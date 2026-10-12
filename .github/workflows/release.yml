@@ -1,0 +1,141 @@
+name: Release
+
+# 目标是「不同用户拿到就能用」：CI 的 artifact 需要登录才能下载，等于没分发。
+# 所以打 tag 就自动发布 Release，产物任何人都能直接下。
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # 每个平台各自原生编译（不是交叉编译），编完顺手冒烟一下
+  # ------------------------------------------------------------------
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 旧手机（Termux）、ARM 盒子、树莓派 3/4/5
+          - name: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          # PC / VPS / 开发机
+          - name: x86_64-linux-musl
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 musl 工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          which musl-gcc
+
+      - name: 构建静态二进制
+        run: |
+          # musl target 的默认 linker 不是 musl-gcc，得显式指定，
+          # 否则链接出来的是动态依赖 glibc 的二进制，丢到别的设备上就跑不了。
+          TARGET_UPPER="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          TARGET_LOWER="$(echo '${{ matrix.target }}' | tr '-' '_')"
+          export "CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc"
+          export "CC_${TARGET_LOWER}=musl-gcc"
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: 校验产物（架构 + 静态链接）
+        run: |
+          BIN=target/${{ matrix.target }}/release/plugin-panel
+          file "$BIN"
+          file "$BIN" | grep -qi "statically linked"
+          case "${{ matrix.name }}" in
+            aarch64-*) file "$BIN" | grep -q "aarch64" ;;
+            x86_64-*)  file "$BIN" | grep -q "x86-64"  ;;
+          esac
+
+      - name: 冒烟测试（真的把服务跑起来）
+        run: python3 scripts/smoke.py ./target/${{ matrix.target }}/release/plugin-panel
+
+      - name: 打包
+        run: |
+          cd target/${{ matrix.target }}/release
+          cp plugin-panel plugin-panel-${{ matrix.name }}
+          sha256sum plugin-panel-${{ matrix.name }} > SHA256SUMS-${{ matrix.name }}
+          ls -lh plugin-panel-${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target }}/release/plugin-panel-${{ matrix.name }}
+            target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.name }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 汇总成一个 Release
+  # ------------------------------------------------------------------
+  release:
+    name: 发布
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 合并校验和
+        run: |
+          cd dist
+          ls -lh
+          cat SHA256SUMS-* | sort -k2 > SHA256SUMS
+          rm -f SHA256SUMS-*
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
+
+      # 发布完自测一遍：不用本地文件，走真实的 Release 下载 + SHA256 校验 + 真的跑起来。
+      # 这一步挂了就说明「用户拿到的安装方式」是坏的 —— 比 CI 里的 shim 测试更接近真实。
+      - name: 用刚发布的产物验证 install.sh（真下载 / 真校验 / 真启动）
+        env:
+          PANEL_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+        run: |
+          PANEL_PREFIX="$RUNNER_TEMP/panel" bash install.sh
+          ls -lh "$RUNNER_TEMP/panel/plugin-panel"
+
+          BIND_ADDR=127.0.0.1:8899 DB_PATH="$RUNNER_TEMP/panel/panel.db" \
+            "$RUNNER_TEMP/panel/plugin-panel" > "$RUNNER_TEMP/panel.log" 2>&1 &
+          PID=$!
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8899/api/state >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:8899/api/state | head -c 200
+          echo
+          kill -TERM "$PID"
+          wait "$PID" || true
+          grep -q "引擎线程已退出" "$RUNNER_TEMP/panel.log"

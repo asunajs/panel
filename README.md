@@ -10,6 +10,7 @@
 | 第二轮 | 毫秒级 Cron 调度 + `jobs` 表持久化 + 面板任务视图 | ✅ 已验证 |
 | 第三轮 | 执行预算（死循环防护）+ 任务熔断 + 引擎健康上报 + SIGTERM 优雅退出 | ✅ 已验证 |
 | 第四轮 | **内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物** | ✅ 本机已验证，ARM 待 CI |
+| 第五轮 | **部署与分发**（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本已测（15 项用例），Release 流水线待打 tag 验证 |
 | 后续 | Python 支持 / 插件热更新 / 完整前端 | 未开始 |
 
 ---
@@ -44,20 +45,29 @@
 ```
 rust-plugin-panel/
 ├── Cargo.toml
+├── install.sh          一键安装：架构检测 → 下载 → SHA256 校验 → 装进 PATH
 ├── src/
 │   ├── main.rs        启动顺序：SQLite → 引擎线程 → tick 循环 → Axum
 │   ├── js_engine.rs   ★ QuickJS 线程、插件加载、host 注入、任务分发
-│   ├── cron.rs        ★ Cron 表达式解析 + next_after（含 18 个单元测试）
-│   ├── scheduler.rs   ★ 调度器：deadline 驱动、sleep_hint / due / advance
+│   ├── cron.rs        ★ Cron 表达式解析 + next_after（13 个单测）
+│   ├── scheduler.rs   ★ 调度器：deadline 驱动、熔断退避（10 个单测）
 │   ├── db.rs          SQLite：tasks 表 + jobs 表
 │   └── web.rs         Axum 路由 + 服务端渲染面板
 ├── plugins/
 │   ├── hello.js            on_tick + host.log 示例
 │   ├── counter.js          验证「每个插件独立 Context」
 │   └── scheduler-demo.js   ★ cron / 毫秒级任务示例
+├── scripts/
+│   ├── smoke.py            端到端冒烟：真的把服务跑起来走一遍链路
+│   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
+├── .github/workflows/
+│   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
+│   └── release.yml         打 tag 发多架构静态产物 + 发布后自测安装
 └── examples/
     ├── probe.rs            分层探针：逐项验证 tokio/sqlite/rquickjs 可用
-    └── broken-plugins/     容错测试用的一组坏插件
+    ├── broken-plugins/     容错测试：坏插件不影响好插件
+    ├── hostile-plugins/    执行预算 / 熔断测试：死循环插件
+    └── recovery-plugins/   熔断恢复测试：先失败几次再正常
 ```
 
 ## 3. 运行
@@ -148,6 +158,9 @@ EXEC_BUDGET_MS=10000 PLUGINS_DIR=examples/hostile-plugins \
 # ⑧ 熔断验证：连续失败 3 次即熔断，CPU 应降下来（默认阈值 5 / 冷却 30s）
 EXEC_BUDGET_MS=500 JOB_TRIP_THRESHOLD=3 JOB_COOLDOWN_MS=5000 \
   PLUGINS_DIR=examples/hostile-plugins BIND_ADDR=127.0.0.1:8792 cargo run
+
+# ⑨ 安装脚本用例（六条分支，macOS 上也能跑）
+bash scripts/test-install.sh
 ```
 
 实测数据（`plugins/scheduler-demo.js`）：
@@ -161,7 +174,8 @@ weekday-morning  30 9 * * MON-FRI    0      次日 09:30             -
 boom             @every 4s           5      -                      异常隔离，last_error 带 stack
 ```
 
-常驻占用：**RSS ≈ 9 MB，idle CPU 0.1%**（含 3 个插件 Context + 5 个调度任务）。
+常驻占用：**RSS ≈ 8.6 MB，idle CPU 0.1%**（含 3 个插件 Context + 5 个调度任务）。
+注意 macOS 的 `ps` 把共享库页也算进来，真实独占只有 2.6 MB —— 怎么读这些数字见 §8.1。
 
 ## 6. 踩坑记录
 
@@ -186,6 +200,16 @@ boom             @every 4s           5      -                      异常隔离�
 11. **`@every` 绝不能复用 cron 的「截断到秒」。** 早期版本 `next_after` 里对 `from` 做了 `truncate_to_sec`，于是 `08:00:00.500 + 500ms` 又算回 `08:00:00.500` —— `next_fire` 原地踏步，毫秒级任务被无限重触发（实测 1 秒内跑了 48 次）。已修复并加了两条防回归测试（`cron.rs::every_preserves_subsecond_and_always_moves_forward`、`scheduler.rs::subsecond_task_never_stalls`）。
 12. **推进要以「原定触发时刻」为基准，不是「现在」。** 否则每次执行耗时都会累积成漂移，500ms 的任务会慢慢变成 530ms、560ms。
 13. **积压要跳拍，不要补跑。** 落后太多时从 `now` 重算下一次，而不是把错过的次数补一遍。
+
+### 安装脚本（第五轮）
+
+14. **macOS 没有 `sha256sum`，而 `shasum` 默认是 SHA-1。** 写成 `shasum <file>` 会拿到 40 位的 SHA-1，
+    跟 Release 里的 64 位 SHA-256 永远对不上 —— 现象是「文件明明没动，校验却失败」。
+    必须显式 `shasum -a 256`（`install.sh` 里的回退分支是对的，写测试 shim 时踩了一次）。
+15. **`curl | bash` 这条链路没法在开发机上跑通**（脚本只发 Linux 产物，macOS 直接被拦）。
+    所以 `scripts/test-install.sh` 用 PATH 里的 shim 假造 `uname` / `curl` / `sha256sum`，
+    把架构检测、下载、校验、安装、Termux 路径、失败分支全在本机走一遍 ——
+    「用户唯一会跑的那个脚本」不该是唯一没被测过的代码。
 
 ## 7. 执行预算与熔断（引擎自我保护）
 
@@ -314,6 +338,16 @@ CPU 占用（进程 CPU 时间差值法）：
 3. worker 栈 2MB → 512KB。
 4. 面板暴露 `rt.memory_usage()`，能直接看到 JS 侧真实堆用量。
 
+**怎么读这些数字**（这里最容易看错）：
+
+- 表里的 `RSS` 是 macOS 的 `ps -o rss`。它把系统框架的共享页（`__TEXT` / `__OBJC_RO` 之类）
+  算进本进程 —— 同一台机器上每个进程都「占」着这几百 MB。所以它只能**同机前后对比**，不能当真实占用。
+  本轮用 `footprint` 复测：空闲态 `phys_footprint` 只有 **2.6 MB**，和 RSS 的 8.6 MB 差的就是共享页。
+- Linux 静态 musl 产物不加载共享库，RSS 才接近真实占用。所以 `scripts/smoke.py` 里的常驻内存检查
+  **只在 Linux 上生效**（macOS 上打印一行说明后跳过），数字以 CI 为准。
+- 本轮复测（release，3 次）：RSS 8560 / 8640 / 8656 KB，线程 4 —— 与表里的 8928 KB 同量级，
+  差异来自测量时刻的插件与 DB 状态，不影响结论。
+
 ### 8.2 跨平台验证（GitHub Actions）
 
 开发机是 arm64 macOS：**跑不了 Linux 二进制，也没法验证交叉编译产物**
@@ -321,7 +355,7 @@ CPU 占用（进程 CPU 时间差值法）：
 
 | job | runner | 做什么 |
 |---|---|---|
-| `linux-x86_64` | `ubuntu-latest` | 单元测试 + 冒烟 + 产物 |
+| `linux-x86_64` | `ubuntu-latest` | 单元测试 + install.sh 用例 + 冒烟 + 产物 |
 | `linux-aarch64` | `ubuntu-24.04-arm` | **真 ARM64 硬件**上跑单元测试 + 冒烟 |
 | `linux-aarch64-musl` | `ubuntu-24.04-arm` | 静态链接产物 + 冒烟 |
 
@@ -340,9 +374,14 @@ CPU 占用（进程 CPU 时间差值法）：
 ✅ jobs 表已落库 — 5 条任务
 ✅ 引擎健康上报正常 — beat_ago=19ms
 ✅ QuickJS 堆用量可观测 — 225 KB
+·  常驻内存 — 非 Linux，跳过（macOS 的 RSS 含共享库，不可信）
 ✅ SIGTERM 后进程退出 — exit=0
 ✅ 退出路径完整（QuickJS 已按序析构）
 ```
+
+上面那行「常驻内存」在 Linux 上会变成实测值（`✅ 常驻内存 — RSS x.x MB / 峰值 y.y MB`），阈值 32 MB，
+超了就说明有人往引擎里塞了不该塞的东西。**Linux 上的真实数字待 CI 首次运行确认**
+（本地 macOS 只能打印那行跳过说明）。
 
 本地跑同一个脚本：
 
@@ -369,12 +408,152 @@ PT_INTERP: 无 → 完全静态
 静态链接意味着丢到任何 ARM Linux 上都不需要 libc ——
 但**本机执行会报 `Exec format error`**，这就是运行验证必须交给 CI 的原因。
 
-## 9. 影响后续扩展的设计决策（未实现）
+### 8.4 一次被实测否掉的优化：SQLite page cache
+
+`db.rs` 里本来加了三条 pragma，理由是「SQLite 默认 page cache 是 2000 KiB，在低配设备上是白占的常驻内存」。
+把这三条撤掉做 A/B 之后，**这个理由被实测否掉了**：
+
+| 场景 | 默认（cache_size = 2000） | 改成 256 KiB |
+|---|---|---|
+| 空闲态 RSS（面板负载，各 3 次） | 8608 / 8608 / 8640 KB | 8560 / 8640 / 8656 KB |
+| 117 MB 的库全表扫描，峰值 RSS | 4928 KB | **3104 KB** |
+
+- 空闲态两边落在同一量级的抖动里 —— **page cache 是「用到了才分配」，不是开库就预占 2 MB**。
+  面板的库才几十 KB，缓存永远填不满，所以这条 pragma 一点内存都省不下来。
+- 差值只在「缓存真的被填满」时出现：全表扫描省 1.8 MB（≈ 2000 − 256 KiB），但面板目前没有扫描型查询。
+  所以它现在的定位是**给将来的查询设一个上界**，不是「省内存」。
+
+顺带量掉了另外两条：`PRAGMA mmap_size` / `temp_store` 的编译期默认值本来就是 `0` / `1`（文件），
+写上去是噪音 —— 已删除。最后只留 `cache_size = -256`，注释也改成了实话。
+
+> 教训：给嵌入式数据库调参前先量。低配设备上的内存优化最容易犯的错，
+> 就是拿「默认值看起来很大」当成「它真的占着」。
+
+## 9. 部署（旧手机 / ARM 盒子 / PC）
+
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash
+```
+
+`install.sh` 会检测架构 → 下载对应产物 → 校验 SHA256 → 装进 PATH。
+Termux 下自动装到 `$PREFIX/bin`，普通 Linux 装到 `~/.local/bin`。
+
+**raw.githubusercontent.com 打不开时**（国内网络常见）：把脚本存到本地再跑，或者让脚本从镜像取产物 ——
+下载地址可以用 `PANEL_BASE_URL` 覆盖：
+
+```bash
+# ① 脚本和产物都走镜像
+curl -fsSL https://mirror.example.com/install.sh | bash
+# ② 脚本走 GitHub，产物走镜像 / 内网
+PANEL_BASE_URL=https://mirror.example.com/plugin-panel/releases/latest/download bash install.sh
+# ③ 产物就在本机（file:// 也支持）
+PANEL_BASE_URL=file:///srv/dist bash install.sh
+```
+
+SHA256 校验不过会直接拒绝安装，不会在 PATH 里留下半个二进制。
+
+`install.sh` 自己也有端到端测试 —— 用 PATH 里的 shim 假造一个 Linux 环境 + 本地 Release，
+把六条分支都走一遍（正常安装 / 产物被篡改 / 架构不支持 / 非 Linux / Termux / 下载失败），
+macOS 上就能跑，不需要真的 Release：
+
+```bash
+bash scripts/test-install.sh     # 15 项断言
+```
+
+### 发布产物
+
+打 tag 就自动构建并发布多架构静态二进制（`.github/workflows/release.yml`）：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+| 产物 | 适用设备 |
+|---|---|
+| `plugin-panel-aarch64-linux-musl` | 旧手机（Termux）、ARM 盒子、树莓派 3/4/5 |
+| `plugin-panel-x86_64-linux-musl` | PC、VPS、开发机 |
+
+两个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
+
+> CI 的 artifact 需要登录 GitHub 才能下载，对「给别人用」来说等于没分发 ——
+> 所以走 Release 而不是 artifact。
+
+发布流程的最后一步会**真的把刚发出去的产物装一遍**：走真实 Release 下载 → SHA256 校验 → 启动 →
+请求一次 `/api/state` → SIGTERM 优雅退出。这一步挂了，说明「用户拿到手的安装方式」是坏的。
+
+### 旧手机（Termux）
+
+```bash
+# 1. 装 Termux（用 F-Droid 版，Play 商店那个已经停更）
+# 2. 装依赖
+pkg install curl
+# 3. 装面板
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash
+# 4. 启动
+plugin-panel
+```
+
+手机上三个坑：
+
+1. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载的，二进制执行不了。
+   装到 `$HOME` 或 `$PREFIX/bin` 下。
+2. **防后台被杀** —— Android 会回收后台进程。Termux 里跑 `termux-wake-lock` 能缓解，
+   想长期常驻得在系统设置里关掉 Termux 的电池优化。
+3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。
+
+> ⚠️ 默认只监听 `127.0.0.1` 是**刻意的**：面板目前**没有任何鉴权**，
+> 任何能访问到端口的人都能看到插件日志、任务列表，也能触发任务。
+> 要暴露到局域网/公网，先自己加一层反代 + 认证。
+
+### ARM 盒子 / 树莓派（systemd）
+
+```ini
+# /etc/systemd/system/plugin-panel.service
+[Unit]
+Description=Plugin Panel
+After=network.target
+
+[Service]
+Type=simple
+User=panel
+WorkingDirectory=/opt/plugin-panel
+Environment=BIND_ADDR=0.0.0.0:8787
+ExecStart=/opt/plugin-panel/plugin-panel
+Restart=always
+RestartSec=3
+
+# 收紧权限（面板只需要写 data/ 目录）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/plugin-panel/data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+面板处理 SIGTERM，`systemctl stop` 能优雅退出（QuickJS 会按序析构，见 §7）。
+
+### 资源占用（macOS arm64 实测，Linux aarch64 未实测）
+
+| 项 | 值 |
+|---|---|
+| RSS | 8.6 MB（macOS `ps`，含共享库页；`footprint` 实测独占 **2.6 MB**） |
+| 线程数 | 4 |
+| CPU（空闲） | 0.0–0.1% |
+| 二进制 | 2.7 MB（静态 musl） |
+| QuickJS 堆 | 225 KB |
+
+空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。
+
+## 10. 影响后续扩展的设计决策（未实现）
 
 1. **跨运行时抽象层。** `js_engine.rs` 里「线程 + 通道 + 插件表 + 调度器」这套骨架和 QuickJS 无关。加 Python 时把 `LoadedPlugin.ctx` 换成 `enum Runtime { Js(Context), Py(PyCtx) }`，`dispatch_task` 按变体分发即可，Axum / SQLite / 调度器一行不用改。
 2. **`host.*` 的模式可以直接复制。** 底层 Rust 函数只收 `String`（JSON），业务语义放 JS 包装层，宿主侧永远不碰 `Value` 的类型分支。加 `host.http` / `host.sql` 时沿用。
 3. **热更新入口已留好。** 每 tick 重新取 `on_tick`、每轮重新查 `__tasks`，只要把「每插件一个 Context」改成「持有 Context + 可重建」，watch 文件变化后重建 Context 即可。
 4. **任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。要支持面板上动态增删任务，下一步是把 `jobs` 表升级为权威来源，插件只提供 handler。
-5. **调度器与 JS 同线程、串行执行。** 一个任务死循环会卡住所有任务。需要给每个任务加执行预算（QuickJS 的 `rt.set_interrupt_handler`）。
+5. **调度器与 JS 同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「Context 只在一个线程里被碰」这个简单前提。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。Axum handler 里同步调 SQLite，量级上来要挪 `spawn_blocking`。
-7. **线程数**：13 个线程里 10 个是 tokio 默认按 CPU 核数开的 worker，压内存时 `Builder::new_multi_thread().worker_threads(2)` 是最省事的一刀。
+7. **面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。

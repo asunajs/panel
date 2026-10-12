@@ -32,6 +32,17 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     println!("[db] journal_mode = {mode}");
     conn.pragma_update(None, "synchronous", "NORMAL")?;
 
+    // ---- 内存：给 page cache 设个上界 ----
+    // 负值单位是 KiB，-256 = 256 KiB（SQLite 默认 -2000 = 2 MB）。
+    //
+    // 注意别被默认值骗了：page cache 是「用到了才分配」，不是开库就预占 2 MB。
+    // 实测（README §8.4）：空闲态 RSS 8608 KB（默认）vs 8640 KB（256 KiB）—— 同一量级的抖动，
+    // 面板的库才几十 KB，缓存根本填不满，这条 pragma 一点内存都省不下来。
+    // 它唯一的作用是给扫描型查询设上界：117 MB 的库全表扫描，峰值 RSS 4928 KB → 3104 KB。
+    conn.pragma_update(None, "cache_size", -256)?;
+    // mmap_size / temp_store 不设：实测这两条的编译期默认值本来就是 0 / 1（文件），
+    // 写上去是噪音，不是优化。
+
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS tasks (

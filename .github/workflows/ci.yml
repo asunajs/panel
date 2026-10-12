@@ -31,6 +31,9 @@ jobs:
       - name: 单元测试
         run: cargo test --all-targets
 
+      - name: install.sh 端到端测试（用 shim 假造一个 Release）
+        run: bash scripts/test-install.sh
+
       - name: 构建 release
         run: cargo build --release
 
