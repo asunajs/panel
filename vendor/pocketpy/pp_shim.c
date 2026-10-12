@@ -44,3 +44,7 @@ const char* pp_arg_str(py_StackRef argv, int i) {
 }
 
 int pp_arg_type(py_StackRef argv, int i) { return (int)py_typeof(&argv[i]); }
+
+/* 立刻跑一次 GC，返回回收掉的对象数。
+ * 用途：长跑内存探针（见 README 第十一轮），以及确认「垃圾到底收不收得掉」。 */
+int pp_gc_collect(void) { return py_gc_collect(); }

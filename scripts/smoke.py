@@ -307,6 +307,162 @@ def auth_checks(tmp: Path) -> None:
         logf.close()
 
 
+def plugin_lifecycle_checks(tmp: Path) -> None:
+    """第十一轮：插件目录变活 + 同名冲突不再静默串台。
+
+    必须另起一个实例，而且插件目录是**临时**的 —— 这一组用例要在进程跑着的时候
+    往里丢文件、删文件、改文件，不能拿仓库里的 `plugins/` 做实验。
+
+    这一组同时是三个真 bug 的回归测试（都在第十一轮发现）：
+      ① 热更新一个「不声明任何任务」的插件会把整个 jobs 表清空
+      ② 运行中新丢进去的插件文件永远不被加载（只比 mtime，从不重扫目录）
+      ③ 同名插件（`js/foo.js` 与 `py/foo.py`）静默串台，任务被派发到另一个解释器
+    """
+    pdir = tmp / "lifecycle-plugins"
+    (pdir / "js").mkdir(parents=True)
+    (pdir / "py").mkdir(parents=True)
+    # keeper 声明一个任务；idle 什么任务都不声明（用来复现 bug ①）
+    (pdir / "js" / "keeper.js").write_text(
+        "const host = globalThis.host;\n"
+        "host.every('keeper-task', '2s', function () {});\n"
+    )
+    (pdir / "js" / "idle.js").write_text("const host = globalThis.host;\nhost.log('idle v1');\n")
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "lifecycle.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "lifecycle.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def snap():
+        code, _, body = http(f"{base}/api/state")
+        if code != 200:
+            return set(), {}
+        st = json.loads(body)
+        return {j["name"] for j in st.get("jobs", [])}, {
+            p["name"]: p for p in st.get("plugins", [])
+        }
+
+    def wait_for(pred, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred(*snap()):
+                return True
+            time.sleep(0.4)
+        return False
+
+    try:
+        if not check(wait_ready(base, proc), "插件生命周期用例的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        # ---- ① 热更新「无任务插件」不该动别人的 jobs 行 ----
+        jobs0, plugs0 = snap()
+        check(
+            jobs0 == {"keeper-task"},
+            "初始只有 keeper 声明了任务",
+            str(sorted(jobs0)),
+        )
+        (pdir / "js" / "idle.js").write_text(
+            "const host = globalThis.host;\nhost.log('idle v2');\n"
+        )
+        check(
+            wait_for(lambda j, p: p.get("idle", {}).get("ticks", 0) >= 0 and "idle v2" in logpath.read_text(errors="replace")),
+            "无任务插件热更新被引擎接受",
+        )
+        time.sleep(1.5)
+        jobs1, _ = snap()
+        check(
+            jobs1 == jobs0,
+            "热更新无任务插件后 jobs 表**没有**被清空",
+            f"{sorted(jobs0)} → {sorted(jobs1)}",
+        )
+
+        # ---- ② 运行中新丢进来的插件文件要自动加载 ----
+        (pdir / "js" / "dropped.js").write_text(
+            "const host = globalThis.host;\n"
+            "host.every('dropped-task', '5s', function () {});\n"
+        )
+        check(
+            wait_for(lambda j, p: "dropped-task" in j and "dropped" in p),
+            "运行中新增的插件文件被自动加载",
+            f"jobs={sorted(snap()[0])}",
+        )
+
+        # ---- ③ 删掉文件要自动卸载，且只摘它自己的任务 ----
+        (pdir / "js" / "dropped.js").unlink()
+        check(
+            wait_for(lambda j, p: "dropped" not in p),
+            "运行中删除的插件文件被自动卸载",
+        )
+        jobs2, _ = snap()
+        check(
+            jobs2 == {"keeper-task"},
+            "卸载只摘掉它自己的任务（keeper 的还在）",
+            str(sorted(jobs2)),
+        )
+
+        # ---- ④ 同名冲突：拒绝加载，且不影响已加载的那个 ----
+        (pdir / "py" / "keeper.py").write_text(
+            "from host_api import every\n\n"
+            "def keeper_task(payload):\n"
+            "    pass\n\n"
+            "every('keeper-task-py', '3s', keeper_task)\n"
+        )
+        check(
+            wait_for(lambda j, p: any(
+                n == "keeper" and pl.get("error") for n, pl in p.items()
+            )),
+            "同名插件（js/keeper.js vs py/keeper.py）被拒绝加载",
+        )
+        jobs3, plugs3 = snap()
+        check(
+            jobs3 == {"keeper-task"},
+            "同名冲突不影响已加载插件的任务",
+            str(sorted(jobs3)),
+        )
+        keeper_err = next(
+            (pl["error"] for n, pl in plugs3.items() if n == "keeper" and pl.get("error")), ""
+        )
+        check(
+            "占用" in keeper_err and "文件名" in keeper_err,
+            "拒绝原因说清了怎么办",
+            keeper_err[:80],
+        )
+
+        # ---- ⑤ 改名解除冲突：两个都该活，任务都在 ----
+        (pdir / "py" / "keeper.py").rename(pdir / "py" / "keeper2.py")
+        check(
+            wait_for(lambda j, p: "keeper2" in p and "keeper-task-py" in j),
+            "改名之后冲突解除、两个插件都在跑",
+            f"jobs={sorted(snap()[0])}",
+        )
+        jobs4, _ = snap()
+        check(
+            jobs4 == {"keeper-task", "keeper-task-py"},
+            "解除冲突后两个插件的任务都在",
+            str(sorted(jobs4)),
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
 def refuse_to_start_without_token(tmp: Path) -> None:
     """没配令牌却往非回环地址绑 → 必须**拒绝启动**，而不是打个警告继续裸奔。"""
     env = dict(os.environ)
@@ -673,6 +829,7 @@ def main() -> int:
     print("---- 鉴权（PANEL_TOKEN 模式）----")
     auth_checks(tmp)
     refuse_to_start_without_token(tmp)
+    plugin_lifecycle_checks(tmp)
 
     print()
     if FAILURES:

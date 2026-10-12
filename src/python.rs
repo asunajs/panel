@@ -77,6 +77,8 @@ extern "C" {
     // ---- 下面是 vendor/pocketpy/pp_shim.c 提供的、与版本无关的包装 ----
     fn pp_arg(argv: PyStackRef, i: c_int) -> PyRef;
     fn pp_version() -> *const c_char;
+    /// 立刻跑一次 GC，返回回收的对象数（长跑内存探针用）
+    fn pp_gc_collect() -> c_int;
     fn pp_set_print(print: Option<extern "C" fn(*const c_char)>, flush: Option<extern "C" fn()>);
     fn pp_raise_value_error(msg: *const c_char) -> bool;
     #[allow(dead_code)]
@@ -117,6 +119,18 @@ pub fn version() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// 宿主 → Python 的调用次数，用来定期兜底做一次 GC。
+static CALL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 每这么多次宿主调用做一次全量 GC。
+///
+/// 为什么必须由宿主兜底：pocketpy 的 GC 触发点只有**字节码 `OP_CALL`**
+/// （`VM__vectorcall` 那条路径里的 `ManagedHeap__collect_hint`）。插件 handler 里
+/// 如果一次函数调用都没有（纯表达式、构造字面量），GC 就永远不会被触发 ——
+/// 实测这种插件会让常驻内存**线性涨到几十 MB 且不回头**（每调用约 435 B）。
+/// 阈值本身也调小了（见 build.rs 的 `PK_GC_MIN_THRESHOLD`），两个一起才是完整的修法。
+const GC_EVERY_CALLS: u64 = 256;
 
 /// 进程级初始化。多次调用是安全的（内部只初始化一次）。
 pub fn init() {
@@ -220,6 +234,11 @@ impl PyVm {
         }
 
         let ok = unsafe { py_call(f, args.len() as c_int, base) };
+        // 兜底 GC：计数器是全局的，与具体 VM 无关（垃圾总量才是要控制的量）
+        let n = CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % GC_EVERY_CALLS == GC_EVERY_CALLS - 1 {
+            unsafe { pp_gc_collect() };
+        }
         let ret = unsafe { py_tostr(py_retval()) };
         let text = if ret.is_null() {
             String::new()
@@ -361,6 +380,98 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+
+    /// 本进程 RSS（KB）。macOS 的 `ps` 会把共享页算进去，但这里只看**增量**，
+    /// 所以够用（增量比绝对值可靠得多）。
+    fn rss_kb() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps 跑不起来");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    /// 探针：宿主 → Python 调用路径有没有按调用次数漏内存。
+    ///
+    /// 用 `#[ignore]` 标着：它靠 RSS 判定，阈值在不同机器/分配器上会飘，不适合当 CI 门禁。
+    /// 手动跑：`cargo test --bin plugin-panel -- --ignored --nocapture call_path_rss_probe`
+    ///
+    /// 第十一轮的实测（macOS）：
+    /// - 修前 `alloc`（handler 里造一个 dict + 一个 64 字符串）**每调用 +435 B、线性不回头**
+    ///   （40000 次调用涨 17 MB），而 `noop` 是 +12 B/次、立刻走平；
+    /// - 两者差这么多说明漏点**不在**插件代码的分配上，而在「谁来触发 GC」上；
+    /// - 修后（阈值调小 + 宿主每 256 次调用兜底一次全量 GC）`alloc` 变成
+    ///   「第一个 4000 次 +96 KB，之后每 4000 次恒为 0」。
+    ///
+    /// 最后的断言把「线性不回头」这个特征钉住：修前最后 5 段的涨幅会是 MB 级。
+    #[test]
+    #[ignore]
+    fn call_path_rss_probe() {
+        let _guard = serial();
+        init();
+        let mut vm = PyVm::attach(12);
+        vm.reset();
+        vm.exec("def noop(payload):\n    return ''", "probe.py").unwrap();
+        vm.exec(
+            "def alloc(payload):\n    d = {'a': payload, 'b': 'x' * 64}\n    return ''",
+            "probe.py",
+        )
+        .unwrap();
+
+        // 分段采样：区分「水位线（涨到某个量就停）」和「线性无界增长」。
+        // 只看总增量会把两者混为一谈 —— 这也是判定「是不是真泄漏」的关键。
+        const CHUNK: u64 = 4_000;
+        const CHUNKS: u64 = 10;
+        let mut deltas_last5 = 0i64;
+        for func in ["noop", "alloc"] {
+            let mut prev = rss_kb();
+            let start = prev;
+            let mut deltas: Vec<i64> = Vec::new();
+            for _ in 0..CHUNKS {
+                for _ in 0..CHUNK {
+                    vm.call_str(func, &["{\"runs\":1}"]).unwrap();
+                }
+                let now = rss_kb();
+                deltas.push(now as i64 - prev as i64);
+                prev = now;
+            }
+            if func == "alloc" {
+                deltas_last5 = deltas[CHUNKS as usize / 2..].iter().sum();
+            }
+            let shown: Vec<String> = deltas.iter().map(|d| format!("{d:+}")).collect();
+            println!(
+                "{func:6}: 起 {start} → 终 {prev} KB（每 {CHUNK} 次调用的增量: {}）",
+                shown.join(" ")
+            );
+        }
+
+        // GC 收得回来吗？
+        let before_gc = rss_kb();
+        let freed = unsafe { pp_gc_collect() };
+        println!("gc_collect 回收 {freed} 个对象，RSS {before_gc} → {} KB", rss_kb());
+
+        // 回归断言：修前 alloc 每 4000 次调用稳定 +1700KB，修后恒为 0。
+        // 用「最后 5 段的总涨幅 < 1MB」这个宽松界限把「线性无界」和「水位线」分开 ——
+        // 界限宽松是故意的：RSS 判定在不同分配器上会飘，这里只抓数量级。
+        let tail_growth: i64 = deltas_last5;
+        assert!(
+            tail_growth < 1024,
+            "alloc 路径疑似又出现线性增长：最后 5 段共涨 {tail_growth} KB（修前是 MB 级）"
+        );
+
+        // 只往寄存器窗口写字符串、不做任何调用 —— 测「寄存器窗口里的临时对象」这条路径
+        let before = rss_kb();
+        for _ in 0..CHUNK {
+            let cs = CString::new("{\"runs\":1}").unwrap();
+            unsafe { py_newstr(py_getreg(0), cs.as_ptr()) };
+        }
+        let after = rss_kb();
+        println!(
+            "只写寄存器: RSS {before} → {after} KB，每次 {:+.0} B",
+            (after as f64 - before as f64) * 1024.0 / CHUNK as f64
+        );
     }
 
     /// 冒烟：初始化 → 建 VM → 执行脚本 → 取 print 输出 → 异常文本。

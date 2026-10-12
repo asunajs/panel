@@ -32,6 +32,11 @@ fn main() {
     build.define("PK_ENABLE_OS", "0");
     build.define("PK_ENABLE_DLL", "0");
     build.define("PK_ENABLE_THREADS", "0");
+    // GC 阈值：默认 20000，自适应区间 [10000, 160000] 个对象。
+    // 这个上限直接决定「Python 堆的水位线」——低配盒子上按比例调到 2000
+    // （自适应区间变成 [1000, 16000]），实测把长跑的水位线压下来了。
+    // GC 本身很便宜（活对象只有几百个），代价可以忽略。
+    build.define("PK_GC_MIN_THRESHOLD", "2000");
     build.define("NDEBUG", None);
 
     build.flag_if_supported("-std=c11");

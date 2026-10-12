@@ -403,20 +403,24 @@ fn engine_main(
         health.budget_ms
     );
 
-    // 只有真的存在 .py 插件才初始化 PocketPy —— 纯 JS 部署不该为它付那 ~2 MB 常驻内存
+    // PocketPy 是**惰性**初始化的：纯 JS 部署不该为它付那 ~2 MB 常驻内存。
+    // 初始化点在 `ensure_python_ready`（第一次真的要加载 .py 时触发），
+    // 而不是这里按文件列表猜一次 —— 插件目录是活的，猜不准。
     let files = scan_plugins(&plugins_dir);
-    let has_py = files.iter().any(|f| is_python(f));
-    if has_py {
-        python::init();
-        pyhost::install_state(host.clone());
-        println!("[engine] PocketPy {} 就绪", python::version());
-    }
 
     let mut plugins: Vec<LoadedPlugin> = Vec::new();
     let mut pending: Vec<RawTaskDef> = Vec::new();
     let mut next_vm: i32 = 1;
 
     for file in &files {
+        let name = plugin_name_of(file);
+        // 同名插件的检查必须在**建解释器之前**：撞名的那个不该白占一个 VM 索引
+        if let Some(owner) = name_taken(&plugins, &name, file) {
+            let lp = rejected_plugin(file, name_conflict_message(&name, &owner));
+            hostapi::push_log(&logs, &name, "error", &lp.error.clone().unwrap());
+            plugins.push(lp);
+            continue;
+        }
         let (lp, mut declared) = load_one(&rt, file, &logs, &host, &wd, budget, &mut next_vm);
         pending.append(&mut declared);
         plugins.push(lp);
@@ -487,6 +491,7 @@ fn engine_main(
     );
 
     // ---------- 事件循环：deadline 驱动 ----------
+    let mut last_scan = Instant::now();
     loop {
         health.last_beat_ms.store(now_ms(), Ordering::Relaxed);
         health
@@ -591,31 +596,31 @@ fn engine_main(
             fire_due(&mut sched, &plugins, &logs, &db, &wd, budget);
         }
 
-        // 热更新：插件文件 mtime 变了就重建它的解释器实例并重新登记任务
-        if let Some(changed) = detect_changes(&plugins) {
-            for name in changed {
-                reload_plugin(
-                    &rt,
-                    &mut plugins,
-                    &mut sched,
-                    &name,
-                    &logs,
-                    &db,
-                    &host,
-                    &wd,
-                    budget,
-                    &mut next_vm,
-                    &registry,
-                );
-            }
+        // 插件目录同步：新增 / 修改 / 删除，按秒节流（目录很小，但没必要每轮 readdir）
+        if last_scan.elapsed() >= Duration::from_secs(1) {
+            last_scan = Instant::now();
+            sync_plugins(
+                &rt,
+                &mut plugins,
+                &mut sched,
+                &logs,
+                &db,
+                &host,
+                &wd,
+                budget,
+                &mut next_vm,
+                &registry,
+                &plugins_dir,
+            );
         }
     }
 
     // ---------- 收尾：解释器必须按序析构 ----------
     println!("[engine] 正在释放插件解释器...");
     drop(plugins);
-    // 先解除 VM 绑定，再 finalize 整个解释器
-    if has_py {
+    // 先解除 VM 绑定，再 finalize 整个解释器。
+    // 判断依据是「这次运行里真的初始化过」，不是「目录里有没有 .py」。
+    if PYTHON_READY.load(Ordering::Relaxed) {
         python::finalize();
         println!("[engine] PocketPy 已释放");
     }
@@ -764,7 +769,7 @@ fn reinstall_panel_jobs(
         };
         let has_handler = plugins
             .iter()
-            .find(|p| p.name == job.plugin)
+            .find(|p| p.name == job.plugin && p.runtime.is_some())
             .map(|p| plugin_has_handler(p, &job.name, wd, budget))
             .unwrap_or(false);
         if !has_handler {
@@ -962,7 +967,7 @@ fn run_one(
     })
     .to_string();
 
-    let result = match plugins.iter().find(|p| p.name == plugin) {
+    let result = match find_plugin(plugins, &plugin) {
         Some(p) => dispatch_task(p, &name, &payload, wd, budget),
         None => Err(format!("任务所属插件 `{plugin}` 不存在")),
     };
@@ -1125,7 +1130,7 @@ fn dispatch_route(
         .to_string();
     };
 
-    let Some(p) = plugins.iter().find(|p| p.name == plugin) else {
+    let Some(p) = find_plugin(plugins, &plugin) else {
         return serde_json::json!({
             "status": 503,
             "headers": {},
@@ -1446,6 +1451,29 @@ fn eval_as_module(ctx: &Ctx, source: &str, file_str: &str) -> Result<(), String>
     Ok(())
 }
 
+/// 确保 PocketPy 已初始化（幂等）。
+///
+/// 为什么不能只在启动时按「插件目录里有没有 `.py`」判断一次：插件目录现在是**活的**
+/// —— 运行中丢进来一个 `.py` 也要能加载。原来那条路径会在**未初始化**的解释器上
+/// 执行 `py_switchvm`，现象是引擎线程栈溢出、整个进程 abort（实测，见 README 第十一轮）。
+/// 所以初始化点必须放在「真的要用 Python」的那一刻。
+fn ensure_python_ready(host: &Arc<HostState>) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        python::init();
+        pyhost::install_state(host.clone());
+        PYTHON_READY.store(true, Ordering::Relaxed);
+        println!(
+            "[engine] PocketPy {} 就绪（首次用到 Python 插件时才初始化）",
+            python::version()
+        );
+    });
+}
+
+/// Python 解释器这次运行里到底有没有被初始化过 —— 收尾时决定要不要 `py_finalize`。
+/// 没初始化过就调 `py_finalize` 是未定义行为，所以不能只看「插件目录里有没有 .py」。
+static PYTHON_READY: AtomicBool = AtomicBool::new(false);
+
 /// PocketPy 插件加载：分一个 VM、建 host_api 模块、执行源码、探测 on_tick。
 fn load_python(
     source: &str,
@@ -1454,6 +1482,7 @@ fn load_python(
     host: &Arc<HostState>,
     next_vm: &mut i32,
 ) -> (Option<PluginRuntime>, bool, Option<String>) {
+    ensure_python_ready(host);
     if *next_vm >= python::MAX_VM {
         return (
             None,
@@ -1524,21 +1553,273 @@ fn is_python(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("py")
 }
 
-/// 检查插件文件的 mtime，返回需要重载的插件名。
-fn detect_changes(plugins: &[LoadedPlugin]) -> Option<Vec<String>> {
-    let mut changed = Vec::new();
-    for p in plugins {
-        let now = std::fs::metadata(&p.file).and_then(|m| m.modified()).ok();
-        match (p.mtime, now) {
-            (Some(old), Some(new)) if new != old => changed.push(p.name.clone()),
-            (_, None) => changed.push(p.name.clone()), // 文件被删了
-            _ => {}
+/// 把调度器里**全部**插件声明的任务映射成 `jobs` 表的 spec。
+///
+/// 这个函数存在的唯一理由是给调用方一个明确的提醒：`db::sync_jobs` 的契约是
+/// 「这是全量声明，不在其中的 `source='plugin'` 行都删掉」。所以调用方必须传全量 ——
+/// 传子集就等于「把别的插件的任务删掉」，而且是静默的。
+fn all_specs(sched: &Scheduler) -> Vec<db::JobSpec> {
+    sched
+        .tasks()
+        .iter()
+        .map(|t| {
+            (
+                t.plugin.clone(),
+                t.name.clone(),
+                t.expr.clone(),
+                Some(scheduler::fmt_ms(t.next_fire)),
+            )
+        })
+        .collect()
+}
+
+/// 一个新版本（或新插件）挂上之后的收尾：装回面板任务、灌回累计计数、恢复暂停状态。
+///
+/// 三件事都必须在「插件的解释器实例已经进列表」之后做，因为
+/// `reinstall_panel_jobs` 要能查到它、校验处理函数是否存在。
+fn settle_plugin(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    name: &str,
+) {
+    // 面板创建的任务刚被 `remove_plugin` 一起摘掉了，这里装回来
+    // （处理函数在新版本里已经不存在的，标成 error 保留定义）
+    reinstall_panel_jobs(sched, plugins, logs, db, wd, budget, Local::now(), Some(name));
+    // 累计计数同样要灌回来，否则热更新一次「触发次数」就归零
+    seed_counters(sched, db, Some(name));
+    // 暂停状态同样要恢复，否则改一次插件文件就把用户暂停的任务悄悄放跑了
+    restore_paused(sched, logs, db, Local::now(), Some(name));
+}
+
+/// 按名字找一个**可用的**插件实例。
+///
+/// 为什么要区分：同名冲突时列表里会同时存在「加载成功的那个」和「被拒绝的占位记录」
+/// （见 `rejected_plugin`），两者名字相同。派发任务、查处理函数都必须找到有解释器的那个，
+/// 否则会莫名其妙地报「插件加载失败，没有可用的解释器实例」。
+fn find_plugin<'a>(plugins: &'a [LoadedPlugin], name: &str) -> Option<&'a LoadedPlugin> {
+    plugins
+        .iter()
+        .find(|p| p.name == name && p.runtime.is_some())
+        .or_else(|| plugins.iter().find(|p| p.name == name))
+}
+
+/// 插件名（文件名去掉扩展名）。它同时是 `jobs.plugin` 的键、日志标签和注册表键，
+/// 所以必须唯一 —— 见 `name_taken`。
+fn plugin_name_of(file: &Path) -> String {
+    file.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed")
+        .to_string()
+}
+
+/// 这个名字是不是已经被**另一个文件**占了。
+///
+/// 为什么必须挡住：插件名只由文件名（去扩展名）决定，`plugins/js/foo.js` 和
+/// `plugins/py/foo.py` 会算出同一个名字。撞名之后 `plugins.iter().find(|p| p.name == x)`
+/// 只会找到第一个，于是**任务被派发到另一个插件的解释器里** —— 实测现象是
+/// Python 任务报「没有可调用的处理函数」，而那条错误其实是 JS 侧报的，
+/// 排查起来完全摸不着头脑。所以宁可直接拒绝加载，并说清楚改哪个文件名。
+fn name_conflict_message(name: &str, owner: &Path) -> String {
+    format!(
+        "插件名 `{name}` 已被 {} 占用。插件名来自文件名（去掉扩展名），\
+         同名插件会让任务被派发到错误的解释器里 —— 请改一下其中一个文件名。",
+        owner.display()
+    )
+}
+
+fn name_taken(plugins: &[LoadedPlugin], name: &str, file: &Path) -> Option<PathBuf> {
+    plugins
+        .iter()
+        .find(|p| p.name == name && p.file != file)
+        .map(|p| p.file.clone())
+}
+
+/// 造一条「拒绝加载」的插件记录：不建解释器、不占 VM 索引，只把原因显示在面板上。
+fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
+    LoadedPlugin {
+        name: plugin_name_of(file),
+        file: file.to_path_buf(),
+        runtime: None,
+        has_on_tick: false,
+        ticks: 0,
+        last_tick: None,
+        error: Some(reason),
+        tasks: 0,
+        mtime: std::fs::metadata(file).and_then(|m| m.modified()).ok(),
+        vm_index: None,
+    }
+}
+
+/// 卸载一个插件：摘任务、清路由、释放解释器实例。
+///
+/// `jobs` 表的行不在这里删 —— 调用方随后会用 `sync_jobs(all_specs(sched))` 收敛，
+/// 那一步天然会把「已经不在调度器里」的 `source='plugin'` 行删掉。
+/// 面板创建的任务（`source='panel'`）**保留**：按 §12.6 的约定走「处理函数找不到」那条路，
+/// 显示为 `error` 而不是静默消失。
+fn unload_plugin(
+    plugins: &mut Vec<LoadedPlugin>,
+    sched: &mut Scheduler,
+    host: &Arc<HostState>,
+    next_vm: &mut i32,
+    file: &Path,
+) -> Option<(String, usize)> {
+    // ⚠️ 按**文件**定位而不是按名字：同名冲突时列表里会有两条同名记录
+    // （一条真插件、一条拒绝占位），按名字找会摘错那一条。
+    let pos = plugins.iter().position(|p| p.file == file)?;
+    let name = plugins[pos].name.clone();
+    let vm_index = plugins[pos].vm_index;
+    // ⚠️ 只有「活着的」插件才动调度器。拒绝占位记录（runtime=None）从没注册过任务，
+    // 而它和真插件**同名** —— 按名字调 `remove_plugin` 会把真插件的任务一起删掉
+    // （实测：删掉冲突文件后，另一个插件的任务从 jobs 表里消失了）。
+    let removed = if plugins[pos].runtime.is_some() {
+        host.routes.lock().unwrap().retain(|r| r.plugin != name);
+        sched.remove_plugin(&name)
+    } else {
+        0
+    };
+
+    let mut old = plugins.remove(pos);
+    if let Some(PluginRuntime::Py(_)) = old.runtime.as_ref() {
+        if let Some(i) = vm_index {
+            // 让下次加载复用这个 VM 索引，而不是每卸载一次就吃掉一个
+            if i < *next_vm {
+                *next_vm = i;
+            }
+            host.unbind_vm(i);
         }
     }
-    if changed.is_empty() {
-        None
-    } else {
-        Some(changed)
+    drop(old.runtime.take());
+    Some((name, removed))
+}
+
+/// 把插件目录的实际内容和内存里的插件列表对齐。
+///
+/// 三类变化都要处理，而且**三类都必须处理**：
+///
+/// | 变化 | 为什么 |
+/// |---|---|
+/// | **新增**（目录里有、内存里没有） | 「往插件目录丢个新文件」是最自然的用法。只比 mtime 的实现在这里会永远看不见它，用户会以为热更新坏了 |
+/// | **修改**（mtime 变了） | 常规热更新：重建解释器、重登记任务、恢复面板任务/计数/暂停状态 |
+/// | **删除**（内存里有、目录里没有） | 否则任务会一直跑下去，面板上还留着一个文件已经不存在的插件 |
+///
+/// 调用方按秒节流：目录很小（递归两层），但没必要每次循环都 readdir。
+#[allow(clippy::too_many_arguments)]
+fn sync_plugins(
+    rt: &Runtime,
+    plugins: &mut Vec<LoadedPlugin>,
+    sched: &mut Scheduler,
+    logs: &SharedLogs,
+    db: &Db,
+    host: &Arc<HostState>,
+    wd: &Watchdog,
+    budget: Duration,
+    next_vm: &mut i32,
+    registry: &Registry,
+    dir: &Path,
+) {
+    let files = scan_plugins(dir);
+    let mut touched = false;
+
+    // ── ① 删除：文件没了就卸载 ──
+    let gone: Vec<PathBuf> = plugins
+        .iter()
+        .filter(|p| !files.contains(&p.file))
+        .map(|p| p.file.clone())
+        .collect();
+    for file in gone {
+        if let Some((name, removed)) = unload_plugin(plugins, sched, host, next_vm, &file) {
+            touched = true;
+            hostapi::push_log(
+                logs,
+                &name,
+                "warn",
+                &format!("插件文件已不存在，已卸载（摘掉 {removed} 个任务）"),
+            );
+        }
+    }
+
+    // ── ② 新增：目录里有、内存里没有 ──
+    for file in &files {
+        if plugins.iter().any(|p| &p.file == file) {
+            continue;
+        }
+        let name = plugin_name_of(file);
+        if let Some(owner) = name_taken(plugins, &name, file) {
+            let lp = rejected_plugin(
+                file,
+                format!(
+                    "插件名 `{name}` 已被 {} 占用。插件名来自文件名（去掉扩展名），                     同名插件会让任务被派发到错误的解释器里 —— 请改一下其中一个文件名。",
+                    owner.display()
+                ),
+            );
+            hostapi::push_log(logs, &name, "error", &lp.error.clone().unwrap());
+            plugins.push(lp);
+            plugins.sort_by(|a, b| a.file.cmp(&b.file));
+            sync_registry(registry, plugins);
+            touched = true;
+            continue;
+        }
+
+        let (lp, pending) = load_one(rt, file, logs, host, wd, budget, next_vm);
+        let failed = lp.error.is_some();
+        install_tasks(sched, &pending, logs, Local::now(), db);
+        plugins.push(lp);
+        plugins.sort_by(|a, b| a.file.cmp(&b.file));
+        settle_plugin(sched, plugins, logs, db, wd, budget, &name);
+        touched = true;
+        if !failed {
+            hostapi::push_log(
+                logs,
+                &name,
+                "info",
+                &format!(
+                    "发现新插件文件 {}，已加载（{} 个任务）",
+                    file.display(),
+                    pending.len()
+                ),
+            );
+        }
+    }
+
+    // ── ③ 修改：mtime 变了就热更新 ──
+    let modified: Vec<PathBuf> = plugins
+        .iter()
+        .filter(|p| {
+            if !files.contains(&p.file) {
+                return false; // 上面已经卸载过了
+            }
+            let now = std::fs::metadata(&p.file).and_then(|m| m.modified()).ok();
+            match (p.mtime, now) {
+                (Some(old), Some(new)) => new != old,
+                _ => false,
+            }
+        })
+        .map(|p| p.file.clone())
+        .collect();
+    for file in modified {
+        reload_plugin(
+            rt, plugins, sched, &file, logs, db, host, wd, budget, next_vm, registry,
+        );
+        touched = true;
+    }
+
+    // 收敛 jobs 表：一次目录同步只写一次，且**永远是全量**
+    if touched {
+        match db::sync_jobs(db, &all_specs(sched), &fmt_secs(Local::now())) {
+            Ok(0) => {}
+            Ok(n) => hostapi::push_log(
+                logs,
+                "kernel",
+                "warn",
+                &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
+            ),
+            Err(e) => eprintln!("[engine] 同步 jobs 表失败: {e}"),
+        }
+        sync_registry(registry, plugins);
     }
 }
 
@@ -1550,7 +1831,7 @@ fn reload_plugin(
     rt: &Runtime,
     plugins: &mut Vec<LoadedPlugin>,
     sched: &mut Scheduler,
-    name: &str,
+    file: &Path,
     logs: &SharedLogs,
     db: &Db,
     host: &Arc<HostState>,
@@ -1559,14 +1840,21 @@ fn reload_plugin(
     next_vm: &mut i32,
     registry: &Registry,
 ) {
-    let Some(pos) = plugins.iter().position(|p| p.name == name) else {
+    // 同样按**文件**定位（见 `unload_plugin` 的注释）
+    let Some(pos) = plugins.iter().position(|p| p.file == file) else {
         return;
     };
-    let file = plugins[pos].file.clone();
+    let name = plugins[pos].name.clone();
+    let was_live = plugins[pos].runtime.is_some();
     let vm_index = plugins[pos].vm_index;
 
-    let removed = sched.remove_plugin(name);
-    host.routes.lock().unwrap().retain(|r| r.plugin != name);
+    // 只有活插件才有任务要摘（见 `unload_plugin` 的注释）
+    let removed = if was_live {
+        host.routes.lock().unwrap().retain(|r| r.plugin != name);
+        sched.remove_plugin(&name)
+    } else {
+        0
+    };
     // 旧的解释器实例在这里 drop（JS 是 Context，Python 是 VM 复用同一个索引）
     let mut old = plugins.remove(pos);
     if let Some(PluginRuntime::Py(_)) = old.runtime.as_ref() {
@@ -1580,37 +1868,37 @@ fn reload_plugin(
     }
     drop(old.runtime.take());
 
-    let (lp, pending) = load_one(rt, &file, logs, host, wd, budget, next_vm);
+    // 旧记录已经移出列表，这时候查冲突才是准的：如果还有另一个同名插件，
+    // 说明冲突没解除（用户只是改了这个文件的内容），继续拒绝加载 ——
+    // 否则这里会绕过 `sync_plugins` 的冲突检查，凭空造出第二个同名活插件。
+    if let Some(owner) = name_taken(plugins, &name, file) {
+        let lp = rejected_plugin(file, name_conflict_message(&name, &owner));
+        hostapi::push_log(logs, &name, "error", &lp.error.clone().unwrap());
+        plugins.push(lp);
+        plugins.sort_by(|a, b| a.file.cmp(&b.file));
+        sync_registry(registry, plugins);
+        return;
+    }
+
+    let (lp, pending) = load_one(rt, file, logs, host, wd, budget, next_vm);
     let load_failed = lp.error.is_some();
 
-    let specs = install_tasks(sched, &pending, logs, Local::now(), db);
-    match db::sync_jobs(db, &specs, &fmt_secs(Local::now())) {
-        Ok(0) => {}
-        Ok(n) => hostapi::push_log(
-            logs,
-            name,
-            "warn",
-            &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
-        ),
-        Err(e) => eprintln!("[engine] 热更新后同步 jobs 表失败: {e}"),
-    }
+    install_tasks(sched, &pending, logs, Local::now(), db);
+    // `jobs` 表的收敛统一由 `sync_plugins` 在最后做一次（**传全量** all_specs）。
+    // 这里以前自己调 `sync_jobs(&specs)` 传的是子集 —— 那个契约是「不在其中的
+    // plugin 行都删掉」，于是热更新一个不含任务的插件会把 jobs 表整个清空
+    // （实测 14 行 → 0 行：任务还在跑，面板却全空、运行历史丢失）。
 
     // 先把新版本挂进列表，再装面板任务 —— `reinstall_panel_jobs` 要能查到新的解释器实例
     plugins.push(lp);
     plugins.sort_by(|a, b| a.file.cmp(&b.file));
 
-    // 面板创建的任务刚被 `remove_plugin` 一起摘掉了，这里装回来
-    // （处理函数在新版本里已经不存在的，标成 error 保留定义）
-    reinstall_panel_jobs(sched, plugins, logs, db, wd, budget, Local::now(), Some(name));
-    // 累计计数同样要灌回来，否则热更新一次「触发次数」就归零
-    seed_counters(sched, db, Some(name));
-    // 暂停状态同样要恢复，否则改一次插件文件就把用户暂停的任务悄悄放跑了
-    restore_paused(sched, logs, db, Local::now(), Some(name));
+    settle_plugin(sched, plugins, logs, db, wd, budget, &name);
 
     if !load_failed {
         hostapi::push_log(
             logs,
-            name,
+            &name,
             "info",
             &format!(
                 "插件已热更新（摘掉 {removed} 个旧任务，登记 {} 个新任务）",
@@ -1670,5 +1958,85 @@ mod tests {
         assert!(looks_like_module("export function on_tick(p) {}"));
         assert!(!looks_like_module("// import 只是注释\nfunction on_tick(p) {}"));
         assert!(!looks_like_module("const host = 1;\nhost;"));
+    }
+
+    /// 造一条插件记录。`live = true` 会真的建一个 QuickJS Context
+    /// （「活着的插件」这个判断就是看有没有解释器实例，所以只能建真的）。
+    fn fake_plugin(rt: &Runtime, name: &str, file: &str, live: bool) -> LoadedPlugin {
+        LoadedPlugin {
+            name: name.to_string(),
+            file: PathBuf::from(file),
+            runtime: if live {
+                Some(PluginRuntime::Js(Context::full(rt).expect("建 Context 失败")))
+            } else {
+                None
+            },
+            has_on_tick: false,
+            ticks: 0,
+            last_tick: None,
+            error: if live { None } else { Some("被拒绝".into()) },
+            tasks: 0,
+            mtime: None,
+            vm_index: None,
+        }
+    }
+
+    #[test]
+    fn plugin_name_comes_from_file_stem() {
+        assert_eq!(plugin_name_of(Path::new("plugins/js/hello.js")), "hello");
+        assert_eq!(plugin_name_of(Path::new("plugins/py/sys_info.py")), "sys_info");
+        // 没有扩展名也能兜住
+        assert_eq!(plugin_name_of(Path::new("plugins/raw")), "raw");
+    }
+
+    #[test]
+    fn name_conflict_is_detected_by_file_not_by_name() {
+        let rt = Runtime::new().expect("建 Runtime 失败");
+        let a = PathBuf::from("plugins/js/foo.js");
+        let b = PathBuf::from("plugins/py/foo.py");
+        let plugins = vec![fake_plugin(&rt, "foo", a.to_str().unwrap(), false)];
+
+        // 同一个文件不算冲突（热更新时它就是自己）
+        assert!(name_taken(&plugins, "foo", &a).is_none());
+        // 另一个文件用了同一个名字 → 冲突，且报出占用的那个文件
+        assert_eq!(name_taken(&plugins, "foo", &b), Some(a.clone()));
+        // 别的名字不冲突
+        assert!(name_taken(&plugins, "bar", &b).is_none());
+
+        let msg = name_conflict_message("foo", &a);
+        assert!(msg.contains("`foo`") && msg.contains("js/foo.js") && msg.contains("文件名"));
+    }
+
+    #[test]
+    fn find_plugin_prefers_a_live_instance() {
+        // 同名两条记录：被拒绝的排在前面，也必须找到活的那条
+        let rt = Runtime::new().expect("建 Runtime 失败");
+        let plugins = vec![
+            fake_plugin(&rt, "foo", "plugins/a/foo.js", false),
+            fake_plugin(&rt, "foo", "plugins/b/foo.js", true),
+        ];
+        let found = find_plugin(&plugins, "foo").expect("应该能找到");
+        assert!(found.runtime.is_some(), "找到的是被拒绝的那条，会导致派发失败");
+        assert_eq!(found.file, PathBuf::from("plugins/b/foo.js"));
+        assert!(find_plugin(&plugins, "nope").is_none());
+    }
+
+    #[test]
+    fn all_specs_is_the_full_set_not_a_subset() {
+        // 这条单测钉住的是「sync_jobs 必须收到全量」这个约定：
+        // 它删掉所有不在入参里的 source='plugin' 行，传子集就会静默删掉别的插件的任务。
+        use crate::cron::Schedule;
+        let mut sched = Scheduler::new(crate::scheduler::TripConfig::default());
+        let now = Local::now();
+        for (plugin, task) in [("a", "t1"), ("b", "t2"), ("c", "t3")] {
+            let sch = Schedule::parse("@every 1s").unwrap();
+            sched.add(plugin, task, "@every 1s", sch, now).unwrap();
+        }
+        let specs = all_specs(&sched);
+        assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部任务");
+        let names: Vec<&str> = specs.iter().map(|(_, n, _, _)| n.as_str()).collect();
+        assert!(names.contains(&"t1") && names.contains(&"t2") && names.contains(&"t3"));
+        // next_run 必须带上（面板靠它显示下次触发）
+        assert!(specs.iter().all(|(_, _, _, next)| next.is_some()));
     }
 }
