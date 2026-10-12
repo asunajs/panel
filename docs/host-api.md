@@ -159,6 +159,7 @@ handler(payload) -> None
 | 生成器表达式 `f(x for x in y)` | ❌ `SyntaxError` | 列表推导 `f([x for x in y])` |
 | `finally:` | ❌ `SyntaxError: finally clause is not supported yet` | 清理逻辑写两遍 |
 | `nonlocal` | ❌ `SyntaxError` | 用 `state = {...}` 字典改状态 |
+| 相邻字符串隐式拼接 `"a" "b"` | ❌ `SyntaxError: expected ')', got '@str'` | 显式写 `"a" + "b"`（多行 SQL 最容易踩） |
 | `async def` / `await` | ❌ `SyntaxError` | 同步写法 |
 | `with` 自定义上下文管理器 | ⚠️ `__exit__` 只收到 self | 手写 try/except |
 | `datetime + timedelta` | ❌ `TypeError` | 用时间戳字符串 |
