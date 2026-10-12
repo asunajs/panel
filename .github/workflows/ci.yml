@@ -1,0 +1,131 @@
+name: CI
+
+# 为什么需要 CI：开发机是 arm64 macOS，跑不了 Linux 二进制，
+# 也没法验证交叉编译产物。GitHub 的 ubuntu-24.04-arm runner 是**真 ARM64 Linux 硬件**，
+# 正好替掉缺失的「低配 ARM 盒子」，把「能不能在目标平台上跑」这件事真正验证掉。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ------------------------------------------------------------------
+  # x86_64 Linux：单元测试 + 冒烟测试
+  # ------------------------------------------------------------------
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 单元测试
+        run: cargo test --all-targets
+
+      - name: 构建 release
+        run: cargo build --release
+
+      - name: 冒烟测试（真的把服务跑起来）
+        run: python3 scripts/smoke.py ./target/release/plugin-panel
+
+      - name: 产物信息
+        run: |
+          ls -lh target/release/plugin-panel
+          file target/release/plugin-panel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-panel-x86_64-linux-gnu
+          path: target/release/plugin-panel
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # ARM64 Linux 原生 —— 这就是「低配 ARM 盒子」的真实验证
+  # ------------------------------------------------------------------
+  linux-aarch64:
+    name: Linux aarch64（原生 ARM 硬件）
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 确认 runner 真的是 aarch64
+        run: |
+          uname -m
+          uname -m | grep -q aarch64
+
+      - name: 单元测试
+        run: cargo test --all-targets
+
+      - name: 构建 release
+        run: cargo build --release
+
+      - name: 冒烟测试（真的把服务跑起来）
+        run: python3 scripts/smoke.py ./target/release/plugin-panel
+
+      - name: 产物信息
+        run: |
+          ls -lh target/release/plugin-panel
+          file target/release/plugin-panel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-panel-aarch64-linux-gnu
+          path: target/release/plugin-panel
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # aarch64-musl 静态二进制：无 libc 依赖，丢到任何 ARM Linux 上都能跑
+  # 在 ARM runner 上原生编译，不需要交叉工具链
+  # ------------------------------------------------------------------
+  linux-aarch64-musl:
+    name: Linux aarch64 musl（静态）
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 musl 工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          which musl-gcc
+
+      - name: 构建静态二进制
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: 确认是静态链接
+        run: |
+          BIN=target/aarch64-unknown-linux-musl/release/plugin-panel
+          file "$BIN"
+          file "$BIN" | grep -q "aarch64"
+          file "$BIN" | grep -qi "static"
+
+      - name: 冒烟测试（真的把服务跑起来）
+        run: python3 scripts/smoke.py ./target/aarch64-unknown-linux-musl/release/plugin-panel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-panel-aarch64-linux-musl
+          path: target/aarch64-unknown-linux-musl/release/plugin-panel
+          if-no-files-found: error
