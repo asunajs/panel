@@ -15,6 +15,7 @@
     3. GET /api/state   → 合法 JSON，含 status / plugins / jobs / engine
     3b. 双运行时都加载了（JS + Python），且没有加载失败的插件
     3c. JS 插件注册的 HTTP 路由挂在同一个端口上；未注册路径仍返回 404
+    3d. 面板写接口：缺护栏头 403 / 任务不存在 404 / 手动触发 / 暂停冻结 / 恢复不补跑
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
     4b. Python 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
@@ -59,6 +60,22 @@ def free_port() -> int:
 def fetch(url: str, timeout: float = 5.0):
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return r.status, r.read().decode()
+
+
+def post_json(url: str, panel: bool = True, timeout: float = 10.0):
+    """POST 一个写接口。`panel=False` 用来验证「缺 x-panel 头会被拦」。"""
+    req = urllib.request.Request(url, data=b"", method="POST")
+    if panel:
+        req.add_header("x-panel", "1")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        try:
+            return e.code, json.loads(body)
+        except json.JSONDecodeError:
+            return e.code, {"raw": body}
 
 
 def fetch_json(url: str, timeout: float = 5.0):
@@ -163,6 +180,80 @@ def main() -> int:
             check(ok_route, "插件路由 GET /hits 可用（同一个 Axum 端口）", f"http {status}, {len(body)} B")
         except Exception as e:  # noqa: BLE001
             check(False, "插件路由 GET /hits 可用（同一个 Axum 端口）", repr(e))
+
+        # ---- 3d. 面板写接口：手动触发 / 暂停 / 恢复（第八轮）----
+        # 先拿一个基线：py-style-500ms 是 @every 500ms，暂停后 runs 必须冻住
+        task_url = f"{base}/api/tasks/host-api-demo/py-style-500ms"
+
+        # ① 缺 `x-panel` 头 → 403（防跨站请求伪造的护栏）
+        code, _ = post_json(f"{task_url}/run", panel=False)
+        check(code == 403, "写接口缺 x-panel 头被拦", f"http {code}")
+
+        # ② 不存在的任务 → 404
+        code, _ = post_json(f"{base}/api/tasks/host-api-demo/no-such-task/run")
+        check(code == 404, "写接口对不存在的任务返回 404", f"http {code}")
+
+        # ③ 手动触发：请求成功，且不该打乱调度节奏
+        before = {j["name"]: j for j in state.get("jobs", [])}
+        code, body = post_json(f"{task_url}/run")
+        _, after_state = fetch_json(f"{base}/api/state")
+        after = {j["name"]: j for j in after_state.get("jobs", [])}
+        b, a = before.get("py-style-500ms", {}), after.get("py-style-500ms", {})
+        check(
+            code == 200 and body.get("ok") is True,
+            "手动触发任务返回 ok",
+            f"http {code}, {body}",
+        )
+        check(
+            a.get("runs", 0) >= b.get("runs", 0) + 1,
+            "手动触发计入了 runs",
+            f"{b.get('runs')} → {a.get('runs')}",
+        )
+        check(
+            a.get("next_run") == b.get("next_run"),
+            "手动触发不改下次触发时刻",
+            f"{b.get('next_run')} → {a.get('next_run')}",
+        )
+
+        # ④ 暂停：状态落库 + runs 冻结
+        code, body = post_json(f"{task_url}/pause")
+        check(
+            code == 200 and body.get("paused") is True,
+            "暂停任务返回 paused=true",
+            f"http {code}, {body}",
+        )
+        _, st1 = fetch_json(f"{base}/api/state")
+        j1 = next((j for j in st1.get("jobs", []) if j["name"] == "py-style-500ms"), {})
+        check(
+            j1.get("status") == "paused" and j1.get("paused") is True,
+            "暂停状态落进 jobs 表",
+            f"status={j1.get('status')} paused={j1.get('paused')}",
+        )
+        time.sleep(3)
+        _, st2 = fetch_json(f"{base}/api/state")
+        j2 = next((j for j in st2.get("jobs", []) if j["name"] == "py-style-500ms"), {})
+        check(
+            j2.get("runs") == j1.get("runs"),
+            "暂停期间任务不再触发",
+            f"runs {j1.get('runs')} → {j2.get('runs')}（等了 3 秒）",
+        )
+
+        # ⑤ 恢复：重新开始触发，且不补跑（3 秒最多涨 8 次，补跑会瞬间上百）
+        code, body = post_json(f"{task_url}/resume")
+        check(
+            code == 200 and body.get("paused") is False,
+            "恢复任务返回 paused=false",
+            f"http {code}, {body}",
+        )
+        time.sleep(2.5)
+        _, st3 = fetch_json(f"{base}/api/state")
+        j3 = next((j for j in st3.get("jobs", []) if j["name"] == "py-style-500ms"), {})
+        grew = j3.get("runs", 0) - j2.get("runs", 0)
+        check(
+            1 <= grew <= 12,
+            "恢复后按节奏重新触发（没有补跑欠账）",
+            f"2.5 秒涨了 {grew} 次（@every 500ms 期望约 5 次）",
+        )
 
         # 没注册过的路径必须还是 404，而不是被 fallback 吃掉
         try:

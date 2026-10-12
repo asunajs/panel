@@ -69,6 +69,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             last_run   TEXT,
             next_run   TEXT,
             last_error TEXT,
+            paused     INTEGER NOT NULL DEFAULT 0,
             created_at TEXT    NOT NULL,
             updated_at TEXT    NOT NULL,
             UNIQUE(plugin, name)
@@ -79,6 +80,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
 
     // 兼容已经在跑的旧库：补齐后加的列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）
     ensure_column(&conn, "jobs", "trips", "INTEGER NOT NULL DEFAULT 0")?;
+    // 面板上的「暂停 / 恢复」：这一列是权威来源，插件热更新不会覆盖它
+    ensure_column(&conn, "jobs", "paused", "INTEGER NOT NULL DEFAULT 0")?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -185,6 +188,8 @@ pub struct JobRow {
     pub last_run: Option<String>,
     pub next_run: Option<String>,
     pub last_error: Option<String>,
+    /// 面板上被暂停（暂停状态跨重启保留，见 `list_paused_jobs`）
+    pub paused: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -209,7 +214,9 @@ pub fn sync_jobs(db: &Db, specs: &[JobSpec], now: &str) -> rusqlite::Result<()> 
             VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?5)
             ON CONFLICT(plugin, name) DO UPDATE SET
                 schedule   = excluded.schedule,
-                status     = 'running',
+                -- 注意：**不能**把 status 硬写成 'running'，也不能碰 paused。
+                -- 插件热更新会重跑一遍 sync_jobs，硬写会把用户暂停的任务悄悄恢复掉。
+                status     = CASE WHEN jobs.paused = 1 THEN 'paused' ELSE 'running' END,
                 next_run   = excluded.next_run,
                 updated_at = excluded.updated_at
             "#,
@@ -264,6 +271,7 @@ pub fn record_job_run(
             next_run   = ?6,
             last_error = ?7,
             status     = CASE
+                             WHEN jobs.paused = 1 THEN 'paused'
                              WHEN ?8 THEN 'tripped'
                              WHEN ?7 IS NULL THEN 'running'
                              ELSE 'error'
@@ -277,12 +285,45 @@ pub fn record_job_run(
     Ok(())
 }
 
+/// 启动时把「用户暂停过」的任务读回来，交给调度器。
+///
+/// 这是「jobs 表成为权威来源」的第一步：任务定义仍然由插件代码声明（代码即配置），
+/// 但**用户对任务的操作**（暂停 / 恢复）必须跨重启保留 —— 否则重启一次，
+/// 用户暂停掉的那个每 500ms 烧 CPU 的任务就自己活过来了。
+pub fn list_paused_jobs(db: &Db) -> rusqlite::Result<Vec<(String, String)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT plugin, name FROM jobs WHERE paused = 1")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    rows.collect()
+}
+
+/// 面板点了「暂停 / 恢复」之后写库。
+pub fn set_job_paused(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    paused: bool,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        UPDATE jobs SET
+            paused     = ?3,
+            status     = CASE WHEN ?3 = 1 THEN 'paused' ELSE 'running' END,
+            updated_at = ?4
+        WHERE plugin = ?1 AND name = ?2
+        "#,
+        params![plugin, name, paused as i64, now],
+    )
+}
+
 /// 列出全部调度任务，按插件名 + 任务名排序。
 pub fn list_jobs(db: &Db) -> rusqlite::Result<Vec<JobRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT id, name, plugin, schedule, status, runs, trips, last_run, next_run, last_error,
-                created_at, updated_at
+                paused, created_at, updated_at
          FROM jobs ORDER BY plugin, name LIMIT 100",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -297,8 +338,9 @@ pub fn list_jobs(db: &Db) -> rusqlite::Result<Vec<JobRow>> {
             last_run: r.get(7)?,
             next_run: r.get(8)?,
             last_error: r.get(9)?,
-            created_at: r.get(10)?,
-            updated_at: r.get(11)?,
+            paused: r.get::<_, i64>(10)? != 0,
+            created_at: r.get(11)?,
+            updated_at: r.get(12)?,
         })
     })?;
     rows.collect()

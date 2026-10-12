@@ -13,7 +13,8 @@
 | 第五轮 | 部署与分发（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本已测（15 项用例），Release 流水线待打 tag 验证 |
 | 第六轮 | **双运行时：嵌入 PocketPy 跑 Python 插件 + 抽象宿主 API（`host-api`/`host_api`）+ JS 插件 HTTP 路由 + mtime 热更新** | ✅ 本机已验证（含双运行时冒烟、静态 musl 产物 4.4 MB） |
 | 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | ✅ 适配器自带用例（Node 20 / CPython 51 项），交叉验证见 §10.5 |
-| 后续 | 完整前端 / 插件市场 / 多实例 | 未开始 |
+| 第八轮 | **面板从只读变可操作**：手动触发 / 暂停 / 恢复，暂停状态跨重启保留 + 写接口防 CSRF | ✅ 已验证（冒烟 24 项含 6 项面板写操作） |
+| 后续 | 鉴权 / 完整前端 / 插件市场 / 多实例 | 未开始 |
 
 ---
 
@@ -190,6 +191,48 @@ Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个
 
 顺序上「先摘旧的、再装新的」：即使新版本加载失败，面板上也不会留下幽灵任务。
 
+### 面板上的写操作（第八轮）
+
+面板原来只能看。现在任务表多了两个按钮：**立即执行** / **暂停·恢复**。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/tasks/{plugin}/{name}/run` | 立即执行一次 |
+| `POST /api/tasks/{plugin}/{name}/pause` | 暂停（不再被调度） |
+| `POST /api/tasks/{plugin}/{name}/resume` | 恢复（从当前时刻重新对齐，**不补跑**） |
+
+三条语义，都是刻意设计的：
+
+1. **手动触发对插件完全透明**。`run_one` 是同一条代码路径（`engine.rs`），
+   payload 字段与调度触发一模一样 —— 插件不需要区分「我是被定时叫醒的还是被人点的」。
+   区别只在宿主侧：手动触发**不推进 `next_fire`**（不打乱节奏），
+   也**不动熔断状态**（失败不计入连续失败，否则调试时点几下就把任务弄熔断了；
+   成功也不解除熔断，否则等于开了个「绕过熔断器猛点」的口子）。
+2. **恢复不补跑**。暂停期间错过的触发一律丢掉，从当前时刻重新对齐。
+   否则一个被暂停一天的 `@every 500ms` 任务在恢复瞬间要面对 17 万次欠账。
+   实测：暂停 3 秒后恢复，2.5 秒内触发 5 次（正好是 `@every 500ms` 的节奏）。
+3. **暂停状态跨重启保留**。写进 `jobs.paused`，引擎启动时读回来。
+   这是「`jobs` 表成为权威来源」的第一步 —— 任务定义仍由插件代码声明（代码即配置），
+   但**用户对任务的操作**必须活过重启，否则重启一次，你暂停掉的那个每 500ms 烧 CPU
+   的任务就自己活过来了。实测重启后日志里出现「任务 `py-heartbeat` 按上次的暂停状态继续暂停」。
+
+写接口要求带请求头 **`x-panel: 1`**，否则 403。这不是鉴权，是防 CSRF：
+浏览器跨站发起的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，
+而本服务不返回任何 CORS 响应头，预检必然失败 —— 恶意网页没法借用户的浏览器点这些按钮。
+**能直接访问端口的人依然能调这些接口**，所以面板默认只绑 `127.0.0.1`（§10.4）。
+
+```bash
+B=http://127.0.0.1:8787
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/host-api-demo/py-style-500ms/run      # {"ok":true}
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/scheduler-demo/boom/run               # {"ok":false,"error":"Error: ..."}
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/pause            # {"ok":true,"paused":true}
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/resume           # {"ok":true,"paused":false}
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/tasks/sysinfo/py-heartbeat/run   # 403（缺头）
+```
+
+返回码约定：任务跑了但失败是 **`200` + `{"ok":false,"error":"..."}`**（请求本身成功了，
+错误文本原样带回面板）；`403` 缺护栏头、`404` 任务不存在、`503` 引擎不可用、`504` 超时。
+
 ### Cron 语法
 
 | 形式 | 例子 | 含义 |
@@ -253,7 +296,12 @@ curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/nope   # 404
 # ⑬ 热更新：改完插件存盘，看日志出现「插件已热更新」
 $EDITOR plugins/py/sysinfo.py
 
-# ⑭ 同一份插件跑在别的运行时里（跨运行时验证）
+# ⑭ 面板写操作（手动触发 / 暂停 / 恢复）
+curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/scheduler-demo/boom/run
+curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/sysinfo/py-heartbeat/pause
+curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/sysinfo/py-heartbeat/resume
+
+# ⑮ 同一份插件跑在别的运行时里（跨运行时验证）
 cd adapters/node   && node test/run-tests.mjs && node bin/run.mjs ../../plugins/js/host-api-demo.js --once
 cd adapters/python && python3 -m unittest discover -s tests && python3 -m host_api ../../plugins/py/sysinfo.py --once
 ```
@@ -869,7 +917,10 @@ PocketPy 的语法缺口（写插件时的硬约束，完整表见 `docs/host-ap
    同一份插件文件在四个宿主里跑通（§10.5）。
 3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，JS 重建 `Context`、
    Python 复用 VM 索引 + `py_resetvm`，先摘旧任务再装新任务（§4「热更新」）。
-4. **任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。要支持面板上动态增删任务，下一步是把 `jobs` 表升级为权威来源，插件只提供 handler。
+4. **任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。
+   第八轮已经把**用户对任务的操作**（暂停 / 恢复）做成权威落在库里、跨重启保留；
+   还差「面板上新增/删除任务」这一步 —— 那需要把 `jobs` 表升级为任务定义的权威来源，
+   插件只提供 handler（现在是反过来）。
 5. **调度器与两个解释器同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「解释器只在一个线程里被碰」这个简单前提 —— 也是 pocketpy 的进程级全局状态不允许的。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。Axum handler 里同步调 SQLite，量级上来要挪 `spawn_blocking`。
 7. **面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。

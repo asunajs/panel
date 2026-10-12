@@ -69,6 +69,7 @@ pub struct ScheduledTask {
     pub runs: u64,
     pub last_run: Option<String>,
     pub last_error: Option<String>,
+    /// 是否参与调度。面板上的「暂停 / 恢复」就是翻这个位（见 `set_paused`）。
     pub enabled: bool,
 
     // ---- 熔断状态 ----
@@ -151,6 +152,55 @@ impl Scheduler {
         let before = self.tasks.len();
         self.tasks.retain(|t| t.plugin != plugin);
         before - self.tasks.len()
+    }
+
+    /// 按 `(plugin, name)` 找任务下标 —— 面板上的「立即执行 / 暂停」都靠它定位。
+    pub fn find(&self, plugin: &str, name: &str) -> Option<usize> {
+        self.tasks
+            .iter()
+            .position(|t| t.plugin == plugin && t.name == name)
+    }
+
+    /// 暂停 / 恢复一个任务。返回设置后的 `enabled`（true = 在跑）。
+    ///
+    /// 恢复时**不补跑**：暂停期间错过的触发一律丢掉，从当前时刻重新对齐下一次。
+    /// 否则一个被暂停了一天的 `@every 500ms` 任务在恢复瞬间就要面对 17 万次欠账 ——
+    /// 要么一口气补跑完（把盒子打死），要么在调度器里堆一堆过期 deadline。
+    ///
+    /// 注意：**暂停不动熔断状态**。一个正在冷却的任务被暂停再恢复，冷却截止时刻
+    /// 仍然生效（`next_fire` 本来就钉在冷却终点，不会被这里的重算覆盖）。
+    pub fn set_paused(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        paused: bool,
+        now: DateTime<Local>,
+    ) -> Result<bool, String> {
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let t = &mut self.tasks[idx];
+        t.enabled = !paused;
+        if t.enabled && t.next_fire <= now {
+            // 恢复：从当前时刻重新对齐，欠下的触发不补
+            t.next_fire = t
+                .schedule
+                .next_after(now)
+                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        }
+        Ok(t.enabled)
+    }
+
+    /// 记录一次**手动触发**的结果：只更新 `runs / last_run / last_error`。
+    ///
+    /// 故意不动 `next_fire`（手动执行不该打乱调度节奏），也故意不碰熔断状态：
+    /// - 手动失败不计入连续失败，否则调试时点几下就把任务弄熔断了
+    /// - 手动成功也不解除熔断，否则等于给了个「绕过熔断器猛点」的口子
+    pub fn record_manual_run(&mut self, idx: usize, now: DateTime<Local>, error: Option<String>) {
+        let t = &mut self.tasks[idx];
+        t.runs += 1;
+        t.last_run = Some(fmt_ms(now));
+        t.last_error = error;
     }
 
     /// 距离最近一个到期任务还有多久 —— 直接当作 `recv_timeout` 的时长。
@@ -263,6 +313,10 @@ mod tests {
         Schedule::parse("@every 1s").unwrap()
     }
 
+    fn every_500ms() -> Schedule {
+        Schedule::parse("@every 500ms").unwrap()
+    }
+
     /// 阈值设 3、冷却 10s 的测试配置，方便快速验证
     fn test_cfg() -> TripConfig {
         TripConfig {
@@ -365,6 +419,92 @@ mod tests {
         assert_eq!(s.tasks()[0].plugin, "b");
         // 不存在的插件返回 0，不 panic
         assert_eq!(s.remove_plugin("nope"), 0);
+    }
+
+    // ---- 面板操作：暂停 / 恢复 / 手动触发 ----
+
+    #[test]
+    fn paused_task_is_not_due_and_does_not_wake_the_loop() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add("a", "t1", "@every 500ms", every_500ms(), now).unwrap();
+
+        assert_eq!(s.set_paused("a", "t1", true, now).unwrap(), false);
+        // 暂停后即使时间已经越过 next_fire，也不该被判为到期
+        let later = at(5); // at(s) 的 s 是「秒」，只能是 0..=59
+        assert!(s.due(later).is_empty(), "暂停的任务不该到期");
+        // 也不该影响睡眠时长（否则会每 500ms 白醒一次）
+        assert_eq!(s.sleep_hint(later), Duration::from_secs(3600));
+
+        // 恢复：从当前时刻重新对齐，不补跑
+        assert_eq!(s.set_paused("a", "t1", false, later).unwrap(), true);
+        let idx = s.find("a", "t1").unwrap();
+        let expected = later + ChronoDuration::milliseconds(500);
+        assert_eq!(s.tasks()[idx].next_fire, expected, "恢复后应从当前时刻重新对齐");
+        assert_eq!(s.due(later).len(), 0, "恢复的瞬间不该立刻补跑");
+    }
+
+    #[test]
+    fn resume_keeps_a_future_cooldown_deadline() {
+        // 任务被熔断（next_fire 钉在冷却终点）→ 暂停 → 恢复：
+        // 冷却截止时刻仍在未来，不该被「从当前时刻重算」覆盖掉
+        let mut s = Scheduler::new(TripConfig {
+            threshold: 1,
+            base_cooldown: Duration::from_secs(60),
+            max_cooldown: Duration::from_secs(600),
+        });
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        let idx = s.find("a", "t1").unwrap();
+        s.advance(idx, now, Some("boom".into()));
+        let cooldown_end = s.tasks()[idx].next_fire;
+        assert!(s.tasks()[idx].tripped);
+
+        let later = at(1);
+        s.set_paused("a", "t1", true, later).unwrap();
+        s.set_paused("a", "t1", false, later).unwrap();
+        assert_eq!(s.tasks()[idx].next_fire, cooldown_end, "冷却截止时刻被改掉了");
+        assert!(s.tasks()[idx].tripped, "暂停/恢复不该动熔断状态");
+    }
+
+    #[test]
+    fn manual_run_records_without_touching_schedule_or_breaker() {
+        let mut s = Scheduler::new(TripConfig {
+            threshold: 1,
+            base_cooldown: Duration::from_secs(60),
+            max_cooldown: Duration::from_secs(600),
+        });
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        let idx = s.find("a", "t1").unwrap();
+        let next_before = s.tasks()[idx].next_fire;
+
+        s.record_manual_run(idx, at(30), Some("手动这次失败了".into()));
+        assert_eq!(s.tasks()[idx].runs, 1);
+        assert_eq!(s.tasks()[idx].next_fire, next_before, "手动触发不该改调度节奏");
+        assert!(!s.tasks()[idx].tripped, "手动失败不该把任务弄熔断");
+        assert_eq!(s.tasks()[idx].consecutive_failures, 0);
+
+        // 手动成功也不解除已有的熔断
+        let mut s2 = Scheduler::new(TripConfig {
+            threshold: 1,
+            base_cooldown: Duration::from_secs(60),
+            max_cooldown: Duration::from_secs(600),
+        });
+        s2.add("b", "t2", "@every 1s", every_1s(), at(0)).unwrap();
+        let i = s2.find("b", "t2").unwrap();
+        s2.advance(i, at(0), Some("boom".into()));
+        assert!(s2.tasks()[i].tripped);
+        s2.record_manual_run(i, at(30), None);
+        assert!(s2.tasks()[i].tripped, "手动成功不该解除熔断");
+    }
+
+    #[test]
+    fn set_paused_rejects_unknown_task() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let err = s.set_paused("nope", "nope", true, at(0)).unwrap_err();
+        assert!(err.contains("没有名为"), "错误信息不够明确: {err}");
+        assert!(s.find("nope", "nope").is_none());
     }
 
     // ---- 熔断 ----

@@ -187,6 +187,19 @@ pub enum EngineCmd {
         request_json: String,
         reply: tokio::sync::oneshot::Sender<String>,
     },
+    /// 面板点「立即执行」：马上跑一次，不影响调度节奏、不动熔断状态。
+    ManualRun {
+        plugin: String,
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 面板点「暂停 / 恢复」。
+    SetPaused {
+        plugin: String,
+        name: String,
+        paused: bool,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -419,6 +432,25 @@ fn engine_main(
     if let Err(e) = db::sync_jobs(&db, &specs, &fmt_secs(boot_at)) {
         eprintln!("[engine] 同步 jobs 表失败: {e}");
     }
+
+    // 恢复用户上次的暂停状态。放在 sync_jobs 之后：sync_jobs 会重写 status / next_run，
+    // 但**不会碰 paused 列**（见 db.rs 里那段注释），所以这里的恢复才是最终状态。
+    match db::list_paused_jobs(&db) {
+        Ok(list) => {
+            for (plugin, name) in list {
+                if sched.set_paused(&plugin, &name, true, boot_at).is_ok() {
+                    hostapi::push_log(
+                        &logs,
+                        &plugin,
+                        "info",
+                        &format!("任务 `{name}` 按上次的暂停状态继续暂停"),
+                    );
+                }
+                // 任务已经不在插件代码里了 → 忽略，sync_jobs 下一轮会把它删掉
+            }
+        }
+        Err(e) => eprintln!("[engine] 读取暂停状态失败: {e}"),
+    }
     for t in sched.tasks() {
         hostapi::push_log(
             &logs,
@@ -466,6 +498,49 @@ fn engine_main(
                 reply,
             }) => {
                 let out = dispatch_route(&plugins, &host, &key, &request_json, &wd, budget);
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::ManualRun {
+                plugin,
+                name,
+                reply,
+            }) => {
+                let out = match sched.find(&plugin, &name) {
+                    Some(idx) => run_one(
+                        idx, &mut sched, &plugins, &logs, &db, &wd, budget, true,
+                    ),
+                    None => Err(format!("插件 `{plugin}` 里没有名为 `{name}` 的任务")),
+                };
+                let _ = reply.send(out);
+                sync_registry(&registry, &plugins);
+            }
+            Ok(EngineCmd::SetPaused {
+                plugin,
+                name,
+                paused,
+                reply,
+            }) => {
+                let now = Local::now();
+                let out = sched
+                    .set_paused(&plugin, &name, paused, now)
+                    .map(|_| ())
+                    .and_then(|()| {
+                        // 先写库再回话：写失败要让面板知道，否则重启后状态就丢了
+                        db::set_job_paused(&db, &plugin, &name, paused, &fmt_secs(now))
+                            .map(|_| ())
+                            .map_err(|e| format!("写库失败: {e}"))
+                    });
+                if out.is_ok() {
+                    hostapi::push_log(
+                        &logs,
+                        &plugin,
+                        "info",
+                        &format!(
+                            "任务 `{name}` 已{}（面板操作）",
+                            if paused { "暂停" } else { "恢复" }
+                        ),
+                    );
+                }
                 let _ = reply.send(out);
             }
             Ok(EngineCmd::Shutdown) => {
@@ -564,100 +639,135 @@ fn fire_due(
     budget: Duration,
 ) {
     let now = Local::now();
-    let due = sched.due(now);
-    if due.is_empty() {
-        return;
+    for idx in sched.due(now) {
+        let _ = run_one(idx, sched, plugins, logs, db, wd, budget, false);
     }
+}
 
-    for idx in due {
-        let (plugin, name, expr, scheduled, runs_before) = {
-            let t = &sched.tasks()[idx];
-            (
-                t.plugin.clone(),
-                t.name.clone(),
-                t.expr.clone(),
-                t.next_fire,
-                t.runs,
-            )
-        };
-        let late_ms = (now - scheduled).num_milliseconds();
-
-        // 交给插件的载荷：全是 JSON 可序列化的普通字段（两个运行时看到的是同一份）
-        let payload = serde_json::json!({
-            "name": &name,
-            "plugin": &plugin,
-            "expr": &expr,
-            "runs": runs_before + 1,
-            "scheduledAt": scheduler::fmt_ms(scheduled),
-            "firedAt": scheduler::fmt_ms(now),
-            "lateMs": late_ms,
-        })
-        .to_string();
-
-        let result = match plugins.iter().find(|p| p.name == plugin) {
-            Some(p) => dispatch_task(p, &name, &payload, wd, budget),
-            None => Err(format!("任务所属插件 `{plugin}` 不存在")),
-        };
-
-        // 日志策略：毫秒级任务不能每次触发都刷屏，只在首次触发与失败时记录
-        match &result {
-            Err(e) => hostapi::push_log(
-                logs,
-                &plugin,
-                "error",
-                &format!("任务 `{name}` 执行失败: {e}"),
-            ),
-            Ok(()) if runs_before == 0 => hostapi::push_log(
-                logs,
-                &plugin,
-                "info",
-                &format!("任务 `{name}` 首次触发（{expr}），调度延迟 {late_ms}ms"),
-            ),
-            Ok(()) => {}
-        }
-
-        let err = result.err();
-        let was_tripped = sched.tasks()[idx].tripped;
-        sched.advance(idx, now, err.clone());
-
+/// 执行一个任务 —— 调度到点触发（`manual = false`）和面板手动触发（`manual = true`）
+/// 走的是**同一条路径**，区别只在两处：
+///
+/// | | 调度触发 | 手动触发 |
+/// |---|---|---|
+/// | 推进 `next_fire` | 按 cron 节奏推进 | **不动**（手动执行不打乱节奏） |
+/// | 熔断状态 | 失败累计、达标熔断 | **不动**（既不计失败，也不解除熔断） |
+/// | 日志 | 只在首次/失败时记 | 每次都记（用户正等着看结果） |
+///
+/// 插件侧完全感知不到区别：payload 字段一模一样，handler 也是同一个。
+fn run_one(
+    idx: usize,
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    manual: bool,
+) -> Result<(), String> {
+    let now = Local::now();
+    let (plugin, name, expr, scheduled, runs_before) = {
         let t = &sched.tasks()[idx];
-        if t.tripped && !was_tripped {
-            hostapi::push_log(
-                logs,
-                &plugin,
-                "error",
-                &format!(
-                    "任务 `{name}` 连续失败达到阈值，已熔断（第 {} 次），冷却至 {}",
-                    t.trips,
-                    t.retry_at
-                        .map(scheduler::fmt_ms)
-                        .unwrap_or_else(|| "-".to_string())
-                ),
-            );
-        } else if !t.tripped && was_tripped {
-            hostapi::push_log(
-                logs,
-                &plugin,
-                "info",
-                &format!("任务 `{name}` 半开重试成功，已恢复调度"),
-            );
-        }
-
-        if let Err(e) = db::record_job_run(
-            db,
-            &plugin,
-            &name,
+        (
+            t.plugin.clone(),
+            t.name.clone(),
+            t.expr.clone(),
+            t.next_fire,
             t.runs,
-            t.trips,
-            t.last_run.as_deref(),
-            &scheduler::fmt_ms(t.next_fire),
-            err.as_deref(),
-            t.tripped,
-            &fmt_secs(now),
-        ) {
-            eprintln!("[engine] 更新 job 状态失败: {e}");
-        }
+        )
+    };
+    let late_ms = (now - scheduled).num_milliseconds();
+
+    // 交给插件的载荷：全是 JSON 可序列化的普通字段（两个运行时看到的是同一份）
+    let payload = serde_json::json!({
+        "name": &name,
+        "plugin": &plugin,
+        "expr": &expr,
+        "runs": runs_before + 1,
+        "scheduledAt": scheduler::fmt_ms(scheduled),
+        "firedAt": scheduler::fmt_ms(now),
+        "lateMs": late_ms,
+    })
+    .to_string();
+
+    let result = match plugins.iter().find(|p| p.name == plugin) {
+        Some(p) => dispatch_task(p, &name, &payload, wd, budget),
+        None => Err(format!("任务所属插件 `{plugin}` 不存在")),
+    };
+
+    // 日志策略：毫秒级任务不能每次触发都刷屏，只在首次触发与失败时记录；
+    // 手动触发是用户主动点的，成功失败都要说清楚。
+    match &result {
+        Err(e) => hostapi::push_log(
+            logs,
+            &plugin,
+            "error",
+            &format!(
+                "任务 `{name}`{} 执行失败: {e}",
+                if manual { "（手动触发）" } else { "" }
+            ),
+        ),
+        Ok(()) if manual => hostapi::push_log(
+            logs,
+            &plugin,
+            "info",
+            &format!("任务 `{name}` 手动触发成功"),
+        ),
+        Ok(()) if runs_before == 0 => hostapi::push_log(
+            logs,
+            &plugin,
+            "info",
+            &format!("任务 `{name}` 首次触发（{expr}），调度延迟 {late_ms}ms"),
+        ),
+        Ok(()) => {}
     }
+
+    let err = result.clone().err();
+    let was_tripped = sched.tasks()[idx].tripped;
+    if manual {
+        sched.record_manual_run(idx, now, err.clone());
+    } else {
+        sched.advance(idx, now, err.clone());
+    }
+
+    let t = &sched.tasks()[idx];
+    if !manual && t.tripped && !was_tripped {
+        hostapi::push_log(
+            logs,
+            &plugin,
+            "error",
+            &format!(
+                "任务 `{name}` 连续失败达到阈值，已熔断（第 {} 次），冷却至 {}",
+                t.trips,
+                t.retry_at
+                    .map(scheduler::fmt_ms)
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+        );
+    } else if !manual && !t.tripped && was_tripped {
+        hostapi::push_log(
+            logs,
+            &plugin,
+            "info",
+            &format!("任务 `{name}` 半开重试成功，已恢复调度"),
+        );
+    }
+
+    if let Err(e) = db::record_job_run(
+        db,
+        &plugin,
+        &name,
+        t.runs,
+        t.trips,
+        t.last_run.as_deref(),
+        &scheduler::fmt_ms(t.next_fire),
+        err.as_deref(),
+        t.tripped,
+        &fmt_secs(now),
+    ) {
+        eprintln!("[engine] 更新 job 状态失败: {e}");
+    }
+
+    result
 }
 
 /// 在任务所属插件的解释器里调用它的 handler。

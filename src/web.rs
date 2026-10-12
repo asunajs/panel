@@ -12,10 +12,10 @@ use crate::engine::{EngineCmd, PluginInfo};
 use crate::hostapi::LogLine;
 use crate::AppState;
 use axum::body::Bytes;
-use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use std::sync::atomic::Ordering;
@@ -28,8 +28,149 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/state", get(api_state))
+        // 面板上的写操作。三个都是 POST，且都要求带 `x-panel: 1`（见 guard_write）
+        .route("/api/tasks/{plugin}/{name}/run", post(run_task))
+        .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
+        .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
         .fallback(plugin_route)
         .with_state(state)
+}
+
+/// 写接口的统一护栏：必须带自定义头 `x-panel: 1`。
+///
+/// 为什么这样就够挡住 CSRF：浏览器跨站发起的「简单请求」**不允许**带自定义头，
+/// 想带就会触发 CORS 预检 —— 而本服务不返回任何 CORS 响应头，预检必然失败，
+/// 真正的请求根本发不出去。于是恶意网页没法借用用户的浏览器来点这些按钮。
+///
+/// ⚠️ 这**不是鉴权**：能直接访问端口的人（本机进程、局域网内）依然能调这些接口。
+/// 面板本来默认只绑 `127.0.0.1`，要放到局域网得另外加 token —— 见 README §10.4。
+fn guard_write(headers: &HeaderMap) -> Result<(), Response> {
+    let ok = headers
+        .get("x-panel")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "1");
+    if ok {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        "写接口要求请求头 `x-panel: 1`（防跨站请求伪造；面板页面自己会带上）\n",
+    )
+        .into_response())
+}
+
+fn task_exists(st: &AppState, plugin: &str, name: &str) -> bool {
+    db::list_jobs(&st.db)
+        .unwrap_or_default()
+        .iter()
+        .any(|j| j.plugin == plugin && j.name == name)
+}
+
+fn json_error(code: StatusCode, msg: String) -> Response {
+    (code, Json(json!({ "ok": false, "error": msg }))).into_response()
+}
+
+/// `POST /api/tasks/{plugin}/{name}/run` —— 立即执行一次。
+///
+/// 语义（与调度触发共用一条代码路径，见 engine.rs 的 `run_one`）：
+/// 插件收到的 payload 与调度触发时**完全一致**，不影响下次触发时刻，也不碰熔断状态。
+///
+/// 返回码：任务跑了但失败了仍然是 `200`（请求本身成功了，`ok:false` 里带错误文本）；
+/// `404` 是任务不存在，`403` 是缺护栏头，`503`/`504` 是引擎不可用或超时。
+async fn run_task(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    if !task_exists(&st, &plugin, &name) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("没有名为 `{name}` 的任务（插件 `{plugin}`）"),
+        );
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::ManualRun {
+            plugin: plugin.clone(),
+            name: name.clone(),
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+
+    let wait = Duration::from_millis(st.health.budget_ms + 1_000);
+    match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(Err(e))) => Json(json!({ "ok": false, "error": e })).into_response(),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("任务超过 {wait:?} 没返回"),
+        ),
+    }
+}
+
+async fn pause_task(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    set_paused(st, plugin, name, true, &headers).await
+}
+
+async fn resume_task(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    set_paused(st, plugin, name, false, &headers).await
+}
+
+/// 暂停 / 恢复的公共实现。暂停状态写进 `jobs.paused`，重启后由引擎读回来（跨重启保留）。
+async fn set_paused(
+    st: AppState,
+    plugin: String,
+    name: String,
+    paused: bool,
+    headers: &HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(headers) {
+        return r;
+    }
+    if !task_exists(&st, &plugin, &name) {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("没有名为 `{name}` 的任务（插件 `{plugin}`）"),
+        );
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::SetPaused {
+            plugin: plugin.clone(),
+            name: name.clone(),
+            paused,
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true, "paused": paused })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
 }
 
 async fn index(State(st): State<AppState>) -> Html<String> {
@@ -204,12 +345,13 @@ fn render_page(st: &AppState) -> String {
 /// 调度任务行：插件 / 任务名 / 表达式 / 状态 / 触发次数 / 熔断次数 / 下次触发。
 fn job_rows(jobs: &[JobRow]) -> String {
     if jobs.is_empty() {
-        return "<tr><td colspan=\"7\" class=\"empty\">没有注册任何调度任务</td></tr>".to_string();
+        return "<tr><td colspan=\"8\" class=\"empty\">没有注册任何调度任务</td></tr>".to_string();
     }
     jobs.iter()
         .map(|j| {
-            // status 由引擎写入：tripped（熔断中）> error（上次失败）> running
+            // status 由引擎写入：paused（用户暂停）> tripped（熔断中）> error（上次失败）> running
             let status = match j.status.as_str() {
+                "paused" => "<span class=\"bad idle\">已暂停</span>".to_string(),
                 "tripped" => format!("<span class=\"bad bad\">已熔断 ×{}</span>", j.trips),
                 "error" => "<span class=\"bad bad\">执行出错</span>".to_string(),
                 _ if j.runs > 0 => "<span class=\"bad ok\">运行中</span>".to_string(),
@@ -220,8 +362,16 @@ fn job_rows(jobs: &[JobRow]) -> String {
                 .as_deref()
                 .map(|e| format!("<div class=\"err\">{}</div>", esc(e)))
                 .unwrap_or_default();
+            let buttons = format!(
+                "<button class=\"btn\" data-act=\"run\" data-plugin=\"{p}\" data-name=\"{n}\">立即执行</button>\
+                 <button class=\"btn\" data-act=\"{toggle}\" data-plugin=\"{p}\" data-name=\"{n}\">{label}</button>",
+                p = esc(&j.plugin),
+                n = esc(&j.name),
+                toggle = if j.paused { "resume" } else { "pause" },
+                label = if j.paused { "恢复" } else { "暂停" },
+            );
             format!(
-                "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td>{}{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td>{}{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td><td class=\"ops\">{}</td></tr>",
                 esc(&j.plugin),
                 esc(&j.name),
                 esc(&j.schedule),
@@ -229,7 +379,8 @@ fn job_rows(jobs: &[JobRow]) -> String {
                 err,
                 j.runs,
                 j.trips,
-                esc(j.next_run.as_deref().unwrap_or("-"))
+                esc(j.next_run.as_deref().unwrap_or("-")),
+                buttons
             )
         })
         .collect::<Vec<_>>()
@@ -350,6 +501,14 @@ const PAGE: &str = r##"<!DOCTYPE html>
   .bad.ok { background: #12351c; color: #3fb950; }
   .bad.idle { background: #2b2b16; color: #d0a215; }
   .bad.bad { background: #3a1518; color: #f85149; }
+  .ops { white-space: nowrap; }
+  .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+         padding: 3px 9px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+  .btn:hover { background: #30363d; border-color: #8b949e; }
+  .btn:active { transform: translateY(1px); }
+  .actmsg { font-size: 12px; margin: 6px 0 8px; min-height: 1em; color: #8b949e; }
+  .actmsg.ok { color: #3fb950; }
+  .actmsg.bad { color: #f85149; }
   .err { color: #f85149; font-size: 11px; margin-top: 4px; white-space: pre-wrap; }
   .logs { background: #16181d; border: 1px solid #272c34; border-radius: 7px;
           padding: 8px; max-height: 320px; overflow: auto; }
@@ -380,8 +539,9 @@ const PAGE: &str = r##"<!DOCTYPE html>
   </table>
 
   <h2>调度任务（cron / @every）</h2>
+  <div id="actmsg" class="actmsg"></div>
   <table>
-    <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th></tr></thead>
+    <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th><th>操作</th></tr></thead>
     <tbody id="jobs">__JOB_ROWS__</tbody>
   </table>
 
@@ -427,16 +587,22 @@ const PAGE: &str = r##"<!DOCTYPE html>
 
       document.getElementById('jobs').innerHTML = s.jobs.map(function (j) {
         var st;
-        if (j.status === 'tripped') st = '<span class="bad bad">已熔断 ×' + j.trips + '</span>';
+        if (j.status === 'paused') st = '<span class="bad idle">已暂停</span>';
+        else if (j.status === 'tripped') st = '<span class="bad bad">已熔断 ×' + j.trips + '</span>';
         else if (j.status === 'error') st = '<span class="bad bad">执行出错</span>';
         else if (j.runs > 0) st = '<span class="bad ok">运行中</span>';
         else st = '<span class="bad idle">待触发</span>';
         var err = j.last_error ? '<div class="err">' + esc(j.last_error) + '</div>' : '';
+        // 操作按钮只带 data-* 属性，事件走 tbody 上的委托（见下面的 click 监听）
+        var p = esc(j.plugin), n = esc(j.name);
+        var ops = '<button class="btn" data-act="run" data-plugin="' + p + '" data-name="' + n + '">立即执行</button>' +
+                  '<button class="btn" data-act="' + (j.paused ? 'resume' : 'pause') +
+                  '" data-plugin="' + p + '" data-name="' + n + '">' + (j.paused ? '恢复' : '暂停') + '</button>';
         return '<tr><td class="mono">' + esc(j.plugin) + '</td><td class="mono">' + esc(j.name) +
                '</td><td class="mono dim">' + esc(j.schedule) + '</td><td>' + st + err +
                '</td><td class="num">' + j.runs + '</td><td class="num">' + j.trips +
-               '</td><td class="mono dim">' + esc(j.next_run || '-') + '</td></tr>';
-      }).join('') || '<tr><td colspan="7" class="empty">没有注册任何调度任务</td></tr>';
+               '</td><td class="mono dim">' + esc(j.next_run || '-') + '</td><td class="ops">' + ops + '</td></tr>';
+      }).join('') || '<tr><td colspan="8" class="empty">没有注册任何调度任务</td></tr>';
 
       document.getElementById('tasks').innerHTML = s.tasks.map(function (t) {
         return '<tr><td class="num">' + t.id + '</td><td class="mono">' + esc(t.name) +
