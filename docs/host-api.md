@@ -139,10 +139,15 @@ handler(payload) -> None
 | `with` 自定义上下文管理器 | ⚠️ `__exit__` 只收到 self | 手写 try/except |
 | `datetime + timedelta` | ❌ `TypeError` | 用时间戳字符串 |
 | `threading` / `sqlite3` / `urllib` / `http.server` | ❌ 没有这些模块 | 走 `host_api` |
+| `os` 模块 / `open()` | ❌ 宿主编译时关掉了（`PK_ENABLE_OS=0`） | 走 `host_api`（宿主统一审计） |
 | 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=`、`json` | ✅ | — |
 
 JS 侧反过来：QuickJS 没有 Node 的 `fs` / `http` / `process`，
 所以插件同样只能走 `host-api`。这条约束是**两边对称**的，也正是抽象层存在的理由。
+
+嵌入式宿主里 Python 插件的可用模块（实测）：`json` / `math` / `traceback` / `sys` 可用；
+`os` 与 `open()` 不可用（`PK_ENABLE_OS=0`，见 `build.rs` 的注释）。
+需要文件、网络、数据库一律走 `host_api`。
 
 ---
 

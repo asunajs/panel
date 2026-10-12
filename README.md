@@ -484,21 +484,48 @@ CPU 占用（进程 CPU 时间差值法）：
 
 | 场景 | RSS | phys_footprint | 增量 |
 |---|---|---|---|
-| 0 个插件（纯宿主） | 8144 KB | **2112 KB** | — |
-| 4 个 JS 插件（`plugins/js`） | 9216 KB | **2864 KB** | +752 KB |
-| 1 个 Python 插件 | 12032 KB | **5488 KB** | **+3376 KB** |
-| 2 个 Python 插件 | 13328 KB | **6752 KB** | +1264 KB |
-| 4 JS + 2 Python（`plugins/`） | 14512 KB | **7632 KB** | +4768 KB |
+| 0 个插件（纯宿主） | 8224 KB | **2192 KB** | — |
+| 4 个 JS 插件（`plugins/js`） | 9232 KB | **2880 KB** | +688 KB（约 170 KB/插件） |
+| 1 个 Python 插件 | 12048 KB | **5552 KB** | **+3360 KB** |
+| 2 个 Python 插件 | 13344 KB | **6816 KB** | +1264 KB |
+| 4 JS + 2 Python（`plugins/`） | 14064 KB | **7248 KB** | +5056 KB |
+
+（同一套用例跑了两次 —— 关掉 pocketpy 的 `os` 模块前后 —— 两次差异都 < 400 KB，
+在噪声范围内，所以这张表按最新一次填。）
 
 结论（也是设计依据）：
 
 - **PocketPy 是惰性初始化的**：`engine.rs` 先扫插件目录，只有真的存在 `.py` 文件才调
   `py_initialize()`。纯 JS 部署**一分钱不花**，不需要为了「支持 Python」牺牲常驻内存。
 - 解释器 + 第一个 VM ≈ **3.4 MB**，之后每多一个 Python 插件 ≈ **1.3 MB**（VM 上限 15 个）。
-- 对照 JS 侧：一个插件一个 Context 只花 ~190 KB。所以「Python 插件」的单价确实贵一个数量级，
+- 对照 JS 侧：一个插件一个 Context 只花 ~170 KB。所以「Python 插件」的单价确实贵一个数量级，
   但它换来的是一整门语言 —— 值不值取决于盒子的内存预算，用户自己选。
-- 依然远低于「< 10 MB」的目标：**纯 JS 部署 2.9 MB，带两个 Python 插件 7.6 MB**。
+- 依然远低于「< 10 MB」的目标：**纯 JS 部署 2.9 MB，带两个 Python 插件 7.2 MB**。
   （Linux 静态 musl 上的真实数字以 CI 为准，macOS 的共享页会让 RSS 虚高。）
+
+### 8.1c Axum 是不是最优选择（需求里点名问的，实测对比）
+
+需求文档里问「如果 Axum 不是最优选择，欢迎推荐更轻量的 HTTP 方案」。做了一个同条件对比：
+两个最小服务，都是 `GET /` 返回一段 HTML + `GET /api/state` 返回一段 JSON，
+同样的 `opt-level="z" + lto + panic=abort + strip`：
+
+| 方案 | 二进制 | RSS | phys_footprint |
+|---|---|---|---|
+| tokio(2 worker) + Axum（当前） | 558 KB | 1728 KB | **1040 KB** |
+| tiny_http（纯阻塞 accept 循环，无 tokio/hyper/tower） | 395 KB | 1616 KB | **1088 KB** |
+| 真实面板（0 插件，= HTTP 层 + QuickJS + SQLite + 引擎线程） | 3.7 MB | 8224 KB | 2128 KB |
+
+结论：**换掉 Axum 省不出内存**。省下的是 163 KB 二进制，内存差异在噪声内（实测 tiny_http 反而略高）。
+真实面板 2128 KB 里，HTTP 层只占约 1.0 MB，另外 1.1 MB 是 QuickJS runtime + SQLite + 调度器 ——
+要压内存得动引擎，动 HTTP 框架是白费力气。而丢掉 Axum 的代价很实在：
+
+- 插件路由的转发（`web.rs` 的 fallback → 引擎线程 → oneshot 回包）要改成阻塞式，连接会占住 worker；
+- graceful shutdown、请求体上限、超时都要自己写；
+- 后面要加认证/限流时，tower 那套中间件就没了。
+
+所以**保留 Axum**。真要继续压内存，优先级是：① 减少 Python 插件（3.4 MB/个，见 §8.1b）
+② 减少 tokio worker（已收到 2）③ 换掉 `ureq`（只在用到 `http_fetch` 时才必要，
+但它本身是阻塞实现，已经很轻）。
 
 ### 8.2 跨平台验证（GitHub Actions）
 
@@ -802,6 +829,13 @@ Rust 只保存「插件名 + 任务名 + 表达式」这点元数据。
   默认 10s 超时、上限 60s、响应体上限 1 MiB。
 - **熔断 / 执行预算 / 热更新是宿主策略**，不在 `host-api` 规范里：
   Node/CPython 适配器不实现它们，插件也不该依赖。
+- **Python 插件拿不到文件系统和 shell**：pocketpy 用 `PK_ENABLE_OS=0` 编译，
+  `os` 模块（`system` / `remove` / `chdir` / `environ`）和 `open()` 都不存在。
+  实测（临时插件逐个 import）：
+  `json` / `math` / `traceback` / `sys` → OK，`os` → `ImportError: module 'os' not found`，
+  `open()` → `NameError`。理由很直接：这个面板没有鉴权，
+  而「插件的能力只能来自 `host_api`」是整个抽象层的承诺 —— 留一个 `os.system` 就等于承诺作废。
+  需要外部能力的（读文件、发请求、查库）走 `host_api`，宿主侧统一审计。
 - 面板没有鉴权，所以默认只绑 `127.0.0.1`。
 
 ### 10.5 跨运行时验证（同一份插件跑在四个宿主里）
