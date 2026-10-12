@@ -154,6 +154,19 @@ impl Scheduler {
         before - self.tasks.len()
     }
 
+    /// 摘掉单个任务，返回是否真的摘掉了。
+    ///
+    /// 两个用途：面板删除任务；以及 `add_job` 里「任务已装进调度器但写库失败」时回滚。
+    pub fn remove_task(&mut self, plugin: &str, name: &str) -> bool {
+        match self.find(plugin, name) {
+            Some(idx) => {
+                self.tasks.remove(idx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 按 `(plugin, name)` 找任务下标 —— 面板上的「立即执行 / 暂停」都靠它定位。
     pub fn find(&self, plugin: &str, name: &str) -> Option<usize> {
         self.tasks
@@ -201,6 +214,28 @@ impl Scheduler {
         t.runs += 1;
         t.last_run = Some(fmt_ms(now));
         t.last_error = error;
+    }
+
+    /// 把库里的累计计数灌回一个任务（重启 / 热更新后调用）。
+    ///
+    /// 为什么需要：`add` 建出来的任务是零计数，而 `record_job_run` 会把**内存里的**
+    /// 计数写回库 —— 不灌的话，重启一次面板上的「触发次数」就归零，
+    /// 熔断的指数退避也会从第一次冷却重新开始。
+    /// `sync_jobs` 里那句「保留 runs 历史」只保住了重启前的那一瞬间。
+    ///
+    /// 只灌 `runs` / `trips`，不碰 `tripped` / `consecutive_failures`：
+    /// 熔断的**冷却是否生效**不该跨重启延续（那会让一次重启变成绕过冷却的手段），
+    /// 但「这个任务历史上熔断过几次」应该留着，它决定下一次冷却的起点。
+    pub fn seed_counters(&mut self, plugin: &str, name: &str, runs: u64, trips: u32) -> bool {
+        match self.find(plugin, name) {
+            Some(idx) => {
+                let t = &mut self.tasks[idx];
+                t.runs = runs;
+                t.trips = trips;
+                true
+            }
+            None => false,
+        }
     }
 
     /// 距离最近一个到期任务还有多久 —— 直接当作 `recv_timeout` 的时长。
@@ -622,5 +657,67 @@ mod tests {
         assert!(s.due(now + ChronoDuration::seconds(9)).is_empty());
         // 冷却结束就该到期（半开）
         assert_eq!(s.due(now + ChronoDuration::seconds(10)).len(), 1);
+    }
+
+    // ---- 第九轮：单任务摘除 + 计数回灌 ----
+
+    #[test]
+    fn remove_task_takes_only_the_named_one() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t2", "@every 1s", every_1s(), now).unwrap();
+        s.add("b", "t1", "@every 1s", every_1s(), now).unwrap();
+
+        assert!(s.remove_task("a", "t1"));
+        assert_eq!(s.len(), 2);
+        assert!(s.find("a", "t1").is_none());
+        assert!(s.find("a", "t2").is_some(), "同插件的其他任务不该被牵连");
+        assert!(s.find("b", "t1").is_some(), "同名的其他插件任务不该被牵连");
+
+        // 摘不存在的不 panic
+        assert!(!s.remove_task("a", "t1"));
+        assert!(!s.remove_task("nope", "nope"));
+    }
+
+    #[test]
+    fn seed_counters_restores_history_but_not_the_breaker() {
+        let mut s = Scheduler::new(test_cfg());
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+
+        // 假设库里记着「跑过 42 次、历史上熔断过 2 次」
+        assert!(s.seed_counters("a", "t1", 42, 2));
+        let t = &s.tasks()[0];
+        assert_eq!(t.runs, 42);
+        assert_eq!(t.trips, 2);
+        // 熔断的**状态**不跨重启延续：重启不该变成绕过冷却的手段
+        assert!(!t.tripped);
+        assert_eq!(t.consecutive_failures, 0);
+        assert!(t.retry_at.is_none());
+
+        // 灌完之后的第一次失败：runs 接着数；连败 3 次（阈值）才熔断，
+        // 而冷却按「历史上第 3 次熔断」退避 = 10s × 2² = 40s
+        for _ in 0..3 {
+            s.advance(0, now, Some("boom".into()));
+        }
+        assert_eq!(s.tasks()[0].runs, 45, "runs 该从历史值继续往上加");
+        assert_eq!(s.tasks()[0].trips, 3, "trips 该从历史值继续往上加");
+        assert_eq!(s.tasks()[0].retry_at.unwrap(), now + ChronoDuration::seconds(40));
+
+        // 不存在的任务返回 false，不 panic
+        assert!(!s.seed_counters("a", "nope", 1, 1));
+    }
+
+    #[test]
+    fn seeded_runs_flows_into_the_next_payload() {
+        // payload.runs = 内存计数 + 1：回灌之后，重启不会让插件看到的序号倒退回 1
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.seed_counters("a", "t1", 99, 0);
+        assert_eq!(s.tasks()[0].runs, 99);
+        s.advance(0, now, None);
+        assert_eq!(s.tasks()[0].runs, 100);
     }
 }

@@ -31,6 +31,9 @@ jobs:
       - name: 单元测试
         run: cargo test --all-targets
 
+      - name: 面板前端逻辑回归（把 web.rs 里的 <script> 抠出来用 DOM 桩跑）
+        run: node scripts/test-panel-frontend.mjs
+
       - name: install.sh 端到端测试（用 shim 假造一个 Release）
         run: bash scripts/test-install.sh
 

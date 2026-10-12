@@ -32,13 +32,33 @@ Node/CPython 适配器写 stderr，格式 `[host-api] [level] msg`。
 ```
 register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
+register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
   **日与周同时受限时取 OR 语义**（与 Vixie cron 一致）。
 - `interval`：`500ms` / `2s` / `1m` / `1h`，毫秒级精度。
 - 表达式非法时**在注册阶段就报错**（加载插件时就失败），而不是等运行时才发现。
-- 同一插件内任务重名会报错，不静默覆盖。
+- 同一插件内 `name` 重名会报错，不静默覆盖 —— `register_cron` 与 `register_handler`
+  共用同一个名字空间，两种注册方式互相查重。
+
+#### `register_handler`：把「处理函数」和「调度」拆开
+
+`register_cron` 一次做完两件事：登记处理函数 + 声明一条调度。`register_handler` 只做第一件，
+调度交给宿主的面板创建（嵌入式宿主：面板上的「新建任务」；Node/CPython 适配器：运行器的
+`--job <name>=<expr>`）。
+
+这样拆的理由：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」
+登记出来，面板再从里面挑一个挂上表达式 —— 「插件的能力只能来自插件代码」这条线没有破。
+
+| 注册方式 | 任务定义来源 | 面板上 |
+|---|---|---|
+| `register_cron` / `every` | `jobs.source = 'plugin'`（插件代码） | 可暂停、**不可删除**（删了下次 `sync_jobs` 也会装回来） |
+| `register_handler` + 面板建任务 | `jobs.source = 'panel'`（面板） | 可暂停、可删除 |
+
+同一个 `register_handler` 登记的处理函数可以被面板上的**多条**任务复用（挂不同表达式）。
+插件热更新时，面板创建的任务会跟着重新装载；如果处理函数在新版本里没有了，
+任务定义**保留**、状态标成 `error` 并在日志里说明原因，而不是静默消失。
 
 ### SQLite
 
@@ -92,10 +112,13 @@ handler(payload) -> None
 | `name` | string | 任务名 |
 | `plugin` | string | 插件名（文件名去扩展名） |
 | `expr` | string | 注册时的表达式原文 |
-| `runs` | number | 第几次触发（从 1 开始） |
+| `runs` | number | 第几次触发（**生命周期内**，跨重启接着数） |
 | `scheduledAt` | string | 原定触发时刻，`YYYY-MM-DD HH:MM:SS.mmm` |
 | `firedAt` | string | 实际触发时刻 |
 | `lateMs` | number | 晚了多少毫秒 |
+
+`runs` 是**累计**的：宿主把 `jobs.runs` 灌回调度器（见 README §12.3），
+所以重启 / 热更新之后它不会退回 1。面板上的「触发次数」与插件看到的 `runs` 是同一个数。
 
 **成功 / 失败的唯一约定：正常返回 = 成功，抛异常 = 失败。**
 失败时宿主记录错误文本（JS 取 `name: message` + stack，Python 取 `traceback.format_exc()`），
@@ -112,6 +135,7 @@ handler(payload) -> None
 |---|---|---|---|---|
 | `log/warn/error` | ✅ | ✅ | ✅ | ✅ |
 | `register_cron` / `every` | ✅ | ✅ | ✅ | ✅ |
+| `register_handler`（只登记不调度） | ✅ | ✅ | ✅（配 `--job`） | ✅（配 `--job`） |
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
 | `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
 | `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |

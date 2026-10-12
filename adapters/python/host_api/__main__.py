@@ -24,7 +24,10 @@ except ImportError:  # 直接 python3 host_api/__main__.py 时
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from host_api import HostApiError, bind, fmt_ts, get_host
 
-USAGE = "用法: python3 -m host_api <plugin.py> [--once] [--db <path>] [--run-for <seconds>]"
+USAGE = ("用法: python3 -m host_api <plugin.py> [--once] [--db <path>] [--run-for <seconds>]\n"
+         "                       [--job <name>=<expr>]...\n"
+         "  --job <n>=<e>  把 register_handler 登记过的处理函数 n 按表达式 e 挂上调度，可重复\n"
+         "                 （等价于嵌入式宿主里「在面板上新建任务」这一步）")
 
 
 def _usage_error(msg):
@@ -37,6 +40,7 @@ def _parse_args(argv):
     once = False
     db_path = None
     run_for = None
+    jobs = []
 
     i = 0
     while i < len(argv):
@@ -50,6 +54,13 @@ def _parse_args(argv):
             db_path = argv[i]
         elif arg.startswith("--db="):
             db_path = arg[len("--db="):]
+        elif arg == "--job":
+            i += 1
+            if i >= len(argv):
+                raise HostApiError("--job 需要一个 <name>=<expr>")
+            jobs.append(argv[i])
+        elif arg.startswith("--job="):
+            jobs.append(arg[len("--job="):])
         elif arg == "--run-for":
             i += 1
             if i >= len(argv):
@@ -71,7 +82,7 @@ def _parse_args(argv):
 
     if plugin_path is None:
         raise HostApiError("缺少插件文件路径")
-    return plugin_path, once, db_path, run_for
+    return plugin_path, once, db_path, run_for, jobs
 
 
 def load_plugin(path):
@@ -123,7 +134,7 @@ def _report(host, fired, label):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        plugin_path, once, db_path, run_for = _parse_args(argv)
+        plugin_path, once, db_path, run_for, jobs = _parse_args(argv)
     except HostApiError as exc:
         return _usage_error(str(exc))
 
@@ -143,6 +154,22 @@ def main(argv=None):
         sys.stderr.write("[runner] 插件加载失败:\n")
         traceback.print_exc(file=sys.stderr)
         return 2
+
+    # --job 必须在插件顶层代码跑完之后才挂：那时 register_handler 才登记完
+    for spec in jobs:
+        if "=" not in spec:
+            return _usage_error("--job 需要 <name>=<expr> 形式: {}".format(spec))
+        jname, jexpr = spec.split("=", 1)
+        try:
+            host.schedule_handler(jname.strip(), jexpr.strip())
+        except (ValueError, HostApiError) as exc:
+            return _usage_error("--job {} 失败: {}".format(spec, exc))
+        sys.stdout.write("[runner] 已挂上任务 `{}`（{}）\n".format(jname.strip(), jexpr.strip()))
+
+    if host.handlers:
+        sys.stdout.write("[runner] register_handler 登记了 {} 个处理函数: {}\n"
+                         .format(len(host.handlers), ", ".join(sorted(host.handlers))))
+    sys.stdout.flush()
 
     _print_summary(host)
 

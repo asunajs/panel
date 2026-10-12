@@ -77,10 +77,15 @@ const state = {
   scheduler: null,
 };
 
+/// 只登记、不声明调度的处理函数（见 `register_handler`）。
+/// 生命周期跟插件走：`setPluginName` 会清空。
+const handlers = new Map();
+
 /// 运行器在加载插件前调用，用来给 payload.plugin / 日志行提供插件名
 export function setPluginName(name) {
   state.plugin = String(name || 'plugin');
   state.scheduler = null;
+  handlers.clear();
   return state.plugin;
 }
 
@@ -89,7 +94,17 @@ function scheduler() {
   return state.scheduler;
 }
 
+/// 调度器里已经有同名任务吗
+function hasTask(name) {
+  return scheduler().tasks.some((t) => t.name === name);
+}
+
 export function register_cron(name, expr, handler) {
+  // 与嵌入式宿主对齐：处理函数名在同一插件内唯一，重名直接报错而不是静默覆盖。
+  // 任务之间的重名由 Scheduler 自己拒绝（错误文案不同，是刻意的）。
+  if (handlers.has(name)) {
+    throw new Error(`插件里已经有名为 \`${name}\` 的处理函数`);
+  }
   scheduler().add(name, expr, handler);
 }
 
@@ -100,6 +115,45 @@ export function every(name, interval, handler) {
   return register_cron(name, `@every ${interval}`, handler);
 }
 
+/// 只登记处理函数，**不声明调度** —— 调度由宿主的面板创建（嵌入式宿主）。
+///
+/// Node 适配器里没有面板，所以本地用运行器的 `--job <name>=<expr>` 把它挂上调度：
+///
+///   node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 2s --duration 5
+export function register_handler(name, fn) {
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('register_handler(name, fn): name 必须是非空字符串');
+  }
+  if (typeof fn !== 'function') {
+    throw new Error('register_handler: fn 必须是函数');
+  }
+  // 与 register_cron 共用同一个名字空间：两个方向都要查重
+  if (handlers.has(name) || hasTask(name)) {
+    throw new Error(`插件里已经有名为 \`${name}\` 的处理函数`);
+  }
+  handlers.set(name, fn);
+  return name;
+}
+
+/// 运行器内部接口：把一个已登记的 handler 按表达式挂上调度
+/// —— 对应嵌入式宿主里「在面板上新建任务」这一步。
+///
+/// 直接进调度器，**不走 `register_cron`**：这个名字本来就是 handler 名，
+/// 走 register_cron 会被上面那条「handler 已存在」的查重挡下来。
+export function scheduleHandler(name, expr) {
+  const fn = handlers.get(name);
+  if (!fn) {
+    throw new Error(`没有名为 \`${name}\` 的处理函数（插件得先 register_handler）`);
+  }
+  scheduler().add(name, expr, fn);
+  return name;
+}
+
+/// 已登记的 handler 名字（运行器 / 调试用）
+export function handlerNames() {
+  return [...handlers.keys()];
+}
+
 // ------------------------------------------------------------------ 全局安装
 
 const PUBLIC = {
@@ -107,6 +161,7 @@ const PUBLIC = {
   warn,
   error,
   register_cron,
+  register_handler,
   every,
   sqlite_query,
   sqlite_exec,
@@ -125,6 +180,7 @@ for (const [key, fn] of Object.entries(PUBLIC)) {
 globalThis.host = {
   ...PUBLIC,
   cron: register_cron,
+  registerHandler: register_handler,
   sqliteQuery: sqlite_query,
   sqliteExec: sqlite_exec,
   httpFetch: http_fetch,
@@ -145,6 +201,9 @@ export const __host = {
   tasks: () => scheduler().snapshot(),
   tick: (now) => scheduler().tick(now),
   fireAllOnce: (now) => scheduler().fireAllOnce(now),
+  // 面板任务的等价物：把已登记的 handler 挂上调度（见 bin/run.mjs 的 --job）
+  scheduleHandler,
+  handlerNames,
   startServer,
   serverReady,
   serverInfo,

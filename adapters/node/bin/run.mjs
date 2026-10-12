@@ -23,7 +23,7 @@ try {
 // ---------------------------------------------------------------- 参数解析
 
 const argv = process.argv.slice(2);
-const opts = { plugin: null, once: false, db: null, duration: null, tickMs: 100, help: false };
+const opts = { plugin: null, once: false, db: null, duration: null, tickMs: 100, jobs: [], help: false };
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -31,6 +31,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--db') opts.db = argv[++i];
   else if (a === '--duration') opts.duration = Number(argv[++i]);
   else if (a === '--tick') opts.tickMs = Number(argv[++i]);
+  else if (a === '--job') opts.jobs.push(argv[++i]);
   else if (a === '-h' || a === '--help') opts.help = true;
   else if (a.startsWith('--')) {
     process.stderr.write(`未知参数: ${a}\n`);
@@ -44,11 +45,13 @@ for (let i = 0; i < argv.length; i++) {
 
 if (opts.help || !opts.plugin) {
   process.stdout.write(
-    '用法: node bin/run.mjs <plugin.js> [--once] [--db <path>] [--duration <sec>] [--tick <ms>]\n' +
+    '用法: node bin/run.mjs <plugin.js> [--once] [--db <path>] [--duration <sec>] [--tick <ms>] [--job <name>=<expr>]\n' +
       '  --once          立即把已注册任务各触发一次后退出（测试用）\n' +
       '  --db <path>     任务运行记录写入该 SQLite 文件（同时作为插件的 PANEL_DB）\n' +
       '  --duration <s>  持续运行 N 秒后退出（默认直到收到 SIGINT/SIGTERM）\n' +
-      '  --tick <ms>     最大唤醒间隔上限，默认 1000ms（实际按最近到期时刻精确唤醒）\n',
+      '  --tick <ms>     最大唤醒间隔上限，默认 1000ms（实际按最近到期时刻精确唤醒）\n' +
+      '  --job <n>=<e>   把 register_handler 登记过的处理函数 n 按表达式 e 挂上调度，可重复\n' +
+      '                  （等价于嵌入式宿主里「在面板上新建任务」这一步）\n',
   );
   process.exit(opts.help ? 0 : 2);
 }
@@ -113,6 +116,33 @@ try {
 } catch (e) {
   out(`[${stamp()}] [${pluginName}] [error] 插件加载失败: ${__host.fmtError(e)}`);
   process.exit(1);
+}
+
+// --job 必须在插件顶层代码跑完之后才挂：那时 register_handler 才登记完
+for (const spec of opts.jobs) {
+  const eq = spec.indexOf('=');
+  if (eq < 1) {
+    out(`[${stamp()}] [${pluginName}] [error] --job 需要 <name>=<expr> 形式: ${spec}`);
+    process.exit(2);
+  }
+  const jname = spec.slice(0, eq).trim();
+  const jexpr = spec.slice(eq + 1).trim();
+  try {
+    __host.scheduleHandler(jname, jexpr);
+    out(`[${stamp()}] [${pluginName}] [info] 已挂上任务 \`${jname}\`（${jexpr}）`);
+  } catch (e) {
+    out(`[${stamp()}] [${pluginName}] [error] --job ${spec} 失败: ${__host.fmtErrorLine(e)}`);
+    process.exit(2);
+  }
+}
+
+const handlers = __host.handlerNames();
+if (handlers.length > 0) {
+  // 排序只为输出稳定（Map 本身保持插入顺序）
+  out(
+    `[${stamp()}] [${pluginName}] [info] register_handler 登记了 ${handlers.length} 个处理函数: ` +
+      `${[...handlers].sort().join(', ')}`,
+  );
 }
 
 const tasks = __host.tasks();

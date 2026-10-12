@@ -29,6 +29,8 @@ const REPO_PLUGIN = ['../../../plugins/js/scheduler-demo.js', '../../../plugins/
   .map((p) => path.resolve(HERE, p))
   .find((p) => fs.existsSync(p));
 const HOST_API_PLUGIN = path.resolve(HERE, '../../../plugins/js/host-api-demo.js');
+// 第九轮：登记处理函数、调度由运行器的 --job 提供
+const PANEL_JOBS_PLUGIN = path.resolve(HERE, '../../../plugins/js/panel-jobs.js');
 
 // ---------------------------------------------------------------- 工具
 
@@ -103,12 +105,13 @@ test('log / warn / error 写 stderr，格式 [host-api] [level] msg', () => {
   assert.equal(lines[2], '[host-api] [error] error 一条');
 });
 
-test('规范里的 9 个函数都挂在全局，并带 host 命名空间别名', () => {
+test('规范里的 10 个函数都挂在全局，并带 host 命名空间别名', () => {
   for (const name of [
     'log',
     'warn',
     'error',
     'register_cron',
+    'register_handler',
     'every',
     'sqlite_query',
     'sqlite_exec',
@@ -611,3 +614,82 @@ test('运行器：仓库里跨运行时写法的插件（plugins/js/host-api-dem
   assert.equal(Number(n), 1);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------- 9. register_handler
+
+test('register_handler 只登记不调度；scheduleHandler 才把它挂上调度', () => {
+  const { __host } = host;
+  __host.setPluginName('unit-test'); // 清空 handler 表与调度器
+
+  let calls = 0;
+  host.register_handler('echo', () => {
+    calls += 1;
+  });
+
+  // 登记完不该有任何任务 —— 这正是 register_handler 与 register_cron 的区别
+  assert.equal(__host.tasks().length, 0, 'register_handler 不该创建任务');
+  assert.deepEqual(__host.handlerNames(), ['echo']);
+  assert.equal(calls, 0);
+
+  // 两种注册方式共用同一个名字空间，互相查重
+  assert.throws(() => host.register_handler('echo', () => {}), /已经有名为 `echo` 的处理函数/);
+  assert.throws(() => host.register_cron('echo', '@every 1s', () => {}), /已经有名为 `echo` 的处理函数/);
+  host.register_cron('scheduled', '@every 1s', () => {});
+  assert.throws(() => host.register_handler('scheduled', () => {}), /已经有名为 `scheduled` 的处理函数/);
+
+  // 参数校验
+  assert.throws(() => host.register_handler('', () => {}), /name 必须是非空字符串/);
+  assert.throws(() => host.register_handler('x', 42), /必须是函数/);
+
+  // 挂上调度之后才成为任务
+  __host.scheduleHandler('echo', '@every 1s');
+  assert.equal(__host.tasks().length, 2);
+  assert.ok(__host.tasks().some((t) => t.name === 'echo' && t.expr === '@every 1s'));
+  // 没登记过的名字挂不上
+  assert.throws(() => __host.scheduleHandler('nope', '@every 1s'), /没有名为 `nope` 的处理函数/);
+
+  __host.setPluginName('unit-test'); // 收尾：别把状态漏给后面的用例
+});
+
+test('setPluginName 清空 handler 表（生命周期跟插件走）', () => {
+  const { __host } = host;
+  __host.setPluginName('unit-test');
+  host.register_handler('h1', () => {});
+  assert.deepEqual(__host.handlerNames(), ['h1']);
+  __host.setPluginName('another');
+  assert.deepEqual(__host.handlerNames(), [], '换插件时 handler 表该清空');
+  __host.setPluginName('unit-test');
+});
+
+test(
+  '运行器 --job：把 register_handler 的处理函数挂上调度',
+  { skip: !fs.existsSync(PANEL_JOBS_PLUGIN) && '仓库插件不存在' },
+  () => {
+    const r = runNode(['bin/run.mjs', PANEL_JOBS_PLUGIN, '--job', 'echo=@every 1s', '--once'], {
+      cwd: PKG,
+      env: { ...process.env, PANEL_PORT: '0' },
+    });
+    const out = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 0, out);
+    assert.match(out, /register_handler 登记了 3 个处理函数: always-fails, echo, report/);
+    assert.match(out, /已挂上任务 `echo`（@every 1s）/);
+    assert.match(out, /插件已加载：注册 2 个任务/); // code-side（代码声明）+ echo（--job 挂的）
+    assert.match(out, /task `echo` 第 1 次触发/);
+    // 只登记、没挂调度的处理函数不该被 --once 触发
+    assert.doesNotMatch(out, /task `always-fails`/);
+    assert.match(out, /--once 完成：触发 2 次，失败 0 次/);
+  },
+);
+
+test(
+  '运行器 --job：handler 名写错 → 退出码 2',
+  { skip: !fs.existsSync(PANEL_JOBS_PLUGIN) && '仓库插件不存在' },
+  () => {
+    const r = runNode(['bin/run.mjs', PANEL_JOBS_PLUGIN, '--job', 'nope=@every 1s', '--once'], {
+      cwd: PKG,
+      env: { ...process.env, PANEL_PORT: '0' },
+    });
+    assert.equal(r.status, 2);
+    assert.match(`${r.stdout}${r.stderr}`, /没有名为 `nope` 的处理函数/);
+  },
+);

@@ -155,13 +155,35 @@ def __pp_log(level, msg):
     _h._log_raw(level, str(msg))
 
 def __pp_register(name, expr, handler):
-    err = _h._register_task(str(name), str(expr))
-    if err:
-        raise ValueError(err)
     if not callable(handler):
         raise TypeError("register_cron(name, expr, handler): handler 必须可调用")
-    __pp_tasks[name] = handler
+    key = str(name)
+    # 先查重再登记：_register_task 会把任务推进宿主侧 pending 列表，
+    # 重名判断放在它后面的话，一次失败的注册会在宿主流下一个幽灵任务。
+    if key in __pp_tasks:
+        raise ValueError("插件里已经有名为 `" + key + "` 的处理函数")
+    err = _h._register_task(key, str(expr))
+    if err:
+        raise ValueError(err)
+    __pp_tasks[key] = handler
     return name
+
+# 只登记处理函数，**不声明调度**：任务由面板创建（见 README「第九轮」）。
+def __pp_register_handler(name, handler):
+    if not callable(handler):
+        raise TypeError("register_handler(name, handler): handler 必须可调用")
+    key = str(name)
+    if key in __pp_tasks:
+        raise ValueError("插件里已经有名为 `" + key + "` 的处理函数")
+    __pp_tasks[key] = handler
+    return name
+
+# 宿主问「这个插件有没有名为 name 的处理函数」——面板新建任务前用它校验。
+# 约定与 _xxx 原生函数一致：只传字符串，返回 "1"（有）或 ""（没有）。
+def __pp_has_task(name):
+    if str(name) in __pp_tasks:
+        return "1"
+    return ""
 
 def __pp_every(name, interval, handler):
     return __pp_register(name, "@every " + str(interval), handler)
@@ -208,6 +230,7 @@ _h.log   = lambda msg: __pp_log("info", msg)
 _h.warn  = lambda msg: __pp_log("warn", msg)
 _h.error = lambda msg: __pp_log("error", msg)
 _h.register_cron = __pp_register
+_h.register_handler = __pp_register_handler
 _h.every = __pp_every
 _h.sqlite_query = lambda sql, params=None: __pp_sqlite(sql, params, True)
 _h.sqlite_exec  = lambda sql, params=None: __pp_sqlite(sql, params, False)

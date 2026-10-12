@@ -200,6 +200,22 @@ pub enum EngineCmd {
         paused: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// 面板新建任务：`(插件, 处理函数名, 调度表达式)`。
+    ///
+    /// `name` 指向插件用 `register_handler(name, fn)` 注册的处理函数 ——
+    /// 面板只提供调度，不提供代码。
+    AddJob {
+        plugin: String,
+        name: String,
+        expr: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 面板删除任务。只允许删 `source = 'panel'` 的行（插件声明的任务只能暂停）。
+    RemoveJob {
+        plugin: String,
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -429,28 +445,26 @@ fn engine_main(
     let boot_at = Local::now();
     let specs = install_tasks(&mut sched, &pending, &logs, boot_at, &db);
 
-    if let Err(e) = db::sync_jobs(&db, &specs, &fmt_secs(boot_at)) {
-        eprintln!("[engine] 同步 jobs 表失败: {e}");
+    match db::sync_jobs(&db, &specs, &fmt_secs(boot_at)) {
+        Ok(0) => {}
+        Ok(n) => hostapi::push_log(
+            &logs,
+            "kernel",
+            "warn",
+            &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
+        ),
+        Err(e) => eprintln!("[engine] 同步 jobs 表失败: {e}"),
     }
 
-    // 恢复用户上次的暂停状态。放在 sync_jobs 之后：sync_jobs 会重写 status / next_run，
+    // 面板创建的任务不在插件代码里，`install_tasks` 装不到它们，得单独从库里读回来。
+    reinstall_panel_jobs(&mut sched, &plugins, &logs, &db, &wd, budget, boot_at, None);
+
+    // 把累计计数灌回去（否则重启后「触发次数」归零、熔断退避从头开始）
+    seed_counters(&mut sched, &db, None);
+
+    // 恢复用户上次的暂停状态。放在最后：`sync_jobs` 会重写 status / next_run，
     // 但**不会碰 paused 列**（见 db.rs 里那段注释），所以这里的恢复才是最终状态。
-    match db::list_paused_jobs(&db) {
-        Ok(list) => {
-            for (plugin, name) in list {
-                if sched.set_paused(&plugin, &name, true, boot_at).is_ok() {
-                    hostapi::push_log(
-                        &logs,
-                        &plugin,
-                        "info",
-                        &format!("任务 `{name}` 按上次的暂停状态继续暂停"),
-                    );
-                }
-                // 任务已经不在插件代码里了 → 忽略，sync_jobs 下一轮会把它删掉
-            }
-        }
-        Err(e) => eprintln!("[engine] 读取暂停状态失败: {e}"),
-    }
+    restore_paused(&mut sched, &logs, &db, boot_at, None);
     for t in sched.tasks() {
         hostapi::push_log(
             &logs,
@@ -543,6 +557,25 @@ fn engine_main(
                 }
                 let _ = reply.send(out);
             }
+            Ok(EngineCmd::AddJob {
+                plugin,
+                name,
+                expr,
+                reply,
+            }) => {
+                let out = add_job(
+                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr,
+                );
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::RemoveJob {
+                plugin,
+                name,
+                reply,
+            }) => {
+                let out = remove_job(&mut sched, &logs, &db, &plugin, &name);
+                let _ = reply.send(out);
+            }
             Ok(EngineCmd::Shutdown) => {
                 println!("[engine] 收到关闭指令");
                 break;
@@ -627,6 +660,246 @@ fn install_tasks(
         }
     }
     specs
+}
+
+/// 把库里被用户暂停过的任务重新置为暂停。
+///
+/// `only_plugin` 为 `Some(p)` 时只处理该插件的（热更新后用）。
+///
+/// 为什么热更新也要走这一步：`Scheduler::add` 建出来的任务是 `enabled = true`，
+/// 而热更新会先 `remove_plugin` 把该插件的任务全部摘掉再重新登记 ——
+/// 少了这一步，**改一次插件文件就会把用户暂停的任务悄悄恢复**，
+/// 和「重启一次暂停的任务自己活过来」是同一个坑，只是触发方式不同。
+fn restore_paused(
+    sched: &mut Scheduler,
+    logs: &SharedLogs,
+    db: &Db,
+    now: chrono::DateTime<Local>,
+    only_plugin: Option<&str>,
+) {
+    let list = match db::list_paused_jobs(db) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[engine] 读取暂停状态失败: {e}");
+            return;
+        }
+    };
+    for (plugin, name) in list {
+        if let Some(p) = only_plugin {
+            if plugin != p {
+                continue;
+            }
+        }
+        if sched.set_paused(&plugin, &name, true, now).is_ok() {
+            hostapi::push_log(
+                logs,
+                &plugin,
+                "info",
+                &format!("任务 `{name}` 按上次的暂停状态继续暂停"),
+            );
+        }
+        // 任务已经不在插件代码里了 → 忽略，`sync_jobs` 下一轮会把它删掉
+    }
+}
+
+/// 把库里的累计计数（`runs` / `trips`）灌回调度器。
+///
+/// 顺序要求：必须在 `install_tasks` 和 `reinstall_panel_jobs` **之后**调用 ——
+/// 那两个函数才刚把任务建出来（零计数）。
+fn seed_counters(sched: &mut Scheduler, db: &Db, only_plugin: Option<&str>) {
+    let rows = match db::list_job_counters(db, only_plugin) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[engine] 读取任务计数失败: {e}");
+            return;
+        }
+    };
+    for (plugin, name, runs, trips) in rows {
+        sched.seed_counters(
+            &plugin,
+            &name,
+            runs.max(0) as u64,
+            trips.clamp(0, u32::MAX as i64) as u32,
+        );
+    }
+}
+
+/// 把库里 `source = 'panel'` 的任务定义装回调度器。
+///
+/// `only_plugin` 为 `Some(p)` 时只装该插件的（热更新后用）。
+///
+/// 处理函数已经不存在的任务**保留在库里**、状态标成 `error` 并在面板上说明原因，
+/// 而不是静默删掉 —— 用户建的任务不该因为插件改了个函数名就凭空消失。
+#[allow(clippy::too_many_arguments)]
+fn reinstall_panel_jobs(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    now: chrono::DateTime<Local>,
+    only_plugin: Option<&str>,
+) {
+    let rows = match db::list_panel_jobs(db, only_plugin) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[engine] 读取面板任务失败: {e}");
+            return;
+        }
+    };
+    for job in rows.iter() {
+        // 同名任务已经存在（插件代码也声明了同名任务）→ 代码优先，面板这条留在库里但不装
+        if sched.find(&job.plugin, &job.name).is_some() {
+            continue;
+        }
+        let schedule = match Schedule::parse(&job.schedule) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("面板任务 `{}` 的调度表达式无效: {e}", job.name);
+                hostapi::push_log(logs, &job.plugin, "error", &msg);
+                let _ = db::set_job_status(db, &job.plugin, &job.name, "error", Some(&msg), &fmt_secs(now));
+                continue;
+            }
+        };
+        let has_handler = plugins
+            .iter()
+            .find(|p| p.name == job.plugin)
+            .map(|p| plugin_has_handler(p, &job.name, wd, budget))
+            .unwrap_or(false);
+        if !has_handler {
+            let msg = format!(
+                "面板任务 `{}` 的处理函数在插件 `{}` 里找不到了，定义已保留但不参与调度",
+                job.name, job.plugin
+            );
+            hostapi::push_log(logs, &job.plugin, "error", &msg);
+            let _ = db::set_job_status(db, &job.plugin, &job.name, "error", Some(&msg), &fmt_secs(now));
+            continue;
+        }
+        match sched.add(&job.plugin, &job.name, &job.schedule, schedule, now) {
+            Ok(_) => {}
+            Err(e) => hostapi::push_log(logs, &job.plugin, "error", &format!("面板任务重装失败: {e}")),
+        }
+    }
+}
+
+/// 插件里有没有名为 `name` 的处理函数（`register_cron` / `register_handler` 注册的）。
+///
+/// 面板新建任务时用它做校验：名字写错的任务会一路失败到熔断，
+/// 不如在创建的那一刻就说清楚。两个运行时的引导脚本都提供了 `__has_task`，
+/// 约定一致：只传 String，返回 `"1"`（有）/ `""`（没有）。
+fn plugin_has_handler(
+    plugin: &LoadedPlugin,
+    name: &str,
+    wd: &Watchdog,
+    budget: Duration,
+) -> bool {
+    match plugin.runtime.as_ref() {
+        None => false,
+        Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
+            let f: Function = match ctx.globals().get("__has_task") {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            wd.arm(budget);
+            let r = f.call::<_, String>((name.to_string(),));
+            wd.disarm();
+            r.map(|s| !s.is_empty()).unwrap_or(false)
+        }),
+        Some(PluginRuntime::Py(vm)) => {
+            python::budget_begin(budget.as_millis() as u64);
+            let r = vm.call_str("__pp_has_task", &[name]);
+            python::budget_end();
+            r.map(|s| !s.is_empty()).unwrap_or(false)
+        }
+    }
+}
+
+/// 面板新建任务：校验 → 装进调度器 → 落库。
+///
+/// 校验顺序刻意从「便宜且常见」到「贵」：插件存在 → 名字没被占用 → 表达式能解析 →
+/// 最后才去问插件的解释器「有没有这个处理函数」（那是一次真实的函数调用）。
+#[allow(clippy::too_many_arguments)]
+fn add_job(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    plugin: &str,
+    name: &str,
+    expr: &str,
+) -> Result<(), String> {
+    let now = Local::now();
+
+    if name.trim().is_empty() {
+        return Err("任务名不能为空".to_string());
+    }
+    let p = plugins
+        .iter()
+        .find(|p| p.name == plugin)
+        .ok_or_else(|| format!("没有名为 `{plugin}` 的插件"))?;
+    if p.error.is_some() {
+        return Err(format!("插件 `{plugin}` 加载失败，不能为它创建任务"));
+    }
+    if sched.find(plugin, name).is_some()
+        || db::job_source(db, plugin, name)
+            .map_err(|e| format!("读库失败: {e}"))?
+            .is_some()
+    {
+        return Err(format!("插件 `{plugin}` 里已经有名为 `{name}` 的任务"));
+    }
+    let schedule =
+        Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+    if !plugin_has_handler(p, name, wd, budget) {
+        return Err(format!(
+            "插件 `{plugin}` 里没有名为 `{name}` 的处理函数。\
+             面板任务调用的处理函数要由插件用 `register_handler(name, fn)` 注册（JS）\
+             或 `register_handler(name, fn)`（Python）注册 —— 检查一下名字有没有写错。"
+        ));
+    }
+
+    let idx = sched.add(plugin, name, expr, schedule, now)?;
+    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+    // 先落库。写库失败就把刚装上的任务摘掉，避免「调度器里在跑、库里没有」的假状态。
+    if let Err(e) = db::insert_panel_job(db, plugin, name, expr, Some(&next), &fmt_secs(now)) {
+        sched.remove_task(plugin, name);
+        return Err(format!("写库失败: {e}"));
+    }
+    hostapi::push_log(
+        logs,
+        plugin,
+        "info",
+        &format!("面板创建了任务 `{name}`（{expr}），下次触发 {next}"),
+    );
+    Ok(())
+}
+
+/// 面板删除任务。只允许删面板自己创建的（`source = 'panel'`）。
+///
+/// 插件代码声明的任务不给删：删了也会在下一次 `sync_jobs`（重启 / 热更新）里原样回来，
+/// 让用户白操作一次。要让它停下来应该用「暂停」—— 那才是跨重启保留的用户意图。
+fn remove_job(
+    sched: &mut Scheduler,
+    logs: &SharedLogs,
+    db: &Db,
+    plugin: &str,
+    name: &str,
+) -> Result<(), String> {
+    match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+        None => Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
+        Some(src) if src != "panel" => Err(format!(
+            "任务 `{name}` 由插件 `{plugin}` 的代码声明（source = {src}），不能在面板上删除；\
+             想让它停下来请用「暂停」"
+        )),
+        Some(_) => {
+            db::delete_panel_job(db, plugin, name).map_err(|e| format!("写库失败: {e}"))?;
+            sched.remove_task(plugin, name);
+            hostapi::push_log(logs, plugin, "info", &format!("面板删除了任务 `{name}`"));
+            Ok(())
+        }
+    }
 }
 
 /// 触发所有到期任务，并把结果写回调度器与 SQLite。
@@ -1308,13 +1581,33 @@ fn reload_plugin(
     drop(old.runtime.take());
 
     let (lp, pending) = load_one(rt, &file, logs, host, wd, budget, next_vm);
+    let load_failed = lp.error.is_some();
 
     let specs = install_tasks(sched, &pending, logs, Local::now(), db);
-    if let Err(e) = db::sync_jobs(db, &specs, &fmt_secs(Local::now())) {
-        eprintln!("[engine] 热更新后同步 jobs 表失败: {e}");
+    match db::sync_jobs(db, &specs, &fmt_secs(Local::now())) {
+        Ok(0) => {}
+        Ok(n) => hostapi::push_log(
+            logs,
+            name,
+            "warn",
+            &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
+        ),
+        Err(e) => eprintln!("[engine] 热更新后同步 jobs 表失败: {e}"),
     }
 
-    if lp.error.is_none() {
+    // 先把新版本挂进列表，再装面板任务 —— `reinstall_panel_jobs` 要能查到新的解释器实例
+    plugins.push(lp);
+    plugins.sort_by(|a, b| a.file.cmp(&b.file));
+
+    // 面板创建的任务刚被 `remove_plugin` 一起摘掉了，这里装回来
+    // （处理函数在新版本里已经不存在的，标成 error 保留定义）
+    reinstall_panel_jobs(sched, plugins, logs, db, wd, budget, Local::now(), Some(name));
+    // 累计计数同样要灌回来，否则热更新一次「触发次数」就归零
+    seed_counters(sched, db, Some(name));
+    // 暂停状态同样要恢复，否则改一次插件文件就把用户暂停的任务悄悄放跑了
+    restore_paused(sched, logs, db, Local::now(), Some(name));
+
+    if !load_failed {
         hostapi::push_log(
             logs,
             name,
@@ -1325,8 +1618,6 @@ fn reload_plugin(
             ),
         );
     }
-    plugins.push(lp);
-    plugins.sort_by(|a, b| a.file.cmp(&b.file));
     sync_registry(registry, plugins);
 }
 

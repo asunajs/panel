@@ -14,6 +14,7 @@
 | 第六轮 | **双运行时：嵌入 PocketPy 跑 Python 插件 + 抽象宿主 API（`host-api`/`host_api`）+ JS 插件 HTTP 路由 + mtime 热更新** | ✅ 本机已验证（含双运行时冒烟、静态 musl 产物 4.4 MB） |
 | 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | ✅ 适配器自带用例（Node 20 / CPython 51 项），交叉验证见 §10.5 |
 | 第八轮 | **面板从只读变可操作**：手动触发 / 暂停 / 恢复，暂停状态跨重启保留 + 写接口防 CSRF | ✅ 已验证（冒烟 24 项含 6 项面板写操作） |
+| 第九轮 | **`jobs` 表成为任务定义的权威来源**：`source` 区分「插件声明 / 面板创建」，面板可新建 / 删除任务 + `register_handler` 把处理函数与调度拆开 + 修掉第八轮的两个真 bug | ✅ 已验证（单测 47 项、冒烟 38 项、适配器 Node 24 / CPython 61 项） |
 | 后续 | 鉴权 / 完整前端 / 插件市场 / 多实例 | 未开始 |
 
 ---
@@ -77,24 +78,27 @@ rust-plugin-panel/
 │   ├── pyhost.rs      ★ Python 侧适配：`host_api` 模块 + 原生函数 + 引导脚本
 │   ├── python.rs      ★ PocketPy FFI 薄封装（PyVm / 参数读取 / 预算 / traceback）
 │   ├── cron.rs        Cron 表达式解析 + next_after（13 个单测）
-│   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件摘任务（11 个单测）
-│   ├── db.rs          SQLite：tasks 表 + jobs 表
+│   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除（14 个单测）
+│   ├── db.rs          SQLite：tasks 表 + jobs 表（含第九轮的 source 列，11 个单测）
 │   └── web.rs         Axum 路由 + 服务端渲染面板 + 插件路由 fallback
 ├── plugins/
 │   ├── js/
 │   │   ├── hello.js            on_tick + host.log 示例
 │   │   ├── counter.js          验证「每个插件独立 Context」
 │   │   ├── scheduler-demo.js   cron / 毫秒级任务示例
-│   │   └── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
+│   │   ├── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
+│   │   └── panel-jobs.js       ★ 第九轮：register_handler 登记处理函数，调度交给面板
 │   └── py/
 │       ├── sysinfo.py          ★ 最小 Python 插件（every + cron + on_tick）
-│       └── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
+│       ├── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
+│       └── py-panel-jobs.py    ★ 第九轮：同一件事的 Python 版
 ├── adapters/                  让同一份插件脚本跑在别的运行时里
 │   ├── node/                  npm 包 `host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
 ├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
 ├── scripts/
 │   ├── smoke.py            端到端冒烟：双运行时、插件路由、Python 任务真的触发
+│   ├── test-panel-frontend.mjs  面板前端逻辑回归（DOM 桩跑 web.rs 里的 <script>）
 │   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
 ├── .github/workflows/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
@@ -146,12 +150,17 @@ host.every(name, interval, handler) // interval: '500ms' / '2s' / '1m' / '1h'
 // 跨运行时写法（第六轮）—— 同一份文件在 Node 里也能跑
 import { log, register_cron, every, sqlite_query, sqlite_exec, http_fetch, register_route } from 'host-api';
 
+// 第九轮：只登记处理函数，不声明调度 —— 任务由面板创建
+import { register_handler } from 'host-api';
+register_handler('echo', (payload) => { log(`第 ${payload.runs} 次`); });
+
 // 每秒一次的心跳回调
 function on_tick(payload) { /* payload = { seq, ts } */ }
 
 // handler 收到的 payload
 // { name, plugin, expr, runs, scheduledAt, firedAt, lateMs }
-//   lateMs = 实际触发比原定晚了多少毫秒 —— 用来观察调度精度
+//   runs    = 生命周期内第几次触发（跨重启接着数，见 §12.3）
+//   lateMs  = 实际触发比原定晚了多少毫秒 —— 用来观察调度精度
 ```
 
 带顶层 `import` / `export` 的文件按 **ES 模块**加载（引擎线程装了自定义 Resolver/Loader，
@@ -160,7 +169,7 @@ function on_tick(payload) { /* payload = { seq, ts } */ }
 ### Python 插件
 
 ```python
-from host_api import log, register_cron, every, sqlite_query, sqlite_exec, http_fetch
+from host_api import log, register_cron, every, register_handler, sqlite_query, sqlite_exec, http_fetch
 
 log("插件加载中")
 
@@ -168,6 +177,12 @@ def heartbeat(payload):                 # payload 字段与 JS 完全一致
     sqlite_exec("INSERT INTO hits (at) VALUES (?1)", [payload["firedAt"]])
 
 every("py-heartbeat", "2s", heartbeat)
+
+# 第九轮：只登记处理函数，不声明调度 —— 任务由面板创建
+def echo(payload):
+    log("第 " + str(payload["runs"]) + " 次")
+
+register_handler("echo", echo)
 
 def on_tick(payload):                   # 可选，语义与 JS 的 on_tick 相同
     pass
@@ -178,6 +193,25 @@ Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个
 `nonlocal`、`async` 都没有）。
 
 任务名在**同一插件内**必须唯一，重名会让插件加载直接失败（不静默覆盖）。
+`register_cron` 与 `register_handler` **共用同一个名字空间**，两个方向都会查重。
+
+### 处理函数 vs 调度：`register_handler`（第九轮）
+
+| 注册方式 | 任务定义来源 | 面板上 |
+|---|---|---|
+| `register_cron` / `every` | `jobs.source = 'plugin'` | 可暂停、**不可删除**（删了下次 `sync_jobs` 也会装回来） |
+| `register_handler` + 面板建任务 | `jobs.source = 'panel'` | 可暂停、可删除 |
+
+拆开的意义：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」登记出来，
+面板再从里面挑一个挂上表达式 —— 「插件的能力只能来自插件代码」这条线没有破。
+同一个 handler 还能被面板上的多条任务复用（挂不同表达式）。
+
+Node / CPython 适配器里没有面板，等价做法是运行器的 `--job`：
+
+```bash
+cd adapters/node && node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 2s --duration 5
+cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --job py-echo=@every 2s --run-for 5
+```
 
 ### 热更新
 
@@ -191,15 +225,30 @@ Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个
 
 顺序上「先摘旧的、再装新的」：即使新版本加载失败，面板上也不会留下幽灵任务。
 
-### 面板上的写操作（第八轮）
+热更新之后还有三步收尾（第九轮补的，每一步都对应一个实测出来的坑，见 §12.4）：
 
-面板原来只能看。现在任务表多了两个按钮：**立即执行** / **暂停·恢复**。
+1. **装回面板任务** —— 它们不在插件代码里，`install_tasks` 装不到
+2. **灌回累计计数** —— 否则「触发次数」归零、熔断退避从头开始
+3. **恢复暂停状态** —— 否则改一次插件文件，用户暂停的任务就自己活过来了
+
+### 面板上的写操作（第八轮 / 第九轮）
+
+面板原来只能看。现在任务表有三个按钮：**立即执行** / **暂停·恢复** / **删除**（删除只给面板任务），
+下面还有一个新建任务的表单。
 
 | 接口 | 作用 |
 |---|---|
+| `POST /api/jobs` | 新建任务定义（body: `{"plugin","name","expr"}`） |
+| `POST /api/jobs/{plugin}/{name}/delete` | 删除任务定义（只允许 `source = 'panel'`） |
 | `POST /api/tasks/{plugin}/{name}/run` | 立即执行一次 |
 | `POST /api/tasks/{plugin}/{name}/pause` | 暂停（不再被调度） |
 | `POST /api/tasks/{plugin}/{name}/resume` | 恢复（从当前时刻重新对齐，**不补跑**） |
+
+`jobs` = 任务**定义**（新增 / 删除），`tasks` = 任务**操作**（执行 / 暂停 / 恢复）。
+
+> 第八轮的这三个按钮**在页面上点了没反应** —— 后端接口和按钮都写好了，
+> 但前端的 click 委托漏了（`web.rs` 里那句「见下面的 click 监听」下面根本没有监听）。
+> 第九轮补上，并顺手把「请求进行中禁用按钮」也做了。见 §12.4 的 bug ①。
 
 三条语义，都是刻意设计的：
 
@@ -216,6 +265,13 @@ Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个
    但**用户对任务的操作**必须活过重启，否则重启一次，你暂停掉的那个每 500ms 烧 CPU
    的任务就自己活过来了。实测重启后日志里出现「任务 `py-heartbeat` 按上次的暂停状态继续暂停」。
 
+4. **删除只对面板任务开放**（第九轮）。插件代码声明的任务删了也会在下一次
+   `sync_jobs`（重启 / 热更新）里原样回来，给个能点的删除按钮等于骗人；
+   要让它停下来请用「暂停」—— 那才是跨重启保留的用户意图。
+   实测：`POST /api/jobs/panel-jobs/code-side/delete` → `400`，
+   错误文本是「任务 `code-side` 由插件 `panel-jobs` 的代码声明（source = plugin），
+   不能在面板上删除；想让它停下来请用「暂停」」。
+
 写接口要求带请求头 **`x-panel: 1`**，否则 403。这不是鉴权，是防 CSRF：
 浏览器跨站发起的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，
 而本服务不返回任何 CORS 响应头，预检必然失败 —— 恶意网页没法借用户的浏览器点这些按钮。
@@ -228,10 +284,24 @@ curl -s -X POST -H 'x-panel: 1' $B/api/tasks/scheduler-demo/boom/run            
 curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/pause            # {"ok":true,"paused":true}
 curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/resume           # {"ok":true,"paused":false}
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/tasks/sysinfo/py-heartbeat/run   # 403（缺头）
+
+# 第九轮：新建 / 删除面板任务
+curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
+  -d '{"plugin":"panel-jobs","name":"echo","expr":"@every 1s"}' $B/api/jobs         # {"ok":true}
+curl -s -X POST -H 'x-panel: 1' $B/api/jobs/panel-jobs/echo/delete                 # {"ok":true}
+curl -s -X POST -H 'x-panel: 1' $B/api/jobs/panel-jobs/code-side/delete            # 400（插件声明的任务）
+curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
+  -d '{"plugin":"panel-jobs","name":"nope","expr":"@every 1s"}' $B/api/jobs        # 400（没有这个处理函数）
 ```
 
 返回码约定：任务跑了但失败是 **`200` + `{"ok":false,"error":"..."}`**（请求本身成功了，
-错误文本原样带回面板）；`403` 缺护栏头、`404` 任务不存在、`503` 引擎不可用、`504` 超时。
+错误文本原样带回面板）；`400` 校验没过（新建任务时）、`403` 缺护栏头、`404` 任务不存在、
+`503` 引擎不可用、`504` 超时。
+
+新建任务的全部校验都在**引擎线程**里串行做（插件存在 → 名字没被占用 → 表达式能解析 →
+处理函数真的存在），失败原因原样带回面板。最后一条会真的调一次插件的解释器
+（`__has_task` / `__pp_has_task`），所以名字写错在**创建的那一刻**就报出来，
+而不是等它一路失败到熔断。
 
 ### Cron 语法
 
@@ -251,15 +321,19 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/tasks/sysinfo/py-heartbe
 ## 5. 怎么验证
 
 ```bash
-# ① 单元测试（cron 解析 + 调度推进，含毫秒级防回归）
+# ① 单元测试（cron 解析 + 调度推进 + jobs 表来源语义，含毫秒级防回归）
 cargo test
+
+# ①b 面板前端逻辑回归：把 web.rs 里的 <script> 抠出来配 DOM/fetch 桩跑，不需要浏览器
+node scripts/test-panel-frontend.mjs
+node scripts/test-panel-frontend.mjs /tmp/old-web.rs   # 传路径做回归验证：旧版本必须报红
 
 # ② 看面板
 open http://127.0.0.1:8787/
 
-# ③ 调度任务落库情况
+# ③ 调度任务落库情况（第九轮起多了 source 列：plugin / panel）
 sqlite3 -header -column data/panel.db \
-  "SELECT plugin,name,schedule,status,runs,last_run,next_run,last_error FROM jobs;"
+  "SELECT plugin,name,schedule,source,status,runs,last_run,next_run,last_error FROM jobs;"
 
 # ④ 依赖分层探针（怀疑环境问题而不是代码问题时先跑这个）
 cargo run --example probe
@@ -301,9 +375,27 @@ curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/scheduler-demo/b
 curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/sysinfo/py-heartbeat/pause
 curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/tasks/sysinfo/py-heartbeat/resume
 
+# ⑯ 面板新建 / 删除任务（第九轮）：面板只提供调度，代码在插件里
+curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
+  -d '{"plugin":"panel-jobs","name":"echo","expr":"@every 1s"}' http://127.0.0.1:8787/api/jobs
+sleep 3 && sqlite3 -header -column data/panel.db \
+  "SELECT plugin,name,source,status,runs FROM jobs WHERE source='panel';"   # runs 应该在涨
+curl -s -X POST -H 'x-panel: 1' http://127.0.0.1:8787/api/jobs/panel-jobs/echo/delete
+
+# ⑰ 面板任务跨重启存活（面板建的 + 面板暂停的，重启后都该原样回来）
+#     重启后看日志应有「任务 `echo` 按上次的暂停状态继续暂停」，且 runs 从历史值接着数
+
+# ⑱ 面板任务在插件热更新后存活（这条曾经是坏的，见 §12.4 bug ②）
+touch plugins/js/panel-jobs.js     # 触发 mtime 热更新
+#     热更新后面板任务应仍在、暂停状态应仍在、runs 历史应仍在
+
 # ⑮ 同一份插件跑在别的运行时里（跨运行时验证）
 cd adapters/node   && node test/run-tests.mjs && node bin/run.mjs ../../plugins/js/host-api-demo.js --once
 cd adapters/python && python3 -m unittest discover -s tests && python3 -m host_api ../../plugins/py/sysinfo.py --once
+
+# ⑲ register_handler 的跨运行时等价物：运行器的 --job（没有面板时的替代）
+cd adapters/node   && node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 2s --duration 5
+cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --job py-echo=@every 2s --run-for 5
 ```
 
 实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：
@@ -896,8 +988,8 @@ Node.js（adapters/node）     ✅ 一字不改跑通（exit 0）       —
 CPython（adapters/python）   —                            ✅ 一字不改跑通（exit 0）
 ```
 
-适配器自带的用例：Node 20 项全绿（`node test/run-tests.mjs`），
-CPython 51 项全绿（`python3 -m unittest discover -s tests`）。
+适配器自带的用例：Node 24 项全绿（`node test/run-tests.mjs`），
+CPython 61 项全绿（`python3 -m unittest discover -s tests`）。
 两边都做了同一件事：**拿仓库里的真插件文件直接跑**，不是另写一份测试插件。
 
 PocketPy 的语法缺口（写插件时的硬约束，完整表见 `docs/host-api.md` §4）：
@@ -917,12 +1009,177 @@ PocketPy 的语法缺口（写插件时的硬约束，完整表见 `docs/host-ap
    同一份插件文件在四个宿主里跑通（§10.5）。
 3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，JS 重建 `Context`、
    Python 复用 VM 索引 + `py_resetvm`，先摘旧任务再装新任务（§4「热更新」）。
-4. **任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。
+4. ~~**任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。
    第八轮已经把**用户对任务的操作**（暂停 / 恢复）做成权威落在库里、跨重启保留；
    还差「面板上新增/删除任务」这一步 —— 那需要把 `jobs` 表升级为任务定义的权威来源，
-   插件只提供 handler（现在是反过来）。
+   插件只提供 handler（现在是反过来）。~~
+   ✅ **已实现（第九轮）**：`jobs.source` 区分 `plugin` / `panel` 两种来源，
+   `sync_jobs` 只收敛 `plugin` 行，面板可以新增 / 删除 `panel` 行；
+   插件侧新增 `register_handler(name, fn)`，把「处理函数」与「调度」彻底拆开。
+   当时的判断是准的 —— 但代价比预想的大：这个改动**把第八轮埋着的两个 bug 逼了出来**
+   （面板按钮是死的、热更新会把暂停的任务放跑），见 §12.4。
 5. **调度器与两个解释器同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「解释器只在一个线程里被碰」这个简单前提 —— 也是 pocketpy 的进程级全局状态不允许的。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。Axum handler 里同步调 SQLite，量级上来要挪 `spawn_blocking`。
 7. **面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。
 8. **Python VM 上限 15 个**（`pocketpy` 共 16 个 VM，0 号留给宿主）。超过会加载失败并在面板上显示原因。要更多得改 pocketpy 的 `PK_MAX_VM` 重新编译。
 9. **Python 侧的模块系统只有一个内置模块**（`host_api`）。插件之间不能互相 import，也没有第三方包 —— 需要的话得把 `.py` 目录挂进 `sys.path` 并接受「加载任意 Python 代码」的安全代价。
+
+## 12. 第九轮：`jobs` 表成为任务定义的权威来源
+
+第八轮把「用户对任务的操作」做成了权威（`jobs.paused` 跨重启保留）。这一轮把**任务定义本身**
+也搬进库里：面板上可以新建 / 删除任务，插件只负责提供处理函数。
+
+### 12.1 为什么要拆「处理函数」和「调度」
+
+面板不能提供代码 —— 这是整个抽象层的底线（§10.4：Python 插件连 `os` 都没有，
+就是为了兑现「插件的能力只能来自 `host_api`」）。所以「面板上新建任务」这件事必须回答：
+**新建出来的任务，执行的是什么？**
+
+答案是：插件预先登记的处理函数。于是 `host-api` 多了一个动词：
+
+| 注册方式 | 语义 | `jobs.source` |
+|---|---|---|
+| `register_cron(name, expr, fn)` / `every(...)` | 登记处理函数 **+** 声明一条调度 | `plugin` |
+| `register_handler(name, fn)` | **只**登记处理函数 | ——（没有任务） |
+| 面板 `POST /api/jobs` | 给一个已登记的 handler 挂上表达式 | `panel` |
+
+三个细节是刻意的：
+
+1. **两者共用一个名字空间**，两个方向都查重。`register_handler('x')` 之后再
+   `register_cron('x', ...)` 会报错，反之亦然 —— 否则面板上会出现两条同名任务，
+   而 `UNIQUE(plugin, name)` 只允许一条。
+2. **查重必须在登记之前做**。`__host_register_task` 会把任务推进宿主侧 `pending` 列表，
+   如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务
+   （Python 侧的 `__pp_register` 原来就是这个顺序，这轮顺手改对了）。
+3. **一个 handler 可以被多条面板任务复用**（挂不同表达式）——
+   handler 是能力，任务是调度，本来就不该一一对应。
+
+### 12.2 `source` 列与三条收敛规则
+
+`jobs` 表加一列 `source TEXT NOT NULL DEFAULT 'plugin'`。默认值就是历史归属：
+升级前建的库，里面的行全是插件声明的（`ensure_column` 补列，老数据一行不动，有单测钉住）。
+
+| 规则 | 实现 |
+|---|---|
+| `sync_jobs` 只 upsert / 清理 `source = 'plugin'` 的行 | 清理时的 `SELECT` 带 `WHERE source = 'plugin'` |
+| 面板只能删 `source = 'panel'` 的行 | `delete_panel_job` 的 `DELETE` 带 `WHERE source = 'panel'` |
+| 同名冲突时**代码优先** | `sync_jobs` 先删同名面板行再重建，并返回被顶掉的条数让引擎打日志 |
+
+第三条为什么需要「返回条数」：不然用户会看到自己建的任务**静默消失**。
+现在的实测日志是：
+
+```
+[panel-jobs] [warn] 有 1 条面板任务与插件代码声明的任务重名，已按「代码优先」重建
+```
+
+反面情形同样有明确行为：插件新版本里处理函数没了，**任务定义保留**、状态标 `error`、
+`next_run` 清空，日志说清楚原因 —— 用户建的任务不该因为插件作者改了个函数名就凭空消失。
+
+```
+report | source= panel | status= error | next= None
+  last_error: 面板任务 `report` 的处理函数在插件 `panel-jobs` 里找不到了，定义已保留但不参与调度
+```
+
+### 12.3 累计计数回灌（`runs` / `trips`）
+
+`Scheduler::add` 建出来的任务是零计数，而 `record_job_run` 会把**内存里的**计数写回库。
+`sync_jobs` 里那句「保留 runs 历史」其实只保住了重启前的那一瞬间 —— 一触发就被覆盖了。
+
+这是重启实测抓到的（不是推理出来的）：
+
+```
+重启前  py-panel-jobs/py-echo  runs=112
+重启后  第一次触发              runs=3      ← 归零重数
+```
+
+修法：新增 `db::list_job_counters` + `Scheduler::seed_counters`，
+在启动和热更新时（`install_tasks` / `reinstall_panel_jobs` 之后）把 `runs` / `trips` 灌回调度器。
+修完：
+
+```
+重启后立刻   py-echo runs=57      ← 从库里接着数
+再等 2.5 秒  py-echo runs=60
+```
+
+只灌 `runs` / `trips`，**不灌** `tripped` / `consecutive_failures`：
+熔断的**冷却是否生效**不该跨重启延续（否则重启就成了绕过冷却的手段），
+但「这个任务历史上熔断过几次」要留着 —— 它决定下一次冷却从哪一档开始退避。
+
+副作用（有意为之）：插件的 `payload.runs` 现在也是**累计**的，不再每次重启从 1 开始。
+契约写进了 `docs/host-api.md`。
+
+### 12.4 顺手挖出来的三个 bug
+
+这一轮的改动把第八轮埋着的两个 bug 顶了出来，加上一个自己写测试时踩的。
+
+#### bug ①：面板按钮是死的
+
+第八轮的后端接口、护栏头、按钮 DOM 全写好了，`web.rs` 里甚至留了一句注释
+「事件走 tbody 上的委托（见下面的 click 监听）」—— 但 `<script>` 里
+**根本没有那个 click 监听，也没有任何带 `x-panel: 1` 的 fetch**。
+按钮渲染出来了，点了没反应。README §4 当时却写着面板上有这两个按钮。
+
+修法：补上 document 级的事件委托 + `x-panel: 1` 请求 + 行内结果提示 +
+请求进行中禁用按钮（`busy` 标志，手快点两下不该排两次队）。
+
+顺带补了 `scripts/test-panel-frontend.mjs`：把 `web.rs` 里那段 `<script>` 抠出来，
+配上 DOM / fetch 桩真的跑一遍，然后合成点击、断言发出的请求。不需要浏览器、不需要起服务、
+零依赖，已经进 CI。**拿第八轮的 `web.rs` 跑它会红 24 项** —— 一个抓不到目标 bug 的测试
+等于没有测试，所以这一条是特意验证过的。
+
+#### bug ②：热更新会把用户暂停的任务放跑
+
+`Scheduler::add` 建出来的任务 `enabled = true`，而热更新会先 `remove_plugin`
+把该插件的任务全部摘掉再重新登记 —— 原来的 `reload_plugin` 里**没有任何一步恢复暂停状态**。
+结果：面板上显示「已暂停」，任务其实在跑。这和第 3 条语义（暂停跨重启保留）想解决的
+是同一个问题，只是触发方式换成了「改一次插件文件」。
+
+用 `git worktree` 拉了一份 HEAD 的旧二进制做 A/B（同一台机器、同一份插件、同一个操作序列）：
+
+| | 暂停 `scheduler-demo/every-3s` → touch 插件文件 → 等 7 秒 |
+|---|---|
+| 第八轮（HEAD `c9a7723`） | 面板 `paused=True / status=paused`，**runs 5 → 7（还在跑）** |
+| 第九轮 | 面板 `paused=True / status=paused`，**runs 0 → 0**，日志「任务 `every-3s` 按上次的暂停状态继续暂停」 |
+
+修法：把启动时的「恢复暂停」抽成 `restore_paused(...)`，热更新路径复用（带插件过滤）。
+**面板说已暂停，就必须真的没在跑** —— 一个会说谎的状态显示比没有状态显示更糟。
+
+#### bug ③：Node / CPython 适配器的 `scheduleHandler` 复用错了函数
+
+适配器里 `scheduleHandler` 一开始写成「查表拿到 handler，然后调 `register_cron(name, expr, fn)`」。
+但 `register_cron` 现在会拒绝「已经登记过的 handler 名」—— 而这个名字**本来就是** handler 名，
+于是必然报错：
+
+```
+[runner] --job py-echo=@every 1s 失败: 插件里已经有名为 `py-echo` 的处理函数
+```
+
+这是写测试时跑出来的（两个适配器的用例都红了）。修法：抽出 `_add_task` / 直接进调度器，
+绕过那条只对「插件自己声明调度」才成立的查重。
+
+> 教训：**查重规则是有适用范围的**。「handler 名不能和已有名字撞」这条规则，
+> 对「插件声明调度」成立，对「宿主给 handler 挂调度」不成立 —— 后者那个重名是设计的一部分。
+
+### 12.5 这一轮的验证
+
+| 验证 | 结果 |
+|---|---|
+| `cargo test` | **47 项全绿**（第八轮 33 项 → 新增 11 项 `db` + 3 项 `scheduler`） |
+| `node scripts/test-panel-frontend.mjs` | **22 项全绿**（新增；拿第八轮的 `web.rs` 跑会红 24 项） |
+| `python3 scripts/smoke.py` | **36 项全绿**（新增 3e 一节 11 项：来源标注、四条校验、真被调度、删除边界） |
+| Node 适配器 `node test/run-tests.mjs` | **24 项全绿**（新增 4 项：`register_handler` 语义 + 运行器 `--job`） |
+| CPython 适配器 `unittest` | **61 项全绿**（新增 10 项：同上） |
+| 面板新建 / 删除（curl 实测） | 见 §4 的 curl 清单，四条校验路径 + 删除边界都对 |
+| 面板任务跨重启 | ✅ 定义、暂停状态、`runs` 历史三样都活过重启 |
+| 面板任务跨热更新 | ✅ 同上（这一条修之前是坏的） |
+| 同名接管（代码优先） | ✅ 面板行被删、按插件声明重建、日志说明 |
+| 处理函数消失 | ✅ 定义保留、`status=error`、`next_run` 清空、日志说明 |
+| 旧库升级 | ✅ `source` 列补上后默认 `plugin`，`runs` / `paused` 既有数据一行不动 |
+
+### 12.6 遗留
+
+- `jobs` 表现在是任务定义的权威，但**没有「编辑」**：改表达式要删了重建（会丢 `runs` 历史）。
+- 面板任务只能引用**已加载插件**的处理函数。插件被删掉之后，它的面板任务会走
+  「处理函数找不到」那条路（保留 + `error`），不会自动清理 —— 目前靠人工删。
+- §11 第 7 条依然成立：**面板没有鉴权**。这一轮让面板多了「新建任务」这个更强的写能力，
+  所以「只绑 `127.0.0.1`」这条约束比以前更重要了。

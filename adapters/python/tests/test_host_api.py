@@ -519,6 +519,79 @@ class TestRegisterRoute(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 6b. register_handler：只登记处理函数，调度交给宿主（第九轮）
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterHandler(unittest.TestCase):
+    def test_registers_without_creating_a_task(self):
+        host = host_api.Host(plugin="p")
+        host.register_handler("echo", lambda payload: None)
+        # 关键差异：register_handler 不产生调度任务
+        self.assertEqual(host.tasks, [])
+        self.assertIn("echo", host.handlers)
+
+    def test_duplicate_name_rejected_both_ways(self):
+        host = host_api.Host(plugin="p")
+        host.register_handler("echo", lambda payload: None)
+        # 两个方向都要查重（共用同一个名字空间）
+        with self.assertRaises(ValueError):
+            host.register_handler("echo", lambda payload: None)
+        with self.assertRaises(ValueError):
+            host.register_cron("echo", "@every 1s", lambda payload: None)
+
+        host.register_cron("scheduled", "@every 1s", lambda payload: None)
+        with self.assertRaises(ValueError):
+            host.register_handler("scheduled", lambda payload: None)
+
+    def test_argument_validation(self):
+        host = host_api.Host(plugin="p")
+        with self.assertRaises(ValueError):
+            host.register_handler("", lambda payload: None)
+        with self.assertRaises(ValueError):
+            host.register_handler("x", "not callable")
+
+    def test_schedule_handler_attaches_to_the_scheduler(self):
+        host = host_api.Host(plugin="p")
+        seen = []
+        host.register_handler("echo", lambda payload: seen.append(payload))
+        self.assertEqual(host.tasks, [])
+
+        host.schedule_handler("echo", "@every 60ms")
+        self.assertEqual(len(host.tasks), 1)
+        self.assertEqual(host.tasks[0].name, "echo")
+        self.assertEqual(host.tasks[0].expr, "@every 60ms")
+
+        run_ticks(host, 0.25)
+        self.assertGreaterEqual(len(seen), 2, "挂上调度后应该真的被触发")
+        self.assertEqual(seen[0]["name"], "echo")
+
+    def test_schedule_handler_rejects_unknown_name(self):
+        host = host_api.Host(plugin="p")
+        with self.assertRaises(ValueError) as ctx:
+            host.schedule_handler("nope", "@every 1s")
+        self.assertIn("没有名为 `nope` 的处理函数", str(ctx.exception))
+        self.assertEqual(host.tasks, [])
+
+    def test_reset_tasks_clears_handlers_too(self):
+        host = host_api.Host(plugin="p")
+        host.register_handler("h1", lambda payload: None)
+        self.assertEqual(sorted(host.handlers), ["h1"])
+        # handler 的生命周期跟插件走：换插件（bind 的 reset）时一起清
+        host.reset_tasks()
+        self.assertEqual(host.handlers, {})
+        self.assertEqual(host.tasks, [])
+
+    def test_module_level_functions_go_through_singleton(self):
+        host = host_api.bind(plugin="unit-test")
+        host_api.register_handler("m1", lambda payload: None)
+        self.assertIn("m1", host.handlers)
+        host_api.schedule_handler("m1", "@every 1s")
+        self.assertEqual([t.name for t in host.tasks], ["m1"])
+        host.reset_tasks()
+
+
+# ---------------------------------------------------------------------------
 # 7. 可移植性：examples 必须避开 PocketPy 的语法缺口
 # ---------------------------------------------------------------------------
 
@@ -694,6 +767,36 @@ class TestRunner(unittest.TestCase):
         proc = self._run(["--once"])
         self.assertEqual(proc.returncode, 2)
         self.assertIn("缺少插件文件路径", proc.stderr)
+
+    def test_job_flag_schedules_a_registered_handler(self):
+        # 第九轮：面板任务的等价物 —— 插件 register_handler 登记，--job 挂上调度
+        plugin = os.path.normpath(os.path.join(ADAPTER_DIR, "..", "..", "plugins", "py", "py-panel-jobs.py"))
+        if not os.path.isfile(plugin):
+            self.skipTest("仓库插件不存在")
+        proc = self._run([plugin, "--job", "py-echo=@every 1s", "--once"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(
+            "register_handler 登记了 3 个处理函数: py-always-fails, py-echo, py-report", proc.stdout
+        )
+        self.assertIn("已挂上任务 `py-echo`（@every 1s）", proc.stdout)
+        # py-code-side（代码声明）+ py-echo（--job 挂的）
+        self.assertIn("[runner] 插件 `py-panel-jobs` 注册了 2 个任务", proc.stdout)
+        self.assertIn("[面板任务] py-echo 第 1 次触发", proc.stderr)
+        # 只登记、没挂调度的处理函数不该被 --once 触发
+        self.assertNotIn("py-always-fails", proc.stderr)
+
+    def test_job_flag_rejects_unknown_handler(self):
+        plugin = os.path.normpath(os.path.join(ADAPTER_DIR, "..", "..", "plugins", "py", "py-panel-jobs.py"))
+        if not os.path.isfile(plugin):
+            self.skipTest("仓库插件不存在")
+        proc = self._run([plugin, "--job", "nope=@every 1s", "--once"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("没有名为 `nope` 的处理函数", proc.stderr)
+
+    def test_job_flag_requires_name_equals_expr(self):
+        proc = self._run(["examples/demo.py", "--job", "no-equals-sign", "--once"])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--job 需要 <name>=<expr> 形式", proc.stderr)
 
     def test_broken_plugin_reports_and_exits_2(self):
         tmp = tempfile.mkdtemp()

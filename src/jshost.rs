@@ -59,9 +59,22 @@ globalThis.host_api = {
         if (typeof name !== 'string' || !name) throw new Error('register_cron(name, expr, handler): name 必须是非空字符串');
         if (typeof expr !== 'string' || !expr) throw new Error('register_cron: expr 必须是非空字符串');
         if (typeof handler !== 'function') throw new Error('register_cron: handler 必须是函数');
+        // 先查重再登记：__host_register_task 会把任务推进宿主侧 pending 列表，
+        // 如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务。
+        if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
         var err = __host_register_task(name, expr);
         if (err) throw new Error(err);
         __register_task(name, handler);
+        return name;
+    },
+
+    // 只登记处理函数，**不声明调度**：任务由面板创建（见 README「第九轮」）。
+    // 一个 handler 可以被面板上的多条任务复用（不同调度表达式）。
+    register_handler: function (name, handler) {
+        if (typeof name !== 'string' || !name) throw new Error('register_handler(name, handler): name 必须是非空字符串');
+        if (typeof handler !== 'function') throw new Error('register_handler: handler 必须是函数');
+        if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
+        __tasks[name] = handler;
         return name;
     },
 
@@ -107,6 +120,12 @@ globalThis.__routes = Object.create(null);
 globalThis.__register_task = function (name, handler) { __tasks[name] = handler; };
 globalThis.__register_route = function (key, handler) { __routes[key] = handler; };
 
+// 宿主问「这个插件有没有名为 name 的处理函数」——面板新建任务前用它校验。
+// 约定与 __host_* 一致：只传 String，返回 '1'（有）或 ''（没有）。
+globalThis.__has_task = function (name) {
+    return typeof __tasks[name] === 'function' ? '1' : '';
+};
+
 // 约定：返回空字符串 = 成功；非空字符串 = 错误消息。只用 String 一种类型。
 globalThis.__dispatch_task = function (name, payloadJson) {
     var h = __tasks[name];
@@ -151,6 +170,7 @@ export const log = api.log;
 export const warn = api.warn;
 export const error = api.error;
 export const register_cron = api.register_cron;
+export const register_handler = api.register_handler;
 export const every = api.every;
 export const sqlite_query = api.sqlite_query;
 export const sqlite_exec = api.sqlite_exec;

@@ -17,6 +17,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -24,11 +25,26 @@ use std::time::Duration;
 /// 插件路由请求体的上限（低配设备上不给插件机会把内存吃光）。
 const MAX_ROUTE_BODY: usize = 1024 * 1024;
 
+/// 面板新建任务的请求体。
+#[derive(Debug, Deserialize)]
+struct AddJobReq {
+    /// 插件名（文件名去扩展名）
+    plugin: String,
+    /// 处理函数名 —— 插件用 `register_handler(name, fn)` 注册的那个
+    name: String,
+    /// 调度表达式（cron 5/6 段，或 `@every 500ms`）
+    expr: String,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/state", get(api_state))
-        // 面板上的写操作。三个都是 POST，且都要求带 `x-panel: 1`（见 guard_write）
+        // 任务**定义**：新建 / 删除（`jobs` 表）
+        .route("/api/jobs", post(add_job))
+        .route("/api/jobs/{plugin}/{name}/delete", post(delete_job))
+        // 任务**操作**：立即执行 / 暂停 / 恢复
+        // 所有写接口都是 POST，且都要求带 `x-panel: 1`（见 guard_write）
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
         .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
@@ -117,15 +133,83 @@ async fn run_task(
     }
 }
 
+/// `POST /api/jobs` —— 新建一条**面板任务**（任务定义写进 `jobs` 表，`source = 'panel'`）。
+///
+/// 请求体 `{"plugin": "...", "name": "...", "expr": "..."}`。
+/// `name` 指向插件用 `register_handler(name, fn)` 注册的处理函数 ——
+/// 面板只提供调度，代码仍然在插件里。
+///
+/// 全部校验都在引擎线程里做（插件存在 / 名字没被占用 / 表达式能解析 / 处理函数存在），
+/// 失败原因原样带回面板：`400` + `{"ok":false,"error":"..."}`。
+async fn add_job(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AddJobReq>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::AddJob {
+            plugin: req.plugin.clone(),
+            name: req.name.clone(),
+            expr: req.expr.clone(),
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+    // 校验里有一次真实的插件函数调用（问「有没有这个 handler」），给 5 秒足够
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
+/// `POST /api/jobs/{plugin}/{name}/delete` —— 删除一条**面板任务**。
+///
+/// 插件代码声明的任务（`source = 'plugin'`）返回 `400`：删了也会在下一次
+/// `sync_jobs`（重启 / 热更新）里原样回来，让它停下来应该用「暂停」。
+async fn delete_job(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::RemoveJob {
+            plugin: plugin.clone(),
+            name: name.clone(),
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
 async fn pause_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
     set_paused(st, plugin, name, true, &headers).await
-}
-
-async fn resume_task(
+}async fn resume_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
     headers: HeaderMap,
@@ -342,10 +426,10 @@ fn render_page(st: &AppState) -> String {
         .replace("__LOG_ROWS__", &log_rows(&logs))
 }
 
-/// 调度任务行：插件 / 任务名 / 表达式 / 状态 / 触发次数 / 熔断次数 / 下次触发。
+/// 调度任务行：插件 / 任务名 / 表达式 / 来源 / 状态 / 触发次数 / 熔断次数 / 下次触发 / 操作。
 fn job_rows(jobs: &[JobRow]) -> String {
     if jobs.is_empty() {
-        return "<tr><td colspan=\"8\" class=\"empty\">没有注册任何调度任务</td></tr>".to_string();
+        return "<tr><td colspan=\"9\" class=\"empty\">没有注册任何调度任务</td></tr>".to_string();
     }
     jobs.iter()
         .map(|j| {
@@ -362,29 +446,55 @@ fn job_rows(jobs: &[JobRow]) -> String {
                 .as_deref()
                 .map(|e| format!("<div class=\"err\">{}</div>", esc(e)))
                 .unwrap_or_default();
-            let buttons = format!(
-                "<button class=\"btn\" data-act=\"run\" data-plugin=\"{p}\" data-name=\"{n}\">立即执行</button>\
-                 <button class=\"btn\" data-act=\"{toggle}\" data-plugin=\"{p}\" data-name=\"{n}\">{label}</button>",
-                p = esc(&j.plugin),
-                n = esc(&j.name),
-                toggle = if j.paused { "resume" } else { "pause" },
-                label = if j.paused { "恢复" } else { "暂停" },
-            );
             format!(
-                "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td>{}{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td><td class=\"ops\">{}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td>{}</td><td>{}{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td><td class=\"ops\">{}</td></tr>",
                 esc(&j.plugin),
                 esc(&j.name),
                 esc(&j.schedule),
+                source_badge(&j.source),
                 status,
                 err,
                 j.runs,
                 j.trips,
                 esc(j.next_run.as_deref().unwrap_or("-")),
-                buttons
+                job_buttons(&j.plugin, &j.name, j.paused, &j.source)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 任务定义的来源徽标：`plugin` = 插件代码里声明，`panel` = 面板上创建。
+fn source_badge(source: &str) -> String {
+    if source == "panel" {
+        "<span class=\"bad panel\">面板</span>".to_string()
+    } else {
+        "<span class=\"bad code\">插件代码</span>".to_string()
+    }
+}
+
+/// 一行的操作按钮。
+///
+/// 只有面板创建的任务才给「删除」：插件声明的任务删了也会被下一次 `sync_jobs`
+/// （重启 / 热更新）装回来，给个按不动的按钮等于骗人 —— 那种情况应该用「暂停」。
+///
+/// `data-plugin` / `data-name` 走 `esc`（属性用双引号包裹，转义 `&<>"` 足够）；
+/// URL 里的同名参数由前端再 `encodeURIComponent` 一次。
+fn job_buttons(plugin: &str, name: &str, paused: bool, source: &str) -> String {
+    let p = esc(plugin);
+    let n = esc(name);
+    let mut out = format!(
+        "<button class=\"btn\" data-act=\"run\" data-plugin=\"{p}\" data-name=\"{n}\">立即执行</button>\
+         <button class=\"btn\" data-act=\"{toggle}\" data-plugin=\"{p}\" data-name=\"{n}\">{label}</button>",
+        toggle = if paused { "resume" } else { "pause" },
+        label = if paused { "恢复" } else { "暂停" },
+    );
+    if source == "panel" {
+        out.push_str(&format!(
+            "<button class=\"btn danger\" data-act=\"delete\" data-plugin=\"{p}\" data-name=\"{n}\">删除</button>"
+        ));
+    }
+    out
 }
 
 fn plugin_rows(plugins: &[PluginInfo]) -> String {
@@ -501,11 +611,23 @@ const PAGE: &str = r##"<!DOCTYPE html>
   .bad.ok { background: #12351c; color: #3fb950; }
   .bad.idle { background: #2b2b16; color: #d0a215; }
   .bad.bad { background: #3a1518; color: #f85149; }
+  .bad.panel { background: #16273a; color: #58a6ff; }
+  .bad.code { background: #21262d; color: #8b949e; }
   .ops { white-space: nowrap; }
   .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
          padding: 3px 9px; font-size: 12px; cursor: pointer; margin-right: 4px; }
   .btn:hover { background: #30363d; border-color: #8b949e; }
   .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.danger { color: #f85149; }
+  .btn.danger:hover { background: #3a1518; border-color: #f85149; }
+  .btn.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .btn.primary:hover { background: #388bfd; border-color: #388bfd; }
+  .newjob { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .newjob select, .newjob input { background: #16181d; color: #d8dee9; border: 1px solid #30363d;
+         border-radius: 6px; padding: 5px 9px; font: inherit; font-size: 12px; }
+  .newjob select:focus, .newjob input:focus { outline: none; border-color: #1f6feb; }
+  .newjob input { min-width: 220px; }
   .actmsg { font-size: 12px; margin: 6px 0 8px; min-height: 1em; color: #8b949e; }
   .actmsg.ok { color: #3fb950; }
   .actmsg.bad { color: #f85149; }
@@ -540,8 +662,14 @@ const PAGE: &str = r##"<!DOCTYPE html>
 
   <h2>调度任务（cron / @every）</h2>
   <div id="actmsg" class="actmsg"></div>
+  <div class="newjob">
+    <select id="nj-plugin" title="插件"></select>
+    <input id="nj-name" placeholder="处理函数名（register_handler 注册的）" spellcheck="false">
+    <input id="nj-expr" placeholder="*/5 * * * * * 或 @every 2s" spellcheck="false">
+    <button class="btn primary" id="nj-add">新建任务</button>
+  </div>
   <table>
-    <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th><th>操作</th></tr></thead>
+    <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>来源</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th><th>操作</th></tr></thead>
     <tbody id="jobs">__JOB_ROWS__</tbody>
   </table>
 
@@ -593,16 +721,17 @@ const PAGE: &str = r##"<!DOCTYPE html>
         else if (j.runs > 0) st = '<span class="bad ok">运行中</span>';
         else st = '<span class="bad idle">待触发</span>';
         var err = j.last_error ? '<div class="err">' + esc(j.last_error) + '</div>' : '';
-        // 操作按钮只带 data-* 属性，事件走 tbody 上的委托（见下面的 click 监听）
-        var p = esc(j.plugin), n = esc(j.name);
-        var ops = '<button class="btn" data-act="run" data-plugin="' + p + '" data-name="' + n + '">立即执行</button>' +
-                  '<button class="btn" data-act="' + (j.paused ? 'resume' : 'pause') +
-                  '" data-plugin="' + p + '" data-name="' + n + '">' + (j.paused ? '恢复' : '暂停') + '</button>';
+        var src = j.source === 'panel'
+          ? '<span class="bad panel">面板</span>'
+          : '<span class="bad code">插件代码</span>';
+        // 操作按钮只带 data-* 属性，事件走 document 上的委托（见下面的 click 监听）
+        var ops = jobButtons(j);
         return '<tr><td class="mono">' + esc(j.plugin) + '</td><td class="mono">' + esc(j.name) +
-               '</td><td class="mono dim">' + esc(j.schedule) + '</td><td>' + st + err +
+               '</td><td class="mono dim">' + esc(j.schedule) + '</td><td>' + src +
+               '</td><td>' + st + err +
                '</td><td class="num">' + j.runs + '</td><td class="num">' + j.trips +
                '</td><td class="mono dim">' + esc(j.next_run || '-') + '</td><td class="ops">' + ops + '</td></tr>';
-      }).join('') || '<tr><td colspan="8" class="empty">没有注册任何调度任务</td></tr>';
+      }).join('') || '<tr><td colspan="9" class="empty">没有注册任何调度任务</td></tr>';
 
       document.getElementById('tasks').innerHTML = s.tasks.map(function (t) {
         return '<tr><td class="num">' + t.id + '</td><td class="mono">' + esc(t.name) +
@@ -615,10 +744,140 @@ const PAGE: &str = r##"<!DOCTYPE html>
         return '<div class="line lv-' + esc(l.level) + '"><span class="t">' + esc(l.ts) +
                '</span><span class="p">' + esc(l.plugin) + '</span><span class="m">' + esc(l.msg) + '</span></div>';
       }).join('') || '<div class="empty">暂无日志</div>';
+
+      fillPlugins(s.plugins);
     }).catch(function () { /* 服务重启中，下一轮再试 */ });
   }
 
+  // ---- 任务操作按钮（与 Rust 侧 job_buttons 保持同一份标记）----
+  // 「删除」只给面板创建的任务：插件代码声明的任务删了也会被 sync_jobs 装回来。
+  function jobButtons(j) {
+    var p = esc(j.plugin), n = esc(j.name);
+    var ops = '<button class="btn" data-act="run" data-plugin="' + p + '" data-name="' + n + '">立即执行</button>' +
+              '<button class="btn" data-act="' + (j.paused ? 'resume' : 'pause') +
+              '" data-plugin="' + p + '" data-name="' + n + '">' + (j.paused ? '恢复' : '暂停') + '</button>';
+    if (j.source === 'panel') {
+      ops += '<button class="btn danger" data-act="delete" data-plugin="' + p +
+             '" data-name="' + n + '">删除</button>';
+    }
+    return ops;
+  }
+
+  // ---- 面板写操作 ----
+  // 所有写请求都必须带 `x-panel: 1`：服务端拿它挡 CSRF
+  // （浏览器跨站的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，而本服务不返回预检响应）。
+  var ACT_LABEL = { run: '立即执行', pause: '暂停', resume: '恢复', delete: '删除' };
+  var busy = false;
+
+  function setMsg(text, cls) {
+    var el = document.getElementById('actmsg');
+    el.className = 'actmsg' + (cls ? ' ' + cls : '');
+    el.textContent = text;
+  }
+
+  function post(url, body) {
+    var opts = { method: 'POST', headers: { 'x-panel': '1' } };
+    if (body !== undefined) {
+      opts.headers['content-type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(url, opts).then(function (r) {
+      return r.json()
+        .catch(function () { return { ok: false, error: 'HTTP ' + r.status + '（响应不是 JSON）' }; })
+        .then(function (j) { return { status: r.status, body: j }; });
+    });
+  }
+
+  function runAction(btn) {
+    if (busy) return;   // 手快点两下不该排两次队
+    busy = true;
+    var act = btn.dataset.act, plugin = btn.dataset.plugin, name = btn.dataset.name;
+    var label = plugin + '/' + name;
+    // 定义级操作走 /api/jobs，运行级操作走 /api/tasks（见 src/web.rs 的 router）
+    var url = act === 'delete'
+      ? '/api/jobs/' + encodeURIComponent(plugin) + '/' + encodeURIComponent(name) + '/delete'
+      : '/api/tasks/' + encodeURIComponent(plugin) + '/' + encodeURIComponent(name) + '/' + act;
+
+    btn.disabled = true;
+    setMsg('正在' + ACT_LABEL[act] + ' ' + label + ' …', '');
+    post(url).then(function (res) {
+      busy = false;
+      if (res.body && res.body.ok) {
+        setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '成功', 'ok');
+      } else {
+        setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '失败 — ' +
+               ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+      }
+      refresh();
+    }).catch(function (e) {
+      busy = false;
+      setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '失败 — 请求没发出去: ' + e, 'bad');
+    });
+  }
+
+  document.addEventListener('click', function (ev) {
+    var el = ev.target;
+    var btn = (el && el.closest) ? el.closest('button[data-act]') : null;
+    if (btn) {
+      ev.preventDefault();
+      runAction(btn);
+    }
+  });
+
+  // ---- 新建任务 ----
+  // 下拉里只放加载成功的插件：加载失败的插件建了任务也跑不起来。
+  function fillPlugins(plugins) {
+    var sel = document.getElementById('nj-plugin');
+    var want = sel.value;
+    var html = plugins.filter(function (p) { return !p.error; }).map(function (p) {
+      return '<option value="' + esc(p.name) + '">' + esc(p.name) + ' · ' + esc(p.runtime) + '</option>';
+    }).join('') || '<option value="">（没有可用的插件）</option>';
+    if (html !== sel.dataset.sig) {   // 只在真的变了才重建，避免每秒把用户的选择重置掉
+      sel.innerHTML = html;
+      sel.dataset.sig = html;
+      if (want) sel.value = want;
+    }
+  }
+
+  function addJob() {
+    if (busy) return;
+    var plugin = document.getElementById('nj-plugin').value;
+    var name = document.getElementById('nj-name').value.trim();
+    var expr = document.getElementById('nj-expr').value.trim();
+    if (!plugin || !name || !expr) {
+      setMsg('插件 / 处理函数名 / 调度表达式都不能为空', 'bad');
+      return;
+    }
+    busy = true;
+    var btn = document.getElementById('nj-add');
+    btn.disabled = true;
+    setMsg('正在创建 ' + plugin + '/' + name + ' …', '');
+    post('/api/jobs', { plugin: plugin, name: name, expr: expr }).then(function (res) {
+      busy = false;
+      btn.disabled = false;
+      if (res.body && res.body.ok) {
+        setMsg('任务 ' + plugin + '/' + name + ' 已创建（' + expr + '）', 'ok');
+        document.getElementById('nj-name').value = '';
+        refresh();
+      } else {
+        setMsg('创建失败 — ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+      }
+    }).catch(function (e) {
+      busy = false;
+      btn.disabled = false;
+      setMsg('创建失败 — 请求没发出去: ' + e, 'bad');
+    });
+  }
+
+  document.getElementById('nj-add').addEventListener('click', addJob);
+  ['nj-name', 'nj-expr'].forEach(function (id) {
+    document.getElementById(id).addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') addJob();
+    });
+  });
+
   setInterval(refresh, 1000);
+  refresh();
 </script>
 </body>
 </html>

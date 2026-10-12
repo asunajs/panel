@@ -16,6 +16,8 @@
     3b. 双运行时都加载了（JS + Python），且没有加载失败的插件
     3c. JS 插件注册的 HTTP 路由挂在同一个端口上；未注册路径仍返回 404
     3d. 面板写接口：缺护栏头 403 / 任务不存在 404 / 手动触发 / 暂停冻结 / 恢复不补跑
+    3e. 任务定义（第九轮）：插件/面板两种来源标注；新建的四条校验路径；
+        面板任务真的被调度；插件声明的任务删不掉、面板任务删得掉
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
     4b. Python 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
@@ -62,11 +64,17 @@ def fetch(url: str, timeout: float = 5.0):
         return r.status, r.read().decode()
 
 
-def post_json(url: str, panel: bool = True, timeout: float = 10.0):
-    """POST 一个写接口。`panel=False` 用来验证「缺 x-panel 头会被拦」。"""
-    req = urllib.request.Request(url, data=b"", method="POST")
+def post_json(url: str, panel: bool = True, timeout: float = 10.0, payload=None):
+    """POST 一个写接口。`panel=False` 用来验证「缺 x-panel 头会被拦」。
+
+    `payload` 给了就按 JSON 发（`/api/jobs` 新建任务用），否则发空体。
+    """
+    data = b"" if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
     if panel:
         req.add_header("x-panel", "1")
+    if payload is not None:
+        req.add_header("content-type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
@@ -253,6 +261,118 @@ def main() -> int:
             1 <= grew <= 12,
             "恢复后按节奏重新触发（没有补跑欠账）",
             f"2.5 秒涨了 {grew} 次（@every 500ms 期望约 5 次）",
+        )
+
+        # ---- 3e. 任务定义：面板新建 / 删除（第九轮）----
+        # 面板创建的任务写进 jobs 表且 source='panel'，插件代码声明的是 source='plugin'。
+        # 这一节验证：来源标注、四条校验路径、真的会被调度、以及「插件声明的任务删不掉」。
+        code, st = fetch_json(f"{base}/api/state")
+        plugin_task = next(
+            (j for j in st.get("jobs", []) if j["plugin"] == "panel-jobs" and j["name"] == "code-side"),
+            None,
+        )
+        check(
+            plugin_task is not None and plugin_task.get("source") == "plugin",
+            "插件代码声明的任务标成 source=plugin",
+            f"{plugin_task}",
+        )
+
+        # ① 缺护栏头 → 403
+        code, _ = post_json(
+            f"{base}/api/jobs",
+            panel=False,
+            payload={"plugin": "panel-jobs", "name": "echo", "expr": "@every 1s"},
+        )
+        check(code == 403, "新建任务缺 x-panel 头被拦", f"http {code}")
+
+        # ② 处理函数名不存在 → 400（面板任务只能调用插件 register_handler 出来的处理函数）
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "panel-jobs", "name": "no-such-handler", "expr": "@every 1s"},
+        )
+        check(
+            code == 400 and "处理函数" in str(body.get("error", "")),
+            "新建任务时校验处理函数是否存在",
+            f"http {code}, {body.get('error')}",
+        )
+
+        # ③ 表达式非法 → 400
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "panel-jobs", "name": "echo", "expr": "@every 0s"},
+        )
+        check(
+            code == 400 and "无效" in str(body.get("error", "")),
+            "新建任务时校验调度表达式",
+            f"http {code}, {body.get('error')}",
+        )
+
+        # ④ 插件不存在 → 400
+        code, _ = post_json(
+            f"{base}/api/jobs", payload={"plugin": "nope", "name": "echo", "expr": "@every 1s"}
+        )
+        check(code == 400, "新建任务时校验插件存在", f"http {code}")
+
+        # ⑤ 合法新建 → ok，且立刻出现在面板上、标成 source=panel
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "panel-jobs", "name": "echo", "expr": "@every 1s"},
+        )
+        _, st = fetch_json(f"{base}/api/state")
+        created = next(
+            (j for j in st.get("jobs", []) if j["plugin"] == "panel-jobs" and j["name"] == "echo"),
+            None,
+        )
+        check(
+            code == 200 and body.get("ok") is True and created is not None,
+            "面板新建任务成功",
+            f"http {code}, {body}",
+        )
+        check(
+            created is not None and created.get("source") == "panel",
+            "面板创建的任务标成 source=panel",
+            f"{created.get('source') if created else None}",
+        )
+
+        # ⑥ 重名再来一次 → 400（不静默覆盖）
+        code, _ = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "panel-jobs", "name": "echo", "expr": "@every 2s"},
+        )
+        check(code == 400, "重名任务被拒绝（不静默覆盖）", f"http {code}")
+
+        # ⑦ 面板任务真的会被调度触发
+        runs_before = created.get("runs", 0) if created else 0
+        time.sleep(2.5)
+        _, st = fetch_json(f"{base}/api/state")
+        after_job = next(
+            (j for j in st.get("jobs", []) if j["plugin"] == "panel-jobs" and j["name"] == "echo"),
+            {},
+        )
+        check(
+            after_job.get("runs", 0) > runs_before,
+            "面板创建的任务真的被调度触发",
+            f"runs {runs_before} → {after_job.get('runs')}（等了 2.5 秒）",
+        )
+
+        # ⑧ 插件代码声明的任务不能在面板上删（删了也会被 sync_jobs 装回来）
+        code, body = post_json(f"{base}/api/jobs/panel-jobs/code-side/delete")
+        check(
+            code == 400 and "source" in str(body.get("error", "")),
+            "插件声明的任务拒绝从面板删除",
+            f"http {code}, {body.get('error')}",
+        )
+
+        # ⑨ 面板任务可以删，删完从列表消失
+        code, body = post_json(f"{base}/api/jobs/panel-jobs/echo/delete")
+        _, st = fetch_json(f"{base}/api/state")
+        gone = not any(
+            j["plugin"] == "panel-jobs" and j["name"] == "echo" for j in st.get("jobs", [])
+        )
+        check(
+            code == 200 and body.get("ok") is True and gone,
+            "面板创建的任务可以删除",
+            f"http {code}, {body}",
         )
 
         # 没注册过的路径必须还是 404，而不是被 fallback 吃掉

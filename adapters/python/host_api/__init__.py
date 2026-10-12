@@ -38,6 +38,8 @@ __all__ = [
     "warn",
     "error",
     "register_cron",
+    "register_handler",
+    "schedule_handler",
     "every",
     "sqlite_query",
     "sqlite_exec",
@@ -424,6 +426,8 @@ class Host(object):
     def __init__(self, plugin="plugin", db_path=None):
         self.plugin = plugin
         self.tasks = []
+        #: 只登记、不声明调度的处理函数（见 ``register_handler``）
+        self.handlers = {}
         self._lock = threading.RLock()
         self._db_path = db_path
         self._conn = None
@@ -465,20 +469,60 @@ class Host(object):
         if not callable(handler):
             raise ValueError("任务 `{}` 的 handler 必须可调用".format(name))
         with self._lock:
-            for existing in self.tasks:
-                if existing.name == name:
-                    raise ValueError(
-                        "插件 `{}` 里已经注册过名为 `{}` 的任务".format(self.plugin, name)
-                    )
-            schedule = parse_schedule(expr)
-            next_fire = schedule.next_after(datetime.now())
-            if next_fire is None:
-                next_fire = datetime.now() + timedelta(days=_FALLBACK_DAYS)
-            self.tasks.append(Task(name, self.plugin, expr, schedule, handler, next_fire))
+            # 与 register_handler 共用同一个名字空间：两个方向都查重
+            if name in self.handlers:
+                raise ValueError("插件里已经有名为 `{}` 的处理函数".format(name))
+            self._add_task(name, expr, handler)
+        return None
+
+    def _add_task(self, name, expr, handler):
+        """把任务装进调度表（调用方持锁）。任务之间的重名在这里拒绝。"""
+        for existing in self.tasks:
+            if existing.name == name:
+                raise ValueError(
+                    "插件 `{}` 里已经注册过名为 `{}` 的任务".format(self.plugin, name)
+                )
+        schedule = parse_schedule(expr)
+        next_fire = schedule.next_after(datetime.now())
+        if next_fire is None:
+            next_fire = datetime.now() + timedelta(days=_FALLBACK_DAYS)
+        self.tasks.append(Task(name, self.plugin, expr, schedule, handler, next_fire))
         return None
 
     def every(self, name, interval, handler):
         return self.register_cron(name, "@every " + str(interval), handler)
+
+    def register_handler(self, name, handler):
+        """只登记处理函数，**不声明调度** —— 调度由宿主的面板创建（嵌入式宿主）。
+
+        CPython 适配器里没有面板，所以本地用运行器的 ``--job <name>=<expr>``
+        把它挂上调度（见 ``schedule_handler``）。
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("register_handler(name, handler): name 必须是非空字符串")
+        if not callable(handler):
+            raise ValueError("register_handler: handler 必须可调用")
+        with self._lock:
+            # 两个方向都查重：先 register_cron 再 register_handler 同名也要报错
+            if name in self.handlers or any(t.name == name for t in self.tasks):
+                raise ValueError("插件里已经有名为 `{}` 的处理函数".format(name))
+            self.handlers[name] = handler
+        return None
+
+    def schedule_handler(self, name, expr):
+        """运行器内部接口：把已登记的 handler 按表达式挂上调度。
+
+        直接进调度表，**不走 ``register_cron``**：这个名字本来就是 handler 名，
+        走 ``register_cron`` 会被上面那条「handler 已存在」的查重挡下来。
+        """
+        with self._lock:
+            handler = self.handlers.get(name)
+            if handler is None:
+                raise ValueError(
+                    "没有名为 `{}` 的处理函数（插件得先 register_handler）".format(name)
+                )
+            self._add_task(name, expr, handler)
+        return None
 
     def register_route(self, path, method, handler):
         # 故意抛异常，而不是「支持一下」：
@@ -665,6 +709,8 @@ class Host(object):
     def reset_tasks(self):
         with self._lock:
             self.tasks = []
+            # handler 的生命周期跟着插件走，和 tasks 一起清
+            self.handlers = {}
         return None
 
     def close(self):
@@ -717,6 +763,14 @@ def error(msg):
 
 def register_cron(name, expr, handler):
     return _host.register_cron(name, expr, handler)
+
+
+def register_handler(name, handler):
+    return _host.register_handler(name, handler)
+
+
+def schedule_handler(name, expr):
+    return _host.schedule_handler(name, expr)
 
 
 def every(name, interval, handler):
