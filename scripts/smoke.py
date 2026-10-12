@@ -18,6 +18,9 @@
     3d. 面板写接口：缺护栏头 403 / 任务不存在 404 / 手动触发 / 暂停冻结 / 恢复不补跑
     3e. 任务定义（第九轮）：插件/面板两种来源标注；新建的四条校验路径；
         面板任务真的被调度；插件声明的任务删不掉、面板任务删得掉
+    8.  鉴权（第十轮）：无凭证 401 / 浏览器 303 跳登录页 / 插件路由也受保护 /
+        令牌两种头 / 登录 cookie 属性 / 退出即失效 / 开放重定向防护 / 登录退避；
+        以及「非回环 + 无令牌 → 拒绝启动」
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
     4b. Python 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
@@ -37,6 +40,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -91,6 +95,36 @@ def fetch_json(url: str, timeout: float = 5.0):
     return status, json.loads(body)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """别自动跟 3xx —— 鉴权用例要断言「跳到了哪」，跟过去就看不到了。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def http(url, method="GET", headers=None, body=None, timeout=5.0):
+    """返回 `(状态码, 响应头, 正文)`。**不抛** HTTPError —— 401/303/429 都是要断言的正常结果。
+
+    响应头的键统一转小写：axum 发出来的就是小写（`set-cookie`），
+    而 `dict(headers)` 会保留原始大小写，按 `Set-Cookie` 查会拿到空值。
+    """
+    req = urllib.request.Request(url, data=body, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+
+    def lower(h):
+        return {k.lower(): v for k, v in h.items()}
+
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            return r.status, lower(r.headers), r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, lower(e.headers), e.read().decode()
+
+
 def proc_mem_kb(pid: int, field: str = "VmRSS"):
     """从 /proc 读内存（Linux）。其他平台返回 None。
 
@@ -107,6 +141,191 @@ def proc_mem_kb(pid: int, field: str = "VmRSS"):
     except OSError:
         return None
     return None
+
+
+def wait_ready(base, proc, headers=None, timeout=20.0):
+    """等服务就绪。带令牌的实例探活也得带令牌。
+
+    同样要等**引擎加载完插件**：不然紧接着的 `POST /api/tasks/.../run` 会因为
+    任务还没登记而 404（见 main 里那段注释）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            code, _, body = http(f"{base}/api/state", headers=headers, timeout=2)
+            if code == 200 and json.loads(body).get("plugins"):
+                return True
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def auth_checks(tmp: Path) -> None:
+    """第十轮：鉴权。另起一个**带令牌**的实例，验完整登录流程与边界。
+
+    为什么不复用上面那个实例：那个必须保持「无鉴权」状态，否则前面所有
+    「不带令牌直接调接口」的断言就全失效了。
+    """
+    token = os.urandom(16).hex()
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "auth.db"),
+            "PLUGINS_DIR": str(REPO / "plugins"),
+            "PANEL_TOKEN": token,
+        }
+    )
+    logpath = tmp / "auth.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        if not check(wait_ready(base, proc, {"X-Panel-Token": token}), "带令牌的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        # ---- 无凭证一律拒绝 ----
+        code, _, _ = http(f"{base}/api/state")
+        check(code == 401, "无凭证访问 /api/state → 401", f"http {code}")
+
+        code, _, _ = http(f"{base}/hits")
+        check(code == 401, "无凭证访问**插件注册的路由** → 401", f"http {code}")
+
+        code, _, _ = http(f"{base}/", headers={"Accept": "text/html"})
+        check(code == 303, "浏览器导航 → 303 跳登录页", f"http {code}")
+
+        code, _, _ = http(f"{base}/login")
+        check(code == 200, "登录页本身是公开的", f"http {code}")
+
+        # 脚本客户端（不带 Accept: text/html）不该被跳走，否则 fetch 会拿到一整页 HTML
+        code, _, _ = http(f"{base}/api/state", headers={"Accept": "*/*"})
+        check(code == 401, "脚本客户端得到 401 而不是重定向", f"http {code}")
+
+        # ---- 令牌（两种头）----
+        for header in ({"Authorization": f"Bearer {token}"}, {"X-Panel-Token": token}):
+            code, _, _ = http(f"{base}/api/state", headers=header)
+            check(code == 200, f"带令牌访问通过（{list(header)[0]}）", f"http {code}")
+
+        code, _, _ = http(f"{base}/api/state", headers={"Authorization": "Bearer wrong"})
+        check(code == 401, "错误令牌被拒", f"http {code}")
+
+        code, _, body = http(f"{base}/api/state", headers={"X-Panel-Token": token})
+        try:
+            auth = json.loads(body).get("auth", {})
+        except json.JSONDecodeError:
+            auth = {}
+        check(auth.get("enabled") is True, "/api/state 里带 auth.enabled", str(auth))
+
+        # ---- 登录 → cookie → 退出 ----
+        code, headers, _ = http(
+            f"{base}/api/login",
+            method="POST",
+            headers={"content-type": "application/json"},
+            body=json.dumps({"token": token}).encode(),
+        )
+        raw_cookie = headers.get("set-cookie", "")
+        check(code == 200, "JSON 登录成功", f"http {code}")
+        check("HttpOnly" in raw_cookie, "会话 cookie 带 HttpOnly", raw_cookie)
+        check("SameSite=Strict" in raw_cookie, "会话 cookie 带 SameSite=Strict", raw_cookie)
+        check(
+            "Secure" not in raw_cookie,
+            "纯 HTTP 下不加 Secure（加了 cookie 根本存不下来）",
+            raw_cookie,
+        )
+        cookie = raw_cookie.split(";")[0]
+
+        code, _, _ = http(f"{base}/api/state", headers={"Cookie": cookie})
+        check(code == 200, "带会话 cookie 访问通过", f"http {code}")
+
+        code, _, _ = http(f"{base}/", headers={"Cookie": cookie})
+        check(code == 200, "带会话 cookie 能打开面板", f"http {code}")
+
+        # 写接口：cookie + 护栏头
+        code, _, _ = http(
+            f"{base}/api/tasks/scheduler-demo/boom/run",
+            method="POST",
+            headers={"Cookie": cookie, "x-panel": "1"},
+        )
+        check(code == 200, "会话 cookie 可以调写接口", f"http {code}")
+
+        # 退出 → 会话立即失效
+        code, _, _ = http(f"{base}/api/logout", method="POST", headers={"Cookie": cookie})
+        check(code in (200, 303), "退出登录", f"http {code}")
+        code, _, _ = http(f"{base}/api/state", headers={"Cookie": cookie})
+        check(code == 401, "退出后会话立即失效", f"http {code}")
+
+        # ---- 开放重定向防护 ----
+        for evil in ("//evil.com", "https://evil.com", "/\\evil.com"):
+            code, headers, _ = http(
+                f"{base}/api/login",
+                method="POST",
+                headers={"content-type": "application/x-www-form-urlencoded"},
+                body=f"token={token}&next={urllib.parse.quote(evil, safe='')}".encode(),
+            )
+            loc = headers.get("location", "")
+            check(
+                code == 303 and loc.rstrip("/") in ("", base),
+                f"next={evil!r} 被归一化成站内路径",
+                f"http {code}, Location={loc!r}",
+            )
+
+        # ---- 登录退避 ----
+        bad = json.dumps({"token": "definitely-wrong"}).encode()
+        codes = []
+        for _ in range(4):
+            code, _, _ = http(
+                f"{base}/api/login",
+                method="POST",
+                headers={"content-type": "application/json"},
+                body=bad,
+            )
+            codes.append(code)
+        check(codes[:3] == [401, 401, 401], "连续错令牌前 3 次是 401", str(codes))
+        check(codes[3] == 429, "第 4 次开始退避（429）", str(codes))
+
+        # 退避期间连**正确**的令牌也进不来（否则退避形同虚设）
+        code, _, _ = http(
+            f"{base}/api/login",
+            method="POST",
+            headers={"content-type": "application/json"},
+            body=json.dumps({"token": token}).encode(),
+        )
+        check(code == 429, "退避期间正确令牌也被挡", f"http {code}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
+def refuse_to_start_without_token(tmp: Path) -> None:
+    """没配令牌却往非回环地址绑 → 必须**拒绝启动**，而不是打个警告继续裸奔。"""
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"0.0.0.0:{free_port()}",
+            "DB_PATH": str(tmp / "bare.db"),
+            "PLUGINS_DIR": str(REPO / "plugins"),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    env.pop("PANEL_TOKEN_FILE", None)
+    r = subprocess.run([str(BIN)], capture_output=True, text=True, env=env, cwd=REPO, timeout=30)
+    check(r.returncode != 0, "非回环 + 无令牌 → 拒绝启动", f"exit={r.returncode}")
+    check(
+        "拒绝启动" in (r.stdout + r.stderr),
+        "拒绝启动时给出可操作的原因",
+        (r.stdout + r.stderr).strip().splitlines()[-1][:120] if (r.stdout + r.stderr).strip() else "",
+    )
 
 
 def main() -> int:
@@ -141,6 +360,11 @@ def main() -> int:
     base = f"http://127.0.0.1:{port}"
     try:
         # ---- 1. 等待就绪 ----
+        #
+        # 判据是「HTTP 通了**并且**引擎已经加载完插件」，不是只等 HTTP 通。
+        # 引擎在独立线程里加载插件（QuickJS + PocketPy 都要初始化），Axum 完全可能先答上来，
+        # 那一刻 /api/state 里 plugins 还是空的 —— 实测踩到过（面板 15 KB、plugins 0 个，
+        # 而紧接着 jobs 表里已经有 14 条任务）。只等 HTTP 会随机输掉这个竞态。
         state = None
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -148,15 +372,18 @@ def main() -> int:
                 break  # 进程自己退了
             try:
                 _, state = fetch_json(f"{base}/api/state", timeout=2)
-                break
+                if state.get("plugins"):
+                    break
             except (urllib.error.URLError, OSError, json.JSONDecodeError):
-                time.sleep(0.25)
+                pass
+            time.sleep(0.25)
 
         if not check(state is not None, "服务在 20 秒内就绪"):
             print()
             print("--- 进程日志 ---")
             print(logpath.read_text(errors="replace"))
             return 1
+        check(bool(state.get("plugins")), "引擎在 20 秒内加载完插件", f"{len(state.get('plugins', []))} 个")
 
         # ---- 2. HTML 面板 ----
         try:
@@ -440,6 +667,12 @@ def main() -> int:
         if proc.poll() is None:
             proc.kill()
         logf.close()
+
+    # ---- 8. 鉴权（第十轮）：另起一个带令牌的实例 ----
+    print()
+    print("---- 鉴权（PANEL_TOKEN 模式）----")
+    auth_checks(tmp)
+    refuse_to_start_without_token(tmp)
 
     print()
     if FAILURES:

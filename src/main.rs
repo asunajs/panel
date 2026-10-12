@@ -1,6 +1,6 @@
 //! Rust + QuickJS + PocketPy 动态插件任务面板。
 //!
-//! 六轮累计的能力：
+//! 十轮累计的能力：
 //!   1. Axum 起 HTTP 服务 + 服务端渲染面板
 //!   2. rquickjs 把 QuickJS-ng 嵌进同一个二进制，启动时加载 `plugins/**/*.js`
 //!   3. 向 JS 暴露宿主能力：`host.log` / `host.cron` / `host.every`
@@ -10,7 +10,10 @@
 //!   7. **双运行时**：pocketpy 嵌入 Python 插件（`plugins/**/*.py`），
 //!      与 QuickJS 共用同一套宿主 API（`hostapi.rs`）与调度器
 //!   8. JS 插件可注册 HTTP 路由（挂在同一个 Axum 端口上）+ 插件 mtime 热更新
+//!   9. `jobs` 表是任务定义的权威来源（`source` 区分插件声明 / 面板创建）
+//!  10. **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避（`auth.rs`）
 
+mod auth;
 mod cron;
 mod db;
 mod engine;
@@ -21,6 +24,7 @@ mod python;
 mod scheduler;
 mod web;
 
+use auth::Auth;
 use db::Db;
 use engine::{EngineCmd, EngineHealth, JsEngine, Registry};
 use hostapi::{HostState, SharedLogs};
@@ -56,6 +60,8 @@ pub struct AppState {
     pub host: Arc<HostState>,
     /// 引擎指令通道（转发插件路由请求用）
     pub engine_tx: std::sync::mpsc::Sender<EngineCmd>,
+    /// 面板鉴权（第十轮）。`enabled() == false` 表示没配令牌，只在 loopback 下允许。
+    pub auth: Arc<Auth>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,6 +85,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let plugins_dir = env_path("PLUGINS_DIR", "plugins");
     let db_path = env_path("DB_PATH", "data/panel.db");
     let addr: SocketAddr = env_str("BIND_ADDR", "127.0.0.1:8787").parse()?;
+
+    // ---------- 鉴权（第十轮） ----------
+    let token = read_token()?;
+    let auth_enabled = token.is_some();
+    let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
+
+    // 没配令牌还往非回环地址绑 = 把一个「能看所有日志、能触发/新建任意任务」的面板
+    // 裸奔在局域网上。这里**直接拒绝启动**，而不是打条警告继续跑 ——
+    // systemd 的日志里没人会看到那条警告，而端口已经开了。
+    if !auth_enabled && !is_loopback(addr) {
+        return Err(format!(
+            "拒绝启动：BIND_ADDR={addr} 不是回环地址，但没有配置 PANEL_TOKEN。\n\
+             \x20   面板没鉴权时，任何能访问到端口的人都能看日志、触发任务、新建任务。\n\
+             \x20   要暴露到局域网，请先设置令牌（任选一种）：\n\
+             \x20     PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') ./plugin-panel\n\
+             \x20     PANEL_TOKEN_FILE=/etc/plugin-panel.token ./plugin-panel   # 文件权限 600\n\
+             \x20   只想本机用就保持默认：BIND_ADDR=127.0.0.1:8787\n"
+        )
+        .into());
+    }
+    println!(
+        "[boot] 鉴权: {}",
+        if auth_enabled {
+            if cookie_secure {
+                "已开启（PANEL_TOKEN + cookie Secure）"
+            } else {
+                "已开启（PANEL_TOKEN；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1）"
+            }
+        } else {
+            "未开启 —— 只绑回环地址，本机任何进程都能操作面板"
+        }
+    );
 
     // ---------- 1. SQLite：开库 + 建表 ----------
     if let Some(parent) = db_path.parent() {
@@ -157,6 +195,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         health,
         host,
         engine_tx,
+        auth: Arc::new(Auth::new(token, cookie_secure)),
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -167,9 +206,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("[boot] Web UI: http://{addr}/");
     println!("[boot] 按 Ctrl-C 退出");
 
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // into_make_service_with_connect_info: 让 handler 能拿到对端地址
+    // —— 登录退避按来源 IP 计数、审计日志要记是谁登的，都得靠它。
+    // 注意：放在反向代理后面时这里是**反代的地址**，见 auth.rs 顶部的边界说明。
+    axum::serve(
+        listener,
+        web::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // ---------- 6. 收尾：让引擎线程把 Context 干净地析构掉 ----------
     println!("[boot] 正在关闭...");
@@ -215,6 +260,51 @@ async fn shutdown_signal() {
 
 fn now_secs() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 读面板令牌：`PANEL_TOKEN` 优先，其次 `PANEL_TOKEN_FILE` 的内容。
+///
+/// 为什么要文件形式：systemd 的 `Environment=` 会把令牌写进 unit 文件（常常是 644），
+/// 而 `/proc/<pid>/environ` 对同用户也可读；`EnvironmentFile=` 指向一个 600 的文件更稳。
+///
+/// 两个来源都 `trim()` —— 换行/空格是最常见的坑（`echo xxx > token` 会带一个 `\n`，
+/// 而 `auth.rs` 里候选值也是 trim 过的）。两边不一致的话，
+/// `PANEL_TOKEN=" abc "` 会变成一个「怎么输都登不上」的谜题。
+fn read_token() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Ok(t) = std::env::var("PANEL_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Ok(Some(t));
+        }
+    }
+    match std::env::var("PANEL_TOKEN_FILE") {
+        Ok(path) if !path.is_empty() => {
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| format!("读 PANEL_TOKEN_FILE={path} 失败: {e}"))?;
+            let t = raw.trim().to_string();
+            if t.is_empty() {
+                return Err(format!("PANEL_TOKEN_FILE={path} 是空的").into());
+            }
+            Ok(Some(t))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// 这个监听地址是不是只对本机开放。
+fn is_loopback(addr: SocketAddr) -> bool {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+/// `1` / `true` / `yes` / `on` 都算开（大小写不敏感）。
+fn env_flag(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
 }
 
 fn env_str(key: &str, default: &str) -> String {

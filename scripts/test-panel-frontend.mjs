@@ -35,7 +35,10 @@ function extractScript() {
   if (!page) throw new Error('在 src/web.rs 里找不到 const PAGE');
   const script = page[1].match(/<script>([\s\S]*?)<\/script>/);
   if (!script) throw new Error('PAGE 里找不到 <script>');
-  return { html: page[1], js: script[1] };
+  // 登录页是另一份模板（未认证状态下渲染，不能带面板数据与轮询脚本）
+  const login = src.match(/const LOGIN_PAGE: &str = r##"([\s\S]*?)"##;/);
+  if (!login) throw new Error('在 src/web.rs 里找不到 const LOGIN_PAGE');
+  return { html: page[1], js: script[1], login: login[1], src };
 }
 
 // ---------------------------------------------------------------- DOM / fetch 桩
@@ -64,6 +67,7 @@ const STATE = {
   uptime_secs: 1,
   ticks: 2,
   engine: { healthy: true, beat_ago_ms: 3, interrupts: 0, budget_ms: 2000, js_memory_bytes: 1024 },
+  auth: { enabled: true, sessions: 2, cookie_secure: false },
   plugins: [
     { name: 'panel-jobs', runtime: 'js', file: 'x', has_on_tick: false, ticks: 0, last_tick: null, error: null, tasks: 1 },
   ],
@@ -134,7 +138,7 @@ async function main() {
     console.error(`环境问题: 找不到 ${WEB_RS}`);
     return 2;
   }
-  const { html, js } = extractScript();
+  const { html, js, login, src } = extractScript();
   console.log(`面板前端回归测试（脚本 ${js.length} 字符）\n`);
 
   // ---- 静态部分：第九轮加的东西都在 ----
@@ -145,6 +149,21 @@ async function main() {
   check(js.includes('addEventListener'), '注册了事件监听');
   check(js.includes('closest'), '用事件委托而不是给每个按钮绑监听');
 
+  // ---- 鉴权（第十轮）：登录页必须自洽，且不能带面板的东西 ----
+  check(html.includes('id="authBadge"'), '面板页头有鉴权徽标');
+  // 退出按钮由 render_page 拼进 __AUTH_BADGE__（模板里是占位符），所以查生成代码
+  check(html.includes('__AUTH_BADGE__'), '页头留了鉴权徽标的占位符');
+  check(
+    src.includes('action=\\"/api/logout\\"') && src.includes('__AUTH_BADGE__'),
+    '鉴权徽标里带退出按钮',
+  );
+  check(login.includes('action="/api/login"'), '登录页的表单指向 /api/login');
+  check(/name="token"/.test(login), '登录页有令牌输入框');
+  check(/type="password"/.test(login), '令牌输入框是密码类型（不明文显示）');
+  check(/name="next"/.test(login), '登录页带 next（登录完回原页面）');
+  check(!login.includes('<script'), '登录页没有任何 JS（未认证时不该去拉 /api/state）');
+  check(!login.includes('__JOB_ROWS__'), '登录页不渲染任何面板数据');
+
   const { ctx, get, calls } = boot(js);
   await settle();
 
@@ -153,6 +172,11 @@ async function main() {
   check(get('jobs').innerHTML.includes('插件代码'), '任务行渲染出来源徽标');
   check(get('jobs').innerHTML.includes('data-act="run"'), '任务行渲染出操作按钮');
   check(get('nj-plugin').innerHTML.includes('panel-jobs'), '插件下拉被填充');
+  check(
+    get('sessionCount').textContent === 2,
+    '会话数跟着 /api/state 刷新（别的标签页登录/退出后不会显示旧数字）',
+    String(get('sessionCount').textContent),
+  );
 
   // ---- 这就是 bug ①：点了必须真的发请求 ----
   calls.length = 0;

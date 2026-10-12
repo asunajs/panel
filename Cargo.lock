@@ -501,10 +501,12 @@ dependencies = [
  "axum",
  "cc",
  "chrono",
+ "getrandom",
  "rquickjs",
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "ureq",
 ]

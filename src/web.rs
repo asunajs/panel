@@ -7,18 +7,21 @@
 //! 没被内置路由匹配到的请求走 `fallback`，查插件路由表 → 投给引擎线程 →
 //! 在对应插件的解释器里执行 handler → 把结果写回响应。Python 插件不参与这一层。
 
+use crate::auth::{self, LoginError};
 use crate::db::{self, JobRow, TaskRow};
 use crate::engine::{EngineCmd, PluginInfo};
 use crate::hostapi::LogLine;
 use crate::AppState;
 use axum::body::Bytes;
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -36,30 +39,341 @@ struct AddJobReq {
     expr: String,
 }
 
+/// 登录页的查询串（`/login?next=%2Fapi%2Fstate`）。
+#[derive(Debug, Deserialize)]
+struct LoginQuery {
+    next: Option<String>,
+    /// 失败原因（登录失败后重渲染登录页时带上）
+    err: Option<String>,
+}
+
+/// `POST /api/login` 的 JSON 形式。
+#[derive(Debug, Deserialize)]
+struct LoginReq {
+    token: String,
+    next: Option<String>,
+}
+
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/api/state", get(api_state))
+    // 需要认证的部分（**含插件路由的 fallback**）统一挂一层中间件。
+    //
+    // 用 `layer` 而不是 `route_layer`：后者不覆盖 fallback —— 那样插件注册的路由
+    // 就成了唯一不需要认证的入口，而这恰恰是最不该漏的地方（插件能读库、能发请求）。
+    let protected = Router::new()
         // 任务**定义**：新建 / 删除（`jobs` 表）
         .route("/api/jobs", post(add_job))
         .route("/api/jobs/{plugin}/{name}/delete", post(delete_job))
         // 任务**操作**：立即执行 / 暂停 / 恢复
-        // 所有写接口都是 POST，且都要求带 `x-panel: 1`（见 guard_write）
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
         .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
+        // 只读接口
+        .route("/", get(index))
+        .route("/api/state", get(api_state))
+        // 插件注册的路由（兜底）
         .fallback(plugin_route)
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    // 登录相关是唯一的公开入口 —— 它必须公开，否则没法登录。
+    Router::new()
+        .route("/login", get(login_page))
+        .route("/api/login", post(do_login))
+        .route("/api/logout", post(do_logout))
+        .merge(protected)
         .with_state(state)
 }
 
-/// 写接口的统一护栏：必须带自定义头 `x-panel: 1`。
+// ---------------------------------------------------------------------------
+// 鉴权中间件
+// ---------------------------------------------------------------------------
+
+/// 除登录接口外的一切请求都要过这一层。
 ///
-/// 为什么这样就够挡住 CSRF：浏览器跨站发起的「简单请求」**不允许**带自定义头，
-/// 想带就会触发 CORS 预检 —— 而本服务不返回任何 CORS 响应头，预检必然失败，
-/// 真正的请求根本发不出去。于是恶意网页没法借用用户的浏览器来点这些按钮。
+/// 三种情况：
+/// - 没开鉴权（只绑回环 + 没配令牌）→ 直通。启动时已经打过警告了。
+/// - 凭证有效（头里的令牌 或 会话 cookie）→ 直通。
+/// - 否则 → 浏览器导航跳登录页，脚本请求给 401 JSON。
+async fn require_auth(
+    State(st): State<AppState>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !st.auth.enabled() {
+        return next.run(req).await;
+    }
+    if st.auth.authenticate(req.headers()).is_some() {
+        return next.run(req).await;
+    }
+    if wants_html(&req) {
+        return Redirect::to(&login_url(&req)).into_response();
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "ok": false,
+            "error": "未认证。脚本请带 `Authorization: Bearer <token>` 或 `X-Panel-Token: <token>`；\
+                      浏览器请先访问 /login 登录。"
+        })),
+    )
+        .into_response()
+}
+
+/// 请求方期待 HTML 吗（= 是浏览器导航，而不是 fetch / curl）。
 ///
-/// ⚠️ 这**不是鉴权**：能直接访问端口的人（本机进程、局域网内）依然能调这些接口。
-/// 面板本来默认只绑 `127.0.0.1`，要放到局域网得另外加 token —— 见 README §10.4。
+/// 判据只看 `Accept` 里有 `text/html`。面板自己的 fetch 不带这个头（默认 `*/*`），
+/// 所以 API 请求不会被误判成导航跳走 —— 那样 `fetch` 会跟着重定向拿到一整页 HTML，
+/// 报出「JSON 解析失败」这种让人摸不着头脑的错。
+fn wants_html(req: &Request) -> bool {
+    req.headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"))
+}
+
+/// 登录页地址，带上「登录完回哪」。
+fn login_url(req: &Request) -> String {
+    let mut target = req.uri().path().to_string();
+    if let Some(q) = req.uri().query() {
+        target.push('?');
+        target.push_str(q);
+    }
+    if target == "/" || target.starts_with("/login") {
+        "/login".to_string()
+    } else {
+        format!("/login?next={}", percent_encode(&target))
+    }
+}
+
+/// 校验并归一化 `next`：只接受站内绝对路径，避免变成开放重定向。
+///
+/// `//evil.com` 和 `/\evil.com` 在浏览器里会被当成协议相对 URL 跳到外站，
+/// 所以除了必须以 `/` 开头，还要排掉第二个字符是 `/` 或 `\` 的情况。
+fn safe_next(next: Option<&str>) -> String {
+    match next {
+        Some(n)
+            if n.starts_with('/')
+                && !n.starts_with("//")
+                && !n.starts_with("/\\")
+                && !n.contains('\n')
+                && !n.contains('\r') =>
+        {
+            n.to_string()
+        }
+        _ => "/".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 登录 / 退出
+// ---------------------------------------------------------------------------
+
+/// `GET /login` —— 登录页。没开鉴权就直接回面板，已经登录过也直接回面板。
+async fn login_page(
+    State(st): State<AppState>,
+    Query(q): Query<LoginQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !st.auth.enabled() {
+        return Redirect::to("/").into_response();
+    }
+    if st.auth.authenticate(&headers).is_some() {
+        return Redirect::to(&safe_next(q.next.as_deref())).into_response();
+    }
+    Html(render_login(q.err.as_deref(), q.next.as_deref(), &st)).into_response()
+}
+
+/// `POST /api/login` —— 验令牌、发会话 cookie。
+///
+/// 两种调用形状，按 `Content-Type` 分：
+/// - `application/x-www-form-urlencoded`（登录页的表单）→ 成功 303 跳 `next`，
+///   失败重渲染登录页并带上原因（浏览器体验）
+/// - `application/json`（脚本 / CI）→ 一律返回 JSON
+async fn do_login(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !st.auth.enabled() {
+        return json_error(StatusCode::BAD_REQUEST, "本面板没有开启鉴权，不需要登录".into());
+    }
+
+    let is_form = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/x-www-form-urlencoded"));
+
+    let (token, next) = if is_form {
+        let form = parse_form(&String::from_utf8_lossy(&body));
+        (form.0, form.1)
+    } else {
+        match serde_json::from_slice::<LoginReq>(&body) {
+            Ok(r) => (r.token, r.next),
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, format!("请求体不是合法 JSON: {e}"))
+            }
+        }
+    };
+
+    match st.auth.login(&token, peer.ip()) {
+        Ok(sid) => {
+            crate::hostapi::push_log(
+                &st.logs,
+                "auth",
+                "info",
+                &format!("登录成功（来自 {}，当前活跃会话 {}）", peer.ip(), st.auth.active_sessions()),
+            );
+            let cookie = st.auth.session_cookie(&sid);
+            let target = safe_next(next.as_deref());
+            let mut resp = if is_form {
+                Redirect::to(&target).into_response()
+            } else {
+                Json(json!({ "ok": true, "sessions": st.auth.active_sessions() })).into_response()
+            };
+            resp.headers_mut().insert(
+                axum::http::header::SET_COOKIE,
+                HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+            resp
+        }
+        Err(e) => {
+            // 失败原因写进日志（面板上能看到谁在猜），但**不回显令牌本身**
+            crate::hostapi::push_log(
+                &st.logs,
+                "auth",
+                "warn",
+                &format!("登录失败（来自 {}）: {}", peer.ip(), e.message()),
+            );
+            if is_form {
+                let status = match e {
+                    LoginError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+                    _ => StatusCode::UNAUTHORIZED,
+                };
+                (
+                    status,
+                    Html(render_login(Some(&e.message()), next.as_deref(), &st)),
+                )
+                    .into_response()
+            } else {
+                let status = match e {
+                    LoginError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+                    LoginError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    _ => StatusCode::UNAUTHORIZED,
+                };
+                json_error(status, e.message())
+            }
+        }
+    }
+}
+
+/// `POST /api/logout` —— 删会话 + 清 cookie。
+async fn do_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let removed = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            raw.split(';').find_map(|p| {
+                let p = p.trim();
+                p.strip_prefix(auth::SESSION_COOKIE)
+                    .and_then(|r| r.strip_prefix('='))
+                    .map(str::to_string)
+            })
+        })
+        .map(|sid| st.auth.logout(sid.trim()))
+        .unwrap_or(false);
+
+    if removed {
+        crate::hostapi::push_log(&st.logs, "auth", "info", "已退出登录（会话已删除）");
+    }
+    let mut resp = Redirect::to("/login").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        HeaderValue::from_str(&st.auth.clear_cookie())
+            .unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    resp
+}
+
+/// 解析 `application/x-www-form-urlencoded`，返回 `(token, next)`。
+///
+/// `+` 在表单编码里代表空格，所以必须先还原成空格再百分号解码 ——
+/// 顺序反了的话，令牌里合法的 `+` 会变成空格，登录永远失败。
+fn parse_form(body: &str) -> (String, Option<String>) {
+    let mut token = String::new();
+    let mut next = None;
+    for pair in body.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            match percent_decode(k).as_str() {
+                "token" => token = percent_decode(v),
+                "next" => next = Some(percent_decode(v)),
+                _ => {}
+            }
+        }
+    }
+    (token, next)
+}
+
+/// `+` → 空格，`%XX` → 字节。解不出来就原样保留，不报错。
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < b.len() => {
+                match std::str::from_utf8(&b[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 只编码「非 URL 安全」的字符（`/` 保留，这样 `next` 读起来还是路径）。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// 写接口的第二道护栏：必须带自定义头 `x-panel: 1`。
+///
+/// 为什么在鉴权（第十轮）之后还留着它：
+///
+/// 1. **没开鉴权时它是唯一的 CSRF 防线**（只绑回环 + 没配令牌那种部署）。
+///    浏览器跨站发起的「简单请求」**不允许**带自定义头，想带就会触发 CORS 预检 ——
+///    而本服务不返回任何 CORS 响应头，预检必然失败，真正的请求根本发不出去。
+/// 2. **开了鉴权时它是纵深防御**。会话 cookie 已经是 `SameSite=Strict`，
+///    跨站请求带不上；但那是浏览器的行为，多一道不依赖浏览器实现的检查没坏处。
+///
+/// ⚠️ 这**不是鉴权**：能直接访问端口的人依然能调这些接口（如果他们知道令牌的话
+/// 就更不用说了）。真正的门是 `require_auth`。
 fn guard_write(headers: &HeaderMap) -> Result<(), Response> {
     let ok = headers
         .get("x-panel")
@@ -386,11 +700,32 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         },
         "uptime_secs": st.started.elapsed().as_secs(),
         "ticks": st.ticks.load(Ordering::Relaxed),
+        "auth": {
+            "enabled": st.auth.enabled(),
+            "sessions": st.auth.active_sessions(),
+            "cookie_secure": st.auth.cookie_secure(),
+        },
         "plugins": plugins,
         "jobs": jobs,
         "tasks": tasks,
         "logs": logs,
     }))
+}
+
+/// 登录页。故意复用面板的配色与字体，看起来是同一个东西。
+///
+/// `err` 只在登录失败后由 `do_login` 传进来；`next` 会原样进表单，
+/// 但服务端会再 `safe_next` 一次（表单是用户可改的，不能只信前端）。
+fn render_login(err: Option<&str>, next: Option<&str>, st: &AppState) -> String {
+    let err_html = match err {
+        Some(e) => format!("<div class=\"err\">{}</div>", esc(e)),
+        None => String::new(),
+    };
+    LOGIN_PAGE
+        .replace("__ERR__", &err_html)
+        .replace("__NEXT__", &esc(&safe_next(next)))
+        .replace("__ADDR__", &esc(&st.addr))
+        .replace("__SESSIONS__", &st.auth.active_sessions().to_string())
 }
 
 fn render_page(st: &AppState) -> String {
@@ -407,6 +742,34 @@ fn render_page(st: &AppState) -> String {
         st.health.budget_ms,
         st.health.js_memory_bytes() / 1024
     );
+    // 鉴权状态必须**显式**展示：一个不吭声就「没鉴权」的面板比一个明确标注的更危险。
+    let auth_badge = if st.auth.enabled() {
+        let sessions = st.auth.sessions();
+        let title = if sessions.is_empty() {
+            "当前没有活跃会话".to_string()
+        } else {
+            sessions
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}（登录 {}s 前，空闲 {}s）",
+                        s.ip, s.age_secs, s.idle_secs
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("； ")
+        };
+        format!(
+            "<span class=\"bad auth\" title=\"{}\">已认证 · <span id=\"sessionCount\">{}</span> 个会话</span>\
+             <form method=\"post\" action=\"/api/logout\" class=\"inline\">\
+             <button class=\"btn\" type=\"submit\">退出</button></form>",
+            esc(&title),
+            sessions.len()
+        )
+    } else {
+        "<span class=\"bad noauth\" title=\"只绑回环地址；设 PANEL_TOKEN 可开启鉴权\">无鉴权（仅本机）</span>"
+            .to_string()
+    };
 
     PAGE.replace("__STARTED_AT__", &esc(&st.started_at))
         .replace("__UPTIME__", &format!("{}s", st.started.elapsed().as_secs()))
@@ -414,6 +777,7 @@ fn render_page(st: &AppState) -> String {
         .replace("__ADDR__", &esc(&st.addr))
         .replace("__PLUGINS_DIR__", &esc(&st.plugins_dir.display().to_string()))
         .replace("__DB_PATH__", &esc(&st.db_path.display().to_string()))
+        .replace("__AUTH_BADGE__", &auth_badge)
         .replace("__STATUS_TEXT__", if healthy { "运行中" } else { "引擎无响应" })
         .replace(
             "__STATUS_CLASS__",
@@ -613,6 +977,9 @@ const PAGE: &str = r##"<!DOCTYPE html>
   .bad.bad { background: #3a1518; color: #f85149; }
   .bad.panel { background: #16273a; color: #58a6ff; }
   .bad.code { background: #21262d; color: #8b949e; }
+  .bad.auth { background: #12351c; color: #3fb950; }
+  .bad.noauth { background: #3a2a15; color: #e3a008; }
+  form.inline { display: inline; margin-left: 6px; }
   .ops { white-space: nowrap; }
   .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
          padding: 3px 9px; font-size: 12px; cursor: pointer; margin-right: 4px; }
@@ -643,7 +1010,7 @@ const PAGE: &str = r##"<!DOCTYPE html>
 </style>
 </head>
 <body>
-  <h1><span class="__STATUS_CLASS__" id="statusDot"></span><span id="statusText">__STATUS_TEXT__</span> <span class="dim" style="font-weight:400">Rust + QuickJS 插件面板</span></h1>
+  <h1><span class="__STATUS_CLASS__" id="statusDot"></span><span id="statusText">__STATUS_TEXT__</span> <span class="dim" style="font-weight:400">Rust + QuickJS 插件面板</span> <span id="authBadge">__AUTH_BADGE__</span></h1>
   <div class="sub">启动于 __STARTED_AT__ · 监听 __ADDR__ · 插件目录 __PLUGINS_DIR__ · DB __DB_PATH__</div>
   <div class="sub" id="engine">__ENGINE_INFO__</div>
 
@@ -746,6 +1113,11 @@ const PAGE: &str = r##"<!DOCTYPE html>
       }).join('') || '<div class="empty">暂无日志</div>';
 
       fillPlugins(s.plugins);
+
+      // 会话数是服务端渲染的，但别的标签页登录/退出会改变它 —— 跟着刷新，
+      // 不然面板上显示的数字只在页面加载那一刻是真的。
+      var sc = document.getElementById('sessionCount');
+      if (sc && s.auth) sc.textContent = s.auth.sessions;
     }).catch(function () { /* 服务重启中，下一轮再试 */ });
   }
 
@@ -882,3 +1254,208 @@ const PAGE: &str = r##"<!DOCTYPE html>
 </body>
 </html>
 "##;
+
+/// 登录页。
+///
+/// 单独一份而不是复用 `PAGE`：登录页**不能**带任何面板数据（它是在未认证状态下
+/// 渲染的），也不能带面板那段会去 fetch `/api/state` 的脚本 —— 否则未登录的浏览器
+/// 会每秒收到一个 401。这里只有一张表单，没有任何 JS。
+///
+/// 表单用 `application/x-www-form-urlencoded`（浏览器默认），服务端 `do_login`
+/// 按 `Content-Type` 分流：表单走「失败重渲染」，JSON 走「返回 JSON」。
+const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · Plugin Panel</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: #14161a; color: #d8dee9;
+         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #1b1e24; border: 1px solid #272c34; border-radius: 9px;
+          padding: 22px 24px; width: 100%; max-width: 400px; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: #6b7686; font-size: 12px; margin-bottom: 18px; }
+  label { display: block; color: #8b949e; font-size: 12px; margin-bottom: 6px; }
+  input[type=password] { width: 100%; background: #16181d; color: #d8dee9;
+          border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px;
+          font: inherit; font-size: 13px; }
+  input[type=password]:focus { outline: none; border-color: #1f6feb; }
+  button { margin-top: 14px; width: 100%; background: #1f6feb; color: #fff; border: 0;
+           border-radius: 6px; padding: 9px; font: inherit; font-size: 13px; cursor: pointer; }
+  button:hover { background: #388bfd; }
+  .err { background: #3a1518; color: #f85149; border-radius: 6px; padding: 8px 10px;
+         font-size: 12px; margin-bottom: 14px; }
+  .hint { color: #6b7686; font-size: 11px; margin-top: 14px; line-height: 1.7; }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Plugin Panel</h1>
+    <div class="sub">监听 __ADDR__ · 当前 __SESSIONS__ 个活跃会话</div>
+    __ERR__
+    <form method="post" action="/api/login">
+      <input type="hidden" name="next" value="__NEXT__">
+      <label for="token">面板令牌</label>
+      <input id="token" name="token" type="password" autocomplete="current-password"
+             autofocus required spellcheck="false">
+      <button type="submit">登录</button>
+    </form>
+    <div class="hint">
+      令牌来自服务端的 <code>PANEL_TOKEN</code> 或 <code>PANEL_TOKEN_FILE</code>。
+      登录成功后会下发一个 <code>HttpOnly</code> 会话 cookie（有效期 12 小时，
+      空闲 2 小时失效）；脚本可以改用
+      <code>Authorization: Bearer &lt;token&gt;</code> 免登录调用。
+    </div>
+  </div>
+</body>
+</html>
+"##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- 登录后跳回哪里：开放重定向防护 ----
+
+    #[test]
+    fn safe_next_only_allows_same_site_paths() {
+        // 正常情况
+        assert_eq!(safe_next(Some("/api/state")), "/api/state");
+        assert_eq!(safe_next(Some("/api/state?x=1&y=2")), "/api/state?x=1&y=2");
+        assert_eq!(safe_next(Some("/")), "/");
+        assert_eq!(safe_next(None), "/");
+    }
+
+    #[test]
+    fn safe_next_rejects_every_escape_hatch() {
+        // 协议相对 URL：浏览器会当成 //evil.com 跳到外站
+        assert_eq!(safe_next(Some("//evil.com")), "/");
+        // 反斜杠变体：有些浏览器会把 /\ 归一成 //
+        assert_eq!(safe_next(Some("/\\evil.com")), "/");
+        // 绝对 URL
+        assert_eq!(safe_next(Some("https://evil.com")), "/");
+        assert_eq!(safe_next(Some("http://evil.com")), "/");
+        // 非路径
+        assert_eq!(safe_next(Some("evil.com")), "/");
+        assert_eq!(safe_next(Some("")), "/");
+        // javascript: 之类（不以 / 开头，已被挡）
+        assert_eq!(safe_next(Some("javascript:alert(1)")), "/");
+        // 响应头注入
+        assert_eq!(safe_next(Some("/ok\r\nSet-Cookie: x=1")), "/");
+        assert_eq!(safe_next(Some("/ok\nX-Evil: 1")), "/");
+    }
+
+    // ---- 表单与百分号编解码 ----
+
+    #[test]
+    fn percent_decode_handles_form_encoding() {
+        // `+` 在表单编码里是空格
+        assert_eq!(percent_decode("a+b"), "a b");
+        // `%2B` 才是真正的加号 —— base64 令牌里就有 `+`，顺序搞反会永远登录不上
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        assert_eq!(percent_decode("%2F%3D"), "/=");
+        // 解不出来的原样保留，不 panic
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("100%"), "100%");
+        // 多字节 UTF-8
+        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87"), "中文");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn percent_encode_leaves_paths_readable() {
+        assert_eq!(percent_encode("/api/state"), "/api/state");
+        assert_eq!(percent_encode("/a b"), "/a%20b");
+        assert_eq!(percent_encode("/x?y=1&z=2"), "/x%3Fy%3D1%26z%3D2");
+        assert_eq!(percent_encode("中"), "%E4%B8%AD");
+    }
+
+    #[test]
+    fn percent_roundtrip_preserves_awkward_tokens() {
+        // base64 风格的令牌：`+` `/` `=` 都是合法字符，编解码必须无损
+        for token in [
+            "abc+/=XYZ",
+            " 空格 前后 ",
+            "中文令牌",
+            "a=b&c=d",
+            "100%",
+            "",
+        ] {
+            assert_eq!(percent_decode(&percent_encode(token)), token, "往返失败: {token:?}");
+        }
+    }
+
+    #[test]
+    fn parse_form_reads_token_and_next() {
+        let (t, n) = parse_form("token=s3cret&next=%2Fapi%2Fstate");
+        assert_eq!(t, "s3cret");
+        assert_eq!(n.as_deref(), Some("/api/state"));
+
+        // 顺序无关
+        let (t, n) = parse_form("next=%2F&token=abc");
+        assert_eq!(t, "abc");
+        assert_eq!(n.as_deref(), Some("/"));
+
+        // 令牌里的 `+`：表单会编码成 %2B，解出来必须还是 `+`
+        let (t, _) = parse_form("token=a%2Bb");
+        assert_eq!(t, "a+b");
+
+        // 缺字段
+        let (t, n) = parse_form("token=x");
+        assert_eq!(t, "x");
+        assert!(n.is_none());
+        let (t, _) = parse_form("next=%2F");
+        assert_eq!(t, "");
+    }
+
+    // ---- 登录跳转地址 ----
+
+    fn req_with(path: &str, query: Option<&str>, accept: Option<&str>) -> Request {
+        let uri = match query {
+            Some(q) => format!("{path}?{q}"),
+            None => path.to_string(),
+        };
+        let mut b = Request::builder().uri(uri);
+        if let Some(a) = accept {
+            b = b.header("accept", a);
+        }
+        b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn wants_html_detects_browser_navigation() {
+        assert!(wants_html(&req_with("/", None, Some("text/html,application/xhtml+xml"))));
+        assert!(wants_html(&req_with("/", None, Some("TEXT/HTML"))));
+        // 面板自己的 fetch 不带 Accept（默认 */*）→ 不该被当成导航
+        assert!(!wants_html(&req_with("/api/state", None, Some("*/*"))));
+        assert!(!wants_html(&req_with("/api/state", None, Some("application/json"))));
+        assert!(!wants_html(&req_with("/api/state", None, None)));
+    }
+
+    #[test]
+    fn login_url_carries_the_target_but_skips_the_login_page_itself() {
+        let url = login_url(&req_with("/api/state", Some("x=1"), None));
+        // `/` 不编码（保持路径可读），`?` `=` 必须编码（否则会被当成 next 的结束）
+        assert_eq!(url, "/login?next=/api/state%3Fx%3D1");
+        // 已经在登录页上了就别再套一层
+        assert_eq!(login_url(&req_with("/login", None, None)), "/login");
+        assert_eq!(login_url(&req_with("/", None, None)), "/login");
+    }
+
+    #[test]
+    fn login_url_output_survives_safe_next() {
+        // 反向验证：login_url 编出来的 next，经过 safe_next 之后仍是原来那个路径
+        for path in ["/api/state?x=1&y=2", "/foo/bar", "/"] {
+            let req = req_with(path, None, None);
+            let url = login_url(&req);
+            let next = url.strip_prefix("/login?next=").map(percent_decode);
+            assert_eq!(safe_next(next.as_deref()), path, "往返失败: {path}");
+        }
+    }
+}

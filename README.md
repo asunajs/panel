@@ -15,7 +15,8 @@
 | 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | ✅ 适配器自带用例（Node 20 / CPython 51 项），交叉验证见 §10.5 |
 | 第八轮 | **面板从只读变可操作**：手动触发 / 暂停 / 恢复，暂停状态跨重启保留 + 写接口防 CSRF | ✅ 已验证（冒烟 24 项含 6 项面板写操作） |
 | 第九轮 | **`jobs` 表成为任务定义的权威来源**：`source` 区分「插件声明 / 面板创建」，面板可新建 / 删除任务 + `register_handler` 把处理函数与调度拆开 + 修掉第八轮的两个真 bug | ✅ 已验证（单测 47 项、冒烟 38 项、适配器 Node 24 / CPython 61 项） |
-| 后续 | 鉴权 / 完整前端 / 插件市场 / 多实例 | 未开始 |
+| 第十轮 | **面板鉴权**：`PANEL_TOKEN` 令牌 + 内存会话 cookie（HttpOnly/SameSite=Strict）+ 常量时间比较 + 登录退避 + 审计日志；非回环且无令牌时**拒绝启动** | ✅ 已验证（单测 73 项、冒烟 64 项、前端 32 项） |
+| 后续 | 完整前端 / 插件市场 / 多实例 / 面板任务编辑 | 未开始 |
 
 ---
 
@@ -25,9 +26,12 @@
             tokio 多线程 runtime                      专用 OS 线程 (std::thread)
   ┌────────────────────────────────┐   ┌──────────────────────────────────────────────┐
   │  Axum (axum::serve)            │   │  QuickJS Runtime (独占, 非 Send)              │
-  │    GET  /          服务端渲染   │   │    ├─ Context  hello.js                       │
-  │    GET  /api/state JSON 快照    │   │    ├─ Context  host-api-demo.js               │
-  │    fallback: 插件注册的 HTTP 路由│   │    └─ Context  counter.js                     │
+  │    公开: GET  /login 登录页      │   │    ├─ Context  hello.js                       │
+  │          POST /api/login        │   │    ├─ Context  host-api-demo.js               │
+  │    其余全过 require_auth 中间件  │   │    └─ Context  counter.js                     │
+  │    GET  /          服务端渲染   │   │                                              │
+  │    GET  /api/state JSON 快照    │   │                                              │
+  │    fallback: 插件注册的 HTTP 路由│   │                                              │
   │         │                      │   │                                              │
   │         └── EngineCmd::HttpRequest ──>│  PocketPy 2.2.0（惰性初始化，非 Send）        │
   │                                │   │    ├─ VM 1     sysinfo.py                    │
@@ -60,6 +64,10 @@
 - **插件 → Rust**：`log / register_cron / sqlite_query / http_fetch`，一律 String 进 String 出（JSON 语义）
 - **Rust → SQLite**：`tasks` 表心跳、`jobs` 表任务状态与 `last_error`
 
+鉴权在 HTTP 层，**对插件完全不可见**：中间件挂在路由之外，
+插件注册的 `fallback` 路由同样受保护（用 `layer` 而不是 `route_layer`，
+后者不覆盖 fallback —— 那会让插件路由成为唯一不需要认证的入口）。见 §13。
+
 跨运行时的完整 API 规范见 [`docs/host-api.md`](docs/host-api.md)。
 
 ## 2. 目录结构
@@ -79,6 +87,7 @@ rust-plugin-panel/
 │   ├── python.rs      ★ PocketPy FFI 薄封装（PyVm / 参数读取 / 预算 / traceback）
 │   ├── cron.rs        Cron 表达式解析 + next_after（13 个单测）
 │   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除（14 个单测）
+│   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum，17 个单测）
 │   ├── db.rs          SQLite：tasks 表 + jobs 表（含第九轮的 source 列，11 个单测）
 │   └── web.rs         Axum 路由 + 服务端渲染面板 + 插件路由 fallback
 ├── plugins/
@@ -128,6 +137,9 @@ open http://127.0.0.1:8787/  # 面板
 | `JOB_TRIP_THRESHOLD` | `5` | 连续失败多少次熔断该任务 |
 | `JOB_COOLDOWN_MS` | `30000` | 首次熔断的冷却时长 |
 | `JOB_MAX_COOLDOWN_MS` | `600000` | 指数退避的冷却上限 |
+| `PANEL_TOKEN` | 空 | **面板令牌**。设了就开鉴权（见 §13）。空字符串等于没设 |
+| `PANEL_TOKEN_FILE` | 空 | 从文件读令牌（systemd 用；内容会 trim，适合放 600 权限的文件）。两个都设时 `PANEL_TOKEN` 优先 |
+| `PANEL_COOKIE_SECURE` | 空 | `1`/`true`/`yes`/`on` → 会话 cookie 加 `Secure`。**走反代加了 TLS 时才开**（纯 HTTP 下开了 cookie 存不下来） |
 
 **后台常驻**（脱离终端，不随 shell 退出）：
 
@@ -275,7 +287,10 @@ cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --jo
 写接口要求带请求头 **`x-panel: 1`**，否则 403。这不是鉴权，是防 CSRF：
 浏览器跨站发起的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，
 而本服务不返回任何 CORS 响应头，预检必然失败 —— 恶意网页没法借用户的浏览器点这些按钮。
-**能直接访问端口的人依然能调这些接口**，所以面板默认只绑 `127.0.0.1`（§10.4）。
+
+> 第十轮起**上面这些接口默认还要求认证**（`PANEL_TOKEN`，见 §13），
+> 所以下面的 curl 在开了鉴权时要补一个 `-H "Authorization: Bearer $TOKEN"`。
+> `x-panel: 1` 保留下来做纵深防御 —— 它也是「没开鉴权」那种部署下唯一的 CSRF 防线。
 
 ```bash
 B=http://127.0.0.1:8787
@@ -396,6 +411,19 @@ cd adapters/python && python3 -m unittest discover -s tests && python3 -m host_a
 # ⑲ register_handler 的跨运行时等价物：运行器的 --job（没有面板时的替代）
 cd adapters/node   && node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 2s --duration 5
 cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --job py-echo=@every 2s --run-for 5
+
+# ⑳ 鉴权（第十轮）：没令牌 → 401 / 浏览器 → 跳登录页
+PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+  BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel
+TOK=...   # 上面那串
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/api/state          # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Accept: text/html' http://127.0.0.1:8787/   # 303 → /login
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" http://127.0.0.1:8787/api/state  # 200
+curl -s -c /tmp/ck -X POST -d "token=$TOK" http://127.0.0.1:8787/api/login         # 拿会话 cookie
+curl -s -b /tmp/ck -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/        # 200
+
+# ㉑ 裸奔拒绝启动：绑非回环 + 没令牌必须起不来
+BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel; echo "exit=$?"   # 非 0，并打印原因
 ```
 
 实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：
@@ -836,9 +864,18 @@ plugin-panel
    想长期常驻得在系统设置里关掉 Termux 的电池优化。
 3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。
 
-> ⚠️ 默认只监听 `127.0.0.1` 是**刻意的**：面板目前**没有任何鉴权**，
-> 任何能访问到端口的人都能看到插件日志、任务列表，也能触发任务。
-> 要暴露到局域网/公网，先自己加一层反代 + 认证。
+> ⚠️ 默认只监听 `127.0.0.1` 是**刻意的**：没配令牌时面板没有任何鉴权，
+> 任何能访问到端口的人都能看到插件日志、任务列表，也能触发 / 新建任务。
+>
+> 第十轮起**不用再自己套反代了**：设一个 `PANEL_TOKEN` 就能直接绑 `0.0.0.0`（见 §13）。
+> 而且「绑非回环 + 没令牌」现在是**拒绝启动**，不会默默裸奔：
+>
+> ```bash
+> PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+>   BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel
+> ```
+>
+> 走反代加 TLS 时再加 `PANEL_COOKIE_SECURE=1`。
 
 ### ARM 盒子 / 树莓派（systemd）
 
@@ -976,7 +1013,7 @@ Rust 只保存「插件名 + 任务名 + 表达式」这点元数据。
   `open()` → `NameError`。理由很直接：这个面板没有鉴权，
   而「插件的能力只能来自 `host_api`」是整个抽象层的承诺 —— 留一个 `os.system` 就等于承诺作废。
   需要外部能力的（读文件、发请求、查库）走 `host_api`，宿主侧统一审计。
-- 面板没有鉴权，所以默认只绑 `127.0.0.1`。
+- 面板默认只绑 `127.0.0.1`；第十轮起可以用 `PANEL_TOKEN` 开鉴权后绑外网（§13）。
 
 ### 10.5 跨运行时验证（同一份插件跑在四个宿主里）
 
@@ -1020,7 +1057,11 @@ PocketPy 的语法缺口（写插件时的硬约束，完整表见 `docs/host-ap
    （面板按钮是死的、热更新会把暂停的任务放跑），见 §12.4。
 5. **调度器与两个解释器同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「解释器只在一个线程里被碰」这个简单前提 —— 也是 pocketpy 的进程级全局状态不允许的。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。Axum handler 里同步调 SQLite，量级上来要挪 `spawn_blocking`。
-7. **面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。
+7. ~~**面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。~~
+   ✅ **已实现（第十轮）**：`PANEL_TOKEN` + 内存会话 cookie + 常量时间比较 + 登录退避，见 §13。
+   并且「绑非回环 + 没令牌」从「打条警告」改成**拒绝启动** —— 警告在 systemd 日志里没人看，
+   而端口已经开了。**剩下的坑**：会话表在内存里（重启失效、多实例不共享），
+   退避也只按 `ConnectInfo` 的 IP 算（反代后面会退化成全局退避）。
 8. **Python VM 上限 15 个**（`pocketpy` 共 16 个 VM，0 号留给宿主）。超过会加载失败并在面板上显示原因。要更多得改 pocketpy 的 `PK_MAX_VM` 重新编译。
 9. **Python 侧的模块系统只有一个内置模块**（`host_api`）。插件之间不能互相 import，也没有第三方包 —— 需要的话得把 `.py` 目录挂进 `sys.path` 并接受「加载任意 Python 代码」的安全代价。
 
@@ -1181,5 +1222,145 @@ report | source= panel | status= error | next= None
 - `jobs` 表现在是任务定义的权威，但**没有「编辑」**：改表达式要删了重建（会丢 `runs` 历史）。
 - 面板任务只能引用**已加载插件**的处理函数。插件被删掉之后，它的面板任务会走
   「处理函数找不到」那条路（保留 + `error`），不会自动清理 —— 目前靠人工删。
-- §11 第 7 条依然成立：**面板没有鉴权**。这一轮让面板多了「新建任务」这个更强的写能力，
-  所以「只绑 `127.0.0.1`」这条约束比以前更重要了。
+- §11 第 7 条（**面板没有鉴权**）在**第十轮**解决了，见 §13。
+  这一轮让面板多了「新建任务」这个更强的写能力，所以那条约束比以前更重要 ——
+  第十轮的鉴权就是冲着它来的。
+
+## 13. 第十轮：面板鉴权
+
+第八轮让面板能**操作**任务，第九轮让它能**新建 / 删除**任务。这两轮都把
+「面板没有鉴权」这个约束推得更紧 —— 一个能新建任意任务的接口，裸奔在局域网上
+比一个只读面板危险得多。这一轮把它补上。
+
+### 13.1 为什么是「令牌 + 会话」而不是「把令牌塞进 cookie」
+
+最短的实现是：登录表单收令牌 → 直接把令牌当 cookie 值存下来 → 每个请求比一遍。
+能跑，但主令牌会**长期躺在浏览器里**，而且没法单独失效。
+
+这里的做法是**主令牌只在登录那一次**从浏览器到服务端，之后浏览器拿的是一个
+32 字节随机会话 ID（`getrandom` → 64 位十六进制），存在服务端**内存**里。
+好处：
+
+- 主令牌不长期存在于浏览器存储里（哪怕 cookie 泄漏，泄漏的也是一个会话）
+- 会话是内存态 —— 重启即失效，不需要写一套吊销机制
+- 想立刻踢掉某个人：`POST /api/logout`（他自己点退出也是走这条）
+
+代价是会话不跨重启、多实例之间不共享。对一个单实例面板这是划算的（§13.5）。
+
+### 13.2 三种运行模式
+
+| 情况 | 行为 |
+|---|---|
+| 绑回环 + **没**配令牌 | 保持原样：无鉴权，页头明确标「无鉴权（仅本机）」 |
+| 配了 `PANEL_TOKEN` / `PANEL_TOKEN_FILE` | 全站要求认证（登录页本身除外） |
+| 绑**非回环** + 没配令牌 | **拒绝启动**，退出码 1，并打印怎么设令牌 |
+
+第三条是刻意的：以前只打一条警告，而 systemd 的日志里没人会看到那条警告，
+**端口已经开了**。「拒绝启动」是唯一不会骗人的做法。
+
+> 页头的鉴权徽标也是刻意的：一个不吭声就「没鉴权」的面板，比一个明确写着
+> 「无鉴权（仅本机）」的更危险 —— 后者至少让你知道自己站在哪。
+
+### 13.3 怎么用
+
+**浏览器**：直接开面板 → 跳 `/login` → 粘贴令牌 → 下发会话 cookie（12 小时绝对有效、
+2 小时空闲失效）→ 回原来的页面。
+
+**脚本 / CI**（无状态，不用先登录）：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://host:8787/api/state
+curl -H "X-Panel-Token: $TOKEN" http://host:8787/api/state          # 等价写法
+curl -H "Authorization: Bearer $TOKEN" -H 'x-panel: 1' -X POST \
+     http://host:8787/api/jobs -d '{"plugin":"panel-jobs","name":"echo","expr":"@every 1s"}'
+```
+
+**登录 / 退出**（给脚本用的 JSON 形式）：
+
+```bash
+curl -c /tmp/ck -X POST -H 'content-type: application/json' \
+     -d "{\"token\":\"$TOKEN\"}" http://host:8787/api/login      # Set-Cookie: panel_session=...
+curl -b /tmp/ck http://host:8787/api/state
+curl -b /tmp/ck -X POST http://host:8787/api/logout
+```
+
+**生成一个令牌**（十六进制，省掉 base64 里 `+` `/` `=` 的转义麻烦）：
+
+```bash
+head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'    # 48 位十六进制
+```
+
+**systemd**：用 `PANEL_TOKEN_FILE` 指向一个 `600` 的文件。`Environment=` 会把令牌
+写进 unit 文件（常常是 644），而 `/proc/<pid>/environ` 对同用户也可读：
+
+```ini
+[Service]
+EnvironmentFile=/etc/plugin-panel.env      # 里面一行 PANEL_TOKEN=...
+Environment=BIND_ADDR=0.0.0.0:8787
+# 走反代加了 TLS 时再开：
+# Environment=PANEL_COOKIE_SECURE=1
+```
+
+### 13.4 安全细节（每条都对应一个具体的攻击面）
+
+| 做法 | 挡的是什么 |
+|---|---|
+| 令牌 / 会话 ID 都用 `subtle::ConstantTimeEq` **常量时间比较** | 逐字节比较会在第一个不同的字节早退，从响应时间能反推出令牌前缀（计时侧信道） |
+| 会话 ID 来自 `getrandom`（OS 随机源），32 字节 | 可预测的会话 ID = 可伪造的登录 |
+| 登录失败**按来源 IP 指数退避**（1s→2s→…→封顶 60s） | 在线暴力猜令牌。退避检查**在验令牌之前**，否则暴力请求照样能打满 CPU 去比令牌 |
+| 退避期间**正确的令牌也进不来** | 否则退避只是给攻击者加了个延迟，没有真正掐断 |
+| cookie 带 `HttpOnly` | XSS 偷 cookie（JS 读不到） |
+| cookie 带 `SameSite=Strict` | 跨站请求带不上凭证 —— 顺带把 CSRF 也堵了 |
+| 写接口**仍然**要求 `x-panel: 1` | 纵深防御：不依赖浏览器实现；也是「没开鉴权」模式下唯一的 CSRF 防线 |
+| `next` 参数服务端再归一化一次 | **开放重定向**：`//evil.com`、`/\evil.com`、`https://evil.com` 全部打回 `/` |
+| 登录失败**不回显令牌**，只记来源 IP 和原因 | 日志本身不该成为凭证泄漏点 |
+| 登录 / 失败 / 退出都写进面板日志 | 有人在猜令牌时，面板上看得见 |
+| `Accept: text/html` 才跳登录页，否则 401 JSON | 面板自己的 `fetch` 不该跟着 303 拿到一整页 HTML（那会报「JSON 解析失败」，非常难查） |
+
+`Secure` 是**可选**的（`PANEL_COOKIE_SECURE=1`）而不是默认：纯 HTTP 下加了 `Secure`
+浏览器根本不会存这个 cookie，那是把功能弄坏，不是更安全。走反代加 TLS 时才开。
+
+### 13.5 明确的边界（写死的，不是漏掉的）
+
+- **会话表在内存里**：进程重启后所有人要重新登录；多实例部署时会话不共享
+  （要共享得引入 Redis 之类，或者改用无状态签名 token —— 那又会失去「立即失效」）。
+- **退避按 `ConnectInfo` 的 IP 算**。放在反向代理后面时，拿到的是**反代的 IP** ——
+  所有客户端共用一个退避桶，等于退化成全局退避（一个人猜错把所有人挡住）。
+  真放反代后面，应该让反代自己限流（`limit_req` / `fail2ban`），
+  或者改代码信任 `X-Forwarded-For`（**但这需要先确保反代会覆盖该头**，否则可以伪造）。
+- **没有用户体系**：一个令牌就是一个身份，没有角色、没有多用户、没有操作审计到人。
+  面板定位是「单机/单人的插件面板」，不是多租户平台。
+- **没有 2FA、没有令牌轮换提醒**。
+- **没有 TLS**：面板说 HTTP。要在公网用，前面挂反代（Caddy/nginx）终止 TLS。
+
+### 13.6 这一轮的验证
+
+| 验证 | 结果 |
+|---|---|
+| `cargo test` | **73 项全绿**（第九轮 47 项 → 新增 17 项 `auth` + 9 项 `web`） |
+| `python3 scripts/smoke.py` | **64 项全绿**（新增第 8 节 26 项：401 / 303 / 令牌两态 / cookie 属性 / 退出 / 开放重定向 / 退避 / 拒绝启动） |
+| `node scripts/test-panel-frontend.mjs` | **32 项全绿**（新增 10 项：鉴权徽标、登录页自洽、会话数刷新） |
+| Node / CPython 适配器 | 24 / 61 项全绿（未受影响） |
+| clippy | 无新增 warning |
+
+实测过的路径（curl，非单测）：无凭证 401 → 浏览器导航 303 → 登录页 200 →
+两种令牌头 200 → 错令牌 401 → 登录拿 cookie（`HttpOnly; SameSite=Strict; Max-Age=43200`）→
+带 cookie 开面板 / 调写接口 → 退出后立刻 401 → `next=//evil.com` 打回 `/` →
+连错 3 次后第 4 次 429（连正确令牌也挡）→ 绑 `0.0.0.0` 无令牌退出码 1。
+
+`auth.rs` 刻意**不依赖 axum**（只抽了「取 Bearer / 取 `X-Panel-Token` / 取 cookie」
+三件事），所以会话过期、退避曲线、cookie 属性这些逻辑都能直接单测，
+不用起 HTTP 服务。
+
+### 13.7 这一轮顺手挖出来的一个测试问题
+
+加鉴权用例时冒烟测试红了 8 项，**但红的是测试而不是应用**：
+
+就绪探测原来是「`/api/state` 返回 200 就算就绪」，而引擎是在**独立线程**里加载插件的
+（QuickJS + PocketPy 都要初始化）。Axum 完全可能先答上来，那一刻 `plugins` 还是空的 ——
+实测看到面板只有 15 KB、`plugins` 0 个，而紧接着 `jobs` 表里已经有 14 条任务。
+这个竞态**一直存在**，只是前面几十次都没输过。
+
+修法是把判据改成「HTTP 通了**并且** `plugins` 非空」。
+教训：**探活探的是「服务能答」，不是「服务准备好了」** —— 这两件事在
+「有独立初始化线程」的架构里不是一回事。
