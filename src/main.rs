@@ -1,21 +1,29 @@
-//! Rust + QuickJS 动态插件任务面板。
+//! Rust + QuickJS + PocketPy 动态插件任务面板。
 //!
-//! 四轮累计的能力：
+//! 六轮累计的能力：
 //!   1. Axum 起 HTTP 服务 + 服务端渲染面板
-//!   2. rquickjs 把 QuickJS-ng 嵌进同一个二进制，启动时加载 `plugins/*.js`
+//!   2. rquickjs 把 QuickJS-ng 嵌进同一个二进制，启动时加载 `plugins/**/*.js`
 //!   3. 向 JS 暴露宿主能力：`host.log` / `host.cron` / `host.every`
 //!   4. rusqlite（bundled）持久化：`tasks` 运行记录 + `jobs` 调度任务
 //!   5. 毫秒级调度（deadline 驱动）+ 执行预算 + 任务熔断 + 引擎健康上报
 //!   6. 单二进制、可交叉编译到 aarch64-linux-musl
+//!   7. **双运行时**：pocketpy 嵌入 Python 插件（`plugins/**/*.py`），
+//!      与 QuickJS 共用同一套宿主 API（`hostapi.rs`）与调度器
+//!   8. JS 插件可注册 HTTP 路由（挂在同一个 Axum 端口上）+ 插件 mtime 热更新
 
 mod cron;
 mod db;
-mod js_engine;
+mod engine;
+mod hostapi;
+mod jshost;
+mod pyhost;
+mod python;
 mod scheduler;
 mod web;
 
 use db::Db;
-use js_engine::{EngineCmd, EngineHealth, JsEngine, Registry, SharedLogs};
+use engine::{EngineCmd, EngineHealth, JsEngine, Registry};
+use hostapi::{HostState, SharedLogs};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -44,6 +52,10 @@ pub struct AppState {
     pub db_path: PathBuf,
     /// 引擎健康状态。面板靠它区分「真在跑」和「已经卡死」。
     pub health: EngineHealth,
+    /// 宿主 API 状态（Axum 侧要用它查插件路由表）
+    pub host: Arc<HostState>,
+    /// 引擎指令通道（转发插件路由请求用）
+    pub engine_tx: std::sync::mpsc::Sender<EngineCmd>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -86,15 +98,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let registry: Registry = Arc::new(Mutex::new(Vec::new()));
     let logs: SharedLogs = Arc::new(Mutex::new(VecDeque::new()));
     let ticks = Arc::new(AtomicU64::new(0));
+    // 宿主 API 状态：两个运行时的适配层都往这里调（见 hostapi.rs）
+    let host = HostState::new(logs.clone(), db.clone());
 
-    // ---------- 3. 启动 QuickJS 引擎线程（内部扫描并加载 plugins/*.js，并注册 cron 任务） ----------
+    // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js|*.py，并注册 cron 任务） ----------
     let mut engine = JsEngine::spawn(
         plugins_dir.clone(),
         registry.clone(),
         logs.clone(),
         db.clone(),
+        host.clone(),
     );
     let health = engine.health();
+    let engine_tx = engine.sender();
 
     // ---------- 4. tick 循环：tokio interval → 引擎线程 → 插件 on_tick() ----------
     let tick_tx = engine.sender();
@@ -139,6 +155,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         plugins_dir: plugins_dir.clone(),
         db_path: db_path.clone(),
         health,
+        host,
+        engine_tx,
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {

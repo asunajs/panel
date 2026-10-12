@@ -2,15 +2,17 @@
 name = "plugin-panel"
 version = "0.1.0"
 edition = "2021"
-description = "Rust + QuickJS 动态插件任务面板（第一轮 MVP）"
+description = "Rust + QuickJS + PocketPy 动态插件任务面板"
 
 [dependencies]
 # HTTP 服务器
 axum = "0.8"
 # 异步运行时（rt-multi-thread: 多线程调度；signal: Ctrl-C 优雅退出）
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
-# 嵌入式 JS 引擎：rquickjs 绑定 QuickJS-ng，静态编译进二进制，无外部 .so 依赖
-rquickjs = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+# 嵌入式 JS 引擎：rquickjs 绑定 QuickJS-ng，静态编译进二进制，无外部 .so 依赖。
+# loader 特性是给「插件里 import { ... } from 'host-api'」用的：自定义 Resolver/Loader
+# 把 host-api 解析成内置模块，插件脚本与 Node 下的一字不差。
+rquickjs = { version = "0.14", features = ["loader"] }
 # SQLite。bundled = 把 SQLite C 源码一起编译进来，目标机不需要装 libsqlite3
 rusqlite = { version = "0.40", features = ["bundled"] }
 # 插件 ↔ 宿主之间的 JSON 通信
@@ -18,6 +20,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 时间格式化
 chrono = "0.4"
+# host_api.http_fetch 的传输层：阻塞式 + rustls（内置 webpki 根证书，目标机不需要装 CA）。
+# 只用它做「插件发起的出站请求」，服务端仍然是 Axum。
+# 实测（cargo zigbuild aarch64-unknown-linux-musl）能出静态 musl 产物，见 README §9.3。
+ureq = { version = "3", features = ["rustls"] }
+
+[build-dependencies]
+# 编译 vendored 的 pocketpy（amalgamated 单文件 C）—— 见 build.rs 的注释
+cc = "1"
 
 # 面向低配 ARM 盒子：体积优先。本轮不验证效果，先把配置占位在这里。
 [profile.release]

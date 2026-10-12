@@ -1,0 +1,29 @@
+{
+  "name": "host-api",
+  "version": "1.0.0",
+  "description": "Node.js host API adapter: the same JS plugin runs under the QuickJS host and under Node.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "host-api-run": "./bin/run.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "files": [
+    "src",
+    "bin",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/run-tests.mjs",
+    "demo": "node bin/run.mjs examples/demo.js --once"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}

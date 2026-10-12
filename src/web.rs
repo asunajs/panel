@@ -2,26 +2,141 @@
 //!
 //! 故意不引前端框架：首屏由 Rust 直接渲染成 HTML（没有 JS 也能看到状态），
 //! 再加约 30 行原生 fetch 做局部刷新。等 UI 真的复杂起来再考虑上框架。
+//!
+//! 另外这里还承担一件事：**插件注册的 HTTP 路由由 Axum 统一分发**。
+//! 没被内置路由匹配到的请求走 `fallback`，查插件路由表 → 投给引擎线程 →
+//! 在对应插件的解释器里执行 handler → 把结果写回响应。Python 插件不参与这一层。
 
 use crate::db::{self, JobRow, TaskRow};
-use crate::js_engine::{LogLine, PluginInfo};
+use crate::engine::{EngineCmd, PluginInfo};
+use crate::hostapi::LogLine;
 use crate::AppState;
-use axum::extract::State;
-use axum::response::Html;
+use axum::body::Bytes;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+/// 插件路由请求体的上限（低配设备上不给插件机会把内存吃光）。
+const MAX_ROUTE_BODY: usize = 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/state", get(api_state))
+        .fallback(plugin_route)
         .with_state(state)
 }
 
 async fn index(State(st): State<AppState>) -> Html<String> {
     Html(render_page(&st))
+}
+
+/// 插件注册的 HTTP 路由：查表 → 投给引擎 → 等结果。
+///
+/// 引擎线程是单线程串行执行插件的，所以这里必须带超时：
+/// 一个慢 handler 不能把 HTTP 连接也一起拖住。
+async fn plugin_route(State(st): State<AppState>, req: Request) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let key = format!("{method} {path}");
+
+    let known = st
+        .host
+        .routes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| format!("{} {}", r.method, r.path) == key);
+    if !known {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("没有插件注册路由 {key}（内置路由只有 / 和 /api/state）\n"),
+        )
+            .into_response();
+    }
+
+    let mut headers = serde_json::Map::new();
+    for (k, v) in req.headers().iter() {
+        headers.insert(
+            k.as_str().to_string(),
+            json!(v.to_str().unwrap_or("<非 UTF-8>")),
+        );
+    }
+
+    let body_bytes: Bytes = match axum::body::to_bytes(req.into_body(), MAX_ROUTE_BODY).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("请求体超过 {MAX_ROUTE_BODY} 字节: {e}\n"),
+            )
+                .into_response()
+        }
+    };
+    let request_json = json!({
+        "method": method,
+        "path": path,
+        "query": query,
+        "headers": headers,
+        "body": String::from_utf8_lossy(&body_bytes),
+    })
+    .to_string();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::HttpRequest {
+            key: key.clone(),
+            request_json,
+            reply: tx,
+        })
+        .is_err()
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出\n").into_response();
+    }
+
+    // 超时给得比插件执行预算宽一点：预算是给 handler 的，这里还要算上排队
+    let wait = Duration::from_millis(st.health.budget_ms + 1_000);
+    let reply = match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => return (StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话\n").into_response(),
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("插件路由 {key} 超过 {wait:?} 没返回\n"),
+            )
+                .into_response()
+        }
+    };
+
+    let v: serde_json::Value = serde_json::from_str(&reply).unwrap_or_else(|_| json!({ "body": reply }));
+    let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(200) as u16;
+    let body = v
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut resp = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    if let Some(hs) = v.get("headers").and_then(|h| h.as_object()) {
+        for (k, val) in hs {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::try_from(k.as_str()),
+                HeaderValue::try_from(val.as_str().unwrap_or("")),
+            ) {
+                resp = resp.header(name, value);
+            }
+        }
+    }
+    resp.body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
 }
 
 /// 给前端轮询用的 JSON 快照。插件与日志都是 JSON 可序列化的普通结构体。
@@ -123,7 +238,7 @@ fn job_rows(jobs: &[JobRow]) -> String {
 
 fn plugin_rows(plugins: &[PluginInfo]) -> String {
     if plugins.is_empty() {
-        return "<tr><td colspan=\"5\" class=\"empty\">没有加载任何插件</td></tr>".to_string();
+        return "<tr><td colspan=\"6\" class=\"empty\">没有加载任何插件</td></tr>".to_string();
     }
     plugins
         .iter()
@@ -136,8 +251,9 @@ fn plugin_rows(plugins: &[PluginInfo]) -> String {
                 None => "<span class=\"bad idle\">已加载 / 无 on_tick</span>".to_string(),
             };
             format!(
-                "<tr><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td></tr>",
+                "<tr><td class=\"mono\">{}</td><td class=\"mono dim\">{}</td><td class=\"mono dim\">{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"mono dim\">{}</td></tr>",
                 esc(&p.name),
+                esc(&p.runtime),
                 esc(&p.file),
                 state,
                 p.ticks,
@@ -259,7 +375,7 @@ const PAGE: &str = r##"<!DOCTYPE html>
 
   <h2>已加载插件</h2>
   <table>
-    <thead><tr><th>插件</th><th>文件</th><th>状态</th><th class="num">tick 次数</th><th>最近 tick</th></tr></thead>
+    <thead><tr><th>插件</th><th>运行时</th><th>文件</th><th>状态</th><th class="num">tick 次数</th><th>最近 tick</th></tr></thead>
     <tbody id="plugins">__PLUGIN_ROWS__</tbody>
   </table>
 
@@ -303,10 +419,11 @@ const PAGE: &str = r##"<!DOCTYPE html>
         var st = p.error
           ? '<span class="bad bad">加载失败</span><div class="err">' + esc(p.error) + '</div>'
           : (p.has_on_tick ? '<span class="bad ok">运行中</span>' : '<span class="bad idle">已加载 / 无 on_tick</span>');
-        return '<tr><td class="mono">' + esc(p.name) + '</td><td class="mono dim">' + esc(p.file) +
-               '</td><td>' + st + '</td><td class="num">' + p.ticks +
+        return '<tr><td class="mono">' + esc(p.name) + '</td><td class="mono dim">' + esc(p.runtime) +
+               '</td><td class="mono dim">' + esc(p.file) + '</td><td>' + st +
+               '</td><td class="num">' + p.ticks +
                '</td><td class="mono dim">' + esc(p.last_tick || '-') + '</td></tr>';
-      }).join('') || '<tr><td colspan="5" class="empty">没有加载任何插件</td></tr>';
+      }).join('') || '<tr><td colspan="6" class="empty">没有加载任何插件</td></tr>';
 
       document.getElementById('jobs').innerHTML = s.jobs.map(function (j) {
         var st;

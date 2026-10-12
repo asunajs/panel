@@ -1,4 +1,4 @@
-# plugin-panel —— Rust + QuickJS 动态插件任务面板
+# plugin-panel —— Rust + QuickJS + PocketPy 动态插件任务面板
 
 低配 ARM 盒子上的任务控制面板。最终目标：常驻内存极低 / JS+Python 动态插件 / 毫秒级 Cron / SQLite 持久化 / 单二进制。
 
@@ -9,56 +9,91 @@
 | 第一轮 | Axum + 嵌入 QuickJS + 插件加载 + `host.log` + SQLite + 每秒 `on_tick` | ✅ 已验证 |
 | 第二轮 | 毫秒级 Cron 调度 + `jobs` 表持久化 + 面板任务视图 | ✅ 已验证 |
 | 第三轮 | 执行预算（死循环防护）+ 任务熔断 + 引擎健康上报 + SIGTERM 优雅退出 | ✅ 已验证 |
-| 第四轮 | **内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物** | ✅ 本机已验证，ARM 待 CI |
-| 第五轮 | **部署与分发**（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本已测（15 项用例），Release 流水线待打 tag 验证 |
-| 后续 | Python 支持 / 插件热更新 / 完整前端 | 未开始 |
+| 第四轮 | 内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物 | ✅ 本机已验证，ARM 待 CI |
+| 第五轮 | 部署与分发（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本已测（15 项用例），Release 流水线待打 tag 验证 |
+| 第六轮 | **双运行时：嵌入 PocketPy 跑 Python 插件 + 抽象宿主 API（`host-api`/`host_api`）+ JS 插件 HTTP 路由 + mtime 热更新** | ✅ 本机已验证（含双运行时冒烟、静态 musl 产物 4.4 MB） |
+| 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | ✅ 适配器自带用例（Node 20 / CPython 51 项），交叉验证见 §10.5 |
+| 后续 | 完整前端 / 插件市场 / 多实例 | 未开始 |
 
 ---
 
 ## 1. 架构
 
 ```
-                 tokio 多线程 runtime                   专用 OS 线程 (std::thread)
-   ┌───────────────────────────────────────┐   ┌──────────────────────────────────────┐
-   │  Axum (axum::serve)                    │   │  QuickJS Runtime (独占, 非 Send)      │
-   │    GET /            服务端渲染 HTML     │   │    ├─ Context  hello.js               │
-   │    GET /api/state   JSON 快照           │   │    ├─ Context  counter.js             │
-   │                                        │   │    └─ Context  scheduler-demo.js      │
-   │  tokio::time::interval(1s)  ───Tick───┼──>│                                      │
-   │                                        │   │  ┌── Scheduler (deadline 驱动) ──┐   │
-   │  rusqlite (Arc<Mutex<Connection>>)     │   │  │  next_fire = 最近到期时刻      │   │
-   │    tasks 表  —— 运行记录                │   │  │  recv_timeout(next_fire - now) │   │
-   │    jobs  表  —— 调度任务                │<──┼──┤  到期 → __dispatch_task(name)  │   │
-   └───────────────────────────────────────┘   │  └────────────────────────────────┘   │
-                                               │  host.log ──> 日志环形缓冲            │
-                                               └──────────────────────────────────────┘
+            tokio 多线程 runtime                      专用 OS 线程 (std::thread)
+  ┌────────────────────────────────┐   ┌──────────────────────────────────────────────┐
+  │  Axum (axum::serve)            │   │  QuickJS Runtime (独占, 非 Send)              │
+  │    GET  /          服务端渲染   │   │    ├─ Context  hello.js                       │
+  │    GET  /api/state JSON 快照    │   │    ├─ Context  host-api-demo.js               │
+  │    fallback: 插件注册的 HTTP 路由│   │    └─ Context  counter.js                     │
+  │         │                      │   │                                              │
+  │         └── EngineCmd::HttpRequest ──>│  PocketPy 2.2.0（惰性初始化，非 Send）        │
+  │                                │   │    ├─ VM 1     sysinfo.py                    │
+  │  tokio::time::interval(1s) ───Tick──>│    └─ VM 2     sqlite-demo.py                 │
+  │                                │   │                                              │
+  │  rusqlite (Arc<Mutex<Conn>>)   │   │  ┌── Scheduler (deadline 驱动) ──┐            │
+  │    tasks 表  —— 运行记录        │   │  │  next_fire = 最近到期时刻      │            │
+  │    jobs  表  —— 调度任务        │<──┼──┤  recv_timeout(next_fire - now) │            │
+  └────────────────────────────────┘   │  │  到期 → __dispatch_task(name)  │            │
+                                       │  └────────────────────────────────┘            │
+                                       │  host_api.* ──> HostState::do_* ──> 日志/SQLite │
+                                       │  插件文件 mtime 变了 ──> 重建解释器 + 重登记任务 │
+                                       └──────────────────────────────────────────────┘
 ```
 
-三条链路，两轮累计验证：
+**两个运行时共用一套宿主 API 与一个调度器**（`src/hostapi.rs` 是唯一实现）：
 
-- **Rust → JS**：`tokio::time::interval` 每秒投 Tick（`on_tick`）；调度器到点投 `__dispatch_task`（cron handler）
-- **JS → Rust**：`host.log(...)`；`host.cron(...)` / `host.every(...)` 注册任务
-- **Rust → SQLite**：`tasks` 表心跳、`jobs` 表任务状态
+| 链路 | JS 插件 | Python 插件 |
+|---|---|---|
+| 注册任务 | `host.cron` / `register_cron` → 闭包捕获的 `pending` | `host_api.register_cron` → 原生函数 → `HostState.vms[vm].pending` |
+| 触发任务 | `__dispatch_task(name, payloadJson)` | `__pp_dispatch(name, payloadJson)` |
+| 每秒心跳 | 全局 `on_tick(payload)` | `__main__` 里的 `on_tick(payload)` |
+| 执行预算 | QuickJS interrupt handler（墙钟） | pocketpy watchdog（**CPU 时间**） |
+| 隔离粒度 | 一个插件一个 `Context` | 一个插件一个 `VM`（`py_switchvm`，最多 15 个） |
+| HTTP 路由 | ✅ 挂在 Axum 同一端口 | ❌ 抛 `NotImplementedError`（能力边界写死） |
+
+三条链路：
+
+- **Rust → 插件**：`tokio::time::interval` 每秒投 Tick（`on_tick`）；调度器到点投 `__dispatch_task` / `__pp_dispatch`
+- **插件 → Rust**：`log / register_cron / sqlite_query / http_fetch`，一律 String 进 String 出（JSON 语义）
+- **Rust → SQLite**：`tasks` 表心跳、`jobs` 表任务状态与 `last_error`
+
+跨运行时的完整 API 规范见 [`docs/host-api.md`](docs/host-api.md)。
 
 ## 2. 目录结构
 
 ```
 rust-plugin-panel/
 ├── Cargo.toml
+├── build.rs           编译 vendored 的 pocketpy（amalgamated 单文件 C）+ 打开 watchdog
 ├── install.sh          一键安装：架构检测 → 下载 → SHA256 校验 → 装进 PATH
+├── vendor/pocketpy/    pocketpy v2.2.0（pocketpy.c / pocketpy.h / pp_shim.c / VERSION）
 ├── src/
-│   ├── main.rs        启动顺序：SQLite → 引擎线程 → tick 循环 → Axum
-│   ├── js_engine.rs   ★ QuickJS 线程、插件加载、host 注入、任务分发
-│   ├── cron.rs        ★ Cron 表达式解析 + next_after（13 个单测）
-│   ├── scheduler.rs   ★ 调度器：deadline 驱动、熔断退避（10 个单测）
+│   ├── main.rs        启动顺序：SQLite → 宿主状态 → 引擎线程 → tick 循环 → Axum
+│   ├── engine.rs      ★ 引擎线程：QuickJS + PocketPy + 调度器 + 热更新 + 路由分发
+│   ├── hostapi.rs     ★ 宿主 API 的**唯一实现**（四个运行时共用，HostState::do_*）
+│   ├── jshost.rs      ★ JS 侧适配：内置 `host-api` 模块源码 + `__host_*` 原生函数
+│   ├── pyhost.rs      ★ Python 侧适配：`host_api` 模块 + 原生函数 + 引导脚本
+│   ├── python.rs      ★ PocketPy FFI 薄封装（PyVm / 参数读取 / 预算 / traceback）
+│   ├── cron.rs        Cron 表达式解析 + next_after（13 个单测）
+│   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件摘任务（11 个单测）
 │   ├── db.rs          SQLite：tasks 表 + jobs 表
-│   └── web.rs         Axum 路由 + 服务端渲染面板
+│   └── web.rs         Axum 路由 + 服务端渲染面板 + 插件路由 fallback
 ├── plugins/
-│   ├── hello.js            on_tick + host.log 示例
-│   ├── counter.js          验证「每个插件独立 Context」
-│   └── scheduler-demo.js   ★ cron / 毫秒级任务示例
+│   ├── js/
+│   │   ├── hello.js            on_tick + host.log 示例
+│   │   ├── counter.js          验证「每个插件独立 Context」
+│   │   ├── scheduler-demo.js   cron / 毫秒级任务示例
+│   │   └── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
+│   └── py/
+│       ├── sysinfo.py          ★ 最小 Python 插件（every + cron + on_tick）
+│       └── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
+├── adapters/                  让同一份插件脚本跑在别的运行时里
+│   ├── node/                  npm 包 `host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
+│   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
+├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
 ├── scripts/
-│   ├── smoke.py            端到端冒烟：真的把服务跑起来走一遍链路
+│   ├── smoke.py            端到端冒烟：双运行时、插件路由、Python 任务真的触发
 │   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
 ├── .github/workflows/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
@@ -66,7 +101,8 @@ rust-plugin-panel/
 └── examples/
     ├── probe.rs            分层探针：逐项验证 tokio/sqlite/rquickjs 可用
     ├── broken-plugins/     容错测试：坏插件不影响好插件
-    ├── hostile-plugins/    执行预算 / 熔断测试：死循环插件
+    ├── hostile-plugins/    执行预算 / 熔断测试：JS 死循环插件
+    ├── hostile-py-plugins/ 同一件事的 Python 版（验证 pocketpy watchdog）
     └── recovery-plugins/   熔断恢复测试：先失败几次再正常
 ```
 
@@ -74,16 +110,16 @@ rust-plugin-panel/
 
 ```bash
 cd rust-plugin-panel
-cargo run                    # 首次会编译 SQLite bundled + QuickJS-ng
+cargo run                    # 首次会编译 SQLite bundled + QuickJS-ng + PocketPy
 open http://127.0.0.1:8787/  # 面板
 ```
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1:8787` | 监听地址 |
-| `PLUGINS_DIR` | `plugins` | 插件目录 |
+| `PLUGINS_DIR` | `plugins` | 插件目录（递归两层，`.js` / `.py` 都收） |
 | `DB_PATH` | `data/panel.db` | SQLite 文件 |
-| `EXEC_BUDGET_MS` | `2000` | 单次 JS 调用的执行预算；调大它可复现 `degraded` 场景 |
+| `EXEC_BUDGET_MS` | `2000` | 单次 JS **或 Python** 调用的执行预算；调大它可复现 `degraded` 场景 |
 | `JOB_TRIP_THRESHOLD` | `5` | 连续失败多少次熔断该任务 |
 | `JOB_COOLDOWN_MS` | `30000` | 首次熔断的冷却时长 |
 | `JOB_MAX_COOLDOWN_MS` | `600000` | 指数退避的冷却上限 |
@@ -96,23 +132,63 @@ setsid ./target/release/plugin-panel > /tmp/panel.log 2>&1 < /dev/null &
 
 ## 4. 插件 API
 
+完整规范（四个运行时的能力矩阵、语义约定、错误约定）见 **[`docs/host-api.md`](docs/host-api.md)**。
+
+### JS 插件
+
 ```javascript
-// 日志
+// 老写法（第一～五轮，继续可用）
 host.log(...) / host.warn(...) / host.error(...)   // console.* 同样转发
-
-// 每秒一次的心跳回调（第一轮）
-function on_tick(payload) { /* payload = { seq, ts } */ }
-
-// 调度任务（第二轮）
 host.cron(name, expr, handler)      // expr: 5 段或 6 段 cron
 host.every(name, interval, handler) // interval: '500ms' / '2s' / '1m' / '1h'
+
+// 跨运行时写法（第六轮）—— 同一份文件在 Node 里也能跑
+import { log, register_cron, every, sqlite_query, sqlite_exec, http_fetch, register_route } from 'host-api';
+
+// 每秒一次的心跳回调
+function on_tick(payload) { /* payload = { seq, ts } */ }
 
 // handler 收到的 payload
 // { name, plugin, expr, runs, scheduledAt, firedAt, lateMs }
 //   lateMs = 实际触发比原定晚了多少毫秒 —— 用来观察调度精度
 ```
 
+带顶层 `import` / `export` 的文件按 **ES 模块**加载（引擎线程装了自定义 Resolver/Loader，
+把 `host-api` 解析成内置模块），否则按普通脚本 eval。两种写法可以混用。
+
+### Python 插件
+
+```python
+from host_api import log, register_cron, every, sqlite_query, sqlite_exec, http_fetch
+
+log("插件加载中")
+
+def heartbeat(payload):                 # payload 字段与 JS 完全一致
+    sqlite_exec("INSERT INTO hits (at) VALUES (?1)", [payload["firedAt"]])
+
+every("py-heartbeat", "2s", heartbeat)
+
+def on_tick(payload):                   # 可选，语义与 JS 的 on_tick 相同
+    pass
+```
+
+Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个插件一个独立 VM。
+语法是 CPython 3.9 级别的子集，缺口见 `docs/host-api.md` §4（生成器表达式、`finally`、
+`nonlocal`、`async` 都没有）。
+
 任务名在**同一插件内**必须唯一，重名会让插件加载直接失败（不静默覆盖）。
+
+### 热更新
+
+插件文件的 mtime 变了 → 引擎重建它的解释器实例（JS 换新 Context、Python 复用同一 VM 索引并
+`py_resetvm`）、摘掉它的旧任务、重新登记新任务。改完存盘即可，不用重启进程：
+
+```
+[20:40:26] [sysinfo] [info] sysinfo-v2: 已加载（pocketpy 插件，from host_api import ...）
+[20:40:26] [sysinfo] [info] 插件已热更新（摘掉 2 个旧任务，登记 2 个新任务）
+```
+
+顺序上「先摘旧的、再装新的」：即使新版本加载失败，面板上也不会留下幽灵任务。
 
 ### Cron 语法
 
@@ -161,9 +237,28 @@ EXEC_BUDGET_MS=500 JOB_TRIP_THRESHOLD=3 JOB_COOLDOWN_MS=5000 \
 
 # ⑨ 安装脚本用例（六条分支，macOS 上也能跑）
 bash scripts/test-install.sh
+
+# ⑩ 端到端冒烟：双运行时都加载 + 插件路由 + Python 任务真的触发 + 优雅退出
+cargo build --release && python3 scripts/smoke.py ./target/release/plugin-panel
+
+# ⑪ Python 侧的执行预算（pocketpy watchdog）：死循环被打断 + 对照组照跑
+PLUGINS_DIR=examples/hostile-py-plugins EXEC_BUDGET_MS=500 \
+  BIND_ADDR=127.0.0.1:8793 cargo run
+
+# ⑫ 插件注册的 HTTP 路由（挂在同一个 Axum 端口上）
+curl -i http://127.0.0.1:8787/hits            # JS 插件注册的 GET
+curl -i -X POST "http://127.0.0.1:8787/hits?tag=x" -d 'body'   # POST + 查询串 + 请求体
+curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/nope   # 404
+
+# ⑬ 热更新：改完插件存盘，看日志出现「插件已热更新」
+$EDITOR plugins/py/sysinfo.py
+
+# ⑭ 同一份插件跑在别的运行时里（跨运行时验证）
+cd adapters/node   && node test/run-tests.mjs && node bin/run.mjs ../../plugins/js/host-api-demo.js --once
+cd adapters/python && python3 -m unittest discover -s tests && python3 -m host_api ../../plugins/py/sysinfo.py --once
 ```
 
-实测数据（`plugins/scheduler-demo.js`）：
+实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：
 
 ```
 任务              表达式              runs   下次触发               实测精度
@@ -172,10 +267,13 @@ every-3s         */3 * * * * *       7      整 3 秒                延迟 2-5m
 hourly-30s       30 0 * * * *        1      20:00:30.000           延迟 2ms
 weekday-morning  30 9 * * MON-FRI    0      次日 09:30             -
 boom             @every 4s           5      -                      异常隔离，last_error 带 stack
+py-heartbeat     @every 2s           -      +2s                    延迟 0-1ms（Python 侧）
+py-note          @every 3s           -      +3s                    延迟 1ms，写入 py_notes 表
+py-runaway       @every 2s           5      熔断中                 500ms 预算内被 watchdog 打断
 ```
 
-常驻占用：**RSS ≈ 8.6 MB，idle CPU 0.1%**（含 3 个插件 Context + 5 个调度任务）。
-注意 macOS 的 `ps` 把共享库页也算进来，真实独占只有 2.6 MB —— 怎么读这些数字见 §8.1。
+常驻占用：**纯 JS 部署 RSS ≈ 8.1 MB（真实独占 2.1 MB），加 2 个 Python 插件后 ≈ 13.3 MB**。
+macOS 的 `ps` 把共享库页也算进来，真实独占看 `footprint` 的 `phys_footprint` —— 怎么读这些数字见 §8.1。
 
 ## 6. 踩坑记录
 
@@ -210,6 +308,37 @@ boom             @every 4s           5      -                      异常隔离�
     所以 `scripts/test-install.sh` 用 PATH 里的 shim 假造 `uname` / `curl` / `sha256sum`，
     把架构检测、下载、校验、安装、Termux 路径、失败分支全在本机走一遍 ——
     「用户唯一会跑的那个脚本」不该是唯一没被测过的代码。
+
+### PocketPy 嵌入（第六轮，都是实测踩出来的）
+
+16. **crates.io 上的 `pocketpy-sys 0.1.1` 不能用**：它的 `build.rs` 要 cmake + bindgen（libclang），
+    而且 vendor 的是 pocketpy **2.0.0**。交叉编译到 musl 时工具链会缺 libclang，直接卡死。
+    → 改成 vendor `pocketpy.c` + `pocketpy.h` 两个 amalgamated 文件（1.29 MB + 43 KB），
+    用 `cc` crate 一个 `cc::Build` 编掉，零额外工具链。见 `build.rs` / `vendor/pocketpy/VERSION`。
+17. **2.0.0 的 `py_switchvm` 会直接把进程 abort**。现象：`py_switchvm(1)` → SIGABRT（exit 134），
+    什么信息都没有。给 pocketpy 的 `VALIDATE` 宏塞了个打印才看到
+    `[vm.c:94] VALIDATE FAIL: expected 1, got 58` —— 根因是 2.0.0 在 `VM__ctor` **之后**才
+    设置 `pk_current_vm`，新建 VM 的类型表全落到了旧 VM 上，第一个断言就炸。
+    2.2.0 里 `pk_current_vm = pk_all_vm[index] = PK_MALLOC(...)` 在 `VM__ctor` **之前**，问题消失。
+    → 这就是选 2.2.0 而不是 2.0.0 的全部理由，**不是「更新更好」，是 2.0.0 用不了**。
+18. **原生函数读参数不能用 `py_arg` 宏**：2.0.0 是 `((char*)p + (i<<4))`（16 字节步长），
+    2.2.0 是 `&argv[i]`（`sizeof(py_TValue) == 24`）。照抄头文件的宏会读出 `nil`，
+    而且**不报错**（现象是「参数全是 None」）。→ 参数读取一律走自己写的 C shim `pp_arg()`
+    （`vendor/pocketpy/pp_shim.c`），把版本差异关在 C 里。
+19. **`py_Name` 是不透明指针，不是 `u16`**。头文件里 `typedef struct py_OpaqueName* py_Name;`，
+    按整数声明会在取全局变量时静默拿到垃圾。→ `src/python.rs` 里声明成 `*mut c_void`。
+20. **`py_call` 的返回值不在寄存器里**，要读 `py_retval()`。一开始从寄存器取，
+    于是「函数明明执行了但返回空」，traceback 也全是空的。
+21. **`py_resetvm` 不清 print 钩子**：它会把 VM 的 globals 清掉，但 `py_sys_setprint` 是
+    进程级的。热更新时如果忘了重新装钩子，插件的 `print` 就跑到 stdout 而不是面板日志里。
+22. **watchdog 看的是 CPU 时间（`clock()`），不是墙钟**。所以它能拦住 `while True: pass`，
+    拦不住阻塞在系统调用里的插件（比如等一个不响应的 socket）。
+    要 `PK_ENABLE_WATCHDOG=1` 才会编进去 —— `build.rs` 里显式定义了。
+23. **pocketpy 的解释器是进程级单例状态**（`pk_current_vm`、类型表），所以
+    `cargo test` 里解释器相关的用例必须串行跑。并行跑两个线程互相切 VM，直接 SIGABRT ——
+    `src/python.rs` 的测试用 `serial()` 一把全局锁锁住，这不是洁癖，是必须的。
+24. **PocketPy 的 `dir()` 需要参数**（`dir()` 零参调用报 `TypeError`），
+    所以「这个变量存不存在」不能用 `'x' in dir()` 探测，得用 `try/except NameError`。
 
 ## 7. 执行预算与熔断（引擎自我保护）
 
@@ -348,6 +477,29 @@ CPU 占用（进程 CPU 时间差值法）：
 - 本轮复测（release，3 次）：RSS 8560 / 8640 / 8656 KB，线程 4 —— 与表里的 8928 KB 同量级，
   差异来自测量时刻的插件与 DB 状态，不影响结论。
 
+### 8.1b 加 Python 支持要多付多少内存（第六轮实测）
+
+同一台机器、同一个二进制，**只换 `PLUGINS_DIR`**，跑 5 秒后取 `ps -o rss` 与
+`footprint` 的 `phys_footprint`（真实独占）：
+
+| 场景 | RSS | phys_footprint | 增量 |
+|---|---|---|---|
+| 0 个插件（纯宿主） | 8144 KB | **2112 KB** | — |
+| 4 个 JS 插件（`plugins/js`） | 9216 KB | **2864 KB** | +752 KB |
+| 1 个 Python 插件 | 12032 KB | **5488 KB** | **+3376 KB** |
+| 2 个 Python 插件 | 13328 KB | **6752 KB** | +1264 KB |
+| 4 JS + 2 Python（`plugins/`） | 14512 KB | **7632 KB** | +4768 KB |
+
+结论（也是设计依据）：
+
+- **PocketPy 是惰性初始化的**：`engine.rs` 先扫插件目录，只有真的存在 `.py` 文件才调
+  `py_initialize()`。纯 JS 部署**一分钱不花**，不需要为了「支持 Python」牺牲常驻内存。
+- 解释器 + 第一个 VM ≈ **3.4 MB**，之后每多一个 Python 插件 ≈ **1.3 MB**（VM 上限 15 个）。
+- 对照 JS 侧：一个插件一个 Context 只花 ~190 KB。所以「Python 插件」的单价确实贵一个数量级，
+  但它换来的是一整门语言 —— 值不值取决于盒子的内存预算，用户自己选。
+- 依然远低于「< 10 MB」的目标：**纯 JS 部署 2.9 MB，带两个 Python 插件 7.6 MB**。
+  （Linux 静态 musl 上的真实数字以 CI 为准，macOS 的共享页会让 RSS 虚高。）
+
 ### 8.2 跨平台验证（GitHub Actions）
 
 开发机是 arm64 macOS：**跑不了 Linux 二进制，也没法验证交叉编译产物**
@@ -394,16 +546,30 @@ python3 scripts/smoke.py ./target/release/plugin-panel
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-cargo install --locked cargo-zigbuild   # 借 zig 编译 QuickJS / SQLite 的 C 代码
+cargo install --locked cargo-zigbuild   # 借 zig 编译 QuickJS / PocketPy / SQLite 的 C 代码
 cargo zigbuild --release --target aarch64-unknown-linux-musl
 ```
 
-产物（实测，耗时 1m03s）：
+产物（实测，含 QuickJS + PocketPy + SQLite + rustls，耗时 43s）：
 
 ```
-ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped    2.7 MB
+ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped    4.4 MB
 PT_INTERP: 无 → 完全静态
 ```
+
+第五轮只有 QuickJS + SQLite 时是 2.7 MB；第六轮加进 PocketPy（~700 KB 代码）
+与 ureq/rustls（内置 webpki 根证书，目标机不需要装 CA）后是 4.4 MB。
+
+**三套 C 代码都要交叉编译**，这是第六轮最容易被卡住的地方：
+
+| C 代码 | 谁编 | 需要的工具链 |
+|---|---|---|
+| QuickJS-ng | `rquickjs-sys` 的 build script | 交叉 `cc`（zig 提供） |
+| SQLite | `rusqlite` 的 `bundled` 特性 | 同上 |
+| **PocketPy** | **本项目自己的 `build.rs`（`cc` crate）** | 同上 —— 这也是当初否掉 `pocketpy-sys` 的原因（它还要 cmake + bindgen/libclang） |
+
+CI 的 musl job 里显式设了 `CC_aarch64_unknown_linux_musl=musl-gcc`；
+本地用 `cargo zigbuild` 时 zig 会自动接管 `CC_*`，不需要额外配置。
 
 静态链接意味着丢到任何 ARM Linux 上都不需要 libc ——
 但**本机执行会报 `Exec format error`**，这就是运行验证必须交给 CI 的原因。
@@ -540,7 +706,9 @@ WantedBy=multi-user.target
 
 | 项 | 值 |
 |---|---|
-| RSS | 8.6 MB（macOS `ps`，含共享库页；`footprint` 实测独占 **2.6 MB**） |
+| RSS | 8.1 MB（纯宿主，macOS `ps`，含共享库页；`footprint` 实测独占 **2.1 MB**） |
+| RSS（+4 JS 插件） | 9.2 MB（独占 2.9 MB） |
+| RSS（+4 JS + 2 Python 插件） | 14.5 MB（独占 7.6 MB） |
 | 线程数 | 4 |
 | CPU（空闲） | 0.0–0.1% |
 | 二进制 | 2.7 MB（静态 musl） |
@@ -548,12 +716,128 @@ WantedBy=multi-user.target
 
 空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。
 
-## 10. 影响后续扩展的设计决策（未实现）
+## 10. 第六/七轮：双运行时与跨运行时宿主 API
 
-1. **跨运行时抽象层。** `js_engine.rs` 里「线程 + 通道 + 插件表 + 调度器」这套骨架和 QuickJS 无关。加 Python 时把 `LoadedPlugin.ctx` 换成 `enum Runtime { Js(Context), Py(PyCtx) }`，`dispatch_task` 按变体分发即可，Axum / SQLite / 调度器一行不用改。
-2. **`host.*` 的模式可以直接复制。** 底层 Rust 函数只收 `String`（JSON），业务语义放 JS 包装层，宿主侧永远不碰 `Value` 的类型分支。加 `host.http` / `host.sql` 时沿用。
-3. **热更新入口已留好。** 每 tick 重新取 `on_tick`、每轮重新查 `__tasks`，只要把「每插件一个 Context」改成「持有 Context + 可重建」，watch 文件变化后重建 Context 即可。
+### 10.1 为什么选 PocketPy（选型评估）
+
+需求是「Python 动态插件 + 常驻内存极低 + 交叉编译到 aarch64-musl + 单二进制」。
+四个候选，都是按「能不能塞进 10 MB 的预算里、能不能在 musl 上编出来」这两条筛的：
+
+| 候选 | 常驻内存 | musl 交叉编译 | 多实例隔离 | 执行预算钩子 | 结论 |
+|---|---|---|---|---|---|
+| CPython | 3～5 MB 起（+ 一堆 .so） | 很痛苦（要编 libpython，依赖多） | 子解释器有共享 GIL/状态坑 | 需要 C 层 tracings | ❌ |
+| MicroPython | ~256 KB（裁剪后） | 要写移植层 + 配 `mpconfigport.h` | 无现成多实例 API | 无 | ❌ 配置成本高于收益 |
+| RustPython | 10 MB+ | 能编，但体积/速度都不划算 | 无 | 无 | ❌ |
+| **PocketPy 2.2.0** | **解释器 + 首 VM ≈ 3.4 MB，每多一个 VM ≈ 1.3 MB** | **单文件 C11，`cc` 一个命令编掉** | **`py_switchvm(i)` 现成，最多 16 个 VM** | **`py_watchdog_begin(ms)` 现成** | ✅ |
+
+决定性的是最后两列：pocketpy 的 API 里**恰好有**「多实例隔离」和「执行预算」这两个钩子，
+而这两个正是第三轮已经验证过的引擎自我保护机制所需要的。别的候选都得自己造。
+
+实测验证（本机，不是文档抄的）：
+
+```bash
+# 1. 编译方式：两个文件 + 一个 shim，纯 cc，无 cmake / 无 bindgen / 无 libclang
+cc -c vendor/pocketpy/pocketpy.c -DPK_ENABLE_WATCHDOG=1 -DPK_ENABLE_OS=1 -std=c11 -O2
+# 2. 交叉编译：整个二进制（QuickJS + PocketPy + SQLite + rustls）→ 4.4 MB 静态 aarch64
+cargo zigbuild --release --target aarch64-unknown-linux-musl
+file target/.../plugin-panel
+# → ELF 64-bit LSB executable, ARM aarch64, statically linked
+# 3. 内存：见 §8.1b 的实测表
+```
+
+⚠️ **不要用 crates.io 上的 `pocketpy-sys`**（只有 0.1.1，vendor 的是 2.0.0）：
+它的 build.rs 要 cmake + bindgen，而且 2.0.0 的 `py_switchvm` 会直接 abort 进程。
+细节见 §6 第 16～17 条。本项目 vendor 的是 **v2.2.0 amalgamated 源码**。
+
+### 10.2 两个运行时怎么共处一个线程
+
+QuickJS 的 `Runtime`/`Context` 和 pocketpy 的 VM **都不是 `Send`**
+（GC 和值栈绑死在创建它的线程上；pocketpy 干脆用进程级全局 `pk_current_vm`）。
+所以两个解释器都不能塞进 `tokio::spawn`，只能放在**同一个专用 OS 线程**里：
+
+```
+tokio runtime                          plugin-engine 线程
+  Tick(每秒) ─┐
+  插件路由请求 ─┼─ EngineCmd ──────────> QuickJS Context × N
+  /api/state  ─┘   (std::mpsc)           PocketPy VM × M（惰性初始化）
+                                         Scheduler（deadline 驱动，两个运行时共用）
+```
+
+- 一个插件 = 一个解释器实例（JS 一个 `Context`，Python 一个 `VM`）。
+  JS 侧是为了避免顶层 `const` 重名；Python 侧是 `py_switchvm` 天然给的。
+- 两个运行时**共用同一个 `Scheduler`**：任务表里只记 `plugin` 名字，到点时按名字找插件、
+  按运行时选分发函数（`__dispatch_task` / `__pp_dispatch`）。
+- 执行预算也是两套机制、一个语义：JS 用 interrupt handler（墙钟），
+  Python 用 watchdog（CPU 时间）。**超预算 = 任务失败 = 交给熔断器**，插件视角完全一致。
+
+### 10.3 抽象层：一份实现 + 两层薄适配
+
+```
+                 HostState::do_log / do_register_task / do_sqlite / do_http_fetch / do_register_route
+                     ▲                                        ▲
+      src/jshost.rs  │（注入 __host_* 原生函数 + BOOTSTRAP）   │ src/pyhost.rs（host_api 模块 + PY_BOOTSTRAP）
+                     │                                        │
+   JS 插件：import { log } from 'host-api'         Python 插件：from host_api import log
+```
+
+两条铁律：
+
+1. **Rust 侧只传 String**（内容按 JSON 约定）。宿主代码永远不碰 `rquickjs::Value` 或
+   `py_TValue` 的类型分支 —— 类型转换、默认值、错误文本全在各运行时的引导脚本里写。
+   代价是一次 JSON 序列化，收益是宿主侧只有一份逻辑、加第三个运行时不用改 Rust。
+2. **错误约定跨运行时统一**：handler 正常返回 = 成功，抛异常 = 失败；
+   底层 `__host_*` / `_xxx` 原生函数返回「空串 = 成功，非空 = 错误文本」，
+   由引导脚本决定抛成哪个语言的哪个异常类型。
+
+插件里的 handler 存在**插件自己的解释器里**（JS 的 `__tasks` 对象 / Python 的 `__pp_tasks` 字典），
+Rust 只保存「插件名 + 任务名 + 表达式」这点元数据。
+这样宿主侧完全不需要 `rquickjs::Persistent<Function>`，也就绕开了它
+「必须在 Runtime drop 前全部释放，否则 QuickJS 直接 abort 进程」的坑。
+
+### 10.4 能力边界（写死的，不是漏掉的）
+
+- **Python 插件不提供 HTTP 路由**：`register_route` 在 Python 侧抛 `NotImplementedError`。
+  故意 fail-fast，而不是静默接受 —— 静默接受会让插件「本地跑得通、上机静默失效」。
+- **`http_fetch` 是同步阻塞调用**，会占住引擎线程（一次慢请求推迟同轮其它任务）。
+  默认 10s 超时、上限 60s、响应体上限 1 MiB。
+- **熔断 / 执行预算 / 热更新是宿主策略**，不在 `host-api` 规范里：
+  Node/CPython 适配器不实现它们，插件也不该依赖。
+- 面板没有鉴权，所以默认只绑 `127.0.0.1`。
+
+### 10.5 跨运行时验证（同一份插件跑在四个宿主里）
+
+```
+                     plugins/js/host-api-demo.js        plugins/py/sysinfo.py
+Rust + QuickJS              ✅ 原生                        —
+Rust + PocketPy              —                            ✅ 原生
+Node.js（adapters/node）     ✅ 一字不改跑通（exit 0）       —
+CPython（adapters/python）   —                            ✅ 一字不改跑通（exit 0）
+```
+
+适配器自带的用例：Node 20 项全绿（`node test/run-tests.mjs`），
+CPython 51 项全绿（`python3 -m unittest discover -s tests`）。
+两边都做了同一件事：**拿仓库里的真插件文件直接跑**，不是另写一份测试插件。
+
+PocketPy 的语法缺口（写插件时的硬约束，完整表见 `docs/host-api.md` §4）：
+生成器表达式 / `finally` / `nonlocal` / `async` / 自定义 `with` / `datetime + timedelta` 不支持；
+列表推导、f-string、class、lambda、闭包、`yield`、`match/case`、`:=`、`json` 都可用。
+
+## 11. 影响后续扩展的设计决策
+
+第六/七轮已经落地了这里的 1、2、3 三条（保留原文，可以对照当时的判断准不准）：
+
+1. ~~**跨运行时抽象层。**~~ ✅ **已实现**：`engine.rs` 里 `LoadedPlugin.runtime` 就是
+   `enum PluginRuntime { Js(Context), Py(PyVm) }`，`dispatch_task` 按变体分发，
+   Axum / SQLite / 调度器一行没改 —— 当时的判断是准的。
+2. ~~**`host.*` 的模式可以直接复制。**~~ ✅ **已实现**：`hostapi.rs` 是唯一实现，
+   `jshost.rs` / `pyhost.rs` 各是一层薄适配，宿主侧确实一次都没碰 `Value` 的类型分支。
+   额外收获：因为底层只传 String，**Node/CPython 适配器能把同一套语义再实现一遍**，
+   同一份插件文件在四个宿主里跑通（§10.5）。
+3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，JS 重建 `Context`、
+   Python 复用 VM 索引 + `py_resetvm`，先摘旧任务再装新任务（§4「热更新」）。
 4. **任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。要支持面板上动态增删任务，下一步是把 `jobs` 表升级为权威来源，插件只提供 handler。
-5. **调度器与 JS 同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「Context 只在一个线程里被碰」这个简单前提。
+5. **调度器与两个解释器同线程、串行执行。** 执行预算已经能打断死循环（§7），但同一轮里的任务仍是串行的：一个慢任务会推迟同轮的其他任务。要真正隔离，得把每个插件放进独立线程（或进程），代价是失去「解释器只在一个线程里被碰」这个简单前提 —— 也是 pocketpy 的进程级全局状态不允许的。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。Axum handler 里同步调 SQLite，量级上来要挪 `spawn_blocking`。
 7. **面板没有鉴权**，所以默认只监听 `127.0.0.1`（§9）。要放到局域网用，得先加认证 —— 现在任何能访问端口的人都能看到日志、触发任务。
+8. **Python VM 上限 15 个**（`pocketpy` 共 16 个 VM，0 号留给宿主）。超过会加载失败并在面板上显示原因。要更多得改 pocketpy 的 `PK_MAX_VM` 重新编译。
+9. **Python 侧的模块系统只有一个内置模块**（`host_api`）。插件之间不能互相 import，也没有第三方包 —— 需要的话得把 `.py` 目录挂进 `sys.path` 并接受「加载任意 Python 代码」的安全代价。

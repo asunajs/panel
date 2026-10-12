@@ -132,3 +132,36 @@ jobs:
           name: plugin-panel-aarch64-linux-musl
           path: target/aarch64-unknown-linux-musl/release/plugin-panel
           if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 跨运行时适配器：同一份插件脚本在 Node / CPython 下也要跑通
+  #
+  # 这两个适配器是「抽象宿主 API」承诺的证据：如果只有 Rust 宿主能跑，
+  # 那所谓跨运行时就是一句空话。所以它们必须进 CI，且跑的是**仓库里的真插件文件**。
+  # ------------------------------------------------------------------
+  adapters:
+    name: 跨运行时适配器（Node / CPython）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # node:sqlite 需要 Node 22.5+，别用 runner 自带的旧版本
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Node 适配器用例（20 项）
+        run: node test/run-tests.mjs
+        working-directory: adapters/node
+
+      - name: CPython 适配器用例（51 项）
+        run: python3 -m unittest discover -s tests -v
+        working-directory: adapters/python
+
+      - name: 仓库真插件在 Node 下原样跑通（ES 模块 + import 'host-api'）
+        run: node bin/run.mjs ../../plugins/js/host-api-demo.js --once
+        working-directory: adapters/node
+
+      - name: 仓库真插件在 CPython 下原样跑通（from host_api import ...）
+        run: python3 -m host_api ../../plugins/py/sysinfo.py --once
+        working-directory: adapters/python

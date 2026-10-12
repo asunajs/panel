@@ -144,6 +144,15 @@ impl Scheduler {
         Ok(self.tasks.len() - 1)
     }
 
+    /// 移除某个插件的全部任务（热更新时用），返回摘掉的条数。
+    ///
+    /// 先摘旧的再装新的：即使新版本加载失败，也不会在面板上留下幽灵任务。
+    pub fn remove_plugin(&mut self, plugin: &str) -> usize {
+        let before = self.tasks.len();
+        self.tasks.retain(|t| t.plugin != plugin);
+        before - self.tasks.len()
+    }
+
     /// 距离最近一个到期任务还有多久 —— 直接当作 `recv_timeout` 的时长。
     pub fn sleep_hint(&self, now: DateTime<Local>) -> Duration {
         let mut best: Option<i64> = None;
@@ -341,6 +350,21 @@ mod tests {
         }
         assert_eq!(s.tasks()[0].runs, 12);
         assert_eq!(prev.format("%H:%M:%S%.3f").to_string(), "08:00:07.000");
+    }
+
+    #[test]
+    fn remove_plugin_drops_only_its_tasks() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t2", "@every 1s", every_1s(), now).unwrap();
+        s.add("b", "t1", "@every 1s", every_1s(), now).unwrap();
+
+        assert_eq!(s.remove_plugin("a"), 2);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.tasks()[0].plugin, "b");
+        // 不存在的插件返回 0，不 panic
+        assert_eq!(s.remove_plugin("nope"), 0);
     }
 
     // ---- 熔断 ----

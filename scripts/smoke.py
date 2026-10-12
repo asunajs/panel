@@ -13,9 +13,13 @@
     1. 二进制存在且能启动
     2. GET /            → 200，返回 HTML 面板
     3. GET /api/state   → 合法 JSON，含 status / plugins / jobs / engine
+    3b. 双运行时都加载了（JS + Python），且没有加载失败的插件
+    3c. JS 插件注册的 HTTP 路由挂在同一个端口上；未注册路径仍返回 404
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
+    4b. Python 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
     6. QuickJS 堆用量可观测
+    6b. 常驻内存（只在 Linux 上给数字）
     7. SIGTERM → 15 秒内退出，且日志出现「引擎线程已退出」
 
 退出码: 0 全通过 / 1 有失败 / 2 环境问题
@@ -141,12 +145,52 @@ def main() -> int:
         check(ok_shape, "/api/state 结构完整", f"status={state.get('status')}")
         check(len(state.get("plugins", [])) > 0, "插件已加载", f"{len(state.get('plugins', []))} 个")
 
+        # ---- 3b. 双运行时：JS 和 Python 插件都要在 ----
+        plugins = state.get("plugins", [])
+        runtimes = {p.get("runtime") for p in plugins}
+        check(
+            {"js", "py"} <= runtimes,
+            "双运行时都加载了",
+            f"runtime={sorted(runtimes)}, " + ", ".join(f"{p['name']}:{p['runtime']}" for p in plugins),
+        )
+        failed = [p for p in plugins if p.get("error")]
+        check(not failed, "没有加载失败的插件", "; ".join(f"{p['name']}: {p['error'][:60]}" for p in failed))
+
+        # ---- 3c. JS 插件注册的 HTTP 路由挂在同一个端口上 ----
+        try:
+            status, body = fetch(f"{base}/hits")
+            ok_route = status == 200 and '"rows"' in body
+            check(ok_route, "插件路由 GET /hits 可用（同一个 Axum 端口）", f"http {status}, {len(body)} B")
+        except Exception as e:  # noqa: BLE001
+            check(False, "插件路由 GET /hits 可用（同一个 Axum 端口）", repr(e))
+
+        # 没注册过的路径必须还是 404，而不是被 fallback 吃掉
+        try:
+            fetch(f"{base}/definitely-not-registered")
+            check(False, "未注册路由返回 404", "居然 200 了")
+        except urllib.error.HTTPError as e:
+            check(e.code == 404, "未注册路由返回 404", f"http {e.code}")
+
         # ---- 4. 调度循环在转 ----
         t1 = state.get("ticks", 0)
         time.sleep(3)
         _, state2 = fetch_json(f"{base}/api/state")
         t2 = state2.get("ticks", 0)
         check(t2 > t1, "调度循环在转（ticks 增长）", f"{t1} → {t2}")
+
+        # ---- 4b. Python 侧的任务真的被触发过（不是只加载不干活）----
+        # py-heartbeat 是 @every 2s，等最多 8 秒应该至少有一条它的日志
+        py_fired = False
+        deadline = time.time() + 8
+        while time.time() < deadline and not py_fired:
+            _, st = fetch_json(f"{base}/api/state")
+            for line in st.get("logs", []):
+                if line.get("plugin") in ("sysinfo", "sqlite-demo") and "触发" in line.get("msg", ""):
+                    py_fired = True
+                    break
+            if not py_fired:
+                time.sleep(0.5)
+        check(py_fired, "Python 插件的调度任务真的触发了")
 
         # ---- 5. SQLite 落库 ----
         jobs = state2.get("jobs", [])
