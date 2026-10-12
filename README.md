@@ -18,6 +18,15 @@
 | 第十轮 | **面板鉴权**：`PANEL_TOKEN` 令牌 + 内存会话 cookie（HttpOnly/SameSite=Strict）+ 常量时间比较 + 登录退避 + 审计日志；非回环且无令牌时**拒绝启动** | ✅ 已验证（单测 73 项、冒烟 64 项、前端 32 项） |
 | 后续 | 完整前端 / 插件市场 / 多实例 / 面板任务编辑 | 未开始 |
 
+**界面**（`node scripts/screenshot.mjs` 生成，见 §5 第 ㉒ 条）：
+
+![面板](docs/screenshots/panel-auth.png)
+
+页头右边那个绿色徽标是第十轮的鉴权状态；任务表的「来源」列是第九轮的
+`jobs.source`（`插件代码` / `面板`）。没开鉴权时徽标变成橙色的
+[「无鉴权（仅本机）」](docs/screenshots/panel-noauth.png) —— 一个不吭声就「没鉴权」
+的面板比一个明确标注的更危险。
+
 ---
 
 ## 1. 架构
@@ -105,9 +114,11 @@ rust-plugin-panel/
 │   ├── node/                  npm 包 `host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
 ├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
+├── docs/screenshots/   文档里的界面截图（由 scripts/screenshot.mjs 生成）
 ├── scripts/
 │   ├── smoke.py            端到端冒烟：双运行时、插件路由、Python 任务真的触发
 │   ├── test-panel-frontend.mjs  面板前端逻辑回归（DOM 桩跑 web.rs 里的 <script>）
+│   ├── screenshot.mjs      用 CDP 驱动 headless Chrome/Edge 截图（零 npm 依赖）
 │   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
 ├── .github/workflows/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
@@ -424,6 +435,13 @@ curl -s -b /tmp/ck -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/      
 
 # ㉑ 裸奔拒绝启动：绑非回环 + 没令牌必须起不来
 BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel; echo "exit=$?"   # 非 0，并打印原因
+
+# ㉒ 重新生成文档里的截图（需要本机有 Chrome / Edge / Chromium，零 npm 依赖）
+#     起两个实例：一个带令牌（拍登录页 + 登录后的面板），一个不带（拍「无鉴权」徽标）
+PANEL_TOKEN=demo-token BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel &
+BIND_ADDR=127.0.0.1:8788 ./target/release/plugin-panel &
+node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --open http://127.0.0.1:8788 \
+                            --token demo-token --out docs/screenshots
 ```
 
 实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：
@@ -1265,6 +1283,14 @@ report | source= panel | status= error | next= None
 
 **浏览器**：直接开面板 → 跳 `/login` → 粘贴令牌 → 下发会话 cookie（12 小时绝对有效、
 2 小时空闲失效）→ 回原来的页面。
+
+| 登录页 | 令牌错了 |
+|---|---|
+| ![登录页](docs/screenshots/login.png) | ![登录失败](docs/screenshots/login-failed.png) |
+
+登录失败只回一句「令牌不正确」——**不区分**「没配令牌」和「令牌不对」，
+免得把「这个面板配了令牌」当成可探测的信号。表单提交失败时是**重渲染这一页**
+（而不是回 JSON），因为提交它的是一个浏览器。
 
 **脚本 / CI**（无状态，不用先登录）：
 
