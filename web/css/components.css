@@ -609,3 +609,14 @@
   background: var(--border-soft);
   margin: var(--sp-4) 0;
 }
+
+/*
+  插在标题和列表之间的容器（比如「清理失效任务」的结果面板）。
+
+  用 `:not(:empty)` 而不是直接给 margin-bottom：容器**空的时候不能留空隙** ——
+  没点清理时页面上会凭空多出一块空白，看起来像布局坏了。
+  实测踩到过：清理结果卡片和下面的任务卡片直接贴在一起、圆角被压住（用户指出的）。
+*/
+.stack:not(:empty) {
+  margin-bottom: var(--sp-3);
+}

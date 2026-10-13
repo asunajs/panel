@@ -413,6 +413,35 @@ const SHOTS = (o) => [
         await ev(`fetch('/api/jobs/panel-jobs/${n}/delete', { method: 'POST', headers: { 'x-panel': '1' } }).then((r) => r.json())`);
       }
 
+      // ⑧ 卡片里的元素不能溢出卡片右边缘。
+      //
+      // 这条是用户指出「清理结果和列表贴在一起」之后顺手补的：那一类问题（挤压、
+      // 溢出、被裁掉）静态检查和接口测试都看不见。判据是「子元素的右边界不能超过
+      // 卡片内容区的右边界」—— 中文提示文字一整串不可断的时候最容易踩。
+      const overflow = await ev(`(function () {
+        const bad = [];
+        for (const card of document.querySelectorAll('[data-task]')) {
+          const box = card.getBoundingClientRect();
+          const styles = getComputedStyle(card);
+          const contentRight = box.right - parseFloat(styles.paddingRight || '0');
+          for (const el of card.querySelectorAll('*')) {
+            const r = el.getBoundingClientRect();
+            if (r.width === 0) continue;
+            if (r.right > contentRight + 1) {
+              bad.push(el.className + ':' + Math.round(r.right - contentRight) + 'px');
+            }
+          }
+        }
+        return bad.slice(0, 5);
+      })()`);
+      results.push(
+        note(
+          '任务卡片里没有元素溢出右边缘',
+          Array.isArray(overflow) && overflow.length === 0,
+          Array.isArray(overflow) ? overflow.join(', ') : '测量失败',
+        ),
+      );
+
       const bad = results.filter((r) => !r.ok);
       return {
         ok: bad.length === 0,
@@ -444,6 +473,14 @@ const SHOTS = (o) => [
            const txt = box ? box.textContent : '';
            const empty = /没有失效任务/.test(txt);
            const pending = /将要删除/.test(txt);
+           // 量一下结果面板和下方任务列表之间**有没有真的间隔**。
+           //
+           // 这一条是用户指出的：结果卡片和第一张任务卡片贴在一起、圆角被压住。
+           // 间距/重叠这类问题静态检查和接口测试都看不见，只有真浏览器能量出来。
+           const first = document.querySelector('[data-task]');
+           const gap = box && first && box.firstElementChild
+             ? Math.round(first.getBoundingClientRect().top - box.getBoundingClientRect().bottom)
+             : null;
            return {
              hasBox: !!box,
              text: txt.slice(0, 48),
@@ -452,16 +489,19 @@ const SHOTS = (o) => [
              // 「将要删除」分支必须给出确认按钮，否则用户没法真正删掉
              hasConfirm: !!document.getElementById('cleanup-go'),
              jobs: document.querySelectorAll('[data-task]').length,
+             gap: gap,
            };
          })()`,
       );
       // 两个分支都算通过，但**不允许**出现「报告了却点不动」这种半成品状态
       const ok = r.hasBox && (r.empty || (r.pending && r.hasConfirm));
+      // 结果面板和下方列表之间必须有真实间隔（≥8px），不能贴着或重叠
+      const spaced = r.gap !== null && r.gap >= 8;
       return {
-        ok: ok,
-        label: '清理失效任务：dry_run 只报告、不确认就不删',
+        ok: ok && spaced,
+        label: '清理失效任务：dry_run 只报告 + 结果面板与列表有间隔',
         detail: `分支=${r.empty ? '没有失效任务' : r.pending ? '将要删除' : '未知'}`
-          + `, 确认按钮=${r.hasConfirm}, 面板="${r.text}"`,
+          + `, 确认按钮=${r.hasConfirm}, 与下方列表的间隔=${r.gap}px, 面板="${r.text}"`,
       };
     },
   },

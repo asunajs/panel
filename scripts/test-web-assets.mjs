@@ -254,6 +254,14 @@ const taskListJs = readFileSync(join(WEB, 'js/views/task-list.js'), 'utf8');
 check(/addEventListener\('click'/.test(taskListJs) && /closest\('button/.test(taskListJs),
   '任务卡片用事件委托处理按钮点击');
 
+// 插在标题和列表之间的容器：**空的时候不能留空隙**。
+// 直接给 margin-bottom 的话，没点「清理失效任务」时页面上会凭空多一块空白。
+// 用 :not(:empty) 才对 —— 这条同时也是用户指出的「结果卡片贴着任务卡片」的修法。
+check(
+  /\.stack:not\(:empty\)/.test(componentsCss),
+  '插在中间的结果容器用 :not(:empty) 控制间距（空的时不占位置）',
+);
+
 const webRs2 = readFileSync(join(REPO, 'src/web.rs'), 'utf8');
 const loginPage = webRs2.match(/const LOGIN_PAGE: &str = r##"([\s\S]*?)"##;/);
 check(!!loginPage, '在 src/web.rs 里找得到 LOGIN_PAGE');

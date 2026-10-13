@@ -147,7 +147,7 @@ export async function render(root, ctx, opts = {}) {
   } else {
     // 降级：后端不可用也要能看到界面（离线调 UI / 首次部署前预览）
     tasks = TASKS.map(fromMock);
-    notice = `<div class="card" style="border-color:var(--warning);margin-bottom:var(--sp-3)">
+    notice = `<div class="card stack" style="border-color:var(--warning)">
       <span class="badge warning">后端不可用</span>
       <span class="hint"> 显示的是示例数据（web/js/mock.js）。原因：${esc(res.error || '未知')}</span>
     </div>`;
@@ -163,7 +163,8 @@ export async function render(root, ctx, opts = {}) {
           <button class="btn primary" id="new-task-btn">新建任务</button>
         </div>
       </div>
-      <div id="cleanup-box"></div>
+      <!-- .stack：有内容时才会和下方任务列表拉开间隔（见 components.css） -->
+      <div id="cleanup-box" class="stack"></div>
       ${notice}
       <div class="grid">
         ${tasks.length ? tasks.map(taskCard).join('') : '<div class="card empty">还没有任务</div>'}
