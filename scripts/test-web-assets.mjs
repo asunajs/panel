@@ -54,6 +54,7 @@ const EXPECTED = [
   'js/views/task-list.js',
   'js/views/task-editor.js',
   'js/views/plugin-list.js',
+  'js/views/plugin-source.js',
 ];
 
 const PLUGIN_UI = ['index.html', 'style.css', 'app.js'];

@@ -12,14 +12,8 @@
   所以这里出现的是「打开配置页」按钮，而不是把插件的配置界面复制到主面板里。
 */
 
-import {
-  getState,
-  setPluginDisabled,
-  reloadPlugin,
-  pluginSource,
-} from '../api.js';
-import { highlight } from '../editor.js';
-import { askConfirm, RISK } from '../confirm.js';
+import { getState, setPluginDisabled, reloadPlugin } from '../api.js';
+import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -39,6 +33,29 @@ function statusBadge(p) {
  * @param {HTMLElement} root
  * @param {{toast: Function, navigate: Function}} ctx
  */
+/**
+ * 注册在 `root` 上的委托监听，重渲染前要先摘掉。
+ *
+ * 为什么必须有这个：`root.addEventListener` 写在 `render()` 里，而 render 会被反复调用
+ * （动作之后的静默刷新、路由切回来）。每渲染一次就多挂一份监听 —— 一次点击于是触发
+ * N 次请求。实测撞到过：在插件管理页点了 1 次「启用」，后端日志里出现 4 次
+ * 「插件已被面板启用」（4 次渲染 = 4 份监听）。
+ *
+ * 幂等的动作（暂停/停用/删除）重复发请求只是浪费，但「立即执行」这种**不幂等**的
+ * 动作会被真的执行多次 —— 所以这是个必须修掉的真 bug，不是洁癖。
+ */
+let rootListeners = [];
+
+function addRootListener(root, type, fn) {
+  rootListeners.push([type, fn]);
+  root.addEventListener(type, fn);
+}
+
+function clearRootListeners(root) {
+  for (const [type, fn] of rootListeners) root.removeEventListener(type, fn);
+  rootListeners = [];
+}
+
 export async function render(root, ctx, opts = {}) {
   // silent：操作完（停用 / 重载）刷新时不要闪一下「加载中…」
   if (!opts.silent) root.innerHTML = '<div class="empty">加载中…</div>';
@@ -86,7 +103,7 @@ export async function render(root, ctx, opts = {}) {
                       ? `<button class="btn primary" data-open="${esc(p.name)}">打开配置页</button>
                        <a class="btn" href="/plugins/${encodeURIComponent(p.name)}/" target="_blank" rel="noopener">新标签页</a>`
                       : '<span class="hint">没有自带配置页</span>';
-                  // 管理动作：重载 / 停用启用 / 看源码
+                  // 管理动作：源码（跳到独立页面，可编辑）/ 重载 / 停用启用
                   const ops = `
                     <button class="btn" data-src="${esc(p.name)}">源码</button>
                     <button class="btn" data-reload="${esc(p.name)}">重载</button>
@@ -99,7 +116,7 @@ export async function render(root, ctx, opts = {}) {
                   // 横排时这些内容在 280px 的列宽里会互相挤 —— 徽章被压成竖排、
                   // 插件名被折成三行，是实测出来的回归。
                   return `
-          <div class="card plugin-card">
+          <div class="card plugin-card" data-plugin="${esc(p.name)}">
             <div class="card-head">
               <div class="card-head-main">
                 <span class="card-title" title="${esc(p.name)}">${esc(p.name)}</span>
@@ -123,18 +140,6 @@ export async function render(root, ctx, opts = {}) {
       </div>
     </div>
 
-    <div class="section" id="src-section" hidden>
-      <div class="section-head">
-        <span class="section-title" id="src-title">插件源码</span>
-        <div class="card-actions">
-          <span class="hint" id="src-meta"></span>
-          <button class="btn ghost" id="src-close">关闭</button>
-        </div>
-      </div>
-      <!-- 只读：面板不负责改插件源码（改文件交给编辑器与 git），只让你在这里看得见 -->
-      <pre class="code-view" id="src-view"></pre>
-    </div>
-
     <div class="section" id="frame-section" hidden>
       <div class="section-head">
         <span class="section-title" id="frame-title">插件配置页</span>
@@ -145,11 +150,15 @@ export async function render(root, ctx, opts = {}) {
       <iframe id="plugin-frame" class="plugin-frame" title="插件配置页"></iframe>
     </div>`;
 
+  // 渲染完把开着的确认条画回去（见 confirm.js）
+  paintArmed(root);
+
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
 
   // 内嵌打开：比新标签页顺手（不用来回切），但也提供新标签页入口 ——
   // 插件页面若需要整个窗口（比如它自己的移动端布局），iframe 里会显得挤。
-  root.addEventListener('click', (ev) => {
+  clearRootListeners(root);
+  addRootListener(root, 'click', (ev) => {
     const btn = ev.target.closest('button[data-open]');
     if (!btn) return;
     const name = btn.dataset.open;
@@ -162,29 +171,24 @@ export async function render(root, ctx, opts = {}) {
     section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
-  // 源码（只读）
-  root.querySelector('#src-close').addEventListener('click', () => {
-    root.querySelector('#src-section').hidden = true;
-  });
-
   // 管理动作：源码 / 重载 / 停用启用
-  root.addEventListener('click', async (ev) => {
+  addRootListener(root, 'click', async (ev) => {
+    // 确认条的两个按钮先接住（事件委托：重画之后依然有效）
+    if (ev.target.closest('[data-confirm-ok]')) {
+      settleArmed(true);
+      return;
+    }
+    if (ev.target.closest('[data-confirm-cancel]')) {
+      settleArmed(false);
+      render(root, ctx, { silent: true });
+      return;
+    }
+
     const srcBtn = ev.target.closest('button[data-src]');
     if (srcBtn) {
-      const name = srcBtn.dataset.src;
-      const res = await pluginSource(name);
-      if (!res.ok) {
-        ctx.toast(`${name}：读源码失败 —— ${res.error}`, 'bad');
-        return;
-      }
-      const lang = res.runtime === 'py' || res.path.endsWith('.py') ? 'py' : 'js';
-      root.querySelector('#src-title').textContent = `${name} · 源码（只读）`;
-      root.querySelector('#src-meta').textContent = `${res.path} · ${res.lines} 行 · ${res.bytes} 字节`;
-      // highlight 是自带的（不走网络），返回的是已经转义过的 HTML
-      root.querySelector('#src-view').innerHTML = highlight(res.text, lang);
-      const section = root.querySelector('#src-section');
-      section.hidden = false;
-      section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // 源码是**独立页面**（可以编辑）：卡片下面那条窄缝装不下长插件，
+      // 而且编辑要和「打开配置页」那些动作分开
+      ctx.navigate(`#/plugins/${encodeURIComponent(srcBtn.dataset.src)}/source`);
       return;
     }
 
@@ -211,16 +215,24 @@ export async function render(root, ctx, opts = {}) {
       // 停用要确认（它会让这个插件的任务全部停跑、配置页也打不开）；
       // 启用是往回走，不确认。
       if (!off) {
-        const row = tBtn.closest('.plugin-actions');
-        const keep = row.innerHTML;
-        const yes = await askConfirm(row, {
-          question: `停用插件 \`${name}\`？`,
-          detail: '它的任务都不会再跑，配置页与接口也关掉；重启后仍然停用。随时可以启用。',
-          okText: '停用',
-          risk: RISK.PAUSE,
-        });
+        // 可重画的确认条（见 confirm.js）
+        const yes = await armConfirm(
+          {
+            question: `停用插件 \`${name}\`？`,
+            detail: '它的任务都不会再跑，配置页与接口也关掉；重启后仍然停用。随时可以启用。',
+            okText: '停用',
+            risk: RISK.PAUSE,
+          },
+          {
+            root,
+            locate: (r) =>
+              [...r.querySelectorAll('[data-plugin]')].find(
+                (c) => c.dataset.plugin === name,
+              )?.querySelector('.plugin-actions') || null,
+          },
+        );
         if (!yes) {
-          row.innerHTML = keep;
+          render(root, ctx, { silent: true });
           return;
         }
       }

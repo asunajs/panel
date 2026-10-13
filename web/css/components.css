@@ -654,6 +654,19 @@
   下一行，而且十几张卡片重复同一句话本身就是噪音（用户两次指出过）。
 */
 /*
+  插件源码页（web/js/views/plugin-source.js）：编辑器要占满页面高度。
+
+  默认的 `.editor { max-height: 52vh }` 是给「新建任务」那种表单用的 —— 表单下面
+  还有别的字段，编辑器不该把整页顶掉。源码页正相反：整页就是编辑器，
+  52vh 会让下面留一大片空白。
+*/
+.src-editor-wrap .editor {
+  height: calc(100vh - 260px);
+  min-height: 320px;
+  max-height: none;
+}
+
+/*
   内联确认条（高危动作的二次确认，见 web/js/confirm.js）。
 
   刻意**内联**在原来那行按钮的位置上：用户一眼看到自己在确认哪一个对象 ——

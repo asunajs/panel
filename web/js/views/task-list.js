@@ -20,7 +20,7 @@ import {
   cleanupJobs,
 } from '../api.js';
 import { TASKS } from '../mock.js';
-import { askConfirm, RISK } from '../confirm.js';
+import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 
 /** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
 const STATUS_MAP = {
@@ -178,6 +178,43 @@ function taskCard(t) {
  * 整个列表会闪一下白 —— 在低配盒子上这个闪烁很明显。带 `silent` 时保留旧内容，
  * 等新数据回来再整体换掉。
  */
+/**
+ * 按 (plugin, name) 找到那张任务卡片。
+ *
+ * 不拼选择器：任务名/插件名是用户或插件作者起的，塞进 `[data-task="…"]` 里
+ * 遇到引号或反斜杠就会拼出坏选择器（然后抛异常）。逐个比对最稳。
+ */
+function rowOfTask(root, plugin, name) {
+  return (
+    [...root.querySelectorAll('[data-task]')].find(
+      (c) => c.dataset.task === name && c.dataset.plugin === plugin,
+    ) || null
+  );
+}
+
+/**
+ * 注册在 `root` 上的委托监听，重渲染前要先摘掉。
+ *
+ * 为什么必须有这个：`root.addEventListener` 写在 `render()` 里，而 render 会被反复调用
+ * （动作之后的静默刷新、路由切回来）。每渲染一次就多挂一份监听 —— 一次点击于是触发
+ * N 次请求。实测撞到过：在插件管理页点了 1 次「启用」，后端日志里出现 4 次
+ * 「插件已被面板启用」（4 次渲染 = 4 份监听）。
+ *
+ * 幂等的动作（暂停/停用/删除）重复发请求只是浪费，但「立即执行」这种**不幂等**的
+ * 动作会被真的执行多次 —— 所以这是个必须修掉的真 bug，不是洁癖。
+ */
+let rootListeners = [];
+
+function addRootListener(root, type, fn) {
+  rootListeners.push([type, fn]);
+  root.addEventListener(type, fn);
+}
+
+function clearRootListeners(root) {
+  for (const [type, fn] of rootListeners) root.removeEventListener(type, fn);
+  rootListeners = [];
+}
+
 export async function render(root, ctx, opts = {}) {
   if (!opts.silent) root.innerHTML = '<div class="empty">加载中…</div>';
 
@@ -256,6 +293,10 @@ export async function render(root, ctx, opts = {}) {
     </div>`;
 
   // 手动刷新是用户主动要看到「在加载」的反馈，所以不清空
+  // 卡片都进 DOM 了 → 如果有个确认条正开着，画回它该在的那一行。
+  // 这一步是「确认条不会因为视图重渲染而消失」的关键（见 confirm.js 的注释）。
+  paintArmed(root);
+
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
 
   // 「显示已删除的」：按需渲染（见上面关于「不渲染 vs hidden」的说明）
@@ -356,7 +397,19 @@ export async function render(root, ctx, opts = {}) {
   });
 
   // 事件委托：卡片上的操作按钮。每次操作后重渲染，拿最新状态。
-  root.addEventListener('click', async (ev) => {
+  clearRootListeners(root);
+  addRootListener(root, 'click', async (ev) => {
+    // 确认条的两个按钮先接住（事件委托：重画之后依然有效）
+    if (ev.target.closest('[data-confirm-ok]')) {
+      settleArmed(true);
+      return;
+    }
+    if (ev.target.closest('[data-confirm-cancel]')) {
+      settleArmed(false);
+      render(root, ctx, { silent: true });
+      return;
+    }
+
     const btn = ev.target.closest('button[data-act]');
     if (!btn) return;
     const card = btn.closest('[data-task]');
@@ -404,12 +457,19 @@ export async function render(root, ctx, opts = {}) {
     }[act];
 
     if (confirmSpec) {
-      const row = btn.closest('.card-actions');
-      const keep = row.innerHTML;
-      const yes = await askConfirm(row, confirmSpec);
+      // 确认条是**可重画**的（见 confirm.js）：视图自己重渲染时它会自动画回来，
+      // 点确认/取消走事件委托，不会因为重建 DOM 而丢。
+      const yes = await armConfirm(
+        { ...confirmSpec, plugin, name },
+        {
+          root,
+          locate: (r) =>
+            rowOfTask(r, plugin, name)?.querySelector('.card-actions') || null,
+        },
+      );
       if (!yes) {
-        // 取消：把按钮原样放回去（监听是委托在 root 上的，重建 innerHTML 不会丢）
-        row.innerHTML = keep;
+        // 取消 / Esc / 超时：重渲染一次把按钮放回去（静默，别闪白）
+        render(root, ctx, { silent: true });
         return;
       }
     }

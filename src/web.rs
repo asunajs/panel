@@ -105,7 +105,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/disable", post(disable_plugin))
         .route("/api/plugins/{name}/enable", post(enable_plugin))
         .route("/api/plugins/{name}/reload", post(reload_plugin))
-        .route("/api/plugins/{name}/source", get(plugin_source))
+        .route(
+            "/api/plugins/{name}/source",
+            get(plugin_source).post(save_plugin_source),
+        )
+        .route(
+            "/api/plugins/{name}/source/restore",
+            post(restore_plugin_source),
+        )
         // 任务**操作**：立即执行 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
@@ -757,31 +764,179 @@ async fn reload_plugin(
     }
 }
 
+/// 按插件名解析出源文件路径，并做**两道**防穿越：
+/// 名字本身的形状检查 + 解析出来的真实路径必须在插件目录里。
+fn plugin_source_path(
+    plugins_dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, Response> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
+        return Err(json_error(StatusCode::BAD_REQUEST, "插件名不合法".into()));
+    }
+    let Some(path) = plugin_file_of(plugins_dir, name) else {
+        return Err(json_error(
+            StatusCode::NOT_FOUND,
+            format!("没有名为 `{name}` 的插件文件"),
+        ));
+    };
+    // 名字检查之外的第二道：解析出来的真实路径必须落在插件目录里
+    match (std::fs::canonicalize(plugins_dir).ok(), std::fs::canonicalize(&path).ok()) {
+        (Some(d), Some(f)) if f.starts_with(&d) => Ok(path),
+        _ => Err(json_error(StatusCode::FORBIDDEN, "路径不在插件目录里".into())),
+    }
+}
+
+/// 备份文件放在源文件旁边，名字是 `{file}.bak`。
+///
+/// 刻意**不用隐藏目录 / 数据库**：出问题的时候用户可能是在 SSH 里手动恢复，
+/// 一个躺在原文件旁边的 `.bak` 是他一眼就能找到的东西。
+/// 引擎的扫描只认 `.js` / `.py` 扩展名，所以 `.bak` 不会被当成插件加载。
+fn plugin_source_backup(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".bak");
+    std::path::PathBuf::from(s)
+}
+
+/// 保存插件源码的上限。低配设备上写一个几 MB 的插件文件没有意义，
+/// 而「手滑把别的东西粘进来」是有可能的。
+const MAX_PLUGIN_SOURCE_BYTES: usize = 1 << 20; // 1 MiB
+
+#[derive(Debug, serde::Deserialize)]
+struct SaveSourceReq {
+    text: String,
+}
+
+/// `POST /api/plugins/{name}/source` —— 保存插件源码（body `{"text": "..."}`）。
+///
+/// 写完**不重启、也不主动触发热更新**：引擎每秒的目录扫描会发现 mtime 变化并热更新 ——
+/// 这本来就是面板已有的机制，这里只要把文件写好就行。
+///
+/// 三条安全线：
+///
+/// 1. 路径两道防穿越（见 `plugin_source_path`）；
+/// 2. 空内容与超限内容拒绝（空文件会让插件加载失败，属于「手滑」而不是「编辑」）；
+/// 3. 写之前把旧内容备份成 `{file}.bak`，并提供一键回滚 ——
+///    从网页上改插件源码是个有风险的动作，**必须留退路**。
+///
+/// 写文件用「临时文件 + rename」：rename 在同一文件系统内是原子的，
+/// 不会出现「写到一半崩溃、插件文件变成半截」的情况。
+async fn save_plugin_source(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<SaveSourceReq>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let path = match plugin_source_path(&st.plugins_dir, &name) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if req.text.trim().is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "内容为空，拒绝保存 —— 空文件会让这个插件加载失败。要停用它请用「停用」。".into(),
+        );
+    }
+    if req.text.len() > MAX_PLUGIN_SOURCE_BYTES {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "内容 {} 字节，超过上限 {} 字节",
+                req.text.len(),
+                MAX_PLUGIN_SOURCE_BYTES
+            ),
+        );
+    }
+
+    let backup = plugin_source_backup(&path);
+    let old = std::fs::read(&path).unwrap_or_default();
+    let had_backup = backup.is_file();
+    if let Err(e) = std::fs::write(&backup, &old) {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写备份失败（未改动原文件）: {e}"),
+        );
+    }
+
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("js")
+    ));
+    if let Err(e) = std::fs::write(&tmp, req.text.as_bytes()) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写临时文件失败: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("替换原文件失败: {e}"));
+    }
+
+    let lines = req.text.lines().count();
+    let bytes = req.text.len();
+    Json(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "lines": lines,
+        "bytes": bytes,
+        "backup": backup.display().to_string(),
+        "had_backup": had_backup,
+        // 前端据此提示「引擎正在热更新」——省得用户以为没生效
+        "note": "已写入。引擎最多 1 秒内发现文件变化并热更新这个插件。",
+    }))
+    .into_response()
+}
+
+/// `POST /api/plugins/{name}/source/restore` —— 用 `{file}.bak` 覆盖回去。
+async fn restore_plugin_source(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let path = match plugin_source_path(&st.plugins_dir, &name) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let backup = plugin_source_backup(&path);
+    let text = match std::fs::read_to_string(&backup) {
+        Ok(t) => t,
+        Err(e) => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                format!("没有可恢复的备份（{}）: {e}", backup.display()),
+            )
+        }
+    };
+    if let Err(e) = std::fs::write(&path, text.as_bytes()) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("恢复失败: {e}"));
+    }
+    Json(json!({
+        "ok": true,
+        "lines": text.lines().count(),
+        "bytes": text.len(),
+        "note": "已用备份覆盖。引擎最多 1 秒内热更新。",
+    }))
+    .into_response()
+}
+
 /// `GET /api/plugins/{name}/source` —— 只读地看一眼插件源码。
 ///
 /// 为什么值得有：这个面板能跑测试代码、能看到插件报的错，但看不到插件**本身**——
 /// 排查问题时要来回切编辑器。只读是刻意的：面板不负责改插件源码（改文件的事交给
 /// 编辑器与 git），它只负责让你在这里看得见。
 async fn plugin_source(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    // 名字用来拼路径，必须挡住 `../` 之类（和插件静态资源同一套判据）
-    if name.contains('/') || name.contains('\\') || name.contains("..") || name.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "插件名不合法".into());
-    }
-    let Some(path) = plugin_file_of(&st.plugins_dir, &name) else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            format!("没有名为 `{name}` 的插件文件"),
-        );
+    let path = match plugin_source_path(&st.plugins_dir, &name) {
+        Ok(p) => p,
+        Err(r) => return r,
     };
-    // 再确认一次「解析出来的真实路径确实在插件目录里」——名字检查之外的第二道
-    let canon_dir = std::fs::canonicalize(&st.plugins_dir).ok();
-    let canon = std::fs::canonicalize(&path).ok();
-    match (canon_dir, canon) {
-        (Some(d), Some(f)) if f.starts_with(&d) => {}
-        _ => {
-            return json_error(StatusCode::FORBIDDEN, "路径不在插件目录里".into());
-        }
-    }
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let lines = text.lines().count();
@@ -792,6 +947,9 @@ async fn plugin_source(State(st): State<AppState>, Path(name): Path<String>) -> 
                 "lines": lines,
                 "bytes": text.len(),
                 "text": text,
+                // 有备份才给「恢复上一次」按钮 —— 给一个点了没反应的按钮是最差的可达性
+                "has_backup": plugin_source_backup(&path).is_file(),
+                "runtime": if path.extension().and_then(|s| s.to_str()) == Some("py") { "py" } else { "js" },
             }))
             .into_response()
         }

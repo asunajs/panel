@@ -15,6 +15,7 @@
 import * as taskList from './views/task-list.js';
 import * as taskEditor from './views/task-editor.js';
 import * as pluginList from './views/plugin-list.js';
+import * as pluginSource from './views/plugin-source.js';
 import { getState, logout } from './api.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -309,7 +310,13 @@ function parseHash() {
     }
     return { view: 'tasks' };
   }
-  if (parts[0] === 'plugins') return { view: 'plugins' };
+  if (parts[0] === 'plugins') {
+    // #/plugins/{name}/source —— 插件源码（独立页面，可编辑）
+    if (parts[1] && parts[2] === 'source') {
+      return { view: 'plugin-source', params: { name: parts[1] } };
+    }
+    return { view: 'plugins' };
+  }
   if (parts[0] === 'settings') return { view: 'settings' };
   return { view: 'dashboard' };
 }
@@ -330,7 +337,9 @@ async function route() {
   }
 
   // 侧边栏高亮：task-editor 归到「任务列表」下
-  const navKey = view === 'task-editor' ? 'tasks' : view;
+  // plugin-source 归到「插件管理」下（它就是从那里进来的）
+  const navKey =
+    view === 'task-editor' ? 'tasks' : view === 'plugin-source' ? 'plugins' : view;
   document.querySelectorAll('.nav-item').forEach((a) => {
     a.classList.toggle('active', a.dataset.view === navKey);
   });
@@ -339,13 +348,16 @@ async function route() {
       ? params.mode === 'edit'
         ? '编辑任务'
         : '新建任务'
-      : TITLES[view] || '面板';
+      : view === 'plugin-source'
+        ? `插件源码：${params.name}`
+        : TITLES[view] || '面板';
 
   try {
     if (view === 'dashboard') cleanup = await renderDashboard(root);
     else if (view === 'tasks') cleanup = await taskList.render(root, ctx);
     else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
+    else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
     else if (view === 'settings') renderSettings(root);
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页

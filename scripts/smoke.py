@@ -1481,6 +1481,134 @@ def plugin_manage_checks(tmp: Path) -> None:
         logf.close()
 
 
+def plugin_source_edit_checks(tmp: Path) -> None:
+    """插件源码：读 / 改 / 存 / 备份 / 回滚。
+
+    用户实测说「源码单独进入一个页面吧」+「可编辑」。可编辑这件事的真正难点不是
+    保存，而是**改坏了怎么办** —— 从网页上写插件文件是有风险的动作，所以这一组
+    重点钉住退路：
+
+      ① 保存前自动备份成 `{file}.bak`
+      ② 保存之后引擎自动热更新（不用重启、不用手点）
+      ③ 改坏了（语法错误）→ 插件报加载失败 → **一键回滚能救回来**
+      ④ 空内容 / 超限 / 坏名字 / 缺 `x-panel` 头都被拒
+    """
+    pdir = tmp / "src-plugins"
+    pdir.mkdir(parents=True)
+    src = pdir / "src-demo.js"
+    good = (
+        "import { log, register_cron } from 'host-api';\n"
+        "register_cron('beat', '@every 2s', function () { log('beat v1'); });\n"
+    )
+    src.write_text(good)
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "src.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "src.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def plugin():
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return None
+        for p in body.get("plugins", []):
+            if p["name"] == "src-demo":
+                return p
+        return None
+
+    def wait_for(pred, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.3)
+        return False
+
+    def save(text, panel=True):
+        # post_json 的 panel=False 用来验证「缺 x-panel 头会被拦」
+        return post_json(
+            f"{base}/api/plugins/src-demo/source", panel=panel, payload={"text": text}
+        )
+
+    try:
+        check(wait_ready(base, proc, timeout=20.0), "源码编辑实例已就绪")
+        check(wait_for(lambda: plugin() is not None, 15.0), "插件已加载")
+
+        code, body = fetch_json(f"{base}/api/plugins/src-demo/source")
+        check(code == 200 and "beat v1" in body.get("text", ""), "能读到源码", f"{code}")
+        check(body.get("has_backup") is False, "还没有备份时 has_backup=false")
+        check(body.get("runtime") == "js", "带回了运行时（决定高亮词表）", str(body.get("runtime")))
+
+        # ① 保存 → 备份
+        code, body = save(good.replace("beat v1", "beat v2"))
+        check(code == 200 and body.get("ok"), "保存返回成功", f"{code} {body}")
+        check((pdir / "src-demo.js.bak").is_file(), "保存前自动生成了 .bak 备份")
+        check((pdir / "src-demo.js.bak").read_text() == good, "备份里是**保存前**的内容")
+        code, body = fetch_json(f"{base}/api/plugins/src-demo/source")
+        check("beat v2" in body.get("text", ""), "读回来是改动后的内容")
+        check(body.get("has_backup") is True, "有了备份 → has_backup=true")
+
+        # ② 自动热更新（不重启、不手点）
+        check(
+            wait_for(lambda: "插件已热更新" in logpath.read_text(errors="replace"), 10.0),
+            "**保存后引擎自己热更新了**（不用重启）",
+        )
+
+        # ③ 改坏了能救回来 —— 这条是「可编辑」这个功能真正的安全网
+        code, _ = save("this is not valid javascript ((")
+        check(code == 200, "故意写坏也能保存（面板不做语法校验，交给引擎报）")
+        check(
+            wait_for(lambda: (plugin() or {}).get("error") is not None, 12.0),
+            "插件随后报出加载失败（面板上看得见）",
+            str((plugin() or {}).get("error"))[:60],
+        )
+        code, body = post_json(f"{base}/api/plugins/src-demo/source/restore")
+        check(code == 200 and body.get("ok"), "一键回滚返回成功", f"{code} {body}")
+        check(
+            wait_for(lambda: (plugin() or {}).get("error") is None, 12.0),
+            "**回滚之后插件又正常加载了**（退路是通的）",
+        )
+        check("beat v2" in src.read_text(), "文件内容回到回滚前的版本")
+
+        # ④ 各种拒绝
+        code, body = save("   ")
+        check(code == 400, "空内容拒绝保存（空文件会让插件加载失败）", f"{code}")
+        code, _ = save("x" * (1500 * 1024))
+        check(code == 400, "超过 1 MiB 的内容拒绝保存", f"{code}")
+        code, _ = save("x", panel=False)
+        check(code == 403, "缺少 `x-panel` 头时拒绝写入（防 CSRF）", f"{code}")
+        for bad in ["..", "a%2Fb", "nope"]:
+            code, _, _ = http(
+                f"{base}/api/plugins/{bad}/source", method="POST", body=b'{"text":"x"}',
+                headers={"content-type": "application/json", "x-panel": "1"},
+            )
+            check(code in (400, 404), f"插件名 `{bad}` 的写入被拒", f"HTTP {code}")
+        code, _, _ = http(
+            f"{base}/api/plugins/src-demo/source/restore", method="POST", body=b"{}",
+            headers={"content-type": "application/json", "x-panel": "1"},
+        )
+        check(code == 200, "有备份时可以回滚（上面刚用过）", f"HTTP {code}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
 def plugin_ui_checks(tmp: Path) -> None:
     """第十二轮：插件自有 WebUI + 主面板前端资源 + 测试运行。
 
@@ -2208,6 +2336,7 @@ def main() -> int:
     job_override_checks(tmp)
     job_delete_checks(tmp)
     plugin_manage_checks(tmp)
+    plugin_source_edit_checks(tmp)
 
     print()
     if FAILURES:

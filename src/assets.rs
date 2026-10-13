@@ -172,6 +172,7 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/views/task-list.js"),
     asset!("js/views/task-editor.js"),
     asset!("js/views/plugin-list.js"),
+    asset!("js/views/plugin-source.js"),
 ];
 
 #[cfg(test)]

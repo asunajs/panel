@@ -734,6 +734,40 @@ const SHOTS = (o) => [
         ),
       );
 
+      // ⑧ 点一次「立即执行」= **恰好跑一次**。
+      //
+      //    这条抓的是一个真 bug：委托监听注册在 `render()` 里，而 render 会被反复调用
+      //    （动作后的静默刷新、点刷新按钮、路由切回来），每渲染一次就多挂一份监听 ——
+      //    一次点击于是触发 N 次请求。幂等动作（暂停/停用/删除）看不出来，
+      //    但「立即执行」会真的多跑几次。实测撞到过：插件管理页点 1 次「启用」，
+      //    后端日志里 4 条「插件已被面板启用」。
+      //
+      //    用 always-fails（`@every 1h`，不会自己跑）把噪声排掉，再先点几次刷新
+      //    把「监听累积」的条件造出来。
+      const runsOf = (name) =>
+        ev(`fetch('/api/state', { credentials: 'same-origin' })
+              .then((r) => r.json())
+              .then((d) => {
+                const j = (d.jobs || []).find((x) => x.name === '${name}');
+                return j ? j.runs : null;
+              })`);
+      for (let i = 0; i < 3; i += 1) {
+        await clickEl('#refresh-btn');
+        await sleep(350);
+      }
+      await waitFor(`!!document.querySelector('[data-task="always-fails"] [data-act="run"]')`, 8000);
+      const runsBefore = await runsOf('always-fails');
+      await clickAndWaitToast('[data-task="always-fails"] [data-act="run"]');
+      await sleep(900);
+      const runsAfter = await runsOf('always-fails');
+      results.push(
+        note(
+          '点一次「立即执行」只跑一次（委托监听没有累积）',
+          runsBefore !== null && runsAfter === runsBefore + 1,
+          `runs ${runsBefore} → ${runsAfter}`,
+        ),
+      );
+
       // ⑥ 面板任务渲染出「编辑 / 删除」
       const panel = await card('echo');
       results.push(
@@ -1109,8 +1143,10 @@ const SHOTS = (o) => [
              return c ? c.textContent.includes('已暂停') : null;
            })()`);
 
-      // 用 code-side（插件声明的任务，稳定存在、不会自己跑出状态）
-      const target = 'code-side';
+      // 用 hit-report（demo 插件声明的任务，稳定存在）。**别用冒烟 fixture 里的名字**
+      // （比如 code-side）—— 那些只在冒烟自己的临时插件目录里存在，
+      // 浏览器断言跑在真实 plugins/ 上，会查不到卡片（实测踩过）。
+      const target = 'hit-report';
       const before = await paused(target);
       note(`任务 ${target} 初始未暂停`, before === false, String(before));
 
@@ -1227,7 +1263,7 @@ const SHOTS = (o) => [
 
       const target = list.find((c) => c.name === 'counter') || list[0];
       if (target) {
-        // ① 源码
+        // ① 源码：跳到**独立页面**（可编辑，见 web-plugin-source 那个镜头）
         const src = await ev(
           `(function () {
              const b = [...document.querySelectorAll('[data-src]')].find(x => x.dataset.src === '${target.name}');
@@ -1238,18 +1274,27 @@ const SHOTS = (o) => [
         for (let i = 0; i < 40; i += 1) {
           await sleep(150);
           srcOk = await ev(`(function () {
-            const s = document.getElementById('src-section');
-            const v = document.getElementById('src-view');
-            const t = document.getElementById('src-title');
-            return { shown: s && !s.hidden, len: v ? v.textContent.length : 0, title: t ? t.textContent : '' };
+            return {
+              hash: location.hash,
+              editorLen: (document.querySelector('.editor')?.textContent || '').length,
+            };
           })()`);
-          if (srcOk && srcOk.shown && srcOk.len > 50) break;
+          if (srcOk && srcOk.editorLen > 50) break;
         }
         note(
-          `点「源码」能看到${target.name}的内容`,
-          src === true && !!srcOk && srcOk.shown === true && srcOk.len > 50,
+          `点「源码」跳到独立页面（${target.name}）`,
+          src === true &&
+            !!srcOk &&
+            srcOk.hash === `#/plugins/${target.name}/source` &&
+            srcOk.editorLen > 50,
           JSON.stringify(srcOk),
         );
+        // 回到插件列表，后面的停用检查在列表页上做
+        await ev(`(function () { location.hash = '#/plugins'; return true; })()`);
+        for (let i = 0; i < 40; i += 1) {
+          await sleep(150);
+          if ((await cards()).length > 0) break;
+        }
 
         // ② 停用 → 卡片翻成已停用 + 出现「启用」
         const clicked = await ev(
@@ -1296,6 +1341,125 @@ const SHOTS = (o) => [
         detail:
           failed.length === 0
             ? `${results.length} 项通过（源码有内容、停用可持久、能启用回来）`
+            : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
+      };
+    },
+  },
+  {
+    // 插件源码页：**可编辑**。用户实测说「源码单独进入一个页面吧」+「可编辑」。
+    // 这个镜头真的改一次文件再恢复回来 —— 所以跑它的实例必须用**插件目录的副本**
+    // （别动仓库里的 plugins/），脚本里那一步恢复是兜底，不是主要保险。
+    name: 'web-plugin-source',
+    url: `${o.auth}/#/plugins/demo/source`,
+    viewport: [1280, 1000],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const results = [];
+      const note = (label, ok, detail) => results.push({ label, ok, detail });
+      const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      const state = () =>
+        ev(`(function () {
+           const ed = document.querySelector('.editor');
+           return {
+             editorLen: (ed?.textContent || '').length,
+             meta: document.getElementById('src-meta')?.textContent || '',
+             dirtyHidden: document.getElementById('src-dirty')?.hidden,
+             hasSave: !!document.getElementById('src-save'),
+             hasRestore: !!document.getElementById('src-restore'),
+             restoreHidden: document.getElementById('src-restore')?.hidden,
+             saveLabel: document.getElementById('src-save')?.textContent || '',
+             hostH: Math.round(document.querySelector('.editor')?.getBoundingClientRect().height || 0),
+             title: document.getElementById('view-title')?.textContent || '',
+           };
+         })()`);
+
+      let st = null;
+      for (let i = 0; i < 60; i += 1) {
+        await sleepMs(150);
+        st = await state();
+        if (st && st.editorLen > 50) break;
+      }
+      note(`源码页渲染出编辑器（${st ? st.editorLen : 0} 字符）`, !!st && st.editorLen > 50);
+      note('页头写的是插件名', !!st && /demo/.test(st.title), st ? st.title : '');
+      note(
+        '元信息里有路径 / 行数 / 字节数 / 保存提示',
+        !!st && /demo\.js/.test(st.meta) && /行/.test(st.meta) && /Ctrl/.test(st.meta),
+        st ? st.meta.slice(0, 80) : '',
+      );
+      note('有「保存」按钮', !!st && st.hasSave === true && /保存/.test(st.saveLabel));
+      note('初始没有「未保存」标记', !!st && st.dirtyHidden === true);
+      note(
+        '编辑器占了整屏高度（不是表单里那个 52vh）',
+        !!st && st.hostH > 500,
+        st ? `${st.hostH}px` : '',
+      );
+      note('**编辑器是可编辑的**（contenteditable）', (await ev(`document.querySelector('.editor')?.isContentEditable === true`)) === true);
+
+      // 记下改动前的内容：恢复之后要**回到这个内容**。
+      //
+      // 不能断言「测试标记没了」—— 上一轮失败会把标记留在文件里，下一轮的备份
+      // 又会把带标记的版本存下来，于是那句断言永远不成立（实测踩到过，
+      // 排查时以为是恢复功能坏了）。比「和改动前一致」才是真的在测恢复。
+      const beforeText = await ev(`document.querySelector('.editor')?.textContent || ''`);
+
+      // 改一点内容：**用 CDP 真实输入**，不要手搓 textContent + 合成 input 事件。
+      // 合成事件走不通（实测：「未保存」不亮）—— 编辑器的 input 处理里会
+      // redraw()/setCaret()，对着一个手工改过的 DOM 状态不成立。
+      // 真实输入才是用户按键盘走的那条路，也才测得到真东西。
+      await ev(`document.querySelector('.editor')?.focus()`);
+      await cdp.send('Input.insertText', { text: '// 面板源码页的编辑测试标记' }, S);
+      const edited = await ev(`/编辑测试标记/.test(document.querySelector('.editor')?.textContent || '')`);
+      let dirty = null;
+      for (let i = 0; i < 40; i += 1) {
+        await sleepMs(100);
+        dirty = await state();
+        if (dirty && dirty.dirtyHidden === false) break;
+      }
+      note('改动之后出现「未保存」标记', edited === true && !!dirty && dirty.dirtyHidden === false);
+
+      const toastBefore = await ev(`(document.getElementById('toast')?.textContent || '')`);
+      await ev(`(function () { document.getElementById('src-save').click(); return true; })()`);
+      let saved = null;
+      for (let i = 0; i < 60; i += 1) {
+        await sleepMs(150);
+        saved = await state();
+        const t = await ev(`(document.getElementById('toast')?.textContent || '')`);
+        if (t && t !== toastBefore && /已保存/.test(t)) break;
+      }
+      const toastAfter = await ev(`(document.getElementById('toast')?.textContent || '')`);
+      note('点「保存」后有成功提示', /已保存/.test(toastAfter), toastAfter.slice(0, 60));
+      note('保存后「未保存」标记消失', !!saved && saved.dirtyHidden === true);
+      note(
+        '保存后出现「恢复上一次」（因为这次生成了备份）',
+        !!saved && saved.restoreHidden === false,
+      );
+
+      // 恢复回来：走确认条，然后等页面刷新
+      await ev(`(function () { document.getElementById('src-restore').click(); return true; })()`);
+      const confirmHit = await confirmIfAny(cdp, S, 2500);
+      note('恢复要先确认（会覆盖当前内容）', confirmHit === true);
+      let back = null;
+      for (let i = 0; i < 60; i += 1) {
+        await sleepMs(150);
+        back = await ev(`(document.querySelector('.editor')?.textContent || '')`);
+        if (back && back === beforeText) break;
+      }
+      note(
+        '恢复之后内容回到改动前（逐字一致）',
+        !!back && back === beforeText,
+        back === beforeText ? '一致' : `长度 ${beforeText.length} → ${back ? back.length : '?'}`,
+      );
+
+      const failed = results.filter((r) => !r.ok);
+      return {
+        ok: failed.length === 0,
+        label: '插件源码：独立页面、可编辑、能保存、能恢复',
+        detail:
+          failed.length === 0
+            ? `${results.length} 项通过（真的改了一次文件又恢复回来）`
             : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
       };
     },

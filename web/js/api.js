@@ -149,9 +149,26 @@ export function reloadPlugin(name) {
   });
 }
 
-/// 只读地取插件源码。
+/// 取插件源码（含有没有备份，用来决定「恢复上一次」按钮给不给）。
 export function pluginSource(name) {
   return request(`/api/plugins/${encodeURIComponent(name)}/source`);
+}
+
+/// 保存插件源码。写完引擎会自己发现文件变化并热更新（面板已有机制）。
+export function savePluginSource(name, text) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/source`, {
+    method: 'POST',
+    body: { text },
+    panel: true,
+  });
+}
+
+/// 用 `{file}.bak` 覆盖回上一次保存前的内容。
+export function restorePluginSource(name) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/source/restore`, {
+    method: 'POST',
+    panel: true,
+  });
 }
 
 /// 撤销「面板删除」（墓碑）——把被删掉的插件任务装回调度器。
