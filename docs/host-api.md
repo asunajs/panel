@@ -171,15 +171,17 @@ handler(payload) -> None
 
 ---
 
-## 4. 写插件的硬约束（PocketPy 兼容性）
+## 4. 写插件的硬约束
 
-这一节**只约束 Python 插件**（`.py`）。理由：一个 `.py` 文件要同时能在 PocketPy 和
-CPython 里跑，而两者里 **PocketPy 是受限的那一侧** —— 它是嵌入式解释器，只实现了
-Python 的一个子集。所以要避开它的语法缺口（实测）：
+约束永远来自「**两个宿主里较弱的那一侧**」——因为一份脚本要在两个宿主里跑，
+能被两边都接受的写法，就是被较弱那侧接受的写法。两个方向各一张实测表。
 
-> 注意不是「所有插件都要避开 PocketPy」：JS 插件根本不经过 PocketPy，
-> 这些限制对它无关。**约束永远来自「两个宿主里较弱的那一侧」**，
-> JS 侧的对应物在下面表格之后。
+### 4.1 Python 插件（`.py`）：避开 PocketPy 的缺口
+
+一个 `.py` 文件要同时跑在 PocketPy 和 CPython 里，而 PocketPy 是受限的那一侧
+（嵌入式解释器，只实现了 Python 的一个子集）：
+
+> JS 插件不经过 PocketPy，这张表对它无关。
 
 | 构造 | PocketPy v2.2.0 | 替代写法 |
 |---|---|---|
@@ -192,14 +194,35 @@ Python 的一个子集。所以要避开它的语法缺口（实测）：
 | `datetime + timedelta` | ❌ `TypeError` | 用时间戳字符串 |
 | `threading` / `sqlite3` / `urllib` / `http.server` | ❌ 没有这些模块 | 走 `host_api` |
 | `os` 模块 / `open()` | ❌ 宿主编译时关掉了（`PK_ENABLE_OS=0`） | 走 `host_api`（宿主统一审计） |
-| 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=`、`json` | ✅ | — |
+| 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=` | ✅ | — |
+| 可用模块：`json` / `math` / `traceback` / `sys` | ✅ | — |
 
-JS 侧反过来：QuickJS 没有 Node 的 `fs` / `http` / `process`，
-所以插件同样只能走 `host-api`。这条约束是**两边对称**的，也正是抽象层存在的理由。
+### 4.2 JS 插件（`.js`）：避开 Node 的原生能力
 
-嵌入式宿主里 Python 插件的可用模块（实测）：`json` / `math` / `traceback` / `sys` 可用；
-`os` 与 `open()` 不可用（`PK_ENABLE_OS=0`，见 `build.rs` 的注释）。
-需要文件、网络、数据库一律走 `host_api`。
+一个 `.js` 文件要同时跑在嵌入式 QuickJS 和 Node 里，而 **嵌入式 QuickJS 是受限的那一侧**：
+它没有 Node 的任何原生全局量和原生模块。实测（`typeof globalThis[x]`，v1 规范，2026-10-13）：
+
+| 构造 | 嵌入式 QuickJS | Node | 替代写法 |
+|---|---|---|---|
+| `process` / `require` / `module` / `exports` / `__dirname` / `Buffer` | ❌ `undefined` | ✅ | 走 `host-api`（配置走 `sqlite_*` 或宿主参数） |
+| `setTimeout` / `setInterval` / `setImmediate` | ❌ `undefined` | ✅ | **用调度器**：`every(name, '500ms', fn)` / `register_cron` |
+| `fetch` | ❌ `undefined` | ✅ | `http_fetch(url, opts)`（宿主侧同步实现，见 §3） |
+| `import fs from 'node:fs'` 等原生模块 | ❌ 加载期就失败：`Error loading module 'node:fs': 只内置了 host-api 模块` | ✅ | 走 `host-api` |
+| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `structuredClone` / `crypto` | ❌ `undefined` | ✅ | 自己拼字符串 / 用 `host-api` |
+| `console` / `performance` / `atob` / `btoa` / `queueMicrotask` | ✅ | ✅ | — |
+| `Promise` / `Symbol` / `BigInt` / `WeakRef` / `Proxy` / `Reflect` / `eval` | ✅ | ✅ | — |
+
+一句话：**除了 ECMAScript 语言本身 + `host-api`，别的都别指望。**
+实测对照 —— 同一个文件：
+
+```
+// 用了原生模块的插件
+import fs from 'node:fs';
+嵌入式 QuickJS → ReferenceError: Error loading module 'node:fs': 只内置了 `host-api` 模块
+Node          → ✅ 正常读到文件
+```
+
+两边对称，也正是抽象层存在的理由。
 
 ---
 
