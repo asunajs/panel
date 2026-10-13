@@ -16,8 +16,8 @@
 | 第一轮 | Axum + 嵌入 QuickJS + 插件加载 + `host.log` + SQLite + 每秒 `on_tick` | ✅ 已验证 |
 | 第二轮 | 毫秒级 Cron 调度 + `jobs` 表持久化 + 面板任务视图 | ✅ 已验证 |
 | 第三轮 | 执行预算（死循环防护）+ 任务熔断 + 引擎健康上报 + SIGTERM 优雅退出 | ✅ 已验证 |
-| 第四轮 | 内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物 | ✅ 本机已验证，ARM 待 CI |
-| 第五轮 | 部署与分发（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本已测（15 项用例），Release 流水线待打 tag 验证 |
+| 第四轮 | 内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物 | ✅ 本机 + **CI（真 ARM64 Linux 硬件）已验证** |
+| 第五轮 | 部署与分发（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本 15 项用例 + **真 Release 端到端验证**（下载→SHA256→装好→启动→干净关闭） |
 | 第六轮 | **双运行时：嵌入 PocketPy 跑 Python 插件 + 抽象宿主 API（`host-api`/`host_api`）+ JS 插件 HTTP 路由 + mtime 热更新** | ✅ 本机已验证（含双运行时冒烟、静态 musl 产物 4.4 MB） |
 | 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | ✅ 适配器自带用例（Node 20 / CPython 51 项），交叉验证见 §10.5 |
 | 第八轮 | **面板从只读变可操作**：手动触发 / 暂停 / 恢复，暂停状态跨重启保留 + 写接口防 CSRF | ✅ 已验证（冒烟 24 项含 6 项面板写操作） |
@@ -2801,7 +2801,52 @@ finalize 是**进程级**的：第二次调用直接
 - **别在浏览器断言里用冒烟 fixture 的任务名**（比如 `code-side` 在冒烟自己的临时
   插件目录里，真实 `plugins/` 里没有）—— 查不到卡片会报成「功能坏了」。
 
-### 16.26 还没做的
+## 17. 发布到 GitHub（`asunajs/panel`）这一轮踩到的三个坑
+
+仓库推到 [asunajs/panel](https://github.com/asunajs/panel)，CI 跑在**真 ARM64 Linux 硬件**上
+（`ubuntu-24.04-arm`）。开发机是 arm64 macOS，跑不了 Linux 二进制 —— 「目标平台上能不能跑」
+只能由 CI 回答，所以这一步不是走形式，是补上一直缺的那块证据。
+
+第一次推送后，流水线连红了三次，红的原因都是**测试/断言本身**（不是产品）：
+
+**① 静态链接的断言太窄**（release.yml）
+
+x86_64 的产物是：
+
+```
+ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped
+```
+
+而断言只匹配 `statically linked` —— 现代 Rust 在 `x86_64-unknown-linux-musl` 上默认产出
+**static PIE**，`file` 报的是 `static-pie linked`。aarch64 那条恰好报 `statically linked`，
+所以只有 x86_64 红。改成同时接受两种写法，并补一条**更硬**的判据：直接看 ELF 的
+`NEEDED` 段（静态的真正含义是「没有动态库依赖」，而 `file` 的措辞会随工具链版本变）。
+
+**② 冒烟里一条「太急」的断言**（scripts/smoke.py）
+
+x86_64-musl runner 上报 `双运行时都加载了 — runtime=['js']`，但同一次运行的日志里
+`PocketPy 2.2.0 就绪` 和三个 py 插件的「插件已加载」都在 —— 产品是好的。
+原因是 Python VM **惰性初始化**（「首次用到 Python 插件时才初始化」），慢机器上 py 插件
+比 js 插件晚一两秒登记，而断言拿的是启动后**第一次**快照。改成轮询等待（最多 15 秒）。
+
+这是同一类问题的第五次（编辑器 / 任务卡片 / 任务操作 / Dashboard / 双运行时）：
+**异步就绪的状态一律要等，不能赌**。
+
+**③ Release 里一句永远不成立的 grep**（release.yml）
+
+「用刚发布的产物验证 install.sh」这一步，前面真下载 ✓、SHA256 校验 ✓、装好 ✓、服务起来 ✓、
+`/api/state` 正常 ✓ —— 最后一句 `grep -q "引擎线程已退出"` 挂了。多执行线程之后那句话
+已经变成 `[engine:N] 执行线程已退出`，所以它**永远**不成立。换成现存字符串，并补一条不变量：
+`PocketPy 已释放` 只出现一次（多线程下重复 finalize 会 abort，冒烟里早就钉住了）。
+
+#### 发布后的状态
+
+- CI：4 个 job 全绿（x86_64 / **原生 ARM64** / **aarch64 musl 静态** / 跨运行时适配器）
+- Release `v0.1.0`：`plugin-panel-aarch64-linux-musl`（4.6 MB）、`plugin-panel-x86_64-linux-musl`（5.1 MB）、`SHA256SUMS`
+- 发布流水线结束前会**自己**用真下载的产物跑一遍 install.sh（校验和 → 装好 → 启动 → 干净关闭），
+  这样「用户拿到的安装方式」本身就是被验过的
+
+### 17.1 还没做的
 
 - **旧版页面 `/classic` 还没删**。等新版把实时日志、熔断清理、鉴权徽标对齐后再删。
 - **插件配置页没有共享的组件库**。现在插件只能复用 CSS 变量和 `components.css` 的类名，
