@@ -21,10 +21,21 @@ const $ = (sel) => document.querySelector(sel);
 
 // ---------------------------------------------------------------- 主题
 
-const THEME_KEY = 'panel-theme';
+// 键名带版本号：上一版把「跟随系统偏好」算出来的结果**自动写进**了
+// `panel-theme`，于是那个值看起来像用户的选择，其实不是。改默认主题后
+// 所有加载过旧页面的人都会卡在旧值上（实测踩到：headless 环境报 light，
+// 于是「默认深色」对谁都不生效）。换键名正好把那些自动写进去的值丢掉。
+const THEME_KEY = 'panel-theme-v2';
 
-function applyTheme(theme) {
+/**
+ * 应用主题。
+ *
+ * `persist` 只在**用户主动切换**时为 true —— 初始化时把算出来的默认值写回
+ * localStorage 是个陷阱：下次改默认值就再也生效不了了。
+ */
+function applyTheme(theme, persist = false) {
   document.documentElement.dataset.theme = theme;
+  if (!persist) return;
   try {
     localStorage.setItem(THEME_KEY, theme);
   } catch {
@@ -47,7 +58,7 @@ function initTheme() {
   applyTheme(saved || 'dark');
 
   $('#theme-btn').addEventListener('click', () => {
-    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
   });
 }
 
@@ -73,7 +84,16 @@ function initDrawer() {
   const scrim = $('#scrim');
   const btn = $('#menu-btn');
 
+  // 抽屉模式只在窄屏成立（断点与 layout.css 一致）。
+  //
+  // 宽屏下侧边栏是常驻的一列，点汉堡只会切 nav-open + 显示蒙层，
+  // 而没有任何东西会滑进来 —— 用户看到的就是「屏幕上蒙了一层灰」。
+  // CSS 那边已经让按钮不在宽屏显示了，这里再挡一道：
+  // **蒙层绝不能在没有抽屉的时候出现**，否则不管按钮因为什么原因露出来，症状都是它。
+  const drawerMode = () => window.matchMedia('(max-width: 860px)').matches;
+
   const setOpen = (open) => {
+    if (open && !drawerMode()) return;
     root.classList.toggle('nav-open', open);
     scrim.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
@@ -85,6 +105,10 @@ function initDrawer() {
   $('#nav').addEventListener('click', () => setOpen(false));
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') setOpen(false);
+  });
+  // 从窄屏拖宽（或手机横屏）时收起抽屉，否则蒙层会留在宽屏上
+  window.addEventListener('resize', () => {
+    if (!drawerMode()) setOpen(false);
   });
 }
 
@@ -197,7 +221,7 @@ function renderSettings(root) {
       </div>
     </div>`;
   root.querySelector('#s-theme').addEventListener('click', () => {
-    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
     renderSettings(root);
   });
 }

@@ -189,6 +189,20 @@ check(
   '.card-head 允许换行（窄屏不压缩子项）',
 );
 
+// 主题持久化：只有**用户主动切换**才写 localStorage。
+//
+// 这条守的是一个真实踩到的坑：上一版在初始化时把「跟随系统偏好」算出来的结果
+// 写回了 localStorage，于是那个值看起来像用户的选择。后来把默认主题改成深色，
+// 所有加载过旧页面的人却都卡在旧值上 —— 默认值改了但谁都不生效。
+const appJs = readFileSync(join(WEB, 'js/app.js'), 'utf8');
+const themeCalls = [...appJs.matchAll(/applyTheme\(([^)]*)\)/g)].map((m) => m[1]);
+const persisting = themeCalls.filter((args) => args.includes('true'));
+check(
+  themeCalls.length > 0 && persisting.length === 2,
+  '只有用户主动切换主题时才写 localStorage（初始化不写）',
+  `${themeCalls.length} 处调用，其中 ${persisting.length} 处带 persist`,
+);
+
 const pluginCss = readFileSync(join(PLUGINS, 'demo/style.css'), 'utf8');
 check(
   [...pluginCss.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/#[0-9a-fA-F]{3,8}\b/g)].length === 0,

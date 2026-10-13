@@ -127,6 +127,21 @@ async function waitForDevtools(port, timeoutMs = 25000) {
   throw new Error(`浏览器的 devtools 端口 ${port} 没起来`);
 }
 
+/**
+ * 在页面里求一个表达式的值（`returnByValue`）。
+ *
+ * 放在模块级而不是某个函数里：`SHOTS` 里的 `verify` 闭包要用它，
+ * 而那些闭包是在模块作用域创建的 —— 定义在函数里它们看不见。
+ */
+const evalIn = async (cdp, S, expression) => {
+  const r = await cdp.send(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, awaitPromise: true },
+    S,
+  );
+  return r.result && r.result.value;
+};
+
 // ---------------------------------------------------------------- 要拍的几张
 
 /** 每张图的视口与裁剪区域（CSS 像素）。裁剪是为了让图聚焦在要讲的那部分。 */
@@ -184,6 +199,74 @@ const SHOTS = (o) => [
     viewport: [1280, 1100],
     scale: 2,
     cookie: 'session',
+  },
+  {
+    // PC 宽度点汉堡按钮：它**不该**显示，点了也**不该**出现蒙层。
+    // 实测踩到过：`.only-mobile` 的 display:none 被 components.css 的
+    // `.icon-btn { display: inline-flex }` 覆盖（同优先级、后加载），
+    // 于是按钮在 PC 上一直露着，点下去只留下一层灰 —— 宽屏下侧边栏是常驻的，
+    // 没有任何东西会滑进来。
+    name: 'web-desktop-hamburger',
+    url: `${o.auth}/#/dashboard`,
+    viewport: [1280, 700],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const btn = document.getElementById('menu-btn');
+           const display = getComputedStyle(btn).display;
+           btn.click();                       // 万一它露出来了，点一下
+           return {
+             display: display,
+             navOpen: document.documentElement.classList.contains('nav-open'),
+             scrimHidden: document.getElementById('scrim').hidden,
+           };
+         })()`,
+      );
+      const ok = r.display === 'none' && r.navOpen === false && r.scrimHidden === true;
+      return {
+        ok: ok,
+        label: 'PC 宽度下汉堡按钮不显示、点了也不出现蒙层',
+        detail: `display=${r.display}, navOpen=${r.navOpen}, 蒙层隐藏=${r.scrimHidden}`,
+      };
+    },
+  },
+  {
+    // 窄屏点同一个按钮：按钮要显示，点了要真的滑出抽屉 + 蒙层。
+    name: 'web-mobile-drawer',
+    url: `${o.auth}/#/dashboard`,
+    viewport: [420, 700],
+    scale: 2,
+    cookie: 'session',
+    after: async (cdp, S) => {
+      await evalIn(cdp, S, `document.getElementById('menu-btn').click()`);
+      await sleep(400);
+    },
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const btn = document.getElementById('menu-btn');
+           return {
+             display: getComputedStyle(btn).display,
+             navOpen: document.documentElement.classList.contains('nav-open'),
+             scrimHidden: document.getElementById('scrim').hidden,
+             drawerX: document.getElementById('sidebar').getBoundingClientRect().x,
+           };
+         })()`,
+      );
+      const ok =
+        r.display !== 'none' && r.navOpen === true && r.scrimHidden === false && r.drawerX === 0;
+      return {
+        ok: ok,
+        label: '窄屏下汉堡按钮可见、点了滑出抽屉 + 蒙层',
+        detail: `display=${r.display}, navOpen=${r.navOpen}, 蒙层隐藏=${r.scrimHidden}, 抽屉 x=${Math.round(r.drawerX)}`,
+      };
+    },
   },
   {
     name: 'web-plugins',
@@ -275,6 +358,9 @@ try {
   console.log(`会话:   ${sid.slice(0, 16)}…\n`);
 
   let lastUrl = null; // 判断下一次导航是不是「同文档、只换 hash」
+  let verifyPassed = 0;
+  const verifyFailed = [];
+
 
   for (const shot of SHOTS(opts)) {
     const [w, h] = shot.viewport;
@@ -303,17 +389,42 @@ try {
       target.search === lastUrl.search;
     lastUrl = target;
 
+    // 每个镜头都从**全新文档**开始。
+    //
+    // 为什么必须这样：hash 路由切换（`/#/dashboard` → `/#/tasks`）不会重新加载
+    // 文档，上一个镜头留下的状态会漏到下一个 —— 实测踩到过：点开抽屉的镜头把
+    // `nav-open` 留在 <html> 上，下一个镜头再点一次反而把它关掉，断言于是时好时坏。
+    // 先跳 about:blank 再进目标 URL 是最省心的做法（`Page.reload` 在会话未附着
+    // 活动页时会报「Not attached to an active page」）。
+    // 截图脚本里「快」不重要，「每个镜头独立」才重要。
     if (sameDoc) {
-      await cdp.send('Page.navigate', { url: shot.url }, S);
-      await sleep(500);
-    } else {
-      const loaded = cdp.once('Page.loadEventFired');
-      await cdp.send('Page.navigate', { url: shot.url }, S);
-      await loaded;
+      const blank = cdp.once('Page.loadEventFired');
+      await cdp.send('Page.navigate', { url: 'about:blank' }, S);
+      await blank;
     }
+    const loaded = cdp.once('Page.loadEventFired');
+    await cdp.send('Page.navigate', { url: shot.url }, S);
+    await loaded;
     if (shot.after) {
       await sleep(700); // 等首屏脚本把 DOM 建好再动它
       await shot.after(cdp, S);
+    }
+
+    // verify 钩子：在**真浏览器**里跑断言。
+    //
+    // 为什么需要它：这一轮踩到的两个 bug（徽章被 flex 压成竖排、汉堡按钮在 PC 上
+    // 露出并留下一层蒙层）在静态检查、冒烟、单元测试里**全是绿的** ——
+    // 它们只存在于「浏览器怎么排版、事件怎么走」这一层。
+    // 截图能让人看见问题，但看见不等于拦住，所以断言要落在浏览器里。
+    if (shot.verify) {
+      const r = await shot.verify(cdp, S);
+      if (r && r.ok) {
+        verifyPassed++;
+        console.log(`  ✅ ${r.label}${r.detail ? ` — ${r.detail}` : ''}`);
+      } else {
+        verifyFailed.push((r && r.label) || shot.name);
+        console.log(`  ❌ ${(r && r.label) || shot.name}${r && r.detail ? ` — ${r.detail}` : ''}`);
+      }
     }
     // 面板首屏是服务端渲染的，但任务表 / 会话数 / 日志由 fetch 填 —— 等第一轮跑完
     await sleep(1800);
@@ -329,6 +440,13 @@ try {
     const kb = (fs.statSync(file).size / 1024).toFixed(0);
     console.log(`  ✅ ${file}  (${kb} KB)`);
   }
+
+  console.log(
+    `\n浏览器断言：通过 ${verifyPassed} 条` +
+      (verifyFailed.length ? `，失败 ${verifyFailed.length} 条` : ''),
+  );
+  for (const f of verifyFailed) console.log(`   - ${f}`);
+  if (verifyFailed.length) process.exitCode = 1;
 } finally {
   cdp?.close();
   browserProc.kill('SIGKILL');

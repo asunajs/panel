@@ -1979,9 +1979,9 @@ Python 侧要借一个**空闲** VM 槽位（`next_vm` 始终指向最小的空�
 
 | 套件 | 数量 | 结果 |
 |---|---|---|
-| `cargo test` | 83（+1 ignored） | ✅ |
-| 冒烟 `scripts/smoke.py` | **146**（原 99，新增 47） | ✅ |
-| 前端资源静态检查 `scripts/test-web-assets.mjs` | **47**（新增） | ✅ |
+| `cargo test` | 84（+1 ignored） | ✅ |
+| 冒烟 `scripts/smoke.py` | **153**（原 99，新增 54） | ✅ |
+| 前端资源静态检查 `scripts/test-web-assets.mjs` | **52**（新增） | ✅ |
 | 旧版页面前端 `scripts/test-panel-frontend.mjs` | 47 | ✅ |
 | Node 适配器 | 24 | ✅ |
 | CPython 适配器 | 61 | ✅ |
@@ -2030,7 +2030,67 @@ Python 侧要借一个**空闲** VM 槽位（`next_vm` 始终指向最小的空�
 > 但它管不了「徽章竖过来了」。所以截图脚本（真 Edge + CDP）不是装饰品，
 > 它是这一轮唯一能发现这个 bug 的工具。
 
-### 16.9 还没做的
+### 16.9 PC 上点汉堡按钮只留下一层蒙层（用户实测发现）
+
+第二个用户实测发现的 bug，比 16.8 那个更阴：**PC 宽度下顶栏的 ☰ 按钮显示着，点下去
+屏幕上蒙了一层灰，但没有任何东西滑进来。**
+
+两个独立的错叠在一起，任一个修掉都不会出现症状：
+
+**① `.only-mobile` 的 `display: none` 被覆盖了。** CSS 里：
+
+```css
+/* layout.css（先加载） */
+.only-mobile { display: none; }
+/* components.css（后加载） */
+.icon-btn { display: inline-flex; }
+```
+
+两个都是单类选择器（specificity 0,1,0），**后加载的赢** —— 所以汉堡按钮在 PC 上也一直
+露着。修法是把选择器写成 `.only-mobile.only-mobile`（0,2,0），让「谁能覆盖我」与加载
+顺序无关。写两遍不优雅，但比 `!important` 好，也比「记得别改 link 顺序」可靠。
+
+**② 抽屉逻辑没判断自己是不是在抽屉模式。** 宽屏下侧边栏是常驻的一列（不是
+off-canvas），点了只切 `nav-open` + 显示蒙层 —— 于是只有蒙层，没有抽屉。
+
+```js
+const drawerMode = () => window.matchMedia('(max-width: 860px)').matches;
+const setOpen = (open) => {
+  if (open && !drawerMode()) return;   // 宽屏没有抽屉，不进入抽屉态
+  ...
+};
+```
+
+外加一条 `resize` 监听：从窄屏拖宽时收起抽屉，否则蒙层会留在宽屏上。
+
+**为什么两道都要有**：只藏按钮不够 —— `btn.click()` 对 `display: none` 的元素照样触发
+（实测场景 B 证明了这点：按钮 `display=none`，但 `navOpen=true`、蒙层可见）。
+CSS 决定「看不看得见」，JS 决定「点下去有没有后果」，这是两件事。
+
+#### 顺带把断言搬进了浏览器
+
+这两个 bug（16.8 的徽章竖排、16.9 的蒙层）在 `cargo test`、冒烟、静态检查里**全是绿的** ——
+它们只存在于「浏览器怎么排版、事件怎么走」这一层。截图能让人**看见**问题，但看见不等于
+拦住，所以给截图脚本加了 `verify` 钩子，在真页面里跑断言：
+
+| 断言 | 结果 |
+|---|---|
+| PC 宽度下汉堡按钮不显示、点了也不出现蒙层 | `display=none, navOpen=false, 蒙层隐藏=true` ✅ |
+| 窄屏下汉堡按钮可见、点了滑出抽屉 + 蒙层 | `display=flex, navOpen=true, 蒙层隐藏=false, 抽屉 x=0` ✅ |
+
+**反向验证过两个方向**（不然不知道它拦得住什么）：
+
+| 场景 | PC 断言 | 说明 |
+|---|---|---|
+| 只撤 CSS 修复 | ❌ `display=flex, navOpen=false, 蒙层隐藏=true` | 抓到「按钮露出来」，JS 守卫独立挡住了蒙层 |
+| 只撤 JS 守卫 | ❌ `display=none, navOpen=true, 蒙层隐藏=false` | 抓到「看不见的按钮点下去仍有后果」——正是用户报的症状 |
+
+截图脚本还顺手修了两处自身的问题：`Page.reload` 在会话未附着活动页时会报
+「Not attached to an active page」（改成先跳 `about:blank`）；以及**每个镜头现在都从
+全新文档开始** —— 之前 hash 路由切换不重载文档，上一个镜头留在 `<html>` 上的 `nav-open`
+会漏到下一个，断言于是时好时坏。
+
+### 16.10 还没做的
 
 - **旧版页面 `/classic` 还没删**。等新版把实时日志、熔断清理、鉴权徽标对齐后再删。
 - **插件配置页没有共享的组件库**。现在插件只能复用 CSS 变量和 `components.css` 的类名，

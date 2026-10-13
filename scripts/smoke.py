@@ -721,6 +721,26 @@ def raw_http(port: int, path: str, method: str = "GET", headers=None, body: byte
     return code, body_b.decode("utf-8", "replace")
 
 
+def wait_for_plugin(base: str, name: str, timeout: float = 20.0):
+    """等一个热加载的插件出现在 /api/state 里。
+
+    不要用固定 `sleep` 等它：目录扫描是 1s 节流，插件加载 + 注册表同步还要时间，
+    机器忙的时候 1.6s 经常不够 —— 实测就是这条把冒烟弄成时好时坏的。
+    固定等待是 flaky 测试的经典来源，判据应该是「插件出现了」，不是「等了多久」。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _, state = fetch_json(f"{base}/api/state")
+            p = next((x for x in state.get("plugins", []) if x["name"] == name), None)
+            if p is not None:
+                return p
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+    return None
+
+
 def plugin_ui_checks(tmp: Path) -> None:
     """第十二轮：插件自有 WebUI + 主面板前端资源 + 测试运行。
 
@@ -854,13 +874,11 @@ def plugin_ui_checks(tmp: Path) -> None:
         by_name = {p["name"]: p for p in state.get("plugins", [])}
         check(by_name.get("uidev", {}).get("has_ui") is True, "has_ui=true（插件提供了配置页）")
         (pdir / "js" / "noui.js").write_text("const host = globalThis.host;\n")
-        time.sleep(1.6)  # 目录扫描是 1s 节流
-        _, state2 = fetch_json(f"{base}/api/state")
-        by2 = {p["name"]: p for p in state2.get("plugins", [])}
+        noui = wait_for_plugin(base, "noui")
         check(
-            by2.get("noui", {}).get("has_ui") is False,
+            noui is not None and noui.get("has_ui") is False,
             "has_ui=false（没有配置页的插件）",
-            f"{by2.get('noui')}",
+            f"{noui}",
         )
 
         # 目录穿越：必须用原始请求，客户端会把 `..` 折掉
@@ -878,6 +896,43 @@ def plugin_ui_checks(tmp: Path) -> None:
         check(code == 405, "插件静态资源只接受 GET", f"http {code}")
         code, _, _ = http(f"{base}/plugins/nosuch/index.html")
         check(code == 404, "不存在的插件没有页面", f"http {code}")
+
+        # ---- ②b ETag / 304 ----
+        #
+        # 前端资源跟着二进制走，所以「URL 没变内容变了」是常态。只给
+        # `Cache-Control: no-cache` 而不给 ETag 等于没有验证器 —— 浏览器只能靠
+        # 启发式规则猜，升级二进制后卡在旧 UI 上是这类问题的典型表现。
+        code, headers, body = http(f"{base}/css/components.css")
+        etag = headers.get("etag", "")
+        check(code == 200 and etag, "内嵌资源带 ETag", etag or "（没有）")
+
+        code, _, body = http(f"{base}/css/components.css", headers={"If-None-Match": etag})
+        check(
+            code == 304 and body == "",
+            "ETag 命中回 304 且不带正文",
+            f"http {code}, {len(body)}B",
+        )
+
+        code, _, _ = http(f"{base}/css/components.css", headers={"If-None-Match": '"nope"'})
+        check(code == 200, "ETag 不匹配回 200（内容变了要能拿到新的）", f"http {code}")
+
+        code, _, _ = http(f"{base}/css/components.css", headers={"If-None-Match": "*"})
+        check(code == 304, "If-None-Match: * 也回 304", f"http {code}")
+
+        # 插件资源同样要 ETag：插件作者改完页面刷新看不到变化是经典困惑
+        code, headers, _ = http(f"{base}/plugins/uidev/style.css")
+        petag = headers.get("etag", "")
+        check(code == 200 and petag, "插件资源带 ETag", petag or "（没有）")
+        code, _, _ = http(f"{base}/plugins/uidev/style.css", headers={"If-None-Match": petag})
+        check(code == 304, "插件资源的 ETag 命中回 304", f"http {code}")
+
+        (pdir / "uidev" / "style.css").write_text(".x{color:var(--accent)} /* changed */")
+        code, headers2, _ = http(f"{base}/plugins/uidev/style.css")
+        check(
+            code == 200 and headers2.get("etag") != petag,
+            "插件文件改了 ETag 跟着变",
+            f"{petag} → {headers2.get('etag')}",
+        )
 
         # ---- ③ 插件自己的 API ----
         status, body = fetch(f"{base}/plugins/uidev/api/ping")
@@ -976,22 +1031,21 @@ def plugin_ui_checks(tmp: Path) -> None:
             "           body: JSON.stringify({ via: 'host 别名' }) };\n"
             "});\n"
         )
-        time.sleep(1.6)
-        _, state4 = fetch_json(f"{base}/api/state")
-        alias_plugin = next(
-            (p for p in state4.get("plugins", []) if p["name"] == "alias"), None
-        )
+        alias_plugin = wait_for_plugin(base, "alias")
         check(
             alias_plugin is not None and not alias_plugin.get("error"),
             "全局 `host` 别名暴露完整的 host_api 面（register_route 可用）",
             f"{alias_plugin.get('error') if alias_plugin else '插件没加载'}",
         )
-        status, body = fetch(f"{base}/plugins/alias/api/x")
-        check(
-            status == 200 and "host 别名" in body,
-            "用 `host.register_route` 注册的路由能派发",
-            f"http {status}, {body[:40]}",
-        )
+        if alias_plugin is None:
+            check(False, "用 `host.register_route` 注册的路由能派发", "插件没加载，无法验证")
+        else:
+            status, body = fetch(f"{base}/plugins/alias/api/x")
+            check(
+                status == 200 and "host 别名" in body,
+                "用 `host.register_route` 注册的路由能派发",
+                f"http {status}, {body[:40]}",
+            )
 
         code, _ = test_run("js", {"code": "1"}, panel=False)
         check(code == 403, "测试运行缺 x-panel 头被拦", f"http {code}")

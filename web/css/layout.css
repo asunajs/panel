@@ -138,8 +138,14 @@
   z-index: 30;
 }
 
-/* 只在移动端显示的元素 */
-.only-mobile {
+/* 只在移动端显示的元素。
+   选择器故意把类名写两遍（specificity 0,2,0 而不是 0,1,0）：
+   components.css 里的 `.icon-btn { display: inline-flex }` 是同优先级，而且
+   layout.css 在它**之前**加载，所以单类名的 `display: none` 会被覆盖 ——
+   实测就是这个原因让汉堡按钮在 PC 上也一直显示，点下去只留下一层蒙层
+   （宽屏下侧边栏是常驻的，没有东西会滑进来）。
+   写两遍不优雅，但它把「谁能覆盖我」这件事变成与加载顺序无关。 */
+.only-mobile.only-mobile {
   display: none;
 }
 
@@ -165,7 +171,7 @@
     transform: none;
   }
 
-  .only-mobile {
+  .only-mobile.only-mobile {
     display: inline-flex;
   }
 

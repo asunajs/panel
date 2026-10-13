@@ -688,8 +688,25 @@ async fn set_paused(
 }
 
 /// `GET /` —— 主面板（`web/` 下的多文件前端，编译期内嵌，见 `crate::assets`）。
-async fn asset_index() -> Response {
-    asset_response(crate::assets::get("/index.html").expect("index.html 必须内嵌"))
+async fn asset_index(headers: HeaderMap) -> Response {
+    asset_response(
+        crate::assets::get("/index.html").expect("index.html 必须内嵌"),
+        &headers,
+    )
+}
+
+/// `If-None-Match` 命中就返回 304。
+///
+/// 支持逗号分隔的列表与 `*`（RFC 9110 允许），因为浏览器/代理可能带上多个候选值。
+fn is_fresh(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|t| t.trim() == etag || t.trim() == "*")
+        })
+        .unwrap_or(false)
 }
 
 /// `GET /classic` —— 旧版单文件页面（`PAGE` 常量直接渲染）。
@@ -699,17 +716,29 @@ async fn classic_index(State(st): State<AppState>) -> Html<String> {
     Html(render_page(&st))
 }
 
-/// 内嵌资源 → HTTP 响应。
-fn asset_response(a: &'static crate::assets::Asset) -> Response {
+/// 内嵌资源 → HTTP 响应（带 ETag，未变则 304）。
+fn asset_response(a: &'static crate::assets::Asset, headers: &HeaderMap) -> Response {
+    let etag = crate::assets::etag_of(a.body.as_bytes());
+
+    if is_fresh(headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(axum::http::header::ETAG, etag)
+            .header(axum::http::header::CACHE_CONTROL, "no-cache")
+            .body(axum::body::Body::empty())
+            .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response());
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header(
             axum::http::header::CONTENT_TYPE,
             crate::assets::content_type(a.path),
         )
-        // 前端资源跟着二进制走，所以 URL 不变内容也可能变 —— 必须让浏览器每次校验，
-        // 否则升级二进制之后用户看到的还是缓存里的旧 JS，报错信息会指向不存在的行号。
+        // no-cache 的意思是「用之前先问我」—— 配上 ETag 才是完整语义：
+        // 内容没变回 304（省流量），变了回新内容（不会卡在旧 UI 上）。
         .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .header(axum::http::header::ETAG, etag)
         .body(axum::body::Body::from(a.body))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
 }
@@ -736,13 +765,13 @@ async fn fallback_route(State(st): State<AppState>, req: Request) -> Response {
 
     // ② 插件自带的静态资源：/plugins/{name}/...
     if let Some(rest) = path.strip_prefix("/plugins/") {
-        return plugin_asset(&st, rest, &method).await;
+        return plugin_asset(&st, rest, &method, req.headers()).await;
     }
 
     // ③ 主面板自己的静态资源
     if method == "GET" || method == "HEAD" {
         if let Some(a) = crate::assets::get(&path) {
-            return asset_response(a);
+            return asset_response(a, req.headers());
         }
     }
 
@@ -817,7 +846,7 @@ fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result
 ///
 /// 只服务**已加载插件**的资源：否则插件目录下任何一个目录（哪怕它不是插件）
 /// 都能被从网上读出来。
-async fn plugin_asset(st: &AppState, rest: &str, method: &str) -> Response {
+async fn plugin_asset(st: &AppState, rest: &str, method: &str, req_headers: &HeaderMap) -> Response {
     if method != "GET" && method != "HEAD" {
         return (StatusCode::METHOD_NOT_ALLOWED, "插件静态资源只支持 GET\n").into_response();
     }
@@ -862,12 +891,25 @@ async fn plugin_asset(st: &AppState, rest: &str, method: &str) -> Response {
 
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
+            // 插件资源同样是「URL 不变内容会变」（插件热更新、作者改页面），
+            // 所以也要 ETag：不给的话「改完页面刷新看不到变化」会变成经典困惑。
+            let etag = crate::assets::etag_of(&bytes);
+            if is_fresh(req_headers, &etag) {
+                return Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header(axum::http::header::ETAG, etag)
+                    .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                    .body(axum::body::Body::empty())
+                    .unwrap_or_else(|_| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()
+                    });
+            }
             let ct = crate::assets::content_type(&path.to_string_lossy());
             Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, ct)
-                // 插件资源是热更新的一部分（改完文件立刻生效），所以不能缓存
                 .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                .header(axum::http::header::ETAG, etag)
                 .body(axum::body::Body::from(bytes))
                 .unwrap_or_else(|_| {
                     (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()

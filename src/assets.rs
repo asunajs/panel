@@ -21,6 +21,23 @@ pub fn get(path: &str) -> Option<&'static Asset> {
     ASSETS.iter().find(|a| a.path == rel)
 }
 
+/// 内容的 ETag（FNV-1a）。
+///
+/// 前端资源跟着二进制走，所以「**URL 没变但内容变了**」是常态 —— 升级二进制后
+/// 浏览器如果还在用旧 JS，报错信息会指向不存在的行号，是极难查的一类问题。
+/// `Cache-Control: no-cache` 要求浏览器每次先验证，但**没有验证器就无从验证**：
+/// 只给 `no-cache` 而不给 `ETag`，等于把判断权交给浏览器的启发式规则。
+///
+/// 这里不是安全用途（不用于防篡改），所以非加密哈希足够，也就不引新依赖。
+pub fn etag_of(body: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in body {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("\"{h:016x}\"")
+}
+
 /// 由扩展名决定 `Content-Type`。
 ///
 /// 全部带上 `charset=utf-8`：这些文件里都有中文注释，少了它浏览器会按 latin-1 猜，
@@ -78,6 +95,15 @@ mod tests {
         assert!(get("/../Cargo.toml").is_none());
         assert!(get("").is_none());
         assert!(get("/").is_none());
+    }
+
+    #[test]
+    fn etag_changes_with_content() {
+        let a = etag_of(b"body{}");
+        let b = etag_of(b"body{ }");
+        assert_ne!(a, b, "内容差一个字符 ETag 就必须变，否则浏览器会一直用旧的");
+        assert_eq!(a, etag_of(b"body{}"), "同样内容 ETag 必须稳定（否则每次都是 200）");
+        assert!(a.starts_with('"') && a.ends_with('"'), "ETag 要带引号: {a}");
     }
 
     #[test]
