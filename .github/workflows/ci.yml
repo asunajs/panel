@@ -31,8 +31,14 @@ jobs:
       - name: 单元测试
         run: cargo test --all-targets
 
-      - name: 面板前端逻辑回归（把 web.rs 里的 <script> 抠出来用 DOM 桩跑）
-        run: node scripts/test-panel-frontend.mjs
+      # 前端资源与视图的静态检查（76+ 项）：资源登记表与 web/ 实际文件对账、
+      # 每个视图「用到的接口都 import 了」、样式里不许硬编码色值……
+      #
+      # 原来这一步跑的是 scripts/test-panel-frontend.mjs —— 那个脚本在前端拆成
+      # 独立文件之后就不存在了。CI 引用一个不存在的脚本，第一次推送就会红，
+      # 所以推送前在本机把每一步都跑了一遍。
+      - name: 前端资源与视图的静态检查
+        run: node scripts/test-web-assets.mjs
 
       - name: install.sh 端到端测试（用 shim 假造一个 Release）
         run: bash scripts/test-install.sh
@@ -153,11 +159,11 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Node 适配器用例（20 项）
+      - name: Node 适配器用例
         run: node test/run-tests.mjs
         working-directory: adapters/node
 
-      - name: CPython 适配器用例（51 项）
+      - name: CPython 适配器用例
         run: python3 -m unittest discover -s tests -v
         working-directory: adapters/python
 

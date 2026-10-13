@@ -863,7 +863,7 @@ CI 的 musl job 里显式设了 `CC_aarch64_unknown_linux_musl=musl-gcc`；
 ### 一键安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 ```
 
 `install.sh` 会检测架构 → 下载对应产物 → 校验 SHA256 → 装进 PATH。
@@ -919,7 +919,7 @@ git tag v0.1.0 && git push origin v0.1.0
 # 2. 装依赖
 pkg install curl
 # 3. 装面板
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 # 4. 启动
 plugin-panel
 ```

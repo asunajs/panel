@@ -2,7 +2,7 @@
 #
 # plugin-panel 一键安装
 #
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 #
 # 做四件事：检测架构 → 下载对应产物 → 校验 SHA256 → 装进 PATH。
 #
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # ---- fork 之后改这一行 ----
-REPO="${PANEL_REPO:-OWNER/REPO}"
+REPO="${PANEL_REPO:-asunajs/panel}"
 
 VERSION="${PANEL_VERSION:-latest}"
 BIN_NAME="plugin-panel"
