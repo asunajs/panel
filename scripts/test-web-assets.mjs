@@ -238,6 +238,30 @@ check(
   '插件样式确实用上了主面板的 CSS 变量',
 );
 
+// 卡片头部布局的三条硬约束（都有实测教训，见 components.css 的注释）
+{
+  // **先剥掉注释**再查属性：这些规则的说明本身就在注释里提到 `margin-left: auto`
+  // （解释为什么不能用它），不剥的话检查会被自己的说明文字绊倒 —— 实测就是这么红的。
+  const css = componentsCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const head = css.match(/\.card-head \{([\s\S]*?)\}/);
+  check(!!head && /justify-content:\s*space-between/.test(head[1]),
+    '.card-head 用 space-between 分开「标题组」和「按钮组」');
+  const acts = css.match(/\.card-actions \{([\s\S]*?)\}/);
+  check(!!acts && !/margin-left:\s*auto/.test(acts[1]),
+    '.card-actions 不写 margin-left:auto（换行后会飘在卡片中间）');
+  check(/\.card-head-main\s*\{/.test(css),
+    '有 .card-head-main：标题+徽章必须包一层，否则会被 space-between 摊开');
+  // 两处卡片都要用这个包装层
+  for (const f of ['web/js/views/task-list.js', 'web/js/views/plugin-list.js']) {
+    check(readFileSync(join(REPO, f), 'utf8').includes('card-head-main'),
+      `${f} 的卡片头部用了 .card-head-main`);
+  }
+  // 那张重复的提示不该再回到卡片里
+  check(!readFileSync(join(REPO, 'web/js/views/task-list.js'), 'utf8')
+    .includes('表达式由插件代码声明</span>'),
+    '卡片里没有重复的「表达式由插件代码声明」可见文案');
+}
+
 // ---------------------------------------------------------------- ⑤ 安全相关的静态约束
 //
 // 这几条是从旧版页面的前端套件搬过来的（那些用例检查的是服务端渲染的 HTML 常量，

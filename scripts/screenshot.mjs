@@ -206,6 +206,105 @@ const SHOTS = (o) => [
     viewport: [1280, 1100],
     scale: 2,
     cookie: 'session',
+    verify: async (cdp, S) => {
+      // 卡片头部：标题 + 徽章要**贴在一起**，按钮组在另一端。
+      //
+      // 这两条钉的是同一个真实的回归：我为了修「窄屏按钮飘在中间」给 .card-head 加了
+      // space-between，结果它把**四个平级子元素**均匀摊开了 —— 徽章飘到卡片中间、
+      // 和任务名脱开（用户截图指出）。正确做法是标题+徽章包一层（.card-head-main），
+      // 让 space-between 只分两组。
+      const measure = () =>
+        evalIn(
+          cdp,
+          S,
+          `(function () {
+           const out = [];
+           for (const c of [...document.querySelectorAll('[data-task]')].slice(0, 4)) {
+             const cr = c.getBoundingClientRect();
+             const main = c.querySelector('.card-head-main');
+             const kids = main ? [...main.children] : [];
+             const gaps = kids.slice(1).map((el, i) =>
+               Math.round(el.getBoundingClientRect().left - kids[i].getBoundingClientRect().right));
+             const acts = c.querySelector('.card-actions');
+             if (!main || !acts) { out.push({ task: c.dataset.task, broken: true }); continue; }
+             const ar = acts.getBoundingClientRect();
+             out.push({
+               task: c.dataset.task,
+               最大徽章间距: gaps.length ? Math.max(...gaps) : 0,
+               // 按钮组右端距卡片内容区右边界；同排时应当≈0
+               右端余量: Math.round((cr.right - 17) - ar.right),
+               同排: Math.abs(ar.top - c.querySelector('.card-head').getBoundingClientRect().top) < 2,
+               提示文案: /表达式由插件代码声明/.test(c.textContent),
+             });
+           }
+           return out;
+         })()`,
+        );
+      // **等列表渲染出来**再量，而且空样本直接判失败。
+      //
+      // 这条是反向验证逼出来的：把修复拆掉之后它居然还是绿的 —— 因为它量到 0 张卡片，
+      // 而 `[].every(...)` 恒为 true。空样本过掉的断言比没有断言更糟（它给人安全感）。
+      let r = [];
+      for (let i = 0; i < 50 && r.length === 0; i += 1) {
+        r = await measure();
+        if (!r.length) await sleep(150);
+      }
+      const tight = r.length > 0 && r.every((x) => !x.broken && x.最大徽章间距 <= 16);
+      const anchored = r.every(
+        (x) => x.broken || (x.同排 ? Math.abs(x.右端余量) <= 2 : Math.abs(x.右端余量) > 2),
+      );
+      const noHint = r.every((x) => x.提示文案 === false);
+      const bad = [];
+      if (!tight) bad.push('徽章被摊开（间距 >16px）');
+      if (!anchored) bad.push('按钮组没有贴齐卡片右边界');
+      if (!noHint) bad.push('卡片里又出现了重复的「表达式由插件代码声明」');
+      if (r.length === 0) bad.push('等了 7.5 秒都没量到任何任务卡片（空样本不算通过）');
+      return {
+        ok: bad.length === 0,
+        label: '卡片头部：徽章贴住标题、按钮组贴齐右边界、无重复提示',
+        detail:
+          bad.length === 0
+            ? `${r.length} 张卡片：最大徽章间距 ${Math.max(...r.map((x) => x.最大徽章间距))}px，右端余量 ${r.map((x) => x.右端余量).join('/')}`
+            : bad.join('；'),
+      };
+    },
+  },
+  {
+    // 窄屏：按钮放不下时**换行后必须贴左**，不能飘在卡片中间。
+    name: 'web-tasks-narrow',
+    url: `${o.auth}/#/tasks`,
+    viewport: [430, 1000],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const out = [];
+           for (const c of [...document.querySelectorAll('[data-task]')]) {
+             const cr = c.getBoundingClientRect();
+             const head = c.querySelector('.card-head').getBoundingClientRect();
+             const acts = c.querySelector('.card-actions').getBoundingClientRect();
+             out.push({
+               换行: acts.top - head.top >= 2,
+               左余量: Math.round(acts.left - (cr.left + 17)),
+               右端余量: Math.round((cr.right - 17) - acts.right),
+             });
+           }
+           return out;
+         })()`,
+      );
+      const wrapped = r.filter((x) => x.换行);
+      const badLeft = wrapped.filter((x) => Math.abs(x.左余量) > 2);
+      const badRight = r.filter((x) => !x.换行 && Math.abs(x.右端余量) > 2);
+      return {
+        ok: badLeft.length === 0 && badRight.length === 0 && r.length > 0,
+        label: '窄屏卡片：换行的按钮组贴左、同排的贴右',
+        detail: `${r.length} 张卡片，其中 ${wrapped.length} 张换行；`
+          + `换行但没贴左 ${badLeft.length} 张，同排但没贴右 ${badRight.length} 张`,
+      };
+    },
   },
   {
     // 任务卡片的交互：按钮点了**有没有反应**、发的是不是对的请求、失败分支说不说得清。

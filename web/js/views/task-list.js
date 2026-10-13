@@ -87,16 +87,25 @@ function taskCard(t) {
          canEdit
            ? `<button class="btn" data-act="edit">编辑</button>
               <button class="btn danger" data-act="delete">删除</button>`
-           : '<span class="hint" title="调度表达式由插件代码声明，改它会随插件热更新被覆盖">表达式由插件代码声明</span>'
+           // 插件任务没有编辑入口，原因写在「来源」那个字段的 title 上。
+           //
+           // 以前这里有一行可见的「表达式由插件代码声明」，**每张卡片重复一遍** ——
+           // 窄屏下它会把按钮挤到中间、整屏都是重复文案（用户指出「杂乱」）。
+           // 而同一张卡片的「来源」本来就写着「插件代码」，那行字本来就是重复信息。
+           : ''
        }`
     : '<span class="hint">示例数据，无操作</span>';
 
   return `
     <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}">
       <div class="card-head">
-        <span class="card-title mono">${esc(t.name)}</span>
-        ${langBadge(t.lang)}
-        ${badge(t.status, t.trips)}
+        <!-- 标题与徽章包成一组：space-between 只负责把它和按钮组分到两端，
+             不然徽章会被均匀摊到卡片中间（见 components.css 的注释） -->
+        <div class="card-head-main">
+          <span class="card-title mono">${esc(t.name)}</span>
+          ${langBadge(t.lang)}
+          ${badge(t.status, t.trips)}
+        </div>
         <span class="card-actions">${ops}</span>
       </div>
       <div class="row">
@@ -114,7 +123,11 @@ function taskCard(t) {
         </div>
         <div class="field">
           <span class="field-label">来源</span>
-          <span class="mono dim">${t.source === 'panel' ? '面板' : '插件代码'}</span>
+          <span class="mono dim" title="${
+            t.source === 'panel'
+              ? '面板创建的任务，调度表达式可以在面板上改'
+              : '调度表达式由插件代码声明，改它会随插件热更新被覆盖'
+          }">${t.source === 'panel' ? '面板' : '插件代码'}</span>
         </div>
       </div>
     </div>`;

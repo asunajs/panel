@@ -194,6 +194,30 @@
   margin-bottom: var(--sp-3);
   /* 窄屏放不下时**换行**，而不是把名字和徽章挤扁 */
   flex-wrap: wrap;
+  /*
+    用 space-between 而不是给 .card-actions 挂 `margin-left: auto` 定位。
+
+    区别只在**换行之后**：auto margin 会把换到第二行的按钮组继续往右推，
+    于是它左不齐标题、右不齐卡片内边距，看起来像飘在卡片中间（实测 left+113，
+    而卡片内容区是 left+17）。space-between 是逐行生效的 —— 第二行只有一个元素时
+    它贴在行首，按钮组就左对齐了。宽屏下两者表现一样。
+  */
+  justify-content: space-between;
+}
+
+/*
+  标题 + 徽章这一组**必须自己包一层**，不能直接当 .card-head 的平级子元素。
+
+  .card-head 用 space-between 把「这一组」和「按钮组」分开；如果标题和徽章是平级的
+  四个子元素，space-between 会把它们**均匀摊开** —— 徽章飘到卡片中间、和任务名脱开
+  （用户截图指出过）。包一层之后组内用普通 flex 间距，徽章始终贴着标题。
+*/
+.card-head-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* 卡片标题：长标识符用省略号，不要折成三行 */
@@ -215,10 +239,12 @@
 }
 
 .card-actions {
-  margin-left: auto;
+  /* 这里**故意不写 margin-left: auto**，原因见 .card-head 的注释 */
   display: flex;
   gap: var(--sp-2);
-  flex: none;
+  align-items: center;
+  /* 0 1 auto：能被压缩，但按钮自身不会被挤扁（.btn 有 white-space: nowrap） */
+  flex: 0 1 auto;
   flex-wrap: wrap;
 }
 

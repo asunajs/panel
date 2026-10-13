@@ -79,9 +79,11 @@ export async function render(root, ctx) {
                   return `
           <div class="card plugin-card">
             <div class="card-head">
-              <span class="card-title" title="${esc(p.name)}">${esc(p.name)}</span>
-              ${statusBadge(p)}
-              <span class="badge lang ${p.runtime === 'py' ? 'py' : 'js'}">${esc(p.runtime)}</span>
+              <div class="card-head-main">
+                <span class="card-title" title="${esc(p.name)}">${esc(p.name)}</span>
+                ${statusBadge(p)}
+                <span class="badge lang ${p.runtime === 'py' ? 'py' : 'js'}">${esc(p.runtime)}</span>
+              </div>
             </div>
             <div class="path" title="${esc(p.file)}">${esc(p.file)}</div>
             ${
