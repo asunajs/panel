@@ -167,6 +167,7 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/app.js"),
     asset!("js/api.js"),
     asset!("js/editor.js"),
+    asset!("js/confirm.js"),
     asset!("js/mock.js"),
     asset!("js/views/task-list.js"),
     asset!("js/views/task-editor.js"),

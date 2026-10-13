@@ -19,6 +19,7 @@ import {
   pluginSource,
 } from '../api.js';
 import { highlight } from '../editor.js';
+import { askConfirm, RISK } from '../confirm.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -206,6 +207,24 @@ export async function render(root, ctx, opts = {}) {
     if (tBtn) {
       const name = tBtn.dataset.toggle;
       const off = tBtn.dataset.off === '1'; // 当前是停用状态 → 这次是「启用」
+
+      // 停用要确认（它会让这个插件的任务全部停跑、配置页也打不开）；
+      // 启用是往回走，不确认。
+      if (!off) {
+        const row = tBtn.closest('.plugin-actions');
+        const keep = row.innerHTML;
+        const yes = await askConfirm(row, {
+          question: `停用插件 \`${name}\`？`,
+          detail: '它的任务都不会再跑，配置页与接口也关掉；重启后仍然停用。随时可以启用。',
+          okText: '停用',
+          risk: RISK.PAUSE,
+        });
+        if (!yes) {
+          row.innerHTML = keep;
+          return;
+        }
+      }
+
       tBtn.disabled = true;
       const res = await setPluginDisabled(name, !off);
       tBtn.disabled = false;

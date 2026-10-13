@@ -20,6 +20,7 @@ import {
   cleanupJobs,
 } from '../api.js';
 import { TASKS } from '../mock.js';
+import { askConfirm, RISK } from '../confirm.js';
 
 /** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
 const STATUS_MAP = {
@@ -117,7 +118,9 @@ function taskCard(t) {
        <button class="btn danger" data-act="delete">删除</button>`;
 
   return `
-    <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}">
+    <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}"
+         data-source="${esc(t.source || '')}" data-covered="${t.covered ? '1' : '0'}"
+         data-deleted="${t.deleted ? '1' : '0'}">
       <div class="card-head">
         <!-- 标题与徽章包成一组：space-between 只负责把它和按钮组分到两端，
              不然徽章会被均匀摊到卡片中间（见 components.css 的注释） -->
@@ -369,6 +372,48 @@ export async function render(root, ctx, opts = {}) {
     }
 
     const label = plugin ? `${plugin}/${name}` : name;
+
+    // 高危动作要**二次确认**。放在最前面、请求之前 —— 确认条就贴在这一行的按钮位置，
+    // 用户一眼看到自己在确认哪一个（误操作的根源就是没看清对象）。
+    //
+    // 哪些要确认、哪些不要，按「误触的代价」分：
+    //   要：删除（不可逆 / 或者会中断）、暂停（任务会停）、撤销覆盖（自定义频率会丢）
+    //   不要：立即执行（只是多跑一次）、恢复 / 启用（都是往回走）、编辑（只是打开表单）
+    const confirmSpec = {
+      delete: {
+        question: `删除任务 \`${name}\`？`,
+        detail:
+          card.dataset.source === 'panel'
+            ? '面板创建的任务：删掉就没了，运行历史一起消失，要重建得重新填表达式。'
+            : '插件代码声明的任务：删掉后不再运行，但会留在列表底部，随时可以恢复。',
+        okText: '删除',
+        risk: RISK.LOSS,
+      },
+      pause: {
+        question: `暂停任务 \`${name}\`？`,
+        detail: '它不会再按节奏跑（暂停状态重启后仍然保留）。随时可以「恢复」。',
+        okText: '暂停',
+        risk: RISK.PAUSE,
+      },
+      uncover: {
+        question: `撤销 \`${name}\` 的频率覆盖？`,
+        detail: '会回到插件代码里声明的值 —— 你手填的这个频率会丢，要重填。',
+        okText: '撤销覆盖',
+        risk: RISK.PAUSE,
+      },
+    }[act];
+
+    if (confirmSpec) {
+      const row = btn.closest('.card-actions');
+      const keep = row.innerHTML;
+      const yes = await askConfirm(row, confirmSpec);
+      if (!yes) {
+        // 取消：把按钮原样放回去（监听是委托在 root 上的，重建 innerHTML 不会丢）
+        row.innerHTML = keep;
+        return;
+      }
+    }
+
     btn.disabled = true;
 
     let res2;

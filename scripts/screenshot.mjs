@@ -142,6 +142,32 @@ const evalIn = async (cdp, S, expression) => {
   return r.result && r.result.value;
 };
 
+/**
+ * 高危动作（删除 / 暂停 / 停用 / 撤销覆盖）会先出内联确认条，这里点掉它。
+ *
+ * 单独做成模块级函数而不是写进每个镜头里：一旦哪个镜头忘了走这一步，
+ * 表现就是「点了没反应」的假失败 —— 而那个假失败恰恰证明确认条拦住了动作。
+ * 返回是否真的点到了确认条（可以据此断言「确认条出现过」）。
+ */
+const confirmIfAny = async (cdp, S, timeoutMs = 1500) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const hit = await evalIn(
+      cdp,
+      S,
+      `(function () {
+         const b = document.querySelector('[data-confirm-ok]');
+         if (!b) return false;
+         b.click();
+         return true;
+       })()`,
+    );
+    if (hit) return true;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  return false;
+};
+
 // ---------------------------------------------------------------- 要拍的几张
 
 /** 每张图的视口与裁剪区域（CSS 像素）。裁剪是为了让图聚焦在要讲的那部分。 */
@@ -387,7 +413,7 @@ const SHOTS = (o) => [
            return true;
          })()`,
       );
-      note('点击撤销覆盖', clicked === true);
+      note('撤销覆盖也要确认', clicked === true && (await confirmIfAny(cdp, S)) === true);
       let gone = false;
       for (let i = 0; i < 40 && !gone; i += 1) {
         await sleep(150);
@@ -410,7 +436,8 @@ const SHOTS = (o) => [
            return true;
          })()`,
       );
-      note('点击删除', del === true);
+      // 删除是危险动作：点了先出确认条（web-confirm 那个镜头专门测它拦不拦得住）
+      note('删除先出确认条', del === true && (await confirmIfAny(cdp, S)) === true);
       let collapsed = null;
       for (let i = 0; i < 40; i += 1) {
         await sleep(150);
@@ -566,6 +593,13 @@ const SHOTS = (o) => [
           return true;
         })()`);
         if (!clicked) return { hidden: true, cls: '', text: '<按钮不存在>' };
+        // 高危动作（删除 / 暂停 / 停用）会先出内联确认条（见 web/js/confirm.js）：
+        // 这里自动走一步「确认」，否则断言会卡在确认条上等提示。
+        await ev(`(function () {
+          const b = document.querySelector('[data-confirm-ok]');
+          if (b) { b.click(); return true; }
+          return false;
+        })()`);
         const t0 = Date.now();
         while (Date.now() - t0 < timeout) {
           const t = await toast();
@@ -594,6 +628,12 @@ const SHOTS = (o) => [
           await sleep(120);
         }
         return false;
+      };
+      // 高危动作要跟一步确认（见 confirmIfAny 的注释）
+      const clickElConfirm = async (sel, timeout = 6000) => {
+        const ok = await clickEl(sel, timeout);
+        if (ok) await confirmIfAny(cdp, S);
+        return ok;
       };
 
       const card = (name) =>
@@ -649,8 +689,10 @@ const SHOTS = (o) => [
         ),
       );
 
-      // ③ 暂停 → 重新渲染后按钮变「恢复」、状态变「已暂停」
+      // ③ 暂停 → **先出确认条**，确认后才变「恢复」/「已暂停」
       const clickedPause = await clickEl('[data-task="hit-report"] [data-act="pause"]');
+      const sawConfirm = await confirmIfAny(cdp, S);
+      results.push(note('暂停这类动作会先出确认条', clickedPause && sawConfirm, `确认条=${sawConfirm}`));
       const becameResume = clickedPause
         ? await waitFor(`!!document.querySelector('[data-task="hit-report"] [data-act="resume"]')`)
         : false;
@@ -1020,6 +1062,132 @@ const SHOTS = (o) => [
     },
   },
   {
+    // 高危动作的二次确认：**点了不等于做了**。
+    // 用户实测指出「删除停用，暂停这中高危动作没有二次确认？」—— 这一条钉住：
+    //   ① 点「暂停」先出确认条，**取消**之后任务还是跑着的（没被执行）
+    //   ② 再点一次并确认，才真的暂停
+    //   ③ 删除也有确认条，而且不可逆的那种会写清后果
+    name: 'web-confirm',
+    url: `${o.auth}/#/tasks`,
+    viewport: [1280, 1000],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const results = [];
+      const note = (label, ok, detail) => results.push({ label, ok, detail });
+
+      const clickAct = (name, act) =>
+        ev(`(function () {
+             const b = document.querySelector('[data-task="${name}"] [data-act="${act}"]');
+             if (!b) return false;
+             b.click();
+             return true;
+           })()`);
+      const confirmBar = () =>
+        ev(`(function () {
+             const b = document.querySelector('.confirm-bar');
+             return b
+               ? {
+                   question: b.querySelector('.confirm-q')?.textContent || '',
+                   detail: b.querySelector('.confirm-d')?.textContent || '',
+                   okText: b.querySelector('[data-confirm-ok]')?.textContent || '',
+                   danger: b.classList.contains('danger'),
+                 }
+               : null;
+           })()`);
+      const clickConfirm = (sel) =>
+        ev(`(function () {
+             const b = document.querySelector(${JSON.stringify(sel)});
+             if (!b) return false;
+             b.click();
+             return true;
+           })()`);
+      const paused = (name) =>
+        ev(`(function () {
+             const c = document.querySelector('[data-task="${name}"]');
+             return c ? c.textContent.includes('已暂停') : null;
+           })()`);
+
+      // 用 code-side（插件声明的任务，稳定存在、不会自己跑出状态）
+      const target = 'code-side';
+      const before = await paused(target);
+      note(`任务 ${target} 初始未暂停`, before === false, String(before));
+
+      // ① 点暂停 → 出确认条 → 取消 → 状态不变
+      await clickAct(target, 'pause');
+      let bar = null;
+      for (let i = 0; i < 30 && !bar; i += 1) {
+        await sleep(100);
+        bar = await confirmBar();
+      }
+      note(
+        '点「暂停」先出确认条（不是一次点击就执行）',
+        !!bar && /暂停/.test(bar.question),
+        JSON.stringify(bar),
+      );
+      note('确认条写清了后果（可以恢复）', !!bar && /恢复/.test(bar.detail), bar ? bar.detail : '');
+      note('暂停的确认条不是危险配色（重量跟着风险走）', !!bar && bar.danger === false);
+
+      await clickConfirm('[data-confirm-cancel]');
+      await sleep(600);
+      note('**取消之后任务没有被暂停**（确认真的拦住了动作）', (await paused(target)) === false);
+      note('取消后按钮回来了', (await confirmBar()) === null);
+
+      // ② 再点一次并确认 → 真的暂停
+      await clickAct(target, 'pause');
+      for (let i = 0; i < 30; i += 1) {
+        await sleep(100);
+        if (await confirmBar()) break;
+      }
+      await clickConfirm('[data-confirm-ok]');
+      let nowPaused = false;
+      for (let i = 0; i < 60 && !nowPaused; i += 1) {
+        await sleep(150);
+        nowPaused = (await paused(target)) === true;
+      }
+      note('确认之后才真的暂停', nowPaused === true);
+
+      // ③ 删除：确认条写清「不可逆 / 可恢复」的差别
+      await clickAct(target, 'delete');
+      let delBar = null;
+      for (let i = 0; i < 30 && !delBar; i += 1) {
+        await sleep(100);
+        delBar = await confirmBar();
+      }
+      note(
+        '删除也有确认条，且是危险配色',
+        !!delBar && /删除/.test(delBar.question) && delBar.danger === true,
+        JSON.stringify(delBar),
+      );
+      note(
+        '插件任务的删除写明「可以恢复」（措辞跟后果一致）',
+        !!delBar && /恢复/.test(delBar.detail),
+        delBar ? delBar.detail : '',
+      );
+      await clickConfirm('[data-confirm-cancel]');
+
+      // 收尾：把暂停恢复回去，别把状态留给后面的镜头
+      await sleep(400);
+      const rBtn = await ev(`(function () {
+        const b = document.querySelector('[data-task="${target}"] [data-act="resume"]');
+        if (!b) return false; b.click(); return true;
+      })()`);
+      if (rBtn) await sleep(1200);
+      note('收尾：恢复回运行状态', (await paused(target)) === false);
+
+      const failed = results.filter((r) => !r.ok);
+      return {
+        ok: failed.length === 0,
+        label: '高危动作有二次确认，取消真的会拦住',
+        detail:
+          failed.length === 0
+            ? `${results.length} 项通过（暂停/删除都先确认，取消后状态不变）`
+            : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
+      };
+    },
+  },
+  {
     name: 'web-plugins',
     // 插件管理页：徽章 / 插件名 / 按钮的排版在这里最容易挤（实测被压成竖排过）
     url: `${o.auth}/#/plugins`,
@@ -1090,6 +1258,8 @@ const SHOTS = (o) => [
              if (!b) return false; b.click(); return true;
            })()`,
         );
+        // 停用插件是危险动作：先出确认条
+        note('停用插件先出确认条', clicked === true && (await confirmIfAny(cdp, S)) === true);
         let off = null;
         for (let i = 0; i < 60; i += 1) {
           await sleep(200);

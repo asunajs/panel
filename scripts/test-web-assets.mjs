@@ -49,6 +49,7 @@ const EXPECTED = [
   'js/app.js',
   'js/api.js',
   'js/editor.js',
+  'js/confirm.js',
   'js/mock.js',
   'js/views/task-list.js',
   'js/views/task-editor.js',
