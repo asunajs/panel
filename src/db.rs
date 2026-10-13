@@ -43,6 +43,21 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // mmap_size / temp_store 不设：实测这两条的编译期默认值本来就是 0 / 1（文件），
     // 写上去是噪音，不是优化。
 
+    // ---- 磁盘：给 WAL 文件设上界 ----
+    //
+    // SQLite 默认每 1000 页（≈4 MB）自动 checkpoint，而 **checkpoint 之后 WAL 文件
+    // 不会缩回 0**，就停在高水位上。实测：90 秒的负载（约 30 写/秒）就能把 WAL 顶到
+    // 3.93 MB；8 小时长跑全程停在 4.0 MB，盘上是 `db 1.5 MB + wal 4.0 MB`。
+    //
+    // 对低配盒子这是白占的 4 MB，更要紧的是每次 checkpoint 都是一次 4 MB 的写尖峰 ——
+    // 弱机的 I/O 抖动是可感的。把自动 checkpoint 降到 256 页（1 MB）、并把 WAL 文件
+    // 上限压到 1 MB：实测高水位 3.93 MB → 1.0 MB。
+    //
+    // 代价是 checkpoint 频率高 4 倍。但 checkpoint 的总写入量由脏页数决定，
+    // 与频率无关 —— 拆小只是把一次尖峰摊成四次小抖动，对弱机反而更友好。
+    conn.pragma_update(None, "wal_autocheckpoint", 256)?;
+    conn.pragma_update(None, "journal_size_limit", 1048576)?;
+
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS tasks (
@@ -529,6 +544,31 @@ mod tests {
     use std::path::Path;
 
     const NOW: &str = "2026-03-10 08:00:00";
+
+    #[test]
+    fn wal_is_bounded() {
+        // 回归测试：WAL 文件不设上限的话，SQLite 默认每 1000 页（≈4 MB）才 checkpoint，
+        // 而 checkpoint 后文件不缩回 0 —— 盘上长期停着 4 MB 的 WAL。
+        // 实测：90 秒负载就能顶到 3.93 MB；设了下面两条之后高水位 1.00 MB。
+        let dir = std::env::temp_dir().join(format!("panel-wal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wal.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            let auto: i64 = conn
+                .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+                .unwrap();
+            let limit: i64 = conn
+                .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(auto, 256, "自动 checkpoint 阈值必须是 256 页（≈1 MB）");
+            assert_eq!(limit, 1_048_576, "WAL 文件上限必须是 1 MB");
+        }
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 每次测试一个全新的内存库。`open` 里的 pragma 对内存库是无操作，不影响断言。
     fn mem() -> Db {

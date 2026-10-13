@@ -304,10 +304,16 @@ def threads(pid: int):
 
 
 def db_sizes(db_path: Path):
+    """库文件 + WAL + SHM 的字节数。
+
+    键**不带横杠**（`db` / `wal` / `shm`）—— 之前用 `suffix or "db"` 当键，
+    于是键是 `-wal` / `-shm`，而报告按 `wal` / `shm` 查，永远取到默认值 0：
+    磁盘上明明有 4.1 MB 的 WAL，报告里印的是「0 KB → 0 KB」。
+    """
     out = {}
-    for suffix in ("", "-wal", "-shm"):
+    for key, suffix in (("db", ""), ("wal", "-wal"), ("shm", "-shm")):
         p = Path(str(db_path) + suffix)
-        out[suffix or "db"] = p.stat().st_size if p.exists() else 0
+        out[key] = p.stat().st_size if p.exists() else 0
     return out
 
 
@@ -829,14 +835,31 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     # ---------- 8. 数据库 ----------
     a("## 8. SQLite 文件增长\n")
     db0, db1 = samples[0].get("db", {}), samples[-1].get("db", {})
+
+    def kv(d, key):
+        """取库文件大小。兼容两种键名：新脚本用 `wal`/`shm`，
+        老脚本（第一次 8 小时长跑）用的是 `-wal`/`-shm` —— 报告得能读旧日志。"""
+        return d.get(key, d.get("-" + key, 0))
+
     for k in ("db", "wal", "shm"):
-        a(f"- `{k}`：{db0.get(k, 0) / 1024:.0f} KB → {db1.get(k, 0) / 1024:.0f} KB")
+        a(f"- `{k}`：{kv(db0, k) / 1024:.0f} KB → {kv(db1, k) / 1024:.0f} KB")
+    wal_hi = max((kv(s.get("db", {}), "wal") for s in samples), default=0)
+    db_grow = kv(db1, "db") - kv(db0, "db")
+    if wal_hi > 0:
+        a(f"- WAL 高水位：**{wal_hi / 1024 / 1024:.2f} MB**"
+          f"（WAL 文件 checkpoint 后**不会缩回 0**，停在高水位上 —— 这是 SQLite 的行为，不是泄漏。"
+          f"面板在 `db::open` 里设了 `wal_autocheckpoint=256` + `journal_size_limit=1MB`，"
+          f"所以高水位应该 ≤1 MB；**明显高于 1 MB 说明是改动前的二进制跑的**）")
+        if db_grow > 0:
+            a(f"- 库里增长 {db_grow / 1024:.0f} KB 是任务触发记录（每次触发一条 UPDATE + 插件自己的追加写）；"
+              f"面板不主动清自己的表，清理策略归插件作者")
     a("")
 
     # ---------- 9. 结论 ----------
     a("## 9. 结论\n")
     verdicts = []
-    verdicts.append(("常驻内存", abs(growth_tail) < max(80.0, 2 * sg3)))
+    # 阈值是 MB（原来是 soak.py 的 KB 常量 80，作用在 MB 值上等于把门槛放到 80MB）
+    verdicts.append(("常驻内存", abs(growth_tail) < max(0.08, 2 * sg3)))
     verdicts.append(("调度达成率", not drops))
     verdicts.append(("fd 无泄漏", not fds or fds[-1] <= fds[0] + 5))
     verdicts.append(("无崩溃", restarts == 0))

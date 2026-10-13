@@ -1760,7 +1760,46 @@ POST /api/jobs/cleanup   {"dry_run": true}
 | `adapters/python` | 61 项 |
 | `scripts/test-install.sh` | 15 项 |
 
-### 15.6 这一轮**没有**解决的
+### 15.6 8 小时长跑报告里对不上的一处：WAL 被印成 0 KB
+
+定时提醒让我复核 8 小时长跑的产物时，顺手对了下账：报告写 `wal：0 KB → 0 KB`，
+而磁盘上 `panel-*.db-wal` 是 **4.0 MB**。查下来是**报告侧**的两个 bug（采样数据是对的）：
+
+1. `db_sizes()` 用 `suffix or "db"` 当键，于是键是 `-wal` / `-shm`（带横杠），
+   而报告按 `("db", "wal", "shm")` 查 —— 永远取到默认值 `0`。
+   顺手让报告兼容两种键名，这样**旧日志也能重新出报告**（这次就是这么修的）。
+2. §9 结论段的平台期阈值还是 soak.py 那个 KB 常量 `80.0`，作用在 MB 值上等于把门槛
+   放到 80 MB —— 形同虚设（§1 修过，§9 漏了）。
+
+修正后 8 小时长跑的真实盘上占用：`db 1.5 MB + wal 4.0 MB + shm 32 KB`。
+
+#### 顺着这个数字做的一个小优化
+
+4.0 MB 的 WAL 不是泄漏，是 SQLite 的默认行为：**每 1000 页（≈4 MB）才自动 checkpoint，
+而 checkpoint 之后 WAL 文件不缩回 0**，就停在高水位上。对低配盒子这是白占的 4 MB，
+更要紧的是每次 checkpoint 是一次 4 MB 的写尖峰 —— 弱机上 I/O 抖动是可感的。
+
+`db::open` 里加两条：
+
+```rust
+conn.pragma_update(None, "wal_autocheckpoint", 256)?;      // 256 页 ≈ 1 MB 就 checkpoint
+conn.pragma_update(None, "journal_size_limit", 1048576)?;  // WAL 文件上限 1 MB
+```
+
+A/B 实测（同一份 90 秒长跑负载、同样 6 个采样点、库增长都是 36 KB）：
+
+| | WAL 高水位 | 盘上合计 |
+|---|---|---|
+| 改动前 | **3.93 MB** | db 40 KB + wal 4.0 MB |
+| 改动后 | **1.00 MB** | db 40 KB + wal 1.0 MB |
+
+代价是 checkpoint 频率高 4 倍，但 checkpoint 的总写入量由脏页数决定、与频率无关 ——
+拆小只是把一次尖峰摊成四次小抖动，对弱机反而更友好。单测 `wal_is_bounded` 钉住这两个 pragma。
+
+> ⚠️ 上面那份 8 小时报告是**改动前**的二进制跑的，所以它的 WAL 高水位仍是 3.94 MB。
+> 要拿到改动后的长跑数字得重跑一次（8 小时）。
+
+### 15.7 这一轮**没有**解决的
 
 - §11 / §14.9 的老账照旧：慢任务隔离、`db` 是 `Arc<Mutex<Connection>>` 无连接池、
   Python VM 上限 15、无模块系统、会话在内存里、退避按 `ConnectInfo` 的 IP 计（反代下会退化成
