@@ -1,6 +1,13 @@
 # plugin-panel —— Rust + QuickJS + PocketPy 动态插件任务面板
 
+[![CI](https://github.com/asunajs/panel/actions/workflows/ci.yml/badge.svg)](https://github.com/asunajs/panel/actions/workflows/ci.yml)
+
 低配 ARM 盒子上的任务控制面板。最终目标：常驻内存极低 / JS+Python 动态插件 / 毫秒级 Cron / SQLite 持久化 / 单二进制。
+
+**CI 跑在真 ARM64 Linux 硬件上**（`ubuntu-24.04-arm`）：单元测试、冒烟测试（真的把服务跑起来）、
+以及 `aarch64-unknown-linux-musl` 静态产物的构建与校验。开发机是 arm64 macOS，
+跑不了 Linux 二进制 —— 所以「目标平台上到底能不能跑」这件事只能由 CI 回答，
+不能拿本机结果代替。
 
 **当前进度**
 
