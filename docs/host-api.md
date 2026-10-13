@@ -1,34 +1,29 @@
 # host-api 规范 v1（跨运行时最小公共子集）
 
-先说清楚一件最容易误解的事：**这里没有「一份脚本跑遍四个宿主」这回事**，
-仓库里也没有任何 JS↔Python 的转译器或桥接层。真实结构是 **2 种语言 × 每种 2 个宿主**：
+插件用哪种语言写，就跑在那一种语言的两个宿主里：
 
-| 你写的插件 | 跑在哪些宿主里 | 两个宿主都是什么 |
+| 插件 | 宿主 | 抽象层由谁提供 |
 |---|---|---|
-| 一个 `.js` 文件 | QuickJS（嵌入式）+ Node.js | 都是 JS 引擎 |
-| 一个 `.py` 文件 | PocketPy（嵌入式）+ CPython | 都是 Python 解释器 |
+| `.js` | Rust + QuickJS-ng（嵌入式）、Node.js | `host-api` —— 嵌入式侧 `src/jshost.rs`（内置模块），Node 侧 `adapters/node` |
+| `.py` | Rust + PocketPy（嵌入式）、CPython | `host_api` —— 嵌入式侧 `src/pyhost.rs`（`py_newmodule`），CPython 侧 `adapters/python` |
 
-**JS 不会在 Python 解释器里跑，Python 也不会在 JS 引擎里跑。** 把 `foo.js` 改名成
-`foo.py` 得到的只会是 Python 的 `SyntaxError`（实测：`// 注释` → `@id contains invalid char`），
-因为引擎只按扩展名选解释器（`src/engine.rs:1313`）。
+引擎按扩展名选解释器（`src/engine.rs:1313`），所以 `.js` 进 JS 引擎、`.py` 进 Python 解释器。
+两个适配器都是**直接拿仓库里的真插件文件跑**（`plugins/js/host-api-demo.js`、`plugins/py/sysinfo.py`），
+不是另写一份测试插件。
 
-那「跨运行时」到底保证了什么？两件事：
+插件写法：
 
-1. **同语言内的可移植性**：同一个 `.js` 文件在 QuickJS 和 Node 里一字不改；
-   同一个 `.py` 文件在 PocketPy 和 CPython 里一字不改。仓库里两个真插件
-   （`plugins/js/host-api-demo.js`、`plugins/py/sysinfo.py`）就是这么被两个适配器直接跑起来的。
-2. **跨语言的 API 契约**：`host-api`(JS) 与 `host_api`(Python) 是同一套函数名、
-   同一套 payload 字段、同一套错误约定。所以「同一个插件的 JS 版和 Python 版」是
-   **两份文件做同一件事**，互相移植是机械劳动 —— 但它是移植，不是同一份文件。
+```js
+// .js
+import { log, every } from 'host-api';
+```
+```python
+# .py
+from host_api import log, every
+```
 
-下表列出四个宿主各自怎么拿到这套 API：
-
-| 宿主 | 插件写法 | 谁提供 `host_api` |
-|---|---|---|
-| Rust + QuickJS-ng（本项目的引擎线程） | `import { log } from 'host-api'` | `src/jshost.rs`：自定义 Resolver/Loader 把 `host-api` 解析成内置模块 |
-| Rust + PocketPy（本项目的引擎线程） | `from host_api import log` | `src/pyhost.rs`：`py_newmodule("host_api")` + 原生函数 + 引导脚本 |
-| Node.js | `import { log } from 'host-api'` | `adapters/node`（npm 包名就叫 `host-api`） |
-| CPython | `from host_api import log` | `adapters/python`（模块名 `host_api`） |
+JS 版与 Python 版是同一个功能的两份实现，函数名、payload 字段、错误约定完全一致，
+所以互相移植是机械劳动。
 
 设计原则：**能力只取四个运行时都能实现的交集**，语义（参数、返回值、错误）在四处完全一致。
 只在一处能做的事（比如 JS 的 HTTP 路由、Node 的 `http_fetch_async`）明确标成扩展，
@@ -173,56 +168,42 @@ handler(payload) -> None
 
 ## 4. 写插件的硬约束
 
-约束永远来自「**两个宿主里较弱的那一侧**」——因为一份脚本要在两个宿主里跑，
-能被两边都接受的写法，就是被较弱那侧接受的写法。两个方向各一张实测表。
+一份脚本要在两个宿主里都跑通，写法就得被两边都接受。两种语言各一张实测表。
 
-### 4.1 Python 插件（`.py`）：避开 PocketPy 的缺口
+### 4.1 `.js` 插件：QuickJS 与 Node 的差异
 
-一个 `.py` 文件要同时跑在 PocketPy 和 CPython 里，而 PocketPy 是受限的那一侧
-（嵌入式解释器，只实现了 Python 的一个子集）：
-
-> JS 插件不经过 PocketPy，这张表对它无关。
-
-| 构造 | PocketPy v2.2.0 | 替代写法 |
-|---|---|---|
-| 生成器表达式 `f(x for x in y)` | ❌ `SyntaxError` | 列表推导 `f([x for x in y])` |
-| `finally:` | ❌ `SyntaxError: finally clause is not supported yet` | 清理逻辑写两遍 |
-| `nonlocal` | ❌ `SyntaxError` | 用 `state = {...}` 字典改状态 |
-| 相邻字符串隐式拼接 `"a" "b"` | ❌ `SyntaxError: expected ')', got '@str'` | 显式写 `"a" + "b"`（多行 SQL 最容易踩） |
-| `async def` / `await` | ❌ `SyntaxError` | 同步写法 |
-| `with` 自定义上下文管理器 | ⚠️ `__exit__` 只收到 self | 手写 try/except |
-| `datetime + timedelta` | ❌ `TypeError` | 用时间戳字符串 |
-| `threading` / `sqlite3` / `urllib` / `http.server` | ❌ 没有这些模块 | 走 `host_api` |
-| `os` 模块 / `open()` | ❌ 宿主编译时关掉了（`PK_ENABLE_OS=0`） | 走 `host_api`（宿主统一审计） |
-| 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=` | ✅ | — |
-| 可用模块：`json` / `math` / `traceback` / `sys` | ✅ | — |
-
-### 4.2 JS 插件（`.js`）：避开 Node 的原生能力
-
-一个 `.js` 文件要同时跑在嵌入式 QuickJS 和 Node 里，而 **嵌入式 QuickJS 是受限的那一侧**：
-它没有 Node 的任何原生全局量和原生模块。实测（`typeof globalThis[x]`，v1 规范，2026-10-13）：
+实测（`typeof globalThis[x]`，2026-10-13）：
 
 | 构造 | 嵌入式 QuickJS | Node | 替代写法 |
 |---|---|---|---|
-| `process` / `require` / `module` / `exports` / `__dirname` / `Buffer` | ❌ `undefined` | ✅ | 走 `host-api`（配置走 `sqlite_*` 或宿主参数） |
-| `setTimeout` / `setInterval` / `setImmediate` | ❌ `undefined` | ✅ | **用调度器**：`every(name, '500ms', fn)` / `register_cron` |
-| `fetch` | ❌ `undefined` | ✅ | `http_fetch(url, opts)`（宿主侧同步实现，见 §3） |
-| `import fs from 'node:fs'` 等原生模块 | ❌ 加载期就失败：`Error loading module 'node:fs': 只内置了 host-api 模块` | ✅ | 走 `host-api` |
-| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `structuredClone` / `crypto` | ❌ `undefined` | ✅ | 自己拼字符串 / 用 `host-api` |
-| `console` / `performance` / `atob` / `btoa` / `queueMicrotask` | ✅ | ✅ | — |
-| `Promise` / `Symbol` / `BigInt` / `WeakRef` / `Proxy` / `Reflect` / `eval` | ✅ | ✅ | — |
+| `process` / `require` / `module` / `exports` / `__dirname` / `Buffer` | 无 | 有 | 走 `host-api` |
+| `setTimeout` / `setInterval` / `setImmediate` | 无 | 有 | 用调度器：`every(name, '500ms', fn)` / `register_cron` |
+| `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现，见 §3） |
+| `import fs from 'node:fs'` 等原生模块 | 加载期报错：`Error loading module 'node:fs': 只内置了 host-api 模块` | 有 | 走 `host-api` |
+| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `structuredClone` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
+| `console` / `performance` / `atob` / `btoa` / `queueMicrotask` | 有 | 有 | — |
+| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `WeakRef` / `Proxy` / `Reflect` / `eval`） | 有 | 有 | — |
 
-一句话：**除了 ECMAScript 语言本身 + `host-api`，别的都别指望。**
-实测对照 —— 同一个文件：
+一句话：用 ECMAScript 语言本身 + `host-api`，两边都跑得通。
+`setTimeout` 这类计时器两边不能通用，延时一律交给调度器。
 
-```
-// 用了原生模块的插件
-import fs from 'node:fs';
-嵌入式 QuickJS → ReferenceError: Error loading module 'node:fs': 只内置了 `host-api` 模块
-Node          → ✅ 正常读到文件
-```
+### 4.2 `.py` 插件：PocketPy 与 CPython 的差异
 
-两边对称，也正是抽象层存在的理由。
+| 构造 | PocketPy v2.2.0 | CPython | 替代写法 |
+|---|---|---|---|
+| 生成器表达式 `f(x for x in y)` | 不支持（`SyntaxError`） | 支持 | 列表推导 `f([x for x in y])` |
+| `finally:` | 不支持（`SyntaxError: finally clause is not supported yet`） | 支持 | 清理逻辑写两遍 |
+| `nonlocal` | 不支持（`SyntaxError`） | 支持 | 用 `state = {...}` 字典改状态 |
+| 相邻字符串隐式拼接 `"a" "b"` | 不支持（`SyntaxError: expected ')', got '@str'`） | 支持 | 显式写 `"a" + "b"`（多行 SQL 最容易踩） |
+| `async def` / `await` | 不支持（`SyntaxError`） | 支持 | 同步写法 |
+| `with` 自定义上下文管理器 | `__exit__` 只收到 self | 支持 | 手写 try/except |
+| `datetime + timedelta` | 不支持（`TypeError`） | 支持 | 用时间戳字符串 |
+| `threading` / `sqlite3` / `urllib` / `http.server` | 没有这些模块 | 有 | 走 `host_api` |
+| `os` 模块 / `open()` | 关掉了（`PK_ENABLE_OS=0`，见 `build.rs`） | 有 | 走 `host_api`（宿主统一审计） |
+| 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=` | 支持 | 支持 | — |
+| 可用模块：`json` / `math` / `traceback` / `sys` | 有 | 有 | — |
+
+一句话：按 PocketPy 的写法写，两边都跑得通；它不支持的那些构造，换成表里的替代写法。
 
 ---
 

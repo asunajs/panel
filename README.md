@@ -1033,10 +1033,10 @@ Rust 只保存「插件名 + 任务名 + 表达式」这点元数据。
   需要外部能力的（读文件、发请求、查库）走 `host_api`，宿主侧统一审计。
 - 面板默认只绑 `127.0.0.1`；第十轮起可以用 `PANEL_TOKEN` 开鉴权后绑外网（§13）。
 
-### 10.5 跨运行时验证（同一份插件跑在**它自己语言的两个**宿主里）
+### 10.5 跨运行时验证
 
-注意下面这张表里的 `—`：JS 插件在 Python 宿主里是**不跑**的，反之亦然。
-「四个宿主」指的是 2 种语言 × 每种 2 个宿主，不是「一份脚本跑遍四个」。
+JS 插件跑在 QuickJS 与 Node；Python 插件跑在 PocketPy 与 CPython。
+两边都是拿仓库里的真插件文件直接跑，一字不改。
 
 ```
                      plugins/js/host-api-demo.js        plugins/py/sysinfo.py
@@ -1050,7 +1050,8 @@ CPython（adapters/python）   —                            ✅ 一字不改�
 CPython 61 项全绿（`python3 -m unittest discover -s tests`）。
 两边都做了同一件事：**拿仓库里的真插件文件直接跑**，不是另写一份测试插件。
 
-PocketPy 的语法缺口（写 **Python** 插件时的硬约束；JS 插件不经过 PocketPy，与它无关。完整表见 `docs/host-api.md` §4）：
+`.js` 与 `.py` 各自的硬约束（完整表见 `docs/host-api.md` §4）。
+Python 侧要避开 PocketPy 的语法缺口：
 生成器表达式 / `finally` / `nonlocal` / `async` / 自定义 `with` / `datetime + timedelta` 不支持；
 列表推导、f-string、class、lambda、闭包、`yield`、`match/case`、`:=`、`json` 都可用。
 
@@ -1064,8 +1065,7 @@ PocketPy 的语法缺口（写 **Python** 插件时的硬约束；JS 插件不�
 2. ~~**`host.*` 的模式可以直接复制。**~~ ✅ **已实现**：`hostapi.rs` 是唯一实现，
    `jshost.rs` / `pyhost.rs` 各是一层薄适配，宿主侧确实一次都没碰 `Value` 的类型分支。
    额外收获：因为底层只传 String，**Node/CPython 适配器能把同一套语义再实现一遍** ——
-   同一个 `.js` 文件在 QuickJS 与 Node 里跑通、同一个 `.py` 文件在 PocketPy 与 CPython
-   里跑通（§10.5 那张表里的 `—` 是刻意的：跨语言的只有 API 契约，不是代码）。
+   同一个 `.js` 文件在 QuickJS 与 Node 里跑通，同一个 `.py` 文件在 PocketPy 与 CPython 里跑通（§10.5）。
 3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，JS 重建 `Context`、
    Python 复用 VM 索引 + `py_resetvm`，先摘旧任务再装新任务（§4「热更新」）。
 4. ~~**任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。
