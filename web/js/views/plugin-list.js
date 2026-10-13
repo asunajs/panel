@@ -71,26 +71,25 @@ export async function render(root, ctx) {
                     ? `<button class="btn primary" data-open="${esc(p.name)}">打开配置页</button>
                        <a class="btn" href="/plugins/${encodeURIComponent(p.name)}/" target="_blank" rel="noopener">新标签页</a>`
                     : '<span class="hint">这个插件没有自带配置页</span>';
+                  // 有配置页时按钮行里是两个按钮：内嵌打开 + 新标签页
+                  // 竖排布局（见 components.css 的 .plugin-card）：
+                  // 名字 + 徽章一行、路径一行、状态一行、按钮一行。
+                  // 横排时这些内容在 280px 的列宽里会互相挤 —— 徽章被压成竖排、
+                  // 插件名被折成三行，是实测出来的回归。
                   return `
           <div class="card plugin-card">
-            <div class="grow">
-              <div class="card-head" style="margin-bottom:var(--sp-1)">
-                <span class="card-title">${esc(p.name)}</span>
-                ${statusBadge(p)}
-                <span class="badge lang ${p.runtime === 'py' ? 'py' : 'js'}">${esc(p.runtime)}</span>
-              </div>
-              <div class="path" title="${esc(p.file)}">${esc(p.file)}</div>
-              ${
-                p.error
-                  ? `<div class="err-text" style="margin-top:6px">${esc(p.error)}</div>`
-                  : `<div class="hint" style="margin-top:6px">tick ${p.ticks} 次 · 最近 ${
-                      esc(p.last_tick || '—')
-                    }</div>`
-              }
+            <div class="card-head">
+              <span class="card-title" title="${esc(p.name)}">${esc(p.name)}</span>
+              ${statusBadge(p)}
+              <span class="badge lang ${p.runtime === 'py' ? 'py' : 'js'}">${esc(p.runtime)}</span>
             </div>
-            <div class="card-actions" style="flex-direction:column;align-items:stretch;gap:6px">
-              ${openBtn}
-            </div>
+            <div class="path" title="${esc(p.file)}">${esc(p.file)}</div>
+            ${
+              p.error
+                ? `<div class="err-text">${esc(p.error)}</div>`
+                : `<div class="hint">tick ${p.ticks} 次 · 最近 ${esc(p.last_tick || '—')}</div>`
+            }
+            <div class="plugin-actions">${openBtn}</div>
           </div>`;
                 })
                 .join('')

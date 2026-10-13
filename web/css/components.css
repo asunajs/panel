@@ -116,6 +116,11 @@
   line-height: 1.6;
   background: var(--mute-soft);
   color: var(--text-dim);
+  /* flex 子项默认 flex-shrink:1，放不下时浏览器会挑最没「抵抗力」的来压。
+     徽章里是「已加载」这种中文，能任意断行，于是被压成竖排的「已/加/载」。
+     徽章是标签：要么完整显示，要么换行，绝不被压缩。 */
+  flex: none;
+  white-space: nowrap;
 }
 
 .badge::before {
@@ -187,6 +192,16 @@
   align-items: center;
   gap: var(--sp-2);
   margin-bottom: var(--sp-3);
+  /* 窄屏放不下时**换行**，而不是把名字和徽章挤扁 */
+  flex-wrap: wrap;
+}
+
+/* 卡片标题：长标识符用省略号，不要折成三行 */
+.card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-title {
@@ -203,6 +218,8 @@
   margin-left: auto;
   display: flex;
   gap: var(--sp-2);
+  flex: none;
+  flex-wrap: wrap;
 }
 
 .section {
@@ -500,20 +517,22 @@
   background: var(--surface);
 }
 
-/* 插件的入口链接卡片（插件管理页） */
+/* 插件的入口链接卡片（插件管理页）。
+   竖排而不是「左边信息 + 右边按钮」：插件名是标识符（host-api-demo），
+   加上两个徽章和两个按钮，横排在 280px 的列宽里必然挤 —— 实测徽章会被压成
+   竖排的「已/加/载」、名字被折成三行。竖排之后每行都有完整宽度。 */
 .plugin-card {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3);
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plugin-card .card-head {
+  margin-bottom: 0;
 }
 
 .plugin-card .card-title {
   font-family: var(--font-mono);
-}
-
-.plugin-card .grow {
-  min-width: 0;
-  flex: 1;
 }
 
 .plugin-card .path {
@@ -523,6 +542,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 按钮行：贴到卡片底部，让同一行的卡片高度看起来一致 */
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: var(--sp-2);
 }
 
 /* 视图切换的顶部消息条 */

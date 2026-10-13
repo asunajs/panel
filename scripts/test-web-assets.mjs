@@ -168,6 +168,27 @@ for (const name of ['layout.css', 'components.css', 'reset.css']) {
     hex.slice(0, 4).join(' '),
   );
 }
+// 徽章必须「要么完整显示、要么换行」，绝不能被 flex 压缩。
+//
+// 这条守的是一个**用户实测出来的回归**：插件管理页的卡片里，名字 + 两个徽章 +
+// 两个按钮在 280px 的列宽里放不下，浏览器就把 `.badge` 压成了竖排的
+// 「已/加/载」（中文能任意断行，所以它比按钮「好压」）。这类问题静态检查
+// 本来抓不到，但成因很具体、修法也很具体，所以值得钉一条。
+const componentsCss = readFileSync(join(WEB, 'css/components.css'), 'utf8');
+const badgeRule = componentsCss.match(/\n\.badge \{([\s\S]*?)\n\}/);
+check(!!badgeRule, '找得到 .badge 规则');
+if (badgeRule) {
+  const body = badgeRule[1];
+  check(/flex:\s*none/.test(body), '.badge 设了 flex:none（不会被压缩）');
+  check(/white-space:\s*nowrap/.test(body), '.badge 设了 white-space:nowrap（不会竖排断行）');
+}
+// 卡片头也要允许换行，否则窄屏下会去压缩子项而不是折行
+const headRule = componentsCss.match(/\n\.card-head \{([\s\S]*?)\n\}/);
+check(
+  !!headRule && /flex-wrap:\s*wrap/.test(headRule[1]),
+  '.card-head 允许换行（窄屏不压缩子项）',
+);
+
 const pluginCss = readFileSync(join(PLUGINS, 'demo/style.css'), 'utf8');
 check(
   [...pluginCss.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/#[0-9a-fA-F]{3,8}\b/g)].length === 0,

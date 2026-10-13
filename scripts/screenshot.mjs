@@ -186,6 +186,22 @@ const SHOTS = (o) => [
     cookie: 'session',
   },
   {
+    name: 'web-plugins',
+    // 插件管理页：徽章 / 插件名 / 按钮的排版在这里最容易挤（实测被压成竖排过）
+    url: `${o.auth}/#/plugins`,
+    viewport: [1280, 900],
+    scale: 2,
+    cookie: 'session',
+  },
+  {
+    name: 'web-plugins-narrow',
+    // 手机宽度：同一个页面在窄屏下会不会挤扁 —— 这一张专门盯响应式
+    url: `${o.auth}/#/plugins`,
+    viewport: [420, 900],
+    scale: 2,
+    cookie: 'session',
+  },
+  {
     name: 'web-plugin-ui',
     // 插件作者提供的配置页：它自己的表单 + 自己的 API
     url: `${o.auth}/plugins/demo/`,
