@@ -2025,8 +2025,20 @@ def main() -> int:
         check(len(state.get("plugins", [])) > 0, "插件已加载", f"{len(state.get('plugins', []))} 个")
 
         # ---- 3b. 双运行时：JS 和 Python 插件都要在 ----
+        #
+        # **这里必须等**：Python VM 是惰性初始化的（日志原话「首次用到 Python 插件时才
+        # 初始化」），慢机器上 py 插件会比 js 插件晚登记一两秒。原来拿前面那次快照直接
+        # 断言，在 CI 的 x86_64-musl runner 上红过一次 —— 而日志里 PocketPy 明明已就绪、
+        # 三个 py 插件都加载了：**产品没问题，是断言太急**。
         plugins = state.get("plugins", [])
         runtimes = {p.get("runtime") for p in plugins}
+        deadline = time.time() + 15.0
+        while time.time() < deadline and not {"js", "py"} <= runtimes:
+            time.sleep(0.3)
+            code2, state2 = fetch_json(f"{base}/api/state")
+            if code2 == 200:
+                plugins = state2.get("plugins", [])
+                runtimes = {p.get("runtime") for p in plugins}
         check(
             {"js", "py"} <= runtimes,
             "双运行时都加载了",
