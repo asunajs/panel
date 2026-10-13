@@ -89,7 +89,20 @@ pub struct AppState {
     pub assets: assets::Assets,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    // 错误用 **Display** 打，不用 Debug。
+    //
+    // 这里有几个错误是**多行提示**（「拒绝启动」那段会告诉用户怎么配令牌、
+    // 为什么没有免登录模式）。`fn main() -> Result<..>` 的默认打印是 Debug：
+    // 整个字符串被引号包起来、\n 原样转义 —— 用户在终端里看到的是一大坨
+    // 带 `\n` 的单行，等于把最需要看清的那段提示作废了。
+    if let Err(e) = real_main() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // 子命令要在**建 runtime / 碰数据库之前**处理：生成令牌哈希不需要起服务，
     // 也不该因为「端口被占」之类的配置问题就跑不了。
     let args: Vec<String> = std::env::args().skip(1).collect();
