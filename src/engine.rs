@@ -216,8 +216,32 @@ pub enum EngineCmd {
         name: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// 面板编辑任务：只换调度表达式，保留 `runs` / `trips` / 暂停状态。
+    ///
+    /// 与「删了重建」的区别就在这个「保留」上 —— 删了重建会把运行历史归零。
+    EditJob {
+        plugin: String,
+        name: String,
+        expr: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 清理失效的面板任务：插件没了 / 插件加载失败 / 处理函数没了。
+    ///
+    /// `dry_run = true` 只报告不删 —— 面板上先让用户看清要删什么。
+    /// 回包是 `(plugin, name, 失效原因)` 列表。
+    CleanupJobs {
+        dry_run: bool,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<InvalidJob>, String>>,
+    },
     Shutdown,
 }
+
+/// 一条失效任务的报告：`(plugin, name, 失效原因)`。
+///
+/// 单独起个名字是因为它会出现在 `EngineCmd` 的返回类型里 ——
+/// 裸 `Vec<(String, String, String)>` 塞进泛型会触发 clippy 的
+/// `type_complexity`，而且读代码的人得数一遍才知道三个 String 各是什么。
+pub type InvalidJob = (String, String, String);
 
 /// 引擎线程句柄。
 pub struct JsEngine {
@@ -581,6 +605,23 @@ fn engine_main(
                 let out = remove_job(&mut sched, &logs, &db, &plugin, &name);
                 let _ = reply.send(out);
             }
+            Ok(EngineCmd::EditJob {
+                plugin,
+                name,
+                expr,
+                reply,
+            }) => {
+                let out = edit_job(
+                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr,
+                );
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::CleanupJobs { dry_run, reply }) => {
+                let out = cleanup_jobs(
+                    &mut sched, &plugins, &logs, &db, &wd, budget, dry_run,
+                );
+                let _ = reply.send(out);
+            }
             Ok(EngineCmd::Shutdown) => {
                 println!("[engine] 收到关闭指令");
                 break;
@@ -781,7 +822,9 @@ fn reinstall_panel_jobs(
             let _ = db::set_job_status(db, &job.plugin, &job.name, "error", Some(&msg), &fmt_secs(now));
             continue;
         }
-        match sched.add(&job.plugin, &job.name, &job.schedule, schedule, now) {
+        // add_panel：面板任务必须带着 TaskSource::Panel 进调度器，
+        // 否则下一轮 all_specs 会把它当成代码声明的任务喂给 sync_jobs（见 all_specs 注释）
+        match sched.add_panel(&job.plugin, &job.name, &job.schedule, schedule, now) {
             Ok(_) => {}
             Err(e) => hostapi::push_log(logs, &job.plugin, "error", &format!("面板任务重装失败: {e}")),
         }
@@ -865,7 +908,8 @@ fn add_job(
         ));
     }
 
-    let idx = sched.add(plugin, name, expr, schedule, now)?;
+    // add_panel 而不是 add：这条是面板创建的任务，不归 sync_jobs 管
+    let idx = sched.add_panel(plugin, name, expr, schedule, now)?;
     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
     // 先落库。写库失败就把刚装上的任务摘掉，避免「调度器里在跑、库里没有」的假状态。
     if let Err(e) = db::insert_panel_job(db, plugin, name, expr, Some(&next), &fmt_secs(now)) {
@@ -905,6 +949,151 @@ fn remove_job(
             Ok(())
         }
     }
+}
+
+/// 面板编辑任务：只换调度表达式。
+///
+/// 为什么要有这个（而不是「删了重建」）：`runs` / `trips` / `created_at` / 暂停状态
+/// 都在库里那一行上，删了重建等于把运行历史清零。用户调个 cron 表达式不该丢历史。
+///
+/// 校验顺序与 `add_job` 一致，且**先校验完再动任何状态**：
+/// 1. 任务必须存在于库里，且 `source = 'panel'`（插件代码声明的任务，表达式在代码里，
+///    改库没用 —— 下一次 `sync_jobs` 会被覆盖回去）
+/// 2. 表达式能解析
+/// 3. 插件在、加载成功、处理函数还在（改完表达式马上要跑的还是那个 handler）
+///
+/// 落库与内存的先后：先改调度器（内存），失败则回滚；再落库，失败则把内存改回去。
+/// 两边都失败时以「内存与库一致」为准 —— 宁可这次编辑没生效，也不留下
+/// 「调度器里是新表达式、库里是旧的」这种假状态。
+#[allow(clippy::too_many_arguments)]
+fn edit_job(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    plugin: &str,
+    name: &str,
+    expr: &str,
+) -> Result<(), String> {
+    let now = Local::now();
+
+    match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+        None => return Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
+        Some(src) if src != "panel" => {
+            return Err(format!(
+                "任务 `{name}` 的调度表达式由插件 `{plugin}` 的代码声明（source = {src}），\
+                 面板上不能改；要改请改插件代码里的 `register_cron` / `every`"
+            ))
+        }
+        Some(_) => {}
+    }
+
+    let schedule =
+        Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+
+    // 插件与处理函数都要在：改完表达式要跑的还是那个 handler。
+    // 插件已经没了的话，该做的是「清理失效任务」，不是编辑它。
+    let p = plugins
+        .iter()
+        .find(|p| p.name == plugin)
+        .ok_or_else(|| {
+            format!(
+                "没有名为 `{plugin}` 的插件（任务已失效，可以用「清理失效任务」删掉它）"
+            )
+        })?;
+    if p.error.is_some() {
+        return Err(format!("插件 `{plugin}` 加载失败，不能改它的任务"));
+    }
+    if !plugin_has_handler(p, name, wd, budget) {
+        return Err(format!(
+            "插件 `{plugin}` 里没有名为 `{name}` 的处理函数，不能改它的任务"
+        ));
+    }
+
+    // 任务可能在库里但不在调度器里（例如插件加载失败时不会装上）。
+    // 那就只改库：库是面板任务的权威来源，插件下次加载时会按新表达式装上。
+    let Some(idx) = sched.find(plugin, name) else {
+        let next = schedule.next_after(now).map(scheduler::fmt_ms);
+        db::update_panel_job_schedule(db, plugin, name, expr, next.as_deref(), &fmt_secs(now))
+            .map_err(|e| format!("写库失败: {e}"))?;
+        hostapi::push_log(
+            logs,
+            plugin,
+            "info",
+            &format!("面板修改了任务 `{name}` 的表达式为 `{expr}`（插件未加载，只改库）"),
+        );
+        return Ok(());
+    };
+
+    let old_expr = sched.tasks()[idx].expr.clone();
+    sched.set_expr(plugin, name, expr, schedule, now)?;
+    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+
+    if let Err(e) = db::update_panel_job_schedule(db, plugin, name, expr, Some(&next), &fmt_secs(now))
+    {
+        // 回滚内存。`old_expr` 是从一个成功解析过的表达式来的，再解析一定成功。
+        if let Ok(s) = Schedule::parse(&old_expr) {
+            let _ = sched.set_expr(plugin, name, &old_expr, s, now);
+        }
+        return Err(format!("写库失败: {e}"));
+    }
+
+    hostapi::push_log(
+        logs,
+        plugin,
+        "info",
+        &format!("面板把任务 `{name}` 的表达式从 `{old_expr}` 改成 `{expr}`，下次触发 {next}"),
+    );
+    Ok(())
+}
+
+/// 清理失效的面板任务，返回 `(plugin, name, 原因)` 列表。
+///
+/// 三种失效：插件文件被删了、插件加载失败、处理函数在新版本里没了。
+/// 这三种情况下任务留着只会每到一个触发点就报一次错（并把熔断计数堆上去），
+/// 所以「插件没了」时由用户点一下清掉，比让它在后台空转强。
+///
+/// **只清 `source = 'panel'`**：插件代码声明的任务由 `sync_jobs` 收敛，
+/// 插件删了它们自然就没了，不需要这里管。
+fn cleanup_jobs(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    dry_run: bool,
+) -> Result<Vec<InvalidJob>, String> {
+    let rows = db::list_panel_jobs(db, None).map_err(|e| format!("读库失败: {e}"))?;
+    let mut out = Vec::new();
+
+    for row in rows {
+        let reason = match plugins.iter().find(|p| p.name == row.plugin) {
+            None => "插件已不存在（文件被删除或改名）".to_string(),
+            Some(p) if p.error.is_some() => "插件加载失败".to_string(),
+            Some(p) if !plugin_has_handler(p, &row.name, wd, budget) => {
+                "处理函数在新版本里没有了".to_string()
+            }
+            Some(_) => continue,
+        };
+
+        if !dry_run {
+            db::delete_panel_job(db, &row.plugin, &row.name)
+                .map_err(|e| format!("写库失败: {e}"))?;
+            sched.remove_task(&row.plugin, &row.name);
+            hostapi::push_log(
+                logs,
+                &row.plugin,
+                "warn",
+                &format!("清理了失效任务 `{}`：{reason}", row.name),
+            );
+        }
+        out.push((row.plugin, row.name, reason));
+    }
+
+    Ok(out)
 }
 
 /// 触发所有到期任务，并把结果写回调度器与 SQLite。
@@ -1553,15 +1742,23 @@ fn is_python(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("py")
 }
 
-/// 把调度器里**全部**插件声明的任务映射成 `jobs` 表的 spec。
+/// 把调度器里**插件代码声明的**任务映射成 `jobs` 表的 spec。
 ///
 /// 这个函数存在的唯一理由是给调用方一个明确的提醒：`db::sync_jobs` 的契约是
-/// 「这是全量声明，不在其中的 `source='plugin'` 行都删掉」。所以调用方必须传全量 ——
-/// 传子集就等于「把别的插件的任务删掉」，而且是静默的。
+/// 「这是代码声明的全量集合，不在其中的 `source='plugin'` 行都删掉，且同名时
+/// 代码优先（会删掉面板那条）」。所以调用方必须传全量 —— 传子集就等于
+/// 「把别的插件的任务删掉」，而且是静默的。
+///
+/// ⚠️ **只收 `TaskSource::Code` 的任务**。第十一轮这里收的是「调度器里全部任务」，
+/// 而调度器里同时装着面板创建的任务 —— 于是 `sync_jobs` 那段「同名代码优先」
+/// 会把面板行删掉再以 `source='plugin'` 插回来：面板上这条任务立刻变成「插件代码」
+/// （用户拿不到编辑/删除按钮），插件文件一删就被当成「代码里已不声明」静默清掉，
+/// 运行历史一起没。实测复现：建面板任务 → `touch` 插件文件 → 查库 `source` 已翻转。
 fn all_specs(sched: &Scheduler) -> Vec<db::JobSpec> {
     sched
         .tasks()
         .iter()
+        .filter(|t| t.source == scheduler::TaskSource::Code)
         .map(|t| {
             (
                 t.plugin.clone(),
@@ -2033,10 +2230,41 @@ mod tests {
             sched.add(plugin, task, "@every 1s", sch, now).unwrap();
         }
         let specs = all_specs(&sched);
-        assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部任务");
+        assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部**代码声明的**任务");
         let names: Vec<&str> = specs.iter().map(|(_, n, _, _)| n.as_str()).collect();
         assert!(names.contains(&"t1") && names.contains(&"t2") && names.contains(&"t3"));
         // next_run 必须带上（面板靠它显示下次触发）
         assert!(specs.iter().all(|(_, _, _, next)| next.is_some()));
+    }
+
+    #[test]
+    fn all_specs_excludes_panel_tasks() {
+        // 回归测试：`all_specs` 把面板任务也当成「代码声明」喂给 `sync_jobs`，
+        // 会导致 sync_jobs 的「同名代码优先」那段删掉面板行、再以 source='plugin'
+        // 插回来 —— 面板上任务变成「插件代码」（拿不到编辑/删除按钮），
+        // 插件文件一删就被静默清掉，运行历史一起没。
+        use crate::cron::Schedule;
+        use crate::scheduler::TaskSource;
+        let mut sched = Scheduler::new(crate::scheduler::TripConfig::default());
+        let now = Local::now();
+        let sch = || Schedule::parse("@every 1s").unwrap();
+
+        sched.add("demo", "from-code", "@every 1s", sch(), now).unwrap();
+        sched
+            .add_panel("demo", "from-panel", "@every 1s", sch(), now)
+            .unwrap();
+
+        let specs = all_specs(&sched);
+        let names: Vec<&str> = specs.iter().map(|(_, n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["from-code"],
+            "面板任务不能出现在 sync_jobs 的入参里，否则会被误判成代码声明"
+        );
+        // 来源跟着任务走，不是靠猜
+        let panel_idx = sched.find("demo", "from-panel").unwrap();
+        assert_eq!(sched.tasks()[panel_idx].source, TaskSource::Panel);
+        let code_idx = sched.find("demo", "from-code").unwrap();
+        assert_eq!(sched.tasks()[code_idx].source, TaskSource::Code);
     }
 }

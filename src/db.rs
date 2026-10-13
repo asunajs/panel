@@ -432,6 +432,32 @@ pub fn insert_panel_job(
     )
 }
 
+/// 改一条**面板创建**任务的调度表达式。返回受影响行数。
+///
+/// 只动 `schedule` / `next_run` / `updated_at` 三列，其余（`runs`、`trips`、`status`、
+/// `created_at`）全部原样保留 —— 这正是「编辑」而不是「删了重建」的意义：
+/// 删了重建会把 `runs` 归零、`created_at` 变成现在，用户在面板上看到的历史就没了。
+///
+/// 带 `source = 'panel'` 条件与 `delete_panel_job` 同理：插件代码声明的任务，
+/// 调度表达式在代码里，改库也没用（下一次 `sync_jobs` 会被覆盖回去）。
+pub fn update_panel_job_schedule(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    schedule: &str,
+    next_run: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        UPDATE jobs SET schedule = ?3, next_run = ?4, updated_at = ?5
+        WHERE plugin = ?1 AND name = ?2 AND source = 'panel'
+        "#,
+        params![plugin, name, schedule, next_run, now],
+    )
+}
+
 /// 删除一条**面板创建**的任务定义。返回受影响行数。
 ///
 /// 带 `source = 'panel'` 条件是有意的：插件代码声明的任务不该从面板上删掉 ——

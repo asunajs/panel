@@ -74,6 +74,9 @@ const STATE = {
   jobs: [
     { plugin: 'panel-jobs', name: 'code-side', schedule: '@every 5s', source: 'plugin', status: 'running',
       runs: 1, trips: 0, paused: false, next_run: '2026-01-01 00:00:00', last_error: null },
+    // 面板创建的任务：只有它会渲染「编辑 / 删除」（第十二轮）
+    { plugin: 'panel-jobs', name: 'echo', schedule: '@every 2s', source: 'panel', status: 'running',
+      runs: 7, trips: 0, paused: false, next_run: '2026-01-01 00:00:00', last_error: null },
   ],
   tasks: [],
   logs: [],
@@ -86,8 +89,14 @@ function boot(js) {
     return els.get(id);
   };
   const calls = [];
+  // prompt / confirm 的返回值由测试控制：编辑和清理都是「先问再动」
+  const ui = { promptAnswer: null, confirmAnswer: true };
   const ctx = {
     console,
+    window: {
+      prompt: () => ui.promptAnswer,
+      confirm: () => ui.confirmAnswer,
+    },
     encodeURIComponent,
     setTimeout,
     setInterval: () => 0, // 别真的开定时器
@@ -100,13 +109,24 @@ function boot(js) {
     },
     fetch: async (url, opts = {}) => {
       calls.push({ url, method: opts.method, headers: opts.headers || {}, body: opts.body });
-      return { status: 200, json: async () => (url === '/api/state' ? STATE : { ok: true }) };
+      return {
+        status: 200,
+        json: async () => {
+          if (url === '/api/state') return STATE;
+          // 清理接口得回一份「有一条失效任务」的清单：回空清单的话前端会走
+          // 「没有失效任务」分支直接返回，测不到「确认后才真删」那一步。
+          if (url === '/api/jobs/cleanup') {
+            return { ok: true, jobs: [{ plugin: 'dead', name: 'ghost', reason: '插件已不存在（文件被删除或改名）' }] };
+          }
+          return { ok: true };
+        },
+      };
     },
   };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(js, ctx);
-  return { ctx, get, calls };
+  return { ctx, get, calls, ui };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
@@ -164,13 +184,31 @@ async function main() {
   check(!login.includes('<script'), '登录页没有任何 JS（未认证时不该去拉 /api/state）');
   check(!login.includes('__JOB_ROWS__'), '登录页不渲染任何面板数据');
 
-  const { ctx, get, calls } = boot(js);
+  const { ctx, get, calls, ui } = boot(js);
   await settle();
 
   // ---- 首屏渲染 ----
   check(calls[0]?.url === '/api/state', '首屏拉了 /api/state', calls[0]?.url);
   check(get('jobs').innerHTML.includes('插件代码'), '任务行渲染出来源徽标');
   check(get('jobs').innerHTML.includes('data-act="run"'), '任务行渲染出操作按钮');
+  // 第十二轮：编辑只给面板任务，插件代码声明的任务没有这个按钮
+  check(
+    get('jobs').innerHTML.includes('data-act="edit"'),
+    '面板任务渲染出「编辑」按钮',
+  );
+  check(
+    get('jobs').innerHTML.includes('data-expr="@every 2s"'),
+    '「编辑」按钮带着当前表达式（弹窗里当默认值）',
+  );
+  check(
+    get('jobs').innerHTML.includes('data-act="delete"'),
+    '面板任务渲染出「删除」按钮',
+  );
+  check(
+    !/data-act="edit"[^>]*data-name="code-side"/.test(get('jobs').innerHTML),
+    '插件代码声明的任务**没有**「编辑」按钮',
+  );
+  check(html.includes('id="nj-cleanup"'), '「清理失效任务」按钮在页面里');
   check(get('nj-plugin').innerHTML.includes('panel-jobs'), '插件下拉被填充');
   check(
     get('sessionCount').textContent === 2,
@@ -200,6 +238,67 @@ async function main() {
   await settle();
   c = calls.find((x) => x.url !== '/api/state');
   check(c?.url === '/api/jobs/panel-jobs/echo/delete', '点「删除」走 /api/jobs', c?.url);
+
+  // ---- 编辑（第十二轮）：弹窗确认 → POST /api/jobs/{p}/{n}/edit + {expr} ----
+  calls.length = 0;
+  ui.promptAnswer = '@every 30s';
+  click(ctx, { act: 'edit', plugin: 'panel-jobs', name: 'echo', expr: '@every 2s' });
+  await settle();
+  c = calls.find((x) => x.url !== '/api/state');
+  check(c?.url === '/api/jobs/panel-jobs/echo/edit', '点「编辑」走 /api/jobs 的 edit', c?.url);
+  check(c?.method === 'POST', '「编辑」用 POST', c?.method);
+  check(
+    c?.body === JSON.stringify({ expr: '@every 30s' }),
+    '「编辑」的请求体只带 expr（插件名与处理函数名是任务身份，不可改）',
+    c?.body,
+  );
+  check(c?.headers['x-panel'] === '1', '「编辑」带上护栏头');
+
+  // 用户取消弹窗 → 什么都不发
+  calls.length = 0;
+  ui.promptAnswer = null;
+  click(ctx, { act: 'edit', plugin: 'panel-jobs', name: 'echo', expr: '@every 2s' });
+  await settle();
+  check(
+    !calls.some((x) => x.url !== '/api/state'),
+    '弹窗里取消 → 不发任何请求',
+    JSON.stringify(calls.map((x) => x.url)),
+  );
+
+  // 表达式没变 → 也不发（省一次无意义的写）
+  calls.length = 0;
+  ui.promptAnswer = '@every 2s';
+  click(ctx, { act: 'edit', plugin: 'panel-jobs', name: 'echo', expr: '@every 2s' });
+  await settle();
+  check(
+    !calls.some((x) => x.url !== '/api/state'),
+    '表达式没变 → 不发请求',
+    get('actmsg').textContent,
+  );
+
+  // ---- 清理失效任务：先 dry_run 看清要删什么，确认后再真删 ----
+  calls.length = 0;
+  ui.confirmAnswer = false;
+  get('nj-cleanup').handlers.click[0]();
+  await settle();
+  c = calls.find((x) => x.url === '/api/jobs/cleanup');
+  check(c?.url === '/api/jobs/cleanup', '点「清理失效任务」走 /api/jobs/cleanup', c?.url);
+  check(
+    c?.body === JSON.stringify({ dry_run: true }),
+    '第一步是 dry_run（先看清要删什么）',
+    c?.body,
+  );
+
+  calls.length = 0;
+  ui.confirmAnswer = true;
+  get('nj-cleanup').handlers.click[0]();
+  await settle();
+  const cleanups = calls.filter((x) => x.url === '/api/jobs/cleanup');
+  check(
+    cleanups.length === 2 && cleanups[1].body === JSON.stringify({ dry_run: false }),
+    '确认后才真删（第二发 dry_run:false）',
+    JSON.stringify(cleanups.map((x) => x.body)),
+  );
 
   // ---- 新建任务 ----
   calls.length = 0;

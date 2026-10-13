@@ -39,6 +39,21 @@ struct AddJobReq {
     expr: String,
 }
 
+/// 面板编辑任务的请求体（只有表达式可改：插件名与处理函数名是任务的**身份**）。
+#[derive(Debug, Deserialize)]
+struct EditJobReq {
+    /// 新的调度表达式
+    expr: String,
+}
+
+/// 清理失效任务的请求体。
+#[derive(Debug, Deserialize, Default)]
+struct CleanupReq {
+    /// `true` 只报告不删（面板上先给用户看清要删什么）
+    #[serde(default)]
+    dry_run: bool,
+}
+
 /// 登录页的查询串（`/login?next=%2Fapi%2Fstate`）。
 #[derive(Debug, Deserialize)]
 struct LoginQuery {
@@ -60,9 +75,11 @@ pub fn router(state: AppState) -> Router {
     // 用 `layer` 而不是 `route_layer`：后者不覆盖 fallback —— 那样插件注册的路由
     // 就成了唯一不需要认证的入口，而这恰恰是最不该漏的地方（插件能读库、能发请求）。
     let protected = Router::new()
-        // 任务**定义**：新建 / 删除（`jobs` 表）
+        // 任务**定义**：新建 / 删除 / 编辑 / 清理失效（`jobs` 表）
         .route("/api/jobs", post(add_job))
         .route("/api/jobs/{plugin}/{name}/delete", post(delete_job))
+        .route("/api/jobs/{plugin}/{name}/edit", post(edit_job))
+        .route("/api/jobs/cleanup", post(cleanup_jobs))
         // 任务**操作**：立即执行 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
@@ -517,6 +534,83 @@ async fn delete_job(
     }
 }
 
+/// `POST /api/jobs/{plugin}/{name}/edit` —— 改一条**面板任务**的调度表达式。
+///
+/// 请求体 `{"expr": "..."}`。只换表达式，`runs` / `trips` / 暂停状态全部保留 ——
+/// 这正是「编辑」相对「删了重建」的意义（删了重建会把运行历史归零）。
+///
+/// 插件代码声明的任务返回 `400`：它们的表达式在代码里，改库下一次 `sync_jobs`
+/// 就被覆盖回去了，白操作一次。
+async fn edit_job(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<EditJobReq>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::EditJob {
+            plugin: plugin.clone(),
+            name: name.clone(),
+            expr: req.expr.clone(),
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+    // 校验里有一次真实的插件函数调用（问「handler 还在不在」），给 5 秒足够
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => {
+            Json(json!({ "ok": true, "expr": req.expr })).into_response()
+        }
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
+/// `POST /api/jobs/cleanup` —— 清理失效的面板任务。
+///
+/// 请求体 `{"dry_run": true}`（可选，默认 `false`）。失效 = 插件没了 / 插件加载失败 /
+/// 处理函数在新版本里没有了。返回 `{"ok":true,"jobs":[{"plugin","name","reason"}]}`，
+/// `dry_run` 时列表就是「将会被删掉的」。
+async fn cleanup_jobs(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<CleanupReq>>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let dry_run = body.map(|Json(b)| b.dry_run).unwrap_or(false);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::CleanupJobs { dry_run, reply: tx })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+    // 每个失效任务都要问一次插件「handler 还在不在」，任务多时要留出时间
+    match tokio::time::timeout(Duration::from_secs(15), rx).await {
+        Ok(Ok(Ok(jobs))) => {
+            let list: Vec<_> = jobs
+                .into_iter()
+                .map(|(plugin, name, reason)| json!({ "plugin": plugin, "name": name, "reason": reason }))
+                .collect();
+            Json(json!({ "ok": true, "dry_run": dry_run, "jobs": list })).into_response()
+        }
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 15 秒没回话".into()),
+    }
+}
+
 async fn pause_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
@@ -821,7 +915,7 @@ fn job_rows(jobs: &[JobRow]) -> String {
                 j.runs,
                 j.trips,
                 esc(j.next_run.as_deref().unwrap_or("-")),
-                job_buttons(&j.plugin, &j.name, j.paused, &j.source)
+                job_buttons(&j.plugin, &j.name, j.paused, &j.source, &j.schedule)
             )
         })
         .collect::<Vec<_>>()
@@ -844,7 +938,11 @@ fn source_badge(source: &str) -> String {
 ///
 /// `data-plugin` / `data-name` 走 `esc`（属性用双引号包裹，转义 `&<>"` 足够）；
 /// URL 里的同名参数由前端再 `encodeURIComponent` 一次。
-fn job_buttons(plugin: &str, name: &str, paused: bool, source: &str) -> String {
+/// 任务操作按钮。
+///
+/// ⚠️ 必须与前端 `jobButtons()`（PAGE 里的 JS）保持同一份标记 ——
+/// 首屏由这里渲染，之后每秒由前端重渲染，两边不一致就会出现「刷新一下按钮变了」。
+fn job_buttons(plugin: &str, name: &str, paused: bool, source: &str, expr: &str) -> String {
     let p = esc(plugin);
     let n = esc(name);
     let mut out = format!(
@@ -854,6 +952,12 @@ fn job_buttons(plugin: &str, name: &str, paused: bool, source: &str) -> String {
         label = if paused { "恢复" } else { "暂停" },
     );
     if source == "panel" {
+        // 「编辑」只给面板任务：插件代码声明的任务，表达式在代码里
+        out.push_str(&format!(
+            "<button class=\"btn\" data-act=\"edit\" data-plugin=\"{p}\" data-name=\"{n}\" \
+             data-expr=\"{e}\">编辑</button>",
+            e = esc(expr)
+        ));
         out.push_str(&format!(
             "<button class=\"btn danger\" data-act=\"delete\" data-plugin=\"{p}\" data-name=\"{n}\">删除</button>"
         ));
@@ -1034,6 +1138,7 @@ const PAGE: &str = r##"<!DOCTYPE html>
     <input id="nj-name" placeholder="处理函数名（register_handler 注册的）" spellcheck="false">
     <input id="nj-expr" placeholder="*/5 * * * * * 或 @every 2s" spellcheck="false">
     <button class="btn primary" id="nj-add">新建任务</button>
+    <button class="btn" id="nj-cleanup" title="删掉插件已不存在 / 加载失败 / 处理函数已消失的面板任务">清理失效任务</button>
   </div>
   <table>
     <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>来源</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th><th>操作</th></tr></thead>
@@ -1122,14 +1227,17 @@ const PAGE: &str = r##"<!DOCTYPE html>
   }
 
   // ---- 任务操作按钮（与 Rust 侧 job_buttons 保持同一份标记）----
-  // 「删除」只给面板创建的任务：插件代码声明的任务删了也会被 sync_jobs 装回来。
+  // 「编辑 / 删除」只给面板创建的任务：插件代码声明的任务，表达式在代码里，
+  // 改库或删库下一次 sync_jobs 都会覆盖回去。
   function jobButtons(j) {
     var p = esc(j.plugin), n = esc(j.name);
     var ops = '<button class="btn" data-act="run" data-plugin="' + p + '" data-name="' + n + '">立即执行</button>' +
               '<button class="btn" data-act="' + (j.paused ? 'resume' : 'pause') +
               '" data-plugin="' + p + '" data-name="' + n + '">' + (j.paused ? '恢复' : '暂停') + '</button>';
     if (j.source === 'panel') {
-      ops += '<button class="btn danger" data-act="delete" data-plugin="' + p +
+      ops += '<button class="btn" data-act="edit" data-plugin="' + p + '" data-name="' + n +
+             '" data-expr="' + esc(j.schedule) + '">编辑</button>' +
+             '<button class="btn danger" data-act="delete" data-plugin="' + p +
              '" data-name="' + n + '">删除</button>';
     }
     return ops;
@@ -1138,7 +1246,7 @@ const PAGE: &str = r##"<!DOCTYPE html>
   // ---- 面板写操作 ----
   // 所有写请求都必须带 `x-panel: 1`：服务端拿它挡 CSRF
   // （浏览器跨站的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，而本服务不返回预检响应）。
-  var ACT_LABEL = { run: '立即执行', pause: '暂停', resume: '恢复', delete: '删除' };
+  var ACT_LABEL = { run: '立即执行', pause: '暂停', resume: '恢复', delete: '删除', edit: '编辑' };
   var busy = false;
 
   function setMsg(text, cls) {
@@ -1165,17 +1273,31 @@ const PAGE: &str = r##"<!DOCTYPE html>
     busy = true;
     var act = btn.dataset.act, plugin = btn.dataset.plugin, name = btn.dataset.name;
     var label = plugin + '/' + name;
-    // 定义级操作走 /api/jobs，运行级操作走 /api/tasks（见 src/web.rs 的 router）
-    var url = act === 'delete'
-      ? '/api/jobs/' + encodeURIComponent(plugin) + '/' + encodeURIComponent(name) + '/delete'
+    // 定义级操作（edit / delete）走 /api/jobs，运行级操作走 /api/tasks（见 src/web.rs 的 router）
+    var url = (act === 'delete' || act === 'edit')
+      ? '/api/jobs/' + encodeURIComponent(plugin) + '/' + encodeURIComponent(name) + '/' + act
       : '/api/tasks/' + encodeURIComponent(plugin) + '/' + encodeURIComponent(name) + '/' + act;
+
+    // 「编辑」只换调度表达式：插件名与处理函数名是任务的**身份**，不是可编辑属性。
+    // 用 prompt 而不是行内表单：这块界面每秒重渲染，行内输入框会被刷掉。
+    var body;
+    if (act === 'edit') {
+      var cur = btn.dataset.expr || '';
+      var next = window.prompt('把 ' + label + ' 的调度表达式改成：\n（cron 5/6 段，或 @every 500ms）', cur);
+      if (next === null) { busy = false; return; }   // 用户取消
+      next = next.trim();
+      if (!next) { busy = false; setMsg('表达式不能为空，什么都没做', 'bad'); return; }
+      if (next === cur) { busy = false; setMsg('表达式没变，什么都没做', ''); return; }
+      body = { expr: next };
+    }
 
     btn.disabled = true;
     setMsg('正在' + ACT_LABEL[act] + ' ' + label + ' …', '');
-    post(url).then(function (res) {
+    post(url, body).then(function (res) {
       busy = false;
       if (res.body && res.body.ok) {
-        setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '成功', 'ok');
+        setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '成功' +
+               (act === 'edit' ? '（现在 ' + body.expr + '）' : ''), 'ok');
       } else {
         setMsg('任务 ' + label + '：' + ACT_LABEL[act] + '失败 — ' +
                ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
@@ -1241,7 +1363,52 @@ const PAGE: &str = r##"<!DOCTYPE html>
     });
   }
 
+  // ---- 清理失效任务 ----
+  // 两段式：先 dry_run 看清要删什么，用户确认后再真删。
+  // 删除不可逆，不该一个按钮直接下手。
+  function cleanupJobs() {
+    if (busy) return;
+    busy = true;
+    var btn = document.getElementById('nj-cleanup');
+    btn.disabled = true;
+    setMsg('正在检查失效任务 …', '');
+
+    function done() { busy = false; btn.disabled = false; }
+
+    post('/api/jobs/cleanup', { dry_run: true }).then(function (res) {
+      if (!res.body || !res.body.ok) {
+        done();
+        setMsg('检查失败 — ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'bad');
+        return;
+      }
+      var list = res.body.jobs || [];
+      if (!list.length) {
+        done();
+        setMsg('没有失效任务', 'ok');
+        return;
+      }
+      var lines = list.map(function (j) {
+        return '  · ' + j.plugin + '/' + j.name + ' —— ' + j.reason;
+      }).join('\n');
+      if (!window.confirm('将删除 ' + list.length + ' 条失效任务：\n' + lines + '\n\n继续？')) {
+        done();
+        setMsg('已取消，什么都没删', '');
+        return;
+      }
+      post('/api/jobs/cleanup', { dry_run: false }).then(function (r2) {
+        done();
+        if (r2.body && r2.body.ok) {
+          setMsg('已清理 ' + (r2.body.jobs || []).length + ' 条失效任务', 'ok');
+        } else {
+          setMsg('清理失败 — ' + ((r2.body && r2.body.error) || ('HTTP ' + r2.status)), 'bad');
+        }
+        refresh();
+      }).catch(function (e) { done(); setMsg('清理失败 — 请求没发出去: ' + e, 'bad'); });
+    }).catch(function (e) { done(); setMsg('检查失败 — 请求没发出去: ' + e, 'bad'); });
+  }
+
   document.getElementById('nj-add').addEventListener('click', addJob);
+  document.getElementById('nj-cleanup').addEventListener('click', cleanupJobs);
   ['nj-name', 'nj-expr'].forEach(function (id) {
     document.getElementById(id).addEventListener('keydown', function (e) {
       if (e.key === 'Enter') addJob();

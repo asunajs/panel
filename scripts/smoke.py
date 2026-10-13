@@ -463,6 +463,237 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
         logf.close()
 
 
+def job_edit_checks(tmp: Path) -> None:
+    """第十二轮：任务定义的「编辑」与「清理失效」。
+
+    第九轮把 `jobs` 表升级成任务定义的权威来源之后，面板只能「新建 / 删除」——
+    想改一个 cron 表达式只能删了重建，而删了重建会把 `runs` 历史归零。
+    这一组钉住两件事：
+
+      ① **编辑只换表达式**：`runs` / `trips` / 暂停状态 / `created_at` 全部保留
+      ② **失效任务可清理**：插件没了 / 加载失败 / 处理函数在新版本里没了
+
+    另起一个实例 + 临时插件目录（这一组要在进程跑着的时候删插件文件、改插件代码）。
+    """
+    pdir = tmp / "edit-plugins"
+    pdir.mkdir(parents=True)
+    (pdir / "edit-demo.js").write_text(
+        "import { log, register_cron, register_handler } from 'host-api';\n"
+        "register_cron('code-side', '@every 9s', function () { log('code-side'); });\n"
+        "register_handler('echo', function (p) { log('echo runs=' + p.runs); });\n"
+        "register_handler('gone', function () { log('gone'); });\n"
+    )
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "edit.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "edit.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def jobs():
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return {}
+        return {(j["plugin"], j["name"]): j for j in body.get("jobs", [])}
+
+    def one(plugin, name):
+        return jobs().get((plugin, name))
+
+    def wait_until(pred, timeout=12.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.4)
+        return False
+
+    try:
+        if not check(wait_ready(base, proc), "任务编辑用例的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        # ---- ① 新建 → 跑起来 → 编辑 ----
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "edit-demo", "name": "echo", "expr": "@every 300ms"},
+        )
+        check(code == 200 and body.get("ok"), "面板新建任务成功", f"{code} {body}")
+
+        check(
+            wait_until(lambda: (one("edit-demo", "echo") or {}).get("runs", 0) >= 3),
+            "任务按 @every 300ms 跑起来了",
+            f"runs={(one('edit-demo', 'echo') or {}).get('runs')}",
+        )
+        before = one("edit-demo", "echo") or {}
+        runs_before = before.get("runs", 0)
+
+        code, body = post_json(
+            f"{base}/api/jobs/edit-demo/echo/edit", payload={"expr": "@every 2s"}
+        )
+        check(code == 200 and body.get("ok"), "编辑调度表达式成功", f"{code} {body}")
+
+        after = one("edit-demo", "echo") or {}
+        check(
+            after.get("schedule") == "@every 2s",
+            "表达式已改（库里 / 面板上都是新值）",
+            f"{before.get('schedule')} → {after.get('schedule')}",
+        )
+        # 这一条就是「编辑」相对「删了重建」的全部意义
+        check(
+            after.get("runs", 0) >= runs_before,
+            "编辑后 runs **没有**归零（运行历史保留）",
+            f"{runs_before} → {after.get('runs')}",
+        )
+        check(
+            after.get("source") == "panel" and after.get("status") == "running",
+            "编辑后来源与状态不变（source=panel / status=running）",
+            f"source={after.get('source')} status={after.get('status')}",
+        )
+
+        # ---- ①b 热更新后来源不能翻转（本轮修掉的静默数据丢失 bug）----
+        # 面板任务必须一直归面板管。一旦被 sync_jobs 当成「代码声明」重写成
+        # source='plugin'：面板不再给它编辑/删除按钮，插件文件一删它还会被静默清掉。
+        # 复现路径就是下面这三行：建面板任务 → touch 插件文件 → 查库。
+        (pdir / "edit-demo.js").touch()
+        time.sleep(2.5)
+        after_reload = one("edit-demo", "echo") or {}
+        check(
+            after_reload.get("source") == "panel",
+            "插件热更新后面板任务的 source 仍是 panel（不被 sync_jobs 改写成 plugin）",
+            f"source={after_reload.get('source')}",
+        )
+        check(
+            after_reload.get("schedule") == "@every 2s"
+            and after_reload.get("runs", 0) >= runs_before,
+            "热更新后表达式与 runs 都保留",
+            f"schedule={after_reload.get('schedule')} runs={after_reload.get('runs')}",
+        )
+
+        # ---- ② 编辑不动暂停状态 ----
+        post_json(f"{base}/api/tasks/edit-demo/echo/pause")
+        check(
+            (one("edit-demo", "echo") or {}).get("status") == "paused",
+            "先暂停，状态变 paused",
+        )
+        post_json(f"{base}/api/jobs/edit-demo/echo/edit", payload={"expr": "@every 3s"})
+        paused_after = one("edit-demo", "echo") or {}
+        check(
+            paused_after.get("status") == "paused"
+            and paused_after.get("schedule") == "@every 3s",
+            "编辑一个已暂停的任务：表达式换了、暂停状态没被清掉",
+            f"status={paused_after.get('status')} schedule={paused_after.get('schedule')}",
+        )
+        post_json(f"{base}/api/tasks/edit-demo/echo/resume")
+
+        # ---- ③ 三种「不能编辑」的情况 ----
+        code, body = post_json(
+            f"{base}/api/jobs/edit-demo/code-side/edit", payload={"expr": "@every 1s"}
+        )
+        check(
+            code == 400 and "代码声明" in body.get("error", ""),
+            "插件代码声明的任务不能编辑（400，且说清原因）",
+            f"{code} {body.get('error', '')[:40]}",
+        )
+
+        code, body = post_json(
+            f"{base}/api/jobs/edit-demo/echo/edit", payload={"expr": "@every 明天"}
+        )
+        check(
+            code == 400 and "无效" in body.get("error", ""),
+            "非法表达式被拒（400）",
+            f"{code} {body.get('error', '')[:40]}",
+        )
+
+        code, body = post_json(
+            f"{base}/api/jobs/edit-demo/nope/edit", payload={"expr": "@every 1s"}
+        )
+        check(
+            code == 400 and "没有名为" in body.get("error", ""),
+            "不存在的任务不能编辑（400）",
+            f"{code} {body.get('error', '')[:40]}",
+        )
+
+        # ---- ④ 清理：处理函数在新版本里没了 ----
+        post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "edit-demo", "name": "gone", "expr": "@every 5s"},
+        )
+        check(
+            one("edit-demo", "gone") is not None,
+            "为即将消失的处理函数建了一条面板任务",
+        )
+        (pdir / "edit-demo.js").write_text(
+            "import { log, register_cron, register_handler } from 'host-api';\n"
+            "register_cron('code-side', '@every 9s', function () { log('code-side'); });\n"
+            "register_handler('echo', function (p) { log('echo runs=' + p.runs); });\n"
+            "// `gone` 这个 handler 被删掉了 —— 面板上那条任务就此失效\n"
+        )
+        time.sleep(2.5)  # 等目录重扫 + 热更新
+        code, body = post_json(f"{base}/api/jobs/cleanup", payload={"dry_run": True})
+        reasons = {j["name"]: j["reason"] for j in body.get("jobs", [])}
+        check(
+            code == 200 and "gone" in reasons and "处理函数" in reasons.get("gone", ""),
+            "清理能识别「处理函数在新版本里没了」",
+            f"{reasons}",
+        )
+        check(
+            one("edit-demo", "gone") is not None,
+            "dry_run 只报告不删（任务还在）",
+        )
+
+        # ---- ⑤ 清理：插件文件被删 ----
+        (pdir / "edit-demo.js").unlink()
+        time.sleep(2.5)
+        code, body = post_json(f"{base}/api/jobs/cleanup", payload={"dry_run": True})
+        names = {j["name"] for j in body.get("jobs", [])}
+        check(
+            {"gone", "echo"} <= names,
+            "插件文件被删后，它的面板任务全部被识别为失效",
+            f"{sorted(names)}",
+        )
+        check(
+            any("插件已不存在" in j["reason"] for j in body.get("jobs", [])),
+            "失效原因写明「插件已不存在」",
+            f"{[j['reason'] for j in body.get('jobs', [])][:2]}",
+        )
+
+        code, body = post_json(f"{base}/api/jobs/cleanup", payload={"dry_run": False})
+        check(code == 200 and len(body.get("jobs", [])) == 2, "真删：两条失效任务被清掉")
+        check(
+            all(k[0] != "edit-demo" for k in jobs().keys()),
+            "清理后面板上不再有该插件的任务",
+            f"{sorted(k[1] for k in jobs().keys())}",
+        )
+        code, body = post_json(f"{base}/api/jobs/cleanup", payload={"dry_run": True})
+        check(body.get("jobs") == [], "再清一次：没有可清的了（幂等）")
+
+        # ---- ⑥ 清理不动插件代码声明的任务 ----
+        # `code-side` 是插件声明的（source=plugin），插件文件删了它由 sync_jobs 收敛，
+        # 不该出现在「面板任务清理」的结果里。
+        check(
+            "code-side" not in {j["name"] for j in body.get("jobs", [])},
+            "清理只处理面板任务，不碰插件代码声明的任务",
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
 def refuse_to_start_without_token(tmp: Path) -> None:
     """没配令牌却往非回环地址绑 → 必须**拒绝启动**，而不是打个警告继续裸奔。"""
     env = dict(os.environ)
@@ -830,6 +1061,7 @@ def main() -> int:
     auth_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
+    job_edit_checks(tmp)
 
     print()
     if FAILURES:

@@ -58,6 +58,31 @@ impl Default for TripConfig {
     }
 }
 
+/// 任务定义的来源。**决定这条任务归谁管**，是第十三轮修的一个静默数据丢失 bug 的核心。
+///
+/// - `Code`：插件代码里 `register_cron` / `every` 声明的。代码即配置 ——
+///   `db::sync_jobs` 会按「当前代码声明的全量集合」收敛它们（不在集合里的删掉）。
+/// - `Panel`：面板上创建的。**库那一行才是权威来源**，`sync_jobs` 一律不碰。
+///
+/// 为什么必须分开记：`sync_jobs` 的第一段逻辑是「同名时代码优先，删掉面板那条」，
+/// 而它的入参约定是「**代码声明的全量集合**」。如果调用方把面板任务也塞进这个集合
+/// （第十一轮的 `all_specs` 就是这么写的），那段逻辑就会把面板行删掉、再以
+/// `source='plugin'` 重新插入 —— 于是：
+///
+/// 1. 面板上这条任务显示成「插件代码」，用户再也拿不到它的「编辑 / 删除」按钮；
+/// 2. 插件文件被删时，它已经是 `source='plugin'` 了，会被 `sync_jobs` 当成
+///    「代码里已不声明的任务」**静默删掉**，连运行历史一起没。
+///
+/// 实测：建一条面板任务，`touch` 一下插件文件触发热更新，库里的 `source` 就从
+/// `panel` 翻成 `plugin`。所以来源必须跟着任务走，不能事后靠猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskSource {
+    /// 插件代码声明（`register_cron` / `every`）
+    Code,
+    /// 面板创建（`register_handler` + 面板上的「新建任务」）
+    Panel,
+}
+
 /// 一个被调度的任务。
 pub struct ScheduledTask {
     pub name: String,
@@ -65,6 +90,8 @@ pub struct ScheduledTask {
     /// 原始表达式，面板上直接展示。
     pub expr: String,
     pub schedule: Schedule,
+    /// 这条任务是插件代码声明的还是面板创建的（见 `TaskSource`）。
+    pub source: TaskSource,
     pub next_fire: DateTime<Local>,
     pub runs: u64,
     pub last_run: Option<String>,
@@ -109,6 +136,7 @@ impl Scheduler {
     }
 
     /// 注册一个任务。同一个插件内重名会报错（避免静默覆盖）。
+    /// 装一条**插件代码声明**的任务（`register_cron` / `every`）。
     pub fn add(
         &mut self,
         plugin: &str,
@@ -116,6 +144,33 @@ impl Scheduler {
         expr: &str,
         schedule: Schedule,
         now: DateTime<Local>,
+    ) -> Result<usize, String> {
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Code)
+    }
+
+    /// 装一条**面板创建**的任务（`register_handler` + 面板上的「新建任务」）。
+    ///
+    /// 与 `add` 唯一的区别是记下的 `source` —— 而这个区别是本质的：
+    /// 面板任务不归 `sync_jobs` 管，插件热更新/卸载都不该动它（见 `TaskSource`）。
+    pub fn add_panel(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+    ) -> Result<usize, String> {
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel)
+    }
+
+    fn insert(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+        source: TaskSource,
     ) -> Result<usize, String> {
         if self
             .tasks
@@ -132,6 +187,7 @@ impl Scheduler {
             plugin: plugin.to_string(),
             expr: expr.to_string(),
             schedule,
+            source,
             next_fire,
             runs: 0,
             last_run: None,
@@ -202,6 +258,41 @@ impl Scheduler {
                 .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
         }
         Ok(t.enabled)
+    }
+
+    /// 换一条任务的调度表达式（面板上的「编辑」）。
+    ///
+    /// 与 `set_paused` 同样的两条原则：
+    ///
+    /// - **不补跑**：从当前时刻重新对齐 `next_fire`。把 `@every 1h` 改成 `@every 1s`
+    ///   不该立刻欠下几千次触发。
+    /// - **不动熔断状态**：改的是「什么时候跑」，不是「为什么老失败」。一个正在冷却的
+    ///   任务改了表达式，冷却截止时刻照旧生效（`next_fire` 钉在冷却终点，这里不覆盖）——
+    ///   否则就等于给了个「改一下表达式就绕过熔断」的口子。
+    ///
+    /// 已暂停的任务只换表达式，`next_fire` 等恢复时再对齐（见 `set_paused`）。
+    /// `runs` / `trips` / `last_run` 一律不动：编辑调度不该抹掉运行历史。
+    pub fn set_expr(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let t = &mut self.tasks[idx];
+        t.expr = expr.to_string();
+        t.schedule = schedule;
+        if t.enabled && !t.tripped {
+            t.next_fire = t
+                .schedule
+                .next_after(now)
+                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        }
+        Ok(())
     }
 
     /// 记录一次**手动触发**的结果：只更新 `runs / last_run / last_error`。
