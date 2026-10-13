@@ -171,6 +171,21 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_TOKEN` | 空 | **面板令牌**。设了就开鉴权（见 §13）。空字符串等于没设 |
 | `PANEL_TOKEN_FILE` | 空 | 从文件读令牌（systemd 用；内容会 trim，适合放 600 权限的文件）。两个都设时 `PANEL_TOKEN` 优先 |
 | `PANEL_COOKIE_SECURE` | 空 | `1`/`true`/`yes`/`on` → 会话 cookie 加 `Secure`。**走反代加了 TLS 时才开**（纯 HTTP 下开了 cookie 存不下来） |
+| `TEST_RUN_BURST` / `TEST_RUN_REFILL_MS` | `10` / `1000` | 测试运行的令牌桶（见 §16.16） |
+| `TEST_RUN_MAX_PENDING` | `2` | 同时在排队 / 执行的测试数上限。**这才是保护引擎的那道闸**；`0` 等于关掉测试运行 |
+| `WEB_DEV_DIR` | 空 | **开发用**：设了就从这个目录读主面板前端（每次请求都读），改一行 CSS/JS 刷新浏览器即可，不用 `cargo build`。生产别设 |
+
+**改前端不用重编**（开发时）：
+
+```bash
+# 编译一次，之后改 web/ 下的任何文件只要刷新浏览器
+WEB_DEV_DIR=./web ./target/release/plugin-panel
+```
+
+内嵌（`include_str!`）是部署上的正确选择 —— 单一静态二进制，不会出现「二进制升级了、
+前端还是旧的」。但它让改一行 CSS 也要全量重编，开发循环太慢。`WEB_DEV_DIR` 就是给这件事
+开的口子：**每次请求都读盘**（所以新建的文件立刻能访问、不用重启），ETag 按内容算
+（改完刷新就是新内容，也不会卡在缓存的旧 JS 上），穿越防护与插件静态资源同一套判据。
 
 **后台常驻**（脱离终端，不随 shell 退出）：
 

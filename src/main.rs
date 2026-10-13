@@ -26,6 +26,7 @@ mod python;
 mod scheduler;
 mod web;
 
+use assets::Assets;
 use auth::Auth;
 use db::Db;
 use engine::{EngineCmd, EngineHealth, JsEngine, Registry};
@@ -80,6 +81,8 @@ pub struct AppState {
     pub auth: Arc<Auth>,
     /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
     pub test_limiter: Arc<TestRunLimiter>,
+    /// 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
+    pub assets: assets::Assets,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -199,7 +202,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ---------- 5. Axum ----------
+    // ---------- 5. 前端资源来源 ----------
+    //
+    // `WEB_DEV_DIR` 是**开发用**的：设了就从磁盘读前端，改一行 CSS/JS 刷新浏览器即可，
+    // 不用 `cargo build --release`（内嵌方案下改前端必须全量重编，改前端的循环太慢）。
+    // 不设就是内嵌 —— 那才是部署形态（单一静态二进制，不会出现「二进制升级了、
+    // 前端还是旧的」这种最难查的问题）。
+    let assets = match std::env::var("WEB_DEV_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let path = PathBuf::from(dir.trim());
+            if !path.join("index.html").is_file() {
+                eprintln!(
+                    "[boot] WEB_DEV_DIR={} 里没有 index.html，主面板会 404（把 WEB_DEV_DIR 指向仓库的 web/ 目录）",
+                    path.display()
+                );
+            }
+            eprintln!(
+                "[boot] ⚠ 开发模式：主面板前端从 {} 读盘（每次请求都读，改完刷新即可）。生产部署请去掉 WEB_DEV_DIR。",
+                path.display()
+            );
+            Assets::from_dir(path)
+        }
+        _ => Assets::embedded(),
+    };
+
+    // ---------- 7. Axum ----------
     let state = AppState {
         started,
         started_at,
@@ -214,6 +241,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         host,
         engine_tx,
         auth: Arc::new(Auth::new(token, cookie_secure)),
+        assets,
         test_limiter: Arc::new(TestRunLimiter::new(
             env_usize("TEST_RUN_BURST", DEFAULT_TEST_RUN_BURST) as u32,
             env_usize("TEST_RUN_REFILL_MS", DEFAULT_TEST_RUN_REFILL_MS) as u64,
@@ -239,7 +267,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    // ---------- 6. 收尾：让引擎线程把 Context 干净地析构掉 ----------
+    // ---------- 7. 收尾：让引擎线程把 Context 干净地析构掉 ----------
     println!("[boot] 正在关闭...");
     engine.shutdown();
     println!("[boot] 已退出");

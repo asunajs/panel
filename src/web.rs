@@ -685,12 +685,19 @@ async fn set_paused(
     }
 }
 
-/// `GET /` —— 主面板（`web/` 下的多文件前端，编译期内嵌，见 `crate::assets`）。
-async fn asset_index(headers: HeaderMap) -> Response {
-    asset_response(
-        crate::assets::get("/index.html").expect("index.html 必须内嵌"),
-        &headers,
-    )
+/// `GET /` —— 主面板（`web/` 下的多文件前端）。
+///
+/// 资源来源取决于有没有设 `WEB_DEV_DIR`：没设就是编译期内嵌（生产），
+/// 设了就从磁盘读（开发，改前端不用重编也不用重启）。见 `crate::assets`。
+async fn asset_index(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    match st.assets.load("/index.html") {
+        Some(a) => asset_response(&a, &headers),
+        None => (
+            StatusCode::NOT_FOUND,
+            "404 找不到主面板的 index.html\n             （WEB_DEV_DIR 指错目录了？它必须是包含 index.html 的那个 web/ 目录）\n",
+        )
+            .into_response(),
+    }
 }
 
 /// `If-None-Match` 命中就返回 304。
@@ -708,9 +715,12 @@ fn is_fresh(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 
-/// 内嵌资源 → HTTP 响应（带 ETag，未变则 304）。
-fn asset_response(a: &'static crate::assets::Asset, headers: &HeaderMap) -> Response {
-    let etag = crate::assets::etag_of(a.body.as_bytes());
+/// 资源 → HTTP 响应（带 ETag，未变则 304）。
+///
+/// ETag 按**内容**算，所以开发模式下改完文件刷新就能看到新内容，
+/// 不用重启、不用重编，也不会卡在缓存的旧 JS 上。
+fn asset_response(a: &crate::assets::Served, headers: &HeaderMap) -> Response {
+    let etag = crate::assets::etag_of(&a.body);
 
     if is_fresh(headers, &etag) {
         return Response::builder()
@@ -725,13 +735,13 @@ fn asset_response(a: &'static crate::assets::Asset, headers: &HeaderMap) -> Resp
         .status(StatusCode::OK)
         .header(
             axum::http::header::CONTENT_TYPE,
-            crate::assets::content_type(a.path),
+            crate::assets::content_type(&a.path),
         )
         // no-cache 的意思是「用之前先问我」—— 配上 ETag 才是完整语义：
         // 内容没变回 304（省流量），变了回新内容（不会卡在旧 UI 上）。
         .header(axum::http::header::CACHE_CONTROL, "no-cache")
         .header(axum::http::header::ETAG, etag)
-        .body(axum::body::Body::from(a.body))
+        .body(axum::body::Body::from(a.body.clone().into_owned()))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
 }
 
@@ -760,10 +770,10 @@ async fn fallback_route(State(st): State<AppState>, req: Request) -> Response {
         return plugin_asset(&st, rest, &method, req.headers()).await;
     }
 
-    // ③ 主面板自己的静态资源
+    // ③ 主面板自己的静态资源（内嵌，或开发模式下从 WEB_DEV_DIR 读）
     if method == "GET" || method == "HEAD" {
-        if let Some(a) = crate::assets::get(&path) {
-            return asset_response(a, req.headers());
+        if let Some(a) = st.assets.load(&path) {
+            return asset_response(&a, req.headers());
         }
     }
 
@@ -771,7 +781,7 @@ async fn fallback_route(State(st): State<AppState>, req: Request) -> Response {
         StatusCode::NOT_FOUND,
         format!(
             "404 {method} {path}\n\
-             （内置路由：/ 主面板、/classic 旧版页面、/api/state、/api/test/js|py、/login；\
+             （内置路由：/ 主面板、/api/state、/api/test/js|py、/login；\
              插件页面在 /plugins/{{name}}/，插件接口由插件用 register_route 注册）\n"
         ),
     )

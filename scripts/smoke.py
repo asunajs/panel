@@ -33,6 +33,7 @@
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -740,6 +741,84 @@ def wait_for_plugin(base: str, name: str, timeout: float = 20.0):
             pass
         time.sleep(0.2)
     return None
+
+
+def dev_assets_checks(tmp: Path) -> None:
+    """`WEB_DEV_DIR` 开发模式：改前端不用重编 Rust。
+
+    这个开关的意义就是省掉 `cargo build`，所以断言必须**证明「请求时读盘」**这个性质：
+    启动之后修改、甚至**新建**的文件都要立刻生效。只断言「起了个服务」是不够的 ——
+    内嵌模式也一样能起。这里用一个只存在于磁盘副本里的标记来区分两种模式。
+    """
+    print("\n== 开发模式（WEB_DEV_DIR）==")
+    web_src = Path(__file__).resolve().parent.parent / "web"
+    dev_dir = tmp / "web-dev"
+    shutil.copytree(web_src, dev_dir)
+    marker = "DEV-MARKER-smoke-31337"
+    idx = dev_dir / "index.html"
+    idx.write_text(idx.read_text().replace("</body>", f"<!-- {marker} --></body>"))
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "PLUGINS_DIR": str(Path(__file__).resolve().parent.parent / "plugins"),
+            "DB_PATH": str(tmp / "dev.db"),
+            "WEB_DEV_DIR": str(dev_dir),
+        }
+    )
+    proc = subprocess.Popen([BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        if not wait_ready(base, proc):
+            check(False, "开发模式实例起来了")
+            return
+        check(True, "开发模式实例起来了")
+
+        # ① 首页确实来自磁盘副本（内嵌的那份没有这个标记）
+        code, _, body = http(f"{base}/")
+        check(code == 200 and marker in body, "首页来自磁盘副本（不是内嵌的那份）", f"http {code}")
+
+        # ② 改一个文件：**进程不动**，下一次请求就该是新内容
+        css = dev_dir / "css" / "theme.css"
+        _, _, before = http(f"{base}/css/theme.css")
+        css.write_text(css.read_text() + "\n/* dev-reload-check */\n")
+        _, _, after = http(f"{base}/css/theme.css")
+        check(
+            "dev-reload-check" in after and "dev-reload-check" not in before,
+            "改完文件不重启就生效（这就是省掉 cargo build 的那一步）",
+        )
+
+        # ③ ETag 必须跟着内容走，否则浏览器会卡在缓存的旧 JS 上
+        _, h1, _ = http(f"{base}/css/theme.css")
+        css.write_text(css.read_text() + "\n/* again */\n")
+        _, h2, _ = http(f"{base}/css/theme.css")
+        check(h1.get("etag") != h2.get("etag"), "改内容后 ETag 跟着变", f"{h1.get('etag')} → {h2.get('etag')}")
+
+        # ④ 内容没变时 304 仍然工作（省流量的语义不能因为开发模式丢掉）
+        code, _, _ = http(f"{base}/css/theme.css", headers={"If-None-Match": h2.get("etag", "")})
+        check(code == 304, "内容没变时仍然 304", f"http {code}")
+
+        # ⑤ **启动之后新建**的文件也要能读到 —— 这才叫「请求时读盘」
+        (dev_dir / "js" / "created-later.js").write_text("export const later = 1;\n")
+        code, _, _ = http(f"{base}/js/created-later.js")
+        check(code == 200, "启动后新建的文件立刻能访问", f"http {code}")
+
+        # ⑥ 穿越防护不能因为开发模式就松掉
+        for bad in ["/../etc/passwd", "/js/../../etc/passwd", "/./index.html"]:
+            code, _, _ = http(f"{base}{bad}")
+            check(code == 404, f"开发模式仍然拒绝穿越 {bad}", f"http {code}")
+
+        # ⑦ 没配 WEB_DEV_DIR 的实例用的是内嵌资源（主实例已经覆盖，这里做一个反向对照）
+        code, _, body = http(f"{base}/js/app.js")
+        check(code == 200 and len(body) > 100, "开发模式下 JS 也能取到", f"{len(body)} B")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=6)
+        except Exception:
+            proc.kill()
 
 
 def broken_plugin_checks(tmp: Path) -> None:
@@ -1664,6 +1743,7 @@ def main() -> int:
     auth_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
+    dev_assets_checks(tmp)
     broken_plugin_checks(tmp)
     test_run_limit_checks(tmp)
     plugin_ui_checks(tmp)
