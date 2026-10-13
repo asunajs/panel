@@ -278,25 +278,16 @@ impl HostState {
             .unwrap_or(10_000)
             .clamp(100, 60_000);
 
-        let mut req = ureq::http::Request::builder()
-            .method(method.as_str())
-            .uri(url)
-            .header("user-agent", "plugin-panel/host-api");
-        if let Some(headers) = opts.get("headers").and_then(|v| v.as_object()) {
-            for (k, v) in headers {
-                if let Some(s) = v.as_str() {
-                    req = req.header(k.as_str(), s);
-                }
-            }
-        }
-
-        let request = if body.is_empty() {
-            req.body(Vec::new())
-        } else {
-            req.body(body.as_bytes().to_vec())
-        }
-        .map_err(|e| format!("请求构造失败: {e}"))?;
-
+        let request = build_http_request(
+            &method,
+            url,
+            opts.get("headers").and_then(|v| v.as_object()),
+            if body.is_empty() {
+                Vec::new()
+            } else {
+                body.as_bytes().to_vec()
+            },
+        )?;
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_millis(timeout_ms)))
             .build()
@@ -415,6 +406,52 @@ fn json_to_sql(v: &Value) -> Result<rusqlite::types::Value, String> {
     })
 }
 
+/// 宿主默认的 `user-agent`。
+///
+/// ⚠️ **只在插件没给 `user-agent` 时**才用它 —— 这是踩过一次才定下来的规矩，见
+/// [`build_http_request`] 的说明。
+pub const DEFAULT_USER_AGENT: &str = "plugin-panel/host-api";
+
+/// 按插件给的选项构造请求。**抽成纯函数是为了能测** —— 尤其"UA 到底是谁的"这件事。
+///
+/// # 为什么不能无条件先塞一枚默认 UA
+///
+/// 第一版是「先 `.header("user-agent", DEFAULT)`，再把插件的头 append 上去」。
+/// 结果是请求里**有两枚 `user-agent`**，而服务端只会看到第一枚 ——
+/// 插件伪装成浏览器 UA 的那条链，实际发出去的是 `plugin-panel/host-api`，
+/// **伪装被静默丢掉**（2026-10-13 在插件侧的 E2E 里被抓到：mock 收到的头里
+/// 只有宿主的 UA）。
+///
+/// 这个丢失之所以危险，是因为它**不报错**：对"必须伪装 UA 才能拿到内容"的站点
+/// （例如小红书 —— 非常规 UA 会被回一个**空壳页**，而空壳页与"这期没数据"
+/// 在解析层分不开），插件会一路以为"上游没有数据"，而其实是被自己人挡住了。
+///
+/// 所以现在的规矩是：**插件的头就是插件的头**，宿主只在它没给的时候兜底。
+fn build_http_request(
+    method: &str,
+    url: &str,
+    plugin_headers: Option<&serde_json::Map<String, Value>>,
+    body: Vec<u8>,
+) -> Result<ureq::http::Request<Vec<u8>>, String> {
+    let mut req = ureq::http::Request::builder().method(method).uri(url);
+    let mut has_user_agent = false;
+    if let Some(headers) = plugin_headers {
+        for (k, v) in headers {
+            let Some(s) = v.as_str() else { continue };
+            // 头名大小写不敏感（HTTP 如此），所以要按不敏感比较 ——
+            // 否则插件写 `User-Agent` 就绕过了这个判据，又会变成两枚 UA
+            if k.eq_ignore_ascii_case("user-agent") {
+                has_user_agent = true;
+            }
+            req = req.header(k.as_str(), s);
+        }
+    }
+    if !has_user_agent {
+        req = req.header("user-agent", DEFAULT_USER_AGENT);
+    }
+    req.body(body).map_err(|e| format!("请求构造失败: {e}"))
+}
+
 /// SQLite 列值 → JSON 值。
 fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
     use rusqlite::types::ValueRef as R;
@@ -425,5 +462,63 @@ fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
         R::Text(t) => Value::String(String::from_utf8_lossy(t).into_owned()),
         // BLOB 不做 base64：面板场景几乎用不到，返回长度提示比塞一坨乱码更有用
         R::Blob(b) => Value::String(format!("<blob {} bytes>", b.len())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with(headers: Value) -> ureq::http::Request<Vec<u8>> {
+        let map = headers.as_object().cloned().unwrap_or_default();
+        build_http_request("GET", "https://example.com/x", Some(&map), Vec::new()).unwrap()
+    }
+
+    /// 只能有**一枚** UA：两枚时服务端只看第一枚，插件的伪装会被静默丢掉。
+    #[test]
+    fn plugin_user_agent_wins() {
+        let req = req_with(json!({
+            "user-agent": "Mozilla/5.0 (Macintosh) Chrome/128.0.0.0 Safari/537.36",
+            "referer": "https://example.com/",
+        }));
+        let uas: Vec<String> = req
+            .headers()
+            .get_all("user-agent")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(uas.len(), 1, "只能有一枚 UA，实际 {uas:?}");
+        assert!(uas[0].contains("Chrome"), "插件的 UA 必须原样发出去：{uas:?}");
+        assert!(!uas[0].contains("plugin-panel"), "宿主的默认 UA 不该混进来：{uas:?}");
+        // 其它头照旧透传
+        assert_eq!(req.headers().get("referer").unwrap(), "https://example.com/");
+    }
+
+    /// 大小写不敏感：插件写 `User-Agent` 也必须算"给了"，
+    /// 否则又会变成两枚 UA（判据被绕过，而现象一模一样）。
+    #[test]
+    fn user_agent_check_is_case_insensitive() {
+        let req = req_with(json!({ "User-Agent": "curl/8" }));
+        let uas: Vec<&str> = req
+            .headers()
+            .get_all("user-agent")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(uas, vec!["curl/8"], "实际 {uas:?}");
+    }
+
+    /// 插件没给才兜底 —— 宿主标识自己的那一条不能丢。
+    #[test]
+    fn default_user_agent_when_plugin_says_nothing() {
+        let req = req_with(json!({ "accept": "*/*" }));
+        assert_eq!(req.headers().get("user-agent").unwrap(), DEFAULT_USER_AGENT);
+    }
+
+    /// 没有 headers 选项时同样兜底。
+    #[test]
+    fn default_user_agent_without_headers_option() {
+        let req = build_http_request("GET", "https://example.com/x", None, Vec::new()).unwrap();
+        assert_eq!(req.headers().get("user-agent").unwrap(), DEFAULT_USER_AGENT);
     }
 }
