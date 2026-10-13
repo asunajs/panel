@@ -88,10 +88,22 @@ export async function render(root, ctx, opts = {}) {
         主面板负责任务与调度，插件自己负责它那份配置。
       </p>
 
-      <div class="grid cols-2">
-        ${
-          plugins.length
-            ? plugins
+      ${
+        plugins.length
+          ? (() => {
+              // 按"系列"分组。面板里的插件是一个个文件，现实里它们成系列
+              // （`mcloud-*` / `bilibili-*`）—— 摆到一起才看得清
+              // "这一系列有哪几个、哪个挂了"。分组名由面板推导（名字里第一个
+              // 分隔符之前那段），界面只负责摆。
+              const groups = new Map();
+              for (const p of plugins) {
+                const g = p.group || p.name;
+                if (!groups.has(g)) groups.set(g, []);
+                groups.get(g).push(p);
+              }
+              return [...groups.entries()]
+                .map(([g, list]) => {
+                  const cards = list
                 .map((p) => {
                   const hasUi = p.has_ui === true;
                   const off = p.disabled === true;
@@ -134,10 +146,23 @@ export async function render(root, ctx, opts = {}) {
             <div class="plugin-actions">${ops}</div>
           </div>`;
                 })
-                .join('')
-            : '<div class="card empty">插件目录里没有插件</div>'
-        }
-      </div>
+                .join('');
+                  return `
+        <div class="section">
+          <div class="section-head">
+            <span class="section-title">${esc(g)} 系列（${list.length}）</span>
+            <div class="card-actions">
+              <button class="btn" data-group-reload="${esc(g)}">全部重载</button>
+              <button class="btn" data-group-enable="${esc(g)}">全部启用</button>
+            </div>
+          </div>
+          <div class="grid cols-2">${cards}</div>
+        </div>`;
+                })
+                .join('');
+            })()
+          : '<div class="card empty">插件目录里没有插件</div>'
+      }
     </div>
 
     <div class="section" id="frame-section" hidden>
@@ -203,6 +228,30 @@ export async function render(root, ctx, opts = {}) {
         res.ok ? 'ok' : 'bad',
       );
       // 引擎每轮扫描 1 秒，等一拍再刷新才看得到新状态
+      setTimeout(() => render(root, ctx, { silent: true }), 1200);
+      return;
+    }
+
+    // 整个系列一起动：重载 / 启用。**不做"全部停用"** —— 那是破坏性的，
+    // 逐条停用已经有确认流程，批量那条路不该绕过它。
+    const grBtn = ev.target.closest('button[data-group-reload], button[data-group-enable]');
+    if (grBtn) {
+      const g = grBtn.dataset.groupReload || grBtn.dataset.groupEnable;
+      const doEnable = !!grBtn.dataset.groupEnable;
+      const names = plugins.filter((p) => (p.group || p.name) === g).map((p) => p.name);
+      grBtn.disabled = true;
+      const fails = [];
+      for (const n of names) {
+        const r = doEnable ? await setPluginDisabled(n, false) : await reloadPlugin(n);
+        if (!r.ok) fails.push(`${n}(${r.error})`);
+      }
+      grBtn.disabled = false;
+      ctx.toast(
+        fails.length
+          ? `${g} 系列：${names.length - fails.length} 个成功，失败 ${fails.join('、')}`
+          : `${g} 系列：${names.length} 个${doEnable ? '已启用' : '已要求重载'}`,
+        fails.length ? 'bad' : 'ok',
+      );
       setTimeout(() => render(root, ctx, { silent: true }), 1200);
       return;
     }

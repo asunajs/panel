@@ -1200,6 +1200,20 @@ fn plugin_file_of(plugins_dir: &std::path::Path, name: &str) -> Option<std::path
     None
 }
 
+/// 插件属于哪个"系列"（分组）。
+///
+/// 规则：**名字里第一个分隔符之前的那一段** —— `mcloud-signin` → `mcloud`、
+/// `bilibili-checkin` → `bilibili`；名字里没有分隔符的，自己就是一组
+/// （`mcloud` → `mcloud`）。
+///
+/// 为什么用**推导**而不是让插件声明：面板里的插件就是"一个文件"，为了填一个
+/// 字符串去加一套清单格式或 API，代价不成比例。而"按系列起名"本来就是插件作者的
+/// 常态（`mcloud-*` / `bilibili-*`）—— 推导出来的多数就是作者心里那个分组。
+/// 真要覆盖时再加一个 `declare_group()`（host-api），等有需求再说。
+fn plugin_group(name: &str) -> String {
+    name.split(['-', '_']).next().unwrap_or(name).to_string()
+}
+
 fn plugin_ui_index(plugins_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     plugins_dir.join(name).join("index.html")
 }
@@ -1579,6 +1593,8 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
                     "has_ui".to_string(),
                     json!(plugin_ui_index(&st.plugins_dir, &p.name).is_file()),
                 );
+                // 分组：界面按"系列"归拢（`mcloud-*` 一组、`bilibili-*` 一组）
+                o.insert("group".to_string(), json!(plugin_group(&p.name)));
                 o.insert(
                     "disabled".to_string(),
                     json!(disabled.iter().any(|d| d == &p.name)),
@@ -1604,6 +1620,7 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         plugins.push(json!({
             "name": name,
             "file": file,
+            "group": plugin_group(name),
             "runtime": runtime,
             "has_on_tick": false,
             "ticks": 0,
@@ -1766,6 +1783,21 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
 
 #[cfg(test)]
 mod tests {
+    /// 插件分组：名字里第一个分隔符之前那段。推导规则要钉住 ——
+    /// 它是界面"按系列归拢"的唯一依据，改错了会让插件的分组整体错位。
+    #[test]
+    fn plugin_group_by_name_prefix() {
+        assert_eq!(plugin_group("mcloud"), "mcloud");
+        assert_eq!(plugin_group("mcloud-signin"), "mcloud");
+        assert_eq!(plugin_group("bilibili-checkin"), "bilibili");
+        assert_eq!(plugin_group("bilibili_dynamic"), "bilibili");
+        assert_eq!(plugin_group("panel-jobs"), "panel");
+        // 多个分隔符：只切第一个
+        assert_eq!(plugin_group("mcloud-sign-in"), "mcloud");
+        // 前导分隔符是退化情况，别 panic
+        assert_eq!(plugin_group("-x"), "");
+    }
+
     use super::*;
 
     // ---- 登录后跳回哪里：开放重定向防护 ----
