@@ -17,11 +17,12 @@
 use crate::auth::{self, LoginError};
 use crate::db;
 use crate::engine::EngineCmd;
+use crate::ratelimit::Rejected;
 use crate::hostapi::LogLine;
 use crate::AppState;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -941,6 +942,40 @@ async fn test_run(
         return json_error(StatusCode::PAYLOAD_TOO_LARGE, "代码超过 256 KB".into());
     }
 
+    // 限流。放在参数校验**之后** —— 参数不合法的请求本来就不该占名额，
+    // 否则一个写错参数的脚本会把自己的桶打空。
+    //
+    // 许可拿在手里活到函数结束（RAII），超时 / 通道关闭这些提前返回的路径
+    // 都会自动把名额还回去。
+    let _permit = match st.test_limiter.acquire() {
+        Ok(p) => p,
+        Err(Rejected::Busy { pending, max }) => {
+            let mut resp = json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "引擎已经排了 {pending} 个测试（上限 {max}）。\
+                     引擎只有一条线程、每个测试真占满执行预算，等前面跑完再来。"
+                ),
+            );
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+            return resp;
+        }
+        Err(Rejected::Rate { retry_after_ms }) => {
+            let secs = retry_after_ms.div_ceil(1000).max(1);
+            let mut resp = json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("测试运行太频繁了，{secs} 秒后再来"),
+            );
+            resp.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&secs.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static("1")),
+            );
+            return resp;
+        }
+    };
+
     let (tx, rx) = tokio::sync::oneshot::channel();
     if st
         .engine_tx
@@ -1131,6 +1166,13 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "enabled": st.auth.enabled(),
             "sessions": st.auth.active_sessions(),
             "cookie_secure": st.auth.cookie_secure(),
+        },
+        // 测试运行的占用情况。面板据此告诉用户「引擎正忙」而不是让他按了没反应。
+        "test_run": {
+            "pending": st.test_limiter.pending(),
+            "max_pending": st.test_limiter.max_pending(),
+            "burst": st.test_limiter.burst(),
+            "refill_ms": st.test_limiter.refill_ms(),
         },
         "plugins": plugins,
         "jobs": jobs,

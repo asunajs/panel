@@ -14,6 +14,7 @@
 //!  10. **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避（`auth.rs`）
 
 mod assets;
+mod ratelimit;
 mod auth;
 mod cron;
 mod db;
@@ -29,6 +30,7 @@ use auth::Auth;
 use db::Db;
 use engine::{EngineCmd, EngineHealth, JsEngine, Registry};
 use hostapi::{HostState, SharedLogs};
+use ratelimit::TestRunLimiter;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,6 +44,13 @@ use std::time::{Duration, Instant};
 /// 低配 ARM 盒子通常只有 1-2 核，开一堆 worker 纯属浪费内存和调度开销。
 /// 这里默认 2，用 `TOKIO_WORKER_THREADS` 覆盖。
 const DEFAULT_WORKER_THREADS: usize = 2;
+
+/// 测试运行的限流默认值（见 `src/ratelimit.rs`）。
+/// 突发 5 次、每 2 秒补一个、同时在飞最多 2 个。
+/// 「在飞最多 2 个」是保护引擎的关键量 —— 引擎只有一条线程，每次测试真占满预算。
+const DEFAULT_TEST_RUN_BURST: usize = 5;
+const DEFAULT_TEST_RUN_REFILL_MS: usize = 2000;
+const DEFAULT_TEST_RUN_MAX_PENDING: usize = 2;
 
 /// 共享给 Axum handler 的全部状态。必须是 `Clone + Send + Sync`。
 #[derive(Clone)]
@@ -63,6 +72,8 @@ pub struct AppState {
     pub engine_tx: std::sync::mpsc::Sender<EngineCmd>,
     /// 面板鉴权（第十轮）。`enabled() == false` 表示没配令牌，只在 loopback 下允许。
     pub auth: Arc<Auth>,
+    /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
+    pub test_limiter: Arc<TestRunLimiter>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,6 +208,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         host,
         engine_tx,
         auth: Arc::new(Auth::new(token, cookie_secure)),
+        test_limiter: Arc::new(TestRunLimiter::new(
+            env_usize("TEST_RUN_BURST", DEFAULT_TEST_RUN_BURST) as u32,
+            env_usize("TEST_RUN_REFILL_MS", DEFAULT_TEST_RUN_REFILL_MS) as u64,
+            env_usize_allow_zero("TEST_RUN_MAX_PENDING", DEFAULT_TEST_RUN_MAX_PENDING),
+        )),
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -314,6 +330,17 @@ fn env_str(key: &str, default: &str) -> String {
 
 fn env_path(key: &str, default: &str) -> PathBuf {
     PathBuf::from(env_str(key, default))
+}
+
+/// 与 [`env_usize`] 的区别：**允许显式写 0**。
+///
+/// `TEST_RUN_MAX_PENDING=0` 是有意义的值（等于把测试运行整个关掉），
+/// 用 `env_usize` 会被当成「没填」退回默认值 —— 运维会以为关掉了，其实没有。
+fn env_usize_allow_zero(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {

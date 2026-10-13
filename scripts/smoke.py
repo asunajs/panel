@@ -38,6 +38,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -741,6 +742,135 @@ def wait_for_plugin(base: str, name: str, timeout: float = 20.0):
     return None
 
 
+def test_run_limit_checks(tmp: Path) -> None:
+    """测试运行的限流（第十四轮）。
+
+    引擎只有一条线程，每次测试真占满执行预算 —— 多开几个标签页按「运行测试」，
+    请求会在 mpsc 通道里排队，每个都占住引擎好几秒。所以这个接口有两道闸：
+    速率（令牌桶）+ 在飞数量。
+
+    用**单独的实例**把闸门拧紧，断言才是确定性的（不靠并发时序碰运气）：
+    `burst=2, refill=10s, max_pending=1`。
+
+    顺序有讲究：**先测在飞上限，再测速率**。反过来的话，那个「占住引擎」的慢测试
+    会因为桶已空而被速率挡掉，根本进不了引擎，在飞上限就永远测不到。
+    """
+    print("\n== 测试运行限流 ==")
+    port = free_port()
+    plugin_dir = tmp / "limit-plugins"
+    plugin_dir.mkdir(exist_ok=True)
+    # 放一个**故意什么都不注册**的最小插件：`wait_ready` 靠「plugins 非空」判断
+    # 引擎加载完了，空目录会一直等不到就绪；但它不能注册任何任务，
+    # 否则限流测试就不是独占引擎了（那个 1.5 秒的忙等必须没有别的干扰）。
+    (plugin_dir / "noop.js").write_text(
+        "import { log } from 'host-api';\n"
+        "// 只为了让 /api/state 里有插件。故意不注册任何任务或处理函数。\n"
+        "log('limit-test noop 已加载');\n"
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "PLUGINS_DIR": str(plugin_dir),
+            "DB_PATH": str(tmp / "limit.db"),
+            "TEST_RUN_BURST": "2",
+            "TEST_RUN_REFILL_MS": "10000",  # 10 秒才补一个：桶空得足够久
+            "TEST_RUN_MAX_PENDING": "1",
+        }
+    )
+    proc = subprocess.Popen([BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        if not wait_ready(base, proc, timeout=25):
+            check(False, "限流实例起来了")
+            return
+        check(True, "限流实例起来了")
+
+        url = f"{base}/api/test/js"
+        hdr = {"content-type": "application/json", "x-panel": "1"}
+        quick = json.dumps({"code": "1 + 1"}).encode()
+
+        # ① 配置读进来了（不然下面测的可能是默认值）
+        _, _, text = http(f"{base}/api/state")
+        tr = json.loads(text).get("test_run", {})
+        check(
+            tr.get("burst") == 2 and tr.get("max_pending") == 1 and tr.get("pending") == 0,
+            "限流的配置从环境变量读进来了",
+            str(tr),
+        )
+
+        # ② 在飞上限：先让一个「占住引擎 1.5 秒」的测试进去（桶够，放行）
+        slow = json.dumps(
+            {"code": "const t = Date.now(); while (Date.now() - t < 1500) {} 1"}
+        ).encode()
+        holder = {}
+
+        def hold():
+            holder["status"], _, _ = http(url, "POST", hdr, slow, timeout=15)
+
+        th = threading.Thread(target=hold)
+        th.start()
+        time.sleep(0.45)  # 等它真的进到引擎线程里
+
+        _, _, text = http(f"{base}/api/state")
+        check(
+            json.loads(text).get("test_run", {}).get("pending") == 1,
+            "执行中的测试让 pending 变成 1",
+            str(json.loads(text).get("test_run")),
+        )
+
+        # ③ 引擎被占住时**直接拒绝**而不是排队 —— 这才是不让请求堆在通道里的关键
+        status, _, text = http(url, "POST", hdr, quick)
+        data = json.loads(text)
+        check(status == 429, "引擎被占住时返回 429（不排队）", f"http {status}")
+        check("排了" in data.get("error", ""), "429 说清了是「引擎已经排了几个」", data.get("error", "")[:46])
+        th.join(timeout=15)
+        # 这条是**真断言**：慢测试自己必须成功（1.5 秒忙等 < 2000ms 预算），
+        # 否则它可能是被预算打断的 —— 那 pending 的时序就不可信了。
+        check(
+            holder.get("status") == 200,
+            "占住引擎的那个慢测试本身跑成功了",
+            f"status={holder.get('status')}",
+        )
+
+        # ④ 名额必须还回去 —— 漏掉的话「用一会儿之后所有人都被 429」，而且看不出原因
+        _, _, text = http(f"{base}/api/state")
+        check(
+            json.loads(text).get("test_run", {}).get("pending") == 0,
+            "执行结束后 pending 归零（拒绝的请求也没漏占名额）",
+            str(json.loads(text).get("test_run")),
+        )
+
+        # ⑤ 桶里还剩 1 个令牌：这次该放行
+        status, _, _ = http(url, "POST", hdr, quick)
+        check(status == 200, "还剩的额度能用掉", f"http {status}")
+
+        # ⑥ 桶空了：速率闸，而且必须带 Retry-After（否则调用方只能瞎猜）
+        status, headers, text = http(url, "POST", hdr, quick)
+        data = json.loads(text)
+        check(status == 429, "超出突发额度返回 429", f"http {status}")
+        check(not data.get("ok", True), "429 的响应体 ok=false")
+        check("太频繁" in data.get("error", ""), "429 说明了原因", data.get("error", "")[:40])
+        retry = headers.get("retry-after", "")
+        check(
+            retry.isdigit() and int(retry) >= 1,
+            "429 带 Retry-After（建议几秒后再来）",
+            f"retry-after={retry!r}",
+        )
+
+        # ⑦ 参数校验在限流**之前**：写错参数不该消耗额度
+        status, _, _ = http(url, "POST", hdr, json.dumps({"code": "  "}).encode())
+        check(status == 400, "空代码是 400（参数错误不走限流）", f"http {status}")
+        status, _, _ = http(f"{base}/api/test/lua", "POST", hdr, quick)
+        check(status == 400, "不支持的运行时报 400", f"http {status}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=6)
+        except Exception:
+            proc.kill()
+
+
 def plugin_ui_checks(tmp: Path) -> None:
     """第十二轮：插件自有 WebUI + 主面板前端资源 + 测试运行。
 
@@ -1427,6 +1557,7 @@ def main() -> int:
     auth_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
+    test_run_limit_checks(tmp)
     plugin_ui_checks(tmp)
     job_edit_checks(tmp)
 
