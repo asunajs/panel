@@ -238,9 +238,48 @@ check(
   '插件样式确实用上了主面板的 CSS 变量',
 );
 
-// ---------------------------------------------------------------- ⑤ QuickJS 约束
+// ---------------------------------------------------------------- ⑤ 安全相关的静态约束
+//
+// 这几条是从旧版页面的前端套件搬过来的（那些用例检查的是服务端渲染的 HTML 常量，
+// 现在新版页面是外置文件，但「登录页洁癖」和「写请求带护栏头」这两件事一样重要）。
+console.log('\n⑤ 安全约束');
 
-console.log('\n⑤ 嵌入式 QuickJS 的约束（plugins/js/*.js）');
+const apiJs = readFileSync(join(WEB, 'js/api.js'), 'utf8');
+check(apiJs.includes("'x-panel': '1'") || apiJs.includes('x-panel'), '写请求会带 x-panel 护栏头（防 CSRF）');
+
+// 任务卡片用**事件委托**（在容器上监听 + closest 找按钮），而不是给每张卡片的每个
+// 按钮单独绑监听 —— 卡片是重新渲染出来的，逐按钮绑必然漏掉新渲染的那批。
+// 旧版页面正是「按钮 DOM 和后端接口都写好了、唯独漏了 click 监听」，这条守的就是那个坑。
+const taskListJs = readFileSync(join(WEB, 'js/views/task-list.js'), 'utf8');
+check(/addEventListener\('click'/.test(taskListJs) && /closest\('button/.test(taskListJs),
+  '任务卡片用事件委托处理按钮点击');
+
+const webRs2 = readFileSync(join(REPO, 'src/web.rs'), 'utf8');
+const loginPage = webRs2.match(/const LOGIN_PAGE: &str = r##"([\s\S]*?)"##;/);
+check(!!loginPage, '在 src/web.rs 里找得到 LOGIN_PAGE');
+if (loginPage) {
+  const lp = loginPage[1];
+  check(lp.includes('action="/api/login"'), '登录页表单指向 /api/login');
+  check(/name="token"/.test(lp), '登录页有令牌输入框');
+  check(/type="password"/.test(lp), '令牌输入框是密码类型（不明文显示）');
+  check(/name="next"/.test(lp), '登录页带 next（登录完回原页面）');
+  // 未认证时不该有任何脚本：登录页去拉 /api/state 只会拿到 401
+  check(!lp.includes('<script'), '登录页没有任何 JS');
+  check(!lp.includes('__JOB_ROWS__'), '登录页不渲染任何面板数据');
+}
+
+// 主面板不该在 HTML 里写死内联脚本（新版是外置模块；旧版是内联的，已删）
+const indexHtml = readFileSync(join(WEB, 'index.html'), 'utf8');
+check(
+  !/<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?\S[\s\S]*?<\/script>/.test(
+    indexHtml.replace(/<!--[\s\S]*?-->/g, ''),
+  ),
+  '主面板没有内联脚本（全部走外置 ES Module）',
+);
+
+// ---------------------------------------------------------------- ⑥ QuickJS 约束
+
+console.log('\n⑥ 嵌入式 QuickJS 的约束（plugins/js/*.js）');
 // 这些名字在嵌入式 QuickJS 里**不存在**（实测见 docs/host-api.md §4.1）。
 // 插件里写了它们，加载期就抛 ReferenceError —— 而同一份文件在 Node 里
 // 调试时是好的，于是变成「本地能跑、上机就炸」。

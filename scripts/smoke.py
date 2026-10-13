@@ -833,13 +833,11 @@ def plugin_ui_checks(tmp: Path) -> None:
         code, _, _ = http(f"{base}/js/nope.js")
         check(code == 404, "不存在的内嵌资源返回 404", f"http {code}")
 
-        # 旧版单文件页面保留（它有实时日志/熔断清理，新版对齐后再删）
-        status, body = fetch(f"{base}/classic")
-        check(
-            status == 200 and "<title>Plugin Panel</title>" in body,
-            "旧版单文件页面仍在 /classic 上可用",
-            f"http {status}, {len(body)} B",
-        )
+        # 旧版单文件页面已删（第十三轮末：新版功能对齐后退休）。
+        # 这条断言改成「确认它真的没了」——否则删掉路由却留着引用，
+        # 会变成一条谁也不看的死链接。
+        code, _, _ = http(f"{base}/classic")
+        check(code == 404, "旧版 /classic 已下线（404）", f"http {code}")
 
         # ---- ② 插件自带的页面 ----
         status, body = fetch(f"{base}/plugins/uidev/")

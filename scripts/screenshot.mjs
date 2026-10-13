@@ -164,27 +164,6 @@ const SHOTS = (o) => [
       );
     },
   },
-  // 第十三轮：`/` 换成了多文件前端，旧版单文件页面挪到 `/classic`。
-  // 这两张是给旧页面留的档（它的实时日志 / 熔断清理还没搬过来）。
-  {
-    name: 'panel-auth',
-    url: `${o.auth}/classic`,
-    viewport: [1240, 1200],
-    scale: 2,
-    clip: [0, 0, 1240, 850], // 页头（鉴权徽标）+ 统计卡 + 插件表 + 新建表单 + 任务表（含来源列）
-    cookie: 'session',
-  },
-  {
-    name: 'panel-jobs',
-    // 单独给「任务表」来一张：来源列 + 面板任务的「编辑 / 删除」按钮
-    // （第十二轮加的东西，整页截图里会被插件表挤到下面看不清）
-    url: `${o.auth}/classic`,
-    // 比别的截图宽：任务表操作列有 4 个按钮，1240 下会被挤到横向滚动区外面
-    viewport: [1440, 2200],
-    scale: 2,
-    clip: [0, 0, 1440, 2100],
-    cookie: 'session',
-  },
   // ---- 第十三轮：新版多文件前端 ----
   {
     name: 'web-dashboard',
@@ -227,6 +206,223 @@ const SHOTS = (o) => [
     viewport: [1280, 1100],
     scale: 2,
     cookie: 'session',
+  },
+  {
+    // 任务卡片的交互：按钮点了**有没有反应**、发的是不是对的请求、失败分支说不说得清。
+    //
+    // 这一条接的是旧版前端测试套件的班：那个套件的由来是「按钮 DOM 和后端接口都写好了，
+    // 唯独漏了前端的 click 监听，而冒烟只测 HTTP 所以看不见」。现在用真浏览器覆盖同一件事。
+    name: 'web-task-actions',
+    url: `${o.auth}/#/tasks`,
+    viewport: [1280, 1000],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const note = (label, ok, detail) => ({ label, ok, detail });
+      const results = [];
+      const waitFor = async (expr, timeout = 4000) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeout) {
+          if (await ev(expr)) return true;
+          await sleep(120);
+        }
+        return false;
+      };
+      const toast = () =>
+        ev(`(function () {
+              const t = document.getElementById('toast');
+              return { hidden: t.hidden, cls: t.className, text: t.textContent };
+            })()`);
+
+      /**
+       * 点一个按钮，然后**等提示条真的变化**再断言。
+       *
+       * 不能「点完 sleep 固定时长再读」：上一次操作的提示可能还挂在那里（3.2s 才消失），
+       * 请求又可能因为引擎正在跑别的任务而晚几百毫秒 —— 结果是偶发地读到**上一条**
+       * 提示。会偶发失败的断言比没有断言更糟，所以判据改成「内容变了」。
+       */
+      const clickAndWaitToast = async (selector, timeout = 6000) => {
+        const before = await toast();
+        const clicked = await ev(`(function () {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return false;
+          el.click();
+          return true;
+        })()`);
+        if (!clicked) return { hidden: true, cls: '', text: '<按钮不存在>' };
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeout) {
+          const t = await toast();
+          if (!t.hidden && t.text !== before.text) return t;
+          await sleep(100);
+        }
+        return await toast();
+      };
+      /**
+       * 点一个元素：**先等它出现**，不存在就重试，超时才返回 false。
+       *
+       * 不能「查到就点」：操作之后的重新渲染有一小段窗口期，那时卡片是新的或还没建好。
+       * 实测踩到过：点完「立即执行」，提示条已经变了（断言等的是它），但列表还在重渲染，
+       * 紧接着点「暂停」就点了个不存在的节点 —— 表现为偶发假失败。
+       */
+      const clickEl = async (sel, timeout = 6000) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < timeout) {
+          const ok = await ev(`(function () {
+            const el = document.querySelector(${JSON.stringify(sel)});
+            if (!el) return false;
+            el.click();
+            return true;
+          })()`);
+          if (ok) return true;
+          await sleep(120);
+        }
+        return false;
+      };
+
+      const card = (name) =>
+        ev(`(function () {
+              const c = document.querySelector('[data-task="${name}"]');
+              if (!c) return { missing: true };
+              return {
+                text: c.textContent,
+                hasRun: !!c.querySelector('[data-act="run"]'),
+                hasPause: !!c.querySelector('[data-act="pause"]'),
+                hasResume: !!c.querySelector('[data-act="resume"]'),
+                hasEdit: !!c.querySelector('[data-act="edit"]'),
+                hasDelete: !!c.querySelector('[data-act="delete"]'),
+              };
+            })()`);
+
+      // 先等任务列表**渲染出来**再断言。
+      // 不等的后果是偶发地读到「加载中…」（首屏 fetch /api/state 还没回来），
+      // 于是卡片查不到 —— 实测踩到过，表现成「hit-report 找不到」这种假失败。
+      await waitFor(`!!document.querySelector('[data-task="hit-report"]')`, 8000);
+
+      // 再**归一化起始状态**：暂停状态是持久化在 jobs 表里的，上一次运行可能把它
+      // 停在「已暂停」—— 那样这次根本没有「暂停」按钮可点，断言会偶发失败。
+      // 断言必须与起始状态无关，否则它测的是「上一次跑成什么样」。
+      if (await ev(`!!document.querySelector('[data-task="hit-report"] [data-act="resume"]')`)) {
+        await clickEl('[data-task="hit-report"] [data-act="resume"]');
+        await waitFor(`!!document.querySelector('[data-task="hit-report"] [data-act="pause"]')`);
+      }
+
+      // ① 插件代码声明的任务：不该给「编辑 / 删除」入口
+      //    （后端只允许改面板任务，给入口等于让人填半天表单再报错）
+      const code = await card('hit-report');
+      results.push(
+        note(
+          '插件代码声明的任务不给「编辑 / 删除」入口',
+          !code.missing && code.hasRun && code.hasPause && !code.hasEdit && !code.hasDelete,
+          JSON.stringify(code),
+        ),
+      );
+
+      // ② 立即执行 → 成功提示。
+      //    hit-report 的处理函数只查库 + 打日志，**必定成功** —— 成败不能依赖 fixture
+      //    的随机性（下面 boom 那条就是这么翻车的）。
+      const t1 = await clickAndWaitToast('[data-task="hit-report"] [data-act="run"]');
+      results.push(
+        note(
+          '点「立即执行」发出请求并提示成功',
+          !t1.hidden && /(^|\s)ok(\s|$)/.test(t1.cls) && /成功/.test(t1.text),
+          `${t1.cls} "${t1.text}"`,
+        ),
+      );
+
+      // ③ 暂停 → 重新渲染后按钮变「恢复」、状态变「已暂停」
+      const clickedPause = await clickEl('[data-task="hit-report"] [data-act="pause"]');
+      const becameResume = clickedPause
+        ? await waitFor(`!!document.querySelector('[data-task="hit-report"] [data-act="resume"]')`)
+        : false;
+      const paused = await card('hit-report');
+      results.push(
+        note(
+          '点「暂停」后按钮变恢复、状态显示已暂停',
+          clickedPause && becameResume && paused.hasResume && /已暂停/.test(paused.text),
+          `点到暂停按钮=${clickedPause}, 出现恢复按钮=${becameResume}, 状态含已暂停=${/已暂停/.test(paused.text)}`,
+        ),
+      );
+
+      // ④ 恢复 → 回到可暂停状态
+      await clickEl('[data-task="hit-report"] [data-act="resume"]');
+      const back = await waitFor(`!!document.querySelector('[data-task="hit-report"] [data-act="pause"]')`);
+      results.push(note('点「恢复」后回到可暂停状态', back, `hasPause=${back}`));
+
+      // ⑤ 失败分支：面板给 `always-fails` 建一条任务，它的处理函数**必定抛异常**。
+      //    先删再建，保证脚本可重复跑（上一次失败留下的残留不会影响这一次）。
+      const mkJob = (name, expr) =>
+        ev(`fetch('/api/jobs/panel-jobs/${name}/delete', { method: 'POST', headers: { 'x-panel': '1' } })
+              .then(() => fetch('/api/jobs', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-panel': '1' },
+                body: JSON.stringify({ plugin: 'panel-jobs', name: '${name}', expr: '${expr}' }),
+              }))
+              .then((r) => r.json())`);
+      await mkJob('always-fails', '@every 1h');
+      await mkJob('echo', '@every 30s');
+      await clickEl('#refresh-btn');
+      await waitFor(`!!document.querySelector('[data-task="always-fails"] [data-act="run"]')`, 8000);
+
+      const t2 = await clickAndWaitToast('[data-task="always-fails"] [data-act="run"]');
+      results.push(
+        note(
+          '执行失败的任务提示失败**并带原因**',
+          !t2.hidden && /(^|\s)bad(\s|$)/.test(t2.cls) && /失败/.test(t2.text) && t2.text.length > 12,
+          `${t2.cls} "${t2.text}"`,
+        ),
+      );
+
+      // ⑥ 面板任务渲染出「编辑 / 删除」
+      const panel = await card('echo');
+      results.push(
+        note(
+          '面板任务渲染出「编辑 / 删除」',
+          panel.hasEdit && panel.hasDelete,
+          JSON.stringify(panel),
+        ),
+      );
+
+      // ⑦ 点编辑 → 编辑页回填当前表达式、编辑器就绪
+      await clickEl('[data-task="echo"] [data-act="edit"]');
+      await sleep(700);
+      const editPage = await ev(`(function () {
+        return {
+          hash: location.hash,
+          expr: (document.getElementById('f-expr') || {}).value,
+          plugin: (document.getElementById('f-plugin') || {}).value,
+          editor: (document.getElementById('editor-state') || {}).textContent,
+        };
+      })()`);
+      results.push(
+        note(
+          '点「编辑」进入编辑页并回填当前表达式（插件名不可改）',
+          /panel-jobs/.test(editPage.hash) &&
+            editPage.expr === '@every 30s' &&
+            editPage.plugin === 'panel-jobs',
+          JSON.stringify(editPage),
+        ),
+      );
+      results.push(
+        note('编辑页的编辑器已就绪（不是「加载中」）', /内置编辑器/.test(editPage.editor || ''), `"${editPage.editor}"`),
+      );
+
+      // 收尾：把两条测试任务删掉，镜头可重复跑
+      for (const n of ['echo', 'always-fails']) {
+        await ev(`fetch('/api/jobs/panel-jobs/${n}/delete', { method: 'POST', headers: { 'x-panel': '1' } }).then((r) => r.json())`);
+      }
+
+      const bad = results.filter((r) => !r.ok);
+      return {
+        ok: bad.length === 0,
+        label: '任务卡片交互：执行 / 暂停 / 恢复 / 失败原因 / 新建 / 编辑',
+        detail:
+          bad.length === 0
+            ? `${results.length}/${results.length} 项通过`
+            : bad.map((r) => `${r.label} → ${r.detail}`).join(' | '),
+      };
+    },
   },
   {
     name: 'web-cleanup',

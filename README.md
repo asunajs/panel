@@ -20,12 +20,17 @@
 
 **界面**（`node scripts/screenshot.mjs` 生成，见 §5 第 ㉒ 条）：
 
-![面板](docs/screenshots/panel-auth.png)
+![面板](docs/screenshots/web-dashboard.png)
 
-页头右边那个绿色徽标是第十轮的鉴权状态；任务表的「来源」列是第九轮的
-`jobs.source`（`插件代码` / `面板`）。没开鉴权时徽标变成橙色的
-[「无鉴权（仅本机）」](docs/screenshots/panel-noauth.png) —— 一个不吭声就「没鉴权」
+主面板是 `web/` 下的多文件前端（零构建、原生 ES Module、hash 路由），编译期内嵌进
+二进制。侧边栏底部两个徽标分别是引擎心跳（第十一轮）和鉴权状态（第十轮）——
+没开鉴权时会明确写出
+[「本机免登录」](docs/screenshots/panel-noauth.png) —— 一个不吭声就「没鉴权」
 的面板比一个明确标注的更危险。
+
+插件可以自带配置页（由插件作者提供，位于 `/plugins/{name}/`，见 §16.3）：
+
+![插件自带的配置页](docs/screenshots/web-plugin-ui.png)
 
 ---
 
@@ -98,14 +103,20 @@ rust-plugin-panel/
 │   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除（14 个单测）
 │   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum，17 个单测）
 │   ├── db.rs          SQLite：tasks 表 + jobs 表（含第九轮的 source 列，11 个单测）
-│   └── web.rs         Axum 路由 + 服务端渲染面板 + 插件路由 fallback
+│   ├── assets.rs      主面板前端资源（web/ 下 12 个文件，include_str! 编译期内嵌）
+│   └── web.rs         Axum 路由 + 插件静态资源 + 插件路由 fallback + 测试运行
 ├── plugins/
 │   ├── js/
 │   │   ├── hello.js            on_tick + host.log 示例
 │   │   ├── counter.js          验证「每个插件独立 Context」
 │   │   ├── scheduler-demo.js   cron / 毫秒级任务示例
 │   │   ├── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
-│   │   └── panel-jobs.js       ★ 第九轮：register_handler 登记处理函数，调度交给面板
+│   │   ├── panel-jobs.js       ★ 第九轮：register_handler 登记处理函数，调度交给面板
+│   │   └── demo.js             ★ 第十三轮：自带配置页（见 plugins/demo/）+ 自己的 API
+│   ├── demo/                   ★ 插件作者提供的配置页（/plugins/demo/ 就是它）
+│   │   ├── index.html          只管理这个插件自己那份配置
+│   │   ├── style.css           直接复用主面板的 CSS 变量（换主题自动跟随）
+│   │   └── app.js              调自己的 /plugins/demo/api/*
 │   └── py/
 │       ├── sysinfo.py          ★ 最小 Python 插件（every + cron + on_tick）
 │       ├── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
@@ -113,12 +124,21 @@ rust-plugin-panel/
 ├── adapters/                  让同一份插件脚本跑在别的运行时里
 │   ├── node/                  npm 包 `@plugin-panel/host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
+├── web/                主面板前端（零构建：原生 ES Module + hash 路由，无框架）
+│   ├── index.html      壳结构（侧边栏 / 顶栏 / 视图容器 / 消息条，无内联 CSS/JS）
+│   ├── css/            reset / theme（Mocha+Latte 变量）/ layout / components
+│   └── js/             app（路由+日志+鉴权）· api · editor（自带编辑器）· mock
+│       └── views/      task-list · task-editor · plugin-list
 ├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
 ├── docs/screenshots/   文档里的界面截图（由 scripts/screenshot.mjs 生成）
 ├── scripts/
 │   ├── smoke.py            端到端冒烟：双运行时、插件路由、Python 任务真的触发
-│   ├── test-panel-frontend.mjs  面板前端逻辑回归（DOM 桩跑 web.rs 里的 <script>）
-│   ├── screenshot.mjs      用 CDP 驱动 headless Chrome/Edge 截图（零 npm 依赖）
+│   ├── test-web-assets.mjs 前端静态检查：ES Module 语法 / 文件清单对账 / 没有内联
+│   │                       CSS-JS / CSS 只用变量 / 前后端字段名契约 / 安全约束
+│   ├── screenshot.mjs      用 CDP 驱动 headless Chrome/Edge 截图 **+ 浏览器断言**
+│   │                       （零 npm 依赖；排版与事件这类问题只有真浏览器能验）
+│   ├── endurance.py        长跑内存/CPU/调度抖动/HTTP 延迟实测（含报告生成）
+│   ├── soak.py             高压短跑（真 ARM64 硬件上跑）
 │   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
 ├── .github/workflows/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
@@ -362,10 +382,6 @@ curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
 ```bash
 # ① 单元测试（cron 解析 + 调度推进 + jobs 表来源语义，含毫秒级防回归）
 cargo test
-
-# ①b 面板前端逻辑回归：把 web.rs 里的 <script> 抠出来配 DOM/fetch 桩跑，不需要浏览器
-node scripts/test-panel-frontend.mjs
-node scripts/test-panel-frontend.mjs /tmp/old-web.rs   # 传路径做回归验证：旧版本必须报红
 
 # ①c 前端资源静态检查（web/ 与 plugins/demo/）：ES Module 语法、没有内联 CSS/JS、
 #     CSS 里没有硬编码色值、plugins/js/*.js 没用嵌入式 QuickJS 不存在的全局
@@ -1759,10 +1775,11 @@ POST /api/jobs/cleanup   {"dry_run": true}
 ```
 
 窄屏下用户横向滑一下就能点到，宽屏下无影响。三张表都包了。
-`docs/screenshots/panel-jobs.png` 是专门给任务表拍的一张（比别的截图宽 200px，
-不然 4 个按钮在截图里也是被裁掉的）：
 
-![任务表：面板任务有「编辑 / 删除」，插件代码任务没有](docs/screenshots/panel-jobs.png)
+> 这一轮给旧版单文件页面的任务表专门拍过一张宽截图（`panel-jobs.png`）。
+> 那个页面在第十三轮末退休了（见 §16.13），截图随之删掉；
+> 现在同一件事由浏览器断言覆盖 —— `web-task-actions` 明确验证
+> 「面板任务有编辑/删除、插件代码声明的任务没有」。
 
 ### 15.5 这一轮的验证
 
@@ -1979,8 +1996,8 @@ Python 侧要借一个**空闲** VM 槽位（`next_vm` 始终指向最小的空�
 |---|---|---|
 | `cargo test` | 84（+1 ignored） | ✅ |
 | 冒烟 `scripts/smoke.py` | **153**（原 99，新增 54） | ✅ |
-| 前端资源静态检查 `scripts/test-web-assets.mjs` | **54**（新增） | ✅ |
-| 旧版页面前端 `scripts/test-panel-frontend.mjs` | 47 | ✅ |
+| 前端资源静态检查 `scripts/test-web-assets.mjs` | **64**（新增） | ✅ |
+| **浏览器断言**（`screenshot.mjs` 的 `verify` 钩子） | **7 条**（连跑 5 次零失败） | ✅ |
 | Node 适配器 | 24 | ✅ |
 | CPython 适配器 | 61 | ✅ |
 | `scripts/test-install.sh` | 15 | ✅ |
@@ -2176,7 +2193,55 @@ CSS 决定「看不看得见」，JS 决定「点下去有没有后果」，这�
 
 实测：`登出后 path=/login（表单=true），再访问面板 → /login` ✅
 
-### 16.13 还没做的
+### 16.13 `/classic` 退休：删掉旧页面 + 把它的用例搬到浏览器里
+
+上一节说「删它不等于删一行路由」：旧页面被 47 项前端用例钉着，那些用例把 `web.rs`
+里的 `<script>` 抠出来配 DOM/fetch 桩跑。这一轮把那套覆盖搬走，然后把页面删了。
+
+**搬去哪了**，以及为什么：
+
+| 旧套件测的 | 现在测在哪 | 为什么 |
+|---|---|---|
+| 按钮点了**有没有反应**、发的是不是对的请求 | 浏览器断言 `web-task-actions`（8 项） | 这是旧套件存在的理由（第八轮「按钮 DOM 和后端接口都写好了、唯独漏了 click 监听」）。用真浏览器跑，覆盖的是同一件事，而且连 CSS 一起验了 |
+| 编辑 / 删除只给面板任务 | 同上 + 静态检查 | |
+| 失败分支说不说得清原因 | 同上（用**必定失败**的处理函数） | |
+| 清理两阶段、不确认不删 | 浏览器断言 `web-cleanup` | |
+| 写请求带 `x-panel` 护栏头 | `test-web-assets.mjs` 静态检查 | 安全约束，静态查最省事 |
+| 登录页自洁（有令牌框、password 类型、有 next、无 JS、无面板数据） | 同上 | 同上 |
+| 事件委托而不是逐按钮绑监听 | 同上 | 设计属性，静态可查 |
+| 首屏拉了 `/api/state` | 浏览器断言（日志渲染出来 = 数据到了） | 间接但等价 |
+
+结果：`src/web.rs` 从 **1979 行降到 1376 行**（删了 `PAGE` 常量约 390 行、`render_page`、
+`job_rows`、`log_rows`、`source_badge`、`job_buttons`、`plugin_rows`、`task_rows`
+共 600 行，加回一点新代码），`scripts/test-panel-frontend.mjs` 整个删除。
+冒烟里那条「旧版页面仍可用」的断言改成了「**确认它真的 404 了**」—— 删掉路由却留着
+引用会变成一条谁也不看的死链接。
+
+### 16.14 让断言不 flaky 的过程里，抓到一个真的体验问题
+
+浏览器断言第一版是「点完按钮 `sleep` 固定时长再读结果」，结果是偶发失败。查下来有
+**三**个不同的原因，每一个都值得记：
+
+**① 提示条读到的是上一条。** 提示要 3.2s 才消失，请求又可能因为引擎在跑别的任务而晚
+几百毫秒 —— 固定 `sleep` 就是在赌。改成**等提示条内容真的变化**再断言。
+
+**② fixture 的成败本身不确定。** 我拿 `scheduler-demo/boom` 当「必定失败」的例子，
+但它源码是**隔次抛异常**（`boomCount % 2 === 1`）—— 手动跑它成不成功取决于它已经跑过
+多少次。表现是提示条写「执行成功」，而断言在等「失败」。换成 `panel-jobs/always-fails`
+（处理函数里直接 `throw`），确定性才有意义。
+
+**③ 状态在两次运行之间泄漏。** 暂停状态是持久化在 `jobs` 表里的：上一次运行如果把它
+停在「已暂停」，这次就没有「暂停」按钮可点，脚本报假失败。断言必须**与起始状态无关** ——
+所以开头先归一化（是暂停态就先恢复）。
+
+而 ③ 的排查过程顺带挖出**产品侧一个真问题**：`render()` 一上来就把整个视图清成
+「加载中…」，所以点完「立即执行 / 暂停 / 删除」之后，**整个列表会闪一下白**。
+低配盒子上这个闪烁很明显。改成带 `silent` 的刷新：保留旧内容，等新数据回来再整体换掉。
+
+修完连跑 5 次，7 条断言全过、零失败。测试侧同时把「查到就点」改成「**等它出现再点**」——
+视图重渲染有一小段窗口期，那时卡片是新的或还没建好。
+
+### 16.15 还没做的
 
 - **旧版页面 `/classic` 还没删**。等新版把实时日志、熔断清理、鉴权徽标对齐后再删。
 - **插件配置页没有共享的组件库**。现在插件只能复用 CSS 变量和 `components.css` 的类名，

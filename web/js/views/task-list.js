@@ -74,11 +74,21 @@ function fromMock(t) {
 }
 
 function taskCard(t) {
+  // 操作按钮的可见性跟**后端的规矩**一致（别的地方都不对）：
+  //   - 执行 / 暂停 / 恢复：任何任务都能做
+  //   - 编辑 / 删除：只有面板建的任务（`source = 'panel'`）能。插件代码声明的任务
+  //     身份是「插件名 + 处理函数名」，改了表达式下次插件热更新就回来了 ——
+  //     后端会 400 拒绝，所以**不该给出这个入口**：点进去填半天再报错是最差的体验。
+  const canEdit = t.real && t.source === 'panel';
   const ops = t.real
     ? `<button class="btn" data-act="run">立即执行</button>
        <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
-       <button class="btn" data-act="edit">编辑</button>
-       ${t.source === 'panel' ? '<button class="btn danger" data-act="delete">删除</button>' : ''}`
+       ${
+         canEdit
+           ? `<button class="btn" data-act="edit">编辑</button>
+              <button class="btn danger" data-act="delete">删除</button>`
+           : '<span class="hint" title="调度表达式由插件代码声明，改它会随插件热更新被覆盖">表达式由插件代码声明</span>'
+       }`
     : '<span class="hint">示例数据，无操作</span>';
 
   return `
@@ -114,8 +124,15 @@ function taskCard(t) {
  * @param {HTMLElement} root
  * @param {{toast: (msg: string, kind?: string) => void, navigate: (hash: string) => void}} ctx
  */
-export async function render(root, ctx) {
-  root.innerHTML = '<div class="empty">加载中…</div>';
+/**
+ * @param {{silent?: boolean}} [opts] `silent` = 刷新时**不清空**当前内容。
+ *
+ * 操作后（执行 / 暂停 / 删除）要重新渲染列表，但如果先把视图清成「加载中…」，
+ * 整个列表会闪一下白 —— 在低配盒子上这个闪烁很明显。带 `silent` 时保留旧内容，
+ * 等新数据回来再整体换掉。
+ */
+export async function render(root, ctx, opts = {}) {
+  if (!opts.silent) root.innerHTML = '<div class="empty">加载中…</div>';
 
   const res = await getState();
   let tasks;
@@ -153,6 +170,7 @@ export async function render(root, ctx) {
       </div>
     </div>`;
 
+  // 手动刷新是用户主动要看到「在加载」的反馈，所以不清空
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
 
   // ---- 清理失效任务：两阶段 ----
@@ -268,7 +286,8 @@ export async function render(root, ctx) {
     const verb = { run: '执行', pause: '暂停', resume: '恢复', delete: '删除' }[act];
     if (res2.ok) {
       ctx.toast(`${label}：${verb}成功`, 'ok');
-      render(root, ctx);
+      // silent：列表闪白比等 20ms 更难受
+      render(root, ctx, { silent: true });
     } else {
       ctx.toast(`${label}：${verb}失败 —— ${res2.error}`, 'bad');
     }
