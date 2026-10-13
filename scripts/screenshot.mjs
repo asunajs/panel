@@ -249,6 +249,35 @@ const SHOTS = (o) => [
         r = await measure();
         if (!r.length) await sleep(150);
       }
+      // 列表开头那行说明里的数字**必须和实际卡片对得上** —— 它直接告诉用户
+      // 「哪些任务能编辑 / 删除」。数字说谎比没有说明更糟：用户会照着一个错的
+      // 结论去找按钮。用户实测就问过「任务不能编辑不能删除？」。
+      const telling = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const note = document.querySelector('.list-note');
+           const text = note ? note.textContent : '';
+           return {
+             text: text.slice(0, 34),
+             nums: (text.match(/\\d+/g) || []).map(Number),
+             cards: document.querySelectorAll('[data-task]').length,
+             editable: document.querySelectorAll('[data-task] [data-act="edit"]').length,
+             deletable: document.querySelectorAll('[data-task] [data-act="delete"]').length,
+           };
+         })()`,
+      );
+      const sum = telling.nums.reduce((a, b) => a + b, 0);
+      // 两个分支的数字都要对：
+      //   无面板任务 → 说明里只有 1 个数字（代码声明的个数），此时**没有**删除按钮
+      //   有面板任务 → 「N 个面板创建；M 个由代码声明」，N 就是可删除的个数
+      // 编辑按钮两类任务都有（插件任务的编辑会落成「覆盖」），所以它应当等于卡片数。
+      const countsOk =
+        telling.nums.length > 0 &&
+        sum === telling.cards &&
+        telling.deletable === (telling.nums.length >= 2 ? telling.nums[0] : 0) &&
+        telling.editable === telling.cards;
+
       const tight = r.length > 0 && r.every((x) => !x.broken && x.最大徽章间距 <= 16);
       const anchored = r.every(
         (x) => x.broken || (x.同排 ? Math.abs(x.右端余量) <= 2 : Math.abs(x.右端余量) > 2),
@@ -259,13 +288,118 @@ const SHOTS = (o) => [
       if (!anchored) bad.push('按钮组没有贴齐卡片右边界');
       if (!noHint) bad.push('卡片里又出现了重复的「表达式由插件代码声明」');
       if (r.length === 0) bad.push('等了 7.5 秒都没量到任何任务卡片（空样本不算通过）');
+      if (!countsOk) {
+        bad.push(
+          `说明行的数字对不上：说明里 ${JSON.stringify(telling.nums)}（合计 ${sum}），` +
+            `实际卡片 ${telling.cards}，可编辑 ${telling.editable}`,
+        );
+      }
       return {
         ok: bad.length === 0,
-        label: '卡片头部：徽章贴住标题、按钮组贴齐右边界、无重复提示',
+        label: '卡片头部 + 列表说明：徽章贴标题、按钮贴边界、说明行数字准确',
         detail:
           bad.length === 0
-            ? `${r.length} 张卡片：最大徽章间距 ${Math.max(...r.map((x) => x.最大徽章间距))}px，右端余量 ${r.map((x) => x.右端余量).join('/')}`
+            ? `${r.length} 张卡片：最大徽章间距 ${Math.max(...r.map((x) => x.最大徽章间距))}px，`
+              + `右端余量 ${r.map((x) => x.右端余量).join('/')}；说明行数字 `
+              + `${telling.nums.join('+')}=${sum}，实际 ${telling.cards} 张卡、`
+              + `${telling.editable} 张可编辑、${telling.deletable} 张可删除`
             : bad.join('；'),
+      };
+    },
+  },
+  {
+    // 面板对插件代码声明任务的**覆盖**：能改频率、看得见、能撤销。
+    name: 'web-override',
+    url: `${o.auth}/#/tasks`,
+    viewport: [1280, 1000],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const card = (name) =>
+        `[...document.querySelectorAll('[data-task]')].find(c => c.dataset.task === '${name}')`;
+      // demo/collect 由插件代码声明（`@every 30s`）
+      const target = 'collect';
+      const setOverride = async (expr) => {
+        const r = await ev(
+          `fetch('/api/jobs/demo/${target}/edit', {
+             method: 'POST',
+             headers: { 'content-type': 'application/json', 'x-panel': '1' },
+             body: JSON.stringify({ expr: ${JSON.stringify(expr)} }),
+           }).then(r => r.status)`,
+        );
+        await sleep(300);
+        return r;
+      };
+      const reload = async () => {
+        await ev(`location.hash = '#/tasks'; location.reload()`);
+        for (let i = 0; i < 60; i += 1) {
+          await sleep(150);
+          const ok = await ev(`!!document.querySelector('[data-task]')`);
+          if (ok) return true;
+        }
+        return false;
+      };
+
+      const results = [];
+      const note = (label, ok, detail) => results.push({ label, ok, detail });
+
+      const code = await setOverride('@every 7s');
+      note('给插件任务设覆盖返回 200', code === 200, `HTTP ${code}`);
+      await reload();
+
+      const shown = await ev(
+        `(function () {
+           const c = ${card(target)};
+           if (!c) return { missing: true };
+           const txt = c.textContent;
+           return {
+             hasBadge: /覆盖/.test(txt),
+             hasUndo: !!c.querySelector('[data-act="uncover"]'),
+             hasEdit: !!c.querySelector('[data-act="edit"]'),
+             showsEffective: /@every 7s/.test(txt),
+             showsDeclared: /@every 30s/.test(txt),
+             hasDelete: !!c.querySelector('[data-act="delete"]'),
+           };
+         })()`,
+      );
+      note('卡片上出现「覆盖」标记', shown.hasBadge === true, JSON.stringify(shown));
+      note('卡片上同时显示生效值与代码里的值', shown.showsEffective && shown.showsDeclared, JSON.stringify(shown));
+      note('有「撤销覆盖」按钮', shown.hasUndo === true);
+      note('插件任务有「编辑」按钮（不是只读）', shown.hasEdit === true);
+      note('插件任务仍然没有「删除」按钮（删了会被 sync_jobs 建回来）', shown.hasDelete === false);
+
+      // 点「撤销覆盖」→ 回到代码声明的值
+      const clicked = await ev(
+        `(function () {
+           const c = ${card(target)};
+           const b = c && c.querySelector('[data-act="uncover"]');
+           if (!b) return false;
+           b.click();
+           return true;
+         })()`,
+      );
+      note('点击撤销覆盖', clicked === true);
+      let gone = false;
+      for (let i = 0; i < 40 && !gone; i += 1) {
+        await sleep(150);
+        gone = await ev(
+          `(function () {
+             const c = ${card(target)};
+             return !!c && !c.querySelector('[data-act="uncover"]') && /@every 30s/.test(c.textContent);
+           })()`,
+        );
+      }
+      note('撤销后回到代码声明的 @every 30s、覆盖标记消失', gone === true);
+
+      const failed = results.filter((r) => !r.ok);
+      return {
+        ok: failed.length === 0 && !shown.missing,
+        label: '插件任务的「覆盖」：可编辑、有标记、能撤销、仍不可删',
+        detail:
+          failed.length === 0
+            ? `${results.length} 项通过（生效值/声明值都在卡片上）`
+            : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
       };
     },
   },
@@ -412,8 +546,12 @@ const SHOTS = (o) => [
       const code = await card('hit-report');
       results.push(
         note(
-          '插件代码声明的任务不给「编辑 / 删除」入口',
-          !code.missing && code.hasRun && code.hasPause && !code.hasEdit && !code.hasDelete,
+          // 插件代码声明的任务**有编辑**（改的是「覆盖」：写 override_expr，
+          // 代码声明的值原样保留）、**没有删除**（删了会被 sync_jobs 建回来）。
+          // 这条断言以前是反过来的 —— 用户实测问过「任务不能编辑不能删除？」
+          // 之后，编辑才对插件任务开放。
+          '插件任务：有编辑（记成覆盖）、没有删除',
+          !code.missing && code.hasRun && code.hasPause && code.hasEdit && !code.hasDelete,
           JSON.stringify(code),
         ),
       );

@@ -50,8 +50,11 @@ struct AddJobReq {
 /// 面板编辑任务的请求体（只有表达式可改：插件名与处理函数名是任务的**身份**）。
 #[derive(Debug, Deserialize)]
 struct EditJobReq {
-    /// 新的调度表达式
-    expr: String,
+    /// 新的调度表达式。
+    ///
+    /// `null` = **撤销面板覆盖**（只对插件代码声明的任务有意义：让它的频率回到
+    /// 插件代码里声明的那个值）。面板任务必须给值。
+    expr: Option<String>,
 }
 
 /// 测试运行的请求体。
@@ -585,13 +588,19 @@ async fn delete_job(
     }
 }
 
-/// `POST /api/jobs/{plugin}/{name}/edit` —— 改一条**面板任务**的调度表达式。
+/// `POST /api/jobs/{plugin}/{name}/edit` —— 改一条任务的调度表达式。
 ///
-/// 请求体 `{"expr": "..."}`。只换表达式，`runs` / `trips` / 暂停状态全部保留 ——
-/// 这正是「编辑」相对「删了重建」的意义（删了重建会把运行历史归零）。
+/// 请求体 `{"expr": "..."}`，或 `{"expr": null}` 撤销覆盖。
+/// 只换表达式，`runs` / `trips` / 暂停状态全部保留 —— 这正是「编辑」相对
+/// 「删了重建」的意义（删了重建会把运行历史归零）。
 ///
-/// 插件代码声明的任务返回 `400`：它们的表达式在代码里，改库下一次 `sync_jobs`
-/// 就被覆盖回去了，白操作一次。
+/// **两类任务的落地方式不同**：
+///
+/// - 面板创建的任务（`source = 'panel'`）：直接改 `jobs.schedule`，库里就是权威。
+/// - 插件代码声明的任务（`source = 'plugin'`）：写进 `jobs.override_expr`。
+///   代码声明的值原样保留，`sync_jobs` 每次重启 / 热更新照旧按代码收敛它、
+///   碰不到覆盖，所以**面板改的频率不会丢**；面板上显示「覆盖」标记，
+///   想回到代码的值就发 `{"expr": null}`。
 async fn edit_job(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,

@@ -300,7 +300,8 @@ pub enum EngineCmd {
     EditJob {
         plugin: String,
         name: String,
-        expr: String,
+        /// `None` = 撤销面板覆盖（回到插件代码声明的表达式）
+        expr: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     /// 清理失效的面板任务：插件没了 / 插件加载失败 / 处理函数没了。
@@ -769,7 +770,9 @@ fn worker_main(
 
     // 恢复用户上次的暂停状态。放在最后：`sync_jobs` 会重写 status / next_run，
     // 但**不会碰 paused 列**（见 db.rs 里那段注释），所以这里的恢复才是最终状态。
-    restore_paused(&mut sched, &logs, &db, boot_at, None);
+    restore_paused(&mut sched, &logs, &db, boot_at, &owned);
+    // 覆盖值必须在 install_tasks 之后装（那时任务才存在），而且要在 seed_counters 之前
+    apply_overrides(&mut sched, &logs, &db, boot_at, &owned);
     for t in sched.tasks() {
         hostapi::push_log(
             &logs,
@@ -906,7 +909,15 @@ fn worker_main(
                 reply,
             }) => {
                 let out = edit_job(
-                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr,
+                    &mut sched,
+                    &plugins,
+                    &logs,
+                    &db,
+                    &wd,
+                    budget,
+                    &plugin,
+                    &name,
+                    expr.as_deref(),
                 );
                 let _ = reply.send(out);
             }
@@ -1075,7 +1086,7 @@ fn restore_paused(
     logs: &SharedLogs,
     db: &Db,
     now: chrono::DateTime<Local>,
-    only_plugin: Option<&str>,
+    owned: &[String],
 ) {
     let list = match db::list_paused_jobs(db) {
         Ok(l) => l,
@@ -1085,10 +1096,10 @@ fn restore_paused(
         }
     };
     for (plugin, name) in list {
-        if let Some(p) = only_plugin {
-            if plugin != p {
-                continue;
-            }
+        // 同上：只处理自己负责的插件。别人的任务不在我的调度器里，
+        // `set_paused` 会失败 —— 以前靠「失败了就忽略」蒙过去，现在写明白。
+        if !owned.iter().any(|p| p == &plugin) {
+            continue;
         }
         if sched.set_paused(&plugin, &name, true, now).is_ok() {
             hostapi::push_log(
@@ -1099,6 +1110,52 @@ fn restore_paused(
             );
         }
         // 任务已经不在插件代码里了 → 忽略，`sync_jobs` 下一轮会把它删掉
+    }
+}
+
+/// 把库里面板**覆盖**的表达式重新装回调度器。
+///
+/// 为什么必须有这一步：覆盖值存在库里，而调度器里的任务每次重启 / 热更新都是**重建**的
+/// （`install_tasks` 只会装代码里声明的那个表达式）。少了这一步，用户辛苦改的频率
+/// 会在一次重启后**静默失效** —— 而且不会有任何报错，只是行为悄悄回到插件作者写的值。
+/// 这跟 `restore_paused` 是同一类坑（那次踩的是「暂停状态自己活过来」）。
+fn apply_overrides(
+    sched: &mut Scheduler,
+    logs: &SharedLogs,
+    db: &Db,
+    now: chrono::DateTime<Local>,
+    owned: &[String],
+) {
+    let rows = match db::list_job_overrides(db, Some(owned)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[engine] 读取任务覆盖失败: {e}");
+            return;
+        }
+    };
+    for (plugin, name, ov) in rows {
+        // 先取代码声明的值：`set_override` 之后 `t.expr` 里仍然是它（覆盖是另一个字段）
+        let declared = sched
+            .tasks()
+            .iter()
+            .find(|t| t.plugin == plugin && t.name == name)
+            .map(|t| t.expr.clone())
+            .unwrap_or_default();
+        match sched.set_override(&plugin, &name, Some(ov.as_str()), now) {
+            Ok(()) => hostapi::push_log(
+                logs,
+                &plugin,
+                "info",
+                &format!("任务 `{name}` 沿用面板覆盖的表达式 `{ov}`（代码里声明的是 `{declared}`）"),
+            ),
+            // 覆盖值解析不了（理论上不可能：写库前解析过）→ 记一行，用代码声明的值继续跑
+            Err(e) => hostapi::push_log(
+                logs,
+                &plugin,
+                "error",
+                &format!("任务 `{name}` 的面板覆盖表达式装不上（{e}），本次用代码声明的值"),
+            ),
+        }
     }
 }
 
@@ -1335,23 +1392,25 @@ fn edit_job(
     budget: Duration,
     plugin: &str,
     name: &str,
-    expr: &str,
+    // `None` = 撤销覆盖
+    expr: Option<&str>,
 ) -> Result<(), String> {
     let now = Local::now();
 
-    match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
         None => return Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
-        Some(src) if src != "panel" => {
-            return Err(format!(
-                "任务 `{name}` 的调度表达式由插件 `{plugin}` 的代码声明（source = {src}），\
-                 面板上不能改；要改请改插件代码里的 `register_cron` / `every`"
-            ))
-        }
-        Some(_) => {}
-    }
+        Some(src) => src == "panel",
+    };
 
-    let schedule =
-        Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+    // `None` = 撤销覆盖（只有插件任务有意义：面板任务的表达式本来就在库里）
+    if expr.is_none() && is_panel {
+        return Err("面板任务没有「覆盖」可撤销 —— 它的表达式本来就在面板上".to_string());
+    }
+    // 表达式一律先解析，无效就早点报错（两种情况共用一个错误信息）
+    let schedule = match expr {
+        Some(e) => Some(Schedule::parse(e).map_err(|e| format!("调度表达式 `{e}` 无效: {e}"))?),
+        None => None,
+    };
 
     // 插件与处理函数都要在：改完表达式要跑的还是那个 handler。
     // 插件已经没了的话，该做的是「清理失效任务」，不是编辑它。
@@ -1373,38 +1432,85 @@ fn edit_job(
     }
 
     // 任务可能在库里但不在调度器里（例如插件加载失败时不会装上）。
-    // 那就只改库：库是面板任务的权威来源，插件下次加载时会按新表达式装上。
+    // 那就只改库：插件下次加载时会按库里的值装上（`apply_overrides` 收尾）。
     let Some(idx) = sched.find(plugin, name) else {
-        let next = schedule.next_after(now).map(scheduler::fmt_ms);
-        db::update_panel_job_schedule(db, plugin, name, expr, next.as_deref(), &fmt_secs(now))
-            .map_err(|e| format!("写库失败: {e}"))?;
+        if is_panel {
+            let e = expr.as_deref().unwrap_or_default();
+            let next = schedule.as_ref().and_then(|s| s.next_after(now)).map(scheduler::fmt_ms);
+            db::update_panel_job_schedule(db, plugin, name, e, next.as_deref(), &fmt_secs(now))
+                .map_err(|err| format!("写库失败: {err}"))?;
+            hostapi::push_log(
+                logs,
+                plugin,
+                "info",
+                &format!("面板修改了任务 `{name}` 的表达式为 `{e}`（插件未加载，只改库）"),
+            );
+        } else {
+            db::set_job_override(db, plugin, name, expr.as_deref(), &fmt_secs(now))
+                .map_err(|err| format!("写库失败: {err}"))?;
+            hostapi::push_log(
+                logs,
+                plugin,
+                "info",
+                &format!(
+                    "面板{}了任务 `{name}` 的覆盖（插件未加载，只改库）",
+                    if expr.is_some() { "设置" } else { "撤销" }
+                ),
+            );
+        }
+        return Ok(());
+    };
+
+    if is_panel {
+        // 面板任务：直接改表达式（库里就是权威来源）
+        let e = expr.as_deref().unwrap_or_default();
+        let schedule = schedule.expect("面板任务一定有表达式");
+        let old_expr = sched.tasks()[idx].expr.clone();
+        sched.set_expr(plugin, name, e, schedule, now)?;
+        let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+        if let Err(err) =
+            db::update_panel_job_schedule(db, plugin, name, e, Some(&next), &fmt_secs(now))
+        {
+            // 回滚内存。`old_expr` 解析过，再解析一定成功。
+            if let Ok(s) = Schedule::parse(&old_expr) {
+                let _ = sched.set_expr(plugin, name, &old_expr, s, now);
+            }
+            return Err(format!("写库失败: {err}"));
+        }
         hostapi::push_log(
             logs,
             plugin,
             "info",
-            &format!("面板修改了任务 `{name}` 的表达式为 `{expr}`（插件未加载，只改库）"),
+            &format!("面板把任务 `{name}` 的表达式从 `{old_expr}` 改成 `{e}`，下次触发 {next}"),
         );
         return Ok(());
-    };
-
-    let old_expr = sched.tasks()[idx].expr.clone();
-    sched.set_expr(plugin, name, expr, schedule, now)?;
-    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
-
-    if let Err(e) = db::update_panel_job_schedule(db, plugin, name, expr, Some(&next), &fmt_secs(now))
-    {
-        // 回滚内存。`old_expr` 是从一个成功解析过的表达式来的，再解析一定成功。
-        if let Ok(s) = Schedule::parse(&old_expr) {
-            let _ = sched.set_expr(plugin, name, &old_expr, s, now);
-        }
-        return Err(format!("写库失败: {e}"));
     }
 
+    // 插件代码声明的任务：写**覆盖**，`expr`（代码声明的值）在内存和库里都不动。
+    //
+    // 这就是「面板能改插件任务的频率」的实现方式：改动住 `override_expr` 里，
+    // `sync_jobs` 按代码收敛 `expr` 时碰不到它，所以重启 / 热更新都不会丢。
+    let old_override = sched.tasks()[idx].override_expr.clone();
+    sched.set_override(plugin, name, expr.as_deref(), now)?;
+    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+    if let Err(err) = db::set_job_override(db, plugin, name, expr.as_deref(), &fmt_secs(now)) {
+        // 回滚内存到改之前的状态
+        let _ = sched.set_override(plugin, name, old_override.as_deref(), now);
+        return Err(format!("写库失败: {err}"));
+    }
+    let declared = sched.tasks()[idx].expr.clone();
     hostapi::push_log(
         logs,
         plugin,
         "info",
-        &format!("面板把任务 `{name}` 的表达式从 `{old_expr}` 改成 `{expr}`，下次触发 {next}"),
+        &format!(
+            "面板{}了任务 `{name}` 的覆盖：{}（代码声明的是 `{declared}`），下次触发 {next}",
+            if expr.is_some() { "设置" } else { "撤销" },
+            match expr {
+                Some(e) => format!("生效 `{e}`"),
+                None => "恢复用代码声明的表达式".to_string(),
+            }
+        ),
     );
     Ok(())
 }
@@ -2191,7 +2297,9 @@ fn settle_plugin(
     // 累计计数同样要灌回来，否则热更新一次「触发次数」就归零
     seed_counters(sched, db, Some(name));
     // 暂停状态同样要恢复，否则改一次插件文件就把用户暂停的任务悄悄放跑了
-    restore_paused(sched, logs, db, Local::now(), Some(name));
+    let mine = vec![name.to_string()];
+    restore_paused(sched, logs, db, Local::now(), &mine);
+    apply_overrides(sched, logs, db, Local::now(), &mine);
 }
 
 /// 按名字找一个**可用的**插件实例。

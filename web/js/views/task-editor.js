@@ -41,7 +41,11 @@ export async function render(root, ctx, params = {}) {
       <div class="card">
         <div class="card-head">
           <span class="card-title">任务定义</span>
-          <span class="card-sub">${isEdit ? '只能改调度表达式：插件名与处理函数名是这条任务的身份' : '处理函数要由插件用 register_handler 注册'}</span>
+          <span class="card-sub">${
+            isEdit
+              ? '只能改调度表达式：插件名与处理函数名是这条任务的身份'
+              : '处理函数要由插件用 register_handler 注册'
+          }</span>
         </div>
 
         <div class="row">
@@ -116,10 +120,28 @@ export async function render(root, ctx, params = {}) {
     : '<option value="">（没有可用的插件）</option>';
   if (plugin) sel.value = plugin;
 
+  let row = null;
   if (isEdit) {
     // 编辑模式：把当前表达式填进去。jobs 里按 (plugin, name) 找。
-    const row = (state.jobs || []).find((j) => j.plugin === plugin && j.name === name);
-    if (row) $('#f-expr').value = row.schedule;
+    row = (state.jobs || []).find((j) => j.plugin === plugin && j.name === name) || null;
+    if (row) $('#f-expr').value = row.override_expr || row.schedule;
+  }
+
+  // 插件代码声明的任务：这里保存的是**覆盖**，不是改写代码。
+  // 说清楚「代码里是什么」，用户才知道自己改的是什么、以及怎么回去。
+  if (isEdit && row && row.source !== 'panel') {
+    const note = document.createElement('div');
+    note.className = 'field-sub dim';
+    note.innerHTML = row.override_expr
+      ? `代码里声明的是 <span class="mono">${esc(row.schedule)}</span>，`
+        + `当前用的是面板覆盖。填回代码里的值（或回列表点「撤销覆盖」）就恢复原样。`
+      : `这条任务由插件代码声明（<span class="mono">${esc(row.schedule)}</span>）。`
+        + `保存后会记成一条**覆盖**：代码里的值原样保留，重启和热更新都不会丢。`.replace(
+          /\*\*/g,
+          '',
+        );
+    const exprField = $('#f-expr')?.closest('.field');
+    if (exprField) exprField.appendChild(note);
   }
 
   // ---- 编辑器 ----

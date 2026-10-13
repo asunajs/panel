@@ -598,14 +598,25 @@ def job_edit_checks(tmp: Path) -> None:
         )
         post_json(f"{base}/api/tasks/edit-demo/echo/resume")
 
-        # ---- ③ 三种「不能编辑」的情况 ----
+        # ---- ③ 插件代码声明的任务：**能**改频率（写覆盖）----
+        #
+        # 这条断言以前是反过来的（要求 400）。用户实测问过「任务不能编辑不能删除？」，
+        # 之后改成了覆盖机制：编辑插件任务写 `override_expr`，代码声明的值保留。
+        # 详细的一整组在 `job_override_checks` 里。
         code, body = post_json(
             f"{base}/api/jobs/edit-demo/code-side/edit", payload={"expr": "@every 1s"}
         )
         check(
-            code == 400 and "代码声明" in body.get("error", ""),
-            "插件代码声明的任务不能编辑（400，且说清原因）",
-            f"{code} {body.get('error', '')[:40]}",
+            code == 200 and body.get("ok") is True,
+            "插件代码声明的任务现在能改频率（写覆盖）",
+            f"{code} {body}",
+        )
+        after = one("edit-demo", "code-side") or {}
+        check(
+            after.get("override_expr") == "@every 1s"
+            and after.get("schedule") == "@every 9s",
+            "覆盖生效、代码声明的值原样保留",
+            f"override={after.get('override_expr')} schedule={after.get('schedule')}",
         )
 
         code, body = post_json(
@@ -1049,6 +1060,144 @@ def test_run_limit_checks(tmp: Path) -> None:
             proc.wait(timeout=6)
         except Exception:
             proc.kill()
+
+
+def job_override_checks(tmp: Path) -> None:
+    """面板对**插件代码声明任务**的表达式覆盖。
+
+    用户实测问过「任务不能编辑不能删除？」—— 答案曾经是「插件任务不能改」（改库会被
+    `sync_jobs` 覆盖回去，后端 400 拒绝）。现在改成**覆盖**：改动住 `jobs.override_expr`，
+    代码声明的 `schedule` 原样保留，调度用覆盖值。
+
+    这一组钉住四件事：
+
+      ① 插件任务的频率**能改**了，而且代码声明的值没被动过
+      ② **重启之后覆盖还在**（这是整个设计的关键：`apply_overrides` 把它装回来）
+      ③ `{"expr": null}` 撤销覆盖，回到代码的值
+      ④ 删除仍然拒绝（插件任务删了会被 `sync_jobs` 建回来，给入口是骗人）
+    """
+    pdir = tmp / "override-plugins"
+    pdir.mkdir(parents=True)
+    (pdir / "ov-demo.js").write_text(
+        "import { log, register_cron } from 'host-api';\n"
+        "register_cron('tick', '@every 30s', function () { log('tick'); });\n"
+    )
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "override.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "override.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def one():
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return None
+        for j in body.get("jobs", []):
+            if (j["plugin"], j["name"]) == ("ov-demo", "tick"):
+                return j
+        return None
+
+    def wait_for(pred, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.3)
+        return False
+
+    try:
+        check(wait_ready(base, proc, timeout=20.0), "覆盖测试实例已就绪")
+        check(wait_for(lambda: one() is not None, 15.0), "插件声明的任务已注册")
+
+        j = one() or {}
+        check(j.get("schedule") == "@every 30s", "任务初始频率来自插件代码", str(j.get("schedule")))
+        check(not j.get("override_expr"), "初始没有覆盖")
+
+        # ① 改频率
+        code, body = post_json(
+            f"{base}/api/jobs/ov-demo/tick/edit", payload={"expr": "@every 1s"}
+        )
+        check(code == 200 and body.get("ok"), "插件任务的频率可以改（写覆盖）", f"{code} {body}")
+
+        def covered():
+            x = one() or {}
+            return x.get("override_expr") == "@every 1s"
+
+        check(wait_for(covered, 8.0), "覆盖已生效")
+        j = one() or {}
+        check(
+            j.get("schedule") == "@every 30s",
+            "代码声明的值没被动过（覆盖是单独一列）",
+            str(j.get("schedule")),
+        )
+
+        # 非法表达式
+        code, _ = post_json(
+            f"{base}/api/jobs/ov-demo/tick/edit", payload={"expr": "不是表达式"}
+        )
+        check(code == 400, "非法表达式被拒", f"HTTP {code}")
+
+        # ② 重启后覆盖仍在
+        proc.terminate()
+        proc.wait(timeout=15)
+        logf.close()
+        logf = open(logpath, "w")
+        proc = subprocess.Popen(
+            [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+        )
+        check(wait_ready(base, proc, timeout=20.0), "重启后实例已就绪")
+        check(wait_for(covered, 15.0), "**重启后覆盖仍在**（这是设计的关键）")
+        log_text = logpath.read_text(errors="replace")
+        check(
+            "沿用面板覆盖的表达式" in log_text,
+            "启动日志写明了「沿用面板覆盖」",
+            next((l for l in log_text.splitlines() if "覆盖" in l), "（没找到）")[:90],
+        )
+        # 多 worker 时不能把别的 worker 的覆盖误报成错误
+        check(
+            "覆盖表达式装不上" not in log_text,
+            "没有把别的执行线程的插件误报成「装不上」",
+        )
+
+        # ③ 撤销覆盖
+        code, body = post_json(f"{base}/api/jobs/ov-demo/tick/edit", payload={"expr": None})
+        check(code == 200 and body.get("ok"), "撤销覆盖成功", f"{code} {body}")
+        check(wait_for(lambda: not (one() or {}).get("override_expr"), 8.0), "覆盖已清掉")
+        j = one() or {}
+        check(j.get("schedule") == "@every 30s", "撤销后用的还是代码声明的值")
+
+        # ④ 删除仍然拒绝
+        code, body = post_json(f"{base}/api/jobs/ov-demo/tick/delete")
+        check(code == 400, "插件任务仍然不能删除（删了会被 sync_jobs 建回来）", f"HTTP {code}")
+        check(
+            "暂停" in str(body.get("error", "")),
+            "拒绝时告诉用户该用「暂停」",
+            str(body.get("error"))[:70],
+        )
+
+        # 面板任务不受影响
+        code, _ = post_json(f"{base}/api/jobs", payload={"plugin": "ov-demo", "name": "tick", "expr": "@every 5s"})
+        code2, _ = post_json(f"{base}/api/jobs/ov-demo/tick/edit", payload={"expr": "@every 6s"})
+        check(code2 in (200, 400), "对插件任务重复编辑不会 500", f"HTTP {code2}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
 
 
 def plugin_ui_checks(tmp: Path) -> None:
@@ -1772,6 +1921,7 @@ def main() -> int:
     test_run_limit_checks(tmp)
     plugin_ui_checks(tmp)
     job_edit_checks(tmp)
+    job_override_checks(tmp)
 
     print()
     if FAILURES:

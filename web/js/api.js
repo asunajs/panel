@@ -124,6 +124,7 @@ export function createJob(plugin, name, expr) {
   return request('/api/jobs', { method: 'POST', panel: true, body: { plugin, name, expr } });
 }
 
+/// `expr = null` 表示**撤销覆盖**：让插件代码声明的任务的频率回到代码里的值。
 export function editJob(plugin, name, expr) {
   return request(`/api/jobs/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}/edit`, {
     method: 'POST',

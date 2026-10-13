@@ -646,3 +646,21 @@
 .stack:not(:empty) {
   margin-bottom: var(--sp-3);
 }
+
+/*
+  列表开头的一行说明（「哪些任务能编辑、哪些不能」）。
+
+  刻意做成**一行全局说明**而不是每张卡片上的提示：卡片上的重复文案在窄屏会把按钮挤到
+  下一行，而且十几张卡片重复同一句话本身就是噪音（用户两次指出过）。
+*/
+/* 「代码里：@every 30s」那种附注（面板覆盖频率后，把代码声明的值也写出来） */
+.field-sub {
+  font-size: 11px;
+}
+
+.list-note {
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: var(--sp-3);
+}

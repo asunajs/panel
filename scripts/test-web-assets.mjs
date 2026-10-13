@@ -262,6 +262,45 @@ check(
     '卡片里没有重复的「表达式由插件代码声明」可见文案');
 }
 
+// ---------------------------------------------------------------- 视图必须导入它用到的接口
+//
+// 这条检查钉的是一个真实的静默 bug：`task-list.js` 里新加的「撤销覆盖」按钮调了
+// `editJob`，但那个文件**没有 import 它** —— 点击时抛 `ReferenceError`，
+// 被 async 事件处理函数吞掉：没有报错、没有提示、什么都没发生。
+// 界面测试只点按钮是发现不了的（除非同时断言服务端状态）。
+{
+  const apiSrc = readFileSync(join(REPO, 'web/js/api.js'), 'utf8');
+  const exported = new Set(
+    [...apiSrc.matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)].map((m) => m[1]),
+  );
+  check(exported.size > 5, `api.js 导出了 ${exported.size} 个函数`);
+
+  const viewFiles = EXPECTED.filter((f) => f.startsWith('js/views/'));
+  check(viewFiles.length >= 3, `检查 ${viewFiles.length} 个视图文件`);
+  for (const f of viewFiles) {
+    const src = readFileSync(join(WEB, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    // 用 `[^}]*` 而不是 `[\s\S]*?`：后者会从**上一个** `import {` 开始匹配、
+    // 把 `editor.js` 的导入也吞进来，于是捕获到的名字带着 "import { " 前缀，
+    // 检查器就误报「少 import: getState」（实测踩到 —— 检查器自己也写错过）。
+    const importedSet = new Set();
+    for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*'\.\.\/api\.js'/g)) {
+      for (const part of m[1].split(',')) {
+        const name = part.trim();
+        if (name) importedSet.add(name);
+      }
+    }
+    const imported = importedSet;
+    const missing = [...exported].filter(
+      (name) => !imported.has(name) && new RegExp(`(?<![\\w.])${name}\\s*\\(`).test(src),
+    );
+    check(
+      missing.length === 0,
+      `${f} 用到的接口都 import 了`,
+      missing.length ? `少 import: ${missing.join(', ')}` : '',
+    );
+  }
+}
+
 // ---------------------------------------------------------------- ⑤ 安全相关的静态约束
 //
 // 这几条是从旧版页面的前端套件搬过来的（那些用例检查的是服务端渲染的 HTML 常量，

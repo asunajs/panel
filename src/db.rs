@@ -100,6 +100,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 第九轮：任务定义分两个来源 —— 'plugin'（插件代码声明）/'panel'（面板创建）。
     // 旧库里的行全部是插件声明的，所以默认值 'plugin' 就是正确的历史归属。
     ensure_column(&conn, "jobs", "source", "TEXT NOT NULL DEFAULT 'plugin'")?;
+    // 面板对**插件代码声明任务**的表达式覆盖。NULL = 没覆盖（用代码里的）。
+    // 单独一列而不是改写 schedule：sync_jobs 每次重载都按代码覆盖 schedule，
+    // 面板改的东西必须放在它碰不到的地方。见 scheduler::ScheduledTask。
+    ensure_column(&conn, "jobs", "override_expr", "TEXT")?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -199,6 +203,8 @@ pub struct JobRow {
     pub name: String,
     pub plugin: String,
     pub schedule: String,
+    /// 面板覆盖的表达式（`None` = 用代码声明的 `schedule`）。见 scheduler::ScheduledTask。
+    pub override_expr: Option<String>,
     pub status: String,
     pub runs: i64,
     /// 累计熔断次数（连续失败触发的自动禁用）
@@ -354,6 +360,55 @@ pub fn list_paused_jobs(db: &Db) -> rusqlite::Result<Vec<(String, String)>> {
 }
 
 /// 面板点了「暂停 / 恢复」之后写库。
+/// 列出所有**有面板覆盖**的任务：`(plugin, name, override_expr)`。
+///
+/// 开机 / 热更新后要把它们重新装回调度器（`engine::apply_overrides`），
+/// 否则用户改过的频率会在一次重启后静默失效。
+pub fn list_job_overrides(
+    db: &Db,
+    owned: Option<&[String]>,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT plugin, name, override_expr FROM jobs
+         WHERE override_expr IS NOT NULL AND override_expr <> ''
+         ORDER BY plugin, name",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let mut out = Vec::new();
+    for r in rows {
+        let row: (String, String, String) = r?;
+        // 按「我负责的插件」过滤：多 worker 时每条调度器里只有一部分插件的任务，
+        // 不过滤会把别的 worker 的覆盖判成「装不上」并刷一条 error 日志（实测踩到）。
+        if let Some(list) = owned {
+            if !list.iter().any(|p| p == &row.0) {
+                continue;
+            }
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
+/// 写入 / 清除**面板覆盖**的表达式。
+///
+/// `ov = None` 表示撤销覆盖、回到代码声明的表达式。
+/// `schedule` 列**不动** —— 它是插件代码的声明值，下次 `sync_jobs` 还会按代码收敛它，
+/// 面板的覆盖住 `override_expr` 里，两者互不干扰。
+pub fn set_job_override(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    ov: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET override_expr = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, ov, now],
+    )
+}
+
 pub fn set_job_paused(
     db: &Db,
     plugin: &str,
@@ -403,11 +458,13 @@ pub fn set_job_status(
 
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
-                           last_error, paused, source, created_at, updated_at";
+                           last_error, paused, source, created_at, updated_at, override_expr";
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
+        // 新列一律追加在最后：这样既有的 r.get(n) 索引都不用动
+        override_expr: r.get(14)?,
         id: r.get(0)?,
         name: r.get(1)?,
         plugin: r.get(2)?,
@@ -700,6 +757,83 @@ mod tests {
         // 引擎线程里的校验是串行的，这里是兜底：宁可报错也不静默覆盖一条已有定义
         assert!(insert_panel_job(&db, "p", "x", "@every 2s", None, NOW).is_err());
         assert_eq!(get(&db, "p", "x").schedule, "@every 1s");
+    }
+
+    #[test]
+    #[test]
+    fn override_roundtrip_and_owned_filter() {
+        // 覆盖值必须能被读回来，而且能按「我负责的插件」过滤 ——
+        // 多 worker 时不过滤会把别人的覆盖判成「装不上」（实测踩到过）。
+        // 文件名必须每次都不同：只删主库文件、留下 -wal/-shm 副文件时，
+        // 下一次开库会直接 `database is locked`（实测踩到）。
+        let dir = std::env::temp_dir().join(format!(
+            "pp-ov-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ov.db");
+        let db = open(&path).unwrap();
+        let now = "2026-01-01 00:00:00";
+        // 用 sync_jobs 建行：插件代码声明的任务走的是「按代码收敛」这条路，
+        // `source` 才是 'plugin'（upsert_task 写的是另一张表 tasks，别用错）
+        let specs: Vec<JobSpec> = vec![
+            ("a".into(), "t1".into(), "@every 30s".into(), None),
+            ("b".into(), "t2".into(), "@every 30s".into(), None),
+        ];
+        sync_jobs(&db, &specs, now, None).unwrap();
+        assert!(list_job_overrides(&db, None).unwrap().is_empty());
+
+        set_job_override(&db, "a", "t1", Some("@every 1s"), now).unwrap();
+        set_job_override(&db, "b", "t2", Some("@every 2s"), now).unwrap();
+
+        let all = list_job_overrides(&db, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        let mine = list_job_overrides(&db, Some(&["b".to_string()])).unwrap();
+        assert_eq!(mine.len(), 1, "只应该看到自己负责的那个插件");
+        assert_eq!(mine[0], ("b".to_string(), "t2".to_string(), "@every 2s".to_string()));
+
+        // 撤销
+        set_job_override(&db, "a", "t1", None, now).unwrap();
+        assert_eq!(list_job_overrides(&db, None).unwrap().len(), 1);
+
+        // 空串也算没有覆盖（老库 / 手工写过库的情况）
+        set_job_override(&db, "b", "t2", Some(""), now).unwrap();
+        assert!(list_job_overrides(&db, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn override_column_survives_reading_a_job_row() {
+        // 列位置：新列追加在 JOB_COLUMNS 最后，映射索引必须对得上
+        let dir = std::env::temp_dir().join(format!(
+            "pp-ovrow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ovrow.db");
+        let db = open(&path).unwrap();
+        let now = "2026-01-01 00:00:00";
+        let specs: Vec<JobSpec> = vec![("p".into(), "t".into(), "@every 30s".into(), None)];
+        sync_jobs(&db, &specs, now, None).unwrap();
+        set_job_override(&db, "p", "t", Some("@every 3s"), now).unwrap();
+        let row = list_jobs(&db)
+            .unwrap()
+            .into_iter()
+            .find(|j| j.name == "t")
+            .expect("任务应当在库里");
+        assert_eq!(row.override_expr.as_deref(), Some("@every 3s"));
     }
 
     #[test]

@@ -9,7 +9,15 @@
   恢复）走 /api/tasks。这条分界是后端定的，前端照搬，不要自己发明第三套。
 */
 
-import { getState, runTask, pauseTask, resumeTask, deleteJob, cleanupJobs } from '../api.js';
+import {
+  getState,
+  runTask,
+  pauseTask,
+  resumeTask,
+  editJob,
+  deleteJob,
+  cleanupJobs,
+} from '../api.js';
 import { TASKS } from '../mock.js';
 
 /** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
@@ -41,11 +49,18 @@ function langBadge(runtime) {
 
 /** 真实任务 → 视图模型。字段名跟 mock.js 对齐，方便两条路径共用渲染。 */
 function fromJob(j) {
+  // 插件代码声明的任务可能被面板**覆盖**过频率：`schedule` 是代码里声明的值，
+  // `override_expr` 是面板改的值，调度实际用的是后者（见 src/scheduler.rs）。
+  const override = j.override_expr || '';
   return {
     plugin: j.plugin,
     name: j.name,
     lang: 'js',
-    cron: j.schedule,
+    // 卡片上主显「生效的那个」——用户关心的是它多久跑一次
+    cron: override || j.schedule,
+    declared: j.schedule,
+    override,
+    covered: !!override,
     lastRun: j.last_run || '—',
     status: j.status,
     trips: j.trips,
@@ -74,26 +89,22 @@ function fromMock(t) {
 }
 
 function taskCard(t) {
-  // 操作按钮的可见性跟**后端的规矩**一致（别的地方都不对）：
+  // 操作按钮的可见性跟**后端的规矩**一致：
   //   - 执行 / 暂停 / 恢复：任何任务都能做
-  //   - 编辑 / 删除：只有面板建的任务（`source = 'panel'`）能。插件代码声明的任务
-  //     身份是「插件名 + 处理函数名」，改了表达式下次插件热更新就回来了 ——
-  //     后端会 400 拒绝，所以**不该给出这个入口**：点进去填半天再报错是最差的体验。
-  const canEdit = t.real && t.source === 'panel';
+  //   - 编辑：**任何真实任务都能**。插件代码声明的任务改的是「面板覆盖」
+  //     （写 `override_expr`，代码声明的值原样保留、重启与热更新都不会丢）。
+  //     面板创建的任务直接改表达式。
+  //   - 删除：只有面板建的任务。插件代码声明的任务删不掉 —— 身份是「插件名 +
+  //     处理函数名」，`sync_jobs` 下一次重载就把它建回来了（后端 400）。要让它停下来
+  //     用「暂停」（暂停状态跨重启保留），所以这里不给一个骗人的入口。
+  const canEdit = t.real;
+  const canDelete = t.real && t.source === 'panel';
   const ops = t.real
     ? `<button class="btn" data-act="run">立即执行</button>
        <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
-       ${
-         canEdit
-           ? `<button class="btn" data-act="edit">编辑</button>
-              <button class="btn danger" data-act="delete">删除</button>`
-           // 插件任务没有编辑入口，原因写在「来源」那个字段的 title 上。
-           //
-           // 以前这里有一行可见的「表达式由插件代码声明」，**每张卡片重复一遍** ——
-           // 窄屏下它会把按钮挤到中间、整屏都是重复文案（用户指出「杂乱」）。
-           // 而同一张卡片的「来源」本来就写着「插件代码」，那行字本来就是重复信息。
-           : ''
-       }`
+       ${canEdit ? '<button class="btn" data-act="edit">编辑</button>' : ''}
+       ${t.covered ? '<button class="btn" data-act="uncover" title="把频率改回插件代码里声明的值">撤销覆盖</button>' : ''}
+       ${canDelete ? '<button class="btn danger" data-act="delete">删除</button>' : ''}`
     : '<span class="hint">示例数据，无操作</span>';
 
   return `
@@ -110,8 +121,19 @@ function taskCard(t) {
       </div>
       <div class="row">
         <div class="field">
-          <span class="field-label">调度表达式</span>
-          <span class="mono">${esc(t.cron)}</span>
+          <span class="field-label">调度表达式${
+            t.covered
+              ? ' <span class="badge warning" title="面板改过频率；插件代码里声明的值见下面">覆盖</span>'
+              : ''
+          }</span>
+          <span class="mono"${t.covered ? ` title="插件代码里声明的是 ${esc(t.declared)}"` : ''}>${
+            esc(t.cron)
+          }</span>
+          ${
+            t.covered
+              ? `<span class="field-sub mono dim">代码里：${esc(t.declared)}</span>`
+              : ''
+          }
         </div>
         <div class="field">
           <span class="field-label">上次执行</span>
@@ -166,6 +188,27 @@ export async function render(root, ctx, opts = {}) {
     </div>`;
   }
 
+  // 为什么任务大多没有「编辑 / 删除」按钮 —— 说清一次，而不是每张卡片重复一遍
+  // （重复的可见文案上一轮刚因为「杂乱」被拿掉）。
+  //
+  // 这不是可选的装饰：`plugins/` 里的任务**全部**由插件代码声明，所以新用户看到的
+  // 是「一个任务都改不了也删不掉」，而界面对此一言不发 —— 用户实测就问过
+  // 「任务不能编辑不能删除？」。
+  const panelCount = tasks.filter((t) => t.real && t.source === 'panel').length;
+  const codeCount = tasks.filter((t) => t.real && t.source !== 'panel').length;
+  const realCount = panelCount + codeCount;
+  const kindNote = !realCount
+    ? ''
+    : `<div class="list-note">${
+        panelCount === 0
+          ? `这 ${codeCount} 个任务都由**插件代码**声明（表达式写在插件源码里）。` +
+            `「编辑」可以改它的触发频率 —— 面板会把它记成一条**覆盖**，` +
+            `代码里的值原样保留，重启和热更新都不会丢；想回到代码的值就点「撤销覆盖」。` +
+            `也可以用「暂停」让它停下来。`
+          : `${panelCount} 个面板创建的任务可以编辑 / 删除；` +
+            `${codeCount} 个由插件代码声明，编辑它记的是**覆盖**（代码里的值保留）。`
+      }</div>`.replace(/\*\*/g, '');
+
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
@@ -176,6 +219,7 @@ export async function render(root, ctx, opts = {}) {
           <button class="btn primary" id="new-task-btn">新建任务</button>
         </div>
       </div>
+      ${kindNote}
       <!-- .stack：有内容时才会和下方任务列表拉开间隔（见 components.css） -->
       <div id="cleanup-box" class="stack"></div>
       ${notice}
@@ -294,10 +338,18 @@ export async function render(root, ctx, opts = {}) {
     else if (act === 'pause') res2 = await pauseTask(plugin, name);
     else if (act === 'resume') res2 = await resumeTask(plugin, name);
     else if (act === 'delete') res2 = await deleteJob(plugin, name);
+    // 撤销覆盖：给后端发 null，它会把 override_expr 清掉、回到代码声明的值
+    else if (act === 'uncover') res2 = await editJob(plugin, name, null);
     else return;
 
     btn.disabled = false;
-    const verb = { run: '执行', pause: '暂停', resume: '恢复', delete: '删除' }[act];
+    const verb = {
+      run: '执行',
+      pause: '暂停',
+      resume: '恢复',
+      delete: '删除',
+      uncover: '撤销覆盖',
+    }[act];
     if (res2.ok) {
       ctx.toast(`${label}：${verb}成功`, 'ok');
       // silent：列表闪白比等 20ms 更难受

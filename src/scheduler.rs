@@ -87,8 +87,15 @@ pub enum TaskSource {
 pub struct ScheduledTask {
     pub name: String,
     pub plugin: String,
-    /// 原始表达式，面板上直接展示。
+    /// **代码声明的**（或面板任务的）表达式，面板上直接展示。
     pub expr: String,
+    /// 面板对插件代码声明任务的**覆盖**表达式（`None` = 没覆盖）。
+    ///
+    /// 为什么要跟 `expr` 分开存：`sync_jobs` 每次重启 / 热更新都按代码收敛 `expr`，
+    /// 面板改的东西放在 `expr` 里下一次就被静默覆盖回去了。生效的调度始终是
+    /// `override_expr ?? expr`（即 `schedule` 字段已经是解析好的生效值）。
+    pub override_expr: Option<String>,
+    /// **生效**的调度（来自 `override_expr`，没有覆盖时来自 `expr`）
     pub schedule: Schedule,
     /// 这条任务是插件代码声明的还是面板创建的（见 `TaskSource`）。
     pub source: TaskSource,
@@ -186,6 +193,7 @@ impl Scheduler {
             name: name.to_string(),
             plugin: plugin.to_string(),
             expr: expr.to_string(),
+            override_expr: None,
             schedule,
             source,
             next_fire,
@@ -272,6 +280,44 @@ impl Scheduler {
     ///
     /// 已暂停的任务只换表达式，`next_fire` 等恢复时再对齐（见 `set_paused`）。
     /// `runs` / `trips` / `last_run` 一律不动：编辑调度不该抹掉运行历史。
+    /// 设置 / 撤销**面板覆盖**。`ov = None` 表示回到代码声明的表达式。
+    ///
+    /// 只动表达式与生效调度，`runs` / `trips` / 暂停状态全部保留
+    /// （和 `set_expr` 一样，这正是「编辑」相对「删了重建」的意义）。
+    pub fn set_override(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        ov: Option<&str>,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let effective = match ov {
+            Some(e) => e.to_string(),
+            None => self.tasks[idx].expr.clone(),
+        };
+        let schedule = Schedule::parse(&effective)
+            .map_err(|e| format!("调度表达式 `{effective}` 无效: {e}"))?;
+        let t = &mut self.tasks[idx];
+        t.override_expr = ov.map(str::to_string);
+        t.schedule = schedule;
+        if t.enabled && !t.tripped {
+            t.next_fire = t
+                .schedule
+                .next_after(now)
+                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        }
+        Ok(())
+    }
+
+    /// 有待覆盖的表达式时返回它（面板据此显示「覆盖」标记）。
+    pub fn override_of(&self, plugin: &str, name: &str) -> Option<&str> {
+        self.find(plugin, name)
+            .and_then(|i| self.tasks[i].override_expr.as_deref())
+    }
+
     pub fn set_expr(
         &mut self,
         plugin: &str,
@@ -751,6 +797,94 @@ mod tests {
     }
 
     // ---- 第九轮：单任务摘除 + 计数回灌 ----
+
+    // ---- 面板覆盖（`override_expr`） ----
+
+    #[test]
+    fn override_changes_the_effective_schedule_but_keeps_the_declared_one() {
+        // 这是「面板能改插件任务频率」的全部要害：`expr`（代码声明的）不许动，
+        // 生效的 `schedule` 换成覆盖值。`sync_jobs` 收敛的是 `expr`，所以覆盖不会被冲掉。
+        let mut sched = Scheduler::new(TripConfig::default());
+        let now = Local::now();
+        let sch = Schedule::parse("@every 30s").unwrap();
+        sched
+            .add("p", "t", "@every 30s", sch, now)
+            .unwrap();
+
+        sched
+            .set_override("p", "t", Some("@every 1s"), now)
+            .unwrap();
+        let t = &sched.tasks()[0];
+        assert_eq!(t.expr, "@every 30s", "代码声明的值必须原样保留");
+        assert_eq!(t.override_expr.as_deref(), Some("@every 1s"));
+        // 生效的调度是 1 秒：下一次触发必须落在 1 秒内
+        assert!(
+            (t.next_fire - now).num_seconds() <= 1,
+            "生效的调度应当是覆盖值，next_fire = {}",
+            t.next_fire
+        );
+    }
+
+    #[test]
+    fn override_can_be_cleared_and_restores_the_declared_schedule() {
+        let mut sched = Scheduler::new(TripConfig::default());
+        let now = Local::now();
+        let sch = Schedule::parse("@every 30s").unwrap();
+        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        sched
+            .set_override("p", "t", Some("@every 2s"), now)
+            .unwrap();
+        sched.set_override("p", "t", None, now).unwrap();
+        let t = &sched.tasks()[0];
+        assert_eq!(t.override_expr, None);
+        assert!(
+            (t.next_fire - now).num_seconds() > 1,
+            "撤销后应当回到 30 秒的节奏，next_fire = {}",
+            t.next_fire
+        );
+        assert_eq!(sched.override_of("p", "t"), None);
+    }
+
+    #[test]
+    fn override_keeps_history_and_pause_state() {
+        // 编辑不能把运行历史清掉 —— 这是「编辑」相对「删了重建」的全部意义
+        let mut sched = Scheduler::new(TripConfig::default());
+        let now = Local::now();
+        let sch = Schedule::parse("@every 30s").unwrap();
+        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        sched.seed_counters("p", "t", 7, 2);
+        sched.set_paused("p", "t", true, now).unwrap();
+
+        sched
+            .set_override("p", "t", Some("@every 5s"), now)
+            .unwrap();
+        let t = &sched.tasks()[0];
+        assert_eq!(t.runs, 7, "累计触发不许归零");
+        assert_eq!(t.trips, 2, "熔断计数不许归零");
+        assert!(!t.enabled, "暂停状态不许被编辑清掉");
+    }
+
+    #[test]
+    fn override_rejects_a_bad_expression() {
+        let mut sched = Scheduler::new(TripConfig::default());
+        let now = Local::now();
+        let sch = Schedule::parse("@every 30s").unwrap();
+        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        assert!(sched.set_override("p", "t", Some("明天早上"), now).is_err());
+        // 失败之后不能留下半改的状态：还是代码声明的节奏
+        let t = &sched.tasks()[0];
+        assert_eq!(t.override_expr, None);
+        assert_eq!(t.expr, "@every 30s");
+    }
+
+    #[test]
+    fn override_of_an_unknown_task_is_an_error() {
+        let mut sched = Scheduler::new(TripConfig::default());
+        assert!(sched
+            .set_override("nope", "t", Some("@every 1s"), Local::now())
+            .is_err());
+        assert_eq!(sched.override_of("nope", "t"), None);
+    }
 
     #[test]
     fn remove_task_takes_only_the_named_one() {
