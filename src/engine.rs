@@ -728,41 +728,50 @@ fn url_join(base: &str, spec: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// 解析一个相对说明符：URL 语义合并 → 转成路径 → 检查边界 → 返回 `file://` URL。
+/// 解析一个相对说明符：URL 语义合并 → 转路径 → **自动找** → 检查边界 → 返回 `file://` URL。
 ///
-/// **严格按 ESM 来**：说明符必须写全（含扩展名）。
-/// 上一版我加了 `.js` 与 `/index.js` 两个回退 —— 那是 CJS 的习惯，
-/// Node 的 ESM 与浏览器都要求写全扩展名。这里不替插件作者猜，只在
-/// **确实存在 `+.js` 那个文件**时把猜测写进错误提示（看得见，但不生效）。
-fn resolve_relative(base: &str, spec: &str, root: &Path, cjs: bool) -> Result<String, String> {
+/// 自动找的候选链：`原样` → `+.js` → `+.mjs` → `/index.js` → `/index.mjs`。
+///
+/// ⚠️ 说明白一件事：**这不是浏览器 / Node 的 ESM 行为**（那两边都要求写全扩展名、
+/// 也不会自动找 index）。这里放宽是为了少写几个字。代价要认：
+/// `./x` 与 `./x.js` 指向同一个文件，也就是说**写错时不会立刻发现** ——
+/// 一个被误删的 `./x.js` 可能悄悄落到 `./x.mjs` 或 `./x/index.js` 上。
+/// 所以解析结果一律以 `file://` URL 为准（`import.meta.url` 里能看到最终是哪个文件）。
+fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, String> {
     let url = url_join(base, spec)?;
     let path_part = url.strip_prefix("file://").unwrap_or(&url);
     let path = PathBuf::from(pct_decode(path_part)?);
 
-    // `import` 严格（要写全扩展名），`require` 兼容 CJS 的老习惯（可省扩展名 / 找 index.js）。
-    // 两种模式分开是有意的：ESM 那侧不替人猜，CJS 那侧照它自己的规矩来 ——
-    // 混在一起就会变成"两边都能过、但过的方式不同"，那才是最难查的。
+    let mut tried: Vec<PathBuf> = vec![path.clone()];
     let mut cand = path.clone();
-    if cjs && !cand.is_file() {
-        let with_ext = PathBuf::from(format!("{}.js", path.display()));
-        let as_index = path.join("index.js");
-        if with_ext.is_file() {
-            cand = with_ext;
-        } else if as_index.is_file() {
-            cand = as_index;
+    if !cand.is_file() {
+        for suffix in [".js", ".mjs"] {
+            let p2 = PathBuf::from(format!("{}{suffix}", path.display()));
+            tried.push(p2.clone());
+            if p2.is_file() {
+                cand = p2;
+                break;
+            }
+        }
+        if !cand.is_file() {
+            for name in ["index.js", "index.mjs"] {
+                let p2 = path.join(name);
+                tried.push(p2.clone());
+                if p2.is_file() {
+                    cand = p2;
+                    break;
+                }
+            }
         }
     }
 
     let canon = cand.canonicalize().map_err(|_| {
-        let mut hint = String::new();
-        let with_ext = PathBuf::from(format!("{}.js", path.display()));
-        if with_ext.is_file() {
-            // 严格 ESM 要求写全扩展名 —— 这是最容易犯的错，直接告诉人家正确的写法
-            hint = format!("（提示：`{spec}.js` 是存在的 —— ESM 要求写全扩展名）");
-        } else if path.join("index.js").is_file() {
-            hint = format!("（提示：`{spec}/index.js` 是存在的 —— ESM 不会自动找 index.js，要写全）");
-        }
-        format!("找不到模块 `{spec}`（解析成 `{}`）{hint}", path.display())
+        let list = tried
+            .iter()
+            .map(|p| format!("`{}`", p.display()))
+            .collect::<Vec<_>>()
+            .join("、");
+        format!("找不到模块 `{spec}`（从 `{base}` 试过：{list}）")
     })?;
 
     let root_canon = root
@@ -809,7 +818,7 @@ impl Resolver for HostApiResolver {
                 "只内置了 `host-api`；要引自己的文件请用相对说明符（如 './lib/core.js'）",
             ));
         }
-        resolve_relative(base, name, &self.root, false)
+        resolve_relative(base, name, &self.root)
             .map_err(|e| rquickjs::Error::new_resolving_message(base, name, e))
     }
 }
@@ -835,7 +844,7 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
             .unwrap_or_else(|_| "\"?\"".into())
         );
     }
-    match resolve_relative(base, spec, root, true) {
+    match resolve_relative(base, spec, root) {
         Ok(url) => {
             let path_part = url.strip_prefix("file://").unwrap_or(&url).to_string();
             match pct_decode(&path_part) {
@@ -861,6 +870,27 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
             serde_json::to_string(&e).unwrap_or_else(|_| "\"?\"".into())
         ),
     }
+}
+
+/// 这个文件看起来是 **CJS 写法**吗（用了 `module.exports` / `exports.` 而没有 ESM 语法）？
+///
+/// 为什么要判它：`import` 一个 CJS 文件时，QuickJS 的链接器只会丢一句
+/// `Could not find export 'default' in module …` —— 那句话说不到点子上，
+/// 人会去查自己的 import 语法，而真正的问题是"这个文件不是 ES 模块"。
+/// （反方向同理：`require` 读 ES 模块会丢 `unsupported keyword: export`，
+/// 那条我已经在 require 那侧拦下了。）
+fn looks_like_cjs(source: &str) -> bool {
+    let has_esm = source
+        .lines()
+        .any(|l| {
+            let t = l.trim_start();
+            t.starts_with("import ") || t.starts_with("import{") || t.starts_with("export ")
+                || t.starts_with("export{") || t.starts_with("export(")
+        });
+    if has_esm {
+        return false;
+    }
+    source.contains("module.exports") || source.contains("exports.")
 }
 
 /// 需要给模块注入 `require` 吗？
@@ -929,6 +959,18 @@ impl Loader for HostApiLoader {
         }
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| rquickjs::Error::new_loading_message(name, format!("读模块失败：{e}")))?;
+        // `import` 只能读 ES 模块。读 CJS 文件时给出**能照着做**的提示，
+        // 而不是让链接器丢一句 "Could not find export 'default'"。
+        if looks_like_cjs(&raw) {
+            return Err(rquickjs::Error::new_loading_message(
+                name,
+                format!(
+                    "`{}` 是 CommonJS 写法（用了 module.exports / exports），`import` 读不了它 —— \
+                     请用 `require()` 引入这个文件，或者把它改成 ES 模块（export）。",
+                    path.display()
+                ),
+            ));
+        }
         let src = if needs_require_shim(&raw) { with_require_shim(&raw) } else { raw };
         let module = Module::declare(ctx.clone(), name, src)?;
         // 被 import 的模块同样要有 `import.meta.url` —— 模块最常见的用法就是
@@ -3450,6 +3492,55 @@ fn test_run(
 
 #[cfg(test)]
 mod tests {
+    /// 相对说明符的解析：URL 语义 + **自动找** + 边界。
+    ///
+    /// 自动找（省扩展名、找 index）是**放宽**，不是 ESM 规范行为 —— 所以更要钉住：
+    /// ① 候选链的顺序与结果；② 找不到时把"试过哪些路径"说出来；
+    /// ③ 越界仍然被挡住（边界不能因为放宽而松掉）。
+    #[test]
+    fn relative_specifier_resolution() {
+        let tmp = std::env::temp_dir().join(format!("pp-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("lib/pkg")).unwrap();
+        std::fs::write(tmp.join("lib/math.js"), "export const x = 1;").unwrap();
+        std::fs::write(tmp.join("lib/only_mjs.mjs"), "export const y = 2;").unwrap();
+        std::fs::write(tmp.join("lib/pkg/index.js"), "export const z = 3;").unwrap();
+        std::fs::write(tmp.join("lib/pkg/index.mjs"), "export const z2 = 4;").unwrap();
+
+        let root = tmp.clone();
+        let base = crate::engine::file_url(&tmp.join("lib/entry.js"));
+
+        let ok = |spec: &str| resolve_relative(&base, spec, &root).expect(spec);
+        // 原样命中
+        assert!(ok("./math.js").ends_with("/lib/math.js"));
+        // 省扩展名 → +.js
+        assert!(ok("./math").ends_with("/lib/math.js"));
+        // 省扩展名 → +.mjs
+        assert!(ok("./only_mjs").ends_with("/lib/only_mjs.mjs"));
+        // 目录 → index.js（且优先于 index.mjs）
+        assert!(ok("./pkg").ends_with("/lib/pkg/index.js"));
+        // `..` 在 URL 语义下先规范化，再去找
+        assert!(ok("../lib/math").ends_with("/lib/math.js"));
+
+        // 找不到：错误里要把试过的候选列出来（只说"找不到"最难查）
+        let err = resolve_relative(&base, "./nope", &root).unwrap_err();
+        assert!(err.contains("找不到模块 `./nope`"), "{err}");
+        assert!(err.contains("math") || err.contains("nope.js"), "应当列出试过的路径: {err}");
+
+        // 边界：解析到插件目录之外 → 挡（放宽自动找不能让边界松掉）
+        let outside = resolve_relative(&base, "../../../../../../etc/hosts", &root).unwrap_err();
+        assert!(
+            outside.contains("只能 import 插件目录内的文件") || outside.contains("找不到模块"),
+            "{outside}"
+        );
+
+        // 非 file:// 基准（例如 /api/test/js 的临时代码）要说清楚，别静默错
+        let bad_base = resolve_relative("<test-run>", "./math", &root).unwrap_err();
+        assert!(bad_base.contains("file://"), "{bad_base}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// 配置页目录与模块目录都不能被当成插件。
     ///
     /// 两种"不是插件但放在 plugins/ 下面"的东西：

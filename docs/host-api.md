@@ -172,7 +172,7 @@ plugins/mcloud/index.html     插件自带的页面（不是插件）
 再往下不收。所以"模块放子目录"这件事是有硬约束的：放在 `plugins/js/` 根下的
 `.js` 会被当成插件加载（会多出一个没有任务的插件，名字还跟你想的对不上）。
 
-### `import` —— 严格按 ES 模块语义
+### `import` —— ES 模块语义（扩展名可省）
 
 ```js
 import twice, { base, counter } from './lib/math.js';
@@ -184,8 +184,15 @@ import { base as reBase } from './lib/reexport.js';   // 支持 `export * from`
 * 相对说明符按 **URL 语义**解析（`./`、`../` 都行，`/x.js` 以根为基准）
 * 导出是 **活绑定**（导出方改变量，导入方看得到 —— 这是 ESM 的语义，不是拷贝）
 * 循环导入、动态 `import()`、顶层 `await` 都可用
-* **要写全扩展名**（`'./lib/math.js'`，不是 `'./lib/math'`）。没写全时报错会提示
-  你可能想写的路径，但**不会**替你猜 —— 严格 ESM 就是这样
+* **`import` 只能读 ES 模块**。读一个 CJS 文件（`module.exports` 写法）会明确告诉你
+  「请用 `require()` 引入，或改成 ES 模块」，而不是丢 `Could not find export 'default'`
+* **扩展名可以省**，也会自动找目录入口。候选链是：
+  `原样` → `+.js` → `+.mjs` → `/index.js` → `/index.mjs`
+  （`import './lib/math'`、`import './lib'` 都能用）
+* ⚠️ 这是**放宽**，不是浏览器 / Node 的 ESM 行为（那两边都要求写全扩展名、也不找 index）。
+  代价要认：`./x` 与 `./x.js` 指向同一个文件，**写错时不会立刻发现** ——
+  误删的 `./x.js` 可能悄悄落到 `./x.mjs` 或 `./x/index.js` 上。
+  想知道最终用的是哪个文件，看 `import.meta.url`（它一定是 `file://` URL）
 * 只能引**插件目录内**的文件（越界的路径会被挡住并说明）
 
 ### `require` —— 够用的 CJS 兼容
@@ -195,7 +202,7 @@ const legacy = require('./lib/legacy.js');   // CJS：module.exports / exports �
 const host = require('host-api');            // 与 import … from 'host-api' 同一批函数
 ```
 
-* 解析**按 CJS 的规矩**：可以省扩展名、可以找目录里的 `index.js`
+* 解析与 `import` **同一套**（同样可以省扩展名、找目录入口）—— 见上
 * 按解析后的 URL 缓存；循环 `require` 拿到的是"半成品"（与 Node 一致）
 * 每个模块顶部会被自动注入一行，把 `require` 绑到**这个模块自己**的 URL 上 ——
   所以 `lib/` 里的模块 `require('./x.js')` 解析的是它自己旁边，而不是入口那边
