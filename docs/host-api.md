@@ -156,6 +156,57 @@ sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
 ### HTTP
 
 ```
+## 3.5 插件多文件：相对 `import` 与 `require`
+
+一个插件**可以拆成多个文件**。入口仍然是 `plugins/js/<名字>.js`（或 `py/`），
+被引用的模块放在**子目录**里：
+
+```text
+plugins/js/mcloud.js          入口（这是"插件"）
+plugins/js/lib/core.js        ← 模块（不是插件）
+plugins/js/lib/util/date.js   ← 也可以再深
+plugins/mcloud/index.html     插件自带的页面（不是插件）
+```
+
+**收集规则**：只收 `plugins/` 根目录与 `plugins/js/`、`plugins/py/` 这一层，
+再往下不收。所以"模块放子目录"这件事是有硬约束的：放在 `plugins/js/` 根下的
+`.js` 会被当成插件加载（会多出一个没有任务的插件，名字还跟你想的对不上）。
+
+### `import` —— 严格按 ES 模块语义
+
+```js
+import twice, { base, counter } from './lib/math.js';
+import * as ns from './lib/math.js';
+import { base as reBase } from './lib/reexport.js';   // 支持 `export * from`
+```
+
+* 模块标识是 **`file://` URL** —— `import.meta.url` 就是它（模块靠它定位自己的位置）
+* 相对说明符按 **URL 语义**解析（`./`、`../` 都行，`/x.js` 以根为基准）
+* 导出是 **活绑定**（导出方改变量，导入方看得到 —— 这是 ESM 的语义，不是拷贝）
+* 循环导入、动态 `import()`、顶层 `await` 都可用
+* **要写全扩展名**（`'./lib/math.js'`，不是 `'./lib/math'`）。没写全时报错会提示
+  你可能想写的路径，但**不会**替你猜 —— 严格 ESM 就是这样
+* 只能引**插件目录内**的文件（越界的路径会被挡住并说明）
+
+### `require` —— 够用的 CJS 兼容
+
+```js
+const legacy = require('./lib/legacy.js');   // CJS：module.exports / exports 都行
+const host = require('host-api');            // 与 import … from 'host-api' 同一批函数
+```
+
+* 解析**按 CJS 的规矩**：可以省扩展名、可以找目录里的 `index.js`
+* 按解析后的 URL 缓存；循环 `require` 拿到的是"半成品"（与 Node 一致）
+* 每个模块顶部会被自动注入一行，把 `require` 绑到**这个模块自己**的 URL 上 ——
+  所以 `lib/` 里的模块 `require('./x.js')` 解析的是它自己旁边，而不是入口那边
+  （代价：用到 `require` 的文件，错误堆栈里的行号 +1）
+* **`require` 读不了 ES 模块**。真去读会明确告诉你"这是 ES 模块，请用 import"，
+  而不是丢一个 `unsupported keyword: export`
+* 不提供：`require.resolve` / `require.cache` / package.json 的 main / `.json` / Node 内置模块
+
+> 同一个模块文件被多个插件 `import` 时只会被加载一次（按 URL 缓存），
+> 这是"一份 core、多个插件共用"省内存的地方。
+
 http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
 ```
 
@@ -244,7 +295,7 @@ handler(payload) -> None
 | `process` / `require` / `module` / `exports` / `__dirname` / `Buffer` | 无 | 有 | 走 `host-api` |
 | `setTimeout` / `setInterval` / `setImmediate` | 无 | 有 | 用调度器：`every(name, '500ms', fn)` / `register_cron` |
 | `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现，见 §3） |
-| `import fs from 'node:fs'` 等原生模块 | 加载期报错：`Error loading module 'node:fs': 只内置了 host-api 模块` | 有 | 走 `host-api` |
+| `import fs from 'node:fs'` / `require('fs')` 等 Node 内置 | 加载期报错（说明只支持 `host-api` 与插件目录内的相对路径） | 有 | 走 `host-api` |
 | `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `structuredClone` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
 | `console` / `performance` / `atob` / `btoa` / `queueMicrotask` | 有 | 有 | — |
 | ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `WeakRef` / `Proxy` / `Reflect` / `eval`） | 有 | 有 | — |

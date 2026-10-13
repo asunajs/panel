@@ -210,7 +210,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logs: SharedLogs = Arc::new(Mutex::new(VecDeque::new()));
     let ticks = Arc::new(AtomicU64::new(0));
     // 宿主 API 状态：两个运行时的适配层都往这里调（见 hostapi.rs）
-    let host = HostState::new(logs.clone(), db.clone());
+    let host = HostState::new(logs.clone(), db.clone(), plugins_dir.clone());
 
     // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js|*.py，并注册 cron 任务） ----------
     let mut engine = JsEngine::spawn(

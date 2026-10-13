@@ -622,25 +622,269 @@ enum TickOutcome {
     Failed(String),
 }
 
-/// `host-api` 模块的解析器：只认内置模块名，其它交给默认规则（相对路径）。
-struct HostApiResolver;
+/// 单个模块文件的大小上限。
+///
+/// why：插件是操作者自己装的，但"手滑把一个巨型文件 import 进来"是很现实的错
+/// （误引了打包产物、日志之类）。QuickJS 那边有 64MB 堆上限，真撞上去的现场是一条
+/// 难懂的 OOM；这里提前给一句人话。
+const MAX_MODULE_BYTES: u64 = 1024 * 1024;
+
+// ══════════════════════ 模块名 = URL（严格 ESM）══════════════════════
+//
+// 标准里 ES 模块由 **URL** 标识：`import.meta.url` 拿到的就是它，相对说明符
+// 也按 URL 规则解析。所以这里模块名一律是 `file:///…/x.js`，而不是裸路径。
+//
+// 上一版我用裸路径当模块名，两个后果：`import.meta.url` 不是一个合法 URL
+// （插件里任何按 URL 处理它的代码都会错），以及解析只能靠 `Path::join`
+// 而不是 URL 语义。既然要"符合 ESM"，这两处都得改。
+
+/// 一个字符是否需要百分号编码（URL path 段里不安全的那些）。
+fn needs_pct(b: u8) -> bool {
+    !(b.is_ascii_alphanumeric()
+        || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'@' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b'='))
+}
+
+/// 路径 → `file://` URL（百分号编码）。
+fn file_url(path: &Path) -> String {
+    let mut out = String::from("file://");
+    for &b in path.to_string_lossy().as_bytes() {
+        if needs_pct(b) {
+            out.push_str(&format!("%{b:02X}"));
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+/// 百分号解码（`file://` URL 的 path 部分 → 文件系统路径）。
+fn pct_decode(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(format!("URL 里的百分号编码不完整：`{s}`"));
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            let v = u8::from_str_radix(hex, 16).map_err(|_| format!("URL 里的百分号编码非法：`{s}`"))?;
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|e| format!("URL 解码后不是合法 UTF-8：{e}"))
+}
+
+/// 按 URL 规则把 `file://` 基址与相对说明符合并（RFC 3986 §5.3 merge + 去点段）。
+///
+/// 只处理 path-only 的 `file://` URL（没有 query / fragment），够插件用；
+/// 不做的事写清楚：不认识 `?` / `#`（按普通字符处理），不解析 import maps。
+fn url_join(base: &str, spec: &str) -> Result<String, String> {
+    let base_path = base
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("导入方模块名不是 file:// URL：`{base}`（相对 import 需要有文件作基准）"))?;
+    // 去点段要在**合并之后**做：先丢掉基址最后一段（文件名），再接上说明符。
+    // `spec` 以 `/` 开头时按 URL 语义是"以根为基准"，直接替掉整条 path。
+    let joined = if spec.starts_with('/') {
+        spec.to_string()
+    } else {
+        let dir = match base_path.rfind('/') {
+            Some(i) => &base_path[..=i],
+            None => "/",
+        };
+        format!("{dir}{spec}")
+    };
+
+    // 去掉 `?` / `#` 之后的部分（ESM 里它们不算路径），并切成段做规范化
+    let cut = joined.find(['?', '#']).unwrap_or(joined.len());
+    let path = &joined[..cut];
+    let mut segs: Vec<&str> = Vec::new();
+    let absolute = path.starts_with('/');
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                // 越到根之上就停在根（URL 规范如此），**但**越过插件目录会在下一步被挡
+                if segs.pop().is_none() && !absolute {
+                    return Err(format!("`{spec}` 越过了模块根（`..` 太多）"));
+                }
+            }
+            other => segs.push(other),
+        }
+    }
+    let trailing = path.ends_with('/');
+    let mut out = String::from("file://");
+    if absolute {
+        out.push('/');
+    }
+    out.push_str(&segs.join("/"));
+    if trailing && !out.ends_with('/') {
+        out.push('/');
+    }
+    Ok(out)
+}
+
+/// 解析一个相对说明符：URL 语义合并 → 转成路径 → 检查边界 → 返回 `file://` URL。
+///
+/// **严格按 ESM 来**：说明符必须写全（含扩展名）。
+/// 上一版我加了 `.js` 与 `/index.js` 两个回退 —— 那是 CJS 的习惯，
+/// Node 的 ESM 与浏览器都要求写全扩展名。这里不替插件作者猜，只在
+/// **确实存在 `+.js` 那个文件**时把猜测写进错误提示（看得见，但不生效）。
+fn resolve_relative(base: &str, spec: &str, root: &Path, cjs: bool) -> Result<String, String> {
+    let url = url_join(base, spec)?;
+    let path_part = url.strip_prefix("file://").unwrap_or(&url);
+    let path = PathBuf::from(pct_decode(path_part)?);
+
+    // `import` 严格（要写全扩展名），`require` 兼容 CJS 的老习惯（可省扩展名 / 找 index.js）。
+    // 两种模式分开是有意的：ESM 那侧不替人猜，CJS 那侧照它自己的规矩来 ——
+    // 混在一起就会变成"两边都能过、但过的方式不同"，那才是最难查的。
+    let mut cand = path.clone();
+    if cjs && !cand.is_file() {
+        let with_ext = PathBuf::from(format!("{}.js", path.display()));
+        let as_index = path.join("index.js");
+        if with_ext.is_file() {
+            cand = with_ext;
+        } else if as_index.is_file() {
+            cand = as_index;
+        }
+    }
+
+    let canon = cand.canonicalize().map_err(|_| {
+        let mut hint = String::new();
+        let with_ext = PathBuf::from(format!("{}.js", path.display()));
+        if with_ext.is_file() {
+            // 严格 ESM 要求写全扩展名 —— 这是最容易犯的错，直接告诉人家正确的写法
+            hint = format!("（提示：`{spec}.js` 是存在的 —— ESM 要求写全扩展名）");
+        } else if path.join("index.js").is_file() {
+            hint = format!("（提示：`{spec}/index.js` 是存在的 —— ESM 不会自动找 index.js，要写全）");
+        }
+        format!("找不到模块 `{spec}`（解析成 `{}`）{hint}", path.display())
+    })?;
+
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("插件目录 `{}` 不可用：{e}", root.display()))?;
+    if !canon.starts_with(&root_canon) {
+        return Err(format!(
+            "只能 import 插件目录内的文件：`{spec}` 解析成 `{}`，不在 `{}` 之内",
+            canon.display(),
+            root_canon.display()
+        ));
+    }
+    Ok(file_url(&canon))
+}
+
+/// 模块解析器：`host-api` 内置；相对说明符按 URL 语义解析成 `file://` URL。
+struct HostApiResolver {
+    root: PathBuf,
+}
+
+impl HostApiResolver {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
 
 impl Resolver for HostApiResolver {
     fn resolve<'js>(
         &mut self,
         _ctx: &Ctx<'js>,
-        _base: &str,
+        base: &str,
         name: &str,
         _attrs: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
-        Ok(name.to_string())
+        if name == "host-api" {
+            return Ok(name.to_string());
+        }
+        if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
+            // 裸标识符（`lodash` 之类）没有 node_modules 可找 —— 说清楚，
+            // 别让插件作者以为是拼写问题。
+            return Err(rquickjs::Error::new_resolving_message(
+                base,
+                name,
+                "只内置了 `host-api`；要引自己的文件请用相对说明符（如 './lib/core.js'）",
+            ));
+        }
+        resolve_relative(base, name, &self.root, false)
+            .map_err(|e| rquickjs::Error::new_resolving_message(base, name, e))
     }
 }
 
-/// `host-api` 模块的加载器：把 `jshost::HOST_API_MODULE` 当作内置模块返回。
+/// `require()` 的宿主侧：解析 + 读文件，**一个调用干完**。
 ///
-/// 这样 JS 插件可以写 `import { log } from 'host-api'`，
-/// 而同一份文件在 Node 下由 `adapters/node` 提供同名包 —— 脚本一字不改。
+/// 返回值一律是带 `ok` 的 JSON（`{"ok":true,"url":…,"text":…}` / `{"ok":false,"error":…}`）。
+/// 为什么不学 `http_fetch` 那样"成功一种形状、失败另一种"：那种设计让调用方
+/// 必须先猜形状，插件里任何一处漏判就是 TypeError（见 `docs/findings.md` F-006，
+/// 那是本项目在面板侧踩过的坑）。带 `ok` 的单一形状没有这个问题。
+pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
+    if spec == "host-api" {
+        // 交给 JS 侧直接返回 globalThis.host_api —— 这里给个标记即可
+        return "{\"ok\":true,\"builtin\":true}".to_string();
+    }
+    if spec.starts_with("node:") || spec.starts_with("fs") && !spec.starts_with("./") && !spec.starts_with("../") {
+        // 裸标识符 / node: 内置 —— 没有 node_modules 可找
+        return format!(
+            "{{\"ok\":false,\"error\":{}}}",
+            serde_json::to_string(&format!(
+                "只支持 `host-api` 与插件目录内的相对路径；`{spec}` 是 Node 内置或第三方包，这里没有"
+            ))
+            .unwrap_or_else(|_| "\"?\"".into())
+        );
+    }
+    match resolve_relative(base, spec, root, true) {
+        Ok(url) => {
+            let path_part = url.strip_prefix("file://").unwrap_or(&url).to_string();
+            match pct_decode(&path_part) {
+                Ok(p) => match std::fs::read_to_string(&p) {
+                    Ok(text) => format!(
+                        "{{\"ok\":true,\"url\":{},\"text\":{}}}",
+                        serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into()),
+                        serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into())
+                    ),
+                    Err(e) => format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        serde_json::to_string(&format!("读不到 `{p}`：{e}")).unwrap_or_else(|_| "\"?\"".into())
+                    ),
+                },
+                Err(e) => format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    serde_json::to_string(&e).unwrap_or_else(|_| "\"?\"".into())
+                ),
+            }
+        }
+        Err(e) => format!(
+            "{{\"ok\":false,\"error\":{}}}",
+            serde_json::to_string(&e).unwrap_or_else(|_| "\"?\"".into())
+        ),
+    }
+}
+
+/// 需要给模块注入 `require` 吗？
+///
+/// 只在源码里真的出现 `require(` 时才注入一行 —— 注入会**让模块的行号整体 +1**
+/// （错误堆栈里的行号就对不上了）。纯 ESM 的模块（我们期望的常态）因此完全不受影响；
+/// 只有用 require 的文件承担这一点代价，而且这件事写在文档里了。
+fn needs_require_shim(source: &str) -> bool {
+    source.contains("require(")
+}
+
+/// 给模块源码前面加一行，把 `require` 绑到**这个模块自己的 URL** 上。
+///
+/// 为什么不是"给全局塞一个 require"：那样 `require('./x.js')` 的基准就变成了
+/// 最后被设置的那个模块，`lib/` 里的模块 require 兄弟文件会解析错地方 —— 而且是
+/// 那种"有时候对"的错。模块作用域的一行 const 没有这个问题，而且仍然是合法 ESM。
+fn with_require_shim(source: &str) -> String {
+    format!("const require = globalThis.__make_require(import.meta.url);\n{source}")
+}
+
+/// 模块加载器：`host-api` 返回内置源码，其余按解析出的 `file://` URL 读文件。
+///
+/// 模块名就是 URL，所以同一个文件被多个插件 import 时只会被声明一次
+/// （rquickjs 按名字缓存）—— 这正是"一份 core、多个插件共用"省内存的地方。
 struct HostApiLoader;
 
 impl Loader for HostApiLoader {
@@ -651,13 +895,57 @@ impl Loader for HostApiLoader {
         _attrs: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, Declared>> {
         if name == "host-api" {
-            Module::declare(ctx.clone(), name, jshost::HOST_API_MODULE)
-        } else {
-            Err(rquickjs::Error::new_loading_message(
-                name,
-                "只内置了 `host-api` 模块；插件之间请用相对路径 import",
-            ))
+            return Module::declare(ctx.clone(), name, jshost::HOST_API_MODULE);
         }
+
+        let path_part = name.strip_prefix("file://").ok_or_else(|| {
+            rquickjs::Error::new_loading_message(
+                name,
+                "只有 `host-api` 与插件目录内的文件可以被 import（解析阶段应当给出 file:// URL）",
+            )
+        })?;
+        let path = PathBuf::from(pct_decode(path_part).map_err(|e| {
+            rquickjs::Error::new_loading_message(name, e)
+        })?);
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext != "js" && ext != "mjs" {
+            return Err(rquickjs::Error::new_loading_message(
+                name,
+                format!("只支持 .js / .mjs 模块（这个文件后缀是 `.{ext}`）"),
+            ));
+        }
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| rquickjs::Error::new_loading_message(name, format!("读不到模块文件：{e}")))?;
+        if meta.len() > MAX_MODULE_BYTES {
+            return Err(rquickjs::Error::new_loading_message(
+                name,
+                format!(
+                    "模块文件 {} 太大（{} 字节，上限 {}）—— 确认一下是不是引错了文件",
+                    path.display(),
+                    meta.len(),
+                    MAX_MODULE_BYTES
+                ),
+            ));
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| rquickjs::Error::new_loading_message(name, format!("读模块失败：{e}")))?;
+        let src = if needs_require_shim(&raw) { with_require_shim(&raw) } else { raw };
+        let module = Module::declare(ctx.clone(), name, src)?;
+        // 被 import 的模块同样要有 `import.meta.url` —— 模块最常见的用法就是
+        // 靠它定位自己旁边的文件（这也是 ESM 语义的一部分，不是可选项）
+        fill_meta(&module, name);
+        Ok(module)
+    }
+}
+
+/// 给一个（已声明的）模块填 `import.meta`。
+///
+/// 目前填两样：`url`（ESM 规范里的那一个，模块自己的 `file://` URL）与
+/// `main`（是不是入口 —— Node 近年的约定，判"我是不是被直接跑的那个"很有用）。
+fn fill_meta<'js>(module: &Module<'js, Declared>, module_name: &str) {
+    if let Ok(meta) = module.meta() {
+        let _ = meta.set("url", module_name.to_string());
+        let _ = meta.set("main", true);
     }
 }
 
@@ -689,7 +977,7 @@ fn worker_main(
     };
     rt.set_memory_limit(64 * 1024 * 1024);
     rt.set_max_stack_size(1024 * 1024);
-    rt.set_loader(HostApiResolver, HostApiLoader);
+    rt.set_loader(HostApiResolver::new(plugins_dir.clone()), HostApiLoader);
 
     let wd = Watchdog {
         total: interrupts.clone(),
@@ -744,7 +1032,8 @@ fn worker_main(
             plugins.push(lp);
             continue;
         }
-        let (lp, mut declared) = load_one(&rt, file, &logs, &host, &wd, budget, &mut next_vm);
+        let (lp, mut declared) =
+            load_one(&rt, file, &logs, &host, &wd, budget, &mut next_vm);
         pending.append(&mut declared);
         plugins.push(lp);
     }
@@ -2159,7 +2448,10 @@ fn load_one(
         .and_then(|s| s.to_str())
         .unwrap_or("unnamed")
         .to_string();
-    let file_str = file.display().to_string();
+    // 绝对值化：`PLUGINS_DIR` 可以是相对路径（`./plugins`），而模块名必须是
+    // `file://` **绝对** URL（否则 import.meta.url 与相对解析都没有意义）。
+    let file_abs = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let file_str = file_abs.display().to_string();
     let mtime = std::fs::metadata(file).and_then(|m| m.modified()).ok();
 
     let mut lp = LoadedPlugin {
@@ -2313,8 +2605,21 @@ fn looks_like_module(source: &str) -> bool {
 /// 为什么要把 `on_tick` 拷到全局：模块顶层声明是模块作用域，不是 `globalThis`。
 /// 引擎的 tick 分发统一从 globals 取 `on_tick`，拷一次就统一了两条路径。
 fn eval_as_module(ctx: &Ctx, source: &str, file_str: &str) -> Result<(), String> {
-    let module = Module::declare(ctx.clone(), file_str.to_string(), source.to_string())
+    // 模块名（= `import.meta.url`）= 该文件的 `file://` URL（严格 ESM 的标识方式）；
+    // 不是文件路径时（例如 /api/test/js 跑临时代码，名字是 `<test-run>`）原样用，
+    // 那种情况下相对 import 没有基准，解析器会明确报错。
+    let module_name = if Path::new(file_str).is_absolute() {
+        file_url(Path::new(file_str))
+    } else {
+        file_str.to_string()
+    };
+    let src = if needs_require_shim(source) { with_require_shim(source) } else { source.to_string() };
+    let module = Module::declare(ctx.clone(), module_name.clone(), src)
         .map_err(|e| render_exception(ctx, &e))?;
+    // 填 `import.meta`：ESM 的模块要能问"我在哪"。QuickJS 不自动给，得宿主填
+    // （rquickjs 的 `Module::meta()` 就是这个口子）。不填的话 `import.meta.url`
+    // 是 `undefined` —— 实测探针里就是这样，而任何按 URL 处理它的插件代码都会错。
+    fill_meta(&module, &module_name);
     let (module, promise) = module.eval().map_err(|e| render_exception(ctx, &e))?;
     // 用 render_exception 而不是 `{e}`：后者对 promise 拒绝只会打出
     // 「Exception generated by QuickJS」——那是包装类型名，插件作者拿它什么都查不出来。
@@ -2394,44 +2699,45 @@ fn load_python(
 }
 
 /// 扫描插件目录（递归），`.js` 和 `.py` 都收，按路径排序保证顺序稳定。
+/// 收集**插件入口**文件。
+///
+/// 约定（与"插件可以多文件"这条能力配套）：
+///
+/// ```text
+/// plugins/*.js            根目录直接放也行
+/// plugins/js/*.js         正经位置
+/// plugins/py/*.py         正经位置
+/// plugins/js/lib/*.js     ← **模块目录，不是插件**
+/// plugins/<name>/**       插件自带的配置页资源，也不是插件
+/// ```
+///
+/// 再往下的 `*.js` 一律**不收**。上一版是"下钻两层 + 只跳过带 index.html 的目录"，
+/// 于是 `plugins/js/lib/math.js` 会被当成一个叫 `math` 的插件加载 —— 实测就是
+/// 这样：探针里四个模块全变成了"没有任务的插件"，面板上凭空多出四行，
+/// 名字（math / a / b / reexport）跟作者写的东西对不上，很难查。
+///
+/// 这条规则同时让"模块文件放哪儿"有了明确答案：**放子目录**。
 fn scan_plugins(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk(dir, &mut out, 0);
+    collect_entries(dir, &mut out);
+    for lang in ["js", "py"] {
+        collect_entries(&dir.join(lang), &mut out);
+    }
     out.sort();
+    out.dedup();
     out
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    // 只下钻 2 层：`plugins/*.js`、`plugins/js/*.js`、`plugins/py/*.py` 都覆盖到了，
-    // 又不至于把整个目录树翻一遍（低配设备上少一次无谓的 stat）
-    if depth > 2 {
-        return;
-    }
+/// 只收这一层里的 `.js` / `.py` 文件，**不递归**。
+fn collect_entries(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(e) => {
-            eprintln!("[engine] 无法读取插件目录 {}: {e}", dir.display());
-            return;
-        }
+        // 语言目录不存在是正常的（只用 JS 的部署没有 py/），不报错
+        Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            // 目录里有 index.html 的，是**插件自带的配置页资源**（插件作者提供的
-            // HTML/CSS/JS），不是插件本体。
-            //
-            // 不跳过的话 `plugins/demo/app.js` 会被当成一个叫 `app` 的插件加载：
-            // 它 `import` 的是自己的相对路径，引擎按 host-api 解析必然失败，
-            // 于是面板上凭空多出一个「加载失败」的插件 —— 而且名字（app）
-            // 跟用户写的任何东西都对不上，根本查不到原因。
-            //
-            // 用「有 index.html」而不是「有 style.css」之类来判定，是因为
-            // index.html 是配置页的**入口**，插件作者一定会提供它。
-            if path.join("index.html").is_file() {
-                continue;
-            }
-            walk(&path, out, depth + 1);
-        } else if path.is_file() && (is_js(&path) || is_python(&path)) {
+        if path.is_file() && (is_js(&path) || is_python(&path)) {
             out.push(path);
         }
     }
@@ -3144,30 +3450,41 @@ fn test_run(
 
 #[cfg(test)]
 mod tests {
-    /// UI 资源目录不能被当成插件。
+    /// 配置页目录与模块目录都不能被当成插件。
     ///
-    /// 这条测试的意义：插件作者给插件加一个配置页是**正常操作**，而 `plugins/demo/`
-    /// 里必然有一个 `app.js`。如果扫描器把它当插件加载，面板上会出现一个名字叫
-    /// `app` 的失败插件，报的错还是 host-api 解析失败 —— 跟「我给 demo 加了个页面」
-    /// 这个动作完全联系不起来。所以这里用真实目录结构把它钉住。
+    /// 两种"不是插件但放在 plugins/ 下面"的东西：
+    ///
+    /// ① **配置页资源**：插件作者给插件加页面是正常操作，`plugins/demo/` 里必然有
+    ///    `app.js`。当插件加载的话，面板上会出现一个叫 `app` 的失败插件，报的错还是
+    ///    host-api 解析失败 —— 跟「我给 demo 加了个页面」完全联系不起来。
+    /// ② **模块目录**：插件可以 `import './lib/core.js'`（多文件插件），那些模块
+    ///    同样不是插件。这条是实测撞出来的：探针里 `js/lib/{math,a,b,reexport}.js`
+    ///    四个模块**全都变成了插件**（名字是 math / a / b / reexport，任务数 0），
+    ///    而当时的扫描器是"下钻两层 + 只跳过带 index.html 的目录"。
+    ///
+    /// 修法不是再加一条特判，而是把规则变**结构性的**：只收 `plugins/` 根与
+    /// `plugins/js|py/` 这一层，不再往下。于是这两种情况一起被排除，
+    /// 而且"模块该放哪儿"有了唯一答案：**放子目录**。
     #[test]
-    fn ui_dirs_are_not_plugins() {
-        let tmp = std::env::temp_dir().join(format!("pp-walk-{}", std::process::id()));
+    fn config_dirs_and_module_dirs_are_not_plugins() {
+        let tmp = std::env::temp_dir().join(format!("pp-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("js")).unwrap();
+        std::fs::create_dir_all(tmp.join("js/lib")).unwrap();
+        std::fs::create_dir_all(tmp.join("py")).unwrap();
         std::fs::create_dir_all(tmp.join("demo")).unwrap();
 
         // 真插件
         std::fs::write(tmp.join("js/real.js"), "// plugin").unwrap();
         std::fs::write(tmp.join("top.py"), "# plugin").unwrap();
-        // 插件的配置页资源：里面有 app.js，但它不是插件
+        // 模块目录里的模块（给 import 用的），不是插件
+        std::fs::write(tmp.join("js/lib/core.js"), "export const x = 1;").unwrap();
+        std::fs::write(tmp.join("js/lib/core.mjs"), "export const y = 2;").unwrap();
+        // 配置页资源
         std::fs::write(tmp.join("demo/index.html"), "<html></html>").unwrap();
         std::fs::write(tmp.join("demo/app.js"), "// ui").unwrap();
         std::fs::write(tmp.join("demo/style.css"), "body{}").unwrap();
 
-        let mut found = Vec::new();
-        walk(&tmp, &mut found, 1);
-        let names: Vec<String> = found
+        let names: Vec<String> = scan_plugins(&tmp)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -3177,6 +3494,10 @@ mod tests {
         assert!(
             !names.contains(&"app.js".to_string()),
             "配置页里的 app.js 不能被当成插件: {names:?}"
+        );
+        assert!(
+            !names.contains(&"core.js".to_string()) && !names.contains(&"core.mjs".to_string()),
+            "模块目录里的模块不能被当成插件: {names:?}"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

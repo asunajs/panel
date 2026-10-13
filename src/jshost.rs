@@ -127,6 +127,71 @@ globalThis.__has_task = function (name) {
     return typeof __tasks[name] === 'function' ? '1' : '';
 };
 
+// ══════════════════════ require（CJS 兼容层）══════════════════════════
+//
+// 插件是 ESM（`import` 严格：要写全扩展名、不自动找 index.js）。但现实里总有
+// 老代码/片段是 CJS 写法，硬要人重写不值得。所以给一个**够用的** require：
+//
+//   · `require('host-api')`      → 与 `import … from 'host-api'` 同一批函数
+//   · `require('./lib/x.js')`    → 按 **CJS 规矩**解析（可省扩展名、找 index.js）
+//   · 缓存按解析后的 URL 走；循环 require 拿到的是"半成品"（与 Node 一致）
+//
+// 每个模块顶部会被注入一行 `const require = globalThis.__make_require(import.meta.url)`，
+// 于是 require 的解析基准是**这个模块自己**，而不是最后被设置的那个全局。
+//
+// 不做的（写清楚，省得人试）：`require.resolve` / `require.cache` / package.json main /
+// `.json` 数据文件 / 任何 Node 内置模块。
+var __cjsModules = {};
+
+globalThis.__make_require = function (base) {
+    return function require(spec) {
+        var s = String(spec);
+        var r = JSON.parse(__host_require_load(String(base), s));
+        if (!r.ok) {
+            var err = new Error("Cannot find module '" + s + "'：" + r.error);
+            err.code = 'MODULE_NOT_FOUND';
+            throw err;
+        }
+        if (r.builtin) return globalThis.host_api;      // host-api 与 ESM 那边同一批函数
+        if (__cjsModules[r.url]) return __cjsModules[r.url].exports;
+
+        // `require` 只能读 **CJS** 文件。要去读一个 ES 模块，`new Function` 会报
+        // "unsupported keyword: export" —— 那句话说不到点子上（人会去查自己的语法）。
+        // 提前认出来，直接告诉他该改用 import。
+        if (/(^|\n)\s*(import|export)\s/.test(r.text) || /(^|\n)\s*import\{/.test(r.text)) {
+            var e2 = new Error(
+                "'" + s + "' 是 **ES 模块**（用了 import/export），require() 读不了 ES 模块 —— " +
+                '请用 `import` 引入它（或把它改成 CJS 的 module.exports 写法）。'
+            );
+            e2.code = 'ERR_REQUIRE_ESM';
+            throw e2;
+        }
+
+        var mod = { exports: {}, id: r.url, filename: r.url, loaded: false };
+        __cjsModules[r.url] = mod;    // **先入缓存**：循环 require 时拿到半成品（Node 语义）
+        var fn = new Function(
+            'exports', 'require', 'module', '__filename', '__dirname',
+            r.text + '\n//# sourceURL=' + r.url
+        );
+        var dir = r.url.slice(0, r.url.lastIndexOf('/'));
+        var ret = fn(mod.exports, __make_require(r.url), mod, r.url, dir);
+        mod.loaded = true;
+        // CJS 的规矩：`module.exports` 被整体替换时用它，否则用 `exports`
+        return ret !== undefined && ret !== mod.exports ? ret : mod.exports;
+    };
+};
+
+// 没有绑定文件的 require：**响亮地报错**，别静默解析到别处去。
+// （模块顶部的注入会让这段几乎不会被执行到；真执行到了，说明注入没生效 ——
+//  那是个真问题，得让人看见。）
+globalThis.require = function (spec) {
+    throw new Error(
+        '这个 require 没有绑定到文件（spec: ' + String(spec) + '）。插件的每个模块顶部会' +
+        '自动注入 `const require = …(import.meta.url)`；通过 new Function / eval 间接' +
+        '拿到 require 时，请把模块里的 require 显式传进去。'
+    );
+};
+
 // 约定：返回空字符串 = 成功；非空字符串 = 错误消息。只用 String 一种类型。
 globalThis.__dispatch_task = function (name, payloadJson) {
     var h = __tasks[name];
@@ -231,6 +296,20 @@ pub fn install_host<'js>(
                 Ok(s) => s,
                 Err(e) => json_error(&e),
             }
+        }),
+    )?;
+
+    // ---- require（CJS 兼容）：解析 + 读文件，交给 engine 的同一套解析逻辑 ----
+    //
+    // 边界与 import 一致（只能碰插件目录内的文件），但**解析规矩按 CJS**：
+    // 允许省略扩展名、允许目录里的 index.js —— 那是 require 自己的习惯，
+    // 而 import 那边是严格的。两种模式分开，是为了别让"两边都能过、
+    // 但过的方式不同"变成最难查的那类问题。
+    let root_for_require = state.plugins_dir.clone();
+    ctx.globals().set(
+        "__host_require_load",
+        Func::new(move |base: String, spec: String| -> String {
+            crate::engine::do_require_load(&root_for_require, &base, &spec)
         }),
     )?;
 

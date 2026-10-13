@@ -43,6 +43,7 @@ use crate::cron::Schedule;
 use crate::db::Db;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// 日志环形缓冲上限，防止长时间运行把内存吃光。
@@ -152,15 +153,23 @@ pub struct HostState {
     pub vms: Mutex<HashMap<i32, VmBinding>>,
     /// JS 插件注册的 HTTP 路由（引擎线程持有，Axum 侧转发请求过来匹配）
     pub routes: Mutex<Vec<RouteDef>>,
+    /// 插件根目录。
+    ///
+    /// 放在这里而不是一路传参：`require` / 相对 `import` 的**边界**要用它
+    /// （只能碰这个目录里的文件）。它是面板配置，宿主状态本来就该知道 ——
+    /// 塞进参数列表的话，`load_js` / `load_one` / `sync_plugins` / `/api/test/js`
+    /// 四条路径都要多带一个参数，纯粹是搬运。
+    pub plugins_dir: PathBuf,
 }
 
 impl HostState {
-    pub fn new(logs: SharedLogs, db: Db) -> Arc<Self> {
+    pub fn new(logs: SharedLogs, db: Db, plugins_dir: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             logs,
             db,
             vms: Mutex::new(HashMap::new()),
             routes: Mutex::new(Vec::new()),
+            plugins_dir,
         })
     }
 
