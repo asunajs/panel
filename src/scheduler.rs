@@ -313,6 +313,10 @@ impl Scheduler {
     }
 
     /// 有待覆盖的表达式时返回它（面板据此显示「覆盖」标记）。
+    // 读覆盖表达式的辅助：面板那条路直接读库里的 `override_expr`（见 db.rs），
+    // 所以二进制里没人调它，目前只有本文件的单测在用。留着是为了让「覆盖」这件事
+    // 在调度器这一层可测；真要用到的时候去掉 cfg 就行。
+    #[cfg(test)]
     pub fn override_of(&self, plugin: &str, name: &str) -> Option<&str> {
         self.find(plugin, name)
             .and_then(|i| self.tasks[i].override_expr.as_deref())

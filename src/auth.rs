@@ -14,7 +14,13 @@
 //!
 //! ## 安全细节（每一条都是刻意的）
 //!
-//! - 令牌与会话 ID 都用 **常量时间比较**（`subtle::ConstantTimeEq`），避免计时侧信道
+//! - 令牌可以配成**盐 + 哈希**（`PANEL_TOKEN_HASH`，Argon2id / PHC 串），
+//!   这样**本地落盘的不是可直接复用的明文**：谁读到配置文件也只能拿到一个哈希。
+//!   明文的 `PANEL_TOKEN` 仍然支持（好用），但启动时会提示一次该换成哈希
+//! - 明文形式下令牌与会话 ID 都用 **常量时间比较**（`subtle::ConstantTimeEq`），
+//!   避免计时侧信道；哈希形式由 Argon2 的校验自带常量时间
+//! - 哈希形式下**连长度都不比较**：走的是「哈希候选值再比」这条路，
+//!   连「令牌有多长」这个信息都不会从比较路径里漏出去
 //! - 会话 ID 来自 **OS 随机源**（`getrandom`，32 字节 → 64 位十六进制）
 //! - 登录失败**按来源 IP 指数退避**（1s → 64s，上限 60s），挡住暴力猜令牌
 //! - cookie 是 **HttpOnly + SameSite=Strict**：JS 读不到，跨站请求也带不上
@@ -111,19 +117,132 @@ impl LoginError {
     }
 }
 
-/// 鉴权状态。`token = None` 表示**没配令牌**（只在 loopback 绑定下允许）。
+/// 令牌的**存储形式**。
+///
+/// 为什么要有这个：令牌是配置项，通常躺在环境变量或某个配置文件里 —— 那是**明文**，
+/// 谁读到那个文件谁就能拿来登录。改成哈希之后，本地落盘的只是一串「盐 + 哈希」，
+/// 拿到它既不能直接登录、也没法反推出令牌。
+pub enum Cred {
+    /// 明文令牌（`PANEL_TOKEN`）。好用，但落盘就是可复用凭据。
+    Plain(String),
+    /// `PANEL_TOKEN_HASH`：PHC 串（`$argon2id$v=19$m=...,t=...,p=...$盐$哈希`）。
+    /// 盐就带在串里，不需要单独存一列 —— 每次哈希用新盐，同样的令牌两次哈希也不一样。
+    Phc(String),
+}
+
+/// `Debug` **刻意涂掉内容**：不涂的话，`{:?}` 一次就可能把明文令牌写进日志、
+/// panic 信息或错误上报里 —— 而这类泄漏通常是事后才发现的。
+/// 只留下形式（明文 / 哈希），够排查问题。
+impl std::fmt::Debug for Cred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cred::{}(<redacted>)", self.kind())
+    }
+}
+
+/// 令牌哈希用的算法与参数。
+///
+/// Argon2id（`Argon2::default()`：m=19 MiB / t=2 / p=1）。参数会写进 PHC 串，
+/// 校验时**从串里读**，所以以后调参数不会让老哈希失效。
+///
+/// 为什么不用 SHA-256 这种快哈希：令牌按理是高熵随机串（那样快哈希也够），
+/// 但运维很可能顺手设成 `admin123` —— 弱口令在快哈希面前等于没有成本。
+/// 登录路径本来就限流（按 IP 指数退避，且在验令牌**之前**判），
+/// 所以这里用内存硬的 Argon2id，代价只落在每次登录那几十毫秒上。
+fn argon2() -> argon2::Argon2<'static> {
+    argon2::Argon2::default()
+}
+
+/// 把一个明文令牌变成「盐 + 哈希」的 PHC 串（`PANEL_TOKEN_HASH` 的值）。
+///
+/// 盐用**已有的** `getrandom`（OS 随机源）——不为了拿 16 字节随机再引一个 RNG 依赖。
+pub fn hash_token(token: &str) -> Result<String, String> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+
+    let mut salt_bytes = [0u8; 16];
+    getrandom::getrandom(&mut salt_bytes).map_err(|e| format!("取随机盐失败: {e}"))?;
+    // b64 编码成 SaltString（PHC 里盐是 base64 的，长度要求 4~64）
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| format!("盐编码失败: {e}"))?;
+    argon2()
+        .hash_password(token.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| format!("哈希失败: {e}"))
+}
+
+impl Cred {
+    /// 按内容判断是哈希还是明文：PHC 串一定以 `$` 开头。
+    ///
+    /// 哈希串**当场校验格式**，格式不对就报错、让进程起不来 ——
+    /// 「配错了于是谁都登不上」是那种要排查半天的故障，宁可在启动时大声失败。
+    pub fn parse(raw: &str) -> Result<Cred, String> {
+        let raw = raw.trim();
+        if raw.starts_with('$') {
+            use argon2::password_hash::PasswordHash;
+            let parsed = PasswordHash::new(raw)
+                .map_err(|e| format!("不是合法的 PHC 哈希串（{e}）。用 `plugin-panel hash-token` 生成"))?;
+            if parsed.algorithm.as_str() != "argon2id" {
+                return Err(format!(
+                    "不支持的哈希算法 `{}`：本面板只用 argon2id 校验（argon2i/argon2d 校验不了，\
+                     与其让你「怎么登都登不上」，不如启动时就报错）",
+                    parsed.algorithm
+                ));
+            }
+            Ok(Cred::Phc(raw.to_string()))
+        } else {
+            Ok(Cred::Plain(raw.to_string()))
+        }
+    }
+
+    /// 候选令牌对不对。
+    pub fn verify(&self, candidate: &str) -> bool {
+        match self {
+            Cred::Plain(expected) => {
+                let (a, b) = (expected.as_bytes(), candidate.as_bytes());
+                // 长度不等直接失败：`ct_eq` 要求等长，而令牌长度是配置项、
+                // 不是用户口令 —— 不过在**哈希**形式下连这个都不需要（见 Phc 分支），
+                // 所以这里不构成真正的信息泄漏。
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.ct_eq(b).into()
+            }
+            Cred::Phc(phc) => {
+                use argon2::password_hash::{PasswordHash, PasswordVerifier};
+                let Ok(parsed) = PasswordHash::new(phc) else {
+                    // parse() 已经校验过；走到这里说明内存里的串被改坏了
+                    return false;
+                };
+                argon2().verify_password(candidate.as_bytes(), &parsed).is_ok()
+            }
+        }
+    }
+
+    /// 给启动日志用的可读名字。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Cred::Plain(_) => "明文令牌",
+            Cred::Phc(_) => "Argon2id 哈希",
+        }
+    }
+
+    /// 明文形式才需要提示「建议换成哈希」。
+    pub fn is_plain(&self) -> bool {
+        matches!(self, Cred::Plain(_))
+    }
+}
+
+/// 鉴权状态。`cred = None` 表示**没配令牌**（只在 loopback 绑定下允许）。
 pub struct Auth {
-    token: Option<String>,
+    cred: Option<Cred>,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, FailState>>,
     cookie_secure: bool,
 }
 
 impl Auth {
-    pub fn new(token: Option<String>, cookie_secure: bool) -> Self {
+    pub fn new(cred: Option<Cred>, cookie_secure: bool) -> Self {
         Self {
             // 空字符串等于没配：环境变量写成空是很容易犯的错，不该变成「空令牌能过」
-            token: token.filter(|t| !t.is_empty()),
+            cred: cred.filter(|c| !matches!(c, Cred::Plain(s) if s.is_empty())),
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             cookie_secure,
@@ -132,7 +251,12 @@ impl Auth {
 
     /// 配了令牌吗（= 开了鉴权）。
     pub fn enabled(&self) -> bool {
-        self.token.is_some()
+        self.cred.is_some()
+    }
+
+    /// 令牌的存储形式（启动日志里写出来，也让调用方能提示「建议换成哈希」）。
+    pub fn cred_kind(&self) -> Option<(&'static str, bool)> {
+        self.cred.as_ref().map(|c| (c.kind(), c.is_plain()))
     }
 
     /// cookie 要不要带 `Secure`。
@@ -140,18 +264,13 @@ impl Auth {
         self.cookie_secure
     }
 
-    /// 令牌对不对。**常量时间比较**，不因为前缀相同就早退。
-    fn token_matches(&self, candidate: &str) -> bool {
-        let Some(expected) = self.token.as_deref() else {
+    /// 令牌对不对。明文走**常量时间比较**（不因为前缀相同就早退），
+    /// 哈希走 Argon2 校验（自带常量时间）。
+    fn credential_matches(&self, candidate: &str) -> bool {
+        let Some(cred) = self.cred.as_ref() else {
             return false;
         };
-        let (a, b) = (expected.as_bytes(), candidate.as_bytes());
-        // 长度不等直接失败：`ct_eq` 本来就要求等长，而令牌长度是配置项、
-        // 不是用户口令，泄漏长度不构成风险。
-        if a.len() != b.len() {
-            return false;
-        }
-        a.ct_eq(b).into()
+        cred.verify(candidate)
     }
 
     /// 用会话 ID 换一次「已认证」。顺带刷新空闲时间、清掉过期的。
@@ -180,7 +299,7 @@ impl Auth {
         if let Err(wait) = self.check_rate(ip) {
             return Err(LoginError::RateLimited(wait));
         }
-        if !self.token_matches(candidate) {
+        if !self.credential_matches(candidate) {
             self.record_failure(ip);
             return Err(LoginError::BadToken);
         }
@@ -282,7 +401,7 @@ impl Auth {
             return None;
         }
         if let Some(t) = headers.bearer_token().or_else(|| headers.panel_token()) {
-            if self.token_matches(&t) {
+            if self.credential_matches(&t) {
                 return Some(Via::Token);
             }
         }
@@ -407,7 +526,7 @@ mod tests {
     const TOKEN: &str = "s3cret-token-0123456789";
 
     fn auth() -> Auth {
-        Auth::new(Some(TOKEN.to_string()), false)
+        Auth::new(Some(Cred::parse(TOKEN).unwrap()), false)
     }
 
     // ---- 配置 ----
@@ -415,9 +534,11 @@ mod tests {
     #[test]
     fn empty_token_means_auth_disabled() {
         // 环境变量写成空是常见错误，不该变成「空令牌能过」
-        assert!(!Auth::new(Some(String::new()), false).enabled());
+        // 空字符串等于没配：环境变量写成空是很容易犯的错，不该变成「空令牌能过」。
+        // （`Cred::parse("")` 给的是明文空串，Auth::new 会把它滤掉）
+        assert!(!Auth::new(Some(Cred::parse("").unwrap()), false).enabled());
         assert!(!Auth::new(None, false).enabled());
-        assert!(Auth::new(Some(TOKEN.into()), false).enabled());
+        assert!(Auth::new(Some(Cred::parse(TOKEN).unwrap()), false).enabled());
     }
 
     #[test]
@@ -430,13 +551,88 @@ mod tests {
     // ---- 令牌 ----
 
     #[test]
+    fn hashed_token_roundtrip_and_rejection() {
+        // 盐是随机的 → 同一个令牌两次哈希**必须不一样**（否则等于没盐）
+        let h1 = hash_token(TOKEN).unwrap();
+        let h2 = hash_token(TOKEN).unwrap();
+        assert_ne!(h1, h2, "同样的令牌两次哈希应当不同（说明盐是随机的）");
+        assert!(h1.starts_with("$argon2id$"), "应当是 PHC 串：{h1}");
+        // 参数随串一起存 → 校验时从串里读，不依赖代码里的默认值
+        assert!(h1.contains("m="), "PHC 串里应当带参数：{h1}");
+
+        let cred = Cred::parse(&h1).unwrap();
+        assert!(cred.verify(TOKEN), "正确的令牌应当通过");
+        assert!(!cred.verify("wrong"), "错误的令牌不应当通过");
+        assert!(!cred.verify(""), "空令牌不应当通过");
+        // 前缀相同也不行（Argon2 校验的是哈希，不是前缀）
+        assert!(!cred.verify(&TOKEN[..TOKEN.len() - 1]));
+        assert_eq!(cred.kind(), "Argon2id 哈希");
+        assert!(!cred.is_plain());
+    }
+
+    #[test]
+    fn plain_token_still_supported_and_reported_as_plain() {
+        let cred = Cred::parse(TOKEN).unwrap();
+        assert!(cred.verify(TOKEN));
+        assert!(!cred.verify("wrong"));
+        assert_eq!(cred.kind(), "明文令牌");
+        assert!(cred.is_plain(), "明文要被标出来，启动日志才好提示换哈希");
+    }
+
+    #[test]
+    fn debug_never_prints_the_secret() {
+        // 这条不是洁癖：`{:?}` 出现在日志、panic、错误上报里的机会很多，
+        // 而令牌是那种「泄漏一次就得换」的东西。
+        for cred in [Cred::parse(TOKEN).unwrap(), Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()] {
+            let s = format!("{cred:?}");
+            assert!(!s.contains(TOKEN), "Debug 输出里不该出现令牌本身：{s}");
+            assert!(s.contains("redacted"), "应当明确标出被涂掉了：{s}");
+            assert!(s.contains("Cred::"), "应当留下形式（明文/哈希）：{s}");
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsupported_hash_is_rejected_at_parse() {
+        // 配错了要在**启动时**大声失败，而不是「怎么登都登不上」那种要排查半天的故障
+        assert!(Cred::parse("$argon2id$这不是哈希").is_err());
+        assert!(Cred::parse("$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA").is_err());
+        // 只支持 argon2id：别的算法直接拒绝，而不是当明文令牌用（那会变成「谁都登不上」）。
+        // 用一个**真哈希改掉算法名**来构造：`$md5$...$aGFzaA` 那种长度不够的串
+        // 在 PHC 解析阶段就被拒了，压根走不到算法检查（我第一版就是这么写错的）。
+        let argon2i = hash_token(TOKEN).unwrap().replace("$argon2id$", "$argon2i$");
+        let err = Cred::parse(&argon2i).unwrap_err();
+        assert!(err.contains("argon2id"), "错误里要说清支持什么：{err}");
+    }
+
+    #[test]
+    fn hashed_credential_works_through_login() {
+        // 走一遍真实路径：哈希凭据 → login() → 拿到会话 ID → 会话可用
+        let cred = Cred::parse(&hash_token(TOKEN).unwrap()).unwrap();
+        let a = Auth::new(Some(cred), false);
+        assert!(a.enabled());
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let sid = a.login(TOKEN, ip).expect("哈希凭据应当能登录");
+        assert!(a.touch_session(&sid));
+        assert!(matches!(a.login("wrong", ip), Err(LoginError::BadToken)));
+    }
+
+    #[test]
+    fn credential_kind_is_reported_for_the_boot_log() {
+        let plain = Auth::new(Some(Cred::parse(TOKEN).unwrap()), false);
+        assert_eq!(plain.cred_kind(), Some(("明文令牌", true)));
+        let hashed = Auth::new(Some(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()), false);
+        assert_eq!(hashed.cred_kind(), Some(("Argon2id 哈希", false)));
+        assert_eq!(Auth::new(None, false).cred_kind(), None);
+    }
+
+    #[test]
     fn token_comparison_is_exact() {
         let a = auth();
-        assert!(a.token_matches(TOKEN));
-        assert!(!a.token_matches(""));
-        assert!(!a.token_matches("s3cret"));                    // 前缀也不行
-        assert!(!a.token_matches("s3cret-token-0123456789x"));  // 超集也不行
-        assert!(!a.token_matches("S3CRET-TOKEN-0123456789"));   // 大小写敏感
+        assert!(a.credential_matches(TOKEN));
+        assert!(!a.credential_matches(""));
+        assert!(!a.credential_matches("s3cret"));                    // 前缀也不行
+        assert!(!a.credential_matches("s3cret-token-0123456789x"));  // 超集也不行
+        assert!(!a.credential_matches("S3CRET-TOKEN-0123456789"));   // 大小写敏感
     }
 
     #[test]
@@ -655,7 +851,7 @@ mod tests {
 
     #[test]
     fn secure_flag_is_opt_in() {
-        let a = Auth::new(Some(TOKEN.into()), true);
+        let a = Auth::new(Some(Cred::parse(TOKEN).unwrap()), true);
         assert!(a.session_cookie("x").contains("; Secure"));
         assert!(a.clear_cookie().contains("; Secure"));
         assert!(a.cookie_secure());

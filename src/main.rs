@@ -87,6 +87,27 @@ pub struct AppState {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 子命令要在**建 runtime / 碰数据库之前**处理：生成令牌哈希不需要起服务，
+    // 也不该因为「端口被占」之类的配置问题就跑不了。
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(cmd) = args.first() {
+        match cmd.as_str() {
+            "hash-token" => return hash_token_cmd(args.get(1).map(String::as_str)),
+            "help" | "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            "serve" => {} // 显式写 serve 也接受（systemd 里写全更好读）
+            other => {
+                return Err(format!(
+                    "未知子命令 `{other}`。支持：hash-token（生成令牌哈希）。\
+                     不带子命令就是启动面板。用 `--help` 看全部。"
+                )
+                .into())
+            }
+        }
+    }
+
     let workers = env_usize("TOKIO_WORKER_THREADS", DEFAULT_WORKER_THREADS);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -108,9 +129,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = env_path("DB_PATH", "data/panel.db");
     let addr: SocketAddr = env_str("BIND_ADDR", "127.0.0.1:8787").parse()?;
 
-    // ---------- 鉴权（第十轮） ----------
-    let token = read_token()?;
-    let auth_enabled = token.is_some();
+    // ---------- 鉴权（第十轮；第十八轮支持哈希存储） ----------
+    let cred = read_credential()?;
+    let auth_enabled = cred.is_some();
+    let auth_result = cred.as_ref().map(|c| (c.kind(), c.is_plain()));
     let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
 
     // 没配令牌还往非回环地址绑 = 把一个「能看所有日志、能触发/新建任意任务」的面板
@@ -127,18 +149,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    // 启动日志写明**凭据的存储形式**：运维一眼能看到自己用的是明文还是哈希，
+    // 也能在日志里确认「那个 PANEL_TOKEN_HASH 到底生效了没」。
+    let (kind, _is_plain) = auth_result.unwrap_or(("", false));
     println!(
         "[boot] 鉴权: {}",
         if auth_enabled {
-            if cookie_secure {
-                "已开启（PANEL_TOKEN + cookie Secure）"
+            // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
+            let secure = if cookie_secure {
+                " + cookie Secure"
             } else {
-                "已开启（PANEL_TOKEN；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1）"
-            }
+                "；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
+            };
+            format!("已开启（{kind}{secure}）")
         } else {
-            "未开启 —— 只绑回环地址，本机任何进程都能操作面板"
+            "未开启 —— 只绑回环地址，本机任何进程都能操作面板".to_string()
         }
     );
+
 
     // ---------- 1. SQLite：开库 + 建表 ----------
     if let Some(parent) = db_path.parent() {
@@ -242,7 +270,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         health,
         host,
         engine: engine_handle,
-        auth: Arc::new(Auth::new(token, cookie_secure)),
+        auth: Arc::new(Auth::new(cred, cookie_secure)),
         assets,
         test_limiter: Arc::new(TestRunLimiter::new(
             env_usize("TEST_RUN_BURST", DEFAULT_TEST_RUN_BURST) as u32,
@@ -315,6 +343,62 @@ fn now_secs() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// `plugin-panel hash-token [令牌]` —— 打印 `PANEL_TOKEN_HASH` 要用的「盐 + 哈希」。
+///
+/// 令牌优先从**标准输入**读：
+///
+/// ```text
+/// printf '%s' "$TOKEN" | plugin-panel hash-token
+/// ```
+///
+/// 为什么推荐 stdin：命令行参数会进 shell 历史，也会出现在同机器上其他用户的
+/// `ps` 输出里 —— 那就等于把明文令牌又泄了一处。
+///
+/// 哈希是**单向**的：忘了令牌只能重新生成（换一个令牌重新配），没法从哈希反推。
+fn hash_token_cmd(arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let token = match arg {
+        Some(t) => t.to_string(),
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("令牌是空的（没给参数，标准输入里也没读到内容）".into());
+    }
+    let hash = auth::hash_token(token)?;
+    // 哈希进 stdout（好让 `HASH=$(... | plugin-panel hash-token)` 拿到干净的值），
+    // 说明进 stderr。
+    println!("{hash}");
+    eprintln!();
+    eprintln!("把哈希配上去（本地落盘的就只有盐+哈希，没有可复用的明文）：");
+    eprintln!("  export PANEL_TOKEN_HASH='{hash}'");
+    eprintln!("  # 或者写成文件（权限 600）：");
+    eprintln!("  echo '{hash}' > /etc/plugin-panel.hash");
+    eprintln!("  export PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash");
+    eprintln!();
+    eprintln!("注意：哈希是单向的，忘了原令牌只能重新生成一个（等于换令牌）。");
+    Ok(())
+}
+
+fn print_usage() {
+    println!("plugin-panel —— 低配设备上的任务控制面板");
+    println!();
+    println!("用法：");
+    println!("  plugin-panel                     启动面板（默认 127.0.0.1:8787）");
+    println!("  plugin-panel serve               同上，显式写法");
+    println!("  plugin-panel hash-token [令牌]    生成令牌的「盐+哈希」（令牌从标准输入读更安全）");
+    println!("  plugin-panel --help              看这段说明");
+    println!();
+    println!("鉴权（二选一，**推荐哈希**）：");
+    println!("  PANEL_TOKEN=明文令牌              支持，但落盘就是可复用凭据");
+    println!("  PANEL_TOKEN_HASH=哈希             推荐：本地只存盐+哈希");
+    println!("  PANEL_TOKEN_FILE / PANEL_TOKEN_HASH_FILE   从文件读（权限建议 600）");
+}
+
 /// 读面板令牌：`PANEL_TOKEN` 优先，其次 `PANEL_TOKEN_FILE` 的内容。
 ///
 /// 为什么要文件形式：systemd 的 `Environment=` 会把令牌写进 unit 文件（常常是 644），
@@ -323,24 +407,71 @@ fn now_secs() -> String {
 /// 两个来源都 `trim()` —— 换行/空格是最常见的坑（`echo xxx > token` 会带一个 `\n`，
 /// 而 `auth.rs` 里候选值也是 trim 过的）。两边不一致的话，
 /// `PANEL_TOKEN=" abc "` 会变成一个「怎么输都登不上」的谜题。
-fn read_token() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Ok(t) = std::env::var("PANEL_TOKEN") {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            return Ok(Some(t));
+fn read_credential() -> Result<Option<auth::Cred>, Box<dyn std::error::Error>> {
+    let hash = read_secret("PANEL_TOKEN_HASH", "PANEL_TOKEN_HASH_FILE")?;
+    let plain = read_secret("PANEL_TOKEN", "PANEL_TOKEN_FILE")?;
+    let (chosen, notes) = choose_credential(hash, plain);
+    for n in &notes {
+        println!("[boot] {n}");
+    }
+    match chosen {
+        // parse() 会当场校验哈希格式：配错了就起不来，而不是「怎么登都登不上」
+        Some(raw) => Ok(Some(auth::Cred::parse(&raw)?)),
+        None => Ok(None),
+    }
+}
+
+/// 从环境变量或文件读一个秘密值（都 trim）。
+///
+/// `trim()` 是刻意的：`echo xxx > token` 会带一个换行，而候选值那边也 trim 过 ——
+/// 两边不一致的话，`PANEL_TOKEN=" abc "` 会变成一个「怎么输都登不上」的谜题。
+fn read_secret(env_key: &str, file_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Ok(v) = std::env::var(env_key) {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return Ok(Some(v));
         }
     }
-    match std::env::var("PANEL_TOKEN_FILE") {
+    match std::env::var(file_key) {
         Ok(path) if !path.is_empty() => {
             let raw = std::fs::read_to_string(&path)
-                .map_err(|e| format!("读 PANEL_TOKEN_FILE={path} 失败: {e}"))?;
-            let t = raw.trim().to_string();
-            if t.is_empty() {
-                return Err(format!("PANEL_TOKEN_FILE={path} 是空的").into());
+                .map_err(|e| format!("读 {file_key}={path} 失败: {e}"))?;
+            let v = raw.trim().to_string();
+            if v.is_empty() {
+                return Err(format!("{file_key}={path} 是空的").into());
             }
-            Ok(Some(t))
+            Ok(Some(v))
         }
         _ => Ok(None),
+    }
+}
+
+/// 决定用哪个凭据，并给出该提示的话。
+///
+/// 抽成**纯函数**是为了能单测：读环境变量的东西没法在同一个进程里反复测。
+///
+/// 优先级：哈希 > 明文。两个都配了不报错（可能是配置过渡期），但明确提示以哈希为准 ——
+/// 静默忽略一个安全相关的配置项是最不该有的行为。
+fn choose_credential(hash: Option<String>, plain: Option<String>) -> (Option<String>, Vec<String>) {
+    let hash = hash.filter(|h| !h.trim().is_empty());
+    let plain = plain.filter(|p| !p.trim().is_empty());
+    match (hash, plain) {
+        (Some(h), Some(_)) => (
+            Some(h),
+            vec![
+                "同时配了 PANEL_TOKEN_HASH 和 PANEL_TOKEN，**以哈希为准**（明文那个被忽略）"
+                    .to_string(),
+            ],
+        ),
+        (Some(h), None) => (Some(h), Vec::new()),
+        (None, Some(p)) => (
+            Some(p),
+            vec![
+                "用的是明文令牌（PANEL_TOKEN）。想让它不以明文落盘：                 `plugin-panel hash-token` 生成哈希，改用 PANEL_TOKEN_HASH"
+                    .to_string(),
+            ],
+        ),
+        (None, None) => (None, Vec::new()),
     }
 }
 
@@ -385,4 +516,52 @@ fn env_usize(key: &str, default: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod cred_choice_tests {
+    use super::choose_credential;
+
+    #[test]
+    fn hash_wins_over_plaintext_and_says_so() {
+        // 两个都配了：不报错（可能是配置过渡期），但**必须提示**以哈希为准 ——
+        // 静默忽略一个安全相关的配置项是最不该有的行为
+        let (chosen, notes) = choose_credential(Some("$argon2id$h".into()), Some("plain".into()));
+        assert_eq!(chosen.as_deref(), Some("$argon2id$h"));
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("以哈希为准"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn plaintext_alone_is_used_but_gets_the_upgrade_hint() {
+        let (chosen, notes) = choose_credential(None, Some("plain".into()));
+        assert_eq!(chosen.as_deref(), Some("plain"));
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("hash-token"), "提示里要给具体命令：{}", notes[0]);
+    }
+
+    #[test]
+    fn hashed_alone_is_silent() {
+        let (chosen, notes) = choose_credential(Some("$argon2id$h".into()), None);
+        assert_eq!(chosen.as_deref(), Some("$argon2id$h"));
+        assert!(notes.is_empty(), "正常配置不该有噪音：{notes:?}");
+    }
+
+    #[test]
+    fn blank_values_count_as_unset() {
+        // 环境变量写成空是最容易犯的错：不能变成「空令牌能过」，也不能当成「配了哈希」
+        let (chosen, notes) = choose_credential(Some("   ".into()), Some("".into()));
+        assert!(chosen.is_none());
+        assert!(notes.is_empty());
+
+        let (chosen, _) = choose_credential(Some("  ".into()), Some("plain".into()));
+        assert_eq!(chosen.as_deref(), Some("plain"), "空哈希不该把明文挤掉");
+    }
+
+    #[test]
+    fn nothing_configured_means_no_auth() {
+        let (chosen, notes) = choose_credential(None, None);
+        assert!(chosen.is_none());
+        assert!(notes.is_empty());
+    }
 }

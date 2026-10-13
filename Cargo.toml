@@ -25,6 +25,12 @@ chrono = "0.4"
 # 所以加为直接依赖**不增加任何编译单元** —— 只是把已经编进来的东西显式声明出来。
 getrandom = "0.2"
 subtle = "2"
+# 令牌的**哈希存储**（第十八轮）：面板支持把令牌以「盐 + 哈希」的形式配置
+# （PANEL_TOKEN_HASH），本地落盘的不再是可直接复用的明文。
+# 用 Argon2id 而不是 SHA-256：令牌虽然通常是高熵随机串，但运维很可能设成
+# 一个弱口令，而弱口令在快速哈希面前没有成本可言。Argon2id 是内存硬的，
+# 参数（m/t/p）随 PHC 串一起存 —— 校验时从串里读，不依赖这里的默认值。
+argon2 = "0.5"
 # host_api.http_fetch 的传输层：阻塞式 + rustls（内置 webpki 根证书，目标机不需要装 CA）。
 # 只用它做「插件发起的出站请求」，服务端仍然是 Axum。
 # 实测（cargo zigbuild aarch64-unknown-linux-musl）能出静态 musl 产物，见 README §9.3。

@@ -309,6 +309,173 @@ def auth_checks(tmp: Path) -> None:
         logf.close()
 
 
+def auth_hash_checks(tmp: Path) -> None:
+    """第十八轮：令牌的**哈希存储**（用户实测指出：「登录令牌不应该明文保存在本地」）。
+
+    支持 `PANEL_TOKEN_HASH`（Argon2id / PHC 串，盐带在串里）之后，本地落盘的
+    不再是可以直接复用的明文 —— 谁读到那个配置文件也只能拿到一个哈希。
+
+    钉住四件事：
+
+      ① `hash-token` 子命令能生成可用的哈希（顺带把 CLI 也测了）
+      ② 哈希令牌能正常登录，错令牌仍然 401
+      ③ **明文绝不落盘**：把令牌明文翻遍 DB / 日志 / 临时目录，一个字节都不该有
+      ④ 哈希与明文同时配置时**以哈希为准**并说出来；坏哈希直接拒绝启动
+    """
+    token = os.urandom(24).hex()
+
+    # ---- ① hash-token 子命令 ----
+    r = subprocess.run(
+        [str(BIN), "hash-token"], input=token.encode(), capture_output=True, timeout=30
+    )
+    hashed = r.stdout.decode().strip()
+    check(
+        r.returncode == 0 and hashed.startswith("$argon2id$") and "m=" in hashed,
+        "hash-token 生成 PHC 格式的盐+哈希",
+        f"rc={r.returncode}, {hashed[:40]}",
+    )
+    check(
+        token not in r.stdout.decode() and token not in r.stderr.decode(),
+        "hash-token 的输出里不含明文令牌",
+    )
+    again = subprocess.run(
+        [str(BIN), "hash-token"], input=token.encode(), capture_output=True, timeout=30
+    ).stdout.decode().strip()
+    check(again != hashed, "两次生成的哈希不同（盐是随机的）")
+
+    # ---- ② 用哈希启动，登录流程照常 ----
+    port = free_port()
+    env = dict(os.environ)
+    env.pop("PANEL_TOKEN", None)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "auth-hash.db"),
+            "PLUGINS_DIR": str(REPO / "plugins"),
+            "PANEL_TOKEN_HASH": hashed,
+        }
+    )
+    logpath = tmp / "auth-hash.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        if not check(wait_ready(base, proc, {"X-Panel-Token": token}), "哈希令牌实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        boot = logpath.read_text(errors="replace")
+        check("Argon2id 哈希" in boot, "启动日志写明用的是哈希（不是明文）", "")
+        check("明文令牌" not in boot, "启动日志没有误报成明文")
+
+        code, _, _ = http(f"{base}/api/state")
+        check(code == 401, "无凭证仍然 401", f"http {code}")
+
+        body = json.dumps({"token": "wrong-" + token}).encode()
+        code, _, _ = http(
+            f"{base}/api/login", method="POST", body=body,
+            headers={"content-type": "application/json"},
+        )
+        check(code == 401, "错令牌 401", f"http {code}")
+
+        body = json.dumps({"token": token}).encode()
+        code, headers, _ = http(
+            f"{base}/api/login", method="POST", body=body,
+            headers={"content-type": "application/json"},
+        )
+        sid = ""
+        for k, v in headers.items():
+            if k == "set-cookie":
+                sid = v.split(";")[0].split("=", 1)[1]
+        check(code == 200 and bool(sid), "**哈希令牌能登录**（走 Argon2 校验）", f"http {code}")
+        code, _, _ = http(f"{base}/api/state", headers={"Cookie": f"panel_session={sid}"})
+        check(code == 200, "会话 cookie 可用", f"http {code}")
+
+        # ---- ③ 明文绝不落盘 ----
+        #
+        # 这一轮最要紧的一条：把令牌明文翻遍**所有**可能落盘的地方。
+        # 它不是实现细节检查，而是「以后别写坏」的闸门 —— 谁哪天顺手把令牌存进
+        # DB（比如做个「记住令牌」），这条会立刻红。
+        code, _, state_body = http(f"{base}/api/state", headers={"Cookie": f"panel_session={sid}"})
+        check(token not in state_body, "/api/state 里不含令牌明文")
+        leaked = []
+        for f in sorted(tmp.rglob("*")):
+            if not f.is_file():
+                continue
+            try:
+                raw = f.read_bytes()
+            except OSError:
+                continue
+            if token.encode() in raw:
+                leaked.append(f.name)
+        check(
+            not leaked,
+            "**明文令牌没有落到任何文件里**（DB / 日志 / 临时目录都翻了）",
+            f"泄漏在: {leaked}" if leaked else "",
+        )
+
+        # ---- ④ 坏哈希：启动就报错，不要变成「怎么登都登不上」 ----
+        bad_env = dict(env)
+        bad_env["PANEL_TOKEN_HASH"] = "$argon2id$这不是哈希"
+        bad_env["BIND_ADDR"] = f"127.0.0.1:{free_port()}"
+        bad = subprocess.run([str(BIN)], capture_output=True, timeout=30, env=bad_env, cwd=REPO)
+        err = (bad.stdout + bad.stderr).decode()
+        check(
+            bad.returncode != 0 and "hash-token" in err,
+            "坏哈希拒绝启动，并告诉用户怎么生成",
+            f"rc={bad.returncode}",
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+    # ---- ⑤ 哈希与明文同时配置：以哈希为准，并且说出来 ----
+    port2 = free_port()
+    env2 = dict(env)
+    env2.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port2}",
+            "DB_PATH": str(tmp / "auth-both.db"),
+            "PANEL_TOKEN_HASH": hashed,
+            "PANEL_TOKEN": "this-should-be-ignored",
+        }
+    )
+    log2 = tmp / "auth-both.log"
+    f2 = open(log2, "w")
+    proc2 = subprocess.Popen([str(BIN)], stdout=f2, stderr=subprocess.STDOUT, env=env2, cwd=REPO)
+    base2 = f"http://127.0.0.1:{port2}"
+    try:
+        if not check(wait_ready(base2, proc2, {"X-Panel-Token": token}), "两个都配了时实例就绪"):
+            return
+        boot2 = log2.read_text(errors="replace")
+        check("以哈希为准" in boot2, "同时配置时明确提示「以哈希为准」")
+        body = json.dumps({"token": "this-should-be-ignored"}).encode()
+        code, _, _ = http(
+            f"{base2}/api/login", method="POST", body=body,
+            headers={"content-type": "application/json"},
+        )
+        check(code == 401, "被忽略的明文**登录不上**（优先级真的生效）", f"http {code}")
+        body = json.dumps({"token": token}).encode()
+        code, _, _ = http(
+            f"{base2}/api/login", method="POST", body=body,
+            headers={"content-type": "application/json"},
+        )
+        check(code == 200, "哈希那条令牌照常能登录", f"http {code}")
+    finally:
+        proc2.terminate()
+        try:
+            proc2.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc2.kill()
+        f2.close()
+
+
 def plugin_lifecycle_checks(tmp: Path) -> None:
     """第十一轮：插件目录变活 + 同名冲突不再静默串台。
 
@@ -2338,6 +2505,7 @@ def main() -> int:
     print()
     print("---- 鉴权（PANEL_TOKEN 模式）----")
     auth_checks(tmp)
+    auth_hash_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
     dev_assets_checks(tmp)

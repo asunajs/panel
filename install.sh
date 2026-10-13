@@ -137,6 +137,9 @@ echo "    BIND_ADDR=0.0.0.0:8787   改监听地址（想让别的设备访问就
 echo "    PLUGINS_DIR=./plugins    插件目录"
 echo "    DB_PATH=./data/panel.db  SQLite 路径"
 echo
-echo "  ⚠️  想让别的设备访问，必须先设令牌 —— 绑非回环地址而没有 PANEL_TOKEN 会拒绝启动："
+echo "  ⚠️  想让别的设备访问，必须先设令牌 —— 绑非回环地址而没有令牌会拒绝启动："
 echo "    PANEL_TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') $BIN_NAME"
 echo "    然后在浏览器打开面板会跳到登录页，粘贴那串令牌即可"
+echo
+echo "  推荐：本地只存「盐+哈希」，不存明文（拿到那个文件也登不上）："
+echo "    printf '%s' "\$TOKEN" | $BIN_NAME hash-token   # 生成 PANEL_TOKEN_HASH"
