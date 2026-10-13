@@ -19,7 +19,12 @@ import {
 
 const PLUGIN = 'host-api-demo';
 
-log(`${PLUGIN}: 已加载（ES 模块写法，import 'host-api'）`);
+// 打**真实宿主**而不是写死名字：Node 有 process，嵌入式 QuickJS 没有。
+// 同一个文件在两处跑，日志会分别显示 "Node v22.x" 和 "QuickJS（嵌入式宿主）"。
+const HOST = typeof process !== 'undefined'
+    ? `Node ${process.version}`
+    : 'QuickJS（嵌入式宿主）';
+log(`${PLUGIN}: 已加载（ES 模块写法，import 'host-api'，宿主 ${HOST}）`);
 
 // ---- 建一张自己的表，验证 sqlite_exec / sqlite_query 往返 ----
 sqlite_exec('CREATE TABLE IF NOT EXISTS js_hits (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL)');

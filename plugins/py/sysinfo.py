@@ -6,12 +6,16 @@
 #
 # 同一份文件也能在 CPython 下跑：
 #   cd adapters/python && python3 -m host_api ../../plugins/py/sysinfo.py --once
+import sys as _sys
+
 from host_api import log, register_cron, every
 
 PLUGIN = "sysinfo"
 _state = {"ticks": 0, "runs": 0}
 
-log(PLUGIN + ": 已加载（pocketpy 插件，from host_api import ...）")
+# 打**真实解释器版本**而不是写死运行时名：同一个文件在嵌入式 PocketPy 里是
+# "2.2.0"，在 CPython 适配器里是 "3.x.y" —— 一眼就能看出这份脚本跑在哪个宿主。
+log(PLUGIN + ": 已加载（from host_api import ...，解释器 " + str(_sys.version) + "）")
 
 
 def heartbeat(payload):

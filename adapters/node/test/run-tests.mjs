@@ -603,7 +603,9 @@ test('运行器：仓库里跨运行时写法的插件（plugins/js/host-api-dem
   });
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 0, out);
-  assert.match(out, /已加载（ES 模块写法，import 'host-api'）/);
+  // 插件自己会报出真实宿主（Node 有 process，嵌入式 QuickJS 没有）——
+  // 断言宿主名，比只断言「加载了」更能证明「同一份文件真的在 Node 里跑」
+  assert.match(out, /已加载（ES 模块写法，import 'host-api'，宿主 Node v\d+/);
   assert.match(out, /内置 http server 监听 http:\/\/127\.0\.0\.1:\d+，路由: GET \/hits, POST \/hits/);
   assert.match(out, /累计写入 1 条/);
 
