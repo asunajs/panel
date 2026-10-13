@@ -288,7 +288,16 @@ pub enum EngineCmd {
         expr: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
-    /// 面板删除任务。只允许删 `source = 'panel'` 的行（插件声明的任务只能暂停）。
+    /// 撤销墓碑：把被面板删掉的插件任务装回调度器
+    RestoreJob {
+        plugin: String,
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 面板删除任务。
+    ///
+    /// 两条路的落地方式不同：面板任务**真删行**；插件代码声明的任务立**墓碑**
+    /// （`jobs.deleted = 1`）—— 真删没用，`sync_jobs` 下一次重载会按代码建回来。
     RemoveJob {
         plugin: String,
         name: String,
@@ -773,6 +782,17 @@ fn worker_main(
     restore_paused(&mut sched, &logs, &db, boot_at, &owned);
     // 覆盖值必须在 install_tasks 之后装（那时任务才存在），而且要在 seed_counters 之前
     apply_overrides(&mut sched, &logs, &db, boot_at, &owned);
+    // 删掉的必须在装完之后摘掉，否则「删掉的任务」重启后又跑起来了
+    drop_deleted(&mut sched, &logs, &db, &owned);
+    // 同时清掉**真正过期**的墓碑（插件代码里已经不再声明它了）。
+    // 判定必须用这份声明列表，不能用 sync_jobs 手里的 specs（见 db::prune_tombstones）。
+    let declared: Vec<(String, String)> = pending
+        .iter()
+        .map(|d| (d.plugin.clone(), d.name.clone()))
+        .collect();
+    if let Err(e) = db::prune_tombstones(&db, &owned, &declared) {
+        eprintln!("[engine] 清理过期墓碑失败: {e}");
+    }
     for t in sched.tasks() {
         hostapi::push_log(
             &logs,
@@ -900,6 +920,16 @@ fn worker_main(
                 reply,
             }) => {
                 let out = remove_job(&mut sched, &logs, &db, &plugin, &name);
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::RestoreJob {
+                plugin,
+                name,
+                reply,
+            }) => {
+                let out = restore_job(
+                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name,
+                );
                 let _ = reply.send(out);
             }
             Ok(EngineCmd::EditJob {
@@ -1353,17 +1383,130 @@ fn remove_job(
     plugin: &str,
     name: &str,
 ) -> Result<(), String> {
-    match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
-        None => Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
-        Some(src) if src != "panel" => Err(format!(
-            "任务 `{name}` 由插件 `{plugin}` 的代码声明（source = {src}），不能在面板上删除；\
-             想让它停下来请用「暂停」"
-        )),
-        Some(_) => {
-            db::delete_panel_job(db, plugin, name).map_err(|e| format!("写库失败: {e}"))?;
-            sched.remove_task(plugin, name);
-            hostapi::push_log(logs, plugin, "info", &format!("面板删除了任务 `{name}`"));
-            Ok(())
+    let now = Local::now();
+    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+        None => return Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
+        Some(src) => src == "panel",
+    };
+
+    if is_panel {
+        // 面板任务：真删（库里就是权威，插件代码里没有这一条，不会有人把它建回来）
+        db::delete_panel_job(db, plugin, name).map_err(|e| format!("写库失败: {e}"))?;
+        sched.remove_task(plugin, name);
+        hostapi::push_log(logs, plugin, "info", &format!("面板删除了任务 `{name}`"));
+        return Ok(());
+    }
+
+    // 插件代码声明的任务：**删行没用** —— `sync_jobs` 每次重载都按代码收敛，
+    // 插件还声明着它就会被建回来。所以删 = 立墓碑：调度器摘掉、列表默认不显示，
+    // 而 `sync_jobs` 认这个标记（不许把状态改回 running）。
+    db::set_job_deleted(db, plugin, name, true, &fmt_secs(now))
+        .map_err(|e| format!("写库失败: {e}"))?;
+    sched.remove_task(plugin, name);
+    hostapi::push_log(
+        logs,
+        plugin,
+        "info",
+        &format!(
+            "面板删除了插件代码声明的任务 `{name}`（留了墓碑：插件代码仍然声明它，\
+             所以不会真的消失；不想要它请改插件代码，误删可以在列表底部恢复）"
+        ),
+    );
+    Ok(())
+}
+
+/// 撤销墓碑：把被面板删掉的插件任务装回调度器。
+///
+/// **不需要重载插件**：表达式就在库里的 `schedule` 列（插件代码声明的那个值），
+/// 处理函数在触发时按名字从插件里找 —— 和 `reinstall_panel_jobs` 装面板任务是同一条路。
+/// 重载插件会把解释器状态清掉，那是没有必要的副作用。
+fn restore_job(
+    sched: &mut Scheduler,
+    plugins: &[LoadedPlugin],
+    logs: &SharedLogs,
+    db: &Db,
+    wd: &Watchdog,
+    budget: Duration,
+    plugin: &str,
+    name: &str,
+) -> Result<(), String> {
+    let now = Local::now();
+    let row = db::list_jobs(db)
+        .map_err(|e| format!("读库失败: {e}"))?
+        .into_iter()
+        .find(|j| j.plugin == plugin && j.name == name)
+        .ok_or_else(|| format!("没有名为 `{name}` 的任务（插件 `{plugin}`）"))?;
+    if !row.deleted {
+        return Err(format!("任务 `{name}` 没有被删除，不需要恢复"));
+    }
+    // 插件不在 / 加载失败 / 处理函数没了 → 恢复出来只会每个触发点报一次错，先说清楚
+    let p = plugins
+        .iter()
+        .find(|p| p.name == plugin)
+        .ok_or_else(|| format!("插件 `{plugin}` 不在了，恢复前请先把它放回去"))?;
+    if p.error.is_some() {
+        return Err(format!("插件 `{plugin}` 加载失败，不能恢复它的任务"));
+    }
+    if !plugin_has_handler(p, name, wd, budget) {
+        return Err(format!(
+            "插件 `{plugin}` 里没有名为 `{name}` 的处理函数，恢复出来也跑不了"
+        ));
+    }
+    let expr = row.override_expr.clone().unwrap_or_else(|| row.schedule.clone());
+    let schedule =
+        Schedule::parse(&expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+
+    db::set_job_deleted(db, plugin, name, false, &fmt_secs(now))
+        .map_err(|e| format!("写库失败: {e}"))?;
+    if sched.find(plugin, name).is_none() {
+        sched
+            .add(plugin, name, &expr, schedule, now)
+            .map_err(|e| format!("装回调度器失败: {e}"))?;
+        // 累计计数从库里灌回来（`add` 出来的是零计数）
+        sched.seed_counters(plugin, name, row.runs.max(0) as u64, row.trips.max(0) as u32);
+        if row.paused {
+            let _ = sched.set_paused(plugin, name, true, now);
+        }
+        if row.override_expr.is_some() {
+            let _ = sched.set_override(plugin, name, row.override_expr.as_deref(), now);
+        }
+    }
+    hostapi::push_log(
+        logs,
+        plugin,
+        "info",
+        &format!("面板恢复了任务 `{name}`（表达式 `{expr}`）"),
+    );
+    Ok(())
+}
+
+/// 把被面板删掉的任务从调度器里摘掉。
+///
+/// 为什么必须有这一步：`install_tasks` 是照插件代码登记的任务装的，它不知道
+/// 哪些被用户删过 —— 少了这一步，**删掉的任务会在下次重启 / 热更新时自己跑起来**。
+/// 和 `restore_paused`（暂停状态）、`apply_overrides`（覆盖表达式）是同一类坑，
+/// 三者都必须在「装完之后、seed 之前」跑一遍。
+fn drop_deleted(
+    sched: &mut Scheduler,
+    logs: &SharedLogs,
+    db: &Db,
+    owned: &[String],
+) {
+    let rows = match db::list_deleted_jobs(db, Some(owned)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[engine] 读取已删除任务失败: {e}");
+            return;
+        }
+    };
+    for (plugin, name, _, _) in rows {
+        if sched.remove_task(&plugin, &name) {
+            hostapi::push_log(
+                logs,
+                &plugin,
+                "info",
+                &format!("任务 `{name}` 按「面板删除」的状态不装（可在列表底部恢复）"),
+            );
         }
     }
 }
@@ -2300,6 +2443,7 @@ fn settle_plugin(
     let mine = vec![name.to_string()];
     restore_paused(sched, logs, db, Local::now(), &mine);
     apply_overrides(sched, logs, db, Local::now(), &mine);
+    drop_deleted(sched, logs, db, &mine);
 }
 
 /// 按名字找一个**可用的**插件实例。

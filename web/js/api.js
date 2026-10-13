@@ -133,6 +133,14 @@ export function editJob(plugin, name, expr) {
   });
 }
 
+/// 撤销「面板删除」（墓碑）——把被删掉的插件任务装回调度器。
+export function restoreJob(plugin, name) {
+  return request(
+    `/api/jobs/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}/restore`,
+    { method: 'POST', panel: true },
+  );
+}
+
 export function deleteJob(plugin, name) {
   return request(`/api/jobs/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}/delete`, {
     method: 'POST',

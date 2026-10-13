@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         // 任务**定义**：新建 / 删除 / 编辑 / 清理失效（`jobs` 表）
         .route("/api/jobs", post(add_job))
         .route("/api/jobs/{plugin}/{name}/delete", post(delete_job))
+        .route("/api/jobs/{plugin}/{name}/restore", post(restore_job))
         .route("/api/jobs/{plugin}/{name}/edit", post(edit_job))
         .route("/api/jobs/cleanup", post(cleanup_jobs))
         // 任务**操作**：立即执行 / 暂停 / 恢复
@@ -556,10 +557,15 @@ async fn add_job(
     }
 }
 
-/// `POST /api/jobs/{plugin}/{name}/delete` —— 删除一条**面板任务**。
+/// `POST /api/jobs/{plugin}/{name}/delete` —— 删除一条任务。
 ///
-/// 插件代码声明的任务（`source = 'plugin'`）返回 `400`：删了也会在下一次
-/// `sync_jobs`（重启 / 热更新）里原样回来，让它停下来应该用「暂停」。
+/// 两条路的落地方式不同：
+///
+/// - 面板创建的任务（`source = 'panel'`）：**真删行** —— 库里就是权威来源。
+/// - 插件代码声明的任务（`source = 'plugin'`）：立**墓碑**（`jobs.deleted = 1`）。
+///   真删行没用，`sync_jobs` 下一次重载会按插件代码把它建回来；墓碑会让调度器摘掉它、
+///   列表默认不显示它，而且 `sync_jobs` 认这个标记（不会把状态改回 running）。
+///   误删可以 `POST .../restore` 恢复。
 async fn delete_job(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
@@ -580,6 +586,39 @@ async fn delete_job(
     ) {
         return r;
     }
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
+/// `POST /api/jobs/{plugin}/{name}/restore` —— 撤销墓碑，把任务装回调度器。
+///
+/// 只对 `deleted = 1` 的行有意义。**不需要重载插件**：表达式就在库里的
+/// `schedule`（代码声明的值）或 `override_expr`，处理函数在触发时按名字从插件里找。
+async fn restore_job(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(r) = route(
+        &st,
+        &plugin,
+        EngineCmd::RestoreJob {
+            plugin: plugin.clone(),
+            name: name.clone(),
+            reply: tx,
+        },
+    ) {
+        return r;
+    }
+    // 恢复里会问一次「处理函数还在不在」（真实调用插件函数），给 5 秒
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
         Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
         Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),

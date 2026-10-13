@@ -1178,19 +1178,170 @@ def job_override_checks(tmp: Path) -> None:
         j = one() or {}
         check(j.get("schedule") == "@every 30s", "撤销后用的还是代码声明的值")
 
-        # ④ 删除仍然拒绝
+        # ④ 删除：墓碑 + 可恢复（完整的一组在 `job_delete_checks` 里）
         code, body = post_json(f"{base}/api/jobs/ov-demo/tick/delete")
-        check(code == 400, "插件任务仍然不能删除（删了会被 sync_jobs 建回来）", f"HTTP {code}")
-        check(
-            "暂停" in str(body.get("error", "")),
-            "拒绝时告诉用户该用「暂停」",
-            str(body.get("error"))[:70],
-        )
+        check(code == 200 and body.get("ok"), "插件任务可以删（立墓碑）", f"HTTP {code} {body}")
+        code, body = post_json(f"{base}/api/jobs/ov-demo/tick/restore")
+        check(code == 200 and body.get("ok"), "删完可以恢复", f"HTTP {code} {body}")
 
         # 面板任务不受影响
         code, _ = post_json(f"{base}/api/jobs", payload={"plugin": "ov-demo", "name": "tick", "expr": "@every 5s"})
         code2, _ = post_json(f"{base}/api/jobs/ov-demo/tick/edit", payload={"expr": "@every 6s"})
         check(code2 in (200, 400), "对插件任务重复编辑不会 500", f"HTTP {code2}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
+def job_delete_checks(tmp: Path) -> None:
+    """删除插件代码声明的任务 = 立**墓碑**。
+
+    用户实测问过「删除呢」。旧答案是「插件任务不能删」（删了 `sync_jobs` 下一次重载
+    就按代码建回来，后端 400）。现在的语义是墓碑：调度器摘掉、列表默认不显示、
+    `sync_jobs` 认这个标记、随时可以恢复。
+
+    这一组钉住四件事：
+
+      ① 删除后不调度，而且**重启**后不会自己回来
+      ② **热更新**（插件文件被改，引擎重跑一遍 sync_jobs）之后墓碑仍生效
+      ③ 恢复能把它装回调度器（不需要重载插件）
+      ④ 面板任务仍然是**真删**（库里就是权威，删了不会再出现）
+    """
+    pdir = tmp / "del-plugins"
+    pdir.mkdir(parents=True)
+    src = pdir / "del-demo.js"
+    src.write_text(
+        "import { log, register_cron, register_handler } from 'host-api';\n"
+        "register_cron('keep', '@every 30s', function () { log('keep'); });\n"
+        # extra 只注册处理函数、不声明任务：给「面板创建的任务」那一步用
+        "register_handler('extra', function () { log('extra'); });\n"
+    )
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "del.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "del.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def one(name="keep"):
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return None
+        for j in body.get("jobs", []):
+            if (j["plugin"], j["name"]) == ("del-demo", name):
+                return j
+        return None
+
+    def wait_for(pred, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.3)
+        return False
+
+    def restart():
+        nonlocal proc, logf
+        proc.terminate()
+        proc.wait(timeout=15)
+        logf.close()
+        logf = open(logpath, "w")
+        proc = subprocess.Popen(
+            [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+        )
+        return wait_ready(base, proc, timeout=20.0)
+
+    try:
+        check(wait_ready(base, proc, timeout=20.0), "删除测试实例已就绪")
+        check(wait_for(lambda: one() is not None, 15.0), "插件声明的任务已注册")
+
+        # ① 删除 → 墓碑
+        code, body = post_json(f"{base}/api/jobs/del-demo/keep/delete")
+        check(code == 200 and body.get("ok"), "插件任务可以删除了（立墓碑）", f"{code} {body}")
+        check(
+            wait_for(lambda: (one() or {}).get("deleted") is True, 8.0),
+            "库里标记为已删除",
+        )
+        check((one() or {}).get("status") == "deleted", "状态是 deleted（不是 running）")
+
+        # 重启后不能自己回来
+        check(restart(), "重启后实例已就绪")
+        check(
+            wait_for(lambda: (one() or {}).get("deleted") is True, 15.0),
+            "**重启后仍然是删除状态**（不会自己回来）",
+        )
+        log2 = logpath.read_text(errors="replace")
+        check(
+            "按「面板删除」的状态不装" in log2,
+            "启动日志写明了「按删除状态不装」",
+            next((l for l in log2.splitlines() if "删除" in l), "（没找到）")[:80],
+        )
+
+        # ② 热更新之后墓碑仍生效（这一步最难：重载会重跑 sync_jobs）
+        src.write_text(
+            "import { log, register_cron, register_handler } from 'host-api';\n"
+            "register_cron('keep', '@every 30s', function () { log('keep v2'); });\n"
+            # 热更新这一版也要带上 extra：否则第 ④ 步「面板任务」会因为处理函数
+            # 不见了而被拒（400）—— 我第一版就是这么把测试写红的
+            "register_handler('extra', function () { log('extra v2'); });\n"
+        )
+        time.sleep(3.5)
+        check(
+            wait_for(lambda: (one() or {}).get("deleted") is True, 10.0),
+            "**热更新后墓碑仍生效**（删掉的任务没被插件重载带回来）",
+        )
+        code, body = fetch_json(f"{base}/api/state")
+        check(
+            any(
+                j["plugin"] == "del-demo" and j["name"] == "keep" and j.get("deleted")
+                for j in body.get("jobs", [])
+            ),
+            "热更新后它仍然在库里（墓碑保留，能恢复）",
+        )
+
+        # ③ 恢复
+        code, body = post_json(f"{base}/api/jobs/del-demo/keep/restore")
+        check(code == 200 and body.get("ok"), "可以恢复", f"{code} {body}")
+        check(
+            wait_for(lambda: (one() or {}).get("deleted") is False, 8.0),
+            "恢复后不再是删除状态",
+        )
+        check((one() or {}).get("status") == "running", "恢复后回到 running")
+        code, body = post_json(f"{base}/api/jobs/del-demo/keep/restore")
+        check(code == 400, "对没被删除的任务再恢复会报错（400）", f"HTTP {code}")
+
+        # ④ 面板任务：真删（库里不留行，而且 sync_jobs 不会把它建回来 —— 代码里没它）
+        #
+        # 注意别拿插件已经声明的名字来建面板任务：会被重名校验拒掉（400），
+        # 于是这一步测的其实是插件任务（我第一版就是这么写错的）。
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "del-demo", "name": "extra", "expr": "@every 20s"},
+        )
+        check(code == 200, "面板任务创建成功", f"{code} {body}")
+        check(wait_for(lambda: one("extra") is not None, 8.0), "面板任务已在列表里")
+        code, body = post_json(f"{base}/api/jobs/del-demo/extra/delete")
+        check(code == 200, "面板任务删除成功", f"{code} {body}")
+        check(
+            wait_for(lambda: one("extra") is None, 8.0),
+            "面板任务被真删（库里不留行，sync_jobs 也不会把它建回来）",
+        )
+        check(one() is not None, "同一插件里插件声明的任务不受影响")
     finally:
         proc.terminate()
         try:
@@ -1800,13 +1951,16 @@ def main() -> int:
             f"runs {runs_before} → {after_job.get('runs')}（等了 2.5 秒）",
         )
 
-        # ⑧ 插件代码声明的任务不能在面板上删（删了也会被 sync_jobs 装回来）
+        # ⑧ 插件代码声明的任务：删 = 立墓碑（**本轮改的语义**）
+        #
+        # 以前这里断言的是 400（「删了会被 sync_jobs 装回来」）。用户实测问「删除呢」，
+        # 之后改成墓碑：调度器摘掉、列表不显示、sync_jobs 认这个标记、可恢复。
+        # 一整套（含热更新与重启）在 `job_delete_checks` 里。
         code, body = post_json(f"{base}/api/jobs/panel-jobs/code-side/delete")
-        check(
-            code == 400 and "source" in str(body.get("error", "")),
-            "插件声明的任务拒绝从面板删除",
-            f"http {code}, {body.get('error')}",
-        )
+        check(code == 200 and body.get("ok"), "插件声明的任务可以删（立墓碑）", f"http {code}, {body}")
+        after = {(j["plugin"], j["name"]): j for j in fetch_json(f"{base}/api/state")[1]["jobs"]}
+        row = after.get(("panel-jobs", "code-side")) or {}
+        check(row.get("deleted") is True, "删除后标记成 deleted", str(row.get("status")))
 
         # ⑨ 面板任务可以删，删完从列表消失
         code, body = post_json(f"{base}/api/jobs/panel-jobs/echo/delete")
@@ -1922,6 +2076,7 @@ def main() -> int:
     plugin_ui_checks(tmp)
     job_edit_checks(tmp)
     job_override_checks(tmp)
+    job_delete_checks(tmp)
 
     print()
     if FAILURES:

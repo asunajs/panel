@@ -268,14 +268,13 @@ const SHOTS = (o) => [
          })()`,
       );
       const sum = telling.nums.reduce((a, b) => a + b, 0);
-      // 两个分支的数字都要对：
-      //   无面板任务 → 说明里只有 1 个数字（代码声明的个数），此时**没有**删除按钮
-      //   有面板任务 → 「N 个面板创建；M 个由代码声明」，N 就是可删除的个数
-      // 编辑按钮两类任务都有（插件任务的编辑会落成「覆盖」），所以它应当等于卡片数。
+      // 说明行里的数字是「面板创建 / 代码声明」的分布，必须和卡片总数对上。
+      // 编辑与删除现在对**所有真实任务**开放（插件任务的编辑落成「覆盖」、
+      // 删除落成「墓碑」），所以两者都应当等于卡片数。
       const countsOk =
         telling.nums.length > 0 &&
         sum === telling.cards &&
-        telling.deletable === (telling.nums.length >= 2 ? telling.nums[0] : 0) &&
+        telling.deletable === telling.cards &&
         telling.editable === telling.cards;
 
       const tight = r.length > 0 && r.every((x) => !x.broken && x.最大徽章间距 <= 16);
@@ -302,7 +301,7 @@ const SHOTS = (o) => [
             ? `${r.length} 张卡片：最大徽章间距 ${Math.max(...r.map((x) => x.最大徽章间距))}px，`
               + `右端余量 ${r.map((x) => x.右端余量).join('/')}；说明行数字 `
               + `${telling.nums.join('+')}=${sum}，实际 ${telling.cards} 张卡、`
-              + `${telling.editable} 张可编辑、${telling.deletable} 张可删除`
+              + `${telling.editable} 张可编辑、${telling.deletable} 张可删除（都等于卡片数）`
             : bad.join('；'),
       };
     },
@@ -367,7 +366,7 @@ const SHOTS = (o) => [
       note('卡片上同时显示生效值与代码里的值', shown.showsEffective && shown.showsDeclared, JSON.stringify(shown));
       note('有「撤销覆盖」按钮', shown.hasUndo === true);
       note('插件任务有「编辑」按钮（不是只读）', shown.hasEdit === true);
-      note('插件任务仍然没有「删除」按钮（删了会被 sync_jobs 建回来）', shown.hasDelete === false);
+      note('插件任务也有「删除」按钮（立墓碑，可恢复）', shown.hasDelete === true);
 
       // 点「撤销覆盖」→ 回到代码声明的值
       const clicked = await ev(
@@ -392,13 +391,87 @@ const SHOTS = (o) => [
       }
       note('撤销后回到代码声明的 @every 30s、覆盖标记消失', gone === true);
 
+      // ---- 删除 → 折叠 → 恢复（同一张卡片走完整条路）----
+      const del = await ev(
+        `(function () {
+           const c = ${card(target)};
+           const b = c && c.querySelector('[data-act="delete"]');
+           if (!b) return false;
+           b.click();
+           return true;
+         })()`,
+      );
+      note('点击删除', del === true);
+      let collapsed = null;
+      for (let i = 0; i < 40; i += 1) {
+        await sleep(150);
+        collapsed = await ev(
+          `(function () {
+             const still = !!${card(target)};
+             const btn = document.querySelector('#show-deleted');
+             return { still, toggle: btn ? btn.textContent.trim() : null };
+           })()`,
+        );
+        if (collapsed && !collapsed.still && collapsed.toggle) break;
+      }
+      note(
+        '删掉后卡片从列表消失，出现「显示 N 个已删除的任务」',
+        collapsed && collapsed.still === false && !!collapsed.toggle,
+        JSON.stringify(collapsed),
+      );
+
+      const revealed = await ev(
+        `(function () {
+           const btn = document.querySelector('#show-deleted');
+           if (!btn) return false;
+           btn.click();
+           return true;
+         })()`,
+      );
+      await sleep(300);
+      const goneCard = await ev(
+        `(function () {
+           const c = ${card(target)};
+           return c
+             ? { hasRestore: !!c.querySelector('[data-act="restore"]'), text: c.textContent.replace(/\\s+/g, ' ').slice(0, 40) }
+             : null;
+         })()`,
+      );
+      note(
+        '展开后能看到它，并带「恢复」按钮',
+        revealed === true && !!goneCard && goneCard.hasRestore === true,
+        JSON.stringify(goneCard),
+      );
+
+      const restored = await ev(
+        `(function () {
+           const c = ${card(target)};
+           const b = c && c.querySelector('[data-act="restore"]');
+           if (!b) return false;
+           b.click();
+           return true;
+         })()`,
+      );
+      note('点击恢复', restored === true);
+      let back = false;
+      for (let i = 0; i < 40 && !back; i += 1) {
+        await sleep(150);
+        back = await ev(
+          `(function () {
+             const c = ${card(target)};
+             return !!c && !!c.querySelector('[data-act="run"]') && !c.querySelector('[data-act="restore"]');
+           })()`,
+        );
+      }
+      note('恢复后回到正常卡片（有「立即执行」）', back === true);
+
       const failed = results.filter((r) => !r.ok);
       return {
         ok: failed.length === 0 && !shown.missing,
-        label: '插件任务的「覆盖」：可编辑、有标记、能撤销、仍不可删',
+        label: '插件任务：可编辑（覆盖）、可删除（墓碑）、可恢复',
         detail:
           failed.length === 0
-            ? `${results.length} 项通过（生效值/声明值都在卡片上）`
+            ? `${results.length} 项通过（覆盖 + 删除 + 恢复全流程）`
             : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
       };
     },
@@ -546,12 +619,11 @@ const SHOTS = (o) => [
       const code = await card('hit-report');
       results.push(
         note(
-          // 插件代码声明的任务**有编辑**（改的是「覆盖」：写 override_expr，
-          // 代码声明的值原样保留）、**没有删除**（删了会被 sync_jobs 建回来）。
-          // 这条断言以前是反过来的 —— 用户实测问过「任务不能编辑不能删除？」
-          // 之后，编辑才对插件任务开放。
-          '插件任务：有编辑（记成覆盖）、没有删除',
-          !code.missing && code.hasRun && code.hasPause && code.hasEdit && !code.hasDelete,
+          // 插件代码声明的任务：编辑 → 「覆盖」、删除 → 「墓碑」，两个都有。
+          // 这条断言改过两次：最初断言「编辑和删除都不给」，用户实测问「任务不能编辑
+          // 不能删除？」之后先放开编辑，再问「删除呢」之后放开删除。
+          '插件任务：有编辑（覆盖）、有删除（墓碑）',
+          !code.missing && code.hasRun && code.hasPause && code.hasEdit && code.hasDelete,
           JSON.stringify(code),
         ),
       );

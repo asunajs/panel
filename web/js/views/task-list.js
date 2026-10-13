@@ -16,6 +16,7 @@ import {
   resumeTask,
   editJob,
   deleteJob,
+  restoreJob,
   cleanupJobs,
 } from '../api.js';
 import { TASKS } from '../mock.js';
@@ -27,6 +28,8 @@ const STATUS_MAP = {
   tripped: { cls: 'failed', text: '已熔断' },
   error: { cls: 'failed', text: '执行出错' },
   idle: { cls: 'idle', text: '待触发' },
+  // 面板删掉的（墓碑）：插件代码仍然声明它，所以它还在库里但不调度
+  deleted: { cls: 'idle', text: '已删除' },
 };
 
 function esc(s) {
@@ -67,6 +70,9 @@ function fromJob(j) {
     runs: j.runs,
     source: j.source,
     paused: j.paused,
+    // 被面板删掉的（墓碑）。插件代码仍然声明它，所以它还在库里 ——
+    // 默认不显示、不调度，列表底部可以展开恢复。
+    deleted: !!j.deleted,
     real: true,
   };
 }
@@ -97,15 +103,18 @@ function taskCard(t) {
   //   - 删除：只有面板建的任务。插件代码声明的任务删不掉 —— 身份是「插件名 +
   //     处理函数名」，`sync_jobs` 下一次重载就把它建回来了（后端 400）。要让它停下来
   //     用「暂停」（暂停状态跨重启保留），所以这里不给一个骗人的入口。
-  const canEdit = t.real;
-  const canDelete = t.real && t.source === 'panel';
-  const ops = t.real
-    ? `<button class="btn" data-act="run">立即执行</button>
+  // 删除：**所有真实任务都能删**。面板任务真删行；插件代码声明的任务立墓碑
+  // （`jobs.deleted = 1`）—— 真删行没用，`sync_jobs` 下一次重载会按代码建回来。
+  // 删掉之后卡片挪到列表底部，带一个「恢复」。
+  const ops = !t.real
+    ? '<span class="hint">示例数据，无操作</span>'
+    : t.deleted
+      ? '<button class="btn" data-act="restore">恢复</button>'
+      : `<button class="btn" data-act="run">立即执行</button>
        <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
-       ${canEdit ? '<button class="btn" data-act="edit">编辑</button>' : ''}
+       <button class="btn" data-act="edit">编辑</button>
        ${t.covered ? '<button class="btn" data-act="uncover" title="把频率改回插件代码里声明的值">撤销覆盖</button>' : ''}
-       ${canDelete ? '<button class="btn danger" data-act="delete">删除</button>' : ''}`
-    : '<span class="hint">示例数据，无操作</span>';
+       <button class="btn danger" data-act="delete">删除</button>`;
 
   return `
     <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}">
@@ -115,7 +124,7 @@ function taskCard(t) {
         <div class="card-head-main">
           <span class="card-title mono">${esc(t.name)}</span>
           ${langBadge(t.lang)}
-          ${badge(t.status, t.trips)}
+          ${t.deleted ? badge('deleted', 0) : badge(t.status, t.trips)}
         </div>
         <span class="card-actions">${ops}</span>
       </div>
@@ -196,17 +205,23 @@ export async function render(root, ctx, opts = {}) {
   // 「任务不能编辑不能删除？」。
   const panelCount = tasks.filter((t) => t.real && t.source === 'panel').length;
   const codeCount = tasks.filter((t) => t.real && t.source !== 'panel').length;
+  // 删掉的挪到列表底部折叠：默认**不渲染**（不是渲染后 hidden），
+  // 这样「界面上有多少张卡片」和「有多少个活任务」始终是一回事 ——
+  // 断言和用户数数都不会被隐藏 DOM 骗到。
+  const alive = tasks.filter((t) => !t.deleted);
+  const gone = tasks.filter((t) => t.deleted);
   const realCount = panelCount + codeCount;
   const kindNote = !realCount
     ? ''
     : `<div class="list-note">${
         panelCount === 0
           ? `这 ${codeCount} 个任务都由**插件代码**声明（表达式写在插件源码里）。` +
-            `「编辑」可以改它的触发频率 —— 面板会把它记成一条**覆盖**，` +
-            `代码里的值原样保留，重启和热更新都不会丢；想回到代码的值就点「撤销覆盖」。` +
-            `也可以用「暂停」让它停下来。`
-          : `${panelCount} 个面板创建的任务可以编辑 / 删除；` +
-            `${codeCount} 个由插件代码声明，编辑它记的是**覆盖**（代码里的值保留）。`
+            `「编辑」改它的触发频率（记成一条**覆盖**，代码里的值原样保留，` +
+            `重启和热更新都不会丢，点「撤销覆盖」回到代码的值）；` +
+            `「删除」是**不调度 + 不显示**（插件代码还声明着它，真删了下次重载会回来），` +
+            `删掉的任务挪到列表底部，可以恢复。`
+          : `${panelCount} 个面板创建的任务可以编辑 / 删除（真删）；` +
+            `${codeCount} 个由插件代码声明，编辑记成**覆盖**、删除记成**墓碑**（可恢复）。`
       }</div>`.replace(/\*\*/g, '');
 
   root.innerHTML = `
@@ -224,12 +239,35 @@ export async function render(root, ctx, opts = {}) {
       <div id="cleanup-box" class="stack"></div>
       ${notice}
       <div class="grid">
-        ${tasks.length ? tasks.map(taskCard).join('') : '<div class="card empty">还没有任务</div>'}
+        ${alive.length ? alive.map(taskCard).join('') : '<div class="card empty">还没有任务</div>'}
       </div>
+      ${
+        gone.length
+          ? `<div class="list-note" style="margin-top:var(--sp-3)">
+               <button class="btn ghost" id="show-deleted">显示 ${gone.length} 个已删除的任务</button>
+               <span class="hint">插件代码仍然声明它们，所以这里的「删除」是不调度 + 不显示；随时可以恢复。</span>
+             </div>
+             <div class="grid" id="deleted-grid" hidden></div>`
+          : ''
+      }
     </div>`;
 
   // 手动刷新是用户主动要看到「在加载」的反馈，所以不清空
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
+
+  // 「显示已删除的」：按需渲染（见上面关于「不渲染 vs hidden」的说明）
+  root.querySelector('#show-deleted')?.addEventListener('click', (ev) => {
+    const grid = root.querySelector('#deleted-grid');
+    const btn = ev.currentTarget;
+    const hidden = grid.hidden;
+    if (hidden) {
+      grid.innerHTML = gone.map(taskCard).join('');
+    } else {
+      grid.innerHTML = '';
+    }
+    grid.hidden = !hidden;
+    btn.textContent = hidden ? `隐藏这 ${gone.length} 个` : `显示 ${gone.length} 个已删除的任务`;
+  });
 
   // ---- 清理失效任务：两阶段 ----
   //
@@ -340,6 +378,7 @@ export async function render(root, ctx, opts = {}) {
     else if (act === 'delete') res2 = await deleteJob(plugin, name);
     // 撤销覆盖：给后端发 null，它会把 override_expr 清掉、回到代码声明的值
     else if (act === 'uncover') res2 = await editJob(plugin, name, null);
+    else if (act === 'restore') res2 = await restoreJob(plugin, name);
     else return;
 
     btn.disabled = false;
@@ -349,6 +388,7 @@ export async function render(root, ctx, opts = {}) {
       resume: '恢复',
       delete: '删除',
       uncover: '撤销覆盖',
+      restore: '恢复',
     }[act];
     if (res2.ok) {
       ctx.toast(`${label}：${verb}成功`, 'ok');

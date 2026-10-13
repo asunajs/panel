@@ -104,6 +104,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 单独一列而不是改写 schedule：sync_jobs 每次重载都按代码覆盖 schedule，
     // 面板改的东西必须放在它碰不到的地方。见 scheduler::ScheduledTask。
     ensure_column(&conn, "jobs", "override_expr", "TEXT")?;
+    // 「面板删掉的」墓碑。插件代码声明的任务**不能真删**（下一次 sync_jobs 会按代码
+    // 建回来），所以改成留一行墓碑：调度器不装它、列表默认不显示它，
+    // 而 `sync_jobs` 认这个标记、不许把它的状态改回 running。
+    ensure_column(&conn, "jobs", "deleted", "INTEGER NOT NULL DEFAULT 0")?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -205,6 +209,10 @@ pub struct JobRow {
     pub schedule: String,
     /// 面板覆盖的表达式（`None` = 用代码声明的 `schedule`）。见 scheduler::ScheduledTask。
     pub override_expr: Option<String>,
+    /// 被面板删掉了（墓碑）。对插件代码声明的任务来说删除只能是这个意思：
+    /// 真删了 `sync_jobs` 下一次重载就把它建回来。列表默认不显示这些行，
+    /// 但保留 `runs` 历史，可以恢复。
+    pub deleted: bool,
     pub status: String,
     pub runs: i64,
     /// 累计熔断次数（连续失败触发的自动禁用）
@@ -266,9 +274,14 @@ pub fn sync_jobs(
             VALUES (?1, ?2, ?3, 'running', 0, ?4, 'plugin', ?5, ?5)
             ON CONFLICT(plugin, name) DO UPDATE SET
                 schedule   = excluded.schedule,
-                -- 注意：**不能**把 status 硬写成 'running'，也不能碰 paused。
-                -- 插件热更新会重跑一遍 sync_jobs，硬写会把用户暂停的任务悄悄恢复掉。
-                status     = CASE WHEN jobs.paused = 1 THEN 'paused' ELSE 'running' END,
+                -- 注意：**不能**把 status 硬写成 'running'，也不能碰 paused / deleted。
+                -- 插件热更新会重跑一遍 sync_jobs：硬写会把用户暂停的任务悄悄恢复，
+                -- 也会把用户**删掉**的任务重新变成 running（墓碑失守 = 删除按钮骗人）。
+                status     = CASE
+                               WHEN jobs.deleted = 1 THEN 'deleted'
+                               WHEN jobs.paused  = 1 THEN 'paused'
+                               ELSE 'running'
+                             END,
                 next_run   = excluded.next_run,
                 updated_at = excluded.updated_at
             -- 防御性条件：同名的那行如果是面板创建的，就不要被插件同步改写
@@ -280,8 +293,15 @@ pub fn sync_jobs(
     }
 
     // 清理代码里已经不存在的任务（只看 source = 'plugin'）
+    //
+    // **墓碑（deleted = 1）不参与这段清理**，这是实测逼出来的：`specs` 是从调度器
+    // 里取出来的，而被面板删掉的任务**故意不在调度器里**（`drop_deleted` 摘掉了它）——
+    // 于是「不在 specs 里」既可能是「代码不再声明」也可能是「被面板删了」，
+    // 分不出来就会把墓碑删掉，表现就是「删掉的任务被热更新带回来了」。
+    // 真正的过期墓碑由 `prune_tombstones` 按引擎知道的**声明列表**清。
     let existing: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT plugin, name FROM jobs WHERE source = 'plugin'")?;
+        let mut stmt =
+            tx.prepare("SELECT plugin, name FROM jobs WHERE source = 'plugin' AND deleted = 0")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -390,6 +410,91 @@ pub fn list_job_overrides(
     Ok(out)
 }
 
+/// 立 / 撤**墓碑**（面板删掉插件代码声明的任务）。
+///
+/// 真删行是不行的：`sync_jobs` 每次重载都按代码收敛，插件还声明着这个任务就会被建回来。
+/// 所以删除 = 标记，`sync_jobs` 认这个标记（见它的 status CASE）。
+pub fn set_job_deleted(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    deleted: bool,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        UPDATE jobs SET
+            deleted    = ?3,
+            status     = CASE WHEN ?3 = 1 THEN 'deleted'
+                              WHEN paused = 1 THEN 'paused'
+                              ELSE 'running' END,
+            updated_at = ?4
+        WHERE plugin = ?1 AND name = ?2
+        "#,
+        params![plugin, name, deleted as i64, now],
+    )
+}
+
+/// 清掉**真正过期**的墓碑：插件代码里已经不再声明这个任务了。
+///
+/// `declared` 是引擎这次从插件里读到任务声明（`(plugin, name)`）。只有它才能判定
+/// 「代码里还有没有这个任务」—— `sync_jobs` 手里的 `specs` 判不了（见那段注释）。
+pub fn prune_tombstones(
+    db: &Db,
+    owned: &[String],
+    declared: &[(String, String)],
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT plugin, name FROM jobs WHERE deleted = 1")?;
+        let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        it.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut n = 0;
+    for (plugin, name) in rows {
+        if !owned.iter().any(|o| o == &plugin) {
+            continue;
+        }
+        if declared.iter().any(|(p, nm)| p == &plugin && nm == &name) {
+            continue;
+        }
+        n += conn.execute(
+            "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2 AND deleted = 1",
+            params![plugin, name],
+        )?;
+    }
+    Ok(n)
+}
+
+/// 列出被面板删掉的任务：`(plugin, name, schedule)`。
+///
+/// 开机 / 热更新之后要把它们从调度器里摘掉（`engine::drop_deleted`）——
+/// 插件代码重新登记了任务，不摘的话「删掉的任务」重启后又跑起来了。
+pub fn list_deleted_jobs(
+    db: &Db,
+    owned: Option<&[String]>,
+) -> rusqlite::Result<Vec<(String, String, String, Option<String>)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT plugin, name, schedule, override_expr FROM jobs
+         WHERE deleted = 1 ORDER BY plugin, name",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    let mut out = Vec::new();
+    for r in rows {
+        let row: (String, String, String, Option<String>) = r?;
+        // 只处理自己负责的插件（多 worker 时别人的任务不在我的调度器里）
+        if let Some(list) = owned {
+            if !list.iter().any(|p| p == &row.0) {
+                continue;
+            }
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
 /// 写入 / 清除**面板覆盖**的表达式。
 ///
 /// `ov = None` 表示撤销覆盖、回到代码声明的表达式。
@@ -458,12 +563,14 @@ pub fn set_job_status(
 
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
-                           last_error, paused, source, created_at, updated_at, override_expr";
+                           last_error, paused, source, created_at, updated_at, override_expr,
+                           deleted";
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
         // 新列一律追加在最后：这样既有的 r.get(n) 索引都不用动
+        deleted: r.get(15).unwrap_or(0) != 0,
         override_expr: r.get(14)?,
         id: r.get(0)?,
         name: r.get(1)?,
@@ -808,6 +915,105 @@ mod tests {
         // 空串也算没有覆盖（老库 / 手工写过库的情况）
         set_job_override(&db, "b", "t2", Some(""), now).unwrap();
         assert!(list_job_overrides(&db, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tombstone_is_not_resurrected_by_sync_jobs() {
+        // 这是「删除」这个功能的全部要害：插件代码**仍然声明**这个任务，
+        // 每次重载都会跑一遍 sync_jobs —— 它必须认墓碑，不能把状态改回 running。
+        // 失守的表现就是「删掉的任务下次重启又跑起来了」。
+        let dir = std::env::temp_dir().join(format!(
+            "pp-tomb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let db = open(&dir.join("tomb.db")).unwrap();
+        let specs: Vec<JobSpec> = vec![("p".into(), "t".into(), "@every 30s".into(), None)];
+        sync_jobs(&db, &specs, NOW, None).unwrap();
+
+        set_job_deleted(&db, "p", "t", true, NOW).unwrap();
+        let row = |db: &Db| {
+            list_jobs(db)
+                .unwrap()
+                .into_iter()
+                .find(|j| j.name == "t")
+                .unwrap()
+        };
+        assert!(row(&db).deleted, "立碑后 deleted 应当是 1");
+        assert_eq!(row(&db).status, "deleted");
+
+        // 模拟插件热更新 / 重启：再收敛一次，墓碑必须还在
+        for _ in 0..3 {
+            sync_jobs(&db, &specs, NOW, None).unwrap();
+            assert!(row(&db).deleted, "sync_jobs 不许把墓碑清掉");
+            assert_eq!(row(&db).status, "deleted", "sync_jobs 不许把状态改回 running");
+        }
+
+        // 插件代码里删掉了这个任务：`sync_jobs` **不动墓碑**（它手里的 specs 来自
+        // 调度器，而被删的任务故意不在调度器里，判不出「代码不再声明」），
+        // 真正的过期墓碑由 `prune_tombstones` 用引擎的声明列表清。
+        sync_jobs(&db, &[], NOW, None).unwrap();
+        assert!(row(&db).deleted, "sync_jobs 不该擅自清墓碑（它判不出来）");
+        prune_tombstones(&db, &["p".to_string()], &[]).unwrap();
+        assert!(
+            list_jobs(&db).unwrap().is_empty(),
+            "声明列表里没有它 → 墓碑这才该被清掉"
+        );
+
+        // 重建一行，验证「代码里还声明着它 → 墓碑必须留着」
+        sync_jobs(&db, &specs, NOW, None).unwrap();
+        set_job_deleted(&db, "p", "t", true, NOW).unwrap();
+        prune_tombstones(&db, &["p".to_string()], &[("p".to_string(), "t".to_string())])
+            .unwrap();
+        assert!(
+            row(&db).deleted,
+            "声明列表里还有它 → 墓碑不许被当成过期清掉"
+        );
+        // 别人负责的插件不许被我清（多 worker）
+        prune_tombstones(&db, &["other".to_string()], &[]).unwrap();
+        assert!(row(&db).deleted, "不是自己负责的插件不许动");
+
+        // 恢复：标记清掉，状态回到 running（暂停状态优先）
+        set_job_paused(&db, "p", "t", true, NOW).unwrap();
+        set_job_paused(&db, "p", "t", true, NOW).unwrap();
+        set_job_deleted(&db, "p", "t", false, NOW).unwrap();
+        assert!(!row(&db).deleted);
+        assert_eq!(row(&db).status, "paused", "恢复后应当尊重暂停状态");
+    }
+
+    #[test]
+    fn list_deleted_jobs_filters_and_reads_override() {
+        let dir = std::env::temp_dir().join(format!(
+            "pp-del-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let db = open(&dir.join("del.db")).unwrap();
+        let specs: Vec<JobSpec> = vec![
+            ("a".into(), "t1".into(), "@every 30s".into(), None),
+            ("b".into(), "t2".into(), "@every 30s".into(), None),
+        ];
+        sync_jobs(&db, &specs, NOW, None).unwrap();
+        set_job_deleted(&db, "a", "t1", true, NOW).unwrap();
+        set_job_deleted(&db, "b", "t2", true, NOW).unwrap();
+        set_job_override(&db, "b", "t2", Some("@every 5s"), NOW).unwrap();
+
+        let all = list_deleted_jobs(&db, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].3.as_deref(), None, "a 没有覆盖");
+        assert_eq!(all[1].3.as_deref(), Some("@every 5s"), "b 的覆盖要带出来");
+
+        let mine = list_deleted_jobs(&db, Some(&["b".to_string()])).unwrap();
+        assert_eq!(mine.len(), 1, "只应该看到自己负责的插件");
+        assert_eq!(mine[0].1, "t2");
     }
 
     #[test]
