@@ -149,4 +149,13 @@ jobs:
           echo
           kill -TERM "$PID"
           wait "$PID" || true
-          grep -q "引擎线程已退出" "$RUNNER_TEMP/panel.log"
+
+          # 关闭路径的证据要挑**现在真的会打印**的字符串。
+          #
+          # 原来这里 grep 的是「引擎线程已退出」—— 多执行线程之后，那句话变成了
+          # 「[engine:N] 执行线程已退出」，于是这一步**永远**失败（第一次跑 Release
+          # 就红在这；而它前面「真下载 / 真校验 / 真启动」全过了）。
+          grep -q "执行线程已退出" "$RUNNER_TEMP/panel.log"
+          # Python 只能被 finalize 一次（多线程下重复 finalize 会 abort）
+          test "$(grep -c 'PocketPy 已释放' "$RUNNER_TEMP/panel.log")" = 1
+          ! grep -qi "panic" "$RUNNER_TEMP/panel.log"
