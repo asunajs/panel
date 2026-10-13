@@ -381,6 +381,23 @@ async function pollEngine() {
   el.className = 'badge ' + (healthy ? 'success' : 'failed');
   el.textContent = healthy ? '引擎正常' : '引擎停摆';
 
+  // 多执行线程之后，「引擎正常」不够 —— 一条线程卡住时另一条还在跳，
+  // 整体仍报正常，但被卡住那条上的插件任务是真的一直不跑。
+  // 所以把「最慢的那条落后多久」直接显示出来（单线程时它就是心跳本身）。
+  const workers = res.workers || 1;
+  if (workers > 1) {
+    const stale = (res.worker_staleness_ms || []).reduce((a, b) => Math.max(a, b), 0);
+    el.title =
+      `${workers} 条执行线程；最慢的一条落后 ${stale}ms` +
+      `（引擎硬阈值 5000ms，超过就会被判停摆）` +
+      `\n插件分布：` +
+      Object.entries(res.owners || {})
+        .map(([name, w]) => `${name}→w${w}`)
+        .join('、');
+  } else {
+    el.title = '单条执行线程（ENGINE_WORKERS=1）';
+  }
+
   // 鉴权状态：这一条在排查「为什么接口 401」时最有用 ——
   // 「本机免登录」和「已认证」是两件完全不同的事，界面上必须能区分。
   const auth = res.auth || {};

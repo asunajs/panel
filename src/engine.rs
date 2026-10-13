@@ -48,6 +48,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use crate::workers;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -122,38 +124,114 @@ impl Watchdog {
 ///
 /// 判定要同时看「最近心跳」和「预期唤醒时刻」：只看心跳的话，调度器睡 1 小时等下一个任务
 /// 会被误判成卡死；只看预期唤醒的话，引擎卡在插件里（预期唤醒早已过期）判不出来。
-#[derive(Clone)]
+/// 一条 worker 的健康槽位。每条 worker 只写自己那一格，互不干扰。
+#[derive(Debug, Default)]
+pub struct WorkerSlot {
+    beat_ms: AtomicU64,
+    expect_ms: AtomicU64,
+    interrupts: AtomicU64,
+    mem_bytes: AtomicU64,
+}
+
+/// 引擎健康。
+///
+/// 多 worker 之后「健康」的判据变了：单 worker 时只有一条线程，它不动就是停摆；
+/// 现在要按**最陈旧的那条**判 —— 一条卡在 60 秒的 `http_fetch` 上而另一条正常，
+/// 面板必须能看出「有一半在卡」，而不是笼统报「健康」。所以：
+///
+/// - `healthy()`：每条 worker 都还活着（任意一条卡住就报 degraded）
+/// - `stalest_worker()` / `per_worker_ms()`：面板上能指明是哪条、卡了多久
+/// - `beat_ago_ms()`：**最新**的一条，回答「整个引擎还有没有在动」
+#[derive(Clone, Debug)]
 pub struct EngineHealth {
-    last_beat_ms: Arc<AtomicU64>,
-    expected_wake_ms: Arc<AtomicU64>,
-    interrupts: Arc<AtomicU64>,
-    js_memory_bytes: Arc<AtomicU64>,
+    slots: Arc<Vec<WorkerSlot>>,
     stop: Arc<AtomicBool>,
     pub budget_ms: u64,
 }
 
 impl EngineHealth {
-    pub fn beat_ago_ms(&self) -> u64 {
-        now_ms().saturating_sub(self.last_beat_ms.load(Ordering::Relaxed))
+    pub fn workers(&self) -> usize {
+        self.slots.len()
     }
 
+    /// 第 `i` 条 worker 的槽位（worker 循环用它写自己的心跳）。
+    pub fn slot(&self, i: usize) -> &WorkerSlot {
+        &self.slots[i]
+    }
+
+    /// 每条 worker 落后了多久（毫秒）。面板可直接显示「worker 1 卡了 12s」。
+    pub fn per_worker_ms(&self) -> Vec<u64> {
+        let now = now_ms();
+        self.slots
+            .iter()
+            .map(|s| {
+                let beat = now.saturating_sub(s.beat_ms.load(Ordering::Relaxed));
+                let expect = s.expect_ms.load(Ordering::Relaxed);
+                let wake = now.saturating_sub(expect);
+                // 取较小的那个：它还在按时醒着，还是已经在等却等过头了
+                beat.min(wake)
+            })
+            .collect()
+    }
+
+    /// 最陈旧的那条 worker 下标（健康判据就是它）。
+    pub fn stalest_worker(&self) -> usize {
+        self.per_worker_ms()
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, ms)| (**ms, *i))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// 整个引擎还有没有在动：**最新**的一条心跳距今多久。
+    pub fn beat_ago_ms(&self) -> u64 {
+        let now = now_ms();
+        let newest = self
+            .slots
+            .iter()
+            .map(|s| s.beat_ms.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0);
+        now.saturating_sub(newest)
+    }
+
+    /// 每条 worker 都还活着才算健康。
+    ///
+    /// 为什么不是「任意一条活着就算健康」：那样一条永久卡死的 worker 会被另一条
+    /// 正常的心跳掩盖掉 —— 而卡死的那条上的插件任务是真的一直不跑了。
     pub fn healthy(&self) -> bool {
         let now = now_ms();
-        let beat_ok = now < self.last_beat_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
-        let wake_ok =
-            now < self.expected_wake_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
-        beat_ok || wake_ok
+        self.slots.iter().all(|s| {
+            let beat_ok = now < s.beat_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
+            let wake_ok =
+                now < s.expect_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
+            beat_ok || wake_ok
+        })
     }
 
+    /// 所有 worker 被打断的次数之和（执行预算保护）。
     pub fn interrupts(&self) -> u64 {
-        self.interrupts.load(Ordering::Relaxed)
+        self.slots
+            .iter()
+            .map(|s| s.interrupts.load(Ordering::Relaxed))
+            .sum()
     }
 
+    /// 所有 worker 的 JS 堆之和 —— 每条 worker 有自己的 QuickJS Runtime。
     pub fn js_memory_bytes(&self) -> u64 {
-        self.js_memory_bytes.load(Ordering::Relaxed)
+        self.slots
+            .iter()
+            .map(|s| s.mem_bytes.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// 请求引擎停下来：置位后正在执行的 JS 会被立刻打断，不用等它跑满预算。
+    /// `Arc` 形式的停止位（`Watchdog` 要在 interrupt handler 里持有它）。
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
+    }
+
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -231,7 +309,9 @@ pub enum EngineCmd {
     /// 回包是 `(plugin, name, 失效原因)` 列表。
     CleanupJobs {
         dry_run: bool,
-        reply: tokio::sync::oneshot::Sender<Result<Vec<InvalidJob>, String>>,
+        /// 用 mpsc 而不是 oneshot：多 worker 时**每条线程都要回一份**，合并后才是
+        /// 完整的失效清单（每条只知道自己负责的插件）。oneshot 收不了 N 份。
+        reply: tokio::sync::mpsc::Sender<Result<Vec<InvalidJob>, String>>,
     },
     /// 面板的「测试运行」：把一段代码丢进**一次性解释器**里跑，回它的输出。
     ///
@@ -271,9 +351,92 @@ pub type InvalidJob = (String, String, String);
 
 /// 引擎线程句柄。
 pub struct JsEngine {
-    tx: Sender<EngineCmd>,
-    handle: Option<thread::JoinHandle<()>>,
+    handle: EngineHandle,
+    threads: Vec<thread::JoinHandle<()>>,
     health: EngineHealth,
+}
+
+/// 路由失败的原因。
+///
+/// 分成两种是因为面板要给**不同的状态码**：「这个插件不存在」是 404
+/// （请求本身没错），「引擎整个不在了」是 503。混成一个就只能都报 503，
+/// 用户看到「服务不可用」却不知道是自己写错了插件名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteError {
+    UnknownPlugin(String),
+    Down,
+}
+
+/// 引擎句柄：把指令**路由到负责该插件的 worker**。
+///
+/// 为什么要按插件路由：解释器不是 `Send`，一个插件（连同它的解释器状态）住在
+/// 一条 worker 上，所以「谁的任务要跑」决定「发给谁」。插件名 → worker 的归属表
+/// 由 `workers::Assignment` 维护，它在启动时按分配方案灌入，并在运行期认领新文件。
+#[derive(Clone)]
+pub struct EngineHandle {
+    senders: Arc<Vec<Sender<EngineCmd>>>,
+    assign: Arc<Mutex<workers::Assignment>>,
+}
+
+impl EngineHandle {
+    pub fn workers(&self) -> usize {
+        self.senders.len()
+    }
+
+    /// 归属表快照：面板可以显示「哪个插件在哪条 worker 上」。
+    pub fn owners(&self) -> HashMap<String, usize> {
+        self.assign.lock().unwrap().route_map()
+    }
+
+    /// 发给负责 `plugin` 的那条 worker。
+    pub fn send_for(&self, plugin: &str, cmd: EngineCmd) -> Result<(), RouteError> {
+        let idx = self.assign.lock().unwrap().route_map().get(plugin).copied();
+        match idx {
+            None => Err(RouteError::UnknownPlugin(plugin.to_string())),
+            Some(i) => self.senders[i].send(cmd).map_err(|_| RouteError::Down),
+        }
+    }
+
+    /// 广播给所有 worker（Tick / Shutdown）。
+    pub fn broadcast(&self, cmd: EngineCmd) -> bool {
+        let mut all = true;
+        for s in self.senders.iter() {
+            match cmd.broadcast_clone() {
+                Some(c) => {
+                    if s.send(c).is_err() {
+                        all = false;
+                    }
+                }
+                None => all = false,
+            }
+        }
+        all
+    }
+
+    /// 所有 worker 的原始发送端。
+    ///
+    /// 清理失效任务要**收集每一份回包再合并**（每条 worker 只知道自己负责的那部分），
+    /// 一个 `oneshot` 收不了 N 份，所以把发送端交出去让调用方自己开 mpsc 收集。
+    pub fn senders(&self) -> Vec<Sender<EngineCmd>> {
+        self.senders.as_ref().clone()
+    }
+}
+
+impl EngineCmd {
+    /// 能安全广播的指令的副本。
+    ///
+    /// `None` = 这条指令带一次性回包（`oneshot::Sender`），广播出去只有一条 worker
+    /// 能回话，结果会静默丢失 —— 所以宁可拒绝广播也不做半截事。
+    fn broadcast_clone(&self) -> Option<EngineCmd> {
+        match self {
+            EngineCmd::Tick { seq, ts } => Some(EngineCmd::Tick {
+                seq: *seq,
+                ts: ts.clone(),
+            }),
+            EngineCmd::Shutdown => Some(EngineCmd::Shutdown),
+            _ => None,
+        }
+    }
 }
 
 impl JsEngine {
@@ -290,26 +453,58 @@ impl JsEngine {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_EXEC_BUDGET_MS);
 
+        let workers_n = env_usize("ENGINE_WORKERS", DEFAULT_ENGINE_WORKERS);
+        let pin = parse_pin(&std::env::var("ENGINE_PIN").unwrap_or_default());
+
+        // 分配发生在**创建解释器之前**，所以只能靠源码文本扫出「哪个插件要精度」
+        // （见 workers 模块的说明）。每条决策都打日志，分错了看得见。
+        let files = scan_plugins(&plugins_dir);
+        let costs = workers::scan_costs(&files, plugin_name_of);
+        let plan = workers::plan(&costs, workers_n, &pin);
+        println!("[engine] {workers_n} 条执行线程（ENGINE_WORKERS 可调）：");
+        for note in &plan.notes {
+            println!("[engine]   {note}");
+        }
+        if workers_n > 1 && plan.groups.iter().any(|g| g.is_empty()) {
+            println!("[engine]   （有 worker 暂时空着：插件数少于线程数，或都归到精度线程上了）");
+        }
+
+        let mut assign = workers::Assignment::new();
+        assign.seed(&plan, plugin_name_of);
+        let assign = Arc::new(Mutex::new(assign));
+
         let health = EngineHealth {
-            last_beat_ms: Arc::new(AtomicU64::new(now_ms())),
-            expected_wake_ms: Arc::new(AtomicU64::new(now_ms())),
-            interrupts: Arc::new(AtomicU64::new(0)),
-            js_memory_bytes: Arc::new(AtomicU64::new(0)),
+            slots: Arc::new((0..workers_n).map(|_| WorkerSlot::default()).collect()),
             stop: Arc::new(AtomicBool::new(false)),
             budget_ms,
         };
 
-        let (tx, rx) = mpsc::channel();
-        let health_for_thread = health.clone();
-        let handle = thread::Builder::new()
-            .name("plugin-engine".into())
-            .spawn(move || {
-                engine_main(plugins_dir, registry, logs, db, host, health_for_thread, rx)
-            })
-            .expect("启动引擎线程失败");
+        let mut senders: Vec<Sender<EngineCmd>> = Vec::with_capacity(workers_n);
+        let mut threads = Vec::with_capacity(workers_n);
+        for idx in 0..workers_n {
+            let (tx, rx) = mpsc::channel();
+            senders.push(tx);
+            let group = plan.groups[idx].clone();
+            let a = assign.clone();
+            let dir = plugins_dir.clone();
+            let reg = registry.clone();
+            let lg = logs.clone();
+            let d = db.clone();
+            let h = host.clone();
+            let hh = health.clone();
+            let handle = thread::Builder::new()
+                .name(format!("plugin-engine-{idx}"))
+                .spawn(move || worker_main(idx, group, workers_n, a, dir, reg, lg, d, h, hh, rx))
+                .expect("启动引擎线程失败");
+            threads.push(handle);
+        }
+
         Self {
-            tx,
-            handle: Some(handle),
+            handle: EngineHandle {
+                senders: Arc::new(senders),
+                assign,
+            },
+            threads,
             health,
         }
     }
@@ -318,18 +513,44 @@ impl JsEngine {
         self.health.clone()
     }
 
-    pub fn sender(&self) -> Sender<EngineCmd> {
-        self.tx.clone()
+    /// 引擎句柄（指令路由）。
+    pub fn handle(&self) -> EngineHandle {
+        self.handle.clone()
     }
 
-    /// 发关闭指令并 join 线程，保证解释器按序析构。
+    /// 发关闭指令并 join 所有线程，保证解释器按序析构。
+    ///
+    /// **Python 的 finalize 在这里做，而且只做一次** —— 它是进程级的，
+    /// 由各 worker 各调一次会 `abort()`（实测过）。必须在所有线程都 join 之后，
+    /// 所有 VM 都已析构的前提下再 finalize。
     pub fn shutdown(&mut self) {
         self.health.request_stop();
-        let _ = self.tx.send(EngineCmd::Shutdown);
-        if let Some(h) = self.handle.take() {
+        self.handle.broadcast(EngineCmd::Shutdown);
+        for h in self.threads.drain(..) {
             let _ = h.join();
         }
+        if PYTHON_READY.load(Ordering::Relaxed) {
+            python::finalize();
+            println!("[engine] PocketPy 已释放（协调者，唯一一次）");
+        }
     }
+}
+
+/// 解析 `ENGINE_PIN="插件:worker,插件:worker"`。写错的部分忽略（日志里能看到分配结果）。
+fn parse_pin(raw: &str) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((name, w)) = part.rsplit_once(':') {
+            if let Ok(i) = w.trim().parse::<usize>() {
+                out.insert(name.trim().to_string(), i);
+            }
+        }
+    }
+    out
 }
 
 /// 插件用哪个运行时。
@@ -419,7 +640,12 @@ impl Loader for HostApiLoader {
     }
 }
 
-fn engine_main(
+#[allow(clippy::too_many_arguments)]
+fn worker_main(
+    idx: usize,
+    my_files: Vec<PathBuf>,
+    workers_n: usize,
+    assign: Arc<Mutex<workers::Assignment>>,
     plugins_dir: PathBuf,
     registry: Registry,
     logs: SharedLogs,
@@ -428,6 +654,10 @@ fn engine_main(
     health: EngineHealth,
     rx: Receiver<EngineCmd>,
 ) {
+    // 打断计数先在本线程累加，再回写自己的健康槽位。
+    // 不能直接用 `health.slot(idx)` 里的原子 —— `Watchdog` 需要在 interrupt handler
+    // 里持有一个 `Arc<AtomicU64>`，而槽位是 `Arc<Vec<..>>` 内部的一个字段，借不出来。
+    let interrupts = Arc::new(AtomicU64::new(0));
     // 声明顺序很重要：`rt` 先声明 → 最后析构，保证所有 Context 都先于 Runtime 释放。
     let rt = match Runtime::new() {
         Ok(rt) => rt,
@@ -441,22 +671,22 @@ fn engine_main(
     rt.set_loader(HostApiResolver, HostApiLoader);
 
     let wd = Watchdog {
-        total: health.interrupts.clone(),
-        stop: health.stop.clone(),
+        total: interrupts.clone(),
+        stop: health.stop_flag(),
         ..Default::default()
     };
     rt.set_interrupt_handler(Some(wd.handler()));
     let budget = Duration::from_millis(health.budget_ms);
 
     println!(
-        "[engine] QuickJS Runtime 就绪（内存上限 64 MiB，单次执行预算 {}ms）",
+        "[engine:{idx}] QuickJS Runtime 就绪（内存上限 64 MiB，单次执行预算 {}ms）",
         health.budget_ms
     );
 
     // PocketPy 是**惰性**初始化的：纯 JS 部署不该为它付那 ~2 MB 常驻内存。
     // 初始化点在 `ensure_python_ready`（第一次真的要加载 .py 时触发），
     // 而不是这里按文件列表猜一次 —— 插件目录是活的，猜不准。
-    let files = scan_plugins(&plugins_dir);
+    let files = my_files;
 
     let mut plugins: Vec<LoadedPlugin> = Vec::new();
     let mut pending: Vec<RawTaskDef> = Vec::new();
@@ -476,6 +706,15 @@ fn engine_main(
         plugins.push(lp);
     }
 
+    // 「我负责的插件」—— 从共享归属表取（而不是从已加载的 plugins），
+    // 这样被删掉的文件也还在名单里，sync_registry 才能把它的条目清掉。
+    let owned: Vec<String> = assign.lock().unwrap().names_of(idx);
+    println!(
+        "[engine:{idx}] 负责 {} 个插件（全局共 {} 个文件）",
+        owned.len(),
+        assign.lock().unwrap().len()
+    );
+
     if plugins.is_empty() {
         hostapi::push_log(
             &logs,
@@ -487,7 +726,7 @@ fn engine_main(
             ),
         );
     }
-    sync_registry(&registry, &plugins);
+    sync_registry(&registry, &plugins, &owned.clone());
 
     // ---------- 把插件声明的任务装进调度器 ----------
     let trip_cfg = TripConfig {
@@ -499,7 +738,10 @@ fn engine_main(
     let boot_at = Local::now();
     let specs = install_tasks(&mut sched, &pending, &logs, boot_at, &db);
 
-    match db::sync_jobs(&db, &specs, &fmt_secs(boot_at)) {
+    // 只收敛「我负责的插件」的声明式任务：多 worker 时 specs 只是子集，
+    // 按全量收敛会把别的 worker 的插件任务删掉（见 db::sync_jobs 的参数说明）
+    let owned: Vec<String> = plugins.iter().map(|p| p.name.clone()).collect();
+    match db::sync_jobs(&db, &specs, &fmt_secs(boot_at), Some(&owned)) {
         Ok(0) => {}
         Ok(n) => hostapi::push_log(
             &logs,
@@ -511,7 +753,16 @@ fn engine_main(
     }
 
     // 面板创建的任务不在插件代码里，`install_tasks` 装不到它们，得单独从库里读回来。
-    reinstall_panel_jobs(&mut sched, &plugins, &logs, &db, &wd, budget, boot_at, None);
+    reinstall_panel_jobs(
+        &mut sched,
+        &plugins,
+        &logs,
+        &db,
+        &wd,
+        budget,
+        boot_at,
+        &owned,
+    );
 
     // 把累计计数灌回去（否则重启后「触发次数」归零、熔断退避从头开始）
     seed_counters(&mut sched, &db, None);
@@ -540,16 +791,33 @@ fn engine_main(
         trip_cfg.base_cooldown.as_millis()
     );
 
+    // 「我负责的插件」/「全局插件」—— 从共享归属表取，运行期新增的插件也算得上。
+    // 清理任务与面板任务重装都要按它过滤（见 cleanup_jobs 的说明）。
+    let owned_now = {
+        let a = assign.clone();
+        move || -> Vec<String> { a.lock().unwrap().names_of(idx) }
+    };
+    let all_names_now = {
+        let a = assign.clone();
+        move || -> Vec<String> { a.lock().unwrap().live_names() }
+    };
+    let _ = workers_n;
+
     // ---------- 事件循环：deadline 驱动 ----------
     let mut last_scan = Instant::now();
     loop {
-        health.last_beat_ms.store(now_ms(), Ordering::Relaxed);
-        health
-            .js_memory_bytes
-            .store(rt.memory_usage().memory_used_size as u64, Ordering::Relaxed);
+        // 只写**自己那一格**：多 worker 下每条线程各自心跳，面板按「最陈旧的那条」判健康
+        {
+            let slot = health.slot(idx);
+            slot.beat_ms.store(now_ms(), Ordering::Relaxed);
+            slot.mem_bytes
+                .store(rt.memory_usage().memory_used_size as u64, Ordering::Relaxed);
+            slot.interrupts
+                .store(interrupts.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         let now = Local::now();
         let sleep = sched.sleep_hint(now);
-        health.expected_wake_ms.store(
+        health.slot(idx).expect_ms.store(
             now_ms().saturating_add(sleep.as_millis() as u64),
             Ordering::Relaxed,
         );
@@ -559,7 +827,7 @@ fn engine_main(
                 for p in plugins.iter_mut() {
                     p.fire_tick(seq, &ts, &logs, &wd, budget);
                 }
-                sync_registry(&registry, &plugins);
+                sync_registry(&registry, &plugins, &owned.clone());
             }
             Ok(EngineCmd::HttpRequest {
                 key,
@@ -581,7 +849,7 @@ fn engine_main(
                     None => Err(format!("插件 `{plugin}` 里没有名为 `{name}` 的任务")),
                 };
                 let _ = reply.send(out);
-                sync_registry(&registry, &plugins);
+                sync_registry(&registry, &plugins, &owned.clone());
             }
             Ok(EngineCmd::SetPaused {
                 plugin,
@@ -644,9 +912,19 @@ fn engine_main(
             }
             Ok(EngineCmd::CleanupJobs { dry_run, reply }) => {
                 let out = cleanup_jobs(
-                    &mut sched, &plugins, &logs, &db, &wd, budget, dry_run,
+                    &mut sched,
+                    &plugins,
+                    &logs,
+                    &db,
+                    &wd,
+                    budget,
+                    dry_run,
+                    &owned_now(),
+                    &all_names_now(),
                 );
-                let _ = reply.send(out);
+                // try_send：worker 循环是同步的，await 不了。容量按 worker 数开，
+                // 每条只回一份，所以正常情况下不会满。
+                let _ = reply.try_send(out);
             }
             Ok(EngineCmd::TestRun {
                 lang,
@@ -665,7 +943,7 @@ fn engine_main(
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        health.last_beat_ms.store(now_ms(), Ordering::Relaxed);
+        health.slot(idx).beat_ms.store(now_ms(), Ordering::Relaxed);
 
         // 触发所有到期任务
         if !sched.is_empty() {
@@ -675,6 +953,43 @@ fn engine_main(
         // 插件目录同步：新增 / 修改 / 删除，按秒节流（目录很小，但没必要每轮 readdir）
         if last_scan.elapsed() >= Duration::from_secs(1) {
             last_scan = Instant::now();
+
+            // **谁认领新文件**：只让 worker 0 算 —— 每条线程各算一遍没意义，
+            // 而且并发认领会给出不一致的归属。其它线程只读结果。
+            // 因此新插件可能要在下个扫描周期才被它所属的 worker 看见（最多迟 1 秒）。
+            let all = scan_plugins(&plugins_dir);
+            if idx == 0 {
+                let mut a = assign.lock().unwrap();
+                for f in &all {
+                    if a.owner_of(f).is_none() {
+                        let name = plugin_name_of(f);
+                        let finest = std::fs::read_to_string(f)
+                            .ok()
+                            .and_then(|src| workers::finest_interval_ms(&src));
+                        let w = a.claim(f, &name, finest, workers_n);
+                        println!(
+                            "[engine:0] 新插件 `{name}` 归到 worker {w}（运行期认领，最细 {:?}ms）",
+                            finest
+                        );
+                    }
+                }
+            }
+            let my_files: Vec<PathBuf> = {
+                let a = assign.lock().unwrap();
+                all.iter()
+                    .filter(|f| a.owner_of(f) == Some(idx))
+                    .cloned()
+                    .collect()
+            };
+            let mine: Vec<String> = {
+                let a = assign.lock().unwrap();
+                my_files
+                    .iter()
+                    .map(|f| plugin_name_of(f))
+                    .chain(a.names_of(idx))
+                    .collect()
+            };
+
             sync_plugins(
                 &rt,
                 &mut plugins,
@@ -686,23 +1001,27 @@ fn engine_main(
                 budget,
                 &mut next_vm,
                 &registry,
-                &plugins_dir,
+                &my_files,
+                &mine,
             );
         }
     }
 
     // ---------- 收尾：解释器必须按序析构 ----------
-    println!("[engine] 正在释放插件解释器...");
+    println!("[engine:{idx}] 正在释放插件解释器...");
     drop(plugins);
-    // 先解除 VM 绑定，再 finalize 整个解释器。
-    // 判断依据是「这次运行里真的初始化过」，不是「目录里有没有 .py」。
-    if PYTHON_READY.load(Ordering::Relaxed) {
-        python::finalize();
-        println!("[engine] PocketPy 已释放");
-    }
-    println!("[engine] 正在释放 QuickJS Runtime...");
+    // **这里绝对不能调 `python::finalize()`**。
+    //
+    // pocketpy 的 finalize 是**进程级**的，调第二次会直接
+    // `py_finalize() can only be called once!` + `abort()` —— 实测在多 worker
+    // 关闭时崩成这样（Abort trap: 6）。而且就算不崩，先退出的那条 worker 也会
+    // 把别的 worker 还持有的 VM 一起释放掉。
+    //
+    // 正确做法：各 worker 只丢掉自己的解释器，由协调者在**所有线程 join 之后**
+    // 调一次 finalize（见 `JsEngine::shutdown`）。
+    println!("[engine:{idx}] 正在释放 QuickJS Runtime...");
     drop(rt);
-    println!("[engine] 引擎线程已退出");
+    println!("[engine:{idx}] 执行线程已退出");
 }
 
 /// 把（重新）加载出来的任务声明装进调度器，返回给 `jobs` 表用的 spec 列表。
@@ -820,9 +1139,12 @@ fn reinstall_panel_jobs(
     wd: &Watchdog,
     budget: Duration,
     now: chrono::DateTime<Local>,
-    only_plugin: Option<&str>,
+    // 本条 worker 负责的插件名。多 worker 时**必须**按它过滤：
+    // 不过滤的话，每条 worker 都会去装别人的面板任务，而它加载不到那些插件，
+    // 于是任务会被标成 error / 甚至被清理掉。
+    owned: &[String],
 ) {
-    let rows = match db::list_panel_jobs(db, only_plugin) {
+    let rows = match db::list_panel_jobs(db, None) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[engine] 读取面板任务失败: {e}");
@@ -830,6 +1152,9 @@ fn reinstall_panel_jobs(
         }
     };
     for job in rows.iter() {
+        if !owned.iter().any(|o| o == &job.plugin) {
+            continue;
+        }
         // 同名任务已经存在（插件代码也声明了同名任务）→ 代码优先，面板这条留在库里但不装
         if sched.find(&job.plugin, &job.name).is_some() {
             continue;
@@ -1092,6 +1417,7 @@ fn edit_job(
 ///
 /// **只清 `source = 'panel'`**：插件代码声明的任务由 `sync_jobs` 收敛，
 /// 插件删了它们自然就没了，不需要这里管。
+#[allow(clippy::too_many_arguments)]
 fn cleanup_jobs(
     sched: &mut Scheduler,
     plugins: &[LoadedPlugin],
@@ -1100,13 +1426,29 @@ fn cleanup_jobs(
     wd: &Watchdog,
     budget: Duration,
     dry_run: bool,
+    // 本条 worker 负责的插件名
+    owned: &[String],
+    // 全局插件名（跨所有 worker）——「插件是不是真的没了」必须按全局判
+    all_plugins: &[String],
 ) -> Result<Vec<InvalidJob>, String> {
     let rows = db::list_panel_jobs(db, None).map_err(|e| format!("读库失败: {e}"))?;
     let mut out = Vec::new();
 
     for row in rows {
+        // ① 不归我管的插件任务一律跳过：交给负责它的那条 worker 去判、去删。
+        //    不跳的话，别人的插件会被我判成「已不存在」然后删掉。
+        if !owned.iter().any(|o| o == &row.plugin) {
+            continue;
+        }
         let reason = match plugins.iter().find(|p| p.name == row.plugin) {
-            None => "插件已不存在（文件被删除或改名）".to_string(),
+            None => {
+                // ② 我负责它、但它不在我这儿 —— 正常不该发生（归属唯一）。
+                //    真发生时先按全局名单确认插件还在别处，避免误删。
+                if all_plugins.iter().any(|n| n == &row.plugin) {
+                    continue;
+                }
+                "插件已不存在（文件被删除或改名）".to_string()
+            }
             Some(p) if p.error.is_some() => "插件加载失败".to_string(),
             Some(p) if !plugin_has_handler(p, &row.name, wd, budget) => {
                 "处理函数在新版本里没有了".to_string()
@@ -1836,7 +2178,16 @@ fn settle_plugin(
 ) {
     // 面板创建的任务刚被 `remove_plugin` 一起摘掉了，这里装回来
     // （处理函数在新版本里已经不存在的，标成 error 保留定义）
-    reinstall_panel_jobs(sched, plugins, logs, db, wd, budget, Local::now(), Some(name));
+    reinstall_panel_jobs(
+        sched,
+        plugins,
+        logs,
+        db,
+        wd,
+        budget,
+        Local::now(),
+        &[name.to_string()],
+    );
     // 累计计数同样要灌回来，否则热更新一次「触发次数」就归零
     seed_counters(sched, db, Some(name));
     // 暂停状态同样要恢复，否则改一次插件文件就把用户暂停的任务悄悄放跑了
@@ -1967,9 +2318,12 @@ fn sync_plugins(
     budget: Duration,
     next_vm: &mut i32,
     registry: &Registry,
-    dir: &Path,
+    // 本次要同步的文件（只包含**本 worker 负责的**）
+    my_files: &[PathBuf],
+    // 本 worker 负责的插件名（sync_registry / sync_jobs 都要按它收敛）
+    owned: &[String],
 ) {
-    let files = scan_plugins(dir);
+    let files: Vec<PathBuf> = my_files.to_vec();
     let mut touched = false;
 
     // ── ① 删除：文件没了就卸载 ──
@@ -2007,7 +2361,7 @@ fn sync_plugins(
             hostapi::push_log(logs, &name, "error", &lp.error.clone().unwrap());
             plugins.push(lp);
             plugins.sort_by(|a, b| a.file.cmp(&b.file));
-            sync_registry(registry, plugins);
+            sync_registry(registry, plugins, owned);
             touched = true;
             continue;
         }
@@ -2050,14 +2404,16 @@ fn sync_plugins(
         .collect();
     for file in modified {
         reload_plugin(
-            rt, plugins, sched, &file, logs, db, host, wd, budget, next_vm, registry,
+            rt, plugins, sched, &file, logs, db, host, wd, budget, next_vm, registry, owned,
         );
         touched = true;
     }
 
     // 收敛 jobs 表：一次目录同步只写一次，且**永远是全量**
     if touched {
-        match db::sync_jobs(db, &all_specs(sched), &fmt_secs(Local::now())) {
+        // 用传进来的 owned（= 本 worker 负责的插件名），不要再从 plugins 现算 ——
+        // 被删掉的文件已经不在 plugins 里了，现算会把它的任务从收敛范围里漏掉。
+        match db::sync_jobs(db, &all_specs(sched), &fmt_secs(Local::now()), Some(owned)) {
             Ok(0) => {}
             Ok(n) => hostapi::push_log(
                 logs,
@@ -2067,7 +2423,7 @@ fn sync_plugins(
             ),
             Err(e) => eprintln!("[engine] 同步 jobs 表失败: {e}"),
         }
-        sync_registry(registry, plugins);
+        sync_registry(registry, plugins, owned);
     }
 }
 
@@ -2087,6 +2443,7 @@ fn reload_plugin(
     budget: Duration,
     next_vm: &mut i32,
     registry: &Registry,
+    owned: &[String],
 ) {
     // 同样按**文件**定位（见 `unload_plugin` 的注释）
     let Some(pos) = plugins.iter().position(|p| p.file == file) else {
@@ -2124,7 +2481,7 @@ fn reload_plugin(
         hostapi::push_log(logs, &name, "error", &lp.error.clone().unwrap());
         plugins.push(lp);
         plugins.sort_by(|a, b| a.file.cmp(&b.file));
-        sync_registry(registry, plugins);
+        sync_registry(registry, plugins, owned);
         return;
     }
 
@@ -2154,13 +2511,15 @@ fn reload_plugin(
             ),
         );
     }
-    sync_registry(registry, plugins);
+    sync_registry(registry, plugins, owned);
 }
 
 /// 把引擎侧状态同步给 Web UI 可读的注册表。
-fn sync_registry(registry: &Registry, plugins: &[LoadedPlugin]) {
+fn sync_registry(registry: &Registry, plugins: &[LoadedPlugin], owned: &[String]) {
     let mut guard = registry.lock().unwrap();
-    guard.clear();
+    // 只清掉**自己负责的**那些条目：多 worker 下 `clear()` 会把别人的插件从面板上抹掉，
+    // 而且另一条 worker 也不会把它加回来（它只写自己的）。
+    guard.retain(|p| !owned.iter().any(|o| o == &p.name));
     for p in plugins {
         guard.push(PluginInfo {
             name: p.name.clone(),
@@ -2173,10 +2532,30 @@ fn sync_registry(registry: &Registry, plugins: &[LoadedPlugin]) {
             tasks: p.tasks,
         });
     }
+    // 按文件路径排序：单 worker 时的顺序就是「目录扫描的字典序」，
+    // 保留它免得面板上的插件列表顺序忽然变了。
+    guard.sort_by(|a, b| a.file.cmp(&b.file));
 }
 
 fn fmt_secs(t: chrono::DateTime<Local>) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 默认几条执行线程。
+///
+/// 2 是刻意的：串行的代价是实测出来的（`scripts/serial_cost.py`）—— 一个每 1 秒
+/// 忙等 300ms 的任务会把 20ms 任务的间隔 p99 从 29ms 推到 311ms。2 条就够把
+/// 「要精度的插件」和「粗粒度的大块任务」分开（见 `workers::plan`）。
+/// 低配盒子上多一条 QuickJS Runtime 的常驻开销需要实测，所以它是可配置的：
+/// `ENGINE_WORKERS=1` 退回单线程。
+const DEFAULT_ENGINE_WORKERS: usize = 2;
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {

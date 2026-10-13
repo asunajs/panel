@@ -231,7 +231,17 @@ pub type JobSpec = (String, String, String, Option<String>);
 /// 让引擎在面板日志里说清楚「你建的那条被插件代码接管了」，而不是静默消失。
 ///
 /// 整个过程放在一个事务里，中途出错不会留下半同步状态。
-pub fn sync_jobs(db: &Db, specs: &[JobSpec], now: &str) -> rusqlite::Result<usize> {
+pub fn sync_jobs(
+    db: &Db,
+    specs: &[JobSpec],
+    now: &str,
+    // owned：本次同步「负责」的插件集合。`None` = 全量（单 worker）。
+    //
+    // 多 worker 时每条 worker 只加载了一部分插件，`specs` 自然只是子集 ——
+    // 如果还按全量收敛，A 会认为「B 的插件任务不在我的 specs 里」而把它们删掉，
+    // 每一次目录扫描都删一遍。所以清理段必须限定在自己负责的插件上。
+    owned: Option<&[String]>,
+) -> rusqlite::Result<usize> {
     let mut guard = db.lock().unwrap();
     let tx = guard.transaction()?;
 
@@ -270,6 +280,12 @@ pub fn sync_jobs(db: &Db, specs: &[JobSpec], now: &str) -> rusqlite::Result<usiz
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (plugin, name) in existing {
+        // 只清理自己负责的插件 —— 别人的插件任务不归我管（见上面的参数说明）
+        if let Some(owned) = owned {
+            if !owned.iter().any(|o| o == &plugin) {
+                continue;
+            }
+        }
         let still_declared = specs
             .iter()
             .any(|(p, n, _, _)| p == &plugin && n == &name);
@@ -595,7 +611,7 @@ mod tests {
         insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
 
         // 插件代码声明了另一个任务 —— 不能把面板创建的那条顺手删掉
-        let taken = sync_jobs(&db, &[spec("p", "theirs", "@every 2s")], NOW).unwrap();
+        let taken = sync_jobs(&db, &[spec("p", "theirs", "@every 2s")], NOW, None).unwrap();
 
         assert_eq!(taken, 0);
         assert_eq!(get(&db, "p", "mine").source, "panel");
@@ -606,10 +622,10 @@ mod tests {
     fn sync_jobs_prunes_only_stale_plugin_rows() {
         let db = mem();
         insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
-        sync_jobs(&db, &[spec("p", "old", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "old", "@every 1s")], NOW, None).unwrap();
 
         // 这一轮插件代码里只剩 theirs：old 该被清掉，mine 该活着
-        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
 
         let names: Vec<String> = list_jobs(&db).unwrap().into_iter().map(|j| j.name).collect();
         assert!(!names.contains(&"old".to_string()), "插件已不声明的任务该被清掉");
@@ -623,7 +639,7 @@ mod tests {
         insert_panel_job(&db, "p", "echo", "@every 1s", None, NOW).unwrap();
 
         // 插件代码里也声明了 echo → 代码优先，面板那条被接管
-        let taken = sync_jobs(&db, &[spec("p", "echo", "@every 9s")], NOW).unwrap();
+        let taken = sync_jobs(&db, &[spec("p", "echo", "@every 9s")], NOW, None).unwrap();
         assert_eq!(taken, 1, "接管次数要能报给引擎，否则面板上是静默消失");
 
         let echo = get(&db, "p", "echo");
@@ -635,7 +651,7 @@ mod tests {
     #[test]
     fn sync_jobs_preserves_runs_history() {
         let db = mem();
-        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW, None).unwrap();
         // 假装已经跑过 7 次
         record_job_run(
             &db,
@@ -651,7 +667,7 @@ mod tests {
         )
         .unwrap();
 
-        sync_jobs(&db, &[spec("p", "t", "@every 2s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "t", "@every 2s")], NOW, None).unwrap();
 
         let t = get(&db, "p", "t");
         assert_eq!(t.runs, 7, "sync_jobs 不该清掉 runs 历史");
@@ -665,7 +681,7 @@ mod tests {
         assert_eq!(job_source(&db, "p", "mine").unwrap().as_deref(), Some("panel"));
 
         // 插件声明的行不能被面板删掉（删了也会被 sync_jobs 装回来）
-        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
         assert_eq!(
             delete_panel_job(&db, "p", "theirs").unwrap(),
             0,
@@ -691,7 +707,7 @@ mod tests {
         let db = mem();
         insert_panel_job(&db, "a", "one", "@every 1s", None, NOW).unwrap();
         insert_panel_job(&db, "b", "two", "@every 1s", None, NOW).unwrap();
-        sync_jobs(&db, &[spec("a", "code", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("a", "code", "@every 1s")], NOW, None).unwrap();
 
         let all = list_panel_jobs(&db, None).unwrap();
         assert_eq!(all.len(), 2, "只有面板创建的两条");
@@ -706,7 +722,7 @@ mod tests {
     fn list_job_counters_reads_both_sources() {
         let db = mem();
         insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
-        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
         record_job_run(&db, "p", "mine", 5, 2, None, NOW, None, false, NOW).unwrap();
 
         let counters = list_job_counters(&db, None).unwrap();
@@ -740,11 +756,11 @@ mod tests {
     #[test]
     fn paused_state_survives_sync_jobs() {
         let db = mem();
-        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW, None).unwrap();
         set_job_paused(&db, "p", "t", true, NOW).unwrap();
 
         // 热更新会重跑一遍 sync_jobs：status 不能被硬写成 running，paused 也不能被碰
-        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW).unwrap();
+        sync_jobs(&db, &[spec("p", "t", "@every 1s")], NOW, None).unwrap();
 
         let t = get(&db, "p", "t");
         assert!(t.paused, "sync_jobs 把用户的暂停状态弄丢了");

@@ -433,6 +433,36 @@ fn task_exists(st: &AppState, plugin: &str, name: &str) -> bool {
         .any(|j| j.plugin == plugin && j.name == name)
 }
 
+/// 把指令路由到**负责该插件的 worker**，失败时直接给出该返回的响应。
+///
+/// 多 worker 之后「发指令」必须带插件名：一个插件的解释器状态住在一条特定线程上
+/// （解释器不是 `Send`），发给别的线程它也不知道这个插件是谁。
+fn route(st: &AppState, plugin: &str, cmd: EngineCmd) -> Result<(), Response> {
+    route_code(st, plugin, cmd, StatusCode::NOT_FOUND)
+}
+
+/// 同上，但可以指定「插件不存在」用哪个状态码。
+///
+/// 为什么需要区分：`/api/tasks/{plugin}/{name}/…` 的插件名在**路径**里，
+/// 插件不存在就是 404；而 `/api/jobs` 的插件名在**请求体**里，那是参数错误，
+/// 应该是 400 —— 报 404 会让人以为「接口地址写错了」。
+fn route_code(
+    st: &AppState,
+    plugin: &str,
+    cmd: EngineCmd,
+    unknown_status: StatusCode,
+) -> Result<(), Response> {
+    st.engine.send_for(plugin, cmd).map_err(|e| match e {
+        crate::engine::RouteError::UnknownPlugin(p) => json_error(
+            unknown_status,
+            format!("插件 `{p}` 不存在（没有对应的插件文件）"),
+        ),
+        crate::engine::RouteError::Down => {
+            json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into())
+        }
+    })
+}
+
 fn json_error(code: StatusCode, msg: String) -> Response {
     (code, Json(json!({ "ok": false, "error": msg }))).into_response()
 }
@@ -460,16 +490,16 @@ async fn run_task(
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::ManualRun {
+    if let Err(r) = route(
+        &st,
+        &plugin,
+        EngineCmd::ManualRun {
             plugin: plugin.clone(),
             name: name.clone(),
             reply: tx,
-        })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        },
+    ) {
+        return r;
     }
 
     let wait = Duration::from_millis(st.health.budget_ms + 1_000);
@@ -501,17 +531,18 @@ async fn add_job(
         return r;
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::AddJob {
+    if let Err(r) = route_code(
+        &st,
+        &req.plugin,
+        EngineCmd::AddJob {
             plugin: req.plugin.clone(),
             name: req.name.clone(),
             expr: req.expr.clone(),
             reply: tx,
-        })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        },
+        StatusCode::BAD_REQUEST,
+    ) {
+        return r;
     }
     // 校验里有一次真实的插件函数调用（问「有没有这个 handler」），给 5 秒足够
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
@@ -535,16 +566,16 @@ async fn delete_job(
         return r;
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::RemoveJob {
+    if let Err(r) = route(
+        &st,
+        &plugin,
+        EngineCmd::RemoveJob {
             plugin: plugin.clone(),
             name: name.clone(),
             reply: tx,
-        })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        },
+    ) {
+        return r;
     }
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
         Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
@@ -571,17 +602,17 @@ async fn edit_job(
         return r;
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::EditJob {
+    if let Err(r) = route(
+        &st,
+        &plugin,
+        EngineCmd::EditJob {
             plugin: plugin.clone(),
             name: name.clone(),
             expr: req.expr.clone(),
             reply: tx,
-        })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        },
+    ) {
+        return r;
     }
     // 校验里有一次真实的插件函数调用（问「handler 还在不在」），给 5 秒足够
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
@@ -608,25 +639,48 @@ async fn cleanup_jobs(
         return r;
     }
     let dry_run = body.map(|Json(b)| b.dry_run).unwrap_or(false);
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::CleanupJobs { dry_run, reply: tx })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    // **必须扇出到所有 worker 再合并**：失效任务的判据是「我负责的插件里还有没有这个
+    // 处理函数」，而每条 worker 只加载了一部分插件。只问一条的话，别的 worker 负责的
+    // 插件任务会被它一律报成「插件已不存在」——然后被删掉。那是灾难性的。
+    let senders = st.engine.senders();
+    if senders.is_empty() {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有可用的线程".into());
     }
+    let n = senders.len();
+    // 每条 worker 回一份，所以用 mpsc 收集（oneshot 只能收一次）
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Vec<crate::engine::InvalidJob>, String>>(n);
+    for s in &senders {
+        if s.send(EngineCmd::CleanupJobs {
+            dry_run,
+            reply: tx.clone(),
+        })
+        .is_err()
+        {
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        }
+    }
+    drop(tx);
+
     // 每个失效任务都要问一次插件「handler 还在不在」，任务多时要留出时间
-    match tokio::time::timeout(Duration::from_secs(15), rx).await {
-        Ok(Ok(Ok(jobs))) => {
+    let collect = async {
+        let mut all = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                Ok(mut jobs) => all.append(&mut jobs),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok::<_, String>(all)
+    };
+    match tokio::time::timeout(Duration::from_secs(15), collect).await {
+        Ok(Ok(jobs)) => {
             let list: Vec<_> = jobs
                 .into_iter()
                 .map(|(plugin, name, reason)| json!({ "plugin": plugin, "name": name, "reason": reason }))
                 .collect();
             Json(json!({ "ok": true, "dry_run": dry_run, "jobs": list })).into_response()
         }
-        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
-        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Ok(Err(e)) => json_error(StatusCode::BAD_REQUEST, e),
         Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 15 秒没回话".into()),
     }
 }
@@ -664,17 +718,17 @@ async fn set_paused(
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::SetPaused {
+    if let Err(r) = route(
+        &st,
+        &plugin,
+        EngineCmd::SetPaused {
             plugin: plugin.clone(),
             name: name.clone(),
             paused,
             reply: tx,
-        })
-        .is_err()
-    {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+        },
+    ) {
+        return r;
     }
 
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
@@ -987,8 +1041,13 @@ async fn test_run(
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
+    // 测试运行用的是**一次性解释器**，不碰任何插件的状态，所以随便挑一条 worker。
+    // 挑第一条是为了确定性：分散到多条上去会让「引擎在忙」的判断变得难解释。
+    let any_worker = st.engine.senders();
+    let Some(first) = any_worker.first() else {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有可用的线程".into());
+    };
+    if first
         .send(EngineCmd::TestRun {
             lang: lang.clone(),
             code: req.code,
@@ -1039,20 +1098,22 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
         }
     }
 
-    let known = st
+    // 顺便取到注册者：指令必须发给**拥有这个插件解释器**的那条 worker
+    let owner = st
         .host
         .routes
         .lock()
         .unwrap()
         .iter()
-        .any(|r| format!("{} {}", r.method, r.path) == key);
-    if !known {
+        .find(|r| format!("{} {}", r.method, r.path) == key)
+        .map(|r| r.plugin.clone());
+    let Some(owner) = owner else {
         return (
             StatusCode::NOT_FOUND,
             format!("没有插件注册路由 {key}（内置路由只有 / 和 /api/state）\n"),
         )
             .into_response();
-    }
+    };
 
     let mut headers = serde_json::Map::new();
     for (k, v) in req.headers().iter() {
@@ -1082,16 +1143,24 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
     .to_string();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if st
-        .engine_tx
-        .send(EngineCmd::HttpRequest {
+    if let Err(e) = st.engine.send_for(
+        &owner,
+        EngineCmd::HttpRequest {
             key: key.clone(),
             request_json,
             reply: tx,
-        })
-        .is_err()
-    {
-        return (StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出\n").into_response();
+        },
+    ) {
+        return match e {
+            crate::engine::RouteError::UnknownPlugin(p) => (
+                StatusCode::NOT_FOUND,
+                format!("注册路由 {key} 的插件 `{p}` 已经不在了\n"),
+            )
+                .into_response(),
+            crate::engine::RouteError::Down => {
+                (StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出\n").into_response()
+            }
+        };
     }
 
     // 超时给得比插件执行预算宽一点：预算是给 handler 的，这里还要算上排队
@@ -1177,6 +1246,12 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "sessions": st.auth.active_sessions(),
             "cookie_secure": st.auth.cookie_secure(),
         },
+        // 多 worker 的可见性：哪条卡住了、哪个插件在哪条上。
+        // 没有这两个字段的话，「插件之间互相干扰」就只能靠猜。
+        "workers": st.health.workers(),
+        "worker_staleness_ms": st.health.per_worker_ms(),
+        "stalest_worker": st.health.stalest_worker(),
+        "owners": st.engine.owners(),
         // 测试运行的占用情况。面板据此告诉用户「引擎正忙」而不是让他按了没反应。
         "test_run": {
             "pending": st.test_limiter.pending(),

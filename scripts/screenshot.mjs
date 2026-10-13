@@ -602,9 +602,17 @@ const SHOTS = (o) => [
       const text = () => ev(`document.querySelector('.editor').textContent`);
       const note = (label, ok, detail) => ({ label, ok, detail });
 
-      const found = await ev(`!!document.querySelector('.editor')`);
+      // **等**编辑器出现再断言。视图是异步渲染的（先 await /api/state 再建编辑器），
+      // 而这里跑在 load 事件之后 —— 单次查询就是赌它已经渲染完。
+      // 实测踩到过：改成多 worker 之后这一条开始稳定失败，而手工 probe 里
+      // 编辑器明明在（.editor 存在、状态文案也对）—— 纯粹是断言跑早了。
+      let found = false;
+      for (let i = 0; i < 60 && !found; i += 1) {
+        found = await ev(`!!document.querySelector('.editor')`);
+        if (!found) await sleep(150);
+      }
       if (!found) {
-        return { ok: false, label: '代码编辑器存在', detail: '找不到 .editor' };
+        return { ok: false, label: '代码编辑器存在', detail: '等了 9 秒仍然找不到 .editor' };
       }
 
       const results = [];

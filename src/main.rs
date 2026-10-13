@@ -15,6 +15,7 @@
 
 mod assets;
 mod ratelimit;
+mod workers;
 mod auth;
 mod cron;
 mod db;
@@ -29,7 +30,7 @@ mod web;
 use assets::Assets;
 use auth::Auth;
 use db::Db;
-use engine::{EngineCmd, EngineHealth, JsEngine, Registry};
+use engine::{EngineCmd, EngineHandle, EngineHealth, JsEngine, Registry};
 use hostapi::{HostState, SharedLogs};
 use ratelimit::TestRunLimiter;
 use std::collections::VecDeque;
@@ -75,8 +76,8 @@ pub struct AppState {
     pub health: EngineHealth,
     /// 宿主 API 状态（Axum 侧要用它查插件路由表）
     pub host: Arc<HostState>,
-    /// 引擎指令通道（转发插件路由请求用）
-    pub engine_tx: std::sync::mpsc::Sender<EngineCmd>,
+    /// 引擎句柄（按插件名路由指令）
+    pub engine: EngineHandle,
     /// 面板鉴权（第十轮）。`enabled() == false` 表示没配令牌，只在 loopback 下允许。
     pub auth: Arc<Auth>,
     /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
@@ -169,10 +170,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         host.clone(),
     );
     let health = engine.health();
-    let engine_tx = engine.sender();
+    let engine_handle = engine.handle();
 
     // ---------- 4. tick 循环：tokio interval → 引擎线程 → 插件 on_tick() ----------
-    let tick_tx = engine.sender();
+    let tick_tx = engine.handle();
     let ticks_for_task = ticks.clone();
     let db_for_task = db.clone();
     tokio::spawn(async move {
@@ -189,7 +190,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             ticks_for_task.store(seq, Ordering::Relaxed);
 
             // Rust → JS：投递一次 tick。引擎线程是阻塞消费的，send 本身不阻塞。
-            if tick_tx.send(EngineCmd::Tick { seq, ts: ts.clone() }).is_err() {
+            // 广播：每条 worker 都要给**自己负责的插件**派 on_tick
+            if !tick_tx.broadcast(EngineCmd::Tick { seq, ts: ts.clone() }) {
                 println!("[tick] 引擎线程已退出，停止 tick 循环");
                 break;
             }
@@ -239,7 +241,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         db_path: db_path.clone(),
         health,
         host,
-        engine_tx,
+        engine: engine_handle,
         auth: Arc::new(Auth::new(token, cookie_secure)),
         assets,
         test_limiter: Arc::new(TestRunLimiter::new(

@@ -37,6 +37,9 @@ BIN = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "target/release/plugin-pa
 FIXTURES = ROOT / "examples" / "serial-cost"
 
 MEASURE_SECS = 12
+# 对照：1 条执行线程（改造前的行为）vs 2 条（默认）。这是 worker 池的验收依据 ——
+# 场景 B/C 在 2 条 worker 下的 p99 必须回到基线的水平。
+WORKER_COUNTS = [1, 2]
 # 慢任务每次占住引擎多久（毫秒）。C 场景翻倍，用来看伤害是否线性。
 SCENARIOS = [
     ("A 只有快任务（基线）", 0),
@@ -77,9 +80,9 @@ def wait_ready(base, proc, timeout=25.0):
     return False
 
 
-def run_scenario(tmp: Path, label: str, block_ms: int) -> dict:
+def run_scenario(tmp: Path, label: str, block_ms: int, workers: int) -> dict:
     """跑一个场景，返回夹具插件吐出来的统计。"""
-    plugins = tmp / f"plugins-{block_ms}"
+    plugins = tmp / f"plugins-{block_ms}-w{workers}"
     plugins.mkdir(parents=True, exist_ok=True)
     shutil.copy(FIXTURES / "fast.js", plugins / "fast.js")
     if block_ms > 0:
@@ -94,7 +97,8 @@ def run_scenario(tmp: Path, label: str, block_ms: int) -> dict:
         {
             "BIND_ADDR": f"127.0.0.1:{port}",
             "PLUGINS_DIR": str(plugins),
-            "DB_PATH": str(tmp / f"db-{block_ms}.db"),
+            "DB_PATH": str(tmp / f"db-{block_ms}-w{workers}.db"),
+            "ENGINE_WORKERS": str(workers),
         }
     )
     proc = subprocess.Popen(
@@ -128,6 +132,7 @@ def run_scenario(tmp: Path, label: str, block_ms: int) -> dict:
         stats["label"] = label
         stats["window_secs"] = MEASURE_SECS
         stats["plugins"] = os.listdir(plugins)
+        stats["workers"] = workers
         return stats
     finally:
         proc.terminate()
@@ -145,59 +150,77 @@ def main() -> int:
         print(f"环境问题：找不到夹具 {FIXTURES}")
         return 2
 
-    print(f"任务串行的代价实测（每个场景 {MEASURE_SECS} 秒，20ms 任务）\n")
+    print(f"任务串行的代价实测（每个场景 {MEASURE_SECS} 秒，20ms 快任务）")
+    print("对照 ENGINE_WORKERS=1（改造前）与 =2（默认）\n")
     results = []
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        for label, block in SCENARIOS:
-            sys.stdout.write(f"  跑 {label} … ")
-            sys.stdout.flush()
-            try:
-                r = run_scenario(tmp, label, block)
-                results.append(r)
-                print("完成")
-            except Exception as e:
-                print(f"失败：{e}")
-                return 1
+        for workers in WORKER_COUNTS:
+            for label, block in SCENARIOS:
+                sys.stdout.write(f"  ENGINE_WORKERS={workers} 跑 {label} … ")
+                sys.stdout.flush()
+                try:
+                    r = run_scenario(tmp, label, block, workers)
+                    results.append(r)
+                    print("完成")
+                except Exception as e:
+                    print(f"失败：{e}")
+                    return 1
 
     hdr = (
-        f"{'场景':<22} {'触发':>6} {'间隔p50':>8} {'间隔p99':>8} "
-        f"{'间隔max':>8} {'间隔均值':>9} {'>40ms':>6} {'lateP99':>8}"
+        f"{'worker 数 / 场景':<26} {'触发':>6} {'间隔p50':>8} {'间隔p99':>8} "
+        f"{'间隔max':>8} {'间隔均值':>9} {'>40ms':>6}"
     )
     print("\n" + hdr)
     print("-" * max(len(hdr), 60))
     for r in results:
         print(
-            f"{r['label']:<22} {r['count']:>6} {fmt(r['gap_p50']):>8} {fmt(r['gap_p99']):>8} "
-            f"{fmt(r['gap_max']):>8} {fmt2(r['gap_mean']):>9} {r['gap_over_40']:>6} {fmt(r['late_p99']):>8}"
+            f"{str(r['workers']) + ' / ' + r['label']:<26} {r['count']:>6} "
+            f"{fmt(r['gap_p50']):>8} {fmt(r['gap_p99']):>8} {fmt(r['gap_max']):>8} "
+            f"{fmt2(r['gap_mean']):>9} {r['gap_over_40']:>6}"
         )
 
-    base = results[0]
-    worst = results[-1]
+    def pick(workers, scenario_idx):
+        return results[workers_idx(workers) * len(SCENARIOS) + scenario_idx]
+
+    def workers_idx(w):
+        return WORKER_COUNTS.index(w)
+
     print("\n结论：")
+    base = pick(1, 0)
     print(
-        f"  · 基线（独占引擎）：20ms 任务触发 {base['count']} 次，间隔 p99 "
-        f"{fmt(base['gap_p99'])}ms，超 40ms 的 {base['gap_over_40']} 次。"
+        f"  · 基线（只有快任务，无干扰）：间隔 p99 {fmt(base['gap_p99'])}ms，"
+        f"间隔均值 {fmt2(base['gap_mean'])}ms，超 40ms 的 {base['gap_over_40']} 次"
+        f"（{MEASURE_SECS}s 窗口里应有 {int(MEASURE_SECS * 1000 / 20)} 次触发，实测 {base['count']} 次）。"
     )
-    for r in results[1:]:
-        lost = r["gap_over_40"] - base["gap_over_40"]
+    for i, (label, _) in enumerate(SCENARIOS):
+        if i == 0:
+            continue
+        one = pick(1, i)
+        two = pick(2, i)
         print(
-            f"  · 加一个每 1s 忙等 {r['label'].split()[3].rstrip('/1s')} 的慢任务后："
-            f"间隔 p99 {fmt(base['gap_p99'])} → {fmt(r['gap_p99'])}ms，"
-            f"最大 {fmt(r['gap_max'])}ms，多丢了 {lost} 次触发"
-            f"（宿主视角调度延迟 p99 {fmt(r['late_p99'])}ms）。"
+            f"  · {label}：\n"
+            f"      ENGINE_WORKERS=1 → 间隔 p99 {fmt(one['gap_p99'])}ms，"
+            f"最大 {fmt(one['gap_max'])}ms，丢 {one['gap_over_40']} 次（触发只剩 {one['count']} 次）\n"
+            f"      ENGINE_WORKERS=2 → 间隔 p99 {fmt(two['gap_p99'])}ms，"
+            f"最大 {fmt(two['gap_max'])}ms，丢 {two['gap_over_40']} 次（触发 {two['count']} 次）"
         )
-    b = base
-    print(
-        f"  · 节奏对账：目标的 20ms 对应 {b['window_secs']}s 窗口里应有 "
-        f"{int(b['window_secs'] * 1000 / 20)} 次触发，实测 {b['count']} 次，"
-        f"间隔均值 {fmt2(b['gap_mean'])}ms（实测窗口 {fmt(b['elapsed_ms'])}ms）。"
+    ok = all(
+        pick(2, i)["gap_over_40"] == 0 and pick(2, i)["gap_p99"] <= base["gap_p99"] * 1.5
+        for i in range(1, len(SCENARIOS))
     )
     print(
-        f"\n  代价大致正比于「慢任务单次阻塞时长 × 每秒触发次数」：\n"
-        f"  慢任务每 1 秒占住引擎 N 毫秒，快任务就每秒被推迟 N 毫秒（并丢掉 N/20 次触发）。\n"
-        f"  这正是「毫秒级任务和有慢任务的插件放在一起就没法用」的量化形态。"
+        "\n  " + ("✅ 验收通过：" if ok else "❌ 验收失败：")
+        + "2 条 worker 下，一个每 1 秒阻塞 300~800ms 的合规任务不再影响 20ms 任务的节奏"
+        + ("（p99 回到基线水平、一次不丢）。" if ok else "（p99 仍未回到基线）。")
     )
+    print(
+        "  原理：慢任务的插件和快任务的插件被分到不同的执行线程（`workers::plan`），"
+        "各自有独立的 QuickJS Runtime 和调度器 —— 慢的那条卡住时，快的那条照常在跑。"
+    )
+    return 0 if ok else 1
+
+
     return 0
 
 

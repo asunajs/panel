@@ -1731,7 +1731,31 @@ def main() -> int:
             check(False, "SIGTERM 后进程退出", "15 秒超时，只能 kill -9")
 
         log = logpath.read_text(errors="replace")
-        check("引擎线程已退出" in log, "退出路径完整（QuickJS 已按序析构）")
+        # 退出路径。多 worker 之后要按**每条线程**看，而且这里钉住的是一个实测崩过的
+        # 真实 bug：pocketpy 的 finalize 是进程级的，各 worker 各调一次会
+        # `py_finalize() can only be called once!` + abort()（Abort trap: 6）。
+        # 现在只有协调者在所有线程 join 之后调一次。
+        n_workers = log.count("正在释放插件解释器")
+        check(
+            n_workers >= 1 and log.count("执行线程已退出") == n_workers,
+            "每条执行线程都走完了析构路径",
+            f"{n_workers} 条线程释放解释器，{log.count('执行线程已退出')} 条报退出",
+        )
+        check(
+            "py_finalize() can only be called once" not in log and "Abort trap" not in log,
+            "关闭时没有重复 finalize Python（会 abort）",
+            "日志里出现了重复 finalize" if "py_finalize() can only be called once" in log else "干净",
+        )
+        check(
+            log.count("PocketPy 已释放") == 1,
+            "Python 只被 finalize 一次（由协调者做）",
+            f"{log.count('PocketPy 已释放')} 次",
+        )
+        check(
+            "正在关闭" in log and "panicked" not in log,
+            "关闭路径正常走完，没有 panic",
+            f"关闭日志={'有' if '正在关闭' in log else '缺'}，panic={'有' if 'panicked' in log else '无'}",
+        )
     finally:
         if proc.poll() is None:
             proc.kill()
