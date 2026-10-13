@@ -46,10 +46,16 @@ use std::time::{Duration, Instant};
 const DEFAULT_WORKER_THREADS: usize = 2;
 
 /// 测试运行的限流默认值（见 `src/ratelimit.rs`）。
-/// 突发 5 次、每 2 秒补一个、同时在飞最多 2 个。
-/// 「在飞最多 2 个」是保护引擎的关键量 —— 引擎只有一条线程，每次测试真占满预算。
-const DEFAULT_TEST_RUN_BURST: usize = 5;
-const DEFAULT_TEST_RUN_REFILL_MS: usize = 2000;
+///
+/// **在飞最多 2 个**才是保护引擎的关键量 —— 引擎只有一条线程，每次测试真占满预算。
+/// 速率只是挡脚本 / 多标签页狂点的后备，所以给得宽松：
+/// 突发 10 次、之后每 1 秒补一个。
+///
+/// 一开始是 5 次 / 2 秒，结果**冒烟测试自己就被挡住了**（连着跑十几次测试运行是
+/// 很正常的调试节奏）—— 真实用户在编辑器里连试几段代码也是同样的节奏。
+/// 「按了没反应」比「多占一点引擎」更糟。
+const DEFAULT_TEST_RUN_BURST: usize = 10;
+const DEFAULT_TEST_RUN_REFILL_MS: usize = 1000;
 const DEFAULT_TEST_RUN_MAX_PENDING: usize = 2;
 
 /// 共享给 Axum handler 的全部状态。必须是 `Clone + Send + Sync`。
