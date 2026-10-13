@@ -269,6 +269,126 @@ const SHOTS = (o) => [
     },
   },
   {
+    // 代码编辑器（自带实现，见 web/js/editor.js）：真的打一段字，验高亮 / caret /
+    // 回车缩进 / Tab / 撤销。
+    //
+    // 这一条尤其重要：编辑器原来是「从 CDN 引 CodeJar，失败就降级成纯文本」，
+    // 而实测在**有外网**的机器上也加载失败（版本号写死写错了），用户看到的
+    // 就是「CDN 不可用」。改成自带实现之后，这套断言是唯一能证明它真的能编辑的地方。
+    name: 'web-editor',
+    url: `${o.auth}/#/tasks/new`,
+    viewport: [1100, 700],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const key = async (k, code, vk, modifiers = 0) => {
+        const base = { key: k, code: code, windowsVirtualKeyCode: vk, modifiers: modifiers };
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base }, S);
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, S);
+      };
+      const reset = () =>
+        ev(`(function () {
+              const el = document.querySelector('.editor');
+              el.textContent = '';
+              el.focus();
+              return true;
+            })()`);
+      const text = () => ev(`document.querySelector('.editor').textContent`);
+      const note = (label, ok, detail) => ({ label, ok, detail });
+
+      const found = await ev(`!!document.querySelector('.editor')`);
+      if (!found) {
+        return { ok: false, label: '代码编辑器存在', detail: '找不到 .editor' };
+      }
+
+      const results = [];
+
+      // ① 打字 → 高亮 + 内容保真
+      await reset();
+      await cdp.send('Input.insertText', { text: 'const x = 1' }, S);
+      await sleep(250);
+      const typed = await ev(`(function () {
+        const el = document.querySelector('.editor');
+        const kw = el.querySelectorAll('.tok-key');
+        const num = el.querySelectorAll('.tok-num');
+        return {
+          text: el.textContent,
+          kw: kw.length,
+          kwText: kw.length ? kw[0].textContent : '',
+          num: num.length,
+        };
+      })()`);
+      results.push(
+        note(
+          '打字后内容保真 + 关键字/数字被高亮',
+          typed.text === 'const x = 1' && typed.kw >= 1 && typed.kwText === 'const' && typed.num >= 1,
+          `text=${JSON.stringify(typed.text)}, 关键字=${typed.kw}(${typed.kwText}), 数字=${typed.num}`,
+        ),
+      );
+
+      // ② caret 在高亮重画之后要还在末尾
+      const caret = await ev(`(function () {
+        const el = document.querySelector('.editor');
+        const sel = window.getSelection();
+        const r = sel.getRangeAt(0);
+        const pre = r.cloneRange();
+        pre.selectNodeContents(el);
+        pre.setEnd(r.startContainer, r.startOffset);
+        return pre.toString().length;
+      })()`);
+      results.push(
+        note('高亮重画后 caret 停在末尾', caret === 11, `caret 偏移=${caret}（应为 11）`),
+      );
+
+      // ③ 回车：行尾是 { 时多缩进一级
+      await reset();
+      await cdp.send('Input.insertText', { text: 'function f() {' }, S);
+      await sleep(150);
+      await key('Enter', 'Enter', 13);
+      await sleep(200);
+      const afterEnter = await text();
+      results.push(
+        note(
+          '回车保留缩进且 `{` 后多缩进一级',
+          afterEnter === 'function f() {\n  ',
+          JSON.stringify(afterEnter),
+        ),
+      );
+
+      // ④ Tab 插入两个空格
+      await key('Tab', 'Tab', 9);
+      await sleep(200);
+      const afterTab = await text();
+      results.push(
+        note(
+          'Tab 插入 2 个空格',
+          afterTab === 'function f() {\n    ',
+          JSON.stringify(afterTab),
+        ),
+      );
+
+      // ⑤ 撤销（Cmd/Ctrl+Z）回到上一步
+      await sleep(450); // 撤销栈是 300ms 防抖，等它落定
+      await key('z', 'KeyZ', 90, 4);
+      await sleep(250);
+      const afterUndo = await text();
+      results.push(
+        note('Cmd/Ctrl+Z 撤销上一步', afterUndo === 'function f() {\n  ', JSON.stringify(afterUndo)),
+      );
+
+      const bad = results.filter((r) => !r.ok);
+      return {
+        ok: bad.length === 0,
+        label: '代码编辑器：打字 / 高亮 / caret / 回车缩进 / Tab / 撤销',
+        detail:
+          bad.length === 0
+            ? `${results.length}/${results.length} 项通过（${results.map((r) => r.label).join('；')}）`
+            : bad.map((r) => `${r.label} → ${r.detail}`).join(' | '),
+      };
+    },
+  },
+  {
     name: 'web-plugins',
     // 插件管理页：徽章 / 插件名 / 按钮的排版在这里最容易挤（实测被压成竖排过）
     url: `${o.auth}/#/plugins`,

@@ -129,19 +129,14 @@ export async function render(root, ctx, params = {}) {
   let editor;
   const host = $('#editor-host');
   try {
-    editor = await createEditor(host, { value: SAMPLE_CODE[lang], language: lang });
+    // 同步创建：编辑器是自带的（见 editor.js 顶部注释），不走网络，
+    // 所以不存在「加载中 / 加载失败」这两个状态。
+    editor = createEditor(host, { value: SAMPLE_CODE[lang], language: lang });
+    $('#editor-state').textContent = `内置编辑器 · ${lang === 'py' ? 'Python' : 'JavaScript'} 高亮`;
   } catch (e) {
-    // createEditor 自己已经处理了 CDN 失败（降级 textarea），这里兜的是更意外的情况
+    // 兜底：编辑器创建本身失败（理论上不会发生）。留个可读的错误，不要白屏。
     host.innerHTML = `<div class="editor-note">编辑器创建失败：${esc(e.message || e)}</div>`;
     editor = null;
-  }
-  if (editor) {
-    $('#editor-state').textContent = editor.isFallback
-      ? 'CDN 不可用，已降级为纯文本编辑（无高亮）'
-      : 'CodeJar 已就绪';
-    if (editor.isFallback && editor.error) {
-      $('#editor-state').title = editor.error;
-    }
   }
 
   $('#lang-sel').addEventListener('change', () => {
