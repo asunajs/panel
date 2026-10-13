@@ -13,6 +13,7 @@
 //!   9. `jobs` 表是任务定义的权威来源（`source` 区分插件声明 / 面板创建）
 //!  10. **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避（`auth.rs`）
 
+mod assets;
 mod auth;
 mod cron;
 mod db;

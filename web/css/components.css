@@ -1,0 +1,564 @@
+/*
+  web/css/components.css —— 组件样式。
+
+  顺序：按钮 → 徽章 → 卡片 → 表单 → 编辑器 → 控制台 → 表格 → 杂项。
+  所有颜色都走 theme.css 的变量，这里没有一处硬编码色值 —— 换主题不需要动这个文件。
+*/
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--t-fast), border-color var(--t-fast),
+    transform var(--t-fast);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--text-mute);
+}
+
+/* 按下时轻微下沉：给出「点击被接收」的触感，比只变色更明确 */
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+
+.btn.danger {
+  color: var(--error);
+  border-color: var(--error-soft);
+  background: var(--error-soft);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--error);
+  color: var(--accent-ink);
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  color: var(--text-dim);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.icon-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* 按钮里的加载转圈 */
+.spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------- 徽章 */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+  background: var(--mute-soft);
+  color: var(--text-dim);
+}
+
+.badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.badge.idle {
+  background: var(--mute-soft);
+  color: var(--text-dim);
+}
+
+.badge.running {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.badge.success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.badge.failed {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.badge.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+/* 语言标签不需要小圆点，纯文字更干净 */
+.badge.lang::before {
+  display: none;
+}
+
+.badge.lang.js {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.badge.lang.py {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+.card.hoverable:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.card-sub {
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.card-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.section {
+  margin-bottom: var(--sp-5);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.section-head .card-actions {
+  margin-left: auto;
+}
+
+.grid {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.grid.cols-2 {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.grid.stats {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+/* 统计卡：数字大、标签小 */
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* ---------------------------------------------------------------- 表单 */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  transition: border-color var(--t-fast);
+}
+
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--text-mute);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--text-mute);
+}
+
+.input.mono,
+.textarea.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.row > .field {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-mute);
+}
+
+.err-text {
+  font-size: 12px;
+  color: var(--error);
+}
+
+/* ---------------------------------------------------------------- 编辑器 */
+
+.editor-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+
+.editor {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  padding: var(--sp-3);
+  min-height: 220px;
+  max-height: 52vh;
+  overflow: auto;
+  white-space: pre;
+  tab-size: 2;
+  outline: none;
+}
+
+/* CodeJar 渲染出来的 token 颜色（语法高亮） */
+.editor .tok-key { color: var(--accent); }
+.editor .tok-str { color: var(--success); }
+.editor .tok-num { color: var(--warning); }
+.editor .tok-com { color: var(--text-mute); font-style: italic; }
+
+/* CDN 不可用时的降级控件（editor.js 会在 import 失败时插进来） */
+.editor-fallback {
+  width: 100%;
+  min-height: 220px;
+  max-height: 52vh;
+  padding: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  outline: none;
+  resize: vertical;
+}
+
+.editor-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.editor-bar .spacer {
+  margin-left: auto;
+}
+
+.editor-note {
+  padding: 6px var(--sp-3);
+  font-size: 12px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+/* ---------------------------------------------------------------- 控制台 */
+
+.console {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  min-height: 120px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.console-line {
+  display: block;
+}
+
+.console-line.stdout { color: var(--text); }
+.console-line.stderr { color: var(--warning); }
+.console-line.error  { color: var(--error); }
+.console-line.meta   { color: var(--text-mute); }
+.console-line.system { color: var(--accent); }
+
+.console-empty {
+  color: var(--text-mute);
+}
+
+/* ---------------------------------------------------------------- 表格 */
+
+.table-wrap {
+  overflow-x: auto; /* 窄屏横向滚动，别把操作列挤出可视区 */
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.table-wrap table {
+  min-width: 560px;
+}
+
+.table-wrap th {
+  padding: 9px var(--sp-3);
+  font-size: 11px;
+  color: var(--text-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+
+.table-wrap td {
+  padding: 10px var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+
+.table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-wrap tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.dim {
+  color: var(--text-mute);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  color: var(--text-mute);
+}
+
+/* ---------------------------------------------------------------- 杂项 */
+
+/* 插件 UI 的 iframe 容器：撑满剩余高度，插件页面自己负责内部滚动 */
+.plugin-frame {
+  width: 100%;
+  height: calc(100vh - var(--topbar-h) - 160px);
+  min-height: 360px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+/* 插件的入口链接卡片（插件管理页） */
+.plugin-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.plugin-card .card-title {
+  font-family: var(--font-mono);
+}
+
+.plugin-card .grow {
+  min-width: 0;
+  flex: 1;
+}
+
+.plugin-card .path {
+  color: var(--text-mute);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 视图切换的顶部消息条 */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  max-width: min(92vw, 560px);
+  padding: 10px var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  z-index: 50;
+}
+
+.toast.ok { border-color: var(--success); color: var(--success); }
+.toast.bad { border-color: var(--error); color: var(--error); }
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+  font-size: 13px;
+  color: var(--text-mute);
+}
+
+.breadcrumb a:hover {
+  color: var(--accent);
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-soft);
+  margin: var(--sp-4) 0;
+}

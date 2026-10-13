@@ -101,13 +101,14 @@ globalThis.host_api = {
 };
 
 // ---- 向后兼容：host.* 是同一个东西的老名字 ----
-globalThis.host = {
-    log:   host_api.log,
-    warn:  host_api.warn,
-    error: host_api.error,
-    cron:  host_api.register_cron,
-    every: host_api.every,
-};
+// `host` 是 host_api 的**完整别名**（原型继承），只多一个历史名字 `cron`。
+//
+// 以前这里是一个手写的 5 方法对象字面量，于是 `host.register_route` / `host.sqlite_query`
+// 全都是 undefined —— 插件里写出来就是「TypeError: not a function」，而且报在加载期，
+// 跟「我照文档写了个路由」这个动作对不上号。少一个方法就该少一个方法，但不该
+// **看起来像**少了一堆：现在除了 cron 这个名字，host 上有什么完全由 host_api 决定。
+globalThis.host = Object.create(host_api);
+globalThis.host.cron = host_api.register_cron;
 globalThis.console = { log: host_api.log, warn: host_api.warn, error: host_api.error, info: host_api.log, debug: host_api.log };
 
 // ---- 任务与路由表（存在 JS 侧，宿主只保存元数据）----

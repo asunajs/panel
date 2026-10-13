@@ -149,9 +149,11 @@ const SHOTS = (o) => [
       );
     },
   },
+  // 第十三轮：`/` 换成了多文件前端，旧版单文件页面挪到 `/classic`。
+  // 这两张是给旧页面留的档（它的实时日志 / 熔断清理还没搬过来）。
   {
     name: 'panel-auth',
-    url: `${o.auth}/`,
+    url: `${o.auth}/classic`,
     viewport: [1240, 1200],
     scale: 2,
     clip: [0, 0, 1240, 850], // 页头（鉴权徽标）+ 统计卡 + 插件表 + 新建表单 + 任务表（含来源列）
@@ -161,11 +163,34 @@ const SHOTS = (o) => [
     name: 'panel-jobs',
     // 单独给「任务表」来一张：来源列 + 面板任务的「编辑 / 删除」按钮
     // （第十二轮加的东西，整页截图里会被插件表挤到下面看不清）
-    url: `${o.auth}/`,
+    url: `${o.auth}/classic`,
     // 比别的截图宽：任务表操作列有 4 个按钮，1240 下会被挤到横向滚动区外面
     viewport: [1440, 2200],
     scale: 2,
     clip: [0, 0, 1440, 2100],
+    cookie: 'session',
+  },
+  // ---- 第十三轮：新版多文件前端 ----
+  {
+    name: 'web-dashboard',
+    url: `${o.auth}/#/dashboard`,
+    viewport: [1280, 1000],
+    scale: 2,
+    cookie: 'session',
+  },
+  {
+    name: 'web-tasks',
+    url: `${o.auth}/#/tasks`,
+    viewport: [1280, 1100],
+    scale: 2,
+    cookie: 'session',
+  },
+  {
+    name: 'web-plugin-ui',
+    // 插件作者提供的配置页：它自己的表单 + 自己的 API
+    url: `${o.auth}/plugins/demo/`,
+    viewport: [900, 1250],
+    scale: 2,
     cookie: 'session',
   },
   {
@@ -233,6 +258,8 @@ try {
   console.log(`浏览器: ${browser}`);
   console.log(`会话:   ${sid.slice(0, 16)}…\n`);
 
+  let lastUrl = null; // 判断下一次导航是不是「同文档、只换 hash」
+
   for (const shot of SHOTS(opts)) {
     const [w, h] = shot.viewport;
     await cdp.send(
@@ -249,9 +276,25 @@ try {
       );
     }
 
-    const loaded = cdp.once('Page.loadEventFired');
-    await cdp.send('Page.navigate', { url: shot.url }, S);
-    await loaded;
+    // 新版面板是 **hash 路由**（`/#/tasks`）。从 `/#/dashboard` 切到 `/#/tasks`
+    // 只换了 fragment，文档根本没重新加载 —— 等 `Page.loadEventFired` 必然超时。
+    // 所以只有「换文档」的导航才等加载事件，纯 hash 变化等一小会儿让视图渲染。
+    const target = new URL(shot.url);
+    const sameDoc =
+      lastUrl !== null &&
+      target.origin === lastUrl.origin &&
+      target.pathname === lastUrl.pathname &&
+      target.search === lastUrl.search;
+    lastUrl = target;
+
+    if (sameDoc) {
+      await cdp.send('Page.navigate', { url: shot.url }, S);
+      await sleep(500);
+    } else {
+      const loaded = cdp.once('Page.loadEventFired');
+      await cdp.send('Page.navigate', { url: shot.url }, S);
+      await loaded;
+    }
     if (shot.after) {
       await sleep(700); // 等首屏脚本把 DOM 建好再动它
       await shot.after(cdp, S);

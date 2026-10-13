@@ -1,0 +1,111 @@
+/*
+  web/css/theme.css —— 主题变量。
+
+  深色 = Catppuccin Mocha，亮色 = Catppuccin Latte（同一套变量的另一组取值）。
+  切换只改 <html data-theme="dark|light">，JS 不碰任何具体样式 ——
+  这样加主题（比如高对比度）只需要再加一个 [data-theme=...] 块。
+
+  插件可以**直接复用**这些变量（web/plugins/demo/style.css 就是这么做的）：
+  插件样式表里写 var(--surface) / var(--accent)，就自动跟着主面板换主题。
+*/
+
+:root,
+:root[data-theme='dark'] {
+  /* ---- Catppuccin Mocha ---- */
+  --bg: #1e1e2e;          /* base：主区域背景 */
+  --bg-deep: #181825;     /* mantle：侧边栏 / 控制台等更深的底 */
+  --surface: #313244;     /* surface0：卡片、输入框 */
+  --surface-2: #45475a;   /* surface1：悬停、分隔 */
+  --border: #45475a;
+  --border-soft: #313244;
+
+  --text: #cdd6f4;
+  --text-dim: #a6adc8;
+  --text-mute: #6c7086;
+
+  --accent: #89b4fa;
+  --accent-ink: #11111b;  /* 强调色底上的文字 */
+  --success: #a6e3a1;
+  --error: #f38ba8;
+  --warning: #f9e2af;
+
+  /* 徽章背景：强调色的低饱和底，避免整行都在喊 */
+  --accent-soft: rgba(137, 180, 250, 0.16);
+  --success-soft: rgba(166, 227, 161, 0.16);
+  --error-soft: rgba(243, 139, 168, 0.16);
+  --warning-soft: rgba(249, 226, 175, 0.16);
+  --mute-soft: rgba(108, 112, 134, 0.18);
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 6px 16px rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme='light'] {
+  /* ---- Catppuccin Latte ---- */
+  --bg: #eff1f5;
+  --bg-deep: #e6e9ef;
+  --surface: #ffffff;
+  --surface-2: #e6e9ef;
+  --border: #ccd0da;
+  --border-soft: #e6e9ef;
+
+  --text: #4c4f69;
+  --text-dim: #6c6f85;
+  --text-mute: #9ca0b0;
+
+  --accent: #1e66f5;
+  --accent-ink: #ffffff;
+  --success: #40a02b;
+  --error: #d20f39;
+  --warning: #df8e1d;
+
+  --accent-soft: rgba(30, 102, 245, 0.12);
+  --success-soft: rgba(64, 160, 43, 0.14);
+  --error-soft: rgba(210, 15, 57, 0.12);
+  --warning-soft: rgba(223, 142, 29, 0.16);
+  --mute-soft: rgba(156, 160, 176, 0.18);
+
+  --shadow: 0 1px 2px rgba(76, 79, 105, 0.08), 0 6px 16px rgba(76, 79, 105, 0.10);
+  --scrim: rgba(76, 79, 105, 0.35);
+}
+
+:root {
+  /* ---- 不随主题变的东西：字体、圆角、间距、过渡 ---- */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 过渡只给颜色和背景：给 all 会在滚动/布局变化时触发无谓的重排动画 */
+  --t-fast: 120ms ease;
+  --t-mid: 200ms ease;
+
+  --sidebar-w: 216px;
+  --topbar-h: 56px;
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}

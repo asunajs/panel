@@ -1,0 +1,179 @@
+/*
+  web/css/layout.css —— 整体布局。
+
+  结构（对应 index.html）：
+
+    .app
+      ├── .sidebar        左侧固定导航
+      └── .main
+            ├── .topbar   顶栏（移动端出现汉堡按钮）
+            └── .view     视图容器，由 app.js 填内容
+
+  响应式只有一个断点（860px）：宽屏侧边栏常驻，窄屏侧边栏变成 off-canvas 抽屉。
+  面板跑在手机上时 860px 以上基本是横屏平板，所以不需要更多断点。
+*/
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 100vh;
+}
+
+/* ---------------------------------------------------------------- 侧边栏 */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--bg-deep);
+  border-right: 1px solid var(--border-soft);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.sidebar-brand .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  flex: none;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--sp-2);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 8px var(--sp-3);
+  border-radius: var(--r-md);
+  color: var(--text-dim);
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.nav-item:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.nav-icon {
+  width: 16px;
+  text-align: center;
+  opacity: 0.9;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* ---------------------------------------------------------------- 主区域 */
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0; /* grid 子项默认 min-width:auto，会把宽表格撑破布局 */
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: var(--topbar-h);
+  padding: 0 var(--sp-5);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.topbar-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.view {
+  padding: var(--sp-5);
+  max-width: 1100px; /* 信息密度：不让内容在超宽屏上摊成一条线 */
+  width: 100%;
+  outline: none;
+}
+
+/* 抽屉遮罩 */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  z-index: 30;
+}
+
+/* 只在移动端显示的元素 */
+.only-mobile {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- 响应式 */
+
+@media (max-width: 860px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(78vw, var(--sidebar-w));
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform var(--t-mid);
+    box-shadow: var(--shadow);
+  }
+
+  /* 抽屉打开：由 app.js 在 <html> 上切换这个类 */
+  :root.nav-open .sidebar {
+    transform: none;
+  }
+
+  .only-mobile {
+    display: inline-flex;
+  }
+
+  .view {
+    padding: var(--sp-4) var(--sp-3);
+  }
+
+  .topbar {
+    padding: 0 var(--sp-3);
+  }
+}

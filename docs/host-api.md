@@ -272,6 +272,88 @@ handler(payload) -> None
 
 ---
 
+## 4.5 绑定名：`host-api` 模块、`host_api` 全局、`host` 别名
+
+同一个 API 有三个入口，**语义完全一致**，只是绑定名不同：
+
+| 入口 | 写法 | 说明 |
+|---|---|---|
+| ES 模块（推荐） | `import { log, register_route } from 'host-api'` | 规范接口，跨运行时的名字就是它 |
+| 全局对象 | `host_api.register_route(...)` | 模块系统不可用时的等价入口 |
+| 历史别名 | `host.register_route(...)` | 等价于 `host_api`，只多一个 `cron` 名字 |
+
+⚠️ **`host` 必须是 `host_api` 的完整别名。** 它以前是手写的 5 方法对象字面量
+（`log/warn/error/cron/every`），于是 `host.register_route` / `host.sqlite_query`
+全是 `undefined`，插件里写出来就是**加载期**的
+`TypeError: not a function` —— 跟「我照老示例写了个路由」这个动作完全对不上号。
+现在它是 `Object.create(host_api)` 加一个 `cron`，所以「`host` 上有什么」完全由
+`host_api` 决定，不会再出现「看起来少了一堆方法」。
+
+---
+
+## 4.6 插件自带的配置页
+
+**边界**：主面板（Rust 提供）负责任务定义与调度、测试运行、插件管理、日志与健康度；
+插件自带的页面**只管理这个插件自己那份配置**。它不接管主面板的职责，主面板也不替它管配置。
+
+目录约定 —— 插件目录下、与插件**同名**的子目录：
+
+```
+plugins/
+├── js/demo.js      插件本体（名字 = 文件名去扩展名 = demo）
+└── demo/           这个插件的配置页
+    ├── index.html  入口（必须叫这个名字）
+    ├── style.css
+    └── app.js
+```
+
+运行时路径 `/plugins/{name}/`：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /plugins/demo/` | 读 `{PLUGINS_DIR}/demo/index.html` |
+| `GET /plugins/demo/style.css` | 读同目录下的文件 |
+| `GET /plugins/demo/api/*` | **先查插件注册的路由**，命中就派发给插件 |
+| `POST /plugins/demo/api/*` | 同上，但要求 `x-panel: 1` |
+| `POST /plugins/demo/index.html` | 405（静态资源只接受 GET） |
+| 未加载的插件名 | 404 |
+
+三条硬规则：
+
+1. **静态资源只服务已加载插件的目录**。否则插件目录下任何一个目录都能从网上读出来。
+2. **目录穿越在服务端自己挡**：插件名不含分隔符、相对路径逐段检查、规范化后必须仍在
+   插件目录之下（这条同时挡住符号链接）。用 `..` 测的时候记得用**原始 socket** ——
+   urllib / curl 会在客户端把 `..` 折掉，用它们测等于在测客户端。
+3. **目录里有 `index.html` 的不会被当成插件加载**。插件目录扫描器下钻 2 层找 `.js`/`.py`，
+   不跳过的话 `demo/app.js` 会被当成一个叫 `app` 的插件，报的错还是 host-api 解析失败 ——
+   跟「我给插件加了个页面」这个动作联系不起来。
+
+插件页面可以直接复用主面板的 CSS 变量（`<link rel="stylesheet" href="/css/theme.css">`），
+这样它会自动跟着主面板换主题，作者不需要写两套配色。
+
+---
+
+## 4.7 测试运行（面板侧接口）
+
+面板的「测试运行」不是插件 API，而是宿主给编辑器的便利：跑一段代码、把输出收回来。
+
+```
+POST /api/test/js    { "code": "...", "input": "..." }   → { ok, stdout, stderr, error, ms }
+POST /api/test/py    同上
+```
+
+- 代码跑在**一次性解释器**里（JS 新建 `Context`、Python 借一个空闲 pocketpy VM），
+  跑完立刻析构：不碰任何已加载插件的状态，也不注册任务。
+- 输入以全局 `input` 提供（两种语言都有）。
+- 输出约定：`log`/`console.log`/`print` → `stdout`；`warn`/`error` → `stderr`；
+  代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码，
+  两者分开，面板才能区分「你的代码有问题」和「面板出问题了」。
+- 受执行预算保护：JS 死循环被 interrupt handler 打断（实测 2000 ms），
+  Python 死循环被 watchdog 打断（实测 2032 ms，CPU 时间）。
+- 输出**不进**面板的实时日志（用 thread_local 捕获缓冲收走），否则跑几次就把日志刷满了。
+
+---
+
 ## 5. 参考实现
 
 - 宿主侧唯一实现：`src/hostapi.rs`（`HostState::do_*`）
@@ -280,3 +362,6 @@ handler(payload) -> None
 - Node 适配器：`adapters/node`（自带 `README.md` 与 20 个用例）
 - CPython 适配器：`adapters/python`（自带 51 个用例）
 - 示例插件：`plugins/js/host-api-demo.js`、`plugins/py/sysinfo.py`、`plugins/py/sqlite-demo.py`
+- 带配置页的示例插件：`plugins/js/demo.js` + `plugins/demo/{index.html,style.css,app.js}`
+- 主面板前端：`web/`（编译期内嵌，见 `src/assets.rs`）
+- 插件静态资源与测试运行的服务侧：`src/web.rs`（`plugin_asset` / `test_run`）

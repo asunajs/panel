@@ -1,0 +1,94 @@
+/*
+  plugins/demo/style.css —— 示例插件自己的样式。
+
+  关键点：**它直接复用主面板的 CSS 变量**（/css/theme.css 已经通过 link 引进来），
+  所以插件页面会自动跟着主面板换主题 —— 插件作者不需要自己写两套配色。
+
+  只有主面板没有的东西才在这里定义（.plugin-* 这一组）。
+  能在 components.css 里找到的（.card / .btn / .badge / .input / .console）一律复用，
+  不要在插件里复制一份 —— 复制出来的那份不会跟着主面板演进。
+*/
+
+.plugin-body {
+  /* 插件页面通常是 iframe 里的整块内容，不需要主面板的侧边栏留白 */
+  padding: 20px;
+  background: var(--bg);
+}
+
+.plugin-page {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.plugin-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.plugin-title {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.plugin-sub {
+  color: var(--text-mute);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.plugin-header .badge {
+  margin-left: auto;
+}
+
+/* 配置项两列，窄屏一列 */
+.cfg-grid {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  margin-bottom: 16px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plugin-foot {
+  padding-top: 4px;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 4px;
+}
+
+/* 主面板用 iframe 嵌这个页面时会带 ?embed=1 —— 那时藏掉自己的页头，
+   否则页面上会出现「主面板标题 + 插件标题」两层标题。 */
+body.embedded .plugin-header {
+  display: none;
+}
+
+/* 采集结果的紧凑展示：一行一条，成功/异常用颜色区分 */
+.sample-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.sample-row .at {
+  color: var(--text-mute);
+}
+
+.sample-row .val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sample-row.ok .val {
+  color: var(--success);
+}
+
+.sample-row.warn .val {
+  color: var(--warning);
+}

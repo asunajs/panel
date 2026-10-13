@@ -268,8 +268,19 @@ cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --jo
 | `POST /api/tasks/{plugin}/{name}/run` | 立即执行一次 |
 | `POST /api/tasks/{plugin}/{name}/pause` | 暂停（不再被调度） |
 | `POST /api/tasks/{plugin}/{name}/resume` | 恢复（从当前时刻重新对齐，**不补跑**） |
+| `POST /api/test/js` | 测试运行一段 JS（body: `{"code","input"}`；见 §16.5） |
+| `POST /api/test/py` | 测试运行一段 Python（同上） |
 
-`jobs` = 任务**定义**（新增 / 编辑 / 删除 / 清理失效），`tasks` = 任务**操作**（执行 / 暂停 / 恢复）。
+`jobs` = 任务**定义**（新增 / 编辑 / 删除 / 清理失效），`tasks` = 任务**操作**（执行 / 暂停 / 恢复），
+`test` = **一次性解释器**（不碰已加载插件的状态，跑完即弃）。
+
+### 面板页面
+
+| 路径 | 内容 |
+|---|---|
+| `/` | 主面板（`web/` 下的多文件前端，编译期内嵌） |
+| `/classic` | 旧版单文件页面（保留一轮，见 §16.2） |
+| `/plugins/{name}/` | **插件作者**提供的配置页（只管理这个插件自己的配置，见 §16.3） |
 
 > 第八轮的这三个按钮**在页面上点了没反应** —— 后端接口和按钮都写好了，
 > 但前端的 click 委托漏了（`web.rs` 里那句「见下面的 click 监听」下面根本没有监听）。
@@ -355,6 +366,10 @@ cargo test
 # ①b 面板前端逻辑回归：把 web.rs 里的 <script> 抠出来配 DOM/fetch 桩跑，不需要浏览器
 node scripts/test-panel-frontend.mjs
 node scripts/test-panel-frontend.mjs /tmp/old-web.rs   # 传路径做回归验证：旧版本必须报红
+
+# ①c 前端资源静态检查（web/ 与 plugins/demo/）：ES Module 语法、没有内联 CSS/JS、
+#     CSS 里没有硬编码色值、plugins/js/*.js 没用嵌入式 QuickJS 不存在的全局
+node scripts/test-web-assets.mjs
 
 # ② 看面板
 open http://127.0.0.1:8787/
@@ -1807,3 +1822,191 @@ A/B 实测（同一份 90 秒长跑负载、同样 6 个采样点、库增长都
 - **编辑不支持改 `next_run`**：想让任务「立刻跑一次」用「立即执行」，它不动调度节奏。
 - **清理只处理面板任务**：插件代码声明的任务如果因为插件加载失败而挂着，得等插件修好
   （那时 `sync_jobs` 会重新收敛）。
+
+## 16. 第十三轮：插件自有 WebUI（主面板不是壳）
+
+### 16.1 先把边界说清楚
+
+这一轮开头我犯过一个错，值得写在这里当反面教材：我把主面板描述成「壳」，说
+「插件才是真正提供界面的人」。这是错的，而且错得有害 —— 它会让人以为任务定义、
+调度、测试运行这些能力应该下沉到插件里去。
+
+正确的分工是：
+
+| | 归谁 | 内容 |
+|---|---|---|
+| **主面板** | Rust 提供，功能完整 | 导航、Dashboard、任务列表、任务编辑与调度、测试运行、插件管理、日志与健康度 |
+| **插件自有 UI** | **插件作者**提供，是补充 | 只管**这个插件自己那份配置**（它自己的间隔、目标、阈值） |
+
+所以这一轮做的是两件事：**把主面板补成一个真的控制面板**（多文件前端 + 测试运行），
+**同时**给插件一条「交付自己的配置页」的路。插件不接管主面板的职责，主面板也不
+替插件管它的配置。
+
+### 16.2 主面板前端：多文件、零构建、编译期内嵌
+
+原来是 `src/web.rs` 里一个 `PAGE` 常量（单文件、约 42 KB）。现在拆成 `web/` 下的
+12 个文件，用 `include_str!` 在编译期嵌进二进制（`src/assets.rs`）。
+
+| 文件 | 职责 |
+|---|---|
+| `web/index.html` | 壳结构：侧边栏 / 顶栏 / 视图容器 / 消息条 |
+| `web/css/reset.css` | 只消除浏览器差异，不做视觉决定 |
+| `web/css/theme.css` | 主题变量（Mocha / Latte），**唯一**允许出现色值的地方 |
+| `web/css/layout.css` | 应用外壳与唯一的响应式断点（860px） |
+| `web/css/components.css` | 按钮 / 徽章 / 卡片 / 编辑器 / 控制台 / 表格 |
+| `web/js/app.js` | 入口：hash 路由、主题、抽屉、Dashboard、设置 |
+| `web/js/api.js` | 接口封装（**不抛异常**，统一返回 `{ok, error}`） |
+| `web/js/editor.js` | CodeJar 封装 + 语言感知高亮 + CDN 失败降级 |
+| `web/js/mock.js` | 示例数据（后端不可用时的兜底） |
+| `web/js/views/task-list.js` | 任务列表（**默认接真实后端**，降级才用示例数据） |
+| `web/js/views/task-editor.js` | 任务编辑（表达式）+ 测试运行（代码编辑器 + 控制台） |
+| `web/js/views/plugin-list.js` | 插件管理 + 打开插件配置页 |
+
+三点设计决定：
+
+- **不引框架、不引构建工具**。`web/js/app.js` 是唯一的 `<script type="module">` 入口，
+  视图用 hash 路由切换（`#/tasks`）。面板可能被反代挂在子路径下，hash 路由不需要
+  服务端配合重写规则，刷新也不会 404。
+- **`/classic` 保留旧页面**。旧页面有实时日志、熔断清理、鉴权徽标这些新版还没对齐的
+  能力，而且被 99 项冒烟 + 47 项前端用例钉着。直接删会让这些能力短暂消失。等新版
+  功能对齐后再删 —— 保留一轮的代价远小于回归的代价。
+- **CodeJar 从 CDN 引入，但必须能降级**。面板跑在内网盒子上的概率很高，CDN 拿不到
+  时编辑器降级为原生 `textarea`（没有高亮，但功能完整），并在界面上说明原因。
+  一个「白屏 + 控制台红字」比没有高亮糟糕得多。
+
+### 16.3 插件自有 UI：一条路，两个约束
+
+插件作者在**插件目录**下建一个与插件同名的子目录，放自己的页面：
+
+```
+plugins/
+├── js/demo.js          ← 插件本体（名字 = 文件名去扩展名 = demo）
+└── demo/               ← 这个插件的配置页（与插件同名）
+    ├── index.html
+    ├── style.css       ← 复用主面板的 CSS 变量，自动跟随换主题
+    └── app.js          ← 调自己的 /plugins/demo/api/*
+```
+
+运行时路径是 `/plugins/{name}/`，由 Rust 从插件目录读（`src/web.rs::plugin_asset`）。
+
+**约束一：目录穿越只在一处防，而且防严。** `resolve_plugin_asset` 是唯一把外部路径
+映射到磁盘的地方，三层判断：插件名不含分隔符、相对路径逐段检查、**规范化后必须仍在
+插件目录之下**（这条是权威判据，它同时挡住符号链接指向目录外）。实测用**原始 socket**
+发未规范化的 `..`（urllib / curl 会在客户端把 `..` 折掉，用它们测等于在测客户端）：
+
+```
+/plugins/uidev/../../Cargo.toml        → 404 路径里有非法片段: ".."
+/plugins/uidev/../uidev/style.css      → 404 路径里有非法片段: ".."
+/plugins/uidev/../../../../etc/passwd  → 404 路径里有非法片段: ".."
+/plugins/uidev/%2e%2e/%2e%2e/x         → 404 找不到（未解码，不构成绕过）
+POST /plugins/uidev/index.html         → 405
+```
+
+**约束二：UI 资源目录不能被当成插件。** 这是这一轮抓到的真 bug。插件目录扫描器
+（`walk`，下钻 2 层找 `.js`/`.py`）会把 `plugins/demo/app.js` 当成一个叫 **`app`** 的
+插件去加载：它 `import` 的是自己的相对路径，引擎按 `host-api` 解析必然失败，于是面板上
+凭空多出一个「加载失败」的插件 —— 名字跟用户写的任何东西都对不上，根本查不到原因。
+
+修法是给扫描器一条明确规则：**目录里有 `index.html` 的，是插件的配置页资源，不是插件**
+（`index.html` 是配置页的入口，作者一定会提供）。单测 `ui_dirs_are_not_plugins`
+用真实目录结构钉住，冒烟里也有一条断言「`uidev` 在、`app` 不在」。
+
+### 16.4 `has_ui`：面板怎么知道该不该显示按钮
+
+`/api/state` 的每个插件多了 `has_ui`，判据是 `{plugins_dir}/{name}/index.html` 是否存在。
+规则只写在 `plugin_ui_index()` 一处，**上报**和**服务**共用它 —— 两边不一致会变成
+「按钮点了 404」，这是最难查的一类错。
+
+没有 `has_ui` 的话，面板只能对每个插件都显示「打开配置页」，点进去 404：那是把
+插件作者的疏漏转嫁给了用户。
+
+### 16.5 测试运行：真的跑起来
+
+`POST /api/test/js` 与 `POST /api/test/py`，请求体 `{code, input}`，
+回 `{ok, stdout, stderr, error, ms}`。
+
+关键在**一次性解释器**：JS 新建 `Context`、Python 借一个空闲 pocketpy VM，跑完立刻析构。
+复用插件的解释器会让用户在编辑器里写错一行就污染那个插件的全局状态（甚至改掉它的
+任务表），而面板上没有任何提示 —— 这类问题极难排查。代价是每次几十微秒。
+
+两个实现细节：
+
+- **日志捕获用 thread_local**（`hostapi::capture_scope`）。插件代码全在引擎线程上跑，
+  所以捕获状态放 thread_local 最准确也最省事：`push_log` 一开头查一下，有捕获就进捕获
+  缓冲、不打 stdout、不进面板的环形缓冲。测试运行因此不会把面板的实时日志刷满
+  （冒烟里有一条断言专门查这个泄漏）。
+- **两个宿主的输出都要收干净**。JS 侧把 `console.*` 接到 `__host_log_raw`（QuickJS 自带的
+  `console` 是直接写宿主 stdout 的）；Python 侧的 `print` 本来就走 `pp_set_print` 回调，
+  `host_api.log` 走 `push_log`，两条都能捕获。约定 `info → stdout`、`warn/error → stderr`，
+  跟 Node 的 `console` 语义对齐。
+
+实测五个分支（本机 macOS / aarch64）：
+
+| 用例 | 结果 |
+|---|---|
+| JS `console.log('hello ' + input)`，input=`world` | `stdout="hello world\n"`，0 ms |
+| JS `console.warn('w'); console.error('e')` | `stderr="w\ne\n"` |
+| JS `throw new Error('boom')` | `error="Error: boom\n    at <eval> (eval_script:1:11)"` |
+| JS `while (true) {}` | `error="执行超过预算 2s 被强制中断（死循环或阻塞调用？）"`，**2000 ms** |
+| JS 空代码 | HTTP 400「代码是空的」 |
+| Python `print('py ' + input)` | `stdout="py ok\n"`，2 ms |
+| Python `from host_api import log; log(...)` | `stdout="via host_api\n"` |
+| Python 抛 `ValueError` | `error` 带完整 traceback |
+| Python `while True: pass` | `TimeoutError: watchdog timeout`，**2032 ms** |
+| 缺 `x-panel` 头 | HTTP 403 |
+| `lang=ruby` | HTTP 400 |
+
+Python 侧要借一个**空闲** VM 槽位（`next_vm` 始终指向最小的空闲下标）。15 个槽位都被
+插件占满时返回明确错误，并说明 JS 侧不受影响（QuickJS 的 `Context` 是每次新建的）。
+
+### 16.6 顺带修掉的两个坑
+
+**坑一：全局 `host` 是个不完整的别名。** `jshost.rs` 里 `globalThis.host` 原本是个手写的
+5 方法对象字面量（`log/warn/error/cron/every`），于是 `host.register_route`、
+`host.sqlite_query` 全是 `undefined` —— 插件里写出来就是加载期的
+「`TypeError: not a function`」，跟「我照老示例写了个路由」这个动作对不上号。
+现在 `host` 是 `host_api` 的**完整别名**（`Object.create(host_api)`，只多保留 `cron`
+这个历史名字），`host` 上有什么完全由 `host_api` 决定。冒烟里加了一条回归用例
+（用 `host.register_route` 注册一条路由并断言它能派发）。
+
+**坑二：插件注册的写路由没过 CSRF 闸。** 内置写接口都要求 `x-panel: 1`，插件路由却是
+裸的。SameSite=Strict 的 cookie 已经挡住了跨站请求，但「忘了检查这个头」这件事**没有
+任何症状** —— 插件本地跑得好好的，只是多了一个能被跨站触发的写接口。现在非 GET/HEAD
+的插件路由也过同一道闸（实测：缺头 403、带头 200）。GET/HEAD 不要求：它们不改状态，
+而且在浏览器地址栏直接打开插件页面很常见。
+
+### 16.7 验证
+
+| 套件 | 数量 | 结果 |
+|---|---|---|
+| `cargo test` | 83（+1 ignored） | ✅ |
+| 冒烟 `scripts/smoke.py` | **146**（原 99，新增 47） | ✅ |
+| 前端资源静态检查 `scripts/test-web-assets.mjs` | **47**（新增） | ✅ |
+| 旧版页面前端 `scripts/test-panel-frontend.mjs` | 47 | ✅ |
+| Node 适配器 | 24 | ✅ |
+| CPython 适配器 | 61 | ✅ |
+| `scripts/test-install.sh` | 15 | ✅ |
+
+新增的前端资源检查（`scripts/test-web-assets.mjs`）值得单说：前端没有构建步骤，
+也就没有编译期把关，一个写错的模块只会在浏览器里变成白屏。它做五件事：文件清单与
+`assets.rs` 登记表对账、每个 `.js` 按 ES Module 解析（`node --check`）、HTML 里没有
+内联 CSS/JS、CSS 里没有硬编码色值、以及 **`plugins/js/*.js` 里没有嵌入式 QuickJS
+不存在的全局**（`process`/`require`/`fetch`/`setTimeout`…）。最后一条盯的是
+「本地在 Node 里调得好好的、上机加载期就炸」这类问题。
+
+这个检查器写完我做了**反向验证**（一个不会失败的检查等于没有检查）：注入
+`setTimeout`+`fetch`、注入硬编码色值、注入内联 `onclick`，三类都被抓到；
+过程中还修掉了它自己的三个误报 —— HTML 注释里的示例代码、`http_fetch(` 里含有
+`fetch(`、以及 `typeof process !== 'undefined'` 这种合法的特性探测。
+
+### 16.8 还没做的
+
+- **旧版页面 `/classic` 还没删**。等新版把实时日志、熔断清理、鉴权徽标对齐后再删。
+- **插件配置页没有共享的组件库**。现在插件只能复用 CSS 变量和 `components.css` 的类名，
+  没有 JS 侧的公共封装（比如统一的 `req()`）。示例里是照抄了一份形状，将来插件多了
+  再抽。
+- **测试运行没有历史**。每次运行都是独立的，刷新就没了。
+- **`/api/test/*` 没有限流**。面板有鉴权，但如果多个标签页同时按「运行」，会排队占住
+  引擎线程（单线程串行）。预算 2s × N 就是排队时间。
+- 前面几轮留下的账照旧：慢任务隔离、`db` 无连接池、Python VM 上限 15、无 ARM 真机实测、
+  无 git remote。

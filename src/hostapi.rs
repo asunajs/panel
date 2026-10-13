@@ -60,8 +60,31 @@ pub struct LogLine {
 pub type SharedLogs = Arc<Mutex<VecDeque<LogLine>>>;
 
 /// 写日志：控制台 + 环形缓冲。这就是 `host.log` / `host_api.log` 的落点。
+///
+/// 如果在**捕获作用域**里（见 `capture_scope`），日志只进捕获缓冲、不进面板的
+/// 环形缓冲、也不打 stdout —— 测试运行不该把面板的实时日志刷满。
 pub fn push_log(logs: &SharedLogs, plugin: &str, level: &str, msg: &str) {
     let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+
+    let captured = CAPTURE.with(|c| {
+        let mut slot = c.borrow_mut();
+        match slot.as_mut() {
+            Some(buf) => {
+                buf.push(LogLine {
+                    ts: ts.clone(),
+                    plugin: plugin.to_string(),
+                    level: level.to_string(),
+                    msg: msg.to_string(),
+                });
+                true
+            }
+            None => false,
+        }
+    });
+    if captured {
+        return;
+    }
+
     println!("[{ts}] [{plugin}] [{level}] {msg}");
 
     let mut guard = logs.lock().unwrap();
@@ -74,6 +97,25 @@ pub fn push_log(logs: &SharedLogs, plugin: &str, level: &str, msg: &str) {
         level: level.to_string(),
         msg: msg.to_string(),
     });
+}
+
+thread_local! {
+    /// 当前线程的日志捕获缓冲。只有引擎线程会用到（插件代码全在那一条线程上跑），
+    /// 所以 thread_local 是最省事也最准确的实现 —— 不用把捕获状态一路传参下去。
+    static CAPTURE: std::cell::RefCell<Option<Vec<LogLine>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 在日志捕获作用域里跑一段代码，返回 `(结果, 捕获到的日志)`。
+///
+/// 用于「测试运行」：跑一段用户写的代码，把它 `log` / `console.log` 出来的东西
+/// 收进返回值，而不是混进面板的实时日志里。
+pub fn capture_scope<R>(f: impl FnOnce() -> R) -> (R, Vec<LogLine>) {
+    let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
+    let out = f();
+    let lines = CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    CAPTURE.with(|c| *c.borrow_mut() = prev);
+    (out, lines)
 }
 
 /// 插件在**加载期**声明的一个任务（还没进调度器）。

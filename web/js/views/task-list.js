@@ -1,0 +1,194 @@
+/*
+  web/js/views/task-list.js —— 任务列表视图。
+
+  数据来源：**默认接真实后端**（`/api/state` 里的 `jobs`，即 SQLite 的 jobs 表）。
+  后端不可用时降级到 `mock.js` 的示例数据并显示提示条 —— 这样在没有后端的
+  环境里也能调 UI，生产环境看到的则是真实任务。
+
+  任务的「定义级」操作（编辑 / 删除）走 /api/jobs，「运行级」操作（执行 / 暂停 /
+  恢复）走 /api/tasks。这条分界是后端定的，前端照搬，不要自己发明第三套。
+*/
+
+import { getState, runTask, pauseTask, resumeTask, deleteJob } from '../api.js';
+import { TASKS } from '../mock.js';
+
+/** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
+const STATUS_MAP = {
+  running: { cls: 'running', text: '运行中' },
+  paused: { cls: 'idle', text: '已暂停' },
+  tripped: { cls: 'failed', text: '已熔断' },
+  error: { cls: 'failed', text: '执行出错' },
+  idle: { cls: 'idle', text: '待触发' },
+};
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
+}
+
+function badge(status, trips) {
+  const m = STATUS_MAP[status] || STATUS_MAP.idle;
+  const suffix = status === 'tripped' && trips ? ` ×${trips}` : '';
+  return `<span class="badge ${m.cls}">${m.text}${suffix}</span>`;
+}
+
+function langBadge(runtime) {
+  const lang = runtime === 'py' ? 'py' : 'js';
+  const label = runtime === 'py' ? 'Python' : 'JavaScript';
+  return `<span class="badge lang ${lang}">${label}</span>`;
+}
+
+/** 真实任务 → 视图模型。字段名跟 mock.js 对齐，方便两条路径共用渲染。 */
+function fromJob(j) {
+  return {
+    plugin: j.plugin,
+    name: j.name,
+    lang: 'js',
+    cron: j.schedule,
+    lastRun: j.last_run || '—',
+    status: j.status,
+    trips: j.trips,
+    runs: j.runs,
+    source: j.source,
+    paused: j.paused,
+    real: true,
+  };
+}
+
+/** 示例任务 → 视图模型（没有 plugin，操作按钮会禁用）。 */
+function fromMock(t) {
+  return {
+    plugin: '',
+    name: t.name,
+    lang: t.lang,
+    cron: t.cron,
+    lastRun: t.lastRun,
+    status: t.status,
+    trips: 0,
+    runs: 0,
+    source: 'panel',
+    paused: false,
+    real: false,
+  };
+}
+
+function taskCard(t) {
+  const ops = t.real
+    ? `<button class="btn" data-act="run">立即执行</button>
+       <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
+       <button class="btn" data-act="edit">编辑</button>
+       ${t.source === 'panel' ? '<button class="btn danger" data-act="delete">删除</button>' : ''}`
+    : '<span class="hint">示例数据，无操作</span>';
+
+  return `
+    <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}">
+      <div class="card-head">
+        <span class="card-title mono">${esc(t.name)}</span>
+        ${langBadge(t.lang)}
+        ${badge(t.status, t.trips)}
+        <span class="card-actions">${ops}</span>
+      </div>
+      <div class="row">
+        <div class="field">
+          <span class="field-label">调度表达式</span>
+          <span class="mono">${esc(t.cron)}</span>
+        </div>
+        <div class="field">
+          <span class="field-label">上次执行</span>
+          <span class="mono dim">${esc(t.lastRun)}</span>
+        </div>
+        <div class="field">
+          <span class="field-label">累计触发</span>
+          <span class="mono">${t.runs}</span>
+        </div>
+        <div class="field">
+          <span class="field-label">来源</span>
+          <span class="mono dim">${t.source === 'panel' ? '面板' : '插件代码'}</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * @param {HTMLElement} root
+ * @param {{toast: (msg: string, kind?: string) => void, navigate: (hash: string) => void}} ctx
+ */
+export async function render(root, ctx) {
+  root.innerHTML = '<div class="empty">加载中…</div>';
+
+  const res = await getState();
+  let tasks;
+  let notice = '';
+
+  if (res.ok && Array.isArray(res.jobs)) {
+    tasks = res.jobs.map(fromJob);
+    // 用 plugins 表补上语言（jobs 行本身不带 runtime）
+    const langOf = {};
+    for (const p of res.plugins || []) langOf[p.name] = p.runtime;
+    for (const t of tasks) t.lang = langOf[t.plugin] || 'js';
+  } else {
+    // 降级：后端不可用也要能看到界面（离线调 UI / 首次部署前预览）
+    tasks = TASKS.map(fromMock);
+    notice = `<div class="card" style="border-color:var(--warning);margin-bottom:var(--sp-3)">
+      <span class="badge warning">后端不可用</span>
+      <span class="hint"> 显示的是示例数据（web/js/mock.js）。原因：${esc(res.error || '未知')}</span>
+    </div>`;
+  }
+
+  root.innerHTML = `
+    <div class="section">
+      <div class="section-head">
+        <span class="section-title">任务（${tasks.length}）</span>
+        <div class="card-actions">
+          <button class="btn" id="refresh-btn">刷新</button>
+          <button class="btn primary" id="new-task-btn">新建任务</button>
+        </div>
+      </div>
+      ${notice}
+      <div class="grid">
+        ${tasks.length ? tasks.map(taskCard).join('') : '<div class="card empty">还没有任务</div>'}
+      </div>
+    </div>`;
+
+  root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
+  root.querySelector('#new-task-btn').addEventListener('click', () => {
+    ctx.navigate('#/tasks/new');
+  });
+
+  // 事件委托：卡片上的操作按钮。每次操作后重渲染，拿最新状态。
+  root.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    const card = btn.closest('[data-task]');
+    if (!card) return;
+
+    const act = btn.dataset.act;
+    const plugin = card.dataset.plugin;
+    const name = card.dataset.task;
+
+    if (act === 'edit') {
+      ctx.navigate(`#/tasks/edit/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}`);
+      return;
+    }
+
+    const label = plugin ? `${plugin}/${name}` : name;
+    btn.disabled = true;
+
+    let res2;
+    if (act === 'run') res2 = await runTask(plugin, name);
+    else if (act === 'pause') res2 = await pauseTask(plugin, name);
+    else if (act === 'resume') res2 = await resumeTask(plugin, name);
+    else if (act === 'delete') res2 = await deleteJob(plugin, name);
+    else return;
+
+    btn.disabled = false;
+    const verb = { run: '执行', pause: '暂停', resume: '恢复', delete: '删除' }[act];
+    if (res2.ok) {
+      ctx.toast(`${label}：${verb}成功`, 'ok');
+      render(root, ctx);
+    } else {
+      ctx.toast(`${label}：${verb}失败 —— ${res2.error}`, 'bad');
+    }
+  });
+}

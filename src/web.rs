@@ -3,9 +3,16 @@
 //! 故意不引前端框架：首屏由 Rust 直接渲染成 HTML（没有 JS 也能看到状态），
 //! 再加约 30 行原生 fetch 做局部刷新。等 UI 真的复杂起来再考虑上框架。
 //!
-//! 另外这里还承担一件事：**插件注册的 HTTP 路由由 Axum 统一分发**。
-//! 没被内置路由匹配到的请求走 `fallback`，查插件路由表 → 投给引擎线程 →
-//! 在对应插件的解释器里执行 handler → 把结果写回响应。Python 插件不参与这一层。
+//! 另外这里还承担两件事：
+//!
+//! 1. **插件注册的 HTTP 路由由 Axum 统一分发**：没被内置路由匹配到的请求走
+//!    `fallback`，查插件路由表 → 投给引擎线程 → 在对应插件的解释器里执行 handler
+//!    → 把结果写回响应。Python 插件不参与这一层。
+//! 2. **插件自带的静态资源**：`/plugins/{name}/...` 从插件目录的 `{name}/` 子目录读。
+//!    这是「插件作者提供自己的配置页」那条路的落地（见 `plugin_asset`）。
+//!
+//! 两类请求共用同一个 `fallback`，顺序是：**插件注册的路由优先，然后才是静态文件**。
+//! 反过来的话，插件没法用一个同名路径既提供页面又提供数据。
 
 use crate::auth::{self, LoginError};
 use crate::db::{self, JobRow, TaskRow};
@@ -46,6 +53,16 @@ struct EditJobReq {
     expr: String,
 }
 
+/// 测试运行的请求体。
+#[derive(Debug, Deserialize)]
+struct TestRunReq {
+    /// 要跑的源码
+    code: String,
+    /// 模拟参数 / stdin，可选
+    #[serde(default)]
+    input: Option<String>,
+}
+
 /// 清理失效任务的请求体。
 #[derive(Debug, Deserialize, Default)]
 struct CleanupReq {
@@ -84,11 +101,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
         .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
+        // 测试运行：一段代码 → 一个临时解释器 → stdout/stderr
+        .route("/api/test/{lang}", post(test_run))
         // 只读接口
-        .route("/", get(index))
+        .route("/", get(asset_index))
+        // 旧版单文件页面。它仍然是完整可用的（实时日志、熔断清理、鉴权徽标都在），
+        // 保留一轮等新版功能对齐 —— 直接删掉会让这些能力短暂消失。
+        .route("/classic", get(classic_index))
         .route("/api/state", get(api_state))
-        // 插件注册的路由（兜底）
-        .fallback(plugin_route)
+        // 插件注册的路由 + 插件静态资源 + 主面板静态资源（兜底）
+        .fallback(fallback_route)
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // 登录相关是唯一的公开入口 —— 它必须公开，否则没法登录。
@@ -665,19 +687,279 @@ async fn set_paused(
     }
 }
 
-async fn index(State(st): State<AppState>) -> Html<String> {
+/// `GET /` —— 主面板（`web/` 下的多文件前端，编译期内嵌，见 `crate::assets`）。
+async fn asset_index() -> Response {
+    asset_response(crate::assets::get("/index.html").expect("index.html 必须内嵌"))
+}
+
+/// `GET /classic` —— 旧版单文件页面（`PAGE` 常量直接渲染）。
+///
+/// 它仍然完整可用，保留一轮等新版功能对齐。`/api/state` 等接口两边共用。
+async fn classic_index(State(st): State<AppState>) -> Html<String> {
     Html(render_page(&st))
+}
+
+/// 内嵌资源 → HTTP 响应。
+fn asset_response(a: &'static crate::assets::Asset) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            crate::assets::content_type(a.path),
+        )
+        // 前端资源跟着二进制走，所以 URL 不变内容也可能变 —— 必须让浏览器每次校验，
+        // 否则升级二进制之后用户看到的还是缓存里的旧 JS，报错信息会指向不存在的行号。
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from(a.body))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
+}
+
+/// 兜底分发：插件路由 → 插件静态资源 → 主面板静态资源 → 404。
+///
+/// 顺序是有意的：**插件注册的路由优先于静态文件**。反过来的话，一个插件想同时
+/// 提供 `/plugins/x/api/status` 页面和同名接口就做不到。
+async fn fallback_route(State(st): State<AppState>, req: Request) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+
+    // ① 插件注册的路由（插件自己的 API）
+    let is_plugin_route = st
+        .host
+        .routes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.method == method && r.path == path);
+    if is_plugin_route {
+        return plugin_route(st, req).await;
+    }
+
+    // ② 插件自带的静态资源：/plugins/{name}/...
+    if let Some(rest) = path.strip_prefix("/plugins/") {
+        return plugin_asset(&st, rest, &method).await;
+    }
+
+    // ③ 主面板自己的静态资源
+    if method == "GET" || method == "HEAD" {
+        if let Some(a) = crate::assets::get(&path) {
+            return asset_response(a);
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        format!(
+            "404 {method} {path}\n\
+             （内置路由：/ 主面板、/classic 旧版页面、/api/state、/api/test/js|py、/login；\
+             插件页面在 /plugins/{{name}}/，插件接口由插件用 register_route 注册）\n"
+        ),
+    )
+        .into_response()
+}
+
+/// 插件自带静态资源的上限。插件 UI 是给人看的页面，几 MB 已经离谱。
+const MAX_PLUGIN_ASSET: u64 = 4 * 1024 * 1024;
+
+/// 插件配置页的入口文件：插件目录下**与插件同名**的子目录里的 `index.html`。
+///
+/// 这条规则只写在这里一处：「面板说这个插件有配置页」和「实际能打开它」
+/// 必须用同一个判据 —— 两边不一致会变成「按钮点了 404」这种最难查的错。
+fn plugin_ui_index(plugins_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    plugins_dir.join(name).join("index.html")
+}
+
+/// 把 `/plugins/{name}/<相对路径>` 解析成插件目录里的真实文件。
+///
+/// 这是**唯一**一处把外部路径映射到磁盘的地方，所以防穿越只在这里做一次、做严：
+/// 1. `name` 不允许含分隔符或 `..`（插件名本来就等于文件名去扩展名）
+/// 2. 相对路径逐段检查，拒绝 `..` / `.` / 空段 / 反斜杠
+/// 3. **规范化之后必须仍在插件目录之下** —— 这一条是权威判据，
+///    它同时挡住了符号链接指向目录外的情况（前两条只是提前给出清楚的错误）
+fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result<std::path::PathBuf, String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("插件名非法".into());
+    }
+
+    let rel = rel.trim_start_matches('/');
+    // 目录请求（以 / 结尾或空）按 index.html 处理，这样 /plugins/demo/ 能直接用。
+    // 用 plugin_ui_index 的同一份规则拼，避免两处各写一遍。
+    let rel = if rel.is_empty() || rel.ends_with('/') {
+        let p = plugin_ui_index(root, name);
+        let dir = root.join(name);
+        p.strip_prefix(&dir)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| "index.html".to_string())
+    } else {
+        rel.to_string()
+    };
+
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') {
+            return Err(format!("路径里有非法片段: {seg:?}"));
+        }
+    }
+
+    let dir = root.join(name);
+    let full = dir.join(&rel);
+    let canon_dir = dir
+        .canonicalize()
+        .map_err(|_| format!("插件 `{name}` 没有 UI 目录"))?;
+    let canon = full
+        .canonicalize()
+        .map_err(|_| format!("找不到 {rel}"))?;
+    if !canon.starts_with(&canon_dir) {
+        return Err("路径超出插件目录".into());
+    }
+    Ok(canon)
+}
+
+/// 服务 `/plugins/{name}/...`。
+///
+/// 只服务**已加载插件**的资源：否则插件目录下任何一个目录（哪怕它不是插件）
+/// 都能被从网上读出来。
+async fn plugin_asset(st: &AppState, rest: &str, method: &str) -> Response {
+    if method != "GET" && method != "HEAD" {
+        return (StatusCode::METHOD_NOT_ALLOWED, "插件静态资源只支持 GET\n").into_response();
+    }
+
+    let (name, rel) = match rest.split_once('/') {
+        Some((n, r)) => (n, r),
+        None => (rest, ""),
+    };
+
+    let known = st
+        .registry
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p.name == name);
+    if !known {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("没有名为 `{name}` 的插件（插件页面在 /plugins/{{name}}/ 下）\n"),
+        )
+            .into_response();
+    }
+
+    let path = match resolve_plugin_asset(&st.plugins_dir, name, rel) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::NOT_FOUND, format!("{e}\n")).into_response(),
+    };
+
+    match tokio::fs::metadata(&path).await {
+        Ok(m) if m.is_file() => {
+            if m.len() > MAX_PLUGIN_ASSET {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("插件资源超过 {MAX_PLUGIN_ASSET} 字节\n"),
+                )
+                    .into_response();
+            }
+        }
+        Ok(_) => return (StatusCode::NOT_FOUND, "这是一个目录\n").into_response(),
+        Err(_) => return (StatusCode::NOT_FOUND, "文件不存在\n").into_response(),
+    }
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let ct = crate::assets::content_type(&path.to_string_lossy());
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, ct)
+                // 插件资源是热更新的一部分（改完文件立刻生效），所以不能缓存
+                .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()
+                })
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读插件资源失败: {e}\n"),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/test/{lang}` —— 跑一段代码，返回它的输出。
+///
+/// 请求体 `{"code": "...", "input": "..."}`，回 `{"ok":true,"stdout","stderr","error","ms"}`。
+/// 代码跑在**一次性的临时解释器**里：不碰任何已加载插件的状态，也不注册任务。
+async fn test_run(
+    State(st): State<AppState>,
+    Path(lang): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<TestRunReq>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    if lang != "js" && lang != "py" {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("只支持 js / py，收到 `{lang}`"),
+        );
+    }
+    if req.code.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "代码是空的".into());
+    }
+    // 一次运行最多 256 KB 源码：面板跑在低配盒子上，别让一个请求把内存吃掉
+    if req.code.len() > 256 * 1024 {
+        return json_error(StatusCode::PAYLOAD_TOO_LARGE, "代码超过 256 KB".into());
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if st
+        .engine_tx
+        .send(EngineCmd::TestRun {
+            lang: lang.clone(),
+            code: req.code,
+            input: req.input.unwrap_or_default(),
+            reply: tx,
+        })
+        .is_err()
+    {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
+    }
+
+    // 给得比执行预算宽：临时解释器要先建起来（QuickJS Context / PocketPy VM）
+    let wait = Duration::from_millis(st.health.budget_ms + 5_000);
+    match tokio::time::timeout(wait, rx).await {
+        Ok(Ok(Ok(out))) => Json(json!({
+            "ok": true,
+            "stdout": out.stdout,
+            "stderr": out.stderr,
+            "error": out.error,
+            "ms": out.ms,
+        }))
+        .into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎超时没回话".into()),
+    }
 }
 
 /// 插件注册的 HTTP 路由：查表 → 投给引擎 → 等结果。
 ///
 /// 引擎线程是单线程串行执行插件的，所以这里必须带超时：
 /// 一个慢 handler 不能把 HTTP 连接也一起拖住。
-async fn plugin_route(State(st): State<AppState>, req: Request) -> Response {
+async fn plugin_route(st: AppState, req: Request) -> Response {
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let key = format!("{method} {path}");
+
+    // 插件注册的**写**路由也过同一道闸。
+    //
+    // 为什么不交给插件作者自己检查：面板是安全边界，而「忘了检查 x-panel」
+    // 这件事没有任何症状 —— 插件本地跑得好好的，只是多了一个能被跨站触发的
+    // 写接口。这类遗漏不该由每个插件各自承担。
+    // GET/HEAD 不要求：它们不改状态，而且在浏览器地址栏直接打开插件页面很常见。
+    if method != "GET" && method != "HEAD" {
+        if let Err(r) = guard_write(req.headers()) {
+            return r;
+        }
+    }
 
     let known = st
         .host
@@ -774,7 +1056,25 @@ async fn plugin_route(State(st): State<AppState>, req: Request) -> Response {
 
 /// 给前端轮询用的 JSON 快照。插件与日志都是 JSON 可序列化的普通结构体。
 async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let plugins = st.registry.lock().unwrap().clone();
+    // `has_ui` 是给面板判断「要不要显示打开配置页的按钮」用的：插件作者提供了
+    // `{name}/index.html` 才有这个入口。不报这个字段的话，面板只能对每个插件都
+    // 显示按钮，点进去 404 —— 那是把插件的责任转嫁给了用户。
+    let plugins: Vec<serde_json::Value> = st
+        .registry
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let mut v = serde_json::to_value(p).unwrap_or_else(|_| json!({}));
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "has_ui".to_string(),
+                    json!(plugin_ui_index(&st.plugins_dir, &p.name).is_file()),
+                );
+            }
+            v
+        })
+        .collect();
     let logs: Vec<LogLine> = st.logs.lock().unwrap().iter().cloned().collect();
     let tasks = db::list_tasks(&st.db).unwrap_or_default();
     let jobs = db::list_jobs(&st.db).unwrap_or_default();

@@ -8,7 +8,7 @@ description = "Rust + QuickJS + PocketPy 动态插件任务面板"
 # HTTP 服务器
 axum = "0.8"
 # 异步运行时（rt-multi-thread: 多线程调度；signal: Ctrl-C 优雅退出）
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "fs"] }
 # 嵌入式 JS 引擎：rquickjs 绑定 QuickJS-ng，静态编译进二进制，无外部 .so 依赖。
 # loader 特性是给「插件里 import { ... } from 'host-api'」用的：自定义 Resolver/Loader
 # 把 host-api 解析成内置模块，插件脚本与 Node 下的一字不差。

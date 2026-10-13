@@ -694,6 +694,320 @@ def job_edit_checks(tmp: Path) -> None:
         logf.close()
 
 
+def raw_http(port: int, path: str, method: str = "GET", headers=None, body: bytes = b""):
+    """发一个**不经过 urllib 规范化**的请求。
+
+    目录穿越必须这样测：urllib / curl 都会在客户端把 `..` 折掉，用它们测等于
+    在测客户端，服务端那几行判断永远不会被执行到 —— 这正是这类漏洞最常见的
+    漏测方式。
+    """
+    req = [f"{method} {path} HTTP/1.1", "Host: 127.0.0.1", "Connection: close"]
+    for k, v in (headers or {}).items():
+        req.append(f"{k}: {v}")
+    if body:
+        req.append(f"Content-Length: {len(body)}")
+    head = ("\r\n".join(req) + "\r\n\r\n").encode()
+    with socket.create_connection(("127.0.0.1", port), 5) as s:
+        s.sendall(head + body)
+        buf = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    head_b, _, body_b = buf.partition(b"\r\n\r\n")
+    status_line = head_b.split(b"\r\n", 1)[0].decode("latin-1")
+    code = int(status_line.split()[1])
+    return code, body_b.decode("utf-8", "replace")
+
+
+def plugin_ui_checks(tmp: Path) -> None:
+    """第十二轮：插件自有 WebUI + 主面板前端资源 + 测试运行。
+
+    核心是那条**边界**：主面板是功能完整的控制面板，插件自带的页面只管理
+    它自己那份配置。所以这一组同时验证三件事：
+      ① 主面板的多文件前端能被正确内嵌并服务
+      ② 插件目录下 `{name}/` 的 HTML/CSS/JS 能通过 `/plugins/{name}/` 访问，
+         而且**不会被当成插件加载**（`uidev/app.js` 是最容易被误加载的那个）
+      ③ 插件自己的 API 与主面板的测试运行各自工作
+    """
+    pdir = tmp / "ui-plugins"
+    (pdir / "js").mkdir(parents=True)
+    (pdir / "uidev").mkdir(parents=True)
+
+    # 插件本体：注册两条自己的路由（GET 只读 + POST 写入）
+    (pdir / "js" / "uidev.js").write_text(
+        "import { register_route, log } from 'host-api';\n"
+        "log('uidev 已加载');\n"
+        "register_route('/plugins/uidev/api/ping', 'GET', function () {\n"
+        "  return { status: 200, headers: { 'content-type': 'application/json' },\n"
+        "           body: JSON.stringify({ pong: true }) };\n"
+        "});\n"
+        "register_route('/plugins/uidev/api/save', 'POST', function (req) {\n"
+        "  return { status: 200, headers: { 'content-type': 'application/json' },\n"
+        "           body: JSON.stringify({ saved: req.body }) };\n"
+        "});\n"
+    )
+    # 插件自带的页面。`app.js` 这个名字是刻意的：没有扫描器规则的话，
+    # 它会被当成一个叫 `app` 的插件加载。
+    (pdir / "uidev" / "index.html").write_text(
+        "<!DOCTYPE html><html><body><h1>uidev 配置页</h1>"
+        '<script type="module" src="app.js"></script></body></html>'
+    )
+    (pdir / "uidev" / "style.css").write_text(".x{color:var(--accent)}")
+    (pdir / "uidev" / "app.js").write_text("// 插件自己的页面逻辑\n")
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "ui.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "ui.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        wait_ready(base, proc)
+
+        # ---- ① 主面板前端 ----
+        status, body = fetch(f"{base}/")
+        check(status == 200 and "插件面板" in body, "主面板首页可用", f"http {status}")
+        check(
+            'href="/css/theme.css"' in body and 'type="module" src="/js/app.js"' in body,
+            "首页引用了外置 CSS 与 ES Module 入口（没有内联样式/脚本）",
+            f"{len(body)} B",
+        )
+        check("<style" not in body and "onclick=" not in body, "首页里没有内联 CSS/JS")
+
+        for asset, want in [
+            ("css/theme.css", "text/css"),
+            ("css/layout.css", "text/css"),
+            ("css/components.css", "text/css"),
+            ("css/reset.css", "text/css"),
+            ("js/app.js", "text/javascript"),
+            ("js/api.js", "text/javascript"),
+            ("js/editor.js", "text/javascript"),
+            ("js/mock.js", "text/javascript"),
+            ("js/views/task-list.js", "text/javascript"),
+            ("js/views/task-editor.js", "text/javascript"),
+            ("js/views/plugin-list.js", "text/javascript"),
+        ]:
+            try:
+                code, headers, _ = http(f"{base}/{asset}")
+                ctype = headers.get("content-type", "")
+                check(
+                    code == 200 and want in ctype and "utf-8" in ctype,
+                    f"内嵌资源 /{asset}",
+                    f"http {code}, {ctype}",
+                )
+            except Exception as e:  # noqa: BLE001
+                check(False, f"内嵌资源 /{asset}", repr(e))
+
+        code, _, _ = http(f"{base}/js/nope.js")
+        check(code == 404, "不存在的内嵌资源返回 404", f"http {code}")
+
+        # 旧版单文件页面保留（它有实时日志/熔断清理，新版对齐后再删）
+        status, body = fetch(f"{base}/classic")
+        check(
+            status == 200 and "<title>Plugin Panel</title>" in body,
+            "旧版单文件页面仍在 /classic 上可用",
+            f"http {status}, {len(body)} B",
+        )
+
+        # ---- ② 插件自带的页面 ----
+        status, body = fetch(f"{base}/plugins/uidev/")
+        check(
+            status == 200 and "uidev 配置页" in body,
+            "插件配置页：/plugins/{name}/ 直接给出 index.html",
+            f"http {status}",
+        )
+        code, headers, _ = http(f"{base}/plugins/uidev/app.js")
+        check(
+            code == 200 and "text/javascript" in headers.get("content-type", ""),
+            "插件页面的 JS 能取到",
+            f"http {code}, {headers.get('content-type')}",
+        )
+        code, headers, _ = http(f"{base}/plugins/uidev/style.css")
+        check(
+            code == 200 and "text/css" in headers.get("content-type", ""),
+            "插件页面的 CSS 能取到",
+            f"http {code}, {headers.get('content-type')}",
+        )
+
+        # 幽灵插件回归：uidev/app.js 绝不能被当成一个叫 `app` 的插件
+        _, state = fetch_json(f"{base}/api/state")
+        names = [p["name"] for p in state.get("plugins", [])]
+        check(
+            "uidev" in names and "app" not in names,
+            "插件目录里的 UI 资源不会被当成插件加载",
+            f"plugins={names}",
+        )
+
+        # has_ui：面板靠它决定要不要显示「打开配置页」按钮
+        by_name = {p["name"]: p for p in state.get("plugins", [])}
+        check(by_name.get("uidev", {}).get("has_ui") is True, "has_ui=true（插件提供了配置页）")
+        (pdir / "js" / "noui.js").write_text("const host = globalThis.host;\n")
+        time.sleep(1.6)  # 目录扫描是 1s 节流
+        _, state2 = fetch_json(f"{base}/api/state")
+        by2 = {p["name"]: p for p in state2.get("plugins", [])}
+        check(
+            by2.get("noui", {}).get("has_ui") is False,
+            "has_ui=false（没有配置页的插件）",
+            f"{by2.get('noui')}",
+        )
+
+        # 目录穿越：必须用原始请求，客户端会把 `..` 折掉
+        for bad in [
+            "/plugins/uidev/../../Cargo.toml",
+            "/plugins/uidev/../uidev/style.css",
+            "/plugins/uidev/./style.css",
+            "/plugins/uidev/../../../../etc/passwd",
+            "/plugins/./uidev/style.css",
+        ]:
+            code, _ = raw_http(port, bad)
+            check(code == 404, f"穿越被挡：{bad}", f"http {code}")
+
+        code, _ = raw_http(port, "/plugins/uidev/index.html", method="POST")
+        check(code == 405, "插件静态资源只接受 GET", f"http {code}")
+        code, _, _ = http(f"{base}/plugins/nosuch/index.html")
+        check(code == 404, "不存在的插件没有页面", f"http {code}")
+
+        # ---- ③ 插件自己的 API ----
+        status, body = fetch(f"{base}/plugins/uidev/api/ping")
+        check(
+            status == 200 and '"pong"' in body,
+            "插件自己的 GET 路由可用",
+            f"http {status}, {body[:40]}",
+        )
+        code, _ = post_json(f"{base}/plugins/uidev/api/save", panel=False, payload={"a": 1})
+        check(code == 403, "插件写路由同样过 CSRF 闸（缺 x-panel 被拦）", f"http {code}")
+        code, body = post_json(f"{base}/plugins/uidev/api/save", payload={"a": 1})
+        check(code == 200 and body.get("saved"), "插件写路由带 x-panel 可用", f"http {code}, {body}")
+
+        # ---- ④ 测试运行 ----
+        def test_run(lang: str, payload: dict, panel: bool = True):
+            req = urllib.request.Request(
+                f"{base}/api/test/{lang}",
+                data=json.dumps(payload).encode(),
+                method="POST",
+            )
+            req.add_header("content-type", "application/json")
+            if panel:
+                req.add_header("x-panel", "1")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return r.status, json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                raw = e.read().decode()
+                try:
+                    return e.code, json.loads(raw)
+                except json.JSONDecodeError:
+                    return e.code, {"raw": raw}
+
+        code, body = test_run("js", {"code": "console.log('hello ' + input)", "input": "world"})
+        check(
+            code == 200 and body.get("stdout", "").strip() == "hello world",
+            "测试运行 JS：console.log 进 stdout，input 可用",
+            f"http {code}, {body}",
+        )
+        code, body = test_run("js", {"code": "console.warn('w'); console.error('e');"})
+        check(
+            code == 200 and "w" in body.get("stderr", "") and "e" in body.get("stderr", ""),
+            "测试运行 JS：warn/error 进 stderr",
+            f"{body}",
+        )
+        code, body = test_run("js", {"code": "throw new Error('boom')"})
+        check(
+            code == 200 and "boom" in (body.get("error") or ""),
+            "测试运行 JS：异常进 error（不是传输失败）",
+            f"{body}",
+        )
+        code, body = test_run("js", {"code": "while (true) {}"})
+        check(
+            code == 200 and "预算" in (body.get("error") or ""),
+            "测试运行 JS：死循环被执行预算打断",
+            f"{body.get('error')!r}, {body.get('ms')}ms",
+        )
+        code, body = test_run("js", {"code": "   "})
+        check(code == 400, "测试运行：空代码被拒", f"http {code}")
+
+        code, body = test_run("py", {"code": "print('py ' + input)", "input": "ok"})
+        check(
+            code == 200 and body.get("stdout", "").strip() == "py ok",
+            "测试运行 Python：print 进 stdout，input 可用",
+            f"http {code}, {body}",
+        )
+        code, body = test_run("py", {"code": "from host_api import log\nlog('via host_api')"})
+        check(
+            code == 200 and "via host_api" in body.get("stdout", ""),
+            "测试运行 Python：host_api.log 也能捕获",
+            f"{body}",
+        )
+        code, body = test_run("py", {"code": "def f():\n    raise ValueError('boom')\n\nf()"})
+        check(
+            code == 200 and "ValueError" in (body.get("error") or ""),
+            "测试运行 Python：异常带 traceback",
+            f"{(body.get('error') or '')[:60]}",
+        )
+        code, body = test_run("py", {"code": "while True:\n    pass"})
+        check(
+            code == 200 and "watchdog" in (body.get("error") or "").lower(),
+            "测试运行 Python：死循环被 pocketpy watchdog 打断",
+            f"{(body.get('error') or '')[:50]}, {body.get('ms')}ms",
+        )
+
+        # `host` 这个全局别名必须是**完整**的 host_api 面。
+        #
+        # 这里钉的是一个真实踩到的坑：它以前是个手写的 5 方法对象字面量，
+        # `host.register_route` 直接是 undefined，插件在**加载期**就抛
+        # 「TypeError: not a function」—— 而用户只是照着老示例写了行路由。
+        (pdir / "js" / "alias.js").write_text(
+            "const host = globalThis.host;\n"
+            "host.log('alias 插件已加载');\n"
+            "host.register_route('/plugins/alias/api/x', 'GET', function () {\n"
+            "  return { status: 200, headers: { 'content-type': 'application/json' },\n"
+            "           body: JSON.stringify({ via: 'host 别名' }) };\n"
+            "});\n"
+        )
+        time.sleep(1.6)
+        _, state4 = fetch_json(f"{base}/api/state")
+        alias_plugin = next(
+            (p for p in state4.get("plugins", []) if p["name"] == "alias"), None
+        )
+        check(
+            alias_plugin is not None and not alias_plugin.get("error"),
+            "全局 `host` 别名暴露完整的 host_api 面（register_route 可用）",
+            f"{alias_plugin.get('error') if alias_plugin else '插件没加载'}",
+        )
+        status, body = fetch(f"{base}/plugins/alias/api/x")
+        check(
+            status == 200 and "host 别名" in body,
+            "用 `host.register_route` 注册的路由能派发",
+            f"http {status}, {body[:40]}",
+        )
+
+        code, _ = test_run("js", {"code": "1"}, panel=False)
+        check(code == 403, "测试运行缺 x-panel 头被拦", f"http {code}")
+        code, _ = test_run("ruby", {"code": "1"})
+        check(code == 400, "测试运行只接受 js / py", f"http {code}")
+
+        # 测试运行不该污染面板的实时日志
+        _, state3 = fetch_json(f"{base}/api/state")
+        leaked = [l for l in state3.get("logs", []) if "__test__" in json.dumps(l)]
+        check(not leaked, "测试运行的输出不进面板实时日志", f"{len(leaked)} 条泄漏")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        logf.close()
+
+
 def refuse_to_start_without_token(tmp: Path) -> None:
     """没配令牌却往非回环地址绑 → 必须**拒绝启动**，而不是打个警告继续裸奔。"""
     env = dict(os.environ)
@@ -1061,6 +1375,7 @@ def main() -> int:
     auth_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
+    plugin_ui_checks(tmp)
     job_edit_checks(tmp)
 
     print()

@@ -1,0 +1,105 @@
+/*
+  web/css/reset.css —— 基础重置。
+
+  只做一件事：消除浏览器默认样式之间的差异（margin / list-style / 表单控件继承）。
+  这里**不做任何视觉决定** —— 颜色、圆角、间距全在 theme.css / layout.css / components.css。
+  把重置和视觉分开，改主题时不用在重置里翻找。
+*/
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+h1, h2, h3, h4, h5, h6,
+p, figure, blockquote, dl, dd, pre {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 表单控件默认不继承字体/颜色，这里统一收回控制权 */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  margin: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0;
+  font-weight: inherit;
+}
+
+img,
+svg,
+iframe {
+  display: block;
+  max-width: 100%;
+  border: 0;
+}
+
+pre,
+code,
+kbd {
+  font-family: var(--font-mono);
+  font-size: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* 键盘可达性：只在键盘导航时画焦点圈，鼠标点击不画（:focus-visible 的语义） */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 尊重系统的「减少动效」偏好：这不是可选项，前庭功能敏感的用户会晕 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

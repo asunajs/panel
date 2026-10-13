@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!--
+  web/index.html —— 主面板的壳。
+
+  主面板是**功能完整的控制面板**，不是壳：导航、任务定义与调度、任务编辑、
+  测试运行、插件管理、日志与健康度都是它的职责。
+
+  插件自有 UI 是**补充**：每个插件可以在 /plugins/{name}/ 下提供自己的页面，
+  由**插件作者**编写，用来管理**这个插件自己需要的那份配置**（比如它自己的
+  间隔、目标地址、阈值）。它不接管主面板的职责，也不重复主面板的界面。
+  示例见 web/plugins/demo/。
+
+  约定：
+  - 所有样式走 link 引入，所有脚本走 <script type="module">，这个文件里没有一行内联 CSS/JS。
+  - 路径全部用绝对路径（/css/...、/js/...），因为面板可能挂在子路径下由反代转发。
+  - 主题是 <html data-theme="..."> 上的一个属性，JS 只改这一个属性。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>插件面板</title>
+
+  <link rel="stylesheet" href="/css/reset.css">
+  <link rel="stylesheet" href="/css/theme.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <!-- 移动端侧边栏滑出时的遮罩；点击它收起侧边栏 -->
+  <div id="scrim" class="scrim" hidden></div>
+
+  <div class="app">
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="sidebar-brand-text">插件面板</span>
+      </div>
+
+      <nav class="nav" id="nav">
+        <a class="nav-item" href="#/dashboard" data-view="dashboard">
+          <span class="nav-icon" aria-hidden="true">▦</span><span>Dashboard</span>
+        </a>
+        <a class="nav-item" href="#/tasks" data-view="tasks">
+          <span class="nav-icon" aria-hidden="true">≡</span><span>任务列表</span>
+        </a>
+        <a class="nav-item" href="#/plugins" data-view="plugins">
+          <span class="nav-icon" aria-hidden="true">◧</span><span>插件管理</span>
+        </a>
+        <a class="nav-item" href="#/settings" data-view="settings">
+          <span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span id="engine-state" class="badge idle" title="引擎心跳">连接中…</span>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button id="menu-btn" class="icon-btn only-mobile" aria-label="打开导航" aria-expanded="false">☰</button>
+        <h1 id="view-title" class="topbar-title">Dashboard</h1>
+        <div class="topbar-right">
+          <button id="theme-btn" class="icon-btn" aria-label="切换主题" title="切换深色 / 亮色">◐</button>
+        </div>
+      </header>
+
+      <!-- 视图容器：由 web/js/app.js 按当前路由渲染。 -->
+      <main id="view" class="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <!--
+    视图切换的「消息条」：操作结果（成功 / 失败原因）统一显示在这里。
+    aria-live 让屏幕阅读器也能读到，不用自己造通知系统。
+  -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

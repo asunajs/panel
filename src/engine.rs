@@ -233,8 +233,34 @@ pub enum EngineCmd {
         dry_run: bool,
         reply: tokio::sync::oneshot::Sender<Result<Vec<InvalidJob>, String>>,
     },
+    /// 面板的「测试运行」：把一段代码丢进**一次性解释器**里跑，回它的输出。
+    ///
+    /// 关键在「一次性」：不碰任何已加载插件的解释器状态、不注册任务、不进熔断统计。
+    /// 用完立刻析构，所以它不会让常驻内存变高。
+    TestRun {
+        /// `"js"` 或 `"py"`
+        lang: String,
+        code: String,
+        input: String,
+        reply: tokio::sync::oneshot::Sender<Result<TestRunOut, String>>,
+    },
     Shutdown,
 }
+
+/// 「测试运行」的结果。
+///
+/// `error` 是**代码自己报的错**（语法错、抛异常、超预算），传输层的失败走
+/// `Err(String)`。分开是为了让面板能区分「你的代码有问题」和「面板自己出问题了」。
+#[derive(Debug, Clone, Serialize)]
+pub struct TestRunOut {
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
+    pub ms: u64,
+}
+
+/// 测试运行用的伪插件名：日志里能一眼看出这条输出不是任何插件的。
+const TEST_RUN_PLUGIN: &str = "__test__";
 
 /// 一条失效任务的报告：`(plugin, name, 失效原因)`。
 ///
@@ -620,6 +646,15 @@ fn engine_main(
                 let out = cleanup_jobs(
                     &mut sched, &plugins, &logs, &db, &wd, budget, dry_run,
                 );
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::TestRun {
+                lang,
+                code,
+                input,
+                reply,
+            }) => {
+                let out = test_run(&rt, &host, &logs, &wd, budget, &mut next_vm, &lang, &code, &input);
                 let _ = reply.send(out);
             }
             Ok(EngineCmd::Shutdown) => {
@@ -1727,6 +1762,19 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // 目录里有 index.html 的，是**插件自带的配置页资源**（插件作者提供的
+            // HTML/CSS/JS），不是插件本体。
+            //
+            // 不跳过的话 `plugins/demo/app.js` 会被当成一个叫 `app` 的插件加载：
+            // 它 `import` 的是自己的相对路径，引擎按 host-api 解析必然失败，
+            // 于是面板上凭空多出一个「加载失败」的插件 —— 而且名字（app）
+            // 跟用户写的任何东西都对不上，根本查不到原因。
+            //
+            // 用「有 index.html」而不是「有 style.css」之类来判定，是因为
+            // index.html 是配置页的**入口**，插件作者一定会提供它。
+            if path.join("index.html").is_file() {
+                continue;
+            }
             walk(&path, out, depth + 1);
         } else if path.is_file() && (is_js(&path) || is_python(&path)) {
             out.push(path);
@@ -2145,8 +2193,249 @@ fn env_u32(key: &str, default: u32) -> u32 {
 }
 
 
+// ============================================================ 测试运行
+//
+// 面板的「测试运行」：把一段代码丢进**一次性解释器**里跑，把输出收回来。
+//
+// 为什么必须是一次性的：如果复用插件的解释器，用户在编辑器里写错一行就会污染
+// 那个插件的全局状态（甚至改掉它的任务表），而面板上没有任何提示 —— 这类问题
+// 极难排查。新建一个 Context / 借一个空闲 VM，跑完立刻析构，代价是每次几十微秒，
+// 换来的确定性很划算。
+
+/// 把 `console.*` 接到宿主日志通道上。
+///
+/// QuickJS 自带的 `console` 直接写宿主 stdout：那样测试运行的输出既捕获不到，
+/// 又会混进面板自己的输出里。接到 `__host_log_raw` 之后，`console.log` 和
+/// `host-api` 的 `log()` 走同一条路，面板能把两者一起收走。
+const CONSOLE_SHIM: &str = r#"
+(function () {
+  function fmt(args) {
+    return Array.prototype.map.call(args, function (v) { return String(v); }).join(' ');
+  }
+  globalThis.console = {
+    log:   function () { __host_log_raw('info',  fmt(arguments)); },
+    info:  function () { __host_log_raw('info',  fmt(arguments)); },
+    debug: function () { __host_log_raw('info',  fmt(arguments)); },
+    warn:  function () { __host_log_raw('warn',  fmt(arguments)); },
+    error: function () { __host_log_raw('error', fmt(arguments)); }
+  };
+})();
+"#;
+
+/// 把一段文本转成 Python 字符串字面量。
+///
+/// 不能直接用 Rust 的 `{:?}`：它把非 ASCII 转成 `\u{4e2d}`，那不是合法的 Python 转义。
+/// 这里只转义反斜杠、引号和不可见字符，其余原样保留（源码本身是 UTF-8，Python 接受）。
+fn py_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 在一次性 `Context` 里跑一段 JS。成功返回 `Ok(())`，失败返回给面板看的错误文本。
+fn run_scratch_js(
+    rt: &Runtime,
+    host: &Arc<HostState>,
+    logs: &SharedLogs,
+    wd: &Watchdog,
+    budget: Duration,
+    code: &str,
+    input: &str,
+) -> Result<(), String> {
+    let ctx = Context::full(rt).map_err(|e| format!("创建临时 Context 失败: {e}"))?;
+
+    ctx.with(|ctx| {
+        // pending 是加载期收集任务声明用的。测试运行不注册任务，但 host_api 的
+        // register_cron 仍然可以调用 —— 声明会进这个临时 vec，随 Context 一起丢掉。
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        jshost::install_host(
+            &ctx,
+            TEST_RUN_PLUGIN.to_string(),
+            host.clone(),
+            pending,
+            logs.clone(),
+        )
+        .map_err(|e| format!("注入 host 失败: {e}"))?;
+
+        ctx.eval::<(), _>(CONSOLE_SHIM)
+            .map_err(|e| render_exception(&ctx, &e))?;
+
+        // 输入以全局 `input` 提供：测试运行要能模拟参数
+        ctx.globals()
+            .set("input", input.to_string())
+            .map_err(|e| format!("设置 input 失败: {e}"))?;
+
+        wd.arm(budget);
+        let eval = if looks_like_module(code) {
+            eval_as_module(&ctx, code, "<test-run>")
+        } else {
+            ctx.eval::<(), _>(code).map_err(|e| render_exception(&ctx, &e))
+        };
+        wd.disarm();
+        let fired = wd.take_fired();
+
+        match eval {
+            Ok(()) => Ok(()),
+            // 预算打断要说清楚是**超时**而不是语法错，否则用户会去改一行没错的代码
+            Err(_) if fired => Err(format!(
+                "执行超过预算 {budget:?} 被强制中断（死循环或阻塞调用？）"
+            )),
+            Err(e) => Err(e),
+        }
+    })
+}
+
+/// 在一次性 PocketPy VM 里跑一段 Python。
+fn run_scratch_py(
+    host: &Arc<HostState>,
+    next_vm: &mut i32,
+    budget: Duration,
+    code: &str,
+    input: &str,
+) -> Result<(), String> {
+    ensure_python_ready(host);
+
+    // 借一个**空闲**槽位：`next_vm` 始终指向最小的空闲下标（卸载插件时会回退），
+    // 用完立刻 unbind 还回去，所以不占插件的位置、也不动 next_vm 本身。
+    if *next_vm >= python::MAX_VM {
+        return Err(format!(
+            "Python 测试运行要借一个空闲的 pocketpy VM，但 {MAX_PY_PLUGINS} 个槽位都被插件占满了。\
+             JS 测试运行不受影响 —— QuickJS 的 Context 是每次新建的。"
+        ));
+    }
+    let index = *next_vm;
+
+    host.bind_vm(index, TEST_RUN_PLUGIN);
+    let mut vm = PyVm::attach(index);
+    vm.reset();
+
+    let out = (|| -> Result<(), String> {
+        pyhost::install(&mut vm).map_err(|e| format!("初始化 host_api 失败: {e}"))?;
+
+        // 便利：把输入放进全局 `input`。失败就算了 —— 它只是方便，不该让整次测试挂掉。
+        let _ = vm.exec(&format!("input = {}\n", py_str(input)), "<test-run>");
+
+        // 预算要挂上：pocketpy 的 watchdog 是 CPU 时间，拦得住 `while True: pass`
+        python::budget_begin(budget.as_millis() as u64);
+        let r = vm.exec(code, "<test-run>");
+        python::budget_end();
+        r
+    })();
+
+    host.unbind_vm(index);
+    out
+}
+
+/// 「测试运行」的落地：跑一段代码，把输出收回来。
+#[allow(clippy::too_many_arguments)]
+fn test_run(
+    rt: &Runtime,
+    host: &Arc<HostState>,
+    logs: &SharedLogs,
+    wd: &Watchdog,
+    budget: Duration,
+    next_vm: &mut i32,
+    lang: &str,
+    code: &str,
+    input: &str,
+) -> Result<TestRunOut, String> {
+    let started = Instant::now();
+
+    // Python 的 print 走 PRINT_BUF（不是 push_log），先清掉残留，
+    // 免得把上一次插件运行的输出算到这次测试头上。
+    if lang == "py" {
+        let _ = python::take_print_buffer();
+    }
+
+    let (result, lines) = hostapi::capture_scope(|| {
+        if lang == "py" {
+            run_scratch_py(host, next_vm, budget, code, input)
+        } else {
+            run_scratch_js(rt, host, logs, wd, budget, code, input)
+        }
+    });
+
+    // info → stdout，warn/error → stderr。跟 Node 的 console 语义对齐，
+    // 面板就能用同一套配色显示两种宿主的输出。
+    let mut stdout = if lang == "py" {
+        python::take_print_buffer()
+    } else {
+        String::new()
+    };
+    let mut stderr = String::new();
+    for l in &lines {
+        let dst = if l.level == "info" {
+            &mut stdout
+        } else {
+            &mut stderr
+        };
+        if !dst.is_empty() && !dst.ends_with('\n') {
+            dst.push('\n');
+        }
+        dst.push_str(&l.msg);
+        dst.push('\n');
+    }
+
+    Ok(TestRunOut {
+        stdout,
+        stderr,
+        error: result.err(),
+        ms: started.elapsed().as_millis() as u64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    /// UI 资源目录不能被当成插件。
+    ///
+    /// 这条测试的意义：插件作者给插件加一个配置页是**正常操作**，而 `plugins/demo/`
+    /// 里必然有一个 `app.js`。如果扫描器把它当插件加载，面板上会出现一个名字叫
+    /// `app` 的失败插件，报的错还是 host-api 解析失败 —— 跟「我给 demo 加了个页面」
+    /// 这个动作完全联系不起来。所以这里用真实目录结构把它钉住。
+    #[test]
+    fn ui_dirs_are_not_plugins() {
+        let tmp = std::env::temp_dir().join(format!("pp-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("js")).unwrap();
+        std::fs::create_dir_all(tmp.join("demo")).unwrap();
+
+        // 真插件
+        std::fs::write(tmp.join("js/real.js"), "// plugin").unwrap();
+        std::fs::write(tmp.join("top.py"), "# plugin").unwrap();
+        // 插件的配置页资源：里面有 app.js，但它不是插件
+        std::fs::write(tmp.join("demo/index.html"), "<html></html>").unwrap();
+        std::fs::write(tmp.join("demo/app.js"), "// ui").unwrap();
+        std::fs::write(tmp.join("demo/style.css"), "body{}").unwrap();
+
+        let mut found = Vec::new();
+        walk(&tmp, &mut found, 1);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.contains(&"real.js".to_string()), "真插件要找到: {names:?}");
+        assert!(names.contains(&"top.py".to_string()), "顶层插件要找到: {names:?}");
+        assert!(
+            !names.contains(&"app.js".to_string()),
+            "配置页里的 app.js 不能被当成插件: {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     use super::*;
 
     #[test]

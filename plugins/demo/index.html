@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<!--
+  web/plugins/demo/index.html —— 示例插件自己的配置页。
+
+  这是**插件作者**写的东西，不是主面板的一部分。它只做一件事：
+  管理 `demo` 这个插件自己需要的那份配置（采集间隔、目标、阈值、开关）。
+
+  它不重复主面板的界面：任务定义、调度、测试运行、插件管理都在主面板上，
+  这里只放这个插件自己才知道的配置项。
+
+  部署位置：插件目录下与插件同名的子目录（`$PLUGINS_DIR/demo/`），
+  运行时可访问路径是 `/plugins/demo/`（由 Rust 侧静态服务，见 src/web.rs）。
+
+  两个刻意的细节：
+  - 样式表复用了主面板的 CSS 变量（/css/theme.css），所以它跟着主面板换主题
+  - 带 ?embed=1 打开时（主面板用 iframe 嵌它）隐藏自己的页头，避免出现两层标题
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>demo 插件 · 配置</title>
+
+  <!-- 复用主面板的主题变量与组件样式；再叠一层插件自己的 style.css -->
+  <link rel="stylesheet" href="/css/reset.css">
+  <link rel="stylesheet" href="/css/theme.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="plugin-body">
+  <div class="plugin-page">
+    <header class="plugin-header" id="plugin-header">
+      <div>
+        <h1 class="plugin-title">demo 插件</h1>
+        <p class="plugin-sub">这个页面由插件作者提供，只管理这个插件自己的配置。</p>
+      </div>
+      <span id="conn" class="badge idle">读取配置中…</span>
+    </header>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">采集配置</span>
+        <span class="card-sub">保存到插件自己的表（demo_config）</span>
+      </div>
+
+      <div class="grid cfg-grid">
+        <label class="field">
+          <span class="field-label">采集间隔</span>
+          <input class="input mono" id="cfg-interval" placeholder="30s" spellcheck="false">
+          <span class="hint">支持 500ms / 2s / 5m</span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">目标地址</span>
+          <input class="input mono" id="cfg-target" placeholder="http://127.0.0.1:8080/metrics" spellcheck="false">
+          <span class="hint">由 host_api 的 http_fetch 拉取</span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">告警阈值</span>
+          <input class="input mono" id="cfg-threshold" placeholder="0.85" spellcheck="false">
+          <span class="hint">超过它就把样本标成异常</span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">启用</span>
+          <select class="select" id="cfg-enabled">
+            <option value="1">启用</option>
+            <option value="0">停用</option>
+          </select>
+          <span class="hint">停用后插件不再采集（任务仍会触发，但直接返回）</span>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="save-btn">保存配置</button>
+        <button class="btn" id="reload-btn">重新读取</button>
+        <span class="hint" id="save-hint"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">试跑一次</span>
+        <span class="card-sub">调插件自己的 API：POST /plugins/demo/api/run</span>
+      </div>
+      <p class="hint" style="margin-bottom:12px">
+        用当前配置立刻采一次样，返回结果直接显示在下面。这条路径走的是插件注册的路由，
+        跟主面板的任务调度无关 —— 插件自己的界面调自己的后端。
+      </p>
+      <div class="actions">
+        <button class="btn primary" id="run-btn">立即采集一次</button>
+      </div>
+
+      <div class="console" id="out"><span class="console-empty">还没有采集过</span></div>
+    </section>
+
+    <footer class="plugin-foot">
+      <span class="hint">
+        这个插件同时也注册了定时任务：主面板的「任务列表」里能看到它，
+        但它的配置只在这里改。
+      </span>
+    </footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
