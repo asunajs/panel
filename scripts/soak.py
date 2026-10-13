@@ -126,7 +126,7 @@ def sample_mem(pid: int, repeat: int = 3):
 
 def api_state(base: str):
     try:
-        # 带上令牌：面板没配令牌是**拒绝启动**的（第十五轮删掉了「本机免登录」），
+        # 带上令牌：面板没配令牌是**拒绝启动**的（第十九轮删掉了「本机免登录」），
         # 不带就是 401，长跑会把「好好的面板」误判成挂掉
         req = urllib.request.Request(
             f"{base}/api/state",

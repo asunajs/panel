@@ -79,7 +79,10 @@ pub struct AppState {
     /// 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
     /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
+    /// 反代模式下（`PANEL_TRUST_PROXY=1`）客户端 IP 从转发头里取，见 web.rs 的 `client_ip`。
     pub auth: Arc<Auth>,
+    /// 反代模式下从 `X-Forwarded-For` / `X-Real-IP` 取真实客户端 IP（默认**不信任**）
+    pub trust_proxy: bool,
     /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
     pub test_limiter: Arc<TestRunLimiter>,
     /// 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
@@ -149,7 +152,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let auth_result = Some((cred.kind(), cred.is_plain()));
     let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
+    // 反代模式：开了才从转发头取客户端 IP。默认不信 —— 那些头客户端可以随便写，
+    // 默认信就等于「退避用伪造 IP 就能绕过」。开了会打一条日志（它改变安全语义，
+    // 运维必须能确认自己开没开）。
+    let trust_proxy = env_flag("PANEL_TRUST_PROXY");
 
+    if trust_proxy {
+        println!(
+            "[boot] 反代模式：客户端 IP 取自 X-Forwarded-For / X-Real-IP 的**最右一跳**\n\
+             \x20       （只在反代确实会覆盖这个头时才开 —— 否则退避可以被伪造 IP 绕过）"
+        );
+    }
     let (kind, _is_plain) = auth_result.unwrap_or(("", false));
     println!(
         "[boot] 鉴权: {}",
@@ -268,6 +281,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         host,
         engine: engine_handle,
         auth: Arc::new(Auth::new(cred, cookie_secure)),
+        trust_proxy,
         assets,
         test_limiter: Arc::new(TestRunLimiter::new(
             env_usize("TEST_RUN_BURST", DEFAULT_TEST_RUN_BURST) as u32,
@@ -473,7 +487,7 @@ fn choose_credential(hash: Option<String>, plain: Option<String>) -> (Option<Str
 }
 
 // （这里原来有个 `is_loopback`：用来判断「绑回环 + 没配令牌 = 允许免登录」。
-//  第十五轮删掉了 —— 反代就跑在本机，转发来的请求源地址全是 127.0.0.1，
+//  第十九轮删掉了 —— 反代就跑在本机，转发来的请求源地址全是 127.0.0.1，
 //  那条判断在有人挂反代时会变成「面板裸奔」。现在凭据是必需品，不再需要它。）
 
 /// `1` / `true` / `yes` / `on` 都算开（大小写不敏感）。

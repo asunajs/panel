@@ -33,7 +33,7 @@ const BROWSERS = [
 
 function parseArgs(argv) {
   const o = { out: 'docs/screenshots', token: 'demo-token', port: 9333 };
-  // `--open` 以前指向「无鉴权实例」（拍本机免登录那张）。第十五轮没有那种实例了，
+  // `--open` 以前指向「无鉴权实例」（拍本机免登录那张）。第十九轮没有那种实例了，
   // 所以它变成可选；不传就用和 --auth 同一个地址。
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i].replace(/^--/, '');
@@ -49,7 +49,7 @@ if (opts.help || !opts.auth) {
 
   --auth   面板地址（实例**必须配令牌** —— 没有「本机免登录」模式了，
            没配令牌的实例会拒绝启动，见 README §13）
-  --open   可选。以前是「无鉴权实例」，第十五轮删掉了那种状态；
+  --open   可选。以前是「无鉴权实例」，第十九轮删掉了那种状态；
            不传就用 --auth 同一个地址
   --token  --auth 那个实例的令牌
   --out    输出目录，默认 docs/screenshots
@@ -199,7 +199,7 @@ const SHOTS = (o) => [
     name: 'web-dashboard',
     // 第十三轮从旧版搬过来的三样东西：实时日志、鉴权徽标、登出。
     // （带令牌的实例上能看到「已认证 · N 个会话」+ 登出按钮；
-    //   `panel-noauth` 那张在第十五轮删掉了 —— 面板不再有「本机免登录」模式，
+    //   `panel-noauth` 那张在第十九轮删掉了 —— 面板不再有「本机免登录」模式，
     //   所以「没登出按钮」那个状态已经不存在了。）
     url: `${o.auth}/#/dashboard`,
     viewport: [1280, 1000],
@@ -1496,6 +1496,69 @@ const SHOTS = (o) => [
     viewport: [900, 1250],
     scale: 2,
     cookie: 'session',
+  },
+  {
+    name: 'web-auth-throttle',
+    // 防爆破要能从**界面上**看出来，而不是只在日志里事后发现：
+    // 有人在猜令牌时徽标变成警告色并写出「有来源被退避」。
+    // 这条也是排查「为什么我自己登不上」的入口 —— 反代下所有人共用一个来源 IP，
+    // 一个人猜错会把所有人退避掉，看到徽标才知道不是自己的令牌配错了。
+    //
+    // **真的打**：从 Node 侧连发 4 次错令牌（阈值 3，第 4 次起退避）。
+    // 放在最后跑：它会把这个来源（127.0.0.1）退避掉，而前面的登录/登出镜头需要
+    // 能正常登录（退避是 fail-closed 的，正确令牌也会被挡）。
+    // 页面自己的轮询走会话 cookie，不受按 IP 退避影响 —— 所以徽标还是能刷新出来。
+    url: `${o.auth}/#/dashboard`,
+    viewport: [1280, 260],
+    scale: 2,
+    cookie: 'session',
+    verify: async (cdp, S) => {
+      const results = [];
+      const note = (label, ok, detail) => results.push({ label, ok, detail });
+      const codes = [];
+      const attempt = async (i) => {
+        const r = await fetch(`${o.auth}/api/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: `definitely-not-the-token-${i}` }),
+        });
+        codes.push(r.status);
+        return r.status;
+      };
+      for (let i = 0; i < 3; i += 1) await attempt(i);
+      note('连错 3 次后开始退避（第 4 次 429）', (await attempt(3)) === 429, `codes=${codes.join(',')}`);
+
+      // 退避是指数增长的（1s→2s→4s→8s…）。要让**页面**看到它，就得先把它拉长：
+      // 页面每 5 秒才轮询一次 /api/state，只错 4 次的话退避只有 2 秒，
+      // 轮询那一刻它已经过期了 —— 实测正是这样红了第一次。
+      let n = 4;
+      for (const wait of [1100, 2200, 4400]) {
+        await sleep(wait);
+        await attempt(n);
+        n += 1;
+      }
+
+      let t = '';
+      for (let i = 0; i < 60; i += 1) {
+        t = await evalIn(cdp, S, `document.getElementById('auth-state').textContent`);
+        if (/被退避|正在被爆破/.test(t)) break;
+        await sleep(500);
+      }
+      note('鉴权徽标变成警告并写出「有来源被退避」', /被退避|正在被爆破/.test(t), t);
+
+      const title = await evalIn(cdp, S, `document.getElementById('auth-state').title`);
+      note('徽标提示里能看到失败次数与退避来源数', /近 60 秒失败/.test(title), title.slice(0, 90));
+
+      const failed = results.filter((r) => !r.ok);
+      return {
+        ok: failed.length === 0,
+        label: '防爆破在界面上能看见（真的连打了错令牌）',
+        detail:
+          failed.length === 0
+            ? `${results.length} 项通过`
+            : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
+      };
+    },
   },
   {
     // 登出：必须是**最后一个用 cookie 的**镜头。

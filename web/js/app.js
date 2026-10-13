@@ -411,18 +411,36 @@ async function pollEngine() {
   }
 
   // 鉴权状态。**没有「本机免登录」这个分支了**：能被渲染出来就说明这个会话
-  // 是通过校验进来的（第十五轮起凭据是必需品，反代就跑在本机，
+  // 是通过校验进来的（第十九轮起凭据是必需品，反代就跑在本机，
   // 「绑回环 = 安全」不成立）。徽标里顺带写上凭据的存储形式（明文 / 哈希），
   // 排查「为什么接口 401」时一眼能看到自己配的是哪种。
   const auth = res.auth || {};
-  authEl.className = 'badge running';
-  authEl.textContent =
-    auth.kind === 'Argon2id 哈希'
-      ? `已认证 · 令牌是哈希 · ${auth.sessions} 个会话`
-      : `已认证 · ${auth.sessions} 个会话`;
+  const lockedMs = auth.global_lock_ms || 0;
+  const blocked = auth.blocked_ips || 0;
+  const failed = auth.failed_recent || 0;
+
+  // 防爆破状态要能一眼看到，两个原因：
+  //   ① 有人在猜令牌时，运维得知道（而不是只从日志里事后发现）
+  //   ② 反代下所有人共用一个来源 IP —— 一个人猜错把所有人退避掉之后，
+  //      运维看到「有来源被退避」才知道「不是我的令牌错了，是有人被打」
+  if (lockedMs > 0) {
+    authEl.className = 'badge failed';
+    authEl.textContent = `正在被爆破 · 暂停验凭据 ${Math.ceil(lockedMs / 1000)}s`;
+  } else if (blocked > 0) {
+    authEl.className = 'badge warning';
+    authEl.textContent = `有来源被退避 · ${blocked} 个`;
+  } else {
+    authEl.className = 'badge running';
+    authEl.textContent =
+      auth.kind === 'Argon2id 哈希'
+        ? `已认证 · 令牌是哈希 · ${auth.sessions} 个会话`
+        : `已认证 · ${auth.sessions} 个会话`;
+  }
   authEl.title =
     '面板始终要求令牌（没有「本机免登录」模式：反代也跑在本机，' +
-    '转发来的请求源地址就是 127.0.0.1）';
+    '转发来的请求源地址就是 127.0.0.1）\n' +
+    `防爆破：近 60 秒失败 ${failed} 次，正在退避的来源 ${blocked} 个` +
+    (auth.trust_proxy ? '\n反代模式：客户端 IP 取自 X-Forwarded-For 的最右一跳' : '');
   if (logoutBtn) logoutBtn.hidden = false;
 }
 

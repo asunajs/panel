@@ -54,7 +54,7 @@ FAILURES: list[str] = []
 
 # 冒烟用的面板令牌。
 #
-# 第十五轮起**面板没有「本机免登录」模式了**（反代也跑在本机，转发来的请求源地址
+# 第十九轮起**面板没有「本机免登录」模式了**（反代也跑在本机，转发来的请求源地址
 # 就是 127.0.0.1，所以「绑回环 = 安全」不成立）。于是每个测试实例都得配一个令牌，
 # 而请求也得带上它 —— 否则整个冒烟都会撞 401。
 #
@@ -256,7 +256,7 @@ def auth_checks(tmp: Path) -> None:
             auth = json.loads(body).get("auth", {})
         except json.JSONDecodeError:
             auth = {}
-        # 第十五轮：没有「本机免登录」了，`enabled` 这个可变字段也一起去掉 ——
+        # 第十九轮：没有「本机免登录」了，`enabled` 这个可变字段也一起去掉 ——
         # 改成报**凭据的存储形式**（排查「我配的哈希到底生效没」时最有用）
         check(
             auth.get("kind") in ("明文令牌", "Argon2id 哈希") and "enabled" not in auth,
@@ -514,6 +514,185 @@ def auth_hash_checks(tmp: Path) -> None:
         except subprocess.TimeoutExpired:
             proc2.kill()
         f2.close()
+
+
+def anti_bruteforce_checks(tmp: Path) -> None:
+    """第二十轮：防爆破（用户实测要求「还要做防爆破」）。
+
+    已有的那套是**按来源 IP 指数退避**（第 3 次起 1s→2s→…→60s 封顶）。它有两个洞，
+    这一组把两个都钉住：
+
+      ① **反代下它是假的**：nginx/caddy 转发来的请求源地址全是 127.0.0.1 ——
+         所有人共用一个来源，攻击者猜错 3 次就把**所有人**（包括运维自己）挡在门外。
+         所以加了 `PANEL_TRUST_PROXY=1`：从转发头取真实客户端 IP。但转发头本身是
+         客户端能写的，所以**默认不信**，只在开了反代模式时读，而且只读**最右一跳**。
+      ② **换 IP 就没人拦**：僵尸网络 / 伪造一片 XFF 就能全速猜。所以加了跨来源的
+         **全局闸**：60 秒内失败 30 次就整体冷 30 秒。
+
+    顺带钉住两条容易搞错的语义：
+      - 退避是**临时**的（过期后正确令牌要能进来，不是永久拉黑）
+      - 全局闸只挡「猜凭据」，**不踢已经登录的会话**（运维不该被攻击者踢下线）
+    """
+    use_token(None)  # 全部请求自己指定头部，不让助手加默认令牌
+
+    def make(base_env, tag):
+        port = free_port()
+        env = dict(os.environ)
+        env.update(base_env)
+        env.update(
+            {
+                "BIND_ADDR": f"127.0.0.1:{port}",
+                "DB_PATH": str(tmp / f"bf-{tag}.db"),
+                "PLUGINS_DIR": str(REPO / "plugins"),
+            }
+        )
+        f = open(tmp / f"bf-{tag}.log", "w")
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+        return port, proc, f
+
+    def login(port, token, xff=None):
+        headers = {"content-type": "application/json"}
+        if xff:
+            headers["X-Forwarded-For"] = xff
+        code, hdrs, _ = http(
+            f"http://127.0.0.1:{port}/api/login",
+            method="POST",
+            headers=headers,
+            body=json.dumps({"token": token}).encode(),
+        )
+        return code, hdrs
+
+    def state(port, headers):
+        code, _, body = http(f"http://127.0.0.1:{port}/api/state", headers=headers)
+        try:
+            return code, json.loads(body)
+        except json.JSONDecodeError:
+            return code, {}
+
+    def stop(proc, f):
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        f.close()
+
+    # ── 实例 ①：默认（不信任转发头）──
+    port1, proc1, f1 = make({"PANEL_TOKEN": SMOKE_TOKEN}, "default")
+    try:
+        check(
+            wait_ready(f"http://127.0.0.1:{port1}", proc1, {"X-Panel-Token": SMOKE_TOKEN}),
+            "默认模式实例就绪",
+        )
+        # 干净来源上先看状态（下面会把 127.0.0.1 退避掉，之后就看不到了 ——
+        # 退避是 fail-closed 的，连正确凭据也一起挡，这是有意的）
+        code, st = state(port1, {"X-Panel-Token": SMOKE_TOKEN})
+        a = st.get("auth", {})
+        check(
+            code == 200 and a.get("trust_proxy") is False,
+            "/api/state 明确报出「没有开反代模式」",
+            f"http {code}, {a}",
+        )
+        check(
+            a.get("blocked_ips") == 0 and a.get("global_lock_ms") == 0 and a.get("failed_recent") == 0,
+            "一开始没有任何退避/关闸的痕迹（别在正常部署上误报）",
+            str(a),
+        )
+
+        # 每次换一个**伪造的** X-Forwarded-For：如果服务端信了这个头，每次都会被
+        # 当成新来源，退避永远攒不起来 —— 这就是最常见的绕过手法。
+        # 6 次全是 401 就说明伪造成功了，出现 429 才说明它被无视。
+        codes = [login(port1, "wrong", xff=f"10.0.0.{i}")[0] for i in range(1, 4)]
+        check(
+            codes == [401, 401, 401],
+            "阈值内是 401（还没有退避）",
+            f"codes={codes}",
+        )
+        check(
+            login(port1, "wrong", xff="10.0.0.99")[0] == 429,
+            "**伪造 X-Forwarded-For 绕不过退避**（默认不信任转发头）",
+        )
+        check(
+            login(port1, SMOKE_TOKEN)[0] == 429,
+            "退避期间正确令牌也进不来（fail-closed，不会给爆破留并行通道）",
+        )
+
+        # 退避是**临时**的：第 3 次失败的退避是 1 秒，等过去就该恢复
+        time.sleep(1.3)
+        code, _ = login(port1, SMOKE_TOKEN)
+        check(code == 200, "**退避会过期**：等过退避时间后正确令牌又能进（不是永久拉黑）", f"http {code}")
+
+        # 失败计数要能从外面看见（运维得知道有人在猜）
+        code, st = state(port1, {"X-Panel-Token": SMOKE_TOKEN})
+        a = st.get("auth", {})
+        # 注意这里是 **3** 而不是 4：第 4 次是被退避挡下的（429 在验凭据**之前**返回），
+        # 不记为一次真实失败。这个语义是刻意的 —— 否则单个攻击者一直打就能把
+        # 共享的全局窗口永久填满，等于用一行 while 循环把所有人锁在登录页外。
+        check(
+            code == 200 and a.get("failed_recent", 0) >= 3,
+            "**能看出有人在猜**：失败次数暴露在 /api/state（被退避挡住的不重复计数）",
+            f"failed_recent={a.get('failed_recent')}",
+        )
+    finally:
+        stop(proc1, f1)
+
+    # ── 实例 ②：反代模式 ──
+    port2, proc2, f2 = make({"PANEL_TOKEN": SMOKE_TOKEN, "PANEL_TRUST_PROXY": "1"}, "proxy")
+    try:
+        check(
+            wait_ready(f"http://127.0.0.1:{port2}", proc2, {"X-Panel-Token": SMOKE_TOKEN}),
+            "反代模式实例就绪",
+        )
+        check(
+            "反代模式" in (tmp / "bf-proxy.log").read_text(errors="replace"),
+            "启动日志写明开了反代模式（它改变安全语义，必须可见）",
+        )
+
+        # 先正常登录拿一个会话：下面要验证「全局闸不踢已登录的人」
+        code, hdrs = login(port2, SMOKE_TOKEN)
+        cookie = hdrs.get("set-cookie", "").split(";")[0]
+        check(code == 200 and cookie.startswith("panel_session="), "反代模式下正常登录能拿到会话", f"http {code}")
+
+        # 同一个真实客户端连错 → 它被退避
+        a_codes = [login(port2, "wrong", xff="203.0.113.7")[0] for _ in range(4)]
+        check(429 in a_codes, "反代模式下：某个客户端连错会被退避", f"codes={a_codes}")
+        check(
+            login(port2, "wrong", xff="203.0.113.8")[0] == 401,
+            "**另一个客户端不受牵连**（反代下退避不再退化成「全员被锁」）",
+        )
+        check(
+            login(port2, "wrong", xff="1.1.1.1, 203.0.113.9")[0] == 401,
+            "只认最右一跳（左边那一段可以被客户端随便伪造）",
+        )
+
+        # 从干净来源看：确实有一个来源正在被退避
+        code, st = state(port2, {"X-Panel-Token": SMOKE_TOKEN, "X-Forwarded-For": "203.0.113.200"})
+        check(
+            code == 200 and st.get("auth", {}).get("blocked_ips", 0) >= 1,
+            "blocked_ips 能看到正在退避的来源数（反代下排查「我为什么登不上」靠它）",
+            f"http {code}, {st.get('auth')}",
+        )
+
+        # ── 全局闸：换 IP 全速猜 → 整体冷下来 ──
+        for i in range(40):
+            login(port2, "wrong", xff=f"198.51.100.{i % 250 + 1}")
+        check(
+            login(port2, SMOKE_TOKEN, xff="192.0.2.1")[0] == 429,
+            "**跨来源的全局闸会关**（换 IP 也挡得住：期间连正确令牌都进不来）",
+        )
+        # 但**已经登录的会话不受影响**：闸只挡「猜凭据」，不该把运维踢下线
+        code, st = state(port2, {"cookie": cookie})
+        check(
+            code == 200 and st.get("auth", {}).get("global_lock_ms", 0) > 0,
+            "**全局闸不踢已登录的会话**，而且关闸状态能在 /api/state 里看到",
+            f"http {code}, global_lock_ms={st.get('auth', {}).get('global_lock_ms')}",
+        )
+        check(
+            "全局失败闸触发" in (tmp / "bf-proxy.log").read_text(errors="replace"),
+            "关闸时在日志里留下可查的记录",
+        )
+    finally:
+        stop(proc2, f2)
 
 
 def plugin_lifecycle_checks(tmp: Path) -> None:
@@ -2150,7 +2329,7 @@ def plugin_ui_checks(tmp: Path) -> None:
 def refuse_to_start_without_token(tmp: Path) -> None:
     """没有凭据 → **必须拒绝启动**，不管绑的是哪个地址。
 
-    第十五轮之前这里只测「非回环 + 没令牌」，因为「绑回环 + 没令牌」是允许免登录的。
+    第十九轮之前这里只测「非回环 + 没令牌」，因为「绑回环 + 没令牌」是允许免登录的。
     用户实测指出那条假设是错的：「有人会用反代，导致本地出网」—— 反代
     （nginx/caddy/cloudflared）就跑在本机，转发来的请求源地址全是 127.0.0.1，
     所以「绑回环 = 安全」在挂反代的那一刻就不成立了，而表现是面板裸奔在公网上。
@@ -2211,7 +2390,7 @@ def refuse_to_start_without_token(tmp: Path) -> None:
 
 
 def main() -> int:
-    # 第十五轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
+    # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
     #   ① 进到父进程环境里 → 所有实例都继承（不会再冒出「忘了配令牌」的实例）
     #   ② 助手的默认请求头也带上 → 现有几百个调用点不用逐个改
@@ -2614,6 +2793,7 @@ def main() -> int:
     print("---- 鉴权（PANEL_TOKEN 模式）----")
     auth_checks(tmp)
     auth_hash_checks(tmp)
+    anti_bruteforce_checks(tmp)
     refuse_to_start_without_token(tmp)
     plugin_lifecycle_checks(tmp)
     dev_assets_checks(tmp)

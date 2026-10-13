@@ -155,7 +155,8 @@ async fn require_auth(
 ) -> Response {
     // 没有「未配令牌就直通」这条快路：凭据是必需品（见 auth.rs 里 `Auth` 的注释，
     // 反代就跑在本机，`127.0.0.1` 不等于可信）
-    if st.auth.authenticate(req.headers(), peer.ip()).is_some() {
+    let ip = auth::client_ip(peer, req.headers(), st.trust_proxy);
+    if st.auth.authenticate(req.headers(), ip).is_some() {
         return next.run(req).await;
     }
     if wants_html(&req) {
@@ -228,7 +229,10 @@ async fn login_page(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if st.auth.authenticate(&headers, peer.ip()).is_some() {
+    if st.auth
+        .authenticate(&headers, auth::client_ip(peer, &headers, st.trust_proxy))
+        .is_some()
+    {
         return Redirect::to(&safe_next(q.next.as_deref())).into_response();
     }
     Html(render_login(q.err.as_deref(), q.next.as_deref(), &st)).into_response()
@@ -263,7 +267,9 @@ async fn do_login(
         }
     };
 
-    match st.auth.login(&token, peer.ip()) {
+    // 登录是爆破的主要目标：这里也走 client_ip（反代模式下取真实来源），
+    // 否则反代后面所有人共用一个 127.0.0.1，一个人猜错就把所有人都退避掉
+    match st.auth.login(&token, auth::client_ip(peer, &headers, st.trust_proxy)) {
         Ok(sid) => {
             crate::hostapi::push_log(
                 &st.logs,
@@ -1243,6 +1249,10 @@ fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result
     Ok(canon)
 }
 
+// 客户端 IP 的求法放在 auth.rs 的 `client_ip` 里（那边有可测的头部替身，
+// 而且「谁的失败算在谁头上」本来就是这个模块的事）。
+
+
 /// 服务 `/plugins/{name}/...`。
 ///
 /// 只服务**已加载插件**的资源：否则插件目录下任何一个目录（哪怕它不是插件）
@@ -1635,6 +1645,12 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "kind": st.auth.cred_kind().0,
             "sessions": st.auth.active_sessions(),
             "cookie_secure": st.auth.cookie_secure(),
+            // 防爆破的可观测面：运维要能看出「有人在猜令牌」以及「自己为什么登不上」。
+            // 反代下尤其重要 —— 所有人共用一个 IP，一个来源被退避就等于全员被退避。
+            "failed_recent": st.auth.failed_recent(),
+            "blocked_ips": st.auth.blocked_ips(),
+            "global_lock_ms": st.auth.global_lock_ms(),
+            "trust_proxy": st.trust_proxy,
         },
         // 多 worker 的可见性：哪条卡住了、哪个插件在哪条上。
         // 没有这两个字段的话，「插件之间互相干扰」就只能靠猜。

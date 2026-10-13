@@ -40,8 +40,8 @@
 //! - 反代后面拿到的 `ConnectInfo` 是**反代的 IP**，按 IP 退避会退化成全局退避。
 //!   真放反代后面应该让反代自己做限流（见 README §13.5）
 
-use std::collections::HashMap;
-use std::net::IpAddr;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
@@ -59,6 +59,17 @@ const FAIL_THRESHOLD: u32 = 3;
 const FAIL_MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// 失败记录多久没更新就丢掉（防止来源 IP 多的时候 HashMap 无限涨）。
 const FAIL_FORGET: Duration = Duration::from_secs(3600);
+
+/// 全局失败闸的滑动窗口。
+const GLOBAL_FAIL_WINDOW: Duration = Duration::from_secs(60);
+/// 窗口内失败多少次就关一次全局闸。
+///
+/// 为什么除了按 IP 退避还要这个：按 IP 的限制挡不住**换 IP**的爆破
+/// （僵尸网络、或者反代后面 XFF 被伪造的一片地址）。全局闸不区分来源，
+/// 超过就整体冷一会儿 —— 攻击者拿到的尝试次数从「无限」变成「每分钟几十次」。
+const GLOBAL_FAIL_THRESHOLD: usize = 30;
+/// 关闸多久。
+const GLOBAL_LOCK: Duration = Duration::from_secs(30);
 
 /// 一条活跃会话的可展示信息（面板上「谁登录着」用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +259,14 @@ struct VerifyCache {
     entries: HashMap<[u8; 32], Instant>,
 }
 
+/// 跨 IP 的全局失败闸。
+struct GlobalGate {
+    /// 滑动窗口内失败的时刻（只留窗口内的，所以不会涨）
+    recent: VecDeque<Instant>,
+    /// 关到什么时候
+    locked_until: Option<Instant>,
+}
+
 /// 指纹缓存的条目上限。正常场景只有一两个（脚本 / 一个人），上限只是防止
 /// 「有人拿一堆不同的错令牌来灌」时内存无限涨。
 const VERIFY_CACHE_MAX: usize = 32;
@@ -280,9 +299,43 @@ fn fingerprint(s: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// 取**真实客户端 IP**，用于登录退避与失败计数。
+///
+/// 默认**不信任**任何转发头：`X-Forwarded-For` / `X-Real-IP` 都是客户端能随便写的，
+/// 默认信它等于把退避变成「攻击者自己填个 IP 就绕过了」。
+///
+/// 只有显式开 `PANEL_TRUST_PROXY=1` 才读，而且只取 XFF 的**最右一跳** ——
+/// 那是你自己的反代追加进去的（客户端伪造的那些在左边，取左边就等于取攻击者写的东西）。
+pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trust_proxy: bool) -> IpAddr {
+    if !trust_proxy {
+        return peer.ip();
+    }
+    if let Some(v) = headers.get_str("x-forwarded-for") {
+        // 取**字面量最后一个**元素：反代追加的那一跳就在最右。
+        //
+        // 末尾是空值 / 解析不出来时**回退到对端地址**，而不是往前找一个能用的 ——
+        // 往前找就等于把「客户端自己写的那一段」当成事实（那一整段都是可以伪造的）。
+        // 代价：某些会追加空值的反代（例如 `X-Forwarded-For: 1.2.3.4, `）会让
+        // 所有客户端都塌回同一个地址 —— 那是**安全方向**的退化，
+        // 而且 `/api/state` 里能看出 `blocked_ips` 的异常（见 README §18.2）。
+        if let Some(last) = v.rsplit(',').next() {
+            if let Ok(ip) = last.trim().parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+    if let Some(v) = headers.get_str("x-real-ip") {
+        if let Ok(ip) = v.trim().parse::<IpAddr>() {
+            return ip;
+        }
+    }
+    // 头缺失或解析不出来 → 老实回退到对端地址，而不是放行
+    peer.ip()
+}
+
 /// 鉴权状态。
 ///
-/// `cred` 是**非 Option** 的：第十五轮之前这里允许「没配令牌 + 只绑回环 = 免登录」，
+/// `cred` 是**非 Option** 的：第十九轮之前这里允许「没配令牌 + 只绑回环 = 免登录」，
 /// 但那是个错误的假设 —— **反代就是跑在本机的**，nginx/caddy 转发过来的请求源地址
 /// 全是 `127.0.0.1`。所以「本机 = 可信」在有人挂反代的那一刻就不成立了，
 /// 而表现是「面板裸奔在公网上」。现在凭据是必需品，`main()` 里没配就拒绝启动。
@@ -293,6 +346,8 @@ pub struct Auth {
     cookie_secure: bool,
     /// 校验通过的候选值指纹（见 `VerifyCache`）
     verified: Mutex<VerifyCache>,
+    /// 全局闸：窗口内失败的**时间点**（不分来源）+ 关到什么时候
+    global: Mutex<GlobalGate>,
     /// Argon2 真正跑了几次。只用来做断言（证明缓存/退避真的省下了 KDF），
     /// 计数本身是 relaxed 原子加，代价可以忽略。
     kdf_runs: std::sync::atomic::AtomicU64,
@@ -309,6 +364,10 @@ impl Auth {
             cookie_secure,
             verified: Mutex::new(VerifyCache {
                 entries: HashMap::new(),
+            }),
+            global: Mutex::new(GlobalGate {
+                recent: VecDeque::new(),
+                locked_until: None,
             }),
             kdf_runs: std::sync::atomic::AtomicU64::new(0),
         }
@@ -376,11 +435,18 @@ impl Auth {
     ///
     /// 退避检查**在验令牌之前**，否则暴力猜照样能打满 CPU 去比令牌。
     pub fn login(&self, candidate: &str, ip: IpAddr) -> Result<String, LoginError> {
+        // 两层限流，都在验凭据**之前**：全局闸（挡换 IP 的分布式爆破）
+        // → 按 IP 退避（挡单来源的连续猜）。顺序无所谓，但都要先判 ——
+        // 关闸期间一次 Argon2 都不该跑。
+        if let Err(wait) = self.check_global() {
+            return Err(LoginError::RateLimited(wait));
+        }
         if let Err(wait) = self.check_rate(ip) {
             return Err(LoginError::RateLimited(wait));
         }
         if !self.credential_matches(candidate) {
             self.record_failure(ip);
+            self.record_global_failure();
             return Err(LoginError::BadToken);
         }
         // 成功：清掉这个 IP 的失败记录
@@ -431,6 +497,80 @@ impl Auth {
     }
 
     /// 这个 IP 现在能不能尝试登录。
+    /// 全局闸：现在还能不能验凭据。
+    ///
+    /// 和按 IP 的退避一样，**在验证之前**判 —— 关闸期间一次 KDF 都不跑。
+    fn check_global(&self) -> Result<(), Duration> {
+        let now = Instant::now();
+        let mut g = self.global.lock().unwrap();
+        match g.locked_until {
+            Some(until) if until > now => Err(until - now),
+            _ => {
+                g.locked_until = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// 记一次失败进全局窗口；到阈值就关闸。
+    fn record_global_failure(&self) {
+        let now = Instant::now();
+        let mut g = self.global.lock().unwrap();
+        g.recent.push_back(now);
+        // 只留窗口内的：队列长度自然被窗口大小和流量约束住
+        while let Some(front) = g.recent.front() {
+            if now.duration_since(*front) > GLOBAL_FAIL_WINDOW {
+                g.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        if g.recent.len() >= GLOBAL_FAIL_THRESHOLD {
+            let tripped = g.locked_until.is_none_or(|u| u <= now);
+            g.locked_until = Some(now + GLOBAL_LOCK);
+            g.recent.clear();
+            if tripped {
+                eprintln!(
+                    "[auth] 全局失败闸触发：{} 秒内失败 {} 次，暂停验凭据 {} 秒",
+                    GLOBAL_FAIL_WINDOW.as_secs(),
+                    GLOBAL_FAIL_THRESHOLD,
+                    GLOBAL_LOCK.as_secs()
+                );
+            }
+        }
+    }
+
+    /// 全局闸还要关多久（毫秒）。给 `/api/state` 用：运维一眼能看到「有人在爆破」。
+    pub fn global_lock_ms(&self) -> u64 {
+        let now = Instant::now();
+        let g = self.global.lock().unwrap();
+        match g.locked_until {
+            Some(u) if u > now => (u - now).as_millis() as u64,
+            _ => 0,
+        }
+    }
+
+    /// 当前窗口内的失败次数（不分来源）。
+    pub fn failed_recent(&self) -> usize {
+        let now = Instant::now();
+        let g = self.global.lock().unwrap();
+        g.recent
+            .iter()
+            .filter(|t| now.duration_since(**t) <= GLOBAL_FAIL_WINDOW)
+            .count()
+    }
+
+    /// 正被按 IP 退避多少个来源（排查「为什么我自己登不上」时很有用：
+    /// 反代下所有人共用一个 IP，一个来源被退避就等于所有人都被退避）。
+    pub fn blocked_ips(&self) -> usize {
+        let now = Instant::now();
+        let guard = self.failures.lock().unwrap();
+        guard
+            .values()
+            .filter(|f| f.blocked_until.is_some_and(|u| u > now))
+            .count()
+    }
+
     fn check_rate(&self, ip: IpAddr) -> Result<(), Duration> {
         let guard = self.failures.lock().unwrap();
         if let Some(f) = guard.get(&ip) {
@@ -483,17 +623,20 @@ impl Auth {
     /// 「一行命令烧掉对方 CPU 和内存」的放大器。退避**在验令牌之前**判。
     pub fn authenticate<H: HeaderMapLike>(&self, headers: &H, ip: IpAddr) -> Option<Via> {
         if let Some(t) = headers.bearer_token().or_else(|| headers.panel_token()) {
-            if self.check_rate(ip).is_err() {
+            if self.check_global().is_err() || self.check_rate(ip).is_err() {
                 return None;
             }
             if self.credential_matches(&t) {
                 return Some(Via::Token);
             }
-            // 只有哈希形式才动失败计数：明文比较是纳秒级，把它也计入退避
-            // 会让「脚本用错令牌」这种小失误直接把自己锁住，收益为零。
-            if matches!(self.cred, Cred::Phc(_)) {
-                self.record_failure(ip);
-            }
+            // **两种凭据形式都要记失败**。
+            //
+            // 我一开始只在哈希形式下记（理由是「明文比较是纳秒级、没有放大风险」），
+            // 但那只对 DoS 成立：爆破跟凭据怎么存没关系，明文模式下照样能全速猜，
+            // 而多数部署用的就是明文令牌 —— 等于防爆破对最常见的场景失效。
+            // 代价是「脚本写错令牌」也会被退避，那是应该的（它本来就在反复失败）。
+            self.record_failure(ip);
+            self.record_global_failure();
         }
         if let Some(sid) = headers.cookie(SESSION_COOKIE) {
             if self.touch_session(&sid) {
@@ -632,12 +775,101 @@ mod tests {
     }
 
     #[test]
+    fn client_ip_ignores_forwarded_headers_unless_proxy_mode_is_on() {
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let headers = h(&[
+            ("x-forwarded-for", "1.2.3.4"),
+            ("x-real-ip", "5.6.7.8"),
+        ]);
+        // 默认：**一个字都不看**。转发头是客户端能随便写的，默认信它 = 退避可被绕过
+        assert_eq!(client_ip(peer, &headers, false), peer.ip());
+        // 开了反代模式才信
+        assert_eq!(client_ip(peer, &headers, true).to_string(), "1.2.3.4");
+    }
+
+    #[test]
+    fn client_ip_takes_the_rightmost_hop_in_proxy_mode() {
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        // 客户端可以自己塞一串假的 XFF；你的反代**追加**在右边。
+        // 取最右边那一跳才是「你的反代看到的对端」，取左边等于取攻击者写的东西。
+        let headers = h(&[("x-forwarded-for", "1.2.3.4, 5.6.7.8, 203.0.113.7")]);
+        assert_eq!(client_ip(peer, &headers, true).to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn client_ip_falls_back_when_headers_are_missing_or_garbage() {
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        for hs in [
+            vec![],                                                     // 没有头
+            vec![("x-forwarded-for", "")],                              // 空
+            vec![("x-forwarded-for", "not-an-ip")],                     // 垃圾
+            vec![("x-forwarded-for", "1.2.3.4, ")],                     // 只有逗号
+        ] {
+            assert_eq!(
+                client_ip(peer, &h(&hs), true),
+                peer.ip(),
+                "解析不出来就该回退到对端地址，而不是放行：{hs:?}"
+            );
+        }
+        // XFF 坏但 X-Real-IP 好 → 用后者（nginx 常只给这一个）
+        let headers = h(&[("x-forwarded-for", "garbage"), ("x-real-ip", "9.9.9.9")]);
+        assert_eq!(client_ip(peer, &headers, true).to_string(), "9.9.9.9");
+    }
+
+    #[test]
+    fn global_gate_trips_after_many_failures_from_different_ips() {
+        // 这是按 IP 退避**挡不住**的场景：换 IP 继续猜。
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        let before = a.global_lock_ms();
+        // 用一堆不同的来源 IP 打到阈值
+        for i in 0..GLOBAL_FAIL_THRESHOLD {
+            let ip: IpAddr = format!("10.0.0.{}", i % 250 + 1).parse().unwrap();
+            assert!(a.login("wrong", ip).is_err());
+        }
+        assert_eq!(before, 0, "一开始不该有关闸");
+        assert!(a.global_lock_ms() > 0, "到阈值就该关闸");
+        // 关闸期间**连正确的令牌也进不来**（和按 IP 退避同一个语义）
+        assert!(matches!(
+            a.login(TOKEN, "10.9.9.9".parse().unwrap()),
+            Err(LoginError::RateLimited(_))
+        ));
+        // 而且关闸时每个来源的独立退避仍然各自记账（不是「全都算一个人头上」）
+        assert!(a.failed_recent() <= GLOBAL_FAIL_THRESHOLD);
+    }
+
+    #[test]
+    fn success_never_counts_toward_the_gate() {
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        for _ in 0..(GLOBAL_FAIL_THRESHOLD * 2) {
+            assert!(a.login(TOKEN, any_ip()).is_ok());
+        }
+        assert_eq!(a.failed_recent(), 0, "成功不该进失败窗口");
+        assert_eq!(a.global_lock_ms(), 0, "成功不该关闸");
+    }
+
+    #[test]
+    fn blocked_ips_counts_what_is_currently_backed_off() {
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        assert_eq!(a.blocked_ips(), 0);
+        let ip: IpAddr = "10.1.1.1".parse().unwrap();
+        for _ in 0..FAIL_THRESHOLD {
+            assert!(a.login("wrong", ip).is_err());
+        }
+        assert_eq!(a.blocked_ips(), 1, "这个来源应当正在退避");
+        // 换个来源不受影响（按 IP 退避的意义就在这）
+        assert!(a.login(TOKEN, "10.2.2.2".parse().unwrap()).is_ok());
+    }
+
+    #[test]
     fn auth_fails_closed_for_every_missing_or_wrong_credential() {
-        // 第十五轮删掉「本机免登录」之后，这一条是核心不变量：**没有任何请求能靠
+        // 第十九轮删掉「本机免登录」之后，这一条是核心不变量：**没有任何请求能靠
         // 「缺东西」通过**。以前这里测的是「没配令牌 = 谁都过不了」，那个状态现在
         // 在类型上就不存在了（`Auth` 必须拿一个有效凭据才能构造），所以改成测
         // 「fail-closed」这件事本身。
         let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        // 每个变体换一个来源 IP：同一个 IP 连打错令牌会触发退避（那是设计如此），
+        // 混在一起测就分不清「被拒是因为凭据不对」还是「因为退避」。
+        let mut n = 1;
         for headers in [
             vec![],                                            // 什么都没有
             vec![("authorization", "Bearer ")],
@@ -647,15 +879,13 @@ mod tests {
             vec![("cookie", "panel_session=")],
             vec![("cookie", "panel_session=nonexistent")],
         ] {
-            assert_eq!(
-                a.authenticate(&h(&headers), any_ip()),
-                None,
-                "不该放行：{headers:?}"
-            );
+            let ip: IpAddr = format!("10.10.10.{n}").parse().unwrap();
+            n += 1;
+            assert_eq!(a.authenticate(&h(&headers), ip), None, "不该放行：{headers:?}");
         }
-        assert!(a.login("wrong", ip("127.0.0.1")).is_err());
-        // 只有真凭据能过
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), any_ip()).is_some());
+        assert!(a.login("wrong", "10.10.10.99".parse().unwrap()).is_err());
+        // 只有真凭据能过（用一个干净的来源）
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), "10.10.10.100".parse().unwrap()).is_some());
     }
 
     // ---- 令牌 ----
@@ -785,12 +1015,13 @@ mod tests {
         // 明文比较是纳秒级，缓存与退避对它没有意义；也不能因为「脚本用错令牌」
         // 这种小失误就把自己锁住（收益为零、麻烦很大）
         let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
-        let ip = any_ip();
-        for _ in 0..10 {
+        // 每次换一个来源 IP：同一个 IP 连错会退避，退避之后测的就不是 KDF 这条路了
+        for i in 0..10 {
+            let ip: IpAddr = format!("10.20.20.{}", i + 1).parse().unwrap();
             assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
         }
         assert_eq!(a.kdf_runs(), 0, "明文路径不该跑 KDF");
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), "10.20.20.200".parse().unwrap()).is_some());
     }
 
     #[test]
