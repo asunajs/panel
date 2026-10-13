@@ -131,7 +131,14 @@ jobs:
           BIN=target/aarch64-unknown-linux-musl/release/plugin-panel
           file "$BIN"
           file "$BIN" | grep -q "aarch64"
-          file "$BIN" | grep -qi "static"
+          # 同时接受 "statically linked" 与 "static-pie linked"（见 release.yml 的注释）
+          file "$BIN" | grep -qiE "statically linked|static-pie linked"
+          # 静态的真正含义：ELF 里没有任何动态库依赖
+          if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "::error::$BIN 有动态库依赖，不是真静态："
+            readelf -d "$BIN" | grep "NEEDED"
+            exit 1
+          fi
 
       - name: 冒烟测试（真的把服务跑起来）
         run: python3 scripts/smoke.py ./target/aarch64-unknown-linux-musl/release/plugin-panel

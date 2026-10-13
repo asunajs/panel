@@ -61,7 +61,18 @@ jobs:
         run: |
           BIN=target/${{ matrix.target }}/release/plugin-panel
           file "$BIN"
-          file "$BIN" | grep -qi "statically linked"
+          # 注意 "static-pie linked" 和 "statically linked" 是两种写法：
+          # 现代 Rust 在 x86_64-unknown-linux-musl 上默认产出 **static PIE**，
+          # `file` 报的是 "static-pie linked"，不含 "statically linked"。
+          # 只匹配后者会误判失败（第一次打 tag 就是这么红的：aarch64 绿、x86_64 红）。
+          file "$BIN" | grep -qiE "statically linked|static-pie linked"
+          # 更硬的一条：静态的**真正含义**是没有动态库依赖 —— 直接看 ELF 的 NEEDED 段。
+          # file 的措辞会随工具链版本变，NEEDED 段不会骗人。
+          if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "::error::$BIN 有动态库依赖，不是真静态："
+            readelf -d "$BIN" | grep "NEEDED"
+            exit 1
+          fi
           case "${{ matrix.name }}" in
             aarch64-*) file "$BIN" | grep -q "aarch64" ;;
             x86_64-*)  file "$BIN" | grep -q "x86-64"  ;;
