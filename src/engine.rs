@@ -288,6 +288,17 @@ pub enum EngineCmd {
         expr: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// 停用 / 启用一个插件（写库；扫描那一轮就生效）
+    SetPluginDisabled {
+        name: String,
+        disabled: bool,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    /// 立刻重读一个插件（不等文件 mtime 变化）
+    ReloadPlugin {
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     /// 撤销墓碑：把被面板删掉的插件任务装回调度器
     RestoreJob {
         plugin: String,
@@ -699,11 +710,33 @@ fn worker_main(
     let files = my_files;
 
     let mut plugins: Vec<LoadedPlugin> = Vec::new();
+    // 「立刻重载」的请求队列：命令循环只往里塞名字，真正的重载交给扫描那一轮做
+    // （重载要动 plugins/sched/rt/registry，那套东西都在扫描路径上）。
+    let forced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut pending: Vec<RawTaskDef> = Vec::new();
     let mut next_vm: i32 = 1;
 
+    // 开机加载也要认「面板停用」——这条路径**不走** `sync_plugins`，漏了这里
+    // 就会出现「停用的插件重启后照样跑」（冒烟里就是这么红的）。
+    let disabled_at_boot = match db::list_disabled_plugins(&db) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[engine:{idx}] 读取停用插件失败: {e}");
+            Vec::new()
+        }
+    };
+
     for file in &files {
         let name = plugin_name_of(file);
+        if disabled_at_boot.iter().any(|d| d == &name) {
+            hostapi::push_log(
+                &logs,
+                &name,
+                "warn",
+                "插件被面板停用，本次启动不加载（可在插件管理页启用）",
+            );
+            continue;
+        }
         // 同名插件的检查必须在**建解释器之前**：撞名的那个不该白占一个 VM 索引
         if let Some(owner) = name_taken(&plugins, &name, file) {
             let lp = rejected_plugin(file, name_conflict_message(&name, &owner));
@@ -922,6 +955,33 @@ fn worker_main(
                 let out = remove_job(&mut sched, &logs, &db, &plugin, &name);
                 let _ = reply.send(out);
             }
+            Ok(EngineCmd::SetPluginDisabled {
+                name,
+                disabled,
+                reply,
+            }) => {
+                let out = db::set_plugin_disabled(&db, &name, disabled, &fmt_secs(Local::now()))
+                    .map(|_| ())
+                    .map_err(|e| format!("写库失败: {e}"));
+                if out.is_ok() {
+                    hostapi::push_log(
+                        &logs,
+                        &name,
+                        "warn",
+                        &format!(
+                            "插件已被面板{}，最多 1 秒内生效",
+                            if disabled { "停用" } else { "启用" }
+                        ),
+                    );
+                }
+                let _ = reply.send(out);
+            }
+            Ok(EngineCmd::ReloadPlugin { name, reply }) => {
+                // 只入队：真正的重载在扫描那一轮（那里才有 plugins/sched/rt/registry）
+                forced.lock().unwrap().push(name.clone());
+                hostapi::push_log(&logs, &name, "info", "面板要求重载，下一轮扫描执行");
+                let _ = reply.send(Ok(()));
+            }
             Ok(EngineCmd::RestoreJob {
                 plugin,
                 name,
@@ -1044,6 +1104,7 @@ fn worker_main(
                 &registry,
                 &my_files,
                 &mine,
+                &forced,
             );
         }
     }
@@ -2574,9 +2635,24 @@ fn sync_plugins(
     my_files: &[PathBuf],
     // 本 worker 负责的插件名（sync_registry / sync_jobs 都要按它收敛）
     owned: &[String],
+    // 面板点过「重载」的插件名（命令循环塞进来，这里消费掉）
+    forced: &Mutex<Vec<String>>,
 ) {
     let files: Vec<PathBuf> = my_files.to_vec();
+    let forced_now: Vec<String> = std::mem::take(&mut *forced.lock().unwrap());
     let mut touched = false;
+
+    // 面板停用的插件：**不加载**，已经加载的立刻卸掉（摘任务、关掉它的 WebUI/接口）。
+    // 每次扫描都从库里读一次：停用是跨 worker 的状态（每条 worker 只加载一部分插件，
+    // 谁都得认这个标记），而这张表只有几行，查询可以忽略不计。
+    let disabled: Vec<String> = match db::list_disabled_plugins(db) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[engine] 读取停用插件失败: {e}");
+            Vec::new()
+        }
+    };
+    let is_disabled = |name: &str| disabled.iter().any(|d| d == name);
 
     // ── ① 删除：文件没了就卸载 ──
     let gone: Vec<PathBuf> = plugins
@@ -2596,12 +2672,34 @@ fn sync_plugins(
         }
     }
 
+    // ── ①b 停用：文件还在、但被面板停用了 → 卸载 ──
+    let muted: Vec<PathBuf> = plugins
+        .iter()
+        .filter(|p| is_disabled(&p.name))
+        .map(|p| p.file.clone())
+        .collect();
+    for file in muted {
+        if let Some((name, removed)) = unload_plugin(plugins, sched, host, next_vm, &file) {
+            touched = true;
+            hostapi::push_log(
+                logs,
+                &name,
+                "warn",
+                &format!("插件已被面板停用，已卸载（摘掉 {removed} 个任务）"),
+            );
+        }
+    }
+
     // ── ② 新增：目录里有、内存里没有 ──
     for file in &files {
         if plugins.iter().any(|p| &p.file == file) {
             continue;
         }
         let name = plugin_name_of(file);
+        if is_disabled(&name) {
+            // 停用的插件保持「不加载」状态：面板上它仍然列着（可重新启用）
+            continue;
+        }
         if let Some(owner) = name_taken(plugins, &name, file) {
             let lp = rejected_plugin(
                 file,
@@ -2639,12 +2737,15 @@ fn sync_plugins(
         }
     }
 
-    // ── ③ 修改：mtime 变了就热更新 ──
+    // ── ③ 修改：mtime 变了就热更新（或者面板点了「重载」）──
     let modified: Vec<PathBuf> = plugins
         .iter()
         .filter(|p| {
             if !files.contains(&p.file) {
                 return false; // 上面已经卸载过了
+            }
+            if forced_now.iter().any(|n| n == &p.name) {
+                return true;
             }
             let now = std::fs::metadata(&p.file).and_then(|m| m.modified()).ok();
             match (p.mtime, now) {
@@ -2654,6 +2755,17 @@ fn sync_plugins(
         })
         .map(|p| p.file.clone())
         .collect();
+    // 要求重载一个**没被加载**的插件（停用中 / 加载失败）→ 说清楚，别静默吞掉
+    for name in &forced_now {
+        if !plugins.iter().any(|p| &p.name == name) {
+            hostapi::push_log(
+                logs,
+                name,
+                "warn",
+                "重载请求被忽略：这个插件当前没有被加载（可能被面板停用了）",
+            );
+        }
+    }
     for file in modified {
         reload_plugin(
             rt, plugins, sched, &file, logs, db, host, wd, budget, next_vm, registry, owned,

@@ -102,6 +102,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{plugin}/{name}/restore", post(restore_job))
         .route("/api/jobs/{plugin}/{name}/edit", post(edit_job))
         .route("/api/jobs/cleanup", post(cleanup_jobs))
+        .route("/api/plugins/{name}/disable", post(disable_plugin))
+        .route("/api/plugins/{name}/enable", post(enable_plugin))
+        .route("/api/plugins/{name}/reload", post(reload_plugin))
+        .route("/api/plugins/{name}/source", get(plugin_source))
         // 任务**操作**：立即执行 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
@@ -673,6 +677,131 @@ async fn edit_job(
     }
 }
 
+/// `POST /api/plugins/{name}/disable` / `enable` —— 面板停用 / 启用一个插件。
+///
+/// 停用是**持久化的面板决定**（落在 `plugin_state` 表里）：引擎不加载它、它的任务
+/// 不被装上、它的 WebUI 与接口都关掉，而且重启之后仍然停用。启用就是反过来。
+///
+/// 引擎每轮目录扫描（1 秒）都会读一次这张表，所以最多 1 秒生效 —— 不做「立刻同步
+/// 卸载」是因为那要跨线程改插件实例，而重载/卸载的逻辑全在扫描路径上。
+async fn set_plugin_disabled(
+    st: &AppState,
+    name: &str,
+    disabled: bool,
+    headers: &HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(r) = route(
+        st,
+        name,
+        EngineCmd::SetPluginDisabled {
+            name: name.to_string(),
+            disabled,
+            reply: tx,
+        },
+    ) {
+        return r;
+    }
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true, "disabled": disabled })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
+async fn disable_plugin(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    set_plugin_disabled(&st, &name, true, &headers).await
+}
+
+async fn enable_plugin(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    set_plugin_disabled(&st, &name, false, &headers).await
+}
+
+/// `POST /api/plugins/{name}/reload` —— 立刻重读这个插件（不等文件 mtime 变化）。
+async fn reload_plugin(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(r) = route(
+        &st,
+        &name,
+        EngineCmd::ReloadPlugin {
+            name: name.clone(),
+            reply: tx,
+        },
+    ) {
+        return r;
+    }
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
+/// `GET /api/plugins/{name}/source` —— 只读地看一眼插件源码。
+///
+/// 为什么值得有：这个面板能跑测试代码、能看到插件报的错，但看不到插件**本身**——
+/// 排查问题时要来回切编辑器。只读是刻意的：面板不负责改插件源码（改文件的事交给
+/// 编辑器与 git），它只负责让你在这里看得见。
+async fn plugin_source(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    // 名字用来拼路径，必须挡住 `../` 之类（和插件静态资源同一套判据）
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "插件名不合法".into());
+    }
+    let Some(path) = plugin_file_of(&st.plugins_dir, &name) else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("没有名为 `{name}` 的插件文件"),
+        );
+    };
+    // 再确认一次「解析出来的真实路径确实在插件目录里」——名字检查之外的第二道
+    let canon_dir = std::fs::canonicalize(&st.plugins_dir).ok();
+    let canon = std::fs::canonicalize(&path).ok();
+    match (canon_dir, canon) {
+        (Some(d), Some(f)) if f.starts_with(&d) => {}
+        _ => {
+            return json_error(StatusCode::FORBIDDEN, "路径不在插件目录里".into());
+        }
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let lines = text.lines().count();
+            Json(json!({
+                "ok": true,
+                "name": name,
+                "path": path.display().to_string(),
+                "lines": lines,
+                "bytes": text.len(),
+                "text": text,
+            }))
+            .into_response()
+        }
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读插件源码失败: {e}"),
+        ),
+    }
+}
+
 /// `POST /api/jobs/cleanup` —— 清理失效的面板任务。
 ///
 /// 请求体 `{"dry_run": true}`（可选，默认 `false`）。失效 = 插件没了 / 插件加载失败 /
@@ -897,6 +1026,21 @@ const MAX_PLUGIN_ASSET: u64 = 4 * 1024 * 1024;
 ///
 /// 这条规则只写在这里一处：「面板说这个插件有配置页」和「实际能打开它」
 /// 必须用同一个判据 —— 两边不一致会变成「按钮点了 404」这种最难查的错。
+/// 按「插件名 = 文件主名」的约定把插件的源文件找回来（`js/` 或 `py/` 子目录都看）。
+///
+/// 用点：停用中的插件不在 registry 里，面板仍要显示它的路径。
+fn plugin_file_of(plugins_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for dir in [plugins_dir.to_path_buf(), plugins_dir.join("js"), plugins_dir.join("py")] {
+        for ext in ["js", "py"] {
+            let p = dir.join(format!("{name}.{ext}"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 fn plugin_ui_index(plugins_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     plugins_dir.join(name).join("index.html")
 }
@@ -1254,7 +1398,13 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
     // `has_ui` 是给面板判断「要不要显示打开配置页的按钮」用的：插件作者提供了
     // `{name}/index.html` 才有这个入口。不报这个字段的话，面板只能对每个插件都
     // 显示按钮，点进去 404 —— 那是把插件的责任转嫁给了用户。
-    let plugins: Vec<serde_json::Value> = st
+    // 插件列表 = **已加载的** ∪ **被面板停用的**。
+    //
+    // 停用的插件不在 registry 里（引擎没加载它），但必须仍然列出来 —— 否则用户在
+    // 面板上一点停用，它就整个消失了，再也点不回来。这类条目只给名字 / 文件 /
+    // 运行时 / 一个 disabled 标记，够了。
+    let disabled = db::list_disabled_plugins(&st.db).unwrap_or_default();
+    let mut plugins: Vec<serde_json::Value> = st
         .registry
         .lock()
         .unwrap()
@@ -1266,10 +1416,47 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
                     "has_ui".to_string(),
                     json!(plugin_ui_index(&st.plugins_dir, &p.name).is_file()),
                 );
+                o.insert(
+                    "disabled".to_string(),
+                    json!(disabled.iter().any(|d| d == &p.name)),
+                );
             }
             v
         })
         .collect();
+    // 停用中的（不在 registry 里）补上去
+    let loaded: Vec<String> = plugins
+        .iter()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .collect();
+    for name in &disabled {
+        if loaded.iter().any(|l| l == name) {
+            continue;
+        }
+        // 文件按「插件名 = 文件主名」的约定找回来（可能在 js/ 或 py/ 子目录）
+        let file = plugin_file_of(&st.plugins_dir, name)
+            .map(|f| f.display().to_string())
+            .unwrap_or_default();
+        let runtime = if file.ends_with(".py") { "py" } else { "js" };
+        plugins.push(json!({
+            "name": name,
+            "file": file,
+            "runtime": runtime,
+            "has_on_tick": false,
+            "ticks": 0,
+            "last_tick": null,
+            "error": null,
+            "tasks": 0,
+            "has_ui": plugin_ui_index(&st.plugins_dir, name).is_file(),
+            "disabled": true,
+        }));
+    }
+    plugins.sort_by(|a, b| {
+        a.get("file")
+            .and_then(|f| f.as_str())
+            .unwrap_or("")
+            .cmp(b.get("file").and_then(|f| f.as_str()).unwrap_or(""))
+    });
     let logs: Vec<LogLine> = st.logs.lock().unwrap().iter().cloned().collect();
     let tasks = db::list_tasks(&st.db).unwrap_or_default();
     let jobs = db::list_jobs(&st.db).unwrap_or_default();

@@ -1351,6 +1351,136 @@ def job_delete_checks(tmp: Path) -> None:
         logf.close()
 
 
+def plugin_manage_checks(tmp: Path) -> None:
+    """插件管理：停用 / 启用、重载、看源码。
+
+    用户实测指出「插件管理，但是现在是只能看，没有管理」。停用是最要紧的那个动作 ——
+    以前想让一个不想要的插件别跑，只能去动文件（移走 / 改名）。
+
+    这一组钉住：
+
+      ① 停用是**持久化**的：不加载、任务不跑、重启后仍然停用，但**仍然列在面板上**
+         （否则一点停用它就消失了，再也点不回来）
+      ② 启用能装回来
+      ③ 重载能立刻重读（不等文件 mtime 变化）
+      ④ 源码接口只读、且挡住路径穿越
+    """
+    pdir = tmp / "pm-plugins"
+    pdir.mkdir(parents=True)
+    (pdir / "pm-demo.js").write_text(
+        "import { log, register_cron } from 'host-api';\n"
+        "register_cron('beat', '@every 2s', function () { log('beat'); });\n"
+    )
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "pm.db"),
+            "PLUGINS_DIR": str(pdir),
+        }
+    )
+    env.pop("PANEL_TOKEN", None)
+    logpath = tmp / "pm.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+    base = f"http://127.0.0.1:{port}"
+
+    def plugin(name="pm-demo"):
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return None
+        for p in body.get("plugins", []):
+            if p["name"] == name:
+                return p
+        return None
+
+    def job_runs():
+        code, body = fetch_json(f"{base}/api/state")
+        if code != 200:
+            return None
+        for j in body.get("jobs", []):
+            if (j["plugin"], j["name"]) == ("pm-demo", "beat"):
+                return j["runs"]
+        return None
+
+    def wait_for(pred, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.3)
+        return False
+
+    try:
+        check(wait_ready(base, proc, timeout=20.0), "插件管理实例已就绪")
+        check(wait_for(lambda: plugin() is not None, 15.0), "插件已加载")
+        check((plugin() or {}).get("disabled") is False, "初始是启用状态")
+
+        # ① 停用
+        code, body = post_json(f"{base}/api/plugins/pm-demo/disable")
+        check(code == 200 and body.get("ok"), "停用接口返回成功", f"{code} {body}")
+        check(wait_for(lambda: (plugin() or {}).get("disabled") is True, 8.0), "状态变成已停用")
+        check(plugin() is not None, "**停用后仍然列在面板上**（否则点不回来）")
+        check(
+            wait_for(lambda: job_runs() is None, 8.0),
+            "停用后它的任务也不在了（摘掉调度、jobs 行被收敛掉）",
+        )
+        log_text = logpath.read_text(errors="replace")
+        check("已卸载" in log_text, "日志写明了「插件已被面板停用，已卸载」")
+
+        # ② 重启后仍然停用
+        proc.terminate()
+        proc.wait(timeout=15)
+        logf.close()
+        logf = open(logpath, "w")
+        proc = subprocess.Popen(
+            [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+        )
+        check(wait_ready(base, proc, timeout=20.0), "重启后实例已就绪")
+        check(
+            wait_for(lambda: (plugin() or {}).get("disabled") is True, 12.0),
+            "**重启后仍然停用**（持久化的面板决定）",
+        )
+        check(job_runs() is None, "重启后它的任务仍然不跑")
+
+        # ③ 启用
+        code, body = post_json(f"{base}/api/plugins/pm-demo/enable")
+        check(code == 200 and body.get("ok"), "启用接口返回成功", f"{code} {body}")
+        check(wait_for(lambda: (plugin() or {}).get("disabled") is False, 8.0), "状态回到启用")
+        check(wait_for(lambda: job_runs() is not None, 8.0), "任务装回来了")
+
+        # ④ 重载（文件没变也要重读）
+        code, body = post_json(f"{base}/api/plugins/pm-demo/reload")
+        check(code == 200 and body.get("ok"), "重载接口返回成功", f"{code} {body}")
+        log2 = logpath.read_text(errors="replace")
+        check("面板要求重载" in log2, "日志写明「面板要求重载，下一轮扫描执行」")
+        check(
+            wait_for(lambda: "插件已热更新" in logpath.read_text(errors="replace"), 10.0),
+            "**文件没变也真的重载了**（不等 mtime）",
+        )
+
+        # ⑤ 源码：只读 + 挡穿越
+        code, body = fetch_json(f"{base}/api/plugins/pm-demo/source")
+        check(code == 200 and "register_cron" in body.get("text", ""), "能读到插件源码", f"{code}")
+        check(body.get("lines", 0) >= 2 and "pm-demo.js" in body.get("path", ""), "带回路径与行数")
+        # 用 http() 而不是 fetch_json()：后者遇到 4xx 会抛 HTTPError（我第一版就是这么
+        # 把冒烟搞崩的 —— 要断言的恰恰是非 2xx）
+        for bad in ["..", "a%2Fb", "nope"]:
+            code, _, _ = http(f"{base}/api/plugins/{bad}/source")
+            check(code in (400, 404), f"插件名 `{bad}` 被拒", f"HTTP {code}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
+
+
 def plugin_ui_checks(tmp: Path) -> None:
     """第十二轮：插件自有 WebUI + 主面板前端资源 + 测试运行。
 
@@ -2077,6 +2207,7 @@ def main() -> int:
     job_edit_checks(tmp)
     job_override_checks(tmp)
     job_delete_checks(tmp)
+    plugin_manage_checks(tmp)
 
     print()
     if FAILURES:

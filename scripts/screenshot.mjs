@@ -175,10 +175,14 @@ const SHOTS = (o) => [
     scale: 2,
     cookie: 'session',
     verify: async (cdp, S) => {
-      const r = await evalIn(
-        cdp,
-        S,
-        `(function () {
+      // **等数据到位再断言**。视图是异步渲染的：先渲染骨架（"鉴权…" / "连接中…"），
+      // 等 `/api/state` 回来才填真值。单次查询就是赌它已经回来了 —— 实测偶发红过
+      // 一次（日志 -1 行、鉴权还是占位符）。同一类 flake 这是第四次，所以这里必须等。
+      const read = () =>
+        evalIn(
+          cdp,
+          S,
+          `(function () {
            const box = document.getElementById('log-box');
            return {
              hasLogSection: !!box,
@@ -189,7 +193,12 @@ const SHOTS = (o) => [
              engine: document.getElementById('engine-state').textContent,
            };
          })()`,
-      );
+        );
+      let r = await read();
+      for (let i = 0; i < 60 && !(r.lines > 0 && /已认证/.test(r.auth)); i += 1) {
+        await sleep(150);
+        r = await read();
+      }
       const ok =
         r.hasLogSection && r.lines > 0 && r.hasTs === r.lines &&
         /已认证/.test(r.auth) && r.logoutVisible === true;
@@ -1017,6 +1026,109 @@ const SHOTS = (o) => [
     viewport: [1280, 900],
     scale: 2,
     cookie: 'session',
+    verify: async (cdp, S) => {
+      // 用户实测指出「插件管理，但是现在是只能看，没有管理」。这一条钉住三个动作
+      // 真的在界面上、而且真的有用（停用 → 卡片翻成已停用且能启用；源码 → 有内容）。
+      const ev = (expr) => evalIn(cdp, S, expr);
+      const results = [];
+      const note = (label, ok, detail) => results.push({ label, ok, detail });
+
+      const cards = () =>
+        ev(`(function () {
+             return [...document.querySelectorAll('.plugin-card')].map(c => ({
+               name: c.querySelector('.card-title')?.textContent?.trim(),
+               badges: c.textContent.includes('已停用') ? '已停用' : '启用中',
+               hasSrc: !!c.querySelector('[data-src]'),
+               hasReload: !!c.querySelector('[data-reload]'),
+               hasToggle: !!c.querySelector('[data-toggle]'),
+               hasOpen: !!c.querySelector('[data-open]'),
+             }));
+           })()`);
+
+      let list = [];
+      for (let i = 0; i < 40 && list.length === 0; i += 1) {
+        await sleep(150);
+        list = await cards();
+      }
+      note(`插件卡片渲染出来了（${list.length} 张）`, list.length > 0);
+      note(
+        '每张卡片都有「源码 / 重载 / 停用」三个动作',
+        list.length > 0 && list.every((c) => c.hasSrc && c.hasReload && c.hasToggle),
+        JSON.stringify(list[0] || {}),
+      );
+
+      const target = list.find((c) => c.name === 'counter') || list[0];
+      if (target) {
+        // ① 源码
+        const src = await ev(
+          `(function () {
+             const b = [...document.querySelectorAll('[data-src]')].find(x => x.dataset.src === '${target.name}');
+             if (!b) return false; b.click(); return true;
+           })()`,
+        );
+        let srcOk = null;
+        for (let i = 0; i < 40; i += 1) {
+          await sleep(150);
+          srcOk = await ev(`(function () {
+            const s = document.getElementById('src-section');
+            const v = document.getElementById('src-view');
+            const t = document.getElementById('src-title');
+            return { shown: s && !s.hidden, len: v ? v.textContent.length : 0, title: t ? t.textContent : '' };
+          })()`);
+          if (srcOk && srcOk.shown && srcOk.len > 50) break;
+        }
+        note(
+          `点「源码」能看到${target.name}的内容`,
+          src === true && !!srcOk && srcOk.shown === true && srcOk.len > 50,
+          JSON.stringify(srcOk),
+        );
+
+        // ② 停用 → 卡片翻成已停用 + 出现「启用」
+        const clicked = await ev(
+          `(function () {
+             const b = [...document.querySelectorAll('[data-toggle]')].find(x => x.dataset.toggle === '${target.name}');
+             if (!b) return false; b.click(); return true;
+           })()`,
+        );
+        let off = null;
+        for (let i = 0; i < 60; i += 1) {
+          await sleep(200);
+          off = (await cards()).find((c) => c.name === target.name);
+          if (off && off.badges === '已停用') break;
+        }
+        note(
+          `停用${target.name}后卡片显示「已停用」`,
+          clicked === true && !!off && off.badges === '已停用' && off.hasToggle === true,
+          JSON.stringify(off),
+        );
+        note('已停用时不再给「打开配置页」（它打不开）', !!off && off.hasOpen === false);
+
+        // ③ 启用回来（别把实例留在停用状态，后面的镜头还在跑）
+        const back = await ev(
+          `(function () {
+             const b = [...document.querySelectorAll('[data-toggle]')].find(x => x.dataset.toggle === '${target.name}');
+             if (!b) return false; b.click(); return true;
+           })()`,
+        );
+        let on = null;
+        for (let i = 0; i < 60; i += 1) {
+          await sleep(200);
+          on = (await cards()).find((c) => c.name === target.name);
+          if (on && on.badges === '启用中') break;
+        }
+        note(`再点一次启用${target.name}，恢复原状`, back === true && !!on && on.badges === '启用中');
+      }
+
+      const failed = results.filter((r) => !r.ok);
+      return {
+        ok: failed.length === 0,
+        label: '插件管理：源码 / 重载 / 停用启用三个动作真的可用',
+        detail:
+          failed.length === 0
+            ? `${results.length} 项通过（源码有内容、停用可持久、能启用回来）`
+            : failed.map((r) => `${r.label} ✗ ${r.detail || ''}`).join('；'),
+      };
+    },
   },
   {
     name: 'web-plugins-narrow',

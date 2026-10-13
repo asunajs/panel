@@ -653,6 +653,27 @@
   刻意做成**一行全局说明**而不是每张卡片上的提示：卡片上的重复文案在窄屏会把按钮挤到
   下一行，而且十几张卡片重复同一句话本身就是噪音（用户两次指出过）。
 */
+/*
+  只读源码视图（插件管理页的「源码」）。
+
+  行高与等宽字体跟着编辑器走，但**不**做成 contenteditable —— 面板不负责改插件源码，
+  一个看起来能编辑、其实存不回去的框比只读更糟。
+*/
+.code-view {
+  margin: 0;
+  padding: var(--sp-3);
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  max-height: 60vh;
+  white-space: pre;
+  tab-size: 2;
+}
+
 /* 「代码里：@every 30s」那种附注（面板覆盖频率后，把代码声明的值也写出来） */
 .field-sub {
   font-size: 11px;

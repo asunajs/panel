@@ -133,6 +133,27 @@ export function editJob(plugin, name, expr) {
   });
 }
 
+/// 停用 / 启用一个插件（持久化：引擎不加载它、它的任务不跑、WebUI 关掉）。
+export function setPluginDisabled(name, disabled) {
+  return request(
+    `/api/plugins/${encodeURIComponent(name)}/${disabled ? 'disable' : 'enable'}`,
+    { method: 'POST', panel: true },
+  );
+}
+
+/// 立刻重读一个插件（不等文件变化）。
+export function reloadPlugin(name) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/reload`, {
+    method: 'POST',
+    panel: true,
+  });
+}
+
+/// 只读地取插件源码。
+export function pluginSource(name) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/source`);
+}
+
 /// 撤销「面板删除」（墓碑）——把被删掉的插件任务装回调度器。
 export function restoreJob(plugin, name) {
   return request(

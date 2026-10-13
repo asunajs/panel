@@ -108,6 +108,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 建回来），所以改成留一行墓碑：调度器不装它、列表默认不显示它，
     // 而 `sync_jobs` 认这个标记、不许把它的状态改回 running。
     ensure_column(&conn, "jobs", "deleted", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_plugin_state(&conn)?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -493,6 +494,45 @@ pub fn list_deleted_jobs(
         out.push(row);
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// 插件级状态（面板的「停用 / 启用」）
+// ---------------------------------------------------------------------------
+
+/// 建插件状态表。停用是**面板的决定**，不能只放在内存里 —— 否则重启就丢，
+/// 而「停用一个不想要的插件」正是那种希望它一直生效的操作。
+fn ensure_plugin_state(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS plugin_state (
+            name       TEXT PRIMARY KEY,
+            disabled   INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+}
+
+/// 被面板停用的插件名。
+pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE disabled = 1 ORDER BY name")?;
+    let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    it.collect()
+}
+
+/// 停用 / 启用一个插件。
+pub fn set_plugin_disabled(db: &Db, name: &str, disabled: bool, now: &str) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO plugin_state (name, disabled, updated_at) VALUES (?1, ?2, ?3)
+        ON CONFLICT(name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
+        "#,
+        params![name, disabled as i64, now],
+    )?;
+    Ok(())
 }
 
 /// 写入 / 清除**面板覆盖**的表达式。
