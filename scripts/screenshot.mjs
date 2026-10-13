@@ -188,10 +188,38 @@ const SHOTS = (o) => [
   // ---- 第十三轮：新版多文件前端 ----
   {
     name: 'web-dashboard',
+    // 第十三轮从旧版搬过来的三样东西：实时日志、鉴权徽标、登出。
+    // （带令牌的实例上能看到「已认证 · N 个会话」+ 登出按钮；
+    //   无令牌实例那张 panel-noauth 里是「本机免登录」且没有登出按钮。）
     url: `${o.auth}/#/dashboard`,
     viewport: [1280, 1000],
     scale: 2,
     cookie: 'session',
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const box = document.getElementById('log-box');
+           return {
+             hasLogSection: !!box,
+             lines: box ? box.querySelectorAll('.console-line').length : -1,
+             hasTs: box ? box.querySelectorAll('.log-ts').length : -1,
+             auth: document.getElementById('auth-state').textContent,
+             logoutVisible: !document.getElementById('logout-btn').hidden,
+             engine: document.getElementById('engine-state').textContent,
+           };
+         })()`,
+      );
+      const ok =
+        r.hasLogSection && r.lines > 0 && r.hasTs === r.lines &&
+        /已认证/.test(r.auth) && r.logoutVisible === true;
+      return {
+        ok: ok,
+        label: 'Dashboard 有实时日志 + 鉴权徽标 + 登出按钮',
+        detail: `日志 ${r.lines} 行（时间戳 ${r.hasTs} 个）, 鉴权="${r.auth}", 登出可见=${r.logoutVisible}, 引擎="${r.engine}"`,
+      };
+    },
   },
   {
     name: 'web-tasks',
@@ -199,6 +227,47 @@ const SHOTS = (o) => [
     viewport: [1280, 1100],
     scale: 2,
     cookie: 'session',
+  },
+  {
+    name: 'web-cleanup',
+    url: `${o.auth}/#/tasks`,
+    viewport: [1280, 900],
+    scale: 2,
+    cookie: 'session',
+    after: async (cdp, S) => {
+      // 真点一次「清理失效任务」，等 dry_run 的结果渲染出来
+      await evalIn(cdp, S, `document.getElementById('cleanup-btn').click()`);
+      await sleep(700);
+    },
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           const box = document.getElementById('cleanup-box');
+           const txt = box ? box.textContent : '';
+           const empty = /没有失效任务/.test(txt);
+           const pending = /将要删除/.test(txt);
+           return {
+             hasBox: !!box,
+             text: txt.slice(0, 48),
+             empty: empty,
+             pending: pending,
+             // 「将要删除」分支必须给出确认按钮，否则用户没法真正删掉
+             hasConfirm: !!document.getElementById('cleanup-go'),
+             jobs: document.querySelectorAll('[data-task]').length,
+           };
+         })()`,
+      );
+      // 两个分支都算通过，但**不允许**出现「报告了却点不动」这种半成品状态
+      const ok = r.hasBox && (r.empty || (r.pending && r.hasConfirm));
+      return {
+        ok: ok,
+        label: '清理失效任务：dry_run 只报告、不确认就不删',
+        detail: `分支=${r.empty ? '没有失效任务' : r.pending ? '将要删除' : '未知'}`
+          + `, 确认按钮=${r.hasConfirm}, 面板="${r.text}"`,
+      };
+    },
   },
   {
     // PC 宽度点汉堡按钮：它**不该**显示，点了也**不该**出现蒙层。
@@ -411,6 +480,51 @@ const SHOTS = (o) => [
     viewport: [900, 1250],
     scale: 2,
     cookie: 'session',
+  },
+  {
+    // 登出：必须是**最后一个用 cookie 的**镜头。
+    //
+    // 它会把服务端会话删掉，而每个镜头重设的是同一个会话 id —— 后面再有带 cookie
+    // 的镜头就会 401 跳登录页。所以它排在 panel-noauth（本来就不用 cookie）之前。
+    // 加新镜头时要注意这个顺序。
+    // 只验按钮可见是不够的 —— 登出静默失败会留下一个仍然有效的会话，是安全相关路径。
+    name: 'web-logout',
+    url: `${o.auth}/#/settings`,
+    viewport: [900, 600],
+    scale: 2,
+    cookie: 'session',
+    after: async (cdp, S) => {
+      await evalIn(cdp, S, `document.getElementById('logout-btn').click()`);
+      await sleep(1200); // 等服务端删会话 + 前端跳转
+    },
+    verify: async (cdp, S) => {
+      const r = await evalIn(
+        cdp,
+        S,
+        `(function () {
+           return {
+             path: location.pathname,
+             hasLoginForm: !!document.getElementById('token'),
+           };
+         })()`,
+      );
+
+      // 光看「跳到了登录页」不够 —— 那只证明前端跳了。真正的判据是**会话真的没了**：
+      // 再访问一次面板，必须被挡回登录页。会话还活着的话这里会看到面板。
+      const back = cdp.once('Page.loadEventFired');
+      await cdp.send('Page.navigate', { url: `${o.auth}/` }, S);
+      await back;
+      await sleep(500);
+      const after = await evalIn(cdp, S, `location.pathname + location.hash`);
+
+      const ok =
+        r.path.startsWith('/login') && r.hasLoginForm && !after.startsWith('/#');
+      return {
+        ok: ok,
+        label: '点登出会删会话并跳回登录页（且会话真的失效）',
+        detail: `登出后 path=${r.path}（表单=${r.hasLoginForm}），再访问面板 → ${after}`,
+      };
+    },
   },
   {
     name: 'panel-noauth',

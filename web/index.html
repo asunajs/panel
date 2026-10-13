@@ -55,6 +55,8 @@
 
       <div class="sidebar-foot">
         <span id="engine-state" class="badge idle" title="引擎心跳">连接中…</span>
+        <!-- 鉴权状态：没开鉴权时说明「本机免登录」，开了就显示会话数 -->
+        <span id="auth-state" class="badge idle" title="鉴权状态">鉴权…</span>
       </div>
     </aside>
 
@@ -63,6 +65,8 @@
         <button id="menu-btn" class="icon-btn only-mobile" aria-label="打开导航" aria-expanded="false">☰</button>
         <h1 id="view-title" class="topbar-title">Dashboard</h1>
         <div class="topbar-right">
+          <!-- 只在开了鉴权时显示（app.js 按 /api/state 的 auth.enabled 决定） -->
+          <button id="logout-btn" class="btn ghost" hidden>登出</button>
           <button id="theme-btn" class="icon-btn" aria-label="切换主题" title="切换深色 / 亮色">◐</button>
         </div>
       </header>

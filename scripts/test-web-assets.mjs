@@ -203,6 +203,31 @@ check(
   `${themeCalls.length} 处调用，其中 ${persisting.length} 处带 persist`,
 );
 
+// 前后端字段名契约。
+//
+// 这条守的是一个真实踩到的静默 bug：清理失效任务的接口返回 `{"jobs":[...]}`，
+// 而前端按语义猜成了 `res.invalid` —— 结果**有失效任务时界面永远显示「没有失效任务」**。
+// 静态检查、冒烟（测的是 API）、单元测试（测的是后端）全都不会报。
+// 跨边界的字段名对不上是这个项目里最容易发生、又最难发现的一类错。
+{
+  const webRs = readFileSync(join(REPO, 'src/web.rs'), 'utf8');
+  const fn = webRs.match(/async fn cleanup_jobs[\s\S]*?\n\}/);
+  const keys = fn
+    ? [...fn[0].matchAll(/json!\(\{([^}]*)\}/g)].flatMap((m) =>
+        [...m[1].matchAll(/"(\w+)":/g)].map((x) => x[1]),
+      )
+    : [];
+  check(keys.includes('jobs'), '清理接口（src/web.rs）返回的字段里有 jobs', keys.join(','));
+
+  const taskListJs = readFileSync(join(WEB, 'js/views/task-list.js'), 'utf8');
+  const read = taskListJs.match(/const invalid = res\.(\w+)/);
+  check(
+    !!read && keys.includes(read[1]),
+    '前端读的清理结果字段名与后端返回一致',
+    `前端读 res.${read ? read[1] : '?'}，后端返回 ${keys.join('/')}`,
+  );
+}
+
 const pluginCss = readFileSync(join(PLUGINS, 'demo/style.css'), 'utf8');
 check(
   [...pluginCss.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/#[0-9a-fA-F]{3,8}\b/g)].length === 0,

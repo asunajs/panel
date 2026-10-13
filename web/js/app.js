@@ -15,7 +15,7 @@
 import * as taskList from './views/task-list.js';
 import * as taskEditor from './views/task-editor.js';
 import * as pluginList from './views/plugin-list.js';
-import { getState } from './api.js';
+import { getState, logout } from './api.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -114,6 +114,25 @@ function initDrawer() {
 
 // ---------------------------------------------------------------- Dashboard
 
+/** 日志行的渲染。`LEVEL_CLASS` 决定颜色，未知等级按 info 处理。 */
+const LEVEL_CLASS = { info: 'stdout', warn: 'stderr', error: 'error' };
+
+function logRows(logs, limit = 40) {
+  if (!logs || logs.length === 0) {
+    return '<span class="console-empty">还没有日志</span>';
+  }
+  // 只显示最后 limit 行（环形缓冲上限 200 行，全渲染既没必要也拖慢低配盒子）
+  return logs
+    .slice(-limit)
+    .map(
+      (l) =>
+        `<span class="console-line ${LEVEL_CLASS[l.level] || 'stdout'}">` +
+        `<span class="log-ts">${l.ts}</span> ` +
+        `<span class="log-src">${l.plugin}</span> ${l.msg}</span>`,
+    )
+    .join('');
+}
+
 async function renderDashboard(root) {
   root.innerHTML = '<div class="empty">加载中…</div>';
   const res = await getState();
@@ -189,7 +208,50 @@ async function renderDashboard(root) {
           </tbody>
         </table>
       </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-title">实时日志</span>
+        <span class="hint" id="log-note"></span>
+        <div class="card-actions">
+          <button class="btn ghost" id="log-toggle">暂停刷新</button>
+        </div>
+      </div>
+      <div class="console" id="log-box">${logRows(res.logs)}</div>
     </div>`;
+
+  // 日志单独轮询，不重渲染整页 —— 重渲染会把滚动位置和按钮焦点弄丢。
+  // 返回 cleanup 由 app.js 在切视图时调用，否则切走之后这个定时器还在跑。
+  let paused = false;
+  const box = root.querySelector('#log-box');
+  const note = root.querySelector('#log-note');
+  const shown = Math.min((res.logs || []).length, 40);
+  note.textContent = `最近 ${shown} 行 / 缓冲 ${(res.logs || []).length} 行`;
+
+  const timer = setInterval(async () => {
+    if (paused || !document.body.contains(box)) return;
+    const r = await getState();
+    if (!r.ok) return;
+    // 只在内容变了才动 DOM（日志不动时别做无谓的重排）
+    const html = logRows(r.logs);
+    if (box.innerHTML !== html) {
+      const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+      box.innerHTML = html;
+      // 用户本来贴着底部看，就继续贴着；否则别抢他的滚动位置
+      if (atBottom) box.scrollTop = box.scrollHeight;
+    }
+    note.textContent = `最近 ${Math.min((r.logs || []).length, 40)} 行 / 缓冲 ${
+      (r.logs || []).length
+    } 行`;
+  }, 3000);
+
+  root.querySelector('#log-toggle').addEventListener('click', (e) => {
+    paused = !paused;
+    e.target.textContent = paused ? '继续刷新' : '暂停刷新';
+  });
+
+  return () => clearInterval(timer);
 }
 
 // ---------------------------------------------------------------- 设置
@@ -280,7 +342,7 @@ async function route() {
       : TITLES[view] || '面板';
 
   try {
-    if (view === 'dashboard') await renderDashboard(root);
+    if (view === 'dashboard') cleanup = await renderDashboard(root);
     else if (view === 'tasks') cleanup = await taskList.render(root, ctx);
     else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
@@ -305,21 +367,49 @@ const ctx = {
 
 async function pollEngine() {
   const el = $('#engine-state');
+  const authEl = $('#auth-state');
+  const logoutBtn = $('#logout-btn');
   const res = await getState();
+
   if (!res.ok) {
     el.className = 'badge failed';
     el.textContent = '后端不可用';
     return;
   }
+
   const healthy = res.engine?.healthy !== false;
   el.className = 'badge ' + (healthy ? 'success' : 'failed');
   el.textContent = healthy ? '引擎正常' : '引擎停摆';
+
+  // 鉴权状态：这一条在排查「为什么接口 401」时最有用 ——
+  // 「本机免登录」和「已认证」是两件完全不同的事，界面上必须能区分。
+  const auth = res.auth || {};
+  if (auth.enabled) {
+    authEl.className = 'badge running';
+    authEl.textContent = `已认证 · ${auth.sessions} 个会话`;
+    if (logoutBtn) logoutBtn.hidden = false;
+  } else {
+    authEl.className = 'badge idle';
+    authEl.textContent = '本机免登录';
+    if (logoutBtn) logoutBtn.hidden = true;
+  }
 }
 
 // ---------------------------------------------------------------- 启动
 
 initTheme();
 initDrawer();
+
+$('#logout-btn').addEventListener('click', async () => {
+  const btn = $('#logout-btn');
+  btn.disabled = true;
+  const res = await logout();
+  // 成功时 logout() 已经跳走了；失败要说清原因，否则用户只看到按钮变灰
+  if (!res.ok) {
+    btn.disabled = false;
+    toast('登出失败：' + res.error, 'bad');
+  }
+});
 window.addEventListener('hashchange', route);
 if (!location.hash) location.hash = '#/dashboard';
 route();

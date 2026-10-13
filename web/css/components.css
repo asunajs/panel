@@ -448,6 +448,24 @@
   color: var(--text-mute);
 }
 
+/* 日志行里的时间戳与来源插件名：压暗，让正文（msg）读起来更清 */
+.log-ts {
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-src {
+  color: var(--accent);
+}
+
+/* 侧边栏脚部的两个徽标叠着放，窄侧边栏里读起来更整齐 */
+.sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
 /* ---------------------------------------------------------------- 表格 */
 
 .table-wrap {

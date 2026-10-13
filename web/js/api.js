@@ -160,6 +160,49 @@ export function resumeTask(plugin, name) {
   });
 }
 
+/**
+ * 清理失效的面板任务（插件没了 / 加载失败 / 处理函数没了）。
+ *
+ * `dryRun=true` 只报告不删 —— 面板上先让用户看清要删什么，再确认。
+ * 回 `{ ok, invalid: [{plugin, name, reason}], removed? }`。
+ */
+export function cleanupJobs(dryRun) {
+  return request('/api/jobs/cleanup', {
+    method: 'POST',
+    panel: true,
+    body: { dry_run: !!dryRun },
+  });
+}
+
+/**
+ * 登出：删服务端会话 + 清 cookie，然后跳登录页。
+ *
+ * ⚠️ 这个接口**不返回 JSON**，是唯一的例外：`POST /api/logout` 回的是
+ * `303 → /login`（旧版页面用的是 `<form method="post">`，靠浏览器跟重定向完成跳转）。
+ * 所以不能走上面的 `request()`：
+ *   - fetch 默认会**跟着** 303 走，拿到的其实是登录页的 HTML
+ *   - 于是 JSON 解析失败，`request()` 会把「已经登出成功」判成失败
+ *     表现就是：会话真的删了、cookie 也清了，界面却弹「登出失败」并且不跳转。
+ *
+ * 用 `redirect: 'manual'` 拦住重定向（服务端照样删会话 + 下发清 cookie 的头），
+ * 然后自己跳。这个接口没有「失败」这个分支可报 —— 没登录时登出也是成功（幂等），
+ * 所以拿到响应就跳，唯一的失败是网络层面。
+ */
+export async function logout() {
+  try {
+    await fetch('/api/logout', {
+      method: 'POST',
+      headers: { 'x-panel': '1' },
+      credentials: 'same-origin',
+      redirect: 'manual',
+    });
+    location.href = '/login';
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: '连不上后端：' + (e.message || e) };
+  }
+}
+
 // ---------------------------------------------------------------- 插件
 
 /**

@@ -9,7 +9,7 @@
   恢复）走 /api/tasks。这条分界是后端定的，前端照搬，不要自己发明第三套。
 */
 
-import { getState, runTask, pauseTask, resumeTask, deleteJob } from '../api.js';
+import { getState, runTask, pauseTask, resumeTask, deleteJob, cleanupJobs } from '../api.js';
 import { TASKS } from '../mock.js';
 
 /** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
@@ -141,10 +141,12 @@ export async function render(root, ctx) {
       <div class="section-head">
         <span class="section-title">任务（${tasks.length}）</span>
         <div class="card-actions">
+          <button class="btn" id="cleanup-btn">清理失效任务</button>
           <button class="btn" id="refresh-btn">刷新</button>
           <button class="btn primary" id="new-task-btn">新建任务</button>
         </div>
       </div>
+      <div id="cleanup-box"></div>
       ${notice}
       <div class="grid">
         ${tasks.length ? tasks.map(taskCard).join('') : '<div class="card empty">还没有任务</div>'}
@@ -152,6 +154,86 @@ export async function render(root, ctx) {
     </div>`;
 
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
+
+  // ---- 清理失效任务：两阶段 ----
+  //
+  // 先 dry_run 把「要删什么」列出来让用户看清，再确认。**故意不用
+  // `window.confirm`**：它阻塞、信息量只有一行摘要，而且在自动化里根本点不动
+  // （会卡住整个页面）。失效原因是后端算的，原样展示 —— 前端不该猜。
+  root.querySelector('#cleanup-btn').addEventListener('click', async () => {
+    const box = root.querySelector('#cleanup-box');
+    const btn = root.querySelector('#cleanup-btn');
+    btn.disabled = true;
+    box.innerHTML = '<div class="card"><span class="hint">正在检查…</span></div>';
+
+    const res = await cleanupJobs(true);
+    btn.disabled = false;
+
+    if (!res.ok) {
+      box.innerHTML = `<div class="card"><span class="badge failed">清理失败</span>
+        <p class="hint" style="margin-top:var(--sp-2)">${esc(res.error)}</p></div>`;
+      return;
+    }
+
+    // 字段名是 `jobs`（见 src/web.rs::cleanup_jobs 的返回）。**不是** `invalid` ——
+    // 我一开始按语义猜了个名字，结果是「有失效任务时界面永远显示没有」，
+    // 而静态检查、冒烟、API 测试全都是绿的：只有拿真数据在浏览器里点一次才看得见。
+    const invalid = res.jobs || [];
+    if (invalid.length === 0) {
+      box.innerHTML = '<div class="card"><span class="badge success">没有失效任务</span>'
+        + '<p class="hint" style="margin-top:var(--sp-2)">所有面板任务的插件与处理函数都还在。</p></div>';
+      return;
+    }
+
+    box.innerHTML = `
+      <div class="card" style="border-color:var(--warning)">
+        <div class="card-head">
+          <span class="card-title">将要删除 ${invalid.length} 条失效任务</span>
+          <span class="badge warning">未删除，等你确认</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>插件</th><th>任务</th><th>失效原因</th></tr></thead>
+            <tbody>
+              ${invalid
+                .map(
+                  (j) => `<tr>
+                    <td class="mono dim">${esc(j.plugin)}</td>
+                    <td class="mono">${esc(j.name)}</td>
+                    <td class="dim">${esc(j.reason)}</td>
+                  </tr>`,
+                )
+                .join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="row" style="margin-top:var(--sp-3)">
+          <button class="btn danger" id="cleanup-go">确认删除这 ${invalid.length} 条</button>
+          <button class="btn ghost" id="cleanup-cancel">取消</button>
+          <span class="hint" id="cleanup-hint"></span>
+        </div>
+      </div>`;
+
+    box.querySelector('#cleanup-cancel').addEventListener('click', () => {
+      box.innerHTML = '';
+    });
+
+    box.querySelector('#cleanup-go').addEventListener('click', async (ev) => {
+      const go = ev.target;
+      go.disabled = true;
+      go.innerHTML = '<span class="spinner"></span> 删除中…';
+      const done = await cleanupJobs(false);
+      if (done.ok) {
+        ctx.toast(`已删除 ${invalid.length} 条失效任务`, 'ok');
+        render(root, ctx);
+      } else {
+        go.disabled = false;
+        go.textContent = '重试';
+        box.querySelector('#cleanup-hint').className = 'err-text';
+        box.querySelector('#cleanup-hint').textContent = done.error;
+      }
+    });
+  });
   root.querySelector('#new-task-btn').addEventListener('click', () => {
     ctx.navigate('#/tasks/new');
   });
