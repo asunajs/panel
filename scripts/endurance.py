@@ -662,24 +662,29 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     ts = [s["elapsed_s"] for s in ok]
     warm = max(1, len(ok) // 10)
     sts, smem = ts[warm:], mem[warm:]
-    slope, sigma = _slope(sts, smem)
+    slope_s, sigma = _slope(sts, smem)   # _slope 的入参是「秒 + MB」，所以斜率是 MB/s
+    slope = slope_s * 3600.0             # 报告统一用 MB/小时
     mid = len(sts) // 2
     s1, _ = _slope(sts[:mid], smem[:mid]) if mid > 2 else (0, 0)
     s2, sg2 = _slope(sts[mid:], smem[mid:]) if mid > 2 else (0, 0)
+    s1, s2 = s1 * 3600.0, s2 * 3600.0
     tailn = max(3, len(sts) // 4)
-    s3, sg3 = _slope(sts[-tailn:], smem[-tailn:])
-    growth_tail = s3 * (sts[-1] - sts[-tailn])
+    s3_s, sg3 = _slope(sts[-tailn:], smem[-tailn:])   # 每秒，用来算涨幅
+    s3 = s3_s * 3600.0                                # 每小时，用来显示
+    growth_tail = s3_s * (sts[-1] - sts[-tailn])
     a("| 指标 | 值 |")
     a("|---|---|")
     a(f"| 起 / 终 / 峰值 | {mem[0]:.2f} MB / {mem[-1]:.2f} MB / **{max(mem):.2f} MB** |")
     a(f"| 稳态斜率 | {slope:+.3f} MB/小时（σ={sigma:.2f} MB） |")
     a(f"| 前半段 / 后半段 / 末段斜率 | {s1:+.3f} / {s2:+.3f} / {s3:+.3f} MB/小时 |")
     a(f"| 末段涨幅 | {growth_tail:+.2f} MB（阈值 max(0.08MB, 2σ={2 * sg3:.2f}MB)） |")
-    a(f"| 外推 | {slope * 24:+.1f} MB/天 |")
-    resolvable = 2 * sigma / (sts[-1] - sts[0]) * 86400 / 1024 if sts[-1] > sts[0] else 0
-    a(f"| 本窗口分辨率 | ±{resolvable:.1f} MB/天 |\n")
-    if abs(growth_tail) < max(80.0, 2 * sg3):
-        a(f"**判定：✅ 平台期** —— 末段涨幅 {growth_tail:+.0f}KB 落在噪声带内，"
+    a(f"| 外推 | {slope * 24:+.2f} MB/天 |")
+    # 分辨率：2σ/窗口长度 × 一天的秒数。ys 的单位已经是 MB，不能再除 1024
+    resolvable = 2 * sigma / (sts[-1] - sts[0]) * 86400 if sts[-1] > sts[0] else 0
+    a(f"| 本窗口分辨率 | ±{resolvable:.2f} MB/天 |\n")
+    # 阈值也是 MB（原来是 soak.py 的 KB 常量 80，直接用会把门槛放到 80MB，形同虚设）
+    if abs(growth_tail) < max(0.08, 2 * sg3):
+        a(f"**判定：✅ 平台期** —— 末段涨幅 {growth_tail:+.2f}MB 落在噪声带内，"
           f"常驻稳定在 ~{mem[-1]:.1f} MB。")
     elif abs(slope * 24) > 20:
         a(f"**判定：❌ 疑似持续增长** —— 外推 {slope * 24:+.1f} MB/天，"
@@ -726,6 +731,7 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     a("## 4. 调度：触发次数 vs 理论值\n")
     first, last = samples[0], samples[-1]
     runs0, runs1 = first.get("runs") or {}, last.get("runs") or {}
+    trips = last.get("trips") or {}
     exp = header["expected_ms"]
     a("| 任务 | 理论间隔 | 实际触发 | 理论次数 | 达成率 |")
     a("|---|---|---|---|---|")
@@ -742,7 +748,11 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
         # 理论次数太少时，比值被量化误差主导（窗口边界不可能正好落在任务的触发相位上）：
         # 30s 的任务在 70s 窗口里是「2 次 vs 2.33 次」= 86%，但那不是丢触发。
         # 所以只在理论次数够多（≥20）时才判定。
-        if theory >= 20:
+        if trips.get(name, 0) > 0:
+            # 这个任务被熔断过：冷却期内宿主**故意不触发**它，所以达成率低是设计行为，
+            # 不是丢触发（实测 perf-fail 熔断 52 次 → 达成率 25%，完全符合预期）
+            flag = f" （熔断 {trips[name]} 次，冷却期内不触发，属预期）"
+        elif theory >= 20:
             if ratio < 95:
                 flag = " ❌"
                 drops.append(name)
@@ -776,7 +786,18 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
           f" · 超过最大桶 {st['over']} 次")
         a("")
     a("> 说明：`lateMs` 是「实际触发时刻 − 计划触发时刻」。毫秒级任务必然有少量延迟，"
-      "关键看 p99 和最大值有没有随时间恶化。\n")
+      "关键看 p99 和最大值有没有随时间恶化。")
+    # 统计存在插件内存里，而热更新会重建解释器 → 计数被清零。
+    # 所以要跟任务的实际触发次数对比，说清这份分布覆盖了多久。
+    fast_runs = (last.get("runs") or {}).get("perf-fast", 0)
+    if fast_runs and perf.get("js", {}).get("n", 0) < fast_runs * 0.5:
+        a(f">")
+        a(f"> ⚠️ 覆盖范围：上面这份分布只统计了**最后一次热更新之后**的触发"
+          f"（JS {perf['js']['n']:,} 次 vs 全程 {fast_runs:,} 次）—— "
+          f"统计量存在插件内存里，而热更新会重建解释器把它清零。"
+          f"要看全程分布得让插件把统计落到库里再累加。\n")
+    else:
+        a("")
 
     # ---------- 6. HTTP ----------
     a("## 6. HTTP 延迟\n")
