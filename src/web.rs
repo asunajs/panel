@@ -147,14 +147,16 @@ pub fn router(state: AppState) -> Router {
 /// - 否则 → 浏览器导航跳登录页，脚本请求给 401 JSON。
 async fn require_auth(
     State(st): State<AppState>,
-    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
+    // ConnectInfo 不只是给日志用的：头里带令牌的这条路径也要按 IP 退避 ——
+    // 哈希校验一次 19 MiB / 几十毫秒，未认证请求不能让对方白烧 CPU（见 auth.rs）
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
     if !st.auth.enabled() {
         return next.run(req).await;
     }
-    if st.auth.authenticate(req.headers()).is_some() {
+    if st.auth.authenticate(req.headers(), peer.ip()).is_some() {
         return next.run(req).await;
     }
     if wants_html(&req) {
@@ -224,12 +226,13 @@ fn safe_next(next: Option<&str>) -> String {
 async fn login_page(
     State(st): State<AppState>,
     Query(q): Query<LoginQuery>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
     if !st.auth.enabled() {
         return Redirect::to("/").into_response();
     }
-    if st.auth.authenticate(&headers).is_some() {
+    if st.auth.authenticate(&headers, peer.ip()).is_some() {
         return Redirect::to(&safe_next(q.next.as_deref())).into_response();
     }
     Html(render_login(q.err.as_deref(), q.next.as_deref(), &st)).into_response()

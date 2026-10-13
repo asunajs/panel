@@ -21,6 +21,9 @@
 //!   避免计时侧信道；哈希形式由 Argon2 的校验自带常量时间
 //! - 哈希形式下**连长度都不比较**：走的是「哈希候选值再比」这条路，
 //!   连「令牌有多长」这个信息都不会从比较路径里漏出去
+//! - 但 KDF 每次要 19 MiB / 几十毫秒，而 `authenticate()` 是**每个请求**都会走的 ——
+//!   所以：①成功校验过的候选值按**指纹**缓存（命中就跳过 KDF，指纹不是令牌、不能用来认证）；
+//!   ②**失败退避在验令牌之前**，未认证请求不能每次都让 CPU 跑一次 Argon2（放大的口子）
 //! - 会话 ID 来自 **OS 随机源**（`getrandom`，32 字节 → 64 位十六进制）
 //! - 登录失败**按来源 IP 指数退避**（1s → 64s，上限 60s），挡住暴力猜令牌
 //! - cookie 是 **HttpOnly + SameSite=Strict**：JS 读不到，跨站请求也带不上
@@ -230,12 +233,62 @@ impl Cred {
     }
 }
 
+/// 成功校验过的候选值的**指纹**缓存。
+///
+/// 为什么需要：Argon2id 一次要 19 MiB / 几十毫秒，而 `authenticate()` 是每个请求
+/// 都会走的路径 —— 脚本带 `X-Panel-Token` 连着打接口时，每个请求都跑一次 KDF
+/// 在低配 ARM 盒子上是灾难。
+///
+/// 缓存里放的是候选值的 **blake2b-256 指纹**，不是令牌本身：指纹不可反推，
+/// 也**不能**用来认证（它只用来查表）。只缓存**成功**的 —— 失败要是也缓存，
+/// 等于给暴力猜加速。
+struct VerifyCache {
+    entries: HashMap<[u8; 32], Instant>,
+}
+
+/// 指纹缓存的条目上限。正常场景只有一两个（脚本 / 一个人），上限只是防止
+/// 「有人拿一堆不同的错令牌来灌」时内存无限涨。
+const VERIFY_CACHE_MAX: usize = 32;
+/// 指纹的有效期。令牌不会变，这里只是让内存能自然回收。
+const VERIFY_CACHE_TTL: Duration = Duration::from_secs(600);
+
+impl VerifyCache {
+    fn fresh(&self, fp: &[u8; 32], now: Instant) -> bool {
+        match self.entries.get(fp) {
+            Some(t) => now.duration_since(*t) < VERIFY_CACHE_TTL,
+            None => false,
+        }
+    }
+
+    fn remember(&mut self, fp: [u8; 32], now: Instant) {
+        // 满了就整体清掉：这是个缓存，清空重填的代价（一次 KDF）远小于做 LRU 的复杂度
+        if self.entries.len() >= VERIFY_CACHE_MAX {
+            self.entries.clear();
+        }
+        self.entries.insert(fp, now);
+    }
+}
+
+/// blake2b-256 指纹。选它是因为 `argon2` 已经把它带进依赖树了（加为直接依赖不增加编译单元）。
+fn fingerprint(s: &str) -> [u8; 32] {
+    use blake2::digest::consts::U32;
+    use blake2::{Blake2b, Digest};
+    let mut h = Blake2b::<U32>::new();
+    h.update(s.as_bytes());
+    h.finalize().into()
+}
+
 /// 鉴权状态。`cred = None` 表示**没配令牌**（只在 loopback 绑定下允许）。
 pub struct Auth {
     cred: Option<Cred>,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, FailState>>,
     cookie_secure: bool,
+    /// 校验通过的候选值指纹（见 `VerifyCache`）
+    verified: Mutex<VerifyCache>,
+    /// Argon2 真正跑了几次。只用来做断言（证明缓存/退避真的省下了 KDF），
+    /// 计数本身是 relaxed 原子加，代价可以忽略。
+    kdf_runs: std::sync::atomic::AtomicU64,
 }
 
 impl Auth {
@@ -246,6 +299,10 @@ impl Auth {
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             cookie_secure,
+            verified: Mutex::new(VerifyCache {
+                entries: HashMap::new(),
+            }),
+            kdf_runs: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -266,11 +323,33 @@ impl Auth {
 
     /// 令牌对不对。明文走**常量时间比较**（不因为前缀相同就早退），
     /// 哈希走 Argon2 校验（自带常量时间）。
+    ///
+    /// 只有哈希形式才需要缓存：明文比较本来就是纳秒级。
     fn credential_matches(&self, candidate: &str) -> bool {
         let Some(cred) = self.cred.as_ref() else {
             return false;
         };
-        cred.verify(candidate)
+        if let Cred::Plain(_) = cred {
+            return cred.verify(candidate);
+        }
+        let now = Instant::now();
+        let fp = fingerprint(candidate);
+        if self.verified.lock().unwrap().fresh(&fp, now) {
+            return true;
+        }
+        self.kdf_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ok = cred.verify(candidate);
+        if ok {
+            self.verified.lock().unwrap().remember(fp, now);
+        }
+        ok
+    }
+
+    /// Argon2 实际跑了几次（测试用：证明缓存命中与退避前置**真的**省下了 KDF）。
+    #[cfg(test)]
+    fn kdf_runs(&self) -> u64 {
+        self.kdf_runs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 用会话 ID 换一次「已认证」。顺带刷新空闲时间、清掉过期的。
@@ -396,13 +475,26 @@ impl Auth {
     /// 两种凭证**任一**有效即可（头 = 脚本/CI 用的无状态令牌；cookie = 浏览器会话）。
     /// 头里带了但不对时**回落到 cookie**，而不是直接拒绝 —— 浏览器发请求时本来就可能
     /// 同时带上 cookie，用「头不对就一票否决」会让残留的旧头把正常会话挡掉。
-    pub fn authenticate<H: HeaderMapLike>(&self, headers: &H) -> Option<Via> {
+    /// `ip` 用来给**头里的令牌**也上失败退避。
+    ///
+    /// 为什么必须给这条路径也上退避：哈希校验一次要 19 MiB / 几十毫秒，而未认证请求
+    /// 也能触发它 —— 不上退避的话，`curl -H 'X-Panel-Token: x'` 循环就是一个
+    /// 「一行命令烧掉对方 CPU 和内存」的放大器。退避**在验令牌之前**判。
+    pub fn authenticate<H: HeaderMapLike>(&self, headers: &H, ip: IpAddr) -> Option<Via> {
         if !self.enabled() {
             return None;
         }
         if let Some(t) = headers.bearer_token().or_else(|| headers.panel_token()) {
+            if self.check_rate(ip).is_err() {
+                return None;
+            }
             if self.credential_matches(&t) {
                 return Some(Via::Token);
+            }
+            // 只有哈希形式才动失败计数：明文比较是纳秒级，把它也计入退避
+            // 会让「脚本用错令牌」这种小失误直接把自己锁住，收益为零。
+            if matches!(self.cred, Some(Cred::Phc(_))) {
+                self.record_failure(ip);
             }
         }
         if let Some(sid) = headers.cookie(SESSION_COOKIE) {
@@ -544,7 +636,7 @@ mod tests {
     #[test]
     fn disabled_auth_authenticates_nobody() {
         let a = Auth::new(None, false);
-        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer anything")])), None);
+        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer anything")]), any_ip()), None);
         assert!(a.login(TOKEN, ip("127.0.0.1")).is_err());
     }
 
@@ -616,6 +708,74 @@ mod tests {
         assert!(matches!(a.login("wrong", ip), Err(LoginError::BadToken)));
     }
 
+    /// 造一个「哈希凭据 + 已退避状态可观测」的实例。
+    fn hashed_auth() -> Auth {
+        Auth::new(Some(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()), false)
+    }
+
+    fn any_ip() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
+    #[test]
+    fn verify_cache_skips_kdf_on_repeat() {
+        // 为什么要有缓存：`authenticate()` 是**每个请求**都走的，而 Argon2 一次
+        // 19 MiB / 几十毫秒 —— 脚本带 X-Panel-Token 连着打接口时不能每个请求都跑。
+        let a = hashed_auth();
+        let ip = any_ip();
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+        assert_eq!(a.kdf_runs(), 1, "第一次当然要跑");
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+        assert_eq!(a.kdf_runs(), 1, "同样的令牌第二次应当走缓存，不再跑 KDF");
+        // 指纹缓存只认「校验成功过的」值：另一个令牌不会命中
+        assert!(a.authenticate(&h(&[("x-panel-token", "another")]), ip).is_none());
+        assert_eq!(a.kdf_runs(), 2);
+    }
+
+    #[test]
+    fn wrong_token_is_never_cached() {
+        // 失败要是也缓存，等于给暴力猜加速（每次都能免费知道「这个不对」）
+        let a = hashed_auth();
+        let ip = any_ip();
+        assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        assert_eq!(a.kdf_runs(), 2, "失败路径绝不能被缓存");
+    }
+
+    #[test]
+    fn backoff_runs_before_the_kdf_so_hammering_cannot_burn_cpu() {
+        // 这是哈希存储**引入**的风险，必须一起解决：未认证请求也能触发 19 MiB / 几十毫秒
+        // 的 KDF，不上退避就是一个「一行 curl 烧掉对方 CPU 和内存」的放大器。
+        let a = hashed_auth();
+        let ip = any_ip();
+        for _ in 0..3 {
+            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        }
+        let after_threshold = a.kdf_runs();
+        assert_eq!(after_threshold, 3, "退避阈值前会真的校验");
+        // 进入退避之后：再打 20 次，一次 KDF 都不该跑
+        for _ in 0..20 {
+            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        }
+        assert_eq!(a.kdf_runs(), after_threshold, "退避期间绝不能再跑 KDF");
+        // 退避期间连**正确**的令牌也进不来（和登录路径同一套语义）
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_none());
+        assert_eq!(a.kdf_runs(), after_threshold);
+    }
+
+    #[test]
+    fn plaintext_credential_never_touches_the_kdf_or_the_cache() {
+        // 明文比较是纳秒级，缓存与退避对它没有意义；也不能因为「脚本用错令牌」
+        // 这种小失误就把自己锁住（收益为零、麻烦很大）
+        let a = Auth::new(Some(Cred::parse(TOKEN).unwrap()), false);
+        let ip = any_ip();
+        for _ in 0..10 {
+            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        }
+        assert_eq!(a.kdf_runs(), 0, "明文路径不该跑 KDF");
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+    }
+
     #[test]
     fn credential_kind_is_reported_for_the_boot_log() {
         let plain = Auth::new(Some(Cred::parse(TOKEN).unwrap()), false);
@@ -651,16 +811,16 @@ mod tests {
     fn bearer_and_panel_token_headers_both_work() {
         let a = auth();
         let bearer = format!("Bearer {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("authorization", &bearer)])), Some(Via::Token));
+        assert_eq!(a.authenticate(&h(&[("authorization", &bearer)]), any_ip()), Some(Via::Token));
 
         // 大小写不敏感（HTTP 头的 scheme 本来就大小写不敏感）
         let lower = format!("bearer {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("Authorization", &lower)])), Some(Via::Token));
+        assert_eq!(a.authenticate(&h(&[("Authorization", &lower)]), any_ip()), Some(Via::Token));
 
-        assert_eq!(a.authenticate(&h(&[("X-Panel-Token", TOKEN)])), Some(Via::Token));
+        assert_eq!(a.authenticate(&h(&[("X-Panel-Token", TOKEN)]), any_ip()), Some(Via::Token));
         // 前后空白该被容忍（从文件读令牌、复制粘贴都容易带）
         assert_eq!(
-            a.authenticate(&h(&[("x-panel-token", &format!("  {TOKEN}  "))])),
+            a.authenticate(&h(&[("x-panel-token", &format!("  {TOKEN}  "))]), any_ip()),
             Some(Via::Token)
         );
     }
@@ -668,16 +828,16 @@ mod tests {
     #[test]
     fn wrong_or_malformed_credentials_are_rejected() {
         let a = auth();
-        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer wrong")])), None);
+        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer wrong")]), any_ip()), None);
 
         // 不是 Bearer 的方案
         let basic = format!("Basic {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("authorization", &basic)])), None);
+        assert_eq!(a.authenticate(&h(&[("authorization", &basic)]), any_ip()), None);
 
         // 没有空格分隔
-        assert_eq!(a.authenticate(&h(&[("authorization", TOKEN)])), None);
+        assert_eq!(a.authenticate(&h(&[("authorization", TOKEN)]), any_ip()), None);
         // 什么都没有
-        assert_eq!(a.authenticate(&h(&[])), None);
+        assert_eq!(a.authenticate(&h(&[]), any_ip()), None);
     }
 
     #[test]
@@ -685,9 +845,9 @@ mod tests {
         let a = auth();
         let sid = a.login(TOKEN, ip("10.0.0.1")).unwrap();
         let cookie = h(&[("cookie", &format!("other=1; {SESSION_COOKIE}={sid}; x=2"))]);
-        assert_eq!(a.authenticate(&cookie), Some(Via::Session));
+        assert_eq!(a.authenticate(&cookie, any_ip()), Some(Via::Session));
         assert!(a.logout(&sid));
-        assert_eq!(a.authenticate(&cookie), None, "退出后会话该失效");
+        assert_eq!(a.authenticate(&cookie, any_ip()), None, "退出后会话该失效");
         assert!(!a.logout(&sid), "重复退出返回 false");
     }
 
@@ -701,21 +861,21 @@ mod tests {
             ("cookie", &format!("{SESSION_COOKIE}={sid}")),
             ("x-panel-token", "wrong"),
         ]);
-        assert_eq!(a.authenticate(&mixed), Some(Via::Session));
+        assert_eq!(a.authenticate(&mixed, any_ip()), Some(Via::Session));
 
         // 反过来：头对、cookie 是坏的 → 通过头
         let bad_cookie = h(&[
             ("cookie", &format!("{SESSION_COOKIE}=deadbeef")),
             ("x-panel-token", TOKEN),
         ]);
-        assert_eq!(a.authenticate(&bad_cookie), Some(Via::Token));
+        assert_eq!(a.authenticate(&bad_cookie, any_ip()), Some(Via::Token));
 
         // 两个都错 → 拒绝
         assert_eq!(
             a.authenticate(&h(&[
                 ("cookie", &format!("{SESSION_COOKIE}=deadbeef")),
                 ("x-panel-token", "wrong"),
-            ])),
+            ]), any_ip()),
             None
         );
     }
@@ -731,13 +891,13 @@ mod tests {
             format!("a=b; {SESSION_COOKIE}={sid}; c=d"),
         ] {
             assert_eq!(
-                a.authenticate(&h(&[("cookie", &raw)])),
+                a.authenticate(&h(&[("cookie", &raw)]), any_ip()),
                 Some(Via::Session),
                 "解析失败: {raw}"
             );
         }
         // 空值不算
-        assert_eq!(a.authenticate(&h(&[("cookie", &format!("{SESSION_COOKIE}=;"))])), None);
+        assert_eq!(a.authenticate(&h(&[("cookie", &format!("{SESSION_COOKIE}=;"))]), any_ip()), None);
     }
 
     // ---- 登录退避 ----

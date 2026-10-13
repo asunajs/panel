@@ -31,6 +31,9 @@ subtle = "2"
 # 一个弱口令，而弱口令在快速哈希面前没有成本可言。Argon2id 是内存硬的，
 # 参数（m/t/p）随 PHC 串一起存 —— 校验时从串里读，不依赖这里的默认值。
 argon2 = "0.5"
+# 指纹缓存用 blake2b-256。它本来就在依赖树里（argon2 → blake2，
+# 见上面两条同样的理由），加为直接依赖不增加任何编译单元。
+blake2 = "0.10"
 # host_api.http_fetch 的传输层：阻塞式 + rustls（内置 webpki 根证书，目标机不需要装 CA）。
 # 只用它做「插件发起的出站请求」，服务端仍然是 Axum。
 # 实测（cargo zigbuild aarch64-unknown-linux-musl）能出静态 musl 产物，见 README §9.3。
