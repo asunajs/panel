@@ -531,12 +531,21 @@ test('运行器：加载失败退出码 1，handler 失败不影响退出码', (
 
 // ---------------------------------------------------------------- 8. host-api 解析
 
-test("解析①：包内自引用 —— import 'host-api' 靠 package.json 的 name + exports", () => {
-  const r = runNode(['--input-type=module', '-e', "const m = await import('host-api'); m.log('self-ref-ok');"], {
-    cwd: PKG,
+test("解析①：npm 别名 —— 不靠运行器，纯 node 也能 import 'host-api'", () => {
+  // 包名带 scope（`@plugin-panel/host-api`）之后，Node 的「包内自引用」不再匹配
+  // 裸说明符 `host-api`。插件要拿到这个名字，只剩两条路：
+  //   ① 装成别名：`npm i host-api@npm:@plugin-panel/host-api`（或 node_modules 链接）—— 本用例
+  //   ② 由运行器的 loader hook 兜底（见解析③）
+  // 这条路是给「不用运行器、自己写 Node 脚本」的用法留的。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'host-api-alias-'));
+  fs.mkdirSync(path.join(tmp, 'node_modules'), { recursive: true });
+  fs.symlinkSync(PKG, path.join(tmp, 'node_modules', 'host-api'), 'dir');
+  const r = runNode(['--input-type=module', '-e', "const m = await import('host-api'); m.log('alias-ok');"], {
+    cwd: tmp,
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /\[host-api\] \[info\] self-ref-ok/);
+  assert.match(r.stderr, /\[host-api\] \[info\] alias-ok/);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test('解析②：包外靠 node_modules 链接（等价 npm link）', () => {

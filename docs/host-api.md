@@ -1,5 +1,70 @@
 # host-api 规范 v1（跨运行时最小公共子集）
 
+## 0. 需求（按语言分轨）
+
+> 9. **插件脚本跨运行时兼容（按语言分轨）**：
+>    - **JS 插件**：同一份 `.js` 文件应能同时运行在：Rust + QuickJS-ng（嵌入式宿主，主目标）、Node.js（开发/调试环境）
+>    - **Python 插件**：同一份 `.py` 文件应能同时运行在：Rust + PocketPy（嵌入式宿主，主目标）、CPython（开发/调试环境）
+>    - **跨语言不共享脚本**：JS 插件与 Python 插件是两套独立文件，互不通用。
+>    - **共享的是抽象宿主 API 规范**：两种语言各自实现一套函数名、参数、返回值语义一致的宿主 API 层（JS 侧为 `host-api` 模块，Python 侧为 `host_api` 模块）。插件脚本只导入该抽象层，不直接调用任何运行时的原生全局对象或原生模块。
+>    - **各运行时的实现来源**：
+>      - Rust + QuickJS-ng：通过 `rquickjs` 自定义 Resolver 提供内置 `host-api` 模块
+>      - Node.js：提供 npm 包 `@yourproject/host-api`
+>      - Rust + PocketPy：通过 `pocketpy-sys` 注册 `host_api` 模块
+>      - CPython：提供 Python 包 `yourproject_host_api`
+
+### 0.1 逐条对照实现
+
+★ = 与需求原文有差异，原因见 §0.2 / §0.3。
+
+| 需求 | 实现 | 证据 |
+|---|---|---|
+| JS 插件：一份 `.js` 同时跑 QuickJS + Node | ✅ | `plugins/js/host-api-demo.js` 两边都跑通（`adapters/node` 24 项用例里有一条就是直接拿它跑） |
+| Python 插件：一份 `.py` 同时跑 PocketPy + CPython | ✅ | `plugins/py/sysinfo.py` 两边都跑通（CPython 61 项用例） |
+| 跨语言不共享脚本 | ✅ | 引擎按扩展名分派（`src/engine.rs:1313`）；仓库里 grep 不到任何 JS↔Python 转译/桥接代码 |
+| 共享抽象宿主 API 规范 | ✅ | §1–§3；两边函数名/payload/错误约定一致，由适配器用例 + 冒烟测试钉住 |
+| QuickJS：`rquickjs` 自定义 Resolver 提供内置 `host-api` | ✅ | `src/engine.rs` 的 `HostApiResolver` / `HostApiLoader` |
+| Node：提供 npm 包 `@yourproject/host-api` | ★ 包名 `@plugin-panel/host-api`（占位符映射到本项目名） | `adapters/node/package.json` |
+| PocketPy：通过 `pocketpy-sys` 注册 `host_api` 模块 | ★ **不用 `pocketpy-sys`**：vendored amalgamation + `build.rs` 直接编，再 `py_newmodule("host_api")` 注册。**注册机制一致，接入方式不同** | `build.rs` 头部注释；`src/pyhost.rs` |
+| CPython：提供 Python 包 `yourproject_host_api` | ★ 分发名 `plugin-panel-host-api`，**import 的模块名固定 `host_api`** | `adapters/python/pyproject.toml` |
+
+### 0.2 「分发名」和「import 名」是两回事
+
+需求里那两个名字（`@yourproject/host-api`、`yourproject_host_api`）是**分发身份**，
+而插件里写的 `import 'host-api'` / `from host_api import log` 是**模块名**。两者不能混：
+
+- **分发名**随便改：npm 包叫 `@plugin-panel/host-api`，pip 包叫 `plugin-panel-host-api`。
+- **模块名必须两个宿主完全一致**，否则「同一份文件」当场失效：
+  插件在嵌入式宿主里 `from host_api import log` 能跑，换到 CPython 就得改代码。
+  所以它固定是 `host-api` / `host_api`，**不跟着分发名走**。
+
+Node 侧由此有个副作用值得记一笔：包名带 scope 之后，Node 的「包内自引用」
+不再匹配裸说明符 `host-api`。插件要拿到这个名字只剩两条路 ——
+**① 运行器的 loader hook 兜底**（零配置，主路径）；**② 装成别名**
+（`npm i host-api@npm:@plugin-panel/host-api` 或 node_modules 链接，给「不用运行器、
+自己写 Node 脚本」的用法）。`adapters/node` 的解析①/②/③ 三条用例分别钉住这三条路径。
+
+### 0.3 为什么不用 `pocketpy-sys`
+
+需求写的是「通过 `pocketpy-sys` 注册 `host_api` 模块」。注册那半句照做了
+（`py_newmodule("host_api")` + 原生函数 + 引导脚本），**但没用这个 crate**，原因是实测的：
+
+1. `pocketpy-sys` 走 **cmake + bindgen**（要 cmake 和 libclang），交叉编译还得自己写
+   toolchain 文件；而 amalgamated 构建只有两个 C 文件，`cc` 直接编，
+   `cargo zigbuild` 就能出 `aarch64-unknown-linux-musl` 的静态二进制（本项目的主目标）。
+2. 我们需要几个**编译期开关**必须能透到 C 编译里：`PK_ENABLE_WATCHDOG=1`（执行预算，
+   不开的话一个 `while True: pass` 插件会把引擎线程永久卡死）、`PK_ENABLE_OS=0`
+   （关掉 `os`，保住「插件能力只能来自 host_api」这条承诺）、`PK_ENABLE_DLL=0`、
+   `PK_ENABLE_THREADS=0`、`PK_GC_MIN_THRESHOLD=2000`（长跑内存水位线，见 README 第十一轮）。
+   `build.rs` 直接 `cc::Build::define` 就能给到。
+3. 曾经实测过 `pocketpy-sys` 路线：它带的 2.0.0 版本 `py_switchvm` 会 abort
+   （`[vm.c:94] VALIDATE FAIL: expected 1, got 58`，因为 2.0.0 在 `VM__ctor` 之后才设
+   `pk_current_vm`），而多 VM 隔离是这个项目的基础。
+
+如果后续要换回 `pocketpy-sys`，需要先解决上面三条；换过去不影响插件侧任何代码
+（插件只认 `host_api` 这个名字，宿主怎么把 C 解释器链进来是内部实现）。
+
+
 插件用哪种语言写，就跑在那一种语言的两个宿主里：
 
 | 插件 | 宿主 | 抽象层由谁提供 |

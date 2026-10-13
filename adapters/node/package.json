@@ -1,5 +1,5 @@
 {
-  "name": "host-api",
+  "name": "@plugin-panel/host-api",
   "version": "1.0.0",
   "description": "Node.js host API adapter: the same JS plugin runs under the QuickJS host and under Node.",
   "type": "module",

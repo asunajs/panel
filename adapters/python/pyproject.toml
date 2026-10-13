@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# 分发名（PyPI 上的身份）。规范里写的 `yourproject_host_api` 是占位符，
+# 本项目映射成这个名字。
+#
+# ⚠️ 注意区分两个东西：
+#   - **分发名**（这里）= 你 pip install 的名字，可以随便改
+#   - **import 的模块名**（下面的 packages）= 插件里写的 `from host_api import log`
+#     —— 这个名字**必须**和嵌入式 PocketPy 宿主提供的一致，否则同一个 .py 文件
+#     在两个宿主里就跑不通了。所以它固定是 `host_api`，不跟着分发名走。
+name = "plugin-panel-host-api"
+version = "1.0.0"
+description = "host_api：插件面板的抽象宿主 API（CPython 适配器，开发/调试用）"
+requires-python = ">=3.8"
+# 纯标准库，零依赖 —— 刻意的：适配器不该把依赖带进插件环境
+dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/yourproject/rust-plugin-panel/blob/main/docs/host-api.md"
+
+[tool.setuptools]
+packages = ["host_api"]
+
+[tool.setuptools.package-data]
+host_api = ["py.typed"]

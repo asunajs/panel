@@ -111,7 +111,7 @@ rust-plugin-panel/
 │       ├── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
 │       └── py-panel-jobs.py    ★ 第九轮：同一件事的 Python 版
 ├── adapters/                  让同一份插件脚本跑在别的运行时里
-│   ├── node/                  npm 包 `host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
+│   ├── node/                  npm 包 `@plugin-panel/host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
 ├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
 ├── docs/screenshots/   文档里的界面截图（由 scripts/screenshot.mjs 生成）
