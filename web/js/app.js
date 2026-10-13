@@ -410,18 +410,20 @@ async function pollEngine() {
     el.title = '单条执行线程（ENGINE_WORKERS=1）';
   }
 
-  // 鉴权状态：这一条在排查「为什么接口 401」时最有用 ——
-  // 「本机免登录」和「已认证」是两件完全不同的事，界面上必须能区分。
+  // 鉴权状态。**没有「本机免登录」这个分支了**：能被渲染出来就说明这个会话
+  // 是通过校验进来的（第十五轮起凭据是必需品，反代就跑在本机，
+  // 「绑回环 = 安全」不成立）。徽标里顺带写上凭据的存储形式（明文 / 哈希），
+  // 排查「为什么接口 401」时一眼能看到自己配的是哪种。
   const auth = res.auth || {};
-  if (auth.enabled) {
-    authEl.className = 'badge running';
-    authEl.textContent = `已认证 · ${auth.sessions} 个会话`;
-    if (logoutBtn) logoutBtn.hidden = false;
-  } else {
-    authEl.className = 'badge idle';
-    authEl.textContent = '本机免登录';
-    if (logoutBtn) logoutBtn.hidden = true;
-  }
+  authEl.className = 'badge running';
+  authEl.textContent =
+    auth.kind === 'Argon2id 哈希'
+      ? `已认证 · 令牌是哈希 · ${auth.sessions} 个会话`
+      : `已认证 · ${auth.sessions} 个会话`;
+  authEl.title =
+    '面板始终要求令牌（没有「本机免登录」模式：反代也跑在本机，' +
+    '转发来的请求源地址就是 127.0.0.1）';
+  if (logoutBtn) logoutBtn.hidden = false;
 }
 
 // ---------------------------------------------------------------- 启动

@@ -126,7 +126,13 @@ def sample_mem(pid: int, repeat: int = 3):
 
 def api_state(base: str):
     try:
-        with urllib.request.urlopen(f"{base}/api/state", timeout=5) as r:
+        # 带上令牌：面板没配令牌是**拒绝启动**的（第十五轮删掉了「本机免登录」），
+        # 不带就是 401，长跑会把「好好的面板」误判成挂掉
+        req = urllib.request.Request(
+            f"{base}/api/state",
+            headers={"X-Panel-Token": os.environ.get("SOAK_TOKEN", "10086112")},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
             return json.loads(r.read().decode())
     except Exception:  # noqa: BLE001
         return {}
@@ -234,7 +240,9 @@ def main() -> int:
             "DB_PATH": str(workdir / "panel.db"),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    # 令牌是必须的（没有「本机免登录」这种模式了）：长跑实例也要带上，
+    # 顺着的把 HTTP 探活也带上 —— 不带就全是 401，长跑会误判成「面板没起来」
+    env["PANEL_TOKEN"] = os.environ.get("SOAK_TOKEN", "10086112")
 
     log = (workdir / "run.log").open("w")
     proc = subprocess.Popen([str(bin_path)], env=env, stdout=log, stderr=subprocess.STDOUT)

@@ -128,8 +128,8 @@ case ":$PATH:" in
 esac
 
 echo
-ok "装好了。启动："
-echo "    $BIN_NAME"
+ok "装好了。启动（**先设令牌**，否则会拒绝启动）："
+echo "    PANEL_TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') $BIN_NAME"
 echo
 echo "  面板默认监听 http://127.0.0.1:8787"
 echo "  常用环境变量："
@@ -137,7 +137,9 @@ echo "    BIND_ADDR=0.0.0.0:8787   改监听地址（想让别的设备访问就
 echo "    PLUGINS_DIR=./plugins    插件目录"
 echo "    DB_PATH=./data/panel.db  SQLite 路径"
 echo
-echo "  ⚠️  想让别的设备访问，必须先设令牌 —— 绑非回环地址而没有令牌会拒绝启动："
+echo "  ⚠️  令牌是**必须**的：没配就拒绝启动，跟绑哪个地址无关"
+echo "     （反代 nginx/caddy 也跑在本机，转发来的请求源地址就是 127.0.0.1 ——"
+echo "      所以「绑回环 = 安全」不成立，没有「本机免登录」这种模式）"
 echo "    PANEL_TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') $BIN_NAME"
 echo "    然后在浏览器打开面板会跳到登录页，粘贴那串令牌即可"
 echo

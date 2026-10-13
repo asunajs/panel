@@ -43,10 +43,8 @@
 ![面板](docs/screenshots/web-dashboard.png)
 
 主面板是 `web/` 下的多文件前端（零构建、原生 ES Module、hash 路由），编译期内嵌进
-二进制。侧边栏底部两个徽标分别是引擎心跳（第十一轮）和鉴权状态（第十轮）——
-没开鉴权时会明确写出
-[「本机免登录」](docs/screenshots/panel-noauth.png) —— 一个不吭声就「没鉴权」
-的面板比一个明确标注的更危险。
+二进制。侧边栏底部两个徽标分别是引擎心跳（第十一轮）和鉴权状态（第十轮起强制）——
+鉴权徽标会写出**凭据的存储形式**（明文 / Argon2id 哈希）。
 
 插件可以自带配置页（由插件作者提供，位于 `/plugins/{name}/`，见 §16.3）：
 
@@ -188,7 +186,7 @@ open http://127.0.0.1:8787/  # 面板
 | `JOB_TRIP_THRESHOLD` | `5` | 连续失败多少次熔断该任务 |
 | `JOB_COOLDOWN_MS` | `30000` | 首次熔断的冷却时长 |
 | `JOB_MAX_COOLDOWN_MS` | `600000` | 指数退避的冷却上限 |
-| `PANEL_TOKEN` | 空 | **面板令牌**。设了就开鉴权（见 §13）。空字符串等于没设 |
+| `PANEL_TOKEN` | 空 | **面板令牌（必填）**。没配就拒绝启动 —— 没有「本机免登录」模式，因为反代也跑在本机（见 §13）。空字符串等于没设 |
 | `PANEL_TOKEN_FILE` | 空 | 从文件读令牌（systemd 用；内容会 trim，适合放 600 权限的文件）。两个都设时 `PANEL_TOKEN` 优先 |
 | `PANEL_TOKEN_HASH` | 空 | **推荐**：令牌的「盐 + 哈希」（Argon2id / PHC 串，用 `plugin-panel hash-token` 生成）。本地落盘的不是可复用的明文。与 `PANEL_TOKEN` 同时存在时**以哈希为准**并提示。见 §18 |
 | `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系 |
@@ -203,7 +201,7 @@ open http://127.0.0.1:8787/  # 面板
 
 ```bash
 # 编译一次，之后改 web/ 下的任何文件只要刷新浏览器
-WEB_DEV_DIR=./web ./target/release/plugin-panel
+PANEL_TOKEN=dev-token WEB_DEV_DIR=./web ./target/release/plugin-panel
 ```
 
 内嵌（`include_str!`）是部署上的正确选择 —— 单一静态二进制，不会出现「二进制升级了、
@@ -214,7 +212,8 @@ WEB_DEV_DIR=./web ./target/release/plugin-panel
 **后台常驻**（脱离终端，不随 shell 退出）：
 
 ```bash
-setsid ./target/release/plugin-panel > /tmp/panel.log 2>&1 < /dev/null &
+setsid env PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+  ./target/release/plugin-panel > /tmp/panel.log 2>&1 < /dev/null &
 ```
 
 ## 4. 插件 API
@@ -505,15 +504,14 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" http://
 curl -s -c /tmp/ck -X POST -d "token=$TOK" http://127.0.0.1:8787/api/login         # 拿会话 cookie
 curl -s -b /tmp/ck -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/        # 200
 
-# ㉑ 裸奔拒绝启动：绑非回环 + 没令牌必须起不来
+# ㉑ 没有令牌必须起不来 —— **回环也一样**（第十五轮：反代就在本机，绑回环不等于安全）
 BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel; echo "exit=$?"   # 非 0，并打印原因
+BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel; echo "exit=$?" # 同样非 0
 
 # ㉒ 重新生成文档里的截图（需要本机有 Chrome / Edge / Chromium，零 npm 依赖）
-#     起两个实例：一个带令牌（拍登录页 + 登录后的面板），一个不带（拍「无鉴权」徽标）
+#     一个带令牌的实例就够（没有「无鉴权实例」这种状态了）
 PANEL_TOKEN=demo-token BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel &
-BIND_ADDR=127.0.0.1:8788 ./target/release/plugin-panel &
-node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --open http://127.0.0.1:8788 \
-                            --token demo-token --out docs/screenshots
+node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --token demo-token --out docs/screenshots
 ```
 
 实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：
@@ -942,8 +940,8 @@ git tag v0.1.0 && git push origin v0.1.0
 pkg install curl
 # 3. 装面板
 curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
-# 4. 启动
-plugin-panel
+# 4. 启动（**必须先设令牌**，没配会拒绝启动 —— 反代也在本机，绑回环不等于安全）
+PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
 ```
 
 手机上三个坑：
@@ -954,11 +952,10 @@ plugin-panel
    想长期常驻得在系统设置里关掉 Termux 的电池优化。
 3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。
 
-> ⚠️ 默认只监听 `127.0.0.1` 是**刻意的**：没配令牌时面板没有任何鉴权，
-> 任何能访问到端口的人都能看到插件日志、任务列表，也能触发 / 新建任务。
->
-> 第十轮起**不用再自己套反代了**：设一个 `PANEL_TOKEN` 就能直接绑 `0.0.0.0`（见 §13）。
-> 而且「绑非回环 + 没令牌」现在是**拒绝启动**，不会默默裸奔：
+> ⚠️ **令牌是必须的**（第十五轮起）：没有「本机免登录」模式了。因为反代
+> （nginx / caddy / cloudflared）就跑在本机，转发过来的请求源地址全是 `127.0.0.1` ——
+> 「绑回环 = 安全」在挂反代的那一刻就不成立。所以**没配令牌一律拒绝启动**，
+> 跟绑哪个地址无关。设上令牌就能直接绑 `0.0.0.0`（见 §13）：
 >
 > ```bash
 > PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
@@ -1345,15 +1342,15 @@ report | source= panel | status= error | next= None
 
 | 情况 | 行为 |
 |---|---|
-| 绑回环 + **没**配令牌 | 保持原样：无鉴权，页头明确标「无鉴权（仅本机）」 |
+| 绑回环 + **没**配令牌 | **拒绝启动**（第十五轮改的，见下面「为什么删掉本机免登录」） |
 | 配了 `PANEL_TOKEN` / `PANEL_TOKEN_FILE` | 全站要求认证（登录页本身除外） |
 | 绑**非回环** + 没配令牌 | **拒绝启动**，退出码 1，并打印怎么设令牌 |
 
 第三条是刻意的：以前只打一条警告，而 systemd 的日志里没人会看到那条警告，
 **端口已经开了**。「拒绝启动」是唯一不会骗人的做法。
 
-> 页头的鉴权徽标也是刻意的：一个不吭声就「没鉴权」的面板，比一个明确写着
-> 「无鉴权（仅本机）」的更危险 —— 后者至少让你知道自己站在哪。
+> 页头的鉴权徽标也是刻意的：能被渲染出来就说明这个会话是通过校验进来的
+> （第十五轮删掉了「本机免登录」之后，界面上不再有「我其实没鉴权」这种状态可以显示）。
 
 ### 13.3 怎么用
 
@@ -1466,6 +1463,31 @@ Environment=BIND_ADDR=0.0.0.0:8787
 修法是把判据改成「HTTP 通了**并且** `plugins` 非空」。
 教训：**探活探的是「服务能答」，不是「服务准备好了」** —— 这两件事在
 「有独立初始化线程」的架构里不是一回事。
+
+#### 为什么删掉「本机免登录」（第十五轮）
+
+第十轮到第十四轮一直有这么一条：**绑回环 + 没配令牌 = 免登录**。理由是「能访问 127.0.0.1
+的本来就只有本机的进程」。用户实测指出这条假设是错的：
+
+> 「去掉本机免登录，有人会用反代，导致本地出网」
+
+**反代（nginx / caddy / cloudflared）就是跑在本机的**：它转发过来的请求，源地址全是
+`127.0.0.1`。所以只要有人挂了反代，绑定回环就等于把面板**裸奔在公网上** —— 而且是在
+「免登录」这个状态下，页头还写着「仅本机」。这是那种「配置看起来对、实际敞着门」的坑，
+比明着要求令牌危险得多。
+
+现在的做法：
+
+- **凭据是必需品**，跟绑哪个地址无关。没配就拒绝启动，退出码 1，消息里说清上面这个理由
+- `Auth` 结构里凭据字段从 `Option<Cred>` 改成 `Cred` —— **类型上就不存在**
+  「没有凭据的鉴权状态」这种构造，`enabled()` 这个方法也一起删了。
+  代码里再也没有「跳过鉴权」的分支可走，而不是「记得别走那条分支」
+- 页头上那个「本机免登录」徽标随之删掉：能被渲染出来，就说明这个会话是通过校验进来的
+- 冒烟里 `refuse_to_start_without_token` 覆盖**两种绑定地址**（`0.0.0.0` 与 `127.0.0.1`），
+  并额外验证「配上令牌就能正常起来」—— 否则那两条「拒绝启动」也可能只是「这二进制本来就起不来」
+
+代价是首次启动多一步（先设令牌）。这一条是刻意的：默认安全、需要显式动作才能放宽，
+而不是默认能用、需要记得去收紧。
 
 ## 14. 第十一轮：插件目录变活 + 长跑内存实测
 

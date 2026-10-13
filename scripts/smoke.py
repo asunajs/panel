@@ -52,6 +52,35 @@ BIN = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else REPO / "target/relea
 FAILURES: list[str] = []
 
 
+# 冒烟用的面板令牌。
+#
+# 第十五轮起**面板没有「本机免登录」模式了**（反代也跑在本机，转发来的请求源地址
+# 就是 127.0.0.1，所以「绑回环 = 安全」不成立）。于是每个测试实例都得配一个令牌，
+# 而请求也得带上它 —— 否则整个冒烟都会撞 401。
+#
+# 做法：`CUR_TOKEN` 记住「当前这个实例的令牌」，四个 HTTP 助手自动带上；
+# 每个测试片段开始时用 `use_token()` 显式设一次。故意要验「无凭据会被拒」的地方
+# 就 `use_token(None)` —— 显式声明比全局隐式默认值安全，也不会让那些断言失真。
+# 开发/测试用的固定令牌 —— 用户明确说「放仓库也没关系」（10086112）。
+# 它只用在随机的回环端口 + 临时数据库的测试实例上，不是任何真实部署的凭据。
+SMOKE_TOKEN = "10086112"
+CUR_TOKEN = None
+
+
+def use_token(token):
+    """设定当前实例的令牌（`None` = 这个片段就是要验「不带凭据」）。"""
+    global CUR_TOKEN
+    CUR_TOKEN = token
+
+
+def _auth_headers(headers=None):
+    """把当前令牌合进请求头（调用方显式给的优先）。"""
+    h = dict(headers or {})
+    if CUR_TOKEN and not any(k.lower() in ("x-panel-token", "authorization", "cookie") for k in h):
+        h["X-Panel-Token"] = CUR_TOKEN
+    return h
+
+
 def check(ok: bool, label: str, detail: str = "") -> bool:
     print(f"  {'✅' if ok else '❌'} {label}" + (f" — {detail}" if detail else ""))
     if not ok:
@@ -66,7 +95,8 @@ def free_port() -> int:
 
 
 def fetch(url: str, timeout: float = 5.0):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    req = urllib.request.Request(url, headers=_auth_headers())
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode()
 
 
@@ -77,6 +107,8 @@ def post_json(url: str, panel: bool = True, timeout: float = 10.0, payload=None)
     """
     data = b"" if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, method="POST")
+    for k, v in _auth_headers().items():
+        req.add_header(k, v)
     if panel:
         req.add_header("x-panel", "1")
     if payload is not None:
@@ -114,7 +146,7 @@ def http(url, method="GET", headers=None, body=None, timeout=5.0):
     而 `dict(headers)` 会保留原始大小写，按 `Set-Cookie` 查会拿到空值。
     """
     req = urllib.request.Request(url, data=body, method=method)
-    for k, v in (headers or {}).items():
+    for k, v in _auth_headers(headers).items():
         req.add_header(k, v)
 
     def lower(h):
@@ -171,6 +203,7 @@ def auth_checks(tmp: Path) -> None:
     为什么不复用上面那个实例：那个必须保持「无鉴权」状态，否则前面所有
     「不带令牌直接调接口」的断言就全失效了。
     """
+    use_token(None)  # 这一组故意验「不带凭据会被拒」，别让助手自动加令牌
     token = os.urandom(16).hex()
     port = free_port()
     env = dict(os.environ)
@@ -223,7 +256,13 @@ def auth_checks(tmp: Path) -> None:
             auth = json.loads(body).get("auth", {})
         except json.JSONDecodeError:
             auth = {}
-        check(auth.get("enabled") is True, "/api/state 里带 auth.enabled", str(auth))
+        # 第十五轮：没有「本机免登录」了，`enabled` 这个可变字段也一起去掉 ——
+        # 改成报**凭据的存储形式**（排查「我配的哈希到底生效没」时最有用）
+        check(
+            auth.get("kind") in ("明文令牌", "Argon2id 哈希") and "enabled" not in auth,
+            "/api/state 报凭据形式，且不再有 auth.enabled（没有免登录模式了）",
+            str(auth),
+        )
 
         # ---- 登录 → cookie → 退出 ----
         code, headers, _ = http(
@@ -322,6 +361,7 @@ def auth_hash_checks(tmp: Path) -> None:
       ③ **明文绝不落盘**：把令牌明文翻遍 DB / 日志 / 临时目录，一个字节都不该有
       ④ 哈希与明文同时配置时**以哈希为准**并说出来；坏哈希直接拒绝启动
     """
+    use_token(None)  # 这一组故意验「不带凭据会被拒」，别让助手自动加令牌
     token = os.urandom(24).hex()
 
     # ---- ① hash-token 子命令 ----
@@ -346,7 +386,7 @@ def auth_hash_checks(tmp: Path) -> None:
     # ---- ② 用哈希启动，登录流程照常 ----
     port = free_port()
     env = dict(os.environ)
-    env.pop("PANEL_TOKEN", None)
+    env.pop("PANEL_TOKEN", None)  # 这个实例**只**配哈希，测的才是哈希那条路
     env.update(
         {
             "BIND_ADDR": f"127.0.0.1:{port}",
@@ -487,6 +527,7 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
       ② 运行中新丢进去的插件文件永远不被加载（只比 mtime，从不重扫目录）
       ③ 同名插件（`js/foo.js` 与 `py/foo.py`）静默串台，任务被派发到另一个解释器
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "lifecycle-plugins"
     (pdir / "js").mkdir(parents=True)
     (pdir / "py").mkdir(parents=True)
@@ -506,7 +547,7 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "lifecycle.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -644,6 +685,7 @@ def job_edit_checks(tmp: Path) -> None:
 
     另起一个实例 + 临时插件目录（这一组要在进程跑着的时候删插件文件、改插件代码）。
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "edit-plugins"
     pdir.mkdir(parents=True)
     (pdir / "edit-demo.js").write_text(
@@ -662,7 +704,7 @@ def job_edit_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "edit.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -882,7 +924,9 @@ def raw_http(port: int, path: str, method: str = "GET", headers=None, body: byte
     漏测方式。
     """
     req = [f"{method} {path} HTTP/1.1", "Host: 127.0.0.1", "Connection: close"]
-    for k, v in (headers or {}).items():
+    # 手搓请求也要带当前令牌：穿越用例走的是这条路（urllib 会把 `..` 折掉，
+    # 那样测的是客户端而不是服务端），不带令牌就全撞 401，测不到真正想测的东西
+    for k, v in _auth_headers(headers).items():
         req.append(f"{k}: {v}")
     if body:
         req.append(f"Content-Length: {len(body)}")
@@ -1243,6 +1287,7 @@ def job_override_checks(tmp: Path) -> None:
       ③ `{"expr": null}` 撤销覆盖，回到代码的值
       ④ 删除仍然拒绝（插件任务删了会被 `sync_jobs` 建回来，给入口是骗人）
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "override-plugins"
     pdir.mkdir(parents=True)
     (pdir / "ov-demo.js").write_text(
@@ -1259,7 +1304,7 @@ def job_override_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "override.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -1378,6 +1423,7 @@ def job_delete_checks(tmp: Path) -> None:
       ③ 恢复能把它装回调度器（不需要重载插件）
       ④ 面板任务仍然是**真删**（库里就是权威，删了不会再出现）
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "del-plugins"
     pdir.mkdir(parents=True)
     src = pdir / "del-demo.js"
@@ -1397,7 +1443,7 @@ def job_delete_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "del.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -1532,6 +1578,7 @@ def plugin_manage_checks(tmp: Path) -> None:
       ③ 重载能立刻重读（不等文件 mtime 变化）
       ④ 源码接口只读、且挡住路径穿越
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "pm-plugins"
     pdir.mkdir(parents=True)
     (pdir / "pm-demo.js").write_text(
@@ -1548,7 +1595,7 @@ def plugin_manage_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "pm.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -1660,6 +1707,7 @@ def plugin_source_edit_checks(tmp: Path) -> None:
       ③ 改坏了（语法错误）→ 插件报加载失败 → **一键回滚能救回来**
       ④ 空内容 / 超限 / 坏名字 / 缺 `x-panel` 头都被拒
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "src-plugins"
     pdir.mkdir(parents=True)
     src = pdir / "src-demo.js"
@@ -1678,7 +1726,7 @@ def plugin_source_edit_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "src.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -1786,6 +1834,7 @@ def plugin_ui_checks(tmp: Path) -> None:
          而且**不会被当成插件加载**（`uidev/app.js` 是最容易被误加载的那个）
       ③ 插件自己的 API 与主面板的测试运行各自工作
     """
+    use_token(SMOKE_TOKEN)
     pdir = tmp / "ui-plugins"
     (pdir / "js").mkdir(parents=True)
     (pdir / "uidev").mkdir(parents=True)
@@ -1821,7 +1870,7 @@ def plugin_ui_checks(tmp: Path) -> None:
             "PLUGINS_DIR": str(pdir),
         }
     )
-    env.pop("PANEL_TOKEN", None)
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
     logpath = tmp / "ui.log"
     logf = open(logpath, "w")
     proc = subprocess.Popen(
@@ -1987,6 +2036,9 @@ def plugin_ui_checks(tmp: Path) -> None:
                 method="POST",
             )
             req.add_header("content-type", "application/json")
+            # 令牌也要带：这个助手是就地手搓的请求，不走全局那几个助手
+            for k, v in _auth_headers().items():
+                req.add_header(k, v)
             if panel:
                 req.add_header("x-panel", "1")
             try:
@@ -2096,27 +2148,79 @@ def plugin_ui_checks(tmp: Path) -> None:
 
 
 def refuse_to_start_without_token(tmp: Path) -> None:
-    """没配令牌却往非回环地址绑 → 必须**拒绝启动**，而不是打个警告继续裸奔。"""
+    """没有凭据 → **必须拒绝启动**，不管绑的是哪个地址。
+
+    第十五轮之前这里只测「非回环 + 没令牌」，因为「绑回环 + 没令牌」是允许免登录的。
+    用户实测指出那条假设是错的：「有人会用反代，导致本地出网」—— 反代
+    （nginx/caddy/cloudflared）就跑在本机，转发来的请求源地址全是 127.0.0.1，
+    所以「绑回环 = 安全」在挂反代的那一刻就不成立了，而表现是面板裸奔在公网上。
+
+    现在没有「本机免登录」模式，所以**两种情况都要拒绝启动**。这条断言是这次改动的
+    主要验收点。
+    """
+    use_token(None)
+    for bind, why in [
+        ("0.0.0.0", "非回环（别人能直接连）"),
+        ("127.0.0.1", "回环（但反代就在本机，转发来的就是 127.0.0.1）"),
+    ]:
+        env = dict(os.environ)
+        env.update(
+            {
+                "BIND_ADDR": f"{bind}:{free_port()}",
+                "DB_PATH": str(tmp / f"bare-{bind}.db"),
+                "PLUGINS_DIR": str(REPO / "plugins"),
+            }
+        )
+        # 三个凭据来源都清干净：现在没有任何「没配令牌也能跑」的口子
+        for k in ("PANEL_TOKEN", "PANEL_TOKEN_FILE", "PANEL_TOKEN_HASH", "PANEL_TOKEN_HASH_FILE"):
+            env.pop(k, None)
+        r = subprocess.run([str(BIN)], capture_output=True, text=True, env=env, cwd=REPO, timeout=30)
+        out = r.stdout + r.stderr
+        check(r.returncode != 0, f"没有凭据 + 绑 {bind} → 拒绝启动（{why}）", f"exit={r.returncode}")
+        check(
+            "拒绝启动" in out and "反代" in out,
+            f"绑 {bind} 时拒绝启动的原因写明「反代也在本机」",
+            out.strip().splitlines()[1][:90] if len(out.strip().splitlines()) > 1 else out[:90],
+        )
+
+    # 配了令牌就正常起来（否则上面那两条「拒绝」可能只是「这二进制本来就起不来」）
     env = dict(os.environ)
     env.update(
         {
-            "BIND_ADDR": f"0.0.0.0:{free_port()}",
-            "DB_PATH": str(tmp / "bare.db"),
+            "BIND_ADDR": f"127.0.0.1:{free_port()}",
+            "DB_PATH": str(tmp / "bare-ok.db"),
             "PLUGINS_DIR": str(REPO / "plugins"),
+            "PANEL_TOKEN": SMOKE_TOKEN,
         }
     )
-    env.pop("PANEL_TOKEN", None)
-    env.pop("PANEL_TOKEN_FILE", None)
-    r = subprocess.run([str(BIN)], capture_output=True, text=True, env=env, cwd=REPO, timeout=30)
-    check(r.returncode != 0, "非回环 + 无令牌 → 拒绝启动", f"exit={r.returncode}")
-    check(
-        "拒绝启动" in (r.stdout + r.stderr),
-        "拒绝启动时给出可操作的原因",
-        (r.stdout + r.stderr).strip().splitlines()[-1][:120] if (r.stdout + r.stderr).strip() else "",
-    )
+    logf = open(tmp / "bare-ok.log", "w")
+    proc = subprocess.Popen([str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    use_token(SMOKE_TOKEN)  # 这个实例配了令牌，探活要带上它
+    try:
+        check(
+            wait_ready(f"http://127.0.0.1:{env['BIND_ADDR'].split(':')[1]}", proc),
+            "配上令牌就能正常启动（说明上面拒绝的确实是「没凭据」这一条）",
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logf.close()
 
 
 def main() -> int:
+    # 第十五轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
+    # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
+    #   ① 进到父进程环境里 → 所有实例都继承（不会再冒出「忘了配令牌」的实例）
+    #   ② 助手的默认请求头也带上 → 现有几百个调用点不用逐个改
+    # 需要别种凭据的片段自己覆盖（auth_checks 用随机令牌、auth_hash_checks 只用哈希、
+    # refuse_to_start_without_token 把四个来源全清掉）。
+    os.environ["PANEL_TOKEN"] = SMOKE_TOKEN
+    os.environ.pop("PANEL_TOKEN_FILE", None)
+    use_token(SMOKE_TOKEN)
+
     if not BIN.exists():
         print(f"❌ 找不到二进制: {BIN}")
         print("   先跑 `cargo build --release`")
@@ -2136,6 +2240,10 @@ def main() -> int:
     env["TEST_RUN_REFILL_MS"] = "1"
     env["TEST_RUN_MAX_PENDING"] = "1000"
     env.setdefault("PLUGINS_DIR", str(REPO / "plugins"))
+    env["PANEL_TOKEN"] = SMOKE_TOKEN
+    env.pop("PANEL_TOKEN_FILE", None)
+    env.pop("PANEL_TOKEN_HASH", None)
+    env.pop("PANEL_TOKEN_HASH_FILE", None)
 
     print(f"二进制: {BIN}")
     print(f"端口:   {port}")

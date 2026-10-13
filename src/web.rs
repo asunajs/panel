@@ -153,9 +153,8 @@ async fn require_auth(
     req: Request,
     next: Next,
 ) -> Response {
-    if !st.auth.enabled() {
-        return next.run(req).await;
-    }
+    // 没有「未配令牌就直通」这条快路：凭据是必需品（见 auth.rs 里 `Auth` 的注释，
+    // 反代就跑在本机，`127.0.0.1` 不等于可信）
     if st.auth.authenticate(req.headers(), peer.ip()).is_some() {
         return next.run(req).await;
     }
@@ -229,9 +228,6 @@ async fn login_page(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !st.auth.enabled() {
-        return Redirect::to("/").into_response();
-    }
     if st.auth.authenticate(&headers, peer.ip()).is_some() {
         return Redirect::to(&safe_next(q.next.as_deref())).into_response();
     }
@@ -250,10 +246,6 @@ async fn do_login(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !st.auth.enabled() {
-        return json_error(StatusCode::BAD_REQUEST, "本面板没有开启鉴权，不需要登录".into());
-    }
-
     let is_form = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -1637,8 +1629,10 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         },
         "uptime_secs": st.started.elapsed().as_secs(),
         "ticks": st.ticks.load(Ordering::Relaxed),
+        // 鉴权**永远是开的**（没有「本机免登录」这种模式了），所以这里不再报
+        // `enabled` —— 前端也就没有「本机免登录」那个徽标分支可走（见 app.js）
         "auth": {
-            "enabled": st.auth.enabled(),
+            "kind": st.auth.cred_kind().0,
             "sessions": st.auth.active_sessions(),
             "cookie_secure": st.auth.cookie_secure(),
         },

@@ -33,6 +33,8 @@ const BROWSERS = [
 
 function parseArgs(argv) {
   const o = { out: 'docs/screenshots', token: 'demo-token', port: 9333 };
+  // `--open` 以前指向「无鉴权实例」（拍本机免登录那张）。第十五轮没有那种实例了，
+  // 所以它变成可选；不传就用和 --auth 同一个地址。
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i].replace(/^--/, '');
     if (k === 'help') o.help = true;
@@ -42,11 +44,13 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv);
-if (opts.help || !opts.auth || !opts.open) {
-  console.log(`用法: node scripts/screenshot.mjs --auth <带令牌的URL> --open <无令牌的URL> [--token X] [--out 目录]
+if (opts.help || !opts.auth) {
+  console.log(`用法: node scripts/screenshot.mjs --auth <带令牌的URL> [--token X] [--out 目录]
 
-  --auth   开了鉴权的面板地址（要拍到登录页和登录后的面板）
-  --open   没开鉴权的面板地址（要拍到「无鉴权（仅本机）」徽标）
+  --auth   面板地址（实例**必须配令牌** —— 没有「本机免登录」模式了，
+           没配令牌的实例会拒绝启动，见 README §13）
+  --open   可选。以前是「无鉴权实例」，第十五轮删掉了那种状态；
+           不传就用 --auth 同一个地址
   --token  --auth 那个实例的令牌
   --out    输出目录，默认 docs/screenshots
   BROWSER  浏览器可执行文件路径（默认按常见路径找）`);
@@ -195,7 +199,8 @@ const SHOTS = (o) => [
     name: 'web-dashboard',
     // 第十三轮从旧版搬过来的三样东西：实时日志、鉴权徽标、登出。
     // （带令牌的实例上能看到「已认证 · N 个会话」+ 登出按钮；
-    //   无令牌实例那张 panel-noauth 里是「本机免登录」且没有登出按钮。）
+    //   `panel-noauth` 那张在第十五轮删掉了 —— 面板不再有「本机免登录」模式，
+    //   所以「没登出按钮」那个状态已经不存在了。）
     url: `${o.auth}/#/dashboard`,
     viewport: [1280, 1000],
     scale: 2,
@@ -1319,19 +1324,31 @@ const SHOTS = (o) => [
         note('已停用时不再给「打开配置页」（它打不开）', !!off && off.hasOpen === false);
 
         // ③ 启用回来（别把实例留在停用状态，后面的镜头还在跑）
-        const back = await ev(
-          `(function () {
-             const b = [...document.querySelectorAll('[data-toggle]')].find(x => x.dataset.toggle === '${target.name}');
-             if (!b) return false; b.click(); return true;
-           })()`,
-        );
+        //
+        // 点一下、等它翻回来；**没翻就再点一次**。为什么需要重试：停用之后列表会
+        // 静默重渲染一次（1.5 秒后），如果「启用」这一下正好落在重渲染的瞬间，
+        // 点的就是即将被替换掉的节点 —— 事件冒泡到 root 之前节点已经不在文档里了。
+        // 实测偶发红过一次（连跑两次都过，说明是时序不是功能）。
+        let back = false;
         let on = null;
-        for (let i = 0; i < 60; i += 1) {
-          await sleep(200);
-          on = (await cards()).find((c) => c.name === target.name);
-          if (on && on.badges === '启用中') break;
+        for (let attempt = 0; attempt < 2 && !(on && on.badges === '启用中'); attempt += 1) {
+          back = await ev(
+            `(function () {
+               const b = [...document.querySelectorAll('[data-toggle]')].find(x => x.dataset.toggle === '${target.name}');
+               if (!b) return false; b.click(); return true;
+             })()`,
+          );
+          for (let i = 0; i < 50; i += 1) {
+            await sleep(200);
+            on = (await cards()).find((c) => c.name === target.name);
+            if (on && on.badges === '启用中') break;
+          }
         }
-        note(`再点一次启用${target.name}，恢复原状`, back === true && !!on && on.badges === '启用中');
+        note(
+          `再点一次启用${target.name}，恢复原状`,
+          back === true && !!on && on.badges === '启用中',
+          JSON.stringify(on),
+        );
       }
 
       const failed = results.filter((r) => !r.ok);
@@ -1484,7 +1501,7 @@ const SHOTS = (o) => [
     // 登出：必须是**最后一个用 cookie 的**镜头。
     //
     // 它会把服务端会话删掉，而每个镜头重设的是同一个会话 id —— 后面再有带 cookie
-    // 的镜头就会 401 跳登录页。所以它排在 panel-noauth（本来就不用 cookie）之前。
+    // 的镜头就会 401 跳登录页，所以它排在登出那个镜头之前。
     // 加新镜头时要注意这个顺序。
     // 只验按钮可见是不够的 —— 登出静默失败会留下一个仍然有效的会话，是安全相关路径。
     name: 'web-logout',
@@ -1524,13 +1541,6 @@ const SHOTS = (o) => [
         detail: `登出后 path=${r.path}（表单=${r.hasLoginForm}），再访问面板 → ${after}`,
       };
     },
-  },
-  {
-    name: 'panel-noauth',
-    url: `${o.open}/`,
-    viewport: [1240, 1200],
-    scale: 2,
-    clip: [0, 0, 1240, 850],
   },
 ];
 
@@ -1589,6 +1599,8 @@ try {
   if (!sid) throw new Error('登录成功但没拿到 Set-Cookie');
   console.log(`浏览器: ${browser}`);
   console.log(`会话:   ${sid.slice(0, 16)}…\n`);
+
+  opts.open = opts.open || opts.auth;
 
   let lastUrl = null; // 判断下一次导航是不是「同文档、只换 hash」
   let verifyPassed = 0;

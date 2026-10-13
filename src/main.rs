@@ -78,7 +78,7 @@ pub struct AppState {
     pub host: Arc<HostState>,
     /// 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
-    /// 面板鉴权（第十轮）。`enabled() == false` 表示没配令牌，只在 loopback 下允许。
+    /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
     pub auth: Arc<Auth>,
     /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
     pub test_limiter: Arc<TestRunLimiter>,
@@ -130,31 +130,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = env_str("BIND_ADDR", "127.0.0.1:8787").parse()?;
 
     // ---------- 鉴权（第十轮；第十八轮支持哈希存储） ----------
-    let cred = read_credential()?;
-    let auth_enabled = cred.is_some();
-    let auth_result = cred.as_ref().map(|c| (c.kind(), c.is_plain()));
-    let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
-
-    // 没配令牌还往非回环地址绑 = 把一个「能看所有日志、能触发/新建任意任务」的面板
-    // 裸奔在局域网上。这里**直接拒绝启动**，而不是打条警告继续跑 ——
-    // systemd 的日志里没人会看到那条警告，而端口已经开了。
-    if !auth_enabled && !is_loopback(addr) {
+    // 凭据是**必需**的：没有就拒绝启动。以前「绑回环 + 没配令牌 = 免登录」，
+    // 但那条假设在有人挂反代时不成立 —— nginx/caddy 转发的请求源地址全是 127.0.0.1，
+    // 于是面板会在「本机免登录」的状态下被暴露出去。
+    let Some(cred) = read_credential()? else {
         return Err(format!(
-            "拒绝启动：BIND_ADDR={addr} 不是回环地址，但没有配置 PANEL_TOKEN。\n\
-             \x20   面板没鉴权时，任何能访问到端口的人都能看日志、触发任务、新建任务。\n\
-             \x20   要暴露到局域网，请先设置令牌（任选一种）：\n\
+            "拒绝启动：没有配置面板令牌。\n\
+             \x20   这个面板没有「本机免登录」模式 —— 反代（nginx/caddy/cloudflared）就是\n\
+             \x20   跑在本机的，转发过来的请求源地址全是 127.0.0.1，所以「绑回环 = 安全」\n\
+             \x20   这个假设不成立：挂了反代就等于把面板裸奔出去。\n\
+             \x20   任选一种配置（推荐后两种，本地落盘的不是可复用的明文）：\n\
              \x20     PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') ./plugin-panel\n\
-             \x20     PANEL_TOKEN_FILE=/etc/plugin-panel.token ./plugin-panel   # 文件权限 600\n\
-             \x20   只想本机用就保持默认：BIND_ADDR=127.0.0.1:8787\n"
+             \x20     printf '%s' \"$TOKEN\" | ./plugin-panel hash-token   # 生成 PANEL_TOKEN_HASH\n\
+             \x20     PANEL_TOKEN_HASH='$argon2id$...' ./plugin-panel\n\
+             \x20     PANEL_TOKEN_FILE=/etc/plugin-panel.token ./plugin-panel   # 文件权限 600\n"
         )
         .into());
-    }
-    // 启动日志写明**凭据的存储形式**：运维一眼能看到自己用的是明文还是哈希，
-    // 也能在日志里确认「那个 PANEL_TOKEN_HASH 到底生效了没」。
+    };
+    let auth_result = Some((cred.kind(), cred.is_plain()));
+    let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
+
     let (kind, _is_plain) = auth_result.unwrap_or(("", false));
     println!(
         "[boot] 鉴权: {}",
-        if auth_enabled {
+        {
             // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
             let secure = if cookie_secure {
                 " + cookie Secure"
@@ -162,8 +161,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
             };
             format!("已开启（{kind}{secure}）")
-        } else {
-            "未开启 —— 只绑回环地址，本机任何进程都能操作面板".to_string()
         }
     );
 
@@ -475,13 +472,9 @@ fn choose_credential(hash: Option<String>, plain: Option<String>) -> (Option<Str
     }
 }
 
-/// 这个监听地址是不是只对本机开放。
-fn is_loopback(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        std::net::IpAddr::V4(v4) => v4.is_loopback(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
-    }
-}
+// （这里原来有个 `is_loopback`：用来判断「绑回环 + 没配令牌 = 允许免登录」。
+//  第十五轮删掉了 —— 反代就跑在本机，转发来的请求源地址全是 127.0.0.1，
+//  那条判断在有人挂反代时会变成「面板裸奔」。现在凭据是必需品，不再需要它。）
 
 /// `1` / `true` / `yes` / `on` 都算开（大小写不敏感）。
 fn env_flag(key: &str) -> bool {

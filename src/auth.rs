@@ -33,6 +33,8 @@
 //!
 //! ## 明确的边界
 //!
+//! - **没有「本机免登录」这回事**：凭据是必需品，`Auth` 结构里存的是非 Option 的 `Cred`
+//!   —— 类型上就不存在「未鉴权也能过」的构造方式。理由见下面那条注释。
 //! - 会话表在**内存**里：进程重启后所有会话失效（要重新登录），多实例之间不共享
 //! - 退避也只在内存里：重启即清零。够挡在线暴力猜，不挡离线攻击
 //! - 反代后面拿到的 `ConnectInfo` 是**反代的 IP**，按 IP 退避会退化成全局退避。
@@ -278,9 +280,14 @@ fn fingerprint(s: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// 鉴权状态。`cred = None` 表示**没配令牌**（只在 loopback 绑定下允许）。
+/// 鉴权状态。
+///
+/// `cred` 是**非 Option** 的：第十五轮之前这里允许「没配令牌 + 只绑回环 = 免登录」，
+/// 但那是个错误的假设 —— **反代就是跑在本机的**，nginx/caddy 转发过来的请求源地址
+/// 全是 `127.0.0.1`。所以「本机 = 可信」在有人挂反代的那一刻就不成立了，
+/// 而表现是「面板裸奔在公网上」。现在凭据是必需品，`main()` 里没配就拒绝启动。
 pub struct Auth {
-    cred: Option<Cred>,
+    cred: Cred,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, FailState>>,
     cookie_secure: bool,
@@ -292,10 +299,11 @@ pub struct Auth {
 }
 
 impl Auth {
-    pub fn new(cred: Option<Cred>, cookie_secure: bool) -> Self {
+    /// 建鉴权状态。`cred` 必须是有效凭据 —— 「空字符串等于没配」这种坑交给
+    /// `read_credential()` 在启动阶段挡住（写成空就等于没配，会拒绝启动）。
+    pub fn new(cred: Cred, cookie_secure: bool) -> Self {
         Self {
-            // 空字符串等于没配：环境变量写成空是很容易犯的错，不该变成「空令牌能过」
-            cred: cred.filter(|c| !matches!(c, Cred::Plain(s) if s.is_empty())),
+            cred,
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             cookie_secure,
@@ -306,14 +314,9 @@ impl Auth {
         }
     }
 
-    /// 配了令牌吗（= 开了鉴权）。
-    pub fn enabled(&self) -> bool {
-        self.cred.is_some()
-    }
-
     /// 令牌的存储形式（启动日志里写出来，也让调用方能提示「建议换成哈希」）。
-    pub fn cred_kind(&self) -> Option<(&'static str, bool)> {
-        self.cred.as_ref().map(|c| (c.kind(), c.is_plain()))
+    pub fn cred_kind(&self) -> (&'static str, bool) {
+        (self.cred.kind(), self.cred.is_plain())
     }
 
     /// cookie 要不要带 `Secure`。
@@ -326,9 +329,7 @@ impl Auth {
     ///
     /// 只有哈希形式才需要缓存：明文比较本来就是纳秒级。
     fn credential_matches(&self, candidate: &str) -> bool {
-        let Some(cred) = self.cred.as_ref() else {
-            return false;
-        };
+        let cred = &self.cred;
         if let Cred::Plain(_) = cred {
             return cred.verify(candidate);
         }
@@ -481,9 +482,6 @@ impl Auth {
     /// 也能触发它 —— 不上退避的话，`curl -H 'X-Panel-Token: x'` 循环就是一个
     /// 「一行命令烧掉对方 CPU 和内存」的放大器。退避**在验令牌之前**判。
     pub fn authenticate<H: HeaderMapLike>(&self, headers: &H, ip: IpAddr) -> Option<Via> {
-        if !self.enabled() {
-            return None;
-        }
         if let Some(t) = headers.bearer_token().or_else(|| headers.panel_token()) {
             if self.check_rate(ip).is_err() {
                 return None;
@@ -493,7 +491,7 @@ impl Auth {
             }
             // 只有哈希形式才动失败计数：明文比较是纳秒级，把它也计入退避
             // 会让「脚本用错令牌」这种小失误直接把自己锁住，收益为零。
-            if matches!(self.cred, Some(Cred::Phc(_))) {
+            if matches!(self.cred, Cred::Phc(_)) {
                 self.record_failure(ip);
             }
         }
@@ -618,26 +616,46 @@ mod tests {
     const TOKEN: &str = "s3cret-token-0123456789";
 
     fn auth() -> Auth {
-        Auth::new(Some(Cred::parse(TOKEN).unwrap()), false)
+        Auth::new(Cred::parse(TOKEN).unwrap(), false)
     }
 
     // ---- 配置 ----
 
     #[test]
-    fn empty_token_means_auth_disabled() {
+    fn configured_credential_is_always_required() {
         // 环境变量写成空是常见错误，不该变成「空令牌能过」
         // 空字符串等于没配：环境变量写成空是很容易犯的错，不该变成「空令牌能过」。
         // （`Cred::parse("")` 给的是明文空串，Auth::new 会把它滤掉）
-        assert!(!Auth::new(Some(Cred::parse("").unwrap()), false).enabled());
-        assert!(!Auth::new(None, false).enabled());
-        assert!(Auth::new(Some(Cred::parse(TOKEN).unwrap()), false).enabled());
+        // 「空字符串等于没配」这条语义搬到了启动阶段（main.rs 的 read_credential /
+        // choose_credential 里，配成空就不启动）—— 这里不再有「没配 = 免登录」这种状态可测。
+        assert!(Auth::new(Cred::parse(TOKEN).unwrap(), false).cred_kind().1);
     }
 
     #[test]
-    fn disabled_auth_authenticates_nobody() {
-        let a = Auth::new(None, false);
-        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer anything")]), any_ip()), None);
-        assert!(a.login(TOKEN, ip("127.0.0.1")).is_err());
+    fn auth_fails_closed_for_every_missing_or_wrong_credential() {
+        // 第十五轮删掉「本机免登录」之后，这一条是核心不变量：**没有任何请求能靠
+        // 「缺东西」通过**。以前这里测的是「没配令牌 = 谁都过不了」，那个状态现在
+        // 在类型上就不存在了（`Auth` 必须拿一个有效凭据才能构造），所以改成测
+        // 「fail-closed」这件事本身。
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        for headers in [
+            vec![],                                            // 什么都没有
+            vec![("authorization", "Bearer ")],
+            vec![("authorization", "Bearer anything")],
+            vec![("x-panel-token", "")],
+            vec![("x-panel-token", "wrong")],
+            vec![("cookie", "panel_session=")],
+            vec![("cookie", "panel_session=nonexistent")],
+        ] {
+            assert_eq!(
+                a.authenticate(&h(&headers), any_ip()),
+                None,
+                "不该放行：{headers:?}"
+            );
+        }
+        assert!(a.login("wrong", ip("127.0.0.1")).is_err());
+        // 只有真凭据能过
+        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), any_ip()).is_some());
     }
 
     // ---- 令牌 ----
@@ -700,8 +718,7 @@ mod tests {
     fn hashed_credential_works_through_login() {
         // 走一遍真实路径：哈希凭据 → login() → 拿到会话 ID → 会话可用
         let cred = Cred::parse(&hash_token(TOKEN).unwrap()).unwrap();
-        let a = Auth::new(Some(cred), false);
-        assert!(a.enabled());
+        let a = Auth::new(cred, false);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         let sid = a.login(TOKEN, ip).expect("哈希凭据应当能登录");
         assert!(a.touch_session(&sid));
@@ -710,7 +727,7 @@ mod tests {
 
     /// 造一个「哈希凭据 + 已退避状态可观测」的实例。
     fn hashed_auth() -> Auth {
-        Auth::new(Some(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()), false)
+        Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false)
     }
 
     fn any_ip() -> IpAddr {
@@ -767,7 +784,7 @@ mod tests {
     fn plaintext_credential_never_touches_the_kdf_or_the_cache() {
         // 明文比较是纳秒级，缓存与退避对它没有意义；也不能因为「脚本用错令牌」
         // 这种小失误就把自己锁住（收益为零、麻烦很大）
-        let a = Auth::new(Some(Cred::parse(TOKEN).unwrap()), false);
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
         let ip = any_ip();
         for _ in 0..10 {
             assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
@@ -778,11 +795,10 @@ mod tests {
 
     #[test]
     fn credential_kind_is_reported_for_the_boot_log() {
-        let plain = Auth::new(Some(Cred::parse(TOKEN).unwrap()), false);
-        assert_eq!(plain.cred_kind(), Some(("明文令牌", true)));
-        let hashed = Auth::new(Some(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()), false);
-        assert_eq!(hashed.cred_kind(), Some(("Argon2id 哈希", false)));
-        assert_eq!(Auth::new(None, false).cred_kind(), None);
+        let plain = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        assert_eq!(plain.cred_kind(), ("明文令牌", true));
+        let hashed = Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false);
+        assert_eq!(hashed.cred_kind(), ("Argon2id 哈希", false));
     }
 
     #[test]
@@ -1011,7 +1027,7 @@ mod tests {
 
     #[test]
     fn secure_flag_is_opt_in() {
-        let a = Auth::new(Some(Cred::parse(TOKEN).unwrap()), true);
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), true);
         assert!(a.session_cookie("x").contains("; Secure"));
         assert!(a.clear_cookie().contains("; Secure"));
         assert!(a.cookie_secure());
