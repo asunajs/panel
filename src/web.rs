@@ -1085,6 +1085,9 @@ const PAGE: &str = r##"<!DOCTYPE html>
   .bad.noauth { background: #3a2a15; color: #e3a008; }
   form.inline { display: inline; margin-left: 6px; }
   .ops { white-space: nowrap; }
+  /* 表格横向滚动容器：任务表的操作列在窄屏（手机）上放不下 4 个按钮，
+     没有这层的话按钮会被挤出可视区，用户根本点不到 —— 不是「不好看」而是「不可用」。 */
+  .tw { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
          padding: 3px 9px; font-size: 12px; cursor: pointer; margin-right: 4px; }
   .btn:hover { background: #30363d; border-color: #8b949e; }
@@ -1126,10 +1129,12 @@ const PAGE: &str = r##"<!DOCTYPE html>
   </div>
 
   <h2>已加载插件</h2>
+  <div class="tw">
   <table>
     <thead><tr><th>插件</th><th>运行时</th><th>文件</th><th>状态</th><th class="num">tick 次数</th><th>最近 tick</th></tr></thead>
     <tbody id="plugins">__PLUGIN_ROWS__</tbody>
   </table>
+  </div>
 
   <h2>调度任务（cron / @every）</h2>
   <div id="actmsg" class="actmsg"></div>
@@ -1140,16 +1145,20 @@ const PAGE: &str = r##"<!DOCTYPE html>
     <button class="btn primary" id="nj-add">新建任务</button>
     <button class="btn" id="nj-cleanup" title="删掉插件已不存在 / 加载失败 / 处理函数已消失的面板任务">清理失效任务</button>
   </div>
+  <div class="tw">
   <table>
     <thead><tr><th>插件</th><th>任务</th><th>调度表达式</th><th>来源</th><th>状态</th><th class="num">触发次数</th><th class="num">熔断</th><th>下次触发</th><th>操作</th></tr></thead>
     <tbody id="jobs">__JOB_ROWS__</tbody>
   </table>
+  </div>
 
   <h2>tasks 表（SQLite）</h2>
+  <div class="tw">
   <table>
     <thead><tr><th class="num">id</th><th>name</th><th>plugin</th><th>status</th><th class="num">runs</th><th>updated_at</th></tr></thead>
     <tbody id="tasks">__TASK_ROWS__</tbody>
   </table>
+  </div>
 
   <h2>宿主日志（host.log）</h2>
   <div class="logs" id="logs">__LOG_ROWS__</div>

@@ -158,6 +158,17 @@ const SHOTS = (o) => [
     cookie: 'session',
   },
   {
+    name: 'panel-jobs',
+    // 单独给「任务表」来一张：来源列 + 面板任务的「编辑 / 删除」按钮
+    // （第十二轮加的东西，整页截图里会被插件表挤到下面看不清）
+    url: `${o.auth}/`,
+    // 比别的截图宽：任务表操作列有 4 个按钮，1240 下会被挤到横向滚动区外面
+    viewport: [1440, 2200],
+    scale: 2,
+    clip: [0, 0, 1440, 2100],
+    cookie: 'session',
+  },
+  {
     name: 'panel-noauth',
     url: `${o.open}/`,
     viewport: [1240, 1200],

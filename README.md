@@ -1728,7 +1728,28 @@ POST /api/jobs/cleanup   {"dry_run": true}
 这一轮之后，插件文件删掉不再等于「面板任务被静默销毁」，而是「任务留在面板上标为失效，
 用户自己决定清理还是把插件放回来」—— 临时挪走插件文件（重新部署、改名）不再丢任务。
 
-### 15.4 这一轮的验证
+### 15.4 一个 UI 回归：加第 4 个按钮把操作列挤出了视口
+
+加「编辑」之后操作列变成 4 个按钮（立即执行 / 暂停 / 编辑 / 删除），
+1240px 宽的窗口下最后两个**被挤出可视区**——不是「不好看」，是「点不到」。
+手机上看更明显。
+
+根因：`table { width: 100% }` + `.ops { white-space: nowrap }`，
+表格的 min-content 宽度超过容器时不会缩，只会溢出。
+
+修法是给表格包一层横向滚动容器：
+
+```css
+.tw { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+```
+
+窄屏下用户横向滑一下就能点到，宽屏下无影响。三张表都包了。
+`docs/screenshots/panel-jobs.png` 是专门给任务表拍的一张（比别的截图宽 200px，
+不然 4 个按钮在截图里也是被裁掉的）：
+
+![任务表：面板任务有「编辑 / 删除」，插件代码任务没有](docs/screenshots/panel-jobs.png)
+
+### 15.5 这一轮的验证
 
 | 套件 | 结果 |
 |---|---|
@@ -1739,7 +1760,7 @@ POST /api/jobs/cleanup   {"dry_run": true}
 | `adapters/python` | 61 项 |
 | `scripts/test-install.sh` | 15 项 |
 
-### 15.5 这一轮**没有**解决的
+### 15.6 这一轮**没有**解决的
 
 - §11 / §14.9 的老账照旧：慢任务隔离、`db` 是 `Arc<Mutex<Connection>>` 无连接池、
   Python VM 上限 15、无模块系统、会话在内存里、退避按 `ConnectInfo` 的 IP 计（反代下会退化成
