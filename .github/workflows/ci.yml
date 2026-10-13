@@ -3,10 +3,24 @@ name: CI
 # 为什么需要 CI：开发机是 arm64 macOS，跑不了 Linux 二进制，
 # 也没法验证交叉编译产物。GitHub 的 ubuntu-24.04-arm runner 是**真 ARM64 Linux 硬件**，
 # 正好替掉缺失的「低配 ARM 盒子」，把「能不能在目标平台上跑」这件事真正验证掉。
+#
+# **什么时候跑（用户实测要求：「不要每次推送都跑 ci，还是要 tag 再跑」）**：
+#
+#   - 打 tag（`v*`）：跑。这既是发布前的闸门，也是「这一版在真 ARM 上验过了」的凭证
+#   - 手动 `workflow_dispatch`：跑。想单独验一次就直接在 Actions 页面点
+#   - 别人发 PR：跑（自己往 main 推 commit **不跑**）—— 这是一个不花任何代价的
+#     安全网：没有 PR 时它永远不会触发
+#
+# 为什么不该跟着每次 push 跑：这个项目一轮工作常常十几次提交，其中大部分是文档与
+# 前端调整 —— 1 次推送 = 4 个 job ≈ 2.5 分钟，换来的信息却和上一次几乎一样。
+# 真正的验证时机是「要发一版」，而那就是 tag。
+#
+# 注意：打 tag 时 `release.yml` 也会跑（它要做 musl 产物 + 发 Release + 验 install.sh），
+# 两个工作流在 tag 上有重复的构建 —— 那是发布时刻的刻意冗余，不是配置失误。
 
 on:
   push:
-    branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
