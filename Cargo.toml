@@ -47,6 +47,21 @@ ureq = { version = "3", features = ["rustls"] }
 # ⚠ `rustls-tls-webpki-roots` 与 ureq 用的是**同一个信任库**（webpki-roots）——
 # 「目标机不需要装 CA」这条性质因此对 ws 也成立。
 tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# host_api.smtp_send 的传输层（第二十三轮）。
+#
+# 为什么不能复用 ureq：SMTP 是**裸 TCP 上的文本协议**（`EHLO` / `STARTTLS` /
+# `DATA` …），ureq 只会发 HTTP 请求，接不了它。而 rustls 的**同步** API
+# （`StreamOwned`）刚好够用 —— 插件侧全是阻塞调用（见 http_fetch 的说明），
+# 保持同构比省一条线程重要。
+#
+# 这四个 crate 本来就在依赖树里（ureq → rustls → webpki-roots / base64），
+# 加为直接依赖**不增加任何编译单元** —— 和上面 getrandom / blake2 是同一条理由。
+# 信任库也用 webpki-roots：与 http_fetch / ws_* 同一份，
+# 「目标机不需要装 CA」这条性质因此对邮件也成立。
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+base64 = "0.23"
 # 上面那个的 Stream/Sink 组合子（`split()` / `next()` / `send()`）。
 # 它本来就在依赖树里（tokio-tungstenite 自己依赖它），加为直接依赖不增加编译单元。
 futures-util = "0.3"

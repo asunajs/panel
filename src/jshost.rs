@@ -154,6 +154,16 @@ globalThis.host_api = {
     sqlite_exec: function (sql, params) {
         return JSON.parse(__host_sqlite(String(sql), JSON.stringify(params === undefined ? [] : params), false));
     },
+    // 发一封邮件。**阻塞**调用，默认超时 15 秒 —— 别放在需要毫秒精度的任务里。
+    //
+    // 成功返回 `{ok: true, response: "250 ..."}`；失败抛错（错误文本是服务器
+    // 那句回复，方便直接贴进日志排查）。
+    smtp_send: function (options) {
+        var r = JSON.parse(__host_smtp_send(JSON.stringify(options === undefined ? {} : options)));
+        if (r && r.error) throw new Error(r.error);
+        return r;
+    },
+
     http_fetch: function (url, options) {
         return JSON.parse(__host_http_fetch(String(url), JSON.stringify(options === undefined ? {} : options)));
     },
@@ -324,6 +334,7 @@ export const every = api.every;
 export const sqlite_query = api.sqlite_query;
 export const sqlite_exec = api.sqlite_exec;
 export const http_fetch = api.http_fetch;
+export const smtp_send = api.smtp_send;
 export const ws_open = api.ws_open;
 export const ws_send = api.ws_send;
 export const ws_recv = api.ws_recv;
@@ -415,6 +426,18 @@ pub fn install_host<'js>(
         "__host_require_load",
         Func::new(move |base: String, spec: String| -> String {
             crate::engine::do_require_load(&root_for_require, &base, &spec)
+        }),
+    )?;
+
+    // ---- 邮件 ----
+    let state_for_smtp = state.clone();
+    ctx.globals().set(
+        "__host_smtp_send",
+        Func::new(move |opts: String| -> String {
+            match state_for_smtp.do_smtp_send(&opts) {
+                Ok(s) => s,
+                Err(e) => json_error(&e),
+            }
         }),
     )?;
 

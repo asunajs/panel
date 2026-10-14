@@ -135,6 +135,28 @@ extern "C" fn native_sqlite(argc: c_int, argv: PyStackRef) -> bool {
     true
 }
 
+/// `_smtp_send(options_json) -> str`
+///
+/// 与 `_http_fetch` 一样：返回 JSON 文本，失败时是 `{"error": "..."}` ——
+/// 让 Python 侧的 `smtp_send` 决定抛不抛，宿主不替它决定。
+extern "C" fn native_smtp_send(argc: c_int, argv: PyStackRef) -> bool {
+    if argc != 1 {
+        return python::raise_value_error(&format!("_smtp_send 需要 1 个参数，收到 {argc}"));
+    }
+    let Some(opts) = python::arg_str(argv, 0) else {
+        return python::raise_value_error("_smtp_send(options_json): 参数必须是字符串");
+    };
+    let msg = match state() {
+        Some(s) => match s.do_smtp_send(&opts) {
+            Ok(ok) => ok,
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        },
+        None => serde_json::json!({ "error": "宿主状态未初始化" }).to_string(),
+    };
+    python::set_ret_str(&msg);
+    true
+}
+
 /// `_http_fetch(url, options_json) -> str`
 extern "C" fn native_http_fetch(argc: c_int, argv: PyStackRef) -> bool {
     if argc != 2 {
@@ -288,6 +310,13 @@ def __pp_sqlite(sql, params, is_query):
         raise RuntimeError(r["error"])
     return r
 
+def __pp_smtp(options):
+    raw = _h._smtp_send(_json.dumps(options if options is not None else {}))
+    r = _json.loads(raw)
+    if isinstance(r, dict) and "error" in r:
+        raise RuntimeError(r["error"])
+    return r
+
 def __pp_http(url, options):
     raw = _h._http_fetch(str(url), _json.dumps(options if options is not None else {}))
     r = _json.loads(raw)
@@ -342,6 +371,7 @@ _h.every = __pp_every
 _h.sqlite_query = lambda sql, params=None: __pp_sqlite(sql, params, True)
 _h.sqlite_exec  = lambda sql, params=None: __pp_sqlite(sql, params, False)
 _h.http_fetch   = lambda url, options=None: __pp_http(url, options)
+_h.smtp_send    = __pp_smtp
 _h.register_route = _h._register_route
 # WebSocket：Python 侧**故意**只留一个明确的失败点（见 pyhost.rs 那段说明）
 _h.ws_open  = _h._ws_open
@@ -370,6 +400,7 @@ pub fn install(vm: &mut python::PyVm) -> Result<(), String> {
     );
     python::bind(m, "_sqlite(sql, params_json, is_query)", native_sqlite as PyCFunction);
     python::bind(m, "_http_fetch(url, options_json)", native_http_fetch as PyCFunction);
+    python::bind(m, "_smtp_send(options_json)", native_smtp_send as PyCFunction);
     python::bind(
         m,
         "_register_route(path, method, handler)",

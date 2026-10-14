@@ -25,6 +25,7 @@ mod jshost;
 mod pyhost;
 mod python;
 mod scheduler;
+mod smtp;
 mod web;
 mod wsclient;
 

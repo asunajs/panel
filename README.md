@@ -3089,6 +3089,62 @@ register_nav({ label: '日常任务', icon: '🗓' });   // path 不给就用 {n
 > 不存在的 DOM 跑。现在 cookie 名从响应里解析，而且**先断言「已登录」**，
 > 免得这类失败被误读成「入口没出来」。
 
+### 16.30 `smtp_send`：推送的邮件通道（第二十三轮）
+
+**问题**：推送有 10 个渠道，邮件是其中之一，而面板此前完全没有发信能力。
+
+**做法**：`smtp_send(opts)` —— 裸 SMTP 客户端，支持 `starttls` / `implicit` / `none`。
+
+**为什么自己写而不是找个库**：插件要的只是「把一封邮件交给服务器」。能用得上的库
+要么拖进一整棵异步栈（lettre），要么在 Linux 上引入 OpenSSL（`native-tls`），
+与「静态 musl 单文件」这条部署性质冲突。而协议面很窄：`EHLO` / `STARTTLS` /
+`AUTH` / `MAIL` / `RCPT` / `DATA` / `QUIT` + MIME 的头编码与 base64。
+
+**零新编译单元**：`rustls` / `rustls-pki-types` / `webpki-roots` / `base64`
+本来就在依赖树里（`ureq` 拉的），加为直接依赖**不增加任何编译单元** ——
+和 `getrandom` / `blake2` 是同一条理由。信任库与 `http_fetch` / `ws_*` 同一份，
+「目标机不需要装 CA」对邮件也成立。
+
+**几处刻意的设计**：
+
+| 决定 | 为什么 |
+|---|---|
+| 用 rustls 的**同步** API（`StreamOwned`） | 插件侧全是阻塞调用，与 `http_fetch` 同构比省一条线程重要 |
+| `tls` 拼错**报错**，不默认成 `none` | 默认成 `none` 会明文把密码发出去 —— 最坏的失败模式是静默的 |
+| 端口不给就按 `tls` 推（465 / 587） | 少一个要填的格子，而填错的代价是「连不上」这种没头绪的报错 |
+| 失败时把服务器**原话**带回来 | `535 bad credentials` / `550 no such user here` 贴进日志就能排查；自己编一句「发送失败」等于把信息丢了 |
+| 收件人被拒时**点名**是哪个地址 | 群发时最要紧的信息 |
+| `ca_file` 是**追加**信任锚，不是替换 | 「内网用私有 CA」和「外网用公共 CA」经常同时存在，替换会让一半忽然连不上 |
+| **不做附件** | 要处理 filename 编码、Content-Disposition、各家客户端对 MIME 的奇葩解读 —— 另一个量级的复杂度，而推送只需要「一段文字」 |
+
+**实测验收**（`python3 scripts/smtp_check.py`，自带假 SMTP 服务器 + 真邮件解析器）：
+
+```
+明文 + AUTH PLAIN   MAIL FROM/RCPT TO 正确 · 中文主题 RFC 2047 往返无损 ·
+                   显示名可解析 · Message-ID / Date 有 · 正文往返无损
+只给 AUTH LOGIN     自动退回 LOGIN 机制 · `to` 收字符串也认
+text + html         multipart/alternative · 两段都在且各自无损
+点填充              正文里行首的 `.` 原样到达（邮件没被截断）
+失败路径            密码错→带回 535 原话 · 收件人被拒→点名地址 ·
+                   没声明 STARTTLS→给出可操作的报错 · 连不上→报错而不是挂死
+STARTTLS            私有 CA 签的证书 + ca_file 走通 · 不给 ca_file 则被拒
+implicit TLS        走通 · 主题正文无损
+```
+
+**测试抓到的两个真 bug**（都是「不看真服务器就发现不了」的那类）：
+
+1. **`MAIL FROM:<机器人 <a@b>>`** —— 信封（`MAIL FROM` / `RCPT TO`）只认**裸地址**，
+   把头里那个 `显示名 <a@b>` 整个塞进 `<>` 会变成两个 `<` 加一个没闭合的尖括号。
+2. **`Conn::writer()` 里写了 `get_mut().get_mut()`** —— 那是拿到**底层 `TcpStream`**，
+   等于绕过 TLS 明文发命令。握手本身由第一次读驱动所以能成功，之后每条命令都是明文，
+   服务器在记录层直接崩（`record_overflow`），而报错看起来像是服务器的问题。
+   **这个 bug 只有对着真的 TLS 服务器跑一遍才会露出来。**
+
+> 脚本侧也踩了两个坑：假服务器用 `makefile().readline()` 会**预读**，
+> 把紧跟 `220` 之后到达的 ClientHello 吞进自己的缓冲 —— 改成逐字节读行；
+> `openssl req -x509` 生成的证书默认带 `CA:TRUE`，rustls 会当成 CA 而不是服务器证书
+> （`CaUsedAsEndEntity`），要生成「私有 CA + 它签的叶子证书」才对。
+
 ## 17. 发布到 GitHub（`asunajs/panel`）这一轮踩到的三个坑
 
 仓库推到 [asunajs/panel](https://github.com/asunajs/panel)，CI 跑在**真 ARM64 Linux 硬件**上

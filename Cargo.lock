@@ -962,6 +962,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64 0.23.1",
  "blake2",
  "cc",
  "chrono",
@@ -971,12 +972,15 @@ dependencies = [
  "reqwest",
  "rquickjs",
  "rusqlite",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "subtle",
  "tokio",
  "tokio-tungstenite",
  "ureq",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

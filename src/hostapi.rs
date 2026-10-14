@@ -403,6 +403,117 @@ impl HostState {
     // -----------------------------------------------------------------
 
     /// `ws_open(url, opts)` —— 连接（**握手失败就是 Err**，不留半死的句柄）。
+    /// 发一封邮件。`Ok` 是 `{"ok":true,"response":"250 ..."}` 的 JSON 文本。
+    ///
+    /// `opts` 的形状（全是插件侧 `smtp_send` 收的那个对象）：
+    ///
+    /// ```json
+    /// { "host": "smtp.example.com", "port": 587, "tls": "starttls",
+    ///   "user": "a@b.com", "pass": "…",
+    ///   "from": "机器人 <a@b.com>", "to": ["me@b.com"],
+    ///   "subject": "日常任务完成", "text": "…", "html": "…",
+    ///   "timeout_ms": 15000, "ehlo": "localhost" }
+    /// ```
+    ///
+    /// ⚠ 这是**阻塞**调用（和 `http_fetch` 同一条路），默认超时 15 秒 ——
+    /// 比 `EXEC_BUDGET_MS` 长。看门狗只打断 CPU 死循环，打断不了阻塞中的网络调用，
+    /// 所以发邮件这一步会实实在在占住执行线程。别把它放在需要毫秒精度的任务里。
+    pub fn do_smtp_send(&self, opts_json: &str) -> Result<String, String> {
+        let opts: Value = if opts_json.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(opts_json).map_err(|e| format!("参数不是 JSON 对象: {e}"))?
+        };
+        let get_str = |k: &str| -> String {
+            opts.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+
+        let host = get_str("host");
+        if host.is_empty() {
+            return Err("smtp_send: host 不能为空".to_string());
+        }
+        // 端口默认跟着 tls 走：465 是 implicit、其它是 starttls。
+        // 显式给了就用显式的 —— 内网中继经常跑在奇怪端口上。
+        let tls = crate::smtp::TlsMode::parse(&get_str("tls"))?;
+        let default_port = match tls {
+            crate::smtp::TlsMode::Implicit => 465,
+            _ => 587,
+        };
+        let port = opts
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u16)
+            .unwrap_or(default_port);
+
+        // `to` 收字符串或字符串数组 —— 只写一个收件人是最常见的情况，
+        // 逼用户写成 `["a@b.com"]` 没有道理
+        let to: Vec<String> = match opts.get("to") {
+            Some(Value::String(s)) => vec![s.trim().to_string()],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+
+        let timeout_ms = opts
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(15_000)
+            .clamp(1_000, 60_000);
+
+        let cfg = crate::smtp::Config {
+            host,
+            port,
+            tls,
+            user: get_str("user"),
+            pass: opts.get("pass").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            from: get_str("from"),
+            to,
+            subject: opts
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            text: opts
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            html: opts
+                .get("html")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            ehlo_name: get_str("ehlo"),
+            // 自建 SMTP / 内网中继用私有 CA 签证书，公共根里没有 ——
+            // 给了 ca_file 就追加进信任库（见 smtp::tls_config 的说明）
+            ca_file: {
+                let p = get_str("ca_file");
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(p))
+                }
+            },
+        };
+
+        match crate::smtp::send(&cfg) {
+            Ok(resp) => Ok(serde_json::json!({ "ok": true, "response": resp }).to_string()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn do_ws_open(&self, url: &str, opts_json: &str) -> Result<String, String> {
         let id = self.ws.open(url, opts_json)?;
         Ok(json!({ "id": id }).to_string())

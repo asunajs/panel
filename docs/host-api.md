@@ -117,6 +117,7 @@ register_handler(name, handler)    -> None      # 只登记处理函数，不声
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
 # 第四个参数：register_cron(name, expr, handler, { params })  —— 见下面「任务参数」
 # 表达式末尾可以加一个抖动后缀                                    —— 见下面「随机表达式」
+smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见下面「发邮件」
 register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见下面「侧边栏入口」
 ```
 
@@ -222,6 +223,60 @@ Node / CPython 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个
 payload 里一样有）。
 
 验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
+
+#### 发邮件：`smtp_send(opts)`
+
+```js
+import { smtp_send } from 'host-api';
+
+smtp_send({
+    host: 'smtp.example.com',
+    port: 587,
+    tls: 'starttls',            // starttls（默认）| implicit（465）| none
+    user: 'robot@example.com',
+    pass: '…',
+    from: '机器人 <robot@example.com>',
+    to: ['me@example.com'],      // 也可以直接给一个字符串
+    subject: '日常任务完成',
+    text: '3 个账号都跑完了',
+    html: '<b>3 个账号都跑完了</b>',   // 给了 text + html 就是 multipart/alternative
+});
+// → { ok: true, response: "250 message accepted" }
+```
+
+```python
+from host_api import smtp_send
+smtp_send({"host": "smtp.example.com", "user": "…", "pass": "…",
+           "from": "robot@example.com", "to": "me@example.com",
+           "subject": "hi", "text": "body"})
+```
+
+| 字段 | 说明 |
+|---|---|
+| `host` | 必填 |
+| `port` | 不给就按 `tls` 推：`implicit` → 465，其余 → 587 |
+| `tls` | `"starttls"`（默认）/ `"implicit"` / `"none"`。**拼错会报错**，不会默认成 `none` —— 那会明文发密码 |
+| `user` / `pass` | `user` 为空就跳过 `AUTH`（内网中继常见） |
+| `from` | 可以写 `显示名 <a@b>`；**信封里只用裸地址** |
+| `to` | 字符串或字符串数组 |
+| `subject` / `text` / `html` | 至少给一个正文；中文主题走 RFC 2047 编码字 |
+| `ca_file` | 额外的信任锚（PEM）。给**自建 SMTP / 内网中继**用 —— 那种服务器用私有 CA 签证书，公共根里没有 |
+| `timeout_ms` | 默认 15000，夹在 1s ~ 60s |
+| `ehlo` | EHLO 自报的名字，默认 `localhost` |
+
+- 失败**抛错**，错误文本是服务器那句原话（`535 bad credentials` / `550 no such user here`），
+  直接贴进日志就能排查。
+- 收件人被拒时会**点名**是哪个地址 —— 群发时最要紧的信息。
+- ⚠ **这是阻塞调用**，默认超时 15 秒，比 `EXEC_BUDGET_MS` 长。看门狗只打断 CPU 死循环，
+  打断不了阻塞中的网络调用，所以这一步会实实在在占住执行线程。**别把它放进需要毫秒
+  精度的任务里**（兑换那条链）。
+- 信任库与 `http_fetch` / `ws_*` 是同一份（`webpki-roots`）——「目标机不需要装 CA」
+  这条性质对邮件也成立。
+- **不做附件**、不做 `8BITMIME` / `SMTPUTF8` 协商（正文一律 base64、头里有非 ASCII
+  就编码）。理由写在 `src/smtp.rs` 的文件头。
+
+验收脚本：`python3 scripts/smtp_check.py`（自带一个假 SMTP 服务器，含 STARTTLS / implicit TLS，
+不依赖外网）。
 
 #### 侧边栏入口：`register_nav({ label, icon, path })`
 
@@ -554,6 +609,7 @@ handler(payload) -> None
 | `register_cron` 的 `opts.params` | ✅ | ✅ | ✅ | ✅ |
 | 随机表达式（抖动后缀 `~` / `+` / `-`） | ✅ | ❌ | ❌ | ❌ |
 | `register_nav`（侧边栏入口） | ✅ | ❌ | ❌ | ❌ |
+| `smtp_send`（发邮件） | ✅ | ❌ | ❌ | ❌ |
 
 > 抖动的三个适配器**还没实现**。插件用了抖动之后，在面板里正常，在适配器里会
 > 直接报表达式非法 —— 是**响亮**的失败，不是静默地按原节奏跑，所以不会误导。
