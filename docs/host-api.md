@@ -224,6 +224,49 @@ payload 里一样有）。
 
 验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
 
+#### 执行预算：`{ budget_ms }`
+
+```js
+import { register_cron, register_route, worker_hint } from 'host-api';
+
+// 长任务**必须**同时声明独占线程 —— 见下面那段
+worker_hint('exclusive');
+
+register_cron('日常', '*/30 7-22 * * *', runDaily, { budget_ms: 120_000 });
+register_route('/plugins/x/run', 'POST', handler, { budget_ms: 120_000 });
+```
+
+```python
+from host_api import register_cron, worker_hint
+worker_hint('exclusive')
+register_cron('日常', '*/30 7-22 * * *', run_daily, budget_ms=120_000)
+```
+
+| | |
+|---|---|
+| 默认 | 全局 `EXEC_BUDGET_MS`（2000ms） |
+| 范围 | 100ms ~ 600000ms（10 分钟）。越界**报错**，不静默夹紧 |
+| 生效范围 | 任务（`register_cron` / `every`）和路由（`register_route`）都能声明 |
+| 落库 | `jobs.budget_ms` —— 面板上能看到，重启后还在 |
+
+**为什么要有这一格。** 全局预算存在的理由是「一个跑飞的插件不能把**同一条线程上的**
+别的任务拖住」。那也正是当年把 mcloud 写成 25 条「一次一步」任务的根因 ——
+一个「一个函数从头跑到尾」的任务必然超过 2 秒，然后被判成「疑似死循环」。
+
+**⚠ 长预算必须和 `worker_hint('exclusive')` 一起用。** 独占线程之后「拖住别人」
+这个理由不成立了（这条线程上只有它自己），所以长预算是安全的；共享线程上声明长预算
+会把同线程的其它插件一起拖住。**加载期会为此打一条警告**，点名是哪个插件 ——
+因为那个症状出现在**别的插件**身上，没人会想到是刚装的那个。
+
+**预算不是「取消超时保护」的口子。** 有上限（10 分钟），而且没声明预算的任务
+依然被全局值拦下（`scripts/budget_check.py` 里有一个对照组专门验这件事）。
+
+**HTTP 那一层也跟着走。** 插件路由与手动触发任务在 Axum 侧另有一个「等多久算超时」
+的闸，它用的也是这条路由/任务声明的预算 —— 否则会出现「声明了 8 秒，HTTP 3 秒就 504」，
+声明等于没声明。
+
+验收脚本：`python3 scripts/budget_check.py`
+
 #### 发邮件：`smtp_send(opts)`
 
 ```js
@@ -610,6 +653,7 @@ handler(payload) -> None
 | 随机表达式（抖动后缀 `~` / `+` / `-`） | ✅ | ❌ | ❌ | ❌ |
 | `register_nav`（侧边栏入口） | ✅ | ❌ | ❌ | ❌ |
 | `smtp_send`（发邮件） | ✅ | ❌ | ❌ | ❌ |
+| `opts.budget_ms`（执行预算） | ✅ | ❌ | ❌ | ❌ |
 
 > 抖动的三个适配器**还没实现**。插件用了抖动之后，在面板里正常，在适配器里会
 > 直接报表达式非法 —— 是**响亮**的失败，不是静默地按原节奏跑，所以不会误导。

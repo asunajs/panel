@@ -82,8 +82,9 @@ globalThis.host_api = {
         if (typeof expr !== 'string' || !expr) throw new Error('register_cron: expr 必须是非空字符串');
         if (typeof handler !== 'function') throw new Error('register_cron: handler 必须是函数');
         var params = '';
+        var budget = '';
         if (opts !== undefined && opts !== null) {
-            if (typeof opts !== 'object') throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...} }');
+            if (typeof opts !== 'object') throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...}, budget_ms: 30000 }');
             if (opts.params !== undefined && opts.params !== null) {
                 try {
                     params = JSON.stringify(opts.params);
@@ -92,11 +93,14 @@ globalThis.host_api = {
                 }
                 if (params === undefined) throw new Error('register_cron: params 序列化后是 undefined，换个值');
             }
+            if (opts.budget_ms !== undefined && opts.budget_ms !== null) {
+                budget = String(opts.budget_ms);
+            }
         }
         // 先查重再登记：__host_register_task 会把任务推进宿主侧 pending 列表，
         // 如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务。
         if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
-        var err = __host_register_task(name, expr, params);
+        var err = __host_register_task(name, expr, params, budget);
         if (err) throw new Error(err);
         __register_task(name, handler);
         return name;
@@ -184,8 +188,12 @@ globalThis.host_api = {
         return label;
     },
 
-    register_route: function (path, method, handler) {
-        var err = __host_register_route(String(path), String(method));
+    register_route: function (path, method, handler, opts) {
+        var budget = '';
+        if (opts !== undefined && opts !== null && opts.budget_ms !== undefined && opts.budget_ms !== null) {
+            budget = String(opts.budget_ms);
+        }
+        var err = __host_register_route(String(path), String(method), budget);
         if (err) throw new Error(err);
         __register_route(String(method).toUpperCase() + ' ' + String(path), handler);
         return path;
@@ -370,7 +378,7 @@ pub fn install_host<'js>(
     let plugin_for_tasks = plugin.clone();
     ctx.globals().set(
         "__host_register_task",
-        Func::new(move |name: String, expr: String, params_json: String| -> String {
+        Func::new(move |name: String, expr: String, params_json: String, budget: String| -> String {
             if let Err(e) = crate::cron::Schedule::parse(&expr) {
                 return format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}");
             }
@@ -389,6 +397,10 @@ pub fn install_host<'js>(
                     }
                 }
             };
+            let budget_ms = match hostapi::parse_budget_ms(&budget) {
+                Ok(b) => b,
+                Err(e) => return format!("任务 `{name}`：{e}"),
+            };
             let mut guard = pending.lock().unwrap();
             if guard.iter().any(|t| t.name == name) {
                 return format!("插件 `{plugin_for_tasks}` 里已经注册过名为 `{name}` 的任务");
@@ -398,6 +410,7 @@ pub fn install_host<'js>(
                 name,
                 expr,
                 params,
+                budget_ms,
             });
             String::new()
         }),
@@ -508,8 +521,8 @@ pub fn install_host<'js>(
     let state_for_routes = state.clone();
     ctx.globals().set(
         "__host_register_route",
-        Func::new(move |path: String, method: String| -> String {
-            match state_for_routes.do_register_route(&plugin_for_routes, &path, &method) {
+        Func::new(move |path: String, method: String, budget: String| -> String {
+            match state_for_routes.do_register_route(&plugin_for_routes, &path, &method, &budget) {
                 Ok(()) => String::new(),
                 Err(e) => e,
             }

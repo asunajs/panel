@@ -293,6 +293,8 @@ pub enum EngineCmd {
         expr: String,
         /// 任务参数（JSON 文本，`None` = 没有）。面板**不解释**它的内容。
         params: Option<String>,
+        /// 任务声明的执行预算（毫秒，`None` = 用全局默认）。
+        budget_ms: Option<u64>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     /// 停用 / 启用一个插件（写库；扫描那一轮就生效）
@@ -1294,10 +1296,12 @@ fn worker_main(
                 name,
                 expr,
                 params,
+                budget_ms,
                 reply,
             }) => {
                 let out = add_job(
                     &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr, params,
+                    budget_ms,
                 );
                 let _ = reply.send(out);
             }
@@ -1507,7 +1511,15 @@ fn install_tasks(
                 continue;
             }
         };
-        match sched.add(&d.plugin, &d.name, &d.expr, sch, now, d.params.clone()) {
+        match sched.add(
+            &d.plugin,
+            &d.name,
+            &d.expr,
+            sch,
+            now,
+            d.params.clone(),
+            d.budget_ms,
+        ) {
             Ok(_) => {
                 let idx = sched.len() - 1;
                 specs.push(db::JobSpec {
@@ -1516,6 +1528,7 @@ fn install_tasks(
                     schedule: d.expr.clone(),
                     next_run: Some(scheduler::fmt_ms(sched.tasks()[idx].next_fire)),
                     params: d.params.clone(),
+                    budget_ms: d.budget_ms,
                 });
             }
             Err(e) => hostapi::push_log(logs, &d.plugin, "error", &format!("任务注册失败: {e}")),
@@ -1692,7 +1705,15 @@ fn reinstall_panel_jobs(
         }
         // add_panel：面板任务必须带着 TaskSource::Panel 进调度器，
         // 否则下一轮 all_specs 会把它当成代码声明的任务喂给 sync_jobs（见 all_specs 注释）
-        match sched.add_panel(&job.plugin, &job.name, &job.schedule, schedule, now, job.params.clone()) {
+        match sched.add_panel(
+            &job.plugin,
+            &job.name,
+            &job.schedule,
+            schedule,
+            now,
+            job.params.clone(),
+            job.budget_ms.map(|v| v as u64),
+        ) {
             Ok(_) => {}
             Err(e) => hostapi::push_log(logs, &job.plugin, "error", &format!("面板任务重装失败: {e}")),
         }
@@ -1747,6 +1768,7 @@ fn add_job(
     name: &str,
     expr: &str,
     params: Option<String>,
+    budget_ms: Option<u64>,
 ) -> Result<(), String> {
     let now = Local::now();
 
@@ -1778,11 +1800,20 @@ fn add_job(
     }
 
     // add_panel 而不是 add：这条是面板创建的任务，不归 sync_jobs 管
-    let idx = sched.add_panel(plugin, name, expr, schedule, now, params.clone())?;
+    let idx = sched.add_panel(plugin, name, expr, schedule, now, params.clone(), budget_ms)?;
     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
     // 先落库。写库失败就把刚装上的任务摘掉，避免「调度器里在跑、库里没有」的假状态。
     if let Err(e) =
-        db::insert_panel_job(db, plugin, name, expr, Some(&next), &fmt_secs(now), params.as_deref())
+        db::insert_panel_job(
+            db,
+            plugin,
+            name,
+            expr,
+            Some(&next),
+            &fmt_secs(now),
+            params.as_deref(),
+            budget_ms.map(|v| v as i64),
+        )
     {
         sched.remove_task(plugin, name);
         return Err(format!("写库失败: {e}"));
@@ -1884,7 +1915,15 @@ fn restore_job(
         .map_err(|e| format!("写库失败: {e}"))?;
     if sched.find(plugin, name).is_none() {
         sched
-            .add(plugin, name, &expr, schedule, now, row.params.clone())
+            .add(
+                plugin,
+                name,
+                &expr,
+                schedule,
+                now,
+                row.params.clone(),
+                row.budget_ms.map(|v| v as u64),
+            )
             .map_err(|e| format!("装回调度器失败: {e}"))?;
         // 累计计数从库里灌回来（`add` 出来的是零计数）
         sched.seed_counters(plugin, name, row.runs.max(0) as u64, row.trips.max(0) as u32);
@@ -2235,8 +2274,21 @@ fn run_one(
     })
     .to_string();
 
+    // 这条任务自己声明了预算就用它，否则用全局默认。
+    //
+    // 为什么要有这一格：全局预算（默认 2 秒）原本是「一个跑飞的插件不能把
+    // **同一条线程上的**别的任务拖住」。独占线程之后那个理由不成立了，
+    // 但全局值还在 —— 于是一个「一个函数从头跑到尾」的长任务会被直接掐断
+    // （报「疑似死循环」）。这一格就是给它一个说清楚自己需要多久的地方。
+    let task_budget = sched
+        .tasks()
+        .get(idx)
+        .and_then(|t| t.budget_ms)
+        .map(Duration::from_millis)
+        .unwrap_or(budget);
+
     let result = match find_plugin(plugins, &plugin) {
-        Some(p) => dispatch_task(p, &name, &payload, wd, budget),
+        Some(p) => dispatch_task(p, &name, &payload, wd, task_budget),
         None => Err(format!("任务所属插件 `{plugin}` 不存在")),
     };
 
@@ -2381,13 +2433,21 @@ fn dispatch_route(
     wd: &Watchdog,
     budget: Duration,
 ) -> String {
-    let plugin = host
-        .routes
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|r| format!("{} {}", r.method, r.path) == key)
-        .map(|r| r.plugin.clone());
+    // 路由也能声明自己的预算（`register_route(…, { budget_ms })`）。
+    // 为什么路由也要：兑换那条链的手动触发走的是 HTTP 路由，同样会超过 2 秒。
+    let (plugin, budget) = {
+        let guard = host.routes.lock().unwrap();
+        match guard
+            .iter()
+            .find(|r| format!("{} {}", r.method, r.path) == key)
+        {
+            Some(r) => (
+                Some(r.plugin.clone()),
+                r.budget_ms.map(Duration::from_millis).unwrap_or(budget),
+            ),
+            None => (None, budget),
+        }
+    };
 
     let Some(plugin) = plugin else {
         return serde_json::json!({
@@ -2625,6 +2685,45 @@ fn load_one(
     };
 
     lp.tasks = declared.len();
+
+    // 声明了「超过全局默认」的预算，却没独占线程 ⇒ 会拖住**同一条线程上的**
+    // 别的插件。预算原本存在的理由正是防这件事，所以这里必须说出来：
+    // 不说的话，实机上表现为「别的插件的任务忽然变慢」，而没人会想到是
+    // 新装的那个插件声明了 30 秒预算。
+    {
+        let over: Vec<&str> = declared
+            .iter()
+            .filter(|d| d.budget_ms.is_some_and(|b| b > DEFAULT_EXEC_BUDGET_MS))
+            .map(|d| d.name.as_str())
+            .collect();
+        let route_over: Vec<String> = {
+            let guard = host.routes.lock().unwrap();
+            guard
+                .iter()
+                .filter(|r| {
+                    r.plugin == name && r.budget_ms.is_some_and(|b| b > DEFAULT_EXEC_BUDGET_MS)
+                })
+                .map(|r| format!("{} {}", r.method, r.path))
+                .collect()
+        };
+        if (!over.is_empty() || !route_over.is_empty())
+            && !crate::workers::WorkerHint::scan(&source).is_exclusive()
+        {
+            hostapi::push_log(
+                logs,
+                &name,
+                "warn",
+                &format!(
+                    "声明了超过 {DEFAULT_EXEC_BUDGET_MS}ms 的执行预算（任务 {}，路由 {}）\
+                     但**没有**声明 worker_hint('exclusive') —— 长任务会把同一条线程上\
+                     其它插件的任务一起拖住。建议在插件顶层加一句 worker_hint('exclusive')。",
+                    if over.is_empty() { "无".to_string() } else { over.join("、") },
+                    if route_over.is_empty() { "无".to_string() } else { route_over.join("、") },
+                ),
+            );
+        }
+    }
+
     match runtime {
         Some(rt_kind) => {
             lp.has_on_tick = has_on_tick;
@@ -2899,6 +2998,7 @@ fn all_specs(sched: &Scheduler) -> Vec<db::JobSpec> {
             schedule: t.expr.clone(),
             next_run: Some(scheduler::fmt_ms(t.next_fire)),
             params: t.params.clone(),
+            budget_ms: t.budget_ms,
         })
         .collect()
 }
@@ -3763,7 +3863,7 @@ mod tests {
         let now = Local::now();
         for (plugin, task) in [("a", "t1"), ("b", "t2"), ("c", "t3")] {
             let sch = Schedule::parse("@every 1s").unwrap();
-            sched.add(plugin, task, "@every 1s", sch, now, None).unwrap();
+            sched.add(plugin, task, "@every 1s", sch, now, None, None).unwrap();
         }
         let specs = all_specs(&sched);
         assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部**代码声明的**任务");
@@ -3785,9 +3885,9 @@ mod tests {
         let now = Local::now();
         let sch = || Schedule::parse("@every 1s").unwrap();
 
-        sched.add("demo", "from-code", "@every 1s", sch(), now, None).unwrap();
+        sched.add("demo", "from-code", "@every 1s", sch(), now, None, None).unwrap();
         sched
-            .add_panel("demo", "from-panel", "@every 1s", sch(), now, None)
+            .add_panel("demo", "from-panel", "@every 1s", sch(), now, None, None)
             .unwrap();
 
         let specs = all_specs(&sched);

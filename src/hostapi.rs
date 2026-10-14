@@ -127,6 +127,8 @@ pub struct RawTaskDef {
     pub plugin: String,
     pub name: String,
     pub expr: String,
+    /// 这条任务自己声明的执行预算（毫秒）。`None` = 用全局默认。
+    pub budget_ms: Option<u64>,
     /// 任务参数（JSON 文本，`None` = 没给）。形状由插件定义，面板不解释。
     pub params: Option<String>,
 }
@@ -137,6 +139,8 @@ pub struct RouteDef {
     pub plugin: String,
     pub method: String,
     pub path: String,
+    /// 这条路由自己声明的执行预算（毫秒）。`None` = 用全局默认。
+    pub budget_ms: Option<u64>,
 }
 
 /// 一个 Python VM 和它所属插件的绑定关系。
@@ -231,6 +235,7 @@ impl HostState {
         name: &str,
         expr: &str,
         params_json: &str,
+        budget_raw: &str,
     ) -> Result<(), String> {
         if name.is_empty() {
             return Err("任务名不能为空".to_string());
@@ -238,6 +243,7 @@ impl HostState {
         if let Err(e) = Schedule::parse(expr) {
             return Err(format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}"));
         }
+        let budget_ms = parse_budget_ms(budget_raw)?;
         let params = if params_json.trim().is_empty() {
             None
         } else {
@@ -260,6 +266,7 @@ impl HostState {
                     name: name.to_string(),
                     expr: expr.to_string(),
                     params,
+                    budget_ms,
                 });
                 return Ok(());
             }
@@ -538,7 +545,14 @@ impl HostState {
     }
 
     /// 登记一条 JS 路由。
-    pub fn do_register_route(&self, plugin: &str, path: &str, method: &str) -> Result<(), String> {
+    pub fn do_register_route(
+        &self,
+        plugin: &str,
+        path: &str,
+        method: &str,
+        budget_raw: &str,
+    ) -> Result<(), String> {
+        let budget_ms = parse_budget_ms(budget_raw)?;
         if !path.starts_with('/') {
             return Err(format!("路由 `{path}` 必须以 / 开头"));
         }
@@ -560,6 +574,7 @@ impl HostState {
             plugin: plugin.to_string(),
             method,
             path: path.to_string(),
+            budget_ms,
         });
         Ok(())
     }
@@ -626,6 +641,44 @@ impl HostState {
     pub fn plugin_of_vm(&self, vm: i32) -> Option<String> {
         self.vms.lock().unwrap().get(&vm).map(|b| b.plugin.clone())
     }
+}
+
+/// 任务 / 路由能声明的最长执行预算（10 分钟）。
+///
+/// 为什么不给无上限：预算存在的原因是「一个跑飞的插件不能把引擎线程永久占住」。
+/// 声明式预算解决的是「长任务被误杀」，不是「取消这条保护」——
+/// 10 分钟已经比任何正常的插件任务长一个量级。
+pub const MAX_DECLARED_BUDGET_MS: u64 = 10 * 60 * 1000;
+
+/// 能声明的最短预算。低于这个数连一次网络往返都跑不完，声明它没有意义。
+pub const MIN_DECLARED_BUDGET_MS: u64 = 100;
+
+/// 解析 `opts.budget_ms`。空串 / `None` = 没声明。
+///
+/// ⚠ **长预算必须和 `worker_hint('exclusive')` 一起用**：预算原本是为了
+/// 「一个任务不能把**同一条线程上的**别的任务拖住」。独占线程之后那个理由不成立了
+/// （这条线程上只有它自己），所以长预算是安全的；共享线程上声明长预算会把
+/// 同线程的其它插件一起拖住 —— 加载期会为此**打警告**，见 `engine::load_one`。
+pub fn parse_budget_ms(raw: &str) -> Result<Option<u64>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let n: u64 = raw
+        .parse()
+        .map_err(|_| format!("budget_ms 必须是整数毫秒，收到 `{raw}`"))?;
+    if n < MIN_DECLARED_BUDGET_MS {
+        return Err(format!(
+            "budget_ms 太小（{n}ms），最少 {MIN_DECLARED_BUDGET_MS}ms —— 再小连一次网络往返都跑不完"
+        ));
+    }
+    if n > MAX_DECLARED_BUDGET_MS {
+        return Err(format!(
+            "budget_ms 太大（{n}ms），最多 {MAX_DECLARED_BUDGET_MS}ms（10 分钟）。\
+             预算不是「取消超时保护」的口子 —— 它解决的是长任务被误杀"
+        ));
+    }
+    Ok(Some(n))
 }
 
 /// 校验并补全一个侧边栏入口。**JS 与 Python 两条路共用这一份判据** ——
@@ -963,6 +1016,25 @@ mod tests {
         assert_eq!(req.headers().get("user-agent").unwrap(), DEFAULT_USER_AGENT);
     }
     // ---- 侧边栏入口（register_nav）----
+
+    #[test]
+    fn budget_parsing_bounds() {
+        // 没声明 = 用全局默认
+        assert_eq!(parse_budget_ms("").unwrap(), None);
+        assert_eq!(parse_budget_ms("  ").unwrap(), None);
+        // 正常值
+        assert_eq!(parse_budget_ms("30000").unwrap(), Some(30_000));
+        assert_eq!(parse_budget_ms("100").unwrap(), Some(100));
+        assert_eq!(parse_budget_ms("600000").unwrap(), Some(600_000));
+        // 太小 / 太大 / 不是数 —— 都要报出来，不能静默当成「没声明」
+        assert!(parse_budget_ms("99").is_err());
+        assert!(parse_budget_ms("600001").is_err());
+        assert!(parse_budget_ms("30s").is_err());
+        assert!(parse_budget_ms("-1").is_err());
+        // 报错要说清边界
+        let e = parse_budget_ms("600001").unwrap_err();
+        assert!(e.contains("10 分钟"), "{e}");
+    }
 
     #[test]
     fn nav_defaults_to_the_panel_convention() {

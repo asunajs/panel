@@ -52,6 +52,12 @@ struct AddJobReq {
     /// 或插件填进来，否则那种模型没法在面板上建。
     #[serde(default)]
     params: Option<serde_json::Value>,
+    /// 这条任务需要多久的执行预算（毫秒）。不给就用全局 `EXEC_BUDGET_MS`。
+    ///
+    /// 只有**面板创建**的任务需要填它 —— 插件声明的任务自己带预算
+    /// （`register_cron(…, { budget_ms })`）。见 docs/host-api.md「执行预算」。
+    #[serde(default)]
+    budget_ms: Option<u64>,
 }
 
 /// 面板编辑任务的请求体（只有表达式可改：插件名与处理函数名是任务的**身份**）。
@@ -525,7 +531,10 @@ async fn run_task(
         return r;
     }
 
-    let wait = Duration::from_millis(st.health.budget_ms + 1_000);
+    // 同理：用**这条任务自己声明的**预算。手动触发一条声明了 30 秒的任务时，
+    // 这一层在 3 秒就超时会让人以为「任务没跑」——而它其实正在跑。
+    let budget_ms = task_budget_ms(&st.db, &plugin, &name).unwrap_or(st.health.budget_ms);
+    let wait = Duration::from_millis(budget_ms + 1_000);
     match tokio::time::timeout(wait, rx).await {
         Ok(Ok(Ok(()))) => Json(json!({ "ok": true })).into_response(),
         Ok(Ok(Err(e))) => Json(json!({ "ok": false, "error": e })).into_response(),
@@ -581,6 +590,7 @@ async fn add_job(
             name: req.name.clone(),
             expr: req.expr.clone(),
             params: params_json,
+            budget_ms: req.budget_ms,
             reply: tx,
         },
         StatusCode::BAD_REQUEST,
@@ -1476,6 +1486,33 @@ async fn test_run(
 ///
 /// 引擎线程是单线程串行执行插件的，所以这里必须带超时：
 /// 一个慢 handler 不能把 HTTP 连接也一起拖住。
+
+/// 查一条**插件任务**声明的执行预算（毫秒）。查不到就返回 `None`。
+///
+/// 为什么 HTTP 层也要查：插件任务的 handler 在引擎线程里跑，而 HTTP 这一层
+/// 另外还有一个「等多久算超时」的闸。两个值对不上就会出现
+/// **「声明了 8 秒预算，HTTP 3 秒就 504」**——声明等于没声明。
+/// （这一条是 `scripts/budget_check.py` 抓出来的。）
+fn task_budget_ms(db: &crate::db::Db, plugin: &str, name: &str) -> Option<u64> {
+    db::list_jobs(db)
+        .ok()?
+        .into_iter()
+        .find(|j| j.plugin == plugin && j.name == name)
+        .and_then(|j| j.budget_ms)
+        .filter(|v| *v > 0)
+        .map(|v| v as u64)
+}
+
+/// 查一条**插件路由**声明的执行预算（毫秒）。查不到就返回 `None`。
+fn route_budget_ms(host: &crate::hostapi::HostState, key: &str) -> Option<u64> {
+    host.routes
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|r| format!("{} {}", r.method, r.path) == key)
+        .and_then(|r| r.budget_ms)
+}
+
 async fn plugin_route(st: AppState, req: Request) -> Response {
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
@@ -1559,8 +1596,12 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
         };
     }
 
-    // 超时给得比插件执行预算宽一点：预算是给 handler 的，这里还要算上排队
-    let wait = Duration::from_millis(st.health.budget_ms + 1_000);
+    // 超时给得比插件执行预算宽一点：预算是给 handler 的，这里还要算上排队。
+    //
+    // ⚠ 用**这条路由自己声明的**预算，不是全局那个 —— 否则路由声明了 8 秒，
+    //   这一层还在 3 秒就 504，声明等于没声明。全局值只是「没声明时」的兜底。
+    let budget_ms = route_budget_ms(&st.host, &key).unwrap_or(st.health.budget_ms);
+    let wait = Duration::from_millis(budget_ms + 1_000);
     let reply = match tokio::time::timeout(wait, rx).await {
         Ok(Ok(s)) => s,
         Ok(Err(_)) => return (StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话\n").into_response(),
