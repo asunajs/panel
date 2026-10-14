@@ -116,6 +116,7 @@ every(name, interval, handler)     -> None      # = register_cron(name, "@every 
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
 # 第四个参数：register_cron(name, expr, handler, { params })  —— 见下面「任务参数」
+# 表达式末尾可以加一个抖动后缀                                    —— 见下面「随机表达式」
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -220,6 +221,54 @@ Node / CPython 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个
 payload 里一样有）。
 
 验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
+
+#### 随机表达式（抖动）
+
+表达式**末尾**可以再加一个 token，让实际触发时刻围绕理论时刻随机偏移 ——
+多个用户/实例用同一个表达式时就不会在同一毫秒一起打服务器。
+
+```text
+@every 1s -200ms          # 实际落在 [t-200ms, t]，也就是「提前一点点」
+*/5 * * * * * ~500ms      # cron：实际落在 [t-500ms, t+500ms]
+0 8 * * * +30s            # 只往后
+```
+
+| 记号 | 含义 | 允许用在 |
+|---|---|---|
+| `-X` | 只提前：`[t-X, t]` | `@every` ✅ / cron ✅ |
+| `~X` | 双边：`[t-X, t+X]` | 只有 cron ✅ |
+| `+X` | 只推后：`[t, t+X]` | 只有 cron ✅ |
+
+**`@every` 为什么只允许 `-X`**：提前是安全的 —— `实际 ≤ 理论 < 下一拍理论` 恒成立，
+单调性天然保证，不需要任何钳制。推后就会跟下一拍打架。上限是周期的 **20%**
+（`@every 5s -1s` 可以，`-1001ms` 报错），留的余量足够避免「两次触发挤在一起」。
+
+**cron 为什么宽松**：cron 的理论时刻是绝对的日历时刻，偏移越界时**钳到相邻槽位内**
+（`(上次实际触发, 下一个理论时刻 - 1ms)`），保证频率不降。代价是偏移过大时可能
+退化成「贴着下一拍」，所以**偏移别超过周期的一半**（`*/5 * * * * * ~10s` 会被钳得
+很难看，虽然仍然合法）。
+
+**抖动不累积**。理论那条线自己走（`理论 += 周期`），抖动只加在实际那一份上。
+拿「上次实际触发 + 周期」当基准的话，`@every 1d -30m` 会变成随机游走 ——
+跑一个月「8 点」就漂走了。
+
+**哪几种触发不抖**：手动触发（不动调度）、暂停恢复、换表达式、熔断重试、
+落后太多重新对齐。抖动只属于「按节奏到点了」。
+
+**payload 多了 `jitterMs`**，并且 `scheduledAt` 给的是**理论**时刻（不含抖动）：
+
+```text
+firedAt - scheduledAt == lateMs + jitterMs
+```
+
+`lateMs` 因此是**真实**的调度延迟，抖动不混在里面 —— `diag` 那类任务拿 `lateMs`
+的 p50/p99 判断「同轮有没有慢任务把我推开」时，不会被自己抖出来的数字顶爆。
+
+**排障用的可复现开关**：设了 `PANEL_JITTER_SEED=<整数>` 之后，抖动变成
+「种子 + 理论时刻」的确定函数，同一个理论时刻永远给同一个偏移。注意 `@every`
+的理论时刻是从**进程启动那一刻**起算的，所以跨重启不可复现；cron 的绝对时刻可以。
+
+验收脚本：`python3 scripts/jitter_check.py`（夹具 `examples/jitter/jitter.js`）。
 
 ### SQLite
 ```
@@ -459,6 +508,12 @@ handler(payload) -> None
 | `register_handler`（只登记不调度） | ✅ | ✅ | ✅（配 `--job`） | ✅（配 `--job`） |
 | `worker_hint`（只做校验，无副作用） | ✅ | ✅ | ✅ | ✅ |
 | `register_cron` 的 `opts.params` | ✅ | ✅ | ✅ | ✅ |
+| 随机表达式（抖动后缀 `~` / `+` / `-`） | ✅ | ❌ | ❌ | ❌ |
+
+> 抖动的三个适配器**还没实现**。插件用了抖动之后，在面板里正常，在适配器里会
+> 直接报表达式非法 —— 是**响亮**的失败，不是静默地按原节奏跑，所以不会误导。
+> 要补的话三处都要改（`adapters/node/src/cron.js`、`adapters/python/host_api/` 的
+> 调度解析，以及各自的 `nextAfter` / `next_after`）。
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
 | `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
 | `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |

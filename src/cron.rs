@@ -271,30 +271,113 @@ fn start_of_next_minute(t: DateTime<Local>) -> Option<DateTime<Local>> {
     Some(m + ChronoDuration::minutes(1))
 }
 
+/// 抖动的方向。
+///
+/// 记号与数学直觉一致：`~` 是「约等于」（双边），`+` / `-` 是单边。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitterKind {
+    /// `~X` —— 双边，落在 `[-X, +X]`
+    Symmetric,
+    /// `+X` —— 只往后，落在 `[0, +X]`
+    Later,
+    /// `-X` —— 只往前，落在 `[-X, 0]`
+    Earlier,
+}
+
+impl JitterKind {
+    fn sign(self) -> char {
+        match self {
+            JitterKind::Symmetric => '~',
+            JitterKind::Later => '+',
+            JitterKind::Earlier => '-',
+        }
+    }
+}
+
+/// 一条抖动规则：**怎么抖**，不是「这次抖多少」。
+///
+/// 随机值在每次计算下一次触发时**重新生成**（见 [`apply_jitter`]）——
+/// 固定的偏移量达不到「分散多个实例」的目的：多个实例用同一个表达式，
+/// 偏移固定的话它们仍然会在同一时刻触发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jitter {
+    pub kind: JitterKind,
+    pub amount: Duration,
+}
+
 /// 一个任务的调度方式。
 #[derive(Debug, Clone)]
 pub enum Schedule {
     Cron(CronSchedule),
     /// 固定间隔（`@every`），最小到毫秒。
     Every(Duration),
+    /// 带抖动的调度：`@every 5s -200ms` / `0 0 * * * ~30m`。
+    Jittered {
+        base: Box<Schedule>,
+        jitter: Jitter,
+    },
 }
 
+/// `@every` 的抖动上限：周期的 20%。
+///
+/// 为什么是 20% 而不是 50%：**负偏移**（`@every` 只允许这个方向）下，
+/// `actual ≤ base < next_base` 恒成立，单调性天然保证、不需要任何钳制。
+/// 一旦允许偏移超过半周期，抖动就可能撞上甚至越过下一拍 ⇒ 要么截断（产生
+/// 「两次触发只隔 1 毫秒」的突发），要么丢拍。20% 留了足够余量。
+pub const EVERY_JITTER_MAX_PERCENT: u64 = 20;
+
 impl Schedule {
-    /// 解析调度表达式：`*/5 * * * * *` 或 `@every 500ms`。
+    /// 解析调度表达式。
+    ///
+    /// 支持三种形状，以及一个可选的**抖动后缀**（末尾一个 token）：
+    ///
+    /// ```text
+    /// */5 * * * * *          6 段 cron（第一段是秒）
+    /// 0 0 * * *              5 段 cron
+    /// @every 500ms           固定间隔
+    ///
+    /// @every 5s -200ms       ← 只能负偏移，上限周期的 20%
+    /// */5 * * * * * ~500ms   ← cron 宽松：~ / + / - 都行
+    /// 0 0 * * * ~30m
+    /// ```
     pub fn parse(s: &str) -> Result<Schedule, String> {
         let s = s.trim();
         if s.is_empty() {
             return Err("调度表达式为空".to_string());
         }
-        if let Some(rest) = s.strip_prefix("@every") {
-            return Ok(Schedule::Every(parse_duration(rest.trim())?));
+        let (body, jitter) = split_jitter(s)?;
+        // 主体末尾还留着记号开头的 token ⇒ 抖动写了不止一个。
+        // 这个检查必须在主体解析**之前**：否则 `*/5 * * * * * ~1s ~2s` 会先撞上
+        // cron 的语法错，报出来的话跟「抖动写多了」毫无关系，用户根本猜不到。
+        if let Some(extra) = trailing_signed_token(body) {
+            return Err(format!(
+                "抖动只能写一个（`{extra}` 是多余的）。\n\
+                 正确写法是末尾一个记号：`*/5 * * * * * ~500ms`"
+            ));
         }
-        Ok(Schedule::Cron(CronSchedule::parse(s)?))
+        let base = if let Some(rest) = body.strip_prefix("@every") {
+            Schedule::Every(parse_every_arg(rest.trim())?)
+        } else {
+            Schedule::Cron(CronSchedule::parse(body)?)
+        };
+        let Some(j) = jitter else {
+            return Ok(base);
+        };
+        validate_jitter(&base, &j)?;
+        Ok(Schedule::Jittered {
+            base: Box::new(base),
+            jitter: j,
+        })
     }
 
-    /// 严格晚于 `from` 的下一个触发时刻。
-    pub fn next_after(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
+    /// 这条调度的**理论**时刻序列上的下一个（不含抖动）。
+    ///
+    /// 「理论」和「实际」分开是抖动不累积的关键：理论那条线自己走，
+    /// 抖动只加在实际那一份上。否则 `@every 1d ~30m` 会变成随机游走 ——
+    /// 跑一个月「8 点」就漂走了。
+    pub fn next_base(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
         match self {
+            Schedule::Jittered { base, .. } => base.next_base(from),
             Schedule::Cron(c) => c.next_after(from),
             // 注意：这里**绝对不能** truncate 到秒。
             // cron 的粒度是秒，但 @every 可以细到毫秒；一旦把 from 的毫秒抹掉再 +500ms，
@@ -304,6 +387,251 @@ impl Schedule {
                 Some(from + cd)
             }
         }
+    }
+
+    pub fn jitter(&self) -> Option<Jitter> {
+        match self {
+            Schedule::Jittered { jitter, .. } => Some(*jitter),
+            _ => None,
+        }
+    }
+
+    /// 严格晚于 `from` 的下一个**理论**时刻。
+    ///
+    /// 保留这个签名是为了让调用方读起来还是「下一个触发时刻」；带抖动的调度
+    /// 请用 [`Schedule::next_base`] + [`apply_jitter`] 两步走。
+    pub fn next_after(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
+        self.next_base(from)
+    }
+}
+
+/// `@every` 后面那个参数。多给了一个 token 是最常见的写错方式，
+/// 这里给专门的报错 —— `无法识别的单位 \`s 1s\`` 那种话没人看得懂。
+fn parse_every_arg(rest: &str) -> Result<Duration, String> {
+    let mut it = rest.split_whitespace();
+    let first = it.next().unwrap_or("");
+    if let Some(extra) = it.next() {
+        if extra.starts_with(['~', '+', '-']) {
+            return Err(format!(
+                "抖动只能写一个（`{extra}` 是多余的）。写成 `@every {first} -200ms` 这样"
+            ));
+        }
+        // 漏了记号 —— 间隔表达式的抖动只支持**负**偏移（提前触发）
+        return Err(format!(
+            "`@every` 后面只能跟一个间隔，收到 `{rest}`。\
+             想要抖动的话记号不能省：写成 `@every {first} -{extra}`\
+             （间隔表达式只支持负偏移，也就是「提前一点点」）"
+        ));
+    }
+    if first.is_empty() {
+        return Err("@every 后面缺少数值，例如 `@every 500ms`".to_string());
+    }
+    parse_duration(first)
+}
+
+/// 末尾那个以 `~` / `+` / `-` 开头、后面跟数字的 token（若有）。
+///
+/// 用来发现「抖动写了两个」。`1-5` 这种范围不会命中 —— 它不以记号开头。
+fn trailing_signed_token(s: &str) -> Option<&str> {
+    let last = s.split_whitespace().last()?;
+    let mut cs = last.chars();
+    match cs.next() {
+        Some('~') | Some('+') | Some('-') => {}
+        _ => return None,
+    }
+    if cs.next().is_some_and(|c| c.is_ascii_digit()) {
+        Some(last)
+    } else {
+        None
+    }
+}
+
+/// 把末尾的抖动后缀切下来。切不出来就是「没有抖动」，原样返回。
+///
+/// 只认**末尾一个 token** 且形如 `[~+-]<数字><单位>`。这样 cron 里的
+/// 范围写法（`1-5`）不会被误伤 —— 它不在末尾、也不带单位。
+fn split_jitter(s: &str) -> Result<(&str, Option<Jitter>), String> {
+    let Some(idx) = s.rfind(char::is_whitespace) else {
+        return Ok((s, None));
+    };
+    let (head, tail) = s.split_at(idx);
+    let tail = tail.trim();
+    let Some(kind) = tail.chars().next().and_then(|c| match c {
+        '~' => Some(JitterKind::Symmetric),
+        '+' => Some(JitterKind::Later),
+        '-' => Some(JitterKind::Earlier),
+        _ => None,
+    }) else {
+        return Ok((s, None));
+    };
+    // `@every -5s` 这种：切完主体就空了，说明那个 `-` 是主体的一部分而不是后缀。
+    // 交回原串，让主体解析去报「间隔必须大于 0」这类更准确的错。
+    if head.trim().is_empty() {
+        return Ok((s, None));
+    }
+    let amount = parse_duration(&tail[1..]).map_err(|_| {
+        format!("抖动 `{tail}` 的量不对：要写成 `-200ms` / `-1s` 这样，且必须大于 0")
+    })?;
+    Ok((head.trim_end(), Some(Jitter { kind, amount })))
+}
+
+/// 校验抖动规则与主体的搭配。
+fn validate_jitter(base: &Schedule, j: &Jitter) -> Result<(), String> {
+    match base {
+        Schedule::Every(d) => {
+            if j.kind != JitterKind::Earlier {
+                return Err(format!(
+                    "间隔表达式只支持负偏移（提前触发），收到 `{}{}`。\
+                     写成 `@every 5s -{}` 这样；\
+                     要用 `~` / `+` 请换成 cron 表达式（cron 的偏移没有这个限制）",
+                    j.kind.sign(),
+                    fmt_dur(j.amount),
+                    fmt_dur(j.amount)
+                ));
+            }
+            let period = d.as_millis().max(1) as u64;
+            let amount = j.amount.as_millis() as u64;
+            let max = period * EVERY_JITTER_MAX_PERCENT / 100;
+            if amount > max {
+                return Err(format!(
+                    "`@every {}` 的抖动 `-{}` 太大：上限是周期的 {}%（最多 `-{}`）。\
+                     间隔表达式的抖动必须是「提前一点点」而不是「换一个节奏」——\
+                     超过上限就可能撞上下一拍",
+                    fmt_dur(*d),
+                    fmt_dur(j.amount),
+                    EVERY_JITTER_MAX_PERCENT,
+                    fmt_dur(Duration::from_millis(max.max(1)))
+                ));
+            }
+        }
+        Schedule::Cron(_) => {
+            // cron 宽松：三个方向都行，也不设百分比上限。
+            // 越界由 `apply_jitter` 钳到相邻周期内（见那里的说明）。
+        }
+        Schedule::Jittered { .. } => {
+            return Err("抖动只能写一个".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 给一个**理论**时刻抽一次抖动，返回**实际**触发时刻与这次的抖动量（毫秒）。
+///
+/// - `prev_actual`：上一次实际触发的时刻。`None` = 第一次（没有下界）。
+///
+/// # 边界保护
+///
+/// 实际时刻必须落在 `(上次实际触发, 下一个理论时刻)` 内，越界就**钳住**。
+/// 对 `@every` 这条钳制永远走不到（负偏移 + 20% 上限已经保证单调，见
+/// [`EVERY_JITTER_MAX_PERCENT`]）；它服务的是 cron —— `*/5 * * * * * ~10s`
+/// 的偏移比周期还大，不钳就会跑到下一拍甚至更远。
+///
+/// 钳制而不是丢弃：保证执行频率不降。代价是偏移过大时可能退化成「贴着下一拍」，
+/// 所以文档里明说偏移别超过周期的一半。
+pub fn apply_jitter(
+    schedule: &Schedule,
+    base: DateTime<Local>,
+    prev_actual: Option<DateTime<Local>>,
+) -> (DateTime<Local>, i64) {
+    let Some(j) = schedule.jitter() else {
+        return (base, 0);
+    };
+    let span = j.amount.as_millis().max(0) as u64;
+    let raw = if span == 0 {
+        0
+    } else {
+        match j.kind {
+            JitterKind::Symmetric => rand_below(base, span * 2 + 1) as i64 - span as i64,
+            JitterKind::Later => rand_below(base, span + 1) as i64,
+            JitterKind::Earlier => -(rand_below(base, span + 1) as i64),
+        }
+    };
+
+    let mut actual = base + ChronoDuration::milliseconds(raw);
+    let mut applied = raw;
+
+    // 上界：不得越过下一个理论时刻（否则就跑到下一拍的槽位里了）
+    if let Some(next_base) = schedule.next_base(base) {
+        let ceiling = next_base - ChronoDuration::milliseconds(1);
+        if actual > ceiling {
+            actual = ceiling;
+            applied = (ceiling - base).num_milliseconds();
+        }
+    }
+    // 下界：不得早于（或等于）上一次实际触发 —— 否则两次触发挤在一起甚至倒序
+    if let Some(prev) = prev_actual {
+        let floor = prev + ChronoDuration::milliseconds(1);
+        if actual < floor {
+            actual = floor;
+            applied = (floor - base).num_milliseconds();
+        }
+    }
+    (actual, applied)
+}
+
+/// 抽一个 `[0, n)` 的随机数。`n == 0` 时返回 0。
+///
+/// 默认走系统随机源（`getrandom`）。设了 `PANEL_JITTER_SEED` 就变成**可复现**的：
+/// 用「种子 + 这次的理论时刻」算一个确定的值。
+///
+/// 为什么用理论时刻当计数器、而不是自增序号：理论时刻由表达式确定算出、
+/// 跨重启稳定，所以复现不需要额外保存任何状态。自增序号一旦重启就断片。
+fn rand_below(base: DateTime<Local>, n: u64) -> u64 {
+    rand_below_with(base, n, *jitter_seed())
+}
+
+/// [`rand_below`] 的实现，种子显式传入 —— 单测用它验「同一种子同一天给同一个值」，
+/// 不必去动进程级环境变量（那样会和别的用例打架）。
+fn rand_below_with(base: DateTime<Local>, n: u64, seed: Option<u64>) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    if let Some(seed) = seed {
+        let mixed =
+            splitmix64(seed ^ (base.timestamp_millis() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        return mixed % n;
+    }
+    let mut buf = [0u8; 8];
+    if getrandom::getrandom(&mut buf).is_err() {
+        // 拿不到随机源就退化成「不抖」—— 比 panic 好：调度本身还是对的，
+        // 只是这一轮没有分散。这个失败模式不该让整个引擎线程挂掉。
+        return 0;
+    }
+    u64::from_le_bytes(buf) % n
+}
+
+/// `PANEL_JITTER_SEED`：设了就复现（测试用），不设就用系统随机源。
+fn jitter_seed() -> &'static Option<u64> {
+    static SEED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| {
+        std::env::var("PANEL_JITTER_SEED")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    })
+}
+
+/// 一个够用的混合函数（SplitMix64 的终混步骤）。不追求密码学强度，
+/// 只要「相邻输入给出不相关的输出」—— 那正是「多个实例错开」需要的性质。
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// 把 Duration 写成 `500ms` / `2s` / `1m` 这种人话（报错信息用）。
+fn fmt_dur(d: Duration) -> String {
+    let ms = d.as_millis() as u64;
+    if ms % 86_400_000 == 0 {
+        format!("{}d", ms / 86_400_000)
+    } else if ms % 3_600_000 == 0 {
+        format!("{}h", ms / 3_600_000)
+    } else if ms % 60_000 == 0 {
+        format!("{}m", ms / 60_000)
+    } else if ms % 1000 == 0 {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{ms}ms")
     }
 }
 
@@ -473,5 +801,172 @@ mod tests {
         assert!(CronSchedule::parse("0 0 24 * * *").is_err()); // 时 24
         assert!(CronSchedule::parse("0 0 0 0 * *").is_err()); // 日 0
         assert!(CronSchedule::parse("0 0 0 * 13 *").is_err()); // 月 13
+    }
+    // ---- 抖动（随机表达式） ----
+
+    fn err_of(expr: &str) -> String {
+        Schedule::parse(expr).unwrap_err()
+    }
+
+    #[test]
+    fn jitter_suffix_is_parsed_off_the_tail() {
+        let s = Schedule::parse("@every 5s -200ms").unwrap();
+        assert_eq!(s.jitter().unwrap().kind, JitterKind::Earlier);
+        assert_eq!(s.jitter().unwrap().amount, Duration::from_millis(200));
+        // 理论线不受抖动影响
+        assert_eq!(fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()), "2026-03-10 08:00:05");
+
+        let s = Schedule::parse("0 0 * * * ~30m").unwrap();
+        assert_eq!(s.jitter().unwrap().kind, JitterKind::Symmetric);
+        assert_eq!(s.jitter().unwrap().amount, Duration::from_secs(1800));
+        assert_eq!(fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()), "2026-03-11 00:00:00");
+    }
+
+    #[test]
+    fn expressions_without_jitter_are_untouched() {
+        assert!(Schedule::parse("@every 500ms").unwrap().jitter().is_none());
+        assert!(Schedule::parse("*/5 * * * * *").unwrap().jitter().is_none());
+        // 末尾 token 不带记号 → 不是抖动，原样交给主体解析
+        assert!(Schedule::parse("0 0 * * *").unwrap().jitter().is_none());
+    }
+
+    #[test]
+    fn cron_ranges_are_not_mistaken_for_jitter() {
+        // `1-5` 里的 `-` 是范围，不是抖动后缀 —— 它在末尾时也必须被认出来
+        let s = Schedule::parse("0 0 * * 1-5").unwrap();
+        assert!(s.jitter().is_none(), "周末范围被误判成抖动了");
+        let s = Schedule::parse("0 0 1-5 * *").unwrap();
+        assert!(s.jitter().is_none());
+        // 六段写法、末尾是星期范围
+        let s = Schedule::parse("0 0 0 * * 1-5").unwrap();
+        assert!(s.jitter().is_none());
+    }
+
+    #[test]
+    fn every_jitter_only_allows_negative() {
+        // `~` 与 `+` 在 @every 上都拒绝，且报错要给出正确写法
+        let e = err_of("@every 5s ~1s");
+        assert!(e.contains("只支持负偏移"), "{e}");
+        assert!(e.contains("@every 5s -1s"), "报错里要给正确写法: {e}");
+
+        let e = err_of("@every 5s +2s");
+        assert!(e.contains("只支持负偏移"), "{e}");
+
+        // 记号不可省
+        let e = err_of("@every 5s 1s");
+        assert!(e.contains("无效") || e.contains("@every"), "{e}");
+    }
+
+    #[test]
+    fn every_jitter_cap_is_20_percent_of_period() {
+        // 5s 的 20% = 1s：正好 1s 可以，多 1ms 就不行
+        assert!(Schedule::parse("@every 5s -1s").is_ok());
+        let e = err_of("@every 5s -1001ms");
+        assert!(e.contains("太大"), "{e}");
+        assert!(e.contains("20%"), "报错要说明上限: {e}");
+
+        // 大周期同理
+        assert!(Schedule::parse("@every 1h -12m").is_ok());
+        assert!(Schedule::parse("@every 1h -13m").is_err());
+    }
+
+    #[test]
+    fn cron_jitter_accepts_all_three_directions() {
+        for expr in ["*/5 * * * * * ~1s", "*/5 * * * * * +1s", "*/5 * * * * * -1s"] {
+            assert!(Schedule::parse(expr).is_ok(), "{expr} 应当合法");
+        }
+        // cron 不设百分比上限（越界由钳制处理）
+        assert!(Schedule::parse("*/5 * * * * * ~1h").is_ok());
+    }
+
+    #[test]
+    fn only_one_jitter_suffix() {
+        let e = err_of("@every 5s -1s -1s");
+        assert!(e.contains("只能写一个"), "{e}");
+    }
+
+    #[test]
+    fn every_jitter_keeps_actual_strictly_increasing() {
+        // @every 1s -200ms：跑 200 拍，实际时刻必须严格递增、且始终落在
+        // (上一拍, 本拍理论时刻] 之内。这一条是「负偏移 + 20% 上限」的回报 ——
+        // 单调性天然成立，不需要任何钳制。
+        let s = Schedule::parse("@every 1s -200ms").unwrap();
+        let mut base = at(2026, 3, 10, 8, 0, 0);
+        let mut prev_actual: Option<DateTime<Local>> = None;
+        for i in 0..200 {
+            let next_base = s.next_base(base).unwrap();
+            let (actual, j) = apply_jitter(&s, next_base, prev_actual);
+            assert_eq!(
+                next_base - base,
+                ChronoDuration::seconds(1),
+                "理论线漂了（第 {i} 拍）"
+            );
+            assert!(j >= -200 && j <= 0, "抖动越界: {j}ms");
+            if let Some(p) = prev_actual {
+                assert!(actual > p, "实际时刻没有严格递增（第 {i} 拍）");
+            }
+            assert!(actual <= next_base, "实际时刻越过了理论时刻");
+            prev_actual = Some(actual);
+            base = next_base;
+        }
+    }
+
+    #[test]
+    fn cron_jitter_is_clamped_into_the_adjacent_slot() {
+        // ~1h 比周期（5s）大得多：钳到「下一个理论时刻 - 1ms」，而不是跑到下一拍去
+        let s = Schedule::parse("*/5 * * * * * ~1h").unwrap();
+        let base = s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap();
+        assert_eq!(fmt(base), "2026-03-10 08:00:05");
+        let next_base = s.next_base(base).unwrap();
+        for _ in 0..50 {
+            let (actual, j) = apply_jitter(&s, base, None);
+            assert!(actual < next_base, "跑出槽位了: {actual:?}");
+            assert!(actual >= base - ChronoDuration::hours(1));
+            assert!(j >= -3_600_000);
+        }
+        // 下界：给了上一次实际触发时刻就不能早于（或等于）它
+        let prev = base - ChronoDuration::milliseconds(500);
+        for _ in 0..50 {
+            let (actual, _) = apply_jitter(&s, base, Some(prev));
+            assert!(actual > prev, "撞上下界了");
+        }
+    }
+
+    #[test]
+    fn seeded_random_is_reproducible() {
+        let t = at(2026, 3, 10, 8, 0, 0);
+        let a = rand_below_with(t, 1000, Some(42));
+        let b = rand_below_with(t, 1000, Some(42));
+        assert_eq!(a, b, "同一种子 + 同一时刻应当给同一个值");
+        assert!(a < 1000);
+        // 不同时刻 → 不相关（相邻输入不该给相邻输出）
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..50 {
+            seen.insert(rand_below_with(t + ChronoDuration::seconds(i), 1000, Some(42)));
+        }
+        assert!(seen.len() > 40, "相邻时刻的输出太相关了: {seen:?}");
+        // 不同种子 → 不同序列
+        assert_ne!(
+            rand_below_with(t, 1000, Some(42)),
+            rand_below_with(t, 1000, Some(43))
+        );
+    }
+
+    #[test]
+    fn zero_span_jitter_is_rejected_with_a_readable_message() {
+        // `-0ms` 是「写了个什么都不做的抖动」，值得当场说清楚而不是静默接受
+        let e = err_of("@every 5s -0ms");
+        assert!(e.contains("必须大于 0"), "{e}");
+
+        // 而没有抖动规则时 apply_jitter 必须是恒等变换（span=0 那条路径不 panic）
+        let s = Schedule::parse("@every 5s").unwrap();
+        let base = s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap();
+        let (actual, j) = apply_jitter(&s, base, None);
+        assert_eq!(actual, base);
+        assert_eq!(j, 0);
+        // 给上下界也一样是恒等
+        let (actual, j) = apply_jitter(&s, base, Some(base - ChronoDuration::days(1)));
+        assert_eq!(actual, base);
+        assert_eq!(j, 0);
     }
 }

@@ -110,6 +110,20 @@ pub struct ScheduledTask {
     /// 面板**不解释**这一列的内容 —— 它是插件的数据结构，只负责原样存、原样透传。
     pub params: Option<String>,
     pub next_fire: DateTime<Local>,
+    /// **理论**序列上的下一次触发时刻（不含抖动）。
+    ///
+    /// 为什么要跟 `next_fire` 分开存：抖动**不能累积**。理论那条线必须自己走
+    /// （`base_fire += 周期`），抖动只加在实际那一份上。要是拿「上次实际触发 + 周期」
+    /// 当基准，`@every 1d -30m` 就会变成随机游走 —— 跑一个月「8 点」就漂走了。
+    ///
+    /// cron 天然没这个问题（`next_after` 从日历算绝对时刻），但 `@every` 有。
+    pub base_fire: DateTime<Local>,
+    /// 这一次实际触发时刻相对理论时刻抖了多少毫秒（没有抖动规则时是 0）。
+    ///
+    /// 为什么要记下来：它要交给插件（payload 的 `jitterMs`），而且宿主的
+    /// `lateMs` 必须**扣掉**它 —— 抖动是**故意的**迟到，算进 `lateMs` 的话
+    /// `diag` 的 p99 告警会被自己抖出来的数字顶爆，那个告警就废了。
+    pub jitter_ms: i64,
     pub runs: u64,
     pub last_run: Option<String>,
     pub last_error: Option<String>,
@@ -125,6 +139,34 @@ pub struct ScheduledTask {
     pub consecutive_failures: u32,
     /// 熔断后允许重试的时刻（冷却结束点）
     pub retry_at: Option<DateTime<Local>>,
+}
+
+/// 正常推进：**理论**线接着上一次的理论时刻走，并抖一次。
+///
+/// `prev_actual` 是上一次实际触发的时刻，用来保证实际序列单调（抖动不会让
+/// 两次触发挤在一起甚至倒序）。`None` = 第一次，没有下界。
+fn advance_from(
+    schedule: &Schedule,
+    base_prev: DateTime<Local>,
+    prev_actual: Option<DateTime<Local>>,
+) -> (DateTime<Local>, DateTime<Local>, i64) {
+    let base = schedule
+        .next_base(base_prev)
+        .unwrap_or_else(|| base_prev + ChronoDuration::days(FALLBACK_DAYS));
+    let (actual, jitter) = crate::cron::apply_jitter(schedule, base, prev_actual);
+    (base, actual, jitter)
+}
+
+/// 重新对齐：从 `now` 起算，**不抖**。
+///
+/// 用给「暂停恢复 / 换表达式 / 落后太多重新对齐」这几种情况 —— 它们都不是
+/// 「按节奏到点了」，抖它们没有意义（用户刚点完按钮，等一个随机量很莫名其妙）。
+/// 抖动只属于**正常的定时触发**。
+fn align_from(schedule: &Schedule, now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>, i64) {
+    let base = schedule
+        .next_base(now)
+        .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+    (base, base, 0)
 }
 
 pub struct Scheduler {
@@ -199,9 +241,8 @@ impl Scheduler {
         {
             return Err(format!("插件 `{plugin}` 里已经注册过名为 `{name}` 的任务"));
         }
-        let next_fire = schedule
-            .next_after(now)
-            .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        // 第一次装进来：从 now 对齐，不抖（还没有「上一次」可以保证单调）
+        let (base_fire, next_fire, jitter_ms) = align_from(&schedule, now);
         self.tasks.push(ScheduledTask {
             name: name.to_string(),
             plugin: plugin.to_string(),
@@ -210,7 +251,9 @@ impl Scheduler {
             schedule,
             source,
             params,
+            base_fire,
             next_fire,
+            jitter_ms,
             runs: 0,
             last_run: None,
             last_error: None,
@@ -273,11 +316,11 @@ impl Scheduler {
         let t = &mut self.tasks[idx];
         t.enabled = !paused;
         if t.enabled && t.next_fire <= now {
-            // 恢复：从当前时刻重新对齐，欠下的触发不补
-            t.next_fire = t
-                .schedule
-                .next_after(now)
-                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+            // 恢复：从当前时刻重新对齐，欠下的触发不补，也不抖
+            let (base, actual, j) = align_from(&t.schedule, now);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
         }
         Ok(t.enabled)
     }
@@ -318,10 +361,10 @@ impl Scheduler {
         t.override_expr = ov.map(str::to_string);
         t.schedule = schedule;
         if t.enabled && !t.tripped {
-            t.next_fire = t
-                .schedule
-                .next_after(now)
-                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+            let (base, actual, j) = align_from(&t.schedule, now);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
         }
         Ok(())
     }
@@ -351,10 +394,10 @@ impl Scheduler {
         t.expr = expr.to_string();
         t.schedule = schedule;
         if t.enabled && !t.tripped {
-            t.next_fire = t
-                .schedule
-                .next_after(now)
-                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+            let (base, actual, j) = align_from(&t.schedule, now);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
         }
         Ok(())
     }
@@ -439,15 +482,15 @@ impl Scheduler {
             t.consecutive_failures = 0;
         }
 
-        // ① 半开重试成功 → 完全恢复，重新对齐正常节奏
+        // ① 半开重试成功 → 完全恢复，重新对齐正常节奏（不抖：这是重试，不是到点了）
         if error.is_none() && t.tripped {
             t.tripped = false;
             t.trips = 0;
             t.retry_at = None;
-            t.next_fire = t
-                .schedule
-                .next_after(now)
-                .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+            let (base, actual, j) = align_from(&t.schedule, now);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
             return;
         }
 
@@ -460,18 +503,26 @@ impl Scheduler {
             t.consecutive_failures = 0;
             let cooldown = cooldown_for(&cfg, t.trips);
             t.retry_at = Some(now + cooldown);
-            // 冷却结束即重试：把 next_fire 直接钉在冷却终点
+            // 冷却结束即重试：把 next_fire 直接钉在冷却终点。
+            // 理论线也一起钉过去 —— 不钉的话冷却结束后会按老理论线算，
+            // 可能算出过去的时刻。重试同样不抖。
+            t.base_fire = now + cooldown;
             t.next_fire = now + cooldown;
+            t.jitter_ms = 0;
             return;
         }
 
-        // ③ 正常推进
-        let base = t.next_fire;
-        let mut next = t.schedule.next_after(base);
-        if next.map_or(true, |n| n <= now) {
-            next = t.schedule.next_after(now);
+        // ③ 正常推进：理论线接着上一次的**理论**时刻走（不是实际时刻 —— 那样抖动会累积）
+        let prev_actual = t.next_fire;
+        let (mut base, mut actual, mut j) =
+            advance_from(&t.schedule, t.base_fire, Some(prev_actual));
+        if base <= now {
+            // 落后太多：重新对齐到 now 之后，且**不补跑、不抖**
+            (base, actual, j) = align_from(&t.schedule, now);
         }
-        t.next_fire = next.unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        t.base_fire = base;
+        t.next_fire = actual;
+        t.jitter_ms = j;
     }
 }
 
@@ -963,5 +1014,162 @@ mod tests {
         assert_eq!(s.tasks()[0].runs, 99);
         s.advance(0, now, None);
         assert_eq!(s.tasks()[0].runs, 100);
+    }
+    // ---- 抖动（随机表达式） ----
+
+    fn at_ms(y: i32, mo: u32, d: u32, h: u32, mi: u32, sec: u32, ms: u32) -> DateTime<Local> {
+        Local.with_ymd_and_hms(y, mo, d, h, mi, sec).unwrap()
+            + ChronoDuration::milliseconds(ms as i64)
+    }
+
+    /// 核心断言：**理论线不累积抖动**。
+    ///
+    /// 跑 100 拍，`base_fire` 必须严格是 `t0 + k*周期`。拿「上次实际触发 + 周期」
+    /// 当基准的话，`@every 1h -10m` 会变成随机游走 —— 跑几天「8 点」就漂走了。
+    #[test]
+    fn jitter_does_not_drift_the_theoretical_line() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "@every 1h -10m";
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None)
+            .unwrap();
+
+        let mut expected_base = s.tasks()[0].base_fire;
+        for i in 1..=100 {
+            let t = &s.tasks()[0];
+            // 不变量：实际 = 理论 + 抖动，且抖动是负的（@every 只允许提前）
+            assert_eq!(
+                t.next_fire,
+                t.base_fire + ChronoDuration::milliseconds(t.jitter_ms),
+                "第 {i} 拍：next_fire 不等于 base_fire + jitter_ms"
+            );
+            assert!(t.jitter_ms <= 0 && t.jitter_ms >= -600_000, "抖动越界");
+
+            let now = t.next_fire;
+            s.advance(0, now, None);
+
+            expected_base = expected_base + ChronoDuration::hours(1);
+            assert_eq!(
+                s.tasks()[0].base_fire,
+                expected_base,
+                "第 {i} 拍：理论线漂了（抖动被算进了基准）"
+            );
+        }
+    }
+
+    /// `@every` 的抖动只会让触发**提前**，而且提前量不超过上限。
+    #[test]
+    fn every_jitter_only_ever_fires_earlier() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "@every 1s -200ms";
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None)
+            .unwrap();
+
+        let mut earlier_count = 0;
+        let mut prev_actual: Option<DateTime<Local>> = None;
+        for _ in 0..60 {
+            let t = &s.tasks()[0];
+            assert!(t.next_fire <= t.base_fire, "抖动方向错了");
+            assert!(
+                t.base_fire - t.next_fire <= ChronoDuration::milliseconds(200),
+                "抖动超过上限"
+            );
+            if let Some(p) = prev_actual {
+                assert!(t.next_fire > p, "实际触发时刻没有严格递增");
+            }
+            if t.next_fire < t.base_fire {
+                earlier_count += 1;
+            }
+            prev_actual = Some(t.next_fire);
+            let now = t.next_fire;
+            s.advance(0, now, None);
+        }
+        // 60 拍里总该有几拍真的提前了（否则随机源没在工作）
+        assert!(earlier_count > 30, "只有 {earlier_count}/60 拍提前，随机源可疑");
+    }
+
+    /// 暂停恢复 / 换表达式 / 熔断重试**都不抖** —— 抖动只属于「按节奏到点了」。
+    #[test]
+    fn rebase_paths_do_not_jitter() {
+        let expr = "@every 1s -200ms";
+        let sch = || Schedule::parse(expr).unwrap();
+
+        // ① 暂停 → 恢复
+        let mut s = Scheduler::new(test_cfg());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        s.add("p", "t", expr, sch(), t0, None).unwrap();
+        s.set_paused("p", "t", true, t0).unwrap();
+        s.set_paused("p", "t", false, at_ms(2026, 3, 10, 8, 0, 30, 0))
+            .unwrap();
+        let t = &s.tasks()[0];
+        assert_eq!(t.jitter_ms, 0, "恢复时不该抖");
+        assert_eq!(t.next_fire, t.base_fire, "恢复时实际应当等于理论");
+
+        // ② 换表达式
+        let mut s = Scheduler::new(test_cfg());
+        s.add("p", "t", expr, sch(), t0, None).unwrap();
+        s.set_expr("p", "t", "@every 2s -200ms", Schedule::parse("@every 2s -200ms").unwrap(), t0)
+            .unwrap();
+        let t = &s.tasks()[0];
+        assert_eq!(t.jitter_ms, 0, "换表达式时不该抖");
+        assert_eq!(t.next_fire, t.base_fire);
+
+        // ③ 熔断重试
+        let mut s = Scheduler::new(test_cfg());
+        s.add("p", "t", expr, sch(), t0, None).unwrap();
+        for _ in 0..3 {
+            let now = s.tasks()[0].next_fire;
+            s.advance(0, now, Some("boom".to_string()));
+        }
+        let t = &s.tasks()[0];
+        assert!(t.tripped, "该熔断了");
+        assert_eq!(t.jitter_ms, 0, "熔断重试时不该抖");
+        assert_eq!(t.next_fire, t.retry_at.unwrap(), "重试时刻应当是冷却终点");
+        assert_eq!(t.base_fire, t.next_fire, "理论线要跟着钉到冷却终点");
+    }
+
+    /// 落后太多时重新对齐：不补跑，也不抖。
+    #[test]
+    fn catch_up_realign_does_not_jitter() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "@every 1s -200ms";
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None)
+            .unwrap();
+
+        // 一口气跳到 1 小时后：理论线早就落后了
+        let late = at_ms(2026, 3, 10, 9, 0, 0, 0);
+        s.advance(0, late, None);
+        let t = &s.tasks()[0];
+        assert!(t.next_fire > late, "重新对齐后下一次必须在 now 之后");
+        assert_eq!(t.jitter_ms, 0, "重新对齐时不该抖");
+        assert_eq!(t.next_fire, t.base_fire);
+        // 而且是从 late 重新起算，不是补跑
+        assert!(t.base_fire <= late + ChronoDuration::seconds(1));
+    }
+
+    /// cron 的抖动可以越出周期，但会被钳回相邻槽位内。
+    #[test]
+    fn cron_jitter_stays_inside_the_slot() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        // 周期 1s、抖动 ±10s：不钳制的话会跑到好几拍之后
+        let expr = "*/1 * * * * * ~10s";
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None)
+            .unwrap();
+
+        let mut prev: Option<DateTime<Local>> = None;
+        for _ in 0..40 {
+            let t = &s.tasks()[0];
+            let next_base = t.schedule.next_base(t.base_fire).unwrap();
+            assert!(t.next_fire < next_base, "跑出槽位了");
+            if let Some(p) = prev {
+                assert!(t.next_fire > p, "没有严格递增");
+            }
+            prev = Some(t.next_fire);
+            let now = t.next_fire;
+            s.advance(0, now, None);
+        }
     }
 }

@@ -2172,18 +2172,29 @@ fn run_one(
     manual: bool,
 ) -> Result<(), String> {
     let now = Local::now();
-    let (plugin, name, expr, scheduled, runs_before, params_json) = {
+    let (plugin, name, expr, scheduled, runs_before, params_json, jitter_ms) = {
         let t = &sched.tasks()[idx];
         (
             t.plugin.clone(),
             t.name.clone(),
             t.expr.clone(),
-            t.next_fire,
+            // `scheduledAt` 给的是**理论**时刻（不含抖动），不是 `next_fire`。
+            //
+            // 为什么：`lateMs` 要能回答「这一轮我到底被拖了多久」。理论时刻是表达式
+            // 说了算的那个时间（`@every 1s` 就是整秒），抖动是我们**故意**加在上面的。
+            // 拿实际时刻当基准的话，`lateMs` 里就混着抖动，`diag` 那类任务拿它算
+            // p50/p99 判断「同轮有没有慢任务把我推开」时，p99 会被自己抖出来的
+            // 数字顶爆，那个告警就废了。
+            //
+            // 三者关系（插件可以据此反推）：
+            //     firedAt - scheduledAt == lateMs + jitterMs
+            t.base_fire,
             t.runs,
             t.params.clone(),
+            t.jitter_ms,
         )
     };
-    let late_ms = (now - scheduled).num_milliseconds();
+    let late_ms = (now - scheduled).num_milliseconds() - jitter_ms;
 
     // 参数原样交给插件 —— 但**解析成 JSON 值**再塞进载荷，而不是当字符串。
     // 插件那边 `p.params.account` 就能直接取；塞成字符串的话每个 handler
@@ -2206,6 +2217,10 @@ fn run_one(
         "scheduledAt": scheduler::fmt_ms(scheduled),
         "firedAt": scheduler::fmt_ms(now),
         "lateMs": late_ms,
+        // 这一次相对**理论**时刻抖了多少毫秒（没有抖动规则时恒为 0）。
+        // 插件一般不用它，但它让「调度延迟」这件事可解释：
+        // `firedAt - scheduledAt == lateMs + jitterMs`。
+        "jitterMs": jitter_ms,
         "params": params_value,
     })
     .to_string();
