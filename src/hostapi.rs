@@ -291,6 +291,30 @@ impl HostState {
             .unwrap_or(10_000)
             .clamp(100, 60_000);
 
+        // 校验 `tls` 选项。**两种构建都要校验**（默认构建里 `tls:"native"` 会在这里
+        // 明确报错，而不是被静默忽略）—— 只是默认构建里返回值没人用，所以分开写。
+        #[cfg(not(feature = "legacy-tls"))]
+        parse_tls_choice(&opts)?;
+        #[cfg(feature = "legacy-tls")]
+        let tls = parse_tls_choice(&opts)?;
+
+        // ── 平台 TLS 那一路（只有 `legacy-tls` 构建里存在）────────────────────
+        //
+        // ⚠ 它是**另一份独立实现**（reqwest），不是"给 ureq 换个后端"：
+        // ureq 的 native-tls 要 `der 0.8`，离线缓存里只有 0.7 ⇒ 离线编不出来
+        // （见 Cargo.toml 那段）。两条路的返回形状必须逐字段一致，
+        // 否则"换个 tls 就少个字段"会变成插件侧的暗雷 —— 下面那份照这个抄。
+        #[cfg(feature = "legacy-tls")]
+        if tls == TlsChoice::Native {
+            return http_fetch_native(
+                &method,
+                url,
+                opts.get("headers").and_then(|v| v.as_object()),
+                body,
+                timeout_ms,
+            );
+        }
+
         let request = build_http_request(
             &method,
             url,
@@ -301,12 +325,11 @@ impl HostState {
                 body.as_bytes().to_vec()
             },
         )?;
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_millis(timeout_ms)))
-            .build()
-            .new_agent();
+        let agent = build_agent(timeout_ms);
 
-        let resp = agent.run(request).map_err(|e| format!("请求失败: {e}"))?;
+        let resp = agent
+            .run(request)
+            .map_err(|e| format!("请求失败: {e}{}", tls_hint(&e.to_string())))?;
         let status = resp.status().as_u16();
         let mut headers = serde_json::Map::new();
         for (k, v) in resp.headers().iter() {
@@ -418,6 +441,18 @@ impl HostState {
     }
 }
 
+/// JSON 值的**种类**名（报错措辞用）。`json_to_sql` 与 `parse_tls_choice` 共用。
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// JSON 值 → SQLite 参数。
 fn json_to_sql(v: &Value) -> Result<rusqlite::types::Value, String> {
     use rusqlite::types::Value as S;
@@ -437,11 +472,7 @@ fn json_to_sql(v: &Value) -> Result<rusqlite::types::Value, String> {
         other => {
             return Err(format!(
                 "参数只支持 null / bool / number / string，收到 {}",
-                match other {
-                    Value::Array(_) => "array",
-                    Value::Object(_) => "object",
-                    _ => "unknown",
-                }
+                kind_of(other)
             ))
         }
     })
@@ -452,6 +483,154 @@ fn json_to_sql(v: &Value) -> Result<rusqlite::types::Value, String> {
 /// ⚠️ **只在插件没给 `user-agent` 时**才用它 —— 这是踩过一次才定下来的规矩，见
 /// [`build_http_request`] 的说明。
 pub const DEFAULT_USER_AGENT: &str = "plugin-panel/host-api";
+
+// ---------------------------------------------------------------------------
+// TLS 后端选择（第二十二轮：给「只给 CBC 套件」的上游留一条路）
+// ---------------------------------------------------------------------------
+
+/// TLS 后端。**默认 [`TlsChoice::Rustls`]**（即今天的行为）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsChoice {
+    /// 内置 webpki 根证书的 rustls：目标机不需要装 CA，也是默认构建唯一有的。
+    Rustls,
+    /// 平台 TLS（`native-tls`：macOS = Security.framework，Linux = OpenSSL）。
+    ///
+    /// ⚠ 它存在的理由是**能力**，不是偏好：2026-10-14 实测 `v.cmcc-cs.cn` 与
+    /// `videoim.cmcc-cs.cn:20102` **只给 CBC 套件**（`ECDHE-RSA-AES128-SHA`），
+    /// 而 **rustls 不实现任何 CBC 套件** ⇒ 默认构建连不上这两个主机（详见
+    /// `docs/host-api.md` 与插件侧的 F-030）。平台 TLS 能谈 CBC。
+    Native,
+}
+
+/// 读 `tls` 选项：`"rustls"`（默认）或 `"native"`。
+///
+/// # 为什么不"握手失败就自动换一个后端重试"
+///
+/// 换后端就换了**信任库与校验策略**（webpki-roots → 系统证书库）。
+/// 自动降级会把这件事**静默**做掉，而它对"这个请求到底信谁"是有实质影响的选择。
+/// 所以：**要哪个由插件显式说**，宿主只负责把"这个构建没有那个后端"如实报出来。
+pub fn parse_tls_choice(opts: &Value) -> Result<TlsChoice, String> {
+    match opts.get("tls") {
+        None => Ok(TlsChoice::Rustls),
+        Some(Value::String(s)) => match s.as_str() {
+            "rustls" => Ok(TlsChoice::Rustls),
+            "native" => {
+                if cfg!(feature = "legacy-tls") {
+                    Ok(TlsChoice::Native)
+                } else {
+                    Err("tls:\"native\" 需要宿主用 `--features legacy-tls` 构建\
+                         （本构建里只有 rustls；那条路会在 Linux 上引入 OpenSSL 依赖，\
+                         所以默认不编）"
+                        .to_string())
+                }
+            }
+            other => Err(format!(
+                "tls 只认 \"rustls\" 或 \"native\"，收到 `{other}`"
+            )),
+        },
+        Some(other) => Err(format!("tls 必须是字符串，收到 {}", kind_of(other))),
+    }
+}
+
+/// 把「连不上」的那句话**分成两类**。
+///
+/// ⚠ 这不是措辞偏好：`HandshakeFailure` 有**两个**完全不同的成因 ——
+/// ① 这个主机只给 CBC 套件而我们在用 rustls（**宿主能力问题**，改 `tls` 或换构建就有救）；
+/// ② 对面真的不是 TLS 服务 / 证书链不通（**环境问题**）。
+/// 不分开的话，插件作者会去翻自己的协议代码，而那两个方向的动作完全相反。
+pub fn tls_hint(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    if e.contains("handshakefailure") || e.contains("handshake failure") || e.contains("alert 40") {
+        "（像是 TLS 套件不重叠：该主机可能**只给 CBC 套件**，而 rustls 不实现 CBC。\
+         宿主若用 `--features legacy-tls` 构建，可试 `tls:\"native\"`）"
+    } else {
+        ""
+    }
+}
+
+/// 默认那条路（rustls）的 `ureq` agent。
+///
+/// ⚠ **平台 TLS 不在这里**：它是 [`http_fetch_native`] 里完整的另一份实现。
+/// 让 `ureq` 只负责一件事，是为了"默认构建的行为一个字节都没变"这条性质 ——
+/// 否则每次动 legacy 那条路都要重新审视默认路径。
+pub fn build_agent(timeout_ms: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_millis(timeout_ms)))
+        .build()
+        .new_agent()
+}
+
+/// `tls:"native"` 那条路的实现：**reqwest(blocking) + 平台 TLS**。
+///
+/// # 与 ureq 那条路必须逐字段对齐
+///
+/// `{status, headers, body}` 三个字段、1 MiB 响应体上限、`user-agent` 兜底规则、
+/// 「插件的头就是插件的头」—— 全部照抄。两处一旦漂移，插件按 `tls` 分叉出两种行为，
+/// 而那种 bug 只在"换了 tls"时才现身。
+///
+/// ⚠ `.no_proxy()`：宿主的行为应当由**请求**决定，不由跑它的那台机器的环境变量决定
+/// （ureq 那条路也不读环境代理 —— 两条路在这件事上必须同答）。
+#[cfg(feature = "legacy-tls")]
+fn http_fetch_native(
+    method: &str,
+    url: &str,
+    plugin_headers: Option<&serde_json::Map<String, Value>>,
+    body: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    use std::io::Read as _;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("构造客户端失败: {e}"))?;
+
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| format!("method 不合法 `{method}`: {e}"))?;
+    let mut req = client.request(method, url);
+
+    let mut has_user_agent = false;
+    if let Some(headers) = plugin_headers {
+        for (k, v) in headers {
+            let Some(v) = v.as_str() else { continue };
+            if k.eq_ignore_ascii_case("user-agent") {
+                has_user_agent = true;
+            }
+            req = req.header(k, v);
+        }
+    }
+    if !has_user_agent {
+        req = req.header("user-agent", DEFAULT_USER_AGENT);
+    }
+    if !body.is_empty() {
+        req = req.body(body.to_string());
+    }
+
+    let resp = req
+        .send()
+        .map_err(|e| format!("请求失败: {e}{}", tls_hint(&e.to_string())))?;
+    let status = resp.status().as_u16();
+    let mut headers = serde_json::Map::new();
+    for (k, v) in resp.headers().iter() {
+        headers.insert(
+            k.as_str().to_string(),
+            Value::String(v.to_str().unwrap_or("<非 UTF-8>").to_string()),
+        );
+    }
+    let mut buf = Vec::new();
+    resp.take(1024 * 1024)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("响应体读取失败: {e}"))?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+
+    Ok(json!({
+        "status": status,
+        "headers": Value::Object(headers),
+        "body": text,
+    })
+    .to_string())
+}
 
 /// 按插件给的选项构造请求。**抽成纯函数是为了能测** —— 尤其"UA 到底是谁的"这件事。
 ///

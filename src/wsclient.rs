@@ -157,6 +157,9 @@ impl Registry {
             .and_then(Value::as_u64)
             .unwrap_or(CONNECT_TIMEOUT_MS)
             .clamp(500, 30_000);
+        // ⚠ 与 `http_fetch` **共用同一个判据**（`hostapi::parse_tls_choice`）：
+        // 两个能力对"tls 该怎么写、写了 native 而没有它该怎么办"必须是同一个答案。
+        let tls = crate::hostapi::parse_tls_choice(&opts)?;
 
         {
             let conns = self.conns.lock().unwrap();
@@ -199,12 +202,43 @@ impl Registry {
         let connect_timeout = Duration::from_millis(timeout_ms);
 
         self.rt.spawn(async move {
-            let connected =
-                tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(req)).await;
+            // 平台 TLS 那一路（`tls:"native"`）：只有 `legacy-tls` 构建里才存在。
+            // `None` = 用 tokio-tungstenite 默认的 rustls（今天的行为）。
+            #[cfg(feature = "legacy-tls")]
+            let connector = match tls {
+                crate::hostapi::TlsChoice::Rustls => None,
+                crate::hostapi::TlsChoice::Native => {
+                    match native_tls::TlsConnector::new() {
+                        Ok(c) => Some(tokio_tungstenite::Connector::NativeTls(c)),
+                        Err(e) => {
+                            let _ = in_tx.send(In::Failed(format!("平台 TLS 初始化失败: {e}")));
+                            return;
+                        }
+                    }
+                }
+            };
+            #[cfg(not(feature = "legacy-tls"))]
+            let connector = {
+                // 默认构建里只有 rustls：`tls:"native"` 在 `parse_tls_choice` 那一步
+                // 就被拦下了，这里把那件事写成**可执行的断言**（而不是一句注释）。
+                debug_assert_eq!(tls, crate::hostapi::TlsChoice::Rustls);
+                None
+            };
+
+            let connected = tokio::time::timeout(
+                connect_timeout,
+                tokio_tungstenite::connect_async_tls_with_config(req, None, false, connector),
+            )
+            .await;
             let ws = match connected {
                 Ok(Ok((ws, _resp))) => ws,
                 Ok(Err(e)) => {
-                    let _ = in_tx.send(In::Failed(format!("连接失败: {e}")));
+                    // 「握手失败」有两个成因（套件不重叠 vs 对面不是 TLS 服务），
+                    // 措辞上分开 —— 见 `hostapi::tls_hint`。
+                    let _ = in_tx.send(In::Failed(format!(
+                        "连接失败: {e}{}",
+                        crate::hostapi::tls_hint(&e.to_string())
+                    )));
                     return;
                 }
                 Err(_) => {

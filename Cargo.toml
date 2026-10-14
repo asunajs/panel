@@ -50,6 +50,30 @@ tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rus
 # 上面那个的 Stream/Sink 组合子（`split()` / `next()` / `send()`）。
 # 它本来就在依赖树里（tokio-tungstenite 自己依赖它），加为直接依赖不增加编译单元。
 futures-util = "0.3"
+# `legacy-tls` 那条路用的平台 TLS（见下面 [features]）。
+# ⚠ **它是可选的**：默认构建里一个字节都不编。
+native-tls = { version = "0.2", optional = true }
+# `legacy-tls` 那条路的**HTTP** 客户端。
+#
+# ⚠ 为什么不直接开 `ureq/native-tls`：它要 `der 0.8.2`，而本机离线缓存里只有 `0.7.10`
+#   —— 半版本不兼容 ⇒ 离线根本编不出来（"能不能在离网机器上编"是硬约束，不是偏好）。
+# 而 reqwest + native-tls 这一套是 mcloud 生产里用的同一套（本机缓存里全都在）；
+# 与它并列的 ureq 继续负责默认那条路，两个后端各自只在自己被选中时出现。
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "native-tls"] }
+
+[features]
+default = []
+# 「只给 CBC 套件」的上游（2026-10-14 实测：直播侧的 `v.cmcc-cs.cn` 与
+# `videoim.cmcc-cs.cn:20102` **只**给 `ECDHE-RSA-AES128-SHA` 那一档）——
+# **rustls 不实现任何 CBC 套件**（设计选择，不是配置问题）⇒ 面板的默认构建连不上它们，
+# 而 `http_fetch` / `ws_*` 都是 rustls。开这个 feature 就多一条**能谈 CBC** 的路，
+# 插件用 `tls:"native"` 显式要（不显式要就还是 rustls，行为与今天完全一致）。
+#
+# ⚠⚠ **默认必须关**：Linux/musl 上 `native-tls` = OpenSSL，会让静态二进制多一个系统依赖
+# （README §9.3 那条性质）。macOS 上它走 Security.framework，不用装 OpenSSL。
+# 这就是"给一个上游加兼容"与"给所有部署加负担"之间的取舍 —— 取舍点写在这里：
+# 需要的人开，不需要的人一个字节都不受影响。
+legacy-tls = ["tokio-tungstenite/native-tls", "native-tls", "dep:reqwest"]
 
 [build-dependencies]
 # 编译 vendored 的 pocketpy（amalgamated 单文件 C）—— 见 build.rs 的注释

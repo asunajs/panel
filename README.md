@@ -39,6 +39,7 @@
 | 第十九轮 | **删掉「本机免登录」**（用户实测：「有人会用反代，导致本地出网」）—— 凭据变成必需品，`Auth.cred` 从 `Option` 改成非 Option（类型上不存在「免鉴权」状态） | ✅ 已验证（单测 135 项、冒烟「两种绑定地址都拒绝启动」） |
 | 第二十轮 | **防爆破**（用户实测：「还要做防爆破」）—— 反代下取真实客户端 IP（默认不信任转发头）+ 跨来源的全局失败闸 + 状态可见 | ✅ 已验证（单测 141 项、冒烟 315 项、浏览器 14 条；两条核心断言做过反向验证） |
 | 第二十一轮 | **宿主 API 加 WebSocket 客户端**（`ws_open` / `ws_send` / `ws_recv` / `ws_close`）—— 之前只有 `http_fetch`（一次请求一次响应），长连接（弹幕）在插件侧是"结构性不可及" | ✅ 已验证（单测 9 项用**真的** WS 服务端 + 一条 JS 门面到 socket 的端到端） |
+| 第二十二轮 | **`legacy-tls` 那条路**（用户实测点出来的：「现在也可以实机，直播正在进行中」）—— 实测上游只给 **CBC 套件**而 rustls 不实现 CBC ⇒ 默认构建连不上直播那两个主机；可选 feature 给出一条平台 TLS 的路 | ✅ 已验证（真直播：门三步 869ms + **WS 收到 SockJS 的 `o` 帧**；默认构建一个字节都没变） |
 | 后续 | 插件市场 / 多实例 / 用户与权限 / ARM 真机 | 未开始 |
 
 **界面**（`node scripts/screenshot.mjs` 生成，见 §5 第 ㉒ 条）：
@@ -308,6 +309,25 @@ Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个
 
 任务名在**同一插件内**必须唯一，重名会让插件加载直接失败（不静默覆盖）。
 `register_cron` 与 `register_handler` **共用同一个名字空间**，两个方向都会查重。
+
+### 只给 CBC 套件的上游：`tls:"native"`（第二十二轮，构建时 `--features legacy-tls`）
+
+```javascript
+// 默认（rustls）——大多数主机用这个
+http_fetch('https://user-njs.yun.139.com/x', {});
+// 只给 CBC 套件的主机（实测：直播侧的 v.cmcc-cs.cn 与 videoim.cmcc-cs.cn:20102）
+http_fetch('https://v.cmcc-cs.cn/cmlive/api/...', { tls: 'native' });
+ws_open('wss://videoim.cmcc-cs.cn:20102/ws/1/abc/websocket', { tls: 'native' });
+```
+
+- **默认构建里没有这条路**：写 `tls:"native"` 会明确报错，提示要 `--features legacy-tls`
+  —— 不静默退化（换后端就换了信任库：webpki-roots → 系统证书库，那是实质区别）。
+- **为什么默认关**：Linux 上平台 TLS = OpenSSL ⇒ 会破坏「musl 静态二进制不需要装依赖」。
+  macOS 上走 Security.framework，不用装 OpenSSL。
+- 判断该不该用：`HandshakeFailure` + 该主机只给 CBC 套件。`tls_hint()` 会把这句话
+  写进错误里；完整量测过程见 [`docs/host-api.md`](docs/host-api.md) 的 `tls` 那节。
+- ⚠ 给 `http://` 请求填 `tls` 是白填（宿主**先校验再发请求**）—— 插件侧若要对 mock 也能跑，
+  记得只在 `https:` 上加这个字段（`mcloud-plugin` 的 `hostFetchOptions` 就是这么做的）。
 
 ### 处理函数 vs 调度：`register_handler`（第九轮）
 

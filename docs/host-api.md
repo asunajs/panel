@@ -241,6 +241,43 @@ http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
 
 `options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`（默认 10000，钳制到 `[100, 60000]`）。
 
+### `tls` 选项：`"rustls"`（默认）与 `"native"`（第二十二轮，cargo feature `legacy-tls`）
+
+```text
+http_fetch(url, { tls: "native" })      # HTTP 走平台 TLS
+ws_open(url,   { tls: "native" })       # WS  走平台 TLS
+```
+
+**默认构建里只有 rustls**；`tls:"native"` 会**明确报错**（不是静默忽略）：
+
+```json
+{"error":"tls:\"native\" 需要宿主用 `--features legacy-tls` 构建（本构建里只有 rustls；那条路会在 Linux 上引入 OpenSSL 依赖，所以默认不编）"}
+```
+
+为什么需要这条路 —— **能力，不是偏好**（2026-10-14 实测）：
+
+```text
+$ openssl s_client -connect v.cmcc-cs.cn:443 -tls1_2
+  New, TLSv1.0, Cipher is ECDHE-RSA-AES128-SHA          ← 只给 CBC + SHA1
+$ openssl s_client -connect videoim.cmcc-cs.cn:20102 -tls1_2
+  New, TLSv1.0, Cipher is ECDHE-RSA-AES128-SHA          ← WS 那个主机也是
+$ … -cipher "ECDHE-RSA-AES128-GCM-SHA256"               ← 只给现代套件
+  alert number 40 (handshake failure)
+```
+
+**rustls 不实现任何 CBC 套件**（设计选择）⇒ 默认构建**连不上**这些主机。
+`legacy-tls` 里的平台 TLS 能谈 CBC：macOS 走 Security.framework（**不用装 OpenSSL**），
+Linux 走 OpenSSL（**所以默认必须关**，否则 musl 静态二进制要多一个系统依赖）。
+
+⚠ 实现上有一条**很容易踩**的：`legacy-tls` 里 HTTP 那条路是 **reqwest**，不是
+"给 ureq 换个后端" —— ureq 的 `native-tls` 要 `der 0.8`，很多离线缓存里只有 `0.7`
+（半版本不兼容 ⇒ 离线编不出来）。两条路对外的返回形状逐字段一致，
+并且 `tls_hint()` 会把 `HandshakeFailure` 的**两个成因**分开提示
+（套件不重叠 vs 对面不是 TLS 服务）—— 不分开的话插件作者会去翻自己的协议代码。
+
+**什么时候别用**：只给现代套件的主机（绝大多数）用默认 rustls 就好。
+填 `"native"` 会换信任库（webpki-roots → 系统证书库），那是实质区别，不是同义替换。
+
 ⚠️ **这是同步阻塞调用**，会占住引擎线程（Node 侧会阻塞事件循环）：
 一次慢请求会推迟同一轮里的其它任务。响应体上限 1 MiB。
 嵌入式宿主用 `ureq` + rustls（内置 webpki 根证书，目标机不需要装 CA）。
