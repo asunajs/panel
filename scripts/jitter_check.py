@@ -291,10 +291,26 @@ def main() -> int:
                 d.cleanup()
 
         maps = [{r["scheduledAt"]: r["jitterMs"] for r in c} for c in cron]
-        common = sorted(set(maps[0]) & set(maps[1]) & set(maps[2]))
+        # ⚠ **排掉"落后重对齐"的那几拍**。
+        #
+        # 重对齐（以及熔断重试、首次装载）**故意不加抖动** ⇒ 那一拍的
+        # `jitterMs` 是 0，但它是**时刻决定的**，不是种子决定的。三个实例
+        # 同时跑，谁被负载拖得落后谁就会重对齐 ⇒ 这条断言会**随机红**。
+        #
+        # ⚠ 不能简单地把 `jitterMs == 0` 都排掉：对称抖动的**中点就是 0**，
+        #   那是合法取值，排掉它会掩盖"同种子给了不同结果"这个真 bug。
+        #   所以要靠宿主新给的 `realigned` 那一格来分辨 —— 这正是加它的原因。
+        reals = [{r["scheduledAt"] for r in c if r.get("realigned")} for c in cron]
+        skipped = set().union(*reals) if reals else set()
+        common = sorted((set(maps[0]) & set(maps[1]) & set(maps[2])) - skipped)
         if len(common) < 3:
-            print(f"  环境问题：三个实例没有足够的共同理论时刻（{len(common)} 个）")
+            print(
+                f"  环境问题：三个实例没有足够的共同理论时刻"
+                f"（{len(common)} 个；另有 {len(skipped)} 拍是重对齐，已排除）"
+            )
             return 2
+        if skipped:
+            print(f"  （排除了 {len(skipped)} 拍「落后重对齐」—— 那几拍故意不抖）")
 
         bad = [(t, maps[0][t], maps[1][t]) for t in common if maps[0][t] != maps[1][t]]
         check(

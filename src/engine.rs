@@ -2221,7 +2221,7 @@ fn run_one(
     manual: bool,
 ) -> Result<(), String> {
     let now = Local::now();
-    let (plugin, name, expr, scheduled, runs_before, params_json, jitter_ms) = {
+    let (plugin, name, expr, scheduled, runs_before, params_json, jitter_ms, realigned) = {
         let t = &sched.tasks()[idx];
         (
             t.plugin.clone(),
@@ -2241,6 +2241,7 @@ fn run_one(
             t.runs,
             t.params.clone(),
             t.jitter_ms,
+            t.realigned,
         )
     };
     let late_ms = (now - scheduled).num_milliseconds() - jitter_ms;
@@ -2270,6 +2271,13 @@ fn run_one(
         // 插件一般不用它，但它让「调度延迟」这件事可解释：
         // `firedAt - scheduledAt == lateMs + jitterMs`。
         "jitterMs": jitter_ms,
+        // 这一拍是**落后重对齐**（或熔断重试、首次装载）来的，不是按理论线
+        // 正常走到的。那几种情况都**不加抖动** ⇒ `jitterMs` 是 0，但它
+        // 与"抖到正好 0"（对称抖动的中点）是两件事。
+        //
+        // ⚠ 有这一格之前，只看 `jitterMs == 0` 是分不出这两者的 ——
+        //   `scripts/jitter_check.py` 的同种子可复现性断言就是这么随机红的。
+        "realigned": realigned,
         "params": params_value,
     })
     .to_string();

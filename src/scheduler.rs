@@ -131,6 +131,19 @@ pub struct ScheduledTask {
     /// `lateMs` 必须**扣掉**它 —— 抖动是**故意的**迟到，算进 `lateMs` 的话
     /// `diag` 的 p99 告警会被自己抖出来的数字顶爆，那个告警就废了。
     pub jitter_ms: i64,
+    /// 这一次触发是**落后重对齐**来的（不是按理论线正常走到的）。
+    ///
+    /// # 为什么插件需要知道这件事
+    ///
+    /// 重对齐那一拍**不加抖动**（`jitter_ms = 0`），因为它是"我落后了，
+    /// 从下一拍重新对齐"—— 对一个补跑的时刻加抖动没有意义。
+    ///
+    /// 但这样一来 `jitter_ms == 0` 就有**两个**来源：正常的"抖到正好 0"
+    /// （对称抖动的中点是合法取值）和"这一拍是重对齐"。插件（以及验收脚本）
+    /// 想区分它们时，只看 `jitterMs` 是分不出来的 —— 实测就撞上过：
+    /// `scripts/jitter_check.py` 的同种子可复现性断言会随机红，
+    /// 因为三个实例里有一个被负载拖得落后了。
+    pub realigned: bool,
     pub runs: u64,
     pub last_run: Option<String>,
     pub last_error: Option<String>,
@@ -265,6 +278,8 @@ impl Scheduler {
             base_fire,
             next_fire,
             jitter_ms,
+            // 装进来那一次是"从 now 对齐"，同样不是按理论线走到的
+            realigned: true,
             runs: 0,
             last_run: None,
             last_error: None,
@@ -520,6 +535,9 @@ impl Scheduler {
             t.base_fire = now + cooldown;
             t.next_fire = now + cooldown;
             t.jitter_ms = 0;
+            // 熔断重试也**不是**按理论线走到的 —— 对验收脚本是同一件事：
+            // 这一拍的 jitterMs 是 0，但它不是"种子算出来的 0"
+            t.realigned = true;
             return;
         }
 
@@ -527,13 +545,16 @@ impl Scheduler {
         let prev_actual = t.next_fire;
         let (mut base, mut actual, mut j) =
             advance_from(&t.schedule, t.base_fire, Some(prev_actual));
+        let mut realigned = false;
         if base <= now {
             // 落后太多：重新对齐到 now 之后，且**不补跑、不抖**
             (base, actual, j) = align_from(&t.schedule, now);
+            realigned = true;
         }
         t.base_fire = base;
         t.next_fire = actual;
         t.jitter_ms = j;
+        t.realigned = realigned;
     }
 }
 
@@ -1159,6 +1180,42 @@ mod tests {
         assert_eq!(t.next_fire, t.base_fire);
         // 而且是从 late 重新起算，不是补跑
         assert!(t.base_fire <= late + ChronoDuration::seconds(1));
+        // ⚠ 还要**说出来**：`jitter_ms == 0` 有两个来源（抖到正好 0 / 重对齐），
+        //   光看它是分不出来的 —— 插件与验收脚本都要能分辨（见字段上的说明）
+        assert!(t.realigned, "重对齐那一拍要标出来");
+    }
+
+    /// ⚠ `realigned` 必须是**逐拍**的：正常走到的那一拍不能带着上一拍的标记。
+    ///
+    /// 带着的话，"这一拍是重对齐"就变成"这条任务曾经重对齐过" ——
+    /// 验收脚本会把后面所有正常拍的 jitterMs 一起排掉，
+    /// 于是同种子可复现性那条断言就**测不到东西**了（永远绿）。
+    #[test]
+    fn realigned_is_per_tick_not_sticky() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "@every 1s";
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None, None)
+            .unwrap();
+        // 刚装进来是"从 now 对齐"⇒ 标上
+        assert!(s.tasks()[0].realigned, "首次装载不是按理论线走到的");
+
+        // 正常走一拍 ⇒ 标记要清掉
+        s.advance(0, t0 + ChronoDuration::seconds(1), None);
+        assert!(
+            !s.tasks()[0].realigned,
+            "正常走到的那一拍不该带着重对齐标记"
+        );
+
+        // 再落后一次 ⇒ 又标上
+        let late = at_ms(2026, 3, 10, 9, 0, 0, 0);
+        s.advance(0, late, None);
+        assert!(s.tasks()[0].realigned, "落后重对齐要重新标上");
+
+        // 再正常走 ⇒ 又清掉
+        let next = s.tasks()[0].next_fire;
+        s.advance(0, next, None);
+        assert!(!s.tasks()[0].realigned, "标记不该粘住");
     }
 
     /// cron 的抖动可以越出周期，但会被钳回相邻槽位内。
