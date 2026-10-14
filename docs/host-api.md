@@ -258,6 +258,50 @@ register_route(path, method, handler) -> None
 - **Python 插件调用它会抛 `NotImplementedError`**：嵌入式宿主只把路由能力给了 JS。
   故意让它 fail-fast —— 静默接受会让插件「本地跑得通、上机静默失效」。
 
+### WebSocket（扩展：仅嵌入式 JS 宿主）
+
+```
+ws_open(url, options)   -> int                  # 句柄（数字）
+ws_send(id, text)       -> true
+ws_recv(id, timeout_ms) -> { "type": …, … }
+ws_close(id)            -> true
+```
+
+`options`：`headers`（对象，同名头**覆盖**而不是追加）、`timeout_ms`（握手总超时，默认 8000，钳制到 `[500, 30000]`）。
+
+`ws_recv` 的返回是**结构化的结果**，不是异常：
+
+| `type` | 含义 | 插件该做什么 |
+|---|---|---|
+| `text` | 收到一帧文本，内容在 `data` | 处理它 |
+| `binary` | 收到二进制帧，hex 在 `hex`（SockJS 走文本，但二进制不该被静默丢掉） | 一般用不上 |
+| `timeout` | 等满了 `timeout_ms` 还是没东西 | **不是错误** —— 存好状态，下次调用接着收 |
+| `close` | 关了（`reason` 是给**人**看的一句话） | 这条连接没了 ⇒ 要重连 |
+| `error` | 出错了（`message`） | 同上 |
+
+⚠️ **`timeout` 与 `close` 的区别就是插件最需要的那个判据**：前者"再等等"，后者"重连"。
+所以 `timeout` **不抛异常** —— 抛了会让"正常等不到东西"表现成任务失败，把日志刷满。
+
+⚠️ 句柄不存在（已经关过 / **面板重启过**）时 `ws_send` / `ws_recv` / `ws_close` **抛异常**，
+错误信息里直接写了该怎么办（重新 `ws_open`）。这是刻意的：静默当成 `close` 会让人
+以为"对端关了"，而真因是宿主重启过 —— 那两件事的处置完全不同。
+
+设计要点（为什么是这个形状）：
+
+- **同步 + 超时**：插件的调用是阻塞的（引擎线程一次跑一个 handler），面板单次执行预算
+  2000ms ⇒ `ws_recv` 的最大超时给到 **1800ms**。一次调用收一点、状态落库、下次再来，
+  **插件侧不需要事件循环**，句柄跨调用有效。
+- **连接任务跑在面板的 tokio runtime 上**（插件侧只是阻塞地收发），
+  所以这些函数必须从**非 runtime 线程**调用 —— 就是引擎线程，插件代码天然满足。
+- **不自动重连**：重连策略（要不要退避、要不要重放订阅）是插件的业务判断。
+- 上限：**同时 8 条连接**、**单帧 256 KiB**（超了报 `error` 并关掉，**不静默截断**）。
+- TLS 与 `http_fetch` 用**同一个信任库**（webpki-roots）⇒ 「目标机不需要装 CA」仍然成立。
+
+⚠️ **这一族目前只有嵌入式 JS 宿主有**（`ws_*` 在 PocketPy / Node 适配器 / CPython 适配器
+都**没有**实现，调用会抛 `NotImplementedError`）。插件要用它，建议像 `mcloud-plugin`
+那样把 WS 调用收敛到一个**可注入的端口**上，测试里注入桩 —— 那样同一份逻辑在
+Node 下（`node --test`）照样能测，不依赖适配器补这一族。
+
 ---
 
 ## 2. handler 的调用约定
@@ -300,6 +344,7 @@ handler(payload) -> None
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
 | `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
 | `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |
+| 扩展：`ws_*`（WebSocket 客户端） | ✅ | ❌ `NotImplementedError` | ❌ | ❌ |
 | 执行预算（死循环打断） | ✅ interrupt handler | ✅ watchdog（**CPU 时间**） | ❌ | ❌ |
 | 任务熔断 | ✅ | ✅ | ❌ | ❌ |
 | 插件热更新 | ✅ mtime | ✅ mtime | ❌ | ❌ |

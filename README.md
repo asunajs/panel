@@ -38,6 +38,7 @@
 | 第十八轮 | 令牌改为支持**盐 + 哈希**存储（`PANEL_TOKEN_HASH`，Argon2id）+ `hash-token` 子命令 + 明文绝不落盘的断言 | ✅ 已验证（单测 131 项、冒烟含「明文没落到任何文件」） |
 | 第十九轮 | **删掉「本机免登录」**（用户实测：「有人会用反代，导致本地出网」）—— 凭据变成必需品，`Auth.cred` 从 `Option` 改成非 Option（类型上不存在「免鉴权」状态） | ✅ 已验证（单测 135 项、冒烟「两种绑定地址都拒绝启动」） |
 | 第二十轮 | **防爆破**（用户实测：「还要做防爆破」）—— 反代下取真实客户端 IP（默认不信任转发头）+ 跨来源的全局失败闸 + 状态可见 | ✅ 已验证（单测 141 项、冒烟 315 项、浏览器 14 条；两条核心断言做过反向验证） |
+| 第二十一轮 | **宿主 API 加 WebSocket 客户端**（`ws_open` / `ws_send` / `ws_recv` / `ws_close`）—— 之前只有 `http_fetch`（一次请求一次响应），长连接（弹幕）在插件侧是"结构性不可及" | ✅ 已验证（单测 9 项用**真的** WS 服务端 + 一条 JS 门面到 socket 的端到端） |
 | 后续 | 插件市场 / 多实例 / 用户与权限 / ARM 真机 | 未开始 |
 
 **界面**（`node scripts/screenshot.mjs` 生成，见 §5 第 ㉒ 条）：
@@ -234,6 +235,9 @@ host.every(name, interval, handler) // interval: '500ms' / '2s' / '1m' / '1h'
 // 跨运行时写法（第六轮）—— 同一份文件在 Node 里也能跑
 import { log, register_cron, every, sqlite_query, sqlite_exec, http_fetch, register_route } from 'host-api';
 
+// 第二十一轮：WebSocket 客户端（长连接）—— 见下面「WebSocket」那节
+import { ws_open, ws_send, ws_recv, ws_close } from 'host-api';
+
 // 第九轮：只登记处理函数，不声明调度 —— 任务由面板创建
 import { register_handler } from 'host-api';
 register_handler('echo', (payload) => { log(`第 ${payload.runs} 次`); });
@@ -249,6 +253,32 @@ function on_tick(payload) { /* payload = { seq, ts } */ }
 
 带顶层 `import` / `export` 的文件按 **ES 模块**加载（引擎线程装了自定义 Resolver/Loader，
 把 `host-api` 解析成内置模块），否则按普通脚本 eval。两种写法可以混用。
+
+### WebSocket（第二十一轮，仅嵌入式 JS 宿主）
+
+```javascript
+const id = ws_open('wss://example.com/sockjs/123/abc/websocket', { headers: { authorization: jwt } });
+ws_send(id, 'ping');
+const m = ws_recv(id, 1500);   // {type:'text', data} / {type:'timeout'} / {type:'close', reason} / {type:'error', message}
+if (m.type === 'text') log(m.data);
+ws_close(id);
+```
+
+**为什么是这个形状**（详细语义见 [`docs/host-api.md`](docs/host-api.md) §1 末尾）：
+
+- 面板单次执行预算 2000ms，插件的调用是**阻塞**的 ⇒ `ws_recv` 带超时（最大 1800ms），
+  **`{type:'timeout'}` 不是错误**：插件存好状态、下一次调用接着收 —— 插件侧**不需要事件循环**，
+  句柄跨调用有效（所以它活在宿主里，插件拿到的是一个数字）。
+- 句柄不存在（关过了 / **面板重启过**）⇒ `ws_send` / `ws_recv` **抛异常**，
+  错误信息里写了该怎么办。静默当成 `close` 会让人以为是"对端关了"，而真因是宿主重启。
+- **不自动重连**（那是插件的业务判断）；同时最多 **8 条**连接；单帧上限 **256 KiB**
+  （超了报错并关掉，**不静默截断**）；TLS 与 `http_fetch` 用同一个信任库
+  ⇒ 「目标机不需要装 CA」这条性质不变。
+- ⚠ **必须从引擎线程调**（插件代码天然满足）：`ws_recv` 会阻塞，连接任务跑在 tokio
+  runtime 的 worker 上 —— 从 runtime 线程调会把那条任务饿死（现象是"握手永远没结果"）。
+- ⚠ 这一族**只有嵌入式 JS 宿主有**（Python / Node 适配器 / CPython 适配器都没有，
+  调用抛 `NotImplementedError`）。插件要用它，建议把 WS 调用收敛到一个**可注入的端口**上，
+  测试里注入桩 —— 那样同一份逻辑在 Node 下照样能测。
 
 ### Python 插件
 
@@ -422,6 +452,8 @@ curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
 
 ```bash
 # ① 单元测试（cron 解析 + 调度推进 + jobs 表来源语义，含毫秒级防回归）
+#    第二十一轮起也含 WebSocket 客户端：9 项对着**真的** WS 服务端收发，
+#    外加一条「插件 JS 门面 → 宿主 → socket」的端到端（engine::tests）
 cargo test
 
 # ①c 前端资源静态检查（web/ 与 plugins/demo/）：ES Module 语法、没有内联 CSS/JS、

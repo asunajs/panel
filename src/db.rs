@@ -907,7 +907,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn override_roundtrip_and_owned_filter() {
         // 覆盖值必须能被读回来，而且能按「我负责的插件」过滤 ——
         // 多 worker 时不过滤会把别人的覆盖判成「装不上」（实测踩到过）。

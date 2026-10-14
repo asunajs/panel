@@ -45,6 +45,10 @@ __all__ = [
     "sqlite_exec",
     "http_fetch",
     "register_route",
+    "ws_open",
+    "ws_send",
+    "ws_recv",
+    "ws_close",
     "Host",
     "Task",
     "get_host",
@@ -791,3 +795,32 @@ def http_fetch(url, options=None):
 
 def register_route(path, method, handler):
     return _host.register_route(path, method, handler)
+
+
+# ── WebSocket（本适配器**明确不可用**）───────────────────────────────────────
+#
+# 与 `register_route` 同一条处理：**函数存在、调用时明确抛**。
+#
+# 为什么"存在"这件事很重要：插件里 `from host_api import ws_open` 若名字不存在，
+# 是**导入期**错误 —— 那样整个插件在 CPython 下连加载都过不去，而它在嵌入式宿主里
+# 本来是好用的。所以给四个明确的失败点，而不是让 import 直接炸。
+#
+# 嵌入式宿主（QuickJS）**有**这一族（见 docs/host-api.md §1 末尾）。
+def ws_open(url, options=None):
+    raise NotImplementedError(
+        "ws_open 不受支持：CPython 适配器不提供 WebSocket 客户端"
+        "（嵌入式 JS 宿主里有，见 docs/host-api.md）。"
+        "插件要用它，请把 WS 调用收敛到一个可注入的端口上，测试里注入桩。"
+    )
+
+
+def ws_send(id, text):
+    raise NotImplementedError("ws_send 不受支持：CPython 适配器不提供 WebSocket 客户端")
+
+
+def ws_recv(id, timeout_ms=None):
+    raise NotImplementedError("ws_recv 不受支持：CPython 适配器不提供 WebSocket 客户端")
+
+
+def ws_close(id):
+    raise NotImplementedError("ws_close 不受支持：CPython 适配器不提供 WebSocket 客户端")

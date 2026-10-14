@@ -135,6 +135,40 @@ extern "C" fn native_register_route(_argc: c_int, _argv: PyStackRef) -> bool {
     )
 }
 
+/// `ws_open` / `ws_send` / `ws_recv` / `ws_close` —— Python 插件**不提供**这一族。
+///
+/// # 为什么不像 JS 那样实现
+///
+/// 这一族的真实需求来自**一个 JS 插件**（mcloud-plugin 的直播弹幕），而宿主 API 的
+/// 规矩是"**能用**的才放进最小公共子集"—— 给一个今天没有任何调用方的运行时
+/// 加一层绑定，只会多一块**没人测过的代码**（pocketpy 的栈参数解析很容易写错，
+/// 而错了要等到有人用才发现）。
+///
+/// 与 `_register_route` 同一条处理：**明确抛 `NotImplementedError`**，不是静默什么都不做。
+/// 真需要时再补 —— 补的代价是这一族四个函数的绑定，判据（`wsclient`）一行都不用改。
+fn raise_ws_not_implemented(what: &str) -> bool {
+    python::raise_not_implemented(&format!(
+        "Python 插件不支持 WebSocket（`{what}`）—— 这一族目前只给了 JS。\
+         需要长连接请用 JS 插件；判据层（src/wsclient.rs）与运行时无关，补 Python 绑定即可。"
+    ))
+}
+
+extern "C" fn native_ws_open(_argc: c_int, _argv: PyStackRef) -> bool {
+    raise_ws_not_implemented("ws_open")
+}
+
+extern "C" fn native_ws_send(_argc: c_int, _argv: PyStackRef) -> bool {
+    raise_ws_not_implemented("ws_send")
+}
+
+extern "C" fn native_ws_recv(_argc: c_int, _argv: PyStackRef) -> bool {
+    raise_ws_not_implemented("ws_recv")
+}
+
+extern "C" fn native_ws_close(_argc: c_int, _argv: PyStackRef) -> bool {
+    raise_ws_not_implemented("ws_close")
+}
+
 // ---------------------------------------------------------------------------
 // 引导脚本
 // ---------------------------------------------------------------------------
@@ -236,6 +270,11 @@ _h.sqlite_query = lambda sql, params=None: __pp_sqlite(sql, params, True)
 _h.sqlite_exec  = lambda sql, params=None: __pp_sqlite(sql, params, False)
 _h.http_fetch   = lambda url, options=None: __pp_http(url, options)
 _h.register_route = _h._register_route
+# WebSocket：Python 侧**故意**只留一个明确的失败点（见 pyhost.rs 那段说明）
+_h.ws_open  = _h._ws_open
+_h.ws_send  = _h._ws_send
+_h.ws_recv  = _h._ws_recv
+_h.ws_close = _h._ws_close
 "#;
 
 /// 在一个 VM 里创建 `host_api` 模块并跑引导脚本。
@@ -258,6 +297,12 @@ pub fn install(vm: &mut python::PyVm) -> Result<(), String> {
         "_register_route(path, method, handler)",
         native_register_route as PyCFunction,
     );
+    // 与 `_register_route` 同一条：**声明成与 JS 一样的参数个数**，
+    // 这样 Python 侧拿到的是「这个能力不存在」，而不是「参数个数不对」。
+    python::bind(m, "_ws_open(url, options)", native_ws_open as PyCFunction);
+    python::bind(m, "_ws_send(id, text)", native_ws_send as PyCFunction);
+    python::bind(m, "_ws_recv(id, timeout_ms)", native_ws_recv as PyCFunction);
+    python::bind(m, "_ws_close(id)", native_ws_close as PyCFunction);
 
     vm.exec(PY_BOOTSTRAP, "<host_api-bootstrap>")
 }

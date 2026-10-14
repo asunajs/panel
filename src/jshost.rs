@@ -68,6 +68,37 @@ globalThis.host_api = {
         return name;
     },
 
+    // WebSocket：**句柄式**（见 jshost.rs 里那段说明与 docs/host-api.md）
+    //
+    // 语义上最要紧的两条：
+    //   · `ws_recv` 的 `{type:"timeout"}` **不是错误** —— 它是"这一步没有东西可读"，
+    //     插件据此"存好状态、下次再来"。抛异常会让"正常等不到东西"表现成任务失败。
+    //   · 句柄不存在（面板重启 / 已经关过）**抛异常** —— 那是生命周期问题，
+    //     静默返回一个 close 会让人以为"对端关了"，而真因是宿主重启过。
+    ws_open: function (url, opts) {
+        if (typeof url !== 'string' || !url) throw new Error('ws_open(url, opts): url 必须是非空字符串');
+        var r = __host_ws_open(url, opts === undefined || opts === null ? '' : JSON.stringify(opts));
+        var o = JSON.parse(r);
+        if (o.error !== undefined) throw new Error(o.error);
+        return o.id;
+    },
+    ws_send: function (id, text) {
+        var o = JSON.parse(__host_ws_send(Number(id), __fmt(text)));
+        if (o.error !== undefined) throw new Error(o.error);
+        return true;
+    },
+    ws_recv: function (id, timeoutMs) {
+        var ms = (timeoutMs === undefined || timeoutMs === null) ? 0 : Math.floor(Number(timeoutMs));
+        var o = JSON.parse(__host_ws_recv(Number(id), ms > 0 ? ms : 0));
+        if (o.error !== undefined) throw new Error(o.error);
+        return o;   // {type:"text"|"binary"|"timeout"|"close"|"error", …}
+    },
+    ws_close: function (id) {
+        var o = JSON.parse(__host_ws_close(Number(id)));
+        if (o.error !== undefined) throw new Error(o.error);
+        return true;
+    },
+
     // 只登记处理函数，**不声明调度**：任务由面板创建（见 README「第九轮」）。
     // 一个 handler 可以被面板上的多条任务复用（不同调度表达式）。
     register_handler: function (name, handler) {
@@ -241,6 +272,10 @@ export const every = api.every;
 export const sqlite_query = api.sqlite_query;
 export const sqlite_exec = api.sqlite_exec;
 export const http_fetch = api.http_fetch;
+export const ws_open = api.ws_open;
+export const ws_send = api.ws_send;
+export const ws_recv = api.ws_recv;
+export const ws_close = api.ws_close;
 export const register_route = api.register_route;
 export default api;
 "#;
@@ -319,6 +354,56 @@ pub fn install_host<'js>(
         "__host_http_fetch",
         Func::new(move |url: String, opts: String| -> String {
             match state_for_http.do_http_fetch(&url, &opts) {
+                Ok(s) => s,
+                Err(e) => json_error(&e),
+            }
+        }),
+    )?;
+
+    // ---- WebSocket（句柄式：open 拿 id，send/recv/close 都按 id 来）----
+    //
+    // 为什么是"句柄"而不是"一个对象"：宿主 API 的约定是**只传 String**，
+    // 而句柄要跨调用有效（插件按"一次调用推进一步"写）⇒ 它只能活在宿主里，
+    // 插件侧看到的是一个数字。`ws_recv` 带超时，超时返回 `{type:"timeout"}`，
+    // 插件那一步就"没收到东西"，下一次调用接着收。
+    let state_for_ws_open = state.clone();
+    ctx.globals().set(
+        "__host_ws_open",
+        Func::new(move |url: String, opts: String| -> String {
+            match state_for_ws_open.do_ws_open(&url, &opts) {
+                Ok(s) => s,
+                Err(e) => json_error(&e),
+            }
+        }),
+    )?;
+
+    let state_for_ws_send = state.clone();
+    ctx.globals().set(
+        "__host_ws_send",
+        Func::new(move |id: u64, text: String| -> String {
+            match state_for_ws_send.do_ws_send(id, &text) {
+                Ok(s) => s,
+                Err(e) => json_error(&e),
+            }
+        }),
+    )?;
+
+    let state_for_ws_recv = state.clone();
+    ctx.globals().set(
+        "__host_ws_recv",
+        Func::new(move |id: u64, timeout_ms: u64| -> String {
+            match state_for_ws_recv.do_ws_recv(id, timeout_ms) {
+                Ok(s) => s,
+                Err(e) => json_error(&e),
+            }
+        }),
+    )?;
+
+    let state_for_ws_close = state.clone();
+    ctx.globals().set(
+        "__host_ws_close",
+        Func::new(move |id: u64| -> String {
+            match state_for_ws_close.do_ws_close(id) {
                 Ok(s) => s,
                 Err(e) => json_error(&e),
             }

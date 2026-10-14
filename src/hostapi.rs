@@ -27,6 +27,7 @@
 //! | `sqlite_query(sql, params)` | 查询，返回对象数组 |
 //! | `sqlite_exec(sql, params)` | 写入，返回 `{changes, lastInsertRowid}` |
 //! | `http_fetch(url, options)` | 同步 HTTP(S)，返回 `{status, headers, body}` |
+//! | `ws_open` / `ws_send` / `ws_recv` / `ws_close` | **扩展**：WebSocket 客户端（长连接、句柄式；见 [`crate::wsclient`]）。**仅嵌入式 JS 宿主**，Python 侧抛 `NotImplementedError` |
 //! | `register_route(path, method, handler)` | **仅 JS/Node**；Python 侧抛 `NotImplementedError` |
 //!
 //! `handler(payload)` 的 `payload` 固定为
@@ -41,6 +42,7 @@
 
 use crate::cron::Schedule;
 use crate::db::Db;
+use crate::wsclient;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -160,16 +162,27 @@ pub struct HostState {
     /// 塞进参数列表的话，`load_js` / `load_one` / `sync_plugins` / `/api/test/js`
     /// 四条路径都要多带一个参数，纯粹是搬运。
     pub plugins_dir: PathBuf,
+    /// WebSocket 句柄注册表（见 [`crate::wsclient`]）。
+    ///
+    /// ⚠ 它**跨调用**活着（插件按"一次调用推进一步"写，句柄要在两次调用之间有效），
+    /// 所以只能挂在这里；面板重启则全部失效 —— 这条边界写在 host-api.md 里。
+    pub ws: wsclient::Registry,
 }
 
 impl HostState {
-    pub fn new(logs: SharedLogs, db: Db, plugins_dir: PathBuf) -> Arc<Self> {
+    pub fn new(
+        logs: SharedLogs,
+        db: Db,
+        plugins_dir: PathBuf,
+        ws: wsclient::Registry,
+    ) -> Arc<Self> {
         Arc::new(Self {
             logs,
             db,
             vms: Mutex::new(HashMap::new()),
             routes: Mutex::new(Vec::new()),
             plugins_dir,
+            ws,
         })
     }
 
@@ -316,6 +329,34 @@ impl HostState {
             "body": text,
         })
         .to_string())
+    }
+
+    // -----------------------------------------------------------------
+    // WebSocket（`wsclient` 的薄包装 —— 这里只做"参数解析 + JSON 化"）
+    // -----------------------------------------------------------------
+
+    /// `ws_open(url, opts)` —— 连接（**握手失败就是 Err**，不留半死的句柄）。
+    pub fn do_ws_open(&self, url: &str, opts_json: &str) -> Result<String, String> {
+        let id = self.ws.open(url, opts_json)?;
+        Ok(json!({ "id": id }).to_string())
+    }
+
+    /// `ws_send(id, text)` —— 入队即返回（不等对端）。
+    pub fn do_ws_send(&self, id: u64, text: &str) -> Result<String, String> {
+        self.ws.send(id, text)?;
+        Ok(json!({ "ok": true }).to_string())
+    }
+
+    /// `ws_recv(id, timeout_ms)` —— 收一帧或超时（形状见 [`crate::wsclient::Registry::recv`]）。
+    pub fn do_ws_recv(&self, id: u64, timeout_ms: u64) -> Result<String, String> {
+        let v = self.ws.recv(id, timeout_ms)?;
+        Ok(v.to_string())
+    }
+
+    /// `ws_close(id)` —— 幂等。
+    pub fn do_ws_close(&self, id: u64) -> Result<String, String> {
+        self.ws.close(id)?;
+        Ok(json!({ "ok": true }).to_string())
     }
 
     /// 登记一条 JS 路由。

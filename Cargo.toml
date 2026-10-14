@@ -38,6 +38,18 @@ blake2 = "0.10"
 # 只用它做「插件发起的出站请求」，服务端仍然是 Axum。
 # 实测（cargo zigbuild aarch64-unknown-linux-musl）能出静态 musl 产物，见 README §9.3。
 ureq = { version = "3", features = ["rustls"] }
+# host_api.ws_* 的传输层：插件用的 **WebSocket 客户端**（第二十一轮）。
+#
+# 为什么不是"再写一个 HTTP 库"：弹幕是**长连接**，`http_fetch` 那种"一次请求一次响应"
+# 的结构接不了它（见 src/wsclient.rs 文件头）。选 tokio-tungstenite 是因为它与面板
+# 已有的 tokio 运行时天然同构（异步任务跑在面板的 runtime 上，插件侧仍然是阻塞调用）。
+#
+# ⚠ `rustls-tls-webpki-roots` 与 ureq 用的是**同一个信任库**（webpki-roots）——
+# 「目标机不需要装 CA」这条性质因此对 ws 也成立。
+tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# 上面那个的 Stream/Sink 组合子（`split()` / `next()` / `send()`）。
+# 它本来就在依赖树里（tokio-tungstenite 自己依赖它），加为直接依赖不增加编译单元。
+futures-util = "0.3"
 
 [build-dependencies]
 # 编译 vendored 的 pocketpy（amalgamated 单文件 C）—— 见 build.rs 的注释

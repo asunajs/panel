@@ -3714,4 +3714,102 @@ mod tests {
         let code_idx = sched.find("demo", "from-code").unwrap();
         assert_eq!(sched.tasks()[code_idx].source, TaskSource::Code);
     }
+
+    /// **插件侧（JS）用 `ws_*` 的整条链**：JS 门面 → 宿主 → 真的 socket。
+    ///
+    /// 为什么要写成"真的连一条本地 WS 服务端"：这一层要验的正是
+    /// 「JS 那个门面把参数传对了、宿主真的连上了、帧真的收回来了」——
+    /// 只测 Rust 那一层（wsclient.rs 的单测）证明不了门面与 `host_api` 的接线。
+    ///
+    /// ⚠ 这里**故意**不用 `run_scratch_js`：那个要 Watchdog/预算一整套。
+    /// 直接 `install_host` + `ctx.eval` 更贴近"插件加载时发生了什么"，
+    /// 而且失败信息更短。
+    #[test]
+    fn plugin_uses_websocket_through_host_api() {
+        use crate::hostapi::HostState;
+        use crate::jshost;
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::{Arc, Mutex};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // ① 一个**真的** WS 服务端（回声 + 回一条 SockJS 形态的 `o` 帧）
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let addr = rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(msg)) = ws.next().await {
+                    if let Message::Text(t) = msg {
+                        let _ = ws.send(Message::text(format!("echo:{}", t.as_str()))).await;
+                        let _ = ws.send(Message::text("o")).await;
+                    }
+                }
+            });
+            addr
+        });
+
+        // ② 一套真的宿主状态（临时库 + 临时插件目录 + 挂在上面那个 runtime 上的 WS 注册表）
+        let tmp = std::env::temp_dir().join(format!("pp-ws-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let db = crate::db::open(&tmp.join("ws-test.db")).unwrap();
+        let logs: crate::hostapi::SharedLogs = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let host = HostState::new(
+            logs.clone(),
+            db,
+            tmp.clone(),
+            crate::wsclient::Registry::new(rt.handle().clone()),
+        );
+
+        // ③ 一段插件代码：开 → 发 → 收 → 超时 → 关 → 再收（必须抛"句柄不存在"）
+        let code = format!(
+            r#"
+            var id = host_api.ws_open('ws://{addr}', {{ headers: {{ 'user-agent': 'MCloudApp/12.6.0' }} }});
+            host_api.ws_send(id, 'hi');
+            var a = host_api.ws_recv(id, 1000);
+            var b = host_api.ws_recv(id, 1000);
+            var idle = host_api.ws_recv(id, 30);
+            host_api.ws_close(id);
+            var after = 'no-throw';
+            try {{ host_api.ws_recv(id, 10); }} catch (e) {{ after = e.message; }}
+            globalThis.__ws = JSON.stringify([
+                typeof id, a.type, a.data, b.type, b.data, idle.type, after
+            ]);
+            "#
+        );
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            jshost::install_host(
+                &ctx,
+                "ws-test".to_string(),
+                host.clone(),
+                Arc::new(Mutex::new(Vec::new())),
+                logs.clone(),
+            )
+            .unwrap();
+            ctx.eval::<(), _>(code.as_str())
+                .unwrap_or_else(|e| panic!("插件代码执行失败: {}", super::render_exception(&ctx, &e)));
+        });
+        let got: String = ctx.with(|ctx| ctx.globals().get("__ws").unwrap());
+        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+        let v = v.as_array().unwrap();
+        assert_eq!(v[0], "number", "ws_open 要返回一个数字句柄：{got}");
+        assert_eq!(v[1], "text");
+        assert_eq!(v[2], "echo:hi", "收到的第一帧该是回声：{got}");
+        assert_eq!(v[3], "text");
+        assert_eq!(v[4], "o", "第二帧是服务端补的那条 SockJS `o`：{got}");
+        assert_eq!(v[5], "timeout", "没东西可读要回 timeout，**不是**异常：{got}");
+        assert!(
+            v[6].as_str().unwrap().contains("不存在"),
+            "关掉之后再收必须抛「句柄不存在」：{got}"
+        );
+        // 句柄表也空了（没有泄漏）
+        assert_eq!(host.ws.open_count(), 0);
+    }
 }

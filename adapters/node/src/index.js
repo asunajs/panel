@@ -154,6 +154,36 @@ export function handlerNames() {
   return [...handlers.keys()];
 }
 
+// ------------------------------------------------------- WebSocket（Node 侧：明确不可用）
+
+/// `ws_open` / `ws_send` / `ws_recv` / `ws_close` —— **Node 适配器不实现**这一族。
+///
+/// 为什么不在这里也实现一份：Node 没有内置 WebSocket **客户端**（要用 `ws` 这个 npm 包），
+/// 而适配器的定位是"零依赖、拿 node 就能跑"。真接一个第三方包进来，会让
+/// 「同一份脚本在两边跑」多一个**只在调试环境存在**的依赖。
+///
+/// 所以这里和 Python 侧同一条处理：**函数存在、调用时明确抛**。
+/// 存在是必须的 —— ESM 里 `import { ws_open } from 'host-api'` 遇到不存在的具名导出
+/// 是**链接期**错误，那样整个插件在 Node 下连加载都过不去，而它在宿主里本来是好用的。
+function wsUnavailable(what) {
+  throw new Error(
+    `${what}: Node 适配器不提供 WebSocket（宿主里可用，见 docs/host-api.md）。` +
+      '插件要用它，请把 WS 调用收敛到一个可注入的端口上，测试里注入桩。'
+  );
+}
+export function ws_open() {
+  wsUnavailable('ws_open');
+}
+export function ws_send() {
+  wsUnavailable('ws_send');
+}
+export function ws_recv() {
+  wsUnavailable('ws_recv');
+}
+export function ws_close() {
+  wsUnavailable('ws_close');
+}
+
 // ------------------------------------------------------------------ 全局安装
 
 const PUBLIC = {
@@ -169,6 +199,11 @@ const PUBLIC = {
   register_route,
   // Node 专有扩展：不阻塞事件循环的 http_fetch（可自调用本进程注册的路由）
   http_fetch_async,
+  // 宿主里有、Node 侧明确不可用（调用时抛，见上面那段说明）
+  ws_open,
+  ws_send,
+  ws_recv,
+  ws_close,
 };
 
 for (const [key, fn] of Object.entries(PUBLIC)) {
@@ -229,6 +264,8 @@ export {
   http_fetch,
   http_fetch_async,
   register_route,
+  // ⚠ `ws_*` **不在这里**：它们是在本文件里 `export function` 声明的，
+  //   再列一遍是「重复导出」（ESM 语法错误），而不是"多导出一次"。
   fmtMs,
   fmtClock,
   fmtError,

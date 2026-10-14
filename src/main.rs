@@ -26,6 +26,7 @@ mod pyhost;
 mod python;
 mod scheduler;
 mod web;
+mod wsclient;
 
 use assets::Assets;
 use auth::Auth;
@@ -210,7 +211,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let logs: SharedLogs = Arc::new(Mutex::new(VecDeque::new()));
     let ticks = Arc::new(AtomicU64::new(0));
     // 宿主 API 状态：两个运行时的适配层都往这里调（见 hostapi.rs）
-    let host = HostState::new(logs.clone(), db.clone(), plugins_dir.clone());
+    // WebSocket 句柄注册表挂在宿主状态上（跨调用有效 —— 见 hostapi::HostState::ws）。
+    // 连接任务跑在这个 runtime 上，而插件在引擎线程上**阻塞**地收发 —— 两边互不占。
+    let host = HostState::new(
+        logs.clone(),
+        db.clone(),
+        plugins_dir.clone(),
+        wsclient::Registry::new(tokio::runtime::Handle::current()),
+    );
 
     // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js|*.py，并注册 cron 任务） ----------
     let mut engine = JsEngine::spawn(
