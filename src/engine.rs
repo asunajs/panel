@@ -286,6 +286,8 @@ pub enum EngineCmd {
         plugin: String,
         name: String,
         expr: String,
+        /// 任务参数（JSON 文本，`None` = 没有）。面板**不解释**它的内容。
+        params: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     /// 停用 / 启用一个插件（写库；扫描那一轮就生效）
@@ -1281,10 +1283,11 @@ fn worker_main(
                 plugin,
                 name,
                 expr,
+                params,
                 reply,
             }) => {
                 let out = add_job(
-                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr,
+                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr, params,
                 );
                 let _ = reply.send(out);
             }
@@ -1494,15 +1497,16 @@ fn install_tasks(
                 continue;
             }
         };
-        match sched.add(&d.plugin, &d.name, &d.expr, sch, now) {
+        match sched.add(&d.plugin, &d.name, &d.expr, sch, now, d.params.clone()) {
             Ok(_) => {
                 let idx = sched.len() - 1;
-                specs.push((
-                    d.plugin.clone(),
-                    d.name.clone(),
-                    d.expr.clone(),
-                    Some(scheduler::fmt_ms(sched.tasks()[idx].next_fire)),
-                ));
+                specs.push(db::JobSpec {
+                    plugin: d.plugin.clone(),
+                    name: d.name.clone(),
+                    schedule: d.expr.clone(),
+                    next_run: Some(scheduler::fmt_ms(sched.tasks()[idx].next_fire)),
+                    params: d.params.clone(),
+                });
             }
             Err(e) => hostapi::push_log(logs, &d.plugin, "error", &format!("任务注册失败: {e}")),
         }
@@ -1678,7 +1682,7 @@ fn reinstall_panel_jobs(
         }
         // add_panel：面板任务必须带着 TaskSource::Panel 进调度器，
         // 否则下一轮 all_specs 会把它当成代码声明的任务喂给 sync_jobs（见 all_specs 注释）
-        match sched.add_panel(&job.plugin, &job.name, &job.schedule, schedule, now) {
+        match sched.add_panel(&job.plugin, &job.name, &job.schedule, schedule, now, job.params.clone()) {
             Ok(_) => {}
             Err(e) => hostapi::push_log(logs, &job.plugin, "error", &format!("面板任务重装失败: {e}")),
         }
@@ -1732,6 +1736,7 @@ fn add_job(
     plugin: &str,
     name: &str,
     expr: &str,
+    params: Option<String>,
 ) -> Result<(), String> {
     let now = Local::now();
 
@@ -1763,10 +1768,12 @@ fn add_job(
     }
 
     // add_panel 而不是 add：这条是面板创建的任务，不归 sync_jobs 管
-    let idx = sched.add_panel(plugin, name, expr, schedule, now)?;
+    let idx = sched.add_panel(plugin, name, expr, schedule, now, params.clone())?;
     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
     // 先落库。写库失败就把刚装上的任务摘掉，避免「调度器里在跑、库里没有」的假状态。
-    if let Err(e) = db::insert_panel_job(db, plugin, name, expr, Some(&next), &fmt_secs(now)) {
+    if let Err(e) =
+        db::insert_panel_job(db, plugin, name, expr, Some(&next), &fmt_secs(now), params.as_deref())
+    {
         sched.remove_task(plugin, name);
         return Err(format!("写库失败: {e}"));
     }
@@ -1867,7 +1874,7 @@ fn restore_job(
         .map_err(|e| format!("写库失败: {e}"))?;
     if sched.find(plugin, name).is_none() {
         sched
-            .add(plugin, name, &expr, schedule, now)
+            .add(plugin, name, &expr, schedule, now, row.params.clone())
             .map_err(|e| format!("装回调度器失败: {e}"))?;
         // 累计计数从库里灌回来（`add` 出来的是零计数）
         sched.seed_counters(plugin, name, row.runs.max(0) as u64, row.trips.max(0) as u32);
@@ -2165,7 +2172,7 @@ fn run_one(
     manual: bool,
 ) -> Result<(), String> {
     let now = Local::now();
-    let (plugin, name, expr, scheduled, runs_before) = {
+    let (plugin, name, expr, scheduled, runs_before, params_json) = {
         let t = &sched.tasks()[idx];
         (
             t.plugin.clone(),
@@ -2173,9 +2180,22 @@ fn run_one(
             t.expr.clone(),
             t.next_fire,
             t.runs,
+            t.params.clone(),
         )
     };
     let late_ms = (now - scheduled).num_milliseconds();
+
+    // 参数原样交给插件 —— 但**解析成 JSON 值**再塞进载荷，而不是当字符串。
+    // 插件那边 `p.params.account` 就能直接取；塞成字符串的话每个 handler
+    // 都得自己 JSON.parse 一遍，而且很容易忘。
+    //
+    // 解析失败按 `null` 处理：注册期已经用 `do_register_task` 挡过非法 JSON，
+    // 走到这里说明是有人手改过库。不 panic —— 一次任务拿到 null 参数，
+    // 比整个引擎线程挂掉好。
+    let params_value: serde_json::Value = params_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
 
     // 交给插件的载荷：全是 JSON 可序列化的普通字段（两个运行时看到的是同一份）
     let payload = serde_json::json!({
@@ -2186,6 +2206,7 @@ fn run_one(
         "scheduledAt": scheduler::fmt_ms(scheduled),
         "firedAt": scheduler::fmt_ms(now),
         "lateMs": late_ms,
+        "params": params_value,
     })
     .to_string();
 
@@ -2825,13 +2846,12 @@ fn all_specs(sched: &Scheduler) -> Vec<db::JobSpec> {
         .tasks()
         .iter()
         .filter(|t| t.source == scheduler::TaskSource::Code)
-        .map(|t| {
-            (
-                t.plugin.clone(),
-                t.name.clone(),
-                t.expr.clone(),
-                Some(scheduler::fmt_ms(t.next_fire)),
-            )
+        .map(|t| db::JobSpec {
+            plugin: t.plugin.clone(),
+            name: t.name.clone(),
+            schedule: t.expr.clone(),
+            next_run: Some(scheduler::fmt_ms(t.next_fire)),
+            params: t.params.clone(),
         })
         .collect()
 }
@@ -3689,14 +3709,14 @@ mod tests {
         let now = Local::now();
         for (plugin, task) in [("a", "t1"), ("b", "t2"), ("c", "t3")] {
             let sch = Schedule::parse("@every 1s").unwrap();
-            sched.add(plugin, task, "@every 1s", sch, now).unwrap();
+            sched.add(plugin, task, "@every 1s", sch, now, None).unwrap();
         }
         let specs = all_specs(&sched);
         assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部**代码声明的**任务");
-        let names: Vec<&str> = specs.iter().map(|(_, n, _, _)| n.as_str()).collect();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"t1") && names.contains(&"t2") && names.contains(&"t3"));
         // next_run 必须带上（面板靠它显示下次触发）
-        assert!(specs.iter().all(|(_, _, _, next)| next.is_some()));
+        assert!(specs.iter().all(|s| s.next_run.is_some()));
     }
 
     #[test]
@@ -3711,13 +3731,13 @@ mod tests {
         let now = Local::now();
         let sch = || Schedule::parse("@every 1s").unwrap();
 
-        sched.add("demo", "from-code", "@every 1s", sch(), now).unwrap();
+        sched.add("demo", "from-code", "@every 1s", sch(), now, None).unwrap();
         sched
-            .add_panel("demo", "from-panel", "@every 1s", sch(), now)
+            .add_panel("demo", "from-panel", "@every 1s", sch(), now, None)
             .unwrap();
 
         let specs = all_specs(&sched);
-        let names: Vec<&str> = specs.iter().map(|(_, n, _, _)| n.as_str()).collect();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["from-code"],

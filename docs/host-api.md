@@ -115,6 +115,7 @@ register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
+# 第四个参数：register_cron(name, expr, handler, { params })  —— 见下面「任务参数」
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -181,8 +182,46 @@ worker_hint('precision');   // 要落在精度线程上（毫秒级任务）
 
 验收脚本：`python3 scripts/worker_hint.py`（对照 / 声明 / 基线三组，见脚本头部）。
 
-### SQLite
+#### 任务参数：`register_cron(name, expr, handler, opts)` 的 `opts.params`
 
+```js
+// 同一个处理函数挂多条任务，各带各的数据 —— 名字不同、参数不同
+for (const account of ['alice', 'bob', 'carol']) {
+    register_cron('exchange-' + account, '*/1 * * * * *', doExchange, {
+        params: { account: account, slot: 3 },
+    });
+}
+// Python：register_cron('exchange-' + account, '*/1 * * * * *', do_exchange, {'account': account})
+```
+
+handler 里直接取：
+
+```js
+function doExchange(p) {
+    log(p.params.account);   // 'alice' —— 不用自己 JSON.parse
+}
+```
+
+**为什么需要它。** 抢兑要求所有账号**并行**发单 —— 串行会错过那几百毫秒的窗口。
+而面板只能把「一条任务」派给引擎。所以做法是插件注册 N 条任务（名字不同、
+处理函数相同、参数各带一个账号），面板照常调度，每条任务自己带上自己的参数。
+
+| 要点 | 说明 |
+|---|---|
+| 参数形状 | **任意 JSON**（对象、数组、字符串、数字都行）。面板不解释内容 |
+| 没给参数 | `p.params` 是 `null`（不是 `{}`，也不是 `undefined`） |
+| 落库 | 存在 `jobs.params` 列（JSON 文本），**重启后还在** |
+| 跟着代码走 | 插件重载时 `sync_jobs` 会把 `params` 收敛到代码声明的那一份（账号列表变了，重新声明一次就同步过去） |
+| 加载期校验 | 不可序列化的值（循环引用等）在**注册时**就报错，不会等到触发时才变成 `null` |
+| 上限 | 64 KiB（面板建的）。参数是**任务定义**的一部分，不该拿来存数据 —— 要存数据用插件自己的 SQLite |
+| 面板也能带 | `POST /api/jobs` 的 `params` 字段（任意 JSON）；只有 `register_handler` 登记的处理函数才能被面板挂上任务 |
+
+Node / CPython 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个参数，
+payload 里一样有）。
+
+验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
+
+### SQLite
 ```
 sqlite_query(sql, params) -> [ {列名: 值, ...}, ... ]
 sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
@@ -419,6 +458,7 @@ handler(payload) -> None
 | `register_cron` / `every` | ✅ | ✅ | ✅ | ✅ |
 | `register_handler`（只登记不调度） | ✅ | ✅ | ✅（配 `--job`） | ✅（配 `--job`） |
 | `worker_hint`（只做校验，无副作用） | ✅ | ✅ | ✅ | ✅ |
+| `register_cron` 的 `opts.params` | ✅ | ✅ | ✅ | ✅ |
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
 | `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
 | `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |

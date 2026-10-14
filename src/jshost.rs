@@ -73,14 +73,30 @@ globalThis.host_api = {
     },
 
     // 注册定时任务：表达式非法会直接抛错（加载期就失败，而不是等运行时才发现）
-    register_cron: function (name, expr, handler) {
+    //
+    // `opts.params`：任务参数，任意 JSON 可序列化的值（也可以直接给一个对象）。
+    // 它是**这条任务自己的**数据 —— 同一个处理函数挂多条任务、各带各的参数，
+    // 是「一个账号一条任务」那种模型的基础（见 scheduler::ScheduledTask::params）。
+    register_cron: function (name, expr, handler, opts) {
         if (typeof name !== 'string' || !name) throw new Error('register_cron(name, expr, handler): name 必须是非空字符串');
         if (typeof expr !== 'string' || !expr) throw new Error('register_cron: expr 必须是非空字符串');
         if (typeof handler !== 'function') throw new Error('register_cron: handler 必须是函数');
+        var params = '';
+        if (opts !== undefined && opts !== null) {
+            if (typeof opts !== 'object') throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...} }');
+            if (opts.params !== undefined && opts.params !== null) {
+                try {
+                    params = JSON.stringify(opts.params);
+                } catch (e) {
+                    throw new Error('register_cron: params 不是可序列化的值（' + e + '）');
+                }
+                if (params === undefined) throw new Error('register_cron: params 序列化后是 undefined，换个值');
+            }
+        }
         // 先查重再登记：__host_register_task 会把任务推进宿主侧 pending 列表，
         // 如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务。
         if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
-        var err = __host_register_task(name, expr);
+        var err = __host_register_task(name, expr, params);
         if (err) throw new Error(err);
         __register_task(name, handler);
         return name;
@@ -127,9 +143,9 @@ globalThis.host_api = {
         return name;
     },
 
-    every: function (name, interval, handler) {
+    every: function (name, interval, handler, opts) {
         if (typeof interval !== 'string' || !interval) throw new Error('every(name, interval, handler): interval 形如 "500ms" / "2s"');
-        return host_api.register_cron(name, '@every ' + interval, handler);
+        return host_api.register_cron(name, '@every ' + interval, handler, opts);
     },
 
     sqlite_query: function (sql, params) {
@@ -324,10 +340,25 @@ pub fn install_host<'js>(
     let plugin_for_tasks = plugin.clone();
     ctx.globals().set(
         "__host_register_task",
-        Func::new(move |name: String, expr: String| -> String {
+        Func::new(move |name: String, expr: String, params_json: String| -> String {
             if let Err(e) = crate::cron::Schedule::parse(&expr) {
                 return format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}");
             }
+            // 参数必须是合法 JSON（空串 = 没有参数）。在加载期挡掉，
+            // 而不是等第一次触发时插件才发现自己的参数是坏的。
+            let params = if params_json.trim().is_empty() {
+                None
+            } else {
+                match serde_json::from_str::<serde_json::Value>(&params_json) {
+                    Ok(_) => Some(params_json),
+                    Err(e) => {
+                        return format!(
+                            "任务 `{name}` 的参数不是合法 JSON: {e}（收到 {} 字节）",
+                            params_json.len()
+                        )
+                    }
+                }
+            };
             let mut guard = pending.lock().unwrap();
             if guard.iter().any(|t| t.name == name) {
                 return format!("插件 `{plugin_for_tasks}` 里已经注册过名为 `{name}` 的任务");
@@ -336,6 +367,7 @@ pub fn install_host<'js>(
                 plugin: plugin_for_tasks.clone(),
                 name,
                 expr,
+                params,
             });
             String::new()
         }),

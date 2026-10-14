@@ -99,20 +99,38 @@ function hasTask(name) {
   return scheduler().tasks.some((t) => t.name === name);
 }
 
-export function register_cron(name, expr, handler) {
+export function register_cron(name, expr, handler, opts) {
   // 与嵌入式宿主对齐：处理函数名在同一插件内唯一，重名直接报错而不是静默覆盖。
   // 任务之间的重名由 Scheduler 自己拒绝（错误文案不同，是刻意的）。
   if (handlers.has(name)) {
     throw new Error(`插件里已经有名为 \`${name}\` 的处理函数`);
   }
-  scheduler().add(name, expr, handler);
+  // 与嵌入式宿主对齐：第四个参数是 { params }，参数是**这条任务自己的**数据。
+  // 面板那边会把它落进 jobs.params 并在触发时透传；这里只存在内存里。
+  let params = null;
+  if (opts !== undefined && opts !== null) {
+    if (typeof opts !== 'object') {
+      throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...} }');
+    }
+    if (opts.params !== undefined && opts.params !== null) {
+      try {
+        // 过一遍序列化：不可序列化的值要**在加载期**报错，
+        // 而不是等触发时才在 payload 里变成 undefined（嵌入式宿主也是这个判据）
+        JSON.stringify(opts.params);
+      } catch (e) {
+        throw new Error(`register_cron: params 不是可序列化的值（${e}）`);
+      }
+      params = opts.params;
+    }
+  }
+  scheduler().add(name, expr, handler, params);
 }
 
-export function every(name, interval, handler) {
+export function every(name, interval, handler, opts) {
   if (typeof interval !== 'string' || interval === '') {
     throw new Error('every(name, interval, handler): interval 形如 "500ms" / "2s"');
   }
-  return register_cron(name, `@every ${interval}`, handler);
+  return register_cron(name, `@every ${interval}`, handler, opts);
 }
 
 /// 声明本插件对自己归属的**要求**（见面板 src/workers.rs 的 WorkerHint）。

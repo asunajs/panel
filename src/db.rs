@@ -108,6 +108,10 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 建回来），所以改成留一行墓碑：调度器不装它、列表默认不显示它，
     // 而 `sync_jobs` 认这个标记、不许把它的状态改回 running。
     ensure_column(&conn, "jobs", "deleted", "INTEGER NOT NULL DEFAULT 0")?;
+    // 第二十三轮：任务参数（JSON 文本）。为「一个账号一条任务」这种模型服务 ——
+    // 插件注册 N 条同名任务、用参数区分（见 scheduler::ScheduledTask::params）。
+    // 面板不理解这一列的内容，只负责原样存、原样交给 handler。
+    ensure_column(&conn, "jobs", "params", "TEXT")?;
     ensure_plugin_state(&conn)?;
 
     Ok(Arc::new(Mutex::new(conn)))
@@ -228,10 +232,29 @@ pub struct JobRow {
     pub source: String,
     pub created_at: String,
     pub updated_at: String,
+    /// 任务参数（JSON 文本，`None` = 没有参数）。面板只原样展示/透传，不解释内容 ——
+    /// 它的形状是插件定义的（见 [`JobSpec::params`]）。
+    pub params: Option<String>,
 }
 
-/// 一个待同步的任务定义：`(plugin, name, schedule, next_run)`。
-pub type JobSpec = (String, String, String, Option<String>);
+/// 一个待同步的任务定义。
+///
+/// 第二十三轮从 4 元组改成了结构体：加 `params` 的时候第 5 个位置放什么、谁在前谁在后
+/// 全靠数位置，太容易错。字段名自解释，编译器也帮着查。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobSpec {
+    pub plugin: String,
+    pub name: String,
+    /// 生效的调度表达式（插件代码声明的，或面板覆盖后的）
+    pub schedule: String,
+    pub next_run: Option<String>,
+    /// 任务参数：一段 JSON **文本**（`None` = 没有参数）。
+    ///
+    /// 为什么存文本而不是解析好的结构：这一列是插件自己给的（`register_cron(…, { params })`），
+    /// 面板**不理解**它的内容，只负责原样存、原样交给 handler。存文本就没有
+    /// 「面板要认识插件的数据结构」这层耦合。
+    pub params: Option<String>,
+}
 
 /// 把「当前插件代码里声明的任务集合」同步进库。
 ///
@@ -261,20 +284,24 @@ pub fn sync_jobs(
     let tx = guard.transaction()?;
 
     let mut taken_over = 0usize;
-    for (plugin, name, _, _) in specs {
+    for s in specs {
         taken_over += tx.execute(
             "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2 AND source = 'panel'",
-            params![plugin, name],
+            params![s.plugin, s.name],
         )?;
     }
 
-    for (plugin, name, schedule, next_run) in specs {
+    for s in specs {
         tx.execute(
             r#"
-            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, source, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'running', 0, ?4, 'plugin', ?5, ?5)
+            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, source, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, 'plugin', ?6, ?6)
             ON CONFLICT(plugin, name) DO UPDATE SET
                 schedule   = excluded.schedule,
+                -- 参数跟着代码走：账号列表变了，插件重新声明一次就该收敛过来。
+                -- 这一格**故意**可以被覆盖（不像 paused / deleted 那样要保住），
+                -- 因为「有哪些账号」只有插件知道，面板无从判断该不该保留旧的。
+                params     = excluded.params,
                 -- 注意：**不能**把 status 硬写成 'running'，也不能碰 paused / deleted。
                 -- 插件热更新会重跑一遍 sync_jobs：硬写会把用户暂停的任务悄悄恢复，
                 -- 也会把用户**删掉**的任务重新变成 running（墓碑失守 = 删除按钮骗人）。
@@ -289,7 +316,7 @@ pub fn sync_jobs(
             -- （上面已经删过了，正常走不到；留着是为了「删」和「写」两段逻辑各自自洽）。
             WHERE jobs.source = 'plugin'
             "#,
-            params![name, plugin, schedule, next_run, now],
+            params![s.name, s.plugin, s.schedule, s.next_run, s.params, now],
         )?;
     }
 
@@ -315,7 +342,7 @@ pub fn sync_jobs(
         }
         let still_declared = specs
             .iter()
-            .any(|(p, n, _, _)| p == &plugin && n == &name);
+            .any(|s| &s.plugin == &plugin && &s.name == &name);
         if !still_declared {
             tx.execute(
                 "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2",
@@ -604,12 +631,13 @@ pub fn set_job_status(
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
                            last_error, paused, source, created_at, updated_at, override_expr,
-                           deleted";
+                           deleted, params";
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
         // 新列一律追加在最后：这样既有的 r.get(n) 索引都不用动
+        params: r.get(16).unwrap_or(None),
         deleted: r.get(15).unwrap_or(0) != 0,
         override_expr: r.get(14)?,
         id: r.get(0)?,
@@ -656,14 +684,15 @@ pub fn insert_panel_job(
     schedule: &str,
     next_run: Option<&str>,
     now: &str,
+    params: Option<&str>,
 ) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     conn.execute(
         r#"
-        INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, source, created_at, updated_at)
-        VALUES (?1, ?2, ?3, 'running', 0, ?4, 'panel', ?5, ?5)
+        INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, source, created_at, updated_at)
+        VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, 'panel', ?6, ?6)
         "#,
-        params![name, plugin, schedule, next_run, now],
+        params![name, plugin, schedule, next_run, params, now],
     )
 }
 
@@ -796,7 +825,13 @@ mod tests {
     }
 
     fn spec(plugin: &str, name: &str, expr: &str) -> JobSpec {
-        (plugin.to_string(), name.to_string(), expr.to_string(), None)
+        JobSpec {
+            plugin: plugin.to_string(),
+            name: name.to_string(),
+            schedule: expr.to_string(),
+            next_run: None,
+            params: None,
+        }
     }
 
     fn get(db: &Db, plugin: &str, name: &str) -> JobRow {
@@ -812,7 +847,7 @@ mod tests {
     #[test]
     fn sync_jobs_does_not_touch_panel_rows() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None).unwrap();
 
         // 插件代码声明了另一个任务 —— 不能把面板创建的那条顺手删掉
         let taken = sync_jobs(&db, &[spec("p", "theirs", "@every 2s")], NOW, None).unwrap();
@@ -825,7 +860,7 @@ mod tests {
     #[test]
     fn sync_jobs_prunes_only_stale_plugin_rows() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None).unwrap();
         sync_jobs(&db, &[spec("p", "old", "@every 1s")], NOW, None).unwrap();
 
         // 这一轮插件代码里只剩 theirs：old 该被清掉，mine 该活着
@@ -840,7 +875,7 @@ mod tests {
     #[test]
     fn sync_jobs_lets_code_take_over_a_same_named_panel_row() {
         let db = mem();
-        insert_panel_job(&db, "p", "echo", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "p", "echo", "@every 1s", None, NOW, None).unwrap();
 
         // 插件代码里也声明了 echo → 代码优先，面板那条被接管
         let taken = sync_jobs(&db, &[spec("p", "echo", "@every 9s")], NOW, None).unwrap();
@@ -881,7 +916,7 @@ mod tests {
     #[test]
     fn panel_job_roundtrip_and_delete_guard() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None).unwrap();
         assert_eq!(job_source(&db, "p", "mine").unwrap().as_deref(), Some("panel"));
 
         // 插件声明的行不能被面板删掉（删了也会被 sync_jobs 装回来）
@@ -900,9 +935,9 @@ mod tests {
     #[test]
     fn duplicate_panel_job_is_rejected_by_the_unique_index() {
         let db = mem();
-        insert_panel_job(&db, "p", "x", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "p", "x", "@every 1s", None, NOW, None).unwrap();
         // 引擎线程里的校验是串行的，这里是兜底：宁可报错也不静默覆盖一条已有定义
-        assert!(insert_panel_job(&db, "p", "x", "@every 2s", None, NOW).is_err());
+        assert!(insert_panel_job(&db, "p", "x", "@every 2s", None, NOW, None).is_err());
         assert_eq!(get(&db, "p", "x").schedule, "@every 1s");
     }
 
@@ -927,8 +962,8 @@ mod tests {
         // 用 sync_jobs 建行：插件代码声明的任务走的是「按代码收敛」这条路，
         // `source` 才是 'plugin'（upsert_task 写的是另一张表 tasks，别用错）
         let specs: Vec<JobSpec> = vec![
-            ("a".into(), "t1".into(), "@every 30s".into(), None),
-            ("b".into(), "t2".into(), "@every 30s".into(), None),
+            spec("a", "t1", "@every 30s"),
+            spec("b", "t2", "@every 30s"),
         ];
         sync_jobs(&db, &specs, now, None).unwrap();
         assert!(list_job_overrides(&db, None).unwrap().is_empty());
@@ -971,7 +1006,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let db = open(&dir.join("tomb.db")).unwrap();
-        let specs: Vec<JobSpec> = vec![("p".into(), "t".into(), "@every 30s".into(), None)];
+        let specs: Vec<JobSpec> = vec![spec("p", "t", "@every 30s")];
         sync_jobs(&db, &specs, NOW, None).unwrap();
 
         set_job_deleted(&db, "p", "t", true, NOW).unwrap();
@@ -1037,8 +1072,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let db = open(&dir.join("del.db")).unwrap();
         let specs: Vec<JobSpec> = vec![
-            ("a".into(), "t1".into(), "@every 30s".into(), None),
-            ("b".into(), "t2".into(), "@every 30s".into(), None),
+            spec("a", "t1", "@every 30s"),
+            spec("b", "t2", "@every 30s"),
         ];
         sync_jobs(&db, &specs, NOW, None).unwrap();
         set_job_deleted(&db, "a", "t1", true, NOW).unwrap();
@@ -1070,7 +1105,7 @@ mod tests {
         let path = dir.join("ovrow.db");
         let db = open(&path).unwrap();
         let now = "2026-01-01 00:00:00";
-        let specs: Vec<JobSpec> = vec![("p".into(), "t".into(), "@every 30s".into(), None)];
+        let specs: Vec<JobSpec> = vec![spec("p", "t", "@every 30s")];
         sync_jobs(&db, &specs, now, None).unwrap();
         set_job_override(&db, "p", "t", Some("@every 3s"), now).unwrap();
         let row = list_jobs(&db)
@@ -1084,8 +1119,8 @@ mod tests {
     #[test]
     fn list_panel_jobs_filters_by_plugin() {
         let db = mem();
-        insert_panel_job(&db, "a", "one", "@every 1s", None, NOW).unwrap();
-        insert_panel_job(&db, "b", "two", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "a", "one", "@every 1s", None, NOW, None).unwrap();
+        insert_panel_job(&db, "b", "two", "@every 1s", None, NOW, None).unwrap();
         sync_jobs(&db, &[spec("a", "code", "@every 1s")], NOW, None).unwrap();
 
         let all = list_panel_jobs(&db, None).unwrap();
@@ -1100,7 +1135,7 @@ mod tests {
     #[test]
     fn list_job_counters_reads_both_sources() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None).unwrap();
         sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
         record_job_run(&db, "p", "mine", 5, 2, None, NOW, None, false, NOW).unwrap();
 
@@ -1116,7 +1151,7 @@ mod tests {
     #[test]
     fn set_job_status_keeps_paused_and_clears_next_run() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None).unwrap();
         set_job_paused(&db, "p", "mine", true, NOW).unwrap();
 
         set_job_status(&db, "p", "mine", "error", Some("处理函数没了"), NOW).unwrap();
@@ -1127,7 +1162,7 @@ mod tests {
         assert!(j.next_run.is_none(), "跑不起来的任务不该留着下次触发时刻");
 
         // 没暂停的那条才该显示 error
-        insert_panel_job(&db, "p", "other", "@every 1s", Some(NOW), NOW).unwrap();
+        insert_panel_job(&db, "p", "other", "@every 1s", Some(NOW), NOW, None).unwrap();
         set_job_status(&db, "p", "other", "error", Some("x"), NOW).unwrap();
         assert_eq!(get(&db, "p", "other").status, "error");
     }

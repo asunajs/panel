@@ -99,6 +99,16 @@ pub struct ScheduledTask {
     pub schedule: Schedule,
     /// 这条任务是插件代码声明的还是面板创建的（见 `TaskSource`）。
     pub source: TaskSource,
+    /// 任务参数（JSON 文本，`None` = 没有参数）。
+    ///
+    /// 为什么要这个东西：**同一个处理函数要能被多条任务复用，各自带不同的数据**。
+    /// 典型是「一个账号一条任务」—— 抢兑要求所有账号**并行**发单，串行会错过
+    /// 那几百毫秒的窗口；而面板只能把「一条任务」派给引擎。所以插件注册 N 条任务
+    /// （名字不同、处理函数相同、`params` 里各带一个账号），面板照常调度，
+    /// 每条任务自己带上自己的参数。
+    ///
+    /// 面板**不解释**这一列的内容 —— 它是插件的数据结构，只负责原样存、原样透传。
+    pub params: Option<String>,
     pub next_fire: DateTime<Local>,
     pub runs: u64,
     pub last_run: Option<String>,
@@ -151,8 +161,9 @@ impl Scheduler {
         expr: &str,
         schedule: Schedule,
         now: DateTime<Local>,
+        params: Option<String>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Code)
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Code, params)
     }
 
     /// 装一条**面板创建**的任务（`register_handler` + 面板上的「新建任务」）。
@@ -166,8 +177,9 @@ impl Scheduler {
         expr: &str,
         schedule: Schedule,
         now: DateTime<Local>,
+        params: Option<String>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel)
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel, params)
     }
 
     fn insert(
@@ -178,6 +190,7 @@ impl Scheduler {
         schedule: Schedule,
         now: DateTime<Local>,
         source: TaskSource,
+        params: Option<String>,
     ) -> Result<usize, String> {
         if self
             .tasks
@@ -196,6 +209,7 @@ impl Scheduler {
             override_expr: None,
             schedule,
             source,
+            params,
             next_fire,
             runs: 0,
             last_run: None,
@@ -507,7 +521,7 @@ mod tests {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
         let sch = Schedule::parse("@every 500ms").unwrap();
-        s.add("p", "fast", "@every 500ms", sch, now).unwrap();
+        s.add("p", "fast", "@every 500ms", sch, now, None).unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s.sleep_hint(now), Duration::from_millis(500));
     }
@@ -516,10 +530,10 @@ mod tests {
     fn duplicate_name_rejected() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("p", "a", "@every 1s", every_1s(), now).unwrap();
-        assert!(s.add("p", "a", "@every 1s", every_1s(), now).is_err());
+        s.add("p", "a", "@every 1s", every_1s(), now, None).unwrap();
+        assert!(s.add("p", "a", "@every 1s", every_1s(), now, None).is_err());
         // 不同插件同名是允许的
-        s.add("q", "a", "@every 1s", every_1s(), now).unwrap();
+        s.add("q", "a", "@every 1s", every_1s(), now, None).unwrap();
         assert_eq!(s.len(), 2);
     }
 
@@ -527,7 +541,7 @@ mod tests {
     fn due_and_advance_keeps_cadence() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("p", "t", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "t", "@every 1s", every_1s(), now, None).unwrap();
 
         let fire_at = now + ChronoDuration::seconds(1);
         assert_eq!(
@@ -549,7 +563,7 @@ mod tests {
     fn backlog_is_skipped_not_replayed() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("p", "t", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "t", "@every 1s", every_1s(), now, None).unwrap();
         let wake = now + ChronoDuration::seconds(10);
         s.advance(0, wake, None);
         assert!(s.tasks()[0].next_fire > wake);
@@ -568,6 +582,7 @@ mod tests {
             "@every 500ms",
             Schedule::parse("@every 500ms").unwrap(),
             t0,
+            None,
         )
         .unwrap();
 
@@ -586,9 +601,9 @@ mod tests {
     fn remove_plugin_drops_only_its_tasks() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
-        s.add("a", "t2", "@every 1s", every_1s(), now).unwrap();
-        s.add("b", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
+        s.add("a", "t2", "@every 1s", every_1s(), now, None).unwrap();
+        s.add("b", "t1", "@every 1s", every_1s(), now, None).unwrap();
 
         assert_eq!(s.remove_plugin("a"), 2);
         assert_eq!(s.len(), 1);
@@ -603,7 +618,7 @@ mod tests {
     fn paused_task_is_not_due_and_does_not_wake_the_loop() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("a", "t1", "@every 500ms", every_500ms(), now).unwrap();
+        s.add("a", "t1", "@every 500ms", every_500ms(), now, None).unwrap();
 
         assert_eq!(s.set_paused("a", "t1", true, now).unwrap(), false);
         // 暂停后即使时间已经越过 next_fire，也不该被判为到期
@@ -630,7 +645,7 @@ mod tests {
             max_cooldown: Duration::from_secs(600),
         });
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
         let idx = s.find("a", "t1").unwrap();
         s.advance(idx, now, Some("boom".into()));
         let cooldown_end = s.tasks()[idx].next_fire;
@@ -651,7 +666,7 @@ mod tests {
             max_cooldown: Duration::from_secs(600),
         });
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
         let idx = s.find("a", "t1").unwrap();
         let next_before = s.tasks()[idx].next_fire;
 
@@ -667,7 +682,7 @@ mod tests {
             base_cooldown: Duration::from_secs(60),
             max_cooldown: Duration::from_secs(600),
         });
-        s2.add("b", "t2", "@every 1s", every_1s(), at(0)).unwrap();
+        s2.add("b", "t2", "@every 1s", every_1s(), at(0), None).unwrap();
         let i = s2.find("b", "t2").unwrap();
         s2.advance(i, at(0), Some("boom".into()));
         assert!(s2.tasks()[i].tripped);
@@ -689,7 +704,7 @@ mod tests {
     fn trips_after_consecutive_failures() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("p", "bad", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "bad", "@every 1s", every_1s(), now, None).unwrap();
 
         // 前 threshold-1 次失败：还不熔断
         for i in 0..2 {
@@ -715,7 +730,7 @@ mod tests {
     fn success_resets_failure_streak() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("p", "flaky", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "flaky", "@every 1s", every_1s(), now, None).unwrap();
 
         s.advance(0, now, Some("f1".into()));
         s.advance(0, now, Some("f2".into()));
@@ -732,7 +747,7 @@ mod tests {
     fn cooldown_backs_off_exponentially() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("p", "bad", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "bad", "@every 1s", every_1s(), now, None).unwrap();
 
         // 第一次熔断：10s
         for _ in 0..3 {
@@ -761,7 +776,7 @@ mod tests {
     fn half_open_success_fully_recovers() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("p", "bad", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "bad", "@every 1s", every_1s(), now, None).unwrap();
 
         for _ in 0..3 {
             s.advance(0, now, Some("x".into()));
@@ -788,7 +803,7 @@ mod tests {
     fn tripped_task_still_has_deadline_for_retry() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("p", "bad", "@every 1s", every_1s(), now).unwrap();
+        s.add("p", "bad", "@every 1s", every_1s(), now, None).unwrap();
         for _ in 0..3 {
             s.advance(0, now, Some("x".into()));
         }
@@ -812,7 +827,7 @@ mod tests {
         let now = Local::now();
         let sch = Schedule::parse("@every 30s").unwrap();
         sched
-            .add("p", "t", "@every 30s", sch, now)
+            .add("p", "t", "@every 30s", sch, now, None)
             .unwrap();
 
         sched
@@ -834,7 +849,7 @@ mod tests {
         let mut sched = Scheduler::new(TripConfig::default());
         let now = Local::now();
         let sch = Schedule::parse("@every 30s").unwrap();
-        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        sched.add("p", "t", "@every 30s", sch, now, None).unwrap();
         sched
             .set_override("p", "t", Some("@every 2s"), now)
             .unwrap();
@@ -855,7 +870,7 @@ mod tests {
         let mut sched = Scheduler::new(TripConfig::default());
         let now = Local::now();
         let sch = Schedule::parse("@every 30s").unwrap();
-        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        sched.add("p", "t", "@every 30s", sch, now, None).unwrap();
         sched.seed_counters("p", "t", 7, 2);
         sched.set_paused("p", "t", true, now).unwrap();
 
@@ -873,7 +888,7 @@ mod tests {
         let mut sched = Scheduler::new(TripConfig::default());
         let now = Local::now();
         let sch = Schedule::parse("@every 30s").unwrap();
-        sched.add("p", "t", "@every 30s", sch, now).unwrap();
+        sched.add("p", "t", "@every 30s", sch, now, None).unwrap();
         assert!(sched.set_override("p", "t", Some("明天早上"), now).is_err());
         // 失败之后不能留下半改的状态：还是代码声明的节奏
         let t = &sched.tasks()[0];
@@ -894,9 +909,9 @@ mod tests {
     fn remove_task_takes_only_the_named_one() {
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
-        s.add("a", "t2", "@every 1s", every_1s(), now).unwrap();
-        s.add("b", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
+        s.add("a", "t2", "@every 1s", every_1s(), now, None).unwrap();
+        s.add("b", "t1", "@every 1s", every_1s(), now, None).unwrap();
 
         assert!(s.remove_task("a", "t1"));
         assert_eq!(s.len(), 2);
@@ -913,7 +928,7 @@ mod tests {
     fn seed_counters_restores_history_but_not_the_breaker() {
         let mut s = Scheduler::new(test_cfg());
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
 
         // 假设库里记着「跑过 42 次、历史上熔断过 2 次」
         assert!(s.seed_counters("a", "t1", 42, 2));
@@ -943,7 +958,7 @@ mod tests {
         // payload.runs = 内存计数 + 1：回灌之后，重启不会让插件看到的序号倒退回 1
         let mut s = Scheduler::new(TripConfig::default());
         let now = at(0);
-        s.add("a", "t1", "@every 1s", every_1s(), now).unwrap();
+        s.add("a", "t1", "@every 1s", every_1s(), now, None).unwrap();
         s.seed_counters("a", "t1", 99, 0);
         assert_eq!(s.tasks()[0].runs, 99);
         s.advance(0, now, None);

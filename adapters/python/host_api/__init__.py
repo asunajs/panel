@@ -410,13 +410,16 @@ class _Headers(dict):
 class Task(object):
     """一个被调度的任务。"""
 
-    def __init__(self, name, plugin, expr, schedule, handler, next_fire):
+    def __init__(self, name, plugin, expr, schedule, handler, next_fire, params=None):
         self.name = name
         self.plugin = plugin
         self.expr = expr
         self.schedule = schedule
         self.handler = handler
         self.next_fire = next_fire
+        # 这条任务**自己的**数据（同一个 handler 挂多条任务、各带各的）。
+        # 宿主只原样存、原样透传，不解释内容。
+        self.params = params
         self.runs = 0
         self.last_run = None
         self.last_error = None
@@ -468,19 +471,26 @@ class Host(object):
 
     # ---- 调度注册 ----
 
-    def register_cron(self, name, expr, handler):
+    def register_cron(self, name, expr, handler, params=None):
         if not isinstance(name, str) or not name.strip():
             raise ValueError("任务名不能为空")
         if not callable(handler):
             raise ValueError("任务 `{}` 的 handler 必须可调用".format(name))
+        if params is not None:
+            # 过一遍序列化：不可序列化的值要**在加载期**报错，
+            # 而不是等触发时才在 payload 里变成 None（嵌入式宿主也是这个判据）
+            try:
+                json.dumps(params)
+            except Exception as e:
+                raise ValueError("register_cron: params 不是可序列化的值（{}）".format(e))
         with self._lock:
             # 与 register_handler 共用同一个名字空间：两个方向都查重
             if name in self.handlers:
                 raise ValueError("插件里已经有名为 `{}` 的处理函数".format(name))
-            self._add_task(name, expr, handler)
+            self._add_task(name, expr, handler, params)
         return None
 
-    def _add_task(self, name, expr, handler):
+    def _add_task(self, name, expr, handler, params=None):
         """把任务装进调度表（调用方持锁）。任务之间的重名在这里拒绝。"""
         for existing in self.tasks:
             if existing.name == name:
@@ -491,11 +501,11 @@ class Host(object):
         next_fire = schedule.next_after(datetime.now())
         if next_fire is None:
             next_fire = datetime.now() + timedelta(days=_FALLBACK_DAYS)
-        self.tasks.append(Task(name, self.plugin, expr, schedule, handler, next_fire))
+        self.tasks.append(Task(name, self.plugin, expr, schedule, handler, next_fire, params))
         return None
 
-    def every(self, name, interval, handler):
-        return self.register_cron(name, "@every " + str(interval), handler)
+    def every(self, name, interval, handler, params=None):
+        return self.register_cron(name, "@every " + str(interval), handler, params)
 
     def register_handler(self, name, handler):
         """只登记处理函数，**不声明调度** —— 调度由宿主的面板创建（嵌入式宿主）。
@@ -660,6 +670,7 @@ class Host(object):
             "scheduledAt": fmt_ts(scheduled),
             "firedAt": fmt_ts(now),
             "lateMs": late_ms,
+            "params": task.params,
         }
 
     def fire_task(self, task, now=None, scheduled=None):
@@ -778,8 +789,8 @@ def schedule_handler(name, expr):
     return _host.schedule_handler(name, expr)
 
 
-def every(name, interval, handler):
-    return _host.every(name, interval, handler)
+def every(name, interval, handler, params=None):
+    return _host.every(name, interval, handler, params)
 
 
 def worker_hint(kind):

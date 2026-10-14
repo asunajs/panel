@@ -127,6 +127,8 @@ pub struct RawTaskDef {
     pub plugin: String,
     pub name: String,
     pub expr: String,
+    /// 任务参数（JSON 文本，`None` = 没给）。形状由插件定义，面板不解释。
+    pub params: Option<String>,
 }
 
 /// JS 插件注册的一条 HTTP 路由。
@@ -199,13 +201,34 @@ impl HostState {
     }
 
     /// 校验调度表达式并登记任务。返回 `Err` 表示表达式非法（插件加载期就会失败）。
-    pub fn do_register_task(&self, plugin: &str, name: &str, expr: &str) -> Result<(), String> {
+    ///
+    /// `params_json`：任务参数，一段 JSON 文本；空串 = 没有参数。
+    /// **在这里就把非法 JSON 挡掉**，和表达式同一个理由：让错误在加载期暴露，
+    /// 而不是等到第一次触发时插件才发现自己的参数是坏的。
+    pub fn do_register_task(
+        &self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        params_json: &str,
+    ) -> Result<(), String> {
         if name.is_empty() {
             return Err("任务名不能为空".to_string());
         }
         if let Err(e) = Schedule::parse(expr) {
             return Err(format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}"));
         }
+        let params = if params_json.trim().is_empty() {
+            None
+        } else {
+            if let Err(e) = serde_json::from_str::<Value>(params_json) {
+                return Err(format!(
+                    "任务 `{name}` 的参数不是合法 JSON: {e}（收到 {} 字节）",
+                    params_json.len()
+                ));
+            }
+            Some(params_json.to_string())
+        };
         let mut guard = self.vms.lock().unwrap();
         for b in guard.values_mut() {
             if b.plugin == plugin {
@@ -216,6 +239,7 @@ impl HostState {
                     plugin: plugin.to_string(),
                     name: name.to_string(),
                     expr: expr.to_string(),
+                    params,
                 });
                 return Ok(());
             }

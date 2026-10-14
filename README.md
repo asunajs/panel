@@ -2953,6 +2953,44 @@ cron 报 `scheduled=.000 → fired=.009`（真晚 9ms）。
 **教训**：做 A/B 对照时，两个任务的**时间网格必须对齐**，否则测的是运气。
 （这和 §16.19 那条「空样本也算过」是同一类：断言绿了但什么都没测到。）
 
+### 16.27 任务参数：同一个处理函数挂多条任务（第二十三轮）
+
+**问题**：抢兑要求所有账号**并行**发单 —— 串行会错过那几百毫秒的窗口。而面板只能把
+「一条任务」派给引擎。之前只能靠插件自己在 handler 里循环账号，那就必然串行。
+
+**做法**：任务带上参数。插件注册 N 条任务（名字不同、处理函数相同、`params` 里各带
+一个账号），面板照常调度，每条任务自己带上自己的参数。
+
+```js
+for (const account of ['alice', 'bob', 'carol']) {
+    register_cron('exchange-' + account, '*/1 * * * * *', doExchange, { params: { account } });
+}
+function doExchange(p) { log(p.params.account); }   // 不用自己 JSON.parse
+```
+
+**几处刻意的设计**：
+
+| 决定 | 为什么 |
+|---|---|
+| 参数存**文本**（`jobs.params`），面板不解析 | 面板**不理解**它的内容，只负责原样存、原样透传。否则「面板要认识插件的数据结构」这层耦合就来了 |
+| payload 里是**解析好的 JSON 值**，不是字符串 | 插件那边 `p.params.account` 直接取；塞字符串的话每个 handler 都得自己 `JSON.parse`，很容易忘 |
+| 没给参数 → `null` | 不是 `{}`、不是 `undefined`。三者语义不同，含糊会让人写出 `p.params?.x ?? y` 这种防御代码 |
+| `sync_jobs` **收敛** `params` | 「有哪些账号」只有插件知道；账号变了重新声明一次就该同步过去。（不像 `paused` / `deleted` 那样要保住用户意图） |
+| 加载期校验可序列化 | 循环引用之类的值在**注册时**就报错，不会等触发时才在 payload 里变成 `null` —— 静默是这里最坏的失败模式 |
+| 面板建的参数上限 64 KiB | 参数是**任务定义**的一部分，不该拿来当数据仓库用（要存数据用插件自己的 SQLite） |
+| `JobSpec` 从 4 元组改成结构体 | 加第 5 个字段时全靠数位置太容易错，字段名自解释、编译器也帮着查 |
+
+**实测验收**（`scripts/params_check.py`，夹具 `examples/params/params.js`）：
+
+```
+第一次启动  三条同处理函数的任务各拿到 {"account": "alice"|"bob"|"carol", "slot": 3}
+           无参数的那条拿到 null · 数组参数那条拿到 ["x", 1, true]
+           三条没串味（账号互不相同）
+重启之后    五条任务的参数全部原样还在（走 jobs.params 那一列）
+面板路径    能建带参数的任务（http 200）· 参数落进 jobs 表 ·
+           与插件任务重名会被拒（400）· 超大参数被挡（400）
+```
+
 ## 17. 发布到 GitHub（`asunajs/panel`）这一轮踩到的三个坑
 
 仓库推到 [asunajs/panel](https://github.com/asunajs/panel)，CI 跑在**真 ARM64 Linux 硬件**上

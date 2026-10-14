@@ -45,6 +45,13 @@ struct AddJobReq {
     name: String,
     /// 调度表达式（cron 5/6 段，或 `@every 500ms`）
     expr: String,
+    /// 任务参数：任意 JSON 值。面板**不解释**它的内容，原样存、原样交给 handler。
+    ///
+    /// 为什么面板要有这一格：插件可以用同一个处理函数挂多条任务、各带各的参数
+    /// （「一个账号一条任务」就是靠它）。而面板能提供的只有调度 —— 参数得让用户
+    /// 或插件填进来，否则那种模型没法在面板上建。
+    #[serde(default)]
+    params: Option<serde_json::Value>,
 }
 
 /// 面板编辑任务的请求体（只有表达式可改：插件名与处理函数名是任务的**身份**）。
@@ -546,6 +553,25 @@ async fn add_job(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
+    // 参数原样转成 JSON 文本。上限 64 KiB：它是任务定义的一部分，
+    // 不该被拿来当数据仓库用（真要存数据，插件有自己的 SQLite）。
+    let params_json = match &req.params {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let s = v.to_string();
+            if s.len() > 64 * 1024 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "ok": false,
+                        "error": "任务参数太大（上限 64 KiB）—— 参数是任务定义的一部分，不该拿来存数据"
+                    })),
+                )
+                    .into_response();
+            }
+            Some(s)
+        }
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Err(r) = route_code(
         &st,
@@ -554,6 +580,7 @@ async fn add_job(
             plugin: req.plugin.clone(),
             name: req.name.clone(),
             expr: req.expr.clone(),
+            params: params_json,
             reply: tx,
         },
         StatusCode::BAD_REQUEST,

@@ -333,7 +333,7 @@ test('register_cron + every 触发：载荷字段、runs 递增、跳拍推进',
   await s.tick(base);
   assert.equal(seen.length, 1);
   const p = seen[0];
-  assert.deepEqual(Object.keys(p).sort(), ['expr', 'firedAt', 'lateMs', 'name', 'plugin', 'runs', 'scheduledAt']);
+  assert.deepEqual(Object.keys(p).sort(), ['expr', 'firedAt', 'lateMs', 'name', 'params', 'plugin', 'runs', 'scheduledAt']);
   assert.equal(p.name, 'c5');
   assert.equal(p.plugin, 'unit');
   assert.equal(p.expr, '*/5 * * * * *');
@@ -342,6 +342,7 @@ test('register_cron + every 触发：载荷字段、runs 递增、跳拍推进',
   assert.equal(p.firedAt, fmtMs(base));
   assert.match(p.firedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
   assert.equal(p.lateMs, 0, '准时触发 lateMs=0');
+  assert.equal(p.params, null, '没给参数就是 null（不是 {} 也不是 undefined）');
   assert.equal(task.nextFire, base + 5000, '以原定时刻为基准推进');
   assert.equal(task.runs, 1);
   assert.equal(task.lastError, null);
@@ -378,6 +379,44 @@ test('真实计时：every 50ms 在 320ms 内至少触发 4 次', async () => {
   }
   assert.ok(n >= 4, `实际触发 ${n} 次`);
 });
+
+test('params：每条任务各带各的，原样到达 handler（不串味）', async () => {
+  const s = new Scheduler('params-test');
+  const got = [];
+  // 同一个处理函数挂三条任务，各带各的账号 —— 「一个账号一条任务」那个模型的最小形态
+  for (const account of ['a', 'b']) {
+    s.add('job-' + account, '@every 1s', (p) => got.push([p.name, p.params]), { account });
+  }
+  s.add('job-plain', '@every 1s', (p) => got.push([p.name, p.params]));
+  s.add('job-arr', '@every 1s', (p) => got.push([p.name, p.params]), ['x', 1, true]);
+
+  await s.tick(Date.now() + 2000);
+
+  const byName = Object.fromEntries(got);
+  assert.deepEqual(byName['job-a'], { account: 'a' }, '各拿各的，不串味');
+  assert.deepEqual(byName['job-b'], { account: 'b' });
+  assert.equal(byName['job-plain'], null, '没给参数就是 null（不是 {} 也不是 undefined）');
+  assert.deepEqual(byName['job-arr'], ['x', 1, true], '参数是任意 JSON，不限于对象');
+});
+
+test('register_cron 的 opts.params：拼错在加载期就报错，不等到触发', () => {
+  host.__host.setPluginName('opts-test');
+  // 第四个参数不是对象
+  assert.throws(() => register_cron('bad1', '@every 1s', () => {}, 'oops'), /第四个参数必须是对象/);
+  // 不可序列化的值（循环引用）—— 不能等触发时才在 payload 里变成 undefined
+  const circular = {};
+  circular.self = circular;
+  assert.throws(
+    () => register_cron('bad2', '@every 1s', () => {}, { params: circular }),
+    /不是可序列化的值/,
+  );
+  // 给了合法的 opts 就该成功（否则上面两条断言可能只是因为「全都抛」而通过）
+  register_cron('ok1', '@every 1s', () => {}, { params: { a: 1 } });
+  // opts 给了但没有 params 这一格：等价于没给
+  register_cron('ok2', '@every 1s', () => {}, {});
+  host.__host.setPluginName('unit-test');
+});
+
 
 test('handler 抛异常被捕获、记 last_error、不退出、不影响其他任务', async () => {
   const s = new Scheduler('unit');

@@ -34,7 +34,7 @@ if ADAPTER_DIR not in sys.path:
 import host_api  # noqa: E402  （必须在 sys.path 调整之后）
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
-PAYLOAD_KEYS = {"name", "plugin", "expr", "runs", "scheduledAt", "firedAt", "lateMs"}
+PAYLOAD_KEYS = {"name", "plugin", "expr", "runs", "scheduledAt", "firedAt", "lateMs", "params"}
 
 
 def capture_stderr(func, *args, **kwargs):
@@ -411,6 +411,42 @@ class TestEveryAndFire(unittest.TestCase):
             self.assertIsInstance(payload["lateMs"], int)
             self.assertGreaterEqual(payload["lateMs"], 0)
             self.assertLess(payload["lateMs"], 1000)
+
+    def test_params_are_per_task_and_reach_the_handler(self):
+        # 同一个处理函数挂多条任务、各带各的 —— 「一个账号一条任务」那个模型的最小形态
+        host = host_api.Host(plugin="p")
+        got = {}
+        for account in ("a", "b"):
+            host.register_cron(
+                "job-" + account,
+                "@every 1s",
+                (lambda p: got.__setitem__(p["name"], p["params"])),
+                {"account": account},
+            )
+        host.register_cron("job-plain", "@every 1s", lambda p: got.__setitem__(p["name"], p["params"]))
+        host.register_cron(
+            "job-arr", "@every 1s", lambda p: got.__setitem__(p["name"], p["params"]), ["x", 1, True]
+        )
+
+        run_ticks(host, 1.2)
+
+        self.assertEqual(got["job-a"], {"account": "a"}, "各拿各的，不串味")
+        self.assertEqual(got["job-b"], {"account": "b"})
+        self.assertIsNone(got["job-plain"], "没给参数就是 None")
+        self.assertEqual(got["job-arr"], ["x", 1, True], "参数是任意 JSON，不限于对象")
+
+    def test_params_reject_unserializable_at_load_time(self):
+        # 静默是这里最坏的失败模式：插件以为参数挂上了，触发时却变成 None。
+        host = host_api.Host(plugin="p")
+        circular = {}
+        circular["self"] = circular
+        with self.assertRaises(ValueError):
+            host.register_cron("bad", "@every 1s", lambda p: None, circular)
+        # 合法的要能过 —— 否则上面那条断言可能只是因为「全都抛」而通过
+        host.register_cron("ok", "@every 1s", lambda p: None, {"a": 1})
+        host.register_cron("ok2", "@every 1s", lambda p: None)
+        self.assertEqual(len(host.tasks), 2)
+
 
     def test_cadence_does_not_drift(self):
         # 以原定触发时刻为基准推进：执行耗时（30ms/25ms）不累积成漂移

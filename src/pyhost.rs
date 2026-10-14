@@ -51,20 +51,24 @@ extern "C" fn native_log(argc: c_int, argv: PyStackRef) -> bool {
     true
 }
 
-/// `_register_task(name, expr) -> str`：返回空串 = 成功，非空 = 错误消息。
+/// `_register_task(name, expr, params_json) -> str`：返回空串 = 成功，非空 = 错误消息。
 ///
 /// 这里返回错误字符串而不是抛异常，是为了让 Python 侧的 `register_cron` 决定
 /// 是抛 `ValueError` 还是别的 —— 语义与 JS 侧的 `__host_register_task` 完全一致。
 extern "C" fn native_register_task(argc: c_int, argv: PyStackRef) -> bool {
-    if argc != 2 {
-        return python::raise_value_error(&format!("_register_task 需要 2 个参数，收到 {argc}"));
+    if argc != 3 {
+        return python::raise_value_error(&format!("_register_task 需要 3 个参数，收到 {argc}"));
     }
-    let (Some(name), Some(expr)) = (python::arg_str(argv, 0), python::arg_str(argv, 1)) else {
-        return python::raise_value_error("_register_task(name, expr): 两个参数都必须是字符串");
+    let (Some(name), Some(expr), Some(params_json)) = (
+        python::arg_str(argv, 0),
+        python::arg_str(argv, 1),
+        python::arg_str(argv, 2),
+    ) else {
+        return python::raise_value_error("_register_task(name, expr, params): 三个参数都必须是字符串");
     };
     let plugin = current_plugin();
     let msg = match state() {
-        Some(s) => match s.do_register_task(&plugin, &name, &expr) {
+        Some(s) => match s.do_register_task(&plugin, &name, &expr, &params_json) {
             Ok(()) => String::new(),
             Err(e) => e,
         },
@@ -188,7 +192,7 @@ __pp_tasks = {}
 def __pp_log(level, msg):
     _h._log_raw(level, str(msg))
 
-def __pp_register(name, expr, handler):
+def __pp_register(name, expr, handler, params=None):
     if not callable(handler):
         raise TypeError("register_cron(name, expr, handler): handler 必须可调用")
     key = str(name)
@@ -196,7 +200,15 @@ def __pp_register(name, expr, handler):
     # 重名判断放在它后面的话，一次失败的注册会在宿主流下一个幽灵任务。
     if key in __pp_tasks:
         raise ValueError("插件里已经有名为 `" + key + "` 的处理函数")
-    err = _h._register_task(key, str(expr))
+    # params 是**这条任务自己的**数据（同一个处理函数挂多条任务、各带各的参数）。
+    # 序列化成 JSON 交给宿主；`None` = 没有参数。
+    params_json = ""
+    if params is not None:
+        try:
+            params_json = _json.dumps(params)
+        except Exception as e:
+            raise ValueError("register_cron: params 不是可序列化的值（" + str(e) + "）")
+    err = _h._register_task(key, str(expr), params_json)
     if err:
         raise ValueError(err)
     __pp_tasks[key] = handler
@@ -240,8 +252,8 @@ def __pp_has_task(name):
         return "1"
     return ""
 
-def __pp_every(name, interval, handler):
-    return __pp_register(name, "@every " + str(interval), handler)
+def __pp_every(name, interval, handler, params=None):
+    return __pp_register(name, "@every " + str(interval), handler, params)
 
 def __pp_sqlite(sql, params, is_query):
     raw = _h._sqlite(str(sql), _json.dumps(params if params is not None else []), "1" if is_query else "0")
@@ -311,7 +323,7 @@ pub fn install(vm: &mut python::PyVm) -> Result<(), String> {
     // —— 前者说的是「这个能力不存在」，后者会让人以为是自己写错了。
     let m = python::new_module("host_api");
     python::bind(m, "_log_raw(level, msg)", native_log as PyCFunction);
-    python::bind(m, "_register_task(name, expr)", native_register_task as PyCFunction);
+    python::bind(m, "_register_task(name, expr, params)", native_register_task as PyCFunction);
     python::bind(m, "_sqlite(sql, params_json, is_query)", native_sqlite as PyCFunction);
     python::bind(m, "_http_fetch(url, options_json)", native_http_fetch as PyCFunction);
     python::bind(

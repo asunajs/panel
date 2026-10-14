@@ -2,7 +2,7 @@
 //   - 任务名在同一插件内唯一，重名直接抛错（不静默覆盖）
 //   - handler 正常返回 = 成功；抛异常 = 失败，记录 last_error，不影响其他任务、不退出进程
 //   - 推进下一次触发时刻时以「原定的触发时刻」为基准，落后太多才从 now 重算（跳拍）
-//   - payload 固定为 {name, plugin, expr, runs, scheduledAt, firedAt, lateMs}
+//   - payload 固定为 {name, plugin, expr, runs, scheduledAt, firedAt, lateMs, params}
 
 import { Schedule } from './cron.js';
 
@@ -49,7 +49,7 @@ export class Scheduler {
   }
 
   /// 注册任务。name 同插件内唯一；expr 非法直接抛错（宿主加载期就该失败）。
-  add(name, expr, handler) {
+  add(name, expr, handler, params = null) {
     if (typeof name !== 'string' || name === '') {
       throw new Error('register_cron(name, expr, handler): name 必须是非空字符串');
     }
@@ -69,6 +69,9 @@ export class Scheduler {
       expr,
       schedule,
       handler,
+      // 这条任务**自己的**数据（同一个 handler 挂多条任务、各带各的）。
+      // 宿主只原样存、原样透传，不解释内容。
+      params,
       runs: 0,
       lastRun: null,
       lastError: null,
@@ -109,6 +112,7 @@ export class Scheduler {
       scheduledAt: fmtMs(scheduledAt),
       firedAt: fmtMs(firedAt),
       lateMs,
+      params: task.params ?? null,
     };
   }
 
