@@ -115,6 +115,27 @@ export function every(name, interval, handler) {
   return register_cron(name, `@every ${interval}`, handler);
 }
 
+/// 声明本插件对自己归属的**要求**（见面板 src/workers.rs 的 WorkerHint）。
+///
+/// ⚠ 这是**声明**，不是运行时调用：面板在创建解释器**之前**就靠源码文本扫描
+/// 读走了它（分配必须早于解释器存在）。所以这里只做参数校验，没有副作用 ——
+/// 调用它不会改变任何东西。作用是把拼写错误在**加载期**变成一条明确的报错，
+/// 而不是让插件静默地拿到一个它没要求的线程。
+///
+/// Node 适配器里没有 worker 池（只有一条事件循环），所以这里纯粹是「语法检查」：
+/// 同一个插件在面板里和在适配器里跑，写法要一致，不能因为换了宿主就报
+/// "worker_hint is not a function"。
+export function worker_hint(kind) {
+  if (kind !== 'precision' && kind !== 'exclusive') {
+    throw new Error(
+      `worker_hint(kind): kind 只能是 'precision' 或 'exclusive'，收到 ${JSON.stringify(kind)}。\n` +
+        "  'precision' —— 要落在精度线程上（毫秒级任务）\n" +
+        "  'exclusive' —— 要独占一条线程（会长时间占住线程，或错过就废）",
+    );
+  }
+  return kind;
+}
+
 /// 只登记处理函数，**不声明调度** —— 调度由宿主的面板创建（嵌入式宿主）。
 ///
 /// Node 适配器里没有面板，所以本地用运行器的 `--job <name>=<expr>` 把它挂上调度：
@@ -193,6 +214,7 @@ const PUBLIC = {
   register_cron,
   register_handler,
   every,
+  worker_hint,
   sqlite_query,
   sqlite_exec,
   http_fetch,

@@ -41,6 +41,7 @@ __all__ = [
     "register_handler",
     "schedule_handler",
     "every",
+    "worker_hint",
     "sqlite_query",
     "sqlite_exec",
     "http_fetch",
@@ -779,6 +780,28 @@ def schedule_handler(name, expr):
 
 def every(name, interval, handler):
     return _host.every(name, interval, handler)
+
+
+def worker_hint(kind):
+    """声明本插件对自己归属的**要求**（见面板 src/workers.rs 的 WorkerHint）。
+
+    ⚠ 这是**声明**，不是运行时调用：面板在创建解释器**之前**就靠源码文本扫描
+    读走了它（分配必须早于解释器存在）。所以这里只做参数校验，没有副作用 ——
+    调用它不会改变任何东西。作用是把拼写错误在**加载期**变成一条明确的报错，
+    而不是让插件静默地拿到一个它没要求的线程。
+
+    Python 适配器里没有 worker 池，所以这里纯粹是「语法检查」：同一个插件在
+    面板里和在适配器里跑，写法要一致，不能因为换了宿主就 NameError。
+    """
+    k = str(kind)
+    if k not in ("precision", "exclusive"):
+        raise ValueError(
+            "worker_hint(kind): kind 只能是 'precision' 或 'exclusive'，"
+            f"收到 {kind!r}\n"
+            "  'precision' —— 要落在精度线程上（毫秒级任务）\n"
+            "  'exclusive' —— 要独占一条线程（会长时间占住线程，或错过就废）"
+        )
+    return k
 
 
 def sqlite_query(sql, params=None):

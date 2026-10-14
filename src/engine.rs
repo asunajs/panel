@@ -474,14 +474,24 @@ impl JsEngine {
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_EXEC_BUDGET_MS);
 
-        let workers_n = env_usize("ENGINE_WORKERS", DEFAULT_ENGINE_WORKERS);
+        let workers_cfg = env_usize("ENGINE_WORKERS", DEFAULT_ENGINE_WORKERS);
         let pin = parse_pin(&std::env::var("ENGINE_PIN").unwrap_or_default());
 
         // 分配发生在**创建解释器之前**，所以只能靠源码文本扫出「哪个插件要精度」
-        // （见 workers 模块的说明）。每条决策都打日志，分错了看得见。
+        // 和「哪个插件要独占」（见 workers 模块的说明）。每条决策都打日志，分错了看得见。
         let files = scan_plugins(&plugins_dir);
         let costs = workers::scan_costs(&files, plugin_name_of);
+        // 插件声明了独占，就**自动**给够线程 —— 不让用户去算 `ENGINE_WORKERS`：
+        // 这是「装在自己设备上」的场景，没人会去读文档调环境变量。
+        let exclusive = costs.iter().filter(|c| c.hint.is_exclusive()).count();
+        let workers_n = workers::required_workers(&costs, workers_cfg);
         let plan = workers::plan(&costs, workers_n, &pin);
+        if workers_n > workers_cfg {
+            println!(
+                "[engine] ENGINE_WORKERS={workers_cfg}，但有 {exclusive} 个插件声明了 worker_hint('exclusive') \
+                 ⇒ 自动抬到 {workers_n} 条执行线程"
+            );
+        }
         println!("[engine] {workers_n} 条执行线程（ENGINE_WORKERS 可调）：");
         for note in &plan.notes {
             println!("[engine]   {note}");
@@ -1395,14 +1405,19 @@ fn worker_main(
                 for f in &all {
                     if a.owner_of(f).is_none() {
                         let name = plugin_name_of(f);
-                        let finest = std::fs::read_to_string(f)
-                            .ok()
-                            .and_then(|src| workers::finest_interval_ms(&src));
-                        let w = a.claim(f, &name, finest, workers_n);
+                        let src = std::fs::read_to_string(f).unwrap_or_default();
+                        let finest = workers::finest_interval_ms(&src);
+                        let hint = workers::WorkerHint::scan(&src);
+                        let (w, warn) = a.claim_with(f, &name, finest, hint, workers_n);
                         println!(
                             "[engine:0] 新插件 `{name}` 归到 worker {w}（运行期认领，最细 {:?}ms）",
                             finest
                         );
+                        // 运行期出现的独占插件拿不到独占槽位（线程是启动时建的）——
+                        // 不能装作它已经独占，所以把警告打出来。
+                        if let Some(w) = warn {
+                            println!("[engine:0] ⚠️ {w}");
+                        }
                     }
                 }
             }

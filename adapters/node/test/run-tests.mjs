@@ -113,6 +113,7 @@ test('规范里的 10 个函数都挂在全局，并带 host 命名空间别名'
     'register_cron',
     'register_handler',
     'every',
+    'worker_hint',
     'sqlite_query',
     'sqlite_exec',
     'http_fetch',
@@ -124,6 +125,18 @@ test('规范里的 10 个函数都挂在全局，并带 host 命名空间别名'
   // 仓库 QuickJS 宿主的写法：host.cron / host.every
   assert.equal(typeof globalThis.host.cron, 'function');
   assert.equal(globalThis.host.cron, globalThis.register_cron);
+});
+
+test('worker_hint 是声明：合法值原样返回，拼错在加载期报错', () => {
+  // 合法值：返回自己（跟面板侧一致），不产生任何副作用
+  assert.equal(worker_hint('precision'), 'precision');
+  assert.equal(worker_hint('exclusive'), 'exclusive');
+
+  // 拼错 / 传别的：必须**立刻**抛，不能静默 —— 否则插件会以为自己声明成功了，
+  // 而面板那边扫不到，于是它被塞进共享线程（抢兑就是这么废掉的）。
+  for (const bad of ['exclusiv', 'Exclusive', '', 'fast', undefined, null]) {
+    assert.throws(() => worker_hint(bad), /worker_hint/, `应当拒绝 ${JSON.stringify(bad)}`);
+  }
 });
 
 // ---------------------------------------------------------------- 2. SQLite

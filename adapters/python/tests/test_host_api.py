@@ -376,6 +376,23 @@ class TestEveryAndFire(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.every("t", "2s", lambda p: None)
 
+    def test_worker_hint_is_a_declaration(self):
+        # 合法值原样返回，且**不碰调度** —— 它是声明，面板在创建解释器之前
+        # 就靠源码扫描读走了它，这里只是把拼写错误在加载期变成报错。
+        self.assertEqual(host_api.worker_hint("precision"), "precision")
+        self.assertEqual(host_api.worker_hint("exclusive"), "exclusive")
+
+        host = host_api.Host(plugin="p")
+        host_api.worker_hint("exclusive")
+        self.assertEqual(len(host.tasks), 0, "声明不该注册任何任务")
+
+    def test_worker_hint_rejects_typos_loudly(self):
+        # 静默是这里最坏的失败模式：插件以为声明成功了，面板却扫不到，
+        # 于是它被塞进共享线程 —— 抢兑就是这么废掉的。
+        for bad in ["exclusiv", "Exclusive", "", "fast", None]:
+            with self.assertRaises(ValueError, msg=f"应当拒绝 {bad!r}"):
+                host_api.worker_hint(bad)
+
     def test_payload_shape_and_runs_sequence(self):
         host = host_api.Host(plugin="test_plugin")
         seen = []

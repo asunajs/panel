@@ -114,6 +114,7 @@ Node/CPython 适配器写 stderr，格式 `[host-api] [level] msg`。
 register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
+worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -140,6 +141,45 @@ register_handler(name, handler)    -> None      # 只登记处理函数，不声
 同一个 `register_handler` 登记的处理函数可以被面板上的**多条**任务复用（挂不同表达式）。
 插件热更新时，面板创建的任务会跟着重新装载；如果处理函数在新版本里没有了，
 任务定义**保留**、状态标成 `error` 并在日志里说明原因，而不是静默消失。
+
+#### `worker_hint`：声明「我跑在哪条线程上」
+
+```js
+import { worker_hint } from 'host-api';
+worker_hint('exclusive');   // 要独占一条线程
+// 或
+worker_hint('precision');   // 要落在精度线程上（毫秒级任务）
+```
+
+解释器不是 `Send`，所以每个插件跑在**一条**引擎线程上（见 `src/workers.rs`）。
+面板默认按「最细调度间隔 < 1s ⇒ 要精度」的启发式分配，但有一类任务**光看间隔看不出来**：
+
+> 抢兑的表达式是 `0 10 * * *`（一天一次，粗粒度），可它到点那一刻差几十毫秒就没了。
+> 启发式会把它和「跑三分钟的日常」放进同一个负载池 ⇒ 抢兑被挡住整个窗口。
+
+而这是「用户装在自己设备上」的场景 —— 不能让每个用户去配 `ENGINE_PIN`。所以：
+
+| `kind` | 含义 | 面板做什么 |
+|---|---|---|
+| `'precision'` | 要落在精度线程上 | 归到 worker 0 |
+| `'exclusive'` | 要**独占**一条线程 | 给它一条只跑它自己的线程，并**自动把线程数抬到够用** |
+
+声明了 `exclusive` 时，面板会把 `ENGINE_WORKERS` 抬到 `独占数 + 1`（只抬不降），
+启动日志里会打一句「⇒ 自动抬到 N 条执行线程」。**用户不需要配任何环境变量。**
+
+⚠ 三条要注意的：
+
+- **这是声明，不是运行时调用。** 面板在创建解释器**之前**就靠源码文本扫描读走了它
+  （分配必须早于解释器存在），所以运行时调用它没有任何副作用。留着这个函数是为了
+  把拼写错误在**加载期**变成一条明确的报错，而不是让插件静默地拿到它没要求的线程。
+- **只认代码里的调用。** 注释和字符串里出现的 `worker_hint('exclusive')` 只是文本
+  （文档里写句例子不会把你的插件变成独占）。
+- **运行期新出现的插件拿不到独占** —— 线程是启动时建的，加不了。面板会照常加载它、
+  但打一句警告说明「要重启才生效」，不静默降级。
+
+`ENGINE_PIN`（环境变量）优先级**高于**插件自己的声明 —— 它是逃生门，不能失灵。
+
+验收脚本：`python3 scripts/worker_hint.py`（对照 / 声明 / 基线三组，见脚本头部）。
 
 ### SQLite
 
@@ -378,6 +418,7 @@ handler(payload) -> None
 | `log/warn/error` | ✅ | ✅ | ✅ | ✅ |
 | `register_cron` / `every` | ✅ | ✅ | ✅ | ✅ |
 | `register_handler`（只登记不调度） | ✅ | ✅ | ✅（配 `--job`） | ✅（配 `--job`） |
+| `worker_hint`（只做校验，无副作用） | ✅ | ✅ | ✅ | ✅ |
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
 | `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
 | `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |
@@ -422,6 +463,7 @@ handler(payload) -> None
 | `finally:` | 不支持（`SyntaxError: finally clause is not supported yet`） | 支持 | 清理逻辑写两遍 |
 | `nonlocal` | 不支持（`SyntaxError`） | 支持 | 用 `state = {...}` 字典改状态 |
 | 相邻字符串隐式拼接 `"a" "b"` | 不支持（`SyntaxError: expected ')', got '@str'`） | 支持 | 显式写 `"a" + "b"`（多行 SQL 最容易踩） |
+| **f-string 与普通字面量相邻**（`f"…{x}" "…"`） | 不支持（同一个 `SyntaxError`） | 支持 | 别混着写：整段都用 `+` 拼，或整段都用 f-string。**踩过一次**：宿主自己的 `host_api` 引导脚本这么写，导致**所有** `.py` 插件一起加载失败 |
 | `async def` / `await` | 不支持（`SyntaxError`） | 支持 | 同步写法 |
 | `with` 自定义上下文管理器 | `__exit__` 只收到 self | 支持 | 手写 try/except |
 | `datetime + timedelta` | 不支持（`TypeError`） | 支持 | 用时间戳字符串 |

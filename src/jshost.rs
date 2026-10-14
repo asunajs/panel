@@ -54,6 +54,24 @@ globalThis.host_api = {
     warn:  function (msg) { __host_log_raw('warn',  __fmt(msg)); },
     error: function (msg) { __host_log_raw('error', __fmt(msg)); },
 
+    // 声明本插件对自己归属的**要求**（见 workers.rs 的 WorkerHint）。
+    //
+    // ⚠ 这是一个**声明**，不是一次运行时调用：面板在创建解释器**之前**就靠
+    //   源码文本扫描读走了它（分配必须早于解释器存在）。所以这里的运行时实现
+    //   只做参数校验 —— 它没有任何副作用，调用它不会改变已经分配好的归属。
+    //   作用是把拼写错误**在加载期**变成一条明确的报错，而不是让插件静默地
+    //   拿到一个它没要求的线程。
+    worker_hint: function (kind) {
+        if (kind !== 'precision' && kind !== 'exclusive') {
+            throw new Error(
+                "worker_hint(kind): kind 只能是 'precision' 或 'exclusive'，收到 " + __fmt(kind) +
+                "。\\n  'precision' —— 要落在精度线程上（毫秒级任务）\\n" +
+                "  'exclusive' —— 要独占一条线程（会长时间占住线程，或错过就废）"
+            );
+        }
+        return kind;
+    },
+
     // 注册定时任务：表达式非法会直接抛错（加载期就失败，而不是等运行时才发现）
     register_cron: function (name, expr, handler) {
         if (typeof name !== 'string' || !name) throw new Error('register_cron(name, expr, handler): name 必须是非空字符串');
@@ -268,6 +286,7 @@ export const warn = api.warn;
 export const error = api.error;
 export const register_cron = api.register_cron;
 export const register_handler = api.register_handler;
+export const worker_hint = api.worker_hint;
 export const every = api.every;
 export const sqlite_query = api.sqlite_query;
 export const sqlite_exec = api.sqlite_exec;

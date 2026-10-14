@@ -212,6 +212,27 @@ def __pp_register_handler(name, handler):
     __pp_tasks[key] = handler
     return name
 
+# 声明本插件对自己归属的**要求**（见 workers.rs 的 WorkerHint）。
+#
+# ⚠ 这是**声明**，不是运行时调用：面板在创建解释器**之前**就靠源码文本扫描
+#   读走了它（分配必须早于解释器存在）。所以这里只做参数校验，没有副作用 ——
+#   调用它不会改变已经分配好的归属。作用是把拼写错误在**加载期**变成一条明确的
+#   报错，而不是让插件静默地拿到一个它没要求的线程。
+def __pp_worker_hint(kind):
+    k = str(kind)
+    if k not in ("precision", "exclusive"):
+        # ⚠ 这里**不能**用 f-string 与普通字面量隐式拼接（`f"…" "…"`）——
+        # CPython 允许，PocketPy 会报 `SyntaxError: expected ')', got '@str'`。
+        # 实测踩到：整个 host_api 初始化失败，所有 .py 插件一起加载不了。
+        # 用 `+` 拼，两种实现都认。
+        raise ValueError(
+            "worker_hint(kind): kind 只能是 'precision' 或 'exclusive'，收到 "
+            + repr(k)
+            + "\n  'precision' —— 要落在精度线程上（毫秒级任务）"
+            + "\n  'exclusive' —— 要独占一条线程（会长时间占住线程，或错过就废）"
+        )
+    return k
+
 # 宿主问「这个插件有没有名为 name 的处理函数」——面板新建任务前用它校验。
 # 约定与 _xxx 原生函数一致：只传字符串，返回 "1"（有）或 ""（没有）。
 def __pp_has_task(name):
@@ -265,6 +286,7 @@ _h.warn  = lambda msg: __pp_log("warn", msg)
 _h.error = lambda msg: __pp_log("error", msg)
 _h.register_cron = __pp_register
 _h.register_handler = __pp_register_handler
+_h.worker_hint = __pp_worker_hint
 _h.every = __pp_every
 _h.sqlite_query = lambda sql, params=None: __pp_sqlite(sql, params, True)
 _h.sqlite_exec  = lambda sql, params=None: __pp_sqlite(sql, params, False)
