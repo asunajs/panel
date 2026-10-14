@@ -147,6 +147,26 @@ pub struct RouteDef {
 pub struct VmBinding {
     pub plugin: String,
     pub pending: Vec<RawTaskDef>,
+    /// 插件声明的侧边栏入口（一个插件最多一个）。见 [`NavDef`]。
+    pub nav: Option<NavDef>,
+}
+
+/// 插件在加载期声明的**侧边栏入口**：面板主界面左侧会多出一项。
+///
+/// # 为什么让插件声明而不是面板推导
+///
+/// 面板已经能推导出「这个插件有没有配置页」（`{name}/index.html` 存在），
+/// 但**推导不出它该叫什么、用什么图标**。而这两件事恰恰决定了用户能不能一眼
+/// 认出「这是我的日常任务」—— 面板替它起名叫 `mcloud-daily` 的话，
+/// 用户看到的是一串插件文件名，那正是要解决的问题。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NavDef {
+    /// 侧边栏上显示的字（必填，非空）
+    pub label: String,
+    /// 图标：**一个字符**（emoji 或符号都行）。空串 = 用默认的
+    pub icon: String,
+    /// 页面地址。空串 = 默认 `/plugins/{name}/index.html`
+    pub path: String,
 }
 
 /// 宿主侧共享状态：两个运行时的适配层都往这里调。
@@ -442,6 +462,7 @@ impl HostState {
             VmBinding {
                 plugin: plugin.to_string(),
                 pending: Vec::new(),
+                nav: None,
             },
         );
     }
@@ -460,9 +481,74 @@ impl HostState {
             .unwrap_or_default()
     }
 
+    /// 取走某个 VM 声明的侧边栏入口（加载完成后调用）。
+    pub fn take_nav(&self, vm: i32) -> Option<NavDef> {
+        self.vms.lock().unwrap().get_mut(&vm).and_then(|b| b.nav.take())
+    }
+
+    /// 登记侧边栏入口。同一个插件只能有一个 —— 第二个报错而不是静默覆盖：
+    /// 侧边栏是给用户认路用的，悄悄多出一项或少一项都会让人困惑。
+    pub fn do_register_nav(
+        &self,
+        plugin: &str,
+        label: &str,
+        icon: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let nav = validate_nav(plugin, label, icon, path)?;
+        let mut guard = self.vms.lock().unwrap();
+        for b in guard.values_mut() {
+            if b.plugin == plugin {
+                if let Some(old) = &b.nav {
+                    return Err(format!(
+                        "插件 `{plugin}` 已经声明过侧边栏入口 `{}`，不能再声明一个",
+                        old.label
+                    ));
+                }
+                b.nav = Some(nav);
+                return Ok(());
+            }
+        }
+        Err(format!("插件 `{plugin}` 没有绑定解释器实例"))
+    }
+
     pub fn plugin_of_vm(&self, vm: i32) -> Option<String> {
         self.vms.lock().unwrap().get(&vm).map(|b| b.plugin.clone())
     }
+}
+
+/// 校验并补全一个侧边栏入口。**JS 与 Python 两条路共用这一份判据** ——
+/// 两边各写一遍的话，迟早会出现「JS 里能过、Python 里报错」这种最难查的差异。
+pub fn validate_nav(plugin: &str, label: &str, icon: &str, path: &str) -> Result<NavDef, String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("register_nav: label 不能为空（它是侧边栏上显示的字）".to_string());
+    }
+    if label.chars().count() > 12 {
+        return Err(format!(
+            "register_nav: label 太长（{} 个字符）。侧边栏一行放不下，12 个以内",
+            label.chars().count()
+        ));
+    }
+    let icon = icon.trim();
+    if icon.chars().count() > 2 {
+        return Err("register_nav: icon 最多 2 个字符（emoji 通常是 1 个）".to_string());
+    }
+    let path = path.trim();
+    // 默认落在面板已有的约定上（`{name}/index.html`），这样插件不写 path 也能用
+    let path = if path.is_empty() {
+        format!("/plugins/{plugin}/index.html")
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        // 相对路径按插件自己的目录解析 —— 插件作者写 `index.html` 是最自然的
+        format!("/plugins/{plugin}/{}", path.trim_start_matches("./"))
+    };
+    Ok(NavDef {
+        label: label.to_string(),
+        icon: icon.to_string(),
+        path,
+    })
 }
 
 /// JSON 值的**种类**名（报错措辞用）。`json_to_sql` 与 `parse_tls_choice` 共用。
@@ -765,4 +851,52 @@ mod tests {
         let req = build_http_request("GET", "https://example.com/x", None, Vec::new()).unwrap();
         assert_eq!(req.headers().get("user-agent").unwrap(), DEFAULT_USER_AGENT);
     }
+    // ---- 侧边栏入口（register_nav）----
+
+    #[test]
+    fn nav_defaults_to_the_panel_convention() {
+        // 不给 path → 落在面板已有的约定上（`{name}/index.html`）。
+        // 这条约定必须只有一处：面板判断「有没有配置页」用的也是它。
+        let n = validate_nav("mcloud-daily", "日常", "🗓", "").unwrap();
+        assert_eq!(n.path, "/plugins/mcloud-daily/index.html");
+        assert_eq!(n.label, "日常");
+        assert_eq!(n.icon, "🗓");
+    }
+
+    #[test]
+    fn nav_path_forms() {
+        // 绝对路径原样用
+        assert_eq!(validate_nav("p", "L", "", "/x/y.html").unwrap().path, "/x/y.html");
+        // 相对路径按插件自己的目录解析 —— 插件作者写 `index.html` 是最自然的
+        assert_eq!(validate_nav("p", "L", "", "index.html").unwrap().path, "/plugins/p/index.html");
+        assert_eq!(
+            validate_nav("p", "L", "", "./sub/a.html").unwrap().path,
+            "/plugins/p/sub/a.html"
+        );
+    }
+
+    #[test]
+    fn nav_label_is_required_and_bounded() {
+        // label 是**唯一**必填项：没有它侧边栏那一项就是个空白，比没有还糟
+        assert!(validate_nav("p", "", "", "").is_err());
+        assert!(validate_nav("p", "   ", "", "").is_err());
+        // 侧边栏一行放不下 —— 与其在界面上被截断成「日常任务…」，不如当场说清楚
+        // 按**字符**数算而不是字节数：CJK 一个字 3 字节，
+        // 用字节数当判据的话中文 label 会被误杀
+        assert!(validate_nav("p", "日常任务日常任务日常任务", "", "").is_ok()); // 12 字
+        assert!(validate_nav("p", "日常任务日常任务日常任务日", "", "").is_err()); // 13 字
+        // icon 最多 2 个字符（emoji 带变体选择符时会占 2 个）
+        assert!(validate_nav("p", "L", "🗓️", "").is_ok());
+        assert!(validate_nav("p", "L", "abc", "").is_err());
+    }
+
+    #[test]
+    fn nav_trims_surrounding_space() {
+        // 顺手 trim：插件里写 `' 日常 '` 是很常见的手滑，
+        // 不 trim 的话侧边栏会多出一段看不见的空白
+        let n = validate_nav("p", "  日常  ", "  🗓  ", "").unwrap();
+        assert_eq!(n.label, "日常");
+        assert_eq!(n.icon, "🗓");
+    }
+
 }

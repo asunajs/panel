@@ -117,6 +117,7 @@ register_handler(name, handler)    -> None      # 只登记处理函数，不声
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
 # 第四个参数：register_cron(name, expr, handler, { params })  —— 见下面「任务参数」
 # 表达式末尾可以加一个抖动后缀                                    —— 见下面「随机表达式」
+register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见下面「侧边栏入口」
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -221,6 +222,49 @@ Node / CPython 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个
 payload 里一样有）。
 
 验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
+
+#### 侧边栏入口：`register_nav({ label, icon, path })`
+
+让面板主界面左侧多出一项，点进去打开插件自己的页面。
+
+```js
+import { register_nav } from 'host-api';
+
+// 不给 path → 落在面板已有的约定上：`{name}/index.html`
+register_nav({ label: '日常任务', icon: '🗓' });
+
+// 也可以自己指定（绝对路径，或相对插件目录）
+register_nav({ label: '兑换', icon: '🎁', path: 'exchange.html' });
+```
+
+```python
+from host_api import register_nav
+register_nav("日常任务", "🗓")          # label 必填，icon / path 可省
+```
+
+页面就是插件目录下那个 `index.html`（或你指定的文件），面板用 **iframe** 装它：
+
+- 插件完全掌控自己那块 UI，不用迁就面板的组件
+- 页面里的相对路径 `fetch('api/xxx')` 直接调**插件自己注册的路由**（同源）
+- iframe 是独立文档 —— 插件的 JS **动不了**面板本身（读令牌、改别人的任务）
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `label` | ✅ | 侧边栏上显示的字。**12 个字符以内**。写用户看得懂的话（「日常任务」而不是 `mcloud-daily`） |
+| `icon` | | 一个字符（emoji 或符号）。空 = 面板给个默认方块 |
+| `path` | | 页面地址。空 = `/plugins/{name}/index.html`；相对路径按插件目录解析 |
+
+- **一个插件只能声明一个**入口。第二个报错而不是静默覆盖 —— 侧边栏是给用户认路用的，
+  悄悄多出一项或少一项都会让人困惑。
+- **停用的插件不摆入口**：引擎没加载它，页面也打不开。给一个点了 404 的入口是最差的可达性。
+- 面板**不解释** `label` 的内容，只负责摆出来。
+
+> 为什么让插件声明而不是面板推导：面板已经能推导出「这个插件有没有配置页」
+> （`{name}/index.html` 存在），但**推导不出它该叫什么**。而名字恰恰决定了用户
+> 能不能一眼认出「这是我的日常任务」—— 面板替它起名叫 `mcloud-daily` 的话，
+> 用户看到的是一串插件文件名，那正是要解决的问题。
+
+验收脚本：`node scripts/nav_check.mjs`（夹具 `examples/nav/`）。
 
 #### 随机表达式（抖动）
 
@@ -509,6 +553,7 @@ handler(payload) -> None
 | `worker_hint`（只做校验，无副作用） | ✅ | ✅ | ✅ | ✅ |
 | `register_cron` 的 `opts.params` | ✅ | ✅ | ✅ | ✅ |
 | 随机表达式（抖动后缀 `~` / `+` / `-`） | ✅ | ❌ | ❌ | ❌ |
+| `register_nav`（侧边栏入口） | ✅ | ❌ | ❌ | ❌ |
 
 > 抖动的三个适配器**还没实现**。插件用了抖动之后，在面板里正常，在适配器里会
 > 直接报表达式非法 —— 是**响亮**的失败，不是静默地按原节奏跑，所以不会误导。

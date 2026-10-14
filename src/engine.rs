@@ -251,6 +251,11 @@ pub struct PluginInfo {
     pub error: Option<String>,
     /// 该插件注册的调度任务数
     pub tasks: usize,
+    /// 插件声明的侧边栏入口（`register_nav`）。`None` = 它不想要入口。
+    ///
+    /// 面板据此在左侧多出一项。**名字只有插件自己知道** —— 面板推导得出
+    /// 「有没有配置页」，推导不出「该显示成日常任务还是 mcloud-daily」。
+    pub nav: Option<hostapi::NavDef>,
 }
 
 pub type Registry = Arc<Mutex<Vec<PluginInfo>>>;
@@ -617,6 +622,11 @@ struct LoadedPlugin {
     mtime: Option<SystemTime>,
     /// Python 插件的 VM 索引（JS 插件是 None）
     vm_index: Option<i32>,
+    /// 插件声明的侧边栏入口（`register_nav`）。`None` = 它不想要入口。
+    ///
+    /// 面板据此在左侧多出一项。**只有插件自己知道该叫什么** —— 面板推导得出
+    /// 「有没有配置页」，推导不出「该显示成日常任务还是 mcloud-daily」。
+    nav: Option<hostapi::NavDef>,
 }
 
 impl LoadedPlugin {
@@ -2558,6 +2568,7 @@ fn load_one(
         tasks: 0,
         mtime,
         vm_index: None,
+        nav: None,
     };
 
     let source = match std::fs::read_to_string(file) {
@@ -2570,6 +2581,7 @@ fn load_one(
     };
 
     let pending: Arc<Mutex<Vec<RawTaskDef>>> = Arc::new(Mutex::new(Vec::new()));
+    let nav: Arc<Mutex<Option<hostapi::NavDef>>> = Arc::new(Mutex::new(None));
 
     let (runtime, has_on_tick, err) = if is_python(file) {
         load_python(&source, &file_str, &name, host, next_vm)
@@ -2582,6 +2594,7 @@ fn load_one(
             logs,
             host,
             pending.clone(),
+            nav.clone(),
             wd,
             budget,
         )
@@ -2598,6 +2611,17 @@ fn load_one(
             .unwrap_or_default()
     } else {
         std::mem::take(&mut *pending.lock().unwrap())
+    };
+
+    lp.nav = if is_python(file) {
+        runtime
+            .as_ref()
+            .and_then(|r| match r {
+                PluginRuntime::Py(vm) => host.take_nav(vm.index()),
+                _ => None,
+            })
+    } else {
+        nav.lock().unwrap().take()
     };
 
     lp.tasks = declared.len();
@@ -2644,6 +2668,7 @@ fn load_js(
     logs: &SharedLogs,
     host: &Arc<HostState>,
     pending: Arc<Mutex<Vec<RawTaskDef>>>,
+    nav: Arc<Mutex<Option<hostapi::NavDef>>>,
     wd: &Watchdog,
     budget: Duration,
 ) -> (Option<PluginRuntime>, bool, Option<String>) {
@@ -2653,7 +2678,14 @@ fn load_js(
     };
 
     let result: Result<bool, String> = ctx.with(|ctx| {
-        jshost::install_host(&ctx, name.to_string(), host.clone(), pending, logs.clone())
+        jshost::install_host(
+            &ctx,
+            name.to_string(),
+            host.clone(),
+            pending,
+            nav,
+            logs.clone(),
+        )
             .map_err(|e| format!("注入 host 失败: {e}"))?;
 
         wd.arm(budget);
@@ -2961,6 +2993,7 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
         tasks: 0,
         mtime: std::fs::metadata(file).and_then(|m| m.modified()).ok(),
         vm_index: None,
+        nav: None,
     }
 }
 
@@ -3292,6 +3325,7 @@ fn sync_registry(registry: &Registry, plugins: &[LoadedPlugin], owned: &[String]
             last_tick: p.last_tick.clone(),
             error: p.error.clone(),
             tasks: p.tasks,
+            nav: p.nav.clone(),
         });
     }
     // 按文件路径排序：单 worker 时的顺序就是「目录扫描的字典序」，
@@ -3404,11 +3438,15 @@ fn run_scratch_js(
         // pending 是加载期收集任务声明用的。测试运行不注册任务，但 host_api 的
         // register_cron 仍然可以调用 —— 声明会进这个临时 vec，随 Context 一起丢掉。
         let pending = Arc::new(Mutex::new(Vec::new()));
+        // 测试运行同样不给侧边栏入口：它是个一次性的临时 Context，
+        // 声明了也没有面板去显示，收下反而是个假的成功信号。
+        let nav = Arc::new(Mutex::new(None));
         jshost::install_host(
             &ctx,
             TEST_RUN_PLUGIN.to_string(),
             host.clone(),
             pending,
+            nav,
             logs.clone(),
         )
         .map_err(|e| format!("注入 host 失败: {e}"))?;
@@ -3672,6 +3710,7 @@ mod tests {
             tasks: 0,
             mtime: None,
             vm_index: None,
+            nav: None,
         }
     }
 
@@ -3840,6 +3879,7 @@ mod tests {
                 "ws-test".to_string(),
                 host.clone(),
                 Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(None)),
                 logs.clone(),
             )
             .unwrap();

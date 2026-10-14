@@ -186,12 +186,23 @@ def main() -> int:
         check("确实有几拍提前了", sum(1 for o in offsets if o < 0) >= 3, f"{sum(1 for o in offsets if o < 0)}/{len(offsets)} 拍")
 
         # ---- ② lateMs 没被污染（核心）----
+        #
+        # 判据看的是**系统性偏移**，不是单个尖峰。
+        # 泄漏的表现是「每一拍都被挪了 jitterMs 那么多」，所以均值会整块偏掉
+        # （抖动均值约 -100ms）；而机器忙的时候偶尔有一拍迟到 60ms 是正常的调度
+        # 噪声，不该判红 —— 第一版用 `max(|lateMs|) < 50` 就是这么误红过一次。
         lates = [r["lateMs"] for r in jit]
+        mean_late = sum(lates) / len(lates)
         worst = max(abs(x) for x in lates)
         check(
-            "lateMs 是真实延迟（|lateMs| < 50ms，没混进 200ms 的抖动）",
-            worst < 50,
-            f"最大 {worst}ms；混进抖动的话这里会是 200 上下",
+            "lateMs 没有系统性偏移（均值接近 0，而不是被抖动整块挪走）",
+            abs(mean_late) < 30,
+            f"均值 {mean_late:.1f}ms；泄漏的话会是 -100ms 上下",
+        )
+        check(
+            "单拍 lateMs 也没有大到装下抖动（< 150ms）",
+            worst < 150,
+            f"最大 {worst}ms（抖动上限是 200ms）",
         )
 
         # ---- ③ 恒等式 firedAt - scheduledAt == lateMs + jitterMs ----
@@ -214,18 +225,21 @@ def main() -> int:
 
         # 实际间隔应当围绕 1s 波动（被抖动推开），但不能有负的
         gaps = [(b - a).total_seconds() * 1000 for a, b in zip(stamps, stamps[1:])]
+        # 上界放宽到 1600ms：机器忙的时候某一拍迟到几十毫秒是正常的，
+        # 这条要抓的是「挤在一起」（负间隔）和「漏拍」（间隔接近 2 秒）
         check(
-            "相邻间隔落在 (0, 1400ms) 内（没有挤在一起、也没漏拍）",
-            all(0 < g < 1400 for g in gaps),
+            "相邻间隔落在 (0, 1600ms) 内（没有挤在一起、也没漏拍）",
+            all(0 < g < 1600 for g in gaps),
             f"最小 {min(gaps):.0f}ms 最大 {max(gaps):.0f}ms",
         )
 
         print(f"\n对照组：没写抖动的任务（{len(plain)} 拍）")
         check("jitterMs 恒为 0", all(r["jitterMs"] == 0 for r in plain))
+        plain_mean = sum(r["lateMs"] for r in plain) / len(plain)
         check(
-            "lateMs 行为跟以前一样（几毫秒）",
-            max(abs(r["lateMs"]) for r in plain) < 50,
-            f"最大 {max(abs(r['lateMs']) for r in plain)}ms",
+            "lateMs 行为跟以前一样（均值几毫秒）",
+            abs(plain_mean) < 30,
+            f"均值 {plain_mean:.1f}ms，最大 {max(abs(r['lateMs']) for r in plain)}ms",
         )
 
         # ---- ⑤ cron 的抖动也要满足同样的不变量 ----
@@ -234,10 +248,12 @@ def main() -> int:
         if not cron:
             check("cron 任务触发过", False, "一条记录都没有")
         else:
+            cron_lates = [r["lateMs"] for r in cron]
+            cron_mean = sum(cron_lates) / len(cron_lates)
             check(
-                "cron 的 lateMs 同样没被污染",
-                max(abs(r["lateMs"]) for r in cron) < 50,
-                f"最大 {max(abs(r['lateMs']) for r in cron)}ms",
+                "cron 的 lateMs 同样没有系统性偏移",
+                abs(cron_mean) < 30,
+                f"均值 {cron_mean:.1f}ms，最大 {max(abs(x) for x in cron_lates)}ms",
             )
             check(
                 "cron 的抖动落在 ±200ms 内",

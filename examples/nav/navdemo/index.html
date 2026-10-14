@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>日常任务</title>
+  <style>
+    body { font: 14px/1.6 system-ui, sans-serif; margin: 16px; color: #ddd; background: #1b1b1f; }
+    h2 { margin: 0 0 8px; font-size: 16px; }
+    .row { padding: 8px 10px; border: 1px solid #333; border-radius: 8px; margin-bottom: 8px; }
+    button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid #444;
+             background: #2a2a30; color: #eee; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>日常任务</h2>
+  <div class="row" id="summary">加载中…</div>
+  <button id="go">立即执行</button>
+  <script>
+    // 同源 iframe：直接用相对路径调插件自己的接口
+    fetch('api/summary').then(r => r.json()).then(d => {
+      document.getElementById('summary').textContent =
+        `共 ${d.accounts} 个账号，下次触发 ${d.next}`;
+    });
+    document.getElementById('go').addEventListener('click', () => {
+      document.getElementById('summary').textContent = '已触发（夹具，不做真的）';
+    });
+  </script>
+</body>
+</html>

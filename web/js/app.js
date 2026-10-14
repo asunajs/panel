@@ -20,6 +20,12 @@ import { getState, logout } from './api.js';
 
 const $ = (sel) => document.querySelector(sel);
 
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
+}
+
 // ---------------------------------------------------------------- 主题
 
 // 键名带版本号：上一版把「跟随系统偏好」算出来的结果**自动写进**了
@@ -318,6 +324,10 @@ function parseHash() {
     return { view: 'plugins' };
   }
   if (parts[0] === 'settings') return { view: 'settings' };
+  // #/plugin/{name} —— 插件自己的页面（iframe）。名字就是插件名。
+  if (parts[0] === 'plugin' && parts[1]) {
+    return { view: 'plugin-page', params: { name: parts[1] } };
+  }
   return { view: 'dashboard' };
 }
 
@@ -336,13 +346,7 @@ async function route() {
     cleanup = null;
   }
 
-  // 侧边栏高亮：task-editor 归到「任务列表」下
-  // plugin-source 归到「插件管理」下（它就是从那里进来的）
-  const navKey =
-    view === 'task-editor' ? 'tasks' : view === 'plugin-source' ? 'plugins' : view;
-  document.querySelectorAll('.nav-item').forEach((a) => {
-    a.classList.toggle('active', a.dataset.view === navKey);
-  });
+  paintNavActive();
   $('#view-title').textContent =
     view === 'task-editor'
       ? params.mode === 'edit'
@@ -350,7 +354,9 @@ async function route() {
         : '新建任务'
       : view === 'plugin-source'
         ? `插件源码：${params.name}`
-        : TITLES[view] || '面板';
+        : view === 'plugin-page'
+          ? pluginNavLabel(params.name)
+          : TITLES[view] || '面板';
 
   try {
     if (view === 'dashboard') cleanup = await renderDashboard(root);
@@ -358,6 +364,7 @@ async function route() {
     else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
+    else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
     else if (view === 'settings') renderSettings(root);
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页
@@ -377,6 +384,94 @@ const ctx = {
 
 // ---------------------------------------------------------------- 引擎状态徽标
 
+// ---------------------------------------------------------------- 插件入口
+
+/// `/api/state` 里的插件入口，按插件名索引（标题、页面都要用）。
+const pluginNav = new Map();
+
+function pluginNavLabel(name) {
+  const n = pluginNav.get(name);
+  return n && n.label ? n.label : name;
+}
+
+/// 侧边栏高亮。**单独抽出来**是因为插件入口是异步建的：路由先跑、入口后到，
+/// 建完得再刷一次高亮，否则点进插件页面时那一项不会亮。
+function paintNavActive() {
+  const { view, params } = parseHash();
+  const navKey =
+    view === 'task-editor'
+      ? 'tasks'
+      : view === 'plugin-source'
+        ? 'plugins'
+        : view === 'plugin-page'
+          ? `plugin:${params.name}`
+          : view;
+  document.querySelectorAll('.nav-item').forEach((a) => {
+    a.classList.toggle('active', a.dataset.view === navKey);
+  });
+}
+
+/// 把 `/api/state` 里的 `nav` 摆进侧边栏。
+///
+/// **只在内容变了的时候重建 DOM**：这个函数跟着 5 秒轮询跑，每次重建会把用户
+/// 正按着的那个 `<a>` 换掉（移动端滑出侧边栏时那一下点击就丢了），还白费一次重排。
+function renderPluginNav(plugins) {
+  const box = $('#plugin-nav');
+  if (!box) return;
+  pluginNav.clear();
+  const entries = [];
+  for (const p of plugins || []) {
+    // 停用的插件不摆入口：引擎没加载它，页面也打不开 ——
+    // 给一个点了 404 的入口是最差的可达性（判据与插件列表里那处一致）
+    if (p.disabled) continue;
+    if (!p.nav || !p.nav.label) continue;
+    pluginNav.set(p.name, p.nav);
+    entries.push({ name: p.name, label: p.nav.label, icon: p.nav.icon });
+  }
+  const sig = JSON.stringify(entries);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = entries.length === 0;
+  box.innerHTML = entries
+    .map(
+      (e) =>
+        `<a class="nav-item" href="#/plugin/${encodeURIComponent(e.name)}" data-view="plugin:${esc(e.name)}">` +
+        `<span class="nav-icon" aria-hidden="true">${esc(e.icon || '◻')}</span><span>${esc(e.label)}</span></a>`,
+    )
+    .join('');
+  paintNavActive();
+}
+
+/// 插件自己的页面：用 iframe 装它，让它完全掌控自己那块 UI。
+///
+/// 为什么不把插件的 JS 注入主页面：插件是操作者自己装的代码，注入进来等于让它
+/// 能改面板本身（读令牌、改别人的任务）。iframe 是同源但**独立文档**，
+/// 插件的影响范围就是那一块。
+function renderPluginPage(root, params) {
+  const name = params.name;
+  const nav = pluginNav.get(name);
+  const src = nav && nav.path ? nav.path : `/plugins/${encodeURIComponent(name)}/index.html`;
+  const label = pluginNavLabel(name);
+  root.innerHTML = `
+    <div class="card plugin-page-card">
+      <div class="plugin-page-head">
+        <span class="badge running">${esc(label)}</span>
+        <span class="hint">${esc(name)}</span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="plugin-reload">重新加载</button>
+        <a class="btn ghost" href="${esc(src)}" target="_blank" rel="noopener">新标签页</a>
+      </div>
+      <iframe id="plugin-frame" class="plugin-frame" src="${esc(src)}?embed=1"
+              title="${esc(label)}"></iframe>
+    </div>`;
+  const frame = root.querySelector('#plugin-frame');
+  // 插件页面有自己的状态（半填的表单、展开的面板），整页刷新是唯一可靠的复位手段
+  root.querySelector('#plugin-reload').addEventListener('click', () => {
+    frame.src = frame.src;
+  });
+  return null;
+}
+
 async function pollEngine() {
   const el = $('#engine-state');
   const authEl = $('#auth-state');
@@ -388,6 +483,8 @@ async function pollEngine() {
     el.textContent = '后端不可用';
     return;
   }
+
+  renderPluginNav(res.plugins);
 
   const healthy = res.engine?.healthy !== false;
   el.className = 'badge ' + (healthy ? 'success' : 'failed');

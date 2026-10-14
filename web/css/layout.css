@@ -85,6 +85,29 @@
   opacity: 0.9;
 }
 
+/* 插件声明的入口（`register_nav`）。
+   与内置那四项**视觉上分开**：上面一条分隔线，加一个小标题。
+   不分的话用户会以为「日常任务」也是面板自带的功能 —— 出问题时不知道该找谁。 */
+.nav-plugins {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.nav-plugins::before {
+  content: "插件";
+  display: block;
+  padding: 0 var(--sp-3) var(--sp-2);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+.nav-plugins[hidden] {
+  display: none;
+}
+
 .sidebar-foot {
   margin-top: auto;
   padding: var(--sp-2) var(--sp-3);

@@ -37,6 +37,14 @@
         </a>
       </nav>
 
+      <!--
+        插件声明的页面入口（`register_nav`）。
+        面板推导得出「这个插件有没有配置页」，推导不出它该叫什么 ——
+        所以名字和图标由插件给，这里只负责摆出来。
+        由 web/js/app.js 按 /api/state 里的 `nav` 字段填充；一个都没有时整块隐藏。
+      -->
+      <nav class="nav nav-plugins" id="plugin-nav" aria-label="插件页面" hidden></nav>
+
       <div class="sidebar-foot">
         <span id="engine-state" class="badge idle" title="引擎心跳">连接中…</span>
         <!-- 鉴权状态：没开鉴权时说明「本机免登录」，开了就显示会话数 -->

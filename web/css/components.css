@@ -561,6 +561,26 @@
   background: var(--surface);
 }
 
+/* 插件自己那一页（`#/plugin/{name}`）的壳：一行头部 + 撑满的 iframe。
+   头部把「这是哪个插件」写清楚（标签 + 插件名），因为 iframe 里的页面
+   可能完全不提自己的名字 —— 用户从侧边栏点进来之后得知道自己站在哪。 */
+.plugin-page-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.plugin-page-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.plugin-page-head .spacer {
+  flex: 1;
+}
+
 /* 插件的入口链接卡片（插件管理页）。
    竖排而不是「左边信息 + 右边按钮」：插件名是标识符（host-api-demo），
    加上两个徽章和两个按钮，横排在 280px 的列宽里必然挤 —— 实测徽章会被压成

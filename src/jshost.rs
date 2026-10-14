@@ -10,7 +10,7 @@
 //! 类型转换、参数默认值、错误语义全在下面的 `BOOTSTRAP` 里用 JS 写。
 //! 这样宿主代码永远不碰 `rquickjs::Value` 的类型分支 —— 和 Python 侧同一个套路。
 
-use crate::hostapi::{HostState, RawTaskDef, SharedLogs};
+use crate::hostapi::{self, HostState, NavDef, RawTaskDef, SharedLogs};
 use rquickjs::prelude::Func;
 use rquickjs::Ctx;
 use std::sync::{Arc, Mutex};
@@ -157,6 +157,23 @@ globalThis.host_api = {
     http_fetch: function (url, options) {
         return JSON.parse(__host_http_fetch(String(url), JSON.stringify(options === undefined ? {} : options)));
     },
+    // 声明一个侧边栏入口：面板左侧会多出一项，点进去打开插件自己的页面。
+    //
+    // label 是**必填**的，而且应该是用户看得懂的话（「日常任务」而不是
+    // 「mcloud-daily」）—— 面板推导得出「有没有配置页」，推导不出该叫什么。
+    // path 不给就默认 `{name}/index.html`，也就是面板已有的那条约定。
+    register_nav: function (opts) {
+        if (!opts || typeof opts !== 'object') {
+            throw new Error('register_nav({ label, icon, path }): 参数必须是对象');
+        }
+        var label = String(opts.label === undefined ? '' : opts.label);
+        var icon = opts.icon === undefined ? '' : String(opts.icon);
+        var path = opts.path === undefined ? '' : String(opts.path);
+        var err = __host_register_nav(label, icon, path);
+        if (err) throw new Error(err);
+        return label;
+    },
+
     register_route: function (path, method, handler) {
         var err = __host_register_route(String(path), String(method));
         if (err) throw new Error(err);
@@ -312,6 +329,7 @@ export const ws_send = api.ws_send;
 export const ws_recv = api.ws_recv;
 export const ws_close = api.ws_close;
 export const register_route = api.register_route;
+export const register_nav = api.register_nav;
 export default api;
 "#;
 
@@ -323,6 +341,7 @@ pub fn install_host<'js>(
     plugin: String,
     state: Arc<HostState>,
     pending: Arc<Mutex<Vec<RawTaskDef>>>,
+    nav: Arc<Mutex<Option<NavDef>>>,
     logs: SharedLogs,
 ) -> rquickjs::Result<()> {
     // ---- 日志 ----
@@ -471,6 +490,27 @@ pub fn install_host<'js>(
                 Ok(()) => String::new(),
                 Err(e) => e,
             }
+        }),
+    )?;
+
+    // ---- 侧边栏入口登记 ----
+    let plugin_for_nav = plugin.clone();
+    ctx.globals().set(
+        "__host_register_nav",
+        Func::new(move |label: String, icon: String, path: String| -> String {
+            let def = match hostapi::validate_nav(&plugin_for_nav, &label, &icon, &path) {
+                Ok(d) => d,
+                Err(e) => return e,
+            };
+            let mut slot = nav.lock().unwrap();
+            if let Some(old) = slot.as_ref() {
+                return format!(
+                    "插件 `{plugin_for_nav}` 已经声明过侧边栏入口 `{}`，不能再声明一个",
+                    old.label
+                );
+            }
+            *slot = Some(def);
+            String::new()
         }),
     )?;
 

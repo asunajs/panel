@@ -51,6 +51,32 @@ extern "C" fn native_log(argc: c_int, argv: PyStackRef) -> bool {
     true
 }
 
+/// `_register_nav(label, icon, path) -> str`：返回空串 = 成功，非空 = 错误消息。
+///
+/// 语义与 JS 侧的 `__host_register_nav` 完全一致（校验共用 `hostapi::validate_nav`）。
+extern "C" fn native_register_nav(argc: c_int, argv: PyStackRef) -> bool {
+    if argc != 3 {
+        return python::raise_value_error(&format!("_register_nav 需要 3 个参数，收到 {argc}"));
+    }
+    let (Some(label), Some(icon), Some(path)) = (
+        python::arg_str(argv, 0),
+        python::arg_str(argv, 1),
+        python::arg_str(argv, 2),
+    ) else {
+        return python::raise_value_error("_register_nav(label, icon, path): 三个参数都必须是字符串");
+    };
+    let plugin = current_plugin();
+    let msg = match state() {
+        Some(s) => match s.do_register_nav(&plugin, &label, &icon, &path) {
+            Ok(()) => String::new(),
+            Err(e) => e,
+        },
+        None => "宿主状态未初始化".to_string(),
+    };
+    python::set_ret_str(&msg);
+    true
+}
+
 /// `_register_task(name, expr, params_json) -> str`：返回空串 = 成功，非空 = 错误消息。
 ///
 /// 这里返回错误字符串而不是抛异常，是为了让 Python 侧的 `register_cron` 决定
@@ -296,6 +322,19 @@ def __pp_tick(payload_json):
 _h.log   = lambda msg: __pp_log("info", msg)
 _h.warn  = lambda msg: __pp_log("warn", msg)
 _h.error = lambda msg: __pp_log("error", msg)
+def __pp_nav(label, icon="", path=""):
+    """声明一个侧边栏入口：面板左侧会多出一项，点进去打开插件自己的页面。
+
+    label 是**必填**的，而且应该是用户看得懂的话（「日常任务」而不是
+    「mcloud-daily」）—— 面板推导得出「有没有配置页」，推导不出该叫什么。
+    path 不给就默认 `{name}/index.html`，也就是面板已有的那条约定。
+    """
+    err = _h._register_nav(str(label), str(icon), str(path))
+    if err:
+        raise ValueError(err)
+    return label
+
+_h.register_nav = __pp_nav
 _h.register_cron = __pp_register
 _h.register_handler = __pp_register_handler
 _h.worker_hint = __pp_worker_hint
@@ -324,6 +363,11 @@ pub fn install(vm: &mut python::PyVm) -> Result<(), String> {
     let m = python::new_module("host_api");
     python::bind(m, "_log_raw(level, msg)", native_log as PyCFunction);
     python::bind(m, "_register_task(name, expr, params)", native_register_task as PyCFunction);
+    python::bind(
+        m,
+        "_register_nav(label, icon, path)",
+        native_register_nav as PyCFunction,
+    );
     python::bind(m, "_sqlite(sql, params_json, is_query)", native_sqlite as PyCFunction);
     python::bind(m, "_http_fetch(url, options_json)", native_http_fetch as PyCFunction);
     python::bind(
