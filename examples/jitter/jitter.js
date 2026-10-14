@@ -44,6 +44,10 @@ register_cron('jittered', '@every 1s -200ms', function (p) {
             firedAt: p.firedAt,
             lateMs: p.lateMs,
             jitterMs: p.jitterMs,
+            // ⚠ 这一格**必须记**：`jitterMs == 0` 有两个来源（抖到正好 0 /
+            //   落后重对齐），验收脚本要靠它把重对齐那几拍排除掉。
+            //   不记的话那条"同种子给出同一偏移"的断言会随机红。
+            realigned: p.realigned,
         });
     }
 });
@@ -59,6 +63,10 @@ register_cron('cron-jittered', '*/1 * * * * * ~200ms', function (p) {
             firedAt: p.firedAt,
             lateMs: p.lateMs,
             jitterMs: p.jitterMs,
+            // ⚠ 这一格**必须记**：`jitterMs == 0` 有两个来源（抖到正好 0 /
+            //   落后重对齐），验收脚本要靠它把重对齐那几拍排除掉。
+            //   不记的话那条"同种子给出同一偏移"的断言会随机红。
+            realigned: p.realigned,
         });
     }
 });
@@ -72,6 +80,10 @@ register_cron('plain', '@every 1s', function (p) {
             firedAt: p.firedAt,
             lateMs: p.lateMs,
             jitterMs: p.jitterMs,
+            // ⚠ 这一格**必须记**：`jitterMs == 0` 有两个来源（抖到正好 0 /
+            //   落后重对齐），验收脚本要靠它把重对齐那几拍排除掉。
+            //   不记的话那条"同种子给出同一偏移"的断言会随机红。
+            realigned: p.realigned,
         });
     }
 });

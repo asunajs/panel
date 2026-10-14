@@ -347,6 +347,10 @@ impl Scheduler {
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
+        // 这几种都是**重新对齐**（不是按理论线走到的）——
+        // 不标的话 `realigned` 会留着上一拍的值，验收脚本就分不出
+        // "抖到正好 0"与"这一拍没抖"（见字段上的说明）
+        t.realigned = true;
         }
         Ok(t.enabled)
     }
@@ -391,6 +395,10 @@ impl Scheduler {
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
+        // 这几种都是**重新对齐**（不是按理论线走到的）——
+        // 不标的话 `realigned` 会留着上一拍的值，验收脚本就分不出
+        // "抖到正好 0"与"这一拍没抖"（见字段上的说明）
+        t.realigned = true;
         }
         Ok(())
     }
@@ -424,6 +432,10 @@ impl Scheduler {
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
+        // 这几种都是**重新对齐**（不是按理论线走到的）——
+        // 不标的话 `realigned` 会留着上一拍的值，验收脚本就分不出
+        // "抖到正好 0"与"这一拍没抖"（见字段上的说明）
+        t.realigned = true;
         }
         Ok(())
     }
@@ -1183,6 +1195,64 @@ mod tests {
         // ⚠ 还要**说出来**：`jitter_ms == 0` 有两个来源（抖到正好 0 / 重对齐），
         //   光看它是分不出来的 —— 插件与验收脚本都要能分辨（见字段上的说明）
         assert!(t.realigned, "重对齐那一拍要标出来");
+    }
+
+    /// ⚠ **每一条**"重新对齐"的路径都要标 `realigned` —— 漏一条就有一拍
+    /// 是 `jitter_ms == 0` 而 `realigned == false`，验收脚本分不出它，
+    /// 那条同种子可复现性断言就会随机红（实测就是这么红的）。
+    ///
+    /// 四条路径：落后重对齐（`advance`）、熔断重试（`advance`）、
+    /// 暂停恢复 / 换表达式 / 覆盖表达式（下面这三个 setter）。
+    #[test]
+    fn every_realign_path_is_flagged() {
+        let t0 = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "@every 1s -200ms";
+
+        // 先让任务"正常走到"一拍，把标记清成 false
+        let fresh = |label: &str| {
+            let mut s = Scheduler::new(TripConfig::default());
+            s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None, None)
+                .unwrap();
+            // 正常走一拍 ⇒ realigned 变 false（这一拍是"按节奏到点的"）
+            let n = s.tasks()[0].next_fire;
+            s.advance(0, n, None);
+            assert!(!s.tasks()[0].realigned, "{label}：前置条件——正常拍该是 false");
+            s
+        };
+
+        let late = at_ms(2026, 3, 10, 9, 0, 0, 0);
+
+        // ① 暂停 ⇒ 恢复
+        let mut s = fresh("暂停恢复");
+        s.set_paused("p", "t", true, late).unwrap();
+        s.set_paused("p", "t", false, late).unwrap();
+        assert!(s.tasks()[0].realigned, "暂停恢复是重新对齐，要标上");
+
+        // ② 换表达式
+        let mut s = fresh("换表达式");
+        let e2 = "@every 2s -200ms";
+        s.set_expr("p", "t", e2, Schedule::parse(e2).unwrap(), late)
+            .unwrap();
+        assert!(s.tasks()[0].realigned, "换表达式是重新对齐，要标上");
+
+        // ③ 覆盖表达式
+        let mut s = fresh("覆盖表达式");
+        s.set_override("p", "t", Some("@every 3s -200ms"), late)
+            .unwrap();
+        assert!(s.tasks()[0].realigned, "覆盖表达式是重新对齐，要标上");
+
+        // ④ 熔断重试
+        let mut s = Scheduler::new(TripConfig {
+            threshold: 1,
+            ..TripConfig::default()
+        });
+        s.add("p", "t", expr, Schedule::parse(expr).unwrap(), t0, None, None)
+            .unwrap();
+        let n = s.tasks()[0].next_fire;
+        s.advance(0, n, None);
+        assert!(!s.tasks()[0].realigned);
+        s.advance(0, n + ChronoDuration::seconds(1), Some("炸了".into()));
+        assert!(s.tasks()[0].realigned, "熔断重试要标上");
     }
 
     /// ⚠ `realigned` 必须是**逐拍**的：正常走到的那一拍不能带着上一拍的标记。
