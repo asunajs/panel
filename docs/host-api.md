@@ -561,6 +561,25 @@ register_route(path, method, handler) -> None
 - 嵌入式宿主：路由挂在 **Axum 的同一个端口**上，由 Rust 统一分发（`src/web.rs` 的 `fallback`）。
 - `handler(request)` 收到 `{method, path, query, headers, body}`，
   返回 `{status, headers, body}`（缺省 `200 / {} / ''`）。
+- ⚠⚠ **`query` 是原始查询串（字符串），不是解析好的对象。**
+  实测（`src/web.rs:1519` 那一行是 `req.uri().query().unwrap_or("")`）：
+
+  ```
+  GET /plugins/qprobe/api/echo?id=abc&x=1
+  → { "type": "string", "value": "id=abc&x=1" }
+  ```
+
+  这一条踩过，而且**踩得毫无症状**：插件作者很自然会写成 `req.query['id']`，
+  而 `Object.keys('id=abc')` 在 JS 里**不报错** —— 它给的是字符下标
+  `["0","1","2",…]`。所以"把字符串当对象用"既没有类型错误（插件自己写的
+  `.d.ts` 会写成 `Record<string,string>`）也没有运行时异常，只有
+  **参数永远是 `undefined`**。
+
+  要按名取值就自己解析（`new URLSearchParams(req.query).get('id')`，
+  或者自己按第一个 `=` 切 —— 注意 `+` 是空格、值里允许有 `=`、坏编码不该抛）。
+
+  > 面板**不发** `.d.ts`（插件各自写），所以这类形状错误只能在文档里钉住 ——
+  > 这一条就是被 `mcloud-plugin` 压出来的（它写了一个 `parseQuery()` 兜住）。
 - 未匹配的路径仍然 404；`(method, path)` 重复注册会报错。
 - **Python 插件调用它会抛 `NotImplementedError`**：嵌入式宿主只把路由能力给了 JS。
   故意让它 fail-fast —— 静默接受会让插件「本地跑得通、上机静默失效」。
