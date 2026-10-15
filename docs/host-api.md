@@ -776,6 +776,51 @@ fs.mkdirSync(path.dirname(STATE), { recursive: true });
 fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 ```
 
+### 4.3.0 能用哪些函数
+
+**这是全部**（多一个都没有，少一个也不行 —— 这张表和 `src/jshost.rs` 的导出表由测试
+`documented_fs_surface_matches_the_code` **双向**钉着：代码里有而表格没写会红，
+表格里写了而代码没有也会红。见 [验证手册](testing.md#5-怎么验证)）。
+
+| `node:fs` | 说明 |
+| --- | --- |
+| `readFileSync(path[, encoding])` | 不给 encoding 返回 `Uint8Array`（不是 `Buffer`） |
+| `writeFileSync(path, data)` | 不会自动建父目录（与 Node 一致：报 `ENOENT`） |
+| `appendFileSync(path, data)` | 追加而不是覆盖 |
+| `existsSync(path)` | → `bool` |
+| `mkdirSync(path[, { recursive }])` | |
+| `readdirSync(path)` | → 名字数组（不递归、不含 `.` / `..`） |
+| `statSync(path)` | → `{ size, isDirectory(), isFile(), mtimeMs }` |
+| `unlinkSync(path)` | 删文件 |
+| `rmSync(path[, { recursive, force }])` | 删文件或目录 |
+| `renameSync(from, to)` | |
+| `rootDir()` | **面板扩展**：返回数据根的真实路径（排查用，别依赖 —— Node 里没有它） |
+| `constants` | 只给了 `F_OK` 这类常用值 |
+
+| `node:path` | 说明 |
+| --- | --- |
+| `join` `resolve` `normalize` `relative` | `resolve` 的"当前目录"是数据根，结果是 `/a/b` 形状 |
+| `dirname` `basename` `extname` | |
+| `isAbsolute` `sep` `delimiter` | `sep` 恒为 `/` |
+| `parse` `format` `posix` `win32` | `posix` / `win32` 都指向同一份实现（面板只有一种路径风格） |
+
+Python 侧是**另一套名字**（不是 `os` 的包装，见 §4.3.3）：
+
+| Python（`host_api`） | 说明 |
+| --- | --- |
+| `read_text(name)` / `write_text(name, text)` | 读写文本（UTF-8） |
+| `append_text(name, text)` | 追加 |
+| `read_bytes(name)` / `write_bytes(name, data)` | 读写字节 |
+| `exists(name)` / `list_dir(name)` | 存在 / 列名字 |
+| `mkdir(name)` / `remove(name)` | 建目录 / 尽力删（文件或整棵目录） |
+| `rename(from_name, to_name)` / `stat(name)` | 改名 / `{ size, is_dir, is_file, mtime_ms }` |
+| `data_dir()` | 数据根的真实路径（CPython 适配器里 = cwd） |
+
+> 为什么这里要列全：这些函数是**跨运行时的承诺** —— 面板内与面板外同名同义。
+> 文档只提其中几个的话，插件作者要么去读源码，要么写出只能在一边跑的代码。
+> 上一版就是这样：文档只提了 `writeFileSync` / `rmSync` / `rootDir`，
+> 于是"面板里到底有没有 `readFileSync`"只能靠试。
+
 ### 4.3.1 与 Node 的差异（就这几条）
 
 | | Node 原生 | 面板内 |

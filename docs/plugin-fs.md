@@ -9,6 +9,10 @@
 
 ## 22. 面板内的文件系统：给插件一个自己的根（第二十五轮）
 
+> 要查**能用哪些函数**（`readFileSync` / `readdirSync` / `statSync` …）见
+> [host-api.md §4.3.0](host-api.md#430-能用哪些函数) —— 那里是完整清单，
+> 而且和 `src/jshost.rs` 的导出表由一条测试钉着。
+
 插件经常要落点东西：抓下来的快照、上次跑到哪、缓存。在面板外它是
 `node plugin.js`，原生 `fs` 就在手边；在面板里 QuickJS **没有** `fs` ——
 于是同一份插件出了面板就跑、进了面板就 `Cannot find module 'node:fs'`。
@@ -125,7 +129,7 @@ code = getattr(e, "code", str(e).split(":")[0])
 ### 22.7 证据
 
 ```
-单元测试   271 项（新增 18：
+单元测试   269 项（新增 8：
              pluginfs —— 相对/绝对等价、`..` 越界拒绝而不是夹回、内层 `..` 正常、
                          **软链接逃逸被拦**、NUL 拒绝
              jshost  —— path 的十个边角语义（期望值来自真 Node 实跑）、

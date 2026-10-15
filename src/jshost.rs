@@ -1237,6 +1237,103 @@ mod tests {
         assert_eq!(got["err"]["message"], "没有 gone.txt");
     }
 
+    /// `docs/host-api.md` 里 §4.3.0 那一段（"能用哪些函数"的表格区）。
+    ///
+    /// **必须只取这一段**，不能拿整篇文档来 `contains`：整篇找会被**说明文字**满足 ——
+    /// 第一版就是这么写的，把表格里的 `readFileSync` 删掉之后测试照样绿，
+    /// 因为下面那句「面板里到底有没有 `readFileSync`」也含这个词。
+    /// 一条永远绿的测试比没有测试更坏（它让人以为有人在看着）。
+    fn fs_api_section() -> String {
+        let doc = std::fs::read_to_string("docs/host-api.md")
+            .expect("读不到 docs/host-api.md（cargo test 的工作目录应该是 crate 根）");
+        let start = doc.find("### 4.3.0").expect("找不到 §4.3.0（函数清单那一节）");
+        let rest = &doc[start..];
+        let end = rest.find("\n### ").expect("§4.3.0 后面应该还有小节");
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn documented_fs_surface_matches_the_code() {
+        // 文档里的函数清单必须和代码的导出表**一一对上**，两个方向都要管：
+        //
+        // - 代码里有、文档没写 → 插件作者不知道能用，只能去读源码或者瞎试
+        //   （这一版之前就是这样：文档只提了 `writeFileSync`/`rmSync`/`rootDir`，
+        //   于是"面板里到底有没有 `readFileSync`"没有任何地方能查到）；
+        // - 文档写了、代码没有 → 照着文档写会拿到 `undefined`，报错还发生在插件那边。
+        let section = fs_api_section();
+        // **只认表格行**：散文里提到一个函数名不算"文档写了它" ——
+        // 不然"表格里删掉一行、散文里还提一句"就能骗过这条测试
+        // （这正是我第一版没牙的原因：那句说明里又写了一遍 `readFileSync`）。
+        let table: String = section
+            .lines()
+            .filter(|l| l.trim_start().starts_with('|'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // 方向一：导出表里的每个名字都要在表格区出现
+        for (mod_name, names) in [("node:path", NODE_PATH_EXPORTS), ("node:fs", NODE_FS_EXPORTS)] {
+            for n in names {
+                assert!(
+                    table.contains(n),
+                    "§4.3.0 的表格里没写 `{mod_name}` 的 `{n}` —— 插件作者查不到它"
+                );
+            }
+        }
+
+        // 方向二：表格区里出现的**函数名**都必须是真有的
+        //
+        // 手写扫描而不是正则：项目约定不加编译单元（没有 `regex` 依赖）。
+        // 只挑两类明显的函数名，避免把散文里的 `open()` / `Buffer` 之类误判：
+        //   · `xxxSync`（JS 侧的文件系统函数都带这个后缀）
+        //   · snake_case 的 Python 门面名
+        let known: Vec<&str> = NODE_FS_EXPORTS
+            .iter()
+            .chain(NODE_PATH_EXPORTS.iter())
+            .copied()
+            .collect();
+        let py_known = [
+            "read_text", "write_text", "append_text", "read_bytes", "write_bytes", "exists",
+            "list_dir", "mkdir", "remove", "rename", "stat", "data_dir",
+        ];
+        let mut offenders: Vec<String> = Vec::new();
+        for token in section.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            let looks_like_fs = token.ends_with("Sync")
+                || py_known.contains(&token)
+                || token.starts_with("read_")
+                || token.starts_with("write_")
+                || token.starts_with("append_");
+            if looks_like_fs && !known.contains(&token) && !py_known.contains(&token) {
+                offenders.push(token.to_string());
+            }
+        }
+        offenders.sort();
+        offenders.dedup();
+        assert!(
+            offenders.is_empty(),
+            "§4.3.0 里写了代码没有的函数: {offenders:?} —— 照着文档写会拿到 undefined"
+        );
+
+        // Python 门面：从引导脚本里**提取**导出的名字（不另抄一份清单，
+        // 抄的那份迟早和实现分叉 —— 这正是这条测试要防的事）
+        let facade: Vec<&str> = crate::pyhost::PY_BOOTSTRAP
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("_h."))
+            .filter_map(|l| l.split('=').next())
+            .map(str::trim)
+            .filter(|n| py_known.contains(n))
+            .collect();
+        assert!(
+            facade.len() >= 12,
+            "Python 门面里应该至少有 12 个文件系统函数，只找到 {facade:?}"
+        );
+        for n in &facade {
+            assert!(
+                table.contains(n),
+                "§4.3.0 的表格里没写 Python 门面的 `{n}` —— 插件作者查不到它"
+            );
+        }
+    }
+
     #[test]
     fn every_exported_builtin_name_is_actually_defined() {
         // 「导出清单」和「模块体」是两处**分开**写的东西，而它们必须一一对上：
