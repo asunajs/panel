@@ -23,16 +23,21 @@
   --text-dim: #a6adc8;
   --text-mute: #6c7086;
 
-  --accent: #89b4fa;
-  --accent-ink: #11111b;  /* 强调色底上的文字 */
+  /* ---- 粉色系（第二十七轮）----
+     accent 从 Mocha 的蓝 #89b4fa 换成官方粉 #f5c2e7（对比度 10.74:1，比蓝还好）。
+     危险色**跟着改了**：原来用 Mocha red #f38ba8，它本身就是粉红 ——
+     和粉 accent 只差 1.52:1，任务失败在列表里读起来像"高亮"。
+     #f87171 是 5.93:1，且色相 0° 离粉的 316° 有 44°，"出事了"一眼能认出来。 */
+  --accent: #f5c2e7;      /* Mocha pink */
+  --accent-ink: #11111b;  /* 强调色底上的文字（深字在粉底上 12.28:1） */
   --success: #a6e3a1;
-  --error: #f38ba8;
+  --error: #f87171;
   --warning: #f9e2af;
 
   /* 徽章背景：强调色的低饱和底，避免整行都在喊 */
-  --accent-soft: rgba(137, 180, 250, 0.16);
+  --accent-soft: rgba(245, 194, 231, 0.16);
   --success-soft: rgba(166, 227, 161, 0.16);
-  --error-soft: rgba(243, 139, 168, 0.16);
+  --error-soft: rgba(248, 113, 113, 0.16);
   --warning-soft: rgba(249, 226, 175, 0.16);
   --mute-soft: rgba(108, 112, 134, 0.18);
 
@@ -53,13 +58,24 @@
   --text-dim: #6c6f85;
   --text-mute: #9ca0b0;
 
-  --accent: #1e66f5;
+  /* ---- 粉色系（第二十七轮）----
+     **不能**直接用 Latte 官方的粉 #ea76cb：它在这个底色上只有 2.34:1，
+     而 --accent 在这个项目里既当底（primary 按钮）又当字（链接、token、
+     控制台 system 行、激活的导航项）—— 当字用就不合格了。
+     所以亮色用加深的粉 #b32d8f：底色上 5.03:1，白字在它上面 5.69:1，两头都过。
+     危险色保持 Latte red #d20f39（4.80:1），它离这个粉 31° 且更深，不撞。 */
+  --accent: #b32d8f;
   --accent-ink: #ffffff;
-  --success: #40a02b;
+  /* 这两个**不是** Latte 的官方值（官方 #40a02b / #df8e1d 在这个底色上只有
+     2.96:1 / 2.31:1）。它们当 `color` 用（徽章文字、日志级别、编辑器 token、
+     控制台 stderr），2.31:1 是真的读不清 —— 是 `⑥b 配色对比度` 那条检查
+     抓出来的既有缺陷。加深后 4.56:1 / 4.79:1。它们不当底色用，所以白字变差
+     这件事不存在。 */
+  --success: #2f7d1f;
   --error: #d20f39;
-  --warning: #df8e1d;
+  --warning: #9c5a08;
 
-  --accent-soft: rgba(30, 102, 245, 0.12);
+  --accent-soft: rgba(179, 45, 143, 0.12);
   --success-soft: rgba(64, 160, 43, 0.14);
   --error-soft: rgba(210, 15, 57, 0.12);
   --warning-soft: rgba(223, 142, 29, 0.16);

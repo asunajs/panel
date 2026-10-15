@@ -405,6 +405,56 @@ for (const f of readdirSync(join(PLUGINS, 'js'))) {
   check(hits.length === 0, `plugins/js/${f} 没用嵌入式宿主没有的全局`, hits.join(', '));
 }
 
+// ---------------------------------------------------------------- ⑥b 配色对比度
+
+console.log('\n⑥b 配色对比度');
+
+// 为什么要有这条：换配色是"看着好看"就能改的事，而对比度是**能不能读**的事。
+// 第二十七轮把 accent 从蓝换成粉时就踩到了 —— Latte 官方的粉 #ea76cb 在它自己的
+// 底色上只有 2.34:1，当**文字**色根本不合格（--accent 在这个项目里既当底又当字：
+// primary 按钮、链接、token 高亮、控制台 system 行、激活的导航项）。
+// 肉眼看不出来，算一下就知道。所以钉在这里。
+function luminance(hex) {
+  const h = hex.replace('#', '');
+  const chan = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+  const lin = chan.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+function contrast(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+const themeCss = readFileSync(join(WEB, 'css/theme.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+// 两个主题块：`:root, :root[data-theme='dark']` 和 `:root[data-theme='light']`
+const themeBlocks = [
+  ['dark', /:root,\s*\n:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/.exec(themeCss)?.[1] || ''],
+  ['light', /:root\[data-theme='light'\]\s*\{([\s\S]*?)\n\}/.exec(themeCss)?.[1] || ''],
+];
+const readToken = (block, name) =>
+  new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`).exec(block)?.[1] || '';
+
+for (const [name, block] of themeBlocks) {
+  check(!!block, `找得到 ${name} 主题块`);
+  const bg = readToken(block, 'bg');
+  for (const [token, min] of [
+    ['accent', 4.5],   // 当文字色用，AA 正文标准
+    ['text', 4.5],
+    ['error', 4.5],
+    ['success', 4.5],  // 也当文字用（徽章文字、日志级别、编辑器 token）
+    ['warning', 4.5],
+  ]) {
+    const c = readToken(block, token);
+    if (!c) continue;
+    const ratio = contrast(c, bg);
+    check(
+      ratio >= min,
+      `${name} 主题：--${token} ${c} 在 --bg ${bg} 上 ${ratio.toFixed(2)}:1（要 ≥${min}）`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------- ⑦ 第三方 vendor
 
 console.log('\n⑦ 第三方组件（web/vendor/）');

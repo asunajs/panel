@@ -34,6 +34,15 @@ cargo test
 # ①c 前端资源静态检查（web/ 与 plugins/demo/）：ES Module 语法、没有内联 CSS/JS、
 #     CSS 里没有硬编码色值、plugins/js/*.js 没用嵌入式 QuickJS 不存在的全局
 #
+#     第六节还有一条「⑥b 配色对比度」：从 theme.css 里解析出两个主题块的
+#     --accent/--text/--error/--success/--warning，算它们和 --bg 的对比度，
+#     要求全部 ≥4.5:1（WCAG AA 正文）。换配色是"看着好看"就能改的事，
+#     而对比度是**能不能读**的事 —— 这条钉住后者。
+#     第二十七轮把 accent 换成粉色时它当场抓出两件事：
+#       · Latte 官方的粉 #ea76cb 在它自己底色上只有 2.34:1（当文字不合格）
+#       · 亮色主题**原本就有的**缺陷：--success 2.96:1、--warning 2.31:1
+#     验牙：把亮色 accent 改回 #ea76cb → 报 "2.34:1（要 ≥4.5）"。
+#
 #     第二十七轮起多一节「⑦ 第三方组件（web/vendor/）」：
 #       · vendor 的每个 .css 都在 index.html 里被 link（漏 link 的症状是组件没样式）
 #       · FORK.md 记了上游版本 + commit，且**列全**目录里的每个文件

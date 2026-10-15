@@ -117,7 +117,7 @@ rust-plugin-panel/
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
 ├── web/                主面板前端（原生 ES Module + hash 路由，无框架；共 31 个文件）
 │   ├── index.html      壳结构（侧边栏 / 顶栏 / 视图容器 / 消息条，无内联 CSS/JS）
-│   ├── css/            reset / theme（Mocha+Latte 变量）/ layout / components
+│   ├── css/            reset / theme（Mocha+Latte 变量，粉色系 accent）/ layout / components
 │   ├── js/             app（路由+鉴权）· api · editor（自带编辑器）· confirm（二次确认）
 │   │   │               · logstream（SSE 日志流）· mock
 │   │   └── views/      task-list · task-editor · plugin-list · plugin-source · log-view
