@@ -596,8 +596,6 @@ fn ensure_plugin_state(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// 被面板停用的插件名。
-
 /* ------------------------------------------------------------------ 运行记录 */
 
 /// 一次运行的记录。`ok` 是 `Option`：`None` = 还没结束（面板重启留下的残记录）。
@@ -787,6 +785,7 @@ pub fn close_dangling_runs(db: &Db, now: &str) -> rusqlite::Result<usize> {
     )
 }
 
+/// 被面板停用的插件名。
 pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE disabled = 1 ORDER BY name")?;

@@ -1501,11 +1501,6 @@ async fn test_run(
     }
 }
 
-/// 插件注册的 HTTP 路由：查表 → 投给引擎 → 等结果。
-///
-/// 引擎线程是单线程串行执行插件的，所以这里必须带超时：
-/// 一个慢 handler 不能把 HTTP 连接也一起拖住。
-
 /// 查一条**插件任务**声明的执行预算（毫秒）。查不到就返回 `None`。
 ///
 /// 为什么 HTTP 层也要查：插件任务的 handler 在引擎线程里跑，而 HTTP 这一层
@@ -1532,6 +1527,10 @@ fn route_budget_ms(host: &crate::hostapi::HostState, key: &str) -> Option<u64> {
         .and_then(|r| r.budget_ms)
 }
 
+/// 插件注册的 HTTP 路由：查表 → 投给引擎 → 等结果。
+///
+/// 引擎线程是单线程串行执行插件的，所以这里必须带超时：
+/// 一个慢 handler 不能把 HTTP 连接也一起拖住。
 async fn plugin_route(st: AppState, req: Request) -> Response {
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();

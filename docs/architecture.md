@@ -62,23 +62,37 @@
 
 ```
 rust-plugin-panel/
+├── README.md           概览 / 快速开始 / 文档索引 / 验证入口 / 当前进度（详细内容都在 docs/）
 ├── Cargo.toml
+├── Cargo.lock          锁定的依赖树（可复现构建；bundled SQLite 等版本由它钉住）
 ├── build.rs           编译 vendored 的 pocketpy（amalgamated 单文件 C）+ 打开 watchdog
 ├── install.sh          一键安装：架构检测 → 下载 → SHA256 校验 → 装进 PATH
 ├── vendor/pocketpy/    pocketpy v2.2.0（pocketpy.c / pocketpy.h / pp_shim.c / VERSION）
 ├── src/
-│   ├── main.rs        启动顺序：SQLite → 宿主状态 → 引擎线程 → tick 循环 → Axum
-│   ├── engine.rs      ★ 引擎线程：QuickJS + PocketPy + 调度器 + 热更新 + 路由分发
-│   ├── hostapi.rs     ★ 宿主 API 的**唯一实现**（两个嵌入式宿主共用，HostState::do_*）
-│   ├── jshost.rs      ★ JS 侧适配：内置 `host-api` 模块源码 + `__host_*` 原生函数
-│   ├── pyhost.rs      ★ Python 侧适配：`host_api` 模块 + 原生函数 + 引导脚本
-│   ├── python.rs      ★ PocketPy FFI 薄封装（PyVm / 参数读取 / 预算 / traceback）
-│   ├── cron.rs        Cron 表达式解析 + next_after（13 个单测）
-│   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除（14 个单测）
-│   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum，17 个单测）
-│   ├── db.rs          SQLite：tasks 表 + jobs 表（含第九轮的 source 列，11 个单测）
-│   ├── assets.rs      主面板前端资源（web/ 下 12 个文件，include_str! 编译期内嵌）
-│   └── web.rs         Axum 路由 + 插件静态资源 + 插件路由 fallback + 测试运行
+│   ├── main.rs        启动顺序：SQLite → 宿主状态 → 引擎线程 → tick 循环 → Axum（5 个单测）
+│   ├── engine.rs      ★ 引擎线程：QuickJS + PocketPy + 调度器 + 热更新 + 路由分发（9 个单测）
+│   ├── hostapi.rs     ★ 宿主 API 的**唯一实现**（两个嵌入式宿主共用，HostState::do_*）（9 个单测）
+│   ├── jshost.rs      ★ JS 侧适配：内置 `host-api`/`node:fs`/`node:path` 源码 + `__host_*`（10 个单测）
+│   ├── pyhost.rs      ★ Python 侧适配：`host_api` 模块 + 原生函数 + 引导脚本（6 个单测）
+│   ├── python.rs      ★ PocketPy FFI 薄封装 + 进程级解释器锁（第二十六轮那个崩溃的修法）（5 个单测）
+│   ├── pluginfs.rs    ★ 第二十五轮：插件数据根 + 围栏（物理层复核，软链接也拦）（5 个单测）
+│   ├── log/           ★ 第二十四轮：日志内核 + 可插拔出口（插件 / 面板两条独立通道）
+│   │   ├── mod.rs       8 个语义 Type × 5 个过滤 Level、LogEntry、脱敏、run_id（20 个单测）
+│   │   ├── console.rs   终端出口（彩色；只给插件通道）（4 个单测）
+│   │   ├── memory.rs    环形缓冲（面板日志页读它）（7 个单测）
+│   │   ├── file.rs      JSONL 按天轮转，保留 7 天（9 个单测）
+│   │   ├── capture.rs   测试运行的捕获出口（不打终端 / 不进缓冲 / 不写文件）（4 个单测）
+│   │   └── hub.rs       多路分发 + SSE 订阅（5 个单测）
+│   ├── cron.rs        Cron 表达式解析 + next_after（24 个单测）
+│   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除（30 个单测）
+│   ├── workers.rs     第二十三轮：worker 池（`worker_hint` 把毫秒级任务与长任务分线程）（29 个单测）
+│   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum）（33 个单测）
+│   ├── ratelimit.rs   第二十轮：令牌桶（登录退避、测试运行限流）（5 个单测）
+│   ├── db.rs          SQLite：tasks / jobs / runs 三张表（16 个单测）
+│   ├── smtp.rs        第二十三轮：`smtp_send` 的邮件通道（12 个单测）
+│   ├── wsclient.rs    第二十一轮：插件侧 WebSocket 客户端（9 个单测）
+│   ├── assets.rs      主面板前端资源（web/ 下 16 个文件，include_str! 编译期内嵌）（8 个单测）
+│   └── web.rs         Axum 路由 + 插件静态资源 + 插件路由 fallback + 测试运行（10 个单测）
 ├── plugins/
 │   ├── js/
 │   │   ├── hello.js            on_tick + host.log 示例
@@ -86,6 +100,8 @@ rust-plugin-panel/
 │   │   ├── scheduler-demo.js   cron / 毫秒级任务示例
 │   │   ├── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
 │   │   ├── panel-jobs.js       ★ 第九轮：register_handler 登记处理函数，调度交给面板
+│   │   ├── log-levels.js       ★ 第二十四轮：8 个语义级别各打一条（日志页的活样本）
+│   │   ├── fs-demo.js          ★ 第二十五轮：跨运行时落盘/读回（只用相对路径，面板内外都能跑）
 │   │   └── demo.js             ★ 第十三轮：自带配置页（见 plugins/demo/）+ 自己的 API
 │   ├── demo/                   ★ 插件作者提供的配置页（/plugins/demo/ 就是它）
 │   │   ├── index.html          只管理这个插件自己那份配置
@@ -94,26 +110,42 @@ rust-plugin-panel/
 │   └── py/
 │       ├── sysinfo.py          ★ 最小 Python 插件（every + cron + on_tick）
 │       ├── sqlite-demo.py      ★ SQLite 往返 + 错误隔离 + 能力边界（register_route 报错）
-│       └── py-panel-jobs.py    ★ 第九轮：同一件事的 Python 版
+│       ├── py-panel-jobs.py    ★ 第九轮：同一件事的 Python 版
+│       └── log_levels.py       ★ 第二十四轮：日志级别的 Python 版（跨运行时一致性）
 ├── adapters/                  让同一份插件脚本跑在别的运行时里
 │   ├── node/                  npm 包 `@plugin-panel/host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
-├── web/                主面板前端（零构建：原生 ES Module + hash 路由，无框架）
+├── web/                主面板前端（零构建：原生 ES Module + hash 路由，无框架；共 16 个文件）
 │   ├── index.html      壳结构（侧边栏 / 顶栏 / 视图容器 / 消息条，无内联 CSS/JS）
 │   ├── css/            reset / theme（Mocha+Latte 变量）/ layout / components
-│   └── js/             app（路由+日志+鉴权）· api · editor（自带编辑器）· mock
-│       └── views/      task-list · task-editor · plugin-list
-├── docs/host-api.md    跨运行时 API 规范 v1（四个宿主的能力矩阵与语义约定）
-├── docs/screenshots/   文档里的界面截图（由 scripts/screenshot.mjs 生成）
+│   └── js/             app（路由+鉴权）· api · editor（自带编辑器）· confirm（二次确认）
+│       │               · logstream（SSE 日志流）· mock
+│       └── views/      task-list · task-editor · plugin-list · plugin-source · log-view
+├── docs/               参考文档（按主题）+ 按轮次的工程记录
+│   ├── README.md       索引 + 「原 §编号 → 文件」对照表（代码注释里 20 多处引用 §N）
+│   ├── host-api.md     ★ 跨运行时 API 规范 v1（函数、payload、错误约定、四宿主能力矩阵）
+│   ├── architecture.md  本文件：进程/线程模型、三条链路、目录结构、设计决策
+│   ├── …               plugin-api · runtimes · configuration · deployment · security ·
+│   │                   engine-safety · performance · logging · plugin-fs · run-history ·
+│   │                   testing · pitfalls · roadmap（14 篇）
+│   ├── changelog/      第九轮起按轮次记录（8 篇：为什么这么改、踩了什么、证据）
+│   └── screenshots/    文档里的界面截图（由 scripts/screenshot.mjs 生成）
 ├── scripts/
 │   ├── smoke.py            端到端冒烟：双运行时、插件路由、Python 任务真的触发
-│   ├── test-web-assets.mjs 前端静态检查：ES Module 语法 / 文件清单对账 / 没有内联
+│   ├── test-web-assets.mjs  前端静态检查：ES Module 语法 / 文件清单对账 / 没有内联
 │   │                       CSS-JS / CSS 只用变量 / 前后端字段名契约 / 安全约束
 │   ├── screenshot.mjs      用 CDP 驱动 headless Chrome/Edge 截图 **+ 浏览器断言**
 │   │                       （零 npm 依赖；排版与事件这类问题只有真浏览器能验）
-│   ├── endurance.py        长跑内存/CPU/调度抖动/HTTP 延迟实测（含报告生成）
-│   ├── soak.py             高压短跑（真 ARM64 硬件上跑）
-│   └── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
+│   ├── nav_check.mjs       同上，专测「插件声明的侧边栏入口」
+│   ├── endurance.py        长跑内存/CPU/调度抖动/HTTP 延迟实测（默认 8 小时，含报告）
+│   ├── soak.py             高压短跑：连续跑 + 反复热更新，看常驻内存会不会一路涨
+│   ├── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）
+│   └── *_check.py          单点验收：budget（执行预算）/ jitter（随机表达式）/
+│                           params（任务参数）/ smtp（邮件）/ worker_hint（分线程）/
+│                           serial_cost（量化「任务串行」的代价）
+├── testdata/           跨实现共享的测试向量（三份实现读同一份，防漂移）
+│   ├── log-format-cases.json
+│   └── redact-cases.json
 ├── .github/workflows/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）
 │   └── release.yml         打 tag 发多架构静态产物 + 发布后自测安装
@@ -121,7 +153,7 @@ rust-plugin-panel/
     ├── probe.rs            分层探针：逐项验证 tokio/sqlite/rquickjs 可用
     ├── broken-plugins/     容错测试：坏插件不影响好插件
     ├── hostile-plugins/    执行预算 / 熔断测试：JS 死循环插件
-    ├── hostile-py-plugins/ 同一件事的 Python 版（验证 pocketpy watchdog）
+    ├── hostile-py-plugins/  同一件事的 Python 版（验证 pocketpy watchdog）
     └── recovery-plugins/   熔断恢复测试：先失败几次再正常
 ```
 

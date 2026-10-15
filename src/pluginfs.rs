@@ -169,64 +169,6 @@ fn real_root(root: &Path) -> Result<PathBuf, FsError> {
     std::fs::canonicalize(root).map_err(|e| FsError::from_io(&e))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pluginfs-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn accepts_relative_and_rooted_forms() {
-        let root = tmpdir("ok");
-        let a = resolve_in_root(&root, "a/b.txt").unwrap();
-        let b = resolve_in_root(&root, "/a/b.txt").unwrap();
-        assert_eq!(a, b, "`/a/b` 与 `a/b` 必须等价（插件眼里的 / 就是根）");
-        assert!(a.starts_with(&root));
-    }
-
-    #[test]
-    fn rejects_parent_escape_instead_of_clamping() {
-        let root = tmpdir("esc");
-        // 夹到根上的话这里会返回 <root>/x —— 那是**静默改写**，插件在外面跑
-        // 时写到的是上一级，行为不一致。拒绝才是诚实的。
-        let err = resolve_in_root(&root, "../x").unwrap_err();
-        assert_eq!(err.code(), "EACCES");
-        let err = resolve_in_root(&root, "a/../../x").unwrap_err();
-        assert_eq!(err.code(), "EACCES");
-    }
-
-    #[test]
-    fn nested_inner_parent_segments_are_fine() {
-        let root = tmpdir("inner");
-        assert!(resolve_in_root(&root, "a/b/../c").is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_escape_is_blocked() {
-        let root = tmpdir("link");
-        let outside = tmpdir("outside");
-        // 根里放一个指向外面的软链接：字符串怎么规整都看不出问题
-        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
-        let err = resolve_in_root(&root, "escape/secret.txt").unwrap_err();
-        assert_eq!(
-            err.code(),
-            "EACCES",
-            "软链接逃逸必须被拦（纯字符串围栏在这里会漏）"
-        );
-    }
-
-    #[test]
-    fn nul_is_rejected() {
-        let root = tmpdir("nul");
-        assert_eq!(resolve_in_root(&root, "a\0b").unwrap_err().code(), "EINVAL");
-    }
-}
 
 /* ------------------------------------------------------------------ 操作 */
 
@@ -533,5 +475,65 @@ pub fn op(root: &Path, op: &str, a: &str, b: &str, c: &str) -> String {
         "rename" => rename(root, a, b),
         "stat" => stat(root, a),
         other => FsError::new("EINVAL", format!("未知的 fs 操作 `{other}`")).to_json(),
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pluginfs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn accepts_relative_and_rooted_forms() {
+        let root = tmpdir("ok");
+        let a = resolve_in_root(&root, "a/b.txt").unwrap();
+        let b = resolve_in_root(&root, "/a/b.txt").unwrap();
+        assert_eq!(a, b, "`/a/b` 与 `a/b` 必须等价（插件眼里的 / 就是根）");
+        assert!(a.starts_with(&root));
+    }
+
+    #[test]
+    fn rejects_parent_escape_instead_of_clamping() {
+        let root = tmpdir("esc");
+        // 夹到根上的话这里会返回 <root>/x —— 那是**静默改写**，插件在外面跑
+        // 时写到的是上一级，行为不一致。拒绝才是诚实的。
+        let err = resolve_in_root(&root, "../x").unwrap_err();
+        assert_eq!(err.code(), "EACCES");
+        let err = resolve_in_root(&root, "a/../../x").unwrap_err();
+        assert_eq!(err.code(), "EACCES");
+    }
+
+    #[test]
+    fn nested_inner_parent_segments_are_fine() {
+        let root = tmpdir("inner");
+        assert!(resolve_in_root(&root, "a/b/../c").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_blocked() {
+        let root = tmpdir("link");
+        let outside = tmpdir("outside");
+        // 根里放一个指向外面的软链接：字符串怎么规整都看不出问题
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let err = resolve_in_root(&root, "escape/secret.txt").unwrap_err();
+        assert_eq!(
+            err.code(),
+            "EACCES",
+            "软链接逃逸必须被拦（纯字符串围栏在这里会漏）"
+        );
+    }
+
+    #[test]
+    fn nul_is_rejected() {
+        let root = tmpdir("nul");
+        assert_eq!(resolve_in_root(&root, "a\0b").unwrap_err().code(), "EINVAL");
     }
 }

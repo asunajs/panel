@@ -162,8 +162,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 但那条假设在有人挂反代时不成立 —— nginx/caddy 转发的请求源地址全是 127.0.0.1，
     // 于是面板会在「本机免登录」的状态下被暴露出去。
     let Some(cred) = read_credential()? else {
-        return Err(format!(
-            "拒绝启动：没有配置面板令牌。\n\
+        return Err("拒绝启动：没有配置面板令牌。\n\
              \x20   这个面板没有「本机免登录」模式 —— 反代（nginx/caddy/cloudflared）就是\n\
              \x20   跑在本机的，转发过来的请求源地址全是 127.0.0.1，所以「绑回环 = 安全」\n\
              \x20   这个假设不成立：挂了反代就等于把面板裸奔出去。\n\
@@ -172,10 +171,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
              \x20     printf '%s' \"$TOKEN\" | ./plugin-panel hash-token   # 生成 PANEL_TOKEN_HASH\n\
              \x20     PANEL_TOKEN_HASH='$argon2id$...' ./plugin-panel\n\
              \x20     PANEL_TOKEN_FILE=/etc/plugin-panel.token ./plugin-panel   # 文件权限 600\n"
-        )
+        .to_string()
         .into());
     };
-    let auth_result = Some((cred.kind(), cred.is_plain()));
+    let kind = cred.kind();
     let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
     // 反代模式：开了才从转发头取客户端 IP。默认不信 —— 那些头客户端可以随便写，
     // 默认信就等于「退避用伪造 IP 就能绕过」。开了会打一条日志（它改变安全语义，
@@ -190,7 +189,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
              \x20       （只在反代确实会覆盖这个头时才开 —— 否则退避可以被伪造 IP 绕过）"
         );
     }
-    let (kind, _is_plain) = auth_result.unwrap_or(("", false));
     crate::log::plog!(
         "boot",
         info,
@@ -650,5 +648,84 @@ mod cred_choice_tests {
         let (chosen, notes) = choose_credential(None, None);
         assert!(chosen.is_none());
         assert!(notes.is_empty());
+    }
+}
+
+/// `docs/architecture.md` 的目录树必须和磁盘对得上。
+///
+/// 为什么放在 `main.rs`：这棵树描述的是**整个仓库**，不属于任何单个模块，
+/// 而 `main.rs` 是 crate 根。
+///
+/// **只查一个方向**：树里写了、磁盘上必须有。
+/// 反过来（磁盘上有、树里没写）不查 —— 那会在每次加文件时误报，
+/// 逼着人为了过测试去改文档，最后大家学会的是"无视这条测试"。
+///
+/// 为什么需要它：这棵树陈旧了十几轮没人发现（缺 6 个源文件、单测数还停在第 13 轮、
+/// `web/` 少算 4 个文件）。**没有牙的文档就会这样** —— 而这正是这个仓库最在意的事。
+#[cfg(test)]
+mod docs_tree_tests {
+    use std::path::Path;
+
+    /// 从 ASCII 树里抽出相对路径。
+    ///
+    /// 解析规则只有两条，和 `docs/architecture.md` 的写法约定绑死：
+    /// · 每层缩进 4 列（`│   ` 或 4 个空格）；
+    /// · 行内说明用**两个以上空格**分隔 —— 所以路径本身不能带空格。
+    fn parse_tree(text: &str) -> Vec<String> {
+        let mut stack: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let mut rest = line;
+            let mut depth = 0usize;
+            while let Some(r) = rest
+                .strip_prefix("│   ")
+                .or_else(|| rest.strip_prefix("    "))
+            {
+                depth += 1;
+                rest = r;
+            }
+            let Some(rest) = rest
+                .strip_prefix("├── ")
+                .or_else(|| rest.strip_prefix("└── "))
+            else {
+                continue; // 续行（纯说明）没有树形符号
+            };
+            let name = rest.trim().split("  ").next().unwrap_or("").trim();
+            // 省略号行（`…` 后面列了一串文档）和 `*_check.py` 这种通配不是真路径
+            if name.is_empty() || name.contains('…') || name.contains('*') {
+                continue;
+            }
+            stack.truncate(depth);
+            stack.push(name.trim_end_matches('/').to_string());
+            out.push(stack.join("/"));
+        }
+        out
+    }
+
+    #[test]
+    fn architecture_tree_lists_only_paths_that_exist() {
+        let doc = std::fs::read_to_string("docs/architecture.md")
+            .expect("读不到 docs/architecture.md（工作目录应该是 crate 根）");
+        let start = doc.find("rust-plugin-panel/").expect("找不到目录树");
+        let block = &doc[start..];
+        let end = block.find("\n```").expect("目录树代码块没闭合");
+        let paths = parse_tree(&block[..end]);
+
+        // 先确认解析没和文档写法脱节：解析出的条数太少就说明规则失效了，
+        // 那种情况下这条测试会变成"永远绿"，比没有更坏。
+        assert!(
+            paths.len() > 50,
+            "只解析出 {} 条路径 —— 解析规则可能和文档写法脱节了",
+            paths.len()
+        );
+
+        let missing: Vec<&String> = paths
+            .iter()
+            .filter(|p| !Path::new(p.as_str()).exists())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "docs/architecture.md 的目录树里列了磁盘上不存在的路径: {missing:#?}"
+        );
     }
 }
