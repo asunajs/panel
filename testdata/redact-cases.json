@@ -1,0 +1,160 @@
+{
+  "_note": [
+    "脱敏规则的**共享测试向量**。Rust（面板/宿主）、JS（面板内 QuickJS + 面板外 Node/Bun）、",
+    "Python（面板内 PocketPy + 面板外 CPython）三份实现都读这一个文件。",
+    "",
+    "为什么要有这个东西：『同一份插件源码，面板内/外都能跑』这句话的全部价值在于",
+    "三份实现的行为一致。日志行格式或脱敏规则只要差一个字符，那句话就名存实亡 ——",
+    "而三份实现分散在三种语言里，靠人肉对齐是撑不过第三次改动的。",
+    "加一条规则 = 在这里加一个 case，三边的测试同时变红。",
+    "",
+    "改这个文件时请同时跑三边的测试（cargo test / npm test / python -m pytest）。",
+    "",
+    "CJK 紧邻的几条（2026-10-15 补）钉住了一处真实分叉：Rust 侧原本用",
+    "char::is_alphanumeric()（Unicode 语义，汉字算字母），而 JS/Python 侧是",
+    "ASCII 判定 —— 于是「用token=xxx」这种紧贴写法在 Rust 里漏脱、在另两边脱。",
+    "现在三边统一成 ASCII：漏脱一个令牌比多脱一点危险得多。"
+  ],
+  "cases": [
+    {
+      "why": "手机号脱中间四位，保留首 3 末 4 —— 仍能区分账号，排查不受影响",
+      "in": "账号 13600136001 未登录：state 里没有会话",
+      "out": "账号 136****6001 未登录：state 里没有会话"
+    },
+    {
+      "why": "12 位数字不是手机号，别误伤",
+      "in": "id=136001360012",
+      "out": "id=136001360012"
+    },
+    {
+      "why": "前面紧挨着数字的也不算（可能是更长数字串的一部分）",
+      "in": "913600136001",
+      "out": "913600136001"
+    },
+    {
+      "why": "第二位必须是 3-9（19x 是真号段，12x 不是）",
+      "in": "12001234567",
+      "out": "12001234567"
+    },
+    {
+      "why": "URL query 里的 token 类参数",
+      "in": "GET /ycloud/x?ssoToken=abc.def.ghi&page=2",
+      "out": "GET /ycloud/x?ssoToken=***&page=2"
+    },
+    {
+      "why": "非敏感参数原样留着 —— 误伤的代价是排查时看不到真实参数",
+      "in": "?keyword=design&signal=3&n=1",
+      "out": "?keyword=design&signal=3&n=1"
+    },
+    {
+      "why": "password 类",
+      "in": "?password=hunter2&user=a",
+      "out": "?password=***&user=a"
+    },
+    {
+      "why": "JSON 字段里的 token",
+      "in": "{\"token\":\"abcdef\",\"page\":2}",
+      "out": "{\"token\":\"***\",\"page\":2}"
+    },
+    {
+      "why": "值不是字符串的 JSON 字段不动 —— 脱敏不该破坏 JSON 结构",
+      "in": "{\"token\":123}",
+      "out": "{\"token\":123}"
+    },
+    {
+      "why": "Authorization 头整行脱到行尾",
+      "in": "Authorization: Bearer xyz",
+      "out": "Authorization: ***"
+    },
+    {
+      "why": "Cookie 头整行脱（值里带 ; 和空格，只能整行砍）；冒号后的空格保留",
+      "in": "Cookie: panel_session=abc123; theme=dark",
+      "out": "Cookie: ***"
+    },
+    {
+      "why": "Set-Cookie 同理",
+      "in": "Set-Cookie: panel_session=abc; Path=/; HttpOnly",
+      "out": "Set-Cookie: ***"
+    },
+    {
+      "why": "裸 Bearer",
+      "in": "header Bearer abc.def",
+      "out": "header Bearer ***"
+    },
+    {
+      "why": "头名大小写不敏感",
+      "in": "cookie: a=b",
+      "out": "cookie: ***"
+    },
+    {
+      "why": "正文里的同名词不算请求头（必须在行首或空白之后）",
+      "in": "我设置了 authorization 这个词",
+      "out": "我设置了 authorization 这个词"
+    },
+    {
+      "why": "一条里同时命中多条规则：全部脱掉（手机号 + 裸 kv + 括号里的请求头）",
+      "in": "登录 13600136001 失败 token=zzz (Cookie: s=1)",
+      "out": "登录 136****6001 失败 token=*** (Cookie: ***)"
+    },
+    {
+      "why": "裸 kv 也要脱 —— 插件排查时最爱打这种没有 URL 上下文的片段，漏掉它等于没脱",
+      "in": "用 token=abc123 去换 SSO 失败",
+      "out": "用 token=*** 去换 SSO 失败"
+    },
+    {
+      "why": "单字符值不可能是凭据，别脱 —— 实测踩过：面板自己的提示 `请设 PANEL_COOKIE_SECURE=1` 被脱成 `=***`，提示文本坏了",
+      "in": "鉴权: 已开启（明文令牌；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1）",
+      "out": "鉴权: 已开启（明文令牌；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1）"
+    },
+    {
+      "why": "但环境变量里的真令牌照脱（值不止一个字符）",
+      "in": "PANEL_TOKEN=abcdefg ./plugin-panel",
+      "out": "PANEL_TOKEN=*** ./plugin-panel"
+    },
+    {
+      "why": "敏感 key 是**子串**匹配（不是相等）：access_token / ssoToken / x-auth-token 这些都得命中",
+      "in": "access_token=abc123",
+      "out": "access_token=***"
+    },
+    {
+      "why": "反过来，不含敏感子串的 key 一律不碰",
+      "in": "page=2&sign=1&design=dark",
+      "out": "page=2&sign=1&design=dark"
+    },
+    {
+      "why": "空串、纯文本原样返回",
+      "in": "插件已加载（quickjs）",
+      "out": "插件已加载（quickjs）"
+    },
+    {
+      "why": "CJK 紧贴 key 左边（中文日志里很常见的写法）：边界必须是 **ASCII** 语义，否则 Rust 的 char::is_alphanumeric() 把「用」算成字母，整条就漏脱了",
+      "in": "用token=abc123 去换 SSO",
+      "out": "用token=*** 去换 SSO"
+    },
+    {
+      "why": "同上，Bearer 那条规则也一样（boundary 不能是 Unicode 字母数字）",
+      "in": "用Bearer abc123 去换 SSO",
+      "out": "用Bearer *** 去换 SSO"
+    },
+    {
+      "why": "CJK 紧贴 key 右边：key 的字符集也必须只认 ASCII —— 否则 key 会被读成「token中」，而它并不是一个真的 key 名",
+      "in": "token中=abc123",
+      "out": "token中=abc123"
+    },
+    {
+      "why": "全角括号也要算「行内起点」和「配对终点」：中文提示里 （Cookie: xxx） 很常见，不认全角括号就会整条漏脱",
+      "in": "（Cookie: session=abc）后面还有人",
+      "out": "（Cookie: ***）后面还有人"
+    },
+    {
+      "why": "全角方括号/书名号同理",
+      "in": "【Authorization: Bearer zzz】",
+      "out": "【Authorization: ***】"
+    },
+    {
+      "why": "中文标点紧跟手机号：全角标点已经是终止符，不能把它一起脱掉",
+      "in": "账号13600136001，已锁定",
+      "out": "账号136****6001，已锁定"
+    }
+  ]
+}

@@ -4,9 +4,11 @@
 // 行为：加载插件文件 → 插件顶层调用 register_cron / every 注册任务
 //       → 运行器按调度逐 tick 触发到期任务（--once 表示跑一轮就退出，便于测试）。
 //
-// 日志：
-//   插件自己的 log/warn/error        -> stderr `[host-api] [level] msg`
-//   每次任务触发 / 失败              -> stderr `[HH:MM:SS] [plugin] [info|error] task ...`
+// 日志（规范 v2，与面板逐字符一致 —— 见 src/log.js 与 docs/logging.md）：
+//   八档 type，全部 -> stderr `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`
+//   运行器自己的行**也走同一套**（scope = 插件名）：面板里「任务触发 / 失败」
+//   本来就挂在该插件的 scope 下，换宿主不该换掉这条。只有纯 CLI 诊断
+//   （参数拼错、文件不存在）才直接打 stderr。
 
 import { register } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -67,11 +69,19 @@ if (!fs.existsSync(pluginPath)) {
 const pluginName = path.basename(pluginPath).replace(/\.[^.]+$/, '');
 process.env.PANEL_PLUGIN = pluginName;
 
-const { __host, sqlite_exec } = await import('host-api');
+const { __host, sqlite_exec, loggerFactory } = await import('host-api');
 __host.setPluginName(pluginName);
 
+// 运行器自己的行（任务触发 / 失败 / 加载概况）也走**同一套日志**。
+//
+// 为什么不是自己拼字符串：面板里这些行本来就挂在该插件的 scope 下
+// （见 src/scheduler.rs 与 engine.rs），换宿主不该换掉这条。以前这里是第三种
+// 格式 `[HH:MM:SS] [plugin] [type] msg` —— 三种格式并存时，「同一份插件两边
+// 跑出来一样」就成了空话。
+const lg = loggerFactory({ scope: pluginName, plugin: pluginName });
+
+/// 纯 CLI 诊断（参数拼错、插件文件不存在）还没进插件上下文，直接打 stderr。
 const out = (line) => process.stderr.write(`${line}\n`);
-const stamp = () => __host.fmtClock(Date.now());
 
 // ---------------------------------------------------------------- 运行记录落库
 
@@ -92,7 +102,7 @@ if (opts.db && opts.db !== ':memory:') {
         [task.name, task.plugin, task.expr, task.runs, task.lastRun, task.lastError, __host.fmtMs(task.nextFire)],
       );
     } catch (e) {
-      out(`[${stamp()}] [${pluginName}] [warn] jobs 表写入失败: ${__host.fmtErrorLine(e)}`);
+      lg.warn(`jobs 表写入失败: ${__host.fmtErrorLine(e)}`);
     }
   };
 }
@@ -100,9 +110,8 @@ if (opts.db && opts.db !== ':memory:') {
 function report(results) {
   for (const { task, payload, error } of results) {
     if (error) {
-      out(
-        `[${stamp()}] [${pluginName}] [error] task \`${task.name}\` 第 ${payload.runs} 次执行失败: ` +
-          `${__host.fmtErrorLine(error)}`,
+      lg.error(
+        `task \`${task.name}\` 第 ${payload.runs} 次执行失败: ${__host.fmtErrorLine(error)}`,
       );
     }
     if (persist) persist(task);
@@ -114,7 +123,7 @@ function report(results) {
 try {
   await import(pathToFileURL(pluginPath).href);
 } catch (e) {
-  out(`[${stamp()}] [${pluginName}] [error] 插件加载失败: ${__host.fmtError(e)}`);
+  lg.error(`插件加载失败: ${__host.fmtError(e)}`);
   process.exit(1);
 }
 
@@ -122,16 +131,16 @@ try {
 for (const spec of opts.jobs) {
   const eq = spec.indexOf('=');
   if (eq < 1) {
-    out(`[${stamp()}] [${pluginName}] [error] --job 需要 <name>=<expr> 形式: ${spec}`);
+    out(`--job 需要 <name>=<expr> 形式: ${spec}`);
     process.exit(2);
   }
   const jname = spec.slice(0, eq).trim();
   const jexpr = spec.slice(eq + 1).trim();
   try {
     __host.scheduleHandler(jname, jexpr);
-    out(`[${stamp()}] [${pluginName}] [info] 已挂上任务 \`${jname}\`（${jexpr}）`);
+    lg.info(`已挂上任务 \`${jname}\`（${jexpr}）`);
   } catch (e) {
-    out(`[${stamp()}] [${pluginName}] [error] --job ${spec} 失败: ${__host.fmtErrorLine(e)}`);
+    out(`--job ${spec} 失败: ${__host.fmtErrorLine(e)}`);
     process.exit(2);
   }
 }
@@ -139,23 +148,21 @@ for (const spec of opts.jobs) {
 const handlers = __host.handlerNames();
 if (handlers.length > 0) {
   // 排序只为输出稳定（Map 本身保持插入顺序）
-  out(
-    `[${stamp()}] [${pluginName}] [info] register_handler 登记了 ${handlers.length} 个处理函数: ` +
-      `${[...handlers].sort().join(', ')}`,
+  lg.info(
+    `register_handler 登记了 ${handlers.length} 个处理函数: ${[...handlers].sort().join(', ')}`,
   );
 }
 
 const tasks = __host.tasks();
-out(
-  `[${stamp()}] [${pluginName}] [info] 插件已加载：注册 ${tasks.length} 个任务` +
+lg.info(
+  `插件已加载：注册 ${tasks.length} 个任务` +
     (tasks.length > 0 ? ` -> ${tasks.map((t) => `${t.name}(${t.expr})`).join(', ')}` : ''),
 );
 
 // 触发日志：在 handler 执行之前打，顺序更符合宿主输出（先触发，再是插件自己的日志）
 __host.scheduler().onFire = (task, payload) => {
-  out(
-    `[${stamp()}] [${pluginName}] [info] task \`${task.name}\` 第 ${payload.runs} 次触发` +
-      `（${task.expr}，调度延迟 ${payload.lateMs}ms）`,
+  lg.info(
+    `task \`${task.name}\` 第 ${payload.runs} 次触发（${task.expr}，调度延迟 ${payload.lateMs}ms）`,
   );
 };
 
@@ -163,12 +170,12 @@ const routes = __host.routes();
 if (routes.length > 0) {
   try {
     const info = await __host.serverReady();
-    out(
-      `[${stamp()}] [${pluginName}] [info] 内置 http server 监听 ${info ? info.url : '(未启动)'}` +
+    lg.info(
+      `内置 http server 监听 ${info ? info.url : '(未启动)'}` +
         `，路由: ${routes.map((r) => `${r.method} ${r.path}`).join(', ')}`,
     );
   } catch (e) {
-    out(`[${stamp()}] [${pluginName}] [error] 内置 http server 未能启动: ${__host.fmtErrorLine(e)}`);
+    lg.error(`内置 http server 未能启动: ${__host.fmtErrorLine(e)}`);
   }
 }
 
@@ -183,7 +190,7 @@ if (opts.once) {
   const results = await __host.fireAllOnce();
   countFailures(results);
   report(results);
-  out(`[${stamp()}] [${pluginName}] [info] --once 完成：触发 ${results.length} 次，失败 ${failures} 次`);
+  lg.info(`--once 完成：触发 ${results.length} 次，失败 ${failures} 次`);
   await __host.shutdownNet();
   __host.closeDb();
   process.exit(0);
@@ -205,7 +212,7 @@ async function loop() {
       countFailures(results);
       report(results);
     } catch (e) {
-      out(`[${stamp()}] [${pluginName}] [error] 调度循环异常: ${__host.fmtErrorLine(e)}`);
+      lg.error(`调度循环异常: ${__host.fmtErrorLine(e)}`);
     }
   }
 }
@@ -216,9 +223,9 @@ async function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   running = false;
-  out(`[${stamp()}] [${pluginName}] [info] ${reason}，退出（累计失败 ${failures} 次）`);
+  lg.info(`${reason}，退出（累计失败 ${failures} 次）`);
   const last = __host.tasks().filter((t) => t.lastError);
-  for (const t of last) out(`[${stamp()}] [${pluginName}] [warn] last_error ${t.name}: ${t.lastError.split('\n')[0]}`);
+  for (const t of last) lg.warn(`last_error ${t.name}: ${t.lastError.split('\n')[0]}`);
   await __host.shutdownNet();
   __host.closeDb();
   process.exit(0);

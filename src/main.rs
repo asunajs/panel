@@ -22,6 +22,8 @@ mod db;
 mod engine;
 mod hostapi;
 mod jshost;
+mod log;
+mod pluginfs;
 mod pyhost;
 mod python;
 mod scheduler;
@@ -35,7 +37,6 @@ use db::Db;
 use engine::{EngineCmd, EngineHandle, EngineHealth, JsEngine, Registry};
 use hostapi::{HostState, SharedLogs};
 use ratelimit::TestRunLimiter;
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,7 +138,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
 
-    println!("[boot] tokio runtime 就绪（{workers} 个 worker 线程）");
+    // 面板自身日志的过滤级别。默认 debug（全都要），
+    // 部署时嫌吵就用 `PANEL_LOG_LEVEL=warn` —— 注意它只影响面板通道，
+    // 插件的日志级别由插件自己决定（`host.log` 就是 info）。
+    log::init_panel(
+        std::env::var("PANEL_LOG_LEVEL")
+            .ok()
+            .and_then(|s| log::Level::parse(&s))
+            .unwrap_or(log::Level::Debug),
+    );
+    log::plog!("boot", info, "tokio runtime 就绪（{workers} 个 worker 线程）");
     rt.block_on(run())
 }
 
@@ -173,14 +183,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let trust_proxy = env_flag("PANEL_TRUST_PROXY");
 
     if trust_proxy {
-        println!(
-            "[boot] 反代模式：客户端 IP 取自 X-Forwarded-For / X-Real-IP 的**最右一跳**\n\
+        crate::log::plog!(
+            "boot",
+            info,
+            "反代模式：客户端 IP 取自 X-Forwarded-For / X-Real-IP 的**最右一跳**\n\
              \x20       （只在反代确实会覆盖这个头时才开 —— 否则退避可以被伪造 IP 绕过）"
         );
     }
     let (kind, _is_plain) = auth_result.unwrap_or(("", false));
-    println!(
-        "[boot] 鉴权: {}",
+    crate::log::plog!(
+        "boot",
+        info,
+        "鉴权: {}",
         {
             // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
             let secure = if cookie_secure {
@@ -198,26 +212,66 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let db = db::open(&db_path)?;
-    println!("[boot] SQLite 就绪: {}", db_path.display());
+    crate::log::plog!("boot", info, "SQLite 就绪: {}", db_path.display());
 
     let started = Instant::now();
     let started_at = now_secs();
 
+    /// 运行记录保留天数。**比日志的 7 天长** —— 见下面那段的说明。
+    const RUN_KEEP_DAYS: i64 = 30;
+
     // 写一条 boot 记录，验证 Rust → SQLite 的写入链路
     db::upsert_task(&db, "boot", "kernel", "done", "{}", &started_at)?;
-    println!("[boot] tasks 表已写入 boot 记录");
+    crate::log::plog!("boot", info, "tasks 表已写入 boot 记录");
+
+    // ---------- 1.5 运行记录：收尾 + 清理 ----------
+    //
+    // 两件事都在这里做，因为都只该在启动时做一次：
+    //
+    // ① **收尾残留**：上一次进程被杀/崩掉时，正在跑的那次运行留下了
+    //    `finished_at IS NULL` 的记录。不收尾的话它会永远显示成"跑着呢"，
+    //    而那次运行早就没了 —— 界面在撒谎比没有界面更坏。
+    // ② **清理过期**：保留 30 天，比日志的 7 天**长**。这是刻意的：
+    //    日志过期后记录还在，界面才能说清「这次跑过、日志已过期」，
+    //    而不是让那条记录凭空消失（用户会以为面板漏记了）。
+    match db::close_dangling_runs(&db, &started_at) {
+        Ok(0) => {}
+        Ok(n) => crate::log::plog!("boot", warn, "收尾了 {n} 条上次没结束的运行记录"),
+        Err(e) => crate::log::plog!("boot", warn, "收尾残留运行记录失败: {e}"),
+    }
+    match db::prune_runs(&db, RUN_KEEP_DAYS, &started_at) {
+        Ok(0) => {}
+        Ok(n) => crate::log::plog!("boot", info, "清理了 {n} 条超过 {RUN_KEEP_DAYS} 天的运行记录"),
+        Err(e) => crate::log::plog!("boot", warn, "清理运行记录失败: {e}"),
+    }
 
     // ---------- 2. 共享状态 ----------
     let registry: Registry = Arc::new(Mutex::new(Vec::new()));
-    let logs: SharedLogs = Arc::new(Mutex::new(VecDeque::new()));
+    // 插件日志中枢：终端 + 1MB 内存环 + JSONL（按天，留 7 天）。
+    // 面板自己的日志不走这里 —— 它只有终端 + 内存环（见 log::panel）。
+    let log_dir = env_path("PANEL_LOG_DIR", "logs");
+    let logs: SharedLogs = log::Hub::new(Some(&log_dir));
     let ticks = Arc::new(AtomicU64::new(0));
     // 宿主 API 状态：两个运行时的适配层都往这里调（见 hostapi.rs）
     // WebSocket 句柄注册表挂在宿主状态上（跨调用有效 —— 见 hostapi::HostState::ws）。
     // 连接任务跑在这个 runtime 上，而插件在引擎线程上**阻塞**地收发 —— 两边互不占。
+    // 插件的数据根：`<这里>/<插件名>/` 就是插件在 node:fs 里看到的 `/`。
+    // 默认放在数据库旁边（`<DB 所在目录>/plugin-data`）——**刻意不放在插件目录里**：
+    // 那里会被面板当静态目录服务出去，插件往那儿写的 token 就上网页了。
+    let plugin_data_dir = env_path(
+        "PLUGIN_DATA_DIR",
+        &db_path
+            .parent()
+            .map(|p| p.join("plugin-data"))
+            .unwrap_or_else(|| std::path::PathBuf::from("plugin-data"))
+            .display()
+            .to_string(),
+    );
     let host = HostState::new(
         logs.clone(),
         db.clone(),
         plugins_dir.clone(),
+        plugin_data_dir,
         wsclient::Registry::new(tokio::runtime::Handle::current()),
     );
 
@@ -252,14 +306,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Rust → JS：投递一次 tick。引擎线程是阻塞消费的，send 本身不阻塞。
             // 广播：每条 worker 都要给**自己负责的插件**派 on_tick
             if !tick_tx.broadcast(EngineCmd::Tick { seq, ts: ts.clone() }) {
-                println!("[tick] 引擎线程已退出，停止 tick 循环");
+                crate::log::plog!("tick", info, "引擎线程已退出，停止 tick 循环");
                 break;
             }
 
             // Rust → SQLite：心跳落盘
             let payload = format!("{{\"seq\":{seq}}}");
             if let Err(e) = db::bump_heartbeat(&db_for_task, "heartbeat", &payload, &ts) {
-                eprintln!("[tick] 心跳写库失败: {e}");
+                crate::log::plog!("tick", error, "心跳写库失败: {e}");
             }
         }
     });
@@ -274,13 +328,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(dir) if !dir.trim().is_empty() => {
             let path = PathBuf::from(dir.trim());
             if !path.join("index.html").is_file() {
-                eprintln!(
-                    "[boot] WEB_DEV_DIR={} 里没有 index.html，主面板会 404（把 WEB_DEV_DIR 指向仓库的 web/ 目录）",
+                crate::log::plog!(
+                    "boot",
+                    warn,
+                    "WEB_DEV_DIR={} 里没有 index.html，主面板会 404（把 WEB_DEV_DIR 指向仓库的 web/ 目录）",
                     path.display()
                 );
             }
-            eprintln!(
-                "[boot] ⚠ 开发模式：主面板前端从 {} 读盘（每次请求都读，改完刷新即可）。生产部署请去掉 WEB_DEV_DIR。",
+            crate::log::plog!(
+                "boot",
+                warn,
+                "⚠ 开发模式：主面板前端从 {} 读盘（每次请求都读，改完刷新即可）。生产部署请去掉 WEB_DEV_DIR。",
                 path.display()
             );
             Assets::from_dir(path)
@@ -313,12 +371,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        eprintln!("[boot] 监听 {addr} 失败: {e}");
-        eprintln!("[boot] 端口被占用？用 BIND_ADDR=127.0.0.1:8790 换一个");
+        crate::log::plog!("boot", error, "监听 {addr} 失败: {e}");
+        crate::log::plog!("boot", error, "端口被占用？用 BIND_ADDR=127.0.0.1:8790 换一个");
         e
     })?;
-    println!("[boot] Web UI: http://{addr}/");
-    println!("[boot] 按 Ctrl-C 退出");
+    crate::log::plog!("boot", info, "Web UI: http://{addr}/");
+    crate::log::plog!("boot", info, "按 Ctrl-C 退出");
 
     // into_make_service_with_connect_info: 让 handler 能拿到对端地址
     // —— 登录退避按来源 IP 计数、审计日志要记是谁登的，都得靠它。
@@ -331,9 +389,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // ---------- 7. 收尾：让引擎线程把 Context 干净地析构掉 ----------
-    println!("[boot] 正在关闭...");
+    crate::log::plog!("boot", info, "正在关闭...");
     engine.shutdown();
-    println!("[boot] 已退出");
+    crate::log::plog!("boot", info, "已退出");
     Ok(())
 }
 
@@ -358,7 +416,7 @@ async fn shutdown_signal() {
                 s.recv().await;
             }
             Err(e) => {
-                eprintln!("[boot] 注册 SIGTERM 处理器失败: {e}");
+                crate::log::plog!("boot", warn, "注册 SIGTERM 处理器失败: {e}");
                 std::future::pending::<()>().await;
             }
         }
@@ -367,8 +425,8 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => println!("[boot] 收到 SIGINT"),
-        _ = terminate => println!("[boot] 收到 SIGTERM"),
+        _ = ctrl_c => crate::log::plog!("boot", info, "收到 SIGINT"),
+        _ = terminate => crate::log::plog!("boot", info, "收到 SIGTERM"),
     }
 }
 
@@ -445,7 +503,7 @@ fn read_credential() -> Result<Option<auth::Cred>, Box<dyn std::error::Error>> {
     let plain = read_secret("PANEL_TOKEN", "PANEL_TOKEN_FILE")?;
     let (chosen, notes) = choose_credential(hash, plain);
     for n in &notes {
-        println!("[boot] {n}");
+        crate::log::plog!("boot", info, "{n}");
     }
     match chosen {
         // parse() 会当场校验哈希格式：配错了就起不来，而不是「怎么登都登不上」

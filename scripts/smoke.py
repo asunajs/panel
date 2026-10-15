@@ -33,6 +33,7 @@
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -79,6 +80,35 @@ def _auth_headers(headers=None):
     if CUR_TOKEN and not any(k.lower() in ("x-panel-token", "authorization", "cookie") for k in h):
         h["X-Panel-Token"] = CUR_TOKEN
     return h
+
+
+def sse_probe(url: str, token: str = "", seconds: float = 4.0) -> tuple[str, str]:
+    """连上一条 SSE 流，读一小段就断开。返回 `(content-type, 收到的文本)`。
+
+    ⚠ 不能 `r.read(n)`：SSE 是**长连接**，`read(n)` 会一直等满 n 个字节，
+    没有新日志时就挂到超时（实测）。`read1()` 只做一次底层 recv，
+    拿到什么就返回什么 —— 这正是我们要的「读一小段」。
+
+    每次 `read1` 都由 urlopen 的 timeout 兜底，超时就当作「这段先读到这儿」。
+    """
+    hdrs = {"X-Panel-Token": token} if token else _auth_headers()
+    req = urllib.request.Request(url, headers=hdrs)
+    buf = b""
+    deadline = time.time() + seconds
+    with urllib.request.urlopen(req, timeout=1.5) as r:
+        ctype = (r.headers.get("content-type") or "").split(";")[0].strip()
+        while time.time() < deadline:
+            try:
+                chunk = r.read1(65536)
+            except (socket.timeout, TimeoutError):
+                continue
+            if not chunk:
+                break
+            buf += chunk
+            # 两条都拿到了就没必要再等
+            if b"event: notice" in buf and b"event: log" in buf:
+                break
+    return ctype, buf.decode("utf-8", "replace")
 
 
 def check(ok: bool, label: str, detail: str = "") -> bool:
@@ -197,6 +227,866 @@ def wait_ready(base, proc, headers=None, timeout=20.0):
     return False
 
 
+# ---------------------------------------------------------------- 跨运行时日志一致性
+
+# 同一份插件，面板的 QuickJS 与 Node 适配器各跑一遍，插件自己发出的日志必须**逐条相同**。
+#
+# 为什么值得一条常驻检查：日志的格式 / 字段 / 脱敏规则被三份实现（Rust / JS / Python）
+# 各写了一遍，靠人眼对齐撑不过第三次改动。共享向量（testdata/*.json）钉住了
+# **规则**，但钉不住「宿主接线是否走对了这条路」—— 比如插件调 `console.log`
+# 到底进没进日志、`plugin`/`scope` 字段有没有填。这条检查补的就是这一段：
+# 真跑两个宿主，真比输出。
+PARITY_PROBE = """
+import { start, success, fail, warn, error, debug, fatal, info, register_handler } from 'host-api';
+start('八档对齐探针已加载');
+info('多参', 1, { a: 1 }, [1, 2], null, undefined, true);
+debug('debug 一条');
+warn('账号 13600136001 失败');
+error('token=abc123');
+fail('fail 一条');
+success('success 一条');
+fatal('fatal 一条');
+error('{"user":"x","access_token":"SECRET","page":2}');
+warn('Authorization: Bearer zzzzz');
+register_handler('noop', () => {});
+"""
+
+# 探针里**日志调用**的条数。改上面的探针时必须同步改这里（下面对比用的就是它），
+# 不写 `count("\n")` 是因为文件行数与日志条数不是一回事。
+PARITY_PROBE_LINES = 10
+
+
+# Python 侧的同一份探针。**只用标量参数** —— 容器的 JSON 空白在 JS/Python 之间
+# 本来就不同（`{"a":1}` vs `{"a": 1}`，见 adapters 的说明），那条差异是跨**语言**
+# 的，不该混进「同一种语言跨宿主」这条检查里。
+PARITY_PROBE_PY = """
+from host_api import start, success, fail, warn, error, debug, fatal, info, register_handler
+
+start("八档对齐探针已加载")
+info("多参", 1, "str", None, True)
+debug("debug 一条")
+warn("账号 13600136001 失败")
+error("token=abc123")
+fail("fail 一条")
+success("success 一条")
+fatal("fatal 一条")
+error('{"user":"x","access_token":"SECRET","page":2}')
+warn("Authorization: Bearer zzzzz")
+register_handler("noop", lambda payload: None)
+"""
+
+PARITY_PROBE_PY_LINES = 10
+def _plugin_log_rows(path: Path) -> list[tuple]:
+    """读 JSONL，只取插件自己发出的那些行（丢掉宿主自己的收尾行）。"""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        d = json.loads(line)
+        rows.append((d["type"], d["level"], d["scope"], d.get("plugin"), d["msg"]))
+    return rows
+
+
+# ---------------------------------------------------------------- node:fs / node:path（面板内）
+
+# 插件在面板里拿到的文件系统是**限定范围**的：它眼里的 `/` 就是
+# `<PLUGIN_DATA_DIR>/<插件名>/`。这一组验四件事：
+#   ① 常规读写真能落盘（不是在内存里假装）；
+#   ② 越界被拒（`../`、别的插件的目录、系统文件）；
+#   ③ 插件之间互相看不见；
+#   ④ 删光自己的根，不会碰到插件源码目录（那是面板的静态目录）。
+#
+# 为什么值得常驻：围栏是"默认信任"和"默认不信任"的分界线，而这类代码
+# 一旦写歪（比如只做字符串规整、漏掉软链接），功能测试**全会通过** ——
+# 只有专门打边界的用例才拦得住。
+FS_PROBE_A = """
+import fs from 'node:fs';
+import path from 'node:path';
+import { log, start, register_handler } from 'host-api';
+
+start('fs 探针 A');
+log('ROOT=' + fs.rootDir());
+fs.mkdirSync('data', { recursive: true });
+fs.writeFileSync(path.join('data', 'x.json'), JSON.stringify({ n: 1 }));
+log('READ=' + fs.readFileSync('data/x.json', 'utf8'));
+log('EXISTS=' + fs.existsSync('data/x.json'));
+log('LIST=' + JSON.stringify(fs.readdirSync('data')));
+log('SIZE=' + fs.statSync('data/x.json').size);
+fs.appendFileSync('data/x.json', '-tail');
+log('APPEND=' + fs.readFileSync('data/x.json', 'utf8'));
+fs.writeFileSync('data/b.bin', new Uint8Array([1, 2, 3]));
+const back = fs.readFileSync('data/b.bin');
+log('BYTES=' + (back instanceof Uint8Array) + ',' + Array.from(back).join(','));
+fs.renameSync('data/x.json', 'data/y.json');
+log('RENAMED=' + JSON.stringify(fs.readdirSync('data')));
+fs.unlinkSync('data/y.json');
+fs.rmSync('data/b.bin');
+log('CLEARED=' + JSON.stringify(fs.readdirSync('data')));
+const cjs = require('node:fs');
+log('SAME=' + (cjs === fs));
+// 越界：每一条都必须被拒。写清「没被拒会打 LEAK=…」，这样断言能直接找它。
+for (const [why, fn] of [
+  ['parent-write', () => fs.writeFileSync('../escape.txt', 'x')],
+  ['system', () => fs.readFileSync('../../../../../etc/passwd', 'utf8')],
+  ['sibling-read', () => fs.readFileSync('../fs_probe_b/secret.txt', 'utf8')],
+  ['parent-list', () => fs.readdirSync('..')],
+  ['escape-write', () => fs.appendFileSync('../../escape.txt', 'x')],
+]) {
+  try { fn(); log('LEAK=' + why); }
+  catch (e) { log('DENY=' + why + ':' + e.code); }
+}
+fs.writeFileSync('secret.txt', 'A的机密');
+log('SECRET=' + fs.readFileSync('secret.txt', 'utf8'));
+register_handler('noop', () => {});
+"""
+
+FS_PROBE_B = """
+import fs from 'node:fs';
+import { log, start, register_handler } from 'host-api';
+
+start('fs 探针 B');
+fs.writeFileSync('secret.txt', 'B的机密');
+log('B-ROOT=' + fs.rootDir());
+try { fs.readFileSync('../fs_probe_a/secret.txt', 'utf8'); log('LEAK=sibling-B'); }
+catch (e) { log('DENY=sibling-B:' + e.code); }
+try { fs.readdirSync('..'); log('LEAK=parent-list-B'); }
+catch (e) { log('DENY=parent-list-B:' + e.code); }
+register_handler('noop', () => {});
+"""
+
+
+# ---------------------------------------------------------------- Python 多 worker
+
+# 这一组钉的是一个**启动即崩**的 bug（2026-10-15 实测）：
+#
+#   `py_switchvm()` 改的是**进程级**的 `pk_current_vm`，而引擎默认 `ENGINE_WORKERS=2`。
+#   两条线程各跑自己的 Python 插件时会互相把"当前 VM"切走 ——
+#   2 个 worker + 2 个 .py 插件 → `Abort trap: 6`，3 个 → `Segmentation fault: 11`。
+#   而且 **stdout 上什么都没有**（原生 abort 不走 panic hook），面板就是"启动了、然后没了"。
+#
+# 仓库自带的插件之所以没暴露它，只是因为那几个 .py 恰好被分到了同一个 worker。
+# 换句话说：用户往目录里多放一个 .py 就可能整面板起不来。所以这条检查
+# **必须真的起进程、真的分到两个 worker**，不能只测单 worker（那本来就是好的）。
+# 每个插件定义一个**自己的**全局变量，再去摸别人的 —— 摸到了就说明两个插件
+# 共用了同一个解释器（这正是 `next_vm` 每 worker 各发一份时发生的事）。
+PY_PLUGIN_TEMPLATE = """
+from host_api import log, register_handler
+
+MARK_{name} = "{name}"
+
+log("{name} 加载")
+{checks}
+register_handler("noop", lambda payload: None)
+"""
+
+PY_ISO_CHECK = """try:
+    _other = MARK_{other}
+    log("LEAK={other}")
+except NameError:
+    log("ISOLATED={other}")"""
+
+
+# ---------------------------------------------------------------- 运行记录
+
+# 「日志是日志，运行记录是运行记录」：日志是**插件层次**的（一天一个文件、留 7 天），
+# 运行记录是**面板层次**的（面板自己写、留 30 天）。两者只有一根线：
+# `runs.id` == 日志条目的 `run_id`（引擎执行时用 `log::with_run_id` 圈住整段）。
+#
+# 这一组要钉住的就是**那根线**：
+#   ① 跑一次 → 记录出现，字段对（结果/耗时/触发方式）；
+#   ② 那次运行的日志**真的带上了那个 id**（不带的话"从记录点进日志"是空话）；
+#   ③ 失败也要有记录（失败的那几次才是最需要点进日志的）；
+#   ④ 记录比日志活得久 —— 日志文件删掉之后记录还在（界面靠它说"日志已过期"）。
+RUN_PLUGIN = """
+import { log, start, register_cron, register_handler } from 'host-api';
+
+start('runs 探针');
+register_cron('ok-task', '@every 1h', () => {
+  log('ok-task 跑了一次');
+});
+register_cron('bad-task', '@every 1h', () => {
+  log('bad-task 要炸了');
+  throw new Error('故意失败（冒烟用）');
+});
+register_handler('noop', () => {});
+"""
+
+
+def wait_for_runs(base: str, hdrs: dict, plugin: str, task: str, timeout: float = 5.0) -> list:
+    """等到某条任务出现运行记录为止（最多 `timeout` 秒）。
+
+    **必须轮询**：`POST /api/tasks/{p}/{n}/run` 只是把任务**入队**给引擎线程，
+    接口返回时那次运行还没开始 —— 记录自然还没写。立刻查会拿到空列表，
+    而且它偶尔能过（线程恰好抢在前面），那种测试最坏：随机红。
+    """
+    deadline = time.time() + timeout
+    last = []
+    while time.time() < deadline:
+        _, _, body = http(f"{base}/api/runs?plugin={plugin}&task={task}", headers=hdrs)
+        try:
+            last = json.loads(body).get("runs", [])
+        except json.JSONDecodeError:
+            last = []
+        if last:
+            return last
+        time.sleep(0.1)
+    return last
+
+
+def run_record_checks(tmp: Path) -> None:
+    """运行记录：落库、带 run 标签的日志、失败也记、记录比日志活得久。"""
+    pdir = tmp / "runs-plugins"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "runs_probe.js").write_text(RUN_PLUGIN, encoding="utf-8")
+
+    port = free_port()
+    logdir = tmp / "runs-logs"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "runs.db"),
+            "PLUGINS_DIR": str(pdir),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(logdir),
+        }
+    )
+    logpath = tmp / "runs.log"
+    with open(logpath, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    base = f"http://127.0.0.1:{port}"
+    hdrs = {"X-Panel-Token": SMOKE_TOKEN}
+    try:
+        if not check(wait_ready(base, proc, hdrs), "运行记录检查用的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        # ① 成功的一次
+        post_code, _, _ = http(
+            f"{base}/api/tasks/runs_probe/ok-task/run",
+            method="POST",
+            headers={**hdrs, "x-panel": "1"},
+            body=b"{}",
+        )
+        check(post_code == 200, "手动触发接口返回 200（缺 `x-panel: 1` 会被 CSRF 门拦成 403）", str(post_code))
+        runs = wait_for_runs(base, hdrs, "runs_probe", "ok-task")
+        if not check(len(runs) >= 1, "跑一次就有了运行记录", str(len(runs))):
+            return
+        r = runs[0]
+        check(r["ok"] is True, "记录里写了成功")
+        check(r["kind"] == "manual", "记录里写了触发方式（手动）", r["kind"])
+        check(r["plugin"] == "runs_probe" and r["task"] == "ok-task", "记录里写了是哪条任务")
+        check(r["finished_at"] is not None, "记录里写了结束时间（没结束的记录会一直显示「跑着呢」）")
+        check(isinstance(r["duration_ms"], int) and r["duration_ms"] >= 0, "记录里写了耗时")
+        # run id 要能安全地进 URL（`#/logs/run/{id}`），所以形状是钉死的
+        check(
+            re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", r["id"]) is not None,
+            "运行 id 是 URL 安全的形状",
+            r["id"],
+        )
+
+        # ② 那一次的日志**真的带上了这个 id** —— 这是「记录 → 日志」那根线
+        files = sorted(logdir.glob("plugin-*.jsonl"))
+        rows = [json.loads(l) for l in files[0].read_text(encoding="utf-8").splitlines() if l.strip()]
+        tagged = [d for d in rows if d.get("run") == r["id"]]
+        check(len(tagged) >= 1, "那次运行的日志带上了 run 标签（记录才能反查到日志）", str(len(tagged)))
+        check(
+            any("ok-task 跑了一次" in d["msg"] for d in tagged),
+            "插件自己打的那行也带标签（不只是面板的结论行）",
+        )
+
+        # ③ 失败也有记录，而且带上错误文本
+        http(
+            f"{base}/api/tasks/runs_probe/bad-task/run",
+            method="POST",
+            headers={**hdrs, "x-panel": "1"},
+            body=b"{}",
+        )
+        bad = wait_for_runs(base, hdrs, "runs_probe", "bad-task")
+        if check(len(bad) >= 1, "失败的那次也留下了记录（失败才是最需要点进日志的）"):
+            check(bad[0]["ok"] is False, "记录里写了失败")
+            check(
+                bad[0]["error"] and "故意失败" in bad[0]["error"],
+                "记录里存了错误文本（日志过期后它是唯一的线索）",
+                (bad[0]["error"] or "")[:40],
+            )
+            # 单条查询
+            code, _, one = http(f"{base}/api/runs/{bad[0]['id']}", headers=hdrs)
+            check(code == 200 and json.loads(one)["run"]["id"] == bad[0]["id"], "单条运行记录能查")
+        code404, _, _ = http(f"{base}/api/runs/99999999-000000-ffff", headers=hdrs)
+        check(code404 == 404, "不存在的 id 返回 404（不是空对象）—— 界面要靠它区分「没有记录」和「日志过期」")
+
+        # ⑤ 试跑也进记录，但**输出存在记录自己身上**
+        #
+        # 试跑的输出被捕获缓冲收走了 —— 不打终端、不进环形缓冲、不写文件。
+        # 所以「试跑记录」和「真跑记录」在这一点上**不一样**：
+        #   真跑：输出在日志里，记录靠 run 标签反查（给「看日志」入口）
+        #   试跑：输出在记录里，日志库里根本没有（所以**不给**「看日志」入口）
+        # 界面要是给试跑一个点进去是空页面的按钮，用户会以为日志丢了。
+        post_code, _, body = http(
+            f"{base}/api/test/js",
+            method="POST",
+            headers={**hdrs, "x-panel": "1", "content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "code": 'console.log("试跑输出", 1 + 1); console.error("试跑 stderr");',
+                    "plugin": "runs_probe",
+                    "task": "ok-task",
+                }
+            ).encode(),
+        )
+        check(post_code == 200, "试跑接口返回 200", str(post_code))
+        tests = [r for r in wait_for_runs(base, hdrs, "runs_probe", "ok-task") if r["kind"] == "test"]
+        if check(len(tests) >= 1, "试跑也留下了运行记录（kind=test）"):
+            t = tests[0]
+            check(t["ok"] is True, "试跑记录里写了成功")
+            check(
+                t.get("output") and "试跑输出 2" in t["output"],
+                "试跑的**输出存在记录里**（日志库里没有它）",
+                (t.get("output") or "")[:40],
+            )
+            check(
+                "--- stderr ---" in (t.get("output") or ""),
+                "stderr 也收了，并标了来源（混在一起分不清哪句是报错）",
+            )
+            # 这条是**设计**的断言：试跑的输出不该出现在日志里。
+            # 出现了说明捕获缓冲没生效（那会让试跑污染插件日志）。
+            check(
+                not any(d.get("run") == t["id"] for d in rows),
+                "试跑的输出**没有**进日志库（它走捕获缓冲）—— 所以试跑不给「看日志」",
+            )
+
+        # 失败的试跑也要有记录（跟真跑同一个道理）
+        http(
+            f"{base}/api/test/js",
+            method="POST",
+            headers={**hdrs, "x-panel": "1", "content-type": "application/json"},
+            body=json.dumps(
+                {"code": 'throw new Error("试跑故意炸");', "plugin": "runs_probe", "task": "ok-task"}
+            ).encode(),
+        )
+        tests2 = [r for r in wait_for_runs(base, hdrs, "runs_probe", "ok-task") if r["kind"] == "test"]
+        check(
+            any(r["ok"] is False and (r["error"] or "").find("试跑故意炸") >= 0 for r in tests2),
+            "失败的试跑也记下来，并存了错误文本",
+        )
+
+        # ④ 记录比日志活得久：把日志文件删掉，记录还在
+        #
+        # 这就是「日志已过期」那个状态在数据层的形状。日志保留 7 天、记录保留 30 天，
+        # 所以这个状态是**必然会到**的，不是异常 —— 界面必须能说清它。
+        for f in logdir.glob("plugin-*.jsonl"):
+            f.unlink()
+        _, _, after = http(f"{base}/api/runs?plugin=runs_probe&task=ok-task", headers=hdrs)
+        check(
+            len(json.loads(after).get("runs", [])) >= 1,
+            "日志文件删掉后，运行记录还在（界面据此说「日志已过期」）",
+        )
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+def python_multi_worker_checks(tmp: Path) -> None:
+    """多个 Python 插件 + 多 worker：面板必须活着，而且每个插件都加载了。"""
+    pdir = tmp / "py-multi"
+    pdir.mkdir(parents=True, exist_ok=True)
+    names = ["py_one", "py_two", "py_three", "py_four"]
+    for n in names:
+        checks = "\n".join(
+            PY_ISO_CHECK.format(other=o) for o in names if o != n
+        )
+        (pdir / f"{n}.py").write_text(
+            PY_PLUGIN_TEMPLATE.format(name=n, checks=checks), encoding="utf-8"
+        )
+
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "pymulti.db"),
+            "PLUGINS_DIR": str(pdir),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(tmp / "pymulti-logs"),
+            # 显式两条线程：默认就是 2，写出来是为了让「这条检查到底在验什么」不含糊
+            "ENGINE_WORKERS": "2",
+        }
+    )
+    logpath = tmp / "pymulti.log"
+    with open(logpath, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        ready = wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN})
+        check(ready, "4 个 Python 插件 + 2 条线程：面板活着（不崩）")
+        # ⚠ 不能只等「就绪」：`wait_ready` 在 `/api/state` 报出**任意**一个插件时就返回，
+        # 而 4 个插件是分到两条线程上**先后**加载的。等引擎自己的汇总行出现再断言 ——
+        # 直接数 JSONL 里的行会在"加载到一半"时读到 2 行（这一条踩过）。
+        if ready:
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                if "已加载 {} 个插件".format(len(names)) in logpath.read_text(errors="replace"):
+                    break
+                time.sleep(0.2)
+        check(
+            proc.poll() is None,
+            "进程没有自己退出（原生 abort 不会有 panic 输出，只能看退出码）",
+            f"退出码 {proc.returncode}",
+        )
+        if not ready:
+            print(logpath.read_text(errors="replace")[-2000:])
+            return
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    files = sorted((tmp / "pymulti-logs").glob("plugin-*.jsonl"))
+    if not check(len(files) == 1, "Python 多 worker 检查拿到了日志文件", str(files)):
+        return
+    rows = files[0].read_text(encoding="utf-8").splitlines()
+    boot = [json.loads(l) for l in rows if l.strip()]
+    loaded = {d["scope"] for d in boot if d["msg"].endswith("加载")}
+    # 面板通道的日志（线程数、"负责 N 个插件"、"已加载 N 个插件"）**不进 JSONL** ——
+    # 那是设计（面板日志不落盘，见 docs/logging.md §21.1），所以要读进程自己的 stdout
+    console = logpath.read_text(errors="replace")
+    # ⚠ 引擎的汇总行是**每个 worker 各一条**（"已加载 N 个插件" 指的是这条线程），
+    # 所以要看总和，不是找某一行等于 4（这一条我一开始就写错了）。
+    totals = [
+        int(m.group(1))
+        for m in re.finditer(r"已加载 (\d+) 个插件", console)
+    ]
+    check(
+        sum(totals) == len(names),
+        "引擎汇总：两条线程加起来 4 个插件都加载了（不是「崩在这一半」）",
+        "各线程 " + "+".join(str(t) for t in totals) if totals else "—",
+    )
+    check(
+        loaded == set(names),
+        "4 个插件各自都打了自己的加载行",
+        "已加载 " + ",".join(sorted(loaded)),
+    )
+    # ---- 隔离：A 的全局在 B 里必须看不见 ----
+    # 这一条钉的是那个「两个 worker 各发一份 VM 索引 → 两个插件共用解释器」的 bug。
+    leaks = []
+    for d in boot:
+        msg = d["msg"]
+        if msg.startswith("LEAK="):
+            leaks.append(d["scope"] + "→" + msg.split("=", 1)[1])
+    check(not leaks, "没有插件能看见别的插件的全局变量", ",".join(leaks) or "干净")
+    isolated = sum(1 for d in boot if d["msg"].startswith("ISOLATED="))
+    check(
+        isolated == len(names) * (len(names) - 1),
+        "每个插件都确认了「别人的全局不可见」",
+        "{} 条（应为 {}）".format(isolated, len(names) * (len(names) - 1)),
+    )
+    workers = [l for l in console.splitlines() if "条执行线程" in l]
+    check(bool(workers), "启动日志说了线程数", workers[0].split("]")[-1].strip() if workers else "—")
+    # 格式：`2026-10-15 21:23:16.665 [info] [engine:0] 负责 1 个插件（…）`
+    assigned = {m.group(1) for m in re.finditer(r"\[(engine[^\]]*)\] 负责 ", console)}
+    check(
+        len(assigned) >= 2,
+        "两个 worker 都参与了加载（说明真的并发过 —— 不然这条检查白跑）",
+        ",".join(sorted(assigned)) or "—",
+    )
+
+def plugin_fs_checks(tmp: Path) -> None:
+    """面板内的 node:fs / node:path：能落盘、越界被拒、插件之间互相看不见。"""
+    pdir = tmp / "fs-plugins"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "fs_probe_a.js").write_text(FS_PROBE_A, encoding="utf-8")
+    (pdir / "fs_probe_b.js").write_text(FS_PROBE_B, encoding="utf-8")
+
+    data_dir = tmp / "fs-plugin-data"
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "fs.db"),
+            "PLUGINS_DIR": str(pdir),
+            "PLUGIN_DATA_DIR": str(data_dir),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(tmp / "fs-logs"),
+        }
+    )
+    logpath = tmp / "fs.log"
+    with open(logpath, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        if not check(
+            wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN}),
+            "fs 检查用的实例就绪",
+        ):
+            print(logpath.read_text(errors="replace"))
+            return
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    files = sorted((tmp / "fs-logs").glob("plugin-*.jsonl"))
+    if not check(len(files) == 1, "fs 检查拿到了日志文件", str(files)):
+        return
+    rows = files[0].read_text(encoding="utf-8").splitlines()
+    a = _probe_log_rows_scope(rows, "fs_probe_a")
+    b = _probe_log_rows_scope(rows, "fs_probe_b")
+
+    # ① 真的落盘了（读回来的内容 = 写进去的内容）
+    check(a.get("READ") == '{"n":1}', "写进去的能读回来", str(a.get("READ")))
+    check(a.get("APPEND") == '{"n":1}-tail', "appendFileSync 追加而不是覆盖", str(a.get("APPEND")))
+    check(a.get("LIST") == '["x.json"]', "readdirSync 列出目录", str(a.get("LIST")))
+    check(a.get("SIZE") == "7", "statSync 给出正确大小", str(a.get("SIZE")))
+    check(a.get("BYTES") == "true,1,2,3", "不给 encoding 时读写 Uint8Array", str(a.get("BYTES")))
+    check(a.get("RENAMED") == '["b.bin","y.json"]', "renameSync", str(a.get("RENAMED")))
+    check(a.get("CLEARED") == "[]", "unlinkSync / rmSync 删掉了", str(a.get("CLEARED")))
+    check(a.get("SAME") == "true", "require('node:fs') 与 import fs 是同一个对象")
+
+    # ② 越界被拒（注意：以 `/` 开头的路径**不是**越界 —— 那是插件根里的路径，
+    #    见 src/pluginfs.rs 的 resolve_in_root）
+    def denied(row, why, code="EACCES"):
+        return row.get("DENY={}:{}".format(why, code)) is True
+
+    check(denied(a, "parent-write"), "写 `../` 被拒（EACCES）")
+    check(denied(a, "system"), "读系统文件被拒（EACCES）")
+    check(denied(a, "parent-list"), "列上级目录被拒")
+    check(denied(a, "escape-write"), "`../../` 追加同样被拒")
+    leaked = [k for k in a if k.startswith("LEAK=")]
+    check(not leaked, "没有任何越界操作成功过", str(leaked))
+
+    # ③ 插件之间互相看不见
+    check(denied(a, "sibling-read"), "读**另一个插件**的数据被拒")
+    check(denied(b, "sibling-B"), "反过来读也一样被拒")
+    check(denied(b, "parent-list-B"), "列上级目录被拒（不然能靠列目录摸出别人的名字）")
+    check("LEAK=sibling-read" not in a and "LEAK=sibling-B" not in b, "两个探针都没读到对方")
+
+    # ④ 落盘位置：数据根在 PLUGIN_DATA_DIR 下，**插件源码目录里什么都没多出来**
+    root_a = data_dir / "fs_probe_a"
+    check(a.get("ROOT", "").endswith("/fs_probe_a"), "插件看到的根是数据根下的同名子目录", str(a.get("ROOT")))
+    check(
+        (root_a / "secret.txt").exists(),
+        "插件写的东西真在数据根里（不是在内存里假装）",
+        str(root_a),
+    )
+    stray = sorted(p.name for p in pdir.iterdir() if p.suffix not in (".js", ".py"))
+    check(
+        stray == [],
+        "插件源码目录里没有多出任何数据文件（那里是面板的静态目录，写进去会被 HTTP 取走）",
+        str(stray),
+    )
+
+    # ---- Python 侧：同一套 API、同一套围栏 ------------------------------------
+    #
+    # 面板内的 Python 插件没有 `open()` / `os`（嵌入式宿主是 PocketPy），
+    # 所以宿主在 `host_api` 门面上给了一套窄接口。这一段的重点是**两边同名同语义** ——
+    # 否则同一份 .py 插件在面板里能跑、出去就 AttributeError（或反过来）。
+    (pdir / "pyfs_probe.py").write_text(FS_PROBE_PY, encoding="utf-8")
+
+    port = free_port()
+    py_data = tmp / "pyfs-plugin-data"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "pyfs.db"),
+            "PLUGINS_DIR": str(pdir),
+            "PLUGIN_DATA_DIR": str(py_data),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(tmp / "pyfs-logs"),
+        }
+    )
+    logpath = tmp / "pyfs.log"
+    with open(logpath, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        if not check(
+            wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN}),
+            "Python fs 检查用的实例就绪",
+        ):
+            print(logpath.read_text(errors="replace"))
+            return
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    pfiles = sorted((tmp / "pyfs-logs").glob("plugin-*.jsonl"))
+    if not check(len(pfiles) == 1, "Python fs 检查拿到了日志文件", str(pfiles)):
+        return
+    prows = pfiles[0].read_text(encoding="utf-8").splitlines()
+    p = _probe_log_rows_scope(prows, "pyfs_probe")
+
+    check(p.get("READ") == "你好", "Python 侧写进去的能读回来", str(p.get("READ")))
+    check(p.get("APPEND") == "你好-尾", "Python 侧 append_text 是追加", str(p.get("APPEND")))
+    check(p.get("LIST") == "['x.txt']", "Python 侧 list_dir", str(p.get("LIST")))
+    check(p.get("SIZE") == "10", "Python 侧 stat 大小正确（按 UTF-8 字节：你好-尾 = 3+3+1+3）", str(p.get("SIZE")))
+    check(p.get("RENAMED") == "['y.txt']", "Python 侧 rename")
+    check(p.get("CLEARED") == "[]", "Python 侧 remove")
+    check(p.get("ROOT", "").endswith("/pyfs_probe"), "Python 侧看到的根也是数据根下的同名子目录", str(p.get("ROOT")))
+    for why in ("parent-write", "system-read", "parent-list"):
+        check(
+            p.get("DENY={}:EACCES".format(why)) is True,
+            "Python 侧 {} 被拒（EACCES）".format(why),
+        )
+    check(not [k for k in p if k.startswith("LEAK=")], "Python 侧没有任何越界操作成功过")
+
+    # ---- 同一个 .py 文件在 CPython 适配器里也跑（跨运行时的承诺）----
+    pydir = REPO / "adapters" / "python"
+    if not pydir.exists():
+        print("  ⏭ 跳过 Python 文件的跨运行时对比（缺 adapters/python）")
+        return
+    cpy = tmp / "pyfs-cpython"
+    cpy.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        [sys.executable, "-m", "host_api", str(pdir / "pyfs_probe.py"), "--once"],
+        env={**os.environ, "PYTHONPATH": str(pydir), "HOST_LOG_DIR": str(cpy / "logs")},
+        cwd=str(cpy),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    check(r.returncode == 0, "CPython 适配器能跑同一个 .py 文件", (r.stderr or "").strip()[-160:])
+    # 面板外**没有围栏**（刻意的：外面你有正常的文件系统权限）。所以那里
+    # `../escape.txt` 会成功 —— 这里断言的是"面板外确实是按原生语义跑"，
+    # 而不是"到处都是围栏"。可移植的写法是只用相对路径。
+    check(
+        "LEAK=parent-write" in r.stdout + r.stderr,
+        "面板外按原生语义（没有围栏）—— 这是刻意的，不是漏洞",
+    )
+
+
+# Python 侧的同一组探针。**只用单行 import** —— PocketPy 不支持跨行括号 import
+# （`SyntaxError: expected '@id', got ')'`，见 docs/host-api.md §5.2 的兼容性表；我自己第一个版本就踩了）。
+FS_PROBE_PY = """
+from host_api import log, start, data_dir, read_text, write_text, append_text, exists, list_dir, mkdir, remove, rename, stat, register_handler
+
+start("pyfs 探针")
+log("ROOT=" + data_dir())
+mkdir("data")
+write_text("data/x.txt", "你好")
+log("READ=" + read_text("data/x.txt"))
+append_text("data/x.txt", "-尾")
+log("APPEND=" + read_text("data/x.txt"))
+log("EXISTS=" + str(exists("data/x.txt")))
+log("LIST=" + str(list_dir("data")))
+log("SIZE=" + str(stat("data/x.txt")["size"]))
+rename("data/x.txt", "data/y.txt")
+log("RENAMED=" + str(list_dir("data")))
+remove("data/y.txt")
+log("CLEARED=" + str(list_dir("data")))
+for why, fn in (
+    ("parent-write", lambda: write_text("../escape.txt", "x")),
+    ("system-read", lambda: read_text("../../../../../etc/passwd")),
+    ("parent-list", lambda: list_dir("..")),
+):
+    try:
+        fn()
+        log("LEAK=" + why)
+    except OSError as exc:
+        # 两边都对的取码写法：面板侧没有 .code（PocketPy 挂不了属性），
+        # 适配器侧有。都没有时退回消息前缀 —— 那个约定两边都守。
+        log("DENY=" + why + ":" + getattr(exc, "code", str(exc).split(":")[0]))
+register_handler("noop", lambda payload: None)
+"""
+
+
+def _probe_log_rows_scope(rows: list[str], scope: str) -> dict:
+    """按 scope 过滤后收 `KEY=值`。
+
+    ⚠ `DENY=` / `LEAK=` 这些要**整句当键**：它们的值里还有 `:`
+    （`DENY=parent-write:EACCES`），按第一个 `=` 切会得到键 `DENY`、
+    值 `parent-write:EACCES` —— 于是断言查 `DENY=parent-write:EACCES` 永远查不到，
+    测试"绿"得毫无意义（这一条是踩过才知道的）。
+    """
+    out = {}
+    for line in rows:
+        if not line.strip():
+            continue
+        d = json.loads(line)
+        if d["scope"] != scope:
+            continue
+        msg = d["msg"]
+        if msg.startswith(("DENY=", "LEAK=")):
+            out[msg] = True
+            continue
+        if "=" in msg:
+            k, _, v = msg.partition("=")
+            out[k] = v
+    return out
+
+def cross_runtime_log_parity(tmp: Path) -> None:
+    """同一份插件 → 面板（QuickJS）与 Node 适配器 → 日志逐条相同。"""
+    node = shutil.which("node")
+    runner = REPO / "adapters" / "node" / "bin" / "run.mjs"
+    if not node or not runner.exists():
+        print(f"  ⏭ 跳过跨运行时日志一致性（没装 node 或缺 {runner}）")
+        return
+
+    pdir = tmp / "parity-plugins"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "parity_probe.js").write_text(PARITY_PROBE, encoding="utf-8")
+
+    port = free_port()
+    panel_logs = tmp / "parity-panel-logs"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "parity.db"),
+            "PLUGINS_DIR": str(pdir),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(panel_logs),
+        }
+    )
+    plog = tmp / "parity.log"
+    with open(plog, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        if not check(
+            wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN}),
+            "跨运行时对比用的实例就绪",
+        ):
+            print(plog.read_text(errors="replace"))
+            return
+
+        node_logs = tmp / "parity-node-logs"
+        r = subprocess.run(
+            [node, str(runner), str(pdir / "parity_probe.js"), "--once"],
+            env={**os.environ, "HOST_LOG_DIR": str(node_logs)},
+            cwd=str(runner.parent),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if not check(
+            r.returncode == 0,
+            "Node 适配器能跑同一个插件文件（run.mjs --once）",
+            (r.stderr or "").strip().splitlines()[-1] if r.stderr else f"退出码 {r.returncode}",
+        ):
+            return
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    pf = sorted(panel_logs.glob("plugin-*.jsonl"))
+    nf = sorted(node_logs.glob("plugin-*.jsonl"))
+    if not check(pf and nf, "两边都落了 JSONL", f"面板 {len(pf)} / Node {len(nf)}"):
+        return
+
+    panel_rows = _plugin_log_rows(pf[0])
+    # 面板会在插件日志后面补一条宿主自己的收尾行（quickjs / 任务数…），
+    # 那是宿主差异，不是漂移 —— 只比插件自己发出的 10 行。
+    panel_rows = panel_rows[:PARITY_PROBE_LINES]
+    node_rows = _plugin_log_rows(nf[0])[:PARITY_PROBE_LINES]
+
+    if not check(
+        len(panel_rows) == PARITY_PROBE_LINES and len(node_rows) == PARITY_PROBE_LINES,
+        f"两边都是探针的 {PARITY_PROBE_LINES} 行",
+        f"面板 {len(panel_rows)} / Node {len(node_rows)}",
+    ):
+        return
+
+    bad = [
+        (i, a, b)
+        for i, (a, b) in enumerate(zip(panel_rows, node_rows))
+        if a != b
+    ]
+    check(
+        not bad,
+        "面板与 Node 的日志逐条相同（type / level / scope / plugin / msg）",
+        f"第 {bad[0][0]} 行不同：{bad[0][1]} vs {bad[0][2]}" if bad else "10/10",
+    )
+    # 脱敏必须两边都生效（这是「落盘的东西能不能给别人看」的底线）
+    msgs = " ".join(r[4] for r in panel_rows)
+    check(
+        "136****6001" in msgs and "abc123" not in msgs and "SECRET" not in msgs,
+        "两边都脱敏了（手机号 / token / JSON 字段）",
+    )
+
+    # ---- 同一种语言、两个宿主：Python（PocketPy 宿主 vs CPython 适配器）----
+    #
+    # 上一段比的 JS。Python 侧是另一份实现（嵌入的是 PocketPy，不是 CPython），
+    # 同样能各自写歪 —— 所以两条腿都要有。
+    pydir = REPO / "adapters" / "python"
+    if not pydir.exists():
+        print("  ⏭ 跳过 Python 跨宿主对比（缺 adapters/python）")
+        return
+
+    ppdir = tmp / "parity-plugins-py"
+    ppdir.mkdir(parents=True, exist_ok=True)
+    (ppdir / "parity_probe.py").write_text(PARITY_PROBE_PY, encoding="utf-8")
+
+    port = free_port()
+    panel_logs_py = tmp / "parity-panel-logs-py"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "parity-py.db"),
+            "PLUGINS_DIR": str(ppdir),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_LOG_DIR": str(panel_logs_py),
+        }
+    )
+    plog_py = tmp / "parity-py.log"
+    with open(plog_py, "w") as f:
+        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        if not check(
+            wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN}),
+            "Python 跨宿主对比用的实例就绪",
+        ):
+            print(plog_py.read_text(errors="replace"))
+            return
+
+        cpy_logs = tmp / "parity-cpython-logs"
+        # 用 `-m host_api` 跑：PYTHONPATH 指到适配器目录，插件里那句
+        # `from host_api import …` 就能解析（面板外跑 CPython 的正规姿势）
+        r = subprocess.run(
+            [sys.executable, "-m", "host_api", str(ppdir / "parity_probe.py"), "--once"],
+            env={**os.environ, "PYTHONPATH": str(pydir), "HOST_LOG_DIR": str(cpy_logs)},
+            cwd=str(pydir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if not check(
+            r.returncode == 0,
+            "CPython 适配器能跑同一个插件文件（python -m host_api --once）",
+            (r.stderr or "").strip().splitlines()[-1] if r.stderr else f"退出码 {r.returncode}",
+        ):
+            return
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    pf = sorted(panel_logs_py.glob("plugin-*.jsonl"))
+    cf = sorted(cpy_logs.glob("plugin-*.jsonl"))
+    if not check(pf and cf, "Python 两边都落了 JSONL", f"面板 {len(pf)} / CPython {len(cf)}"):
+        return
+
+    panel_py = _plugin_log_rows(pf[0])[:PARITY_PROBE_PY_LINES]
+    cpy_rows = _plugin_log_rows(cf[0])[:PARITY_PROBE_PY_LINES]
+    if not check(
+        len(panel_py) == PARITY_PROBE_PY_LINES and len(cpy_rows) == PARITY_PROBE_PY_LINES,
+        f"Python 两边都是探针的 {PARITY_PROBE_PY_LINES} 行",
+        f"面板 {len(panel_py)} / CPython {len(cpy_rows)}",
+    ):
+        return
+    bad = [(i, a, b) for i, (a, b) in enumerate(zip(panel_py, cpy_rows)) if a != b]
+    check(
+        not bad,
+        "PocketPy 宿主与 CPython 适配器的日志逐条相同",
+        f"第 {bad[0][0]} 行不同：{bad[0][1]} vs {bad[0][2]}" if bad else "10/10",
+    )
+    msgs = " ".join(r[4] for r in panel_py)
+    check(
+        "136****6001" in msgs and "abc123" not in msgs and "SECRET" not in msgs,
+        "Python 两边都脱敏了",
+    )
+    check(
+        "八档对齐探针已加载" in msgs,
+        "Python 插件侧八档 API 都能被导入（门面导出完整）",
+    )
+
+
 def auth_checks(tmp: Path) -> None:
     """第十轮：鉴权。另起一个**带令牌**的实例，验完整登录流程与边界。
 
@@ -247,6 +1137,41 @@ def auth_checks(tmp: Path) -> None:
         for header in ({"Authorization": f"Bearer {token}"}, {"X-Panel-Token": token}):
             code, _, _ = http(f"{base}/api/state", headers=header)
             check(code == 200, f"带令牌访问通过（{list(header)[0]}）", f"http {code}")
+
+        # ---- 实时日志（SSE，第二十四轮）----
+        #
+        # 这是面板唯一的**推送**接口：前端不再轮询，日志页和 Dashboard 都挂在它上面。
+        # 它坏了不会让任何 HTTP 接口 5xx（连接是 200、流是空的），所以必须单独验。
+        sse_ctype, sse_body = sse_probe(f"{base}/api/logs/stream?channel=all&level=debug", token)
+        check(
+            sse_ctype == "text/event-stream",
+            "SSE 连接返回 text/event-stream",
+            sse_ctype or "(空)",
+        )
+        check(
+            "event: notice" in sse_body and "cap_bytes" in sse_body,
+            "SSE 连上先推一条 notice（缓冲概况：留了多少行 / 淘汰了多少行）",
+            sse_body.splitlines()[0] if sse_body else "(没收到任何事件)",
+        )
+        check(
+            "event: log" in sse_body and '"scope"' in sse_body,
+            "SSE 推出日志事件（带 scope / level / type 字段）",
+            f"{len(sse_body)} 字节",
+        )
+        # 面板**自己的**日志必须能推出来 —— 旧实现里它根本进不了界面
+        _, sse_panel = sse_probe(f"{base}/api/logs/stream?channel=panel&level=debug", token)
+        check(
+            "event: log" in sse_panel,
+            "面板通道（channel=panel）有内容 —— 引擎/启动日志能到界面上",
+            f"{len(sse_panel)} 字节",
+        )
+        # 无凭证不能看日志流（它是不经中间件的长连接路径，特别容易漏鉴权）
+        try:
+            req_naked = urllib.request.Request(f"{base}/api/logs/stream")
+            urllib.request.urlopen(req_naked, timeout=2.0)
+            check(False, "无凭证访问日志流被拒", "居然连上了")
+        except urllib.error.HTTPError as e:
+            check(e.code == 401, "无凭证访问日志流被拒", f"http {e.code}")
 
         code, _, _ = http(f"{base}/api/state", headers={"Authorization": "Bearer wrong"})
         check(code == 401, "错误令牌被拒", f"http {code}")
@@ -2791,6 +3716,10 @@ def main() -> int:
     # ---- 8. 鉴权（第十轮）：另起一个带令牌的实例 ----
     print()
     print("---- 鉴权（PANEL_TOKEN 模式）----")
+    run_record_checks(tmp)
+    python_multi_worker_checks(tmp)
+    plugin_fs_checks(tmp)
+    cross_runtime_log_parity(tmp)
     auth_checks(tmp)
     auth_hash_checks(tmp)
     anti_bruteforce_checks(tmp)

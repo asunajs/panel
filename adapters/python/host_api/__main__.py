@@ -8,6 +8,11 @@
    触发所有到期任务；handler 抛异常只记 ``last_error``，进程继续
 4. ``--once`` 只跑一轮就退出（强制每个任务各触发一次，用于冒烟）
 
+日志：**运行器自己的行也走插件同一套 logger**（``scope = plugin``）—— 面板里
+「任务触发 / 失败」这些行本来就挂在该插件的 scope 下（见 ``src/scheduler.rs``）。
+v1 时它们是第三种格式 ``[runner] …``，三种格式并存时「同一份插件两边跑出来一样」
+就成了空话。只有纯 CLI 诊断（参数拼错、插件文件不存在）还直接打 stderr。
+
 退出码：0 = 全部成功；1 = 有任务失败（便于 CI 判定）；2 = 用法/加载错误。
 """
 
@@ -19,10 +24,10 @@ import time
 from datetime import datetime
 
 try:
-    from . import HostApiError, bind, fmt_ts, get_host
+    from . import HostApiError, bind, create_logger, fmt_ts, get_host
 except ImportError:  # 直接 python3 host_api/__main__.py 时
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from host_api import HostApiError, bind, fmt_ts, get_host
+    from host_api import HostApiError, bind, create_logger, fmt_ts, get_host
 
 USAGE = ("用法: python3 -m host_api <plugin.py> [--once] [--db <path>] [--run-for <seconds>]\n"
          "                       [--job <name>=<expr>]...\n"
@@ -31,7 +36,8 @@ USAGE = ("用法: python3 -m host_api <plugin.py> [--once] [--db <path>] [--run-
 
 
 def _usage_error(msg):
-    sys.stderr.write("[runner] {}\n{}\n".format(msg, USAGE))
+    # 纯 CLI 诊断：还没进插件上下文，硬套一个 scope 反而误导（面板里没有这些行）
+    sys.stderr.write("{}\n{}\n".format(msg, USAGE))
     return 2
 
 
@@ -104,14 +110,13 @@ def load_plugin(path):
     return plugin_name, module
 
 
-def _print_summary(host):
-    sys.stdout.write("[runner] 插件 `{}` 注册了 {} 个任务：\n".format(host.plugin, len(host.tasks)))
+def _print_summary(lg, host):
+    lg.info("插件 `{}` 注册了 {} 个任务：".format(host.plugin, len(host.tasks)))
     for task in host.tasks:
-        sys.stdout.write("[runner]   - {}\n".format(task.describe()))
-    sys.stdout.flush()
+        lg.info("  - {}".format(task.describe()))
 
 
-def _report(host, fired, label):
+def _report(lg, host, fired, label):
     ok_count = 0
     fail_count = 0
     for task, ok in fired:
@@ -119,15 +124,13 @@ def _report(host, fired, label):
             ok_count += 1
         else:
             fail_count += 1
-    sys.stdout.write(
-        "[runner] {}：成功 {} / 失败 {}（共 {} 次触发）\n".format(
-            label, ok_count, fail_count, len(fired)
-        )
-    )
+    lg.info("{}：成功 {} / 失败 {}（共 {} 次触发）".format(
+        label, ok_count, fail_count, len(fired)))
     for task in host.tasks:
         if task.last_error:
-            sys.stdout.write("[runner]   ! {} last_error = {}\n".format(task.name, task.last_error))
-    sys.stdout.flush()
+            # 失败行走 warn（与 Node 侧的 last_error 行同一档）：它是「有情况」，
+            # 真正的 error 已经由 fire_task 里那条带 traceback 的日志给了
+            lg.warn("  ! {} last_error = {}".format(task.name, task.last_error))
     return fail_count
 
 
@@ -142,16 +145,19 @@ def main(argv=None):
     plugin_name = os.path.splitext(os.path.basename(plugin_path))[0]
     # 必须在 exec 插件之前绑定：插件顶层就会调 register_cron
     host = bind(plugin=plugin_name, db_path=db_path)
+    # 与 Node 侧 `loggerFactory({scope: plugin, plugin})` 同一个用法
+    lg = create_logger(scope=plugin_name, plugin=plugin_name)
 
     try:
         plugin_name, _module = load_plugin(plugin_path)
     except SystemExit as exc:
-        sys.stderr.write("[runner] 插件在加载阶段调用了 sys.exit({})\n".format(exc.code))
+        lg.error("插件在加载阶段调用了 sys.exit({})".format(exc.code))
         return 2
     except BaseException:
         import traceback
 
-        sys.stderr.write("[runner] 插件加载失败:\n")
+        # 头部走日志，traceback 保持原样：栈本来就是给人看的，塞进日志行里反而没法读
+        lg.error("插件加载失败")
         traceback.print_exc(file=sys.stderr)
         return 2
 
@@ -164,30 +170,28 @@ def main(argv=None):
             host.schedule_handler(jname.strip(), jexpr.strip())
         except (ValueError, HostApiError) as exc:
             return _usage_error("--job {} 失败: {}".format(spec, exc))
-        sys.stdout.write("[runner] 已挂上任务 `{}`（{}）\n".format(jname.strip(), jexpr.strip()))
+        lg.info("已挂上任务 `{}`（{}）".format(jname.strip(), jexpr.strip()))
 
     if host.handlers:
-        sys.stdout.write("[runner] register_handler 登记了 {} 个处理函数: {}\n"
-                         .format(len(host.handlers), ", ".join(sorted(host.handlers))))
-    sys.stdout.flush()
+        # 排序只为输出稳定（dict 保持插入顺序，但排序后跨运行可比）
+        lg.info("register_handler 登记了 {} 个处理函数: {}".format(
+            len(host.handlers), ", ".join(sorted(host.handlers))))
 
-    _print_summary(host)
+    _print_summary(lg, host)
 
     if not host.tasks:
-        sys.stdout.write("[runner] 插件没有注册任何任务\n")
+        lg.info("插件没有注册任何任务")
 
     failures = 0
 
     if once:
-        sys.stdout.write("[runner] --once：强制触发 {} 个任务各一次（scheduledAt = firedAt = now）\n"
-                         .format(len(host.tasks)))
-        sys.stdout.flush()
-        failures += _report(host, host.fire_all(datetime.now()), "--once 结果")
+        lg.info("--once：强制触发 {} 个任务各一次（scheduledAt = firedAt = now）".format(
+            len(host.tasks)))
+        failures += _report(lg, host, host.fire_all(datetime.now()), "--once 结果")
         host.close()
         return 1 if failures else 0
 
-    sys.stdout.write("[runner] 进入调度循环（Ctrl-C 退出）\n")
-    sys.stdout.flush()
+    lg.info("进入调度循环（Ctrl-C 退出）")
     deadline = time.monotonic() + run_for if run_for is not None else None
     total = []
     try:
@@ -199,9 +203,9 @@ def main(argv=None):
             # deadline 驱动：睡到最近一个到期时刻，上限 1 秒（逐秒 tick）
             time.sleep(host.sleep_hint(now, max_tick=1.0))
     except KeyboardInterrupt:
-        sys.stdout.write("[runner] 收到 Ctrl-C，退出调度循环\n")
+        lg.info("收到 Ctrl-C，退出调度循环")
 
-    failures += _report(host, total, "调度循环结束")
+    failures += _report(lg, host, total, "调度循环结束")
     host.close()
     return 1 if failures else 0
 

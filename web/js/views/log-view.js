@@ -1,0 +1,523 @@
+/*
+  web/js/views/log-view.js —— 完整的日志页（终端风格）。
+
+  这页要解决的是「排查时到底发生了什么」这一个问题，所以它比 Dashboard 上那块
+  摘要多做了四件事：
+
+    1. **两条通道都能看**（插件日志 / 面板自身日志）。面板自己的日志以前
+       根本进不了界面 —— 引擎为什么卡、插件为什么没加载，全都只能去翻 systemd。
+    2. **按级别、按插件、按一次执行筛**。毫秒级任务一秒能刷几百行，
+       没有过滤的实时日志等于没有。
+    3. **关键字即时高亮**（客户端做的，不重连）。
+    4. **能带走**：复制 / 下载 `.log` 和 `.jsonl`。
+
+  ## 过滤为什么分两层
+
+  级别 / 插件 / 通道走**服务端**（改了就重连）：1MB 缓冲里有好几 MB 文本，
+  全推过来再让浏览器丢掉是白烧带宽和内存。
+
+  关键字走**客户端**：它要即时反馈，每敲一个字重连一次是不可接受的。
+  两层各管各的，互不干扰。
+*/
+
+import { getState } from '../api.js';
+import {
+  LEVELS,
+  esc,
+  lineNode,
+  makeRing,
+  openLogStream,
+  paintHighlight,
+} from '../logstream.js';
+
+/** 行数上限（见 logstream.js 里 makeRing 的说明：服务端按字节限，这里按条数兜）。 */
+const MAX_LINES = 2000;
+
+/** 关键字输入的防抖：高亮要即时，但没必要每个字符都重扫 2000 个节点。 */
+const HIGHLIGHT_DEBOUNCE_MS = 120;
+
+const CHANNELS = [
+  { key: 'all', label: '全部' },
+  { key: 'plugin', label: '插件日志' },
+  { key: 'panel', label: '面板日志' },
+];
+
+function fmtStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  );
+}
+
+function download(name, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 立刻 revoke 在部分浏览器上会让下载失败（下载还没开始就把 URL 撤了）
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * @param {HTMLElement} root
+ * @param {{toast: Function, navigate: Function}} ctx
+ * @param {{plugin?: string, run?: string}} [params] 从 hash 带进来的初始过滤
+ */
+export async function render(root, ctx, params = {}) {
+  // 插件名的候选值：来自 /api/state。拿不到就算了（只是个 datalist 提示）。
+  let pluginNames = [];
+  const st = await getState();
+  if (st.ok) {
+    pluginNames = (st.plugins || []).map((p) => p.name);
+  }
+
+  root.innerHTML = `
+    <div class="section">
+      <div class="section-head">
+        <span class="section-title">日志</span>
+        <span class="badge running" id="log-conn">连接中…</span>
+        <span class="hint" id="log-note"></span>
+        <div class="card-actions">
+          <button class="btn ghost" id="log-pause">暂停</button>
+          <button class="btn ghost" id="log-copy">复制</button>
+          <button class="btn ghost" id="log-dl-txt">下载 .log</button>
+          <button class="btn ghost" id="log-dl-json">下载 .jsonl</button>
+          <button class="btn ghost" id="log-clear">清空视图</button>
+        </div>
+      </div>
+
+      <div id="run-banner"></div>
+
+      <div class="log-toolbar">
+        <label class="tool">通道
+          <select id="f-channel">
+            ${CHANNELS.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
+          </select>
+        </label>
+
+        <span class="tool">级别
+          <span class="log-levels">
+            ${LEVELS.map(
+              (l) =>
+                `<label class="chip"><input type="checkbox" data-level="${l}"${
+                  l === 'debug' ? '' : ' checked'
+                }>${l}</label>`,
+            ).join('')}
+          </span>
+        </span>
+
+        <label class="tool">插件
+          <input id="f-plugin" list="log-plugin-list" placeholder="全部"
+                 value="${esc(params.plugin || '')}">
+          <datalist id="log-plugin-list">
+            ${pluginNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}
+            <option value="engine"></option>
+            <option value="boot"></option>
+            <option value="auth"></option>
+            <option value="tick"></option>
+            <option value="db"></option>
+          </datalist>
+        </label>
+
+        <label class="tool">关键字
+          <input id="f-q" placeholder="即时高亮，不重连">
+        </label>
+
+        <label class="chip" title="关掉就不会跟着新日志滚动 —— 想翻旧行时很有用">
+          <input type="checkbox" id="f-follow" checked>自动贴底
+        </label>
+
+        ${
+          params.run
+            ? `<span class="badge warning" title="只看这一次执行（run 标签）">
+                 运行 ${esc(params.run)}
+                 <button class="btn ghost" id="f-run-clear" style="margin-left:6px">×</button>
+               </span>`
+            : ''
+        }
+      </div>
+
+      <div class="console console-tall" id="log-box"></div>
+
+      <p class="hint" id="log-foot">
+        快捷键：<kbd>Ctrl</kbd>+<kbd>F</kbd> 交给浏览器搜页内（也可以直接用上面的关键字框）。
+        日志按天落盘（<span class="mono">logs/plugin-YYYY-MM-DD.jsonl</span>），保留 7 天 ——
+        面板外的 <span class="mono">jq</span> / <span class="mono">grep</span> 读的也是它。
+      </p>
+    </div>`;
+
+  const box = root.querySelector('#log-box');
+  const note = root.querySelector('#log-note');
+  const conn = root.querySelector('#log-conn');
+  const followEl = root.querySelector('#f-follow');
+  const qEl = root.querySelector('#f-q');
+  const pluginEl = root.querySelector('#f-plugin');
+  const channelEl = root.querySelector('#f-channel');
+
+  if (params.plugin) pluginEl.value = params.plugin;
+  if (params.channel) channelEl.value = params.channel;
+
+  /** 当前勾选的级别集合。空集合 = 什么都不显示（有提示，不是静默）。 */
+  const checkedLevels = () =>
+    [...root.querySelectorAll('input[data-level]:checked')].map((i) => i.dataset.level);
+
+  /** 服务端要的最低级别 = 勾选里的最低那档（先在服务端砍掉一批，省带宽）。 */
+  const serverLevel = () => {
+    const on = checkedLevels();
+    if (!on.length) return 'debug';
+    return LEVELS.find((l) => on.includes(l)) || 'info';
+  };
+
+  const ring = makeRing(MAX_LINES);
+  let stream = null;
+  let paused = false;
+  let notice = null;
+  let dropped = 0;
+  let highlightTimer = null;
+  let pluginTimer = null;
+
+  /** 一行该不该显示：勾选的级别是**精确集合**，不是「最低档」。 */
+  const visible = (el) => {
+    const on = checkedLevels();
+    if (!on.includes(el.dataset.level)) return false;
+    const kw = qEl.value.trim().toLowerCase();
+    if (kw && !el.dataset.text.includes(kw)) return false;
+    return true;
+  };
+
+  function applyFilter() {
+    let shown = 0;
+    for (const el of box.children) {
+      const ok = visible(el);
+      el.hidden = !ok;
+      if (ok) shown += 1;
+    }
+    updateNote(shown);
+  }
+
+
+  // ---- 运行记录横幅 ----
+  //
+  // 「日志是日志，运行记录是运行记录」：横幅里的东西（哪条任务、几点跑的、
+  // 成没成、花了多久）来自**面板的 runs 表**，不来自日志。日志只是被它关联
+  // 出来的那一次执行的输出。
+  //
+  // 于是"日志过期"是一个**能说清楚**的状态：记录在、日志没了。反过来
+  // （记录没了、日志还在）在保留期设计上不会出现 —— 记录留 30 天，日志留 7 天。
+  const LOG_KEEP_DAYS = 7;
+  let runRecord = null;
+  let runFetchDone = false;
+
+  async function renderRunBanner() {
+    const el = root.querySelector('#run-banner');
+    if (!el) return;
+    if (!params.run) {
+      el.innerHTML = '';
+      return;
+    }
+    const res = await fetch(`/api/runs/${encodeURIComponent(params.run)}`, {
+      headers: { 'X-Panel-Token': window.__PANEL_TOKEN__ || '' },
+    });
+    runFetchDone = true;
+    if (!res.ok) {
+      // 记录本身就不在（超过 30 天、或者手动拼的 id）—— 这和"日志过期"
+      // 是两句不同的话，不能混
+      el.innerHTML = `<div class="card run-banner warn">
+        <span class="badge danger">没有这条运行记录</span>
+        <span class="hint">运行 id <code>${esc(params.run)}</code> 不在面板的记录里
+        （记录保留 30 天）。下面的日志仍按这个 id 过滤。</span>
+      </div>`;
+      return;
+    }
+    const { run } = await res.json();
+    runRecord = run;
+    const ok = run.ok === true;
+    const pending = run.ok === null || run.ok === undefined;
+    const cls = pending ? 'warning' : ok ? 'ok' : 'danger';
+    const label = pending ? '没跑完' : ok ? '成功' : '失败';
+    const dur = run.duration_ms == null ? '—' : `${run.duration_ms} ms`;
+    el.innerHTML = `<div class="card run-banner">
+      <span class="badge ${cls}">${label}</span>
+      <span class="run-title">
+        <strong>${esc(run.plugin)}</strong> / ${esc(run.task)}
+        <span class="hint">${esc(run.kind === 'manual' ? '手动触发' : run.kind === 'cron' ? '调度触发' : run.kind)}</span>
+      </span>
+      <span class="hint">${esc(run.started_at)} · 耗时 ${esc(dur)}</span>
+      ${run.error ? `<div class="run-error">${esc(run.error)}</div>` : ''}
+      <div class="card-actions">
+        <a class="btn ghost" href="#/tasks?plugin=${encodeURIComponent(run.plugin)}">看这条任务</a>
+        <button class="btn ghost" id="run-clear">退出运行视图</button>
+      </div>
+    </div>`;
+    el.querySelector('#run-clear')?.addEventListener('click', () => {
+      params.run = '';
+      location.hash = `#/logs/plugin/${encodeURIComponent(params.plugin || run.plugin)}`;
+      renderRunBanner();
+      renderNote2();
+    });
+  }
+
+  /// 运行视图下：日志一行都没来 → 说清楚是"过期了"还是"这次没打日志"。
+  ///
+  /// 判据是**运行时间 vs 日志保留期**，不是"文件在不在"：日志按天一个文件、
+  /// 留 7 天，所以 7 天前的运行必然过期，7 天内的运行只要没被清理就还在。
+  /// 用时间判而不是去问文件，是因为**文件可能被手工删掉**，那时候说"过期"
+  /// 也是对的（对用户来说就是没了）。
+  function runEmptyNotice() {
+    if (!params.run || !runFetchDone || !runRecord) return null;
+    if (ring.length > 0) return null;
+    const started = Date.parse((runRecord.started_at || '').replace(' ', 'T'));
+    if (Number.isNaN(started)) return null;
+    const ageDays = (Date.now() - started) / 86_400_000;
+    if (ageDays > LOG_KEEP_DAYS) {
+      return `这次运行的日志已过期（日志保留 ${LOG_KEEP_DAYS} 天，运行记录保留 30 天）—— 记录还在，日志文件已经清理掉了。`;
+    }
+    return '这次运行没有产生日志（或者日志已被手工清理）。';
+  }
+
+  function renderNote2() {
+    const extra = runEmptyNotice();
+    if (extra) note.textContent = extra;
+  }
+
+  function updateNote(shown) {
+    if (shown === undefined) {
+      shown = [...box.children].filter((c) => !c.hidden).length;
+    }
+    const parts = [`显示 ${shown} 行 / 本页缓冲 ${ring.length} 行`];
+    if (notice) {
+      const b = notice.channel === 'panel' ? notice.panel : notice.plugin;
+      if (notice.channel === 'all') {
+        parts.push(
+          `服务端环形缓冲：插件 ${notice.plugin.lines} 行 · 面板 ${notice.panel.lines} 行`,
+        );
+        dropped = notice.plugin.dropped + notice.panel.dropped;
+      } else if (b) {
+        parts.push(`服务端环形缓冲 ${b.lines} 行`);
+        dropped = b.dropped;
+      }
+      if (dropped) {
+        // 淘汰必须说出来：让人以为「日志是连续的」比丢日志更糟
+        parts.push(`已淘汰 ${dropped} 行（上限 1 MB）`);
+      }
+      if (notice.lost_lines) {
+        parts.push(`断线期间丢了 ${notice.lost_lines} 行`);
+      }
+    }
+    note.textContent = parts.join(' · ');
+    // 运行视图下，如果一行都没有，把"为什么没有"写在后面
+    const extra = runEmptyNotice();
+    if (extra) note.textContent = extra;
+  }
+
+  function append(entry) {
+    ring.push(entry);
+    if (paused) return; // 暂停时只进缓冲，不动 DOM（恢复时整段重画）
+    const el = lineNode(entry);
+    box.appendChild(el);
+    el.hidden = !visible(el);
+    if (qEl.value.trim()) paintHighlight(el, qEl.value.trim());
+    // 超上限：从头砍（同时砍 DOM，否则节点会一直涨）
+    while (box.children.length > MAX_LINES) box.removeChild(box.firstChild);
+    if (followEl.checked) box.scrollTop = box.scrollHeight;
+  }
+
+  /** 恢复时按缓冲整段重画（暂停期间新来的行就是这么补上的，不会丢）。 */
+  function repaint() {
+    const frag = document.createDocumentFragment();
+    const items = ring.lines().slice(-MAX_LINES);
+    for (const e of items) {
+      const el = lineNode(e);
+      el.hidden = !visible(el);
+      if (qEl.value.trim()) paintHighlight(el, qEl.value.trim());
+      frag.appendChild(el);
+    }
+    box.replaceChildren(frag);
+    if (followEl.checked) box.scrollTop = box.scrollHeight;
+    applyFilter();
+  }
+
+  function open() {
+    stream?.close();
+    conn.className = 'badge running';
+    conn.textContent = '连接中…';
+    stream = openLogStream({      channel: channelEl.value,
+      level: serverLevel(),
+      plugin: pluginEl.value.trim(),
+      run: params.run || '',
+      onNotice(n) {
+        if (n.resumed) {
+          note.textContent = `断线期间丢了 ${n.lost_lines} 行（已被 1 MB 缓冲淘汰）`;
+          return;
+        }
+        notice = n;
+        updateNote();
+      },
+      onLine: append,
+      onState(s) {
+        if (s === 'open') {
+          conn.className = 'badge success';
+          conn.textContent = '实时';
+          conn.title = '服务端主动推送；断线会自动重连，并从断点续传';
+        } else {
+          // EventSource 自己会退避重连 —— 这里只是把它说出来
+          conn.className = 'badge warning';
+          conn.textContent = '重连中…';
+          conn.title = '连接断了，浏览器正在自动重连（会带上断点，不会漏行）';
+        }
+      },
+    });
+  }
+
+  /* ---------------------------------------------------------- 交互 */
+
+  followEl.addEventListener('change', () => {
+    if (followEl.checked) box.scrollTop = box.scrollHeight;
+  });
+
+  // 用户往上翻 → 自动关掉贴底；翻回底部 → 自动打开。
+  // 这是 tail 的惯常行为：手动翻看旧行时被新日志拽走是最讨厌的。
+  box.addEventListener('scroll', () => {
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    if (atBottom !== followEl.checked) followEl.checked = atBottom;
+  });
+
+  // 级别：勾选变化 → 客户端精确过滤 + 服务端重连（拿更低的档来少传点数据）
+  root.querySelectorAll('input[data-level]').forEach((i) =>
+    i.addEventListener('change', () => {
+      if (!checkedLevels().length) {
+        // 一个都不勾 = 什么都看不到，这几乎肯定是误操作。挡住并把这一档还回去。
+        i.checked = true;
+        ctx.toast('至少勾一个级别', 'bad');
+      }
+      applyFilter();
+      open();
+    }),
+  );
+
+  channelEl.addEventListener('change', open);
+
+  // 插件名走服务端过滤 → 重连。但输入框每敲一个字都重连太狠，防抖 400ms。
+  pluginEl.addEventListener('input', () => {
+    clearTimeout(pluginTimer);
+    pluginTimer = setTimeout(open, 400);
+  });
+
+  // 关键字走客户端：即时，不重连
+  qEl.addEventListener('input', () => {
+    clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => {
+      const kw = qEl.value.trim();
+      for (const el of box.children) {
+        el.hidden = !visible(el);
+        paintHighlight(el, kw);
+      }
+      updateNote();
+    }, HIGHLIGHT_DEBOUNCE_MS);
+  });
+
+  root.querySelector('#f-run-clear')?.addEventListener('click', () => {
+    params.run = '';
+    ctx.navigate('#/logs');
+  });
+
+  root.querySelector('#log-pause').addEventListener('click', (ev) => {
+    paused = !paused;
+    ev.target.textContent = paused ? '继续' : '暂停';
+    if (!paused) repaint();
+  });
+
+  // 运行视图：先把"这是哪一次运行"显示出来。**不 await** —— 横幅是附加信息，
+  // 等它会把日志流推迟一个往返；先连上流、横幅随后补上。
+  renderRunBanner().then(() => updateNote());
+
+  root.querySelector('#log-clear').addEventListener('click', () => {
+    // 只清这一页。服务端缓冲（以及已经落盘的文件）不动 —— 说清楚，
+    // 否则用户会以为「清空」等于删日志。
+    box.replaceChildren();
+    ring.clear();
+    updateNote(0);
+    ctx.toast('已清空视图（服务端缓冲与落盘文件不受影响）', 'ok');
+  });
+
+  root.querySelector('#log-copy').addEventListener('click', async () => {
+    const text = visibleLines().join('\n');
+    if (!text) {
+      ctx.toast('没有可复制的内容', 'bad');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      ctx.toast(`已复制 ${visibleLines().length} 行`, 'ok');
+    } catch {
+      // http 页面（非安全上下文）下 clipboard API 不可用，退回选中 + 让用户自己按
+      selectBox();
+      ctx.toast('浏览器不允许自动复制，已帮你全选，按 Ctrl/Cmd+C', 'bad');
+    }
+  });
+
+  /** 可见行的**原始文本**（与服务端 `line` 逐字节一致 → 和文件里的一样）。 */
+  function visibleLines() {
+    const out = [];
+    for (const el of box.children) {
+      if (!el.hidden) out.push(el.dataset.line || el.textContent);
+    }
+    return out;
+  }
+
+  function selectBox() {
+    const r = document.createRange();
+    r.selectNodeContents(box);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
+  root.querySelector('#log-dl-txt').addEventListener('click', () => {
+    const lines = visibleLines();
+    if (!lines.length) {
+      ctx.toast('没有可下载的内容', 'bad');
+      return;
+    }
+    // .log 是纯文本行（与终端/文件里看到的一致）；.jsonl 带全部字段，供 jq 用
+    download(`panel-logs-${fmtStamp()}.log`, lines.join('\n') + '\n', 'text/plain;charset=utf-8');
+    ctx.toast(`已导出 ${lines.length} 行`, 'ok');
+  });
+
+  root.querySelector('#log-dl-json').addEventListener('click', () => {
+    const lines = ring.lines();
+    if (!lines.length) {
+      ctx.toast('没有可下载的内容', 'bad');
+      return;
+    }
+    const body = lines.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    download(`panel-logs-${fmtStamp()}.jsonl`, body, 'application/x-ndjson;charset=utf-8');
+    ctx.toast(`已导出 ${lines.length} 行（JSONL，可用 jq 筛）`, 'ok');
+  });
+
+  open();
+
+  // 统计行的定时刷新。
+  //
+  // 为什么不挂在每一条新日志上：日志可能一秒来几百条，每条都算一次
+  // 「可见行数」就要遍历一遍 DOM（2000 个节点）—— 白烧 CPU。
+  // 一秒刷一次，读数足够新，代价可以忽略。
+  const noteTimer = setInterval(() => {
+    if (!document.body.contains(box)) return;
+    updateNote();
+  }, 1000);
+
+  // 路由切走时由 app.js 调用：必须把 EventSource 关掉，
+  // 否则每切一次页面就多留一条长连接（服务端那边一直挂着）。
+  return () => {
+    stream?.close();
+    clearInterval(noteTimer);
+    clearTimeout(highlightTimer);
+    clearTimeout(pluginTimer);
+  };
+}

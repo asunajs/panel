@@ -2,11 +2,15 @@
 #
 # 跑：cd adapters/python && python3 -m unittest discover -s tests -v
 #
-# 覆盖：log/warn/error 格式、sqlite_query/sqlite_exec（内存库往返）、
+# 覆盖：八档日志的行格式（v2，共享向量在 tests/test_log_vectors.py）、
+#       sqlite_query/sqlite_exec（内存库往返）、
 #       http_fetch（本地回环 server 当被测端，含 404 与超时）、
 #       cron 解析与 OR 语义、register_cron/every 触发、payload 结构、
 #       handler 抛异常被捕获且进程不退出、register_route 的 fail-fast、
 #       运行器端到端（--once / --run-for / --db / 缺文件）。
+#
+# ⚠ 脱敏 / 行格式 / 彩色行 / 落盘的**逐字符**断言都在 test_log_vectors.py
+#   （读仓库根的 testdata/*.json）。本文件只断言「接线接对了」。
 
 import ast
 import contextlib
@@ -110,23 +114,49 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class TestLogging(unittest.TestCase):
-    def test_levels_and_format(self):
+    def test_eight_levels_use_the_v2_line_format(self):
+        # 规范 v2：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`（本地时间，毫秒 3 位）
         host = host_api.Host(plugin="p")
-        _, err = capture_stderr(lambda: (host.log("hi"), host.warn("careful"), host.error("bad")))
-        self.assertEqual(
-            err.splitlines(),
-            ["[host-api] [info] hi", "[host-api] [warn] careful", "[host-api] [error] bad"],
-        )
+        calls = [
+            (host.debug, "debug"),
+            (host.log, "info"),  # `log` 仍是 `info` 的别名
+            (host.start, "start"),
+            (host.success, "success"),
+            (host.fail, "fail"),
+            (host.warn, "warn"),
+            (host.error, "error"),
+            (host.fatal, "fatal"),
+        ]
+
+        def fire():
+            for fn, tag in calls:
+                fn(tag)
+
+        _, err = capture_stderr(fire)
+        lines = err.splitlines()
+        self.assertEqual(len(lines), 8, err)
+        for line, (_fn, tag) in zip(lines, calls):
+            self.assertRegex(
+                line,
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[" + tag + r"\] \[p\] " + tag,
+            )
 
     def test_module_level_functions_go_through_singleton(self):
         host_api.bind(plugin="modtest")
-        _, err = capture_stderr(lambda: host_api.log("模块级日志"))
-        self.assertIn("[host-api] [info] 模块级日志", err)
+        _, err = capture_stderr(
+            lambda: (host_api.info("模块级 info"), host_api.fatal("模块级 fatal"))
+        )
+        self.assertIn("[info] [modtest] 模块级 info", err)
+        self.assertIn("[fatal] [modtest] 模块级 fatal", err)
 
-    def test_non_string_message_is_json_encoded(self):
+    def test_message_is_joined_and_redacted_when_the_entry_is_built(self):
         host = host_api.Host(plugin="p")
+        # 容器走 JSON（CPython 的 json.dumps：`, ` / `: ` 带空格，与嵌入式 PocketPy 一致）
         _, err = capture_stderr(lambda: host.log({"a": 1, "b": [1, 2]}))
-        self.assertIn('[host-api] [info] {"a": 1, "b": [1, 2]}', err)
+        self.assertIn('[info] [p] {"a": 1, "b": [1, 2]}', err)
+        # 多参按空格拼接，且**脱敏在构造条目时**就做了（不是展示时才做）
+        _, err = capture_stderr(lambda: host.log("账号", "13600136001", "登录失败"))
+        self.assertIn("[info] [p] 账号 136****6001 登录失败", err)
 
 
 # ---------------------------------------------------------------------------
@@ -488,9 +518,13 @@ class TestEveryAndFire(unittest.TestCase):
         bad_task = host.get_task("bad")
         self.assertEqual(bad_task.last_error, "RuntimeError: 故意失败")
         self.assertEqual(host.get_task("good").last_error, None)
-        # traceback 打到 stderr，且日志里有失败记录
+        # traceback 打到 stderr，且日志里有失败记录（v2 行格式）
         self.assertIn("Traceback (most recent call last)", buf.getvalue())
-        self.assertIn("[host-api] [error] 任务 `bad` 执行失败: RuntimeError: 故意失败", buf.getvalue())
+        self.assertRegex(
+            buf.getvalue(),
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[error\] \[p\] "
+            r"任务 `bad` 执行失败: RuntimeError: 故意失败",
+        )
         # 进程没退出：两个任务都在继续跑
         self.assertGreaterEqual(calls["bad"], 2)
         self.assertGreaterEqual(calls["good"], 2)
@@ -754,6 +788,11 @@ class TestRunner(unittest.TestCase):
     def _run(self, args, timeout=60):
         env = dict(os.environ)
         env["PYTHONPATH"] = ADAPTER_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        # 日志的过滤 / 配色必须由测试决定：开发机自己的 HOST_LOG_LEVEL / FORCE_COLOR
+        # 会把「行格式」这一类断言搞成随机红
+        for key in ("HOST_LOG_LEVEL", "HOST_LOG_COLOR", "NO_COLOR", "FORCE_COLOR",
+                    "HOST_LOG_SCOPE", "PANEL_PLUGIN"):
+            env.pop(key, None)
         return subprocess.run(
             [sys.executable, "-m", "host_api"] + args,
             cwd=ADAPTER_DIR,
@@ -767,20 +806,23 @@ class TestRunner(unittest.TestCase):
         proc = self._run(["examples/demo.py", "--once"])
         # demo 的 boom 任务故意在第 1 次抛异常 → 退出码 1，但进程正常跑完
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn("[runner] 插件 `demo` 注册了 4 个任务", proc.stdout)
-        self.assertIn("[runner] --once：强制触发 4 个任务各一次", proc.stdout)
+        # 运行器自己的行也走插件那套日志（v2）：`[type] [scope] msg`，走 stderr
+        self.assertRegex(proc.stderr, r"\[info\] \[demo\] 插件 `demo` 注册了 4 个任务：")
+        self.assertRegex(proc.stderr, r"\[info\] \[demo\] --once：强制触发 4 个任务各一次")
         self.assertIn("Traceback (most recent call last)", proc.stderr)
         self.assertIn("RuntimeError: 这个任务故意失败（第 1 次）", proc.stderr)
-        self.assertIn("[host-api] [error] 任务 `boom` 执行失败", proc.stderr)
+        self.assertRegex(proc.stderr, r"\[error\] \[demo\] 任务 `boom` 执行失败")
         # 失败之后其它任务照样跑完（进程没退出）
-        self.assertIn("成功 3 / 失败 1", proc.stdout)
+        self.assertRegex(proc.stderr, r"\[info\] \[demo\] --once 结果：成功 3 / 失败 1")
         self.assertIn("[500ms] 第 1 次", proc.stderr)
         self.assertIn("查回 2 行", proc.stderr)
+        # stdout 留给插件自己 print 的业务输出：适配器的日志一律走 stderr
+        self.assertEqual(proc.stdout, "", proc.stdout)
 
     def test_run_for_real_ticks(self):
         proc = self._run(["examples/demo.py", "--run-for", "1.2"])
         self.assertIn(proc.returncode, (0, 1), proc.stderr)
-        self.assertIn("[runner] 调度循环结束", proc.stdout)
+        self.assertRegex(proc.stderr, r"\[info\] \[demo\] 调度循环结束：成功 ")
         # 真实调度下 500ms 任务至少跑两次，且延迟落在合理范围
         self.assertGreaterEqual(proc.stderr.count("[500ms] 第 "), 2, proc.stderr)
         delays = re.findall(r"调度延迟 (\d+)ms", proc.stderr)
@@ -812,6 +854,7 @@ class TestRunner(unittest.TestCase):
         self.assertIn("GET /missing -> status=404", proc.stderr)
 
     def test_missing_plugin_returns_2(self):
+        # 纯 CLI 诊断（还没进插件上下文）：直接打 stderr，不套日志格式
         proc = self._run(["examples/nope.py", "--once"])
         self.assertEqual(proc.returncode, 2)
         self.assertIn("插件文件不存在", proc.stderr)
@@ -829,14 +872,15 @@ class TestRunner(unittest.TestCase):
         proc = self._run([plugin, "--job", "py-echo=@every 1s", "--once"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(
-            "register_handler 登记了 3 个处理函数: py-always-fails, py-echo, py-report", proc.stdout
+            "register_handler 登记了 3 个处理函数: py-always-fails, py-echo, py-report", proc.stderr
         )
-        self.assertIn("已挂上任务 `py-echo`（@every 1s）", proc.stdout)
+        self.assertIn("已挂上任务 `py-echo`（@every 1s）", proc.stderr)
         # py-code-side（代码声明）+ py-echo（--job 挂的）
-        self.assertIn("[runner] 插件 `py-panel-jobs` 注册了 2 个任务", proc.stdout)
+        self.assertRegex(proc.stderr, r"\[info\] \[py-panel-jobs\] 插件 `py-panel-jobs` 注册了 2 个任务")
         self.assertIn("[面板任务] py-echo 第 1 次触发", proc.stderr)
         # 只登记、没挂调度的处理函数不该被 --once 触发
-        self.assertNotIn("py-always-fails", proc.stderr)
+        # （不能拿它的名字去查整段 stderr：上面那行「登记了 3 个处理函数」里就有它）
+        self.assertNotIn("[面板任务] py-always-fails", proc.stderr)
 
     def test_job_flag_rejects_unknown_handler(self):
         plugin = os.path.normpath(os.path.join(ADAPTER_DIR, "..", "..", "plugins", "py", "py-panel-jobs.py"))
@@ -861,9 +905,89 @@ class TestRunner(unittest.TestCase):
             self.assertEqual(proc.returncode, 2)
             self.assertIn("插件加载失败", proc.stderr)
             self.assertIn("顶层就炸了", proc.stderr)
-            self.assertIn("[host-api] [info] before crash", proc.stderr)
+            self.assertRegex(proc.stderr, r"\[info\] \[broken\] before crash")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_log_levels_plugin_shows_all_eight_types(self):
+        # 仓库里那份「八档活文档」插件：它 import 的是 `from host_api import ... fatal`
+        # —— 门面漏一档，这里就会在**加载期**炸，而不是等面板上才发现少了半屏日志
+        plugin = os.path.normpath(os.path.join(ADAPTER_DIR, "..", "..", "plugins", "py", "log_levels.py"))
+        if not os.path.isfile(plugin):
+            self.skipTest("仓库插件不存在")
+        proc = self._run([plugin, "--once"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # scope/plugin 跟着**文件名**走（面板里也是这么标来源的）
+        scope = os.path.splitext(os.path.basename(plugin))[0]
+        for type_name in host_api.TYPES:
+            self.assertIn("[{}] [{}]".format(type_name, scope), proc.stderr)
+        # 脱敏在构造条目时就做：插件那条带手机号的多参日志不该把真号留在输出里
+        self.assertIn("136****6001", proc.stderr)
+        self.assertNotIn("13600136001", proc.stderr)
+
+
+class TestFilesApi(unittest.TestCase):
+    """`host_api` 的文件系统 API（CPython 侧）。
+
+    这一组的存在理由是**跨运行时**：同一套名字在面板内的 PocketPy 宿主里也有
+    （`src/pyhost.rs` 的引导脚本），两边都实现才谈得上「同一份插件两边都能跑」。
+    面板那一侧由 `scripts/smoke.py` 的「面板内文件系统」一组验（真起面板跑）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="host-api-files-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, self._cwd)
+
+    def test_roundtrip_and_listing(self):
+        host_api.write_text("a.txt", "你好")
+        self.assertEqual(host_api.read_text("a.txt"), "你好")
+        host_api.append_text("a.txt", "-尾")
+        self.assertEqual(host_api.read_text("a.txt"), "你好-尾")
+        self.assertEqual(host_api.list_dir("."), ["a.txt"])
+        self.assertTrue(host_api.exists("a.txt"))
+        self.assertFalse(host_api.exists("nope.txt"))
+        self.assertEqual(host_api.stat("a.txt")["size"], len("你好-尾".encode()))
+        host_api.rename("a.txt", "b.txt")
+        self.assertEqual(host_api.list_dir("."), ["b.txt"])
+        host_api.remove("b.txt")
+        self.assertEqual(host_api.list_dir("."), [])
+
+    def test_bytes_are_bytes_not_text(self):
+        # 二进制走 write_bytes / read_bytes：混进文本会在第一个非法字节上炸，
+        # 而不是在写的时候 —— 那种"错得晚"最难查
+        host_api.write_bytes("b.bin", bytes([0, 1, 2, 255]))
+        self.assertEqual(host_api.read_bytes("b.bin"), bytes([0, 1, 2, 255]))
+
+    def test_mkdir_and_remove_are_recursive_ish(self):
+        host_api.mkdir("a/b/c")
+        self.assertTrue(host_api.exists("a/b/c"))
+        host_api.write_text("a/b/c/x.txt", "x")
+        host_api.remove("a")
+        self.assertFalse(host_api.exists("a"))
+
+    def test_remove_of_missing_file_is_not_an_error(self):
+        # 与宿主侧一致：那边走的是 force 那条路。不一样的话，
+        # 「删之前先判断存不存在」的代码在有围栏那边反而变成多余的
+        host_api.remove("never-existed")
+
+    def test_errors_carry_node_style_codes(self):
+        # 两边都让插件"认码不认类型"：面板侧是宿主给的 Node 风格码，
+        # 这里由 errno 映射过来 —— 同一段 `except OSError` 不用按宿主分叉
+        with self.assertRaises(OSError) as caught:
+            host_api.read_text("definitely-missing.txt")
+        self.assertEqual(caught.exception.code, "ENOENT")
+        with self.assertRaises(OSError) as caught:
+            host_api.list_dir("definitely-missing-dir")
+        self.assertEqual(caught.exception.code, "ENOENT")
+
+    def test_data_dir_is_the_cwd_outside_the_panel(self):
+        # 面板里 data_dir() 是插件自己的数据目录（有围栏）；面板外就是 cwd。
+        # 这是**设计**：外面你有正常的文件系统权限，再加一层围栏只会让人困惑。
+        # 可移植的写法是只用相对路径 —— 两边都落在自己的"当前目录"下。
+        self.assertEqual(os.path.realpath(host_api.data_dir()), os.path.realpath(os.getcwd()))
 
 
 if __name__ == "__main__":

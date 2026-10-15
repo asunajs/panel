@@ -90,19 +90,76 @@ async function startFixtureServer() {
   return { port, url: `http://127.0.0.1:${port}`, stop: () => child.kill() };
 }
 
+// 共享向量（脱敏 / 行格式 / 彩色行）的测试在另一个文件里。**在这里 import 进来**，
+// 而不是让调用方多敲一条命令：`npm test` 少跑一项就等于没有这项 —— 向量是
+// 三份实现（Rust/JS/Python）之间唯一的执行保障，不能靠记得。
+import './log-vectors.mjs';
+
 // ---------------------------------------------------------------- 1. 日志
 
-test('log / warn / error 写 stderr，格式 [host-api] [level] msg', () => {
+// 规范 v2 的行格式：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`。
+// 前缀那段用正则吃掉，因为时间戳每次都不同；重点是 type/scope/msg 三段。
+// scope 默认不锁死：主测试进程把插件名设成了 `unit-test`（见文件头的 PANEL_PLUGIN），
+// 子进程里又是别的名字。要断言具体 scope 就显式传第三个参数。
+// 尾部用 `(?=\n|$)` 而不是 `$`：JS 的正则**不把末尾换行当行尾**（那是 Perl/PCRE
+// 的行为），所以 `'...\n'` 用 `$` 是匹配不上的 —— 而 stderr 恰恰总带一个尾换行。
+const LOG_LINE = (type, msg, scope = '[^\\]]+') =>
+  new RegExp(
+    `\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\[${type}\\] \\[${scope}\\] ${msg}(?=\\n|$)`,
+  );
+
+/** 只要求「这一行以该前缀开头」，不关心后面还有什么（长日志行用这个）。 */
+const LOG_HAS = (type, msg, scope = '[^\\]]+') =>
+  new RegExp(
+    `\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\[${type}\\] \\[${scope}\\] ${msg}`,
+  );
+
+test('八档日志都写 stderr，格式 YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg', () => {
   const out = captureStderr(() => {
     host.log('hello', 1, { a: 1 }, [1, 2], null, undefined, true);
+    host.info('info 一条');
+    host.debug('debug 一条');
     host.warn('warn 一条');
     host.error('error 一条');
+    host.start('start 一条');
+    host.success('success 一条');
+    host.fail('fail 一条');
+    host.fatal('fatal 一条');
   });
   const lines = out.trimEnd().split('\n');
-  assert.equal(lines.length, 3);
-  assert.equal(lines[0], '[host-api] [info] hello 1 {"a":1} [1,2] null undefined true');
-  assert.equal(lines[1], '[host-api] [warn] warn 一条');
-  assert.equal(lines[2], '[host-api] [error] error 一条');
+  assert.equal(lines.length, 9, `八档 + log 别名 = 9 行，实际 ${lines.length}`);
+  const types = ['info', 'info', 'debug', 'warn', 'error', 'start', 'success', 'fail', 'fatal'];
+  const msgs = [
+    'hello 1 {"a":1} [1,2] null undefined true',
+    'info 一条',
+    'debug 一条',
+    'warn 一条',
+    'error 一条',
+    'start 一条',
+    'success 一条',
+    'fail 一条',
+    'fatal 一条',
+  ];
+  lines.forEach((line, i) => {
+    assert.match(line, LOG_LINE(types[i], msgs[i].replace(/[[\]{}()]/g, (c) => '\\' + c)), `第 ${i} 行: ${line}`);
+  });
+});
+
+test('console.* 接到同一套日志上（与面板的 QuickJS 宿主一致）', () => {
+  const out = captureStderr(() => {
+    console.log('console 一条');
+    console.debug('console debug');
+    console.warn('console warn');
+    console.error('console error');
+  });
+  const lines = out.trimEnd().split('\n');
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], LOG_LINE('info', 'console 一条'));
+  assert.match(lines[1], LOG_LINE('debug', 'console debug'));
+  assert.match(lines[2], LOG_LINE('warn', 'console warn'));
+  assert.match(lines[3], LOG_LINE('error', 'console error'));
+  // 非日志方法要保留（别把 table/time 这些砍掉）
+  assert.equal(typeof console.table, 'function');
 });
 
 test('规范里的 10 个函数都挂在全局，并带 host 命名空间别名', () => {
@@ -531,12 +588,12 @@ test('运行器：node bin/run.mjs examples/demo.js --once', async () => {
   assert.equal(r.status, 0, `退出码 ${r.status}\n${out}`);
   assert.match(out, /插件已加载：注册 8 个任务/);
   assert.match(out, /内置 http server 监听 http:\/\/127\.0\.0\.1:\d+/);
-  assert.match(out, /\[info\] task `record-hit` 第 1 次触发/);
-  assert.match(out, /\[error\] task `boom` 第 1 次执行失败: Error: 这个任务故意失败（第 1 次）/);
+  assert.match(out, LOG_HAS('info', 'task `record-hit` 第 1 次触发'));
+  assert.match(out, LOG_HAS('error', 'task `boom` 第 1 次执行失败: Error: 这个任务故意失败（第 1 次）'));
   assert.match(out, new RegExp(`http_fetch ${fx.url}/hello -> 200 fixture-ok`));
   assert.match(out, /http_fetch_async http:\/\/127\.0\.0\.1:\d+\/hello -> 200 \{"ok":true/);
   assert.match(out, /--once 完成：触发 8 次，失败 1 次/);
-  assert.match(out, /\[host-api\] \[info\] 落库 id=\d+/);
+  assert.match(out, LOG_HAS('info', '落库 id=\\d+（changes=\\d+）'));
 
   // --db 里的 jobs 表记录了 last_error
   const db2 = new DatabaseSync(db);
@@ -557,12 +614,12 @@ test('运行器：持续调度（--duration）按 cron 重复触发', () => {
   });
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 0, `退出码 ${r.status}\n${out}`);
-  assert.match(out, /\[info\] task `fast-500ms` 第 \d+ 次触发/);
+  assert.match(out, LOG_HAS('info', 'task `fast-500ms` 第 \\d+ 次触发'));
   assert.match(out, /--duration 3s 到期/);
   const runs = [...out.matchAll(/task `fast-500ms` 第 (\d+) 次触发/g)].map((m) => Number(m[1]));
   assert.ok(runs.length >= 4, `fast-500ms 触发次数=${runs.length}`);
   // 同步 fetch 失败也只是任务失败，进程照常跑完
-  assert.match(out, /\[error\] task `fetch-panel` 第 \d+ 次执行失败/);
+  assert.match(out, LOG_HAS('error', 'task `fetch-panel` 第 \\d+ 次执行失败'));
 });
 
 test('运行器：加载失败退出码 1，handler 失败不影响退出码', () => {
@@ -596,7 +653,7 @@ test("解析①：npm 别名 —— 不靠运行器，纯 node 也能 import 'ho
     cwd: tmp,
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /\[host-api\] \[info\] alias-ok/);
+  assert.match(r.stderr, LOG_LINE('info', 'alias-ok'));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -611,7 +668,7 @@ test('解析②：包外靠 node_modules 链接（等价 npm link）', () => {
   );
   const r = runNode([plugin], { cwd: tmp, env: { ...process.env, PANEL_PLUGIN: 'linked' } });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /\[host-api\] \[info\] linked-ok/);
+  assert.match(r.stderr, LOG_LINE('info', 'linked-ok'));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -625,7 +682,7 @@ test('解析③：包外 + 无链接 —— 运行器的 resolve hook 兜底', (
   });
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 0, out);
-  assert.match(out, /\[host-api\] \[info\] hook-ok/);
+  assert.match(out, LOG_LINE('info', 'hook-ok'));
   assert.match(out, /插件已加载：注册 1 个任务 -> t\(@every 2s\)/);
   assert.match(out, /--once 完成：触发 1 次，失败 0 次/);
   fs.rmSync(tmp, { recursive: true, force: true });

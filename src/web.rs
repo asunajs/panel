@@ -18,12 +18,12 @@ use crate::auth::{self, LoginError};
 use crate::db;
 use crate::engine::EngineCmd;
 use crate::ratelimit::Rejected;
-use crate::hostapi::LogLine;
 use crate::AppState;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 插件路由请求体的上限（低配设备上不给插件机会把内存吃光）。
@@ -78,6 +79,15 @@ struct TestRunReq {
     /// 模拟参数 / stdin，可选
     #[serde(default)]
     input: Option<String>,
+    /// 这次试跑是在哪条任务的编辑器里做的（可选）。
+    ///
+    /// 带上它，试跑记录才会出现在那条任务的「记录」里 —— 试跑和真跑是同一条
+    /// 任务的两半（改代码 → 试 → 保存），分开看没有意义。
+    /// 不带就记到 `__test__` 名下（通用试跑框以后走这条）。
+    #[serde(default)]
+    plugin: Option<String>,
+    #[serde(default)]
+    task: Option<String>,
 }
 
 /// 清理失效任务的请求体。
@@ -128,6 +138,11 @@ pub fn router(state: AppState) -> Router {
         )
         // 任务**操作**：立即执行 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
+        // 运行记录（面板层次）。日志是插件层次的、一天一个文件保留一周；
+        // 运行记录由面板自己写、保留更久 —— 所以**日志过期后记录还在**，
+        // 界面才能说清"这次跑过、日志已过期"（见 docs/run-history.md §24）。
+        .route("/api/runs", get(api_runs))
+        .route("/api/runs/{id}", get(api_run_one))
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
         .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
         // 测试运行：一段代码 → 一个临时解释器 → stdout/stderr
@@ -135,6 +150,9 @@ pub fn router(state: AppState) -> Router {
         // 只读接口
         .route("/", get(asset_index))
         .route("/api/state", get(api_state))
+        // 实时日志（SSE）。旧版是前端 3s 轮询 /api/state 的 logs 字段 ——
+        // 那个字段现在只剩「首屏摘要」这个用途了（见 logs_for_state）。
+        .route("/api/logs/stream", get(api_logs_stream))
         // 插件注册的路由 + 插件静态资源 + 主面板静态资源（兜底）
         .fallback(fallback_route)
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -284,11 +302,15 @@ async fn do_login(
     // 否则反代后面所有人共用一个 127.0.0.1，一个人猜错就把所有人都退避掉
     match st.auth.login(&token, auth::client_ip(peer, &headers, st.trust_proxy)) {
         Ok(sid) => {
-            crate::hostapi::push_log(
-                &st.logs,
+            // ⚠ 走**面板通道**（plog!），不是插件通道：登录是面板自己的事，
+            // 和插件无关。写进插件通道会让它带上一个假的「插件名 auth」，
+            // 于是按插件过滤时会冒出一个不存在的插件（实测就是这样）。
+            crate::log::plog!(
                 "auth",
-                "info",
-                &format!("登录成功（来自 {}，当前活跃会话 {}）", peer.ip(), st.auth.active_sessions()),
+                info,
+                "登录成功（来自 {}，当前活跃会话 {}）",
+                peer.ip(),
+                st.auth.active_sessions()
             );
             let cookie = st.auth.session_cookie(&sid);
             let target = safe_next(next.as_deref());
@@ -305,12 +327,7 @@ async fn do_login(
         }
         Err(e) => {
             // 失败原因写进日志（面板上能看到谁在猜），但**不回显令牌本身**
-            crate::hostapi::push_log(
-                &st.logs,
-                "auth",
-                "warn",
-                &format!("登录失败（来自 {}）: {}", peer.ip(), e.message()),
-            );
+            crate::log::plog!("auth", warn, "登录失败（来自 {}）: {}", peer.ip(), e.message());
             if is_form {
                 let status = match e {
                     LoginError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -350,7 +367,7 @@ async fn do_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
         .unwrap_or(false);
 
     if removed {
-        crate::hostapi::push_log(&st.logs, "auth", "info", "已退出登录（会话已删除）");
+        crate::log::plog!("auth", info, "已退出登录（会话已删除）");
     }
     let mut resp = Redirect::to("/login").into_response();
     resp.headers_mut().insert(
@@ -1458,6 +1475,8 @@ async fn test_run(
             lang: lang.clone(),
             code: req.code,
             input: req.input.unwrap_or_default(),
+            plugin: req.plugin,
+            task: req.task,
             reply: tx,
         })
         .is_err()
@@ -1639,6 +1658,415 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
 }
 
 /// 给前端轮询用的 JSON 快照。插件与日志都是 JSON 可序列化的普通结构体。
+/// `/api/state` 里的日志区。
+///
+/// 这是**过渡期的兼容形状**（`{ts, plugin, level, msg}`）：前端 Dashboard 那块
+/// 摘要区还在用它。真正的实时视图走 SSE（`/api/logs/stream`），
+/// 那个不受这里的尾部截断影响。
+///
+/// 两条通道的内存环合并后按时间排序，只取最后 500 行 —— 两个 1MB 环全量
+/// 序列化进每次 `/api/state` 响应是没必要的（前端也只渲染 40 行）。
+///
+/// 面板通道的日志没有 `plugin`，这里拿它的 scope 顶上（`boot` / `engine:0`
+/// 在前端和插件名是同一列，没必要为它单独开一列）。
+fn logs_for_state(st: &AppState) -> Vec<serde_json::Value> {
+    const STATE_LOG_LIMIT: usize = 500;
+    let mut all = st.logs.mem().snapshot();
+    all.extend(crate::log::panel_mem().snapshot());
+    all.sort_by(|a, b| a.entry.ts.cmp(&b.entry.ts));
+    let start = all.len().saturating_sub(STATE_LOG_LIMIT);
+    all[start..]
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "ts": l.entry.ts.format("%H:%M:%S").to_string(),
+                "plugin": l.entry.plugin.clone().unwrap_or_else(|| l.entry.scope.clone()),
+                "level": l.entry.level().as_str(),
+                "msg": l.entry.msg,
+            })
+        })
+        .collect()
+}
+
+/// `/api/logs/stream` 的查询参数。
+#[derive(Deserialize)]
+struct LogStreamQuery {
+    /// `all`（默认）| `plugin` | `panel`
+    channel: Option<String>,
+    /// 最低过滤级别（debug/info/warn/error/fatal）。默认 info —— debug 太吵。
+    level: Option<String>,
+    /// 只看某个插件（面板通道的日志没有 plugin，这里也接受 scope 名，如 `engine`）
+    plugin: Option<String>,
+    /// 只看某一次执行（插件日志的 run 标签）
+    run: Option<String>,
+    /// 关键字，大小写不敏感，匹配整行文本
+    q: Option<String>,
+}
+
+/// 把内存环里的一条渲染成 SSE 事件。
+fn log_event_json(l: &crate::log::LogLine) -> String {
+    serde_json::json!({
+        "seq": l.seq,
+        "ts": l.entry.ts.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        "type": l.entry.typ.as_str(),
+        "level": l.entry.level().as_str(),
+        "scope": l.entry.scope,
+        "plugin": l.entry.plugin,
+        "run": l.entry.run,
+        "msg": l.entry.msg,
+        "line": l.rendered,
+    })
+    .to_string()
+}
+
+/// 服务端过滤条件。**在服务端过滤**而不是全推给浏览器：
+/// 1MB 的缓冲里有几个 MB 的文本，全量推过去让前端丢，是白烧带宽和内存。
+struct LogFilter {
+    min: crate::log::Level,
+    plugin: Option<String>,
+    run: Option<String>,
+    kw: Option<String>,
+}
+
+impl LogFilter {
+    fn keep(&self, l: &crate::log::LogLine) -> bool {
+        if l.entry.level() < self.min {
+            return false;
+        }
+        if let Some(p) = &self.plugin {
+            // plugin 字段只插件通道有；面板通道退化成比 scope（`engine` / `auth`）
+            let hit = l.entry.plugin.as_deref() == Some(p.as_str()) || l.entry.scope == *p;
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(r) = &self.run {
+            if l.entry.run.as_deref() != Some(r.as_str()) {
+                return false;
+            }
+        }
+        if let Some(k) = &self.kw {
+            if !l.rendered.to_lowercase().contains(k) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// 一条日志来自哪条通道。两条通道的 seq 各自独立，所以 id 里必须分开记。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chan {
+    Plugin,
+    Panel,
+}
+
+/// 待推送的一个事件。
+struct Pending {
+    event: &'static str,
+    data: String,
+    /// 这条事件对应缓冲区里的哪个位置。发出时才用它推进游标 ——
+    /// **游标必须表示「已经推给客户端了」**，不能表示「已经取出来了」，
+    /// 否则客户端在批次中途断线、带着批次末尾的 id 重连时会把没收到的那几条跳过去。
+    mark: Option<(Chan, u64)>,
+}
+
+/// SSE 流的推进状态。
+struct LogStreamState {
+    plugin: Option<Arc<crate::log::MemoryTransport>>,
+    panel: Option<Arc<crate::log::MemoryTransport>>,
+    rx_plugin: tokio::sync::broadcast::Receiver<u64>,
+    rx_panel: tokio::sync::broadcast::Receiver<u64>,
+    /// **取**到哪了（从缓冲区读的进度）。与下面的「推」游标分开：
+    /// 一批可以一次取多行，但要一行一行地推。
+    fetch_plugin: u64,
+    fetch_panel: u64,
+    /// **推**到哪了。对外的事件 id 是 `"{plugin}-{panel}"`，
+    /// 这样一个 Last-Event-ID 就能同时恢复两条通道（SSE 只能带一个 id）。
+    cursor_plugin: u64,
+    cursor_panel: u64,
+    filter: LogFilter,
+    backlog: std::collections::VecDeque<Pending>,
+}
+
+impl LogStreamState {
+    /// 把两条通道里**还没取过**的行拉出来，按时间排序后并入待推队列。
+    fn pull(&mut self) {
+        let mut fresh: Vec<(Chan, Arc<crate::log::LogLine>)> = Vec::new();
+        if let Some(m) = &self.plugin {
+            for l in m.since(self.fetch_plugin) {
+                self.fetch_plugin = l.seq;
+                fresh.push((Chan::Plugin, l));
+            }
+        }
+        if let Some(m) = &self.panel {
+            for l in m.since(self.fetch_panel) {
+                self.fetch_panel = l.seq;
+                fresh.push((Chan::Panel, l));
+            }
+        }
+        // 两条通道合流后要按时间排 —— 否则视图里会出现「引擎日志插在插件日志中间」
+        // 这种顺序错乱。同一毫秒内按 seq 兜底。
+        fresh.sort_by(|a, b| a.1.entry.ts.cmp(&b.1.entry.ts).then(a.1.seq.cmp(&b.1.seq)));
+        for (ch, l) in fresh {
+            if self.filter.keep(&l) {
+                self.backlog.push_back(Pending {
+                    event: "log",
+                    data: log_event_json(&l),
+                    mark: Some((ch, l.seq)),
+                });
+            }
+        }
+    }
+
+    /// 推一条事件时推进游标。id 因此永远表示「这个位置之前的都收到了」。
+    fn advance(&mut self, p: &Pending) {
+        if let Some((ch, seq)) = p.mark {
+            match ch {
+                Chan::Plugin => self.cursor_plugin = self.cursor_plugin.max(seq),
+                Chan::Panel => self.cursor_panel = self.cursor_panel.max(seq),
+            }
+        }
+    }
+
+    fn id(&self) -> String {
+        format!("{}-{}", self.cursor_plugin, self.cursor_panel)
+    }
+}
+
+/// `GET /api/logs/stream` —— 实时日志（SSE）。
+///
+/// **服务端主动推**，浏览器不再轮询（旧版是 3s 拉一次 `/api/state`）。
+///
+/// 断线续传：每个事件的 `id` 是 `"{plugin游标}-{panel游标}"`，浏览器重连时会
+/// 自动带上 `Last-Event-ID`，这里从那个位置接着推 —— 断线期间的行不会丢
+/// （除非已经被 1MB 环淘汰，那种情况会先推一条 `notice` 说明）。
+///
+/// 连上先推一条 `notice`（缓冲概况：留了多少行、淘汰了多少行），
+/// 再推最近的 `tail` 行历史，之后是增量。
+async fn api_logs_stream(
+    State(st): State<AppState>,
+    Query(q): Query<LogStreamQuery>,
+    headers: HeaderMap,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+
+    let channel = q.channel.unwrap_or_else(|| "all".into());
+    let want_plugin = channel == "all" || channel == "plugin";
+    let want_panel = channel == "all" || channel == "panel";
+
+    let filter = LogFilter {
+        min: q
+            .level
+            .as_deref()
+            .and_then(crate::log::Level::parse)
+            .unwrap_or(crate::log::Level::Info),
+        plugin: q.plugin.clone(),
+        run: q.run.clone(),
+        kw: q.q.as_deref().map(|s| s.to_lowercase()),
+    };
+
+    let plugin_mem = if want_plugin {
+        Some(st.logs.mem().clone())
+    } else {
+        None
+    };
+    let panel_mem = if want_panel {
+        Some(crate::log::panel_mem())
+    } else {
+        None
+    };
+
+    // 两条通道都要订阅（select! 里不好处理 Option），只是不推不要的那条。
+    let rx_plugin = st.logs.mem().subscribe();
+    let rx_panel = crate::log::panel_mem().subscribe();
+
+    // 断线续传：浏览器带上 Last-Event-ID 就从那儿接着推，不回灌历史。
+    let resume: Option<(u64, u64)> = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            let (a, b) = s.split_once('-')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        });
+
+    let mut backlog: std::collections::VecDeque<Pending> = std::collections::VecDeque::new();
+
+    // 概况：让面板表头能显示「缓冲 N 行 / 已淘汰 M 行」——
+    // 「日志怎么少了一段」必须有解释，不能悄悄丢。
+    let (pn, pb, pd) = plugin_mem.as_ref().map(|m| m.stats()).unwrap_or((0, 0, 0));
+    let (nn, nb, nd) = panel_mem.as_ref().map(|m| m.stats()).unwrap_or((0, 0, 0));
+    backlog.push_back(Pending {
+        event: "notice",
+        data: serde_json::json!({
+            "channel": channel,
+            "cap_bytes": crate::log::hub::MEMORY_CAP,
+            "plugin": { "lines": pn, "bytes": pb, "dropped": pd },
+            "panel": { "lines": nn, "bytes": nb, "dropped": nd },
+        })
+        .to_string(),
+        mark: None,
+    });
+
+    /// 连上时回灌多少行历史。视图本来就是「看最近的」，
+    /// 回灌整段 1MB 只会让首屏卡一下。
+    const DEFAULT_TAIL: usize = 300;
+
+    // 游标与取数进度的定位。两种情况分开处理，但共用同一套「推时才推进游标」的规则：
+    //
+    // - **断线重连**（有 Last-Event-ID）：客户端的游标就是「我收到哪了」。
+    //   取数进度也从那里起步 ⇒ 紧接着第一次 `pull()` 就把断线期间漏的补齐。
+    //   这天然是「不漏行」的：id 只在真的推出去之后才前进。
+    //
+    // - **首次连接**：回灌尾部 DEFAULT_TAIL 行作为历史，取数进度定在**快照末尾**
+    //   （别把刚回灌的又取一遍）；而**推**游标定在回灌窗口之前一格，
+    //   这样万一客户端在回灌途中断线，重连时会从窗口起点重放（宁可重复，不可漏）。
+    let (fetch_plugin, fetch_panel, cursor_plugin, cursor_panel) = match resume {
+        Some((a, b)) => (a, b, a, b),
+        None => {
+            let tail_start =
+                |m: &Arc<crate::log::MemoryTransport>,
+                 ch: Chan,
+                 backlog: &mut std::collections::VecDeque<Pending>|
+                 -> (u64, u64) {
+                    let snap = m.snapshot();
+                    let start = snap.len().saturating_sub(DEFAULT_TAIL);
+                    let window = &snap[start..];
+                    let before = window.first().map(|l| l.seq.saturating_sub(1)).unwrap_or(0);
+                    for l in window {
+                        if filter.keep(l) {
+                            backlog.push_back(Pending {
+                                event: "log",
+                                data: log_event_json(l),
+                                mark: Some((ch, l.seq)),
+                            });
+                        }
+                    }
+                    // (取数进度 = 快照末尾, 推游标 = 回灌窗口之前)
+                    (snap.last().map(|l| l.seq).unwrap_or(0), before)
+                };
+            let (fp, cp) = plugin_mem
+                .as_ref()
+                .map_or((0, 0), |m| tail_start(m, Chan::Plugin, &mut backlog));
+            let (fn_, cn) = panel_mem
+                .as_ref()
+                .map_or((0, 0), |m| tail_start(m, Chan::Panel, &mut backlog));
+            (fp, fn_, cp, cn)
+        }
+    };
+
+    // 断线期间的行如果已经被 1MB 环淘汰掉了，就**明说丢了多少行** ——
+    // 静默补齐是最坏的选择：用户会以为自己看到的日志是连续的。
+    if let Some((a, b)) = resume {
+        let lost = |m: &Arc<crate::log::MemoryTransport>, cursor: u64| -> u64 {
+            match m.snapshot().first() {
+                Some(old) if old.seq > cursor + 1 => old.seq - cursor - 1,
+                _ => 0,
+            }
+        };
+        let n = plugin_mem.as_ref().map_or(0, |m| lost(m, a))
+            + panel_mem.as_ref().map_or(0, |m| lost(m, b));
+        if n > 0 {
+            backlog.push_back(Pending {
+                event: "notice",
+                data: serde_json::json!({ "resumed": true, "lost_lines": n }).to_string(),
+                mark: None,
+            });
+        }
+    }
+
+    let mut state = LogStreamState {
+        plugin: plugin_mem,
+        panel: panel_mem,
+        rx_plugin,
+        rx_panel,
+        fetch_plugin,
+        fetch_panel,
+        cursor_plugin,
+        cursor_panel,
+        filter,
+        backlog,
+    };
+
+    // **先补一次**，然后再进「等广播」的循环。
+    //
+    // 不能只靠广播：广播只会在**订阅之后**有新写入时响。断线期间写的行
+    // （以及首次连接之前就躺在缓冲区里的行）不会有任何通知来叫醒我们 ——
+    // 少了这一句，`Last-Event-ID` 续传会安静地返回 0 条（实测踩到）。
+    state.pull();
+
+    let stream = futures_util::stream::unfold(state, |mut s| async move {
+        loop {
+            if let Some(p) = s.backlog.pop_front() {
+                // 先推进游标再发：这条要么被客户端收到（id 正确前进），
+                // 要么连接断了（客户端带旧 id 重连，这条会被重放）。
+                s.advance(&p);
+                let ev = Event::default().event(p.event).id(s.id()).data(p.data);
+                return Some((Ok::<_, std::convert::Infallible>(ev), s));
+            }
+            // 等「有新日志」的通知。两个缓冲区任一有动静都醒 ——
+            // 起来之后按取数进度去缓冲区取，所以丢一两个通知不影响正确性。
+            let woke = tokio::select! {
+                r = s.rx_plugin.recv() => !matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)),
+                r = s.rx_panel.recv() => !matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)),
+            };
+            if !woke {
+                // 两个发送端都没了（进程在收尾）→ 结束流，让浏览器自己重连
+                return None;
+            }
+            s.pull();
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
+/* ---------------------------------------------------------------- 运行记录 */
+
+#[derive(serde::Deserialize)]
+struct RunsQuery {
+    plugin: Option<String>,
+    task: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/runs?plugin=&task=&limit=`
+///
+/// 两个过滤条件都是可选的（不传 = 不过滤），列表新的在前。
+async fn api_runs(State(st): State<AppState>, Query(q): Query<RunsQuery>) -> Json<serde_json::Value> {
+    // 上限 500：这是个**界面用的**列表，不是导出接口。不设上限的话一个跑了
+    // 半年的面板一开页面就要序列化几万条。
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    match db::list_runs(&st.db, q.plugin.as_deref(), q.task.as_deref(), limit) {
+        Ok(runs) => Json(serde_json::json!({ "runs": runs, "limit": limit })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// `GET /api/runs/{id}` —— 单条记录（日志页顶部要显示"这是哪一次运行"）。
+///
+/// 找不到返回 404 而不是空对象：日志页要能区分「记录不存在」和
+/// 「记录在、但日志过期了」—— 这两句话对用户的意思完全不同。
+async fn api_run_one(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match db::get_run(&st.db, &id) {
+        Ok(Some(run)) => (StatusCode::OK, Json(serde_json::json!({ "run": run }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "没有这条运行记录" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
     // `has_ui` 是给面板判断「要不要显示打开配置页的按钮」用的：插件作者提供了
     // `{name}/index.html` 才有这个入口。不报这个字段的话，面板只能对每个插件都
@@ -1705,7 +2133,7 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             .unwrap_or("")
             .cmp(b.get("file").and_then(|f| f.as_str()).unwrap_or(""))
     });
-    let logs: Vec<LogLine> = st.logs.lock().unwrap().iter().cloned().collect();
+    let logs = logs_for_state(&st);
     let tasks = db::list_tasks(&st.db).unwrap_or_default();
     let jobs = db::list_jobs(&st.db).unwrap_or_default();
 

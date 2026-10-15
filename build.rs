@@ -3,7 +3,7 @@
 //! 为什么不用 crates.io 上的 `pocketpy-sys`：
 //! 它走 cmake + bindgen（要 cmake 和 libclang），交叉编译还得自己写 toolchain 文件；
 //! 而 amalgamated 构建只有两个文件，`cc` 直接编，`cargo zigbuild` 就能出
-//! aarch64-unknown-linux-musl 的静态二进制（实测，见 README）。
+//! aarch64-unknown-linux-musl 的静态二进制（实测，见 docs/performance.md §8.3）。
 //!
 //! 编译开关：
 //! - `PK_ENABLE_WATCHDOG=1`：**必须开**。它让 pocketpy 解释器主循环里检查 deadline，

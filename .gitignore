@@ -4,9 +4,27 @@
 /data/*.db-shm
 __pycache__/
 
+# 插件自己的 SQLite（面板的 panel.db 在上面，插件的数据根默认也在 data/ 下）。
+# 它们是运行期产物：几百 KB 到几 MB，且每个实例都不一样。
+/data/*.sqlite
+/data/*.sqlite-wal
+/data/*.sqlite-shm
+
+# 本地跑插件时留下的工作目录（进程日志 + 插件库）。
+# 不是源码，也不是夹具（夹具在 testdata/，那两个 JSON 是共享向量，必须进仓库）。
+/run/
+
 # macOS Finder 的元数据。它会污染 web/ 的资源对账单测（assets.rs 会把
 # web/ 下的实际文件和登记表逐个对账），也让 git status 变脏。
 .DS_Store
 
 # 适配器的本地依赖（npm link / pip 安装产物不进仓库）
 adapters/node/node_modules/
+
+# 插件的 JSONL 日志（`PANEL_LOG_DIR` / `HOST_LOG_DIR`，默认都是 ./logs）。
+# 按天切、留 7 天，是运行期产物，不进仓库。
+#
+# 用 `logs/`（任意层级）而不是 `/logs`：适配器自己的测试与运行器都在
+# `adapters/node/`、`adapters/python/` 下跑，它们的默认目录就是那里的 ./logs ——
+# 只忽略根目录的话，跑一次自测就会把两个适配器目录弄脏。
+logs/

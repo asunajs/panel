@@ -1,4 +1,4 @@
-"""host_api —— 宿主 API 适配器（CPython 版，规范 v1）。
+"""host_api —— 宿主 API 适配器（CPython 版，规范 v1；日志已升到 v2）。
 
 目的：让**同一份** Python 插件脚本既能在嵌入式 PocketPy 宿主里跑，
 也能在 CPython 里跑（本地开发 / 自测 / CI 用）。
@@ -12,6 +12,13 @@
     python3 -m host_api <plugin.py> [--once] [--db <path>]
 
 只依赖标准库：sqlite3 / urllib.request / json / threading。
+
+日志（规范 v2，实现在 ``log.py``）：八档 ``debug info start success fail warn
+error fatal``（``log`` 仍是 ``info`` 的别名），行格式
+``YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg``，同时落 JSONL。
+
+⚠ 相对 v1 的 ``[host-api] [level] msg``（只有三档、只写 stderr）这是**有意的
+破坏性变更** —— 见 ``docs/logging.md``。
 
 语义对齐 Rust 侧实现（``src/cron.rs`` / ``src/scheduler.rs`` / ``src/js_engine.rs``）：
 
@@ -31,12 +38,47 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
 
+# 文件系统：**同一个 API 在面板内也有实现**（嵌入式宿主的那份见 src/pyhost.rs）。
+# 单独一个模块的原因与 log 一样：__init__.py 只做接线。
+from . import files as _files
+
+# 日志实现单独一个模块（脱敏 / 格式化 / 文件出口 / logger 工厂）：
+# `__init__.py` 只做接线，插件侧看到的仍是同一个 `host_api` 模块。
+#
+# ⚠ 这里 import 进来的子模块名就是 `log`，而本模块底部又定义了**函数** `log`
+# （`info` 的别名，插件的 `from host_api import log` 靠它）—— 函数定义在后，
+# 于是 `host_api.log` 最终是那个函数。要用实现模块请走下面这些再导出，
+# 别写 `import host_api.log`（拿到的是函数，不是模块）。
+from .log import (  # noqa: F401  （再导出，让适配器只有一层门面）
+    LEVEL_OF,
+    TYPES,
+    Logger,
+    colored_line,
+    create_logger,
+    fmt_args,
+    fmt_value,
+    json_line,
+    json_of,
+    line_of,
+    log_state,
+    redact,
+    reset_config_for_test,
+    rfc3339,
+    stamp,
+)
+
 __all__ = [
     "HostApiError",
     "CronError",
     "log",
+    "info",
+    "debug",
+    "start",
+    "success",
+    "fail",
     "warn",
     "error",
+    "fatal",
     "register_cron",
     "register_handler",
     "schedule_handler",
@@ -58,6 +100,22 @@ __all__ = [
     "parse_duration",
     "fmt_ts",
     "TS_FORMAT",
+    # 日志（规范 v2）
+    "TYPES",
+    "LEVEL_OF",
+    "Logger",
+    "create_logger",
+    "redact",
+    "fmt_value",
+    "fmt_args",
+    "stamp",
+    "rfc3339",
+    "line_of",
+    "colored_line",
+    "json_of",
+    "json_line",
+    "log_state",
+    "reset_config_for_test",
 ]
 
 #: payload / 日志里的时间戳格式（毫秒精度）
@@ -431,6 +489,11 @@ class Task(object):
 class Host(object):
     """宿主 API 的实现。模块级有一个单例（见 ``get_host()``）。"""
 
+    #: 八档语义 type（顺序固定）与 type → 过滤级别。
+    #: 唯一权威是 `log.py`，这里只做**类属性**再导出：插件与测试不用摸实现模块。
+    TYPES = TYPES
+    LEVEL_OF = LEVEL_OF
+
     def __init__(self, plugin="plugin", db_path=None):
         self.plugin = plugin
         self.tasks = []
@@ -439,35 +502,53 @@ class Host(object):
         self._lock = threading.RLock()
         self._db_path = db_path
         self._conn = None
+        self._logger = create_logger(scope=plugin, plugin=plugin)
 
-    # ---- 日志 ----
+    # ---- 日志（规范 v2）----
+    #
+    # 八档都挂在**三个面**上：模块级函数（`host_api.fatal(...)`）、实例方法
+    # （`host.fatal(...)`）、类属性（`Host.TYPES` / `Host.LEVEL_OF`）。
+    # 少一个面的后果是插件在某个宿主里静默少打一档 —— 那是最难查的一类。
 
     @staticmethod
     def _stringify(msg):
-        if isinstance(msg, str):
-            return msg
-        if isinstance(msg, (bytes, bytearray)):
-            return bytes(msg).decode("utf-8", "replace")
-        try:
-            return json.dumps(msg, ensure_ascii=False, default=str)
-        except Exception:
-            return str(msg)
+        """兼容旧的内部名：实现在 `log.fmt_value`。"""
+        return fmt_value(msg)
 
     def _emit(self, level, msg):
-        # 每次现取 sys.stderr，这样 contextlib.redirect_stderr 能捕获到。
-        line = "[host-api] [{}] {}\n".format(level, self._stringify(msg))
-        with self._lock:
-            sys.stderr.write(line)
-            sys.stderr.flush()
+        """内部接口：发一条**已成型**的消息（多参拼接由调用方负责）。"""
+        return self._logger.emit(level, msg)
 
-    def log(self, msg):
-        self._emit("info", msg)
+    def _relog(self, plugin):
+        """换插件名时换 logger（见 ``bind``）：日志的 scope/plugin 跟着插件走。"""
+        self._logger = create_logger(scope=plugin, plugin=plugin)
 
-    def warn(self, msg):
-        self._emit("warn", msg)
+    def log(self, *args):
+        return self._logger.info(*args)
 
-    def error(self, msg):
-        self._emit("error", msg)
+    def info(self, *args):
+        return self._logger.info(*args)
+
+    def debug(self, *args):
+        return self._logger.debug(*args)
+
+    def start(self, *args):
+        return self._logger.start(*args)
+
+    def success(self, *args):
+        return self._logger.success(*args)
+
+    def fail(self, *args):
+        return self._logger.fail(*args)
+
+    def warn(self, *args):
+        return self._logger.warn(*args)
+
+    def error(self, *args):
+        return self._logger.error(*args)
+
+    def fatal(self, *args):
+        return self._logger.fatal(*args)
 
     # ---- 调度注册 ----
 
@@ -758,6 +839,9 @@ def bind(plugin=None, db_path=None, reset=True):
     """把模块级单例绑定到当前插件（运行器在 exec 插件之前调用）。"""
     if plugin is not None:
         _host.plugin = plugin
+        # 日志的 scope/plugin 跟着插件名走：面板里日志就是这么标来源的，
+        # 换宿主不该换掉这条 —— 否则同一份插件的日志在两边长得不一样。
+        _host._relog(plugin)
     if db_path is not None:
         _host.set_db_path(db_path)
     if reset:
@@ -765,16 +849,43 @@ def bind(plugin=None, db_path=None, reset=True):
     return _host
 
 
-def log(msg):
-    return _host.log(msg)
+# 八档 + `log`（`info` 的别名，老写法继续可用）。
+# ⚠ 这些名字必须**一个不少**：插件写 `from host_api import fatal`，漏一个就是
+# 加载期就炸（比运行时才发现难查得多）。
+def log(*args):
+    return _host.info(*args)
 
 
-def warn(msg):
-    return _host.warn(msg)
+def info(*args):
+    return _host.info(*args)
 
 
-def error(msg):
-    return _host.error(msg)
+def debug(*args):
+    return _host.debug(*args)
+
+
+def start(*args):
+    return _host.start(*args)
+
+
+def success(*args):
+    return _host.success(*args)
+
+
+def fail(*args):
+    return _host.fail(*args)
+
+
+def warn(*args):
+    return _host.warn(*args)
+
+
+def error(*args):
+    return _host.error(*args)
+
+
+def fatal(*args):
+    return _host.fatal(*args)
 
 
 def register_cron(name, expr, handler):
@@ -839,7 +950,7 @@ def register_route(path, method, handler):
 # 是**导入期**错误 —— 那样整个插件在 CPython 下连加载都过不去，而它在嵌入式宿主里
 # 本来是好用的。所以给四个明确的失败点，而不是让 import 直接炸。
 #
-# 嵌入式宿主（QuickJS）**有**这一族（见 docs/host-api.md §1 末尾）。
+# 嵌入式宿主（QuickJS）**有**这一族（见 docs/host-api.md §1.7）。
 def ws_open(url, options=None):
     raise NotImplementedError(
         "ws_open 不受支持：CPython 适配器不提供 WebSocket 客户端"
@@ -854,6 +965,54 @@ def ws_send(id, text):
 
 def ws_recv(id, timeout_ms=None):
     raise NotImplementedError("ws_recv 不受支持：CPython 适配器不提供 WebSocket 客户端")
+
+
+def data_dir():
+    return _files.data_dir()
+
+
+def read_text(name):
+    return _files.read_text(name)
+
+
+def read_bytes(name):
+    return _files.read_bytes(name)
+
+
+def write_text(name, text):
+    return _files.write_text(name, text)
+
+
+def append_text(name, text):
+    return _files.append_text(name, text)
+
+
+def write_bytes(name, data):
+    return _files.write_bytes(name, data)
+
+
+def exists(name):
+    return _files.exists(name)
+
+
+def list_dir(name):
+    return _files.list_dir(name)
+
+
+def mkdir(name):
+    return _files.mkdir(name)
+
+
+def remove(name):
+    return _files.remove(name)
+
+
+def rename(from_name, to_name):
+    return _files.rename(from_name, to_name)
+
+
+def stat(name):
+    return _files.stat(name)
 
 
 def ws_close(id):

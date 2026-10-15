@@ -21,6 +21,7 @@
 | 构造 | v2.2.0 实测报错 | 替代写法 |
 | --- | --- | --- |
 | **生成器表达式** `sum(x for x in y)` | `SyntaxError: expected ')', got 'for'` | 列表推导 `sum([x for x in y])` |
+| **跨行括号 import** `from host_api import (\n  log,\n  warn)` | `SyntaxError: expected '@id', got ')'` | 写成一整行。名字多的时候用 `import host_api as h` 再 `h.log(...)` |
 | `finally:` 子句 | `SyntaxError: finally clause is not supported yet` | 清理逻辑写在 `except` 分支 + 正常路径各一遍 |
 | `nonlocal` | `SyntaxError: expected statement end` | 用可变容器承接状态，如 `state = {"n": 0}` 再 `state["n"] += 1` |
 | `async def` / `await` | `SyntaxError: expected statement end` | 同步写法 |
@@ -42,7 +43,7 @@ dict 的 `get/keys`、str 的 `strip/split/lower/replace`、异常类 + `try/exc
 
 ### 插件侧硬约束
 
-* 只能 `from host_api import log, warn, error, register_cron, every, sqlite_query,
+* 只能 `from host_api import log, info, debug, start, success, fail, warn, error, fatal, register_cron, every, sqlite_query,
   sqlite_exec, http_fetch`
 * **不得调用 `register_route`**：嵌入式宿主没有路由能力。CPython 适配器里这个
   函数直接 `raise NotImplementedError`，好让可移植性错误在加载阶段就暴露，
@@ -51,6 +52,10 @@ dict 的 `get/keys`、str 的 `strip/split/lower/replace`、异常类 + `try/exc
 * `sqlite_query` 的参数占位符用 `?1 ?2` 并按位置数组绑定（`?1` → `params[0]`）
 * handler 收到的 payload 固定 7 个字段：`{name, plugin, expr, runs, scheduledAt,
   firedAt, lateMs}`，时间戳格式 `YYYY-MM-DD HH:MM:SS.mmm`，`runs` 从 1 开始
+
+> **日志（v2）**：八档 + 多参（`log('账号', phone, '失败')`，`log` 是 `info` 的别名），
+> 行格式 `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`，凭据与手机号自动脱敏。
+> 完整规则与环境变量见上一级 `README.md` 的「日志（v2）」。
 
 > `demo.py` 已实测：把 `host_api` 换成桩之后，**在 PocketPy v2.2.0 上原样跑通**（exit 0）。
 > `fetch_demo.py` 依赖 `threading` + `http.server`，是 CPython 专用的。

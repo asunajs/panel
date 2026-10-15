@@ -48,7 +48,7 @@ if (opts.help || !opts.auth) {
   console.log(`用法: node scripts/screenshot.mjs --auth <带令牌的URL> [--token X] [--out 目录]
 
   --auth   面板地址（实例**必须配令牌** —— 没有「本机免登录」模式了，
-           没配令牌的实例会拒绝启动，见 README §13）
+           没配令牌的实例会拒绝启动，见 docs/security.md §13）
   --open   可选。以前是「无鉴权实例」，第十九轮删掉了那种状态；
            不传就用 --auth 同一个地址
   --token  --auth 那个实例的令牌

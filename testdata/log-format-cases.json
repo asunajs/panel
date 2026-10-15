@@ -1,0 +1,181 @@
+{
+  "_note": [
+    "日志**行格式与字段**的共享测试向量。三份实现（Rust / JS / Python）都读它。",
+    "",
+    "时间戳故意不写死在向量里：向量里写死 `2026-10-15 18:45:40.123` 的话，",
+    "在 UTC 机器上跑的测试就会红 —— 那是时区差异，不是格式差异。",
+    "所以每边各自把「本机本地时间」渲染出来，然后断言：",
+    "  ① 行前缀是 `YYYY-MM-DD HH:MM:SS.mmm`（3 位毫秒）",
+    "  ② 行的**后缀**逐字节等于 line_suffix（这是格式的真正约定）",
+    "",
+    "JSONL 那边同理：`ts` 断言「能解析回同一个时刻」而不是字符串相等，",
+    "字段集合逐字段严格断言。",
+    "",
+    "彩色行不是「在纯文本行上套颜色」：`[type]` 会被提到最前面，",
+    "`{色}[{type}]{复位} {时间} [{scope}] {msg}` —— 扫一眼颜色就能定位级别，",
+    "不用先跳过时间戳。三份实现（Rust/JS/Python）必须一致，见 line_colored_template。"
+  ],
+  "type_level": {
+    "debug": "debug",
+    "info": "info",
+    "start": "info",
+    "success": "info",
+    "fail": "info",
+    "warn": "warn",
+    "error": "error",
+    "fatal": "fatal"
+  },
+  "type_level_note": [
+    "start / success / fail 的过滤级别是 info —— 它们是**语义着色**，不是严重程度。",
+    "一次任务『失败了』在显示上是 fail（红色），但严重程度由随后的 error 决定。",
+    "把 fail 当 error 级别会让 `--min-level error` 变得没法用（满屏都是）。"
+  ],
+  "line_prefix_regex": "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3} ",
+  "json_fields_note": "面板通道的条目**没有** plugin 和 run；插件通道两条都有。",
+  "cases": [
+    {
+      "why": "面板通道：没有 plugin / run，scope 是模块名",
+      "type": "info",
+      "scope": "boot",
+      "plugin": null,
+      "run": null,
+      "msg": "tokio runtime 就绪（2 个 worker 线程）",
+      "line_suffix": "[info] [boot] tokio runtime 就绪（2 个 worker 线程）",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "msg"
+      ]
+    },
+    {
+      "why": "面板通道带线程号的 scope",
+      "type": "warn",
+      "scope": "engine:0",
+      "plugin": null,
+      "run": null,
+      "msg": "第 3 个插件加载失败",
+      "line_suffix": "[warn] [engine:0] 第 3 个插件加载失败",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "msg"
+      ]
+    },
+    {
+      "why": "插件通道 + run 标签：三个可选字段都在",
+      "type": "fail",
+      "scope": "mcloud-daily",
+      "plugin": "mcloud-daily",
+      "run": "daily-1792054905909",
+      "msg": "日常（136****6001）：11/16 步失败",
+      "line_suffix": "[fail] [mcloud-daily] 日常（136****6001）：11/16 步失败",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "plugin",
+        "run",
+        "msg"
+      ]
+    },
+    {
+      "why": "插件通道没有 run（插件自己触发的日志，不属于任何一次面板调度的执行）",
+      "type": "start",
+      "scope": "mcloud",
+      "plugin": "mcloud",
+      "run": null,
+      "msg": "插件已加载（quickjs，on_tick: 未注册，任务: 1）",
+      "line_suffix": "[start] [mcloud] 插件已加载（quickjs，on_tick: 未注册，任务: 1）",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "plugin",
+        "msg"
+      ]
+    },
+    {
+      "why": "success 的过滤级别还是 info",
+      "type": "success",
+      "scope": "mcloud",
+      "plugin": "mcloud",
+      "run": null,
+      "msg": "登录成功",
+      "line_suffix": "[success] [mcloud] 登录成功",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "plugin",
+        "msg"
+      ]
+    },
+    {
+      "why": "debug 是最低档，默认会被过滤掉（但格式不变）",
+      "type": "debug",
+      "scope": "wsclient",
+      "plugin": null,
+      "run": null,
+      "msg": "收到 CONNECTED 帧",
+      "line_suffix": "[debug] [wsclient] 收到 CONNECTED 帧",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "msg"
+      ]
+    },
+    {
+      "why": "JSONL 的转义：消息里有引号和换行，三份实现必须都转义成 \\\" 和 \\n",
+      "type": "error",
+      "scope": "engine",
+      "plugin": null,
+      "run": null,
+      "msg": "创建 Runtime 失败: \"out of memory\"\n第二行",
+      "line_suffix": "[error] [engine] 创建 Runtime 失败: \"out of memory\"\n第二行",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "msg"
+      ]
+    },
+    {
+      "why": "fatal 是最高的过滤级别",
+      "type": "fatal",
+      "scope": "boot",
+      "plugin": null,
+      "run": null,
+      "msg": "端口被占用，退出",
+      "line_suffix": "[fatal] [boot] 端口被占用，退出",
+      "json_fields": [
+        "ts",
+        "type",
+        "level",
+        "scope",
+        "msg"
+      ]
+    }
+  ],
+  "line_colored_template": "{color}[{type}]{reset} {local} [{scope}] {msg}",
+  "colors": {
+    "info": "\u001b[36m",
+    "warn": "\u001b[33m",
+    "error": "\u001b[31m",
+    "fatal": "\u001b[31;1m",
+    "success": "\u001b[32m",
+    "debug": "\u001b[90m",
+    "start": "\u001b[35m",
+    "fail": "\u001b[31m",
+    "reset": "\u001b[0m"
+  }
+}

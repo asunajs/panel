@@ -193,7 +193,12 @@ export async function render(root, ctx, params = {}) {
     clearConsole();
     line(`$ 运行 ${lang === 'py' ? 'Python' : 'JavaScript'}（输入 ${input ? JSON.stringify(input) : '空'}）`, 'meta');
 
-    const res = lang === 'py' ? await runPy(code, input) : await runJs(code, input);
+    // 带上上下文：这次试跑会记进那条任务的运行记录（kind='test'），
+    // 于是「改代码 → 试 → 保存」在「记录」里是一串。新建任务时还没有 name，
+    // 传空字符串，记录会挂在插件名下但不属于任何任务。
+    const testCtx = { plugin, task: isEdit ? name : '' };
+    const res =
+      lang === 'py' ? await runPy(code, input, testCtx) : await runJs(code, input, testCtx);
 
     btn.disabled = false;
     btn.textContent = '运行测试';

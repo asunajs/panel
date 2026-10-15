@@ -47,12 +47,34 @@ globalThis.__fmt_err = function (e) {
     return __fmt(e);
 };
 
+// ---- 工具：多个实参 → 一行文本 ----
+// 为什么必须支持多参：`log('对象也能直接打：', { ok: true })` 是插件的常见写法，
+// 而老实现只声明了 `function (msg)` —— **第二个实参被静默丢掉**。
+// 静默丢参数是最难查的一类问题（输出看起来「对」，只是少了半句）。
+// 分隔符用空格，与 Node 的 console.log 一致。
+globalThis.__fmt_args = function (args) {
+    var parts = [];
+    for (var i = 0; i < args.length; i++) parts.push(__fmt(args[i]));
+    return parts.join(' ');
+};
+
 // ---- host_api：跨运行时的那份门面 ----
 // 只暴露所有运行时都能实现的最小公共子集，语义与 PocketPy / Node / CPython 适配器一致。
+//
+// 八档语义 type（第二十四轮）与 mcloud-sign 对齐：
+//   info / debug / warn / error / fatal  —— 严重程度
+//   start / success / fail               —— **语义着色**（过滤级别都算 info）
+// 过滤级别由宿主决定（见 log::Type::level），插件只管语义。
 globalThis.host_api = {
-    log:   function (msg) { __host_log_raw('info',  __fmt(msg)); },
-    warn:  function (msg) { __host_log_raw('warn',  __fmt(msg)); },
-    error: function (msg) { __host_log_raw('error', __fmt(msg)); },
+    log:     function () { __host_log_raw('info',    __fmt_args(arguments)); },
+    info:    function () { __host_log_raw('info',    __fmt_args(arguments)); },
+    debug:   function () { __host_log_raw('debug',   __fmt_args(arguments)); },
+    warn:    function () { __host_log_raw('warn',    __fmt_args(arguments)); },
+    error:   function () { __host_log_raw('error',   __fmt_args(arguments)); },
+    start:   function () { __host_log_raw('start',   __fmt_args(arguments)); },
+    success: function () { __host_log_raw('success', __fmt_args(arguments)); },
+    fail:    function () { __host_log_raw('fail',    __fmt_args(arguments)); },
+    fatal:   function () { __host_log_raw('fatal',   __fmt_args(arguments)); },
 
     // 声明本插件对自己归属的**要求**（见 workers.rs 的 WorkerHint）。
     //
@@ -137,7 +159,7 @@ globalThis.host_api = {
         return true;
     },
 
-    // 只登记处理函数，**不声明调度**：任务由面板创建（见 README「第九轮」）。
+    // 只登记处理函数，**不声明调度**：任务由面板创建（见 docs/changelog/09-jobs-authority.md）。
     // 一个 handler 可以被面板上的多条任务复用（不同调度表达式）。
     register_handler: function (name, handler) {
         if (typeof name !== 'string' || !name) throw new Error('register_handler(name, handler): name 必须是非空字符串');
@@ -209,7 +231,18 @@ globalThis.host_api = {
 // **看起来像**少了一堆：现在除了 cron 这个名字，host 上有什么完全由 host_api 决定。
 globalThis.host = Object.create(host_api);
 globalThis.host.cron = host_api.register_cron;
-globalThis.console = { log: host_api.log, warn: host_api.warn, error: host_api.error, info: host_api.log, debug: host_api.log };
+// console 逐档映射到对应的日志级别。
+//
+// ⚠ 老实现把 `console.info` / `console.debug` **都**塞进 info —— 那是错的：
+// `console.debug` 写出来的东西本该在「只看 warn 以上」时被压掉。
+// 映射表对齐 Node 的语义（log/info → info、debug → debug、warn → warn、error → error）。
+globalThis.console = {
+    log: host_api.log,
+    info: host_api.info,
+    debug: host_api.debug,
+    warn: host_api.warn,
+    error: host_api.error,
+};
 
 // ---- 任务与路由表（存在 JS 侧，宿主只保存元数据）----
 //
@@ -242,6 +275,21 @@ globalThis.__has_task = function (name) {
 // 不做的（写清楚，省得人试）：`require.resolve` / `require.cache` / package.json main /
 // `.json` 数据文件 / 任何 Node 内置模块。
 var __cjsModules = {};
+var __cjsBuiltins = {};
+
+// 内置模块的 CJS 门面：源码由 Rust 侧**按导出清单现生成**（见 node_module_for_require），
+// 与 `import` 那条路是同一份模块体 —— 两种写法绝不能拿到两份实现。
+function __builtinCjsModule(name) {
+    if (__cjsBuiltins[name]) return __cjsBuiltins[name];
+    var src = globalThis.__host_node_cjs[name];
+    if (!src) throw new Error('没有内置模块 ' + name);
+    var m = new Function(src)();
+    __cjsBuiltins[name] = m;
+    return m;
+}
+// 内置模块的 ESM 视图要从这里取同一个对象（见 node_module_for_import）——
+// 挂在 globalThis 上，因为 ESM 模块里的 `globalThis` 才是它们共用的那个。
+globalThis.__builtinCjsModule = __builtinCjsModule;
 
 globalThis.__make_require = function (base) {
     return function require(spec) {
@@ -252,7 +300,10 @@ globalThis.__make_require = function (base) {
             err.code = 'MODULE_NOT_FOUND';
             throw err;
         }
-        if (r.builtin) return globalThis.host_api;      // host-api 与 ESM 那边同一批函数
+        if (r.builtin) {
+            if (r.module) return __builtinCjsModule(r.module);
+            return globalThis.host_api;                  // host-api 与 ESM 那边同一批函数
+        }
         if (__cjsModules[r.url]) return __cjsModules[r.url].exports;
 
         // `require` 只能读 **CJS** 文件。要去读一个 ES 模块，`new Function` 会报
@@ -332,9 +383,16 @@ globalThis.__dispatch_route = function (key, requestJson) {
 /// 是同一个语义。
 pub const HOST_API_MODULE: &str = r#"
 const api = globalThis.host_api;
+// 日志八档。`log` 是 `info` 的别名（老写法，继续可用）。
 export const log = api.log;
+export const info = api.info;
+export const debug = api.debug;
 export const warn = api.warn;
 export const error = api.error;
+export const start = api.start;
+export const success = api.success;
+export const fail = api.fail;
+export const fatal = api.fatal;
 export const register_cron = api.register_cron;
 export const register_handler = api.register_handler;
 export const worker_hint = api.worker_hint;
@@ -351,6 +409,315 @@ export const register_route = api.register_route;
 export const register_nav = api.register_nav;
 export default api;
 "#;
+
+/// `node:path` 的内置实现（纯字符串运算，不碰文件系统）。
+///
+/// 为什么要在面板里再实现一遍 Node 的 path：插件的常见写法
+/// `fs.writeFileSync(path.join(dir, 'x.json'), s)` 两个模块都得在，
+/// 少一个就是 `Cannot find module 'node:path'`，而这不是插件作者的错。
+///
+/// **`resolve` 的「当前目录」是围栏根**：插件眼里的 `/` 就是它自己那个目录
+/// （见 src/pluginfs.rs）。于是 `path.resolve('a/b')` 得到 `/a/b`，把它原样
+/// 交给 `fs` 就是根里的 `a/b`。面板外的原生实现给的是真实绝对路径 ——
+/// 只要插件把结果**交回给 fs**（正常写法都是这样），两边行为一致。
+pub const NODE_PATH_BODY: &str = r#"
+const sep = '/';
+
+function isAbsolute(p) { return typeof p === 'string' && p.charCodeAt(0) === 47; }
+
+/// 规整路径段。`absolute` 决定开头的 `..` 是「保留」还是「丢掉」——
+/// 这不是能省的一个参数：`normalize('a/../..')` 是 `..`，而 `normalize('/../x')` 是 `/x`
+/// （实测 Node 就这两个结果），差别全在这一个标志上。
+function normalizeParts(parts, absolute) {
+    const out = [];
+    for (const seg of parts) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') {
+            if (out.length && out[out.length - 1] !== '..') out.pop();
+            else if (!absolute) out.push('..');
+            continue;
+        }
+        out.push(seg);
+    }
+    return out;
+}
+
+function join(...args) {
+    const parts = [];
+    let absolute = false;
+    for (const a of args) {
+        if (typeof a !== 'string' || a === '') continue;
+        if (parts.length === 0) absolute = isAbsolute(a);
+        parts.push(...a.split('/'));
+    }
+    return normalizeParts(parts, absolute).join('/');
+}
+
+function normalize(p) {
+    if (typeof p !== 'string' || p === '') return '.';
+    const abs = isAbsolute(p);
+    const trailing = p.length > 1 && p.endsWith('/');
+    const s = normalizeParts(p.split('/'), abs).join('/');
+    if (abs) return '/' + s + (trailing ? '/' : '');
+    return (s === '' ? '.' : s) + (trailing ? '/' : '');
+}
+
+function resolve(...args) {
+    // 从左到右，遇到绝对路径就把前面攒的全丢掉 —— Node 就是这么做的，
+    // 所以 `resolve('/x', '..', 'y')` 是 `/y` 而不是 `/x/y`。
+    //
+    // 面板里的「当前目录」是围栏根，也就是 `/`：于是结果总是以 `/` 开头，
+    // 把它原样交回 `fs` 就是根里的相对路径（见 src/pluginfs.rs 的 resolve_in_root）。
+    let out = [];
+    for (const a of args) {
+        if (typeof a !== 'string' || a === '') continue;
+        if (isAbsolute(a)) out = [];
+        out = out.concat(a.split('/'));
+    }
+    return '/' + normalizeParts(out, true).join('/');
+}
+
+function dirname(p) {
+    if (typeof p !== 'string' || p === '') return '.';
+    const abs = isAbsolute(p);
+    const parts = p.split('/');
+    while (parts.length > 1 && parts[parts.length - 1] === '') parts.pop();
+    parts.pop();
+    const s = parts.join('/').replace(/\/+$/, '');
+    if (s === '') return abs ? '/' : '.';
+    return s;
+}
+
+function basename(p, ext) {
+    if (typeof p !== 'string' || p === '') return '';
+    let b = p.replace(/\/+$/, '');
+    const i = b.lastIndexOf('/');
+    if (i >= 0) b = b.slice(i + 1);
+    if (ext && b.endsWith(ext) && b !== ext) b = b.slice(0, b.length - ext.length);
+    return b;
+}
+
+function extname(p) {
+    const b = basename(p);
+    const i = b.lastIndexOf('.');
+    return i <= 0 ? '' : b.slice(i);
+}
+
+function relative(from, to) {
+    const f = resolve(from).split('/').filter(Boolean);
+    const t = resolve(to).split('/').filter(Boolean);
+    let i = 0;
+    while (i < f.length && i < t.length && f[i] === t[i]) i++;
+    const up = new Array(f.length - i).fill('..');
+    return up.concat(t.slice(i)).join('/');
+}
+
+function parse(p) {
+    const dir = dirname(p);
+    const base = basename(p);
+    const ext = extname(p);
+    return {
+        root: isAbsolute(p) ? '/' : '',
+        dir, base, ext,
+        name: ext ? base.slice(0, base.length - ext.length) : base,
+    };
+}
+
+function format(o) {
+    if (typeof o !== 'object' || o === null) throw new TypeError('path.format: 需要一个对象');
+    const dir = o.dir || o.root || '';
+    const base = o.base || (o.name || '') + (o.ext || '');
+    if (!dir) return base;
+    return dir.endsWith('/') ? dir + base : dir + '/' + base;
+}
+
+const posix = { sep, join, normalize, resolve, dirname, basename, extname, relative, isAbsolute, parse, format };
+const delimiter = ':';
+// 面板跑在 Linux 上。给 win32 一个同名对象，别让 `import { win32 }` 直接炸。
+const win32 = posix;
+"#;
+
+/// `node:fs` 的内置实现：**限定在插件自己目录内**的同步 API。
+///
+/// 所有路径都过 `src/pluginfs.rs` 的围栏（语法规整 + 真实路径校验，软链接也算）。
+/// 越界报 `EACCES`，与 Node 同码 —— 插件里 `catch (e) { if (e.code === …) }` 照旧能跑。
+///
+/// 与 Node 的差异（刻意，写在 docs/host-api.md）：
+///   · 没有 `Buffer`：不给 encoding 时读写 `Uint8Array`
+///   · 只有同步 API：QuickJS 宿主没有真事件循环，`fs.promises` 只会是一句谎话
+///   · 单次读写上限 8 MiB（要穿过 JSON 桥，超大文件会卡住引擎线程）
+pub const NODE_FS_BODY: &str = r#"
+function call(json) {
+    const r = JSON.parse(json);
+    if (!r.ok) {
+        const err = new Error(r.error);
+        err.code = r.code || 'EIO';
+        throw err;
+    }
+    return r;
+}
+
+function opt(options, key, dflt) {
+    if (options === undefined || options === null) return dflt;
+    if (typeof options === 'string') return key === 'encoding' ? options : dflt;
+    return options[key] === undefined ? dflt : options[key];
+}
+
+function toBytes(data) {
+    // Uint8Array / ArrayBuffer / 数组都收；字符串走 text 那条
+    if (typeof data === 'string') return null;
+    if (data instanceof Uint8Array) return Array.from(data);
+    if (data instanceof ArrayBuffer) return Array.from(new Uint8Array(data));
+    if (Array.isArray(data)) return data.map((n) => Number(n) & 0xff);
+    throw new TypeError('fs.writeFileSync: data 只能是 string / Uint8Array / ArrayBuffer');
+}
+
+function bytesParam(bytes) { return bytes === null ? 'null' : '[' + bytes.join(',') + ']'; }
+
+function readFileSync(path, options) {
+    const encoding = opt(options, 'encoding', '');
+    const r = call(globalThis.__host_fs_read(String(path), String(encoding || '')));
+    if (typeof r.data === 'string') return r.data;
+    return new Uint8Array(r.data);
+}
+
+function writeFileSync(path, data, options) {
+    const bytes = toBytes(data);
+    const text = bytes === null ? String(data) : '';
+    call(globalThis.__host_fs_write(String(path), text, bytesParam(bytes), false));
+    return undefined;
+}
+
+function appendFileSync(path, data, options) {
+    const bytes = toBytes(data);
+    const text = bytes === null ? String(data) : '';
+    call(globalThis.__host_fs_write(String(path), text, bytesParam(bytes), true));
+    return undefined;
+}
+
+function existsSync(path) {
+    return !!call(globalThis.__host_fs_exists(String(path))).exists;
+}
+
+function mkdirSync(path, options) {
+    call(globalThis.__host_fs_mkdir(String(path), !!opt(options, 'recursive', false)));
+    return undefined;
+}
+
+function readdirSync(path, options) {
+    // withFileTypes 返回的对象上只实现 isFile/isDirectory —— 别伪造一堆
+    // `Dirent` 上其实不存在的方法出来
+    const withTypes = !!opt(options, 'withFileTypes', false);
+    const items = call(globalThis.__host_fs_readdir(String(path))).entries;
+    if (!withTypes) return items.map((e) => e.name);
+    return items.map((e) => ({
+        name: e.name,
+        isFile: () => !!e.is_file,
+        isDirectory: () => !!e.is_dir,
+    }));
+}
+
+function statSync(path) {
+    const r = call(globalThis.__host_fs_stat(String(path)));
+    return {
+        size: r.size,
+        mtimeMs: r.mtime_ms,
+        isFile: () => !!r.is_file,
+        isDirectory: () => !!r.is_dir,
+    };
+}
+
+function unlinkSync(path) {
+    call(globalThis.__host_fs_unlink(String(path)));
+    return undefined;
+}
+
+function rmSync(path, options) {
+    call(globalThis.__host_fs_rm(
+        String(path), !!opt(options, 'recursive', false), !!opt(options, 'force', false)));
+    return undefined;
+}
+
+function renameSync(from, to) {
+    call(globalThis.__host_fs_rename(String(from), String(to)));
+    return undefined;
+}
+
+/// 插件自己那个目录的**真实**位置。排查时很有用（「我到底写哪去了」）。
+function rootDir() { return call(globalThis.__host_fs_root()).dir; }
+
+const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 };
+
+const fs = {
+    readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync,
+    statSync, unlinkSync, rmSync, renameSync, rootDir, constants,
+};
+"#;
+
+/// 内置模块的具名导出清单。
+///
+/// ESM（`import`）与 CJS（`require`）两个包装器**都按它生成** —— 各写一份清单的话，
+/// 加一个函数只会加上其中一种写法，另一种静默少一个名字。这正是适配器那边
+/// （三份实现共用向量）反复吃过的那类问题，在同一个文件里就不该重演。
+const NODE_PATH_EXPORTS: &[&str] = &[
+    "sep", "delimiter", "win32", "posix", "join", "normalize", "resolve", "dirname", "basename",
+    "extname", "relative", "isAbsolute", "parse", "format",
+];
+const NODE_FS_EXPORTS: &[&str] = &[
+    "readFileSync", "writeFileSync", "appendFileSync", "existsSync", "mkdirSync", "readdirSync",
+    "statSync", "unlinkSync", "rmSync", "renameSync", "rootDir", "constants",
+];
+
+fn node_module_parts(name: &str) -> Option<(&'static str, &'static [&'static str], &'static str)> {
+    match name {
+        "node:path" => Some((NODE_PATH_BODY, NODE_PATH_EXPORTS, "posix")),
+        "node:fs" => Some((NODE_FS_BODY, NODE_FS_EXPORTS, "fs")),
+        _ => None,
+    }
+}
+
+/// 内置模块的 **ESM** 源码（给 `import` 用）。
+///
+/// ⚠ 它**不重新实现**，而是把 CJS 那个对象拿过来再具名导出：这样
+/// `require('node:fs') === (import fs from 'node:fs')` 在面板里也成立 ——
+/// 与 Node 一致（Node 的 ESM default 就是 CJS 的 `module.exports`）。
+/// 两份实现的话，`===` 会悄悄变成 false，而"同一份实现"正是这个模块存在的理由。
+pub fn node_module_for_import(name: &str) -> Option<String> {
+    let (_body, names, _default) = node_module_parts(name)?;
+    let mut lines: Vec<String> = vec![
+        format!("const M = globalThis.__builtinCjsModule({name:?});"),
+        "export default M;".to_string(),
+    ];
+    for n in names {
+        lines.push(format!("export const {n} = M.{n};"));
+    }
+    Some(format!("{}\n", lines.join("\n")))
+}
+
+/// 内置模块的 **CJS** 源码：一个 `new Function('M', src)` 能跑出模块对象的体。
+///
+/// 用 `new Function(src)()` 而不是给每个内置模块再写一份 CJS 文件：两种写法的插件
+/// （`import fs from 'node:fs'` / `const fs = require('node:fs')`）必须拿到**同一份
+/// 实现**，否则行为会按写法分叉。
+pub fn node_module_for_require(name: &str) -> Option<String> {
+    let (body, names, _) = node_module_parts(name)?;
+    Some(format!("{body}\nreturn {{ {} }};\n", names.join(", ")))
+}
+
+/// 把内置 Node 模块的**模块体**挂到 `globalThis.__host_node_cjs`。
+///
+/// `require('node:fs')` 那条路从这里取源码跑成模块对象（见 BOOTSTRAP 的
+/// `__builtinCjsModule`）。**单独抽出来是为了让单测能用最小宿主复现同一套注入** ——
+/// 测试里另写一份的话，验的就不是面板真正跑的那条路了。
+fn install_builtin_node_modules<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    let map = rquickjs::Object::new(ctx.clone())?;
+    for name in ["node:path", "node:fs"] {
+        if let Some(src) = node_module_for_require(name) {
+            map.set(name, src)?;
+        }
+    }
+    ctx.globals().set("__host_node_cjs", map)
+}
 
 /// 把宿主能力注入 Context：底层 `__host_*` 函数 + 引导脚本。
 ///
@@ -440,6 +807,92 @@ pub fn install_host<'js>(
         Func::new(move |base: String, spec: String| -> String {
             crate::engine::do_require_load(&root_for_require, &base, &spec)
         }),
+    )?;
+
+    install_builtin_node_modules(ctx)?;
+
+    // ---- 文件系统（限定在插件自己目录内，见 src/pluginfs.rs）----
+    //
+    // 边界与 require/import 一致（只能碰插件目录里的东西），但**根是插件自己的
+    // 那个子目录**（`<PLUGINS_DIR>/<插件名>/`）—— 读写别人的文件、以及删掉面板
+    // 自己的文件，都不在能力范围内。围栏在 Rust 侧算（语法规整 + 真实路径校验），
+    // JS 侧只做参数整理：**围栏不能写在被围的人那一边**。
+    //
+    // 根名只取 `plugin` 的**最后一段**：插件名理论上可能被写成 `../x`
+    // （它在别处已经被拒了，但这里再收一道）—— 别让一个名字把根顶出去。
+    let fs_root = match std::path::Path::new(&plugin).file_name() {
+        Some(name) => state.plugin_data_dir.join(name),
+        None => state.plugin_data_dir.join("__unnamed__"),
+    };
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_read",
+        Func::new(move |path: String, enc: String| -> String {
+            crate::pluginfs::read(&r, &path, &enc)
+        }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_write",
+        Func::new(move |path: String, text: String, bytes: String, append: bool| -> String {
+            let parsed: Option<Vec<u8>> = if bytes == "null" {
+                None
+            } else {
+                match serde_json::from_str::<Vec<u8>>(&bytes) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        return crate::pluginfs::bad_bytes(&e.to_string());
+                    }
+                }
+            };
+            crate::pluginfs::write(&r, &path, &text, parsed, append)
+        }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_exists",
+        Func::new(move |path: String| -> String { crate::pluginfs::exists(&r, &path) }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_mkdir",
+        Func::new(move |path: String, recursive: bool| -> String {
+            crate::pluginfs::mkdir(&r, &path, recursive)
+        }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_readdir",
+        Func::new(move |path: String| -> String { crate::pluginfs::readdir(&r, &path) }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_stat",
+        Func::new(move |path: String| -> String { crate::pluginfs::stat(&r, &path) }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_unlink",
+        Func::new(move |path: String| -> String { crate::pluginfs::unlink(&r, &path) }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_rm",
+        Func::new(move |path: String, rec: bool, force: bool| -> String {
+            crate::pluginfs::rm(&r, &path, rec, force)
+        }),
+    )?;
+    let r = fs_root.clone();
+    ctx.globals().set(
+        "__host_fs_rename",
+        Func::new(move |from: String, to: String| -> String {
+            crate::pluginfs::rename(&r, &from, &to)
+        }),
+    )?;
+    let r = fs_root;
+    ctx.globals().set(
+        "__host_fs_root",
+        Func::new(move || -> String { crate::pluginfs::describe_root(&r) }),
     )?;
 
     // ---- 邮件 ----
@@ -559,4 +1012,282 @@ pub fn install_host<'js>(
 /// 这样插件侧 `JSON.parse` 不会二次抛错，拿到的是一条可读的错误信息。
 fn json_error(msg: &str) -> String {
     serde_json::json!({ "error": msg }).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在**最小宿主**里跑一段插件代码，把 `__host_log_raw` 换成一个收集器。
+    ///
+    /// 为什么不拉 `HostState` 进来：那要 DB + WebSocket 注册表 + tokio handle 一整套，
+    /// 而这里要验的只是「JS 门面有没有把**正确的级别**和**拼好的文本**递出来」。
+    /// 门面之外的东西由 engine.rs 的集成测试覆盖。
+    fn run(code: &str) -> Vec<(String, String)> {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__cap = [];
+                globalThis.__host_log_raw = function (level, msg) { __cap.push([level, msg]); };
+                "#,
+            )
+            .unwrap();
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            ctx.eval::<(), _>(code).expect("被测代码执行失败");
+            ctx.eval::<(), _>("globalThis.__cap_json = JSON.stringify(__cap);")
+                .unwrap();
+        });
+        let s: String = ctx.with(|ctx| ctx.globals().get("__cap_json").unwrap());
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn every_level_maps_to_the_expected_host_level() {
+        let got = run(r#"
+            host_api.log('a');
+            host_api.info('b');
+            host_api.debug('c');
+            host_api.warn('d');
+            host_api.error('e');
+            host_api.start('f');
+            host_api.success('g');
+            host_api.fail('h');
+            host_api.fatal('i');
+        "#);
+        let levels: Vec<&str> = got.iter().map(|(l, _)| l.as_str()).collect();
+        // `log` 是 `info` 的别名（老写法），两者必须同档
+        assert_eq!(
+            levels,
+            vec![
+                "info", "info", "debug", "warn", "error", "start", "success", "fail", "fatal"
+            ]
+        );
+        let msgs: Vec<&str> = got.iter().map(|(_, m)| m.as_str()).collect();
+        assert_eq!(msgs, vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+    }
+
+    #[test]
+    fn multiple_arguments_are_joined_instead_of_silently_dropped() {
+        // 老实现是 `function (msg)` —— 第二个以后的实参**被静默丢掉**。
+        // 静默丢参数最难查：输出看起来「对」，只是少了半句。
+        let got = run(r#"
+            host_api.log('账号', { phone: '13600136001' }, 3, [1, 2]);
+            host_api.log();
+            host_api.log('只有一个');
+        "#);
+        assert_eq!(got[0].1, r#"账号 {"phone":"13600136001"} 3 [1,2]"#);
+        assert_eq!(got[1].1, "", "没有实参就是空串，不能变成 'undefined'");
+        assert_eq!(got[2].1, "只有一个");
+    }
+
+    #[test]
+    fn console_debug_no_longer_masquerades_as_info() {
+        // 老实现把 console.info / console.debug 都塞进 info，
+        // 于是「只看 warn 以上」时 debug 那句压不掉。
+        let got = run(r#"
+            console.log('l');
+            console.info('i');
+            console.debug('d');
+            console.warn('w');
+            console.error('e');
+        "#);
+        let levels: Vec<&str> = got.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(levels, vec!["info", "info", "debug", "warn", "error"]);
+    }
+
+    // ---------------------------------------------------------------- node:path / node:fs
+
+    /// 在最小宿主里跑一段代码，返回它写进 `__out` 的 JSON。
+    ///
+    /// 与 `run()` 的区别：这里要的是**值**，不是日志。node:fs / node:path 是纯计算
+    /// （fs 的那些 `__host_fs_*` 由下面的 Rust 函数直接顶上），不需要 HostState。
+    fn run_json(code: &str) -> serde_json::Value {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        let out = ctx.with(|ctx| {
+            install_builtin_node_modules(&ctx).expect("内置模块注入失败");
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            ctx.eval::<(), _>(code).expect("被测代码执行失败");
+            ctx.eval::<String, _>("JSON.stringify(globalThis.__out)").unwrap()
+        });
+        serde_json::from_str(&out).unwrap()
+    }
+
+    #[test]
+    fn path_module_matches_node_semantics_on_the_shapes_plugins_use() {
+        let got = run_json(
+            r#"
+            const M = globalThis.__builtinCjsModule('node:path');
+            globalThis.__out = {
+                join: M.join('a', 'b', 'c.json'),
+                joinTricky: M.join('a/', '/b', '..', 'c'),
+                joinRelativeEscape: M.join('a', '..', '..'),
+                resolve: M.resolve('a', 'b'),
+                resolveAbs: M.resolve('/x', '..', 'y'),
+                normalizeAbsEscape: M.normalize('/../x'),
+                normalizeRelativeEscape: M.normalize('a/../..'),
+                dirname: M.dirname('a/b/c.json'),
+                dirnameRoot: M.dirname('/'),
+                basename: M.basename('/a/b/c.json', '.json'),
+                extname: M.extname('a/b/c.tar.gz'),
+                extnameDotfile: M.extname('.gitignore'),
+                normalize: M.normalize('a/./b/../c'),
+                relative: M.relative('a/b', 'a/c'),
+                isAbsolute: [M.isAbsolute('/x'), M.isAbsolute('x')],
+                sep: M.sep,
+            };
+            "#,
+        );
+        // 期望值逐条对着 Node 的 path 模块写的（`node -e` 实测）：
+        //   join('a','b','c.json')            -> a/b/c.json
+        //   join('a/','/b','..','c')          -> a/c
+        //   resolve('a','b')                  -> 面板里是 /a/b（根 = 插件的数据目录）
+        //   resolve('/x','..','y')            -> /y
+        //   dirname('a/b/c.json')             -> a/b
+        //   basename('/a/b/c.json','.json')   -> c
+        //   extname('a/b/c.tar.gz')           -> .gz
+        //   normalize('a/./b/../c')           -> a/c
+        //   relative('a/b','a/c')             -> ../c
+        assert_eq!(got["join"], "a/b/c.json");
+        assert_eq!(got["joinTricky"], "a/c");
+        // 下面的期望值全部来自 `node -e "require('path')…"` 的**实测输出**，
+        // 不是照文档猜的 —— 猜出来的语义会在边角上分叉，而边角正是插件会踩的。
+        assert_eq!(got["joinRelativeEscape"], "..");
+        assert_eq!(got["resolve"], "/a/b", "面板里 / 就是插件自己的数据目录");
+        assert_eq!(got["resolveAbs"], "/y");
+        assert_eq!(got["normalizeAbsEscape"], "/x");
+        assert_eq!(got["normalizeRelativeEscape"], "..");
+        assert_eq!(got["dirname"], "a/b");
+        assert_eq!(got["dirnameRoot"], "/");
+        assert_eq!(got["basename"], "c");
+        assert_eq!(got["extname"], ".gz");
+        assert_eq!(got["extnameDotfile"], "", "`.gitignore` 没有扩展名（Node 语义）");
+        assert_eq!(got["normalize"], "a/c");
+        assert_eq!(got["relative"], "../c");
+        assert_eq!(got["isAbsolute"][0], true);
+        assert_eq!(got["isAbsolute"][1], false);
+        assert_eq!(got["sep"], "/");
+    }
+
+    #[test]
+    fn esm_and_cjs_views_are_the_same_object() {
+        // Node 里 `require('fs') === (await import('fs')).default` 成立（ESM 的
+        // default 就是 CJS 的 module.exports）。这里也必须成立 —— 不成立的话，
+        // 「同一份实现」就只是句口号。
+        let got = run_json(
+            r#"
+            globalThis.__out = { same: globalThis.__builtinCjsModule('node:fs') === globalThis.__builtinCjsModule('node:fs') };
+            "#,
+        );
+        assert_eq!(got["same"], true, "模块对象必须缓存成同一个实例");
+        // 顺带静态核对：ESM 包装器是「从同一个对象上取名字」，不是另写一份实现
+        let src = node_module_for_import("node:fs").unwrap();
+        assert!(src.contains("__builtinCjsModule(\"node:fs\")"), "{src}");
+        assert!(src.contains("export default M;"));
+        for n in NODE_FS_EXPORTS {
+            assert!(src.contains(&format!("export const {n} = M.{n};")), "少了 {n}");
+        }
+        // 两份导出清单都不许空着（空清单会让包装器静默生成一个空模块）
+        assert!(NODE_PATH_EXPORTS.len() >= 10);
+        assert!(NODE_FS_EXPORTS.len() >= 10);
+    }
+
+    #[test]
+    fn fs_wrapper_raises_node_style_codes_and_keeps_paths_relative_to_root() {
+        // 顶上 `__host_fs_*`：这一条验的是**JS 包装层**（参数整理、编码选择、
+        // 错误对象形状），围栏本身由 src/pluginfs.rs 的单测验。
+        let got = run_json(
+            r#"
+            globalThis.__host_fs_read = function (p, enc) {
+                return JSON.stringify({ ok: true, data: enc === 'utf8' ? '文本:' + p : [1, 2] });
+            };
+            globalThis.__host_fs_write = function (p, text, bytes, append) {
+                globalThis.__wrote = { p: p, text: text, bytes: bytes, append: append };
+                return JSON.stringify({ ok: true });
+            };
+            globalThis.__host_fs_exists = function (p) { return JSON.stringify({ ok: true, exists: p === 'yes' }); };
+            globalThis.__host_fs_stat = function (p) {
+                return JSON.stringify({ ok: false, code: 'ENOENT', error: '没有 ' + p });
+            };
+            const fs = globalThis.__builtinCjsModule('node:fs');
+            globalThis.__out = {
+                text: fs.readFileSync('x.txt', 'utf8'),
+                bytesIsTyped: fs.readFileSync('b.bin') instanceof Uint8Array,
+                wrote: (fs.writeFileSync('a/b.json', '内容'), globalThis.__wrote),
+                append: (fs.appendFileSync('c.log', 'x'), globalThis.__wrote.append),
+                exists: [fs.existsSync('yes'), fs.existsSync('no')],
+            };
+            try { fs.statSync('gone.txt'); } catch (e) {
+                globalThis.__out.err = { code: e.code, message: e.message };
+            }
+            "#,
+        );
+        assert_eq!(got["text"], "文本:x.txt");
+        assert_eq!(got["bytesIsTyped"], true, "不给 encoding 时应当给 Uint8Array");
+        assert_eq!(got["wrote"]["p"], "a/b.json");
+        assert_eq!(got["wrote"]["text"], "内容");
+        assert_eq!(got["wrote"]["bytes"], "null", "字符串走 text 那条，不进字节数组");
+        assert_eq!(got["wrote"]["append"], false);
+        assert_eq!(got["append"], true);
+        assert_eq!(got["exists"][0], true);
+        assert_eq!(got["exists"][1], false);
+        assert_eq!(got["err"]["code"], "ENOENT", "错误对象上要有 Node 的 code");
+        assert_eq!(got["err"]["message"], "没有 gone.txt");
+    }
+
+    #[test]
+    fn every_exported_builtin_name_is_actually_defined() {
+        // 「导出清单」和「模块体」是两处**分开**写的东西，而它们必须一一对上：
+        //
+        // - 清单里有、模块体里没有 → 插件 `import { xxx }` 拿到 `undefined`，
+        //   报错发生在**插件那边**（"xxx is not a function"），而根因在这里；
+        // - 模块体里有、清单里没有 → 插件根本 import 不到，但这个更难发现，
+        //   因为 `require` 那条路（对象整体）是能拿到的 —— 于是
+        //   「require 能用、import 不能用」，排查起来非常费劲。
+        //
+        // 两处都对上的话，上面两条都不会发生。这条测试就是那个"对上"。
+        for name in ["node:path", "node:fs"] {
+            let (body, names, _default) = node_module_parts(name).expect("内置模块必须存在");
+            for n in names {
+                // 三种定义形式都要认：`function f(`、`const f =`、对象字面量里的 `f:`
+                let defined = body.contains(&format!("function {n}("))
+                    || body.contains(&format!("const {n} ="))
+                    || body.contains(&format!("\n  {n}:"))
+                    || body.contains(&format!("\n{n}:"));
+                assert!(
+                    defined,
+                    "{name} 的导出清单里有 `{n}`，但模块体里没定义 —— 插件 import 它会拿到 undefined"
+                );
+            }
+            assert!(!names.is_empty(), "{name} 的导出清单是空的");
+        }
+    }
+
+    #[test]
+    fn the_esm_facade_exports_every_level() {
+        // 具名导出漏一个，插件里 `import { fatal } from 'host-api'` 会在**加载期**炸。
+        // 这里做静态核对 —— 运行时那条路由 engine.rs 加载真插件来验。
+        for name in [
+            "log", "info", "debug", "warn", "error", "start", "success", "fail", "fatal",
+        ] {
+            let want = format!("export const {name} = api.{name};");
+            assert!(
+                HOST_API_MODULE.contains(&want),
+                "host-api 模块少了 `{name}` 的具名导出"
+            );
+        }
+    }
+
+    #[test]
+    fn host_alias_shares_the_same_facade() {
+        // 老写法 `host.log(...)` 必须继续可用（Object.create(host_api) 把它继承下来）
+        let got = run(r#"
+            host.log('老写法');
+            host.success('也在');
+        "#);
+        assert_eq!(got[0].1, "老写法");
+        assert_eq!(got[1].0, "success");
+    }
 }

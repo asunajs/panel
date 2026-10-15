@@ -5,8 +5,8 @@
 //! 目标是「单二进制 + 常驻内存极低 + aarch64-musl 静态链接」。CPython 动态链接 libpython，
 //! 静态化要自己编交叉工具链；MicroPython 的内存占用更小但语法覆盖更窄。
 //! PocketPy 是 **纯 C11 的 amalgamated 单文件**（`pocketpy.c` + `pocketpy.h`），
-//! 用 `cc` 就能编进二进制，`cargo zigbuild` 直接出静态 musl 产物（实测见 README）。
-//! 实测内存：解释器本体 ~2.3 MB，每多一个插件 VM ~0.8 MB（macOS，详见 README §9）。
+//! 用 `cc` 就能编进二进制，`cargo zigbuild` 直接出静态 musl 产物（实测见 docs/performance.md §8.3）。
+//! 实测内存：解释器本体 ~2.3 MB，每多一个插件 VM ~0.8 MB（macOS，详见 docs/performance.md §8.1b）。
 //!
 //! ## 插件隔离：一个插件 = 一个 VM
 //!
@@ -156,6 +156,67 @@ pub fn take_print_buffer() -> String {
     PRINT_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()))
 }
 
+// ---------------------------------------------------------------- 解释器全局锁
+//
+// **这一节是一个真 bug 的修复**，不是防御性编程。
+//
+// `py_switchvm()` 改的是**进程级**的 `pk_current_vm`（还有类型表之类），而引擎默认
+// `ENGINE_WORKERS=2`：两条线程各自跑自己的 Python 插件时，会互相把"当前 VM"切走。
+// 实测（2026-10-15）：
+//
+//   1 个 worker + 2 个 .py 插件 → 正常
+//   2 个 worker + 2 个 .py 插件 → `Abort trap: 6`
+//   2 个 worker + 3 个 .py 插件 → `Segmentation fault: 11`
+//
+// 而且**stdout 上什么都没有** —— 原生 abort 不走 Rust 的 panic hook，
+// 面板就是"启动了、然后没了"。仓库自带的 4 个 .py 插件之所以没暴露它，
+// 只是因为它们恰好都被分到了同一个 worker。
+//
+// 修法是把「测试里那个串行锁」提到生产路径上（原来只在 `#[cfg(test)]` 里，
+// 因为并行跑测试同样会崩 —— 那条注释早就写明了原因，只是生产路径没上锁）。
+//
+// 代价说清楚：**Python 插件之间不再并行**（同一时刻只有一个在跑 pocketpy）。
+// 这是换到"不崩"的最低代价；QuickJS 侧完全不受影响（它每个插件一个 Context，
+// 没有这种进程级全局状态）。
+
+static POCKETPY_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+thread_local! {
+    /// 当前线程已经嵌套持有几次。native 函数是在 pocketpy **里面**被调用的，
+    /// 若它们再碰解释器就会嵌套加锁 —— 深度计数让只有最外层真去抢锁。
+    static LOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 解释器锁的 RAII 句柄。最外层那个 drop 时才真正解锁。
+///
+/// 那个 `Option<MutexGuard>` **必须**被持有（它一 drop 就解锁）—— 字段本身不读，
+/// 所以这里显式说明它是有用的负载，不是可以删掉的空壳。
+pub struct InterpreterGuard(#[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>);
+
+/// 进入解释器操作时调用：`let _g = lock_interpreter();`
+///
+/// **可重入**：同一线程嵌套调用不会死锁（内层拿到的是空守卫）。
+/// 跨线程仍然严格串行 —— 这正是要的效果。
+pub fn lock_interpreter() -> InterpreterGuard {
+    let depth = LOCK_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v.saturating_add(1));
+        v
+    });
+    if depth > 0 {
+        return InterpreterGuard(None);
+    }
+    let m = POCKETPY_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    // 中毒不传染：上一轮 panic 不该让后面所有 Python 插件都不能跑
+    InterpreterGuard(Some(m.lock().unwrap_or_else(|e| e.into_inner())))
+}
+
+impl Drop for InterpreterGuard {
+    fn drop(&mut self) {
+        LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// 一个插件的解释器实例。
 pub struct PyVm {
     index: i32,
@@ -166,6 +227,9 @@ pub struct PyVm {
 impl PyVm {
     /// 切到（必要时创建）第 `index` 个 VM。调用方负责保证 index 不重复。
     pub fn attach(index: i32) -> Self {
+        // ⚠ 加锁必须在 `py_switchvm` **之前**：它改的就是那个进程级全局。
+        // （第一版把锁写在了它后面 —— 那样等于没锁，实测仍然崩。）
+        let _g = lock_interpreter();
         unsafe { py_switchvm(index) };
         Self {
             index,
@@ -185,18 +249,22 @@ impl PyVm {
     /// 把本 VM 设为当前 VM。所有 pocketpy 调用都作用于「当前 VM」，
     /// 所以每次碰某个插件的解释器之前都要先切过来。
     pub fn activate(&self) {
+        // 同上：先加锁再切 VM
+        let _g = lock_interpreter();
         unsafe { py_switchvm(self.index) };
     }
 
     /// 清空本 VM 的全部状态（热更新时用），之后必须重新 bootstrap。
     pub fn reset(&mut self) {
-        self.activate();
+        let _g = lock_interpreter();
+        unsafe { py_switchvm(self.index) };
         unsafe { py_resetvm() };
         self.booted = false;
     }
 
     /// 执行一段源码。失败时返回 Python 的 traceback 文本。
     pub fn exec(&mut self, source: &str, filename: &str) -> Result<(), String> {
+        let _g = lock_interpreter();
         self.activate();
         let src = CString::new(source).map_err(|e| format!("源码里有 NUL 字节: {e}"))?;
         let fname = CString::new(filename).unwrap_or_else(|_| CString::new("<plugin>").unwrap());
@@ -217,6 +285,7 @@ impl PyVm {
     /// 这是宿主 → Python 的入口：`__pp_dispatch(name, payload_json)` /
     /// `__pp_tick(payload_json)` / `__pp_route(req_json)`。
     pub fn call_str(&self, func: &str, args: &[&str]) -> Result<String, String> {
+        let _g = lock_interpreter();
         self.activate();
         let name = CString::new(func).unwrap();
         let f = unsafe { py_getglobal(py_name(name.as_ptr())) };
@@ -259,6 +328,7 @@ impl PyVm {
 
     /// `__main__` 里有没有这个名字且可调用。
     pub fn has_callable(&self, name: &str) -> bool {
+        let _g = lock_interpreter();
         self.activate();
         let cs = CString::new(name).unwrap();
         unsafe { pp_is_callable_global(cs.as_ptr()) }

@@ -12,10 +12,12 @@
 // （同时提供 snake_case 与仓库 QuickJS 宿主用的 camelCase 别名：host.log / host.cron / host.every）。
 //
 // 语义要点（与 Rust 宿主逐条对齐）：
-//   - log/warn/error 写 stderr，格式 `[host-api] [level] msg`
+//   - 日志八档，写 stderr，格式 `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`，
+//     同时落 JSONL（按天切、留 7 天）—— 见 src/log.js 与仓库根的共享向量
 //   - handler 正常返回 = 本次成功；抛异常 = 失败（运行器捕获、记 last_error，不退出进程）
 //   - payload 固定 {name, plugin, expr, runs, scheduledAt, firedAt, lateMs}
 
+import { createLogger, fmtValue, fmtArgs, redact, TYPES } from './log.js';
 import { Scheduler, fmtMs, fmtClock, fmtError, fmtErrorLine } from './scheduler.js';
 import { CronSchedule, Schedule, parseDuration } from './cron.js';
 import { sqlite_query, sqlite_exec, dbPath, closeDb } from './sqlite.js';
@@ -32,43 +34,31 @@ import {
   routeSnapshot,
 } from './net.js';
 
-const LEVELS = ['info', 'warn', 'error'];
+// 日志八档（规范 v2）。实现在 `src/log.js` —— 与面板的 `src/log/` 逐字符对齐：
+// 同一个行格式、同一套 JSONL 字段、同一份脱敏规则。三份实现（Rust/JS/Python）
+// 靠仓库根的共享向量 `testdata/*.json` 对齐，谁改歪了谁的测试就红。
+//
+// ⚠ v1 只有 log/warn/error 三档、格式是 `[host-api] [level] msg`。那次变更
+//   是**有意的破坏性变更**：日志格式统一是「同一份插件面板内外都能跑」的前提。
+//
+// 模块级默认 logger：scope/plugin 跟着插件名走（见 `setPluginName`）。
+let logger = createLogger({
+  scope: process.env.PANEL_PLUGIN || process.env.HOST_LOG_SCOPE || 'plugin',
+  plugin: process.env.PANEL_PLUGIN || null,
+});
 
-// 与 QuickJS 宿主 __fmt 一致：任意值 → 可打印字符串
-function fmtValue(v) {
-  if (typeof v === 'string') return v;
-  if (v === null) return 'null';
-  if (v === undefined) return 'undefined';
-  const t = typeof v;
-  if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v);
-  if (t === 'function') return `[Function ${v.name || 'anonymous'}]`;
-  if (t === 'symbol') return String(v);
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
+export const log = (...args) => logger.info(...args);
+export const info = (...args) => logger.info(...args);
+export const debug = (...args) => logger.debug(...args);
+export const warn = (...args) => logger.warn(...args);
+export const error = (...args) => logger.error(...args);
+export const start = (...args) => logger.start(...args);
+export const success = (...args) => logger.success(...args);
+export const fail = (...args) => logger.fail(...args);
+export const fatal = (...args) => logger.fatal(...args);
 
-function fmtArgs(args) {
-  return args.map(fmtValue).join(' ');
-}
-
-function emit(level, args) {
-  process.stderr.write(`[host-api] [${level}] ${fmtArgs(args)}\n`);
-}
-
-export function log(...args) {
-  emit('info', args);
-}
-
-export function warn(...args) {
-  emit('warn', args);
-}
-
-export function error(...args) {
-  emit('error', args);
-}
+/** 拿一个带自定义 scope 的 logger（`logger().child('exchange')` 这样用）。 */
+export const loggerFactory = (opts) => createLogger(opts);
 
 // ------------------------------------------------------------------ 调度注册
 
@@ -84,6 +74,9 @@ const handlers = new Map();
 /// 运行器在加载插件前调用，用来给 payload.plugin / 日志行提供插件名
 export function setPluginName(name) {
   state.plugin = String(name || 'plugin');
+  // 日志的 scope/plugin 跟着插件名走：面板里日志就是这么标来源的，
+  // 换宿主不该换掉这条 —— 否则同一份插件的日志在两边长得不一样。
+  logger = createLogger({ scope: state.plugin, plugin: state.plugin });
   state.scheduler = null;
   handlers.clear();
   return state.plugin;
@@ -226,7 +219,16 @@ export function ws_close() {
 // ------------------------------------------------------------------ 全局安装
 
 const PUBLIC = {
+  // 八档日志（规范 v2）
   log,
+  info,
+  debug,
+  warn,
+  error,
+  start,
+  success,
+  fail,
+  fatal,
   warn,
   error,
   register_cron,
@@ -250,7 +252,30 @@ for (const [key, fn] of Object.entries(PUBLIC)) {
   if (typeof globalThis[key] === 'undefined') globalThis[key] = fn;
 }
 
-// 仓库 QuickJS 宿主的门面：host.log / host.warn / host.error / host.cron / host.every
+// `console.*` 也要接到同一套日志上。
+//
+// 为什么必须做：面板的 QuickJS 宿主里 `console.log` 就是宿主日志（见 src/jshost.rs
+// 的 console 映射）。适配器不接的话，同一份插件 `console.debug('x')` 在面板里
+// 进日志、在 Node 里进 stdout —— 两边行为分叉，而「同一份源码两边都能跑」正是
+// 这个适配器存在的理由。
+//
+// 其余方法（table / time / dir …）保留原生：只换日志出口，不砍功能。
+{
+  const native = globalThis.console;
+  const mapped = {
+    log: info,
+    info,
+    debug,
+    warn,
+    error,
+  };
+  for (const k of ['table', 'time', 'timeEnd', 'timeLog', 'dir', 'trace', 'assert', 'count', 'countReset', 'group', 'groupEnd', 'clear']) {
+    if (typeof native?.[k] === 'function') mapped[k] = native[k].bind(native);
+  }
+  globalThis.console = mapped;
+}
+
+// 仓库 QuickJS 宿主的门面：host.log / host.warn / host.info / host.start / host.cron …
 // 这里同时暴露规范名与 camelCase 别名，让两种写法的插件都能直接跑。
 globalThis.host = {
   ...PUBLIC,

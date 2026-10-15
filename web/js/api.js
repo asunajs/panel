@@ -91,31 +91,42 @@ export function getState() {
 /**
  * 跑一段 JS / Python 代码。
  *
- * 后端 `POST /api/test/js` / `POST /api/test/py`，请求体 `{ code, input }`，
+ * 后端 `POST /api/test/js` / `POST /api/test/py`，请求体 `{ code, input, plugin?, task? }`，
  * 回 `{ ok, stdout, stderr, error, ms }`。
+ *
+ * `context` 传 `{plugin, task}` 时，这次试跑会**记进那条任务的运行记录**
+ * （`kind='test'`），于是「改代码 → 试 → 保存」是一串能回看的记录。
+ * 不传就记到 `__test__` 名下（不混进任何任务）。
+ *
+ * ⚠ 试跑的输出**不进日志库**（被捕获缓冲收走），所以它存在记录自己身上；
+ * 试跑记录也因此**没有**「看日志」入口 —— 那是两回事，别做成一样的。
  *
  * @param {'js'|'py'} lang
  * @param {string} code
  * @param {string} [input]
+ * @param {{plugin?: string, task?: string}} [context]
  */
-export function runSnippet(lang, code, input = '') {
+export function runSnippet(lang, code, input = '', context = {}) {
   if (lang !== 'js' && lang !== 'py') {
     return Promise.resolve({ ok: false, error: `不支持的语言：${lang}` });
   }
   if (!code || !code.trim()) {
     return Promise.resolve({ ok: false, error: '代码是空的' });
   }
-  return request(`/api/test/${lang}`, { method: 'POST', panel: true, body: { code, input } });
+  const body = { code, input };
+  if (context.plugin) body.plugin = context.plugin;
+  if (context.task) body.task = context.task;
+  return request(`/api/test/${lang}`, { method: 'POST', panel: true, body });
 }
 
 /** 跑 JS。见 `runSnippet`。 */
-export function runJs(code, input) {
-  return runSnippet('js', code, input);
+export function runJs(code, input, context) {
+  return runSnippet('js', code, input, context);
 }
 
 /** 跑 Python。见 `runSnippet`。 */
-export function runPy(code, input) {
-  return runSnippet('py', code, input);
+export function runPy(code, input, context) {
+  return runSnippet('py', code, input, context);
 }
 
 // ---------------------------------------------------------------- 任务定义

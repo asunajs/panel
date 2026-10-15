@@ -377,7 +377,7 @@ fn intervals_in(source: &str, prefix: &str) -> Vec<u64> {
 /// 要几条 worker 才装得下这些插件的声明。
 ///
 /// 用户不该为了「抢兑不被日常挡住」去算 `ENGINE_WORKERS` —— 那正是多用户部署里
-/// 没人会做的事（README 里那条「让用户自己配环境变量」的建议就是不可用的）。
+/// 没人会做的事（docs/changelog/14-15-throughput-and-editing.md §16.18：那条「让用户自己配环境变量」的建议就是不可用的）。
 /// 所以这里取**「配置值」与「声明要求的下限」的较大者**：
 ///
 /// ```text

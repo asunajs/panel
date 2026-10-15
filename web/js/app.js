@@ -16,7 +16,9 @@ import * as taskList from './views/task-list.js';
 import * as taskEditor from './views/task-editor.js';
 import * as pluginList from './views/plugin-list.js';
 import * as pluginSource from './views/plugin-source.js';
+import * as logView from './views/log-view.js';
 import { getState, logout } from './api.js';
+import { lineNode, openLogStream, makeRing } from './logstream.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -121,23 +123,44 @@ function initDrawer() {
 
 // ---------------------------------------------------------------- Dashboard
 
-/** 日志行的渲染。`LEVEL_CLASS` 决定颜色，未知等级按 info 处理。 */
-const LEVEL_CLASS = { info: 'stdout', warn: 'stderr', error: 'error' };
+/** 八档语义 type → 控制台配色类（见 logstream.js 的 TYPE_CLASS）。 */
+const TYPE_CLASS = {
+  debug: 'stdout',
+  info: 'stdout',
+  start: 'system',
+  success: 'successline',
+  fail: 'stderr',
+  warn: 'stderr',
+  error: 'error',
+  fatal: 'error',
+};
 
-function logRows(logs, limit = 40) {
+/** 一行的 html（Dashboard 摘要用，纯字符串 —— 这里不做节点级操作）。 */
+function logLineHtml(e) {
+  const cls = TYPE_CLASS[e.type] || 'stdout';
+  return (
+    `<span class="console-line ${cls}">` +
+    `<span class="log-ts">${esc(e.ts)}</span> ` +
+    `<span class="log-lv">[${esc(e.type)}]</span> ` +
+    `<span class="log-src">[${esc(e.plugin || e.scope)}]</span> ${esc(e.msg)}</span>`
+  );
+}
+
+/**
+ * Dashboard 的日志摘要。
+ *
+ * 首屏用 `/api/state` 里那份（不给用户一个空框），之后交给 SSE 增量推 ——
+ * 旧版是每 3 秒整包拉一次 `/api/state`，只为看这 40 行，而且看不到面板自己的日志。
+ *
+ * 只留最近 40 行：Dashboard 是「扫一眼」的地方，翻日志有独立的日志页。
+ */
+const DASH_LOG_LINES = 40;
+
+function logRows(logs) {
   if (!logs || logs.length === 0) {
     return '<span class="console-empty">还没有日志</span>';
   }
-  // 只显示最后 limit 行（环形缓冲上限 200 行，全渲染既没必要也拖慢低配盒子）
-  return logs
-    .slice(-limit)
-    .map(
-      (l) =>
-        `<span class="console-line ${LEVEL_CLASS[l.level] || 'stdout'}">` +
-        `<span class="log-ts">${l.ts}</span> ` +
-        `<span class="log-src">${l.plugin}</span> ${l.msg}</span>`,
-    )
-    .join('');
+  return logs.slice(-DASH_LOG_LINES).map(logLineHtml).join('');
 }
 
 async function renderDashboard(root) {
@@ -222,43 +245,79 @@ async function renderDashboard(root) {
         <span class="section-title">实时日志</span>
         <span class="hint" id="log-note"></span>
         <div class="card-actions">
-          <button class="btn ghost" id="log-toggle">暂停刷新</button>
+          <label class="chip" title="关掉就不会跟着新日志滚动">
+            <input type="checkbox" id="log-follow" checked>贴底
+          </label>
+          <button class="btn ghost" id="log-toggle">暂停</button>
+          <button class="btn" id="log-more">打开日志页</button>
         </div>
       </div>
       <div class="console" id="log-box">${logRows(res.logs)}</div>
+      <p class="hint">这里只留最近 40 行，且**只有插件日志与面板日志的混合流**。
+        要看全量、按级别/插件/关键字筛、导出，去「日志」页。</p>
     </div>`;
 
-  // 日志单独轮询，不重渲染整页 —— 重渲染会把滚动位置和按钮焦点弄丢。
-  // 返回 cleanup 由 app.js 在切视图时调用，否则切走之后这个定时器还在跑。
-  let paused = false;
+  // ---- 日志：SSE 增量推 ----
+  //
+  // 首屏那 40 行已经在上面渲染好了，这里只接增量 —— 不重渲染整页
+  // （重渲染会把滚动位置和按钮焦点弄丢）。
+  //
+  // 只留最近 40 行 DOM：Dashboard 是扫一眼的地方，翻日志有独立的日志页。
   const box = root.querySelector('#log-box');
   const note = root.querySelector('#log-note');
-  const shown = Math.min((res.logs || []).length, 40);
-  note.textContent = `最近 ${shown} 行 / 缓冲 ${(res.logs || []).length} 行`;
+  const followEl = root.querySelector('#log-follow');
+  const ring = makeRing(DASH_LOG_LINES);
+  for (const l of (res.logs || []).slice(-DASH_LOG_LINES)) ring.push({ ...l, line: '' });
 
-  const timer = setInterval(async () => {
-    if (paused || !document.body.contains(box)) return;
-    const r = await getState();
-    if (!r.ok) return;
-    // 只在内容变了才动 DOM（日志不动时别做无谓的重排）
-    const html = logRows(r.logs);
-    if (box.innerHTML !== html) {
-      const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-      box.innerHTML = html;
-      // 用户本来贴着底部看，就继续贴着；否则别抢他的滚动位置
-      if (atBottom) box.scrollTop = box.scrollHeight;
-    }
-    note.textContent = `最近 ${Math.min((r.logs || []).length, 40)} 行 / 缓冲 ${
-      (r.logs || []).length
-    } 行`;
-  }, 3000);
+  let paused = false;
+  let connection = 'connecting';
+  const paintNote = () => {
+    const label = connection === 'open' ? '实时' : connection === 'error' ? '重连中' : '连接中';
+    note.textContent = `${label} · 最近 ${Math.min(ring.length, DASH_LOG_LINES)} 行`;
+  };
+  paintNote();
+
+  const stream = openLogStream({
+    channel: 'all',
+    level: 'info',
+    onLine(e) {
+      if (paused || !document.body.contains(box)) {
+        ring.push(e);
+        return;
+      }
+      const el = lineNode(e);
+      el.className = `console-line ${TYPE_CLASS[e.type] || 'stdout'}`;
+      box.appendChild(el);
+      while (box.children.length > DASH_LOG_LINES) box.removeChild(box.firstChild);
+      if (followEl.checked) box.scrollTop = box.scrollHeight;
+      if (note.dataset.tick !== String(Math.floor(Date.now() / 1000))) {
+        // 每行都改 note 会触发无谓的重排；一秒最多一次
+        note.dataset.tick = String(Math.floor(Date.now() / 1000));
+        paintNote();
+      }
+    },
+    onState(s) {
+      connection = s;
+      paintNote();
+    },
+  });
 
   root.querySelector('#log-toggle').addEventListener('click', (e) => {
     paused = !paused;
     e.target.textContent = paused ? '继续刷新' : '暂停刷新';
   });
 
-  return () => clearInterval(timer);
+  root.querySelector('#log-more').addEventListener('click', () => ctx.navigate('#/logs'));
+  followEl.addEventListener('change', () => {
+    if (followEl.checked) box.scrollTop = box.scrollHeight;
+  });
+  box.addEventListener('scroll', () => {
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    if (atBottom !== followEl.checked) followEl.checked = atBottom;
+  });
+
+  // 返回 cleanup 由 route() 在切视图时调用 —— 不关的话每切一次就多留一条长连接
+  return () => stream.close();
 }
 
 // ---------------------------------------------------------------- 设置
@@ -300,6 +359,7 @@ function renderSettings(root) {
 const TITLES = {
   dashboard: 'Dashboard',
   tasks: '任务列表',
+  logs: '日志',
   plugins: '插件管理',
   settings: '设置',
 };
@@ -322,6 +382,17 @@ function parseHash() {
       return { view: 'plugin-source', params: { name: parts[1] } };
     }
     return { view: 'plugins' };
+  }
+  if (parts[0] === 'logs') {
+    // #/logs/plugin/{插件名} —— 从别处点过来直接按插件筛
+    // #/logs/run/{运行 id}   —— 「运行记录 → 那次执行的日志」用的入口
+    if (parts[1] === 'plugin' && parts[2]) {
+      return { view: 'logs', params: { plugin: parts[2] } };
+    }
+    if (parts[1] === 'run' && parts[2]) {
+      return { view: 'logs', params: { run: parts[2] } };
+    }
+    return { view: 'logs', params: {} };
   }
   if (parts[0] === 'settings') return { view: 'settings' };
   // #/plugin/{name} —— 插件自己的页面（iframe）。名字就是插件名。
@@ -363,6 +434,7 @@ async function route() {
     else if (view === 'tasks') cleanup = await taskList.render(root, ctx);
     else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
+    else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
     else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
     else if (view === 'settings') renderSettings(root);

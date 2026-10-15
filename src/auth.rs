@@ -38,7 +38,7 @@
 //! - 会话表在**内存**里：进程重启后所有会话失效（要重新登录），多实例之间不共享
 //! - 退避也只在内存里：重启即清零。够挡在线暴力猜，不挡离线攻击
 //! - 反代后面拿到的 `ConnectInfo` 是**反代的 IP**，按 IP 退避会退化成全局退避。
-//!   真放反代后面应该让反代自己做限流（见 README §13.5）
+//!   真放反代后面应该让反代自己做限流（见 docs/security.md §13.5）
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -317,7 +317,7 @@ pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trust_proxy: b
         // 往前找就等于把「客户端自己写的那一段」当成事实（那一整段都是可以伪造的）。
         // 代价：某些会追加空值的反代（例如 `X-Forwarded-For: 1.2.3.4, `）会让
         // 所有客户端都塌回同一个地址 —— 那是**安全方向**的退化，
-        // 而且 `/api/state` 里能看出 `blocked_ips` 的异常（见 README §18.2）。
+        // 而且 `/api/state` 里能看出 `blocked_ips` 的异常（见 docs/security.md §20.3）。
         if let Some(last) = v.rsplit(',').next() {
             if let Ok(ip) = last.trim().parse::<IpAddr>() {
                 return ip;
@@ -530,8 +530,10 @@ impl Auth {
             g.locked_until = Some(now + GLOBAL_LOCK);
             g.recent.clear();
             if tripped {
-                eprintln!(
-                    "[auth] 全局失败闸触发：{} 秒内失败 {} 次，暂停验凭据 {} 秒",
+                crate::log::plog!(
+                    "auth",
+                    warn,
+                    "全局失败闸触发：{} 秒内失败 {} 次，暂停验凭据 {} 秒",
                     GLOBAL_FAIL_WINDOW.as_secs(),
                     GLOBAL_FAIL_THRESHOLD,
                     GLOBAL_LOCK.as_secs()

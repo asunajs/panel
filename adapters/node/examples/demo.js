@@ -74,7 +74,7 @@ register_route('/echo', 'POST', (ctx) => ({ status: 200, body: `echo(${ctx.body.
 // ---- 出站请求（同步，与 QuickJS 宿主同语义）----
 //
 // 同步调用会阻塞事件循环，所以目标必须是**别的进程**：
-// 默认打本机面板（Rust 侧，8787）。同进程自调用会一直等到超时 —— 见 README 已知限制。
+// 默认打本机面板（Rust 侧，8787）。同进程自调用会一直等到超时 —— 见 docs/host-api.md §1.4 的已知限制。
 const env = globalThis.process && globalThis.process.env ? globalThis.process.env : {};
 const FETCH_TARGET = env.DEMO_FETCH_URL || 'http://127.0.0.1:8787/';
 register_cron('fetch-panel', '*/2 * * * * *', () => {

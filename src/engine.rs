@@ -352,6 +352,14 @@ pub enum EngineCmd {
         lang: String,
         code: String,
         input: String,
+        /// 试跑**属于哪条任务**（面板的任务编辑器会带上）。
+        ///
+        /// 为什么要有：试跑记录要能出现在那条任务的「记录」里 ——
+        /// 「我改了代码、试跑两次、然后保存」这个过程本来就是一串的。
+        /// 不带上下文（比如以后有个通用试跑框）就记到 `__test__` 名下，
+        /// 它会出现在全局列表里，但不会混进任何任务的记录。
+        plugin: Option<String>,
+        task: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<TestRunOut, String>>,
     },
     Shutdown,
@@ -496,17 +504,19 @@ impl JsEngine {
         let workers_n = workers::required_workers(&costs, workers_cfg);
         let plan = workers::plan(&costs, workers_n, &pin);
         if workers_n > workers_cfg {
-            println!(
-                "[engine] ENGINE_WORKERS={workers_cfg}，但有 {exclusive} 个插件声明了 worker_hint('exclusive') \
+            crate::log::plog!(
+                "engine",
+                info,
+                "ENGINE_WORKERS={workers_cfg}，但有 {exclusive} 个插件声明了 worker_hint('exclusive') \
                  ⇒ 自动抬到 {workers_n} 条执行线程"
             );
         }
-        println!("[engine] {workers_n} 条执行线程（ENGINE_WORKERS 可调）：");
+        crate::log::plog!("engine", info, "{workers_n} 条执行线程（ENGINE_WORKERS 可调）：");
         for note in &plan.notes {
-            println!("[engine]   {note}");
+            crate::log::plog!("engine", info, "  {note}");
         }
         if workers_n > 1 && plan.groups.iter().any(|g| g.is_empty()) {
-            println!("[engine]   （有 worker 暂时空着：插件数少于线程数，或都归到精度线程上了）");
+            crate::log::plog!("engine", info, "  （有 worker 暂时空着：插件数少于线程数，或都归到精度线程上了）");
         }
 
         let mut assign = workers::Assignment::new();
@@ -571,7 +581,7 @@ impl JsEngine {
         }
         if PYTHON_READY.load(Ordering::Relaxed) {
             python::finalize();
-            println!("[engine] PocketPy 已释放（协调者，唯一一次）");
+            crate::log::plog!("engine", info, "PocketPy 已释放（协调者，唯一一次）");
         }
     }
 }
@@ -811,6 +821,27 @@ fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, Strin
     Ok(file_url(&canon))
 }
 
+/// 哪些 Node 内置模块在面板里有等价实现。
+///
+/// 名单刻意很短：每加一个就要在 `src/jshost.rs` 里真实现一遍，**假实现比不实现更坏**
+/// ——插件在里面跑得通、出去跑不通（或者反过来）都难查。目前是路径与文件系统这一对，
+/// 因为它们是「把状态写下来」这件事的最小集合。
+pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
+    match name {
+        "node:path" | "path" => Some("node:path"),
+        "node:fs" | "fs" => Some("node:fs"),
+        _ => None,
+    }
+}
+
+/// 裸标识符解析失败时的提示。`path` / `fs` 单独说，因为它们是**有**等价实现的，
+/// 只是写法不对（比如 `require('fs/promises')`）—— 那种情况要指路，不是给一句
+/// 「没有 node_modules」让人去翻半天。
+pub(crate) const BUILTIN_HINT: &str =
+    "面板里只内置了 `host-api`（宿主 API）、`node:path` 与 `node:fs`（限定在插件自己\
+的目录内）。`fs/promises` / `node:os` / 第三方包都没有；要引自己的文件请用相对说明符\
+（如 './lib/core.js'）";
+
 /// 模块解析器：`host-api` 内置；相对说明符按 URL 语义解析成 `file://` URL。
 struct HostApiResolver {
     root: PathBuf,
@@ -833,13 +864,19 @@ impl Resolver for HostApiResolver {
         if name == "host-api" {
             return Ok(name.to_string());
         }
+        // Node 的内置模块：只放这两个 —— 它们是**跨运行时**写法里最常出现的一对
+        // （`fs.writeFileSync(path.join(dir, 'x.json'), s)`）。裸名与 `node:` 前缀
+        // 都收：Node 两种都认，插件里两种写法都有。
+        if let Some(builtin) = builtin_node_module(name) {
+            return Ok(builtin.to_string());
+        }
         if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
             // 裸标识符（`lodash` 之类）没有 node_modules 可找 —— 说清楚，
             // 别让插件作者以为是拼写问题。
             return Err(rquickjs::Error::new_resolving_message(
                 base,
                 name,
-                "只内置了 `host-api`；要引自己的文件请用相对说明符（如 './lib/core.js'）",
+                BUILTIN_HINT,
             ));
         }
         resolve_relative(base, name, &self.root)
@@ -857,6 +894,10 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
     if spec == "host-api" {
         // 交给 JS 侧直接返回 globalThis.host_api —— 这里给个标记即可
         return "{\"ok\":true,\"builtin\":true}".to_string();
+    }
+    if let Some(m) = builtin_node_module(spec) {
+        // 标记里带上模块名，JS 侧据此选择返回哪个门面对象（见 BOOTSTRAP 的 require）
+        return format!("{{\"ok\":true,\"builtin\":true,\"module\":\"{m}\"}}");
     }
     if spec.starts_with("node:") || spec.starts_with("fs") && !spec.starts_with("./") && !spec.starts_with("../") {
         // 裸标识符 / node: 内置 —— 没有 node_modules 可找
@@ -951,6 +992,11 @@ impl Loader for HostApiLoader {
         if name == "host-api" {
             return Module::declare(ctx.clone(), name, jshost::HOST_API_MODULE);
         }
+        // 内置模块的源码**每次现生成**（体 + 导出清单），不在别处再存一份 ——
+        // 两份清单迟早会不一致，而那种不一致只在「用了那个名字」时才炸。
+        if let Some(src) = jshost::node_module_for_import(name) {
+            return Module::declare(ctx.clone(), name, src.as_str());
+        }
 
         let path_part = name.strip_prefix("file://").ok_or_else(|| {
             rquickjs::Error::new_loading_message(
@@ -1037,7 +1083,7 @@ fn worker_main(
     let rt = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("[engine] 创建 QuickJS Runtime 失败: {e}");
+            crate::log::plog!("engine", error, "创建 QuickJS Runtime 失败: {e}");
             return;
         }
     };
@@ -1053,8 +1099,10 @@ fn worker_main(
     rt.set_interrupt_handler(Some(wd.handler()));
     let budget = Duration::from_millis(health.budget_ms);
 
-    println!(
-        "[engine:{idx}] QuickJS Runtime 就绪（内存上限 64 MiB，单次执行预算 {}ms）",
+    crate::log::plog!(
+        &format!("engine:{idx}"),
+        info,
+        "QuickJS Runtime 就绪（内存上限 64 MiB，单次执行预算 {}ms）",
         health.budget_ms
     );
 
@@ -1068,14 +1116,13 @@ fn worker_main(
     // （重载要动 plugins/sched/rt/registry，那套东西都在扫描路径上）。
     let forced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut pending: Vec<RawTaskDef> = Vec::new();
-    let mut next_vm: i32 = 1;
 
     // 开机加载也要认「面板停用」——这条路径**不走** `sync_plugins`，漏了这里
     // 就会出现「停用的插件重启后照样跑」（冒烟里就是这么红的）。
     let disabled_at_boot = match db::list_disabled_plugins(&db) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[engine:{idx}] 读取停用插件失败: {e}");
+            crate::log::plog!(&format!("engine:{idx}"), warn, "读取停用插件失败: {e}");
             Vec::new()
         }
     };
@@ -1099,7 +1146,7 @@ fn worker_main(
             continue;
         }
         let (lp, mut declared) =
-            load_one(&rt, file, &logs, &host, &wd, budget, &mut next_vm);
+            load_one(&rt, file, &logs, &host, &wd, budget);
         pending.append(&mut declared);
         plugins.push(lp);
     }
@@ -1107,21 +1154,30 @@ fn worker_main(
     // 「我负责的插件」—— 从共享归属表取（而不是从已加载的 plugins），
     // 这样被删掉的文件也还在名单里，sync_registry 才能把它的条目清掉。
     let owned: Vec<String> = assign.lock().unwrap().names_of(idx);
-    println!(
-        "[engine:{idx}] 负责 {} 个插件（全局共 {} 个文件）",
+    crate::log::plog!(
+        &format!("engine:{idx}"),
+        info,
+        "负责 {} 个插件（全局共 {} 个文件）",
         owned.len(),
         assign.lock().unwrap().len()
     );
 
-    if plugins.is_empty() {
-        hostapi::push_log(
-            &logs,
+    // 「目录里一个插件都没有」只能看**全局**文件数，不能看 `plugins`。
+    //
+    // `plugins` 是**本 worker 分到的子集**（多 worker 下按文件哈希分派）。只要目录里
+    // 的文件数 >= 1，就必然有 worker 一个都没分到 —— 它会谎报「目录是空的」。
+    // 实测就是这么暴露的：目录里有一个插件、两个 worker，日志里凭空多出一条
+    // 「没有找到任何 .js / .py 插件」。再加 `idx == 0` 让这条只报一次（N 个 worker
+    // 同时满足条件，不挡就报 N 次）。
+    //
+    // ⚠ 也走**面板通道**：`kernel` 不是插件名。写进插件通道会让日志视图的插件下拉里
+    // 冒出一个不存在的插件，JSONL 里也会混进面板级的行（见 web.rs 里 auth 那条）。
+    if idx == 0 && assign.lock().unwrap().len() == 0 {
+        crate::log::plog!(
             "kernel",
-            "warn",
-            &format!(
-                "插件目录 {} 里没有找到任何 .js / .py 插件",
-                plugins_dir.display()
-            ),
+            warn,
+            "插件目录 {} 里没有找到任何 .js / .py 插件",
+            plugins_dir.display()
         );
     }
     sync_registry(&registry, &plugins, &owned.clone());
@@ -1141,13 +1197,14 @@ fn worker_main(
     let owned: Vec<String> = plugins.iter().map(|p| p.name.clone()).collect();
     match db::sync_jobs(&db, &specs, &fmt_secs(boot_at), Some(&owned)) {
         Ok(0) => {}
-        Ok(n) => hostapi::push_log(
-            &logs,
+        // 同上：这是面板层面的事（代码声明的任务覆盖了面板上的同名任务），
+        // 不属于任何插件 —— 走面板通道，别伪装成一个叫 kernel 的插件。
+        Ok(n) => crate::log::plog!(
             "kernel",
-            "warn",
-            &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
+            warn,
+            "有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"
         ),
-        Err(e) => eprintln!("[engine] 同步 jobs 表失败: {e}"),
+        Err(e) => crate::log::plog!("engine", error, "同步 jobs 表失败: {e}"),
     }
 
     // 面板创建的任务不在插件代码里，`install_tasks` 装不到它们，得单独从库里读回来。
@@ -1179,7 +1236,7 @@ fn worker_main(
         .map(|d| (d.plugin.clone(), d.name.clone()))
         .collect();
     if let Err(e) = db::prune_tombstones(&db, &owned, &declared) {
-        eprintln!("[engine] 清理过期墓碑失败: {e}");
+        crate::log::plog!("engine", error, "清理过期墓碑失败: {e}");
     }
     for t in sched.tasks() {
         hostapi::push_log(
@@ -1194,8 +1251,10 @@ fn worker_main(
             ),
         );
     }
-    println!(
-        "[engine] 已加载 {} 个插件、{} 个调度任务（熔断阈值 {} 次，首次冷却 {}ms）",
+    crate::log::plog!(
+        "engine",
+        info,
+        "已加载 {} 个插件、{} 个调度任务（熔断阈值 {} 次，首次冷却 {}ms）",
         plugins.len(),
         sched.len(),
         trip_cfg.threshold,
@@ -1389,13 +1448,52 @@ fn worker_main(
                 lang,
                 code,
                 input,
+                plugin,
+                task,
                 reply,
             }) => {
-                let out = test_run(&rt, &host, &logs, &wd, budget, &mut next_vm, &lang, &code, &input);
+                let run_id = new_run_id();
+                let started = Local::now();
+                let out = test_run(&rt, &host, &logs, &wd, budget, &lang, &code, &input);
+
+                // 试跑也进运行记录（`kind = 'test'`），但**输出存在记录自己身上**：
+                // 试跑的输出被捕获缓冲收走了，不进日志库（不打终端、不进环形缓冲、
+                // 不写文件）—— 对试跑来说，`runs.output` 是它唯一的留存处。
+                //
+                // 所以试跑记录**没有**「看日志」入口：那是另一回事（见 docs/run-history.md §24.6）。
+                if let Ok(o) = &out {
+                    let mut output = o.stdout.clone();
+                    if !o.stderr.is_empty() {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        // 标出来源：混在一起读的人分不清哪句是 print、哪句是报错
+                        output.push_str("--- stderr ---\n");
+                        output.push_str(&o.stderr);
+                    }
+                    let (ok, err) = match &o.error {
+                        Some(e) => (false, Some(e.as_str())),
+                        None => (true, None),
+                    };
+                    if let Err(e) = db::insert_test_run(
+                        &db,
+                        &run_id,
+                        plugin.as_deref().unwrap_or(TEST_RUN_PLUGIN),
+                        task.as_deref().unwrap_or(""),
+                        &started.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        &Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                        ok,
+                        err,
+                        o.ms as i64,
+                        &output,
+                    ) {
+                        crate::log::plog!("engine", warn, "写试跑记录失败（不影响试跑）: {e}");
+                    }
+                }
                 let _ = reply.send(out);
             }
             Ok(EngineCmd::Shutdown) => {
-                println!("[engine] 收到关闭指令");
+                crate::log::plog!("engine", info, "收到关闭指令");
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1426,14 +1524,16 @@ fn worker_main(
                         let finest = workers::finest_interval_ms(&src);
                         let hint = workers::WorkerHint::scan(&src);
                         let (w, warn) = a.claim_with(f, &name, finest, hint, workers_n);
-                        println!(
-                            "[engine:0] 新插件 `{name}` 归到 worker {w}（运行期认领，最细 {:?}ms）",
+                        crate::log::plog!(
+                            &format!("engine:{idx}"),
+                            info,
+                            "新插件 `{name}` 归到 worker {w}（运行期认领，最细 {:?}ms）",
                             finest
                         );
                         // 运行期出现的独占插件拿不到独占槽位（线程是启动时建的）——
                         // 不能装作它已经独占，所以把警告打出来。
                         if let Some(w) = warn {
-                            println!("[engine:0] ⚠️ {w}");
+                            crate::log::plog!(&format!("engine:{idx}"), info, "⚠️ {w}");
                         }
                     }
                 }
@@ -1463,7 +1563,6 @@ fn worker_main(
                 &host,
                 &wd,
                 budget,
-                &mut next_vm,
                 &registry,
                 &my_files,
                 &mine,
@@ -1473,7 +1572,7 @@ fn worker_main(
     }
 
     // ---------- 收尾：解释器必须按序析构 ----------
-    println!("[engine:{idx}] 正在释放插件解释器...");
+    crate::log::plog!(&format!("engine:{idx}"), info, "正在释放插件解释器...");
     drop(plugins);
     // **这里绝对不能调 `python::finalize()`**。
     //
@@ -1484,9 +1583,9 @@ fn worker_main(
     //
     // 正确做法：各 worker 只丢掉自己的解释器，由协调者在**所有线程 join 之后**
     // 调一次 finalize（见 `JsEngine::shutdown`）。
-    println!("[engine:{idx}] 正在释放 QuickJS Runtime...");
+    crate::log::plog!(&format!("engine:{idx}"), info, "正在释放 QuickJS Runtime...");
     drop(rt);
-    println!("[engine:{idx}] 执行线程已退出");
+    crate::log::plog!(&format!("engine:{idx}"), info, "执行线程已退出");
 }
 
 /// 把（重新）加载出来的任务声明装进调度器，返回给 `jobs` 表用的 spec 列表。
@@ -1555,7 +1654,7 @@ fn restore_paused(
     let list = match db::list_paused_jobs(db) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[engine] 读取暂停状态失败: {e}");
+            crate::log::plog!("engine", warn, "读取暂停状态失败: {e}");
             return;
         }
     };
@@ -1593,7 +1692,7 @@ fn apply_overrides(
     let rows = match db::list_job_overrides(db, Some(owned)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[engine] 读取任务覆盖失败: {e}");
+            crate::log::plog!("engine", warn, "读取任务覆盖失败: {e}");
             return;
         }
     };
@@ -1631,7 +1730,7 @@ fn seed_counters(sched: &mut Scheduler, db: &Db, only_plugin: Option<&str>) {
     let rows = match db::list_job_counters(db, only_plugin) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[engine] 读取任务计数失败: {e}");
+            crate::log::plog!("engine", warn, "读取任务计数失败: {e}");
             return;
         }
     };
@@ -1668,7 +1767,7 @@ fn reinstall_panel_jobs(
     let rows = match db::list_panel_jobs(db, None) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[engine] 读取面板任务失败: {e}");
+            crate::log::plog!("engine", warn, "读取面板任务失败: {e}");
             return;
         }
     };
@@ -1958,7 +2057,7 @@ fn drop_deleted(
     let rows = match db::list_deleted_jobs(db, Some(owned)) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[engine] 读取已删除任务失败: {e}");
+            crate::log::plog!("engine", warn, "读取已删除任务失败: {e}");
             return;
         }
     };
@@ -2185,6 +2284,20 @@ fn cleanup_jobs(
     Ok(out)
 }
 
+/// 生成一个**运行 id**：`20261015-213045-1a2b3c`。
+///
+/// 规则（三条都是被需求逼出来的）：
+/// - **URL 安全**：它要进 `#/logs/run/{id}`，所以只用 `[0-9a-f-]`；
+/// - **同一进程内绝不重复**：靠一个自增计数器，不靠随机数（随机数只是"大概率"）；
+/// - **跨进程也能排**：时间前缀，重启后看记录还是按时间顺序。
+///
+/// 时间 + 计数器：同一秒内的多次运行靠计数器分开，不同进程靠时间分开。
+fn new_run_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{:04x}", chrono::Local::now().format("%Y%m%d-%H%M%S"), n & 0xffff)
+}
+
 /// 触发所有到期任务，并把结果写回调度器与 SQLite。
 fn fire_due(
     sched: &mut Scheduler,
@@ -2295,14 +2408,52 @@ fn run_one(
         .map(Duration::from_millis)
         .unwrap_or(budget);
 
-    let result = match find_plugin(plugins, &plugin) {
-        Some(p) => dispatch_task(p, &name, &payload, wd, task_budget),
+    // ---- 运行记录（面板层次）----
+    //
+    // 先落一条"开始了"的记录，再执行；执行完补上结果。中间崩了/被杀了，记录还在
+    // （下次启动 `close_dangling_runs` 会把没收尾的收掉）—— 「跑过但没结果」
+    // 本身就是要能看见的信息。
+    //
+    // 同时用 `with_run_id` 圈住整段执行：这期间插件打的每一行日志都带上这个 id，
+    // 于是「记录 → 那一次的日志」就是把 id 交给日志页过滤（见 docs/run-history.md §24）。
+    let run_id = new_run_id();
+    let started_at = Local::now();
+    let kind = if manual { "manual" } else { "cron" };
+    if let Err(e) = db::insert_run(
+        db,
+        &run_id,
+        &plugin,
+        &name,
+        kind,
+        &started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+    ) {
+        // 记录写不进去**不能挡住执行** —— 任务是正经活，记录只是账本
+        crate::log::plog!("engine", warn, "写运行记录失败（不影响执行）: {e}");
+    }
+
+    let result = crate::log::with_run_id(&run_id, || match find_plugin(plugins, &plugin) {
+        Some(p) => dispatch_task(p, &name, &payload, wd, task_budget, logs),
         None => Err(format!("任务所属插件 `{plugin}` 不存在")),
-    };
+    });
+
+    if let Err(e) = db::finish_run(
+        db,
+        &run_id,
+        result.is_ok(),
+        result.as_ref().err().map(|s| s.as_str()),
+        (Local::now() - started_at).num_milliseconds(),
+        &Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    ) {
+        crate::log::plog!("engine", warn, "收尾运行记录失败（不影响执行）: {e}");
+    }
 
     // 日志策略：毫秒级任务不能每次触发都刷屏，只在首次触发与失败时记录；
     // 手动触发是用户主动点的，成功失败都要说清楚。
-    match &result {
+    //
+    // 这几条也包在 `with_run_id` 里：它们是**面板对这一次运行的结论**
+    // （成功/失败/首次触发），按 run 过滤日志时必须跟着一起出来 ——
+    // 尤其是失败那条，它是点进日志的人最先要找的东西。
+    crate::log::with_run_id(&run_id, || match &result {
         Err(e) => hostapi::push_log(
             logs,
             &plugin,
@@ -2325,7 +2476,7 @@ fn run_one(
             &format!("任务 `{name}` 首次触发（{expr}），调度延迟 {late_ms}ms"),
         ),
         Ok(()) => {}
-    }
+    });
 
     let err = result.clone().err();
     let was_tripped = sched.tasks()[idx].tripped;
@@ -2370,10 +2521,32 @@ fn run_one(
         t.tripped,
         &fmt_secs(now),
     ) {
-        eprintln!("[engine] 更新 job 状态失败: {e}");
+        crate::log::plog!("engine", error, "更新 job 状态失败: {e}");
     }
 
     result
+}
+
+/// 把 Python 插件 `print` 出来的文本搬进它自己的日志。
+///
+/// `print` 走的是 pocketpy 的 print 回调 → 一块**线程局部的独立缓冲区**
+/// （`python::PRINT_BUF`），不是 `host_api.log`，所以它不会自己进日志。
+/// 每次调用完 Python 插件代码都要 drain 一次。
+///
+/// ⚠ 为什么要修：旧代码只在「测试运行」那条路上 `take_print_buffer()`，
+/// 于是**正常调度**下的 `print` 既进不了面板日志，又会一直攒在缓冲区里
+/// （只有 64KB 兜底在截断）—— 插件的调试输出等于石沉大海。
+///
+/// ⚠ 这个缓冲区是**引擎线程共用**的，所以 drain 必须紧跟在「刚跑完那个 Python 插件」
+/// 之后，并且只对 Python 插件调用 —— 否则会把上一个插件的输出算到下一个头上。
+fn drain_py_print(logs: &SharedLogs, plugin: &str) {
+    let buf = python::take_print_buffer();
+    for line in buf.lines() {
+        // print 出来的空行不用变成日志（不然手动对齐输出会刷一堆空行）
+        if !line.trim().is_empty() {
+            hostapi::push_log(logs, plugin, "info", line);
+        }
+    }
 }
 
 /// 在任务所属插件的解释器里调用它的 handler。
@@ -2386,6 +2559,7 @@ fn dispatch_task(
     payload_json: &str,
     wd: &Watchdog,
     budget: Duration,
+    logs: &SharedLogs,
 ) -> Result<(), String> {
     match plugin.runtime.as_ref() {
         None => Err("插件加载失败，没有可用的解释器实例".to_string()),
@@ -2414,6 +2588,8 @@ fn dispatch_task(
             python::budget_begin(budget.as_millis() as u64);
             let r = vm.call_str("__pp_dispatch", &[name, payload_json]);
             python::budget_end();
+            // 不管成功失败都要把 print 收走：失败前打的那几行往往才是线索
+            drain_py_print(logs, &plugin.name);
             match r {
                 Ok(msg) if msg.is_empty() => Ok(()),
                 Ok(msg) => Err(explain_python_error(&msg, budget)),
@@ -2556,6 +2732,12 @@ impl LoadedPlugin {
             None => return,
         };
 
+        // Python 的 print 走独立缓冲区：调用完必须取走并记日志。
+        // 只对 Python 插件 drain —— 那块缓冲区是引擎线程共用的（见 drain_py_print）。
+        if matches!(self.runtime.as_ref(), Some(PluginRuntime::Py(_))) {
+            drain_py_print(logs, &name);
+        }
+
         match outcome {
             TickOutcome::Ok => {
                 self.ticks += 1;
@@ -2612,7 +2794,6 @@ fn load_one(
     host: &Arc<HostState>,
     wd: &Watchdog,
     budget: Duration,
-    next_vm: &mut i32,
 ) -> (LoadedPlugin, Vec<RawTaskDef>) {
     let name = file
         .file_stem()
@@ -2652,7 +2833,7 @@ fn load_one(
     let nav: Arc<Mutex<Option<hostapi::NavDef>>> = Arc::new(Mutex::new(None));
 
     let (runtime, has_on_tick, err) = if is_python(file) {
-        load_python(&source, &file_str, &name, host, next_vm)
+        load_python(&source, &file_str, &name, host)
     } else {
         load_js(
             rt,
@@ -2668,8 +2849,13 @@ fn load_one(
         )
     };
 
-    let declared = if is_python(file) {
-        // Python：从 HostState 里取回该 VM 声明的任务
+    // Python 插件**加载期**的 print 也要收进日志：插件经常在模块顶层
+    // print 一句「我起来了 / 我读到几行配置」——那正是最需要看的东西。
+    if is_python(file) {
+        drain_py_print(logs, &name);
+    }
+
+    let declared = if is_python(file) {        // Python：从 HostState 里取回该 VM 声明的任务
         runtime
             .as_ref()
             .and_then(|r| match r {
@@ -2824,7 +3010,7 @@ fn load_js(
 ///
 /// 为什么不靠「先当脚本 eval，失败了再当模块试」：那样要靠错误信息区分
 /// 「语法错」和「本来该走模块」，还要记得 `ctx.catch()` 清异常，容易出错。
-/// 直接看首字符更简单，而且行为对用户是可预期的（README 里写清楚了）。
+/// 直接看首字符更简单，而且行为对用户是可预期的（docs/plugin-api.md §4 里写清楚了）。
 fn looks_like_module(source: &str) -> bool {
     source.lines().any(|l| {
         let l = l.trim_start();
@@ -2871,7 +3057,7 @@ fn eval_as_module(ctx: &Ctx, source: &str, file_str: &str) -> Result<(), String>
 ///
 /// 为什么不能只在启动时按「插件目录里有没有 `.py`」判断一次：插件目录现在是**活的**
 /// —— 运行中丢进来一个 `.py` 也要能加载。原来那条路径会在**未初始化**的解释器上
-/// 执行 `py_switchvm`，现象是引擎线程栈溢出、整个进程 abort（实测，见 README 第十一轮）。
+/// 执行 `py_switchvm`，现象是引擎线程栈溢出、整个进程 abort（实测，见 docs/changelog/11-live-plugin-dir.md）。
 /// 所以初始化点必须放在「真的要用 Python」的那一刻。
 fn ensure_python_ready(host: &Arc<HostState>) {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -2879,8 +3065,10 @@ fn ensure_python_ready(host: &Arc<HostState>) {
         python::init();
         pyhost::install_state(host.clone());
         PYTHON_READY.store(true, Ordering::Relaxed);
-        println!(
-            "[engine] PocketPy {} 就绪（首次用到 Python 插件时才初始化）",
+        crate::log::plog!(
+            "engine",
+            info,
+            "PocketPy {} 就绪（首次用到 Python 插件时才初始化）",
             python::version()
         );
     });
@@ -2890,16 +3078,32 @@ fn ensure_python_ready(host: &Arc<HostState>) {
 /// 没初始化过就调 `py_finalize` 是未定义行为，所以不能只看「插件目录里有没有 .py」。
 static PYTHON_READY: AtomicBool = AtomicBool::new(false);
 
+/// 取一个**进程内唯一**的 pocketpy VM 索引（0 号留给宿主）。
+///
+/// **为什么必须是进程级**：这个索引原来由每个 worker 各自的 `next_vm` 计数器发放
+/// （语义是"最小的空闲下标"），而那等于假设「只有一个 worker」。实测（2026-10-15）
+/// 两条线程各发各的，于是两个插件拿到同一个索引、`py_switchvm(1)` 在两边指向
+/// **同一个 VM**，后果有两层：
+///
+/// 1. 日志归属错乱 —— `[py_one] py_four 加载`（py_four 的日志记到 py_one 头上）；
+/// 2. 更严重的是**两个插件共用一个解释器实例**，globals 串在一起、隔离直接没了。
+///
+/// `HostState.vms` 本来就是进程级的「VM 索引 → 插件名」表，卸载时会 `unbind_vm`，
+/// 所以直接在里面找空槽既唯一、又天然回收（顺带修掉"热重载若干次后 VM 用完"）。
+fn free_vm_index(host: &HostState) -> Option<i32> {
+    let guard = host.vms.lock().unwrap_or_else(|e| e.into_inner());
+    (1..python::MAX_VM).find(|i| !guard.contains_key(i))
+}
+
 /// PocketPy 插件加载：分一个 VM、建 host_api 模块、执行源码、探测 on_tick。
 fn load_python(
     source: &str,
     file_str: &str,
     name: &str,
     host: &Arc<HostState>,
-    next_vm: &mut i32,
 ) -> (Option<PluginRuntime>, bool, Option<String>) {
     ensure_python_ready(host);
-    if *next_vm >= python::MAX_VM {
+    let Some(index) = free_vm_index(host) else {
         return (
             None,
             false,
@@ -2908,9 +3112,7 @@ fn load_python(
                 MAX_PY_PLUGINS
             )),
         );
-    }
-    let index = *next_vm;
-    *next_vm += 1;
+    };
 
     host.bind_vm(index, name);
     let mut vm = PyVm::attach(index);
@@ -3109,13 +3311,12 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
 ///
 /// `jobs` 表的行不在这里删 —— 调用方随后会用 `sync_jobs(all_specs(sched))` 收敛，
 /// 那一步天然会把「已经不在调度器里」的 `source='plugin'` 行删掉。
-/// 面板创建的任务（`source='panel'`）**保留**：按 §12.6 的约定走「处理函数找不到」那条路，
+/// 面板创建的任务（`source='panel'`）**保留**：按 docs/changelog/09-jobs-authority.md §12.6 的约定走「处理函数找不到」那条路，
 /// 显示为 `error` 而不是静默消失。
 fn unload_plugin(
     plugins: &mut Vec<LoadedPlugin>,
     sched: &mut Scheduler,
     host: &Arc<HostState>,
-    next_vm: &mut i32,
     file: &Path,
 ) -> Option<(String, usize)> {
     // ⚠️ 按**文件**定位而不是按名字：同名冲突时列表里会有两条同名记录
@@ -3136,10 +3337,7 @@ fn unload_plugin(
     let mut old = plugins.remove(pos);
     if let Some(PluginRuntime::Py(_)) = old.runtime.as_ref() {
         if let Some(i) = vm_index {
-            // 让下次加载复用这个 VM 索引，而不是每卸载一次就吃掉一个
-            if i < *next_vm {
-                *next_vm = i;
-            }
+            // 索引不需要"归还"：`unbind_vm` 一调用，`free_vm_index` 就能再发出去
             host.unbind_vm(i);
         }
     }
@@ -3168,7 +3366,6 @@ fn sync_plugins(
     host: &Arc<HostState>,
     wd: &Watchdog,
     budget: Duration,
-    next_vm: &mut i32,
     registry: &Registry,
     // 本次要同步的文件（只包含**本 worker 负责的**）
     my_files: &[PathBuf],
@@ -3187,7 +3384,7 @@ fn sync_plugins(
     let disabled: Vec<String> = match db::list_disabled_plugins(db) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[engine] 读取停用插件失败: {e}");
+            crate::log::plog!("engine", warn, "读取停用插件失败: {e}");
             Vec::new()
         }
     };
@@ -3200,7 +3397,7 @@ fn sync_plugins(
         .map(|p| p.file.clone())
         .collect();
     for file in gone {
-        if let Some((name, removed)) = unload_plugin(plugins, sched, host, next_vm, &file) {
+        if let Some((name, removed)) = unload_plugin(plugins, sched, host, &file) {
             touched = true;
             hostapi::push_log(
                 logs,
@@ -3218,7 +3415,7 @@ fn sync_plugins(
         .map(|p| p.file.clone())
         .collect();
     for file in muted {
-        if let Some((name, removed)) = unload_plugin(plugins, sched, host, next_vm, &file) {
+        if let Some((name, removed)) = unload_plugin(plugins, sched, host, &file) {
             touched = true;
             hostapi::push_log(
                 logs,
@@ -3255,7 +3452,7 @@ fn sync_plugins(
             continue;
         }
 
-        let (lp, pending) = load_one(rt, file, logs, host, wd, budget, next_vm);
+        let (lp, pending) = load_one(rt, file, logs, host, wd, budget);
         let failed = lp.error.is_some();
         install_tasks(sched, &pending, logs, Local::now(), db);
         plugins.push(lp);
@@ -3307,7 +3504,7 @@ fn sync_plugins(
     }
     for file in modified {
         reload_plugin(
-            rt, plugins, sched, &file, logs, db, host, wd, budget, next_vm, registry, owned,
+            rt, plugins, sched, &file, logs, db, host, wd, budget, registry, owned,
         );
         touched = true;
     }
@@ -3318,13 +3515,13 @@ fn sync_plugins(
         // 被删掉的文件已经不在 plugins 里了，现算会把它的任务从收敛范围里漏掉。
         match db::sync_jobs(db, &all_specs(sched), &fmt_secs(Local::now()), Some(owned)) {
             Ok(0) => {}
-            Ok(n) => hostapi::push_log(
-                logs,
+            // 同上（热扫描这条路也有一份）：面板层面的事，走面板通道
+            Ok(n) => crate::log::plog!(
                 "kernel",
-                "warn",
-                &format!("有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"),
+                warn,
+                "有 {n} 条面板任务与插件代码声明的任务重名，已按「代码优先」重建"
             ),
-            Err(e) => eprintln!("[engine] 同步 jobs 表失败: {e}"),
+            Err(e) => crate::log::plog!("engine", error, "同步 jobs 表失败: {e}"),
         }
         sync_registry(registry, plugins, owned);
     }
@@ -3344,7 +3541,6 @@ fn reload_plugin(
     host: &Arc<HostState>,
     wd: &Watchdog,
     budget: Duration,
-    next_vm: &mut i32,
     registry: &Registry,
     owned: &[String],
 ) {
@@ -3367,10 +3563,7 @@ fn reload_plugin(
     let mut old = plugins.remove(pos);
     if let Some(PluginRuntime::Py(_)) = old.runtime.as_ref() {
         if let Some(i) = vm_index {
-            // 让下次加载复用这个 VM 索引，而不是每热更新一次就吃掉一个
-            if i < *next_vm {
-                *next_vm = i;
-            }
+            // 同上：`unbind_vm` 就是"还回去"
             host.unbind_vm(i);
         }
     }
@@ -3388,7 +3581,7 @@ fn reload_plugin(
         return;
     }
 
-    let (lp, pending) = load_one(rt, file, logs, host, wd, budget, next_vm);
+    let (lp, pending) = load_one(rt, file, logs, host, wd, budget);
     let load_failed = lp.error.is_some();
 
     install_tasks(sched, &pending, logs, Local::now(), db);
@@ -3590,22 +3783,20 @@ fn run_scratch_js(
 /// 在一次性 PocketPy VM 里跑一段 Python。
 fn run_scratch_py(
     host: &Arc<HostState>,
-    next_vm: &mut i32,
     budget: Duration,
     code: &str,
     input: &str,
 ) -> Result<(), String> {
     ensure_python_ready(host);
 
-    // 借一个**空闲**槽位：`next_vm` 始终指向最小的空闲下标（卸载插件时会回退），
-    // 用完立刻 unbind 还回去，所以不占插件的位置、也不动 next_vm 本身。
-    if *next_vm >= python::MAX_VM {
+    // 借一个**空闲**槽位（进程级找空槽），用完立刻 unbind 还回去，
+    // 所以不占插件的位置。
+    let Some(index) = free_vm_index(host) else {
         return Err(format!(
             "Python 测试运行要借一个空闲的 pocketpy VM，但 {MAX_PY_PLUGINS} 个槽位都被插件占满了。\
              JS 测试运行不受影响 —— QuickJS 的 Context 是每次新建的。"
         ));
-    }
-    let index = *next_vm;
+    };
 
     host.bind_vm(index, TEST_RUN_PLUGIN);
     let mut vm = PyVm::attach(index);
@@ -3636,7 +3827,6 @@ fn test_run(
     logs: &SharedLogs,
     wd: &Watchdog,
     budget: Duration,
-    next_vm: &mut i32,
     lang: &str,
     code: &str,
     input: &str,
@@ -3651,13 +3841,14 @@ fn test_run(
 
     let (result, lines) = hostapi::capture_scope(|| {
         if lang == "py" {
-            run_scratch_py(host, next_vm, budget, code, input)
+            run_scratch_py(host, budget, code, input)
         } else {
             run_scratch_js(rt, host, logs, wd, budget, code, input)
         }
     });
 
-    // info → stdout，warn/error → stderr。跟 Node 的 console 语义对齐，
+    // info 档（含 start/success/fail 这三个语义 type）→ stdout，
+    // warn 及以上 → stderr。跟 Node 的 console 语义对齐，
     // 面板就能用同一套配色显示两种宿主的输出。
     let mut stdout = if lang == "py" {
         python::take_print_buffer()
@@ -3666,7 +3857,7 @@ fn test_run(
     };
     let mut stderr = String::new();
     for l in &lines {
-        let dst = if l.level == "info" {
+        let dst = if l.level() == crate::log::Level::Info {
             &mut stdout
         } else {
             &mut stderr
@@ -3955,11 +4146,13 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("pp-ws-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let db = crate::db::open(&tmp.join("ws-test.db")).unwrap();
-        let logs: crate::hostapi::SharedLogs = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        // 不落盘的日志中枢：单测不写文件（`None`），只留终端 + 内存环
+        let logs: crate::hostapi::SharedLogs = crate::log::Hub::new(None);
         let host = HostState::new(
             logs.clone(),
             db,
             tmp.clone(),
+            tmp.join("plugin-data"),
             crate::wsclient::Registry::new(rt.handle().clone()),
         );
 

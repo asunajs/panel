@@ -751,3 +751,178 @@
   line-height: 1.6;
   margin-bottom: var(--sp-3);
 }
+
+/* ---------------------------------------------------------------- 日志页 */
+
+/* 工具条：一行里塞下通道 / 级别 / 插件 / 关键字 / 贴底，窄屏自动折行 */
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.log-toolbar .tool {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.log-toolbar input[type='text'],
+.log-toolbar input:not([type]) {
+  width: 160px;
+}
+
+.log-levels {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* 小标签（复选框 + 文字）。刻意不复用 .btn：它是交互按钮的观感，
+   而这些是「开关」，两者的视觉语言要分开。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.chip input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* 完整的日志页：终端就该是高的 —— Dashboard 那块是摘要，这里是主视图 */
+.console-tall {
+  min-height: 55vh;
+  max-height: 68vh;
+}
+
+/* 日志行。八档各一色（见 log/mod.rs 的 Type）。 */
+.logline {
+  display: block;
+}
+
+/* ⚠ 必须写在 .logline 之后：`.logline { display: block }` 会盖掉浏览器默认的
+   `[hidden] { display: none }`，于是「过滤掉的行」仍然占位显示 —— 过滤看起来
+   完全没生效。这个坑静态检查抓不到，只能靠这条规则。 */
+.logline[hidden] {
+  display: none;
+}
+
+.logline .log-lv {
+  font-weight: 600;
+}
+
+.logline.t-debug {
+  color: var(--text-mute);
+}
+.logline.t-info {
+  color: var(--text);
+}
+.logline.t-start {
+  color: var(--accent);
+}
+.logline.t-success {
+  color: var(--success);
+}
+.logline.t-fail {
+  color: var(--error);
+  opacity: 0.85;
+}
+.logline.t-warn {
+  color: var(--warning);
+}
+.logline.t-error {
+  color: var(--error);
+}
+.logline.t-fatal {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* 关键字高亮。用 mark 的语义标签，但配色跟着主题走 */
+.logline mark {
+  background: var(--warning-soft);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Dashboard 摘要里「成功」那一档（.console-line 的既有配色里没有它） */
+.console-line.successline {
+  color: var(--success);
+}
+
+/* 日志行里的级别标记：固定宽度，让同一列的不同级别能对齐着看 */
+.console-line .log-lv {
+  display: inline-block;
+  min-width: 9ch;
+}
+
+/* ---- 运行记录横幅（日志页顶部）----
+ *
+ * 「日志是日志，运行记录是运行记录」：横幅里的东西来自面板的 runs 表，
+ * 日志只是被它关联出来的那一次执行的输出。所以样式上也要能一眼分开 ——
+ * 横幅用卡片底、日志区仍是终端感的黑底。
+ */
+.run-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+}
+.run-banner.warn {
+  border-left: 3px solid var(--warning);
+}
+.run-banner .run-title {
+  font-size: 13px;
+}
+.run-banner .run-error {
+  flex-basis: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 试跑的输出（记录弹窗里展开看）。
+ *
+ * 试跑的输出不进日志库，所以它是**记录的一部分**，不是日志的一部分 ——
+ * 用等宽 + 预格式显示，但底色跟日志区区分开（那是终端感的黑底）。 */
+.run-output pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--surface);
+  border-radius: 4px;
+}
+.run-output summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+}

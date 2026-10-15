@@ -44,81 +44,37 @@ use crate::cron::Schedule;
 use crate::db::Db;
 use crate::wsclient;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// 日志环形缓冲上限，防止长时间运行把内存吃光。
-pub const LOG_CAP: usize = 200;
-
-/// 一条日志（引擎线程写，Axum handler 读）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LogLine {
-    pub ts: String,
-    pub plugin: String,
-    pub level: String,
-    pub msg: String,
-}
-
-pub type SharedLogs = Arc<Mutex<VecDeque<LogLine>>>;
-
-/// 写日志：控制台 + 环形缓冲。这就是 `host.log` / `host_api.log` 的落点。
+/// 插件日志的中枢：终端 + 1MB 内存环 + JSONL 文件三件套。
 ///
-/// 如果在**捕获作用域**里（见 `capture_scope`），日志只进捕获缓冲、不进面板的
-/// 环形缓冲、也不打 stdout —— 测试运行不该把面板的实时日志刷满。
+/// 类型别名保持不变是**刻意的** —— `engine.rs` 里有三十来个 `SharedLogs`
+/// 参数和 `push_log` 调用点，签名不变就能让这一轮的 diff 只落在
+/// 「面板自身日志迁移」这个真问题上，而不是顺手重排一大片无关代码。
+pub type SharedLogs = Arc<crate::log::Hub>;
+
+/// 写日志：插件通道的唯一落点。
+/// `host.log` / `console.log`（JS）、`print` / `log`（Python）最后都汇到这里。
 pub fn push_log(logs: &SharedLogs, plugin: &str, level: &str, msg: &str) {
-    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-
-    let captured = CAPTURE.with(|c| {
-        let mut slot = c.borrow_mut();
-        match slot.as_mut() {
-            Some(buf) => {
-                buf.push(LogLine {
-                    ts: ts.clone(),
-                    plugin: plugin.to_string(),
-                    level: level.to_string(),
-                    msg: msg.to_string(),
-                });
-                true
-            }
-            None => false,
-        }
-    });
-    if captured {
-        return;
-    }
-
-    println!("[{ts}] [{plugin}] [{level}] {msg}");
-
-    let mut guard = logs.lock().unwrap();
-    if guard.len() >= LOG_CAP {
-        guard.pop_front();
-    }
-    guard.push_back(LogLine {
-        ts,
-        plugin: plugin.to_string(),
-        level: level.to_string(),
-        msg: msg.to_string(),
-    });
+    logs.for_plugin(plugin).log(parse_level(level), msg);
 }
 
-thread_local! {
-    /// 当前线程的日志捕获缓冲。只有引擎线程会用到（插件代码全在那一条线程上跑），
-    /// 所以 thread_local 是最省事也最准确的实现 —— 不用把捕获状态一路传参下去。
-    static CAPTURE: std::cell::RefCell<Option<Vec<LogLine>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// 在日志捕获作用域里跑一段代码，返回 `(结果, 捕获到的日志)`。
+/// 级别字符串 → 语义 type。
 ///
-/// 用于「测试运行」：跑一段用户写的代码，把它 `log` / `console.log` 出来的东西
-/// 收进返回值，而不是混进面板的实时日志里。
-pub fn capture_scope<R>(f: impl FnOnce() -> R) -> (R, Vec<LogLine>) {
-    let prev = CAPTURE.with(|c| c.borrow_mut().replace(Vec::new()));
-    let out = f();
-    let lines = CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default();
-    CAPTURE.with(|c| *c.borrow_mut() = prev);
-    (out, lines)
+/// 认不出来的名字一律落到 `info`，**不丢**：「少一条日志」比「多一条 info」
+/// 难查得多 —— 前者是静默的，后者一眼能看见。
+pub fn parse_level(level: &str) -> crate::log::Type {
+    crate::log::Type::parse(level).unwrap_or(crate::log::Type::Info)
+}
+
+/// 在捕获作用域里跑一段代码，返回 `(结果, 捕获到的日志)`。
+///
+/// 实现在 [`crate::log::capture_scope`]（那边用 transport 而不是布尔开关）。
+/// 这里留一个薄转发，让 `engine.rs` 的调用点不必跟着改名字。
+pub fn capture_scope<R>(f: impl FnOnce() -> R) -> (R, Vec<crate::log::LogEntry>) {
+    crate::log::capture_scope(f)
 }
 
 /// 插件在**加载期**声明的一个任务（还没进调度器）。
@@ -188,6 +144,16 @@ pub struct HostState {
     /// 塞进参数列表的话，`load_js` / `load_one` / `sync_plugins` / `/api/test/js`
     /// 四条路径都要多带一个参数，纯粹是搬运。
     pub plugins_dir: PathBuf,
+    /// 插件的**数据根**：`<这里>/<插件名>/` 就是插件在 `node:fs` 里看到的 `/`。
+    ///
+    /// 为什么不直接用 `<plugins_dir>/<插件名>/`：那个目录是插件**代码与自有 UI**
+    /// 放的地方，而且面板会把它整个当静态目录服务出去（`/plugins/<name>/…`）。
+    /// 让插件往那儿写有两层问题：
+    ///   ① 一次 `rmSync('/', {recursive:true})` 就把自己的配置页删了；
+    ///   ② 写进去的任何东西都能被 HTTP 取走 —— 插件很容易往这里放 token。
+    /// 数据根在数据目录下（默认 `<DB 所在目录>/plugin-data`），既不进静态服务，
+    /// 也和插件代码的改动/覆盖安装解耦。
+    pub plugin_data_dir: PathBuf,
     /// WebSocket 句柄注册表（见 [`crate::wsclient`]）。
     ///
     /// ⚠ 它**跨调用**活着（插件按"一次调用推进一步"写，句柄要在两次调用之间有效），
@@ -200,6 +166,7 @@ impl HostState {
         logs: SharedLogs,
         db: Db,
         plugins_dir: PathBuf,
+        plugin_data_dir: PathBuf,
         ws: wsclient::Registry,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -208,6 +175,7 @@ impl HostState {
             vms: Mutex::new(HashMap::new()),
             routes: Mutex::new(Vec::new()),
             plugins_dir,
+            plugin_data_dir,
             ws,
         })
     }
@@ -216,11 +184,12 @@ impl HostState {
     // 业务实现（与运行时无关）
     // -----------------------------------------------------------------
 
+    /// 插件日志的统一落点。
+    ///
+    /// 八档语义 type 现在**全都认**（`start` / `success` / `fail` / `debug` /
+    /// `fatal` 是这一轮新开的）：以前只认 warn/error/info，其余静默降级成
+    /// info —— 那样插件作者想区分「开始 / 成功 / 失败」就只能自己拼字符串。
     pub fn do_log(&self, plugin: &str, level: &str, msg: &str) {
-        let level = match level {
-            "warn" | "error" | "info" => level,
-            _ => "info",
-        };
         push_log(&self.logs, plugin, level, msg);
     }
 
@@ -322,7 +291,7 @@ impl HostState {
     /// 同步 HTTP(S) 请求。
     ///
     /// ⚠️ 这是**阻塞**调用，跑在引擎线程上：一次慢请求会推迟同轮其它任务。
-    /// 所以默认 10s 超时、最长 60s，且明确写在 README 的已知限制里。
+    /// 所以默认 10s 超时、最长 60s，且明确写在 docs/host-api.md §1.4 的已知限制里。
     pub fn do_http_fetch(&self, url: &str, opts_json: &str) -> Result<String, String> {
         let opts: Value = if opts_json.trim().is_empty() {
             json!({})

@@ -112,6 +112,7 @@ function taskCard(t) {
     : t.deleted
       ? '<button class="btn" data-act="restore">恢复</button>'
       : `<button class="btn" data-act="run">立即执行</button>
+       <button class="btn" data-act="runs">记录</button>
        <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
        <button class="btn" data-act="edit">编辑</button>
        ${t.covered ? '<button class="btn" data-act="uncover" title="把频率改回插件代码里声明的值">撤销覆盖</button>' : ''}
@@ -213,6 +214,92 @@ function addRootListener(root, type, fn) {
 function clearRootListeners(root) {
   for (const [type, fn] of rootListeners) root.removeEventListener(type, fn);
   rootListeners = [];
+}
+
+// ---- 运行记录 ----
+//
+// 数据来自面板的 `runs` 表（**面板层次**），不是日志（插件层次）。
+// 每条记录点进去就是那一次执行的日志 —— 用 `runs.id` == 日志条目的 `run_id`
+// 关联（引擎执行时用 `log::with_run_id` 圈住整段）。
+//
+// 为什么值得单独一屏：日志页是按**插件**看的，一个跑得勤的任务会把日志刷满，
+// 「昨天下午那次失败到底输出了什么」在插件视图里翻不到；按运行看才有边界。
+async function openRunsDialog(plugin, name) {
+  const res = await fetch(
+    `/api/runs?plugin=${encodeURIComponent(plugin)}&task=${encodeURIComponent(name)}&limit=30`,
+    { headers: { 'X-Panel-Token': window.__PANEL_TOKEN__ || '' } },
+  );
+  const data = res.ok ? await res.json() : { error: `HTTP ${res.status}` };
+  const runs = data.runs || [];
+
+  const rows = runs.length
+    ? runs
+        .map((r) => {
+          const pending = r.ok === null || r.ok === undefined;
+          const cls = pending ? 'warning' : r.ok ? 'ok' : 'danger';
+          const label = pending ? '没跑完' : r.ok ? '成功' : '失败';
+          const dur = r.duration_ms == null ? '—' : `${r.duration_ms} ms`;
+          const kind =
+            r.kind === 'manual'
+              ? '手动'
+              : r.kind === 'cron'
+                ? '调度'
+                : r.kind === 'test'
+                  ? '试跑'
+                  : esc(r.kind);
+          // ⚠ 试跑**没有**「看日志」入口 —— 它的输出被捕获缓冲收走了，根本不进
+          //   日志库（不打终端、不进环形缓冲、不写文件）。给一个点进去是空页面的
+          //   按钮，比不给按钮更坏：用户会以为日志丢了。
+          //   试跑的输出存在记录自己身上（runs.output），所以给它一个展开。
+          const action =
+            r.kind === 'test'
+              ? `<span class="hint" title="试跑的输出不进日志库，存在这条记录里">试跑（输出见下）</span>`
+              : `<a class="btn ghost" href="#/logs/run/${encodeURIComponent(r.id)}">看日志</a>`;
+          const detail =
+            r.kind === 'test' && r.output
+              ? `<tr><td colspan="6" class="run-output">
+                   <details><summary>输出（${r.output.length} 字节）</summary>
+                   <pre>${esc(r.output)}</pre></details></td></tr>`
+              : '';
+          return `<tr>
+            <td><span class="badge ${cls}">${label}</span></td>
+            <td class="mono">${esc(r.started_at)}</td>
+            <td>${kind}</td>
+            <td class="mono">${esc(dur)}</td>
+            <td class="mono run-id">${esc(r.id)}</td>
+            <td>${action}</td>
+          </tr>
+          ${r.error ? `<tr><td colspan="6" class="run-error">${esc(r.error)}</td></tr>` : ''}
+          ${detail}`;
+        })
+        .join('')
+    : '<tr><td colspan="6" class="hint">还没有运行记录。点「立即执行」跑一次就会出现。</td></tr>';
+
+  const back = document.createElement('div');
+  back.className = 'dialog-back';
+  back.innerHTML = `<div class="dialog wide" role="dialog" aria-modal="true">
+    <div class="dialog-head">
+      <span>运行记录 · <strong>${esc(plugin)}</strong> / ${esc(name)}</span>
+      <button class="btn ghost" id="runs-close">关闭</button>
+    </div>
+    <div class="dialog-body">
+      <p class="hint">面板保留 30 天；日志按天一个文件、保留 7 天 —— 所以旧记录点进去
+      可能显示「日志已过期」，那是正常的，记录本身还在。<br>
+      「试跑」是在任务编辑器里按「运行测试」留下的记录：它的输出**不进日志库**
+      （存在记录自己身上，展开看），所以没有「看日志」入口。</p>
+      <table class="table"><thead><tr>
+        <th>结果</th><th>开始</th><th>触发</th><th>耗时</th><th>运行 id</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+  </div>`;
+  document.body.appendChild(back);
+  const close = () => back.remove();
+  back.querySelector('#runs-close').addEventListener('click', close);
+  back.addEventListener('click', (e) => {
+    if (e.target === back) close();
+  });
+  // 点「看日志」时先收起弹窗，否则它会盖在日志页上
+  back.querySelectorAll('a.btn').forEach((a) => a.addEventListener('click', close));
 }
 
 export async function render(root, ctx, opts = {}) {
@@ -421,6 +508,12 @@ export async function render(root, ctx, opts = {}) {
 
     if (act === 'edit') {
       ctx.navigate(`#/tasks/edit/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}`);
+      return;
+    }
+    // 「记录」是本地动作：拉面板的 runs 表，不动任务本身 —— 所以**不走**
+    // 下面那段 disable → 请求 → toast 的流程
+    if (act === 'runs') {
+      openRunsDialog(plugin, name);
       return;
     }
 

@@ -10,7 +10,8 @@
 adapters/node/
 ├── package.json           name: "host-api"（非 scoped），type: module，exports -> src/index.js
 ├── src/
-│   ├── index.js           门面：9 个规范函数 + 全局安装 + host 命名空间
+│   ├── index.js           门面：规范函数 + 全局安装 + host 命名空间
+│   ├── log.js             日志（规范 v2）：八档 / 行格式 / JSONL / 脱敏
 │   ├── cron.js            cron / @every 解析 + next_after（与 src/cron.rs 对齐）
 │   ├── scheduler.js       任务注册、触发、payload、last_error、跳拍（与 src/scheduler.rs 对齐）
 │   ├── sqlite.js          node:sqlite 封装（DatabaseSync）
@@ -24,14 +25,15 @@ adapters/node/
 ├── examples/
 │   ├── demo.js            覆盖全部能力（cron/every/sqlite/http/route/异常）
 │   └── hello.js           纯 host.* 全局写法（对应仓库 plugins/ 里的老写法）
-└── test/run-tests.mjs     19 个用例（node:test）
+├── test/run-tests.mjs     36 个用例（node:test；会 import 下面的向量测试）
+└── test/log-vectors.mjs   读仓库 testdata/*.json 的共享向量测试
 ```
 
 ## 宿主 API 规范 v1
 
 | 函数 | 说明 |
 | --- | --- |
-| `log(msg)` / `warn(msg)` / `error(msg)` | 写 stderr，格式 `[host-api] [level] msg`；多参数按空格拼接（与宿主 `__fmt` 同规则） |
+| `log(msg)` / `info` / `debug` / `warn` / `error` / `start` / `success` / `fail` / `fatal` | **八档**，写 stderr，格式 `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`，同时落 JSONL。多参数按空格拼接（与宿主 `__fmt` 同规则）。见下面「日志」一节 |
 | `register_cron(name, expr, handler)` | `*/5 * * * * *`（6 段）/ `30 9 * * MON-FRI`（5 段）/ `@every 500ms` |
 | `every(name, interval, handler)` | 等价 `register_cron(name, '@every ' + interval, handler)` |
 | `sqlite_query(sql, params = [])` | 返回 `list[dict]`；占位符 `?1 ?2` 按位置绑定 |
@@ -42,6 +44,8 @@ adapters/node/
 除规范里的 9 个函数外，本适配器还提供：
 
 - `http_fetch_async(url, options)` —— Node 专有扩展，不阻塞事件循环（可以自调用本进程注册的路由）。
+- `loggerFactory({scope, plugin, run})` —— 造一个带自定义 scope 的 logger（运行器自己就用它）。
+  **Node 专有扩展**：面板的 QuickJS 宿主没有对应物，插件里用了就不跨运行时了。
 - 全局 `host` 命名空间：`host.log / host.warn / host.error / host.cron / host.every / host.sqlite_query / host.http_fetch / host.register_route`，另有 camelCase 别名（`host.sqliteQuery`、`host.httpFetch`、`host.httpFetchAsync`、`host.registerRoute`、`host.serverUrl()`）。仓库 QuickJS 宿主的 `host.*` 老写法可直接跑。
 - `__host`：运行器内部接口（任务快照、tick、启动/停止 server、关库等），插件不该依赖。
 
@@ -88,15 +92,71 @@ node bin/run.mjs examples/demo.js --db /tmp/jobs.db      # 任务运行记录写
 node bin/run.mjs examples/demo.js --tick 1000            # 最大唤醒间隔上限
 ```
 
-日志：
+日志（**运行器自己的行也走同一套格式** —— 面板里「任务触发/失败」本来就挂在该插件的
+scope 下，换宿主不该换掉这条；v1 时它是第三种格式 `[HH:MM:SS] [plugin] [type] msg`）：
 
 ```
-[host-api] [info] 插件自己的 log            <- 规范格式
-[HH:MM:SS] [demo] [info] task `x` 第 1 次触发（*/3 * * * * *，调度延迟 1ms）
-[HH:MM:SS] [demo] [error] task `boom` 第 1 次执行失败: Error: ...
+2026-10-15 20:19:36.480 [info] [demo] 插件自己的 log
+2026-10-15 20:19:36.482 [info] [demo] 插件已加载：注册 8 个任务 -> …
+2026-10-15 20:19:36.482 [info] [demo] task `x` 第 1 次触发（*/3 * * * * *，调度延迟 1ms）
+2026-10-15 20:19:36.700 [error] [demo] task `boom` 第 1 次执行失败: Error: ...
 ```
 
 调度循环按 `sleepHint()`（最近到期时刻）精确唤醒，`--tick` 只是上限；实测 `@every 500ms` 的 `lateMs` 通常 1ms。
+
+## 日志（规范 v2）
+
+同一份插件源码面板内外跑，**日志必须长得一样** —— 行格式、JSONL 字段、脱敏规则，
+一个字都不能差。实现在 `src/log.js`，是面板 `src/log/` 的 JS 侧等价实现。
+
+```
+2026-10-15 18:45:40.123 [start] [demo] 插件已加载
+2026-10-15 18:45:40.124 [warn] [demo] 账号 136****6001 登录失败
+2026-10-15 18:45:41.001 [success] [demo] 落库完成
+```
+
+| 项 | 说明 |
+| --- | --- |
+| 八档 type | `debug info start success fail warn error fatal`；`start/success/fail` 是**语义着色**，过滤级别都是 `info` |
+| 行格式 | `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`（本地时间） |
+| 彩色 | `\x1b[33m[warn]\x1b[0m 2026-10-15 …` —— `[type]` 提到最前面，扫一眼颜色就能定位级别；只给 `[type]` 上色。`NO_COLOR` / `FORCE_COLOR` / `HOST_LOG_COLOR` / 是否 tty 决定开关 |
+| 落盘 | `plugin-YYYY-MM-DD.jsonl`（按天切、保留 7 天），字段 `{ts,type,level,scope,msg}`（有值才带 `plugin`/`run`）；**逐行同步写**，`tail -f` 立刻能看到 |
+| 脱敏 | 在**构造条目时**做（唯一入口）：请求头 → JSON 字段 → 裸 `key=value` → `Bearer` → 手机号（`136****6001`）。两条跨实现契约：**词边界用 ASCII 判定**（`用token=abc123` 要脱 —— 汉字不能算「字母」而让整条漏脱）、**全角括号算占位符**（`（Cookie: xxx）`） |
+| 输出流 | **stderr**（面板内的 console transport 走 stdout）。这样 `node plugin.js > data.txt` 里的 `data.txt` 只有插件自己的业务输出 |
+| `console.*` | 接到同一套日志上（`log/info/debug/warn/error`），与面板的 QuickJS 宿主一致；`table/time/dir` 等保留原生 |
+
+环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `HOST_LOG_LEVEL` | `debug` | 最低过滤级别 |
+| `HOST_LOG_DIR` | `./logs` | JSONL 目录；`off` / `0` / `false` / `-` / 空 = 不落盘 |
+| `HOST_LOG_KEEP_DAYS` | `7` | 保留天数 |
+| `HOST_LOG_COLOR` | 自动 | `0`/`1` 强制关/开颜色 |
+| `HOST_LOG_SCOPE` | `plugin` | 没设置插件名时的 scope |
+
+### ⚠ 破坏性变更（v1 → v2）
+
+v1 只有 `log/warn/error` 三档，格式是 `[host-api] [level] msg`，只写 stderr。
+v2 换了格式、加了五档与落盘。**解析过 v1 输出的脚本需要改**。
+
+这次变更是有意的：日志格式统一是「同一份插件面板内外都能跑」的前提，
+而 v1 的格式在面板里根本不存在（面板一直是八档 + JSONL）。留两套格式，
+就等于让同一个插件在两边产出不同形状的日志。
+
+### 怎么保证三份实现不漂移
+
+Rust 宿主、这个适配器、Python 适配器各自实现了一遍日志。靠人眼对齐撑不过第三次
+改动，所以规则被固化进**共享向量**：
+
+```
+testdata/redact-cases.json      脱敏：输入 → 期望输出（逐字符）
+testdata/log-format-cases.json  八档 → 过滤级别、行格式、JSONL 字段集合、彩色行模板与配色
+```
+
+三边的测试都读**同一个文件**，谁改歪了谁的测试就红。本适配器侧由
+`test/log-vectors.mjs` 覆盖，并被 `test/run-tests.mjs` **import 进来**
+（不是让调用方多敲一条命令 —— 少跑一项就等于没有这项）。
 
 ## 与 QuickJS 宿主的语义对齐
 
@@ -122,7 +182,8 @@ node bin/run.mjs examples/demo.js --tick 1000            # 最大唤醒间隔上
 ## 自测
 
 ```bash
-cd adapters/node && node test/run-tests.mjs
+cd adapters/node && node test/run-tests.mjs          # 36 个用例（含向量测试）
+cd adapters/node && node --test test/log-vectors.mjs # 只跑向量测试
 ```
 
-覆盖：log/warn/error 格式、sqlite（建表/参数化插入/查回/多语句/类型绑定）、`http_fetch`（同步阻塞 + 超时 clamp + 协议校验，被测端是独立进程 fixture server）、`http_fetch_async`（本地回环 server，GET/POST/404/超时）、cron 解析语义、`@every` 毫秒精度、`register_cron`/`every` 触发与载荷、跳拍、handler 抛异常被捕获且不退出、`register_route` 全语义、运行器端到端（`--once`、`--duration`、`--db` 落库、加载失败退出码）、以及 `import 'host-api'` 的三种解析路径。
+覆盖：八档日志格式与 `console.*` 映射、脱敏/行格式/彩色行的**共享向量**、sqlite（建表/参数化插入/查回/多语句/类型绑定）、`http_fetch`（同步阻塞 + 超时 clamp + 协议校验，被测端是独立进程 fixture server）、`http_fetch_async`（本地回环 server，GET/POST/404/超时）、cron 解析语义、`@every` 毫秒精度、`register_cron`/`every` 触发与载荷、跳拍、handler 抛异常被捕获且不退出、`register_route` 全语义、运行器端到端（`--once`、`--duration`、`--db` 落库、加载失败退出码）、以及 `import 'host-api'` 的三种解析路径。

@@ -29,14 +29,14 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
 
     // WAL 更适合「一写多读」的面板场景；pragma 有返回值，必须用 query_row 取回。
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-    println!("[db] journal_mode = {mode}");
+    crate::log::plog!("db", info, "journal_mode = {mode}");
     conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     // ---- 内存：给 page cache 设个上界 ----
     // 负值单位是 KiB，-256 = 256 KiB（SQLite 默认 -2000 = 2 MB）。
     //
     // 注意别被默认值骗了：page cache 是「用到了才分配」，不是开库就预占 2 MB。
-    // 实测（README §8.4）：空闲态 RSS 8608 KB（默认）vs 8640 KB（256 KiB）—— 同一量级的抖动，
+    // 实测（docs/performance.md §8.4）：空闲态 RSS 8608 KB（默认）vs 8640 KB（256 KiB）—— 同一量级的抖动，
     // 面板的库才几十 KB，缓存根本填不满，这条 pragma 一点内存都省不下来。
     // 它唯一的作用是给扫描型查询设上界：117 MB 的库全表扫描，峰值 RSS 4928 KB → 3104 KB。
     conn.pragma_update(None, "cache_size", -256)?;
@@ -90,6 +90,34 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             UNIQUE(plugin, name)
         );
         CREATE INDEX IF NOT EXISTS idx_jobs_next ON jobs(next_run);
+
+        -- 第二十六轮：**运行记录**。单独一张表，理由见 docs/run-history.md §24：
+        --
+        -- 「日志是日志，运行记录是运行记录」—— 日志是**插件层次**的（插件自己
+        -- 想打什么打什么，一天一个文件、保留一周），运行记录是**面板层次**的
+        -- （谁在什么时候跑了哪条任务、成没成、花了多久），由面板自己写，
+        -- 插件改不了、也删不掉。
+        --
+        -- 两者的关系只有一根线：`runs.id` == 日志条目上的 `run_id`（引擎用
+        -- `log::with_run_id` 圈住整段执行）。于是「从记录点进那次运行的日志」
+        -- 就是把 id 交给日志页过滤。
+        --
+        -- 保留期**比日志长**（日志 7 天 / 记录 30 天）是刻意的：日志过期后
+        -- 记录还在，界面就能说清「这次跑过、日志已过期」，而不是让那条记录
+        -- 凭空消失（用户会以为是面板漏记了）。
+        CREATE TABLE IF NOT EXISTS runs (
+            id          TEXT PRIMARY KEY,
+            plugin      TEXT    NOT NULL,
+            task        TEXT    NOT NULL,
+            kind        TEXT    NOT NULL,
+            started_at  TEXT    NOT NULL,
+            finished_at TEXT,
+            ok          INTEGER,
+            error       TEXT,
+            duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(plugin, task, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
         "#,
     )?;
 
@@ -114,6 +142,13 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "jobs", "params", "TEXT")?;
     // 任务声明的执行预算（毫秒）。NULL = 用全局 EXEC_BUDGET_MS
     ensure_column(&conn, "jobs", "budget_ms", "INTEGER")?;
+    // 第二十六轮：**试跑的输出**。
+    //
+    // 只有试跑（kind='test'）会填这一列，因为试跑的输出**不进日志库**
+    // （它被捕获缓冲收走了，不打终端、不进环形缓冲、不写文件 —— 见 log/capture.rs）。
+    // 也就是说：对试跑来说，这一列是它输出唯一留存的地方。
+    // 真跑（cron/manual）留 NULL，它们的输出在日志里，有 run 标签可以反查。
+    ensure_column(&conn, "runs", "output", "TEXT")?;
     ensure_plugin_state(&conn)?;
 
     Ok(Arc::new(Mutex::new(conn)))
@@ -562,6 +597,196 @@ fn ensure_plugin_state(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// 被面板停用的插件名。
+
+/* ------------------------------------------------------------------ 运行记录 */
+
+/// 一次运行的记录。`ok` 是 `Option`：`None` = 还没结束（面板重启留下的残记录）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunRecord {
+    pub id: String,
+    pub plugin: String,
+    pub task: String,
+    pub kind: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub ok: Option<bool>,
+    pub error: Option<String>,
+    pub duration_ms: Option<i64>,
+    /// 试跑的捕获输出（真跑为 None —— 它们的输出在日志里）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
+    Ok(RunRecord {
+        id: r.get(0)?,
+        plugin: r.get(1)?,
+        task: r.get(2)?,
+        kind: r.get(3)?,
+        started_at: r.get(4)?,
+        finished_at: r.get(5)?,
+        // SQLite 没有 bool：NULL / 0 / 1
+        ok: r.get::<_, Option<i64>>(6)?.map(|v| v != 0),
+        error: r.get(7)?,
+        duration_ms: r.get(8)?,
+        output: r.get(9)?,
+    })
+}
+
+const RUN_COLS: &str =
+    "id, plugin, task, kind, started_at, finished_at, ok, error, duration_ms, output";
+
+/// 记一次运行的开始。`kind`：目前只有 `cron`（调度触发）和 `manual`（面板点的）。
+///
+/// **没有 `test`**：测试运行（`/api/test/*`）不进这张表（第二十六轮起已进 `runs` 表，见 docs/run-history.md §26）。
+/// 这一格是 TEXT，加一种值不需要迁移 —— 但别在这里先写上"支持 test"，
+/// 那会让读代码的人以为已经有记录了（我自己就先那么写过一遍）。
+pub fn insert_run(
+    db: &Db,
+    id: &str,
+    plugin: &str,
+    task: &str,
+    kind: &str,
+    started_at: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO runs (id, plugin, task, kind, started_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, plugin, task, kind, started_at],
+    )?;
+    Ok(())
+}
+
+/// 记一次运行的结束。
+///
+/// 失败也要写 —— 「失败的那几次」正是最需要点进日志的，只记成功等于没记。
+pub fn finish_run(
+    db: &Db,
+    id: &str,
+    ok: bool,
+    error: Option<&str>,
+    duration_ms: i64,
+    finished_at: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE runs SET ok = ?2, error = ?3, duration_ms = ?4, finished_at = ?5 WHERE id = ?1",
+        params![id, ok as i64, error, duration_ms, finished_at],
+    )?;
+    Ok(())
+}
+
+/// 记一次**试跑**（`kind = 'test'`）：一条记录写全，不分开"开始/结束"。
+///
+/// 为什么不复用 `insert_run` + `finish_run`：试跑是**同步**的 —— HTTP 请求
+/// 一直等到跑完才返回，中间没有"面板重启"这种窗口，所以那条残记录的可能性
+/// 不存在。一次写全更简单，也不会出现"跑完了但收尾失败"的半截记录。
+///
+/// `output` 会被**截断**：试跑可以 print 出很多，而这是给人看的记录，
+/// 不是日志备份。截断处会留一行说明（不然读的人以为输出就这么点）。
+pub fn insert_test_run(
+    db: &Db,
+    id: &str,
+    plugin: &str,
+    task: &str,
+    started_at: &str,
+    finished_at: &str,
+    ok: bool,
+    error: Option<&str>,
+    duration_ms: i64,
+    output: &str,
+) -> rusqlite::Result<()> {
+    /// 单条记录里存多少输出。8 KB 够看清一次试跑（试跑的代码本来就不长），
+    /// 又不至于让 runs 表被输出撑爆。
+    const MAX_OUTPUT: usize = 8 * 1024;
+    let stored = if output.len() > MAX_OUTPUT {
+        // 按**字符边界**截：中文被劈成半个字符会变成乱码
+        let mut cut = MAX_OUTPUT;
+        while cut > 0 && !output.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{}\n…（输出被截断：共 {} 字节，只存了前 {MAX_OUTPUT} 字节）",
+            &output[..cut],
+            output.len()
+        )
+    } else {
+        output.to_string()
+    };
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO runs \
+         (id, plugin, task, kind, started_at, finished_at, ok, error, duration_ms, output) \
+         VALUES (?1, ?2, ?3, 'test', ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            plugin,
+            task,
+            started_at,
+            finished_at,
+            ok as i64,
+            error,
+            duration_ms,
+            stored
+        ],
+    )?;
+    Ok(())
+}
+
+/// 某条任务的运行记录（新的在前）。
+pub fn list_runs(
+    db: &Db,
+    plugin: Option<&str>,
+    task: Option<&str>,
+    limit: i64,
+) -> rusqlite::Result<Vec<RunRecord>> {
+    let conn = db.lock().unwrap();
+    // 两个条件都用「空则不筛」的写法，省掉四种 SQL 组合
+    let sql = format!(
+        "SELECT {RUN_COLS} FROM runs \
+         WHERE (?1 IS NULL OR plugin = ?1) AND (?2 IS NULL OR task = ?2) \
+         ORDER BY started_at DESC, id DESC LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let it = stmt.query_map(params![plugin, task, limit], row_to_run)?;
+    it.collect()
+}
+
+pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
+    let conn = db.lock().unwrap();
+    let sql = format!("SELECT {RUN_COLS} FROM runs WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut it = stmt.query_map(params![id], row_to_run)?;
+    match it.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+/// 清理过期的运行记录（保留期比日志长，见建表处的说明）。
+///
+/// 返回删掉几条。**只按时间删，不按"日志还在不在"删** —— 记录的价值恰恰在
+/// 日志过期之后。
+pub fn prune_runs(db: &Db, keep_days: i64, now: &str) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    let cutoff = chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M:%S")
+        .map(|t| (t - chrono::Duration::days(keep_days)).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| now.to_string());
+    conn.execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])
+}
+
+/// 面板重启后，把**上一轮留下的**未结束记录收尾。
+///
+/// 不这么做的话它们会永远显示成"跑着呢"，而那个运行早就没了。
+pub fn close_dangling_runs(db: &Db, now: &str) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE runs SET ok = 0, error = COALESCE(error, '面板重启，这次运行没有正常收尾'), \
+         finished_at = ?1 WHERE finished_at IS NULL",
+        params![now],
+    )
+}
+
 pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE disabled = 1 ORDER BY name")?;

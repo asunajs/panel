@@ -166,11 +166,14 @@ pub const ASSETS: &[Asset] = &[
     asset!("css/components.css"),
     asset!("js/app.js"),
     asset!("js/api.js"),
+    // 实时日志：SSE 客户端 + 工具（第二十四轮）
+    asset!("js/logstream.js"),
     asset!("js/editor.js"),
     asset!("js/confirm.js"),
     asset!("js/mock.js"),
     asset!("js/views/task-list.js"),
     asset!("js/views/task-editor.js"),
+    asset!("js/views/log-view.js"),
     asset!("js/views/plugin-list.js"),
     asset!("js/views/plugin-source.js"),
 ];
