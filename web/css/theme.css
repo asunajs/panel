@@ -18,6 +18,12 @@
   --surface-2: #45475a;   /* surface1：悬停、分隔 */
   --border: #45475a;
   --border-soft: #313244;
+  /* 交互控件的边框（输入框 / 按钮 / 编辑器）单独一档。
+     为什么不能和 --border 共用：WCAG 1.4.11 要求**用来识别组件的边界**至少 3:1，
+     --border 在底色上只有 1.80:1 —— 当卡片分隔线没问题（卡片另有自己的面色），
+     当输入框的边框就不合格了（看不清哪里能输入）。
+     取 overlay0 #6c7086 = 3.36:1，是能过的最轻的一档。 */
+  --border-control: #6c7086;
 
   --text: #cdd6f4;
   --text-dim: #a6adc8;
@@ -53,6 +59,10 @@
   --surface-2: #e6e9ef;
   --border: #ccd0da;
   --border-soft: #e6e9ef;
+  /* 交互控件的边框：见暗色主题里那段说明。
+     Latte 的 overlay0/1（#9ca0b0 2.30:1、#8c8fa1 2.83:1）**都过不了 3:1**，
+     得用 overlay2 #7c7f93 = 3.49:1 —— 亮色这边能过的最轻的一档比暗色更靠后。 */
+  --border-control: #7c7f93;
 
   --text: #4c4f69;
   --text-dim: #6c6f85;

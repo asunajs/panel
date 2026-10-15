@@ -444,6 +444,12 @@ for (const [name, block] of themeBlocks) {
     ['error', 4.5],
     ['success', 4.5],  // 也当文字用（徽章文字、日志级别、编辑器 token）
     ['warning', 4.5],
+    // UI 组件那一档（WCAG 1.4.11 非文本对比度，3:1）：边框是"这里能输入/能点"
+    // 的唯一视觉线索，1.80:1 会让人看不出输入框在哪。
+    // 注意 --border / --border-soft **故意不查**：它们现在只用在卡片和分隔线上，
+    // 而那些容器另有自己的面色（--surface）来区分，1.4.11 管的是"识别组件所必需的边界"。
+    // 这个区分不是文字游戏 —— 第二十七轮就是因为没分这一档，才发现输入框边框不合格。
+    ['border-control', 3.0],
   ]) {
     const c = readToken(block, token);
     if (!c) continue;
