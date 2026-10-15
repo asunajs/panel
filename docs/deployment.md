@@ -1,0 +1,137 @@
+# 部署与分发
+
+> 一键安装、Release 产物、旧手机（Termux）、ARM 盒子（systemd）。
+>
+> 章节号沿用原 `README.md` 的编号（作为稳定 ID，便于对照 git 历史与旧讨论）。
+> 文档索引：[docs/README.md](README.md)
+
+---
+
+## 9. 部署（旧手机 / ARM 盒子 / PC）
+
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+```
+
+`install.sh` 会检测架构 → 下载对应产物 → 校验 SHA256 → 装进 PATH。
+Termux 下自动装到 `$PREFIX/bin`，普通 Linux 装到 `~/.local/bin`。
+
+**raw.githubusercontent.com 打不开时**（国内网络常见）：把脚本存到本地再跑，或者让脚本从镜像取产物 ——
+下载地址可以用 `PANEL_BASE_URL` 覆盖：
+
+```bash
+# ① 脚本和产物都走镜像
+curl -fsSL https://mirror.example.com/install.sh | bash
+# ② 脚本走 GitHub，产物走镜像 / 内网
+PANEL_BASE_URL=https://mirror.example.com/plugin-panel/releases/latest/download bash install.sh
+# ③ 产物就在本机（file:// 也支持）
+PANEL_BASE_URL=file:///srv/dist bash install.sh
+```
+
+SHA256 校验不过会直接拒绝安装，不会在 PATH 里留下半个二进制。
+
+`install.sh` 自己也有端到端测试 —— 用 PATH 里的 shim 假造一个 Linux 环境 + 本地 Release，
+把六条分支都走一遍（正常安装 / 产物被篡改 / 架构不支持 / 非 Linux / Termux / 下载失败），
+macOS 上就能跑，不需要真的 Release：
+
+```bash
+bash scripts/test-install.sh     # 15 项断言
+```
+
+### 发布产物
+
+打 tag 就自动构建并发布多架构静态二进制（`.github/workflows/release.yml`）：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+| 产物 | 适用设备 |
+|---|---|
+| `plugin-panel-aarch64-linux-musl` | 旧手机（Termux）、ARM 盒子、树莓派 3/4/5 |
+| `plugin-panel-x86_64-linux-musl` | PC、VPS、开发机 |
+
+两个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
+
+> CI 的 artifact 需要登录 GitHub 才能下载，对「给别人用」来说等于没分发 ——
+> 所以走 Release 而不是 artifact。
+
+发布流程的最后一步会**真的把刚发出去的产物装一遍**：走真实 Release 下载 → SHA256 校验 → 启动 →
+请求一次 `/api/state` → SIGTERM 优雅退出。这一步挂了，说明「用户拿到手的安装方式」是坏的。
+
+### 旧手机（Termux）
+
+```bash
+# 1. 装 Termux（用 F-Droid 版，Play 商店那个已经停更）
+# 2. 装依赖
+pkg install curl
+# 3. 装面板
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+# 4. 启动（**必须先设令牌**，没配会拒绝启动 —— 反代也在本机，绑回环不等于安全）
+PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
+```
+
+手机上三个坑：
+
+1. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载的，二进制执行不了。
+   装到 `$HOME` 或 `$PREFIX/bin` 下。
+2. **防后台被杀** —— Android 会回收后台进程。Termux 里跑 `termux-wake-lock` 能缓解，
+   想长期常驻得在系统设置里关掉 Termux 的电池优化。
+3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。
+
+> ⚠️ **令牌是必须的**（第十九轮起）：没有「本机免登录」模式了。因为反代
+> （nginx / caddy / cloudflared）就跑在本机，转发过来的请求源地址全是 `127.0.0.1` ——
+> 「绑回环 = 安全」在挂反代的那一刻就不成立。所以**没配令牌一律拒绝启动**，
+> 跟绑哪个地址无关。设上令牌就能直接绑 `0.0.0.0`（见 [§13](security.md#13-第十轮面板鉴权)）：
+>
+> ```bash
+> PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+>   BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel
+> ```
+>
+> 走反代加 TLS 时再加 `PANEL_COOKIE_SECURE=1`。
+
+### ARM 盒子 / 树莓派（systemd）
+
+```ini
+# /etc/systemd/system/plugin-panel.service
+[Unit]
+Description=Plugin Panel
+After=network.target
+
+[Service]
+Type=simple
+User=panel
+WorkingDirectory=/opt/plugin-panel
+Environment=BIND_ADDR=0.0.0.0:8787
+ExecStart=/opt/plugin-panel/plugin-panel
+Restart=always
+RestartSec=3
+
+# 收紧权限（面板只需要写 data/ 目录）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/plugin-panel/data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+面板处理 SIGTERM，`systemctl stop` 能优雅退出（QuickJS 会按序析构，见 [§7](engine-safety.md#7-执行预算与熔断引擎自我保护)）。
+
+### 资源占用（macOS arm64 实测，Linux aarch64 未实测）
+
+| 项 | 值 |
+|---|---|
+| RSS | 8.1 MB（纯宿主，macOS `ps`，含共享库页；`footprint` 实测独占 **2.1 MB**） |
+| RSS（+4 JS 插件） | 9.2 MB（独占 2.9 MB） |
+| RSS（+4 JS + 2 Python 插件） | 14.5 MB（独占 7.6 MB） |
+| 线程数 | 4 |
+| CPU（空闲） | 0.0–0.1% |
+| 二进制 | 2.7 MB（静态 musl） |
+| QuickJS 堆 | 225 KB |
+
+空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。
