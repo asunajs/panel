@@ -92,7 +92,18 @@ check(
 console.log('\n② ES Module 语法');
 const tmp = mkdtempSync(join(tmpdir(), 'webcheck-'));
 try {
-  const allJs = [...EXPECTED, ...PLUGIN_UI.map((f) => `../plugins/demo/${f}`)]
+  // 第三方 vendor 的 JS 也要过语法检查：上游文件坏了、或者我们升级时拷漏了，
+// 症状都是「浏览器里某个组件不出现」，而这条检查能当场说出来是哪个文件。
+const vendorJs = [];
+(function walkJs(dir, base) {
+  if (!existsSync(dir)) return;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walkJs(p, base);
+    else if (e.name.endsWith('.js')) vendorJs.push(relative(base, p).replace(/\\/g, '/'));
+  }
+})(join(WEB, 'vendor'), WEB);
+const allJs = [...EXPECTED, ...PLUGIN_UI.map((f) => `../plugins/demo/${f}`), ...vendorJs]
     .filter((f) => f.endsWith('.js'))
     .map((f) => (f.startsWith('../') ? join(REPO, f.slice(3)) : join(WEB, f)));
 
@@ -392,6 +403,46 @@ for (const f of readdirSync(join(PLUGINS, 'js'))) {
   }).map(([name]) => name);
 
   check(hits.length === 0, `plugins/js/${f} 没用嵌入式宿主没有的全局`, hits.join(', '));
+}
+
+// ---------------------------------------------------------------- ⑦ 第三方 vendor
+
+console.log('\n⑦ 第三方组件（web/vendor/）');
+
+// 说明：`④ CSS 约束` 里那条「不许硬编码色值」只查我们自己写的 css/*.css，
+// 是**故意**不查 vendor 的 —— 上游的样式里有 250 处 `var(--pd-x, #hex)` 兜底，
+// 那是它的写法，不是我们要改的东西。别为了"统一"把它加进那个循环。
+
+const VENDOR = join(WEB, 'vendor/puredashboard');
+if (existsSync(VENDOR)) {
+  // 1) 每个 vendor CSS 都必须在 index.html 里被 link ——
+  //    上游是「一个组件一份样式」，漏 link 的症状是组件没样式（而不是报错）。
+  const vendorCss = readdirSync(VENDOR).filter((f) => f.endsWith('.css'));
+  check(vendorCss.length > 0, 'vendor 目录里有样式文件');
+  for (const css of vendorCss) {
+    check(
+      index.includes(`href="/vendor/puredashboard/${css}"`),
+      `index.html 引入了 /vendor/puredashboard/${css}`,
+    );
+  }
+
+  // 2) FORK.md 必须**列全**目录里的每个文件，并记下上游版本 ——
+  //    这条是给升级用的：少了哪个文件、从哪个 commit 来的，diff 的时候全靠它。
+  const fork = readFileSync(join(VENDOR, 'FORK.md'), 'utf8');
+  check(/commit[^\n]*`[0-9a-f]{7,}`/.test(fork), 'FORK.md 记了上游 commit');
+  check(/v\d+\.\d+\.\d+/.test(fork), 'FORK.md 记了上游版本号');
+  const notListed = readdirSync(VENDOR)
+    .filter((f) => f !== 'FORK.md')
+    .filter((f) => !fork.includes(f));
+  check(
+    notListed.length === 0,
+    'FORK.md 列出了 vendor 目录里的每个文件',
+    notListed.join(', '),
+  );
+
+  // 3) 许可必须随产物走（MIT 要求保留版权声明）
+  check(existsSync(join(VENDOR, 'LICENSE')), 'vendor 目录里带着上游的 LICENSE');
+  check(/MIT/.test(fork), 'FORK.md 写明了上游许可');
 }
 
 // ---------------------------------------------------------------- 结果

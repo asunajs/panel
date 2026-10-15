@@ -33,6 +33,16 @@ cargo test
 
 # ①c 前端资源静态检查（web/ 与 plugins/demo/）：ES Module 语法、没有内联 CSS/JS、
 #     CSS 里没有硬编码色值、plugins/js/*.js 没用嵌入式 QuickJS 不存在的全局
+#
+#     第二十七轮起多一节「⑦ 第三方组件（web/vendor/）」：
+#       · vendor 的每个 .css 都在 index.html 里被 link（漏 link 的症状是组件没样式）
+#       · FORK.md 记了上游版本 + commit，且**列全**目录里的每个文件
+#         （升级时靠它 diff —— 少了哪个文件、从哪个 commit 来的）
+#       · LICENSE 随产物走
+#     这几条都验过会红：从 FORK.md 删掉一个文件名、或塞一个没被 link 的 css，
+#     当场报出来（塞 css 那次同时触发了三条：登记表不一致、没 link、FORK.md 没列）。
+#     注意「不许硬编码色值」那条**故意**不查 vendor —— 上游样式里有 250 处
+#     `var(--pd-x, #hex)` 兜底，那是它的写法，不是我们要改的。
 node scripts/test-web-assets.mjs
 
 # ② 看面板
@@ -122,6 +132,18 @@ BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel; echo "exit=$?" # 同样�
 #     一个带令牌的实例就够（没有「无鉴权实例」这种状态了）
 PANEL_TOKEN=demo-token BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel &
 node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --token demo-token --out docs/screenshots
+
+# ㉓ 第三方组件的**运行时**验收（web/vendor/puredashboard/ 那个子集 fork）
+#     静态检查管的是"文件登记齐了、link 上了"；这个脚本管"跑起来对不对"。
+#     它自己起一个实例（临时目录、随机端口），所以不用先开面板：
+node scripts/vendor_ui_check.mjs ./target/release/plugin-panel
+#     20 项断言，关键是这三条：
+#       · dialog() 开在 top layer（`:modal` 匹配 = 浏览器白送的焦点陷阱/叠放）
+#       · 组件上的 --pd-accent 解析成**我们的** --accent，primary 按钮背景
+#         就是我们的 accent 色 —— 主题桥接没生效的话，组件会带着上游的
+#         兜底蓝出现在界面上，这是引第三方组件库最典型的事故
+#       · Esc 能关（**必须发真实按键**：原生 <dialog> 的 Esc 是浏览器行为，
+#         JS 合成的 KeyboardEvent 触发不了 —— 我第一版就是这么写的，红得莫名其妙）
 ```
 
 实测数据（`plugins/js/scheduler-demo.js` + `plugins/py/*.py`）：

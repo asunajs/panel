@@ -1,0 +1,186 @@
+/* puredashboard-button — styles for <puredashboard-button> (button.js). BEM, block = the tag.
+ *
+ * Self-contained & theme-able. Values come from the shared design tokens
+ * (--accent, --accent-ink, --accent-hover/-active, --panel-2/3, --border, --text,
+ * --danger/--red, --radius, --control-height-*, --control-pad-x, --focus-ring,
+ * --duration-fast, --disabled-opacity, --weight-medium) via a --pd-* chain that
+ * falls back to your app tokens and finally to neutral system colours — so it
+ * looks right with NO config and adapts to light/dark automatically. Theme by
+ * defining the app tokens, or override --pd-button-*.
+ *
+ * Aligns with the native <button> theming in theme/base.css (same accent fill /
+ * panel surface / danger treatment), promoted to variants.
+ */
+puredashboard-button {
+  display: inline-flex;
+  vertical-align: middle;
+  max-width: 100%;
+
+  --pd-accent:        var(--accent,        #3b82f6);
+  --pd-accent-ink:    var(--accent-ink,    #ffffff);
+  --pd-accent-hover:  var(--accent-hover,  color-mix(in srgb, var(--pd-accent) 88%, #000));
+  --pd-accent-active: var(--accent-active, color-mix(in srgb, var(--pd-accent) 78%, #000));
+  --pd-text:      var(--text,     CanvasText);
+  --pd-panel-2:   var(--panel-2,  color-mix(in srgb, CanvasText 4%, Canvas));
+  --pd-panel-3:   var(--panel-3,  color-mix(in srgb, CanvasText 9%, Canvas));
+  --pd-border:    var(--border,   color-mix(in srgb, CanvasText 16%, Canvas));
+  --pd-red:       var(--danger,   var(--red, #dc2626));
+  --pd-success:   var(--success,  #16a34a);
+  --pd-warning:   var(--warning,  #d97706);
+  --pd-radius:    var(--radius-sm, var(--radius, 8px));
+  --pd-focus-ring: var(--focus-ring, 0 0 0 3px color-mix(in srgb, var(--pd-accent) 40%, transparent));
+  --pd-weight:    var(--weight-medium, 500);
+  --pd-duration:  var(--duration-fast, 120ms);
+  --pd-ease:      var(--ease-standard, cubic-bezier(0.2, 0, 0, 1));
+  --pd-disabled-opacity: var(--disabled-opacity, 0.55);
+
+  /* per-component knobs (overridable via --pd-button-*) */
+  --pd-button-height: var(--control-height-md, 34px);
+  --pd-button-pad-x:  var(--control-pad-x, 12px);
+}
+
+/* full-width host (from `block`) */
+puredashboard-button.puredashboard-button--block { display: flex; width: 100%; }
+
+/* ── the inner button/link (shared base) ── */
+.puredashboard-button__el {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2, 8px);
+  min-width: 0;
+  height: var(--pd-button-height);
+  padding: 0 var(--pd-button-pad-x);
+  font: inherit;
+  font-size: var(--font-size-md, 13px);
+  font-weight: var(--pd-weight);
+  line-height: var(--line-normal, 1.5);
+  color: var(--pd-text);
+  background: var(--pd-panel-2);
+  border: 1px solid var(--pd-border);
+  border-radius: var(--pd-radius);
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--pd-duration) var(--pd-ease),
+              border-color var(--pd-duration) var(--pd-ease),
+              color var(--pd-duration) var(--pd-ease),
+              transform 40ms var(--pd-ease);
+}
+.puredashboard-button__el:hover { background: var(--pd-panel-3); }
+.puredashboard-button__el:active { transform: translateY(1px); }
+.puredashboard-button__el:focus-visible { outline: none; box-shadow: var(--pd-focus-ring); }
+
+/* the label never wraps mid-flow; it truncates when the button is width-limited */
+.puredashboard-button__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* icon-only: no empty label slot, so the gap does not push the icon off-centre (set by the script). */
+.puredashboard-button__el--icon-only .puredashboard-button__label { display: none; }
+
+/* ── variant: primary (accent fill) ── */
+.puredashboard-button__el--primary {
+  color: var(--pd-accent-ink);
+  background: var(--pd-accent);
+  border-color: var(--pd-accent);
+  font-weight: var(--weight-semibold, 600);
+}
+.puredashboard-button__el--primary:hover { background: var(--pd-accent-hover); border-color: var(--pd-accent-hover); }
+.puredashboard-button__el--primary:active { background: var(--pd-accent-active); }
+
+/* ── variant: dashed (secondary surface, dashed border) ── */
+.puredashboard-button__el--dashed { border-style: dashed; }
+
+/* ── variant: text (borderless, transparent until hover) ── */
+.puredashboard-button__el--text {
+  background: transparent;
+  border-color: transparent;
+}
+.puredashboard-button__el--text:hover { background: var(--pd-panel-3); }
+
+/* ── variant: link (looks like an anchor) ── */
+.puredashboard-button__el--link {
+  background: transparent;
+  border-color: transparent;
+  color: var(--pd-accent);
+  padding-left: 0;
+  padding-right: 0;
+}
+.puredashboard-button__el--link:hover { background: transparent; text-decoration: underline; }
+
+/* ── status modifiers (intent colour) ── danger/success/warning recolour every
+ * variant through the shared --pd-status var. `--danger` is kept as the legacy
+ * class (== status="danger") so existing markup/selectors keep working. */
+.puredashboard-button__el--danger,
+.puredashboard-button__el--status-danger  { --pd-status: var(--pd-red); }
+.puredashboard-button__el--status-success { --pd-status: var(--pd-success); }
+.puredashboard-button__el--status-warning { --pd-status: var(--pd-warning); }
+
+/* outlined/default status: coloured text + tinted border + tinted hover */
+.puredashboard-button__el--status { color: var(--pd-status); border-color: color-mix(in srgb, var(--pd-status) 40%, var(--pd-border)); }
+.puredashboard-button__el--status:hover { background: color-mix(in srgb, var(--pd-status) 14%, transparent); }
+/* solid status (primary + status): ink on the status fill */
+.puredashboard-button__el--primary.puredashboard-button__el--status {
+  color: var(--pd-accent-ink);
+  background: var(--pd-status);
+  border-color: var(--pd-status);
+}
+.puredashboard-button__el--primary.puredashboard-button__el--status:hover { background: color-mix(in srgb, var(--pd-status) 86%, #000); border-color: color-mix(in srgb, var(--pd-status) 86%, #000); }
+/* text/link status: coloured glyph, transparent surface */
+.puredashboard-button__el--text.puredashboard-button__el--status,
+.puredashboard-button__el--link.puredashboard-button__el--status { color: var(--pd-status); background: transparent; }
+.puredashboard-button__el--text.puredashboard-button__el--status:hover { background: color-mix(in srgb, var(--pd-status) 12%, transparent); }
+
+/* ── shape modifiers ── round = pill; circle = 1:1 for an icon-only button ── */
+.puredashboard-button__el--round  { border-radius: var(--radius-full, 999px); }
+.puredashboard-button__el--circle {
+  border-radius: 50%;
+  padding: 0;
+  width: var(--pd-button-height);
+  min-width: var(--pd-button-height);
+  aspect-ratio: 1 / 1;
+}
+
+/* ── size modifiers — remap the height/padding tokens ── */
+.puredashboard-button__el--sm { --pd-button-height: var(--control-height-sm, 28px); font-size: var(--font-size-sm, 12px); padding: 0 var(--sp-2, 8px); }
+.puredashboard-button__el--lg { --pd-button-height: var(--control-height-lg, 42px); font-size: var(--font-size-lg, 15px); padding: 0 var(--sp-4, 16px); }
+
+/* ── block modifier (full width inner) ── */
+.puredashboard-button__el--block { width: 100%; }
+
+/* ── disabled (native + link aria-disabled) ── */
+.puredashboard-button__el:disabled,
+.puredashboard-button__el[aria-disabled="true"] {
+  opacity: var(--pd-disabled-opacity);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ── loading (spinner shown, interaction blocked) ── */
+.puredashboard-button__el--loading { cursor: progress; }
+.puredashboard-button__el--loading .puredashboard-button__label { opacity: 0.85; }
+
+/* leading/trailing glyph slots */
+.puredashboard-button__icon,
+.puredashboard-button__spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 1em;
+  height: 1em;
+}
+.puredashboard-button__icon svg,
+.puredashboard-button__spinner svg { width: 1em; height: 1em; }
+
+/* the loading spinner ring — a track + a rotating head arc, tinted currentColor */
+.puredashboard-button__spinner-svg { animation: puredashboard-button-spin 0.8s linear infinite; }
+.puredashboard-button__spinner-track { stroke: currentColor; opacity: 0.3; }
+.puredashboard-button__spinner-head { stroke: currentColor; }
+
+@keyframes puredashboard-button-spin { to { transform: rotate(360deg); } }
+
+/* Reduced motion — freeze the spin (show a static partial ring, no continuous
+ * movement) rather than leaving a "running but frozen" animation. */
+@media (prefers-reduced-motion: reduce) {
+  .puredashboard-button__spinner-svg { animation: none; }
+}

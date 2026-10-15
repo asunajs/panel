@@ -1,0 +1,120 @@
+/* dialog.css — baseline skin for puredashboard/dialog.js. BEM, block = .puredashboard-dialog.
+ *
+ * Self-contained & theme-able, consistent with the rest of PureDashboard:
+ *   - Colours come from the --pd-* palette (default to your app tokens --accent/--panel/…,
+ *     then to neutral system colours) — set the app tokens once and every component themes
+ *     together; or override --pd-* on .puredashboard-dialog.
+ *   - Dialog-specific sizing knobs are --puredashboard-dialog-* (pad, gap, max-w,
+ *     drawer-w/h, backdrop). font/color-scheme inherit so dialogs match your typography
+ *     and dark/light mode.
+ *   - Or skip this file and style .puredashboard-dialog__* yourself; or pass
+ *     okClass/cancelClass/className to reuse your own button/dialog classes.
+ */
+
+/* The colour tokens are declared on the button class too, so a .puredashboard-dialog__button used OUTSIDE a
+ * dialog (a trigger, an app's own footer) is complete on its own. Without it, --pd-accent-ink was undefined there and
+ * a primary button got the inherited text colour: dark text on the accent fill in the light theme. */
+.puredashboard-dialog, .puredashboard-dialog__button {
+  --pd-accent:     var(--accent,     #3b82f6);
+  --pd-accent-ink: var(--accent-ink, #fff);
+  --pd-text:       var(--text,       CanvasText);
+  --pd-panel:      var(--panel,      Canvas);
+  --pd-panel-2:    var(--panel-2,    color-mix(in srgb, CanvasText 5%, Canvas));
+  --pd-border:     var(--border,     color-mix(in srgb, CanvasText 16%, Canvas));
+  --pd-red:        var(--red,        #dc2626);
+}
+.puredashboard-dialog {
+  --pd-radius:     var(--radius,     12px);
+  --puredashboard-dialog-pad:      16px 18px;
+  --puredashboard-dialog-gap:      14px;
+  --puredashboard-dialog-max-w:    min(92vw, 520px);
+  --puredashboard-dialog-drawer-w: min(92vw, 380px);
+  --puredashboard-dialog-drawer-h: 45vh;
+  --puredashboard-dialog-backdrop: rgba(0, 0, 0, .5);
+
+  color-scheme: inherit; font: inherit;
+  color: var(--pd-text);
+  background: var(--pd-panel);
+  border: 1px solid var(--pd-border);
+  border-radius: var(--pd-radius);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .25);
+  padding: 0;
+  max-width: var(--puredashboard-dialog-max-w);
+  max-height: var(--puredashboard-dialog-max-h, 85vh);
+  /* flex column so the head + footer stay put and only the body scrolls */
+  display: flex;
+  flex-direction: column;
+}
+/* `size` (set by dialog(); default md): a FIXED width from --puredashboard-dialog-w, capped
+ * to the viewport — not shrink-to-content, which left forms and tables cramped. Presets
+ * are themable: --puredashboard-dialog-w-sm / -md / -lg / -xl (400 / 560 / 800 / 1140px). */
+.puredashboard-dialog--sized { width: min(var(--puredashboard-dialog-w), calc(100vw - 32px)); max-width: none; }
+.puredashboard-dialog--size-full { height: calc(100vh - 32px); max-height: none; }
+.puredashboard-dialog::backdrop { background: var(--puredashboard-dialog-backdrop); }
+
+.puredashboard-dialog__head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: var(--puredashboard-dialog-pad);
+  border-bottom: 1px solid var(--pd-border);
+}
+.puredashboard-dialog__title { margin: 0; font-size: 1.05rem; font-weight: 600; }
+.puredashboard-dialog__close { all: unset; cursor: pointer; font-size: 1.4rem; line-height: 1; border-radius: 6px;
+  /* square hit/hover box around the × glyph (was a wider-than-tall padded text box) */
+  display: inline-flex; align-items: center; justify-content: center; width: 1.6rem; height: 1.6rem; }
+.puredashboard-dialog__close:hover { background: var(--pd-panel-2); }
+
+/* the body takes the leftover height and scrolls only when it overflows
+ * (min-height:0 lets a flex child shrink below its content so overflow can kick in) */
+.puredashboard-dialog__body { flex: 1 1 auto; min-height: 0; padding: var(--puredashboard-dialog-pad); display: flex; flex-direction: column; gap: var(--puredashboard-dialog-gap); overflow: auto;
+  /* the same thin scrollbar as the sider: transparent track, thumb while the pointer is
+   * over the dialog (or focus is inside); --puredashboard-dialog-scrollbar sets its colour */
+  scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.puredashboard-dialog:hover .puredashboard-dialog__body,
+.puredashboard-dialog:focus-within .puredashboard-dialog__body {
+  scrollbar-color: var(--puredashboard-dialog-scrollbar, color-mix(in srgb, currentColor 28%, transparent)) transparent;
+}
+.puredashboard-dialog__body::-webkit-scrollbar { width: 8px; }
+.puredashboard-dialog__body::-webkit-scrollbar-track { background: transparent; }
+.puredashboard-dialog__body::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+.puredashboard-dialog:hover .puredashboard-dialog__body::-webkit-scrollbar-thumb,
+.puredashboard-dialog:focus-within .puredashboard-dialog__body::-webkit-scrollbar-thumb {
+  background-color: var(--puredashboard-dialog-scrollbar, color-mix(in srgb, currentColor 28%, transparent));
+}
+.puredashboard-dialog__message { margin: 0; }
+.puredashboard-dialog__input {
+  font: inherit; color: inherit; background: transparent;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid var(--pd-border);
+}
+
+/* the optional footer slot — always pinned below the scrolling body */
+.puredashboard-dialog__footer {
+  flex: 0 0 auto;
+  padding: var(--puredashboard-dialog-pad);
+  border-top: 1px solid var(--pd-border);
+}
+.puredashboard-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; }
+.puredashboard-dialog__button {
+  /* metrics of <puredashboard-button> (height, type, radius), so confirm()/prompt()/alert() match a footer of actions */
+  font: inherit; font-size: var(--font-size-md, 13px); font-weight: var(--weight-medium, 500); cursor: pointer;
+  box-sizing: border-box; height: var(--control-height-md, 34px); padding: 0 var(--control-pad-x, 14px);
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--pd-border); background: transparent; color: var(--pd-text);
+}
+/* alert / confirm / prompt: a readable minimum width (a one-word alert was ~88px wide) */
+.puredashboard-dialog--alert, .puredashboard-dialog--confirm, .puredashboard-dialog--prompt { min-width: min(320px, calc(100vw - 32px)); }
+.puredashboard-dialog__button:hover:not(.puredashboard-dialog__button--primary):not(.puredashboard-dialog__button--danger) { background: var(--pd-panel-2); }
+.puredashboard-dialog__button--primary { background: var(--pd-accent); color: var(--pd-accent-ink); border-color: transparent; }
+.puredashboard-dialog__button--danger  { background: var(--pd-red);    color: #fff;                 border-color: transparent; }
+/* primary / danger keep their fill on hover (a plain :hover repaint made their text unreadable) — just darken it */
+.puredashboard-dialog__button--primary:hover { background: color-mix(in srgb, var(--pd-accent) 88%, #000); }
+.puredashboard-dialog__button--danger:hover  { background: color-mix(in srgb, var(--pd-red) 88%, #000); }
+
+/* drawers: size + slide come from JS inline styles (themed via --puredashboard-dialog-drawer-*);
+ * here we only square off the side that meets the viewport edge. */
+.puredashboard-dialog.puredashboard-dialog--left, .puredashboard-dialog.puredashboard-dialog--right, .puredashboard-dialog.puredashboard-dialog--top, .puredashboard-dialog.puredashboard-dialog--bottom { border-radius: 0; max-width: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .puredashboard-dialog.puredashboard-dialog--center { animation: puredashboard-dialog-pop .15s ease; }
+  @keyframes puredashboard-dialog-pop { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+}

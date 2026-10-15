@@ -141,6 +141,9 @@ pub fn content_type(path: &str) -> &'static str {
         Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
         Some("svg") => "image/svg+xml",
+        // `.md` 是纯文本，给对类型浏览器才会**显示**而不是下载
+        // （`web/vendor/puredashboard/FORK.md` 就是要给人看的）
+        Some("md") => "text/markdown; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -176,6 +179,27 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/views/log-view.js"),
     asset!("js/views/plugin-list.js"),
     asset!("js/views/plugin-source.js"),
+    // ---- 第三方：PureDashboard 的子集 fork（见该目录下的 FORK.md）----
+    //
+    // 只拿"自己写容易写错"的浮层：`dialog.js` 建在原生 `showModal()` 上，
+    // top-layer / 焦点陷阱 / Esc / 蒙层关闭都是浏览器白送的。
+    // 其余 40+ 组件按需再加 —— 每加一个都要在这里登记（漏登记 = 浏览器 404）。
+    asset!("vendor/puredashboard/dialog.js"),
+    asset!("vendor/puredashboard/dialog.css"),
+    asset!("vendor/puredashboard/button.js"),
+    asset!("vendor/puredashboard/button.css"),
+    asset!("vendor/puredashboard/toast.js"),
+    asset!("vendor/puredashboard/toast.css"),
+    asset!("vendor/puredashboard/menu.js"),
+    asset!("vendor/puredashboard/menu.css"),
+    asset!("vendor/puredashboard/popconfirm.js"),
+    asset!("vendor/puredashboard/popconfirm.css"),
+    asset!("vendor/puredashboard/tooltip.js"),
+    asset!("vendor/puredashboard/tooltip.css"),
+    // 许可与 fork 记录也一起内嵌：MIT 的声明要跟着产物走，
+    // FORK.md 则让部署后的面板能自证「这份前端来自哪个上游、哪个 commit」。
+    asset!("vendor/puredashboard/LICENSE"),
+    asset!("vendor/puredashboard/FORK.md"),
 ];
 
 #[cfg(test)]

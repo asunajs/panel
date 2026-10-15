@@ -101,6 +101,45 @@
   color-scheme: light;
 }
 
+/* ---- 第三方组件（PureDashboard 子集）的桥接 ----------------------------
+   见 web/vendor/puredashboard/FORK.md。它的每个组件都按
+   `var(--panel, var(--pd-panel, Canvas))` 这样的链读变量 —— **先读通用名**。
+
+   所以我们把通用名接到自己的变量上，而不是去写它的 `--pd-*`：
+   ① 这是上游文档给的扩展点；
+   ② 好处是**以后再加它的组件也会自动跟着我们的主题走**，不用一个个配。
+
+   只接「名字不一样」的那些 —— `--text` / `--accent` / `--accent-ink` /
+   `--success` / `--warning` / `--border` 双方同名，什么都不用写。
+
+   它的组件局部变量（`--pd-menu-*` / `--pd-tooltip-*` / `--pd-popconfirm-*`）
+   自己兜底到这一层，所以不需要我们操心。 */
+:root {
+  /* 颜色：我们有分层语义（surface / error / warning），它是直白的颜色名 */
+  --panel: var(--surface);
+  --panel-2: var(--surface-2);
+  --panel-3: var(--surface-2); /* 我们没有第三层，退到第二层 —— 比让它兜底成 Canvas 好 */
+  --muted: var(--text-dim);
+  --red: var(--error);
+  --danger: var(--error);
+  --green: var(--success);
+  --amber: var(--warning);
+
+  /* 形状与动效 */
+  --radius: var(--r-md);
+  --radius-sm: var(--r-sm);
+  /* 我们的 `--t-fast` 是 `120ms ease` 这个**简写**，而它要的是分开的两个值 */
+  --duration-fast: 120ms;
+  --ease-standard: ease;
+  --focus-ring: 0 0 0 3px var(--accent-soft);
+  /* 控件高度对齐我们自己的 .btn（padding 6px 12px + 1px 边框 ≈ 34px） */
+  --control-height-md: 34px;
+  --control-height-lg: 42px;
+  --control-pad-x: 12px;
+  --disabled-opacity: 0.55;
+  --weight-medium: 500;
+}
+
 body {
   background: var(--bg);
   color: var(--text);

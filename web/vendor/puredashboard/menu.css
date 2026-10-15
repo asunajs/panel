@@ -1,0 +1,91 @@
+/* puredashboard-menu — styles for the menu() dropdown (menu.js). BEM, block = .puredashboard-menu.
+ *
+ * The menu is appended to <body> (top layer), so the --pd-* theme tokens are defined
+ * on .puredashboard-menu itself. They default to your app tokens, then to neutral system
+ * colours (Canvas / CanvasText) — works with no config, adapts to light/dark.
+ *
+ * Layout of an item (leading gutters are RESERVED per menu, so labels line up):
+ *   [ indicator ][ icon ] label …………… [ shortcut ][ chevron ]
+ * The indicator gutter exists only in menus that have checkbox / radio items, the icon
+ * gutter only in menus where at least one item carries an icon (see menu.js).
+ */
+.puredashboard-menu {
+  /* component-tier knobs (fallback chain: --pd-* ← app token ← system default) */
+  --pd-menu-accent:   var(--accent,  #3b82f6);
+  --pd-menu-text:     var(--text,    CanvasText);
+  --pd-menu-muted:    var(--muted,   color-mix(in srgb, CanvasText 60%, Canvas));
+  --pd-menu-panel:    var(--panel,   Canvas);
+  --pd-menu-panel-2:  var(--panel-2, color-mix(in srgb, CanvasText 5%, Canvas));
+  --pd-menu-border:   var(--border,  color-mix(in srgb, CanvasText 16%, Canvas));
+  --pd-menu-red:      var(--red,     #dc2626);
+  --pd-menu-radius:   var(--radius,  10px);
+  --pd-menu-shadow:   var(--shadow-3, 0 12px 32px rgba(0, 0, 0, .28));
+  --pd-menu-pad:      var(--sp-1,    4px);
+  --pd-menu-gutter:   16px;                    /* icon slot */
+  --pd-menu-indicator: var(--pd-menu-gutter);  /* check / radio-dot slot — as wide as the icon slot so labels line up */
+
+  /* legacy aliases — the previous release themed these; keep them working */
+  --pd-accent: var(--pd-menu-accent);
+  --pd-text:   var(--pd-menu-text);
+  --pd-muted:  var(--pd-menu-muted);
+  --pd-panel:  var(--pd-menu-panel);
+  --pd-border: var(--pd-menu-border);
+  --pd-red:    var(--pd-menu-red);
+
+  box-sizing: border-box;
+  display: flex; flex-direction: column; min-width: 160px; max-width: min(92vw, 340px);
+  margin: 0; padding: var(--pd-menu-pad);
+  background: var(--pd-menu-panel); color: var(--pd-menu-text);
+  border: 1px solid var(--pd-menu-border);
+  border-radius: var(--pd-menu-radius);
+  box-shadow: var(--pd-menu-shadow);
+}
+.puredashboard-menu:not(:popover-open):not([style*="z-index"]) { display: none; }   /* popover hidden state */
+
+/* ---------------------------------------------------------------- items --- */
+.puredashboard-menu__item {
+  all: unset; box-sizing: border-box;
+  display: flex; align-items: center; gap: var(--sp-2, 8px); cursor: pointer;
+  padding: 8px 10px; border-radius: calc(var(--pd-menu-radius) - 3px);
+  font: inherit; color: var(--pd-menu-text); text-decoration: none;
+  transition: background var(--duration-fast, 120ms) var(--ease-standard, ease);
+}
+.puredashboard-menu__item:hover,
+.puredashboard-menu__item:focus-visible,
+.puredashboard-menu__item--open { background: var(--pd-menu-panel-2); outline: none; }
+.puredashboard-menu__item:focus-visible { outline: var(--focus-ring, 2px solid var(--pd-menu-accent)); outline-offset: -2px; }
+.puredashboard-menu__item--danger { color: var(--pd-menu-red); }
+.puredashboard-menu__item[aria-disabled="true"] { opacity: var(--disabled-opacity, .45); cursor: default; }
+
+.puredashboard-menu__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Leading gutters. Both are fixed-width and always present (empty when the item has
+ * no icon / isn't checkable) so every label in the menu starts on the same column. */
+.puredashboard-menu__icon,
+.puredashboard-menu__indicator { display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--pd-menu-muted); }
+.puredashboard-menu__icon { width: var(--pd-menu-gutter); height: var(--pd-menu-gutter); }
+.puredashboard-menu__icon > svg { width: 100%; height: 100%; }
+.puredashboard-menu__indicator { width: var(--pd-menu-indicator); height: var(--pd-menu-indicator); color: var(--pd-menu-accent); }
+/* the check / dot is painted only while the item is checked (the slot stays reserved) */
+[role="menuitemcheckbox"][aria-checked="false"] > .puredashboard-menu__indicator,
+[role="menuitemradio"][aria-checked="false"] > .puredashboard-menu__indicator { visibility: hidden; }
+.puredashboard-menu__item--danger > .puredashboard-menu__icon { color: inherit; }
+
+/* Trailing slots. */
+.puredashboard-menu__shortcut { flex: none; margin-left: var(--sp-4, 16px); color: var(--pd-menu-muted); font-size: var(--font-size-sm, 12px); font-variant-numeric: tabular-nums; }
+.puredashboard-menu__chevron { display: inline-flex; align-items: center; flex: none; margin-left: auto; color: var(--pd-menu-muted); }
+
+/* --------------------------------------------------------------- groups --- */
+.puredashboard-menu__group { display: flex; flex-direction: column; }
+.puredashboard-menu__group + .puredashboard-menu__group { margin-top: var(--sp-1, 4px); }
+.puredashboard-menu__group-label {
+  padding: 6px 10px 4px; color: var(--pd-menu-muted);
+  font-size: var(--font-size-sm, 12px); font-weight: var(--weight-medium, 600);
+  letter-spacing: .02em;
+}
+.puredashboard-menu__separator { height: 1px; background: var(--pd-menu-border); margin: var(--sp-1, 4px) 6px; border: 0; }
+
+/* -------------------------------------------------------------- submenu --- */
+/* A submenu is a DOM child of its parent popup (so the Popover API nests them), but
+ * it is positioned independently — never inherit the parent's flex layout. */
+.puredashboard-menu--submenu { position: fixed; inset: auto; min-width: 180px; }

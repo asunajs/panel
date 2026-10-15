@@ -1,0 +1,152 @@
+/* puredashboard-popconfirm — styles for <puredashboard-popconfirm> (popconfirm.js).
+ * BEM, block = .puredashboard-popconfirm. The block is the component tag; the
+ * built confirm body gets .puredashboard-popconfirm__panel.
+ *
+ * The panel is promoted to the TOP LAYER (native Popover API) or, in the
+ * fallback, becomes a fixed high-z element — either way it paints above page
+ * content, so its --pd-* theme tokens are declared on the panel itself. They
+ * default to your app tokens, then to neutral system colours (Canvas /
+ * CanvasText) — works with no theme linked, adapts to light/dark, re-themes when
+ * the app defines its tokens, and can be overridden via --pd-* directly.
+ *
+ * Mirrors popover.css for the top-layer/fallback container; the buttons mirror
+ * button.js styling (default + primary/danger) rather than depend on it.
+ */
+
+/* The host is a passive wrapper — it must not affect layout of the trigger. */
+puredashboard-popconfirm { display: contents; }
+
+.puredashboard-popconfirm__panel {
+  /* component-tier knobs (fallback chain: --pd-* ← app token ← system default) */
+  --pd-popconfirm-panel:   var(--panel,   Canvas);
+  --pd-popconfirm-text:    var(--text,    CanvasText);
+  --pd-popconfirm-muted:   var(--muted,   color-mix(in srgb, CanvasText 62%, Canvas));
+  --pd-popconfirm-border:  var(--border,  color-mix(in srgb, CanvasText 16%, Canvas));
+  --pd-popconfirm-radius:  var(--radius,  10px);
+  --pd-popconfirm-shadow:  var(--shadow-2, 0 4px 12px rgba(0, 0, 0, .28));
+  --pd-popconfirm-padding: var(--sp-3,    12px);
+  --pd-popconfirm-gap:     var(--sp-2,    8px);
+  --pd-popconfirm-warn:    var(--amber,   #d29922);
+  --pd-popconfirm-danger:  var(--danger,  #f85149);
+  --pd-popconfirm-accent:  var(--accent,  #4f9cf9);
+  --pd-popconfirm-ink:     var(--accent-ink, #fff);
+  --pd-popconfirm-z:       var(--z-dropdown, 1000);
+
+  box-sizing: border-box;
+  min-width: 200px;
+  max-width: min(92vw, 320px);
+  margin: 0;                      /* the UA gives [popover] auto margins; reset */
+  padding: var(--pd-popconfirm-padding);
+  background: var(--pd-popconfirm-panel);
+  color: var(--pd-popconfirm-text);
+  border: 1px solid var(--pd-popconfirm-border);
+  border-radius: var(--pd-popconfirm-radius);
+  box-shadow: var(--pd-popconfirm-shadow);
+  font-family: var(--sans, system-ui, sans-serif);
+  font-size: var(--font-size-md, 13px);
+  transition: opacity var(--duration-fast, 120ms) var(--ease-standard, ease);
+}
+
+/* Native top-layer popovers are position-fixed and toggled by the UA between
+ * display:none (closed) and rendered (open). We set inset via inline style on
+ * open; ensure it's fixed so our top/left coords are viewport-relative. */
+.puredashboard-popconfirm__panel[popover] { position: fixed; inset: auto; }
+
+/* Fallback (no Popover API): a plain element shown/hidden via [data-open]. */
+.puredashboard-popconfirm__panel--fallback { position: fixed; inset: auto; z-index: var(--pd-popconfirm-z); }
+.puredashboard-popconfirm__panel--fallback:not([data-open]) { display: none; }
+
+/* Body: warning icon + text, laid out in a row. */
+.puredashboard-popconfirm__body {
+  display: flex;
+  gap: var(--pd-popconfirm-gap);
+  align-items: flex-start;
+}
+
+.puredashboard-popconfirm__icon {
+  flex: none;
+  display: inline-flex;
+  margin-top: 1px;
+  color: var(--pd-popconfirm-warn);
+  font-size: 1.15em;
+}
+
+.puredashboard-popconfirm__text { min-width: 0; }
+
+.puredashboard-popconfirm__title {
+  font-weight: var(--weight-semibold, 600);
+  line-height: var(--line-tight, 1.25);
+  color: var(--pd-popconfirm-text);
+}
+
+.puredashboard-popconfirm__desc {
+  margin-top: var(--sp-1, 4px);
+  color: var(--pd-popconfirm-muted);
+  font-size: var(--font-size-sm, 12px);
+  line-height: var(--line-normal, 1.5);
+}
+.puredashboard-popconfirm__desc[hidden] { display: none; }
+
+/* Actions row: Cancel + OK, aligned to the end. */
+.puredashboard-popconfirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2, 8px);
+  margin-top: var(--sp-3, 12px);
+}
+
+/* Buttons — mirror button.js (default + primary/danger), self-contained. */
+.puredashboard-popconfirm__btn {
+  appearance: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-sm, 28px);
+  padding: 0 var(--sp-3, 12px);
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--pd-popconfirm-border);
+  background: var(--pd-popconfirm-panel);
+  color: var(--pd-popconfirm-text);
+  font: inherit;
+  font-size: var(--font-size-sm, 12px);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1;
+  transition: background var(--duration-fast, 120ms) var(--ease-standard, ease),
+              border-color var(--duration-fast, 120ms) var(--ease-standard, ease);
+}
+.puredashboard-popconfirm__btn:hover {
+  background: var(--panel-2, color-mix(in srgb, CanvasText 5%, Canvas));
+}
+.puredashboard-popconfirm__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring, 0 0 0 3px color-mix(in srgb, var(--pd-popconfirm-accent) 40%, transparent));
+}
+
+/* OK — primary accent by default. */
+.puredashboard-popconfirm__btn--ok {
+  background: var(--pd-popconfirm-accent);
+  border-color: var(--pd-popconfirm-accent);
+  color: var(--pd-popconfirm-ink);
+}
+.puredashboard-popconfirm__btn--ok:hover {
+  background: var(--accent-hover, color-mix(in srgb, var(--pd-popconfirm-accent) 88%, #fff));
+  border-color: var(--accent-hover, color-mix(in srgb, var(--pd-popconfirm-accent) 88%, #fff));
+}
+
+/* OK (danger) — destructive confirmations. */
+.puredashboard-popconfirm__btn--ok.puredashboard-popconfirm__btn--danger {
+  background: var(--pd-popconfirm-danger);
+  border-color: var(--pd-popconfirm-danger);
+  color: var(--accent-ink, #fff);
+}
+.puredashboard-popconfirm__btn--ok.puredashboard-popconfirm__btn--danger:hover {
+  background: color-mix(in srgb, var(--pd-popconfirm-danger) 88%, #000);
+  border-color: color-mix(in srgb, var(--pd-popconfirm-danger) 88%, #000);
+}
+
+/* Placement affordance — a hook for future arrow/offset styling per side. */
+.puredashboard-popconfirm__panel[data-placement="top"] { --pd-popconfirm-from: bottom; }
+.puredashboard-popconfirm__panel[data-placement="bottom"] { --pd-popconfirm-from: top; }
+.puredashboard-popconfirm__panel[data-placement="left"] { --pd-popconfirm-from: right; }
+.puredashboard-popconfirm__panel[data-placement="right"] { --pd-popconfirm-from: left; }

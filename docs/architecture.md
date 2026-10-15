@@ -91,7 +91,7 @@ rust-plugin-panel/
 │   ├── db.rs          SQLite：tasks / jobs / runs 三张表（16 个单测）
 │   ├── smtp.rs        第二十三轮：`smtp_send` 的邮件通道（12 个单测）
 │   ├── wsclient.rs    第二十一轮：插件侧 WebSocket 客户端（9 个单测）
-│   ├── assets.rs      主面板前端资源（web/ 下 16 个文件，include_str! 编译期内嵌）（8 个单测）
+│   ├── assets.rs      主面板前端资源（web/ 下 31 个文件，include_str! 编译期内嵌）（8 个单测）
 │   └── web.rs         Axum 路由 + 插件静态资源 + 插件路由 fallback + 测试运行（10 个单测）
 ├── plugins/
 │   ├── js/
@@ -115,12 +115,15 @@ rust-plugin-panel/
 ├── adapters/                  让同一份插件脚本跑在别的运行时里
 │   ├── node/                  npm 包 `@plugin-panel/host-api`（node:sqlite + 内置 http server + 同步 http_fetch）
 │   └── python/                模块 `host_api`（stdlib sqlite3/urllib + 运行器）
-├── web/                主面板前端（零构建：原生 ES Module + hash 路由，无框架；共 16 个文件）
+├── web/                主面板前端（原生 ES Module + hash 路由，无框架；共 31 个文件）
 │   ├── index.html      壳结构（侧边栏 / 顶栏 / 视图容器 / 消息条，无内联 CSS/JS）
 │   ├── css/            reset / theme（Mocha+Latte 变量）/ layout / components
-│   └── js/             app（路由+鉴权）· api · editor（自带编辑器）· confirm（二次确认）
-│       │               · logstream（SSE 日志流）· mock
-│       └── views/      task-list · task-editor · plugin-list · plugin-source · log-view
+│   ├── js/             app（路由+鉴权）· api · editor（自带编辑器）· confirm（二次确认）
+│   │   │               · logstream（SSE 日志流）· mock
+│   │   └── views/      task-list · task-editor · plugin-list · plugin-source · log-view
+│   └── vendor/         第三方组件（子集 fork，见目录下的 FORK.md）
+│       └── puredashboard/  dialog+drawer+alert+confirm+prompt · button · toast ·
+│                           menu · popconfirm · tooltip（6 个组件，13 个文件）
 ├── docs/               参考文档（按主题）+ 按轮次的工程记录
 │   ├── README.md       索引 + 「原 §编号 → 文件」对照表（代码注释里 20 多处引用 §N）
 │   ├── host-api.md     ★ 跨运行时 API 规范 v1（函数、payload、错误约定、四宿主能力矩阵）
@@ -137,6 +140,8 @@ rust-plugin-panel/
 │   ├── screenshot.mjs      用 CDP 驱动 headless Chrome/Edge 截图 **+ 浏览器断言**
 │   │                       （零 npm 依赖；排版与事件这类问题只有真浏览器能验）
 │   ├── nav_check.mjs       同上，专测「插件声明的侧边栏入口」
+│   ├── vendor_ui_check.mjs  同上，专测第三方组件子集：能 import / 开在 top layer /
+│   │                        主题桥接生效 / Esc 能关（发真实按键，合成事件测不出来）
 │   ├── endurance.py        长跑内存/CPU/调度抖动/HTTP 延迟实测（默认 8 小时，含报告）
 │   ├── soak.py             高压短跑：连续跑 + 反复热更新，看常驻内存会不会一路涨
 │   ├── test-install.sh     install.sh 的 15 项用例（shim 假造 Release）

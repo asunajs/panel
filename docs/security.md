@@ -272,9 +272,13 @@ Argon2id 一次要 19 MiB / 几十毫秒，而 `authenticate()` 是**每个请�
 
 ### 18.1 还没做的
 
-- **插件配置页没有共享的组件库**。现在插件只能复用 CSS 变量和 `components.css` 的类名，
-  没有 JS 侧的公共封装（比如统一的 `req()`）。示例里是照抄了一份形状，将来插件多了
-  再抽。
+- **插件配置页没有共享的组件库**。第二十七轮起**面板侧**有了第三方组件子集
+  （`web/vendor/puredashboard/`：dialog/drawer/alert/confirm/prompt、toast、menu、
+  popconfirm、tooltip），但**插件页面还用不上** —— `test-web-assets.mjs` 只允许
+  插件页引用 `/css/*` 和它自己的相对资源。
+  放开之前得先定「给插件作者的稳定面是什么」：面板自己的 `js/` 全是内部模块
+  （`api.js` 带着登录态、`logstream.js` 带着面板的 SSE 约定），直接放开等于把内部
+  实现变成公开 API。插件侧现在仍然只能复用 CSS 变量和 `components.css` 的类名。
 - ✅ **测试运行没有历史** —— 第二十六轮做完（[§26](run-history.md#26-试跑也进运行记录第二十六轮续)）。试跑进同一张 `runs` 表
   （`kind='test'`），出现在那条任务的「记录」里；因为试跑的输出**不进日志库**，
   它存在记录自己身上（`runs.output`），界面给的是展开而不是「看日志」。

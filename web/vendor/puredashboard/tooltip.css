@@ -1,0 +1,50 @@
+/* puredashboard-tooltip — styles for <puredashboard-tooltip> (tooltip.js).
+ * BEM, block = the tag.
+ *
+ * The component works with NO theme linked: every colour resolves through a
+ * --pd-* chain that defaults to the shared app tokens, then to neutral
+ * system-colour fallbacks (Canvas / CanvasText / color-mix). Per-component knobs
+ * (--pd-tooltip-*) are declared here on the component root — never in tokens.css.
+ */
+puredashboard-tooltip {
+  /* per-component knobs (component tier) */
+  --pd-tooltip-bg:     var(--panel-3, color-mix(in srgb, CanvasText 8%, Canvas));
+  --pd-tooltip-text:   var(--text,    CanvasText);
+  --pd-tooltip-border: var(--border,  color-mix(in srgb, CanvasText 16%, Canvas));
+  --pd-tooltip-radius: var(--radius-sm, 8px);
+  --pd-tooltip-shadow: var(--shadow-2, 0 4px 12px rgba(0, 0, 0, .28));
+  --pd-tooltip-font:   var(--font-size-sm, 12px);
+  --pd-tooltip-offset: var(--sp-2, 8px);
+
+  /* wrap tightly around the trigger so hover/focus map to the trigger's box */
+  display: inline-flex;
+  position: relative;
+}
+
+.puredashboard-tooltip__content {
+  /* JS sets position:fixed + top/left on show; this z-index keeps it above page
+   * content in the non-top-layer fallback path we use here. */
+  z-index: var(--z-overlay, 1200);
+  max-width: 260px;
+  box-sizing: border-box;
+  padding: var(--sp-1, 4px) var(--sp-2, 8px);
+  background: var(--pd-tooltip-bg);
+  color: var(--pd-tooltip-text);
+  border: 1px solid var(--pd-tooltip-border);
+  border-radius: var(--pd-tooltip-radius);
+  box-shadow: var(--pd-tooltip-shadow);
+  font: inherit;
+  font-size: var(--pd-tooltip-font);
+  line-height: var(--line-normal, 1.5);
+  white-space: normal;
+  overflow-wrap: break-word;
+  pointer-events: none;   /* never a pointer/focus target — it can't trap focus */
+
+  /* fade in; --duration-fast collapses to 0ms under prefers-reduced-motion */
+  opacity: 0;
+  transition: opacity var(--duration-fast, 120ms) var(--ease-standard, ease);
+}
+
+/* [hidden] is the source of truth for shown/hidden; the modifier drives the fade. */
+.puredashboard-tooltip__content[hidden] { display: none; }
+.puredashboard-tooltip__content--visible { opacity: 1; }

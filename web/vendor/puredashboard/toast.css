@@ -1,0 +1,37 @@
+/* toast.css — skin for puredashboard/toast.js. BEM, block = .puredashboard-toast.
+ *
+ * Self-contained & theme-able, consistent with the rest of PureDashboard: colours come
+ * from the --pd-* palette (default to your app tokens, then system colours); the
+ * per-type accent stripe maps to --pd-accent / --pd-green / --pd-amber / --pd-red. The
+ * sizing knob is --puredashboard-toast-pad. Stacking/position/animation come from JS
+ * inline styles. Drop this file and style .puredashboard-toast yourself if you prefer.
+ */
+
+.puredashboard-toast {
+  --pd-text:    var(--text,    CanvasText);
+  --pd-panel:   var(--panel,   Canvas);
+  --pd-accent:  var(--accent,  #2563eb);
+  --pd-green:   var(--green,   #16a34a);
+  --pd-amber:   var(--amber,   #d97706);
+  --pd-red:     var(--red,     #dc2626);
+  --pd-radius:  var(--radius,  10px);
+  --puredashboard-toast-pad: 10px 12px;
+
+  font: inherit;
+  display: flex; align-items: center; gap: 10px;
+  padding: var(--puredashboard-toast-pad);
+  border-radius: var(--pd-radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .22);
+  background: var(--pd-panel);
+  color: var(--pd-text);
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-left: 4px solid var(--pd-toast-accent, color-mix(in srgb, currentColor 40%, transparent));
+}
+.puredashboard-toast__message { flex: 1; min-width: 0; }
+.puredashboard-toast__close { all: unset; cursor: pointer; opacity: .6; padding: 0 4px; font-size: 1.1rem; line-height: 1; }
+.puredashboard-toast__close:hover { opacity: 1; }
+
+.puredashboard-toast--info    { --pd-toast-accent: var(--pd-accent); }
+.puredashboard-toast--success { --pd-toast-accent: var(--pd-green); }
+.puredashboard-toast--warn    { --pd-toast-accent: var(--pd-amber); }
+.puredashboard-toast--error   { --pd-toast-accent: var(--pd-red); }
