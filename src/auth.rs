@@ -871,8 +871,7 @@ mod tests {
         let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
         // 每个变体换一个来源 IP：同一个 IP 连打错令牌会触发退避（那是设计如此），
         // 混在一起测就分不清「被拒是因为凭据不对」还是「因为退避」。
-        let mut n = 1;
-        for headers in [
+        for (i, headers) in [
             vec![],                                            // 什么都没有
             vec![("authorization", "Bearer ")],
             vec![("authorization", "Bearer anything")],
@@ -880,9 +879,12 @@ mod tests {
             vec![("x-panel-token", "wrong")],
             vec![("cookie", "panel_session=")],
             vec![("cookie", "panel_session=nonexistent")],
-        ] {
-            let ip: IpAddr = format!("10.10.10.{n}").parse().unwrap();
-            n += 1;
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // 每个用例换一个源地址：退避是按 IP 记的，同 IP 会把后面的用例全退掉
+            let ip: IpAddr = format!("10.10.10.{}", i + 1).parse().unwrap();
             assert_eq!(a.authenticate(&h(&headers), ip), None, "不该放行：{headers:?}");
         }
         assert!(a.login("wrong", "10.10.10.99".parse().unwrap()).is_err());

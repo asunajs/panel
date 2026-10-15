@@ -830,7 +830,7 @@ mod tests {
         let mut pin2 = HashMap::new();
         pin2.insert("fast".to_string(), 99);
         let p2 = plan(&costs, 2, &pin2);
-        assert_eq!(group_names(&p2)[1].contains(&"fast".to_string()), true);
+        assert!(group_names(&p2)[1].contains(&"fast".to_string()));
         // 插件的总数不能变（钉住 + 自动分配不能重复或丢失）
         let total: usize = p2.groups.iter().map(|g| g.len()).sum();
         assert_eq!(total, 2);

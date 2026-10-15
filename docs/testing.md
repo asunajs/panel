@@ -10,6 +10,12 @@
 ## 5. 怎么验证
 
 ```bash
+# ①a lint 门禁（CI 里也跑）：41 条警告在第二十七轮清到 0，之后不许再涨。
+#    它挡的不是风格 —— 是编译和测试都抓不到的：文档注释被后来插入的代码切断
+#    （只有 cargo doc 才看得出来）、走不到的死分支、测试模块被夹在文件中间。
+#    不加 `cargo fmt --check`：本仓库刻意不用 rustfmt（会改 289 处）。
+cargo clippy --all-targets -- -D warnings
+
 # ① 单元测试（cron 解析 + 调度推进 + jobs 表来源语义，含毫秒级防回归）
 #    第二十一轮起也含 WebSocket 客户端：9 项对着**真的** WS 服务端收发，
 #    外加一条「插件 JS 门面 → 宿主 → socket」的端到端（engine::tests）

@@ -397,7 +397,7 @@ pub fn sync_jobs(
         }
         let still_declared = specs
             .iter()
-            .any(|s| &s.plugin == &plugin && &s.name == &name);
+            .any(|s| s.plugin.as_str() == plugin && s.name.as_str() == name);
         if !still_declared {
             tx.execute(
                 "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2",
@@ -550,14 +550,20 @@ pub fn prune_tombstones(
     Ok(n)
 }
 
-/// 列出被面板删掉的任务：`(plugin, name, schedule)`。
+/// 一条「被面板删掉的任务」：`(plugin, name, schedule, expr)`。
+///
+/// 给个名字而不是直接写四元组：`Vec<(String, String, String, Option<String>)>`
+/// 读的人得数位置才知道哪个是哪个。
+pub type DeletedJob = (String, String, String, Option<String>);
+
+/// 列出被面板删掉的任务。
 ///
 /// 开机 / 热更新之后要把它们从调度器里摘掉（`engine::drop_deleted`）——
 /// 插件代码重新登记了任务，不摘的话「删掉的任务」重启后又跑起来了。
 pub fn list_deleted_jobs(
     db: &Db,
     owned: Option<&[String]>,
-) -> rusqlite::Result<Vec<(String, String, String, Option<String>)>> {
+) -> rusqlite::Result<Vec<DeletedJob>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT plugin, name, schedule, override_expr FROM jobs

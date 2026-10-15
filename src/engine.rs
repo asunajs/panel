@@ -2140,7 +2140,7 @@ fn edit_job(
     // 那就只改库：插件下次加载时会按库里的值装上（`apply_overrides` 收尾）。
     let Some(idx) = sched.find(plugin, name) else {
         if is_panel {
-            let e = expr.as_deref().unwrap_or_default();
+            let e = expr.unwrap_or_default();
             let next = schedule.as_ref().and_then(|s| s.next_after(now)).map(scheduler::fmt_ms);
             db::update_panel_job_schedule(db, plugin, name, e, next.as_deref(), &fmt_secs(now))
                 .map_err(|err| format!("写库失败: {err}"))?;
@@ -2151,7 +2151,7 @@ fn edit_job(
                 &format!("面板修改了任务 `{name}` 的表达式为 `{e}`（插件未加载，只改库）"),
             );
         } else {
-            db::set_job_override(db, plugin, name, expr.as_deref(), &fmt_secs(now))
+            db::set_job_override(db, plugin, name, expr, &fmt_secs(now))
                 .map_err(|err| format!("写库失败: {err}"))?;
             hostapi::push_log(
                 logs,
@@ -2168,7 +2168,7 @@ fn edit_job(
 
     if is_panel {
         // 面板任务：直接改表达式（库里就是权威来源）
-        let e = expr.as_deref().unwrap_or_default();
+        let e = expr.unwrap_or_default();
         let schedule = schedule.expect("面板任务一定有表达式");
         let old_expr = sched.tasks()[idx].expr.clone();
         sched.set_expr(plugin, name, e, schedule, now)?;
@@ -2196,9 +2196,9 @@ fn edit_job(
     // 这就是「面板能改插件任务的频率」的实现方式：改动住 `override_expr` 里，
     // `sync_jobs` 按代码收敛 `expr` 时碰不到它，所以重启 / 热更新都不会丢。
     let old_override = sched.tasks()[idx].override_expr.clone();
-    sched.set_override(plugin, name, expr.as_deref(), now)?;
+    sched.set_override(plugin, name, expr, now)?;
     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
-    if let Err(err) = db::set_job_override(db, plugin, name, expr.as_deref(), &fmt_secs(now)) {
+    if let Err(err) = db::set_job_override(db, plugin, name, expr, &fmt_secs(now)) {
         // 回滚内存到改之前的状态
         let _ = sched.set_override(plugin, name, old_override.as_deref(), now);
         return Err(format!("写库失败: {err}"));

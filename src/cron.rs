@@ -536,7 +536,7 @@ pub fn apply_jitter(
     let Some(j) = schedule.jitter() else {
         return (base, 0);
     };
-    let span = j.amount.as_millis().max(0) as u64;
+    let span = j.amount.as_millis() as u64;
     let raw = if span == 0 {
         0
     } else {
@@ -622,13 +622,13 @@ fn splitmix64(mut x: u64) -> u64 {
 /// 把 Duration 写成 `500ms` / `2s` / `1m` 这种人话（报错信息用）。
 fn fmt_dur(d: Duration) -> String {
     let ms = d.as_millis() as u64;
-    if ms % 86_400_000 == 0 {
+    if ms.is_multiple_of(86_400_000) {
         format!("{}d", ms / 86_400_000)
-    } else if ms % 3_600_000 == 0 {
+    } else if ms.is_multiple_of(3_600_000) {
         format!("{}h", ms / 3_600_000)
-    } else if ms % 60_000 == 0 {
+    } else if ms.is_multiple_of(60_000) {
         format!("{}m", ms / 60_000)
-    } else if ms % 1000 == 0 {
+    } else if ms.is_multiple_of(1000) {
         format!("{}s", ms / 1000)
     } else {
         format!("{ms}ms")
@@ -648,7 +648,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     let num: f64 = num_s
         .parse()
         .map_err(|_| format!("`{num_s}` 不是合法数字"))?;
-    if !(num > 0.0) {
+    if num <= 0.0 {
         return Err("间隔必须大于 0".to_string());
     }
 
@@ -901,7 +901,7 @@ mod tests {
                 ChronoDuration::seconds(1),
                 "理论线漂了（第 {i} 拍）"
             );
-            assert!(j >= -200 && j <= 0, "抖动越界: {j}ms");
+            assert!((-200..=0).contains(&j), "抖动越界: {j}ms");
             if let Some(p) = prev_actual {
                 assert!(actual > p, "实际时刻没有严格递增（第 {i} 拍）");
             }

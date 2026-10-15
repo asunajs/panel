@@ -1672,7 +1672,7 @@ fn logs_for_state(st: &AppState) -> Vec<serde_json::Value> {
     const STATE_LOG_LIMIT: usize = 500;
     let mut all = st.logs.mem().snapshot();
     all.extend(crate::log::panel_mem().snapshot());
-    all.sort_by(|a, b| a.entry.ts.cmp(&b.entry.ts));
+    all.sort_by_key(|a| a.entry.ts);
     let start = all.len().saturating_sub(STATE_LOG_LIMIT);
     all[start..]
         .iter()

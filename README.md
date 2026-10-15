@@ -91,6 +91,7 @@ PANEL_TOKEN=dev-token WEB_DEV_DIR=./web ./target/release/plugin-panel
 
 ```bash
 cargo test                                  # 单元测试（cron / 调度 / jobs 语义 / WebSocket 客户端）
+cargo clippy --all-targets -- -D warnings   # lint 门禁（41 条已清到 0；见下）
 node scripts/test-web-assets.mjs            # 前端静态检查（ES Module、无内联 CSS/JS、无硬编码色值）
 cargo build --release && python3 scripts/smoke.py ./target/release/plugin-panel   # 端到端冒烟
 bash scripts/test-install.sh                # install.sh 的 15 项用例（shim 假造 Release）

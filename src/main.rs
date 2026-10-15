@@ -13,6 +13,18 @@
 //!   9. `jobs` 表是任务定义的权威来源（`source` 区分插件声明 / 面板创建）
 //!  10. **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避（`auth.rs`）
 
+// ── 两条 clippy lint 属于**项目风格**，不是欠的债。加在 crate 级是为了不写 13 遍：
+//
+// · `too_many_arguments`：`db` / `engine` / `scheduler` 里的内部函数刻意把参数铺开写 ——
+//   每个参数是什么在调用处一眼可见，而且每处都有注释解释为什么是这几个。
+//   收进 struct 会多一层定义 + 一次构造，读代码时要跳过去才知道到底传了什么。
+// · `result_large_err`：Axum 的 handler 就是 `Result<_, Response>`（`Response` 很大）。
+//   为了过 lint 去 `Box` 一个 `Response`，会在**每次出错**时多一次堆分配 ——
+//   而错误路径正是最不该再加开销的地方。
+//
+// 其余 lint 一律当债还掉（这一轮把 41 条清到 0）。门禁见 `.github/workflows/ci.yml`。
+#![allow(clippy::too_many_arguments, clippy::result_large_err)]
+
 mod assets;
 mod ratelimit;
 mod workers;

@@ -42,6 +42,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # clippy 门禁：第二十七轮把 41 条清到 0，之后不许再涨。
+      #
+      # 它挡的不是风格 —— 是**编译和测试都抓不到**的那类问题：文档注释被后来插入的
+      # 代码切断（只有 `cargo doc` 才看得出来，注释会挂到错误的对象上）、
+      # 永远走不到的死分支、`#[cfg(test)] mod tests` 被夹在文件中间……
+      # 这一轮清掉的 5 条真缺陷里，4 条就是这么来的。
+      #
+      # 这里**不加** `cargo fmt --check`：本仓库刻意不用 rustfmt
+      # （手写换行 + 中文注释对齐是风格；rustfmt 会改 289 处，等于把注释排版全打乱）。
+      # 那是选择，不是欠的债。
+      - name: clippy（-D warnings）
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: 单元测试
         run: cargo test --all-targets
 

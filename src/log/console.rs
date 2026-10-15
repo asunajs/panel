@@ -78,7 +78,7 @@ impl ConsoleTransport {
         Self::default()
     }
 
-    pub fn to_stderr(mut self) -> Self {
+    pub fn with_stderr(mut self) -> Self {
         self.to_stderr = true;
         self
     }

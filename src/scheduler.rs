@@ -716,7 +716,7 @@ mod tests {
         let now = at(0);
         s.add("a", "t1", "@every 500ms", every_500ms(), now, None, None).unwrap();
 
-        assert_eq!(s.set_paused("a", "t1", true, now).unwrap(), false);
+        assert!(!s.set_paused("a", "t1", true, now).unwrap());
         // 暂停后即使时间已经越过 next_fire，也不该被判为到期
         let later = at(5); // at(s) 的 s 是「秒」，只能是 0..=59
         assert!(s.due(later).is_empty(), "暂停的任务不该到期");
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(s.sleep_hint(later), Duration::from_secs(3600));
 
         // 恢复：从当前时刻重新对齐，不补跑
-        assert_eq!(s.set_paused("a", "t1", false, later).unwrap(), true);
+        assert!(s.set_paused("a", "t1", false, later).unwrap());
         let idx = s.find("a", "t1").unwrap();
         let expected = later + ChronoDuration::milliseconds(500);
         assert_eq!(s.tasks()[idx].next_fire, expected, "恢复后应从当前时刻重新对齐");
@@ -1093,7 +1093,7 @@ mod tests {
             let now = t.next_fire;
             s.advance(0, now, None);
 
-            expected_base = expected_base + ChronoDuration::hours(1);
+            expected_base += ChronoDuration::hours(1);
             assert_eq!(
                 s.tasks()[0].base_fire,
                 expected_base,

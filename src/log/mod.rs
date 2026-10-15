@@ -871,9 +871,7 @@ fn redact_phones(src: &[char]) -> Vec<char> {
             let next_is_digit = j < src.len() && src[j].is_ascii_digit();
             if len == 11 && ('3'..='9').contains(&src[i + 1]) && !next_is_digit {
                 out.extend(src[i..i + 3].iter()); // 前 3 位
-                for _ in 0..4 {
-                    out.push('*');
-                }
+                out.extend(['*'; 4]);
                 out.extend(src[i + 7..j].iter()); // 后 4 位
                 i = j;
                 continue;
