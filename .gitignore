@@ -1,14 +1,17 @@
 /target
-/data/*.db
-/data/*.db-wal
-/data/*.db-shm
-__pycache__/
 
-# 插件自己的 SQLite（面板的 panel.db 在上面，插件的数据根默认也在 data/ 下）。
-# 它们是运行期产物：几百 KB 到几 MB，且每个实例都不一样。
-/data/*.sqlite
-/data/*.sqlite-wal
-/data/*.sqlite-shm
+# `data/` 下**全是运行期产物**，没有一个是源码或夹具 —— 所以整目录忽略。
+#
+# 原来这里是逐条列的（`/data/*.db` + `-wal` + `-shm`、`/data/*.sqlite` + 两个后缀），
+# 漏了一条：**插件的数据根**默认在 `<DB 所在目录>/plugin-data/`，也就是
+# `data/plugin-data/<插件名>/…`。第二十八轮 `git add -A` 顺着这个缺口
+# 把 `data/plugin-data/fs-demo/data/state.json` 提交了进去。
+#
+# 逐条列法的毛病就是这里：运行期产物每多一种就要记得补一条，而漏的那次
+# 不会有任何提示。改成一整条之后，`data/` 下不管以后多出什么都不会再进仓库。
+# 真要把某个文件放进仓库（比如将来的夹具），用 `!/data/xxx` 显式开一个口子。
+/data/
+__pycache__/
 
 # 本地跑插件时留下的工作目录（进程日志 + 插件库）。
 # 不是源码，也不是夹具（夹具在 testdata/，那两个 JSON 是共享向量，必须进仓库）。
