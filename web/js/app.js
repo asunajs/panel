@@ -261,8 +261,8 @@ async function renderDashboard(root) {
         </div>
       </div>
       <div class="console" id="log-box">${logRows(res.logs)}</div>
-      <p class="hint">这里只留最近 40 行，且**只有插件日志与面板日志的混合流**。
-        要看全量、按级别/插件/关键字筛、导出，去「日志」页。</p>
+      <p class="hint">这里只留最近 40 行，<b>面板自己的日志和各个插件的日志都在里面</b>
+        （每行前面那个方括号就是来源）。要看全量、按级别/插件/关键字筛、或者导出，去「日志」页。</p>
     </div>`;
 
   // ---- 日志：SSE 增量推 ----

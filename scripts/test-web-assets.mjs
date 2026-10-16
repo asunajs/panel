@@ -550,6 +550,101 @@ if (existsSync(VENDOR)) {
   check(/MIT/.test(fork), 'FORK.md 写明了上游许可');
 }
 
+// ---------------------------------------------------------------- ⑧ 界面文案里不许写 Markdown
+
+console.log('\n⑧ 界面文案');
+
+// 为什么有这条：界面上真的出现过**星号原样显示**——
+//
+//     这里只留最近 40 行，且**只有插件日志与面板日志的混合流**。
+//
+// `**` 是 Markdown 的强调语法，而 `.hint` 是纯 HTML，不会渲染它。
+// 这种错**别的检查一个都抓不到**：语法正确、链接正确、对比度也正确 ——
+// 只有真看一眼才发现，而它一眼就能看出"这界面没做过"。
+//
+// 判据：源码里**不在注释里**的 `**`。
+// 字符串里的 `**` 一定是这个毛病（要强调就用 `<b>`）；
+// 代码里的 `**` 是幂运算符，本仓库目前一处都没有 —— 真要用，就在这一行
+// 写成算式并在这里开个口子，别偷偷绕过去。
+//
+// ⚠ 不查 `vendor/`：那是上游的代码（同「不许硬编码色值」那条的口径）。
+const STAR = /\*\*/;
+
+/** 找出**不在注释里**的 `**`，返回 `行号: 该行内容`。 */
+function nonCommentStars(src) {
+  const hits = [];
+  let inBlock = false; // JS 块注释
+  let inHtml = false; // 模板串里的 HTML 注释（用户看不见，不算）
+  src.split('\n').forEach((line, i) => {
+    let code = line;
+    // ① HTML 注释（多行）
+    if (inHtml) {
+      const end = code.indexOf('-->');
+      if (end === -1) return;
+      inHtml = false;
+      code = code.slice(end + 3);
+    }
+    // ② JS 块注释（多行）
+    if (inBlock) {
+      const end = code.indexOf('*/');
+      if (end === -1) return;
+      inBlock = false;
+      code = code.slice(end + 2);
+    }
+    // ③ 行内块注释，④ 未闭合的 `/*`（**先截断再判**，否则 JSDoc 的 `/**` 会被误报）
+    code = code.replace(/\/\*[\s\S]*?\*\//g, '');
+    const open = code.indexOf('/*');
+    if (open !== -1) {
+      code = code.slice(0, open);
+      inBlock = true;
+    }
+    // ⑤ 行注释
+    const lc = code.indexOf('//');
+    if (lc !== -1) code = code.slice(0, lc);
+    // ⑥ 行内 / 未闭合的 HTML 注释
+    const hc = code.indexOf('<!--');
+    if (hc !== -1) {
+      const hEnd = code.indexOf('-->', hc);
+      if (hEnd === -1) {
+        code = code.slice(0, hc);
+        inHtml = true;
+      } else {
+        code = code.slice(0, hc) + code.slice(hEnd + 3);
+      }
+    }
+    if (STAR.test(code)) hits.push(`${i + 1}: ${line.trim().slice(0, 80)}`);
+  });
+  return hits;
+}
+
+{
+  // 自己走一遍文件（不借别处的变量：那些变量有自己的作用域，借了会 ReferenceError，
+  // 而这条检查要的是"扫全部界面代码"，包括 web/js 与 plugins/ 下所有 .js）
+  const targets = [];
+  const walk = (d) => {
+    if (!existsSync(d)) return;
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      // 排除 vendor（上游代码）；用正则而不是拼分隔符，省得在意平台差异
+      else if (e.name.endsWith('.js') && !/[\\/]vendor[\\/]/.test(p)) targets.push(p);
+    }
+  };
+  walk(join(WEB, 'js'));
+  walk(join(REPO, 'plugins'));
+
+  const offenders = [];
+  for (const abs of targets) {
+    const hits = nonCommentStars(readFileSync(abs, 'utf8'));
+    if (hits.length) offenders.push(`${relative(REPO, abs)} → ${hits.join(' | ')}`);
+  }
+  check(
+    offenders.length === 0,
+    `界面文案里没有字面 Markdown（扫了 ${targets.length} 个文件）`,
+    offenders.join(' ; '),
+  );
+}
+
 // ---------------------------------------------------------------- 结果
 
 console.log();

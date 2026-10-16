@@ -132,14 +132,15 @@ export async function render(root, ctx, params = {}) {
   if (isEdit && row && row.source !== 'panel') {
     const note = document.createElement('div');
     note.className = 'field-sub dim';
+    // ⚠ 强调用 `<b>`，**不要**在给人看的字符串里写 Markdown 的 `**`
+    //   （写了的后果是星号原样显示出来）。这里原来靠一句 `.replace(/\*\*/g,'')`
+    //   把星号擦掉 —— 那是"写错了再擦"，而且同一份代码里
+    //   `views/task-list.js` 的同类提示忘了擦，界面上就真的露出了 `**`。
     note.innerHTML = row.override_expr
       ? `代码里声明的是 <span class="mono">${esc(row.schedule)}</span>，`
         + `当前用的是面板覆盖。填回代码里的值（或回列表点「撤销覆盖」）就恢复原样。`
       : `这条任务由插件代码声明（<span class="mono">${esc(row.schedule)}</span>）。`
-        + `保存后会记成一条**覆盖**：代码里的值原样保留，重启和热更新都不会丢。`.replace(
-          /\*\*/g,
-          '',
-        );
+        + `保存后会记成一条<b>覆盖</b>：代码里的值原样保留，重启和热更新都不会丢。`;
     const exprField = $('#f-expr')?.closest('.field');
     if (exprField) exprField.appendChild(note);
   }
