@@ -352,6 +352,31 @@
   outline: none;
 }
 
+/* <select> 的那个三角是**浏览器自己画的**，我们只给了边框和底色。
+   在深色主题下它那套原生外观（大箭头 + 箭头旁边一截"接缝"）跟面板不是一套
+   —— 用户圈出来说"这个箭头不对"。
+   所以：关掉原生外观，自己画一个细 V（不是实心三角 —— 实心那块在深色下太重）。
+
+   画法：两层线性渐变的**窄带**，一条是"\"、一条是"/"，并排拼成 V：
+     45°  的渐变，等色线是"\"方向  → 左半边
+     135° 的渐变，等色线是"/"方向  → 右半边
+   ⚠ 颜色必须走 `var(--text-dim)`（深浅主题自动跟着变）。
+     别改成 SVG data URI —— 里面的颜色只能写死成 `#hex`，
+     而 ④ 那条「不许硬编码色值」会当场红（这条检查是对的，别绕它）。 */
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px; /* 给箭头留位，否则长选项名会压到箭头上 */
+  background-image:
+    linear-gradient(45deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 62%, transparent 62%),
+    linear-gradient(135deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 62%, transparent 62%);
+  background-position:
+    calc(100% - 16px) calc(50% - 3px),
+    calc(100% - 10px) calc(50% - 3px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
 .input::placeholder,
 .textarea::placeholder {
   color: var(--text-mute);
