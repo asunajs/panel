@@ -210,6 +210,36 @@ if (badgeRule) {
   check(/flex:\s*none/.test(body), '.badge 设了 flex:none（不会被压缩）');
   check(/white-space:\s*nowrap/.test(body), '.badge 设了 white-space:nowrap（不会竖排断行）');
 }
+// select 的箭头画在 background 上（见 components.css 的 `.select`），必须**垂直居中**。
+//
+// 为什么钉这条：`background-position` 的百分比是**对齐点**，不是左上角 ——
+// 写 `50%` 就是"背景中心对容器中心"（已居中）；写成 `calc(50% - 3px)`
+// （按左上角去减半高）会整体**偏高 3px**。我第一版就是这么写的，
+// 静态检查、单测全绿，用户一眼看出来「箭头没上下居中」。
+// 所以把 y 钉成 50%/center，不许再加减。
+const selectRule = componentsCss.match(/\n\.select \{([\s\S]*?)\n\}/);
+check(!!selectRule, '找得到 .select 规则');
+if (selectRule) {
+  check(
+    /appearance:\s*none/.test(selectRule[1]),
+    '.select 关掉了原生外观（不然浏览器会再画一个自己的箭头）',
+  );
+  const bgPos = selectRule[1].match(/background-position:\s*([\s\S]*?);/);
+  check(!!bgPos, '.select 里写了 background-position（箭头靠它定位）');
+  if (bgPos) {
+    const layers = bgPos[1]
+      .split(',')
+      .map((s) => s.trim().split(/\s+/))
+      .filter((l) => l.length);
+    const bad = layers.filter((l) => !['50%', 'center'].includes(l[l.length - 1]));
+    check(
+      bad.length === 0,
+      '.select 的箭头垂直居中（background-position 的 y 必须是 50%/center）',
+      bad.map((l) => l.join(' ')).join(' ; '),
+    );
+  }
+}
+
 // 卡片头也要允许换行，否则窄屏下会去压缩子项而不是折行
 const headRule = componentsCss.match(/\n\.card-head \{([\s\S]*?)\n\}/);
 check(

@@ -362,7 +362,13 @@
      135° 的渐变，等色线是"/"方向  → 右半边
    ⚠ 颜色必须走 `var(--text-dim)`（深浅主题自动跟着变）。
      别改成 SVG data URI —— 里面的颜色只能写死成 `#hex`，
-     而 ④ 那条「不许硬编码色值」会当场红（这条检查是对的，别绕它）。 */
+     而 ④ 那条「不许硬编码色值」会当场红（这条检查是对的，别绕它）。
+
+   ⚠⚠ `background-position` 的百分比是**对齐点**，不是左上角：
+     写 `50%` 就是"背景的中心对容器的中心"（已居中）。
+     我第一版按左上角算、写成 `calc(50% - 3px)`，于是箭头整体**偏高 3px**
+     —— 用户一眼就看出来了（"上下居中"）。实测偏离 3.2px，就是这一处。
+     所以这里**不要**再加减半高。 */
 .select {
   appearance: none;
   -webkit-appearance: none;
@@ -371,8 +377,8 @@
     linear-gradient(45deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 62%, transparent 62%),
     linear-gradient(135deg, transparent 40%, var(--text-dim) 40%, var(--text-dim) 62%, transparent 62%);
   background-position:
-    calc(100% - 16px) calc(50% - 3px),
-    calc(100% - 10px) calc(50% - 3px);
+    calc(100% - 16px) 50%,
+    calc(100% - 10px) 50%;
   background-size: 6px 6px, 6px 6px;
   background-repeat: no-repeat;
 }
