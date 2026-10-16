@@ -112,7 +112,10 @@ export async function render(root, ctx, params = {}) {
         </span>
 
         <label class="tool">插件
-          <input id="f-plugin" list="log-plugin-list" placeholder="全部"
+          <!-- ⚠ 占位符不能写「全部」：左边「通道」那个 select 的**值**就是「全部」，
+               两个控件长得一模一样（都是一个框 + 右边一个三角），
+               用户分不清哪个是哪个 —— 实测有人把「插件」当成了通道选择器。 -->
+          <input id="f-plugin" list="log-plugin-list" placeholder="全部插件"
                  value="${esc(params.plugin || '')}">
           <datalist id="log-plugin-list">
             ${pluginNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}
@@ -344,6 +347,18 @@ export async function render(root, ctx, params = {}) {
 
   function open() {
     stream?.close();
+    // ⚠ 换筛选条件（通道 / 级别 / 插件）时必须**把屏幕上已有的行清掉**。
+    //
+    // 服务端的筛选只作用于**新推来的**行，而框里那 300 行是换条件之前渲染的 ——
+    // 不清的话，用户看到的是"我选了某个插件，可框里还有一堆别的插件和面板日志"，
+    // 结论自然是"这个筛选没用"。实测（把「插件」填成 mcloud-live、等 2.5 秒）：
+    // 框里 106 行里仍有 30 行面板日志 + 9 行别的插件，只有新来的行是过滤过的。
+    //
+    // 只在**换条件**时清：断线重连走的是 EventSource 自己的退避，不经过这里，
+    // 所以重连不会把已经看到的行抹掉（那是另一条底线：断线不该丢视野）。
+    box.replaceChildren();
+    ring.clear();
+    updateNote(0);
     conn.className = 'badge running';
     conn.textContent = '连接中…';
     stream = openLogStream({      channel: channelEl.value,
