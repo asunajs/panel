@@ -3672,15 +3672,48 @@ def main() -> int:
                 detail += f" / 峰值 {peak / 1024:.1f} MB"
             check(rss < 32 * 1024, "常驻内存", detail)
 
-        # ---- 7. 优雅退出 ----
+        # ---- 7. 优雅退出（**必须挂着一条 SSE 长连接**）----
+        #
+        # 为什么非挂不可：这是第二十八轮补的，而且原来正是**缺了这一半**。
+        #
+        # axum 的 `with_graceful_shutdown` 会无限等所有连接关掉，而 SSE 日志流
+        # 自己不会结束 —— 面板通道的广播发送端是全局的，进程活着它就不会被 drop，
+        # 于是那条 `RecvError::Closed` 的收尾分支永远走不到。
+        # 症状：只要有人开着日志页，Ctrl-C / systemctl stop / docker stop 就卡住，
+        # 直到 systemd 的 TimeoutStopSec 发 SIGKILL —— 那正好绕过了
+        # `engine.shutdown()` 的 join()（注册 SIGTERM 本来就是为了让它跑到）。
+        #
+        # 实测（修之前）：没有客户端时 SIGTERM → 55ms 退出；挂着一个流 → 10 秒都退不出。
+        # 所以原来那条"没客户端"的版本**测不出这个 bug**，它不是一条够严的回归。
+        stream = None
+        try:
+            sreq = urllib.request.Request(
+                f"{base}/api/logs/stream?channel=all", headers=_auth_headers()
+            )
+            stream = urllib.request.urlopen(sreq, timeout=5)
+            head = stream.read1(64) or b""
+            check(
+                b"event: notice" in head,
+                "SSE 长连接已建立（发 SIGTERM 之前挂上）",
+                head[:40].decode("utf-8", "replace").replace("\n", "⏎"),
+            )
+        except Exception as e:  # noqa: BLE001 —— 建不起来就是失败，不掩盖
+            check(False, "SSE 长连接已建立（发 SIGTERM 之前挂上）", repr(e))
+
         proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=15)
-            check(True, "SIGTERM 后进程退出", f"exit={proc.returncode}")
+            check(True, "SIGTERM 后进程退出（挂着 SSE 流）", f"exit={proc.returncode}")
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
-            check(False, "SIGTERM 后进程退出", "15 秒超时，只能 kill -9")
+            check(False, "SIGTERM 后进程退出（挂着 SSE 流）", "15 秒超时，只能 kill -9")
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         log = logpath.read_text(errors="replace")
         # 退出路径。多 worker 之后要按**每条线程**看，而且这里钉住的是一个实测崩过的

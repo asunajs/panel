@@ -391,12 +391,47 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // into_make_service_with_connect_info: 让 handler 能拿到对端地址
     // —— 登录退避按来源 IP 计数、审计日志要记是谁登的，都得靠它。
     // 注意：放在反向代理后面时这里是**反代的地址**，见 auth.rs 顶部的边界说明。
-    axum::serve(
-        listener,
-        web::router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    //
+    // 关停分两段：axum 需要"已收到信号"来停止接入，我们需要同一个时刻来**开始计时**。
+    //
+    // ⚠ 超时**绝不能**直接包住整个 `serve`：那等于给"服务器总共能活多久"设了上限 ——
+    // 起来 5 秒后自己就退了。第二十八轮我第一版就是这么写的，冒烟测试当场抓到
+    // （启动 08:28:56、退出 08:29:01.8，正好 5 秒；之后所有请求都是 connection refused）。
+    // 正确顺序：**先等信号，信号到了才套超时**。
+    //
+    // 兜底超时本身是必要的：SSE 流现在收到关停信号会自己收尾（见 web.rs 的 SHUTDOWN），
+    // 但将来若又多出别的卡住的长连接，进程不能无限等 —— 拖到 systemd 的
+    // TimeoutStopSec 就是 SIGKILL，那样下面 `engine.shutdown()` 的 join() 没机会跑。
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+    let (sig_tx, mut sig_rx) = tokio::sync::oneshot::channel::<()>();
+    // 包一层 async 块：`with_graceful_shutdown` 返回的是 `IntoFuture` 而不是 `Future`，
+    // 直接 `tokio::pin!` 再 `&mut` 轮询会报 "is not a future"。
+    // （`.await` 自己会走 `IntoFuture`，所以这里只是把它变成真正的 future。）
+    let served = async move {
+        axum::serve(
+            listener,
+            web::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = sig_tx.send(());
+        })
+        .await
+    };
+    tokio::pin!(served);
+
+    tokio::select! {
+        r = &mut served => r?,
+        _ = &mut sig_rx => {
+            if tokio::time::timeout(SHUTDOWN_GRACE, &mut served).await.is_err() {
+                crate::log::plog!(
+                    "boot",
+                    warn,
+                    "Web 层 {SHUTDOWN_GRACE:?} 内没退干净，直接收尾（还有长连接挂着？见 web.rs 的关停说明）"
+                );
+            }
+        }
+    }
 
     // ---------- 7. 收尾：让引擎线程把 Context 干净地析构掉 ----------
     crate::log::plog!("boot", info, "正在关闭...");
@@ -438,6 +473,11 @@ async fn shutdown_signal() {
         _ = ctrl_c => crate::log::plog!("boot", info, "收到 SIGINT"),
         _ = terminate => crate::log::plog!("boot", info, "收到 SIGTERM"),
     }
+
+    // ⚠ 顺序不能反：**先**让长连接（SSE）知道该收尾，**再**让 axum 停止接入。
+    // 反过来的话，axum 已经在等所有连接关掉，而 SSE 流还在等广播 ——
+    // 那就是"卡住不退"的原始症状（见 web.rs 里 SHUTDOWN 的说明）。
+    crate::web::begin_shutdown();
 }
 
 fn now_secs() -> String {

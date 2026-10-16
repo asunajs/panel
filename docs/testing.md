@@ -89,6 +89,15 @@ EXEC_BUDGET_MS=500 JOB_TRIP_THRESHOLD=3 JOB_COOLDOWN_MS=5000 \
 bash scripts/test-install.sh
 
 # ⑩ 端到端冒烟：双运行时都加载 + 插件路由 + Python 任务真的触发 + 优雅退出
+#
+# 最后那条「优雅退出」**必须挂着一条 SSE 长连接**再发 SIGTERM（第二十八轮改的）。
+# 原来那版没有客户端连着，于是它永远测不出真实场景里的卡死：axum 的
+# with_graceful_shutdown 会无限等所有连接关掉，而 SSE 日志流自己不会结束
+# （面板通道的广播发送端是全局的，进程活着就永不 drop）。
+# 症状：开着日志页时 Ctrl-C / systemctl stop 卡到 TimeoutStopSec 被 SIGKILL，
+# engine.shutdown() 的 join() 就没机会跑。
+# 验过有牙：拿 HEAD 的代码跑这条 → 4 条连锁失败（超时 → 0 条线程释放解释器
+# → 没 finalize → 关闭日志缺失），修好后全绿。
 cargo build --release && python3 scripts/smoke.py ./target/release/plugin-panel
 
 # ⑪ Python 侧的执行预算（pocketpy watchdog）：死循环被打断 + 对照组照跑

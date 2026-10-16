@@ -37,6 +37,47 @@ use std::time::Duration;
 /// 插件路由请求体的上限（低配设备上不给插件机会把内存吃光）。
 const MAX_ROUTE_BODY: usize = 1024 * 1024;
 
+/* ---------------------------------------------------------------- 关停信号 */
+
+/// 关停信号：`main` 收到 SIGTERM/SIGINT 之后置位，**长连接据此自己收尾**。
+///
+/// # 为什么必须有它
+///
+/// 原来 SSE 流只在「两个广播发送端都没了」时才结束（`RecvError::Closed`）。
+/// 但面板通道的发送端是全局的，进程活着它就不会被 drop ⇒ 那条分支永远走不到。
+/// 而 axum 的 `with_graceful_shutdown` 会**无限等**所有连接关掉 ——
+/// 于是只要有人开着日志页，`Ctrl-C` / `systemctl stop` / `docker stop` 就卡住，
+/// 直到 systemd 的 `TimeoutStopSec` 到了发 SIGKILL。那正是 `main.rs` 里
+/// 注册 SIGTERM 想避免的事：`engine.shutdown()` 的 `join()` 没机会跑，
+/// QuickJS 的 Context 就不会按正确顺序析构。
+///
+/// 实测（修之前）：没有客户端时 SIGTERM → **55ms** 退出；
+/// 挂着一个 SSE 日志流时 → **10 秒都退不出**，只能 kill -9。
+///
+/// # 为什么用 `watch` 而不是 `Notify`
+///
+/// watch 是**状态**，晚注册的等待者也能立刻看到 `true`；
+/// `Notify::notify_waiters()` 只叫醒"此刻正等着"的那些 —— 而这条流在 drain
+/// 待推队列的间隙里并不在 `await`，那一轮就永远错过了，症状是"偶尔还是卡"。
+static SHUTDOWN: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> = std::sync::OnceLock::new();
+
+/// 拿到关停信号的发送端（没有就建一个）。惰性初始化：这样不用在 `main` 里
+/// 记住"要在建 router 之前先 init"这一步 —— 那种顺序依赖迟早会被改坏。
+fn shutdown_tx() -> &'static tokio::sync::watch::Sender<bool> {
+    SHUTDOWN.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
+
+/// 订阅关停信号。每个长连接持有一份。
+pub fn shutdown_rx() -> tokio::sync::watch::Receiver<bool> {
+    shutdown_tx().subscribe()
+}
+
+/// 置位关停信号。由 `main` 在**收到信号之后、交给 axum 之前**调用 ——
+/// 顺序反过来的话，axum 已经在等流结束，而流还不知道该结束。
+pub fn begin_shutdown() {
+    let _ = shutdown_tx().send(true);
+}
+
 /// 面板新建任务的请求体。
 #[derive(Debug, Deserialize)]
 struct AddJobReq {
@@ -1786,6 +1827,8 @@ struct LogStreamState {
     cursor_panel: u64,
     filter: LogFilter,
     backlog: std::collections::VecDeque<Pending>,
+    /// 进程在关停时就结束这条流，否则它会一直挂着（见 `SHUTDOWN` 的说明）。
+    shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
 impl LogStreamState {
@@ -1984,6 +2027,7 @@ async fn api_logs_stream(
         cursor_panel,
         filter,
         backlog,
+        shutdown: shutdown_rx(),
     };
 
     // **先补一次**，然后再进「等广播」的循环。
@@ -2002,14 +2046,25 @@ async fn api_logs_stream(
                 let ev = Event::default().event(p.event).id(s.id()).data(p.data);
                 return Some((Ok::<_, std::convert::Infallible>(ev), s));
             }
+            // 已经收到关停信号就立刻收尾。
+            //
+            // 这一步是**必须**的，不能只靠下面 select! 里的 `changed()`：
+            // `borrow_and_update()` 会把"当前值已看过"记下来，于是在这之后
+            // `changed()` 要等**下一次**变化 —— 而关停只会发生一次。
+            // 所以先取值、再决定，别把顺序调过来。
+            if *s.shutdown.borrow_and_update() {
+                return None;
+            }
             // 等「有新日志」的通知。两个缓冲区任一有动静都醒 ——
             // 起来之后按取数进度去缓冲区取，所以丢一两个通知不影响正确性。
             let woke = tokio::select! {
+                // 关停优先：信号一到就结束流，不再等广播
+                _ = s.shutdown.changed() => false,
                 r = s.rx_plugin.recv() => !matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)),
                 r = s.rx_panel.recv() => !matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)),
             };
             if !woke {
-                // 两个发送端都没了（进程在收尾）→ 结束流，让浏览器自己重连
+                // 关停信号，或两个发送端都没了（进程在收尾）→ 结束流
                 return None;
             }
             s.pull();

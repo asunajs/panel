@@ -122,6 +122,21 @@ Dashboard 原来是每 3 秒整包拉一次 `/api/state`，只为看那 40 行�
   是第 10 条的 id，于是第 4～10 条永久丢失。改成「发出即推进」，并把
   `fetch_*`（取到哪）和 `cursor_*`（发到哪）分开
 
+还有一个坑是**关停的时候**才暴露的（第二十八轮）：
+
+- **这条流必须自己响应关停信号，否则进程退不出去**。axum 的
+  `with_graceful_shutdown` 会无限等所有连接关掉，而 SSE 流正常永远不结束 ——
+  于是只要有人开着日志页，`Ctrl-C` / `systemctl stop` / `docker stop` 就卡住，
+  直到 systemd 的 `TimeoutStopSec` 发 SIGKILL。那正好绕过了
+  `engine.shutdown()` 的 join()（注册 SIGTERM 处理器本来就是为了让它跑到）。
+  实测：没有客户端时 SIGTERM → **55ms** 退出；挂着一个流 → **10 秒都退不出**。
+  现在流会 select 一个 `watch` 关停信号（`web.rs` 的 `SHUTDOWN`），
+  两条路径都是 ~50ms。用 `watch` 而不是 `Notify`：watch 是**状态**，
+  晚注册的等待者也能立刻看到；`notify_waiters()` 只叫醒"此刻正等着"的那些，
+  而这条流在 drain 待推队列的间隙里并不在 await，那一轮就永远错过了。
+
+  浏览器那边不需要改：连接断了 `EventSource` 自己会重连（进程都没了，重连自然失败）。
+
 ### 21.5 前端：Dashboard 摘要 + 独立日志页
 
 - **Dashboard**：最近 40 行混合流，首屏用 `/api/state` 那份（不给用户一个空框），

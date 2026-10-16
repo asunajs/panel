@@ -122,6 +122,12 @@ WantedBy=multi-user.target
 
 面板处理 SIGTERM，`systemctl stop` 能优雅退出（QuickJS 会按序析构，见 [§7](engine-safety.md#7-执行预算与熔断引擎自我保护)）。
 
+⚠️ 这句话在第二十八轮之前**只在没人开着日志页的时候成立**：SSE 日志流不会自己结束，
+而 axum 的优雅退会无限等所有连接关掉 —— 于是 `systemctl stop` 卡到 `TimeoutStopSec`
+被 SIGKILL，`engine.shutdown()` 的 join() 反而没机会跑（越是想保住收尾，越保不住）。
+现在流会响应关停信号（见 [logging.md §21.4](logging.md#214-sse为什么换掉轮询)），
+两条路径都是 ~50ms；`main.rs` 另有一道 5 秒兜底超时。
+
 ### 资源占用（macOS arm64 实测，Linux aarch64 未实测）
 
 | 项 | 值 |
