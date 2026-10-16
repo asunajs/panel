@@ -199,9 +199,14 @@ pub const ASSETS: &[Asset] = &[
     asset!("vendor/puredashboard/popconfirm.css"),
     asset!("vendor/puredashboard/tooltip.js"),
     asset!("vendor/puredashboard/tooltip.css"),
-    // 许可与 fork 记录也一起内嵌：MIT 的声明要跟着产物走，
-    // FORK.md 则让部署后的面板能自证「这份前端来自哪个上游、哪个 commit」。
-    asset!("vendor/puredashboard/LICENSE"),
+    // FORK.md 一起内嵌：让部署后的面板能自证「这份前端来自哪个上游、哪个 commit」。
+    //
+    // ⚠ `vendor/puredashboard/LICENSE` **故意不内嵌**（用户口径：许可留在项目里就行，
+    //    没必要编进二进制、也没必要对外提供）。它仍然在仓库里、就在 fork 旁边
+    //    （`web/vendor/puredashboard/LICENSE`）—— MIT 的声明跟着**源码**走，不跟着产物走。
+    //    代价是这条对账（web/ 下每个文件都要登记）得给它留个例外，
+    //    理由写在 `scripts/test-web-assets.mjs` 里；`vendor_ui_check.mjs` 也不再要求它可访问。
+    //    顺带：删掉这个文件**不会**再让编译断掉（原来会 —— `include_str!` 引着它）。
     asset!("vendor/puredashboard/FORK.md"),
 ];
 
@@ -313,6 +318,14 @@ mod tests {
     fn web_assets_are_complete() {
         // 这条测试的对手是「加了文件忘了登记」：那种错只有打开浏览器才发现。
         // 用 include_str! 就没法在运行时 readdir，所以这里对着源码树比一遍。
+        //
+        // ⚠ 有一个**例外**：`vendor/puredashboard/LICENSE` —— 它留在仓库里
+        //    （就在 fork 旁边，MIT 的声明跟着源码走），但**不内嵌进二进制**。
+        //    所以它既不该出现在 ASSETS 表里，也不该被这条判成"漏登记"。
+        //    `scripts/test-web-assets.mjs` 里那份对账有同一个例外，
+        //    两处必须一致（改一处忘了另一处，红的就是这里）。
+        const NOT_SHIPPED: &[&str] = &["vendor/puredashboard/LICENSE"];
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
         let mut found = Vec::new();
         fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
@@ -326,6 +339,15 @@ mod tests {
             }
         }
         walk(&root, &root, &mut found);
+
+        // 例外清单里的文件必须**真的还在** —— 否则"不内嵌"会悄悄变成"已经被删掉"
+        for rel in NOT_SHIPPED {
+            assert!(
+                root.join(rel).exists(),
+                "{rel} 不在仓库里了：它是「不内嵌进二进制」，不是「可以删」"
+            );
+        }
+        found.retain(|f| !NOT_SHIPPED.contains(&f.as_str()));
         found.sort();
 
         let mut registered: Vec<String> = ASSETS.iter().map(|a| a.path.to_string()).collect();

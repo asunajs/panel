@@ -220,6 +220,10 @@ async function main() {
 
     // ---- ① 资源本身服务得出来 ----
     console.log('资源层（脚本断言）');
+    // ⚠ `LICENSE` **故意不在这个清单里**：它留在仓库里（就在 fork 旁边），
+    //    但不内嵌进二进制、也不对外提供（用户口径）。所以这里**不查它可访问** ——
+    //    查了就会红，而那是设计如此。它的存在由 `test-web-assets.mjs` 的
+    //    例外清单负责（那一条会验"文件确实还在"）。
     for (const f of [
       'dialog.js',
       'dialog.css',
@@ -229,7 +233,6 @@ async function main() {
       'popconfirm.js',
       'tooltip.js',
       'FORK.md',
-      'LICENSE',
     ]) {
       const r = await api(base, `/vendor/puredashboard/${f}`);
       check(`/vendor/puredashboard/${f} 可访问`, r.status === 200, `http ${r.status}`);

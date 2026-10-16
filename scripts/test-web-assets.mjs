@@ -72,12 +72,21 @@ for (const rel of PLUGIN_UI) {
 // 前端开发者通常不会跑 cargo test —— 这个脚本是他们唯一会跑的。
 const assetsRs = readFileSync(join(REPO, 'src/assets.rs'), 'utf8');
 const registered = [...assetsRs.matchAll(/asset!\("([^"]+)"\)/g)].map((m) => m[1]).sort();
+// `web/` 是「要发出去的前端」，登记表里的东西都会被编进二进制、对外提供。
+// **有一个例外**：vendor 的 LICENSE —— 用户口径是"许可留在项目里就行，
+// 没必要编进二进制、也没必要对外提供"，所以它躺在仓库里（就在 fork 旁边）
+// 但不进登记表。下面这条例外清单把这件事写死，同时**校验它确实还在仓库里**
+// （不然文件被删了、例外还留着，就成了"静默豁免"）。
+const NOT_SHIPPED = ['vendor/puredashboard/LICENSE'];
 const onDisk = [];
 (function walk(dir, base) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
     if (e.isDirectory()) walk(p, base);
-    else onDisk.push(relative(base, p).replace(/\\/g, '/'));
+    else {
+      const rel = relative(base, p).replace(/\\/g, '/');
+      if (!NOT_SHIPPED.includes(rel)) onDisk.push(rel);
+    }
   }
 })(WEB, WEB);
 onDisk.sort();
@@ -86,6 +95,12 @@ check(
   'src/assets.rs 的登记表与 web/ 实际文件一致',
   `表里 ${registered.length} 个，磁盘 ${onDisk.length} 个`,
 );
+for (const rel of NOT_SHIPPED) {
+  check(
+    existsSync(join(WEB, rel)),
+    `例外清单里的 ${rel} 还在仓库里（它是"不内嵌"，不是"可以删"）`,
+  );
+}
 
 // ---------------------------------------------------------------- ② 语法
 
