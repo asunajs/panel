@@ -928,3 +928,58 @@
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* ---- 弹窗 -----------------------------------------------------------------
+   一类是面板自己的「运行记录」（`task-list.js` 里那段），一类是**插件页面**的弹窗
+   （插件的账号配置、添加账号那些）。两边都用这一套类名。
+
+   ⚠ 这几个类**早就有了标记、一直没有样式**：`git log -S dialog-back -- web/css/`
+   是空的，而 `web/js/views/task-list.js` 从引入那天就在拼这套标记 ——
+   于是那个弹窗渲染出来是一段裸内容，直接铺在页面最底下（没有遮罩、没有定位、
+   表格还是浏览器默认样式）。第二十九轮补上，顺手让插件页面有个能用的弹窗可对齐。
+
+   z-index 取 45（低于 `.toast` 的 50）：弹窗开着时来的提示要浮在上面，
+   被遮罩盖住的提示等于没提示。 */
+.dialog-back {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-4);
+  background: var(--scrim);
+  /* 遮罩自己也要能滚：内容比视口高时（长表单）不能把它顶出屏幕外 */
+  overflow: auto;
+}
+
+.dialog {
+  width: min(560px, 100%);
+  /* 留出上下的边距，长内容在 `.dialog-body` 里滚，标题栏始终看得见 */
+  max-height: calc(100vh - var(--sp-5) * 2);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+}
+
+/* 表格类的弹窗需要更宽（运行记录六列） */
+.dialog.wide {
+  width: min(880px, 100%);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 13px;
+}
+
+.dialog-body {
+  padding: var(--sp-4);
+  overflow: auto;
+}

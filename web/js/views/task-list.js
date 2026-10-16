@@ -287,9 +287,14 @@ async function openRunsDialog(plugin, name) {
       可能显示「日志已过期」，那是正常的，记录本身还在。<br>
       「试跑」是在任务编辑器里按「运行测试」留下的记录：它的输出**不进日志库**
       （存在记录自己身上，展开看），所以没有「看日志」入口。</p>
-      <table class="table"><thead><tr>
+      <!-- ⚠ 不能写成 table class="table" —— 面板**没有** .table 这个类，
+           表格样式挂在 .table-wrap table 上（本文件 439 行、app.js 214 行都是这个写法）。
+           写成 .table 的结果是这张表拿浏览器默认样式，跟别处的表长得不一样。
+           ⚠ 这段是**模板串里的 HTML 注释**，所以一个反引号都不能出现 ——
+             写了会把模板串截断（面板的前端资源检查里那条「语法正确」就是这么红过一次）。 -->
+      <div class="table-wrap"><table><thead><tr>
         <th>结果</th><th>开始</th><th>触发</th><th>耗时</th><th>运行 id</th><th></th>
-      </tr></thead><tbody>${rows}</tbody></table>
+      </tr></thead><tbody>${rows}</tbody></table></div>
     </div>
   </div>`;
   document.body.appendChild(back);
