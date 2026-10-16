@@ -1,7 +1,6 @@
 # PureDashboard（子集 fork）
 
 这个目录是 [PureDashboard](https://github.com/madnh/puredashboard) 的**子集**。
-上游是 MIT、零依赖、**无构建、无压缩** —— 源码即产物，所以"用"就是"复制文件"。
 
 ## 上游版本
 
@@ -11,7 +10,7 @@
 | 版本 | **v0.4.0** |
 | commit | `fb96bbb` |
 | 取用日期 | 2026-10-16 |
-| 许可 | MIT —— `LICENSE` 已随附，版权归上游作者（勿删） |
+| 许可 | MIT —— 版权归上游作者 |
 
 ## 拿了哪些（13 个文件 + LICENSE）
 
