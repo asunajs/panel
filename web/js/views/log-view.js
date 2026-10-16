@@ -95,7 +95,13 @@ export async function render(root, ctx, params = {}) {
 
       <div class="log-toolbar">
         <label class="tool">通道
-          <select id="f-channel">
+          <!-- ⚠ 这些控件必须带上面板自己的类（「select」/「input」）——
+               面板的输入框观感挂在类上，没类就拿浏览器默认样式，
+               在深色主题下几乎看不出"这里能点/能输入"（用户实测：看不出那是输入框）。
+               ⚠ 本段是**模板串里的 HTML 注释**：一个反引号都不能出现，写了会把模板串截断
+                 （我这次就是这么把整个日志页弄挂的 —— 页面卡在"连接中…"，控制台里是
+                  语法错误。面板的静态检查当时没红，因为那种截断恰好还能被解析）。 -->
+          <select class="select" id="f-channel" style="width:auto">
             ${CHANNELS.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
           </select>
         </label>
@@ -112,23 +118,32 @@ export async function render(root, ctx, params = {}) {
         </span>
 
         <label class="tool">插件
-          <!-- ⚠ 占位符不能写「全部」：左边「通道」那个 select 的**值**就是「全部」，
-               两个控件长得一模一样（都是一个框 + 右边一个三角），
-               用户分不清哪个是哪个 —— 实测有人把「插件」当成了通道选择器。 -->
-          <input id="f-plugin" list="log-plugin-list" placeholder="全部插件"
-                 value="${esc(params.plugin || '')}">
-          <datalist id="log-plugin-list">
-            ${pluginNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}
-            <option value="engine"></option>
-            <option value="boot"></option>
-            <option value="auth"></option>
-            <option value="tick"></option>
-            <option value="db"></option>
-          </datalist>
+          <!-- 这里是**真 select**，不再是「输入框 + datalist」。
+               原来那套的毛病（用户实测）：点一下**什么都不弹**（datalist 只在按方向键、
+               或点那个小箭头时才开），看着像 select、用起来不像；弹层还是浏览器原生的，
+               跟页面设计不是一套。面板自己的写法就是 select + 「select」类
+               （见 views/task-editor.js 的插件选择器），这里照它。
+               面板自己的日志没有 plugin 名，是按 scope 分的 —— 所以下面给一组 scope，
+               与「通道 = 面板日志」配合用。
+               ⚠ 同上：这段里不许出现反引号。 -->
+          <select class="select" id="f-plugin" style="width:auto">
+            <option value="">全部插件</option>
+            ${pluginNames.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}
+            <optgroup label="面板日志（按 scope）">
+              <option value="engine">engine</option>
+              <option value="boot">boot</option>
+              <option value="auth">auth</option>
+              <option value="tick">tick</option>
+              <option value="db">db</option>
+            </optgroup>
+          </select>
         </label>
 
         <label class="tool">关键字
-          <input id="f-q" placeholder="即时高亮，不重连">
+          <!-- placeholder 要写**输入什么**（「搜关键字」），不是写这个控件的行为。
+               原来写的是「即时高亮，不重连」—— 那是一句说明，被当成了标签，
+               再加上没有框，用户根本看不出这里能打字。行为挪到 title（悬停才看）。 -->
+          <input class="input" id="f-q" placeholder="搜关键字" title="即时高亮，不重连">
         </label>
 
         <label class="chip" title="关掉就不会跟着新日志滚动 —— 想翻旧行时很有用">
@@ -162,7 +177,15 @@ export async function render(root, ctx, params = {}) {
   const pluginEl = root.querySelector('#f-plugin');
   const channelEl = root.querySelector('#f-channel');
 
-  if (params.plugin) pluginEl.value = params.plugin;
+  // 深链带进来的插件名不一定在候选里（比如那个插件已经被删了）。
+  // 补一个 option 再选中 —— 不补的话 select 会**静默**回到「全部插件」，
+  // 而 URL 里还写着 `plugin=xxx`，用户以为筛选生效了、其实没有。
+  if (params.plugin) {
+    if (![...pluginEl.options].some((o) => o.value === params.plugin)) {
+      pluginEl.appendChild(new Option(params.plugin, params.plugin));
+    }
+    pluginEl.value = params.plugin;
+  }
   if (params.channel) channelEl.value = params.channel;
 
   /** 当前勾选的级别集合。空集合 = 什么都不显示（有提示，不是静默）。 */
@@ -182,7 +205,6 @@ export async function render(root, ctx, params = {}) {
   let notice = null;
   let dropped = 0;
   let highlightTimer = null;
-  let pluginTimer = null;
 
   /** 一行该不该显示：勾选的级别是**精确集合**，不是「最低档」。 */
   const visible = (el) => {
@@ -417,11 +439,9 @@ export async function render(root, ctx, params = {}) {
 
   channelEl.addEventListener('change', open);
 
-  // 插件名走服务端过滤 → 重连。但输入框每敲一个字都重连太狠，防抖 400ms。
-  pluginEl.addEventListener('input', () => {
-    clearTimeout(pluginTimer);
-    pluginTimer = setTimeout(open, 400);
-  });
+  // 插件名走服务端过滤 → 重连。原来这里是「输入框 + 防抖 400ms」（因为每敲一个字
+  // 都重连太狠）；现在它是 select：选一下就是一次明确的意图，不需要防抖。
+  pluginEl.addEventListener('change', open);
 
   // 关键字走客户端：即时，不重连
   qEl.addEventListener('input', () => {
@@ -533,6 +553,5 @@ export async function render(root, ctx, params = {}) {
     stream?.close();
     clearInterval(noteTimer);
     clearTimeout(highlightTimer);
-    clearTimeout(pluginTimer);
   };
 }

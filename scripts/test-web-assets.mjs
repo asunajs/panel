@@ -585,6 +585,42 @@ console.log('\n⑧ 界面文案');
 // ⚠ 不查 `vendor/`：那是上游的代码（同「不许硬编码色值」那条的口径）。
 const STAR = /\*\*/;
 
+/**
+ * 找出「模板串里的 HTML 注释」中的反引号。
+ *
+ * 为什么单列一条：面板的界面是**拼字符串**出来的（`root.innerHTML = \`…\``），
+ * 里面常写 HTML 注释解释"这块为什么这么排"。而模板串的定界符就是反引号 ——
+ * 注释里写一个反引号，模板串会**提前结束**，后面那半截变成语法垃圾。
+ *
+ * ⚠ 关键：这种截断**不一定**是语法错误 —— 它可能恰好还能被解析
+ * （第二十八轮我就在 `views/log-view.js` 里踩到了：`\`.select\` / \`.input\``
+ * 被解析成"字符串 除以 什么"，`node --check` 全绿，而浏览器里整个日志页起不来、
+ * 面板卡在「连接中…」）。所以「语法正确」那条**盖不住**它，必须单独查。
+ */
+function backticksInHtmlComments(src) {
+  const hits = [];
+  let inHtml = false;
+  src.split('\n').forEach((line, i) => {
+    let rest = line;
+    for (;;) {
+      if (!inHtml) {
+        const o = rest.indexOf('<!--');
+        if (o === -1) break;
+        inHtml = true;
+        rest = rest.slice(o + 4);
+        continue;
+      }
+      const c = rest.indexOf('-->');
+      const inner = c === -1 ? rest : rest.slice(0, c);
+      if (inner.includes('`')) hits.push(`${i + 1}: ${line.trim().slice(0, 80)}`);
+      if (c === -1) break;
+      inHtml = false;
+      rest = rest.slice(c + 3);
+    }
+  });
+  return hits;
+}
+
 /** 找出**不在注释里**的 `**`，返回 `行号: 该行内容`。 */
 function nonCommentStars(src) {
   const hits = [];
@@ -649,14 +685,23 @@ function nonCommentStars(src) {
   walk(join(REPO, 'plugins'));
 
   const offenders = [];
+  const tickOffenders = [];
   for (const abs of targets) {
-    const hits = nonCommentStars(readFileSync(abs, 'utf8'));
+    const src = readFileSync(abs, 'utf8');
+    const hits = nonCommentStars(src);
     if (hits.length) offenders.push(`${relative(REPO, abs)} → ${hits.join(' | ')}`);
+    const ticks = backticksInHtmlComments(src);
+    if (ticks.length) tickOffenders.push(`${relative(REPO, abs)} → ${ticks.join(' | ')}`);
   }
   check(
     offenders.length === 0,
     `界面文案里没有字面 Markdown（扫了 ${targets.length} 个文件）`,
     offenders.join(' ; '),
+  );
+  check(
+    tickOffenders.length === 0,
+    '模板串里的 HTML 注释里没有反引号（写了会把模板串截断）',
+    tickOffenders.join(' ; '),
   );
 }
 
