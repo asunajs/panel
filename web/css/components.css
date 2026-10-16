@@ -294,11 +294,16 @@
   padding: var(--sp-3) var(--sp-4);
 }
 
+/* 统计卡的标签（「运行时长」「心跳次数」…）。
+   ⚠ 原来是 11px + uppercase + 0.06em 字距。那一套是**给英文小标签**用的排版：
+   uppercase 对中文毫无作用，只剩"小一号 + 松字距"，11px 的中文再叠上当时那一档
+   很淡的灰，整行就是糊的（用户原话："字色太浅了"）。
+   现在：12px（中文的可读下限）、去掉 uppercase、字距收到 0.02em。
+   配套改动：`web/js/app.js` 里那几个英文标签也换成了中文（混着写本身就不整齐）。 */
 .stat-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-mute);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
 }
 
 .stat-value {
@@ -509,10 +514,12 @@
 
 .table-wrap th {
   padding: 9px var(--sp-3);
-  font-size: 11px;
+  /* 表头：与 .stat-label 同一套口径（12px、不 uppercase、字距 0.02em）。
+     表头是**列的名字**，比正文更需要一眼扫到 —— 原来是 11px + 大写 + 很淡的灰，
+     中文表头（插件/任务/表达式/来源/状态）读起来最吃力。 */
+  font-size: 12px;
   color: var(--text-mute);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
   border-bottom: 1px solid var(--border-soft);
   white-space: nowrap;
 }

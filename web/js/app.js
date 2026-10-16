@@ -19,6 +19,8 @@ import * as pluginSource from './views/plugin-source.js';
 import * as logView from './views/log-view.js';
 import { getState, logout } from './api.js';
 import { lineNode, openLogStream, makeRing } from './logstream.js';
+// 状态的中文与时刻的显示格式：与任务列表页共用一份（见 status.js 的文件头）
+import { statusBadge, minuteOf } from './status.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -191,14 +193,19 @@ async function renderDashboard(root) {
         <span class="badge ${healthy ? 'success' : 'failed'}">${healthy ? '健康' : '停摆'}</span>
       </div>
       <div class="grid stats">
-        ${stat('Uptime', Math.floor((res.uptime_secs || 0) / 60) + ' 分')}
-        ${stat('Ticks', res.ticks ?? '—')}
+        ${/*
+          标签一律用中文。原来这里混着 UPTIME / TICKS / QuickJS 堆 —— 一格里三种语言，
+          而且大写那套排版对中文毫无作用（.stat-label 原来还挂着 uppercase）。
+          `Ticks` 是引擎循环跑了几轮，`QuickJS 堆` 里的 QuickJS 是实现名（用户不需要知道）。
+        */ ''}
+        ${stat('运行时长', Math.floor((res.uptime_secs || 0) / 60) + ' 分')}
+        ${stat('循环次数', res.ticks ?? '—')}
         ${stat('插件', plugins.length)}
         ${stat('任务', jobs.length)}
         ${stat('心跳', (engine.beat_ago_ms ?? '—') + ' ms')}
         ${stat('预算打断', engine.interrupts ?? '—')}
         ${stat('单次预算', (engine.budget_ms ?? '—') + ' ms')}
-        ${stat('QuickJS 堆', Math.round((engine.js_memory_bytes || 0) / 1024) + ' KB')}
+        ${stat('JS 内存', Math.round((engine.js_memory_bytes || 0) / 1024) + ' KB')}
       </div>
       ${
         healthy
@@ -219,19 +226,20 @@ async function renderDashboard(root) {
               jobs.length
                 ? jobs
                     .slice(0, 12)
-                    .map(
-                      (j) => `<tr>
+                    .map((j) => {
+                      // 状态原来是把后端的原值直接印出来的（表里写 `running`），
+                      // 而任务列表页同一列写「运行中」—— 现在共用 ../status.js 那一份。
+                      const st = statusBadge(j.status);
+                      return `<tr>
                   <td class="mono dim">${j.plugin}</td>
                   <td class="mono">${j.name}</td>
                   <td class="mono dim">${j.schedule}</td>
                   <td class="mono dim">${j.source === 'panel' ? '面板' : '插件代码'}</td>
-                  <td><span class="badge ${
-                    j.status === 'running' ? 'running' : j.status === 'paused' ? 'idle' : 'failed'
-                  }">${j.status}</span></td>
+                  <td><span class="badge ${st.cls}">${st.text}</span></td>
                   <td class="num">${j.runs}</td>
-                  <td class="mono dim">${j.next_run || '—'}</td>
-                </tr>`,
-                    )
+                  <td class="mono dim">${minuteOf(j.next_run)}</td>
+                </tr>`;
+                    })
                     .join('')
                 : '<tr><td colspan="7" class="empty">还没有任务</td></tr>'
             }
@@ -357,7 +365,10 @@ function renderSettings(root) {
 // ---------------------------------------------------------------- 路由
 
 const TITLES = {
-  dashboard: 'Dashboard',
+  // ⚠ 这一格原来是 'Dashboard'（英文）—— 其余四格都是中文，侧边栏里并排写着
+  // 「Dashboard / 任务列表 / 日志 / 插件管理 / 设置」。同一份界面里混两种语言
+  // 本身就是"没设计过"的样子（同一个毛病还有统计卡的 UPTIME / TICKS，第二十八轮一并改了）。
+  dashboard: '仪表盘',
   tasks: '任务列表',
   logs: '日志',
   plugins: '插件管理',

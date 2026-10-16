@@ -459,6 +459,55 @@ for (const [name, block] of themeBlocks) {
       `${name} 主题：--${token} ${c} 在 --bg ${bg} 上 ${ratio.toFixed(2)}:1（要 ≥${min}）`,
     );
   }
+
+  // ---- 文字三档 × **每一个它可能落在的底**（第二十八轮补）----
+  //
+  // 为什么要逐对算，而不是像上面那样只算 --bg：`--text-mute` 原来是 overlay0
+  // #6c7086 —— 它在 --bg 上是 3.36:1（"看着还行"，所以一直没被发现），
+  // 而它**待得最多的地方是卡片**：在 --surface 上 2.57:1、悬停底上 1.87:1。
+  // 表现是"表头、卡片小字、统计标签糊成一片"，肉眼只知道"不好看"，
+  // 不知道是哪一档、更不知道改到多少才算够。算出来就清楚了。
+  //
+  // 阈值：正文 AA 是 4.5:1。悬停底（--surface-2）放宽到 4.0 —— 文字只是**扫过**它
+  // （悬停是瞬时的），而且那一档同时是分隔线色，压暗它会连带把分隔线也压没。
+  // ⚠ 放宽的额度写在这里：谁要再往下调，得先改这一行。
+  for (const token of ['text', 'text-dim', 'text-mute']) {
+    const c = readToken(block, token);
+    if (!c) continue;
+    for (const [bgName, min] of [
+      ['bg', 4.5],
+      ['bg-deep', 4.5],
+      ['surface', 4.5],
+      ['surface-2', 4.0],
+    ]) {
+      const b = readToken(block, bgName);
+      if (!b) continue;
+      const ratio = contrast(c, b);
+      check(
+        ratio >= min,
+        `${name} 主题：文字 --${token} ${c} 在 --${bgName} ${b} 上 ${ratio.toFixed(2)}:1（要 ≥${min}）`,
+      );
+    }
+  }
+
+  // ---- 三档必须**依次变淡**（设计不变量）----
+  //
+  // 上面那些算的是"每档都够不够读"，这条管的是"三档还分不分得开"：
+  // 都合格但取同一个值的写法（dim == mute）会让层级消失，页面上"次要信息"
+  // 和"更次要信息"长得一样。方向随主题相反 —— 暗色是越淡越暗，亮色是越淡越浅。
+  const lum = (t) => luminance(readToken(block, t));
+  // 方向随主题相反：暗色是"越次要越暗"（亮度递减），亮色是"越次要越浅"（亮度递增）。
+  const dir = name === 'dark' ? -1 : 1;
+  const d1 = lum('text-dim') - lum('text');
+  const d2 = lum('text-mute') - lum('text-dim');
+  check(
+    Math.sign(d1) === dir && Math.abs(d1) > 0.01,
+    `${name} 主题：--text-dim 要比 --text 淡一档（亮度差 ${d1.toFixed(3)}，要 ${dir > 0 ? '正' : '负'}）`,
+  );
+  check(
+    Math.sign(d2) === dir && Math.abs(d2) > 0.01,
+    `${name} 主题：--text-mute 要比 --text-dim 再淡一档（亮度差 ${d2.toFixed(3)}，要 ${dir > 0 ? '正' : '负'}）`,
+  );
 }
 
 // ---------------------------------------------------------------- ⑦ 第三方 vendor

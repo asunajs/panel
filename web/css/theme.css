@@ -25,9 +25,26 @@
      取 overlay0 #6c7086 = 3.36:1，是能过的最轻的一档。 */
   --border-control: #6c7086;
 
+  /* ---- 文字三档（第二十八轮重定）----
+     **三档都要能读**。原来 dim=#a6adc8、mute=#6c7086，而 #6c7086 是 Mocha 的
+     overlay0 —— 官方口径里那一档是"很少用、比如禁用态"，拿来当表头 / 卡片小字 /
+     统计标签的颜色就太淡了：在 --bg 上 3.36:1、在卡片 --surface 上 2.57:1、
+     在悬停底 --surface-2 上 1.87:1（WCAG AA 正文要 4.5:1）。
+     表现就是"字糊成一片"—— 这种问题肉眼看不出是哪一档，算一下才知道。
+
+     现在整体上移一档，取值全是 Mocha 官方色，不自己调色：
+
+       档位    值          在 --bg   在 --surface   在 --surface-2
+       text   #cdd6f4     11.34     9.02           6.31
+       dim    #bac2de      9.26     7.10           5.15
+       mute   #a6adc8      7.37     5.65           4.10
+
+     ⚠ 结论：**overlay0 / overlay1 不许当文字色**（官方口径里它们是装饰色）。
+       非文字的边界仍走 --border-control（那一档按 WCAG 1.4.11 只要 3:1）。
+       scripts/test-web-assets.mjs ⑥b 现在会按"文字档 × 各个底"逐对算，改回去就红。 */
   --text: #cdd6f4;
-  --text-dim: #a6adc8;
-  --text-mute: #6c7086;
+  --text-dim: #bac2de;
+  --text-mute: #a6adc8;
 
   /* ---- 粉色系（第二十七轮）----
      accent 从 Mocha 的蓝 #89b4fa 换成官方粉 #f5c2e7（对比度 10.74:1，比蓝还好）。
@@ -64,9 +81,21 @@
      得用 overlay2 #7c7f93 = 3.49:1 —— 亮色这边能过的最轻的一档比暗色更靠后。 */
   --border-control: #7c7f93;
 
+  /* 文字三档。亮色这边**没有现成的第三档能过 AA**：
+     Latte 的 overlay2 #7c7f93 是 3.50:1、subtext0 #6c6f85 是 4.37:1 —— 都不到 4.5。
+     （注意这与上面 --border-control 是同一个坑：overlay 那几档是装饰色，
+       拿来当文字比当边框更糟 —— 边框只要 3:1，文字要 4.5:1。）
+
+     所以第三档取 subtext0 与 subtext1 之间的一档 #64687e（4.86:1，实测）。
+     它是内插值，仍在 Latte 的冷灰区间里，不引入新色相：
+
+       档位    值          在 --bg   在 --surface(#fff)
+       text   #4c4f69      7.06     8.42
+       dim    #5c5f77      5.53     6.25
+       mute   #64687e      4.86     5.49 */
   --text: #4c4f69;
-  --text-dim: #6c6f85;
-  --text-mute: #9ca0b0;
+  --text-dim: #5c5f77;
+  --text-mute: #64687e;
 
   /* ---- 粉色系（第二十七轮）----
      **不能**直接用 Latte 官方的粉 #ea76cb：它在这个底色上只有 2.34:1，

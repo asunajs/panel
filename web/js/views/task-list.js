@@ -21,17 +21,8 @@ import {
 } from '../api.js';
 import { TASKS } from '../mock.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
-
-/** 后端 status → 徽章样式。后端只保证这几个取值（见 src/web.rs 的 job_rows）。 */
-const STATUS_MAP = {
-  running: { cls: 'running', text: '运行中' },
-  paused: { cls: 'idle', text: '已暂停' },
-  tripped: { cls: 'failed', text: '已熔断' },
-  error: { cls: 'failed', text: '执行出错' },
-  idle: { cls: 'idle', text: '待触发' },
-  // 面板删掉的（墓碑）：插件代码仍然声明它，所以它还在库里但不调度
-  deleted: { cls: 'idle', text: '已删除' },
-};
+// 状态的中文与徽章样式在 ../status.js —— 仪表盘也要用同一份（原来它露的是英文原值）
+import { statusBadge } from '../status.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -40,7 +31,7 @@ function esc(s) {
 }
 
 function badge(status, trips) {
-  const m = STATUS_MAP[status] || STATUS_MAP.idle;
+  const m = statusBadge(status);
   const suffix = status === 'tripped' && trips ? ` ×${trips}` : '';
   return `<span class="badge ${m.cls}">${m.text}${suffix}</span>`;
 }

@@ -174,6 +174,9 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/editor.js"),
     asset!("js/confirm.js"),
     asset!("js/mock.js"),
+    // 任务状态 → 中文 + 徽章样式，以及时刻的显示格式：列表页与仪表盘共用一份
+    // （第二十八轮从 task-list.js 里抽出来 —— 抽之前仪表盘露的是后端的英文原值）
+    asset!("js/status.js"),
     asset!("js/views/task-list.js"),
     asset!("js/views/task-editor.js"),
     asset!("js/views/log-view.js"),

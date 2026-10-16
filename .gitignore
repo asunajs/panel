@@ -31,3 +31,9 @@ adapters/node/node_modules/
 # `adapters/node/`、`adapters/python/` 下跑，它们的默认目录就是那里的 ./logs ——
 # 只忽略根目录的话，跑一次自测就会把两个适配器目录弄脏。
 logs/
+
+# 面板的源码编辑器保存插件源码时，会在原文件旁边留一份 `<名>.bak`（"能恢复"那条
+# 断言的底气就在它）。它是**运行期产物**，不是源码 ——
+# `scripts/screenshot.mjs` 跑一趟就会在 `plugins/js/` 下留一个，`git status` 变脏。
+# 仓库里被跟踪的 .bak 是 0 个（`git ls-files '*.bak'`），所以整类忽略是安全的。
+*.bak
