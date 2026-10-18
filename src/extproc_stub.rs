@@ -35,8 +35,6 @@ impl ExtPlugin {
     pub fn tick(&self, _seq: u64, _ts: &str, _budget: Duration) -> Result<(), String> {
         Err(unsupported())
     }
-
-    pub fn kill(&self) {}
 }
 
 pub struct ExtLoad {

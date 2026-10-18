@@ -22,8 +22,10 @@
 PocketPy 与 Python 插件基础设施在本轮被删除，新的 Node/Bun 数字等实测补上。
 
 **CI 跑在真 ARM64 Linux 硬件上**（`ubuntu-24.04-arm`）：单元测试、冒烟测试（真的把服务跑起来）、
-以及 `aarch64-unknown-linux-musl` 静态产物的构建与校验。开发机是 arm64 macOS，跑不了 Linux 二进制 ——
-「目标平台上到底能不能跑」只能由 CI 回答，不能拿本机结果代替。
+以及 `aarch64-unknown-linux-musl` 静态产物的构建与校验；另有一个 `windows-latest` job
+只做 `cargo check --all-targets` + release 链接，确保外部运行时 Unix-only 时 QuickJS 仍可编译。
+开发机是 arm64 macOS，跑不了 Linux 二进制 —— 「目标平台上到底能不能跑」只能由 CI 回答，
+不能拿本机结果代替。
 CI 在**打 tag / 手动触发 / 别人发 PR** 时跑；自己往 `main` 推 commit 不跑（一轮工作常常十几次提交，
 大部分是文档与前端调整）。真正的验证时机是「要发一版」，而那就是 tag。
 

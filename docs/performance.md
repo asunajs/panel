@@ -117,6 +117,7 @@ PANEL_JS_ENGINE=quickjs ./plugin-panel &   # 基线
 | `linux-x86_64` | `ubuntu-latest` | 单元测试 + install.sh 用例 + 前端静态检查 + 冒烟 + 产物 |
 | `linux-aarch64` | `ubuntu-24.04-arm` | **真 ARM64 硬件**上跑单元测试 + 冒烟 |
 | `linux-aarch64-musl` | `ubuntu-24.04-arm` | 静态链接产物 + 冒烟 |
+| `windows-x86_64` | `windows-latest` | `cargo check --all-targets` + release 链接（外部运行时 Unix-only，QuickJS 必须可编译） |
 | `adapters` | `ubuntu-latest` | Node 适配器用例 + 仓库真插件在 Node 下跑通 |
 | `runtime-js` | `ubuntu-latest` | `runtime/js` 的协议 / host-api 用例（Node 22） |
 

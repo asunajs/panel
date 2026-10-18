@@ -297,6 +297,7 @@ fn run_version(cmd: &PathBuf, args: &[&str], timeout: Duration) -> Result<String
     }
 }
 
+#[cfg(unix)]
 fn probe_cmd(env_key: &str, default: &str, args: &[&str], kind: &str) -> RuntimeInfo {
     let raw = std::env::var(env_key).ok().filter(|s| !s.trim().is_empty());
     let path = raw
@@ -313,6 +314,7 @@ fn probe_cmd(env_key: &str, default: &str, args: &[&str], kind: &str) -> Runtime
     }
 }
 
+#[cfg(unix)]
 fn probe_node() -> RuntimeInfo {
     let info = probe_cmd("PANEL_NODE", "node", &["--version"], "node");
     if !info.available {
@@ -330,6 +332,7 @@ fn probe_node() -> RuntimeInfo {
     }
 }
 
+#[cfg(any(unix, test))]
 fn node_major(raw: &str) -> Option<(u32, u32)> {
     // "v24.16.0" / "24.16.0"
     let s = raw.trim().trim_start_matches('v');
@@ -339,6 +342,7 @@ fn node_major(raw: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+#[cfg(unix)]
 fn probe_bun() -> RuntimeInfo {
     let info = probe_cmd("PANEL_BUN", "bun", &["--version"], "bun");
     if !info.available {
