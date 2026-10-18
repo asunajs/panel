@@ -15,8 +15,12 @@
 //! 反过来的话，插件没法用一个同名路径既提供页面又提供数据。
 
 use crate::auth::{self, LoginError};
+use chrono::Local;
+use crate::cron::Schedule;
 use crate::db;
 use crate::engine::EngineCmd;
+use crate::runtimes::EngineKind;
+use crate::taskdir;
 use crate::ratelimit::Rejected;
 use crate::AppState;
 use axum::body::Bytes;
@@ -166,7 +170,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{plugin}/{name}/restore", post(restore_job))
         .route("/api/jobs/{plugin}/{name}/edit", post(edit_job))
         .route("/api/jobs/cleanup", post(cleanup_jobs))
+        .route("/api/plugins/{name}/runtime", post(set_plugin_runtime))
         .route("/api/plugins/{name}/disable", post(disable_plugin))
+        .route("/api/plugins/{name}/keep-warm", post(set_plugin_keep_warm))
+        .route("/api/plugins/{name}/load", post(load_plugin))
+        .route("/api/plugins/{name}/unload", post(unload_plugin))
         .route("/api/plugins/{name}/enable", post(enable_plugin))
         .route("/api/plugins/{name}/reload", post(reload_plugin))
         .route(
@@ -187,6 +195,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/pause", post(pause_task))
         .route("/api/tasks/{plugin}/{name}/resume", post(resume_task))
         // 测试运行：一段代码 → 一个临时解释器 → stdout/stderr
+        .route("/api/scripts", get(list_scripts))
+        .route("/api/scripts/jobs", post(create_script_job))
+        .route("/api/scripts/jobs/{name}/edit", post(edit_script_job))
         .route("/api/test/{lang}", post(test_run))
         // 只读接口
         .route("/", get(asset_index))
@@ -327,21 +338,23 @@ async fn do_login(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("application/x-www-form-urlencoded"));
 
-    let (token, next) = if is_form {
-        let form = parse_form(&String::from_utf8_lossy(&body));
-        (form.0, form.1)
+    // 登录是爆破的主要目标：这里也走 client_ip（反代模式下取真实来源），
+    // 否则反代后面所有人共用一个 127.0.0.1，一个人猜错就把所有人都退避掉
+    let ip = auth::client_ip(peer, &headers, st.trust_proxy);
+
+    let (token, next, trap) = if is_form {
+        parse_form(&String::from_utf8_lossy(&body))
     } else {
         match serde_json::from_slice::<LoginReq>(&body) {
-            Ok(r) => (r.token, r.next),
+            // JSON 那条是脚本 / CI 的路：它压根没有表单，也就没有蜜罐可填
+            Ok(r) => (r.token, r.next, String::new()),
             Err(e) => {
                 return json_error(StatusCode::BAD_REQUEST, format!("请求体不是合法 JSON: {e}"))
             }
         }
     };
 
-    // 登录是爆破的主要目标：这里也走 client_ip（反代模式下取真实来源），
-    // 否则反代后面所有人共用一个 127.0.0.1，一个人猜错就把所有人都退避掉
-    match st.auth.login(&token, auth::client_ip(peer, &headers, st.trust_proxy)) {
+    match st.auth.login(&token, ip) {
         Ok(sid) => {
             // ⚠ 走**面板通道**（plog!），不是插件通道：登录是面板自己的事，
             // 和插件无关。写进插件通道会让它带上一个假的「插件名 auth」，
@@ -367,6 +380,15 @@ async fn do_login(
             resp
         }
         Err(e) => {
+            // 蜜罐：填了登录页上那个看不见的字段、口令又不对 ⇒ 判定为自动化脚本，
+            // 封掉这个来源的登录（`Auth::ban`，一小时）。
+            //
+            // ⚠ 两个条件缺一不可。只看字段的话，「浏览器把用户名自动填上了」
+            // 就能把自己锁在门外；只看口令错的话，就是原来那套退避、没有新增什么。
+            // 另外只在**表单**这条路上判：JSON 是脚本用的，没有蜜罐字段。
+            if !trap.is_empty() && matches!(e, LoginError::BadToken) {
+                st.auth.ban(ip);
+            }
             // 失败原因写进日志（面板上能看到谁在猜），但**不回显令牌本身**
             crate::log::plog!("auth", warn, "登录失败（来自 {}）: {}", peer.ip(), e.message());
             if is_form {
@@ -419,23 +441,29 @@ async fn do_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     resp
 }
 
-/// 解析 `application/x-www-form-urlencoded`，返回 `(token, next)`。
+/// 解析 `application/x-www-form-urlencoded`，返回 `(token, next, 蜜罐字段)`。
 ///
 /// `+` 在表单编码里代表空格，所以必须先还原成空格再百分号解码 ——
 /// 顺序反了的话，令牌里合法的 `+` 会变成空格，登录永远失败。
-fn parse_form(body: &str) -> (String, Option<String>) {
+///
+/// 第三个值是登录页上那个**看不见**的 `username`。真人提交时它是空字符串
+/// （字段在表单里，但没人填得动），非空 ⇒ 对方是把表单整个灌一遍的脚本。
+/// 判据在 `do_login` 那边，这里只负责把它读出来。
+fn parse_form(body: &str) -> (String, Option<String>, String) {
     let mut token = String::new();
     let mut next = None;
+    let mut trap = String::new();
     for pair in body.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             match percent_decode(k).as_str() {
                 "token" => token = percent_decode(v),
                 "next" => next = Some(percent_decode(v)),
+                "username" => trap = percent_decode(v),
                 _ => {}
             }
         }
     }
-    (token, next)
+    (token, next, trap)
 }
 
 /// `+` → 空格，`%XX` → 字节。解不出来就原样保留，不报错。
@@ -816,6 +844,88 @@ async fn set_plugin_disabled(
     }
 }
 
+/// `POST /api/plugins/{name}/load` / `unload` —— 手动装进 / 卸出内存。
+///
+/// 与「停用」不是一回事：停用是面板不让它加载（任务也不跑、重启后仍然停用）；
+/// 这个只是"这会儿在不在内存里"，任务照旧排着，到点会自动装回来。
+async fn set_plugin_loaded(st: &AppState, name: &str, loaded: bool, headers: &HeaderMap) -> Response {
+    if let Err(r) = guard_write(headers) {
+        return r;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(r) = route(
+        st,
+        name,
+        EngineCmd::SetPluginLoaded {
+            name: name.to_string(),
+            loaded,
+            reply: tx,
+        },
+    ) {
+        return r;
+    }
+    match tokio::time::timeout(Duration::from_secs(15), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true, "loaded": loaded })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 15 秒没回话".into()),
+    }
+}
+
+async fn load_plugin(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    set_plugin_loaded(&st, &name, true, &headers).await
+}
+
+async fn unload_plugin(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    set_plugin_loaded(&st, &name, false, &headers).await
+}
+
+/// `POST /api/plugins/{name}/keep-warm` `{keep: true|false}` —— 「长期加载」。
+///
+/// 引擎默认对**没有路由、没有 on_tick、也没有勾这个**的插件做惰性加载
+/// （闲下来就卸出内存，触发前 [`crate::engine::DEFAULT_PRELOAD_MS`] 装回来）。
+/// 勾上这一格 = 一直待在内存里，一次也不卸。
+async fn set_plugin_keep_warm(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let keep = body
+        .get("keep")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Err(r) = route(
+        &st,
+        &name,
+        EngineCmd::SetPluginKeepWarm {
+            name: name.clone(),
+            keep,
+            reply: tx,
+        },
+    ) {
+        return r;
+    }
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true, "keep_warm": keep })).into_response(),
+        Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
+        Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
+        Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
+    }
+}
+
 async fn disable_plugin(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -1116,6 +1226,390 @@ async fn cleanup_jobs(
     }
 }
 
+/* ------------------------------ 第三方运行时 / 脚本任务 ------------------------------ */
+
+#[derive(Deserialize)]
+struct PluginRuntimeReq {
+    engine: String,
+    #[serde(default)]
+    command: Option<String>,
+}
+
+/// `POST /api/plugins/{name}/runtime` —— 切 QuickJS / Node / Bun（按插件覆盖）。
+async fn set_plugin_runtime(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<PluginRuntimeReq>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let Some(engine) = EngineKind::parse(&req.engine) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("engine 只认 quickjs / node / bun，收到 `{}`", req.engine),
+        );
+    };
+    // 插件存在性：已加载 / 已停用 / 磁盘上有文件都算
+    let known = st.registry.lock().unwrap().iter().any(|p| p.name == name)
+        || db::list_disabled_plugins(&st.db)
+            .unwrap_or_default()
+            .iter()
+            .any(|n| n == &name)
+        || plugin_file_of(&st.plugins_dir, &name).is_some();
+    if !known {
+        return json_error(StatusCode::NOT_FOUND, format!("没有叫 `{name}` 的插件"));
+    }
+
+    let command = req
+        .command
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if engine == EngineKind::QuickJs {
+        if command.is_some() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "QuickJS 是内嵌的，不能指定解释器路径".into(),
+            );
+        }
+    } else {
+        if let Err(e) = st.host.catalog.require(engine) {
+            return json_error(StatusCode::BAD_REQUEST, e);
+        }
+        if let Some(cmd) = &command {
+            let p = std::path::Path::new(cmd);
+            if !p.is_file() {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("解释器路径不存在或不是文件: `{cmd}`"),
+                );
+            }
+        }
+    }
+
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    if let Err(e) = db::set_plugin_runtime(
+        &st.db,
+        &name,
+        // 显式选 QuickJS 要落库：否则在 `PANEL_JS_ENGINE=node` 的部署里，
+        // “改回 QuickJS”会被当成“没设置”而回落到全局 node。
+        Some(engine.as_str()),
+        command.as_deref(),
+        &now,
+    ) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写运行时设置失败: {e}"));
+    }
+
+    // 已加载的插件立刻按新引擎重读；停用的插件下次启用时自然生效。
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let _ = st.engine.send_for(
+        &name,
+        EngineCmd::ReloadPlugin {
+            name: name.clone(),
+            reply: tx,
+        },
+    );
+    Json(json!({ "ok": true, "engine": engine.as_str() })).into_response()
+}
+
+/// `GET /api/scripts` —— 任务目录里的文件 + 所有脚本任务。
+fn runtime_available(cat: &crate::runtimes::RuntimeCatalog, runtime: &str) -> bool {
+    match runtime {
+        "node" => cat.node_path().is_ok(),
+        "bun" => cat.bun_path().is_ok(),
+        "python3" | "python" | "py" => cat.python_path().is_ok(),
+        "sh" | "bash" => cfg!(unix) && std::path::Path::new("/bin/sh").exists(),
+        _ => false,
+    }
+}
+
+async fn list_scripts(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let files = taskdir::scan(&st.host.tasks_dir);
+    let jobs = db::list_script_jobs(&st.db).unwrap_or_default();
+    let files_json: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| {
+            let scheduled = jobs.iter().any(|j| {
+                !j.deleted
+                    && (j.script.as_deref() == Some(f.path.as_str())
+                        || j.name == f.name)
+                    && (j.source == "script-panel" || !j.schedule.is_empty())
+            });
+            let params = f
+                .header
+                .params
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .unwrap_or(serde_json::Value::Null);
+            json!({
+                "path": f.path,
+                "name": f.name,
+                "runtime": f.runtime.as_str(),
+                "kind": f.kind.label(),
+                "header": {
+                    "name": f.header.name,
+                    "cron": f.header.cron,
+                    "runtime": f.header.runtime,
+                    "timeout_ms": f.header.timeout_ms,
+                    "params": params,
+                    "disabled": f.header.disabled,
+                },
+                "valid": f.valid,
+                "error": f.error,
+                "scheduled": scheduled,
+                "available": runtime_available(&st.host.catalog, f.runtime.as_str()),
+            })
+        })
+        .collect();
+    let jobs_json: Vec<serde_json::Value> = jobs
+        .iter()
+        .map(|j| {
+            let mut v = serde_json::to_value(j).unwrap_or_else(|_| json!({}));
+            let rt = j.runtime.as_deref().unwrap_or("node");
+            v["available"] = json!(runtime_available(&st.host.catalog, rt));
+            v
+        })
+        .collect();
+    Json(json!({
+        "files": files_json,
+        "jobs": jobs_json,
+        "tasks_dir": st.host.tasks_dir.display().to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ScriptJobCreate {
+    name: String,
+    path: String,
+    expr: String,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    budget_ms: Option<u64>,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+fn normalize_script_path(raw: &str) -> String {
+    raw.trim().trim_start_matches("./").replace('\\', "/")
+}
+
+fn script_params_text(v: &Option<serde_json::Value>) -> Result<Option<String>, String> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => {
+            if let Some(s) = v.as_str() {
+                if s.trim().is_empty() {
+                    return Ok(None);
+                }
+                serde_json::from_str::<serde_json::Value>(s)
+                    .map_err(|e| format!("params 不是合法 JSON: {e}"))?;
+                Ok(Some(s.to_string()))
+            } else {
+                Ok(Some(v.to_string()))
+            }
+        }
+    }
+}
+
+fn notify_scripts(st: &AppState) {
+    for s in st.engine.senders() {
+        let _ = s.send(EngineCmd::ReloadScripts);
+    }
+}
+
+/// `POST /api/scripts/jobs` —— 面板创建一条脚本任务（引用 TASKS_DIR 里的文件）。
+async fn create_script_job(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ScriptJobCreate>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let name = req.name.trim();
+    if !taskdir::valid_task_name(name) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "任务名不合法：不能为空、不能含路径分隔符、不能是 `.`/`..`，最多 80 个字符".into(),
+        );
+    }
+    let path = normalize_script_path(&req.path);
+    let Some(file) = taskdir::scan(&st.host.tasks_dir)
+        .into_iter()
+        .find(|f| f.path == path)
+    else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("任务目录里没有 `{path}`"),
+        );
+    };
+    if file.name == name {
+        return json_error(
+            StatusCode::CONFLICT,
+            format!("`{}` 的目录任务已经叫 `{name}`（目录优先）", file.path),
+        );
+    }
+    let schedule = match Schedule::parse(&req.expr) {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, format!("表达式无效: {e}")),
+    };
+    let _ = schedule;
+    let runtime = match req.runtime.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("auto") => file.runtime,
+        Some(raw) => match taskdir::ScriptRuntime::parse(raw) {
+            Some(r) if r == file.runtime => r,
+            Some(r) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "运行时 `{}` 与文件 `{}` 的类型（{}）不匹配",
+                        r.as_str(),
+                        file.path,
+                        file.runtime.as_str()
+                    ),
+                )
+            }
+            None => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("未知运行时 `{raw}`（node|bun|python3|sh）"),
+                )
+            }
+        },
+    };
+    let params = match script_params_text(&req.params) {
+        Ok(p) => p,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let existing = db::list_script_jobs(&st.db).unwrap_or_default();
+    if existing.iter().any(|j| j.name == name) {
+        return json_error(StatusCode::CONFLICT, format!("任务 `{name}` 已经存在"));
+    }
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    if let Err(e) = db::insert_script_panel_job(
+        &st.db,
+        name,
+        &file.path,
+        runtime.as_str(),
+        &req.expr,
+        "scheduled",
+        None,
+        params.as_deref(),
+        req.budget_ms,
+        &now,
+    ) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写任务失败: {e}"));
+    }
+    notify_scripts(&st);
+    Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ScriptJobEdit {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    expr: Option<String>,
+    #[serde(default)]
+    runtime: Option<String>,
+    // 三态：字段缺失 = 不改；null = 清空；数字 = 设值。
+    #[serde(default, deserialize_with = "double_option")]
+    budget_ms: Option<Option<u64>>,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// `POST /api/scripts/jobs/{name}/edit` —— 编辑面板脚本任务（目录任务用 `/api/jobs/.../edit`）。
+async fn edit_script_job(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<ScriptJobEdit>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let jobs = db::list_script_jobs(&st.db).unwrap_or_default();
+    let Some(job) = jobs.iter().find(|j| j.name == name) else {
+        return json_error(StatusCode::NOT_FOUND, format!("没有脚本任务 `{name}`"));
+    };
+    if job.source != "script-panel" {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "目录任务的调度请用 /api/jobs/__script__/{name}/edit 覆盖".into(),
+        );
+    }
+    let path = req
+        .path
+        .as_deref()
+        .map(normalize_script_path)
+        .unwrap_or_else(|| job.script.clone().unwrap_or_default());
+    let Some(file) = taskdir::scan(&st.host.tasks_dir)
+        .into_iter()
+        .find(|f| f.path == path)
+    else {
+        return json_error(StatusCode::BAD_REQUEST, format!("任务目录里没有 `{path}`"));
+    };
+    let expr = req.expr.unwrap_or_else(|| job.schedule.clone());
+    if let Err(e) = Schedule::parse(&expr) {
+        return json_error(StatusCode::BAD_REQUEST, format!("表达式无效: {e}"));
+    }
+    let runtime = match req.runtime.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("auto") => file.runtime,
+        Some(raw) => match taskdir::ScriptRuntime::parse(raw) {
+            Some(r) if r == file.runtime => r,
+            Some(r) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("运行时 `{}` 与 `{}` 不匹配", r.as_str(), file.path),
+                )
+            }
+            None => {
+                return json_error(StatusCode::BAD_REQUEST, format!("未知运行时 `{raw}`"))
+            }
+        },
+    };
+    let params = if req.params.is_some() {
+        match script_params_text(&req.params) {
+            Ok(p) => p,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+        }
+    } else {
+        job.params.clone()
+    };
+    let budget = match req.budget_ms {
+        None => job.budget_ms.map(|v| v as u64),
+        Some(None) => None,
+        Some(Some(0)) => None,
+        Some(Some(v)) => Some(v),
+    };
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    if let Err(e) = db::update_script_panel_job(
+        &st.db,
+        &name,
+        &file.path,
+        runtime.as_str(),
+        &expr,
+        params.as_deref(),
+        budget,
+        &now,
+    ) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("更新任务失败: {e}"));
+    }
+    notify_scripts(&st);
+    Json(json!({ "ok": true })).into_response()
+}
+
 async fn pause_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
@@ -1284,8 +1778,9 @@ const MAX_PLUGIN_ASSET: u64 = 4 * 1024 * 1024;
 ///
 /// 用点：停用中的插件不在 registry 里，面板仍要显示它的路径。
 fn plugin_file_of(plugins_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    for dir in [plugins_dir.to_path_buf(), plugins_dir.join("js"), plugins_dir.join("py")] {
-        for ext in ["js", "py"] {
+    // Python 已退出插件范畴：只找 .js / .mjs。
+    for dir in [plugins_dir.to_path_buf(), plugins_dir.join("js")] {
+        for ext in ["js", "mjs"] {
             let p = dir.join(format!("{name}.{ext}"));
             if p.is_file() {
                 return Some(p);
@@ -1456,10 +1951,10 @@ async fn test_run(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    if lang != "js" && lang != "py" {
+    if lang != "js" {
         return json_error(
             StatusCode::BAD_REQUEST,
-            format!("只支持 js / py，收到 `{lang}`"),
+            format!("只支持 js（Python 已退出插件/试跑范畴），收到 `{lang}`"),
         );
     }
     if req.code.trim().is_empty() {
@@ -1525,7 +2020,7 @@ async fn test_run(
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
     }
 
-    // 给得比执行预算宽：临时解释器要先建起来（QuickJS Context / PocketPy VM）
+    // 给得比执行预算宽：临时解释器要先建起来（QuickJS Context）
     let wait = Duration::from_millis(st.health.budget_ms + 5_000);
     match tokio::time::timeout(wait, rx).await {
         Ok(Ok(Ok(out))) => Json(json!({
@@ -2131,6 +2626,8 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
     // 面板上一点停用，它就整个消失了，再也点不回来。这类条目只给名字 / 文件 /
     // 运行时 / 一个 disabled 标记，够了。
     let disabled = db::list_disabled_plugins(&st.db).unwrap_or_default();
+    // 停用的条目也要如实报「长期加载」—— 它是面板设置，与"加载没加载"无关
+    let keep_warm_names = db::list_keep_warm_plugins(&st.db).unwrap_or_default();
     let mut plugins: Vec<serde_json::Value> = st
         .registry
         .lock()
@@ -2166,12 +2663,18 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         let file = plugin_file_of(&st.plugins_dir, name)
             .map(|f| f.display().to_string())
             .unwrap_or_default();
-        let runtime = if file.ends_with(".py") { "py" } else { "js" };
+        let (stored_engine, stored_command) = db::get_plugin_runtime(&st.db, name).unwrap_or((None, None));
+        let engine = stored_engine
+            .as_deref()
+            .and_then(crate::runtimes::EngineKind::parse)
+            .unwrap_or(st.host.catalog.js_default);
         plugins.push(json!({
             "name": name,
             "file": file,
             "group": plugin_group(name),
-            "runtime": runtime,
+            "runtime": "js",
+            "engine": engine.as_str(),
+            "command": stored_command,
             "has_on_tick": false,
             "ticks": 0,
             "last_tick": null,
@@ -2179,6 +2682,14 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "tasks": 0,
             "has_ui": plugin_ui_index(&st.plugins_dir, name).is_file(),
             "disabled": true,
+            // ⚠ 停用的插件**也**要带上这四格，否则 `/api/state` 的 `plugins[]` 有两种形状：
+            //   `PluginInfo`（已加载的，有 evicted/keep_warm/has_routes/nav）与这条手搓的。
+            //   前端拿 `p.evicted !== true` 判"已加载" ⇒ 停用插件会被画成"已加载 + 可点卸载"，
+            //   点下去引擎回"没有叫 X 的插件"（它压根没加载）—— 实测踩到。
+            "evicted": false,
+            "keep_warm": keep_warm_names.iter().any(|n| n == name),
+            "has_routes": false,
+            "nav": serde_json::Value::Null,
         }));
     }
     plugins.sort_by(|a, b| {
@@ -2204,18 +2715,28 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "budget_ms": st.health.budget_ms,
             "js_memory_bytes": st.health.js_memory_bytes(),
         },
+        // 这个二进制**编进了什么**。发布出去之后，"直播能不能用"完全取决于它，
+        // 而它以前只能靠"跑一次任务看有没有报错"才知道 —— 太晚、也太难看懂。
+        // 放在 state 里 ⇒ `curl /api/state | jq .build` 一眼就答得上来。
+        "build": build_info(),
         "uptime_secs": st.started.elapsed().as_secs(),
         "ticks": st.ticks.load(Ordering::Relaxed),
         // 鉴权**永远是开的**（没有「本机免登录」这种模式了），所以这里不再报
         // `enabled` —— 前端也就没有「本机免登录」那个徽标分支可走（见 app.js）
         "auth": {
             "kind": st.auth.cred_kind().0,
+            // 线上那份是不是明文（= 开发口子开着）。露出来是为了让它**藏不住**：
+            // 「部署闸」只能拦住明显的部署形态（反代/TLS、非回环），
+            // 一个只绑回环却用隧道反代出去的人拦不住 —— 那就让他至少在读数里看得见。
+            "plain_token": st.auth.plain_token(),
             "sessions": st.auth.active_sessions(),
             "cookie_secure": st.auth.cookie_secure(),
             // 防爆破的可观测面：运维要能看出「有人在猜令牌」以及「自己为什么登不上」。
             // 反代下尤其重要 —— 所有人共用一个 IP，一个来源被退避就等于全员被退避。
             "failed_recent": st.auth.failed_recent(),
             "blocked_ips": st.auth.blocked_ips(),
+            // 蜜罐封掉的来源（比退避重：那一个是猜错几次，这一个是被判定为脚本）
+            "banned_ips": st.auth.banned_ips(),
             "global_lock_ms": st.auth.global_lock_ms(),
             "trust_proxy": st.trust_proxy,
         },
@@ -2232,6 +2753,7 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             "burst": st.test_limiter.burst(),
             "refill_ms": st.test_limiter.refill_ms(),
         },
+        "runtimes": st.host.catalog.snapshot(),
         "plugins": plugins,
         "jobs": jobs,
         "tasks": tasks,
@@ -2248,11 +2770,14 @@ fn render_login(err: Option<&str>, next: Option<&str>, st: &AppState) -> String 
         Some(e) => format!("<div class=\"err\">{}</div>", esc(e)),
         None => String::new(),
     };
+    // 摘要形态（部署里的正常情况）：页面先算 `sha256("plugin-panel/v1:"+口令)`，
+    // 只把这个摘要 POST 上去 —— 明文口令不出浏览器。
+    // 旧形态（明文 / 旧哈希，只在本机开发口子里）：页面照原样提交。
+    let mode = if st.auth.wants_digest() { "digest" } else { "plain" };
     LOGIN_PAGE
         .replace("__ERR__", &err_html)
         .replace("__NEXT__", &esc(&safe_next(next)))
-        .replace("__ADDR__", &esc(&st.addr))
-        .replace("__SESSIONS__", &st.auth.active_sessions().to_string())
+        .replace("__MODE__", mode)
 }
 
 
@@ -2274,10 +2799,21 @@ fn esc(s: &str) -> String {
 ///
 /// 单独一份而不是复用 `PAGE`：登录页**不能**带任何面板数据（它是在未认证状态下
 /// 渲染的），也不能带面板那段会去 fetch `/api/state` 的脚本 —— 否则未登录的浏览器
-/// 会每秒收到一个 401。这里只有一张表单，没有任何 JS。
+/// 会每秒收到一个 401。这里只有一张表单，外加那段把口令换成摘要的脚本。
 ///
 /// 表单用 `application/x-www-form-urlencoded`（浏览器默认），服务端 `do_login`
 /// 按 `Content-Type` 分流：表单走「失败重渲染」，JSON 走「返回 JSON」。
+///
+/// ## 表单里那个看不见的「账号」
+///
+/// 这个面板没有账号概念，只有口令。所以那个「账号」框是**蜜罐**：真人看不见它、
+/// Tab 也进不去（`.acct { display: none; }` + `tabindex="-1"`），而批量脚本通常把
+/// 表单里每个输入框都灌一份（admin / user / root）—— 填了它就是自动化的信号。
+/// 填了它 + 口令又不对 ⇒ 封掉这个来源的登录一小时（[`auth::Auth::ban`]，判据在 `do_login`）。
+///
+/// ⚠ 为什么解释写在这里而不是 HTML 里：这一整串是**原样发给浏览器**的，
+/// HTML / CSS 注释里的每个字都是攻击者能读到的 —— 写明「这是蜜罐」等于教他留空。
+/// 类名同理，所以叫 `.acct` 而不是 `.trap`。要改这段说明，只能改 Rust 侧的注释。
 const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2292,8 +2828,7 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
          display: flex; align-items: center; justify-content: center; min-height: 100vh; }
   .card { background: #1b1e24; border: 1px solid #272c34; border-radius: 9px;
           padding: 22px 24px; width: 100%; max-width: 400px; }
-  h1 { font-size: 15px; margin: 0 0 4px; }
-  .sub { color: #6b7686; font-size: 12px; margin-bottom: 18px; }
+  h1 { font-size: 15px; margin: 0 0 18px; }
   label { display: block; color: #8b949e; font-size: 12px; margin-bottom: 6px; }
   input[type=password] { width: 100%; background: #16181d; color: #d8dee9;
           border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px;
@@ -2304,35 +2839,163 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
   button:hover { background: #388bfd; }
   .err { background: #3a1518; color: #f85149; border-radius: 6px; padding: 8px 10px;
          font-size: 12px; margin-bottom: 14px; }
-  .hint { color: #6b7686; font-size: 11px; margin-top: 14px; line-height: 1.7; }
-  code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
+  .acct { display: none; }
 </style>
 </head>
 <body>
   <div class="card">
     <h1>Plugin Panel</h1>
-    <div class="sub">监听 __ADDR__ · 当前 __SESSIONS__ 个活跃会话</div>
     __ERR__
-    <form method="post" action="/api/login">
+    <form method="post" action="/api/login" id="login-form">
       <input type="hidden" name="next" value="__NEXT__">
-      <label for="token">面板令牌</label>
+      <div class="acct" aria-hidden="true">
+        <label for="username">账号</label>
+        <input id="username" name="username" type="text" tabindex="-1"
+               autocomplete="off" spellcheck="false">
+      </div>
+      <label for="token">面板口令</label>
       <input id="token" name="token" type="password" autocomplete="current-password"
              autofocus required spellcheck="false">
       <button type="submit">登录</button>
     </form>
-    <div class="hint">
-      令牌来自服务端的 <code>PANEL_TOKEN</code> 或 <code>PANEL_TOKEN_FILE</code>。
-      登录成功后会下发一个 <code>HttpOnly</code> 会话 cookie（有效期 12 小时，
-      空闲 2 小时失效）；脚本可以改用
-      <code>Authorization: Bearer &lt;token&gt;</code> 免登录调用。
-    </div>
+    <noscript><div class="err">这个页面需要 JavaScript：口令要先在浏览器里算成摘要再提交，
+      服务端不收明文口令。</div></noscript>
+    <div class="err" id="js-err" style="display:none"></div>
   </div>
+<script>
+/* 口令 → 摘要。**这段是安全边界的一部分**：它保证明文口令不出浏览器。
+ *
+ * 两条路径：
+ *   ① `crypto.subtle`（首选）：localhost / HTTPS 下都有
+ *   ② 纯 JS 的 SHA-256：`http://` + 局域网 IP 时**没有** `crypto.subtle`
+ *      （那不是安全上下文），而面板最常见的用法恰好就是这种 —— 少了这条兜底，
+ *      这类访问会直接登不上。
+ */
+(function () {
+  var MODE = "__MODE__";
+  var form = document.getElementById('login-form');
+  var input = document.getElementById('token');
+  var errBox = document.getElementById('js-err');
+  if (!form || !input || MODE !== 'digest') return; // 旧形态：原样提交（只在本机开发口子）
+
+  function fail(msg) {
+    if (errBox) { errBox.textContent = msg; errBox.style.display = 'block'; }
+  }
+
+  function sha256(bytes) {
+    var K = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ];
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    var len = bytes.length, bitLen = len * 8;
+    // 补齐到 64 字节整数倍，末尾 8 字节放长度（大端；口令远小于 2^32 位，高 4 字节为 0）
+    var total = ((len + 8) >> 6) * 64 + 64;
+    var m = new Uint8Array(total);
+    m.set(bytes);
+    m[len] = 0x80;
+    m[total - 4] = (bitLen >>> 24) & 0xff;
+    m[total - 3] = (bitLen >>> 16) & 0xff;
+    m[total - 2] = (bitLen >>> 8) & 0xff;
+    m[total - 1] = bitLen & 0xff;
+    var w = new Int32Array(64), i, off;
+    for (off = 0; off < total; off += 64) {
+      for (i = 0; i < 16; i++) {
+        w[i] = (m[off + 4 * i] << 24) | (m[off + 4 * i + 1] << 16) |
+               (m[off + 4 * i + 2] << 8) | m[off + 4 * i + 3];
+      }
+      for (i = 16; i < 64; i++) {
+        var x = w[i - 15], y = w[i - 2];
+        var s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+        var s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (i = 0; i < 64; i++) {
+        var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+        var ch = (e & f) ^ (~e & g);
+        var t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+        var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+        var maj = (a & b) ^ (a & c) ^ (b & c);
+        var t2 = (S0 + maj) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0;
+        d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+      H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+    }
+    var out = '';
+    for (i = 0; i < 8; i++) out += ('00000000' + (H[i] >>> 0).toString(16)).slice(-8);
+    return out;
+  }
+
+  function digest(text) {
+    var bytes = new TextEncoder().encode(text);
+    if (window.crypto && window.crypto.subtle && window.crypto.subtle.digest) {
+      return window.crypto.subtle.digest('SHA-256', bytes).then(function (buf) {
+        var v = new Uint8Array(buf), s = '';
+        for (var i = 0; i < v.length; i++) s += ('0' + v[i].toString(16)).slice(-2);
+        return s;
+      });
+    }
+    return Promise.resolve(sha256(bytes));
+  }
+
+  form.addEventListener('submit', function (ev) {
+    if (form.getAttribute('data-hashed') === '1') return; // 已经换成摘要了，放行
+    ev.preventDefault();
+    digest('plugin-panel/v1:' + input.value).then(function (hex) {
+      input.value = hex;                     // 只把摘要交出去
+      form.setAttribute('data-hashed', '1');
+      form.submit();                         // 不再触发本处理器
+    })['catch'](function (e) {
+      fail('浏览器里算摘要失败，没法登录：' + e);
+    });
+  });
+})();
+</script>
 </body>
 </html>
 "##;
 
+/// 这个二进制编进了什么（发布/排障用）。
+///
+/// ⚠ 为什么值得单列一个字段：`legacy-tls` 决定**直播那条链能不能连**
+/// （上游只给 CBC 套件，rustls 不实现任何一个）。它默认关，于是"发出去的包
+/// 到底支不支持直播"是个**事实问题**，不该让用户在报错里反推。
+pub fn build_info() -> serde_json::Value {
+    let features: Vec<&str> = if cfg!(feature = "legacy-tls") {
+        vec!["legacy-tls"]
+    } else {
+        vec![]
+    };
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "features": features,
+        // 一句给界面/排查直接用的结论，省得每个调用方自己拼
+        "live_supported": cfg!(feature = "legacy-tls"),
+        // ⚠ 措辞是"编漏了"，不是"这是一个精简版"：`legacy-tls` 自 2026-10-17 起
+        //   就在 `default` 里，正常发布的面板不会有这个状态。
+        "live_missing_hint": if cfg!(feature = "legacy-tls") {
+            ""
+        } else {
+            "这个面板二进制缺 legacy-tls（它本该是默认带的）⇒ 直播用不了。这是构建缺陷：\n\
+             用 `cargo build --release` 重编（发布产物用 `--features legacy-tls-vendored`）。"
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// 插件分组：名字里第一个分隔符之前那段。推导规则要钉住 ——
     /// 它是界面"按系列归拢"的唯一依据，改错了会让插件的分组整体错位。
     #[test]
@@ -2348,7 +3011,52 @@ mod tests {
         assert_eq!(plugin_group("-x"), "");
     }
 
-    use super::*;
+    // ---- 登录页：口令在浏览器里换成摘要 ----
+
+    #[test]
+    fn login_page_uses_the_same_digest_domain_as_the_server() {
+        // 页面里那段 JS 与 `auth::password_digest` 必须用**同一个**域前缀。
+        // 不一致的表现是「口令明明是对的，就是登不上」—— 而且服务端只会回一个
+        // 401，看不出是前缀的问题。所以这条把两边钉在一起。
+        let lit = format!("'{}'", crate::auth::DIGEST_DOMAIN);
+        assert!(
+            LOGIN_PAGE.contains(&lit),
+            "登录页里要出现 {lit}（和 auth::DIGEST_DOMAIN 一致）"
+        );
+        assert!(
+            LOGIN_PAGE.contains("input.value"),
+            "摘要必须由输入框里的口令算出来"
+        );
+    }
+
+    #[test]
+    fn login_page_hashes_before_submit_with_a_no_subtle_fallback() {
+        // ① 首选 crypto.subtle（localhost / HTTPS 有）
+        assert!(LOGIN_PAGE.contains("crypto.subtle"), "要用 WebCrypto 的 SHA-256");
+        // ② 纯 JS 兜底：`http://` + 局域网 IP 不是安全上下文，没有 subtle ——
+        //    而面板最常见的用法恰好就是这种。少了这条兜底，那类访问直接登不上。
+        assert!(LOGIN_PAGE.contains("function sha256("), "要有纯 JS 的 SHA-256 兜底");
+        assert!(LOGIN_PAGE.contains("new TextEncoder()"), "要按 UTF-8 编码（和服务端一致）");
+        // ③ 提交前替换成摘要，并且**只提交一次**（避免二次哈希）
+        assert!(LOGIN_PAGE.contains("ev.preventDefault()"), "要先拦住原生提交");
+        assert!(LOGIN_PAGE.contains("data-hashed"), "要标记「已经换成摘要了」");
+        // ④ 没有 JS 就登不上 —— 必须说清楚，而不是让人对着一个"没反应"的按钮
+        assert!(LOGIN_PAGE.contains("<noscript>"), "要告诉用户这页需要 JS");
+        // ⑤ 页面本身绝不能带任何秘密
+        assert!(!LOGIN_PAGE.contains("prehash1:"), "登录页不该出现凭据");
+        assert!(!LOGIN_PAGE.contains("argon2"), "登录页不该出现哈希算法细节");
+    }
+
+    #[test]
+    fn login_page_mode_placeholder_is_substituted() {
+        // 摘要形态发摘要、旧形态发原文：这个分支由 `render_login` 用 `__MODE__` 注入。
+        // 这里只钉住"模板里确实有这个占位、并且默认是保守的那一侧"。
+        assert!(LOGIN_PAGE.contains(r#"var MODE = "__MODE__";"#), "模板要有 MODE 占位");
+        assert!(
+            LOGIN_PAGE.contains("if (!form || !input || MODE !== 'digest') return;"),
+            "只有 digest 模式才改提交内容（其余原样提交）"
+        );
+    }
 
     // ---- 登录后跳回哪里：开放重定向防护 ----
 
@@ -2422,26 +3130,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_form_reads_token_and_next() {
-        let (t, n) = parse_form("token=s3cret&next=%2Fapi%2Fstate");
+    fn parse_form_reads_token_next_and_the_honeypot() {
+        let (t, n, trap) = parse_form("token=s3cret&next=%2Fapi%2Fstate");
         assert_eq!(t, "s3cret");
         assert_eq!(n.as_deref(), Some("/api/state"));
+        assert_eq!(trap, "", "没带 username 就是没填（不能因为字段缺失就判成脚本）");
 
         // 顺序无关
-        let (t, n) = parse_form("next=%2F&token=abc");
+        let (t, n, _) = parse_form("next=%2F&token=abc");
         assert_eq!(t, "abc");
         assert_eq!(n.as_deref(), Some("/"));
 
         // 令牌里的 `+`：表单会编码成 %2B，解出来必须还是 `+`
-        let (t, _) = parse_form("token=a%2Bb");
+        let (t, _, _) = parse_form("token=a%2Bb");
         assert_eq!(t, "a+b");
 
         // 缺字段
-        let (t, n) = parse_form("token=x");
+        let (t, n, _) = parse_form("token=x");
         assert_eq!(t, "x");
         assert!(n.is_none());
-        let (t, _) = parse_form("next=%2F");
+        let (t, _, _) = parse_form("next=%2F");
         assert_eq!(t, "");
+
+        // ---- 蜜罐 ----
+        // 真人提交：字段在表单里，所以一定带 `username=`，值是**空**
+        let (_, _, trap) = parse_form("username=&token=x");
+        assert_eq!(trap, "");
+        // 脚本把每个输入框都灌一份
+        let (_, _, trap) = parse_form("username=admin&token=x");
+        assert_eq!(trap, "admin");
+        // 蜜罐里的值也要还原百分号编码（正规客户端就是会编码）
+        let (_, _, trap) = parse_form("username=root%40example.com&token=x");
+        assert_eq!(trap, "root@example.com");
+    }
+
+    #[test]
+    fn login_page_hides_the_honeypot_field() {
+        // 蜜罐的全部价值建立在「人看不见它」上。这三条任何一条被改掉，
+        // 表现都不是报错，而是**真人开始被自己的面板封在门外** —— 所以钉住。
+        assert!(
+            LOGIN_PAGE.contains(r#"name="username""#),
+            "蜜罐字段要在（名字要够常见，钓得到批量脚本）"
+        );
+        assert!(
+            LOGIN_PAGE.contains(".acct { display: none; }"),
+            "它必须被 CSS 藏起来：能看见就等于请人来填"
+        );
+        assert!(
+            LOGIN_PAGE.contains(r#"tabindex="-1""#),
+            "还要拿掉 tab 序：键盘用户按 Tab 会停在一个看不见的框里"
+        );
+        // 不能用 type=hidden：那不像一个「账号」框，批量工具通常直接跳过 hidden 输入
+        assert!(
+            LOGIN_PAGE.contains(r#"name="username" type="text""#),
+            "蜜罐要长得像一个真账号框（type=text），否则钓不到东西"
+        );
+        // 发给浏览器的那一串里不许有任何解释：注释也是攻击者能读到的文本
+        for leak in ["蜜罐", "honeypot", "trap", "看不见"] {
+            assert!(
+                !LOGIN_PAGE.contains(leak),
+                "页面里出现了 {leak:?} —— 等于告诉对方这个字段是干什么的，留空就废了"
+            );
+        }
     }
 
     // ---- 登录跳转地址 ----

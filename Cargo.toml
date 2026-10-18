@@ -2,7 +2,7 @@
 name = "plugin-panel"
 version = "0.1.0"
 edition = "2021"
-description = "Rust + QuickJS + PocketPy 动态插件任务面板"
+description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
 [dependencies]
 # HTTP 服务器
@@ -62,6 +62,11 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pki-types = "1"
 webpki-roots = "1"
 base64 = "0.23"
+# 外部运行时（src/extproc.rs）：
+#   · `kill(-pid, SIGKILL)` 杀整个进程组（插件/脚本可能自己起子进程）
+#   · Linux 上的 `prctl(PR_SET_PDEATHSIG)` 兜底，避免面板异常死亡留下孤儿
+# libc 本来就在依赖树里（rusqlite / ring / getrandom），加为直接依赖不增加编译单元。
+libc = "0.2"
 # 上面那个的 Stream/Sink 组合子（`split()` / `next()` / `send()`）。
 # 它本来就在依赖树里（tokio-tungstenite 自己依赖它），加为直接依赖不增加编译单元。
 futures-util = "0.3"
@@ -75,9 +80,24 @@ native-tls = { version = "0.2", optional = true }
 # 而 reqwest + native-tls 这一套是 mcloud 生产里用的同一套（本机缓存里全都在）；
 # 与它并列的 ureq 继续负责默认那条路，两个后端各自只在自己被选中时出现。
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "native-tls"] }
+# `legacy-tls-vendored` 用的那份 OpenSSL（静态编进二进制）。只在那个 feature 下才编。
+openssl = { version = "0.10", optional = true }
+sha2 = "0.10"
 
 [features]
-default = []
+# ⚠⚠ **默认就带**（2026-10-17 改）。
+#
+# 原先是 `default = []`：要直播的人自己开。那个取舍写得很"讲道理"
+# （Linux 上 native-tls = OpenSSL，静态二进制会多一个系统依赖），但它把
+# **一个功能默认变成残的**：发出去的包跑直播必然失败，用户看到的是一句
+# TLS 报错，还得自己去查"我这版是不是没编某个 feature"。
+#
+# 判断改了：**直播是这个产品的一部分**，不是可选装饰。所以
+#   · 默认编上；
+#   · 想省那点体积/依赖的人显式 `--no-default-features`；
+#   · Linux 静态构建用 `legacy-tls-vendored`（把 OpenSSL **静态链进去**），
+#     于是"静态 + 直播"同时成立 —— 见下面那个 feature。
+default = ["legacy-tls"]
 # 「只给 CBC 套件」的上游（2026-10-14 实测：直播侧的 `v.cmcc-cs.cn` 与
 # `videoim.cmcc-cs.cn:20102` **只**给 `ECDHE-RSA-AES128-SHA` 那一档）——
 # **rustls 不实现任何 CBC 套件**（设计选择，不是配置问题）⇒ 面板的默认构建连不上它们，
@@ -90,9 +110,15 @@ default = []
 # 需要的人开，不需要的人一个字节都不受影响。
 legacy-tls = ["tokio-tungstenite/native-tls", "native-tls", "dep:reqwest"]
 
-[build-dependencies]
-# 编译 vendored 的 pocketpy（amalgamated 单文件 C）—— 见 build.rs 的注释
-cc = "1"
+# 「静态」与「直播」不必二选一：把 OpenSSL **编进二进制**（vendored）。
+#
+# 什么时候用：`*-unknown-linux-musl` 的发布产物 —— 那种二进制承诺
+# "目标机不用装任何东西"，而默认的 native-tls 会动态链系统 libssl，
+# 正好把这个承诺打破。vendored 之后静态链接，两个性质同时成立。
+#
+# ⚠ 代价是**构建时间**（本地编一遍 OpenSSL）与**构建机要 perl/make**；
+# 用户那边一点代价都没有。这就是该由发布方付的账。
+legacy-tls-vendored = ["legacy-tls", "dep:openssl", "openssl/vendored"]
 
 # 面向低配 ARM 盒子：体积优先。本轮不验证效果，先把配置占位在这里。
 [profile.release]

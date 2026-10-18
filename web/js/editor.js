@@ -31,21 +31,16 @@
 
 // ---------------------------------------------------------------- 语法高亮
 
-const KEYWORDS = {
-  js: [
-    'import', 'from', 'export', 'default', 'const', 'let', 'var', 'function',
-    'return', 'if', 'else', 'for', 'while', 'do', 'break', 'continue', 'try',
-    'catch', 'finally', 'throw', 'new', 'class', 'extends', 'super', 'this',
-    'typeof', 'instanceof', 'in', 'of', 'async', 'await', 'yield', 'delete',
-    'void', 'null', 'undefined', 'true', 'false',
-  ],
-  py: [
-    'import', 'from', 'as', 'def', 'return', 'if', 'elif', 'else', 'for',
-    'while', 'break', 'continue', 'try', 'except', 'finally', 'raise', 'with',
-    'class', 'lambda', 'yield', 'global', 'nonlocal', 'assert', 'del', 'pass',
-    'and', 'or', 'not', 'in', 'is', 'None', 'True', 'False',
-  ],
-};
+// 面板只编辑 JavaScript：插件是 JS-only，脚本任务（.py/.sh）在面板上只填
+// 元数据（路径 / 调度 / 运行时），不在这里改源码。原来那份 Python 词表已经
+// 没有任何使用方了，留着只会让人以为面板还能编辑 Python。
+const KEYWORDS = [
+  'import', 'from', 'export', 'default', 'const', 'let', 'var', 'function',
+  'return', 'if', 'else', 'for', 'while', 'do', 'break', 'continue', 'try',
+  'catch', 'finally', 'throw', 'new', 'class', 'extends', 'super', 'this',
+  'typeof', 'instanceof', 'in', 'of', 'async', 'await', 'yield', 'delete',
+  'void', 'null', 'undefined', 'true', 'false',
+];
 
 function escapeHtml(s) {
   return s
@@ -62,22 +57,14 @@ function escapeHtml(s) {
  * 连续 replace 的写法一定会踩这个坑。
  *
  * @param {string} code
- * @param {'js'|'py'} lang
  */
-export function highlight(code, lang = 'js') {
-  const words = KEYWORDS[lang] || KEYWORDS.js;
-  const kw = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+export function highlight(code) {
+  const kw = KEYWORDS.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
 
-  const re =
-    lang === 'py'
-      ? new RegExp(
-          `(#[^\\n]*)|('(?:\\\\.|[^'\\\\])*'|"(?:\\\\.|[^"\\\\])*")|\\b(\\d+\\.?\\d*)\\b|\\b(${kw})\\b`,
-          'g',
-        )
-      : new RegExp(
-          `(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)|('(?:\\\\.|[^'\\\\])*'|"(?:\\\\.|[^"\\\\])*"|\`(?:\\\\.|[^\`\\\\])*\`)|\\b(0x[0-9a-fA-F]+|\\d+\\.?\\d*)\\b|\\b(${kw})\\b`,
-          'g',
-        );
+  const re = new RegExp(
+    `(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)|('(?:\\\\.|[^'\\\\])*'|"(?:\\\\.|[^"\\\\])*"|\`(?:\\\\.|[^\`\\\\])*\`)|\\b(0x[0-9a-fA-F]+|\\d+\\.?\\d*)\\b|\\b(${kw})\\b`,
+    'g',
+  );
 
   let out = '';
   let last = 0;
@@ -143,11 +130,11 @@ const INDENT = '  ';
  * 在容器里创建编辑器。
  *
  * @param {HTMLElement} host   编辑器容器（会被清空后重建内容）
- * @param {{value?: string, language?: 'js'|'py', onUpdate?: (v: string) => void}} [opts]
- * @returns {{getValue(): string, setValue(v: string): void, setLanguage(l: string): void, focus(): void, isFallback: boolean, error: string|null}}
+ * @param {{value?: string, onUpdate?: (v: string) => void}} [opts]
+ * @returns {{getValue(): string, setValue(v: string): void, focus(): void, isFallback: boolean, error: string|null}}
  */
 export function createEditor(host, opts = {}) {
-  const { value = '', language = 'js', onUpdate } = opts;
+  const { value = '', onUpdate } = opts;
 
   host.textContent = '';
 
@@ -160,7 +147,6 @@ export function createEditor(host, opts = {}) {
   el.setAttribute('aria-label', '代码编辑器');
   host.appendChild(el);
 
-  let lang = language;
   let composing = false;
   const history = [value];
   let histIdx = 0;
@@ -169,7 +155,7 @@ export function createEditor(host, opts = {}) {
   /** 重画：保持 caret 位置。 */
   function redraw() {
     const off = caretOffset(el);
-    el.innerHTML = highlight(el.textContent, lang);
+    el.innerHTML = highlight(el.textContent);
     if (off !== null) setCaret(el, off);
   }
 
@@ -233,7 +219,7 @@ export function createEditor(host, opts = {}) {
 
   function applyValue(v) {
     el.textContent = v;
-    el.innerHTML = highlight(v, lang);
+    el.innerHTML = highlight(v);
   }
 
   // ---- 输入 ----
@@ -332,11 +318,6 @@ export function createEditor(host, opts = {}) {
       history.length = 0;
       history.push(v);
       histIdx = 0;
-    },
-    setLanguage: (l) => {
-      lang = l;
-      // 换语言要重画一遍（高亮的词表变了）
-      el.innerHTML = highlight(el.textContent, lang);
     },
     focus: () => el.focus(),
     // 兼容原来的接口：现在没有「降级」这回事了，编辑器永远可用

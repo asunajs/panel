@@ -1,120 +1,75 @@
-# host-api 规范 v1（跨运行时最小公共子集）
+# host-api 规范 v2（JS / QuickJS / Node / Bun）
 
-> 一份插件脚本要能跑在四个宿主里（嵌入式 QuickJS / PocketPy + Node / CPython 适配器），
+> 一份 JS 插件要能跑在三个引擎里（内嵌 QuickJS、外部 Node、外部 Bun）和 Node 适配器里，
 > 这份文档是它们之间**唯一**的公共契约：函数名、参数、返回值、错误约定。
 >
-> 文档索引：[docs/README.md](README.md) · 相关：[插件 API](plugin-api.md) · [运行时选型与宿主 API 抽象](runtimes.md)
+> 文档索引：[docs/README.md](README.md) · 相关：[插件 API](plugin-api.md) · [运行时选型](runtimes.md) · [外部运行时协议](ext-runtime-protocol.md)
 
 ## 目录
 
 | 章节 | 内容 |
 |---|---|
-| [0](#0-需求按语言分轨) | 需求、逐条对照、分发名与 import 名、为什么不用 `pocketpy-sys`、插件写在哪两个宿主里 |
-| [1](#1-函数) | 函数参考：[日志](#11-日志) · [定时任务](#12-定时任务) · [SQLite](#13-sqlite) · [HTTP](#14-http) · [`tls`](#15-tls-选项rustls默认与-native第二十二轮cargo-feature-legacy-tls) · [HTTP 路由](#16-http-路由仅-js--node) · [WebSocket](#17-websocket扩展仅嵌入式-js-宿主) |
+| [0](#0-需求与实现) | 需求、逐条对照、分发名与 import 名、为什么删掉 Python 插件 |
+| [1](#1-函数) | 函数参考：[日志](#11-日志) · [定时任务](#12-定时任务) · [SQLite](#13-sqlite) · [HTTP](#14-http) · [`tls`](#15-tls-选项rustls默认与-native构建-feature) · [HTTP 路由](#16-http-路由) · [WebSocket](#17-websocket) |
 | [2](#2-handler-的调用约定) | `handler(payload)` 的字段、成功/失败约定、`on_tick` |
-| [3](#3-各运行时的差异明确边界) | 四个宿主的能力矩阵 |
-| [4](#4-插件工程) | [插件分组](#41-插件分组按系列) · [多文件（`import`/`require`）](#42-插件多文件相对-import-与-require) · [内置模块 `node:fs`](#43-内置模块文件系统nodefs--nodepath) |
-| [5](#5-写插件的硬约束) | [`.js` 差异](#51-js-插件quickjs-与-node-的差异) · [`.py` 差异](#52-py-插件pocketpy-与-cpython-的差异) · [绑定名](#53-绑定名host-api-模块host_api-全局host-别名) · [插件自带配置页](#54-插件自带的配置页) · [测试运行](#55-测试运行面板侧接口) |
+| [3](#3-各运行时的差异明确边界) | 各宿主与脚本模式的能力矩阵 |
+| [4](#4-插件工程) | [插件分组](#41-插件分组按系列) · [多文件](#42-插件多文件相对-import-与-require) · [内置模块 node:fs](#43-内置模块文件系统nodefs--nodepath) |
+| [5](#5-写插件的硬约束) | [QuickJS 与 Node/Bun 的差异](#51-quickjs-与-nodebun-的差异) · [绑定名](#52-绑定名host-api-模块host_api-全局host-别名) · [脚本模式](#53-脚本模式一次性进程) · [原生逃生口](#54-原生逃生口node--bun-only) · [测试运行](#55-测试运行面板侧接口) |
 | [6](#6-参考实现) | 宿主侧与适配器的源码位置 |
 
 > 章节号沿用本文件的编号；主 README 里的「§N」是另一套编号，见 [文档索引](README.md)。
 
 
-## 0. 需求（按语言分轨）
+## 0. 需求与实现
 
-> 9. **插件脚本跨运行时兼容（按语言分轨）**：
->    - **JS 插件**：同一份 `.js` 文件应能同时运行在：Rust + QuickJS-ng（嵌入式宿主，主目标）、Node.js（开发/调试环境）
->    - **Python 插件**：同一份 `.py` 文件应能同时运行在：Rust + PocketPy（嵌入式宿主，主目标）、CPython（开发/调试环境）
->    - **跨语言不共享脚本**：JS 插件与 Python 插件是两套独立文件，互不通用。
->    - **共享的是抽象宿主 API 规范**：两种语言各自实现一套函数名、参数、返回值语义一致的宿主 API 层（JS 侧为 `host-api` 模块，Python 侧为 `host_api` 模块）。插件脚本只导入该抽象层，不直接调用任何运行时的原生全局对象或原生模块。
->    - **各运行时的实现来源**：
->      - Rust + QuickJS-ng：通过 `rquickjs` 自定义 Resolver 提供内置 `host-api` 模块
->      - Node.js：提供 npm 包 `@yourproject/host-api`
->      - Rust + PocketPy：通过 `pocketpy-sys` 注册 `host_api` 模块
->      - CPython：提供 Python 包 `yourproject_host_api`
+### 0.1 这一版的需求
 
-### 0.1 逐条对照实现
+- **插件语言只有 JavaScript**：同一份 `.js` 应能跑在
+  Rust + QuickJS-ng（内嵌，默认）、Node.js、Bun。
+- **能力由抽象宿主 API 提供**：插件只 `import 'host-api'`，不直接依赖宿主原生全局对象；
+  同一份源码在三个引擎里语义一致。
+- **Python 不是插件语言**：`.py` 只作为任务目录里的 cron 脚本（一次性进程，无 `host-api`）。
+- **宿主 API 的数据面走面板**（A 数据面）：日志、SQLite、HTTP、WS、SMTP、任务注册、路由、
+  侧边栏入口，外部引擎一律经 fd3/fd4 RPC 调回面板。
+- **原生 API 是逃生口**：Node/Bun 插件可以 `import` npm 包 / `node:fs` / `node:child_process`，
+  但那样的插件是 Node/Bun-only，不承诺 QuickJS。
 
-★ = 与需求原文有差异，原因见 §0.2 / §0.3。
+### 0.2 逐条对照实现
 
 | 需求 | 实现 | 证据 |
 |---|---|---|
-| JS 插件：一份 `.js` 同时跑 QuickJS + Node | ✅ | `plugins/js/host-api-demo.js` 两边都跑通（`adapters/node` 24 项用例里有一条就是直接拿它跑） |
-| Python 插件：一份 `.py` 同时跑 PocketPy + CPython | ✅ | `plugins/py/sysinfo.py` 两边都跑通（CPython 61 项用例） |
-| 跨语言不共享脚本 | ✅ | 引擎按扩展名分派（`src/engine.rs:1313`）；仓库里 grep 不到任何 JS↔Python 转译/桥接代码 |
-| 共享抽象宿主 API 规范 | ✅ | §1–§3；两边函数名/payload/错误约定一致，由适配器用例 + 冒烟测试钉住 |
-| QuickJS：`rquickjs` 自定义 Resolver 提供内置 `host-api` | ✅ | `src/engine.rs` 的 `HostApiResolver` / `HostApiLoader` |
-| Node：提供 npm 包 `@yourproject/host-api` | ★ 包名 `@plugin-panel/host-api`（占位符映射到本项目名） | `adapters/node/package.json` |
-| PocketPy：通过 `pocketpy-sys` 注册 `host_api` 模块 | ★ **不用 `pocketpy-sys`**：vendored amalgamation + `build.rs` 直接编，再 `py_newmodule("host_api")` 注册。**注册机制一致，接入方式不同** | `build.rs` 头部注释；`src/pyhost.rs` |
-| CPython：提供 Python 包 `yourproject_host_api` | ★ 分发名 `plugin-panel-host-api`，**import 的模块名固定 `host_api`** | `adapters/python/pyproject.toml` |
+| 同一份 `.js` 跑 QuickJS / Node / Bun | ✅ | `plugins/js/host-api-demo.js`；冒烟 + `runtime/js/test/run-tests.mjs` |
+| 共享抽象宿主 API | ✅ | §1–§3；函数名 / payload / 错误约定一致 |
+| QuickJS：内置 `host-api` 模块 | ✅ | `src/jshost.rs` 的 Resolver/Loader |
+| Node：`host-api` 由 loader hook 解析 | ✅ | `runtime/js/register.mjs`（`module.register`）+ `runtime/js/host-api/` |
+| Bun：`host-api` 由 `NODE_PATH` 解析 | ✅ | `runtime/js/node_modules/host-api` |
+| 外部引擎的数据面走面板 | ✅ | `src/extproc.rs` 的 fd3/fd4 RPC（§6.3） |
+| Node 适配器（面板外） | ✅ | `adapters/node`（`node test/run-tests.mjs`） |
+| Python 插件 / CPython 适配器 | 🗑 **已删除** | 见 [changelog/60](changelog/60-third-party-runtimes.md) |
 
-### 0.2 「分发名」和「import 名」是两回事
+### 0.3 「分发名」和「import 名」是两回事
 
-需求里那两个名字（`@yourproject/host-api`、`yourproject_host_api`）是**分发身份**，
-而插件里写的 `import 'host-api'` / `from host_api import log` 是**模块名**。两者不能混：
+- **分发名**随便改：npm 包可以叫 `@plugin-panel/host-api`，pip 包曾经叫 `plugin-panel-host-api`。
+- **模块名必须所有宿主一致**：插件里写的是 `import … from 'host-api'`，
+  三个引擎 + Node 适配器都解析到同一个名字。它不跟着分发名走。
 
-- **分发名**随便改：npm 包叫 `@plugin-panel/host-api`，pip 包叫 `plugin-panel-host-api`。
-- **模块名必须两个宿主完全一致**，否则「同一份文件」当场失效：
-  插件在嵌入式宿主里 `from host_api import log` 能跑，换到 CPython 就得改代码。
-  所以它固定是 `host-api` / `host_api`，**不跟着分发名走**。
+对 Node 来说，这意味着「裸说明符 `host-api`」必须由某处解析：
 
-Node 侧由此有个副作用值得记一笔：包名带 scope 之后，Node 的「包内自引用」
-不再匹配裸说明符 `host-api`。插件要拿到这个名字只剩两条路 ——
-**① 运行器的 loader hook 兜底**（零配置，主路径）；**② 装成别名**
-（`npm i host-api@npm:@plugin-panel/host-api` 或 node_modules 链接，给「不用运行器、
-自己写 Node 脚本」的用法）。`adapters/node` 的解析①/②/③ 三条用例分别钉住这三条路径。
+| 场景 | 解析方式 |
+|---|---|
+| 面板内的外部插件 | `--import register.mjs` 的 `module.register` hook（零配置） |
+| Bun | `NODE_PATH=<runtime>/js/node_modules`（包里 `exports` 指到同一个文件） |
+| Node 适配器（面板外） | 运行器的 loader hook；或 `npm link` / `npm i` 装成 `host-api` |
 
-### 0.3 为什么不用 `pocketpy-sys`
+### 0.4 为什么删掉 Python 插件与 CPython 适配器
 
-需求写的是「通过 `pocketpy-sys` 注册 `host_api` 模块」。注册那半句照做了
-（`py_newmodule("host_api")` + 原生函数 + 引导脚本），**但没用这个 crate**，原因是实测的：
+一句话：**两种插件语言的总账不划算**，而真正需要 Python 的场景是一次性脚本，不是常驻插件。
+逐条论证（PocketPy 的语法缺口、进程级全局状态与多 worker 的冲突、没有 `os`/`open`、
+四份语义实现要同步维护）见 [runtimes.md §10.1](runtimes.md#101-为什么删掉-pocketpy-与-python-插件)。
 
-1. `pocketpy-sys` 走 **cmake + bindgen**（要 cmake 和 libclang），交叉编译还得自己写
-   toolchain 文件；而 amalgamated 构建只有两个 C 文件，`cc` 直接编，
-   `cargo zigbuild` 就能出 `aarch64-unknown-linux-musl` 的静态二进制（本项目的主目标）。
-2. 我们需要几个**编译期开关**必须能透到 C 编译里：`PK_ENABLE_WATCHDOG=1`（执行预算，
-   不开的话一个 `while True: pass` 插件会把引擎线程永久卡死）、`PK_ENABLE_OS=0`
-   （关掉 `os`，保住「插件能力只能来自 host_api」这条承诺）、`PK_ENABLE_DLL=0`、
-   `PK_ENABLE_THREADS=0`、`PK_GC_MIN_THRESHOLD=2000`（长跑内存水位线，见 README 第十一轮）。
-   `build.rs` 直接 `cc::Build::define` 就能给到。
-3. 曾经实测过 `pocketpy-sys` 路线：它带的 2.0.0 版本 `py_switchvm` 会 abort
-   （`[vm.c:94] VALIDATE FAIL: expected 1, got 58`，因为 2.0.0 在 `VM__ctor` 之后才设
-   `pk_current_vm`），而多 VM 隔离是这个项目的基础。
-
-如果后续要换回 `pocketpy-sys`，需要先解决上面三条；换过去不影响插件侧任何代码
-（插件只认 `host_api` 这个名字，宿主怎么把 C 解释器链进来是内部实现）。
-
-
-### 0.4 插件写在哪两个宿主里
-
-插件用哪种语言写，就跑在那一种语言的两个宿主里：
-
-| 插件 | 宿主 | 抽象层由谁提供 |
-|---|---|---|
-| `.js` | Rust + QuickJS-ng（嵌入式）、Node.js | `host-api` —— 嵌入式侧 `src/jshost.rs`（内置模块），Node 侧 `adapters/node` |
-| `.py` | Rust + PocketPy（嵌入式）、CPython | `host_api` —— 嵌入式侧 `src/pyhost.rs`（`py_newmodule`），CPython 侧 `adapters/python` |
-
-引擎按扩展名选解释器（`src/engine.rs:1313`），所以 `.js` 进 JS 引擎、`.py` 进 Python 解释器。
-两个适配器都是**直接拿仓库里的真插件文件跑**（`plugins/js/host-api-demo.js`、`plugins/py/sysinfo.py`），
-不是另写一份测试插件。
-
-插件写法：
-
-```js
-// .js
-import { log, every } from 'host-api';
-```
-```python
-# .py
-from host_api import log, every
-```
-
-JS 版与 Python 版是同一个功能的两份实现，函数名、payload 字段、错误约定完全一致，
-所以互相移植是机械劳动。
-
-设计原则：**能力只取四个运行时都能实现的交集**，语义（参数、返回值、错误）在四处完全一致。
-只在一处能做的事（比如 JS 的 HTTP 路由、Node 的 `http_fetch_async`）明确标成扩展，
-插件不允许依赖它。
+`host_api`（下划线）这个模块名、Python 门面（`read_text` / `write_text` / …）、
+`adapters/python`、`src/pyhost.rs`、`src/python.rs`、`build.rs`、`vendor/pocketpy/`
+全部删除。`.py` 现在只由 [脚本任务](script-jobs.md) 执行，**没有 `host-api`**。
 
 ---
 
@@ -129,19 +84,16 @@ log/info(msg...) / debug / start / success / fail / warn / error / fatal -> None
 **八档语义 type**：`debug info start success fail warn error fatal`。
 `start/success/fail` 描述一件事的开始/成了/没成，是**语义着色**，过滤级别都算 `info`。
 
-非字符串参数由各运行时自行转成字符串：标量按各自语言的字面量规则（`null`/`true`），
-容器走 **JSON**（不是 Python 的 `repr` —— `{"a": 1}` 而不是 `{'a': 1}`）。
-**多参按空格拼接**（`log('账号', 13712345678, '失败')`）。
+非字符串参数按 JSON / 标量字面量转成字符串；**多参按空格拼接**
+（`log('账号', 13712345678, '失败')`）。容器走 JSON（`{"a":1}`），不是各语言自己的 `repr`。
 
-> 已知的跨语言差异：容器的 JSON **空白**不同 —— JS `{"a":1}`、Python `{"a": 1}`
-> （pocketpy 的 `json.dumps` 不认 `separators` 关键字，对齐不了）。值是同一个值。
+行格式（三个引擎一致）：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`。
+面板内嵌宿主走面板日志出口（终端 + 环形缓冲 + JSONL），外部引擎经 fd1 `log` 事件
+回到同一条出口 —— **脱敏、按天切、留 7 天都由面板统一做**。
+Node 适配器（面板外）写 **stderr**，同时落 JSONL。
 
-行格式（四边一致）：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`。
-嵌入式宿主写 stdout，Node/CPython 适配器写 **stderr**（让 `> out.txt` 只装插件自己的
-业务输出）。两边都同时落 JSONL（`plugin-YYYY-MM-DD.jsonl`，按天切、留 7 天）。
-
-完整规格（脱敏规则、JSONL 字段、环境变量、彩色行为什么把 `[type]` 提到最前、
-三份实现怎么靠共享向量不漂移）见 [§21 日志](logging.md#21-日志插件级与面板级两条通道第二十四轮)。
+完整规格（脱敏规则、JSONL 字段、环境变量、彩色行为什么把 `[type]` 提到最前）见
+[§21 日志](logging.md#21-日志插件级与面板级两条通道第二十四轮)。
 
 > ⚠ **v1 → v2 是有意的破坏性变更**：v1 只有 `log/warn/error`，格式是
 > `[host-api] [level] msg`、只写 stderr。解析过 v1 输出的脚本需要改。
@@ -153,10 +105,10 @@ register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
-# 第四个参数：register_cron(name, expr, handler, { params })  —— 见 §1.2.3「任务参数」
-# 表达式末尾可以加一个抖动后缀                                    —— 见下面「随机表达式」
-smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见下面「发邮件」
-register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见下面「侧边栏入口」
+# 第四个参数：register_cron(name, expr, handler, { params, budget_ms })  —— 见 §1.2.3 / §1.2.4
+# 表达式末尾可以加一个抖动后缀                                          —— 见 §1.2.7
+smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见 §1.2.5
+register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见 §1.2.6
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -169,8 +121,7 @@ register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —
 #### 1.2.1 `register_handler`：把「处理函数」和「调度」拆开
 
 `register_cron` 一次做完两件事：登记处理函数 + 声明一条调度。`register_handler` 只做第一件，
-调度交给宿主的面板创建（嵌入式宿主：面板上的「新建任务」；Node/CPython 适配器：运行器的
-`--job <name>=<expr>`）。
+调度交给宿主的面板创建（面板上的「新建任务」；Node 适配器用运行器的 `--job <name>=<expr>`）。
 
 这样拆的理由：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」
 登记出来，面板再从里面挑一个挂上表达式 —— 「插件的能力只能来自插件代码」这条线没有破。
@@ -193,46 +144,37 @@ worker_hint('exclusive');   // 要独占一条线程
 worker_hint('precision');   // 要落在精度线程上（毫秒级任务）
 ```
 
-解释器不是 `Send`，所以每个插件跑在**一条**引擎线程上（见 `src/workers.rs`）。
+QuickJS 的解释器不是 `Send`，每个插件跑在**一条**引擎线程上（`src/workers.rs`）；
+外部插件虽然有自己的进程，但 `tick` / `invoke` 的派发仍在引擎线程上串行发生。
 面板默认按「最细调度间隔 < 1s ⇒ 要精度」的启发式分配，但有一类任务**光看间隔看不出来**：
 
 > 抢兑的表达式是 `0 10 * * *`（一天一次，粗粒度），可它到点那一刻差几十毫秒就没了。
 > 启发式会把它和「跑三分钟的日常」放进同一个负载池 ⇒ 抢兑被挡住整个窗口。
-
-而这是「用户装在自己设备上」的场景 —— 不能让每个用户去配 `ENGINE_PIN`。所以：
 
 | `kind` | 含义 | 面板做什么 |
 |---|---|---|
 | `'precision'` | 要落在精度线程上 | 归到 worker 0 |
 | `'exclusive'` | 要**独占**一条线程 | 给它一条只跑它自己的线程，并**自动把线程数抬到够用** |
 
-声明了 `exclusive` 时，面板会把 `ENGINE_WORKERS` 抬到 `独占数 + 1`（只抬不降），
-启动日志里会打一句「⇒ 自动抬到 N 条执行线程」。**用户不需要配任何环境变量。**
-
 ⚠ 三条要注意的：
 
-- **这是声明，不是运行时调用。** 面板在创建解释器**之前**就靠源码文本扫描读走了它
-  （分配必须早于解释器存在），所以运行时调用它没有任何副作用。留着这个函数是为了
-  把拼写错误在**加载期**变成一条明确的报错，而不是让插件静默地拿到它没要求的线程。
-- **只认代码里的调用。** 注释和字符串里出现的 `worker_hint('exclusive')` 只是文本
-  （文档里写句例子不会把你的插件变成独占）。
-- **运行期新出现的插件拿不到独占** —— 线程是启动时建的，加不了。面板会照常加载它、
-  但打一句警告说明「要重启才生效」，不静默降级。
+- **这是声明，不是运行时调用。** 面板在创建解释器**之前**就靠源码文本扫描读走了它；
+  运行时调用只做校验（拼写错误在加载期变成明确报错）。
+- **只认代码里的调用。** 注释和字符串里出现的 `worker_hint('exclusive')` 只是文本。
+- **运行期新出现的插件拿不到独占** —— 线程是启动时建的；面板会加载它但打警告说明要重启。
 
 `ENGINE_PIN`（环境变量）优先级**高于**插件自己的声明 —— 它是逃生门，不能失灵。
 
-验收脚本：`python3 scripts/worker_hint.py`（对照 / 声明 / 基线三组，见脚本头部）。
+验收脚本：`python3 scripts/worker_hint.py`（对照 / 声明 / 基线三组）。
 
-#### 1.2.3 任务参数：`register_cron(name, expr, handler, opts)` 的 `opts.params`
+#### 1.2.3 任务参数：`register_cron(name, expr, handler, { params })`
 
 ```js
-// 同一个处理函数挂多条任务，各带各的数据 —— 名字不同、参数不同
 for (const account of ['alice', 'bob', 'carol']) {
     register_cron('exchange-' + account, '*/1 * * * * *', doExchange, {
         params: { account: account, slot: 3 },
     });
 }
-// Python：register_cron('exchange-' + account, '*/1 * * * * *', do_exchange, {'account': account})
 ```
 
 handler 里直接取：
@@ -243,41 +185,24 @@ function doExchange(p) {
 }
 ```
 
-**为什么需要它。** 抢兑要求所有账号**并行**发单 —— 串行会错过那几百毫秒的窗口。
-而面板只能把「一条任务」派给引擎。所以做法是插件注册 N 条任务（名字不同、
-处理函数相同、参数各带一个账号），面板照常调度，每条任务自己带上自己的参数。
-
 | 要点 | 说明 |
 |---|---|
 | 参数形状 | **任意 JSON**（对象、数组、字符串、数字都行）。面板不解释内容 |
 | 没给参数 | `p.params` 是 `null`（不是 `{}`，也不是 `undefined`） |
 | 落库 | 存在 `jobs.params` 列（JSON 文本），**重启后还在** |
-| 跟着代码走 | 插件重载时 `sync_jobs` 会把 `params` 收敛到代码声明的那一份（账号列表变了，重新声明一次就同步过去） |
-| 加载期校验 | 不可序列化的值（循环引用等）在**注册时**就报错，不会等到触发时才变成 `null` |
-| 上限 | 64 KiB（面板建的）。参数是**任务定义**的一部分，不该拿来存数据 —— 要存数据用插件自己的 SQLite |
-| 面板也能带 | `POST /api/jobs` 的 `params` 字段（任意 JSON）；只有 `register_handler` 登记的处理函数才能被面板挂上任务 |
+| 跟着代码走 | 插件重载时 `sync_jobs` 会把 `params` 收敛到代码声明的那一份 |
+| 加载期校验 | 不可序列化的值（循环引用等）在**注册时**就报错 |
+| 上限 | 64 KiB（面板建的）。参数是**任务定义**的一部分，别拿来存数据 |
+| 面板也能带 | `POST /api/jobs` 的 `params` 字段；只有 `register_handler` 登记的函数能被挂上任务 |
 
-Node / CPython 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个参数，
-payload 里一样有）。
-
-验收脚本：`python3 scripts/params_check.py`（透传 / 不串味 / 重启不丢 / 面板路径）。
+Node 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个参数）。验收脚本：
+`python3 scripts/params_check.py`。
 
 #### 1.2.4 执行预算：`{ budget_ms }`
 
 ```js
-import { register_cron, register_route, worker_hint } from 'host-api';
-
-// 长任务**必须**同时声明独占线程 —— 见下面那段
-worker_hint('exclusive');
-
 register_cron('日常', '*/30 7-22 * * *', runDaily, { budget_ms: 120_000 });
 register_route('/plugins/x/run', 'POST', handler, { budget_ms: 120_000 });
-```
-
-```python
-from host_api import register_cron, worker_hint
-worker_hint('exclusive')
-register_cron('日常', '*/30 7-22 * * *', run_daily, budget_ms=120_000)
 ```
 
 | | |
@@ -287,23 +212,16 @@ register_cron('日常', '*/30 7-22 * * *', run_daily, budget_ms=120_000)
 | 生效范围 | 任务（`register_cron` / `every`）和路由（`register_route`）都能声明 |
 | 落库 | `jobs.budget_ms` —— 面板上能看到，重启后还在 |
 
-**为什么要有这一格。** 全局预算存在的理由是「一个跑飞的插件不能把**同一条线程上的**
-别的任务拖住」。那也正是当年把 mcloud 写成 25 条「一次一步」任务的根因 ——
-一个「一个函数从头跑到尾」的任务必然超过 2 秒，然后被判成「疑似死循环」。
+**⚠ 长预算必须和 `worker_hint('exclusive')` 一起用。** 独占线程之后「拖住别人」这个理由
+不成立了；共享线程上声明长预算会把同线程的其它插件一起拖住。加载期会为此打警告并点名。
 
-**⚠ 长预算必须和 `worker_hint('exclusive')` 一起用。** 独占线程之后「拖住别人」
-这个理由不成立了（这条线程上只有它自己），所以长预算是安全的；共享线程上声明长预算
-会把同线程的其它插件一起拖住。**加载期会为此打一条警告**，点名是哪个插件 ——
-因为那个症状出现在**别的插件**身上，没人会想到是刚装的那个。
+**预算不是「取消超时保护」的口子。** 有上限（10 分钟），而且没声明预算的任务依然被全局值拦下。
+**HTTP 那一层也跟着走**：插件路由与手动触发任务在 Axum 侧的超时闸用的也是这条预算。
 
-**预算不是「取消超时保护」的口子。** 有上限（10 分钟），而且没声明预算的任务
-依然被全局值拦下（`scripts/budget_check.py` 里有一个对照组专门验这件事）。
+外部引擎的「预算」实现是 **`SIGKILL` 进程组**（不是中断循环）：超时 = 本次调用失败 +
+插件内存状态丢失，下一次触发重新拉起。见 [ext-runtime-protocol.md §8](ext-runtime-protocol.md#8-超时杀进程重启)。
 
-**HTTP 那一层也跟着走。** 插件路由与手动触发任务在 Axum 侧另有一个「等多久算超时」
-的闸，它用的也是这条路由/任务声明的预算 —— 否则会出现「声明了 8 秒，HTTP 3 秒就 504」，
-声明等于没声明。
-
-验收脚本：`python3 scripts/budget_check.py`
+验收脚本：`python3 scripts/budget_check.py`。
 
 #### 1.2.5 发邮件：`smtp_send(opts)`
 
@@ -325,90 +243,52 @@ smtp_send({
 // → { ok: true, response: "250 message accepted" }
 ```
 
-```python
-from host_api import smtp_send
-smtp_send({"host": "smtp.example.com", "user": "…", "pass": "…",
-           "from": "robot@example.com", "to": "me@example.com",
-           "subject": "hi", "text": "body"})
-```
-
 | 字段 | 说明 |
 |---|---|
 | `host` | 必填 |
 | `port` | 不给就按 `tls` 推：`implicit` → 465，其余 → 587 |
-| `tls` | `"starttls"`（默认）/ `"implicit"` / `"none"`。**拼错会报错**，不会默认成 `none` —— 那会明文发密码 |
+| `tls` | `"starttls"`（默认）/ `"implicit"` / `"none"`。**拼错会报错**，不会默认成 `none` |
 | `user` / `pass` | `user` 为空就跳过 `AUTH`（内网中继常见） |
 | `from` | 可以写 `显示名 <a@b>`；**信封里只用裸地址** |
 | `to` | 字符串或字符串数组 |
 | `subject` / `text` / `html` | 至少给一个正文；中文主题走 RFC 2047 编码字 |
-| `ca_file` | 额外的信任锚（PEM）。给**自建 SMTP / 内网中继**用 —— 那种服务器用私有 CA 签证书，公共根里没有 |
+| `ca_file` | 额外的信任锚（PEM），给自建 SMTP / 内网中继 |
 | `timeout_ms` | 默认 15000，夹在 1s ~ 60s |
 | `ehlo` | EHLO 自报的名字，默认 `localhost` |
 
-- 失败**抛错**，错误文本是服务器那句原话（`535 bad credentials` / `550 no such user here`），
-  直接贴进日志就能排查。
-- 收件人被拒时会**点名**是哪个地址 —— 群发时最要紧的信息。
-- ⚠ **这是阻塞调用**，默认超时 15 秒，比 `EXEC_BUDGET_MS` 长。看门狗只打断 CPU 死循环，
-  打断不了阻塞中的网络调用，所以这一步会实实在在占住执行线程。**别把它放进需要毫秒
-  精度的任务里**（兑换那条链）。
-- 信任库与 `http_fetch` / `ws_*` 是同一份（`webpki-roots`）——「目标机不需要装 CA」
-  这条性质对邮件也成立。
-- **不做附件**、不做 `8BITMIME` / `SMTPUTF8` 协商（正文一律 base64、头里有非 ASCII
-  就编码）。理由写在 `src/smtp.rs` 的文件头。
+- 失败**抛错**，错误文本是服务器那句原话；收件人被拒时点名是哪个地址。
+- ⚠ **阻塞调用**，默认 15 秒，比 `EXEC_BUDGET_MS` 长 —— 会占住执行线程。
+- 信任库与 `http_fetch` / `ws_*` 同一份（`webpki-roots`）。
+- **不做附件**、不做 `8BITMIME` / `SMTPUTF8` 协商。理由在 `src/smtp.rs` 文件头。
 
-验收脚本：`python3 scripts/smtp_check.py`（自带一个假 SMTP 服务器，含 STARTTLS / implicit TLS，
-不依赖外网）。
+验收脚本：`python3 scripts/smtp_check.py`（自带假 SMTP 服务器，含 STARTTLS / implicit TLS）。
 
 #### 1.2.6 侧边栏入口：`register_nav({ label, icon, path })`
 
-让面板主界面左侧多出一项，点进去打开插件自己的页面。
-
 ```js
 import { register_nav } from 'host-api';
-
-// 不给 path → 落在面板已有的约定上：`{name}/index.html`
 register_nav({ label: '日常任务', icon: '🗓' });
-
-// 也可以自己指定（绝对路径，或相对插件目录）
 register_nav({ label: '兑换', icon: '🎁', path: 'exchange.html' });
 ```
 
-```python
-from host_api import register_nav
-register_nav("日常任务", "🗓")          # label 必填，icon / path 可省
-```
-
-页面就是插件目录下那个 `index.html`（或你指定的文件），面板用 **iframe** 装它：
-
-- 插件完全掌控自己那块 UI，不用迁就面板的组件
-- 页面里的相对路径 `fetch('api/xxx')` 直接调**插件自己注册的路由**（同源）
-- iframe 是独立文档 —— 插件的 JS **动不了**面板本身（读令牌、改别人的任务）
-
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `label` | ✅ | 侧边栏上显示的字。**12 个字符以内**。写用户看得懂的话（「日常任务」而不是 `mcloud-daily`） |
+| `label` | ✅ | 侧边栏上显示的字。**12 个字符以内** |
 | `icon` | | 一个字符（emoji 或符号）。空 = 面板给个默认方块 |
 | `path` | | 页面地址。空 = `/plugins/{name}/index.html`；相对路径按插件目录解析 |
 
-- **一个插件只能声明一个**入口。第二个报错而不是静默覆盖 —— 侧边栏是给用户认路用的，
-  悄悄多出一项或少一项都会让人困惑。
-- **停用的插件不摆入口**：引擎没加载它，页面也打不开。给一个点了 404 的入口是最差的可达性。
-- 面板**不解释** `label` 的内容，只负责摆出来。
-
-> 为什么让插件声明而不是面板推导：面板已经能推导出「这个插件有没有配置页」
-> （`{name}/index.html` 存在），但**推导不出它该叫什么**。而名字恰恰决定了用户
-> 能不能一眼认出「这是我的日常任务」—— 面板替它起名叫 `mcloud-daily` 的话，
-> 用户看到的是一串插件文件名，那正是要解决的问题。
+- **一个插件只能声明一个**入口。第二个报错而不是静默覆盖。
+- **停用的插件不摆入口**；面板用 iframe 装页面，插件的 JS 动不了面板本身。
+- 页面里的相对路径 `fetch('api/xxx')` 调**插件自己注册的路由**（同源）。
 
 验收脚本：`node scripts/nav_check.mjs`（夹具 `examples/nav/`）。
 
 #### 1.2.7 随机表达式（抖动）
 
-表达式**末尾**可以再加一个 token，让实际触发时刻围绕理论时刻随机偏移 ——
-多个用户/实例用同一个表达式时就不会在同一毫秒一起打服务器。
+表达式**末尾**可以再加一个 token，让实际触发时刻围绕理论时刻随机偏移：
 
 ```text
-@every 1s -200ms          # 实际落在 [t-200ms, t]，也就是「提前一点点」
+@every 1s -200ms          # 实际落在 [t-200ms, t]
 */5 * * * * * ~500ms      # cron：实际落在 [t-500ms, t+500ms]
 0 8 * * * +30s            # 只往后
 ```
@@ -420,48 +300,27 @@ register_nav("日常任务", "🗓")          # label 必填，icon / path 可�
 | `+X` | 只推后：`[t, t+X]` | 只有 cron ✅ |
 
 **`@every` 为什么只允许 `-X`**：提前是安全的 —— `实际 ≤ 理论 < 下一拍理论` 恒成立，
-单调性天然保证，不需要任何钳制。推后就会跟下一拍打架。上限是周期的 **20%**
-（`@every 5s -1s` 可以，`-1001ms` 报错），留的余量足够避免「两次触发挤在一起」。
+单调性天然保证；推后就会跟下一拍打架。上限是周期的 **20%**。
 
 **cron 为什么宽松**：cron 的理论时刻是绝对的日历时刻，偏移越界时**钳到相邻槽位内**
-（`(上次实际触发, 下一个理论时刻 - 1ms)`），保证频率不降。代价是偏移过大时可能
-退化成「贴着下一拍」，所以**偏移别超过周期的一半**（`*/5 * * * * * ~10s` 会被钳得
-很难看，虽然仍然合法）。
+（`(上次实际触发, 下一个理论时刻 - 1ms)`），保证频率不降。
 
-**抖动不累积**。理论那条线自己走（`理论 += 周期`），抖动只加在实际那一份上。
-拿「上次实际触发 + 周期」当基准的话，`@every 1d -30m` 会变成随机游走 ——
-跑一个月「8 点」就漂走了。
+**抖动不累积**：理论那条线自己走（`理论 += 周期`），抖动只加在实际那一份上。
 
-**哪几种触发不抖**：手动触发（不动调度）、暂停恢复、换表达式、熔断重试、
-落后太多重新对齐。抖动只属于「按节奏到点了」。
+**哪几种触发不抖**：手动触发、暂停恢复、换表达式、熔断重试、落后太多重新对齐。
 
-**payload 多了 `jitterMs`**，并且 `scheduledAt` 给的是**理论**时刻（不含抖动）：
+**payload 多了 `jitterMs`**，`scheduledAt` 给的是**理论**时刻：
+`firedAt - scheduledAt == lateMs + jitterMs`。
+**payload 还多了 `realigned`（布尔）**：这一拍是落后重对齐 / 熔断重试 / 首次装载来的。
+（对称抖动的中点也是 0，所以不能只看 `jitterMs == 0`。）
 
-```text
-firedAt - scheduledAt == lateMs + jitterMs
-```
-
-`lateMs` 因此是**真实**的调度延迟，抖动不混在里面 —— `diag` 那类任务拿 `lateMs`
-的 p50/p99 判断「同轮有没有慢任务把我推开」时，不会被自己抖出来的数字顶爆。
-
-**payload 还多了 `realigned`（布尔）**：这一拍是**落后重对齐**（或熔断重试、
-首次装载）来的，不是按理论线正常走到的。
-
-⚠ 为什么需要单独一格：上面那几种情况**故意不加抖动** ⇒ 它们的 `jitterMs` 是 `0`，
-而**对称抖动的中点也是 `0`**（合法取值）。所以只看 `jitterMs == 0` 是分不出
-「这一拍没抖」和「这一拍是重对齐」的。
-
-实测撞上过：`scripts/jitter_check.py` 那条"同一种子给出同一偏移"的断言会
-**随机红** —— 三个实例同时跑，谁被负载拖得落后谁就重对齐，而重对齐是
-**时刻**决定的、不是种子决定的。有了 `realigned` 才分得开。
-
-**排障用的可复现开关**：设了 `PANEL_JITTER_SEED=<整数>` 之后，抖动变成
-「种子 + 理论时刻」的确定函数，同一个理论时刻永远给同一个偏移。注意 `@every`
-的理论时刻是从**进程启动那一刻**起算的，所以跨重启不可复现；cron 的绝对时刻可以。
+**排障开关**：`PANEL_JITTER_SEED=<整数>` 让抖动变成「种子 + 理论时刻」的确定函数；
+`@every` 的理论时刻从进程启动起算，所以跨重启不可复现。
 
 验收脚本：`python3 scripts/jitter_check.py`（夹具 `examples/jitter/jitter.js`）。
 
 ### 1.3 SQLite
+
 ```
 sqlite_query(sql, params) -> [ {列名: 值, ...}, ... ]
 sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
@@ -471,6 +330,7 @@ sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
 - `params` 只支持 `null` / `bool` / `number` / `string`；数组、对象会明确报错。
 - 查询结果上限 1000 行（低配设备上不让一个 `SELECT *` 把内存吃光）。
 - BLOB 列返回 `"<blob N bytes>"` 字符串，不做 base64。
+- 外部引擎经 RPC 调回面板：**同一个 DB 文件、同一把锁**，不是插件自己开连接。
 
 ### 1.4 HTTP
 
@@ -478,20 +338,18 @@ sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
 http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
 ```
 
-`options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`（默认 10000，钳制到 `[100, 60000]`）。
+`options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`
+（默认 10000，钳制到 `[100, 60000]`）。
 
-### 1.5 `tls` 选项：`"rustls"`（默认）与 `"native"`（第二十二轮，cargo feature `legacy-tls`）
+### 1.5 `tls` 选项：`"rustls"`（默认）与 `"native"`（构建 feature）
 
 ```text
 http_fetch(url, { tls: "native" })      # HTTP 走平台 TLS
 ws_open(url,   { tls: "native" })       # WS  走平台 TLS
 ```
 
-**默认构建里只有 rustls**；`tls:"native"` 会**明确报错**（不是静默忽略）：
-
-```json
-{"error":"tls:\"native\" 需要宿主用 `--features legacy-tls` 构建（本构建里只有 rustls；那条路会在 Linux 上引入 OpenSSL 依赖，所以默认不编）"}
-```
+**默认构建就带这条路**（`default = ["legacy-tls"]`）。拿掉它的人（`--no-default-features`）
+会得到一条**明确报错**，而不是静默忽略。
 
 为什么需要这条路 —— **能力，不是偏好**（2026-10-14 实测）：
 
@@ -500,60 +358,40 @@ $ openssl s_client -connect v.cmcc-cs.cn:443 -tls1_2
   New, TLSv1.0, Cipher is ECDHE-RSA-AES128-SHA          ← 只给 CBC + SHA1
 $ openssl s_client -connect videoim.cmcc-cs.cn:20102 -tls1_2
   New, TLSv1.0, Cipher is ECDHE-RSA-AES128-SHA          ← WS 那个主机也是
-$ … -cipher "ECDHE-RSA-AES128-GCM-SHA256"               ← 只给现代套件
-  alert number 40 (handshake failure)
 ```
 
 **rustls 不实现任何 CBC 套件**（设计选择）⇒ 默认构建**连不上**这些主机。
-`legacy-tls` 里的平台 TLS 能谈 CBC：macOS 走 Security.framework（**不用装 OpenSSL**），
-Linux 走 OpenSSL（**所以默认必须关**，否则 musl 静态二进制要多一个系统依赖）。
+`legacy-tls` 里的平台 TLS 能谈 CBC：macOS 走 Security.framework（不用装 OpenSSL），
+Linux 走 OpenSSL（发布产物静态链进去，目标机仍然什么都不用装）。
 
-⚠ 实现上有一条**很容易踩**的：`legacy-tls` 里 HTTP 那条路是 **reqwest**，不是
-"给 ureq 换个后端" —— ureq 的 `native-tls` 要 `der 0.8`，很多离线缓存里只有 `0.7`
-（半版本不兼容 ⇒ 离线编不出来）。两条路对外的返回形状逐字段一致，
-并且 `tls_hint()` 会把 `HandshakeFailure` 的**两个成因**分开提示
-（套件不重叠 vs 对面不是 TLS 服务）—— 不分开的话插件作者会去翻自己的协议代码。
+- 两条路对外的返回形状逐字段一致；`tls_hint()` 会把 `HandshakeFailure` 的**两个成因**
+  分开提示（套件不重叠 vs 对面不是 TLS 服务）。
+- 填 `"native"` 会换信任库（webpki-roots → 系统证书库），那是实质区别。
+- ⚠ **同步阻塞调用**，会占住执行线程；响应体上限 1 MiB。
 
-**什么时候别用**：只给现代套件的主机（绝大多数）用默认 rustls 就好。
-填 `"native"` 会换信任库（webpki-roots → 系统证书库），那是实质区别，不是同义替换。
-
-⚠️ **这是同步阻塞调用**，会占住引擎线程（Node 侧会阻塞事件循环）：
-一次慢请求会推迟同一轮里的其它任务。响应体上限 1 MiB。
-嵌入式宿主用 `ureq` + rustls（内置 webpki 根证书，目标机不需要装 CA）。
-
-### 1.6 HTTP 路由（仅 JS / Node）
+### 1.6 HTTP 路由
 
 ```
 register_route(path, method, handler) -> None
 ```
 
-- 嵌入式宿主：路由挂在 **Axum 的同一个端口**上，由 Rust 统一分发（`src/web.rs` 的 `fallback`）。
+- 三个引擎都支持：路由挂在 **Axum 的同一个端口**上，由 Rust 统一分发
+  （QuickJS 进程内派发；Node/Bun 经 fd3/4 把请求交给子进程）。
 - `handler(request)` 收到 `{method, path, query, headers, body}`，
   返回 `{status, headers, body}`（缺省 `200 / {} / ''`）。
-- ⚠⚠ **`query` 是原始查询串（字符串），不是解析好的对象。**
-  实测（`src/web.rs:1519` 那一行是 `req.uri().query().unwrap_or("")`）：
+- ⚠⚠ **`query` 是原始查询串（字符串），不是解析好的对象。** 实测：
 
   ```
   GET /plugins/qprobe/api/echo?id=abc&x=1
   → { "type": "string", "value": "id=abc&x=1" }
   ```
 
-  这一条踩过，而且**踩得毫无症状**：插件作者很自然会写成 `req.query['id']`，
-  而 `Object.keys('id=abc')` 在 JS 里**不报错** —— 它给的是字符下标
-  `["0","1","2",…]`。所以"把字符串当对象用"既没有类型错误（插件自己写的
-  `.d.ts` 会写成 `Record<string,string>`）也没有运行时异常，只有
-  **参数永远是 `undefined`**。
-
-  要按名取值就自己解析（`new URLSearchParams(req.query).get('id')`，
-  或者自己按第一个 `=` 切 —— 注意 `+` 是空格、值里允许有 `=`、坏编码不该抛）。
-
-  > 面板**不发** `.d.ts`（插件各自写），所以这类形状错误只能在文档里钉住 ——
-  > 这一条就是被 `mcloud-plugin` 压出来的（它写了一个 `parseQuery()` 兜住）。
+  写成 `req.query['id']` 在 JS 里**不报错**（字符串取下标给字符），只有**参数永远 undefined**。
+  要按名取值就自己解析：`new URLSearchParams(req.query).get('id')`。
 - 未匹配的路径仍然 404；`(method, path)` 重复注册会报错。
-- **Python 插件调用它会抛 `NotImplementedError`**：嵌入式宿主只把路由能力给了 JS。
-  故意让它 fail-fast —— 静默接受会让插件「本地跑得通、上机静默失效」。
+- 外部引擎的路由 handler 超时 = 杀进程组；返回体超限 / 非 JSON 会变成 500。
 
-### 1.7 WebSocket（扩展：仅嵌入式 JS 宿主）
+### 1.7 WebSocket
 
 ```
 ws_open(url, options)   -> int                  # 句柄（数字）
@@ -562,40 +400,29 @@ ws_recv(id, timeout_ms) -> { "type": …, … }
 ws_close(id)            -> true
 ```
 
-`options`：`headers`（对象，同名头**覆盖**而不是追加）、`timeout_ms`（握手总超时，默认 8000，钳制到 `[500, 30000]`）。
+`options`：`headers`（对象，同名头**覆盖**而不是追加）、`timeout_ms`
+（握手总超时，默认 8000，钳制到 `[500, 30000]`）。
 
 `ws_recv` 的返回是**结构化的结果**，不是异常：
 
 | `type` | 含义 | 插件该做什么 |
 |---|---|---|
 | `text` | 收到一帧文本，内容在 `data` | 处理它 |
-| `binary` | 收到二进制帧，hex 在 `hex`（SockJS 走文本，但二进制不该被静默丢掉） | 一般用不上 |
+| `binary` | 收到二进制帧，hex 在 `hex` | 一般用不上 |
 | `timeout` | 等满了 `timeout_ms` 还是没东西 | **不是错误** —— 存好状态，下次调用接着收 |
-| `close` | 关了（`reason` 是给**人**看的一句话） | 这条连接没了 ⇒ 要重连 |
+| `close` | 关了（`reason` 是给人看的一句话） | 这条连接没了 ⇒ 要重连 |
 | `error` | 出错了（`message`） | 同上 |
 
-⚠️ **`timeout` 与 `close` 的区别就是插件最需要的那个判据**：前者"再等等"，后者"重连"。
-所以 `timeout` **不抛异常** —— 抛了会让"正常等不到东西"表现成任务失败，把日志刷满。
-
-⚠️ 句柄不存在（已经关过 / **面板重启过**）时 `ws_send` / `ws_recv` / `ws_close` **抛异常**，
-错误信息里直接写了该怎么办（重新 `ws_open`）。这是刻意的：静默当成 `close` 会让人
-以为"对端关了"，而真因是宿主重启过 —— 那两件事的处置完全不同。
-
-设计要点（为什么是这个形状）：
-
-- **同步 + 超时**：插件的调用是阻塞的（引擎线程一次跑一个 handler），面板单次执行预算
-  2000ms ⇒ `ws_recv` 的最大超时给到 **1800ms**。一次调用收一点、状态落库、下次再来，
-  **插件侧不需要事件循环**，句柄跨调用有效。
-- **连接任务跑在面板的 tokio runtime 上**（插件侧只是阻塞地收发），
-  所以这些函数必须从**非 runtime 线程**调用 —— 就是引擎线程，插件代码天然满足。
-- **不自动重连**：重连策略（要不要退避、要不要重放订阅）是插件的业务判断。
-- 上限：**同时 8 条连接**、**单帧 256 KiB**（超了报 `error` 并关掉，**不静默截断**）。
-- TLS 与 `http_fetch` 用**同一个信任库**（webpki-roots）⇒ 「目标机不需要装 CA」仍然成立。
-
-⚠️ **这一族目前只有嵌入式 JS 宿主有**（`ws_*` 在 PocketPy / Node 适配器 / CPython 适配器
-都**没有**实现，调用会抛 `NotImplementedError`）。插件要用它，建议像 `mcloud-plugin`
-那样把 WS 调用收敛到一个**可注入的端口**上，测试里注入桩 —— 那样同一份逻辑在
-Node 下（`node --test`）照样能测，不依赖适配器补这一族。
+- **`timeout` 与 `close` 的区别就是插件最需要的那个判据**：前者「再等等」，后者「重连」。
+  所以 `timeout` **不抛异常**。
+- 句柄不存在（已经关过 / 面板重启过 / 外部子进程重启过）时 `ws_send` / `ws_recv` /
+  `ws_close` **抛异常**，错误信息里写了该怎么办（重新 `ws_open`）。
+- **同步 + 超时**：插件的调用是阻塞的；`ws_recv` 的最大超时给到 **1800ms**，
+  一次调用收一点、状态落库、下次再来 —— 插件侧不需要事件循环，句柄跨调用有效。
+- **不自动重连**；同时最多 **8 条**连接、单帧 **256 KiB**（超了报 `error` 并关掉，不静默截断）。
+- TLS 与 `http_fetch` 用同一个信任库。
+- ⚠ **必须从引擎线程调**（插件代码天然满足）；`ws_recv` 会阻塞。
+- 三个引擎都支持这一族（外部引擎经 RPC；句柄活在面板进程里）。
 
 
 ## 2. handler 的调用约定
@@ -604,7 +431,7 @@ Node 下（`node --test`）照样能测，不依赖适配器补这一族。
 handler(payload) -> None
 ```
 
-`payload` 是 JSON 可序列化的普通对象/字典，字段固定：
+`payload` 是 JSON 可序列化的普通对象（**11 格**，下表全列）：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -614,157 +441,99 @@ handler(payload) -> None
 | `runs` | number | 第几次触发（**生命周期内**，跨重启接着数） |
 | `scheduledAt` | string | 原定触发时刻，`YYYY-MM-DD HH:MM:SS.mmm` |
 | `firedAt` | string | 实际触发时刻 |
-| `lateMs` | number | 晚了多少毫秒 |
+| `lateMs` | number | 晚了多少毫秒（**手动触发时是负数**） |
+| `jitterMs` | number | 相对**理论**时刻抖了多少毫秒（没写抖动规则时恒为 0） |
+| `realigned` | boolean | 落后重对齐 / 熔断重试 / 首次装载来的（不能用 `jitterMs == 0` 反推） |
+| `manual` | boolean | 用户点的（`true`）还是调度到点的（`false`） |
+| `params` | object \| null | `register_cron(…, { params })` 给的那份；没给是 `null` |
 
-`runs` 是**累计**的：宿主把 `jobs.runs` 灌回调度器（见 [§12.3](changelog/09-jobs-authority.md#123-累计计数回灌runs--trips)），
-所以重启 / 热更新之后它不会退回 1。面板上的「触发次数」与插件看到的 `runs` 是同一个数。
+`runs` 是**累计**的：面板把 `jobs.runs` 灌回调度器，所以重启 / 热更新之后不会退回 1。
 
 **成功 / 失败的唯一约定：正常返回 = 成功，抛异常 = 失败。**
-失败时宿主记录错误文本（JS 取 `name: message` + stack，Python 取 `traceback.format_exc()`），
-写进 `jobs` 表的 `last_error`，并交给熔断器（连续失败 N 次后指数退避冷却）。
+失败时宿主记录错误文本（`name: message` + stack），写进 `jobs.last_error`，
+并交给熔断器（连续失败 N 次后指数退避冷却）。
 
 `on_tick(payload)`（可选）：宿主每秒调一次，`payload = {seq, ts}`。
-四个运行时里它都只是「定义了就会被调用」，不影响任务调度。
+三个引擎里它都只是「定义了就会被调用」，不影响任务调度。
 
 ---
 
-
 ## 3. 各运行时的差异（明确边界）
 
-| 能力 | QuickJS 宿主 | PocketPy 宿主 | Node 适配器 | CPython 适配器 |
+| 能力 | QuickJS（面板内嵌） | Node / Bun（面板外部） | Node 适配器（面板外） | 脚本模式（JS） |
 |---|---|---|---|---|
-| 日志八档 + 多参 + 脱敏 + JSONL | ✅ | ✅ | ✅ | ✅ |
-| `node:path` / `node:fs`（跨运行时写法） | ✅ **限定范围** | ❌ | ✅ 原生 | ✅ 原生 |
-| `fs.rootDir()`（面板扩展，问数据根） | ✅ | ❌ | ❌ | ❌ |
-| `read_text` / `write_text` / `list_dir` …（Python 门面） | ❌ | ✅ **限定范围** | ❌ | ✅ 原生 |
-| `data_dir()`（问数据根） | ❌ | ✅ | ❌ | ✅（= cwd） |
-| `register_cron` / `every` | ✅ | ✅ | ✅ | ✅ |
-| `register_handler`（只登记不调度） | ✅ | ✅ | ✅（配 `--job`） | ✅（配 `--job`） |
-| `worker_hint`（只做校验，无副作用） | ✅ | ✅ | ✅ | ✅ |
-| `register_cron` 的 `opts.params` | ✅ | ✅ | ✅ | ✅ |
-| 随机表达式（抖动后缀 `~` / `+` / `-`） | ✅ | ❌ | ❌ | ❌ |
-| `register_nav`（侧边栏入口） | ✅ | ❌ | ❌ | ❌ |
-| `smtp_send`（发邮件） | ✅ | ❌ | ❌ | ❌ |
-| `opts.budget_ms`（执行预算） | ✅ | ❌ | ❌ | ❌ |
-| `sqlite_query` / `sqlite_exec` | ✅ | ✅ | ✅（`node:sqlite`） | ✅（stdlib `sqlite3`） |
-| `http_fetch`（同步） | ✅ | ✅ | ✅（worker + Atomics） | ✅（`urllib`） |
-| `register_route` | ✅ | ❌ `NotImplementedError` | ✅（内置 http server） | ❌ `NotImplementedError` |
-| 扩展：`ws_*`（WebSocket 客户端） | ✅ | ❌ `NotImplementedError` | ❌ | ❌ |
-| 执行预算（死循环打断） | ✅ interrupt handler | ✅ watchdog（**CPU 时间**） | ❌ | ❌ |
-| 任务熔断 | ✅ | ✅ | ❌ | ❌ |
-| 插件热更新 | ✅ mtime | ✅ mtime | ❌ | ❌ |
-| 扩展：`http_fetch_async` | ❌ | ❌ | ✅（Node 专有） | ❌ |
+| 日志八档 + 多参 + 脱敏 + JSONL | ✅ | ✅（RPC） | ✅ | ✅ |
+| `register_cron` / `every` | ✅ | ✅（RPC） | ✅ | ❌ 抛错 |
+| `register_handler` | ✅ | ✅（RPC） | ✅（配 `--job`） | ❌ 抛错 |
+| `worker_hint` | ✅ 源码扫描 | ✅（RPC，只校验） | ✅（只校验） | ❌ 抛错 |
+| `opts.params` | ✅ | ✅ | ✅ | —（脚本无调度） |
+| 随机表达式（抖动） | ✅ 面板调度器 | ✅ 面板调度器 | ❌ 未实现 | ✅ 由面板调度 |
+| `register_nav` | ✅ | ✅（RPC） | ❌ | ❌ 抛错 |
+| `register_route` | ✅ | ✅（RPC） | ✅（内置 http server） | ❌ 抛错 |
+| `ws_*` | ✅ | ✅（RPC） | ❌ | ✅ |
+| `smtp_send` | ✅ | ✅（RPC） | ❌ | ✅ |
+| `opts.budget_ms` | ✅ | ✅（面板执行） | ❌ | —（用 `@timeout`） |
+| `sqlite_query` / `sqlite_exec` | ✅ | ✅（RPC） | ✅（`node:sqlite`） | ✅ |
+| `http_fetch`（同步） | ✅ | ✅（RPC） | ✅（worker + Atomics） | ✅ |
+| `node:fs` / `node:path` | ✅ **限定在数据根** | ✅ **原生、无围栏** | ✅ 原生 | ✅ 原生（脚本跑在 Node/Bun 里） |
+| `fs.rootDir()`（面板扩展） | ✅ | ❌（原生 fs 不需要） | ❌ | ✅ |
+| 执行预算（死循环防护） | ✅ interrupt handler | ✅ **杀进程组** | ❌ | ✅ 超时杀进程组 |
+| 任务熔断 | ✅ | ✅ | ❌ | ✅ |
+| 插件热更新 | ✅ mtime | ✅ mtime（重启子进程） | ❌ | —（一次性） |
+| 原生 npm / `child_process` | ❌ | ✅ **Node/Bun-only** | ✅ | ✅（JS 脚本） |
+| 扩展：`http_fetch_async` | ❌ | ❌ | ✅（Node 专有） | — |
 
-> 抖动的三个适配器**还没实现**。插件用了抖动之后，在面板里正常，在适配器里会
-> 直接报表达式非法 —— 是**响亮**的失败，不是静默地按原节奏跑，所以不会误导。
-> 要补的话三处都要改（`adapters/node/src/cron.js`、`adapters/python/host_api/` 的
-> 调度解析，以及各自的 `nextAfter` / `next_after`）。
-
-「执行预算 / 熔断 / 热更新」是**宿主策略**，不是插件 API：
-适配器不实现它们，插件也不应该依赖它们 —— 同一份脚本在嵌入式宿主里受保护，
-在 Node/CPython 里得自己注意。
+「执行预算 / 熔断 / 热更新 / 运行记录」是**宿主策略**，不是插件 API：
+Node 适配器不实现它们，插件也不应该依赖 —— 同一份脚本在面板里受保护，
+在面板外得自己注意。
 
 ---
 
 ## 4. 插件工程
 
-这一章不是 API，而是「一个插件在工程上怎么组织」：面板上怎么分组、一个插件怎么拆成多个文件、
-以及插件能用的内置模块。
+### 4.1 插件分组（按「系列」）
 
-## 4.1 插件分组（按"系列"）
-
-插件面板上按**系列**归拢显示，规则是**推导**的：
+面板上按**系列**归拢显示，规则是**推导**的：
 
 > **插件名里第一个 `-` 或 `_` 之前的那一段就是系列名。**
 
 | 插件名 | 系列 |
 |---|---|
 | `mcloud-signin` | `mcloud` |
-| `mcloud-receive` | `mcloud` |
 | `bilibili-checkin` | `bilibili` |
-| `bilibili-dynamic` | `bilibili` |
 | `mcloud` | `mcloud`（没有分隔符，自己一组） |
 
-界面里每个系列一块，带「全部重载」「全部启用」—— 一个系列的插件一起看、一起动。
-（不做"全部停用"：那是破坏性的，逐条停用已经有确认流程，批量那条路不该绕过它。）
+**为什么是推导而不是让插件声明**：面板里的插件就是"一个文件"，为了填一个字符串去加一套清单
+格式或 API，代价不成比例；而"按系列起名"本来就是插件作者的常态。真要覆盖时再加
+`declare_group()`，等有需求再做。
 
-**为什么是推导而不是让插件声明**：面板里的插件就是"一个文件"，为了填一个字符串去加
-一套清单格式或 API，代价不成比例；而"按系列起名"本来就是插件作者的常态。
-所以**起名就等于分组** —— 想把几个插件归到一起，给它们同一个前缀就行。
-真要覆盖时再加 `declare_group()`，等有需求再做。
+### 4.2 插件多文件：相对 `import` 与 `require`
 
-## 4.2 插件多文件：相对 `import` 与 `require`
-
-一个插件**可以拆成多个文件**。入口仍然是 `plugins/js/<名字>.js`（或 `py/`），
-被引用的模块放在**子目录**里：
+一个插件**可以拆成多个文件**。入口仍然是 `plugins/js/<名字>.js`（**入口只认 `.js`**），
+被引用的模块（可以是 `.js` / `.mjs`）放在**子目录**里：
 
 ```text
 plugins/js/mcloud.js          入口（这是"插件"）
 plugins/js/lib/core.js        ← 模块（不是插件）
-plugins/js/lib/util/date.js   ← 也可以再深
+plugins/js/lib/util/date.js
 plugins/mcloud/index.html     插件自带的页面（不是插件）
 ```
 
-**收集规则**：只收 `plugins/` 根目录与 `plugins/js/`、`plugins/py/` 这一层，
-再往下不收。所以"模块放子目录"这件事是有硬约束的：放在 `plugins/js/` 根下的
-`.js` 会被当成插件加载（会多出一个没有任务的插件，名字还跟你想的对不上）。
+**收集规则**：只收 `plugins/` 根目录与 `plugins/js/` 这一层，再往下不收。
+放在 `plugins/js/` 根下的 `.js` 会被当成插件加载（会多出一个没有任务的插件）。
 
-### 4.2.1 `import` —— ES 模块语义（扩展名可省）
+**QuickJS**：相对 `import` 按 URL 语义解析（可省扩展名、找目录入口），
+另有够用的 CJS `require`（`module.exports` / `exports`、按 URL 缓存、每个模块自己的相对基准）。
+`require('host-api')` 与 `import 'host-api'` 是同一批函数。
 
-```js
-import twice, { base, counter } from './lib/math.js';
-import * as ns from './lib/math.js';
-import { base as reBase } from './lib/reexport.js';   // 支持 `export * from`
-```
+**Node / Bun**：用 Node/Bun 自己的 ESM 加载器 —— 相对路径、npm 包、`import.meta` 都按原生语义；
+`host-api` 由 loader hook / `NODE_PATH` 解析。**不提供** CJS 的 `require` / `module.exports`
+（插件入口不是 CJS 模块；要拆模块请写 ESM）。
 
-* 模块标识是 **`file://` URL** —— `import.meta.url` 就是它（模块靠它定位自己的位置）
-* 相对说明符按 **URL 语义**解析（`./`、`../` 都行，`/x.js` 以根为基准）
-* 导出是 **活绑定**（导出方改变量，导入方看得到 —— 这是 ESM 的语义，不是拷贝）
-* 循环导入、动态 `import()`、顶层 `await` 都可用
-* **`import` 只能读 ES 模块**。读一个 CJS 文件（`module.exports` 写法）会明确告诉你
-  「请用 `require()` 引入，或改成 ES 模块」，而不是丢 `Could not find export 'default'`
-* **扩展名可以省**，也会自动找目录入口。候选链是：
-  `原样` → `+.js` → `+.mjs` → `/index.js` → `/index.mjs`
-  （`import './lib/math'`、`import './lib'` 都能用）
-* ⚠️ 这是**放宽**，不是浏览器 / Node 的 ESM 行为（那两边都要求写全扩展名、也不找 index）。
-  代价要认：`./x` 与 `./x.js` 指向同一个文件，**写错时不会立刻发现** ——
-  误删的 `./x.js` 可能悄悄落到 `./x.mjs` 或 `./x/index.js` 上。
-  想知道最终用的是哪个文件，看 `import.meta.url`（它一定是 `file://` URL）
-* 只能引**插件目录内**的文件（越界的路径会被挡住并说明）
+> 同一个模块文件被多个插件 `import` 时，QuickJS 按 URL 缓存只加载一次；
+> 外部引擎每个插件是独立进程，天然不共享模块实例。
 
-### 4.2.2 `require` —— 够用的 CJS 兼容
-
-```js
-const legacy = require('./lib/legacy.js');   // CJS：module.exports / exports 都行
-const host = require('host-api');            // 与 import … from 'host-api' 同一批函数
-```
-
-* 解析与 `import` **同一套**（同样可以省扩展名、找目录入口）—— 见上
-* 按解析后的 URL 缓存；循环 `require` 拿到的是"半成品"（与 Node 一致）
-* 每个模块顶部会被自动注入一行，把 `require` 绑到**这个模块自己**的 URL 上 ——
-  所以 `lib/` 里的模块 `require('./x.js')` 解析的是它自己旁边，而不是入口那边
-  （代价：用到 `require` 的文件，错误堆栈里的行号 +1）
-* **`require` 读不了 ES 模块**。真去读会明确告诉你"这是 ES 模块，请用 import"，
-  而不是丢一个 `unsupported keyword: export`
-* 不提供：`require.resolve` / `require.cache` / package.json 的 main / `.json` / Node 内置模块
-
-> 同一个模块文件被多个插件 `import` 时只会被加载一次（按 URL 缓存），
-> 这是"一份 core、多个插件共用"省内存的地方。
-
-
-## 4.3 内置模块：文件系统（`node:fs` / `node:path`）
-
-跨运行时写法直接 `import fs from 'node:fs'` / `import path from 'node:path'`：
-
-| | 面板内（QuickJS） | 面板外（Node / Bun） |
-| --- | --- | --- |
-| 来源 | 宿主内置（`src/jshost.rs`） | 里的原生模块 |
-| 边界 | **只在自己数据目录内**：`<PLUGIN_DATA_DIR>/<插件名>/` 就是它眼里的 `/` | 无限制 |
-| 越界 | `EACCES`（**拒绝**，不是夹回根目录） | — |
-| 相对路径的基准 | 那个数据根 | 进程 cwd |
-| `path.resolve()` | 绝对结果是 `/a/b` 形状（根 = 数据根） | 真实绝对路径 |
-
-**可移植的写法是只用相对路径**，并把 `path` 的结果原样交回 `fs` —— 两边都对。
+### 4.3 内置模块：文件系统（`node:fs` / `node:path`）
 
 ```js
 import fs from 'node:fs';
@@ -776,11 +545,26 @@ fs.mkdirSync(path.dirname(STATE), { recursive: true });
 fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 ```
 
-### 4.3.0 能用哪些函数
+| | 面板内（QuickJS） | 面板外（Node / Bun） |
+|---|---|---|
+| 来源 | 宿主内置（`src/jshost.rs`） | 原生模块 |
+| 边界 | **只在自己数据目录内**：`<PLUGIN_DATA_DIR>/<插件名>/` 就是它眼里的 `/` | 无限制 |
+| 越界 | `EACCES`（**拒绝**，不是夹回根目录） | — |
+| 相对路径的基准 | 那个数据根 | 进程 CWD（面板把 CWD 设成插件数据目录；脚本是脚本所在目录） |
+| `path.resolve()` | 绝对结果是 `/a/b` 形状（根 = 数据根） | 真实绝对路径 |
+| `Buffer` | 没有；不给 encoding 返回 `Uint8Array` | 有 |
+| 异步 API（`fs.promises`） | 没有 | 有 |
+| 单次读写上限 | 8 MiB | 无 |
 
-**这是全部**（多一个都没有，少一个也不行 —— 这张表和 `src/jshost.rs` 的导出表由测试
-`documented_fs_surface_matches_the_code` **双向**钉着：代码里有而表格没写会红，
-表格里写了而代码没有也会红。见 [验证手册](testing.md#5-怎么验证)）。
+**可移植的写法是只用相对路径**，并把 `path` 的结果原样交回 `fs` —— 两边都对。
+完整的 QuickJS fs 函数清单（与 `src/jshost.rs` 导出表由测试双向钉着）见
+[plugin-fs.md §22.4](plugin-fs.md#224-与-node-原生-fs-的差异quickjs-侧)。
+
+### 4.3.0 能用哪些函数（QuickJS）
+
+**这是 QuickJS 侧的全部导出**（多一个没有，少一个也不行 —— 这张表和 `src/jshost.rs` 的导出表
+由测试 `documented_fs_surface_matches_the_code` **双向**钉着：代码里有而表格没写会红，
+表格里写了而代码没有也会红）。
 
 | `node:fs` | 说明 |
 | --- | --- |
@@ -799,125 +583,45 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 
 | `node:path` | 说明 |
 | --- | --- |
-| `join` `resolve` `normalize` `relative` | `resolve` 的"当前目录"是数据根，结果是 `/a/b` 形状 |
+| `join` `normalize` `resolve` `relative` | `resolve` 的「当前目录」是数据根，结果是 `/a/b` 形状 |
 | `dirname` `basename` `extname` | |
 | `isAbsolute` `sep` `delimiter` | `sep` 恒为 `/` |
 | `parse` `format` `posix` `win32` | `posix` / `win32` 都指向同一份实现（面板只有一种路径风格） |
 
-Python 侧是**另一套名字**（不是 `os` 的包装，见 §4.3.3）：
+> 为什么这里要列全：这些函数是**跨运行时的承诺** —— 面板内 QuickJS 与面板外 Node 同名同义
+> （除了 `rootDir`）。文档只提其中几个的话，插件作者要么去读源码，要么写出只能在一边跑的代码。
+> 外部 Node / Bun 的 `fs` 是**原生**的，函数远多于这张表；那张表只约束 QuickJS 的内置模块。
 
-| Python（`host_api`） | 说明 |
-| --- | --- |
-| `read_text(name)` / `write_text(name, text)` | 读写文本（UTF-8） |
-| `append_text(name, text)` | 追加 |
-| `read_bytes(name)` / `write_bytes(name, data)` | 读写字节 |
-| `exists(name)` / `list_dir(name)` | 存在 / 列名字 |
-| `mkdir(name)` / `remove(name)` | 建目录 / 尽力删（文件或整棵目录） |
-| `rename(from_name, to_name)` / `stat(name)` | 改名 / `{ size, is_dir, is_file, mtime_ms }` |
-| `data_dir()` | 数据根的真实路径（CPython 适配器里 = cwd） |
+### 4.3.1 外部 Node / Bun：原生 fs
 
-> 为什么这里要列全：这些函数是**跨运行时的承诺** —— 面板内与面板外同名同义。
-> 文档只提其中几个的话，插件作者要么去读源码，要么写出只能在一边跑的代码。
-> 上一版就是这样：文档只提了 `writeFileSync` / `rmSync` / `rootDir`，
-> 于是"面板里到底有没有 `readFileSync`"只能靠试。
-
-### 4.3.1 与 Node 的差异（就这几条）
-
-| | Node 原生 | 面板内 |
-| --- | --- | --- |
-| `Buffer` | 有 | **没有**；不给 encoding 时给 `Uint8Array` |
-| 异步 API（`fs.promises`） | 有 | **没有**（宿主没有真事件循环，提供它只会是谎话） |
-| 单次读写上限 | 无 | 8 MiB（要穿过 JSON 桥，超大文件会卡住引擎线程） |
-| 支持的 encoding | 很多 | 只有 `utf8`（省略 = 字节） |
-| `fs.rootDir()` | 不存在 | **面板扩展**，返回数据根的真实路径（排查用，别依赖） |
-
-### 4.3.2 边界为什么这样做
-
-- **数据根不在插件源码目录里**。`<PLUGINS_DIR>/<插件名>/` 是插件放自有 UI/配置的地方，而且面板把它整个当静态目录服务出去 —— 让插件往那儿写有两层问题：一次误删就把自己的页面删了；写进去的 token 会出现在网页上。所以数据根放在数据目录下（默认 `<DB 所在目录>/plugin-data`，`PLUGIN_DATA_DIR` 可覆盖）。
-- **越界拒绝而不是夹回**。静默改写成夹回根目录会让同一份代码在面板内外表现不同，那种差异最难查。
-- **围栏在物理层复核**。只做 `..` 的字符串规整挡不住软链接（`data -> /var/lib/x` 看着完全合法）。见 `src/pluginfs.rs` 的 `resolve_in_root` 与其单测。
-- **`require('node:fs')` 与 `import fs` 是同一个对象**（与 Node 一致；两份实现会让 `===` 悄悄变 false）。
-
-### 4.3.3 Python 侧：`read_text` / `write_text` 这一套
-
-面板内的 Python 插件**没有** `open()` / `os`（宿主是 PocketPy，不带这些），
-所以门面上给了一套窄接口。落点与 JS 侧的 `node:fs` **完全一样**：
-`<PLUGIN_DATA_DIR>/<插件名>/` 就是插件眼里的根。
-
-```python
-# ⚠ 必须单行 import：PocketPy 不认跨行括号 import
-from host_api import read_text, write_text, append_text, list_dir, exists, mkdir, remove, rename, stat, data_dir
-
-write_text("data/x.json", '{"n":1}')
-print(read_text("data/x.json"))
-for name in list_dir("data"):
-    print(name, stat("data/" + name)["size"])
-```
-
-`data_dir()` 在**两侧都实现**（面板里是插件的数据根，CPython 适配器里是 cwd），
-所以同一份 `.py` 两边都能跑。
-
-**越界**：`../x` 一律 `OSError` + `EACCES`（拒绝，不夹回）。
-
-**取错误码**（跨运行时的写法）：
-
-```python
-try:
-    read_text("../x")
-except OSError as e:
-    code = getattr(e, "code", str(e).split(":")[0])   # 面板侧没有 .code，靠消息前缀
-```
-
-面板侧**没有** `.code` 属性：PocketPy 里给异常实例挂属性不行、`class X(OSError)` 不行、
-两参数 `OSError(code, msg)` 也不行（三条都实测过）。所以约定是**两边 `str(e)` 都以
-`码: ` 开头**，而 CPython 适配器额外有 `.code`。`getattr` 的默认值就是为面板侧准备的。
-
-
-## 5. 写插件的硬约束
-
-一份脚本要在两个宿主里都跑通，写法就得被两边都接受。两种语言各一张实测表。
-
-### 5.1 `.js` 插件：QuickJS 与 Node 的差异
-
-实测（`typeof globalThis[x]`，2026-10-13）：
-
-| 构造 | 嵌入式 QuickJS | Node | 替代写法 |
-|---|---|---|---|
-| `process` / `require` / `module` / `exports` / `__dirname` / `Buffer` | 无 | 有 | 走 `host-api` |
-| `setTimeout` / `setInterval` / `setImmediate` | 无 | 有 | 用调度器：`every(name, '500ms', fn)` / `register_cron` |
-| `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现，见 §1.4） |
-| `import fs from 'node:fs'` / `require('fs')` 等 Node 内置 | 加载期报错（说明只支持 `host-api` 与插件目录内的相对路径） | 有 | 走 `host-api` |
-| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `structuredClone` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
-| `console` / `performance` / `atob` / `btoa` / `queueMicrotask` | 有 | 有 | — |
-| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `WeakRef` / `Proxy` / `Reflect` / `eval`） | 有 | 有 | — |
-
-一句话：用 ECMAScript 语言本身 + `host-api`，两边都跑得通。
-`setTimeout` 这类计时器两边不能通用，延时一律交给调度器。
-
-### 5.2 `.py` 插件：PocketPy 与 CPython 的差异
-
-| 构造 | PocketPy v2.2.0 | CPython | 替代写法 |
-|---|---|---|---|
-| 生成器表达式 `f(x for x in y)` | 不支持（`SyntaxError`） | 支持 | 列表推导 `f([x for x in y])` |
-| `finally:` | 不支持（`SyntaxError: finally clause is not supported yet`） | 支持 | 清理逻辑写两遍 |
-| `nonlocal` | 不支持（`SyntaxError`） | 支持 | 用 `state = {...}` 字典改状态 |
-| 相邻字符串隐式拼接 `"a" "b"` | 不支持（`SyntaxError: expected ')', got '@str'`） | 支持 | 显式写 `"a" + "b"`（多行 SQL 最容易踩） |
-| **f-string 与普通字面量相邻**（`f"…{x}" "…"`） | 不支持（同一个 `SyntaxError`） | 支持 | 别混着写：整段都用 `+` 拼，或整段都用 f-string。**踩过一次**：宿主自己的 `host_api` 引导脚本这么写，导致**所有** `.py` 插件一起加载失败 |
-| `async def` / `await` | 不支持（`SyntaxError`） | 支持 | 同步写法 |
-| `with` 自定义上下文管理器 | `__exit__` 只收到 self | 支持 | 手写 try/except |
-| `datetime + timedelta` | 不支持（`TypeError`） | 支持 | 用时间戳字符串 |
-| `threading` / `sqlite3` / `urllib` / `http.server` | 没有这些模块 | 有 | 走 `host_api` |
-| `os` 模块 / `open()` | 关掉了（`PK_ENABLE_OS=0`，见 `build.rs`） | 有 | 走 `host_api`（宿主统一审计） |
-| 列表/字典/集合推导、f-string、`.format()`、`%`、class、lambda、闭包、`global`、`assert`、`yield`、`match/case`、`:=` | 支持 | 支持 | — |
-| 可用模块：`json` / `math` / `traceback` / `sys` | 有 | 有 | — |
-
-一句话：按 PocketPy 的写法写，两边都跑得通；它不支持的那些构造，换成表里的替代写法。
+**外部 Node/Bun 的 `fs` 是原生的、没有围栏**：它能读写当前用户能读写的任何文件。
+面板只做两件事：把 CWD 设成插件数据目录、在环境变量里给出 `PANEL_PLUGIN_DATA_DIR`。
+这是「可信代码」边界的一部分（[security.md §28](security.md#28-外部运行时与脚本可信代码不是沙箱)）。
 
 ---
 
-## 5.3 绑定名：`host-api` 模块、`host_api` 全局、`host` 别名
+## 5. 写插件的硬约束
 
-同一个 API 有三个入口，**语义完全一致**，只是绑定名不同：
+### 5.1 QuickJS 与 Node/Bun 的差异
+
+| 构造 | QuickJS（内嵌） | Node / Bun | 替代写法 |
+|---|---|---|---|
+| `process` / `Buffer` / `__dirname` | 无 | 有 | 走 `host-api`；宿主平台判断用 `typeof process !== 'undefined'` |
+| `setTimeout` / `setInterval` | 无 | 有 | 用调度器：`every(name, '500ms', fn)` / `register_cron` |
+| `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现） |
+| `node:fs` / `node:path` | **受限**（数据根围栏） | 原生 | `host-api` 或只用相对路径 |
+| `node:child_process` / 其它 Node 内置 / npm 包 | 加载期报错 | 有 | 用了就是 Node/Bun-only，见 §5.4 |
+| `URL` / `URLSearchParams` / `TextEncoder` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
+| `console` / `performance` / `atob` / `btoa` | 有 | 有 | — |
+| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有 | 有 | — |
+| 模块形态 | 经典脚本 + ESM（`import`/`export`） | 经典全局脚本 + ESM；**没有 CJS 模块语义** | 拆模块用 ESM |
+
+一句话：**只用 ECMAScript 语言本身 + `host-api`，三个引擎都跑得通。**
+`setTimeout` 这类计时器两边不能通用，延时一律交给调度器。
+
+### 5.2 绑定名：`host-api` 模块、`host_api` 全局、`host` 别名
+
+同一个 API 有三个入口，**语义完全一致**：
 
 | 入口 | 写法 | 说明 |
 |---|---|---|
@@ -925,87 +629,73 @@ except OSError as e:
 | 全局对象 | `host_api.register_route(...)` | 模块系统不可用时的等价入口 |
 | 历史别名 | `host.register_route(...)` | 等价于 `host_api`，只多一个 `cron` 名字 |
 
-⚠️ **`host` 必须是 `host_api` 的完整别名。** 它以前是手写的 5 方法对象字面量
-（`log/warn/error/cron/every`），于是 `host.register_route` / `host.sqlite_query`
-全是 `undefined`，插件里写出来就是**加载期**的
-`TypeError: not a function` —— 跟「我照老示例写了个路由」这个动作完全对不上号。
-现在它是 `Object.create(host_api)` 加一个 `cron`，所以「`host` 上有什么」完全由
-`host_api` 决定，不会再出现「看起来少了一堆方法」。
+⚠ **`host` 必须是 `host_api` 的完整别名。** 它曾经是手写的 5 方法对象字面量，
+于是 `host.register_route` 是 `undefined`，插件里写出来就是加载期的
+`TypeError: not a function`。现在它是 `Object.create(host_api)` 加一个 `cron` ——
+「`host` 上有什么」完全由 `host_api` 决定。
 
----
+### 5.3 脚本模式（一次性进程）
 
-## 5.4 插件自带的配置页
+JS 脚本（`.js` / `.mjs`）跑在**同一个 runner** 里，但**没有调度表**：
 
-**边界**：主面板（Rust 提供）负责任务定义与调度、测试运行、插件管理、日志与健康度；
-插件自带的页面**只管理这个插件自己那份配置**。它不接管主面板的职责，主面板也不替它管配置。
-
-目录约定 —— 插件目录下、与插件**同名**的子目录：
-
-```
-plugins/
-├── js/demo.js      插件本体（名字 = 文件名去扩展名 = demo）
-└── demo/           这个插件的配置页
-    ├── index.html  入口（必须叫这个名字）
-    ├── style.css
-    └── app.js
-```
-
-运行时路径 `/plugins/{name}/`：
-
-| 请求 | 结果 |
+| 能力 | 脚本模式 |
 |---|---|
-| `GET /plugins/demo/` | 读 `{PLUGINS_DIR}/demo/index.html` |
-| `GET /plugins/demo/style.css` | 读同目录下的文件 |
-| `GET /plugins/demo/api/*` | **先查插件注册的路由**，命中就派发给插件 |
-| `POST /plugins/demo/api/*` | 同上，但要求 `x-panel: 1` |
-| `POST /plugins/demo/index.html` | 405（静态资源只接受 GET） |
-| 未加载的插件名 | 404 |
+| `log` / `sqlite_*` / `http_fetch` / `ws_*` / `smtp_send` | ✅ 可用（经 RPC） |
+| `register_cron` / `every` / `register_handler` / `register_route` / `register_nav` / `worker_hint` | ❌ **抛错** |
+| `on_tick` | ❌ 不会被调用 |
 
-三条硬规则：
+错误文本会直接说「脚本是一次性的；调度来自 `@cron` 头部或面板任务；需要任务/路由请写插件」。
+顶层代码跑完发 `done` 并退出（成功 0 / 失败 1）。执行环境、超时、输出与退出码见
+[script-jobs.md](script-jobs.md#6-执行环境)。
 
-1. **静态资源只服务已加载插件的目录**。否则插件目录下任何一个目录都能从网上读出来。
-2. **目录穿越在服务端自己挡**：插件名不含分隔符、相对路径逐段检查、规范化后必须仍在
-   插件目录之下（这条同时挡住符号链接）。用 `..` 测的时候记得用**原始 socket** ——
-   urllib / curl 会在客户端把 `..` 折掉，用它们测等于在测客户端。
-3. **目录里有 `index.html` 的不会被当成插件加载**。插件目录扫描器下钻 2 层找 `.js`/`.py`，
-   不跳过的话 `demo/app.js` 会被当成一个叫 `app` 的插件，报的错还是 host-api 解析失败 ——
-   跟「我给插件加了个页面」这个动作联系不起来。
+> **Python / Shell 脚本没有 `host-api`**：它们是原生的普通进程。这种非对称是故意的 ——
+> 给它们 `host-api` 那套能力等于把两套语义硬凑在一起。需要面板能力请写 JS 脚本或插件。
 
-插件页面可以直接复用主面板的 CSS 变量（`<link rel="stylesheet" href="/css/theme.css">`），
-这样它会自动跟着主面板换主题，作者不需要写两套配色。
+### 5.4 原生逃生口（Node / Bun only）
 
----
-
-## 5.5 测试运行（面板侧接口）
-
-面板的「测试运行」不是插件 API，而是宿主给编辑器的便利：跑一段代码、把输出收回来。
-
-```
-POST /api/test/js    { "code": "...", "input": "..." }   → { ok, stdout, stderr, error, ms }
-POST /api/test/py    同上
+```js
+import fs from 'node:fs';                 // 真实文件系统，没有围栏
+import { execFile } from 'node:child_process';
+import Database from 'better-sqlite3';    // 任何 npm 包
 ```
 
-- 代码跑在**一次性解释器**里（JS 新建 `Context`、Python 借一个空闲 pocketpy VM），
-  跑完立刻析构：不碰任何已加载插件的状态，也不注册任务。
-- 输入以全局 `input` 提供（两种语言都有）。
-- 输出约定：`log`/`console.log`/`print` → `stdout`；`warn`/`error` → `stderr`；
-  代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码，
-  两者分开，面板才能区分「你的代码有问题」和「面板出问题了」。
-- 受执行预算保护：JS 死循环被 interrupt handler 打断（实测 2000 ms），
-  Python 死循环被 watchdog 打断（实测 2032 ms，CPU 时间）。
-- 输出**不进**面板的实时日志（用 thread_local 捕获缓冲收走），否则跑几次就把日志刷满了。
+- 用了原生 API 的插件是 **Node/Bun-only**，**不承诺**能跑在 QuickJS 里
+  （QuickJS 没有 `process` / `child_process` / 任意 npm 包）。
+- 原生 API **绕过面板的统一审计**：不走日志脱敏、不走 `http_fetch` 的信任库、
+  不经过 SQLite 的那把锁、不受「可中断」的执行预算保护（只有杀进程这一层）。
+- 文件系统没有沙箱；面板只保证不透传 `PANEL_TOKEN*` 环境变量。
+- 跨引擎插件请只用 `host-api`（以及 QuickJS 也提供的受限 `node:fs` / `node:path`）。
+
+### 5.5 测试运行（面板侧接口）
+
+```
+POST /api/test/js    { "code": "...", "input": "...", "plugin"?, "task"?, "engine"? }
+                     → { ok, stdout, stderr, error, ms }
+```
+
+- 代码跑在**一次性解释器**里（新建 `Context`，或临时起一次外部引擎），跑完立刻析构：
+  不碰任何已加载插件的状态，也不注册任务。
+- 可选 `engine`（`quickjs` / `node` / `bun`）决定这次试跑用哪个引擎；不传用后端默认。
+  传 `plugin` / `task` 时这次试跑会记进那条任务的 `runs`（`kind='test'`）。
+- 输入以全局 `input` 提供。
+- 输出约定：`log`/`console.log` → `stdout`；`warn`/`error` → `stderr`；
+  代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码。
+- 受执行预算保护：死循环被 interrupt handler 打断（实测 2000 ms）。
+- 输出**不进**面板的实时日志（用捕获缓冲收走），否则跑几次就把日志刷满了。
+- `POST /api/test/py` **已删除**（Python 插件退场）。
 
 ---
-
 
 ## 6. 参考实现
 
 - 宿主侧唯一实现：`src/hostapi.rs`（`HostState::do_*`）
-- JS 适配 + 内置模块源码：`src/jshost.rs`
-- Python 适配 + 引导脚本：`src/pyhost.rs`
-- Node 适配器：`adapters/node`（自带 `README.md` 与 20 个用例）
-- CPython 适配器：`adapters/python`（自带 51 个用例）
-- 示例插件：`plugins/js/host-api-demo.js`、`plugins/py/sysinfo.py`、`plugins/py/sqlite-demo.py`
+- QuickJS 适配 + 内置模块源码：`src/jshost.rs`
+- 外部进程协议：`src/extproc.rs` + [ext-runtime-protocol.md](ext-runtime-protocol.md)
+- 外部 shim 落盘：`src/runtimefs.rs`；JS runner / host-api：`runtime/js/`
+- 运行时探测：`src/runtimes.rs`
+- Node 适配器（面板外）：`adapters/node`
+- 示例插件：`plugins/js/host-api-demo.js`、`plugins/js/fs-demo.js`、`plugins/js/panel-jobs.js`
 - 带配置页的示例插件：`plugins/js/demo.js` + `plugins/demo/{index.html,style.css,app.js}`
+- 脚本任务：`src/taskdir.rs`（发现 / 头部解析）、`src/scriptjob.rs`（执行）
 - 主面板前端：`web/`（编译期内嵌，见 `src/assets.rs`）
 - 插件静态资源与测试运行的服务侧：`src/web.rs`（`plugin_asset` / `test_run`）

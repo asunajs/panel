@@ -26,6 +26,8 @@
 //!   ②**失败退避在验令牌之前**，未认证请求不能每次都让 CPU 跑一次 Argon2（放大的口子）
 //! - 会话 ID 来自 **OS 随机源**（`getrandom`，32 字节 → 64 位十六进制）
 //! - 登录失败**按来源 IP 指数退避**（1s → 64s，上限 60s），挡住暴力猜令牌
+//! - 登录页有一个**蜜罐字段**（人看不见的 `username`）：填了它 + 口令又不对 ⇒ 判定为
+//!   自动化脚本，直接封掉该 IP 的登录一小时（见 [`Auth::ban`]）。只封登录，不撤已有会话
 //! - cookie 是 **HttpOnly + SameSite=Strict**：JS 读不到，跨站请求也带不上
 //!   （SameSite=Strict 顺带把 CSRF 也堵了，`x-panel: 1` 保留做纵深防御）
 //! - `Secure` 只在**真的走 HTTPS 时**才加（`PANEL_COOKIE_SECURE=1`）——
@@ -37,6 +39,8 @@
 //!   —— 类型上就不存在「未鉴权也能过」的构造方式。理由见下面那条注释。
 //! - 会话表在**内存**里：进程重启后所有会话失效（要重新登录），多实例之间不共享
 //! - 退避也只在内存里：重启即清零。够挡在线暴力猜，不挡离线攻击
+//! - 蜜罐封禁同样只在内存里（重启即解除），且**不撤销已登录的会话**：它挡的是
+//!   「继续尝试登录」，不是「把已经进来的人踢出去」—— 后者要靠 `logout` / 重启
 //! - 反代后面拿到的 `ConnectInfo` 是**反代的 IP**，按 IP 退避会退化成全局退避。
 //!   真放反代后面应该让反代自己做限流（见 docs/security.md §13.5）
 
@@ -71,6 +75,13 @@ const GLOBAL_FAIL_THRESHOLD: usize = 30;
 /// 关闸多久。
 const GLOBAL_LOCK: Duration = Duration::from_secs(30);
 
+/// 蜜罐命中之后封禁登录多久。
+///
+/// 为什么不永久：这个面板通常就跑在局域网里，客户端 IP 由 DHCP 给，永久封禁
+/// 攒久了等于把自家地址池一个个封掉；而误封的恢复路径（`PANEL_ALLOW_IPS`、
+/// 重启）都不该是「必须动手修」。一小时既让这一波脚本白跑，又会自动过去。
+const BAN_TTL: Duration = Duration::from_secs(3600);
+
 /// 一条活跃会话的可展示信息（面板上「谁登录着」用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -96,6 +107,13 @@ struct FailState {
     blocked_until: Option<Instant>,
     last: Instant,
 }
+
+/// 被封禁的来源（蜜罐命中）。值 = 封到什么时候。
+///
+/// 单独一张表而不是塞进 `FailState`：那条的语义是「猜错了要冷一会儿」，
+/// 会被成功登录抹掉（`login` 成功就 `remove`）。封禁要是跟着走，
+/// 攻击者只要猜中一次就把自己的封禁清掉了。
+type BanTable = HashMap<IpAddr, Instant>;
 
 /// 凭证是通过哪种方式验过的（审计日志里会写）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,16 +153,39 @@ impl LoginError {
 
 /// 令牌的**存储形式**。
 ///
-/// 为什么要有这个：令牌是配置项，通常躺在环境变量或某个配置文件里 —— 那是**明文**，
-/// 谁读到那个文件谁就能拿来登录。改成哈希之后，本地落盘的只是一串「盐 + 哈希」，
-/// 拿到它既不能直接登录、也没法反推出令牌。
+/// 三种形态，安全强度依次递增（`Plain` < `Phc` < `Prehash`）：
+///
+/// | 形态 | 落盘那份 | 线上那份 | 部署可用 |
+/// |---|---|---|---|
+/// | `Plain` | 明文口令 | 明文口令 | ✗ 只在开发口子里 |
+/// | `Phc` | Argon2id(口令) | **明文口令** | ✗ 只在开发口子里 |
+/// | `Prehash` | Argon2id(摘要) | 摘要 | ✓ |
+///
+/// 关键那一列是「线上那份」：前两种形态下，**明文口令都要经过服务端**（浏览器把它
+/// 发上来，服务端在内存里持有并比对）—— 只要服务端能看到，环境变量、进程内存、
+/// 崩溃转储、抓包就都有机会看到它。`Prehash` 把这一步挪进浏览器，服务端只见到摘要。
 pub enum Cred {
-    /// 明文令牌（`PANEL_TOKEN`）。好用，但落盘就是可复用凭据。
+    /// 明文口令（`PANEL_TOKEN`）。落盘就是可直接复用的凭据 —— **只给开发用**。
     Plain(String),
-    /// `PANEL_TOKEN_HASH`：PHC 串（`$argon2id$v=19$m=...,t=...,p=...$盐$哈希`）。
-    /// 盐就带在串里，不需要单独存一列 —— 每次哈希用新盐，同样的令牌两次哈希也不一样。
+    /// 旧形态：`PANEL_TOKEN_HASH` 的 `$argon2id$...`，哈希的是**口令本身**。
+    ///
+    /// 盐带在串里，不需要单独存一列；同样的口令两次哈希也不一样。
+    /// ⚠ 它只保护了"落盘那一份"：**口令仍然要经过服务端**。部署里不再接受。
     Phc(String),
+    /// 新形态：`prehash1:$argon2id$...`，哈希的是**浏览器算出的摘要**
+    /// （`sha256("plugin-panel/v1:" + 口令)`，见 [`password_digest`]）。
+    ///
+    /// 明文口令从不离开浏览器；线上走的是摘要，落盘的是摘要的 Argon2id。
+    /// 拿到落盘那份既不能登录、也反推不出口令、更反推不出摘要。
+    Prehash(String),
 }
+
+/// `prehash1:` —— 摘要形态的前缀。
+///
+/// 为什么用**自己加的前缀**而不是把模式塞进 PHC 参数：PHC 的参数段是 argon2 自己的
+/// 名字空间（`m/t/p`），塞私货进去要么被解析器拒掉、要么以后升级时炸。前缀是我们
+/// 自己的格式版本号，`prehash2:` 以后想加「每套安装一个盐」也不用动别的。
+pub const PREHASH_PREFIX: &str = "prehash1:";
 
 /// `Debug` **刻意涂掉内容**：不涂的话，`{:?}` 一次就可能把明文令牌写进日志、
 /// panic 信息或错误上报里 —— 而这类泄漏通常是事后才发现的。
@@ -168,10 +209,48 @@ fn argon2() -> argon2::Argon2<'static> {
     argon2::Argon2::default()
 }
 
-/// 把一个明文令牌变成「盐 + 哈希」的 PHC 串（`PANEL_TOKEN_HASH` 的值）。
+/// 浏览器与脚本共用的**口令摘要**：`sha256("plugin-panel/v1:" + 口令)` 的小写十六进制。
+///
+/// # 这一层是干什么的
+///
+/// 要求是「除了网页端那个输入框，任何地方都不该出现明文口令」。于是把口令的**第一次**
+/// 变换放进浏览器：
+///
+/// ```text
+/// 浏览器：  口令 --sha256("plugin-panel/v1:"+口令)--> 摘要 --POST--> 服务端
+/// 服务端：  摘要 --Argon2id--> 落盘的凭据（比摘要更慢、更咸）
+/// ```
+///
+/// - 服务端（进程内存 / 环境变量 / 配置文件 / 崩溃转储）**见不到口令**
+/// - 落盘那份连摘要都不是，是摘要的 Argon2id
+/// - 脚本拿摘要当 `X-Panel-Token`：它只是**这个面板**的凭据，换个站/换个面板没用
+///
+/// # 为什么有 `plugin-panel/v1:` 这个前缀
+///
+/// 域分隔。没有它，摘要就等于 `sha256(口令)`，与世界上任何"口令的 sha256"撞车 ——
+/// 现成的彩虹表直接覆盖。加了前缀，针对本面板的预计算表得专门为这个串重做一遍。
+///
+/// # 它不是万能药（必须说清楚）
+///
+/// 摘要是**可重放的 bearer 凭据**：谁截到它（明文 HTTP、代理日志）谁就能登录。
+/// 它保护的是**口令本身**（反推不出来、也不能拿去登别处），不是"截获也无法登录"。
+/// 要连重放一起挡住得用 PAKE（SRP / OPAQUE），那是另一个量级的工程
+/// （见 docs/security.md §21）。
+pub fn password_digest(password: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(DIGEST_DOMAIN.as_bytes());
+    h.update(password.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 摘要的域分隔前缀。**改它等于换掉所有人的口令**（摘要会变），所以带版本号。
+pub const DIGEST_DOMAIN: &str = "plugin-panel/v1:";
+
+/// 给一段字符串做「盐 + Argon2id」，返回 PHC 串。
 ///
 /// 盐用**已有的** `getrandom`（OS 随机源）——不为了拿 16 字节随机再引一个 RNG 依赖。
-pub fn hash_token(token: &str) -> Result<String, String> {
+fn argon2_hash(s: &str) -> Result<String, String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
 
     let mut salt_bytes = [0u8; 16];
@@ -179,49 +258,75 @@ pub fn hash_token(token: &str) -> Result<String, String> {
     // b64 编码成 SaltString（PHC 里盐是 base64 的，长度要求 4~64）
     let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| format!("盐编码失败: {e}"))?;
     argon2()
-        .hash_password(token.as_bytes(), &salt)
+        .hash_password(s.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| format!("哈希失败: {e}"))
 }
 
+/// 把**明文口令**变成 `PANEL_TOKEN_HASH` 要用的值：`prehash1:$argon2id$...`。
+///
+/// 入参是**人会输入的那个口令**（不是摘要）：这一步替他把「先算摘要、再 Argon2id」
+/// 做完，于是他不需要在任何地方把口令存下来 —— 在**自己电脑上**跑一次，
+/// 把输出的那串贴到服务器上就行。
+pub fn hash_token(password: &str) -> Result<String, String> {
+    let digest = password_digest(password);
+    Ok(format!("{PREHASH_PREFIX}{}", argon2_hash(&digest)?))
+}
+
+/// 旧形态（`$argon2id$...`，哈希的是口令本身）：**只给开发口子**用。
+///
+/// 留着它是因为「线上那份是明文」这条旧契约还得能被测到 —— 不然
+/// `check_credential_policy` 的拒绝分支就没有正样本。
+pub fn hash_token_legacy(token: &str) -> Result<String, String> {
+    argon2_hash(token)
+}
+
 impl Cred {
-    /// 按内容判断是哈希还是明文：PHC 串一定以 `$` 开头。
+    /// 按内容判断形态：`prehash1:` 前缀 = 摘要形态；`$` 开头 = 旧哈希；否则明文。
     ///
     /// 哈希串**当场校验格式**，格式不对就报错、让进程起不来 ——
     /// 「配错了于是谁都登不上」是那种要排查半天的故障，宁可在启动时大声失败。
     pub fn parse(raw: &str) -> Result<Cred, String> {
+        use argon2::password_hash::PasswordHash;
+
         let raw = raw.trim();
+        // ① 摘要形态（部署里唯一允许的那种）
+        if let Some(phc) = raw.strip_prefix(PREHASH_PREFIX) {
+            let parsed = PasswordHash::new(phc).map_err(|e| {
+                format!("`{PREHASH_PREFIX}` 后面不是合法的 PHC 哈希串（{e}）。用 `plugin-panel hash-token` 生成")
+            })?;
+            check_argon2id(&parsed)?;
+            return Ok(Cred::Prehash(phc.to_string()));
+        }
+        // ② 旧哈希形态（哈希的是口令本身 ⇒ 口令仍要经过服务端）
         if raw.starts_with('$') {
-            use argon2::password_hash::PasswordHash;
             let parsed = PasswordHash::new(raw)
                 .map_err(|e| format!("不是合法的 PHC 哈希串（{e}）。用 `plugin-panel hash-token` 生成"))?;
-            if parsed.algorithm.as_str() != "argon2id" {
-                return Err(format!(
-                    "不支持的哈希算法 `{}`：本面板只用 argon2id 校验（argon2i/argon2d 校验不了，\
-                     与其让你「怎么登都登不上」，不如启动时就报错）",
-                    parsed.algorithm
-                ));
-            }
+            check_argon2id(&parsed)?;
             Ok(Cred::Phc(raw.to_string()))
         } else {
             Ok(Cred::Plain(raw.to_string()))
         }
     }
 
-    /// 候选令牌对不对。
+    /// 候选值对不对。
+    ///
+    /// ⚠ 摘要形态下候选值**就是摘要**（浏览器算好的）：这里**不再**对它做一次
+    /// `password_digest()` —— 那会把「摘要的摘要」拿去比，谁都登不上。
+    /// 这一层只负责「摘要 --Argon2id--> 与落盘那份比」。
     pub fn verify(&self, candidate: &str) -> bool {
         match self {
             Cred::Plain(expected) => {
                 let (a, b) = (expected.as_bytes(), candidate.as_bytes());
                 // 长度不等直接失败：`ct_eq` 要求等长，而令牌长度是配置项、
-                // 不是用户口令 —— 不过在**哈希**形式下连这个都不需要（见 Phc 分支），
+                // 不是用户口令 —— 不过在**哈希**形式下连这个都不需要（见下面两支），
                 // 所以这里不构成真正的信息泄漏。
                 if a.len() != b.len() {
                     return false;
                 }
                 a.ct_eq(b).into()
             }
-            Cred::Phc(phc) => {
+            Cred::Phc(phc) | Cred::Prehash(phc) => {
                 use argon2::password_hash::{PasswordHash, PasswordVerifier};
                 let Ok(parsed) = PasswordHash::new(phc) else {
                     // parse() 已经校验过；走到这里说明内存里的串被改坏了
@@ -232,11 +337,12 @@ impl Cred {
         }
     }
 
-    /// 给启动日志用的可读名字。
+    /// 给启动日志 / 面板读数用的可读名字。
     pub fn kind(&self) -> &'static str {
         match self {
-            Cred::Plain(_) => "明文令牌",
-            Cred::Phc(_) => "Argon2id 哈希",
+            Cred::Plain(_) => "明文口令",
+            Cred::Phc(_) => "Argon2id(口令)",
+            Cred::Prehash(_) => "Argon2id(摘要)",
         }
     }
 
@@ -244,6 +350,90 @@ impl Cred {
     pub fn is_plain(&self) -> bool {
         matches!(self, Cred::Plain(_))
     }
+
+    /// 这份凭据能不能出现在**部署**里（线上那份不是明文）。
+    pub fn is_deploy_safe(&self) -> bool {
+        matches!(self, Cred::Prehash(_))
+    }
+
+    /// 浏览器该发什么：`true` = 先算摘要再发；`false` = 直接发输入的内容。
+    ///
+    /// 登录页把这个值嵌进 HTML（不额外发请求 —— 登录页在未认证状态下渲染，
+    /// 不该再带上任何会 401 的 fetch）。
+    pub fn wants_digest(&self) -> bool {
+        matches!(self, Cred::Prehash(_))
+    }
+}
+
+/// 只认 argon2id：argon2i/argon2d 在同一个 `argon2` crate 里也能校验，但本面板
+/// 生成的一律是 id 形态 —— 与其让别的算法悄悄进来、以后排查时一脸问号，
+/// 不如启动就报错。
+fn check_argon2id(parsed: &argon2::password_hash::PasswordHash<'_>) -> Result<(), String> {
+    if parsed.algorithm.as_str() != "argon2id" {
+        return Err(format!(
+            "不支持的哈希算法 `{}`：本面板只用 argon2id 校验（argon2i/argon2d 校验不了，\
+             与其让你「怎么登都登不上」，不如启动时就报错）",
+            parsed.algorithm
+        ));
+    }
+    Ok(())
+}
+
+/// 开发口子：允许「线上那份是明文」的旧形态（`Plain` / `Phc`）。
+///
+/// 名字里带 `ALLOW` 是刻意的 —— 它出现在 `ps eww` / unit 文件里时，读的人
+/// 一眼能看出「这台机器上有人开了明文口令」。
+pub const ALLOW_PLAIN_ENV: &str = "PANEL_ALLOW_PLAIN_TOKEN";
+
+/// 部署闸：这份凭据 + 这套运行环境，允不允许起来。
+///
+/// 规则（顺序有意义：先看形态，再看"是不是明显在部署里"）：
+///
+/// 1. `Prehash` ⇒ 永远允许（这是唯一"口令不经过服务端"的形态）
+/// 2. 其余形态 ⇒ 必须显式开 [`ALLOW_PLAIN_ENV`]，否则**拒绝启动**
+/// 3. 开了口子还要过两道：`PANEL_COOKIE_SECURE=1`（= 你已经挂在 TLS/反代后面）
+///    或监听地址不是回环 ⇒ 仍然拒绝
+///
+/// 第 3 条是"部署不行"的落地：这两件事都是「这台机器对外服务」的强信号。
+/// 它**不是**密码学保证（一个只绑回环、却用 frp 反代出去的人照样能绕过），
+/// 所以还要配上启动时的 warn 和面板读数里的 `auth.plain_token`，让它藏不住。
+///
+/// 抽成纯函数是为了能单测：真去改环境变量没法在同一个进程里反复测。
+pub fn check_credential_policy(
+    cred: &Cred,
+    allow_plain: bool,
+    cookie_secure: bool,
+    bind_is_loopback: bool,
+) -> Result<(), String> {
+    if cred.is_deploy_safe() {
+        return Ok(());
+    }
+    let how = cred.kind();
+    if !allow_plain {
+        return Err(format!(
+            "口令用的是「{how}」形态：**线上那份是明文口令**（浏览器把口令发上来、服务端在内存里比对）。\n\
+             \x20 部署请改用摘要形态（口令不离开浏览器）：\n\
+             \x20     printf '%s' '<你的口令>' | plugin-panel hash-token\n\
+             \x20     export PANEL_TOKEN_HASH='prehash1:$argon2id$...'\n\
+             \x20 只是本机临时开一下，就显式开这个口子：\n\
+             \x20     export {ALLOW_PLAIN_ENV}=1"
+        ));
+    }
+    if cookie_secure {
+        return Err(format!(
+            "「{how}」+ PANEL_COOKIE_SECURE=1：这个组合只在开发时允许。\n\
+             \x20 PANEL_COOKIE_SECURE=1 说明你已经挂在反代/TLS 后面（= 在对外服务），\n\
+             \x20 这种部署里不接受明文口令。改用 `plugin-panel hash-token` 生成的 prehash1: 形态。"
+        ));
+    }
+    if !bind_is_loopback {
+        return Err(format!(
+            "「{how}」+ 监听地址不是回环：这个组合只在开发时允许。\n\
+             \x20 绑在 0.0.0.0 / 局域网地址上就等于把它暴露给别人，\n\
+             \x20 而这一形态下明文口令要经过服务端。改用 prehash1: 形态，或先绑回环调试。"
+        ));
+    }
+    Ok(())
 }
 
 /// 成功校验过的候选值的**指纹**缓存。
@@ -333,6 +523,31 @@ pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trust_proxy: b
     peer.ip()
 }
 
+/// 解析 `PANEL_ALLOW_IPS`：逗号 / 分号 / 空白分隔的 IP 列表。
+///
+/// 返回 `(认下来的, 丢掉的那些原始片段)`。**第二个值必须被调用方打出来**：
+/// 白名单写错不会让启动失败，只会在最不该失效的时候（人被锁在门外）才发现
+/// 它压根没生效 —— 所以认不认得出来要当场说。
+///
+/// 只认**单个地址**，不认 CIDR（`10.0.0.0/8` 会被丢进第二个返回值）。
+/// 理由：这是「给自己留一条不会被封的路」，不是一张访问控制表；
+/// 要做网段级别的放行，那是反代的活（见 docs/security.md §13.5）。
+pub fn parse_allow_ips(raw: &str) -> (Vec<IpAddr>, Vec<String>) {
+    let mut ips = Vec::new();
+    let mut bad = Vec::new();
+    for part in raw.split([',', ';', ' ', '\t', '\n']) {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        match p.parse::<IpAddr>() {
+            Ok(ip) => ips.push(ip),
+            Err(_) => bad.push(p.to_string()),
+        }
+    }
+    (ips, bad)
+}
+
 /// 鉴权状态。
 ///
 /// `cred` 是**非 Option** 的：第十九轮之前这里允许「没配令牌 + 只绑回环 = 免登录」，
@@ -343,6 +558,10 @@ pub struct Auth {
     cred: Cred,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, FailState>>,
+    /// 蜜罐封禁表（见 [`Auth::ban`]）。只在内存里：重启即解除。
+    bans: Mutex<BanTable>,
+    /// 永不封禁的地址（`PANEL_ALLOW_IPS`）。只影响封禁，不影响认证。
+    allow_ips: Vec<IpAddr>,
     cookie_secure: bool,
     /// 校验通过的候选值指纹（见 `VerifyCache`）
     verified: Mutex<VerifyCache>,
@@ -361,6 +580,8 @@ impl Auth {
             cred,
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            bans: Mutex::new(BanTable::new()),
+            allow_ips: Vec::new(),
             cookie_secure,
             verified: Mutex::new(VerifyCache {
                 entries: HashMap::new(),
@@ -374,6 +595,9 @@ impl Auth {
     }
 
     /// 令牌的存储形式（启动日志里写出来，也让调用方能提示「建议换成哈希」）。
+    ///
+    /// 第二个返回值是「线上那份是明文」（旧形态），不是「明文口令」——
+    /// 摘要形态下两者都为假。
     pub fn cred_kind(&self) -> (&'static str, bool) {
         (self.cred.kind(), self.cred.is_plain())
     }
@@ -381,6 +605,65 @@ impl Auth {
     /// cookie 要不要带 `Secure`。
     pub fn cookie_secure(&self) -> bool {
         self.cookie_secure
+    }
+
+    /// 设「永不封禁」的地址表（`PANEL_ALLOW_IPS`）。
+    ///
+    /// 为什么需要它：蜜罐判错的代价是**把自己锁在门外**，而锁上的门默认要等一小时
+    /// 才开。留一个不用重启、不用等的出口 —— 尤其反代模式下所有人共用一个来源 IP，
+    /// 那个 IP 一旦被封就是全员进不来。
+    ///
+    /// 它**只**豁免封禁：白名单里的地址口令错了照样进不来。
+    pub fn allow_ips(mut self, ips: Vec<IpAddr>) -> Self {
+        self.allow_ips = ips;
+        self
+    }
+
+    /// 这个地址在封禁白名单里吗。
+    pub fn is_allowed(&self, ip: IpAddr) -> bool {
+        self.allow_ips.contains(&ip)
+    }
+
+    /// 蜜罐命中：封掉这个 IP 的**登录**（[`BAN_TTL`] 时长，重启即解除）。
+    ///
+    /// 返回是否真的封了（白名单里 ⇒ 没封）。只动登录路径，**不撤销已登录的会话**：
+    /// 命中蜜罐说明对方在**猜**，不代表他进来了；把"挡在门外"和"踢出去"混成
+    /// 一个动作，误封时就变成断别人的活。
+    pub fn ban(&self, ip: IpAddr) -> bool {
+        if self.is_allowed(ip) {
+            crate::log::plog!(
+                "auth",
+                warn,
+                "蜜罐命中，但 {ip} 在 PANEL_ALLOW_IPS 里 ⇒ 没有封禁（白名单只豁免封禁，口令该错还是错）"
+            );
+            return false;
+        }
+        let now = Instant::now();
+        self.bans.lock().unwrap().insert(ip, now + BAN_TTL);
+        crate::log::plog!(
+            "auth",
+            warn,
+            "蜜罐命中：{ip} 填了登录页上那个看不见的字段 ⇒ 判定为自动化脚本，封掉它的登录 {} 分钟（重启即解除）",
+            BAN_TTL.as_secs() / 60
+        );
+        true
+    }
+
+    /// 现在是不是被封禁。顺带清掉过期的条目（和 `record_failure` 一个套路：
+    /// 读的时候顺手收，不必另开一个清理任务）。
+    fn is_banned(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut guard = self.bans.lock().unwrap();
+        guard.retain(|_, until| *until > now);
+        guard.contains_key(&ip)
+    }
+
+    /// 正被封禁多少个来源（`/api/state` 用：运维要能看出「有人在被打」，
+    /// 也要能在「我自己怎么进不来了」时第一时间看到这里有没有多一条）。
+    pub fn banned_ips(&self) -> usize {
+        let now = Instant::now();
+        let guard = self.bans.lock().unwrap();
+        guard.values().filter(|until| **until > now).count()
     }
 
     /// 令牌对不对。明文走**常量时间比较**（不因为前缀相同就早退），
@@ -435,6 +718,14 @@ impl Auth {
     ///
     /// 退避检查**在验令牌之前**，否则暴力猜照样能打满 CPU 去比令牌。
     pub fn login(&self, candidate: &str, ip: IpAddr) -> Result<String, LoginError> {
+        // 封禁判在最前面，比两层限流还早：被封的来源一次 KDF 都不该跑。
+        //
+        // ⚠ 回的是**和「口令不对」一模一样**的错误。不能新加一个「你被封了」的
+        // 变体：那等于给攻击者一个探针 —— 填了蜜罐字段再试一次，看回哪句话就知道
+        // 自己中没中，下次留空即可。封禁要有效，就必须让对方猜不到它存在。
+        if self.is_banned(ip) {
+            return Err(LoginError::BadToken);
+        }
         // 两层限流，都在验凭据**之前**：全局闸（挡换 IP 的分布式爆破）
         // → 按 IP 退避（挡单来源的连续猜）。顺序无所谓，但都要先判 ——
         // 关闸期间一次 Argon2 都不该跑。
@@ -474,6 +765,24 @@ impl Auth {
     /// 活跃会话数（面板上展示）。
     pub fn active_sessions(&self) -> usize {
         self.sessions().len()
+    }
+
+    /// 登录页该发**摘要**还是发**原文**（见 [`Cred::wants_digest`]）。
+    ///
+    /// 登录页把这个值嵌进 HTML，于是它不需要为了"我该发什么"再发一次请求 ——
+    /// 未认证状态的页面不该带任何会 401 的 fetch。
+    pub fn wants_digest(&self) -> bool {
+        self.cred.wants_digest()
+    }
+
+    /// 当前凭据形态（启动日志 / 面板读数用）。**不含任何秘密**。
+    pub fn cred_shape(&self) -> &'static str {
+        self.cred.kind()
+    }
+
+    /// 是不是"开发口子"形态（线上那份是明文）。面板读数里露出来，让它藏不住。
+    pub fn plain_token(&self) -> bool {
+        !self.cred.is_deploy_safe()
     }
 
     /// 活跃会话快照，最近登录的在前。顺带清掉过期的。
@@ -896,22 +1205,107 @@ mod tests {
 
     #[test]
     fn hashed_token_roundtrip_and_rejection() {
-        // 盐是随机的 → 同一个令牌两次哈希**必须不一样**（否则等于没盐）
+        // 摘要形态：**候选值是摘要**（浏览器算好的那个），不是口令本身
         let h1 = hash_token(TOKEN).unwrap();
         let h2 = hash_token(TOKEN).unwrap();
-        assert_ne!(h1, h2, "同样的令牌两次哈希应当不同（说明盐是随机的）");
-        assert!(h1.starts_with("$argon2id$"), "应当是 PHC 串：{h1}");
+        assert_ne!(h1, h2, "同样的口令两次哈希应当不同（说明盐是随机的）");
+        assert!(h1.starts_with(PREHASH_PREFIX), "应当带摘要形态前缀：{h1}");
+        assert!(h1[PREHASH_PREFIX.len()..].starts_with("$argon2id$"), "前缀后面是 PHC 串：{h1}");
         // 参数随串一起存 → 校验时从串里读，不依赖代码里的默认值
         assert!(h1.contains("m="), "PHC 串里应当带参数：{h1}");
 
         let cred = Cred::parse(&h1).unwrap();
-        assert!(cred.verify(TOKEN), "正确的令牌应当通过");
-        assert!(!cred.verify("wrong"), "错误的令牌不应当通过");
-        assert!(!cred.verify(""), "空令牌不应当通过");
+        let digest = password_digest(TOKEN);
+        assert!(cred.verify(&digest), "正确的摘要应当通过");
+        assert!(!cred.verify("wrong"), "错误的摘要不应当通过");
+        assert!(!cred.verify(""), "空摘要不应当通过");
+        // ⚠ 口令本身**不是**候选值：摘要形态下把口令当候选值发上来必须失败
+        //   （否则「口令也经过服务端」这条约束就形同虚设）
+        assert!(!cred.verify(TOKEN), "摘要形态不接受明文口令当候选值");
         // 前缀相同也不行（Argon2 校验的是哈希，不是前缀）
-        assert!(!cred.verify(&TOKEN[..TOKEN.len() - 1]));
-        assert_eq!(cred.kind(), "Argon2id 哈希");
+        assert!(!cred.verify(&digest[..digest.len() - 1]));
+        assert_eq!(cred.kind(), "Argon2id(摘要)");
         assert!(!cred.is_plain());
+        assert!(cred.is_deploy_safe(), "摘要形态是唯一允许部署的");
+        assert!(cred.wants_digest(), "登录页要发摘要");
+    }
+
+    #[test]
+    fn legacy_hash_still_works_but_is_not_deploy_safe() {
+        // 旧形态：哈希的是口令本身 ⇒ 口令仍要经过服务端 ⇒ 只给开发口子
+        let h = hash_token_legacy(TOKEN).unwrap();
+        assert!(h.starts_with("$argon2id$"), "旧形态不带前缀：{h}");
+        let cred = Cred::parse(&h).unwrap();
+        assert!(cred.verify(TOKEN), "旧形态比对的是口令本身");
+        assert!(!cred.verify(&password_digest(TOKEN)), "旧形态不认摘要");
+        assert_eq!(cred.kind(), "Argon2id(口令)");
+        assert!(!cred.is_deploy_safe());
+        assert!(!cred.wants_digest());
+    }
+
+    #[test]
+    fn digest_is_domain_separated_and_pinned() {
+        // 钉死向量：浏览器（crypto.subtle 或页面里那段纯 JS）算出来的必须是这串。
+        // 这条同时钉住三件事：域前缀、UTF-8 编码、小写十六进制。
+        assert_eq!(
+            password_digest("dev"),
+            "613da1dbccc9aca00046e78f152d7038560d2855dd42e567eaf87881b606c1a5"
+        );
+        // 非 ASCII：Rust 与 JS 都按 UTF-8 编码，两边必须一致
+        assert_eq!(
+            password_digest("测试口令"),
+            "3a8765428e2ff05bdd18048fe3aad3be27afb15fa206d71835873bd15e254ad2"
+        );
+        // 域分隔：摘要不等于 `sha256(口令)`
+        assert_ne!(
+            password_digest("dev"),
+            password_digest("plugin-panel/v1:dev"),
+            "前缀只能加一次"
+        );
+        assert_eq!(password_digest("dev").len(), 64);
+        assert!(password_digest("dev").chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    #[test]
+    fn prehash_prefix_is_validated_at_parse() {
+        // 前缀后面必须是合法 PHC：配错了要在**启动时**炸，而不是「怎么登都登不上」
+        assert!(Cred::parse("prehash1:$argon2id$这不是哈希").is_err());
+        assert!(Cred::parse("prehash1:").is_err());
+        // 算法不是 argon2id 也要拒（旧形态那条已经在另一条测试里钉过）
+        let wrong_alg = hash_token(TOKEN).unwrap().replace("$argon2id$", "$argon2i$");
+        assert!(Cred::parse(&wrong_alg).is_err());
+        // 前缀写错（prehash2:）会落到"明文"分支 —— 然后被部署闸拦住，
+        // 而不是悄悄当成能用的凭据（这一点由下面那条 policy 测试兜住）
+        assert!(matches!(Cred::parse("prehash2:abc"), Ok(Cred::Plain(_))));
+    }
+
+    #[test]
+    fn deploy_gate_only_lets_prehash_through() {
+        let good = Cred::parse(&hash_token(TOKEN).unwrap()).unwrap();
+        let legacy = Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap();
+        let plain = Cred::parse(TOKEN).unwrap();
+
+        // 摘要形态：任何环境都放行
+        for (allow, secure, lo) in [(false, false, true), (false, true, false), (true, true, false)] {
+            assert!(
+                check_credential_policy(&good, allow, secure, lo).is_ok(),
+                "摘要形态不该被部署闸拦（{allow},{secure},{lo}）"
+            );
+        }
+        // 旧形态 / 明文：不开口子 ⇒ 拒绝，且错误里要给出**可执行**的下一步
+        for c in [&legacy, &plain] {
+            let e = check_credential_policy(c, false, false, true).unwrap_err();
+            assert!(e.contains("hash-token"), "要告诉怎么生成：{e}");
+            assert!(e.contains(ALLOW_PLAIN_ENV), "要告诉怎么临时开：{e}");
+            // 开了口子 + 绑回环 ⇒ 允许（本机调试）
+            assert!(check_credential_policy(c, true, false, true).is_ok());
+            // 开了口子但挂在 TLS/反代后面 ⇒ 仍然拒绝（"部署不行"）
+            let e = check_credential_policy(c, true, true, true).unwrap_err();
+            assert!(e.contains("PANEL_COOKIE_SECURE"), "{e}");
+            // 开了口子但绑在非回环 ⇒ 仍然拒绝
+            let e = check_credential_policy(c, true, false, false).unwrap_err();
+            assert!(e.contains("回环"), "{e}");
+        }
     }
 
     #[test]
@@ -919,7 +1313,7 @@ mod tests {
         let cred = Cred::parse(TOKEN).unwrap();
         assert!(cred.verify(TOKEN));
         assert!(!cred.verify("wrong"));
-        assert_eq!(cred.kind(), "明文令牌");
+        assert_eq!(cred.kind(), "明文口令");
         assert!(cred.is_plain(), "明文要被标出来，启动日志才好提示换哈希");
     }
 
@@ -950,18 +1344,23 @@ mod tests {
 
     #[test]
     fn hashed_credential_works_through_login() {
-        // 走一遍真实路径：哈希凭据 → login() → 拿到会话 ID → 会话可用
+        // 走一遍真实路径：摘要形态凭据 → login(摘要) → 拿到会话 ID → 会话可用
         let cred = Cred::parse(&hash_token(TOKEN).unwrap()).unwrap();
         let a = Auth::new(cred, false);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        let sid = a.login(TOKEN, ip).expect("哈希凭据应当能登录");
+        let sid = a.login(&password_digest(TOKEN), ip).expect("摘要凭据应当能登录");
         assert!(a.touch_session(&sid));
         assert!(matches!(a.login("wrong", ip), Err(LoginError::BadToken)));
+        // ⚠ 拿口令本身当候选值登不进去（这正是"口令不经过服务端"的证明）
+        assert!(matches!(a.login(TOKEN, ip), Err(LoginError::BadToken)));
     }
 
     /// 造一个「哈希凭据 + 已退避状态可观测」的实例。
+    ///
+    /// 用**旧形态**（哈希的是口令本身）：下面那些测试的候选值都是 `TOKEN`，
+    /// 换成摘要形态它们就都得改成「发摘要」—— 那是另一件事，别混在一起测。
     fn hashed_auth() -> Auth {
-        Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false)
+        Auth::new(Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(), false)
     }
 
     fn any_ip() -> IpAddr {
@@ -1015,6 +1414,70 @@ mod tests {
     }
 
     #[test]
+    fn honeypot_ban_blocks_even_the_right_password() {
+        let a = hashed_auth();
+        let bot: IpAddr = "203.0.113.7".parse().unwrap();
+        let sid = a.login(TOKEN, bot).expect("封之前正确口令能进");
+        assert!(a.ban(bot), "不在白名单里 ⇒ 真的封");
+        let e = a.login(TOKEN, bot).unwrap_err();
+        assert!(matches!(e, LoginError::BadToken), "被封要回「口令不对」，不能回一个专门的封禁错误：{e:?}");
+        assert_eq!(
+            e.message(),
+            LoginError::BadToken.message(),
+            "文案要逐字相同 —— 差一个字就是一个探针：填了蜜罐再试一次就知道自己中没中"
+        );
+        assert_eq!(a.banned_ips(), 1);
+        // 封的是这一个来源，不是全世界
+        let other: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(a.login(TOKEN, other).is_ok(), "按来源封，别把别人一起挡在门外");
+        // 已登录的会话不撤：命中蜜罐说明对方在**猜**，不代表他进来了
+        assert!(a.touch_session(&sid), "封禁不该把已经进来的会话踢出去");
+    }
+
+    #[test]
+    fn ban_expires_on_its_own_without_a_sweeper() {
+        let a = hashed_auth();
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        // 直接塞一条已过期的（等一小时不现实）：过期条目由读的那一侧顺手清掉
+        a.bans.lock().unwrap().insert(ip, Instant::now() - Duration::from_secs(1));
+        assert!(!a.is_banned(ip), "过期的封禁不该还挡人");
+        assert_eq!(a.banned_ips(), 0, "读数里也不该留着它");
+        assert!(a.login(TOKEN, ip).is_ok(), "到点自动放回，不需要谁去解锁");
+    }
+
+    #[test]
+    fn allowlist_spares_the_ban_but_not_the_password_check() {
+        let home: IpAddr = "192.168.1.7".parse().unwrap();
+        let a = hashed_auth().allow_ips(vec![home]);
+        assert!(a.is_allowed(home));
+        assert!(!a.ban(home), "白名单里的地址蜜罐命中也不封");
+        assert_eq!(a.banned_ips(), 0, "没封就不该出现在读数里");
+        assert!(matches!(a.login("wrong", home), Err(LoginError::BadToken)));
+        assert!(a.login(TOKEN, home).is_ok(), "白名单豁免的是封禁，不是认证");
+    }
+
+    #[test]
+    fn allow_ips_parsing_hands_back_what_it_dropped() {
+        let (ok, bad) = parse_allow_ips(" 127.0.0.1 , ::1 ;10.0.0.7\n");
+        assert_eq!(
+            ok,
+            vec![
+                IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7)),
+            ],
+            "分隔符要宽容一点：逗号、分号、空白都能写"
+        );
+        assert!(bad.is_empty());
+        // 网段和主机名**不认**，而且要把丢掉的交回调用方打印：
+        // 白名单写错不会让启动失败，只会在人被锁在门外那次才暴露
+        let (ok, bad) = parse_allow_ips("192.168.1.7, 10.0.0.0/8, box.local");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(bad, vec!["10.0.0.0/8".to_string(), "box.local".to_string()]);
+        assert!(parse_allow_ips("  ,, ; ").0.is_empty(), "全空不能报错，那是没配");
+    }
+
+    #[test]
     fn plaintext_credential_never_touches_the_kdf_or_the_cache() {
         // 明文比较是纳秒级，缓存与退避对它没有意义；也不能因为「脚本用错令牌」
         // 这种小失误就把自己锁住（收益为零、麻烦很大）
@@ -1031,9 +1494,13 @@ mod tests {
     #[test]
     fn credential_kind_is_reported_for_the_boot_log() {
         let plain = Auth::new(Cred::parse(TOKEN).unwrap(), false);
-        assert_eq!(plain.cred_kind(), ("明文令牌", true));
-        let hashed = Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false);
-        assert_eq!(hashed.cred_kind(), ("Argon2id 哈希", false));
+        assert_eq!(plain.cred_kind(), ("明文口令", true));
+        let legacy = Auth::new(Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(), false);
+        assert_eq!(legacy.cred_kind(), ("Argon2id(口令)", false));
+        let good = Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false);
+        assert_eq!(good.cred_kind(), ("Argon2id(摘要)", false));
+        assert!(good.wants_digest() && !good.plain_token());
+        assert!(legacy.plain_token(), "旧形态也算开发口子：线上那份是明文");
     }
 
     #[test]

@@ -52,8 +52,8 @@ OUT_DIR = REPO / "target" / "perf"
 # ---------------------------------------------------------------- 工作负载
 #
 # 每个任务记下「理论间隔（毫秒）」，报告里用它算「应该触发多少次」。
-# 刻意覆盖：毫秒级 / 秒级 / 分钟级、JS 与 Python 两条路径、写库、故意失败、
-# 一个会被暂停恢复的任务。
+# 刻意覆盖：毫秒级 / 秒级 / 分钟级、写库、故意失败、一个会被暂停恢复的任务。
+# Python 插件已移除，长跑工作负载只剩 JS。
 JS_PLUGIN = r"""// 长跑压测插件（自动生成，见 scripts/endurance.py）
 import { every, log, register_route, sqlite_exec, sqlite_query } from 'host-api';
 
@@ -97,7 +97,6 @@ every('perf-write', '1s', function (p) {
 
 // 插件路由：采样器每 30 秒来拿一次统计（顺带量 HTTP 延迟）
 register_route('/perf', 'GET', function () {
-    const py = sqlite_query('SELECT stats FROM perf_py ORDER BY id DESC LIMIT 1');
     return {
         status: 200,
         headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -106,7 +105,6 @@ register_route('/perf', 'GET', function () {
                 n: stats.n, sumLate: stats.sumLate, minLate: stats.minLate,
                 maxLate: stats.maxLate, buckets: stats.buckets, over: stats.over,
             },
-            py: py.length > 0 ? JSON.parse(py[0].stats) : null,
         }),
     };
 });
@@ -119,68 +117,12 @@ every('perf-fail', '30s', function () {
 log('perf-js: 已加载');
 """
 
-PY_PLUGIN = r"""# 长跑压测插件（自动生成，见 scripts/endurance.py）
-import json
 
-from host_api import every, log, sqlite_exec
-
-BUCKETS = [1, 5, 20, 50, 100, 500, 1000, 5000]
-_stats = {"n": 0, "sumLate": 0, "minLate": None, "maxLate": 0, "buckets": {}, "over": 0}
-for _b in BUCKETS:
-    # 键用字符串：json.dumps 不接受 int 键（实测 `TypeError: keys must be strings`）。
-    # JS 侧对象键天然是字符串，所以这个坑只有 Python 侧会踩。
-    _stats["buckets"][str(_b)] = 0
-
-
-def _note(p):
-    late = p["lateMs"]
-    _stats["n"] += 1
-    _stats["sumLate"] += late
-    if _stats["minLate"] is None or late < _stats["minLate"]:
-        _stats["minLate"] = late
-    if late > _stats["maxLate"]:
-        _stats["maxLate"] = late
-    placed = False
-    for b in BUCKETS:
-        if late < b:
-            _stats["buckets"][str(b)] += 1
-            placed = True
-            break
-    if not placed:
-        _stats["over"] += 1
-
-
-def fast(payload):
-    _note(payload)
-    # 造点垃圾（第十一轮修的那条路径就是这里）
-    _ = {"i": _stats["n"], "s": "x" * 32}
-
-
-def flush(_payload=None):
-    # 把统计写进库，JS 侧的 /perf 路由会把它一起读出去（Python 侧不能注册路由）
-    # 注意：这里必须用 `+` 拼 SQL，**不能**写成相邻字符串字面量（"a" "b"）——
-    # PocketPy 不支持隐式拼接，会报 `SyntaxError: expected ')', got '@str'`。
-    sqlite_exec(
-        "INSERT INTO perf_py (at, stats) VALUES (?, ?)",
-        [str(_stats["n"]), json.dumps(_stats)],
-    )
-
-
-sqlite_exec(
-    "CREATE TABLE IF NOT EXISTS perf_py "
-    + "(id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, stats TEXT)"
-)
-every("perf-py-fast", "200ms", fast)
-every("perf-py-flush", "10s", flush)
-log("perf-py: 已加载")
-"""
 
 # 任务 -> 理论间隔（毫秒）。报告里用它算「应该触发多少次」。
 EXPECTED_MS = {
     "perf-fast": 50,
     "perf-write": 1000,
-    "perf-py-fast": 200,
-    "perf-py-flush": 10_000,
     "perf-fail": 30_000,
 }
 
@@ -194,9 +136,13 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+PERF_TOKEN = "perf-token"
+
+
 def http(url: str, method: str = "GET", headers=None, body=None, timeout=10.0):
     """返回 `(状态码, 正文)`。不抛 HTTPError —— 4xx/5xx 也是要记录的数据。"""
     req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("X-Panel-Token", PERF_TOKEN)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -318,8 +264,8 @@ def db_sizes(db_path: Path):
 
 
 def write_plugins(pdir: Path, rev: int) -> None:
+    # Python 插件已移除：长跑工作负载只剩 JS。
     (pdir / "perf-js.js").write_text(JS_PLUGIN + f"\n// rev={rev}\n")
-    (pdir / "perf-py.py").write_text(PY_PLUGIN + f"\n# rev={rev}\n")
 
 
 # ---------------------------------------------------------------- 主流程
@@ -335,6 +281,8 @@ class Runner:
         self.report_path = self.workdir / f"endurance-{stamp}.md"
         self.panel_log = self.workdir / f"panel-{stamp}.log"
         self.plugins = self.workdir / f"plugins-{stamp}"
+        self.tasks = self.workdir / f"tasks-{stamp}"
+        self.data = self.workdir / f"data-{stamp}"
         self.db = self.workdir / f"panel-{stamp}.db"
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
@@ -356,12 +304,20 @@ class Runner:
     # ---- 面板进程 ----
     def spawn_panel(self):
         env = dict(os.environ)
+        self.tasks.mkdir(parents=True, exist_ok=True)
         env.update({
             "BIND_ADDR": f"127.0.0.1:{self.port}",
             "PLUGINS_DIR": str(self.plugins),
+            # 别扫仓库自带的 tasks/：压测报告里不该混进示例任务
+            "TASKS_DIR": str(self.tasks),
             "DB_PATH": str(self.db),
+            "PLUGIN_DATA_DIR": str(self.data / "plugin-data"),
+            "PANEL_RUNTIME_DIR": str(self.data / "runtime"),
+            "PANEL_LOG_DIR": str(self.data / "logs"),
         })
-        env.pop("PANEL_TOKEN", None)  # 回环 + 无令牌：压测不掺鉴权开销
+        # 面板没有「本机免登录」；压测用固定明文令牌，http() 每个请求带 X-Panel-Token。
+        env["PANEL_TOKEN"] = PERF_TOKEN
+        env["PANEL_ALLOW_PLAIN_TOKEN"] = "1"
         self.panel_logf = open(self.panel_log, "a")
         self.panel_logf.write(f"\n===== 启动于 {datetime.now().isoformat()} =====\n")
         self.panel_logf.flush()
@@ -696,8 +652,10 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
         a(f"**判定：❌ 疑似持续增长** —— 外推 {slope * 24:+.1f} MB/天，"
           f"末段斜率仍有 {s3:+.3f} MB/小时。")
     else:
-        a(f"**判定：⚠️ 有缓慢增长但量级很小**（{slope * 24:+.1f} MB/天，"
-          f"低于本窗口分辨率 ±{resolvable:.1f} MB/天）。")
+        # 这一档不是「没问题」：末段涨幅已经超过噪声带，但外推还没到 20 MB/天。
+        # 不要把「外推值」和「分辨率」比较 —— 分辨率是斜率的标准误，不是阈值。
+        a(f"**判定：⚠️ 有缓慢增长，需继续观察**（外推 {slope * 24:+.1f} MB/天，"
+          f"末段涨幅 {growth_tail:+.2f}MB 超过噪声带；本窗口分辨率 ±{resolvable:.1f} MB/天）。")
     a("")
 
     # ---------- 2. CPU ----------
@@ -777,7 +735,7 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     # ---------- 5. 调度抖动 ----------
     a("## 5. 调度延迟（`payload.lateMs`）\n")
     perf = last.get("perf") or {}
-    for rt, key in (("JS", "js"), ("Python", "py")):
+    for rt, key in (("JS", "js"),):
         st = perf.get(key)
         if not st or not st.get("n"):
             a(f"- {rt}：没有数据")

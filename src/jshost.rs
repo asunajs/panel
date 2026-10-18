@@ -59,7 +59,7 @@ globalThis.__fmt_args = function (args) {
 };
 
 // ---- host_api：跨运行时的那份门面 ----
-// 只暴露所有运行时都能实现的最小公共子集，语义与 PocketPy / Node / CPython 适配器一致。
+// 只暴露所有 JS 宿主都能实现的最小公共子集，语义与 Node/Bun 的 runtime/js 一致。
 //
 // 八档语义 type（第二十四轮）与 mcloud-sign 对齐：
 //   info / debug / warn / error / fatal  —— 严重程度
@@ -174,11 +174,20 @@ globalThis.host_api = {
         return host_api.register_cron(name, '@every ' + interval, handler, opts);
     },
 
+    // ⚠ 出错时 `__host_sqlite` 回的是 `{"error":"…"}`（**不是抛**）。原样 `return`
+    //   回去的话，插件读到的是 `undefined` —— 失败看起来只是"没写进去"，连栈都没有。
+    //   这和 `smtp_send` 已经做的事一样：**把错误抛出去**。
+    //   （mcloud-plugin 的 F-064 就是这么被拖了一整轮：表名撞了面板自己那张 `runs`，
+    //     每一枪 INSERT 都失败，而自检只报"没拿到自增主键"。）
     sqlite_query: function (sql, params) {
-        return JSON.parse(__host_sqlite(String(sql), JSON.stringify(params === undefined ? [] : params), true));
+        var r = JSON.parse(__host_sqlite(String(sql), JSON.stringify(params === undefined ? [] : params), true));
+        if (r && r.error) throw new Error(String(r.error));
+        return r;
     },
     sqlite_exec: function (sql, params) {
-        return JSON.parse(__host_sqlite(String(sql), JSON.stringify(params === undefined ? [] : params), false));
+        var r = JSON.parse(__host_sqlite(String(sql), JSON.stringify(params === undefined ? [] : params), false));
+        if (r && r.error) throw new Error(String(r.error));
+        return r;
     },
     // 发一封邮件。**阻塞**调用，默认超时 15 秒 —— 别放在需要毫秒精度的任务里。
     //
@@ -926,10 +935,11 @@ pub fn install_host<'js>(
     // 插件侧看到的是一个数字。`ws_recv` 带超时，超时返回 `{type:"timeout"}`，
     // 插件那一步就"没收到东西"，下一次调用接着收。
     let state_for_ws_open = state.clone();
+    let plugin_for_ws = plugin.clone();
     ctx.globals().set(
         "__host_ws_open",
         Func::new(move |url: String, opts: String| -> String {
-            match state_for_ws_open.do_ws_open(&url, &opts) {
+            match state_for_ws_open.do_ws_open(&plugin_for_ws, &url, &opts) {
                 Ok(s) => s,
                 Err(e) => json_error(&e),
             }
@@ -1283,26 +1293,20 @@ mod tests {
         // 方向二：表格区里出现的**函数名**都必须是真有的
         //
         // 手写扫描而不是正则：项目约定不加编译单元（没有 `regex` 依赖）。
-        // 只挑两类明显的函数名，避免把散文里的 `open()` / `Buffer` 之类误判：
-        //   · `xxxSync`（JS 侧的文件系统函数都带这个后缀）
-        //   · snake_case 的 Python 门面名
+        // 只挑明显的函数名（`xxxSync`），避免把散文里的 `open()` / `Buffer` 之类误判。
+        // Python 插件已移除，§4.3.0 只描述 JS 的 fs/path。
         let known: Vec<&str> = NODE_FS_EXPORTS
             .iter()
             .chain(NODE_PATH_EXPORTS.iter())
             .copied()
             .collect();
-        let py_known = [
-            "read_text", "write_text", "append_text", "read_bytes", "write_bytes", "exists",
-            "list_dir", "mkdir", "remove", "rename", "stat", "data_dir",
-        ];
         let mut offenders: Vec<String> = Vec::new();
         for token in section.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             let looks_like_fs = token.ends_with("Sync")
-                || py_known.contains(&token)
                 || token.starts_with("read_")
                 || token.starts_with("write_")
                 || token.starts_with("append_");
-            if looks_like_fs && !known.contains(&token) && !py_known.contains(&token) {
+            if looks_like_fs && !known.contains(&token) {
                 offenders.push(token.to_string());
             }
         }
@@ -1312,26 +1316,6 @@ mod tests {
             offenders.is_empty(),
             "§4.3.0 里写了代码没有的函数: {offenders:?} —— 照着文档写会拿到 undefined"
         );
-
-        // Python 门面：从引导脚本里**提取**导出的名字（不另抄一份清单，
-        // 抄的那份迟早和实现分叉 —— 这正是这条测试要防的事）
-        let facade: Vec<&str> = crate::pyhost::PY_BOOTSTRAP
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("_h."))
-            .filter_map(|l| l.split('=').next())
-            .map(str::trim)
-            .filter(|n| py_known.contains(n))
-            .collect();
-        assert!(
-            facade.len() >= 12,
-            "Python 门面里应该至少有 12 个文件系统函数，只找到 {facade:?}"
-        );
-        for n in &facade {
-            assert!(
-                table.contains(n),
-                "§4.3.0 的表格里没写 Python 门面的 `{n}` —— 插件作者查不到它"
-            );
-        }
     }
 
     #[test]

@@ -179,6 +179,9 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/status.js"),
     asset!("js/views/task-list.js"),
     asset!("js/views/task-editor.js"),
+    // 脚本任务：总览（#/scripts）与新建 / 编辑（#/scripts/new、#/scripts/edit/{name}）
+    asset!("js/views/script-list.js"),
+    asset!("js/views/script-editor.js"),
     asset!("js/views/log-view.js"),
     asset!("js/views/plugin-list.js"),
     asset!("js/views/plugin-source.js"),
@@ -356,6 +359,30 @@ mod tests {
         assert_eq!(
             registered, found,
             "web/ 下的文件和 ASSETS 表不一致（左边是表，右边是实际文件）"
+        );
+    }
+
+    /// 任务状态那一列的词，**不许**再写回「运行中」。
+    ///
+    /// 为什么值得一条测试：`running` 是后端的**任务状态**（"正常在排班里"），
+    /// 而「运行中」会被读成"这会儿正在执行" —— 用户就是这么读的：
+    /// 「这些任务只要到点醒一次，为啥一直显示运行中？只有带路由的插件才需要常驻吧」。
+    /// 两次触发之间任务什么都不做，只有注册了 `on_tick` / 路由的插件才是"常驻"，
+    /// 那是插件层面的属性，不是这一列要表达的东西。
+    #[test]
+    fn job_status_word_is_not_misleading() {
+        let a = super::get("/js/status.js").expect("/js/status.js 必须在资源表里");
+        assert!(
+            a.body.contains("已启用"),
+            "任务状态那一列要写「已启用」（`running` 是排班状态，不是「正在执行」）"
+        );
+        assert!(
+            !a.body.contains("text: '运行中'"),
+            "别把「运行中」写回去 —— 它会被读成「这会儿正在跑」"
+        );
+        assert!(
+            a.body.contains("两次之间不占线程"),
+            "要有一句解释：到点才跑、两次之间什么都不做"
         );
     }
 }

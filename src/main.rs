@@ -1,4 +1,4 @@
-//! Rust + QuickJS + PocketPy 动态插件任务面板。
+//! Rust + QuickJS + Node/Bun 动态插件任务面板。
 //!
 //! 十轮累计的能力：
 //!   1. Axum 起 HTTP 服务 + 服务端渲染面板
@@ -7,8 +7,8 @@
 //!   4. rusqlite（bundled）持久化：`tasks` 运行记录 + `jobs` 调度任务
 //!   5. 毫秒级调度（deadline 驱动）+ 执行预算 + 任务熔断 + 引擎健康上报
 //!   6. 单二进制、可交叉编译到 aarch64-linux-musl
-//!   7. **双运行时**：pocketpy 嵌入 Python 插件（`plugins/**/*.py`），
-//!      与 QuickJS 共用同一套宿主 API（`hostapi.rs`）与调度器
+//!   7. **外部 JS 运行时**：插件默认内嵌 QuickJS，可切到 Node/Bun（`src/extproc.rs`）；
+//!      Python 只作为任务目录里的 cron 脚本（`src/scriptjob.rs`），不再是插件
 //!   8. JS 插件可注册 HTTP 路由（挂在同一个 Axum 端口上）+ 插件 mtime 热更新
 //!   9. `jobs` 表是任务定义的权威来源（`source` 区分插件声明 / 面板创建）
 //!  10. **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避（`auth.rs`）
@@ -26,21 +26,28 @@
 #![allow(clippy::too_many_arguments, clippy::result_large_err)]
 
 mod assets;
-mod ratelimit;
-mod workers;
 mod auth;
 mod cron;
 mod db;
 mod engine;
+#[cfg(unix)]
+mod extproc;
+#[cfg(not(unix))]
+#[path = "extproc_stub.rs"]
+mod extproc;
 mod hostapi;
 mod jshost;
 mod log;
 mod pluginfs;
-mod pyhost;
-mod python;
+mod ratelimit;
+mod runtimes;
+mod runtimefs;
 mod scheduler;
+mod scriptjob;
 mod smtp;
+mod taskdir;
 mod web;
+mod workers;
 mod wsclient;
 
 use assets::Assets;
@@ -123,7 +130,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(cmd) = args.first() {
         match cmd.as_str() {
-            "hash-token" => return hash_token_cmd(args.get(1).map(String::as_str)),
+            "hash-token" => return hash_token_cmd(&args[1..]),
+            "digest" => return digest_cmd(&args[1..]),
+            "build-info" => return build_info_cmd(),
             "help" | "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -131,7 +140,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             "serve" => {} // 显式写 serve 也接受（systemd 里写全更好读）
             other => {
                 return Err(format!(
-                    "未知子命令 `{other}`。支持：hash-token（生成令牌哈希）。\
+                    "未知子命令 `{other}`。支持：hash-token（生成凭据哈希）、digest（口令摘要）、                     build-info（这个二进制编进了什么）。\
                      不带子命令就是启动面板。用 `--help` 看全部。"
                 )
                 .into())
@@ -169,25 +178,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = env_path("DB_PATH", "data/panel.db");
     let addr: SocketAddr = env_str("BIND_ADDR", "127.0.0.1:8787").parse()?;
 
-    // ---------- 鉴权（第十轮；第十八轮支持哈希存储） ----------
+    // ---------- 鉴权（第十轮；第十八轮支持哈希；第二十一轮口令不再经过服务端） ----------
     // 凭据是**必需**的：没有就拒绝启动。以前「绑回环 + 没配令牌 = 免登录」，
     // 但那条假设在有人挂反代时不成立 —— nginx/caddy 转发的请求源地址全是 127.0.0.1，
     // 于是面板会在「本机免登录」的状态下被暴露出去。
-    let Some(cred) = read_credential()? else {
-        return Err("拒绝启动：没有配置面板令牌。\n\
+    //
+    // ⚠ `cookie_secure` 要在读凭据**之前**取：部署闸拿它当「这台机器在对外服务」的信号。
+    let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
+    let Some(cred) = read_credential(&addr, cookie_secure)? else {
+        return Err("拒绝启动：没有配置面板口令。\n\
              \x20   这个面板没有「本机免登录」模式 —— 反代（nginx/caddy/cloudflared）就是\n\
              \x20   跑在本机的，转发过来的请求源地址全是 127.0.0.1，所以「绑回环 = 安全」\n\
              \x20   这个假设不成立：挂了反代就等于把面板裸奔出去。\n\
-             \x20   任选一种配置（推荐后两种，本地落盘的不是可复用的明文）：\n\
-             \x20     PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') ./plugin-panel\n\
-             \x20     printf '%s' \"$TOKEN\" | ./plugin-panel hash-token   # 生成 PANEL_TOKEN_HASH\n\
-             \x20     PANEL_TOKEN_HASH='$argon2id$...' ./plugin-panel\n\
-             \x20     PANEL_TOKEN_FILE=/etc/plugin-panel.token ./plugin-panel   # 文件权限 600\n"
+             \x20   推荐（口令不经过服务端，落盘只有 Argon2id）：\n\
+             \x20     printf '%s' '<你的口令>' | ./plugin-panel hash-token\n\
+             \x20     export PANEL_TOKEN_HASH='prehash1:$argon2id$...'\n\
+             \x20     # 或者写文件（权限 600）并 export PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash\n\
+             \x20   本机临时调试（明文口令，必须显式开这个口子）：\n\
+             \x20     export PANEL_TOKEN='...' PANEL_ALLOW_PLAIN_TOKEN=1 ./plugin-panel\n"
         .to_string()
         .into());
     };
     let kind = cred.kind();
-    let cookie_secure = env_flag("PANEL_COOKIE_SECURE");
     // 反代模式：开了才从转发头取客户端 IP。默认不信 —— 那些头客户端可以随便写，
     // 默认信就等于「退避用伪造 IP 就能绕过」。开了会打一条日志（它改变安全语义，
     // 运维必须能确认自己开没开）。
@@ -199,6 +211,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             info,
             "反代模式：客户端 IP 取自 X-Forwarded-For / X-Real-IP 的**最右一跳**\n\
              \x20       （只在反代确实会覆盖这个头时才开 —— 否则退避可以被伪造 IP 绕过）"
+        );
+    }
+
+    // 蜜罐封禁的白名单（`PANEL_ALLOW_IPS`）：给自己留一条「不会被封死」的路。
+    // 反代下尤其要紧 —— 那时所有客户端的来源 IP 是同一个，那个地址一旦被封就是
+    // 全员进不来，而封禁默认要等一小时才自动解开。
+    let (allow_ips, bad_allow_ips) = auth::parse_allow_ips(&env_str("PANEL_ALLOW_IPS", ""));
+    if !allow_ips.is_empty() {
+        crate::log::plog!(
+            "boot",
+            info,
+            "登录封禁白名单: {}（这些地址填了蜜罐也不会被封；口令该错还是错）",
+            allow_ips
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !bad_allow_ips.is_empty() {
+        // 认不出来**不能**静默跳过：白名单是唯一那条不用等一小时的出路，
+        // 写错了却没人说，等于把这条出路做成了一个「要用时才发现没有」的假出口。
+        crate::log::plog!(
+            "boot",
+            warn,
+            "PANEL_ALLOW_IPS 里这些不是单个 IP，已忽略: {}（只认单地址：不认 10.0.0.0/8 这种网段，也不认主机名）",
+            bad_allow_ips.join(", ")
         );
     }
     crate::log::plog!(
@@ -222,7 +261,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let db = db::open(&db_path)?;
+    // 后面要交给外部进程/脚本的路径必须是绝对的：它们的工作目录是插件数据目录
+    // 或脚本所在目录，相对路径在那边解析出来是另一个地方（实测外部 Node 直接
+    // 报 `Cannot find package 'data'`）。
+    let db_path = db_path.canonicalize().unwrap_or(db_path);
     crate::log::plog!("boot", info, "SQLite 就绪: {}", db_path.display());
+    // 这个构建支不支持直播，**启动时说一次**。
+    // 不说的话，用户只会在真正跑直播那天看到一条 TLS 报错 —— 而那条报错
+    // 读起来像"网络问题"，其实是"这个二进制编的时候少了个 feature"。
+    if cfg!(feature = "legacy-tls") {
+        crate::log::plog!("boot", info, "构建特性: legacy-tls ✓（直播那条链能用）");
+    } else {
+        crate::log::plog!(
+            "boot",
+            warn,
+            "构建特性: 缺 legacy-tls ⇒ **直播用不了**（上游只给 CBC 套件，rustls 一个都不实现）"
+        );
+    }
 
     let started = Instant::now();
     let started_at = now_secs();
@@ -277,15 +332,42 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .display()
             .to_string(),
     );
+    std::fs::create_dir_all(&plugin_data_dir)?;
+    let plugin_data_dir = plugin_data_dir.canonicalize()?;
+    // 外部运行时 shim 的落盘目录（Node runner / host-api；不含 Python）。
+    let runtime_dir = env_path(
+        "PANEL_RUNTIME_DIR",
+        &db_path
+            .parent()
+            .map(|p| p.join("runtime"))
+            .unwrap_or_else(|| std::path::PathBuf::from("runtime"))
+            .display()
+            .to_string(),
+    );
+    std::fs::create_dir_all(&runtime_dir)?;
+    let runtime_dir = runtime_dir.canonicalize()?;
+    let runtime_paths = runtimefs::RuntimePaths::ensure(&runtime_dir)
+        .map_err(|e| format!("落盘外部运行时 shim 到 {} 失败: {e}", runtime_dir.display()))?;
+    let catalog = std::sync::Arc::new(runtimes::RuntimeCatalog::detect());
+    catalog.log_summary();
+    // 任务目录：脚本任务的自动发现根（默认 `tasks`，与 plugins 同构）。
+    let tasks_dir = env_path("TASKS_DIR", "tasks");
+    std::fs::create_dir_all(&tasks_dir)?;
+    let tasks_dir = tasks_dir.canonicalize()?;
+
     let host = HostState::new(
         logs.clone(),
         db.clone(),
+        db_path.clone(),
+        runtime_paths,
+        catalog.clone(),
         plugins_dir.clone(),
         plugin_data_dir,
+        tasks_dir,
         wsclient::Registry::new(tokio::runtime::Handle::current()),
     );
 
-    // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js|*.py，并注册 cron 任务） ----------
+    // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js，并注册 cron 任务） ----------
     let mut engine = JsEngine::spawn(
         plugins_dir.clone(),
         registry.clone(),
@@ -370,7 +452,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         health,
         host,
         engine: engine_handle,
-        auth: Arc::new(Auth::new(cred, cookie_secure)),
+        auth: Arc::new(Auth::new(cred, cookie_secure).allow_ips(allow_ips)),
         trust_proxy,
         assets,
         test_limiter: Arc::new(TestRunLimiter::new(
@@ -484,20 +566,29 @@ fn now_secs() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// `plugin-panel hash-token [令牌]` —— 打印 `PANEL_TOKEN_HASH` 要用的「盐 + 哈希」。
+/// `plugin-panel hash-token [口令]` —— 打印 `PANEL_TOKEN_HASH` 要用的值。
 ///
-/// 令牌优先从**标准输入**读：
+/// 输入是**人会输入的那个口令**（不是摘要）：这里替你做「先算摘要、再 Argon2id」，
+/// 输出 `prehash1:$argon2id$...`。于是在服务器上**任何地方**都不需要存口令 ——
+/// 在你自己电脑上跑一次，把那串贴到服务器就行。
+///
+/// 口令优先从**标准输入**读：
 ///
 /// ```text
-/// printf '%s' "$TOKEN" | plugin-panel hash-token
+/// printf '%s' "$PASSWORD" | plugin-panel hash-token
 /// ```
 ///
 /// 为什么推荐 stdin：命令行参数会进 shell 历史，也会出现在同机器上其他用户的
-/// `ps` 输出里 —— 那就等于把明文令牌又泄了一处。
+/// `ps` 输出里 —— 那就等于把明文口令又泄了一处。
 ///
-/// 哈希是**单向**的：忘了令牌只能重新生成（换一个令牌重新配），没法从哈希反推。
-fn hash_token_cmd(arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let token = match arg {
+/// `--legacy` 生成**旧形态**（`$argon2id$...`，哈希的是口令本身）。那个形态下
+/// 口令仍然要经过服务端，只在开发口子里能用 —— 留着它是为了能测到"部署闸拒绝"。
+///
+/// 哈希是**单向**的：忘了口令只能重新生成（等于换口令），没法从哈希反推。
+fn hash_token_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let legacy = args.iter().any(|a| a == "--legacy");
+    let arg = args.iter().find(|a| !a.starts_with("--"));
+    let password = match arg {
         Some(t) => t.to_string(),
         None => {
             use std::io::Read;
@@ -506,22 +597,59 @@ fn hash_token_cmd(arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             buf
         }
     };
-    let token = token.trim();
-    if token.is_empty() {
-        return Err("令牌是空的（没给参数，标准输入里也没读到内容）".into());
+    let password = password.trim_end_matches(['\n', '\r']);
+    if password.trim().is_empty() {
+        return Err("口令是空的（没给参数，标准输入里也没读到内容）".into());
     }
-    let hash = auth::hash_token(token)?;
+    let hash = if legacy {
+        auth::hash_token_legacy(password)?
+    } else {
+        auth::hash_token(password)?
+    };
+    let digest = auth::password_digest(password);
     // 哈希进 stdout（好让 `HASH=$(... | plugin-panel hash-token)` 拿到干净的值），
     // 说明进 stderr。
     println!("{hash}");
     eprintln!();
-    eprintln!("把哈希配上去（本地落盘的就只有盐+哈希，没有可复用的明文）：");
+    if legacy {
+        eprintln!("⚠ 这是**旧形态**：哈希的是口令本身，口令仍然要经过服务端。");
+        eprintln!("  只在本机临时调试时配 {}=1 用。", auth::ALLOW_PLAIN_ENV);
+        eprintln!();
+    }
+    eprintln!("配上去（本地落盘的只有 Argon2id，没有口令、也没有摘要）：");
     eprintln!("  export PANEL_TOKEN_HASH='{hash}'");
     eprintln!("  # 或者写成文件（权限 600）：");
     eprintln!("  echo '{hash}' > /etc/plugin-panel.hash");
     eprintln!("  export PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash");
     eprintln!();
-    eprintln!("注意：哈希是单向的，忘了原令牌只能重新生成一个（等于换令牌）。");
+    eprintln!("脚本 / CI 用这个当 `X-Panel-Token`（它是**摘要**，不是口令）：");
+    eprintln!("  {digest}");
+    eprintln!();
+    eprintln!("注意：哈希是单向的，忘了口令只能重新生成一个（等于换口令）。");
+    Ok(())
+}
+
+/// `plugin-panel digest [口令]` —— 只打印摘要（脚本 / CI 要的那个值）。
+///
+/// 单独一条子命令是因为**脚本不该去解析 `hash-token` 的输出**：那条命令的
+/// stdout 只该有一个值（哈希），而脚本要的是另一个值（摘要）。两个都塞进同一条
+/// 命令的 stdout 里，脚本就得去猜哪一行是哪个 —— 那种"能跑但脆"的接口不要。
+fn digest_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let arg = args.iter().find(|a| !a.starts_with("--"));
+    let password = match arg {
+        Some(t) => t.to_string(),
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    let password = password.trim_end_matches(['\n', '\r']);
+    if password.trim().is_empty() {
+        return Err("口令是空的（没给参数，标准输入里也没读到内容）".into());
+    }
+    println!("{}", auth::password_digest(password));
     Ok(())
 }
 
@@ -531,13 +659,21 @@ fn print_usage() {
     println!("用法：");
     println!("  plugin-panel                     启动面板（默认 127.0.0.1:8787）");
     println!("  plugin-panel serve               同上，显式写法");
-    println!("  plugin-panel hash-token [令牌]    生成令牌的「盐+哈希」（令牌从标准输入读更安全）");
+    println!("  plugin-panel hash-token [口令]    生成 PANEL_TOKEN_HASH（prehash1:…，口令从标准输入读更安全）");
+    println!("  plugin-panel build-info           打印这个二进制编进了什么（JSON；发布前校验用）");
+    println!("  plugin-panel hash-token --legacy  旧形态（口令要经过服务端，只给开发口子用）");
+    println!("  plugin-panel digest [口令]        只打印口令摘要（脚本当 X-Panel-Token 用）");
     println!("  plugin-panel --help              看这段说明");
     println!();
-    println!("鉴权（二选一，**推荐哈希**）：");
-    println!("  PANEL_TOKEN=明文令牌              支持，但落盘就是可复用凭据");
-    println!("  PANEL_TOKEN_HASH=哈希             推荐：本地只存盐+哈希");
-    println!("  PANEL_TOKEN_FILE / PANEL_TOKEN_HASH_FILE   从文件读（权限建议 600）");
+    println!("鉴权：");
+    println!("  PANEL_TOKEN_HASH=prehash1:$argon2id$…   推荐（也是部署里唯一接受的形态）");
+    println!("      口令在浏览器里先算摘要，服务端只收到摘要；落盘的是摘要的 Argon2id");
+    println!("  PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash   同上，从文件读（权限 600）");
+    println!("  PANEL_TOKEN=明文口令              只在开发口子里（要 {}=1，且绑回环）", auth::ALLOW_PLAIN_ENV);
+    println!("  PANEL_TOKEN_FILE / PANEL_TOKEN_HASH_FILE       从文件读（权限建议 600）");
+    println!("  PANEL_ALLOW_IPS=192.168.1.7,127.0.0.1");
+    println!("      登录封禁的白名单（只认单个 IP）：这些地址填了登录页的隐藏字段也不会被封");
+    println!("      反代下建议配上 —— 那时所有客户端共用一个来源 IP，它被封等于全员进不来");
 }
 
 /// 读面板令牌：`PANEL_TOKEN` 优先，其次 `PANEL_TOKEN_FILE` 的内容。
@@ -548,18 +684,39 @@ fn print_usage() {
 /// 两个来源都 `trim()` —— 换行/空格是最常见的坑（`echo xxx > token` 会带一个 `\n`，
 /// 而 `auth.rs` 里候选值也是 trim 过的）。两边不一致的话，
 /// `PANEL_TOKEN=" abc "` 会变成一个「怎么输都登不上」的谜题。
-fn read_credential() -> Result<Option<auth::Cred>, Box<dyn std::error::Error>> {
+fn read_credential(
+    addr: &SocketAddr,
+    cookie_secure: bool,
+) -> Result<Option<auth::Cred>, Box<dyn std::error::Error>> {
     let hash = read_secret("PANEL_TOKEN_HASH", "PANEL_TOKEN_HASH_FILE")?;
     let plain = read_secret("PANEL_TOKEN", "PANEL_TOKEN_FILE")?;
     let (chosen, notes) = choose_credential(hash, plain);
     for n in &notes {
         crate::log::plog!("boot", info, "{n}");
     }
-    match chosen {
-        // parse() 会当场校验哈希格式：配错了就起不来，而不是「怎么登都登不上」
-        Some(raw) => Ok(Some(auth::Cred::parse(&raw)?)),
-        None => Ok(None),
+    let Some(raw) = chosen else { return Ok(None) };
+    // parse() 会当场校验哈希格式：配错了就起不来，而不是「怎么登都登不上」
+    let cred = auth::Cred::parse(&raw)?;
+    // ⚠ **部署闸**：只有 `prehash1:` 形态允许无条件启动。其余形态（明文 / 旧哈希）
+    //   必须显式开 `PANEL_ALLOW_PLAIN_TOKEN=1`，而且开了也只是"本机调试"——
+    //   挂在 TLS/反代后面、或者绑在非回环地址上，一律拒绝。
+    //   这条闸的意义见 auth.rs 里 `check_credential_policy` 的注释。
+    let allow_plain = env_flag(auth::ALLOW_PLAIN_ENV);
+    auth::check_credential_policy(&cred, allow_plain, cookie_secure, addr.ip().is_loopback())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    if !cred.is_deploy_safe() {
+        // 开着的口子必须**每次启动都喊一声**：这条日志是事后能查到"当时为什么是明文"的唯一线索。
+        crate::log::plog!(
+            "boot",
+            warn,
+            "⚠ 开发口子已开（{}={}）：凭据形态是「{}」，线上那份是**明文口令**。\
+             只在本机调试时这么跑，部署请换成 prehash1:",
+            auth::ALLOW_PLAIN_ENV,
+            allow_plain,
+            cred.kind()
+        );
     }
+    Ok(Some(cred))
 }
 
 /// 从环境变量或文件读一个秘密值（都 trim）。
@@ -607,10 +764,12 @@ fn choose_credential(hash: Option<String>, plain: Option<String>) -> (Option<Str
         (Some(h), None) => (Some(h), Vec::new()),
         (None, Some(p)) => (
             Some(p),
-            vec![
-                "用的是明文令牌（PANEL_TOKEN）。想让它不以明文落盘：                 `plugin-panel hash-token` 生成哈希，改用 PANEL_TOKEN_HASH"
-                    .to_string(),
-            ],
+            vec![format!(
+                "用的是明文口令（PANEL_TOKEN）：**线上那份是明文**。\
+                 部署请换成 `plugin-panel hash-token` 生成的 prehash1: 形态；\
+                 本机调试要显式 {}=1",
+                auth::ALLOW_PLAIN_ENV
+            )],
         ),
         (None, None) => (None, Vec::new()),
     }
@@ -780,4 +939,20 @@ mod docs_tree_tests {
             "docs/architecture.md 的目录树里列了磁盘上不存在的路径: {missing:#?}"
         );
     }
+}
+
+/// `plugin-panel build-info` —— 打印这个二进制**编进了什么**（JSON）。
+///
+/// 为什么值得一条子命令：`legacy-tls` 决定**直播能不能用**，而它默认关。
+/// 发布脚本和用户都需要一个**不问任何人**就能得到的答案：
+///
+/// ```text
+/// ./plugin-panel build-info | jq -r .live_supported
+/// ```
+///
+/// ⚠ 与 `/api/state` 的 `build` 是**同一份**实现（[`web::build_info`]），
+/// 不是两处各写一遍 —— 两份定义迟早会不一致，而不一致的那天没人会发现。
+fn build_info_cmd() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", crate::web::build_info());
+    Ok(())
 }

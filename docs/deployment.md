@@ -55,6 +55,11 @@ git tag v0.1.0 && git push origin v0.1.0
 
 两个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
 
+⚠ **外部运行时不在二进制里**：QuickJS 插件开箱即用；要切 Node / Bun 插件得在目标机
+装 Node >= 20.6 / Bun >= 1.0（或用 `PANEL_NODE` / `PANEL_BUN` 指路径）。`.py` 脚本需要
+`PANEL_PYTHON`（默认 `python3`，>= 3.8）；没装不影响插件与 JS 脚本。
+Termux 上可用 `pkg install nodejs python`，ARM 盒子上用发行版的包。
+
 > CI 的 artifact 需要登录 GitHub 才能下载，对「给别人用」来说等于没分发 ——
 > 所以走 Release 而不是 artifact。
 
@@ -133,11 +138,11 @@ WantedBy=multi-user.target
 | 项 | 值 |
 |---|---|
 | RSS | 8.1 MB（纯宿主，macOS `ps`，含共享库页；`footprint` 实测独占 **2.1 MB**） |
-| RSS（+4 JS 插件） | 9.2 MB（独占 2.9 MB） |
-| RSS（+4 JS + 2 Python 插件） | 14.5 MB（独占 7.6 MB） |
+| RSS（+4 个 QuickJS 插件） | 9.2 MB（独占 2.9 MB） |
+| 外部 Node/Bun 插件 | **单独子进程**，不计入上表；量级 30–80 MB/插件（待实测，见 [performance.md](performance.md#81c-第六十轮的内存账待-lead-实测)） |
 | 线程数 | 4 |
 | CPU（空闲） | 0.0–0.1% |
-| 二进制 | 2.7 MB（静态 musl） |
+| 二进制 | 9.5 MB（aarch64 静态 musl，`legacy-tls-vendored`）；无 TLS 构建 5.0 MB |
 | QuickJS 堆 | 225 KB |
 
 空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。

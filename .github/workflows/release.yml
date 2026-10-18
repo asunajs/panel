@@ -41,10 +41,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 冒烟会跑脚本任务（Python 3 是 runner 自带的）与外部 Node 插件分支；
+      # 静态二进制自己 spawn PATH 里的 node，所以构建机上要有 Node 22。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: 安装 musl 工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          # musl-gcc + perl/make（后者是 `openssl-src` 编 OpenSSL 要的）
+          sudo apt-get install -y musl-tools perl make
           which musl-gcc
 
       - name: 构建静态二进制
@@ -55,7 +62,11 @@ jobs:
           TARGET_LOWER="$(echo '${{ matrix.target }}' | tr '-' '_')"
           export "CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc"
           export "CC_${TARGET_LOWER}=musl-gcc"
-          cargo build --release --target ${{ matrix.target }}
+          # ⚠ `legacy-tls-vendored`（**不是** `legacy-tls`）：把 OpenSSL **静态编进**
+          #   二进制，于是"目标机不用装任何东西"与"直播能用"同时成立。
+          #   只开 `legacy-tls` 会动态链系统 libssl —— 下面那条 NEEDED 断言会红，
+          #   也就是说这个组合**跑不了**，必须带 vendored。
+          cargo build --release --target ${{ matrix.target }} --features legacy-tls-vendored
 
       - name: 校验产物（架构 + 静态链接）
         run: |
@@ -77,6 +88,16 @@ jobs:
             aarch64-*) file "$BIN" | grep -q "aarch64" ;;
             x86_64-*)  file "$BIN" | grep -q "x86-64"  ;;
           esac
+
+      # ⚠ 每一个发出去的产物都**必须**支持直播。
+      #   "某一档少了直播"不是一种可接受的配置 —— 它会让用户装完之后
+      #   撞上一句 TLS 报错，还得自己去猜"是不是我这版编漏了什么"。
+      #   这条断言就是那个不变量的看门人。
+      - name: 断言这个产物**真的**支持直播
+        run: |
+          BIN=target/${{ matrix.target }}/release/plugin-panel
+          "$BIN" build-info
+          "$BIN" build-info | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["live_supported"] is True, "发出去的产物必须支持直播（legacy-tls-vendored）"; print("ok: 直播可用")'
 
       - name: 冒烟测试（真的把服务跑起来）
         run: python3 scripts/smoke.py ./target/${{ matrix.target }}/release/plugin-panel
@@ -160,6 +181,11 @@ jobs:
           # 「[engine:N] 执行线程已退出」，于是这一步**永远**失败（第一次跑 Release
           # 就红在这；而它前面「真下载 / 真校验 / 真启动」全过了）。
           grep -q "执行线程已退出" "$RUNNER_TEMP/panel.log"
-          # Python 只能被 finalize 一次（多线程下重复 finalize 会 abort）
-          test "$(grep -c 'PocketPy 已释放' "$RUNNER_TEMP/panel.log")" = 1
+          # PocketPy / Python 插件在第六十轮删除：产物日志里不该再出现它。
+          # 这条是「旧构建混进 Release」的看门狗 —— 不是历史洁癖。
+          ! grep -qi "pocketpy" "$RUNNER_TEMP/panel.log"
+          # 外部运行时是子进程：面板退出后不应留下 runner.mjs（没有启外部插件时本就没有）
+          if command -v pgrep >/dev/null 2>&1; then
+            ! pgrep -f 'js/runner\.mjs --plugin' >/dev/null 2>&1
+          fi
           ! grep -qi "panic" "$RUNNER_TEMP/panel.log"

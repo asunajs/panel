@@ -13,7 +13,7 @@
     1. 二进制存在且能启动
     2. GET /            → 200，返回 HTML 面板
     3. GET /api/state   → 合法 JSON，含 status / plugins / jobs / engine
-    3b. 双运行时都加载了（JS + Python），且没有加载失败的插件
+    3b. 插件只剩 JS（QuickJS/Node/Bun），且没有加载失败的插件
     3c. JS 插件注册的 HTTP 路由挂在同一个端口上；未注册路径仍返回 404
     3d. 面板写接口：缺护栏头 403 / 任务不存在 404 / 手动触发 / 暂停冻结 / 恢复不补跑
     3e. 任务定义（第九轮）：插件/面板两种来源标注；新建的四条校验路径；
@@ -22,7 +22,7 @@
         令牌两种头 / 登录 cookie 属性 / 退出即失效 / 开放重定向防护 / 登录退避；
         以及「非回环 + 无令牌 → 拒绝启动」
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
-    4b. Python 插件的调度任务真的被触发过（不是只加载不干活）
+    4b. 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
     6. QuickJS 堆用量可观测
     6b. 常驻内存（只在 Linux 上给数字）
@@ -66,6 +66,13 @@ FAILURES: list[str] = []
 # 它只用在随机的回环端口 + 临时数据库的测试实例上，不是任何真实部署的凭据。
 SMOKE_TOKEN = "10086112"
 CUR_TOKEN = None
+
+# ⚠ 第二十一轮起，「明文口令」形态是**开发口子**：不显式打开这个开关，
+#   面板会拒绝启动（部署闸，见 auth.rs 的 check_credential_policy）。
+#   这套冒烟绝大多数片段用的就是 `PANEL_TOKEN` + `X-Panel-Token: 口令`，
+#   所以在这里统一打开；子进程的环境都从 os.environ 派生，开一次就够。
+#   摘要形态那条路在 `smoke_auth` 里**单独**关掉它来测（不然测的不是那条路）。
+os.environ.setdefault("PANEL_ALLOW_PLAIN_TOKEN", "1")
 
 
 def use_token(token):
@@ -370,21 +377,6 @@ register_handler('noop', () => {});
 # **必须真的起进程、真的分到两个 worker**，不能只测单 worker（那本来就是好的）。
 # 每个插件定义一个**自己的**全局变量，再去摸别人的 —— 摸到了就说明两个插件
 # 共用了同一个解释器（这正是 `next_vm` 每 worker 各发一份时发生的事）。
-PY_PLUGIN_TEMPLATE = """
-from host_api import log, register_handler
-
-MARK_{name} = "{name}"
-
-log("{name} 加载")
-{checks}
-register_handler("noop", lambda payload: None)
-"""
-
-PY_ISO_CHECK = """try:
-    _other = MARK_{other}
-    log("LEAK={other}")
-except NameError:
-    log("ISOLATED={other}")"""
 
 
 # ---------------------------------------------------------------- 运行记录
@@ -587,108 +579,6 @@ def run_record_checks(tmp: Path) -> None:
         proc.terminate()
         proc.wait(timeout=10)
 
-def python_multi_worker_checks(tmp: Path) -> None:
-    """多个 Python 插件 + 多 worker：面板必须活着，而且每个插件都加载了。"""
-    pdir = tmp / "py-multi"
-    pdir.mkdir(parents=True, exist_ok=True)
-    names = ["py_one", "py_two", "py_three", "py_four"]
-    for n in names:
-        checks = "\n".join(
-            PY_ISO_CHECK.format(other=o) for o in names if o != n
-        )
-        (pdir / f"{n}.py").write_text(
-            PY_PLUGIN_TEMPLATE.format(name=n, checks=checks), encoding="utf-8"
-        )
-
-    port = free_port()
-    env = dict(os.environ)
-    env.update(
-        {
-            "BIND_ADDR": f"127.0.0.1:{port}",
-            "DB_PATH": str(tmp / "pymulti.db"),
-            "PLUGINS_DIR": str(pdir),
-            "PANEL_TOKEN": SMOKE_TOKEN,
-            "PANEL_LOG_DIR": str(tmp / "pymulti-logs"),
-            # 显式两条线程：默认就是 2，写出来是为了让「这条检查到底在验什么」不含糊
-            "ENGINE_WORKERS": "2",
-        }
-    )
-    logpath = tmp / "pymulti.log"
-    with open(logpath, "w") as f:
-        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
-    try:
-        ready = wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN})
-        check(ready, "4 个 Python 插件 + 2 条线程：面板活着（不崩）")
-        # ⚠ 不能只等「就绪」：`wait_ready` 在 `/api/state` 报出**任意**一个插件时就返回，
-        # 而 4 个插件是分到两条线程上**先后**加载的。等引擎自己的汇总行出现再断言 ——
-        # 直接数 JSONL 里的行会在"加载到一半"时读到 2 行（这一条踩过）。
-        if ready:
-            deadline = time.time() + 20
-            while time.time() < deadline:
-                if "已加载 {} 个插件".format(len(names)) in logpath.read_text(errors="replace"):
-                    break
-                time.sleep(0.2)
-        check(
-            proc.poll() is None,
-            "进程没有自己退出（原生 abort 不会有 panic 输出，只能看退出码）",
-            f"退出码 {proc.returncode}",
-        )
-        if not ready:
-            print(logpath.read_text(errors="replace")[-2000:])
-            return
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
-
-    files = sorted((tmp / "pymulti-logs").glob("plugin-*.jsonl"))
-    if not check(len(files) == 1, "Python 多 worker 检查拿到了日志文件", str(files)):
-        return
-    rows = files[0].read_text(encoding="utf-8").splitlines()
-    boot = [json.loads(l) for l in rows if l.strip()]
-    loaded = {d["scope"] for d in boot if d["msg"].endswith("加载")}
-    # 面板通道的日志（线程数、"负责 N 个插件"、"已加载 N 个插件"）**不进 JSONL** ——
-    # 那是设计（面板日志不落盘，见 docs/logging.md §21.1），所以要读进程自己的 stdout
-    console = logpath.read_text(errors="replace")
-    # ⚠ 引擎的汇总行是**每个 worker 各一条**（"已加载 N 个插件" 指的是这条线程），
-    # 所以要看总和，不是找某一行等于 4（这一条我一开始就写错了）。
-    totals = [
-        int(m.group(1))
-        for m in re.finditer(r"已加载 (\d+) 个插件", console)
-    ]
-    check(
-        sum(totals) == len(names),
-        "引擎汇总：两条线程加起来 4 个插件都加载了（不是「崩在这一半」）",
-        "各线程 " + "+".join(str(t) for t in totals) if totals else "—",
-    )
-    check(
-        loaded == set(names),
-        "4 个插件各自都打了自己的加载行",
-        "已加载 " + ",".join(sorted(loaded)),
-    )
-    # ---- 隔离：A 的全局在 B 里必须看不见 ----
-    # 这一条钉的是那个「两个 worker 各发一份 VM 索引 → 两个插件共用解释器」的 bug。
-    leaks = []
-    for d in boot:
-        msg = d["msg"]
-        if msg.startswith("LEAK="):
-            leaks.append(d["scope"] + "→" + msg.split("=", 1)[1])
-    check(not leaks, "没有插件能看见别的插件的全局变量", ",".join(leaks) or "干净")
-    isolated = sum(1 for d in boot if d["msg"].startswith("ISOLATED="))
-    check(
-        isolated == len(names) * (len(names) - 1),
-        "每个插件都确认了「别人的全局不可见」",
-        "{} 条（应为 {}）".format(isolated, len(names) * (len(names) - 1)),
-    )
-    workers = [l for l in console.splitlines() if "条执行线程" in l]
-    check(bool(workers), "启动日志说了线程数", workers[0].split("]")[-1].strip() if workers else "—")
-    # 格式：`2026-10-15 21:23:16.665 [info] [engine:0] 负责 1 个插件（…）`
-    assigned = {m.group(1) for m in re.finditer(r"\[(engine[^\]]*)\] 负责 ", console)}
-    check(
-        len(assigned) >= 2,
-        "两个 worker 都参与了加载（说明真的并发过 —— 不然这条检查白跑）",
-        ",".join(sorted(assigned)) or "—",
-    )
-
 def plugin_fs_checks(tmp: Path) -> None:
     """面板内的 node:fs / node:path：能落盘、越界被拒、插件之间互相看不见。"""
     pdir = tmp / "fs-plugins"
@@ -773,119 +663,7 @@ def plugin_fs_checks(tmp: Path) -> None:
         str(stray),
     )
 
-    # ---- Python 侧：同一套 API、同一套围栏 ------------------------------------
-    #
-    # 面板内的 Python 插件没有 `open()` / `os`（嵌入式宿主是 PocketPy），
-    # 所以宿主在 `host_api` 门面上给了一套窄接口。这一段的重点是**两边同名同语义** ——
-    # 否则同一份 .py 插件在面板里能跑、出去就 AttributeError（或反过来）。
-    (pdir / "pyfs_probe.py").write_text(FS_PROBE_PY, encoding="utf-8")
-
-    port = free_port()
-    py_data = tmp / "pyfs-plugin-data"
-    env = dict(os.environ)
-    env.update(
-        {
-            "BIND_ADDR": f"127.0.0.1:{port}",
-            "DB_PATH": str(tmp / "pyfs.db"),
-            "PLUGINS_DIR": str(pdir),
-            "PLUGIN_DATA_DIR": str(py_data),
-            "PANEL_TOKEN": SMOKE_TOKEN,
-            "PANEL_LOG_DIR": str(tmp / "pyfs-logs"),
-        }
-    )
-    logpath = tmp / "pyfs.log"
-    with open(logpath, "w") as f:
-        proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
-    try:
-        if not check(
-            wait_ready(f"http://127.0.0.1:{port}", proc, {"X-Panel-Token": SMOKE_TOKEN}),
-            "Python fs 检查用的实例就绪",
-        ):
-            print(logpath.read_text(errors="replace"))
-            return
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
-
-    pfiles = sorted((tmp / "pyfs-logs").glob("plugin-*.jsonl"))
-    if not check(len(pfiles) == 1, "Python fs 检查拿到了日志文件", str(pfiles)):
-        return
-    prows = pfiles[0].read_text(encoding="utf-8").splitlines()
-    p = _probe_log_rows_scope(prows, "pyfs_probe")
-
-    check(p.get("READ") == "你好", "Python 侧写进去的能读回来", str(p.get("READ")))
-    check(p.get("APPEND") == "你好-尾", "Python 侧 append_text 是追加", str(p.get("APPEND")))
-    check(p.get("LIST") == "['x.txt']", "Python 侧 list_dir", str(p.get("LIST")))
-    check(p.get("SIZE") == "10", "Python 侧 stat 大小正确（按 UTF-8 字节：你好-尾 = 3+3+1+3）", str(p.get("SIZE")))
-    check(p.get("RENAMED") == "['y.txt']", "Python 侧 rename")
-    check(p.get("CLEARED") == "[]", "Python 侧 remove")
-    check(p.get("ROOT", "").endswith("/pyfs_probe"), "Python 侧看到的根也是数据根下的同名子目录", str(p.get("ROOT")))
-    for why in ("parent-write", "system-read", "parent-list"):
-        check(
-            p.get("DENY={}:EACCES".format(why)) is True,
-            "Python 侧 {} 被拒（EACCES）".format(why),
-        )
-    check(not [k for k in p if k.startswith("LEAK=")], "Python 侧没有任何越界操作成功过")
-
-    # ---- 同一个 .py 文件在 CPython 适配器里也跑（跨运行时的承诺）----
-    pydir = REPO / "adapters" / "python"
-    if not pydir.exists():
-        print("  ⏭ 跳过 Python 文件的跨运行时对比（缺 adapters/python）")
-        return
-    cpy = tmp / "pyfs-cpython"
-    cpy.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        [sys.executable, "-m", "host_api", str(pdir / "pyfs_probe.py"), "--once"],
-        env={**os.environ, "PYTHONPATH": str(pydir), "HOST_LOG_DIR": str(cpy / "logs")},
-        cwd=str(cpy),
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    check(r.returncode == 0, "CPython 适配器能跑同一个 .py 文件", (r.stderr or "").strip()[-160:])
-    # 面板外**没有围栏**（刻意的：外面你有正常的文件系统权限）。所以那里
-    # `../escape.txt` 会成功 —— 这里断言的是"面板外确实是按原生语义跑"，
-    # 而不是"到处都是围栏"。可移植的写法是只用相对路径。
-    check(
-        "LEAK=parent-write" in r.stdout + r.stderr,
-        "面板外按原生语义（没有围栏）—— 这是刻意的，不是漏洞",
-    )
-
-
-# Python 侧的同一组探针。**只用单行 import** —— PocketPy 不支持跨行括号 import
-# （`SyntaxError: expected '@id', got ')'`，见 docs/host-api.md §5.2 的兼容性表；我自己第一个版本就踩了）。
-FS_PROBE_PY = """
-from host_api import log, start, data_dir, read_text, write_text, append_text, exists, list_dir, mkdir, remove, rename, stat, register_handler
-
-start("pyfs 探针")
-log("ROOT=" + data_dir())
-mkdir("data")
-write_text("data/x.txt", "你好")
-log("READ=" + read_text("data/x.txt"))
-append_text("data/x.txt", "-尾")
-log("APPEND=" + read_text("data/x.txt"))
-log("EXISTS=" + str(exists("data/x.txt")))
-log("LIST=" + str(list_dir("data")))
-log("SIZE=" + str(stat("data/x.txt")["size"]))
-rename("data/x.txt", "data/y.txt")
-log("RENAMED=" + str(list_dir("data")))
-remove("data/y.txt")
-log("CLEARED=" + str(list_dir("data")))
-for why, fn in (
-    ("parent-write", lambda: write_text("../escape.txt", "x")),
-    ("system-read", lambda: read_text("../../../../../etc/passwd")),
-    ("parent-list", lambda: list_dir("..")),
-):
-    try:
-        fn()
-        log("LEAK=" + why)
-    except OSError as exc:
-        # 两边都对的取码写法：面板侧没有 .code（PocketPy 挂不了属性），
-        # 适配器侧有。都没有时退回消息前缀 —— 那个约定两边都守。
-        log("DENY=" + why + ":" + getattr(exc, "code", str(exc).split(":")[0]))
-register_handler("noop", lambda payload: None)
-"""
-
+    # Python 插件已移除：这一组只验 JS 宿主的 fs/path。
 
 def _probe_log_rows_scope(rows: list[str], scope: str) -> dict:
     """按 scope 过滤后收 `KEY=值`。
@@ -999,6 +777,9 @@ def cross_runtime_log_parity(tmp: Path) -> None:
         "136****6001" in msgs and "abc123" not in msgs and "SECRET" not in msgs,
         "两边都脱敏了（手机号 / token / JSON 字段）",
     )
+
+    # Python 已退出插件范畴：跨宿主对比只保留 JS 那一段。
+    return
 
     # ---- 同一种语言、两个宿主：Python（PocketPy 宿主 vs CPython 适配器）----
     #
@@ -1184,7 +965,7 @@ def auth_checks(tmp: Path) -> None:
         # 第十九轮：没有「本机免登录」了，`enabled` 这个可变字段也一起去掉 ——
         # 改成报**凭据的存储形式**（排查「我配的哈希到底生效没」时最有用）
         check(
-            auth.get("kind") in ("明文令牌", "Argon2id 哈希") and "enabled" not in auth,
+            auth.get("kind") in ("明文口令", "Argon2id(口令)", "Argon2id(摘要)") and "enabled" not in auth,
             "/api/state 报凭据形式，且不再有 auth.enabled（没有免登录模式了）",
             str(auth),
         )
@@ -1295,23 +1076,40 @@ def auth_hash_checks(tmp: Path) -> None:
     )
     hashed = r.stdout.decode().strip()
     check(
-        r.returncode == 0 and hashed.startswith("$argon2id$") and "m=" in hashed,
-        "hash-token 生成 PHC 格式的盐+哈希",
+        r.returncode == 0 and hashed.startswith("prehash1:$argon2id$") and "m=" in hashed,
+        "hash-token 生成 prehash1:$argon2id$…（摘要形态）",
         f"rc={r.returncode}, {hashed[:40]}",
     )
     check(
         token not in r.stdout.decode() and token not in r.stderr.decode(),
-        "hash-token 的输出里不含明文令牌",
+        "hash-token 的输出里不含明文口令",
     )
     again = subprocess.run(
         [str(BIN), "hash-token"], input=token.encode(), capture_output=True, timeout=30
     ).stdout.decode().strip()
     check(again != hashed, "两次生成的哈希不同（盐是随机的）")
 
+    # 脚本 / 登录页要用的那个值：摘要（sha256("plugin-panel/v1:"+口令)）
+    d = subprocess.run(
+        [str(BIN), "digest"], input=token.encode(), capture_output=True, timeout=30
+    )
+    digest = d.stdout.decode().strip()
+    check(
+        len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
+        "digest 子命令打印 64 位小写十六进制摘要",
+        digest[:16] + "…",
+    )
+    check(
+        digest != token and token not in d.stderr.decode(),
+        "摘要不等于口令本身（域分隔 + 单向）",
+    )
+
     # ---- ② 用哈希启动，登录流程照常 ----
     port = free_port()
     env = dict(os.environ)
     env.pop("PANEL_TOKEN", None)  # 这个实例**只**配哈希，测的才是哈希那条路
+    # ⚠ 关键：**关掉**开发口子 —— 下面要证明的是「摘要形态不需要任何口子就能跑」
+    env.pop("PANEL_ALLOW_PLAIN_TOKEN", None)
     env.update(
         {
             "BIND_ADDR": f"127.0.0.1:{port}",
@@ -1327,25 +1125,35 @@ def auth_hash_checks(tmp: Path) -> None:
     )
     base = f"http://127.0.0.1:{port}"
     try:
-        if not check(wait_ready(base, proc, {"X-Panel-Token": token}), "哈希令牌实例就绪"):
+        if not check(wait_ready(base, proc, {"X-Panel-Token": digest}), "摘要凭据实例就绪"):
             print(logpath.read_text(errors="replace"))
             return
 
         boot = logpath.read_text(errors="replace")
-        check("Argon2id 哈希" in boot, "启动日志写明用的是哈希（不是明文）", "")
-        check("明文令牌" not in boot, "启动日志没有误报成明文")
+        check("Argon2id(摘要)" in boot, "启动日志写明用的是摘要形态", "")
+        check("明文口令" not in boot, "启动日志没有误报成明文")
+
+        # 登录页要把口令在浏览器里换成摘要再提交
+        code, _, page = http(f"{base}/login")
+        check(code == 200 and 'MODE = "digest"' in page, "登录页切到摘要模式", f"http {code}")
+        check("sha256" in page and "crypto.subtle" in page, "登录页带浏览器侧摘要实现（含无 subtle 的兜底）")
+        check(token not in page, "登录页不含口令（它只可能在输入框里）")
 
         code, _, _ = http(f"{base}/api/state")
         check(code == 401, "无凭证仍然 401", f"http {code}")
+
+        # ⚠ 口令本身**不能**当凭据：这正是「明文口令不经过服务端」的证明
+        code, _, _ = http(f"{base}/api/state", headers={"X-Panel-Token": token})
+        check(code == 401, "**明文口令当令牌被拒**（服务端只认摘要）", f"http {code}")
 
         body = json.dumps({"token": "wrong-" + token}).encode()
         code, _, _ = http(
             f"{base}/api/login", method="POST", body=body,
             headers={"content-type": "application/json"},
         )
-        check(code == 401, "错令牌 401", f"http {code}")
+        check(code == 401, "错摘要 401", f"http {code}")
 
-        body = json.dumps({"token": token}).encode()
+        body = json.dumps({"token": digest}).encode()
         code, headers, _ = http(
             f"{base}/api/login", method="POST", body=body,
             headers={"content-type": "application/json"},
@@ -1354,7 +1162,7 @@ def auth_hash_checks(tmp: Path) -> None:
         for k, v in headers.items():
             if k == "set-cookie":
                 sid = v.split(";")[0].split("=", 1)[1]
-        check(code == 200 and bool(sid), "**哈希令牌能登录**（走 Argon2 校验）", f"http {code}")
+        check(code == 200 and bool(sid), "**摘要能登录**（走 Argon2 校验）", f"http {code}")
         code, _, _ = http(f"{base}/api/state", headers={"Cookie": f"panel_session={sid}"})
         check(code == 200, "会话 cookie 可用", f"http {code}")
 
@@ -1416,7 +1224,7 @@ def auth_hash_checks(tmp: Path) -> None:
     proc2 = subprocess.Popen([str(BIN)], stdout=f2, stderr=subprocess.STDOUT, env=env2, cwd=REPO)
     base2 = f"http://127.0.0.1:{port2}"
     try:
-        if not check(wait_ready(base2, proc2, {"X-Panel-Token": token}), "两个都配了时实例就绪"):
+        if not check(wait_ready(base2, proc2, {"X-Panel-Token": digest}), "两个都配了时实例就绪"):
             return
         boot2 = log2.read_text(errors="replace")
         check("以哈希为准" in boot2, "同时配置时明确提示「以哈希为准」")
@@ -1426,12 +1234,12 @@ def auth_hash_checks(tmp: Path) -> None:
             headers={"content-type": "application/json"},
         )
         check(code == 401, "被忽略的明文**登录不上**（优先级真的生效）", f"http {code}")
-        body = json.dumps({"token": token}).encode()
+        body = json.dumps({"token": digest}).encode()
         code, _, _ = http(
             f"{base2}/api/login", method="POST", body=body,
             headers={"content-type": "application/json"},
         )
-        check(code == 200, "哈希那条令牌照常能登录", f"http {code}")
+        check(code == 200, "哈希那条摘要照常能登录", f"http {code}")
     finally:
         proc2.terminate()
         try:
@@ -1439,6 +1247,67 @@ def auth_hash_checks(tmp: Path) -> None:
         except subprocess.TimeoutExpired:
             proc2.kill()
         f2.close()
+
+    # ---- ⑥ 部署闸：明文形态不开开发口子 ⇒ **拒绝启动**（"部署不行"那一条） ----
+    #
+    # 这是这一轮的核心承诺：口令不能从任何地方被拿到明文。明文形态下口令要经过
+    # 服务端，所以它只能是**显式的**开发口子，默认路径必须拒绝。
+    gate_env = dict(os.environ)
+    gate_env.pop("PANEL_ALLOW_PLAIN_TOKEN", None)
+    gate_env.pop("PANEL_TOKEN_HASH", None)
+    gate_env.pop("PANEL_TOKEN_HASH_FILE", None)
+    gate_env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{free_port()}",
+            "DB_PATH": str(tmp / "auth-gate.db"),
+            "PANEL_TOKEN": token,
+        }
+    )
+    r = subprocess.run([str(BIN)], capture_output=True, timeout=30, env=gate_env, cwd=REPO)
+    err = (r.stdout + r.stderr).decode()
+    check(
+        r.returncode != 0,
+        "**明文形态不开开发口子 ⇒ 拒绝启动**",
+        f"rc={r.returncode}",
+    )
+    check(
+        "prehash1" in err and "hash-token" in err,
+        "拒绝时给出可执行的迁移命令（prehash1 / hash-token）",
+        err.strip().splitlines()[0][:80] if err.strip() else "",
+    )
+
+    # 同一个明文令牌，开了口子 + 绑回环 ⇒ 正常起来（本机调试仍然是一句话）
+    ok_env = dict(gate_env)
+    ok_env["PANEL_ALLOW_PLAIN_TOKEN"] = "1"
+    ok_env["BIND_ADDR"] = f"127.0.0.1:{free_port()}"
+    ok_port = ok_env["BIND_ADDR"].rsplit(":", 1)[1]
+    ok_log = tmp / "auth-gate-ok.log"
+    okf = open(ok_log, "w")
+    okproc = subprocess.Popen([str(BIN)], stdout=okf, stderr=subprocess.STDOUT, env=ok_env, cwd=REPO)
+    try:
+        base_ok = f"http://127.0.0.1:{ok_port}"
+        if check(wait_ready(base_ok, okproc, {"X-Panel-Token": token}), "开闸后明文实例就绪"):
+            boot_ok = ok_log.read_text(errors="replace")
+            check("开发口子已开" in boot_ok, "开闸时启动日志里留下 warn（事后查得到）")
+    finally:
+        okproc.terminate()
+        try:
+            okproc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            okproc.kill()
+        okf.close()
+
+    # 开闸 + 绑非回环 ⇒ 仍然拒绝（部署闸的第二道）
+    exp_env = dict(gate_env)
+    exp_env["PANEL_ALLOW_PLAIN_TOKEN"] = "1"
+    exp_env["BIND_ADDR"] = f"0.0.0.0:{free_port()}"
+    r = subprocess.run([str(BIN)], capture_output=True, timeout=30, env=exp_env, cwd=REPO)
+    err = (r.stdout + r.stderr).decode()
+    check(
+        r.returncode != 0 and "回环" in err,
+        "开闸但绑非回环 ⇒ 仍然拒绝（部署里不行）",
+        f"rc={r.returncode}",
+    )
 
 
 def anti_bruteforce_checks(tmp: Path) -> None:
@@ -1457,6 +1326,11 @@ def anti_bruteforce_checks(tmp: Path) -> None:
     顺带钉住两条容易搞错的语义：
       - 退避是**临时**的（过期后正确令牌要能进来，不是永久拉黑）
       - 全局闸只挡「猜凭据」，**不踢已经登录的会话**（运维不该被攻击者踢下线）
+
+    实例 ③④ 是后来的**蜜罐**那一层：登录页有一个藏起来的「账号」框，真人看不见也
+    tab 不进去，批量脚本通常把它灌一份。判据是两个条件缺一不可 —— 填了它**且**口令不对
+    ⇒ 封掉这个来源的登录一小时。③ 验封禁真的挡住正确口令、且回的话与「口令不对」
+    逐字相同；④ 验 `PANEL_ALLOW_IPS` 那条出路（人被锁在门外时唯一不用等的解法）。
     """
     use_token(None)  # 全部请求自己指定头部，不让助手加默认令牌
 
@@ -1486,6 +1360,21 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             body=json.dumps({"token": token}).encode(),
         )
         return code, hdrs
+
+    def form_login(port, token, username=None):
+        """走**浏览器表单**那条路（JSON 那条没有蜜罐字段，测不到封禁）。
+
+        `username=None` ⇒ 完全不发这个字段；`""` ⇒ 像真人那样发一个空值。
+        两者都必须等价于「没填」—— 否则真人会被自己的浏览器锁在门外。
+        """
+        body = f"token={token}" if username is None else f"username={username}&token={token}"
+        code, _, resp = http(
+            f"http://127.0.0.1:{port}/api/login",
+            method="POST",
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            body=body.encode(),
+        )
+        return code, resp
 
     def state(port, headers):
         code, _, body = http(f"http://127.0.0.1:{port}/api/state", headers=headers)
@@ -1619,6 +1508,103 @@ def anti_bruteforce_checks(tmp: Path) -> None:
     finally:
         stop(proc2, f2)
 
+    # ── 实例 ③④：登录页的蜜罐字段（填了它 + 口令又不对 ⇒ 封这个来源的登录）──
+    #
+    # 为什么是「蜜罐」而不是「多一个账号框」：这个面板只有口令，没有账号。
+    # 一个**看得见**的账号框会把真人钓进来（第一次用的人就会填 admin），
+    # 于是封的是自己人。所以这一组要钉住的核心是：真人**不可能**触发它。
+    port3, proc3, f3 = make({"PANEL_TOKEN": SMOKE_TOKEN}, "honeypot")
+    try:
+        base3 = f"http://127.0.0.1:{port3}"
+        check(wait_ready(base3, proc3, {"X-Panel-Token": SMOKE_TOKEN}), "蜜罐实例就绪")
+
+        _, _, page = http(f"{base3}/login")
+        check(
+            'name="username"' in page and ".acct { display: none; }" in page,
+            "登录页发出去的那个「账号」框是**隐藏的**（看得见就等于请人来填）",
+        )
+        check(
+            "蜜罐" not in page and "trap" not in page,
+            "页面里不解释它是做什么的（HTML/CSS 注释同样会原样发给浏览器）",
+        )
+
+        # 真人：字段在表单里，所以提交时一定带 `username=`（空值）⇒ 不能判成脚本
+        code, _ = form_login(port3, SMOKE_TOKEN, username="")
+        check(code == 303, "空 username + 正确口令 = 正常登录（303 跳回面板）", f"http {code}")
+        # 连字段都不发（老脚本 / 直接 curl）⇒ 同样不算命中
+        code, _ = form_login(port3, SMOKE_TOKEN)
+        check(code == 303, "压根不带 username 也不算命中", f"http {code}")
+
+        # 脚本：把每个框都灌一份，而且口令是猜的
+        code_ban, body_ban = form_login(port3, "guessed-wrong", username="admin")
+        check(code_ban == 401, "填了蜜罐 + 口令不对 → 这一次就是 401", f"http {code_ban}")
+        # 封禁生效：连**正确**口令都进不来了
+        code_after, body_after = form_login(port3, SMOKE_TOKEN, username="")
+        check(
+            code_after == 401 and body_after == body_ban,
+            "**封禁期间正确口令也进不来，而且回的话与「口令不对」逐字相同**"
+            "（不能专门回一句「你被封了」—— 那是一个免费的探针）",
+            f"http {code_after}",
+        )
+        check(
+            code_after != 429,
+            "回 401 而不是 429：退避会自己过期，封禁不会 —— 两者不能混成一个读数",
+        )
+        # 但封的是「登录」：已经拿着令牌/会话在用的通道不受牵连（不踢进来的人）
+        code, st = state(port3, {"X-Panel-Token": SMOKE_TOKEN})
+        check(
+            code == 200 and st.get("auth", {}).get("banned_ips", 0) >= 1,
+            "封禁看得见：/api/state 报出被封的来源数，而**已认证的令牌通道照常**",
+            f"http {code}, {st.get('auth')}",
+        )
+        check(
+            "蜜罐命中" in (tmp / "bf-honeypot.log").read_text(errors="replace"),
+            "封禁在日志里留下记录（含被封的地址与时长）",
+        )
+    finally:
+        stop(proc3, f3)
+
+    # ── 实例 ④：白名单那条出路（人被锁在门外时唯一不用等的解法）──
+    port4, proc4, f4 = make(
+        {"PANEL_TOKEN": SMOKE_TOKEN, "PANEL_ALLOW_IPS": "127.0.0.1"}, "honeypot-allow"
+    )
+    try:
+        base4 = f"http://127.0.0.1:{port4}"
+        check(wait_ready(base4, proc4, {"X-Panel-Token": SMOKE_TOKEN}), "白名单实例就绪")
+        check(
+            "PANEL_ALLOW_IPS 里这些不是单个 IP"
+            not in (tmp / "bf-honeypot-allow.log").read_text(errors="replace"),
+            "一个写对了的白名单不会报「认不出来」",
+        )
+        code, _ = form_login(port4, "guessed-wrong", username="root")
+        check(code == 401, "白名单里也一样拒掉错口令（豁免的是封禁，不是认证）", f"http {code}")
+        code, _ = form_login(port4, SMOKE_TOKEN, username="")
+        check(code == 303, "**白名单生效**：同一个地址蜜罐命中之后仍然登得进来", f"http {code}")
+        code, st = state(port4, {"X-Panel-Token": SMOKE_TOKEN})
+        check(
+            st.get("auth", {}).get("banned_ips", -1) == 0,
+            "白名单命中不进封禁表（读数里也不留）",
+            str(st.get("auth")),
+        )
+        # 白名单写错（网段 / 主机名）必须当场说：那是唯一一条不用等一小时的出路，
+        # 静默忽略等于把它做成一个「要用时才发现没有」的假出口
+        port5, proc5, f5 = make(
+            {"PANEL_TOKEN": SMOKE_TOKEN, "PANEL_ALLOW_IPS": "10.0.0.0/8, box.local"},
+            "honeypot-badallow",
+        )
+        try:
+            wait_ready(f"http://127.0.0.1:{port5}", proc5, {"X-Panel-Token": SMOKE_TOKEN})
+        finally:
+            stop(proc5, f5)
+        bad_log = (tmp / "bf-honeypot-badallow.log").read_text(errors="replace")
+        check(
+            "10.0.0.0/8" in bad_log and "box.local" in bad_log and "已忽略" in bad_log,
+            "白名单里认不出的条目会在启动日志里点名（不点名就等于留了个假出口）",
+            bad_log.splitlines()[-1] if bad_log else "(空)",
+        )
+    finally:
+        stop(proc4, f4)
+
 
 def plugin_lifecycle_checks(tmp: Path) -> None:
     """第十一轮：插件目录变活 + 同名冲突不再静默串台。
@@ -1649,6 +1635,8 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
             "BIND_ADDR": f"127.0.0.1:{port}",
             "DB_PATH": str(tmp / "lifecycle.db"),
             "PLUGINS_DIR": str(pdir),
+            # 别让仓库自带的 tasks/ 混进这一组「任务表应该只有 keeper」的断言
+            "TASKS_DIR": str(tmp / "lifecycle-tasks"),
         }
     )
     env["PANEL_TOKEN"] = SMOKE_TOKEN
@@ -1727,18 +1715,16 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
             str(sorted(jobs2)),
         )
 
-        # ---- ④ 同名冲突：拒绝加载，且不影响已加载的那个 ----
-        (pdir / "py" / "keeper.py").write_text(
-            "from host_api import every\n\n"
-            "def keeper_task(payload):\n"
-            "    pass\n\n"
-            "every('keeper-task-py', '3s', keeper_task)\n"
+        # ---- ④ 同名冲突：根目录 keeper.js 与 js/keeper.js 同名 ----
+        (pdir / "keeper.js").write_text(
+            "const host = globalThis.host;\n"
+            "host.every('keeper-task-root', '3s', function () {});\n"
         )
         check(
             wait_for(lambda j, p: any(
                 n == "keeper" and pl.get("error") for n, pl in p.items()
             )),
-            "同名插件（js/keeper.js vs py/keeper.py）被拒绝加载",
+            "同名插件（keeper.js 与 js/keeper.js）被拒绝加载",
         )
         jobs3, plugs3 = snap()
         check(
@@ -1756,15 +1742,15 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
         )
 
         # ---- ⑤ 改名解除冲突：两个都该活，任务都在 ----
-        (pdir / "py" / "keeper.py").rename(pdir / "py" / "keeper2.py")
+        (pdir / "keeper.js").rename(pdir / "keeper2.js")
         check(
-            wait_for(lambda j, p: "keeper2" in p and "keeper-task-py" in j),
+            wait_for(lambda j, p: "keeper2" in p and "keeper-task-root" in j),
             "改名之后冲突解除、两个插件都在跑",
             f"jobs={sorted(snap()[0])}",
         )
         jobs4, _ = snap()
         check(
-            jobs4 == {"keeper-task", "keeper-task-py"},
+            jobs4 == {"keeper-task", "keeper-task-root"},
             "解除冲突后两个插件的任务都在",
             str(sorted(jobs4)),
         )
@@ -2781,6 +2767,42 @@ def plugin_manage_checks(tmp: Path) -> None:
             "**文件没变也真的重载了**（不等 mtime）",
         )
 
+        # ④·5 惰性加载的三件套：状态字段 + 手动卸载/加载 + 「长期加载」
+        #
+        # 之前这三样在冒烟里**零覆盖**（只有单测钉纯函数），而它们的坑全在
+        # "跟扫描/排班交互"的路径上 —— 这里至少把契约和拒绝路径钉住。
+        st, state = fetch_json(f"{base}/api/state")
+        row = next((p for p in state.get("plugins", []) if p.get("name") == "pm-demo"), None)
+        check(row is not None, "插件列表里有 pm-demo")
+        for k in ("evicted", "keep_warm", "has_routes", "tasks"):
+            check(k in (row or {}), f"/api/state 的插件条目带 `{k}`")
+
+        code, body = post_json(f"{base}/api/plugins/pm-demo/unload")
+        check(code == 200 and body.get("ok"), "卸载接口返回成功", f"{code} {body}")
+        # ⚠ 这里**不能**断言"卸完一直是 evicted"：`pm-demo` 是 `@every 2s` 的任务，
+        #   提前量（默认 20s）永远覆盖它 ⇒ 引擎下一秒就把它装回来了。这正是设计。
+        #   要验的是"接口 → 状态"这条路通，而不是它停在那儿不动。
+        check(
+            (plugin() or {}).get("evicted") in (True, False),
+            "卸载后状态可读（evicted 是布尔）",
+        )
+        code, body = post_json(f"{base}/api/plugins/pm-demo/load")
+        check(code == 200 and body.get("ok"), "加载接口返回成功", f"{code} {body}")
+        check(wait_for(lambda: (plugin() or {}).get("evicted") is False, 8.0), "装回内存")
+
+        # 「长期加载」是个持久化的面板设置：写库、状态里读得到
+        code, body = post_json(f"{base}/api/plugins/pm-demo/keep-warm", payload={"keep": True})
+        check(code == 200 and body.get("keep_warm") is True, "长期加载：置为开", f"{code} {body}")
+        # ⚠ 这条曾经一直红，根因不是"写没写库"，而是主循环用**启动时**那份
+        #   "我负责哪些插件"去同步快照 ⇒ 运行期启用的插件在 registry 里会出现
+        #   **同名两条**，`/api/state` 取到的是旧的那条（keep_warm 永远是 false）。
+        check(
+            wait_for(lambda: (plugin() or {}).get("keep_warm") is True, 6.0),
+            "状态里 keep_warm 变 true（并确认 registry 里没有同名重复条目）",
+            str(plugin()),
+        )
+        post_json(f"{base}/api/plugins/pm-demo/keep-warm", payload={"keep": False})
+
         # ⑤ 源码：只读 + 挡穿越
         code, body = fetch_json(f"{base}/api/plugins/pm-demo/source")
         check(code == 200 and "register_cron" in body.get("text", ""), "能读到插件源码", f"{code}")
@@ -3182,29 +3204,11 @@ def plugin_ui_checks(tmp: Path) -> None:
         code, body = test_run("js", {"code": "   "})
         check(code == 400, "测试运行：空代码被拒", f"http {code}")
 
-        code, body = test_run("py", {"code": "print('py ' + input)", "input": "ok"})
+        code, body = test_run("py", {"code": "print(1)"})
         check(
-            code == 200 and body.get("stdout", "").strip() == "py ok",
-            "测试运行 Python：print 进 stdout，input 可用",
-            f"http {code}, {body}",
-        )
-        code, body = test_run("py", {"code": "from host_api import log\nlog('via host_api')"})
-        check(
-            code == 200 and "via host_api" in body.get("stdout", ""),
-            "测试运行 Python：host_api.log 也能捕获",
-            f"{body}",
-        )
-        code, body = test_run("py", {"code": "def f():\n    raise ValueError('boom')\n\nf()"})
-        check(
-            code == 200 and "ValueError" in (body.get("error") or ""),
-            "测试运行 Python：异常带 traceback",
-            f"{(body.get('error') or '')[:60]}",
-        )
-        code, body = test_run("py", {"code": "while True:\n    pass"})
-        check(
-            code == 200 and "watchdog" in (body.get("error") or "").lower(),
-            "测试运行 Python：死循环被 pocketpy watchdog 打断",
-            f"{(body.get('error') or '')[:50]}, {body.get('ms')}ms",
+            code == 400,
+            "测试运行 Python 已被移除（400）",
+            f"http {code}, {body.get('error', '')[:50]}",
         )
 
         # `host` 这个全局别名必须是**完整**的 host_api 面。
@@ -3314,6 +3318,220 @@ def refuse_to_start_without_token(tmp: Path) -> None:
         logf.close()
 
 
+def external_runtime_checks(tmp: Path) -> None:
+    """Node/Bun 外部插件：加载、路由、任务、切换引擎。"""
+    use_token(SMOKE_TOKEN)
+    print("\n== 外部 JS 运行时（Node/Bun）==")
+    if not shutil.which(os.environ.get("PANEL_NODE") or "node"):
+        print("  ⏭ 跳过：PATH 里没有 node（外部运行时是可选的）")
+        return
+    pdir = tmp / "ext-plugins" / "js"
+    pdir.mkdir(parents=True)
+    (pdir / "extprobe.js").write_text(
+        "import { log, register_cron, register_route } from 'host-api';\n"
+        "log('extprobe loaded');\n"
+        "register_cron('ext-tick', '@every 1s', function () { log('ext-tick ran'); });\n"
+        "register_route('/extprobe', 'GET', function () { return { status: 200, body: 'ext-ok' }; });\n",
+        encoding="utf-8",
+    )
+    port = free_port()
+    env = dict(os.environ)
+    env.update({
+        "BIND_ADDR": f"127.0.0.1:{port}",
+        "DB_PATH": str(tmp / "ext.db"),
+        "PLUGINS_DIR": str(tmp / "ext-plugins"),
+        "TASKS_DIR": str(tmp / "ext-tasks"),
+        "PANEL_JS_ENGINE": "node",
+        "PANEL_LOG_DIR": str(tmp / "ext-logs"),
+        "PANEL_TOKEN": SMOKE_TOKEN,
+    })
+    logpath = tmp / "ext.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen([str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        check(wait_ready(base, proc, {"X-Panel-Token": SMOKE_TOKEN}), "外部 Node 插件实例就绪")
+        _, st = fetch_json(f"{base}/api/state")
+        p = next((x for x in st.get("plugins", []) if x.get("name") == "extprobe"), {})
+        check(p.get("engine") == "node", "插件引擎是 node", str(p.get("engine")))
+        code, _, body = http(f"{base}/extprobe")
+        check(code == 200 and body == "ext-ok", "外部插件的 HTTP 路由可用", f"{code} {body!r}")
+        # 等任务跑一轮
+        deadline = time.time() + 8
+        fired = False
+        while time.time() < deadline and not fired:
+            _, st = fetch_json(f"{base}/api/state")
+            j = next((x for x in st.get("jobs", []) if x.get("name") == "ext-tick"), {})
+            fired = j.get("runs", 0) > 0
+            time.sleep(0.3)
+        check(fired, "外部插件注册的 cron 任务真的触发了")
+        # Bun 是可选引擎：CI 的冒烟 job 只装 Node，没装 Bun 时跳过这一段。
+        if shutil.which("bun"):
+            # 切 Bun
+            code, body = post_json(f"{base}/api/plugins/extprobe/runtime", payload={"engine": "bun", "command": ""})
+            check(code == 200 and body.get("ok") is True, "切换插件引擎到 Bun", f"{code} {body}")
+            deadline = time.time() + 15
+            got = ""
+            while time.time() < deadline:
+                _, st = fetch_json(f"{base}/api/state")
+                p = next((x for x in st.get("plugins", []) if x.get("name") == "extprobe"), {})
+                got = p.get("engine") or ""
+                if got == "bun" and not p.get("error"):
+                    break
+                time.sleep(0.3)
+            check(got == "bun", "插件真的按 Bun 重新加载", got)
+            code, _, body = http(f"{base}/extprobe")
+            check(code == 200 and body == "ext-ok", "Bun 下路由仍然可用", f"{code} {body!r}")
+        else:
+            print("  ⏭ 跳过 Bun 切换（PATH 里没有 bun）")
+
+        # 再切回 QuickJS：显式选择必须落库，不能因为 PANEL_JS_ENGINE=node 回落到 node
+        code, body = post_json(f"{base}/api/plugins/extprobe/runtime", payload={"engine": "quickjs", "command": ""})
+        check(code == 200 and body.get("ok") is True, "切换插件引擎回 QuickJS", f"{code} {body}")
+        deadline = time.time() + 15
+        got = ""
+        while time.time() < deadline:
+            _, st = fetch_json(f"{base}/api/state")
+            p = next((x for x in st.get("plugins", []) if x.get("name") == "extprobe"), {})
+            got = p.get("engine") or ""
+            if got == "quickjs" and not p.get("error"):
+                break
+            time.sleep(0.3)
+        check(got == "quickjs", "显式 QuickJS 覆盖了全局 PANEL_JS_ENGINE=node", got)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        logf.close()
+
+
+def script_task_checks(tmp: Path) -> None:
+    """任务目录 js/py/sh + 面板脚本任务 + 墓碑/恢复。"""
+    use_token(SMOKE_TOKEN)
+    print("\n== 非插件脚本任务（TASKS_DIR）==")
+    if not shutil.which(os.environ.get("PANEL_NODE") or "node"):
+        print("  ⏭ 跳过：JS 脚本任务需要 node（外部运行时是可选的）")
+        return
+    pdir = tmp / "script-plugins" / "js"
+    pdir.mkdir(parents=True)
+    (pdir / "dummy.js").write_text("host.log('dummy');\n", encoding="utf-8")
+    tasks = tmp / "script-tasks"
+    (tasks / "js").mkdir(parents=True)
+    (tasks / "py").mkdir(parents=True)
+    (tasks / "sh").mkdir(parents=True)
+    # Python 只是可选的脚本运行时：没装 python3 时不要因为这个测试挂掉。
+    has_py = bool(shutil.which(os.environ.get("PANEL_PYTHON") or "python3"))
+    (tasks / "js" / "hello.js").write_text(
+        "// @name smoke_js\n// @cron @every 1s\n// @params {\"who\":\"js\"}\n"
+        "host.log('js script ' + (process.env.PANEL_PARAMS || ''));\n",
+        encoding="utf-8",
+    )
+    if has_py:
+        (tasks / "py" / "hello.py").write_text(
+            "# @name smoke_py\n# @cron @every 1s\n# @params {\"who\":\"py\"}\n"
+            "import os\nprint('py script ' + os.environ.get('PANEL_PARAMS', ''))\n",
+            encoding="utf-8",
+        )
+    (tasks / "sh" / "hello.sh").write_text(
+        "#!/bin/sh\n# @name smoke_sh\n# @cron @every 1s\n# @params {\"who\":\"sh\"}\n"
+        "echo \"sh script $PANEL_PARAMS\"\n",
+        encoding="utf-8",
+    )
+    port = free_port()
+    env = dict(os.environ)
+    env.update({
+        "BIND_ADDR": f"127.0.0.1:{port}",
+        "DB_PATH": str(tmp / "scripts.db"),
+        "PLUGINS_DIR": str(tmp / "script-plugins"),
+        "TASKS_DIR": str(tasks),
+        "PANEL_LOG_DIR": str(tmp / "scripts-logs"),
+        "PANEL_TOKEN": SMOKE_TOKEN,
+        "ENGINE_WORKERS": "2",
+        "SCRIPT_WORKER": "1",
+        "PANEL_JS_ENGINE": "node",
+    })
+    logpath = tmp / "scripts.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen([str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        check(wait_ready(base, proc, {"X-Panel-Token": SMOKE_TOKEN}), "脚本任务实例就绪")
+        deadline = time.time() + 20
+        files = []
+        while time.time() < deadline:
+            _, data = fetch_json(f"{base}/api/scripts")
+            files = data.get("files", [])
+            if len(files) == (3 if has_py else 2) and all(f.get("scheduled") for f in files):
+                break
+            time.sleep(0.4)
+        check(
+            len(files) == (3 if has_py else 2),
+            "任务目录扫到 js/py/sh 脚本" if has_py else "任务目录扫到 js/sh 脚本（没装 python3）",
+            str([f.get("path") for f in files]),
+        )
+        check(all(f.get("valid") for f in files), "文件头都合法", str([(f.get("path"), f.get("error")) for f in files]))
+        # 三种运行时都真的跑过
+        deadline = time.time() + 20
+        done = set()
+        want = {"node", "sh"} | ({"python3"} if has_py else set())
+        while time.time() < deadline and len(done) < len(want):
+            _, st = fetch_json(f"{base}/api/state")
+            for j in st.get("jobs", []):
+                if j.get("kind") == "script" and j.get("runs", 0) > 0:
+                    done.add(j.get("runtime"))
+            time.sleep(0.4)
+        check(want <= done, "js/py/sh 脚本都执行过" if has_py else "js/sh 脚本都执行过", str(sorted(done)))
+        # 输出落库
+        _, runs = fetch_json(f"{base}/api/runs?plugin=__script__")
+        outs = [r.get("output") or "" for r in runs.get("runs", [])]
+        check(any("js script" in o for o in outs), "JS 脚本输出写进了 runs.output")
+        if has_py:
+            check(any("py script" in o for o in outs), "Python 脚本输出写进了 runs.output")
+        check(any("sh script" in o for o in outs), "Shell 脚本输出写进了 runs.output")
+        # 面板创建脚本任务
+        code, body = post_json(f"{base}/api/scripts/jobs", payload={
+            "name": "panel-x", "path": "js/hello.js", "expr": "@every 1s",
+            "runtime": "node", "params": {"from": "panel"},
+        })
+        check(code == 200 and body.get("ok") is True, "面板创建脚本任务", f"{code} {body}")
+        deadline = time.time() + 15
+        found = False
+        while time.time() < deadline and not found:
+            _, st = fetch_json(f"{base}/api/state")
+            found = any(j.get("name") == "panel-x" and j.get("source") == "script-panel" for j in st.get("jobs", []))
+            time.sleep(0.3)
+        check(found, "面板脚本任务进了调度器")
+        code, body = post_json(f"{base}/api/tasks/__script__/panel-x/run")
+        check(code == 200 and body.get("ok") is True, "手动触发面板脚本任务", f"{code} {body}")
+        code, body = post_json(f"{base}/api/scripts/jobs/panel-x/edit", payload={"expr": "@every 2s"})
+        check(code == 200, "编辑面板脚本任务", f"{code} {body}")
+        # 目录任务覆盖表达式：写 override_expr，且下一轮扫描不能把它冲掉
+        code, body = post_json(f"{base}/api/jobs/__script__/smoke_js/edit", payload={"expr": "@every 3s"})
+        check(code == 200, "目录脚本任务覆盖表达式", f"{code} {body}")
+        time.sleep(3)
+        _, st = fetch_json(f"{base}/api/state")
+        j = next((x for x in st.get("jobs", []) if x.get("name") == "smoke_js"), {})
+        check(j.get("override_expr") == "@every 3s", "目录脚本任务的覆盖在扫描后仍然生效", str(j.get("override_expr")))
+
+        # 目录任务墓碑 / 恢复
+        code, body = post_json(f"{base}/api/jobs/__script__/smoke_js/delete")
+        check(code == 200, "删除目录脚本任务（墓碑）", f"{code} {body}")
+        time.sleep(2.5)
+        _, st = fetch_json(f"{base}/api/state")
+        j = next((x for x in st.get("jobs", []) if x.get("name") == "smoke_js"), {})
+        check(j.get("deleted") is True, "目录任务删除后仍留墓碑，不会被扫描复活", str(j.get("deleted")))
+        code, body = post_json(f"{base}/api/jobs/__script__/smoke_js/restore")
+        check(code == 200, "恢复目录脚本任务", f"{code} {body}")
+        # 面板任务真删
+        code, body = post_json(f"{base}/api/jobs/__script__/panel-x/delete")
+        check(code == 200, "删除面板脚本任务", f"{code} {body}")
+        _, st = fetch_json(f"{base}/api/state")
+        check(not any(x.get("name") == "panel-x" for x in st.get("jobs", [])), "面板脚本任务真删掉了")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        logf.close()
+
+
 def main() -> int:
     # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
@@ -3368,7 +3586,7 @@ def main() -> int:
         # ---- 1. 等待就绪 ----
         #
         # 判据是「HTTP 通了**并且**引擎已经加载完插件」，不是只等 HTTP 通。
-        # 引擎在独立线程里加载插件（QuickJS + PocketPy 都要初始化），Axum 完全可能先答上来，
+        # 引擎在独立线程里加载插件（QuickJS / 外部子进程都要拉起），Axum 完全可能先答上来，
         # 那一刻 /api/state 里 plugins 还是空的 —— 实测踩到过（面板 15 KB、plugins 0 个，
         # 而紧接着 jobs 表里已经有 14 条任务）。只等 HTTP 会随机输掉这个竞态。
         state = None
@@ -3403,25 +3621,32 @@ def main() -> int:
         check(ok_shape, "/api/state 结构完整", f"status={state.get('status')}")
         check(len(state.get("plugins", [])) > 0, "插件已加载", f"{len(state.get('plugins', []))} 个")
 
-        # ---- 3b. 双运行时：JS 和 Python 插件都要在 ----
-        #
-        # **这里必须等**：Python VM 是惰性初始化的（日志原话「首次用到 Python 插件时才
-        # 初始化」），慢机器上 py 插件会比 js 插件晚登记一两秒。原来拿前面那次快照直接
-        # 断言，在 CI 的 x86_64-musl runner 上红过一次 —— 而日志里 PocketPy 明明已就绪、
-        # 三个 py 插件都加载了：**产品没问题，是断言太急**。
+        # ---- 3b. 插件只剩 JS：语言字段恒为 js，引擎是 quickjs/node/bun ----
         plugins = state.get("plugins", [])
         runtimes = {p.get("runtime") for p in plugins}
+        engines = {p.get("engine") for p in plugins}
         deadline = time.time() + 15.0
-        while time.time() < deadline and not {"js", "py"} <= runtimes:
+        while time.time() < deadline and not plugins:
             time.sleep(0.3)
             code2, state2 = fetch_json(f"{base}/api/state")
             if code2 == 200:
                 plugins = state2.get("plugins", [])
                 runtimes = {p.get("runtime") for p in plugins}
+                engines = {p.get("engine") for p in plugins}
         check(
-            {"js", "py"} <= runtimes,
-            "双运行时都加载了",
+            runtimes == {"js"},
+            "插件语言只剩 JS（Python 已退出插件范畴）",
             f"runtime={sorted(runtimes)}, " + ", ".join(f"{p['name']}:{p['runtime']}" for p in plugins),
+        )
+        check(
+            engines and engines <= {"quickjs", "node", "bun"},
+            "每个插件都报出了 JS 引擎",
+            f"engine={sorted(engines)}",
+        )
+        check(
+            any(r.get("kind") == "quickjs" for r in state.get("runtimes", [])),
+            "/api/state 报出了运行时目录",
+            str([(r.get("kind"), r.get("available")) for r in state.get("runtimes", [])]),
         )
         failed = [p for p in plugins if p.get("error")]
         check(not failed, "没有加载失败的插件", "; ".join(f"{p['name']}: {p['error'][:60]}" for p in failed))
@@ -3637,19 +3862,18 @@ def main() -> int:
         t2 = state2.get("ticks", 0)
         check(t2 > t1, "调度循环在转（ticks 增长）", f"{t1} → {t2}")
 
-        # ---- 4b. Python 侧的任务真的被触发过（不是只加载不干活）----
-        # py-heartbeat 是 @every 2s，等最多 8 秒应该至少有一条它的日志
-        py_fired = False
+        # ---- 4b. 插件的调度任务真的被触发过（不是只加载不干活）----
+        fired = False
         deadline = time.time() + 8
-        while time.time() < deadline and not py_fired:
+        while time.time() < deadline and not fired:
             _, st = fetch_json(f"{base}/api/state")
-            for line in st.get("logs", []):
-                if line.get("plugin") in ("sysinfo", "sqlite-demo") and "触发" in line.get("msg", ""):
-                    py_fired = True
+            for j in st.get("jobs", []):
+                if j.get("plugin") == "host-api-demo" and j.get("runs", 0) > 0:
+                    fired = True
                     break
-            if not py_fired:
+            if not fired:
                 time.sleep(0.5)
-        check(py_fired, "Python 插件的调度任务真的触发了")
+        check(fired, "插件的调度任务真的触发了（host-api-demo 有 runs）")
 
         # ---- 5. SQLite 落库 ----
         jobs = state2.get("jobs", [])
@@ -3716,25 +3940,12 @@ def main() -> int:
                     pass
 
         log = logpath.read_text(errors="replace")
-        # 退出路径。多 worker 之后要按**每条线程**看，而且这里钉住的是一个实测崩过的
-        # 真实 bug：pocketpy 的 finalize 是进程级的，各 worker 各调一次会
-        # `py_finalize() can only be called once!` + abort()（Abort trap: 6）。
-        # 现在只有协调者在所有线程 join 之后调一次。
+        # 退出路径：每条执行线程都要走完析构（外部子进程在 drop 时被杀）。
         n_workers = log.count("正在释放插件解释器")
         check(
             n_workers >= 1 and log.count("执行线程已退出") == n_workers,
             "每条执行线程都走完了析构路径",
             f"{n_workers} 条线程释放解释器，{log.count('执行线程已退出')} 条报退出",
-        )
-        check(
-            "py_finalize() can only be called once" not in log and "Abort trap" not in log,
-            "关闭时没有重复 finalize Python（会 abort）",
-            "日志里出现了重复 finalize" if "py_finalize() can only be called once" in log else "干净",
-        )
-        check(
-            log.count("PocketPy 已释放") == 1,
-            "Python 只被 finalize 一次（由协调者做）",
-            f"{log.count('PocketPy 已释放')} 次",
         )
         check(
             "正在关闭" in log and "panicked" not in log,
@@ -3750,7 +3961,6 @@ def main() -> int:
     print()
     print("---- 鉴权（PANEL_TOKEN 模式）----")
     run_record_checks(tmp)
-    python_multi_worker_checks(tmp)
     plugin_fs_checks(tmp)
     cross_runtime_log_parity(tmp)
     auth_checks(tmp)
@@ -3767,6 +3977,8 @@ def main() -> int:
     job_delete_checks(tmp)
     plugin_manage_checks(tmp)
     plugin_source_edit_checks(tmp)
+    external_runtime_checks(tmp)
+    script_task_checks(tmp)
 
     print()
     if FAILURES:

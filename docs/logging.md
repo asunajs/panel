@@ -157,8 +157,8 @@ Dashboard 原来是每 3 秒整包拉一次 `/api/state`，只为看那 40 行�
 
 ### 21.6 面板外：适配器接上同一套
 
-`adapters/` 下本来就有跨运行时适配器（Node 的 `host-api`、Python 的 `host_api`），
-这一轮把它们从旧的 v1 格式接到 v2：
+`adapters/` 下本来就有跨运行时适配器（Node 的 `host-api`；CPython 适配器已在第六十轮删除），
+`runtime/js` 的外部宿主也实现同一套日志。这一轮把它们从旧的 v1 格式接到 v2：
 
 - **八档 + 多参数**，行格式与面板逐字符相同（终端流走 **stderr**：
   `node plugin.js > data.txt` 时那个文件只装插件自己的业务输出）
@@ -173,7 +173,7 @@ Dashboard 原来是每 3 秒整包拉一次 `/api/state`，只为看那 40 行�
 
 ### 21.7 三份实现怎么不漂移：共享向量
 
-日志的规则被三份实现（Rust 宿主 / JS 适配器 / Python 适配器）各写了一遍。
+日志的规则被多份实现（Rust 宿主 / runtime/js 的 host-api / Node 适配器）各写了一遍。
 靠人眼对齐撑不过第三次改动，所以规则被固化进**共享向量**：
 
 ```
@@ -182,14 +182,13 @@ testdata/log-format-cases.json  八档→过滤级别、行后缀、JSONL 字段
                                 彩色行模板与配色（真实 ESC，JSON 里写作 \u001b）
 ```
 
-三边的测试读**同一个文件**：Rust `src/log/mod.rs` 与 `src/log/console.rs`、JS
-`adapters/node/test/log-vectors.mjs`、Python `adapters/python/tests/test_log_vectors.py`。
-谁改歪了谁的测试就红。而且三边都**不需要额外命令**就能跑到它：JS 侧被
-`run-tests.mjs` import 进来，Python 侧被 `unittest discover` 自动收集 ——
+各实现的测试读**同一个文件**：Rust `src/log/mod.rs` 与 `src/log/console.rs`、
+JS `runtime/js/test/`、`adapters/node/test/log-vectors.mjs`。谁改歪了谁的测试就红。
+而且都不需要额外命令就能跑到它：向量测试被各自的 `run-tests.mjs` import 进来 ——
 少跑一项就等于没有这项。
 
 2026-10-15 这批向量当场抓到一处**实质性分叉**：词边界 Rust 用 Unicode 的
-「字母数字」（汉字算字母）、JS/Python 用 ASCII —— 于是 `用token=abc123` 这种
+「字母数字」（汉字算字母）、JS 侧用 ASCII —— 于是 `用token=abc123` 这种
 中文日志里很常见的紧贴写法，在 Rust 侧**整条漏脱**。已统一到 ASCII，
 并补了 6 条 CJK 紧邻的向量钉住它（含全角括号 `（Cookie: …）`）。
 
@@ -201,7 +200,7 @@ testdata/log-format-cases.json  八档→过滤级别、行后缀、JSONL 字段
 
 | # | 问题 | 怎么暴露的 |
 | --- | --- | --- |
-| 1 | **Python 的 `print` 在正常调度下从没被 drain** | 只在「测试运行」那条路收 print。正常跑任务时 `print` **既不进日志、又一直攒着**（只有 64 KB 兜底在截断）。现在加载期/任务期/`on_tick` 三处都收 |
+| 1 | **Python 的 `print` 在正常调度下从没被 drain**（历史；Python 插件已删除） | 当时只在「测试运行」那条路收 print，正常跑任务时会一直攒着。现在这条路径随 PocketPy 一起移除；外部 JS 的 `stderr` 由 `extproc` 逐行收成 error 日志 |
 | 2 | **JS 多参被静默丢掉** | 老实现是 `function (msg)`，`log('对象也能直接打：', {…})` 的第二个实参直接没了。静默丢参数最难查 —— 输出看起来「对」，只是少了半句 |
 | 3 | **`console.debug` 被当成 info** | 于是「只看 warn 以上」时那句压不掉 |
 | 4 | 登录审计事件写进了**插件通道** | 于是按插件过滤时会冒出一个**不存在的插件 `auth`** |
@@ -220,13 +219,14 @@ testdata/log-format-cases.json  八档→过滤级别、行后缀、JSONL 字段
 - ✅ **运行记录反查日志** —— 第二十六轮做完（[§24](run-history.md#24-运行记录从那次执行点进日志第二十六轮)）。面板自己维护一张 `runs` 表
   （面板层次），引擎执行时用 `with_run_id` 圈住整段，那次运行的日志都带上
   `runs.id`；日志过期后界面说的是「已过期（日志保留 7 天、记录保留 30 天）」
-- ✅ **面板内的 `node:fs` / `node:path`** —— 第二十五轮做完（[§22](plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮)）。限定在插件
-  自己的数据根里，越界 `EACCES`；Python 侧同名门面见 [§22.6](plugin-fs.md#226-python-插件同一套能力同一套围栏)
+- ✅ **面板内的 `node:fs` / `node:path`** —— 第二十五轮做完（[§22](plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮)）。
+  QuickJS 侧限定在插件自己的数据根里，越界 `EACCES`；外部 Node/Bun 是原生 fs（无围栏），见 [plugin-fs.md §23](plugin-fs.md#23-外部-node--bun原生-fs没有围栏)
 - ✅ **`/classic` 旧页面删除** —— 第十三轮就删了（[§16.13](changelog/13-webui.md#1613-classic-退休删掉旧页面--把它的用例搬到浏览器里)），冒烟里有
   「`/classic` 必须 404」的断言
-- ⏳ **Python 适配器的日志落盘**：仍然只有 CPython 下可用。**这条不会变好** ——
-  PocketPy 里没有文件系统（`open` 都没有），面板内的插件日志只能走宿主提供的
-  出口（终端 + 环形缓冲 + JSONL，由面板写）。这是运行时的边界，不是欠的活
+- 🗑 **Python 适配器的日志落盘**：随 Python 插件删除。现在所有面板内插件（QuickJS / Node / Bun）
+  的日志都由面板统一脱敏、落盘、SSE；外部引擎经 fd1 `log` 事件回到同一条出口。
+- ✅ **脚本任务的日志**：stdout 按 info、stderr 按 error 收进同一条通道，带 `run_id`；
+  `runs.output` 另存一份合并文本（见 [script-jobs.md §6](script-jobs.md#62-一次执行的生命周期)）
 
 ### 21.10 证据
 

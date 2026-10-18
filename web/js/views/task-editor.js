@@ -4,15 +4,16 @@
   两件事放在一个视图里，因为它们服务同一个动作：**调好一个任务**。
     ① 调度表达式：新建（选插件 + 处理函数名 + 表达式）或修改（后端 /api/jobs/.../edit，
        只换表达式、保留 runs 与暂停状态）
-    ② 测试运行：一段代码 + 输入 → POST /api/test/js|py → 控制台
+    ② 测试运行：一段 JavaScript + 输入 → POST /api/test/js → 控制台
        调表达式之前先确认处理函数能跑通，这是最自然的工作顺序。
+       Python 已经不是插件语言了，所以这里**没有语言选择**（脚本任务的
+       `.py` 走 `/api/scripts`，见 views/script-editor.js）。
 
-  编辑器是异步创建的（CodeJar 从 CDN 动态加载，失败降级到 textarea），
-  所以 render 里先渲染骨架、再 await 建编辑器。
+  编辑器是自带的（见 editor.js 顶部注释），同步创建，不走网络。
 */
 
-import { createEditor, highlight } from '../editor.js';
-import { getState, createJob, editJob, runJs, runPy } from '../api.js';
+import { createEditor } from '../editor.js';
+import { getState, createJob, editJob, runJs } from '../api.js';
 import { SAMPLE_CODE } from '../mock.js';
 
 function esc(s) {
@@ -78,10 +79,7 @@ export async function render(root, ctx, params = {}) {
       <div class="section-head">
         <span class="section-title">测试运行</span>
         <div class="card-actions">
-          <select class="select" id="lang-sel" style="width:auto">
-            <option value="js">JavaScript</option>
-            <option value="py">Python</option>
-          </select>
+          <span class="badge lang js">JavaScript</span>
           <button class="btn primary" id="run-btn">运行测试</button>
         </div>
       </div>
@@ -116,7 +114,7 @@ export async function render(root, ctx, params = {}) {
   const usable = plugins.filter((p) => !p.error);
   const sel = $('#f-plugin');
   sel.innerHTML = usable.length
-    ? usable.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} · ${esc(p.runtime)}</option>`).join('')
+    ? usable.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} · ${esc(p.engine || 'quickjs')}</option>`).join('')
     : '<option value="">（没有可用的插件）</option>';
   if (plugin) sel.value = plugin;
 
@@ -146,29 +144,20 @@ export async function render(root, ctx, params = {}) {
   }
 
   // ---- 编辑器 ----
-  let lang = isEdit ? (usable.find((p) => p.name === plugin)?.runtime === 'py' ? 'py' : 'js') : 'js';
-  $('#lang-sel').value = lang;
-
   let editor;
   const host = $('#editor-host');
   try {
     // 同步创建：编辑器是自带的（见 editor.js 顶部注释），不走网络，
     // 所以不存在「加载中 / 加载失败」这两个状态。
-    editor = createEditor(host, { value: SAMPLE_CODE[lang], language: lang });
-    $('#editor-state').textContent = `内置编辑器 · ${lang === 'py' ? 'Python' : 'JavaScript'} 高亮`;
+    editor = createEditor(host, { value: SAMPLE_CODE });
+    $('#editor-state').textContent = '内置编辑器 · JavaScript 高亮';
   } catch (e) {
     // 兜底：编辑器创建本身失败（理论上不会发生）。留个可读的错误，不要白屏。
     host.innerHTML = `<div class="editor-note">编辑器创建失败：${esc(e.message || e)}</div>`;
     editor = null;
   }
 
-  $('#lang-sel').addEventListener('change', () => {
-    lang = $('#lang-sel').value;
-    editor?.setLanguage(lang);
-    editor?.setValue(SAMPLE_CODE[lang]);
-  });
-
-  $('#reset-code').addEventListener('click', () => editor?.setValue(SAMPLE_CODE[lang]));
+  $('#reset-code').addEventListener('click', () => editor?.setValue(SAMPLE_CODE));
 
   // ---- 控制台 ----
   const consoleEl = $('#console');
@@ -192,14 +181,13 @@ export async function render(root, ctx, params = {}) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> 运行中…';
     clearConsole();
-    line(`$ 运行 ${lang === 'py' ? 'Python' : 'JavaScript'}（输入 ${input ? JSON.stringify(input) : '空'}）`, 'meta');
+    line(`$ 运行 JavaScript（输入 ${input ? JSON.stringify(input) : '空'}）`, 'meta');
 
     // 带上上下文：这次试跑会记进那条任务的运行记录（kind='test'），
     // 于是「改代码 → 试 → 保存」在「记录」里是一串。新建任务时还没有 name，
     // 传空字符串，记录会挂在插件名下但不属于任何任务。
     const testCtx = { plugin, task: isEdit ? name : '' };
-    const res =
-      lang === 'py' ? await runPy(code, input, testCtx) : await runJs(code, input, testCtx);
+    const res = await runJs(code, input, testCtx);
 
     btn.disabled = false;
     btn.textContent = '运行测试';

@@ -16,6 +16,8 @@ import * as taskList from './views/task-list.js';
 import * as taskEditor from './views/task-editor.js';
 import * as pluginList from './views/plugin-list.js';
 import * as pluginSource from './views/plugin-source.js';
+import * as scriptList from './views/script-list.js';
+import * as scriptEditor from './views/script-editor.js';
 import * as logView from './views/log-view.js';
 import { getState, logout } from './api.js';
 import { lineNode, openLogStream, makeRing } from './logstream.js';
@@ -230,12 +232,23 @@ async function renderDashboard(root) {
                       // 状态原来是把后端的原值直接印出来的（表里写 `running`），
                       // 而任务列表页同一列写「运行中」—— 现在共用 ../status.js 那一份。
                       const st = statusBadge(j.status);
+                      // 脚本任务不挂在插件下：`__script__` 是内部保留名，
+                      // 直接印出来只会让人问「这个插件是什么」。
+                      const isScript = j.kind === 'script';
+                      const who = isScript ? '脚本' : j.plugin;
+                      const src = isScript
+                        ? j.source === 'script-panel'
+                          ? '脚本·面板'
+                          : '脚本·目录'
+                        : j.source === 'panel'
+                          ? '面板'
+                          : '插件代码';
                       return `<tr>
-                  <td class="mono dim">${j.plugin}</td>
-                  <td class="mono">${j.name}</td>
-                  <td class="mono dim">${j.schedule}</td>
-                  <td class="mono dim">${j.source === 'panel' ? '面板' : '插件代码'}</td>
-                  <td><span class="badge ${st.cls}">${st.text}</span></td>
+                  <td class="mono dim" title="${esc(j.script || '')}">${esc(who)}</td>
+                  <td class="mono">${esc(j.name)}</td>
+                  <td class="mono dim">${esc(j.schedule)}</td>
+                  <td class="mono dim">${src}</td>
+                  <td><span class="badge ${st.cls}"${st.title ? ` title="${st.title}"` : ''}>${st.text}</span></td>
                   <td class="num">${j.runs}</td>
                   <td class="mono dim">${minuteOf(j.next_run)}</td>
                 </tr>`;
@@ -370,6 +383,8 @@ const TITLES = {
   // 本身就是"没设计过"的样子（同一个毛病还有统计卡的 UPTIME / TICKS，第二十八轮一并改了）。
   dashboard: '仪表盘',
   tasks: '任务列表',
+  scripts: '脚本任务',
+  'script-editor': '脚本任务',
   logs: '日志',
   plugins: '插件管理',
   settings: '设置',
@@ -386,6 +401,20 @@ function parseHash() {
       return { view: 'task-editor', params: { mode: 'edit', plugin: parts[2], name: parts[3] } };
     }
     return { view: 'tasks' };
+  }
+  if (parts[0] === 'scripts') {
+    // #/scripts/new[/{path}] —— 新建面板任务（path 用来预选文件）
+    // #/scripts/edit/{name}    —— 编辑面板任务 / 覆盖目录任务的调度
+    if (parts[1] === 'new') {
+      return {
+        view: 'script-editor',
+        params: { mode: 'new', path: parts.slice(2).join('/') || '' },
+      };
+    }
+    if (parts[1] === 'edit' && parts[2]) {
+      return { view: 'script-editor', params: { mode: 'edit', name: parts[2] } };
+    }
+    return { view: 'scripts' };
   }
   if (parts[0] === 'plugins') {
     // #/plugins/{name}/source —— 插件源码（独立页面，可编辑）
@@ -434,16 +463,22 @@ async function route() {
       ? params.mode === 'edit'
         ? '编辑任务'
         : '新建任务'
-      : view === 'plugin-source'
-        ? `插件源码：${params.name}`
-        : view === 'plugin-page'
-          ? pluginNavLabel(params.name)
-          : TITLES[view] || '面板';
+      : view === 'script-editor'
+        ? params.mode === 'edit'
+          ? `编辑脚本任务${params.name ? `：${params.name}` : ''}`
+          : '新建脚本任务'
+        : view === 'plugin-source'
+          ? `插件源码：${params.name}`
+          : view === 'plugin-page'
+            ? pluginNavLabel(params.name)
+            : TITLES[view] || '面板';
 
   try {
     if (view === 'dashboard') cleanup = await renderDashboard(root);
     else if (view === 'tasks') cleanup = await taskList.render(root, ctx);
     else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
+    else if (view === 'scripts') cleanup = await scriptList.render(root, ctx);
+    else if (view === 'script-editor') cleanup = await scriptEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
     else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
@@ -484,11 +519,13 @@ function paintNavActive() {
   const navKey =
     view === 'task-editor'
       ? 'tasks'
-      : view === 'plugin-source'
-        ? 'plugins'
-        : view === 'plugin-page'
-          ? `plugin:${params.name}`
-          : view;
+      : view === 'script-editor'
+        ? 'scripts'
+        : view === 'plugin-source'
+          ? 'plugins'
+          : view === 'plugin-page'
+            ? `plugin:${params.name}`
+            : view;
   document.querySelectorAll('.nav-item').forEach((a) => {
     a.classList.toggle('active', a.dataset.view === navKey);
   });
@@ -597,6 +634,7 @@ async function pollEngine() {
   const auth = res.auth || {};
   const lockedMs = auth.global_lock_ms || 0;
   const blocked = auth.blocked_ips || 0;
+  const banned = auth.banned_ips || 0;
   const failed = auth.failed_recent || 0;
 
   // 防爆破状态要能一眼看到，两个原因：
@@ -610,16 +648,23 @@ async function pollEngine() {
     authEl.className = 'badge warning';
     authEl.textContent = `有来源被退避 · ${blocked} 个`;
   } else {
-    authEl.className = 'badge running';
-    authEl.textContent =
-      auth.kind === 'Argon2id 哈希'
-        ? `已认证 · 令牌是哈希 · ${auth.sessions} 个会话`
-        : `已认证 · ${auth.sessions} 个会话`;
+    authEl.className = auth.plain_token ? 'badge warning' : 'badge running';
+    // 第二十一轮起，凭据形态分三档，界面只关心一件事：**线上那份是不是明文**。
+    // 用 `plain_token` 而不是 `kind` 的字符串：`kind` 是给人看的说明文字，
+    // 让它兼职做分支条件，改一个字就会静默走错分支。
+    authEl.textContent = auth.plain_token
+      ? `已认证 · 明文· ${auth.sessions} 个会话`
+      : `已认证 · ${auth.sessions} 个会话`;
   }
   authEl.title =
     '面板始终要求令牌（没有「本机免登录」模式：反代也跑在本机，' +
     '转发来的请求源地址就是 127.0.0.1）\n' +
-    `防爆破：近 60 秒失败 ${failed} 次，正在退避的来源 ${blocked} 个` +
+    (auth.plain_token
+      ? '\n⚠ 口令形态是「明文」：口令要经过服务端。部署请换成 prehash1:（见 docs/security.md §21）'
+      : '\n口令在浏览器里先算成摘要，服务端只收到摘要、存的是它的 Argon2id') +
+    `\n防爆破：近 60 秒失败 ${failed} 次，正在退避的来源 ${blocked} 个` +
+    // 蜜罐（登录页那个看不见的「账号」框）判出来的封禁：比退避重，一小时不解开
+    (banned ? `，已封禁 ${banned} 个` : '') +
     (auth.trust_proxy ? '\n反代模式：客户端 IP 取自 X-Forwarded-For 的最右一跳' : '');
   if (logoutBtn) logoutBtn.hidden = false;
 }

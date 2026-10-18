@@ -1,0 +1,12 @@
+{
+  "name": "host-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Panel host API shim for external Node/Bun JS plugins (protocol v1)",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  }
+}

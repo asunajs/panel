@@ -1,6 +1,7 @@
-# 插件 API（JS / Python）
+# 插件 API（JS）
 
-> 插件作者要看的全部：注册任务、日志、热更新、面板写操作、Cron 语法。跨运行时的完整规范在 [host-api.md](host-api.md)。
+> 插件作者要看的全部：写一个插件、注册任务、日志、运行时选择、热更新、面板写操作、Cron 语法。
+> 完整函数/payload 契约在 [host-api.md](host-api.md)；只想定时跑一段脚本请看 [script-jobs.md](script-jobs.md)。
 >
 > 章节号沿用原 `README.md` 的编号（作为稳定 ID，便于对照 git 历史与旧讨论）。
 > 文档索引：[docs/README.md](README.md)
@@ -9,17 +10,109 @@
 
 ## 4. 插件 API
 
-完整规范（四个运行时的能力矩阵、语义约定、错误约定）见 **[`docs/host-api.md`](host-api.md)**。
+**插件语言只有 JavaScript。** 同一份 `.js` 可以跑在三个引擎里：
 
-### JS 插件
+| 引擎 | 怎么选 | 说明 |
+|---|---|---|
+| **QuickJS**（默认） | 什么都不用做 | 内嵌，无外部依赖；`host-api` 由引擎内置 |
+| **Node.js**（>= 20.6） | 面板插件卡片上切换，或 `PANEL_JS_ENGINE=node` | 长驻子进程；可以 `import` npm 包、用原生 `fs`/`child_process` |
+| **Bun**（>= 1.0） | 同上 | 长驻子进程；`NODE_PATH` 解析 `host-api` |
 
-```javascript
-// 老写法（第一～五轮，继续可用）
-host.log(...) / host.warn(...) / host.error(...)   // console.* 同样转发
-host.cron(name, expr, handler)      // expr: 5 段或 6 段 cron
-host.every(name, interval, handler) // interval: '500ms' / '2s' / '1m' / '1h'
+运行时的探测与优先级见 [runtimes.md §10.3](runtimes.md#103-运行时怎么选三层优先级从高到低)。
+完整规范（能力矩阵、错误约定、脚本模式限制）见 **[host-api.md](host-api.md)**。
 
-// 第二十四轮：日志八档 + 多参数（冒号后是「什么时候用」）
+### 4.1 一个最小的插件
+
+```js
+// plugins/js/hello.js
+import { log, every } from 'host-api';
+
+log('hello: 已加载');                    // 八档日志之一，见 4.4
+
+every('hello-500ms', '500ms', (p) => {   // 毫秒级任务
+    log('第', p.runs, '次，延迟', p.lateMs, 'ms');
+});
+```
+
+- 插件名 = **文件名去掉扩展名**（`hello.js` → `hello`）。同一目录下重名会被拒绝加载。
+- 插件放在 `PLUGINS_DIR`（默认 `plugins`）：根目录、`js/` 这一层会被扫描，再往下不收。
+  入口必须是 `.js`（`.mjs` 只作为被 import 的模块）。被 `import` 的模块请放子目录
+  （`plugins/js/lib/…`），否则它会被当成一个插件加载。
+- 每个插件一个独立运行环境：QuickJS 是独立 `Context`，Node/Bun 是独立子进程。
+  插件之间不共享全局状态。
+- 面板按插件名的第一个 `-` / `_` 前缀**推导系列**（`mcloud-signin` → `mcloud`），
+  用来在插件页分组展示；不需要额外声明。
+
+### 4.2 经典脚本写法与 ES 模块
+
+两种写法都支持：
+
+```js
+// ① 经典脚本：直接用全局 host（第一～五轮的老写法，继续可用）
+host.log('hello');
+host.cron('tick', '@every 1s', () => host.info('tick'));
+
+// ② ES 模块：import 'host-api'（推荐；同一份文件在 Node/Bun 里也能跑）
+import { log, register_cron } from 'host-api';
+```
+
+| 引擎 | 加载方式 |
+|---|---|
+| QuickJS | 带顶层 `import` / `export` ⇒ ES 模块（自定义 Resolver 把 `host-api` 解析成内置模块）；否则按经典脚本 `eval`。两种可以混用 |
+| Node / Bun | 判据是**词法上的**：有顶层 `import` / `export` / `import.meta` ⇒ ES 模块，用 `import(file://…)` 加载，`on_tick` 从模块命名空间取；否则按**经典全局脚本**执行（`new Function(source)`，`globalThis.host` 与 `console` 已装好，`function on_tick(){}` 会被捕获）。**不支持 CommonJS 模块语义**：`module.exports` / `exports` / `require` 都不提供 |
+
+> Node 20.6–20.18 会把 `.js` 默认当 CommonJS。`runtime/js/resolve.mjs` 同时注册了
+> `resolve` 与 `load` hook，把**带顶层 ESM 语法**的 `.js` 在加载时升级成 `format:"module"` ——
+> 所以 `.js` 里直接写 `import` 也能用，不必改名 `.mjs` 或加 `"type":"module"`。
+> 已在 Node 20.6.0 / 22 / 24.16.0 上验证（`runtime/js/test/run-tests.mjs`，17 项）。
+
+⚠ 在 Node/Bun 下，ES 模块插件里能 `import` 什么由 Node/Bun 自己决定：npm 包、`node:fs`、
+`node:child_process` 都可以。**用了它们，这个插件就不再承诺能跑在 QuickJS 里** ——
+见 4.9「原生逃生口」。只用 `host-api` 的插件在三个引擎里行为一致。
+拆模块请写成 ES 模块并放子目录；CJS 写法的 `.js` / `.cjs` 不会被当成插件入口。
+
+### 4.3 注册：任务、处理函数、路由、入口
+
+```js
+import {
+    log, debug, info, start, success, fail, warn, error, fatal,
+    register_cron, every, register_handler, worker_hint,
+    register_route, register_nav, smtp_send,
+    sqlite_query, sqlite_exec, http_fetch,
+    ws_open, ws_send, ws_recv, ws_close,
+} from 'host-api';
+
+register_cron('名字', '*/5 * * * * *', handler, opts?);   // 代码声明调度（source=plugin）
+every('名字', '500ms', handler, opts?);                    // = @every 500ms
+register_handler('名字', handler);                         // 只登记，调度由面板建（source=panel）
+register_route('/plugins/x/api/run', 'POST', handler);     // 挂在面板的同一端口
+register_nav({ label: '日常任务', icon: '🗓' });            // 侧边栏入口
+worker_hint('exclusive');                                  // 声明线程要求（加载期扫描）
+```
+
+`opts` 支持 `{ params, budget_ms }`：
+
+```js
+register_cron('exchange-alice', '*/1 * * * * *', doExchange, {
+    params: { account: 'alice', slot: 3 },
+    budget_ms: 120_000,          // 需要 worker_hint('exclusive')
+});
+```
+
+| 注册方式 | 任务定义来源 | 面板上 |
+|---|---|---|
+| `register_cron` / `every` | `jobs.source = 'plugin'` | 可暂停、**不可删除**（删了下次 `sync_jobs` 也会装回来） |
+| `register_handler` + 面板建任务 | `jobs.source = 'panel'` | 可暂停、可删除 |
+
+拆开的意义：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」登记出来，
+面板再从里面挑一个挂上表达式。同一个 handler 可以被多条任务复用（挂不同表达式、不同 params）。
+
+任务名在**同一插件内**必须唯一，`register_cron` 与 `register_handler` 共用同一个名字空间，
+重名会让加载直接失败（不静默覆盖）。表达式非法也在**注册阶段**就报错。
+
+### 4.4 日志：八档语义
+
+```js
 host.debug('…')    // 排查细节（面板默认视图会把它滤掉）
 host.info('…')     // 常规事实
 host.start('…')    // 一件事开始       ┐ 这三档是**语义着色**，
@@ -29,228 +122,149 @@ host.warn('…')     // 值得看一眼
 host.error('…')    // 出错了
 host.fatal('…')    // 跑不下去了（最高档）
 host.log('多参', 1, {a:1}, [1,2], null)  // log 是 info 的别名；多参按空格拼接
-
-// 跨运行时写法（第六轮）—— 同一份文件在 Node 里也能跑
-import { log, register_cron, every, sqlite_query, sqlite_exec, http_fetch, register_route } from 'host-api';
-
-// 第二十一轮：WebSocket 客户端（长连接）—— 见下面「WebSocket」那节
-import { ws_open, ws_send, ws_recv, ws_close } from 'host-api';
-
-// 第九轮：只登记处理函数，不声明调度 —— 任务由面板创建
-import { register_handler } from 'host-api';
-register_handler('echo', (payload) => { log(`第 ${payload.runs} 次`); });
-
-// 每秒一次的心跳回调
-function on_tick(payload) { /* payload = { seq, ts } */ }
-
-// handler 收到的 payload
-// { name, plugin, expr, runs, scheduledAt, firedAt, lateMs }
-//   runs    = 生命周期内第几次触发（跨重启接着数，见 [§12.3](changelog/09-jobs-authority.md#123-累计计数回灌runs--trips)）
-//   lateMs  = 实际触发比原定晚了多少毫秒 —— 用来观察调度精度
 ```
 
-带顶层 `import` / `export` 的文件按 **ES 模块**加载（引擎线程装了自定义 Resolver/Loader，
-把 `host-api` 解析成内置模块），否则按普通脚本 eval。两种写法可以混用。
+`import { log, warn, error, … } from 'host-api'` 是同一套函数。`console.*` 也接到日志上
+（`console.log` → info，`console.error` → error），所以老代码不用改。
+行格式、脱敏、JSONL 落盘由面板统一做（三个引擎同一条出口），见 [logging.md](logging.md)。
 
-### WebSocket（第二十一轮，仅嵌入式 JS 宿主）
+### 4.5 handler 的 payload
 
-```javascript
+```js
+function handler(payload) {
+    // { name, plugin, expr, runs, scheduledAt, firedAt, lateMs,
+    //   jitterMs, realigned, manual, params }
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `name` / `plugin` / `expr` | 任务名 / 插件名 / 注册时的表达式原文 |
+| `runs` | 生命周期内第几次触发（跨重启接着数） |
+| `scheduledAt` / `firedAt` | 原定 / 实际触发时刻 `YYYY-MM-DD HH:MM:SS.mmm` |
+| `lateMs` | 调度延迟（手动触发时是负数） |
+| `jitterMs` / `realigned` | 这一拍抖了多少；这一拍是不是「落后重对齐 / 熔断重试 / 首次装载」 |
+| `manual` | `true` = 用户点的「现在跑一次」，`false` = 调度到点 |
+| `params` | `register_cron(…, { params })` 给的 JSON；没给是 `null`（不是 `undefined`） |
+
+**成功 / 失败的唯一约定：正常返回 = 成功，抛异常（含 async rejection）= 失败。**
+失败时面板记录错误文本（`name: message` + stack），写进 `jobs.last_error`，交给熔断器。
+`on_tick(payload)` 是可选的每秒回调（`{seq, ts}`），定义了就会被调用。
+
+`manual` 是**告知**，不是行为：用户点「现在跑一次」意味着他已经决定了，插件照做；
+定时到点才按自己的策略判断。
+
+### 4.6 HTTP 路由与 WebSocket
+
+```js
+// 路由：挂在面板同一个端口上，未匹配的路径仍然 404
+register_route('/plugins/x/api/echo', 'GET', (req) => {
+    // req = { method, path, query, headers, body }
+    // ⚠ query 是原始查询串（字符串），不是解析好的对象
+    const id = new URLSearchParams(req.query).get('id');
+    return { status: 200, headers: {}, body: JSON.stringify({ id }) };
+});
+
+// WebSocket：同步收发，句柄活在宿主里，跨调用有效
 const id = ws_open('wss://example.com/sockjs/123/abc/websocket', { headers: { authorization: jwt } });
 ws_send(id, 'ping');
-const m = ws_recv(id, 1500);   // {type:'text', data} / {type:'timeout'} / {type:'close', reason} / {type:'error', message}
-if (m.type === 'text') log(m.data);
+const m = ws_recv(id, 1500);   // {type:'text'|'binary'|'timeout'|'close'|'error', ...}
 ws_close(id);
 ```
 
-**为什么是这个形状**（详细语义见 [`docs/host-api.md`](host-api.md) [§1](architecture.md#1-架构) 末尾）：
+- 三个引擎都支持 `register_route` 与 `ws_*`（外部引擎经 fd3/4 RPC，行为由面板侧实现）。
+- `ws_recv` 的 **`{type:'timeout'}` 不是错误**：存好状态、下一次调用接着收。插件侧不需要事件循环。
+- 单次预算内 `ws_recv` 的最大超时是 1800ms；同时最多 8 条连接、单帧 256 KiB。
+- 句柄不存在（关过了 / 面板重启过 / 插件子进程重启过）⇒ **抛异常**，错误文本说明要重新 `ws_open`。
 
-- 面板单次执行预算 2000ms，插件的调用是**阻塞**的 ⇒ `ws_recv` 带超时（最大 1800ms），
-  **`{type:'timeout'}` 不是错误**：插件存好状态、下一次调用接着收 —— 插件侧**不需要事件循环**，
-  句柄跨调用有效（所以它活在宿主里，插件拿到的是一个数字）。
-- 句柄不存在（关过了 / **面板重启过**）⇒ `ws_send` / `ws_recv` **抛异常**，
-  错误信息里写了该怎么办。静默当成 `close` 会让人以为是"对端关了"，而真因是宿主重启。
-- **不自动重连**（那是插件的业务判断）；同时最多 **8 条**连接；单帧上限 **256 KiB**
-  （超了报错并关掉，**不静默截断**）；TLS 与 `http_fetch` 用同一个信任库
-  ⇒ 「目标机不需要装 CA」这条性质不变。
-- ⚠ **必须从引擎线程调**（插件代码天然满足）：`ws_recv` 会阻塞，连接任务跑在 tokio
-  runtime 的 worker 上 —— 从 runtime 线程调会把那条任务饿死（现象是"握手永远没结果"）。
-- ⚠ 这一族**只有嵌入式 JS 宿主有**（Python / Node 适配器 / CPython 适配器都没有，
-  调用抛 `NotImplementedError`）。插件要用它，建议把 WS 调用收敛到一个**可注入的端口**上，
-  测试里注入桩 —— 那样同一份逻辑在 Node 下照样能测。
+### 4.7 随机表达式（抖动）与按任务预算
 
-### Python 插件
-
-```python
-from host_api import log, register_cron, every, register_handler, sqlite_query, sqlite_exec, http_fetch
-
-log("插件加载中")          # 第二十四轮起：debug/info/start/success/fail/warn/error/fatal 八档
-print("也会进日志")        # 插件的 print 同样被收进日志（info 档）
-
-def heartbeat(payload):                 # payload 字段与 JS 完全一致
-    sqlite_exec("INSERT INTO hits (at) VALUES (?1)", [payload["firedAt"]])
-
-every("py-heartbeat", "2s", heartbeat)
-
-# 第九轮：只登记处理函数，不声明调度 —— 任务由面板创建
-def echo(payload):
-    log("第 " + str(payload["runs"]) + " 次")
-
-register_handler("echo", echo)
-
-def on_tick(payload):                   # 可选，语义与 JS 的 on_tick 相同
-    pass
+```text
+@every 1s -200ms          # 实际落在 [t-200ms, t]（@every 只允许提前）
+*/5 * * * * * ~500ms      # cron：双边 [t-500ms, t+500ms]
+0 8 * * * +30s            # cron：只往后
 ```
 
-Python 插件跑在嵌入的 **PocketPy 2.2.0** 里（不是 CPython），每个插件一个独立 VM。
-语法是 CPython 3.9 级别的子集，缺口见 `docs/host-api.md` [§4](#4-插件-api)（生成器表达式、`finally`、
-`nonlocal`、`async` 都没有）。
+- 抖动只影响「按节奏到点」的触发；手动触发、暂停恢复、熔断重试、落后重对齐都不抖。
+- `payload.jitterMs` 是这一拍的偏移；`realigned` 区分「没抖」和「重对齐」。
+- `register_cron(..., { budget_ms })` 给单条任务声明预算（100ms–600000ms）；长预算必须和
+  `worker_hint('exclusive')` 一起用，否则会打警告并拖住同线程的其它插件。
 
-任务名在**同一插件内**必须唯一，重名会让插件加载直接失败（不静默覆盖）。
-`register_cron` 与 `register_handler` **共用同一个名字空间**，两个方向都会查重。
+### 4.8 热更新
 
-### 只给 CBC 套件的上游：`tls:"native"`（第二十二轮，构建时 `--features legacy-tls`）
-
-```javascript
-// 默认（rustls）——大多数主机用这个
-http_fetch('https://user-njs.yun.139.com/x', {});
-// 只给 CBC 套件的主机（实测：直播侧的 v.cmcc-cs.cn 与 videoim.cmcc-cs.cn:20102）
-http_fetch('https://v.cmcc-cs.cn/cmlive/api/...', { tls: 'native' });
-ws_open('wss://videoim.cmcc-cs.cn:20102/ws/1/abc/websocket', { tls: 'native' });
-```
-
-- **默认构建里没有这条路**：写 `tls:"native"` 会明确报错，提示要 `--features legacy-tls`
-  —— 不静默退化（换后端就换了信任库：webpki-roots → 系统证书库，那是实质区别）。
-- **为什么默认关**：Linux 上平台 TLS = OpenSSL ⇒ 会破坏「musl 静态二进制不需要装依赖」。
-  macOS 上走 Security.framework，不用装 OpenSSL。
-- 判断该不该用：`HandshakeFailure` + 该主机只给 CBC 套件。`tls_hint()` 会把这句话
-  写进错误里；完整量测过程见 [`docs/host-api.md`](host-api.md) 的 `tls` 那节。
-- ⚠ 给 `http://` 请求填 `tls` 是白填（宿主**先校验再发请求**）—— 插件侧若要对 mock 也能跑，
-  记得只在 `https:` 上加这个字段（`mcloud-plugin` 的 `hostFetchOptions` 就是这么做的）。
-
-### 处理函数 vs 调度：`register_handler`（第九轮）
-
-| 注册方式 | 任务定义来源 | 面板上 |
-|---|---|---|
-| `register_cron` / `every` | `jobs.source = 'plugin'` | 可暂停、**不可删除**（删了下次 `sync_jobs` 也会装回来） |
-| `register_handler` + 面板建任务 | `jobs.source = 'panel'` | 可暂停、可删除 |
-
-拆开的意义：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」登记出来，
-面板再从里面挑一个挂上表达式 —— 「插件的能力只能来自插件代码」这条线没有破。
-同一个 handler 还能被面板上的多条任务复用（挂不同表达式）。
-
-Node / CPython 适配器里没有面板，等价做法是运行器的 `--job`：
-
-```bash
-cd adapters/node && node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 2s --duration 5
-cd adapters/python && python3 -m host_api ../../plugins/py/py-panel-jobs.py --job py-echo=@every 2s --run-for 5
-```
-
-### 热更新
-
-插件文件的 mtime 变了 → 引擎重建它的解释器实例（JS 换新 Context、Python 复用同一 VM 索引并
-`py_resetvm`）、摘掉它的旧任务、重新登记新任务。改完存盘即可，不用重启进程：
+插件文件的 mtime 变了 → 面板重建它的运行环境、摘掉旧任务、重新登记新任务：
 
 ```
-[20:40:26] [sysinfo] [info] sysinfo-v2: 已加载（pocketpy 插件，from host_api import ...）
 [20:40:26] [sysinfo] [info] 插件已热更新（摘掉 2 个旧任务，登记 2 个新任务）
 ```
 
-顺序上「先摘旧的、再装新的」：即使新版本加载失败，面板上也不会留下幽灵任务。
+- **QuickJS**：重建 `Context`（换一个干净的解释器）。
+- **Node / Bun**：**杀掉整个子进程组**，下次触发重新 spawn 并等 `ready`。
+  插件里的内存状态不会保留 —— 这是外部运行时的明确代价。
+- 顺序上「先摘旧的、再装新的」：即使新版本加载失败，面板上也不会留下幽灵任务。
+- 热更新后还会装回面板任务、灌回累计 `runs`、恢复暂停状态（[§12.4](changelog/09-jobs-authority.md#124-顺手挖出来的三个-bug)）。
+- 惰性回收也会杀外部子进程（见 [lazy-plugins.md](lazy-plugins.md)）。
 
-热更新之后还有三步收尾（第九轮补的，每一步都对应一个实测出来的坑，见 [§12.4](changelog/09-jobs-authority.md#124-顺手挖出来的三个-bug)）：
+### 4.9 原生逃生口（Node / Bun only）
 
-1. **装回面板任务** —— 它们不在插件代码里，`install_tasks` 装不到
-2. **灌回累计计数** —— 否则「触发次数」归零、熔断退避从头开始
-3. **恢复暂停状态** —— 否则改一次插件文件，用户暂停的任务就自己活过来了
+```js
+// 只有外部 Node/Bun 插件能用；QuickJS 里会加载期报错
+import fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import Database from 'better-sqlite3';
+```
 
-### 面板上的写操作（第八轮 / 第九轮）
+**边界**：
 
-面板原来只能看。现在任务表有三个按钮：**立即执行** / **暂停·恢复** / **删除**（删除只给面板任务），
-下面还有一个新建任务的表单。
+- 用了原生 API 的插件是 **Node/Bun-only**，不承诺能跑在 QuickJS 里。
+- 原生 API 绕过面板的统一审计：日志脱敏、`http_fetch` 的 TLS 信任库、SQLite 的锁、
+  执行预算的「可中断」语义，都享受不到。
+- 文件系统没有沙箱；面板只保证**不透传 `PANEL_TOKEN*`** 环境变量。
+  见 [security.md §28](security.md#28-外部运行时与脚本可信代码不是沙箱)。
+- 跨引擎插件请只用 `host-api`（以及 QuickJS 也提供的受限 `node:fs` / `node:path`，
+  见 [plugin-fs.md](plugin-fs.md)）。
+
+### 4.10 面板上的写操作
+
+面板上任务卡片有三个按钮：**立即执行** / **暂停·恢复** / **删除**（删除只给面板任务），
+下面有新建任务表单。
 
 | 接口 | 作用 |
 |---|---|
 | `POST /api/jobs` | 新建任务定义（body: `{"plugin","name","expr"}`） |
-| `POST /api/jobs/{plugin}/{name}/edit` | 改调度表达式（body: `{"expr"}`；面板任务改 `schedule`，插件任务改**覆盖** `override_expr`；`{"expr":null}` 撤销覆盖。保留 `runs` 与暂停状态，见 [§15.1](changelog/12-editable-jobs.md#151-编辑只换表达式保留运行历史) / [§16.21](changelog/14-15-throughput-and-editing.md#1621-任务能不能编辑--删除用户实测问任务不能编辑不能删除)） |
+| `POST /api/jobs/{plugin}/{name}/edit` | 改调度表达式（`{"expr"}`；插件任务写 `override_expr`，`null` 撤销覆盖） |
 | `POST /api/jobs/{plugin}/{name}/delete` | 删除任务定义（只允许 `source = 'panel'`） |
-| `POST /api/jobs/cleanup` | 清理失效的面板任务（body: `{"dry_run":true}`；见 [§15.3](changelog/12-editable-jobs.md#153-清理失效任务)） |
+| `POST /api/jobs/cleanup` | 清理失效的面板任务（`{"dry_run":true}`） |
 | `POST /api/tasks/{plugin}/{name}/run` | 立即执行一次 |
 | `POST /api/tasks/{plugin}/{name}/pause` | 暂停（不再被调度） |
 | `POST /api/tasks/{plugin}/{name}/resume` | 恢复（从当前时刻重新对齐，**不补跑**） |
-| `POST /api/test/js` | 测试运行一段 JS（body: `{"code","input"}`；见 [§16.5](changelog/13-webui.md#165-测试运行真的跑起来)） |
-| `POST /api/test/py` | 测试运行一段 Python（同上） |
+| `POST /api/test/js` | 测试运行一段 JS（body: `{"code","input","plugin"?,"task"?,"engine"?}`；一次性解释器） |
 
-`jobs` = 任务**定义**（新增 / 编辑 / 删除 / 清理失效），`tasks` = 任务**操作**（执行 / 暂停 / 恢复），
-`test` = **一次性解释器**（不碰已加载插件的状态，跑完即弃）。
+`jobs` = 任务**定义**，`tasks` = 任务**操作**，`test` = **一次性解释器**（不碰已加载插件的状态）。
+`POST /api/test/py` 随 Python 插件一起**删除**了。
 
-### 面板页面
+三条语义：
 
-| 路径 | 内容 |
-|---|---|
-| `/` | 主面板（`web/` 下的多文件前端，编译期内嵌） |
-| `/plugins/{name}/` | **插件作者**提供的配置页（只管理这个插件自己的配置，见 [§16.3](changelog/13-webui.md#163-插件自有-ui一条路两个约束)） |
-
-> 第八轮的这三个按钮**在页面上点了没反应** —— 后端接口和按钮都写好了，
-> 但前端的 click 委托漏了（`web.rs` 里那句「见下面的 click 监听」下面根本没有监听）。
-> 第九轮补上，并顺手把「请求进行中禁用按钮」也做了。见 [§12.4](changelog/09-jobs-authority.md#124-顺手挖出来的三个-bug) 的 bug ①。
-
-三条语义，都是刻意设计的：
-
-1. **手动触发对插件完全透明**。`run_one` 是同一条代码路径（`engine.rs`），
-   payload 字段与调度触发一模一样 —— 插件不需要区分「我是被定时叫醒的还是被人点的」。
-   区别只在宿主侧：手动触发**不推进 `next_fire`**（不打乱节奏），
-   也**不动熔断状态**（失败不计入连续失败，否则调试时点几下就把任务弄熔断了；
-   成功也不解除熔断，否则等于开了个「绕过熔断器猛点」的口子）。
-2. **恢复不补跑**。暂停期间错过的触发一律丢掉，从当前时刻重新对齐。
-   否则一个被暂停一天的 `@every 500ms` 任务在恢复瞬间要面对 17 万次欠账。
-   实测：暂停 3 秒后恢复，2.5 秒内触发 5 次（正好是 `@every 500ms` 的节奏）。
-3. **暂停状态跨重启保留**。写进 `jobs.paused`，引擎启动时读回来。
-   这是「`jobs` 表成为权威来源」的第一步 —— 任务定义仍由插件代码声明（代码即配置），
-   但**用户对任务的操作**必须活过重启，否则重启一次，你暂停掉的那个每 500ms 烧 CPU
-   的任务就自己活过来了。实测重启后日志里出现「任务 `py-heartbeat` 按上次的暂停状态继续暂停」。
-
-4. **删除只对面板任务开放**（第九轮）。插件代码声明的任务删了也会在下一次
-   `sync_jobs`（重启 / 热更新）里原样回来，给个能点的删除按钮等于骗人；
+1. **手动触发对插件完全透明**：同一条代码路径，payload 字段一样；只是不推进 `next_fire`、
+   不动熔断状态。
+2. **恢复不补跑**：暂停期间错过的触发一律丢掉，从当前时刻重新对齐。
+3. **删除只对面板任务开放**：插件代码声明的任务删了也会在下次 `sync_jobs` 回来。
    要让它停下来请用「暂停」—— 那才是跨重启保留的用户意图。
-   实测：`POST /api/jobs/panel-jobs/code-side/delete` → `400`，
-   错误文本是「任务 `code-side` 由插件 `panel-jobs` 的代码声明（source = plugin），
-   不能在面板上删除；想让它停下来请用「暂停」」。
 
-写接口要求带请求头 **`x-panel: 1`**，否则 403。这不是鉴权，是防 CSRF：
-浏览器跨站发起的「简单请求」不允许带自定义头，想带就会触发 CORS 预检，
-而本服务不返回任何 CORS 响应头，预检必然失败 —— 恶意网页没法借用户的浏览器点这些按钮。
-
-> 第十轮起**上面这些接口默认还要求认证**（`PANEL_TOKEN`，见 [§13](security.md#13-第十轮面板鉴权)），
-> 所以下面的 curl 在开了鉴权时要补一个 `-H "Authorization: Bearer $TOKEN"`。
-> `x-panel: 1` 保留下来做纵深防御 —— 它也是「没开鉴权」那种部署下唯一的 CSRF 防线。
+写接口要求请求头 **`x-panel: 1`**（防 CSRF），并且要带认证（[§13](security.md#13-第十轮面板鉴权)）。
 
 ```bash
 B=http://127.0.0.1:8787
-curl -s -X POST -H 'x-panel: 1' $B/api/tasks/host-api-demo/py-style-500ms/run      # {"ok":true}
-curl -s -X POST -H 'x-panel: 1' $B/api/tasks/scheduler-demo/boom/run               # {"ok":false,"error":"Error: ..."}
-curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/pause            # {"ok":true,"paused":true}
-curl -s -X POST -H 'x-panel: 1' $B/api/tasks/sysinfo/py-heartbeat/resume           # {"ok":true,"paused":false}
-curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/api/tasks/sysinfo/py-heartbeat/run   # 403（缺头）
-
-# 第九轮：新建 / 删除面板任务
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/host-api-demo/hit-report/run
+curl -s -X POST -H 'x-panel: 1' $B/api/tasks/host-api-demo/hit-report/pause
 curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
-  -d '{"plugin":"panel-jobs","name":"echo","expr":"@every 1s"}' $B/api/jobs         # {"ok":true}
-curl -s -X POST -H 'x-panel: 1' $B/api/jobs/panel-jobs/echo/delete                 # {"ok":true}
-curl -s -X POST -H 'x-panel: 1' $B/api/jobs/panel-jobs/code-side/delete            # 400（插件声明的任务）
-curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
-  -d '{"plugin":"panel-jobs","name":"nope","expr":"@every 1s"}' $B/api/jobs        # 400（没有这个处理函数）
+  -d '{"plugin":"panel-jobs","name":"echo","expr":"@every 1s"}' $B/api/jobs
 ```
 
-返回码约定：任务跑了但失败是 **`200` + `{"ok":false,"error":"..."}`**（请求本身成功了，
-错误文本原样带回面板）；`400` 校验没过（新建任务时）、`403` 缺护栏头、`404` 任务不存在、
-`503` 引擎不可用、`504` 超时。
+返回码：任务跑了但失败是 **`200` + `{"ok":false,"error":"..."}`**；`400` 校验没过、
+`403` 缺护栏头、`404` 任务不存在、`503` 引擎不可用、`504` 超时。
 
-新建任务的全部校验都在**引擎线程**里串行做（插件存在 → 名字没被占用 → 表达式能解析 →
-处理函数真的存在），失败原因原样带回面板。最后一条会真的调一次插件的解释器
-（`__has_task` / `__pp_has_task`），所以名字写错在**创建的那一刻**就报出来，
-而不是等它一路失败到熔断。
-
-### Cron 语法
+### 4.11 Cron 语法
 
 | 形式 | 例子 | 含义 |
 |---|---|---|
@@ -261,6 +275,11 @@ curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
 | 间隔 | `@every 500ms` | 毫秒级固定间隔 |
 
 星期 `0` 和 `7` 都是周日；月份/星期支持 `JAN`..`DEC` / `SUN`..`SAT`。
+**日 / 周的 OR 语义**（经典 Vixie cron）：两个字段都受限时满足任一即可。
 
-**日 / 周的 OR 语义**（经典 Vixie cron，很多简易实现会写错）：
-两个字段都受限时满足**任一**即可；只有一个受限时以它为准。
+### 4.12 不想写插件？
+
+备份、清理、一次性拉取这类「跑完就退」的事，用 **脚本任务**：把 `.js` / `.py` / `.sh`
+放进 `TASKS_DIR`，文件头写 `@cron` 就会自动被调度。JS 脚本可以用 `host-api` 的
+日志 / SQLite / HTTP / WS / SMTP；调度注册函数在脚本模式**抛错**。
+见 [script-jobs.md](script-jobs.md)。

@@ -53,6 +53,8 @@ const EXPECTED = [
   'js/mock.js',
   'js/views/task-list.js',
   'js/views/task-editor.js',
+  'js/views/script-list.js',
+  'js/views/script-editor.js',
   'js/views/plugin-list.js',
   'js/views/plugin-source.js',
 ];
@@ -286,6 +288,125 @@ check(
   );
 }
 
+// 插件引擎 / 脚本任务：接口名、路由、按钮与「Python 只剩脚本任务」这条边界。
+//
+// 这一组守的是跨边界的**命名**：前端拼的 `/api/scripts/jobs`、`data-engine`、
+// `#/scripts/new` 任何一处改了而另一处没跟上，静态检查、后端单测都不会报，
+// 只有点下去才发现。脚本任务与插件引擎是这一轮新增的面，所以单独钉住。
+{
+  const apiSrc2 = readFileSync(join(REPO, 'web/js/api.js'), 'utf8');
+  for (const fn of ['setPluginRuntime', 'listScripts', 'createScriptJob', 'editScriptJob']) {
+    check(new RegExp(`export function ${fn}\\b`).test(apiSrc2), `api.js 导出了 ${fn}`);
+  }
+  check(apiSrc2.includes("'/api/scripts'"), 'api.js 的 listScripts 调 /api/scripts');
+  check(
+    apiSrc2.includes("'/api/scripts/jobs'"),
+    'api.js 的 createScriptJob 调 POST /api/scripts/jobs',
+  );
+  check(
+    apiSrc2.includes('/api/scripts/jobs/${encodeURIComponent(name)}/edit'),
+    'api.js 的 editScriptJob 调 POST /api/scripts/jobs/{name}/edit',
+  );
+  check(
+    apiSrc2.includes("method: 'POST'") && apiSrc2.includes('body'),
+    '脚本任务写接口是 POST + JSON body',
+  );
+
+  // 测试运行只剩 js：`runSnippet('py', …)` / `/api/test/py` / `runPy` 都不许回来。
+  check(!/runPy\b/.test(apiSrc2), 'api.js 里没有 runPy（Python 不是插件语言）');
+  check(!/\/api\/test\/py/.test(apiSrc2), 'api.js 里没有 /api/test/py');
+  check(!/\/api\/test\/\$\{lang\}/.test(apiSrc2), 'runSnippet 不再拼 /api/test/{lang}');
+  check(
+    /lang !== 'js'/.test(apiSrc2) && apiSrc2.includes("'/api/test/js'"),
+    'runSnippet 只接受 js 并调 /api/test/js',
+  );
+  // 后端 TestRunReq 没有 engine 字段；前端不要发一个会被静默忽略的参数。
+  check(!apiSrc2.includes('body.engine'), 'runSnippet 不发送后端未实现的 engine 字段');
+
+  // 插件列表：引擎徽章 + 下拉框 + 自定义解释器路径，且只列三种插件引擎。
+  const pluginListSrc = readFileSync(join(REPO, 'web/js/views/plugin-list.js'), 'utf8');
+  check(pluginListSrc.includes('setPluginRuntime'), 'plugin-list.js 导入并调用 setPluginRuntime');
+  check(pluginListSrc.includes('data-engine'), 'plugin-list.js 有引擎下拉框（data-engine）');
+  check(pluginListSrc.includes('data-runtime-apply'), 'plugin-list.js 有「应用引擎」按钮');
+  check(
+    /ENGINE_KINDS\s*=\s*\[\s*'quickjs'\s*,\s*'node'\s*,\s*'bun'\s*\]/.test(pluginListSrc),
+    '插件引擎只列 quickjs / node / bun（python / sh 是脚本运行时）',
+  );
+  check(pluginListSrc.includes('runtimes'), 'plugin-list.js 读 /api/state 的 runtimes 做可用性');
+  check(pluginListSrc.includes('unavailable'), '不可用的引擎选项会被禁用并带原因');
+
+  // 任务列表：脚本任务的 kind/script/runtime/source 不能被丢掉。
+  const taskListSrc2 = readFileSync(join(REPO, 'web/js/views/task-list.js'), 'utf8');
+  for (const field of ['script:', 'runtime:', 'source:']) {
+    check(taskListSrc2.includes(field), `task-list.js 的 fromJob 保留 ${field.replace(':', '')}`);
+  }
+  check(/\bkind\s*[,:]/.test(taskListSrc2), 'task-list.js 的 fromJob 保留 kind');
+  check(taskListSrc2.includes("j.kind === 'script'"), 'task-list.js 认出 kind=script');
+  check(
+    /j\.kind === 'script' \? 'script' : 'plugin'/.test(taskListSrc2),
+    'kind 缺失 / 为 plugin 的插件任务仍按插件任务渲染（防御性默认）',
+  );
+  check(taskListSrc2.includes('data-kind'), '任务卡片带 data-kind（编辑走不同表单）');
+  check(taskListSrc2.includes('目录任务') && taskListSrc2.includes('面板任务'),
+    '脚本任务区分目录任务 / 面板任务');
+  check(taskListSrc2.includes("rt === 'python3'") && taskListSrc2.includes("rt === 'sh'"),
+    '脚本运行时映射了 python3 / sh');
+  check(taskListSrc2.includes("ctx.navigate('#/scripts/new')"),
+    '任务列表有「新建脚本任务」入口（#/scripts/new）');
+  check(taskListSrc2.includes('#/scripts/edit/'),
+    '任务列表的脚本任务编辑跳到 #/scripts/edit/{name}');
+
+  // 脚本总览与编辑器：调对接口、用既有任务接口，不自己发明第三套。
+  const scriptListSrc = readFileSync(join(REPO, 'web/js/views/script-list.js'), 'utf8');
+  check(scriptListSrc.includes('listScripts'), 'script-list.js 用 listScripts');
+  check(scriptListSrc.includes("'__script__'"), 'script-list.js 用保留插件名 __script__');
+  check(scriptListSrc.includes('TASKS_DIR'), 'script-list.js 显示 TASKS_DIR 提示');
+  check(scriptListSrc.includes('fileCard') && scriptListSrc.includes('panelJobCard'),
+    'script-list.js 同时渲染目录文件与面板任务');
+  check(scriptListSrc.includes('覆盖调度'), '目录任务可以覆盖调度');
+  check(scriptListSrc.includes('editJob(SCRIPT_PLUGIN'), '覆盖调度走已有的 editJob');
+
+  const scriptEditorSrc = readFileSync(join(REPO, 'web/js/views/script-editor.js'), 'utf8');
+  check(scriptEditorSrc.includes('createScriptJob'), 'script-editor.js 用 createScriptJob');
+  check(scriptEditorSrc.includes('editScriptJob'), 'script-editor.js 用 editScriptJob');
+  check(scriptEditorSrc.includes("editJob('__script__'"),
+    '目录任务的调度覆盖走已有的 editJob');
+  check(scriptEditorSrc.includes("'python3'") && scriptEditorSrc.includes("'sh'"),
+    '脚本编辑器支持 node / bun / python3 / sh 运行时');
+  check(!/language|SAMPLE_CODE|Python 高亮/.test(scriptEditorSrc),
+    '脚本编辑器不冒充代码编辑器（没有语言选择 / Python 高亮）');
+
+  // 路由与导航：新页面必须能从 hash 路由和侧边栏到达。
+  const appSrc = readFileSync(join(REPO, 'web/js/app.js'), 'utf8');
+  check(appSrc.includes("from './views/script-list.js'"), 'app.js 导入 script-list 视图');
+  check(appSrc.includes("from './views/script-editor.js'"), 'app.js 导入 script-editor 视图');
+  check(appSrc.includes("parts[0] === 'scripts'"), 'app.js 注册了 #/scripts 路由');
+  check(appSrc.includes("parts[1] === 'new'") && appSrc.includes("parts[1] === 'edit'"),
+    'app.js 注册了 #/scripts/new 与 #/scripts/edit/{name}');
+  check(appSrc.includes("view === 'script-editor'"), 'app.js 渲染 script-editor 视图');
+  const indexSrc = readFileSync(join(WEB, 'index.html'), 'utf8');
+  check(indexSrc.includes('href="#/scripts"') && indexSrc.includes('data-view="scripts"'),
+    '侧边栏有「脚本任务」入口');
+
+  // 装配完整性：assets.rs 必须登记这两个新视图（否则生产模式 404）。
+  const assetsSrc = readFileSync(join(REPO, 'src/assets.rs'), 'utf8');
+  for (const rel of ['js/views/script-list.js', 'js/views/script-editor.js']) {
+    check(assetsSrc.includes(`asset!("${rel}")`), `src/assets.rs 登记了 ${rel}`);
+  }
+
+  // Python 只作为脚本运行时存在：插件/任务编辑器里不该再出现「Python 插件」那条路。
+  for (const f of ['web/js/views/task-editor.js', 'web/js/views/plugin-source.js']) {
+    const src = readFileSync(join(REPO, f), 'utf8');
+    check(!/runPy|\/api\/test\/py|\bSAMPLE_CODE\[/.test(src),
+      `${f} 里没有 Python 试跑 / Python 示例代码`);
+  }
+  const mockSrc = readFileSync(join(REPO, 'web/js/mock.js'), 'utf8');
+  check(!/SAMPLE_CODE\.py|lang: 'py'|from host_api/.test(mockSrc),
+    'mock.js 里没有 Python 示例任务 / 示例代码');
+  check(!/setLanguage|KEYWORDS\.py/.test(readFileSync(join(REPO, 'web/js/editor.js'), 'utf8')),
+    'editor.js 没有死掉的 Python 高亮分支');
+}
+
 const pluginCss = readFileSync(join(PLUGINS, 'demo/style.css'), 'utf8');
 check(
   [...pluginCss.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/#[0-9a-fA-F]{3,8}\b/g)].length === 0,
@@ -389,11 +510,35 @@ check(!!loginPage, '在 src/web.rs 里找得到 LOGIN_PAGE');
 if (loginPage) {
   const lp = loginPage[1];
   check(lp.includes('action="/api/login"'), '登录页表单指向 /api/login');
-  check(/name="token"/.test(lp), '登录页有令牌输入框');
-  check(/type="password"/.test(lp), '令牌输入框是密码类型（不明文显示）');
+  check(/name="token"/.test(lp), '登录页有口令输入框');
+  check(/type="password"/.test(lp), '口令输入框是密码类型（不明文显示）');
   check(/name="next"/.test(lp), '登录页带 next（登录完回原页面）');
-  // 未认证时不该有任何脚本：登录页去拉 /api/state 只会拿到 401
-  check(!lp.includes('<script'), '登录页没有任何 JS');
+
+  // ⚠ 第二十一轮起登录页**必须有**一段 JS：口令要在浏览器里先算成摘要，
+  // 明文不许离开浏览器（见 docs/security.md §21）。
+  // 但原来那条"未认证页面不许碰面板数据"的约束仍然成立 —— 只是判据从
+  // 「有没有 JS」换成了「这段 JS 有没有去 fetch 面板接口」。
+  check(lp.includes('<script'), '登录页带口令摘要脚本');
+  check(lp.includes('crypto.subtle'), '摘要优先走 WebCrypto');
+  check(/function sha256\(/.test(lp), '带纯 JS 的 SHA-256 兜底（http:// 局域网不是安全上下文）');
+  check(lp.includes('preventDefault'), '提交前先拦住原生提交');
+  check(lp.includes('<noscript>'), '没有 JS 时明确告知（否则是个"没反应的按钮"）');
+
+  // 蜜罐：一个藏起来的「账号」框。它的全部价值建立在「人看不见它」上，
+  // 而这一点太容易被一次好心的改动弄丢（把 display:none 删了、或给它加了可见的提示）。
+  // 丢了之后不是报错，是**真人开始被自己的面板封在门外** —— 所以静态钉住。
+  const form = lp.slice(lp.indexOf('<form'), lp.indexOf('</form>'));
+  check(/name="username"/.test(form), '蜜罐字段在 <form> 里（在外面就不会随提交发出去，等于没有）');
+  check(/\.acct \{ display: none; \}/.test(lp), '蜜罐被 CSS 藏住');
+  check(/tabindex="-1"/.test(form), '蜜罐不在 tab 序里（键盘用户不会停在一个看不见的框上）');
+  check(/type="text"/.test(form), '蜜罐是 type=text：像真账号框，才钓得到批量脚本');
+  // 发给浏览器的那一串里不许有解释 —— HTML / CSS 注释同样是攻击能读的文本
+  check(
+    !/蜜罐|honeypot|trap/.test(lp),
+    '页面里没有泄露蜜罐用途的字样（类名与注释都算：写明等于教对方留空）',
+  );
+  // 未认证的页面不该自己去拉面板接口：那只会拿到 401，还会把登录页变成一个有副作用的页面
+  check(!/fetch\(|XMLHttpRequest|\/api\/state/.test(lp), '登录页不拉任何面板接口');
   check(!lp.includes('__JOB_ROWS__'), '登录页不渲染任何面板数据');
 }
 

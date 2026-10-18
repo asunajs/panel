@@ -2,8 +2,8 @@
 //!
 //! # 为什么要有 worker 池
 //!
-//! 解释器（QuickJS / PocketPy）都不是 `Send`，所以历史上所有插件任务都跑在**一条**
-//! 引擎线程上。代价是实测出来的（`scripts/serial_cost.py`）：一个每 1 秒只忙等 300ms
+//! 解释器（QuickJS）与外部子进程句柄都不是 `Send`，所以历史上所有插件任务都跑在
+//! **一条**引擎线程上。代价是实测出来的（`scripts/serial_cost.py`）：一个每 1 秒只忙等 300ms
 //! 的合规任务，就能把同轮一个 20ms 任务的间隔 p99 从 29ms 推到 **311ms**，代价严格
 //! 正比于阻塞时长。
 //!
@@ -144,6 +144,9 @@ fn code_mask(source: &str) -> Vec<bool> {
     let b = source.as_bytes();
     let mut mask = vec![true; b.len()];
     let mut quote: Option<u8> = None;
+    // 上一个"有意义的代码字节"（跳过空白/注释）。用来判这里的 `/` 是除号还是
+    // **正则字面量的开头** —— 见下面的 [`regex_can_start`]。
+    let mut prev: Option<u8> = None;
     let mut i = 0usize;
     while i < b.len() {
         let c = b[i];
@@ -185,6 +188,54 @@ fn code_mask(source: &str) -> Vec<bool> {
                         }
                         i += 1;
                     }
+                } else if c == b'/' && regex_can_start(prev) {
+                    // **正则字面量**：`/'/` 这种"正则里带引号"的写法，不认出来的话
+                    // 那个引号会被当成字符串开头，一直屏蔽到下一个同名引号 ——
+                    // 中间的 `worker_hint('exclusive')` 就被误判成"在字符串里"。
+                    // （这正是 F-080：我们的 bundle 里只要有一个带引号的正则排在
+                    //  `worker_hint` 前面，独占声明就静默失效。）
+                    mask[i] = false;
+                    i += 1;
+                    let mut in_class = false;
+                    let mut closed = false;
+                    while i < b.len() {
+                        let d = b[i];
+                        if d == b'\\' {
+                            mask[i] = false;
+                            if i + 1 < b.len() {
+                                mask[i + 1] = false;
+                            }
+                            i += 2;
+                            continue;
+                        }
+                        if d == b'\n' {
+                            break; // 行内没闭合 ⇒ 大概率不是正则，就地收手（安全方向）
+                        }
+                        if d == b'[' {
+                            in_class = true;
+                        } else if d == b']' {
+                            in_class = false;
+                        } else if d == b'/' && !in_class {
+                            mask[i] = false;
+                            i += 1;
+                            closed = true;
+                            break;
+                        }
+                        mask[i] = false;
+                        i += 1;
+                    }
+                    // 旗标（`gimsuyd`）
+                    while i < b.len() && b[i].is_ascii_alphabetic() {
+                        mask[i] = false;
+                        i += 1;
+                    }
+                    if closed {
+                        // 正则整体是一个"值" ⇒ 后面再来 `/` 是除号
+                        prev = Some(b')');
+                        continue;
+                    }
+                    prev = Some(b'/');
+                    continue;
                 } else if c == b'#' {
                     // Python 的行注释。JS 里的 `#` 是私有字段名，误当注释只会让
                     // 扫描**漏掉**同行后面的声明（退化成启发式，日志里看得见），
@@ -194,12 +245,51 @@ fn code_mask(source: &str) -> Vec<bool> {
                         i += 1;
                     }
                 } else {
+                    if !c.is_ascii_whitespace() {
+                        prev = Some(c);
+                    }
                     i += 1;
                 }
             }
         }
     }
     mask
+}
+
+/// 这个位置的 `/` 能不能是**正则字面量**的开头。
+///
+/// 判据是"前一个有意义的东西是不是一个**值**"：是值（标识符、`)`、`]`、
+/// 字符串、数字）⇒ 除号；不是一个值（`(`、`,`、`=`、`>`… 或者开头）⇒ 正则。
+///
+/// ⚠ 这是**启发式**，不是解析器。两个已知边界，都朝安全那侧错：
+///   · `return /x/` —— `n` 是字母，会当成除号（退化成现在这样，不会更糟）；
+///   · 模板字符串 `${…}` 里的正则 —— 同上。
+fn regex_can_start(prev: Option<u8>) -> bool {
+    match prev {
+        None => true,
+        Some(c) => matches!(
+            c,
+            b'(' | b','
+                | b'='
+                | b':'
+                | b'['
+                | b'!'
+                | b'&'
+                | b'|'
+                | b'?'
+                | b'{'
+                | b'}'
+                | b';'
+                | b'+'
+                | b'-'
+                | b'*'
+                | b'%'
+                | b'~'
+                | b'^'
+                | b'<'
+                | b'>'
+        ),
+    }
 }
 
 /// 一个插件的分配依据（纯数据，方便单测）。
@@ -1141,5 +1231,52 @@ mod tests {
         // 没声明的不该产生警告
         let (_, none) = a.claim_with(Path::new("plain.js"), "plain", Some(60_000), WorkerHint::None, 2);
         assert!(none.is_none());
+    }
+}
+
+#[cfg(test)]
+mod regex_mask_tests {
+    use super::*;
+
+    /// ⚠ F-080 的正身：正则里带引号时，不能把后面的代码当成"字符串里"。
+    ///
+    /// 修复前：`/'/ ` 里那个引号会开启一个假字符串，一直屏蔽到下一个 `'`——
+    /// 中间的 `worker_hint('exclusive')` 被判成"在字符串里" ⇒ 独占声明**静默失效**。
+    #[test]
+    fn quote_inside_regex_does_not_mask_code() {
+        let src = r#"
+            const sq = /'/;
+            const dq = /"/;
+            worker_hint('exclusive');
+        "#;
+        assert!(WorkerHint::scan(src).is_exclusive());
+    }
+
+    /// 除号不能被当成正则开头（反过来也会错：那会把后面的代码吞掉）。
+    #[test]
+    fn division_is_not_a_regex() {
+        let src = "const half = total / 2;\nworker_hint('exclusive');\n";
+        assert!(WorkerHint::scan(src).is_exclusive());
+    }
+
+    /// 字符类里的 `/` 不结束正则：`/[/']/` 是合法的。
+    #[test]
+    fn slash_inside_character_class() {
+        let src = r#"const r = /[/']/; worker_hint('exclusive');"#;
+        assert!(WorkerHint::scan(src).is_exclusive());
+    }
+
+    /// 注释里那个例子仍然不许生效（这条是原有的语义，别被正则那支破坏）。
+    #[test]
+    fn example_in_comment_still_ignored() {
+        let src = "// 比如 worker_hint('exclusive')\nconst x = 1;\n";
+        assert_eq!(WorkerHint::scan(src), WorkerHint::None);
+    }
+
+    /// 字符串里那个例子同样不许生效。
+    #[test]
+    fn example_in_string_still_ignored() {
+        let src = "const doc = \"worker_hint('exclusive')\";\n";
+        assert_eq!(WorkerHint::scan(src), WorkerHint::None);
     }
 }

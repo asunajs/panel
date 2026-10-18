@@ -1,6 +1,15 @@
-# host-api —— Node.js 版宿主 API 适配器
+# host-api —— Node.js 版宿主 API 适配器（面板外）
 
-同一份 JS 插件脚本，既能在仓库的 QuickJS 宿主里跑，也能在 Node.js 里跑。
+同一份 JS 插件脚本，既能在面板的 QuickJS / 外部 Node / Bun 引擎里跑，也能**脱离面板**在
+Node.js 里跑。这个适配器就是「没有面板时」的那份宿主实现。
+
+> ⚠ 它**不是**面板里切到 Node 时用的那个运行时。面板的外部运行时是 `runtime/js/`
+> （长驻子进程 + fd3/fd4 RPC，数据面回到面板，见 [docs/ext-runtime-protocol.md](../../docs/ext-runtime-protocol.md)）；
+> 这个目录是一个**独立 npm 包/运行器**，自己实现 SQLite、HTTP、路由，不需要面板。
+> 两者共享同一套 `host-api` 语义，但**不共享进程/协议**。
+>
+> 脚本任务（一次性的 `.js`）也是**面板拥有的**：它用 `runtime/js/` 的 runner + RPC，
+> 不经过这个适配器。这里没有 `--script` 模式。
 
 零依赖：只用 Node 内置模块（`node:sqlite` / `node:http` / `node:worker_threads` / 内置 `fetch`）。
 
@@ -29,7 +38,7 @@ adapters/node/
 └── test/log-vectors.mjs   读仓库 testdata/*.json 的共享向量测试
 ```
 
-## 宿主 API 规范 v1
+## 宿主 API 规范（v2 的公共子集）
 
 | 函数 | 说明 |
 | --- | --- |
@@ -49,11 +58,16 @@ adapters/node/
 - 全局 `host` 命名空间：`host.log / host.warn / host.error / host.cron / host.every / host.sqlite_query / host.http_fetch / host.register_route`，另有 camelCase 别名（`host.sqliteQuery`、`host.httpFetch`、`host.httpFetchAsync`、`host.registerRoute`、`host.serverUrl()`）。仓库 QuickJS 宿主的 `host.*` 老写法可直接跑。
 - `__host`：运行器内部接口（任务快照、tick、启动/停止 server、关库等），插件不该依赖。
 
-handler 载荷固定为：
+handler 载荷（本适配器当前是这 7 格）：
 
 ```js
 { name, plugin, expr, runs, scheduledAt, firedAt, lateMs }   // 时间戳 YYYY-MM-DD HH:MM:SS.mmm
 ```
+
+⚠ 面板的完整载荷是 **11 格**，另外四格是 `jitterMs` / `realigned` / `manual` / `params`
+（见 [docs/host-api.md §2](../../docs/host-api.md#2-handler-的调用约定)）。它们属于**面板调度器**的能力：
+本适配器没有抖动、没有面板建任务、也没有熔断，所以这四格是 `undefined`。
+同一份插件如果要跨宿主，读取时要给默认值。
 
 handler 正常返回 = 成功；抛异常（含 async rejection）= 失败：运行器捕获、打印、写进任务 `last_error`，**不退出进程**，同轮其它任务照常执行。
 
@@ -146,8 +160,8 @@ v2 换了格式、加了五档与落盘。**解析过 v1 输出的脚本需要�
 
 ### 怎么保证三份实现不漂移
 
-Rust 宿主、这个适配器、Python 适配器各自实现了一遍日志。靠人眼对齐撑不过第三次
-改动，所以规则被固化进**共享向量**：
+Rust 宿主、`runtime/js` 的 host-api、这个适配器各自实现了一遍日志。靠人眼对齐撑不过
+第三次改动，所以规则被固化进**共享向量**：
 
 ```
 testdata/redact-cases.json      脱敏：输入 → 期望输出（逐字符）
@@ -158,7 +172,7 @@ testdata/log-format-cases.json  八档 → 过滤级别、行格式、JSONL 字�
 `test/log-vectors.mjs` 覆盖，并被 `test/run-tests.mjs` **import 进来**
 （不是让调用方多敲一条命令 —— 少跑一项就等于没有这项）。
 
-## 与 QuickJS 宿主的语义对齐
+## 与面板宿主（QuickJS / 外部 Node / Bun）的语义对齐
 
 对齐 `src/cron.rs` / `src/scheduler.rs` / `src/hostapi.rs` / `src/jshost.rs`：
 
@@ -171,13 +185,19 @@ testdata/log-format-cases.json  八档 → 过滤级别、行格式、JSONL 字�
 
 ## 已知限制
 
-1. **需要 Node 22.5+**：`node:sqlite`（`DatabaseSync`）是 Node 22 起内置的，本机 Node v24.16.0 实测通过；低于 22 没有这个模块（不引入 better-sqlite3，避免编译）。
+1. **这个适配器需要 Node 22.5+**：`node:sqlite`（`DatabaseSync`）是 Node 22 起内置的，本机 Node v24.16.0 实测通过；低于 22 没有这个模块（不引入 better-sqlite3，避免编译）。
+   ⚠ 面板的**外部运行时**门槛更低（Node 20.6，因为它用 RPC 而不是 `node:sqlite`），
+   别把这两个版本要求混了：面板里的 Node 插件不需要 22.5。
 2. **同步 `http_fetch` 会阻塞事件循环**：一次慢请求会推迟同轮其它任务（宿主同样如此）。因此**不能**同步请求本进程自己 `register_route` 注册的路由 —— 主线程被占住时内置 server 无法响应，会一直等到超时；跨进程（例如另一个进程里的面板 8787）没有这个问题。要自调用请用 `http_fetch_async`。
 3. **只支持 http/https**，不支持 `file://` 等；不做重定向策略配置（固定 follow）；请求体上限 1 MiB（入站）。
 4. **cron 到秒级**：不支持 `L/W/#`、`@reboot`、`@daily` 这类扩展；`next_after` 用分层跳转（月/日/时/分），上限 20 万步，解析期会拒绝永不触发的表达式。
-5. **任务执行是串行的**（与宿主一致）：同一轮里一个慢任务会推迟后面的任务；不做熔断/退避（Rust 宿主有，规范 v1 未要求）。
+5. **任务执行是串行的**（与宿主一致）：同一轮里一个慢任务会推迟后面的任务；不做熔断/退避（Rust 宿主有，host-api 规范未要求）。
 6. **路由 handler 的异步是 Node 扩展**：`await handler(ctx)`，Rust 宿主是同步调用。
 7. 插件文件按 **ESM** 加载（`import`/`export`），`.cjs` 不适用；运行器会把 `PANEL_PLUGIN` 设为插件文件名（去扩展名），payload 里的 `plugin` 用它。
+   面板的外部引擎对**经典全局脚本**（无 import/export）有单独支持；本适配器没有，统一走 ESM。
+8. **没有脚本任务 / 没有面板**：`job` 调度靠运行器的 `--job` / `--duration`；
+   一次性脚本请直接用 `node your-script.mjs`，或写进面板的 `TASKS_DIR`（见 [docs/script-jobs.md](../../docs/script-jobs.md)）。
+9. **没有抖动 / 熔断 / 运行记录 / 测试运行**：这些是面板宿主策略，不是 `host-api`。
 
 ## 自测
 

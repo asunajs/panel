@@ -16,13 +16,23 @@
  */
 
 export const STATUS_MAP = {
-  running: { cls: 'running', text: '运行中' },
-  paused: { cls: 'idle', text: '已暂停' },
-  tripped: { cls: 'failed', text: '已熔断' },
-  error: { cls: 'failed', text: '执行出错' },
-  idle: { cls: 'idle', text: '待触发' },
+  // ⚠ `running` 是后端的**任务状态**，意思是"正常在排班里"（没暂停 / 没熔断 /
+  //   上次没出错），**不是**"这会儿正在执行"。
+  //
+  //   原来这里写「运行中」，于是用户合理地问："这些任务只要到点醒一次，
+  //   为啥一直显示运行中？只有带路由的插件才需要常驻吧" —— 问得对。
+  //   真正的状态是：
+  //     · 两次触发之间，任务**什么都不做**（引擎只在到点时叫它一次）；
+  //     · 只有注册了 `on_tick` / 路由的插件才是"常驻"的，那是插件层面的属性，
+  //       不是这一列要表达的东西。
+  //   所以这格里写「已启用」，并把"到点才跑"挂到 title 上。
+  running: { cls: 'running', text: '已启用', title: '会按排班到点跑一次；两次之间不占线程、什么都不做' },
+  paused: { cls: 'idle', text: '已暂停', title: '不会到点跑（去任务页恢复）' },
+  tripped: { cls: 'failed', text: '已熔断', title: '连续失败太多次，面板先把它停一会儿' },
+  error: { cls: 'failed', text: '执行出错', title: '上一次跑到一半抛错了，下次到点还会再试' },
+  idle: { cls: 'idle', text: '待触发', title: '还没排上（没有下次触发时刻）' },
   // 面板删掉的（墓碑）：插件代码仍然声明它，所以它还在库里但不调度
-  deleted: { cls: 'idle', text: '已删除' },
+  deleted: { cls: 'idle', text: '已删除', title: '插件代码里还声明着它，但面板不再调度' },
 };
 
 /** 状态 → `{cls, text}`。认不出来的给中性样式 + 原值。 */

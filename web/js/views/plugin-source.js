@@ -51,7 +51,8 @@ export async function render(root, ctx, params) {
     return null;
   }
 
-  const lang = res.runtime === 'py' ? 'py' : 'js';
+  // 插件是 JS-only：源码页不再分语言（原来按 `runtime === 'py'` 选高亮的那条
+  // 分支已经没有任何插件能走到了）。
   let original = res.text;
   let dirty = false;
 
@@ -86,7 +87,6 @@ export async function render(root, ctx, params) {
 
   const editor = createEditor(root.querySelector('#src-host'), {
     value: res.text,
-    language: lang,
     onUpdate: (v) => {
       const now = v !== original;
       if (now === dirty) return;

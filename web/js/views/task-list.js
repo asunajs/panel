@@ -33,13 +33,46 @@ function esc(s) {
 function badge(status, trips) {
   const m = statusBadge(status);
   const suffix = status === 'tripped' && trips ? ` ×${trips}` : '';
-  return `<span class="badge ${m.cls}">${m.text}${suffix}</span>`;
+  // ⚠ `title` 是"这个词到底什么意思"。状态词天生容易被读成别的意思
+  //   （`running` 被读成"正在执行"就是一次真实的误读）。
+  const t = m.title ? ` title="${esc(m.title)}"` : '';
+  return `<span class="badge ${m.cls}"${t}>${m.text}${suffix}</span>`;
 }
 
-function langBadge(runtime) {
-  const lang = runtime === 'py' ? 'py' : 'js';
-  const label = runtime === 'py' ? 'Python' : 'JavaScript';
-  return `<span class="badge lang ${lang}">${label}</span>`;
+// 脚本任务的插件名是固定的：任务身份是「文件路径 + 任务名」，不挂在某个插件下。
+const SCRIPT_PLUGIN = '__script__';
+
+/**
+ * 脚本运行时 → 徽章。
+ *
+ * 映射是**后端口径**：`python3` → Python、`sh` → Shell，`node` / `bun` 都是
+ * JavaScript（它们只是同一个语言的两种引擎）。值可能暂时为空（老数据 / 旧后端），
+ * 这时按 JavaScript 显示 —— 插件任务也走同一张卡片，不该出现一个空白徽章。
+ */
+function runtimeBadge(runtime) {
+  const rt = String(runtime || '').toLowerCase();
+  let label = 'JavaScript';
+  let cls = 'js';
+  let title = '运行时：默认 JavaScript';
+  if (rt === 'python3' || rt === 'python' || rt === 'py') {
+    label = 'Python';
+    cls = 'py';
+    title = '运行时：python3（脚本任务）';
+  } else if (rt === 'sh' || rt === 'bash') {
+    label = 'Shell';
+    cls = '';
+    title = '运行时：sh（脚本任务）';
+  } else if (rt === 'node' || rt === 'bun') {
+    title = `运行时：${rt}（JavaScript）`;
+  }
+  return `<span class="badge lang ${cls}" title="${esc(title)}">${label}</span>`;
+}
+
+/** 脚本任务的来源徽章：目录里自动发现的 / 面板上建的。 */
+function scriptSourceBadge(source) {
+  return source === 'script-panel'
+    ? '<span class="badge idle" title="在面板上创建的脚本任务（可编辑 / 真删）">面板任务</span>'
+    : '<span class="badge idle" title="由 TASKS_DIR 里的文件头自动发现（删除 = 停止调度，文件不动）">目录任务</span>';
 }
 
 /** 真实任务 → 视图模型。字段名跟 mock.js 对齐，方便两条路径共用渲染。 */
@@ -47,9 +80,15 @@ function fromJob(j) {
   // 插件代码声明的任务可能被面板**覆盖**过频率：`schedule` 是代码里声明的值，
   // `override_expr` 是面板改的值，调度实际用的是后者（见 src/scheduler.rs）。
   const override = j.override_expr || '';
+  // 后端对插件任务可能省略 `kind`（老版本 / 正常插件任务），一律当成 "plugin"。
+  const kind = j.kind === 'script' ? 'script' : 'plugin';
   return {
     plugin: j.plugin,
     name: j.name,
+    kind,
+    // 脚本任务才有：相对 TASKS_DIR 的路径 + 运行时 + 两份来源
+    script: j.script || '',
+    runtime: j.runtime || '',
     lang: 'js',
     // 卡片上主显「生效的那个」——用户关心的是它多久跑一次
     cron: override || j.schedule,
@@ -62,6 +101,8 @@ function fromJob(j) {
     runs: j.runs,
     source: j.source,
     paused: j.paused,
+    budgetMs: j.budget_ms,
+    params: j.params,
     // 被面板删掉的（墓碑）。插件代码仍然声明它，所以它还在库里 ——
     // 默认不显示、不调度，列表底部可以展开恢复。
     deleted: !!j.deleted,
@@ -74,6 +115,9 @@ function fromMock(t) {
   return {
     plugin: '',
     name: t.name,
+    kind: 'plugin',
+    script: '',
+    runtime: '',
     lang: t.lang,
     cron: t.cron,
     lastRun: t.lastRun,
@@ -87,6 +131,28 @@ function fromMock(t) {
 }
 
 function taskCard(t) {
+  const isScript = t.kind === 'script';
+  // 插件任务的语言固定是 JavaScript；脚本任务按后端给的 runtime 画
+  // （python3 → Python、sh → Shell、node/bun → JavaScript）。
+  const langOrRuntime = isScript
+    ? `${scriptSourceBadge(t.source)}${runtimeBadge(t.runtime)}`
+    : '<span class="badge lang js">JavaScript</span>';
+  // 来源那一格：脚本任务说「目录 / 面板」，插件任务沿用「插件代码 / 面板」。
+  const sourceText = isScript
+    ? t.source === 'script-panel'
+      ? '面板任务'
+      : '目录任务'
+    : t.source === 'panel'
+      ? '面板'
+      : '插件代码';
+  const sourceTitle = isScript
+    ? t.source === 'script-panel'
+      ? '在面板上创建的脚本任务，路径 / 调度 / 运行时都能改'
+      : '由 TASKS_DIR 里文件头的 name / cron / runtime 声明，改它要在文件里改（或在这里「覆盖调度」）'
+    : t.source === 'panel'
+      ? '面板创建的任务，调度表达式可以在面板上改'
+      : '调度表达式由插件代码声明，改它会随插件热更新被覆盖';
+
   // 操作按钮的可见性跟**后端的规矩**一致：
   //   - 执行 / 暂停 / 恢复：任何任务都能做
   //   - 编辑：**任何真实任务都能**。插件代码声明的任务改的是「面板覆盖」
@@ -106,19 +172,25 @@ function taskCard(t) {
        <button class="btn" data-act="runs">记录</button>
        <button class="btn" data-act="${t.paused ? 'resume' : 'pause'}">${t.paused ? '恢复' : '暂停'}</button>
        <button class="btn" data-act="edit">编辑</button>
-       ${t.covered ? '<button class="btn" data-act="uncover" title="把频率改回插件代码里声明的值">撤销覆盖</button>' : ''}
+       ${
+         t.covered
+           ? `<button class="btn" data-act="uncover" title="把频率改回${
+               isScript ? '文件头' : '插件代码'
+             }里声明的值">撤销覆盖</button>`
+           : ''
+       }
        <button class="btn danger" data-act="delete">删除</button>`;
 
   return `
     <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}"
-         data-source="${esc(t.source || '')}" data-covered="${t.covered ? '1' : '0'}"
-         data-deleted="${t.deleted ? '1' : '0'}">
+         data-kind="${esc(t.kind || 'plugin')}" data-source="${esc(t.source || '')}"
+         data-covered="${t.covered ? '1' : '0'}" data-deleted="${t.deleted ? '1' : '0'}">
       <div class="card-head">
         <!-- 标题与徽章包成一组：space-between 只负责把它和按钮组分到两端，
              不然徽章会被均匀摊到卡片中间（见 components.css 的注释） -->
         <div class="card-head-main">
           <span class="card-title mono">${esc(t.name)}</span>
-          ${langBadge(t.lang)}
+          ${langOrRuntime}
           ${t.deleted ? badge('deleted', 0) : badge(t.status, t.trips)}
         </div>
         <span class="card-actions">${ops}</span>
@@ -127,15 +199,19 @@ function taskCard(t) {
         <div class="field">
           <span class="field-label">调度表达式${
             t.covered
-              ? ' <span class="badge warning" title="面板改过频率；插件代码里声明的值见下面">覆盖</span>'
+              ? ` <span class="badge warning" title="面板改过频率；${
+                  isScript ? '文件头' : '插件代码'
+                }里声明的值见下面">覆盖</span>`
               : ''
           }</span>
-          <span class="mono"${t.covered ? ` title="插件代码里声明的是 ${esc(t.declared)}"` : ''}>${
-            esc(t.cron)
-          }</span>
+          <span class="mono"${
+            t.covered ? ` title="${isScript ? '文件头' : '插件代码'}里声明的是 ${esc(t.declared)}"` : ''
+          }>${esc(t.cron)}</span>
           ${
             t.covered
-              ? `<span class="field-sub mono dim">代码里：${esc(t.declared)}</span>`
+              ? `<span class="field-sub mono dim">${
+                  isScript ? '文件头' : '代码里'
+                }：${esc(t.declared)}</span>`
               : ''
           }
         </div>
@@ -149,12 +225,16 @@ function taskCard(t) {
         </div>
         <div class="field">
           <span class="field-label">来源</span>
-          <span class="mono dim" title="${
-            t.source === 'panel'
-              ? '面板创建的任务，调度表达式可以在面板上改'
-              : '调度表达式由插件代码声明，改它会随插件热更新被覆盖'
-          }">${t.source === 'panel' ? '面板' : '插件代码'}</span>
+          <span class="mono dim" title="${esc(sourceTitle)}">${sourceText}</span>
         </div>
+        ${
+          isScript
+            ? `<div class="field" style="flex-basis:100%">
+                 <span class="field-label">脚本文件</span>
+                 <span class="mono dim" title="${esc(t.script || '—')}">${esc(t.script || '—')}</span>
+               </div>`
+            : ''
+        }
       </div>
     </div>`;
 }
@@ -307,10 +387,6 @@ export async function render(root, ctx, opts = {}) {
 
   if (res.ok && Array.isArray(res.jobs)) {
     tasks = res.jobs.map(fromJob);
-    // 用 plugins 表补上语言（jobs 行本身不带 runtime）
-    const langOf = {};
-    for (const p of res.plugins || []) langOf[p.name] = p.runtime;
-    for (const t of tasks) t.lang = langOf[t.plugin] || 'js';
   } else {
     // 降级：后端不可用也要能看到界面（离线调 UI / 首次部署前预览）
     tasks = TASKS.map(fromMock);
@@ -326,26 +402,42 @@ export async function render(root, ctx, opts = {}) {
   // 这不是可选的装饰：`plugins/` 里的任务**全部**由插件代码声明，所以新用户看到的
   // 是「一个任务都改不了也删不掉」，而界面对此一言不发 —— 用户实测就问过
   // 「任务不能编辑不能删除？」。
-  const panelCount = tasks.filter((t) => t.real && t.source === 'panel').length;
-  const codeCount = tasks.filter((t) => t.real && t.source !== 'panel').length;
+  //
+  // 脚本任务是另一套语义（两份来源），所以说明分开写；插件任务那段口径不变。
+  const realTasks = tasks.filter((t) => t.real);
+  const pluginTasks = realTasks.filter((t) => t.kind !== 'script');
+  const scriptTasks = realTasks.filter((t) => t.kind === 'script');
+  const panelCount = pluginTasks.filter((t) => t.source === 'panel').length;
+  const codeCount = pluginTasks.length - panelCount;
+  const dirScriptCount = scriptTasks.filter((t) => t.source === 'script-dir').length;
+  const panelScriptCount = scriptTasks.length - dirScriptCount;
   // 删掉的挪到列表底部折叠：默认**不渲染**（不是渲染后 hidden），
   // 这样「界面上有多少张卡片」和「有多少个活任务」始终是一回事 ——
   // 断言和用户数数都不会被隐藏 DOM 骗到。
   const alive = tasks.filter((t) => !t.deleted);
   const gone = tasks.filter((t) => t.deleted);
-  const realCount = panelCount + codeCount;
-  const kindNote = !realCount
-    ? ''
-    : `<div class="list-note">${
-        panelCount === 0
-          ? `这 ${codeCount} 个任务都由<b>插件代码</b>声明（表达式写在插件源码里）。` +
-            `「编辑」改它的触发频率（记成一条<b>覆盖</b>，代码里的值原样保留，` +
-            `重启和热更新都不会丢，点「撤销覆盖」回到代码的值）；` +
-            `「删除」是<b>不调度 + 不显示</b>（插件代码还声明着它，真删了下次重载会回来），` +
-            `删掉的任务挪到列表底部，可以恢复。`
-          : `${panelCount} 个面板创建的任务可以编辑 / 删除（真删）；` +
-            `${codeCount} 个由插件代码声明，编辑记成<b>覆盖</b>、删除记成<b>墓碑</b>（可恢复）。`
-      }</div>`;
+  const notes = [];
+  if (pluginTasks.length) {
+    notes.push(
+      panelCount === 0
+        ? `这 ${codeCount} 个插件任务都由<b>插件代码</b>声明（表达式写在插件源码里）。` +
+          `「编辑」改它的触发频率（记成一条<b>覆盖</b>，代码里的值原样保留，` +
+          `重启和热更新都不会丢，点「撤销覆盖」回到代码的值）；` +
+          `「删除」是<b>不调度 + 不显示</b>（插件代码还声明着它，真删了下次重载会回来），` +
+          `删掉的任务挪到列表底部，可以恢复。`
+        : `${panelCount} 个面板创建的插件任务可以编辑 / 删除（真删）；` +
+          `${codeCount} 个由插件代码声明，编辑记成<b>覆盖</b>、删除记成<b>墓碑</b>（可恢复）。`,
+    );
+  }
+  if (scriptTasks.length) {
+    notes.push(
+      `${dirScriptCount} 个<b>目录任务</b>由 <span class="mono">TASKS_DIR</span> 里的文件头` +
+        `（name / cron / runtime）自动发现：删除 = 停止调度（文件本身不动，可恢复），` +
+        `「编辑」改的是<b>调度覆盖</b>；${panelScriptCount} 个<b>面板任务</b>是面板上建的，` +
+        `路径 / 运行时 / 调度都能改，删除是真删。`,
+    );
+  }
+  const kindNote = notes.length ? `<div class="list-note">${notes.join('<br>')}</div>` : '';
 
   root.innerHTML = `
     <div class="section">
@@ -354,6 +446,7 @@ export async function render(root, ctx, opts = {}) {
         <div class="card-actions">
           <button class="btn" id="cleanup-btn">清理失效任务</button>
           <button class="btn" id="refresh-btn">刷新</button>
+          <button class="btn" id="new-script-btn">新建脚本任务</button>
           <button class="btn primary" id="new-task-btn">新建任务</button>
         </div>
       </div>
@@ -368,7 +461,7 @@ export async function render(root, ctx, opts = {}) {
         gone.length
           ? `<div class="list-note" style="margin-top:var(--sp-3)">
                <button class="btn ghost" id="show-deleted">显示 ${gone.length} 个已删除的任务</button>
-               <span class="hint">插件代码仍然声明它们，所以这里的「删除」是不调度 + 不显示；随时可以恢复。</span>
+               <span class="hint">插件代码 / 目录文件仍然声明它们，所以这里的「删除」是不调度 + 不显示；随时可以恢复。</span>
              </div>
              <div class="grid" id="deleted-grid" hidden></div>`
           : ''
@@ -478,6 +571,9 @@ export async function render(root, ctx, opts = {}) {
   root.querySelector('#new-task-btn').addEventListener('click', () => {
     ctx.navigate('#/tasks/new');
   });
+  root.querySelector('#new-script-btn').addEventListener('click', () => {
+    ctx.navigate('#/scripts/new');
+  });
 
   // 事件委托：卡片上的操作按钮。每次操作后重渲染，拿最新状态。
   clearRootListeners(root);
@@ -501,9 +597,17 @@ export async function render(root, ctx, opts = {}) {
     const act = btn.dataset.act;
     const plugin = card.dataset.plugin;
     const name = card.dataset.task;
+    const isScript = card.dataset.kind === 'script';
+    const source = card.dataset.source || '';
 
     if (act === 'edit') {
-      ctx.navigate(`#/tasks/edit/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}`);
+      // 脚本任务的编辑是**另一套表单**（路径 / 运行时 / 参数），不是插件任务的
+      // 「处理函数 + 表达式」那张卡。目录任务在那边只改调度覆盖。
+      if (isScript) {
+        ctx.navigate(`#/scripts/edit/${encodeURIComponent(name)}`);
+      } else {
+        ctx.navigate(`#/tasks/edit/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}`);
+      }
       return;
     }
     // 「记录」是本地动作：拉面板的 runs 表，不动任务本身 —— 所以**不走**
@@ -513,7 +617,8 @@ export async function render(root, ctx, opts = {}) {
       return;
     }
 
-    const label = plugin ? `${plugin}/${name}` : name;
+    // 脚本任务不挂插件名（`__script__` 是内部保留名），提示里只写任务名
+    const label = plugin && plugin !== SCRIPT_PLUGIN ? `${plugin}/${name}` : name;
 
     // 高危动作要**二次确认**。放在最前面、请求之前 —— 确认条就贴在这一行的按钮位置，
     // 用户一眼看到自己在确认哪一个（误操作的根源就是没看清对象）。
@@ -524,8 +629,11 @@ export async function render(root, ctx, opts = {}) {
     const confirmSpec = {
       delete: {
         question: `删除任务 \`${name}\`？`,
-        detail:
-          card.dataset.source === 'panel'
+        detail: isScript
+          ? source === 'script-panel'
+            ? '面板创建的脚本任务：删掉就没了，运行历史一起消失，要重建得重新填路径和表达式。'
+            : '目录任务：删除后不再调度，但文件本身不动，卡片会留在列表底部，随时可以恢复。'
+          : source === 'panel'
             ? '面板创建的任务：删掉就没了，运行历史一起消失，要重建得重新填表达式。'
             : '插件代码声明的任务：删掉后不再运行，但会留在列表底部，随时可以恢复。',
         okText: '删除',
@@ -539,7 +647,9 @@ export async function render(root, ctx, opts = {}) {
       },
       uncover: {
         question: `撤销 \`${name}\` 的频率覆盖？`,
-        detail: '会回到插件代码里声明的值 —— 你手填的这个频率会丢，要重填。',
+        detail: isScript
+          ? '会回到文件头里声明的 cron —— 你手填的这个频率会丢，要重填。'
+          : '会回到插件代码里声明的值 —— 你手填的这个频率会丢，要重填。',
         okText: '撤销覆盖',
         risk: RISK.PAUSE,
       },

@@ -81,6 +81,10 @@ pub enum TaskSource {
     Code,
     /// 面板创建（`register_handler` + 面板上的「新建任务」）
     Panel,
+    /// 任务目录里带 `@cron` 文件头的脚本（文件是权威）
+    ScriptDir,
+    /// 面板创建的脚本任务（DB 是权威）
+    ScriptPanel,
 }
 
 /// 一个被调度的任务。
@@ -109,6 +113,10 @@ pub struct ScheduledTask {
     ///
     /// 面板**不解释**这一列的内容 —— 它是插件的数据结构，只负责原样存、原样透传。
     pub params: Option<String>,
+    /// 脚本任务：`TASKS_DIR` 下的相对路径；插件任务为 `None`。
+    pub script: Option<String>,
+    /// 脚本任务运行时：`node|bun|python3|sh`；插件任务为 `None`。
+    pub runtime: Option<String>,
     pub next_fire: DateTime<Local>,
     /// **理论**序列上的下一次触发时刻（不含抖动）。
     ///
@@ -214,7 +222,6 @@ impl Scheduler {
         &self.tasks
     }
 
-    /// 注册一个任务。同一个插件内重名会报错（避免静默覆盖）。
     /// 装一条**插件代码声明**的任务（`register_cron` / `every`）。
     pub fn add(
         &mut self,
@@ -230,9 +237,6 @@ impl Scheduler {
     }
 
     /// 装一条**面板创建**的任务（`register_handler` + 面板上的「新建任务」）。
-    ///
-    /// 与 `add` 唯一的区别是记下的 `source` —— 而这个区别是本质的：
-    /// 面板任务不归 `sync_jobs` 管，插件热更新/卸载都不该动它（见 `TaskSource`）。
     pub fn add_panel(
         &mut self,
         plugin: &str,
@@ -244,6 +248,28 @@ impl Scheduler {
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
         self.insert(plugin, name, expr, schedule, now, TaskSource::Panel, params, budget_ms)
+    }
+
+    /// 装一条脚本任务（目录发现或面板创建）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_script(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+        source: TaskSource,
+        script: &str,
+        runtime: &str,
+        params: Option<String>,
+        budget_ms: Option<u64>,
+    ) -> Result<usize, String> {
+        self.insert(plugin, name, expr, schedule, now, source, params, budget_ms)?;
+        let idx = self.tasks.len() - 1;
+        self.tasks[idx].script = Some(script.to_string());
+        self.tasks[idx].runtime = Some(runtime.to_string());
+        Ok(idx)
     }
 
     fn insert(
@@ -274,6 +300,8 @@ impl Scheduler {
             schedule,
             source,
             params,
+            script: None,
+            runtime: None,
             budget_ms,
             base_fire,
             next_fire,
@@ -290,6 +318,41 @@ impl Scheduler {
             retry_at: None,
         });
         Ok(self.tasks.len() - 1)
+    }
+
+    /// 更新一条脚本任务的规格（面板编辑 / 文件头变化）。
+    ///
+    /// 表达式变了才重算下一次触发；只改参数/超时不动节奏。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_script(
+        &mut self,
+        idx: usize,
+        expr: &str,
+        schedule: Schedule,
+        script: &str,
+        runtime: &str,
+        params: Option<String>,
+        budget_ms: Option<u64>,
+        now: DateTime<Local>,
+    ) {
+        let Some(t) = self.tasks.get_mut(idx) else { return };
+        let expr_changed = t.expr != expr;
+        t.expr = expr.to_string();
+        // 面板对目录任务有 override 时，生效表达式是 override，不能被文件头覆盖回去。
+        if t.override_expr.is_none() {
+            t.schedule = schedule;
+        }
+        t.script = Some(script.to_string());
+        t.runtime = Some(runtime.to_string());
+        t.params = params;
+        t.budget_ms = budget_ms;
+        if expr_changed && t.override_expr.is_none() {
+            let (base, next, jitter) = align_from(&t.schedule, now);
+            t.base_fire = base;
+            t.next_fire = next;
+            t.jitter_ms = jitter;
+            t.realigned = true;
+        }
     }
 
     /// 移除某个插件的全部任务（热更新时用），返回摘掉的条数。

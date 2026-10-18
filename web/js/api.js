@@ -89,10 +89,14 @@ export function getState() {
 // ---------------------------------------------------------------- 测试运行
 
 /**
- * 跑一段 JS / Python 代码。
+ * 跑一段 JavaScript 代码。
  *
- * 后端 `POST /api/test/js` / `POST /api/test/py`，请求体 `{ code, input, plugin?, task? }`，
+ * 后端只有 `POST /api/test/js`，请求体 `{ code, input, plugin?, task? }`，
  * 回 `{ ok, stdout, stderr, error, ms }`。
+ *
+ * ⚠ 这里**只接受 JavaScript**：插件是 JS-only（Python 只剩脚本任务，
+ *   见 `/api/scripts` —— 那不是"试跑一段插件代码"）。`lang` 参数留着是为了让
+ *   调用方写清楚自己在跑什么，同时把非 js 的值统一挡在这里。
  *
  * `context` 传 `{plugin, task}` 时，这次试跑会**记进那条任务的运行记录**
  * （`kind='test'`），于是「改代码 → 试 → 保存」是一串能回看的记录。
@@ -101,14 +105,14 @@ export function getState() {
  * ⚠ 试跑的输出**不进日志库**（被捕获缓冲收走），所以它存在记录自己身上；
  * 试跑记录也因此**没有**「看日志」入口 —— 那是两回事，别做成一样的。
  *
- * @param {'js'|'py'} lang
+ * @param {'js'} lang
  * @param {string} code
  * @param {string} [input]
  * @param {{plugin?: string, task?: string}} [context]
  */
 export function runSnippet(lang, code, input = '', context = {}) {
-  if (lang !== 'js' && lang !== 'py') {
-    return Promise.resolve({ ok: false, error: `不支持的语言：${lang}` });
+  if (lang !== 'js') {
+    return Promise.resolve({ ok: false, error: `只支持 JavaScript：${lang}` });
   }
   if (!code || !code.trim()) {
     return Promise.resolve({ ok: false, error: '代码是空的' });
@@ -116,17 +120,12 @@ export function runSnippet(lang, code, input = '', context = {}) {
   const body = { code, input };
   if (context.plugin) body.plugin = context.plugin;
   if (context.task) body.task = context.task;
-  return request(`/api/test/${lang}`, { method: 'POST', panel: true, body });
+  return request('/api/test/js', { method: 'POST', panel: true, body });
 }
 
 /** 跑 JS。见 `runSnippet`。 */
 export function runJs(code, input, context) {
   return runSnippet('js', code, input, context);
-}
-
-/** 跑 Python。见 `runSnippet`。 */
-export function runPy(code, input, context) {
-  return runSnippet('py', code, input, context);
 }
 
 // ---------------------------------------------------------------- 任务定义
@@ -150,6 +149,49 @@ export function setPluginDisabled(name, disabled) {
     `/api/plugins/${encodeURIComponent(name)}/${disabled ? 'disable' : 'enable'}`,
     { method: 'POST', panel: true },
   );
+}
+
+/// 手动装进 / 卸出内存（`loaded = false` 就是卸载）。
+///
+/// ⚠ 它与「停用」是两件事：停用 = 面板不让它加载（任务也不跑、重启后还停用）；
+/// 这个 = 这会儿在不在内存里，任务照旧排着，到点会自动装回来。
+export function setPluginLoaded(name, loaded) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/${loaded ? 'load' : 'unload'}`, {
+    method: 'POST',
+    panel: true,
+  });
+}
+
+/// 设 / 取消「长期加载」。
+///
+/// 默认是**惰性加载**：没有路由、没有 `on_tick` 的插件闲下来就从内存卸出去，
+/// 下次触发前提前装回来。勾上这一格 = 一直待在内存里（代价是那点常驻内存）。
+export function setPluginKeepWarm(name, keep) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/keep-warm`, {
+    method: 'POST',
+    panel: true,
+    body: { keep },
+  });
+}
+
+/// 换一个插件的执行引擎（`quickjs` / `node` / `bun`）。
+///
+/// `command` 可选：Node/Bun 的自定义解释器路径（留空就用 PATH 里那个）。
+/// 换引擎会重新加载插件 —— 已经排着的任务不受影响。
+export function setPluginRuntime(name, engine, command) {
+  const body = { engine };
+  if (command) {
+    body.command = command;
+  } else if (engine !== 'quickjs') {
+    // Node/Bun 留空 = 用 PATH 里的默认命令。**显式发空串**，
+    // 否则之前设过的自定义路径会被保留下来 —— 用户清空输入框后行为没变。
+    body.command = '';
+  }
+  return request(`/api/plugins/${encodeURIComponent(name)}/runtime`, {
+    method: 'POST',
+    panel: true,
+    body,
+  });
 }
 
 /// 立刻重读一个插件（不等文件变化）。
@@ -229,6 +271,54 @@ export function cleanupJobs(dryRun) {
     method: 'POST',
     panel: true,
     body: { dry_run: !!dryRun },
+  });
+}
+
+// ---------------------------------------------------------------- 脚本任务
+
+/**
+ * 脚本任务的两份来源：`TASKS_DIR` 里带文件头的文件（`source="script-dir"`），
+ * 以及在面板上建的任务（`source="script-panel"`）。
+ *
+ * `GET /api/scripts` 回 `{ files: [...], jobs: [...] }`：
+ *   files[] = { path, runtime, header, valid, error, scheduled }
+ *   jobs[]  = 与 `/api/state` 里 `jobs[]` 同形（`kind="script"`）
+ */
+export function listScripts() {
+  return request('/api/scripts');
+}
+
+/**
+ * 建一条**面板**脚本任务。
+ *
+ * @param {{name: string, path: string, expr: string, runtime?: string,
+ *          budget_ms?: number, params?: any}} job
+ *   `runtime` 留空 = 按扩展名 / 文件头推导；`params` 是任意 JSON 值。
+ */
+export function createScriptJob(job) {
+  const body = { name: job.name, path: job.path, expr: job.expr };
+  if (job.runtime) body.runtime = job.runtime;
+  if (job.budget_ms !== undefined && job.budget_ms !== null) body.budget_ms = job.budget_ms;
+  if (job.params !== undefined && job.params !== null) body.params = job.params;
+  return request('/api/scripts/jobs', { method: 'POST', panel: true, body });
+}
+
+/**
+ * 改一条脚本任务的可编辑字段（`path` / `expr` / `runtime` / `budget_ms` / `params`）。
+ *
+ * ⚠ `name` 是身份，不能改 —— 所以它只出现在路径里，不进请求体。
+ */
+export function editScriptJob(name, job) {
+  const body = {};
+  if (job.path !== undefined) body.path = job.path;
+  if (job.expr !== undefined) body.expr = job.expr;
+  if (job.runtime !== undefined) body.runtime = job.runtime;
+  if (job.budget_ms !== undefined) body.budget_ms = job.budget_ms;
+  if (job.params !== undefined) body.params = job.params;
+  return request(`/api/scripts/jobs/${encodeURIComponent(name)}/edit`, {
+    method: 'POST',
+    panel: true,
+    body,
   });
 }
 

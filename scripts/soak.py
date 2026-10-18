@@ -3,7 +3,7 @@
 
 为什么需要它：前面每一轮量到的都是**空闲态**内存（刚启动、跑几秒）。
 而低配盒子上真正会出事的是「跑三天之后内存涨到 OOM」——
-热更新每次都会重建解释器实例（JS 换 Context、Python `py_resetvm`），
+热更新每次都会重建解释器实例（JS 换 Context / 外部子进程重启），
 任务每次触发都会分配临时对象，这些路径只要有一处漏了，内存就是单调上涨。
 
 这个脚本做三件事：
@@ -40,7 +40,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-# 插件源码：一个高频 JS 任务 + 一个中频 Python 任务。
+# 插件源码：一个高频 JS 任务（Python 插件已移除）。
 # `__REV__` 每次热更新都会被替换，保证 mtime 和内容都变。
 JS_PLUGIN = """// soak 用插件，__REV__
 const host = globalThis.host;
@@ -54,23 +54,7 @@ host.every('soak-fast', '50ms', function () {
 function on_tick() { n += 0; }
 """
 
-PY_PLUGIN = """# soak 用插件，__REV__
-from host_api import every, log
 
-_state = {"n": 0}
-
-
-def slow(payload):
-    _state["n"] += 1
-    if __PY_BODY__:
-        # 每次都造一个列表和字符串，走 pocketpy 的堆分配
-        parts = [str(payload["runs"]), "y" * 64]
-        if _state["n"] % 50 == 0:
-            log("soak-slow 第 " + str(_state["n"]) + " 次")
-
-
-every("soak-slow", "200ms", slow)
-"""
 
 
 def free_port() -> int:
@@ -194,10 +178,11 @@ def main() -> int:
     seconds = float(opts.get("seconds", 90))
     # reload-every 0 = 关掉热更新（对照实验用：区分「稳态分配」和「每次热更新的增量」）
     reload_every = float(opts.get("reload-every", 5))
-    only = opts.get("only", "both")  # both | js | py
-    # py-body: alloc（默认，handler 里造列表+字符串）| noop（handler 什么都不做）
-    # 用来区分「宿主调用机制漏内存」和「插件代码自己分配导致的堆积」
-    py_body = opts.get("py-body", "alloc")
+    # Python 插件已移除：soak 只压 JS（QuickJS / Node / Bun）。
+    only = opts.get("only", "js")
+    if only not in ("js", "both"):
+        print("❌ Python 插件已移除，--only 只支持 js（both 也只会跑 JS）", file=sys.stderr)
+        return 2
     sample_every = float(opts.get("sample-every", 3))
     max_mb_per_day = float(opts.get("max-mb-per-day", 20))
 
@@ -210,7 +195,6 @@ def main() -> int:
     plugins.mkdir()
     # ⚠️ 两个插件名必须不同：插件名来自文件名（去扩展名），同名会被引擎拒绝加载
     js_file = plugins / "soak-js.js"
-    py_file = plugins / "soak-py.py"
     port = free_port()
     base = f"http://127.0.0.1:{port}"
 
@@ -218,31 +202,31 @@ def main() -> int:
     print(
         f"时长:   {seconds:.0f}s（每 {sample_every:.0f}s 采样，"
         + (f"每 {reload_every:.0f}s 热更新一次）" if reload_every > 0 else "**不热更新**）")
-        + f"，插件: {only}（py-body={py_body}）"
+        + "，插件: JS（Python 插件已移除）"
     )
     print(f"工作区: {workdir}")
 
     # 插件必须在启动**之前**写好：否则前几秒插件目录是空的，
     # 采样到的「任务触发累计」会一直是 0，整个测试等于没跑。
-    if only in ("both", "js"):
-        js_file.write_text(JS_PLUGIN.replace("__REV__", "rev=0"))
-    if only in ("both", "py"):
-        body = "True" if py_body == "alloc" else "False"
-        py_file.write_text(
-            PY_PLUGIN.replace("__REV__", "rev=0").replace("__PY_BODY__", body)
-        )
+    (workdir / "tasks").mkdir(exist_ok=True)
+    js_file.write_text(JS_PLUGIN.replace("__REV__", "rev=0"))
 
     env = dict(os.environ)
     env.update(
         {
             "BIND_ADDR": f"127.0.0.1:{port}",
             "PLUGINS_DIR": str(plugins),
+            "TASKS_DIR": str(workdir / "tasks"),
             "DB_PATH": str(workdir / "panel.db"),
+            "PLUGIN_DATA_DIR": str(workdir / "plugin-data"),
+            "PANEL_RUNTIME_DIR": str(workdir / "runtime"),
+            "PANEL_LOG_DIR": str(workdir / "logs"),
         }
     )
     # 令牌是必须的（没有「本机免登录」这种模式了）：长跑实例也要带上，
     # 顺着的把 HTTP 探活也带上 —— 不带就全是 401，长跑会误判成「面板没起来」
     env["PANEL_TOKEN"] = os.environ.get("SOAK_TOKEN", "10086112")
+    env["PANEL_ALLOW_PLAIN_TOKEN"] = "1"  # 本机压测实例；线上不要这么跑
 
     log = (workdir / "run.log").open("w")
     proc = subprocess.Popen([str(bin_path)], env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -280,21 +264,8 @@ def main() -> int:
 
             if reload_every > 0 and time.time() >= next_reload:
                 rev += 1
-                # 两个插件交替改，两条热更新路径都要覆盖
-                if only == "js":
-                    target, src = js_file, JS_PLUGIN
-                elif only == "py":
-                    target = py_file
-                    body = "True" if py_body == "alloc" else "False"
-                    src = PY_PLUGIN.replace("__PY_BODY__", body)
-                else:
-                    body = "True" if py_body == "alloc" else "False"
-                    if rev % 2:
-                        target, src = js_file, JS_PLUGIN
-                    else:
-                        target = py_file
-                        src = PY_PLUGIN.replace("__PY_BODY__", body)
-                target.write_text(src.replace("__REV__", f"rev={rev}"))
+                # Python 插件已移除：只热更新 JS 插件
+                js_file.write_text(JS_PLUGIN.replace("__REV__", f"rev={rev}"))
                 reloads += 1
                 next_reload = time.time() + reload_every
 

@@ -1,7 +1,7 @@
-//! 宿主 API 层：**一份实现，四个运行时**。
+//! 宿主 API 层：**一份实现，三个 JS 宿主**。
 //!
-//! 目标是「同一份插件脚本能跑在 QuickJS / PocketPy / Node.js / CPython 上」。
-//! 做法是把平台能力收敛成一个最小公共子集，各运行时只做一层薄适配：
+//! JS 插件可以跑在三种宿主里：内嵌 QuickJS（默认）、外部 Node、外部 Bun。
+//! 平台能力收敛成本文件里的 `HostState::do_*`，各宿主只做一层薄适配：
 //!
 //! ```text
 //!                          ┌──────────────────────────────┐
@@ -9,15 +9,15 @@
 //!                          │  log / register_cron /        │
 //!                          │  sqlite_query / http_fetch    │
 //!                          └───────────┬──────────────────┘
-//!             ┌────────────────────────┼────────────────────────┐
-//!             │                        │                        │
-//!      JS 闭包适配                Python 原生函数          外部运行时适配器
-//!   (rquickjs Func::new)      (extern "C" fn + shim)     adapters/node, adapters/python
-//!             │                        │                        │
-//!        host_api.* (JS)          host_api (py)            host-api / host_api
+//!             ┌────────────────────────┴────────────────────────┐
+//!             │                                                 │
+//!      QuickJS 闭包适配 (src/jshost.rs)                 外部 JS 运行时 RPC (src/extproc.rs)
+//!      host-api / host 全局                          runtime/js 的 host-api / host 全局
 //! ```
 //!
-//! ## API 规范 v1（最小公共子集）
+//! Python 已退出插件范畴：`.py` 只作为任务目录里的 cron 脚本，不接 host-api。
+//!
+//! ## API 规范（JS 最小公共子集）
 //!
 //! | 函数 | 说明 |
 //! |---|---|
@@ -27,8 +27,8 @@
 //! | `sqlite_query(sql, params)` | 查询，返回对象数组 |
 //! | `sqlite_exec(sql, params)` | 写入，返回 `{changes, lastInsertRowid}` |
 //! | `http_fetch(url, options)` | 同步 HTTP(S)，返回 `{status, headers, body}` |
-//! | `ws_open` / `ws_send` / `ws_recv` / `ws_close` | **扩展**：WebSocket 客户端（长连接、句柄式；见 [`crate::wsclient`]）。**仅嵌入式 JS 宿主**，Python 侧抛 `NotImplementedError` |
-//! | `register_route(path, method, handler)` | **仅 JS/Node**；Python 侧抛 `NotImplementedError` |
+//! | `ws_open` / `ws_send` / `ws_recv` / `ws_close` | **扩展**：WebSocket 客户端（长连接、句柄式；见 [`crate::wsclient`]） |
+//! | `register_route(path, method, handler)` | 注册 HTTP 路由 |
 //!
 //! `handler(payload)` 的 `payload` 固定为
 //! `{name, plugin, expr, runs, scheduledAt, firedAt, lateMs}`；
@@ -37,14 +37,15 @@
 //! ## 为什么 Rust 侧只认 String
 //!
 //! 底层函数一律 `String` 进 `String` 出（JSON 或纯文本），类型分支全部留在各自的适配层里。
-//! 这样宿主代码永远不需要碰 `rquickjs::Value` 或 pocketpy 的 `py_TValue`，
-//! 加运行时就是加一个适配层，不动业务逻辑 —— 这也是本文件能同时服务四个运行时的原因。
+//! 这样宿主代码永远不需要碰 `rquickjs::Value`，加运行时就是加一个 RPC 适配层，
+//! 不动业务逻辑。
 
 use crate::cron::Schedule;
 use crate::db::Db;
+use crate::runtimefs::RuntimePaths;
+use crate::runtimes::RuntimeCatalog;
 use crate::wsclient;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -56,7 +57,7 @@ use std::sync::{Arc, Mutex};
 pub type SharedLogs = Arc<crate::log::Hub>;
 
 /// 写日志：插件通道的唯一落点。
-/// `host.log` / `console.log`（JS）、`print` / `log`（Python）最后都汇到这里。
+/// `host.log` / `console.log`（JS）最后都汇到这里。
 pub fn push_log(logs: &SharedLogs, plugin: &str, level: &str, msg: &str) {
     logs.for_plugin(plugin).log(parse_level(level), msg);
 }
@@ -99,18 +100,6 @@ pub struct RouteDef {
     pub budget_ms: Option<u64>,
 }
 
-/// 一个 Python VM 和它所属插件的绑定关系。
-///
-/// 为什么需要这张表：pocketpy 的原生函数是 `extern "C" fn`，**捕获不了状态**，
-/// 所以它只能靠 `py_currentvm()` 反查「我现在在替哪个插件干活」。
-/// JS 那边是闭包，直接捕获插件名，不需要这张表。
-pub struct VmBinding {
-    pub plugin: String,
-    pub pending: Vec<RawTaskDef>,
-    /// 插件声明的侧边栏入口（一个插件最多一个）。见 [`NavDef`]。
-    pub nav: Option<NavDef>,
-}
-
 /// 插件在加载期声明的**侧边栏入口**：面板主界面左侧会多出一项。
 ///
 /// # 为什么让插件声明而不是面板推导
@@ -129,12 +118,16 @@ pub struct NavDef {
     pub path: String,
 }
 
-/// 宿主侧共享状态：两个运行时的适配层都往这里调。
+/// 宿主侧共享状态：QuickJS 与外部 JS 运行时都往这里调。
 pub struct HostState {
     pub logs: SharedLogs,
     pub db: Db,
-    /// VM 索引 → 插件绑定（只有 Python 侧用）
-    pub vms: Mutex<HashMap<i32, VmBinding>>,
+    /// 面板的 SQLite 文件路径：外部插件/脚本用原生 sqlite 时可以通过 `PANEL_DB` 拿到。
+    pub db_path: PathBuf,
+    /// 外部运行时 shim 的落盘路径（`runtime/js/runner.mjs` 等）。
+    pub runtime_paths: RuntimePaths,
+    /// 启动时探测到的运行时能力（Node/Bun/Python）。
+    pub catalog: Arc<RuntimeCatalog>,
     /// JS 插件注册的 HTTP 路由（引擎线程持有，Axum 侧转发请求过来匹配）
     pub routes: Mutex<Vec<RouteDef>>,
     /// 插件根目录。
@@ -154,6 +147,8 @@ pub struct HostState {
     /// 数据根在数据目录下（默认 `<DB 所在目录>/plugin-data`），既不进静态服务，
     /// 也和插件代码的改动/覆盖安装解耦。
     pub plugin_data_dir: PathBuf,
+    /// 任务目录：`.js/.mjs/.py/.sh` 脚本的根（外部任务的自动发现用）。
+    pub tasks_dir: PathBuf,
     /// WebSocket 句柄注册表（见 [`crate::wsclient`]）。
     ///
     /// ⚠ 它**跨调用**活着（插件按"一次调用推进一步"写，句柄要在两次调用之间有效），
@@ -165,17 +160,24 @@ impl HostState {
     pub fn new(
         logs: SharedLogs,
         db: Db,
+        db_path: PathBuf,
+        runtime_paths: RuntimePaths,
+        catalog: Arc<RuntimeCatalog>,
         plugins_dir: PathBuf,
         plugin_data_dir: PathBuf,
+        tasks_dir: PathBuf,
         ws: wsclient::Registry,
     ) -> Arc<Self> {
         Arc::new(Self {
             logs,
             db,
-            vms: Mutex::new(HashMap::new()),
+            db_path,
+            runtime_paths,
+            catalog,
             routes: Mutex::new(Vec::new()),
             plugins_dir,
             plugin_data_dir,
+            tasks_dir,
             ws,
         })
     }
@@ -193,7 +195,8 @@ impl HostState {
         push_log(&self.logs, plugin, level, msg);
     }
 
-    /// 校验调度表达式并登记任务。返回 `Err` 表示表达式非法（插件加载期就会失败）。
+    /// 校验调度表达式并登记任务（QuickJS 侧仍走闭包里的 pending；这里保留一个
+    /// 单任务校验入口给单测/兼容代码用）。
     ///
     /// `params_json`：任务参数，一段 JSON 文本；空串 = 没有参数。
     /// **在这里就把非法 JSON 挡掉**，和表达式同一个理由：让错误在加载期暴露，
@@ -205,42 +208,8 @@ impl HostState {
         expr: &str,
         params_json: &str,
         budget_raw: &str,
-    ) -> Result<(), String> {
-        if name.is_empty() {
-            return Err("任务名不能为空".to_string());
-        }
-        if let Err(e) = Schedule::parse(expr) {
-            return Err(format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}"));
-        }
-        let budget_ms = parse_budget_ms(budget_raw)?;
-        let params = if params_json.trim().is_empty() {
-            None
-        } else {
-            if let Err(e) = serde_json::from_str::<Value>(params_json) {
-                return Err(format!(
-                    "任务 `{name}` 的参数不是合法 JSON: {e}（收到 {} 字节）",
-                    params_json.len()
-                ));
-            }
-            Some(params_json.to_string())
-        };
-        let mut guard = self.vms.lock().unwrap();
-        for b in guard.values_mut() {
-            if b.plugin == plugin {
-                if b.pending.iter().any(|t| t.name == name) {
-                    return Err(format!("插件 `{plugin}` 里已经注册过名为 `{name}` 的任务"));
-                }
-                b.pending.push(RawTaskDef {
-                    plugin: plugin.to_string(),
-                    name: name.to_string(),
-                    expr: expr.to_string(),
-                    params,
-                    budget_ms,
-                });
-                return Ok(());
-            }
-        }
-        Err(format!("插件 `{plugin}` 没有绑定解释器实例"))
+    ) -> Result<RawTaskDef, String> {
+        make_task_def(plugin, name, expr, params_json, budget_raw)
     }
 
     /// SQLite：查询返回对象数组，写入返回 `{changes, lastInsertRowid}`。
@@ -490,8 +459,10 @@ impl HostState {
         }
     }
 
-    pub fn do_ws_open(&self, url: &str, opts_json: &str) -> Result<String, String> {
-        let id = self.ws.open(url, opts_json)?;
+    pub fn do_ws_open(&self, plugin: &str, url: &str, opts_json: &str) -> Result<String, String> {
+        // `plugin` 是**谁开的**：惰性加载要按插件判"这条连接是不是它的"
+        // （全局判会让一条泄漏的句柄把整个惰性加载静默关掉）。
+        let id = self.ws.open(plugin, url, opts_json)?;
         Ok(json!({ "id": id }).to_string())
     }
 
@@ -521,94 +492,16 @@ impl HostState {
         method: &str,
         budget_raw: &str,
     ) -> Result<(), String> {
-        let budget_ms = parse_budget_ms(budget_raw)?;
-        if !path.starts_with('/') {
-            return Err(format!("路由 `{path}` 必须以 / 开头"));
-        }
-        let method = method.to_uppercase();
-        if !matches!(
-            method.as_str(),
-            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD"
-        ) {
-            return Err(format!("不支持的 HTTP 方法 `{method}`"));
-        }
+        let def = validate_route(plugin, path, method, budget_raw)?;
         let mut guard = self.routes.lock().unwrap();
         if guard
             .iter()
-            .any(|r| r.path == path && r.method == method)
+            .any(|r| r.path == def.path && r.method == def.method)
         {
-            return Err(format!("路由 `{method} {path}` 已经被注册过了"));
+            return Err(format!("路由 `{} {}` 已经被注册过了", def.method, def.path));
         }
-        guard.push(RouteDef {
-            plugin: plugin.to_string(),
-            method,
-            path: path.to_string(),
-            budget_ms,
-        });
+        guard.push(def);
         Ok(())
-    }
-
-    // ---- Python 侧绑定 ----
-
-    /// 给一个 VM 绑定插件名（加载插件前调用），并清掉上一轮遗留的声明。
-    pub fn bind_vm(&self, vm: i32, plugin: &str) {
-        self.vms.lock().unwrap().insert(
-            vm,
-            VmBinding {
-                plugin: plugin.to_string(),
-                pending: Vec::new(),
-                nav: None,
-            },
-        );
-    }
-
-    pub fn unbind_vm(&self, vm: i32) {
-        self.vms.lock().unwrap().remove(&vm);
-    }
-
-    /// 取走某个 VM 声明的任务（加载完成后调用）。
-    pub fn take_pending(&self, vm: i32) -> Vec<RawTaskDef> {
-        self.vms
-            .lock()
-            .unwrap()
-            .get_mut(&vm)
-            .map(|b| std::mem::take(&mut b.pending))
-            .unwrap_or_default()
-    }
-
-    /// 取走某个 VM 声明的侧边栏入口（加载完成后调用）。
-    pub fn take_nav(&self, vm: i32) -> Option<NavDef> {
-        self.vms.lock().unwrap().get_mut(&vm).and_then(|b| b.nav.take())
-    }
-
-    /// 登记侧边栏入口。同一个插件只能有一个 —— 第二个报错而不是静默覆盖：
-    /// 侧边栏是给用户认路用的，悄悄多出一项或少一项都会让人困惑。
-    pub fn do_register_nav(
-        &self,
-        plugin: &str,
-        label: &str,
-        icon: &str,
-        path: &str,
-    ) -> Result<(), String> {
-        let nav = validate_nav(plugin, label, icon, path)?;
-        let mut guard = self.vms.lock().unwrap();
-        for b in guard.values_mut() {
-            if b.plugin == plugin {
-                if let Some(old) = &b.nav {
-                    return Err(format!(
-                        "插件 `{plugin}` 已经声明过侧边栏入口 `{}`，不能再声明一个",
-                        old.label
-                    ));
-                }
-                b.nav = Some(nav);
-                return Ok(());
-            }
-        }
-        Err(format!("插件 `{plugin}` 没有绑定解释器实例"))
-    }
-
-    pub fn plugin_of_vm(&self, vm: i32) -> Option<String> {
-        self.vms.lock().unwrap().get(&vm).map(|b| b.plugin.clone())
     }
 }
 
@@ -621,6 +514,68 @@ pub const MAX_DECLARED_BUDGET_MS: u64 = 10 * 60 * 1000;
 
 /// 能声明的最短预算。低于这个数连一次网络往返都跑不完，声明它没有意义。
 pub const MIN_DECLARED_BUDGET_MS: u64 = 100;
+
+/// 校验并构造一条任务声明。QuickJS / 外部 JS 共用这一份判据。
+pub fn make_task_def(
+    plugin: &str,
+    name: &str,
+    expr: &str,
+    params_json: &str,
+    budget_raw: &str,
+) -> Result<RawTaskDef, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("任务名不能为空".to_string());
+    }
+    if let Err(e) = Schedule::parse(expr) {
+        return Err(format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}"));
+    }
+    let budget_ms = parse_budget_ms(budget_raw)?;
+    let params = if params_json.trim().is_empty() {
+        None
+    } else {
+        if let Err(e) = serde_json::from_str::<Value>(params_json) {
+            return Err(format!(
+                "任务 `{name}` 的参数不是合法 JSON: {e}（收到 {} 字节）",
+                params_json.len()
+            ));
+        }
+        Some(params_json.to_string())
+    };
+    Ok(RawTaskDef {
+        plugin: plugin.to_string(),
+        name: name.to_string(),
+        expr: expr.to_string(),
+        params,
+        budget_ms,
+    })
+}
+
+/// 校验并构造一条路由声明（不检查全局重复；安装时再查）。
+pub fn validate_route(
+    plugin: &str,
+    path: &str,
+    method: &str,
+    budget_raw: &str,
+) -> Result<RouteDef, String> {
+    let budget_ms = parse_budget_ms(budget_raw)?;
+    if !path.starts_with('/') {
+        return Err(format!("路由 `{path}` 必须以 / 开头"));
+    }
+    let method = method.trim().to_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD"
+    ) {
+        return Err(format!("不支持的 HTTP 方法 `{method}`"));
+    }
+    Ok(RouteDef {
+        plugin: plugin.to_string(),
+        method,
+        path: path.to_string(),
+        budget_ms,
+    })
+}
 
 /// 解析 `opts.budget_ms`。空串 / `None` = 没声明。
 ///

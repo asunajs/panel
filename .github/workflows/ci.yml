@@ -12,7 +12,7 @@ name: CI
 #     安全网：没有 PR 时它永远不会触发
 #
 # 为什么不该跟着每次 push 跑：这个项目一轮工作常常十几次提交，其中大部分是文档与
-# 前端调整 —— 1 次推送 = 4 个 job ≈ 2.5 分钟，换来的信息却和上一次几乎一样。
+# 前端调整 —— 1 次推送 = 5 个 job ≈ 3 分钟，换来的信息却和上一次几乎一样。
 # 真正的验证时机是「要发一版」，而那就是 tag。
 #
 # 注意：打 tag 时 `release.yml` 也会跑（它要做 musl 产物 + 发 Release + 验 install.sh），
@@ -30,7 +30,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # x86_64 Linux：单元测试 + 冒烟测试
+  # x86_64 Linux：单元测试 + 前端检查 + 冒烟测试
   # ------------------------------------------------------------------
   linux-x86_64:
     name: Linux x86_64
@@ -42,28 +42,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 冒烟里的「外部运行时 / JS 脚本」需要 Node。统一用 22（与适配器一致）；
+      # 面板的外部插件门槛是 20.6（见 docs/runtimes.md）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       # clippy 门禁：第二十七轮把 41 条清到 0，之后不许再涨。
       #
       # 它挡的不是风格 —— 是**编译和测试都抓不到**的那类问题：文档注释被后来插入的
-      # 代码切断（只有 `cargo doc` 才看得出来，注释会挂到错误的对象上）、
-      # 永远走不到的死分支、`#[cfg(test)] mod tests` 被夹在文件中间……
-      # 这一轮清掉的 5 条真缺陷里，4 条就是这么来的。
-      #
-      # 这里**不加** `cargo fmt --check`：本仓库刻意不用 rustfmt
-      # （手写换行 + 中文注释对齐是风格；rustfmt 会改 289 处，等于把注释排版全打乱）。
-      # 那是选择，不是欠的债。
+      # 代码切断（只有 `cargo doc` 才看得出来）、永远走不到的死分支、
+      # `#[cfg(test)] mod tests` 被夹在文件中间。
+      # 这里**不加** `cargo fmt --check`：本仓库刻意不用 rustfmt。
       - name: clippy（-D warnings）
         run: cargo clippy --all-targets -- -D warnings
 
       - name: 单元测试
         run: cargo test --all-targets
 
-      # 前端资源与视图的静态检查（76+ 项）：资源登记表与 web/ 实际文件对账、
+      # 前端资源与视图的静态检查：资源登记表与 web/ 实际文件对账、
       # 每个视图「用到的接口都 import 了」、样式里不许硬编码色值……
-      #
-      # 原来这一步跑的是 scripts/test-panel-frontend.mjs —— 那个脚本在前端拆成
-      # 独立文件之后就不存在了。CI 引用一个不存在的脚本，第一次推送就会红，
-      # 所以推送前在本机把每一步都跑了一遍。
       - name: 前端资源与视图的静态检查
         run: node scripts/test-web-assets.mjs
 
@@ -73,6 +71,8 @@ jobs:
       - name: 构建 release
         run: cargo build --release
 
+      # 冒烟会跑：QuickJS 插件、插件路由、脚本任务（js/py/sh）、优雅退出；
+      # 有 Node 时还会加载一个外部 Node 插件、验证超时杀进程组与环境变量白名单。
       - name: 冒烟测试（真的把服务跑起来）
         run: python3 scripts/smoke.py ./target/release/plugin-panel
 
@@ -99,6 +99,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      # ARM 上也要跑「外部 Node 插件」的冒烟分支
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: 确认 runner 真的是 aarch64
         run: |
@@ -141,6 +146,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 静态二进制仍然会 spawn PATH 里的 node / python3；runner 自带 Python 3，
+      # 这里显式装 Node 22 让「外部运行时」分支也真的跑到。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: 安装 musl 工具链
         run: |
           sudo apt-get update
@@ -177,13 +188,43 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
-  # 跨运行时适配器：同一份插件脚本在 Node / CPython 下也要跑通
+  # 外部 Node/Bun 运行时（runtime/js）
   #
-  # 这两个适配器是「抽象宿主 API」承诺的证据：如果只有 Rust 宿主能跑，
-  # 那所谓跨运行时就是一句空话。所以它们必须进 CI，且跑的是**仓库里的真插件文件**。
+  # 这是第六十轮新增的：面板切到外部 Node 时，真正跑在子进程里的是 runtime/js，
+  # 不是 adapters/node。它有自己的协议（fd0/1/2/3/4）与 host-api，必须单独进 CI。
+  # 用例会用真实 fd3/fd4 起一个「假面板」父进程，所以协议改坏会当场红。
+  # ------------------------------------------------------------------
+  runtime-js:
+    name: 外部运行时（runtime/js）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Bun 是可选引擎：装了就跑一版冒烟；没装也不阻塞（面板在 Bun 不可用时回落）。
+      # 目前不把 Bun 用例设成门禁 —— 先保证 Node 这条主路径稳定。
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+        continue-on-error: true
+
+      - name: runtime/js 协议与 host-api 用例
+        run: node runtime/js/test/run-tests.mjs
+
+      - name: Bun 版本（可选）
+        run: bun --version || true
+
+  # ------------------------------------------------------------------
+  # Node 适配器：同一份插件在「没有面板」的 Node 里也要跑通
+  #
+  # 这是「抽象宿主 API」承诺的证据。CPython 适配器在第六十轮删除，
+  # 这里只保留 Node。
   # ------------------------------------------------------------------
   adapters:
-    name: 跨运行时适配器（Node / CPython）
+    name: 跨运行时适配器（Node）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -197,14 +238,10 @@ jobs:
         run: node test/run-tests.mjs
         working-directory: adapters/node
 
-      - name: CPython 适配器用例
-        run: python3 -m unittest discover -s tests -v
-        working-directory: adapters/python
-
       - name: 仓库真插件在 Node 下原样跑通（ES 模块 + import 'host-api'）
         run: node bin/run.mjs ../../plugins/js/host-api-demo.js --once
         working-directory: adapters/node
 
-      - name: 仓库真插件在 CPython 下原样跑通（from host_api import ...）
-        run: python3 -m host_api ../../plugins/py/sysinfo.py --once
-        working-directory: adapters/python
+      - name: 运行器的 --job（register_handler 的跨宿主等价物）
+        run: node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 1s --duration 2
+        working-directory: adapters/node

@@ -110,6 +110,12 @@ enum In {
 }
 
 struct Conn {
+    /// 哪个插件开的这条连接（**按插件判"能不能卸"要用它**）。
+    ///
+    /// ⚠ 之前没有这一格，惰性加载只能拿 `open_count()` 全局判 ——
+    ///   任何插件挂着一条长连，所有插件都不许卸。一条泄漏的句柄
+    ///   就能把整个惰性加载**静默关掉**（没有报错，只是再也不卸了）。
+    owner: String,
     out: UnboundedSender<Out>,
     /// ⚠ 收端包在 `Arc<Mutex<..>>` 里，**不是**为了共享给多条连接用，而是为了
     /// 让 `recv` 时能先把注册表锁放掉：`std::sync::mpsc::Receiver` 不能克隆，
@@ -139,11 +145,19 @@ impl Registry {
         self.conns.lock().unwrap().len()
     }
 
+    /// 某个插件开着的连接数（惰性加载用它判"这个插件能不能卸"）。
+    pub fn open_count_for(&self, plugin: &str) -> usize {
+        self.conns
+            .lock()
+            .map(|g| g.values().filter(|c| c.owner == plugin).count())
+            .unwrap_or(0)
+    }
+
     /// 打开一条连接。**握手失败就是 `Err`**（不会留一个半死的句柄给插件）。
     ///
     /// `opts_json` 与 `http_fetch` 同形：`{"headers": {…}, "timeout_ms": 8000}`。
     /// 头是**插件自己**的（直播侧要带 `Authorization` 与那个 UA）。
-    pub fn open(&self, url: &str, opts_json: &str) -> Result<u64, String> {
+    pub fn open(&self, owner: &str, url: &str, opts_json: &str) -> Result<u64, String> {
         if !url.starts_with("ws://") && !url.starts_with("wss://") {
             return Err(format!("url 必须以 ws:// 或 wss:// 开头：{url}"));
         }
@@ -325,6 +339,7 @@ impl Registry {
                 self.conns.lock().unwrap().insert(
                     id,
                     Conn {
+                        owner: owner.to_string(),
                         out: out_tx,
                         inc: inc.clone(),
                     },
@@ -498,7 +513,7 @@ mod tests {
         let reg = registry();
 
         let url_for_engine = url.clone();
-        let id = engine(&reg, move |r| r.open(&url_for_engine, "").expect("应当能连上"));
+        let id = engine(&reg, move |r| r.open("t", &url_for_engine, "").expect("应当能连上"));
         assert_eq!(reg.open_count(), 1);
 
         engine(&reg, move |r| r.send(id, "hello")).unwrap();
@@ -532,7 +547,7 @@ mod tests {
     async fn connect_failure_is_reported_at_open() {
         let reg = registry();
         // 一个没人监听的端口：握手必须**在 open 这一步**就失败
-        let err = engine(&reg, |r| r.open("ws://127.0.0.1:1", "")).unwrap_err();
+        let err = engine(&reg, |r| r.open("t", "ws://127.0.0.1:1", "")).unwrap_err();
         assert!(!err.is_empty());
         assert_eq!(reg.open_count(), 0, "连不上就不该留下句柄");
     }
@@ -543,7 +558,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn url_scheme_is_checked() {
         let reg = registry();
-        let err = engine(&reg, |r| r.open("https://example.com", "")).unwrap_err();
+        let err = engine(&reg, |r| r.open("t", "https://example.com", "")).unwrap_err();
         assert!(err.contains("ws://"), "{err}");
     }
 
@@ -562,7 +577,7 @@ mod tests {
         });
         let reg = registry();
         let url = format!("ws://{addr}");
-        let id = engine(&reg, move |r| r.open(&url, "")).unwrap();
+        let id = engine(&reg, move |r| r.open("t", &url, "")).unwrap();
         let got = engine(&reg, move |r| r.recv(id, 1000)).unwrap();
         assert_eq!(got["type"], "close", "{got}");
         assert_eq!(reg.open_count(), 0, "close 之后句柄要被移除");
@@ -597,7 +612,7 @@ mod tests {
         let reg = registry();
         let url = format!("ws://{addr}");
         let opts = json!({"headers": {"authorization": "JWT-LIVE", "x-probe": "1"}}).to_string();
-        let id = engine(&reg, move |r| r.open(&url, &opts)).unwrap();
+        let id = engine(&reg, move |r| r.open("t", &url, &opts)).unwrap();
         // 等一会儿让服务端的回调跑完（它和 open 是并发的）
         tokio::time::sleep(Duration::from_millis(50)).await;
         let headers = got.lock().unwrap().clone();
@@ -650,7 +665,7 @@ mod tests {
         let reg = registry();
         let url = format!("ws://{addr}");
         let opts = json!({"headers": {"User-Agent": "MCloudApp/12.6.0"}}).to_string();
-        let id = engine(&reg, move |r| r.open(&url, &opts)).unwrap();
+        let id = engine(&reg, move |r| r.open("t", &url, &opts)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let uas = got.lock().unwrap().clone();
         assert_eq!(uas, vec!["MCloudApp/12.6.0"], "插件的 UA 必须原样发出去、且只有一枚");
@@ -661,7 +676,7 @@ mod tests {
     async fn bad_header_value_is_rejected() {
         let reg = registry();
         let opts = json!({"headers": {"x-bad": "line\nbreak"}}).to_string();
-        let err = engine(&reg, move |r| r.open("ws://127.0.0.1:1", &opts)).unwrap_err();
+        let err = engine(&reg, move |r| r.open("t", "ws://127.0.0.1:1", &opts)).unwrap_err();
         assert!(err.contains("值不合法"), "{err}");
     }
 
@@ -683,6 +698,7 @@ mod tests {
             reg.conns.lock().unwrap().insert(
                 id,
                 Conn {
+                    owner: "test".to_string(),
                     out,
                     inc: Arc::new(Mutex::new(rx)),
                 },
@@ -690,12 +706,47 @@ mod tests {
             ids.push(id);
         }
         let url_for_engine = url.clone();
-        let err = engine(&reg, move |r| r.open(&url_for_engine, "")).unwrap_err();
+        let err = engine(&reg, move |r| r.open("t", &url_for_engine, "")).unwrap_err();
         assert!(err.contains("上限"), "{err}");
         for id in ids {
             reg.close(id).unwrap();
         }
         assert_eq!(reg.open_count(), 0);
+    }
+
+    /// 按插件数的连接数 —— 惰性加载靠它判"这个插件能不能卸"。
+    ///
+    /// ⚠ 这条是**防回归**的：早先只有全局 `open_count()`，于是"插件 A 漏了一条句柄"
+    /// 会让所有插件都不许卸（惰性加载被静默关掉，没有报错）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_count_for_is_per_plugin() {
+        let reg = registry();
+        let mut ids = Vec::new();
+        for owner in ["a", "a", "b"] {
+            let (out, _rx) = unbounded_channel::<Out>();
+            let (_tx, rx) = channel::<In>();
+            let id = reg.next.fetch_add(1, Ordering::SeqCst);
+            reg.conns.lock().unwrap().insert(
+                id,
+                Conn {
+                    owner: owner.to_string(),
+                    out,
+                    inc: Arc::new(Mutex::new(rx)),
+                },
+            );
+            ids.push(id);
+        }
+        assert_eq!(reg.open_count(), 3);
+        assert_eq!(reg.open_count_for("a"), 2);
+        assert_eq!(reg.open_count_for("b"), 1);
+        assert_eq!(reg.open_count_for("c"), 0, "没开过的插件是 0，别按全局算");
+        // 关掉 a 的，b 的不受影响
+        let a_ids: Vec<u64> = ids[..2].to_vec();
+        for id in a_ids {
+            reg.close(id).unwrap();
+        }
+        assert_eq!(reg.open_count_for("a"), 0);
+        assert_eq!(reg.open_count_for("b"), 1);
     }
 
     #[test]

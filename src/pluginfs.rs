@@ -429,56 +429,6 @@ pub fn describe_root(root: &Path) -> String {
     ok_with(format!("\"dir\":{}", jstr(&root.display().to_string())))
 }
 
-/* ------------------------------------------------- 给 Python 侧的统入口 */
-
-/// 插件的根目录：`<数据根>/<插件名>/`。
-///
-/// 两个运行时（JS 的 `node:fs`、Python 的 `host_api`）都走这一条 —— 边界判断
-/// 只能有一份，两份迟早分叉。
-pub fn plugin_root(data_dir: &Path, plugin: &str) -> PathBuf {
-    // 只取插件名的最后一段：名字理论上可能带 `/`（它在别处已被拒，这里再收一道）
-    match Path::new(plugin).file_name() {
-        Some(name) => data_dir.join(name),
-        None => data_dir.join("__unnamed__"),
-    }
-}
-
-/// `_fs_op` 的分派：`op` + 三个字符串参数 → JSON。
-///
-/// 形状与 JS 侧一致（单一形状 + `ok`）：调用方不必先猜"这次成功长什么样"。
-/// 那个坑项目里踩过（见 docs/findings.md 里 http_fetch 的 F-006）。
-pub fn op(root: &Path, op: &str, a: &str, b: &str, c: &str) -> String {
-    match op {
-        "root" => describe_root(root),
-        "read_text" => read(root, a, "utf8"),
-        "read_bytes" => read(root, a, ""),
-        "write_text" => write(root, a, b, None, false),
-        "append_text" => write(root, a, b, None, true),
-        "write_bytes" => {
-            // 字节由 Python 侧给成 JSON 数组（`"?1"` 之外的第三个参数是 append）
-            let parsed: Option<Vec<u8>> = if b.is_empty() || b == "null" {
-                None
-            } else {
-                match serde_json::from_str::<Vec<u8>>(b) {
-                    Ok(v) => Some(v),
-                    Err(e) => return bad_bytes(&e.to_string()),
-                }
-            };
-            write(root, a, "", parsed, c == "1")
-        }
-        "exists" => exists(root, a),
-        "list_dir" => readdir(root, a),
-        "mkdir" => mkdir(root, a, true),
-        // Python 侧的 `remove` 语义定为「尽力删」（force + recursive）：
-        // 它对应的是 `shutil.rmtree` 那种"清掉这一块"，不是精确控制
-        "remove" => rm(root, a, true, true),
-        "rename" => rename(root, a, b),
-        "stat" => stat(root, a),
-        other => FsError::new("EINVAL", format!("未知的 fs 操作 `{other}`")).to_json(),
-    }
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -150,6 +150,17 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 真跑（cron/manual）留 NULL，它们的输出在日志里，有 run 标签可以反查。
     ensure_column(&conn, "runs", "output", "TEXT")?;
     ensure_plugin_state(&conn)?;
+    // 第五十九轮：**「长期加载」**（不参与"闲下来就卸载"）。
+    // 老库里的 `plugin_state` 没有这一列，补上；默认 0 = 按规则惰性加载。
+    ensure_column(&conn, "plugin_state", "keep_warm", "INTEGER NOT NULL DEFAULT 0")?;
+    // 第六十轮：外部 JS 运行时覆盖。`engine` 为空 = 用 PANEL_JS_ENGINE/QuickJS。
+    ensure_column(&conn, "plugin_state", "engine", "TEXT")?;
+    ensure_column(&conn, "plugin_state", "command", "TEXT")?;
+    // 第六十轮：任务目录脚本。`kind` 区分插件任务与脚本任务；`script` 是
+    // TASKS_DIR 下的相对路径；`runtime` 是脚本解释器（node/bun/python3/sh）。
+    ensure_column(&conn, "jobs", "kind", "TEXT NOT NULL DEFAULT 'plugin'")?;
+    ensure_column(&conn, "jobs", "script", "TEXT")?;
+    ensure_column(&conn, "jobs", "runtime", "TEXT")?;
 
     Ok(Arc::new(Mutex::new(conn)))
 }
@@ -248,6 +259,12 @@ pub struct JobRow {
     pub id: i64,
     pub name: String,
     pub plugin: String,
+    /// `"plugin"` 或 `"script"`（脚本任务）。
+    pub kind: String,
+    /// 脚本任务在 `TASKS_DIR` 下的相对路径（插件任务为 None）。
+    pub script: Option<String>,
+    /// 脚本运行时：`node|bun|python3|sh`（插件任务为 None）。
+    pub runtime: Option<String>,
     pub schedule: String,
     /// 面板覆盖的表达式（`None` = 用代码声明的 `schedule`）。见 scheduler::ScheduledTask。
     pub override_expr: Option<String>,
@@ -264,8 +281,7 @@ pub struct JobRow {
     pub last_error: Option<String>,
     /// 面板上被暂停（暂停状态跨重启保留，见 `list_paused_jobs`）
     pub paused: bool,
-    /// 任务定义的来源：`"plugin"`（插件代码声明）或 `"panel"`（面板创建）。
-    /// 只有 `"panel"` 的行允许在面板上删除，也只有它不受 `sync_jobs` 收敛。
+    /// 任务定义的来源：`"plugin"` / `"panel"` / `"script-dir"` / `"script-panel"`。
     pub source: String,
     pub created_at: String,
     pub updated_at: String,
@@ -596,6 +612,9 @@ fn ensure_plugin_state(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS plugin_state (
             name       TEXT PRIMARY KEY,
             disabled   INTEGER NOT NULL DEFAULT 0,
+            -- 「长期加载」：不参与"闲下来就卸载"（见 engine 里的惰性加载）。
+            -- ⚠ 与 `disabled` 是两件事：停用 = 根本不加载；长期加载 = 一直留在内存。
+            keep_warm  INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
         "#,
@@ -676,6 +695,26 @@ pub fn finish_run(
     conn.execute(
         "UPDATE runs SET ok = ?2, error = ?3, duration_ms = ?4, finished_at = ?5 WHERE id = ?1",
         params![id, ok as i64, error, duration_ms, finished_at],
+    )?;
+    Ok(())
+}
+
+/// 只更新下次触发时刻（脚本任务装进调度器后回写，不动 runs/status）。
+pub fn set_job_next_run(db: &Db, plugin: &str, name: &str, next: &str, now: &str) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET next_run = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, next, now],
+    )?;
+    Ok(())
+}
+
+/// 给一条运行记录补上组合输出（脚本任务用）。
+pub fn set_run_output(db: &Db, id: &str, output: &str) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE runs SET output = ?2 WHERE id = ?1",
+        params![id, output],
     )?;
     Ok(())
 }
@@ -799,6 +838,27 @@ pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
     it.collect()
 }
 
+/// 被设为「长期加载」的插件名（这些**不**参与闲置卸载）。
+pub fn list_keep_warm_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE keep_warm = 1 ORDER BY name")?;
+    let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    it.collect()
+}
+
+/// 设 / 取消某个插件的「长期加载」。
+pub fn set_plugin_keep_warm(db: &Db, name: &str, keep: bool, now: &str) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO plugin_state (name, keep_warm, updated_at) VALUES (?1, ?2, ?3)
+        ON CONFLICT(name) DO UPDATE SET keep_warm = excluded.keep_warm, updated_at = excluded.updated_at
+        "#,
+        params![name, keep as i64, now],
+    )?;
+    Ok(())
+}
+
 /// 停用 / 启用一个插件。
 pub fn set_plugin_disabled(db: &Db, name: &str, disabled: bool, now: &str) -> rusqlite::Result<()> {
     let conn = db.lock().unwrap();
@@ -810,6 +870,207 @@ pub fn set_plugin_disabled(db: &Db, name: &str, disabled: bool, now: &str) -> ru
         params![name, disabled as i64, now],
     )?;
     Ok(())
+}
+
+/// 读插件级运行时覆盖：`(engine, command)`，都没设置就是 `(None, None)`。
+pub fn get_plugin_runtime(
+    db: &Db,
+    name: &str,
+) -> rusqlite::Result<(Option<String>, Option<String>)> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT engine, command FROM plugin_state WHERE name = ?1")?;
+    let mut rows = stmt.query(params![name])?;
+    match rows.next()? {
+        Some(r) => Ok((r.get(0)?, r.get(1)?)),
+        None => Ok((None, None)),
+    }
+}
+
+/// 写插件级运行时覆盖。`engine = None` 表示回到全局默认。
+pub fn set_plugin_runtime(
+    db: &Db,
+    name: &str,
+    engine: Option<&str>,
+    command: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO plugin_state (name, engine, command, updated_at) VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(name) DO UPDATE SET engine = excluded.engine,
+            command = excluded.command, updated_at = excluded.updated_at
+        "#,
+        params![name, engine, command, now],
+    )?;
+    Ok(())
+}
+
+/* ------------------------------ 脚本任务 ------------------------------ */
+
+/// 脚本任务在 `jobs.plugin` 里的固定伪插件名。
+pub const SCRIPT_PLUGIN: &str = "__script__";
+
+/// 目录发现的脚本任务：`source = 'script-dir'`。保留 runs/暂停/墓碑/覆盖。
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_script_dir_job(
+    db: &Db,
+    name: &str,
+    script: &str,
+    runtime: &str,
+    schedule: &str,
+    status: &str,
+    next_run: Option<&str>,
+    params: Option<&str>,
+    budget_ms: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO jobs (name, plugin, schedule, status, runs, trips, next_run,
+                          paused, created_at, updated_at, source, params, budget_ms,
+                          kind, script, runtime)
+        VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, 0, ?6, ?6, 'script-dir', ?7, ?8, 'script', ?9, ?10)
+        ON CONFLICT(plugin, name) DO UPDATE SET
+            schedule = excluded.schedule,
+            script = excluded.script,
+            runtime = excluded.runtime,
+            params = excluded.params,
+            budget_ms = excluded.budget_ms,
+            kind = 'script',
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            name,
+            SCRIPT_PLUGIN,
+            schedule,
+            status,
+            next_run,
+            now,
+            params,
+            budget_ms.map(|v| v as i64),
+            script,
+            runtime
+        ],
+    )?;
+    Ok(())
+}
+
+/// 面板创建的脚本任务：`source = 'script-panel'`（DB 权威，可全字段编辑）。
+#[allow(clippy::too_many_arguments)]
+pub fn insert_script_panel_job(
+    db: &Db,
+    name: &str,
+    script: &str,
+    runtime: &str,
+    schedule: &str,
+    status: &str,
+    next_run: Option<&str>,
+    params: Option<&str>,
+    budget_ms: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO jobs (name, plugin, schedule, status, runs, trips, next_run,
+                          paused, created_at, updated_at, source, params, budget_ms,
+                          kind, script, runtime)
+        VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, 0, ?6, ?6, 'script-panel', ?7, ?8, 'script', ?9, ?10)
+        "#,
+        params![
+            name,
+            SCRIPT_PLUGIN,
+            schedule,
+            status,
+            next_run,
+            now,
+            params,
+            budget_ms.map(|v| v as i64),
+            script,
+            runtime
+        ],
+    )?;
+    Ok(())
+}
+
+/// 编辑面板脚本任务（DB 权威）。名字是身份，不改。
+#[allow(clippy::too_many_arguments)]
+pub fn update_script_panel_job(
+    db: &Db,
+    name: &str,
+    script: &str,
+    runtime: &str,
+    schedule: &str,
+    params: Option<&str>,
+    budget_ms: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        UPDATE jobs SET schedule = ?3, script = ?4, runtime = ?5, params = ?6,
+            budget_ms = ?7, updated_at = ?8
+        WHERE plugin = ?1 AND name = ?2 AND source = 'script-panel'
+        "#,
+        params![
+            SCRIPT_PLUGIN,
+            name,
+            schedule,
+            script,
+            runtime,
+            params,
+            budget_ms.map(|v| v as i64),
+            now
+        ],
+    )
+}
+
+/// 列出所有脚本任务（目录 + 面板）。
+pub fn list_script_jobs(db: &Db) -> rusqlite::Result<Vec<JobRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {JOB_COLUMNS} FROM jobs WHERE kind = 'script' ORDER BY name"
+    ))?;
+    let rows = stmt.query_map([], map_job_row)?;
+    rows.collect()
+}
+
+/// 目录任务被文件/文件头移除了：真删行（它没有"面板定义"可保留）。
+pub fn delete_script_dir_job(db: &Db, name: &str) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir'",
+        params![SCRIPT_PLUGIN, name],
+    )
+}
+
+/// 文件头改调度后，目录任务的 `schedule` 收敛（保留 override_expr）。
+pub fn set_script_dir_schedule(db: &Db, name: &str, schedule: &str, now: &str) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET schedule = ?3, updated_at = ?4          WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir'",
+        params![SCRIPT_PLUGIN, name, schedule, now],
+    )
+}
+
+/// 收敛目录任务的脚本路径 / 运行时 / 参数 / 超时（文件头是权威）。
+pub fn update_script_dir_meta(
+    db: &Db,
+    name: &str,
+    script: &str,
+    runtime: &str,
+    params: Option<&str>,
+    budget_ms: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET script = ?3, runtime = ?4, params = ?5, budget_ms = ?6, updated_at = ?7
+         WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir'",
+        params![SCRIPT_PLUGIN, name, script, runtime, params, budget_ms.map(|v| v as i64), now],
+    )
 }
 
 /// 写入 / 清除**面板覆盖**的表达式。
@@ -881,12 +1142,15 @@ pub fn set_job_status(
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
                            last_error, paused, source, created_at, updated_at, override_expr,
-                           deleted, params, budget_ms";
+                           deleted, params, budget_ms, kind, script, runtime";
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
     Ok(JobRow {
         // 新列一律追加在最后：这样既有的 r.get(n) 索引都不用动
+        kind: r.get(18).unwrap_or_else(|_| "plugin".to_string()),
+        script: r.get(19).unwrap_or(None),
+        runtime: r.get(20).unwrap_or(None),
         budget_ms: r.get(17).unwrap_or(None),
         params: r.get(16).unwrap_or(None),
         deleted: r.get(15).unwrap_or(0) != 0,
@@ -982,7 +1246,7 @@ pub fn update_panel_job_schedule(
 pub fn delete_panel_job(db: &Db, plugin: &str, name: &str) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2 AND source = 'panel'",
+        "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2 AND source IN ('panel', 'script-panel')",
         params![plugin, name],
     )
 }
