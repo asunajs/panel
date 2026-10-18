@@ -48,6 +48,25 @@ curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bas
 PANEL_BASE_URL=https://你的镜像地址/plugin-panel bash install.sh
 ```
 
+用 `gh-proxy.com` 加速时，脚本和产物都要走代理：
+
+```bash
+curl -fsSL -o /tmp/panel-install.sh \
+  https://gh-proxy.com/https://raw.githubusercontent.com/asunajs/panel/main/install.sh
+
+PANEL_BASE_URL=https://gh-proxy.com/https://github.com/asunajs/panel/releases/latest/download \
+  bash /tmp/panel-install.sh
+```
+
+也可以一行跑完：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/asunajs/panel/main/install.sh \
+  | PANEL_BASE_URL=https://gh-proxy.com/https://github.com/asunajs/panel/releases/latest/download bash
+```
+
+固定版本就把 `latest/download` 换成 `download/v0.1.3`。代理只解决访问问题，安装脚本仍会校验 SHA256；但代理和校验和同源，正式环境建议优先用官方地址。
+
 ### 手动下载
 
 到 [Releases](https://github.com/asunajs/panel/releases) 下载：
