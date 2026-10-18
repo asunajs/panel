@@ -184,14 +184,18 @@ jobs:
       - name: 安装 musl 工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          # musl-gcc + perl/make（后者是 `openssl-src` 编 OpenSSL 要的）
+          sudo apt-get install -y musl-tools perl make
           which musl-gcc
 
       - name: 构建静态二进制
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --target aarch64-unknown-linux-musl
+        run: |
+          # 默认 feature 是 legacy-tls；musl 上它要动态链系统 OpenSSL，静态产物会红。
+          # 和 release.yml 一样用 vendored，把 OpenSSL 静态编进去。
+          cargo build --release --target aarch64-unknown-linux-musl --features legacy-tls-vendored
 
       - name: 确认是静态链接
         run: |
@@ -272,5 +276,5 @@ jobs:
         working-directory: adapters/node
 
       - name: 运行器的 --job（register_handler 的跨宿主等价物）
-        run: node bin/run.mjs ../../plugins/js/panel-jobs.js --job echo=@every 1s --duration 2
+        run: node bin/run.mjs ../../plugins/js/panel-jobs.js --job 'echo=@every 1s' --duration 2
         working-directory: adapters/node
