@@ -170,17 +170,21 @@ jobs:
           PANEL_PREFIX="$RUNNER_TEMP/panel" bash install.sh
           ls -lh "$RUNNER_TEMP/panel/plugin-panel"
 
-          # 令牌是必须的：没有就拒绝启动（第十五轮删掉了「本机免登录」）
-          PANEL_TOKEN=release-verify BIND_ADDR=127.0.0.1:8899 \
+          # 令牌是必须的：没有就拒绝启动（第十五轮删掉了「本机免登录」）。
+          # 用摘要形态启动，和真实部署一致；`X-Panel-Token` 要的是摘要，不是口令。
+          BIN="$RUNNER_TEMP/panel/plugin-panel"
+          PANEL_TOKEN_HASH="$(printf '%s' 'release-verify' | "$BIN" hash-token | head -1)"
+          PANEL_DIGEST="$(printf '%s' 'release-verify' | "$BIN" digest)"
+          PANEL_TOKEN_HASH="$PANEL_TOKEN_HASH" BIND_ADDR=127.0.0.1:8899 \
             DB_PATH="$RUNNER_TEMP/panel/panel.db" \
-            "$RUNNER_TEMP/panel/plugin-panel" > "$RUNNER_TEMP/panel.log" 2>&1 &
+            "$BIN" > "$RUNNER_TEMP/panel.log" 2>&1 &
           PID=$!
           for _ in $(seq 1 60); do
-            curl -fsS -H 'X-Panel-Token: release-verify' \
+            curl -fsS -H "X-Panel-Token: $PANEL_DIGEST" \
               http://127.0.0.1:8899/api/state >/dev/null 2>&1 && break
             sleep 0.25
           done
-          curl -fsS -H 'X-Panel-Token: release-verify' \
+          curl -fsS -H "X-Panel-Token: $PANEL_DIGEST" \
             http://127.0.0.1:8899/api/state | head -c 200
           echo
           kill -TERM "$PID"
