@@ -27,7 +27,10 @@ sqlite_exec(
 /** 没存过配置时的默认值。 */
 const DEFAULTS = {
     interval: '30s',
-    target: 'http://127.0.0.1:8080/metrics',
+    // 默认**不填**目标：填一个自己访问不到的内网地址，只会让人以为插件坏了。
+    // 留空就用合成样本演示；真实采集请填自己的 Prometheus / 网关地址。
+    // ⚠ 面板自身（127.0.0.1:<面板端口>）被 SSRF 防护挡住 —— 这是有意的。
+    target: '',
     threshold: '0.85',
     enabled: 1,
 };

@@ -52,13 +52,17 @@
 }
 
 .btn.danger {
+  /* 淡红底 + 红字在深色卡片上只有 3.6:1（Lighthouse 实测），
+     改成透明底 + 红字/红边：在卡片底色上 4.55:1，两种主题都过 AA。
+     悬停时才用实底 + 反色字，仍然过 AA。 */
   color: var(--error);
-  border-color: var(--error-soft);
-  background: var(--error-soft);
+  border-color: var(--error);
+  background: transparent;
 }
 
 .btn.danger:hover:not(:disabled) {
   background: var(--error);
+  border-color: var(--error);
   color: var(--accent-ink);
 }
 
@@ -259,6 +263,8 @@
   align-items: center;
   gap: var(--sp-3);
   margin-bottom: var(--sp-3);
+  /* 窄屏放不下时换行，而不是把「日志」这种两字标题压成竖排。 */
+  flex-wrap: wrap;
 }
 
 .section-title {
@@ -267,6 +273,8 @@
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  flex: none;
+  white-space: nowrap;
 }
 
 .section-head .card-actions {
@@ -652,10 +660,17 @@
 .plugin-actions {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: 6px;
   flex-wrap: wrap;
   margin-top: auto;
   padding-top: var(--sp-2);
+}
+
+/* 插件卡片的动作多（源码 / 卸载 / 长期加载 / 停用），用默认 13px + 12px 内边距时
+   三列卡片里「长期加载 ✓」会把「停用」挤到第二行。这里只收这一排，不动全局面板按钮。 */
+.plugin-actions .btn {
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 /* 视图切换的顶部消息条 */
@@ -809,6 +824,8 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .log-toolbar input[type='text'],
@@ -1020,4 +1037,135 @@
 .dialog-body {
   padding: var(--sp-4);
   overflow: auto;
+}
+
+
+/* ── 窄屏的日志页 / 区块头 ───────────────────────────────────────────────
+   日志页的标题、连接徽章、统计、五个导出按钮全挤在一行时，标题会被压成
+   竖排的「日/志」，按钮也会把统计挤到换行。这里按行重排，不隐藏功能。 */
+@media (max-width: 700px) {
+  .section-head {
+    align-items: flex-start;
+  }
+
+  .section-head .card-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  /* 窄屏上主操作单独占一行：和「刷新 / 清理」并排时它会被挤到第二行左端，
+     看起来像一颗普通按钮。 */
+  .section-head .card-actions .btn.primary {
+    flex: 1 1 100%;
+  }
+
+  .section-head .hint {
+    flex: 1 1 100%;
+  }
+
+  .log-toolbar {
+    gap: var(--sp-2);
+  }
+
+  .log-toolbar .tool {
+    width: 100%;
+  }
+
+  .log-toolbar .tool > .select,
+  .log-toolbar .tool > .input {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .log-toolbar .tool.levels {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .log-toolbar .tool.levels .log-levels {
+    flex: 1 1 100%;
+  }
+}
+
+/* ── 视图切换的轻微入场 ─────────────────────────────────────────────────
+   没有动画时切页像"闪一下"；这里只做 160ms 的透明 + 4px 上移，不改变布局，
+   也不拦点击。尊重系统「减少动态效果」。 */
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.view.is-entering {
+  animation: view-in 160ms ease;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.toast:not([hidden]) {
+  animation: toast-in 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view.is-entering,
+  .toast:not([hidden]) {
+    animation: none;
+  }
+}
+
+/* ── 仪表盘的「任务概览」在窄屏改成卡片 ──────────────────────────────
+   七列表格在 390px 下只能横向滚，用户第一眼看到的是被裁掉的「已启用」。
+   这不是数据缺失，但"要横着拖才知道有什么"本身就不好用 —— 与全部任务页
+   的卡片保持一致，窄屏一行一张。 */
+@media (max-width: 700px) {
+  .dash-jobs {
+    border: 0;
+    background: none;
+    overflow: visible;
+  }
+
+  .dash-jobs table,
+  .dash-jobs tbody,
+  .dash-jobs tr,
+  .dash-jobs td {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .dash-jobs thead {
+    display: none;
+  }
+
+  .dash-jobs tr {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-lg);
+    margin-bottom: var(--sp-2);
+    padding: var(--sp-3);
+    background: var(--surface);
+  }
+
+  .dash-jobs td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    padding: 3px 0;
+    border: 0;
+    text-align: left;
+  }
+
+  .dash-jobs td::before {
+    content: attr(data-label);
+    flex: none;
+    color: var(--text-mute);
+    font-size: 12px;
+  }
+
+  .dash-jobs td.num {
+    text-align: left;
+  }
 }

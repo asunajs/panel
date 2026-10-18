@@ -104,6 +104,12 @@ const SECRET_KEYS = [
   'ticket',
   'signature',
   'credential',
+  // 云厂商 / 网关的 API key 家族（2026-10 审计中4）。刻意写成完整词：
+  // 裸 `key` 会把 `keyword` / `key=value` 这类排查用的正常参数一并误伤。
+  'api_key',
+  'apikey',
+  'access_key',
+  'private_key',
 ];
 
 /** 整行脱到行尾的请求头（值里可能带 `;` 和空格，只能整行砍）。 */
@@ -115,6 +121,10 @@ const SECRET_HEADERS = [
   'x-auth-token',
   'x-csrf-token',
   'x-xsrf-token',
+  // 中4：`X-Api-Key` 是各家网关的凭据头；`x-panel-token` 是**本项目自己**的
+  // 面板令牌 —— 插件拿到它就能冒充操作者，它出现在日志里必须整行脱。
+  'x-api-key',
+  'x-panel-token',
 ];
 
 /** 值的终止符：ASCII 的 `& # ; " ' , ) ] }` + 全角标点 + 空白。 */
@@ -162,6 +172,53 @@ function isKeyChar(c) {
 function isWordBoundary(s, i) {
   if (i === 0) return true;
   return !/[0-9A-Za-z_]/.test(s[i - 1]);
+}
+
+/**
+ * 0) URL userinfo：`scheme://user:pass@host/x` → `scheme://***:***@host/x`。
+ *
+ * 审计中4：`https://alice:hunter2@host/x` 会把**账号和口令**原样留进 JSONL 一周。
+ * 判定收紧到 RFC 3986 的 authority 段（与 `src/log/mod.rs::redact_url_userinfo` 逐字符一致）：
+ * `://` 前必须真有 scheme，`@` 必须在 authority 内 —— 邮箱 `alice@example.com`
+ * 与 path 里的 `@` 因此不会被误伤。输出形状跟输入一致（有 `:` 才是 `***:***`），
+ * 所以对自己幂等。
+ */
+function redactUrlUserinfo(s) {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === ':' && i + 2 < s.length && s[i + 1] === '/' && s[i + 2] === '/') {
+      // 往回找 scheme 起点（ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )）
+      let start = i;
+      while (start > 0 && /[0-9A-Za-z+\-.]/.test(s[start - 1])) start -= 1;
+      const schemeOk = start < i && /[A-Za-z]/.test(s[start]);
+      if (schemeOk) {
+        const authStart = i + 3;
+        let at = -1;
+        let k = authStart;
+        while (k < s.length) {
+          const c = s[k];
+          if (c === '@') {
+            at = k;
+            break;
+          }
+          // authority 到此为止：往后是 path / query / fragment / 正文
+          if (c === '/' || c === '?' || c === '#' || c === '"' || c === "'" || c === '\\' || /\s/.test(c)) break;
+          k += 1;
+        }
+        if (at >= 0) {
+          out += s.slice(i, i + 3); // `://` 原样留着
+          out += s.slice(authStart, at).includes(':') ? '***:***' : '***';
+          out += '@';
+          i = at + 1;
+          continue;
+        }
+      }
+    }
+    out += s[i];
+    i += 1;
+  }
+  return out;
 }
 
 /** 1) `Cookie:` / `Authorization:` … 整行值 → `***`。 */
@@ -334,6 +391,9 @@ function redactPhones(s) {
  */
 export function redact(msg) {
   let s = String(msg);
+  // URL userinfo 排最前面：它是**结构**脱敏（userinfo 里可能含 `=` `&`），
+  // 先换成 `***`，后面的 kv / Bearer 才不会在密码串里做二次解释；也保证幂等。
+  s = redactUrlUserinfo(s);
   s = redactHeaders(s);
   s = redactJsonFields(s);
   s = redactKv(s);

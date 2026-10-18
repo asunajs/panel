@@ -24,6 +24,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# CI 只需要读仓库（多一层显式声明，别依赖事件的默认值）。
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -37,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -99,6 +105,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -124,6 +132,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -168,6 +178,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -232,6 +244,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -261,6 +275,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # node:sqlite 需要 Node 22.5+，别用 runner 自带的旧版本
       - uses: actions/setup-node@v4
@@ -278,3 +294,26 @@ jobs:
       - name: 运行器的 --job（register_handler 的跨宿主等价物）
         run: node bin/run.mjs ../../plugins/js/panel-jobs.js --job 'echo=@every 1s' --duration 2
         working-directory: adapters/node
+
+  # ------------------------------------------------------------------
+  # 依赖漏洞门禁（安全审计 中14）
+  #
+  # 为什么单独一个 job：Cargo.lock 里 3 个包命中过 8 条公告（rustls / zip /
+  # openssl）。当时逐条论证过「不可达」，但那只是**这一版代码**的性质：
+  # 哪天有人给 rustls 加一个自定义 ClientSessionStore、或把 upload.rs 换成
+  # `ZipArchive::extract()`，公告立刻就活了。没有门禁就没人会发现。
+  #
+  # `deny.toml` 里对已论证不可达的公告写了 `ignore` + 理由；新增的会直接红。
+  # ------------------------------------------------------------------
+  advisories:
+    name: 依赖公告
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          arguments: --all-features

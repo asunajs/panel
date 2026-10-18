@@ -1,219 +1,384 @@
-# plugin-panel —— Rust + QuickJS 动态插件任务面板（Node / Bun 可选）
+# 插件面板
 
-[![CI](https://github.com/asunajs/panel/actions/workflows/ci.yml/badge.svg)](https://github.com/asunajs/panel/actions/workflows/ci.yml)
+插件面板是一个跑在自己设备上的定时任务工具。装好以后，用浏览器打开一个网页，就能添加任务、设置执行时间、查看运行结果。它不需要云服务，也不需要数据库服务器，一个程序加一个 SQLite 文件就能工作。
 
-低配 ARM 盒子 / 旧手机上的常驻任务控制面板。最终目标：**常驻内存极低 / 单一 JS 插件语言 /
-毫秒级 Cron / SQLite 持久化 / 单二进制**。
+适合这些场景：
 
-插件语言**只有 JavaScript**，默认跑在内嵌的 QuickJS 里；需要生态或原生能力时，可以按插件
-切到外部 **Node.js（>= 20.6）** 或 **Bun（>= 1.0）**。Python **不再是插件语言** —— `.py`
-只作为任务目录里的 cron 脚本存在（一次性进程，见 [脚本任务](docs/script-jobs.md)）。
+- 每天定时签到、领积分、备份文件、清理临时目录
+- 在旧手机、树莓派或低配盒子上长期挂一个小服务
+- 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
+- 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-| 实测（macOS arm64，release） | 值 |
-|---|---|
-| 常驻内存（纯宿主，`footprint` 独占） | **2.1 MB** |
-| 常驻内存（+4 个 QuickJS 插件） | 2.9 MB |
-| 空闲 CPU | 0.0–0.1%（调度器 deadline 驱动，空闲时一次都不唤醒） |
-| 静态 musl 二进制（aarch64，含 QuickJS + SQLite + TLS） | **9.5 MB**（`legacy-tls-vendored`，发布用）；**5.0 MB**（`--no-default-features`，不带直播 TLS） |
-| 外部 Node / Bun 插件 | **待 Lead 实测**（Node 子进程约 40–80 MB、Bun 约 30–60 MB，量级如此；以实测为准） |
+当前版本：**0.1.2**。设置页可以直接看到正在运行的面板版本。
 
-数字怎么读（macOS 的 `ps` 会把共享库页算进来）见 [内存与跨平台验证](docs/performance.md#81-内存优化实测)。
-**第六轮那张「加 Python 插件要多付多少内存」的表是 PocketPy 时代的历史数据，已经不可复现** ——
-PocketPy 与 Python 插件基础设施在本轮被删除，新的 Node/Bun 数字等实测补上。
-
-**CI 跑在真 ARM64 Linux 硬件上**（`ubuntu-24.04-arm`）：单元测试、冒烟测试（真的把服务跑起来）、
-以及 `aarch64-unknown-linux-musl` 静态产物的构建与校验；另有一个 `windows-latest` job
-只做 `cargo check --all-targets` + release 链接，确保外部运行时 Unix-only 时 QuickJS 仍可编译。
-开发机是 arm64 macOS，跑不了 Linux 二进制 —— 「目标平台上到底能不能跑」只能由 CI 回答，
-不能拿本机结果代替。
-CI 在**打 tag / 手动触发 / 别人发 PR** 时跑；自己往 `main` 推 commit 不跑（一轮工作常常十几次提交，
-大部分是文档与前端调整）。真正的验证时机是「要发一版」，而那就是 tag。
-
-**界面**（`node scripts/screenshot.mjs` 生成，见 [§5 第 ㉒ 条](docs/testing.md#5-怎么验证)）：
-
-![面板](docs/screenshots/web-dashboard.png)
-
-主面板是 `web/` 下的多文件前端（原生 ES Module + hash 路由，无框架），编译期内嵌进二进制。
-**不引入构建链**是第十三轮拆分前端时的取舍（当时是一整个 42 KB 的 `PAGE` 常量），
-不是硬约束 —— 唯一的硬约束是**单一静态二进制**。
-侧边栏底部两个徽标分别是引擎心跳和鉴权状态 —— 鉴权徽标会写出**凭据的存储形式**（明文 / Argon2id 哈希）。
-
-插件可以自带配置页（由插件作者提供，位于 `/plugins/{name}/`，见 [§16.3](docs/changelog/13-webui.md#163-插件自有-ui一条路两个约束)）：
-
-![插件自带的配置页](docs/screenshots/web-plugin-ui.png)
+![面板首页](docs/screenshots/web-dashboard.png)
 
 ---
 
-## 快速开始
+## 先看一遍界面
+
+打开面板后，左侧有几项：
+
+- **仪表盘**：任务数量、最近运行、引擎状态
+- **全部任务**：已经创建的定时任务，可以执行、暂停、修改时间
+- **脚本文件**：放在任务目录里的脚本，以及由面板创建的脚本任务
+- **日志**：按插件和级别查看运行输出
+- **插件列表**：安装、启用、切换运行时、打开插件自己的页面
+- **设置**：主题、面板版本和编译信息
+
+第一次使用，建议先按下面的步骤跑一个最简单的脚本任务。成功一次以后，再装插件或写复杂任务。
+
+---
+
+## 安装
+
+### Linux、树莓派、旧手机（Termux）
+
+在终端执行：
 
 ```bash
-# ① 从源码跑（首次会编译 SQLite bundled + QuickJS-ng；不需要 Node，也不需要 Python）
-cd rust-plugin-panel
-PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') cargo run
-open http://127.0.0.1:8787/          # 面板（登录时填上面那串令牌）
-
-# ② 一键安装（旧手机 / ARM 盒子 / PC；自动检测架构 → 下载 → 校验 SHA256 → 装进 PATH）
 curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 ```
 
-⚠️ **口令是必填的**：没有「本机免登录」模式，没配口令一律拒绝启动 —— 反代
-（nginx / caddy / cloudflared）也跑在本机，转发过来的请求源地址全是 `127.0.0.1`，
-「绑回环 = 安全」在挂反代的那一刻就不成立。见 [§13](docs/security.md#13-第十轮面板鉴权)。
+脚本会识别 CPU 架构，从 GitHub Release 下载对应的静态二进制，校验 SHA256，然后放到 `PATH` 里。Termux 会装到 `$PREFIX/bin`，普通 Linux 一般装到 `~/.local/bin`。
 
-**外部运行时是可选的**。默认 QuickJS；要给某个插件换成 Node / Bun：
+如果 GitHub 下载慢，可以先把 `install.sh` 保存到本地再运行，或者用镜像：
 
 ```bash
-PANEL_JS_ENGINE=node cargo run        # 全局默认改成 Node（PATH 里要有 node >= 20.6）
-PANEL_NODE=/opt/node/bin/node ./plugin-panel   # 指定解释器路径
-# 单个插件在面板的插件卡片上切换运行时；存在 plugin_state 里，跨重启保留
+PANEL_BASE_URL=https://你的镜像地址/plugin-panel bash install.sh
 ```
 
-探不到 Node/Bun **不会阻止启动**：面板照常起，QuickJS 插件照常跑，面板上那两档置灰并显示原因。
+### 手动下载
 
-**Python 只用于脚本任务**：`.py` 脚本由 `PANEL_PYTHON`（默认 `python3`，要求 3.8+）一次性执行，
-没有 `host-api`、不注册任务、不接路由。没装 Python 也不影响插件与 JS 脚本。
+到 [Releases](https://github.com/asunajs/panel/releases) 下载：
 
-**部署请用摘要形态**：口令在浏览器里先算成摘要，服务端只收到摘要、存的是它的
-Argon2id —— 口令既不在服务器上，也不在传输里（[§21](docs/security.md#21-口令不再经过服务端第二十一轮)）：
+- ARM 盒子、树莓派、手机：`plugin-panel-aarch64-linux-musl`
+- 普通电脑、VPS：`plugin-panel-x86_64-linux-musl`
+
+下载后改个名字，加上执行权限：
 
 ```bash
-printf '%s' "$PASSWORD" | plugin-panel hash-token
-# → prehash1:$argon2id$v=19$m=19456,t=2,p=1$<盐>$<哈希>
-export PANEL_TOKEN_HASH='prehash1:$argon2id$…'
+chmod +x plugin-panel
+./plugin-panel
 ```
 
-脚本 / CI 拿 `X-Panel-Token` 用的那个值是**摘要**（不是口令）：
+### 从源码运行
+
+需要 Rust 工具链。第一次编译会久一点。
 
 ```bash
-export PANEL_DIGEST=$(printf '%s' "$PASSWORD" | plugin-panel digest)
-curl -H "X-Panel-Token: $PANEL_DIGEST" http://127.0.0.1:8787/api/state
+git clone https://github.com/asunajs/panel.git
+cd panel
+cargo build --release
+./target/release/plugin-panel
 ```
 
-开发时（`PANEL_TOKEN=明文口令`）要显式开一个**只在本机有效**的口子 —— 绑非回环
-地址或开了 `PANEL_COOKIE_SECURE` 都会被拒绝启动：
+---
+
+## 第一次启动
+
+面板必须设置口令，没有口令会直接拒绝启动。
+
+先生成一个口令哈希：
+
+```bash
+printf '%s' '换成你自己的口令' | plugin-panel hash-token
+```
+
+命令会输出一行 `export PANEL_TOKEN_HASH='prehash1:...'`，复制它，然后启动：
+
+```bash
+export PANEL_TOKEN_HASH='prehash1:...'
+plugin-panel
+```
+
+看到类似下面的日志就说明启动成功：
+
+```text
+插件页面 origin: http://127.0.0.1:8788
+监听 http://127.0.0.1:8787
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8787
+```
+
+输入刚才的口令。登录成功后，会话会保存在浏览器里，短时间内不用重复输入。
+
+> 本机临时调试也可以使用明文口令，但要显式打开开发开关：
+>
+> ```bash
+> PANEL_TOKEN=dev-token PANEL_ALLOW_PLAIN_TOKEN=1 plugin-panel
+> ```
+>
+> 这个开关只适合本机调试。放到服务器上时请用 `PANEL_TOKEN_HASH`。
+
+### 让别的设备访问
+
+默认只监听 `127.0.0.1`，也就是只有本机能打开。要让手机或另一台电脑访问，需要监听局域网地址：
+
+```bash
+BIND_ADDR=0.0.0.0:8787 plugin-panel
+```
+
+然后用 `http://这台机器的局域网IP:8787` 打开。
+
+注意：一旦监听 `0.0.0.0`，同一网络里的人都能访问登录页。请使用强口令；如果要从公网访问，建议放在 Nginx、Caddy 或 Cloudflare Tunnel 后面，并开启 HTTPS。
+
+---
+
+## 第一个定时任务
+
+先不写插件，用 Shell 脚本试一次。
+
+### 1. 找到任务目录
+
+面板默认从当前目录下的 `tasks/` 读取脚本。第一次启动后，这个目录会自动创建。结构可以是：
+
+```text
+tasks/
+├── hello.sh
+├── js/
+│   └── report.mjs
+├── py/
+│   └── cleanup.py
+└── sh/
+    └── backup.sh
+```
+
+根目录、`js/`、`py/`、`sh/` 都会被扫描。脚本放在根目录也可以，放子目录只是为了整齐。
+
+### 2. 写一个脚本
+
+创建 `tasks/hello.sh`：
+
+```sh
+#!/bin/sh
+# @name 打个招呼
+# @cron */5 * * * *
+
+echo "hello $(date)"
+```
+
+文件开头这两行是给面板看的：
+
+- `@name`：任务在面板上显示的名字
+- `@cron`：什么时候执行
+
+保存后回到面板，打开「脚本文件」，应该能看到「打个招呼」。打开「全部任务」，也能看到它，并且显示下一次执行时间。
+
+### 3. 手动跑一次
+
+在任务卡片上点「立即执行」。然后打开「日志」，应该能看到 `hello ...` 这一行。
+
+如果看不到，先检查：
+
+- 脚本有没有执行权限：`chmod +x tasks/hello.sh`
+- `@cron` 是否写对
+- 面板日志里有没有「脚本任务」相关报错
+
+### 4. 改执行时间
+
+可以直接改文件里的 `@cron`，也可以在面板任务卡片上点「编辑」，修改调度表达式。面板上的修改会覆盖文件里的值，文件本身不会被改。
+
+常用写法：
+
+| 表达式 | 含义 |
+|---|---|
+| `*/5 * * * *` | 每 5 分钟 |
+| `0 * * * *` | 每小时整点 |
+| `0 9 * * *` | 每天 9:00 |
+| `30 8 * * 1-5` | 周一到周五 8:30 |
+| `0 10,20 * * *` | 每天 10:00 和 20:00 |
+| `0 10 1 * *` | 每月 1 日 10:00 |
+
+面板同时支持 5 段和 6 段 cron。5 段是「分 时 日 月 周」，6 段在最前面多一个「秒」。
+
+### 5. 用 Python 或 JavaScript
+
+Python 脚本：
+
+```python
+# @name 清理临时文件
+# @cron 0 3 * * *
+# @timeout 120000
+
+import os
+import time
+
+print("start", time.time())
+```
+
+需要机器上有 Python 3.8 以上。面板默认调用 `python3`，也可以用 `PANEL_PYTHON` 指定路径。
+
+JavaScript 脚本需要 Node.js 20.6 以上，或者 Bun 1.0 以上：
+
+```js
+// @name 生成日报
+// @cron 0 8 * * *
+// @runtime node
+
+console.log('report', new Date().toISOString())
+```
+
+`@runtime` 可以写 `node` 或 `bun`。JS 脚本还能 `import 'host-api'`，使用日志、SQLite、HTTP、WebSocket 等能力。
+
+Python 和 Shell 脚本是普通进程，没有 `host-api`。这是有意的：它们本来就是操作系统的一部分。
+
+---
+
+## 安装插件
+
+插件适合放更复杂的功能，比如带配置页的工具、需要保持状态的签到程序。插件用 JavaScript 写，默认跑在面板内置的 QuickJS 里，不占一个 Node 进程。
+
+### 上传插件
+
+打开「插件列表」，点右上角「上传插件」：
+
+- 单文件插件：选 `.js` 文件，会上传到 `plugins/js/`
+- 多文件插件或带配置页的插件：打包成 `.zip` 上传
+- 带配置页的目录插件，zip 里保留外层目录名，例如 `mcloud/index.html`、`mcloud/app.js`
+
+上传后面板会自动扫描。插件卡片出现后，点「启用」或「加载」。如果没反应，点「全部重载」。
+
+### 插件从哪来
+
+插件是别人写的程序，安装前先看一遍源码。Node/Bun 插件能读写文件、启动子进程、访问网络，面板不会把它们关进沙箱。
+
+### 切换运行时
+
+插件卡片上可以选：
+
+- **QuickJS**：默认，内存占用小，适合大多数插件
+- **Node**：需要机器上有 Node.js 20.6+
+- **Bun**：需要 Bun 1.0+
+
+切换后插件会重新加载。某个插件用了 npm 包或原生 `fs`，通常就需要 Node/Bun。
+
+---
+
+## 定时、提前量和任务列表
+
+普通脚本的 cron 就是它真正执行的时间。
+
+有些插件需要在目标时间之前准备，比如抢兑、开抢前登录、提前拉取数据。这类任务会在任务列表里显示两个信息：
+
+- **调度表达式**：用户设置的目标时间，例如 `0 10,20 * * *`
+- **提前**：提前多少秒唤醒，例如 `60s`
+
+所以下一次执行可能显示 `19:59`，但目标仍然是 `20:00`。提前量由插件声明，也可以在插件自己的设置页里改。
+
+任务卡片上的「编辑」修改的是调度表达式；「暂停」会停止触发，但不会删除任务；「删除」对插件声明的任务是隐藏，插件更新后不会自动回来，需要点「恢复」。
+
+---
+
+## 常见问题
+
+### 登录不上
+
+先确认启动时用的是哪个口令。用 `PANEL_TOKEN_HASH` 启动时，浏览器里输入的是原始口令，不是那串 `prehash1:...`。
+
+如果之前登录过，换口令后旧会话会失效，重新登录即可。
+
+### 端口被占用
+
+换一个端口：
+
+```bash
+BIND_ADDR=127.0.0.1:8790 plugin-panel
+```
+
+### 手机锁屏后任务不跑
+
+Android 会清理后台进程。Termux 里执行：
+
+```bash
+termux-wake-lock
+```
+
+再到系统设置里关掉 Termux 的电池优化。不同手机的入口不一样，通常在「应用管理 → Termux → 电池 → 不受限制」。
+
+### Python 插件在哪
+
+没有 Python 插件了。`.py` 只作为脚本任务执行，不注册任务、不提供路由、不常驻。需要长期运行的 Python 程序，建议写成系统服务，或者用 Shell 脚本调用它。
+
+### 任务不执行
+
+按顺序检查：
+
+1. 任务是不是被暂停了
+2. cron 是不是写成了未来的时间
+3. 脚本文件是否还在，路径是否正确
+4. 「日志」里有没有报错
+5. 插件任务的处理函数是否还存在
+
+### 数据放在哪
+
+默认都在启动目录下：
+
+```text
+data/panel.db      任务、账号、插件状态
+plugins/           插件代码和插件页面
+tasks/             脚本任务
+logs/              插件日志
+data/plugin-data/  插件自己的数据
+```
+
+备份时把这几个目录一起复制走即可。升级面板不会删除这些文件。
+
+### 怎么升级
+
+重新运行安装脚本，或者下载新版本替换二进制。数据目录不变，升级后任务和插件都还在。
+
+升级前建议先备份 `data/panel.db`。
+
+---
+
+## 安全提醒
+
+- 不要把没有口令的面板直接暴露到公网。
+- 公网访问请走 HTTPS 反向代理。
+- 插件和脚本都是可信代码，只安装来源明确的插件。
+- 不要把 `PANEL_TOKEN`、`PANEL_TOKEN_HASH` 提交到 Git。
+- 定期备份 `data/panel.db` 和 `plugins/`。
+
+---
+
+## 更多文档
+
+- [文档索引](docs/README.md)：按「使用」「开发」「工程记录」分组
+- [部署与分发](docs/deployment.md)：systemd、Termux、镜像、Release 产物
+- [运行与配置](docs/configuration.md)：全部环境变量
+- [脚本任务](docs/script-jobs.md)：文件头、退出码、两种来源
+- [上传插件与脚本](docs/upload.md)：单文件和 zip 的路径规则
+- [插件 API](docs/plugin-api.md)：写插件时看这份
+- [host-api 规范](docs/host-api.md)：日志、SQLite、HTTP、WebSocket、SMTP、任务注册
+- [运行时选型](docs/runtimes.md)：QuickJS、Node、Bun 怎么选
+- [安全](docs/security.md)：鉴权、令牌存储、外部代码边界
+- [开发日志](docs/changelog/)：每次改动的原因和踩过的坑
+
+---
+
+## 开发
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+node scripts/test-web-assets.mjs
+cargo build --release
+python3 scripts/smoke.py ./target/release/plugin-panel
+```
+
+前端在 `web/`，没有构建步骤，改完刷新浏览器即可。开发时可以用：
 
 ```bash
 PANEL_TOKEN=dev-token PANEL_ALLOW_PLAIN_TOKEN=1 WEB_DEV_DIR=./web ./target/release/plugin-panel
 ```
 
-环境变量总表（执行预算、熔断阈值、worker 数、日志目录、插件数据根、运行时选择、脚本任务…）见
-[运行与配置](docs/configuration.md#3-运行)。
+---
 
-## 脚本任务（Python 退场后它接的是这个位置）
+## 许可证
 
-定时跑一段**不是插件**的东西 —— 备份、清理、一次性拉取 —— 用任务目录，不用写插件：
-
-```
-tasks/
-├── backup.sh              # 根目录
-├── cleanup.py
-├── js/report.mjs          # js|py|sh 各一层
-├── py/rotate.py
-└── sh/sync.sh
-```
-
-文件头（**前 50 行**内）写注解就会被自动发现：
-
-```js
-// @cron */5 * * * * *
-// @name 报表
-// @runtime node
-// @timeout 30000
-// @params {"day":"today"}
-console.log('跑一次就退出');
-```
-
-- `js|mjs` → **Node（默认）或 Bun**（`@runtime`）—— QuickJS 只负责插件，不跑脚本；
-  `py` → `PANEL_PYTHON`；`sh` → `/bin/sh`。
-- 有 `@cron` 才会被调度；没有 `@cron` 的文件只是「被发现了」。
-- **JS 脚本**可以 `import 'host-api'` 用日志 / SQLite / HTTP / WS / SMTP；`register_cron`、
-  `register_handler`、`register_route`、`register_nav`、`worker_hint` 在脚本模式**抛错**（脚本没有调度表）。
-- **Python / Shell 脚本**是原生的：没有 `host-api`，能用整个进程环境 —— 这是刻意的非对称。
-- 面板可以覆盖脚本的调度、暂停 / 立即执行 / 删除 / 恢复；也可以**新建**一条指向任务目录里某个文件的
-  `script-panel` 任务。同名时**目录优先**；文件删了，目录任务消失，面板任务保留并显示错误。
-
-完整规则（目录布局、头部键、两种来源的优先级、退出码、环境变量、例子）见
-[脚本任务](docs/script-jobs.md)。
-
-## 安全边界（一句话）
-
-**外部 JS 插件与 JS/Python/Shell 脚本都是「可信代码」**：Node/Bun 插件有真实的 `fs`、
-`child_process`、网络；Python/Shell 脚本就是普通进程。面板只做**环境变量白名单**
-（不透传 `PANEL_TOKEN*`）与进程组清理，**不沙箱**。装之前先看源码，别装来路不明的插件。
-QuickJS 插件仍受数据目录围栏限制；一旦用了原生 npm/fs/child_process，它就不再承诺能跑在 QuickJS 里。
-详见 [安全](docs/security.md#28-外部运行时与脚本可信代码不是沙箱)。
-
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| **[文档索引](docs/README.md)** | 全部文档的目录 + 「原 README §编号 → 文件」对照表 |
-| [架构与目录结构](docs/architecture.md) | 进程/线程模型、运行时选择、目录布局、影响后续扩展的设计决策 |
-| [插件 API](docs/plugin-api.md) | 插件作者要看的全部：注册任务、日志、热更新、面板写操作、Cron 语法 |
-| [host-api 规范 v2](docs/host-api.md) | JS 宿主契约：函数、payload、错误约定、QuickJS/Node/Bun 能力矩阵、脚本模式限制 |
-| [运行时选型](docs/runtimes.md) | 为什么删掉 PocketPy/Python 插件；QuickJS/Node/Bun 怎么选；外部进程模型；A 数据面与原生逃生口 |
-| [外部运行时协议](docs/ext-runtime-protocol.md) | 长驻 JS 子进程：fd0/1/2/3/4、消息形状、RPC 方法、超时/杀进程组/重启、环境白名单 |
-| [脚本任务](docs/script-jobs.md) | `TASKS_DIR` 布局、文件头键、`script-dir` / `script-panel` 两种来源、执行环境与退出码 |
-| [运行与配置](docs/configuration.md) | 环境变量总表、开发时的前端热改、后台常驻 |
-| [部署与分发](docs/deployment.md) | 一键安装、Release 产物、旧手机（Termux）、ARM 盒子（systemd） |
-| [安全](docs/security.md) | 面板鉴权、令牌存储、防爆破、外部运行时的可信代码边界 |
-| [引擎自我保护](docs/engine-safety.md) | 执行预算、任务熔断、外部进程超时/崩溃/回收、优雅退出 |
-| [内存与跨平台验证](docs/performance.md) | 实测内存、Axum 选型对比、CI、本地交叉编译 |
-| [日志系统](docs/logging.md) | 插件级与面板级两条通道、规格、SSE、三份实现怎么不漂移 |
-| [插件数据目录与文件系统](docs/plugin-fs.md) | QuickJS 的数据根与围栏；外部 Node 的原生 fs 与 CWD |
-| [运行记录](docs/run-history.md) | 从「那次执行」点进日志：`runs` 表、保留期、界面、试跑记录 |
-| [验证手册](docs/testing.md) | 从单元测试到端到端冒烟的全套验证入口 |
-| [实测踩坑清单](docs/pitfalls.md) | rquickjs / SQLite / 调度器 / 外部运行时 fd3-fd4 / 脚本目录发现，实测踩出来的清单 |
-| [路线与遗留](docs/roadmap.md) | 还没做的账：慢任务隔离、连接池、ARM 真机、脚本任务 UI…… |
-| [开发日志](docs/changelog/) | 按轮次的工程记录（第九轮起：为什么这么改、踩了什么、证据是什么） |
-
-## 验证
-
-```bash
-cargo test                                  # 单元测试（cron / 调度 / jobs 语义 / 运行时探测 / WebSocket 客户端）
-cargo clippy --all-targets -- -D warnings   # lint 门禁（41 条已清到 0；见下）
-node scripts/test-web-assets.mjs            # 前端静态检查（ES Module、无内联 CSS/JS、无硬编码色值）
-node runtime/js/test/run-tests.mjs          # 外部 Node/Bun 运行时的协议与 host-api 用例
-cargo build --release && python3 scripts/smoke.py ./target/release/plugin-panel   # 端到端冒烟
-bash scripts/test-install.sh                # install.sh 的 15 项用例（shim 假造 Release）
-```
-
-冒烟测试不是「编译通过就算」—— 它真的把二进制拉起来，走一遍 HTTP / JSON / SQLite / 调度循环 /
-插件路由 / 脚本任务 / 优雅退出，并在 Linux 上检查常驻内存（阈值 32 MB）。
-
-**另外 18 条**（容错、执行预算、熔断、健康上报、热更新、跨重启存活、鉴权、防爆破、截图回归……）
-连同每条的实测数据见 [验证手册](docs/testing.md)。
-
-## 当前进度
-
-| 轮次 | 内容 | 状态 |
-|---|---|---|
-| 第一轮 | Axum + 嵌入 QuickJS + 插件加载 + `host.log` + SQLite + 每秒 `on_tick` | ✅ 已验证 |
-| 第二轮 | 毫秒级 Cron 调度 + `jobs` 表持久化 + 面板任务视图 | ✅ 已验证 |
-| 第三轮 | 执行预算（死循环防护）+ 任务熔断 + 引擎健康上报 + SIGTERM 优雅退出 | ✅ 已验证 |
-| 第四轮 | 内存优化（tokio worker 收敛）+ 跨平台 CI + 静态 musl 产物 | ✅ 本机 + **CI（真 ARM64 Linux 硬件）已验证** |
-| 第五轮 | 部署与分发（install.sh 一键安装 + 打 tag 自动发 Release）+ SQLite 内存参数实测复核 | ✅ 脚本 15 项用例 + **真 Release 端到端验证** |
-| 第六轮 | 双运行时：嵌入 PocketPy 跑 Python 插件 + 抽象宿主 API + JS 插件 HTTP 路由 + mtime 热更新 | 🗑 **已移除**（Python 插件退场，见 [第六十轮](docs/changelog/60-third-party-runtimes.md)） |
-| 第七轮 | Node.js / CPython 适配器（同一份插件跨 4 个运行时） | 🗑 **部分移除**：Node 适配器保留，CPython 适配器删除 |
-| 第八轮 | **面板从只读变可操作**：手动触发 / 暂停 / 恢复 + 写接口防 CSRF | ✅ 已验证（冒烟 24 项） |
-| 第九轮 | **`jobs` 表成为任务定义的权威来源**：`source` 区分插件声明 / 面板创建 + `register_handler` | ✅ 已验证（见 [§12](docs/changelog/09-jobs-authority.md#12-第九轮jobs-表成为任务定义的权威来源)） |
-| 第十轮 | **面板鉴权**：令牌 + 内存会话 cookie + 常量时间比较 + 登录退避 + 审计日志 | ✅ 已验证（见 [§13](docs/security.md#13-第十轮面板鉴权)） |
-| 第十一轮 | 插件目录变活（新增/删除/改名即时生效）+ 长跑内存实测 | ✅ 已验证（见 [§14](docs/changelog/11-live-plugin-dir.md#14-第十一轮插件目录变活--长跑内存实测)） |
-| 第十二轮 | 任务定义可编辑（覆盖层）+ 失效任务清理 | ✅ 已验证（见 [§15](docs/changelog/12-editable-jobs.md#15-第十二轮任务定义可编辑--失效任务清理)） |
-| 第十三轮 | **插件自有 WebUI**（主面板不是壳）+ 前端多文件零构建 + 测试运行 + `/classic` 退休 | ✅ 已验证（见 [§16](docs/changelog/13-webui.md#16-第十三轮插件自有-webui主面板不是壳)） |
-| 第十四轮 | `/api/test/*` 限流 + 串行代价**先量化再改** → worker 池 | ✅ p99 318/820ms → 24ms，丢触发 12 → 0 |
-| 第十五轮 | 卡片布局改两次才对 + 任务可编辑（面板对插件任务的**覆盖层**） | ✅ 已验证 |
-| 第十六轮 | 任务删除的**墓碑**语义 + 插件管理（停用/启用、重载、源码） | ✅ 已验证 |
-| 第十七轮 | 高危动作**二次确认** + 插件源码独立页面且**可编辑**（含改坏能回滚） | ✅ 已验证 |
-| 第十八轮 | 令牌改为支持**盐 + 哈希**存储（Argon2id）+ `hash-token` 子命令 + 明文绝不落盘的断言 | ✅ 已验证（见 [§18](docs/security.md#18-令牌不再明文落盘盐--哈希用户实测指出登录令牌不应该明文保存在本地)） |
-| 第十九轮 | **删掉「本机免登录」** —— 凭据变成必需品（类型上不存在「免鉴权」状态） | ✅ 已验证 |
-| 第二十轮 | **防爆破**：反代下取真实客户端 IP + 跨来源的全局失败闸 + 状态可见 | ✅ 已验证（见 [§20](docs/security.md#20-防爆破第二十轮)） |
-| 第二十一轮 | 宿主 API 加 **WebSocket 客户端**（`ws_open` / `ws_send` / `ws_recv` / `ws_close`） | ✅ 已验证（9 项对着**真的** WS 服务端收发） |
-| 第二十二轮 | `legacy-tls`：只给 CBC 套件的上游（rustls 不实现 CBC）走平台 TLS | ✅ 真直播实测通过；默认构建一个字节都没变 |
-| 第二十三轮 | 任务参数 / 随机表达式（抖动）/ 插件声明的侧边栏入口 / `smtp_send` / 按任务声明执行预算 | ✅ 已验证 |
-| 第二十四轮 | **日志**：插件级与面板级两条通道、八档语义、SSE、三份实现共享向量 | ✅ 已验证（见 [§21](docs/logging.md#21-日志插件级与面板级两条通道第二十四轮)） |
-| 第二十五轮 | **面板内的文件系统**：给插件一个自己的根 + 物理层围栏 | ✅ 已验证（见 [§22](docs/plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮)） |
-| 第二十六轮 | **运行记录**：从「那次执行」点进日志，试跑也进同一张表 | ✅ 已验证（见 [§24](docs/run-history.md#24-运行记录从那次执行点进日志第二十六轮) / [§26](docs/run-history.md#26-试跑也进运行记录第二十六轮续)） |
-| 第二十九轮 | 登录页的**蜜罐**：一个看不见的「账号」框，填了它 + 口令又不对 ⇒ 封掉这个来源的登录一小时（`PANEL_ALLOW_IPS` 是出路） | ✅ 已验证（见 [§27](docs/security.md#27-登录页的蜜罐把自动化脚本判出来第二十九轮)） |
-| 第六十轮 | **第三方运行时**：插件 JS-only（QuickJS / Node / Bun）、脚本任务（`TASKS_DIR`）、Python 插件基础设施删除、Node 适配器保留 | 🚧 进行中（见 [第六十轮](docs/changelog/60-third-party-runtimes.md)） |
-| 后续 | 插件市场 / 多实例 / 用户与权限 / ARM 真机 | 未开始（见 [路线与遗留](docs/roadmap.md)） |
+这个仓库目前没有附带开源许可证文件。使用、分发或修改前请先联系仓库作者。

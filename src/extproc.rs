@@ -897,6 +897,7 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
                 &arg_str(&args, 1),
                 &arg_str(&args, 2),
                 &arg_str(&args, 3),
+                &arg_str(&args, 4),
             )?;
             let mut p = shared.pending.lock().unwrap();
             if p.tasks.iter().any(|t| t.name == def.name) {
@@ -1071,8 +1072,46 @@ fn wait_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
     }
 }
 
+/// 把任务名变成**目录名**（`plugin-data/__script__/<这里>`）。
+///
+/// 必须是**单射**：两个不同的任务名不能落到同一个目录，否则它们会共享数据目录
+/// （`data` / `state.json` 互相覆盖）。原来的写法把所有不安全字符都映射成 `_`：
+/// `日报` 与 `任务` 都变成 `__`，而 `taskdir::valid_task_name` 是允许非 ASCII 的
+/// —— 两处对「合法名字」的定义不一致（安全审计 L19）。
+///
+/// 现在按 UTF-8 **字节**做百分号转义：安全字符保持原样，其余 `%XX`。
+/// 转义以 `%` 开头，而 `%` 本身会被转义成 `%25` ⇒ 不可能撞上原样字符，单射成立。
+/// `.` 不在安全集里，所以 `.` / `..` 不会变成目录穿越。
 fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
-        .collect()
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    // 空名字：占一个不可能由真名产生的值（真名 "%00" 会转成 "%2500"）。
+    if out.is_empty() {
+        out.push_str("%00");
+    }
+    out
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize;
+
+    /// 安全审计 L19：两个不同的任务名必须落到不同的目录。
+    #[test]
+    fn sanitize_is_injective() {
+        assert_ne!(sanitize("日报"), sanitize("任务"));
+        assert_ne!(sanitize("a.b"), sanitize("a_b"));
+        assert_ne!(sanitize(""), sanitize("%00"));
+        // 目录穿越防护：`.` / `..` 不会原样留下
+        assert_eq!(sanitize("."), "%2E");
+        assert_eq!(sanitize(".."), "%2E%2E");
+        // 安全字符保持可读
+        assert_eq!(sanitize("daily-report_2"), "daily-report_2");
+    }
 }

@@ -95,7 +95,7 @@
 }
 
 .nav-plugins::before {
-  content: "插件";
+  content: "插件页面";
   display: block;
   padding: 0 var(--sp-3) var(--sp-2);
   font-size: 11px;
@@ -122,16 +122,24 @@
 }
 
 .topbar {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
   height: var(--topbar-h);
-  padding: 0 var(--sp-5);
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg);
   position: sticky;
   top: 0;
   z-index: 20;
+}
+
+/* 与 .view 的 1100px 内容区对齐（.view 自己有 24px 内边距，所以这里也留同样一份）。 */
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 1100px;
+  height: 100%;
+  margin-inline: auto;
+  padding: 0 var(--sp-5);
 }
 
 .topbar-title {
@@ -150,6 +158,8 @@
   padding: var(--sp-5);
   max-width: 1100px; /* 信息密度：不让内容在超宽屏上摊成一条线 */
   width: 100%;
+  /* 超宽屏上内容居中；否则 1100px 之后右边会空出一大条，页面看起来偏左。 */
+  margin-inline: auto;
   outline: none;
 }
 
@@ -202,7 +212,7 @@
     padding: var(--sp-4) var(--sp-3);
   }
 
-  .topbar {
+  .topbar-inner {
     padding: 0 var(--sp-3);
   }
 }

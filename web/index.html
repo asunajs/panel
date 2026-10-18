@@ -37,16 +37,16 @@
           <span class="nav-icon" aria-hidden="true">▦</span><span>仪表盘</span>
         </a>
         <a class="nav-item" href="#/tasks" data-view="tasks">
-          <span class="nav-icon" aria-hidden="true">≡</span><span>任务列表</span>
+          <span class="nav-icon" aria-hidden="true">≡</span><span>全部任务</span>
         </a>
         <a class="nav-item" href="#/scripts" data-view="scripts">
-          <span class="nav-icon" aria-hidden="true">⌁</span><span>脚本任务</span>
+          <span class="nav-icon" aria-hidden="true">⌁</span><span>脚本文件</span>
         </a>
         <a class="nav-item" href="#/logs" data-view="logs">
           <span class="nav-icon" aria-hidden="true">▶</span><span>日志</span>
         </a>
         <a class="nav-item" href="#/plugins" data-view="plugins">
-          <span class="nav-icon" aria-hidden="true">◧</span><span>插件管理</span>
+          <span class="nav-icon" aria-hidden="true">◧</span><span>插件列表</span>
         </a>
         <a class="nav-item" href="#/settings" data-view="settings">
           <span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span>
@@ -70,12 +70,16 @@
 
     <div class="main">
       <header class="topbar">
-        <button id="menu-btn" class="icon-btn only-mobile" aria-label="打开导航" aria-expanded="false">☰</button>
-        <h1 id="view-title" class="topbar-title">仪表盘</h1>
-        <div class="topbar-right">
-          <!-- 只在开了鉴权时显示（app.js 按 /api/state 的 auth.enabled 决定） -->
-          <button id="logout-btn" class="btn ghost" hidden>登出</button>
-          <button id="theme-btn" class="icon-btn" aria-label="切换主题" title="切换深色 / 亮色">◐</button>
+        <!-- 顶栏内容与 .view 的 1100px 内容区对齐：超宽屏上正文居中之后，
+             标题还贴在侧边栏旁边会显得"没对齐"。 -->
+        <div class="topbar-inner">
+          <button id="menu-btn" class="icon-btn only-mobile" aria-label="打开导航" aria-expanded="false">☰</button>
+          <h1 id="view-title" class="topbar-title">仪表盘</h1>
+          <div class="topbar-right">
+            <!-- 只在开了鉴权时显示（app.js 按 /api/state 的 auth.enabled 决定） -->
+            <button id="logout-btn" class="btn ghost" hidden>登出</button>
+            <button id="theme-btn" class="icon-btn" aria-label="切换主题" title="切换深色 / 亮色">◐</button>
+          </div>
         </div>
       </header>
 

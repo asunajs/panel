@@ -14,11 +14,13 @@
 
 import {
   getState,
+  pluginUiUrl,
   setPluginDisabled,
   reloadPlugin,
   setPluginKeepWarm,
   setPluginLoaded,
   setPluginRuntime,
+  uploadFile,
 } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 
@@ -136,6 +138,8 @@ export async function render(root, ctx, opts = {}) {
       <div class="section-head">
         <span class="section-title">已加载插件（${plugins.length}）</span>
         <div class="card-actions">
+          <button class="btn" id="upload-btn" title="上传 .js 单文件，或解压 .zip 到插件目录">上传插件</button>
+          <input type="file" id="upload-input" accept=".js,.zip" hidden>
           <button class="btn" id="refresh-btn">刷新</button>
         </div>
       </div>
@@ -198,7 +202,7 @@ export async function render(root, ctx, opts = {}) {
                     ? '<span class="hint">已停用：任务不运行，配置页也打不开</span>'
                     : hasUi
                       ? `<button class="btn primary" data-open="${esc(p.name)}">打开配置页</button>
-                       <a class="btn" href="/plugins/${encodeURIComponent(p.name)}/" target="_blank" rel="noopener">新标签页</a>`
+                       <a class="btn" href="${esc(pluginUiUrl(`/plugins/${encodeURIComponent(p.name)}/`))}" target="_blank" rel="noopener">新标签页</a>`
                       : '<span class="hint">没有自带配置页</span>';
                   // 管理动作：源码 / **卸载·加载** / 长期加载 / 停用启用。
                   //
@@ -288,13 +292,35 @@ export async function render(root, ctx, opts = {}) {
           <button class="btn ghost" id="frame-close">关闭</button>
         </div>
       </div>
-      <iframe id="plugin-frame" class="plugin-frame" title="插件配置页"></iframe>
+      <iframe id="plugin-frame" class="plugin-frame"
+              sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
+              title="插件配置页"></iframe>
     </div>`;
 
   // 渲染完把开着的确认条画回去（见 confirm.js）
   paintArmed(root);
 
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
+
+  const uploadInput = root.querySelector('#upload-input');
+  root.querySelector('#upload-btn').addEventListener('click', () => uploadInput.click());
+  uploadInput.addEventListener('change', async () => {
+    const file = uploadInput.files && uploadInput.files[0];
+    uploadInput.value = '';
+    if (!file) return;
+    const res = await uploadFile('plugins', file);
+    if (!res.ok) {
+      ctx.toast(`上传失败：${res.error}`, 'bad');
+      return;
+    }
+    ctx.toast(
+      res.zip
+        ? `已解压 ${res.files.length} 个文件到插件目录`
+        : `已上传插件：${res.files[0] || file.name}`,
+      'ok',
+    );
+    render(root, ctx);
+  });
 
   // 内嵌打开：比新标签页顺手（不用来回切），但也提供新标签页入口 ——
   // 插件页面若需要整个窗口（比如它自己的移动端布局），iframe 里会显得挤。
@@ -323,7 +349,7 @@ export async function render(root, ctx, opts = {}) {
     const frame = root.querySelector('#plugin-frame');
     root.querySelector('#frame-title').textContent = `${name} · 插件配置页`;
     // 加 ?embed=1 让插件页面知道自己在 iframe 里（可以据此隐藏自己的页头）
-    frame.src = `/plugins/${encodeURIComponent(name)}/?embed=1`;
+    frame.src = pluginUiUrl(`/plugins/${encodeURIComponent(name)}/?embed=1`);
     section.hidden = false;
     section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });

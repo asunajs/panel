@@ -2,8 +2,8 @@
   web/js/app.js —— 入口。
 
   职责边界（这一轮最重要的约定）：
-    - **主面板是功能完整的控制面板**：导航、Dashboard、任务列表与编辑、测试运行、
-      插件管理、设置，都归它管。它不是壳。
+    - **主面板是功能完整的控制面板**：导航、Dashboard、全部任务与编辑、测试运行、
+      插件列表、设置，都归它管。它不是壳。
     - **插件自有 UI 是补充**：每个插件在 /plugins/{name}/ 下提供自己的配置页，
       由插件作者编写，用来管理**这个插件自己需要的那份配置**。主面板只给入口
       （见 views/plugin-list.js），不接管、也不复制插件的界面。
@@ -19,9 +19,9 @@ import * as pluginSource from './views/plugin-source.js';
 import * as scriptList from './views/script-list.js';
 import * as scriptEditor from './views/script-editor.js';
 import * as logView from './views/log-view.js';
-import { getState, logout } from './api.js';
+import { getState, logout, setPluginUiOrigin, pluginUiUrl, editJob } from './api.js';
 import { lineNode, openLogStream, makeRing } from './logstream.js';
-// 状态的中文与时刻的显示格式：与任务列表页共用一份（见 status.js 的文件头）
+// 状态的中文与时刻的显示格式：与全部任务页共用一份（见 status.js 的文件头）
 import { statusBadge, minuteOf } from './status.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -175,7 +175,7 @@ async function renderDashboard(root) {
     root.innerHTML = `
       <div class="card">
         <span class="badge failed">读不到面板状态</span>
-        <p class="hint" style="margin-top:var(--sp-2)">${res.error}</p>
+        <p class="hint" style="margin-top:var(--sp-2)">${esc(res.error ?? '')}</p>
       </div>`;
     return;
   }
@@ -220,7 +220,7 @@ async function renderDashboard(root) {
 
     <div class="section">
       <div class="section-head"><span class="section-title">任务概览</span></div>
-      <div class="table-wrap">
+      <div class="table-wrap dash-jobs">
         <table>
           <thead><tr><th>插件</th><th>任务</th><th>表达式</th><th>来源</th><th>状态</th><th class="num">触发</th><th>下次</th></tr></thead>
           <tbody>
@@ -230,7 +230,7 @@ async function renderDashboard(root) {
                     .slice(0, 12)
                     .map((j) => {
                       // 状态原来是把后端的原值直接印出来的（表里写 `running`），
-                      // 而任务列表页同一列写「运行中」—— 现在共用 ../status.js 那一份。
+                      // 而全部任务页同一列写「运行中」—— 现在共用 ../status.js 那一份。
                       const st = statusBadge(j.status);
                       // 脚本任务不挂在插件下：`__script__` 是内部保留名，
                       // 直接印出来只会让人问「这个插件是什么」。
@@ -244,13 +244,13 @@ async function renderDashboard(root) {
                           ? '面板'
                           : '插件代码';
                       return `<tr>
-                  <td class="mono dim" title="${esc(j.script || '')}">${esc(who)}</td>
-                  <td class="mono">${esc(j.name)}</td>
-                  <td class="mono dim">${esc(j.schedule)}</td>
-                  <td class="mono dim">${src}</td>
-                  <td><span class="badge ${st.cls}"${st.title ? ` title="${st.title}"` : ''}>${st.text}</span></td>
-                  <td class="num">${j.runs}</td>
-                  <td class="mono dim">${minuteOf(j.next_run)}</td>
+                  <td data-label="插件" class="mono dim" title="${esc(j.script || '')}">${esc(who)}</td>
+                  <td data-label="任务" class="mono">${esc(j.name)}</td>
+                  <td data-label="表达式" class="mono dim">${esc(j.schedule)}</td>
+                  <td data-label="来源" class="mono dim">${src}</td>
+                  <td data-label="状态"><span class="badge ${st.cls}"${st.title ? ` title="${st.title}"` : ''}>${st.text}</span></td>
+                  <td data-label="触发" class="num">${j.runs}</td>
+                  <td data-label="下次" class="mono dim">${minuteOf(j.next_run)}</td>
                 </tr>`;
                     })
                     .join('')
@@ -273,7 +273,7 @@ async function renderDashboard(root) {
           <button class="btn" id="log-more">打开日志页</button>
         </div>
       </div>
-      <div class="console" id="log-box">${logRows(res.logs)}</div>
+      <div class="console" id="log-box" tabindex="0" aria-label="实时日志">${logRows(res.logs)}</div>
       <p class="hint">这里只留最近 40 行，<b>面板自己的日志和各个插件的日志都在里面</b>
         （每行前面那个方括号就是来源）。要看全量、按级别/插件/关键字筛、或者导出，去「日志」页。</p>
     </div>`;
@@ -343,8 +343,20 @@ async function renderDashboard(root) {
 
 // ---------------------------------------------------------------- 设置
 
-function renderSettings(root) {
+async function renderSettings(root) {
   const theme = document.documentElement.dataset.theme;
+  let build = null;
+  try {
+    const res = await getState();
+    if (res.ok) build = res.build || null;
+  } catch {
+    /* 后端没起来时仍然把外观设置画出来 */
+  }
+  const version = build && build.version ? build.version : '未知';
+  const features = build && Array.isArray(build.features) && build.features.length
+    ? build.features.join('、')
+    : '无';
+  const live = build ? (build.live_supported ? '可用' : '不可用') : '未知';
   root.innerHTML = `
     <div class="section">
       <div class="section-head"><span class="section-title">外观</span></div>
@@ -362,8 +374,22 @@ function renderSettings(root) {
     <div class="section">
       <div class="section-head"><span class="section-title">关于</span></div>
       <div class="card">
-        <p class="hint">
-          主面板负责任务定义与调度、测试运行、插件管理。插件可以在
+        <div class="row">
+          <div class="field">
+            <span class="field-label">面板版本</span>
+            <span class="mono">v${esc(version)}</span>
+          </div>
+          <div class="field">
+            <span class="field-label">编译特性</span>
+            <span class="mono dim">${esc(features)}</span>
+          </div>
+          <div class="field">
+            <span class="field-label">直播支持</span>
+            <span class="mono dim">${esc(live)}</span>
+          </div>
+        </div>
+        <p class="hint" style="margin-top:var(--sp-3)">
+          主面板负责任务定义与调度、测试运行、插件列表。插件可以在
           <span class="mono">/plugins/{name}/</span> 下提供自己的配置页，由插件作者编写，
           用来管理这个插件自己需要的那份配置。
         </p>
@@ -379,14 +405,14 @@ function renderSettings(root) {
 
 const TITLES = {
   // ⚠ 这一格原来是 'Dashboard'（英文）—— 其余四格都是中文，侧边栏里并排写着
-  // 「Dashboard / 任务列表 / 日志 / 插件管理 / 设置」。同一份界面里混两种语言
+  // 「Dashboard / 全部任务 / 日志 / 插件列表 / 设置」。同一份界面里混两种语言
   // 本身就是"没设计过"的样子（同一个毛病还有统计卡的 UPTIME / TICKS，第二十八轮一并改了）。
   dashboard: '仪表盘',
-  tasks: '任务列表',
-  scripts: '脚本任务',
-  'script-editor': '脚本任务',
+  tasks: '全部任务',
+  scripts: '脚本文件',
+  'script-editor': '脚本文件',
   logs: '日志',
-  plugins: '插件管理',
+  plugins: '插件列表',
   settings: '设置',
 };
 
@@ -403,7 +429,7 @@ function parseHash() {
     return { view: 'tasks' };
   }
   if (parts[0] === 'scripts') {
-    // #/scripts/new[/{path}] —— 新建面板任务（path 用来预选文件）
+    // #/scripts/new[/{path}] —— 新建面板脚本任务（path 用来预选文件）
     // #/scripts/edit/{name}    —— 编辑面板任务 / 覆盖目录任务的调度
     if (parts[1] === 'new') {
       return {
@@ -461,12 +487,12 @@ async function route() {
   $('#view-title').textContent =
     view === 'task-editor'
       ? params.mode === 'edit'
-        ? '编辑任务'
-        : '新建任务'
+        ? '编辑插件任务'
+        : '新建插件任务'
       : view === 'script-editor'
         ? params.mode === 'edit'
-          ? `编辑脚本任务${params.name ? `：${params.name}` : ''}`
-          : '新建脚本任务'
+          ? `编辑面板脚本任务${params.name ? `：${params.name}` : ''}`
+          : '新建面板脚本任务'
         : view === 'plugin-source'
           ? `插件源码：${params.name}`
           : view === 'plugin-page'
@@ -483,14 +509,42 @@ async function route() {
     else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
     else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
-    else if (view === 'settings') renderSettings(root);
+    else if (view === 'settings') await renderSettings(root);
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页
     root.innerHTML = `<div class="card"><span class="badge failed">视图渲染失败</span>
       <p class="hint" style="margin-top:var(--sp-2)">${String(e && e.message ? e.message : e)}</p></div>`;
     console.error('[panel] 视图渲染失败', e);
   }
+
+  // 切页的轻微入场：只动透明度和 4px 位移，不改变布局。
+  // 放在 render 之后而不是之前 —— 否则先动画一个「加载中…」，内容到了再闪一下。
+  root.classList.remove('is-entering');
+  void root.offsetWidth; // 强制重排，让同一路由重渲染也能重新触发
+  root.classList.add('is-entering');
+  setTimeout(() => root.classList.remove('is-entering'), 200);
 }
+
+// 插件页（另一个 origin）保存自己的定时设置后，把「用户 cron + 提前量」发回来，
+// 由面板更新这条任务。插件页拿不到面板会话，也不该直接调 /api/jobs。
+window.addEventListener('message', async (event) => {
+  const frame = document.querySelector('#plugin-frame');
+  if (!frame || event.source !== frame.contentWindow) return;
+  const d = event.data;
+  if (!d || d.type !== 'panel:edit-job') return;
+  if (typeof d.plugin !== 'string' || typeof d.name !== 'string') return;
+  // 插件页只能改自己的任务：否则一个插件页就能借面板会话改别人的调度。
+  if (d.plugin !== frame.dataset.plugin) return;
+  const expr = d.expr === null || d.expr === undefined ? null : String(d.expr);
+  const lead = Number(d.lead_ms);
+  const opts = Number.isFinite(lead) && lead >= 0 ? { lead_ms: Math.min(lead, 3_600_000) } : {};
+  const res = await editJob(d.plugin, d.name, expr, opts);
+  if (!res.ok) {
+    toast(`同步定时设置失败：${res.error}`, 'bad');
+    return;
+  }
+  toast('已同步到面板任务', 'ok');
+});
 
 const ctx = {
   toast,
@@ -527,7 +581,11 @@ function paintNavActive() {
             ? `plugin:${params.name}`
             : view;
   document.querySelectorAll('.nav-item').forEach((a) => {
-    a.classList.toggle('active', a.dataset.view === navKey);
+    const active = a.dataset.view === navKey;
+    a.classList.toggle('active', active);
+    // 视觉上的高亮对屏幕阅读器不可见，补一条语义上的「当前页」。
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
   });
 }
 
@@ -565,12 +623,18 @@ function renderPluginNav(plugins) {
 /// 插件自己的页面：用 iframe 装它，让它完全掌控自己那块 UI。
 ///
 /// 为什么不把插件的 JS 注入主页面：插件是操作者自己装的代码，注入进来等于让它
-/// 能改面板本身（读令牌、改别人的任务）。iframe 是同源但**独立文档**，
-/// 插件的影响范围就是那一块。
+/// 能改面板本身（读令牌、改别人的任务）。
+///
+/// ⚠ **iframe 不是安全边界**（安全审计 H1）。同源 iframe 与父文档共享 origin，
+/// 插件页可以 `parent.fetch('/api/plugins/upload', ...)`。真正的隔离来自
+/// 「插件页面在另一个 origin 上」—— 后端为此单开了第二个监听（见 main.rs 的
+/// `bind_plugin_ui`），`pluginUiUrl()` 负责把地址拼过去。这里的 `sandbox` 是
+/// 第二道：即使哪天 origin 又被配回同源，它也挡住 `top` 导航与插件页弹出的窗口。
 function renderPluginPage(root, params) {
   const name = params.name;
   const nav = pluginNav.get(name);
-  const src = nav && nav.path ? nav.path : `/plugins/${encodeURIComponent(name)}/index.html`;
+  const path = nav && nav.path ? nav.path : `/plugins/${encodeURIComponent(name)}/index.html`;
+  const src = pluginUiUrl(path);
   const label = pluginNavLabel(name);
   root.innerHTML = `
     <div class="card plugin-page-card">
@@ -582,9 +646,12 @@ function renderPluginPage(root, params) {
         <a class="btn ghost" href="${esc(src)}" target="_blank" rel="noopener">新标签页</a>
       </div>
       <iframe id="plugin-frame" class="plugin-frame" src="${esc(src)}?embed=1"
+              sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
               title="${esc(label)}"></iframe>
     </div>`;
   const frame = root.querySelector('#plugin-frame');
+  // 只允许这个插件页改**它自己**的任务（见下面 message 监听）。
+  frame.dataset.plugin = name;
   // 插件页面有自己的状态（半填的表单、展开的面板），整页刷新是唯一可靠的复位手段
   root.querySelector('#plugin-reload').addEventListener('click', () => {
     frame.src = frame.src;
@@ -603,6 +670,10 @@ async function pollEngine() {
     el.textContent = '后端不可用';
     return;
   }
+
+  // 插件页面的 origin 由后端在启动时决定（`/api/state` 里两个字段）。
+  // 必须在任何 iframe/链接渲染之前设好，否则第一次点开插件页会落到同源地址上。
+  setPluginUiOrigin(res.plugin_ui_origin, res.plugin_ui_port);
 
   renderPluginNav(res.plugins);
 
@@ -685,7 +756,14 @@ $('#logout-btn').addEventListener('click', async () => {
   }
 });
 window.addEventListener('hashchange', route);
-if (!location.hash) location.hash = '#/dashboard';
-route();
-pollEngine();
-setInterval(pollEngine, 5000);
+
+// 先拿到 `/api/state` 再画第一屏：插件页的 iframe 地址来自
+// `pluginNav` + `setPluginUiOrigin()`，如果 route() 先跑，第一次打开
+// `#/plugin/...` 会拿相对路径拼出同源 iframe，直接落到「拒绝连接」。
+async function boot() {
+  await pollEngine();
+  if (!location.hash) location.hash = '#/dashboard';
+  await route();
+  setInterval(pollEngine, 5000);
+}
+void boot();

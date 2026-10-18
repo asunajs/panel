@@ -13,7 +13,11 @@
     "CJK 紧邻的几条（2026-10-15 补）钉住了一处真实分叉：Rust 侧原本用",
     "char::is_alphanumeric()（Unicode 语义，汉字算字母），而 JS/Python 侧是",
     "ASCII 判定 —— 于是「用token=xxx」这种紧贴写法在 Rust 里漏脱、在另两边脱。",
-    "现在三边统一成 ASCII：漏脱一个令牌比多脱一点危险得多。"
+    "现在三边统一成 ASCII：漏脱一个令牌比多脱一点危险得多。",
+    "",
+    "2026-10 安全审计（中4）补了 URL userinfo 与 api_key / x-panel-token 这四类：",
+    "`https://user:pass@host` 的口令、云厂商的 `api_key=`、网关的 `X-Api-Key:`、",
+    "以及**本项目自己**的 `x-panel-token:` 原先都会原样落盘一周。"
   ],
   "cases": [
     {
@@ -155,6 +159,26 @@
       "why": "中文标点紧跟手机号：全角标点已经是终止符，不能把它一起脱掉",
       "in": "账号13600136001，已锁定",
       "out": "账号136****6001，已锁定"
+    },
+    {
+      "why": "URL userinfo（账号:口令）—— 裸 kv / Bearer 都看不见它，必须按结构脱；host 与 path 保留，排查还要看请求打到哪（审计中4）",
+      "in": "GET https://alice:hunter2@example.com/api/x",
+      "out": "GET https://***:***@example.com/api/x"
+    },
+    {
+      "why": "api_key 家族（api_key/apikey/access_key/private_key）进词表 —— 刻意仍不含裸 key：keyword / key=value 这类排查参数不能误伤（审计中4）",
+      "in": "api_key=AKIA1234567&page=2",
+      "out": "api_key=***&page=2"
+    },
+    {
+      "why": "X-Api-Key 是网关凭据头，与 Authorization 同款整行脱（审计中4）",
+      "in": "X-Api-Key: sk-live-abc123",
+      "out": "X-Api-Key: ***"
+    },
+    {
+      "why": "x-panel-token 是**本项目自己**的面板令牌头 —— 插件拿到它就能冒充操作者，绝不能落盘（审计中4）",
+      "in": "x-panel-token: 8f3a2b1c9d",
+      "out": "x-panel-token: ***"
     }
   ]
 }

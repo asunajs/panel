@@ -282,6 +282,20 @@ pub fn hash_token_legacy(token: &str) -> Result<String, String> {
 }
 
 impl Cred {
+    /// 这个凭据是不是「空的」。
+    ///
+    /// 空凭据**永远不该匹配成功**：`Cred::Plain("")` 的 `verify` 对空候选会恒真，
+    /// 那等于免登录。今天 `main.rs` 的 trim/filter 已经挡住了空令牌，但那条不变式
+    /// 只活在环境变量解析里 —— 任何一条新的构造路径（测试、嵌入式用法）都可能绕过
+    /// 它（安全审计 L2）。所以判据也放在这里。
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Cred::Plain(s) => s.is_empty(),
+            Cred::Phc(phc) => phc.is_empty(),
+            Cred::Prehash(phc) => phc.is_empty(),
+        }
+    }
+
     /// 按内容判断形态：`prehash1:` 前缀 = 摘要形态；`$` 开头 = 旧哈希；否则明文。
     ///
     /// 哈希串**当场校验格式**，格式不对就报错、让进程起不来 ——
@@ -491,16 +505,81 @@ fn fingerprint(s: &str) -> [u8; 32] {
 
 /// 取**真实客户端 IP**，用于登录退避与失败计数。
 ///
+/// 把 IPv4-mapped IPv6（`::ffff:127.0.0.1`）归一成 IPv4。
+///
+/// 双栈监听（`[::]`）时，Linux 上来自 IPv4 反代的 peer 常常是这个表示，
+/// 而人在 `PANEL_ALLOW_IPS` 里写的是 `127.0.0.1`。不归一化就会出现
+/// 「看起来配好了、实际匹配不上」—— 而白名单失灵最糟的时机，正是运维
+/// 被人锁在门外、唯一想用的就是它的时候（安全审计 中2）。
+pub fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
+}
+
+/// 哪些对端地址被允许提供 `X-Forwarded-For` / `X-Real-IP`。
+///
+/// 为什么不是「一个布尔开关」：`PANEL_TRUST_PROXY=1` 对**任何** TCP 对端生效，
+/// 只要面板端口还能被直连，攻击者绕过反代就能自己填 XFF —— 按 IP 退避失效、
+/// 蜜罐还能被用来定向封禁任意受害者（安全审计 中1）。
+/// 现在只有 `peer` 属于这份名单时，转发头才会被读取；不在名单里就老实用它自己的地址。
+#[derive(Clone, Debug, Default)]
+pub struct TrustedProxies {
+    addrs: Vec<IpAddr>,
+}
+
+impl TrustedProxies {
+    pub fn new(list: Vec<IpAddr>) -> Self {
+        let mut addrs: Vec<IpAddr> = list.into_iter().map(normalize_ip).collect();
+        addrs.sort();
+        addrs.dedup();
+        Self { addrs }
+    }
+
+    /// 回环地址（`PANEL_TRUST_PROXY=1` 兼容模式的默认值）。
+    pub fn loopback() -> Self {
+        Self::new(vec![
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.addrs.is_empty()
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        self.addrs.contains(&normalize_ip(ip))
+    }
+
+    /// 渲染成 `a,b,c`（启动日志 / `/api/state` 用）。
+    pub fn render(&self) -> String {
+        self.addrs
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// 从转发头里取客户端 IP。
+///
 /// 默认**不信任**任何转发头：`X-Forwarded-For` / `X-Real-IP` 都是客户端能随便写的，
 /// 默认信它等于把退避变成「攻击者自己填个 IP 就绕过了」。
 ///
-/// 只有显式开 `PANEL_TRUST_PROXY=1` 才读，而且只取 XFF 的**最右一跳** ——
+/// 只有当 `peer` 在 `trusted` 里（默认空；`PANEL_TRUST_PROXY=1` 时是回环；
+/// 推荐显式配 `PANEL_TRUSTED_PROXIES`）才读，而且只取 XFF 的**最右一跳** ——
 /// 那是你自己的反代追加进去的（客户端伪造的那些在左边，取左边就等于取攻击者写的东西）。
-pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trust_proxy: bool) -> IpAddr {
-    if !trust_proxy {
-        return peer.ip();
+pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trusted: &TrustedProxies) -> IpAddr {
+    let peer_ip = normalize_ip(peer.ip());
+    if !trusted.contains(peer_ip) {
+        return peer_ip;
     }
-    if let Some(v) = headers.get_str("x-forwarded-for") {
+    if let Some(v) = headers.get_joined("x-forwarded-for") {
         // 取**字面量最后一个**元素：反代追加的那一跳就在最右。
         //
         // 末尾是空值 / 解析不出来时**回退到对端地址**，而不是往前找一个能用的 ——
@@ -510,17 +589,17 @@ pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trust_proxy: b
         // 而且 `/api/state` 里能看出 `blocked_ips` 的异常（见 docs/security.md §20.3）。
         if let Some(last) = v.rsplit(',').next() {
             if let Ok(ip) = last.trim().parse::<IpAddr>() {
-                return ip;
+                return normalize_ip(ip);
             }
         }
     }
     if let Some(v) = headers.get_str("x-real-ip") {
         if let Ok(ip) = v.trim().parse::<IpAddr>() {
-            return ip;
+            return normalize_ip(ip);
         }
     }
     // 头缺失或解析不出来 → 老实回退到对端地址，而不是放行
-    peer.ip()
+    peer_ip
 }
 
 /// 解析 `PANEL_ALLOW_IPS`：逗号 / 分号 / 空白分隔的 IP 列表。
@@ -541,7 +620,9 @@ pub fn parse_allow_ips(raw: &str) -> (Vec<IpAddr>, Vec<String>) {
             continue;
         }
         match p.parse::<IpAddr>() {
-            Ok(ip) => ips.push(ip),
+            // 归一化：`::ffff:127.0.0.1` 与 `127.0.0.1` 必须是同一个键，
+            // 否则双栈监听下人会写出「看起来对、实际匹配不上」的白名单。
+            Ok(ip) => ips.push(normalize_ip(ip)),
             Err(_) => bad.push(p.to_string()),
         }
     }
@@ -570,6 +651,35 @@ pub struct Auth {
     /// Argon2 真正跑了几次。只用来做断言（证明缓存/退避真的省下了 KDF），
     /// 计数本身是 relaxed 原子加，代价可以忽略。
     kdf_runs: std::sync::atomic::AtomicU64,
+    /// 失败日志的节流状态：来源 → (上次写日志的时刻, 被合并掉的条数)。
+    /// 见 [`Auth::take_failure_log_slot`]（安全审计 L6）。
+    fail_log: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+    /// 同来源**正在验凭据**的请求数（安全审计 L1）。
+    inflight: Mutex<HashMap<IpAddr, u32>>,
+}
+
+/// 同时在验凭据的请求上限（每个来源）。
+///
+/// 为什么不设成 1：双击/重试是正常行为，全拒会变成「手快点就登不上」。
+/// 2 已经能挡住「开 50 个并发把退避阈值打穿」。
+const INFLIGHT_MAX: u32 = 2;
+
+/// 验凭据期间的占位，`Drop` 时归还。
+struct AttemptGuard<'a> {
+    table: &'a Mutex<HashMap<IpAddr, u32>>,
+    ip: IpAddr,
+}
+
+impl Drop for AttemptGuard<'_> {
+    fn drop(&mut self) {
+        let mut g = self.table.lock().unwrap();
+        if let Some(n) = g.get_mut(&self.ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                g.remove(&self.ip);
+            }
+        }
+    }
 }
 
 impl Auth {
@@ -591,6 +701,55 @@ impl Auth {
                 locked_until: None,
             }),
             kdf_runs: std::sync::atomic::AtomicU64::new(0),
+            fail_log: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 占一个「正在验凭据」的名额（安全审计 L1）。
+    ///
+    /// 退避的检查与记账之间存在窗口：N 个并发请求可以**同时**通过
+    /// `check_rate`，各自跑一次 KDF，于是「3 次失败才退避」实际能被打成 N 次。
+    /// 限住同来源同时在验的数量，就把这个窗口压到 `INFLIGHT_MAX`。
+    fn begin_attempt(&self, ip: IpAddr) -> Option<AttemptGuard<'_>> {
+        let ip = normalize_ip(ip);
+        let mut g = self.inflight.lock().unwrap();
+        let n = g.entry(ip).or_insert(0);
+        if *n >= INFLIGHT_MAX {
+            return None;
+        }
+        *n += 1;
+        Some(AttemptGuard {
+            table: &self.inflight,
+            ip,
+        })
+    }
+
+    /// 失败日志的**写入节流**（安全审计 L6）。
+    ///
+    /// 原来每一次登录失败都写一行日志。退避期间每秒仍能打进来一个请求，
+    /// 于是「有人爆破」这件事本身会变成一条日志洪泛（stdout 被重定向到文件时占盘）。
+    ///
+    /// 现在每来源最多 5 秒一行，并把这段时间内被合并掉的次数带上 ——
+    /// 既不失可见性，也不会被单来源的请求量牵着走。
+    /// 返回 `Some(被合并的条数)` 表示「现在该写这一行了」。
+    pub fn take_failure_log_slot(&self, ip: IpAddr) -> Option<u32> {
+        const WINDOW: Duration = Duration::from_secs(5);
+        const FORGET: Duration = Duration::from_secs(3600);
+        let now = Instant::now();
+        let ip = normalize_ip(ip);
+        let mut guard = self.fail_log.lock().unwrap();
+        // 顺手清理，避免表随来源数无界增长
+        guard.retain(|_, (last, _)| now.duration_since(*last) < FORGET);
+        let e = guard.entry(ip).or_insert((now, 0));
+        if now.duration_since(e.0) >= WINDOW {
+            let suppressed = e.1;
+            e.0 = now;
+            e.1 = 0;
+            Some(suppressed)
+        } else {
+            e.1 = e.1.saturating_add(1);
+            None
         }
     }
 
@@ -621,7 +780,7 @@ impl Auth {
 
     /// 这个地址在封禁白名单里吗。
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
-        self.allow_ips.contains(&ip)
+        self.allow_ips.contains(&normalize_ip(ip))
     }
 
     /// 蜜罐命中：封掉这个 IP 的**登录**（[`BAN_TTL`] 时长，重启即解除）。
@@ -629,6 +788,13 @@ impl Auth {
     /// 返回是否真的封了（白名单里 ⇒ 没封）。只动登录路径，**不撤销已登录的会话**：
     /// 命中蜜罐说明对方在**猜**，不代表他进来了；把"挡在门外"和"踢出去"混成
     /// 一个动作，误封时就变成断别人的活。
+    ///
+    /// ⚠ **已在封禁期内不续期**（安全审计 H3）。原来这里无条件 `insert(now+TTL)`，
+    /// 而 `login()` 对已封禁来源仍然返回 `BadToken`，于是 `do_login` 会再次调到这里
+    /// —— 攻击者每打一次就把封禁续到一小时后，**封禁永不过期**。对反代部署
+    /// （默认不信任转发头 ⇒ 封禁键是反代自己的地址）来说，这就是一条 curl
+    /// 把全站登录永久锁死。续期也帮不了正当性：真正的暴力破解靠的是退避与全局闸，
+    /// 不是靠把同一个来源封得更久。
     pub fn ban(&self, ip: IpAddr) -> bool {
         if self.is_allowed(ip) {
             crate::log::plog!(
@@ -639,7 +805,17 @@ impl Auth {
             return false;
         }
         let now = Instant::now();
-        self.bans.lock().unwrap().insert(ip, now + BAN_TTL);
+        let ip = normalize_ip(ip);
+        {
+            let mut guard = self.bans.lock().unwrap();
+            // 顺手清过期项，再判断「是否已经在封禁期内」
+            guard.retain(|_, until| *until > now);
+            if guard.contains_key(&ip) {
+                // 已经是封禁状态：不延长、也不再刷日志（否则被打一次就刷一行）
+                return false;
+            }
+            guard.insert(ip, now + BAN_TTL);
+        }
         crate::log::plog!(
             "auth",
             warn,
@@ -649,10 +825,36 @@ impl Auth {
         true
     }
 
+    /// 这个地址是「本机/内网」吗（回环、私有网段、链路本地、IPv6 唯一本地）。
+    ///
+    /// 用途见 `web.rs::do_login`：**未开 `PANEL_TRUST_PROXY` 时，回环/内网来源
+    /// 不触发蜜罐封禁**。因为那种来源几乎必然是同一台机器上的反向代理
+    /// （nginx / caddy / cloudflared 都跑在本机），封它 = 封所有经反代访问的人。
+    /// 这正是安全审计 H3 的主要触发路径。
+    pub fn is_local_or_private(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                // IPv4-mapped（::ffff:127.0.0.1）要按内嵌的 v4 判，否则反代在双栈
+                // 监听下会是这个表示，识别不出来。
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return v4.is_loopback() || v4.is_private() || v4.is_link_local();
+                }
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 唯一本地
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 链路本地
+            }
+        }
+    }
+
     /// 现在是不是被封禁。顺带清掉过期的条目（和 `record_failure` 一个套路：
     /// 读的时候顺手收，不必另开一个清理任务）。
     fn is_banned(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
+        let ip = normalize_ip(ip);
         let mut guard = self.bans.lock().unwrap();
         guard.retain(|_, until| *until > now);
         guard.contains_key(&ip)
@@ -671,6 +873,11 @@ impl Auth {
     ///
     /// 只有哈希形式才需要缓存：明文比较本来就是纳秒级。
     fn credential_matches(&self, candidate: &str) -> bool {
+        // 空凭据永远不成立（安全审计 L2）。见 `Cred::is_empty` 的注释：
+        // `Cred::Plain("")` 的 verify 对空候选会恒真，那等于免登录。
+        if candidate.trim().is_empty() || self.cred.is_empty() {
+            return false;
+        }
         let cred = &self.cred;
         if let Cred::Plain(_) = cred {
             return cred.verify(candidate);
@@ -735,6 +942,11 @@ impl Auth {
         if let Err(wait) = self.check_rate(ip) {
             return Err(LoginError::RateLimited(wait));
         }
+        // 上面的检查与下面的记账之间有窗口（安全审计 L1）：占一个名额再验，
+        // 超出的请求直接按限流处理 —— 形状和退避一样，不给攻击者额外探针。
+        let Some(_inflight) = self.begin_attempt(ip) else {
+            return Err(LoginError::RateLimited(Duration::from_secs(1)));
+        };
         if !self.credential_matches(candidate) {
             self.record_failure(ip);
             self.record_global_failure();
@@ -883,6 +1095,15 @@ impl Auth {
     }
 
     fn check_rate(&self, ip: IpAddr) -> Result<(), Duration> {
+        // 白名单里的地址**连退避也豁免**（安全审计 中2）。
+        //
+        // 原来它只豁免封禁：共享 IP 部署里，攻击者持续失败会让那个地址落在
+        // 60s 的退避循环里，而白名单地址照样进不来 —— 于是这条「不用等的出路」
+        // 在最需要它的时候是假的。豁免退避不会放松认证：口令该错还是错。
+        if self.is_allowed(ip) {
+            return Ok(());
+        }
+        let ip = normalize_ip(ip);
         let guard = self.failures.lock().unwrap();
         if let Some(f) = guard.get(&ip) {
             if let Some(until) = f.blocked_until {
@@ -895,8 +1116,41 @@ impl Auth {
         Ok(())
     }
 
+    /// 现在被限流要等多久（按 IP 退避与全局闸取较大者）。
+    ///
+    /// 用途：401 响应里区分「凭据不对」与「你被限流了」，并带 `Retry-After`。
+    /// 之前两者都回一句固定的「未认证」，脚本明明令牌是对的也会以为配错了
+    /// （安全审计 中3）。
+    pub fn throttle_wait(&self, ip: IpAddr) -> Option<Duration> {
+        let now = Instant::now();
+        let mut worst: Option<Duration> = None;
+        {
+            let g = self.global.lock().unwrap();
+            if let Some(until) = g.locked_until {
+                if until > now {
+                    worst = Some(until - now);
+                }
+            }
+        }
+        {
+            let f = self.failures.lock().unwrap();
+            if let Some(s) = f.get(&normalize_ip(ip)) {
+                if let Some(until) = s.blocked_until {
+                    if until > now {
+                        let d = until - now;
+                        if worst.is_none_or(|w| d > w) {
+                            worst = Some(d);
+                        }
+                    }
+                }
+            }
+        }
+        worst
+    }
+
     fn record_failure(&self, ip: IpAddr) {
         let now = Instant::now();
+        let ip = normalize_ip(ip);
         let mut guard = self.failures.lock().unwrap();
         let (failures, blocked) = {
             let e = guard.entry(ip).or_insert(FailState {
@@ -996,11 +1250,34 @@ fn new_session_id() -> Result<String, String> {
 /// 鉴权只看这三个头，所以只要实现这三件事就够。
 pub trait HeaderMapLike {
     fn get_str(&self, name: &str) -> Option<String>;
+
+    /// 同名多值合并（逗号分隔）。默认只取第一个 —— 对 `Authorization` 这类头是对的。
+    ///
+    /// `X-Forwarded-For` 不一样：反代可能**追加一条新头**而不是拼进同一条
+    /// （nginx 的 `proxy_add_x_forwarded_for` 是拼同一条，但有些网关会新增一条）。
+    /// 只取第一条就会在最右一跳上退化成「取第一条头的最后一跳」，而那一段
+    /// 可以是客户端自己写的（安全审计 L7）。
+    fn get_joined(&self, name: &str) -> Option<String> {
+        self.get_str(name)
+    }
 }
 
 impl HeaderMapLike for axum::http::HeaderMap {
     fn get_str(&self, name: &str) -> Option<String> {
         self.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+    }
+
+    fn get_joined(&self, name: &str) -> Option<String> {
+        let vals: Vec<&str> = self
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        if vals.is_empty() {
+            None
+        } else {
+            Some(vals.join(", "))
+        }
     }
 }
 
@@ -1057,6 +1334,20 @@ mod tests {
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, v)| v.clone())
         }
+
+        fn get_joined(&self, name: &str) -> Option<String> {
+            let vals: Vec<&str> = self
+                .0
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.join(", "))
+            }
+        }
     }
 
     fn h(pairs: &[(&str, &str)]) -> H {
@@ -1085,17 +1376,32 @@ mod tests {
         assert!(Auth::new(Cred::parse(TOKEN).unwrap(), false).cred_kind().1);
     }
 
+    fn trusted() -> TrustedProxies {
+        TrustedProxies::new(vec!["10.0.0.9".parse().unwrap()])
+    }
+
     #[test]
-    fn client_ip_ignores_forwarded_headers_unless_proxy_mode_is_on() {
+    fn client_ip_ignores_forwarded_headers_unless_peer_is_a_trusted_proxy() {
         let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
         let headers = h(&[
             ("x-forwarded-for", "1.2.3.4"),
             ("x-real-ip", "5.6.7.8"),
         ]);
-        // 默认：**一个字都不看**。转发头是客户端能随便写的，默认信它 = 退避可被绕过
-        assert_eq!(client_ip(peer, &headers, false), peer.ip());
-        // 开了反代模式才信
-        assert_eq!(client_ip(peer, &headers, true).to_string(), "1.2.3.4");
+        // 默认名单为空：**一个字都不看**。转发头是客户端能随便写的。
+        assert_eq!(
+            client_ip(peer, &headers, &TrustedProxies::default()),
+            peer.ip()
+        );
+        // 对端不在受信名单里：即使开了反代模式也不看 —— 这正是「直连 8787
+        // 伪造 X-Forwarded-For」那条攻击被堵住的地方（安全审计 中1）。
+        let other = TrustedProxies::new(vec!["127.0.0.1".parse().unwrap()]);
+        assert_eq!(
+            client_ip(peer, &headers, &other),
+            peer.ip(),
+            "不在名单里的对端必须被忽略"
+        );
+        // 对端在名单里才信
+        assert_eq!(client_ip(peer, &headers, &trusted()).to_string(), "1.2.3.4");
     }
 
     #[test]
@@ -1104,7 +1410,10 @@ mod tests {
         // 客户端可以自己塞一串假的 XFF；你的反代**追加**在右边。
         // 取最右边那一跳才是「你的反代看到的对端」，取左边等于取攻击者写的东西。
         let headers = h(&[("x-forwarded-for", "1.2.3.4, 5.6.7.8, 203.0.113.7")]);
-        assert_eq!(client_ip(peer, &headers, true).to_string(), "203.0.113.7");
+        assert_eq!(
+            client_ip(peer, &headers, &trusted()).to_string(),
+            "203.0.113.7"
+        );
     }
 
     #[test]
@@ -1117,14 +1426,86 @@ mod tests {
             vec![("x-forwarded-for", "1.2.3.4, ")],                     // 只有逗号
         ] {
             assert_eq!(
-                client_ip(peer, &h(&hs), true),
+                client_ip(peer, &h(&hs), &trusted()),
                 peer.ip(),
                 "解析不出来就该回退到对端地址，而不是放行：{hs:?}"
             );
         }
         // XFF 坏但 X-Real-IP 好 → 用后者（nginx 常只给这一个）
         let headers = h(&[("x-forwarded-for", "garbage"), ("x-real-ip", "9.9.9.9")]);
-        assert_eq!(client_ip(peer, &headers, true).to_string(), "9.9.9.9");
+        assert_eq!(
+            client_ip(peer, &headers, &trusted()).to_string(),
+            "9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn client_ip_merges_repeated_forwarded_headers() {
+        // 安全审计 L7：反代**新增一条** XFF（而不是拼进同一条）时，多条头要合并后
+        // 再取最右一跳；只取第一条会退化成「客户端自己写的那一段」。
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let headers = h(&[
+            ("x-forwarded-for", "1.2.3.4"),   // 客户端伪装的
+            ("x-forwarded-for", "203.0.113.7"), // 反代追加的
+        ]);
+        assert_eq!(
+            client_ip(peer, &headers, &trusted()).to_string(),
+            "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn allowlist_normalizes_ipv4_mapped_addresses() {
+        // 双栈监听时反代的对端常是 `::ffff:127.0.0.1`，而人在白名单里写 `127.0.0.1`。
+        let (ips, bad) = parse_allow_ips("::ffff:127.0.0.1, 192.168.1.7");
+        assert!(bad.is_empty(), "不该有认不出的条目: {bad:?}");
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false).allow_ips(ips);
+        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(a.is_allowed(mapped), "IPv4-mapped 表示必须匹配 127.0.0.1");
+        assert!(a.is_allowed("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn allowlisted_ip_is_exempt_from_backoff_too() {
+        // 安全审计 中2：白名单原来只豁免封禁，不豁免退避 —— 共享 IP 部署下
+        // 攻击者持续失败会把那个地址压在 60s 退避里，白名单也就进不来了。
+        let home: IpAddr = "192.168.1.7".parse().unwrap();
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false).allow_ips(vec![home]);
+        for _ in 0..5 {
+            assert!(a.login("wrong", home).is_err(), "错口令仍然错");
+        }
+        assert!(
+            a.login(TOKEN, home).is_ok(),
+            "白名单里的地址不该被退避锁住（豁免的是退避，不是认证）"
+        );
+    }
+
+    #[test]
+    fn concurrent_attempts_are_capped_per_source() {
+        // 安全审计 L1：检查与记账之间的窗口靠「同来源同时在验的上限」收窄。
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        let ip: IpAddr = "203.0.113.77".parse().unwrap();
+        let g1 = a.begin_attempt(ip).expect("第一个");
+        let g2 = a.begin_attempt(ip).expect("第二个（双击/重试是正常的）");
+        assert!(a.begin_attempt(ip).is_none(), "第三个必须被挡");
+        // 别的来源不受影响
+        let other: IpAddr = "198.51.100.8".parse().unwrap();
+        assert!(a.begin_attempt(other).is_some());
+        drop(g1);
+        assert!(a.begin_attempt(ip).is_some(), "释放后可以再进");
+        drop(g2);
+    }
+
+    #[test]
+    fn throttle_wait_reports_the_backoff_window() {
+        let a = Auth::new(Cred::parse(TOKEN).unwrap(), false);
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(a.throttle_wait(ip).is_none(), "一开始不该有限流");
+        for _ in 0..FAIL_THRESHOLD {
+            let _ = a.login("wrong", ip);
+        }
+        let w = a.throttle_wait(ip).expect("进入退避后必须报出来");
+        assert!(w > Duration::ZERO && w <= FAIL_MAX_BACKOFF);
     }
 
     #[test]
@@ -1443,6 +1824,43 @@ mod tests {
         assert!(!a.is_banned(ip), "过期的封禁不该还挡人");
         assert_eq!(a.banned_ips(), 0, "读数里也不该留着它");
         assert!(a.login(TOKEN, ip).is_ok(), "到点自动放回，不需要谁去解锁");
+    }
+
+    #[test]
+    fn a_repeated_honeypot_hit_does_not_extend_the_ban() {
+        // 安全审计 H3：原来每次命中都 insert(now + TTL)，而 login() 对已封禁来源
+        // 仍回 BadToken ⇒ dispatch 会再调 ban() ⇒ 封禁被无限续期，全站登录永久锁死。
+        let a = hashed_auth();
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(a.ban(ip), "第一次要真的封");
+        assert!(!a.ban(ip), "已在封禁期内不该再延长");
+        assert!(!a.ban(ip), "打多少次都不延长");
+        assert_eq!(a.banned_ips(), 1, "封禁表里只能有一条");
+    }
+
+    #[test]
+    fn loopback_and_private_peers_are_recognized() {
+        // 未开反代模式时，这些来源不触发蜜罐封禁（它们多半就是本机反代）。
+        for s in [
+            "127.0.0.1",
+            "127.0.0.2",
+            "::1",
+            "::ffff:127.0.0.1",
+            "192.168.1.5",
+            "10.0.0.2",
+            "172.16.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(Auth::is_local_or_private(ip), "{s} 应被识别为本机/内网");
+        }
+        for s in ["8.8.8.8", "1.1.1.1", "203.0.113.9", "2001:4860:4860::8888"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!Auth::is_local_or_private(ip), "{s} 不该被当成本机/内网");
+        }
     }
 
     #[test]

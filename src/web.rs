@@ -21,25 +21,75 @@ use crate::db;
 use crate::engine::EngineCmd;
 use crate::runtimes::EngineKind;
 use crate::taskdir;
+use crate::upload;
 use crate::ratelimit::Rejected;
 use crate::AppState;
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::Stream;
 use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+/// 同时允许打开多少条日志流（SSE）。每条都占一个连接 + 一份订阅，
+/// 未认证的人打不进来（要登录），但已登录的客户端可以开任意多 —— 所以要有上限
+/// （安全审计 L11）。
+const MAX_SSE: usize = 32;
+
+/// 一条 SSE 流占用的名额，`Drop` 时归还。
+struct SseSlot(Arc<AtomicUsize>);
+
+impl SseSlot {
+    fn acquire(counter: &Arc<AtomicUsize>) -> Option<Self> {
+        // 先加再判：这样并发时不会两个请求同时看到「还有最后一个名额」。
+        if counter.fetch_add(1, Ordering::Relaxed) >= MAX_SSE {
+            counter.fetch_sub(1, Ordering::Relaxed);
+            None
+        } else {
+            Some(Self(Arc::clone(counter)))
+        }
+    }
+}
+
+impl Drop for SseSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// 把名额挂在流上：连接断开（流被 drop）时自动归还。
+struct GuardedStream<S> {
+    inner: Pin<Box<S>>,
+    _slot: SseSlot,
+}
+
+impl<S: Stream> Stream for GuardedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // GuardedStream 本身是 Unpin（Pin<Box<S>> + SseSlot 都 Unpin）。
+        let this = self.get_mut();
+        this.inner.as_mut().poll_next(cx)
+    }
+}
 
 /// 插件路由请求体的上限（低配设备上不给插件机会把内存吃光）。
 const MAX_ROUTE_BODY: usize = 1024 * 1024;
+
+/// 上传请求体的上限。文件本身的上限在 `upload::MAX_UPLOAD_BYTES`（64 MiB），
+/// 这里留一点 multipart 头/边界余量。
+const MAX_UPLOAD_BODY: usize = 72 * 1024 * 1024;
 
 /* ---------------------------------------------------------------- 关停信号 */
 
@@ -104,6 +154,9 @@ struct AddJobReq {
     /// （`register_cron(…, { budget_ms })`）。见 docs/host-api.md「执行预算」。
     #[serde(default)]
     budget_ms: Option<u64>,
+    /// 提前量（毫秒）：在 cron 目标之前多久触发。0/不填 = 不提前。
+    #[serde(default)]
+    lead_ms: Option<u64>,
 }
 
 /// 面板编辑任务的请求体（只有表达式可改：插件名与处理函数名是任务的**身份**）。
@@ -114,6 +167,9 @@ struct EditJobReq {
     /// `null` = **撤销面板覆盖**（只对插件代码声明的任务有意义：让它的频率回到
     /// 插件代码里声明的那个值）。面板任务必须给值。
     expr: Option<String>,
+    /// 新的提前量（毫秒）；不填 = 不动。
+    #[serde(default)]
+    lead_ms: Option<u64>,
 }
 
 /// 测试运行的请求体。
@@ -177,6 +233,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/unload", post(unload_plugin))
         .route("/api/plugins/{name}/enable", post(enable_plugin))
         .route("/api/plugins/{name}/reload", post(reload_plugin))
+        // 上传：单文件或 zip，落到插件目录 / 任务目录。zip 解压保留内部路径。
+        .route(
+            "/api/plugins/upload",
+            post(upload_plugins).layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY)),
+        )
+        .route(
+            "/api/tasks/upload",
+            post(upload_tasks).layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY)),
+        )
         .route(
             "/api/plugins/{name}/source",
             get(plugin_source).post(save_plugin_source),
@@ -215,12 +280,212 @@ pub fn router(state: AppState) -> Router {
         .route("/api/login", post(do_login))
         .route("/api/logout", post(do_logout))
         .merge(protected)
+        // 统一安全响应头（安全审计 中11）。放在最外层，401/303 也带上。
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .with_state(state)
+}
+
+/// 插件页面的**独立 origin** 路由（安全审计 H1）。
+///
+/// 为什么要有第二个 origin：`/plugins/{name}/...` 由面板同源提供时，插件页面
+/// 与面板共享 `document` 的 origin —— 同源 iframe 不是安全边界，插件页的 JS
+/// 可以直接 `parent.fetch('/api/plugins/upload', {headers:{'x-panel':'1'}})`，
+/// 于是 QuickJS 插件的"文件围栏"被绕过，一次点击就能升级成宿主 RCE。
+/// 把插件页面挪到 `127.0.0.1:<port+1>`（或 `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN`）
+/// 之后，它读不到面板的会话，也碰不到面板的 DOM。
+///
+/// 这个 origin **只**服务两样东西：插件静态资源、插件自己注册的路由。
+/// 面板的 `/api/*` 在这里一律 404 —— 那正是隔离的意义。
+pub fn plugin_ui_router(state: AppState) -> Router {
+    Router::new()
+        .fallback(plugin_origin_route)
+        .layer(middleware::from_fn(plugin_origin_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_plugin_origin,
+        ))
+        .with_state(state)
+}
+
+/// 插件 origin 上的兜底：插件路由优先，其次插件静态资源，其余 404。
+async fn plugin_origin_route(State(st): State<AppState>, req: Request) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+
+    let is_plugin_route = st
+        .host
+        .routes
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.method == method && r.path == path);
+    if is_plugin_route {
+        return plugin_route(st, req).await;
+    }
+
+    if let Some(rest) = path.strip_prefix("/plugins/") {
+        return plugin_asset(&st, rest, &method, req.headers()).await;
+    }
+
+    // 插件页面允许引面板的 `/css/*`（约定见 plugins/mcloud/index.html 顶部）。
+    // 这个 origin 与面板不同源，不把 CSS 带过来就会渲染成一张裸 HTML。
+    if path.starts_with("/css/") && (method == "GET" || method == "HEAD") {
+        if let Some(a) = st.assets.load(&path) {
+            return asset_response(&a, req.headers());
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        "这个 origin 只服务插件页面与插件自己注册的路由；面板接口在另一个 origin\n",
+    )
+        .into_response()
+}
+
+/// 插件 origin 的鉴权：和主面板一样要登录，但**不跳登录页**。
+///
+/// 主面板的 `require_auth` 会把浏览器导航 303 到 `/login`，而这个 origin 上
+/// 没有登录页（也不该有）。所以这里只回 401 + 一句人话；面板那边的会话过期时，
+/// 用户回到面板重新登录即可。
+async fn require_auth_plugin_origin(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ip = auth::client_ip(peer, req.headers(), &st.trusted_proxies);
+    if st.auth.authenticate(req.headers(), ip).is_some() {
+        return next.run(req).await;
+    }
+    if let Some(wait) = st.auth.throttle_wait(ip) {
+        return throttled_response(wait);
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        "会话已失效：请回到面板重新登录后再打开这个页面。\n",
+    )
+        .into_response()
+}
+
+/// 被限流时的统一响应：**429 + `Retry-After` + 机器可读的 `code`**。
+///
+/// 为什么不能继续混在 401 里（安全审计 中3）：脚本的令牌明明是对的，被全局闸
+/// 挡住时却收到「未认证。脚本请带 …」，运维会先去怀疑令牌配错。区分开之后，
+/// 「等 N 秒再来」是一个可以直接写进重试逻辑的事实。
+fn throttled_response(wait: std::time::Duration) -> Response {
+    let secs = wait.as_secs().max(1);
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "ok": false,
+            "code": "rate_limited",
+            "retry_after_ms": wait.as_millis() as u64,
+            "error": format!(
+                "凭据校验被限流（按来源退避或全局闸），约 {secs} 秒后再试。\
+                 这**不代表**令牌配错了 —— 看 /api/state 的 auth.blocked_ips / global_lock_ms"
+            ),
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_str(&secs.to_string())
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("1")),
+    );
+    resp
 }
 
 // ---------------------------------------------------------------------------
 // 鉴权中间件
 // ---------------------------------------------------------------------------
+
+/// 面板响应的统一安全头（安全审计 中11）。
+///
+/// 之前全站一个安全头都没有：登录页能被任意站点 iframe（点击劫持），
+/// 没有 CSP 等于「只要将来出现一处注入，攻击面就是全部 API」，
+/// 也没有 `no-store` —— `/login?next=…` 可能被共享代理缓存下来。
+///
+/// `script-src` 保留了 `'unsafe-inline'`：登录页那段 SHA-256 兜底是内联脚本，
+/// 面板里也有大量内联 `style="…"`。这不是理想值，但它把「能加载哪些源」锁死了，
+/// 而这是当前收益最大、又不会把界面弄坏的那一档。
+async fn security_headers(
+    State(st): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let path = req.uri().path().to_string();
+    let mut resp = next.run(req).await;
+
+    // 主面板要能 iframe 插件页面，而插件页面在第二个 origin 上。
+    // 这里按请求的 Host 拼出精确的 origin（port 是已知的），不用 `http:` 这种大网。
+    let frame_src = if let Some(origin) = &st.plugin_ui_origin {
+        format!("'self' {origin}")
+    } else if let Some(port) = st.plugin_ui_port {
+        let hostname = if let Some(end) = host.find(']') {
+            &host[..=end] // IPv6: [::1]:8787 → [::1]
+        } else {
+            host.split(':').next().unwrap_or("")
+        };
+        if hostname.is_empty() {
+            "'self'".to_string()
+        } else {
+            format!("'self' http://{hostname}:{port} https://{hostname}:{port}")
+        }
+    } else {
+        "'self'".to_string()
+    };
+    let csp = format!(
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
+         script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src {frame_src}; \
+         frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
+    );
+
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&csp) {
+        h.insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
+    }
+    // 页面类响应不缓存：`/login?next=…` 与面板 HTML 都不该进共享代理。
+    if path == "/" || path == "/login" {
+        h.insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    resp
+}
+
+/// 插件 origin 的响应头：只要 `nosniff`。
+///
+/// 不能加 `frame-ancestors 'none'` —— 面板正是要 iframe 它。
+async fn plugin_origin_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
 
 /// 除登录接口外的一切请求都要过这一层。
 ///
@@ -238,17 +503,22 @@ async fn require_auth(
 ) -> Response {
     // 没有「未配令牌就直通」这条快路：凭据是必需品（见 auth.rs 里 `Auth` 的注释，
     // 反代就跑在本机，`127.0.0.1` 不等于可信）
-    let ip = auth::client_ip(peer, req.headers(), st.trust_proxy);
+    let ip = auth::client_ip(peer, req.headers(), &st.trusted_proxies);
     if st.auth.authenticate(req.headers(), ip).is_some() {
         return next.run(req).await;
     }
     if wants_html(&req) {
         return Redirect::to(&login_url(&req)).into_response();
     }
+    // 限流与「凭据不对」要分开：前者是「等一会儿」，后者才是「去检查令牌」。
+    if let Some(wait) = st.auth.throttle_wait(ip) {
+        return throttled_response(wait);
+    }
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({
             "ok": false,
+            "code": "unauthenticated",
             "error": "未认证。脚本请带 `Authorization: Bearer <token>` 或 `X-Panel-Token: <token>`；\
                       浏览器请先访问 /login 登录。"
         })),
@@ -313,7 +583,7 @@ async fn login_page(
     headers: HeaderMap,
 ) -> Response {
     if st.auth
-        .authenticate(&headers, auth::client_ip(peer, &headers, st.trust_proxy))
+        .authenticate(&headers, auth::client_ip(peer, &headers, &st.trusted_proxies))
         .is_some()
     {
         return Redirect::to(&safe_next(q.next.as_deref())).into_response();
@@ -340,7 +610,7 @@ async fn do_login(
 
     // 登录是爆破的主要目标：这里也走 client_ip（反代模式下取真实来源），
     // 否则反代后面所有人共用一个 127.0.0.1，一个人猜错就把所有人都退避掉
-    let ip = auth::client_ip(peer, &headers, st.trust_proxy);
+    let ip = auth::client_ip(peer, &headers, &st.trusted_proxies);
 
     let (token, next, trap) = if is_form {
         parse_form(&String::from_utf8_lossy(&body))
@@ -386,11 +656,44 @@ async fn do_login(
             // ⚠ 两个条件缺一不可。只看字段的话，「浏览器把用户名自动填上了」
             // 就能把自己锁在门外；只看口令错的话，就是原来那套退避、没有新增什么。
             // 另外只在**表单**这条路上判：JSON 是脚本用的，没有蜜罐字段。
+            //
+            // ⚠ 第三条：**未开反代模式时，回环/内网来源不封**（安全审计 H3）。
+            // 那种来源几乎必然是同一台机器上的反向代理，封它等于封掉所有经反代
+            // 访问的人 —— 一条未认证 curl 就能把全站登录锁死一小时。这里放行的只是
+            // 「封禁」这一层，口令该错还是错、退避与全局闸照常生效。
             if !trap.is_empty() && matches!(e, LoginError::BadToken) {
-                st.auth.ban(ip);
+                if st.trusted_proxies.contains(peer.ip())
+                    || !crate::auth::Auth::is_local_or_private(peer.ip())
+                {
+                    st.auth.ban(ip);
+                } else {
+                    crate::log::plog!(
+                        "auth",
+                        warn,
+                        "蜜罐命中：{}（对端 {}）但未开 PANEL_TRUST_PROXY 且来源是回环/内网 ⇒ 不封禁\
+                         （它很可能是本机反代，封了会把所有人挡在门外；口令仍然错误）",
+                        ip,
+                        peer.ip()
+                    );
+                }
             }
-            // 失败原因写进日志（面板上能看到谁在猜），但**不回显令牌本身**
-            crate::log::plog!("auth", warn, "登录失败（来自 {}）: {}", peer.ip(), e.message());
+            // 失败原因写进日志（面板上能看到谁在猜），但**不回显令牌本身**。
+            // 每来源 5 秒最多一行（安全审计 L6）：退避期间每秒仍能打进来一个请求，
+            // 逐条写日志会让「有人爆破」本身变成日志洪泛。被合并的条数带上，
+            // 可见性不丢。
+            if let Some(merged) = st.auth.take_failure_log_slot(peer.ip()) {
+                if merged == 0 {
+                    crate::log::plog!("auth", warn, "登录失败（来自 {}）: {}", peer.ip(), e.message());
+                } else {
+                    crate::log::plog!(
+                        "auth",
+                        warn,
+                        "登录失败（来自 {}）: {}（过去 5 秒另有 {merged} 次未逐条记录）",
+                        peer.ip(),
+                        e.message()
+                    );
+                }
+            }
             if is_form {
                 let status = match e {
                     LoginError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -415,6 +718,13 @@ async fn do_login(
 
 /// `POST /api/logout` —— 删会话 + 清 cookie。
 async fn do_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    // 登出会改状态（删会话 + 下清 cookie 的头），所以它和别的写接口一样要过
+    // `x-panel: 1`（安全审计 L9）。原来只靠 `SameSite=Strict` 兜着 —— 那是
+    // 浏览器行为，不该是唯一防线。接口仍然**不要求已登录**：会话已经过期的
+    // 人也要能被清掉 cookie（幂等）。
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
     let removed = headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -539,6 +849,46 @@ fn guard_write(headers: &HeaderMap) -> Result<(), Response> {
         "写接口要求请求头 `x-panel: 1`（防跨站请求伪造；面板页面自己会带上）\n",
     )
         .into_response())
+}
+
+/// 带凭据的请求头：**不转发给插件**。
+///
+/// 为什么需要这份名单：插件路由拿到的是浏览器发来的完整请求，其中必然有
+/// `cookie: panel_session=<会话 ID>`（可重放的 12 小时登录态），脚本/CI 调用时
+/// 还会有 `authorization: Bearer <令牌>` / `x-panel-token: <令牌>`（长期凭据）。
+/// 把它们交给插件，等于让每个插件都能拿到面板管理员身份（安全审计 H2）。
+///
+/// 用黑名单而不是白名单：插件会用到各种自定义头（签名/语言/追踪 ID），白名单
+/// 会静默改变既有插件的行为；而「哪些头带凭据」是一份短且增长缓慢的名单。
+/// 新增凭据头时记得加到这里。
+fn is_credential_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "cookie"
+            | "cookie2"
+            | "set-cookie"
+            | "authorization"
+            | "proxy-authorization"
+            | "x-panel-token"
+            | "x-auth-token"
+            | "x-api-key"
+            | "x-csrf-token"
+            | "x-xsrf-token"
+            | "x-panel" // 面板的 CSRF 头，鉴权层已经消费过，插件不需要
+    )
+}
+
+
+/// 把绝对路径渲染成**相对插件目录**的形式（安全审计 L10）。
+///
+/// 面板页面只需要知道「是哪个文件」，不需要知道服务器把插件放在 `/srv/...` 的哪一层。
+/// 绝对路径会漏进错误响应、SSE、日志，而它对排查没有额外价值（运维本来就知道自己的
+/// 目录布局）。路径不在根下时原样返回 —— 那种情况本身是需要看见的异常。
+fn shown_path(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn task_exists(st: &AppState, plugin: &str, name: &str) -> bool {
@@ -677,6 +1027,7 @@ async fn add_job(
             expr: req.expr.clone(),
             params: params_json,
             budget_ms: req.budget_ms,
+            lead_ms: req.lead_ms.map(|v| v.min(3_600_000)),
             reply: tx,
         },
         StatusCode::BAD_REQUEST,
@@ -792,6 +1143,7 @@ async fn edit_job(
             plugin: plugin.clone(),
             name: name.clone(),
             expr: req.expr.clone(),
+            lead_ms: req.lead_ms.map(|v| v.min(3_600_000)),
             reply: tx,
         },
     ) {
@@ -1087,10 +1439,10 @@ async fn save_plugin_source(
     let bytes = req.text.len();
     Json(json!({
         "ok": true,
-        "path": path.display().to_string(),
+        "path": shown_path(&st.plugins_dir, &path),
         "lines": lines,
         "bytes": bytes,
-        "backup": backup.display().to_string(),
+        "backup": shown_path(&st.plugins_dir, &backup),
         "had_backup": had_backup,
         // 前端据此提示「引擎正在热更新」——省得用户以为没生效
         "note": "已写入。引擎最多 1 秒内发现文件变化并热更新这个插件。",
@@ -1117,7 +1469,7 @@ async fn restore_plugin_source(
         Err(e) => {
             return json_error(
                 StatusCode::NOT_FOUND,
-                format!("没有可恢复的备份（{}）: {e}", backup.display()),
+                format!("没有可恢复的备份（{}）: {e}", shown_path(&st.plugins_dir, &backup)),
             )
         }
     };
@@ -1149,7 +1501,7 @@ async fn plugin_source(State(st): State<AppState>, Path(name): Path<String>) -> 
             Json(json!({
                 "ok": true,
                 "name": name,
-                "path": path.display().to_string(),
+                "path": shown_path(&st.plugins_dir, &path),
                 "lines": lines,
                 "bytes": text.len(),
                 "text": text,
@@ -1942,6 +2294,101 @@ async fn plugin_asset(st: &AppState, rest: &str, method: &str, req_headers: &Hea
 ///
 /// 请求体 `{"code": "...", "input": "..."}`，回 `{"ok":true,"stdout","stderr","error","ms"}`。
 /// 代码跑在**一次性的临时解释器**里：不碰任何已加载插件的状态，也不注册任务。
+/// 上传到插件目录。
+async fn upload_plugins(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mp: Multipart,
+) -> Response {
+    upload_to(&st, &headers, mp, upload::Kind::Plugins).await
+}
+
+/// 上传到任务目录。
+async fn upload_tasks(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mp: Multipart,
+) -> Response {
+    upload_to(&st, &headers, mp, upload::Kind::Tasks).await
+}
+
+async fn upload_to(
+    st: &AppState,
+    headers: &HeaderMap,
+    mp: Multipart,
+    kind: upload::Kind,
+) -> Response {
+    if let Err(r) = guard_write(headers) {
+        return r;
+    }
+    let (filename, data, overwrite) = match read_upload(mp).await {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    let root = match kind {
+        upload::Kind::Plugins => st.plugins_dir.clone(),
+        upload::Kind::Tasks => st.host.tasks_dir.clone(),
+    };
+    match upload::save(kind, &root, &filename, &data, overwrite) {
+        Ok(saved) => {
+            // 文件事件监听可能还在去抖；这里再 Wake 一次，保证保存后立刻扫描。
+            let _ = st.engine.broadcast(EngineCmd::Wake);
+            Json(json!({
+                "ok": true,
+                "files": saved.files,
+                "bytes": saved.bytes,
+                "zip": saved.zip,
+            }))
+            .into_response()
+        }
+        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// 从 multipart 里读一个 `file` 字段和可选的 `overwrite` 字段。
+async fn read_upload(mut mp: Multipart) -> Result<(String, Vec<u8>, bool), String> {
+    let mut filename: Option<String> = None;
+    let mut data: Option<Vec<u8>> = None;
+    let mut overwrite = true;
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| format!("读取上传内容失败: {e}"))?
+    {
+        match field.name().unwrap_or("") {
+            "file" => {
+                if data.is_some() {
+                    return Err("一次只能上传一个文件".into());
+                }
+                let name = field
+                    .file_name()
+                    .map(str::to_string)
+                    .ok_or_else(|| "上传字段缺少文件名".to_string())?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("读取文件失败: {e}"))?;
+                filename = Some(name);
+                data = Some(bytes.to_vec());
+            }
+            "overwrite" => {
+                let v = field.text().await.unwrap_or_default();
+                overwrite = !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                );
+            }
+            _ => {}
+        }
+    }
+    let filename = filename.ok_or_else(|| "缺少 file 字段".to_string())?;
+    let data = data.ok_or_else(|| "缺少 file 字段".to_string())?;
+    if data.is_empty() {
+        return Err("文件是空的".into());
+    }
+    Ok((filename, data, overwrite))
+}
+
 async fn test_run(
     State(st): State<AppState>,
     Path(lang): Path<String>,
@@ -2102,8 +2549,22 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
             .into_response();
     };
 
+    // ⚠ **凭据头一律不转发给插件**（安全审计 H2）。
+    //
+    // 这里原来是无过滤全量转发。后果是插件 handler 的 `payload.headers.cookie`
+    // 就是 `panel_session=<会话 ID>`，而脚本/CI 调插件接口时还会带上
+    // `Authorization: Bearer <令牌>` / `X-Panel-Token: <令牌>` —— 前者是可重放的
+    // 12 小时登录态，后者是**长期凭据**。一个"只多打了一行 console.log(req)"的
+    // 正常插件就能把它落进日志，一个恶意插件可以直接 http_fetch 外带。
+    //
+    // 为什么是**黑名单**而不是白名单：插件作者会用到各种自定义头（签名、语言、
+    // 追踪 ID），白名单会静默改变既有插件的行为；而"哪些头带凭据"是一份可枚举、
+    // 增长缓慢的短名单。新增凭据头时记得往这里加。
     let mut headers = serde_json::Map::new();
     for (k, v) in req.headers().iter() {
+        if is_credential_header(k.as_str()) {
+            continue;
+        }
         headers.insert(
             k.as_str().to_string(),
             json!(v.to_str().unwrap_or("<非 UTF-8>")),
@@ -2184,12 +2645,47 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
                 HeaderName::try_from(k.as_str()),
                 HeaderValue::try_from(val.as_str().unwrap_or("")),
             ) {
+                // 只放行**白名单**里的响应头（安全审计 中10）。
+                //
+                // 原来这里把插件给的头原样回写：`Set-Cookie` 能覆盖面板会话
+                // （把操作者踢下线且登不回来），`Content-Security-Policy` /
+                // `X-Frame-Options` 能被覆盖掉（等于把面板刚加上的加固拆了），
+                // `Location` 能做成面板域名上的开放重定向。
+                if !plugin_response_header_allowed(name.as_str(), value.to_str().unwrap_or("")) {
+                    crate::log::plog!(
+                        "panel",
+                        warn,
+                        "插件响应头被忽略（不在白名单里）: {name}"
+                    );
+                    continue;
+                }
                 resp = resp.header(name, value);
             }
         }
     }
+    // 插件响应也强制加 nosniff：即使插件自己没写 content-type，
+    // 也不能让浏览器把一段文本嗅探成 HTML 在面板源上跑起来。
+    let resp = resp.header(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     resp.body(axum::body::Body::from(body))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response())
+}
+
+/// 插件路由可以设置的响应头白名单。
+///
+/// 凭据/安全策略类的头（`set-cookie`、`content-security-policy`、
+/// `x-frame-options`、`access-control-*`、`strict-transport-security`）一律不放行：
+/// 那些是**面板**的决定，不该由插件覆盖。
+fn plugin_response_header_allowed(name: &str, value: &str) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        "content-type" | "content-disposition" | "cache-control" | "etag" | "last-modified"
+        | "retry-after" | "x-request-id" => true,
+        // 重定向只允许站内绝对路径：`//evil.com`、`https://evil.com` 都不行。
+        "location" => value.starts_with('/') && !value.starts_with("//") && !value.contains('\\'),
+        _ => false,
+    }
 }
 
 /// 给前端轮询用的 JSON 快照。插件与日志都是 JSON 可序列化的普通结构体。
@@ -2385,7 +2881,15 @@ async fn api_logs_stream(
     State(st): State<AppState>,
     Query(q): Query<LogStreamQuery>,
     headers: HeaderMap,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+) -> Response {
+    // 连接名额（安全审计 L11）：不设上限时，一个已登录客户端可以把 fd 与订阅开满。
+    let Some(slot) = SseSlot::acquire(&st.sse_active) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("同时打开的日志流已达上限（{MAX_SSE} 条）—— 关掉不用的日志页再试\n"),
+        )
+            .into_response();
+    };
 
     let channel = q.channel.unwrap_or_else(|| "all".into());
     let want_plugin = channel == "all" || channel == "plugin";
@@ -2566,11 +3070,16 @@ async fn api_logs_stream(
         }
     });
 
-    Sse::new(stream).keep_alive(
+    Sse::new(GuardedStream {
+        inner: Box::pin(stream),
+        _slot: slot,
+    })
+    .keep_alive(
         KeepAlive::new()
             .interval(std::time::Duration::from_secs(15))
             .text("keep-alive"),
     )
+    .into_response()
 }
 
 /* ---------------------------------------------------------------- 运行记录 */
@@ -2719,6 +3228,10 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         // 而它以前只能靠"跑一次任务看有没有报错"才知道 —— 太晚、也太难看懂。
         // 放在 state 里 ⇒ `curl /api/state | jq .build` 一眼就答得上来。
         "build": build_info(),
+        // 插件页面的独立 origin（安全审计 H1）。`plugin_ui_port` 为 `null` =
+        // 没有启用隔离，此时前端用相对路径（行为与以前一致），启动日志有 warn。
+        "plugin_ui_port": st.plugin_ui_port,
+        "plugin_ui_origin": st.plugin_ui_origin,
         "uptime_secs": st.started.elapsed().as_secs(),
         "ticks": st.ticks.load(Ordering::Relaxed),
         // 鉴权**永远是开的**（没有「本机免登录」这种模式了），所以这里不再报
@@ -2738,7 +3251,8 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
             // 蜜罐封掉的来源（比退避重：那一个是猜错几次，这一个是被判定为脚本）
             "banned_ips": st.auth.banned_ips(),
             "global_lock_ms": st.auth.global_lock_ms(),
-            "trust_proxy": st.trust_proxy,
+            "trust_proxy": !st.trusted_proxies.is_empty(),
+            "trusted_proxies": st.trusted_proxies.render(),
         },
         // 多 worker 的可见性：哪条卡住了、哪个插件在哪条上。
         // 没有这两个字段的话，「插件之间互相干扰」就只能靠猜。
@@ -2856,7 +3370,7 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
       <label for="token">面板口令</label>
       <input id="token" name="token" type="password" autocomplete="current-password"
              autofocus required spellcheck="false">
-      <button type="submit">登录</button>
+      <button type="submit" id="login-btn" disabled>登录</button>
     </form>
     <noscript><div class="err">这个页面需要 JavaScript：口令要先在浏览器里算成摘要再提交，
       服务端不收明文口令。</div></noscript>
@@ -2876,6 +3390,11 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
   var form = document.getElementById('login-form');
   var input = document.getElementById('token');
   var errBox = document.getElementById('js-err');
+  var btn = document.getElementById('login-btn');
+  // 安全审计 L5：提交按钮**默认 disabled**，只有这段脚本确认自己能算摘要才打开。
+  // 没有 JS 时浏览器提交的是明文口令 —— 服务端会拒（摘要形态下），但明文已经
+  // 离开浏览器了。与其让它发出去再被拒，不如在客户端就停住；原因写在 `<noscript>` 里。
+  if (btn) btn.disabled = false;
   if (!form || !input || MODE !== 'digest') return; // 旧形态：原样提交（只在本机开发口子）
 
   function fail(msg) {
@@ -3056,6 +3575,69 @@ mod tests {
             LOGIN_PAGE.contains("if (!form || !input || MODE !== 'digest') return;"),
             "只有 digest 模式才改提交内容（其余原样提交）"
         );
+    }
+
+    #[test]
+    fn credential_headers_are_not_forwarded_to_plugins() {
+        // 安全审计 H2：插件路由原来把完整请求头交给插件，里面必然有
+        // `cookie: panel_session=…`；脚本调用时还有长期令牌。这些必须被剔除。
+        for h in [
+            "cookie",
+            "Cookie",
+            "cookie2",
+            "set-cookie",
+            "authorization",
+            "Authorization",
+            "proxy-authorization",
+            "x-panel-token",
+            "X-Panel-Token",
+            "x-api-key",
+            "x-csrf-token",
+            "x-panel",
+        ] {
+            assert!(is_credential_header(h), "{h} 是凭据头，必须剔除");
+        }
+        for h in [
+            "content-type",
+            "accept",
+            "accept-language",
+            "user-agent",
+            "x-request-id",
+            "range",
+            "if-none-match",
+        ] {
+            assert!(!is_credential_header(h), "{h} 不是凭据头，应当转发");
+        }
+    }
+
+    #[test]
+    fn plugin_response_headers_are_allowlisted() {
+        // 安全审计 中10：插件不能覆盖凭据类/安全策略类响应头。
+        for h in [
+            "set-cookie",
+            "Set-Cookie",
+            "content-security-policy",
+            "x-frame-options",
+            "access-control-allow-origin",
+            "strict-transport-security",
+            "x-forwarded-for",
+        ] {
+            assert!(
+                !plugin_response_header_allowed(h, "whatever"),
+                "{h} 不该由插件设置"
+            );
+        }
+        for h in ["content-type", "Content-Type", "cache-control", "etag", "retry-after"] {
+            assert!(plugin_response_header_allowed(h, "x"), "{h} 应当放行");
+        }
+        // 重定向只允许站内绝对路径
+        assert!(plugin_response_header_allowed("location", "/dashboard"));
+        for bad in ["//evil.com", "https://evil.com", "\\\\evil", "javascript:alert(1)"] {
+            assert!(
+                !plugin_response_header_allowed("location", bad),
+                "location={bad} 必须被拒"
+            );
+        }
     }
 
     // ---- 登录后跳回哪里：开放重定向防护 ----

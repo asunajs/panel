@@ -27,6 +27,17 @@ pub struct TaskRow {
 pub fn open(path: &Path) -> rusqlite::Result<Db> {
     let conn = Connection::open(path)?;
 
+    // 安全审计 L18：给「等锁」设个上限，而不是撞上就失败。
+    //
+    // 为什么这条在面板里是必需的：插件可以**直连同一个 DB 文件**（`sqlite_*` 那组
+    // host API 走的就是 `PANEL_DB` 这条路径），于是面板自己的写入（心跳、运行记录）
+    // 和插件的写入会抢同一把文件锁。SQLite 的默认 `busy_timeout` 是 **0** ——
+    // 撞上锁就立刻返回 `SQLITE_BUSY`，表现成"偶发写失败"，而且越忙越容易失败。
+    //
+    // 5 秒是刻意的量级：一次 checkpoint（面板把 WAL 压到 1 MB 上限）通常远小于它，
+    // 但又不至于让一次 HTTP 写请求卡到前端超时。
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
     // WAL 更适合「一写多读」的面板场景；pragma 有返回值，必须用 query_row 取回。
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     crate::log::plog!("db", info, "journal_mode = {mode}");
@@ -142,6 +153,8 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "jobs", "params", "TEXT")?;
     // 任务声明的执行预算（毫秒）。NULL = 用全局 EXEC_BUDGET_MS
     ensure_column(&conn, "jobs", "budget_ms", "INTEGER")?;
+    // 提前量（毫秒）：在 cron 目标前多久触发。NULL / 0 = 不提前。
+    ensure_column(&conn, "jobs", "lead_ms", "INTEGER")?;
     // 第二十六轮：**试跑的输出**。
     //
     // 只有试跑（kind='test'）会填这一列，因为试跑的输出**不进日志库**
@@ -162,8 +175,50 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "jobs", "script", "TEXT")?;
     ensure_column(&conn, "jobs", "runtime", "TEXT")?;
 
+    // 审计中7：库文件（以及 SQLite 的 -wal / -shm 兄弟文件）一律收成 0600。
+    // 放在这里而不是开库第一行：此时 WAL 与 SHM 已经随建表落下来了。
+    restrict_permissions(path);
+
     Ok(Arc::new(Mutex::new(conn)))
 }
+
+/// 把数据库文件与它的 `-wal` / `-shm` 收成 `0600`（owner 独读）。
+///
+/// 审计中7 实测：`data/panel.db`、`data/*.sqlite`、`logs/*.jsonl` 都是 `0644`，
+/// 而 `data/panel-token.hash` 却是 `0600` —— 「凭据文件要收紧」被想到了，
+/// 但**装着全部 payload 的库和日志没被想到**。同机低权用户因此能读走
+/// `tasks.payload` / `jobs.params` / `runs.output`，那里常是第三方站点账号、
+/// 令牌、带凭据的 URL。
+///
+/// 几个刻意的取舍：
+/// - **只改文件，不改目录**：目录归属由调用方（`main.rs` / `PANEL_DATA_DIR`）决定，
+///   它可能挂在一个共享挂载点上，这里多管一层会给出意外的权限变更；
+/// - `-wal` / `-shm` **不存在就跳过**（best-effort）：`journal_mode=WAL` 的两个
+///   兄弟文件是懒创建的，早一秒查可能还没有；
+/// - 之后新建的 WAL/SHM 会继承 DB 文件的 mode，所以这一次收紧是长效的；
+/// - 非 Unix 上是**空操作** —— 项目要在 Windows 上编译。
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let chmod_600 = |p: &Path| {
+        if let Ok(md) = std::fs::metadata(p) {
+            if md.is_file() {
+                let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    };
+    chmod_600(path);
+    // `-wal` 里是还没 checkpoint 的新写入，`-shm` 是 WAL 的索引 —— 两者都含明文 payload，
+    // 所以「库是 0600」并不够。
+    for suffix in ["-wal", "-shm"] {
+        let mut sibling = path.as_os_str().to_owned();
+        sibling.push(suffix);
+        chmod_600(Path::new(&sibling));
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) {}
 
 /// 如果列不存在就补上。SQLite 的 `ALTER TABLE ADD COLUMN` 是 O(1) 的元数据操作。
 fn ensure_column(
@@ -290,6 +345,8 @@ pub struct JobRow {
     pub params: Option<String>,
     /// 任务声明的执行预算（毫秒，`None` = 用全局默认）。见 [`JobSpec::budget_ms`]。
     pub budget_ms: Option<i64>,
+    /// 提前量（毫秒，`None` = 不提前）。
+    pub lead_ms: Option<i64>,
 }
 
 /// 一个待同步的任务定义。
@@ -314,6 +371,8 @@ pub struct JobSpec {
     /// 和 `params` 一样**跟着代码走**（`sync_jobs` 会收敛它）：它是任务定义的一部分，
     /// 不是用户意图。插件说「这条要 30 秒」，面板不该保留一个旧的 5 秒。
     pub budget_ms: Option<u64>,
+    /// 提前量（毫秒，`None` = 不提前）。插件默认时间的一部分。
+    pub lead_ms: Option<u64>,
 }
 
 /// 把「当前插件代码里声明的任务集合」同步进库。
@@ -354,13 +413,14 @@ pub fn sync_jobs(
     for s in specs {
         tx.execute(
             r#"
-            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, source, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?6, 'plugin', ?7, ?7)
+            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, lead_ms, source, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?6, ?8, 'plugin', ?7, ?7)
             ON CONFLICT(plugin, name) DO UPDATE SET
                 schedule   = excluded.schedule,
                 -- 预算也**跟着代码走**：它是任务定义的一部分（插件说这条要 30 秒），
                 -- 不是用户意图。保留一个旧的预算 = 插件改了但没生效。
                 budget_ms  = excluded.budget_ms,
+                lead_ms    = excluded.lead_ms,
                 -- 参数跟着代码走：账号列表变了，插件重新声明一次就该收敛过来。
                 -- 这一格**故意**可以被覆盖（不像 paused / deleted 那样要保住），
                 -- 因为「有哪些账号」只有插件知道，面板无从判断该不该保留旧的。
@@ -386,7 +446,8 @@ pub fn sync_jobs(
                 s.next_run,
                 s.params,
                 s.budget_ms.map(|v| v as i64),
-                now
+                now,
+                s.lead_ms.map(|v| v as i64)
             ],
         )?;
     }
@@ -1142,7 +1203,7 @@ pub fn set_job_status(
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
                            last_error, paused, source, created_at, updated_at, override_expr,
-                           deleted, params, budget_ms, kind, script, runtime";
+                           deleted, params, budget_ms, kind, script, runtime, lead_ms";
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
@@ -1152,6 +1213,7 @@ fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
         script: r.get(19).unwrap_or(None),
         runtime: r.get(20).unwrap_or(None),
         budget_ms: r.get(17).unwrap_or(None),
+        lead_ms: r.get(21).unwrap_or(None),
         params: r.get(16).unwrap_or(None),
         deleted: r.get(15).unwrap_or(0) != 0,
         override_expr: r.get(14)?,
@@ -1201,14 +1263,15 @@ pub fn insert_panel_job(
     now: &str,
     params: Option<&str>,
     budget_ms: Option<i64>,
+    lead_ms: Option<i64>,
 ) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     conn.execute(
         r#"
-        INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, source, created_at, updated_at)
-        VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?6, 'panel', ?7, ?7)
+        INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, lead_ms, source, created_at, updated_at)
+        VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?6, ?7, 'panel', ?8, ?8)
         "#,
-        params![name, plugin, schedule, next_run, params, budget_ms, now],
+        params![name, plugin, schedule, next_run, params, budget_ms, lead_ms, now],
     )
 }
 
@@ -1227,14 +1290,30 @@ pub fn update_panel_job_schedule(
     schedule: &str,
     next_run: Option<&str>,
     now: &str,
+    lead_ms: Option<i64>,
 ) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     conn.execute(
         r#"
-        UPDATE jobs SET schedule = ?3, next_run = ?4, updated_at = ?5
+        UPDATE jobs SET schedule = ?3, next_run = ?4, updated_at = ?5, lead_ms = COALESCE(?6, lead_ms)
         WHERE plugin = ?1 AND name = ?2 AND source = 'panel'
         "#,
-        params![plugin, name, schedule, next_run, now],
+        params![plugin, name, schedule, next_run, now, lead_ms],
+    )
+}
+
+/// 改任意任务的提前量（插件声明 / 面板任务都适用）。
+pub fn set_job_lead(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    lead_ms: i64,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET lead_ms = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, lead_ms, now],
     )
 }
 
@@ -1335,6 +1414,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 审计中7：库文件（含 WAL/SHM）只能是 owner 可读。
+    ///
+    /// 为什么必须在**落盘**的库上测、而不是 `:memory:`：这个缺陷本来就是
+    /// 「文件权限」，内存库根本没有文件。断言用 `mode & 0o777`，因为
+    /// set_permissions 只动权限位，不该碰文件类型位。
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("pp-db-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("panel.db");
+
+        let db = open(&path).unwrap();
+        // 写一笔，确保 WAL 真的被创建（否则「查一下存在才断言」会静默跳过）
+        upsert_task(&db, "t", "p", "idle", "{}", NOW).unwrap();
+
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode_of(&path), 0o600, "数据库文件必须是 0600（审计中7）");
+        for suffix in ["-wal", "-shm"] {
+            let mut p = path.clone().into_os_string();
+            p.push(suffix);
+            let p = std::path::PathBuf::from(p);
+            assert!(p.exists(), "{} 应该已经落盘了（WAL 模式）", p.display());
+            assert_eq!(mode_of(&p), 0o600, "{} 也必须是 0600", p.display());
+        }
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 审计 L18：插件可直连同一个 DB 文件并发写，没有 `busy_timeout` 时
+    /// 面板侧的写入会立刻 `SQLITE_BUSY`。这里钉住「设上了，且是 5 秒」。
+    #[test]
+    fn busy_timeout_is_five_seconds() {
+        let db = mem();
+        let conn = db.lock().unwrap();
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000, "busy_timeout 必须是 5000ms（审计 L18）");
+    }
+
     /// 每次测试一个全新的内存库。`open` 里的 pragma 对内存库是无操作，不影响断言。
     fn mem() -> Db {
         open(Path::new(":memory:")).expect("打开内存库")
@@ -1348,6 +1472,7 @@ mod tests {
             next_run: None,
             params: None,
             budget_ms: None,
+            lead_ms: None,
         }
     }
 
@@ -1364,7 +1489,7 @@ mod tests {
     #[test]
     fn sync_jobs_does_not_touch_panel_rows() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None, None).unwrap();
 
         // 插件代码声明了另一个任务 —— 不能把面板创建的那条顺手删掉
         let taken = sync_jobs(&db, &[spec("p", "theirs", "@every 2s")], NOW, None).unwrap();
@@ -1377,7 +1502,7 @@ mod tests {
     #[test]
     fn sync_jobs_prunes_only_stale_plugin_rows() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None, None).unwrap();
         sync_jobs(&db, &[spec("p", "old", "@every 1s")], NOW, None).unwrap();
 
         // 这一轮插件代码里只剩 theirs：old 该被清掉，mine 该活着
@@ -1392,7 +1517,7 @@ mod tests {
     #[test]
     fn sync_jobs_lets_code_take_over_a_same_named_panel_row() {
         let db = mem();
-        insert_panel_job(&db, "p", "echo", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "echo", "@every 1s", None, NOW, None, None, None).unwrap();
 
         // 插件代码里也声明了 echo → 代码优先，面板那条被接管
         let taken = sync_jobs(&db, &[spec("p", "echo", "@every 9s")], NOW, None).unwrap();
@@ -1433,7 +1558,7 @@ mod tests {
     #[test]
     fn panel_job_roundtrip_and_delete_guard() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
         assert_eq!(job_source(&db, "p", "mine").unwrap().as_deref(), Some("panel"));
 
         // 插件声明的行不能被面板删掉（删了也会被 sync_jobs 装回来）
@@ -1452,9 +1577,9 @@ mod tests {
     #[test]
     fn duplicate_panel_job_is_rejected_by_the_unique_index() {
         let db = mem();
-        insert_panel_job(&db, "p", "x", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "x", "@every 1s", None, NOW, None, None, None).unwrap();
         // 引擎线程里的校验是串行的，这里是兜底：宁可报错也不静默覆盖一条已有定义
-        assert!(insert_panel_job(&db, "p", "x", "@every 2s", None, NOW, None, None).is_err());
+        assert!(insert_panel_job(&db, "p", "x", "@every 2s", None, NOW, None, None, None).is_err());
         assert_eq!(get(&db, "p", "x").schedule, "@every 1s");
     }
 
@@ -1636,8 +1761,8 @@ mod tests {
     #[test]
     fn list_panel_jobs_filters_by_plugin() {
         let db = mem();
-        insert_panel_job(&db, "a", "one", "@every 1s", None, NOW, None, None).unwrap();
-        insert_panel_job(&db, "b", "two", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "a", "one", "@every 1s", None, NOW, None, None, None).unwrap();
+        insert_panel_job(&db, "b", "two", "@every 1s", None, NOW, None, None, None).unwrap();
         sync_jobs(&db, &[spec("a", "code", "@every 1s")], NOW, None).unwrap();
 
         let all = list_panel_jobs(&db, None).unwrap();
@@ -1652,7 +1777,7 @@ mod tests {
     #[test]
     fn list_job_counters_reads_both_sources() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", None, NOW, None, None, None).unwrap();
         sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
         record_job_run(&db, "p", "mine", 5, 2, None, NOW, None, false, NOW).unwrap();
 
@@ -1668,7 +1793,7 @@ mod tests {
     #[test]
     fn set_job_status_keeps_paused_and_clears_next_run() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
         set_job_paused(&db, "p", "mine", true, NOW).unwrap();
 
         set_job_status(&db, "p", "mine", "error", Some("处理函数没了"), NOW).unwrap();
@@ -1679,7 +1804,7 @@ mod tests {
         assert!(j.next_run.is_none(), "跑不起来的任务不该留着下次触发时刻");
 
         // 没暂停的那条才该显示 error
-        insert_panel_job(&db, "p", "other", "@every 1s", Some(NOW), NOW, None, None).unwrap();
+        insert_panel_job(&db, "p", "other", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
         set_job_status(&db, "p", "other", "error", Some("x"), NOW).unwrap();
         assert_eq!(get(&db, "p", "other").status, "error");
     }

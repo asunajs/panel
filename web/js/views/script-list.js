@@ -25,6 +25,7 @@ import {
   editJob,
   deleteJob,
   restoreJob,
+  uploadFile,
 } from '../api.js';
 import { statusBadge } from '../status.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
@@ -129,12 +130,12 @@ function fileCard(f, job) {
         `<button class="btn" data-act="restore" data-name="${esc(job.name)}" data-dir="1" title="把这条目录任务装回调度器">恢复</button>`,
       );
     }
-    // 「建面板任务」始终给：目录任务没排上时这是另一条让它跑起来的路；
+    // 「基于此文件建面板任务」始终给：目录任务没排上时这是另一条让它跑起来的路；
     // 即使是同一份文件，面板任务也各有各的调度（后端按任务身份去重）。
     ops.push(
       `<button class="btn ${scheduled || deleted ? '' : 'primary'}" data-act="create" data-path="${esc(
         f.path,
-      )}" title="在面板上为这份文件另建一条任务（路径 / 运行时 / 调度可改）">建面板任务</button>`,
+      )}" title="基于这份文件另建一条面板任务；原来的目录任务不受影响（路径 / 运行时 / 调度可改）">基于此文件建面板任务</button>`,
     );
     if (disabled) ops.push('<span class="hint">文件头写了 disabled，不会自动排班</span>');
   }
@@ -307,9 +308,9 @@ function rowOfTask(root, name) {
 
 /** 运行记录弹窗：复用任务列表里那套 `/api/runs` 接口，字段完全一样。 */
 async function openRunsDialog(name) {
+  // 同源 cookie 就够了（原来那个头引用的全局从未定义，见安全审计 L13）
   const res = await fetch(
     `/api/runs?plugin=${encodeURIComponent(SCRIPT_PLUGIN)}&task=${encodeURIComponent(name)}&limit=30`,
-    { headers: { 'X-Panel-Token': window.__PANEL_TOKEN__ || '' } },
   );
   const data = res.ok ? await res.json() : { error: `HTTP ${res.status}` };
   const runs = data.runs || [];
@@ -418,8 +419,10 @@ export async function render(root, ctx, opts = {}) {
       <div class="section-head">
         <span class="section-title">脚本文件（${files.length}）</span>
         <div class="card-actions">
+          <button class="btn" id="upload-btn" title="上传 .js / .mjs / .py / .sh 单文件，或解压 .zip 到任务目录">上传脚本</button>
+          <input type="file" id="upload-input" accept=".js,.mjs,.py,.sh,.zip" hidden>
           <button class="btn" id="refresh-btn">刷新</button>
-          <button class="btn primary" id="new-script-btn">新建面板任务</button>
+          <button class="btn primary" id="new-script-btn" title="在面板数据库里创建一条脚本任务；TASKS_DIR 里的目录任务放文件就会自动出现">新建面板脚本任务</button>
         </div>
       </div>
       <p class="hint" style="margin-bottom:var(--sp-3)">
@@ -440,13 +443,33 @@ export async function render(root, ctx, opts = {}) {
       ${
         panelJobs.length
           ? `<div class="grid">${panelJobs.map(panelJobCard).join('')}</div>`
-          : '<div class="card empty">还没有面板脚本任务。点右上角「新建面板任务」，或从上面任意一份文件「建面板任务」。</div>'
+          : '<div class="card empty">还没有面板脚本任务。点右上角「新建面板脚本任务」，或从上面任意一份文件「基于此文件建面板任务」。</div>'
       }
     </div>`;
 
   paintArmed(root);
   root.querySelector('#refresh-btn').addEventListener('click', () => render(root, ctx));
   root.querySelector('#new-script-btn').addEventListener('click', () => ctx.navigate('#/scripts/new'));
+
+  const uploadInput = root.querySelector('#upload-input');
+  root.querySelector('#upload-btn').addEventListener('click', () => uploadInput.click());
+  uploadInput.addEventListener('change', async () => {
+    const file = uploadInput.files && uploadInput.files[0];
+    uploadInput.value = '';
+    if (!file) return;
+    const res = await uploadFile('tasks', file);
+    if (!res.ok) {
+      ctx.toast(`上传失败：${res.error}`, 'bad');
+      return;
+    }
+    ctx.toast(
+      res.zip
+        ? `已解压 ${res.files.length} 个文件到任务目录`
+        : `已上传脚本：${res.files[0] || file.name}`,
+      'ok',
+    );
+    render(root, ctx);
+  });
 
   clearRootListeners(root);
   addRootListener(root, 'click', async (ev) => {

@@ -226,13 +226,18 @@ impl LogEntry {
     ///
     /// 带完整日期（面板是常驻进程，只打 `HH:MM:SS` 跨天就分不清是哪天了），
     /// scope 一律带方括号 —— 这样 `grep '\[engine:0\]'` 直接可用。
+    ///
+    /// ⚠ 这里的 `msg` 要过 [`sanitize_terminal`]（安全审计 L15）：插件往正文里塞
+    /// `\x1b[2K` / `\x1b[31m` 就能在终端上改写别人的行、伪造「成功」的假日志。
+    /// 只对**终端渲染**剥，`to_json()` 留原文（取证要看原样，JSON 本身也不会
+    /// 让终端执行控制序列）。
     pub fn line(&self) -> String {
         format!(
             "{} [{}] [{}] {}",
             self.ts.format("%Y-%m-%d %H:%M:%S%.3f"),
             self.typ.as_str(),
             self.scope,
-            self.msg
+            sanitize_terminal(&self.msg)
         )
     }
 
@@ -393,7 +398,7 @@ impl Logger {
         typ.level() >= self.min_level()
     }
 
-    /// **唯一的写入口**。脱敏在这里做（见模块头「脱敏在核心做」）。
+    /// **唯一的写入口**。脱敏与单条上限都在这里做（见模块头「脱敏在核心做」）。
     pub fn log(&self, typ: Type, msg: impl Into<String>) {
         if !self.is_enabled(typ) {
             return;
@@ -411,7 +416,9 @@ impl Logger {
             } else {
                 None
             },
-            msg: redact(&msg.into()),
+            // 先脱敏、再按 32 KiB 上限截断（安全审计 L15）。放在这里而不是各 transport：
+            // 五个出口（终端/文件/内存/SSE/捕获）拿到的必须是同一份正文。
+            msg: prepare_msg(msg.into()),
         };
 
         // 测试运行：只进捕获缓冲 —— 不打终端、不进环形缓冲、不写文件。
@@ -588,6 +595,12 @@ const SECRET_KEYS: &[&str] = &[
     "ticket",
     "signature",
     "credential",
+    // 云厂商 / 网关的 API key 家族（2026-10 审计中4）。刻意写成完整词：
+    // 裸 `key` 会把 `keyword` / `key=value` 这类排查用的正常参数一并误伤。
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
 ];
 
 /// 整行脱到行尾的请求头（值里可能带 `;` 和空格，只能整行砍）。
@@ -599,6 +612,10 @@ const SECRET_HEADERS: &[&str] = &[
     "x-auth-token",
     "x-csrf-token",
     "x-xsrf-token",
+    // 中4：`X-Api-Key` 是各家网关的凭据头；`x-panel-token` 是**本项目自己**的
+    // 面板令牌 —— 插件拿到它就能冒充操作者，它出现在日志里必须整行脱。
+    "x-api-key",
+    "x-panel-token",
 ];
 
 /// 值的终止符：ASCII 的 `& # ; " ' , ) ] }`，加上**全角**的 `）】》，。、`。
@@ -635,22 +652,170 @@ fn is_flag_value(v: &[char]) -> bool {
 ///
 /// 规则（按这个顺序跑，前一条的结果会被后一条再扫一遍）：
 ///
-/// 1. `Authorization:` / `Cookie:` / `Set-Cookie:` … 整行值 → `***`
-/// 2. JSON 字段 `"token": "…"` → `"***"`
-/// 3. 裸的 `key=value`（`?`/`&` 拼在 URL 上的那种也算）→ `***`
-/// 4. `Bearer xxx` → `Bearer ***`
-/// 5. 11 位手机号 → `136****6001`（**保留首 3 末 4**，仍能区分账号）
+/// 1. URL userinfo：`scheme://user:pass@host` → `scheme://***:***@host`
+/// 2. `Authorization:` / `Cookie:` / `Set-Cookie:` / `X-Api-Key:` … 整行值 → `***`
+/// 3. JSON 字段 `"token": "…"` → `"***"`
+/// 4. 裸的 `key=value`（`?`/`&` 拼在 URL 上的那种也算）→ `***`
+/// 5. `Bearer xxx` → `Bearer ***`
+/// 6. 11 位手机号 → `136****6001`（**保留首 3 末 4**，仍能区分账号）
 ///
 /// ⚠ 顺序有意义：JSON 那条必须排在裸 kv 前面 —— 否则 `{"token":"abc"}`
 /// 里那个 `"` 会被当成 key 的分隔符，脱出个四不像。
+///
+/// URL userinfo 排在最前面：它是**结构**脱敏（`user:pass` 里两侧都可能是任意
+/// 字符，包括 `=` `&`），先把它换成 `***`，后面的 kv / Bearer 才不会在
+/// 密码串里做二次解释。这个顺序也保证幂等：脱过的 `***:***` 再跑一遍不变。
 pub fn redact(msg: &str) -> String {
     let mut buf: Vec<char> = msg.chars().collect();
+    buf = redact_url_userinfo(&buf);
     buf = redact_headers(&buf);
     buf = redact_json_fields(&buf);
     buf = redact_kv(&buf);
     buf = redact_bearer(&buf);
     buf = redact_phones(&buf);
     buf.into_iter().collect()
+}
+
+/* ======================== 单条上限 / 终端净化 ======================== */
+
+/// 单条日志正文上限（字节）。安全审计 L15。
+///
+/// 32 KiB 是个刻意的折中：
+/// - 正常日志（含一次 HTTP 响应体摘要、报错栈）远小于它，**不会**被截；
+/// - 插件「把整个响应体 `log` 出来」这类写法会被截住 —— 一条 64 MiB 的日志行
+///   会把内存环（1 MB 字节预算）直接冲干净，还会让每条都有一次磁盘写；
+/// - 截断按 **UTF-8 边界**退让，绝不产生半个汉字（否则 JSONL 里就是乱码）。
+pub const MAX_MSG_BYTES: usize = 32 * 1024;
+
+/// 超长正文的尾巴。保留「原长」是为了排查时能判断「是内容就这么多，还是被我截了」。
+fn truncation_note(original_len: usize) -> String {
+    format!("…（已截断，原长 {original_len} 字节）")
+}
+
+/// 把 `msg` 在 `budget` 字节处截断，并按 UTF-8 边界往回退。
+fn truncate_utf8(mut msg: String, budget: usize) -> String {
+    let mut cut = budget.min(msg.len());
+    while cut > 0 && !msg.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    msg.truncate(cut);
+    msg
+}
+
+/// 写入口的正文处理：**先脱敏，再卡上限**。
+///
+/// 顺序：
+/// 1. 超过上限的正文先粗切一刀**再脱敏** —— 否则插件打印 100 MB 正文时，
+///    `redact` 要先把它摊成 `Vec<char>`（4 字节/字符）才轮到截断，那本身就是个
+///    内存放大面；
+/// 2. 脱敏（见 [`redact`]）；
+/// 3. 最终长度 > 上限时按边界截断并补「已截断」标记 —— 脱敏可能让正文变长
+///    （`a=b` 这种两字符值也会被换成 `***`），所以这一步不能省。
+///
+/// 截断后的总长（含标记）不超过 [`MAX_MSG_BYTES`]。
+fn prepare_msg(raw: String) -> String {
+    let original_len = raw.len();
+    let mut redacted = if original_len > MAX_MSG_BYTES {
+        redact(&truncate_utf8(raw, MAX_MSG_BYTES))
+    } else {
+        redact(&raw)
+    };
+    // 常态：没超上限，脱敏也没让它变长 —— 一个字节都不动。
+    if original_len <= MAX_MSG_BYTES && redacted.len() <= MAX_MSG_BYTES {
+        return redacted;
+    }
+    // 要么本来超了（上面已粗切），要么脱敏把它撑过了上限（`a=b` → `a=***`）。
+    // 两种情况都要留标记，并且保证「正文 + 标记」≤ 上限。
+    let note = truncation_note(original_len);
+    let budget = MAX_MSG_BYTES.saturating_sub(note.len());
+    redacted = truncate_utf8(redacted, budget);
+    redacted.push_str(&note);
+    redacted
+}
+
+/// 把一条正文净化成「终端上只能当一个普通字符串显示」的形态。
+///
+/// 安全审计 L15：一条 `\x1b[2K\r` 就能把终端上别人那一行擦掉，
+/// 再配一句假的 `[success] …`，操作者看到的就是**伪造的日志**。
+/// 彩色路径（`console.rs::colored_line`）与纯文本路径（[`LogEntry::line`]）都要过这里。
+///
+/// 做两件事：
+/// 1. 剥掉控制序列：CSI（`ESC [`）、OSC（`ESC ]`）以及其余 `ESC` 序列；
+/// 2. 丢掉剩下的 C0/C1 控制字符（`\r` / 退格 / 响铃 / 单字节 CSI `\u{9b}` …），
+///    **只放过 `\n` 与 `\t`**。
+///
+/// 为什么放过 `\n`：共享格式向量里就有一条多行正文（`创建 Runtime 失败…\n第二行`），
+/// 终端行格式是三方契约（Rust/JS），不能在这里单方面改。`\r` 必须丢 ——
+/// 它才是「回到行首覆盖别人内容」的那个字符。
+///
+/// **只用于终端渲染**：JSONL 与内存环保留原文（JSON 转义后不会执行控制序列，
+/// 而且取证要看原样）。
+pub(crate) fn sanitize_terminal(s: &str) -> String {
+    /// 控制序列里除终止字节以外的参数/中间字节。
+    fn is_param(c: char) -> bool {
+        ('\u{20}'..='\u{3f}').contains(&c)
+    }
+    fn is_final(c: char) -> bool {
+        ('\u{40}'..='\u{7e}').contains(&c)
+    }
+    /// 允许出现在终端行里的控制字符：换行（向量契约）与制表符（对齐）。
+    fn is_allowed_control(c: char) -> bool {
+        c == '\n' || c == '\t'
+    }
+
+    // 快路径：绝大多数日志既没有 ESC 也没有别的控制字符。
+    if !s.contains('\x1b') && !s.chars().any(|c| c.is_control() && !is_allowed_control(c)) {
+        return s.to_string();
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\x1b' {
+            if c.is_control() && !is_allowed_control(c) {
+                continue; // `\r` / 单字节 CSI（U+009B）等一律不给终端
+            }
+            out.push(c);
+            continue;
+        }
+        match it.peek().copied() {
+            // CSI：参数（0x20-0x3F，含 `[` 之后的数字/分号）+ 终止字节（0x40-0x7E）
+            Some('[') => {
+                it.next();
+                for c2 in it.by_ref() {
+                    if is_final(c2) {
+                        break;
+                    }
+                }
+            }
+            // OSC：`ESC ]` 之后到 BEL 或 ST（`ESC \`）为止（改标题、写剪贴板都走它）
+            Some(']') => {
+                it.next();
+                let mut prev = '\0';
+                for c2 in it.by_ref() {
+                    if c2 == '\x07' || (prev == '\x1b' && c2 == '\\') {
+                        break;
+                    }
+                    prev = c2;
+                }
+            }
+            // 其它 ESC 序列（如 `ESC ( B`）：中间字节 0x20-0x2F，再跟一个终止字节
+            Some(c2) if is_param(c2) => {
+                it.next();
+                while it.peek().is_some_and(|&c3| ('\u{20}'..='\u{2f}').contains(&c3)) {
+                    it.next();
+                }
+                if it.peek().is_some_and(|&c3| ('\u{30}'..='\u{7e}').contains(&c3)) {
+                    it.next();
+                }
+            }
+            // 裸 ESC 或 ESC + 单个非参数字符：一并丢掉（不让终端看到控制字符）
+            _ => {
+                it.next();
+            }
+        }
+    }
+    out
 }
 
 fn matches_at(src: &[char], at: usize, needle: &str) -> bool {
@@ -670,6 +835,72 @@ fn push_masked(out: &mut Vec<char>) {
     out.push('*');
     out.push('*');
     out.push('*');
+}
+
+/// 1) URL userinfo：`scheme://user:pass@host/x` → `scheme://***:***@host/x`。
+///
+/// 审计中4：`https://alice:hunter2@host/x` 这种写法会把**账号和口令**原样留在
+/// 盘上一周。`redact_kv` 看不见它（userinfo 里不一定有 `=`），`Bearer` 更不沾边。
+///
+/// 判定刻意收紧到「RFC 3986 的 authority 段」：
+///
+/// - `://` 前面必须真有一个 scheme（`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`），
+///   免得把正文里的 `//a@b` 误当 URL；
+/// - `@` 必须出现在 authority 内（到 `/` `?` `#`、空白、引号或反斜杠为止）。
+///   于是 `alice@example.com`（没 scheme）和 `https://host/a@b`（`@` 在 path 里）
+///   都不动 —— 这两条是邮箱与路径，脱了反而毁排查线索。
+///
+/// 输出形状跟输入一致：有 `:` 才是 `***:***`，只有 user 就是 `***`。
+/// 这样它对**自己的输出**幂等（`***:***` / `***` 再跑一遍不变）。
+fn redact_url_userinfo(src: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == ':' && i + 2 < src.len() && src[i + 1] == '/' && src[i + 2] == '/' {
+            // 往回找 scheme 起点
+            let mut s = i;
+            while s > 0
+                && (src[s - 1].is_ascii_alphanumeric() || matches!(src[s - 1], '+' | '-' | '.'))
+            {
+                s -= 1;
+            }
+            // scheme 必须以字母开头，且不能为空（`://x` 这种不算 URL）
+            let scheme_ok = s < i && src[s].is_ascii_alphabetic();
+            if scheme_ok {
+                let auth_start = i + 3;
+                let mut at = None;
+                let mut k = auth_start;
+                while k < src.len() {
+                    let c = src[k];
+                    if c == '@' {
+                        at = Some(k);
+                        break;
+                    }
+                    // authority 到此为止：再往后就是 path / query / fragment / 正文
+                    if matches!(c, '/' | '?' | '#' | '"' | '\'' | '\\') || c.is_whitespace() {
+                        break;
+                    }
+                    k += 1;
+                }
+                if let Some(at) = at {
+                    out.extend(src[i..=i + 2].iter()); // `://` 原样留着
+                    if src[auth_start..at].contains(&':') {
+                        push_masked(&mut out);
+                        out.push(':');
+                        push_masked(&mut out);
+                    } else {
+                        push_masked(&mut out);
+                    }
+                    out.push('@');
+                    i = at + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(src[i]);
+        i += 1;
+    }
+    out
 }
 
 fn redact_headers(src: &[char]) -> Vec<char> {
@@ -944,6 +1175,45 @@ mod tests {
     }
 
     #[test]
+    fn redacts_url_userinfo_but_keeps_email_and_path_intact() {
+        // 中4：userinfo 里的账号 + 口令都要脱，host 和 path 留着（排查要看请求打到哪）
+        assert_eq!(
+            redact("GET https://alice:hunter2@example.com/x"),
+            "GET https://***:***@example.com/x"
+        );
+        // 只有 user（没有 password）时形状少一段 `:`，别凭空造一个
+        assert_eq!(
+            redact("fetch https://ghp_xxx@api.github.com/repos"),
+            "fetch https://***@api.github.com/repos"
+        );
+        // 邮箱（没有 scheme）和 path 里的 `@` 都不是 userinfo
+        assert_eq!(redact("联系 alice@example.com"), "联系 alice@example.com");
+        assert_eq!(
+            redact("https://example.com/a@b"),
+            "https://example.com/a@b"
+        );
+        // 幂等：脱过的再跑一遍不变（日志会被多轮处理，不能越脱越多）
+        assert_eq!(
+            redact("https://***:***@example.com/x"),
+            "https://***:***@example.com/x"
+        );
+        // 没有 scheme 的 `//user:pass@host` 不认 —— 那更像正文/协议相对路径，
+        // 宁可漏掉这种罕见写法，也不要把正文误伤（`://` 是硬门槛）
+        assert_eq!(redact("//alice:pw@host/x"), "//alice:pw@host/x");
+    }
+
+    #[test]
+    fn redacts_api_key_family_and_panel_token_header() {
+        for key in ["api_key", "apikey", "access_key", "private_key"] {
+            assert_eq!(redact(&format!("{key}=AKIA1234567")), format!("{key}=***"));
+        }
+        // 裸 `key` 仍然**不**进词表：`keyword` / `key=value` 必须原样保留
+        assert_eq!(redact("keyword=design&key=value"), "keyword=design&key=value");
+        assert_eq!(redact("X-Api-Key: sk-live-abc123"), "X-Api-Key: ***");
+        assert_eq!(redact("x-panel-token: 8f3a2b1c"), "x-panel-token: ***");
+    }
+
+    #[test]
     fn redacts_auth_headers_to_end_of_line() {
         let got = redact("Cookie: panel_session=abc123; theme=dark\nnext");
         assert!(got.starts_with("Cookie: ***"), "{got}");
@@ -1001,6 +1271,110 @@ mod tests {
         assert_eq!(snap[0].entry.msg, "账号 136****6001 失败");
         assert_eq!(snap[0].entry.typ, Type::Warn);
         assert_eq!(snap[0].entry.scope, "t");
+    }
+
+    /* ================= 单条上限 / 终端净化（审计 L15） ================= */
+
+    /// 超长正文：截到 32 KiB，并留「原长」标记（不含标记的裸截断查不出是不是被切了）。
+    #[test]
+    fn oversized_message_is_truncated_with_original_length() {
+        let mem = Arc::new(MemoryTransport::new(4 << 20));
+        let lg = Logger::with_transports("t", vec![mem.clone()]);
+        lg.info("x".repeat(100 * 1024));
+
+        let msg = &mem.snapshot()[0].entry.msg;
+        assert_eq!(msg.len(), MAX_MSG_BYTES, "含标记的总长要正好卡在上限");
+        assert!(
+            msg.ends_with("…（已截断，原长 102400 字节）"),
+            "标记不对: {:?}",
+            &msg[msg.len() - 45..]
+        );
+    }
+
+    /// 恰好等于上限的正文一个字节都不许动（否则「正常大日志」会被无谓地标记）。
+    #[test]
+    fn a_message_exactly_at_the_cap_is_untouched() {
+        let mem = Arc::new(MemoryTransport::new(4 << 20));
+        let lg = Logger::with_transports("t", vec![mem.clone()]);
+        let exact = "a".repeat(MAX_MSG_BYTES);
+        lg.info(exact.clone());
+        assert_eq!(mem.snapshot()[0].entry.msg, exact);
+    }
+
+    /// 截断必须按 **UTF-8 边界** 退让：半个汉字会让 JSONL 变乱码，也会让 `jq` 报错。
+    #[test]
+    fn truncation_keeps_utf8_boundaries() {
+        let mem = Arc::new(MemoryTransport::new(4 << 20));
+        let lg = Logger::with_transports("t", vec![mem.clone()]);
+        // 20000 个汉字 = 60000 字节，远在上限之上；上限 - 标记长度 基本不可能被 3 整除
+        lg.info("汉".repeat(20_000));
+
+        let msg = &mem.snapshot()[0].entry.msg;
+        assert!(msg.len() <= MAX_MSG_BYTES, "{}", msg.len());
+        assert!(msg.ends_with("字节）"));
+        let cut = msg.find('…').expect("要带截断标记");
+        assert!(
+            msg[..cut].chars().all(|c| c == '汉'),
+            "回退后不能切出半个汉字"
+        );
+        assert!(std::str::from_utf8(msg.as_bytes()).is_ok());
+    }
+
+    /// 终端渲染剥控制序列，JSONL 保留原文（审计 L15）。
+    #[test]
+    fn terminal_rendering_strips_ansi_but_jsonl_keeps_it() {
+        assert_eq!(sanitize_terminal("\x1b[2K伪造 \x1b[32m成功\x1b[0m"), "伪造 成功");
+        assert_eq!(sanitize_terminal("\x1b]0;标题\x07正文"), "正文");
+        // OSC 8 超链接（`ESC ] 8 ; ; url ST 文本 ST`）
+        assert_eq!(sanitize_terminal("\x1b]8;;https://x\x1b\\链接\x1b]8;;\x1b\\"), "链接");
+        assert_eq!(sanitize_terminal("普通日志"), "普通日志");
+        // `\r`（回到行首覆盖）与其余 C0 控制字符一律丢掉；`\n` / `\t` 留着（向量契约）
+        assert_eq!(sanitize_terminal("伪造成功\r真话"), "伪造成功真话");
+        assert_eq!(sanitize_terminal("a\x07b\x08c"), "abc");
+        assert_eq!(sanitize_terminal("a\nb\tc"), "a\nb\tc");
+        // 裸 ESC 也不能落到终端上
+        assert!(!sanitize_terminal("a\x1bb").contains('\x1b'));
+
+        let e = LogEntry {
+            ts: Local::now(),
+            typ: Type::Success,
+            scope: "p".into(),
+            plugin: Some("p".into()),
+            run: None,
+            msg: "\x1b[2K\x1b[32m[success] [p] 假日志\x1b[0m".into(),
+        };
+        let line = e.line();
+        assert!(!line.contains('\x1b'), "终端行不能带控制序列: {line:?}");
+        assert!(line.contains("[success] [p] 假日志"), "{line}");
+        // 文件/JSONL 侧要留原文：取证看的是原样，而 JSON 转义后终端不会执行它
+        assert!(
+            e.to_json().contains("\\u001b"),
+            "JSONL 必须保留原文: {}",
+            e.to_json()
+        );
+    }
+
+    /// 控制台**彩色**路径（tty 下的主路径）同样要净化 —— 只改 `line()` 等于没改。
+    #[test]
+    fn colored_line_strips_ansi_from_the_message_only() {
+        let e = LogEntry {
+            ts: Local::now(),
+            typ: Type::Info,
+            scope: "p".into(),
+            plugin: None,
+            run: None,
+            msg: "前\x1b[2K\r后".into(),
+        };
+        let colored = crate::log::console::colored_line(&e);
+        // 只允许**我们自己**加的两个配色序列（`\x1b[36m` 与 `\x1b[0m`）；
+        // 插件塞进来的那个 `\x1b[2K` 必须已经没了。
+        assert_eq!(
+            colored.matches('\x1b').count(),
+            2,
+            "msg 里的控制序列必须剥掉，只剩我们加的配色: {colored:?}"
+        );
+        assert!(colored.ends_with(" 前后"), "`\\r` 也要丢掉: {colored:?}");
+        assert!(colored.starts_with("\x1b[36m[info]\x1b[0m"), "{colored:?}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
   web/js/views/task-editor.js —— 任务编辑视图（含测试运行）。
 
   两件事放在一个视图里，因为它们服务同一个动作：**调好一个任务**。
-    ① 调度表达式：新建（选插件 + 处理函数名 + 表达式）或修改（后端 /api/jobs/.../edit，
+    ① 调度表达式：新建（选插件 + 任务名 + 表达式）或修改（后端 /api/jobs/.../edit，
        只换表达式、保留 runs 与暂停状态）
     ② 测试运行：一段 JavaScript + 输入 → POST /api/test/js → 控制台
        调表达式之前先确认处理函数能跑通，这是最自然的工作顺序。
@@ -35,7 +35,7 @@ export async function render(root, ctx, params = {}) {
   root.innerHTML = `
     <div class="breadcrumb">
       <a href="#/tasks">任务列表</a><span>/</span>
-      <span>${isEdit ? '编辑' : '新建'}任务</span>
+      <span>${isEdit ? '编辑插件任务' : '新建插件任务'}</span>
     </div>
 
     <div class="section">
@@ -44,8 +44,8 @@ export async function render(root, ctx, params = {}) {
           <span class="card-title">任务定义</span>
           <span class="card-sub">${
             isEdit
-              ? '只能改调度表达式：插件名与处理函数名是这条任务的身份'
-              : '处理函数要由插件用 register_handler 注册'
+              ? '只能改调度表达式：插件名与任务名是这条任务的身份'
+              : '填插件里已经注册的任务名'
           }</span>
         </div>
 
@@ -55,15 +55,17 @@ export async function render(root, ctx, params = {}) {
             <select class="select" id="f-plugin" ${isEdit ? 'disabled' : ''}></select>
           </div>
           <div class="field">
-            <label class="field-label" for="f-name">处理函数名</label>
+            <label class="field-label" for="f-name">任务名</label>
             <input class="input mono" id="f-name" spellcheck="false"
-                   placeholder="例如 echo" value="${esc(name)}" ${isEdit ? 'disabled' : ''}>
+                   placeholder="例如 日常" value="${esc(name)}" ${isEdit ? 'disabled' : ''}>
           </div>
           <div class="field">
             <label class="field-label" for="f-expr">调度表达式</label>
             <input class="input mono" id="f-expr" spellcheck="false" placeholder="*/5 * * * * * 或 @every 2s">
           </div>
         </div>
+        <p class="hint">同一个插件内不能重名；不同插件可以同名，任务列表里会带上插件名。
+          例如 mcloud 系列的「日常」「兑换」「直播」。</p>
 
         <div class="divider"></div>
 
@@ -184,7 +186,7 @@ export async function render(root, ctx, params = {}) {
     line(`$ 运行 JavaScript（输入 ${input ? JSON.stringify(input) : '空'}）`, 'meta');
 
     // 带上上下文：这次试跑会记进那条任务的运行记录（kind='test'），
-    // 于是「改代码 → 试 → 保存」在「记录」里是一串。新建任务时还没有 name，
+    // 于是「改代码 → 试 → 保存」在「记录」里是一串。新建插件任务时还没有 name，
     // 传空字符串，记录会挂在插件名下但不属于任何任务。
     const testCtx = { plugin, task: isEdit ? name : '' };
     const res = await runJs(code, input, testCtx);
@@ -214,7 +216,7 @@ export async function render(root, ctx, params = {}) {
 
     if (!p || !n || !expr) {
       hint.className = 'err-text';
-      hint.textContent = '插件 / 处理函数名 / 调度表达式都不能为空';
+      hint.textContent = '插件 / 任务名 / 调度表达式都不能为空';
       return;
     }
 

@@ -24,7 +24,7 @@
 //!   头里有非 ASCII 就用 RFC 2047 编码字，这样不依赖服务器支持扩展。
 //! - **不做 DSN / 批量投递**。收件人多了就多跑几次。
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -38,6 +38,13 @@ const MAX_LINE: usize = 8 * 1024;
 /// 整封邮件（含头）的上限。超过就没法保证服务器收得下，
 /// 与其发一半被拒，不如在本地就说清楚。
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
+
+/// `ca_file` 的上限。证书文件多几 KB 就算大，1 MiB 是"再大就不像证书了"。
+///
+/// ⚠ 这个上限不是"洁癖"，是**内存边界**：以前直接 `read_to_string`，
+/// `ca_file: "/dev/zero"` 就能把宿主读到 OOM（审计 中5）。真正的护栏是读的时候
+/// `Read::take(limit)` —— 见 [`read_ca_file`]。
+const MAX_CA_FILE: u64 = 1024 * 1024;
 
 /// 连接方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +91,49 @@ pub struct Config {
     pub ca_file: Option<std::path::PathBuf>,
 }
 
+/// 一次发送的**调用方策略** —— 注意它不是 `Config` 的字段。
+///
+/// 为什么单独一个结构：`Config` 的每一格都是插件 `opts` 里的一个键
+/// （见 `hostapi::do_smtp_send` 的构造）。如果把「允许在明文连接上发凭据」
+/// 也放进去，那**插件自己就能打开它** —— 这条限制立刻变回装饰品。
+/// 放行必须是宿主侧显式做的决定，而且只有 [send_with_options] 这条入口认它。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendOptions {
+    /// 明文（`tls:"none"`）连接上仍然发 `AUTH`。默认 `false`：
+    /// 那种模式下凭据只是 base64，等于明文过网（审计 中5）。
+    pub allow_plaintext_auth: bool,
+}
+
 /// 发一封邮件。`Ok` 是服务器最终那句回复（`250 ...`），方便日志里留痕。
+///
+/// 这是**默认策略**的入口（安全那一档：明文连接上不发凭据）。
 pub fn send(cfg: &Config) -> Result<String, String> {
+    send_with_options(cfg, SendOptions::default())
+}
+
+/// 带调用方策略的发送 —— 策略只从宿主侧来，不从插件 opts 里读
+/// （理由见 [`SendOptions`] 的说明）。
+pub fn send_with_options(cfg: &Config, opts: SendOptions) -> Result<String, String> {
+    // ---- 明文不发凭据（审计 中5）----
+    // `AUTH PLAIN` 的 token 只是 base64，**不是加密**：这条 TCP 流上的任何人
+    // 都能把它解回 `user\0pass`。starttls / implicit 上这一步发生在 TLS 里，
+    // 所以只有 `tls:"none"` 需要挡。
+    // 挡在连网之前：配置本身就不该跑的错，没必要先建好 socket 再发现。
+    if cfg.tls == TlsMode::None && !cfg.user.trim().is_empty() {
+        if !opts.allow_plaintext_auth {
+            return Err("tls 是 none（全程明文）而 user 不为空 —— 在明文连接上发 AUTH \
+                 等于把密码明文过网。改用 starttls / implicit；如果确实是本地测试服务器、\
+                 并且愿意承担这个风险，由宿主显式打开 allow_plaintext_auth 再发"
+                .to_string());
+        }
+        // 放行也要留痕：这一行日志是"当时是明知故犯"的唯一证据。
+        crate::log::plog!(
+            "smtp",
+            warn,
+            "tls=none 且 user 非空 —— 调用方显式允许明文认证，凭据会以 base64 明文过网"
+        );
+    }
+
     let msg = build_message(cfg)?;
     if msg.len() > MAX_MESSAGE {
         return Err(format!(
@@ -118,10 +166,11 @@ pub fn send(cfg: &Config) -> Result<String, String> {
         return Err(format!("服务器问候不是 220，而是 {code}"));
     }
 
-    let ehlo = if cfg.ehlo_name.is_empty() {
+    let ehlo = if cfg.ehlo_name.trim().is_empty() {
         "localhost"
     } else {
-        cfg.ehlo_name.as_str()
+        // EHLO 的自报名同样是一条协议行 —— `\r\n` 在这里能凭空拼出下一条命令。
+        sanitize_line(cfg.ehlo_name.trim())?
     };
 
     // ---- EHLO（拿能力表）----
@@ -167,7 +216,7 @@ fn finish(
     // `MAIL FROM:<机器人 <a@b>>` —— 两个 `<`、一个没闭合的尖括号，
     // 服务器要么报语法错、要么把地址截成 `机器人 <a@b`。
     // （这一条是验收脚本抓出来的，不是推出来的。）
-    let (code, text) = conn.cmd(&format!("MAIL FROM:<{}>", envelope_addr(&cfg.from)))?;
+    let (code, text) = conn.cmd(&format!("MAIL FROM:<{}>", envelope_addr(&cfg.from)?))?;
     if code != 250 {
         return Err(format!("MAIL FROM 被拒: {}", first_line(&text)));
     }
@@ -175,7 +224,10 @@ fn finish(
     // ---- RCPT TO（逐个）----
     // 250 和 251 都是成功（251 = 会转发，服务器认这个收件人）
     for rcpt in &cfg.to {
-        let (code, text) = conn.cmd(&format!("RCPT TO:<{}>", envelope_addr(rcpt)))?;
+        // ⚠ 收件人经常是第三方给的（"用户填的邮箱"、"接口返回的地址"）——
+        // 这正是审计 中5 那条攻击路径的入口，消毒在 `envelope_addr` 里。
+        let addr = envelope_addr(rcpt)?;
+        let (code, text) = conn.cmd(&format!("RCPT TO:<{addr}>"))?;
         if code != 250 && code != 251 {
             return Err(format!("收件人 `{rcpt}` 被拒: {}", first_line(&text)));
         }
@@ -423,13 +475,62 @@ fn tls_config(ca_file: Option<&std::path::Path>) -> Result<ClientConfig, String>
         .with_no_client_auth())
 }
 
+/// 读 `ca_file`。**先看它是什么，再限着读**。
+///
+/// 为什么不能直接 `read_to_string`：`ca_file` 是插件给的路径，而
+/// `/dev/zero` 是一个永远不会 EOF 的字符设备 —— 一次 `read_to_string`
+/// 就能把宿主的内存读到 OOM（审计 中5）。两道闸：
+///
+/// 1. `metadata()`：必须是**普通文件**（挡住 `/dev/zero`、`/dev/random`、
+///    管道、目录），且声明长度 <= [`MAX_CA_FILE`]；
+/// 2. `Read::take(MAX_CA_FILE + 1)`：即使第 1 步之后文件被换成别的东西
+///    （metadata 与 open 之间有时间差），**最多也只读 1 MiB**。
+///
+/// 第 2 步是真正的边界，第 1 步只是让错误信息说得清楚（"这不是文件"
+/// 比"读出来一堆二进制不是 UTF-8"有用得多）。
+fn read_ca_file(path: &std::path::Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("读 {} 失败: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{} 不是普通文件 —— ca_file 只接受 PEM 证书文件（`/dev/zero` 这类会被拒）",
+            path.display()
+        ));
+    }
+    if meta.len() > MAX_CA_FILE {
+        return Err(format!(
+            "{} 有 {} 字节，超过 ca_file 的上限 {MAX_CA_FILE} 字节 —— 证书文件不该这么大",
+            path.display(),
+            meta.len()
+        ));
+    }
+    let mut text = String::new();
+    let file = std::fs::File::open(path).map_err(|e| format!("读 {} 失败: {e}", path.display()))?;
+    // `+1` 是为了能**看出**"刚好读满"和"还有更多"的区别：
+    // 读回来超过上限就说明第 1 步之后文件变大过，那时必须拒，不能静默截断
+    // （截断在这条路径上的后果是"证书少了一半 ⇒ 校验失败"，很难查）。
+    file.take(MAX_CA_FILE + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| {
+            format!(
+                "读 {} 失败（ca_file 必须是 PEM 文本，且不超过 {MAX_CA_FILE} 字节）: {e}",
+                path.display()
+            )
+        })?;
+    if text.len() as u64 > MAX_CA_FILE {
+        return Err(format!(
+            "{} 在读的过程中超过了 ca_file 的上限 {MAX_CA_FILE} 字节 —— 已经停手，不再往下读",
+            path.display()
+        ));
+    }
+    Ok(text)
+}
+
 /// 从一个 PEM 文件里读出所有证书。
 ///
 /// 自己解析而不是引 `rustls-pemfile`：只需要「把 BEGIN/END 之间的 base64 抠出来
 /// 解码」这一点，而 base64 我们已经有了。多一个依赖对离线构建是实打实的成本。
 fn load_pem_certs(path: &std::path::Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("读 {} 失败: {e}", path.display()))?;
+    let text = read_ca_file(path)?;
     let mut out = Vec::new();
     let mut cur: Option<String> = None;
     for line in text.lines() {
@@ -465,15 +566,16 @@ fn build_message(cfg: &Config) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    out.push_str(&format!("From: {}\r\n", addr_header(&cfg.from)));
-    out.push_str(&format!(
-        "To: {}\r\n",
-        cfg.to
-            .iter()
-            .map(|a| addr_header(a))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    out.push_str(&format!("From: {}\r\n", addr_header(&cfg.from)?));
+    // 收件人列表先**全部**过一遍消毒再拼：一半写进 `out`、一半才报错的话，
+    // 返回值虽然仍是 Err（不会被发出去），但让人调试时看到半截头很容易误会。
+    let to_header = cfg
+        .to
+        .iter()
+        .map(|a| addr_header(a))
+        .collect::<Result<Vec<_>, String>>()?
+        .join(", ");
+    out.push_str(&format!("To: {to_header}\r\n"));
     out.push_str(&format!("Subject: {}\r\n", encode_header(&cfg.subject)));
     // 日期用本地时区：收件人看到的是「你发的时候」，而 `to_rfc2822` 带 +0800 这种
     // 偏移，符合 RFC 2822，不需要自己算 UTC
@@ -518,31 +620,74 @@ fn build_message(cfg: &Config) -> Result<String, String> {
     Ok(out)
 }
 
+/// 一个值进协议行 / 邮件头之前的**统一闸门**。
+///
+/// 为什么是"拒绝"而不是"改写"：SMTP 里 `\r\n` 就是行分隔符，它一旦穿过去，
+/// 一个收件人字段就能变出第二条 `RCPT TO`、一个地址就能变出一个新的头字段
+/// （审计 中5：插件把"用户填的邮箱 / 第三方返回的地址"原样透传是最自然的写法，
+/// 于是未认证的第三方就能把面板的 SMTP 账号变成多投中继）。
+///
+/// 而静默改写（删掉换行、把控制字符换成空格）比拒绝更糟：地址会被悄悄换一个，
+/// 信发给了别人，日志上却只看得到"发送成功"。这里宁可让插件拿到一个错误。
+///
+/// 顺带挡掉所有其他控制字符（`\t` 也在内）：它们在头里会破坏折叠规则，
+/// 在协议行里本来就不该出现，而合法输入里没有它们。
+fn sanitize_line(s: &str) -> Result<&str, String> {
+    if let Some((i, ch)) = s.char_indices().find(|(_, c)| c.is_control()) {
+        return Err(format!(
+            "值里有控制字符（第 {} 个字节是 {ch:?}）—— 它在 SMTP 里等于换行，\
+             能凭空多出一条命令或一个邮件头，所以直接拒",
+            i + 1
+        ));
+    }
+    Ok(s)
+}
+
 /// 从 `显示名 <a@b>` 或裸地址里抠出**信封**用的裸地址。
 ///
 /// 信封（`MAIL FROM:` / `RCPT TO:`）只认裸地址 —— 见 `finish` 里那段说明。
-fn envelope_addr(s: &str) -> String {
-    let s = s.trim();
-    if let (Some(i), Some(j)) = (s.find('<'), s.rfind('>')) {
-        if i < j {
-            return s[i + 1..j].trim().to_string();
+///
+/// 消毒在入口做一次（[`sanitize_line`]）；尖括号不成对**直接拒**，
+/// 不再"尽力而为"地原样返回 —— 那种返回值拼进 `RCPT TO:<…>` 之后，
+/// 服务器会自己猜地址在哪儿截断，猜错就是把信发给别人。
+fn envelope_addr(s: &str) -> Result<String, String> {
+    let s = sanitize_line(s.trim())?;
+    match (s.find('<'), s.rfind('>')) {
+        (Some(i), Some(j)) if i < j => {
+            let inner = s[i + 1..j].trim();
+            if inner.is_empty() {
+                return Err(format!("地址的尖括号里是空的：`{s}`"));
+            }
+            // `a <b@c> <d@e>` 这种多地址串：取第一对会得到 `b@c> <d@e`，
+            // 那是个畸形地址。与其猜，不如让调用方一个字段只放一个地址。
+            if inner.contains('<') || inner.contains('>') {
+                return Err(format!("地址里有多对尖括号，一个字段只能放一个地址：`{s}`"));
+            }
+            Ok(inner.to_string())
         }
+        (Some(_), _) | (_, Some(_)) => Err(format!(
+            "地址的尖括号没闭合（`<` 与 `>` 必须成对）：`{s}`"
+        )),
+        (None, None) => Ok(s.trim_matches('"').trim().to_string()),
     }
-    s.trim_matches('"').trim().to_string()
 }
 
 /// 地址头的写法：`显示名 <a@b>` 里的显示名要按 RFC 2047 编码。
-fn addr_header(s: &str) -> String {
-    let s = s.trim();
+///
+/// ⚠ 消毒闸在**函数入口**，所以「空显示名」那条快路径也过闸 ——
+/// 以前它直接 `addr.to_string()` 返回，而 `a@b>\r\nBcc: attacker@x`
+/// 正是从这条路径落成一个独立头字段的（审计 中5）。
+fn addr_header(s: &str) -> Result<String, String> {
+    let s = sanitize_line(s.trim())?;
     if let Some(i) = s.rfind('<') {
         let name = s[..i].trim().trim_matches('"');
         let addr = s[i..].trim();
         if name.is_empty() {
-            return addr.to_string();
+            return Ok(addr.to_string());
         }
-        return format!("{} {}", encode_header(name), addr);
+        return Ok(format!("{} {}", encode_header(name), addr));
     }
-    s.to_string()
+    Ok(s.to_string())
 }
 
 /// 头字段值的编码。全 ASCII 就原样用，否则走 RFC 2047 的编码字。
@@ -576,10 +721,14 @@ fn encode_header(s: &str) -> String {
 
 /// `Message-ID`：时间戳 + 随机串 + 域名，保证全局唯一。
 fn message_id(from: &str) -> String {
+    // 域名来自 `from`，也就是插件给的输入 —— 它同样会落进一个头字段，
+    // 所以消毒判据必须和别处一致。这里不是"报错点"（`build_message` 在前面
+    // 已经用 `addr_header` 把非法 from 拒掉了），退成 `localhost` 即可：
+    // Message-ID 只要求唯一，域名错了的后果是归并会话，不是注入。
     let domain = from
         .rsplit_once('@')
-        .map(|(_, d)| d.trim_end_matches('>').to_string())
-        .filter(|d| !d.is_empty())
+        .map(|(_, d)| d.trim_end_matches('>').trim().to_string())
+        .filter(|d| !d.is_empty() && sanitize_line(d).is_ok())
         .unwrap_or_else(|| "localhost".to_string());
     format!(
         "<{}.{}@{}>",
@@ -798,21 +947,128 @@ mod tests {
     #[test]
     fn envelope_addr_strips_the_display_name() {
         // 头里可以写显示名，信封不行 —— 整个塞进 `<>` 会变成两个 `<`
-        assert_eq!(envelope_addr("机器人 <a@b.com>"), "a@b.com");
-        assert_eq!(envelope_addr("Robot <a@b.com>"), "a@b.com");
-        assert_eq!(envelope_addr("<a@b.com>"), "a@b.com");
-        assert_eq!(envelope_addr("a@b.com"), "a@b.com");
-        assert_eq!(envelope_addr("  a@b.com  "), "a@b.com");
-        // 只有一半尖括号时不该乱切
-        assert_eq!(envelope_addr("a@b.com>"), "a@b.com>");
-        assert_eq!(envelope_addr("<a@b.com"), "<a@b.com");
+        assert_eq!(envelope_addr("机器人 <a@b.com>").unwrap(), "a@b.com");
+        assert_eq!(envelope_addr("Robot <a@b.com>").unwrap(), "a@b.com");
+        assert_eq!(envelope_addr("<a@b.com>").unwrap(), "a@b.com");
+        assert_eq!(envelope_addr("a@b.com").unwrap(), "a@b.com");
+        assert_eq!(envelope_addr("  a@b.com  ").unwrap(), "a@b.com");
+        // ⚠ 只有一半尖括号时**拒**，不再"原样返回"：那个返回值拼进
+        //   `RCPT TO:<…>` 之后服务器会自己猜截断点，猜错就是投给了别人。
+        assert!(envelope_addr("a@b.com>").is_err());
+        assert!(envelope_addr("<a@b.com").is_err());
+        assert!(envelope_addr("<>").is_err(), "空地址不是合法信封");
+        assert!(envelope_addr("a <b@c> <d@e>").is_err(), "一个字段只能一个地址");
+    }
+
+    /// 审计 中5 的原始 PoC：`\r\n` 拼出第二条 `RCPT TO`。
+    #[test]
+    fn crlf_in_an_address_is_refused() {
+        let err = envelope_addr("a@b>\r\nRCPT TO:<victim@x").unwrap_err();
+        assert!(err.contains("控制字符"), "{err}");
+        // 同样的输入走头部那条路也必须被拒（以前空显示名的快路径会放过它）
+        assert!(addr_header("a@b>\r\nBcc: attacker@x").is_err());
+        assert!(addr_header("<a@b>\r\nBcc: attacker@x").is_err());
+        // NUL 与裸 \n 一视同仁
+        assert!(envelope_addr("a@b\0c").is_err());
+        assert!(addr_header("a@b\nc").is_err());
+        // 正常值一个都不许被误伤
+        assert!(addr_header("机器人 <a@b.com>").unwrap().contains("a@b.com"));
+    }
+
+    /// `Subject` 不走 `sanitize_line` 那条"拒绝"的路 —— 它整段编成
+    /// RFC 2047 编码字，`\r\n` 被吃进 base64 里，**编码本身**就是消毒。
+    /// 这条测试钉住"别哪天图省事把 subject 也改成拒绝"。
+    #[test]
+    fn subject_with_control_chars_is_encoded_not_injected() {
+        let enc = encode_header("hello\r\nBcc: attacker@x");
+        assert!(!enc.contains('\r') && !enc.contains('\n'), "编码字里不许有换行: {enc:?}");
+        assert!(enc.starts_with("=?UTF-8?B?"), "{enc}");
+        let raw = enc.trim_start_matches("=?UTF-8?B?").trim_end_matches("?=");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(raw).unwrap();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "hello\r\nBcc: attacker@x"
+        );
+        // 整封信里也只会出现一个 `Bcc:` 之外的东西 —— 也就是没有 Bcc 头
+        let mut c = cfg();
+        c.subject = "hi\r\nBcc: attacker@x".into();
+        let msg = build_message(&c).unwrap();
+        assert!(!msg.contains("\r\nBcc:"), "Subject 里的换行漏进报文了:\n{msg}");
+    }
+
+    /// 审计 中5：`tls:"none"` 时对裸 TCP 发 `AUTH PLAIN`。
+    #[test]
+    fn plaintext_with_user_is_refused_by_default() {
+        let mut c = cfg();
+        c.tls = TlsMode::None;
+        c.user = "robot@example.com".into();
+        c.pass = "s3cret".into();
+        // ⚠ 端口 1：默认策略如果没挡住，就会去连 127.0.0.1:1（立刻 refused），
+        //   不会把单测挂在一个真网络上。
+        c.host = "127.0.0.1".into();
+        c.port = 1;
+
+        let err = send(&c).unwrap_err();
+        assert!(err.contains("明文"), "该报明文拒绝: {err}");
+
+        // 没用户名（匿名中继）不该被这条拦住 —— 拦的是"凭据"，不是明文本身
+        let mut anon = cfg();
+        anon.tls = TlsMode::None;
+        anon.host = "127.0.0.1".into();
+        anon.port = 1;
+        let err = send(&anon).unwrap_err();
+        assert!(!err.contains("明文"), "匿名明文不该被这条判据拦: {err}");
+
+        // 显式放行之后，这条判据就不再是失败原因（会走到"连不上"）
+        let err = send_with_options(&c, SendOptions { allow_plaintext_auth: true }).unwrap_err();
+        assert!(!err.contains("明文连接上发 AUTH"), "放行后不该再报明文: {err}");
+    }
+
+    /// 审计 中5：`ca_file` 无上限读取（`/dev/zero` 读爆内存）。
+    #[test]
+    fn oversized_ca_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("panel-ca-{}", rand_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.pem");
+        std::fs::write(&big, vec![b'x'; (MAX_CA_FILE + 1) as usize]).unwrap();
+        let err = load_pem_certs(&big).unwrap_err();
+        assert!(err.contains("上限"), "{err}");
+        // 顺便确认上限是"按 metadata 先拦"，而不是读完才判
+        let err = tls_config(Some(&big)).unwrap_err();
+        assert!(err.contains("上限"), "{err}");
+
+        // 目录不是证书文件
+        let err = load_pem_certs(&dir).unwrap_err();
+        assert!(err.contains("不是普通文件"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `/dev/zero` 是最直接的 PoC：字符设备，`is_file()` 直接挡掉。
+    #[cfg(unix)]
+    #[test]
+    fn device_files_are_refused_as_ca_file() {
+        let p = std::path::Path::new("/dev/zero");
+        if !p.exists() {
+            return; // 非常规环境（比如受限容器），这条测试跳过
+        }
+        let err = load_pem_certs(p).unwrap_err();
+        assert!(err.contains("不是普通文件"), "{err}");
+    }
+
+    #[test]
+    fn ehlo_name_is_sanitized() {
+        // 这条只验闸门本身：真发的话 sanitize_line 会让 send 在连网前就 Err。
+        assert!(sanitize_line("localhost").is_ok());
+        assert!(sanitize_line("localhost\r\nMAIL FROM:<x@y>").is_err());
+        assert!(sanitize_line("host\0").is_err());
     }
 
     #[test]
     fn display_name_is_encoded() {
-        assert_eq!(addr_header("a@b.com"), "a@b.com");
-        assert_eq!(addr_header("Robot <a@b.com>"), "Robot <a@b.com>");
-        let h = addr_header("机器人 <a@b.com>");
+        assert_eq!(addr_header("a@b.com").unwrap(), "a@b.com");
+        assert_eq!(addr_header("Robot <a@b.com>").unwrap(), "Robot <a@b.com>");
+        let h = addr_header("机器人 <a@b.com>").unwrap();
         assert!(h.starts_with("=?UTF-8?B?"), "{h}");
         assert!(h.ends_with("<a@b.com>"), "{h}");
     }

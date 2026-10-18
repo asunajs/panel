@@ -7,7 +7,7 @@
 //! Python 适配器的 `log.py`（那边写 stderr，让 `> out.txt` 只装插件的业务输出）。
 //! 三边必须逐字符一致，靠 `testdata/log-format-cases.json` 的共享向量钉住。
 
-use super::{Level, LogEntry, Transport};
+use super::{sanitize_terminal, Level, LogEntry, Transport};
 use std::io::{IsTerminal, Write};
 
 /// 每个 type 一种颜色，照 mcloud-sign 那套（人已经认得的配色，别自创）。
@@ -44,7 +44,10 @@ pub fn colored_line(entry: &LogEntry) -> String {
         RESET,
         entry.ts.format("%Y-%m-%d %H:%M:%S%.3f"),
         entry.scope,
-        entry.msg
+        // ⚠ msg 必须先剥控制序列（安全审计 L15）：彩色路径是 tty 下的**主路径**，
+        // 一条 `\x1b[2K\r` 就能擦掉上一行再伪造一条「成功」。只剥 msg、不剥
+        // 我们自己加的 `[type]` 配色；JSONL 侧仍留原文（见 `LogEntry::to_json`）。
+        sanitize_terminal(&entry.msg)
     )
 }
 

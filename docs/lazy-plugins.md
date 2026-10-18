@@ -11,6 +11,19 @@
 反过来，"用完立刻卸"也不行：下次触发要多付一次加载（读文件 + 解析 + 顶层初始化，
 上限 10 秒（`DEFAULT_LOAD_BUDGET_MS`，见 `docs/engine-safety.md`）），触发那一刻才开始装，用户看到的是"点了没反应"。
 
+> **Runtime 本身也是按需建的**：worker 启动时不再预建 QuickJS Runtime，第一次真正
+> 加载 QuickJS 插件时才建。没有 QuickJS 插件的 worker（典型是 worker 0）启动后是
+> **0 占用**；一条 worker 上的插件全被卸掉后，Runtime 也会在闲置阈值后回收。
+>
+> **没有 `on_tick` 且插件都已卸出的 worker 不再每秒 Tick**：它睡到
+> `preload / retry / Runtime 回收` 的最近截止时间；目录一变，worker 0 会发
+> `Wake` 把相关 worker 叫醒。这样老 CPU 上空闲 worker 不会每秒被无意义唤醒。
+>
+> 目录变化本身是**半被动**的：`notify` 的 inotify / FSEvents /
+> ReadDirectoryChangesW 事件负责“快”（200ms 去抖），worker 0 的
+> `PLUGIN_SCAN_MS`（默认 30 秒）兜底扫描负责“不漏”。`PLUGIN_WATCH=0`
+> 可退回纯轮询。
+
 所以这里做的是**中间那条路**：卸，但在**下次触发之前**提前装回来。
 
 > 顺带说清一件事：**这套东西省的是 JS 堆，不是 RSS**（原因见下面"实测"）。

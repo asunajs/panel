@@ -18,45 +18,65 @@ use std::sync::{Arc, Mutex};
 /// 注入到每个 Context 的引导脚本。
 pub const BOOTSTRAP: &str = r#"
 // ---- 工具：任意 JS 值 → 可打印字符串 ----
-globalThis.__fmt = function (v) {
-    if (typeof v === 'string') return v;
-    if (v === null) return 'null';
-    if (v === undefined) return 'undefined';
-    var t = typeof v;
-    if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v);
-    if (t === 'function') return '[Function ' + (v.name || 'anonymous') + ']';
-    if (t === 'symbol') return String(v);
-    try { return JSON.stringify(v); } catch (e) { return String(v); }
-};
+//
+// ⚠ 这三个 `__fmt*` 必须是**不可写**的（`writable: false`）。
+// 它们是宿主的内部函数，而 `render_exception` 在插件抛异常后还要回调
+// `__fmt_err` —— 如果插件能用 `globalThis.__fmt_err = function(){while(1);}`
+// 把它换掉，那条回调就发生在执行预算**已经解除**之后（见 engine.rs 的
+// `render_exception_guarded`），于是可以永久占住一整条 worker。
+// 这不是理论问题：安全审计把它列为高危（H6）。`Object.defineProperty` 让
+// 赋值在严格模式下抛 TypeError、在非严格模式下静默失败，两条路都拿不回控制权。
+Object.defineProperty(globalThis, '__fmt', {
+    value: function (v) {
+        if (typeof v === 'string') return v;
+        if (v === null) return 'null';
+        if (v === undefined) return 'undefined';
+        var t = typeof v;
+        if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v);
+        if (t === 'function') return '[Function ' + (v.name || 'anonymous') + ']';
+        if (t === 'symbol') return String(v);
+        try { return JSON.stringify(v); } catch (e) { return String(v); }
+    },
+    writable: false,
+    configurable: false,
+});
 
 // ---- 工具：异常渲染 ----
 // 坑：QuickJS 的 `e.stack` **只有位置行**（"    at fn (eval_script:1:1)"），不含错误消息。
 // 所以必须先取 name/message 拼出首行，再把 stack 接在后面。
-globalThis.__fmt_err = function (e) {
-    if (e && typeof e === 'object') {
-        var head = '';
-        if (e.name !== undefined || e.message !== undefined) {
-            head = String(e.name || 'Error') + ': ' + String(e.message === undefined ? '' : e.message);
+Object.defineProperty(globalThis, '__fmt_err', {
+    value: function (e) {
+        if (e && typeof e === 'object') {
+            var head = '';
+            if (e.name !== undefined || e.message !== undefined) {
+                head = String(e.name || 'Error') + ': ' + String(e.message === undefined ? '' : e.message);
+            }
+            var stack = e.stack ? String(e.stack) : '';
+            if (head && stack) {
+                return stack.indexOf(head) === 0 ? stack : head + '\n' + stack;
+            }
+            return head || stack || __fmt(e);
         }
-        var stack = e.stack ? String(e.stack) : '';
-        if (head && stack) {
-            return stack.indexOf(head) === 0 ? stack : head + '\n' + stack;
-        }
-        return head || stack || __fmt(e);
-    }
-    return __fmt(e);
-};
+        return __fmt(e);
+    },
+    writable: false,
+    configurable: false,
+});
 
 // ---- 工具：多个实参 → 一行文本 ----
 // 为什么必须支持多参：`log('对象也能直接打：', { ok: true })` 是插件的常见写法，
 // 而老实现只声明了 `function (msg)` —— **第二个实参被静默丢掉**。
 // 静默丢参数是最难查的一类问题（输出看起来「对」，只是少了半句）。
 // 分隔符用空格，与 Node 的 console.log 一致。
-globalThis.__fmt_args = function (args) {
-    var parts = [];
-    for (var i = 0; i < args.length; i++) parts.push(__fmt(args[i]));
-    return parts.join(' ');
-};
+Object.defineProperty(globalThis, '__fmt_args', {
+    value: function (args) {
+        var parts = [];
+        for (var i = 0; i < args.length; i++) parts.push(__fmt(args[i]));
+        return parts.join(' ');
+    },
+    writable: false,
+    configurable: false,
+});
 
 // ---- host_api：跨运行时的那份门面 ----
 // 只暴露所有 JS 宿主都能实现的最小公共子集，语义与 Node/Bun 的 runtime/js 一致。
@@ -105,6 +125,7 @@ globalThis.host_api = {
         if (typeof handler !== 'function') throw new Error('register_cron: handler 必须是函数');
         var params = '';
         var budget = '';
+        var lead = '';
         if (opts !== undefined && opts !== null) {
             if (typeof opts !== 'object') throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...}, budget_ms: 30000 }');
             if (opts.params !== undefined && opts.params !== null) {
@@ -118,11 +139,14 @@ globalThis.host_api = {
             if (opts.budget_ms !== undefined && opts.budget_ms !== null) {
                 budget = String(opts.budget_ms);
             }
+            if (opts.lead_ms !== undefined && opts.lead_ms !== null) {
+                lead = String(opts.lead_ms);
+            }
         }
         // 先查重再登记：__host_register_task 会把任务推进宿主侧 pending 列表，
         // 如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务。
         if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
-        var err = __host_register_task(name, expr, params, budget);
+        var err = __host_register_task(name, expr, params, budget, lead);
         if (err) throw new Error(err);
         __register_task(name, handler);
         return name;
@@ -754,7 +778,7 @@ pub fn install_host<'js>(
     let plugin_for_tasks = plugin.clone();
     ctx.globals().set(
         "__host_register_task",
-        Func::new(move |name: String, expr: String, params_json: String, budget: String| -> String {
+        Func::new(move |name: String, expr: String, params_json: String, budget: String, lead: String| -> String {
             if let Err(e) = crate::cron::Schedule::parse(&expr) {
                 return format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}");
             }
@@ -777,6 +801,10 @@ pub fn install_host<'js>(
                 Ok(b) => b,
                 Err(e) => return format!("任务 `{name}`：{e}"),
             };
+            let lead_ms = match hostapi::parse_lead_ms(&lead) {
+                Ok(v) => v,
+                Err(e) => return format!("任务 `{name}`：{e}"),
+            };
             let mut guard = pending.lock().unwrap();
             if guard.iter().any(|t| t.name == name) {
                 return format!("插件 `{plugin_for_tasks}` 里已经注册过名为 `{name}` 的任务");
@@ -787,6 +815,7 @@ pub fn install_host<'js>(
                 expr,
                 params,
                 budget_ms,
+                lead_ms,
             });
             String::new()
         }),

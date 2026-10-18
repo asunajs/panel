@@ -145,7 +145,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
   root.innerHTML = `
     <div class="breadcrumb">
       <a href="#/scripts">脚本任务</a><span>/</span>
-      <span>${isEdit ? '编辑面板任务' : '新建面板任务'}</span>
+      <span>${isEdit ? '编辑面板脚本任务' : '新建面板脚本任务'}</span>
     </div>
 
     <div class="section">

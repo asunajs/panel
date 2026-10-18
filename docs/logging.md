@@ -70,22 +70,41 @@ debug  info  start  success  fail  warn  error  fatal
 与本地偏移的 RFC3339。目录 `<PANEL_LOG_DIR>/plugin-YYYY-MM-DD.jsonl`，留 7 天。
 
 **脱敏在构造条目时做，只有这一个入口**。文件要留 7 天 —— 一个令牌写进磁盘就是
-一周的暴露面，所以不能等「展示的时候再脱」。规则按顺序：请求头 → JSON 字段 →
-裸 `key=value` → `Bearer` → 手机号。
+一周的暴露面，所以不能等「展示的时候再脱」。规则按顺序：URL userinfo → 请求头 →
+JSON 字段 → 裸 `key=value` → `Bearer` → 手机号。
+
+**三条量上的上限**（安全审计 L15，防止插件用日志把盘写满或伪造终端输出）：
+
+| 限制 | 值 | 行为 |
+|---|---|---|
+| 单条正文 | **32 KiB** | 先粗切再脱敏，最后按 UTF-8 边界截断，尾部标注 `…（已截断，原长 N 字节）`。JSONL 与界面看到的是同一个截断结果（只有原文超限时才会不同） |
+| 单个日志文件 | **64 MiB / 天** | 到顶后**停写**、计入 `dropped`，每小时最多 warn 一次；起点按盘上已有长度算，重启不会重置 |
+| 终端输出的控制字符 | — | 只对**终端 sink** 剥离 ANSI（CSI/OSC/裸 ESC 及其余 C0，保留 `\n`、`\t`）。JSONL 保留原文 —— 否则日志就不再是「原样」的记录 |
+
+终端那条是为了防「插件在日志里写一段光标控制序列，把别人的日志行覆盖掉/伪造出来」。
 
 ```
-账号 13600136001             → 账号 136****6001
-token=abc123                 → token=***
-{"access_token":"SECRET"}    → {"access_token":"***"}
-Authorization: Bearer zzzz   → Authorization: ***
+账号 13600136001              → 账号 136****6001
+token=abc123                  → token=***
+{"access_token":"SECRET"}     → {"access_token":"***"}
+Authorization: Bearer zzzz    → Authorization: ***
+https://alice:hunter2@host/x  → https://***:***@host/x
+api_key=AKIA…                 → api_key=***
+X-Api-Key: sk-live-…          → X-Api-Key: ***
+x-panel-token: 8f3a…          → x-panel-token: ***
 ```
 
-两个有意为之的取舍，都踩出来过：
+四个有意为之的取舍，都踩出来过：
 
 - **单字符值不脱**（`PANEL_COOKIE_SECURE=1`）：`=1` 被弄成 `=***` 会让**提示文本本身**
   变得没法读，而单字符不可能是凭据
 - **全角标点算终止符**（`）】》，。、`）：中文提示里 `token=abc）` 的右括号，
   不认它就会把后面半句话一起吃掉
+- **URL userinfo 按结构脱，但不放宽到邮箱**：只有 `scheme://` + authority 段里真有
+  `@` 才动手，所以 `alice@example.com`（没有 scheme）和 `https://host/a@b`
+  （`@` 在 path 里）原样保留。输出形状跟输入一致（有 `:` 才是 `***:***`），对它自己幂等
+- **`api_key` 家族只用完整词**（`api_key` / `apikey` / `access_key` / `private_key`）：
+  裸 `key` 会把 `keyword` / `key=value` 这类排查用的正常参数一起脱掉
 
 ### 21.3 三个 transport + 一个 hub
 

@@ -1,20 +1,22 @@
 [package]
 name = "plugin-panel"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
 [dependencies]
 # HTTP 服务器
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 # 异步运行时（rt-multi-thread: 多线程调度；signal: Ctrl-C 优雅退出）
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "fs"] }
 # 嵌入式 JS 引擎：rquickjs 绑定 QuickJS-ng，静态编译进二进制，无外部 .so 依赖。
 # loader 特性是给「插件里 import { ... } from 'host-api'」用的：自定义 Resolver/Loader
 # 把 host-api 解析成内置模块，插件脚本与 Node 下的一字不差。
 rquickjs = { version = "0.14", features = ["loader"] }
-# SQLite。bundled = 把 SQLite C 源码一起编译进来，目标机不需要装 libsqlite3
-rusqlite = { version = "0.40", features = ["bundled"] }
+# SQLite。bundled = 把 SQLite C 源码一起编译进来，目标机不需要装 libsqlite3。
+# hooks = authorizer + progress_handler（插件 SQL 的权限白名单与执行超时，
+# 见 src/hostapi.rs 的 `install_plugin_sql_guard`）；不开它这两个 API 根本不存在。
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 # 插件 ↔ 宿主之间的 JSON 通信
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -62,6 +64,17 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pki-types = "1"
 webpki-roots = "1"
 base64 = "0.23"
+# 上传：zip 解压到插件目录 / 任务目录。只编 deflate，不把 bzip2/lzma/zstd 全拖进来。
+#
+# 2.6 → 9：2.6.1 命中 3 条公告（2026-0367/0368/0369，前提是调用 `extract()`，
+# 而 `upload.rs` 是逐条目手工解压 ⇒ 当时不可达）。9 除了修掉那三条，还**自己**
+# 会拒「实际解压量 > 声明值」的条目 —— 等于给 zip 炸弹又加了一道，所以直接升上来，
+# 不再靠 `deny.toml` 的 ignore 兜。
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# 插件目录 / 任务目录的文件系统事件（半被动刷新）。
+# Linux 用 inotify、macOS 用 FSEvents、Windows 用 ReadDirectoryChangesW；
+# 静态 musl 下是系统调用，不引入动态库。事件只负责“快”，30 秒兜底扫描负责“不漏”。
+notify = "8.2"
 # 外部运行时（src/extproc.rs）：
 #   · `kill(-pid, SIGKILL)` 杀整个进程组（插件/脚本可能自己起子进程）
 #   · Linux 上的 `prctl(PR_SET_PDEATHSIG)` 兜底，避免面板异常死亡留下孤儿

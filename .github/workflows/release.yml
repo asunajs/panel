@@ -10,9 +10,10 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-permissions:
-  contents: write
-
+# 权限按 job 最小化（安全审计 中13）。
+# 挂在**工作流级**时，编译 job 也会拿到 write token —— 而它要跑依赖的 build script、
+# 仓库里的 smoke.py 与 install.sh，任何一环被投毒都能读 `.git/config` 里的 token
+# 推后门 commit / 覆盖 Release 资产。现在只有真正 `gh release create` 的那个 job 能写。
 jobs:
   # ------------------------------------------------------------------
   # 每个平台各自原生编译（不是交叉编译），编完顺手冒烟一下
@@ -20,6 +21,8 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +37,10 @@ jobs:
             target: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 不把 GITHUB_TOKEN 写进 .git/config：这个 job 里会跑依赖的 build script
+          # 与仓库脚本，它们不该有机会读到推送凭据（安全审计 中13）。
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -125,8 +132,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:

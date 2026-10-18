@@ -533,6 +533,7 @@ export function register_cron(name, expr, handler, opts) {
 
   let paramsJson = null;
   let budgetRaw = '';
+  let leadRaw = '';
   if (opts !== undefined && opts !== null) {
     if (typeof opts !== 'object' || Array.isArray(opts)) {
       throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...}, budget_ms: 30000 }');
@@ -550,6 +551,9 @@ export function register_cron(name, expr, handler, opts) {
     if (opts.budget_ms !== undefined && opts.budget_ms !== null) {
       budgetRaw = String(opts.budget_ms);
     }
+    if (opts.lead_ms !== undefined && opts.lead_ms !== null) {
+      leadRaw = String(opts.lead_ms);
+    }
   }
 
   // Shared namespace with register_handler, like the embedded host: a duplicate
@@ -557,7 +561,7 @@ export function register_cron(name, expr, handler, opts) {
   if (handlers.has(name)) {
     throw new Error(`插件里已经有名为 \`${name}\` 的处理函数`);
   }
-  rpcCall('register_task', [name, expr, paramsJson, budgetRaw]);
+  rpcCall('register_task', [name, expr, paramsJson, budgetRaw, leadRaw]);
   handlers.set(name, handler);
   return name;
 }

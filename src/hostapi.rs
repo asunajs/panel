@@ -46,8 +46,10 @@ use crate::runtimefs::RuntimePaths;
 use crate::runtimes::RuntimeCatalog;
 use crate::wsclient;
 use serde_json::{json, Value};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// 插件日志的中枢：终端 + 1MB 内存环 + JSONL 文件三件套。
 ///
@@ -88,6 +90,8 @@ pub struct RawTaskDef {
     pub budget_ms: Option<u64>,
     /// 任务参数（JSON 文本，`None` = 没给）。形状由插件定义，面板不解释。
     pub params: Option<String>,
+    /// 提前量（毫秒，`None` = 不提前）。
+    pub lead_ms: Option<u64>,
 }
 
 /// JS 插件注册的一条 HTTP 路由。
@@ -156,6 +160,315 @@ pub struct HostState {
     pub ws: wsclient::Registry,
 }
 
+// ---------------------------------------------------------------------------
+// 插件 SQLite 的护栏（安全审计 H5）
+// ---------------------------------------------------------------------------
+
+/// 插件 SQL 的最长执行时间。
+///
+/// 2 秒的判据是**锁的持有时间**：`Db = Arc<Mutex<Connection>>`（见 `src/db.rs`）
+/// 是全局共享连接，插件的一条 `WITH RECURSIVE` 在锁里转一圈，面板所有碰库的
+/// API（任务列表、心跳、运行记录）就一起卡住，引擎线程也退不出来。
+/// 所以这个上限必须比「面板自己最慢的一条查询」还短 —— 2s 足够跑完一次正常的
+/// 插件查询/写入，又远小于人手能忍受的界面无响应。
+const PLUGIN_SQL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// progress handler 的检查粒度：每 10_000 条 VM 指令看一次 deadline。
+/// 太小（比如 1）会让正常查询多出一大截回调开销；太大则超时精度差、中断迟钝。
+const PLUGIN_SQL_PROGRESS_STEPS: std::os::raw::c_int = 10_000;
+
+/// 面板的**权威数据表**：只有面板自己（以及面板的调度器/运行记录）能写。
+///
+/// 插件可以建自己的表、写自己的行，但这四张表的每一列都参与面板的状态机
+/// （`jobs.paused` 是暂停开关、`runs` 是运行历史、`plugin_state` 是停用决定），
+/// 让插件改它们等于让插件改面板的权威状态。
+const PANEL_SQLITE_TABLES: [&str; 4] = ["jobs", "runs", "tasks", "plugin_state"];
+
+fn is_panel_table(name: &str) -> bool {
+    // SQLite 的标识符大小写不敏感（`JOBS` / `Jobs` 都是同一张表），
+    // 判据必须跟着不敏感，否则换个大小写就绕过去了。
+    PANEL_SQLITE_TABLES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(name))
+}
+
+/// `sqlite_query` 模式下允许的 action：**只读白名单**。
+///
+/// 用白名单而不是黑名单：SQLite 以后加新 action 时，未知的那一个会落到
+/// 「拒绝」，不会因为忘了补一条而悄悄变成一条写通道。
+fn is_read_only_action(action: &rusqlite::hooks::AuthAction<'_>) -> bool {
+    use rusqlite::hooks::AuthAction;
+    matches!(
+        action,
+        AuthAction::Select
+            | AuthAction::Read { .. }
+            | AuthAction::Function { .. }
+            | AuthAction::Recursive
+            // 不带值的 PRAGMA 是读（`table_info` / `index_list` 这类自省）；
+            // 带值的会改连接状态，查询模式一律挡掉。
+            | AuthAction::Pragma {
+                pragma_value: None,
+                ..
+            }
+    )
+}
+
+/// 取 SQL 的第一个关键字（跳过前导空白与 `--` / `/* */` 注释），大写返回。
+///
+/// **为什么需要它**：`VACUUM` 没有自己的 authorizer action code ——
+/// SQLite 是在执行期由 `sqlite3RunVacuum` 内部去 `ATTACH` 一个临时库完成整库
+/// 重写的（见 bundled 的 `sqlite3.c`）。也就是说只靠 authorizer 挡住 ATTACH，
+/// 拦不拦得住 VACUUM 取决于内部实现细节；而 `VACUUM INTO '<绝对路径>'` 正是
+/// 审计里那条「绕过 `src/pluginfs.rs` 文件围栏往任意路径落文件」的通道。
+/// 所以在进 prepare 之前按语句头显式挡掉，不依赖内部实现。
+fn first_sql_keyword(sql: &str) -> String {
+    // trim_start 只认 Unicode 空白；BOM（U+FEFF）不是空白，但 SQLite 会跳过它。
+    // 不在这里一起跳掉的话，`\u{FEFF}VACUUM INTO …` 就会绕过语句头判据
+    // （虽然 authorizer 还会挡住 VACUUM 内部的 ATTACH，但那是第二道防线，不该依赖）。
+    fn skip_leading(s: &str) -> &str {
+        s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+    }
+    let mut rest = skip_leading(sql);
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            // 行注释：跳到换行；没有换行 = 整条都是注释
+            match after.find('\n') {
+                Some(i) => rest = skip_leading(&after[i + 1..]),
+                None => return String::new(),
+            }
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            match after.find("*/") {
+                Some(i) => rest = skip_leading(&after[i + 2..]),
+                None => return String::new(),
+            }
+        } else {
+            break;
+        }
+    }
+    rest.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// 插件 SQL 执行期间的 hook 守卫：**Drop 时无条件卸载** authorizer 与 progress handler。
+///
+/// 为什么必须是 RAII：这两个 hook 装在**共享连接**上（`Db` 是全局的），
+/// 只要有一条返回路径漏了清理（`?` 早退、prepare 失败、读取行失败、panic），
+/// 面板自己后续的 `UPDATE jobs` / `CREATE TABLE` 就会被插件的规则拒掉 ——
+/// 那比原来的漏洞更糟。Drop 覆盖所有返回路径，包括 unwind。
+struct PluginSqlGuard<'a> {
+    conn: &'a rusqlite::Connection,
+    /// authorizer 记下的**第一条**拒绝理由。SQLite 抛出的 `SQLITE_AUTH` 只说明
+    /// 「被拒了」，不说是哪条规则；插件作者需要看到原因。
+    reason: Arc<Mutex<Option<String>>>,
+}
+
+impl PluginSqlGuard<'_> {
+    /// 把底层错误翻成插件作者能看懂的中文：超时与权限拒绝要区别于普通 SQL 错误。
+    fn explain(&self, prefix: &str, e: rusqlite::Error) -> String {
+        if let rusqlite::Error::SqliteFailure(err, _) = &e {
+            match err.code {
+                rusqlite::ErrorCode::OperationInterrupted => {
+                    return format!(
+                        "查询超时（>{}s）被中断",
+                        PLUGIN_SQL_TIMEOUT.as_secs()
+                    );
+                }
+                rusqlite::ErrorCode::AuthorizationForStatementDenied => {
+                    if let Some(reason) = self
+                        .reason
+                        .lock()
+                        .ok()
+                        .and_then(|slot| slot.clone())
+                    {
+                        return reason;
+                    }
+                    return "SQL 被插件 SQLite 权限策略拒绝".to_string();
+                }
+                _ => {}
+            }
+        }
+        format!("{prefix}: {e}")
+    }
+}
+
+impl Drop for PluginSqlGuard<'_> {
+    fn drop(&mut self) {
+        // 顺序：先摘 progress、再摘 authorizer。两个都恢复成 None，缺一不可。
+        let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
+        let _ = self.conn.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+    }
+}
+
+/// 在 `conn` 上装好插件 SQL 的 authorizer + 超时，返回负责卸载的 guard。
+///
+/// 规则（与安全审计 H5 的六条对应）：
+///   · 拒绝 `ATTACH` / `DETACH` —— 这两个能读写文件围栏外的任意 SQLite 文件；
+///   · 拒绝 `VACUUM`（调用方先按语句头挡掉，见 [`first_sql_keyword`]）；
+///   · 拒绝写 `jobs` / `runs` / `tasks` / `plugin_state` 四张面板权威表；
+///   · `is_query = true` 时只允许读（见 [`is_read_only_action`]）；
+///   · 其余放行 —— 插件自己的表要能建、能写。
+fn install_plugin_sql_guard<'a>(
+    conn: &'a rusqlite::Connection,
+    is_query: bool,
+) -> Result<PluginSqlGuard<'a>, String> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let reason: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let hook_reason = Arc::clone(&reason);
+
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        let deny = |msg: String| -> Authorization {
+            if let Ok(mut slot) = hook_reason.lock() {
+                // 只留第一条：最内层的拒绝原因最具体，后面的多是连带拒绝。
+                if slot.is_none() {
+                    *slot = Some(msg);
+                }
+            }
+            Authorization::Deny
+        };
+
+        // ① 文件围栏：ATTACH / DETACH 与 writable_schema 都是「越过表级规则」的通道。
+        match ctx.action {
+            AuthAction::Attach { .. } => {
+                return deny("不允许 ATTACH 其它数据库文件".to_string());
+            }
+            AuthAction::Detach { .. } => {
+                return deny("不允许 DETACH 数据库".to_string());
+            }
+            // 打开 writable_schema 之后可以直接改 sqlite_master（等价于绕过下面所有表级规则）。
+            AuthAction::Pragma { pragma_name, .. }
+                if pragma_name.eq_ignore_ascii_case("writable_schema") =>
+            {
+                return deny("不允许修改 writable_schema".to_string());
+            }
+            _ => {}
+        }
+
+        // ② 查询模式：只读白名单。
+        if is_query && !is_read_only_action(&ctx.action) {
+            return deny("sqlite_query 只允许读，不允许改数据".to_string());
+        }
+
+        // ③ 写操作：面板的四张权威表归面板。
+        //
+        // 临时表也算：`CREATE TEMP TABLE jobs(...)` 会在同一条连接上**遮蔽**
+        // 面板的 `jobs`，等 hook 摘掉之后面板自己读到的就是插件伪造的表 ——
+        // 所以 CreateTempTable / CreateTempView 与 CreateTable 同等对待。
+        let written_table = match ctx.action {
+            AuthAction::Insert { table_name }
+            | AuthAction::Update { table_name, .. }
+            | AuthAction::Delete { table_name }
+            | AuthAction::CreateTable { table_name }
+            | AuthAction::DropTable { table_name }
+            | AuthAction::AlterTable { table_name, .. }
+            | AuthAction::CreateIndex { table_name, .. }
+            | AuthAction::DropIndex { table_name, .. }
+            | AuthAction::CreateTrigger { table_name, .. }
+            | AuthAction::DropTrigger { table_name, .. }
+            | AuthAction::CreateTempTable { table_name }
+            | AuthAction::DropTempTable { table_name }
+            | AuthAction::CreateTempTrigger { table_name, .. }
+            | AuthAction::DropTempTrigger { table_name, .. }
+            | AuthAction::CreateVtable { table_name, .. }
+            | AuthAction::DropVtable { table_name, .. } => Some(table_name),
+            AuthAction::CreateView { view_name }
+            | AuthAction::DropView { view_name }
+            | AuthAction::CreateTempView { view_name }
+            | AuthAction::DropTempView { view_name } => Some(view_name),
+            _ => None,
+        };
+        if let Some(name) = written_table {
+            if is_panel_table(name) {
+                return deny(format!("不允许修改面板数据表 {name}"));
+            }
+        }
+
+        Authorization::Allow
+    }))
+    .map_err(|e| format!("安装 SQL 权限检查失败: {e}"))?;
+
+    let deadline = Instant::now() + PLUGIN_SQL_TIMEOUT;
+    if let Err(e) = conn.progress_handler(
+        PLUGIN_SQL_PROGRESS_STEPS,
+        // 返回 true = 让 SQLite 中断当前语句（VM 会以 SQLITE_INTERRUPT 退出）
+        Some(move || Instant::now() >= deadline),
+    ) {
+        // 走到这里还没有 guard，必须自己把 authorizer 摘掉，否则它就会留在共享连接上。
+        let _ = conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        return Err(format!("安装 SQL 超时检查失败: {e}"));
+    }
+
+    Ok(PluginSqlGuard { conn, reason })
+}
+
+/// 插件 SQLite 调用的实现本体：解析参数 → 装护栏 → 执行 → guard 卸载护栏。
+///
+/// 拆成自由函数是为了让单元测试能拿一条临时连接直接跑（不必构造整个 [`HostState`]）；
+/// 生产路径 `do_sqlite` 只是加了一层全局连接锁。
+fn run_plugin_sqlite(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params_json: &str,
+    is_query: bool,
+) -> Result<String, String> {
+    let params: Vec<Value> = if params_json.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(params_json).map_err(|e| format!("参数不是 JSON 数组: {e}"))?
+    };
+    let bound: Vec<rusqlite::types::Value> =
+        params.iter().map(json_to_sql).collect::<Result<_, _>>()?;
+
+    // VACUUM 没有 authorizer action code（见 first_sql_keyword 的注释），
+    // 必须在 prepare 之前挡掉。
+    if first_sql_keyword(sql) == "VACUUM" {
+        return Err("不允许 VACUUM（插件 SQLite 禁止整库重写与落盘）".to_string());
+    }
+
+    // ⚠ guard 必须在任何 prepare 之前建好；它一 Drop 就把两个 hook 摘干净。
+    let guard = install_plugin_sql_guard(conn, is_query)?;
+
+    if is_query {
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| guard.explain("SQL 准备失败", e))?;
+        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(bound.iter()))
+            .map_err(|e| guard.explain("查询失败", e))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| guard.explain("读取行失败", e))?
+        {
+            let mut obj = serde_json::Map::new();
+            for (i, name) in cols.iter().enumerate() {
+                let cell = row
+                    .get_ref(i)
+                    .map_err(|e| guard.explain(&format!("读取列 {name} 失败"), e))?;
+                obj.insert(name.clone(), sql_value_to_json(cell));
+            }
+            out.push(Value::Object(obj));
+            // 兜底：别让一个 `SELECT * FROM huge` 把内存吃光
+            if out.len() >= 1000 {
+                break;
+            }
+        }
+        serde_json::to_string(&out).map_err(|e| e.to_string())
+    } else {
+        let changed = conn
+            .execute(sql, rusqlite::params_from_iter(bound.iter()))
+            .map_err(|e| guard.explain("SQL 执行失败", e))?;
+        Ok(json!({
+            "changes": changed,
+            "lastInsertRowid": conn.last_insert_rowid(),
+        })
+        .to_string())
+    }
+}
+
 impl HostState {
     pub fn new(
         logs: SharedLogs,
@@ -209,52 +522,19 @@ impl HostState {
         params_json: &str,
         budget_raw: &str,
     ) -> Result<RawTaskDef, String> {
-        make_task_def(plugin, name, expr, params_json, budget_raw)
+        make_task_def(plugin, name, expr, params_json, budget_raw, "")
     }
 
     /// SQLite：查询返回对象数组，写入返回 `{changes, lastInsertRowid}`。
     ///
     /// 参数走 JSON 数组，占位符用 `?1 ?2 ...`（SQLite 原生语法）。
+    ///
+    /// ⚠ 插件给的 SQL **不是**直接交给 SQLite 的：实现见 [`run_plugin_sqlite`]，
+    /// 那里装 authorizer（表级/操作级白名单）与 progress handler（2s 超时），
+    /// 且两者都由 RAII guard 保证卸载 —— 否则会误伤面板自己的查询。
     pub fn do_sqlite(&self, sql: &str, params_json: &str, is_query: bool) -> Result<String, String> {
-        let params: Vec<Value> = if params_json.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str(params_json).map_err(|e| format!("参数不是 JSON 数组: {e}"))?
-        };
-        let bound: Vec<rusqlite::types::Value> =
-            params.iter().map(json_to_sql).collect::<Result<_, _>>()?;
-
         let conn = self.db.lock().unwrap();
-        if is_query {
-            let mut stmt = conn.prepare(sql).map_err(|e| format!("SQL 准备失败: {e}"))?;
-            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-            let mut rows = stmt
-                .query(rusqlite::params_from_iter(bound.iter()))
-                .map_err(|e| format!("查询失败: {e}"))?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| format!("读取行失败: {e}"))? {
-                let mut obj = serde_json::Map::new();
-                for (i, name) in cols.iter().enumerate() {
-                    let cell = row.get_ref(i).map_err(|e| format!("读取列 {name} 失败: {e}"))?;
-                    obj.insert(name.clone(), sql_value_to_json(cell));
-                }
-                out.push(Value::Object(obj));
-                // 兜底：别让一个 `SELECT * FROM huge` 把内存吃光
-                if out.len() >= 1000 {
-                    break;
-                }
-            }
-            serde_json::to_string(&out).map_err(|e| e.to_string())
-        } else {
-            let changed = conn
-                .execute(sql, rusqlite::params_from_iter(bound.iter()))
-                .map_err(|e| format!("SQL 执行失败: {e}"))?;
-            Ok(json!({
-                "changes": changed,
-                "lastInsertRowid": conn.last_insert_rowid(),
-            })
-            .to_string())
-        }
+        run_plugin_sqlite(&conn, sql, params_json, is_query)
     }
 
     /// 同步 HTTP(S) 请求。
@@ -286,6 +566,11 @@ impl HostState {
         parse_tls_choice(&opts)?;
         #[cfg(feature = "legacy-tls")]
         let tls = parse_tls_choice(&opts)?;
+
+        // SSRF 防护（审计 L16）：在**任何**传输后端之前判一次 ——
+        // 放在这里而不是 ureq 分支里，是为了让 `tls:"native"` 那条路也过同一道门
+        // （两份传输实现，一条判定）。
+        ensure_outbound_url_allowed(url)?;
 
         // ── 平台 TLS 那一路（只有 `legacy-tls` 构建里存在）────────────────────
         //
@@ -522,6 +807,7 @@ pub fn make_task_def(
     expr: &str,
     params_json: &str,
     budget_raw: &str,
+    lead_raw: &str,
 ) -> Result<RawTaskDef, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -531,6 +817,7 @@ pub fn make_task_def(
         return Err(format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}"));
     }
     let budget_ms = parse_budget_ms(budget_raw)?;
+    let lead_ms = parse_lead_ms(lead_raw)?;
     let params = if params_json.trim().is_empty() {
         None
     } else {
@@ -548,7 +835,26 @@ pub fn make_task_def(
         expr: expr.to_string(),
         params,
         budget_ms,
+        lead_ms,
     })
+}
+
+/// 解析任务提前量：`None` = 0；上限 1 小时。
+pub fn parse_lead_ms(raw: &str) -> Result<Option<u64>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let n: u64 = raw
+        .parse()
+        .map_err(|_| format!("lead_ms 必须是整数毫秒，收到 `{raw}`"))?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n > 3_600_000 {
+        return Err(format!("lead_ms 太大（{n}ms），最多 3600000ms（1 小时）"));
+    }
+    Ok(Some(n))
 }
 
 /// 校验并构造一条路由声明（不检查全局重复；安装时再查）。
@@ -568,6 +874,28 @@ pub fn validate_route(
         "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD"
     ) {
         return Err(format!("不支持的 HTTP 方法 `{method}`"));
+    }
+
+    // 路径空间约束（安全审计 中9）。
+    //
+    // 原来只校验「以 / 开头」：插件 A 可以注册 `GET /plugins/B/index.html`，
+    // 于是 URL 是 B、内容是 A —— 可以仿冒登录页钓口令，也能让 B 的配置页
+    // 永远显示 A 的东西。面板自己的路由（`/`、`/api/*`、`/login`、`/logout`）
+    // 走 axum 显式路由，插件抢不到；但 fallback 里的路径必须先占住。
+    if path == "/login" || path == "/logout" || path == "/api" || path.starts_with("/api/") {
+        return Err(format!(
+            "路由 `{path}` 用了面板保留前缀（/api、/login、/logout）—— \
+             换一个，比如 /plugins/{plugin}/…"
+        ));
+    }
+    if let Some(rest) = path.strip_prefix("/plugins/") {
+        let owner = rest.split('/').next().unwrap_or("");
+        if owner != plugin {
+            return Err(format!(
+                "路由 `{path}` 占用了插件 `{owner}` 的路径空间（只有它自己能注册）—— \
+                 用 /plugins/{plugin}/… 或者一个不属于任何插件的路径"
+            ));
+        }
     }
     Ok(RouteDef {
         plugin: plugin.to_string(),
@@ -870,6 +1198,228 @@ fn build_http_request(
     req.body(body).map_err(|e| format!("请求构造失败: {e}"))
 }
 
+/// 插件**出站目标**的 SSRF 判定（安全审计 L16）。
+///
+/// 纯函数、**不读环境变量**：环境开关在包装函数
+/// `ensure_outbound_url_allowed` 里，拆开是为了让判定表能被单测穷举，
+/// 而不用去改进程环境。
+///
+/// 返回 `Some(理由)` = 这一层必须拒绝；`None` = 没有理由拒绝它。
+///
+/// # 判定表
+///
+/// | 目标 | 结果 |
+/// |---|---|
+/// | `127.0.0.0/8`、`::1` | 回环（面板自身） |
+/// | `169.254/16`（含 `169.254.169.254`） | 链路本地 / 云元数据 |
+/// | `0.0.0.0/8`、`::` | 未指定 |
+/// | `224/4`、`ff00::/8` | 组播 |
+/// | `255.255.255.255` | 受限广播 |
+/// | `fe80::/10` | IPv6 链路本地 |
+/// | `localhost`、`*.localhost` | 回环主机名 |
+/// | `*.internal` | 云厂商内网别名（`metadata.google.internal`） |
+/// | 不含点的主机名（`redis` / `metadata` …） | 单标签内网别名 |
+/// | `0x7f.0.0.1` / `0177.0.0.1` / `2130706433` | 非规范 IPv4 数字写法 |
+/// | 其余（含 `10/8`、`172.16/12`、`192.168/16`、`fc00::/7`、`*.local`） | 放行 |
+///
+/// ⚠ **RFC1918 / IPv6 ULA / `.local` 是刻意放行的**：面板的主力场景就是
+/// 「家里的 NAS / 打印机 / Home Assistant」，把局域网全禁掉等于把 `http_fetch`
+/// 的主要用途一起禁掉。真正要挡的是**面板自己**（回环，可打 `/api/login`
+/// 把退避桶打满）和**云元数据**（链路本地，拿到就能横着走）。
+///
+/// # ⚠ 边界：这一层**不做 DNS 解析**
+///
+/// 只挡**字面量 IP** 与**常见内网别名**。`evil.example` 解析到 `127.0.0.1`
+/// 这种 DNS 重绑定（rebinding）**不在防护范围内** —— 要挡它必须在真正建连时
+/// 校验对端地址（那又会引入阻塞与 TOCTOU），不是这个纯函数能负责的事。
+/// 但**非规范字面量**（inet_aton 的十六/八进制、整数形式）在这一层就挡掉，
+/// 因为 libc 的解析器会把它们变成 127.x，等同于一条换个写法的回环旁路。
+///
+/// IPv6 的方括号（`http::Uri::host()` 对 IPv6 会带方括号）、主机名末尾的点
+/// （`localhost.` 仍是 localhost）都会先归一化再判。
+pub fn is_forbidden_outbound_target(host: &str) -> Option<&'static str> {
+    // 末尾的点：`localhost.` / `127.0.0.1.` 都是合法 FQDN 写法，归一化到同一种。
+    let host = host.trim().trim_end_matches('.');
+    // `http::Uri::host()` 对 IPv6 返回带方括号的形式（`[::1]`）。
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Some("主机为空");
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => forbidden_ipv4(v4),
+            IpAddr::V6(v6) => forbidden_ipv6(v6),
+        };
+    }
+
+    // `0x7f.0.0.1` / `0177.0.0.1` / `2130706433` 这类 inet_aton 写法：标准库的
+    // `IpAddr` 不认，但 libc 的解析器会把它变成 127.x —— 换个写法就绕过上面那张表
+    // 是 SSRF 的经典手法。只要每个标签都是数字（十进制或 0x 十六进制），
+    // 它就不可能是正常的公网主机名。
+    if is_non_canonical_numeric_host(host) {
+        return Some("非规范的 IPv4 数字写法");
+    }
+
+    // 主机名大小写不敏感（DNS 如此）。
+    let name = host.to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
+        return Some("回环主机名 localhost");
+    }
+    // `.local`（mDNS）**不拦**：它和私网地址一样，是家用设备的常态
+    // （`printer.local`、`nas.local`）。真正要挡的是 `metadata.google.internal`
+    // 这类云厂商别名 —— 它解析到 169.254.169.254，而这里不做 DNS 解析，
+    // 所以只能按域名后缀挡。
+    if name.ends_with(".internal") {
+        return Some("内网域名 .internal");
+    }
+    // 不含点的单标签名（`redis` / `metadata` / 容器名）只能靠内网 DNS 解析，
+    // 对插件来说没有合理用途；`example` 这种公网单标签也一并拒掉（罕见且不该用）。
+    if !name.contains('.') {
+        return Some("不含点的单标签主机名（内网别名）");
+    }
+    None
+}
+
+/// 判断一个 host 是否是 inet_aton 风格的“数字 IPv4”变体（含十六进制/八进制/缩写）。
+///
+/// 只看**每个标签是不是数字**：`0x7f.0.0.1`、`0177.0.0.1`、`1.2` 都是，
+/// 而 `api.example.com`、`dead.beef`（标签里含非数字字母）都不是。
+fn is_non_canonical_numeric_host(host: &str) -> bool {
+    let mut labels = 0;
+    for label in host.split('.') {
+        if label.is_empty() {
+            return false;
+        }
+        let numeric = match label.strip_prefix("0x").or_else(|| label.strip_prefix("0X")) {
+            Some(hex) => !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            None => label.chars().all(|c| c.is_ascii_digit()),
+        };
+        if !numeric {
+            return false;
+        }
+        labels += 1;
+    }
+    labels >= 1
+}
+
+/// IPv4 字面量的判定（含 IPv4-mapped IPv6 复用）。
+fn forbidden_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
+    if ip.is_unspecified() {
+        return Some("未指定地址 0.0.0.0");
+    }
+    if ip.is_loopback() {
+        return Some("回环地址 127.0.0.0/8");
+    }
+    // ⚠ **不拦 RFC1918**（10/8、172.16/12、192.168/16）—— 这是刻意放宽的：
+    // 面板的主力场景就是「家里的 NAS / 打印机 / Home Assistant」，把私网全禁掉
+    // 等于把这个 API 的主要用途一起禁掉。要挡的是**面板自己**（回环）和
+    // **云元数据**（链路本地），那两个才是拿到就能横着走的。
+    // 部署方想更严可以设 HOST_API_ALLOW_PRIVATE=0 的反面：目前没有更严的档位，
+    // 需要时再补一个 HOST_API_ALLOW_LAN=0。
+    if ip.is_link_local() {
+        return Some("链路本地 169.254/16（含云元数据 169.254.169.254）");
+    }
+    if ip.is_multicast() {
+        return Some("组播地址 224/4");
+    }
+    if ip.is_broadcast() {
+        return Some("受限广播 255.255.255.255");
+    }
+    // RFC 1122 的 "this network"：0/8 在 Linux 上常被路由到本机。
+    if ip.octets()[0] == 0 {
+        return Some("未指定/本网络地址 0.0.0.0/8");
+    }
+    None
+}
+
+/// IPv6 字面量的判定。
+fn forbidden_ipv6(ip: Ipv6Addr) -> Option<&'static str> {
+    // `::ffff:127.0.0.1` 这类 v4-mapped 地址要按内嵌的 IPv4 判，
+    // 否则换个写法就绕过了整个 IPv4 判定表。
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return forbidden_ipv4(v4);
+    }
+    if ip.is_unspecified() {
+        return Some("未指定地址 ::");
+    }
+    if ip.is_loopback() {
+        return Some("回环地址 ::1");
+    }
+    let first = ip.segments()[0];
+    // ULA（fc00::/7）同理不拦：它等价于 IPv6 世界的私网，是家用网络的常态。
+    if first & 0xffc0 == 0xfe80 {
+        return Some("IPv6 链路本地 fe80::/10");
+    }
+    if first & 0xff00 == 0xff00 {
+        return Some("IPv6 组播 ff00::/8");
+    }
+    None
+}
+
+/// 放行开关：`HOST_API_ALLOW_PRIVATE=1` 时关闭这一层的判定。
+///
+/// 只认精确的 `1`（与仓库里其它布尔环境变量同一套规矩）。
+/// **这是部署决策**：`ws_open` 在 `Registry` 构造时读一次，`http_fetch` 每次现读 ——
+/// 两条路认的是同一个环境变量、同一个判据，只是读取时机不同（一个在启动，
+/// 一个在调用点），不引入新的全局状态。
+///
+/// 打开时**只** warn 一次，避免每个请求都在日志里刷同一句。
+pub(crate) fn allow_private_outbound_targets() -> bool {
+    let allow = std::env::var("HOST_API_ALLOW_PRIVATE")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    if allow {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            crate::log::plog!(
+                "hostapi:ssrf",
+                warn,
+                "HOST_API_ALLOW_PRIVATE=1：插件可以访问内网，SSRF 防护已关闭"
+            );
+        });
+    }
+    allow
+}
+
+/// 从 URL 里取出 host 再做 SSRF 判定 —— `http_fetch` 与 `ws_open` 共用这一道门。
+///
+/// 没有 host 的 URL（相对路径等）不在这里判，交给各自的传输层报"URL 不合法"。
+pub(crate) fn ensure_outbound_url_allowed(url: &str) -> Result<(), String> {
+    ensure_outbound_url_allowed_with(url, allow_private_outbound_targets())
+}
+
+/// [`ensure_outbound_url_allowed`] 的可测内核：开关作为参数传入，**不读环境**
+/// （单测并行跑，改进程环境会让别的用例看到随机的开关状态）。
+pub(crate) fn ensure_outbound_url_allowed_with(
+    url: &str,
+    allow_private: bool,
+) -> Result<(), String> {
+    let uri: ureq::http::Uri = url.parse().map_err(|e| format!("url 不合法: {e}"))?;
+    match uri.host() {
+        Some(host) => ensure_outbound_host_allowed_with(host, allow_private),
+        None => Ok(()),
+    }
+}
+
+/// host 级内核：开关作为参数传入，返回给插件的错误已经是完整中文句子。
+fn ensure_outbound_host_allowed_with(host: &str, allow_private: bool) -> Result<(), String> {
+    if allow_private {
+        return Ok(());
+    }
+    match is_forbidden_outbound_target(host) {
+        None => Ok(()),
+        Some(reason) => Err(format!(
+            "出站目标被 SSRF 防护拒绝：{host}（{reason}）。\
+             插件可以访问公网与局域网，但不能访问面板自身（回环）与云元数据（链路本地）；确需如此，用 HOST_API_ALLOW_PRIVATE=1 启动面板\
+             （会关闭这一层防护并打一条 warn）。"
+        )),
+    }
+}
+
 /// SQLite 列值 → JSON 值。
 fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
     use rusqlite::types::ValueRef as R;
@@ -886,6 +1436,25 @@ fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 安全审计 中9：插件不能占用面板保留前缀，也不能抢别的插件的路径空间。
+    #[test]
+    fn route_paths_are_namespaced() {
+        // 自己的命名空间：可以
+        assert!(validate_route("demo", "/plugins/demo/api/config", "GET", "").is_ok());
+        // 别人的：不行（否则 URL 是 B、内容是 A）
+        let e = validate_route("demo", "/plugins/other/index.html", "GET", "").unwrap_err();
+        assert!(e.contains("路径空间"), "{e}");
+        // 面板保留前缀：不行
+        for p in ["/api/state", "/api/plugins/upload", "/login", "/logout"] {
+            assert!(
+                validate_route("demo", p, "GET", "").is_err(),
+                "{p} 是面板保留路径，插件不该抢"
+            );
+        }
+        // 不属于任何插件的普通路径：仍然允许（这是插件自定义 API 的正常用法）
+        assert!(validate_route("demo", "/demo-api/status", "GET", "").is_ok());
+    }
 
     fn req_with(headers: Value) -> ureq::http::Request<Vec<u8>> {
         let map = headers.as_object().cloned().unwrap_or_default();
@@ -1006,4 +1575,292 @@ mod tests {
         assert_eq!(n.icon, "🗓");
     }
 
+    // ---- 插件 SQLite 护栏（安全审计 H5）----
+
+    /// 临时库 + 面板四张表的**最小骨架**。
+    ///
+    /// 自建目录而不是引入 tempfile 依赖：只为测试多一个 crate 不值得。
+    /// 返回目录（调用方收尾删）与一条已建好表的连接。
+    fn temp_db(tag: &str) -> (PathBuf, rusqlite::Connection) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "panel-hostapi-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("panel.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE jobs (id INTEGER PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE runs (id TEXT PRIMARY KEY);
+            CREATE TABLE tasks (id INTEGER PRIMARY KEY);
+            CREATE TABLE plugin_state (name TEXT PRIMARY KEY, disabled INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO jobs (id, paused) VALUES (1, 1);
+            "#,
+        )
+        .unwrap();
+        (dir, conn)
+    }
+
+    /// `VACUUM INTO '<绝对路径>'` 会绕过 pluginfs 的文件围栏往任意路径落文件，
+    /// 必须在 prepare 之前就被拒；带注释前缀也不能漏。
+    #[test]
+    fn plugin_vacuum_into_is_denied() {
+        let (dir, conn) = temp_db("vacuum");
+        let target = dir.join("outside.db");
+
+        let plain = format!("VACUUM INTO '{}'", target.display());
+        let e = run_plugin_sqlite(&conn, &plain, "", false).unwrap_err();
+        assert!(e.contains("VACUUM"), "{e}");
+        assert!(!target.exists(), "VACUUM INTO 不能在围栏外落文件");
+
+        let commented = format!("  /* 注释 */\n-- 再一行\nVACUUM INTO '{}'", target.display());
+        let e = run_plugin_sqlite(&conn, &commented, "", false).unwrap_err();
+        assert!(e.contains("VACUUM"), "{e}");
+        assert!(!target.exists(), "注释前缀不能绕过 VACUUM 判据");
+
+        // BOM 不是 Unicode 空白，但 SQLite 会跳过 —— 判据也得跳。
+        let bom = format!("\u{feff}VACUUM INTO '{}'", target.display());
+        let e = run_plugin_sqlite(&conn, &bom, "", false).unwrap_err();
+        assert!(e.contains("VACUUM"), "{e}");
+        assert!(!target.exists(), "BOM 前缀不能绕过 VACUUM 判据");
+
+        assert!(run_plugin_sqlite(&conn, "VACUUM", "", false)
+            .unwrap_err()
+            .contains("VACUUM"));
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ATTACH DATABASE '<任意绝对路径>'` 被 authorizer 拒绝，且文件不会被创建；
+    /// 插件自己的表照旧可建可写。
+    #[test]
+    fn plugin_attach_is_denied() {
+        let (dir, conn) = temp_db("attach");
+        let target = dir.join("other.db");
+
+        let sql = format!("ATTACH DATABASE '{}' AS q", target.display());
+        let e = run_plugin_sqlite(&conn, &sql, "", false).unwrap_err();
+        assert!(e.contains("ATTACH"), "{e}");
+        assert!(!target.exists(), "被拒绝的 ATTACH 不应留下文件");
+
+        run_plugin_sqlite(
+            &conn,
+            "CREATE TABLE plugin_own (id INTEGER PRIMARY KEY, body TEXT)",
+            "",
+            false,
+        )
+        .unwrap();
+        run_plugin_sqlite(&conn, "INSERT INTO plugin_own (body) VALUES ('hi')", "", false).unwrap();
+        let rows = run_plugin_sqlite(&conn, "SELECT body FROM plugin_own", "", true).unwrap();
+        assert!(rows.contains("hi"), "{rows}");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 面板权威表：写一律拒绝（含 DROP / ALTER），读放行；
+    /// `sqlite_query` 连插件自己的表也不许写。
+    #[test]
+    fn plugin_cannot_write_panel_tables_but_can_read_them() {
+        let (dir, conn) = temp_db("tables");
+
+        for sql in [
+            "UPDATE jobs SET paused = 0",
+            "INSERT INTO runs (id) VALUES ('x')",
+            "DELETE FROM tasks",
+            "DROP TABLE tasks",
+            "ALTER TABLE plugin_state RENAME TO ps",
+            "CREATE TEMP TABLE jobs (id INTEGER)",
+        ] {
+            let e = run_plugin_sqlite(&conn, sql, "", false).unwrap_err();
+            assert!(e.contains("面板数据表"), "{sql} => {e}");
+        }
+
+        // 读是允许的（查询模式）
+        let rows = run_plugin_sqlite(&conn, "SELECT * FROM jobs", "", true).unwrap();
+        assert!(rows.contains("\"paused\":1"), "{rows}");
+
+        // 查询模式只允许读：即便写的是插件自己的表也不行
+        run_plugin_sqlite(&conn, "CREATE TABLE plugin_own (body TEXT)", "", false).unwrap();
+        let e =
+            run_plugin_sqlite(&conn, "INSERT INTO plugin_own (body) VALUES ('x')", "", true)
+                .unwrap_err();
+        assert!(e.contains("只允许读"), "{e}");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 递归 CTE（`SELECT count(*)` 永不结束）必须在 2s 左右被 progress handler
+    /// 中断，返回可读的超时错误，而不是攥着全局连接把面板挂死。
+    #[test]
+    fn plugin_recursive_cte_times_out() {
+        let (dir, conn) = temp_db("timeout");
+
+        let started = Instant::now();
+        let e = run_plugin_sqlite(
+            &conn,
+            "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt) \
+             SELECT count(*) FROM cnt",
+            "",
+            true,
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(e.contains("查询超时"), "{e}");
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "中断得太早（deadline 没生效？）: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "中断得太迟（查询已经把锁攥住了）: {elapsed:?}"
+        );
+
+        // guard 已 Drop：面板自己的写必须照常成功
+        conn.execute("UPDATE jobs SET paused = 0 WHERE id = 1", []).unwrap();
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 三种返回路径（成功 / 权限拒绝 / SQL 语法错误）之后，authorizer 与
+    /// progress handler 都必须已经从共享连接上摘掉 —— 用面板自己的写来证明。
+    #[test]
+    fn plugin_sql_hooks_are_removed_after_every_outcome() {
+        let (dir, conn) = temp_db("hooks");
+
+        // 成功路径
+        run_plugin_sqlite(&conn, "CREATE TABLE plugin_own (body TEXT)", "", false).unwrap();
+        // 权限拒绝路径
+        assert!(run_plugin_sqlite(&conn, "DROP TABLE jobs", "", false).is_err());
+        // 语法错误路径
+        assert!(run_plugin_sqlite(&conn, "THIS IS NOT SQL", "", false).is_err());
+
+        // 面板自己的查询/写完全不受影响（authorizer 若残留，这里会 SQLITE_AUTH）
+        conn.execute("UPDATE jobs SET paused = 0", []).unwrap();
+        conn.execute("CREATE TABLE panel_own (x INTEGER)", []).unwrap();
+        conn.execute("INSERT INTO panel_own (x) VALUES (7)", []).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM panel_own", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 出站 SSRF 防护（安全审计 L16）----
+
+    /// 判定表：**回环**（面板自己）/ 链路本地（云元数据）/ 未指定 / 组播 /
+    /// inet_aton 变体 / 内网别名，全部必须被拒。
+    ///
+    /// 注意 RFC1918 与 IPv6 ULA **不在**这张表里 —— 那是刻意放行的，
+    /// 见 `forbidden_ipv4` 的注释（局域网设备是这个 API 的主要用途）。
+    #[test]
+    fn ssrf_blocks_loopback_and_metadata_targets() {
+        for (host, hint) in [
+            ("127.0.0.1", "回环"),
+            ("127.9.9.9", "回环"),
+            ("127.0.0.1.", "回环"), // 末尾点仍是同一个 FQDN
+            ("0x7f.0.0.1", "数字写法"), // inet_aton 十六进制变体
+            ("0177.0.0.1", "数字写法"), // inet_aton 八进制变体
+            ("2130706433", "数字写法"), // inet_aton 整数变体
+            ("169.254.169.254", "链路本地"),
+            ("0.0.0.0", "未指定"),
+            ("224.0.0.1", "组播"),
+            ("255.255.255.255", "广播"),
+            ("[::1]", "回环"),
+            ("::1", "回环"),
+            ("::", "未指定"),
+            ("fe80::1", "链路本地"),
+            ("ff02::1", "组播"),
+            ("[::ffff:127.0.0.1]", "回环"),
+            ("localhost", "localhost"),
+            ("LOCALHOST", "localhost"),
+            ("localhost.", "localhost"),
+            ("api.localhost", "localhost"),
+            ("metadata.google.internal", ".internal"),
+            ("metadata", "单标签"),
+            ("redis", "单标签"),
+            ("", "主机为空"),
+        ] {
+            let reason = is_forbidden_outbound_target(host)
+                .unwrap_or_else(|| panic!("{host:?} 应当被拒"));
+            assert!(reason.contains(hint), "{host:?} => {reason}");
+        }
+    }
+
+    /// 公网目标必须放行 —— 防护不能把正常插件全拦下来。
+    #[test]
+    fn ssrf_allows_public_targets() {
+        for host in [
+            "example.com",
+            "api.github.com",
+            "1.1.1.1",
+            "8.8.8.8",
+            "172.32.0.1",  // 172.16/12 之外
+            "192.169.0.1", // 192.168/16 之外
+            "[2606:4700:4700::1111]",
+            "::ffff:8.8.8.8",
+            // 局域网是主力用途，必须放行
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "fd00::1",
+            "nas.local",
+        ] {
+            assert_eq!(
+                is_forbidden_outbound_target(host),
+                None,
+                "{host} 应当放行"
+            );
+        }
+    }
+
+    /// 放行开关是**参数化内核**（生产包装才读 env）：打开后连元数据地址也放行；
+    /// 关闭时错误文本要写清"怎么放行"。
+    #[test]
+    fn ssrf_switch_bypasses_every_check() {
+        let e = ensure_outbound_host_allowed_with("169.254.169.254", false).unwrap_err();
+        assert!(e.contains("SSRF"), "{e}");
+        assert!(e.contains("HOST_API_ALLOW_PRIVATE=1"), "错误里要写清怎么放行: {e}");
+        assert!(ensure_outbound_host_allowed_with("example.com", false).is_ok());
+
+        assert!(ensure_outbound_host_allowed_with("169.254.169.254", true).is_ok());
+        assert!(ensure_outbound_host_allowed_with("localhost", true).is_ok());
+        assert!(ensure_outbound_host_allowed_with("redis", true).is_ok());
+    }
+
+    /// `http_fetch` / `ws_open` 共用的是 URL 级入口：从 URL 里正确取 host，
+    /// 两端（http/https 与 ws/wss）都挡；公网照常放行。
+    #[test]
+    fn ssrf_url_gate_parses_host() {
+        for url in [
+            "http://127.0.0.1:8080/x",
+            "http://[::1]/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "ws://127.0.0.1:9000/ws",
+            "wss://redis/internal",
+        ] {
+            let e = ensure_outbound_url_allowed_with(url, false).unwrap_err();
+            assert!(e.contains("SSRF"), "{url} => {e}");
+        }
+        for url in [
+            "https://example.com/x",
+            "http://1.1.1.1/",
+            "ws://echo.example:443/",
+        ] {
+            assert!(
+                ensure_outbound_url_allowed_with(url, false).is_ok(),
+                "{url} 应当放行"
+            );
+        }
+    }
 }

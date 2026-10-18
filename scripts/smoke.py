@@ -1002,8 +1002,17 @@ def auth_checks(tmp: Path) -> None:
         )
         check(code == 200, "会话 cookie 可以调写接口", f"http {code}")
 
-        # 退出 → 会话立即失效
+        # 退出也要过 `x-panel: 1`（安全审计 L9）：只靠 SameSite 兜着是浏览器行为，
+        # 不该是唯一防线。没有护栏头的 POST 必须被拒。
         code, _, _ = http(f"{base}/api/logout", method="POST", headers={"Cookie": cookie})
+        check(code == 403, "没有 x-panel 的登出被拒（CSRF 护栏）", f"http {code}")
+
+        # 退出 → 会话立即失效
+        code, _, _ = http(
+            f"{base}/api/logout",
+            method="POST",
+            headers={"Cookie": cookie, "x-panel": "1"},
+        )
         check(code in (200, 303), "退出登录", f"http {code}")
         code, _, _ = http(f"{base}/api/state", headers={"Cookie": cookie})
         check(code == 401, "退出后会话立即失效", f"http {code}")
@@ -1361,17 +1370,22 @@ def anti_bruteforce_checks(tmp: Path) -> None:
         )
         return code, hdrs
 
-    def form_login(port, token, username=None):
+    def form_login(port, token, username=None, xff=None):
         """走**浏览器表单**那条路（JSON 那条没有蜜罐字段，测不到封禁）。
 
         `username=None` ⇒ 完全不发这个字段；`""` ⇒ 像真人那样发一个空值。
         两者都必须等价于「没填」—— 否则真人会被自己的浏览器锁在门外。
+
+        `xff` 只在 `PANEL_TRUST_PROXY=1` 的实例上用：用来扮演"不同来源"。
         """
         body = f"token={token}" if username is None else f"username={username}&token={token}"
+        headers = {"content-type": "application/x-www-form-urlencoded"}
+        if xff is not None:
+            headers["x-forwarded-for"] = xff
         code, _, resp = http(
             f"http://127.0.0.1:{port}/api/login",
             method="POST",
-            headers={"content-type": "application/x-www-form-urlencoded"},
+            headers=headers,
             body=body.encode(),
         )
         return code, resp
@@ -1457,9 +1471,13 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             wait_ready(f"http://127.0.0.1:{port2}", proc2, {"X-Panel-Token": SMOKE_TOKEN}),
             "反代模式实例就绪",
         )
+        # 安全审计 中1 之后，「反代模式」不再是一个全局布尔，而是一份**受信代理地址**名单。
+        # 日志必须写清到底信谁 —— 它改变安全语义，不能只是"开了"。
+        log2 = (tmp / "bf-proxy.log").read_text(errors="replace")
         check(
-            "反代模式" in (tmp / "bf-proxy.log").read_text(errors="replace"),
-            "启动日志写明开了反代模式（它改变安全语义，必须可见）",
+            "受信代理" in log2 and "127.0.0.1" in log2,
+            "启动日志写明**谁**被信任提供转发头（它改变安全语义，必须可见）",
+            log2.splitlines()[-1] if log2 else "(空)",
         )
 
         # 先正常登录拿一个会话：下面要验证「全局闸不踢已登录的人」
@@ -1536,33 +1554,99 @@ def anti_bruteforce_checks(tmp: Path) -> None:
         check(code == 303, "压根不带 username 也不算命中", f"http {code}")
 
         # 脚本：把每个框都灌一份，而且口令是猜的
-        code_ban, body_ban = form_login(port3, "guessed-wrong", username="admin")
+        code_ban, _ = form_login(port3, "guessed-wrong", username="admin")
         check(code_ban == 401, "填了蜜罐 + 口令不对 → 这一次就是 401", f"http {code_ban}")
-        # 封禁生效：连**正确**口令都进不来了
-        code_after, body_after = form_login(port3, SMOKE_TOKEN, username="")
+
+        # ⚠ 安全审计 H3：默认（未开 PANEL_TRUST_PROXY）时，**回环/内网来源不封禁**。
+        # 反代（nginx/caddy/cloudflared）就跑在本机，封 127.0.0.1 等于封掉所有
+        # 经反代访问的人 —— 一条未认证 curl 就能把全站登录锁死，而且每打一次续期一次。
+        # 封禁逻辑本身仍然要在：见下面「实例 ③b」（反代模式 + 真实来源）。
+        code_after, _ = form_login(port3, SMOKE_TOKEN, username="")
         check(
-            code_after == 401 and body_after == body_ban,
-            "**封禁期间正确口令也进不来，而且回的话与「口令不对」逐字相同**"
-            "（不能专门回一句「你被封了」—— 那是一个免费的探针）",
+            code_after == 303,
+            "本机/内网来源不会被蜜罐封禁（封了就等于把反代后面的所有人锁在门外）",
             f"http {code_after}",
         )
-        check(
-            code_after != 429,
-            "回 401 而不是 429：退避会自己过期，封禁不会 —— 两者不能混成一个读数",
-        )
-        # 但封的是「登录」：已经拿着令牌/会话在用的通道不受牵连（不踢进来的人）
         code, st = state(port3, {"X-Panel-Token": SMOKE_TOKEN})
         check(
-            code == 200 and st.get("auth", {}).get("banned_ips", 0) >= 1,
-            "封禁看得见：/api/state 报出被封的来源数，而**已认证的令牌通道照常**",
+            code == 200 and st.get("auth", {}).get("banned_ips", -1) == 0,
+            "回环来源不进封禁表（/api/state 里 banned_ips 仍是 0）",
             f"http {code}, {st.get('auth')}",
         )
         check(
-            "蜜罐命中" in (tmp / "bf-honeypot.log").read_text(errors="replace"),
+            "不封禁" in (tmp / "bf-honeypot.log").read_text(errors="replace"),
+            "日志说明了为什么没封（否则运维会以为蜜罐坏了）",
+        )
+
+        # ── 安全审计 H1：插件页面在**独立 origin** 上，而不是与面板同源 ──
+        #
+        # 同源 iframe 不是安全边界：插件页能 `parent.fetch('/api/plugins/upload')`。
+        # 独立 origin 之后，插件页读不到面板会话，也碰不到面板接口。
+        ui_port = st.get("plugin_ui_port")
+        check(
+            isinstance(ui_port, int) and ui_port > 0,
+            "插件页面有独立 origin（PLUGIN_UI 默认开，端口 = 主端口 + 1）",
+            f"plugin_ui_port={ui_port!r}",
+        )
+        if isinstance(ui_port, int) and ui_port > 0:
+            ui_base = f"http://127.0.0.1:{ui_port}"
+            c1, _, _ = http(f"{ui_base}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
+            check(c1 == 200, "插件 origin 能服务插件页面", f"http {c1}")
+            c2, _, _ = http(f"{ui_base}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
+            check(
+                c2 == 404,
+                "插件 origin 上**没有**面板接口（隔离的核心：拿到会话也调不到面板 API）",
+                f"http {c2}",
+            )
+            c3, _, _ = http(f"{ui_base}/plugins/demo/")
+            check(c3 == 401, "插件 origin 也要登录（不是公开的静态站）", f"http {c3}")
+    finally:
+        stop(proc3, f3)
+
+    # ── 实例 ③b：反代模式下，封禁仍然生效（且只封那个来源）──
+    #
+    # 这一组是 H3 的另一半：默认部署不封回环来源，但**不等于把蜜罐废掉**。
+    # 开了 PANEL_TRUST_PROXY 之后，来源是转发头里的真实客户端 IP，封它是对的。
+    port3b, proc3b, f3b = make(
+        {"PANEL_TOKEN": SMOKE_TOKEN, "PANEL_TRUST_PROXY": "1"}, "honeypot-proxy"
+    )
+    try:
+        base3b = f"http://127.0.0.1:{port3b}"
+        check(wait_ready(base3b, proc3b, {"X-Panel-Token": SMOKE_TOKEN}), "反代模式蜜罐实例就绪")
+        bad_ip = "203.0.113.9"
+        code_ban, body_ban = form_login(port3b, "guessed-wrong", username="admin", xff=bad_ip)
+        check(code_ban == 401, "反代模式：填了蜜罐 + 口令不对 → 401", f"http {code_ban}")
+        # 封禁生效：同一个来源，连**正确**口令都进不来了
+        code_after, body_after = form_login(port3b, SMOKE_TOKEN, username="", xff=bad_ip)
+        check(
+            code_after == 401 and body_after == body_ban,
+            "**被封的来源连正确口令也进不来，而且回话与「口令不对」逐字相同**"
+            "（不能专门回一句「你被封了」—— 那是一个免费的探针）",
+            f"http {code_after}",
+        )
+        # 但只封这一个来源：别的客户端不受牵连
+        code_other, _ = form_login(port3b, SMOKE_TOKEN, username="", xff="198.51.100.7")
+        check(code_other == 303, "封禁只针对那个来源，别的客户端照常登录", f"http {code_other}")
+        code, st = state(port3b, {"X-Panel-Token": SMOKE_TOKEN})
+        check(
+            code == 200 and st.get("auth", {}).get("banned_ips", 0) == 1,
+            "封禁看得见：/api/state 报出被封的来源数，而**已认证的令牌通道照常**",
+            f"http {code}, {st.get('auth')}",
+        )
+        # 重复命中不续期、也不产生第二条记录（旧实现每次都会 insert now+TTL）
+        form_login(port3b, "guessed-wrong", username="admin", xff=bad_ip)
+        _, st2 = state(port3b, {"X-Panel-Token": SMOKE_TOKEN})
+        check(
+            st2.get("auth", {}).get("banned_ips", 0) == 1,
+            "重复命中不会产生第二条封禁记录（续期攻击的回归闸）",
+            str(st2.get("auth")),
+        )
+        check(
+            "蜜罐命中" in (tmp / "bf-honeypot-proxy.log").read_text(errors="replace"),
             "封禁在日志里留下记录（含被封的地址与时长）",
         )
     finally:
-        stop(proc3, f3)
+        stop(proc3b, f3b)
 
     # ── 实例 ④：白名单那条出路（人被锁在门外时唯一不用等的解法）──
     port4, proc4, f4 = make(

@@ -133,6 +133,11 @@ pub struct ScheduledTask {
     /// 但全局预算还在 —— 于是一个「一个函数从头跑到尾」的长任务会被 2 秒默认值
     /// 直接掐断（报「疑似死循环」）。这条就是给它一个说清楚自己需要多久的地方。
     pub budget_ms: Option<u64>,
+    /// 提前量（毫秒）：任务在 cron 目标时刻**之前**多久触发。
+    ///
+    /// 兑换这类任务需要在整点前预热，但用户设的 cron 应该是「兑换时间」。
+    /// 调度器把 `next_fire` 提前，任务列表仍显示用户 cron。
+    pub lead_ms: i64,
     /// 这一次实际触发时刻相对理论时刻抖了多少毫秒（没有抖动规则时是 0）。
     ///
     /// 为什么要记下来：它要交给插件（payload 的 `jitterMs`），而且宿主的
@@ -177,12 +182,13 @@ fn advance_from(
     schedule: &Schedule,
     base_prev: DateTime<Local>,
     prev_actual: Option<DateTime<Local>>,
+    lead_ms: i64,
 ) -> (DateTime<Local>, DateTime<Local>, i64) {
     let base = schedule
         .next_base(base_prev)
         .unwrap_or_else(|| base_prev + ChronoDuration::days(FALLBACK_DAYS));
     let (actual, jitter) = crate::cron::apply_jitter(schedule, base, prev_actual);
-    (base, actual, jitter)
+    (base, actual - ChronoDuration::milliseconds(lead_ms), jitter)
 }
 
 /// 重新对齐：从 `now` 起算，**不抖**。
@@ -190,11 +196,15 @@ fn advance_from(
 /// 用给「暂停恢复 / 换表达式 / 落后太多重新对齐」这几种情况 —— 它们都不是
 /// 「按节奏到点了」，抖它们没有意义（用户刚点完按钮，等一个随机量很莫名其妙）。
 /// 抖动只属于**正常的定时触发**。
-fn align_from(schedule: &Schedule, now: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>, i64) {
+fn align_from(
+    schedule: &Schedule,
+    now: DateTime<Local>,
+    lead_ms: i64,
+) -> (DateTime<Local>, DateTime<Local>, i64) {
     let base = schedule
         .next_base(now)
         .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
-    (base, base, 0)
+    (base, base - ChronoDuration::milliseconds(lead_ms), 0)
 }
 
 pub struct Scheduler {
@@ -233,7 +243,33 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Code, params, budget_ms)
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Code, params, budget_ms, 0)
+    }
+
+    /// 装一条**插件代码声明**的任务，带提前量。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_lead(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+        params: Option<String>,
+        budget_ms: Option<u64>,
+        lead_ms: Option<u64>,
+    ) -> Result<usize, String> {
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            TaskSource::Code,
+            params,
+            budget_ms,
+            lead_ms.unwrap_or(0) as i64,
+        )
     }
 
     /// 装一条**面板创建**的任务（`register_handler` + 面板上的「新建任务」）。
@@ -247,7 +283,33 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel, params, budget_ms)
+        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel, params, budget_ms, 0)
+    }
+
+    /// 装一条**面板创建**的任务，带提前量。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_panel_lead(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+        params: Option<String>,
+        budget_ms: Option<u64>,
+        lead_ms: Option<u64>,
+    ) -> Result<usize, String> {
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            TaskSource::Panel,
+            params,
+            budget_ms,
+            lead_ms.unwrap_or(0) as i64,
+        )
     }
 
     /// 装一条脚本任务（目录发现或面板创建）。
@@ -265,7 +327,7 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, source, params, budget_ms)?;
+        self.insert(plugin, name, expr, schedule, now, source, params, budget_ms, 0)?;
         let idx = self.tasks.len() - 1;
         self.tasks[idx].script = Some(script.to_string());
         self.tasks[idx].runtime = Some(runtime.to_string());
@@ -282,6 +344,7 @@ impl Scheduler {
         source: TaskSource,
         params: Option<String>,
         budget_ms: Option<u64>,
+        lead_ms: i64,
     ) -> Result<usize, String> {
         if self
             .tasks
@@ -291,7 +354,7 @@ impl Scheduler {
             return Err(format!("插件 `{plugin}` 里已经注册过名为 `{name}` 的任务"));
         }
         // 第一次装进来：从 now 对齐，不抖（还没有「上一次」可以保证单调）
-        let (base_fire, next_fire, jitter_ms) = align_from(&schedule, now);
+        let (base_fire, next_fire, jitter_ms) = align_from(&schedule, now, lead_ms);
         self.tasks.push(ScheduledTask {
             name: name.to_string(),
             plugin: plugin.to_string(),
@@ -303,6 +366,7 @@ impl Scheduler {
             script: None,
             runtime: None,
             budget_ms,
+            lead_ms,
             base_fire,
             next_fire,
             jitter_ms,
@@ -347,7 +411,7 @@ impl Scheduler {
         t.params = params;
         t.budget_ms = budget_ms;
         if expr_changed && t.override_expr.is_none() {
-            let (base, next, jitter) = align_from(&t.schedule, now);
+            let (base, next, jitter) = align_from(&t.schedule, now, t.lead_ms);
             t.base_fire = base;
             t.next_fire = next;
             t.jitter_ms = jitter;
@@ -406,7 +470,7 @@ impl Scheduler {
         t.enabled = !paused;
         if t.enabled && t.next_fire <= now {
             // 恢复：从当前时刻重新对齐，欠下的触发不补，也不抖
-            let (base, actual, j) = align_from(&t.schedule, now);
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
@@ -454,7 +518,7 @@ impl Scheduler {
         t.override_expr = ov.map(str::to_string);
         t.schedule = schedule;
         if t.enabled && !t.tripped {
-            let (base, actual, j) = align_from(&t.schedule, now);
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
@@ -491,7 +555,7 @@ impl Scheduler {
         t.expr = expr.to_string();
         t.schedule = schedule;
         if t.enabled && !t.tripped {
-            let (base, actual, j) = align_from(&t.schedule, now);
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
@@ -499,6 +563,29 @@ impl Scheduler {
         // 不标的话 `realigned` 会留着上一拍的值，验收脚本就分不出
         // "抖到正好 0"与"这一拍没抖"（见字段上的说明）
         t.realigned = true;
+        }
+        Ok(())
+    }
+
+    /// 改提前量并重新对齐下一次触发。
+    pub fn set_lead(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        lead_ms: u64,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let t = &mut self.tasks[idx];
+        t.lead_ms = lead_ms as i64;
+        if t.enabled && !t.tripped {
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
+            t.realigned = true;
         }
         Ok(())
     }
@@ -588,7 +675,7 @@ impl Scheduler {
             t.tripped = false;
             t.trips = 0;
             t.retry_at = None;
-            let (base, actual, j) = align_from(&t.schedule, now);
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
             t.base_fire = base;
             t.next_fire = actual;
             t.jitter_ms = j;
@@ -619,11 +706,11 @@ impl Scheduler {
         // ③ 正常推进：理论线接着上一次的**理论**时刻走（不是实际时刻 —— 那样抖动会累积）
         let prev_actual = t.next_fire;
         let (mut base, mut actual, mut j) =
-            advance_from(&t.schedule, t.base_fire, Some(prev_actual));
+            advance_from(&t.schedule, t.base_fire, Some(prev_actual), t.lead_ms);
         let mut realigned = false;
         if base <= now {
             // 落后太多：重新对齐到 now 之后，且**不补跑、不抖**
-            (base, actual, j) = align_from(&t.schedule, now);
+            (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
             realigned = true;
         }
         t.base_fire = base;
@@ -1349,6 +1436,40 @@ mod tests {
         let next = s.tasks()[0].next_fire;
         s.advance(0, next, None);
         assert!(!s.tasks()[0].realigned, "标记不该粘住");
+    }
+
+    /// 提前量：用户 cron 是 10:00，调度器 9:59 醒；任务列表看到的仍是 10:00。
+    #[test]
+    fn lead_ms_fires_early_but_keeps_target_expr() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at_ms(2026, 3, 10, 8, 0, 0, 0);
+        let expr = "0 10 * * *";
+        s.add_lead(
+            "p",
+            "t",
+            expr,
+            Schedule::parse(expr).unwrap(),
+            now,
+            None,
+            None,
+            Some(60_000),
+        )
+        .unwrap();
+        assert_eq!(s.tasks()[0].expr, expr);
+        assert_eq!(
+            s.tasks()[0].next_fire,
+            at_ms(2026, 3, 10, 9, 59, 0, 0),
+            "要提前 60s 醒"
+        );
+        // 目标时刻仍是 10:00（插件拿 scheduledAt 当兑换时间）
+        assert_eq!(s.tasks()[0].base_fire, at_ms(2026, 3, 10, 10, 0, 0, 0));
+
+        s.advance(0, s.tasks()[0].next_fire, None);
+        assert_eq!(
+            s.tasks()[0].next_fire,
+            at_ms(2026, 3, 11, 9, 59, 0, 0),
+            "下一场仍要提前"
+        );
     }
 
     /// cron 的抖动可以越出周期，但会被钳回相邻槽位内。

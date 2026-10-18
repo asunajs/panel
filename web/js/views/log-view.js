@@ -106,7 +106,7 @@ export async function render(root, ctx, params = {}) {
           </select>
         </label>
 
-        <span class="tool">级别
+        <span class="tool levels">级别
           <span class="log-levels">
             ${LEVELS.map(
               (l) =>
@@ -160,7 +160,7 @@ export async function render(root, ctx, params = {}) {
         }
       </div>
 
-      <div class="console console-tall" id="log-box"></div>
+      <div class="console console-tall" id="log-box" tabindex="0" aria-label="日志内容"></div>
 
       <p class="hint" id="log-foot">
         快捷键：<kbd>Ctrl</kbd>+<kbd>F</kbd> 交给浏览器搜页内（也可以直接用上面的关键字框）。
@@ -245,9 +245,10 @@ export async function render(root, ctx, params = {}) {
       el.innerHTML = '';
       return;
     }
-    const res = await fetch(`/api/runs/${encodeURIComponent(params.run)}`, {
-      headers: { 'X-Panel-Token': window.__PANEL_TOKEN__ || '' },
-    });
+    // 同源请求自动带会话 cookie；这里原来塞的是 `window.__PANEL_TOKEN__`，
+    // 而那个全局**从来没有定义过**（安全审计 L13）—— 一个永远为空的自定义头
+    // 只会让后来的人以为「面板页是拿令牌鉴权的」。
+    const res = await fetch(`/api/runs/${encodeURIComponent(params.run)}`);
     runFetchDone = true;
     if (!res.ok) {
       // 记录本身就不在（超过 30 天、或者手动拼的 id）—— 这和"日志过期"

@@ -105,10 +105,10 @@ register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
-# 第四个参数：register_cron(name, expr, handler, { params, budget_ms })  —— 见 §1.2.3 / §1.2.4
-# 表达式末尾可以加一个抖动后缀                                          —— 见 §1.2.7
-smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见 §1.2.5
-register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见 §1.2.6
+# 第四个参数：register_cron(name, expr, handler, { params, lead_ms, budget_ms })  —— 见 §1.2.3 / §1.2.4 / §1.2.5
+# 表达式末尾可以加一个抖动后缀                                          —— 见 §1.2.8
+smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见 §1.2.6
+register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见 §1.2.7
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -198,7 +198,19 @@ function doExchange(p) {
 Node 适配器同样支持（`params` 走 `Scheduler.add` 的第 4 个参数）。验收脚本：
 `python3 scripts/params_check.py`。
 
-#### 1.2.4 执行预算：`{ budget_ms }`
+#### 1.2.4 提前量：`{ lead_ms }`
+
+```js
+// 用户看到的是 10:00；调度器 9:58 就醒，留给插件预热。
+register_cron('兑换', '0 10 * * *', runExchange, { lead_ms: 120_000 });
+```
+
+- 单位毫秒，范围 `0 ~ 3600000`；`0` / 不填 = 不提前。
+- `jobs.lead_ms` 落库；任务列表显示「提前 Ns」，但 `schedule` 仍是用户设的 `0 10 * * *`。
+- 触发时载荷里的 `scheduledAt` 仍是**目标整点**，`leadMs` 是这次提前量；
+  插件用 `scheduledAt` 当业务时间即可。
+
+#### 1.2.5 执行预算：`{ budget_ms }`
 
 ```js
 register_cron('日常', '*/30 7-22 * * *', runDaily, { budget_ms: 120_000 });
@@ -223,7 +235,7 @@ register_route('/plugins/x/run', 'POST', handler, { budget_ms: 120_000 });
 
 验收脚本：`python3 scripts/budget_check.py`。
 
-#### 1.2.5 发邮件：`smtp_send(opts)`
+#### 1.2.6 发邮件：`smtp_send(opts)`
 
 ```js
 import { smtp_send } from 'host-api';
@@ -247,12 +259,12 @@ smtp_send({
 |---|---|
 | `host` | 必填 |
 | `port` | 不给就按 `tls` 推：`implicit` → 465，其余 → 587 |
-| `tls` | `"starttls"`（默认）/ `"implicit"` / `"none"`。**拼错会报错**，不会默认成 `none` |
+| `tls` | `"starttls"`（默认）/ `"implicit"` / `"none"`。**拼错会报错**，不会默认成 `none`。⚠ `none` 且 `user` 非空 ⇒ **默认拒绝**（明文通道上不发凭据）；确需如此要显式 `allow_plaintext_auth: true`，面板会打一条 warn |
 | `user` / `pass` | `user` 为空就跳过 `AUTH`（内网中继常见） |
-| `from` | 可以写 `显示名 <a@b>`；**信封里只用裸地址** |
+| `from` | 可以写 `显示名 <a@b>`；**信封里只用裸地址**。含 `\r` / `\n` / 控制字符的地址会被**拒绝**（不做静默清洗） |
 | `to` | 字符串或字符串数组 |
 | `subject` / `text` / `html` | 至少给一个正文；中文主题走 RFC 2047 编码字 |
-| `ca_file` | 额外的信任锚（PEM），给自建 SMTP / 内网中继 |
+| `ca_file` | 额外的信任锚（PEM），给自建 SMTP / 内网中继。必须是普通文件且 **≤ 1 MiB**（`/dev/zero` 之类会拒） |
 | `timeout_ms` | 默认 15000，夹在 1s ~ 60s |
 | `ehlo` | EHLO 自报的名字，默认 `localhost` |
 
@@ -263,7 +275,7 @@ smtp_send({
 
 验收脚本：`python3 scripts/smtp_check.py`（自带假 SMTP 服务器，含 STARTTLS / implicit TLS）。
 
-#### 1.2.6 侧边栏入口：`register_nav({ label, icon, path })`
+#### 1.2.7 侧边栏入口：`register_nav({ label, icon, path })`
 
 ```js
 import { register_nav } from 'host-api';
@@ -278,12 +290,21 @@ register_nav({ label: '兑换', icon: '🎁', path: 'exchange.html' });
 | `path` | | 页面地址。空 = `/plugins/{name}/index.html`；相对路径按插件目录解析 |
 
 - **一个插件只能声明一个**入口。第二个报错而不是静默覆盖。
-- **停用的插件不摆入口**；面板用 iframe 装页面，插件的 JS 动不了面板本身。
-- 页面里的相对路径 `fetch('api/xxx')` 调**插件自己注册的路由**（同源）。
+- **停用的插件不摆入口**。
+- ⚠ **`iframe` 不是安全边界**（安全审计 H1 更正）：同源 iframe 与父文档共享
+  origin，插件页的 JS 可以直接 `parent.fetch('/api/…')`。真正的隔离来自
+  「插件页面在**另一个 origin** 上」—— 面板会默认把插件页放到主端口 +1
+  （见 `docs/configuration.md` 的 `PLUGIN_UI*`）。那个 origin 只服务
+  `/plugins/**` 与插件自己注册的路由，**没有面板 API**。
+  面板还给 iframe 加了 `sandbox`（不含 `allow-top-navigation`），挡住插件页
+  把整个面板导航走。
+- 页面里的相对路径 `fetch('api/xxx')` 调**插件自己注册的路由**（在插件 origin
+  上解析，所以跨端口后依然同源，不需要 CORS）。绝对路径 `/api/...` 是**面板的**
+  接口，插件页拿不到（这是有意的）。
 
 验收脚本：`node scripts/nav_check.mjs`（夹具 `examples/nav/`）。
 
-#### 1.2.7 随机表达式（抖动）
+#### 1.2.8 随机表达式（抖动）
 
 表达式**末尾**可以再加一个 token，让实际触发时刻围绕理论时刻随机偏移：
 
@@ -340,6 +361,29 @@ http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
 
 `options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`
 （默认 10000，钳制到 `[100, 60000]`）。
+
+### 出站目标的限制（SSRF 防护）
+
+`http_fetch` 与 `ws_open` 会先检查目标，命中下面这些**直接报错**（不会发出连接）：
+
+| 被拒 | 为什么 |
+|---|---|
+| 回环：`127.0.0.0/8`、`::1`、`localhost` | 那就是**面板自己**。插件能打 `/api/login`，就等于能把登录退避桶打满、把运维锁在门外 |
+| 链路本地：`169.254.0.0/16`（含云元数据 `169.254.169.254`）、`fe80::/10` | 云上跑时这里能直接拿到实例凭据 |
+| `0.0.0.0` / `::`、组播、广播 | 没有正常用途 |
+| inet_aton 变体：`0x7f.0.0.1`、`0177.0.0.1`、`2130706433` | 换个写法就绕过上一条 |
+| 单标签主机名（`metadata`、`redis`）、`*.internal`、`*.localhost` | 云厂商/容器编排的内网别名，没有公网用途 |
+
+**局域网是放行的**：`10/8`、`172.16/12`、`192.168/16`、`fc00::/7`、`*.local`
+（`nas.local`、`printer.local`）都能访问 —— 家里的 NAS / 打印机 / Home Assistant
+正是这个 API 的主要用途。
+
+⚠ 这一层**不做 DNS 解析后的校验**：它挡的是字面量与常见内网别名，挡不住
+「一个公网域名解析到 127.0.0.1」这种 DNS 重绑定。插件是可信代码，这层是纵深防御，
+不是沙箱。
+
+确需访问回环/元数据时，用 `HOST_API_ALLOW_PRIVATE=1` 启动面板（会打一条 warn）。
+
 
 ### 1.5 `tls` 选项：`"rustls"`（默认）与 `"native"`（构建 feature）
 
@@ -420,6 +464,11 @@ ws_close(id)            -> true
 - **同步 + 超时**：插件的调用是阻塞的；`ws_recv` 的最大超时给到 **1800ms**，
   一次调用收一点、状态落库、下次再来 —— 插件侧不需要事件循环，句柄跨调用有效。
 - **不自动重连**；同时最多 **8 条**连接、单帧 **256 KiB**（超了报 `error` 并关掉，不静默截断）。
+- **入站队列 64 帧**：插件如果一直不来 `recv`、而对端推得很快，攒满之后这条连接会被
+  关掉，`ws_recv` 会先读完积压的 `text`，最后给一条
+  `{"type":"error","message":"插件没来取（入站队列 64 帧已满）…"}`。
+  所以**慢消费者要每轮循环 `recv` 到 `timeout`**，别把连接当无限缓冲。
+- `ws_send` 的出站队列是 **256 帧**：满了会返回错误（以前是无界堆积，看着能跑、其实在吃内存）。
 - TLS 与 `http_fetch` 用同一个信任库。
 - ⚠ **必须从引擎线程调**（插件代码天然满足）；`ws_recv` 会阻塞。
 - 三个引擎都支持这一族（外部引擎经 RPC；句柄活在面板进程里）。
@@ -446,6 +495,7 @@ handler(payload) -> None
 | `realigned` | boolean | 落后重对齐 / 熔断重试 / 首次装载来的（不能用 `jitterMs == 0` 反推） |
 | `manual` | boolean | 用户点的（`true`）还是调度到点的（`false`） |
 | `params` | object \| null | `register_cron(…, { params })` 给的那份；没给是 `null` |
+| `leadMs` | number | 这次触发提前了多少毫秒（老面板不发，缺省 0） |
 
 `runs` 是**累计**的：面板把 `jobs.runs` 灌回调度器，所以重启 / 热更新之后不会退回 1。
 
@@ -467,6 +517,7 @@ handler(payload) -> None
 | `register_handler` | ✅ | ✅（RPC） | ✅（配 `--job`） | ❌ 抛错 |
 | `worker_hint` | ✅ 源码扫描 | ✅（RPC，只校验） | ✅（只校验） | ❌ 抛错 |
 | `opts.params` | ✅ | ✅ | ✅ | —（脚本无调度） |
+| `opts.lead_ms` | ✅ | ✅（RPC） | ❌ | —（脚本无调度） |
 | 随机表达式（抖动） | ✅ 面板调度器 | ✅ 面板调度器 | ❌ 未实现 | ✅ 由面板调度 |
 | `register_nav` | ✅ | ✅（RPC） | ❌ | ❌ 抛错 |
 | `register_route` | ✅ | ✅（RPC） | ✅（内置 http server） | ❌ 抛错 |

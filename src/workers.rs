@@ -471,14 +471,26 @@ fn intervals_in(source: &str, prefix: &str) -> Vec<u64> {
 /// 所以这里取**「配置值」与「声明要求的下限」的较大者**：
 ///
 /// ```text
-/// 下限 = 独占插件数 + 1
-///                 └─ 那 1 条留给其余插件（含精度 worker）
+/// 下限 = 独占插件数 + 1（worker 0） + (还有非独占插件 ? 1 : 0)
+///                                      └─ 一条粗粒度共享 lane
 /// ```
+///
+/// **worker 0 不是普通共享槽**：它负责扫描/认领新插件（只有它算），
+/// 也是细粒度插件的精度线程，所以不能塞长任务。非独占插件另给一条共享 lane，
+/// 它们可以互相排队 —— 这正是「大部分 cron 不要求毫秒级」的取舍。
+///
+/// 全独占时不需要共享 lane：4 个独占 + worker 0 = 5 条。
+/// 独占 + 共享时：独占数 + worker 0 + 1 条共享 lane。
 ///
 /// 只抬不降：配置得比需要多时不缩，用户显式要更多线程的意图照旧成立。
 pub fn required_workers(costs: &[PluginCost], configured: usize) -> usize {
     let exclusive = costs.iter().filter(|c| c.hint.is_exclusive()).count();
-    configured.max(exclusive + 1).max(1)
+    let has_shared = costs.iter().any(|c| !c.hint.is_exclusive());
+    // 没有独占插件时，用户显式 `ENGINE_WORKERS=1` 仍照旧：worker 0 可以自己扛。
+    // 有独占插件时才需要额外的共享 lane，避免长任务占住 worker 0。
+    configured
+        .max(exclusive + 1 + usize::from(has_shared && exclusive > 0))
+        .max(1)
 }
 
 /// 按策略把插件分到 `workers` 条 worker 上。
@@ -545,7 +557,10 @@ pub fn plan(costs: &[PluginCost], workers: usize, pin: &HashMap<String, usize>) 
     //   - 没有细粒度的 → 没有要保护的精度，保留 worker 0 只会让它空着、
     //     把所有任务挤到别的 worker 上（实测就是这么错的，单测抓到的）
     //   - 没有粗粒度的 → 没必要隔离，细粒度应该铺开换吞吐量
-    let reserve = shared_n > 1 && !coarse.is_empty() && !fine.is_empty();
+    // worker 0 只留给精度/扫描：只要有粗粒度任务，就把它赶到共享 lane 上，
+    // 不能让它占住 worker 0（否则目录扫描和细粒度插件都会被长任务拖住）。
+    let reserve =
+        shared_n > 1 && !coarse.is_empty() && (!fine.is_empty() || !exclusive.is_empty());
     let fine_slots: Vec<usize> = if reserve { vec![0] } else { shared_slots.clone() };
     if !fine.is_empty() {
         // 轻的往精度 worker 堆（它们互相影响小），重的铺到别的 slot 上
@@ -814,6 +829,34 @@ mod tests {
     }
 
     // ---------- 分配 ----------
+
+    #[test]
+    fn all_exclusive_plugins_keep_worker_zero_free() {
+        let costs = vec![
+            c_hint("a", Some(60_000), WorkerHint::Exclusive),
+            c_hint("b", Some(60_000), WorkerHint::Exclusive),
+            c_hint("c", Some(60_000), WorkerHint::Exclusive),
+            c_hint("d", Some(60_000), WorkerHint::Exclusive),
+        ];
+        // worker 0 还要负责目录扫描/认领，不能被独占插件占掉。
+        assert_eq!(required_workers(&costs, 2), 5, "4 个独占 + worker 0 = 5 条");
+        let p = plan(&costs, 5, &HashMap::new());
+        assert!(p.groups[0].is_empty(), "worker 0 必须留给精度/扫描: {:?}", group_names(&p));
+    }
+
+    #[test]
+    fn exclusive_plus_shared_still_gets_a_shared_worker() {
+        let costs = vec![
+            c_hint("a", Some(60_000), WorkerHint::Exclusive),
+            c_hint("b", Some(60_000), WorkerHint::Exclusive),
+            c("shared", Some(60_000)),
+        ];
+        assert_eq!(required_workers(&costs, 2), 4, "两个独占 + 一个共享 = 4 条");
+        let p = plan(&costs, 4, &HashMap::new());
+        let g = group_names(&p);
+        assert_eq!(g[1], vec!["shared"], "共享插件要有独立 lane: {g:?}");
+        assert!(g[0].is_empty(), "worker 0 留给精度/扫描: {g:?}");
+    }
 
     #[test]
     fn one_second_is_not_fine_grained() {
@@ -1090,13 +1133,13 @@ mod tests {
         assert_eq!(required_workers(&none, 2), 2);
         assert_eq!(required_workers(&none, 1), 1);
 
-        // 2 个独占 → 至少 3 条（2 条独占 + 1 条给其余）
+        // 2 个独占 + 1 个共享 → 至少 4 条（2 独占 + worker 0 + 共享 lane）
         let two = vec![
             c_hint("x", Some(3_600_000), WorkerHint::Exclusive),
             c_hint("y", Some(3_600_000), WorkerHint::Exclusive),
             c("daily", Some(60_000)),
         ];
-        assert_eq!(required_workers(&two, 1), 3, "配置太小要抬上去");
+        assert_eq!(required_workers(&two, 1), 4, "配置太小要抬上去");
         assert_eq!(required_workers(&two, 8), 8, "只抬不降");
 
         // 精度声明不占额外线程（它只要落在 worker 0 上）
@@ -1113,16 +1156,16 @@ mod tests {
             c("daily2", Some(60_000)),
             c_hint("exchange", Some(3_600_000), WorkerHint::Exclusive),
         ];
-        // 下限是「独占数 + 1」：保证独占那条上只有它自己，且其余插件有地方放。
-        // 「其余插件要不要分开」是性能问题，交给 ENGINE_WORKERS（配置值更大就照配置）。
-        assert_eq!(required_workers(&costs, 1), 2);
+        // 下限是「独占 + worker 0 + 共享 lane」：独占那条只有它自己，
+        // 日常们共享另一条，worker 0 留给精度/扫描。
+        assert_eq!(required_workers(&costs, 1), 3);
         assert_eq!(required_workers(&costs, 4), 4, "只抬不降");
         let p = plan(&costs, 4, &HashMap::new());
         let g = group_names(&p);
         // 独占的落在最后一条，且**只有它自己**
         assert_eq!(g[3], vec!["exchange"], "{g:?}");
+        assert!(g[0].is_empty(), "worker 0 留给精度/扫描: {g:?}");
         // 两个日常落在共享区，不碰独占槽
-        assert!(!g[0].contains(&"exchange".to_string()), "{g:?}");
         assert!(!g[1].contains(&"exchange".to_string()), "{g:?}");
         assert!(!g[2].contains(&"exchange".to_string()), "{g:?}");
         assert!(p.notes.iter().any(|x| x.contains("独占")), "{:?}", p.notes);
@@ -1130,25 +1173,22 @@ mod tests {
 
     #[test]
     fn the_four_lane_layout_mcloud_needs_actually_works() {
-        // mcloud 的真实诉求：路由要一直能响应（登录/设置/读数），
-        // 日常跑几分钟、直播听几小时、抢兑只有几十毫秒的窗口 ——
-        // 四条互不干扰。做法：三个重的声明独占，路由插件不声明。
+        // 新布局：路由插件和抢兑各占一条；日常/直播共享一条粗粒度 lane。
+        // 四条线程：worker 0 控制/精度、worker 1 日常+直播、worker 2 抢兑、worker 3 路由。
         let costs = vec![
-            c("mcloud", None), // 只有 HTTP 路由，没有 cron
-            c_hint("mcloud-daily", Some(60_000), WorkerHint::Exclusive),
+            c_hint("mcloud", None, WorkerHint::Exclusive),
+            c("mcloud-daily", Some(60_000)),
             c_hint("mcloud-exchange", Some(3_600_000), WorkerHint::Exclusive),
-            c_hint("mcloud-live", Some(3_600_000), WorkerHint::Exclusive),
+            c("mcloud-live", Some(3_600_000)),
         ];
         let n = required_workers(&costs, 2); // 默认配置只有 2，必须自己抬
-        assert_eq!(n, 4, "三条独占 + 一条给路由");
+        assert_eq!(n, 4, "两条独占 + worker 0 + 共享 lane");
         let p = plan(&costs, n, &HashMap::new());
         let g = group_names(&p);
-        assert_eq!(g[0], vec!["mcloud"], "路由插件独占 worker 0: {g:?}");
-        // 三个重的各占一条，谁也不和谁共享
-        for name in ["mcloud-daily", "mcloud-exchange", "mcloud-live"] {
-            let slot = g.iter().position(|x| x.contains(&name.to_string())).unwrap();
-            assert_eq!(g[slot], vec![name], "`{name}` 必须独占一条: {g:?}");
-        }
+        assert!(g[0].is_empty(), "worker 0 留给精度/扫描: {g:?}");
+        assert_eq!(g[1], vec!["mcloud-daily", "mcloud-live"], "日常/直播共享粗粒度 lane: {g:?}");
+        assert_eq!(g[2], vec!["mcloud-exchange"], "抢兑独占: {g:?}");
+        assert_eq!(g[3], vec!["mcloud"], "路由插件独占: {g:?}");
     }
 
     #[test]
@@ -1159,13 +1199,14 @@ mod tests {
             c("daily", Some(60_000)),
         ];
         let n = required_workers(&costs, 1);
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
         let p = plan(&costs, n, &HashMap::new());
         let g = group_names(&p);
-        // 按名字排序分配：exchange → 末尾，live → 倒数第二
-        assert_eq!(g[2], vec!["exchange"], "{g:?}");
-        assert_eq!(g[1], vec!["live"], "{g:?}");
-        assert_eq!(g[0], vec!["daily"], "{g:?}");
+        // 按名字排序分配：exchange → 末尾，live → 倒数第二；daily 在共享 lane
+        assert_eq!(g[3], vec!["exchange"], "{g:?}");
+        assert_eq!(g[2], vec!["live"], "{g:?}");
+        assert_eq!(g[1], vec!["daily"], "{g:?}");
+        assert!(g[0].is_empty(), "worker 0 留给精度/扫描: {g:?}");
     }
 
     #[test]

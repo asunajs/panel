@@ -84,6 +84,8 @@ rust-plugin-panel/
 │   ├── runtimes.rs    ★ 运行时探测与选择：QuickJS / Node / Bun / Python(脚本)
 │   ├── runtimefs.rs   ★ 把 runtime/js shim 从二进制落到数据目录（内容哈希目录）
 │   ├── taskdir.rs     ★ TASKS_DIR 扫描 + 文件头解析（@cron/@name/@runtime/@timeout/@params/@disabled）
+│   ├── upload.rs      上传：单文件 / zip 解压（拒绝 ..、符号链接、zip bomb）
+│   ├── watcher.rs     半被动刷新：inotify/FSEvents/ReadDirectoryChangesW → 去抖 Wake
 │   ├── scriptjob.rs   ★ 脚本任务执行：一次性进程、输出捕获、超时、runs 落库
 │   ├── pluginfs.rs    ★ QuickJS 的数据根 + 围栏（物理层复核，软链接也拦）
 │   ├── log/           ★ 日志内核 + 可插拔出口（插件 / 面板两条独立通道）
@@ -138,7 +140,8 @@ rust-plugin-panel/
 │       └── puredashboard/  dialog+drawer+alert+confirm+prompt · button · toast ·
 │                           menu · popconfirm · tooltip
 ├── docs/               参考文档（按主题）+ 按轮次的工程记录
-│   ├── README.md       索引 + 「原 §编号 → 文件」对照表（代码注释里 20 多处引用 §N）
+│   ├── README.md       文档索引（使用 / 开发 / 部署 / 工程记录）
+│   ├── legacy-sections.md  旧 README 章节号与当前文档的对照
 │   ├── host-api.md     ★ JS 宿主契约 v2（函数、payload、错误约定、三引擎能力矩阵）
 │   ├── architecture.md  本文件：进程/线程模型、目录结构、设计决策
 │   ├── ext-runtime-protocol.md  外部 Node/Bun 子进程协议（fd0/1/2/3/4、RPC）

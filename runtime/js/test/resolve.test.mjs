@@ -91,6 +91,7 @@ test(
       '*/5 * * * * *',
       '{"account":"alice","slot":3}',
       '1234',
+      '',
     ]);
 
     panel.invoke({ id: 401, kind: 'task', name: 'echo', payload: { x: 99 } });

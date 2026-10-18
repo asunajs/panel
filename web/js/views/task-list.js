@@ -102,6 +102,7 @@ function fromJob(j) {
     source: j.source,
     paused: j.paused,
     budgetMs: j.budget_ms,
+    leadMs: j.lead_ms || 0,
     params: j.params,
     // 被面板删掉的（墓碑）。插件代码仍然声明它，所以它还在库里 ——
     // 默认不显示、不调度，列表底部可以展开恢复。
@@ -158,10 +159,7 @@ function taskCard(t) {
   //   - 编辑：**任何真实任务都能**。插件代码声明的任务改的是「面板覆盖」
   //     （写 `override_expr`，代码声明的值原样保留、重启与热更新都不会丢）。
   //     面板创建的任务直接改表达式。
-  //   - 删除：只有面板建的任务。插件代码声明的任务删不掉 —— 身份是「插件名 +
-  //     处理函数名」，`sync_jobs` 下一次重载就把它建回来了（后端 400）。要让它停下来
-  //     用「暂停」（暂停状态跨重启保留），所以这里不给一个骗人的入口。
-  // 删除：**所有真实任务都能删**。面板任务真删行；插件代码声明的任务立墓碑
+  //   - 删除：**所有真实任务都能删**。面板任务真删行；插件代码声明的任务立墓碑
   // （`jobs.deleted = 1`）—— 真删行没用，`sync_jobs` 下一次重载会按代码建回来。
   // 删掉之后卡片挪到列表底部，带一个「恢复」。
   const ops = !t.real
@@ -189,7 +187,9 @@ function taskCard(t) {
         <!-- 标题与徽章包成一组：space-between 只负责把它和按钮组分到两端，
              不然徽章会被均匀摊到卡片中间（见 components.css 的注释） -->
         <div class="card-head-main">
-          <span class="card-title mono">${esc(t.name)}</span>
+          <span class="card-title mono" title="${esc(isScript ? t.name : `${t.plugin} / ${t.name}`)}">${
+            isScript ? esc(t.name) : `${esc(t.plugin)} / ${esc(t.name)}`
+          }</span>
           ${langOrRuntime}
           ${t.deleted ? badge('deleted', 0) : badge(t.status, t.trips)}
         </div>
@@ -215,6 +215,14 @@ function taskCard(t) {
               : ''
           }
         </div>
+        ${
+          t.leadMs > 0
+            ? `<div class="field">
+                 <span class="field-label">提前</span>
+                 <span class="mono">${esc(Math.round(t.leadMs / 1000))}s</span>
+               </div>`
+            : ''
+        }
         <div class="field">
           <span class="field-label">上次执行</span>
           <span class="mono dim">${esc(t.lastRun)}</span>
@@ -296,9 +304,9 @@ function clearRootListeners(root) {
 // 为什么值得单独一屏：日志页是按**插件**看的，一个跑得勤的任务会把日志刷满，
 // 「昨天下午那次失败到底输出了什么」在插件视图里翻不到；按运行看才有边界。
 async function openRunsDialog(plugin, name) {
+  // 同源 cookie 就够了（原来那个头引用的全局从未定义，见安全审计 L13）
   const res = await fetch(
     `/api/runs?plugin=${encodeURIComponent(plugin)}&task=${encodeURIComponent(name)}&limit=30`,
-    { headers: { 'X-Panel-Token': window.__PANEL_TOKEN__ || '' } },
   );
   const data = res.ok ? await res.json() : { error: `HTTP ${res.status}` };
   const runs = data.runs || [];
@@ -396,61 +404,22 @@ export async function render(root, ctx, opts = {}) {
     </div>`;
   }
 
-  // 为什么任务大多没有「编辑 / 删除」按钮 —— 说清一次，而不是每张卡片重复一遍
-  // （重复的可见文案上一轮刚因为「杂乱」被拿掉）。
-  //
-  // 这不是可选的装饰：`plugins/` 里的任务**全部**由插件代码声明，所以新用户看到的
-  // 是「一个任务都改不了也删不掉」，而界面对此一言不发 —— 用户实测就问过
-  // 「任务不能编辑不能删除？」。
-  //
-  // 脚本任务是另一套语义（两份来源），所以说明分开写；插件任务那段口径不变。
-  const realTasks = tasks.filter((t) => t.real);
-  const pluginTasks = realTasks.filter((t) => t.kind !== 'script');
-  const scriptTasks = realTasks.filter((t) => t.kind === 'script');
-  const panelCount = pluginTasks.filter((t) => t.source === 'panel').length;
-  const codeCount = pluginTasks.length - panelCount;
-  const dirScriptCount = scriptTasks.filter((t) => t.source === 'script-dir').length;
-  const panelScriptCount = scriptTasks.length - dirScriptCount;
   // 删掉的挪到列表底部折叠：默认**不渲染**（不是渲染后 hidden），
   // 这样「界面上有多少张卡片」和「有多少个活任务」始终是一回事 ——
   // 断言和用户数数都不会被隐藏 DOM 骗到。
   const alive = tasks.filter((t) => !t.deleted);
   const gone = tasks.filter((t) => t.deleted);
-  const notes = [];
-  if (pluginTasks.length) {
-    notes.push(
-      panelCount === 0
-        ? `这 ${codeCount} 个插件任务都由<b>插件代码</b>声明（表达式写在插件源码里）。` +
-          `「编辑」改它的触发频率（记成一条<b>覆盖</b>，代码里的值原样保留，` +
-          `重启和热更新都不会丢，点「撤销覆盖」回到代码的值）；` +
-          `「删除」是<b>不调度 + 不显示</b>（插件代码还声明着它，真删了下次重载会回来），` +
-          `删掉的任务挪到列表底部，可以恢复。`
-        : `${panelCount} 个面板创建的插件任务可以编辑 / 删除（真删）；` +
-          `${codeCount} 个由插件代码声明，编辑记成<b>覆盖</b>、删除记成<b>墓碑</b>（可恢复）。`,
-    );
-  }
-  if (scriptTasks.length) {
-    notes.push(
-      `${dirScriptCount} 个<b>目录任务</b>由 <span class="mono">TASKS_DIR</span> 里的文件头` +
-        `（name / cron / runtime）自动发现：删除 = 停止调度（文件本身不动，可恢复），` +
-        `「编辑」改的是<b>调度覆盖</b>；${panelScriptCount} 个<b>面板任务</b>是面板上建的，` +
-        `路径 / 运行时 / 调度都能改，删除是真删。`,
-    );
-  }
-  const kindNote = notes.length ? `<div class="list-note">${notes.join('<br>')}</div>` : '';
-
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">任务（${tasks.length}）</span>
+        <span class="section-title">全部任务（${tasks.length}）</span>
         <div class="card-actions">
           <button class="btn" id="cleanup-btn">清理失效任务</button>
           <button class="btn" id="refresh-btn">刷新</button>
-          <button class="btn" id="new-script-btn">新建脚本任务</button>
-          <button class="btn primary" id="new-task-btn">新建任务</button>
+          <button class="btn" id="new-script-btn" title="在面板数据库里创建一条脚本任务；TASKS_DIR 里的目录任务不用新建，放文件即可">新建面板脚本任务</button>
+          <button class="btn primary" id="new-task-btn" title="由插件注册的任务名 + 调度表达式创建一条任务">新建插件任务</button>
         </div>
       </div>
-      ${kindNote}
       <!-- .stack：有内容时才会和下方任务列表拉开间隔（见 components.css） -->
       <div id="cleanup-box" class="stack"></div>
       ${notice}
@@ -461,7 +430,7 @@ export async function render(root, ctx, opts = {}) {
         gone.length
           ? `<div class="list-note" style="margin-top:var(--sp-3)">
                <button class="btn ghost" id="show-deleted">显示 ${gone.length} 个已删除的任务</button>
-               <span class="hint">插件代码 / 目录文件仍然声明它们，所以这里的「删除」是不调度 + 不显示；随时可以恢复。</span>
+               <span class="hint">删除的任务可以恢复。</span>
              </div>
              <div class="grid" id="deleted-grid" hidden></div>`
           : ''
@@ -515,7 +484,7 @@ export async function render(root, ctx, opts = {}) {
     const invalid = res.jobs || [];
     if (invalid.length === 0) {
       box.innerHTML = '<div class="card"><span class="badge success">没有失效任务</span>'
-        + '<p class="hint" style="margin-top:var(--sp-2)">所有面板任务的插件与处理函数都还在。</p></div>';
+        + '<p class="hint" style="margin-top:var(--sp-2)">所有面板任务的插件与任务名都还在。</p></div>';
       return;
     }
 
@@ -637,7 +606,14 @@ export async function render(root, ctx, opts = {}) {
             ? '面板创建的任务：删掉就没了，运行历史一起消失，要重建得重新填表达式。'
             : '插件代码声明的任务：删掉后不再运行，但会留在列表底部，随时可以恢复。',
         okText: '删除',
-        risk: RISK.LOSS,
+        // 面板任务真删（不可逆）；插件代码 / 目录任务只是立墓碑 / 停调度，可恢复。
+        risk: isScript
+          ? source === 'script-panel'
+            ? RISK.LOSS
+            : RISK.PAUSE
+          : source === 'panel'
+            ? RISK.LOSS
+            : RISK.PAUSE,
       },
       pause: {
         question: `暂停任务 \`${name}\`？`,

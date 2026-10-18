@@ -15,16 +15,55 @@ const TIMEOUT_MS = 15000;
 const PANEL_HEADER = { 'x-panel': '1' };
 
 /**
+ * 插件页面的 origin（安全审计 H1）。
+ *
+ * 为什么需要它：插件页面必须与面板**不同源**，否则同源 iframe 里的插件 JS
+ * 能直接读 `parent` 并带着会话调面板接口 —— QuickJS 的文件围栏就被绕过了。
+ * 后端在第二个端口上只服务 `/plugins/**` 与插件自己的路由（见 main.rs
+ * 的 `bind_plugin_ui`），这里负责把 iframe/链接拼到那个 origin 上。
+ *
+ * 两个来源，优先级从高到低：
+ *   1. `plugin_ui_origin`：显式配置（反代场景，后端 `PLUGIN_UI_ORIGIN`）
+ *   2. `plugin_ui_port`：按 `location.hostname` + 端口推导，局域网 IP 访问也对
+ * 两者都没有 ⇒ 返回相对路径（隔离未启用，行为与加这个功能之前一致）。
+ */
+let pluginUiBase = '';
+
+/** app.js 每次拿到 `/api/state` 后调它。 */
+export function setPluginUiOrigin(origin, port) {
+  if (origin) {
+    pluginUiBase = String(origin).replace(/\/+$/, '');
+  } else if (port) {
+    // 必须和面板用同一个 hostname：插件 UI 的 iframe 要带上面板的会话 cookie，
+    // 而且后端 CSP 的 frame-src 也是按启动地址生成的。把 localhost 换成
+    // 127.0.0.1 会被 CSP 挡掉（并丢掉 cookie）。
+    pluginUiBase = `${location.protocol}//${location.hostname}:${port}`;
+  } else {
+    pluginUiBase = '';
+  }
+}
+
+/** 把 `/plugins/...` 拼成插件 origin 上的绝对地址（未启用隔离时原样返回）。 */
+export function pluginUiUrl(path) {
+  // 插件声明的 `nav.path` 可能是完整的绝对 URL：那种情况不拼前缀。
+  if (/^(https?:)?\/\//i.test(path)) return path;
+  return pluginUiBase + path;
+}
+
+/**
  * 统一请求。
  * @param {string} url
- * @param {{method?: string, body?: any, panel?: boolean, timeout?: number}} [opts]
+ * @param {{method?: string, body?: any, form?: FormData, panel?: boolean, timeout?: number}} [opts]
  */
 async function request(url, opts = {}) {
-  const { method = 'GET', body, panel = false, timeout = TIMEOUT_MS } = opts;
+  const { method = 'GET', body, form, panel = false, timeout = TIMEOUT_MS } = opts;
 
   const headers = {};
   const init = { method, headers, credentials: 'same-origin' };
-  if (body !== undefined) {
+  if (form !== undefined) {
+    // 让浏览器自己带 multipart boundary，不能手动设 content-type。
+    init.body = form;
+  } else if (body !== undefined) {
     headers['content-type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -128,6 +167,32 @@ export function runJs(code, input, context) {
   return runSnippet('js', code, input, context);
 }
 
+// ---------------------------------------------------------------- 上传
+
+/**
+ * 上传单个文件或 zip 到插件目录 / 任务目录。
+ *
+ * 后端：`POST /api/plugins/upload` / `POST /api/tasks/upload`
+ * 表单字段：`file`（必需）、`overwrite`（可选，默认 true）。
+ * zip 会解压并保留内部路径；单文件按扩展名落到 `js/` / `py/` / `sh/`。
+ *
+ * @param {'plugins'|'tasks'} kind
+ * @param {File} file
+ * @param {{overwrite?: boolean}} [opts]
+ */
+export function uploadFile(kind, file, opts = {}) {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  if (opts.overwrite === false) form.append('overwrite', '0');
+  return request(`/api/${kind}/upload`, {
+    method: 'POST',
+    panel: true,
+    form,
+    // 上传可能比普通 API 慢：给 60 秒，别让大 zip 被 15 秒超时截断。
+    timeout: 60000,
+  });
+}
+
 // ---------------------------------------------------------------- 任务定义
 
 export function createJob(plugin, name, expr) {
@@ -135,11 +200,13 @@ export function createJob(plugin, name, expr) {
 }
 
 /// `expr = null` 表示**撤销覆盖**：让插件代码声明的任务的频率回到代码里的值。
-export function editJob(plugin, name, expr) {
+export function editJob(plugin, name, expr, opts = {}) {
+  const body = { expr };
+  if (opts.lead_ms !== undefined) body.lead_ms = opts.lead_ms;
   return request(`/api/jobs/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}/edit`, {
     method: 'POST',
     panel: true,
-    body: { expr },
+    body,
   });
 }
 

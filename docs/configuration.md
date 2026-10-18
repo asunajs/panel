@@ -40,17 +40,25 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系 |
 | `PANEL_ALLOW_PLAIN_TOKEN` | 空 | **开发口子**：允许「明文 / 旧哈希」形态启动（线上那份是明文口令）。绑非回环地址或开了 `PANEL_COOKIE_SECURE` 时仍然拒绝启动；开着时每次启动打 warn，面板读数里 `auth.plain_token` 为真。见 [§21](security.md#21-口令不再经过服务端第二十一轮) |
 | `PANEL_COOKIE_SECURE` | 空 | `1`/`true`/`yes`/`on` → 会话 cookie 加 `Secure`。**走反代加了 TLS 时才开**（纯 HTTP 下开了 cookie 存不下来） |
-| `PANEL_TRUST_PROXY` | 空 | `1`/`true`/`yes`/`on` → **信任** `X-Forwarded-For` / `X-Real-IP`，取**最右一跳**当客户端 IP。**默认不信** —— 那些头客户端可以随便写，默认信就等于退避可被绕过（见 [§20](security.md#20-防爆破第二十轮)） |
-| `PANEL_ALLOW_IPS` | 空 | 登录**蜜罐封禁**的白名单：`127.0.0.1,192.168.1.7`。**只认单个 IP** —— 网段与主机名会在启动日志里点名为「已忽略」。只豁免封禁，口令错了照样拒；反代下建议配上（全员共用一个来源 IP，它被封等于谁都进不来） |
+| `PANEL_TRUST_PROXY` | 空 | 兼容开关：`1`/`true`/`yes`/`on` → **只信任回环**（`127.0.0.1` / `::1`）对端提供的 `X-Forwarded-For` / `X-Real-IP`。反代不在本机时请改用 `PANEL_TRUSTED_PROXIES`（见下一行） |
+| `PANEL_TRUSTED_PROXIES` | 空 | **受信代理地址名单**（逗号分隔，单个 IP）：只有这些对端提供的转发头会被读取，取**最右一跳**当客户端 IP。推荐写法（比 `PANEL_TRUST_PROXY` 精确）：`127.0.0.1,::1`。不在名单里的对端一律用它对端地址记账 —— 直连 8787 也没法伪造 XFF |
+| `PANEL_ALLOW_IPS` | 空 | 登录**蜜罐封禁**的白名单：`127.0.0.1,192.168.1.7`。**只认单个 IP**（IPv4-mapped 写法会归一化）—— 网段与主机名会在启动日志里点名为「已忽略」。豁免封禁**与退避**，口令错了照样拒；反代下建议配上（全员共用一个来源 IP，它被封等于谁都进不来） |
+| `HOST_API_ALLOW_PRIVATE` | 空 | `1` → 关闭插件出站请求的 **SSRF 防护**（允许 `http_fetch` / `ws_open` 访问回环与云元数据）。默认允许局域网、只拦回环 + 链路本地，见 [host-api.md](host-api.md#出站目标的限制ssrf-防护)。关掉会打 warn |
 | `PANEL_JITTER_SEED` | 空 | 抖动的**可复现**开关：`种子 + 理论时刻` 的确定函数。排障用；`@every` 跨重启不可复现 |
+| `PLUGIN_UI` | 开 | `0`/`false`/`no`/`off` → **关掉插件页面隔离**（插件页回到与面板同源）。安全审计 H1：同源 iframe 不隔离，插件页能带着会话调面板接口 —— 关之前先确认你知道代价 |
+| `PLUGIN_UI_ADDR` | 主端口 +1 | 插件页面监听的 `ip:port`。默认取 `BIND_ADDR` 的 IP 与 `端口+1`；`BIND_ADDR` 是 `0.0.0.0` 时**必须显式设**（否则无法推导 origin，会回退到同源并 warn） |
+| `PLUGIN_UI_ORIGIN` | 空 | 浏览器看到的插件 origin，如 `https://plugins.example.com`。**反代 + TLS 时必须设**：内部仍绑 `PLUGIN_UI_ADDR`，对外由反代转到它。不设时前端按 `location.hostname + 端口` 推导 |
 | `TEST_RUN_BURST` / `TEST_RUN_REFILL_MS` | `10` / `1000` | 测试运行的令牌桶（见 [§16.16](changelog/14-15-throughput-and-editing.md#1616-apitest-限流)） |
 | `TEST_RUN_MAX_PENDING` | `2` | 同时在排队 / 执行的测试数上限。**这才是保护引擎的那道闸**；`0` 等于关掉测试运行 |
-| `ENGINE_WORKERS` | `2` | 执行线程数。`1` 退回单线程。见 [§16.18](changelog/14-15-throughput-and-editing.md#1618-worker-池已实施engine_workers-默认-2)。插件声明 `worker_hint('exclusive')` 时**自动抬到够用**（只抬不降） |
+| `TOKIO_WORKER_THREADS` | `min(2, 核数)` | tokio 的 worker 线程数。1 核老机器默认 1 条，2 核及以上 2 条 |
+| `ENGINE_WORKERS` | `min(2, 核数)` | 执行线程数。1 核老机器默认 1 条；`1` 退回单线程。见 [§16.18](changelog/14-15-throughput-and-editing.md#1618-worker-池已实施engine_workers-默认-2)。插件声明 `worker_hint('exclusive')` 时**自动抬到够用**（只抬不降） |
 | `ENGINE_PIN` | 空 | `插件:worker,插件:worker` 手工指定归属，覆盖「细粒度→精度线程」的启发式与插件自己的 `worker_hint` |
 | `PANEL_LOG_DIR` | `logs` | **插件日志落盘目录**（JSONL，按天切、留 7 天）。面板自己的日志**不落盘**（systemd/journald 已经收了），见 [§21](logging.md#21-日志插件级与面板级两条通道第二十四轮) |
 | `PANEL_LOG_LEVEL` | `debug` | 面板自身日志的最低级别（`debug`/`info`/`warn`/`error`/`fatal`）。插件日志的级别闸在插件自己那边，不受它影响 |
 | `PLUGIN_DATA_DIR` | `<DB 所在目录>/plugin-data` | **插件/脚本的数据根**：`<这里>/<插件名>/` 就是 QuickJS 插件在 `node:fs` 里看到的 `/`；脚本数据在 `<这里>/__script__/<任务名>/`。刻意不在插件目录里（那里会被当静态目录服务出去）。见 [§22](plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮) |
 | `WEB_DEV_DIR` | 空 | **开发用**：设了就从这个目录读主面板前端（每次请求都读），改一行 CSS/JS 刷新浏览器即可，不用 `cargo build`。生产别设 |
+| `PLUGIN_WATCH` | `1` | **半被动刷新**：用文件系统事件（inotify/FSEvents/ReadDirectoryChangesW）监听插件目录和任务目录，事件后 200ms 去抖再 `Wake` 引擎。`0`/`off` 退回纯轮询。监听失败会自动退回轮询 |
+| `PLUGIN_SCAN_MS` | `30000` | 没有事件时的兜底扫描间隔（毫秒，下限 1000）。有 watcher 时事件会强制立刻扫描；这个值只防“漏事件” |
 | `PLUGIN_LAZY` | `1` | **惰性加载**：没有路由、也没有 `on_tick` 的插件闲下来就卸出内存，下次触发前提前装回来（见 [lazy-plugins.md](lazy-plugins.md)）。外部插件卸载 = 杀子进程，RSS 真的会掉。`0`/`off`/`false`/`no` 关掉 |
 | `PLUGIN_IDLE_EVICT_MS` | `120000` | 闲置多久之后卸出内存。**下限 20 秒**（= 2 × 加载预算）；**必须大于** `PLUGIN_PRELOAD_MS`（配反了会自动夹住并打日志） |
 | `PLUGIN_PRELOAD_MS` | `20000` | 触发前多久把它装回来。至少会被抬到一次加载的预算（10s） |

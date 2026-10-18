@@ -1,0 +1,41 @@
+# cargo-deny 配置（安全审计 中14）
+#
+# 为什么需要它：2026-10 的审计里，`Cargo.lock` 曾有 3 个包命中 8 条公告
+# （rustls / zip / openssl）。当时逐条论证过「不可达」，但那是**这一版代码**的
+# 性质，不是依赖树的性质 —— 只要有人：
+#   · 给 rustls 加一个自定义 `ClientSessionStore`（DEBUG 泄漏那条就活了），
+#   · 给 Cargo.toml 加 `brotli` feature（1 GiB 分配那条就活了），
+#   · 把 `upload.rs` 换成 `ZipArchive::extract()`（zip 三条就活了），
+# 公告就会从「不可达」变成「可达」，而没有任何机制会提醒你。
+#
+# 现状：那 8 条已随依赖升级清掉（见下面 ignore 的注释），当前 0 命中。
+# 用法：`cargo deny check`（CI 的 `advisories` job 会跑）。
+
+[advisories]
+# yanked 包一律拒绝：被撤回的版本通常意味着作者发现了严重问题。
+yanked = "deny"
+
+# 已逐条论证为**不可达**的公告。每条都必须在这里写清理由，
+# 并且**在代码/依赖形态变化时回来复核**。
+ignore = [
+    # 2026-10-18：这里的 8 条已经**全部清空** —— rustls 0.23.45→0.23.46、
+    # openssl 0.10.79→0.10.80（含 openssl-sys）、zip 2.6.1→9.0.5 之后，
+    # 对 245 个 registry 包重跑 OSV 的逐版本查询是 **0 命中**。
+    #
+    # 以后再加条目，必须写清「为什么本仓库不可达」以及「什么改动会让它变可达」。
+]
+
+[sources]
+# 只允许 crates.io。本项目 0 个 git 依赖，这条防止有人顺手加一个。
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[bans]
+# 同一个 crate 的多份版本：默认只警告（有些传递依赖没法立刻收敛）。
+multiple-versions = "warn"
+# 这些 crate 不该出现在依赖树里。
+deny = []
+
+[licenses]
+# 允许的许可证：本项目自身 MIT/Apache-2.0，依赖以这两个为主。
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0", "CC0-1.0", "Unlicense", "OpenSSL"]

@@ -46,6 +46,8 @@ mod scheduler;
 mod scriptjob;
 mod smtp;
 mod taskdir;
+mod upload;
+mod watcher;
 mod web;
 mod workers;
 mod wsclient;
@@ -66,8 +68,14 @@ use std::time::{Duration, Instant};
 ///
 /// 默认 `#[tokio::main]` 会按 CPU 核数开 worker（开发机 10 核 → 10 个线程）。
 /// 低配 ARM 盒子通常只有 1-2 核，开一堆 worker 纯属浪费内存和调度开销。
-/// 这里默认 2，用 `TOKIO_WORKER_THREADS` 覆盖。
-const DEFAULT_WORKER_THREADS: usize = 2;
+/// 默认取 `min(2, 可用核数)`：1 核老机器只开 1 条，2 核及以上仍是 2 条；
+/// 用 `TOKIO_WORKER_THREADS` 覆盖。
+fn default_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 2)
+}
 
 /// 测试运行的限流默认值（见 `src/ratelimit.rs`）。
 ///
@@ -101,14 +109,27 @@ pub struct AppState {
     /// 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
     /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
-    /// 反代模式下（`PANEL_TRUST_PROXY=1`）客户端 IP 从转发头里取，见 web.rs 的 `client_ip`。
+    /// 反代模式下客户端 IP 从转发头里取，但**只有受信代理**的对端才允许提供转发头。
     pub auth: Arc<Auth>,
-    /// 反代模式下从 `X-Forwarded-For` / `X-Real-IP` 取真实客户端 IP（默认**不信任**）
-    pub trust_proxy: bool,
+    /// 哪些对端地址被允许提供 `X-Forwarded-For` / `X-Real-IP`（默认**空** = 谁都不信）。
+    ///
+    /// 安全审计 中1：原来是一个全局布尔开关，对**任何** TCP 对端生效 ——
+    /// 面板端口只要还能被直连，攻击者绕过反代就能自己填 XFF。
+    pub trusted_proxies: Arc<auth::TrustedProxies>,
     /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
     pub test_limiter: Arc<TestRunLimiter>,
     /// 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
     pub assets: assets::Assets,
+    /// 插件页面的**独立 origin**（安全审计 H1）。
+    ///
+    /// `plugin_ui_port` 是第二个监听的端口：`Some` = 隔离已启用，前端用
+    /// `location.hostname` + 这个端口拼出 iframe 地址（这样局域网 IP 访问也正确）。
+    /// `plugin_ui_origin` 是显式覆盖（反代场景），优先级高于端口推导。
+    /// 两个都是 `None` = 回退到同源（启动日志里会 warn）。
+    pub plugin_ui_port: Option<u16>,
+    pub plugin_ui_origin: Option<String>,
+    /// 当前打开的日志流（SSE）条数，用来卡上限（安全审计 L11）。
+    pub sse_active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn main() {
@@ -148,7 +169,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let workers = env_usize("TOKIO_WORKER_THREADS", DEFAULT_WORKER_THREADS);
+    let workers = env_usize("TOKIO_WORKER_THREADS", default_worker_threads());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
@@ -200,17 +221,42 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let kind = cred.kind();
-    // 反代模式：开了才从转发头取客户端 IP。默认不信 —— 那些头客户端可以随便写，
-    // 默认信就等于「退避用伪造 IP 就能绕过」。开了会打一条日志（它改变安全语义，
-    // 运维必须能确认自己开没开）。
-    let trust_proxy = env_flag("PANEL_TRUST_PROXY");
-
-    if trust_proxy {
+    // 反代模式：只有**受信代理**转来的请求才读 `X-Forwarded-For` / `X-Real-IP`。
+    // 那些头客户端可以随便写，所以「信谁」必须是一份地址名单，而不是一个全局开关
+    // （安全审计 中1：`PANEL_TRUST_PROXY=1` 对任何对端生效，直连即可伪造）。
+    //
+    //   PANEL_TRUSTED_PROXIES=127.0.0.1,::1     显式名单（推荐）
+    //   PANEL_TRUST_PROXY=1                     兼容模式 = **只信回环**（反代同机部署）
+    let (tproxy_list, tproxy_bad) = auth::parse_allow_ips(&env_str("PANEL_TRUSTED_PROXIES", ""));
+    let trusted_proxies = if !tproxy_list.is_empty() {
+        let list = auth::TrustedProxies::new(tproxy_list);
+        if !tproxy_bad.is_empty() {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "PANEL_TRUSTED_PROXIES 里这些不是单个 IP，已忽略: {}",
+                tproxy_bad.join(", ")
+            );
+        }
+        list
+    } else if env_flag("PANEL_TRUST_PROXY") {
+        crate::log::plog!(
+            "boot",
+            warn,
+            "PANEL_TRUST_PROXY=1：只信任**回环**对端（127.0.0.1 / ::1）提供的转发头。\
+             反代不在本机时请改用 PANEL_TRUSTED_PROXIES=<反代地址>，否则转发头会被忽略、\
+             所有请求按反代地址记账（安全审计 中1）"
+        );
+        auth::TrustedProxies::loopback()
+    } else {
+        auth::TrustedProxies::default()
+    };
+    if !trusted_proxies.is_empty() {
         crate::log::plog!(
             "boot",
             info,
-            "反代模式：客户端 IP 取自 X-Forwarded-For / X-Real-IP 的**最右一跳**\n\
-             \x20       （只在反代确实会覆盖这个头时才开 —— 否则退避可以被伪造 IP 绕过）"
+            "受信代理: {}（只有这些对端能提供 X-Forwarded-For / X-Real-IP）",
+            trusted_proxies.render()
         );
     }
 
@@ -258,7 +304,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---------- 1. SQLite：开库 + 建表 ----------
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let db = db::open(&db_path)?;
     // 后面要交给外部进程/脚本的路径必须是绝对的：它们的工作目录是插件数据目录
@@ -334,6 +380,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::create_dir_all(&plugin_data_dir)?;
     let plugin_data_dir = plugin_data_dir.canonicalize()?;
+    // 插件数据目录里放的是插件自己落的 token/状态（见 pluginfs.rs），收紧到 0700。
+    ensure_private_dir(&plugin_data_dir)?;
     // 外部运行时 shim 的落盘目录（Node runner / host-api；不含 Python）。
     let runtime_dir = env_path(
         "PANEL_RUNTIME_DIR",
@@ -346,6 +394,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::create_dir_all(&runtime_dir)?;
     let runtime_dir = runtime_dir.canonicalize()?;
+    // 运行时 shim 是面板自己写进去的，不该给同机其它用户留写入口。
+    ensure_private_dir(&runtime_dir)?;
     let runtime_paths = runtimefs::RuntimePaths::ensure(&runtime_dir)
         .map_err(|e| format!("落盘外部运行时 shim 到 {} 失败: {e}", runtime_dir.display()))?;
     let catalog = std::sync::Arc::new(runtimes::RuntimeCatalog::detect());
@@ -363,7 +413,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         catalog.clone(),
         plugins_dir.clone(),
         plugin_data_dir,
-        tasks_dir,
+        tasks_dir.clone(),
         wsclient::Registry::new(tokio::runtime::Handle::current()),
     );
 
@@ -377,6 +427,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let health = engine.health();
     let engine_handle = engine.handle();
+
+    // 半被动：文件系统事件负责“快”，worker 0 的兜底扫描负责“不漏”。
+    // 环境变量 PLUGIN_WATCH=0 可退回纯轮询。
+    let watch_on = std::env::var("PLUGIN_WATCH")
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    if watch_on {
+        let paths = vec![plugins_dir.clone(), tasks_dir.clone()];
+        if let Err(e) = crate::watcher::spawn(engine_handle.clone(), paths) {
+            crate::log::plog!(
+                "watcher",
+                warn,
+                "文件系统监听启动失败，退回轮询（最多 30 秒发现变化）: {e}"
+            );
+        }
+    } else {
+        crate::log::plog!("watcher", info, "PLUGIN_WATCH=0：文件变化走轮询");
+    }
 
     // ---------- 4. tick 循环：tokio interval → 引擎线程 → 插件 on_tick() ----------
     let tick_tx = engine.handle();
@@ -397,7 +470,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // Rust → JS：投递一次 tick。引擎线程是阻塞消费的，send 本身不阻塞。
             // 广播：每条 worker 都要给**自己负责的插件**派 on_tick
-            if !tick_tx.broadcast(EngineCmd::Tick { seq, ts: ts.clone() }) {
+            if !tick_tx.broadcast_tick(EngineCmd::Tick { seq, ts: ts.clone() }) {
                 crate::log::plog!("tick", info, "引擎线程已退出，停止 tick 循环");
                 break;
             }
@@ -438,6 +511,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => Assets::embedded(),
     };
 
+    // ---------- 6.9 插件页面的独立 origin（安全审计 H1）----------
+    //
+    // 在**主监听之前**绑定：这样 origin 字符串能直接写进 AppState，
+    // 而 `/api/state` 是前端拼 iframe 地址时唯一的信息来源。
+    // 绑定失败不致命 —— 回退到同源，但一定要在启动日志里说清楚风险，
+    // 不能"看起来配好了、实际没隔离"。
+    let (plugin_ui_listener, plugin_ui_port, plugin_ui_origin) = bind_plugin_ui(addr).await;
+
     // ---------- 7. Axum ----------
     let state = AppState {
         started,
@@ -453,8 +534,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         host,
         engine: engine_handle,
         auth: Arc::new(Auth::new(cred, cookie_secure).allow_ips(allow_ips)),
-        trust_proxy,
+        trusted_proxies: Arc::new(trusted_proxies),
         assets,
+        plugin_ui_port,
+        plugin_ui_origin,
+        sse_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         test_limiter: Arc::new(TestRunLimiter::new(
             env_usize("TEST_RUN_BURST", DEFAULT_TEST_RUN_BURST) as u32,
             env_usize("TEST_RUN_REFILL_MS", DEFAULT_TEST_RUN_REFILL_MS) as u64,
@@ -469,6 +553,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     crate::log::plog!("boot", info, "Web UI: http://{addr}/");
     crate::log::plog!("boot", info, "按 Ctrl-C 退出");
+
+    // 插件页面的第二个监听。它**只**服务插件页面与插件路由，没有面板 API ——
+    // 这正是「插件页面读不到面板会话」的实现方式（安全审计 H1）。
+    // 它不参与优雅关停：进程退出时内核会一并回收；SSE/长连接只在主监听上。
+    if let Some(ui_listener) = plugin_ui_listener {
+        let ui_state = state.clone();
+        tokio::spawn(async move {
+            let r = axum::serve(
+                ui_listener,
+                web::plugin_ui_router(ui_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+            if let Err(e) = r {
+                crate::log::plog!("boot", error, "插件 UI origin 的监听退出: {e}");
+            }
+        });
+    }
 
     // into_make_service_with_connect_info: 让 handler 能拿到对端地址
     // —— 登录退避按来源 IP 计数、审计日志要记是谁登的，都得靠它。
@@ -584,9 +686,16 @@ fn now_secs() -> String {
 /// `--legacy` 生成**旧形态**（`$argon2id$...`，哈希的是口令本身）。那个形态下
 /// 口令仍然要经过服务端，只在开发口子里能用 —— 留着它是为了能测到"部署闸拒绝"。
 ///
+/// `--print-digest` 额外把**摘要**（`X-Panel-Token` 那个值）打到 stdout。
+/// 安全审计 L8：摘要是**可重放的凭据**，默认绝不能落到 stderr —— 运维把
+/// stderr 重定向进 journald/CI 日志是常态，那样一个令牌就落盘了。
+/// 而 stdout 的第一行必须**永远只有哈希**：`HASH=$(... hash-token)` 和
+/// `scripts/smoke.py` 都依赖这个契约，多一行就被当成非法 PHC。
+///
 /// 哈希是**单向**的：忘了口令只能重新生成（等于换口令），没法从哈希反推。
 fn hash_token_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let legacy = args.iter().any(|a| a == "--legacy");
+    let print_digest = args.iter().any(|a| a == "--print-digest");
     let arg = args.iter().find(|a| !a.starts_with("--"));
     let password = match arg {
         Some(t) => t.to_string(),
@@ -607,8 +716,8 @@ fn hash_token_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         auth::hash_token(password)?
     };
     let digest = auth::password_digest(password);
-    // 哈希进 stdout（好让 `HASH=$(... | plugin-panel hash-token)` 拿到干净的值），
-    // 说明进 stderr。
+    // 哈希进 stdout 的**第一行**（好让 `HASH=$(... | plugin-panel hash-token)`
+    // 与 smoke 拿到干净的值），说明进 stderr。
     println!("{hash}");
     eprintln!();
     if legacy {
@@ -622,9 +731,16 @@ fn hash_token_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  echo '{hash}' > /etc/plugin-panel.hash");
     eprintln!("  export PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash");
     eprintln!();
-    eprintln!("脚本 / CI 用这个当 `X-Panel-Token`（它是**摘要**，不是口令）：");
-    eprintln!("  {digest}");
-    eprintln!();
+    if print_digest {
+        // 审计 L8：可重放的凭据只走 stdout（且必须显式要），并当场说清它的分量。
+        println!("# ⚠ 下面这串**等价于口令**（`X-Panel-Token` 直接用它），只显示这一次，别贴进工单。");
+        println!("{digest}");
+    } else {
+        eprintln!("脚本 / CI 要的那个摘要（`X-Panel-Token` 的值）默认**不打印**：");
+        eprintln!("它等价于口令，而 stderr 常被重定向进日志。要用就显式要：");
+        eprintln!("  plugin-panel hash-token --print-digest    # 只打到 stdout，且只显示这一次");
+        eprintln!();
+    }
     eprintln!("注意：哈希是单向的，忘了口令只能重新生成一个（等于换口令）。");
     Ok(())
 }
@@ -662,6 +778,7 @@ fn print_usage() {
     println!("  plugin-panel hash-token [口令]    生成 PANEL_TOKEN_HASH（prehash1:…，口令从标准输入读更安全）");
     println!("  plugin-panel build-info           打印这个二进制编进了什么（JSON；发布前校验用）");
     println!("  plugin-panel hash-token --legacy  旧形态（口令要经过服务端，只给开发口子用）");
+    println!("  plugin-panel hash-token --print-digest  额外打印摘要（等价于口令，只显示这一次，走 stdout）");
     println!("  plugin-panel digest [口令]        只打印口令摘要（脚本当 X-Panel-Token 用）");
     println!("  plugin-panel --help              看这段说明");
     println!();
@@ -789,6 +906,113 @@ fn env_flag(key: &str) -> bool {
 
 fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// 建目录并尽量收紧到 `0700`（安全审计 中7）。
+///
+/// 这些目录里放的是面板的数据库、插件的落盘状态、外部运行时 shim ——
+/// 同机低权用户能读 `data/panel.db` 就等于能读全部任务 payload 与运行记录。
+/// 非 Unix 上没有这套权限位，直接跳过。
+fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 失败不算致命：某些文件系统（FAT / 网络盘）不支持 POSIX 权限位。
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// 绑定插件页面的**独立 origin**（安全审计 H1）。
+///
+/// 返回 `(监听, 端口, 显式 origin)`。任何一步失败都返回 `(None, None, None)` ——
+/// 面板照常启动，插件页面回退到同源（功能不变，但隔离失效，所以要 warn）。
+///
+/// 为什么默认是「主端口 + 1」而不是一个写死的端口：面板可以 `BIND_ADDR=...8790`
+/// 换端口，插件 origin 必须跟着走，否则两个实例会抢同一个插件端口。
+///
+/// 三个环境变量：
+/// - `PLUGIN_UI=0|false|no|off` —— 显式关掉隔离（回到同源，自担风险）
+/// - `PLUGIN_UI_ADDR=ip:port` —— 显式指定绑定地址
+/// - `PLUGIN_UI_ORIGIN=https://...` —— 显式指定**浏览器看到**的 origin。
+///   反代场景必须用它：内部绑 `127.0.0.1:8788`，对外要让浏览器访问
+///   `https://plugins.example.com`（反代到 8788）。不设就按绑定地址拼 `http://…`。
+async fn bind_plugin_ui(
+    main_addr: std::net::SocketAddr,
+) -> (Option<tokio::net::TcpListener>, Option<u16>, Option<String>) {
+    if let Ok(v) = std::env::var("PLUGIN_UI") {
+        if matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ) {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "PLUGIN_UI 显式关闭：插件页面与面板**同源**，插件页的 JS 能读到面板会话并调用面板接口（安全审计 H1）"
+            );
+            return (None, None, None);
+        }
+    }
+
+    let bind_addr = match std::env::var("PLUGIN_UI_ADDR") {
+        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<std::net::SocketAddr>() {
+            Ok(a) => a,
+            Err(e) => {
+                crate::log::plog!(
+                    "boot",
+                    error,
+                    "PLUGIN_UI_ADDR={:?} 不是合法的 ip:port（{e}）⇒ 插件页面回退到同源",
+                    s.trim()
+                );
+                return (None, None, None);
+            }
+        },
+        _ => {
+            // 0.0.0.0 / :: 没法推导出"浏览器该访问哪个地址"，让运维显式配。
+            if main_addr.ip().is_unspecified() {
+                crate::log::plog!(
+                    "boot",
+                    warn,
+                    "监听 {} 时无法自动推导插件 origin ⇒ 插件页面回退到与面板同源。\
+                     设置 PLUGIN_UI_ADDR=127.0.0.1:8788（反代再加 PLUGIN_UI_ORIGIN=https://…）来启用隔离",
+                    main_addr
+                );
+                return (None, None, None);
+            }
+            match main_addr.port().checked_add(1) {
+                Some(port) => std::net::SocketAddr::new(main_addr.ip(), port),
+                None => return (None, None, None),
+            }
+        }
+    };
+
+    match tokio::net::TcpListener::bind(bind_addr).await {
+        Ok(l) => {
+            let explicit = std::env::var("PLUGIN_UI_ORIGIN")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty());
+            let shown = explicit
+                .clone()
+                .unwrap_or_else(|| format!("http://{bind_addr}"));
+            crate::log::plog!(
+                "boot",
+                info,
+                "插件页面 origin: {shown}（监听 {bind_addr}；与面板不同源 ⇒ 插件页读不到面板会话）"
+            );
+            (Some(l), Some(bind_addr.port()), explicit)
+        }
+        Err(e) => {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "插件 UI 独立 origin 绑定 {bind_addr} 失败（{e}）⇒ 插件页面回退到与面板**同源**，\
+                 隔离未生效（安全审计 H1）。换端口用 PLUGIN_UI_ADDR=127.0.0.1:8788"
+            );
+            (None, None, None)
+        }
+    }
 }
 
 fn env_path(key: &str, default: &str) -> PathBuf {
