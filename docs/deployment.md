@@ -54,7 +54,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | `plugin-panel-armv7-linux-musleabihf` | 32 位 ARM：armv7l、老树莓派、部分电视盒子 |
 | `plugin-panel-x86_64-linux-musl` | PC、VPS、开发机 |
 
-两个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
+三个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
 
 ⚠ **外部运行时不在二进制里**：QuickJS 插件开箱即用；要切 Node / Bun 插件得在目标机
 装 Node >= 20.6 / Bun >= 1.0（或用 `PANEL_NODE` / `PANEL_BUN` 指路径）。`.py` 脚本需要
