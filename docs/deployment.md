@@ -50,7 +50,8 @@ git tag v0.1.0 && git push origin v0.1.0
 
 | 产物 | 适用设备 |
 |---|---|
-| `plugin-panel-aarch64-linux-musl` | 旧手机（Termux）、ARM 盒子、树莓派 3/4/5 |
+| `plugin-panel-aarch64-linux-musl` | 64 位 ARM：旧手机（Termux）、ARM 盒子、树莓派 3/4/5 |
+| `plugin-panel-armv7-linux-musleabihf` | 32 位 ARM：armv7l、老树莓派、部分电视盒子 |
 | `plugin-panel-x86_64-linux-musl` | PC、VPS、开发机 |
 
 两个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。

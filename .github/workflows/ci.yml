@@ -94,6 +94,52 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
+  # 32 位 ARM：armv7l（老树莓派、电视盒子、部分 Termux 设备）
+  #
+  # GitHub 没有 armv7 原生 runner，用 cross 的 Docker 交叉工具链构建。
+  # 只做「能编、静态链接、能在 qemu 里启动」三件事；完整冒烟仍在 x86_64 上跑。
+  # ------------------------------------------------------------------
+  linux-armv7:
+    name: Linux armv7（静态）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 cross
+        run: cargo install cross --locked
+
+      - name: 构建
+        run: |
+          cross build --release --target armv7-unknown-linux-musleabihf \
+            --features legacy-tls-vendored
+
+      - name: 安装 qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: 校验（ARM + 静态 + 能启动）
+        run: |
+          BIN=target/armv7-unknown-linux-musleabihf/release/plugin-panel
+          file "$BIN"
+          file "$BIN" | grep -qiE "ARM|armv7"
+          file "$BIN" | grep -qiE "statically linked|static-pie linked"
+          if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "::error::$BIN 有动态库依赖"
+            readelf -d "$BIN" | grep "NEEDED"
+            exit 1
+          fi
+          qemu-arm-static "$BIN" build-info
+
+  # ------------------------------------------------------------------
   # Windows x86_64：外部运行时是 Unix-only，但 QuickJS 必须照常可用
   #
   # 这里只做「能编译 + 能链接 release」的闸门：冒烟脚本依赖 Unix 的

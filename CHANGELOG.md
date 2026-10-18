@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.3
+
+- 增加 `armv7l` / `armhf`（32 位 ARM）支持，发布 `plugin-panel-armv7-linux-musleabihf`。
+- `install.sh` 会自动识别 `armv7l`、`armv7`、`armhf`，下载对应产物。
+- 适用于老树莓派、部分电视盒子和 32 位 Termux 设备。
+- 仍然使用静态 musl 构建，不需要目标机安装 libc 或 OpenSSL。
+
 ## 0.1.2
 
 这一版主要改了插件和任务的使用方式。

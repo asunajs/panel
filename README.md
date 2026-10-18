@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.1.2**。设置页可以直接看到正在运行的面板版本。
+当前版本：**0.1.3**。设置页可以直接看到正在运行的面板版本。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
@@ -52,7 +52,8 @@ PANEL_BASE_URL=https://你的镜像地址/plugin-panel bash install.sh
 
 到 [Releases](https://github.com/asunajs/panel/releases) 下载：
 
-- ARM 盒子、树莓派、手机：`plugin-panel-aarch64-linux-musl`
+- 64 位 ARM（ARM 盒子、树莓派 3/4/5、手机）：`plugin-panel-aarch64-linux-musl`
+- 32 位 ARM（armv7l、老树莓派、部分电视盒子）：`plugin-panel-armv7-linux-musleabihf`
 - 普通电脑、VPS：`plugin-panel-x86_64-linux-musl`
 
 下载后改个名字，加上执行权限：

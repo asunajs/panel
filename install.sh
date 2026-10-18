@@ -7,7 +7,8 @@
 # 做四件事：检测架构 → 下载对应产物 → 强制校验（SHA256 + ELF 自检）→ 装进 PATH。
 #
 # 支持的平台：
-#   aarch64 / arm64  → 旧手机（Termux）、ARM 盒子、树莓派 3/4/5
+#   aarch64 / arm64  → 64 位 ARM：旧手机（Termux）、ARM 盒子、树莓派 3/4/5
+#   armv7l / armhf   → 32 位 ARM：树莓派 2、老盒子、部分电视盒子
 #   x86_64  / amd64  → 普通 PC、VPS、开发机
 #
 # 环境变量：
@@ -49,8 +50,9 @@ esac
 
 case "$(uname -m)" in
     aarch64|arm64) ARCH=aarch64 ;;
+    armv7l|armv7|armhf) ARCH=armv7 ;;
     x86_64|amd64)  ARCH=x86_64 ;;
-    *) die "不支持的架构: $(uname -m)（本项目只出 aarch64 和 x86_64 产物）" ;;
+    *) die "不支持的架构: $(uname -m)（本项目出 aarch64、armv7 和 x86_64 产物）" ;;
 esac
 
 # 只发 Linux 静态产物 —— 静态链接意味着不挑发行版、不挑 libc
@@ -108,7 +110,10 @@ case "$BASE" in
         ;;
 esac
 
-ASSET="$BIN_NAME-$ARCH-linux-musl"
+case "$ARCH" in
+    armv7) ASSET="$BIN_NAME-armv7-linux-musleabihf" ;;
+    *)     ASSET="$BIN_NAME-$ARCH-linux-musl" ;;
+esac
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

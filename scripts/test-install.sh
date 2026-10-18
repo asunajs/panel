@@ -21,6 +21,7 @@
 #  13. 离线分发 file:// + PANEL_ALLOW_FILE=1 → 放行（走 cp 分支）
 #  14. 未知 scheme（ftp://）→ 必须拒绝
 #  15. ELF 头正确但体积 < 1MB → 必须拒绝
+#  16. armv7l → 下载 armv7 资产并安装
 #
 # 注意：下面的假产物是「真 ELF 头部 + 1.25MB 填充」，因为 install.sh 会检查
 # 头 4 字节是 \x7fELF 且体积 > 1MB，所以不能再用 shell 脚本冒充。
@@ -32,6 +33,7 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL="$REPO_DIR/install.sh"
 ASSET="plugin-panel-x86_64-linux-musl"
+ARMV7_ASSET="plugin-panel-armv7-linux-musleabihf"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/panel-install-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -122,8 +124,9 @@ make_fake_elf() { # make_fake_elf <路径>
 make_release() {
     rm -f "$FIXTURE"/*
     make_fake_elf "$FIXTURE/$ASSET"
-    chmod +x "$FIXTURE/$ASSET"
-    ( cd "$FIXTURE" && sha256_of "$ASSET" > SHA256SUMS )
+    make_fake_elf "$FIXTURE/$ARMV7_ASSET"
+    chmod +x "$FIXTURE/$ASSET" "$FIXTURE/$ARMV7_ASSET"
+    ( cd "$FIXTURE" && sha256_of "$ASSET" "$ARMV7_ASSET" > SHA256SUMS )
 }
 
 run_install() { # run_install <输出文件> [额外环境变量...]
@@ -282,6 +285,14 @@ printf '\177ELF\002\001\001\000' > "$FIXTURE/$ASSET"
 OUT="$(run_install "$WORK/15.log" PANEL_PREFIX="$PREFIX"; echo "$?")"
 check "$([ "$OUT" != 0 ]; echo $?)" "体积过小时拒绝安装" "exit=$OUT"
 contains "$(cat "$WORK/15.log")" "< 1MB" && check 0 "提示体积不合理" || check 1 "提示体积不合理"
+
+# ---------- 16. armv7l ----------
+echo "16) armv7l"
+make_release
+OUT="$(run_install "$WORK/16.log" PANEL_FAKE_ARCH=armv7l PANEL_PREFIX="$PREFIX"; echo "$?")"
+check "$([ "$OUT" = 0 ]; echo $?)" "armv7l 退出码为 0" "exit=$OUT"
+contains "$(cat "$WORK/16.log")" "SHA256 校验通过（$ARMV7_ASSET）" \
+    && check 0 "下载的是 armv7 资产" || check 1 "下载的是 armv7 资产"
 
 echo
 if [ "$FAILED" != 0 ]; then
