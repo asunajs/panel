@@ -1,0 +1,6 @@
+# armv7 musl 没有 rquickjs-sys 的预生成 bindings，需要 bindgen。
+# cross 的构建发生在容器里，所以 libclang 也要装进容器。
+[target.armv7-unknown-linux-musleabihf]
+pre-build = [
+  "apt-get update && apt-get install -y libclang-dev clang",
+]
