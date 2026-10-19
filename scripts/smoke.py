@@ -1578,10 +1578,14 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             "日志说明了为什么没封（否则运维会以为蜜罐坏了）",
         )
 
-        # ── 插件页面默认与面板同源 ──
+        # ── 插件页面默认与面板同源（v0.1.5 的决定）──
         #
         # 插件是可信代码（装插件就是给面板加功能），安全边界对着外部访问者，
-        # 不把插件本身当攻击者。需要隔离的部署可以显式 PLUGIN_UI_ADDR=…
+        # 不把插件本身当攻击者。需要隔离的部署显式 PLUGIN_UI=1 / PLUGIN_UI_ADDR。
+        #
+        # ⚠ 同源模式下 iframe 的 `sandbox` **不是安全边界**：页面同时有
+        #   allow-scripts 与 allow-same-origin 时，它自己就能把 sandbox 属性摘掉。
+        #   真正的隔离在下面的「实例 ③c」里验。
         ui_port = st.get("plugin_ui_port")
         check(
             ui_port is None,
@@ -1591,9 +1595,49 @@ def anti_bruteforce_checks(tmp: Path) -> None:
         c1, _, _ = http(f"http://127.0.0.1:{port3}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
         check(c1 == 200, "同源插件页能正常打开", f"http {c1}")
         c2, _, _ = http(f"http://127.0.0.1:{port3}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
-        check(c2 == 200, "同源插件页能读面板接口", f"http {c2}")
+        check(c2 == 200, "同源插件页能读面板接口（这是同源模式的已知代价）", f"http {c2}")
     finally:
         stop(proc3, f3)
+
+    # ── 实例 ③c：显式开启隔离（PLUGIN_UI=1）──
+    #
+    # 这一组才是 H1 的判据：插件 origin 上**只有** 4 条白名单面板接口，
+    # 上传/源码读写/任务编辑/测试运行一律 404 —— 那些等于「执行代码」。
+    port3c, proc3c, f3c = make({"PANEL_TOKEN": SMOKE_TOKEN, "PLUGIN_UI": "1"}, "plugin-ui")
+    try:
+        base3c = f"http://127.0.0.1:{port3c}"
+        check(wait_ready(base3c, proc3c, {"X-Panel-Token": SMOKE_TOKEN}), "隔离实例就绪")
+        code, st3c = state(port3c, {"X-Panel-Token": SMOKE_TOKEN})
+        ui_port = st3c.get("plugin_ui_port")
+        check(
+            isinstance(ui_port, int) and ui_port > 0,
+            "PLUGIN_UI=1 时插件页在独立 origin（主端口 + 1）",
+            f"plugin_ui_port={ui_port!r}",
+        )
+        ui_base = f"http://127.0.0.1:{ui_port}"
+        c1, _, _ = http(f"{ui_base}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
+        check(c1 == 200, "插件 origin 上能打开插件页", f"http {c1}")
+        c2, _, _ = http(f"{ui_base}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
+        check(c2 == 200, "插件 origin 上白名单接口 /api/state 可用（插件页要读任务表）", f"http {c2}")
+        for danger in (
+            "/api/plugins/upload",
+            "/api/plugins/demo/source",
+            "/api/tasks",
+            "/api/scripts/jobs",
+            "/api/test/js",
+        ):
+            cd, _, _ = http(f"{ui_base}{danger}", headers={"X-Panel-Token": SMOKE_TOKEN})
+            check(
+                cd == 404,
+                f"插件 origin 上**没有**危险接口 {danger}（上传/源码/任务编辑 = RCE 面）",
+                f"http {cd}",
+            )
+        c3, _, _ = http(f"{ui_base}/plugins/demo/")
+        check(c3 in (401, 303), "插件 origin 同样要求鉴权", f"http {c3}")
+        c4, _, _ = http(f"{base3c}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
+        check(c4 == 200, "面板主端口上的接口不受影响", f"http {c4}")
+    finally:
+        stop(proc3c, f3c)
 
     # ── 实例 ③b：反代模式下，封禁仍然生效（且只封那个来源）──
     #

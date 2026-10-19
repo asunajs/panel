@@ -27,7 +27,7 @@
 //! **面板日志没有 file** —— 面板日志是运行噪音，交给 systemd/journald 兜；
 //! 插件日志是业务记录，才需要自己管保留期（见模块头那张表）。
 
-use super::{ConsoleTransport, FileTransport, Level, Logger, MemoryTransport, Transport};
+use super::{ConsoleTransport, FileTransport, Level, LogEntry, Logger, MemoryTransport, Transport};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -114,6 +114,16 @@ impl Hub {
 
     pub fn mem(&self) -> &Arc<MemoryTransport> {
         &self.mem
+    }
+
+    /// 读某次运行的历史日志（重启后内存环里没有，只能回文件）。
+    ///
+    /// `limit` 是硬上限，到了就停；没落盘 / 文件被清理时返回空。
+    pub fn history_for_run(&self, run: &str, limit: usize) -> Vec<LogEntry> {
+        self.file
+            .as_ref()
+            .map(|f| crate::log::file::read_run(f.dir(), FILE_PREFIX, run, limit))
+            .unwrap_or_default()
     }
 
     pub fn memory_cap(&self) -> usize {

@@ -666,23 +666,99 @@
   padding-top: var(--sp-2);
 }
 
-/* 插件卡片的动作多（源码 / 卸载 / 长期加载 / 停用），用默认 13px + 12px 内边距时
-   三列卡片里「长期加载 ✓」会把「停用」挤到第二行。这里只收这一排，不动全局面板按钮。 */
+/* 插件卡片的动作多（源码 / 卸载 / 常驻内存 / 停用），用默认 13px + 12px 内边距时
+   三列卡片里「常驻内存 ✓」会把「停用」挤到第二行。这里只收这一排，不动全局面板按钮。 */
 .plugin-actions .btn {
   padding: 5px 9px;
   font-size: 12px;
 }
 
-/* 破坏性操作（删除）与普通动作隔开，靠右放；不跟「覆盖调度」挤在一起 */
+/* 破坏性操作（删除）与普通动作隔开，靠右放；不跟「改运行时间」挤在一起 */
 .plugin-actions .btn.danger {
   margin-left: auto;
 }
 
-/* 视图切换的顶部消息条 */
+/* 任务卡片：默认只露「状态 + 下次运行 + 主操作」。
+   运行计划、来源、上次运行和低频动作收进 <details>，需要时再展开 ——
+   第一眼要回答的是「这条任务现在怎么样、下次什么时候跑」，
+   不是「它的每一列字段分别是什么」。 */
+.task-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-2);
+}
+
+.task-summary .field-label {
+  flex: none;
+}
+
+.task-details {
+  margin-top: var(--sp-2);
+  border-top: 1px solid var(--border-soft);
+  padding-top: var(--sp-2);
+}
+
+.task-details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.task-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-details > summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--text-mute);
+}
+
+.task-details[open] > summary::before {
+  content: '▾';
+}
+
+.task-details > summary:hover {
+  color: var(--text);
+}
+
+.task-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.task-details-body {
+  margin-top: var(--sp-2);
+}
+
+.task-more-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+}
+
+.task-more-actions .btn {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+/* 视图切换的顶部消息条。
+   放在顶栏中间、水平居中：顶栏是 sticky 的，提示条 fixed 在它上面（z-index 50），
+   标题在左、登出在右，中间正好空着 —— 不会盖住页面内容，也不会挡操作按钮。
+   底部提示是移动端 App 的习惯；面板是 WebUI，提示放顶部更符合这里的直觉。 */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: var(--sp-5);
+  top: var(--sp-2);
   transform: translateX(-50%);
   max-width: min(92vw, 560px);
   padding: 10px var(--sp-4);
@@ -692,6 +768,8 @@
   box-shadow: var(--shadow);
   font-size: 13px;
   z-index: 50;
+  /* 提示条只负责显示，不拦截点击：万一它压住了某个控件，用户仍然能点到底下的按钮 */
+  pointer-events: none;
 }
 
 .toast.ok { border-color: var(--success); color: var(--success); }
@@ -1124,7 +1202,7 @@
 }
 
 @keyframes toast-in {
-  from { opacity: 0; transform: translate(-50%, 6px); }
+  from { opacity: 0; transform: translate(-50%, -6px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
@@ -1139,9 +1217,9 @@
   }
 }
 
-/* ── 仪表盘的「任务概览」在窄屏改成卡片 ──────────────────────────────
+/* ── 仪表盘的插件任务 / 脚本任务表在窄屏改成卡片 ──────────────────────
    七列表格在 390px 下只能横向滚，用户第一眼看到的是被裁掉的「已启用」。
-   这不是数据缺失，但"要横着拖才知道有什么"本身就不好用 —— 与全部任务页
+   这不是数据缺失，但"要横着拖才知道有什么"本身就不好用 —— 与插件任务页
    的卡片保持一致，窄屏一行一张。 */
 @media (max-width: 700px) {
   .dash-jobs {

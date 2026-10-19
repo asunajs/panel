@@ -49,6 +49,37 @@ export function pluginUiUrl(path) {
   return pluginUiBase + path;
 }
 
+/** 插件页面隔离是不是**真的**启用了（= 插件页跑在另一个 origin 上）。 */
+export function pluginIsolationEnabled() {
+  return pluginUiBase !== '';
+}
+
+/**
+ * 插件 iframe 的 `sandbox` 属性（**唯一的生成处**，视图里不要再硬编码）。
+ *
+ * ⚠ 说清楚它是什么、不是什么：
+ *
+ * 1. `allow-same-origin` 必须留着 —— 同源模式下插件页要靠它才能带着会话调自己的
+ *    接口、用 localStorage。去掉它页面就废了（这也是 v0.1.5 把默认改回同源的原因）。
+ * 2. 但**同源模式下这个 `sandbox` 不是安全边界**：一个同时有 `allow-scripts` 与
+ *    `allow-same-origin` 的 iframe，被框文档与父页同源时能 `parent.document`
+ *    把自己的 `sandbox` 属性摘掉再重载（MDN 在 sandbox 那页明确警告过）。
+ *    换句话说，它只挡「没打算反抗」的页面，不挡恶意插件页。
+ * 3. 真正的边界是 `PLUGIN_UI=1`（插件页在另一个 origin）：跨源时同源策略接管，
+ *    `allow-same-origin` 只表示「保留它自己的 origin」，摘不到父页。
+ *    那个 origin 上只开 4 条白名单面板接口，上传/源码/任务编辑一律 404。
+ *
+ * 所以：同源模式的安全模型是「插件是可信代码」，不是「iframe 隔离」。
+ */
+export function pluginFrameSandbox() {
+  return 'allow-scripts allow-forms allow-popups allow-modals allow-same-origin';
+}
+
+/** 同源模式下显示给操作者的一句话（不解释它，用户只会以为插件页本来就该有面板权限）。 */
+export const PLUGIN_ISOLATION_HINT =
+  '插件页面与面板同源（隔离未启用）：它带着你的会话，能调面板接口，' +
+  'iframe 的 sandbox 在这里不是安全边界。要隔离设 PLUGIN_UI=1（反代 + TLS 还需 PLUGIN_UI_ORIGIN）。';
+
 /**
  * 统一请求。
  * @param {string} url
@@ -198,7 +229,7 @@ export function createJob(plugin, name, expr) {
   return request('/api/jobs', { method: 'POST', panel: true, body: { plugin, name, expr } });
 }
 
-/// `expr = null` 表示**撤销覆盖**：让插件代码声明的任务的频率回到代码里的值。
+/// `expr = null` 表示**恢复原时间**：让插件声明的任务的频率回到插件里的值。
 export function editJob(plugin, name, expr, opts = {}) {
   const body = { expr };
   if (opts.lead_ms !== undefined) body.lead_ms = opts.lead_ms;
@@ -228,9 +259,9 @@ export function setPluginLoaded(name, loaded) {
   });
 }
 
-/// 设 / 取消「长期加载」。
+/// 设 / 取消「常驻内存」。
 ///
-/// 默认是**惰性加载**：没有路由、没有 `on_tick` 的插件闲下来就从内存卸出去，
+/// 默认是**按需加载**：没有路由、没有 `on_tick` 的插件闲下来就从内存卸出去，
 /// 下次触发前提前装回来。勾上这一格 = 一直待在内存里（代价是那点常驻内存）。
 export function setPluginKeepWarm(name, keep) {
   return request(`/api/plugins/${encodeURIComponent(name)}/keep-warm`, {

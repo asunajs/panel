@@ -98,6 +98,16 @@ PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
 > ```
 >
 > 走反代加 TLS 时再加 `PANEL_COOKIE_SECURE=1`。
+>
+> ⚠️ **如果你开了插件页隔离（`PLUGIN_UI=1`）又挂在反代 + TLS 后面**，还要配
+> `PLUGIN_UI_ORIGIN`：插件页监听在主端口 +1 的**明文**端口上，浏览器在 https
+> 页面里会去连 `https://你的域名:8788` —— 那多半连不上，插件页会白屏。
+>
+> ```bash
+> PLUGIN_UI_ORIGIN=https://plugins.example.com   # 反代把该域名转到 127.0.0.1:8788
+> ```
+>
+> 默认（不设 `PLUGIN_UI`）是同源，不需要这一项。
 
 ### ARM 盒子 / 树莓派（systemd）
 

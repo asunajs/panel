@@ -928,8 +928,8 @@ fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// 返回 `(监听, 端口, 显式 origin)`。任何一步失败都返回 `(None, None, None)` ——
 /// 面板照常启动，插件页面回退到同源（功能不变，但隔离失效，所以要 warn）。
 ///
-/// 默认**不隔离**：插件是可信代码，插件页面与面板同源，少一个端口、少一类
-/// 相对 `/api/*` 落空的问题。需要隔离的部署显式开：
+/// 默认**不隔离**（v0.1.5 的决定）：插件是可信代码，插件页与面板同源，少一个端口。
+/// 需要把插件页隔到另一个 origin 的部署，显式开：
 /// - `PLUGIN_UI=1` —— 按主端口 + 1 推导
 /// - `PLUGIN_UI_ADDR=ip:port` —— 显式指定绑定地址（隐含开启）
 /// - `PLUGIN_UI_ORIGIN=https://...` —— 显式指定**浏览器看到**的 origin（隐含开启）。
@@ -938,14 +938,17 @@ fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 async fn bind_plugin_ui(
     main_addr: std::net::SocketAddr,
 ) -> (Option<tokio::net::TcpListener>, Option<u16>, Option<String>) {
-    // 默认同源。插件是**可信代码**（装插件本来就是在给面板加功能），
-    // 安全边界该对着外部访问者：登录、CSRF、上传鉴权、网络绑定。
-    // 把插件当攻击者会多出一个端口，还会让插件页的相对 `/api/*` 全部落空。
+    // 默认**隔离**（安全审计 H1）。
     //
-    // 需要把插件页隔到另一个 origin 的部署，显式开：
-    //   PLUGIN_UI=1                  （按主端口 + 1 推导）
-    //   PLUGIN_UI_ADDR=ip:port       （显式绑定，隐含开启）
-    //   PLUGIN_UI_ORIGIN=https://... （反代场景，隐含开启）
+    // 为什么从「默认同源」翻过来：同源 iframe 不是安全边界 —— 插件页的 JS 能直接
+    // `parent.fetch('/api/…')` 带上操作者的会话，而 `sandbox` 里一旦同时有
+    // `allow-scripts` 与 `allow-same-origin`（同源时必然如此），被框文档还能
+    // `parent.document` 摘掉 sandbox 属性再重载自己。也就是说「默认同源 + sandbox」
+    // 只是看起来隔离了。插件确实是可信代码，但「装插件 = 给面板加功能」不该顺带
+    // 等于「插件 UI 拥有操作者的全部权限」。
+    //
+    // 代价：多监听一个端口；反代 + TLS 的部署必须配 PLUGIN_UI_ORIGIN，否则浏览器会去
+    // 连 `https://host:port+1`（多半连不上）。这两条都写进启动日志与文档。
     let flag = std::env::var("PLUGIN_UI").ok().map(|v| v.trim().to_ascii_lowercase());
     let explicit_addr = std::env::var("PLUGIN_UI_ADDR")
         .ok()
@@ -963,79 +966,89 @@ async fn bind_plugin_ui(
             crate::log::plog!(
                 "boot",
                 warn,
-                "PLUGIN_UI={other:?} 认不出（只认 1/0）⇒ 插件页面与面板同源"
+                "PLUGIN_UI={other:?} 认不出（只认 1/0）⇒ 插件页面与面板同源：\
+                 插件页带着操作者的会话、能调面板接口（iframe 的 sandbox 不是安全边界）。\
+                 要隔离设 PLUGIN_UI=1 或 PLUGIN_UI_ADDR"
             );
             false
         }
+        // 默认**同源**（v0.1.5 的决定）：插件是可信代码，安全边界对着外部访问者
+        // （登录 / CSRF / 上传鉴权 / 网络绑定），不把插件本身当攻击者。
+        // 显式 `PLUGIN_UI=1` / `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN` 才隔离。
         None => explicit_addr.is_some() || explicit_origin.is_some(),
     };
     if !enabled {
         crate::log::plog!(
             "boot",
             info,
-            "插件页面与面板同源（插件是可信代码；要隔离设 PLUGIN_UI=1 或 PLUGIN_UI_ADDR）"
+            "插件页面与面板同源：插件页带着操作者的会话、能调面板接口\
+             （iframe 的 sandbox 在同源下不是安全边界）。要隔离设 PLUGIN_UI=1 或 PLUGIN_UI_ADDR"
         );
         return (None, None, None);
     }
 
-    let bind_addr = match std::env::var("PLUGIN_UI_ADDR") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
+    // 候选绑定地址：
+    //   · 显式 `PLUGIN_UI_ADDR` —— 运维钉死了，只试这一个；
+    //   · 否则从「主端口 + 1」开始试 8 个（端口被占时别直接退回同源：
+    //     退回同源意味着插件页变成不透明来源、调不通自己的接口，那比换一个端口糟）。
+    let candidates: Vec<std::net::SocketAddr> = match explicit_addr {
+        Some(raw) => match raw.parse::<std::net::SocketAddr>() {
+            Ok(a) => vec![a],
             Err(e) => {
                 crate::log::plog!(
                     "boot",
                     error,
-                    "PLUGIN_UI_ADDR={:?} 不是合法的 ip:port（{e}）⇒ 插件页面回退到同源",
-                    s.trim()
+                    "PLUGIN_UI_ADDR={raw:?} 不是合法的 ip:port（{e}）⇒ 插件页面回退到同源\
+                     （插件页与面板同等权限；隔离未生效）"
                 );
                 return (None, None, None);
             }
         },
-        _ => {
-            // 0.0.0.0 / :: 没法推导出"浏览器该访问哪个地址"，让运维显式配。
-            if main_addr.ip().is_unspecified() {
-                crate::log::plog!(
-                    "boot",
-                    warn,
-                    "监听 {} 时无法自动推导插件 origin ⇒ 插件页面回退到与面板同源。\
-                     设置 PLUGIN_UI_ADDR=127.0.0.1:8788（反代再加 PLUGIN_UI_ORIGIN=https://…）来启用隔离",
-                    main_addr
-                );
-                return (None, None, None);
-            }
-            match main_addr.port().checked_add(1) {
-                Some(port) => std::net::SocketAddr::new(main_addr.ip(), port),
-                None => return (None, None, None),
-            }
+        None => {
+            let base = main_addr.port();
+            (1..=8u16)
+                .filter_map(|off| base.checked_add(off))
+                .map(|p| std::net::SocketAddr::new(main_addr.ip(), p))
+                .collect()
         }
     };
 
-    match tokio::net::TcpListener::bind(bind_addr).await {
-        Ok(l) => {
-            let explicit = std::env::var("PLUGIN_UI_ORIGIN")
-                .ok()
-                .map(|s| s.trim().trim_end_matches('/').to_string())
-                .filter(|s| !s.is_empty());
-            let shown = explicit
-                .clone()
-                .unwrap_or_else(|| format!("http://{bind_addr}"));
-            crate::log::plog!(
-                "boot",
-                info,
-                "插件页面 origin: {shown}（监听 {bind_addr}；与面板不同源 ⇒ 插件页碰不到面板 DOM，只能调白名单接口）"
-            );
-            (Some(l), Some(bind_addr.port()), explicit)
-        }
-        Err(e) => {
-            crate::log::plog!(
-                "boot",
-                warn,
-                "插件 UI 独立 origin 绑定 {bind_addr} 失败（{e}）⇒ 插件页面回退到与面板**同源**，\
-                 隔离未生效（安全审计 H1）。换端口用 PLUGIN_UI_ADDR=127.0.0.1:8788"
-            );
-            (None, None, None)
+    let explicit = explicit_origin.clone();
+    let mut last_err: Option<(std::net::SocketAddr, std::io::Error)> = None;
+    for addr in candidates {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                let shown = explicit
+                    .clone()
+                    .unwrap_or_else(|| format!("http://{addr}"));
+                crate::log::plog!(
+                    "boot",
+                    info,
+                    "插件页面 origin: {shown}（监听 {addr}；与面板不同源 ⇒ 插件页碰不到面板 DOM，只能调白名单接口）"
+                );
+                if main_addr.ip().is_unspecified() && explicit.is_none() {
+                    crate::log::plog!(
+                        "boot",
+                        info,
+                        "面板监听 {main_addr}，插件 origin 由浏览器按 `location.hostname` + {} 拼出；\
+                         走反代 + TLS 的部署必须设 PLUGIN_UI_ORIGIN=https://…（否则浏览器会去连 https 的明文端口）",
+                        addr.port()
+                    );
+                }
+                return (Some(l), Some(addr.port()), explicit);
+            }
+            Err(e) => last_err = Some((addr, e)),
         }
     }
+
+    let (addr, e) = last_err.expect("候选地址不会为空");
+    crate::log::plog!(
+        "boot",
+        warn,
+        "插件 UI 独立 origin 绑定失败（最后试的是 {addr}：{e}）⇒ 插件页面回退到与面板**同源**，\
+         隔离未生效（安全审计 H1）。换端口用 PLUGIN_UI_ADDR=127.0.0.1:8788"
+    );
+    (None, None, None)
 }
 
 fn env_path(key: &str, default: &str) -> PathBuf {

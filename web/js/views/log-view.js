@@ -30,6 +30,11 @@ import {
   paintHighlight,
 } from '../logstream.js';
 
+/// 内部保留的脚本插件名不直接露给用户（和运行记录横幅同一口径）。
+function pluginLabel(name) {
+  return name === '__script__' ? '脚本任务' : name;
+}
+
 /** 行数上限（见 logstream.js 里 makeRing 的说明：服务端按字节限，这里按条数兜）。 */
 const MAX_LINES = 2000;
 
@@ -128,7 +133,7 @@ export async function render(root, ctx, params = {}) {
                ⚠ 同上：这段里不许出现反引号。 -->
           <select class="select" id="f-plugin" style="width:auto">
             <option value="">全部插件</option>
-            ${pluginNames.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}
+            ${pluginNames.map((n) => `<option value="${esc(n)}">${esc(pluginLabel(n))}</option>`).join('')}
             <optgroup label="面板日志（按 scope）">
               <option value="engine">engine</option>
               <option value="boot">boot</option>
@@ -182,7 +187,7 @@ export async function render(root, ctx, params = {}) {
   // 而 URL 里还写着 `plugin=xxx`，用户以为筛选生效了、其实没有。
   if (params.plugin) {
     if (![...pluginEl.options].some((o) => o.value === params.plugin)) {
-      pluginEl.appendChild(new Option(params.plugin, params.plugin));
+      pluginEl.appendChild(new Option(pluginLabel(params.plugin), params.plugin));
     }
     pluginEl.value = params.plugin;
   }
@@ -205,6 +210,12 @@ export async function render(root, ctx, params = {}) {
   let notice = null;
   let dropped = 0;
   let highlightTimer = null;
+  // 运行视图：历史 JSONL 与实时 SSE 可能包含同一行（SSE 会回灌内存环），
+  // 用这个集合去重。只在 params.run 存在时启用。
+  const seen = new Set();
+  // 快速切筛选 / 切页面时，晚到的历史响应不能覆盖新一轮的结果。
+  let historyGen = 0;
+  let disposed = false;
 
   /** 一行该不该显示：勾选的级别是**精确集合**，不是「最低档」。 */
   const visible = (el) => {
@@ -267,16 +278,25 @@ export async function render(root, ctx, params = {}) {
     const cls = pending ? 'warning' : ok ? 'ok' : 'danger';
     const label = pending ? '没跑完' : ok ? '成功' : '失败';
     const dur = run.duration_ms == null ? '—' : `${run.duration_ms} ms`;
+    // 脚本任务在 jobs 表里挂的是内部保留插件名 `__script__`：直接印出来
+    // 只会让人问「这个插件是什么」。按来源给它一个真名字，并链到脚本页 ——
+    // 插件任务与脚本任务已经分页，不能再把脚本任务链到插件任务页。
+    const isScript = run.plugin === '__script__';
+    const who = isScript ? '脚本' : run.plugin;
+    const taskHref = isScript
+      ? '#/scripts'
+      : `#/tasks?plugin=${encodeURIComponent(run.plugin)}`;
+    const taskLabel = isScript ? '看脚本任务' : '看这条任务';
     el.innerHTML = `<div class="card run-banner">
       <span class="badge ${cls}">${label}</span>
       <span class="run-title">
-        <strong>${esc(run.plugin)}</strong> / ${esc(run.task)}
+        <strong>${esc(who)}</strong> / ${esc(run.task)}
         <span class="hint">${esc(run.kind === 'manual' ? '手动触发' : run.kind === 'cron' ? '调度触发' : run.kind)}</span>
       </span>
       <span class="hint">${esc(run.started_at)} · 耗时 ${esc(dur)}</span>
       ${run.error ? `<div class="run-error">${esc(run.error)}</div>` : ''}
       <div class="card-actions">
-        <a class="btn ghost" href="#/tasks?plugin=${encodeURIComponent(run.plugin)}">看这条任务</a>
+        <a class="btn ghost" href="${taskHref}">${taskLabel}</a>
         <button class="btn ghost" id="run-clear">退出运行视图</button>
       </div>
     </div>`;
@@ -341,7 +361,14 @@ export async function render(root, ctx, params = {}) {
     if (extra) note.textContent = extra;
   }
 
-  function append(entry) {
+  function append(entry, { follow = true } = {}) {
+    // 运行视图：历史文件 + SSE 内存回灌可能重复同一条；按「运行 + 时间 + 类型 + 正文」
+    // 去重。别的视图不去重 —— 同样的文本在不同毫秒出现是合法的。
+    if (params.run) {
+      const key = `${entry.run || ''}|${entry.ts}|${entry.type}|${entry.msg}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
     ring.push(entry);
     if (paused) return; // 暂停时只进缓冲，不动 DOM（恢复时整段重画）
     const el = lineNode(entry);
@@ -350,7 +377,7 @@ export async function render(root, ctx, params = {}) {
     if (qEl.value.trim()) paintHighlight(el, qEl.value.trim());
     // 超上限：从头砍（同时砍 DOM，否则节点会一直涨）
     while (box.children.length > MAX_LINES) box.removeChild(box.firstChild);
-    if (followEl.checked) box.scrollTop = box.scrollHeight;
+    if (follow && followEl.checked) box.scrollTop = box.scrollHeight;
   }
 
   /** 恢复时按缓冲整段重画（暂停期间新来的行就是这么补上的，不会丢）。 */
@@ -368,8 +395,10 @@ export async function render(root, ctx, params = {}) {
     applyFilter();
   }
 
-  function open() {
+  async function open() {
+    const gen = ++historyGen;
     stream?.close();
+    stream = null;
     // ⚠ 换筛选条件（通道 / 级别 / 插件）时必须**把屏幕上已有的行清掉**。
     //
     // 服务端的筛选只作用于**新推来的**行，而框里那 300 行是换条件之前渲染的 ——
@@ -381,9 +410,32 @@ export async function render(root, ctx, params = {}) {
     // 所以重连不会把已经看到的行抹掉（那是另一条底线：断线不该丢视野）。
     box.replaceChildren();
     ring.clear();
+    seen.clear();
     updateNote(0);
     conn.className = 'badge running';
     conn.textContent = '连接中…';
+
+    // 运行视图：先回看盘上的 JSONL。SSE 只回灌内存环，进程重启后旧运行的
+    // 日志还在文件里、内存里却没有 —— 不读文件就会误报「没有产生日志」。
+    if (params.run && channelEl.value !== 'panel') {
+      const qs = new URLSearchParams({ run: params.run });
+      const plugin = pluginEl.value.trim();
+      if (plugin) qs.set('plugin', plugin);
+      try {
+        const res = await fetch(`/api/logs/history?${qs.toString()}`);
+        if (gen !== historyGen || disposed) return;
+        if (res.ok) {
+          const data = await res.json();
+          for (const entry of data.lines || []) append(entry, { follow: false });
+          if (followEl.checked) box.scrollTop = box.scrollHeight;
+          updateNote();
+        }
+      } catch {
+        // 历史读不到不挡实时流：至少新日志还能看
+      }
+      if (gen !== historyGen || disposed) return;
+    }
+
     stream = openLogStream({      channel: channelEl.value,
       level: serverLevel(),
       plugin: pluginEl.value.trim(),
@@ -477,6 +529,7 @@ export async function render(root, ctx, params = {}) {
     // 否则用户会以为「清空」等于删日志。
     box.replaceChildren();
     ring.clear();
+    seen.clear();
     updateNote(0);
     ctx.toast('已清空视图（服务端缓冲与落盘文件不受影响）', 'ok');
   });
@@ -551,6 +604,8 @@ export async function render(root, ctx, params = {}) {
   // 路由切走时由 app.js 调用：必须把 EventSource 关掉，
   // 否则每切一次页面就多留一条长连接（服务端那边一直挂着）。
   return () => {
+    disposed = true;
+    historyGen++;
     stream?.close();
     clearInterval(noteTimer);
     clearTimeout(highlightTimer);

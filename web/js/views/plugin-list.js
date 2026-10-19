@@ -15,6 +15,9 @@
 import {
   getState,
   pluginUiUrl,
+  pluginFrameSandbox,
+  pluginIsolationEnabled,
+  PLUGIN_ISOLATION_HINT,
   setPluginDisabled,
   reloadPlugin,
   setPluginKeepWarm,
@@ -23,6 +26,7 @@ import {
   uploadFile,
 } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
+import { showPluginEngineUi } from '../prefs.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -53,9 +57,9 @@ function statusBadge(p) {
   if (p.error) return '<span class="badge failed" title="加载期抛了错，见日志">加载失败</span>';
   // 惰性加载：闲下来就卸出内存（下次触发前会提前装回来）—— 这是**正常**状态
   if (p.evicted)
-    return '<span class="badge idle" title="现在不在内存里（没有路由、也没有 on_tick）；下次触发前会自动装回来">已卸载</span>';
+    return '<span class="badge idle" title="现在不在内存里（没有路由、也没有 on_tick）；下次触发前会自动装回来">未加载</span>';
   if (p.keep_warm)
-    return '<span class="badge success" title="勾了「长期加载」⇒ 一直待在内存里">常驻</span>';
+    return '<span class="badge success" title="勾了「常驻内存」⇒ 一直待在内存里">常驻</span>';
   return '<span class="badge success">已加载</span>';
 }
 
@@ -132,11 +136,14 @@ export async function render(root, ctx, opts = {}) {
   const runtimeByKind = new Map(
     (res.runtimes || []).map((r) => [r.kind, r]),
   );
+  // 「执行引擎 / 自定义解释器路径」默认隐藏（见 prefs.js）：它是个高级开关，
+  // 平时只会把卡片上真正要看的状态挤下去。在「设置 → 插件」里开启后才渲染。
+  const showEngine = showPluginEngineUi();
 
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">已加载插件（${plugins.length}）</span>
+        <span class="section-title">插件（${plugins.length}）</span>
         <div class="card-actions">
           <button class="btn" id="upload-btn" title="上传 .js 单文件，或解压 .zip 到插件目录">上传插件</button>
           <input type="file" id="upload-input" accept=".js,.zip" hidden>
@@ -147,8 +154,13 @@ export async function render(root, ctx, opts = {}) {
       <p class="hint" style="margin-bottom:var(--sp-3)">
         插件可以自带配置页（由插件作者提供，位于 <span class="mono">/plugins/{name}/</span>）。
         主面板负责任务与调度，插件自己负责它那份配置。<br>
-        插件语言只有 JavaScript；执行引擎默认 <b>QuickJS</b>（内置），
-        也可以按插件换成 Node / Bun（装好之后才可选，不可用的选项会写明原因）。
+        ${
+          showEngine
+            ? `执行引擎默认 <b>QuickJS</b>（内置），
+        也可以按插件换成 Node / Bun（装好之后才可选，不可用的选项会写明原因）。`
+            : `默认跑在面板内置的 <b>QuickJS</b> 里。
+        需要按插件切换 Node / Bun 时，去「设置 → 插件」里开启执行引擎设置。`
+        }
       </p>
 
       ${
@@ -176,7 +188,12 @@ export async function render(root, ctx, opts = {}) {
                   const uid = `${gi}-${pi}`;
                   // 自定义解释器路径只对 Node/Bun 有意义（QuickJS 是内置的）。
                   // 切换下拉框时由下面的 change 委托同步禁用状态。
-                  const runtimeRow = `
+                  //
+                  // 整块默认不渲染（见 prefs.js）：它是个高级开关，关着的时候
+                  // 连 DOM 都不给 —— 用 CSS 藏起来的话，Tab 键仍会聚焦到看不见的
+                  // 下拉框和输入框上，屏幕阅读器也会把它们读出来。
+                  const runtimeRow = showEngine
+                    ? `
                     <div class="row plugin-runtime">
                       <div class="field">
                         <label class="field-label" for="plugin-engine-${uid}">执行引擎</label>
@@ -195,15 +212,18 @@ export async function render(root, ctx, opts = {}) {
                       <button class="btn" data-runtime-apply="${esc(p.name)}" ${
                         off ? 'disabled title="先启用插件"' : ''
                       }>应用引擎</button>
-                    </div>`;
+                    </div>`
+                    : '';
                   // 已停用的插件：它的 WebUI 也打不开（引擎没加载它），所以那组按钮
                   // 不给 —— 给一个点了 404 的按钮是最差的可达性。
+                  // 没有配置页时也什么都不说：每张卡都写一句占位说明只是噪声，
+                  // 有配置页的插件自然会有「打开配置页」按钮。
                   const openBtn = off
-                    ? '<span class="hint">已停用：任务不运行，配置页也打不开</span>'
+                    ? ''
                     : hasUi
                       ? `<button class="btn primary" data-open="${esc(p.name)}">打开配置页</button>
                        <a class="btn" href="${esc(pluginUiUrl(`/plugins/${encodeURIComponent(p.name)}/`))}" target="_blank" rel="noopener">新标签页</a>`
-                      : '<span class="hint">没有自带配置页</span>';
+                      : '';
                   // 管理动作：源码 / **卸载·加载** / 长期加载 / 停用启用。
                   //
                   // ⚠ 这里原来放的是「重载」。用户的原话：
@@ -232,8 +252,8 @@ export async function render(root, ctx, opts = {}) {
                     ${loadBtn}
                     <button class="btn ${p.keep_warm ? 'primary' : ''}" data-warm="${esc(p.name)}" data-on="${
                       p.keep_warm ? '1' : '0'
-                    }" title="默认惰性加载：闲下来卸出内存，触发前自动装回。勾上就一直常驻。">${
-                      p.keep_warm ? '长期加载 ✓' : '长期加载'
+                    }" title="默认按需加载：闲下来移出内存，触发前自动装回。开启后一直常驻。">${
+                      p.keep_warm ? '常驻内存 ✓' : '常驻内存'
                     }</button>
                     <button class="btn ${off ? 'primary' : 'danger'}" data-toggle="${esc(p.name)}" data-off="${
                       off ? '1' : '0'
@@ -250,19 +270,18 @@ export async function render(root, ctx, opts = {}) {
                 <span class="card-title" title="${esc(p.name)}">${esc(p.name)}</span>
                 ${statusBadge(p)}
                 ${engineBadge(p, runtimeByKind)}
-                <span class="badge lang js">JavaScript</span>
               </div>
             </div>
             <div class="path" title="${esc(p.file)}">${esc(p.file)}</div>
             ${
               p.error
                 ? `<div class="err-text">${esc(p.error)}</div>`
-                : `<div class="hint">tick ${p.ticks} 次 · 最近 ${esc(p.last_tick || '—')}<br>任务 ${
+                : `<div class="hint">心跳 ${p.ticks} 次 · 最近 ${esc(p.last_tick || '—')}<br>插件任务 ${
                     typeof p.tasks === 'number' ? p.tasks : 0
                   } 条</div>`
             }
             ${runtimeRow}
-            <div class="plugin-actions">${openBtn}</div>
+            ${openBtn ? `<div class="plugin-actions">${openBtn}</div>` : ''}
             <div class="plugin-actions">${ops}</div>
           </div>`;
                 })
@@ -292,8 +311,9 @@ export async function render(root, ctx, opts = {}) {
           <button class="btn ghost" id="frame-close">关闭</button>
         </div>
       </div>
+      ${pluginIsolationEnabled() ? '' : `<p class="hint">⚠ ${esc(PLUGIN_ISOLATION_HINT)}</p>`}
       <iframe id="plugin-frame" class="plugin-frame"
-              sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
+              sandbox="${esc(pluginFrameSandbox())}"
               title="插件配置页"></iframe>
     </div>`;
 
@@ -427,7 +447,7 @@ export async function render(root, ctx, opts = {}) {
       ctx.toast(
         res.ok
           ? nowLoaded
-            ? `${name}：已卸载（任务还在，到点会自动装回来）`
+            ? `${name}：已移出内存（任务还在，到点会自动装回来）`
             : `${name}：已装进内存`
           : `${name}：${res.error}`,
         res.ok ? 'ok' : 'bad',
@@ -448,8 +468,8 @@ export async function render(root, ctx, opts = {}) {
       ctx.toast(
         res.ok
           ? on
-            ? `${name}：恢复惰性加载（闲下来会卸出内存）`
-            : `${name}：长期加载（一直待在内存里）`
+            ? `${name}：恢复按需加载（闲下来会移出内存）`
+            : `${name}：常驻内存（一直待在内存里）`
           : `${name}：设置失败 —— ${res.error}`,
         res.ok ? 'ok' : 'bad',
       );

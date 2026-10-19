@@ -8,8 +8,8 @@
     ② 面板任务（`source="script-panel"`）：在面板上创建，存在 SQLite 里。
        路径 / 运行时 / 调度 / 参数都能改，删除是真删。
 
-  这个页面和「任务列表」的分工：任务列表按**调度**看所有任务（插件任务也在）；
-  这里按**文件**看脚本，并给出「目录里有什么、哪些没排上、哪些是面板建的」。
+  插件任务在「插件任务」页；这里**只管理脚本**（目录脚本 + 面板脚本），
+  按文件看脚本，并给出「目录里有什么、哪些没排上、哪些是面板建的」。
 
   ⚠ 运行级操作（执行 / 暂停 / 恢复）走 /api/tasks/__script__/{name}/...，
     定义级操作（删除 / 恢复 / 覆盖）走 /api/jobs/__script__/{name}/...；
@@ -27,7 +27,7 @@ import {
   restoreJob,
   uploadFile,
 } from '../api.js';
-import { statusBadge } from '../status.js';
+import { statusBadge, minuteOf } from '../status.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 
 /// 脚本任务在 jobs 表里的保留插件名（后端约定）。
@@ -81,11 +81,9 @@ function statusBadgeOf(status, trips) {
   return `<span class="badge ${m.cls}"${t}>${m.text}${suffix}</span>`;
 }
 
-/** 文件头里那几项，只展示存在的，别把空行铺成一张表。 */
-function headerLine(header) {
+/** 文件里除了运行时间之外的额外设置，只展示存在的。 */
+function fileExtras(header) {
   const bits = [];
-  if (header.cron) bits.push(`cron <span class="mono">${esc(header.cron)}</span>`);
-  if (header.runtime) bits.push(`runtime <span class="mono">${esc(header.runtime)}</span>`);
   const timeout = header.timeout_ms ?? header.timeout;
   if (timeout !== undefined && timeout !== null && timeout !== '') {
     bits.push(`超时 <span class="mono">${esc(timeout)}</span>${header.timeout_ms ? ' ms' : ''}`);
@@ -96,7 +94,7 @@ function headerLine(header) {
   return bits.join(' · ');
 }
 
-/** 目录里的一个脚本文件。`job` 只看**目录任务**（面板任务在另一段里）。 */
+/** 任务目录里的一个脚本文件。`job` 只看**目录任务**（在面板创建的任务在另一段里）。 */
 function fileCard(f, job) {
   const header = f.header || {};
   const title = header.name || baseName(f.path);
@@ -104,45 +102,82 @@ function fileCard(f, job) {
   const disabled = header.disabled === true;
   const scheduled = f.scheduled === true && job && !job.deleted;
   // 文件被「面板任务」引用时 scheduled 也是 true（后端口径），但这里没有
-  // 目录任务的 name，不能给它画「暂停 / 覆盖」—— 只标一下，操作去面板任务卡片。
+  // 目录任务的 name，不能给它画「暂停 / 改运行时间」—— 只标一下，操作去面板任务卡片。
   const panelReferenced = f.scheduled === true && !scheduled && !(job && job.deleted);
   const deleted = job && job.deleted;
-  const bits = headerLine(header);
+  const covered = scheduled && !!job.override_expr;
+  const effective = scheduled ? job.override_expr || job.schedule : header.cron || '';
+  const extras = fileExtras(header);
 
-  const ops = [];
-  if (!valid) {
-    ops.push('<span class="hint">文件头解析失败，先修文件</span>');
+  let status;
+  if (scheduled) {
+    status = statusBadgeOf(job.status, job.trips);
+  } else if (deleted) {
+    status = '<span class="badge idle" title="被面板删除（停止调度），文件还在">已删除</span>';
+  } else if (panelReferenced) {
+    status =
+      '<span class="badge idle" title="没有自动目录任务，但有一条在面板创建的脚本引用这个文件">已排班（面板创建）</span>';
+  } else if (!valid) {
+    status = '<span class="badge failed" title="文件里的设置解析失败">设置有误</span>';
   } else {
-    // 目录任务已经排上了：给它运行级操作 + 调度覆盖（改的是库里的 override_expr，
-    // 文件头原样保留，清掉覆盖就回到文件里的值）。
-    if (scheduled) {
-      ops.push(
-        `<button class="btn" data-act="run" data-name="${esc(job.name)}">立即执行</button>`,
-        `<button class="btn" data-act="runs" data-name="${esc(job.name)}">记录</button>`,
-        `<button class="btn" data-act="${job.paused ? 'resume' : 'pause'}" data-name="${esc(job.name)}">${
-          job.paused ? '恢复' : '暂停'
-        }</button>`,
-        `<button class="btn" data-act="override" data-name="${esc(job.name)}" data-path="${esc(f.path)}" title="写一条面板覆盖，文件头里的 cron 保留">覆盖调度</button>`,
-      );
-    } else if (deleted) {
-      ops.push(
-        `<button class="btn" data-act="restore" data-name="${esc(job.name)}" data-dir="1" title="把这条目录任务装回调度器">恢复</button>`,
-      );
-    }
-    // 「基于此文件建面板任务」始终给：目录任务没排上时这是另一条让它跑起来的路；
-    // 即使是同一份文件，面板任务也各有各的调度（后端按任务身份去重）。
-    ops.push(
-      `<button class="btn ${scheduled || deleted ? '' : 'primary'}" data-act="create" data-path="${esc(
-        f.path,
-      )}" title="基于这份文件另建一条面板任务；原来的目录任务不受影响（路径 / 运行时 / 调度可改）">基于此文件建面板任务</button>`,
-    );
-    if (disabled) ops.push('<span class="hint">文件头写了 disabled，不会自动排班</span>');
-    // 删除是破坏性操作，放到这一排最后并靠右；别夹在「覆盖调度」和
-    // 「基于此文件建面板任务」中间，误点的代价太大。
-    if (scheduled) {
-      ops.push(`<button class="btn danger" data-act="delete" data-name="${esc(job.name)}" data-dir="1">删除</button>`);
-    }
+    status = '<span class="badge idle" title="文件里没有运行时间，也没有在面板创建的脚本引用它">未排班</span>';
   }
+
+  // 默认只露主操作。目录任务没排上时，「用这个文件建任务」才是下一步；
+  // 排上了就只留运行 / 暂停，其余收进详情。
+  const primaryOps = !valid
+    ? '<span class="hint">先修正文件里的设置</span>'
+    : scheduled
+      ? `<button class="btn primary" data-act="run" data-name="${esc(job.name)}">运行一次</button>
+         <button class="btn" data-act="${job.paused ? 'resume' : 'pause'}" data-name="${esc(job.name)}">${
+           job.paused ? '恢复' : '暂停'
+         }</button>`
+      : deleted
+        ? `<button class="btn" data-act="restore" data-name="${esc(job.name)}" data-dir="1">恢复</button>`
+        : panelReferenced
+          ? '<span class="hint">去下面「面板创建的脚本」里管理</span>'
+          : `<button class="btn primary" data-act="create" data-path="${esc(
+              f.path,
+            )}" title="用这份文件建一条在面板上管理的脚本任务">用这个文件建任务</button>`;
+
+  const secondaryOps = !valid
+    ? ''
+    : scheduled
+      ? `<button class="btn ghost" data-act="runs" data-name="${esc(job.name)}">运行记录</button>
+         <button class="btn ghost" data-act="override" data-name="${esc(
+           job.name,
+         )}" data-path="${esc(f.path)}" title="改这条目录任务的运行时间，文件本身不动">改运行时间</button>
+         <button class="btn ghost" data-act="create" data-path="${esc(
+           f.path,
+         )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的目录任务不受影响">用这个文件建任务</button>
+         <button class="btn danger" data-act="delete" data-name="${esc(
+           job.name,
+         )}" data-dir="1">删除</button>`
+      : deleted
+        ? `<button class="btn ghost" data-act="create" data-path="${esc(
+            f.path,
+          )}" title="用这份文件另建一条在面板上管理的脚本任务">用这个文件建任务</button>`
+        : panelReferenced
+          ? `<button class="btn ghost" data-act="create" data-path="${esc(
+              f.path,
+            )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的脚本任务不受影响">用这个文件另建任务</button>`
+          : '';
+
+  const summary = scheduled
+    ? `<div class="task-summary">
+         <span class="field-label">下次运行</span>
+         <span class="mono">${esc(minuteOf(job.next_run))}</span>
+         ${covered ? '<span class="badge warning" title="运行时间在面板上改过">已改时间</span>' : ''}
+       </div>`
+    : deleted
+      ? '<div class="task-summary"><span class="hint">已停止调度；文件还在，可以恢复。</span></div>'
+      : panelReferenced
+        ? '<div class="task-summary"><span class="hint">由一条在面板创建的脚本任务使用。</span></div>'
+        : !valid
+          ? `<div class="task-summary"><span class="err-text">${esc(
+              f.error || '文件设置解析失败',
+            )}</span></div>`
+          : '<div class="task-summary"><span class="hint">还没有安排运行时间。</span></div>';
 
   return `
     <div class="card plugin-card" data-script-file="${esc(f.path)}"
@@ -152,36 +187,44 @@ function fileCard(f, job) {
         <div class="card-head-main">
           <span class="card-title mono" title="${esc(f.path)}">${esc(title)}</span>
           ${runtimeBadge(f.runtime, f.available)}
-          <span class="badge ${valid ? 'success' : 'failed'}">${valid ? '文件头有效' : '文件头无效'}</span>
-          ${
-            scheduled
-              ? statusBadgeOf(job.status, job.trips)
-              : deleted
-                ? '<span class="badge idle" title="被面板删除（停止调度），文件还在">已删除</span>'
-                : panelReferenced
-                  ? '<span class="badge idle" title="没有自动目录任务，但有一条面板任务引用这个文件">已排班（面板任务）</span>'
-                  : '<span class="badge idle" title="文件头没有 cron，也没有面板任务引用它">未排班</span>'
-          }
+          ${status}
         </div>
+        <span class="card-actions">${primaryOps}</span>
       </div>
-      <div class="path" title="${esc(f.path)}">${esc(f.path)}</div>
-      ${
-        valid
-          ? `<div class="hint">${bits || '文件头里没有额外字段'}</div>`
-          : `<div class="err-text">${esc(f.error || '文件头不合法')}</div>`
-      }
-      ${
-        scheduled && job.override_expr
-          ? `<div class="field-sub dim">文件头：<span class="mono">${esc(job.schedule)}</span> ·
-               当前用面板覆盖：<span class="mono">${esc(job.override_expr)}</span></div>`
-          : ''
-      }
-      <div class="plugin-actions">${ops.join('')}</div>
+      ${summary}
+      <details class="task-details">
+        <summary>详情与更多操作</summary>
+        <div class="task-details-body">
+          <div class="row">
+            <div class="field">
+              <span class="field-label">脚本文件</span>
+              <span class="mono dim" title="${esc(f.path)}">${esc(f.path)}</span>
+            </div>
+            <div class="field">
+              <span class="field-label">运行计划</span>
+              <span class="mono">${esc(effective || '—')}</span>
+              ${
+                covered
+                  ? `<span class="field-sub mono dim">文件里：${esc(job.schedule || '—')}</span>`
+                  : ''
+              }
+            </div>
+            <div class="field">
+              <span class="field-label">文件设置</span>
+              <span class="mono ${valid ? 'dim' : ''}">${valid ? '设置正确' : '设置有误'}</span>
+            </div>
+          </div>
+          ${extras ? `<p class="hint">${extras}</p>` : ''}
+          ${disabled ? '<p class="hint">文件里写了 disabled，不会自动排班。</p>' : ''}
+          ${secondaryOps ? `<div class="task-more-actions">${secondaryOps}</div>` : ''}
+        </div>
+      </details>
     </div>`;
 }
 
-/** 面板创建的脚本任务卡片。 */
+/** 在面板创建的脚本任务卡片。 */
 function panelJobCard(job) {
+  const effective = job.override_expr || job.schedule || '—';
   return `
     <div class="card plugin-card" data-script-task="${esc(job.name)}"
          data-task="${esc(job.name)}" data-plugin="${SCRIPT_PLUGIN}" data-kind="script"
@@ -189,32 +232,60 @@ function panelJobCard(job) {
       <div class="card-head">
         <div class="card-head-main">
           <span class="card-title mono">${esc(job.name)}</span>
-          <span class="badge idle">面板任务</span>
+          <span class="badge idle">在面板创建</span>
           ${runtimeBadge(job.runtime, job.available)}
           ${statusBadgeOf(job.status, job.trips)}
         </div>
+        <span class="card-actions">
+          <button class="btn primary" data-act="run" data-name="${esc(job.name)}">运行一次</button>
+          <button class="btn" data-act="${job.paused ? 'resume' : 'pause'}" data-name="${esc(
+            job.name,
+          )}">${job.paused ? '恢复' : '暂停'}</button>
+        </span>
       </div>
-      <div class="path" title="${esc(job.script || '')}">${esc(job.script || '（未设置文件）')}</div>
-      <div class="hint">
-        调度 <span class="mono">${esc(job.override_expr || job.schedule || '—')}</span>
-        ${job.override_expr ? `（覆盖文件头 <span class="mono">${esc(job.schedule)}</span>）` : ''}
-        · 上次 <span class="mono dim">${esc(job.last_run || '—')}</span>
-        · 触发 ${esc(job.runs ?? 0)} 次
+      <div class="task-summary">
+        <span class="field-label">下次运行</span>
+        <span class="mono">${esc(minuteOf(job.next_run))}</span>
+        ${job.override_expr ? '<span class="badge warning" title="运行时间在面板上改过">已改时间</span>' : ''}
       </div>
-      <div class="plugin-actions">
-        <button class="btn" data-act="run" data-name="${esc(job.name)}">立即执行</button>
-        <button class="btn" data-act="runs" data-name="${esc(job.name)}">记录</button>
-        <button class="btn" data-act="${job.paused ? 'resume' : 'pause'}" data-name="${esc(
-          job.name,
-        )}">${job.paused ? '恢复' : '暂停'}</button>
-        <button class="btn" data-act="edit" data-name="${esc(job.name)}">编辑</button>
-        <button class="btn danger" data-act="delete" data-name="${esc(job.name)}">删除</button>
-      </div>
+      <details class="task-details">
+        <summary>详情与更多操作</summary>
+        <div class="task-details-body">
+          <div class="row">
+            <div class="field">
+              <span class="field-label">脚本文件</span>
+              <span class="mono dim" title="${esc(job.script || '')}">${esc(job.script || '（未设置文件）')}</span>
+            </div>
+            <div class="field">
+              <span class="field-label">运行计划</span>
+              <span class="mono">${esc(effective)}</span>
+              ${
+                job.override_expr
+                  ? `<span class="field-sub mono dim">原计划：${esc(job.schedule || '—')}</span>`
+                  : ''
+              }
+            </div>
+            <div class="field">
+              <span class="field-label">上次运行</span>
+              <span class="mono dim">${esc(job.last_run || '—')}</span>
+            </div>
+            <div class="field">
+              <span class="field-label">运行次数</span>
+              <span class="mono">${esc(job.runs ?? 0)}</span>
+            </div>
+          </div>
+          <div class="task-more-actions">
+            <button class="btn ghost" data-act="runs" data-name="${esc(job.name)}">运行记录</button>
+            <button class="btn ghost" data-act="edit" data-name="${esc(job.name)}">编辑</button>
+            <button class="btn danger" data-act="delete" data-name="${esc(job.name)}">删除</button>
+          </div>
+        </div>
+      </details>
     </div>`;
 }
 
 /**
- * 「覆盖调度」小表单：只改一条目录任务的 override_expr。
+ * 「改运行时间」小表单：只改一条目录任务的 override_expr。
  *
  * 用弹层而不是跳到编辑页：要改的只有一格表达式，跳页会把用户从「这一堆文件」
  * 里带走。目录任务的**文件内容**不在这里改（那是编辑器 / git 的事）。
@@ -224,28 +295,28 @@ function openOverrideDialog(job, root, ctx) {
   const declared = job.schedule || '';
   const back = document.createElement('div');
   back.className = 'dialog-back';
-  back.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-label="覆盖调度">
+  back.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-label="改运行时间">
     <div class="dialog-head">
-      <span>覆盖调度 · <strong>${esc(job.name)}</strong></span>
+      <span>改运行时间 · <strong>${esc(job.name)}</strong></span>
       <button class="btn ghost" id="ov-close">关闭</button>
     </div>
     <div class="dialog-body">
       <p class="hint">
-        文件头里声明的是 <span class="mono">${esc(declared || '（没有）')}</span>。
-        这里填的值会记成一条<b>面板覆盖</b>：文件原样保留，重启 / 重新发现都不会丢；
-        点「撤销覆盖」就回到文件里的值。
+        文件里设置的是 <span class="mono">${esc(declared || '（没有）')}</span>。
+        这里填的值会单独记住：文件原样保留，重启 / 重新发现都不会丢；
+        点「恢复原时间」就回到文件里的值。
       </p>
       <div class="field">
-        <label class="field-label" for="ov-expr">调度表达式</label>
+        <label class="field-label" for="ov-expr">运行计划</label>
         <input class="input mono" id="ov-expr" spellcheck="false"
                value="${esc(current || declared)}" placeholder="*/5 * * * * * 或 @every 30s">
       </div>
       <p class="err-text" id="ov-err"></p>
       <div class="row" style="align-items:center">
-        <button class="btn primary" id="ov-save">保存覆盖</button>
+        <button class="btn primary" id="ov-save">保存运行时间</button>
         ${
           current
-            ? '<button class="btn" id="ov-clear" title="回到文件头里声明的 cron">撤销覆盖</button>'
+            ? '<button class="btn" id="ov-clear" title="回到文件里设置的运行时间">恢复原时间</button>'
             : ''
         }
         <button class="btn ghost" id="ov-cancel">取消</button>
@@ -268,7 +339,7 @@ function openOverrideDialog(job, root, ctx) {
     }
     close();
     ctx.toast(
-      expr === null ? `${job.name}：已撤销覆盖` : `${job.name}：调度已覆盖为 ${expr}`,
+      expr === null ? `${job.name}：已恢复原时间` : `${job.name}：运行时间已改为 ${expr}`,
       'ok',
     );
     render(root, ctx, { silent: true });
@@ -280,7 +351,7 @@ function openOverrideDialog(job, root, ctx) {
   saveBtn.addEventListener('click', () => {
     const expr = back.querySelector('#ov-expr').value.trim();
     if (!expr) {
-      errEl.textContent = '调度表达式不能为空';
+      errEl.textContent = '运行计划不能为空';
       return;
     }
     submit(expr);
@@ -310,7 +381,7 @@ function rowOfTask(root, name) {
   );
 }
 
-/** 运行记录弹窗：复用任务列表里那套 `/api/runs` 接口，字段完全一样。 */
+/** 运行记录弹窗：复用任务卡片里那套 `/api/runs` 接口，字段完全一样。 */
 async function openRunsDialog(name) {
   // 同源 cookie 就够了（原来那个头引用的全局从未定义，见安全审计 L13）
   const res = await fetch(
@@ -346,7 +417,7 @@ async function openRunsDialog(name) {
           ${detail}`;
         })
         .join('')
-    : '<tr><td colspan="5" class="hint">还没有运行记录。点「立即执行」跑一次就会出现。</td></tr>';
+    : '<tr><td colspan="5" class="hint">还没有运行记录。点「运行一次」跑一次就会出现。</td></tr>';
 
   const back = document.createElement('div');
   back.className = 'dialog-back';
@@ -381,11 +452,9 @@ export async function render(root, ctx, opts = {}) {
         <p class="hint" style="margin-top:var(--sp-2)">${esc(res.error)}</p>
         <div style="margin-top:var(--sp-3)">
           <button class="btn" id="retry">重试</button>
-          <button class="btn ghost" id="back-tasks">回任务列表</button>
         </div>
       </div>`;
     root.querySelector('#retry').addEventListener('click', () => render(root, ctx));
-    root.querySelector('#back-tasks').addEventListener('click', () => ctx.navigate('#/tasks'));
     return null;
   }
 
@@ -406,11 +475,11 @@ export async function render(root, ctx, opts = {}) {
   const filesHtml = files.length
     ? files.map((f) => fileCard(f, dirJobByPath.get(normPath(f.path)))).join('')
     : `<div class="card empty">
-         <p><b>TASKS_DIR 里还没有可识别的脚本。</b></p>
+         <p><b>任务目录里还没有可识别的脚本。</b></p>
          <p class="hint" style="margin-top:var(--sp-2)">
            把 <span class="mono">.js</span> / <span class="mono">.py</span> /
            <span class="mono">.sh</span> 文件放进 <span class="mono">TASKS_DIR</span>
-           （环境变量），并在文件头写清任务信息，它就会自动出现在这里：<br>
+           （环境变量），并在文件开头写清任务信息，它就会自动出现在这里：<br>
            <span class="mono">// name: hello</span><br>
            <span class="mono">// cron: */5 * * * *</span><br>
            <span class="mono">// runtime: node</span><br>
@@ -421,17 +490,17 @@ export async function render(root, ctx, opts = {}) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">脚本文件（${files.length}）</span>
+        <span class="section-title">目录脚本（${files.length}）</span>
         <div class="card-actions">
           <button class="btn" id="upload-btn" title="上传 .js / .mjs / .py / .sh 单文件，或解压 .zip 到任务目录">上传脚本</button>
           <input type="file" id="upload-input" accept=".js,.mjs,.py,.sh,.zip" hidden>
           <button class="btn" id="refresh-btn">刷新</button>
-          <button class="btn primary" id="new-script-btn" title="在面板数据库里创建一条脚本任务；TASKS_DIR 里的目录任务放文件就会自动出现">新建面板脚本任务</button>
+          <button class="btn primary" id="new-script-btn" title="在面板上创建一条脚本任务；任务目录里的脚本放文件就会自动出现">新建脚本任务</button>
         </div>
       </div>
       <p class="hint" style="margin-bottom:var(--sp-3)">
-        目录任务来自 <span class="mono">TASKS_DIR</span>（文件头即定义，改调度要改文件，
-        或在卡片上「覆盖调度」）；面板任务存在面板的数据库里（路径 / 运行时 / 调度都能改）。
+        任务目录里的脚本：运行时间写在文件里，改时间可以点卡片上的「改运行时间」（文件本身不动）。
+        在面板创建的脚本存在面板里，路径 / 运行时 / 运行时间都能改。
         运行时可以是 Node / Bun / Python / Shell。
       </p>
       <div class="grid">${filesHtml}</div>
@@ -439,15 +508,12 @@ export async function render(root, ctx, opts = {}) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">面板脚本任务（${panelJobs.length}）</span>
-        <div class="card-actions">
-          <a class="btn ghost" href="#/tasks">在任务列表里看全部</a>
-        </div>
+        <span class="section-title">面板创建的脚本（${panelJobs.length}）</span>
       </div>
       ${
         panelJobs.length
           ? `<div class="grid">${panelJobs.map(panelJobCard).join('')}</div>`
-          : '<div class="card empty">还没有面板脚本任务。点右上角「新建面板脚本任务」，或从上面任意一份文件「基于此文件建面板任务」。</div>'
+          : '<div class="card empty">还没有在面板创建的脚本。点右上角「新建脚本任务」，或从上面任意一份文件「用这个文件建任务」。</div>'
       }
     </div>`;
 
@@ -511,15 +577,15 @@ export async function render(root, ctx, opts = {}) {
       return;
     }
 
-    // 运行级 / 定义级动作。删除和暂停要确认（与任务列表同一套理由）：
-    // 删除对目录任务是墓碑、对面板任务不可逆；暂停会停掉排班。
+    // 运行级 / 定义级动作。删除和暂停要确认（与插件任务页同一套理由）：
+    // 删除对目录脚本是墓碑、对面板脚本不可逆；暂停会停掉排班。
     const isDir = btn.dataset.dir === '1';
     const confirmSpec = {
       delete: {
         question: `删除脚本任务 \`${name}\`？`,
         detail: isDir
-          ? '目录任务：删除后不再调度，文件本身不动，卡片留在列表里可以恢复。'
-          : '面板任务：删掉就没了，运行历史一起消失，要重建得重新填路径和表达式。',
+          ? '任务目录里的脚本：删除后不再调度，文件本身不动，卡片留在列表里可以恢复。'
+          : '在面板创建的脚本：删掉就没了，运行历史一起消失，要重建得重新填路径和运行时间。',
         okText: '删除',
         risk: RISK.LOSS,
       },
@@ -536,7 +602,7 @@ export async function render(root, ctx, opts = {}) {
         { ...confirmSpec, plugin: SCRIPT_PLUGIN, name },
         {
           root,
-          locate: (r) => rowOfTask(r, name)?.querySelector('.plugin-actions') || null,
+          locate: (r) => rowOfTask(r, name)?.querySelector('.card-actions') || null,
         },
       );
       if (!yes) {
@@ -559,7 +625,7 @@ export async function render(root, ctx, opts = {}) {
     btn.disabled = false;
 
     const verb = {
-      run: '执行',
+      run: '运行',
       pause: '暂停',
       resume: '恢复',
       delete: '删除',

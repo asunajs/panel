@@ -206,7 +206,7 @@ register_cron('兑换', '0 10 * * *', runExchange, { lead_ms: 120_000 });
 ```
 
 - 单位毫秒，范围 `0 ~ 3600000`；`0` / 不填 = 不提前。
-- `jobs.lead_ms` 落库；任务列表显示「提前 Ns」，但 `schedule` 仍是用户设的 `0 10 * * *`。
+- `jobs.lead_ms` 落库；插件任务页显示「提前 Ns」，但 `schedule` 仍是用户设的 `0 10 * * *`。
 - 触发时载荷里的 `scheduledAt` 仍是**目标整点**，`leadMs` 是这次提前量；
   插件用 `scheduledAt` 当业务时间即可。
 
@@ -293,11 +293,22 @@ register_nav({ label: '兑换', icon: '🎁', path: 'exchange.html' });
 - **停用的插件不摆入口**。
 - ⚠ **`iframe` 不是安全边界**（安全审计 H1 更正）：同源 iframe 与父文档共享
   origin，插件页的 JS 可以直接 `parent.fetch('/api/…')`。真正的隔离来自
-  「插件页面在**另一个 origin** 上」—— 面板会默认把插件页放到主端口 +1
-  （见 `docs/configuration.md` 的 `PLUGIN_UI*`）。那个 origin 只服务
-  `/plugins/**` 与插件自己注册的路由，**没有面板 API**。
+  「插件页面在**另一个 origin** 上」—— 面板**默认**把插件页放到主端口 +1
+  （见 `docs/configuration.md` 的 `PLUGIN_UI*`）。那个 origin 服务
+  `/plugins/**`、插件自己注册的路由、以及**恰好 4 条**白名单面板接口
+  （`GET /api/state`、`GET /api/runs`、`GET /api/logs/stream`、
+  `POST /api/tasks/{plugin}/{name}/run` —— 插件页要读任务表/运行记录/日志流，
+  还要能点「现在跑一次」）。**上传插件、源码读写、任务编辑、测试运行这些
+  「等于执行代码」的接口都不在那个 origin 上**（404），那正是隔离的意义。
   面板还给 iframe 加了 `sandbox`（不含 `allow-top-navigation`），挡住插件页
   把整个面板导航走。
+- ⚠ **`sandbox` 在同源模式下不是安全边界**。一个同时带 `allow-scripts` 与
+  `allow-same-origin` 的 iframe，如果被框的文档与父页**同源**，它就够得到
+  `parent.document` —— 可以把自己的 `sandbox` 属性摘掉再重载，沙箱等于不存在。
+  而 `allow-same-origin` 又不能去掉（去掉它插件页就用不了会话与 localStorage），
+  所以：**默认同源 = 插件页与面板同等权限**（这是 v0.1.5 的明确取舍：插件是可信
+  代码）。真正的隔离是 `PLUGIN_UI=1`：插件页在另一个 origin 上，跨源时同源策略
+  接管，那个 origin 上只开 4 条白名单面板接口。
 - 页面里的相对路径 `fetch('api/xxx')` 调**插件自己注册的路由**（在插件 origin
   上解析，所以跨端口后依然同源，不需要 CORS）。绝对路径 `/api/...` 是**面板的**
   接口，插件页拿不到（这是有意的）。

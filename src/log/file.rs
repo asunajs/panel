@@ -37,7 +37,7 @@
 use super::{Level, LogEntry, Transport};
 use chrono::{Duration, Local, NaiveDate};
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -146,6 +146,7 @@ impl FileTransport {
         self
     }
 
+    /// 日志目录。运行视图回看历史时要用它定位 JSONL。
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -250,6 +251,61 @@ pub fn existing_files(dir: &Path, prefix: &str) -> Vec<(NaiveDate, PathBuf)> {
 /// 面板上要显示「日志已过期（保留 7 天）」而不是空白。
 pub fn has_day(dir: &Path, prefix: &str, date: NaiveDate) -> bool {
     daily_path(dir, prefix, date).exists()
+}
+
+/// 从盘上的 JSONL 里读某一次运行的历史日志。
+///
+/// 为什么需要它：SSE 只回灌**内存环**；进程一重启，旧运行的日志还在盘上，
+/// 内存里却没有了 —— 运行视图会误报「没有产生日志」。
+///
+/// 文件名日期可以直接从 run id 的前 8 位（`YYYYMMDD`）解析出来，通常只读
+/// 那一天的文件；解析不出来才退化成扫保留期内的所有文件。行数上限由调用方给，
+/// 到了就停 —— 一次运行打到几千行已经不正常，不能让一个坏 run 拖垮接口。
+pub fn read_run(dir: &Path, prefix: &str, run: &str, limit: usize) -> Vec<LogEntry> {
+    if run.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let date = run
+        .get(0..8)
+        .and_then(|s| NaiveDate::parse_from_str(s, "%Y%m%d").ok());
+    let files: Vec<PathBuf> = match date {
+        Some(d) => {
+            let mut files = vec![daily_path(dir, prefix, d)];
+            // 跨午夜的任务：run id 是开始时间，后半段日志会落到第二天的文件里。
+            if let Some(next) = d.succ_opt() {
+                files.push(daily_path(dir, prefix, next));
+            }
+            files
+        }
+        None => existing_files(dir, prefix)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect(),
+    };
+
+    let mut out = Vec::new();
+    for path in files {
+        let Ok(file) = File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(|l| l.ok()) {
+            // 便宜的前置过滤：绝大多数行跟这次运行无关，不值得先解析 JSON。
+            if !line.contains(run) {
+                continue;
+            }
+            let Some(entry) = LogEntry::from_json(&line) else {
+                continue;
+            };
+            if entry.run.as_deref() != Some(run) {
+                continue;
+            }
+            out.push(entry);
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 /// 写线程眼里的「当前这一天」。
@@ -478,7 +534,7 @@ fn cleanup(dir: &Path, prefix: &str, keep_days: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::log::Logger;
+    use crate::log::{Logger, Type};
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -519,6 +575,35 @@ mod tests {
         assert_eq!(rows[0]["scope"], "mcloud");
         assert_eq!(rows[0]["msg"], "账号 136****6001 失败", "落盘的必须是脱敏后的");
         assert!(rows[0]["ts"].as_str().unwrap().contains('T'));
+    }
+
+    #[test]
+    fn read_run_filters_history_by_run_id() {
+        let dir = tmpdir("read-run");
+        let date = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let path = daily_path(&dir, "plugin", date);
+        let mk = |run: &str, msg: &str| LogEntry {
+            ts: Local::now(),
+            typ: Type::Info,
+            scope: "mcloud-daily".into(),
+            plugin: Some("mcloud-daily".into()),
+            run: Some(run.into()),
+            msg: msg.into(),
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                mk("20261019-094816-0000", "a").to_json(),
+                mk("20261019-100000-0000", "b").to_json()
+            ),
+        )
+        .unwrap();
+
+        let got = read_run(&dir, "plugin", "20261019-094816-0000", 10);
+        assert_eq!(got.len(), 1, "只该读回匹配的那一次运行");
+        assert_eq!(got[0].msg, "a");
+        assert!(read_run(&dir, "plugin", "20261019-094816-0000", 0).is_empty());
     }
 
     #[test]

@@ -45,8 +45,8 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_ALLOW_IPS` | 空 | 登录**蜜罐封禁**的白名单：`127.0.0.1,192.168.1.7`。**只认单个 IP**（IPv4-mapped 写法会归一化）—— 网段与主机名会在启动日志里点名为「已忽略」。豁免封禁**与退避**，口令错了照样拒；反代下建议配上（全员共用一个来源 IP，它被封等于谁都进不来） |
 | `HOST_API_ALLOW_PRIVATE` | 空 | `1` → 关闭插件出站请求的 **SSRF 防护**（允许 `http_fetch` / `ws_open` 访问回环与云元数据）。默认允许局域网、只拦回环 + 链路本地，见 [host-api.md](host-api.md#出站目标的限制ssrf-防护)。关掉会打 warn |
 | `PANEL_JITTER_SEED` | 空 | 抖动的**可复现**开关：`种子 + 理论时刻` 的确定函数。排障用；`@every` 跨重启不可复现 |
-| `PLUGIN_UI` | 空（同源） | `1`/`true`/`yes`/`on` → 开启插件页面隔离，按主端口 + 1 推导；`0`/`false`/`no`/`off` → 保持同源。插件是可信代码，默认不隔离 |
-| `PLUGIN_UI_ADDR` | 空 | 显式指定插件页面监听的 `ip:port`，**隐含开启隔离**。`BIND_ADDR` 是 `0.0.0.0` 时必须显式设（否则无法推导 origin，会回退到同源并 warn） |
+| `PLUGIN_UI` | 空（同源） | `1`/`true`/`yes`/`on` → 开启插件页面隔离，按主端口 + 1 推导（端口被占会往后试，最多 8 个）；`0`/`false`/`no`/`off` → 保持同源。插件是可信代码，默认不隔离。⚠ **同源模式下 iframe 的 `sandbox` 不是安全边界**：同时有 `allow-scripts` 与 `allow-same-origin` 时，被框文档能 `parent.document` 把 sandbox 属性摘掉（MDN 明确警告）。真正的边界是 `PLUGIN_UI=1` 的独立 origin —— 那个 origin 上只开 4 条白名单面板接口，上传/源码/任务编辑一律 404 |
+| `PLUGIN_UI_ADDR` | 空 | 显式指定插件页面监听的 `ip:port`，**隐含开启隔离**。不设时按「主监听地址 + 主端口+1」推导（`0.0.0.0` 也可以：浏览器侧用 `location.hostname` + 这个端口自己拼，端口被占会往后试 8 个）。显式设了只试这一个地址，失败就回退同源并 warn |
 | `PLUGIN_UI_ORIGIN` | 空 | 浏览器看到的插件 origin，如 `https://plugins.example.com`。**反代 + TLS 时必须设**：内部仍绑 `PLUGIN_UI_ADDR`，对外由反代转到它。不设时前端按 `location.hostname + 端口` 推导 |
 | `TEST_RUN_BURST` / `TEST_RUN_REFILL_MS` | `10` / `1000` | 测试运行的令牌桶（见 [§16.16](changelog/14-15-throughput-and-editing.md#1616-apitest-限流)） |
 | `TEST_RUN_MAX_PENDING` | `2` | 同时在排队 / 执行的测试数上限。**这才是保护引擎的那道闸**；`0` 等于关掉测试运行 |

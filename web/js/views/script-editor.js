@@ -65,7 +65,7 @@ function runtimeBadge(runtime) {
 
 function runtimeOptions(current, runtimeByKind) {
   const rows = [
-    ['', '自动（按扩展名和文件头）'],
+    ['', '自动（按扩展名和文件里的设置）'],
     ['node', 'Node'],
     ['bun', 'Bun'],
     ['python3', 'Python 3'],
@@ -74,7 +74,7 @@ function runtimeOptions(current, runtimeByKind) {
   return rows
     .map(([value, label]) => {
       if (!value) {
-        return `<option value="" ${current ? '' : 'selected'} title=".js → node、.py → python3、.sh → sh；文件头里的 runtime 优先">${esc(
+        return `<option value="" ${current ? '' : 'selected'} title=".js → node、.py → python3、.sh → sh；文件里设置的运行时优先">${esc(
           label,
         )}</option>`;
       }
@@ -137,7 +137,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
             (f) =>
               `<option value="${esc(f.path)}" ${f.path === path ? 'selected' : ''} ${
                 f.valid === false ? 'disabled' : ''
-              }>${esc(f.path)}${f.valid === false ? '（文件头无效）' : ''}</option>`,
+              }>${esc(f.path)}${f.valid === false ? '（设置有误）' : ''}</option>`,
           )
           .join('')
       : '<option value="">（TASKS_DIR 里没有脚本文件）</option>');
@@ -145,17 +145,17 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
   root.innerHTML = `
     <div class="breadcrumb">
       <a href="#/scripts">脚本任务</a><span>/</span>
-      <span>${isEdit ? '编辑面板脚本任务' : '新建面板脚本任务'}</span>
+      <span>${isEdit ? '编辑脚本任务' : '新建脚本任务'}</span>
     </div>
 
     <div class="section">
       <div class="card">
         <div class="card-head">
-          <span class="card-title">任务定义</span>
+          <span class="card-title">任务设置</span>
           <span class="card-sub">${
             isEdit
-              ? '名称是任务身份，不能改；路径 / 运行时 / 调度 / 参数都能改'
-              : '路径指向 TASKS_DIR 里的文件；运行时留「自动」就按扩展名 / 文件头推导'
+              ? '名称是任务身份，不能改；路径 / 运行时 / 运行时间 / 参数都能改'
+              : '路径指向 TASKS_DIR 里的文件；运行时留「自动」就按扩展名 / 文件里的设置推导'
           }</span>
         </div>
 
@@ -177,7 +177,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
 
         <div class="row">
           <div class="field">
-            <label class="field-label" for="f-expr">调度表达式</label>
+            <label class="field-label" for="f-expr">运行计划</label>
             <input class="input mono" id="f-expr" spellcheck="false"
                    placeholder="*/5 * * * * * 或 @every 30s" value="${esc(expr)}">
           </div>
@@ -245,11 +245,11 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
       return;
     }
     if (chosen.valid === false) {
-      errEl.textContent = `这份文件的文件头不合法：${chosen.error || '原因未知'}`;
+      errEl.textContent = `这份文件的设置不正确：${chosen.error || '原因未知'}`;
       return;
     }
     if (!exprValue) {
-      errEl.textContent = '调度表达式不能为空';
+      errEl.textContent = '运行计划不能为空';
       return;
     }
 
@@ -314,7 +314,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
   return null;
 }
 
-/** 目录任务：只改调度覆盖（文件头是定义，面板不改文件）。 */
+/** 任务目录里的脚本：只改运行时间（文件里的设置是定义，面板不改文件）。 */
 function renderOverrideForm(root, ctx, job) {
   const declared = job.schedule || '';
   const current = job.override_expr || '';
@@ -322,7 +322,7 @@ function renderOverrideForm(root, ctx, job) {
   root.innerHTML = `
     <div class="breadcrumb">
       <a href="#/scripts">脚本任务</a><span>/</span>
-      <span>目录任务 · ${esc(job.name)}</span>
+      <span>任务目录里的脚本 · ${esc(job.name)}</span>
     </div>
 
     <div class="section">
@@ -330,10 +330,10 @@ function renderOverrideForm(root, ctx, job) {
         <div class="card-head">
           <div class="card-head-main">
             <span class="card-title mono">${esc(job.name)}</span>
-            <span class="badge idle">目录任务</span>
+            <span class="badge idle">任务目录</span>
             ${runtimeBadge(job.runtime)}
           </div>
-          <span class="card-sub">定义在 TASKS_DIR 的文件头里</span>
+          <span class="card-sub">运行时间写在 TASKS_DIR 的文件里</span>
         </div>
 
         <div class="row">
@@ -342,7 +342,7 @@ function renderOverrideForm(root, ctx, job) {
             <span class="mono dim">${esc(job.script || '—')}</span>
           </div>
           <div class="field">
-            <span class="field-label">文件头声明的调度</span>
+            <span class="field-label">文件里设置的运行时间</span>
             <span class="mono">${esc(declared || '—')}</span>
           </div>
           <div class="field">
@@ -354,12 +354,12 @@ function renderOverrideForm(root, ctx, job) {
         <div class="divider"></div>
 
         <div class="field">
-          <label class="field-label" for="f-expr">面板覆盖的调度表达式</label>
+          <label class="field-label" for="f-expr">新的运行时间</label>
           <input class="input mono" id="f-expr" spellcheck="false"
-                 placeholder="留空 = 不覆盖" value="${esc(current)}">
+                 placeholder="留空 = 不改" value="${esc(current)}">
           <span class="field-sub dim">
-            保存后只改<b>调度</b>：文件头里的 cron 原样保留，重启 / 重新发现都不丢；
-            点「撤销覆盖」回到文件里的值。
+            保存后只改运行时间：文件里设置的运行时间原样保留，重启 / 重新发现都不丢；
+            点「恢复原时间」回到文件里的值。
           </span>
         </div>
 
@@ -367,8 +367,8 @@ function renderOverrideForm(root, ctx, job) {
 
         <div class="divider"></div>
         <div class="row" style="align-items:center">
-          <button class="btn primary" id="save-btn">${current ? '保存覆盖' : '设置覆盖'}</button>
-          ${current ? '<button class="btn" id="clear-btn">撤销覆盖</button>' : ''}
+          <button class="btn primary" id="save-btn">${current ? '保存运行时间' : '设置运行时间'}</button>
+          ${current ? '<button class="btn" id="clear-btn">恢复原时间</button>' : ''}
           <button class="btn ghost" id="cancel-btn">返回</button>
           <span class="hint" id="save-hint"></span>
         </div>
@@ -385,7 +385,7 @@ function renderOverrideForm(root, ctx, job) {
     const res = await editJob('__script__', job.name, expr);
     btn.disabled = false;
     if (res.ok) {
-      ctx.toast(expr === null ? `${job.name}：已撤销覆盖` : `${job.name}：调度已覆盖`, 'ok');
+      ctx.toast(expr === null ? `${job.name}：已恢复原时间` : `${job.name}：运行时间已改`, 'ok');
       ctx.navigate('#/scripts');
     } else {
       errEl.textContent = res.error;
@@ -395,7 +395,7 @@ function renderOverrideForm(root, ctx, job) {
   $('#save-btn').addEventListener('click', () => {
     const expr = $('#f-expr').value.trim();
     if (!expr) {
-      $('#form-err').textContent = '表达式为空。要回到文件里的值请点「撤销覆盖」。';
+      $('#form-err').textContent = '运行计划不能为空。要回到文件里的值请点「恢复原时间」。';
       return;
     }
     submit(expr);

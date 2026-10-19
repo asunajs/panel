@@ -18,7 +18,7 @@
 import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname, resolve, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,6 +48,7 @@ const EXPECTED = [
   'css/components.css',
   'js/app.js',
   'js/api.js',
+  'js/prefs.js',
   'js/editor.js',
   'js/confirm.js',
   'js/mock.js',
@@ -334,27 +335,69 @@ check(
   );
   check(pluginListSrc.includes('runtimes'), 'plugin-list.js 读 /api/state 的 runtimes 做可用性');
   check(pluginListSrc.includes('unavailable'), '不可用的引擎选项会被禁用并带原因');
+  check(!pluginListSrc.includes('badge lang js'), '插件卡片不再重复挂 JavaScript 徽章');
+  check(!pluginListSrc.includes('没有自带配置页'), '没有配置页的插件卡片不再写说明');
 
-  // 任务列表：脚本任务的 kind/script/runtime/source 不能被丢掉。
-  const taskListSrc2 = readFileSync(join(REPO, 'web/js/views/task-list.js'), 'utf8');
-  for (const field of ['script:', 'runtime:', 'source:']) {
-    check(taskListSrc2.includes(field), `task-list.js 的 fromJob 保留 ${field.replace(':', '')}`);
-  }
-  check(/\bkind\s*[,:]/.test(taskListSrc2), 'task-list.js 的 fromJob 保留 kind');
-  check(taskListSrc2.includes("j.kind === 'script'"), 'task-list.js 认出 kind=script');
+  // 执行引擎设置默认隐藏，只有「设置」里开启才显示（用户口径）。
+  //
+  // 这里不只查关键字：直接跑一遍 prefs 模块，确认默认值与开关都成立。
+  // 关键字检查只能证明"写了"，跑一遍才能证明"默认是隐藏的"。
+  const prefsSrc = readFileSync(join(WEB, 'js/prefs.js'), 'utf8');
   check(
-    /j\.kind === 'script' \? 'script' : 'plugin'/.test(taskListSrc2),
-    'kind 缺失 / 为 plugin 的插件任务仍按插件任务渲染（防御性默认）',
+    /v === null \? fallback : v === '1'/.test(prefsSrc),
+    'prefs.js 没存过值时按默认（隐藏）走',
   );
-  check(taskListSrc2.includes('data-kind'), '任务卡片带 data-kind（编辑走不同表单）');
-  check(taskListSrc2.includes('目录任务') && taskListSrc2.includes('面板任务'),
-    '脚本任务区分目录任务 / 面板任务');
-  check(taskListSrc2.includes("rt === 'python3'") && taskListSrc2.includes("rt === 'sh'"),
-    '脚本运行时映射了 python3 / sh');
-  check(taskListSrc2.includes("ctx.navigate('#/scripts/new')"),
-    '任务列表有「新建脚本任务」入口（#/scripts/new）');
-  check(taskListSrc2.includes('#/scripts/edit/'),
-    '任务列表的脚本任务编辑跳到 #/scripts/edit/{name}');
+  check(
+    pluginListSrc.includes('showPluginEngineUi'),
+    'plugin-list.js 按本地偏好决定是否渲染执行引擎设置',
+  );
+  check(
+    /runtimeRow\s*=\s*showEngine\s*\?/.test(pluginListSrc),
+    '关闭时执行引擎设置整块不渲染（不是用 CSS 藏起来）',
+  );
+  const appSrcPrefs = readFileSync(join(WEB, 'js/app.js'), 'utf8');
+  check(appSrcPrefs.includes('s-engine-ui'), '设置页有「显示执行引擎设置」开关');
+  check(appSrcPrefs.includes('setPluginEngineUi'), '设置页的开关会写回本地偏好');
+
+  {
+    const store = new Map();
+    const prevLocalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    try {
+      const prefs = await import(
+        `${pathToFileURL(join(WEB, 'js/prefs.js')).href}?t=${Date.now()}`
+      );
+      check(prefs.showPluginEngineUi() === false, '执行引擎设置默认隐藏');
+      prefs.setPluginEngineUi(true);
+      check(prefs.showPluginEngineUi() === true, '设置里开启后执行引擎设置显示');
+      prefs.setPluginEngineUi(false);
+      check(prefs.showPluginEngineUi() === false, '设置里关闭后重新隐藏');
+    } finally {
+      if (prevLocalStorage === undefined) delete globalThis.localStorage;
+      else globalThis.localStorage = prevLocalStorage;
+    }
+  }
+
+  // 插件任务页只放插件任务：脚本任务全部在脚本任务页，一个页面不混两类。
+  const taskListSrc2 = readFileSync(join(REPO, 'web/js/views/task-list.js'), 'utf8');
+  check(taskListSrc2.includes("j.kind !== 'script'"),
+    'task-list.js 过滤掉 kind=script（插件任务页不混脚本任务）');
+  check(!taskListSrc2.includes("ctx.navigate('#/scripts/new')"),
+    '插件任务页没有「新建脚本任务」入口');
+  check(!taskListSrc2.includes('#/scripts'),
+    '插件任务页不引用脚本任务路由');
+  check(taskListSrc2.includes('插件任务（'), '插件任务页标题明确写「插件任务」');
+  check(taskListSrc2.includes('data-kind="plugin"'), '插件任务卡片带 data-kind=plugin');
+  check(!taskListSrc2.includes('badge lang js'), '插件任务卡片不再重复挂 JavaScript 徽章');
+  check(
+    taskListSrc2.includes('task-summary') && taskListSrc2.includes('task-details'),
+    '插件任务卡片默认只露摘要，详情折叠',
+  );
+  check(taskListSrc2.includes('source:'), 'task-list.js 的 fromJob 保留 source');
 
   // 脚本总览与编辑器：调对接口、用既有任务接口，不自己发明第三套。
   const scriptListSrc = readFileSync(join(REPO, 'web/js/views/script-list.js'), 'utf8');
@@ -362,9 +405,33 @@ check(
   check(scriptListSrc.includes("'__script__'"), 'script-list.js 用保留插件名 __script__');
   check(scriptListSrc.includes('TASKS_DIR'), 'script-list.js 显示 TASKS_DIR 提示');
   check(scriptListSrc.includes('fileCard') && scriptListSrc.includes('panelJobCard'),
-    'script-list.js 同时渲染目录文件与面板任务');
-  check(scriptListSrc.includes('覆盖调度'), '目录任务可以覆盖调度');
-  check(scriptListSrc.includes('editJob(SCRIPT_PLUGIN'), '覆盖调度走已有的 editJob');
+    'script-list.js 同时渲染目录脚本与在面板创建的脚本');
+  check(scriptListSrc.includes('改运行时间'), '目录脚本可以改运行时间');
+  check(scriptListSrc.includes('editJob(SCRIPT_PLUGIN'), '改运行时间走已有的 editJob');
+  check(scriptListSrc.includes('目录脚本（') && scriptListSrc.includes('面板创建的脚本（'),
+    '脚本任务页把目录脚本 / 面板创建的脚本分成两段');
+  check(scriptListSrc.includes("rt === 'python3'") && scriptListSrc.includes("rt === 'sh'"),
+    '脚本任务页映射了 python3 / sh 运行时');
+  check(scriptListSrc.includes('任务目录') && scriptListSrc.includes('在面板创建'),
+    '脚本任务页用「任务目录 / 在面板创建」区分来源');
+  check(
+    scriptListSrc.includes('task-summary') && scriptListSrc.includes('task-details'),
+    '脚本任务卡片默认只露摘要，详情折叠',
+  );
+  check(!scriptListSrc.includes('#/tasks'), '脚本任务页不跳到插件任务页');
+  check(!taskListSrc2.includes("'__script__'"), '插件任务页不出现内部脚本插件名');
+
+  // 运行记录横幅：脚本任务不能露内部名 `__script__`，也不能链回插件任务页。
+  const logViewSrc = readFileSync(join(REPO, 'web/js/views/log-view.js'), 'utf8');
+  check(logViewSrc.includes("run.plugin === '__script__'"), '运行记录认出脚本任务');
+  check(logViewSrc.includes("'看脚本任务'") && logViewSrc.includes("'#/scripts'"),
+    '脚本运行记录链到脚本任务页');
+  check(logViewSrc.includes('function pluginLabel') && logViewSrc.includes("'脚本任务'"),
+    '日志筛选不露内部脚本插件名');
+  check(
+    logViewSrc.includes('/api/logs/history') && logViewSrc.includes('historyGen'),
+    '运行视图会从 JSONL 读历史日志（重启后仍能查看）',
+  );
 
   const scriptEditorSrc = readFileSync(join(REPO, 'web/js/views/script-editor.js'), 'utf8');
   check(scriptEditorSrc.includes('createScriptJob'), 'script-editor.js 用 createScriptJob');
@@ -387,6 +454,15 @@ check(
   const indexSrc = readFileSync(join(WEB, 'index.html'), 'utf8');
   check(indexSrc.includes('href="#/scripts"') && indexSrc.includes('data-view="scripts"'),
     '侧边栏有「脚本任务」入口');
+  check(/<span>插件任务<\/span>/.test(indexSrc), '侧边栏「全部任务」改名为「插件任务」');
+  check(/<span>脚本任务<\/span>/.test(indexSrc), '侧边栏「脚本文件」改名为「脚本任务」');
+  check(appSrc.includes("tasks: '插件任务'"), '页面标题：插件任务');
+  check(appSrc.includes("scripts: '脚本任务'"), '页面标题：脚本任务');
+  check(appSrc.includes('>插件任务</span>') && appSrc.includes('>脚本任务</span>'),
+    '仪表盘把插件任务与脚本任务分开列表');
+  check(appSrc.includes("j.kind !== 'script'") && appSrc.includes("j.kind === 'script'"),
+    '仪表盘按 kind 拆分两类任务');
+  check(!appSrc.includes('任务概览'), '仪表盘不再用一张混合的「任务概览」表');
 
   // 装配完整性：assets.rs 必须登记这两个新视图（否则生产模式 404）。
   const assetsSrc = readFileSync(join(REPO, 'src/assets.rs'), 'utf8');
@@ -400,6 +476,10 @@ check(
     check(!/runPy|\/api\/test\/py|\bSAMPLE_CODE\[/.test(src),
       `${f} 里没有 Python 试跑 / Python 示例代码`);
   }
+  check(
+    !readFileSync(join(REPO, 'web/js/views/task-editor.js'), 'utf8').includes('badge lang js'),
+    '任务编辑器不再重复挂 JavaScript 徽章',
+  );
   const mockSrc = readFileSync(join(REPO, 'web/js/mock.js'), 'utf8');
   check(!/SAMPLE_CODE\.py|lang: 'py'|from host_api/.test(mockSrc),
     'mock.js 里没有 Python 示例任务 / 示例代码');
@@ -879,6 +959,86 @@ function nonCommentStars(src) {
     tickOffenders.join(' ; '),
   );
 }
+
+
+// ---------------------------------------------------------------- 插件 iframe 的 sandbox
+
+/*
+  为什么单独钉这一条：`sandbox` 里同时有 `allow-scripts` 与 `allow-same-origin` 时，
+  如果被框文档与父页**同源**，它就能 `parent.document` 摘掉 sandbox 属性再重载自己
+  —— 也就是说**同源模式下 sandbox 不是安全边界**。
+
+  这个项目 v0.1.5 起默认就是同源（插件是可信代码），所以这里钉的不是「逃逸不存在」
+  （它存在），而是：
+    ① sandbox 只有一个生成处（视图里硬编码 → 改一处漏一处）；
+    ② 同源模式下 `allow-same-origin` **必须**在（去掉它插件页就用不了会话/存储）；
+    ③ 隔离开启时 `pluginUiUrl` 真的拼到第二个 origin；
+    ④ 界面在未隔离时会明确告诉操作者「它不是边界」。
+*/
+async function checkPluginFrameSandbox() {
+  const apiPath = join(WEB, 'js', 'api.js');
+  // api.js 顶层不碰 location/document，可以直接 import（Node 里跑得动）。
+  globalThis.location = { protocol: 'http:', hostname: '127.0.0.1' };
+  const api = await import(pathToFileURL(apiPath).href);
+
+  api.setPluginUiOrigin(null, null); // 退回同源（默认）
+  const same = api.pluginFrameSandbox();
+  check(
+    same.includes('allow-same-origin'),
+    '同源模式下 sandbox 仍带 allow-same-origin（去掉它插件页就调不通自己的接口）',
+    same,
+  );
+  check(
+    same.includes('allow-scripts') && same.includes('allow-forms'),
+    'sandbox 保留 allow-scripts / allow-forms',
+    same,
+  );
+  check(api.pluginIsolationEnabled() === false, 'pluginIsolationEnabled() 在同源时为 false');
+  check(
+    api.PLUGIN_ISOLATION_HINT.includes('同源') && api.PLUGIN_ISOLATION_HINT.includes('不是安全边界'),
+    '界面文案明说「同源 + sandbox 不是安全边界」（不解释它就会被当成隔离）',
+    api.PLUGIN_ISOLATION_HINT.slice(0, 40),
+  );
+
+  api.setPluginUiOrigin(null, 8788); // 第二个 origin
+  check(api.pluginIsolationEnabled() === true, 'pluginIsolationEnabled() 在跨源时为 true');
+  check(
+    api.pluginFrameSandbox() === same,
+    'sandbox 只有一个生成处（两种模式同一份，视图里不许再写一遍）',
+  );
+  check(
+    api.pluginUiUrl('/plugins/x/index.html').startsWith('http://127.0.0.1:8788/'),
+    '跨源时 pluginUiUrl 拼到第二个 origin',
+    api.pluginUiUrl('/plugins/x/index.html'),
+  );
+
+  api.setPluginUiOrigin(null, null);
+  check(
+    api.pluginUiUrl('/plugins/x/index.html') === '/plugins/x/index.html',
+    '退回同源时 pluginUiUrl 保持相对路径',
+  );
+
+  // 静态面：视图里不许硬编码 sandbox 串
+  const offenders = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, e.name);
+      if (e.isDirectory()) walk(abs);
+      else if (e.name.endsWith('.js')) {
+        const src = readFileSync(abs, 'utf8');
+        if (/sandbox\s*=\s*"allow-/.test(src)) offenders.push(relative(REPO, abs));
+      }
+    }
+  };
+  walk(join(WEB, 'js'));
+  check(
+    offenders.length === 0,
+    'sandbox 属性只由 pluginFrameSandbox() 生成（视图里没有硬编码）',
+    offenders.join(' ; '),
+  );
+}
+
+await checkPluginFrameSandbox();
 
 // ---------------------------------------------------------------- 结果
 

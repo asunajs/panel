@@ -147,7 +147,7 @@ const evalIn = async (cdp, S, expression) => {
 };
 
 /**
- * 高危动作（删除 / 暂停 / 停用 / 撤销覆盖）会先出内联确认条，这里点掉它。
+ * 高危动作（删除 / 暂停 / 停用 / 恢复原时间）会先出内联确认条，这里点掉它。
  *
  * 单独做成模块级函数而不是写进每个镜头里：一旦哪个镜头忘了走这一步，
  * 表现就是「点了没反应」的假失败 —— 而那个假失败恰恰证明确认条拦住了动作。
@@ -393,7 +393,7 @@ const SHOTS = (o) => [
            if (!c) return { missing: true };
            const txt = c.textContent;
            return {
-             hasBadge: /覆盖/.test(txt),
+             hasBadge: /已改时间/.test(txt),
              hasUndo: !!c.querySelector('[data-act="uncover"]'),
              hasEdit: !!c.querySelector('[data-act="edit"]'),
              showsEffective: /@every 7s/.test(txt),
@@ -402,13 +402,23 @@ const SHOTS = (o) => [
            };
          })()`,
       );
-      note('卡片上出现「覆盖」标记', shown.hasBadge === true, JSON.stringify(shown));
-      note('卡片上同时显示生效值与代码里的值', shown.showsEffective && shown.showsDeclared, JSON.stringify(shown));
-      note('有「撤销覆盖」按钮', shown.hasUndo === true);
+      note('卡片上出现「已改时间」标记', shown.hasBadge === true, JSON.stringify(shown));
+      note('卡片上同时显示生效值与插件里的值', shown.showsEffective && shown.showsDeclared, JSON.stringify(shown));
+      note('有「恢复原时间」按钮', shown.hasUndo === true);
       note('插件任务有「编辑」按钮（不是只读）', shown.hasEdit === true);
       note('插件任务也有「删除」按钮（立墓碑，可恢复）', shown.hasDelete === true);
 
-      // 点「撤销覆盖」→ 回到代码声明的值
+      // 展开详情再截图：默认折叠时，生效值 / 默认值 / 低频按钮都在 details 里。
+      await ev(
+        `(function () {
+           const c = ${card(target)};
+           const d = c && c.querySelector('details.task-details');
+           if (d) d.open = true;
+           return !!d;
+         })()`,
+      );
+
+      // 点「恢复原时间」→ 回到插件里声明的值
       const clicked = await ev(
         `(function () {
            const c = ${card(target)};
@@ -418,7 +428,7 @@ const SHOTS = (o) => [
            return true;
          })()`,
       );
-      note('撤销覆盖也要确认', clicked === true && (await confirmIfAny(cdp, S)) === true);
+      note('恢复原时间也要确认', clicked === true && (await confirmIfAny(cdp, S)) === true);
       let gone = false;
       for (let i = 0; i < 40 && !gone; i += 1) {
         await sleep(150);
@@ -429,7 +439,7 @@ const SHOTS = (o) => [
            })()`,
         );
       }
-      note('撤销后回到代码声明的 @every 30s、覆盖标记消失', gone === true);
+      note('恢复后回到插件里的 @every 30s、已改时间标记消失', gone === true);
 
       // ---- 删除 → 折叠 → 恢复（同一张卡片走完整条路）----
       const del = await ev(
@@ -504,7 +514,7 @@ const SHOTS = (o) => [
            })()`,
         );
       }
-      note('恢复后回到正常卡片（有「立即执行」）', back === true);
+      note('恢复后回到正常卡片（有「运行一次」）', back === true);
 
       const failed = results.filter((r) => !r.ok);
       return {
@@ -688,7 +698,7 @@ const SHOTS = (o) => [
       const t1 = await clickAndWaitToast('[data-task="hit-report"] [data-act="run"]');
       results.push(
         note(
-          '点「立即执行」发出请求并提示成功',
+          '点「运行一次」发出请求并提示成功',
           !t1.hidden && /(^|\s)ok(\s|$)/.test(t1.cls) && /成功/.test(t1.text),
           `${t1.cls} "${t1.text}"`,
         ),
@@ -767,7 +777,7 @@ const SHOTS = (o) => [
       const runsAfter = await runsOf('always-fails');
       results.push(
         note(
-          '点一次「立即执行」只跑一次（委托监听没有累积）',
+          '点一次「运行一次」只跑一次（委托监听没有累积）',
           runsBefore !== null && runsAfter === runsBefore + 1,
           `runs ${runsBefore} → ${runsAfter}`,
         ),

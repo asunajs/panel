@@ -262,6 +262,30 @@ impl LogEntry {
         obj.insert("msg".into(), serde_json::Value::String(self.msg.clone()));
         serde_json::Value::Object(obj).to_string()
     }
+
+    /// 从 JSONL 的一行解析回来（运行视图回看历史用）。
+    ///
+    /// 只认 [`LogEntry::to_json`] 写出的形状；坏行 / 旧格式返回 `None`，
+    /// 调用方跳过即可 —— 一条坏日志不该让整次回看失败。
+    pub fn from_json(line: &str) -> Option<LogEntry> {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let ts = DateTime::parse_from_rfc3339(v.get("ts")?.as_str()?)
+            .ok()?
+            .with_timezone(&Local);
+        let typ = Type::parse(v.get("type")?.as_str()?)?;
+        let scope = v.get("scope")?.as_str()?.to_string();
+        let plugin = v.get("plugin").and_then(|x| x.as_str()).map(str::to_string);
+        let run = v.get("run").and_then(|x| x.as_str()).map(str::to_string);
+        let msg = v.get("msg")?.as_str()?.to_string();
+        Some(LogEntry {
+            ts,
+            typ,
+            scope,
+            plugin,
+            run,
+            msg,
+        })
+    }
 }
 
 /* ================================ Transport ================================ */
@@ -1243,6 +1267,24 @@ mod tests {
         assert_eq!(v["plugin"], "mcloud-live");
         assert_eq!(v["run"], "daily-1");
         assert!(v["ts"].as_str().unwrap().contains('T'), "RFC3339: {}", v["ts"]);
+    }
+
+    #[test]
+    fn jsonl_line_round_trips_through_from_json() {
+        let e = LogEntry {
+            ts: Local::now(),
+            typ: Type::Warn,
+            scope: "mcloud-live".into(),
+            plugin: Some("mcloud-live".into()),
+            run: Some("20261019-094816-0000".into()),
+            msg: "x".into(),
+        };
+        let back = LogEntry::from_json(&e.to_json()).expect("自己写出的行必须能读回来");
+        assert_eq!(back.typ.as_str(), "warn");
+        assert_eq!(back.scope, "mcloud-live");
+        assert_eq!(back.plugin.as_deref(), Some("mcloud-live"));
+        assert_eq!(back.run.as_deref(), Some("20261019-094816-0000"));
+        assert_eq!(back.msg, "x");
     }
 
     #[test]

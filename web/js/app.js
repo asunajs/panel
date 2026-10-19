@@ -2,8 +2,8 @@
   web/js/app.js —— 入口。
 
   职责边界（这一轮最重要的约定）：
-    - **主面板是功能完整的控制面板**：导航、Dashboard、全部任务与编辑、测试运行、
-      插件列表、设置，都归它管。它不是壳。
+    - **主面板是功能完整的控制面板**：导航、Dashboard、插件任务与编辑、脚本任务、
+      测试运行、插件列表、设置，都归它管。它不是壳。
     - **插件自有 UI 是补充**：每个插件在 /plugins/{name}/ 下提供自己的配置页，
       由插件作者编写，用来管理**这个插件自己需要的那份配置**。主面板只给入口
       （见 views/plugin-list.js），不接管、也不复制插件的界面。
@@ -19,9 +19,19 @@ import * as pluginSource from './views/plugin-source.js';
 import * as scriptList from './views/script-list.js';
 import * as scriptEditor from './views/script-editor.js';
 import * as logView from './views/log-view.js';
-import { getState, logout, setPluginUiOrigin, pluginUiUrl, editJob } from './api.js';
+import {
+  getState,
+  logout,
+  setPluginUiOrigin,
+  pluginUiUrl,
+  pluginFrameSandbox,
+  pluginIsolationEnabled,
+  PLUGIN_ISOLATION_HINT,
+  editJob,
+} from './api.js';
+import { showPluginEngineUi, setPluginEngineUi } from './prefs.js';
 import { lineNode, openLogStream, makeRing } from './logstream.js';
-// 状态的中文与时刻的显示格式：与全部任务页共用一份（见 status.js 的文件头）
+// 状态的中文与时刻的显示格式：与插件任务页共用一份（见 status.js 的文件头）
 import { statusBadge, minuteOf } from './status.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -183,10 +193,19 @@ async function renderDashboard(root) {
   const engine = res.engine || {};
   const jobs = res.jobs || [];
   const plugins = res.plugins || [];
+  // 插件任务与脚本任务在仪表盘上**分开摆**：同一张表里混着两种东西，
+  // 用户得先看「来源」那一列才知道这是谁的（用户原话：一个页面不要既有插件的又有脚本的）。
+  const pluginJobs = jobs.filter((j) => j.kind !== 'script');
+  const scriptJobs = jobs.filter((j) => j.kind === 'script');
   const healthy = engine.healthy !== false;
 
   const stat = (label, value) => `
     <div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${value}</div></div>`;
+
+  const dashStatus = (j) => {
+    const st = statusBadge(j.status);
+    return `<span class="badge ${st.cls}"${st.title ? ` title="${st.title}"` : ''}>${st.text}</span>`;
+  };
 
   root.innerHTML = `
     <div class="section">
@@ -203,7 +222,8 @@ async function renderDashboard(root) {
         ${stat('运行时长', Math.floor((res.uptime_secs || 0) / 60) + ' 分')}
         ${stat('循环次数', res.ticks ?? '—')}
         ${stat('插件', plugins.length)}
-        ${stat('任务', jobs.length)}
+        ${stat('插件任务', pluginJobs.length)}
+        ${stat('脚本任务', scriptJobs.length)}
         ${stat('心跳', (engine.beat_ago_ms ?? '—') + ' ms')}
         ${stat('预算打断', engine.interrupts ?? '—')}
         ${stat('单次预算', (engine.budget_ms ?? '—') + ' ms')}
@@ -219,42 +239,69 @@ async function renderDashboard(root) {
     </div>
 
     <div class="section">
-      <div class="section-head"><span class="section-title">任务概览</span></div>
+      <div class="section-head">
+        <span class="section-title">插件任务</span>
+        <div class="card-actions"><a class="btn ghost" href="#/tasks">查看全部</a></div>
+      </div>
       <div class="table-wrap dash-jobs">
         <table>
-          <thead><tr><th>插件</th><th>任务</th><th>表达式</th><th>来源</th><th>状态</th><th class="num">触发</th><th>下次</th></tr></thead>
+          <thead><tr><th>插件</th><th>任务</th><th>运行计划</th><th>来源</th><th>状态</th><th class="num">运行次数</th><th>下次运行</th></tr></thead>
           <tbody>
             ${
-              jobs.length
-                ? jobs
-                    .slice(0, 12)
+              pluginJobs.length
+                ? pluginJobs
+                    .slice(0, 6)
                     .map((j) => {
                       // 状态原来是把后端的原值直接印出来的（表里写 `running`），
-                      // 而全部任务页同一列写「运行中」—— 现在共用 ../status.js 那一份。
-                      const st = statusBadge(j.status);
-                      // 脚本任务不挂在插件下：`__script__` 是内部保留名，
-                      // 直接印出来只会让人问「这个插件是什么」。
-                      const isScript = j.kind === 'script';
-                      const who = isScript ? '脚本' : j.plugin;
-                      const src = isScript
-                        ? j.source === 'script-panel'
-                          ? '脚本·面板'
-                          : '脚本·目录'
-                        : j.source === 'panel'
-                          ? '面板'
-                          : '插件代码';
+                      // 而插件任务页同一列写「运行中」—— 现在共用 ../status.js 那一份。
+                      const src = j.source === 'panel' ? '在面板创建' : '插件声明';
                       return `<tr>
-                  <td data-label="插件" class="mono dim" title="${esc(j.script || '')}">${esc(who)}</td>
+                  <td data-label="插件" class="mono dim">${esc(j.plugin)}</td>
                   <td data-label="任务" class="mono">${esc(j.name)}</td>
-                  <td data-label="表达式" class="mono dim">${esc(j.schedule)}</td>
+                  <td data-label="运行计划" class="mono dim">${esc(j.override_expr || j.schedule)}</td>
                   <td data-label="来源" class="mono dim">${src}</td>
-                  <td data-label="状态"><span class="badge ${st.cls}"${st.title ? ` title="${st.title}"` : ''}>${st.text}</span></td>
-                  <td data-label="触发" class="num">${j.runs}</td>
-                  <td data-label="下次" class="mono dim">${minuteOf(j.next_run)}</td>
+                  <td data-label="状态">${dashStatus(j)}</td>
+                  <td data-label="运行次数" class="num">${j.runs}</td>
+                  <td data-label="下次运行" class="mono dim">${minuteOf(j.next_run)}</td>
                 </tr>`;
                     })
                     .join('')
-                : '<tr><td colspan="7" class="empty">还没有任务</td></tr>'
+                : '<tr><td colspan="7" class="empty">还没有插件任务</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-title">脚本任务</span>
+        <div class="card-actions"><a class="btn ghost" href="#/scripts">查看全部</a></div>
+      </div>
+      <div class="table-wrap dash-jobs">
+        <table>
+          <thead><tr><th>任务</th><th>文件</th><th>运行计划</th><th>来源</th><th>状态</th><th class="num">运行次数</th><th>下次运行</th></tr></thead>
+          <tbody>
+            ${
+              scriptJobs.length
+                ? scriptJobs
+                    .slice(0, 6)
+                    .map((j) => {
+                      // 脚本任务的插件名是内部保留值 `__script__`，不能印出来
+                      // （用户只会问「这个插件是什么」）；用来源和文件路径说明身份。
+                      const src = j.source === 'script-panel' ? '在面板创建' : '任务目录';
+                      return `<tr>
+                  <td data-label="任务" class="mono">${esc(j.name)}</td>
+                  <td data-label="文件" class="mono dim" title="${esc(j.script || '')}">${esc(j.script || '—')}</td>
+                  <td data-label="运行计划" class="mono dim">${esc(j.override_expr || j.schedule)}</td>
+                  <td data-label="来源" class="mono dim">${src}</td>
+                  <td data-label="状态">${dashStatus(j)}</td>
+                  <td data-label="运行次数" class="num">${j.runs}</td>
+                  <td data-label="下次运行" class="mono dim">${minuteOf(j.next_run)}</td>
+                </tr>`;
+                    })
+                    .join('')
+                : '<tr><td colspan="7" class="empty">还没有脚本任务</td></tr>'
             }
           </tbody>
         </table>
@@ -274,7 +321,7 @@ async function renderDashboard(root) {
         </div>
       </div>
       <div class="console" id="log-box" tabindex="0" aria-label="实时日志">${logRows(res.logs)}</div>
-      <p class="hint">这里只留最近 40 行，<b>面板自己的日志和各个插件的日志都在里面</b>
+      <p class="hint">这里只留最近 40 行，<b>面板、插件和脚本的日志都在里面</b>
         （每行前面那个方括号就是来源）。要看全量、按级别/插件/关键字筛、或者导出，去「日志」页。</p>
     </div>`;
 
@@ -372,6 +419,23 @@ async function renderSettings(root) {
     </div>
 
     <div class="section">
+      <div class="section-head"><span class="section-title">插件</span></div>
+      <div class="card">
+        <div class="row" style="align-items:center">
+          <div class="field">
+            <span class="field-label">执行引擎设置</span>
+            <span class="hint">默认隐藏。开启后，插件卡片上会显示「执行引擎」和
+              「自定义解释器路径」，可以按插件切换 Node / Bun。它只影响卡片上显示什么，
+              不改任何任务的调度。</span>
+          </div>
+          <label class="chip" title="开启后回到「插件列表」即可看到">
+            <input type="checkbox" id="s-engine-ui" ${showPluginEngineUi() ? 'checked' : ''}>显示执行引擎设置
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-head"><span class="section-title">关于</span></div>
       <div class="card">
         <div class="row">
@@ -399,18 +463,25 @@ async function renderSettings(root) {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
     renderSettings(root);
   });
+  // 插件卡片上的执行引擎设置默认隐藏（见 prefs.js）。这里只改偏好，
+  // 不重画设置页 —— 复选框自己已经反映状态了，重画反而会闪一下。
+  const engineUi = root.querySelector('#s-engine-ui');
+  engineUi.addEventListener('change', () => {
+    setPluginEngineUi(engineUi.checked);
+    toast(engineUi.checked ? '已显示插件执行引擎设置' : '已隐藏插件执行引擎设置', 'ok');
+  });
 }
 
 // ---------------------------------------------------------------- 路由
 
 const TITLES = {
-  // ⚠ 这一格原来是 'Dashboard'（英文）—— 其余四格都是中文，侧边栏里并排写着
-  // 「Dashboard / 全部任务 / 日志 / 插件列表 / 设置」。同一份界面里混两种语言
+  // ⚠ 这一格原来是 'Dashboard'（英文）—— 其余几格都是中文，侧边栏里并排写着
+  // 「Dashboard / 插件任务 / 脚本任务 / 日志 / 插件列表 / 设置」。同一份界面里混两种语言
   // 本身就是"没设计过"的样子（同一个毛病还有统计卡的 UPTIME / TICKS，第二十八轮一并改了）。
   dashboard: '仪表盘',
-  tasks: '全部任务',
-  scripts: '脚本文件',
-  'script-editor': '脚本文件',
+  tasks: '插件任务',
+  scripts: '脚本任务',
+  'script-editor': '脚本任务',
   logs: '日志',
   plugins: '插件列表',
   settings: '设置',
@@ -472,7 +543,6 @@ let cleanup = null;
 
 async function route() {
   const { view, params } = parseHash();
-  const root = $('#view');
 
   if (typeof cleanup === 'function') {
     try {
@@ -483,6 +553,16 @@ async function route() {
     cleanup = null;
   }
 
+  // 每个视图都会在 #view 上挂事件委托。换页时把 #view 本身换掉，顺手清掉
+  // 上一个视图的监听 —— 否则脚本页的按钮会被插件任务页的监听也接住
+  // （同一个 data-act="runs" 会开出两个弹层）。
+  //
+  // 顺带解决另一个老问题：异步视图晚到的渲染只会写进已经脱离文档的旧节点，
+  // 不会把用户刚切过去的新页面又盖回旧内容。
+  const old = $('#view');
+  const root = old.cloneNode(false);
+  old.replaceWith(root);
+
   paintNavActive();
   $('#view-title').textContent =
     view === 'task-editor'
@@ -491,8 +571,8 @@ async function route() {
         : '新建插件任务'
       : view === 'script-editor'
         ? params.mode === 'edit'
-          ? `编辑面板脚本任务${params.name ? `：${params.name}` : ''}`
-          : '新建面板脚本任务'
+          ? `编辑脚本任务${params.name ? `：${params.name}` : ''}`
+          : '新建脚本任务'
         : view === 'plugin-source'
           ? `插件源码：${params.name}`
           : view === 'plugin-page'
@@ -543,7 +623,7 @@ window.addEventListener('message', async (event) => {
     toast(`同步定时设置失败：${res.error}`, 'bad');
     return;
   }
-  toast('已同步到面板任务', 'ok');
+  toast('已同步到插件任务', 'ok');
 });
 
 const ctx = {
@@ -643,8 +723,9 @@ function renderPluginPage(root, params) {
         <button class="btn ghost" id="plugin-reload">重新加载</button>
         <a class="btn ghost" href="${esc(src)}" target="_blank" rel="noopener">新标签页</a>
       </div>
+      ${pluginIsolationEnabled() ? '' : `<p class="hint" style="margin:0 0 var(--sp-2)">⚠ ${esc(PLUGIN_ISOLATION_HINT)}</p>`}
       <iframe id="plugin-frame" class="plugin-frame" src="${esc(src)}?embed=1"
-              sandbox="allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
+              sandbox="${esc(pluginFrameSandbox())}"
               title="${esc(label)}"></iframe>
     </div>`;
   const frame = root.querySelector('#plugin-frame');

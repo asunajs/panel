@@ -270,6 +270,8 @@ pub fn router(state: AppState) -> Router {
         // 实时日志（SSE）。旧版是前端 3s 轮询 /api/state 的 logs 字段 ——
         // 那个字段现在只剩「首屏摘要」这个用途了（见 logs_for_state）。
         .route("/api/logs/stream", get(api_logs_stream))
+        // 历史日志：运行视图里点开一次旧执行时，从 JSONL 回看（SSE 只回灌内存环）。
+        .route("/api/logs/history", get(api_logs_history))
         // 插件注册的路由 + 插件静态资源 + 主面板静态资源（兜底）
         .fallback(fallback_route)
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -2751,6 +2753,19 @@ struct LogStreamQuery {
     q: Option<String>,
 }
 
+/// `/api/logs/history` 的查询参数。
+#[derive(Deserialize)]
+struct LogHistoryQuery {
+    /// 运行 id（`20261019-094816-0000`）。必填。
+    run: String,
+    /// 可选：只看某个插件。运行视图里插件筛选是服务端做的，回看也要一致。
+    #[serde(default)]
+    plugin: Option<String>,
+    /// 返回行数上限；默认 5000，再大也只给 5000。
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 /// 把内存环里的一条渲染成 SSE 事件。
 fn log_event_json(l: &crate::log::LogLine) -> String {
     serde_json::json!({
@@ -3100,6 +3115,64 @@ async fn api_logs_stream(
 }
 
 /* ---------------------------------------------------------------- 运行记录 */
+
+/// `GET /api/logs/history?run=&plugin=&limit=`
+///
+/// 运行视图的历史日志。SSE 只回灌**内存环**，进程重启后旧运行的日志还在
+/// JSONL 里、内存里却没了 —— 不回文件就会误报「这次运行没有产生日志」。
+///
+/// 返回形状与 SSE 的 `log` 事件一致（`ts/type/level/scope/plugin/run/msg/line`），
+/// 前端可以直接复用 `lineNode` 渲染。`limit` 默认 5000，避免一次坏运行拖垮响应。
+async fn api_logs_history(
+    State(st): State<AppState>,
+    Query(q): Query<LogHistoryQuery>,
+) -> Response {
+    let run = q.run.trim();
+    if run.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "run 不能为空".into());
+    }
+    let limit = q.limit.unwrap_or(5000).clamp(1, 5000);
+    let plugin = q.plugin.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // 读 JSONL 是同步文件 I/O，可能扫到几十 MB —— 丢到 blocking 池，
+    // 别占着 async worker 让别的请求排队。
+    let logs = st.logs.clone();
+    let run_id = run.to_string();
+    let plugin = plugin.map(str::to_string);
+    let entries: Vec<_> = tokio::task::spawn_blocking(move || logs.history_for_run(&run_id, limit))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| match &plugin {
+            Some(p) => e.plugin.as_deref() == Some(p.as_str()),
+            None => true,
+        })
+        .collect();
+
+    let lines: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "ts": e.ts.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                "type": e.typ.as_str(),
+                "level": e.level().as_str(),
+                "scope": e.scope,
+                "plugin": e.plugin,
+                "run": e.run,
+                "msg": e.msg,
+                "line": e.line(),
+            })
+        })
+        .collect();
+    let truncated = entries.len() >= limit;
+    Json(json!({
+        "lines": lines,
+        "count": lines.len(),
+        "truncated": truncated,
+        "limit": limit,
+    }))
+    .into_response()
+}
 
 #[derive(serde::Deserialize)]
 struct RunsQuery {

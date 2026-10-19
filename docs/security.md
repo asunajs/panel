@@ -646,3 +646,72 @@ QuickJS 的围栏是**真的**（`src/pluginfs.rs` 两段式解析 + 软链接�
 - [ext-runtime-protocol.md §7](ext-runtime-protocol.md#7-环境变量白名单) —— 白名单的完整列表
 - [plugin-fs.md §23](plugin-fs.md#23-外部-node--bun原生-fs没有围栏) —— 外部 fs 没有围栏
 - [script-jobs.md §8](script-jobs.md#8-python--shell原生能力没有-host-api) —— Python/Shell 是原生进程
+
+## 29. 插件页面的安全模型（第三十轮：把「不是边界」写清楚）
+
+插件页跑在 `iframe` 里，面板给它加了 `sandbox`。**这不是隔离** —— 这一节把边界写实，
+免得后来的人（包括我自己）把 `sandbox` 当成安全保证。
+
+### 29.1 默认：同源，插件页与面板同等权限
+
+`PLUGIN_UI` 不设时插件页与面板**同源**（v0.1.5 的决定）。这意味着插件页里的 JS：
+
+- 能读面板的 DOM、能拿 `parent.document`
+- 能带着操作者的会话调**任何**面板接口（`fetch('/api/plugins/upload')` 之类）
+
+也就是说：**装一个插件，它的 UI 就拥有操作者的全部权限**。这与「插件是可信代码」
+是一致的 —— 插件本来就能通过 `host_api` 跑任意逻辑，UI 只是它的另一张脸。
+
+### 29.2 `sandbox` 为什么不是边界
+
+一个同时带 `allow-scripts` 与 `allow-same-origin` 的 iframe，如果被框文档与父页**同源**，
+它就能 `parent.document` 拿到父页文档、把自己的 `sandbox` 属性摘掉再重载自己
+（MDN 在 sandbox 那一页明确警告过）。实测（无头 Edge + CDP，`#/plugin/mcloud`）：
+
+```text
+sandbox   = "allow-scripts allow-forms allow-popups allow-modals allow-same-origin"
+在 iframe 上下文里：parentDoc = REACHED   frameEl = REACHED   ← 能摸到父页 DOM
+（同样的探针在 PLUGIN_UI=1 下：两者都是 blocked:SecurityError）
+```
+
+而 `allow-same-origin` **又不能去掉**：去掉之后被框文档变成不透明来源，它的子资源请求
+（`/css/*`、插件自己的接口）不再带 cookie ⇒ 样式 401、接口 401，插件页直接白屏。
+这不是理论 —— 试过一版就是这样，截图为证。
+
+所以默认模式下 `sandbox` 只挡「没打算反抗」的页面（例如某个插件页不小心写了
+`top.location = …`），**不挡恶意插件页**。插件页顶部因此常驻一行提示：
+
+> 插件页面与面板同源（隔离未启用）：它带着你的会话，能调面板接口，
+> iframe 的 sandbox 在这里不是安全边界。要隔离设 `PLUGIN_UI=1`。
+
+### 29.3 真隔离：`PLUGIN_UI=1`
+
+显式开启后插件页在**另一个 origin**（主端口 +1，端口被占往后试最多 8 个）：
+
+| 项 | 行为 |
+|---|---|
+| 跨源 | 同源策略接管：`parent.document` 抛 `SecurityError`，`allow-same-origin` 只表示「保留它自己的 origin」，摘不到父页 |
+| 该 origin 上的面板接口 | **只有 4 条白名单**：`GET /api/state`、`GET /api/runs`、`GET /api/logs/stream`、`POST /api/tasks/{plugin}/{name}/run` |
+| 上传 / 源码读写 / 任务编辑 / 测试运行 | **404**（那些等于「执行代码」，绝不能出现在这个 origin 上） |
+| 鉴权 | 同样要登录；但**不跳登录页**（这个 origin 上没有 `/login`），只回 401 |
+| 反代 + TLS | 必须配 `PLUGIN_UI_ORIGIN=https://…`，否则浏览器会去连 `https://host:端口+1`（明文端口）⇒ 插件页白屏 |
+
+冒烟里有一组专门的实例（`PLUGIN_UI=1`）逐条断言上面这张表，包括 5 条危险接口必须 404。
+
+### 29.4 边界（别当成有）
+
+- **同源模式没有任何隔离**：插件页 = 操作者权限。真正的防线是「不装来路不明的插件」。
+- **隔离模式也不防「插件后端」**：`host_api` 与外部运行时本来就能跑任意逻辑（§28），
+  隔离只保护**面板 DOM 与面板接口**不被插件页顺手摸到。
+- **CSP 的 `frame-src` 是给面板自己用的**：它防的是「别的站点把面板嵌走」，不是
+  「插件页嵌面板」—— 后者靠 origin 隔离，不靠 CSP。
+
+### 29.5 证据
+
+| 断言 | 结果 |
+|---|---|
+| `cargo test` | 358 / 0 |
+| 前端检查 | 254 项：sandbox 单一生成处、同源/跨源两种 `pluginUiUrl`、未隔离时的界面文案 |
+| 冒烟（默认实例） | 同源插件页 200、能读面板接口（**这是已知代价，断言里写明了**） |
+| 冒烟（`PLUGIN_UI=1` 实例） | 插件页 200、`/api/state` 200、上传/源码/任务/脚本/测试运行 **5 条全 404**、无凭据 401 |
+| 浏览器实测（在 iframe 自己的上下文里跑） | 同源（默认）：`parentDoc=REACHED`、`frameEl=REACHED` —— 能摸到父页 DOM，`sandbox` 可被摘掉；`PLUGIN_UI=1`：两者都是 `blocked:SecurityError`，`self.origin` 是 `http://127.0.0.1:8982`（第二个端口） |

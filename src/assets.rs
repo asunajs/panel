@@ -169,6 +169,8 @@ pub const ASSETS: &[Asset] = &[
     asset!("css/components.css"),
     asset!("js/app.js"),
     asset!("js/api.js"),
+    // 浏览器本地偏好（目前只有「插件卡片是否显示执行引擎设置」）
+    asset!("js/prefs.js"),
     // 实时日志：SSE 客户端 + 工具（第二十四轮）
     asset!("js/logstream.js"),
     asset!("js/editor.js"),

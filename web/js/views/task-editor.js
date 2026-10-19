@@ -34,17 +34,17 @@ export async function render(root, ctx, params = {}) {
 
   root.innerHTML = `
     <div class="breadcrumb">
-      <a href="#/tasks">任务列表</a><span>/</span>
+      <a href="#/tasks">插件任务</a><span>/</span>
       <span>${isEdit ? '编辑插件任务' : '新建插件任务'}</span>
     </div>
 
     <div class="section">
       <div class="card">
         <div class="card-head">
-          <span class="card-title">任务定义</span>
+          <span class="card-title">任务设置</span>
           <span class="card-sub">${
             isEdit
-              ? '只能改调度表达式：插件名与任务名是这条任务的身份'
+              ? '只能改运行时间：插件名与任务名是这条任务的身份'
               : '填插件里已经注册的任务名'
           }</span>
         </div>
@@ -60,17 +60,17 @@ export async function render(root, ctx, params = {}) {
                    placeholder="例如 日常" value="${esc(name)}" ${isEdit ? 'disabled' : ''}>
           </div>
           <div class="field">
-            <label class="field-label" for="f-expr">调度表达式</label>
+            <label class="field-label" for="f-expr">运行计划</label>
             <input class="input mono" id="f-expr" spellcheck="false" placeholder="*/5 * * * * * 或 @every 2s">
           </div>
         </div>
-        <p class="hint">同一个插件内不能重名；不同插件可以同名，任务列表里会带上插件名。
+        <p class="hint">同一个插件内不能重名；不同插件可以同名，插件任务页会带上插件名。
           例如 mcloud 系列的「日常」「兑换」「直播」。</p>
 
         <div class="divider"></div>
 
         <div class="row" style="align-items:center">
-          <button class="btn primary" id="save-btn">${isEdit ? '保存表达式' : '创建任务'}</button>
+          <button class="btn primary" id="save-btn">${isEdit ? '保存运行时间' : '创建任务'}</button>
           <button class="btn ghost" id="cancel-btn">返回</button>
           <span class="hint" id="save-hint"></span>
         </div>
@@ -81,7 +81,6 @@ export async function render(root, ctx, params = {}) {
       <div class="section-head">
         <span class="section-title">测试运行</span>
         <div class="card-actions">
-          <span class="badge lang js">JavaScript</span>
           <button class="btn primary" id="run-btn">运行测试</button>
         </div>
       </div>
@@ -137,10 +136,10 @@ export async function render(root, ctx, params = {}) {
     //   把星号擦掉 —— 那是"写错了再擦"，而且同一份代码里
     //   `views/task-list.js` 的同类提示忘了擦，界面上就真的露出了 `**`。
     note.innerHTML = row.override_expr
-      ? `代码里声明的是 <span class="mono">${esc(row.schedule)}</span>，`
-        + `当前用的是面板覆盖。填回代码里的值（或回列表点「撤销覆盖」）就恢复原样。`
-      : `这条任务由插件代码声明（<span class="mono">${esc(row.schedule)}</span>）。`
-        + `保存后会记成一条<b>覆盖</b>：代码里的值原样保留，重启和热更新都不会丢。`;
+      ? `插件里声明的是 <span class="mono">${esc(row.schedule)}</span>，`
+        + `当前用的是面板上改的运行时间。填回插件里的值（或回列表点「恢复原时间」）就恢复原样。`
+      : `这条任务由插件声明（<span class="mono">${esc(row.schedule)}</span>）。`
+        + `保存后会单独记住：插件里的值原样保留，重启和热更新都不会丢。`;
     const exprField = $('#f-expr')?.closest('.field');
     if (exprField) exprField.appendChild(note);
   }
@@ -216,7 +215,7 @@ export async function render(root, ctx, params = {}) {
 
     if (!p || !n || !expr) {
       hint.className = 'err-text';
-      hint.textContent = '插件 / 任务名 / 调度表达式都不能为空';
+      hint.textContent = '插件 / 任务名 / 运行计划都不能为空';
       return;
     }
 
@@ -230,7 +229,7 @@ export async function render(root, ctx, params = {}) {
     btn.textContent = original;
 
     if (res.ok) {
-      ctx.toast(isEdit ? `${p}/${n}：表达式已改为 ${expr}` : `${p}/${n}：任务已创建`, 'ok');
+      ctx.toast(isEdit ? `${p}/${n}：运行时间已改为 ${expr}` : `${p}/${n}：任务已创建`, 'ok');
       ctx.navigate('#/tasks');
     } else {
       hint.className = 'err-text';
