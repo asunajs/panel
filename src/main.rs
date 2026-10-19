@@ -999,7 +999,7 @@ async fn bind_plugin_ui(
             crate::log::plog!(
                 "boot",
                 info,
-                "插件页面 origin: {shown}（监听 {bind_addr}；与面板不同源 ⇒ 插件页读不到面板会话）"
+                "插件页面 origin: {shown}（监听 {bind_addr}；与面板不同源 ⇒ 插件页碰不到面板 DOM，只能调白名单接口）"
             );
             (Some(l), Some(bind_addr.port()), explicit)
         }

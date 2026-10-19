@@ -1,6 +1,6 @@
 [package]
 name = "plugin-panel"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 

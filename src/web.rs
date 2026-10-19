@@ -297,10 +297,22 @@ pub fn router(state: AppState) -> Router {
 /// 把插件页面挪到 `127.0.0.1:<port+1>`（或 `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN`）
 /// 之后，它读不到面板的会话，也碰不到面板的 DOM。
 ///
-/// 这个 origin **只**服务两样东西：插件静态资源、插件自己注册的路由。
-/// 面板的 `/api/*` 在这里一律 404 —— 那正是隔离的意义。
+/// 这个 origin 服务三样东西：插件静态资源、插件自己注册的路由，以及插件 UI
+/// 真正需要的**少量面板接口**（任务表 / 运行记录 / 日志流 / 触发任务，见下面
+/// router 里的白名单）。上传、源码读写、任务编辑这些能改面板文件的接口仍然
+/// 一律 404 —— 插件页碰不到面板 DOM，也不能借会话做高权限操作。
 pub fn plugin_ui_router(state: AppState) -> Router {
     Router::new()
+        // 插件页自己的 JS 需要读「面板的任务表 / 运行记录 / 日志流」，
+        // 还要能点「现在跑一次」。这些是**面板**接口，但插件页在另一个 origin，
+        // 相对路径会落到本 router 的 fallback 上（于是 404）。
+        //
+        // 只开这四条，且都走同一套会话鉴权；上传、源码读写、任务编辑这些
+        // 能改面板文件的接口**不**在这里。插件页仍然碰不到面板 DOM / 会话存储。
+        .route("/api/state", get(api_state))
+        .route("/api/runs", get(api_runs))
+        .route("/api/logs/stream", get(api_logs_stream))
+        .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         .fallback(plugin_origin_route)
         .layer(middleware::from_fn(plugin_origin_headers))
         .layer(middleware::from_fn_with_state(
