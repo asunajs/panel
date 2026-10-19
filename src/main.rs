@@ -40,6 +40,7 @@ mod jshost;
 mod log;
 mod market;
 mod pluginfs;
+mod push;
 mod ratelimit;
 mod runtimefs;
 mod runtimes;
@@ -414,6 +415,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&tasks_dir)?;
     let tasks_dir = tasks_dir.canonicalize()?;
 
+    // 面板级推送：一条后台线程 + 有界队列。任务线程只做 try_send，
+    // 绝不在调度路径上等网络（理由见 src/push/mod.rs 顶部）。
+    let push = push::PushService::spawn(db.clone());
+
     let host = HostState::new(
         logs.clone(),
         db.clone(),
@@ -424,6 +429,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         plugin_data_dir,
         tasks_dir.clone(),
         wsclient::Registry::new(tokio::runtime::Handle::current()),
+        Some(push),
     );
 
     // ---------- 3. 启动引擎线程（内部扫描并加载 plugins/**/*.js，并注册 cron 任务） ----------

@@ -102,6 +102,7 @@ rust-plugin-panel/
 │   ├── ratelimit.rs   第二十轮：令牌桶（登录退避、测试运行限流）
 │   ├── db.rs          SQLite：tasks / jobs / runs / plugin_state
 │   ├── smtp.rs        第二十三轮：`smtp_send` 的邮件通道
+│   ├── push/          第三十一轮：面板级推送（channels.rs 请求构造 + mod.rs 队列/触发/投递）
 │   ├── wsclient.rs    第二十一轮：插件侧 WebSocket 客户端
 │   ├── assets.rs      主面板前端资源（web/ 下多文件，include_str! 编译期内嵌）
 │   └── web.rs         Axum 路由 + 插件静态资源 + 插件路由 fallback + 测试运行 + 脚本任务 API

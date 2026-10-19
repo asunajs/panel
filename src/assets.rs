@@ -189,6 +189,7 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/views/market.js"),
     asset!("js/views/plugin-source.js"),
     asset!("js/views/settings.js"),
+    asset!("js/views/push.js"),
     // ---- 第三方：PureDashboard 的子集 fork（见该目录下的 FORK.md）----
     //
     // 只拿"自己写容易写错"的浮层：`dialog.js` 建在原生 `showModal()` 上，

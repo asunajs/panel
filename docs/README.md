@@ -22,6 +22,7 @@
 | [上传插件与脚本](upload.md) | 单文件、zip、目录插件的路径规则 |
 | [插件商城](market.md) | 从 GitHub Release / 单文件安装，私有仓库 Token，TypeScript 转译 |
 | [运行记录](run-history.md) | 每次执行的结果、耗时、对应日志 |
+| [面板级推送](push.md) | 任务失败 / 熔断时发到 10 个渠道；冷却、日上限、试发 |
 | [日志](logging.md) | 日志级别、筛选、SSE、日志文件保留时间 |
 | [安全](security.md) | 口令、令牌哈希、防爆破、公网访问注意事项 |
 

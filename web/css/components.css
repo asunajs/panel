@@ -1474,3 +1474,63 @@
     grid-column: 1 / -1;
   }
 }
+
+/* ── 面板级推送（web/js/views/push.js）────────────────────────────────────
+   十个渠道 × 每个 1~7 个字段，全铺出来就是一屏表单。所以渠道一行一个、
+   点「填 / 改」才展开那一个（同时只展开一个）。这里只补排版 —— 卡片、表单、
+   徽章、按钮全部复用现有类；颜色一律走 theme.css 的变量，深浅两套主题自动
+   跟随（下面不许出现写死的色值，④ 那条检查会红）。 */
+.push-chan {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) 0;
+  /* 用 --border 而不是 --border-soft：深色主题里 border-soft 与 surface 同值，
+     分隔线会完全看不见（渠道一多就糊成一片）。 */
+  border-bottom: 1px solid var(--border);
+}
+
+/* 名字 + 说明 + 掩码。不给固定宽度：窄屏要能折行，长掩码要能断。 */
+.push-chan-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+/* 展开的字段区：底色比卡片深一档 + 左侧一道竖线，表示"它是上面那一行的附属"，
+   而不是又一个平级渠道。 */
+.push-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3);
+  border-left: 2px solid var(--border-control);
+  border-radius: var(--r-md);
+  background: var(--bg-deep);
+}
+
+/* customPost 的 headers / body 是 JSON 文本，两列里放不下，占满一整行 */
+.push-fields .push-wide {
+  grid-column: 1 / -1;
+}
+
+/* 投递记录的一行（试发结果 / 最近投递共用）：
+   时间 / 任务 / 渠道 / 结果 / note。窄屏折行，不横向滚动。 */
+.push-delivery {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.push-delivery:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}

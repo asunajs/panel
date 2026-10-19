@@ -3690,13 +3690,16 @@ fn run_one(
         },
     });
 
+    let finished_at = Local::now();
+    let duration_ms = (finished_at - started_at).num_milliseconds();
+    let finished_text = finished_at.format("%Y-%m-%d %H:%M:%S").to_string();
     if let Err(e) = db::finish_run(
         db,
         &run_id,
         result.is_ok(),
         result.as_ref().err().map(|s| s.as_str()),
-        (Local::now() - started_at).num_milliseconds(),
-        &Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        duration_ms,
+        &finished_text,
     ) {
         crate::log::plog!("engine", warn, "收尾运行记录失败（不影响执行）: {e}");
     }
@@ -3704,6 +3707,22 @@ fn run_one(
         if let Err(e) = db::set_run_output(db, &run_id, out) {
             crate::log::plog!("engine", warn, "写脚本输出失败: {e}");
         }
+    }
+
+    // 面板级推送（第三十一轮）：**入队即返回**，不等网络。
+    // 放在收尾之后：通知里要带「耗时 / 结果 / 错误」，这些只有跑完才知道。
+    // 推不推、推给谁由推送线程按配置决定；这里只负责把事实交出去。
+    if let Some(push) = host.push.as_ref() {
+        push.notify_run(crate::push::RunEvent {
+            plugin: plugin.clone(),
+            task: name.clone(),
+            run_id: run_id.clone(),
+            ok: result.is_ok(),
+            error: result.as_ref().err().cloned(),
+            duration_ms,
+            manual,
+            at: finished_text.clone(),
+        });
     }
 
     // 日志策略：毫秒级任务不能每次触发都刷屏，只在首次触发与失败时记录；
@@ -3759,6 +3778,16 @@ fn run_one(
                     .unwrap_or_else(|| "-".to_string())
             ),
         );
+        // 熔断是**另一类事件**：失败那条可能已经被冷却挡掉了，而「它不跑了」
+        // 是用户最该知道的一件事。所以它单独发，不受成功/失败那两档的冷却影响。
+        if let Some(push) = host.push.as_ref() {
+            push.notify_breaker(crate::push::BreakerEvent {
+                plugin: plugin.clone(),
+                task: name.clone(),
+                trips: t.trips,
+                at: fmt_secs(now),
+            });
+        }
     } else if !manual && !t.tripped && was_tripped {
         hostapi::push_log(
             logs,
@@ -5787,6 +5816,7 @@ mod tests {
             tmp.join("plugin-data"),
             tmp.join("tasks"),
             crate::wsclient::Registry::new(rt.handle().clone()),
+            None,
         );
 
         // ③ 一段插件代码：开 → 发 → 收 → 超时 → 关 → 再收（必须抛"句柄不存在"）

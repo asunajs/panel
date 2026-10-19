@@ -164,6 +164,9 @@ pub struct HostState {
     pub ws: wsclient::Registry,
     /// 插件运行期改自己任务状态的补丁邮筒（见 [`crate::scheduler::JobControl`]）。
     pub jobs: Arc<JobControl>,
+    /// 面板级推送（第三十一轮）。None = 测试里没起推送线程 ——
+    /// 单测不该因为「发通知」而真的去连网。
+    pub push: Option<Arc<crate::push::PushService>>,
     /// 插件配置文件的 mtime 缓存。配置很小，但每次任务都读盘没必要；
     /// 用 mtime + 长度判断变化，保存后下一次调用就能看到新值。
     config_cache: Mutex<HashMap<String, ConfigCacheEntry>>,
@@ -487,6 +490,7 @@ impl HostState {
         plugin_data_dir: PathBuf,
         tasks_dir: PathBuf,
         ws: wsclient::Registry,
+        push: Option<Arc<crate::push::PushService>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             logs,
@@ -500,6 +504,7 @@ impl HostState {
             tasks_dir,
             ws,
             jobs: Arc::new(JobControl::new()),
+            push,
             config_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -1749,6 +1754,7 @@ mod tests {
             tmp.join("plugin-data"),
             tmp.join("tasks"),
             crate::wsclient::Registry::new(rt.handle().clone()),
+            None,
         );
 
         // 缺失 = {}

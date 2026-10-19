@@ -137,6 +137,31 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
         );
         CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(plugin, task, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
+
+        -- 第三十一轮：**面板级推送**。
+        --
+        -- 配置单独一张单行表：它含 token / 密码，形状是嵌套的，和「运行参数」
+        -- （settings.json 的扁平 key-value）不是同一类东西。放 DB 里还有个
+        -- 直接的好处：它跟着 panel.db 的 0600 权限走，不用再造一份权限处理。
+        --
+        -- 投递记录是**排障用的现场**，不是审计日志：只留最近 200 条，
+        -- 用来回答「配了推送但没收到，到底发没发、哪个渠道失败了」。
+        CREATE TABLE IF NOT EXISTS push_config (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            json       TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS push_deliveries (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            at      TEXT    NOT NULL,
+            plugin  TEXT    NOT NULL DEFAULT '',
+            task    TEXT    NOT NULL DEFAULT '',
+            kind    TEXT    NOT NULL,
+            channel TEXT    NOT NULL,
+            ok      INTEGER NOT NULL,
+            note    TEXT    NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_deliveries_at ON push_deliveries(at DESC);
         "#,
     )?;
 
@@ -836,6 +861,106 @@ pub fn set_run_output(db: &Db, id: &str, output: &str) -> rusqlite::Result<()> {
         params![id, output],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 面板级推送（第三十一轮）
+// ---------------------------------------------------------------------------
+
+/// 最近一条投递记录（界面上的「最近投递」）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PushDeliveryRow {
+    pub at: String,
+    pub plugin: String,
+    pub task: String,
+    pub kind: String,
+    pub channel: String,
+    pub ok: bool,
+    pub note: String,
+}
+
+/// 读推送配置的 JSON 原文。**解析在 push 模块里做** —— db 层不认识推送的形状。
+pub fn get_push_config(db: &Db) -> rusqlite::Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT json FROM push_config WHERE id = 1")?;
+    let mut rows = stmt.query([])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn save_push_config(db: &Db, json: &str, updated_at: &str) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO push_config (id, json, updated_at) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
+        params![json, updated_at],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_push_delivery(
+    db: &Db,
+    at: &str,
+    plugin: &str,
+    task: &str,
+    kind: &str,
+    channel: &str,
+    ok: bool,
+    note: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO push_deliveries (at, plugin, task, kind, channel, ok, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![at, plugin, task, kind, channel, ok as i64, note],
+    )?;
+    Ok(())
+}
+
+/// 只留最近 keep 条。每次写入后跑一次 —— 表很小，代价可以忽略。
+pub fn prune_push_deliveries(db: &Db, keep: i64) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM push_deliveries
+         WHERE id NOT IN (SELECT id FROM push_deliveries ORDER BY id DESC LIMIT ?1)",
+        params![keep],
+    )
+}
+
+pub fn recent_push_deliveries(db: &Db, limit: i64) -> rusqlite::Result<Vec<PushDeliveryRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT at, plugin, task, kind, channel, ok, note
+         FROM push_deliveries ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok(PushDeliveryRow {
+            at: r.get(0)?,
+            plugin: r.get(1)?,
+            task: r.get(2)?,
+            kind: r.get(3)?,
+            channel: r.get(4)?,
+            ok: r.get::<_, i64>(5)? != 0,
+            note: r.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 今天已经投递了多少条（按渠道计，测试发送不算）。
+///
+/// 用 at 的日期前缀而不是 SQLite 的 date()：at 是本地面板写进去的
+/// 「YYYY-MM-DD HH:MM:SS」，前缀比较走索引，也不会被时区解释歪。
+pub fn count_push_deliveries_today(db: &Db, date_prefix: &str) -> rusqlite::Result<i64> {
+    let conn = db.lock().unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM push_deliveries WHERE at LIKE ?1 || ' %' AND kind != 'test'",
+        params![date_prefix],
+        |r| r.get(0),
+    )
 }
 
 /// 记一次**试跑**（`kind = 'test'`）：一条记录写全，不分开"开始/结束"。
@@ -2128,6 +2253,80 @@ mod tests {
         assert_eq!(j.source, "plugin", "老库里的行都是插件声明的");
         assert_eq!(j.runs, 3, "补列不该动既有数据");
         assert!(j.paused, "补列不该动既有数据");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn push_config_is_a_single_row_upsert() {
+        let path = std::env::temp_dir().join(format!("pp-push-cfg-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+
+        assert!(get_push_config(&db).unwrap().is_none());
+        save_push_config(&db, "{\"a\":1}", "2026-10-19 10:00:00").unwrap();
+        save_push_config(&db, "{\"a\":2}", "2026-10-19 10:01:00").unwrap();
+        assert_eq!(
+            get_push_config(&db).unwrap().unwrap(),
+            "{\"a\":2}",
+            "单行表，后写的覆盖前一条"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn push_deliveries_are_counted_and_pruned() {
+        let path = std::env::temp_dir().join(format!("pp-push-deliv-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+
+        insert_push_delivery(
+            &db,
+            "2026-10-19 10:00:00",
+            "mcloud",
+            "daily",
+            "run",
+            "bark",
+            true,
+            "HTTP 200",
+        )
+        .unwrap();
+        insert_push_delivery(
+            &db,
+            "2026-10-19 10:01:00",
+            "",
+            "",
+            "test",
+            "bark",
+            true,
+            "HTTP 200",
+        )
+        .unwrap();
+        insert_push_delivery(
+            &db,
+            "2026-10-20 10:00:00",
+            "mcloud",
+            "daily",
+            "run",
+            "bark",
+            false,
+            "HTTP 500",
+        )
+        .unwrap();
+
+        assert_eq!(
+            count_push_deliveries_today(&db, "2026-10-19").unwrap(),
+            1,
+            "试发不计入日上限"
+        );
+        let rows = recent_push_deliveries(&db, 10).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].at, "2026-10-20 10:00:00", "最新的在最前面");
+        assert!(!rows[0].ok);
+
+        prune_push_deliveries(&db, 2).unwrap();
+        assert_eq!(recent_push_deliveries(&db, 10).unwrap().len(), 2);
 
         let _ = std::fs::remove_file(&path);
     }

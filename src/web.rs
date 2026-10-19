@@ -34,7 +34,7 @@ use axum::{Json, Router};
 use chrono::Local;
 use futures_util::Stream;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -285,6 +285,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", get(api_settings_get))
         .route("/api/settings/save", post(api_settings_save))
         .route("/api/restart", post(api_restart))
+        // 面板级推送：读数 / 增量保存 / 试发。
+        .route("/api/push", get(api_push_get))
+        .route("/api/push/config", post(api_push_save))
+        .route("/api/push/test", post(api_push_test))
         // 插件商城：目录 / GitHub 解析 / 安装。
         .route("/api/market", get(api_market))
         .route("/api/market/install", post(api_market_install))
@@ -3445,6 +3449,73 @@ async fn api_restart(headers: HeaderMap) -> Response {
         crate::settings::restart_process();
     });
     Json(json!({ "ok": true, "restarting": true })).into_response()
+}
+
+
+/// GET /api/push —— 推送页的读数：渠道元数据、掩码后的已配字段、最近投递。
+///
+/// **秘密只回掩码**：界面永远拿不到 token / 密码原文，它只需要知道「配没配」
+/// 和「改哪一项」。这也是增量保存（set / remove）存在的原因。
+async fn api_push_get(State(st): State<AppState>) -> Response {
+    let db = st.db.clone();
+    match tokio::task::spawn_blocking(move || crate::push::view(&db)).await {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("ok".into(), json!(true));
+            }
+            Json(v).into_response()
+        }
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读推送配置失败：{e}"),
+        ),
+    }
+}
+
+/// POST /api/push/config —— 增量保存。
+///
+/// 请求体里所有字段都可选：只发要改的那几项。set 是「渠道 id → 字段」，
+/// remove 是显式删掉的渠道（纯合并删不掉渠道，所以两者都要）。
+async fn api_push_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let db = st.db.clone();
+    match tokio::task::spawn_blocking(move || crate::push::save(&db, &body)).await {
+        Ok(Ok(configured)) => Json(json!({ "ok": true, "configured": configured })).into_response(),
+        Ok(Err(e)) => json_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("保存推送配置失败：{e}"),
+        ),
+    }
+}
+
+/// POST /api/push/test —— 立刻发一条。
+///
+/// 同步等结果（最多每个渠道 10 秒）：用户点「发一条试试」就是在等这个答案，
+/// 再走异步队列反而要额外维护一套「试发状态」。
+async fn api_push_test(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let db = st.db.clone();
+    match tokio::task::spawn_blocking(move || crate::push::send_test(&db)).await {
+        Ok(out) => Json(json!({
+            "ok": out.ok,
+            "line": out.line,
+            "results": out.results,
+        }))
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("试发推送失败：{e}"),
+        ),
+    }
 }
 
 async fn api_market(State(st): State<AppState>, Query(q): Query<MarketQuery>) -> Response {

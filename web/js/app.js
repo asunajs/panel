@@ -20,6 +20,7 @@ import * as pluginSource from './views/plugin-source.js';
 import * as scriptList from './views/script-list.js';
 import * as scriptEditor from './views/script-editor.js';
 import * as logView from './views/log-view.js';
+import { renderPush } from './views/push.js';
 import { renderSettings as renderSettingsView } from './views/settings.js';
 import {
   getState,
@@ -418,6 +419,7 @@ const TITLES = {
   logs: '日志',
   plugins: '插件列表',
   market: '插件商城',
+  push: '推送',
   settings: '设置',
 };
 
@@ -466,6 +468,7 @@ function parseHash() {
     }
     return { view: 'logs', params: {} };
   }
+  if (parts[0] === 'push') return { view: 'push' };
   if (parts[0] === 'settings') return { view: 'settings' };
   // #/plugin/{name} —— 插件自己的页面（iframe）。名字就是插件名。
   if (parts[0] === 'plugin' && parts[1]) {
@@ -525,6 +528,7 @@ async function route() {
     else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
     else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
+    else if (view === 'push') await renderPush(root, ctx);
     else if (view === 'settings') await renderSettings(root, ctx);
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页

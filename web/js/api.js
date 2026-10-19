@@ -525,3 +525,44 @@ export function saveSettings(values) {
 export function restartPanel() {
   return request('/api/restart', { method: 'POST', panel: true, timeout: 5000 });
 }
+
+/* ---------------------------------------------------------------- 推送 */
+
+/**
+ * 面板级推送的只读快照：总开关、触发设置、渠道清单与字段规格、已配渠道、
+ * 最近投递（最多 20 条）、今天已发条数。
+ *
+ * ⚠ `fields` 里是**掩码**（`abc…xyz（共 32 字符）`），不是明文 —— 界面拿不到
+ * 已存的值，所以保存只能走 `set`/`remove` 的增量形状（见 savePush）。
+ */
+export function getPush() {
+  return request('/api/push', { panel: true });
+}
+
+/**
+ * 改推送配置。**只发要改的那部分**：
+ *   `{ enabled, title, settings }`                        —— 总开关与触发设置
+ *   `{ set: { 渠道id: {字段: 值} }, remove: [渠道id] }`   —— 渠道
+ *
+ * 两者刻意分开调用：保存设置不该顺手动渠道，反之亦然。`set` 里只放用户这次
+ * 真填了值的字段（留空 = 不改），因为把空值发过去等于"清空这一项"。
+ *
+ * 特例：`customPost` 在后端存成**数组**，所以它的值要发
+ * `[{ url, method, headers, body }]`。
+ */
+export function savePush(body) {
+  return request('/api/push/config', { method: 'POST', panel: true, body });
+}
+
+/**
+ * 发一条测试消息，回 `{ ok, line, results: [{channel, label, outcome, note}] }`，
+ * `outcome` 只有 `sent|skipped|failed`。一个渠道都没配时后端回 `ok:false` + `line`。
+ *
+ * 带一个空 JSON 体：后端若按 JSON 解析请求体，空 body 会先被判成 400 ——
+ * 而那种 400 跟"没配渠道"是两回事，界面上会很难解释清楚。
+ */
+export function testPush() {
+  // 试发是**同步**的：后端逐个渠道发（每个最多 10 秒），10 个渠道全慢的话
+  // 可能超过默认 15 秒。给它 60 秒，别让用户在「到底发没发」上看到假超时。
+  return request('/api/push/test', { method: 'POST', panel: true, body: {}, timeout: 60000 });
+}
