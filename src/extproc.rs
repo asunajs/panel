@@ -898,6 +898,7 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
                 &arg_str(&args, 2),
                 &arg_str(&args, 3),
                 &arg_str(&args, 4),
+                &arg_str(&args, 5),
             )?;
             let mut p = shared.pending.lock().unwrap();
             if p.tasks.iter().any(|t| t.name == def.name) {
@@ -905,6 +906,28 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
             }
             p.tasks.push(def);
             Ok(String::new())
+        }
+        "set_job_paused" => {
+            host.do_set_job_paused(plugin, &arg_str(&args, 0), args.get(1).and_then(Value::as_bool).unwrap_or(false))
+                .map(|()| String::new())
+        }
+        "set_job_blockers" => {
+            let raw = args.get(1).cloned().unwrap_or(Value::Array(Vec::new()));
+            let blockers: Vec<String> = match serde_json::from_value(raw) {
+                Ok(v) => v,
+                Err(e) => return Err(format!("blockers 必须是字符串数组: {e}")),
+            };
+            host.do_set_job_blockers(plugin, &arg_str(&args, 0), &blockers)
+                .map(|()| String::new())
+        }
+        "set_job_summary" => host
+            .do_set_job_summary(plugin, &arg_str(&args, 0), &arg_str(&args, 1))
+            .map(|()| String::new()),
+        "set_job_schedule" => {
+            let lead_raw = arg_str(&args, 2);
+            let lead = hostapi::parse_lead_ms(&lead_raw)?;
+            host.do_set_job_schedule(plugin, &arg_str(&args, 0), &arg_str(&args, 1), lead)
+                .map(|()| String::new())
         }
         "register_handler" => {
             let name = arg_str(&args, 0);

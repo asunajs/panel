@@ -176,14 +176,20 @@ stdout 的内容**，按 `info` 日志收走（不破坏协议，也不会把插
 | `ws_send` | `[handle:number, text]` | `true` |
 | `ws_recv` | `[handle:number, timeoutMs:number]` | `{type,...}` 的 JSON |
 | `ws_close` | `[handle:number]` | `true` |
-| `register_task` | `[name, expr, paramsJsonOrEmpty, budgetRaw]` | 空串（加载期收集） |
+| `register_task` | `[name, expr, paramsJsonOrEmpty, budgetRaw, leadRaw, metaJsonOrEmpty]` | 空串（加载期收集） |
 | `register_handler` | `[name]` | 空串 |
 | `register_route` | `[path, method, budgetRaw]` | 空串（校验在面板侧做） |
 | `register_nav` | `[label, icon, path]` | 空串（一个插件只能一个） |
 | `worker_hint` | `[kind]` | 空串（只校验 `precision`/`exclusive`/空） |
+| `set_job_paused` | `[name, paused:boolean]` | 空串（运行期） |
+| `set_job_blockers` | `[name, blockers:string[]]` | 空串（运行期） |
+| `set_job_summary` | `[name, text]` | 空串（运行期） |
+| `set_job_schedule` | `[name, expr, leadRaw]` | 空串（运行期） |
 
 - `register_*` / `worker_hint` / `register_nav` 只在**加载期**有意义：面板把它们收进
   pending 表，`ready` 之后一次性安装。
+- `set_job_*` 是**运行期**能力（`ready` 之后也能调）：改调用者自己或同组插件的任务状态，
+  语义见 `docs/host-api.md` §1.2.9。
 - **脚本模式**下 `register_task` / `register_handler` / `register_route` / `register_nav` /
   `worker_hint` 一律返回错误（runner 在调用前就抛 JS 异常，不会真发 RPC）。
   日志 / `sqlite_*` / `http_fetch` / `ws_*` / `smtp_send` 在脚本模式下**仍可用**（这是脚本与插件的

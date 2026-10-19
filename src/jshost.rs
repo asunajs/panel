@@ -126,6 +126,7 @@ globalThis.host_api = {
         var params = '';
         var budget = '';
         var lead = '';
+        var meta = '';
         if (opts !== undefined && opts !== null) {
             if (typeof opts !== 'object') throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...}, budget_ms: 30000 }');
             if (opts.params !== undefined && opts.params !== null) {
@@ -142,11 +143,23 @@ globalThis.host_api = {
             if (opts.lead_ms !== undefined && opts.lead_ms !== null) {
                 lead = String(opts.lead_ms);
             }
+            // 归属面 / 摘要 / 未就绪原因 / 初始暂停：只有真的给了才序列化，
+            // 老插件（不传这些）走的还是空串 ⇒ 宿主取默认值。
+            if (opts.surface !== undefined || opts.summary !== undefined ||
+                opts.blockers !== undefined || opts.paused !== undefined) {
+                meta = JSON.stringify({
+                    surface: opts.surface === undefined ? 'panel' : String(opts.surface),
+                    summary: opts.summary === undefined ? null : String(opts.summary),
+                    blockers: opts.blockers === undefined ? [] : opts.blockers,
+                    paused: opts.paused === true,
+                    manage_url: opts.manage_url === undefined ? null : String(opts.manage_url),
+                });
+            }
         }
         // 先查重再登记：__host_register_task 会把任务推进宿主侧 pending 列表，
         // 如果重名判断放在它后面，一次失败的注册就会在宿主流下一个幽灵任务。
         if (__has_task(name)) throw new Error('插件里已经有名为 `' + name + '` 的处理函数');
-        var err = __host_register_task(name, expr, params, budget, lead);
+        var err = __host_register_task(name, expr, params, budget, lead, meta);
         if (err) throw new Error(err);
         __register_task(name, handler);
         return name;
@@ -196,6 +209,33 @@ globalThis.host_api = {
     every: function (name, interval, handler, opts) {
         if (typeof interval !== 'string' || !interval) throw new Error('every(name, interval, handler): interval 形如 "500ms" / "2s"');
         return host_api.register_cron(name, '@every ' + interval, handler, opts);
+    },
+
+    // ── 运行期改**自己**任务的状态 ─────────────────────────────────
+    //
+    // 这些只作用于调用它的插件名下的任务（宿主按 plugin 校验所有权）。
+    // 用途：插件页面保存“定时抢兑”后同步调度；账号/配置变化后更新“未就绪原因”；
+    // 每趟跑完更新卡片摘要。
+    set_job_paused: function (name, paused) {
+        var e = __host_set_job_paused(String(name), paused === true);
+        if (e) throw new Error(e);
+    },
+    set_job_blockers: function (name, blockers) {
+        var e = __host_set_job_blockers(String(name), JSON.stringify(blockers === undefined || blockers === null ? [] : blockers));
+        if (e) throw new Error(e);
+    },
+    set_job_summary: function (name, text) {
+        var e = __host_set_job_summary(String(name), text === undefined || text === null ? '' : String(text));
+        if (e) throw new Error(e);
+    },
+    set_job_schedule: function (name, opts) {
+        var o = opts || {};
+        var e = __host_set_job_schedule(
+            String(name),
+            o.expr === undefined || o.expr === null ? '' : String(o.expr),
+            o.lead_ms === undefined || o.lead_ms === null ? '' : String(o.lead_ms)
+        );
+        if (e) throw new Error(e);
     },
 
     // ⚠ 出错时 `__host_sqlite` 回的是 `{"error":"…"}`（**不是抛**）。原样 `return`
@@ -440,6 +480,10 @@ export const ws_recv = api.ws_recv;
 export const ws_close = api.ws_close;
 export const register_route = api.register_route;
 export const register_nav = api.register_nav;
+export const set_job_paused = api.set_job_paused;
+export const set_job_blockers = api.set_job_blockers;
+export const set_job_summary = api.set_job_summary;
+export const set_job_schedule = api.set_job_schedule;
 export default api;
 "#;
 
@@ -778,48 +822,96 @@ pub fn install_host<'js>(
     let plugin_for_tasks = plugin.clone();
     ctx.globals().set(
         "__host_register_task",
-        Func::new(move |name: String, expr: String, params_json: String, budget: String, lead: String| -> String {
-            if let Err(e) = crate::cron::Schedule::parse(&expr) {
-                return format!("任务 `{name}` 的调度表达式 `{expr}` 无效: {e}");
-            }
-            // 参数必须是合法 JSON（空串 = 没有参数）。在加载期挡掉，
-            // 而不是等第一次触发时插件才发现自己的参数是坏的。
-            let params = if params_json.trim().is_empty() {
-                None
-            } else {
-                match serde_json::from_str::<serde_json::Value>(&params_json) {
-                    Ok(_) => Some(params_json),
-                    Err(e) => {
-                        return format!(
-                            "任务 `{name}` 的参数不是合法 JSON: {e}（收到 {} 字节）",
-                            params_json.len()
-                        )
-                    }
-                }
-            };
-            let budget_ms = match hostapi::parse_budget_ms(&budget) {
-                Ok(b) => b,
-                Err(e) => return format!("任务 `{name}`：{e}"),
-            };
-            let lead_ms = match hostapi::parse_lead_ms(&lead) {
-                Ok(v) => v,
-                Err(e) => return format!("任务 `{name}`：{e}"),
+        Func::new(move |name: String, expr: String, params_json: String, budget: String, lead: String, opts: String| -> String {
+            // 校验全部收敛到 make_task_def：表达式、参数、预算、提前量、元数据
+            // 都在加载期挡掉，错误信息也只有一个来源。
+            let def = match hostapi::make_task_def(
+                &plugin_for_tasks,
+                &name,
+                &expr,
+                &params_json,
+                &budget,
+                &lead,
+                &opts,
+            ) {
+                Ok(d) => d,
+                Err(e) => return e,
             };
             let mut guard = pending.lock().unwrap();
-            if guard.iter().any(|t| t.name == name) {
-                return format!("插件 `{plugin_for_tasks}` 里已经注册过名为 `{name}` 的任务");
+            if guard.iter().any(|t| t.name == def.name) {
+                return format!(
+                    "插件 `{plugin_for_tasks}` 里已经注册过名为 `{}` 的任务",
+                    def.name
+                );
             }
-            guard.push(RawTaskDef {
-                plugin: plugin_for_tasks.clone(),
-                name,
-                expr,
-                params,
-                budget_ms,
-                lead_ms,
-            });
+            guard.push(def);
             String::new()
         }),
     )?;
+
+    // ---- 运行期改**自己**任务的状态 ----
+    // 空串 = 成功，非空 = 错误消息（JS 侧据此 throw）。
+    // 所有权由宿主按 plugin 校验（见 HostState::do_set_job_*）。
+    {
+        let state = state.clone();
+        let plugin = plugin.clone();
+        ctx.globals().set(
+            "__host_set_job_paused",
+            Func::new(move |name: String, paused: bool| -> String {
+                match state.do_set_job_paused(&plugin, &name, paused) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                }
+            }),
+        )?;
+    }
+    {
+        let state = state.clone();
+        let plugin = plugin.clone();
+        ctx.globals().set(
+            "__host_set_job_blockers",
+            Func::new(move |name: String, raw: String| -> String {
+                let blockers: Vec<String> = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(e) => return format!("blockers 必须是字符串数组: {e}"),
+                };
+                match state.do_set_job_blockers(&plugin, &name, &blockers) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                }
+            }),
+        )?;
+    }
+    {
+        let state = state.clone();
+        let plugin = plugin.clone();
+        ctx.globals().set(
+            "__host_set_job_summary",
+            Func::new(move |name: String, text: String| -> String {
+                match state.do_set_job_summary(&plugin, &name, &text) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                }
+            }),
+        )?;
+    }
+    {
+        let state = state.clone();
+        let plugin = plugin.clone();
+        ctx.globals().set(
+            "__host_set_job_schedule",
+            Func::new(move |name: String, expr: String, lead: String| -> String {
+                let lead_ms = match hostapi::parse_lead_ms(&lead) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                match state.do_set_job_schedule(&plugin, &name, &expr, lead_ms) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                }
+            }),
+        )?;
+    }
 
     // ---- SQLite ----
     let state_for_sql = state.clone();

@@ -28,6 +28,8 @@
 
 use crate::cron::Schedule;
 use chrono::{DateTime, Duration as ChronoDuration, Local};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 没有任务可调度时的睡眠时长。消息到达会立即唤醒，所以设长一点没关系。
@@ -87,6 +89,136 @@ pub enum TaskSource {
     ScriptPanel,
 }
 
+/// 任务在面板上的归属面。
+///
+/// 这不是“显示偏好”，而是**所有权**：`Plugin` 的任务由插件自己的页面配置，
+/// 面板只负责到点叫醒、记录运行结果；它不该出现在面板的“插件任务”列表里，
+/// 也不该让用户在面板上改它的调度 —— 那会和插件页面里的配置打架。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskSurface {
+    /// 面板任务列表里显示、可在这里编辑调度（日常/直播这种环境型任务）。
+    #[default]
+    Panel,
+    /// 插件页面管理（兑换这种“功能实例”）：面板只调度、只记录。
+    Plugin,
+}
+
+impl TaskSurface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskSurface::Panel => "panel",
+            TaskSurface::Plugin => "plugin",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "panel" => Some(TaskSurface::Panel),
+            "plugin" => Some(TaskSurface::Plugin),
+            _ => None,
+        }
+    }
+}
+
+/// 注册任务时带的“非调度”元数据。
+#[derive(Debug, Clone, Default)]
+pub struct TaskMeta {
+    pub surface: TaskSurface,
+    /// 面板卡片上的一行人话摘要（插件维护；`None` = 用默认）。
+    pub summary: Option<String>,
+    /// 未就绪原因。非空 ⇒ 调度器**不触发**（但手动“运行一次”仍然可以）。
+    pub blockers: Vec<String>,
+    /// 新建时是否先暂停（插件自管任务常用：等用户在插件页面里配置好再启用）。
+    pub paused: bool,
+    /// 面板卡片上「去插件页配置」的地址（插件自管任务用；
+    /// 例如 `#/plugin/mcloud`。`None` = 不显示入口）。
+    pub manage_url: Option<String>,
+}
+
+/// 运行期改任务状态的补丁。
+///
+/// 宿主 API 可能在引擎线程（QuickJS）也可能在 RPC 线程（外部 Node/Bun）上被调用，
+/// 而调度器归引擎线程独占 —— 直接借 `&mut Scheduler` 要么拿不到，要么在引擎线程
+/// 上自锁。所以这里只投递补丁，由引擎线程在下一次循环开头统一应用。
+#[derive(Debug, Clone)]
+pub enum JobPatch {
+    Paused {
+        plugin: String,
+        name: String,
+        paused: bool,
+    },
+    Blockers {
+        plugin: String,
+        name: String,
+        blockers: Vec<String>,
+    },
+    Schedule {
+        plugin: String,
+        name: String,
+        expr: String,
+        lead_ms: Option<u64>,
+    },
+}
+
+/// 补丁邮筒 + 唤醒回调。
+pub struct JobControl {
+    patches: Mutex<Vec<(u64, JobPatch)>>,
+    seq: AtomicU64,
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl JobControl {
+    pub fn new() -> Self {
+        Self {
+            patches: Mutex::new(Vec::new()),
+            seq: AtomicU64::new(0),
+            wake: Mutex::new(None),
+        }
+    }
+
+    /// 投递一条补丁；顺手把睡着的引擎线程叫醒（RPC 线程调用时必需）。
+    pub fn push(&self, p: JobPatch) {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.patches.lock().unwrap().push((seq, p));
+        if let Some(w) = self.wake.lock().unwrap().as_ref() {
+            w();
+        }
+    }
+
+    /// 由引擎在启动时装上一个“叫醒所有 worker”的闭包。
+    pub fn set_wake(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.wake.lock().unwrap() = Some(f);
+    }
+
+    /// 取 `seq > after` 的补丁，返回新的水位。
+    pub fn since(&self, after: u64) -> (u64, Vec<JobPatch>) {
+        let g = self.patches.lock().unwrap();
+        let v: Vec<JobPatch> = g
+            .iter()
+            .filter(|(s, _)| *s > after)
+            .map(|(_, p)| p.clone())
+            .collect();
+        let max = g.last().map(|(s, _)| *s).unwrap_or(after);
+        (max, v)
+    }
+
+    /// 只留最近 `keep` 条，避免长期运行把内存涨上去。
+    pub fn prune(&self, keep: usize) {
+        let mut g = self.patches.lock().unwrap();
+        if g.len() > keep {
+            let drop_n = g.len() - keep;
+            g.drain(0..drop_n);
+        }
+    }
+}
+
+impl Default for JobControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 一个被调度的任务。
 pub struct ScheduledTask {
     pub name: String,
@@ -103,6 +235,14 @@ pub struct ScheduledTask {
     pub schedule: Schedule,
     /// 这条任务是插件代码声明的还是面板创建的（见 `TaskSource`）。
     pub source: TaskSource,
+    /// 面板上的归属面（见 `TaskSurface`）：面板列表 / 插件页面。
+    pub surface: TaskSurface,
+    /// 面板卡片上的一行人话摘要（插件维护）。
+    pub summary: Option<String>,
+    /// 未就绪原因。非空 ⇒ **不参与调度**（手动运行不受影响）。
+    pub blockers: Vec<String>,
+    /// 面板卡片上「去插件页配置」的地址（插件自管任务）。
+    pub manage_url: Option<String>,
     /// 任务参数（JSON 文本，`None` = 没有参数）。
     ///
     /// 为什么要这个东西：**同一个处理函数要能被多条任务复用，各自带不同的数据**。
@@ -174,6 +314,17 @@ pub struct ScheduledTask {
     pub retry_at: Option<DateTime<Local>>,
 }
 
+impl ScheduledTask {
+    /// 这条任务现在该不该被**定时**触发。
+    ///
+    /// 两个条件是独立的：`enabled` 是用户的暂停开关，`blockers` 是“还没配好”
+    /// 的机器判据。后者非空时任务不跑，但**手动“运行一次”仍然放行** ——
+    /// 用户主动点的那一下不该被配置闸挡住。
+    pub fn is_runnable(&self) -> bool {
+        self.enabled && self.blockers.is_empty()
+    }
+}
+
 /// 正常推进：**理论**线接着上一次的理论时刻走，并抖一次。
 ///
 /// `prev_actual` 是上一次实际触发的时刻，用来保证实际序列单调（抖动不会让
@@ -243,11 +394,22 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Code, params, budget_ms, 0)
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            TaskSource::Code,
+            params,
+            budget_ms,
+            0,
+            TaskMeta::default(),
+        )
     }
 
-    /// 装一条**插件代码声明**的任务，带提前量。
-    #[allow(clippy::too_many_arguments)]
+    /// 装一条**插件代码声明**的任务，带提前量（不带元数据；单测用）。
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn add_lead(
         &mut self,
         plugin: &str,
@@ -269,6 +431,35 @@ impl Scheduler {
             params,
             budget_ms,
             lead_ms.unwrap_or(0) as i64,
+            TaskMeta::default(),
+        )
+    }
+
+    /// 装一条**插件代码声明**的任务，带提前量和元数据（归属面/摘要/未就绪原因）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_lead_meta(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        schedule: Schedule,
+        now: DateTime<Local>,
+        params: Option<String>,
+        budget_ms: Option<u64>,
+        lead_ms: Option<u64>,
+        meta: TaskMeta,
+    ) -> Result<usize, String> {
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            TaskSource::Code,
+            params,
+            budget_ms,
+            lead_ms.unwrap_or(0) as i64,
+            meta,
         )
     }
 
@@ -283,7 +474,18 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, TaskSource::Panel, params, budget_ms, 0)
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            TaskSource::Panel,
+            params,
+            budget_ms,
+            0,
+            TaskMeta::default(),
+        )
     }
 
     /// 装一条**面板创建**的任务，带提前量。
@@ -309,6 +511,7 @@ impl Scheduler {
             params,
             budget_ms,
             lead_ms.unwrap_or(0) as i64,
+            TaskMeta::default(),
         )
     }
 
@@ -327,7 +530,18 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
     ) -> Result<usize, String> {
-        self.insert(plugin, name, expr, schedule, now, source, params, budget_ms, 0)?;
+        self.insert(
+            plugin,
+            name,
+            expr,
+            schedule,
+            now,
+            source,
+            params,
+            budget_ms,
+            0,
+            TaskMeta::default(),
+        )?;
         let idx = self.tasks.len() - 1;
         self.tasks[idx].script = Some(script.to_string());
         self.tasks[idx].runtime = Some(runtime.to_string());
@@ -345,6 +559,7 @@ impl Scheduler {
         params: Option<String>,
         budget_ms: Option<u64>,
         lead_ms: i64,
+        meta: TaskMeta,
     ) -> Result<usize, String> {
         if self
             .tasks
@@ -362,6 +577,10 @@ impl Scheduler {
             override_expr: None,
             schedule,
             source,
+            surface: meta.surface,
+            summary: meta.summary,
+            blockers: meta.blockers,
+            manage_url: meta.manage_url,
             params,
             script: None,
             runtime: None,
@@ -375,7 +594,7 @@ impl Scheduler {
             runs: 0,
             last_run: None,
             last_error: None,
-            enabled: true,
+            enabled: !meta.paused,
             tripped: false,
             trips: 0,
             consecutive_failures: 0,
@@ -480,6 +699,67 @@ impl Scheduler {
         t.realigned = true;
         }
         Ok(t.enabled)
+    }
+
+    /// 设置未就绪原因（空 = 就绪）。
+    ///
+    /// 从“未就绪”变成“就绪”时**从 now 重新对齐**，不补跑阻塞期间错过的时刻 ——
+    /// 和暂停恢复同一条原则：积压的 deadline 不该在解除阻塞的瞬间一起炸出来。
+    pub fn set_blockers(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        blockers: Vec<String>,
+        now: DateTime<Local>,
+    ) -> Result<bool, String> {
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let was_ready = self.tasks[idx].blockers.is_empty();
+        let now_ready = blockers.is_empty();
+        self.tasks[idx].blockers = blockers;
+        if !was_ready && now_ready && self.tasks[idx].enabled {
+            let t = &mut self.tasks[idx];
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
+            t.realigned = true;
+        }
+        Ok(now_ready)
+    }
+
+    /// 运行期改调度（插件页面保存“定时抢兑”时用）。
+    ///
+    /// 与面板的 `set_override` 语义一致：写 `override_expr`，代码声明的 `expr` 原样保留；
+    /// 只动表达式/提前量，运行历史与暂停状态不动。
+    pub fn set_schedule(
+        &mut self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        lead_ms: Option<u64>,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        let schedule = Schedule::parse(expr)
+            .map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+        let idx = self
+            .find(plugin, name)
+            .ok_or_else(|| format!("插件 `{plugin}` 里没有名为 `{name}` 的任务"))?;
+        let t = &mut self.tasks[idx];
+        t.override_expr = Some(expr.to_string());
+        t.schedule = schedule;
+        if let Some(l) = lead_ms {
+            t.lead_ms = l.min(3_600_000) as i64;
+        }
+        if t.is_runnable() && !t.tripped {
+            let (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
+            t.base_fire = base;
+            t.next_fire = actual;
+            t.jitter_ms = j;
+            t.realigned = true;
+        }
+        Ok(())
     }
 
     /// 换一条任务的调度表达式（面板上的「编辑」）。
@@ -627,7 +907,7 @@ impl Scheduler {
     /// 距离最近一个到期任务还有多久 —— 直接当作 `recv_timeout` 的时长。
     pub fn sleep_hint(&self, now: DateTime<Local>) -> Duration {
         let mut best: Option<i64> = None;
-        for t in self.tasks.iter().filter(|t| t.enabled) {
+        for t in self.tasks.iter().filter(|t| t.is_runnable()) {
             let ms = (t.next_fire - now).num_milliseconds();
             best = Some(match best {
                 Some(b) => b.min(ms),
@@ -646,7 +926,7 @@ impl Scheduler {
         self.tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.enabled && t.next_fire <= now)
+            .filter(|(_, t)| t.is_runnable() && t.next_fire <= now)
             .map(|(i, _)| i)
             .collect()
     }
@@ -1494,5 +1774,86 @@ mod tests {
             let now = t.next_fire;
             s.advance(0, now, None);
         }
+    }
+
+    /// 未就绪（blockers 非空）⇒ 到点也不触发；清空后从**当前**重新对齐，不补跑。
+    #[test]
+    fn blockers_skip_due_and_realign_when_cleared() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add_lead_meta(
+            "p",
+            "t",
+            "@every 1s",
+            every_1s(),
+            now,
+            None,
+            None,
+            None,
+            TaskMeta {
+                blockers: vec!["还没有账号".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let fire_at = now + ChronoDuration::seconds(1);
+        assert!(s.due(fire_at).is_empty(), "未就绪的任务不该被调度");
+        assert_eq!(s.sleep_hint(fire_at), IDLE_SLEEP, "没有可跑任务时应进入空闲");
+
+        // 清空 blockers：从当前时刻重排，欠下的那一拍不补
+        let later = now + ChronoDuration::seconds(10);
+        s.set_blockers("p", "t", vec![], later).unwrap();
+        let t = &s.tasks()[0];
+        assert!(t.is_runnable());
+        assert!(t.next_fire > later, "清空后应从当前时刻重新对齐");
+        assert_eq!(s.due(t.next_fire).len(), 1);
+    }
+
+    /// `paused` 元数据只在新建时生效：暂停的任务不参与调度，恢复后重新对齐。
+    #[test]
+    fn paused_meta_starts_disabled() {
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add_lead_meta(
+            "p",
+            "t",
+            "@every 1s",
+            every_1s(),
+            now,
+            None,
+            None,
+            None,
+            TaskMeta {
+                paused: true,
+                surface: TaskSurface::Plugin,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!s.tasks()[0].enabled, "新建时 paused=true 应先是暂停的");
+        assert_eq!(s.tasks()[0].surface, TaskSurface::Plugin);
+        assert!(s.due(now + ChronoDuration::seconds(5)).is_empty());
+
+        let later = now + ChronoDuration::seconds(10);
+        s.set_paused("p", "t", false, later).unwrap();
+        let t = &s.tasks()[0];
+        assert!(t.enabled);
+        assert!(t.next_fire > later);
+    }
+
+    /// `surface` 的 serde 形式是小写，前端/DB 都按这个字符串走。
+    #[test]
+    fn surface_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&TaskSurface::Panel).unwrap(),
+            "\"panel\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskSurface::Plugin).unwrap(),
+            "\"plugin\""
+        );
+        assert_eq!(TaskSurface::parse("plugin"), Some(TaskSurface::Plugin));
+        assert_eq!(TaskSurface::parse("nope"), None);
     }
 }

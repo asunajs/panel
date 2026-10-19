@@ -96,6 +96,14 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             next_run   TEXT,
             last_error TEXT,
             paused     INTEGER NOT NULL DEFAULT 0,
+            -- 面板上的归属面：'panel'（面板任务列表）/ 'plugin'（插件页面管理）。
+            surface    TEXT    NOT NULL DEFAULT 'panel',
+            -- 面板卡片上的一行人话摘要（插件维护；NULL = 用默认）。
+            summary    TEXT,
+            -- 未就绪原因（JSON 数组文本）。非空 ⇒ 调度器不触发。
+            blockers   TEXT    NOT NULL DEFAULT '[]',
+            -- 面板卡片上「去插件页配置」的地址（插件自管任务）。
+            manage_url TEXT,
             created_at TEXT    NOT NULL,
             updated_at TEXT    NOT NULL,
             UNIQUE(plugin, name)
@@ -147,6 +155,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 建回来），所以改成留一行墓碑：调度器不装它、列表默认不显示它，
     // 而 `sync_jobs` 认这个标记、不许把它的状态改回 running。
     ensure_column(&conn, "jobs", "deleted", "INTEGER NOT NULL DEFAULT 0")?;
+    // 面板上的归属面 / 卡片摘要 / 未就绪原因（见 scheduler::TaskSurface）。
+    ensure_column(&conn, "jobs", "surface", "TEXT NOT NULL DEFAULT 'panel'")?;
+    ensure_column(&conn, "jobs", "summary", "TEXT")?;
+    ensure_column(&conn, "jobs", "blockers", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(&conn, "jobs", "manage_url", "TEXT")?;
     // 第二十三轮：任务参数（JSON 文本）。为「一个账号一条任务」这种模型服务 ——
     // 插件注册 N 条同名任务、用参数区分（见 scheduler::ScheduledTask::params）。
     // 面板不理解这一列的内容，只负责原样存、原样交给 handler。
@@ -347,6 +360,14 @@ pub struct JobRow {
     pub budget_ms: Option<i64>,
     /// 提前量（毫秒，`None` = 不提前）。
     pub lead_ms: Option<i64>,
+    /// 面板上的归属面：`panel` / `plugin`（见 scheduler::TaskSurface）。
+    pub surface: String,
+    /// 面板卡片摘要（插件维护；`None` = 用默认）。
+    pub summary: Option<String>,
+    /// 未就绪原因（空 = 就绪）。非空时调度器不触发。
+    pub blockers: Vec<String>,
+    /// 面板卡片上「去插件页配置」的地址（`None` = 不显示入口）。
+    pub manage_url: Option<String>,
 }
 
 /// 一个待同步的任务定义。
@@ -373,6 +394,16 @@ pub struct JobSpec {
     pub budget_ms: Option<u64>,
     /// 提前量（毫秒，`None` = 不提前）。插件默认时间的一部分。
     pub lead_ms: Option<u64>,
+    /// 面板上的归属面：`panel` / `plugin`。
+    pub surface: String,
+    /// 卡片摘要（`None` = 不覆盖库里已有的）。
+    pub summary: Option<String>,
+    /// 未就绪原因（空 = 就绪）。
+    pub blockers: Vec<String>,
+    /// 新建时是否先暂停（只在 INSERT 时生效；已有行的 paused 是用户/插件的决定，不覆盖）。
+    pub paused: bool,
+    /// 面板卡片上「去插件页配置」的地址。
+    pub manage_url: Option<String>,
 }
 
 /// 把「当前插件代码里声明的任务集合」同步进库。
@@ -413,10 +444,21 @@ pub fn sync_jobs(
     for s in specs {
         tx.execute(
             r#"
-            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, lead_ms, source, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5, ?6, ?8, 'plugin', ?7, ?7)
+            INSERT INTO jobs (name, plugin, schedule, status, runs, next_run, params, budget_ms, lead_ms, source, surface, summary, blockers, paused, manage_url, created_at, updated_at)
+            VALUES (?1, ?2, ?3, CASE WHEN ?12 = 1 THEN 'paused' ELSE 'running' END, 0, ?4, ?5, ?6, ?8, 'plugin', ?9, ?10, ?11, ?12, ?13, ?7, ?7)
             ON CONFLICT(plugin, name) DO UPDATE SET
                 schedule   = excluded.schedule,
+                -- 归属面跟着代码走：插件说“这条我自己管”，面板就不该再把它
+                -- 画进任务列表（surface 是所有权，不是用户偏好）。
+                surface    = excluded.surface,
+                -- 摘要**不**跟着代码覆盖：运行时每次跑完都会写一条“3 个账号 ·
+                -- 2 成功 1 失败”，那是库里的新鲜值。代码只提供初始值。
+                summary    = COALESCE(jobs.summary, excluded.summary),
+                -- 未就绪原因跟着代码走：插件加载时会按当前账号/配置重算一次，
+                -- 旧值（比如上次启动时的“还没有账号”）不能留着当权威。
+                blockers   = excluded.blockers,
+                -- “去插件页配置”的地址跟着代码走（插件换了页面结构，旧地址就是坏链）。
+                manage_url = excluded.manage_url,
                 -- 预算也**跟着代码走**：它是任务定义的一部分（插件说这条要 30 秒），
                 -- 不是用户意图。保留一个旧的预算 = 插件改了但没生效。
                 budget_ms  = excluded.budget_ms,
@@ -447,7 +489,12 @@ pub fn sync_jobs(
                 s.params,
                 s.budget_ms.map(|v| v as i64),
                 now,
-                s.lead_ms.map(|v| v as i64)
+                s.lead_ms.map(|v| v as i64),
+                s.surface,
+                s.summary,
+                blockers_json(&s.blockers),
+                s.paused as i64,
+                s.manage_url
             ],
         )?;
     }
@@ -1173,6 +1220,74 @@ pub fn set_job_paused(
     )
 }
 
+/// 改一条任务的**卡片摘要**（纯展示，插件运行期调用）。
+pub fn set_job_summary(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    summary: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET summary = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, summary, now],
+    )
+}
+
+/// 改一条任务的**未就绪原因**（JSON 数组文本；空数组 = 就绪）。
+pub fn set_job_blockers(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    blockers: &[String],
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET blockers = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, blockers_json(blockers), now],
+    )
+}
+
+/// 运行期改调度：写 `override_expr` + 可选提前量（`schedule` 列是代码声明值，不动）。
+pub fn set_job_schedule_override(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    expr: &str,
+    lead_ms: Option<i64>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET override_expr = ?3, lead_ms = COALESCE(?4, lead_ms), updated_at = ?5 \
+         WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name, expr, lead_ms, now],
+    )
+}
+
+/// 任务的归属面（`panel` / `plugin`）。不存在时返回 `None`。
+pub fn job_surface(db: &Db, plugin: &str, name: &str) -> rusqlite::Result<Option<String>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT surface FROM jobs WHERE plugin = ?1 AND name = ?2")?;
+    let mut rows = stmt.query(params![plugin, name])?;
+    match rows.next()? {
+        Some(r) => Ok(Some(r.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// 这条任务是不是这个插件的（宿主 API 的**所有权**检查）。
+///
+/// 没有它，一个插件页就能改别的插件的调度/暂停状态 —— 和面板 HTTP 层
+/// `edit_job` 的校验是同一件事，只是入口不同。
+pub fn job_owned_by(db: &Db, plugin: &str, name: &str) -> rusqlite::Result<bool> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT 1 FROM jobs WHERE plugin = ?1 AND name = ?2")?;
+    stmt.exists(params![plugin, name])
+}
+
 /// 只改状态与错误文本，不动 runs / next_run。
 ///
 /// 用在「任务定义还在、但已经跑不起来」的场景：面板任务的处理函数在插件新版本里
@@ -1203,7 +1318,20 @@ pub fn set_job_status(
 /// `jobs` 表的列清单（`list_jobs` 与 `list_panel_jobs` 共用，顺序必须一致）。
 const JOB_COLUMNS: &str = "id, name, plugin, schedule, status, runs, trips, last_run, next_run,
                            last_error, paused, source, created_at, updated_at, override_expr,
-                           deleted, params, budget_ms, kind, script, runtime, lead_ms";
+                           deleted, params, budget_ms, kind, script, runtime, lead_ms,
+                           surface, summary, blockers, manage_url";
+
+/// blockers 列是 JSON 数组文本。面板不解释内容，但**读的时候必须能解析** ——
+/// 一条坏值不该让整个任务列表消失，所以解析失败按“没有阻塞”处理（fail-open），
+/// 同时把原文留在库里，排查时能看到。
+fn blockers_json(v: &[String]) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn parse_blockers(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
 
 /// 把一行 `jobs` 记录读成 `JobRow`。列顺序即 `JOB_COLUMNS`。
 fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
@@ -1231,6 +1359,10 @@ fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
         source: r.get(11)?,
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
+        surface: r.get(22).unwrap_or_else(|_| "panel".to_string()),
+        summary: r.get(23).unwrap_or(None),
+        blockers: parse_blockers(r.get(24).unwrap_or(None)),
+        manage_url: r.get(25).unwrap_or(None),
     })
 }
 
@@ -1473,6 +1605,11 @@ mod tests {
             params: None,
             budget_ms: None,
             lead_ms: None,
+            surface: "panel".to_string(),
+            summary: None,
+            blockers: Vec::new(),
+            paused: false,
+            manage_url: None,
         }
     }
 
@@ -1553,6 +1690,44 @@ mod tests {
         let t = get(&db, "p", "t");
         assert_eq!(t.runs, 7, "sync_jobs 不该清掉 runs 历史");
         assert_eq!(t.schedule, "@every 2s");
+    }
+
+    #[test]
+    fn sync_jobs_persists_meta_but_keeps_paused_and_summary() {
+        let db = mem();
+        let mut s = spec("p", "t", "@every 1s");
+        s.surface = "plugin".to_string();
+        s.summary = Some("初始摘要".to_string());
+        s.blockers = vec!["还没有账号".to_string()];
+        s.paused = true;
+        s.manage_url = Some("#/plugin/p".to_string());
+        sync_jobs(&db, &[s], NOW, None).unwrap();
+
+        let row = get(&db, "p", "t");
+        assert_eq!(row.surface, "plugin");
+        assert_eq!(row.summary.as_deref(), Some("初始摘要"));
+        assert_eq!(row.blockers, vec!["还没有账号".to_string()]);
+        assert!(row.paused, "新建时 paused=true 要落库");
+        assert_eq!(row.manage_url.as_deref(), Some("#/plugin/p"));
+
+        // 插件重载：代码里的 paused=false、summary 变了、blockers 清空
+        let mut s2 = spec("p", "t", "@every 1s");
+        s2.surface = "plugin".to_string();
+        s2.summary = Some("代码里的新摘要".to_string());
+        s2.blockers = Vec::new();
+        s2.paused = false;
+        s2.manage_url = Some("#/plugin/p2".to_string());
+        sync_jobs(&db, &[s2], NOW, None).unwrap();
+
+        let row = get(&db, "p", "t");
+        assert!(row.paused, "paused 是运行期的决定，不能被代码覆盖");
+        assert_eq!(
+            row.summary.as_deref(),
+            Some("初始摘要"),
+            "运行期写过的摘要优先于代码默认值"
+        );
+        assert!(row.blockers.is_empty(), "blockers 跟代码走");
+        assert_eq!(row.manage_url.as_deref(), Some("#/plugin/p2"));
     }
 
     #[test]

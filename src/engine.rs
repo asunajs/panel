@@ -1012,6 +1012,17 @@ impl JsEngine {
             receivers.push(rx);
         }
         let senders = Arc::new(senders);
+        // 插件运行期改任务状态（set_job_*）走“补丁 + Wake”：宿主 API 可能在
+        // 引擎线程（QuickJS）或 RPC 线程（外部 Node/Bun）上被调用，直接借
+        // &mut Scheduler 拿不到，在引擎线程上还会自锁。
+        {
+            let wake = senders.clone();
+            host.jobs.set_wake(Arc::new(move || {
+                for tx in wake.iter() {
+                    let _ = tx.send(EngineCmd::Wake);
+                }
+            }));
+        }
         let mut threads = Vec::with_capacity(workers_n);
         for idx in 0..workers_n {
             let group = plan.groups[idx].clone();
@@ -1853,7 +1864,20 @@ fn worker_main(
     // 这条 worker「上一个插件都没装在内存里」是从什么时候开始的（Runtime 回收用它计时）
     let mut rt_idle_at = Instant::now();
     let mut last_dir_sig: Option<u64> = None;
+    let mut last_patch: u64 = 0;
     loop {
+        // 插件运行期改的任务状态（暂停/未就绪/调度）：先应用，再算 sleep。
+        // 放在循环最前面是因为宿主 API 可能刚在上一条命令里投递了补丁。
+        {
+            let (seq, patches) = host.jobs.since(last_patch);
+            if seq != last_patch {
+                last_patch = seq;
+                for p in patches {
+                    apply_job_patch(&mut sched, &db, &logs, p);
+                }
+                host.jobs.prune(256);
+            }
+        }
         // 只有「有已加载插件」的 worker 需要每秒 Tick 做惰性维护；
         // 全卸出之后睡到 preload/retry 截止时间，靠 Wake 响应目录变化。
         let needs_tick = idx == 0
@@ -2415,7 +2439,7 @@ fn install_tasks(
                 continue;
             }
         };
-        match sched.add_lead(
+        match sched.add_lead_meta(
             &d.plugin,
             &d.name,
             &d.expr,
@@ -2424,6 +2448,7 @@ fn install_tasks(
             d.params.clone(),
             d.budget_ms,
             d.lead_ms,
+            d.meta.clone(),
         ) {
             Ok(_) => {
                 let idx = sched.len() - 1;
@@ -2435,12 +2460,76 @@ fn install_tasks(
                     params: d.params.clone(),
                     budget_ms: d.budget_ms,
                     lead_ms: d.lead_ms,
+                    surface: d.meta.surface.as_str().to_string(),
+                    summary: d.meta.summary.clone(),
+                    blockers: d.meta.blockers.clone(),
+                    paused: d.meta.paused,
+                    manage_url: d.meta.manage_url.clone(),
                 });
             }
             Err(e) => hostapi::push_log(logs, &d.plugin, "error", &format!("任务注册失败: {e}")),
         }
     }
     specs
+}
+
+/// 把插件运行期投递的任务补丁应用到本 worker 的调度器。
+///
+/// 库里那一行已经由宿主 API 写好（所有权也在那里校验过），这里只负责内存状态；
+/// 改完调度后把新的 next_run 回写，面板读数才不会滞后一拍。
+fn apply_job_patch(
+    sched: &mut Scheduler,
+    db: &Db,
+    logs: &SharedLogs,
+    patch: scheduler::JobPatch,
+) {
+    let now = Local::now();
+    match patch {
+        scheduler::JobPatch::Paused { plugin, name, paused } => {
+            // 找不到 = 不是本 worker 的插件，正常，不报错
+            if let Ok(enabled) = sched.set_paused(&plugin, &name, paused, now) {
+                // 恢复时 next_fire 可能刚被重新对齐 ⇒ 回写，面板不会还显示旧的
+                // “下次运行”。暂停时保留原值（和面板自己的暂停行为一致）。
+                if enabled {
+                    if let Some(idx) = sched.find(&plugin, &name) {
+                        let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+                        let _ = db::set_job_next_run(db, &plugin, &name, &next, &fmt_secs(now));
+                    }
+                }
+            }
+        }
+        scheduler::JobPatch::Blockers {
+            plugin,
+            name,
+            blockers,
+        } => {
+            if sched.set_blockers(&plugin, &name, blockers, now).is_ok() {
+                if let Some(idx) = sched.find(&plugin, &name) {
+                    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+                    let _ = db::set_job_next_run(db, &plugin, &name, &next, &fmt_secs(now));
+                }
+            }
+        }
+        scheduler::JobPatch::Schedule {
+            plugin,
+            name,
+            expr,
+            lead_ms,
+        } => {
+            if sched.set_schedule(&plugin, &name, &expr, lead_ms, now).is_ok() {
+                if let Some(idx) = sched.find(&plugin, &name) {
+                    let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
+                    let _ = db::set_job_next_run(db, &plugin, &name, &next, &fmt_secs(now));
+                }
+                hostapi::push_log(
+                    logs,
+                    &plugin,
+                    "info",
+                    &format!("任务 `{name}` 的调度已由插件页面更新为 `{expr}`"),
+                );
+            }
+        }
+    }
 }
 
 /// 把库里被用户暂停过的任务重新置为暂停。
@@ -4198,6 +4287,11 @@ fn all_specs(sched: &Scheduler) -> Vec<db::JobSpec> {
             params: t.params.clone(),
             budget_ms: t.budget_ms,
             lead_ms: (t.lead_ms > 0).then_some(t.lead_ms as u64),
+            surface: t.surface.as_str().to_string(),
+            summary: t.summary.clone(),
+            blockers: t.blockers.clone(),
+            paused: !t.enabled,
+            manage_url: t.manage_url.clone(),
         })
         .collect()
 }

@@ -42,6 +42,7 @@
 
 use crate::cron::Schedule;
 use crate::db::Db;
+use crate::scheduler::{JobControl, JobPatch, TaskMeta, TaskSurface};
 use crate::runtimefs::RuntimePaths;
 use crate::runtimes::RuntimeCatalog;
 use crate::wsclient;
@@ -92,6 +93,8 @@ pub struct RawTaskDef {
     pub params: Option<String>,
     /// 提前量（毫秒，`None` = 不提前）。
     pub lead_ms: Option<u64>,
+    /// 归属面 / 摘要 / 未就绪原因 / 初始暂停（见 scheduler::TaskMeta）。
+    pub meta: crate::scheduler::TaskMeta,
 }
 
 /// JS 插件注册的一条 HTTP 路由。
@@ -158,6 +161,8 @@ pub struct HostState {
     /// ⚠ 它**跨调用**活着（插件按"一次调用推进一步"写，句柄要在两次调用之间有效），
     /// 所以只能挂在这里；面板重启则全部失效 —— 这条边界写在 host-api.md 里。
     pub ws: wsclient::Registry,
+    /// 插件运行期改自己任务状态的补丁邮筒（见 [`crate::scheduler::JobControl`]）。
+    pub jobs: Arc<JobControl>,
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +497,7 @@ impl HostState {
             plugin_data_dir,
             tasks_dir,
             ws,
+            jobs: Arc::new(JobControl::new()),
         })
     }
 
@@ -522,7 +528,127 @@ impl HostState {
         params_json: &str,
         budget_raw: &str,
     ) -> Result<RawTaskDef, String> {
-        make_task_def(plugin, name, expr, params_json, budget_raw, "")
+        make_task_def(plugin, name, expr, params_json, budget_raw, "", "")
+    }
+
+    /// 运行期改任务状态的**目标解析**。
+    ///
+    /// `spec` 有两种写法：
+    /// - `"兑换"` —— 调用者自己名下的任务；
+    /// - `"mcloud-exchange/兑换"` —— 同组（名字第一个 `-`/`_` 之前那段相同）的插件。
+    ///
+    /// 为什么允许同组：mcloud 是四个插件（界面 + 三条任务），账号/奖品这些配置
+    /// 只在界面插件里改得到，而任务挂在另外三个插件名下。没有这条，界面插件就
+    /// 永远没法把“账号加好了/奖品选好了”同步给任务 —— 四个插件只能靠重启重读。
+    /// 插件是可信代码，这层是**便利边界**，不是安全边界（面板文档里写清）。
+    fn resolve_job_target(&self, caller: &str, spec: &str) -> Result<(String, String), String> {
+        let group = |n: &str| n.split(['-', '_']).next().unwrap_or(n).to_string();
+        let same_group = |a: &str, b: &str| a == b || group(a) == group(b);
+        if let Some((p, n)) = spec.split_once('/') {
+            let p = p.trim();
+            let n = n.trim();
+            if p.is_empty() || n.is_empty() {
+                return Err(format!("任务写法不对：{spec}（应为 插件名/任务名）"));
+            }
+            if !same_group(caller, p) {
+                return Err(format!("插件 `{caller}` 不能改 `{p}` 的任务（不同组）"));
+            }
+            if !crate::db::job_owned_by(&self.db, p, n)
+                .map_err(|e| format!("查任务失败: {e}"))?
+            {
+                return Err(format!("插件 `{p}` 里没有名为 `{n}` 的任务"));
+            }
+            return Ok((p.to_string(), n.to_string()));
+        }
+        let jobs = crate::db::list_jobs(&self.db).map_err(|e| format!("查任务失败: {e}"))?;
+        let mut hits = jobs
+            .into_iter()
+            .filter(|j| j.name == spec && same_group(caller, &j.plugin));
+        let first = hits
+            .next()
+            .ok_or_else(|| format!("插件 `{caller}` 名下（含同组）没有名为 `{spec}` 的任务"))?;
+        if hits.next().is_some() {
+            return Err(format!(
+                "同组里有多条名为 `{spec}` 的任务，请写成 插件名/任务名"
+            ));
+        }
+        Ok((first.plugin, first.name))
+    }
+
+    /// 插件运行期改自己任务的暂停状态。
+    ///
+    /// 所有权检查在库里做：自己名下，或同组插件（见 `resolve_job_target`）。
+    pub fn do_set_job_paused(&self, plugin: &str, name: &str, paused: bool) -> Result<(), String> {
+        let (plugin, name) = self.resolve_job_target(plugin, name)?;
+        let now = crate::scheduler::fmt_ms(chrono::Local::now());
+        crate::db::set_job_paused(&self.db, &plugin, &name, paused, &now)
+            .map_err(|e| format!("写库失败: {e}"))?;
+        self.jobs.push(JobPatch::Paused {
+            plugin,
+            name,
+            paused,
+        });
+        Ok(())
+    }
+
+    /// 插件运行期设置未就绪原因（空数组 = 就绪）。
+    pub fn do_set_job_blockers(
+        &self,
+        plugin: &str,
+        name: &str,
+        blockers: &[String],
+    ) -> Result<(), String> {
+        let (plugin, name) = self.resolve_job_target(plugin, name)?;
+        let now = crate::scheduler::fmt_ms(chrono::Local::now());
+        crate::db::set_job_blockers(&self.db, &plugin, &name, blockers, &now)
+            .map_err(|e| format!("写库失败: {e}"))?;
+        self.jobs.push(JobPatch::Blockers {
+            plugin,
+            name,
+            blockers: blockers.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// 插件运行期设置卡片摘要（空串 = 清掉）。
+    pub fn do_set_job_summary(&self, plugin: &str, name: &str, summary: &str) -> Result<(), String> {
+        let (plugin, name) = self.resolve_job_target(plugin, name)?;
+        let now = crate::scheduler::fmt_ms(chrono::Local::now());
+        let v = if summary.trim().is_empty() { None } else { Some(summary) };
+        crate::db::set_job_summary(&self.db, &plugin, &name, v, &now)
+            .map_err(|e| format!("写库失败: {e}"))?;
+        Ok(())
+    }
+
+    /// 插件运行期改自己任务的调度（写 override_expr + 可选提前量）。
+    pub fn do_set_job_schedule(
+        &self,
+        plugin: &str,
+        name: &str,
+        expr: &str,
+        lead_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let (plugin, name) = self.resolve_job_target(plugin, name)?;
+        if let Err(e) = Schedule::parse(expr) {
+            return Err(format!("调度表达式 `{expr}` 无效: {e}"));
+        }
+        let now = crate::scheduler::fmt_ms(chrono::Local::now());
+        crate::db::set_job_schedule_override(
+            &self.db,
+            &plugin,
+            &name,
+            expr,
+            lead_ms.map(|v| v.min(3_600_000) as i64),
+            &now,
+        )
+        .map_err(|e| format!("写库失败: {e}"))?;
+        self.jobs.push(JobPatch::Schedule {
+            plugin,
+            name,
+            expr: expr.to_string(),
+            lead_ms,
+        });
+        Ok(())
     }
 
     /// SQLite：查询返回对象数组，写入返回 `{changes, lastInsertRowid}`。
@@ -801,6 +927,60 @@ pub const MAX_DECLARED_BUDGET_MS: u64 = 10 * 60 * 1000;
 pub const MIN_DECLARED_BUDGET_MS: u64 = 100;
 
 /// 校验并构造一条任务声明。QuickJS / 外部 JS 共用这一份判据。
+/// 解析 register_cron(..., { surface, summary, blockers, paused }) 的元数据。
+///
+/// 空串 = 老插件/老运行时，全部取默认值（panel / 无摘要 / 就绪 / 不暂停）。
+fn parse_task_meta(opts_json: &str) -> Result<TaskMeta, String> {
+    if opts_json.trim().is_empty() {
+        return Ok(TaskMeta::default());
+    }
+    let v: Value = serde_json::from_str(opts_json)
+        .map_err(|e| format!("register_cron 的选项不是合法 JSON: {e}"))?;
+    let surface = match v.get("surface").and_then(Value::as_str) {
+        None => TaskSurface::Panel,
+        Some(s) => TaskSurface::parse(s)
+            .ok_or_else(|| format!("surface 只能是 'panel' 或 'plugin'，收到 {s}"))?,
+    };
+    let summary = match v.get("summary") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err("summary 必须是字符串".to_string()),
+    };
+    let blockers = match v.get("blockers") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => {
+            let mut out = Vec::with_capacity(a.len());
+            for x in a {
+                match x.as_str() {
+                    Some(s) => out.push(s.to_string()),
+                    None => return Err("blockers 必须是字符串数组".to_string()),
+                }
+            }
+            out
+        }
+        Some(_) => return Err("blockers 必须是字符串数组".to_string()),
+    };
+    let paused = match v.get("paused") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("paused 必须是布尔值".to_string()),
+    };
+    let manage_url = match v.get("manage_url") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err("manage_url 必须是字符串".to_string()),
+    };
+    Ok(TaskMeta {
+        surface,
+        summary,
+        blockers,
+        paused,
+        manage_url,
+    })
+}
+
 pub fn make_task_def(
     plugin: &str,
     name: &str,
@@ -808,6 +988,7 @@ pub fn make_task_def(
     params_json: &str,
     budget_raw: &str,
     lead_raw: &str,
+    opts_json: &str,
 ) -> Result<RawTaskDef, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -829,6 +1010,7 @@ pub fn make_task_def(
         }
         Some(params_json.to_string())
     };
+    let meta = parse_task_meta(opts_json)?;
     Ok(RawTaskDef {
         plugin: plugin.to_string(),
         name: name.to_string(),
@@ -836,6 +1018,7 @@ pub fn make_task_def(
         params,
         budget_ms,
         lead_ms,
+        meta,
     })
 }
 

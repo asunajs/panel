@@ -105,7 +105,8 @@ register_cron(name, expr, handler) -> None
 every(name, interval, handler)     -> None      # = register_cron(name, "@every " + interval, handler)
 register_handler(name, handler)    -> None      # 只登记处理函数，不声明调度
 worker_hint(kind)                  -> str       # 声明本插件对「跑在哪条线程上」的要求
-# 第四个参数：register_cron(name, expr, handler, { params, lead_ms, budget_ms })  —— 见 §1.2.3 / §1.2.4 / §1.2.5
+# 第四个参数：register_cron(name, expr, handler, { params, lead_ms, budget_ms, surface, summary, blockers, paused, manage_url })
+#                                                              —— 见 §1.2.3 / §1.2.4 / §1.2.5 / §1.2.9
 # 表达式末尾可以加一个抖动后缀                                          —— 见 §1.2.8
 smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见 §1.2.6
 register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见 §1.2.7
@@ -350,6 +351,43 @@ register_nav({ label: '兑换', icon: '🎁', path: 'exchange.html' });
 `@every` 的理论时刻从进程启动起算，所以跨重启不可复现。
 
 验收脚本：`python3 scripts/jitter_check.py`（夹具 `examples/jitter/jitter.js`）。
+
+#### 1.2.9 任务在面板上的呈现与运行期状态
+
+```js
+register_cron('兑换', '0 10 * * *', runExchange, {
+  surface: 'plugin',              // 'panel'（默认）| 'plugin'
+  summary: '2 个账号（张三、李四） · 目标：xxx',
+  blockers: ['还没有选账号'],      // 非空 ⇒ 调度器不触发
+  paused: true,                   // 新建时先暂停（只在 INSERT 生效）
+  manage_url: '#/plugin/mcloud',  // 面板卡片上的“去插件页配置”
+});
+```
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `surface` | `panel` | `panel` = 面板任务列表里显示；`plugin` = 插件页面管理，面板列表里收进「由插件页面管理的任务」折叠区 |
+| `summary` | 空 | 卡片上的一行人话。**只用于展示**，不参与调度 |
+| `blockers` | `[]` | 未就绪原因。非空 ⇒ 到点**不触发**；面板显示灰色「未就绪」，不是失败红 |
+| `paused` | `false` | 新建时先暂停。**已有任务的暂停状态不会被代码覆盖**（用户/插件的决定优先） |
+| `manage_url` | 空 | 卡片上「去插件页配置」的地址（`#/plugin/<插件名>`） |
+
+运行期可以改**自己**（或同组）任务的状态：
+
+```js
+set_job_paused('兑换', false);                         // 启用/暂停
+set_job_blockers('兑换', []);                          // 清空 = 就绪
+set_job_summary('兑换', '2 个账号 · 目标：xxx');        // 卡片摘要
+set_job_schedule('兑换', { expr: '0 10,20 * * *', lead_ms: 120_000 });
+```
+
+- **所有权**：默认只认调用者自己名下的任务；也允许**同组**（插件名第一个 `-`/`_` 之前那段相同）
+  的插件互相改，写法是 `'mcloud-exchange/兑换'`。这是便利边界，不是安全边界 —— 插件本身是可信代码。
+- `set_job_schedule` 写的是面板的 `override_expr`：插件更新不会丢，面板上也能「恢复原时间」。
+- 清空 blockers 后**从当前时刻重新对齐**，不补触发。
+- blockers 非空只影响**定时**；用户点「运行一次」仍然执行（手动运行是显式动作）。
+- 外部运行时（Node/Bun）的 `register_task` RPC 多一个可选的第六个参数（meta JSON）；
+  老插件不传 = 全部默认值，向后兼容。
 
 ### 1.3 SQLite
 

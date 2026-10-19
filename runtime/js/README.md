@@ -114,7 +114,7 @@ Module exports (available as `import { ... } from 'host-api'`):
   `JSON.stringify`-ed.
 - `loggerFactory({ scope, plugin, run })` — optional `[scope] ` prefix.
 - `register_cron(name, expr, handler, opts?)` — stores the handler and calls
-  `register_task` with `[name, expr, paramsJsonOrNull, budgetRawOrEmpty]`.
+  `register_task` with `[name, expr, paramsJsonOrNull, budgetRawOrEmpty, leadRawOrEmpty, metaJsonOrEmpty]`.
 - `every(name, interval, handler, opts?)` — `register_cron` with `@every <interval>`.
 - `register_handler(name, handler)` — `register_handler` RPC; tasks are created by
   the panel later.

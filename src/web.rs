@@ -1154,6 +1154,16 @@ async fn edit_job(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
+    // 归属面是 plugin 的任务，配置在插件页面里 —— 面板这条 HTTP 路径拒绝改，
+    // 否则“两个地方都能改同一个调度”迟早打架。
+    if let Ok(Some(surface)) = db::job_surface(&st.db, &plugin, &name) {
+        if surface == "plugin" {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "这条任务由插件页面管理，请到插件页面修改".to_string(),
+            );
+        }
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Err(r) = route(
         &st,

@@ -126,6 +126,23 @@ export async function render(root, ctx, params = {}) {
     if (row) $('#f-expr').value = row.override_expr || row.schedule;
   }
 
+  // 插件自管任务（surface=plugin）：配置在插件页面里，面板这条编辑路径不接。
+  // 直接深链进来时给一句人话 + 一个入口，而不是让他改完再被后端 400。
+  if (isEdit && row && row.surface === 'plugin') {
+    const url = row.manage_url || '#/tasks';
+    root.innerHTML = `
+      <div class="breadcrumb"><a href="#/tasks">插件任务</a><span>/</span><span>由插件页面管理</span></div>
+      <div class="section"><div class="card">
+        <div class="card-head">
+          <span class="card-title">${esc(plugin)} / ${esc(name)}</span>
+          <span class="badge idle">由插件页面管理</span>
+        </div>
+        <p class="hint">这条任务的奖品、账号和运行时间都在插件自己的页面里配置；面板只负责到点叫醒和记录。</p>
+        <div class="row"><a class="btn primary" href="${esc(url)}">去插件页配置</a></div>
+      </div></div>`;
+    return;
+  }
+
   // 插件代码声明的任务：这里保存的是**覆盖**，不是改写代码。
   // 说清楚「代码里是什么」，用户才知道自己改的是什么、以及怎么回去。
   if (isEdit && row && row.source !== 'panel') {

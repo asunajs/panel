@@ -102,6 +102,7 @@ test('register_cron/register_handler RPC + invoke success/error', async (t) => {
     '{"account":"alice","slot":3}',
     '1234',
     '',
+    '',
   ]);
 
   const handlerCalls = panel.rpc('register_handler');

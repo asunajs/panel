@@ -43,6 +43,12 @@ function badge(status, trips) {
   return `<span class="badge ${m.cls}"${t}>${m.text}${suffix}</span>`;
 }
 
+/** “还没配好”不是失败：给一个灰徽章，悬停能看到缺什么。 */
+function readinessBadge(t) {
+  if (!t.blockers || t.blockers.length === 0) return '';
+  return `<span class="badge idle" title="${esc(t.blockers.join('；'))}">未就绪</span>`;
+}
+
 /** 真实插件任务 → 视图模型。字段名跟 mock.js 对齐，方便两条路径共用渲染。 */
 function fromJob(j) {
   // 插件代码声明的任务可能被面板**覆盖**过频率：`schedule` 是代码里声明的值，
@@ -63,6 +69,11 @@ function fromJob(j) {
     runs: j.runs,
     source: j.source,
     paused: j.paused,
+    // 归属面：panel = 面板任务列表；plugin = 插件页面管理（兑换这种功能实例）。
+    surface: j.surface || 'panel',
+    summary: j.summary || '',
+    blockers: Array.isArray(j.blockers) ? j.blockers : [],
+    manageUrl: j.manage_url || '',
     budgetMs: j.budget_ms,
     leadMs: j.lead_ms || 0,
     params: j.params,
@@ -86,6 +97,10 @@ function fromMock(t) {
     runs: 0,
     source: 'panel',
     paused: false,
+    surface: 'panel',
+    summary: '',
+    blockers: [],
+    manageUrl: '',
     real: false,
   };
 }
@@ -132,6 +147,7 @@ function taskCard(t) {
         <div class="card-head-main">
           <span class="card-title mono" title="${esc(title)}">${esc(title)}</span>
           ${t.deleted ? badge('deleted', 0) : badge(t.status, t.trips)}
+          ${t.deleted ? '' : readinessBadge(t)}
         </div>
         <span class="card-actions">${primaryOps}</span>
       </div>
@@ -139,6 +155,8 @@ function taskCard(t) {
         <span class="field-label">下次运行</span>
         <span class="mono">${esc(minuteOf(t.nextRun))}</span>
         ${t.covered && !t.deleted ? '<span class="badge warning" title="运行时间在面板上改过">已改时间</span>' : ''}
+        ${t.summary ? `<span class="hint task-summary-line">${esc(t.summary)}</span>` : ''}
+        ${t.blockers && t.blockers.length ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>` : ''}
       </div>
       <details class="task-details">
         <summary>详情与更多操作</summary>
@@ -173,6 +191,36 @@ function taskCard(t) {
           ${secondaryOps ? `<div class="task-more-actions">${secondaryOps}</div>` : ''}
         </div>
       </details>
+    </div>`;
+}
+
+/** 插件自管任务（兑换这种功能实例）：面板只调度、只记录，配置在插件页面里。 */
+function pluginManagedCard(t) {
+  const title = `${t.plugin} / ${t.name}`;
+  const manage = t.manageUrl
+    ? `<button class="btn primary" data-act="configure" data-url="${esc(t.manageUrl)}">去插件页配置</button>`
+    : '';
+  return `
+    <div class="card" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}" data-managed="1">
+      <div class="card-head">
+        <div class="card-head-main">
+          <span class="card-title mono" title="${esc(title)}">${esc(title)}</span>
+          ${t.deleted ? badge('deleted', 0) : badge(t.status, t.trips)}
+          ${t.deleted ? '' : readinessBadge(t)}
+        </div>
+        <span class="card-actions">
+          ${t.deleted ? '' : '<button class="btn" data-act="run">运行一次</button>'}
+          <button class="btn ghost" data-act="runs">运行记录</button>
+          ${manage}
+        </span>
+      </div>
+      <div class="task-summary">
+        <span class="field-label">下次运行</span>
+        <span class="mono">${esc(minuteOf(t.nextRun))}</span>
+        ${t.summary ? `<span class="hint task-summary-line">${esc(t.summary)}</span>` : ''}
+        ${t.blockers && t.blockers.length ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>` : ''}
+      </div>
+      <p class="hint" style="margin:0">这条任务的配置、账号和运行时间都在插件页面里管理；面板只负责到点叫醒和记录。</p>
     </div>`;
 }
 
@@ -340,10 +388,14 @@ export async function render(root, ctx, opts = {}) {
   // 断言和用户数数都不会被隐藏 DOM 骗到。
   const alive = tasks.filter((t) => !t.deleted);
   const gone = tasks.filter((t) => t.deleted);
+  // 归属面分开：面板任务列表只放 surface=panel 的；兑换这种“功能实例”
+  // 由插件页面管理，收进下面那个折叠区（只读 + 去插件页配置）。
+  const panelAlive = alive.filter((t) => t.surface !== 'plugin');
+  const managedAlive = alive.filter((t) => t.surface === 'plugin');
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">插件任务（${tasks.length}）</span>
+        <span class="section-title">插件任务（${panelAlive.length}）</span>
         <div class="card-actions">
           <button class="btn" id="cleanup-btn">清理失效任务</button>
           <button class="btn" id="refresh-btn">刷新</button>
@@ -357,8 +409,17 @@ export async function render(root, ctx, opts = {}) {
       <div id="cleanup-box" class="stack"></div>
       ${notice}
       <div class="grid">
-        ${alive.length ? alive.map(taskCard).join('') : '<div class="card empty">还没有插件任务</div>'}
+        ${panelAlive.length ? panelAlive.map(taskCard).join('') : '<div class="card empty">还没有插件任务</div>'}
       </div>
+      ${
+        managedAlive.length
+          ? `<details class="task-managed" style="margin-top:var(--sp-3)">
+               <summary>由插件页面管理的任务（${managedAlive.length}）</summary>
+               <p class="hint">这些任务的配置和运行时间在插件自己的页面里；面板只负责调度与记录，所以不在这里编辑。</p>
+               <div class="grid">${managedAlive.map(pluginManagedCard).join('')}</div>
+             </details>`
+          : ''
+      }
       ${
         gone.length
           ? `<div class="list-note" style="margin-top:var(--sp-3)">
@@ -500,6 +561,13 @@ export async function render(root, ctx, opts = {}) {
 
     if (act === 'edit') {
       ctx.navigate(`#/tasks/edit/${encodeURIComponent(plugin)}/${encodeURIComponent(name)}`);
+      return;
+    }
+    // “去插件页配置”：地址由插件声明（manage_url），面板不猜。
+    if (act === 'configure') {
+      const url = btn.dataset.url || '';
+      if (url.startsWith('#')) ctx.navigate(url);
+      else if (url) location.hash = url;
       return;
     }
     // 「记录」是本地动作：拉面板的 runs 表，不动任务本身 —— 所以**不走**

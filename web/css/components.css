@@ -694,6 +694,19 @@
   flex: none;
 }
 
+/* 摘要/未就绪原因另起一行：它们是“这条任务是什么状态”的补充，
+   不该和“下次运行”挤在同一行把数字挤走。 */
+.task-summary-line {
+  flex: 1 1 100%;
+  color: var(--muted);
+}
+
+.task-managed > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: var(--sp-2) 0;
+}
+
 .task-details {
   margin-top: var(--sp-2);
   border-top: 1px solid var(--border-soft);

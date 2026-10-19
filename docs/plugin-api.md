@@ -90,7 +90,7 @@ register_nav({ label: '日常任务', icon: '🗓' });            // 侧边栏�
 worker_hint('exclusive');                                  // 声明线程要求（加载期扫描）
 ```
 
-`opts` 支持 `{ params, budget_ms }`：
+`opts` 支持 `{ params, budget_ms, lead_ms, surface, summary, blockers, paused, manage_url }`：
 
 ```js
 register_cron('exchange-alice', '*/1 * * * * *', doExchange, {
@@ -103,6 +103,25 @@ register_cron('exchange-alice', '*/1 * * * * *', doExchange, {
 |---|---|---|
 | `register_cron` / `every` | `jobs.source = 'plugin'` | 可暂停、**不可删除**（删了下次 `sync_jobs` 也会装回来） |
 | `register_handler` + 面板建任务 | `jobs.source = 'panel'` | 可暂停、可删除 |
+
+### 任务归谁管：`surface`
+
+- `surface: 'panel'`（默认）：任务出现在面板「插件任务」列表里，用户可以改运行时间、暂停。
+- `surface: 'plugin'`：任务**不出现在**面板任务列表的主列表里（收进「由插件页面管理的任务」折叠区，只读），
+  配置在插件自己的页面里。适合“插件里的一个功能实例”（例如 mcloud 的「兑换」：奖品、账号、
+  时间、提前量都只有插件页面知道）。
+
+配合三个运行期能力使用（详见 `docs/host-api.md` §1.2.9）：
+
+```js
+set_job_blockers('兑换', ['还没有选账号']);  // 未就绪 ⇒ 到点不触发；清空后从当前时刻重排
+set_job_paused('兑换', false);              // 启用/暂停
+set_job_summary('兑换', '2 个账号 · 目标：xxx');
+set_job_schedule('兑换', { expr: '0 10,20 * * *', lead_ms: 120_000 });
+```
+
+`blockers` 只拦**定时**；用户点「运行一次」仍然执行。同组插件（名字第一个 `-` 前相同）
+可以互相改，写法是 `'mcloud-exchange/兑换'`。
 
 拆开的意义：**面板只能提供调度，不能提供代码**。插件先把「可以被调度调用的处理函数」登记出来，
 面板再从里面挑一个挂上表达式。同一个 handler 可以被多条任务复用（挂不同表达式、不同 params）。

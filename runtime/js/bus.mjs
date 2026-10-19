@@ -534,6 +534,7 @@ export function register_cron(name, expr, handler, opts) {
   let paramsJson = null;
   let budgetRaw = '';
   let leadRaw = '';
+  let metaJson = '';
   if (opts !== undefined && opts !== null) {
     if (typeof opts !== 'object' || Array.isArray(opts)) {
       throw new Error('register_cron: 第四个参数必须是对象，形如 { params: {...}, budget_ms: 30000 }');
@@ -554,6 +555,20 @@ export function register_cron(name, expr, handler, opts) {
     if (opts.lead_ms !== undefined && opts.lead_ms !== null) {
       leadRaw = String(opts.lead_ms);
     }
+    if (
+      opts.surface !== undefined ||
+      opts.summary !== undefined ||
+      opts.blockers !== undefined ||
+      opts.paused !== undefined
+    ) {
+      metaJson = JSON.stringify({
+        surface: opts.surface === undefined ? 'panel' : String(opts.surface),
+        summary: opts.summary === undefined ? null : String(opts.summary),
+        blockers: opts.blockers === undefined ? [] : opts.blockers,
+        paused: opts.paused === true,
+        manage_url: opts.manage_url === undefined ? null : String(opts.manage_url),
+      });
+    }
   }
 
   // Shared namespace with register_handler, like the embedded host: a duplicate
@@ -561,7 +576,7 @@ export function register_cron(name, expr, handler, opts) {
   if (handlers.has(name)) {
     throw new Error(`插件里已经有名为 \`${name}\` 的处理函数`);
   }
-  rpcCall('register_task', [name, expr, paramsJson, budgetRaw, leadRaw]);
+  rpcCall('register_task', [name, expr, paramsJson, budgetRaw, leadRaw, metaJson]);
   handlers.set(name, handler);
   return name;
 }
@@ -708,6 +723,34 @@ export function ws_close(id) {
   return true;
 }
 
+/* ------------------------------------------- 运行期改自己任务的状态 */
+
+export function set_job_paused(name, paused) {
+  assertName('set_job_paused', name);
+  rpcCall('set_job_paused', [name, paused === true]);
+}
+
+export function set_job_blockers(name, blockers) {
+  assertName('set_job_blockers', name);
+  const list = Array.isArray(blockers) ? blockers.map((x) => String(x)) : [];
+  rpcCall('set_job_blockers', [name, list]);
+}
+
+export function set_job_summary(name, text) {
+  assertName('set_job_summary', name);
+  rpcCall('set_job_summary', [name, text === undefined || text === null ? '' : String(text)]);
+}
+
+export function set_job_schedule(name, opts) {
+  assertName('set_job_schedule', name);
+  const o = opts || {};
+  rpcCall('set_job_schedule', [
+    name,
+    o.expr === undefined || o.expr === null ? '' : String(o.expr),
+    o.lead_ms === undefined || o.lead_ms === null ? '' : String(o.lead_ms),
+  ]);
+}
+
 /* ------------------------------------------------------------ dispatch */
 
 export function hasTask(name) {
@@ -801,6 +844,10 @@ export function installGlobals() {
     register_route,
     register_nav,
     worker_hint,
+    set_job_paused,
+    set_job_blockers,
+    set_job_summary,
+    set_job_schedule,
     // host calls
     sqlite_query,
     sqlite_exec,
@@ -826,6 +873,10 @@ export function installGlobals() {
     smtpSend: smtp_send,
     registerRoute: register_route,
     registerNav: register_nav,
+    setJobPaused: set_job_paused,
+    setJobBlockers: set_job_blockers,
+    setJobSummary: set_job_summary,
+    setJobSchedule: set_job_schedule,
     wsOpen: ws_open,
     wsSend: ws_send,
     wsRecv: ws_recv,

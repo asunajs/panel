@@ -2,6 +2,18 @@
 
 ## 未发布
 
+- 插件任务支持 `surface` / `summary` / `blockers` / `paused` / `manage_url` 五项元数据：
+  任务可以声明“归插件页面管理”、在卡片上显示一行人话摘要、在账号/配置未就绪时**不参与调度**
+  （面板显示灰色「未就绪」，不是失败红），以及新装时先暂停。
+- 新增运行期宿主 API `set_job_paused` / `set_job_blockers` / `set_job_summary` / `set_job_schedule`：
+  插件页面改账号、奖品、时间后能立刻同步给面板任务，不必重启或改代码。同组插件
+  （名字第一个 `-` 前相同）可以互相改，例如 `mcloud` 管理 `mcloud-exchange/兑换`。
+- 面板「插件任务」列表按归属面分栏：`surface=panel` 的任务在主列表可编辑；
+  `surface=plugin` 的任务收进「由插件页面管理的任务」折叠区（只读 + 去插件页配置），
+  面板只负责调度和记录。任务编辑器深链到这类任务时给一句人话和入口，不再让用户改完被后端拒绝。
+- `jobs` 表新增 `surface` / `summary` / `blockers` / `manage_url` 四列（旧库自动迁移）；
+  `paused` 在插件重新同步时**保留**，不会被代码覆盖。
+
 - 写清插件页面的安全模型：**默认同源 = 插件页与面板同等权限**，iframe 的 `sandbox`
   在这种模式下**不是安全边界**（同时有 `allow-scripts` 与 `allow-same-origin` 时，
   被框文档能 `parent.document` 把 sandbox 属性摘掉再重载）。插件页顶部会明确提示这一点。
