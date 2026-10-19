@@ -663,8 +663,6 @@ pub fn view() -> Vec<Item> {
 ///
 /// 失败时**不退出**（面板继续跑），只在日志里说明 —— 重启按钮失败不该让面板下线。
 pub fn restart_process() {
-    use std::os::unix::process::CommandExt;
-
     crate::log::plog!("boot", warn, "收到重启请求：exec 自身（PID 不变）");
     // 尽量把日志刷出去。stdout 是行缓冲，面板通道的 console transport 是同步写的，
     // 这里再 yield 一下让 writer 线程把队列排空。
@@ -678,14 +676,30 @@ pub fn restart_process() {
         }
     };
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let err = std::process::Command::new(&exe).args(&args).exec();
-    // exec 只有失败才返回
-    crate::log::plog!(
-        "boot",
-        error,
-        "重启失败：exec {} 出错（{err}）—— 面板继续用旧配置运行",
-        exe.display()
-    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        // exec 只有失败才返回
+        crate::log::plog!(
+            "boot",
+            error,
+            "重启失败：exec {} 出错（{err}）—— 面板继续用旧配置运行",
+            exe.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows 没有 exec。这里不 spawn 再退出：父进程退出前端口仍被占用，
+        // 子进程大概率 bind 失败。明确提示手动重启，避免界面看起来成功。
+        let _ = (&exe, &args);
+        crate::log::plog!(
+            "boot",
+            warn,
+            "当前平台不支持原地 exec 重启；请手动重启面板使设置生效"
+        );
+    }
 }
 
 #[cfg(test)]
