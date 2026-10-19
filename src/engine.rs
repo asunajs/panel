@@ -185,12 +185,13 @@ impl LazyCfg {
 /// 该不该把这个插件从内存里卸掉（**纯函数**，好测）。
 ///
 /// `next_fire_in_ms`：它名下**最近**的一次触发还有多久（`None` = 没有排班任务）。
+/// `idle_for_ms`：距离上次活动（加载，或最近一次 HTTP 请求）多久。
 fn should_evict(
     has_on_tick: bool,
     keep_warm: bool,
     has_ws: bool,
     next_fire_in_ms: Option<i64>,
-    since_load_ms: u64,
+    idle_for_ms: u64,
     idle_ms: u64,
 ) -> bool {
     // 路由**不**再阻止卸载：路由声明留在全局表里，请求来了再把运行时装回来
@@ -199,8 +200,8 @@ fn should_evict(
         return false;
     }
     // ⚠ 刚装进来就卸是最没意义的一种：启动时刚付过一次加载的钱。
-    //   所以"闲置"从**装进来的那一刻**开始算，先给满一个 idle 窗口的宽限。
-    if since_load_ms < idle_ms {
+    //   所以"闲置"从**上次活动**开始算，先给满一个 idle 窗口的宽限。
+    if idle_for_ms < idle_ms {
         return false;
     }
     match next_fire_in_ms {
@@ -392,6 +393,13 @@ fn maintain_plugins(
             .filter(|t| t.plugin == p.name && t.enabled)
             .map(|t| (t.next_fire - now).num_milliseconds())
             .min();
+        // 纯 WebUI 插件可能一直在轮询：闲置要按“最近一次请求”算，不能只看
+        // 加载时间 —— 否则页面开着也会每 120 秒被卸一次（然后下一次请求冷启动）。
+        let last_active = match p.last_request {
+            Some(t) if t > p.loaded_at => t,
+            _ => p.loaded_at,
+        };
+        let idle_for = last_active.elapsed().as_millis() as u64;
         if p.evicted {
             // ⚠ 勾了「长期加载」的**必须马上装回来**：否则会出现
             //   `evicted = true && keep_warm = true` 这种自相矛盾的状态
@@ -418,7 +426,7 @@ fn maintain_plugins(
             p.keep_warm,
             host.ws.open_count_for(&p.name) > 0,
             next_in,
-            p.loaded_at.elapsed().as_millis() as u64,
+            idle_for,
             cfg.idle_ms,
         ) {
             continue;
@@ -1117,6 +1125,9 @@ struct LoadedPlugin {
     handlers: Vec<String>,
     /// 装进内存的时刻（惰性加载的"宽限期"从这里算）。
     loaded_at: Instant,
+    /// 最近一次 HTTP 路由请求。纯 WebUI 插件靠它判断“用户还在用”，
+    /// 避免页面开着、轮询每 5 秒一次，却在 120 秒时被当成闲置卸掉。
+    last_request: Option<Instant>,
     /// 「装回内存」失败之后的**下次重试时刻**（惰性加载）。
     ///
     /// ⚠ 没有这一格的话，一次装回失败就是终态：`error.is_some()` 让
@@ -1956,6 +1967,8 @@ fn worker_main(
                         if one.evicted {
                             let _ = rehydrate_plugin(&mut rt, one, one.tasks, &logs, &host, &wd);
                         }
+                        // 有请求 = 还在用：闲置计时从这里重新开始。
+                        one.last_request = Some(Instant::now());
                     }
                 }
                 // 冷启动后立刻刷新面板看到的 loaded/evicted 状态，别等下一次 Tick。
@@ -1975,6 +1988,8 @@ fn worker_main(
                     if one.evicted {
                         let _ = rehydrate_plugin(&mut rt, one, one.tasks, &logs, &host, &wd);
                     }
+                    // 手动触发也算“还在用”，别刚跑完就被闲置卸掉。
+                    one.last_request = Some(Instant::now());
                 }
                 let out = match sched.find(&plugin, &name) {
                     Some(idx) => run_one(
@@ -3916,6 +3931,7 @@ fn load_one(
         command: None,
         handlers: Vec::new(),
         loaded_at: Instant::now(),
+        last_request: None,
         retry_at: None,
         evicted: false,
         keep_warm: false,
@@ -4398,6 +4414,7 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
         command: None,
         handlers: Vec::new(),
         loaded_at: Instant::now(),
+        last_request: None,
         retry_at: None,
         evicted: false,
         keep_warm: false,
@@ -5422,6 +5439,7 @@ mod tests {
             command: None,
             handlers: Vec::new(),
             loaded_at: Instant::now(),
+            last_request: None,
             retry_at: None,
             evicted: false,
             keep_warm: false,
