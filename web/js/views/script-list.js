@@ -123,7 +123,6 @@ function fileCard(f, job) {
           job.paused ? '恢复' : '暂停'
         }</button>`,
         `<button class="btn" data-act="override" data-name="${esc(job.name)}" data-path="${esc(f.path)}" title="写一条面板覆盖，文件头里的 cron 保留">覆盖调度</button>`,
-        `<button class="btn danger" data-act="delete" data-name="${esc(job.name)}" data-dir="1">删除</button>`,
       );
     } else if (deleted) {
       ops.push(
@@ -138,6 +137,11 @@ function fileCard(f, job) {
       )}" title="基于这份文件另建一条面板任务；原来的目录任务不受影响（路径 / 运行时 / 调度可改）">基于此文件建面板任务</button>`,
     );
     if (disabled) ops.push('<span class="hint">文件头写了 disabled，不会自动排班</span>');
+    // 删除是破坏性操作，放到这一排最后并靠右；别夹在「覆盖调度」和
+    // 「基于此文件建面板任务」中间，误点的代价太大。
+    if (scheduled) {
+      ops.push(`<button class="btn danger" data-act="delete" data-name="${esc(job.name)}" data-dir="1">删除</button>`);
+    }
   }
 
   return `

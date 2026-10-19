@@ -673,6 +673,11 @@
   font-size: 12px;
 }
 
+/* 破坏性操作（删除）与普通动作隔开，靠右放；不跟「覆盖调度」挤在一起 */
+.plugin-actions .btn.danger {
+  margin-left: auto;
+}
+
 /* 视图切换的顶部消息条 */
 .toast {
   position: fixed;
@@ -757,6 +762,24 @@
   border-radius: var(--radius, 8px);
   background: var(--surface);
   border: 1px solid var(--border);
+  /* 绝对定位叠在原按钮行上：确认条比按钮行宽，如果参与布局会把整张卡片撑高，
+     点击时页面往下跳一下（用户原话「点击后屏幕闪烁」）。 */
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: max-content;
+  max-width: min(92vw, 560px);
+  box-shadow: var(--shadow);
+}
+
+/* 确认期间保留原按钮的尺寸占位（visibility 不参与焦点，但仍占位） */
+.card-actions.confirming {
+  position: relative;
+}
+
+.card-actions.confirming > :not(.confirm-bar) {
+  visibility: hidden;
 }
 
 /* 不可逆的动作给一圈警示色；可逆的（暂停 / 停用）用中性色，视觉重量跟着风险走 */

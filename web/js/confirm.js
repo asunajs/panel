@@ -76,7 +76,7 @@ function onEsc(ev) {
 export function armConfirm(spec, { locate, root = null, timeoutMs = 10000 } = {}) {
   settleArmed(false); // 同时只允许一个确认（再点别的动作，前一个自动放弃）
   return new Promise((resolve) => {
-    armed = { spec, locate, resolve, timer: null };
+    armed = { spec, locate, resolve, timer: null, root };
     armed.timer = setTimeout(() => settleArmed(false), timeoutMs);
     // Esc 取消：误触之后最常见的动作是「赶紧撤」，不该逼用户去点按钮
     document.addEventListener('keydown', onEsc, true);
@@ -91,6 +91,12 @@ export function settleArmed(value) {
   armed = null;
   clearTimeout(a.timer);
   document.removeEventListener('keydown', onEsc, true);
+  // 确认条是绝对定位的，不会随视图重渲染自动消失；超时 / Esc 也要收掉，
+  // 否则按钮一直藏在确认条下面。
+  if (a.root) {
+    a.root.querySelectorAll('.confirm-bar').forEach((el) => el.remove());
+    a.root.querySelectorAll('.card-actions.confirming').forEach((el) => el.classList.remove('confirming'));
+  }
   a.resolve(value);
   return true;
 }
@@ -108,7 +114,12 @@ export function paintArmed(root) {
     settleArmed(false);
     return false;
   }
-  row.innerHTML = confirmBarHtml(armed.spec);
+  // 保留原来的按钮占位，只把确认条绝对定位叠上去：
+  // 直接 row.innerHTML = ... 会让这一行高度从 34px 变成 52px，整页往下跳一次，
+  // 用户看到的就是「点删除屏幕闪一下」。
+  row.querySelectorAll(':scope > .confirm-bar').forEach((el) => el.remove());
+  row.classList.add('confirming');
+  row.insertAdjacentHTML('beforeend', confirmBarHtml(armed.spec));
   // 焦点给「取消」而不是「确认」：回车不该把危险动作做掉
   const cancel = row.querySelector('[data-confirm-cancel]');
   if (cancel) cancel.focus();
