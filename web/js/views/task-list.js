@@ -109,6 +109,15 @@ function taskCard(t) {
   // 插件任务都是 JavaScript，不再给每张卡挂语言徽章 —— 这是每张卡都一样的
   // 噪声；脚本任务的 Python / Shell 徽章在脚本页，那里才需要区分。
   const title = t.plugin ? `${t.plugin} / ${t.name}` : t.name;
+  // 摘要和未就绪原因经常是同一句（“还没有账号”）—— 只显示一次，
+  // 否则卡片上会出现两行一模一样的话，看起来像两个问题。
+  const dup = t.blockers.length === 1 && t.blockers[0] === t.summary;
+  const summaryLine = t.summary && !dup
+    ? `<span class="hint task-summary-line">${esc(t.summary)}</span>`
+    : '';
+  const blockersLine = t.blockers && t.blockers.length
+    ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>`
+    : '';
   const sourceText = t.source === 'panel' ? '在面板创建' : '插件声明';
   const sourceTitle =
     t.source === 'panel'
@@ -155,8 +164,8 @@ function taskCard(t) {
         <span class="field-label">下次运行</span>
         <span class="mono">${esc(minuteOf(t.nextRun))}</span>
         ${t.covered && !t.deleted ? '<span class="badge warning" title="运行时间在面板上改过">已改时间</span>' : ''}
-        ${t.summary ? `<span class="hint task-summary-line">${esc(t.summary)}</span>` : ''}
-        ${t.blockers && t.blockers.length ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>` : ''}
+        ${summaryLine}
+        ${blockersLine}
       </div>
       <details class="task-details">
         <summary>详情与更多操作</summary>
@@ -200,6 +209,13 @@ function pluginManagedCard(t) {
   const manage = t.manageUrl
     ? `<button class="btn primary" data-act="configure" data-url="${esc(t.manageUrl)}">去插件页配置</button>`
     : '';
+  const dup = t.blockers.length === 1 && t.blockers[0] === t.summary;
+  const summaryLine = t.summary && !dup
+    ? `<span class="hint task-summary-line">${esc(t.summary)}</span>`
+    : '';
+  const blockersLine = t.blockers && t.blockers.length
+    ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>`
+    : '';
   return `
     <div class="card" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}" data-managed="1">
       <div class="card-head">
@@ -217,8 +233,8 @@ function pluginManagedCard(t) {
       <div class="task-summary">
         <span class="field-label">下次运行</span>
         <span class="mono">${esc(minuteOf(t.nextRun))}</span>
-        ${t.summary ? `<span class="hint task-summary-line">${esc(t.summary)}</span>` : ''}
-        ${t.blockers && t.blockers.length ? `<span class="hint task-summary-line">未就绪：${esc(t.blockers.join('；'))}</span>` : ''}
+        ${summaryLine}
+        ${blockersLine}
       </div>
       <p class="hint" style="margin:0">这条任务的配置、账号和运行时间都在插件页面里管理；面板只负责到点叫醒和记录。</p>
     </div>`;
