@@ -905,10 +905,16 @@ impl HostState {
     ) -> Result<(), String> {
         let def = validate_route(plugin, path, method, budget_raw)?;
         let mut guard = self.routes.lock().unwrap();
-        if guard
-            .iter()
-            .any(|r| r.path == def.path && r.method == def.method)
+        if let Some(existing) = guard
+            .iter_mut()
+            .find(|r| r.path == def.path && r.method == def.method)
         {
+            // 同一插件重装（惰性加载的 rehydrate）会再注册一遍同样的路由：
+            // 覆盖成新的 handler 即可，不能报“已经注册过”把装回流程卡死。
+            if existing.plugin == def.plugin {
+                *existing = def;
+                return Ok(());
+            }
             return Err(format!("路由 `{} {}` 已经被注册过了", def.method, def.path));
         }
         guard.push(def);

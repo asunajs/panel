@@ -187,14 +187,15 @@ impl LazyCfg {
 /// `next_fire_in_ms`：它名下**最近**的一次触发还有多久（`None` = 没有排班任务）。
 fn should_evict(
     has_on_tick: bool,
-    has_routes: bool,
     keep_warm: bool,
     has_ws: bool,
     next_fire_in_ms: Option<i64>,
     since_load_ms: u64,
     idle_ms: u64,
 ) -> bool {
-    if has_on_tick || has_routes || keep_warm || has_ws {
+    // 路由**不**再阻止卸载：路由声明留在全局表里，请求来了再把运行时装回来
+    // （冷启动）。纯 WebUI 插件（比如 mcloud）闲置时也能真正把内存还回去。
+    if has_on_tick || keep_warm || has_ws {
         return false;
     }
     // ⚠ 刚装进来就卸是最没意义的一种：启动时刚付过一次加载的钱。
@@ -336,7 +337,7 @@ fn rehydrate_plugin(
             logs,
             &p.name,
             "info",
-            "惰性加载：装回内存（触发时不用等）",
+            "惰性加载：装回内存（触发/请求时不用等）",
         );
     }
     true
@@ -371,13 +372,6 @@ fn maintain_plugins(
     }
     // 按**插件**判（见 `wsclient::Registry::open_count_for`）：
     // 全局判会让一条泄漏的句柄把整个惰性加载静默关掉。
-    // 路由表读一次就够（每个插件在不在里面）
-    let route_owner: Vec<String> = host
-        .routes
-        .lock()
-        .map(|g| g.iter().map(|r| r.plugin.clone()).collect())
-        .unwrap_or_default();
-
     for p in plugins.iter_mut() {
         // 加载失败的（`error` 有值）平时跳过 —— 但**装回失败**是另一回事：
         // 它 `evicted = true` 且我们记了 `retry_at`，到点要再试一次。
@@ -398,8 +392,6 @@ fn maintain_plugins(
             .filter(|t| t.plugin == p.name && t.enabled)
             .map(|t| (t.next_fire - now).num_milliseconds())
             .min();
-        let has_routes = route_owner.iter().any(|n| n == &p.name);
-
         if p.evicted {
             // ⚠ 勾了「长期加载」的**必须马上装回来**：否则会出现
             //   `evicted = true && keep_warm = true` 这种自相矛盾的状态
@@ -423,7 +415,6 @@ fn maintain_plugins(
         }
         if !should_evict(
             p.has_on_tick,
-            has_routes,
             p.keep_warm,
             host.ws.open_count_for(&p.name) > 0,
             next_in,
@@ -435,18 +426,16 @@ fn maintain_plugins(
         // 卸：只丢运行时，**别动排班**（任务还在，到点还要跑）
         evict_runtime(p, host);
         changed = true;
-        // 万一它在**运行期**才注册了路由（加载期没有 ⇒ 上面 `has_routes` 判不出来），
-        // 那些表项指向的 JS 回调已经随运行时一起没了 —— 留着就是悬空指针。
-        // 重装时加载期会把该注册的重新注册回来。
-        if let Ok(mut g) = host.routes.lock() {
-            g.retain(|r| r.plugin != p.name);
-        }
+        // ⚠ **不要**删路由声明：它们是“这个插件有哪些接口”的清单。
+        // 运行时没了，但请求打过来时 `HttpRequest` 会按这份清单把插件装回来
+        // （冷启动）再分发。删了的话，下一次请求只会得到 404。
+        // 热更新 / 停用 / 删除插件那条路仍会清路由（见 `unload_plugin`）。
         hostapi::push_log(
             logs,
             &p.name,
             "info",
             &format!(
-                "惰性加载：卸下内存（下次触发前 {} 秒会装回来；勾了「长期加载」就不卸）",
+                "惰性加载：卸下内存（下次触发/请求前 {} 秒会装回来；勾了「长期加载」就不卸）",
                 cfg.preload_ms / 1000
             ),
         );
@@ -1955,6 +1944,22 @@ fn worker_main(
                 request_json,
                 reply,
             }) => {
+                // 路由请求可能打到**已惰性卸出**的插件：路由声明还在表里，
+                // 但运行时没了。先按声明找到 owner，把运行时装回来（冷启动）再分发。
+                let owner = host.routes.lock().ok().and_then(|g| {
+                    g.iter()
+                        .find(|r| format!("{} {}", r.method, r.path) == key)
+                        .map(|r| r.plugin.clone())
+                });
+                if let Some(owner) = owner {
+                    if let Some(one) = plugins.iter_mut().find(|p| p.name == owner) {
+                        if one.evicted {
+                            let _ = rehydrate_plugin(&mut rt, one, one.tasks, &logs, &host, &wd);
+                        }
+                    }
+                }
+                // 冷启动后立刻刷新面板看到的 loaded/evicted 状态，别等下一次 Tick。
+                sync_registry(&registry, &plugins, &owned_now(), &host.routes);
                 let out = dispatch_route(&plugins, &host, &key, &request_json, &wd, budget);
                 let _ = reply.send(out);
             }
@@ -2073,17 +2078,10 @@ fn worker_main(
                                 "它上一次加载就失败了（本来就没在内存里），看日志".to_string()
                             );
                         }
-                        // 三条"卸了就会出事"的理由，照实说，别让人以为是 bug
+                        // 两条"卸了就会出事"的理由，照实说，别让人以为是 bug。
+                        // 路由**不算**：声明留在表里，下次请求会冷启动装回来。
                         if p.has_on_tick {
                             return Err("它注册了 `on_tick`（每秒都要跑），卸不了".to_string());
-                        }
-                        let has_routes = host
-                            .routes
-                            .lock()
-                            .map(|g| g.iter().any(|r| r.plugin == name))
-                            .unwrap_or(false);
-                        if has_routes {
-                            return Err("它有接口（注册了路由），卸了那些接口就没了".to_string());
                         }
                         let n = host.ws.open_count_for(&name);
                         if n > 0 {
@@ -4004,9 +4002,13 @@ fn load_one(
     // 装不进去（与其他插件冲突）就整体回滚并判加载失败。
     if runtime.is_some() && !routes.is_empty() {
         let mut guard = host.routes.lock().unwrap();
-        let conflict = routes
-            .iter()
-            .find(|r| guard.iter().any(|x| x.method == r.method && x.path == r.path));
+        // 只把**别的插件**占用的 path/method 当冲突；同一插件装回来时
+        // 路由声明还在表里，覆盖成新 handler 即可（惰性加载的 rehydrate）。
+        let conflict = routes.iter().find(|r| {
+            guard
+                .iter()
+                .any(|x| x.method == r.method && x.path == r.path && x.plugin != name)
+        });
         if let Some(r) = conflict {
             let e = format!("路由 `{} {}` 已经被注册过了", r.method, r.path);
             drop(guard);
@@ -4016,7 +4018,14 @@ fn load_one(
             return (lp, Vec::new());
         }
         for r in routes {
-            guard.push(r);
+            if let Some(existing) = guard
+                .iter_mut()
+                .find(|x| x.method == r.method && x.path == r.path)
+            {
+                *existing = r;
+            } else {
+                guard.push(r);
+            }
         }
     }
 
@@ -4415,7 +4424,10 @@ fn unload_plugin(
     // ⚠️ 只有「活着的」插件才动调度器。拒绝占位记录（runtime=None）从没注册过任务，
     // 而它和真插件**同名** —— 按名字调 `remove_plugin` 会把真插件的任务一起删掉
     // （实测：删掉冲突文件后，另一个插件的任务从 jobs 表里消失了）。
-    let removed = if plugins[pos].runtime.is_some() {
+    // 惰性卸出的插件 `runtime` 也是 `None`，但它**确实**注册过路由 —— 删除/停用/
+    // 热更新时必须把路由一起清掉，否则会留下指向“已经不存在的插件”的声明。
+    let is_real = plugins[pos].runtime.is_some() || plugins[pos].evicted;
+    let removed = if is_real {
         host.routes.lock().unwrap().retain(|r| r.plugin != name);
         sched.remove_plugin(&name)
     } else {
@@ -5645,8 +5657,9 @@ mod tests {
         );
     }
 
-    /// 惰性加载的判据：**带路由 / on_tick / 勾了长期加载 / 有活着的 WS** 的一律不卸。
+    /// 惰性加载的判据：**on_tick / 勾了长期加载 / 有活着的 WS** 的一律不卸。
     ///
+    /// 路由**不再**是常驻理由：路由声明留在表里，请求来了冷启动装回。
     /// 末尾那几条是**常量之间的断言**（`DEFAULT_*` 的关系），clippy 会说"值恒定"——
     /// 那正是要点：这些常量哪天被人改反了，这条测试就该红。
     #[allow(clippy::assertions_on_constants)]
@@ -5655,21 +5668,21 @@ mod tests {
         let idle = 120_000i64;
         let old = 10 * idle as u64; // 早就过了宽限期
         // 纯定时任务、离下次触发还很远 ⇒ 该卸
-        assert!(should_evict(false, false, false, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(should_evict(false, false, false, Some(8 * 3_600_000), old, idle as u64));
         // 快到点了 ⇒ 留着（提前量那一侧负责装回来，这里不重复卸装）
-        assert!(!should_evict(false, false, false, false, Some(5_000), old, idle as u64));
-        // 带路由（用户原话：「只有带 route 的才需要常驻」）⇒ 不卸
-        assert!(!should_evict(false, true, false, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(false, false, false, Some(5_000), old, idle as u64));
+        // 带路由的插件也按同一套规则卸（声明留着，请求时冷启动装回）
+        assert!(should_evict(false, false, false, Some(8 * 3_600_000), old, idle as u64));
         // 注册了 on_tick ⇒ 不卸
-        assert!(!should_evict(true, false, false, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(true, false, false, Some(8 * 3_600_000), old, idle as u64));
         // 面板勾了「长期加载」⇒ 不卸
-        assert!(!should_evict(false, false, true, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(false, true, false, Some(8 * 3_600_000), old, idle as u64));
         // 还有活着的 WebSocket 句柄 ⇒ 不卸（句柄指向 JS 回调，卸了就是悬空）
-        assert!(!should_evict(false, false, false, true, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(false, false, true, Some(8 * 3_600_000), old, idle as u64));
         // 名下一条任务都没有 ⇒ 更该卸
-        assert!(should_evict(false, false, false, false, None, old, idle as u64));
+        assert!(should_evict(false, false, false, None, old, idle as u64));
         // **刚装进来**（还没满一个 idle 窗口）⇒ 先留着：启动时刚付过加载的钱
-        assert!(!should_evict(false, false, false, false, Some(8 * 3_600_000), 1_000, idle as u64));
+        assert!(!should_evict(false, false, false, Some(8 * 3_600_000), 1_000, idle as u64));
         // 默认值必须自洽：提前量覆盖一次加载，但又**小于**闲置阈值（否则会抖动）
         assert!(DEFAULT_LOAD_BUDGET_MS < DEFAULT_PRELOAD_MS, "提前量要覆盖一次加载");
         assert!(

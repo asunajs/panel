@@ -235,18 +235,17 @@ export async function render(root, ctx, opts = {}) {
                   //   给它画一个能点的「卸载」按钮，点下去只会回一句
                   //   "没有叫 X 的插件"（`/api/state` 里停用条目是另一种形状）。
                   const loaded = !off && p.evicted !== true;
-                  // 有接口（路由）或 on_tick 的卸不了 —— 按钮灰掉并说明原因，
+                  // on_tick 的卸不了（每秒都要跑）—— 按钮灰掉并说明原因，
                   // 比"点了弹一句失败"好：能点的样子就该真能点。
-                  const pinned = p.has_routes === true || p.has_on_tick === true;
+                  // 路由**不**再阻止卸载：声明留在表里，请求来了冷启动装回。
+                  const pinned = p.has_on_tick === true;
                   const loadBtn = off
                     ? '<button class="btn" disabled title="先启用它，才谈得上装进/卸出内存">卸载</button>'
                     : !loaded
                     ? `<button class="btn" data-loaded="${esc(p.name)}" data-now="0" title="现在装进内存（不用等到点）">加载</button>`
                     : pinned
-                      ? `<button class="btn" disabled title="${esc(
-                          p.has_routes ? '它有接口（路由），卸了那些接口就没了' : '它注册了 on_tick，每秒都要跑',
-                        )}">卸载</button>`
-                      : `<button class="btn" data-loaded="${esc(p.name)}" data-now="1" title="从内存里卸出去：任务照旧排着，到点会自动装回来">卸载</button>`;
+                      ? `<button class="btn" disabled title="它注册了 on_tick，每秒都要跑">卸载</button>`
+                      : `<button class="btn" data-loaded="${esc(p.name)}" data-now="1" title="从内存里卸出去：任务照旧排着，请求/到点会自动装回来">卸载</button>`;
                   const ops = `
                     <button class="btn" data-src="${esc(p.name)}">源码</button>
                     ${loadBtn}

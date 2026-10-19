@@ -122,8 +122,8 @@ CPU 占用（进程 CPU 时间差值法）：
 
 ### 7.4 惰性回收：外部子进程是真的会退出
 
-`PLUGIN_LAZY=1`（默认）时，没有路由、没有 `on_tick`、没有开着的 WS、且下次触发还在
-`PLUGIN_IDLE_EVICT_MS` 之外的插件会被卸出内存：
+`PLUGIN_LAZY=1`（默认）时，没有 `on_tick`、没有开着的 WS、且下次触发还在
+`PLUGIN_IDLE_EVICT_MS` 之外的插件会被卸出内存（有路由的也一样，请求来了冷启动）：
 
 - **QuickJS**：释放 `Context` / `Runtime`。省的是 JS 堆，**RSS 基本不动**
   （实测见 [lazy-plugins.md](lazy-plugins.md)）。

@@ -481,7 +481,9 @@ register_route(path, method, handler) -> None
 
   写成 `req.query['id']` 在 JS 里**不报错**（字符串取下标给字符），只有**参数永远 undefined**。
   要按名取值就自己解析：`new URLSearchParams(req.query).get('id')`。
-- 未匹配的路径仍然 404；`(method, path)` 重复注册会报错。
+- 未匹配的路径仍然 404；**别的插件**占用同一 `(method, path)` 会报错。
+  同一插件重装（惰性加载的冷启动）会重新注册同样的路由，面板**覆盖**成新
+  handler，不报错 —— 否则 rehydrate 会被“已经注册过”卡死。
 - 外部引擎的路由 handler 超时 = 杀进程组；返回体超限 / 非 JSON 会变成 500。
 
 ### 1.7 WebSocket

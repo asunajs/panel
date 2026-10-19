@@ -59,7 +59,7 @@ open http://127.0.0.1:8787/  # 面板
 | `WEB_DEV_DIR` | 空 | **开发用**：设了就从这个目录读主面板前端（每次请求都读），改一行 CSS/JS 刷新浏览器即可，不用 `cargo build`。生产别设 |
 | `PLUGIN_WATCH` | `1` | **半被动刷新**：用文件系统事件（inotify/FSEvents/ReadDirectoryChangesW）监听插件目录和任务目录，事件后 200ms 去抖再 `Wake` 引擎。`0`/`off` 退回纯轮询。监听失败会自动退回轮询 |
 | `PLUGIN_SCAN_MS` | `30000` | 没有事件时的兜底扫描间隔（毫秒，下限 1000）。有 watcher 时事件会强制立刻扫描；这个值只防“漏事件” |
-| `PLUGIN_LAZY` | `1` | **惰性加载**：没有路由、也没有 `on_tick` 的插件闲下来就卸出内存，下次触发前提前装回来（见 [lazy-plugins.md](lazy-plugins.md)）。外部插件卸载 = 杀子进程，RSS 真的会掉。`0`/`off`/`false`/`no` 关掉 |
+| `PLUGIN_LAZY` | `1` | **惰性加载**：没有 `on_tick` 的插件闲下来就卸出内存；有路由的也卸，请求来了冷启动装回，纯定时的下次触发前提前装回来（见 [lazy-plugins.md](lazy-plugins.md)）。外部插件卸载 = 杀子进程，RSS 真的会掉。`0`/`off`/`false`/`no` 关掉 |
 | `PLUGIN_IDLE_EVICT_MS` | `120000` | 闲置多久之后卸出内存。**下限 20 秒**（= 2 × 加载预算）；**必须大于** `PLUGIN_PRELOAD_MS`（配反了会自动夹住并打日志） |
 | `PLUGIN_PRELOAD_MS` | `20000` | 触发前多久把它装回来。至少会被抬到一次加载的预算（10s） |
 
