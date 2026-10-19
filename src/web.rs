@@ -455,10 +455,15 @@ async fn security_headers(
     } else {
         "'self'".to_string()
     };
+    // 插件页要能被面板 iframe；面板自己的页面仍然禁止被任何页面嵌入。
+    // 只按路径放行，不给整个 origin 放开（插件接口响应多带一个头没有意义，
+    // 但至少不会把面板页也变成可嵌入）。
+    let plugin_page = path.starts_with("/plugins/");
+    let frame_ancestors = if plugin_page { "'self'" } else { "'none'" };
     let csp = format!(
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
          script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src {frame_src}; \
-         frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
+         frame-ancestors {frame_ancestors}; base-uri 'none'; object-src 'none'; form-action 'self'"
     );
 
     let h = resp.headers_mut();
@@ -472,7 +477,7 @@ async fn security_headers(
     );
     h.insert(
         axum::http::header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
+        HeaderValue::from_static(if plugin_page { "SAMEORIGIN" } else { "DENY" }),
     );
     if let Ok(v) = HeaderValue::from_str(&csp) {
         h.insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
