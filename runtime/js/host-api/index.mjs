@@ -22,6 +22,7 @@ export {
   fail,
   fatal,
   loggerFactory,
+  config,
   serverUrl,
   register_cron,
   every,

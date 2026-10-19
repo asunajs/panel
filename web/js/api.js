@@ -223,6 +223,27 @@ export function uploadFile(kind, file, opts = {}) {
   });
 }
 
+// ---------------------------------------------------------------- 插件商城
+
+/// 读取 GitHub 目录。`refresh=true` 绕过服务端 15 分钟缓存。
+export function getMarket(refresh = false) {
+  return request(`/api/market${refresh ? '?refresh=1' : ''}`, {
+    // 目录里每个 GitHub 条目都要解析一次；慢网下 15 秒不够。
+    timeout: 60000,
+  });
+}
+
+/// 安装 / 更新目录里的一个条目。客户端只传 id，下载地址由服务端解析。
+export function installMarketPlugin(id) {
+  return request('/api/market/install', {
+    method: 'POST',
+    panel: true,
+    body: { id },
+    // 下载 + 转译 + 写盘可能比普通接口慢得多。
+    timeout: 120000,
+  });
+}
+
 // ---------------------------------------------------------------- 任务定义
 
 export function createJob(plugin, name, expr) {
@@ -302,6 +323,19 @@ export function reloadPlugin(name) {
 /// 取插件源码（含有没有备份，用来决定「恢复上一次」按钮给不给）。
 export function pluginSource(name) {
   return request(`/api/plugins/${encodeURIComponent(name)}/source`);
+}
+
+/// 插件配置：数据目录里的 `config.json`，不是插件源码。
+export function getPluginConfig(name) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/config`);
+}
+
+export function savePluginConfig(name, config) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/config`, {
+    method: 'PUT',
+    panel: true,
+    body: config,
+  });
 }
 
 /// 保存插件源码。写完引擎会自己发现文件变化并热更新（面板已有机制）。
@@ -463,4 +497,31 @@ export function callPluginApi(plugin, path, body) {
     body,
     panel: body !== undefined,
   });
+}
+
+/* ---------------------------------------------------------------- 设置页 */
+
+/**
+ * 全部可配置项 + 当前值 + 来源（env / file / default）。
+ *
+ * 元数据由后端 `settings::DEFS` 提供：前端不抄一份，否则两边迟早对不上。
+ */
+export function getSettings() {
+  return request('/api/settings', { panel: true });
+}
+
+/** 保存一批设置。`values` 是 `{KEY: "value"}`。返回 `{ok, restart:[], live:[]}`。 */
+export function saveSettings(values) {
+  return request('/api/settings/save', { method: 'POST', panel: true, body: { values } });
+}
+
+/**
+ * 自重启（后端 exec 自身，PID 不变）。
+ *
+ * ⚠ 调用方要接受「这个请求可能拿不到完整响应」：服务端先回话再重启，
+ * 但 300ms 的窗口在某些机器上不够。拿到错误不代表没重启 —— 所以前端
+ * 失败后应当轮询 `/api/state` 而不是直接报错（见 views/settings.js）。
+ */
+export function restartPanel() {
+  return request('/api/restart', { method: 'POST', panel: true, timeout: 5000 });
 }

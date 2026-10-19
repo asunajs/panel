@@ -375,3 +375,28 @@ test('plugin load failure reports ready.ok=false and exits 1', async (t) => {
   const exit = await panel.waitExit();
   assert.equal(exit.code, 1);
 });
+
+test('config(): host-api reads the plugin config RPC result', async (t) => {
+  const panel = startRunner({
+    file: fixture('config.mjs'),
+    name: 'config-fixture',
+    rpcHandler: (req) =>
+      req.fn === 'config'
+        ? { ok: true, result: '{"interval":"30s","enabled":true}' }
+        : { ok: true, result: '' },
+  });
+  t.after(() => panel.cleanup());
+
+  const ready = await panel.waitReady();
+  assert.equal(ready.ok, true);
+  const ev = await panel.waitForEvent(
+    (e) => e.ev === 'log' && e.msg === 'config-json {"interval":"30s","enabled":true}',
+    { label: 'config log' },
+  );
+  assert.equal(ev.level, 'info');
+  assert.equal(panel.rpc('config').length, 1);
+
+  panel.shutdown();
+  const exit = await panel.waitExit();
+  assert.equal(exit.code, 0);
+});

@@ -228,15 +228,12 @@ impl ExtPlugin {
         Ok(())
     }
 
-    fn invoke_cmd(
-        &self,
-        cmd: Value,
-        id: u64,
-        budget: Duration,
-    ) -> Result<Option<String>, String> {
+    fn invoke_cmd(&self, cmd: Value, id: u64, budget: Duration) -> Result<Option<String>, String> {
         self.ensure_child()?;
         let mut guard = self.child.lock().unwrap();
-        let child = guard.as_mut().ok_or_else(|| "外部插件没有子进程".to_string())?;
+        let child = guard
+            .as_mut()
+            .ok_or_else(|| "外部插件没有子进程".to_string())?;
         child.send(&cmd).map_err(|e| format!("写命令失败: {e}"))?;
         let deadline = Instant::now() + budget + GRACE;
         let out = child.wait_result(id, deadline);
@@ -299,15 +296,16 @@ impl ExtPlugin {
             "key": key,
             "request": request,
         });
-        self.invoke_cmd(cmd, id, budget).and_then(|r| {
-            r.ok_or_else(|| "外部插件没有返回路由结果".to_string())
-        })
+        self.invoke_cmd(cmd, id, budget)
+            .and_then(|r| r.ok_or_else(|| "外部插件没有返回路由结果".to_string()))
     }
 
     pub fn tick(&self, seq: u64, ts: &str, budget: Duration) -> Result<(), String> {
         self.ensure_child()?;
         let mut guard = self.child.lock().unwrap();
-        let child = guard.as_mut().ok_or_else(|| "外部插件没有子进程".to_string())?;
+        let child = guard
+            .as_mut()
+            .ok_or_else(|| "外部插件没有子进程".to_string())?;
         child
             .send(&json!({"v":1,"cmd":"tick","seq":seq,"ts":ts}))
             .map_err(|e| format!("写 tick 失败: {e}"))?;
@@ -404,7 +402,12 @@ impl ChildHandle {
     fn wait_result(&mut self, id: u64, deadline: Instant) -> Result<Option<String>, String> {
         loop {
             match self.next_event(deadline)? {
-                ChildEvent::Result { id: got, ok, error, result } => {
+                ChildEvent::Result {
+                    id: got,
+                    ok,
+                    error,
+                    result,
+                } => {
                     if got != id {
                         continue;
                     }
@@ -483,9 +486,7 @@ pub fn load(
     let data_dir = host.plugin_data_dir.join(name);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("创建插件数据目录 {} 失败: {e}", data_dir.display()))?;
-    let file = file
-        .canonicalize()
-        .unwrap_or_else(|_| file.to_path_buf());
+    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let spec = ExtSpec {
         name: name.to_string(),
         file: file.clone(),
@@ -605,8 +606,14 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
         .env("PANEL_SCRIPT", if spec.script { "1" } else { "0" })
         .env("PANEL_PLUGIN_DATA_DIR", &spec.data_dir)
         .env(
+            "PANEL_PLUGIN_CONFIG_FILE",
+            spec.data_dir.join("config.json"),
+        )
+        .env(
             "PANEL_DATA_DIR",
-            host.plugin_data_dir.parent().unwrap_or(&host.plugin_data_dir),
+            host.plugin_data_dir
+                .parent()
+                .unwrap_or(&host.plugin_data_dir),
         )
         .env("PANEL_DB", &host.db_path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -629,7 +636,8 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
     // 独立进程组：kill(-pid) 能杀掉插件自己起的子进程
     cmd.process_group(0);
 
-    let (child_req, parent_req) = UnixStream::pair().map_err(|e| format!("建 RPC 请求管道失败: {e}"))?;
+    let (child_req, parent_req) =
+        UnixStream::pair().map_err(|e| format!("建 RPC 请求管道失败: {e}"))?;
     let (parent_resp, child_resp) =
         UnixStream::pair().map_err(|e| format!("建 RPC 响应管道失败: {e}"))?;
     let c_req = child_req.as_raw_fd();
@@ -660,16 +668,29 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
         });
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 {} 失败（{}）: {e}", spec.engine.as_str(), spec.command.display()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "启动 {} 失败（{}）: {e}",
+            spec.engine.as_str(),
+            spec.command.display()
+        )
+    })?;
     // 父端保留；子端在父进程里必须关掉
     drop(child_req);
     drop(child_resp);
     let pid = child.id();
-    let stdin = child.stdin.take().ok_or_else(|| "拿不到子进程 stdin".to_string())?;
-    let stdout = child.stdout.take().ok_or_else(|| "拿不到子进程 stdout".to_string())?;
-    let stderr = child.stderr.take().ok_or_else(|| "拿不到子进程 stderr".to_string())?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "拿不到子进程 stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "拿不到子进程 stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "拿不到子进程 stderr".to_string())?;
 
     let (tx, rx) = mpsc::channel::<ChildEvent>();
     let mut threads = Vec::new();
@@ -715,12 +736,20 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
     })
 }
 
-fn read_events(stdout: std::process::ChildStdout, tx: mpsc::Sender<ChildEvent>, shared: Arc<ExtShared>) {
+fn read_events(
+    stdout: std::process::ChildStdout,
+    tx: mpsc::Sender<ChildEvent>,
+    shared: Arc<ExtShared>,
+) {
     let mut reader = BufReader::new(stdout);
     let mut buf = String::new();
     loop {
         buf.clear();
-        match reader.by_ref().take(MAX_LINE_BYTES as u64).read_line(&mut buf) {
+        match reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64)
+            .read_line(&mut buf)
+        {
             Ok(0) => {
                 let _ = tx.send(ChildEvent::Eof);
                 break;
@@ -766,7 +795,11 @@ fn read_stderr(stderr: std::process::ChildStderr, shared: Arc<ExtShared>) {
     let mut buf = String::new();
     loop {
         buf.clear();
-        match reader.by_ref().take(MAX_LINE_BYTES as u64).read_line(&mut buf) {
+        match reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64)
+            .read_line(&mut buf)
+        {
             Ok(0) => break,
             Ok(_) => {
                 let line = buf.trim_end_matches(['\r', '\n']);
@@ -808,7 +841,11 @@ fn event_from_json(v: &Value) -> Option<ChildEvent> {
                 .get("result")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| v.get("result").filter(|x| !x.is_null()).map(|x| x.to_string())),
+                .or_else(|| {
+                    v.get("result")
+                        .filter(|x| !x.is_null())
+                        .map(|x| x.to_string())
+                }),
         }),
         "tick" => Some(ChildEvent::Tick {
             ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
@@ -830,7 +867,11 @@ fn rpc_loop(req: UnixStream, resp: UnixStream, shared: Arc<ExtShared>) {
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.by_ref().take(MAX_LINE_BYTES as u64).read_line(&mut line) {
+        match reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64)
+            .read_line(&mut line)
+        {
             Ok(0) => break,
             Ok(_) => {
                 if line.trim().is_empty() {
@@ -850,7 +891,11 @@ fn rpc_loop(req: UnixStream, resp: UnixStream, shared: Arc<ExtShared>) {
                 };
                 let mut bytes = serde_json::to_vec(&payload).unwrap_or_default();
                 bytes.push(b'\n');
-                if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                if writer
+                    .write_all(&bytes)
+                    .and_then(|_| writer.flush())
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -868,10 +913,15 @@ fn arg_str(args: &[Value], i: usize) -> String {
 
 fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
     let fname = v.get("fn").and_then(Value::as_str).unwrap_or("");
-    let args = v.get("args").and_then(Value::as_array).cloned().unwrap_or_default();
+    let args = v
+        .get("args")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let host = &shared.host;
     let plugin = &shared.name;
     match fname {
+        "config" => host.read_plugin_config(plugin),
         "sqlite_query" => host.do_sqlite(&arg_str(&args, 0), &arg_str(&args, 1), true),
         "sqlite_exec" => host.do_sqlite(&arg_str(&args, 0), &arg_str(&args, 1), false),
         "http_fetch" => host.do_http_fetch(&arg_str(&args, 0), &arg_str(&args, 1)),
@@ -902,15 +952,21 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
             )?;
             let mut p = shared.pending.lock().unwrap();
             if p.tasks.iter().any(|t| t.name == def.name) {
-                return Err(format!("插件 `{plugin}` 里已经注册过名为 `{}` 的任务", def.name));
+                return Err(format!(
+                    "插件 `{plugin}` 里已经注册过名为 `{}` 的任务",
+                    def.name
+                ));
             }
             p.tasks.push(def);
             Ok(String::new())
         }
-        "set_job_paused" => {
-            host.do_set_job_paused(plugin, &arg_str(&args, 0), args.get(1).and_then(Value::as_bool).unwrap_or(false))
-                .map(|()| String::new())
-        }
+        "set_job_paused" => host
+            .do_set_job_paused(
+                plugin,
+                &arg_str(&args, 0),
+                args.get(1).and_then(Value::as_bool).unwrap_or(false),
+            )
+            .map(|()| String::new()),
         "set_job_blockers" => {
             let raw = args.get(1).cloned().unwrap_or(Value::Array(Vec::new()));
             let blockers: Vec<String> = match serde_json::from_value(raw) {
@@ -948,7 +1004,10 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
                 &arg_str(&args, 2),
             )?;
             let mut p = shared.pending.lock().unwrap();
-            if p.routes.iter().any(|r| r.method == def.method && r.path == def.path) {
+            if p.routes
+                .iter()
+                .any(|r| r.method == def.method && r.path == def.path)
+            {
                 return Err(format!("路由 `{} {}` 已经被注册过了", def.method, def.path));
             }
             p.routes.push(def);
@@ -974,7 +1033,9 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
         "worker_hint" => {
             let kind = arg_str(&args, 0);
             if !matches!(kind.as_str(), "precision" | "exclusive" | "") {
-                return Err(format!("worker_hint 只认 precision/exclusive，收到 `{kind}`"));
+                return Err(format!(
+                    "worker_hint 只认 precision/exclusive，收到 `{kind}`"
+                ));
             }
             Ok(String::new())
         }
@@ -1006,10 +1067,7 @@ pub fn run_js_script(
     run_id: Option<&str>,
     env: Vec<(String, String)>,
 ) -> Result<ScriptRunOut, String> {
-    let data_dir = host
-        .plugin_data_dir
-        .join("__script__")
-        .join(sanitize(name));
+    let data_dir = host.plugin_data_dir.join("__script__").join(sanitize(name));
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("创建脚本数据目录 {} 失败: {e}", data_dir.display()))?;
     let cwd = file.parent().unwrap_or(&data_dir).to_path_buf();

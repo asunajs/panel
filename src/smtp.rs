@@ -121,10 +121,12 @@ pub fn send_with_options(cfg: &Config, opts: SendOptions) -> Result<String, Stri
     // 挡在连网之前：配置本身就不该跑的错，没必要先建好 socket 再发现。
     if cfg.tls == TlsMode::None && !cfg.user.trim().is_empty() {
         if !opts.allow_plaintext_auth {
-            return Err("tls 是 none（全程明文）而 user 不为空 —— 在明文连接上发 AUTH \
+            return Err(
+                "tls 是 none（全程明文）而 user 不为空 —— 在明文连接上发 AUTH \
                  等于把密码明文过网。改用 starttls / implicit；如果确实是本地测试服务器、\
                  并且愿意承担这个风险，由宿主显式打开 allow_plaintext_auth 再发"
-                .to_string());
+                    .to_string(),
+            );
         }
         // 放行也要留痕：这一行日志是"当时是明知故犯"的唯一证据。
         crate::log::plog!(
@@ -179,11 +181,9 @@ pub fn send_with_options(cfg: &Config, opts: SendOptions) -> Result<String, Stri
     // ---- STARTTLS ----
     if cfg.tls == TlsMode::Starttls {
         if !caps.iter().any(|c| c.eq_ignore_ascii_case("STARTTLS")) {
-            return Err(
-                "服务器没在 EHLO 里声明 STARTTLS，而 tls 用的是 starttls。\
+            return Err("服务器没在 EHLO 里声明 STARTTLS，而 tls 用的是 starttls。\
                  要么换 implicit（465 那种），要么确认一下端口对不对"
-                    .to_string(),
-            );
+                .to_string());
         }
         let (code, text) = conn.cmd("STARTTLS")?;
         if code != 220 {
@@ -200,12 +200,7 @@ pub fn send_with_options(cfg: &Config, opts: SendOptions) -> Result<String, Stri
 }
 
 /// TLS 之后（或明文）的剩余流程：AUTH → MAIL → RCPT → DATA → QUIT。
-fn finish(
-    mut conn: Conn,
-    cfg: &Config,
-    msg: String,
-    caps: &[String],
-) -> Result<String, String> {
+fn finish(mut conn: Conn, cfg: &Config, msg: String, caps: &[String]) -> Result<String, String> {
     // ---- AUTH ----
     if !cfg.user.is_empty() {
         conn.auth(cfg, caps)?;
@@ -273,7 +268,9 @@ impl Conn {
             .map_err(|e| format!("`{host}` 不是合法的 TLS 服务器名: {e}"))?;
         let sess = ClientConnection::new(std::sync::Arc::new(cfg), server)
             .map_err(|e| format!("建 TLS 会话失败: {e}"))?;
-        Ok(Conn::Tls(Box::new(BufReader::new(StreamOwned::new(sess, tcp)))))
+        Ok(Conn::Tls(Box::new(BufReader::new(StreamOwned::new(
+            sess, tcp,
+        )))))
     }
 
     /// 明文连接升级成 TLS。`STARTTLS` 之后调用。
@@ -529,7 +526,9 @@ fn read_ca_file(path: &std::path::Path) -> Result<String, String> {
 ///
 /// 自己解析而不是引 `rustls-pemfile`：只需要「把 BEGIN/END 之间的 base64 抠出来
 /// 解码」这一点，而 base64 我们已经有了。多一个依赖对离线构建是实打实的成本。
-fn load_pem_certs(path: &std::path::Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+fn load_pem_certs(
+    path: &std::path::Path,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
     let text = read_ca_file(path)?;
     let mut out = Vec::new();
     let mut cur: Option<String> = None;
@@ -665,9 +664,9 @@ fn envelope_addr(s: &str) -> Result<String, String> {
             }
             Ok(inner.to_string())
         }
-        (Some(_), _) | (_, Some(_)) => Err(format!(
-            "地址的尖括号没闭合（`<` 与 `>` 必须成对）：`{s}`"
-        )),
+        (Some(_), _) | (_, Some(_)) => {
+            Err(format!("地址的尖括号没闭合（`<` 与 `>` 必须成对）：`{s}`"))
+        }
         (None, None) => Ok(s.trim_matches('"').trim().to_string()),
     }
 }
@@ -860,17 +859,21 @@ mod tests {
         let enc = encode_header("  空格被 trim  ");
         let raw = enc.trim_start_matches("=?UTF-8?B?").trim_end_matches("?=");
         assert_eq!(
-            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(raw).unwrap())
-                .unwrap(),
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(raw)
+                    .unwrap()
+            )
+            .unwrap(),
             "空格被 trim"
         );
         // 编码字可解回原文
         let enc = encode_header("日常任务完成");
         assert!(enc.starts_with("=?UTF-8?B?") && enc.ends_with("?="));
-        let raw = enc
-            .trim_start_matches("=?UTF-8?B?")
-            .trim_end_matches("?=");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(raw).unwrap();
+        let raw = enc.trim_start_matches("=?UTF-8?B?").trim_end_matches("?=");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), "日常任务完成");
     }
 
@@ -957,7 +960,10 @@ mod tests {
         assert!(envelope_addr("a@b.com>").is_err());
         assert!(envelope_addr("<a@b.com").is_err());
         assert!(envelope_addr("<>").is_err(), "空地址不是合法信封");
-        assert!(envelope_addr("a <b@c> <d@e>").is_err(), "一个字段只能一个地址");
+        assert!(
+            envelope_addr("a <b@c> <d@e>").is_err(),
+            "一个字段只能一个地址"
+        );
     }
 
     /// 审计 中5 的原始 PoC：`\r\n` 拼出第二条 `RCPT TO`。
@@ -981,10 +987,15 @@ mod tests {
     #[test]
     fn subject_with_control_chars_is_encoded_not_injected() {
         let enc = encode_header("hello\r\nBcc: attacker@x");
-        assert!(!enc.contains('\r') && !enc.contains('\n'), "编码字里不许有换行: {enc:?}");
+        assert!(
+            !enc.contains('\r') && !enc.contains('\n'),
+            "编码字里不许有换行: {enc:?}"
+        );
         assert!(enc.starts_with("=?UTF-8?B?"), "{enc}");
         let raw = enc.trim_start_matches("=?UTF-8?B?").trim_end_matches("?=");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(raw).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .unwrap();
         assert_eq!(
             String::from_utf8(decoded).unwrap(),
             "hello\r\nBcc: attacker@x"
@@ -993,7 +1004,10 @@ mod tests {
         let mut c = cfg();
         c.subject = "hi\r\nBcc: attacker@x".into();
         let msg = build_message(&c).unwrap();
-        assert!(!msg.contains("\r\nBcc:"), "Subject 里的换行漏进报文了:\n{msg}");
+        assert!(
+            !msg.contains("\r\nBcc:"),
+            "Subject 里的换行漏进报文了:\n{msg}"
+        );
     }
 
     /// 审计 中5：`tls:"none"` 时对裸 TCP 发 `AUTH PLAIN`。
@@ -1020,8 +1034,17 @@ mod tests {
         assert!(!err.contains("明文"), "匿名明文不该被这条判据拦: {err}");
 
         // 显式放行之后，这条判据就不再是失败原因（会走到"连不上"）
-        let err = send_with_options(&c, SendOptions { allow_plaintext_auth: true }).unwrap_err();
-        assert!(!err.contains("明文连接上发 AUTH"), "放行后不该再报明文: {err}");
+        let err = send_with_options(
+            &c,
+            SendOptions {
+                allow_plaintext_auth: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            !err.contains("明文连接上发 AUTH"),
+            "放行后不该再报明文: {err}"
+        );
     }
 
     /// 审计 中5：`ca_file` 无上限读取（`/dev/zero` 读爆内存）。

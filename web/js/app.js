@@ -15,10 +15,12 @@
 import * as taskList from './views/task-list.js';
 import * as taskEditor from './views/task-editor.js';
 import * as pluginList from './views/plugin-list.js';
+import * as market from './views/market.js';
 import * as pluginSource from './views/plugin-source.js';
 import * as scriptList from './views/script-list.js';
 import * as scriptEditor from './views/script-editor.js';
 import * as logView from './views/log-view.js';
+import { renderSettings as renderSettingsView } from './views/settings.js';
 import {
   getState,
   logout,
@@ -29,7 +31,6 @@ import {
   PLUGIN_ISOLATION_HINT,
   editJob,
 } from './api.js';
-import { showPluginEngineUi, setPluginEngineUi } from './prefs.js';
 import { lineNode, openLogStream, makeRing } from './logstream.js';
 // 状态的中文与时刻的显示格式：与插件任务页共用一份（见 status.js 的文件头）
 import { statusBadge, minuteOf } from './status.js';
@@ -389,86 +390,18 @@ async function renderDashboard(root) {
 }
 
 // ---------------------------------------------------------------- 设置
+//
+// 实现挪到 views/settings.js（分 tab、后端配置、重启）。这里只留一个薄壳：
+// 把路由需要的上下文（toast / 主题切换）递过去，并保持 `renderSettings` 这个名字，
+// 让路由表不用改。
 
-async function renderSettings(root) {
-  const theme = document.documentElement.dataset.theme;
-  let build = null;
-  try {
-    const res = await getState();
-    if (res.ok) build = res.build || null;
-  } catch {
-    /* 后端没起来时仍然把外观设置画出来 */
-  }
-  const version = build && build.version ? build.version : '未知';
-  const features = build && Array.isArray(build.features) && build.features.length
-    ? build.features.join('、')
-    : '无';
-  const live = build ? (build.live_supported ? '可用' : '不可用') : '未知';
-  root.innerHTML = `
-    <div class="section">
-      <div class="section-head"><span class="section-title">外观</span></div>
-      <div class="card">
-        <div class="row" style="align-items:center">
-          <div class="field">
-            <span class="field-label">主题</span>
-            <span class="hint">当前：${theme === 'dark' ? '深色（Catppuccin Mocha）' : '亮色（Catppuccin Latte）'}</span>
-          </div>
-          <button class="btn" id="s-theme">切换</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-head"><span class="section-title">插件</span></div>
-      <div class="card">
-        <div class="row" style="align-items:center">
-          <div class="field">
-            <span class="field-label">执行引擎设置</span>
-            <span class="hint">默认隐藏。开启后，插件卡片上会显示「执行引擎」和
-              「自定义解释器路径」，可以按插件切换 Node / Bun。它只影响卡片上显示什么，
-              不改任何任务的调度。</span>
-          </div>
-          <label class="chip" title="开启后回到「插件列表」即可看到">
-            <input type="checkbox" id="s-engine-ui" ${showPluginEngineUi() ? 'checked' : ''}>显示执行引擎设置
-          </label>
-        </div>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-head"><span class="section-title">关于</span></div>
-      <div class="card">
-        <div class="row">
-          <div class="field">
-            <span class="field-label">面板版本</span>
-            <span class="mono">v${esc(version)}</span>
-          </div>
-          <div class="field">
-            <span class="field-label">编译特性</span>
-            <span class="mono dim">${esc(features)}</span>
-          </div>
-          <div class="field">
-            <span class="field-label">直播支持</span>
-            <span class="mono dim">${esc(live)}</span>
-          </div>
-        </div>
-        <p class="hint" style="margin-top:var(--sp-3)">
-          主面板负责任务定义与调度、测试运行、插件列表。插件可以在
-          <span class="mono">/plugins/{name}/</span> 下提供自己的配置页，由插件作者编写，
-          用来管理这个插件自己需要的那份配置。
-        </p>
-      </div>
-    </div>`;
-  root.querySelector('#s-theme').addEventListener('click', () => {
-    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
-    renderSettings(root);
-  });
-  // 插件卡片上的执行引擎设置默认隐藏（见 prefs.js）。这里只改偏好，
-  // 不重画设置页 —— 复选框自己已经反映状态了，重画反而会闪一下。
-  const engineUi = root.querySelector('#s-engine-ui');
-  engineUi.addEventListener('change', () => {
-    setPluginEngineUi(engineUi.checked);
-    toast(engineUi.checked ? '已显示插件执行引擎设置' : '已隐藏插件执行引擎设置', 'ok');
+async function renderSettings(root, ctx) {
+  return renderSettingsView(root, {
+    ...ctx,
+    toggleTheme: () => {
+      applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+      renderSettings(root, ctx);
+    },
   });
 }
 
@@ -484,6 +417,7 @@ const TITLES = {
   'script-editor': '脚本任务',
   logs: '日志',
   plugins: '插件列表',
+  market: '插件商城',
   settings: '设置',
 };
 
@@ -513,6 +447,7 @@ function parseHash() {
     }
     return { view: 'scripts' };
   }
+  if (parts[0] === 'market') return { view: 'market' };
   if (parts[0] === 'plugins') {
     // #/plugins/{name}/source —— 插件源码（独立页面，可编辑）
     if (parts[1] && parts[2] === 'source') {
@@ -586,10 +521,11 @@ async function route() {
     else if (view === 'scripts') cleanup = await scriptList.render(root, ctx);
     else if (view === 'script-editor') cleanup = await scriptEditor.render(root, ctx, params);
     else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
+    else if (view === 'market') cleanup = await market.render(root, ctx);
     else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
     else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
     else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
-    else if (view === 'settings') await renderSettings(root);
+    else if (view === 'settings') await renderSettings(root, ctx);
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页
     root.innerHTML = `<div class="card"><span class="badge failed">视图渲染失败</span>
@@ -657,9 +593,11 @@ function paintNavActive() {
         ? 'scripts'
         : view === 'plugin-source'
           ? 'plugins'
-          : view === 'plugin-page'
-            ? `plugin:${params.name}`
-            : view;
+          : view === 'market'
+            ? 'plugins'
+            : view === 'plugin-page'
+              ? `plugin:${params.name}`
+              : view;
   document.querySelectorAll('.nav-item').forEach((a) => {
     const active = a.dataset.view === navKey;
     a.classList.toggle('active', active);

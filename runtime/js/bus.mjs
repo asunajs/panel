@@ -413,6 +413,15 @@ export function loggerFactory(opts = {}) {
  * Panel URL, if the panel provided one. Kept as a function for parity with the
  * repo's Node adapter (`host.serverUrl()`), and harmless when unset.
  */
+/**
+ * 插件级配置：<PLUGIN_DATA_DIR>/<plugin>/config.json。
+ * 缺文件返回 {}；非法 JSON 由面板侧报错。
+ */
+export function config() {
+  const raw = rpcCall('config', []);
+  return parseJsonResult('config', raw);
+}
+
 export function serverUrl() {
   return process.env.PANEL_SERVER_URL || process.env.PANEL_URL || '';
 }
@@ -838,6 +847,7 @@ export function installGlobals() {
     fail,
     fatal,
     loggerFactory,
+    config,
     // registration
     register_cron,
     every,

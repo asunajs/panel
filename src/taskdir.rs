@@ -77,7 +77,12 @@ pub enum ScriptKind {
 
 impl ScriptKind {
     pub fn of(path: &Path) -> Option<Self> {
-        match path.extension().and_then(|s| s.to_str())?.to_ascii_lowercase().as_str() {
+        match path
+            .extension()
+            .and_then(|s| s.to_str())?
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "js" | "mjs" => Some(ScriptKind::Js),
             "py" => Some(ScriptKind::Py),
             "sh" => Some(ScriptKind::Sh),
@@ -230,7 +235,10 @@ pub fn valid_task_name(name: &str) -> bool {
 }
 
 /// 严格解析：任何一处不合法都返回 `Err`（文件会被标成 invalid，不自动调度）。
-pub fn parse_header(source: &str, kind: ScriptKind) -> Result<(ScriptHeader, ScriptRuntime), String> {
+pub fn parse_header(
+    source: &str,
+    kind: ScriptKind,
+) -> Result<(ScriptHeader, ScriptRuntime), String> {
     let h = parse_header_lossy(source);
     let runtime = resolve_runtime(kind, h.runtime.as_deref())?;
     if let Some(cron) = &h.cron {
@@ -242,7 +250,9 @@ pub fn parse_header(source: &str, kind: ScriptKind) -> Result<(ScriptHeader, Scr
     }
     if let Some(raw) = &h.timeout_raw {
         let Some(t) = h.timeout_ms else {
-            return Err(format!("@timeout `{raw}` 解析不了（示例：30s / 500ms / 2m）"));
+            return Err(format!(
+                "@timeout `{raw}` 解析不了（示例：30s / 500ms / 2m）"
+            ));
         };
         if !(100..=10 * 60 * 1000).contains(&t) {
             return Err(format!("@timeout {t}ms 超出范围（100ms..10min）"));
@@ -250,7 +260,10 @@ pub fn parse_header(source: &str, kind: ScriptKind) -> Result<(ScriptHeader, Scr
     }
     if let Some(name) = &h.name {
         if !valid_task_name(name) {
-            return Err("@name 不合法：不能为空、不能含路径分隔符、不能是 `.`/`..`，最多 80 个字符".to_string());
+            return Err(
+                "@name 不合法：不能为空、不能含路径分隔符、不能是 `.`/`..`，最多 80 个字符"
+                    .to_string(),
+            );
         }
     }
     Ok((h, runtime))

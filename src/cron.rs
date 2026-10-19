@@ -259,10 +259,7 @@ fn start_of_next_day(t: DateTime<Local>) -> Option<DateTime<Local>> {
 }
 
 fn start_of_next_hour(t: DateTime<Local>) -> Option<DateTime<Local>> {
-    let h = t
-        .with_minute(0)?
-        .with_second(0)?
-        .with_nanosecond(0)?;
+    let h = t.with_minute(0)?.with_second(0)?.with_nanosecond(0)?;
     Some(h + ChronoDuration::hours(1))
 }
 
@@ -740,7 +737,10 @@ mod tests {
         let a = CronSchedule::parse("0 0 0 * * 7").unwrap();
         let b = CronSchedule::parse("0 0 0 * * 0").unwrap();
         let from = at(2026, 3, 10, 0, 0, 1);
-        assert_eq!(fmt(a.next_after(from).unwrap()), fmt(b.next_after(from).unwrap()));
+        assert_eq!(
+            fmt(a.next_after(from).unwrap()),
+            fmt(b.next_after(from).unwrap())
+        );
         // 2026-03-15 是周日
         assert_eq!(fmt(a.next_after(from).unwrap()), "2026-03-15 00:00:00");
     }
@@ -776,9 +776,7 @@ mod tests {
     #[test]
     fn every_preserves_subsecond_and_always_moves_forward() {
         let s = Schedule::parse("@every 500ms").unwrap();
-        let mut t = Local
-            .with_ymd_and_hms(2026, 3, 10, 8, 0, 0)
-            .unwrap()
+        let mut t = Local.with_ymd_and_hms(2026, 3, 10, 8, 0, 0).unwrap()
             + ChronoDuration::milliseconds(500);
 
         for i in 1..=6 {
@@ -814,12 +812,18 @@ mod tests {
         assert_eq!(s.jitter().unwrap().kind, JitterKind::Earlier);
         assert_eq!(s.jitter().unwrap().amount, Duration::from_millis(200));
         // 理论线不受抖动影响
-        assert_eq!(fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()), "2026-03-10 08:00:05");
+        assert_eq!(
+            fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()),
+            "2026-03-10 08:00:05"
+        );
 
         let s = Schedule::parse("0 0 * * * ~30m").unwrap();
         assert_eq!(s.jitter().unwrap().kind, JitterKind::Symmetric);
         assert_eq!(s.jitter().unwrap().amount, Duration::from_secs(1800));
-        assert_eq!(fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()), "2026-03-11 00:00:00");
+        assert_eq!(
+            fmt(s.next_base(at(2026, 3, 10, 8, 0, 0)).unwrap()),
+            "2026-03-11 00:00:00"
+        );
     }
 
     #[test]
@@ -872,7 +876,11 @@ mod tests {
 
     #[test]
     fn cron_jitter_accepts_all_three_directions() {
-        for expr in ["*/5 * * * * * ~1s", "*/5 * * * * * +1s", "*/5 * * * * * -1s"] {
+        for expr in [
+            "*/5 * * * * * ~1s",
+            "*/5 * * * * * +1s",
+            "*/5 * * * * * -1s",
+        ] {
             assert!(Schedule::parse(expr).is_ok(), "{expr} 应当合法");
         }
         // cron 不设百分比上限（越界由钳制处理）
@@ -942,7 +950,11 @@ mod tests {
         // 不同时刻 → 不相关（相邻输入不该给相邻输出）
         let mut seen = std::collections::HashSet::new();
         for i in 0..50 {
-            seen.insert(rand_below_with(t + ChronoDuration::seconds(i), 1000, Some(42)));
+            seen.insert(rand_below_with(
+                t + ChronoDuration::seconds(i),
+                1000,
+                Some(42),
+            ));
         }
         assert!(seen.len() > 40, "相邻时刻的输出太相关了: {seen:?}");
         // 不同种子 → 不同序列

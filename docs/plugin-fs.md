@@ -145,5 +145,8 @@ fs.readFileSync('/etc/hostname', 'utf8');        // ✅ 也读得到 —— 没�
 ```
 
 - 每个插件/脚本一个子目录；面板启动时 `create_dir_all`。
+- 插件的 `config.json` 也放在 `<PLUGIN_DATA_DIR>/<插件名>/config.json`：
+  不进 `/plugins/` 静态服务，覆盖安装插件也不会冲掉。插件用 `config()` 读，
+  面板「插件列表 → 配置」用表单或 JSON 编辑。
 - 卸载 / 删除插件**不会**删除数据目录（误删不可逆，交给运维）。
 - 备份就备份整个 `PLUGIN_DATA_DIR`（以及 `DB_PATH`）；插件源码目录不用备份。

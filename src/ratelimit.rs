@@ -149,7 +149,10 @@ mod tests {
         let fourth = lim.acquire();
         match fourth {
             Err(Rejected::Rate { retry_after_ms }) => {
-                assert!(retry_after_ms > 0 && retry_after_ms <= 10_000, "{retry_after_ms}");
+                assert!(
+                    retry_after_ms > 0 && retry_after_ms <= 10_000,
+                    "{retry_after_ms}"
+                );
             }
             other => panic!("应该被速率限住，实际 {other:?}"),
         }

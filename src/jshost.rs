@@ -86,6 +86,15 @@ Object.defineProperty(globalThis, '__fmt_args', {
 //   start / success / fail               —— **语义着色**（过滤级别都算 info）
 // 过滤级别由宿主决定（见 log::Type::level），插件只管语义。
 globalThis.host_api = {
+    // 插件级配置：`<PLUGIN_DATA_DIR>/<plugin>/config.json`。
+    // 返回解析后的对象；缺文件是 {}，非法 JSON 直接抛错。
+    config: function () {
+        var raw = __host_config();
+        if (raw.indexOf('!ERR:') === 0) throw new Error(raw.slice(5));
+        try { return JSON.parse(raw); }
+        catch (e) { throw new Error('插件配置不是合法 JSON: ' + e); }
+    },
+
     log:     function () { __host_log_raw('info',    __fmt_args(arguments)); },
     info:    function () { __host_log_raw('info',    __fmt_args(arguments)); },
     debug:   function () { __host_log_raw('debug',   __fmt_args(arguments)); },
@@ -458,6 +467,7 @@ globalThis.__dispatch_route = function (key, requestJson) {
 pub const HOST_API_MODULE: &str = r#"
 const api = globalThis.host_api;
 // 日志八档。`log` 是 `info` 的别名（老写法，继续可用）。
+export const config = api.config;
 export const log = api.log;
 export const info = api.info;
 export const debug = api.debug;
@@ -738,12 +748,34 @@ const fs = {
 /// 加一个函数只会加上其中一种写法，另一种静默少一个名字。这正是适配器那边
 /// （三份实现共用向量）反复吃过的那类问题，在同一个文件里就不该重演。
 const NODE_PATH_EXPORTS: &[&str] = &[
-    "sep", "delimiter", "win32", "posix", "join", "normalize", "resolve", "dirname", "basename",
-    "extname", "relative", "isAbsolute", "parse", "format",
+    "sep",
+    "delimiter",
+    "win32",
+    "posix",
+    "join",
+    "normalize",
+    "resolve",
+    "dirname",
+    "basename",
+    "extname",
+    "relative",
+    "isAbsolute",
+    "parse",
+    "format",
 ];
 const NODE_FS_EXPORTS: &[&str] = &[
-    "readFileSync", "writeFileSync", "appendFileSync", "existsSync", "mkdirSync", "readdirSync",
-    "statSync", "unlinkSync", "rmSync", "renameSync", "rootDir", "constants",
+    "readFileSync",
+    "writeFileSync",
+    "appendFileSync",
+    "existsSync",
+    "mkdirSync",
+    "readdirSync",
+    "statSync",
+    "unlinkSync",
+    "rmSync",
+    "renameSync",
+    "rootDir",
+    "constants",
 ];
 
 fn node_module_parts(name: &str) -> Option<(&'static str, &'static [&'static str], &'static str)> {
@@ -808,6 +840,21 @@ pub fn install_host<'js>(
     nav: Arc<Mutex<Option<NavDef>>>,
     logs: SharedLogs,
 ) -> rquickjs::Result<()> {
+    // ---- 配置 ----
+    {
+        let state = state.clone();
+        let plugin = plugin.clone();
+        ctx.globals().set(
+            "__host_config",
+            Func::new(move || -> String {
+                match state.read_plugin_config(&plugin) {
+                    Ok(json) => json,
+                    Err(e) => format!("!ERR:{e}"),
+                }
+            }),
+        )?;
+    }
+
     // ---- 日志 ----
     let plugin_for_log = plugin.clone();
     let state_for_log = state.clone();
@@ -823,31 +870,39 @@ pub fn install_host<'js>(
     let plugin_for_tasks = plugin.clone();
     ctx.globals().set(
         "__host_register_task",
-        Func::new(move |name: String, expr: String, params_json: String, budget: String, lead: String, opts: String| -> String {
-            // 校验全部收敛到 make_task_def：表达式、参数、预算、提前量、元数据
-            // 都在加载期挡掉，错误信息也只有一个来源。
-            let def = match hostapi::make_task_def(
-                &plugin_for_tasks,
-                &name,
-                &expr,
-                &params_json,
-                &budget,
-                &lead,
-                &opts,
-            ) {
-                Ok(d) => d,
-                Err(e) => return e,
-            };
-            let mut guard = pending.lock().unwrap();
-            if guard.iter().any(|t| t.name == def.name) {
-                return format!(
-                    "插件 `{plugin_for_tasks}` 里已经注册过名为 `{}` 的任务",
-                    def.name
-                );
-            }
-            guard.push(def);
-            String::new()
-        }),
+        Func::new(
+            move |name: String,
+                  expr: String,
+                  params_json: String,
+                  budget: String,
+                  lead: String,
+                  opts: String|
+                  -> String {
+                // 校验全部收敛到 make_task_def：表达式、参数、预算、提前量、元数据
+                // 都在加载期挡掉，错误信息也只有一个来源。
+                let def = match hostapi::make_task_def(
+                    &plugin_for_tasks,
+                    &name,
+                    &expr,
+                    &params_json,
+                    &budget,
+                    &lead,
+                    &opts,
+                ) {
+                    Ok(d) => d,
+                    Err(e) => return e,
+                };
+                let mut guard = pending.lock().unwrap();
+                if guard.iter().any(|t| t.name == def.name) {
+                    return format!(
+                        "插件 `{plugin_for_tasks}` 里已经注册过名为 `{}` 的任务",
+                        def.name
+                    );
+                }
+                guard.push(def);
+                String::new()
+            },
+        ),
     )?;
 
     // ---- 运行期改**自己**任务的状态 ----
@@ -918,12 +973,14 @@ pub fn install_host<'js>(
     let state_for_sql = state.clone();
     ctx.globals().set(
         "__host_sqlite",
-        Func::new(move |sql: String, params: String, is_query: bool| -> String {
-            match state_for_sql.do_sqlite(&sql, &params, is_query) {
-                Ok(s) => s,
-                Err(e) => json_error(&e),
-            }
-        }),
+        Func::new(
+            move |sql: String, params: String, is_query: bool| -> String {
+                match state_for_sql.do_sqlite(&sql, &params, is_query) {
+                    Ok(s) => s,
+                    Err(e) => json_error(&e),
+                }
+            },
+        ),
     )?;
 
     // ---- require（CJS 兼容）：解析 + 读文件，交给 engine 的同一套解析逻辑 ----
@@ -965,19 +1022,21 @@ pub fn install_host<'js>(
     let r = fs_root.clone();
     ctx.globals().set(
         "__host_fs_write",
-        Func::new(move |path: String, text: String, bytes: String, append: bool| -> String {
-            let parsed: Option<Vec<u8>> = if bytes == "null" {
-                None
-            } else {
-                match serde_json::from_str::<Vec<u8>>(&bytes) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        return crate::pluginfs::bad_bytes(&e.to_string());
+        Func::new(
+            move |path: String, text: String, bytes: String, append: bool| -> String {
+                let parsed: Option<Vec<u8>> = if bytes == "null" {
+                    None
+                } else {
+                    match serde_json::from_str::<Vec<u8>>(&bytes) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            return crate::pluginfs::bad_bytes(&e.to_string());
+                        }
                     }
-                }
-            };
-            crate::pluginfs::write(&r, &path, &text, parsed, append)
-        }),
+                };
+                crate::pluginfs::write(&r, &path, &text, parsed, append)
+            },
+        ),
     )?;
     let r = fs_root.clone();
     ctx.globals().set(
@@ -1106,12 +1165,19 @@ pub fn install_host<'js>(
     let state_for_routes = state.clone();
     ctx.globals().set(
         "__host_register_route",
-        Func::new(move |path: String, method: String, budget: String| -> String {
-            match state_for_routes.do_register_route(&plugin_for_routes, &path, &method, &budget) {
-                Ok(()) => String::new(),
-                Err(e) => e,
-            }
-        }),
+        Func::new(
+            move |path: String, method: String, budget: String| -> String {
+                match state_for_routes.do_register_route(
+                    &plugin_for_routes,
+                    &path,
+                    &method,
+                    &budget,
+                ) {
+                    Ok(()) => String::new(),
+                    Err(e) => e,
+                }
+            },
+        ),
     )?;
 
     // ---- 侧边栏入口登记 ----
@@ -1192,9 +1258,7 @@ mod tests {
         // `log` 是 `info` 的别名（老写法），两者必须同档
         assert_eq!(
             levels,
-            vec![
-                "info", "info", "debug", "warn", "error", "start", "success", "fail", "fatal"
-            ]
+            vec!["info", "info", "debug", "warn", "error", "start", "success", "fail", "fatal"]
         );
         let msgs: Vec<&str> = got.iter().map(|(_, m)| m.as_str()).collect();
         assert_eq!(msgs, vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
@@ -1242,7 +1306,8 @@ mod tests {
             install_builtin_node_modules(&ctx).expect("内置模块注入失败");
             ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
             ctx.eval::<(), _>(code).expect("被测代码执行失败");
-            ctx.eval::<String, _>("JSON.stringify(globalThis.__out)").unwrap()
+            ctx.eval::<String, _>("JSON.stringify(globalThis.__out)")
+                .unwrap()
         });
         serde_json::from_str(&out).unwrap()
     }
@@ -1295,7 +1360,10 @@ mod tests {
         assert_eq!(got["dirnameRoot"], "/");
         assert_eq!(got["basename"], "c");
         assert_eq!(got["extname"], ".gz");
-        assert_eq!(got["extnameDotfile"], "", "`.gitignore` 没有扩展名（Node 语义）");
+        assert_eq!(
+            got["extnameDotfile"], "",
+            "`.gitignore` 没有扩展名（Node 语义）"
+        );
         assert_eq!(got["normalize"], "a/c");
         assert_eq!(got["relative"], "../c");
         assert_eq!(got["isAbsolute"][0], true);
@@ -1319,7 +1387,10 @@ mod tests {
         assert!(src.contains("__builtinCjsModule(\"node:fs\")"), "{src}");
         assert!(src.contains("export default M;"));
         for n in NODE_FS_EXPORTS {
-            assert!(src.contains(&format!("export const {n} = M.{n};")), "少了 {n}");
+            assert!(
+                src.contains(&format!("export const {n} = M.{n};")),
+                "少了 {n}"
+            );
         }
         // 两份导出清单都不许空着（空清单会让包装器静默生成一个空模块）
         assert!(NODE_PATH_EXPORTS.len() >= 10);
@@ -1357,10 +1428,16 @@ mod tests {
             "#,
         );
         assert_eq!(got["text"], "文本:x.txt");
-        assert_eq!(got["bytesIsTyped"], true, "不给 encoding 时应当给 Uint8Array");
+        assert_eq!(
+            got["bytesIsTyped"], true,
+            "不给 encoding 时应当给 Uint8Array"
+        );
         assert_eq!(got["wrote"]["p"], "a/b.json");
         assert_eq!(got["wrote"]["text"], "内容");
-        assert_eq!(got["wrote"]["bytes"], "null", "字符串走 text 那条，不进字节数组");
+        assert_eq!(
+            got["wrote"]["bytes"], "null",
+            "字符串走 text 那条，不进字节数组"
+        );
         assert_eq!(got["wrote"]["append"], false);
         assert_eq!(got["append"], true);
         assert_eq!(got["exists"][0], true);
@@ -1378,7 +1455,9 @@ mod tests {
     fn fs_api_section() -> String {
         let doc = std::fs::read_to_string("docs/host-api.md")
             .expect("读不到 docs/host-api.md（cargo test 的工作目录应该是 crate 根）");
-        let start = doc.find("### 4.3.0").expect("找不到 §4.3.0（函数清单那一节）");
+        let start = doc
+            .find("### 4.3.0")
+            .expect("找不到 §4.3.0（函数清单那一节）");
         let rest = &doc[start..];
         let end = rest.find("\n### ").expect("§4.3.0 后面应该还有小节");
         rest[..end].to_string()
@@ -1403,7 +1482,10 @@ mod tests {
             .join("\n");
 
         // 方向一：导出表里的每个名字都要在表格区出现
-        for (mod_name, names) in [("node:path", NODE_PATH_EXPORTS), ("node:fs", NODE_FS_EXPORTS)] {
+        for (mod_name, names) in [
+            ("node:path", NODE_PATH_EXPORTS),
+            ("node:fs", NODE_FS_EXPORTS),
+        ] {
             for n in names {
                 assert!(
                     table.contains(n),
@@ -1473,7 +1555,7 @@ mod tests {
         // 具名导出漏一个，插件里 `import { fatal } from 'host-api'` 会在**加载期**炸。
         // 这里做静态核对 —— 运行时那条路由 engine.rs 加载真插件来验。
         for name in [
-            "log", "info", "debug", "warn", "error", "start", "success", "fail", "fatal",
+            "config", "log", "info", "debug", "warn", "error", "start", "success", "fail", "fatal",
         ] {
             let want = format!("export const {name} = api.{name};");
             assert!(

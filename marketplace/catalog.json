@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "updated_at": "2026-10-19",
+  "plugins": [
+    {
+      "id": "mcloud-plugin",
+      "repo": "asunajs/mcloud-plugin",
+      "type": "release",
+      "provides": [
+        "mcloud",
+        "mcloud-daily",
+        "mcloud-exchange",
+        "mcloud-live"
+      ],
+      "name": "mcloud 系列",
+      "summary": "移动云盘签到、兑换、直播",
+      "tags": [
+        "云盘",
+        "签到"
+      ]
+    },
+    {
+      "id": "quark",
+      "repo": "asunajs/panel-single-plugins",
+      "type": "file",
+      "path": "quark/quark.ts",
+      "ref": "main",
+      "provides": [
+        "quark"
+      ],
+      "name": "夸克网盘签到",
+      "summary": "夸克网盘每日签到（单账号）",
+      "tags": [
+        "夸克",
+        "签到",
+        "网盘"
+      ]
+    }
+  ]
+}

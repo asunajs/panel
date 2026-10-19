@@ -57,6 +57,7 @@ const EXPECTED = [
   'js/views/script-list.js',
   'js/views/script-editor.js',
   'js/views/plugin-list.js',
+  'js/views/market.js',
   'js/views/plugin-source.js',
 ];
 
@@ -338,6 +339,39 @@ check(
   check(!pluginListSrc.includes('badge lang js'), '插件卡片不再重复挂 JavaScript 徽章');
   check(!pluginListSrc.includes('没有自带配置页'), '没有配置页的插件卡片不再写说明');
 
+  // 插件商城：入口只在插件列表页，不占侧边栏导航。
+  const marketSrc = readFileSync(join(REPO, 'web/js/views/market.js'), 'utf8');
+  const appSrcMarket = readFileSync(join(WEB, 'js/app.js'), 'utf8');
+  const apiSrcMarket = readFileSync(join(WEB, 'js/api.js'), 'utf8');
+  check(pluginListSrc.includes('href="#/market"'), '插件列表页有「插件商城」跳转入口');
+  check(!index.includes('href="#/market"'), '插件商城不作为侧边栏导航项');
+  check(appSrcMarket.includes("market: '插件商城'"), 'app.js 有插件商城标题');
+  check(appSrcMarket.includes("view === 'market'"), 'app.js 有 #/market 路由分支');
+  check(marketSrc.includes('data-install') && marketSrc.includes('installMarketPlugin'),
+    'market.js 有安装按钮与安装调用');
+  check(marketSrc.includes('data.proxy'), 'market.js 显示公开库代理状态');
+  check(apiSrcMarket.includes('/api/market') && apiSrcMarket.includes('installMarketPlugin'),
+    'api.js 有商城目录与安装接口');
+  check(marketSrc.includes('source_type === \'ts\'') || marketSrc.includes("source_type === 'ts'"),
+    'market.js 区分单文件 TS');
+  const catalog = JSON.parse(readFileSync(join(REPO, 'marketplace/catalog.json'), 'utf8'));
+  check(catalog.schema === 1, '商城目录 schema=1');
+  const mcloud = (catalog.plugins || []).find((p) => p.id === 'mcloud-plugin');
+  check(!!mcloud && mcloud.repo === 'asunajs/mcloud-plugin' && mcloud.type === 'release',
+    '官方目录收录 mcloud release');
+  check(
+    !!mcloud && (mcloud.provides || []).includes('mcloud-daily'),
+    'mcloud 条目声明了 provides',
+  );
+  const quark = (catalog.plugins || []).find((p) => p.id === 'quark');
+  check(
+    !!quark &&
+      quark.repo === 'asunajs/panel-single-plugins' &&
+      quark.type === 'file' &&
+      quark.path === 'quark/quark.ts',
+    '官方目录收录单文件 TS 插件 quark',
+  );
+
   // 执行引擎设置默认隐藏，只有「设置」里开启才显示（用户口径）。
   //
   // 这里不只查关键字：直接跑一遍 prefs 模块，确认默认值与开关都成立。
@@ -355,9 +389,11 @@ check(
     /runtimeRow\s*=\s*showEngine\s*\?/.test(pluginListSrc),
     '关闭时执行引擎设置整块不渲染（不是用 CSS 藏起来）',
   );
-  const appSrcPrefs = readFileSync(join(WEB, 'js/app.js'), 'utf8');
-  check(appSrcPrefs.includes('s-engine-ui'), '设置页有「显示执行引擎设置」开关');
-  check(appSrcPrefs.includes('setPluginEngineUi'), '设置页的开关会写回本地偏好');
+  // 设置页的实现从 app.js 挪到了 views/settings.js（分 tab 之后），这里跟着挪。
+  const settingsSrc = readFileSync(join(WEB, 'js/views/settings.js'), 'utf8');
+  check(settingsSrc.includes('s-engine-ui'), '设置页有「显示执行引擎设置」开关');
+  check(settingsSrc.includes('setPluginEngineUi'), '设置页的开关会写回本地偏好');
+  // 字面 Markdown 由下面的「界面文案」扫描统一管（它 walk 整个 web/js，已经包含这个文件）
 
   {
     const store = new Map();

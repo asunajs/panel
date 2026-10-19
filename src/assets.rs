@@ -186,7 +186,9 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/views/script-editor.js"),
     asset!("js/views/log-view.js"),
     asset!("js/views/plugin-list.js"),
+    asset!("js/views/market.js"),
     asset!("js/views/plugin-source.js"),
+    asset!("js/views/settings.js"),
     // ---- 第三方：PureDashboard 的子集 fork（见该目录下的 FORK.md）----
     //
     // 只拿"自己写容易写错"的浮层：`dialog.js` 建在原生 `showModal()` 上，
@@ -305,7 +307,11 @@ mod tests {
         let a = etag_of(b"body{}");
         let b = etag_of(b"body{ }");
         assert_ne!(a, b, "内容差一个字符 ETag 就必须变，否则浏览器会一直用旧的");
-        assert_eq!(a, etag_of(b"body{}"), "同样内容 ETag 必须稳定（否则每次都是 200）");
+        assert_eq!(
+            a,
+            etag_of(b"body{}"),
+            "同样内容 ETag 必须稳定（否则每次都是 200）"
+        );
         assert!(a.starts_with('"') && a.ends_with('"'), "ETag 要带引号: {a}");
     }
 

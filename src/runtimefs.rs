@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 /// Node 的 `--import` 指向 `<root>/js/register.mjs`。
 const FILES: &[(&str, &str)] = &[
     ("js/runner.mjs", include_str!("../runtime/js/runner.mjs")),
-    ("js/register.mjs", include_str!("../runtime/js/register.mjs")),
+    (
+        "js/register.mjs",
+        include_str!("../runtime/js/register.mjs"),
+    ),
     ("js/resolve.mjs", include_str!("../runtime/js/resolve.mjs")),
     ("js/bus.mjs", include_str!("../runtime/js/bus.mjs")),
     (
@@ -79,7 +82,10 @@ impl RuntimePaths {
             }
             // 幂等：内容一样就不动（避免每次启动改 mtime）。内容哈希目录下
             // 理论上不会变，但开发时可能手工改 data 目录，检查一下更稳。
-            if fs::read(&dst).map(|old| old == body.as_bytes()).unwrap_or(false) {
+            if fs::read(&dst)
+                .map(|old| old == body.as_bytes())
+                .unwrap_or(false)
+            {
                 continue;
             }
             let tmp = dst.with_extension(format!("tmp-{}", std::process::id()));

@@ -81,7 +81,9 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::runtime::Handle;
-use tokio::sync::mpsc::{channel as tokio_channel, error::TrySendError as TokioTrySend, Sender as TokioSender};
+use tokio::sync::mpsc::{
+    channel as tokio_channel, error::TrySendError as TokioTrySend, Sender as TokioSender,
+};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -281,8 +283,8 @@ impl Registry {
                 let Some(v) = v.as_str() else { continue };
                 let name = HeaderName::from_bytes(k.as_bytes())
                     .map_err(|e| format!("header 名不合法 `{k}`: {e}"))?;
-                let val =
-                    HeaderValue::from_str(v).map_err(|e| format!("header `{k}` 的值不合法: {e}"))?;
+                let val = HeaderValue::from_str(v)
+                    .map_err(|e| format!("header `{k}` 的值不合法: {e}"))?;
                 // 同名头**覆盖**（不是追加），与 `http_fetch` 同一条规矩：
                 // 两枚 UA 时服务端只看第一枚，插件那枚会被**静默丢掉**。
                 if name.as_str() == "user-agent" {
@@ -506,9 +508,7 @@ impl Registry {
                 "句柄 {id} 的发送队列满了（{OUT_QUEUE} 帧还没写到 socket）—— 对端读得太慢，\
                  这一帧没发出去。等一等再发，或者先 ws_close 掉重连"
             )),
-            Err(TokioTrySend::Closed(_)) => {
-                Err(format!("句柄 {id} 的连接已经结束了（发送失败）"))
-            }
+            Err(TokioTrySend::Closed(_)) => Err(format!("句柄 {id} 的连接已经结束了（发送失败）")),
         }
     }
 
@@ -528,7 +528,11 @@ impl Registry {
     /// 后者"这条连接没了，要重连"。
     pub fn recv(&self, id: u64, timeout_ms: u64) -> Result<Value, String> {
         // 0 = "用默认"（JS 侧省略参数时传 0；Rust 侧不该为它多一个 Option 参数）
-        let timeout_ms = if timeout_ms == 0 { DEFAULT_RECV_MS } else { timeout_ms };
+        let timeout_ms = if timeout_ms == 0 {
+            DEFAULT_RECV_MS
+        } else {
+            timeout_ms
+        };
         let (inc, fatal) = {
             let conns = self.conns.lock().unwrap();
             let c = conns.get(&id).ok_or_else(|| no_such_handle(id))?;
@@ -721,7 +725,9 @@ mod tests {
         let reg = registry();
 
         let url_for_engine = url.clone();
-        let id = engine(&reg, move |r| r.open("t", &url_for_engine, "").expect("应当能连上"));
+        let id = engine(&reg, move |r| {
+            r.open("t", &url_for_engine, "").expect("应当能连上")
+        });
         assert_eq!(reg.open_count(), 1);
 
         engine(&reg, move |r| r.send(id, "hello")).unwrap();
@@ -813,7 +819,9 @@ mod tests {
                 }
                 Ok(resp)
             };
-            let mut ws = tokio_tungstenite::accept_hdr_async(stream, cb).await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, cb)
+                .await
+                .unwrap();
             let _ = ws.close(None).await;
         });
 
@@ -866,7 +874,9 @@ mod tests {
                 }
                 Ok(resp)
             };
-            let mut ws = tokio_tungstenite::accept_hdr_async(stream, cb).await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, cb)
+                .await
+                .unwrap();
             let _ = ws.close(None).await;
         });
 
@@ -876,7 +886,11 @@ mod tests {
         let id = engine(&reg, move |r| r.open("t", &url, &opts)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let uas = got.lock().unwrap().clone();
-        assert_eq!(uas, vec!["MCloudApp/12.6.0"], "插件的 UA 必须原样发出去、且只有一枚");
+        assert_eq!(
+            uas,
+            vec!["MCloudApp/12.6.0"],
+            "插件的 UA 必须原样发出去、且只有一枚"
+        );
         engine(&reg, move |r| r.close(id)).unwrap();
     }
 

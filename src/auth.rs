@@ -314,8 +314,9 @@ impl Cred {
         }
         // ② 旧哈希形态（哈希的是口令本身 ⇒ 口令仍要经过服务端）
         if raw.starts_with('$') {
-            let parsed = PasswordHash::new(raw)
-                .map_err(|e| format!("不是合法的 PHC 哈希串（{e}）。用 `plugin-panel hash-token` 生成"))?;
+            let parsed = PasswordHash::new(raw).map_err(|e| {
+                format!("不是合法的 PHC 哈希串（{e}）。用 `plugin-panel hash-token` 生成")
+            })?;
             check_argon2id(&parsed)?;
             Ok(Cred::Phc(raw.to_string()))
         } else {
@@ -346,7 +347,9 @@ impl Cred {
                     // parse() 已经校验过；走到这里说明内存里的串被改坏了
                     return false;
                 };
-                argon2().verify_password(candidate.as_bytes(), &parsed).is_ok()
+                argon2()
+                    .verify_password(candidate.as_bytes(), &parsed)
+                    .is_ok()
             }
         }
     }
@@ -574,7 +577,11 @@ impl TrustedProxies {
 /// 只有当 `peer` 在 `trusted` 里（默认空；`PANEL_TRUST_PROXY=1` 时是回环；
 /// 推荐显式配 `PANEL_TRUSTED_PROXIES`）才读，而且只取 XFF 的**最右一跳** ——
 /// 那是你自己的反代追加进去的（客户端伪造的那些在左边，取左边就等于取攻击者写的东西）。
-pub fn client_ip<H: HeaderMapLike>(peer: SocketAddr, headers: &H, trusted: &TrustedProxies) -> IpAddr {
+pub fn client_ip<H: HeaderMapLike>(
+    peer: SocketAddr,
+    headers: &H,
+    trusted: &TrustedProxies,
+) -> IpAddr {
     let peer_ip = normalize_ip(peer.ip());
     if !trusted.contains(peer_ip) {
         return peer_ip;
@@ -1264,7 +1271,9 @@ pub trait HeaderMapLike {
 
 impl HeaderMapLike for axum::http::HeaderMap {
     fn get_str(&self, name: &str) -> Option<String> {
-        self.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+        self.get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
     }
 
     fn get_joined(&self, name: &str) -> Option<String> {
@@ -1351,7 +1360,10 @@ mod tests {
     }
 
     fn h(pairs: &[(&str, &str)]) -> H {
-        H(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        H(pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect())
     }
 
     fn ip(s: &str) -> IpAddr {
@@ -1383,10 +1395,7 @@ mod tests {
     #[test]
     fn client_ip_ignores_forwarded_headers_unless_peer_is_a_trusted_proxy() {
         let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
-        let headers = h(&[
-            ("x-forwarded-for", "1.2.3.4"),
-            ("x-real-ip", "5.6.7.8"),
-        ]);
+        let headers = h(&[("x-forwarded-for", "1.2.3.4"), ("x-real-ip", "5.6.7.8")]);
         // 默认名单为空：**一个字都不看**。转发头是客户端能随便写的。
         assert_eq!(
             client_ip(peer, &headers, &TrustedProxies::default()),
@@ -1420,10 +1429,10 @@ mod tests {
     fn client_ip_falls_back_when_headers_are_missing_or_garbage() {
         let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
         for hs in [
-            vec![],                                                     // 没有头
-            vec![("x-forwarded-for", "")],                              // 空
-            vec![("x-forwarded-for", "not-an-ip")],                     // 垃圾
-            vec![("x-forwarded-for", "1.2.3.4, ")],                     // 只有逗号
+            vec![],                                 // 没有头
+            vec![("x-forwarded-for", "")],          // 空
+            vec![("x-forwarded-for", "not-an-ip")], // 垃圾
+            vec![("x-forwarded-for", "1.2.3.4, ")], // 只有逗号
         ] {
             assert_eq!(
                 client_ip(peer, &h(&hs), &trusted()),
@@ -1433,10 +1442,7 @@ mod tests {
         }
         // XFF 坏但 X-Real-IP 好 → 用后者（nginx 常只给这一个）
         let headers = h(&[("x-forwarded-for", "garbage"), ("x-real-ip", "9.9.9.9")]);
-        assert_eq!(
-            client_ip(peer, &headers, &trusted()).to_string(),
-            "9.9.9.9"
-        );
+        assert_eq!(client_ip(peer, &headers, &trusted()).to_string(), "9.9.9.9");
     }
 
     #[test]
@@ -1445,7 +1451,7 @@ mod tests {
         // 再取最右一跳；只取第一条会退化成「客户端自己写的那一段」。
         let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
         let headers = h(&[
-            ("x-forwarded-for", "1.2.3.4"),   // 客户端伪装的
+            ("x-forwarded-for", "1.2.3.4"),     // 客户端伪装的
             ("x-forwarded-for", "203.0.113.7"), // 反代追加的
         ]);
         assert_eq!(
@@ -1562,7 +1568,7 @@ mod tests {
         // 每个变体换一个来源 IP：同一个 IP 连打错令牌会触发退避（那是设计如此），
         // 混在一起测就分不清「被拒是因为凭据不对」还是「因为退避」。
         for (i, headers) in [
-            vec![],                                            // 什么都没有
+            vec![], // 什么都没有
             vec![("authorization", "Bearer ")],
             vec![("authorization", "Bearer anything")],
             vec![("x-panel-token", "")],
@@ -1575,11 +1581,20 @@ mod tests {
         {
             // 每个用例换一个源地址：退避是按 IP 记的，同 IP 会把后面的用例全退掉
             let ip: IpAddr = format!("10.10.10.{}", i + 1).parse().unwrap();
-            assert_eq!(a.authenticate(&h(&headers), ip), None, "不该放行：{headers:?}");
+            assert_eq!(
+                a.authenticate(&h(&headers), ip),
+                None,
+                "不该放行：{headers:?}"
+            );
         }
         assert!(a.login("wrong", "10.10.10.99".parse().unwrap()).is_err());
         // 只有真凭据能过（用一个干净的来源）
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), "10.10.10.100".parse().unwrap()).is_some());
+        assert!(a
+            .authenticate(
+                &h(&[("x-panel-token", TOKEN)]),
+                "10.10.10.100".parse().unwrap()
+            )
+            .is_some());
     }
 
     // ---- 令牌 ----
@@ -1591,7 +1606,10 @@ mod tests {
         let h2 = hash_token(TOKEN).unwrap();
         assert_ne!(h1, h2, "同样的口令两次哈希应当不同（说明盐是随机的）");
         assert!(h1.starts_with(PREHASH_PREFIX), "应当带摘要形态前缀：{h1}");
-        assert!(h1[PREHASH_PREFIX.len()..].starts_with("$argon2id$"), "前缀后面是 PHC 串：{h1}");
+        assert!(
+            h1[PREHASH_PREFIX.len()..].starts_with("$argon2id$"),
+            "前缀后面是 PHC 串：{h1}"
+        );
         // 参数随串一起存 → 校验时从串里读，不依赖代码里的默认值
         assert!(h1.contains("m="), "PHC 串里应当带参数：{h1}");
 
@@ -1644,7 +1662,9 @@ mod tests {
             "前缀只能加一次"
         );
         assert_eq!(password_digest("dev").len(), 64);
-        assert!(password_digest("dev").chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(password_digest("dev")
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]
@@ -1653,7 +1673,9 @@ mod tests {
         assert!(Cred::parse("prehash1:$argon2id$这不是哈希").is_err());
         assert!(Cred::parse("prehash1:").is_err());
         // 算法不是 argon2id 也要拒（旧形态那条已经在另一条测试里钉过）
-        let wrong_alg = hash_token(TOKEN).unwrap().replace("$argon2id$", "$argon2i$");
+        let wrong_alg = hash_token(TOKEN)
+            .unwrap()
+            .replace("$argon2id$", "$argon2i$");
         assert!(Cred::parse(&wrong_alg).is_err());
         // 前缀写错（prehash2:）会落到"明文"分支 —— 然后被部署闸拦住，
         // 而不是悄悄当成能用的凭据（这一点由下面那条 policy 测试兜住）
@@ -1667,7 +1689,11 @@ mod tests {
         let plain = Cred::parse(TOKEN).unwrap();
 
         // 摘要形态：任何环境都放行
-        for (allow, secure, lo) in [(false, false, true), (false, true, false), (true, true, false)] {
+        for (allow, secure, lo) in [
+            (false, false, true),
+            (false, true, false),
+            (true, true, false),
+        ] {
             assert!(
                 check_credential_policy(&good, allow, secure, lo).is_ok(),
                 "摘要形态不该被部署闸拦（{allow},{secure},{lo}）"
@@ -1702,7 +1728,10 @@ mod tests {
     fn debug_never_prints_the_secret() {
         // 这条不是洁癖：`{:?}` 出现在日志、panic、错误上报里的机会很多，
         // 而令牌是那种「泄漏一次就得换」的东西。
-        for cred in [Cred::parse(TOKEN).unwrap(), Cred::parse(&hash_token(TOKEN).unwrap()).unwrap()] {
+        for cred in [
+            Cred::parse(TOKEN).unwrap(),
+            Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(),
+        ] {
             let s = format!("{cred:?}");
             assert!(!s.contains(TOKEN), "Debug 输出里不该出现令牌本身：{s}");
             assert!(s.contains("redacted"), "应当明确标出被涂掉了：{s}");
@@ -1718,7 +1747,9 @@ mod tests {
         // 只支持 argon2id：别的算法直接拒绝，而不是当明文令牌用（那会变成「谁都登不上」）。
         // 用一个**真哈希改掉算法名**来构造：`$md5$...$aGFzaA` 那种长度不够的串
         // 在 PHC 解析阶段就被拒了，压根走不到算法检查（我第一版就是这么写错的）。
-        let argon2i = hash_token(TOKEN).unwrap().replace("$argon2id$", "$argon2i$");
+        let argon2i = hash_token(TOKEN)
+            .unwrap()
+            .replace("$argon2id$", "$argon2i$");
         let err = Cred::parse(&argon2i).unwrap_err();
         assert!(err.contains("argon2id"), "错误里要说清支持什么：{err}");
     }
@@ -1729,7 +1760,9 @@ mod tests {
         let cred = Cred::parse(&hash_token(TOKEN).unwrap()).unwrap();
         let a = Auth::new(cred, false);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        let sid = a.login(&password_digest(TOKEN), ip).expect("摘要凭据应当能登录");
+        let sid = a
+            .login(&password_digest(TOKEN), ip)
+            .expect("摘要凭据应当能登录");
         assert!(a.touch_session(&sid));
         assert!(matches!(a.login("wrong", ip), Err(LoginError::BadToken)));
         // ⚠ 拿口令本身当候选值登不进去（这正是"口令不经过服务端"的证明）
@@ -1741,7 +1774,10 @@ mod tests {
     /// 用**旧形态**（哈希的是口令本身）：下面那些测试的候选值都是 `TOKEN`，
     /// 换成摘要形态它们就都得改成「发摘要」—— 那是另一件事，别混在一起测。
     fn hashed_auth() -> Auth {
-        Auth::new(Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(), false)
+        Auth::new(
+            Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(),
+            false,
+        )
     }
 
     fn any_ip() -> IpAddr {
@@ -1754,12 +1790,18 @@ mod tests {
         // 19 MiB / 几十毫秒 —— 脚本带 X-Panel-Token 连着打接口时不能每个请求都跑。
         let a = hashed_auth();
         let ip = any_ip();
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", TOKEN)]), ip)
+            .is_some());
         assert_eq!(a.kdf_runs(), 1, "第一次当然要跑");
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_some());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", TOKEN)]), ip)
+            .is_some());
         assert_eq!(a.kdf_runs(), 1, "同样的令牌第二次应当走缓存，不再跑 KDF");
         // 指纹缓存只认「校验成功过的」值：另一个令牌不会命中
-        assert!(a.authenticate(&h(&[("x-panel-token", "another")]), ip).is_none());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", "another")]), ip)
+            .is_none());
         assert_eq!(a.kdf_runs(), 2);
     }
 
@@ -1768,8 +1810,12 @@ mod tests {
         // 失败要是也缓存，等于给暴力猜加速（每次都能免费知道「这个不对」）
         let a = hashed_auth();
         let ip = any_ip();
-        assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
-        assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", "wrong")]), ip)
+            .is_none());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", "wrong")]), ip)
+            .is_none());
         assert_eq!(a.kdf_runs(), 2, "失败路径绝不能被缓存");
     }
 
@@ -1780,17 +1826,23 @@ mod tests {
         let a = hashed_auth();
         let ip = any_ip();
         for _ in 0..3 {
-            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+            assert!(a
+                .authenticate(&h(&[("x-panel-token", "wrong")]), ip)
+                .is_none());
         }
         let after_threshold = a.kdf_runs();
         assert_eq!(after_threshold, 3, "退避阈值前会真的校验");
         // 进入退避之后：再打 20 次，一次 KDF 都不该跑
         for _ in 0..20 {
-            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+            assert!(a
+                .authenticate(&h(&[("x-panel-token", "wrong")]), ip)
+                .is_none());
         }
         assert_eq!(a.kdf_runs(), after_threshold, "退避期间绝不能再跑 KDF");
         // 退避期间连**正确**的令牌也进不来（和登录路径同一套语义）
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), ip).is_none());
+        assert!(a
+            .authenticate(&h(&[("x-panel-token", TOKEN)]), ip)
+            .is_none());
         assert_eq!(a.kdf_runs(), after_threshold);
     }
 
@@ -1801,7 +1853,10 @@ mod tests {
         let sid = a.login(TOKEN, bot).expect("封之前正确口令能进");
         assert!(a.ban(bot), "不在白名单里 ⇒ 真的封");
         let e = a.login(TOKEN, bot).unwrap_err();
-        assert!(matches!(e, LoginError::BadToken), "被封要回「口令不对」，不能回一个专门的封禁错误：{e:?}");
+        assert!(
+            matches!(e, LoginError::BadToken),
+            "被封要回「口令不对」，不能回一个专门的封禁错误：{e:?}"
+        );
         assert_eq!(
             e.message(),
             LoginError::BadToken.message(),
@@ -1810,7 +1865,10 @@ mod tests {
         assert_eq!(a.banned_ips(), 1);
         // 封的是这一个来源，不是全世界
         let other: IpAddr = "203.0.113.8".parse().unwrap();
-        assert!(a.login(TOKEN, other).is_ok(), "按来源封，别把别人一起挡在门外");
+        assert!(
+            a.login(TOKEN, other).is_ok(),
+            "按来源封，别把别人一起挡在门外"
+        );
         // 已登录的会话不撤：命中蜜罐说明对方在**猜**，不代表他进来了
         assert!(a.touch_session(&sid), "封禁不该把已经进来的会话踢出去");
     }
@@ -1820,7 +1878,10 @@ mod tests {
         let a = hashed_auth();
         let ip: IpAddr = "203.0.113.9".parse().unwrap();
         // 直接塞一条已过期的（等一小时不现实）：过期条目由读的那一侧顺手清掉
-        a.bans.lock().unwrap().insert(ip, Instant::now() - Duration::from_secs(1));
+        a.bans
+            .lock()
+            .unwrap()
+            .insert(ip, Instant::now() - Duration::from_secs(1));
         assert!(!a.is_banned(ip), "过期的封禁不该还挡人");
         assert_eq!(a.banned_ips(), 0, "读数里也不该留着它");
         assert!(a.login(TOKEN, ip).is_ok(), "到点自动放回，不需要谁去解锁");
@@ -1892,7 +1953,10 @@ mod tests {
         let (ok, bad) = parse_allow_ips("192.168.1.7, 10.0.0.0/8, box.local");
         assert_eq!(ok.len(), 1);
         assert_eq!(bad, vec!["10.0.0.0/8".to_string(), "box.local".to_string()]);
-        assert!(parse_allow_ips("  ,, ; ").0.is_empty(), "全空不能报错，那是没配");
+        assert!(
+            parse_allow_ips("  ,, ; ").0.is_empty(),
+            "全空不能报错，那是没配"
+        );
     }
 
     #[test]
@@ -1903,17 +1967,27 @@ mod tests {
         // 每次换一个来源 IP：同一个 IP 连错会退避，退避之后测的就不是 KDF 这条路了
         for i in 0..10 {
             let ip: IpAddr = format!("10.20.20.{}", i + 1).parse().unwrap();
-            assert!(a.authenticate(&h(&[("x-panel-token", "wrong")]), ip).is_none());
+            assert!(a
+                .authenticate(&h(&[("x-panel-token", "wrong")]), ip)
+                .is_none());
         }
         assert_eq!(a.kdf_runs(), 0, "明文路径不该跑 KDF");
-        assert!(a.authenticate(&h(&[("x-panel-token", TOKEN)]), "10.20.20.200".parse().unwrap()).is_some());
+        assert!(a
+            .authenticate(
+                &h(&[("x-panel-token", TOKEN)]),
+                "10.20.20.200".parse().unwrap()
+            )
+            .is_some());
     }
 
     #[test]
     fn credential_kind_is_reported_for_the_boot_log() {
         let plain = Auth::new(Cred::parse(TOKEN).unwrap(), false);
         assert_eq!(plain.cred_kind(), ("明文口令", true));
-        let legacy = Auth::new(Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(), false);
+        let legacy = Auth::new(
+            Cred::parse(&hash_token_legacy(TOKEN).unwrap()).unwrap(),
+            false,
+        );
         assert_eq!(legacy.cred_kind(), ("Argon2id(口令)", false));
         let good = Auth::new(Cred::parse(&hash_token(TOKEN).unwrap()).unwrap(), false);
         assert_eq!(good.cred_kind(), ("Argon2id(摘要)", false));
@@ -1926,9 +2000,9 @@ mod tests {
         let a = auth();
         assert!(a.credential_matches(TOKEN));
         assert!(!a.credential_matches(""));
-        assert!(!a.credential_matches("s3cret"));                    // 前缀也不行
-        assert!(!a.credential_matches("s3cret-token-0123456789x"));  // 超集也不行
-        assert!(!a.credential_matches("S3CRET-TOKEN-0123456789"));   // 大小写敏感
+        assert!(!a.credential_matches("s3cret")); // 前缀也不行
+        assert!(!a.credential_matches("s3cret-token-0123456789x")); // 超集也不行
+        assert!(!a.credential_matches("S3CRET-TOKEN-0123456789")); // 大小写敏感
     }
 
     #[test]
@@ -1947,13 +2021,22 @@ mod tests {
     fn bearer_and_panel_token_headers_both_work() {
         let a = auth();
         let bearer = format!("Bearer {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("authorization", &bearer)]), any_ip()), Some(Via::Token));
+        assert_eq!(
+            a.authenticate(&h(&[("authorization", &bearer)]), any_ip()),
+            Some(Via::Token)
+        );
 
         // 大小写不敏感（HTTP 头的 scheme 本来就大小写不敏感）
         let lower = format!("bearer {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("Authorization", &lower)]), any_ip()), Some(Via::Token));
+        assert_eq!(
+            a.authenticate(&h(&[("Authorization", &lower)]), any_ip()),
+            Some(Via::Token)
+        );
 
-        assert_eq!(a.authenticate(&h(&[("X-Panel-Token", TOKEN)]), any_ip()), Some(Via::Token));
+        assert_eq!(
+            a.authenticate(&h(&[("X-Panel-Token", TOKEN)]), any_ip()),
+            Some(Via::Token)
+        );
         // 前后空白该被容忍（从文件读令牌、复制粘贴都容易带）
         assert_eq!(
             a.authenticate(&h(&[("x-panel-token", &format!("  {TOKEN}  "))]), any_ip()),
@@ -1964,14 +2047,23 @@ mod tests {
     #[test]
     fn wrong_or_malformed_credentials_are_rejected() {
         let a = auth();
-        assert_eq!(a.authenticate(&h(&[("authorization", "Bearer wrong")]), any_ip()), None);
+        assert_eq!(
+            a.authenticate(&h(&[("authorization", "Bearer wrong")]), any_ip()),
+            None
+        );
 
         // 不是 Bearer 的方案
         let basic = format!("Basic {TOKEN}");
-        assert_eq!(a.authenticate(&h(&[("authorization", &basic)]), any_ip()), None);
+        assert_eq!(
+            a.authenticate(&h(&[("authorization", &basic)]), any_ip()),
+            None
+        );
 
         // 没有空格分隔
-        assert_eq!(a.authenticate(&h(&[("authorization", TOKEN)]), any_ip()), None);
+        assert_eq!(
+            a.authenticate(&h(&[("authorization", TOKEN)]), any_ip()),
+            None
+        );
         // 什么都没有
         assert_eq!(a.authenticate(&h(&[]), any_ip()), None);
     }
@@ -2008,10 +2100,13 @@ mod tests {
 
         // 两个都错 → 拒绝
         assert_eq!(
-            a.authenticate(&h(&[
-                ("cookie", &format!("{SESSION_COOKIE}=deadbeef")),
-                ("x-panel-token", "wrong"),
-            ]), any_ip()),
+            a.authenticate(
+                &h(&[
+                    ("cookie", &format!("{SESSION_COOKIE}=deadbeef")),
+                    ("x-panel-token", "wrong"),
+                ]),
+                any_ip()
+            ),
             None
         );
     }
@@ -2033,7 +2128,10 @@ mod tests {
             );
         }
         // 空值不算
-        assert_eq!(a.authenticate(&h(&[("cookie", &format!("{SESSION_COOKIE}=;"))]), any_ip()), None);
+        assert_eq!(
+            a.authenticate(&h(&[("cookie", &format!("{SESSION_COOKIE}=;"))]), any_ip()),
+            None
+        );
     }
 
     // ---- 登录退避 ----
@@ -2049,12 +2147,18 @@ mod tests {
         }
         // 第 3 次失败 → 开始退避，且退避期间连正确的令牌也进不来
         assert!(matches!(a.login("bad", me), Err(LoginError::BadToken)));
-        assert!(matches!(a.login(TOKEN, me), Err(LoginError::RateLimited(_))));
+        assert!(matches!(
+            a.login(TOKEN, me),
+            Err(LoginError::RateLimited(_))
+        ));
         let wait = match a.check_rate(me) {
             Err(w) => w,
             Ok(()) => panic!("该退避了"),
         };
-        assert!(wait <= Duration::from_secs(1) && wait > Duration::from_secs(0), "{wait:?}");
+        assert!(
+            wait <= Duration::from_secs(1) && wait > Duration::from_secs(0),
+            "{wait:?}"
+        );
 
         // 再失败几次，退避窗口应该单调变长（封顶 60s）
         let mut prev = wait;
@@ -2141,8 +2245,14 @@ mod tests {
         assert!(c.contains("HttpOnly"), "JS 不该读得到: {c}");
         assert!(c.contains("SameSite=Strict"), "跨站请求不该带上: {c}");
         assert!(c.contains("Path=/"));
-        assert!(!c.contains("Secure"), "纯 HTTP 下加 Secure 会让 cookie 存不下来");
-        assert_eq!(a.clear_cookie(), "panel_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+        assert!(
+            !c.contains("Secure"),
+            "纯 HTTP 下加 Secure 会让 cookie 存不下来"
+        );
+        assert_eq!(
+            a.clear_cookie(),
+            "panel_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+        );
     }
 
     #[test]

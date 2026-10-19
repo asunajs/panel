@@ -250,9 +250,18 @@ impl LogEntry {
             "ts".into(),
             serde_json::Value::String(self.ts.to_rfc3339_opts(SecondsFormat::Millis, false)),
         );
-        obj.insert("type".into(), serde_json::Value::String(self.typ.as_str().into()));
-        obj.insert("level".into(), serde_json::Value::String(self.level().as_str().into()));
-        obj.insert("scope".into(), serde_json::Value::String(self.scope.clone()));
+        obj.insert(
+            "type".into(),
+            serde_json::Value::String(self.typ.as_str().into()),
+        );
+        obj.insert(
+            "level".into(),
+            serde_json::Value::String(self.level().as_str().into()),
+        );
+        obj.insert(
+            "scope".into(),
+            serde_json::Value::String(self.scope.clone()),
+        );
         if let Some(p) = &self.plugin {
             obj.insert("plugin".into(), serde_json::Value::String(p.clone()));
         }
@@ -339,7 +348,11 @@ impl Logger {
     }
 
     /// 插件通道的 logger：带上插件名（JSONL 和面板视图要按它过滤）。
-    pub fn plugin(scope: impl Into<String>, plugin: impl Into<String>, transports: Vec<Arc<dyn Transport>>) -> Logger {
+    pub fn plugin(
+        scope: impl Into<String>,
+        plugin: impl Into<String>,
+        transports: Vec<Arc<dyn Transport>>,
+    ) -> Logger {
         let mut lg = Logger::with_transports(scope, transports);
         let inner = Arc::get_mut(&mut lg.inner).expect("刚构造的 Logger 独占");
         inner.plugin = Some(plugin.into());
@@ -375,7 +388,11 @@ impl Logger {
     /// 派生一个「属于某次执行」的 logger。执行结束就丢掉它，
     /// 不要复用 —— run 是只读标签，不是可变状态。
     pub fn with_run(&self, run: impl Into<String>) -> Logger {
-        self.derive(self.inner.scope.clone(), self.inner.plugin.clone(), Some(run.into()))
+        self.derive(
+            self.inner.scope.clone(),
+            self.inner.plugin.clone(),
+            Some(run.into()),
+        )
     }
 
     fn derive(&self, scope: String, plugin: Option<String>, run: Option<String>) -> Logger {
@@ -517,10 +534,8 @@ pub fn panel_mem() -> Arc<MemoryTransport> {
 
 fn panel_root() -> &'static Logger {
     PANEL.get_or_init(|| {
-        let transports: Vec<Arc<dyn Transport>> = vec![
-            Arc::new(ConsoleTransport::new()),
-            panel_mem(),
-        ];
+        let transports: Vec<Arc<dyn Transport>> =
+            vec![Arc::new(ConsoleTransport::new()), panel_mem()];
         Logger::with_transports("", transports)
     })
 }
@@ -650,7 +665,20 @@ const SECRET_HEADERS: &[&str] = &[
 fn is_value_terminator(c: char) -> bool {
     matches!(
         c,
-        '&' | '#' | ';' | '"' | '\'' | ',' | ')' | ']' | '}' | '）' | '】' | '》' | '，' | '。' | '、'
+        '&' | '#'
+            | ';'
+            | '"'
+            | '\''
+            | ','
+            | ')'
+            | ']'
+            | '}'
+            | '）'
+            | '】'
+            | '》'
+            | '，'
+            | '。'
+            | '、'
     )
 }
 
@@ -826,10 +854,16 @@ pub(crate) fn sanitize_terminal(s: &str) -> String {
             // 其它 ESC 序列（如 `ESC ( B`）：中间字节 0x20-0x2F，再跟一个终止字节
             Some(c2) if is_param(c2) => {
                 it.next();
-                while it.peek().is_some_and(|&c3| ('\u{20}'..='\u{2f}').contains(&c3)) {
+                while it
+                    .peek()
+                    .is_some_and(|&c3| ('\u{20}'..='\u{2f}').contains(&c3))
+                {
                     it.next();
                 }
-                if it.peek().is_some_and(|&c3| ('\u{30}'..='\u{7e}').contains(&c3)) {
+                if it
+                    .peek()
+                    .is_some_and(|&c3| ('\u{30}'..='\u{7e}').contains(&c3))
+                {
                     it.next();
                 }
             }
@@ -967,8 +1001,8 @@ fn redact_headers(src: &[char]) -> Vec<char> {
                 //   → 脱到配对的右括号为止，不然会把 `)` 一起吃掉，行就断了。
                 let inline = i > 0 && matches!(src[i - 1], '(' | '[' | '{' | '（' | '【' | '《');
                 out.extend(src[i..=colon].iter()); // 头名 + ':'
-                // 冒号后面那点空白留着：`Cookie: ***` 比 `Cookie:***` 好读，
-                // 也让「值被脱了」和「值本来就不存在」看起来不一样。
+                                                   // 冒号后面那点空白留着：`Cookie: ***` 比 `Cookie:***` 好读，
+                                                   // 也让「值被脱了」和「值本来就不存在」看起来不一样。
                 let mut k = colon + 1;
                 while k < src.len() && (src[k] == ' ' || src[k] == '\t') {
                     out.push(src[k]);
@@ -1058,7 +1092,9 @@ fn redact_kv(src: &[char]) -> Vec<char> {
         if boundary && (src[i].is_ascii_alphabetic() || src[i] == '_') {
             let ks = i;
             let mut j = i;
-            while j < src.len() && (src[j].is_ascii_alphanumeric() || matches!(src[j], '_' | '-' | '.')) {
+            while j < src.len()
+                && (src[j].is_ascii_alphanumeric() || matches!(src[j], '_' | '-' | '.'))
+            {
                 j += 1;
             }
             if j < src.len() && src[j] == '=' && j > ks {
@@ -1160,7 +1196,13 @@ mod tests {
         assert!(Level::Info < Level::Warn);
         assert!(Level::Warn < Level::Error);
         assert!(Level::Error < Level::Fatal);
-        for l in [Level::Debug, Level::Info, Level::Warn, Level::Error, Level::Fatal] {
+        for l in [
+            Level::Debug,
+            Level::Info,
+            Level::Warn,
+            Level::Error,
+            Level::Fatal,
+        ] {
             assert_eq!(Level::parse(l.as_str()), Some(l));
         }
         for t in Type::ALL {
@@ -1212,10 +1254,7 @@ mod tests {
         );
         // 邮箱（没有 scheme）和 path 里的 `@` 都不是 userinfo
         assert_eq!(redact("联系 alice@example.com"), "联系 alice@example.com");
-        assert_eq!(
-            redact("https://example.com/a@b"),
-            "https://example.com/a@b"
-        );
+        assert_eq!(redact("https://example.com/a@b"), "https://example.com/a@b");
         // 幂等：脱过的再跑一遍不变（日志会被多轮处理，不能越脱越多）
         assert_eq!(
             redact("https://***:***@example.com/x"),
@@ -1232,7 +1271,10 @@ mod tests {
             assert_eq!(redact(&format!("{key}=AKIA1234567")), format!("{key}=***"));
         }
         // 裸 `key` 仍然**不**进词表：`keyword` / `key=value` 必须原样保留
-        assert_eq!(redact("keyword=design&key=value"), "keyword=design&key=value");
+        assert_eq!(
+            redact("keyword=design&key=value"),
+            "keyword=design&key=value"
+        );
         assert_eq!(redact("X-Api-Key: sk-live-abc123"), "X-Api-Key: ***");
         assert_eq!(redact("x-panel-token: 8f3a2b1c"), "x-panel-token: ***");
     }
@@ -1266,7 +1308,11 @@ mod tests {
         assert_eq!(v["scope"], "mcloud-live");
         assert_eq!(v["plugin"], "mcloud-live");
         assert_eq!(v["run"], "daily-1");
-        assert!(v["ts"].as_str().unwrap().contains('T'), "RFC3339: {}", v["ts"]);
+        assert!(
+            v["ts"].as_str().unwrap().contains('T'),
+            "RFC3339: {}",
+            v["ts"]
+        );
     }
 
     #[test]
@@ -1365,10 +1411,16 @@ mod tests {
     /// 终端渲染剥控制序列，JSONL 保留原文（审计 L15）。
     #[test]
     fn terminal_rendering_strips_ansi_but_jsonl_keeps_it() {
-        assert_eq!(sanitize_terminal("\x1b[2K伪造 \x1b[32m成功\x1b[0m"), "伪造 成功");
+        assert_eq!(
+            sanitize_terminal("\x1b[2K伪造 \x1b[32m成功\x1b[0m"),
+            "伪造 成功"
+        );
         assert_eq!(sanitize_terminal("\x1b]0;标题\x07正文"), "正文");
         // OSC 8 超链接（`ESC ] 8 ; ; url ST 文本 ST`）
-        assert_eq!(sanitize_terminal("\x1b]8;;https://x\x1b\\链接\x1b]8;;\x1b\\"), "链接");
+        assert_eq!(
+            sanitize_terminal("\x1b]8;;https://x\x1b\\链接\x1b]8;;\x1b\\"),
+            "链接"
+        );
         assert_eq!(sanitize_terminal("普通日志"), "普通日志");
         // `\r`（回到行首覆盖）与其余 C0 控制字符一律丢掉；`\n` / `\t` 留着（向量契约）
         assert_eq!(sanitize_terminal("伪造成功\r真话"), "伪造成功真话");
@@ -1486,7 +1538,11 @@ mod tests {
     fn shared_redact_vectors_all_pass() {
         let v = testdata("redact-cases.json");
         let cases = v["cases"].as_array().expect("redact-cases.json 缺 cases");
-        assert!(cases.len() >= 10, "向量太少（{}），文件被删了？", cases.len());
+        assert!(
+            cases.len() >= 10,
+            "向量太少（{}），文件被删了？",
+            cases.len()
+        );
         for (i, c) in cases.iter().enumerate() {
             let input = c["in"].as_str().unwrap();
             let want = c["out"].as_str().unwrap();
@@ -1512,7 +1568,11 @@ mod tests {
         assert_eq!(map.len(), 8, "八档 type 一个都不能少");
         for (k, want) in map {
             let t = Type::parse(k).unwrap_or_else(|| panic!("向量里有不认识的 type: {k}"));
-            assert_eq!(t.level().as_str(), want.as_str().unwrap(), "type `{k}` 的过滤级别不对");
+            assert_eq!(
+                t.level().as_str(),
+                want.as_str().unwrap(),
+                "type `{k}` 的过滤级别不对"
+            );
         }
 
         // ② 每一条的行格式 + JSONL 字段集合
@@ -1537,10 +1597,21 @@ mod tests {
             let prefix = &line[..line.len() - suffix.len()];
             assert_eq!(prefix.len(), 24, "向量 #{i} 时间戳前缀长度不对: {prefix:?}");
             assert_eq!(&prefix[4..5], "-", "向量 #{i} 日期分隔符不对: {prefix:?}");
-            assert_eq!(&prefix[10..11], " ", "向量 #{i} 日期与时间之间要空格: {prefix:?}");
+            assert_eq!(
+                &prefix[10..11],
+                " ",
+                "向量 #{i} 日期与时间之间要空格: {prefix:?}"
+            );
             assert_eq!(&prefix[19..20], ".", "向量 #{i} 毫秒分隔符不对: {prefix:?}");
-            assert_eq!(&prefix[23..24], " ", "向量 #{i} 时间戳后要有一个空格: {prefix:?}");
-            assert!(prefix[..4].chars().all(|ch| ch.is_ascii_digit()), "向量 #{i} 年份不对");
+            assert_eq!(
+                &prefix[23..24],
+                " ",
+                "向量 #{i} 时间戳后要有一个空格: {prefix:?}"
+            );
+            assert!(
+                prefix[..4].chars().all(|ch| ch.is_ascii_digit()),
+                "向量 #{i} 年份不对"
+            );
 
             // JSONL 字段集合（严格：多一个少一个都算错）
             let j: serde_json::Value = serde_json::from_str(&entry.to_json()).unwrap();
@@ -1554,9 +1625,18 @@ mod tests {
                 .map(|s| s.as_str().unwrap().to_string())
                 .collect();
             want.sort();
-            assert_eq!(got, want, "\n向量 #{i} JSONL 字段集合不对（{}）\n", c["why"].as_str().unwrap_or(""));
+            assert_eq!(
+                got,
+                want,
+                "\n向量 #{i} JSONL 字段集合不对（{}）\n",
+                c["why"].as_str().unwrap_or("")
+            );
             // 值和行里的一致（含转义：引号 / 换行）
-            assert_eq!(obj["msg"].as_str().unwrap(), entry.msg, "向量 #{i} msg 转义或脱敏不对");
+            assert_eq!(
+                obj["msg"].as_str().unwrap(),
+                entry.msg,
+                "向量 #{i} msg 转义或脱敏不对"
+            );
             assert_eq!(obj["scope"].as_str().unwrap(), entry.scope);
             assert_eq!(obj["type"].as_str().unwrap(), entry.typ.as_str());
             assert_eq!(obj["level"].as_str().unwrap(), entry.level().as_str());
@@ -1618,7 +1698,10 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].msg, "被捕获");
         // 捕获期间插件日志**不进**内存环（测试运行不该刷满面板实时日志）
-        assert!(hub.mem().snapshot().is_empty(), "捕获期间插件日志不该进环形缓冲");
+        assert!(
+            hub.mem().snapshot().is_empty(),
+            "捕获期间插件日志不该进环形缓冲"
+        );
         // 但面板日志照常进（旧实现里 println! 也不被捕获，语义一致）
         let panel = crate::log::panel_mem().snapshot();
         assert!(panel.iter().any(|l| l.entry.msg == "面板的话不受影响"));

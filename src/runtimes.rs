@@ -97,8 +97,14 @@ impl RuntimeCatalog {
         let (node, bun) = (probe_node(), probe_bun());
         #[cfg(not(unix))]
         let (node, bun) = (
-            RuntimeInfo::missing("node", "外部 Node 运行时只支持 Unix；当前平台请用内嵌 QuickJS"),
-            RuntimeInfo::missing("bun", "外部 Bun 运行时只支持 Unix；当前平台请用内嵌 QuickJS"),
+            RuntimeInfo::missing(
+                "node",
+                "外部 Node 运行时只支持 Unix；当前平台请用内嵌 QuickJS",
+            ),
+            RuntimeInfo::missing(
+                "bun",
+                "外部 Bun 运行时只支持 Unix；当前平台请用内嵌 QuickJS",
+            ),
         );
         let python = probe_python();
 
@@ -212,7 +218,11 @@ impl RuntimeCatalog {
 
     /// 启动日志：探测结果一次说清，免得用户到插件加载失败时才发现没装 Node。
     pub fn log_summary(&self) {
-        for (label, info) in [("node", &self.node), ("bun", &self.bun), ("python3", &self.python)] {
+        for (label, info) in [
+            ("node", &self.node),
+            ("bun", &self.bun),
+            ("python3", &self.python),
+        ] {
             if info.available {
                 crate::log::plog!(
                     "boot",
@@ -271,7 +281,9 @@ fn run_version(cmd: &PathBuf, args: &[&str], timeout: Duration) -> Result<String
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().map_err(|e| format!("读取输出失败: {e}"))?;
+                let out = child
+                    .wait_with_output()
+                    .map_err(|e| format!("读取输出失败: {e}"))?;
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let line = stdout.lines().next().unwrap_or("").trim().to_string();
                 if status.success() && !line.is_empty() {
@@ -364,7 +376,9 @@ fn probe_bun() -> RuntimeInfo {
 
 fn probe_python() -> RuntimeInfo {
     // 脚本任务用。`-c` 打一行版本，避免不同发行版 `--version` 走 stderr。
-    let raw = std::env::var("PANEL_PYTHON").ok().filter(|s| !s.trim().is_empty());
+    let raw = std::env::var("PANEL_PYTHON")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let path = raw
         .as_deref()
         .map(PathBuf::from)
@@ -375,10 +389,7 @@ fn probe_python() -> RuntimeInfo {
         .unwrap_or_else(|| "python3".to_string());
     let probe = run_version(
         &path,
-        &[
-            "-c",
-            "import sys; print('%d.%d.%d' % sys.version_info[:3])",
-        ],
+        &["-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
         Duration::from_secs(2),
     );
     match probe {

@@ -1,6 +1,6 @@
 [package]
 name = "plugin-panel"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
@@ -45,6 +45,15 @@ blake2 = "0.10"
 # 只用它做「插件发起的出站请求」，服务端仍然是 Axum。
 # 实测（cargo zigbuild aarch64-unknown-linux-musl）能出静态 musl 产物，见 docs/performance.md §8.3。
 ureq = { version = "3", features = ["rustls"] }
+# 商城内置 TypeScript 转译：只引 parser/semantic/transformer/codegen，不引
+# OXC 的 minifier / isolated declarations。release 下 strip + LTO 后约 +0.9 MiB，
+# 这样安装 .ts 不再依赖外部的 Bun 或 Node。
+oxc_allocator = "0.154.0"
+oxc_codegen = "0.154.0"
+oxc_parser = "0.154.0"
+oxc_semantic = "0.154.0"
+oxc_span = "0.154.0"
+oxc_transformer = "0.154.0"
 # host_api.ws_* 的传输层：插件用的 **WebSocket 客户端**（第二十一轮）。
 #
 # 为什么不是"再写一个 HTTP 库"：弹幕是**长连接**，`http_fetch` 那种"一次请求一次响应"

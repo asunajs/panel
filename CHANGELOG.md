@@ -1,6 +1,30 @@
 # 更新记录
 
-## 未发布
+## 0.1.6
+
+- **设置页**：引擎预算、插件隔离、安全、日志这些运行参数搬到界面上，分 tab 展示、
+  可保存，需要重启的项旁边就是**重启按钮**。
+  - 优先级：**环境变量 > `data/settings.json` > 内置默认**。被环境变量固定的项在页面上只读，
+    保存会被拒绝 —— 运维钉死的值不该被网页表单改掉。
+  - 凭据、`DB_PATH`/`PLUGINS_DIR`/`BIND_ADDR` **刻意不进设置页**（一个是秘密，
+    几个改错就把自己关在门外）。
+  - 绝大多数项要重启才生效；`PANEL_LOG_LEVEL` 改完立刻生效。
+  - 重启是 `exec` 自身：PID 不变，不依赖 systemd 的 `Restart=always`；
+    exec 失败时面板继续用旧配置跑，不会下线。
+- **单次执行预算默认从 2 秒放宽到 60 秒**（`EXEC_BUDGET_MS` 可改）。2 秒对「扫一遍云盘账号」
+  这类正常工作量太紧，撞上就被 `InternalError: interrupted` 打断，而插件作者看到的只是
+  「被打断」，容易去怀疑路由写错。
+  - 试跑（`POST /api/test/js`）另有 **10 秒**预算（`TEST_RUN_BUDGET_MS`）：它占着引擎线程、
+    又是人在等结果，不能跟着 60 秒走。
+  - 健康判据跟着放宽成「单次预算 + 3 秒」（默认 63 秒），否则一次合法的 60 秒调用会被
+    面板误报成「停摆」。代价：真卡死也要 63 秒才认出来。
+  - 加载预算**不联动**，仍是 10 秒（`LOAD_BUDGET_MS`）：它管的是启动别卡死，和单次预算
+    不是同一件事。
+- 插件配置不再强制写配置页：插件列表新增「配置」按钮，读取/保存插件数据目录里的
+  `config.json`。表单自动识别文本、数字、开关；嵌套对象和数组切到「JSON」页编辑。
+- 插件侧新增 `config()`（QuickJS `host_api.config()` / Node、Bun `import { config }`）：
+  缺文件返回 `{}`，非法 JSON 明确报错，保存后下一次任务自动生效，不需要重载。
+- 新增 `GET/PUT /api/plugins/{name}/config`，供脚本或运维直接传配置；原子写入，权限 `0600`。
 
 - 插件任务支持 `surface` / `summary` / `blockers` / `paused` / `manage_url` 五项元数据：
   任务可以声明“归插件页面管理”、在卡片上显示一行人话摘要、在账号/配置未就绪时**不参与调度**
@@ -13,6 +37,22 @@
   面板只负责调度和记录。任务编辑器深链到这类任务时给一句人话和入口，不再让用户改完被后端拒绝。
 - `jobs` 表新增 `surface` / `summary` / `blockers` / `manage_url` 四列（旧库自动迁移）；
   `paused` 在插件重新同步时**保留**，不会被代码覆盖。
+
+- 新增插件商城（入口在插件列表右上角，路由 `#/market`，不占侧边栏）：目录记录 GitHub
+  仓库，服务端解析 Release / 单文件、版本、资产、大小和 SHA-256；客户端只传条目 `id`。
+- 私有仓库支持 `PANEL_GITHUB_TOKEN` / `PANEL_GITHUB_TOKEN_FILE`：Token 只发 GitHub API
+  同源请求，不进前端、不跟随 Release 资产 302 跳转；私有仓库未配 Token 时的人话提示。
+- 单文件 `.mjs` 安装后改名为 `.js`；单文件 `.ts` 在安装时用**内置 OXC**
+  做类型擦除后写成 `.js`，扫描器与运行时仍然只认 `.js`；不再依赖 Bun / Node。
+- `PANEL_TS_TRANSPILER=auto` 默认使用内置 OXC（parser / semantic / transformer /
+  codegen），release 约 +0.8 MiB；`bun` / `node` 仍可显式选择外部转译。
+- 插件商城支持公开仓库加速前缀 `PANEL_MARKET_PROXY=https://gh-proxy.com`（或 `=1` 使用默认）：
+  目录 / API / Release / 单文件下载可按需走代理；私有仓库始终直连，Token 不发往代理。
+- 官方目录新增单文件 TypeScript 插件 `quark`（夸克网盘签到，仓库 `asunajs/panel-single-plugins`）：
+  验证商城对 `.ts` 源文件的安装、TS→JS 转译、插件配置表单和同步 handler。
+- 商城安装记录写在 `data/market-installed.json`，用于「已安装 / 可更新 / 需修复」；
+  目录/解析结果缓存 15 分钟，页面「刷新目录」可强制刷新。官方目录内置一份，
+  `PANEL_MARKET_URL=off` 时离线可用。
 
 - 写清插件页面的安全模型：**默认同源 = 插件页与面板同等权限**，iframe 的 `sandbox`
   在这种模式下**不是安全边界**（同时有 `allow-scripts` 与 `allow-same-origin` 时，

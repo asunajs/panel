@@ -178,7 +178,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_plugin_state(&conn)?;
     // 第五十九轮：**「长期加载」**（不参与"闲下来就卸载"）。
     // 老库里的 `plugin_state` 没有这一列，补上；默认 0 = 按规则惰性加载。
-    ensure_column(&conn, "plugin_state", "keep_warm", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        &conn,
+        "plugin_state",
+        "keep_warm",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // 第六十轮：外部 JS 运行时覆盖。`engine` 为空 = 用 PANEL_JS_ENGINE/QuickJS。
     ensure_column(&conn, "plugin_state", "engine", "TEXT")?;
     ensure_column(&conn, "plugin_state", "command", "TEXT")?;
@@ -234,21 +239,14 @@ fn restrict_permissions(path: &Path) {
 fn restrict_permissions(_path: &Path) {}
 
 /// 如果列不存在就补上。SQLite 的 `ALTER TABLE ADD COLUMN` 是 O(1) 的元数据操作。
-fn ensure_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    ddl: &str,
-) -> rusqlite::Result<()> {
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> rusqlite::Result<()> {
     let exists = conn
         .prepare(&format!(
             "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
         ))?
         .exists(params![column])?;
     if !exists {
-        conn.execute_batch(&format!(
-            "ALTER TABLE {table} ADD COLUMN {column} {ddl};"
-        ))?;
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl};"))?;
     }
     Ok(())
 }
@@ -569,7 +567,17 @@ pub fn record_job_run(
         WHERE plugin = ?1 AND name = ?2
         "#,
         // rusqlite 没有为 u64 实现 ToSql（SQLite 只有 i64），这里显式降级
-        params![plugin, name, runs as i64, trips as i64, last_run, next_run, error, tripped, now],
+        params![
+            plugin,
+            name,
+            runs as i64,
+            trips as i64,
+            last_run,
+            next_run,
+            error,
+            tripped,
+            now
+        ],
     )?;
     Ok(())
 }
@@ -684,10 +692,7 @@ pub type DeletedJob = (String, String, String, Option<String>);
 ///
 /// 开机 / 热更新之后要把它们从调度器里摘掉（`engine::drop_deleted`）——
 /// 插件代码重新登记了任务，不摘的话「删掉的任务」重启后又跑起来了。
-pub fn list_deleted_jobs(
-    db: &Db,
-    owned: Option<&[String]>,
-) -> rusqlite::Result<Vec<DeletedJob>> {
+pub fn list_deleted_jobs(db: &Db, owned: Option<&[String]>) -> rusqlite::Result<Vec<DeletedJob>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT plugin, name, schedule, override_expr FROM jobs
@@ -808,7 +813,13 @@ pub fn finish_run(
 }
 
 /// 只更新下次触发时刻（脚本任务装进调度器后回写，不动 runs/status）。
-pub fn set_job_next_run(db: &Db, plugin: &str, name: &str, next: &str, now: &str) -> rusqlite::Result<()> {
+pub fn set_job_next_run(
+    db: &Db,
+    plugin: &str,
+    name: &str,
+    next: &str,
+    now: &str,
+) -> rusqlite::Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
         "UPDATE jobs SET next_run = ?3, updated_at = ?4 WHERE plugin = ?1 AND name = ?2",
@@ -921,7 +932,11 @@ pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
 pub fn prune_runs(db: &Db, keep_days: i64, now: &str) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     let cutoff = chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M:%S")
-        .map(|t| (t - chrono::Duration::days(keep_days)).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| {
+            (t - chrono::Duration::days(keep_days))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|_| now.to_string());
     conn.execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])
 }
@@ -941,7 +956,8 @@ pub fn close_dangling_runs(db: &Db, now: &str) -> rusqlite::Result<usize> {
 /// 被面板停用的插件名。
 pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE disabled = 1 ORDER BY name")?;
+    let mut stmt =
+        conn.prepare("SELECT name FROM plugin_state WHERE disabled = 1 ORDER BY name")?;
     let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
     it.collect()
 }
@@ -949,7 +965,8 @@ pub fn list_disabled_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
 /// 被设为「长期加载」的插件名（这些**不**参与闲置卸载）。
 pub fn list_keep_warm_plugins(db: &Db) -> rusqlite::Result<Vec<String>> {
     let conn = db.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT name FROM plugin_state WHERE keep_warm = 1 ORDER BY name")?;
+    let mut stmt =
+        conn.prepare("SELECT name FROM plugin_state WHERE keep_warm = 1 ORDER BY name")?;
     let it = stmt.query_map([], |r| r.get::<_, String>(0))?;
     it.collect()
 }
@@ -1155,7 +1172,12 @@ pub fn delete_script_dir_job(db: &Db, name: &str) -> rusqlite::Result<usize> {
 }
 
 /// 文件头改调度后，目录任务的 `schedule` 收敛（保留 override_expr）。
-pub fn set_script_dir_schedule(db: &Db, name: &str, schedule: &str, now: &str) -> rusqlite::Result<usize> {
+pub fn set_script_dir_schedule(
+    db: &Db,
+    name: &str,
+    schedule: &str,
+    now: &str,
+) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     conn.execute(
         "UPDATE jobs SET schedule = ?3, updated_at = ?4          WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir'",
@@ -1177,7 +1199,15 @@ pub fn update_script_dir_meta(
     conn.execute(
         "UPDATE jobs SET script = ?3, runtime = ?4, params = ?5, budget_ms = ?6, updated_at = ?7
          WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir'",
-        params![SCRIPT_PLUGIN, name, script, runtime, params, budget_ms.map(|v| v as i64), now],
+        params![
+            SCRIPT_PLUGIN,
+            name,
+            script,
+            runtime,
+            params,
+            budget_ms.map(|v| v as i64),
+            now
+        ],
     )
 }
 
@@ -1645,9 +1675,19 @@ mod tests {
         // 这一轮插件代码里只剩 theirs：old 该被清掉，mine 该活着
         sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
 
-        let names: Vec<String> = list_jobs(&db).unwrap().into_iter().map(|j| j.name).collect();
-        assert!(!names.contains(&"old".to_string()), "插件已不声明的任务该被清掉");
-        assert!(names.contains(&"mine".to_string()), "面板任务不该被 sync_jobs 清掉");
+        let names: Vec<String> = list_jobs(&db)
+            .unwrap()
+            .into_iter()
+            .map(|j| j.name)
+            .collect();
+        assert!(
+            !names.contains(&"old".to_string()),
+            "插件已不声明的任务该被清掉"
+        );
+        assert!(
+            names.contains(&"mine".to_string()),
+            "面板任务不该被 sync_jobs 清掉"
+        );
         assert!(names.contains(&"theirs".to_string()));
     }
 
@@ -1733,8 +1773,22 @@ mod tests {
     #[test]
     fn panel_job_roundtrip_and_delete_guard() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
-        assert_eq!(job_source(&db, "p", "mine").unwrap().as_deref(), Some("panel"));
+        insert_panel_job(
+            &db,
+            "p",
+            "mine",
+            "@every 1s",
+            Some(NOW),
+            NOW,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            job_source(&db, "p", "mine").unwrap().as_deref(),
+            Some("panel")
+        );
 
         // 插件声明的行不能被面板删掉（删了也会被 sync_jobs 装回来）
         sync_jobs(&db, &[spec("p", "theirs", "@every 1s")], NOW, None).unwrap();
@@ -1743,7 +1797,10 @@ mod tests {
             0,
             "插件声明的任务不该被面板删掉"
         );
-        assert_eq!(job_source(&db, "p", "theirs").unwrap().as_deref(), Some("plugin"));
+        assert_eq!(
+            job_source(&db, "p", "theirs").unwrap().as_deref(),
+            Some("plugin")
+        );
 
         assert_eq!(delete_panel_job(&db, "p", "mine").unwrap(), 1);
         assert_eq!(job_source(&db, "p", "mine").unwrap(), None);
@@ -1778,10 +1835,8 @@ mod tests {
         let now = "2026-01-01 00:00:00";
         // 用 sync_jobs 建行：插件代码声明的任务走的是「按代码收敛」这条路，
         // `source` 才是 'plugin'（upsert_task 写的是另一张表 tasks，别用错）
-        let specs: Vec<JobSpec> = vec![
-            spec("a", "t1", "@every 30s"),
-            spec("b", "t2", "@every 30s"),
-        ];
+        let specs: Vec<JobSpec> =
+            vec![spec("a", "t1", "@every 30s"), spec("b", "t2", "@every 30s")];
         sync_jobs(&db, &specs, now, None).unwrap();
         assert!(list_job_overrides(&db, None).unwrap().is_empty());
 
@@ -1797,7 +1852,10 @@ mod tests {
 
         let mine = list_job_overrides(&db, Some(&["b".to_string()])).unwrap();
         assert_eq!(mine.len(), 1, "只应该看到自己负责的那个插件");
-        assert_eq!(mine[0], ("b".to_string(), "t2".to_string(), "@every 2s".to_string()));
+        assert_eq!(
+            mine[0],
+            ("b".to_string(), "t2".to_string(), "@every 2s".to_string())
+        );
 
         // 撤销
         set_job_override(&db, "a", "t1", None, now).unwrap();
@@ -1841,7 +1899,11 @@ mod tests {
         for _ in 0..3 {
             sync_jobs(&db, &specs, NOW, None).unwrap();
             assert!(row(&db).deleted, "sync_jobs 不许把墓碑清掉");
-            assert_eq!(row(&db).status, "deleted", "sync_jobs 不许把状态改回 running");
+            assert_eq!(
+                row(&db).status,
+                "deleted",
+                "sync_jobs 不许把状态改回 running"
+            );
         }
 
         // 插件代码里删掉了这个任务：`sync_jobs` **不动墓碑**（它手里的 specs 来自
@@ -1858,8 +1920,12 @@ mod tests {
         // 重建一行，验证「代码里还声明着它 → 墓碑必须留着」
         sync_jobs(&db, &specs, NOW, None).unwrap();
         set_job_deleted(&db, "p", "t", true, NOW).unwrap();
-        prune_tombstones(&db, &["p".to_string()], &[("p".to_string(), "t".to_string())])
-            .unwrap();
+        prune_tombstones(
+            &db,
+            &["p".to_string()],
+            &[("p".to_string(), "t".to_string())],
+        )
+        .unwrap();
         assert!(
             row(&db).deleted,
             "声明列表里还有它 → 墓碑不许被当成过期清掉"
@@ -1888,10 +1954,8 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let db = open(&dir.join("del.db")).unwrap();
-        let specs: Vec<JobSpec> = vec![
-            spec("a", "t1", "@every 30s"),
-            spec("b", "t2", "@every 30s"),
-        ];
+        let specs: Vec<JobSpec> =
+            vec![spec("a", "t1", "@every 30s"), spec("b", "t2", "@every 30s")];
         sync_jobs(&db, &specs, NOW, None).unwrap();
         set_job_deleted(&db, "a", "t1", true, NOW).unwrap();
         set_job_deleted(&db, "b", "t2", true, NOW).unwrap();
@@ -1968,7 +2032,18 @@ mod tests {
     #[test]
     fn set_job_status_keeps_paused_and_clears_next_run() {
         let db = mem();
-        insert_panel_job(&db, "p", "mine", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
+        insert_panel_job(
+            &db,
+            "p",
+            "mine",
+            "@every 1s",
+            Some(NOW),
+            NOW,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         set_job_paused(&db, "p", "mine", true, NOW).unwrap();
 
         set_job_status(&db, "p", "mine", "error", Some("处理函数没了"), NOW).unwrap();
@@ -1979,7 +2054,18 @@ mod tests {
         assert!(j.next_run.is_none(), "跑不起来的任务不该留着下次触发时刻");
 
         // 没暂停的那条才该显示 error
-        insert_panel_job(&db, "p", "other", "@every 1s", Some(NOW), NOW, None, None, None).unwrap();
+        insert_panel_job(
+            &db,
+            "p",
+            "other",
+            "@every 1s",
+            Some(NOW),
+            NOW,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         set_job_status(&db, "p", "other", "error", Some("x"), NOW).unwrap();
         assert_eq!(get(&db, "p", "other").status, "error");
     }
@@ -1996,7 +2082,10 @@ mod tests {
         let t = get(&db, "p", "t");
         assert!(t.paused, "sync_jobs 把用户的暂停状态弄丢了");
         assert_eq!(t.status, "paused");
-        assert_eq!(list_paused_jobs(&db).unwrap(), vec![("p".to_string(), "t".to_string())]);
+        assert_eq!(
+            list_paused_jobs(&db).unwrap(),
+            vec![("p".to_string(), "t".to_string())]
+        );
     }
 
     #[test]

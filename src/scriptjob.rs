@@ -253,7 +253,10 @@ fn script_env(
     out.push(pair("PANEL_SCHEDULE", schedule));
     out.push(pair("PANEL_MANUAL", if manual { "1" } else { "0" }));
     out.push(pair("PANEL_RUN_ID", run_id));
-    out.push(pair("PANEL_PLUGIN_DATA_DIR", &data_dir.display().to_string()));
+    out.push(pair(
+        "PANEL_PLUGIN_DATA_DIR",
+        &data_dir.display().to_string(),
+    ));
     out.push(pair(
         "PANEL_DATA_DIR",
         &host
@@ -353,10 +356,7 @@ fn run_native(
     let code = status.and_then(|s| s.code());
     let output = cap_output(buf.take());
     let error = if timed_out {
-        Some(format!(
-            "执行超过 {}ms，被强制终止",
-            timeout.as_millis()
-        ))
+        Some(format!("执行超过 {}ms，被强制终止", timeout.as_millis()))
     } else {
         match code {
             Some(0) => None,
@@ -383,7 +383,11 @@ fn spawn_reader<R: Read + Send + 'static>(
         let mut line = String::new();
         loop {
             line.clear();
-            match reader.by_ref().take(MAX_LINE_BYTES as u64).read_line(&mut line) {
+            match reader
+                .by_ref()
+                .take(MAX_LINE_BYTES as u64)
+                .read_line(&mut line)
+            {
                 Ok(0) => break,
                 Ok(_) => {
                     let text = line.trim_end_matches(['\r', '\n']);

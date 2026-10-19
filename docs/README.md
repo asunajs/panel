@@ -20,6 +20,7 @@
 | [运行与配置](configuration.md) | 环境变量总表、端口、数据目录、日志目录、运行时选择 |
 | [脚本任务](script-jobs.md) | `tasks/` 目录、文件头、退出码、面板任务与目录任务的区别 |
 | [上传插件与脚本](upload.md) | 单文件、zip、目录插件的路径规则 |
+| [插件商城](market.md) | 从 GitHub Release / 单文件安装，私有仓库 Token，TypeScript 转译 |
 | [运行记录](run-history.md) | 每次执行的结果、耗时、对应日志 |
 | [日志](logging.md) | 日志级别、筛选、SSE、日志文件保留时间 |
 | [安全](security.md) | 口令、令牌哈希、防爆破、公网访问注意事项 |

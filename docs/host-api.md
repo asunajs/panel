@@ -110,6 +110,7 @@ worker_hint(kind)                  -> str       # 声明本插件对「跑在哪
 # 表达式末尾可以加一个抖动后缀                                          —— 见 §1.2.8
 smtp_send(opts)                    -> {ok, response}   # 发一封邮件 —— 见 §1.2.6
 register_nav({ label, icon, path }) -> label   # 在面板侧边栏加一项 —— 见 §1.2.7
+config()                           -> object     # 读插件配置 —— 见 §1.2.10
 ```
 
 - `expr`：5 段或 6 段 cron。支持 `*`、`a-b`、`*/n`、`a,b,c`、`MON-FRI`、`JAN..DEC`、`7`=周日；
@@ -220,7 +221,7 @@ register_route('/plugins/x/run', 'POST', handler, { budget_ms: 120_000 });
 
 | | |
 |---|---|
-| 默认 | 全局 `EXEC_BUDGET_MS`（2000ms） |
+| 默认 | 全局 `EXEC_BUDGET_MS`（默认 **60000ms**；试跑走 `TEST_RUN_BUDGET_MS`，默认 10000ms） |
 | 范围 | 100ms ~ 600000ms（10 分钟）。越界**报错**，不静默夹紧 |
 | 生效范围 | 任务（`register_cron` / `every`）和路由（`register_route`）都能声明 |
 | 落库 | `jobs.budget_ms` —— 面板上能看到，重启后还在 |
@@ -388,6 +389,41 @@ set_job_schedule('兑换', { expr: '0 10,20 * * *', lead_ms: 120_000 });
 - blockers 非空只影响**定时**；用户点「运行一次」仍然执行（手动运行是显式动作）。
 - 外部运行时（Node/Bun）的 `register_task` RPC 多一个可选的第六个参数（meta JSON）；
   老插件不传 = 全部默认值，向后兼容。
+
+#### 1.2.10 插件配置：`config()`
+
+简单插件不需要写配置页。把配置放在插件数据目录：
+
+```text
+<PLUGIN_DATA_DIR>/<plugin>/config.json
+```
+
+插件里直接读：
+
+```js
+import { config } from 'host-api';
+
+const cfg = config();
+// { interval: '30s', enabled: true }
+```
+
+- 文件不存在 ⇒ 返回 `{}`；
+- 只接受 JSON 对象；非法 JSON / 非对象会抛错，错误里带文件路径；
+- 最大 1 MiB；
+- 按 mtime 缓存；面板里保存后，下一次任务自动读到新值，不需要重载插件；
+- 配置是**插件级全局配置**。每个任务自己的参数继续用
+  `register_cron(..., { params })`，两者不要混。
+
+面板的「插件列表 → 配置」会打开一个通用表单：布尔值是勾选框、数字是数字框、
+字符串是输入框；对象/数组切到「JSON」页编辑。也可以直接改文件，或用接口：
+
+```text
+GET /api/plugins/{name}/config
+PUT /api/plugins/{name}/config
+```
+
+`PUT` 只接受 JSON 对象，原子写入，权限 `0600`。这个接口需要正常登录，
+并且带 `x-panel: 1`（和其它写接口一样）。
 
 ### 1.3 SQLite
 
@@ -571,6 +607,7 @@ handler(payload) -> None
 | `opts.lead_ms` | ✅ | ✅（RPC） | ❌ | —（脚本无调度） |
 | 随机表达式（抖动） | ✅ 面板调度器 | ✅ 面板调度器 | ❌ 未实现 | ✅ 由面板调度 |
 | `register_nav` | ✅ | ✅（RPC） | ❌ | ❌ 抛错 |
+| `config()` | ✅ | ✅（RPC） | ❌ | ❌ |
 | `register_route` | ✅ | ✅（RPC） | ✅（内置 http server） | ❌ 抛错 |
 | `ws_*` | ✅ | ✅（RPC） | ❌ | ✅ |
 | `smtp_send` | ✅ | ✅（RPC） | ❌ | ✅ |
@@ -782,7 +819,7 @@ POST /api/test/js    { "code": "...", "input": "...", "plugin"?, "task"?, "engin
 - 输入以全局 `input` 提供。
 - 输出约定：`log`/`console.log` → `stdout`；`warn`/`error` → `stderr`；
   代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码。
-- 受执行预算保护：死循环被 interrupt handler 打断（实测 2000 ms）。
+- 受执行预算保护：死循环被 interrupt handler 打断（默认预算 60 秒；试跑 10 秒）。
 - 输出**不进**面板的实时日志（用捕获缓冲收走），否则跑几次就把日志刷满了。
 - `POST /api/test/py` **已删除**（Python 插件退场）。
 

@@ -573,7 +573,10 @@ mod tests {
         assert_eq!(rows[0]["type"], "warn");
         assert_eq!(rows[0]["level"], "warn");
         assert_eq!(rows[0]["scope"], "mcloud");
-        assert_eq!(rows[0]["msg"], "账号 136****6001 失败", "落盘的必须是脱敏后的");
+        assert_eq!(
+            rows[0]["msg"], "账号 136****6001 失败",
+            "落盘的必须是脱敏后的"
+        );
         assert!(rows[0]["ts"].as_str().unwrap().contains('T'));
     }
 
@@ -611,9 +614,17 @@ mod tests {
         let dir = tmpdir("name");
         let today = Local::now().date_naive();
         let p = daily_path(&dir, "plugin", today);
-        assert!(p.file_name().unwrap().to_str().unwrap().starts_with("plugin-"));
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("plugin-"));
         assert!(p.extension().unwrap() == "jsonl");
-        assert_eq!(p, dir.join(format!("plugin-{}.jsonl", today.format("%Y-%m-%d"))));
+        assert_eq!(
+            p,
+            dir.join(format!("plugin-{}.jsonl", today.format("%Y-%m-%d")))
+        );
     }
 
     #[test]
@@ -715,7 +726,11 @@ mod tests {
         let msg = rows[0]["msg"].as_str().unwrap();
         assert_eq!(msg.len(), crate::log::MAX_MSG_BYTES, "正文必须正好卡在上限");
         assert!(msg.ends_with("字节）"), "要带截断标记: {msg:?}");
-        assert!(msg.contains("原长 65536 字节"), "标记里要有原长: {:?}", &msg[msg.len() - 40..]);
+        assert!(
+            msg.contains("原长 65536 字节"),
+            "标记里要有原长: {:?}",
+            &msg[msg.len() - 40..]
+        );
     }
 
     /// 审计 L15：单个文件到上限后**停写**，并计入 dropped（面板要能看见）。
@@ -796,7 +811,9 @@ mod tests {
     #[test]
     fn min_level_filters_at_the_transport() {
         let dir = tmpdir("minlevel");
-        let t = FileTransport::open(&dir, "plugin", 7).unwrap().with_min_level(Level::Error);
+        let t = FileTransport::open(&dir, "plugin", 7)
+            .unwrap()
+            .with_min_level(Level::Error);
         let lg = Logger::with_transports("x", vec![Arc::new(t)]);
         lg.warn("不该落盘");
         lg.error("该落盘");

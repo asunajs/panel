@@ -104,7 +104,10 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].typ, Type::Info);
         assert_eq!(got[1].msg, "二");
-        assert!(cap.is_empty(), "take 之后必须清空，否则下一次测试会带上上一次的输出");
+        assert!(
+            cap.is_empty(),
+            "take 之后必须清空，否则下一次测试会带上上一次的输出"
+        );
     }
 
     #[test]

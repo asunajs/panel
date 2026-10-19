@@ -33,10 +33,13 @@ interrupt handler，`while(true){}` 会永久占住该线程。附带后果比�
 1. **执行预算**：注册 Runtime 级的 interrupt handler（`rt.set_interrupt_handler`）。
    每次调 JS 前 `arm(budget)`、调用后 `disarm()`，超时由 QuickJS 抛异常打断。
    覆盖三个入口：插件顶层 `eval`、`on_tick`、cron handler。
-   默认 2000ms，环境变量 `EXEC_BUDGET_MS` 可覆盖。
+   默认 **60 秒**，环境变量 `EXEC_BUDGET_MS` 可覆盖（想收紧就 `EXEC_BUDGET_MS=2000`）。
+   试跑（`POST /api/test/js`）另有自己的预算：默认 **10 秒**（`TEST_RUN_BUDGET_MS`），
+   因为那是人在等结果的动作，且试跑占着引擎线程。
 2. **关闭优先**：`EngineHealth.request_stop()` 置位后 handler 无条件打断。
 3. **健康上报**：`EngineHealth` 同时跟踪「最近心跳」和「预期唤醒时刻」，**两者都过期**
-   才判 `degraded`。只看心跳会把「调度器睡 1 小时等下一个任务」误判成卡死；
+   才判 `degraded`；「过期」的阈值是 **单次预算 + 3 秒**（默认 63 秒），
+   否则一次合法的 60 秒调用会被报成停摆。代价：真卡死也要 63 秒才认出来。只看心跳会把「调度器睡 1 小时等下一个任务」误判成卡死；
    只看预期唤醒则判不出「卡在 JS 里」。
 4. **SIGTERM 支持**：`systemctl stop` / `docker stop` 发的是 SIGTERM，只监听 SIGINT 不够。
 
@@ -45,7 +48,7 @@ interrupt handler，`while(true){}` 会永久占住该线程。附带后果比�
 | 观测项 | 修复前 | 修复后 |
 |---|---|---|
 | 同目录对照组 `alive` 任务 | 停摆 | **runs 持续增长**（7 → 10） |
-| `runaway` 任务 | 永久卡死 | 每轮被中断，`last_error` = `执行超过预算 2s，被强制中断（疑似死循环）` |
+| `runaway` 任务 | 永久卡死 | 每轮被中断，`last_error` = `执行超过预算 60s，被强制中断（疑似死循环）` |
 | 面板状态 | 撒谎报 `running` | 卡死时诚实报 **`degraded`**（`beat_ago=8027ms`） |
 | 优雅退出（SIGTERM） | 卡死，只能 `kill -9` | **1 秒内退出** |
 
@@ -66,8 +69,9 @@ dispatch → 写 fd0 invoke → 等 fd1 result
 
 | 项 | 值 |
 |---|---|
-| 单次调用预算 | 任务/路由的 `budget_ms`，否则 `EXEC_BUDGET_MS`（2000ms） |
-| IPC 宽限 | **+250ms**（预算 2s 的插件不该因为几毫秒调度抖动被杀） |
+| 单次调用预算 | 任务/路由的 `budget_ms`，否则 `EXEC_BUDGET_MS`（默认 60s） |
+| 试跑预算 | `TEST_RUN_BUDGET_MS`（默认 10s，且不超过单次预算） |
+| IPC 宽限 | **+250ms**（不该因为几毫秒调度抖动被杀） |
 | 加载预算 | `LOAD_BUDGET_MS`（默认 10s），超时同样杀进程组 |
 | 被杀之后 | 任务算失败 → 交给熔断器；插件**内存状态丢失** |
 | 重启 | 下一次 `invoke` / `tick` 自动拉起；注册声明还在调度器里，不重复安装 |

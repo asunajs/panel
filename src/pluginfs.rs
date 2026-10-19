@@ -141,7 +141,9 @@ pub fn resolve_in_root(root: &Path, requested: &str) -> Result<PathBuf, FsError>
             break probe;
         }
         match probe.parent() {
-            Some(parent) if parent.starts_with(root) || parent == root => probe = parent.to_path_buf(),
+            Some(parent) if parent.starts_with(root) || parent == root => {
+                probe = parent.to_path_buf()
+            }
             // 已经走到根还没找到 → 根本身总该存在（real_root 已经建过它了）
             _ => break root.to_path_buf(),
         }
@@ -168,7 +170,6 @@ fn real_root(root: &Path) -> Result<PathBuf, FsError> {
     }
     std::fs::canonicalize(root).map_err(|e| FsError::from_io(&e))
 }
-
 
 /* ------------------------------------------------------------------ 操作 */
 
@@ -223,14 +224,19 @@ pub fn read(root: &Path, requested: &str, encoding: &str) -> String {
             if encoding.is_empty() {
                 let nums: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
                 ok_with(format!("\"data\":[{}]", nums.join(",")))
-            } else if encoding.eq_ignore_ascii_case("utf8") || encoding.eq_ignore_ascii_case("utf-8") {
+            } else if encoding.eq_ignore_ascii_case("utf8")
+                || encoding.eq_ignore_ascii_case("utf-8")
+            {
                 match String::from_utf8(bytes) {
                     Ok(text) => ok_with(format!("\"data\":{}", jstr(&text))),
                     // 非 UTF-8 就如实说，而不是塞一堆替换字符 —— 后者会让
                     // "文件坏了"看起来像"内容本来就有问号"
                     Err(e) => FsError::new(
                         "EINVAL",
-                        format!("`{requested}` 不是合法的 UTF-8（第 {} 字节处）", e.utf8_error().valid_up_to()),
+                        format!(
+                            "`{requested}` 不是合法的 UTF-8（第 {} 字节处）",
+                            e.utf8_error().valid_up_to()
+                        ),
                     )
                     .to_json(),
                 }
@@ -265,7 +271,11 @@ pub fn write(
     if payload.len() > MAX_WRITE_BYTES {
         return FsError::new(
             "EFBIG",
-            format!("一次写了 {} 字节，超过上限 {}", payload.len(), MAX_WRITE_BYTES),
+            format!(
+                "一次写了 {} 字节，超过上限 {}",
+                payload.len(),
+                MAX_WRITE_BYTES
+            ),
         )
         .to_json();
     }

@@ -42,15 +42,16 @@
 
 use crate::cron::Schedule;
 use crate::db::Db;
-use crate::scheduler::{JobControl, JobPatch, TaskMeta, TaskSurface};
 use crate::runtimefs::RuntimePaths;
 use crate::runtimes::RuntimeCatalog;
+use crate::scheduler::{JobControl, JobPatch, TaskMeta, TaskSurface};
 use crate::wsclient;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// 插件日志的中枢：终端 + 1MB 内存环 + JSONL 文件三件套。
 ///
@@ -163,6 +164,16 @@ pub struct HostState {
     pub ws: wsclient::Registry,
     /// 插件运行期改自己任务状态的补丁邮筒（见 [`crate::scheduler::JobControl`]）。
     pub jobs: Arc<JobControl>,
+    /// 插件配置文件的 mtime 缓存。配置很小，但每次任务都读盘没必要；
+    /// 用 mtime + 长度判断变化，保存后下一次调用就能看到新值。
+    config_cache: Mutex<HashMap<String, ConfigCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct ConfigCacheEntry {
+    modified: Option<SystemTime>,
+    len: u64,
+    json: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,18 +286,10 @@ impl PluginSqlGuard<'_> {
         if let rusqlite::Error::SqliteFailure(err, _) = &e {
             match err.code {
                 rusqlite::ErrorCode::OperationInterrupted => {
-                    return format!(
-                        "查询超时（>{}s）被中断",
-                        PLUGIN_SQL_TIMEOUT.as_secs()
-                    );
+                    return format!("查询超时（>{}s）被中断", PLUGIN_SQL_TIMEOUT.as_secs());
                 }
                 rusqlite::ErrorCode::AuthorizationForStatementDenied => {
-                    if let Some(reason) = self
-                        .reason
-                        .lock()
-                        .ok()
-                        .and_then(|slot| slot.clone())
-                    {
+                    if let Some(reason) = self.reason.lock().ok().and_then(|slot| slot.clone()) {
                         return reason;
                     }
                     return "SQL 被插件 SQLite 权限策略拒绝".to_string();
@@ -302,7 +305,9 @@ impl Drop for PluginSqlGuard<'_> {
     fn drop(&mut self) {
         // 顺序：先摘 progress、再摘 authorizer。两个都恢复成 None，缺一不可。
         let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
-        let _ = self.conn.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>);
+        let _ = self.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        );
     }
 }
 
@@ -444,10 +449,7 @@ fn run_plugin_sqlite(
             .query(rusqlite::params_from_iter(bound.iter()))
             .map_err(|e| guard.explain("查询失败", e))?;
         let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| guard.explain("读取行失败", e))?
-        {
+        while let Some(row) = rows.next().map_err(|e| guard.explain("读取行失败", e))? {
             let mut obj = serde_json::Map::new();
             for (i, name) in cols.iter().enumerate() {
                 let cell = row
@@ -498,6 +500,7 @@ impl HostState {
             tasks_dir,
             ws,
             jobs: Arc::new(JobControl::new()),
+            config_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -510,6 +513,81 @@ impl HostState {
     /// 八档语义 type 现在**全都认**（`start` / `success` / `fail` / `debug` /
     /// `fatal` 是这一轮新开的）：以前只认 warn/error/info，其余静默降级成
     /// info —— 那样插件作者想区分「开始 / 成功 / 失败」就只能自己拼字符串。
+    /// 插件配置文件的路径：`<PLUGIN_DATA_DIR>/<plugin>/config.json`。
+    ///
+    /// 插件名来自文件名 / 目录名，正常不会有分隔符；这里仍然显式拒绝，
+    /// 因为写接口也会用同一份规则，不能给路径穿越留第二条路。
+    pub fn plugin_config_path(&self, plugin: &str) -> Result<PathBuf, String> {
+        if plugin.is_empty()
+            || plugin == "."
+            || plugin == ".."
+            || plugin.contains('/')
+            || plugin.contains('\\')
+        {
+            return Err(format!("插件名非法：{plugin:?}"));
+        }
+        Ok(self.plugin_data_dir.join(plugin).join("config.json"))
+    }
+
+    /// 写接口改完配置后清掉缓存；下一次读会重新走 mtime。
+    pub fn invalidate_plugin_config(&self, plugin: &str) {
+        self.config_cache.lock().unwrap().remove(plugin);
+    }
+
+    /// 读插件配置，返回 JSON 文本（不是对象；适配层负责 parse）。
+    ///
+    /// 缺失 = `{}`；非法 JSON / 非对象 / 超过 1 MiB 都明确报错。
+    /// 错误信息带路径，方便用户直接去改文件。
+    pub fn read_plugin_config(&self, plugin: &str) -> Result<String, String> {
+        let path = self.plugin_config_path(plugin)?;
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("{}".to_string()),
+            Err(e) => return Err(format!("读配置 {} 失败: {e}", path.display())),
+        };
+        if !meta.is_file() {
+            return Err(format!("配置路径不是文件: {}", path.display()));
+        }
+        const MAX: u64 = 1024 * 1024;
+        if meta.len() > MAX {
+            return Err(format!(
+                "配置 {} 超过 {} KiB（当前 {} 字节）",
+                path.display(),
+                MAX / 1024,
+                meta.len()
+            ));
+        }
+        let modified = meta.modified().ok();
+        {
+            let cache = self.config_cache.lock().unwrap();
+            if let Some(hit) = cache.get(plugin) {
+                if hit.len == meta.len() && hit.modified == modified {
+                    return Ok(hit.json.clone());
+                }
+            }
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("读配置 {} 失败: {e}", path.display()))?;
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("配置 {} 不是合法 JSON: {e}", path.display()))?;
+        if !value.is_object() {
+            return Err(format!(
+                "配置 {} 必须是 JSON 对象（形如 {{\"key\": value}}）",
+                path.display()
+            ));
+        }
+        let json = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        self.config_cache.lock().unwrap().insert(
+            plugin.to_string(),
+            ConfigCacheEntry {
+                modified,
+                len: meta.len(),
+                json: json.clone(),
+            },
+        );
+        Ok(json)
+    }
+
     pub fn do_log(&self, plugin: &str, level: &str, msg: &str) {
         push_log(&self.logs, plugin, level, msg);
     }
@@ -553,8 +631,7 @@ impl HostState {
             if !same_group(caller, p) {
                 return Err(format!("插件 `{caller}` 不能改 `{p}` 的任务（不同组）"));
             }
-            if !crate::db::job_owned_by(&self.db, p, n)
-                .map_err(|e| format!("查任务失败: {e}"))?
+            if !crate::db::job_owned_by(&self.db, p, n).map_err(|e| format!("查任务失败: {e}"))?
             {
                 return Err(format!("插件 `{p}` 里没有名为 `{n}` 的任务"));
             }
@@ -611,10 +688,19 @@ impl HostState {
     }
 
     /// 插件运行期设置卡片摘要（空串 = 清掉）。
-    pub fn do_set_job_summary(&self, plugin: &str, name: &str, summary: &str) -> Result<(), String> {
+    pub fn do_set_job_summary(
+        &self,
+        plugin: &str,
+        name: &str,
+        summary: &str,
+    ) -> Result<(), String> {
         let (plugin, name) = self.resolve_job_target(plugin, name)?;
         let now = crate::scheduler::fmt_ms(chrono::Local::now());
-        let v = if summary.trim().is_empty() { None } else { Some(summary) };
+        let v = if summary.trim().is_empty() {
+            None
+        } else {
+            Some(summary)
+        };
         crate::db::set_job_summary(&self.db, &plugin, &name, v, &now)
             .map_err(|e| format!("写库失败: {e}"))?;
         Ok(())
@@ -658,7 +744,12 @@ impl HostState {
     /// ⚠ 插件给的 SQL **不是**直接交给 SQLite 的：实现见 [`run_plugin_sqlite`]，
     /// 那里装 authorizer（表级/操作级白名单）与 progress handler（2s 超时），
     /// 且两者都由 RAII guard 保证卸载 —— 否则会误伤面板自己的查询。
-    pub fn do_sqlite(&self, sql: &str, params_json: &str, is_query: bool) -> Result<String, String> {
+    pub fn do_sqlite(
+        &self,
+        sql: &str,
+        params_json: &str,
+        is_query: bool,
+    ) -> Result<String, String> {
         let conn = self.db.lock().unwrap();
         run_plugin_sqlite(&conn, sql, params_json, is_query)
     }
@@ -832,7 +923,11 @@ impl HostState {
             port,
             tls,
             user: get_str("user"),
-            pass: opts.get("pass").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            pass: opts
+                .get("pass")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             from: get_str("from"),
             to,
             subject: opts
@@ -1239,9 +1334,7 @@ pub fn parse_tls_choice(opts: &Value) -> Result<TlsChoice, String> {
                         .to_string())
                 }
             }
-            other => Err(format!(
-                "tls 只认 \"rustls\" 或 \"native\"，收到 `{other}`"
-            )),
+            other => Err(format!("tls 只认 \"rustls\" 或 \"native\"，收到 `{other}`")),
         },
         Some(other) => Err(format!("tls 必须是字符串，收到 {}", kind_of(other))),
     }
@@ -1483,7 +1576,10 @@ fn is_non_canonical_numeric_host(host: &str) -> bool {
         if label.is_empty() {
             return false;
         }
-        let numeric = match label.strip_prefix("0x").or_else(|| label.strip_prefix("0X")) {
+        let numeric = match label
+            .strip_prefix("0x")
+            .or_else(|| label.strip_prefix("0X"))
+        {
             Some(hex) => !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
             None => label.chars().all(|c| c.is_ascii_digit()),
         };
@@ -1626,7 +1722,71 @@ fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
 mod tests {
     use super::*;
 
-    /// 安全审计 中9：插件不能占用面板保留前缀，也不能抢别的插件的路径空间。
+    /// 插件配置：路径、缺失、非法 JSON、缓存失效。
+    ///
+    /// 这里真的建一套 HostState（临时库 + 临时数据根），因为配置读取依赖
+    /// `plugin_data_dir`，只测字符串拼接测不出实际落点。
+    #[test]
+    fn plugin_config_reads_validates_and_invalidates() {
+        let tmp = std::env::temp_dir().join(format!(
+            "pp-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(tmp.join("plugins")).unwrap();
+        std::fs::create_dir_all(tmp.join("plugin-data/demo")).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let host = HostState::new(
+            crate::log::Hub::new(None),
+            crate::db::open(&tmp.join("panel.db")).unwrap(),
+            tmp.join("panel.db"),
+            crate::runtimefs::RuntimePaths::ensure(&tmp.join("runtime")).unwrap(),
+            std::sync::Arc::new(crate::runtimes::RuntimeCatalog::quickjs_only()),
+            tmp.join("plugins"),
+            tmp.join("plugin-data"),
+            tmp.join("tasks"),
+            crate::wsclient::Registry::new(rt.handle().clone()),
+        );
+
+        // 缺失 = {}
+        assert_eq!(host.read_plugin_config("demo").unwrap(), "{}");
+        // 非法插件名不能拼出数据根之外
+        assert!(host.read_plugin_config("../x").is_err());
+        assert!(host.read_plugin_config("a/b").is_err());
+
+        let path = tmp.join("plugin-data/demo/config.json");
+        std::fs::write(&path, r#"{"x":1,"on":true}"#).unwrap();
+        let v: Value = serde_json::from_str(&host.read_plugin_config("demo").unwrap()).unwrap();
+        assert_eq!(v["x"], 1);
+        assert_eq!(v["on"], true);
+
+        // 写接口会 invalidate；这里直接模拟，确认不会一直吃旧缓存
+        std::fs::write(&path, r#"{"x":2}"#).unwrap();
+        host.invalidate_plugin_config("demo");
+        let v: Value = serde_json::from_str(&host.read_plugin_config("demo").unwrap()).unwrap();
+        assert_eq!(v["x"], 2);
+
+        // 非法 JSON / 非对象都要报错，而不是静默当 {}
+        std::fs::write(&path, "{bad").unwrap();
+        host.invalidate_plugin_config("demo");
+        assert!(host
+            .read_plugin_config("demo")
+            .unwrap_err()
+            .contains("合法 JSON"));
+        std::fs::write(&path, "[]").unwrap();
+        host.invalidate_plugin_config("demo");
+        assert!(host
+            .read_plugin_config("demo")
+            .unwrap_err()
+            .contains("JSON 对象"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 安全审计 中9：插件不能占用面板保留前缀，也不能抢别的插件的路径空间。    /// 安全审计 中9：插件不能占用面板保留前缀，也不能抢别的插件的路径空间。
     #[test]
     fn route_paths_are_namespaced() {
         // 自己的命名空间：可以
@@ -1664,10 +1824,19 @@ mod tests {
             .map(|v| v.to_str().unwrap().to_string())
             .collect();
         assert_eq!(uas.len(), 1, "只能有一枚 UA，实际 {uas:?}");
-        assert!(uas[0].contains("Chrome"), "插件的 UA 必须原样发出去：{uas:?}");
-        assert!(!uas[0].contains("plugin-panel"), "宿主的默认 UA 不该混进来：{uas:?}");
+        assert!(
+            uas[0].contains("Chrome"),
+            "插件的 UA 必须原样发出去：{uas:?}"
+        );
+        assert!(
+            !uas[0].contains("plugin-panel"),
+            "宿主的默认 UA 不该混进来：{uas:?}"
+        );
         // 其它头照旧透传
-        assert_eq!(req.headers().get("referer").unwrap(), "https://example.com/");
+        assert_eq!(
+            req.headers().get("referer").unwrap(),
+            "https://example.com/"
+        );
     }
 
     /// 大小写不敏感：插件写 `User-Agent` 也必须算"给了"，
@@ -1731,9 +1900,15 @@ mod tests {
     #[test]
     fn nav_path_forms() {
         // 绝对路径原样用
-        assert_eq!(validate_nav("p", "L", "", "/x/y.html").unwrap().path, "/x/y.html");
+        assert_eq!(
+            validate_nav("p", "L", "", "/x/y.html").unwrap().path,
+            "/x/y.html"
+        );
         // 相对路径按插件自己的目录解析 —— 插件作者写 `index.html` 是最自然的
-        assert_eq!(validate_nav("p", "L", "", "index.html").unwrap().path, "/plugins/p/index.html");
+        assert_eq!(
+            validate_nav("p", "L", "", "index.html").unwrap().path,
+            "/plugins/p/index.html"
+        );
         assert_eq!(
             validate_nav("p", "L", "", "./sub/a.html").unwrap().path,
             "/plugins/p/sub/a.html"
@@ -1750,7 +1925,7 @@ mod tests {
         // 用字节数当判据的话中文 label 会被误杀
         assert!(validate_nav("p", "日常任务日常任务日常任务", "", "").is_ok()); // 12 字
         assert!(validate_nav("p", "日常任务日常任务日常任务日", "", "").is_err()); // 13 字
-        // icon 最多 2 个字符（emoji 带变体选择符时会占 2 个）
+                                                                                   // icon 最多 2 个字符（emoji 带变体选择符时会占 2 个）
         assert!(validate_nav("p", "L", "🗓️", "").is_ok());
         assert!(validate_nav("p", "L", "abc", "").is_err());
     }
@@ -1806,7 +1981,10 @@ mod tests {
         assert!(e.contains("VACUUM"), "{e}");
         assert!(!target.exists(), "VACUUM INTO 不能在围栏外落文件");
 
-        let commented = format!("  /* 注释 */\n-- 再一行\nVACUUM INTO '{}'", target.display());
+        let commented = format!(
+            "  /* 注释 */\n-- 再一行\nVACUUM INTO '{}'",
+            target.display()
+        );
         let e = run_plugin_sqlite(&conn, &commented, "", false).unwrap_err();
         assert!(e.contains("VACUUM"), "{e}");
         assert!(!target.exists(), "注释前缀不能绕过 VACUUM 判据");
@@ -1844,7 +2022,13 @@ mod tests {
             false,
         )
         .unwrap();
-        run_plugin_sqlite(&conn, "INSERT INTO plugin_own (body) VALUES ('hi')", "", false).unwrap();
+        run_plugin_sqlite(
+            &conn,
+            "INSERT INTO plugin_own (body) VALUES ('hi')",
+            "",
+            false,
+        )
+        .unwrap();
         let rows = run_plugin_sqlite(&conn, "SELECT body FROM plugin_own", "", true).unwrap();
         assert!(rows.contains("hi"), "{rows}");
 
@@ -1876,9 +2060,13 @@ mod tests {
 
         // 查询模式只允许读：即便写的是插件自己的表也不行
         run_plugin_sqlite(&conn, "CREATE TABLE plugin_own (body TEXT)", "", false).unwrap();
-        let e =
-            run_plugin_sqlite(&conn, "INSERT INTO plugin_own (body) VALUES ('x')", "", true)
-                .unwrap_err();
+        let e = run_plugin_sqlite(
+            &conn,
+            "INSERT INTO plugin_own (body) VALUES ('x')",
+            "",
+            true,
+        )
+        .unwrap_err();
         assert!(e.contains("只允许读"), "{e}");
 
         drop(conn);
@@ -1913,7 +2101,8 @@ mod tests {
         );
 
         // guard 已 Drop：面板自己的写必须照常成功
-        conn.execute("UPDATE jobs SET paused = 0 WHERE id = 1", []).unwrap();
+        conn.execute("UPDATE jobs SET paused = 0 WHERE id = 1", [])
+            .unwrap();
 
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1934,8 +2123,10 @@ mod tests {
 
         // 面板自己的查询/写完全不受影响（authorizer 若残留，这里会 SQLITE_AUTH）
         conn.execute("UPDATE jobs SET paused = 0", []).unwrap();
-        conn.execute("CREATE TABLE panel_own (x INTEGER)", []).unwrap();
-        conn.execute("INSERT INTO panel_own (x) VALUES (7)", []).unwrap();
+        conn.execute("CREATE TABLE panel_own (x INTEGER)", [])
+            .unwrap();
+        conn.execute("INSERT INTO panel_own (x) VALUES (7)", [])
+            .unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM panel_own", [], |r| r.get(0))
             .unwrap();
@@ -1957,7 +2148,7 @@ mod tests {
         for (host, hint) in [
             ("127.0.0.1", "回环"),
             ("127.9.9.9", "回环"),
-            ("127.0.0.1.", "回环"), // 末尾点仍是同一个 FQDN
+            ("127.0.0.1.", "回环"),     // 末尾点仍是同一个 FQDN
             ("0x7f.0.0.1", "数字写法"), // inet_aton 十六进制变体
             ("0177.0.0.1", "数字写法"), // inet_aton 八进制变体
             ("2130706433", "数字写法"), // inet_aton 整数变体
@@ -1980,8 +2171,8 @@ mod tests {
             ("redis", "单标签"),
             ("", "主机为空"),
         ] {
-            let reason = is_forbidden_outbound_target(host)
-                .unwrap_or_else(|| panic!("{host:?} 应当被拒"));
+            let reason =
+                is_forbidden_outbound_target(host).unwrap_or_else(|| panic!("{host:?} 应当被拒"));
             assert!(reason.contains(hint), "{host:?} => {reason}");
         }
     }
@@ -2005,11 +2196,7 @@ mod tests {
             "fd00::1",
             "nas.local",
         ] {
-            assert_eq!(
-                is_forbidden_outbound_target(host),
-                None,
-                "{host} 应当放行"
-            );
+            assert_eq!(is_forbidden_outbound_target(host), None, "{host} 应当放行");
         }
     }
 
@@ -2019,7 +2206,10 @@ mod tests {
     fn ssrf_switch_bypasses_every_check() {
         let e = ensure_outbound_host_allowed_with("169.254.169.254", false).unwrap_err();
         assert!(e.contains("SSRF"), "{e}");
-        assert!(e.contains("HOST_API_ALLOW_PRIVATE=1"), "错误里要写清怎么放行: {e}");
+        assert!(
+            e.contains("HOST_API_ALLOW_PRIVATE=1"),
+            "错误里要写清怎么放行: {e}"
+        );
         assert!(ensure_outbound_host_allowed_with("example.com", false).is_ok());
 
         assert!(ensure_outbound_host_allowed_with("169.254.169.254", true).is_ok());

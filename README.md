@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.1.5**。设置页可以直接看到正在运行的面板版本。
+当前版本：**0.1.6**。设置页可以直接看到正在运行的面板版本。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
@@ -24,6 +24,7 @@
 - **脚本任务**：放在任务目录里的脚本，以及由面板创建的脚本任务
 - **日志**：按插件和级别查看运行输出
 - **插件列表**：安装、启用、打开插件自己的页面（切换运行时的入口默认隐藏，可在设置里开启）
+- **插件商城**：在插件列表右上角的入口，从 GitHub Release / 单文件安装（不占侧边栏）
 - **设置**：主题、插件执行引擎开关、面板版本和编译信息
 
 第一次使用，建议先按下面的步骤跑一个最简单的脚本任务。成功一次以后，再装插件或写复杂任务。
@@ -65,7 +66,7 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/asunajs/panel/
   | PANEL_BASE_URL=https://gh-proxy.com/https://github.com/asunajs/panel/releases/latest/download bash
 ```
 
-固定版本就把 `latest/download` 换成 `download/v0.1.3`。代理只解决访问问题，安装脚本仍会校验 SHA256；但代理和校验和同源，正式环境建议优先用官方地址。
+固定版本就把 `latest/download` 换成 `download/v0.1.6`。代理只解决访问问题，安装脚本仍会校验 SHA256；但代理和校验和同源，正式环境建议优先用官方地址。
 
 ### 手动下载
 
@@ -252,6 +253,18 @@ Python 和 Shell 脚本是普通进程，没有 `host-api`。这是有意的：�
 
 插件适合放更复杂的功能，比如带配置页的工具、需要保持状态的签到程序。插件用 JavaScript 写，默认跑在面板内置的 QuickJS 里，不占一个 Node 进程。
 
+### 从插件商城安装
+
+打开「插件列表」→ 右上角「插件商城」，找到条目后点「安装」。商城从 GitHub 解析版本、资产和 SHA-256，确认后直接写入 `plugins/`：
+
+- 支持 Release 资产（`.zip` / `.js` / `.mjs` / `.ts`）和仓库里的单文件；
+- 私有仓库配置 `PANEL_GITHUB_TOKEN` 或 `PANEL_GITHUB_TOKEN_FILE`（Contents: Read）即可；
+- 单文件 `.ts` 在安装时用**内置 OXC** 转成 `.js`，运行时仍然只加载 `.js`；不需要 Bun 或 Node；
+- 国内网络可选用 `PANEL_MARKET_PROXY=https://gh-proxy.com` 给**公开仓库**加速；私有仓库始终直连；
+- 目录和格式见 [插件商城](docs/market.md)。
+
+商城不提供评分、评论、自动更新或卸载；安装仍是覆盖写，确认弹层会提示同名文件会被覆盖。
+
 ### 上传插件
 
 打开「插件列表」，点右上角「上传插件」：
@@ -261,6 +274,35 @@ Python 和 Shell 脚本是普通进程，没有 `host-api`。这是有意的：�
 - 带配置页的目录插件，zip 里保留外层目录名，例如 `mcloud/index.html`、`mcloud/app.js`
 
 上传后面板会自动扫描。插件卡片出现后，点「启用」或「加载」。如果没反应，点「全部重载」。
+
+### 给插件配置
+
+简单插件不用自己写配置页。插件列表每张卡上有一个「配置」按钮：
+
+- 文本、数字、开关会显示成普通表单；
+- 嵌套对象和数组切到「JSON」页改；
+- 配置存在插件数据目录的 `config.json` 里，不在插件源码目录，覆盖安装不会丢。
+
+插件代码只读一行：
+
+```js
+import { config } from 'host-api';
+
+const cfg = config();
+```
+
+配置文件也可以直接编辑或用 `curl` 写：
+
+```bash
+curl -X PUT \
+  -H 'X-Panel-Token: <令牌>' \
+  -H 'x-panel: 1' \
+  -H 'Content-Type: application/json' \
+  --data @config.json \
+  http://127.0.0.1:3030/api/plugins/插件名/config
+```
+
+保存后下一次任务生效，不需要重载插件。
 
 ### 插件从哪来
 

@@ -518,7 +518,11 @@ pub fn plan(costs: &[PluginCost], workers: usize, pin: &HashMap<String, usize>) 
 
     // ② 声明了独占的：各占一条，**从末尾往前**排 —— 这样 worker 0 仍然是
     //    既有的「精度 worker」，其余逻辑不用动。
-    let mut exclusive: Vec<&PluginCost> = rest.iter().copied().filter(|c| c.hint.is_exclusive()).collect();
+    let mut exclusive: Vec<&PluginCost> = rest
+        .iter()
+        .copied()
+        .filter(|c| c.hint.is_exclusive())
+        .collect();
     exclusive.sort_by(|a, b| a.name.cmp(&b.name)); // 结果确定、可单测
     let mut shared: Vec<&PluginCost> = Vec::new();
     for c in rest {
@@ -559,9 +563,12 @@ pub fn plan(costs: &[PluginCost], workers: usize, pin: &HashMap<String, usize>) 
     //   - 没有粗粒度的 → 没必要隔离，细粒度应该铺开换吞吐量
     // worker 0 只留给精度/扫描：只要有粗粒度任务，就把它赶到共享 lane 上，
     // 不能让它占住 worker 0（否则目录扫描和细粒度插件都会被长任务拖住）。
-    let reserve =
-        shared_n > 1 && !coarse.is_empty() && (!fine.is_empty() || !exclusive.is_empty());
-    let fine_slots: Vec<usize> = if reserve { vec![0] } else { shared_slots.clone() };
+    let reserve = shared_n > 1 && !coarse.is_empty() && (!fine.is_empty() || !exclusive.is_empty());
+    let fine_slots: Vec<usize> = if reserve {
+        vec![0]
+    } else {
+        shared_slots.clone()
+    };
     if !fine.is_empty() {
         // 轻的往精度 worker 堆（它们互相影响小），重的铺到别的 slot 上
         fine.sort_by_key(|c| std::cmp::Reverse(c.weight));
@@ -599,8 +606,7 @@ pub fn plan(costs: &[PluginCost], workers: usize, pin: &HashMap<String, usize>) 
         load[slot] += c.weight.max(1);
         notes.push(format!(
             "`{}` → worker {slot}（粗粒度，负载权重 {}）",
-            c.name,
-            c.weight
+            c.name, c.weight
         ));
     }
 
@@ -678,12 +684,12 @@ impl Assignment {
         } else {
             // 其余：挑当前插件数最少的（新来的通常是少数，不需要按权重装箱）
             (0..workers)
-                .min_by_key(|w| {
-                    (self.by_file.values().filter(|v| **v == *w).count(), *w)
-                })
+                .min_by_key(|w| (self.by_file.values().filter(|v| **v == *w).count(), *w))
                 .unwrap_or(0)
         };
-        self.by_name.entry(name.to_string()).or_insert_with(|| file.to_path_buf());
+        self.by_name
+            .entry(name.to_string())
+            .or_insert_with(|| file.to_path_buf());
         self.by_file.insert(file.to_path_buf(), w);
         let warn = hint.is_exclusive().then(|| {
             format!(
@@ -725,12 +731,10 @@ impl Assignment {
             .collect()
     }
 
-    
     /// 已认领的文件数（启动日志用）。
     pub fn len(&self) -> usize {
         self.by_file.len()
     }
-
 }
 
 /// 从插件目录扫出每个插件的最细间隔与负载权重。
@@ -778,8 +782,15 @@ mod tests {
     }
 
     /// 测试用的简写：不带声明地认领（等价于 `claim_with(…, WorkerHint::None, …).0`）。
-    fn claim(a: &mut Assignment, file: &str, name: &str, finest: Option<u64>, workers: usize) -> usize {
-        a.claim_with(Path::new(file), name, finest, WorkerHint::None, workers).0
+    fn claim(
+        a: &mut Assignment,
+        file: &str,
+        name: &str,
+        finest: Option<u64>,
+        workers: usize,
+    ) -> usize {
+        a.claim_with(Path::new(file), name, finest, WorkerHint::None, workers)
+            .0
     }
 
     fn group_names(p: &Plan) -> Vec<Vec<String>> {
@@ -801,14 +812,32 @@ mod tests {
     #[test]
     fn scans_every_and_cron_forms() {
         assert_eq!(finest_interval_ms("every('t', '20ms', f);"), Some(20));
-        assert_eq!(finest_interval_ms("host.every('t', '500ms', f);"), Some(500));
+        assert_eq!(
+            finest_interval_ms("host.every('t', '500ms', f);"),
+            Some(500)
+        );
         assert_eq!(finest_interval_ms("every('t', '2s', f);"), Some(2000));
-        assert_eq!(finest_interval_ms("register_cron('x', '@every 30s', f);"), Some(30_000));
-        assert_eq!(finest_interval_ms("register_cron('x', '@every 5m', f);"), Some(300_000));
-        assert_eq!(finest_interval_ms("register_cron('x', '@every 1h', f);"), Some(3_600_000));
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '@every 30s', f);"),
+            Some(30_000)
+        );
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '@every 5m', f);"),
+            Some(300_000)
+        );
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '@every 1h', f);"),
+            Some(3_600_000)
+        );
         // 6 段 cron 的秒字段
-        assert_eq!(finest_interval_ms("register_cron('x', '*/1 * * * * *', f);"), Some(1000));
-        assert_eq!(finest_interval_ms("register_cron('x', '*/10 * * * * *', f);"), Some(10_000));
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '*/1 * * * * *', f);"),
+            Some(1000)
+        );
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '*/10 * * * * *', f);"),
+            Some(10_000)
+        );
     }
 
     #[test]
@@ -822,7 +851,10 @@ mod tests {
         // 裸数字（没有单位）不该被当成间隔
         assert_eq!(finest_interval_ms("const x = 20; arr[5];"), None);
         // 5 段 cron 没有秒字段，管不到毫秒精度
-        assert_eq!(finest_interval_ms("register_cron('x', '*/5 * * * *', f);"), None);
+        assert_eq!(
+            finest_interval_ms("register_cron('x', '*/5 * * * *', f);"),
+            None
+        );
         // 除法不该被当成 cron 步长
         assert_eq!(finest_interval_ms("const y = a * / 3 goes here;"), None);
         assert_eq!(finest_interval_ms("// 没有任何任务"), None);
@@ -841,7 +873,11 @@ mod tests {
         // worker 0 还要负责目录扫描/认领，不能被独占插件占掉。
         assert_eq!(required_workers(&costs, 2), 5, "4 个独占 + worker 0 = 5 条");
         let p = plan(&costs, 5, &HashMap::new());
-        assert!(p.groups[0].is_empty(), "worker 0 必须留给精度/扫描: {:?}", group_names(&p));
+        assert!(
+            p.groups[0].is_empty(),
+            "worker 0 必须留给精度/扫描: {:?}",
+            group_names(&p)
+        );
     }
 
     #[test]
@@ -862,7 +898,10 @@ mod tests {
     fn one_second_is_not_fine_grained() {
         // 这是验收测试用的夹具组合：20ms 的快任务 + 每 1 秒忙等 300ms 的捣乱任务。
         // 后者必须被判成粗粒度，否则两者会同 worker，隔离失效。
-        assert!(!c("slow", Some(1000)).is_fine_grained(), "整 1 秒不该算细粒度");
+        assert!(
+            !c("slow", Some(1000)).is_fine_grained(),
+            "整 1 秒不该算细粒度"
+        );
         assert!(!c("slow-cron", Some(1000)).is_fine_grained());
         assert!(c("fast", Some(999)).is_fine_grained());
         assert!(c("fast500", Some(500)).is_fine_grained());
@@ -907,7 +946,10 @@ mod tests {
         // worker 0 至少拿到最细的那个；粗粒度的绝不在 worker 0
         assert!(g[0].contains(&"f1".to_string()), "{g:?}");
         assert!(g[1].contains(&"bulk".to_string()), "{g:?}");
-        assert!(!g[0].contains(&"bulk".to_string()), "粗粒度不该进精度 worker: {g:?}");
+        assert!(
+            !g[0].contains(&"bulk".to_string()),
+            "粗粒度不该进精度 worker: {g:?}"
+        );
     }
 
     #[test]
@@ -957,7 +999,11 @@ mod tests {
         let p = plan(&costs, 2, &pin);
         let g = group_names(&p);
         assert!(g[1].contains(&"fast".to_string()), "{g:?}");
-        assert!(p.notes.iter().any(|n| n.contains("ENGINE_PIN")), "{:?}", p.notes);
+        assert!(
+            p.notes.iter().any(|n| n.contains("ENGINE_PIN")),
+            "{:?}",
+            p.notes
+        );
 
         // 越界的下标要被钳住，而不是 panic 或者丢插件
         let mut pin2 = HashMap::new();
@@ -1015,7 +1061,11 @@ mod tests {
         let first = claim(&mut a, "a/x.js", "x", Some(20), 2);
         let second = claim(&mut a, "b/x.js", "x", Some(20), 2);
         assert_eq!(first, second, "同名文件必须落在同一条 worker 上");
-        assert_eq!(a.len(), 2, "两个文件都要有归属（其中一个会被 name_taken 拒绝）");
+        assert_eq!(
+            a.len(),
+            2,
+            "两个文件都要有归属（其中一个会被 name_taken 拒绝）"
+        );
         let routes = a.route_map();
         assert_eq!(routes.len(), 1, "路由表里同名只有一个");
     }
@@ -1034,7 +1084,10 @@ mod tests {
         let total: usize = p.groups.iter().map(|g| g.len()).sum();
         assert_eq!(total, 3);
         let g = group_names(&p);
-        assert!(g[0].contains(&"z".to_string()), "细粒度的应该在精度 worker: {g:?}");
+        assert!(
+            g[0].contains(&"z".to_string()),
+            "细粒度的应该在精度 worker: {g:?}"
+        );
     }
 
     // ── 插件声明式归属（worker_hint） ──
@@ -1042,14 +1095,26 @@ mod tests {
     #[test]
     fn scan_reads_the_hint_from_source() {
         assert_eq!(WorkerHint::scan(""), WorkerHint::None);
-        assert_eq!(WorkerHint::scan("register_cron('a', '@every 5s', f)"), WorkerHint::None);
+        assert_eq!(
+            WorkerHint::scan("register_cron('a', '@every 5s', f)"),
+            WorkerHint::None
+        );
         assert_eq!(
             WorkerHint::scan("import { worker_hint } from 'host-api';\nworker_hint('exclusive');"),
             WorkerHint::Exclusive
         );
-        assert_eq!(WorkerHint::scan("worker_hint(\"exclusive\")"), WorkerHint::Exclusive);
-        assert_eq!(WorkerHint::scan("worker_hint('precision')"), WorkerHint::Precision);
-        assert_eq!(WorkerHint::scan("worker_hint( 'exclusive' )"), WorkerHint::Exclusive);
+        assert_eq!(
+            WorkerHint::scan("worker_hint(\"exclusive\")"),
+            WorkerHint::Exclusive
+        );
+        assert_eq!(
+            WorkerHint::scan("worker_hint('precision')"),
+            WorkerHint::Precision
+        );
+        assert_eq!(
+            WorkerHint::scan("worker_hint( 'exclusive' )"),
+            WorkerHint::Exclusive
+        );
         // Python 侧同一写法
         assert_eq!(
             WorkerHint::scan("from host_api import worker_hint\nworker_hint('exclusive')"),
@@ -1073,7 +1138,10 @@ mod tests {
     #[test]
     fn scan_ignores_unknown_arguments() {
         // 拼错、传变量、传别的东西 —— 都退化成「没声明」，不能当成独占
-        assert_eq!(WorkerHint::scan("worker_hint('exclusiv')"), WorkerHint::None);
+        assert_eq!(
+            WorkerHint::scan("worker_hint('exclusiv')"),
+            WorkerHint::None
+        );
         assert_eq!(WorkerHint::scan("worker_hint(kind)"), WorkerHint::None);
         assert_eq!(WorkerHint::scan("worker_hint()"), WorkerHint::None);
     }
@@ -1094,7 +1162,10 @@ mod tests {
             WorkerHint::scan("// worker_hint 是这么用的"),
             WorkerHint::None
         );
-        assert_eq!(WorkerHint::scan("# worker_hint('exclusive')"), WorkerHint::None);
+        assert_eq!(
+            WorkerHint::scan("# worker_hint('exclusive')"),
+            WorkerHint::None
+        );
         // 字符串里提到的也不算（日志文案里常这么写）
         assert_eq!(
             WorkerHint::scan(r#"log("call worker_hint('exclusive') to isolate");"#),
@@ -1186,7 +1257,11 @@ mod tests {
         let p = plan(&costs, n, &HashMap::new());
         let g = group_names(&p);
         assert!(g[0].is_empty(), "worker 0 留给精度/扫描: {g:?}");
-        assert_eq!(g[1], vec!["mcloud-daily", "mcloud-live"], "日常/直播共享粗粒度 lane: {g:?}");
+        assert_eq!(
+            g[1],
+            vec!["mcloud-daily", "mcloud-live"],
+            "日常/直播共享粗粒度 lane: {g:?}"
+        );
         assert_eq!(g[2], vec!["mcloud-exchange"], "抢兑独占: {g:?}");
         assert_eq!(g[3], vec!["mcloud"], "路由插件独占: {g:?}");
     }
@@ -1220,7 +1295,10 @@ mod tests {
         ];
         let p = plan(&costs, 2, &HashMap::new());
         let g = group_names(&p);
-        assert!(g[0].contains(&"burst".to_string()), "声明了精度就该在 worker 0: {g:?}");
+        assert!(
+            g[0].contains(&"burst".to_string()),
+            "声明了精度就该在 worker 0: {g:?}"
+        );
     }
 
     #[test]
@@ -1232,7 +1310,11 @@ mod tests {
         let p = plan(&costs, 3, &pin);
         let g = group_names(&p);
         assert_eq!(g[0], vec!["exchange"], "pin 该赢: {g:?}");
-        assert!(p.notes.iter().any(|n| n.contains("ENGINE_PIN")), "{:?}", p.notes);
+        assert!(
+            p.notes.iter().any(|n| n.contains("ENGINE_PIN")),
+            "{:?}",
+            p.notes
+        );
     }
 
     #[test]
@@ -1270,7 +1352,13 @@ mod tests {
         assert!(warn.contains("独占"), "{warn}");
 
         // 没声明的不该产生警告
-        let (_, none) = a.claim_with(Path::new("plain.js"), "plain", Some(60_000), WorkerHint::None, 2);
+        let (_, none) = a.claim_with(
+            Path::new("plain.js"),
+            "plain",
+            Some(60_000),
+            WorkerHint::None,
+            2,
+        );
         assert!(none.is_none());
     }
 }

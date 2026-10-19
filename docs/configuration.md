@@ -7,6 +7,10 @@
 
 ---
 
+> 这些变量大多也能在**设置页**（`#/settings`）里改，改完按提示重启即可。
+> 优先级：**环境变量 > 设置页保存的值（`data/settings.json`）> 内置默认**。
+> 详见 [docs/settings.md](settings.md)。
+
 ## 3. 运行
 
 ```bash
@@ -21,7 +25,8 @@ open http://127.0.0.1:8787/  # 面板
 | `PLUGINS_DIR` | `plugins` | 插件目录（递归两层，**入口只收 `.js`**；被 import 的模块可以用 `.mjs`） |
 | `TASKS_DIR` | `tasks` | **脚本任务目录**：根目录 + `js`、`py`、`sh` 各一层，收 `.js/.mjs/.py/.sh`。目录不存在会自动创建。见 [脚本任务](script-jobs.md) |
 | `DB_PATH` | `data/panel.db` | SQLite 文件 |
-| `EXEC_BUDGET_MS` | `2000` | 单次 JS 调用的执行预算；调大它可复现 `degraded` 场景 |
+| `EXEC_BUDGET_MS` | `60000` | 单次 JS 调用的执行预算（默认 60 秒）。任务/路由可各自声明 `budget_ms` 覆盖它；它管的是 `on_tick` 与没声明预算的路由。⚠ 健康判据 = 预算 + 3 秒，所以调大它也意味着「真卡死」更晚被发现 |
+| `TEST_RUN_BUDGET_MS` | `10000` | 试跑（`POST /api/test/js`）的预算，且不超过 `EXEC_BUDGET_MS`。试跑占着引擎线程、又是人在等结果，所以默认 10 秒 |
 | `LOAD_BUDGET_MS` | `10000` | 插件**加载期**预算（顶层初始化 / import / 外部子进程 `ready`）；上限 = 任务预算上限（10 分钟） |
 | `JOB_TRIP_THRESHOLD` | `5` | 连续失败多少次熔断该任务 |
 | `JOB_COOLDOWN_MS` | `30000` | 首次熔断的冷却时长 |
@@ -29,6 +34,13 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_JS_ENGINE` | `quickjs` | **JS 插件的全局默认引擎**：`quickjs` / `node` / `bun`。坏值或对应解释器不可用时回落 QuickJS 并在启动日志里说明。单插件覆盖优先于它 |
 | `PANEL_NODE` | `node` | Node 解释器路径（PATH 里的命令名或绝对路径都行）。**需要 >= 20.6**（`module.register`） |
 | `PANEL_BUN` | `bun` | Bun 解释器路径（同上）。**需要 >= 1.0** |
+| `PANEL_MARKET_URL` | 官方 `catalog.json` | 插件商城目录 URL。`off`/`none`/空串 → 只用内置目录。见 [插件商城](market.md) |
+| `PANEL_GITHUB_TOKEN` | 空 | GitHub PAT（私有仓库 / 提高 API 限额）。只发给 `PANEL_GITHUB_API` 同源请求，不进前端、不跟随资产跳转 |
+| `PANEL_GITHUB_TOKEN_FILE` | 空 | 从文件读 PAT（trim，建议 600 权限）；`PANEL_GITHUB_TOKEN` 优先 |
+| `PANEL_GITHUB_API` | `https://api.github.com` | GitHub / Enterprise API 根地址 |
+| `PANEL_MARKET_ALLOW_HTTP` | 空 | `1` → 允许非回环 HTTP 目录/API（回环始终允许；调试用，生产保持 HTTPS） |
+| `PANEL_MARKET_PROXY` | 空（关闭） | 公开 GitHub 仓库的加速前缀：`1` → `https://gh-proxy.com`；`off`/空 → 直连；也可填自定义 HTTPS 前缀。私有仓库始终直连，Token 不发往代理 |
+| `PANEL_TS_TRANSPILER` | `auto` | 商城单文件 `.ts` 的转译器：`auto`（内置 OXC）/ `oxc` / `bun` / `node` / `off` |
 | `PANEL_PYTHON` | `python3` | **只给 `.py` 脚本任务用**（>= 3.8）；不参与插件运行时 |
 | `PANEL_RUNTIME_DIR` | `<DB 所在目录>/runtime` | 外部运行时 shim 的落盘根：`<这里>/<内容哈希>/js/…`（runner / host-api / register hook）。内容哈希保证升级后不残留旧 shim |
 | `SCRIPT_TIMEOUT_MS` | `60000` | 脚本任务的默认超时（毫秒）；`@timeout` 可覆盖。超时 **SIGKILL 整个进程组** |

@@ -2437,7 +2437,7 @@ def test_run_limit_checks(tmp: Path) -> None:
         check(status == 429, "引擎被占住时返回 429（不排队）", f"http {status}")
         check("排了" in data.get("error", ""), "429 说清了是「引擎已经排了几个」", data.get("error", "")[:46])
         th.join(timeout=15)
-        # 这条是**真断言**：慢测试自己必须成功（1.5 秒忙等 < 2000ms 预算），
+        # 这条是**真断言**：慢测试自己必须成功（1.5 秒忙等 < 试跑预算 10 秒），
         # 否则它可能是被预算打断的 —— 那 pending 的时序就不可信了。
         check(
             holder.get("status") == 200,
@@ -3288,7 +3288,8 @@ def plugin_ui_checks(tmp: Path) -> None:
             if panel:
                 req.add_header("x-panel", "1")
             try:
-                with urllib.request.urlopen(req, timeout=15) as r:
+                # 30 秒：死循环那条要等试跑预算（默认 10 秒）到点才回话
+                with urllib.request.urlopen(req, timeout=30) as r:
                     return r.status, json.loads(r.read().decode())
             except urllib.error.HTTPError as e:
                 raw = e.read().decode()
@@ -3650,6 +3651,131 @@ def script_task_checks(tmp: Path) -> None:
         proc.terminate()
         proc.wait(timeout=10)
         logf.close()
+
+
+def settings_checks(tmp: Path) -> None:
+    """设置页（第三十一轮）：读元数据 / 校验 / 落盘 / 自重启后真的生效。
+
+    用**单独实例**：这一组会真的把进程 exec 掉，不能碰主实例。
+    """
+    port = free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(tmp / "settings.db"),
+            "PLUGINS_DIR": str(REPO / "plugins"),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+        }
+    )
+    # 让它走默认值，才测得出「保存后变了」
+    env.pop("EXEC_BUDGET_MS", None)
+    logf = open(tmp / "settings.log", "w")
+    proc = subprocess.Popen(
+        [str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO
+    )
+
+    def stop(p, f):
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        f.close()
+
+    try:
+        base = f"http://127.0.0.1:{port}"
+        check(wait_ready(base, proc), "设置实例就绪")
+
+        code, _, body = http(f"{base}/api/settings")
+        check(code == 200, "GET /api/settings 可用", f"http {code}")
+        data = json.loads(body)
+        items = {i["key"]: i for i in data.get("items", [])}
+        check(
+            data.get("groups") == ["引擎", "插件", "安全", "日志"],
+            "分组按 DEFS 顺序返回（不是字典序）",
+            f"{data.get('groups')}",
+        )
+        check(
+            "EXEC_BUDGET_MS" in items and items["EXEC_BUDGET_MS"]["value"] == "60000",
+            "单次预算默认 60000 出现在设置里",
+            f"{items.get('EXEC_BUDGET_MS')}",
+        )
+        check(
+            all(i.get("hint") for i in items.values()),
+            "每一项都有说明（没有说明的设置页只能盲猜）",
+        )
+        # 凭据/路径不该出现在这个接口里
+        for forbidden in ("PANEL_TOKEN", "PANEL_TOKEN_HASH", "DB_PATH", "PLUGINS_DIR"):
+            check(forbidden not in items, f"设置接口不暴露 {forbidden}")
+
+        # 校验：越界 / 未知键 / 缺 x-panel
+        code, body = post_json(
+            f"{base}/api/settings/save", payload={"values": {"EXEC_BUDGET_MS": "99999999"}}
+        )
+        check(code == 400, "越界的值被拒（不是夹到边界就存）", f"http {code}, {body}")
+        code, body = post_json(
+            f"{base}/api/settings/save", payload={"values": {"PANEL_TOKEN": "hack"}}
+        )
+        check(code == 400 and "未知" in body.get("error", ""), "凭据不能通过设置接口写入")
+        code, body = post_json(
+            f"{base}/api/settings/save",
+            panel=False,
+            payload={"values": {"PANEL_LOG_LEVEL": "info"}},
+        )
+        check(code == 403, "设置保存也要 x-panel（缺了就是 403）", f"http {code}")
+
+        # 热改：日志级别不用重启
+        code, body = post_json(
+            f"{base}/api/settings/save", payload={"values": {"PANEL_LOG_LEVEL": "warn"}}
+        )
+        check(
+            code == 200 and body.get("live") == ["PANEL_LOG_LEVEL"] and body.get("restart") == [],
+            "日志级别立即生效（不要求重启）",
+            f"{body}",
+        )
+
+        # 需要重启的项：保存 → 重启 → 新值真的用上了
+        code, body = post_json(
+            f"{base}/api/settings/save", payload={"values": {"EXEC_BUDGET_MS": "15000"}}
+        )
+        check(
+            code == 200 and body.get("restart") == ["EXEC_BUDGET_MS"],
+            "预算项被标成「需重启」",
+            f"{body}",
+        )
+        settings_file = tmp / "settings.json"
+        check(settings_file.exists(), "设置落盘到 settings.json", f"{settings_file}")
+        if settings_file.exists():
+            saved = json.loads(settings_file.read_text())
+            check(
+                saved.get("values", {}).get("EXEC_BUDGET_MS") == "15000",
+                "文件里存的是归一化后的值",
+                f"{saved}",
+            )
+            mode = oct(settings_file.stat().st_mode & 0o777)
+            check(mode == "0o600", "设置文件权限 0600（里面可能有地址白名单）", mode)
+
+        code, body = post_json(f"{base}/api/restart")
+        check(code == 200 and body.get("restarting") is True, "重启接口先回话再重启", f"{body}")
+        # exec 之后端口会短暂断开，再等它回来
+        ok = False
+        st = {}
+        for _ in range(120):
+            time.sleep(0.25)
+            try:
+                # ⚠ 别用 `state()`：那是 anti_bruteforce_checks 里的局部闭包，不是模块级助手。
+                st_code, _, st_body = http(f"{base}/api/state")
+                if st_code == 200:
+                    st = json.loads(st_body)
+                    if st.get("engine", {}).get("budget_ms") == 15000:
+                        ok = True
+                        break
+            except Exception:
+                pass  # exec 的那一瞬间端口是关的，连不上是正常的
+        check(ok, "重启后新预算真的生效（exec 自身，PID 不变）", f"budget={st.get('engine', {}).get('budget_ms')}")
+    finally:
+        stop(proc, logf)
 
 
 def main() -> int:
@@ -4099,6 +4225,7 @@ def main() -> int:
     plugin_source_edit_checks(tmp)
     external_runtime_checks(tmp)
     script_task_checks(tmp)
+    settings_checks(tmp)
 
     print()
     if FAILURES:

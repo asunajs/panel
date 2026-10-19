@@ -173,7 +173,9 @@ mod tests {
     fn colored_line_matches_shared_vector() {
         let raw = include_str!("../../testdata/log-format-cases.json");
         let v: serde_json::Value = serde_json::from_str(raw).expect("向量文件读不了");
-        let tpl = v["line_colored_template"].as_str().expect("缺 line_colored_template");
+        let tpl = v["line_colored_template"]
+            .as_str()
+            .expect("缺 line_colored_template");
         let colors = &v["colors"];
 
         // 用向量里给的模板反推格式：把占位符换成真实值，逐段与 colored_line 比

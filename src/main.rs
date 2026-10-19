@@ -38,12 +38,14 @@ mod extproc;
 mod hostapi;
 mod jshost;
 mod log;
+mod market;
 mod pluginfs;
 mod ratelimit;
-mod runtimes;
 mod runtimefs;
+mod runtimes;
 mod scheduler;
 mod scriptjob;
+mod settings;
 mod smtp;
 mod taskdir;
 mod upload;
@@ -59,7 +61,7 @@ use engine::{EngineCmd, EngineHandle, EngineHealth, JsEngine, Registry};
 use hostapi::{HostState, SharedLogs};
 use ratelimit::TestRunLimiter;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -106,6 +108,8 @@ pub struct AppState {
     pub health: EngineHealth,
     /// 宿主 API 状态（Axum 侧要用它查插件路由表）
     pub host: Arc<HostState>,
+    /// 插件商城：GitHub 目录解析、下载、安装标记。
+    pub market: Arc<market::Market>,
     /// 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
     /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
@@ -179,6 +183,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
 
+    // 设置页存下来的值要在**任何配置读取之前**注入环境变量：
+    // 后面所有 `env_str("…")` 就自然看到它们了（环境变量优先，见 settings.rs）。
+    settings::boot();
+
     // 面板自身日志的过滤级别。默认 debug（全都要），
     // 部署时嫌吵就用 `PANEL_LOG_LEVEL=warn` —— 注意它只影响面板通道，
     // 插件的日志级别由插件自己决定（`host.log` 就是 info）。
@@ -188,7 +196,11 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|s| log::Level::parse(&s))
             .unwrap_or(log::Level::Debug),
     );
-    log::plog!("boot", info, "tokio runtime 就绪（{workers} 个 worker 线程）");
+    log::plog!(
+        "boot",
+        info,
+        "tokio runtime 就绪（{workers} 个 worker 线程）"
+    );
     rt.block_on(run())
 }
 
@@ -285,21 +297,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             bad_allow_ips.join(", ")
         );
     }
-    crate::log::plog!(
-        "boot",
-        info,
-        "鉴权: {}",
-        {
-            // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
-            let secure = if cookie_secure {
-                " + cookie Secure"
-            } else {
-                "；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
-            };
-            format!("已开启（{kind}{secure}）")
-        }
-    );
-
+    crate::log::plog!("boot", info, "鉴权: {}", {
+        // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
+        let secure = if cookie_secure {
+            " + cookie Secure"
+        } else {
+            "；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
+        };
+        format!("已开启（{kind}{secure}）")
+    });
 
     // ---------- 1. SQLite：开库 + 建表 ----------
     if let Some(parent) = db_path.parent() {
@@ -351,7 +357,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     match db::prune_runs(&db, RUN_KEEP_DAYS, &started_at) {
         Ok(0) => {}
-        Ok(n) => crate::log::plog!("boot", info, "清理了 {n} 条超过 {RUN_KEEP_DAYS} 天的运行记录"),
+        Ok(n) => crate::log::plog!(
+            "boot",
+            info,
+            "清理了 {n} 条超过 {RUN_KEEP_DAYS} 天的运行记录"
+        ),
         Err(e) => crate::log::plog!("boot", warn, "清理运行记录失败: {e}"),
     }
 
@@ -469,7 +479,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // Rust → JS：投递一次 tick。引擎线程是阻塞消费的，send 本身不阻塞。
             // 广播：每条 worker 都要给**自己负责的插件**派 on_tick
-            if !tick_tx.broadcast_tick(EngineCmd::Tick { seq, ts: ts.clone() }) {
+            if !tick_tx.broadcast_tick(EngineCmd::Tick {
+                seq,
+                ts: ts.clone(),
+            }) {
                 crate::log::plog!("tick", info, "引擎线程已退出，停止 tick 循环");
                 break;
             }
@@ -510,6 +523,79 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => Assets::embedded(),
     };
 
+    // ---------- 6.8 插件商城 ----------
+    //
+    // 目录默认指向官方 GitHub 上的 JSON；`PANEL_MARKET_URL=off` 时只用
+    // 编译进二进制的内置目录。私有仓库靠 `PANEL_GITHUB_TOKEN`，Token 只留在
+    // 服务端 —— 页面看到的只有“是否已配置”这个布尔量。
+    let market_url_env = std::env::var("PANEL_MARKET_URL").ok();
+    let market_url_explicit = market_url_env
+        .as_deref()
+        .map(|v| {
+            let t = v.trim();
+            !t.is_empty() && !matches!(t.to_ascii_lowercase().as_str(), "off" | "none")
+        })
+        .unwrap_or(false);
+    let market_url = match market_url_env {
+        Some(v) => {
+            let t = v.trim().to_string();
+            if t.is_empty() || matches!(t.to_ascii_lowercase().as_str(), "off" | "none") {
+                None
+            } else {
+                Some(t)
+            }
+        }
+        None => Some(market::DEFAULT_CATALOG_URL.to_string()),
+    };
+    let github_api = std::env::var("PANEL_GITHUB_API")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".into());
+    let github_token = read_github_token();
+    let market_proxy = match std::env::var("PANEL_MARKET_PROXY") {
+        Ok(v) => {
+            let t = v.trim().to_string();
+            match t.to_ascii_lowercase().as_str() {
+                "" | "off" | "none" | "0" | "false" | "no" => None,
+                "1" | "true" | "yes" | "on" => Some(market::DEFAULT_PROXY.to_string()),
+                _ => Some(t),
+            }
+        }
+        Err(_) => None,
+    };
+    let ts_mode = market::TsMode::parse(&std::env::var("PANEL_TS_TRANSPILER").unwrap_or_default());
+    let market_marker = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("data"))
+        .join("market-installed.json");
+    let market = market::Market::new(market::MarketOptions {
+        catalog_url: market_url.clone(),
+        // 默认目录暂时连不上时用内置目录，不把它当成错误提示；
+        // 用户显式配置的目录失败才显示原因。
+        catalog_is_default: market_url.is_some() && !market_url_explicit,
+        github_api: github_api.clone(),
+        github_token: github_token.clone(),
+        proxy: market_proxy.clone(),
+        marker_path: market_marker,
+        ts_mode,
+        allow_http: env_flag("PANEL_MARKET_ALLOW_HTTP"),
+        runtimes: catalog.clone(),
+    });
+    crate::log::plog!(
+        "boot",
+        info,
+        "插件商城目录：{}；GitHub Token：{}；公开库代理：{}；TS 转译器：{}",
+        market_url.as_deref().unwrap_or("（内置目录）"),
+        if github_token.is_some() {
+            "已配置"
+        } else {
+            "未配置"
+        },
+        market_proxy.as_deref().unwrap_or("关闭"),
+        market.ts_label()
+    );
+
     // ---------- 6.9 插件页面的独立 origin（安全审计 H1）----------
     //
     // 在**主监听之前**绑定：这样 origin 字符串能直接写进 AppState，
@@ -531,6 +617,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         db_path: db_path.clone(),
         health,
         host,
+        market,
         engine: engine_handle,
         auth: Arc::new(Auth::new(cred, cookie_secure).allow_ips(allow_ips)),
         trusted_proxies: Arc::new(trusted_proxies),
@@ -547,7 +634,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::log::plog!("boot", error, "监听 {addr} 失败: {e}");
-        crate::log::plog!("boot", error, "端口被占用？用 BIND_ADDR=127.0.0.1:8790 换一个");
+        crate::log::plog!(
+            "boot",
+            error,
+            "端口被占用？用 BIND_ADDR=127.0.0.1:8790 换一个"
+        );
         e
     })?;
     crate::log::plog!("boot", info, "Web UI: http://{addr}/");
@@ -732,7 +823,9 @@ fn hash_token_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     if print_digest {
         // 审计 L8：可重放的凭据只走 stdout（且必须显式要），并当场说清它的分量。
-        println!("# ⚠ 下面这串**等价于口令**（`X-Panel-Token` 直接用它），只显示这一次，别贴进工单。");
+        println!(
+            "# ⚠ 下面这串**等价于口令**（`X-Panel-Token` 直接用它），只显示这一次，别贴进工单。"
+        );
         println!("{digest}");
     } else {
         eprintln!("脚本 / CI 要的那个摘要（`X-Panel-Token` 的值）默认**不打印**：");
@@ -785,7 +878,10 @@ fn print_usage() {
     println!("  PANEL_TOKEN_HASH=prehash1:$argon2id$…   推荐（也是部署里唯一接受的形态）");
     println!("      口令在浏览器里先算摘要，服务端只收到摘要；落盘的是摘要的 Argon2id");
     println!("  PANEL_TOKEN_HASH_FILE=/etc/plugin-panel.hash   同上，从文件读（权限 600）");
-    println!("  PANEL_TOKEN=明文口令              只在开发口子里（要 {}=1，且绑回环）", auth::ALLOW_PLAIN_ENV);
+    println!(
+        "  PANEL_TOKEN=明文口令              只在开发口子里（要 {}=1，且绑回环）",
+        auth::ALLOW_PLAIN_ENV
+    );
     println!("  PANEL_TOKEN_FILE / PANEL_TOKEN_HASH_FILE       从文件读（权限建议 600）");
     println!("  PANEL_ALLOW_IPS=192.168.1.7,127.0.0.1");
     println!("      登录封禁的白名单（只认单个 IP）：这些地址填了登录页的隐藏字段也不会被封");
@@ -839,7 +935,10 @@ fn read_credential(
 ///
 /// `trim()` 是刻意的：`echo xxx > token` 会带一个换行，而候选值那边也 trim 过 ——
 /// 两边不一致的话，`PANEL_TOKEN=" abc "` 会变成一个「怎么输都登不上」的谜题。
-fn read_secret(env_key: &str, file_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+fn read_secret(
+    env_key: &str,
+    file_key: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if let Ok(v) = std::env::var(env_key) {
         let v = v.trim().to_string();
         if !v.is_empty() {
@@ -898,13 +997,53 @@ fn choose_credential(hash: Option<String>, plain: Option<String>) -> (Option<Str
 /// `1` / `true` / `yes` / `on` 都算开（大小写不敏感）。
 fn env_flag(key: &str) -> bool {
     match std::env::var(key) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => false,
     }
 }
 
 fn env_str(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// 读取 GitHub PAT：`PANEL_GITHUB_TOKEN` 优先，其次 `PANEL_GITHUB_TOKEN_FILE`。
+///
+/// 只把值交给 Market；这里**不打印、不返回给前端**。文件读不到时只 warn
+/// 路径与错误，不把内容拼进日志。
+fn read_github_token() -> Option<String> {
+    if let Ok(v) = std::env::var("PANEL_GITHUB_TOKEN") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let path = std::env::var("PANEL_GITHUB_TOKEN_FILE").ok()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(v) => {
+            let t = v.trim();
+            if t.is_empty() {
+                crate::log::plog!("boot", warn, "PANEL_GITHUB_TOKEN_FILE={path} 是空文件");
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        Err(e) => {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "PANEL_GITHUB_TOKEN_FILE={path} 读不到：{e}（私有仓库将不可用）"
+            );
+            None
+        }
+    }
 }
 
 /// 建目录并尽量收紧到 `0700`（安全审计 中7）。
@@ -949,7 +1088,9 @@ async fn bind_plugin_ui(
     //
     // 代价：多监听一个端口；反代 + TLS 的部署必须配 PLUGIN_UI_ORIGIN，否则浏览器会去
     // 连 `https://host:port+1`（多半连不上）。这两条都写进启动日志与文档。
-    let flag = std::env::var("PLUGIN_UI").ok().map(|v| v.trim().to_ascii_lowercase());
+    let flag = std::env::var("PLUGIN_UI")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase());
     let explicit_addr = std::env::var("PLUGIN_UI_ADDR")
         .ok()
         .map(|v| v.trim().to_string())
@@ -1018,9 +1159,7 @@ async fn bind_plugin_ui(
     for addr in candidates {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => {
-                let shown = explicit
-                    .clone()
-                    .unwrap_or_else(|| format!("http://{addr}"));
+                let shown = explicit.clone().unwrap_or_else(|| format!("http://{addr}"));
                 crate::log::plog!(
                     "boot",
                     info,
@@ -1093,7 +1232,11 @@ mod cred_choice_tests {
         let (chosen, notes) = choose_credential(None, Some("plain".into()));
         assert_eq!(chosen.as_deref(), Some("plain"));
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("hash-token"), "提示里要给具体命令：{}", notes[0]);
+        assert!(
+            notes[0].contains("hash-token"),
+            "提示里要给具体命令：{}",
+            notes[0]
+        );
     }
 
     #[test]

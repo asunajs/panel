@@ -15,14 +15,13 @@
 //! 反过来的话，插件没法用一个同名路径既提供页面又提供数据。
 
 use crate::auth::{self, LoginError};
-use chrono::Local;
 use crate::cron::Schedule;
 use crate::db;
-use crate::engine::EngineCmd;
+use crate::engine::{test_run_budget_ms, EngineCmd};
+use crate::ratelimit::Rejected;
 use crate::runtimes::EngineKind;
 use crate::taskdir;
 use crate::upload;
-use crate::ratelimit::Rejected;
 use crate::AppState;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path, Query, Request, State};
@@ -32,6 +31,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Local;
 use futures_util::Stream;
 use serde::Deserialize;
 use serde_json::json;
@@ -90,6 +90,9 @@ const MAX_ROUTE_BODY: usize = 1024 * 1024;
 /// 上传请求体的上限。文件本身的上限在 `upload::MAX_UPLOAD_BYTES`（64 MiB），
 /// 这里留一点 multipart 头/边界余量。
 const MAX_UPLOAD_BODY: usize = 72 * 1024 * 1024;
+
+/// 插件配置文件的上限。配置文件不该比源码还大；1 MiB 足够放几百个字段。
+const MAX_PLUGIN_CONFIG_BODY: usize = 1024 * 1024 + 4096;
 
 /* ---------------------------------------------------------------- 关停信号 */
 
@@ -250,6 +253,12 @@ pub fn router(state: AppState) -> Router {
             "/api/plugins/{name}/source/restore",
             post(restore_plugin_source),
         )
+        .route(
+            "/api/plugins/{name}/config",
+            get(plugin_config)
+                .put(save_plugin_config)
+                .layer(DefaultBodyLimit::max(MAX_PLUGIN_CONFIG_BODY)),
+        )
         // 任务**操作**：立即执行 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
         // 运行记录（面板层次）。日志是插件层次的、一天一个文件保留一周；
@@ -272,6 +281,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logs/stream", get(api_logs_stream))
         // 历史日志：运行视图里点开一次旧执行时，从 JSONL 回看（SSE 只回灌内存环）。
         .route("/api/logs/history", get(api_logs_history))
+        // 设置页：读 / 存 / 自重启。
+        .route("/api/settings", get(api_settings_get))
+        .route("/api/settings/save", post(api_settings_save))
+        .route("/api/restart", post(api_restart))
+        // 插件商城：目录 / GitHub 解析 / 安装。
+        .route("/api/market", get(api_market))
+        .route("/api/market/install", post(api_market_install))
         // 插件注册的路由 + 插件静态资源 + 主面板静态资源（兜底）
         .fallback(fallback_route)
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -425,11 +441,7 @@ fn throttled_response(wait: std::time::Duration) -> Response {
 /// `script-src` 保留了 `'unsafe-inline'`：登录页那段 SHA-256 兜底是内联脚本，
 /// 面板里也有大量内联 `style="…"`。这不是理想值，但它把「能加载哪些源」锁死了，
 /// 而这是当前收益最大、又不会把界面弄坏的那一档。
-async fn security_headers(
-    State(st): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn security_headers(State(st): State<AppState>, req: Request, next: Next) -> Response {
     let host = req
         .headers()
         .get(axum::http::header::HOST)
@@ -601,8 +613,12 @@ async fn login_page(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if st.auth
-        .authenticate(&headers, auth::client_ip(peer, &headers, &st.trusted_proxies))
+    if st
+        .auth
+        .authenticate(
+            &headers,
+            auth::client_ip(peer, &headers, &st.trusted_proxies),
+        )
         .is_some()
     {
         return Redirect::to(&safe_next(q.next.as_deref())).into_response();
@@ -702,7 +718,13 @@ async fn do_login(
             // 可见性不丢。
             if let Some(merged) = st.auth.take_failure_log_slot(peer.ip()) {
                 if merged == 0 {
-                    crate::log::plog!("auth", warn, "登录失败（来自 {}）: {}", peer.ip(), e.message());
+                    crate::log::plog!(
+                        "auth",
+                        warn,
+                        "登录失败（来自 {}）: {}",
+                        peer.ip(),
+                        e.message()
+                    );
                 } else {
                     crate::log::plog!(
                         "auth",
@@ -896,7 +918,6 @@ fn is_credential_header(name: &str) -> bool {
             | "x-panel" // 面板的 CSRF 头，鉴权层已经消费过，插件不需要
     )
 }
-
 
 /// 把绝对路径渲染成**相对插件目录**的形式（安全审计 L10）。
 ///
@@ -1180,9 +1201,7 @@ async fn edit_job(
     }
     // 校验里有一次真实的插件函数调用（问「handler 还在不在」），给 5 秒足够
     match tokio::time::timeout(Duration::from_secs(5), rx).await {
-        Ok(Ok(Ok(()))) => {
-            Json(json!({ "ok": true, "expr": req.expr })).into_response()
-        }
+        Ok(Ok(Ok(()))) => Json(json!({ "ok": true, "expr": req.expr })).into_response(),
         Ok(Ok(Err(e))) => json_error(StatusCode::BAD_REQUEST, e),
         Ok(Err(_)) => json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎没有回话".into()),
         Err(_) => json_error(StatusCode::GATEWAY_TIMEOUT, "引擎 5 秒没回话".into()),
@@ -1229,7 +1248,12 @@ async fn set_plugin_disabled(
 ///
 /// 与「停用」不是一回事：停用是面板不让它加载（任务也不跑、重启后仍然停用）；
 /// 这个只是"这会儿在不在内存里"，任务照旧排着，到点会自动装回来。
-async fn set_plugin_loaded(st: &AppState, name: &str, loaded: bool, headers: &HeaderMap) -> Response {
+async fn set_plugin_loaded(
+    st: &AppState,
+    name: &str,
+    loaded: bool,
+    headers: &HeaderMap,
+) -> Response {
     if let Err(r) = guard_write(headers) {
         return r;
     }
@@ -1283,10 +1307,7 @@ async fn set_plugin_keep_warm(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    let keep = body
-        .get("keep")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let keep = body.get("keep").and_then(|v| v.as_bool()).unwrap_or(true);
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Err(r) = route(
         &st,
@@ -1353,6 +1374,115 @@ async fn reload_plugin(
 
 /// 按插件名解析出源文件路径，并做**两道**防穿越：
 /// 名字本身的形状检查 + 解析出来的真实路径必须在插件目录里。
+/// `GET /api/plugins/{name}/config` —— 读插件配置。
+///
+/// 配置文件不在插件源码目录，而在插件数据目录：
+/// `<PLUGIN_DATA_DIR>/<plugin>/config.json`。这样它不会被 `/plugins/` 静态服务
+/// 暴露出去，也不会在覆盖安装插件时被冲掉。
+async fn plugin_config(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    if let Err(r) = plugin_source_path(&st.plugins_dir, &name) {
+        return r;
+    }
+    match st.host.read_plugin_config(&name) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(config) => Json(json!({ "ok": true, "config": config })).into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("配置解析失败: {e}"),
+            ),
+        },
+        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// `PUT /api/plugins/{name}/config` —— 写插件配置。
+///
+/// 只接受 JSON 对象；原子写入（临时文件 + rename），权限 0600。
+/// 写完清缓存，下一次插件的 `config()` 就会读到新值，不需要重载。
+async fn save_plugin_config(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    if let Err(r) = plugin_source_path(&st.plugins_dir, &name) {
+        return r;
+    }
+    if body.len() > MAX_PLUGIN_CONFIG_BODY {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "配置 {} 字节，超过上限 {} 字节",
+                body.len(),
+                MAX_PLUGIN_CONFIG_BODY
+            ),
+        );
+    }
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, format!("配置不是合法 JSON: {e}")),
+    };
+    if !value.is_object() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "配置必须是 JSON 对象（形如 {\"key\": value}）".into(),
+        );
+    }
+    let path = match st.host.plugin_config_path(&name) {
+        Ok(p) => p,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("创建配置目录 {} 失败: {e}", parent.display()),
+            );
+        }
+    }
+    let text = match serde_json::to_string_pretty(&value) {
+        Ok(s) => s + "\n",
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let tmp = path.with_file_name(format!(
+        ".config.json.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写配置临时文件失败: {e}"),
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("设置配置权限失败: {e}"),
+            );
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("替换配置 {} 失败: {e}", path.display()),
+        );
+    }
+    st.host.invalidate_plugin_config(&name);
+    Json(json!({ "ok": true, "config": value })).into_response()
+}
+
 fn plugin_source_path(
     plugins_dir: &std::path::Path,
     name: &str,
@@ -1372,9 +1502,15 @@ fn plugin_source_path(
         ));
     };
     // 名字检查之外的第二道：解析出来的真实路径必须落在插件目录里
-    match (std::fs::canonicalize(plugins_dir).ok(), std::fs::canonicalize(&path).ok()) {
+    match (
+        std::fs::canonicalize(plugins_dir).ok(),
+        std::fs::canonicalize(&path).ok(),
+    ) {
         (Some(d), Some(f)) if f.starts_with(&d) => Ok(path),
-        _ => Err(json_error(StatusCode::FORBIDDEN, "路径不在插件目录里".into())),
+        _ => Err(json_error(
+            StatusCode::FORBIDDEN,
+            "路径不在插件目录里".into(),
+        )),
     }
 }
 
@@ -1457,11 +1593,17 @@ async fn save_plugin_source(
         path.extension().and_then(|s| s.to_str()).unwrap_or("js")
     ));
     if let Err(e) = std::fs::write(&tmp, req.text.as_bytes()) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写临时文件失败: {e}"));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写临时文件失败: {e}"),
+        );
     }
     if let Err(e) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("替换原文件失败: {e}"));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("替换原文件失败: {e}"),
+        );
     }
 
     let lines = req.text.lines().count();
@@ -1498,7 +1640,10 @@ async fn restore_plugin_source(
         Err(e) => {
             return json_error(
                 StatusCode::NOT_FOUND,
-                format!("没有可恢复的备份（{}）: {e}", shown_path(&st.plugins_dir, &backup)),
+                format!(
+                    "没有可恢复的备份（{}）: {e}",
+                    shown_path(&st.plugins_dir, &backup)
+                ),
             )
         }
     };
@@ -1570,7 +1715,8 @@ async fn cleanup_jobs(
     }
     let n = senders.len();
     // 每条 worker 回一份，所以用 mpsc 收集（oneshot 只能收一次）
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Vec<crate::engine::InvalidJob>, String>>(n);
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<Result<Vec<crate::engine::InvalidJob>, String>>(n);
     for s in &senders {
         if s.send(EngineCmd::CleanupJobs {
             dry_run,
@@ -1679,7 +1825,10 @@ async fn set_plugin_runtime(
         command.as_deref(),
         &now,
     ) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写运行时设置失败: {e}"));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写运行时设置失败: {e}"),
+        );
     }
 
     // 已加载的插件立刻按新引擎重读；停用的插件下次启用时自然生效。
@@ -1713,8 +1862,7 @@ async fn list_scripts(State(st): State<AppState>) -> Json<serde_json::Value> {
         .map(|f| {
             let scheduled = jobs.iter().any(|j| {
                 !j.deleted
-                    && (j.script.as_deref() == Some(f.path.as_str())
-                        || j.name == f.name)
+                    && (j.script.as_deref() == Some(f.path.as_str()) || j.name == f.name)
                     && (j.source == "script-panel" || !j.schedule.is_empty())
             });
             let params = f
@@ -1821,10 +1969,7 @@ async fn create_script_job(
         .into_iter()
         .find(|f| f.path == path)
     else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            format!("任务目录里没有 `{path}`"),
-        );
+        return json_error(StatusCode::BAD_REQUEST, format!("任务目录里没有 `{path}`"));
     };
     if file.name == name {
         return json_error(
@@ -1837,7 +1982,12 @@ async fn create_script_job(
         Err(e) => return json_error(StatusCode::BAD_REQUEST, format!("表达式无效: {e}")),
     };
     let _ = schedule;
-    let runtime = match req.runtime.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let runtime = match req
+        .runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None | Some("auto") => file.runtime,
         Some(raw) => match taskdir::ScriptRuntime::parse(raw) {
             Some(r) if r == file.runtime => r,
@@ -1881,7 +2031,10 @@ async fn create_script_job(
         req.budget_ms,
         &now,
     ) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("写任务失败: {e}"));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("写任务失败: {e}"),
+        );
     }
     notify_scripts(&st);
     Json(json!({ "ok": true })).into_response()
@@ -1945,7 +2098,12 @@ async fn edit_script_job(
     if let Err(e) = Schedule::parse(&expr) {
         return json_error(StatusCode::BAD_REQUEST, format!("表达式无效: {e}"));
     }
-    let runtime = match req.runtime.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let runtime = match req
+        .runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None | Some("auto") => file.runtime,
         Some(raw) => match taskdir::ScriptRuntime::parse(raw) {
             Some(r) if r == file.runtime => r,
@@ -1955,9 +2113,7 @@ async fn edit_script_job(
                     format!("运行时 `{}` 与 `{}` 不匹配", r.as_str(), file.path),
                 )
             }
-            None => {
-                return json_error(StatusCode::BAD_REQUEST, format!("未知运行时 `{raw}`"))
-            }
+            None => return json_error(StatusCode::BAD_REQUEST, format!("未知运行时 `{raw}`")),
         },
     };
     let params = if req.params.is_some() {
@@ -1985,7 +2141,10 @@ async fn edit_script_job(
         budget,
         &now,
     ) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("更新任务失败: {e}"));
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("更新任务失败: {e}"),
+        );
     }
     notify_scripts(&st);
     Json(json!({ "ok": true })).into_response()
@@ -1997,7 +2156,8 @@ async fn pause_task(
     headers: HeaderMap,
 ) -> Response {
     set_paused(st, plugin, name, true, &headers).await
-}async fn resume_task(
+}
+async fn resume_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
     headers: HeaderMap,
@@ -2067,13 +2227,9 @@ fn is_fresh(headers: &HeaderMap, etag: &str) -> bool {
     headers
         .get(axum::http::header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.split(',')
-                .any(|t| t.trim() == etag || t.trim() == "*")
-        })
+        .map(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
         .unwrap_or(false)
 }
-
 
 /// 资源 → HTTP 响应（带 ETag，未变则 304）。
 ///
@@ -2088,7 +2244,9 @@ fn asset_response(a: &crate::assets::Served, headers: &HeaderMap) -> Response {
             .header(axum::http::header::ETAG, etag)
             .header(axum::http::header::CACHE_CONTROL, "no-cache")
             .body(axum::body::Body::empty())
-            .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response());
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "响应构造失败").into_response()
+            });
     }
 
     Response::builder()
@@ -2196,7 +2354,11 @@ fn plugin_ui_index(plugins_dir: &std::path::Path, name: &str) -> std::path::Path
 /// 2. 相对路径逐段检查，拒绝 `..` / `.` / 空段 / 反斜杠
 /// 3. **规范化之后必须仍在插件目录之下** —— 这一条是权威判据，
 ///    它同时挡住了符号链接指向目录外的情况（前两条只是提前给出清楚的错误）
-fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_plugin_asset(
+    root: &std::path::Path,
+    name: &str,
+    rel: &str,
+) -> Result<std::path::PathBuf, String> {
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err("插件名非法".into());
     }
@@ -2225,9 +2387,7 @@ fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result
     let canon_dir = dir
         .canonicalize()
         .map_err(|_| format!("插件 `{name}` 没有 UI 目录"))?;
-    let canon = full
-        .canonicalize()
-        .map_err(|_| format!("找不到 {rel}"))?;
+    let canon = full.canonicalize().map_err(|_| format!("找不到 {rel}"))?;
     if !canon.starts_with(&canon_dir) {
         return Err("路径超出插件目录".into());
     }
@@ -2237,12 +2397,16 @@ fn resolve_plugin_asset(root: &std::path::Path, name: &str, rel: &str) -> Result
 // 客户端 IP 的求法放在 auth.rs 的 `client_ip` 里（那边有可测的头部替身，
 // 而且「谁的失败算在谁头上」本来就是这个模块的事）。
 
-
 /// 服务 `/plugins/{name}/...`。
 ///
 /// 只服务**已加载插件**的资源：否则插件目录下任何一个目录（哪怕它不是插件）
 /// 都能被从网上读出来。
-async fn plugin_asset(st: &AppState, rest: &str, method: &str, req_headers: &HeaderMap) -> Response {
+async fn plugin_asset(
+    st: &AppState,
+    rest: &str,
+    method: &str,
+    req_headers: &HeaderMap,
+) -> Response {
     if method != "GET" && method != "HEAD" {
         return (StatusCode::METHOD_NOT_ALLOWED, "插件静态资源只支持 GET\n").into_response();
     }
@@ -2252,12 +2416,7 @@ async fn plugin_asset(st: &AppState, rest: &str, method: &str, req_headers: &Hea
         None => (rest, ""),
     };
 
-    let known = st
-        .registry
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|p| p.name == name);
+    let known = st.registry.lock().unwrap().iter().any(|p| p.name == name);
     if !known {
         return (
             StatusCode::NOT_FOUND,
@@ -2324,20 +2483,12 @@ async fn plugin_asset(st: &AppState, rest: &str, method: &str, req_headers: &Hea
 /// 请求体 `{"code": "...", "input": "..."}`，回 `{"ok":true,"stdout","stderr","error","ms"}`。
 /// 代码跑在**一次性的临时解释器**里：不碰任何已加载插件的状态，也不注册任务。
 /// 上传到插件目录。
-async fn upload_plugins(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    mp: Multipart,
-) -> Response {
+async fn upload_plugins(State(st): State<AppState>, headers: HeaderMap, mp: Multipart) -> Response {
     upload_to(&st, &headers, mp, upload::Kind::Plugins).await
 }
 
 /// 上传到任务目录。
-async fn upload_tasks(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    mp: Multipart,
-) -> Response {
+async fn upload_tasks(State(st): State<AppState>, headers: HeaderMap, mp: Multipart) -> Response {
     upload_to(&st, &headers, mp, upload::Kind::Tasks).await
 }
 
@@ -2497,7 +2648,9 @@ async fn test_run(
     }
 
     // 给得比执行预算宽：临时解释器要先建起来（QuickJS Context）
-    let wait = Duration::from_millis(st.health.budget_ms + 5_000);
+    // 试跑有自己的预算（见 `engine::test_run_budget_ms`），等待也要按它算 ——
+    // 否则单次预算放宽到 60 秒后，这里会陪等 65 秒。
+    let wait = Duration::from_millis(test_run_budget_ms() + 5_000);
     match tokio::time::timeout(wait, rx).await {
         Ok(Ok(Ok(out))) => Json(json!({
             "ok": true,
@@ -2658,7 +2811,8 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
         }
     };
 
-    let v: serde_json::Value = serde_json::from_str(&reply).unwrap_or_else(|_| json!({ "body": reply }));
+    let v: serde_json::Value =
+        serde_json::from_str(&reply).unwrap_or_else(|_| json!({ "body": reply }));
     let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(200) as u16;
     let body = v
         .get("body")
@@ -2666,8 +2820,8 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
         .unwrap_or("")
         .to_string();
 
-    let mut resp = Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+    let mut resp =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
     if let Some(hs) = v.get("headers").and_then(|h| h.as_object()) {
         for (k, val) in hs {
             if let (Ok(name), Ok(value)) = (
@@ -2681,11 +2835,7 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
                 // `X-Frame-Options` 能被覆盖掉（等于把面板刚加上的加固拆了），
                 // `Location` 能做成面板域名上的开放重定向。
                 if !plugin_response_header_allowed(name.as_str(), value.to_str().unwrap_or("")) {
-                    crate::log::plog!(
-                        "panel",
-                        warn,
-                        "插件响应头被忽略（不在白名单里）: {name}"
-                    );
+                    crate::log::plog!("panel", warn, "插件响应头被忽略（不在白名单里）: {name}");
                     continue;
                 }
                 resp = resp.header(name, value);
@@ -2709,8 +2859,13 @@ async fn plugin_route(st: AppState, req: Request) -> Response {
 /// 那些是**面板**的决定，不该由插件覆盖。
 fn plugin_response_header_allowed(name: &str, value: &str) -> bool {
     match name.to_ascii_lowercase().as_str() {
-        "content-type" | "content-disposition" | "cache-control" | "etag" | "last-modified"
-        | "retry-after" | "x-request-id" => true,
+        "content-type"
+        | "content-disposition"
+        | "cache-control"
+        | "etag"
+        | "last-modified"
+        | "retry-after"
+        | "x-request-id" => true,
         // 重定向只允许站内绝对路径：`//evil.com`、`https://evil.com` 都不行。
         "location" => value.starts_with('/') && !value.starts_with("//") && !value.contains('\\'),
         _ => false,
@@ -3006,27 +3161,26 @@ async fn api_logs_stream(
     let (fetch_plugin, fetch_panel, cursor_plugin, cursor_panel) = match resume {
         Some((a, b)) => (a, b, a, b),
         None => {
-            let tail_start =
-                |m: &Arc<crate::log::MemoryTransport>,
-                 ch: Chan,
-                 backlog: &mut std::collections::VecDeque<Pending>|
-                 -> (u64, u64) {
-                    let snap = m.snapshot();
-                    let start = snap.len().saturating_sub(DEFAULT_TAIL);
-                    let window = &snap[start..];
-                    let before = window.first().map(|l| l.seq.saturating_sub(1)).unwrap_or(0);
-                    for l in window {
-                        if filter.keep(l) {
-                            backlog.push_back(Pending {
-                                event: "log",
-                                data: log_event_json(l),
-                                mark: Some((ch, l.seq)),
-                            });
-                        }
+            let tail_start = |m: &Arc<crate::log::MemoryTransport>,
+                              ch: Chan,
+                              backlog: &mut std::collections::VecDeque<Pending>|
+             -> (u64, u64) {
+                let snap = m.snapshot();
+                let start = snap.len().saturating_sub(DEFAULT_TAIL);
+                let window = &snap[start..];
+                let before = window.first().map(|l| l.seq.saturating_sub(1)).unwrap_or(0);
+                for l in window {
+                    if filter.keep(l) {
+                        backlog.push_back(Pending {
+                            event: "log",
+                            data: log_event_json(l),
+                            mark: Some((ch, l.seq)),
+                        });
                     }
-                    // (取数进度 = 快照末尾, 推游标 = 回灌窗口之前)
-                    (snap.last().map(|l| l.seq).unwrap_or(0), before)
-                };
+                }
+                // (取数进度 = 快照末尾, 推游标 = 回灌窗口之前)
+                (snap.last().map(|l| l.seq).unwrap_or(0), before)
+            };
             let (fp, cp) = plugin_mem
                 .as_ref()
                 .map_or((0, 0), |m| tail_start(m, Chan::Plugin, &mut backlog));
@@ -3194,7 +3348,10 @@ struct RunsQuery {
 /// `GET /api/runs?plugin=&task=&limit=`
 ///
 /// 两个过滤条件都是可选的（不传 = 不过滤），列表新的在前。
-async fn api_runs(State(st): State<AppState>, Query(q): Query<RunsQuery>) -> Json<serde_json::Value> {
+async fn api_runs(
+    State(st): State<AppState>,
+    Query(q): Query<RunsQuery>,
+) -> Json<serde_json::Value> {
     // 上限 500：这是个**界面用的**列表，不是导出接口。不设上限的话一个跑了
     // 半年的面板一开页面就要序列化几万条。
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -3221,6 +3378,134 @@ async fn api_run_one(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct MarketQuery {
+    refresh: Option<String>,
+}
+
+/// `GET /api/market?refresh=1` —— GitHub 目录 + 每个条目的解析结果。
+///
+/// 网络、GitHub API、TypeScript 转译都在 blocking 池里做：这些调用可能
+/// 慢到十几秒，不能占着 async worker 让整个面板排队。
+/// 设置页的数据源：每个可配置项的当前值、来源、是否被 env 固定、要不要重启。
+///
+/// 元数据（label/hint/上下限/分组）全部来自后端 `settings::DEFS` ——
+/// 前端不再自己抄一份，否则两边迟早对不上。
+async fn api_settings_get() -> Response {
+    let items = crate::settings::view();
+    // 分组顺序 = DEFS 里的出现顺序（不是字典序）：「引擎」在「插件」前，读起来是有逻辑的。
+    let mut groups: Vec<&'static str> = Vec::new();
+    for it in &items {
+        if !groups.contains(&it.group) {
+            groups.push(it.group);
+        }
+    }
+    Json(json!({ "items": items, "groups": groups })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SettingsPatch {
+    #[serde(default)]
+    values: std::collections::BTreeMap<String, String>,
+}
+
+/// 保存一批设置。**全部校验通过才写**；被环境变量固定的项直接拒绝。
+///
+/// 返回里分开说「哪些要重启」「哪些已经热改」—— 前端据此提示，
+/// 而不是笼统回一句「已保存」然后用户以为生效了。
+async fn api_settings_save(headers: HeaderMap, Json(patch): Json<SettingsPatch>) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    match crate::settings::update(&patch.values) {
+        Ok(applied) => Json(json!({
+            "ok": true,
+            "restart": applied.restart,
+            "live": applied.live,
+        }))
+        .into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// 自重启：`exec` 自身，PID 不变。
+///
+/// 先回话再重启（延迟 300ms）：否则浏览器拿到的是「连接被重置」，
+/// 用户只会以为点坏了。前端拿到 200 后轮询 `/api/state`，恢复即刷新。
+async fn api_restart(headers: HeaderMap) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        crate::settings::restart_process();
+    });
+    Json(json!({ "ok": true, "restarting": true })).into_response()
+}
+
+async fn api_market(State(st): State<AppState>, Query(q): Query<MarketQuery>) -> Response {
+    let refresh = matches!(
+        q.refresh.as_deref().map(str::trim),
+        Some("1" | "true" | "yes" | "on")
+    );
+    let market = st.market.clone();
+    let dir = st.plugins_dir.clone();
+    match tokio::task::spawn_blocking(move || market.catalog(&dir, refresh)).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("插件商城读取失败：{e}"),
+        ),
+    }
+}
+
+/// `POST /api/market/install` —— 只接收 id。
+///
+/// 下载地址、版本、SHA 都由服务端从目录和 GitHub 解析，客户端不能指定 URL；
+/// 这样不会把商城变成一个“任意 URL 写入 plugins/”的接口。
+async fn api_market_install(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::market::InstallRequest>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let id = req.id.trim().to_string();
+    if id.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "id 不能为空".into());
+    }
+    let market = st.market.clone();
+    let dir = st.plugins_dir.clone();
+    match tokio::task::spawn_blocking(move || market.install(&id, &dir)).await {
+        Ok(Ok(report)) => {
+            // 新文件落盘后立刻让引擎扫描；watcher 也会发现，但这里不等它的去抖。
+            let _ = st.engine.broadcast(EngineCmd::Wake);
+            Json(report).into_response()
+        }
+        Ok(Err(e)) => {
+            let code = if e.contains("已有安装") {
+                StatusCode::CONFLICT
+            } else if e.contains("目录里没有") {
+                StatusCode::NOT_FOUND
+            } else if e.contains("下载")
+                || e.contains("GitHub")
+                || e.contains("限流")
+                || e.contains("转译")
+            {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            json_error(code, e)
+        }
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("安装任务异常退出：{e}"),
         ),
     }
 }
@@ -3272,7 +3557,8 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         let file = plugin_file_of(&st.plugins_dir, name)
             .map(|f| f.display().to_string())
             .unwrap_or_default();
-        let (stored_engine, stored_command) = db::get_plugin_runtime(&st.db, name).unwrap_or((None, None));
+        let (stored_engine, stored_command) =
+            db::get_plugin_runtime(&st.db, name).unwrap_or((None, None));
         let engine = stored_engine
             .as_deref()
             .and_then(crate::runtimes::EngineKind::parse)
@@ -3387,19 +3673,16 @@ fn render_login(err: Option<&str>, next: Option<&str>, st: &AppState) -> String 
     // 摘要形态（部署里的正常情况）：页面先算 `sha256("plugin-panel/v1:"+口令)`，
     // 只把这个摘要 POST 上去 —— 明文口令不出浏览器。
     // 旧形态（明文 / 旧哈希，只在本机开发口子里）：页面照原样提交。
-    let mode = if st.auth.wants_digest() { "digest" } else { "plain" };
+    let mode = if st.auth.wants_digest() {
+        "digest"
+    } else {
+        "plain"
+    };
     LOGIN_PAGE
         .replace("__ERR__", &err_html)
         .replace("__NEXT__", &esc(&safe_next(next)))
         .replace("__MODE__", mode)
 }
-
-
-
-
-
-
-
 
 /// 最小 HTML 转义：插件名 / 日志内容都可能来自插件，不能直接拼进 HTML。
 fn esc(s: &str) -> String {
@@ -3651,14 +3934,29 @@ mod tests {
     #[test]
     fn login_page_hashes_before_submit_with_a_no_subtle_fallback() {
         // ① 首选 crypto.subtle（localhost / HTTPS 有）
-        assert!(LOGIN_PAGE.contains("crypto.subtle"), "要用 WebCrypto 的 SHA-256");
+        assert!(
+            LOGIN_PAGE.contains("crypto.subtle"),
+            "要用 WebCrypto 的 SHA-256"
+        );
         // ② 纯 JS 兜底：`http://` + 局域网 IP 不是安全上下文，没有 subtle ——
         //    而面板最常见的用法恰好就是这种。少了这条兜底，那类访问直接登不上。
-        assert!(LOGIN_PAGE.contains("function sha256("), "要有纯 JS 的 SHA-256 兜底");
-        assert!(LOGIN_PAGE.contains("new TextEncoder()"), "要按 UTF-8 编码（和服务端一致）");
+        assert!(
+            LOGIN_PAGE.contains("function sha256("),
+            "要有纯 JS 的 SHA-256 兜底"
+        );
+        assert!(
+            LOGIN_PAGE.contains("new TextEncoder()"),
+            "要按 UTF-8 编码（和服务端一致）"
+        );
         // ③ 提交前替换成摘要，并且**只提交一次**（避免二次哈希）
-        assert!(LOGIN_PAGE.contains("ev.preventDefault()"), "要先拦住原生提交");
-        assert!(LOGIN_PAGE.contains("data-hashed"), "要标记「已经换成摘要了」");
+        assert!(
+            LOGIN_PAGE.contains("ev.preventDefault()"),
+            "要先拦住原生提交"
+        );
+        assert!(
+            LOGIN_PAGE.contains("data-hashed"),
+            "要标记「已经换成摘要了」"
+        );
         // ④ 没有 JS 就登不上 —— 必须说清楚，而不是让人对着一个"没反应"的按钮
         assert!(LOGIN_PAGE.contains("<noscript>"), "要告诉用户这页需要 JS");
         // ⑤ 页面本身绝不能带任何秘密
@@ -3670,7 +3968,10 @@ mod tests {
     fn login_page_mode_placeholder_is_substituted() {
         // 摘要形态发摘要、旧形态发原文：这个分支由 `render_login` 用 `__MODE__` 注入。
         // 这里只钉住"模板里确实有这个占位、并且默认是保守的那一侧"。
-        assert!(LOGIN_PAGE.contains(r#"var MODE = "__MODE__";"#), "模板要有 MODE 占位");
+        assert!(
+            LOGIN_PAGE.contains(r#"var MODE = "__MODE__";"#),
+            "模板要有 MODE 占位"
+        );
         assert!(
             LOGIN_PAGE.contains("if (!form || !input || MODE !== 'digest') return;"),
             "只有 digest 模式才改提交内容（其余原样提交）"
@@ -3727,12 +4028,23 @@ mod tests {
                 "{h} 不该由插件设置"
             );
         }
-        for h in ["content-type", "Content-Type", "cache-control", "etag", "retry-after"] {
+        for h in [
+            "content-type",
+            "Content-Type",
+            "cache-control",
+            "etag",
+            "retry-after",
+        ] {
             assert!(plugin_response_header_allowed(h, "x"), "{h} 应当放行");
         }
         // 重定向只允许站内绝对路径
         assert!(plugin_response_header_allowed("location", "/dashboard"));
-        for bad in ["//evil.com", "https://evil.com", "\\\\evil", "javascript:alert(1)"] {
+        for bad in [
+            "//evil.com",
+            "https://evil.com",
+            "\\\\evil",
+            "javascript:alert(1)",
+        ] {
             assert!(
                 !plugin_response_header_allowed("location", bad),
                 "location={bad} 必须被拒"
@@ -3807,7 +4119,11 @@ mod tests {
             "100%",
             "",
         ] {
-            assert_eq!(percent_decode(&percent_encode(token)), token, "往返失败: {token:?}");
+            assert_eq!(
+                percent_decode(&percent_encode(token)),
+                token,
+                "往返失败: {token:?}"
+            );
         }
     }
 
@@ -3816,7 +4132,10 @@ mod tests {
         let (t, n, trap) = parse_form("token=s3cret&next=%2Fapi%2Fstate");
         assert_eq!(t, "s3cret");
         assert_eq!(n.as_deref(), Some("/api/state"));
-        assert_eq!(trap, "", "没带 username 就是没填（不能因为字段缺失就判成脚本）");
+        assert_eq!(
+            trap, "",
+            "没带 username 就是没填（不能因为字段缺失就判成脚本）"
+        );
 
         // 顺序无关
         let (t, n, _) = parse_form("next=%2F&token=abc");
@@ -3892,11 +4211,19 @@ mod tests {
 
     #[test]
     fn wants_html_detects_browser_navigation() {
-        assert!(wants_html(&req_with("/", None, Some("text/html,application/xhtml+xml"))));
+        assert!(wants_html(&req_with(
+            "/",
+            None,
+            Some("text/html,application/xhtml+xml")
+        )));
         assert!(wants_html(&req_with("/", None, Some("TEXT/HTML"))));
         // 面板自己的 fetch 不带 Accept（默认 */*）→ 不该被当成导航
         assert!(!wants_html(&req_with("/api/state", None, Some("*/*"))));
-        assert!(!wants_html(&req_with("/api/state", None, Some("application/json"))));
+        assert!(!wants_html(&req_with(
+            "/api/state",
+            None,
+            Some("application/json")
+        )));
         assert!(!wants_html(&req_with("/api/state", None, None)));
     }
 

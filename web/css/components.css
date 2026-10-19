@@ -1283,3 +1283,194 @@
     text-align: left;
   }
 }
+
+/* ── 插件商城 ───────────────────────────────────────────────────────────
+   入口只在插件列表页，所以这里只做卡片内部排版；不新增页面级布局。 */
+.market-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.market-summary {
+  margin: var(--sp-2) 0;
+}
+
+.market-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px var(--sp-3);
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.market-meta a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.market-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--sp-2);
+}
+
+.market-provides,
+.market-sha {
+  margin: var(--sp-2) 0 0;
+  word-break: break-word;
+}
+
+.market-hash {
+  word-break: break-all;
+}
+
+.market-actions {
+  margin-top: auto;
+  padding-top: var(--sp-3);
+}
+
+.market-warning {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warning);
+  border-radius: var(--r-md);
+  background: var(--warning-soft);
+  color: var(--text);
+}
+
+.market-toolbar {
+  margin: var(--sp-3) 0;
+}
+
+/* ── 插件通用配置弹窗 ─────────────────────────────────────────────────
+   简单插件不写自己的配置页，用面板这张表单改 config.json。
+   表单只展开顶层标量；对象/数组留给 JSON 页，避免做成递归表单。 */
+.config-dialog {
+  width: min(640px, 100%);
+}
+
+.config-tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.config-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.config-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.config-label {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.config-control {
+  min-width: 0;
+}
+
+.config-check {
+  grid-column: 1 / 3;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  min-height: 34px;
+}
+
+.config-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.config-nested {
+  padding: 7px 10px;
+  border: 1px dashed var(--border-control);
+  border-radius: var(--r-md);
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.config-del {
+  color: var(--text-mute);
+}
+
+.config-del:hover {
+  color: var(--error);
+}
+
+.config-empty {
+  padding: var(--sp-4);
+  border: 1px dashed var(--border-control);
+  border-radius: var(--r-md);
+  color: var(--text-mute);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.config-add-bar {
+  margin-top: var(--sp-3);
+}
+
+.config-add {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) 90px minmax(90px, 1.4fr) auto auto;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.config-json {
+  min-height: 42vh;
+  resize: vertical;
+}
+
+.config-json-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-2);
+}
+
+.config-path {
+  margin-top: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+
+.config-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+@media (max-width: 640px) {
+  .config-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .config-row .config-label {
+    grid-column: 1 / -1;
+  }
+
+  .config-add {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .config-add #cfg-new-value {
+    grid-column: 1 / -1;
+  }
+}

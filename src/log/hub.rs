@@ -76,8 +76,7 @@ impl Hub {
             None => None,
         };
 
-        let mut transports: Vec<Arc<dyn Transport>> =
-            vec![Arc::new(ConsoleTransport::new())];
+        let mut transports: Vec<Arc<dyn Transport>> = vec![Arc::new(ConsoleTransport::new())];
         transports.push(mem.clone());
         if let Some(f) = &file {
             transports.push(f.clone());
@@ -178,7 +177,12 @@ mod tests {
         assert_eq!(b.scope(), "beta");
         // 但它们是不同的 logger 实例（scope 字符串不同就够了）
         a1.info("a");
-        let entries: Vec<_> = hub.mem().snapshot().iter().map(|l| l.entry.plugin.clone()).collect();
+        let entries: Vec<_> = hub
+            .mem()
+            .snapshot()
+            .iter()
+            .map(|l| l.entry.plugin.clone())
+            .collect();
         assert_eq!(entries, vec![Some("alpha".to_string())]);
     }
 

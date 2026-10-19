@@ -24,6 +24,8 @@ import {
   setPluginLoaded,
   setPluginRuntime,
   uploadFile,
+  getPluginConfig,
+  savePluginConfig,
 } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 import { showPluginEngineUi } from '../prefs.js';
@@ -114,6 +116,326 @@ function clearRootListeners(root) {
   rootListeners = [];
 }
 
+// ---------------------------------------------------------------- 插件配置弹窗
+
+function isConfigObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function configKind(v) {
+  if (typeof v === 'boolean') return 'boolean';
+  if (typeof v === 'number') return 'number';
+  if (typeof v === 'string') return 'string';
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  return 'object';
+}
+
+/**
+ * 通用插件配置弹窗。
+ *
+ * 默认是表单：布尔给勾选框、数字给 number、字符串给输入框。
+ * 对象/数组不在表单里展开，避免把「简单配置」做成递归表单；
+ * 高级用户切到 JSON 页处理嵌套结构。
+ *
+ * 刻意不用 `editor.js`：那是 JS 源码编辑器，对短 JSON 来说 caret/输入法
+ * 那一套复杂度全是负担，原生 textarea 对小白和手机都更稳。
+ */
+async function openPluginConfig(name, ctx) {
+  const res = await getPluginConfig(name);
+  if (!res.ok) {
+    ctx.toast(`${name}：读配置失败 —— ${res.error}`, 'bad');
+    return;
+  }
+
+  let values = isConfigObject(res.config) ? res.config : {};
+  let dirty = false;
+  let tab = 'form';
+
+  const back = document.createElement('div');
+  back.className = 'dialog-back';
+  back.innerHTML = `
+    <div class="dialog config-dialog" role="dialog" aria-modal="true" aria-label="配置 ${esc(name)}">
+      <div class="dialog-head">
+        <span>配置 · ${esc(name)}</span>
+        <button class="btn ghost" type="button" data-cfg-close>关闭</button>
+      </div>
+      <div class="dialog-body">
+        <div class="config-tabs" role="tablist">
+          <button class="btn" type="button" data-cfg-tab="form">表单</button>
+          <button class="btn" type="button" data-cfg-tab="json">JSON</button>
+        </div>
+        <div id="cfg-form"></div>
+        <div id="cfg-json-wrap" hidden>
+          <textarea class="textarea mono config-json" id="cfg-json" spellcheck="false"
+                    aria-label="插件配置 JSON"></textarea>
+          <div class="config-json-actions">
+            <button class="btn" type="button" id="cfg-format">格式化</button>
+          </div>
+        </div>
+        <p class="err-text" id="cfg-error" hidden></p>
+        <p class="hint config-path">文件：插件数据目录 / ${esc(name)} / config.json</p>
+        <div class="config-actions">
+          <button class="btn" type="button" data-cfg-close>取消</button>
+          <button class="btn primary" type="button" id="cfg-save">保存</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(back);
+
+  const formEl = back.querySelector('#cfg-form');
+  const jsonWrap = back.querySelector('#cfg-json-wrap');
+  const jsonEl = back.querySelector('#cfg-json');
+  const errEl = back.querySelector('#cfg-error');
+  const saveBtn = back.querySelector('#cfg-save');
+
+  function showError(msg) {
+    errEl.textContent = msg || '';
+    errEl.hidden = !msg;
+  }
+
+  function markDirty() {
+    dirty = true;
+    showError('');
+  }
+
+  function close() {
+    if (dirty && !window.confirm('配置还没保存，确定关闭？')) return;
+    document.removeEventListener('keydown', onKey);
+    back.remove();
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape') close();
+  }
+
+  function fieldHtml(key, val) {
+    const kind = configKind(val);
+    const attrs = `data-cfg-key="${esc(key)}" data-cfg-kind="${kind}"`;
+    if (kind === 'boolean') {
+      return `<div class="config-row">
+        <label class="config-check">
+          <input type="checkbox" ${attrs} ${val ? 'checked' : ''}>
+          <span>${esc(key)}</span>
+        </label>
+        <button class="btn ghost config-del" type="button" data-cfg-del="${esc(key)}" title="删除这一项">删除</button>
+      </div>`;
+    }
+    if (kind === 'object' || kind === 'array') {
+      const what = kind === 'array' ? '数组' : '对象';
+      return `<div class="config-row">
+        <div class="config-label">${esc(key)}</div>
+        <div class="config-nested">${what} · 去 JSON 页编辑</div>
+        <button class="btn ghost config-del" type="button" data-cfg-del="${esc(key)}" title="删除这一项">删除</button>
+      </div>`;
+    }
+    let control;
+    if (kind === 'string' && (val.includes('\n') || val.length > 80)) {
+      control = `<textarea class="textarea mono" rows="4" ${attrs} spellcheck="false">${esc(val)}</textarea>`;
+    } else {
+      control = `<input class="input mono" ${attrs} value="${esc(String(val ?? ''))}" spellcheck="false"${
+        kind === 'number' ? ' inputmode="decimal"' : ''
+      }${kind === 'null' ? ' placeholder="null"' : ''}>`;
+    }
+    return `<div class="config-row">
+      <label class="config-label">${esc(key)}</label>
+      <div class="config-control">${control}</div>
+      <button class="btn ghost config-del" type="button" data-cfg-del="${esc(key)}" title="删除这一项">删除</button>
+    </div>`;
+  }
+
+  function renderForm() {
+    const keys = Object.keys(values);
+    const rows = keys.map((k) => fieldHtml(k, values[k])).join('');
+    formEl.innerHTML = `
+      ${keys.length ? `<div class="config-rows">${rows}</div>` : '<div class="config-empty">还没有配置项。点下面的按钮加一项，或者切到 JSON 直接写。</div>'}
+      <div class="config-add-bar">
+        <button class="btn" type="button" id="cfg-add-toggle">+ 添加配置项</button>
+      </div>
+      <div class="config-add" id="cfg-add-row" hidden>
+        <input class="input mono" id="cfg-new-key" placeholder="key" spellcheck="false">
+        <select class="select" id="cfg-new-type">
+          <option value="text">文本</option>
+          <option value="number">数字</option>
+          <option value="boolean">开关</option>
+          <option value="json">JSON</option>
+        </select>
+        <input class="input mono" id="cfg-new-value" placeholder="值" spellcheck="false">
+        <button class="btn primary" type="button" id="cfg-add-ok">添加</button>
+        <button class="btn ghost" type="button" id="cfg-add-cancel">取消</button>
+      </div>`;
+
+    for (const el of formEl.querySelectorAll('[data-cfg-key]')) {
+      const key = el.dataset.cfgKey;
+      const kind = el.dataset.cfgKind;
+      const update = () => {
+        if (kind === 'boolean') values[key] = el.checked;
+        else if (kind === 'number') {
+          const raw = el.value.trim();
+          if (raw === '') values[key] = '';
+          else {
+            const n = Number(raw);
+            values[key] = Number.isFinite(n) ? n : raw;
+          }
+        } else if (kind === 'null') values[key] = el.value === '' ? null : el.value;
+        else values[key] = el.value;
+        markDirty();
+      };
+      el.addEventListener(kind === 'boolean' ? 'change' : 'input', update);
+    }
+    for (const el of formEl.querySelectorAll('[data-cfg-del]')) {
+      el.addEventListener('click', () => {
+        delete values[el.dataset.cfgDel];
+        markDirty();
+        renderForm();
+      });
+    }
+
+    const addRow = formEl.querySelector('#cfg-add-row');
+    formEl.querySelector('#cfg-add-toggle').addEventListener('click', () => {
+      addRow.hidden = false;
+      formEl.querySelector('#cfg-new-key').focus();
+    });
+    formEl.querySelector('#cfg-add-cancel').addEventListener('click', () => {
+      addRow.hidden = true;
+    });
+    formEl.querySelector('#cfg-add-ok').addEventListener('click', () => {
+      const key = formEl.querySelector('#cfg-new-key').value.trim();
+      const type = formEl.querySelector('#cfg-new-type').value;
+      const raw = formEl.querySelector('#cfg-new-value').value;
+      if (!key) return showError('配置项名字不能为空');
+      if (Object.prototype.hasOwnProperty.call(values, key)) {
+        return showError(`已经有名为 ${key} 的配置项`);
+      }
+      let val;
+      if (type === 'number') {
+        if (raw.trim() === '') return showError('数字配置项不能为空');
+        val = Number(raw);
+        if (!Number.isFinite(val)) return showError('这个值不是合法数字');
+      } else if (type === 'boolean') {
+        val = /^(1|true|yes|on)$/i.test(raw.trim());
+      } else if (type === 'json') {
+        try {
+          val = JSON.parse(raw);
+        } catch (e) {
+          return showError('JSON 值不合法：' + (e.message || e));
+        }
+      } else {
+        val = raw;
+      }
+      values[key] = val;
+      markDirty();
+      renderForm();
+    });
+  }
+
+  function collectForm() {
+    for (const el of formEl.querySelectorAll('[data-cfg-key]')) {
+      const key = el.dataset.cfgKey;
+      const kind = el.dataset.cfgKind;
+      if (kind === 'boolean') values[key] = el.checked;
+      else if (kind === 'number') {
+        const raw = el.value.trim();
+        if (raw === '') values[key] = '';
+        else {
+          const n = Number(raw);
+          values[key] = Number.isFinite(n) ? n : raw;
+        }
+      } else if (kind === 'null') values[key] = el.value === '' ? null : el.value;
+      else values[key] = el.value;
+    }
+    return values;
+  }
+
+  function setTab(next) {
+    if (next === tab) return;
+    if (next === 'json') {
+      collectForm();
+      jsonEl.value = JSON.stringify(values, null, 2);
+      jsonWrap.hidden = false;
+      formEl.hidden = true;
+    } else {
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonEl.value);
+      } catch (e) {
+        return showError('JSON 不合法：' + (e.message || e));
+      }
+      if (!isConfigObject(parsed)) return showError('配置必须是 JSON 对象（不能是数组或单个值）');
+      values = parsed;
+      jsonWrap.hidden = true;
+      formEl.hidden = false;
+      renderForm();
+    }
+    tab = next;
+    showError('');
+    for (const b of back.querySelectorAll('[data-cfg-tab]')) {
+      b.classList.toggle('primary', b.dataset.cfgTab === tab);
+    }
+  }
+
+  function parseActive() {
+    if (tab === 'json') {
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonEl.value);
+      } catch (e) {
+        showError('JSON 不合法：' + (e.message || e));
+        return null;
+      }
+      if (!isConfigObject(parsed)) {
+        showError('配置必须是 JSON 对象（不能是数组或单个值）');
+        return null;
+      }
+      return parsed;
+    }
+    collectForm();
+    return values;
+  }
+
+  for (const b of back.querySelectorAll('[data-cfg-tab]')) {
+    b.addEventListener('click', () => setTab(b.dataset.cfgTab));
+  }
+  for (const b of back.querySelectorAll('[data-cfg-close]')) {
+    b.addEventListener('click', close);
+  }
+  back.addEventListener('click', (ev) => {
+    if (ev.target === back) close();
+  });
+  document.addEventListener('keydown', onKey);
+
+  jsonEl.addEventListener('input', markDirty);
+  back.querySelector('#cfg-format').addEventListener('click', () => {
+    try {
+      const parsed = JSON.parse(jsonEl.value);
+      jsonEl.value = JSON.stringify(parsed, null, 2);
+      showError('');
+    } catch (e) {
+      showError('JSON 不合法：' + (e.message || e));
+    }
+  });
+  saveBtn.addEventListener('click', async () => {
+    const out = parseActive();
+    if (out === null) return;
+    saveBtn.disabled = true;
+    const saved = await savePluginConfig(name, out);
+    saveBtn.disabled = false;
+    if (!saved.ok) {
+      showError('保存失败：' + saved.error);
+      return;
+    }
+    dirty = false;
+    close();
+    ctx.toast(`${name}：配置已保存，下次任务生效`, 'ok');
+  });
+
+  renderForm();
+  for (const b of back.querySelectorAll('[data-cfg-tab]')) {
+    b.classList.toggle('primary', b.dataset.cfgTab === 'form');
+  }
+  back.querySelector('#cfg-add-toggle')?.focus();
+}
+
 export async function render(root, ctx, opts = {}) {
   // silent：操作完（停用 / 重载）刷新时不要闪一下「加载中…」
   if (!opts.silent) root.innerHTML = '<div class="empty">加载中…</div>';
@@ -145,6 +467,7 @@ export async function render(root, ctx, opts = {}) {
       <div class="section-head">
         <span class="section-title">插件（${plugins.length}）</span>
         <div class="card-actions">
+          <a class="btn" href="#/market" title="从 GitHub 安装插件">插件商城</a>
           <button class="btn" id="upload-btn" title="上传 .js 单文件，或解压 .zip 到插件目录">上传插件</button>
           <input type="file" id="upload-input" accept=".js,.zip" hidden>
           <button class="btn" id="refresh-btn">刷新</button>
@@ -152,8 +475,8 @@ export async function render(root, ctx, opts = {}) {
       </div>
 
       <p class="hint" style="margin-bottom:var(--sp-3)">
-        插件可以自带配置页（由插件作者提供，位于 <span class="mono">/plugins/{name}/</span>）。
-        主面板负责任务与调度，插件自己负责它那份配置。<br>
+        简单插件不用自带配置页：点卡片上的「配置」就能改它的 <span class="mono">config.json</span>。
+        复杂插件仍可自带页面（位于 <span class="mono">/plugins/{name}/</span>）。<br>
         ${
           showEngine
             ? `执行引擎默认 <b>QuickJS</b>（内置），
@@ -247,6 +570,7 @@ export async function render(root, ctx, opts = {}) {
                       ? `<button class="btn" disabled title="它注册了 on_tick，每秒都要跑">卸载</button>`
                       : `<button class="btn" data-loaded="${esc(p.name)}" data-now="1" title="从内存里卸出去：任务照旧排着，请求/到点会自动装回来">卸载</button>`;
                   const ops = `
+                    <button class="btn" data-config="${esc(p.name)}">配置</button>
                     <button class="btn" data-src="${esc(p.name)}">源码</button>
                     ${loadBtn}
                     <button class="btn ${p.keep_warm ? 'primary' : ''}" data-warm="${esc(p.name)}" data-on="${
@@ -383,6 +707,12 @@ export async function render(root, ctx, opts = {}) {
     if (ev.target.closest('[data-confirm-cancel]')) {
       settleArmed(false);
       render(root, ctx, { silent: true });
+      return;
+    }
+
+    const cfgBtn = ev.target.closest('button[data-config]');
+    if (cfgBtn) {
+      openPluginConfig(cfgBtn.dataset.config, ctx);
       return;
     }
 

@@ -35,16 +35,16 @@ use crate::hostapi::{self, HostState, RawTaskDef, SharedLogs};
 use crate::jshost;
 use crate::runtimes::EngineKind;
 use crate::scheduler::{self, Scheduler, TripConfig};
+use crate::workers;
 use chrono::{DateTime, Local};
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
 use rquickjs::{Context, Ctx, Function, Module, Object, Runtime};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use crate::workers;
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -56,10 +56,18 @@ use std::time::{Duration, Instant, SystemTime};
 /// 天花板是 [`hostapi::MAX_DECLARED_BUDGET_MS`]（10 分钟）。
 /// 全局默认可用环境变量 `EXEC_BUDGET_MS` 改。
 ///
-/// 也就是说：**跑任务不受这 2 秒限制**（云盘那三条任务各声明了 300s 级别）；
-/// 它真正还管着的是「没声明预算的那些调用」——`on_tick`、没写预算的路由，
-/// 以及**插件加载**（加载那条另有 [`DEFAULT_LOAD_BUDGET_MS`]，见下）。
-const DEFAULT_EXEC_BUDGET_MS: u64 = 2_000;
+/// 也就是说：**跑任务本来就不受这条限制**（云盘那三条任务各声明了 300s 级别）；
+/// 它真正管着的是「没声明预算的那些调用」——`on_tick`、没写预算的路由。
+///
+/// **60 秒**是怎么定的：2 秒对「扫一次云盘账号」这种正常工作量太紧，撞上就
+/// `InternalError: interrupted`，而插件作者看到的只是一句"被打断"，很容易去
+/// 怀疑路由写错。60 秒的取舍是：仍然能在「一条 worker 被死循环占住」时把它救回来
+/// （打断计数会涨、日志有 `执行超过预算 60s，被强制中断`），但代价是**最长 60 秒**
+/// 才救得回来 —— 所以健康判据跟着放宽（见 [`HEALTHY_LAG_FLOOR_MS`]），
+/// 否则一个合法的长调用会让面板误报「停摆」。
+///
+/// 还要更久就在任务/路由上声明 `budget_ms`；想全局改回紧的，`EXEC_BUDGET_MS=2000`。
+const DEFAULT_EXEC_BUDGET_MS: u64 = 60_000;
 
 /// 插件**加载**这一趟的预算 —— 与单次调用分开。
 ///
@@ -82,14 +90,64 @@ fn load_budget_ms(raw: Option<&str>) -> u64 {
 }
 
 /// 这一趟加载用多久。见 [`DEFAULT_LOAD_BUDGET_MS`]。
+///
+/// ⚠ 它**故意**不跟单次预算联动（旧版本有个「加载必须比单次宽松」的不变量，
+/// 那是单次预算还是 2 秒时的代理判据）。两件事的耐心来源不同：
+///
+/// - 加载预算管的是**启动/装回别卡死** —— 10 秒（最大那个插件冷加载实测 ~2 秒，
+///   留 5 倍余量）；真卡住了，等 10 秒就该放弃，而不是陪着等 60 秒。
+/// - 单次预算管的是**一条 worker 被占住多久才救回来** —— 60 秒。
+///
+/// 所以把 `EXEC_BUDGET_MS` 调到 60 秒**不会**把启动等待也拉到 60 秒。
+/// 插件确实要更久加载，显式设 `LOAD_BUDGET_MS`。
 fn load_budget() -> Duration {
     Duration::from_millis(load_budget_ms(
         std::env::var("LOAD_BUDGET_MS").ok().as_deref(),
     ))
 }
 
-/// 引擎心跳落后超过这个值，面板就报 `degraded` 而不是 `running`。
-const HEALTHY_LAG_MS: u64 = 3_000;
+/// 「测试运行」（`POST /api/test/js`）的预算：默认 10 秒，`TEST_RUN_BUDGET_MS` 可改。
+///
+/// 为什么不跟着 [`DEFAULT_EXEC_BUDGET_MS`] 走 60 秒：试跑是**人在等结果**的交互动作，
+/// 一个 `while (true) {}` 让按钮转 60 秒是不能接受的；而且试跑占的是引擎线程
+/// （见 `ratelimit.rs`），拖住 60 秒等于把插件任务一起停了。
+/// 上限仍是单次预算 —— 试跑不该比正式调用更宽松。
+pub const DEFAULT_TEST_RUN_BUDGET_MS: u64 = 10_000;
+
+/// 试跑预算（环境变量可调，且不超过单次调用预算）。
+pub fn test_run_budget_ms() -> u64 {
+    test_run_budget_ms_with(
+        std::env::var("TEST_RUN_BUDGET_MS").ok().as_deref(),
+        exec_budget_ms(),
+    )
+}
+
+/// 纯函数版本：解析 + 夹上限。**不读环境变量**，这样测试不会因为并发改 env 互相干扰。
+fn test_run_budget_ms_with(raw: Option<&str>, exec: u64) -> u64 {
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_TEST_RUN_BUDGET_MS)
+        .min(exec)
+}
+
+/// 单次调用的全局默认预算（`EXEC_BUDGET_MS` 可覆盖，夹在
+/// [`hostapi::MAX_DECLARED_BUDGET_MS`] 以内）。
+fn exec_budget_ms() -> u64 {
+    std::env::var("EXEC_BUDGET_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_EXEC_BUDGET_MS)
+        .min(hostapi::MAX_DECLARED_BUDGET_MS)
+}
+
+/// 心跳落后超过「单次预算 + 这个宽限」，面板才报 `degraded` 而不是 `running`。
+///
+/// 为什么不是固定 3 秒：单次预算 60 秒意味着**一次合法调用最长可以占住一条 worker
+/// 60 秒**，这期间它本来就不会有心跳。固定 3 秒会把这种正常情况报成停摆。
+/// 代价要说清楚：真正卡死的 worker 也要等到「预算 + 3 秒」才被认出来 ——
+/// 这是把预算放宽到 60 秒必须接受的另一半。
+const HEALTHY_LAG_FLOOR_MS: u64 = 3_000;
 
 /// 惰性加载的三档默认值。
 ///
@@ -178,7 +236,11 @@ impl LazyCfg {
         } else {
             want_preload
         };
-        Self { on, idle_ms, preload_ms }
+        Self {
+            on,
+            idle_ms,
+            preload_ms,
+        }
     }
 }
 
@@ -253,7 +315,10 @@ fn make_runtime(plugins_dir: &Path, wd: &Watchdog) -> Option<Runtime> {
     let rt = Runtime::new().ok()?;
     rt.set_memory_limit(64 * 1024 * 1024);
     rt.set_max_stack_size(1024 * 1024);
-    rt.set_loader(HostApiResolver::new(plugins_dir.to_path_buf()), HostApiLoader);
+    rt.set_loader(
+        HostApiResolver::new(plugins_dir.to_path_buf()),
+        HostApiLoader,
+    );
     rt.set_interrupt_handler(Some(wd.handler()));
     Some(rt)
 }
@@ -378,8 +443,7 @@ fn maintain_plugins(
         // 它 `evicted = true` 且我们记了 `retry_at`，到点要再试一次。
         // 否则一次"加载超预算 / 文件一时读不到"就等于插件永久死亡。
         if p.error.is_some() {
-            let retry_due = p.evicted
-                && p.retry_at.map(|t| Instant::now() >= t).unwrap_or(false);
+            let retry_due = p.evicted && p.retry_at.map(|t| Instant::now() >= t).unwrap_or(false);
             if !retry_due {
                 continue;
             }
@@ -405,7 +469,9 @@ fn maintain_plugins(
             //   `evicted = true && keep_warm = true` 这种自相矛盾的状态
             //   （实测：先卸了，随后才在面板上勾上 —— 名单 2 秒后才被读到）。
             let due_soon = p.keep_warm
-                || next_in.map(|ms| ms <= cfg.preload_ms as i64).unwrap_or(false);
+                || next_in
+                    .map(|ms| ms <= cfg.preload_ms as i64)
+                    .unwrap_or(false);
             if !due_soon {
                 continue;
             }
@@ -450,7 +516,6 @@ fn maintain_plugins(
     }
     changed
 }
-
 
 /// 单调时钟毫秒数。用 `Instant` 而不是系统时间：NTP 拨表时执行预算不该跟着跳。
 pub fn now_ms() -> u64 {
@@ -592,9 +657,9 @@ impl EngineHealth {
     pub fn healthy(&self) -> bool {
         let now = now_ms();
         self.slots.iter().all(|s| {
-            let beat_ok = now < s.beat_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
-            let wake_ok =
-                now < s.expect_ms.load(Ordering::Relaxed).saturating_add(HEALTHY_LAG_MS);
+            let lag = self.budget_ms.saturating_add(HEALTHY_LAG_FLOOR_MS);
+            let beat_ok = now < s.beat_ms.load(Ordering::Relaxed).saturating_add(lag);
+            let wake_ok = now < s.expect_ms.load(Ordering::Relaxed).saturating_add(lag);
             beat_ok || wake_ok
         })
     }
@@ -666,7 +731,10 @@ pub type Registry = Arc<Mutex<Vec<PluginInfo>>>;
 /// 宿主 → 引擎线程的指令。
 pub enum EngineCmd {
     /// 一次 tick。`seq` 从 1 开始单调递增。
-    Tick { seq: u64, ts: String },
+    Tick {
+        seq: u64,
+        ts: String,
+    },
     /// 只把 worker 叫醒（目录变了 / 新插件归属变了），不做 tick。
     Wake,
     /// JS 插件注册的 HTTP 路由请求。`key` 形如 `"GET /hello"`。
@@ -886,7 +954,6 @@ impl EngineHandle {
         all
     }
 
-
     /// 只给「需要每秒 tick」的 worker 发 Tick。
     ///
     /// 没有 `on_tick`、插件又都已卸出的 worker 不需要每秒醒；让它睡到
@@ -944,11 +1011,7 @@ impl JsEngine {
         db: Db,
         host: Arc<HostState>,
     ) -> Self {
-        let budget_ms = std::env::var("EXEC_BUDGET_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_EXEC_BUDGET_MS);
+        let budget_ms = exec_budget_ms();
 
         let workers_cfg = env_usize("ENGINE_WORKERS", default_engine_workers());
         let pin = parse_pin(&std::env::var("ENGINE_PIN").unwrap_or_default());
@@ -970,7 +1033,11 @@ impl JsEngine {
                  ⇒ 自动抬到 {workers_n} 条执行线程"
             );
         }
-        crate::log::plog!("engine", info, "{workers_n} 条执行线程（ENGINE_WORKERS 可调）：");
+        crate::log::plog!(
+            "engine",
+            info,
+            "{workers_n} 条执行线程（ENGINE_WORKERS 可调）："
+        );
         for note in &plan.notes {
             crate::log::plog!("engine", info, "  {note}");
         }
@@ -1037,8 +1104,7 @@ impl JsEngine {
                 .name(format!("plugin-engine-{idx}"))
                 .spawn(move || {
                     worker_main(
-                        idx, group, workers_n, a, dir, reg, lg, d, h, hh, tx_all,
-                        tm, rx,
+                        idx, group, workers_n, a, dir, reg, lg, d, h, hh, tx_all, tm, rx,
                     )
                 })
                 .expect("启动引擎线程失败");
@@ -1176,7 +1242,25 @@ const MAX_MODULE_BYTES: u64 = 1024 * 1024;
 /// 一个字符是否需要百分号编码（URL path 段里不安全的那些）。
 fn needs_pct(b: u8) -> bool {
     !(b.is_ascii_alphanumeric()
-        || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'@' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b'='))
+        || matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b'='
+        ))
 }
 
 /// 路径 → `file://` URL（百分号编码）。
@@ -1203,7 +1287,8 @@ fn pct_decode(s: &str) -> Result<String, String> {
                 return Err(format!("URL 里的百分号编码不完整：`{s}`"));
             }
             let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-            let v = u8::from_str_radix(hex, 16).map_err(|_| format!("URL 里的百分号编码非法：`{s}`"))?;
+            let v = u8::from_str_radix(hex, 16)
+                .map_err(|_| format!("URL 里的百分号编码非法：`{s}`"))?;
             out.push(v);
             i += 3;
         } else {
@@ -1219,9 +1304,9 @@ fn pct_decode(s: &str) -> Result<String, String> {
 /// 只处理 path-only 的 `file://` URL（没有 query / fragment），够插件用；
 /// 不做的事写清楚：不认识 `?` / `#`（按普通字符处理），不解析 import maps。
 fn url_join(base: &str, spec: &str) -> Result<String, String> {
-    let base_path = base
-        .strip_prefix("file://")
-        .ok_or_else(|| format!("导入方模块名不是 file:// URL：`{base}`（相对 import 需要有文件作基准）"))?;
+    let base_path = base.strip_prefix("file://").ok_or_else(|| {
+        format!("导入方模块名不是 file:// URL：`{base}`（相对 import 需要有文件作基准）")
+    })?;
     // 去点段要在**合并之后**做：先丢掉基址最后一段（文件名），再接上说明符。
     // `spec` 以 `/` 开头时按 URL 语义是"以根为基准"，直接替掉整条 path。
     let joined = if spec.starts_with('/') {
@@ -1430,7 +1515,9 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
         // 标记里带上模块名，JS 侧据此选择返回哪个门面对象（见 BOOTSTRAP 的 require）
         return format!("{{\"ok\":true,\"builtin\":true,\"module\":\"{m}\"}}");
     }
-    if spec.starts_with("node:") || spec.starts_with("fs") && !spec.starts_with("./") && !spec.starts_with("../") {
+    if spec.starts_with("node:")
+        || spec.starts_with("fs") && !spec.starts_with("./") && !spec.starts_with("../")
+    {
         // 裸标识符 / node: 内置 —— 没有 node_modules 可找
         return format!(
             "{{\"ok\":false,\"error\":{}}}",
@@ -1452,7 +1539,8 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
                     ),
                     Err(e) => format!(
                         "{{\"ok\":false,\"error\":{}}}",
-                        serde_json::to_string(&format!("读不到 `{p}`：{e}")).unwrap_or_else(|_| "\"?\"".into())
+                        serde_json::to_string(&format!("读不到 `{p}`：{e}"))
+                            .unwrap_or_else(|_| "\"?\"".into())
                     ),
                 },
                 Err(e) => format!(
@@ -1476,13 +1564,14 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
 /// （反方向同理：`require` 读 ES 模块会丢 `unsupported keyword: export`，
 /// 那条我已经在 require 那侧拦下了。）
 fn looks_like_cjs(source: &str) -> bool {
-    let has_esm = source
-        .lines()
-        .any(|l| {
-            let t = l.trim_start();
-            t.starts_with("import ") || t.starts_with("import{") || t.starts_with("export ")
-                || t.starts_with("export{") || t.starts_with("export(")
-        });
+    let has_esm = source.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("import ")
+            || t.starts_with("import{")
+            || t.starts_with("export ")
+            || t.starts_with("export{")
+            || t.starts_with("export(")
+    });
     if has_esm {
         return false;
     }
@@ -1535,9 +1624,9 @@ impl Loader for HostApiLoader {
                 "只有 `host-api` 与插件目录内的文件可以被 import（解析阶段应当给出 file:// URL）",
             )
         })?;
-        let path = PathBuf::from(pct_decode(path_part).map_err(|e| {
-            rquickjs::Error::new_loading_message(name, e)
-        })?);
+        let path = PathBuf::from(
+            pct_decode(path_part).map_err(|e| rquickjs::Error::new_loading_message(name, e))?,
+        );
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         if ext != "js" && ext != "mjs" {
             return Err(rquickjs::Error::new_loading_message(
@@ -1545,8 +1634,9 @@ impl Loader for HostApiLoader {
                 format!("只支持 .js / .mjs 模块（这个文件后缀是 `.{ext}`）"),
             ));
         }
-        let meta = std::fs::metadata(&path)
-            .map_err(|e| rquickjs::Error::new_loading_message(name, format!("读不到模块文件：{e}")))?;
+        let meta = std::fs::metadata(&path).map_err(|e| {
+            rquickjs::Error::new_loading_message(name, format!("读不到模块文件：{e}"))
+        })?;
         if meta.len() > MAX_MODULE_BYTES {
             return Err(rquickjs::Error::new_loading_message(
                 name,
@@ -1572,7 +1662,11 @@ impl Loader for HostApiLoader {
                 ),
             ));
         }
-        let src = if needs_require_shim(&raw) { with_require_shim(&raw) } else { raw };
+        let src = if needs_require_shim(&raw) {
+            with_require_shim(&raw)
+        } else {
+            raw
+        };
         let module = Module::declare(ctx.clone(), name, src)?;
         // 被 import 的模块同样要有 `import.meta.url` —— 模块最常见的用法就是
         // 靠它定位自己旁边的文件（这也是 ESM 语义的一部分，不是可选项）
@@ -1680,7 +1774,11 @@ fn worker_main(
     // 所以放在共享的 Arc 里，maintenance 每轮读一次。
     let keep_warm: Arc<Mutex<Vec<String>>> = {
         let v = db::list_keep_warm_plugins(&db).unwrap_or_else(|e| {
-            crate::log::plog!(&format!("engine:{idx}"), warn, "读取「长期加载」名单失败: {e}");
+            crate::log::plog!(
+                &format!("engine:{idx}"),
+                warn,
+                "读取「长期加载」名单失败: {e}"
+            );
             Vec::new()
         });
         Arc::new(Mutex::new(v))
@@ -1710,8 +1808,7 @@ fn worker_main(
             continue;
         }
         // ⚠ 加载用**加载预算**，不是单次调用的 2 秒（见 `DEFAULT_LOAD_BUDGET_MS`）
-        let (lp, mut declared) =
-            load_one(&mut rt, file, &logs, &host, &wd, load_budget());
+        let (lp, mut declared) = load_one(&mut rt, file, &logs, &host, &wd, load_budget());
         pending.append(&mut declared);
         plugins.push(lp);
     }
@@ -1789,14 +1886,7 @@ fn worker_main(
 
     // 面板创建的任务不在插件代码里，`install_tasks` 装不到它们，得单独从库里读回来。
     reinstall_panel_jobs(
-        &mut sched,
-        &plugins,
-        &logs,
-        &db,
-        &wd,
-        budget,
-        boot_at,
-        &owned,
+        &mut sched, &plugins, &logs, &db, &wd, budget, boot_at, &owned,
     );
 
     // 把累计计数灌回去（否则重启后「触发次数」归零、熔断退避从头开始）
@@ -1856,8 +1946,7 @@ fn worker_main(
     // ---------- 事件循环：deadline 驱动 ----------
     let mut last_scan = Instant::now();
     // 半被动：watcher 事件会 Wake 并强制扫描；这个周期只是兜底（默认 30 秒）。
-    let scan_interval =
-        Duration::from_millis(env_u64("PLUGIN_SCAN_MS", 30_000).max(1_000));
+    let scan_interval = Duration::from_millis(env_u64("PLUGIN_SCAN_MS", 30_000).max(1_000));
     let mut force_scan = false;
     let mut last_script_sync = Instant::now();
     let script_worker = script_worker_index(workers_n);
@@ -2070,9 +2159,7 @@ fn worker_main(
                             .map(|v| v.iter().any(|n| n == &name))
                             .unwrap_or(false);
                         if is_off {
-                            return Err(
-                                "它被面板停用了：先启用，再谈装进内存".to_string()
-                            );
+                            return Err("它被面板停用了：先启用，再谈装进内存".to_string());
                         }
                         if !p.evicted {
                             return Ok(()); // 已经装着了
@@ -2100,9 +2187,7 @@ fn worker_main(
                         }
                         let n = host.ws.open_count_for(&name);
                         if n > 0 {
-                            return Err(format!(
-                                "它自己还连着 {n} 条 WebSocket，先等它断开再卸"
-                            ));
+                            return Err(format!("它自己还连着 {n} 条 WebSocket，先等它断开再卸"));
                         }
                         evict_runtime(p, &host);
                         hostapi::push_log(
@@ -2208,7 +2293,17 @@ fn worker_main(
             }) => {
                 let run_id = new_run_id();
                 let started = Local::now();
-                let out = test_run(qjs!(), &host, &logs, &wd, budget, &lang, &code, &input);
+                // 试跑用自己的预算（默认 10 秒）：人在等结果，不该跟着 60 秒的单次预算走
+                let out = test_run(
+                    qjs!(),
+                    &host,
+                    &logs,
+                    &wd,
+                    Duration::from_millis(test_run_budget_ms()),
+                    &lang,
+                    &code,
+                    &input,
+                );
 
                 // 试跑也进运行记录（`kind = 'test'`），但**输出存在记录自己身上**：
                 // 试跑的输出被捕获缓冲收走了，不进日志库（不打终端、不进环形缓冲、
@@ -2405,18 +2500,18 @@ fn worker_main(
                 && forced.lock().map(|g| g.is_empty()).unwrap_or(true);
             if !relax {
                 sync_plugins(
-                &mut rt,
-                &mut plugins,
-                &mut sched,
-                &logs,
-                &db,
-                &host,
-                &wd,
-                budget,
-                &registry,
-                &my_files,
-                &mine,
-                &forced,
+                    &mut rt,
+                    &mut plugins,
+                    &mut sched,
+                    &logs,
+                    &db,
+                    &host,
+                    &wd,
+                    budget,
+                    &registry,
+                    &my_files,
+                    &mine,
+                    &forced,
                 );
             }
         }
@@ -2425,7 +2520,11 @@ fn worker_main(
     // ---------- 收尾：外部子进程先杀掉，再释放解释器 ----------
     crate::log::plog!(&format!("engine:{idx}"), info, "正在释放插件解释器...");
     drop(plugins);
-    crate::log::plog!(&format!("engine:{idx}"), info, "正在释放 QuickJS Runtime...");
+    crate::log::plog!(
+        &format!("engine:{idx}"),
+        info,
+        "正在释放 QuickJS Runtime..."
+    );
     drop(rt);
     crate::log::plog!(&format!("engine:{idx}"), info, "执行线程已退出");
 }
@@ -2490,15 +2589,14 @@ fn install_tasks(
 ///
 /// 库里那一行已经由宿主 API 写好（所有权也在那里校验过），这里只负责内存状态；
 /// 改完调度后把新的 next_run 回写，面板读数才不会滞后一拍。
-fn apply_job_patch(
-    sched: &mut Scheduler,
-    db: &Db,
-    logs: &SharedLogs,
-    patch: scheduler::JobPatch,
-) {
+fn apply_job_patch(sched: &mut Scheduler, db: &Db, logs: &SharedLogs, patch: scheduler::JobPatch) {
     let now = Local::now();
     match patch {
-        scheduler::JobPatch::Paused { plugin, name, paused } => {
+        scheduler::JobPatch::Paused {
+            plugin,
+            name,
+            paused,
+        } => {
             // 找不到 = 不是本 worker 的插件，正常，不报错
             if let Ok(enabled) = sched.set_paused(&plugin, &name, paused, now) {
                 // 恢复时 next_fire 可能刚被重新对齐 ⇒ 回写，面板不会还显示旧的
@@ -2529,7 +2627,10 @@ fn apply_job_patch(
             expr,
             lead_ms,
         } => {
-            if sched.set_schedule(&plugin, &name, &expr, lead_ms, now).is_ok() {
+            if sched
+                .set_schedule(&plugin, &name, &expr, lead_ms, now)
+                .is_ok()
+            {
                 if let Some(idx) = sched.find(&plugin, &name) {
                     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
                     let _ = db::set_job_next_run(db, &plugin, &name, &next, &fmt_secs(now));
@@ -2618,7 +2719,9 @@ fn apply_overrides(
                 logs,
                 &plugin,
                 "info",
-                &format!("任务 `{name}` 沿用面板覆盖的表达式 `{ov}`（代码里声明的是 `{declared}`）"),
+                &format!(
+                    "任务 `{name}` 沿用面板覆盖的表达式 `{ov}`（代码里声明的是 `{declared}`）"
+                ),
             ),
             // 覆盖值解析不了（理论上不可能：写库前解析过）→ 记一行，用代码声明的值继续跑
             Err(e) => hostapi::push_log(
@@ -2693,7 +2796,14 @@ fn reinstall_panel_jobs(
             Err(e) => {
                 let msg = format!("面板任务 `{}` 的调度表达式无效: {e}", job.name);
                 hostapi::push_log(logs, &job.plugin, "error", &msg);
-                let _ = db::set_job_status(db, &job.plugin, &job.name, "error", Some(&msg), &fmt_secs(now));
+                let _ = db::set_job_status(
+                    db,
+                    &job.plugin,
+                    &job.name,
+                    "error",
+                    Some(&msg),
+                    &fmt_secs(now),
+                );
                 continue;
             }
         };
@@ -2708,7 +2818,14 @@ fn reinstall_panel_jobs(
                 job.name, job.plugin
             );
             hostapi::push_log(logs, &job.plugin, "error", &msg);
-            let _ = db::set_job_status(db, &job.plugin, &job.name, "error", Some(&msg), &fmt_secs(now));
+            let _ = db::set_job_status(
+                db,
+                &job.plugin,
+                &job.name,
+                "error",
+                Some(&msg),
+                &fmt_secs(now),
+            );
             continue;
         }
         // add_panel：面板任务必须带着 TaskSource::Panel 进调度器，
@@ -2723,7 +2840,12 @@ fn reinstall_panel_jobs(
             job.budget_ms.map(|v| v as u64),
         ) {
             Ok(_) => {}
-            Err(e) => hostapi::push_log(logs, &job.plugin, "error", &format!("面板任务重装失败: {e}")),
+            Err(e) => hostapi::push_log(
+                logs,
+                &job.plugin,
+                "error",
+                &format!("面板任务重装失败: {e}"),
+            ),
         }
     }
 }
@@ -2733,12 +2855,7 @@ fn reinstall_panel_jobs(
 /// 面板新建任务时用它做校验：名字写错的任务会一路失败到熔断，
 /// 不如在创建的那一刻就说清楚。两个运行时的引导脚本都提供了 `__has_task`，
 /// 约定一致：只传 String，返回 `"1"`（有）/ `""`（没有）。
-fn plugin_has_handler(
-    plugin: &LoadedPlugin,
-    name: &str,
-    wd: &Watchdog,
-    budget: Duration,
-) -> bool {
+fn plugin_has_handler(plugin: &LoadedPlugin, name: &str, wd: &Watchdog, budget: Duration) -> bool {
     match plugin.runtime.as_ref() {
         None => false,
         Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
@@ -2801,8 +2918,7 @@ fn add_job(
     {
         return Err(format!("插件 `{plugin}` 里已经有名为 `{name}` 的任务"));
     }
-    let schedule =
-        Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+    let schedule = Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
     if !plugin_has_handler(p, name, wd, budget) {
         return Err(format!(
             "插件 `{plugin}` 里没有名为 `{name}` 的处理函数。\
@@ -2824,19 +2940,17 @@ fn add_job(
     )?;
     let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
     // 先落库。写库失败就把刚装上的任务摘掉，避免「调度器里在跑、库里没有」的假状态。
-    if let Err(e) =
-        db::insert_panel_job(
-            db,
-            plugin,
-            name,
-            expr,
-            Some(&next),
-            &fmt_secs(now),
-            params.as_deref(),
-            budget_ms.map(|v| v as i64),
-            lead_ms.map(|v| v as i64),
-        )
-    {
+    if let Err(e) = db::insert_panel_job(
+        db,
+        plugin,
+        name,
+        expr,
+        Some(&next),
+        &fmt_secs(now),
+        params.as_deref(),
+        budget_ms.map(|v| v as i64),
+        lead_ms.map(|v| v as i64),
+    ) {
         sched.remove_task(plugin, name);
         return Err(format!("写库失败: {e}"));
     }
@@ -2861,7 +2975,8 @@ fn remove_job(
     name: &str,
 ) -> Result<(), String> {
     let now = Local::now();
-    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))?
+    {
         None => return Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
         Some(src) => src == "panel" || src == "script-panel",
     };
@@ -2919,7 +3034,9 @@ fn restore_job(
     // 脚本任务不依赖插件运行时：直接按 DB 里的路径/表达式装回调度器。
     if plugin == db::SCRIPT_PLUGIN {
         let (Some(script), Some(runtime)) = (row.script.clone(), row.runtime.clone()) else {
-            return Err(format!("任务 `{name}` 不是可恢复的脚本任务（缺路径/运行时）"));
+            return Err(format!(
+                "任务 `{name}` 不是可恢复的脚本任务（缺路径/运行时）"
+            ));
         };
         let schedule = crate::cron::Schedule::parse(&row.schedule)
             .map_err(|e| format!("任务 `{name}` 的表达式无效: {e}"))?;
@@ -2967,9 +3084,11 @@ fn restore_job(
             "插件 `{plugin}` 里没有名为 `{name}` 的处理函数，恢复出来也跑不了"
         ));
     }
-    let expr = row.override_expr.clone().unwrap_or_else(|| row.schedule.clone());
-    let schedule =
-        Schedule::parse(&expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
+    let expr = row
+        .override_expr
+        .clone()
+        .unwrap_or_else(|| row.schedule.clone());
+    let schedule = Schedule::parse(&expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
 
     db::set_job_deleted(db, plugin, name, false, &fmt_secs(now))
         .map_err(|e| format!("写库失败: {e}"))?;
@@ -2986,7 +3105,12 @@ fn restore_job(
             )
             .map_err(|e| format!("装回调度器失败: {e}"))?;
         // 累计计数从库里灌回来（`add` 出来的是零计数）
-        sched.seed_counters(plugin, name, row.runs.max(0) as u64, row.trips.max(0) as u32);
+        sched.seed_counters(
+            plugin,
+            name,
+            row.runs.max(0) as u64,
+            row.trips.max(0) as u32,
+        );
         if row.paused {
             let _ = sched.set_paused(plugin, name, true, now);
         }
@@ -3009,12 +3133,7 @@ fn restore_job(
 /// 哪些被用户删过 —— 少了这一步，**删掉的任务会在下次重启 / 热更新时自己跑起来**。
 /// 和 `restore_paused`（暂停状态）、`apply_overrides`（覆盖表达式）是同一类坑，
 /// 三者都必须在「装完之后、seed 之前」跑一遍。
-fn drop_deleted(
-    sched: &mut Scheduler,
-    logs: &SharedLogs,
-    db: &Db,
-    owned: &[String],
-) {
+fn drop_deleted(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, owned: &[String]) {
     let rows = match db::list_deleted_jobs(db, Some(owned)) {
         Ok(r) => r,
         Err(e) => {
@@ -3064,7 +3183,8 @@ fn edit_job(
 ) -> Result<(), String> {
     let now = Local::now();
 
-    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))? {
+    let is_panel = match db::job_source(db, plugin, name).map_err(|e| format!("读库失败: {e}"))?
+    {
         None => return Err(format!("没有名为 `{name}` 的任务（插件 `{plugin}`）")),
         Some(src) => src == "panel" || src == "script-panel",
     };
@@ -3167,14 +3287,9 @@ fn edit_job(
 
     // 插件与处理函数都要在：改完表达式要跑的还是那个 handler。
     // 插件已经没了的话，该做的是「清理失效任务」，不是编辑它。
-    let p = plugins
-        .iter()
-        .find(|p| p.name == plugin)
-        .ok_or_else(|| {
-            format!(
-                "没有名为 `{plugin}` 的插件（任务已失效，可以用「清理失效任务」删掉它）"
-            )
-        })?;
+    let p = plugins.iter().find(|p| p.name == plugin).ok_or_else(|| {
+        format!("没有名为 `{plugin}` 的插件（任务已失效，可以用「清理失效任务」删掉它）")
+    })?;
     // 插件被"惰性加载"卸出去了：处理函数查不到，但那不是"名字写错"。
     // 直接说清楚，并给一条现成的出路（面板上的「加载」按钮）。
     if p.evicted {
@@ -3197,7 +3312,10 @@ fn edit_job(
     let Some(idx) = sched.find(plugin, name) else {
         if is_panel {
             let e = expr.unwrap_or_default();
-            let next = schedule.as_ref().and_then(|s| s.next_after(now)).map(scheduler::fmt_ms);
+            let next = schedule
+                .as_ref()
+                .and_then(|s| s.next_after(now))
+                .map(scheduler::fmt_ms);
             db::update_panel_job_schedule(
                 db,
                 plugin,
@@ -3207,7 +3325,7 @@ fn edit_job(
                 &fmt_secs(now),
                 lead_ms.map(|v| v as i64),
             )
-                .map_err(|err| format!("写库失败: {err}"))?;
+            .map_err(|err| format!("写库失败: {err}"))?;
             hostapi::push_log(
                 logs,
                 plugin,
@@ -3237,8 +3355,7 @@ fn edit_job(
         let old_expr = sched.tasks()[idx].expr.clone();
         sched.set_expr(plugin, name, e, schedule, now)?;
         let next = scheduler::fmt_ms(sched.tasks()[idx].next_fire);
-        if let Err(err) =
-            db::update_panel_job_schedule(
+        if let Err(err) = db::update_panel_job_schedule(
             db,
             plugin,
             name,
@@ -3246,8 +3363,7 @@ fn edit_job(
             Some(&next),
             &fmt_secs(now),
             lead_ms.map(|v| v as i64),
-        )
-        {
+        ) {
             // 回滚内存。`old_expr` 解析过，再解析一定成功。
             if let Ok(s) = Schedule::parse(&old_expr) {
                 let _ = sched.set_expr(plugin, name, &old_expr, s, now);
@@ -3367,7 +3483,11 @@ fn cleanup_jobs(
 fn new_run_id() -> String {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}-{:04x}", chrono::Local::now().format("%Y%m%d-%H%M%S"), n & 0xffff)
+    format!(
+        "{}-{:04x}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        n & 0xffff
+    )
 }
 
 /// 脚本任务的默认超时（`SCRIPT_TIMEOUT_MS`，默认 60 秒）。
@@ -3496,10 +3616,13 @@ fn run_one(
     // **同一条线程上的**别的任务拖住」。独占线程之后那个理由不成立了，
     // 但全局值还在 —— 于是一个「一个函数从头跑到尾」的长任务会被直接掐断
     // （报「疑似死循环」）。这一格就是给它一个说清楚自己需要多久的地方。
-    let script_meta = sched.tasks().get(idx).and_then(|t| match (&t.script, &t.runtime) {
-        (Some(s), Some(r)) => Some((s.clone(), r.clone())),
-        _ => None,
-    });
+    let script_meta = sched
+        .tasks()
+        .get(idx)
+        .and_then(|t| match (&t.script, &t.runtime) {
+            (Some(s), Some(r)) => Some((s.clone(), r.clone())),
+            _ => None,
+        });
     let task_budget = sched
         .tasks()
         .get(idx)
@@ -3556,7 +3679,9 @@ fn run_one(
             if out.ok {
                 Ok(())
             } else {
-                Err(out.error.unwrap_or_else(|| "脚本执行失败（没有给出原因）".into()))
+                Err(out
+                    .error
+                    .unwrap_or_else(|| "脚本执行失败（没有给出原因）".into()))
             }
         }
         None => match find_plugin(plugins, &plugin) {
@@ -3786,7 +3911,14 @@ fn dispatch_route(
 
 impl LoadedPlugin {
     /// Rust → 插件的 tick 链路。Python 侧对应 `__pp_tick`（插件里定义 `on_tick(payload)`）。
-    fn fire_tick(&mut self, seq: u64, ts: &str, logs: &SharedLogs, wd: &Watchdog, budget: Duration) {
+    fn fire_tick(
+        &mut self,
+        seq: u64,
+        ts: &str,
+        logs: &SharedLogs,
+        wd: &Watchdog,
+        budget: Duration,
+    ) {
         if self.runtime.is_none() || !self.has_on_tick {
             return;
         }
@@ -3993,7 +4125,15 @@ fn load_one(
             );
             let declared = std::mem::take(&mut *pending.lock().unwrap());
             let nav_def = nav.lock().unwrap().take();
-            (runtime, has_on_tick, declared, Vec::new(), Vec::new(), nav_def, err)
+            (
+                runtime,
+                has_on_tick,
+                declared,
+                Vec::new(),
+                Vec::new(),
+                nav_def,
+                err,
+            )
         } else {
             let command = command.expect("外部引擎必然有命令");
             match extproc::load(engine, command, &file_abs, &name, host, logs, load_budget()) {
@@ -4006,7 +4146,15 @@ fn load_one(
                     load.nav,
                     None,
                 ),
-                Err(e) => (None, false, Vec::new(), Vec::new(), Vec::new(), None, Some(e)),
+                Err(e) => (
+                    None,
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(e),
+                ),
             }
         };
 
@@ -4085,7 +4233,11 @@ fn load_one(
                 &format!(
                     "插件已加载（{}，on_tick: {}，任务: {}）",
                     engine.as_str(),
-                    if has_on_tick { "已注册" } else { "未注册" },
+                    if has_on_tick {
+                        "已注册"
+                    } else {
+                        "未注册"
+                    },
                     declared.len()
                 ),
             );
@@ -4111,8 +4263,8 @@ fn choose_engine(
     host: &Arc<HostState>,
     name: &str,
 ) -> Result<(EngineKind, Option<PathBuf>), String> {
-    let (stored_engine, stored_command) = db::get_plugin_runtime(&host.db, name)
-        .map_err(|e| format!("读插件运行时设置失败: {e}"))?;
+    let (stored_engine, stored_command) =
+        db::get_plugin_runtime(&host.db, name).map_err(|e| format!("读插件运行时设置失败: {e}"))?;
     let engine = stored_engine
         .as_deref()
         .and_then(EngineKind::parse)
@@ -4166,13 +4318,14 @@ fn load_js(
             nav,
             logs.clone(),
         )
-            .map_err(|e| format!("注入 host 失败: {e}"))?;
+        .map_err(|e| format!("注入 host 失败: {e}"))?;
 
         wd.arm(budget);
         let eval = if looks_like_module(source) {
             eval_as_module(&ctx, source, file_str)
         } else {
-            ctx.eval::<(), _>(source).map_err(|e| render_exception(&ctx, &e))
+            ctx.eval::<(), _>(source)
+                .map_err(|e| render_exception(&ctx, &e))
         };
         wd.disarm();
         if let Err(e) = eval {
@@ -4218,7 +4371,11 @@ fn eval_as_module(ctx: &Ctx, source: &str, file_str: &str) -> Result<(), String>
     } else {
         file_str.to_string()
     };
-    let src = if needs_require_shim(source) { with_require_shim(source) } else { source.to_string() };
+    let src = if needs_require_shim(source) {
+        with_require_shim(source)
+    } else {
+        source.to_string()
+    };
     let module = Module::declare(ctx.clone(), module_name.clone(), src)
         .map_err(|e| render_exception(ctx, &e))?;
     // 填 `import.meta`：ESM 的模块要能问"我在哪"。QuickJS 不自动给，得宿主填
@@ -4285,7 +4442,6 @@ fn collect_entries(dir: &Path, out: &mut Vec<PathBuf>) {
 fn is_js(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("js")
 }
-
 
 /// 把调度器里**插件代码声明的**任务映射成 `jobs` 表的 spec。
 ///
@@ -4517,12 +4673,7 @@ fn collision_logged() -> &'static Mutex<HashSet<String>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn sync_script_tasks(
-    sched: &mut Scheduler,
-    logs: &SharedLogs,
-    db: &Db,
-    host: &Arc<HostState>,
-) {
+fn sync_script_tasks(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, host: &Arc<HostState>) {
     let files = crate::taskdir::scan(&host.tasks_dir);
     let jobs = match db::list_script_jobs(db) {
         Ok(j) => j,
@@ -4542,7 +4693,10 @@ fn sync_script_tasks(
                 logs,
                 "__script__",
                 "error",
-                &format!("任务目录里有重名脚本 `{}`，已跳过（任务名 `{}`）", f.path, f.name),
+                &format!(
+                    "任务目录里有重名脚本 `{}`，已跳过（任务名 `{}`）",
+                    f.path, f.name
+                ),
             );
             continue;
         }
@@ -4554,9 +4708,7 @@ fn sync_script_tasks(
                 // 目录优先：同名时不让目录任务抢面板任务的名字，但要让用户知道冲突。
                 // 这个函数每 2 秒跑一次，不能每轮都刷同一条 warn。
                 let key = format!("{}::{}", f.path, f.name);
-                let mut seen = collision_logged()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut seen = collision_logged().lock().unwrap_or_else(|e| e.into_inner());
                 if seen.insert(key) {
                     hostapi::push_log(
                         logs,
@@ -4573,7 +4725,11 @@ fn sync_script_tasks(
             }
         }
 
-        let schedule_expr = f.header.cron.clone().filter(|_| f.valid && !f.header.disabled);
+        let schedule_expr = f
+            .header
+            .cron
+            .clone()
+            .filter(|_| f.valid && !f.header.disabled);
         let schedule = schedule_expr
             .as_deref()
             .and_then(|e| crate::cron::Schedule::parse(e).ok());
@@ -4584,8 +4740,8 @@ fn sync_script_tasks(
             //   改它的 path/runtime/params；否则文件删掉后用户看到的是被文件头覆盖过的配置。
             if j.source == "script-dir"
                 && (j.script.as_deref() != Some(f.path.as_str())
-                || j.runtime.as_deref() != Some(f.runtime.as_str())
-                || j.params.as_deref() != f.header.params.as_deref()
+                    || j.runtime.as_deref() != Some(f.runtime.as_str())
+                    || j.params.as_deref() != f.header.params.as_deref()
                     || j.budget_ms != f.header.timeout_ms.map(|v| v as i64))
             {
                 if let Err(e) = db::update_script_dir_meta(
@@ -4601,10 +4757,13 @@ fn sync_script_tasks(
                 }
             }
             // 表达式变了：收敛 DB（不动 override_expr）
-            if j.source == "script-dir"
-                && j.schedule != schedule_expr.clone().unwrap_or_default()
-            {
-                if let Err(e) = db::set_script_dir_schedule(db, &f.name, schedule_expr.as_deref().unwrap_or(""), &now_s) {
+            if j.source == "script-dir" && j.schedule != schedule_expr.clone().unwrap_or_default() {
+                if let Err(e) = db::set_script_dir_schedule(
+                    db,
+                    &f.name,
+                    schedule_expr.as_deref().unwrap_or(""),
+                    &now_s,
+                ) {
                     crate::log::plog!("engine", warn, "收敛脚本调度失败: {e}");
                 }
             }
@@ -4618,7 +4777,11 @@ fn sync_script_tasks(
                 continue;
             }
         } else {
-            let status = if schedule.is_some() { "scheduled" } else { "idle" };
+            let status = if schedule.is_some() {
+                "scheduled"
+            } else {
+                "idle"
+            };
             if let Err(e) = db::upsert_script_dir_job(
                 db,
                 &f.name,
@@ -4734,21 +4897,22 @@ fn sync_script_tasks(
         }
         // 同名目录文件存在且可调度：目录优先，别让面板任务把调度器里的那条覆盖掉。
         // 但目录行被墓碑/暂停时它并不生效，这时面板任务应该继续跑。
-        let dir_blocked = jobs.iter().any(|x| {
-            x.source == "script-dir" && x.name == j.name && (x.deleted || x.paused)
-        });
+        let dir_blocked = jobs
+            .iter()
+            .any(|x| x.source == "script-dir" && x.name == j.name && (x.deleted || x.paused));
         if !dir_blocked
             && files.iter().any(|f| {
-                f.name == j.name
-                    && f.valid
-                    && !f.header.disabled
-                    && f.header.cron.is_some()
+                f.name == j.name && f.valid && !f.header.disabled && f.header.cron.is_some()
             })
         {
             continue;
         }
-        let Some(script) = j.script.as_deref() else { continue };
-        let Some(runtime) = j.runtime.as_deref() else { continue };
+        let Some(script) = j.script.as_deref() else {
+            continue;
+        };
+        let Some(runtime) = j.runtime.as_deref() else {
+            continue;
+        };
         // 文件没了：保留任务与调度（文件回来后下次触发自动恢复），但状态明确标 error。
         let exists = host.tasks_dir.join(script).exists();
         if !exists {
@@ -5138,7 +5302,6 @@ fn env_u32(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-
 // ============================================================ 测试运行
 //
 // 面板的「测试运行」：把一段代码丢进**一次性解释器**里跑，把输出收回来。
@@ -5167,7 +5330,6 @@ const CONSOLE_SHIM: &str = r#"
   };
 })();
 "#;
-
 
 /// 在一次性 `Context` 里跑一段 JS。成功返回 `Ok(())`，失败返回给面板看的错误文本。
 fn run_scratch_js(
@@ -5210,7 +5372,8 @@ fn run_scratch_js(
         let eval = if looks_like_module(code) {
             eval_as_module(&ctx, code, "<test-run>")
         } else {
-            ctx.eval::<(), _>(code).map_err(|e| render_exception(&ctx, &e))
+            ctx.eval::<(), _>(code)
+                .map_err(|e| render_exception(&ctx, &e))
         };
         wd.disarm();
         let fired = wd.take_fired();
@@ -5241,9 +5404,8 @@ fn test_run(
     let started = Instant::now();
     let _ = lang; // py 试跑已移除；只接受 js
 
-    let (result, lines) = hostapi::capture_scope(|| {
-        run_scratch_js(rt, host, logs, wd, budget, code, input)
-    });
+    let (result, lines) =
+        hostapi::capture_scope(|| run_scratch_js(rt, host, logs, wd, budget, code, input));
 
     // info 档（含 start/success/fail 这三个语义 type）→ stdout，
     // warn 及以上 → stderr。跟 Node 的 console 语义对齐，
@@ -5306,7 +5468,10 @@ mod tests {
         // 找不到：错误里要把试过的候选列出来（只说"找不到"最难查）
         let err = resolve_relative(&base, "./nope", &root).unwrap_err();
         assert!(err.contains("找不到模块 `./nope`"), "{err}");
-        assert!(err.contains("math") || err.contains("nope.js"), "应当列出试过的路径: {err}");
+        assert!(
+            err.contains("math") || err.contains("nope.js"),
+            "应当列出试过的路径: {err}"
+        );
 
         // 边界：解析到插件目录之外 → 挡（放宽自动找不能让边界松掉）
         let outside = resolve_relative(&base, "../../../../../../etc/hosts", &root).unwrap_err();
@@ -5391,7 +5556,10 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
 
-        assert!(names.contains(&"real.js".to_string()), "真插件要找到: {names:?}");
+        assert!(
+            names.contains(&"real.js".to_string()),
+            "真插件要找到: {names:?}"
+        );
         assert!(
             !names.contains(&"top.py".to_string()),
             ".py 不再是插件，不能被扫描: {names:?}"
@@ -5412,9 +5580,13 @@ mod tests {
 
     #[test]
     fn module_detection() {
-        assert!(looks_like_module("import { log } from 'host-api';\nlog('x')"));
+        assert!(looks_like_module(
+            "import { log } from 'host-api';\nlog('x')"
+        ));
         assert!(looks_like_module("export function on_tick(p) {}"));
-        assert!(!looks_like_module("// import 只是注释\nfunction on_tick(p) {}"));
+        assert!(!looks_like_module(
+            "// import 只是注释\nfunction on_tick(p) {}"
+        ));
         assert!(!looks_like_module("const host = 1;\nhost;"));
     }
 
@@ -5425,7 +5597,9 @@ mod tests {
             name: name.to_string(),
             file: PathBuf::from(file),
             runtime: if live {
-                Some(PluginRuntime::Js(Context::full(rt).expect("建 Context 失败")))
+                Some(PluginRuntime::Js(
+                    Context::full(rt).expect("建 Context 失败"),
+                ))
             } else {
                 None
             },
@@ -5450,7 +5624,10 @@ mod tests {
     #[test]
     fn plugin_name_comes_from_file_stem() {
         assert_eq!(plugin_name_of(Path::new("plugins/js/hello.js")), "hello");
-        assert_eq!(plugin_name_of(Path::new("plugins/py/sys_info.py")), "sys_info");
+        assert_eq!(
+            plugin_name_of(Path::new("plugins/py/sys_info.py")),
+            "sys_info"
+        );
         // 没有扩展名也能兜住
         assert_eq!(plugin_name_of(Path::new("plugins/raw")), "raw");
     }
@@ -5482,7 +5659,10 @@ mod tests {
             fake_plugin(&rt, "foo", "plugins/b/foo.js", true),
         ];
         let found = find_plugin(&plugins, "foo").expect("应该能找到");
-        assert!(found.runtime.is_some(), "找到的是被拒绝的那条，会导致派发失败");
+        assert!(
+            found.runtime.is_some(),
+            "找到的是被拒绝的那条，会导致派发失败"
+        );
         assert_eq!(found.file, PathBuf::from("plugins/b/foo.js"));
         assert!(find_plugin(&plugins, "nope").is_none());
     }
@@ -5496,10 +5676,16 @@ mod tests {
         let now = Local::now();
         for (plugin, task) in [("a", "t1"), ("b", "t2"), ("c", "t3")] {
             let sch = Schedule::parse("@every 1s").unwrap();
-            sched.add(plugin, task, "@every 1s", sch, now, None, None).unwrap();
+            sched
+                .add(plugin, task, "@every 1s", sch, now, None, None)
+                .unwrap();
         }
         let specs = all_specs(&sched);
-        assert_eq!(specs.len(), 3, "all_specs 必须是调度器里全部**代码声明的**任务");
+        assert_eq!(
+            specs.len(),
+            3,
+            "all_specs 必须是调度器里全部**代码声明的**任务"
+        );
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"t1") && names.contains(&"t2") && names.contains(&"t3"));
         // next_run 必须带上（面板靠它显示下次触发）
@@ -5518,7 +5704,9 @@ mod tests {
         let now = Local::now();
         let sch = || Schedule::parse("@every 1s").unwrap();
 
-        sched.add("demo", "from-code", "@every 1s", sch(), now, None, None).unwrap();
+        sched
+            .add("demo", "from-code", "@every 1s", sch(), now, None, None)
+            .unwrap();
         sched
             .add_panel("demo", "from-panel", "@every 1s", sch(), now, None, None)
             .unwrap();
@@ -5629,8 +5817,9 @@ mod tests {
                 logs.clone(),
             )
             .unwrap();
-            ctx.eval::<(), _>(code.as_str())
-                .unwrap_or_else(|e| panic!("插件代码执行失败: {}", super::render_exception(&ctx, &e)));
+            ctx.eval::<(), _>(code.as_str()).unwrap_or_else(|e| {
+                panic!("插件代码执行失败: {}", super::render_exception(&ctx, &e))
+            });
         });
         let got: String = ctx.with(|ctx| ctx.globals().get("__ws").unwrap());
         let v: serde_json::Value = serde_json::from_str(&got).unwrap();
@@ -5640,7 +5829,10 @@ mod tests {
         assert_eq!(v[2], "echo:hi", "收到的第一帧该是回声：{got}");
         assert_eq!(v[3], "text");
         assert_eq!(v[4], "o", "第二帧是服务端补的那条 SockJS `o`：{got}");
-        assert_eq!(v[5], "timeout", "没东西可读要回 timeout，**不是**异常：{got}");
+        assert_eq!(
+            v[5], "timeout",
+            "没东西可读要回 timeout，**不是**异常：{got}"
+        );
         assert!(
             v[6].as_str().unwrap().contains("不存在"),
             "关掉之后再收必须抛「句柄不存在」：{got}"
@@ -5649,17 +5841,21 @@ mod tests {
         assert_eq!(host.ws.open_count(), 0);
     }
 
-    /// 加载预算：**必须比单次调用的默认预算宽松**，否则最大的那个插件
-    /// 冷启动会被打断在半路（`InternalError: interrupted`，路由一条都没注册）。
+    /// 加载预算有**自己的**下限，且与单次预算**解耦**。
     ///
-    /// 这里比的是两个**常量**，clippy 会说"值恒定" —— 恒定正是要点：谁把它们改反了，
-    /// 这条测试就该红。
+    /// 旧的不变量是「加载预算 > 单次预算」（那时单次是 2 秒）。单次改成 60 秒后
+    /// 这条代理判据会把启动等待也拖到 60 秒 —— 那是另一件事的耐心。现在钉的是：
+    /// 加载预算至少 5 秒（最大插件冷加载 ~2 秒的 2.5 倍），且两个预算各自可调。
     #[allow(clippy::assertions_on_constants)]
     #[test]
-    fn load_budget_is_looser_than_exec_and_env_tunable() {
+    fn load_budget_has_its_own_floor_and_is_env_tunable() {
         assert!(
-            DEFAULT_LOAD_BUDGET_MS > DEFAULT_EXEC_BUDGET_MS,
-            "加载预算不能等于/小于单次调用预算 —— 那是把两件事当成一件"
+            DEFAULT_LOAD_BUDGET_MS >= 5_000,
+            "加载预算不能低于 5 秒 —— 最大那个插件冷加载实测 ~2 秒"
+        );
+        assert!(
+            DEFAULT_EXEC_BUDGET_MS >= DEFAULT_LOAD_BUDGET_MS,
+            "单次预算应当比加载预算宽（加载只是启动期的一次性动作）"
         );
         // 没设 / 空 / 0 / 乱写 ⇒ 默认（不静默变成 0 秒）
         assert_eq!(load_budget_ms(None), DEFAULT_LOAD_BUDGET_MS);
@@ -5675,6 +5871,33 @@ mod tests {
         );
     }
 
+    /// 试跑预算：默认 10 秒，且**永远不超过**单次调用预算（试跑不该比正式调用宽松）。
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn test_run_budget_is_shorter_than_exec_budget() {
+        let exec = DEFAULT_EXEC_BUDGET_MS;
+        // 没设 / 空 / 0 / 乱写 ⇒ 默认 10 秒
+        assert_eq!(test_run_budget_ms_with(None, exec), DEFAULT_TEST_RUN_BUDGET_MS);
+        assert_eq!(test_run_budget_ms_with(Some(""), exec), DEFAULT_TEST_RUN_BUDGET_MS);
+        assert_eq!(test_run_budget_ms_with(Some("0"), exec), DEFAULT_TEST_RUN_BUDGET_MS);
+        assert_eq!(test_run_budget_ms_with(Some("abc"), exec), DEFAULT_TEST_RUN_BUDGET_MS);
+        // 显式设了就听，但不能超过单次预算（试跑不该比正式调用宽松）
+        assert_eq!(test_run_budget_ms_with(Some("30000"), exec), 30_000);
+        assert_eq!(test_run_budget_ms_with(Some("999999"), 5_000), 5_000);
+        assert!(
+            DEFAULT_TEST_RUN_BUDGET_MS < DEFAULT_EXEC_BUDGET_MS,
+            "试跑是人在等结果的动作，必须比正式调用短 —— 否则 while(true) 会让按钮转满 60 秒"
+        );
+    }
+
+    /// 健康判据跟着预算放宽：60 秒的合法调用不该被报成「停摆」。
+    #[test]
+    fn health_lag_scales_with_budget() {
+        let lag = |budget: u64| budget + HEALTHY_LAG_FLOOR_MS;
+        assert!(lag(60_000) > 60_000, "一次 60 秒的合法调用期间不能报停摆");
+        assert!(lag(2_000) < 10_000, "预算紧的时候仍要能快速发现卡死");
+    }
+
     /// 惰性加载的判据：**on_tick / 勾了长期加载 / 有活着的 WS** 的一律不卸。
     ///
     /// 路由**不再**是常驻理由：路由声明留在表里，请求来了冷启动装回。
@@ -5685,31 +5908,86 @@ mod tests {
     fn lazy_evict_rules() {
         let idle = 120_000i64;
         let old = 10 * idle as u64; // 早就过了宽限期
-        // 纯定时任务、离下次触发还很远 ⇒ 该卸
-        assert!(should_evict(false, false, false, Some(8 * 3_600_000), old, idle as u64));
+                                    // 纯定时任务、离下次触发还很远 ⇒ 该卸
+        assert!(should_evict(
+            false,
+            false,
+            false,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64
+        ));
         // 快到点了 ⇒ 留着（提前量那一侧负责装回来，这里不重复卸装）
-        assert!(!should_evict(false, false, false, Some(5_000), old, idle as u64));
+        assert!(!should_evict(
+            false,
+            false,
+            false,
+            Some(5_000),
+            old,
+            idle as u64
+        ));
         // 带路由的插件也按同一套规则卸（声明留着，请求时冷启动装回）
-        assert!(should_evict(false, false, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(should_evict(
+            false,
+            false,
+            false,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64
+        ));
         // 注册了 on_tick ⇒ 不卸
-        assert!(!should_evict(true, false, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(
+            true,
+            false,
+            false,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64
+        ));
         // 面板勾了「长期加载」⇒ 不卸
-        assert!(!should_evict(false, true, false, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(
+            false,
+            true,
+            false,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64
+        ));
         // 还有活着的 WebSocket 句柄 ⇒ 不卸（句柄指向 JS 回调，卸了就是悬空）
-        assert!(!should_evict(false, false, true, Some(8 * 3_600_000), old, idle as u64));
+        assert!(!should_evict(
+            false,
+            false,
+            true,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64
+        ));
         // 名下一条任务都没有 ⇒ 更该卸
         assert!(should_evict(false, false, false, None, old, idle as u64));
         // **刚装进来**（还没满一个 idle 窗口）⇒ 先留着：启动时刚付过加载的钱
-        assert!(!should_evict(false, false, false, Some(8 * 3_600_000), 1_000, idle as u64));
+        assert!(!should_evict(
+            false,
+            false,
+            false,
+            Some(8 * 3_600_000),
+            1_000,
+            idle as u64
+        ));
         // 默认值必须自洽：提前量覆盖一次加载，但又**小于**闲置阈值（否则会抖动）
-        assert!(DEFAULT_LOAD_BUDGET_MS < DEFAULT_PRELOAD_MS, "提前量要覆盖一次加载");
+        assert!(
+            DEFAULT_LOAD_BUDGET_MS < DEFAULT_PRELOAD_MS,
+            "提前量要覆盖一次加载"
+        );
         assert!(
             DEFAULT_PRELOAD_MS < DEFAULT_IDLE_EVICT_MS,
             "提前量必须小于闲置阈值 —— 否则卸完立刻又装回来，一秒一轮"
         );
         // 配置项之间也只能是"提前量 < 闲置阈值"，否则会抖 —— from_env 里夹过
         let cfg = LazyCfg::from_env();
-        assert!(cfg.preload_ms < cfg.idle_ms, "夹过之后仍必须满足 preload < idle");
+        assert!(
+            cfg.preload_ms < cfg.idle_ms,
+            "夹过之后仍必须满足 preload < idle"
+        );
         assert!(
             cfg.idle_ms >= DEFAULT_LOAD_BUDGET_MS * 2,
             "闲置阈值要有下限：至少留得下两次加载的时间"
@@ -5735,10 +6013,17 @@ mod tests {
         };
 
         // 文件没变 ⇒ 什么都不用做（Runtime 继续歇着）
-        assert!(!sync_needed(&[mk(real)], std::slice::from_ref(&f), &[]), "文件没变就不该扫");
+        assert!(
+            !sync_needed(&[mk(real)], std::slice::from_ref(&f), &[]),
+            "文件没变就不该扫"
+        );
         // mtime 变了 ⇒ 要重装
         assert!(
-            sync_needed(&[mk(Some(SystemTime::UNIX_EPOCH))], std::slice::from_ref(&f), &[]),
+            sync_needed(
+                &[mk(Some(SystemTime::UNIX_EPOCH))],
+                std::slice::from_ref(&f),
+                &[]
+            ),
             "改过代码要扫"
         );
         // 多了个文件 ⇒ 要装新的

@@ -136,7 +136,10 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("不是有效的 zip: {e}"))?;
     if archive.len() > MAX_ENTRIES {
-        return Err(format!("zip 条目太多（{}，上限 {MAX_ENTRIES}）", archive.len()));
+        return Err(format!(
+            "zip 条目太多（{}，上限 {MAX_ENTRIES}）",
+            archive.len()
+        ));
     }
 
     // 先收集所有安全路径，再决定要不要剥掉统一的外层目录
@@ -358,7 +361,10 @@ fn ensure_dir(root: &Path, rel: &Path) -> Result<PathBuf, String> {
         match std::fs::symlink_metadata(&cur) {
             Ok(md) => {
                 if md.file_type().is_symlink() {
-                    return Err(format!("目标路径是符号链接，拒绝写入: {}", rel_display(&shown)));
+                    return Err(format!(
+                        "目标路径是符号链接，拒绝写入: {}",
+                        rel_display(&shown)
+                    ));
                 }
                 if !md.is_dir() {
                     return Err(format!("目标路径不是目录: {}", rel_display(&shown)));
@@ -478,15 +484,18 @@ mod tests {
     #[test]
     fn zip_rejects_hidden_path_segments() {
         let root = tmpdir("hidden");
-        for bad in [".hidden", ".env", "js/.env", "a/.git/config", "a/.git/hooks/pre-commit"] {
+        for bad in [
+            ".hidden",
+            ".env",
+            "js/.env",
+            "a/.git/config",
+            "a/.git/hooks/pre-commit",
+        ] {
             // 混一个正常条目：拒绝不能依赖"整个 zip 都坏"
             let z = make_zip(&[(bad, b"x"), ("js/a.js", b"export default 1")]);
             let err = save(Kind::Plugins, &root, "x.zip", &z, true).unwrap_err();
             assert!(err.contains("隐藏"), "`{bad}` 应该被拒，实际: {err}");
-            assert!(
-                err.contains(bad),
-                "错误里要点名条目 `{bad}`，实际: {err}"
-            );
+            assert!(err.contains(bad), "错误里要点名条目 `{bad}`，实际: {err}");
             // 被拒时不能落盘（尤其是 .git 下的路径）
             assert!(!root.join(bad).exists(), "`{bad}` 不能落盘");
         }
@@ -569,12 +578,15 @@ mod tests {
         let mut i =
             u32::from_le_bytes([z[eocd + 16], z[eocd + 17], z[eocd + 18], z[eocd + 19]]) as usize;
         for n in 0..count {
-            assert_eq!(&z[i..i + 4], b"PK\x01\x02", "central directory 第 {n} 条结构不对");
+            assert_eq!(
+                &z[i..i + 4],
+                b"PK\x01\x02",
+                "central directory 第 {n} 条结构不对"
+            );
             let name_len = u16::from_le_bytes([z[i + 28], z[i + 29]]) as usize;
             let extra_len = u16::from_le_bytes([z[i + 30], z[i + 31]]) as usize;
             let comment_len = u16::from_le_bytes([z[i + 32], z[i + 33]]) as usize;
-            let local =
-                u32::from_le_bytes([z[i + 42], z[i + 43], z[i + 44], z[i + 45]]) as usize;
+            let local = u32::from_le_bytes([z[i + 42], z[i + 43], z[i + 44], z[i + 45]]) as usize;
             z[i + 24..i + 28].copy_from_slice(&1u32.to_le_bytes()); // central: 解压后大小
             assert_eq!(&z[local..local + 4], b"PK\x03\x04", "local header 结构不对");
             z[local + 22..local + 26].copy_from_slice(&1u32.to_le_bytes()); // local: 解压后大小
@@ -647,10 +659,7 @@ mod tests {
             err.contains("太大") || err.contains("declared uncompressed size"),
             "应该是总量上限报错，实际: {err}"
         );
-        assert!(
-            !root.join("js/f2.js").exists(),
-            "超出总预算的那条不能落盘"
-        );
+        assert!(!root.join("js/f2.js").exists(), "超出总预算的那条不能落盘");
         let _ = std::fs::remove_dir_all(&root);
     }
 

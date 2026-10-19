@@ -183,7 +183,10 @@ mod tests {
         lg.info("b");
         lg.info("c");
         let snap = mem.snapshot();
-        assert_eq!(snap.iter().map(|l| l.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            snap.iter().map(|l| l.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         assert_eq!(mem.latest_seq(), 3);
         let tail = mem.since(1);
         assert_eq!(tail.len(), 2);
@@ -257,11 +260,16 @@ mod tests {
     }
 
     #[test]
-    fn rendered_line_matches_the_shared_format() {        let mem = Arc::new(MemoryTransport::new(1 << 20));
+    fn rendered_line_matches_the_shared_format() {
+        let mem = Arc::new(MemoryTransport::new(1 << 20));
         let lg = Logger::with_transports("engine:0", vec![mem.clone()]);
         lg.log(Type::Success, "插件已加载");
         let l = &mem.snapshot()[0];
         assert_eq!(l.rendered, l.entry.line());
-        assert!(l.rendered.contains("[success] [engine:0] 插件已加载"), "{}", l.rendered);
+        assert!(
+            l.rendered.contains("[success] [engine:0] 插件已加载"),
+            "{}",
+            l.rendered
+        );
     }
 }
