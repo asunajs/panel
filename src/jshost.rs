@@ -146,7 +146,8 @@ globalThis.host_api = {
             // 归属面 / 摘要 / 未就绪原因 / 初始暂停：只有真的给了才序列化，
             // 老插件（不传这些）走的还是空串 ⇒ 宿主取默认值。
             if (opts.surface !== undefined || opts.summary !== undefined ||
-                opts.blockers !== undefined || opts.paused !== undefined) {
+                opts.blockers !== undefined || opts.paused !== undefined ||
+                opts.manage_url !== undefined) {
                 meta = JSON.stringify({
                     surface: opts.surface === undefined ? 'panel' : String(opts.surface),
                     summary: opts.summary === undefined ? null : String(opts.summary),

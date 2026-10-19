@@ -559,7 +559,8 @@ export function register_cron(name, expr, handler, opts) {
       opts.surface !== undefined ||
       opts.summary !== undefined ||
       opts.blockers !== undefined ||
-      opts.paused !== undefined
+      opts.paused !== undefined ||
+      opts.manage_url !== undefined
     ) {
       metaJson = JSON.stringify({
         surface: opts.surface === undefined ? 'panel' : String(opts.surface),
