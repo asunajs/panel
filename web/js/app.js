@@ -625,11 +625,9 @@ function renderPluginNav(plugins) {
 /// 为什么不把插件的 JS 注入主页面：插件是操作者自己装的代码，注入进来等于让它
 /// 能改面板本身（读令牌、改别人的任务）。
 ///
-/// ⚠ **iframe 不是安全边界**（安全审计 H1）。同源 iframe 与父文档共享 origin，
-/// 插件页可以 `parent.fetch('/api/plugins/upload', ...)`。真正的隔离来自
-/// 「插件页面在另一个 origin 上」—— 后端为此单开了第二个监听（见 main.rs 的
-/// `bind_plugin_ui`），`pluginUiUrl()` 负责把地址拼过去。这里的 `sandbox` 是
-/// 第二道：即使哪天 origin 又被配回同源，它也挡住 `top` 导航与插件页弹出的窗口。
+/// 插件是可信代码，默认与面板同源；只有显式开启 `PLUGIN_UI_ADDR` 时才把
+/// 插件页放到另一个 origin（见 main.rs 的 `bind_plugin_ui`），`pluginUiUrl()`
+/// 负责把地址拼过去。`sandbox` 仍然保留：挡住 `top` 导航与插件页弹出的窗口。
 function renderPluginPage(root, params) {
   const name = params.name;
   const nav = pluginNav.get(name);

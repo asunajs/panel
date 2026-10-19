@@ -288,14 +288,14 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// 插件页面的**独立 origin** 路由（安全审计 H1）。
+/// 插件页面的独立 origin 路由（可选；默认同源）。
 ///
 /// 为什么要有第二个 origin：`/plugins/{name}/...` 由面板同源提供时，插件页面
 /// 与面板共享 `document` 的 origin —— 同源 iframe 不是安全边界，插件页的 JS
 /// 可以直接 `parent.fetch('/api/plugins/upload', {headers:{'x-panel':'1'}})`，
 /// 于是 QuickJS 插件的"文件围栏"被绕过，一次点击就能升级成宿主 RCE。
-/// 把插件页面挪到 `127.0.0.1:<port+1>`（或 `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN`）
-/// 之后，它读不到面板的会话，也碰不到面板的 DOM。
+/// 需要隔离时，可把插件页面挪到 `127.0.0.1:<port+1>`（或显式
+/// `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN`）；默认不隔离，插件页与面板同源。
 ///
 /// 这个 origin 服务三样东西：插件静态资源、插件自己注册的路由，以及插件 UI
 /// 真正需要的**少量面板接口**（任务表 / 运行记录 / 日志流 / 触发任务，见下面
@@ -3240,8 +3240,8 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         // 而它以前只能靠"跑一次任务看有没有报错"才知道 —— 太晚、也太难看懂。
         // 放在 state 里 ⇒ `curl /api/state | jq .build` 一眼就答得上来。
         "build": build_info(),
-        // 插件页面的独立 origin（安全审计 H1）。`plugin_ui_port` 为 `null` =
-        // 没有启用隔离，此时前端用相对路径（行为与以前一致），启动日志有 warn。
+        // 插件页面是否启用了独立 origin。`plugin_ui_port` 为 `null` = 默认同源，
+        // 前端用相对路径；显式 `PLUGIN_UI=1` / `PLUGIN_UI_ADDR` 才会非空。
         "plugin_ui_port": st.plugin_ui_port,
         "plugin_ui_origin": st.plugin_ui_origin,
         "uptime_secs": st.started.elapsed().as_secs(),

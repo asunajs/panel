@@ -17,10 +17,9 @@ const PANEL_HEADER = { 'x-panel': '1' };
 /**
  * 插件页面的 origin（安全审计 H1）。
  *
- * 为什么需要它：插件页面必须与面板**不同源**，否则同源 iframe 里的插件 JS
- * 能直接读 `parent` 并带着会话调面板接口 —— QuickJS 的文件围栏就被绕过了。
- * 后端在第二个端口上只服务 `/plugins/**` 与插件自己的路由（见 main.rs
- * 的 `bind_plugin_ui`），这里负责把 iframe/链接拼到那个 origin 上。
+ * 插件页面**默认与面板同源**（插件是可信代码）。只有显式开启隔离时，后端才
+ * 会在第二个端口上服务 `/plugins/**` 与插件自己的路由（见 main.rs 的
+ * `bind_plugin_ui`），这里负责把 iframe/链接拼到那个 origin 上。
  *
  * 两个来源，优先级从高到低：
  *   1. `plugin_ui_origin`：显式配置（反代场景，后端 `PLUGIN_UI_ORIGIN`）

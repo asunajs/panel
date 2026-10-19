@@ -120,12 +120,11 @@ pub struct AppState {
     pub test_limiter: Arc<TestRunLimiter>,
     /// 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
     pub assets: assets::Assets,
-    /// 插件页面的**独立 origin**（安全审计 H1）。
+    /// 插件页面的独立 origin（可选）。
     ///
-    /// `plugin_ui_port` 是第二个监听的端口：`Some` = 隔离已启用，前端用
-    /// `location.hostname` + 这个端口拼出 iframe 地址（这样局域网 IP 访问也正确）。
-    /// `plugin_ui_origin` 是显式覆盖（反代场景），优先级高于端口推导。
-    /// 两个都是 `None` = 回退到同源（启动日志里会 warn）。
+    /// 默认 `None` = 与面板同源（插件是可信代码）。显式开启隔离时，
+    /// `plugin_ui_port` 是第二个监听的端口，前端用 `location.hostname` + 这个
+    /// 端口拼 iframe 地址；`plugin_ui_origin` 是反代场景的显式覆盖。
     pub plugin_ui_port: Option<u16>,
     pub plugin_ui_origin: Option<String>,
     /// 当前打开的日志流（SSE）条数，用来卡上限（安全审计 L11）。
@@ -929,30 +928,54 @@ fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// 返回 `(监听, 端口, 显式 origin)`。任何一步失败都返回 `(None, None, None)` ——
 /// 面板照常启动，插件页面回退到同源（功能不变，但隔离失效，所以要 warn）。
 ///
-/// 为什么默认是「主端口 + 1」而不是一个写死的端口：面板可以 `BIND_ADDR=...8790`
-/// 换端口，插件 origin 必须跟着走，否则两个实例会抢同一个插件端口。
-///
-/// 三个环境变量：
-/// - `PLUGIN_UI=0|false|no|off` —— 显式关掉隔离（回到同源，自担风险）
-/// - `PLUGIN_UI_ADDR=ip:port` —— 显式指定绑定地址
-/// - `PLUGIN_UI_ORIGIN=https://...` —— 显式指定**浏览器看到**的 origin。
+/// 默认**不隔离**：插件是可信代码，插件页面与面板同源，少一个端口、少一类
+/// 相对 `/api/*` 落空的问题。需要隔离的部署显式开：
+/// - `PLUGIN_UI=1` —— 按主端口 + 1 推导
+/// - `PLUGIN_UI_ADDR=ip:port` —— 显式指定绑定地址（隐含开启）
+/// - `PLUGIN_UI_ORIGIN=https://...` —— 显式指定**浏览器看到**的 origin（隐含开启）。
 ///   反代场景必须用它：内部绑 `127.0.0.1:8788`，对外要让浏览器访问
-///   `https://plugins.example.com`（反代到 8788）。不设就按绑定地址拼 `http://…`。
+///   `https://plugins.example.com`（反代到 8788）。
 async fn bind_plugin_ui(
     main_addr: std::net::SocketAddr,
 ) -> (Option<tokio::net::TcpListener>, Option<u16>, Option<String>) {
-    if let Ok(v) = std::env::var("PLUGIN_UI") {
-        if matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ) {
+    // 默认同源。插件是**可信代码**（装插件本来就是在给面板加功能），
+    // 安全边界该对着外部访问者：登录、CSRF、上传鉴权、网络绑定。
+    // 把插件当攻击者会多出一个端口，还会让插件页的相对 `/api/*` 全部落空。
+    //
+    // 需要把插件页隔到另一个 origin 的部署，显式开：
+    //   PLUGIN_UI=1                  （按主端口 + 1 推导）
+    //   PLUGIN_UI_ADDR=ip:port       （显式绑定，隐含开启）
+    //   PLUGIN_UI_ORIGIN=https://... （反代场景，隐含开启）
+    let flag = std::env::var("PLUGIN_UI").ok().map(|v| v.trim().to_ascii_lowercase());
+    let explicit_addr = std::env::var("PLUGIN_UI_ADDR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let explicit_origin = std::env::var("PLUGIN_UI_ORIGIN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let enabled = match flag.as_deref() {
+        Some("0" | "false" | "no" | "off") => false,
+        Some("1" | "true" | "yes" | "on") => true,
+        Some(other) => {
             crate::log::plog!(
                 "boot",
                 warn,
-                "PLUGIN_UI 显式关闭：插件页面与面板**同源**，插件页的 JS 能读到面板会话并调用面板接口（安全审计 H1）"
+                "PLUGIN_UI={other:?} 认不出（只认 1/0）⇒ 插件页面与面板同源"
             );
-            return (None, None, None);
+            false
         }
+        None => explicit_addr.is_some() || explicit_origin.is_some(),
+    };
+    if !enabled {
+        crate::log::plog!(
+            "boot",
+            info,
+            "插件页面与面板同源（插件是可信代码；要隔离设 PLUGIN_UI=1 或 PLUGIN_UI_ADDR）"
+        );
+        return (None, None, None);
     }
 
     let bind_addr = match std::env::var("PLUGIN_UI_ADDR") {

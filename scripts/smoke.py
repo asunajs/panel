@@ -1578,28 +1578,20 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             "日志说明了为什么没封（否则运维会以为蜜罐坏了）",
         )
 
-        # ── 安全审计 H1：插件页面在**独立 origin** 上，而不是与面板同源 ──
+        # ── 插件页面默认与面板同源 ──
         #
-        # 同源 iframe 不是安全边界：插件页能 `parent.fetch('/api/plugins/upload')`。
-        # 独立 origin 之后，插件页读不到面板会话，也碰不到面板接口。
+        # 插件是可信代码（装插件就是给面板加功能），安全边界对着外部访问者，
+        # 不把插件本身当攻击者。需要隔离的部署可以显式 PLUGIN_UI_ADDR=…
         ui_port = st.get("plugin_ui_port")
         check(
-            isinstance(ui_port, int) and ui_port > 0,
-            "插件页面有独立 origin（PLUGIN_UI 默认开，端口 = 主端口 + 1）",
+            ui_port is None,
+            "插件页面默认与面板同源（不再默认多开一个端口）",
             f"plugin_ui_port={ui_port!r}",
         )
-        if isinstance(ui_port, int) and ui_port > 0:
-            ui_base = f"http://127.0.0.1:{ui_port}"
-            c1, _, _ = http(f"{ui_base}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
-            check(c1 == 200, "插件 origin 能服务插件页面", f"http {c1}")
-            c2, _, _ = http(f"{ui_base}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
-            check(
-                c2 == 404,
-                "插件 origin 上**没有**面板接口（隔离的核心：拿到会话也调不到面板 API）",
-                f"http {c2}",
-            )
-            c3, _, _ = http(f"{ui_base}/plugins/demo/")
-            check(c3 == 401, "插件 origin 也要登录（不是公开的静态站）", f"http {c3}")
+        c1, _, _ = http(f"http://127.0.0.1:{port3}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
+        check(c1 == 200, "同源插件页能正常打开", f"http {c1}")
+        c2, _, _ = http(f"http://127.0.0.1:{port3}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
+        check(c2 == 200, "同源插件页能读面板接口", f"http {c2}")
     finally:
         stop(proc3, f3)
 
