@@ -289,6 +289,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push", get(api_push_get))
         .route("/api/push/config", post(api_push_save))
         .route("/api/push/test", post(api_push_test))
+        // 按任务覆盖：只存偏离「跟随全局」的任务。
+        .route("/api/push/task", post(api_push_task_save))
         // 插件商城：目录 / GitHub 解析 / 安装。
         .route("/api/market", get(api_market))
         .route("/api/market/install", post(api_market_install))
@@ -1529,6 +1531,18 @@ fn plugin_source_backup(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
+/// 源码里的 async 用法 → 给编辑器画警告的字符串（**只提示，不阻塞保存**）。
+///
+/// 为什么放在编辑器这一侧：加载期已经能把注册过的 async 拦成硬错误，但人在编辑器里
+/// 敲 `await` 的那一刻还不知道 —— 保存后要等热更新、等报错，反馈链太长。
+/// 这里用同一份静态分析（[`crate::jslint`]）先把位置说出来。
+fn async_warnings(text: &str) -> Vec<String> {
+    crate::jslint::async_uses(text)
+        .iter()
+        .map(|u| format!("第 {} 行 {}", u.line, u.what))
+        .collect()
+}
+
 /// 保存插件源码的上限。低配设备上写一个几 MB 的插件文件没有意义，
 /// 而「手滑把别的东西粘进来」是有可能的。
 const MAX_PLUGIN_SOURCE_BYTES: usize = 1 << 20; // 1 MiB
@@ -1619,6 +1633,9 @@ async fn save_plugin_source(
         "bytes": bytes,
         "backup": shown_path(&st.plugins_dir, &backup),
         "had_backup": had_backup,
+        // 源码里的 async 用法：**只提示、不阻塞保存**（语法错才是硬错误）。
+        // 编辑器拿它画一行警告，省得人保存完等热更新才发现插件没跑起来。
+        "warnings": async_warnings(&req.text),
         // 前端据此提示「引擎正在热更新」——省得用户以为没生效
         "note": "已写入。引擎最多 1 秒内发现文件变化并热更新这个插件。",
     }))
@@ -1682,6 +1699,8 @@ async fn plugin_source(State(st): State<AppState>, Path(name): Path<String>) -> 
                 "path": shown_path(&st.plugins_dir, &path),
                 "lines": lines,
                 "bytes": text.len(),
+                // 打开页面就先把 async 用法标出来（不用等保存一次才看得到）
+                "warnings": async_warnings(&text),
                 "text": text,
                 // 有备份才给「恢复上一次」按钮 —— 给一个点了没反应的按钮是最差的可达性
                 "has_backup": plugin_source_backup(&path).is_file(),
@@ -3495,6 +3514,34 @@ async fn api_push_save(
     }
 }
 
+/// POST /api/push/task —— 保存一条任务的推送覆盖。
+///
+/// 请求体：{plugin, task, mode: inherit|off|failure|success|all, channels: [...]}。
+/// channels 空 = 用全部已配渠道；mode=inherit 且 channels 空 = 恢复默认（删行）。
+async fn api_push_task_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let db = st.db.clone();
+    match tokio::task::spawn_blocking(move || crate::push::save_task(&db, &body)).await {
+        Ok(Ok(mut v)) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("ok".into(), json!(true));
+            }
+            Json(v).into_response()
+        }
+        Ok(Err(e)) => json_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("保存任务推送规则失败：{e}"),
+        ),
+    }
+}
+
 /// POST /api/push/test —— 立刻发一条。
 ///
 /// 同步等结果（最多每个渠道 10 秒）：用户点「发一条试试」就是在等这个答案，
@@ -3982,6 +4029,25 @@ mod tests {
         assert_eq!(plugin_group("mcloud-sign-in"), "mcloud");
         // 前导分隔符是退化情况，别 panic
         assert_eq!(plugin_group("-x"), "");
+    }
+
+    // ---- 插件源码页：async 提示 ----
+
+    /// 编辑器拿到的提示必须是「第 N 行 …」这种能直接定位的说法。
+    ///
+    /// 只提示、不拦保存：语法 / API 错误才是硬错误，async 是「保存成功但运行期没输出」，
+    /// 所以这里不返回 Err，只返回一个空数组或若干条位置。
+    #[test]
+    fn async_warnings_point_at_the_offending_line() {
+        assert_eq!(
+            async_warnings("\nconst f = async () => { await x; };\n"),
+            vec!["第 2 行 async 函数".to_string()]
+        );
+        assert_eq!(
+            async_warnings("function ok() {}\n"),
+            Vec::<String>::new(),
+            "同步插件不该有任何提示"
+        );
     }
 
     // ---- 登录页：口令在浏览器里换成摘要 ----

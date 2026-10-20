@@ -21,7 +21,7 @@
   `channels` 数组**，前端不写死 —— 顺序是配置的一部分，抄一份就会漂。
 */
 
-import { getPush, savePush, testPush } from '../api.js';
+import { getPush, savePush, savePushTask, testPush } from '../api.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -223,6 +223,124 @@ export async function renderPush(root, ctx) {
   }
 
   /** 「发一条试试」的结果：逐条显示成功 / 跳过 / 失败 + 原因。 */
+  // ---- 按任务 ----
+
+  function tasks() {
+    return Array.isArray(data && data.tasks) ? data.tasks : [];
+  }
+
+  function modes() {
+    return Array.isArray(data && data.modes) && data.modes.length
+      ? data.modes
+      : [{ id: 'inherit', label: '跟随全局' }];
+  }
+
+  function ruleKey(t) {
+    return t.plugin + '::' + t.name;
+  }
+
+  function ruleOf(t) {
+    const r = (data && data.task_rules && data.task_rules[ruleKey(t)]) || {};
+    return {
+      mode: r.mode || 'inherit',
+      channels: Array.isArray(r.channels) ? r.channels : [],
+    };
+  }
+
+  function taskLabel(t) {
+    return t.plugin === '__script__' ? '脚本任务 / ' + t.name : t.plugin + ' / ' + t.name;
+  }
+
+  /** 每条任务一行：模式下拉 + 渠道 chips。改一项就存一项，不设「保存」按钮。 */
+  function tasksBlock() {
+    const list = tasks();
+    if (!list.length) {
+      return '<p class="hint">还没有任务。任务建好（或脚本目录里有文件）之后，这里会出现它。</p>';
+    }
+    const conf = configured();
+    return list
+      .map((t) => {
+        const key = ruleKey(t);
+        const r = ruleOf(t);
+        const modeOptions = modes()
+          .map(
+            (m) =>
+              '<option value="' +
+              esc(m.id) +
+              '"' +
+              (m.id === r.mode ? ' selected' : '') +
+              '>' +
+              esc(m.label) +
+              '</option>',
+          )
+          .join('');
+        const chips = conf.length
+          ? '<div class="push-chips">' +
+            conf
+              .map((cid) => {
+                const meta = channels().find((c) => c.id === cid);
+                const on = r.channels.includes(cid);
+                return (
+                  '<label class="chip"><input type="checkbox" data-task-chan="' +
+                  esc(key) +
+                  '" data-channel="' +
+                  esc(cid) +
+                  '"' +
+                  (on ? ' checked' : '') +
+                  '>' +
+                  esc((meta && (meta.label || meta.id)) || cid) +
+                  '</label>'
+                );
+              })
+              .join('') +
+            '</div>'
+          : '';
+        const dead = r.channels.length > 0 && !r.channels.some((c) => conf.includes(c));
+        const badge = t.status === 'tripped' ? '<span class="badge failed">已熔断</span>' : '';
+        return (
+          '<div class="push-task">' +
+          '<div class="push-task-main">' +
+          '<span class="field-label">' +
+          esc(taskLabel(t)) +
+          '</span>' +
+          '<span class="hint">' +
+          (t.plugin === '__script__' ? '脚本任务' : '插件任务') +
+          '</span>' +
+          badge +
+          '</div>' +
+          '<select class="input push-task-mode" data-task-mode="' +
+          esc(key) +
+          '" aria-label="推送模式">' +
+          modeOptions +
+          '</select>' +
+          chips +
+          (dead
+            ? '<span class="err-text">指定的渠道都没配了 —— 这条任务现在推不出去</span>'
+            : '') +
+          '</div>'
+        );
+      })
+      .join('');
+  }
+
+  /** 改一项存一项。成功后只更新本地快照，不重画：连续勾渠道时页面不跳。 */
+  async function saveTaskRule(t, mode, channels) {
+    const key = ruleKey(t);
+    const res = await savePushTask({ plugin: t.plugin, task: t.name, mode, channels });
+    if (!res || !res.ok) {
+      ctx.toast('没保存：' + ((res && res.error) || '未知错误'), 'bad');
+      return;
+    }
+    if (!data.task_rules) data.task_rules = {};
+    if (res.removed) delete data.task_rules[key];
+    else
+      data.task_rules[key] = {
+        mode: res.mode || mode,
+        channels: Array.isArray(res.channels) ? res.channels : channels,
+      };
+    ctx.toast('已保存 ' + taskLabel(t), 'ok');
+  }
+
   function testBlock() {
     if (testError) return `<p class="err-text">没发出去：${esc(testError)}</p>`;
     if (!testResult) {
@@ -272,16 +390,17 @@ export async function renderPush(root, ctx) {
 
   // ---------------------------------------------------------------- 画
 
-  // 一屏铺完 10 个渠道 + 触发设置 + 试发 + 最近投递要滚三四屏，用户找不到
-  // 「保存设置」在哪。拆成三个页签，每个只回答一个问题：发到哪 / 什么时候发 /
-  // 刚才发出去没有。
+  // 一屏铺完 10 个渠道 + 触发设置 + 按任务 + 试发 + 最近投递要滚好几屏，
+  // 用户找不到「保存设置」在哪。拆成页签，每个只回答一个问题：发到哪 /
+  // 什么时候发 / 哪条任务例外 / 刚才发出去没有。
   //
-  // 实现上是**只藏不删**：paint() 仍把四块都画出来，页签只切 hidden。
+  // 实现上是**只藏不删**：paint() 仍把五块都画出来，页签只切 hidden。
   // 这样从「渠道」切到「触发设置」再切回来，没保存的输入还在 —— 比每次重画
   // 更不容易让用户白填一遍。
   const TABS = [
     ['channels', '渠道'],
     ['settings', '触发设置'],
+    ['tasks', '按任务'],
     ['test', '试发与记录'],
   ];
   let tab = 'channels';
@@ -294,7 +413,13 @@ export async function renderPush(root, ctx) {
   function tabButtonHtml(id, label) {
     const active = tab === id;
     const controls =
-      id === 'channels' ? 'push-sec-1' : id === 'settings' ? 'push-sec-2' : 'push-sec-3 push-sec-4';
+      id === 'channels'
+        ? 'push-sec-1'
+        : id === 'settings'
+          ? 'push-sec-2'
+          : id === 'tasks'
+            ? 'push-sec-3'
+            : 'push-sec-4 push-sec-5';
     return (
       '<button class="btn ' +
       (active ? 'primary' : 'ghost') +
@@ -331,7 +456,8 @@ export async function renderPush(root, ctx) {
 
   /** 只切显隐与选中态：不重画，所以其它页签里没保存的输入不会丢。 */
   function applyTab() {
-    const show = tab === 'settings' ? [2] : tab === 'test' ? [3, 4] : [1];
+    const show =
+      tab === 'settings' ? [2] : tab === 'tasks' ? [3] : tab === 'test' ? [4, 5] : [1];
     [...root.querySelectorAll(':scope > .section')].forEach((s, i) => {
       if (i > 0) s.hidden = !show.includes(i);
     });
@@ -378,6 +504,17 @@ export async function renderPush(root, ctx) {
           </div>
         </div>
         <div class="card" data-settings>${settingsBlock()}</div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <span class="section-title">按任务</span>
+        </div>
+        <p class="hint" style="margin:0 0 var(--sp-2)">
+          默认「跟随全局」。可以单独关掉某个话多的任务、只让它推成功，或只发指定渠道。
+          渠道都不勾 = 用全部已配渠道。
+        </p>
+        <div class="card">${tasksBlock()}</div>
       </div>
 
       <div class="section">
@@ -647,6 +784,28 @@ export async function renderPush(root, ctx) {
       return;
     }
     if (d.settingsSave !== undefined) void saveSettings(btn);
+  });
+
+  // 按任务：模式下拉与渠道勾选都是「改一项存一项」，所以走 change 而不是 click。
+  root.addEventListener('change', (ev) => {
+    const el = ev.target;
+    if (!(el instanceof HTMLSelectElement || el instanceof HTMLInputElement)) return;
+    const modeKey = el.dataset.taskMode;
+    const chanKey = el.dataset.taskChan;
+    const key = modeKey || chanKey;
+    if (!key) return;
+    const t = tasks().find((x) => ruleKey(x) === key);
+    if (!t) return;
+    const r = ruleOf(t);
+    if (modeKey) {
+      void saveTaskRule(t, el.value, r.channels);
+      return;
+    }
+    const cid = el.dataset.channel;
+    const channels = el.checked
+      ? [...new Set([...r.channels, cid])]
+      : r.channels.filter((c) => c !== cid);
+    void saveTaskRule(t, r.mode, channels);
   });
 
   await load(false);

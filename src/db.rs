@@ -162,6 +162,18 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             note    TEXT    NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_push_deliveries_at ON push_deliveries(at DESC);
+
+        -- 第三十二轮：**按任务的推送覆盖**。默认「跟随全局」，所以这里只存偏离
+        -- 默认的行：关掉某个话多的任务、只让它推成功、或者只推某几条渠道。
+        -- 用 (plugin, task) 而不是 jobs.id：任务删掉再建回来，规则还认得它。
+        CREATE TABLE IF NOT EXISTS push_tasks (
+            plugin     TEXT NOT NULL,
+            task       TEXT NOT NULL,
+            mode       TEXT NOT NULL,
+            channels   TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (plugin, task)
+        );
         "#,
     )?;
 
@@ -960,6 +972,76 @@ pub fn count_push_deliveries_today(db: &Db, date_prefix: &str) -> rusqlite::Resu
         "SELECT COUNT(*) FROM push_deliveries WHERE at LIKE ?1 || ' %' AND kind != 'test'",
         params![date_prefix],
         |r| r.get(0),
+    )
+}
+
+/// 一条按任务的推送覆盖。
+#[derive(Debug, Clone, Serialize)]
+pub struct PushTaskRow {
+    pub plugin: String,
+    pub task: String,
+    /// inherit / off / failure / success / all
+    pub mode: String,
+    /// 渠道 id 的 JSON 数组；空数组 = 用全部已配渠道。
+    pub channels: String,
+}
+
+pub fn list_push_tasks(db: &Db) -> rusqlite::Result<Vec<PushTaskRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt =
+        conn.prepare("SELECT plugin, task, mode, channels FROM push_tasks ORDER BY plugin, task")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PushTaskRow {
+            plugin: r.get(0)?,
+            task: r.get(1)?,
+            mode: r.get(2)?,
+            channels: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_push_task(db: &Db, plugin: &str, task: &str) -> rusqlite::Result<Option<PushTaskRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT plugin, task, mode, channels FROM push_tasks WHERE plugin = ?1 AND task = ?2",
+    )?;
+    let mut rows = stmt.query(params![plugin, task])?;
+    match rows.next()? {
+        Some(r) => Ok(Some(PushTaskRow {
+            plugin: r.get(0)?,
+            task: r.get(1)?,
+            mode: r.get(2)?,
+            channels: r.get(3)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+pub fn save_push_task(
+    db: &Db,
+    plugin: &str,
+    task: &str,
+    mode: &str,
+    channels: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO push_tasks (plugin, task, mode, channels, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(plugin, task) DO UPDATE SET
+           mode = excluded.mode, channels = excluded.channels, updated_at = excluded.updated_at",
+        params![plugin, task, mode, channels, updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn delete_push_task(db: &Db, plugin: &str, task: &str) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM push_tasks WHERE plugin = ?1 AND task = ?2",
+        params![plugin, task],
     )
 }
 

@@ -208,16 +208,107 @@ fn worker(db: Db, rx: Receiver<Event>) {
     }
 }
 
-fn wants(cfg: &PushConfig, ok: bool) -> bool {
-    cfg.enabled && if ok { cfg.on_success } else { cfg.on_failure }
+/// 一条任务自己的推送策略。
+///
+/// `Inherit` 是默认值，也是绝大多数任务该有的值 —— 不然每建一条任务都得再配
+/// 一遍推送。只有「这条别推」「这条只推成功」「这条只发某几条渠道」时才落库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskMode {
+    #[default]
+    Inherit,
+    Off,
+    Failure,
+    Success,
+    All,
+}
+
+impl TaskMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "off",
+            Self::Failure => "failure",
+            Self::Success => "success",
+            Self::All => "all",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "inherit" => Self::Inherit,
+            "off" => Self::Off,
+            "failure" => Self::Failure,
+            "success" => Self::Success,
+            "all" => Self::All,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskRule {
+    pub mode: TaskMode,
+    /// 非空 = 只发这几条渠道（仍要求它们已经在全局配好）。
+    pub channels: Vec<String>,
+}
+
+fn load_task_rule(db: &Db, plugin: &str, task: &str) -> TaskRule {
+    let Ok(Some(row)) = db::get_push_task(db, plugin, task) else {
+        return TaskRule::default();
+    };
+    TaskRule {
+        mode: TaskMode::parse(&row.mode).unwrap_or_default(),
+        channels: serde_json::from_str(&row.channels).unwrap_or_default(),
+    }
+}
+
+/// 这次运行该不该发。`Inherit` 就是全局那两档；其余是这条任务的覆盖。
+/// 总开关始终是总开关：关掉之后任何任务都不会发。
+fn task_wants(cfg: &PushConfig, mode: TaskMode, ok: bool) -> bool {
+    if !cfg.enabled {
+        return false;
+    }
+    match mode {
+        TaskMode::Inherit => {
+            if ok {
+                cfg.on_success
+            } else {
+                cfg.on_failure
+            }
+        }
+        TaskMode::Off => false,
+        TaskMode::Failure => !ok,
+        TaskMode::Success => ok,
+        TaskMode::All => true,
+    }
 }
 
 fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
     let cfg = load_config(db);
-    if !wants(&cfg, ev.ok) {
+    let rule = load_task_rule(db, &ev.plugin, &ev.task);
+    if !task_wants(&cfg, rule.mode, ev.ok) {
         return;
     }
-    if channels::configured(&cfg.channels).is_empty() {
+    let configured = channels::configured(&cfg.channels);
+    if configured.is_empty() {
+        return;
+    }
+    // 任务指定了渠道就只发那几条。指定的渠道后来被删掉 = 这条任务没地方发，
+    // 明说一句，否则用户只会看到「规则保存了但从来不推」。
+    if !rule.channels.is_empty()
+        && !rule
+            .channels
+            .iter()
+            .any(|c| configured.iter().any(|x| x == c))
+    {
+        crate::log::plog!(
+            "push",
+            warn,
+            "任务 {} / {} 指定的渠道都已不再配置，跳过",
+            ev.plugin,
+            ev.task
+        );
         return;
     }
 
@@ -253,6 +344,7 @@ fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
         "run",
         &ev.plugin,
         &ev.task,
+        &rule.channels,
     );
     if results.iter().any(|r| r.outcome != "skipped") {
         last.insert(key, Instant::now());
@@ -263,6 +355,11 @@ fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
 fn handle_breaker(db: &Db, ev: &BreakerEvent) {
     let cfg = load_config(db);
     if !cfg.enabled || !cfg.on_breaker {
+        return;
+    }
+    let rule = load_task_rule(db, &ev.plugin, &ev.task);
+    // 「不推」的任务连熔断也不推；其余模式都推熔断 —— 只推成功不代表它停了你不想知道。
+    if rule.mode == TaskMode::Off {
         return;
     }
     if channels::configured(&cfg.channels).is_empty() {
@@ -281,6 +378,7 @@ fn handle_breaker(db: &Db, ev: &BreakerEvent) {
         "breaker",
         &ev.plugin,
         &ev.task,
+        &rule.channels,
     );
     log_summary("熔断", &ev.plugin, &ev.task, &results);
 }
@@ -387,12 +485,17 @@ fn dispatch(
     kind: &str,
     plugin: &str,
     task: &str,
+    only: &[String],
 ) -> Vec<ChannelResult> {
     let now_ms = now_ms();
     let at = now_str();
     let mut out = Vec::new();
 
     for id in channels::configured(chans) {
+        // 空 = 不限制（用全局配的所有渠道）；非空 = 这条任务只要这几条。
+        if !only.is_empty() && !only.iter().any(|c| c == id) {
+            continue;
+        }
         // 业务码按渠道判定（见 check_business_code）：pushplus 的「未实名」、
         // 企业微信的 errcode 都藏在 HTTP 200 里，只看状态码会报「已发送」。
         let label = CHANNELS
@@ -807,7 +910,7 @@ pub fn send_test(db: &Db) -> TestOutcome {
     }
     let title = format!("{} · 试发", effective_title(&cfg));
     let text = "这是一条试发的推送。\n收到就说明配置对了。";
-    let results = dispatch(db, &cfg.channels, &title, text, "test", "", "");
+    let results = dispatch(db, &cfg.channels, &title, text, "test", "", "", &[]);
     let sent = results.iter().filter(|r| r.outcome == "sent").count();
     let failed = results.iter().filter(|r| r.outcome == "failed").count();
     let skipped = results.iter().filter(|r| r.outcome == "skipped").count();
@@ -858,6 +961,38 @@ pub fn view(db: &Db) -> Value {
         Vec::new()
     });
     let today = db::count_push_deliveries_today(db, &today_prefix()).unwrap_or(0);
+    let tasks: Vec<Value> = db::list_jobs(db)
+        .unwrap_or_else(|e| {
+            crate::log::plog!("push", warn, "读任务列表失败（按任务页签会空着）：{e}");
+            Vec::new()
+        })
+        .into_iter()
+        // kernel 的 boot / heartbeat 不是用户任务，列在「按任务」里只会添乱。
+        .filter(|j| !j.deleted && j.plugin != "kernel")
+        .map(|j| {
+            json!({
+                "plugin": j.plugin,
+                "name": j.name,
+                "source": j.source,
+                "status": j.status,
+            })
+        })
+        .collect();
+    let mut rules = serde_json::Map::new();
+    for row in db::list_push_tasks(db).unwrap_or_default() {
+        let chans: Vec<String> = serde_json::from_str(&row.channels).unwrap_or_default();
+        rules.insert(
+            format!("{}::{}", row.plugin, row.task),
+            json!({ "mode": row.mode, "channels": chans }),
+        );
+    }
+    let modes = vec![
+        json!({"id": "inherit", "label": "跟随全局"}),
+        json!({"id": "off", "label": "不推"}),
+        json!({"id": "failure", "label": "只推失败"}),
+        json!({"id": "success", "label": "只推成功"}),
+        json!({"id": "all", "label": "成功和失败都推"}),
+    ];
     json!({
         "enabled": cfg.enabled,
         "title": cfg.title,
@@ -873,6 +1008,9 @@ pub fn view(db: &Db) -> Value {
         "fields": channels::mask(&cfg.channels),
         "recent": recent,
         "today": today,
+        "tasks": tasks,
+        "task_rules": rules,
+        "modes": modes,
     })
 }
 
@@ -978,6 +1116,61 @@ pub fn save(db: &Db, body: &Value) -> Result<Vec<String>, String> {
         configured.len()
     );
     Ok(configured)
+}
+
+/// POST /api/push/task 的处理内核：保存一条任务的覆盖；恢复默认 = 删掉那一行。
+pub fn save_task(db: &Db, body: &Value) -> Result<Value, String> {
+    let Some(obj) = body.as_object() else {
+        return Err("请求体要是 JSON 对象".into());
+    };
+    let plugin = obj
+        .get("plugin")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("plugin 不能为空")?;
+    let task = obj
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("task 不能为空")?;
+    let mode_str = obj.get("mode").and_then(Value::as_str).unwrap_or("inherit");
+    let mode = TaskMode::parse(mode_str).ok_or_else(|| {
+        format!("mode 只能是 inherit / off / failure / success / all，收到 {mode_str}")
+    })?;
+    let channels: Vec<String> = match obj.get("channels") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(_) => return Err("channels 要是字符串数组".into()),
+    };
+    for c in &channels {
+        if !CHANNELS.iter().any(|m| m.id == c) {
+            return Err(format!("不认识的推送渠道：{c}"));
+        }
+    }
+    // 任务必须真的存在：写错一个名字的规则永远不会生效，保存时就说清楚。
+    let exists = db::list_jobs(db)
+        .map_err(|e| format!("读任务列表失败：{e}"))?
+        .into_iter()
+        .any(|j| j.plugin == plugin && j.name == task && !j.deleted);
+    if !exists {
+        return Err(format!("没有这个任务：{plugin} / {task}"));
+    }
+    // 恢复默认不是一个特殊值，而是「把这一行删掉」—— 这样全局改了什么，
+    // 这条任务立刻跟着变，不会留一份看不见的旧快照。
+    if mode == TaskMode::Inherit && channels.is_empty() {
+        db::delete_push_task(db, plugin, task).map_err(|e| format!("删除任务推送规则失败：{e}"))?;
+        return Ok(json!({"removed": true, "mode": mode.as_str(), "channels": []}));
+    }
+    let ch_json = serde_json::to_string(&channels).map_err(|e| format!("序列化渠道失败：{e}"))?;
+    db::save_push_task(db, plugin, task, mode.as_str(), &ch_json, &now_str())
+        .map_err(|e| format!("保存任务推送规则失败：{e}"))?;
+    Ok(json!({"removed": false, "mode": mode.as_str(), "channels": channels}))
 }
 
 #[cfg(test)]
@@ -1105,14 +1298,81 @@ mod tests {
     #[test]
     fn default_triggers_are_failure_and_breaker_only() {
         let cfg = PushConfig::default();
-        assert!(wants(&cfg, false), "失败默认要通知");
-        assert!(!wants(&cfg, true), "成功默认不通知");
+        assert!(
+            task_wants(&cfg, TaskMode::Inherit, false),
+            "失败默认要通知"
+        );
+        assert!(
+            !task_wants(&cfg, TaskMode::Inherit, true),
+            "成功默认不通知"
+        );
         let mut c = cfg.clone();
         c.on_success = true;
-        assert!(wants(&c, true));
+        assert!(task_wants(&c, TaskMode::Inherit, true));
         let mut c = cfg;
         c.enabled = false;
-        assert!(!wants(&c, false), "总开关关掉就什么都不发");
+        assert!(
+            !task_wants(&c, TaskMode::All, false),
+            "总开关关掉就什么都不发"
+        );
+    }
+
+    #[test]
+    fn task_rules_override_the_global_triggers() {
+        let cfg = PushConfig::default();
+        assert!(!task_wants(&cfg, TaskMode::Off, false));
+        assert!(task_wants(&cfg, TaskMode::Failure, false));
+        assert!(!task_wants(&cfg, TaskMode::Failure, true));
+        assert!(task_wants(&cfg, TaskMode::Success, true));
+        assert!(!task_wants(&cfg, TaskMode::Success, false));
+        assert!(task_wants(&cfg, TaskMode::All, true));
+        assert!(task_wants(&cfg, TaskMode::All, false));
+    }
+
+    #[test]
+    fn save_task_round_trip_and_restore_default() {
+        let (db, dir) = temp_db("rules");
+        crate::db::insert_panel_job(
+            &db,
+            "demo",
+            "daily",
+            "@every 1s",
+            None,
+            "2026-10-19 10:00:00",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let out = save_task(
+            &db,
+            &json!({"plugin":"demo","task":"daily","mode":"all","channels":["bark"]}),
+        )
+        .unwrap();
+        assert_eq!(out["mode"], "all");
+        let rule = load_task_rule(&db, "demo", "daily");
+        assert_eq!(rule.mode, TaskMode::All);
+        assert_eq!(rule.channels, vec!["bark".to_string()]);
+
+        // 恢复默认 = 删行，而不是存一条「inherit」的旧快照
+        let out = save_task(
+            &db,
+            &json!({"plugin":"demo","task":"daily","mode":"inherit","channels":[]}),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], true);
+        assert_eq!(load_task_rule(&db, "demo", "daily").mode, TaskMode::Inherit);
+
+        // 写错名字 / 未知渠道 / 未知 mode 都要在保存时拒绝
+        assert!(save_task(&db, &json!({"plugin":"demo","task":"nope","mode":"off"})).is_err());
+        assert!(save_task(
+            &db,
+            &json!({"plugin":"demo","task":"daily","mode":"off","channels":["nope"]})
+        )
+        .is_err());
+        assert!(save_task(&db, &json!({"plugin":"demo","task":"daily","mode":"sometimes"})).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

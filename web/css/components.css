@@ -1551,3 +1551,41 @@
   border-bottom: 0;
   padding-bottom: 0;
 }
+
+/* 按任务：一行 = 名字 + 模式下拉 + 渠道 chips。默认「跟随全局」的任务也列出来
+   （只是不写库）—— 不列的话用户会以为「没出现在这里的任务不推送」。 */
+.push-task {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.push-task:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.push-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* 下拉不抢宽度：它是这一行唯一的开关，窄屏折到下一行。 */
+.push-task-mode {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 8.5rem;
+}
+
+.push-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+

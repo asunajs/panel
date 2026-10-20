@@ -566,3 +566,11 @@ export function testPush() {
   // 可能超过默认 15 秒。给它 60 秒，别让用户在「到底发没发」上看到假超时。
   return request('/api/push/test', { method: 'POST', panel: true, body: {}, timeout: 60000 });
 }
+
+/**
+ * 按任务的推送覆盖。mode: inherit|off|failure|success|all。
+ * channels 空数组 = 用全部已配渠道；mode=inherit 且 channels 空 = 恢复默认（删行）。
+ */
+export function savePushTask(body) {
+  return request('/api/push/task', { method: 'POST', panel: true, body });
+}
