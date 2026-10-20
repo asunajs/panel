@@ -39,6 +39,15 @@ const TRIGGERS = [
   ['on_breaker', '熔断时通知', '连续失败被面板停掉时发一条 —— 这一条最该开着。'],
 ];
 
+/** 正文日志级别（后端的 LogPick）。任务侧多一档「跟随全局」，见 logPicks()。 */
+const LOG_PICKS = [
+  ['off', '不带'],
+  ['error', '仅错误'],
+  ['warn', '警告以上'],
+  ['info', '全部'],
+  ['debug', '全部（含调试）'],
+];
+
 /** 投递结果三档（`results[].outcome`）。认不出来的原样显示，不猜。 */
 const OUTCOME = {
   sent: { cls: 'success', text: '已发送' },
@@ -218,6 +227,22 @@ export async function renderPush(root, ctx) {
             value="${esc(s.daily_cap ?? 100)}">
           <span class="hint">一天最多发几条（各渠道合计）；0 = 不限。</span>
         </div>
+        <div class="field">
+          <label class="field-label" for="pf-log">正文带日志</label>
+          <select class="select" id="pf-log" data-set="log_level">
+            ${LOG_PICKS.map(
+              ([id, label]) =>
+                `<option value="${id}" ${(s.log_level || 'off') === id ? 'selected' : ''}>${label}</option>`,
+            ).join('')}
+          </select>
+          <span class="hint">只发结论常常定位不了问题；带上最后几行日志，手机上就能看出卡在哪。</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="pf-loglines">最多几行</label>
+          <input class="input mono" id="pf-loglines" type="number" min="0" max="50" data-set="log_lines"
+            value="${esc(s.log_lines ?? 10)}">
+          <span class="hint">0 = 不带；上限 50 行，每行还会截到 200 字。</span>
+        </div>
       </div>
       <p class="err-text" style="margin-top:var(--sp-2)" data-settings-err>${esc(settingsError)}</p>`;
   }
@@ -244,7 +269,40 @@ export async function renderPush(root, ctx) {
     return {
       mode: r.mode || 'inherit',
       channels: Array.isArray(r.channels) ? r.channels : [],
+      level: r.level || 'normal',
+      log_level: r.log_level || 'inherit',
     };
+  }
+
+  function levels() {
+    return Array.isArray(data && data.levels) && data.levels.length
+      ? data.levels
+      : [
+          { id: 'normal', label: '普通' },
+          { id: 'high', label: '重要' },
+        ];
+  }
+
+  /** 任务侧的日志档位比全局多一个「跟随全局」—— 那是「不写库」的意思，不是级别。 */
+  function logPicks() {
+    return Array.isArray(data && data.log_picks) && data.log_picks.length
+      ? data.log_picks
+      : [{ id: 'inherit', label: '跟随全局' }];
+  }
+
+  function options(list, current) {
+    return list
+      .map(
+        (o) =>
+          '<option value="' +
+          esc(o.id) +
+          '"' +
+          (o.id === current ? ' selected' : '') +
+          '>' +
+          esc(o.label) +
+          '</option>',
+      )
+      .join('');
   }
 
   function taskLabel(t) {
@@ -262,18 +320,9 @@ export async function renderPush(root, ctx) {
       .map((t) => {
         const key = ruleKey(t);
         const r = ruleOf(t);
-        const modeOptions = modes()
-          .map(
-            (m) =>
-              '<option value="' +
-              esc(m.id) +
-              '"' +
-              (m.id === r.mode ? ' selected' : '') +
-              '>' +
-              esc(m.label) +
-              '</option>',
-          )
-          .join('');
+        const modeOptions = options(modes(), r.mode);
+        const levelOptions = options(levels(), r.level);
+        const logOptions = options(logPicks(), r.log_level);
         const chips = conf.length
           ? '<div class="push-chips">' +
             conf
@@ -310,11 +359,23 @@ export async function renderPush(root, ctx) {
           '</div>' +
           // 必须用 .select 而不是 .input：.input 会露出浏览器原生的三角
           // （大箭头 + 旁边一截接缝），.select 才换成面板自己画的那个细 V。
+          '<div class="push-task-ctl">' +
           '<select class="select push-task-mode" data-task-mode="' +
           esc(key) +
           '" aria-label="推送模式">' +
           modeOptions +
           '</select>' +
+          '<select class="select push-task-mode" data-task-level="' +
+          esc(key) +
+          '" aria-label="任务等级">' +
+          levelOptions +
+          '</select>' +
+          '<select class="select push-task-mode" data-task-log="' +
+          esc(key) +
+          '" aria-label="正文日志">' +
+          logOptions +
+          '</select>' +
+          '</div>' +
           chips +
           (dead
             ? '<span class="err-text">指定的渠道都没配了 —— 这条任务现在推不出去</span>'
@@ -326,9 +387,19 @@ export async function renderPush(root, ctx) {
   }
 
   /** 改一项存一项。成功后只更新本地快照，不重画：连续勾渠道时页面不跳。 */
-  async function saveTaskRule(t, mode, channels) {
+  /** 改一项存一项：`patch` 里给什么改什么，其余沿用当前规则。 */
+  async function saveTaskRule(t, patch) {
     const key = ruleKey(t);
-    const res = await savePushTask({ plugin: t.plugin, task: t.name, mode, channels });
+    const r = ruleOf(t);
+    const body = {
+      plugin: t.plugin,
+      task: t.name,
+      mode: patch.mode ?? r.mode,
+      channels: patch.channels ?? r.channels,
+      level: patch.level ?? r.level,
+      log_level: patch.log_level ?? r.log_level,
+    };
+    const res = await savePushTask(body);
     if (!res || !res.ok) {
       ctx.toast('没保存：' + ((res && res.error) || '未知错误'), 'bad');
       return;
@@ -337,8 +408,10 @@ export async function renderPush(root, ctx) {
     if (res.removed) delete data.task_rules[key];
     else
       data.task_rules[key] = {
-        mode: res.mode || mode,
-        channels: Array.isArray(res.channels) ? res.channels : channels,
+        mode: res.mode || body.mode,
+        channels: Array.isArray(res.channels) ? res.channels : body.channels,
+        level: res.level || body.level,
+        log_level: res.log_level || body.log_level,
       };
     ctx.toast('已保存 ' + taskLabel(t), 'ok');
   }
@@ -405,6 +478,15 @@ export async function renderPush(root, ctx) {
     ['tasks', '按任务'],
     ['test', '试发与记录'],
   ];
+  // 每个页签管哪几块（下标对应 DOM 里 :scope > .section 的顺序，第 0 块是标题区）。
+  // 收成一张表，是因为「aria-controls」「aria-labelledby」「切显隐」三处都要用它；
+  // 各写一份迟早对不上（「试发与记录」共用两块：试一下 + 最近投递）。
+  const PANELS = {
+    channels: [1],
+    settings: [2],
+    tasks: [3],
+    test: [4, 5],
+  };
   let tab = 'channels';
 
   function tabLabel(id, label) {
@@ -412,25 +494,28 @@ export async function renderPush(root, ctx) {
     return label + ' ' + configured().length + '/' + channels().length;
   }
 
+  /** 页签 → 它控制的面板 id 串（aria-controls 允许空格分隔的多个 id）。 */
+  function panelIds(id) {
+    return PANELS[id].map((i) => 'push-sec-' + i).join(' ');
+  }
+
+  // roving tabindex：整条页签在 Tab 序里只占一格（当前项），进去之后用方向键走。
+  // 不做的话，四个页签要按四次 Tab 才能穿过去 —— 键盘用户最烦这个。
   function tabButtonHtml(id, label) {
     const active = tab === id;
-    const controls =
-      id === 'channels'
-        ? 'push-sec-1'
-        : id === 'settings'
-          ? 'push-sec-2'
-          : id === 'tasks'
-            ? 'push-sec-3'
-            : 'push-sec-4 push-sec-5';
     return (
       '<button class="btn ' +
       (active ? 'primary' : 'ghost') +
-      '" type="button" role="tab" data-tab="' +
+      '" type="button" role="tab" id="push-tab-' +
+      id +
+      '" data-tab="' +
       id +
       '" aria-selected="' +
       active +
       '" aria-controls="' +
-      controls +
+      panelIds(id) +
+      '" tabindex="' +
+      (active ? '0' : '-1') +
       '">' +
       esc(tabLabel(id, label)) +
       '</button>'
@@ -451,23 +536,50 @@ export async function renderPush(root, ctx) {
       if (i > 0) {
         s.id = 'push-sec-' + i;
         s.setAttribute('role', 'tabpanel');
+        // 面板要指回自己的页签：没有 aria-labelledby，屏幕阅读器只念「区域」，
+        // 用户不知道这一屏属于哪个页签（「试发与记录」管着两块，两块都指向它）。
+        const owner = TABS.find(([id]) => PANELS[id].includes(i));
+        if (owner) s.setAttribute('aria-labelledby', 'push-tab-' + owner[0]);
       }
+    });
+    // ←/→ 在页签间移动，Home/End 跳首尾，并且**顺手切换内容**（ARIA 页签的自动
+    // 激活）：少按一次 Enter。这条键盘路径不是可选项 —— 未选中的 tab 已经是
+    // tabindex=-1，没有方向键就彻底够不着了。
+    bar.addEventListener('keydown', (ev) => {
+      const ids = TABS.map(([id]) => id);
+      const cur = ids.indexOf(tab);
+      let next = -1;
+      if (ev.key === 'ArrowRight') next = (cur + 1) % ids.length;
+      else if (ev.key === 'ArrowLeft') next = (cur - 1 + ids.length) % ids.length;
+      else if (ev.key === 'Home') next = 0;
+      else if (ev.key === 'End') next = ids.length - 1;
+      if (next < 0) return;
+      ev.preventDefault(); // 方向键别顺带把页面滚走
+      activateTab(ids[next]);
     });
     applyTab();
   }
 
+  /** 切页签 + 把焦点交给它：焦点不跟过去，roving tabindex 就成了死路。 */
+  function activateTab(id) {
+    tab = id;
+    applyTab();
+    const b = root.querySelector('[data-tab="' + id + '"]');
+    if (b) b.focus();
+  }
+
   /** 只切显隐与选中态：不重画，所以其它页签里没保存的输入不会丢。 */
   function applyTab() {
-    const show =
-      tab === 'settings' ? [2] : tab === 'tasks' ? [3] : tab === 'test' ? [4, 5] : [1];
     [...root.querySelectorAll(':scope > .section')].forEach((s, i) => {
-      if (i > 0) s.hidden = !show.includes(i);
+      if (i > 0) s.hidden = !PANELS[tab].includes(i);
     });
     for (const b of root.querySelectorAll('[data-tab]')) {
       const active = b.dataset.tab === tab;
       b.classList.toggle('primary', active);
       b.classList.toggle('ghost', !active);
       b.setAttribute('aria-selected', String(active));
+      // 和 tabButtonHtml 里的初始值保持一致：键盘切完页签，Tab 序也跟着走。
+      b.tabIndex = active ? 0 : -1;
     }
   }
 
@@ -476,7 +588,7 @@ export async function renderPush(root, ctx) {
     root.innerHTML = `
       <div class="section">
         <div class="section-head">
-          <span class="section-title">推送</span>
+          <h2 class="section-title">推送</h2>
           <div class="card-actions"><button class="btn ghost" data-refresh>刷新</button></div>
         </div>
         ${heroHtml()}
@@ -484,7 +596,7 @@ export async function renderPush(root, ctx) {
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">渠道</span>
+          <h2 class="section-title">渠道</h2>
         </div>
         <p class="hint" style="margin:0 0 var(--sp-2)">
           一行一个渠道，点「填 / 改」展开这一个（同时只展开一个）。保存只发这一个渠道的字段。
@@ -500,7 +612,7 @@ export async function renderPush(root, ctx) {
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">触发设置</span>
+          <h2 class="section-title">触发设置</h2>
           <div class="card-actions">
             <button class="btn primary" data-settings-save>保存设置</button>
           </div>
@@ -510,18 +622,18 @@ export async function renderPush(root, ctx) {
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">按任务</span>
+          <h2 class="section-title">按任务</h2>
         </div>
         <p class="hint" style="margin:0 0 var(--sp-2)">
-          默认「跟随全局」。可以单独关掉某个话多的任务、只让它推成功，或只发指定渠道。
-          渠道都不勾 = 用全部已配渠道。
+          默认「跟随全局」。可以单独关掉某个话多的任务、只让它推成功、只发指定渠道，
+          或者把要紧的任务标成「重要」（不受冷却与日上限）。渠道都不勾 = 用全部已配渠道。
         </p>
         <div class="card">${tasksBlock()}</div>
       </div>
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">试一下</span>
+          <h2 class="section-title">试一下</h2>
           <div class="card-actions"><button class="btn" data-test>发一条试试</button></div>
         </div>
         <div class="card" data-test-box>${testBlock()}</div>
@@ -529,7 +641,7 @@ export async function renderPush(root, ctx) {
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">最近投递（${recent().length}）</span>
+          <h2 class="section-title">最近投递（${recent().length}）</h2>
         </div>
         <div class="card">${recentBlock()}</div>
       </div>`;
@@ -540,7 +652,7 @@ export async function renderPush(root, ctx) {
     root.innerHTML = `
       <div class="section">
         <div class="section-head">
-          <span class="section-title">推送</span>
+          <h2 class="section-title">推送</h2>
           <div class="card-actions"><button class="btn" data-refresh>重试</button></div>
         </div>
         <div class="card">
@@ -705,6 +817,18 @@ export async function renderPush(root, ctx) {
     settings.cooldown_secs = cool.value;
     settings.daily_cap = cap.value;
 
+    const lines = intField('log_lines', '日志行数', '0 表示不带');
+    if (lines.error) {
+      fail(errEl, lines.error);
+      return;
+    }
+    if (lines.value > 50) {
+      fail(errEl, '日志最多带 50 行。');
+      return;
+    }
+    settings.log_lines = lines.value;
+    settings.log_level = get('log_level')?.value || 'off';
+
     btn.disabled = true;
     btn.textContent = '保存中…';
     const res = await savePush({
@@ -792,22 +916,29 @@ export async function renderPush(root, ctx) {
   root.addEventListener('change', (ev) => {
     const el = ev.target;
     if (!(el instanceof HTMLSelectElement || el instanceof HTMLInputElement)) return;
-    const modeKey = el.dataset.taskMode;
-    const chanKey = el.dataset.taskChan;
-    const key = modeKey || chanKey;
+    const key =
+      el.dataset.taskMode || el.dataset.taskLevel || el.dataset.taskLog || el.dataset.taskChan;
     if (!key) return;
     const t = tasks().find((x) => ruleKey(x) === key);
     if (!t) return;
-    const r = ruleOf(t);
-    if (modeKey) {
-      void saveTaskRule(t, el.value, r.channels);
+    if (el.dataset.taskMode) {
+      void saveTaskRule(t, { mode: el.value });
       return;
     }
+    if (el.dataset.taskLevel) {
+      void saveTaskRule(t, { level: el.value });
+      return;
+    }
+    if (el.dataset.taskLog) {
+      void saveTaskRule(t, { log_level: el.value });
+      return;
+    }
+    const r = ruleOf(t);
     const cid = el.dataset.channel;
     const channels = el.checked
       ? [...new Set([...r.channels, cid])]
       : r.channels.filter((c) => c !== cid);
-    void saveTaskRule(t, r.mode, channels);
+    void saveTaskRule(t, { channels });
   });
 
   await load(false);

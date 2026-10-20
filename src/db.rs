@@ -171,6 +171,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             task       TEXT NOT NULL,
             mode       TEXT NOT NULL,
             channels   TEXT NOT NULL DEFAULT '[]',
+            -- 第三十三轮：任务等级（normal/high）。high 的任务不受冷却与日上限
+            -- 限制 —— 日上限一满，重要告警就被吞了，这是最难受的一种失败。
+            level      TEXT NOT NULL DEFAULT 'normal',
+            -- 正文里带哪些日志：inherit/off/error/warn/info/debug
+            log_level  TEXT NOT NULL DEFAULT 'inherit',
             updated_at TEXT NOT NULL,
             PRIMARY KEY (plugin, task)
         );
@@ -226,6 +231,19 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "plugin_state", "command", "TEXT")?;
     // 第六十轮：任务目录脚本。`kind` 区分插件任务与脚本任务；`script` 是
     // TASKS_DIR 下的相对路径；`runtime` 是脚本解释器（node/bun/python3/sh）。
+    // 第三十三轮：按任务的推送等级与正文日志级别（老库补列）。
+    ensure_column(
+        &conn,
+        "push_tasks",
+        "level",
+        "TEXT NOT NULL DEFAULT 'normal'",
+    )?;
+    ensure_column(
+        &conn,
+        "push_tasks",
+        "log_level",
+        "TEXT NOT NULL DEFAULT 'inherit'",
+    )?;
     ensure_column(&conn, "jobs", "kind", "TEXT NOT NULL DEFAULT 'plugin'")?;
     ensure_column(&conn, "jobs", "script", "TEXT")?;
     ensure_column(&conn, "jobs", "runtime", "TEXT")?;
@@ -984,18 +1002,26 @@ pub struct PushTaskRow {
     pub mode: String,
     /// 渠道 id 的 JSON 数组；空数组 = 用全部已配渠道。
     pub channels: String,
+    /// normal / high：high 的任务不受冷却与日上限限制。
+    pub level: String,
+    /// inherit / off / error / warn / info / debug：正文里带哪些日志。
+    pub log_level: String,
 }
 
 pub fn list_push_tasks(db: &Db) -> rusqlite::Result<Vec<PushTaskRow>> {
     let conn = db.lock().unwrap();
-    let mut stmt =
-        conn.prepare("SELECT plugin, task, mode, channels FROM push_tasks ORDER BY plugin, task")?;
+    let mut stmt = conn.prepare(
+        "SELECT plugin, task, mode, channels, level, log_level
+         FROM push_tasks ORDER BY plugin, task",
+    )?;
     let rows = stmt.query_map([], |r| {
         Ok(PushTaskRow {
             plugin: r.get(0)?,
             task: r.get(1)?,
             mode: r.get(2)?,
             channels: r.get(3)?,
+            level: r.get(4)?,
+            log_level: r.get(5)?,
         })
     })?;
     rows.collect()
@@ -1004,7 +1030,8 @@ pub fn list_push_tasks(db: &Db) -> rusqlite::Result<Vec<PushTaskRow>> {
 pub fn get_push_task(db: &Db, plugin: &str, task: &str) -> rusqlite::Result<Option<PushTaskRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT plugin, task, mode, channels FROM push_tasks WHERE plugin = ?1 AND task = ?2",
+        "SELECT plugin, task, mode, channels, level, log_level
+         FROM push_tasks WHERE plugin = ?1 AND task = ?2",
     )?;
     let mut rows = stmt.query(params![plugin, task])?;
     match rows.next()? {
@@ -1013,6 +1040,8 @@ pub fn get_push_task(db: &Db, plugin: &str, task: &str) -> rusqlite::Result<Opti
             task: r.get(1)?,
             mode: r.get(2)?,
             channels: r.get(3)?,
+            level: r.get(4)?,
+            log_level: r.get(5)?,
         })),
         None => Ok(None),
     }
@@ -1024,15 +1053,19 @@ pub fn save_push_task(
     task: &str,
     mode: &str,
     channels: &str,
+    level: &str,
+    log_level: &str,
     updated_at: &str,
 ) -> rusqlite::Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO push_tasks (plugin, task, mode, channels, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO push_tasks (plugin, task, mode, channels, level, log_level, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(plugin, task) DO UPDATE SET
-           mode = excluded.mode, channels = excluded.channels, updated_at = excluded.updated_at",
-        params![plugin, task, mode, channels, updated_at],
+           mode = excluded.mode, channels = excluded.channels,
+           level = excluded.level, log_level = excluded.log_level,
+           updated_at = excluded.updated_at",
+        params![plugin, task, mode, channels, level, log_level, updated_at],
     )?;
     Ok(())
 }

@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::db::{self, Db};
+use crate::hostapi::SharedLogs;
 
 pub use channels::{Action, Built, EmailOpts, PushChannels, CHANNELS};
 
@@ -65,6 +66,9 @@ fn default_cooldown() -> u64 {
 fn default_cap() -> u64 {
     100
 }
+fn default_log_lines() -> u64 {
+    10
+}
 
 /// 整份推送配置。**存在面板自己的库里**（不是 settings.json）：
 /// 它包含 token / 密码，而且形状是嵌套的 —— 与「运行参数」不是同一类东西。
@@ -84,6 +88,12 @@ pub struct PushConfig {
     pub cooldown_secs: u64,
     #[serde(default = "default_cap")]
     pub daily_cap: u64,
+    /// 正文里带哪些日志（默认不带：正文只有结论，短、看得完）。
+    #[serde(default)]
+    pub log_level: LogPick,
+    /// 最多带几行（0 = 不带；上限 50）。
+    #[serde(default = "default_log_lines")]
+    pub log_lines: u64,
     #[serde(default)]
     pub channels: PushChannels,
 }
@@ -98,6 +108,8 @@ impl Default for PushConfig {
             on_breaker: true,
             cooldown_secs: default_cooldown(),
             daily_cap: default_cap(),
+            log_level: LogPick::default(),
+            log_lines: default_log_lines(),
             channels: PushChannels::default(),
         }
     }
@@ -164,11 +176,13 @@ pub struct PushService {
 
 impl PushService {
     /// 起一条后台线程消费队列。线程名固定，排查时在进程的线程列表里一眼能看到。
-    pub fn spawn(db: Db) -> Arc<Self> {
+    /// `logs` 是日志中心：正文要带日志时，按 run 标签去它那里取这次执行的行。
+    /// 传进来而不是让推送线程自己去开日志目录 —— 那会绕开面板自己的过滤与缓冲。
+    pub fn spawn(db: Db, logs: SharedLogs) -> Arc<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         thread::Builder::new()
             .name("panel-push".into())
-            .spawn(move || worker(db, rx))
+            .spawn(move || worker(db, logs, rx))
             .expect("起推送线程失败");
         Arc::new(Self { tx })
     }
@@ -196,13 +210,13 @@ impl PushService {
     }
 }
 
-fn worker(db: Db, rx: Receiver<Event>) {
+fn worker(db: Db, logs: SharedLogs, rx: Receiver<Event>) {
     // 冷却表只活在推送线程里：重启后清空。这是有意的 —— 重启本身就意味着
     // 用户可能刚改过配置，这时压着不发比多发一条更让人困惑。
     let mut last: HashMap<String, Instant> = HashMap::new();
     for ev in rx {
         match ev {
-            Event::Run(e) => handle_run(&db, &e, &mut last),
+            Event::Run(e) => handle_run(&db, &logs, &e, &mut last),
             Event::Breaker(e) => handle_breaker(&db, &e),
         }
     }
@@ -246,11 +260,105 @@ impl TaskMode {
     }
 }
 
+/// 一条任务的**等级**。
+///
+/// 为什么需要它：冷却（默认 600 秒）和日上限（默认 100 条）是两道全局闸门，
+/// 它们压的本来是「话多但不要紧」的任务；可它们不认识哪条任务要紧，
+/// 于是日上限一满，最该收到的那条也被一起吞了。
+/// 打上 `high` 的任务跳过这两道闸门（其余的照旧）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskLevel {
+    #[default]
+    Normal,
+    High,
+}
+
+impl TaskLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "normal" => Self::Normal,
+            "high" => Self::High,
+            _ => return None,
+        })
+    }
+}
+
+/// 推送正文里带哪些日志。
+///
+/// 只带结论（「脚本退出码 1」）经常不够定位；把最后几行错误日志一起发出来，
+/// 手机上就能看出是哪一步挂的，不用再开电脑翻日志页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogPick {
+    /// 不带（默认）：正文保持短。
+    #[default]
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LogPick {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "off" => Self::Off,
+            "error" => Self::Error,
+            "warn" => Self::Warn,
+            "info" => Self::Info,
+            "debug" => Self::Debug,
+            _ => return None,
+        })
+    }
+
+    /// 门槛；`Off` 没有门槛（不带日志）。
+    fn min_level(self) -> Option<crate::log::Level> {
+        Some(match self {
+            Self::Off => return None,
+            Self::Error => crate::log::Level::Error,
+            Self::Warn => crate::log::Level::Warn,
+            Self::Info => crate::log::Level::Info,
+            Self::Debug => crate::log::Level::Debug,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "不带日志",
+            Self::Error => "仅错误",
+            Self::Warn => "警告以上",
+            Self::Info => "全部",
+            Self::Debug => "全部（含调试）",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskRule {
     pub mode: TaskMode,
     /// 非空 = 只发这几条渠道（仍要求它们已经在全局配好）。
     pub channels: Vec<String>,
+    pub level: TaskLevel,
+    /// `None` = 跟随全局的 `log_level`。
+    pub log_level: Option<LogPick>,
 }
 
 fn load_task_rule(db: &Db, plugin: &str, task: &str) -> TaskRule {
@@ -260,6 +368,9 @@ fn load_task_rule(db: &Db, plugin: &str, task: &str) -> TaskRule {
     TaskRule {
         mode: TaskMode::parse(&row.mode).unwrap_or_default(),
         channels: serde_json::from_str(&row.channels).unwrap_or_default(),
+        level: TaskLevel::parse(&row.level).unwrap_or_default(),
+        // "inherit" 与认不出的值都当「跟随全局」—— 别让一个写坏的字段把推送整个关掉。
+        log_level: LogPick::parse(&row.log_level),
     }
 }
 
@@ -284,7 +395,12 @@ fn task_wants(cfg: &PushConfig, mode: TaskMode, ok: bool) -> bool {
     }
 }
 
-fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
+fn handle_run(
+    db: &Db,
+    logs: &SharedLogs,
+    ev: &RunEvent,
+    last: &mut HashMap<String, Instant>,
+) {
     let cfg = load_config(db);
     let rule = load_task_rule(db, &ev.plugin, &ev.task);
     if !task_wants(&cfg, rule.mode, ev.ok) {
@@ -319,7 +435,7 @@ fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
         ev.task,
         if ev.ok { "ok" } else { "err" }
     );
-    if cooldown_blocks(&cfg, &key, last) {
+    if gate_applies(rule.level) && cooldown_blocks(&cfg, &key, last) {
         crate::log::plog!(
             "push",
             debug,
@@ -330,12 +446,12 @@ fn handle_run(db: &Db, ev: &RunEvent, last: &mut HashMap<String, Instant>) {
         );
         return;
     }
-    if daily_cap_reached(db, &cfg) {
+    if gate_applies(rule.level) && daily_cap_reached(db, &cfg) {
         return;
     }
 
     let title = effective_title(&cfg);
-    let text = run_text(ev);
+    let text = run_text(ev, &run_log_section(logs, ev, &rule, &cfg));
     let results = dispatch(
         db,
         &cfg.channels,
@@ -392,6 +508,14 @@ fn effective_title(cfg: &PushConfig) -> String {
     }
 }
 
+/// 冷却与日上限要不要对这条任务生效。
+///
+/// 两道闸门压的是「话多但不要紧」的任务，它们不认识哪条要紧 —— 日上限一满，
+/// 最该收到的那条也会被一起吞掉。所以给任务一个 `high`，它就不受这两道限制。
+fn gate_applies(level: TaskLevel) -> bool {
+    level == TaskLevel::Normal
+}
+
 fn cooldown_blocks(cfg: &PushConfig, key: &str, last: &HashMap<String, Instant>) -> bool {
     if cfg.cooldown_secs == 0 {
         return false;
@@ -442,7 +566,7 @@ fn fmt_duration(ms: i64) -> String {
     }
 }
 
-fn run_text(ev: &RunEvent) -> String {
+fn run_text(ev: &RunEvent, logs: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!("任务：{}\n", who(&ev.plugin, &ev.task)));
     s.push_str(&format!("结果：{}\n", if ev.ok { "成功" } else { "失败" }));
@@ -453,7 +577,72 @@ fn run_text(ev: &RunEvent) -> String {
         s.push_str(&format!("错误：{}\n", err.trim()));
     }
     s.push_str(&format!("运行记录：{}", ev.run_id));
+    if !logs.is_empty() {
+        // 日志放最后：结论在上面，翻到下面才是细节。
+        s.push_str("\n\n");
+        s.push_str(logs);
+    }
     s
+}
+
+/// 正文里的日志段（空串 = 不带）。
+///
+/// 取数顺序：先读内存环（同步，刚跑完的日志就在里面），没有再回退到按 run
+/// 标签读日志文件 —— 文件是**异步写**的，刚结束那几行可能还没落盘。
+fn run_log_section(logs: &SharedLogs, ev: &RunEvent, rule: &TaskRule, cfg: &PushConfig) -> String {
+    let pick = rule.log_level.unwrap_or(cfg.log_level);
+    let Some(min) = pick.min_level() else {
+        return String::new();
+    };
+    let max = cfg.log_lines.min(50) as usize;
+    if max == 0 {
+        return String::new();
+    }
+
+    let mut lines: Vec<String> = logs
+        .mem()
+        .snapshot()
+        .into_iter()
+        .filter(|l| l.entry.run.as_deref() == Some(ev.run_id.as_str()) && l.entry.level() >= min)
+        .map(|l| log_line_text(&l.entry))
+        .collect();
+    if lines.is_empty() {
+        lines = logs
+            .history_for_run(&ev.run_id, 500)
+            .into_iter()
+            .filter(|e| e.level() >= min)
+            .map(|e| log_line_text(&e))
+            .collect();
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let start = lines.len().saturating_sub(max);
+    let kept = &lines[start..];
+    let mut s = format!("日志（{}，最近 {} 行）：\n", pick.label(), kept.len());
+    for l in kept {
+        s.push_str("  ");
+        s.push_str(l);
+        s.push('\n');
+    }
+
+    // 兜底：一条推送不该因为日志变成几 MB（有的插件一行就是 200 KB）。
+    const CAP: usize = 800;
+    if s.chars().count() > CAP {
+        let cut: String = s.chars().take(CAP).collect();
+        return format!("{cut}…（已截断）");
+    }
+    s.trim_end().to_string()
+}
+
+fn log_line_text(e: &crate::log::LogEntry) -> String {
+    // 每行限长：日志里贴一整个 JSON 响应是常事，原样塞进推送会变成一坨。
+    let mut msg = e.msg.trim().replace('\n', " ");
+    if msg.chars().count() > 200 {
+        msg = msg.chars().take(200).collect::<String>() + "…";
+    }
+    format!("{} [{}] {}", e.ts.format("%H:%M:%S"), e.level().as_str(), msg)
 }
 
 fn breaker_text(ev: &BreakerEvent) -> String {
@@ -983,9 +1172,26 @@ pub fn view(db: &Db) -> Value {
         let chans: Vec<String> = serde_json::from_str(&row.channels).unwrap_or_default();
         rules.insert(
             format!("{}::{}", row.plugin, row.task),
-            json!({ "mode": row.mode, "channels": chans }),
+            json!({
+                "mode": row.mode,
+                "channels": chans,
+                "level": row.level,
+                "log_level": row.log_level,
+            }),
         );
     }
+    let levels = vec![
+        json!({"id": "normal", "label": "普通"}),
+        json!({"id": "high", "label": "重要"}),
+    ];
+    let log_picks = vec![
+        json!({"id": "inherit", "label": "跟随全局"}),
+        json!({"id": "off", "label": "不带"}),
+        json!({"id": "error", "label": "仅错误"}),
+        json!({"id": "warn", "label": "警告以上"}),
+        json!({"id": "info", "label": "全部"}),
+        json!({"id": "debug", "label": "全部（含调试）"}),
+    ];
     let modes = vec![
         json!({"id": "inherit", "label": "跟随全局"}),
         json!({"id": "off", "label": "不推"}),
@@ -1002,6 +1208,8 @@ pub fn view(db: &Db) -> Value {
             "on_breaker": cfg.on_breaker,
             "cooldown_secs": cfg.cooldown_secs,
             "daily_cap": cfg.daily_cap,
+            "log_level": cfg.log_level.as_str(),
+            "log_lines": cfg.log_lines,
         },
         "channels": channels,
         "configured": channels::configured(&cfg.channels),
@@ -1011,6 +1219,8 @@ pub fn view(db: &Db) -> Value {
         "tasks": tasks,
         "task_rules": rules,
         "modes": modes,
+        "levels": levels,
+        "log_picks": log_picks,
     })
 }
 
@@ -1064,6 +1274,19 @@ pub fn save(db: &Db, body: &Value) -> Result<Vec<String>, String> {
                 return Err("每日上限最多 10000 条".into());
             }
             cfg.daily_cap = n;
+        }
+        if let Some(v) = s.get("log_level") {
+            let t = v.as_str().ok_or("settings.log_level 要是字符串")?;
+            cfg.log_level = LogPick::parse(t).ok_or_else(|| {
+                format!("日志级别只能是 off / error / warn / info / debug，收到 {t}")
+            })?;
+        }
+        if let Some(v) = s.get("log_lines") {
+            let n = v.as_u64().ok_or("settings.log_lines 要是非负整数")?;
+            if n > 50 {
+                return Err("日志最多带 50 行".into());
+            }
+            cfg.log_lines = n;
         }
     }
 
@@ -1161,16 +1384,56 @@ pub fn save_task(db: &Db, body: &Value) -> Result<Value, String> {
     if !exists {
         return Err(format!("没有这个任务：{plugin} / {task}"));
     }
+    let level_str = obj.get("level").and_then(Value::as_str).unwrap_or("normal");
+    let level = TaskLevel::parse(level_str)
+        .ok_or_else(|| format!("level 只能是 normal / high，收到 {level_str}"))?;
+    let log_str = obj
+        .get("log_level")
+        .and_then(Value::as_str)
+        .unwrap_or("inherit");
+    let log_level = if log_str == "inherit" {
+        None
+    } else {
+        Some(LogPick::parse(log_str).ok_or_else(|| {
+            format!("日志级别只能是 inherit / off / error / warn / info / debug，收到 {log_str}")
+        })?)
+    };
+
     // 恢复默认不是一个特殊值，而是「把这一行删掉」—— 这样全局改了什么，
     // 这条任务立刻跟着变，不会留一份看不见的旧快照。
-    if mode == TaskMode::Inherit && channels.is_empty() {
+    if mode == TaskMode::Inherit
+        && channels.is_empty()
+        && level == TaskLevel::Normal
+        && log_level.is_none()
+    {
         db::delete_push_task(db, plugin, task).map_err(|e| format!("删除任务推送规则失败：{e}"))?;
-        return Ok(json!({"removed": true, "mode": mode.as_str(), "channels": []}));
+        return Ok(json!({
+            "removed": true,
+            "mode": mode.as_str(),
+            "channels": [],
+            "level": level.as_str(),
+            "log_level": "inherit",
+        }));
     }
     let ch_json = serde_json::to_string(&channels).map_err(|e| format!("序列化渠道失败：{e}"))?;
-    db::save_push_task(db, plugin, task, mode.as_str(), &ch_json, &now_str())
-        .map_err(|e| format!("保存任务推送规则失败：{e}"))?;
-    Ok(json!({"removed": false, "mode": mode.as_str(), "channels": channels}))
+    db::save_push_task(
+        db,
+        plugin,
+        task,
+        mode.as_str(),
+        &ch_json,
+        level.as_str(),
+        log_level.map(LogPick::as_str).unwrap_or("inherit"),
+        &now_str(),
+    )
+    .map_err(|e| format!("保存任务推送规则失败：{e}"))?;
+    Ok(json!({
+        "removed": false,
+        "mode": mode.as_str(),
+        "channels": channels,
+        "level": level.as_str(),
+        "log_level": log_level.map(LogPick::as_str).unwrap_or("inherit"),
+    }))
 }
 
 #[cfg(test)]
@@ -1195,7 +1458,7 @@ mod tests {
             manual: false,
             at: "2026-10-19 23:30:00".into(),
         };
-        let t = run_text(&ev);
+        let t = run_text(&ev, "");
         assert!(t.contains("任务：mcloud / daily"));
         assert!(t.contains("结果：失败"));
         assert!(t.contains("触发：定时"));
@@ -1215,7 +1478,7 @@ mod tests {
             manual: true,
             at: "2026-10-19 23:30:00".into(),
         };
-        assert!(run_text(&ev).contains("脚本任务 / backup"));
+        assert!(run_text(&ev, "").contains("脚本任务 / backup"));
     }
 
     #[test]
@@ -1372,6 +1635,114 @@ mod tests {
         )
         .is_err());
         assert!(save_task(&db, &json!({"plugin":"demo","task":"daily","mode":"sometimes"})).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn high_level_tasks_skip_the_global_gates() {
+        assert!(gate_applies(TaskLevel::Normal));
+        assert!(
+            !gate_applies(TaskLevel::High),
+            "重要任务不受冷却与日上限限制"
+        );
+    }
+
+    #[test]
+    fn log_picks_map_to_a_level_threshold() {
+        assert!(LogPick::Off.min_level().is_none());
+        assert_eq!(LogPick::Error.min_level(), Some(crate::log::Level::Error));
+        assert_eq!(LogPick::Warn.min_level(), Some(crate::log::Level::Warn));
+        assert_eq!(LogPick::Info.min_level(), Some(crate::log::Level::Info));
+        assert_eq!(LogPick::Debug.min_level(), Some(crate::log::Level::Debug));
+        assert!(
+            LogPick::parse("inherit").is_none(),
+            "inherit 是任务侧的「跟随全局」，不是级别"
+        );
+    }
+
+    #[test]
+    fn log_section_filters_by_level_and_keeps_the_tail() {
+        let hub: SharedLogs = crate::log::Hub::new(None);
+        let lg = hub.for_plugin("demo").with_run("r-1");
+        lg.info("第一条");
+        lg.warn("有点慢");
+        lg.error("炸了");
+        lg.with_run("r-2").error("别人的日志");
+
+        let ev = RunEvent {
+            plugin: "demo".into(),
+            task: "daily".into(),
+            run_id: "r-1".into(),
+            ok: false,
+            error: Some("炸了".into()),
+            duration_ms: 5,
+            manual: false,
+            at: "2026-10-21 00:00:00".into(),
+        };
+        let mut cfg = PushConfig {
+            log_level: LogPick::Warn,
+            log_lines: 10,
+            ..PushConfig::default()
+        };
+
+        let sec = run_log_section(&hub, &ev, &TaskRule::default(), &cfg);
+        assert!(sec.contains("警告以上"), "{sec}");
+        assert!(sec.contains("[warn] 有点慢"), "{sec}");
+        assert!(sec.contains("[error] 炸了"), "{sec}");
+        assert!(!sec.contains("第一条"), "info 低于门槛：{sec}");
+        assert!(!sec.contains("别人的日志"), "别的 run 不该混进来：{sec}");
+
+        cfg.log_lines = 1;
+        let sec = run_log_section(&hub, &ev, &TaskRule::default(), &cfg);
+        assert!(sec.contains("炸了") && !sec.contains("有点慢"), "只留最后 1 行：{sec}");
+
+        let rule = TaskRule {
+            log_level: Some(LogPick::Off),
+            ..Default::default()
+        };
+        assert!(
+            run_log_section(&hub, &ev, &rule, &cfg).is_empty(),
+            "任务把日志关掉就不带"
+        );
+    }
+
+    #[test]
+    fn save_task_keeps_level_and_log_pick() {
+        let (db, dir) = temp_db("rules2");
+        crate::db::insert_panel_job(
+            &db,
+            "demo",
+            "daily",
+            "@every 1s",
+            None,
+            "2026-10-21 00:00:00",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let out = save_task(
+            &db,
+            &json!({"plugin":"demo","task":"daily","level":"high","log_level":"error"}),
+        )
+        .unwrap();
+        assert_eq!(
+            out["removed"], false,
+            "只有等级 / 日志，也不该被当成「恢复默认」删掉"
+        );
+        assert_eq!(out["level"], "high");
+        let rule = load_task_rule(&db, "demo", "daily");
+        assert_eq!(rule.level, TaskLevel::High);
+        assert_eq!(rule.log_level, Some(LogPick::Error));
+
+        // 改回普通 + 跟随全局 = 删行
+        let out = save_task(
+            &db,
+            &json!({"plugin":"demo","task":"daily","mode":"inherit","level":"normal","log_level":"inherit"}),
+        )
+        .unwrap();
+        assert_eq!(out["removed"], true);
         let _ = std::fs::remove_dir_all(dir);
     }
 

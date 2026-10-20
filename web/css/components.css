@@ -1576,11 +1576,18 @@
   min-width: 0;
 }
 
-/* 下拉不抢宽度：它是这一行唯一的开关，窄屏折到下一行。 */
+/* 模式 / 等级 / 日志三个下拉排一组；窄屏各自折行，不硬挤成一行。 */
+.push-task-ctl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* 下拉不抢宽度：它们只是这一行的开关，窄屏折到下一行。 */
 .push-task-mode {
   flex: 0 0 auto;
   width: auto;
-  min-width: 8.5rem;
+  min-width: 7.5rem;
 }
 
 .push-chips {

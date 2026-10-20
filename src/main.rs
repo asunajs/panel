@@ -418,7 +418,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 面板级推送：一条后台线程 + 有界队列。任务线程只做 try_send，
     // 绝不在调度路径上等网络（理由见 src/push/mod.rs 顶部）。
-    let push = push::PushService::spawn(db.clone());
+    let push = push::PushService::spawn(db.clone(), logs.clone());
 
     let host = HostState::new(
         logs.clone(),
