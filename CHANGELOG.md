@@ -2,6 +2,24 @@
 
 ## 未发布
 
+- **QuickJS 下的 `async` 函数从「静默失败」改成硬错误**（breaking）。
+  内嵌 QuickJS 没有事件循环，宿主不驱动 Promise 队列，老实现把 handler 的返回值丢掉 ——
+  于是 `async` 任务记成「成功」但只跑了 `await` 之前那几行，`async` 路由回 **200 + 空 body**，
+  `async` 的 `on_tick` 也一直「正常」。这类插件现在：
+  - **加载期**：`register_handler` / `register_route` / `on_tick` 是 async 函数 ⇒ 插件加载失败，
+    错误信息点名是哪一个（导出但没注册的 async 函数不算，不误伤）。
+  - **调用期**：handler 返回 Promise（如 `return doAsync()`）⇒ 任务判失败并记
+    `jobs.last_error`；路由回 **500** 并带原因；`on_tick` 记一条 error。
+  - **模块顶层 `await`**：只支持微任务内能 settle 的 Promise；`await` 定时器 / 网络会让
+    模块加载失败，错误里说明「没有事件循环」（原来只有一句 dead lock）。
+  - **静态提示**：没注册的 async 辅助函数不拦加载，但日志留一条 warn（带行号）；
+    「插件源码」页打开 / 保存时在编辑器上方标出 `async` / `await` 的行号（最多 5 处，
+    不阻塞保存）。新增 `src/jslint.rs`（OXC AST 遍历，`oxc_ast` / `oxc_ast_visit`
+    是既有依赖的直接引用，不增加编译产物）。
+  - Node / Bun 引擎行为不变。文档：[docs/plugin-api.md](docs/plugin-api.md)、
+    [docs/runtimes.md](docs/runtimes.md)。
+  - 迁移：把 async handler 改写成同步函数（宿主 API 本来就是同步的）。
+
 - **面板级推送**：任务跑完 / 熔断时，面板把结果发到配置好的渠道 —— 补上脚本任务、
   面板创建的任务和熔断这三类「插件推送看不见」的事。
   - 10 个渠道（与插件侧同一套形状）：pushplus / Server酱 / 企业微信（两步）/

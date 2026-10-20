@@ -166,9 +166,32 @@ function handler(payload) {
 | `manual` | `true` = 用户点的「现在跑一次」，`false` = 调度到点 |
 | `params` | `register_cron(…, { params })` 给的 JSON；没给是 `null`（不是 `undefined`） |
 
-**成功 / 失败的唯一约定：正常返回 = 成功，抛异常（含 async rejection）= 失败。**
+**成功 / 失败的唯一约定：正常返回 = 成功，抛异常 = 失败。**
 失败时面板记录错误文本（`name: message` + stack），写进 `jobs.last_error`，交给熔断器。
 `on_tick(payload)` 是可选的每秒回调（`{seq, ts}`），定义了就会被调用。
+
+> ⚠ **QuickJS 引擎不支持 `async` 函数。** 内嵌的 QuickJS 没有事件循环，宿主从不驱动
+> Promise 队列，所以 `await` 之后的代码**永远不会执行** —— 老版本里这甚至是静默的：
+> 任务记成「成功」但只跑了 `await` 之前那几行，路由回 200 但 body 是空的。
+>
+> 现在的行为是显式失败：
+>
+> - **加载期**：注册表里（`register_handler` / `register_route`）或 `on_tick` 是 async 函数
+>   ⇒ 插件**加载失败**，错误信息点名是哪一个，`lp.error` 与日志里都能看到。
+> - **调用期**：handler 返回了 Promise（例如 `return doAsync()`）⇒ 任务判失败、记
+>   `jobs.last_error`；路由回 **500**；`on_tick` 记一条 error。
+> - **模块顶层 `await`**：只有能在微任务里 settle 的才可用（`await 1`、
+>   `await Promise.resolve()`）；`await` 定时器 / 网络会让模块加载失败并说明原因。
+> - **没注册的 async 辅助函数**：插件照常加载（死代码不该让插件装不进去），但日志里
+>   留一条 warn，指明是第几行。
+> - **编辑器提示**：「插件源码」页保存时，接口会返回源码里所有 `async` / `await`
+>   的行号（最多 5 处），页面在编辑器上方标一条警告 —— **不阻塞保存**。
+>
+> 需要真正的 async 请把插件切到 **Node / Bun** 引擎（它们有真事件循环），见
+> [runtimes.md](runtimes.md)。任务目录里的 `.js` **脚本任务**由外部 `node` / `bun`
+> 执行，也有真事件循环，同样不受这条限制。
+> 同一份代码在两个引擎下的能力差异，这是唯一一处「写出来
+> 不报错但行为不同」的地方，所以刻意做成硬错误而不是警告。
 
 `manual` 是**告知**，不是行为：用户点「现在跑一次」意味着他已经决定了，插件照做；
 定时到点才按自己的策略判断。

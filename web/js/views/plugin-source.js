@@ -68,10 +68,12 @@ export async function render(root, ctx, params) {
         </div>
       </div>
       <p class="hint" id="src-meta"></p>
+      <p class="hint" id="src-warn" hidden></p>
       <div class="editor-wrap src-editor-wrap" id="src-host"></div>
     </div>`;
 
   const meta = root.querySelector('#src-meta');
+  const warnEl = root.querySelector('#src-warn');
   const dirtyBadge = root.querySelector('#src-dirty');
   const saveBtn = root.querySelector('#src-save');
   const restoreBtn = root.querySelector('#src-restore');
@@ -84,6 +86,23 @@ export async function render(root, ctx, params) {
       'Ctrl/Cmd+S 保存。保存后引擎最多 1 秒内发现文件变化并热更新这个插件。';
   };
   showMeta(res);
+
+  // 源码里的 async：只提示、不拦保存 —— 违反它的是「运行期不会有任何输出」，
+  // 与其等热更新后对着一条绿色的调度记录猜，不如现在就指出来。
+  const showWarnings = (list) => {
+    const items = list || [];
+    if (items.length === 0) {
+      warnEl.hidden = true;
+      warnEl.textContent = '';
+      return;
+    }
+    warnEl.hidden = false;
+    warnEl.innerHTML =
+      '<span class="badge warning">async</span> ' +
+      '内嵌 QuickJS 没有事件循环，`await` 之后的代码不会执行（只有 Node / Bun 支持）：' +
+      items.map(esc).join('；');
+  };
+  showWarnings(res.warnings);
 
   const editor = createEditor(root.querySelector('#src-host'), {
     value: res.text,
@@ -115,6 +134,7 @@ export async function render(root, ctx, params) {
     // 保存过之后就有备份了，「恢复上一次」该出现了
     restoreBtn.hidden = false;
     showMeta({ ...res, text: { lines: out.lines, bytes: out.bytes } });
+    showWarnings(out.warnings);
     ctx.toast(`${name}：已保存（${out.lines} 行），引擎正在热更新…`, 'ok');
   };
 

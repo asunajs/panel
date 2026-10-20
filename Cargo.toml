@@ -49,6 +49,11 @@ ureq = { version = "3", features = ["rustls"] }
 # OXC 的 minifier / isolated declarations。release 下 strip + LTO 后约 +0.9 MiB，
 # 这样安装 .ts 不再依赖外部的 Bun 或 Node。
 oxc_allocator = "0.154.0"
+# oxc_ast / oxc_ast_visit 是给 src/jslint.rs 用的（在源码里找 async / await）：
+# parser/semantic 本来就把它们拉进来编译了，所以直接依赖**不增加**编译产物，
+# 只是把「用 AST 找节点」从正则换成一次遍历。
+oxc_ast = "0.154.0"
+oxc_ast_visit = "0.154.0"
 oxc_codegen = "0.154.0"
 oxc_parser = "0.154.0"
 oxc_semantic = "0.154.0"

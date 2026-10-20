@@ -426,14 +426,81 @@ globalThis.require = function (spec) {
     );
 };
 
+// ══════════════════════ async 守卫（宿主没有事件循环）══════════════════
+//
+// 为什么必须有：`__dispatch_task` 把 handler 的返回值丢掉，于是 async 的任务
+// 「成功」了 —— 但 `await` 之后一行都没跑；路由更糟，Promise 上没有 status/body，
+// 直接回 200 + 空 body。两种都是**没有任何报错的错误**，靠调度记录永远查不出来。
+//
+// 三个判定只认**真的会被调用**的东西（两张注册表 + `on_tick`），不扫源码：
+// 导出但没注册的 async 工具函数不该让整个插件装不进去。
+Object.defineProperty(globalThis, '__is_async_fn', {
+    value: function (f) {
+        if (typeof f !== 'function') return false;
+        var tag = Object.prototype.toString.call(f);
+        return tag === '[object AsyncFunction]' || tag === '[object AsyncGeneratorFunction]';
+    },
+    writable: false,
+    configurable: false,
+});
+
+// 同步函数返回 Promise 也算 —— 覆盖 `return doAsync()` 这种写法。
+Object.defineProperty(globalThis, '__is_thenable', {
+    value: function (v) {
+        return !!v && (typeof v === 'object' || typeof v === 'function') && typeof v.then === 'function';
+    },
+    writable: false,
+    configurable: false,
+});
+
+Object.defineProperty(globalThis, '__async_call_msg', {
+    value: function (what) {
+        return what + ' 是 async（或返回了 Promise）：内嵌 QuickJS 没有事件循环，' +
+            'Promise 永远不会被驱动，`await` 之后的代码不会执行 —— 所以这次调用判失败。' +
+            '请改写成同步函数；只有 Node / Bun 引擎支持 async。';
+    },
+    writable: false,
+    configurable: false,
+});
+
+function __async_route_resp(what) {
+    return JSON.stringify({
+        status: 500,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+        body: __async_call_msg(what),
+    });
+}
+
+// 加载期审计：返回 JSON 数组，元素是「任务 `x`」/「路由 `GET /x`」/「`on_tick`」。
+// 引擎在 eval 成功后调它一次 —— async 插件要在**装载**时就被拒，
+// 而不是三天后靠人对着一条绿色的调度记录猜。
+Object.defineProperty(globalThis, '__async_audit', {
+    value: function () {
+        var bad = [];
+        for (var t in __tasks) {
+            if (__is_async_fn(__tasks[t])) bad.push('任务 `' + t + '`');
+        }
+        for (var r in __routes) {
+            if (__is_async_fn(__routes[r])) bad.push('路由 `' + r + '`');
+        }
+        if (__is_async_fn(globalThis.on_tick)) bad.push('`on_tick`');
+        return JSON.stringify(bad);
+    },
+    writable: false,
+    configurable: false,
+});
+
 // 约定：返回空字符串 = 成功；非空字符串 = 错误消息。只用 String 一种类型。
 globalThis.__dispatch_task = function (name, payloadJson) {
     var h = __tasks[name];
     if (typeof h !== 'function') return '任务 `' + name + '` 没有可调用的处理函数';
+    // 同步段能跑、`await` 之后的永久不跑 —— 那不是「支持了一部分」，是静默丢工作。
+    if (__is_async_fn(h)) return __async_call_msg('任务 `' + name + '`');
     var payload;
     try { payload = JSON.parse(payloadJson); } catch (e) { payload = { raw: payloadJson }; }
     try {
-        h(payload);
+        var r = h(payload);
+        if (__is_thenable(r)) return __async_call_msg('任务 `' + name + '`');
         return '';
     } catch (e) {
         return __fmt_err(e);
@@ -444,10 +511,13 @@ globalThis.__dispatch_task = function (name, payloadJson) {
 globalThis.__dispatch_route = function (key, requestJson) {
     var h = __routes[key];
     if (typeof h !== 'function') return '{"status":404,"headers":{},"body":"no route"}';
+    if (__is_async_fn(h)) return __async_route_resp('路由 `' + key + '`');
     var req;
     try { req = JSON.parse(requestJson); } catch (e) { req = { raw: requestJson }; }
     try {
         var r = h(req) || {};
+        // Promise 上没有 status/body ⇒ 不拦的话会回 200 + 空 body，比报错更难查
+        if (__is_thenable(r)) return __async_route_resp('路由 `' + key + '`');
         return JSON.stringify({
             status: r.status === undefined ? 200 : r.status,
             headers: r.headers === undefined ? {} : r.headers,
@@ -1291,6 +1361,152 @@ mod tests {
         "#);
         let levels: Vec<&str> = got.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(levels, vec!["info", "info", "debug", "warn", "error"]);
+    }
+
+    // ---------------------------------------------------------------- async 守卫
+    //
+    // 背景：内嵌 QuickJS 没有事件循环，宿主从不泵 job queue。老实现里
+    // `__dispatch_task` 把 handler 的返回值丢掉、`__dispatch_route` 把 Promise 当
+    // 普通对象读 `status`/`body` —— 于是 async 插件「任务成功但一行没跑」、
+    // 「路由 200 但 body 空」。这组测试锁住的就是「不许静默」。
+
+    /// 建一个只有 BOOTSTRAP 的最小 Context（异步守卫是纯 JS 判定，不需要 HostState）。
+    fn with_bootstrap(f: impl FnOnce(&Ctx)) {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            f(&ctx);
+        });
+    }
+
+    #[test]
+    fn async_task_handler_fails_loudly_instead_of_succeeding_silently() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__ran = [];
+                __tasks.slow = async function () {
+                    __ran.push('sync-part');
+                    await 0;
+                    __ran.push('after-await');
+                };
+            "#,
+            )
+            .unwrap();
+            let msg: String = ctx.eval("__dispatch_task('slow', '{}')").unwrap();
+            let ran: String = ctx.eval("__ran.join(',')").unwrap();
+            // 空串 = 成功，正是老实现的行为；这里必须**不是**空串
+            assert!(
+                !msg.is_empty(),
+                "async handler 返回了空串（= 成功）: {msg:?}"
+            );
+            assert!(msg.contains("没有事件循环"), "错误要说出原因: {msg}");
+            assert!(msg.contains("Node / Bun"), "错误要给出出路: {msg}");
+            // 拦在调用之前：连同步段都不跑 —— 只跑前半段同样是丢工作
+            assert_eq!(ran, "", "拦住 async handler 时不该先执行它的同步段");
+        });
+    }
+
+    #[test]
+    fn handler_that_returns_a_promise_is_caught_too() {
+        with_bootstrap(|ctx| {
+            // 同步函数返回 Promise（`return doAsync()`）—— 只看 `async` 关键字会漏掉这种
+            ctx.eval::<(), _>("__tasks.wrap = function () { return Promise.resolve(1); };")
+                .unwrap();
+            let msg: String = ctx.eval("__dispatch_task('wrap', '{}')").unwrap();
+            assert!(msg.contains("没有事件循环"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn sync_handler_still_succeeds() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__ran = [];
+                __tasks.ok = function (p) { __ran.push('ran'); };
+            "#,
+            )
+            .unwrap();
+            let msg: String = ctx.eval("__dispatch_task('ok', '{}')").unwrap();
+            let ran: String = ctx.eval("__ran.join(',')").unwrap();
+            assert_eq!(msg, "");
+            assert_eq!(ran, "ran");
+        });
+    }
+
+    #[test]
+    fn async_route_handler_returns_500_instead_of_empty_200() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>(
+                "__routes['GET /slow'] = async function () { return { status: 200, body: 'x' }; };",
+            )
+            .unwrap();
+            let raw: String = ctx.eval("__dispatch_route('GET /slow', '{}')").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(v["status"], 500, "async 路由必须是 500，不能是 200 空 body");
+            assert!(v["body"].as_str().unwrap().contains("没有事件循环"), "{v}");
+        });
+    }
+
+    #[test]
+    fn sync_route_handler_still_works() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>(
+                "__routes['GET /ok'] = function (req) { return { status: 200, body: 'hi ' + req.path }; };",
+            )
+            .unwrap();
+            let raw: String = ctx
+                .eval(r#"__dispatch_route('GET /ok', '{"path":"/ok"}')"#)
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(v["status"], 200);
+            assert_eq!(v["body"], "hi /ok");
+        });
+    }
+
+    #[test]
+    fn async_audit_lists_exactly_what_will_be_called() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                __tasks.sync_task = function () {};
+                __tasks.async_task = async function () {};
+                __routes['GET /sync'] = function () {};
+                __routes['POST /async'] = async function () {};
+                // 导出但没注册：不该让插件加载失败
+                globalThis.helper = async function () {};
+            "#,
+            )
+            .unwrap();
+            let audit: String = ctx.eval("__async_audit()").unwrap();
+            assert_eq!(audit, r#"["任务 `async_task`","路由 `POST /async`"]"#);
+
+            ctx.eval::<(), _>("globalThis.on_tick = async function () {};")
+                .unwrap();
+            let audit: String = ctx.eval("__async_audit()").unwrap();
+            assert!(audit.contains("`on_tick`"), "{audit}");
+        });
+    }
+
+    #[test]
+    fn async_detection_covers_the_forms_plugins_actually_write() {
+        with_bootstrap(|ctx| {
+            // 逐个写法确认：`[object AsyncFunction]` / `[object AsyncGeneratorFunction]`
+            for (src, want) in [
+                ("async function f(){}", true),
+                ("async () => {}", true),
+                ("async function* g(){}", true),
+                ("function f(){}", false),
+                ("asyncFn => asyncFn", false),
+            ] {
+                let got: bool = ctx
+                    .eval(format!("__is_async_fn(({src}))"))
+                    .unwrap_or_else(|e| panic!("{src}: {e}"));
+                assert_eq!(got, want, "判定 {src} 出错");
+            }
+        });
     }
 
     // ---------------------------------------------------------------- node:path / node:fs

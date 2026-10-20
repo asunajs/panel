@@ -37,6 +37,7 @@ mod extproc;
 mod extproc;
 mod hostapi;
 mod jshost;
+mod jslint;
 mod log;
 mod market;
 mod pluginfs;
