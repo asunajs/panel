@@ -308,7 +308,9 @@ export async function renderPush(root, ctx) {
           '</span>' +
           badge +
           '</div>' +
-          '<select class="input push-task-mode" data-task-mode="' +
+          // 必须用 .select 而不是 .input：.input 会露出浏览器原生的三角
+          // （大箭头 + 旁边一截接缝），.select 才换成面板自己画的那个细 V。
+          '<select class="select push-task-mode" data-task-mode="' +
           esc(key) +
           '" aria-label="推送模式">' +
           modeOptions +
