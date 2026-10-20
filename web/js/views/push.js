@@ -272,6 +272,77 @@ export async function renderPush(root, ctx) {
 
   // ---------------------------------------------------------------- 画
 
+  // 一屏铺完 10 个渠道 + 触发设置 + 试发 + 最近投递要滚三四屏，用户找不到
+  // 「保存设置」在哪。拆成三个页签，每个只回答一个问题：发到哪 / 什么时候发 /
+  // 刚才发出去没有。
+  //
+  // 实现上是**只藏不删**：paint() 仍把四块都画出来，页签只切 hidden。
+  // 这样从「渠道」切到「触发设置」再切回来，没保存的输入还在 —— 比每次重画
+  // 更不容易让用户白填一遍。
+  const TABS = [
+    ['channels', '渠道'],
+    ['settings', '触发设置'],
+    ['test', '试发与记录'],
+  ];
+  let tab = 'channels';
+
+  function tabLabel(id, label) {
+    if (id !== 'channels') return label;
+    return label + ' ' + configured().length + '/' + channels().length;
+  }
+
+  function tabButtonHtml(id, label) {
+    const active = tab === id;
+    const controls =
+      id === 'channels' ? 'push-sec-1' : id === 'settings' ? 'push-sec-2' : 'push-sec-3 push-sec-4';
+    return (
+      '<button class="btn ' +
+      (active ? 'primary' : 'ghost') +
+      '" type="button" role="tab" data-tab="' +
+      id +
+      '" aria-selected="' +
+      active +
+      '" aria-controls="' +
+      controls +
+      '">' +
+      esc(tabLabel(id, label)) +
+      '</button>'
+    );
+  }
+
+  /** 把页签条挂到标题区末尾，并给各块补上 tabpanel 语义。每次 paint 都是新 DOM，挂一次即可。 */
+  function mountTabs() {
+    const first = root.querySelector(':scope > .section');
+    if (!first) return;
+    const bar = document.createElement('div');
+    bar.className = 'push-tabs';
+    bar.setAttribute('role', 'tablist');
+    bar.setAttribute('aria-label', '推送设置');
+    bar.innerHTML = TABS.map(([id, label]) => tabButtonHtml(id, label)).join('');
+    first.appendChild(bar);
+    [...root.querySelectorAll(':scope > .section')].forEach((s, i) => {
+      if (i > 0) {
+        s.id = 'push-sec-' + i;
+        s.setAttribute('role', 'tabpanel');
+      }
+    });
+    applyTab();
+  }
+
+  /** 只切显隐与选中态：不重画，所以其它页签里没保存的输入不会丢。 */
+  function applyTab() {
+    const show = tab === 'settings' ? [2] : tab === 'test' ? [3, 4] : [1];
+    [...root.querySelectorAll(':scope > .section')].forEach((s, i) => {
+      if (i > 0) s.hidden = !show.includes(i);
+    });
+    for (const b of root.querySelectorAll('[data-tab]')) {
+      const active = b.dataset.tab === tab;
+      b.classList.toggle('primary', active);
+      b.classList.toggle('ghost', !active);
+      b.setAttribute('aria-selected', String(active));
+    }
+  }
+
   function paint() {
     if (!data) return;
     root.innerHTML = `
@@ -285,7 +356,7 @@ export async function renderPush(root, ctx) {
 
       <div class="section">
         <div class="section-head">
-          <span class="section-title">渠道（${configured().length} / ${channels().length} 已配）</span>
+          <span class="section-title">渠道</span>
         </div>
         <p class="hint" style="margin:0 0 var(--sp-2)">
           一行一个渠道，点「填 / 改」展开这一个（同时只展开一个）。保存只发这一个渠道的字段。
@@ -323,6 +394,7 @@ export async function renderPush(root, ctx) {
         </div>
         <div class="card">${recentBlock()}</div>
       </div>`;
+    mountTabs();
   }
 
   function paintError() {
@@ -543,11 +615,16 @@ export async function renderPush(root, ctx) {
   root.addEventListener('click', (ev) => {
     if (!(ev.target instanceof Element)) return;
     const btn = ev.target.closest(
-      'button[data-refresh], button[data-edit], button[data-remove],' +
+      'button[data-tab], button[data-refresh], button[data-edit], button[data-remove],' +
         ' button[data-save-chan], button[data-test], button[data-settings-save]',
     );
     if (!btn || btn.disabled) return;
     const d = btn.dataset;
+    if (d.tab !== undefined) {
+      tab = d.tab;
+      applyTab();
+      return;
+    }
     if (d.refresh !== undefined) {
       void load(false);
       return;

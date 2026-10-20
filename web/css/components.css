@@ -1480,6 +1480,23 @@
    点「填 / 改」才展开那一个（同时只展开一个）。这里只补排版 —— 卡片、表单、
    徽章、按钮全部复用现有类；颜色一律走 theme.css 的变量，深浅两套主题自动
    跟随（下面不许出现写死的色值，④ 那条检查会红）。 */
+/* 三个页签：一页只回答一个问题（发到哪 / 什么时候发 / 刚才发出去没有）。
+   按钮复用 .btn 的 primary / ghost，这里只负责把它和下面的内容分开。 */
+.push-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* 页签切走的块必须真的不占位。UA 的 [hidden] 会被任何 class 里的 display
+   覆盖；显式钉一条，省得以后给 .section 加 display 时悄悄把隐藏失效。 */
+[role='tabpanel'][hidden] {
+  display: none;
+}
+
 .push-chan {
   display: flex;
   align-items: center;
