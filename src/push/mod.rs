@@ -393,9 +393,8 @@ fn dispatch(
     let mut out = Vec::new();
 
     for id in channels::configured(chans) {
-        // 只有这三家的 API 用 errcode 表达业务失败；自定义消息的响应体是用户自己的，
-        // 不能拿 errcode 去猜（别人的 200 里可能就有个同名字段）。
-        let check_code = matches!(id, "workWeixin" | "workWeixinBot" | "dingTalk");
+        // 业务码按渠道判定（见 check_business_code）：pushplus 的「未实名」、
+        // 企业微信的 errcode 都藏在 HTTP 200 里，只看状态码会报「已发送」。
         let label = CHANNELS
             .iter()
             .find(|m| m.id == id)
@@ -425,7 +424,7 @@ fn dispatch(
         for action in actions {
             match action {
                 Action::Skip(reason) => last_note = Some(reason.to_string()),
-                Action::Http(built) => match send_http(&built, check_code) {
+                Action::Http(built) => match send_http(&built, id) {
                     Ok(note) => {
                         sent += 1;
                         last_note = Some(note);
@@ -663,30 +662,56 @@ fn snippet(body: &str) -> String {
     format!("：{out}")
 }
 
-/// 2xx 才算成功；但企业微信/钉钉会在 200 里回一个非 0 的 errcode ——
-/// 那等于「配置错了但 HTTP 说没问题」，必须当失败报出来，否则用户只会看到沉默。
-fn check_errcode(body: &str) -> Option<String> {
+/// HTTP 2xx 只说明「服务器收下了」，不代表「用户收到了」。这几家会在 200 的
+/// 响应体里用一个业务码说「其实没发」：
+///
+/// - pushplus 的 905（未实名认证）—— 实测就是这样：HTTP 200、界面「已发送」、
+///   手机上什么都没有；
+/// - 企业微信 / 钉钉的 errcode；
+/// - Server酱的 code（0 才是成功）；
+/// - Bark 的 code（200 才是成功）。
+///
+/// 只认**文档里明确写出来的**成功码；响应体里没这个字段就不判 —— 自定义消息的
+/// 响应体是用户自己的，别人的 200 里有个 code 字段很正常，不能拿来猜。
+fn check_business_code(channel: &str, body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body).ok()?;
-    let code = v.get("errcode")?.as_i64()?;
-    if code == 0 {
-        return None;
+    let code = |k: &str| v.get(k).and_then(Value::as_i64);
+    let msg = || {
+        v.get("msg")
+            .or_else(|| v.get("message"))
+            .or_else(|| v.get("errmsg"))
+            .and_then(Value::as_str)
+            .unwrap_or("（没有说明）")
+            .to_string()
+    };
+    match channel {
+        "workWeixin" | "workWeixinBot" | "dingTalk" => {
+            let c = code("errcode")?;
+            (c != 0).then(|| format!("errcode {c}：{}", msg()))
+        }
+        "pushplus" => {
+            let c = code("code")?;
+            (c != 200).then(|| format!("pushplus code {c}：{}", msg()))
+        }
+        "serverChan" => {
+            let c = code("code")?;
+            (c != 0).then(|| format!("Server酱 code {c}：{}", msg()))
+        }
+        "bark" => {
+            let c = code("code")?;
+            (c != 200).then(|| format!("Bark code {c}：{}", msg()))
+        }
+        _ => None,
     }
-    let msg = v
-        .get("errmsg")
-        .and_then(Value::as_str)
-        .unwrap_or("（没有 errmsg）");
-    Some(format!("errcode {code}：{msg}"))
 }
 
-fn send_http(built: &Built, check_code: bool) -> Result<String, String> {
+fn send_http(built: &Built, channel: &str) -> Result<String, String> {
     let (status, body) = http_call(built)?;
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}{}", snippet(&body)));
     }
-    if check_code {
-        if let Some(e) = check_errcode(&body) {
-            return Err(e);
-        }
+    if let Some(e) = check_business_code(channel, &body) {
+        return Err(e);
     }
     Ok(format!("HTTP {status}"))
 }
@@ -717,7 +742,7 @@ fn send_work_weixin(
             )
         })?;
     let msg = channels::build_work_weixin_message(config, access_token, title, text);
-    send_http(&msg, true)
+    send_http(&msg, "workWeixin")
 }
 
 fn send_email(opts: &EmailOpts) -> Result<String, String> {
@@ -1088,6 +1113,40 @@ mod tests {
         let mut c = cfg;
         c.enabled = false;
         assert!(!wants(&c, false), "总开关关掉就什么都不发");
+    }
+
+    #[test]
+    fn business_codes_are_only_checked_where_they_are_documented() {
+        // pushplus：HTTP 200 + code 905 = 未实名，实测用户收不到
+        let e = check_business_code(
+            "pushplus",
+            r#"{"code":905,"data":"未实名认证用户无法发送消息","msg":"账户未进行实名认证"}"#,
+        )
+        .expect("905 必须判失败");
+        assert!(e.contains("实名"), "{e}");
+        assert!(check_business_code("pushplus", r#"{"code":200,"msg":"请求成功"}"#).is_none());
+
+        // Server酱：0 才是成功
+        assert!(check_business_code("serverChan", r#"{"code":0,"message":""}"#).is_none());
+        assert!(check_business_code("serverChan", r#"{"code":40001,"message":"bad"}"#).is_some());
+
+        // Bark：200 才是成功
+        assert!(check_business_code("bark", r#"{"code":200,"message":"success"}"#).is_none());
+        assert!(check_business_code("bark", r#"{"code":400,"message":"bad key"}"#).is_some());
+
+        // 企业微信 / 钉钉：errcode 非 0
+        assert!(check_business_code("workWeixin", r#"{"errcode":0,"errmsg":"ok"}"#).is_none());
+        assert!(
+            check_business_code("workWeixin", r#"{"errcode":40001,"errmsg":"invalid"}"#).is_some()
+        );
+
+        // 自定义消息的响应体是用户自己的：同名 code 字段不能拿来猜
+        assert!(
+            check_business_code("customPost", r#"{"code":500,"msg":"user owns this"}"#).is_none()
+        );
+
+        // 不是 JSON 就不判（有的渠道回纯文本 ok）
+        assert!(check_business_code("pushplus", "ok").is_none());
     }
 
     #[test]
