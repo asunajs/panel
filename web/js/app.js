@@ -95,6 +95,10 @@ function toast(msg, kind = '') {
   const el = $('#toast');
   el.textContent = msg;
   el.className = 'toast' + (kind ? ' ' + kind : '');
+  // 失败要「打断着」念：role=status 是礼貌播报，屏幕阅读器会先把当前这段念完；
+  // 而「保存失败」这种消息必须立刻听到，否则用户以为存上了。
+  el.setAttribute('role', kind === 'bad' ? 'alert' : 'status');
+  el.setAttribute('aria-live', kind === 'bad' ? 'assertive' : 'polite');
   el.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
@@ -119,9 +123,19 @@ function initDrawer() {
 
   const setOpen = (open) => {
     if (open && !drawerMode()) return;
+    const wasOpen = root.classList.contains('nav-open');
     root.classList.toggle('nav-open', open);
     scrim.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
+    // 抽屉是从左边滑出来的，但 DOM 里侧边栏排在 .main **之前** —— 不主动把焦点搬进去，
+    // 键盘用户按 Tab 只会往内容区走，永远进不了导航（只能 Shift+Tab 倒着找）。
+    if (open && !wasOpen) {
+      const first = $('#nav .nav-item');
+      if (first) first.focus();
+    } else if (!open && wasOpen && $('#sidebar').contains(document.activeElement)) {
+      // 关抽屉时焦点必须跟着回来，否则它留在已经移出屏幕的侧边栏里
+      btn.focus();
+    }
   };
 
   btn.addEventListener('click', () => setOpen(!root.classList.contains('nav-open')));
@@ -212,7 +226,7 @@ async function renderDashboard(root) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">引擎</span>
+        <h2 class="section-title">引擎</h2>
         <span class="badge ${healthy ? 'success' : 'failed'}">${healthy ? '健康' : '停摆'}</span>
       </div>
       <div class="grid stats">
@@ -242,12 +256,12 @@ async function renderDashboard(root) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">插件任务</span>
+        <h2 class="section-title">插件任务</h2>
         <div class="card-actions"><a class="btn ghost" href="#/tasks">查看全部</a></div>
       </div>
       <div class="table-wrap dash-jobs">
         <table>
-          <thead><tr><th>插件</th><th>任务</th><th>运行计划</th><th>来源</th><th>状态</th><th class="num">运行次数</th><th>下次运行</th></tr></thead>
+          <thead><tr><th scope="col">插件</th><th scope="col">任务</th><th scope="col">运行计划</th><th scope="col">来源</th><th scope="col">状态</th><th scope="col" class="num">运行次数</th><th scope="col">下次运行</th></tr></thead>
           <tbody>
             ${
               pluginJobs.length
@@ -277,12 +291,12 @@ async function renderDashboard(root) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">脚本任务</span>
+        <h2 class="section-title">脚本任务</h2>
         <div class="card-actions"><a class="btn ghost" href="#/scripts">查看全部</a></div>
       </div>
       <div class="table-wrap dash-jobs">
         <table>
-          <thead><tr><th>任务</th><th>文件</th><th>运行计划</th><th>来源</th><th>状态</th><th class="num">运行次数</th><th>下次运行</th></tr></thead>
+          <thead><tr><th scope="col">任务</th><th scope="col">文件</th><th scope="col">运行计划</th><th scope="col">来源</th><th scope="col">状态</th><th scope="col" class="num">运行次数</th><th scope="col">下次运行</th></tr></thead>
           <tbody>
             ${
               scriptJobs.length
@@ -312,7 +326,7 @@ async function renderDashboard(root) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">实时日志</span>
+        <h2 class="section-title">实时日志</h2>
         <span class="hint" id="log-note"></span>
         <div class="card-actions">
           <label class="chip" title="关掉就不会跟着新日志滚动">
@@ -478,6 +492,8 @@ function parseHash() {
 }
 
 let cleanup = null;
+/// 是不是第一次进 route()。首次加载不抢焦点（见 route() 里那段说明）。
+let firstRoute = true;
 
 async function route() {
   const { view, params } = parseHash();
@@ -536,6 +552,17 @@ async function route() {
       <p class="hint" style="margin-top:var(--sp-2)">${String(e && e.message ? e.message : e)}</p></div>`;
     console.error('[panel] 视图渲染失败', e);
   }
+
+  // 切页把焦点搬到新页面。
+  //
+  // SPA 里不搬的话：旧的 #view 被 cloneNode 换掉，焦点跟着那个节点一起消失 →
+  // 掉回 <body>，键盘用户得从页面最顶上重新 Tab 一遍；屏幕阅读器也不会念新页面。
+  // #view 自带 tabindex="-1"，focus() 不会画出焦点框（.view 也写了 outline:none）。
+  //
+  // **首次加载不搬**：那时用户还没在任何地方，浏览器从文档开头读起是正确行为 ——
+  // 先给「跳到主内容」和导航，再进正文。搬了反而让第一次 Tab 从正文中间开始。
+  if (!firstRoute) root.focus();
+  firstRoute = false;
 
   // 切页的轻微入场：只动透明度和 4px 位移，不改变布局。
   // 放在 render 之后而不是之前 —— 否则先动画一个「加载中…」，内容到了再闪一下。
@@ -765,6 +792,17 @@ async function pollEngine() {
 
 initTheme();
 initDrawer();
+
+// 「跳到主内容」：面板是 hash 路由，href="#view" 会被 parseHash() 当成一个路由段
+// （#view → 未知视图 → 掉回仪表盘），所以拦下默认行为，自己把焦点搬到 #view。
+// 不拦的话，键盘用户按这个链接不是「跳过去」，而是被送回首页。
+const skipLink = $('#skip-link');
+if (skipLink) {
+  skipLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    $('#view').focus();
+  });
+}
 
 $('#logout-btn').addEventListener('click', async () => {
   const btn = $('#logout-btn');

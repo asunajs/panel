@@ -25,6 +25,14 @@
   <!-- 移动端侧边栏滑出时的遮罩；点击它收起侧边栏 -->
   <div id="scrim" class="scrim" hidden></div>
 
+  <!--
+    键盘用户每页都要先 Tab 过 7 个导航项才能到内容区（WCAG 2.4.1「绕过重复内容」）。
+    平时移出视口，聚焦时才滑出来 —— 鼠标用户不该看见它。
+    href 写 #view 是给「右键复制链接」之类看的，点击由 app.js 拦下自己搬焦点：
+    面板是 hash 路由，#view 这个 hash 会被当成一个路由段。
+  -->
+  <a class="skip-link" id="skip-link" href="#view">跳到主内容</a>
+
   <div class="app">
     <aside id="sidebar" class="sidebar" aria-label="主导航">
       <div class="sidebar-brand">

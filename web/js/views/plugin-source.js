@@ -59,7 +59,7 @@ export async function render(root, ctx, params) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">源码：${esc(name)}</span>
+        <h2 class="section-title">源码：${esc(name)}</h2>
         <div class="card-actions">
           <span class="badge idle" id="src-dirty" ${'hidden'}>未保存</span>
           <button class="btn ghost" id="src-restore" ${res.has_backup ? '' : 'hidden'}>恢复上一次</button>

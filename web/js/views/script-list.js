@@ -27,8 +27,10 @@ import {
   restoreJob,
   uploadFile,
 } from '../api.js';
-import { statusBadge, minuteOf } from '../status.js';
+import { statusBadge, minuteOf, runOutcome } from '../status.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
+// 弹窗的焦点与 Esc 走公共实现（见 ../modal.js 的文件头）
+import { openModal } from '../modal.js';
 
 /// 脚本任务在 jobs 表里的保留插件名（后端约定）。
 const SCRIPT_PLUGIN = '__script__';
@@ -295,9 +297,9 @@ function openOverrideDialog(job, root, ctx) {
   const declared = job.schedule || '';
   const back = document.createElement('div');
   back.className = 'dialog-back';
-  back.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-label="改运行时间">
+  back.innerHTML = `<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="ov-title">
     <div class="dialog-head">
-      <span>改运行时间 · <strong>${esc(job.name)}</strong></span>
+      <span id="ov-title">改运行时间 · <strong>${esc(job.name)}</strong></span>
       <button class="btn ghost" id="ov-close">关闭</button>
     </div>
     <div class="dialog-body">
@@ -308,7 +310,7 @@ function openOverrideDialog(job, root, ctx) {
       </p>
       <div class="field">
         <label class="field-label" for="ov-expr">运行计划</label>
-        <input class="input mono" id="ov-expr" spellcheck="false"
+        <input class="input mono" id="ov-expr" spellcheck="false" autofocus
                value="${esc(current || declared)}" placeholder="*/5 * * * * * 或 @every 30s">
       </div>
       <p class="err-text" id="ov-err"></p>
@@ -323,9 +325,8 @@ function openOverrideDialog(job, root, ctx) {
       </div>
     </div>
   </div>`;
-  document.body.appendChild(back);
-
-  const close = () => back.remove();
+  // openModal：挂载 + 焦点移入 + Esc 关闭 + 关闭后焦点归位
+  const close = openModal(back);
   const errEl = back.querySelector('#ov-err');
   const saveBtn = back.querySelector('#ov-save');
 
@@ -392,9 +393,8 @@ async function openRunsDialog(name) {
   const rows = runs.length
     ? runs
         .map((r) => {
-          const pending = r.ok === null || r.ok === undefined;
-          const cls = pending ? 'warning' : r.ok ? 'ok' : 'danger';
-          const label = pending ? '没跑完' : r.ok ? '成功' : '失败';
+          // 三种结果（成功 / 失败 / 已停止）统一由 status.js 的 runOutcome 判定
+          const out = runOutcome(r);
           const dur = r.duration_ms == null ? '—' : `${r.duration_ms} ms`;
           const action =
             r.kind === 'test'
@@ -407,13 +407,17 @@ async function openRunsDialog(name) {
                 )}</pre></details></td></tr>`
               : '';
           return `<tr>
-            <td><span class="badge ${cls}">${label}</span></td>
+            <td><span class="badge ${out.cls}">${out.text}</span></td>
             <td class="mono">${esc(r.started_at)}</td>
             <td class="mono">${esc(dur)}</td>
             <td class="mono run-id">${esc(r.id)}</td>
             <td>${action}</td>
           </tr>
-          ${r.error ? `<tr><td colspan="5" class="run-error">${esc(r.error)}</td></tr>` : ''}
+          ${
+            out.note
+              ? `<tr><td colspan="5" class="${out.cls === 'danger' ? 'run-error' : 'run-note'}">${esc(out.note)}</td></tr>`
+              : ''
+          }
           ${detail}`;
         })
         .join('')
@@ -421,19 +425,18 @@ async function openRunsDialog(name) {
 
   const back = document.createElement('div');
   back.className = 'dialog-back';
-  back.innerHTML = `<div class="dialog wide" role="dialog" aria-modal="true">
+  back.innerHTML = `<div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="runs-title">
     <div class="dialog-head">
-      <span>运行记录 · <strong>${esc(name)}</strong></span>
+      <span id="runs-title">运行记录 · <strong>${esc(name)}</strong></span>
       <button class="btn ghost" id="runs-close">关闭</button>
     </div>
     <div class="dialog-body">
       <div class="table-wrap"><table><thead><tr>
-        <th>结果</th><th>开始</th><th>耗时</th><th>运行 id</th><th></th>
+        <th scope="col">结果</th><th scope="col">开始</th><th scope="col">耗时</th><th scope="col">运行 id</th><th scope="col"></th>
       </tr></thead><tbody>${rows}</tbody></table></div>
     </div>
   </div>`;
-  document.body.appendChild(back);
-  const close = () => back.remove();
+  const close = openModal(back);
   back.querySelector('#runs-close').addEventListener('click', close);
   back.addEventListener('click', (e) => {
     if (e.target === back) close();
@@ -490,7 +493,7 @@ export async function render(root, ctx, opts = {}) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">目录脚本（${files.length}）</span>
+        <h2 class="section-title">目录脚本（${files.length}）</h2>
         <div class="card-actions">
           <button class="btn" id="upload-btn" title="上传 .js / .mjs / .py / .sh 单文件，或解压 .zip 到任务目录">上传脚本</button>
           <input type="file" id="upload-input" accept=".js,.mjs,.py,.sh,.zip" hidden>
@@ -508,7 +511,7 @@ export async function render(root, ctx, opts = {}) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">面板创建的脚本（${panelJobs.length}）</span>
+        <h2 class="section-title">面板创建的脚本（${panelJobs.length}）</h2>
       </div>
       ${
         panelJobs.length

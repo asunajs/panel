@@ -132,6 +132,12 @@ node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --token demo-token --ou
 node scripts/vendor_ui_check.mjs ./target/release/plugin-panel
 #     20 项断言：dialog 开在 top layer、--pd-accent 解析成我们的 --accent、Esc 能关
 
+# ㉕ 界面可用性（设计 QA）——自己拉二进制 + 无头浏览器，跑工作区的 web/
+node scripts/a11y_check.mjs ./target/release/plugin-panel
+#     19 项断言：跳过导航、弹窗焦点陷阱与 Esc、切页搬焦点、输入框/编辑器的焦点环、
+#     表单可访问名称、h1/h2 层级、触控目标 ≥24×24、深浅两套主题的对比度、320/390 不横向溢出
+#     静态检查（test-web-assets.mjs ⑨）只能证明「规则写了」，这个脚本证明「浏览器里真的生效」
+
 # ㉕ Python 插件退场后：`.py` 只作为脚本任务
 #     没有 PANEL_PYTHON 时，.py 任务在列表里标「Python 不可用」，不影响 JS 插件/脚本
 ```

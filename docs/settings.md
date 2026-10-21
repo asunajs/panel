@@ -29,7 +29,7 @@
 | 安全 | `PANEL_COOKIE_SECURE`、`PANEL_TRUSTED_PROXIES`、`PANEL_TRUST_PROXY`、`PANEL_ALLOW_IPS` |
 | 日志 | `PANEL_LOG_LEVEL`（**立即生效**） |
 | 外观 | 主题、是否显示插件「执行引擎」设置（存在浏览器 localStorage，不写服务端） |
-| 关于 | 版本、编译特性、**重启按钮** |
+| 关于 | 版本、编译特性、**自更新检查**、**重启按钮** |
 
 每个项的默认值、上下限、说明文案都在后端 `src/settings.rs` 的 `DEFS` 里 ——
 前端不抄一份，只负责画控件。校验也在后端（保存前全部校验，通过才写，不做「改一半」）。
@@ -66,6 +66,8 @@
 | `GET` | `/api/settings` | `{items: [...], groups: [...]}`。每项含 `key/label/group/kind/value/default/source/hint/restart/min/max/choices/locked` |
 | `POST` | `/api/settings/save` | `{"values": {"KEY": "value"}}` → `{ok, restart: [], live: []}`；校验失败 400 |
 | `POST` | `/api/restart` | 自重启（见上） |
+| `GET` | `/api/update` | 查最新版本；返回当前平台是否支持、是否有新版本、校验和是否齐全（见 [自更新](update.md)） |
+| `POST` | `/api/update/apply` | 下载、校验并原子替换当前二进制；成功后自重启。要 `x-panel: 1` |
 
 `source` 有三种：`env`（环境变量固定，页面只读）、`file`（存在 settings.json）、
 `default`（内置默认）。

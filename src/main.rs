@@ -49,6 +49,7 @@ mod scheduler;
 mod scriptjob;
 mod settings;
 mod smtp;
+mod update;
 mod taskdir;
 mod upload;
 mod watcher;
@@ -112,6 +113,8 @@ pub struct AppState {
     pub host: Arc<HostState>,
     /// 插件商城：GitHub 目录解析、下载、安装标记。
     pub market: Arc<market::Market>,
+    /// 自更新：查最新 release、下载本平台产物、校验、替换自身。
+    pub update: Arc<update::Update>,
     /// 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
     /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
@@ -576,6 +579,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| Path::new("data"))
         .join("market-installed.json");
+    let updater = update::Update::from_env();
+    {
+        // 不要在启动路径上 `check()`：那是一次最长 20 秒的网络请求，
+        // GitHub 不通时会把整个面板的启动拖住。真正的检查由设置页按需发起。
+        if !updater.enabled() {
+            crate::log::plog!("boot", info, "自更新：已关闭（PANEL_UPDATE=0）");
+        } else if updater.supported() {
+            crate::log::plog!(
+                "boot",
+                info,
+                "自更新：仓库 {}，当前 v{}；设置 → 关于可检查",
+                updater.repo(),
+                updater.current_version()
+            );
+        } else {
+            // 平台没有官方产物是**正常**的（macOS 自编译），说清楚就行，别当错误
+            crate::log::plog!(
+                "boot",
+                info,
+                "自更新：不适用于本平台（{}/{}）；设置 → 关于可查看原因",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
+        }
+    }
+
     let market = market::Market::new(market::MarketOptions {
         catalog_url: market_url.clone(),
         // 默认目录暂时连不上时用内置目录，不把它当成错误提示；
@@ -625,6 +654,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         health,
         host,
         market,
+        update: updater,
         engine: engine_handle,
         auth: Arc::new(Auth::new(cred, cookie_secure).allow_ips(allow_ips)),
         trusted_proxies: Arc::new(trusted_proxies),
@@ -1020,7 +1050,7 @@ fn env_str(key: &str, default: &str) -> String {
 ///
 /// 只把值交给 Market；这里**不打印、不返回给前端**。文件读不到时只 warn
 /// 路径与错误，不把内容拼进日志。
-fn read_github_token() -> Option<String> {
+pub(crate) fn read_github_token() -> Option<String> {
     if let Ok(v) = std::env::var("PANEL_GITHUB_TOKEN") {
         let t = v.trim();
         if !t.is_empty() {

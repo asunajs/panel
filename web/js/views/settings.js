@@ -20,6 +20,8 @@ import {
   getState,
   saveSettings,
   restartPanel,
+  checkUpdate,
+  applyUpdate,
 } from '../api.js';
 import { showPluginEngineUi, setPluginEngineUi } from '../prefs.js';
 
@@ -31,8 +33,17 @@ function esc(s) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/// 最近一次「检查更新」的结果（切 tab 回来不重新联网）。
+let updateInfo = null;
+let updateChecking = false;
+
 /// 当前选中的 tab（重画时保持，避免「保存后跳回第一页」）。
 let activeTab = '外观';
+
+/// 上一次保存失败的原因。放在模块作用域（和 activeTab 一样）是因为 save() 在
+/// renderSettings 外面 —— 它拿不到闭包里的状态。进页面时清空，切 tab 重画时保留：
+/// 用户改完再存之前，得能回头看见上一次为什么没存上。
+let saveError = '';
 
 /** 每个 tab 一句话说明 —— 光有标题，用户还是不知道该不该动。 */
 const TAB_HINT = {
@@ -58,7 +69,12 @@ function badge(text, cls = '') {
 function control(item) {
   const id = `set-${item.key}`;
   const dis = item.locked ? ' disabled' : '';
-  const common = `id="${id}" data-key="${esc(item.key)}"${dis}`;
+  // 控件的可访问名称由下面 itemRow 里的 <label for> 提供；这里补 aria-describedby，
+  // 把可见的 hint（以及 locked 时「环境变量优先」那句）和控件关联起来。
+  // 原来只有 id、标签是个 <span>，屏幕阅读器念的是「编辑框，空白」—— 用户不知道
+  // 自己在改哪一项，也不知道为什么改不动。
+  const describedBy = item.locked ? `${id}-hint ${id}-key` : `${id}-hint`;
+  const common = `id="${id}" data-key="${esc(item.key)}" aria-describedby="${describedBy}"${dis}`;
   switch (item.kind) {
     case 'bool':
       return `<label class="chip" style="gap:var(--sp-2)">
@@ -93,6 +109,7 @@ function controlWidth(kind) {
 }
 
 function itemRow(item) {
+  const id = `set-${item.key}`;
   const src =
     item.source === 'env'
       ? badge('环境变量固定', 'failed')
@@ -100,12 +117,19 @@ function itemRow(item) {
         ? badge('已保存', 'success')
         : '';
   const restart = item.restart ? badge('需重启') : badge('立即生效', 'success');
+  // 标签从 <span> 换成 <label for>：这是控件唯一的名字来源。徽章留在 label 里面
+  // （不然会各自占一行），代价是名字里会带上「需重启 / 已保存」—— 这两句本来就
+  // 是用户要知道的信息，不能为了名字干净把它们 aria-hidden 掉。
+  //
+  // 分隔线原来写的是 var(--line)：theme.css 里根本没有这个变量（只有 --border /
+  // --border-soft / --border-control），整条 border 声明被浏览器直接丢掉，
+  // 于是设置项之间连成一片、看不出这是几项。
   return `
-    <div class="row" style="align-items:flex-start;gap:var(--sp-3);padding:var(--sp-3) 0;border-bottom:1px solid var(--line)">
+    <div class="row" style="align-items:flex-start;gap:var(--sp-3);padding:var(--sp-3) 0;border-bottom:1px solid var(--border-soft)">
       <div class="field" style="flex:1;min-width:12rem">
-        <span class="field-label">${esc(item.label)}${src}${restart}</span>
-        <span class="hint">${esc(item.hint)}</span>
-        <span class="hint dim mono">${esc(item.key)}${
+        <label class="field-label" for="${id}">${esc(item.label)}${src}${restart}</label>
+        <span class="hint" id="${id}-hint">${esc(item.hint)}</span>
+        <span class="hint dim mono" id="${id}-key">${esc(item.key)}${
           item.locked ? '　（环境变量优先，改这里无效）' : ''
         }</span>
       </div>
@@ -130,6 +154,13 @@ async function paintAbout(root, ctx, items) {
       : '无';
   const live = build ? (build.live_supported ? '可用' : '不可用') : '未知';
   const needing = items.filter((i) => i.restart).length;
+  // 第一次打开「关于」自动查一次（之后切回来用缓存，不再联网）
+  if (updateInfo === null && !updateChecking) {
+    updateChecking = true;
+    const r = await checkUpdate();
+    updateChecking = false;
+    updateInfo = r && r.ok ? r : { ok: false, error: (r && r.error) || '检查失败' };
+  }
   root.innerHTML = `
     <div class="card">
       <div class="row" style="align-items:flex-start;gap:var(--sp-4);flex-wrap:wrap">
@@ -143,6 +174,8 @@ async function paintAbout(root, ctx, items) {
       </p>
     </div>
 
+    ${updateCard()}
+
     <div class="card" style="margin-top:var(--sp-4)">
       <div class="row" style="align-items:center;justify-content:space-between;gap:var(--sp-3)">
         <div class="field">
@@ -155,6 +188,137 @@ async function paintAbout(root, ctx, items) {
     </div>`;
 
   root.querySelector('#s-restart').addEventListener('click', () => doRestart(root, ctx));
+  const recheck = root.querySelector('#s-update-check');
+  if (recheck) {
+    recheck.addEventListener('click', async () => {
+      updateInfo = null;
+      recheck.disabled = true;
+      recheck.textContent = '检查中…';
+      await paintAbout(root, ctx, items);
+    });
+  }
+  const applyBtn = root.querySelector('#s-update-apply');
+  if (applyBtn) applyBtn.addEventListener('click', () => doUpdate(root, ctx));
+}
+
+/**
+ * 「更新」卡片。
+ *
+ * 三种状态写死在这里，别让用户猜：
+ *   ① 这个平台没有官方产物 ⇒ 只显示原因（不给按钮）
+ *   ② 有产物但已是最新 ⇒ 显示「已是最新」
+ *   ③ 有新版且校验和齐 ⇒ 给「更新并重启」，并说明「校验通过才会替换」
+ */
+function updateCard() {
+  const info = updateInfo;
+  if (!info) {
+    return `<div class="card" style="margin-top:var(--sp-4)"><p class="hint">正在检查更新…</p></div>`;
+  }
+  if (!info.ok) {
+    return `<div class="card" style="margin-top:var(--sp-4)">
+        <div class="row" style="align-items:center;justify-content:space-between;gap:var(--sp-3)">
+          <div class="field">
+            <span class="field-label">检查更新</span>
+            <span class="hint">${esc(info.error || '检查失败')}</span>
+          </div>
+          <button class="btn ghost" id="s-update-check">重新检查</button>
+        </div>
+      </div>`;
+  }
+  const cur = esc(info.current || '未知');
+  if (!info.enabled) {
+    return `<div class="card" style="margin-top:var(--sp-4)">
+        <div class="row" style="align-items:center;justify-content:space-between;gap:var(--sp-3)">
+          <div class="field">
+            <span class="field-label">自动更新</span>
+            <span class="hint">已关闭（<span class="mono">PANEL_UPDATE=0</span>）</span>
+          </div>
+          <button class="btn ghost" id="s-update-check">重新检查</button>
+        </div>
+      </div>`;
+  }
+  const repo = `<span class="hint dim mono">${esc(info.repo || '')}</span>`;
+  if (!info.supported) {
+    return `<div class="card" style="margin-top:var(--sp-4)">
+        <div class="row" style="align-items:flex-start;justify-content:space-between;gap:var(--sp-3)">
+          <div class="field">
+            <span class="field-label">自动更新<span class="badge" style="margin-left:var(--sp-2)">本平台无产物</span></span>
+            <span class="hint">当前 v${cur}。${esc(info.reason || '')}</span>
+            ${repo}
+          </div>
+          <button class="btn ghost" id="s-update-check">重新检查</button>
+        </div>
+      </div>`;
+  }
+  const latest = esc(info.latest || '?');
+  const note = info.notes
+    ? `<details style="margin-top:var(--sp-2)"><summary class="hint" style="cursor:pointer">这一版改了什么</summary>
+         <pre class="mono dim" style="white-space:pre-wrap;margin:var(--sp-2) 0 0;font-size:12px">${esc(info.notes)}</pre>
+       </details>`
+    : '';
+  const state = info.has_update
+    ? `<span class="badge success" style="margin-left:var(--sp-2)">有新版本</span>`
+    : `<span class="badge" style="margin-left:var(--sp-2)">已是最新</span>`;
+  const meta = [
+    info.published_at ? `发布于 ${esc(String(info.published_at).slice(0, 10))}` : '',
+    info.size ? `${(Number(info.size) / 1024 / 1024).toFixed(1)} MB` : '',
+    info.verified ? 'SHA256 已核对' : '⚠ 没有校验和',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const action = info.can_apply
+    ? `<button class="btn primary" id="s-update-apply">更新并重启</button>`
+    : `<button class="btn ghost" id="s-update-check">重新检查</button>`;
+  return `<div class="card" style="margin-top:var(--sp-4)">
+      <div class="row" style="align-items:flex-start;justify-content:space-between;gap:var(--sp-3)">
+        <div class="field">
+          <span class="field-label">自动更新${state}</span>
+          <span class="hint">当前 v${cur}　最新 v${latest}${
+            info.has_update ? '' : '　' + esc(info.reason || '')
+          }</span>
+          <span class="hint dim">${esc(meta)}</span>
+          <span class="hint dim">下载后先用 release 里的 SHA256SUMS 核对，对不上就中止、不替换任何文件；
+            替换是原地 rename，然后自重启（PID 不变）。</span>
+          ${repo}
+          ${note}
+        </div>
+        ${action}
+      </div>
+    </div>`;
+}
+
+/** 下载 + 替换 + 重启。失败就把原因摊开说，别只说「更新失败」。 */
+async function doUpdate(root, ctx) {
+  const btn = root.querySelector('#s-update-apply');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '正在下载…';
+  }
+  ctx.toast('正在下载并校验新版本…', '');
+  const res = await applyUpdate();
+  if (!res || !res.ok) {
+    ctx.toast(`更新失败：${(res && res.error) || '未知错误'}`, 'bad');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '更新并重启';
+    }
+    return;
+  }
+  ctx.toast(`已更新到 v${res.to}，等待重启…`, 'ok');
+  // 二进制已经换了，接下来等它自己 exec 回来
+  for (let i = 0; i < 80; i++) {
+    await sleep(500);
+    try {
+      const s = await getState();
+      if (s && s.ok) {
+        location.reload();
+        return;
+      }
+    } catch {
+      /* 还没起来 */
+    }
+  }
+  ctx.toast('更新后 40 秒内没有响应，去看日志', 'bad');
 }
 
 /**
@@ -216,7 +380,7 @@ export async function renderSettings(root, ctx) {
   const res = await getSettings();
   if (!res || !res.ok) {
     root.innerHTML = `<div class="section"><div class="card">
-        <p class="err-text">读不到设置：${esc((res && res.error) || '未知错误')}</p>
+        <p class="err-text" role="alert">读不到设置：${esc((res && res.error) || '未知错误')}</p>
         <p class="hint">后端没起来，或者这个版本的二进制还没有 /api/settings。</p>
       </div></div>`;
     return null;
@@ -225,12 +389,15 @@ export async function renderSettings(root, ctx) {
   const groups = Array.isArray(res.groups) ? res.groups : [];
   const tabs = ['外观', ...groups, '关于'];
   if (!tabs.includes(activeTab)) activeTab = tabs[0];
+  saveError = '';
 
   const paint = async () => {
+    // role=alert 那句只有失败时才有字：成功时它是空元素、高度 0，外边距折叠掉，
+    // 不占版面。
     root.innerHTML = `
       <div class="section">
         <div class="section-head">
-          <span class="section-title">设置</span>
+          <h2 class="section-title">设置</h2>
           <div class="card-actions">
             <button class="btn ghost" id="s-save">保存</button>
           </div>
@@ -244,6 +411,9 @@ export async function renderSettings(root, ctx) {
             .join('')}
         </div>
         <p class="hint" style="margin:0 0 var(--sp-3)">${esc(TAB_HINT[activeTab] || '')}</p>
+        <p class="err-text" id="s-err" role="alert" style="margin:0 0 var(--sp-3)">${esc(
+          saveError,
+        )}</p>
         <div id="s-body"></div>
       </div>`;
 
@@ -313,11 +483,27 @@ async function save(root, ctx, items) {
   const btn = root.querySelector('#s-save');
   btn.disabled = true;
   btn.textContent = '保存中…';
+  // 重试时先把上一次的红字收掉：失败信息留在原地是为了能照着改，
+  // 但它不该跟着下一次请求一起挂着。
+  saveError = '';
+  const clearErr = () => {
+    const el = root.querySelector('#s-err');
+    if (el) el.textContent = '';
+  };
+  clearErr();
   const res = await saveSettings(values);
   btn.disabled = false;
   btn.textContent = '保存';
   if (!res || !res.ok) {
-    ctx.toast(`保存失败：${(res && res.error) || '未知错误'}`, 'bad');
+    // 同一句话进两处：toast 会自己消失，而失败原因用户往往要照着改；
+    // role=alert 让屏幕阅读器也能听到（原来只有 3.2 秒的 toast，AT 用户
+    // 等于什么都不知道）。
+    saveError = `保存失败：${(res && res.error) || '未知错误'}`;
+    // 重新查一次节点：请求期间用户可能切了页签（paint 换掉了整段 DOM），
+    // 手里那个引用已经脱离文档了。saveError 还在，下一次 paint 会把它带回来。
+    const cur = root.querySelector('#s-err');
+    if (cur) cur.textContent = saveError;
+    ctx.toast(saveError, 'bad');
     return;
   }
   const restart = Array.isArray(res.restart) ? res.restart : [];

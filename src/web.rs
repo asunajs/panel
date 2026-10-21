@@ -259,8 +259,9 @@ pub fn router(state: AppState) -> Router {
                 .put(save_plugin_config)
                 .layer(DefaultBodyLimit::max(MAX_PLUGIN_CONFIG_BODY)),
         )
-        // 任务**操作**：立即执行 / 暂停 / 恢复
+        // 任务**操作**：立即执行 / 停止 / 暂停 / 恢复
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
+        .route("/api/tasks/{plugin}/{name}/stop", post(stop_task))
         // 运行记录（面板层次）。日志是插件层次的、一天一个文件保留一周；
         // 运行记录由面板自己写、保留更久 —— 所以**日志过期后记录还在**，
         // 界面才能说清"这次跑过、日志已过期"（见 docs/run-history.md §24）。
@@ -281,6 +282,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logs/stream", get(api_logs_stream))
         // 历史日志：运行视图里点开一次旧执行时，从 JSONL 回看（SSE 只回灌内存环）。
         .route("/api/logs/history", get(api_logs_history))
+        // 自更新：查新版本 / 下载并替换自身（替换后由调用方重启）。
+        .route("/api/update", get(api_update_check))
+        .route("/api/update/apply", post(api_update_apply))
         // 设置页：读 / 存 / 自重启。
         .route("/api/settings", get(api_settings_get))
         .route("/api/settings/save", post(api_settings_save))
@@ -337,6 +341,7 @@ pub fn plugin_ui_router(state: AppState) -> Router {
         .route("/api/runs", get(api_runs))
         .route("/api/logs/stream", get(api_logs_stream))
         .route("/api/tasks/{plugin}/{name}/run", post(run_task))
+        .route("/api/tasks/{plugin}/{name}/stop", post(stop_task))
         .fallback(plugin_origin_route)
         .layer(middleware::from_fn(plugin_origin_headers))
         .layer(middleware::from_fn_with_state(
@@ -985,9 +990,18 @@ fn json_error(code: StatusCode, msg: String) -> Response {
 ///
 /// 返回码：任务跑了但失败了仍然是 `200`（请求本身成功了，`ok:false` 里带错误文本）；
 /// `404` 是任务不存在，`403` 是缺护栏头，`503`/`504` 是引擎不可用或超时。
+#[derive(serde::Deserialize)]
+struct RunTaskQuery {
+    /// `?async=1`：只入队，不在这里等任务结束。界面现在用这一种（否则一个
+    /// 长任务会把「跑着呢 / 停止」全堵在响应后面）。
+    #[serde(rename = "async")]
+    r#async: Option<String>,
+}
+
 async fn run_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
+    Query(q): Query<RunTaskQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(r) = guard_write(&headers) {
@@ -1013,6 +1027,14 @@ async fn run_task(
         return r;
     }
 
+    // 界面走这个分支：先回「已入队」，结果由 `/api/runs` 轮询。
+    if q.r#async.as_deref().is_some_and(|v| v == "1" || v == "true") {
+        tokio::spawn(async move {
+            let _ = rx.await;
+        });
+        return Json(json!({ "ok": true, "queued": true })).into_response();
+    }
+
     // 同理：用**这条任务自己声明的**预算。手动触发一条声明了 30 秒的任务时，
     // 这一层在 3 秒就超时会让人以为「任务没跑」——而它其实正在跑。
     let budget_ms = task_budget_ms(&st.db, &plugin, &name).unwrap_or(st.health.budget_ms);
@@ -1026,6 +1048,40 @@ async fn run_task(
             format!("任务超过 {wait:?} 没返回"),
         ),
     }
+}
+
+/// `POST /api/tasks/{plugin}/{name}/stop` —— 请求停止当前正在跑的 JS。
+///
+/// 说明：这里停的是**当前任务**，不是关面板。打断靠 QuickJS 的 interrupt；
+/// 如果任务正卡在 `http_fetch` 这种宿主调用里，只能等它返回后的下一个 JS 边界。
+async fn stop_task(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    st.health.request_task_stop();
+    let health = st.health.clone();
+    let db = st.db.clone();
+    // 等这条任务真的收尾（`runs.finished_at` 有值），再把停止位复位。
+    // 不复位会让下一次任务也被打断；只延时固定秒数又可能在长时间宿主调用里提前复位。
+    tokio::spawn(async move {
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let done = crate::db::list_runs(&db, Some(&plugin), Some(&name), 1)
+                .ok()
+                .and_then(|v| v.into_iter().next())
+                .map(|r| r.finished_at.is_some())
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+        }
+        health.clear_task_stop();
+    });
+    Json(json!({ "ok": true })).into_response()
 }
 
 /// `POST /api/jobs` —— 新建一条**面板任务**（任务定义写进 `jobs` 表，`source = 'panel'`）。
@@ -3414,6 +3470,62 @@ struct MarketQuery {
 ///
 /// 网络、GitHub API、TypeScript 转译都在 blocking 池里做：这些调用可能
 /// 慢到十几秒，不能占着 async worker 让整个面板排队。
+/// 查最新版本。**不下载**任何东西，纯查询。
+///
+/// 会把「这个平台有没有产物 / 为什么不能装」一并说清楚 —— 前端照抄即可，
+/// 不用自己判断平台（判断错了就会给一个点了必然失败的按钮）。
+async fn api_update_check(State(st): State<AppState>) -> Response {
+    let updater = st.update.clone();
+    // 这一步要联网，放到阻塞线程池里跑，别占 tokio worker
+    match tokio::task::spawn_blocking(move || updater.check()).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("检查更新失败：{e}"),
+        ),
+    }
+}
+
+/// 下载并替换自身。**成功即代表二进制已经换了**，调用方接着重启。
+///
+/// 顺序很重要：先回话再重启（和 `/api/restart` 一样的理由），
+/// 否则浏览器拿到的是「连接被重置」，用户以为点坏了。
+async fn api_update_apply(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let updater = st.update.clone();
+    let applied = tokio::task::spawn_blocking(move || updater.apply()).await;
+    match applied {
+        Ok(Ok(done)) => {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "自更新已替换二进制：v{} → v{}，即将重启",
+                done.from,
+                done.to
+            );
+            // 先让响应飞出去，再 exec
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                crate::settings::restart_process();
+            });
+            Json(json!({
+                "ok": true,
+                "restarting": true,
+                "from": done.from,
+                "to": done.to,
+            }))
+            .into_response()
+        }
+        Ok(Err(e)) => json_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("更新任务异常退出：{e}"),
+        ),
+    }
+}
+
 /// 设置页的数据源：每个可配置项的当前值、来源、是否被 env 固定、要不要重启。
 ///
 /// 元数据（label/hint/上下限/分组）全部来自后端 `settings::DEFS` ——

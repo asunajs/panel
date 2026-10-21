@@ -175,6 +175,9 @@ pub const ASSETS: &[Asset] = &[
     asset!("js/logstream.js"),
     asset!("js/editor.js"),
     asset!("js/confirm.js"),
+    // 弹窗的焦点与键盘（Esc / 焦点陷阱 / 关闭后归位）：五个弹窗共用一份，
+    // 见 web/js/modal.js 的文件头。**不是** vendor 那个原生 <dialog> 组件。
+    asset!("js/modal.js"),
     asset!("js/mock.js"),
     // 任务状态 → 中文 + 徽章样式，以及时刻的显示格式：列表页与仪表盘共用一份
     // （第二十八轮从 task-list.js 里抽出来 —— 抽之前仪表盘露的是后端的英文原值）

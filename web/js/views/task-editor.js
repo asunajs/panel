@@ -79,7 +79,7 @@ export async function render(root, ctx, params = {}) {
 
     <div class="section">
       <div class="section-head">
-        <span class="section-title">测试运行</span>
+        <h2 class="section-title">测试运行</h2>
         <div class="card-actions">
           <button class="btn primary" id="run-btn">运行测试</button>
         </div>

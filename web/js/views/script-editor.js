@@ -195,7 +195,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
           <span class="field-sub dim">面板不解释参数内容，原样交给脚本。</span>
         </div>
 
-        <p class="err-text" id="form-err"></p>
+        <p class="err-text" id="form-err" role="alert"></p>
 
         <div class="divider"></div>
         <div class="row" style="align-items:center">
@@ -207,6 +207,23 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
     </div>`;
 
   const $ = (sel) => root.querySelector(sel);
+
+  // 出错时除了写 errEl（role=alert，读屏会念出来），还要把出错的那一格标成
+  // aria-invalid：只念一句「任务名不能为空」，读屏 / 键盘用户还得自己回头找是哪一格。
+  // 每次提交前先全部清掉，否则改对了标记还挂着，像是在说"还是错的"。
+  const FIELD_SELS = ['#f-name', '#f-path', '#f-expr', '#f-budget', '#f-params'];
+  const markInvalid = (badSel) => {
+    for (const sel of FIELD_SELS) {
+      const el = $(sel);
+      if (!el) continue;
+      if (sel === badSel) el.setAttribute('aria-invalid', 'true');
+      else el.removeAttribute('aria-invalid');
+    }
+  };
+  const showFormError = (msg, badSel) => {
+    $('#form-err').textContent = msg;
+    markInvalid(badSel || '');
+  };
 
   // 新建时选了文件 → 名字还空着就按文件名补一个（用户改过的就不动）
   $('#f-path').addEventListener('change', () => {
@@ -223,6 +240,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
     const hint = $('#save-hint');
     errEl.textContent = '';
     hint.textContent = '';
+    markInvalid('');
 
     const taskName = isEdit ? name : $('#f-name').value.trim();
     const scriptPath = $('#f-path').value;
@@ -232,24 +250,24 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
     const paramsRaw = $('#f-params').value.trim();
 
     if (!taskName) {
-      errEl.textContent = '任务名不能为空';
+      showFormError('任务名不能为空', '#f-name');
       return;
     }
     if (!scriptPath) {
-      errEl.textContent = '要选一个脚本文件（TASKS_DIR 里没有文件时先去放一个）';
+      showFormError('要选一个脚本文件（TASKS_DIR 里没有文件时先去放一个）', '#f-path');
       return;
     }
     const chosen = files.find((f) => f.path === scriptPath);
     if (!chosen) {
-      errEl.textContent = '选中的文件不在 TASKS_DIR 里了，请重新选一个';
+      showFormError('选中的文件不在 TASKS_DIR 里了，请重新选一个', '#f-path');
       return;
     }
     if (chosen.valid === false) {
-      errEl.textContent = `这份文件的设置不正确：${chosen.error || '原因未知'}`;
+      showFormError(`这份文件的设置不正确：${chosen.error || '原因未知'}`, '#f-path');
       return;
     }
     if (!exprValue) {
-      errEl.textContent = '运行计划不能为空';
+      showFormError('运行计划不能为空', '#f-expr');
       return;
     }
 
@@ -259,7 +277,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
     } else {
       const n = Number(budgetRaw);
       if (!Number.isInteger(n) || n <= 0) {
-        errEl.textContent = '超时必须是正整数毫秒（或留空）';
+        showFormError('超时必须是正整数毫秒（或留空）', '#f-budget');
         return;
       }
       budgetMs = n;
@@ -272,7 +290,7 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
       try {
         paramsValue = JSON.parse(paramsRaw);
       } catch (e) {
-        errEl.textContent = `参数不是合法 JSON：${e.message || e}`;
+        showFormError(`参数不是合法 JSON：${e.message || e}`, '#f-params');
         return;
       }
     }
@@ -304,10 +322,12 @@ function renderPanelForm(root, ctx, files, job, runtimeByKind, presetPath) {
     btn.textContent = original;
 
     if (res.ok) {
+      markInvalid(''); // 成功了就把红标清掉（虽然马上跳页，返回时不该还挂着）
       ctx.toast(isEdit ? `${name}：已保存` : `${taskName}：脚本任务已创建`, 'ok');
       ctx.navigate('#/scripts');
     } else {
-      errEl.textContent = res.error;
+      // 后端没说是哪一格：不猜，只念原因（errEl 是 role=alert）
+      showFormError(res.error);
     }
   });
 
@@ -363,7 +383,7 @@ function renderOverrideForm(root, ctx, job) {
           </span>
         </div>
 
-        <p class="err-text" id="form-err"></p>
+        <p class="err-text" id="form-err" role="alert"></p>
 
         <div class="divider"></div>
         <div class="row" style="align-items:center">
@@ -381,14 +401,18 @@ function renderOverrideForm(root, ctx, job) {
   const submit = async (expr) => {
     const btn = $('#save-btn');
     const errEl = $('#form-err');
+    const exprEl = $('#f-expr');
     btn.disabled = true;
     const res = await editJob('__script__', job.name, expr);
     btn.disabled = false;
     if (res.ok) {
+      exprEl.removeAttribute('aria-invalid'); // 成功后把红标清掉
       ctx.toast(expr === null ? `${job.name}：已恢复原时间` : `${job.name}：运行时间已改`, 'ok');
       ctx.navigate('#/scripts');
     } else {
+      // errEl 是 role=alert（读屏会念）；输入框再标 aria-invalid，指出是哪一格
       errEl.textContent = res.error;
+      exprEl.setAttribute('aria-invalid', 'true');
     }
   };
 
@@ -396,8 +420,10 @@ function renderOverrideForm(root, ctx, job) {
     const expr = $('#f-expr').value.trim();
     if (!expr) {
       $('#form-err').textContent = '运行计划不能为空。要回到文件里的值请点「恢复原时间」。';
+      $('#f-expr').setAttribute('aria-invalid', 'true');
       return;
     }
+    $('#f-expr').removeAttribute('aria-invalid');
     submit(expr);
   });
   $('#clear-btn')?.addEventListener('click', () => submit(null));

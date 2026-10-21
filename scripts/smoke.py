@@ -3778,6 +3778,212 @@ def settings_checks(tmp: Path) -> None:
         stop(proc, logf)
 
 
+def update_checks(tmp: Path) -> None:
+    """自更新（第三十二轮）：查版本 / 校验 / 替换自身 / 重启。
+
+    用本地夹具当「GitHub」：真的下载、真的校验、真的 rename 替换 ——
+    只是产物是「本二进制 + 1KB 尾巴」（哈希不同但仍可执行，所以重启能起来）。
+    """
+    import hashlib
+    import shutil
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    work = tmp / "upd"
+    work.mkdir(parents=True, exist_ok=True)
+    # 两份「平台产物」：好的一份、坏的一份（摘要对不上）
+    good = BIN.read_bytes() + b"\0" * 1024
+    good_sha = hashlib.sha256(good).hexdigest()
+    ASSET = "plugin-panel-x86_64-linux-musl"
+
+    def release(tag, sums_path):
+        return json.dumps(
+            {
+                "tag_name": tag,
+                "published_at": "2026-01-02T03:04:05Z",
+                "body": "夹具版本：用来验证自更新链路",
+                "assets": [
+                    {
+                        "name": ASSET,
+                        "size": len(good),
+                        "browser_download_url": f"{FIXTURE}/dl/bin",
+                    },
+                    {
+                        "name": "SHA256SUMS",
+                        "size": 128,
+                        "browser_download_url": f"{FIXTURE}{sums_path}",
+                    },
+                ],
+            }
+        ).encode()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # 别把夹具的访问日志灌进冒烟输出
+            pass
+
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            if path == "/repos/o/new/releases/latest":
+                body = release("v9.9.9", "/dl/sums")
+            elif path == "/repos/o/old/releases/latest":
+                body = release("v0.0.1", "/dl/sums")
+            elif path == "/repos/o/bad/releases/latest":
+                # 摘要故意写错：安装时必须因此中止
+                body = release("v9.9.9", "/dl/sums-bad")
+            elif path == "/dl/bin":
+                body = good
+            elif path == "/dl/sums":
+                body = f"{good_sha}  {ASSET}\n".encode()
+            elif path == "/dl/sums-bad":
+                body = f"{'0' * 64}  {ASSET}\n".encode()
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    global FIXTURE
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    FIXTURE = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def boot(tag, repo):
+        port = free_port()
+        # 每个实例一份**自己的**二进制副本：更新会替换「当前可执行文件」，
+        # 共用一份会让后面的用例看到前面替换过的结果。
+        d = work / tag
+        d.mkdir(parents=True, exist_ok=True)
+        exe = d / "plugin-panel"
+        shutil.copy2(BIN, exe)
+        exe.chmod(0o755)
+        env = dict(os.environ)
+        env.update(
+            {
+                "BIND_ADDR": f"127.0.0.1:{port}",
+                "DB_PATH": str(d / "panel.db"),
+                # 仓库自带的插件目录：`wait_ready` 要求 plugins 非空，空目录会一直不就绪
+                "PLUGINS_DIR": str(REPO / "plugins"),
+                "PANEL_TOKEN": SMOKE_TOKEN,
+                "PANEL_UPDATE_ALLOW_HTTP": "1",
+                "PANEL_GITHUB_API": FIXTURE,
+                "PANEL_UPDATE_REPO": repo,
+                "PANEL_UPDATE_ASSET": ASSET,
+            }
+        )
+        logf = open(d / "panel.log", "w")
+        proc = subprocess.Popen(
+            [str(exe)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=d
+        )
+        return port, proc, logf, exe
+
+    def stop(p, f):
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        f.close()
+
+    # ── ① 有新版本：查到了、校验和齐、可以装 ──
+    port, proc, logf, _exe = boot("new", "o/new")
+    try:
+        base = f"http://127.0.0.1:{port}"
+        check(wait_ready(base, proc), "自更新实例就绪")
+        code, _, body = http(f"{base}/api/update")
+        v = json.loads(body)
+        check(code == 200 and v.get("enabled") is True, "GET /api/update 可用", f"http {code}")
+        check(
+            v.get("latest") == "9.9.9" and v.get("has_update") is True,
+            "认出了更新版本（tag 去掉 v 前缀再比）",
+            f"latest={v.get('latest')!r} has_update={v.get('has_update')}",
+        )
+        check(v.get("verified") is True, "从 SHA256SUMS 里取到了本产物的摘要")
+        check(
+            v.get("can_apply") is True and v.get("asset") == ASSET,
+            "可以安装（can_apply + 正确的产物名）",
+            f"{v.get('can_apply')} {v.get('asset')}",
+        )
+        code, body = post_json(f"{base}/api/update/apply", panel=False)
+        check(code == 403, "更新接口也要 x-panel（缺了就是 403）", f"http {code}")
+    finally:
+        stop(proc, logf)
+
+    # ── ② 已经是最新：不许装 ──
+    port2, proc2, logf2, _exe2 = boot("old", "o/old")
+    try:
+        base2 = f"http://127.0.0.1:{port2}"
+        check(wait_ready(base2, proc2), "旧版本实例就绪")
+        code, _, body = http(f"{base2}/api/update")
+        v = json.loads(body)
+        check(
+            v.get("has_update") is False and v.get("can_apply") is False,
+            "版本不比当前新 ⇒ 不给安装入口",
+            f"latest={v.get('latest')!r}",
+        )
+        code, body = post_json(f"{base2}/api/update/apply")
+        check(
+            code == 400 and "最新" in (body.get("error") or ""),
+            "强行安装被拒（400 已经是最新版本）",
+            f"http {code}, {body}",
+        )
+    finally:
+        stop(proc2, logf2)
+
+    # ── ③ 摘要对不上：拒绝替换，二进制一个字节都不动 ──
+    port3, proc3, logf3, exe3 = boot("bad", "o/bad")
+    try:
+        base3 = f"http://127.0.0.1:{port3}"
+        check(wait_ready(base3, proc3), "坏摘要实例就绪")
+        before = hashlib.sha256(exe3.read_bytes()).hexdigest()
+        code, body = post_json(f"{base3}/api/update/apply")
+        after = hashlib.sha256(exe3.read_bytes()).hexdigest()
+        check(
+            code == 400 and "SHA256 不匹配" in (body.get("error") or ""),
+            "摘要不匹配 ⇒ 中止并说明原因",
+            f"http {code}, {body}",
+        )
+        check(before == after, "摘要不匹配时**没有**替换任何文件")
+        # 服务还活着（没被自己搞挂）
+        code, _, _ = http(f"{base3}/api/state")
+        check(code == 200, "拒绝更新后服务仍然正常")
+    finally:
+        stop(proc3, logf3)
+
+    # ── ④ 正常更新：真的替换 + 自重启 + 新文件生效 ──
+    port4, proc4, logf4, exe4 = boot("ok", "o/new")
+    try:
+        base4 = f"http://127.0.0.1:{port4}"
+        check(wait_ready(base4, proc4), "更新实例就绪")
+        before = hashlib.sha256(exe4.read_bytes()).hexdigest()
+        check(before != good_sha, "替换前二进制和「新版本」不是同一个文件")
+        code, body = post_json(f"{base4}/api/update/apply", timeout=120)
+        check(
+            code == 200 and body.get("restarting") is True and body.get("to") == "9.9.9",
+            "更新接口回话「正在重启」",
+            f"http {code}, {body}",
+        )
+        after = hashlib.sha256(exe4.read_bytes()).hexdigest()
+        check(after == good_sha, "磁盘上的二进制已经换成新版本（摘要逐字节相同）")
+        # exec 之后端口会短暂断开，等它回来
+        back = False
+        for _ in range(120):
+            time.sleep(0.25)
+            try:
+                c, _, _ = http(f"{base4}/api/state")
+                if c == 200:
+                    back = True
+                    break
+            except Exception:
+                pass
+        check(back, "替换后自重启并恢复服务（exec 自身，PID 不变）")
+    finally:
+        stop(proc4, logf4)
+        srv.shutdown()
+
+
 def main() -> int:
     # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
@@ -4226,6 +4432,7 @@ def main() -> int:
     external_runtime_checks(tmp)
     script_task_checks(tmp)
     settings_checks(tmp)
+    update_checks(tmp)
 
     print()
     if FAILURES:

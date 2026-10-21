@@ -23,6 +23,8 @@
 | 只有用户主动切主题才写 `localStorage` | 初始化把「算出来的默认值」写回去，会让以后改默认值对老用户不生效（实测） | 检查 ④ |
 | 插件页只引用 `/css/*` 或自己的相对资源；只调自己的 `/plugins/{name}/api/*` | 各管各的，插件页不读主面板接口 | 检查 ③ |
 | 插件 iframe 的 `sandbox` 只能由 `api.js` 的 `pluginFrameSandbox()` 生成 | 手写一份迟早漏项 | 检查 ⑤ + sandbox 专项 |
+| 弹窗只能通过 `js/modal.js` 的 `openModal()` 挂载 | Esc、焦点陷阱、关闭后归位各写一份必然有漏的 | 检查 ⑨ |
+| 表格 `<th>` 必须带 `scope`；区块标题必须是 `<h2 class="section-title">` | 屏幕阅读器靠它们读表格和「按标题跳转」 | 检查 ⑨ |
 
 ## 2. 目录与职责
 
@@ -38,6 +40,7 @@
 | `js/views/*.js` | 一个路由一个文件，导出 `render()` | |
 | `js/prefs.js` | 只影响这台浏览器的偏好（`localStorage`） | 不写服务端 |
 | `js/confirm.js` | 两步确认（先「武装」再确认） | 危险操作专用 |
+| `js/modal.js` | 弹窗的焦点与键盘：Esc / Tab 循环 / 关闭后归位 | 五个弹窗共用，视图里不许自己 `appendChild` |
 | `js/editor.js` | 代码高亮 + 编辑器 | |
 | `js/logstream.js` | 日志 SSE 订阅 | 返回取消函数 |
 | `js/mock.js` | 编辑器里的示例代码 / 假数据 | 仅演示 |
@@ -101,7 +104,7 @@ export async function render(root, ctx, params) {
 | 卡片 | `.card` `.card-head` `.card-actions` |
 | 按钮 | `.btn`（默认）`.btn.primary` `.btn.ghost` `.btn.danger` `.icon-btn` |
 | 表单 | `.field` `.field-label` `.input` `.select` `.textarea` `.chip` |
-| 状态 | `.badge`（`.idle` `.running` `.success` `.failed` `.warning`）`.hint` `.err-text` `.empty` |
+| 状态 | `.badge`（`.idle` `.running` `.success` `.failed` `.warning` `.ok` `.danger` `.stopped`）`.hint` `.err-text` `.run-note` `.empty` |
 | 表格 | `.table-wrap` 包 `<table>`（样式挂在 `.table-wrap table` 上，**没有** `.table` 这个类） |
 | 页签 | `.push-tabs` + `[role=tabpanel][hidden]`（页面级，参考 `views/push.js`） |
 
@@ -115,7 +118,9 @@ export async function render(root, ctx, params) {
 - **保存**：请求中按钮 `disabled` + 文案「保存中…」；成功 `toast`；失败用 `.err-text` 就地显示，不要 `alert`。
 - **危险操作**：走 `confirm.js` 的两步确认（`askConfirm` / `armConfirm`），不要 `window.confirm`。
 - **空状态**：`.empty` 里写清楚下一步（「还没有任务，去插件列表装一个」），不要只写「暂无数据」。
-- **键盘可达**：页签用 `role=tablist/tab/tabpanel` + `aria-selected` / `aria-controls`；图标按钮要有 `aria-label`；菜单按钮有 `aria-expanded`；侧边栏当前项加 `aria-current="page"`。
+- **键盘可达**：页签用 `role=tablist/tab/tabpanel` + `aria-selected` / `aria-controls` + 方向键 + roving tabindex；图标按钮要有 `aria-label`；菜单按钮有 `aria-expanded`；侧边栏当前项加 `aria-current="page"`；弹窗走 `modal.js`（Esc 关、Tab 不跑出遮罩、关闭后焦点归位）。
+- **跳过导航**：`index.html` 里的 `.skip-link` 是键盘用户绕开 7 个导航项的唯一入口。它的 `href="#view"` 会被 hash 路由当成一个路由段，所以点击必须由 `app.js` 拦下自己搬焦点 —— 别改成普通锚点。
+- **标题层级**：页面标题是 `#view-title`（h1），区块标题是 `<h2 class="section-title">`（样式挂在类上，换标签视觉不变）。不要再用 `<span>` 当标题 —— 屏幕阅读器的「按标题跳转」就没了。
 - **页签只藏不删**：切换不重画，保住没保存的输入（见 `views/push.js` 的 `applyTab`）。
 - **窄屏 390px 不横向溢出**：长 URL / 日志用 `overflow-wrap:anywhere`；表格用 `.table-wrap`。
 - **文案**：中文、动词开头、说结果（「已保存」而不是「提交成功」）；同一个动作全文用同一个词；错误要说下一步（「连不上后端，检查面板是否在运行」）。
@@ -153,6 +158,7 @@ export async function render(root, ctx, params) {
   ④ CSS 约束（只用变量、徽章 / 卡片头 / 箭头、主题持久化）⑤ 安全约束（`x-panel`、登录页摘要与蜜罐、无内联脚本）
   ⑥ 嵌入式 QuickJS 约束（`plugins/js/*.js` 不能用 `process` / `require` / `fetch` / `setTimeout` …）
   ⑥b 配色对比度（按 WCAG 公式算 `theme.css`）⑦ 第三方组件子集与 `FORK.md` ⑧ 界面文案
+  ⑨ 界面状态与无障碍（表头 scope、标题层级、弹窗契约、跳过链接、触控尺寸、禁用/焦点/错误/长文本样式）
   另有一段插件 iframe `sandbox` 专项。
 - 加检查：在对应段落加 `check(条件, "用户能看懂的现象")`；不要写成「某某变量存在」这种实现细节。
 - 浏览器验证：`scripts/screenshot.mjs` 用 CDP 驱动无头 Chrome/Edge，登录后截图，并能带断言；另有 `nav_check.mjs`（插件侧边栏入口）、`vendor_ui_check.mjs`（第三方组件子集）。
@@ -171,6 +177,8 @@ export async function render(root, ctx, params) {
 | 插件页调 `/api/state` 拿到主面板数据 | 边界破了 | 只调自己的 `/plugins/{name}/api/*` |
 | 前端改了线上没变 | 生产是内嵌的，没重编 | `cargo build --release`；开发用 `WEB_DEV_DIR` |
 | 界面里原样出现 `**` | 文案里写了 Markdown | 用 `<b>` 强调（检查 ⑧） |
+| 设置项之间没有分隔线 | 内联样式写了 `var(--line)`，这个变量不存在，整条 border 声明被丢掉 | 用 `var(--border-soft)`（检查 ⑨ 的同类：CSS 变量只用 theme.css 里有的） |
+| 弹窗开着还能 Tab 到背后的按钮 | 每个弹窗自己写 `appendChild`，焦点管理各写一份 | 一律走 `modal.js` 的 `openModal()`（检查 ⑨） |
 | 整页起不来，但 `node --check` 全绿 | 模板串里的 HTML 注释写了反引号，把模板串提前截断 | 注释里别写反引号（检查 ⑧） |
 
 相关：[架构](architecture.md) · [验证手册](testing.md) · [安全](security.md) · [插件 API](plugin-api.md)

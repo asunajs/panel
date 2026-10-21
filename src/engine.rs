@@ -534,6 +534,8 @@ struct Watchdog {
     total: Arc<AtomicU64>,
     /// 关闭请求：置位后 handler 无条件返回 true，让正在执行的 JS 立刻被打断
     stop: Arc<AtomicBool>,
+    /// 「停止当前任务」请求：和关闭分开，任务结束后要能复位
+    task_stop: Arc<AtomicBool>,
 }
 
 impl Watchdog {
@@ -553,14 +555,24 @@ impl Watchdog {
         self.fired.swap(0, Ordering::Relaxed) > 0
     }
 
+    /// 这次执行是不是被「停止」打断的。
+    ///
+    /// 停止和「超出执行预算」在引擎里是同一个中断（QuickJS 抛的都是
+    /// `InternalError: interrupted`），所以这个标记只回答「是不是被我们叫停的」，
+    /// 不区分是用户按了停止还是预算到点 —— 对外两者都算「已停止」。
+    fn task_stop_requested(&self) -> bool {
+        self.task_stop.load(Ordering::Relaxed)
+    }
+
     fn handler(&self) -> Box<dyn FnMut() -> bool + 'static> {
         let armed = self.armed.clone();
         let deadline = self.deadline_ms.clone();
         let fired = self.fired.clone();
         let total = self.total.clone();
         let stop = self.stop.clone();
+        let task_stop = self.task_stop.clone();
         Box::new(move || {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || task_stop.load(Ordering::Relaxed) {
                 return true;
             }
             if armed.load(Ordering::Relaxed) && now_ms() >= deadline.load(Ordering::Relaxed) {
@@ -600,6 +612,7 @@ pub struct WorkerSlot {
 pub struct EngineHealth {
     slots: Arc<Vec<WorkerSlot>>,
     stop: Arc<AtomicBool>,
+    task_stop: Arc<AtomicBool>,
     pub budget_ms: u64,
 }
 
@@ -688,6 +701,18 @@ impl EngineHealth {
 
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// 请求停止当前正在跑的任务（不是关闭面板）。
+    ///
+    /// 打断的是 QuickJS 的 interrupt；如果正卡在 `http_fetch` 这种宿主调用里，
+    /// 要等它返回后下一次 JS 边界才会生效。
+    pub fn request_task_stop(&self) {
+        self.task_stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn clear_task_stop(&self) {
+        self.task_stop.store(false, Ordering::Relaxed);
     }
 }
 
@@ -1056,6 +1081,7 @@ impl JsEngine {
         let health = EngineHealth {
             slots: Arc::new((0..workers_n).map(|_| WorkerSlot::default()).collect()),
             stop: Arc::new(AtomicBool::new(false)),
+            task_stop: Arc::new(AtomicBool::new(false)),
             budget_ms,
         };
 
@@ -1709,6 +1735,7 @@ fn worker_main(
     let wd = Watchdog {
         total: interrupts.clone(),
         stop: health.stop_flag(),
+        task_stop: health.task_stop.clone(),
         ..Default::default()
     };
     let budget = Duration::from_millis(health.budget_ms);
@@ -2218,6 +2245,10 @@ fn worker_main(
                     .map(|_| ())
                     .map_err(|e| format!("写库失败: {e}"));
                 if out.is_ok() {
+                    // 停用/启用只改 DB，不会触发 watcher。扫描兜底周期是 30 秒，
+                    // 不主动 force_scan 的话「最多 1 秒生效」只是文案 —— 实测 8 秒
+                    // 都没动，插件任务还在跑。下一轮立刻走 sync_plugins。
+                    force_scan = true;
                     hostapi::push_log(
                         &logs,
                         &name,
@@ -2233,6 +2264,8 @@ fn worker_main(
             Ok(EngineCmd::ReloadPlugin { name, reply }) => {
                 // 只入队：真正的重载在扫描那一轮（那里才有 plugins/sched/rt/registry）
                 forced.lock().unwrap().push(name.clone());
+                // 和停用/启用同一个坑：只塞队列不 force_scan，默认要等 30 秒兜底扫描。
+                force_scan = true;
                 hostapi::push_log(&logs, &name, "info", "面板要求重载，下一轮扫描执行");
                 let _ = reply.send(Ok(()));
             }
@@ -2462,6 +2495,15 @@ fn worker_main(
                             "新插件 `{name}` 归到 worker {w}（运行期认领，最细 {:?}ms）",
                             finest
                         );
+                        // 归属刚写进共享表；如果它属于别的 worker，必须再叫一次。
+                        // 只在目录签名变化时广播一次是不够的：那次 Wake 可能早于
+                        // claim_with 完成，目标 worker 醒来时还没有归属，随后就会
+                        // 睡到 30 秒兜底扫描 —— 实测新插件要等 20+ 秒才加载。
+                        if w != idx {
+                            if let Some(tx) = senders.get(w) {
+                                let _ = tx.send(EngineCmd::Wake);
+                            }
+                        }
                         // 运行期出现的独占插件拿不到独占槽位（线程是启动时建的）——
                         // 不能装作它已经独占，所以把警告打出来。
                         if let Some(w) = warn {
@@ -3693,11 +3735,28 @@ fn run_one(
     let finished_at = Local::now();
     let duration_ms = (finished_at - started_at).num_milliseconds();
     let finished_text = finished_at.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 「停止」不是失败。
+    //
+    // 请求停止（或预算到点）时引擎打断 JS，抛出来的还是 `InternalError: interrupted`，
+    // 和真正的报错走同一条路。照旧按失败处理的话，四处都错：运行记录一屏红色堆栈、
+    // 熔断计数 +1、任务状态变「执行出错」、还给用户发一条失败推送 —— 而他只是按了停止。
+    //
+    // 所以这里先判定一次，下面每一处（记录 / 推送 / 调度计数 / 日志）都按它分流。
+    let stopped = result.is_err() && wd.task_stop_requested();
+
     if let Err(e) = db::finish_run(
         db,
         &run_id,
         result.is_ok(),
-        result.as_ref().err().map(|s| s.as_str()),
+        // 停止不写错误原因：QuickJS 那句 interrupted 不是「原因」，写进去只会让人
+        // 以为任务坏了（记录里另有 stopped 标记，界面按「已停止」显示）
+        if stopped {
+            None
+        } else {
+            result.as_ref().err().map(|s| s.as_str())
+        },
+        stopped,
         duration_ms,
         &finished_text,
     ) {
@@ -3712,7 +3771,11 @@ fn run_one(
     // 面板级推送（第三十一轮）：**入队即返回**，不等网络。
     // 放在收尾之后：通知里要带「耗时 / 结果 / 错误」，这些只有跑完才知道。
     // 推不推、推给谁由推送线程按配置决定；这里只负责把事实交出去。
-    if let Some(push) = host.push.as_ref() {
+    // 停止不发推送：这不是「任务失败了」，是一条被用户自己叫停的执行。
+    // 照旧推的话，用户按一下停止就会收到一条失败告警 —— 等于自己给自己报警。
+    if stopped {
+        crate::log::plog!("push", info, "任务 `{plugin}/{name}` 已停止，不发推送");
+    } else if let Some(push) = host.push.as_ref() {
         push.notify_run(crate::push::RunEvent {
             plugin: plugin.clone(),
             task: name.clone(),
@@ -3732,6 +3795,17 @@ fn run_one(
     // （成功/失败/首次触发），按 run 过滤日志时必须跟着一起出来 ——
     // 尤其是失败那条，它是点进日志的人最先要找的东西。
     crate::log::with_run_id(&run_id, || match &result {
+        // 停止不是错误：日志里给一条 info，别写「执行失败」+ 堆栈，
+        // 否则翻日志的人会以为这个任务坏了（真正的原因就是他自己按了停止）。
+        Err(_) if stopped => hostapi::push_log(
+            logs,
+            &plugin,
+            "info",
+            &format!(
+                "任务 `{name}`{} 已停止（手动停止或超出执行预算），耗时 {duration_ms}ms",
+                if manual { "（手动触发）" } else { "" }
+            ),
+        ),
         Err(e) => hostapi::push_log(
             logs,
             &plugin,
@@ -3756,7 +3830,9 @@ fn run_one(
         Ok(()) => {}
     });
 
-    let err = result.clone().err();
+    // 停止不算失败：传 None 给调度器，连续失败计数不 +1、任务状态也不变「执行出错」。
+    // 否则停几次就把任务熔断了 —— 用户越是用「停止」，任务越容易被判成坏掉。
+    let err = if stopped { None } else { result.clone().err() };
     let was_tripped = sched.tasks()[idx].tripped;
     if manual {
         sched.record_manual_run(idx, now, err.clone());

@@ -67,6 +67,30 @@ Termux 上可用 `pkg install nodejs python`，ARM 盒子上用发行版的包�
 发布流程的最后一步会**真的把刚发出去的产物装一遍**：走真实 Release 下载 → SHA256 校验 → 启动 →
 请求一次 `/api/state` → SIGTERM 优雅退出。这一步挂了，说明「用户拿到手的安装方式」是坏的。
 
+### 升级已有安装
+
+**面板内自更新（官方 Linux 产物）**：设置 → 关于 → 检查更新 → 更新并重启。
+下载后用同一 release 的 `SHA256SUMS` 校验，失败不替换；细节见 [自更新](update.md)。
+没有官方产物的平台（macOS / 自编译）只能手动替换。
+
+**手动替换**：重新跑 `install.sh`，然后重启原来的服务。脚本默认装到
+`~/.local/bin`（Termux 是 `$PREFIX/bin`），**不会**重启进程，也不一定等于 systemd
+里写的 `/opt/plugin-panel/plugin-panel`：
+
+```bash
+# systemd 的自定义目录
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh -o /tmp/panel-install.sh
+sudo PANEL_PREFIX=/opt/plugin-panel bash /tmp/panel-install.sh
+sudo systemctl restart plugin-panel
+
+# 普通用户安装
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+# 再按原来的方式重启：systemctl restart / launchctl kickstart / 前台 Ctrl-C 后重跑
+```
+
+升级只替换二进制；`data/`、`plugins/`、`tasks/` 保留。升级前停服务备份
+`data/panel.db`；新版本启动异常不会自动回滚，保留上一版 Release 产物以便换回。
+
 ### 旧手机（Termux）
 
 ```bash

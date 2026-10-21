@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.1.7**。设置页可以直接看到正在运行的面板版本。
+当前版本：**0.1.8**。设置页可以直接看到正在运行的面板版本。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
@@ -67,7 +67,7 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/asunajs/panel/
   | PANEL_BASE_URL=https://gh-proxy.com/https://github.com/asunajs/panel/releases/latest/download bash
 ```
 
-固定版本就把 `latest/download` 换成 `download/v0.1.7`。代理只解决访问问题，安装脚本仍会校验 SHA256；但代理和校验和同源，正式环境建议优先用官方地址。
+固定版本就把 `latest/download` 换成 `download/v0.1.8`。代理只解决访问问题，安装脚本仍会校验 SHA256；但代理和校验和同源，正式环境建议优先用官方地址。
 
 ### 手动下载
 
@@ -392,9 +392,46 @@ data/plugin-data/  插件自己的数据
 
 ### 怎么升级
 
-重新运行安装脚本，或者下载新版本替换二进制。数据目录不变，升级后任务和插件都还在。
+**方式一：设置页里自更新（推荐，官方 Linux 产物）**
 
-升级前建议先备份 `data/panel.db`。
+打开「设置 → 关于」，点「检查更新」；有新版且 SHA256 校验通过后，点「更新并重启」。
+下载、校验、原子替换和重启都在面板里完成，数据目录不变。
+
+- 只对官方发布的 Linux musl 三平台产物开放；macOS / 自编译版本会提示「本平台无产物」，请走方式二。
+- 拿不到 `SHA256SUMS` 或摘要不匹配会中止，不会替换文件；详见 [自更新说明](docs/update.md)。
+- 不想让面板联网检查，设 `PANEL_UPDATE=0`。
+
+**方式二：手动替换二进制**
+
+```bash
+# 默认安装到 ~/.local/bin（Termux 为 $PREFIX/bin）
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+
+# 或固定版本
+PANEL_VERSION=v0.1.8 \
+  curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+```
+
+安装脚本只负责替换文件，**不会重启正在运行的进程**。按原来的部署方式重启：
+
+```bash
+# systemd
+sudo systemctl restart plugin-panel
+
+# launchd / macOS
+launchctl kickstart -k gui/$(id -u)/com.asunajs.panel
+
+# 手动前台运行：停掉旧进程后重新启动
+pkill -x plugin-panel
+plugin-panel
+```
+
+如果旧版本装在自定义目录（例如 systemd 的 `/opt/plugin-panel`），一键安装默认写
+`~/.local/bin` 不会替换它。先看 `systemctl cat plugin-panel` 的 `ExecStart`，再用
+`PANEL_PREFIX=/opt/plugin-panel` 安装，或直接替换那个路径的二进制。
+
+升级前建议停服务后备份 `data/panel.db`、`plugins/`、`tasks/` 和 `data/plugin-data/`。
+新版本启动异常时没有自动回滚，保留上一版 Release 产物以便手动换回。
 
 ---
 

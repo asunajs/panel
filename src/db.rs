@@ -217,6 +217,15 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 也就是说：对试跑来说，这一列是它输出唯一留存的地方。
     // 真跑（cron/manual）留 NULL，它们的输出在日志里，有 run 标签可以反查。
     ensure_column(&conn, "runs", "output", "TEXT")?;
+    // 「这次是被**停下**的，不是失败」。
+    //
+    // 手动「停止」（或超出执行预算）时，QuickJS 抛的是 `InternalError: interrupted`，
+    // 和真正的报错走同一条路 —— 于是它会被记成失败、计入熔断、发失败推送、
+    // 把任务状态标成「执行出错」。用户看到的是一条红色堆栈，而事实是他自己按了停止。
+    //
+    // 所以单独记一列：ok=0 且 stopped=1 = 已停止（中性），ok=0 且 stopped=0 = 真失败。
+    // 老库里没有这一列，默认 0 正好等于"历史上这些都是真失败"。
+    ensure_column(&conn, "runs", "stopped", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_plugin_state(&conn)?;
     // 第五十九轮：**「长期加载」**（不参与"闲下来就卸载"）。
     // 老库里的 `plugin_state` 没有这一列，补上；默认 0 = 按规则惰性加载。
@@ -803,6 +812,9 @@ pub struct RunRecord {
     pub ok: Option<bool>,
     pub error: Option<String>,
     pub duration_ms: Option<i64>,
+    /// 这次是**被停下**的（手动停止 / 超出预算），不是失败。
+    /// `ok=false` + `stopped=true` = 已停止；`ok=false` + `stopped=false` = 真失败。
+    pub stopped: bool,
     /// 试跑的捕获输出（真跑为 None —— 它们的输出在日志里）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -820,12 +832,13 @@ fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         ok: r.get::<_, Option<i64>>(6)?.map(|v| v != 0),
         error: r.get(7)?,
         duration_ms: r.get(8)?,
+        stopped: r.get::<_, Option<i64>>(10)?.map(|v| v != 0).unwrap_or(false),
         output: r.get(9)?,
     })
 }
 
 const RUN_COLS: &str =
-    "id, plugin, task, kind, started_at, finished_at, ok, error, duration_ms, output";
+    "id, plugin, task, kind, started_at, finished_at, ok, error, duration_ms, output, stopped";
 
 /// 记一次运行的开始。`kind`：目前只有 `cron`（调度触发）和 `manual`（面板点的）。
 ///
@@ -851,18 +864,24 @@ pub fn insert_run(
 /// 记一次运行的结束。
 ///
 /// 失败也要写 —— 「失败的那几次」正是最需要点进日志的，只记成功等于没记。
+#[allow(clippy::too_many_arguments)]
 pub fn finish_run(
     db: &Db,
     id: &str,
     ok: bool,
     error: Option<&str>,
+    stopped: bool,
     duration_ms: i64,
     finished_at: &str,
 ) -> rusqlite::Result<()> {
     let conn = db.lock().unwrap();
+    // ⚠ 参数顺序必须和 SET 里的 ?N 一一对上：stopped 是最后一个（?6）。
+    // 第一版把 stopped 写在 ?6 却按第 4 个位置传，结果把 finished_at 的时间串写进了
+    // stopped 列 —— 读出来是 Text，整个 /api/runs 直接 500。
     conn.execute(
-        "UPDATE runs SET ok = ?2, error = ?3, duration_ms = ?4, finished_at = ?5 WHERE id = ?1",
-        params![id, ok as i64, error, duration_ms, finished_at],
+        "UPDATE runs SET ok = ?2, error = ?3, duration_ms = ?4, finished_at = ?5, \
+         stopped = ?6 WHERE id = ?1",
+        params![id, ok as i64, error, duration_ms, finished_at, stopped as i64],
     )?;
     Ok(())
 }

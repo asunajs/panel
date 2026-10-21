@@ -1407,7 +1407,7 @@ fn clean_env(cmd: &mut Command) {
 /// 校验代理前缀：只允许 http(s)，不带 query/fragment/userinfo。
 ///
 /// 回环 HTTP 是为了本地测试代理服务；生产用 HTTPS。
-fn normalize_proxy(raw: &str, allow_http: bool) -> Option<String> {
+pub(crate) fn normalize_proxy(raw: &str, allow_http: bool) -> Option<String> {
     let proxy = raw.trim().trim_end_matches('/');
     if proxy.is_empty() {
         return None;
@@ -1430,7 +1430,7 @@ fn normalize_proxy(raw: &str, allow_http: bool) -> Option<String> {
 }
 
 /// 只有 GitHub 官方公开 host 才值得套代理；GHE / 自建域名原样直连。
-fn is_proxyable_github(url: &str) -> bool {
+pub(crate) fn is_proxyable_github(url: &str) -> bool {
     let Ok(uri) = url.parse::<ureq::http::Uri>() else {
         return false;
     };
@@ -1440,7 +1440,7 @@ fn is_proxyable_github(url: &str) -> bool {
     )
 }
 
-fn validate_url(raw: &str, allow_http: bool) -> Result<(), String> {
+pub(crate) fn validate_url(raw: &str, allow_http: bool) -> Result<(), String> {
     let uri: ureq::http::Uri = raw.parse().map_err(|e| format!("URL 不合法：{e}"))?;
     let host = uri.host().unwrap_or_default();
     match uri.scheme_str() {
@@ -1455,7 +1455,7 @@ fn validate_url(raw: &str, allow_http: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn same_origin(a: &str, b: &str) -> bool {
+pub(crate) fn same_origin(a: &str, b: &str) -> bool {
     let Ok(a) = a.parse::<ureq::http::Uri>() else {
         return false;
     };

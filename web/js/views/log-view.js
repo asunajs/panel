@@ -21,6 +21,8 @@
 */
 
 import { getState } from '../api.js';
+// 运行结果（成功 / 失败 / 已停止）的判定与文案在 status.js —— 与运行记录弹窗共用一份
+import { runOutcome } from '../status.js';
 import {
   LEVELS,
   esc,
@@ -84,7 +86,7 @@ export async function render(root, ctx, params = {}) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">日志</span>
+        <h2 class="section-title">日志</h2>
         <span class="badge running" id="log-conn">连接中…</span>
         <span class="hint" id="log-note"></span>
         <div class="card-actions">
@@ -97,6 +99,8 @@ export async function render(root, ctx, params = {}) {
       </div>
 
       <div id="run-banner"></div>
+
+      <p class="err-text" id="log-err" role="alert"></p>
 
       <div class="log-toolbar">
         <label class="tool">通道
@@ -159,7 +163,8 @@ export async function render(root, ctx, params = {}) {
           params.run
             ? `<span class="badge warning" title="只看这一次执行（run 标签）">
                  运行 ${esc(params.run)}
-                 <button class="btn ghost" id="f-run-clear" style="margin-left:6px">×</button>
+                 <button class="btn ghost" id="f-run-clear" style="margin-left:6px"
+                         aria-label="清除运行过滤">×</button>
                </span>`
             : ''
         }
@@ -181,6 +186,12 @@ export async function render(root, ctx, params = {}) {
   const qEl = root.querySelector('#f-q');
   const pluginEl = root.querySelector('#f-plugin');
   const channelEl = root.querySelector('#f-channel');
+  const errEl = root.querySelector('#log-err');
+
+  /** 页面级的错误行（role=alert）。传空串 = 收起（空元素高度 0，不占版面）。 */
+  function showErr(msg) {
+    if (errEl) errEl.textContent = msg;
+  }
 
   // 深链带进来的插件名不一定在候选里（比如那个插件已经被删了）。
   // 补一个 option 再选中 —— 不补的话 select 会**静默**回到「全部插件」，
@@ -273,10 +284,8 @@ export async function render(root, ctx, params = {}) {
     }
     const { run } = await res.json();
     runRecord = run;
-    const ok = run.ok === true;
-    const pending = run.ok === null || run.ok === undefined;
-    const cls = pending ? 'warning' : ok ? 'ok' : 'danger';
-    const label = pending ? '没跑完' : ok ? '成功' : '失败';
+    // 成功 / 失败 / 已停止：停止不是错误，横幅不能是红的（判定见 status.js）
+    const out = runOutcome(run);
     const dur = run.duration_ms == null ? '—' : `${run.duration_ms} ms`;
     // 脚本任务在 jobs 表里挂的是内部保留插件名 `__script__`：直接印出来
     // 只会让人问「这个插件是什么」。按来源给它一个真名字，并链到脚本页 ——
@@ -288,13 +297,17 @@ export async function render(root, ctx, params = {}) {
       : `#/tasks?plugin=${encodeURIComponent(run.plugin)}`;
     const taskLabel = isScript ? '看脚本任务' : '看这条任务';
     el.innerHTML = `<div class="card run-banner">
-      <span class="badge ${cls}">${label}</span>
+      <span class="badge ${out.cls}">${out.text}</span>
       <span class="run-title">
         <strong>${esc(who)}</strong> / ${esc(run.task)}
         <span class="hint">${esc(run.kind === 'manual' ? '手动触发' : run.kind === 'cron' ? '调度触发' : run.kind)}</span>
       </span>
       <span class="hint">${esc(run.started_at)} · 耗时 ${esc(dur)}</span>
-      ${run.error ? `<div class="run-error">${esc(run.error)}</div>` : ''}
+      ${
+        out.note
+          ? `<div class="${out.cls === 'danger' ? 'run-error' : 'run-note'}">${esc(out.note)}</div>`
+          : ''
+      }
       <div class="card-actions">
         <a class="btn ghost" href="${taskHref}">${taskLabel}</a>
         <button class="btn ghost" id="run-clear">退出运行视图</button>
@@ -412,6 +425,7 @@ export async function render(root, ctx, params = {}) {
     ring.clear();
     seen.clear();
     updateNote(0);
+    showErr(''); // 换条件重连 = 新一轮，上一次的报错不再挂着
     conn.className = 'badge running';
     conn.textContent = '连接中…';
 
@@ -429,9 +443,15 @@ export async function render(root, ctx, params = {}) {
           for (const entry of data.lines || []) append(entry, { follow: false });
           if (followEl.checked) box.scrollTop = box.scrollHeight;
           updateNote();
+        } else {
+          // 非 2xx 也是一次失败，别让它静默过去（原来只判 res.ok，失败什么都不说）
+          showErr(`读不到历史日志（HTTP ${res.status}），实时日志不受影响`);
         }
-      } catch {
-        // 历史读不到不挡实时流：至少新日志还能看
+      } catch (e) {
+        // 历史读不到不挡实时流：至少新日志还能看。但**不能静默** —— 用户看到的
+        // 是「这次没有日志」，实际是请求挂了；这两句意思完全不同。写进 role=alert，
+        // 屏幕阅读器也听得到。
+        showErr(`读不到历史日志（实时日志不受影响）：${(e && e.message) || '请求失败'}`);
       }
       if (gen !== historyGen || disposed) return;
     }

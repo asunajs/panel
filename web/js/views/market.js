@@ -9,6 +9,8 @@
 */
 
 import { getMarket, installMarketPlugin } from '../api.js';
+// 弹窗的焦点与 Esc 走公共实现（见 ../modal.js 的文件头）
+import { openModal } from '../modal.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -144,7 +146,7 @@ export async function render(root, ctx) {
 
   const errorHtml = (msg) => `<div class="section">
     <div class="section-head">
-      <span class="section-title">插件商城</span>
+      <h2 class="section-title">插件商城</h2>
       <div class="card-actions">
         <a class="btn ghost" href="#/plugins">返回插件列表</a>
         <button class="btn" id="market-retry">重试</button>
@@ -185,7 +187,7 @@ export async function render(root, ctx) {
 
     root.innerHTML = `<div class="section">
       <div class="section-head">
-        <span class="section-title">插件商城（${plugins.length}）</span>
+        <h2 class="section-title">插件商城（${plugins.length}）</h2>
         <div class="card-actions">
           <a class="btn ghost" href="#/plugins">返回插件列表</a>
           <button class="btn" id="market-refresh">刷新目录</button>
@@ -309,18 +311,12 @@ function openInstallDialog(item, tsTranspiler, ctx, after) {
       </div>
     </div>
   </div>`;
-  document.body.appendChild(back);
-
   const err = back.querySelector('[data-err]');
   const now = back.querySelector('[data-install-now]');
-  const onKey = (ev) => {
-    if (ev.key === 'Escape') close();
-  };
-  const close = () => {
-    document.removeEventListener('keydown', onKey);
-    back.remove();
-  };
-  document.addEventListener('keydown', onKey);
+  // openModal：挂载 + 焦点移入 + Esc 关闭 + 关闭后焦点归位。
+  // 初始焦点随后给「安装」—— 打开这个弹窗的人就是要装，焦点落在主操作上
+  // 可以少按一次 Tab；Esc 取消仍然随时可用。
+  const close = openModal(back);
   back.addEventListener('click', (ev) => {
     if (ev.target === back || ev.target.closest('[data-close]')) close();
   });

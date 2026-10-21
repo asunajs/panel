@@ -25,8 +25,10 @@ import {
 } from '../api.js';
 import { TASKS } from '../mock.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
+// 弹窗的焦点与 Esc 走公共实现（五个弹窗各写一份的后果见 ../modal.js 的文件头）
+import { openModal } from '../modal.js';
 // 状态的中文与时刻的显示格式在 ../status.js —— 仪表盘也要用同一份（原来它露的是英文原值）
-import { statusBadge, minuteOf } from '../status.js';
+import { statusBadge, minuteOf, runOutcome } from '../status.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -307,9 +309,9 @@ async function openRunsDialog(plugin, name) {
   const rows = runs.length
     ? runs
         .map((r) => {
-          const pending = r.ok === null || r.ok === undefined;
-          const cls = pending ? 'warning' : r.ok ? 'ok' : 'danger';
-          const label = pending ? '没跑完' : r.ok ? '成功' : '失败';
+          // 成功 / 失败 / 已停止三种结果，判定统一在 status.js 的 runOutcome 里：
+          // 「停止」以前和「失败」长得一模一样，还带一屏红色堆栈。
+          const out = runOutcome(r);
           const dur = r.duration_ms == null ? '—' : `${r.duration_ms} ms`;
           const kind =
             r.kind === 'manual'
@@ -334,14 +336,18 @@ async function openRunsDialog(plugin, name) {
                    <pre>${esc(r.output)}</pre></details></td></tr>`
               : '';
           return `<tr>
-            <td><span class="badge ${cls}">${label}</span></td>
+            <td><span class="badge ${out.cls}">${out.text}</span></td>
             <td class="mono">${esc(r.started_at)}</td>
             <td>${kind}</td>
             <td class="mono">${esc(dur)}</td>
             <td class="mono run-id">${esc(r.id)}</td>
             <td>${action}</td>
           </tr>
-          ${r.error ? `<tr><td colspan="6" class="run-error">${esc(r.error)}</td></tr>` : ''}
+          ${
+            out.note
+              ? `<tr><td colspan="6" class="${out.cls === 'danger' ? 'run-error' : 'run-note'}">${esc(out.note)}</td></tr>`
+              : ''
+          }
           ${detail}`;
         })
         .join('')
@@ -349,9 +355,11 @@ async function openRunsDialog(plugin, name) {
 
   const back = document.createElement('div');
   back.className = 'dialog-back';
-  back.innerHTML = `<div class="dialog wide" role="dialog" aria-modal="true">
+  // aria-labelledby 指向标题：屏幕阅读器打开弹窗时会先念出「运行记录 · 插件 / 任务」；
+  // 只写 role="dialog" 的话它只会说「对话框」，用户不知道自己在看谁。
+  back.innerHTML = `<div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="runs-title">
     <div class="dialog-head">
-      <span>运行记录 · <strong>${esc(plugin)}</strong> / ${esc(name)}</span>
+      <span id="runs-title">运行记录 · <strong>${esc(plugin)}</strong> / ${esc(name)}</span>
       <button class="btn ghost" id="runs-close">关闭</button>
     </div>
     <div class="dialog-body">
@@ -365,12 +373,12 @@ async function openRunsDialog(plugin, name) {
            ⚠ 这段是**模板串里的 HTML 注释**，所以一个反引号都不能出现 ——
              写了会把模板串截断（面板的前端资源检查里那条「语法正确」就是这么红过一次）。 -->
       <div class="table-wrap"><table><thead><tr>
-        <th>结果</th><th>开始</th><th>触发</th><th>耗时</th><th>运行 id</th><th></th>
+        <th scope="col">结果</th><th scope="col">开始</th><th scope="col">触发</th><th scope="col">耗时</th><th scope="col">运行 id</th><th scope="col"></th>
       </tr></thead><tbody>${rows}</tbody></table></div>
     </div>
   </div>`;
-  document.body.appendChild(back);
-  const close = () => back.remove();
+  // openModal 负责挂到 body、把焦点移进来、Esc 关闭、关掉后把焦点还给触发按钮
+  const close = openModal(back);
   back.querySelector('#runs-close').addEventListener('click', close);
   back.addEventListener('click', (e) => {
     if (e.target === back) close();
@@ -411,7 +419,7 @@ export async function render(root, ctx, opts = {}) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">插件任务（${panelAlive.length}）</span>
+        <h2 class="section-title">插件任务（${panelAlive.length}）</h2>
         <div class="card-actions">
           <button class="btn" id="cleanup-btn">清理失效任务</button>
           <button class="btn" id="refresh-btn">刷新</button>
@@ -506,7 +514,7 @@ export async function render(root, ctx, opts = {}) {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>插件</th><th>任务</th><th>失效原因</th></tr></thead>
+            <thead><tr><th scope="col">插件</th><th scope="col">任务</th><th scope="col">失效原因</th></tr></thead>
             <tbody>
               ${invalid
                 .map(

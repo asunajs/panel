@@ -28,6 +28,8 @@ import {
   savePluginConfig,
 } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
+// 弹窗的焦点与 Esc 走公共实现（见 ../modal.js 的文件头）
+import { openModal } from '../modal.js';
 import { showPluginEngineUi } from '../prefs.js';
 
 function esc(s) {
@@ -161,12 +163,17 @@ async function openPluginConfig(name, ctx) {
         <button class="btn ghost" type="button" data-cfg-close>关闭</button>
       </div>
       <div class="dialog-body">
-        <div class="config-tabs" role="tablist">
-          <button class="btn" type="button" data-cfg-tab="form">表单</button>
-          <button class="btn" type="button" data-cfg-tab="json">JSON</button>
+        <!-- 页签语义要成对：role=tablist 里必须是 role=tab（原来只有外层写了 tablist，
+             子元素是普通按钮 —— 屏幕阅读器听到「标签列表」却找不到任何标签）。
+             aria-controls / aria-labelledby 把页签和面板双向绑上。 -->
+        <div class="config-tabs" role="tablist" aria-label="配置编辑方式">
+          <button class="btn" type="button" role="tab" id="cfg-tab-form" aria-controls="cfg-form"
+                  aria-selected="true" data-cfg-tab="form">表单</button>
+          <button class="btn" type="button" role="tab" id="cfg-tab-json" aria-controls="cfg-json-wrap"
+                  aria-selected="false" tabindex="-1" data-cfg-tab="json">JSON</button>
         </div>
-        <div id="cfg-form"></div>
-        <div id="cfg-json-wrap" hidden>
+        <div id="cfg-form" role="tabpanel" aria-labelledby="cfg-tab-form"></div>
+        <div id="cfg-json-wrap" role="tabpanel" aria-labelledby="cfg-tab-json" hidden>
           <textarea class="textarea mono config-json" id="cfg-json" spellcheck="false"
                     aria-label="插件配置 JSON"></textarea>
           <div class="config-json-actions">
@@ -181,8 +188,7 @@ async function openPluginConfig(name, ctx) {
         </div>
       </div>
     </div>`;
-  document.body.appendChild(back);
-
+  // 挂载交给 openModal（在下面 close / beforeClose 定义之后）—— 它要接管焦点和 Esc
   const formEl = back.querySelector('#cfg-form');
   const jsonWrap = back.querySelector('#cfg-json-wrap');
   const jsonEl = back.querySelector('#cfg-json');
@@ -199,15 +205,10 @@ async function openPluginConfig(name, ctx) {
     showError('');
   }
 
-  function close() {
-    if (dirty && !window.confirm('配置还没保存，确定关闭？')) return;
-    document.removeEventListener('keydown', onKey);
-    back.remove();
-  }
-
-  function onKey(e) {
-    if (e.key === 'Escape') close();
-  }
+  // 「还没保存」的确认放在 beforeClose 里：Esc、点遮罩、点关闭都经过它。
+  // 以前只有按钮那条路会问，Esc 反而能一键丢掉没保存的配置。
+  let close = () => {};
+  const beforeClose = () => !dirty || window.confirm('配置还没保存，确定关闭？');
 
   function fieldHtml(key, val) {
     const kind = configKind(val);
@@ -370,7 +371,11 @@ async function openPluginConfig(name, ctx) {
     tab = next;
     showError('');
     for (const b of back.querySelectorAll('[data-cfg-tab]')) {
-      b.classList.toggle('primary', b.dataset.cfgTab === tab);
+      const on = b.dataset.cfgTab === tab;
+      b.classList.toggle('primary', on);
+      b.setAttribute('aria-selected', String(on));
+      // roving tabindex：Tab 进出页签条只停一次，条内切换用方向键（APG 的页签模式）
+      b.tabIndex = on ? 0 : -1;
     }
   }
 
@@ -397,12 +402,29 @@ async function openPluginConfig(name, ctx) {
     b.addEventListener('click', () => setTab(b.dataset.cfgTab));
   }
   for (const b of back.querySelectorAll('[data-cfg-close]')) {
-    b.addEventListener('click', close);
+    // 用 () => close() 而不是直接传 close：close 是 openModal 返回的，定义在后面
+    b.addEventListener('click', () => close());
   }
   back.addEventListener('click', (ev) => {
     if (ev.target === back) close();
   });
-  document.addEventListener('keydown', onKey);
+  close = openModal(back, { beforeClose });
+
+  // 页签的方向键切换（APG 的页签模式）：Tab 只进出页签条一次，条内用 ← → Home End
+  back.querySelector('.config-tabs').addEventListener('keydown', (e) => {
+    const tabs = [...back.querySelectorAll('[data-cfg-tab]')];
+    const i = tabs.indexOf(document.activeElement);
+    if (i < 0) return;
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    tabs[next].focus();
+    setTab(tabs[next].dataset.cfgTab);
+  });
 
   jsonEl.addEventListener('input', markDirty);
   back.querySelector('#cfg-format').addEventListener('click', () => {
@@ -465,7 +487,7 @@ export async function render(root, ctx, opts = {}) {
   root.innerHTML = `
     <div class="section">
       <div class="section-head">
-        <span class="section-title">插件（${plugins.length}）</span>
+        <h2 class="section-title">插件（${plugins.length}）</h2>
         <div class="card-actions">
           <a class="btn" href="#/market" title="从 GitHub 安装插件">插件商城</a>
           <button class="btn" id="upload-btn" title="上传 .js 单文件，或解压 .zip 到插件目录">上传插件</button>
@@ -612,7 +634,7 @@ export async function render(root, ctx, opts = {}) {
                   return `
         <div class="section">
           <div class="section-head">
-            <span class="section-title">${esc(g)} 系列（${list.length}）</span>
+            <h2 class="section-title">${esc(g)} 系列（${list.length}）</h2>
             <div class="card-actions">
               <button class="btn" data-group-reload="${esc(g)}">全部重载</button>
               <button class="btn" data-group-enable="${esc(g)}">全部启用</button>
@@ -629,7 +651,7 @@ export async function render(root, ctx, opts = {}) {
 
     <div class="section" id="frame-section" hidden>
       <div class="section-head">
-        <span class="section-title" id="frame-title">插件配置页</span>
+        <h2 class="section-title" id="frame-title">插件配置页</h2>
         <div class="card-actions">
           <button class="btn ghost" id="frame-close">关闭</button>
         </div>

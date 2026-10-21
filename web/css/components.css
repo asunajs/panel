@@ -85,12 +85,18 @@
   height: 32px;
   border-radius: var(--r-md);
   color: var(--text-dim);
-  transition: background var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast), transform var(--t-fast);
 }
 
 .icon-btn:hover {
   background: var(--surface);
   color: var(--text);
+}
+
+/* 与 .btn:active 同一档的 1px 下沉。图标按钮里只有一个小图形，只靠换底色
+   反馈太弱 —— 手指按下去那一下要看得出「收到了」。 */
+.icon-btn:active {
+  transform: translateY(1px);
 }
 
 /* 按钮里的加载转圈 */
@@ -161,6 +167,38 @@
 .badge.warning {
   background: var(--warning-soft);
   color: var(--warning);
+}
+
+/* 运行记录的三种结果：成功 / 失败 / 已停止。
+   ⚠ 视图里用的类名是 `ok` / `danger`，而这里原来只有 `.success` / `.failed` ——
+   于是「成功」和「失败」两个徽章都落回默认的灰底，长得一模一样，只能靠下面那行
+   错误文字分辨（用户截图里就是这样）。补上这两档，颜色才对得上语义。 */
+.badge.ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.badge.danger {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+/* 已停止：中性灰，**不能**用红色。
+   它不是出错，是这次执行被停下了（手动停止 / 超出预算）—— 用红色会让用户
+   以为任务坏了，还要去查日志。 */
+.badge.stopped {
+  background: var(--mute-soft);
+  color: var(--text-dim);
+}
+
+/* 运行记录里「已停止」那一行说明：中性灰、一句话。
+   与 .run-error（红色、pre-wrap、保留堆栈）刻意分开 —— 停止不是错误，
+   给它红色等于告诉用户"任务坏了"，然后他会去翻一堆本来不该存在的堆栈。 */
+.run-note {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 0 6px;
+  overflow-wrap: anywhere;
 }
 
 /* 语言标签不需要小圆点，纯文字更干净 */
@@ -268,6 +306,11 @@
 }
 
 .section-title {
+  /* 会被渲染成 <h2 class="section-title">（语义标题）。h2 的 UA 字号/字重由
+     下面两条**类**规则覆盖（类选择器 0,1,0 赢 UA 的 0,0,1），margin 则由
+     reset.css 统一清掉；这里再显式写一次 margin:0，是为了让「标题不靠 UA 默认值」
+     这件事在这个文件里也读得出来 —— 换标签（h2/h3）时视觉零变化。 */
+  margin: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-dim);
@@ -347,9 +390,11 @@
   transition: border-color var(--t-fast);
 }
 
-.input:hover,
-.select:hover,
-.textarea:hover {
+/* 悬停只对**能编辑**的控件生效：禁用控件在鼠标扫过时变色，会让人以为它可以改
+   （设置页里被环境变量锁定的那些项就是这么骗人的）。 */
+.input:hover:not(:disabled),
+.select:hover:not(:disabled),
+.textarea:hover:not(:disabled) {
   border-color: var(--text-mute);
 }
 
@@ -357,7 +402,38 @@
 .select:focus,
 .textarea:focus {
   border-color: var(--accent);
-  outline: none;
+}
+
+/* 键盘焦点要有一圈**看得见**的环，不能只靠边框变色。
+   原来这里写了 outline: none —— 结果按钮有 2px 焦点圈、输入框只有边框从灰变粉，
+   同一个页面两套焦点语言，低视力用户根本判断不出「现在在改哪一项」
+   （实测：Tab 到日志页的三个筛选控件，outline-style 是 none）。
+   鼠标点进来时浏览器不会匹配 :focus-visible，所以不会多出一圈。 */
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- 禁用态（.input / .select / .textarea 三件套）----
+   场景：设置页里「被环境变量锁定」的项、保存中的表单。原来它们和可编辑时长得
+   一模一样，用户点上去没反应，会以为面板卡了 —— 这里用三件事一起说明：
+   - opacity .55：和 .btn:disabled 同一档，扫一眼就知道整块是「灰的」；
+   - 底色退回 --bg-deep（可编辑时是 --bg）：不靠边框单独表达，因为深色主题里
+     禁用和正常的边框色本来就接近；
+   - cursor: not-allowed：鼠标移上去直接给「点不动」的反馈。
+   文字压到 --text-mute 但**不**继续往下压：禁用不等于删除，内容仍然要读得出来
+   （--text-mute 在两套主题的 --bg-deep 上都在 AA 之上）。
+   ⚠ 这里用 background-color 而不是 background 简写：.select 的箭头是
+   background-image 画的，简写会把箭头一起清掉。 */
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background-color: var(--bg-deep);
+  color: var(--text-mute);
 }
 
 /* <select> 的那个三角是**浏览器自己画的**，我们只给了边框和底色。
@@ -414,14 +490,19 @@
   min-width: 0;
 }
 
+/* 后端错误 / 提示是**原样显示**的，里面常带完整路径、URL、命令（/Users/…/x.js）。
+   没有 overflow-wrap 时那一长串在 390px 下撑破卡片 —— 不是出滚动条，是直接溢出
+   到卡片外面，看起来像布局坏了。anywhere 让它在任意位置断开（长路径没有空格）。 */
 .hint {
   font-size: 12px;
   color: var(--text-mute);
+  overflow-wrap: anywhere;
 }
 
 .err-text {
   font-size: 12px;
   color: var(--error);
+  overflow-wrap: anywhere;
 }
 
 /* ---------------------------------------------------------------- 编辑器 */
@@ -431,6 +512,20 @@
   border-radius: var(--r-md);
   background: var(--bg-deep);
   overflow: hidden;
+  /* 只过渡颜色和阴影，和 .btn 一致：过渡 all 会在内容变化时触发无谓的重绘 */
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+/* ---- 编辑器焦点 ----
+   编辑器里没有「边框可点」的输入区提示，caret 又只有 1px 宽 —— 键盘用户 Tab
+   进来时完全看不出焦点在哪（用户反馈过「不知道现在在改哪个框」）。
+   用 :focus-within 而不是给 .editor:focus：contenteditable 的 .editor 和降级用
+   的 .editor-fallback 是同一个外框里的两种实现，焦点落在谁身上都该亮同一圈。
+   表现与 .input:focus 同一套语言（强调色边框），外面再加 2px 的 --accent-soft
+   光环 —— 编辑器是页面主体，焦点丢了代价最大，所以比输入框更粗一档。 */
+.editor-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .editor {
@@ -464,8 +559,16 @@
   background: transparent;
   color: var(--text);
   border: 0;
-  outline: none;
+  /* 原来这里写 `outline: none`，Tab 进来一点反馈都没有。可见焦点改由外层
+     .editor-wrap:focus-within 提供（圆角一致、不会被 overflow:hidden 裁）；
+     这里再补一圈**缩到内侧**的圈，防止以后有人把这个 textarea 挪出外框：
+     reset.css 的通用圈 offset 是 +2px，在 .editor-wrap 里会被整圈裁掉。 */
   resize: vertical;
+}
+
+.editor-fallback:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .editor-bar {
@@ -919,6 +1022,8 @@
   font-size: 12px;
   line-height: 1.6;
   margin-bottom: var(--sp-3);
+  /* 这一行里会贴任务标识符 / 路径（同样是原样显示的长串），理由同 .hint */
+  overflow-wrap: anywhere;
 }
 
 /* ---------------------------------------------------------------- 日志页 */
@@ -967,11 +1072,18 @@
   cursor: pointer;
   user-select: none;
   font-size: 12px;
+  transition: border-color var(--t-fast), color var(--t-fast), transform var(--t-fast);
 }
 
 .chip:hover {
   border-color: var(--accent);
   color: var(--text);
+}
+
+/* 同 .btn:active：日志页的级别开关是「点一下立刻过滤」，没有下沉就只剩边框变色，
+   连续点几个开关时看不出哪一下生效了。 */
+.chip:active {
+  transform: translateY(1px);
 }
 
 .chip input {
@@ -1067,13 +1179,22 @@
 .run-banner .run-title {
   font-size: 13px;
 }
+/* 失败原因：**独立成一条**，不写成 `.run-banner .run-error` 的后代规则 ——
+   运行记录表格里用的是 <td class="run-error">，它不是横幅的后代，原来那条规则
+   对它一个字都没生效（表格里的错误于是是默认黑字、长串直接撑破单元格）。
+   颜色走 --error；pre-wrap 保住后端多行报错的换行；break-all 让
+   /Users/…/node_modules/… 这种没有空格的长串能在任意位置断开。 */
+.run-error {
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 横幅里的那份只需要「另起一行占满」+ 等宽小字，颜色/断行继承上面的 .run-error */
 .run-banner .run-error {
   flex-basis: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: var(--error);
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 /* 试跑的输出（记录弹窗里展开看）。
@@ -1096,6 +1217,35 @@
   cursor: pointer;
   font-size: 12px;
   color: var(--text-dim);
+  /* 「输出（123 字节）」这一行是可点的展开开关，但原来只有 12px 行高 × 1.55
+     ≈ 18.6px 的行盒 —— 比 WCAG 2.2 的目标尺寸下限（24×24）还小，手指在
+     表格里点它经常点空。补 4px 上下内边距 + min-height:24px 把命中区做到 24 高，
+     同时用 flex 让文字真正垂直居中（否则 padding 会让文字偏上）。
+
+     ⚠ display:flex 会把浏览器自带的那个展开三角（它挂在 display:list-item 上）
+     一起弄没 —— 于是「能展开」这件事就没提示了。所以自己补一个 ▸/▾，
+     和 .task-details 用的是同一套画法。 */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.run-output summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-output summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--text-mute);
+  flex: none;
+}
+
+.run-output details[open] > summary::before {
+  content: '▾';
 }
 
 /* ---- 弹窗 -----------------------------------------------------------------
@@ -1146,6 +1296,25 @@
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border-soft);
   font-size: 13px;
+  /* 长插件名 + 「关闭」挤不下时**换行**，不要靠压缩标题来腾地方 ——
+     标题是 min-width:auto 的 flex 子项，压缩的结果是把「关闭」挤出弹窗右边缘
+     （390px 下实测点不到）。min-width:0 让子项能缩，配合下面的标题断行，
+     窄屏是「标题折两行 + 关闭在第二行右端」。 */
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* 标题（第一个 span）自己允许在任意位置断行：插件名/任务名是标识符，
+   中间没有空格，不写 anywhere 就只能靠 flex 压缩，压出来是溢出而不是折行。 */
+.dialog-head > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 真换行之后「关闭」也要留在右端：space-between 在「一行只剩一个元素」时
+   会把它贴到行首，看起来像飘在标题下面。auto margin 让它两种情况都靠右。 */
+.dialog-head > .btn {
+  margin-left: auto;
 }
 
 .dialog-body {
@@ -1594,5 +1763,41 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
+}
+
+/* ── 触控尺寸（粗指针设备）──────────────────────────────────────────────
+   桌面上 32px 的图标按钮、34px 高的按钮用鼠标点很舒服；手指不行 ——
+   WCAG 2.5.5 要 44×44，Material / Apple HIG 也是这个数，而 32px 的命中区在
+   手机上实测经常点到隔壁（顶栏的汉堡 / 日志页的导出按钮）。
+   所以只在粗指针设备上放大命中区，桌面尺寸一个像素都不动。
+
+   为什么用 @media (pointer: coarse) 而不是宽度断点：要区分的是**输入方式**
+   不是屏幕宽度 —— 触屏笔记本是宽屏 + 手指，窄窗口的桌面浏览器是窄屏 + 鼠标，
+   两者要的东西正好相反。
+
+   ⚠ .nav-item 的规则在 layout.css，而 layout.css **先**加载；同优先级的覆盖
+   只有写在后面才生效，所以触控尺寸集中放这一处（也省得以后有人只改一边，
+   出现「按钮变大了、侧边栏没变」的错位）。 */
+@media (pointer: coarse) {
+  .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  /* 只加最小高度，不加大内边距：按钮宽度跟着文字走，加了内边距窄屏更容易折行 */
+  .btn {
+    min-height: 44px;
+  }
+
+  /* 日志页的级别 chip 是小开关，44 会占掉一整行；32 是「手指能点到」的下限，
+     同时保住一行里能排下四五个 */
+  .chip {
+    min-height: 32px;
+  }
+
+  /* 侧边栏一项 = 一条整行的导航，命中区高度优先于信息密度 */
+  .nav-item {
+    padding: 12px var(--sp-3);
+  }
 }
 

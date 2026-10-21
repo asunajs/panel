@@ -65,12 +65,22 @@
   padding: 8px var(--sp-3);
   border-radius: var(--r-md);
   color: var(--text-dim);
-  transition: background var(--t-fast), color var(--t-fast);
+  transition: background var(--t-fast), color var(--t-fast),
+    transform var(--t-fast);
 }
 
 .nav-item:hover {
   background: var(--surface);
   color: var(--text);
+}
+
+/* 按下时与 .btn:active 同样下沉 1px。
+   侧边栏项在触屏（抽屉）和鼠标下都是高频点击目标，只有底色变化时
+   「点没点中」全靠切页结果来判断 —— 下沉那一下是即时的确认。
+   ⚠ 触控设备上的命中区尺寸在 components.css 末尾的 @media (pointer: coarse)
+   里统一放大（那一份在这条之后加载，才能覆盖这里的 padding）。 */
+.nav-item:active {
+  transform: translateY(1px);
 }
 
 .nav-item.active {
@@ -161,6 +171,52 @@
   /* 超宽屏上内容居中；否则 1100px 之后右边会空出一大条，页面看起来偏左。 */
   margin-inline: auto;
   outline: none;
+}
+
+/* ---------------------------------------------------------------- 跳过链接 */
+
+/*
+  「跳到主内容」（index.html 里 .skip-link 放在 .app 之前，指向 #view）。
+
+  为什么要有：键盘用户在每一页都得先 Tab 过侧边栏那 7 个导航项才够得着正文，
+  WCAG 2.4.1（绕过重复区块）要的正是这个。
+
+  为什么是「移出视口」而不是 display:none：display:none 的元素**不可聚焦**，
+  跳过链接本身也就没用了 —— 它必须先能被 Tab 到，再在聚焦时现身。
+  translateY(-200%) 只是视觉上挪走，元素仍在可聚焦树里；鼠标用户看不到它，
+  键盘用户 Tab 到它时它会滑下来（transition 只动 transform，不触发重排）。
+  不写 visibility:hidden 同理：那也会让它不可聚焦。
+
+  z-index 60 高于 .toast（50）和抽屉（40）：它是全站最高优先级的浮层，
+  出现时必须压在顶栏和侧边栏上面，否则聚焦了也看不清。
+*/
+.skip-link {
+  /* fixed 而不是 absolute：页面已经滚下去时聚焦它，absolute 会让浏览器把它滚进视口
+     —— 表现就是「按了跳过链接，页面先跳回顶部再跳回来」。fixed 始终贴视口。 */
+  position: fixed;
+  left: var(--sp-3);
+  top: var(--sp-2);
+  z-index: 60;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 500;
+  /* 默认移出视口：它是给键盘用户的，鼠标用户不该看到它 */
+  transform: translateY(-200%);
+  transition: transform var(--t-fast);
+}
+
+.skip-link:focus-visible {
+  transform: none;
+}
+
+/* 系统要求减少动效时不做滑入：直接出现（用户对位移敏感，这一条不是可选项） */
+@media (prefers-reduced-motion: reduce) {
+  .skip-link {
+    transition: none;
+  }
 }
 
 /* 抽屉遮罩 */

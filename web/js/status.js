@@ -41,6 +41,43 @@ export function statusBadge(status) {
 }
 
 /**
+ * 一次**运行**的结果 → 徽章 + 一行说明。
+ *
+ * 为什么不复用 statusBadge()：那个说的是**任务**状态（已启用 / 已暂停 / 已熔断），
+ * 这里说的是**某一次执行**的结果（成功 / 失败 / 已停止）。两套词混在一起，用户会
+ * 以为"任务出错了"，其实只是上一次跑得不顺。
+ *
+ * 三种情况里最容易做错的是「已停止」：手动停止（或超出执行预算）时，QuickJS 抛的是
+ * `InternalError: interrupted` **加一整段 JS 堆栈**。原样显示出来就是一屏红字，看着
+ * 像面板炸了 —— 而事实是用户自己按了停止。所以这里把它单独归一类：中性灰徽章 +
+ * 一句人话，不展示堆栈（堆栈去日志里看，那才是排查的地方）。
+ */
+const INTERRUPTED = /interrupt/i;
+
+export function runOutcome(run) {
+  const r = run || {};
+  if (r.ok === null || r.ok === undefined) {
+    return { cls: 'warning', text: '没跑完', note: '' };
+  }
+  if (r.ok) return { cls: 'ok', text: '成功', note: '' };
+  const err = String(r.error || '');
+  // 后端从「停止不算失败」那一版起直接给 stopped 标记；老记录只有那句 interrupted，
+  // 所以两个都认 —— 升级后不该让昨天那条记录突然变回红色的失败。
+  if (r.stopped === true || INTERRUPTED.test(err)) {
+    return {
+      cls: 'stopped',
+      text: '已停止',
+      // 引擎层「手动停止」和「超出执行预算」是同一个中断，前端分不出来 ——
+      // 所以两种原因都写上。只说"手动停止"会在超预算时骗人。
+      note:
+        '这次执行被中途停下：手动「停止」，或者超出执行预算。' +
+        '这不是任务本身报错 —— 它跑到哪一步，去「看日志」里翻。',
+    };
+  }
+  return { cls: 'danger', text: '失败', note: err };
+}
+
+/**
  * 时刻只显示到**分钟**。
  *
  * 后端给的是 `2026-10-17 08:00:00.000`，而调度最小粒度就是分钟 ——

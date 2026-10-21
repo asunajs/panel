@@ -574,3 +574,20 @@ export function testPush() {
 export function savePushTask(body) {
   return request('/api/push/task', { method: 'POST', panel: true, body });
 }
+
+/* ---------------------------------------------------------------- 自更新 */
+
+/** 查最新版本（不下载任何东西）。 */
+export function checkUpdate() {
+  return request('/api/update', { panel: true, timeout: 30000 });
+}
+
+/**
+ * 下载并替换二进制，然后自重启。
+ *
+ * ⚠ 返回 200 只代表「已经替换完成、正在重启」—— 调用方必须轮询 `/api/state`
+ * 等它回来（和重启按钮同一套处理，见 views/settings.js）。
+ */
+export function applyUpdate() {
+  return request('/api/update/apply', { method: 'POST', panel: true, timeout: 120000 });
+}

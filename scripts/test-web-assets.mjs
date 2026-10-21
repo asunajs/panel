@@ -494,8 +494,10 @@ check(
   check(/<span>脚本任务<\/span>/.test(indexSrc), '侧边栏「脚本文件」改名为「脚本任务」');
   check(appSrc.includes("tasks: '插件任务'"), '页面标题：插件任务');
   check(appSrc.includes("scripts: '脚本任务'"), '页面标题：脚本任务');
-  check(appSrc.includes('>插件任务</span>') && appSrc.includes('>脚本任务</span>'),
-    '仪表盘把插件任务与脚本任务分开列表');
+  // 区块标题从 <span> 换成了 <h2>：屏幕阅读器的「按标题跳转」靠的就是它，
+  // 全站只有一个 h1 时，长页面（日志 / 插件列表）只能逐 Tab 走。
+  check(/<h2[^>]*>插件任务<\/h2>/.test(appSrc) && /<h2[^>]*>脚本任务<\/h2>/.test(appSrc),
+    '仪表盘把插件任务与脚本任务分开列表（标题是 h2，能被按标题跳转）');
   check(appSrc.includes("j.kind !== 'script'") && appSrc.includes("j.kind === 'script'"),
     '仪表盘按 kind 拆分两类任务');
   check(!appSrc.includes('任务概览'), '仪表盘不再用一张混合的「任务概览」表');
@@ -1075,6 +1077,123 @@ async function checkPluginFrameSandbox() {
 }
 
 await checkPluginFrameSandbox();
+
+
+// ---------------------------------------------------------------- ⑨ 界面状态与无障碍
+/*
+  这一组钉的是「用户能不能用」，不是「代码长什么样」。每一条都对应一类真实用户：
+  键盘用户、屏幕阅读器用户、触屏用户、低视力用户。文章里的检查清单落成了这些断言：
+
+    · 只使用键盘能否完成核心流程（跳过导航、弹窗能 Esc 关、焦点会回到原处）
+    · 组件状态是否齐全（禁用 / 按下 / 焦点可见）
+    · 触控目标是否够大（粗指针下放大）
+    · 长文案、错误、空态是否有处理（不撑破、会被朗读）
+*/
+function checkA11yAndStates() {
+  const jsFiles = [];
+  (function walk(dir) {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, e.name);
+      if (e.isDirectory()) walk(abs);
+      else if (e.name.endsWith('.js')) jsFiles.push(abs);
+    }
+  })(join(WEB, 'js'));
+  const jsSrc = new Map(jsFiles.map((f) => [relative(REPO, f), readFileSync(f, 'utf8')]));
+  const allJs = [...jsSrc.values()].join('\n');
+  const css = readFileSync(join(WEB, 'css', 'components.css'), 'utf8');
+  const layoutCss = readFileSync(join(WEB, 'css', 'layout.css'), 'utf8');
+  const indexHtml = readFileSync(join(WEB, 'index.html'), 'utf8');
+  const appSrc = readFileSync(join(WEB, 'js', 'app.js'), 'utf8');
+
+  // ① 表头：屏幕阅读器在表格模式里逐格读时，靠 scope 才知道「这一格属于哪一列」
+  const ths = [...allJs.matchAll(/<th\b[^>]*>/g)].map((m) => m[0]);
+  const thNoScope = ths.filter((t) => !/scope=/.test(t));
+  check(ths.length > 0 && thNoScope.length === 0,
+    `表格表头都标了所属列（scope），共 ${ths.length} 个 th`,
+    thNoScope.slice(0, 3).join(' ; '));
+
+  // ② 标题层级：只有一个 h1（顶栏）时，「按标题跳转」是空的
+  const spanTitles = [...allJs.matchAll(/<span class="section-title"/g)].length;
+  const h2Titles = [...allJs.matchAll(/<h2[^>]*class="section-title"/g)].length;
+  check(h2Titles > 0 && spanTitles === 0,
+    `区块标题是 h2（屏幕阅读器可以按标题跳转），共 ${h2Titles} 处`,
+    spanTitles ? `还有 ${spanTitles} 处写成了 span` : '');
+
+  // ③ 弹窗：Esc / 焦点陷阱 / 关闭后归位只有一份实现，视图里不许再各写各的
+  const dialogSites = [...allJs.matchAll(/className = 'dialog-back'/g)].length;
+  // modal.js 自己就是那个「唯一实现」，它当然要 appendChild
+  const handAppended = [...jsSrc.entries()].filter(
+    ([f, s]) => !f.endsWith('js/modal.js') && /document\.body\.appendChild\(back\)/.test(s),
+  );
+  check(dialogSites > 0 && handAppended.length === 0,
+    `所有弹窗都走 modal.js（Esc 能关、Tab 不会跑出去、关闭后焦点回原处），共 ${dialogSites} 处`,
+    handAppended.map(([f]) => f).join(' ; '));
+  const dlgNoName = [...allJs.matchAll(/class="dialog[^"]*" role="dialog"[^>]*>/g)]
+    .map((m) => m[0])
+    // aria-labelledby= 也满足「有名字」，别只认 aria-label=
+    .filter((t) => !/aria-label(ledby)?=/.test(t));
+  check(dlgNoName.length === 0,
+    '每个弹窗都有可读名称（aria-label / aria-labelledby），不会只念一句「对话框」',
+    dlgNoName.slice(0, 2).join(' ; '));
+
+  // ④ 跳过导航：每页要先 Tab 过 7 个导航项才到正文（WCAG 2.4.1）
+  check(indexHtml.includes('class="skip-link"') && appSrc.includes("'#skip-link'"),
+    '有「跳到主内容」入口，且点击时不会被 hash 路由当成跳页');
+  check(/pointer:\s*coarse/.test(css),
+    '触屏上放大命中区（粗指针下按钮 44px，而不是桌面那套 34px）');
+
+  // ⑤ 组件状态：禁用、焦点、错误、长文本
+  const stateRules = [
+    [/^\.input:disabled/m, '输入框禁用时有可见的「改不动」样式'],
+    [/^\.editor-wrap:focus-within/m, '代码编辑器聚焦时有焦点框（原来 outline:none，键盘用户看不出焦点在哪）'],
+    [/^\.run-error\s*\{/m, '运行记录里的错误行是错误色、会折行（原来只写了 .run-banner 后代，表格里根本没生效）'],
+    [/^\.hint[^{]*\{[^}]*overflow-wrap:\s*anywhere/m, '提示文案遇到长路径会折行，不撑破卡片'],
+    [/^\.err-text[^{]*\{[^}]*overflow-wrap:\s*anywhere/m, '错误文案遇到长路径会折行，不撑破卡片'],
+  ];
+  for (const [re, label] of stateRules) {
+    check(re.test(css), label);
+  }
+  check(/\.skip-link:focus-visible/.test(layoutCss), '跳过链接聚焦时才滑出来（平时不挡内容）');
+
+  // ⑥ 失败要说给屏幕阅读器听：toast 的错误档是 alert（不是礼貌播报）
+  check(/kind === 'bad' \? 'alert'/.test(appSrc), '操作失败的提示会被立刻朗读（role=alert），不会等前面的内容念完');
+}
+
+checkA11yAndStates();
+
+// ---------------------------------------------------------------- ⑨b 运行结果的三态
+/*
+  「停止」曾经和「失败」长得一模一样：红色徽章 + 一屏 QuickJS 堆栈，还会触发失败推送。
+  用户按一下停止，看到的是「面板炸了」。这条钉住的是**判定**本身：
+    成功 → ok；真报错 → 失败（带原因）；被停下 → 已停止（中性，不摆堆栈）。
+  判定只有一份（web/js/status.js 的 runOutcome），三个视图共用。
+*/
+async function checkRunOutcome() {
+  const status = await import(pathToFileURL(join(WEB, 'js', 'status.js')).href);
+  const stopped = status.runOutcome({ ok: false, stopped: true, error: null });
+  const legacy = status.runOutcome({ ok: false, error: 'InternalError: interrupted' });
+  const failed = status.runOutcome({ ok: false, error: 'TypeError: x is not a function' });
+  const okRun = status.runOutcome({ ok: true });
+  check(
+    stopped.cls === 'stopped' && stopped.text === '已停止' && !/interrupt/i.test(stopped.note),
+    '被停下的运行显示「已停止」，不是红色失败，也不把 QuickJS 堆栈摆给用户看',
+    JSON.stringify(stopped),
+  );
+  check(
+    legacy.cls === 'stopped',
+    '老记录（只有 interrupted 文本、没有 stopped 标记）也按「已停止」显示，升级后不会突然变红',
+    JSON.stringify(legacy),
+  );
+  check(
+    failed.cls === 'danger' && failed.note.includes('TypeError'),
+    '真正的报错仍然显示「失败」并带原因',
+    JSON.stringify(failed),
+  );
+  check(okRun.cls === 'ok' && okRun.text === '成功', '成功的运行显示「成功」', JSON.stringify(okRun));
+}
+
+await checkRunOutcome();
+
 
 // ---------------------------------------------------------------- 结果
 
