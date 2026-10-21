@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.9
+
+- 依赖安全：升级 `rustls-webpki` 到 0.103.16、`webpki-roots` 到 1.0.10；
+  WebSocket 改用项目已有的 `webpki-roots 1` 显式注入根证书，移除
+  `tokio-tungstenite` 带来的旧 `webpki-roots 0.26`。修复
+  RUSTSEC-2026-0381 / RUSTSEC-2026-0382，CI 的 cargo-deny 恢复绿色。
+
 ## 0.1.8
 
 - **「停止」不再被当成失败**：手动停止（或超出执行预算）时 QuickJS 抛的是

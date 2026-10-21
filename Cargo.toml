@@ -1,6 +1,6 @@
 [package]
 name = "plugin-panel"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
@@ -65,9 +65,10 @@ oxc_transformer = "0.154.0"
 # 的结构接不了它（见 src/wsclient.rs 文件头）。选 tokio-tungstenite 是因为它与面板
 # 已有的 tokio 运行时天然同构（异步任务跑在面板的 runtime 上，插件侧仍然是阻塞调用）。
 #
-# ⚠ `rustls-tls-webpki-roots` 与 ureq 用的是**同一个信任库**（webpki-roots）——
-# 「目标机不需要装 CA」这条性质因此对 ws 也成立。
-tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# ⚠ 不启用 `rustls-tls-webpki-roots`：那会把 `webpki-roots 0.26` 拖进来
+# （旧根证书，含已不信任的 emSign 中间证书）。`__rustls-tls` 只带 rustls 连接器，
+# 根证书在 src/wsclient.rs 里用项目已有的 `webpki-roots 1` 显式注入。
+tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "__rustls-tls"] }
 # host_api.smtp_send 的传输层（第二十三轮）。
 #
 # 为什么不能复用 ureq：SMTP 是**裸 TCP 上的文本协议**（`EHLO` / `STARTTLS` /

@@ -309,11 +309,24 @@ impl Registry {
         let connect_timeout = Duration::from_millis(timeout_ms);
 
         self.rt.spawn(async move {
+            // 显式把 rustls 的根证书交给 tokio-tungstenite。
+            //
+            // 不用 `rustls-tls-webpki-roots` feature：那条路会拖进
+            // `webpki-roots 0.26`（旧根证书，含已不信任的 emSign 中间证书）。
+            // 直接用项目已有的 `webpki-roots 1` + `rustls`，和 ureq / SMTP 同一份信任库。
+            let rustls_connector = || {
+                let mut roots = rustls::RootCertStore::empty();
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                let config = rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                tokio_tungstenite::Connector::Rustls(Arc::new(config))
+            };
+
             // 平台 TLS 那一路（`tls:"native"`）：只有 `legacy-tls` 构建里才存在。
-            // `None` = 用 tokio-tungstenite 默认的 rustls（今天的行为）。
             #[cfg(feature = "legacy-tls")]
             let connector = match tls {
-                crate::hostapi::TlsChoice::Rustls => None,
+                crate::hostapi::TlsChoice::Rustls => Some(rustls_connector()),
                 crate::hostapi::TlsChoice::Native => {
                     match native_tls::TlsConnector::new() {
                         Ok(c) => Some(tokio_tungstenite::Connector::NativeTls(c)),
@@ -333,7 +346,7 @@ impl Registry {
                 // 默认构建里只有 rustls：`tls:"native"` 在 `parse_tls_choice` 那一步
                 // 就被拦下了，这里把那件事写成**可执行的断言**（而不是一句注释）。
                 debug_assert_eq!(tls, crate::hostapi::TlsChoice::Rustls);
-                None
+                Some(rustls_connector())
             };
 
             // ⚠ 帧上限必须在**解析层**生效（审计 中6）。
