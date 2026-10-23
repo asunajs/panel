@@ -114,3 +114,18 @@
     Python 插件之间不能并行的原因。**这段复杂度随 PocketPy 一起消失了。**
 39. **watchdog 看的是 CPU 时间**，拦不住阻塞在系统调用里的插件；`PK_ENABLE_WATCHDOG=1` 才会编进去。
 40. **PocketPy 的 `dir()` 需要参数**（零参报 `TypeError`），不能用 `'x' in dir()` 探测变量。
+
+### Android / Termux
+
+41. **`error: "…/plugin-panel" has unexpected e_type: 2` = 非 PIE 的「动态」可执行文件**，
+    Android 10+ 的 linker 直接拒绝（`e_type: 2` 就是 `ET_EXEC`）。
+    官方产物是**静态**链接（`ET_EXEC` + **没有** `PT_INTERP`），内核直接 exec、根本不经过 linker，
+    所以不会报这条 —— 见到它，说明装的不是 release 里那份（多半是自己用 NDK
+    `aarch64-linux-android` 编的，还带了 `-no-pie`）。
+    自检两条：`file plugin-panel` 要出现 `statically linked`；
+    `readelf -l plugin-panel | grep INTERP` 要**没有输出**。
+    修法：换官方静态产物（`plugin-panel-aarch64-linux-musl`），或自己编时用
+    `aarch64-unknown-linux-musl` 目标、别加 `-no-pie`。
+42. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载，二进制执行不了（报 `Permission denied`，
+    不是 `e_type`）。装到 `$HOME` 或 `$PREFIX/bin`。
+
