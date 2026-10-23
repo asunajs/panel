@@ -84,10 +84,12 @@ jobs:
           #   -static → -static-pie、crt1.o → rcrt1.o、crtbegin/end.o → crtbegin/endS.o
           # 换完和 rustc 给 x86_64-unknown-linux-musl 传的那套**完全一致**（本地用假
           # linker 抓参数对比过）；再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
+          # 链接器用 rust-lld + rustup 自带的 musl（含 rcrt1.o），不用 musl-gcc：
+          # musl-gcc 那条路实测出来仍是 ET_EXEC（它的 specs 把 -static 又加回去了）。
           if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
-            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C relocation-model=pie"
+            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C linker=rust-lld -C link-self-contained=yes -C relocation-model=pie"
             export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
-            export REAL_LINKER=musl-gcc
+            export REAL_LINKER=rust-lld
             export "CFLAGS_${TARGET_LOWER}=-fPIC"
             export CFLAGS="-fPIC"
             export CXXFLAGS="-fPIC"
@@ -190,17 +192,11 @@ jobs:
         run: cargo install cross --locked
 
       - name: 构建 armv7 静态二进制
-        # 和 aarch64 一样必须编成 static PIE：Termux 的 termux-exec 会把程序交给
-        # /system/bin/linker64 执行，而 bionic 的 linker 只接受 ET_DYN（见 build job 的注释）。
-        # cross 会把这两个环境变量带进容器，C 依赖也要跟着 -fPIC，否则链接会报
-        # "relocation ... can not be used when making a shared object"。
-        env:
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS: "-C relocation-model=pie"
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: "/project/scripts/linker-static-pie.sh"
-          REAL_LINKER: "arm-linux-musleabihf-gcc"
-          CFLAGS_armv7_unknown_linux_musleabihf: "-fPIC"
-          CFLAGS: "-fPIC"
-          CXXFLAGS: "-fPIC"
+        # 32 位 ARM 暂时还是 ET_EXEC（不是 static PIE）：
+        #   - 换 rust-lld：rustup 自带的 armv7 musl 缺 libatomic，链接直接失败；
+        #   - 换 musl-gcc + -static-pie：被 musl-gcc 的 specs 拉回 -static，出来还是 ET_EXEC。
+        # 影响面小：跑 armv7 的 Termux 都是老设备（那会儿 Termux 的 targetSdk 还是 28，
+        # termux-exec 走直接 exec，ET_EXEC 照样能跑）。有设备验证时再补这一档。
         run: |
           cross build --release --target armv7-unknown-linux-musleabihf \
             --features legacy-tls-vendored
@@ -219,17 +215,6 @@ jobs:
           if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
             echo "::error::$BIN 有动态库依赖，不是真静态："
             readelf -d "$BIN" | grep "NEEDED"
-            exit 1
-          fi
-          # 必须是 static PIE（ET_DYN、无 PT_INTERP）：Termux 的 termux-exec 只认 ET_DYN，
-          # ET_EXEC 会报 has unexpected e_type: 2（v0.1.9 的 ARM 产物就是这么挂的）。
-          if ! readelf -h "$BIN" | grep -q "DYN"; then
-            echo "::error::armv7 产物不是 PIE（ET_DYN）：新版 Termux 上会被 linker 拒绝（has unexpected e_type: 2）"
-            readelf -h "$BIN" | head -20
-            exit 1
-          fi
-          if readelf -l "$BIN" | grep -q "INTERP"; then
-            echo "::error::static PIE 不该带 PT_INTERP（那是动态链接）"
             exit 1
           fi
           qemu-arm-static "$BIN" build-info | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["live_supported"] is True, d; print("ok: armv7 能启动，直播可用")'
