@@ -127,9 +127,16 @@
     v0.1.9 及以前的 ARM 产物是 `ET_EXEC`（`file` 显示 statically linked），因此在会走
     linker 的 Termux 上必挂；x86_64 那份恰好是 static PIE，所以没人反馈过。
     修法：**ARM 产物编成 static PIE**（`ET_DYN` + 无 `PT_INTERP`）——直接 exec 能跑，
-    经 linker 也能跑。Rust 用 `-C linker=rust-lld -C link-self-contained=yes -C link-arg=-pie
-    -C relocation-model=pie` + C 依赖 `CFLAGS=-fPIC`；musl-gcc 不行（rustc 已传 `-static`，
-    再加 `-pie` 冲突）。
+    经 linker 也能跑。麻烦在于 rustc 在 ARM musl 上会**显式**传 `-static -no-pie` 和
+    非 PIE 的三件 crt，光在 RUSTFLAGS 里加链接参数盖不回去（`-no-pie` 排在后面会赢）。
+    仓库里 `scripts/linker-static-pie.sh` 是那个补丁：把
+    `-static`→`-static-pie`、丢掉 `-no-pie`、`crt1.o`→`rcrt1.o`、
+    `crtbegin/end.o`→`crtbegin/endS.o`，其余透传；C 依赖再补 `CFLAGS=-fPIC`。
+    两个坑：`RUSTFLAGS` 里别再写 `-C linker=...`（会盖掉 `CARGO_TARGET_*_LINKER`
+    指向的包装脚本）；`REAL_LINKER` 用 `musl-gcc`（`rust-lld` 是通用驱动，得叫 `ld.lld`）。
+    32 位 ARM 暂时还是 `ET_EXEC`：cross 容器里 rustup 的 armv7 musl 缺 libatomic、
+    musl-gcc 那条又被 specs 拉回 `-static`；跑 armv7 的 Termux 都是老设备（targetSdk 28，
+    termux-exec 走直接 exec），能用。
     自检：`readelf -h plugin-panel | grep Type` 要看到 `DYN`，且
     `readelf -l plugin-panel | grep INTERP` **没有输出**。
 42. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载，二进制执行不了（报 `Permission denied`，
