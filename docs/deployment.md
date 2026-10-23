@@ -107,6 +107,8 @@ PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
 
 1. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载的，二进制执行不了。
    装到 `$HOME` 或 `$PREFIX/bin` 下。
+   **也别在 Release 页面手挑产物**：三个文件里第一个是 aarch64，x86 平板 / 模拟器上一挑就错。
+   用 `install.sh` 让它按 CPU 选，装完它会自己跑一次 `build-info` 验证能不能执行。
 2. **防后台被杀** —— Android 会回收后台进程。Termux 里跑 `termux-wake-lock` 能缓解，
    想长期常驻得在系统设置里关掉 Termux 的电池优化。
 3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。

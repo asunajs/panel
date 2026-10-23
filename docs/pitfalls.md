@@ -126,6 +126,9 @@
     `readelf -l plugin-panel | grep INTERP` 要**没有输出**。
     修法：换官方静态产物（`plugin-panel-aarch64-linux-musl`），或自己编时用
     `aarch64-unknown-linux-musl` 目标、别加 `-no-pie`。
+    **给不想折腾的人**：别在 Release 页面手挑产物（第一项就是 aarch64，x86 平板 / 模拟器上会挑错），
+    直接 `curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash` ——
+    它按 CPU 选、校验 SHA256、装完还会跑一次 `build-info` 自测。
 42. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载，二进制执行不了（报 `Permission denied`，
     不是 `e_type`）。装到 `$HOME` 或 `$PREFIX/bin`。
 
