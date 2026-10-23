@@ -111,6 +111,49 @@ PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
    想长期常驻得在系统设置里关掉 Termux 的电池优化。
 3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。
 
+#### 开机自启（Termux:Boot）
+
+Android 没有 systemd，`launchctl` 也没有。想开机就起来，装 **Termux:Boot**（同样用 F-Droid 版），
+然后放一个启动脚本进去：
+
+```bash
+mkdir -p ~/.termux/boot
+cat > ~/.termux/boot/panel.sh <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+export PANEL_TOKEN_HASH_FILE="$HOME/.config/plugin-panel/token.hash"
+exec plugin-panel >> "$HOME/panel.log" 2>&1
+EOF
+chmod +x ~/.termux/boot/panel.sh
+```
+
+- Termux:Boot 只在**开机后**触发，不会立刻跑；写完先手动执行一次 `~/.termux/boot/panel.sh` 确认能起来。
+- 令牌用 `PANEL_TOKEN_HASH_FILE`（`plugin-panel hash-token` 生成），**别把明文口令写进脚本** ——
+  `ps` 和日志都能看到。
+- 电池优化仍要关掉（上面第 2 条），否则开机起来了，过一阵照样被系统杀掉。
+
+#### 常驻（termux-services，可选）
+
+`pkg install termux-services` 之后用 runit 托管，进程退了会被拉起来：
+
+```bash
+mkdir -p "$PREFIX/var/service/plugin-panel"
+cat > "$PREFIX/var/service/plugin-panel/run" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+export PANEL_TOKEN_HASH_FILE="$HOME/.config/plugin-panel/token.hash"
+exec plugin-panel
+EOF
+chmod +x "$PREFIX/var/service/plugin-panel/run"
+sv-enable plugin-panel
+```
+
+`sv status plugin-panel` 看状态，`sv restart plugin-panel` 重启。日志在
+`$PREFIX/var/log/sv/plugin-panel/`。
+
+> 这两段都只是「让进程活着」。Android 的电池管理仍然是最大变量：
+> 厂商 ROM 越激进，越需要在「应用管理 → Termux → 电池」里设成不受限制。
+
 > ⚠️ **令牌是必须的**（第十九轮起）：没有「本机免登录」模式了。因为反代
 > （nginx / caddy / cloudflared）就跑在本机，转发过来的请求源地址全是 `127.0.0.1` ——
 > 「绑回环 = 安全」在挂反代的那一刻就不成立。所以**没配令牌一律拒绝启动**，
