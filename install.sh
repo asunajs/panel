@@ -208,10 +208,11 @@ else
     warn "装好了，但**在这台机器上执行失败**：${RUN_ERR:-（没有输出）}"
     case "$RUN_ERR" in
         *e_type*)
-            warn "这是「非 PIE 的动态二进制」被 Android linker 拒绝的特征；官方产物是静态的。"
-            warn "多半是自己编的 NDK 产物，或者 PATH 里还有一份旧的。自检："
-            warn "    file $INSTALL_DIR/$BIN_NAME"
-            warn "    readelf -l $INSTALL_DIR/$BIN_NAME | grep INTERP   # 应该没有输出"
+            warn "Termux 的 termux-exec 会把程序交给 /system/bin/linker64 执行，"
+            warn "而 linker 只接受 PIE（ET_DYN）—— 静态 ET_EXEC 会被当场拒绝。"
+            warn "这是产物形态的问题，不是你装错了：v0.1.9 及以前的 ARM 产物就是 ET_EXEC。"
+            warn "换带 static PIE 的版本（v0.1.10+）即可。自检："
+            warn "    readelf -h $INSTALL_DIR/$BIN_NAME | grep Type    # 要看到 DYN"
             ;;
         *"Exec format error"*|*"cannot execute"*|*"bad CPU type"*)
             warn "架构不匹配：本机 $(uname -m)，装的产物是 $BIN_NAME。"

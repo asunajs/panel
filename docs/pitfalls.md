@@ -117,18 +117,21 @@
 
 ### Android / Termux
 
-41. **`error: "…/plugin-panel" has unexpected e_type: 2` = 非 PIE 的「动态」可执行文件**，
-    Android 10+ 的 linker 直接拒绝（`e_type: 2` 就是 `ET_EXEC`）。
-    官方产物是**静态**链接（`ET_EXEC` + **没有** `PT_INTERP`），内核直接 exec、根本不经过 linker，
-    所以不会报这条 —— 见到它，说明装的不是 release 里那份（多半是自己用 NDK
-    `aarch64-linux-android` 编的，还带了 `-no-pie`）。
-    自检两条：`file plugin-panel` 要出现 `statically linked`；
-    `readelf -l plugin-panel | grep INTERP` 要**没有输出**。
-    修法：换官方静态产物（`plugin-panel-aarch64-linux-musl`），或自己编时用
-    `aarch64-unknown-linux-musl` 目标、别加 `-no-pie`。
-    **给不想折腾的人**：别在 Release 页面手挑产物（第一项就是 aarch64，x86 平板 / 模拟器上会挑错），
-    直接 `curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash` ——
-    它按 CPU 选、校验 SHA256、装完还会跑一次 `build-info` 自测。
+41. **`error: "…/plugin-panel" has unexpected e_type: 2` 不是内核报的，是 Termux 的
+    `termux-exec` 把你送进 linker 了。** Android 10+ 上，Termux 不再直接 exec 程序，
+    而是 exec `/system/bin/linker64 <你的程序>`，好把 `LD_PRELOAD` 注进去（绕开 R^W 限制，
+    见 termux-exec 的 "Avoid executing ELF files directly"）。bionic 的 linker 只接受
+    `ET_DYN`（PIE），遇到静态 `ET_EXEC` 当场拒绝 —— 报的就是这句
+    （AOSP `linker/linker_phdr.cpp` 里 `header_.e_type != ET_DYN`）。
+    所以这和「设备架构」「手挑产物」都无关：**文件完全正确、sha256 也对得上，照样会撞**。
+    v0.1.9 及以前的 ARM 产物是 `ET_EXEC`（`file` 显示 statically linked），因此在会走
+    linker 的 Termux 上必挂；x86_64 那份恰好是 static PIE，所以没人反馈过。
+    修法：**ARM 产物编成 static PIE**（`ET_DYN` + 无 `PT_INTERP`）——直接 exec 能跑，
+    经 linker 也能跑。Rust 用 `-C linker=rust-lld -C link-self-contained=yes -C link-arg=-pie
+    -C relocation-model=pie` + C 依赖 `CFLAGS=-fPIC`；musl-gcc 不行（rustc 已传 `-static`，
+    再加 `-pie` 冲突）。
+    自检：`readelf -h plugin-panel | grep Type` 要看到 `DYN`，且
+    `readelf -l plugin-panel | grep INTERP` **没有输出**。
 42. **别放 `/sdcard`** —— 那个分区是 `noexec` 挂载，二进制执行不了（报 `Permission denied`，
     不是 `e_type`）。装到 `$HOME` 或 `$PREFIX/bin`。
 

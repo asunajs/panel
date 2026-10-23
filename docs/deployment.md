@@ -109,6 +109,9 @@ PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
    装到 `$HOME` 或 `$PREFIX/bin` 下。
    **也别在 Release 页面手挑产物**：三个文件里第一个是 aarch64，x86 平板 / 模拟器上一挑就错。
    用 `install.sh` 让它按 CPU 选，装完它会自己跑一次 `build-info` 验证能不能执行。
+   顺带说一句：`install.sh` 装完自测就是为了把「装上了但跑不起来」挡在安装这一步 ——
+   新版 Termux 的 `termux-exec` 会走 `/system/bin/linker64`，只认 PIE，静态 `ET_EXEC`
+   会被拒（`has unexpected e_type: 2`，详见 [踩坑清单 41](pitfalls.md#android--termux)）。
 2. **防后台被杀** —— Android 会回收后台进程。Termux 里跑 `termux-wake-lock` 能缓解，
    想长期常驻得在系统设置里关掉 Termux 的电池优化。
 3. **从别的设备访问** —— `BIND_ADDR=0.0.0.0:8787 plugin-panel`，然后浏览器开 `http://<手机IP>:8787`。

@@ -69,6 +69,20 @@ jobs:
           TARGET_LOWER="$(echo '${{ matrix.target }}' | tr '-' '_')"
           export "CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc"
           export "CC_${TARGET_LOWER}=musl-gcc"
+          # Termux（Android 10+ / targetSdk ≥ 29）不再直接 exec，而是让 termux-exec
+          # 去 exec `/system/bin/linker64 <你的程序>`，把 LD_PRELOAD 注进去。
+          # bionic 的 linker 只接受 ET_DYN（PIE），**静态 ET_EXEC 会被当场拒绝**：
+          #     error: "…/plugin-panel" has unexpected e_type: 2
+          # 这就是用户在新版 Termux 上装好、一跑就报的那句（文件本身没坏，sha256 也对）。
+          # 所以 ARM 产物必须编成 **static PIE**：ET_DYN + 没有 PT_INTERP ——
+          # 「内核直接 exec」和「经 linker」两条路都能走。
+          # rust-lld + 自带的 musl crt（rcrt1.o）能产出这种形态；用 musl-gcc 会因为
+          # rustc 已经传了 `-static`，再加 `-pie` 冲突。
+          if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
+            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C linker=rust-lld -C link-self-contained=yes -C link-arg=-pie -C relocation-model=pie"
+            export CFLAGS="-fPIC"
+            export CXXFLAGS="-fPIC"
+          fi
           # ⚠ `legacy-tls-vendored`（**不是** `legacy-tls`）：把 OpenSSL **静态编进**
           #   二进制，于是"目标机不用装任何东西"与"直播能用"同时成立。
           #   只开 `legacy-tls` 会动态链系统 libssl —— 下面那条 NEEDED 断言会红，
@@ -94,6 +108,23 @@ jobs:
           case "${{ matrix.name }}" in
             aarch64-*) file "$BIN" | grep -q "aarch64" ;;
             x86_64-*)  file "$BIN" | grep -q "x86-64"  ;;
+          esac
+          # ARM 必须是 static PIE（ET_DYN、无 PT_INTERP）。这不是洁癖：
+          # 新版 Termux 的 termux-exec 会把程序交给 /system/bin/linker64 执行，
+          # 而它只认 ET_DYN；ET_EXEC 会报 has unexpected e_type: 2（见 build 步骤注释）。
+          # 这条断言是那个不变量的看门人 —— 哪天链接参数被改回去，tag 就该红。
+          case "${{ matrix.name }}" in
+            aarch64-*)
+              if ! readelf -h "$BIN" | grep -q "DYN"; then
+                echo "::error::aarch64 产物不是 PIE（ET_DYN）：新版 Termux 上会被 linker 拒绝（has unexpected e_type: 2）"
+                readelf -h "$BIN" | head -20
+                exit 1
+              fi
+              if readelf -l "$BIN" | grep -q "INTERP"; then
+                echo "::error::static PIE 不该带 PT_INTERP（那是动态链接）"
+                exit 1
+              fi
+              ;;
           esac
 
       # ⚠ 每一个发出去的产物都**必须**支持直播。
