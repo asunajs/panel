@@ -76,16 +76,17 @@ jobs:
           # 这就是用户在新版 Termux 上装好、一跑就报的那句（文件本身没坏，sha256 也对）。
           # 所以 ARM 产物必须编成 **static PIE**：ET_DYN + 没有 PT_INTERP ——
           # 「内核直接 exec」和「经 linker」两条路都能走。
-          # 做法就是 x86_64 那条路：x86_64-unknown-linux-musl 的 target spec 自带 PIE，
-          # rustc 传的 `-static -pie` 组合 GCC 认（等价于 -static-pie），所以那份一直是
-          # static PIE、也一直没出问题。ARM 的 spec 没开 PIE，这里手动补上同样的两个开关。
-          #   -C relocation-model=pie  → Rust 代码按 PIC 生成（否则链接期 relocation 报错）
-          #   -C link-arg=-pie         → 让 GCC 按 static-pie 链接
-          #   CFLAGS=-fPIC             → C 依赖（quickjs / openssl / sqlite3）也必须 PIC
-          # 注意别用 `-C linker=rust-lld`：self-contained 的 musl 缺 libatomic，
-          # 而且混 rustup 自带 musl 与系统 musl-gcc 编的 C 目标文件会跑崩（实测 segfault）。
+          # ARM 的 target spec 没开 static PIE，而 rustc 会**显式**传
+          #   self-contained/crt1.o + -nostartfiles + -static
+          # 光加 `-C link-arg=-static-pie` 没用：crt1.o 不会被换成 rcrt1.o，链接出来是
+          # 「ET_DYN 但没有自搬运启动代码」，一跑就 segfault（CI 上实测过两次）。
+          # 所以用一个 linker 包装脚本（scripts/linker-static-pie.sh）把
+          #   -static → -static-pie、crt1.o → rcrt1.o
+          # 其余参数原样透传；再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
           if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
-            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C link-arg=-pie -C relocation-model=pie"
+            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C relocation-model=pie"
+            export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
+            export REAL_LINKER=musl-gcc
             export "CFLAGS_${TARGET_LOWER}=-fPIC"
             export CFLAGS="-fPIC"
             export CXXFLAGS="-fPIC"
