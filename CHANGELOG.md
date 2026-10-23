@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.1.10
+
+- **ARM 产物改成 static PIE**：新版 Termux（Android 10+ / targetSdk ≥ 29）里，
+  `termux-exec` 不再直接 exec，而是 exec `/system/bin/linker64 <程序>` 好注入
+  `LD_PRELOAD`；bionic 的 linker 只接受 `ET_DYN`（PIE）。之前的 aarch64 产物是静态
+  `ET_EXEC`，装好一跑就报
+  `error: "…/plugin-panel" has unexpected e_type: 2` —— 文件是对的、sha256 也对得上，
+  纯粹是产物形态撞上了。现在用 `scripts/linker-static-pie.sh` 把它编成
+  static PIE（`ET_DYN` + 无 `PT_INTERP`），内核直接 exec 和经 linker 两条路都能走；
+  CI 里加了断言（必须是 DYN 且没有 PT_INTERP），以后不会再退回去。
+  32 位 ARM 仍是 `ET_EXEC`：cross 容器里 rustup 的 armv7 musl 缺 libatomic，
+  musl-gcc 那条又被 specs 拉回 `-static`；跑 armv7 的 Termux 都是老设备
+  （targetSdk 28，termux-exec 走直接 exec），能用。
+- **install.sh 装完自测**：装完直接跑一次 `build-info`，跑不起来按错误特征给提示
+  （架构不匹配 / `e_type` 那条），不再让用户自己猜。
+- 文档：Termux 的开机自启（Termux:Boot）与常驻（termux-services）；
+  踩坑清单新增「Android / Termux」一节，写清 `e_type: 2` 的来龙去脉。
+
 ## 0.1.9
 
 - 依赖安全：升级 `rustls-webpki` 到 0.103.16、`webpki-roots` 到 1.0.10；
