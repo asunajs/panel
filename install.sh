@@ -192,6 +192,34 @@ install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME" 2>/dev/null \
 
 ok "已安装: $INSTALL_DIR/$BIN_NAME"
 
+# ---------- 6.5 真的能跑起来吗 ----------
+# 校验和、ELF 头、体积都过了，仍然可能「在这台机器上跑不起来」：
+#   - 架构不对（装错产物、32 位系统装了 64 位）
+#   - 非静态产物（自己用 NDK 编的 aarch64-linux-android 加了 -no-pie，
+#     Android 10+ 的 linker 会直接拒绝：has unexpected e_type: 2）
+# 跑一次 build-info 是最诚实的检查 —— 它能跑，后面才谈得上能跑。
+# 只警告不中止：二进制已经装好了，用户可能就是想先装上再说。
+if "$INSTALL_DIR/$BIN_NAME" build-info >/dev/null 2>&1; then
+    ok "自检：二进制能在这台机器上执行"
+else
+    # 末尾的 || true 不能省：脚本是 set -euo pipefail，被执行的二进制返回
+    # 126/127 时管道状态会让整个安装脚本以那个码退出（这里本来只是警告）。
+    RUN_ERR="$("$INSTALL_DIR/$BIN_NAME" build-info 2>&1 | head -3 || true)"
+    warn "装好了，但**在这台机器上执行失败**：${RUN_ERR:-（没有输出）}"
+    case "$RUN_ERR" in
+        *e_type*)
+            warn "这是「非 PIE 的动态二进制」被 Android linker 拒绝的特征；官方产物是静态的。"
+            warn "多半是自己编的 NDK 产物，或者 PATH 里还有一份旧的。自检："
+            warn "    file $INSTALL_DIR/$BIN_NAME"
+            warn "    readelf -l $INSTALL_DIR/$BIN_NAME | grep INTERP   # 应该没有输出"
+            ;;
+        *"Exec format error"*|*"cannot execute"*|*"bad CPU type"*)
+            warn "架构不匹配：本机 $(uname -m)，装的产物是 $BIN_NAME。"
+            ;;
+    esac
+    warn "排查见 docs/pitfalls.md 的「Android / Termux」一节。"
+fi
+
 # ---------- 7. PATH 提示 ----------
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
