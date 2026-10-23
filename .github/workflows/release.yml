@@ -87,7 +87,10 @@ jobs:
           # 链接器用 rust-lld + rustup 自带的 musl（含 rcrt1.o），不用 musl-gcc：
           # musl-gcc 那条路实测出来仍是 ET_EXEC（它的 specs 把 -static 又加回去了）。
           if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
-            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C linker=rust-lld -C link-self-contained=yes -C relocation-model=pie"
+            # 注意：这里**不能**再写 `-C linker=rust-lld`。cargo 会把 LINKER 环境变量
+            # 变成 `-C linker=<包装脚本>`，而 RUSTFLAGS 里那条排在后面会把它盖掉 ——
+            # 包装脚本就没被调用过，产物当然还是 ET_EXEC（这个坑 CI 上踩了一次）。
+            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C link-self-contained=yes -C relocation-model=pie"
             export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
             export REAL_LINKER=rust-lld
             export "CFLAGS_${TARGET_LOWER}=-fPIC"
