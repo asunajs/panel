@@ -92,7 +92,7 @@ jobs:
             # 包装脚本就没被调用过，产物当然还是 ET_EXEC（这个坑 CI 上踩了一次）。
             export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C link-self-contained=yes -C relocation-model=pie"
             export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
-            export REAL_LINKER=rust-lld
+            export REAL_LINKER=musl-gcc
             export "CFLAGS_${TARGET_LOWER}=-fPIC"
             export CFLAGS="-fPIC"
             export CXXFLAGS="-fPIC"

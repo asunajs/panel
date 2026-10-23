@@ -6,38 +6,30 @@
 #   error: "…/plugin-panel" has unexpected e_type: 2
 # 详见 docs/pitfalls.md 第 41 条。
 #
-# 为什么不直接 `-C link-arg=-static-pie`：rustc 在 ARM musl 上会**显式**传一整套
-# 非 PIE 的启动/收尾目标文件 + `-static`。只补一个 `-static-pie` 不会换掉它们：
-# 链接出来的东西要么仍是 ET_EXEC，要么是「ET_DYN 但没有自搬运启动代码」——一跑就 segfault。
-#
-# 对照 rustc 给 x86_64-unknown-linux-musl（它本来就是 static PIE）传的参数，
-# 差别只有这几处：
-#   crt1.o     → rcrt1.o      （自搬运的启动代码）
-#   crtbegin.o → crtbeginS.o  （PIC 版）
-#   crtend.o   → crtendS.o
-#   另外还要 -static-pie（GCC）或 -static -pie（rust-lld）
+# rustc 在 ARM musl 上会**显式**传一整套非 PIE 的东西：
+#   -static  -no-pie  crt1.o  crtbegin.o  crtend.o
+# 只补一个 `-static-pie` 没用 —— 后面的 `-no-pie` 会把它盖掉，crt 也不会被换。
+# 对照 rustc 给 x86_64-unknown-linux-musl（本来就是 static PIE）传的参数，这里做四处替换：
+#   -static      → -static-pie          （GCC 的 static PIE 链接）
+#   -no-pie      → 丢弃                 （不然它会把 -static-pie 盖回去）
+#   crt1.o       → rcrt1.o              （自搬运的启动代码）
+#   crtbegin.o   → crtbeginS.o          （PIC 版）
+#   crtend.o     → crtendS.o
 # 其余参数原样透传。
 set -euo pipefail
 
 REAL="${REAL_LINKER:-musl-gcc}"
-# rust-lld 认 "-static -pie"；GCC 要走 "-static-pie"（它不认前者组合）。
-case "$(basename "$REAL")" in
-    rust-lld) LLD=1 ;;
-    *) LLD=0 ;;
-esac
 
 args=()
-has_pie=0
 for a in "$@"; do
     case "$a" in
-        -static) [ "$LLD" = 1 ] && args+=("-static") || args+=("-static-pie") ;;
-        -pie) has_pie=1; args+=("$a") ;;
+        -static) args+=("-static-pie") ;;
+        -no-pie) : ;;
         */self-contained/crt1.o) args+=("${a%crt1.o}rcrt1.o") ;;
         */self-contained/crtbegin.o) args+=("${a%crtbegin.o}crtbeginS.o") ;;
         */self-contained/crtend.o) args+=("${a%crtend.o}crtendS.o") ;;
         *) args+=("$a") ;;
     esac
 done
-[ "$LLD" = 1 ] && [ "$has_pie" = 0 ] && args+=("-pie")
 
 exec "$REAL" "${args[@]}"
