@@ -81,8 +81,9 @@ jobs:
           # 光加 `-C link-arg=-static-pie` 没用：crt1.o 不会被换成 rcrt1.o，链接出来是
           # 「ET_DYN 但没有自搬运启动代码」，一跑就 segfault（CI 上实测过两次）。
           # 所以用一个 linker 包装脚本（scripts/linker-static-pie.sh）把
-          #   -static → -static-pie、crt1.o → rcrt1.o
-          # 其余参数原样透传；再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
+          #   -static → -static-pie、crt1.o → rcrt1.o、crtbegin/end.o → crtbegin/endS.o
+          # 换完和 rustc 给 x86_64-unknown-linux-musl 传的那套**完全一致**（本地用假
+          # linker 抓参数对比过）；再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
           if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
             export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C relocation-model=pie"
             export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
@@ -194,7 +195,9 @@ jobs:
         # cross 会把这两个环境变量带进容器，C 依赖也要跟着 -fPIC，否则链接会报
         # "relocation ... can not be used when making a shared object"。
         env:
-          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS: "-C link-arg=-pie -C relocation-model=pie"
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS: "-C relocation-model=pie"
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: "/project/scripts/linker-static-pie.sh"
+          REAL_LINKER: "arm-linux-musleabihf-gcc"
           CFLAGS_armv7_unknown_linux_musleabihf: "-fPIC"
           CFLAGS: "-fPIC"
           CXXFLAGS: "-fPIC"
