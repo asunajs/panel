@@ -1,0 +1,138 @@
+name: Testkit
+
+# 给「在 Windows 上验证内存」产出一套**可直接下载**的包。
+#
+# 为什么不在开发机上编：开发机是 arm64 macOS，交叉编出来的 Linux / Windows 产物
+# 没法冒烟（跑不了、也没有 wine）。CI 上是原生 runner，编完还能顺手验一下能不能启动。
+#
+# 用法：Actions → Testkit → Run workflow。跑完在页面底部下载 `plugin-panel-testkit`。
+# 命令行：`gh run download -n plugin-panel-testkit`
+#
+# 产物故意用 `--no-default-features`（不带 TLS）：这包只用来测内存与基本功能，
+# 带上 vendored OpenSSL 会让构建慢一倍、体积大 5MB，对测内存没有任何帮助。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-musl
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            out: plugin-panel-x86_64-linux-musl
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            out: plugin-panel-x86_64-windows.exe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 musl 工具链
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version | head -1
+
+      - name: 构建（Linux 静态）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          # musl target 默认 linker 不是 musl-gcc，不显式指定会链接出动态依赖 glibc 的产物
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          cargo build --release --target ${{ matrix.target }} --no-default-features
+          file target/${{ matrix.target }}/release/plugin-panel
+
+      - name: 构建（Windows 原生）
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features
+
+      - name: 冒烟（Linux）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          BIN=target/${{ matrix.target }}/release/plugin-panel
+          $BIN build-info
+          # 静态产物不应该依赖任何动态库
+          ldd $BIN 2>&1 | head -3 || true
+
+      - name: 冒烟（Windows）
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/plugin-panel.exe"
+          & $bin build-info
+          if ($LASTEXITCODE -ne 0) { throw "build-info 失败" }
+
+      - name: 收拢产物
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            cp target/${{ matrix.target }}/release/plugin-panel "out/${{ matrix.out }}"
+          else
+            cp target/${{ matrix.target }}/release/plugin-panel.exe "out/${{ matrix.out }}"
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  package:
+    name: 打包
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      - name: 组装 testkit
+        run: |
+          cd dist
+          cp "$GITHUB_WORKSPACE/scripts/endurance.py" .
+          cp "$GITHUB_WORKSPACE/scripts/rss_evict_check.py" .
+          cp "$GITHUB_WORKSPACE/docs/testing-on-windows.md" ./TESTING-ON-WINDOWS.md
+          chmod +x plugin-panel-x86_64-linux-musl
+          sha256sum plugin-panel-x86_64-linux-musl plugin-panel-x86_64-windows.exe > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+          zip -9 plugin-panel-testkit.zip plugin-panel-x86_64-linux-musl \
+            plugin-panel-x86_64-windows.exe endurance.py rss_evict_check.py \
+            TESTING-ON-WINDOWS.md SHA256SUMS
+          ls -l plugin-panel-testkit.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-panel-testkit
+          path: dist/plugin-panel-testkit.zip
+          if-no-files-found: error
+          retention-days: 30
