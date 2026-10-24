@@ -17,6 +17,7 @@
 | 文档 | 内容 |
 |---|---|
 | [部署与分发](deployment.md) | 一键安装、Release 产物、Termux、systemd、反向代理 |
+| [远程访问](remote-access.md) | 没有公网 IP 时用出站隧道：Cloudflare Tunnel、frp、Tailscale、IPv6 DDNS；Access、安全清单、排障 |
 | [自更新](update.md) | 设置 → 关于检查更新，SHA256 校验、原地替换、重启与代理边界 |
 | [运行与配置](configuration.md) | 环境变量总表、端口、数据目录、日志目录、运行时选择 |
 | [脚本任务](script-jobs.md) | `tasks/` 目录、文件头、退出码、面板任务与目录任务的区别 |
@@ -45,14 +46,18 @@
 | [引擎自我保护](engine-safety.md) | 执行预算、任务熔断、进程回收、优雅退出 |
 | [性能](performance.md) | 内存实测、静态二进制、跨平台验证 |
 | [验证手册](testing.md) | 单元测试、前端检查、冒烟测试、截图回归 |
+| [Windows / WSL2 验证](testing-on-windows.md) | 在 Windows 机器上验证 Linux 内存行为：两个包、跑法、看什么、怎么报告 |
 | [踩坑清单](pitfalls.md) | 已经踩过的兼容性和平台问题 |
 | [路线与遗留](roadmap.md) | 还没做的功能 |
+
+从外网访问但没有公网 IP，先看 [远程访问](remote-access.md)：隧道方案的取舍、面板侧环境变量和排障表都在那一份。
 
 ## 项目内部
 
 | 文档 | 内容 |
 |---|---|
 | [架构](architecture.md) | 进程和线程模型、目录结构、运行时、调度器 |
+| [引擎迁移路线](engine-migration.md) | async/await 与「向 Node 看齐」：目标形态、还没拍板的两个岔路口、分阶段验收 |
 | [前端（WebUI）规范](webui.md) | 零构建、路由与视图契约、样式变量、交互与无障碍、新增页面清单 |
 | [UI 设计规范](ui-spec.md) | 视觉基础、Token、组件状态矩阵、异常态模式、响应式、验收清单 |
 | [旧章节号对照](legacy-sections.md) | 代码注释里 `README §N` 对应的当前文档 |

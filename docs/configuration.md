@@ -28,6 +28,8 @@ open http://127.0.0.1:8787/  # 面板
 | `EXEC_BUDGET_MS` | `60000` | 单次 JS 调用的执行预算（默认 60 秒）。任务/路由可各自声明 `budget_ms` 覆盖它；它管的是 `on_tick` 与没声明预算的路由。⚠ 健康判据 = 预算 + 3 秒，所以调大它也意味着「真卡死」更晚被发现 |
 | `TEST_RUN_BUDGET_MS` | `10000` | 试跑（`POST /api/test/js`）的预算，且不超过 `EXEC_BUDGET_MS`。试跑占着引擎线程、又是人在等结果，所以默认 10 秒 |
 | `LOAD_BUDGET_MS` | `10000` | 插件**加载期**预算（顶层初始化 / import / 外部子进程 `ready`）；上限 = 任务预算上限（10 分钟） |
+| `JOB_SLICE_MS` | `50` | 微任务泵**单轮**上限：一轮最多跑这么久就把控制权交回主循环，剩下的下一轮继续（Promise 的续体不会丢）。排查「续体迟迟不跑」时可以调小观察 |
+| `INV_TRACE` | 空 | `1` → 把每次异步执行的四个时刻（分发 / 登记 / 结算 / 超时）打进日志。**只用于排查**「某条 async 执行收不到结算」，日志量会翻几倍 |
 | `JOB_TRIP_THRESHOLD` | `5` | 连续失败多少次熔断该任务 |
 | `JOB_COOLDOWN_MS` | `30000` | 首次熔断的冷却时长 |
 | `JOB_MAX_COOLDOWN_MS` | `600000` | 指数退避的冷却上限 |
@@ -52,8 +54,8 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系 |
 | `PANEL_ALLOW_PLAIN_TOKEN` | 空 | **开发口子**：允许「明文 / 旧哈希」形态启动（线上那份是明文口令）。绑非回环地址或开了 `PANEL_COOKIE_SECURE` 时仍然拒绝启动；开着时每次启动打 warn，面板读数里 `auth.plain_token` 为真。见 [§21](security.md#21-口令不再经过服务端第二十一轮) |
 | `PANEL_COOKIE_SECURE` | 空 | `1`/`true`/`yes`/`on` → 会话 cookie 加 `Secure`。**走反代加了 TLS 时才开**（纯 HTTP 下开了 cookie 存不下来） |
-| `PANEL_TRUST_PROXY` | 空 | 兼容开关：`1`/`true`/`yes`/`on` → **只信任回环**（`127.0.0.1` / `::1`）对端提供的 `X-Forwarded-For` / `X-Real-IP`。反代不在本机时请改用 `PANEL_TRUSTED_PROXIES`（见下一行） |
-| `PANEL_TRUSTED_PROXIES` | 空 | **受信代理地址名单**（逗号分隔，单个 IP）：只有这些对端提供的转发头会被读取，取**最右一跳**当客户端 IP。推荐写法（比 `PANEL_TRUST_PROXY` 精确）：`127.0.0.1,::1`。不在名单里的对端一律用它对端地址记账 —— 直连 8787 也没法伪造 XFF |
+| `PANEL_TRUST_PROXY` | 空 | 兼容开关：`1`/`true`/`yes`/`on` → **只信任回环**（`127.0.0.1` / `::1`）对端提供的 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP`。反代不在本机时请改用 `PANEL_TRUSTED_PROXIES`（见下一行） |
+| `PANEL_TRUSTED_PROXIES` | 空 | **受信代理地址名单**（逗号分隔，单个 IP）：只有这些对端提供的转发头会被读取。取 IP 的顺序是**先 XFF 最右一跳**；那一跳本身仍是受信代理（多层反代）或没有 XFF 时，才用 `CF-Connecting-IP`，再退 `X-Real-IP`。推荐写法（比 `PANEL_TRUST_PROXY` 精确）：`127.0.0.1,::1`。不在名单里的对端一律用它对端地址记账 —— 直连 8787 也没法伪造 XFF |
 | `PANEL_ALLOW_IPS` | 空 | 登录**蜜罐封禁**的白名单：`127.0.0.1,192.168.1.7`。**只认单个 IP**（IPv4-mapped 写法会归一化）—— 网段与主机名会在启动日志里点名为「已忽略」。豁免封禁**与退避**，口令错了照样拒；反代下建议配上（全员共用一个来源 IP，它被封等于谁都进不来） |
 | `HOST_API_ALLOW_PRIVATE` | 空 | `1` → 关闭插件出站请求的 **SSRF 防护**（允许 `http_fetch` / `ws_open` 访问回环与云元数据）。默认允许局域网、只拦回环 + 链路本地，见 [host-api.md](host-api.md#出站目标的限制ssrf-防护)。关掉会打 warn |
 | `PANEL_PUSH_ALLOW_PRIVATE` | 空 | `1` → 允许**面板级推送**访问回环 / 内网（默认与插件出站同一张 SSRF 判定表：只拦回环 + 链路本地，放行局域网）。见 [面板级推送](push.md) |
@@ -75,6 +77,12 @@ open http://127.0.0.1:8787/  # 面板
 | `PLUGIN_LAZY` | `1` | **惰性加载**：没有 `on_tick` 的插件闲下来就卸出内存；有路由的也卸，请求来了冷启动装回，纯定时的下次触发前提前装回来（见 [lazy-plugins.md](lazy-plugins.md)）。外部插件卸载 = 杀子进程，RSS 真的会掉。`0`/`off`/`false`/`no` 关掉 |
 | `PLUGIN_IDLE_EVICT_MS` | `120000` | 闲置多久之后卸出内存。**下限 20 秒**（= 2 × 加载预算）；**必须大于** `PLUGIN_PRELOAD_MS`（配反了会自动夹住并打日志） |
 | `PLUGIN_PRELOAD_MS` | `20000` | 触发前多久把它装回来。至少会被抬到一次加载的预算（10s） |
+| `PLUGIN_MEM_TRIM_MS` | `60000` | **定时还页**：每隔这么久调一次分配器的归还原语，把空闲段真正还给系统。`0` 关闭。日志里打「归还 N KB」——一直打 0 说明当前没有可归还的空闲页，不是没生效。原语按平台：macOS → `malloc_zone_pressure_relief`、glibc → `malloc_trim`、**musl → 没有对应 API，空操作**（发布产物上这条不干活，日志会一直打 0）。⚠ 第六十五轮之前曾为 musl 换过 mimalloc，因代价 +2.4 MB 而收益未经真机验证，已撤掉 |
+| `PLUGIN_MAX_RSS_KB` | `24576` | **内存自愈上限**：常驻超过它、且当前没有任务在执行时，面板 exec 自身重启（PID 不变、约 1 秒中断）。这是兜底不是主力 —— 频繁触发说明有插件在涨，先看「归还 N KB」和每个插件的 JS 堆。`0` 关闭 |
+| `PLUGIN_MAX_RSS_MS` | `30000` | 上限检查间隔（下限 1000）。触发后强制冷却 5 分钟，避免阈值配低时变成重启风暴 |
+| `PLUGIN_RECYCLE_KB` | `0` | 常驻超过阈值就卸掉所有插件运行时（排班、路由声明保留，下次触发前装回）。对 Node/Bun 一直有效（子进程真的退出）；QuickJS 侧要配合上面的「定时还页」才有机会真的降 RSS |
+| `PLUGIN_RECYCLE_MS` | `30000` | 回收阈值的检查间隔（下限 1000） |
+| `PLUGIN_HTTP_AGENT_CACHE` | `0` | 按 `timeout` 缓存 ureq Agent：复用连接，且不再每次重解 150 张根证书（一次 100–300KB 的瞬时分配）。**省的是把分配器高水位顶上去**，代价是 8–12 块 128KB 连接缓冲（约 1MB）。长跑设备建议打开 |
 
 **已删除**：`MAX_PY_PLUGINS`（PocketPy 的 VM 上限）随 Python 插件一起删除，现在没有这个变量。
 外部插件数量没有硬上限，受内存与 fd 约束。

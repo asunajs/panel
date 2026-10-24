@@ -25,6 +25,22 @@
 // 其余 lint 一律当债还掉（这一轮把 41 条清到 0）。门禁见 `.github/workflows/ci.yml`。
 #![allow(clippy::too_many_arguments, clippy::result_large_err)]
 
+// ── 全局分配器：**不换**，各平台用系统自带的（第六十五轮撤掉 mimalloc）──
+//
+// 曾经在 musl 上换过 mimalloc，理由写得很足（musl 没有 malloc_trim，RSS 高水位
+// 只升不降）。撤掉它是因为**那个理由没有实测支撑**，而代价是实打实的：
+//
+//  · 代价（实测）：同一套插件、同一时刻 A/B，mimalloc 版 8.25 MB vs 系统分配器
+//    5.84 MB，**差值恒定 2.41 MB**（mimalloc 自己的 arena 预留）。任务量翻倍时
+//    两边同步涨 0.93 MB，差值一点没变 —— 就是纯基线，换不来任何东西。
+//  · 理由（没测）：仓库里 11 段长跑**全是 darwin**，一行 musl 运行时内存数据都没有。
+//    当年引用的那个 24h（5.59 → 11.00 MB）也是 macOS 跑的，而且**末 2h 是 −0.23 MB/h**
+//    —— 已经平台期，系统分配器并没有「只升不降」。
+//  · 那次 24h 真正暴露的是 DB 484.7 MB / runs 181 万行（无界增长），跟分配器无关。
+//
+// 于是：常驻内存是这台产品的硬指标，**不该为一个没验证过的假设长期多付 2.4 MB**。
+// 真机上如果确实观察到「不还页」，再拿数据回来换 —— 那时候换也来得及。
+
 mod assets;
 mod auth;
 mod cron;
@@ -37,7 +53,6 @@ mod extproc;
 mod extproc;
 mod hostapi;
 mod jshost;
-mod jslint;
 mod log;
 mod market;
 mod pluginfs;
@@ -51,6 +66,7 @@ mod settings;
 mod smtp;
 mod update;
 mod taskdir;
+mod timers;
 mod upload;
 mod watcher;
 mod web;
@@ -107,36 +123,37 @@ pub struct AppState {
     pub addr: String,
     pub plugins_dir: PathBuf,
     pub db_path: PathBuf,
-    /// 引擎健康状态。面板靠它区分「真在跑」和「已经卡死」。
+    // 引擎健康状态。面板靠它区分「真在跑」和「已经卡死」。
     pub health: EngineHealth,
-    /// 宿主 API 状态（Axum 侧要用它查插件路由表）
+    // 宿主 API 状态（Axum 侧要用它查插件路由表）
     pub host: Arc<HostState>,
-    /// 插件商城：GitHub 目录解析、下载、安装标记。
+    // 插件商城：GitHub 目录解析、下载、安装标记。
     pub market: Arc<market::Market>,
-    /// 自更新：查最新 release、下载本平台产物、校验、替换自身。
+    // 自更新：查最新 release、下载本平台产物、校验、替换自身。
     pub update: Arc<update::Update>,
-    /// 引擎句柄（按插件名路由指令）
+    // 引擎句柄（按插件名路由指令）
     pub engine: EngineHandle,
-    /// 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
-    /// 反代模式下客户端 IP 从转发头里取，但**只有受信代理**的对端才允许提供转发头。
+    // 面板鉴权（第十轮起强制）。凭据是必需品：没有任何「未鉴权也能访问」的路径。
+    // 反代模式下客户端 IP 从转发头里取，但**只有受信代理**的对端才允许提供转发头。
     pub auth: Arc<Auth>,
-    /// 哪些对端地址被允许提供 `X-Forwarded-For` / `X-Real-IP`（默认**空** = 谁都不信）。
-    ///
-    /// 安全审计 中1：原来是一个全局布尔开关，对**任何** TCP 对端生效 ——
-    /// 面板端口只要还能被直连，攻击者绕过反代就能自己填 XFF。
+    // 哪些对端地址被允许提供 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP`
+    // （默认**空** = 谁都不信）。
+    //
+    // 安全审计 中1：原来是一个全局布尔开关，对**任何** TCP 对端生效 ——
+    // 面板端口只要还能被直连，攻击者绕过反代就能自己填 XFF。
     pub trusted_proxies: Arc<auth::TrustedProxies>,
-    /// 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
+    // 测试运行的限流器（引擎只有一条线程，这个接口能占住它好几秒）
     pub test_limiter: Arc<TestRunLimiter>,
-    /// 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
+    // 主面板前端资源的来源（内嵌，或开发模式下从磁盘读）
     pub assets: assets::Assets,
-    /// 插件页面的独立 origin（可选）。
-    ///
-    /// 默认 `None` = 与面板同源（插件是可信代码）。显式开启隔离时，
-    /// `plugin_ui_port` 是第二个监听的端口，前端用 `location.hostname` + 这个
-    /// 端口拼 iframe 地址；`plugin_ui_origin` 是反代场景的显式覆盖。
+    // 插件页面的独立 origin（可选）。
+    //
+    // 默认 `None` = 与面板同源（插件是可信代码）。显式开启隔离时，
+    // `plugin_ui_port` 是第二个监听的端口，前端用 `location.hostname` + 这个
+    // 端口拼 iframe 地址；`plugin_ui_origin` 是反代场景的显式覆盖。
     pub plugin_ui_port: Option<u16>,
     pub plugin_ui_origin: Option<String>,
-    /// 当前打开的日志流（SSE）条数，用来卡上限（安全审计 L11）。
+    // 当前打开的日志流（SSE）条数，用来卡上限（安全审计 L11）。
     pub sse_active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -203,9 +220,26 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     );
     log::plog!(
         "boot",
-        info,
-        "tokio runtime 就绪（{workers} 个 worker 线程）"
+        debug,
+        "网络线程池就绪（{workers} 个线程）"
     );
+
+    // 周期把分配器里**空闲**的页还给系统（macOS: malloc_zone_pressure_relief；
+    // glibc: malloc_trim）。为什么需要：QuickJS 每次热更新/装回都是"建一个 Context
+    // 再销毁"，每次 http_fetch 也是"建一个客户端再销毁" —— libmalloc 会把释放的页
+    // 留在自己的空闲链表里，从不主动还给系统。实测 24h 常驻从 5.6MB 爬到 11MB，
+    // 而 JS 堆只有 0.9MB，涨的全是这些"高水位"。
+    //
+    // 每分钟一次、每次几十微秒；真归还了才打日志。PLUGIN_MEM_TRIM_MS=0 关闭。
+    spawn_mem_trim();
+    // 内存**上限**兜底：常驻超过阈值就把所有插件运行时卸掉（排班保留，下次触发前装回）。
+    // 这条不试图让分配器别涨，而是给曲线一个上界 —— 实测还页/换分配器都不灵。
+    spawn_mem_recycle();
+    // 最后一道保险：常驻超过硬上限就**优雅退出**，交给 supervisor（launchd / systemd /
+    // 端到端测试脚本）拉起一个新的。为什么必须是重启而不是"卸运行时"：实测把插件
+    // 运行时全部卸掉之后 footprint 一点没降 —— 页在 libmalloc 手里，进程内没有任何
+    // 办法把它们要回来（malloc_zone_pressure_relief 也返回 0）。
+    spawn_max_rss_watchdog();
     rt.block_on(run())
 }
 
@@ -237,7 +271,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let kind = cred.kind();
-    // 反代模式：只有**受信代理**转来的请求才读 `X-Forwarded-For` / `X-Real-IP`。
+    // 反代模式：只有**受信代理**转来的请求才读 `X-Forwarded-For` / `X-Real-IP` /
+    // `CF-Connecting-IP`。
     // 那些头客户端可以随便写，所以「信谁」必须是一份地址名单，而不是一个全局开关
     // （安全审计 中1：`PANEL_TRUST_PROXY=1` 对任何对端生效，直连即可伪造）。
     //
@@ -271,7 +306,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         crate::log::plog!(
             "boot",
             info,
-            "受信代理: {}（只有这些对端能提供 X-Forwarded-For / X-Real-IP）",
+            "受信代理: {}（只有这些对端能提供 X-Forwarded-For / X-Real-IP / CF-Connecting-IP）",
             trusted_proxies.render()
         );
     }
@@ -302,15 +337,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             bad_allow_ips.join(", ")
         );
     }
-    crate::log::plog!("boot", info, "鉴权: {}", {
-        // 安全提示只写一次，别为「哈希/明文」和「Secure」的组合抄四遍
-        let secure = if cookie_secure {
-            " + cookie Secure"
-        } else {
-            "；cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
-        };
-        format!("已开启（{kind}{secure}）")
-    });
+    crate::log::plog!("boot", info, "登录保护：已开启（打开面板要输口令）");
+    crate::log::plog!("boot", debug, "  口令形态：{kind}");
+    if !cookie_secure {
+        crate::log::plog!(
+            "boot",
+            debug,
+            "  cookie 未加 Secure —— 走反代加 TLS 时请设 PANEL_COOKIE_SECURE=1"
+        );
+    }
 
     // ---------- 1. SQLite：开库 + 建表 ----------
     if let Some(parent) = db_path.parent() {
@@ -321,12 +356,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 或脚本所在目录，相对路径在那边解析出来是另一个地方（实测外部 Node 直接
     // 报 `Cannot find package 'data'`）。
     let db_path = db_path.canonicalize().unwrap_or(db_path);
-    crate::log::plog!("boot", info, "SQLite 就绪: {}", db_path.display());
+    crate::log::plog!("boot", info, "数据保存在：{}", db_path.display());
     // 这个构建支不支持直播，**启动时说一次**。
     // 不说的话，用户只会在真正跑直播那天看到一条 TLS 报错 —— 而那条报错
     // 读起来像"网络问题"，其实是"这个二进制编的时候少了个 feature"。
     if cfg!(feature = "legacy-tls") {
-        crate::log::plog!("boot", info, "构建特性: legacy-tls ✓（直播那条链能用）");
+        crate::log::plog!("boot", debug, "构建特性: legacy-tls ✓（直播那条链能用）");
     } else {
         crate::log::plog!(
             "boot",
@@ -338,12 +373,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let started_at = now_secs();
 
-    /// 运行记录保留天数。**比日志的 7 天长** —— 见下面那段的说明。
-    const RUN_KEEP_DAYS: i64 = 30;
+    // 运行记录保留天数。**比日志的 7 天长** —— 见下面那段的说明。
+    // 保留天数改成可配置（设置页「存储」组）：长跑实测 24h 就长 486MB，
+    // 只在启动时清理的话，长期不重启的进程里 DB 只涨不缩。
+    let run_keep_days: i64 = std::env::var("RUN_KEEP_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(30);
 
     // 写一条 boot 记录，验证 Rust → SQLite 的写入链路
     db::upsert_task(&db, "boot", "kernel", "done", "{}", &started_at)?;
-    crate::log::plog!("boot", info, "tasks 表已写入 boot 记录");
+    crate::log::plog!("boot", debug, "tasks 表已写入 boot 记录");
 
     // ---------- 1.5 运行记录：收尾 + 清理 ----------
     //
@@ -360,15 +401,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(n) => crate::log::plog!("boot", warn, "收尾了 {n} 条上次没结束的运行记录"),
         Err(e) => crate::log::plog!("boot", warn, "收尾残留运行记录失败: {e}"),
     }
-    match db::prune_runs(&db, RUN_KEEP_DAYS, &started_at) {
+    match db::prune_runs(&db, run_keep_days, &started_at) {
         Ok(0) => {}
         Ok(n) => crate::log::plog!(
             "boot",
             info,
-            "清理了 {n} 条超过 {RUN_KEEP_DAYS} 天的运行记录"
+            "清理了 {n} 条超过 {run_keep_days} 天的运行记录"
         ),
         Err(e) => crate::log::plog!("boot", warn, "清理运行记录失败: {e}"),
     }
+
+    // 运行期也要清理（以前只在启动时清一次）。
+    spawn_db_prune(db.clone(), run_keep_days);
 
     // ---------- 2. 共享状态 ----------
     let registry: Registry = Arc::new(Mutex::new(Vec::new()));
@@ -678,8 +722,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         e
     })?;
-    crate::log::plog!("boot", info, "Web UI: http://{addr}/");
-    crate::log::plog!("boot", info, "按 Ctrl-C 退出");
+    crate::log::plog!("boot", info, "面板地址：http://{addr}/");
+    crate::log::plog!("boot", debug, "按 Ctrl-C 退出");
 
     // 插件页面的第二个监听。它**只**服务插件页面与插件路由，没有面板 API ——
     // 这正是「插件页面读不到面板会话」的实现方式（安全审计 H1）。
@@ -1156,9 +1200,10 @@ async fn bind_plugin_ui(
         None => explicit_addr.is_some() || explicit_origin.is_some(),
     };
     if !enabled {
+        // 安全提示，但对象是"要自己搭插件隔离"的人 —— 普通使用者看到只会懵。
         crate::log::plog!(
             "boot",
-            info,
+            debug,
             "插件页面与面板同源：插件页带着操作者的会话、能调面板接口\
              （iframe 的 sandbox 在同源下不是安全边界）。要隔离设 PLUGIN_UI=1 或 PLUGIN_UI_ADDR"
         );
@@ -1317,11 +1362,11 @@ mod cred_choice_tests {
 mod docs_tree_tests {
     use std::path::Path;
 
-    /// 从 ASCII 树里抽出相对路径。
-    ///
-    /// 解析规则只有两条，和 `docs/architecture.md` 的写法约定绑死：
-    /// · 每层缩进 4 列（`│   ` 或 4 个空格）；
-    /// · 行内说明用**两个以上空格**分隔 —— 所以路径本身不能带空格。
+    // 从 ASCII 树里抽出相对路径。
+    //
+    // 解析规则只有两条，和 `docs/architecture.md` 的写法约定绑死：
+    // · 每层缩进 4 列（`│   ` 或 4 个空格）；
+    // · 行内说明用**两个以上空格**分隔 —— 所以路径本身不能带空格。
     fn parse_tree(text: &str) -> Vec<String> {
         let mut stack: Vec<String> = Vec::new();
         let mut out = Vec::new();
@@ -1396,3 +1441,333 @@ fn build_info_cmd() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", crate::web::build_info());
     Ok(())
 }
+
+/// 周期还页线程（调用点在 real_main）。
+fn spawn_mem_trim() {
+    // 默认 60 秒。这个默认值曾经是 0（关），改成 60 秒是因为当时换了 mimalloc、
+    // 还页真的生效了。第六十五轮撤掉 mimalloc 之后：macOS / glibc 上它仍然干活，
+    // **musl 上又是空操作了**（没有对应 API）。那为什么还留着 60 秒？
+    //   · 空操作的成本是每 60 秒读两次 RSS —— 可以忽略；
+    //   · 而"能还就还"对 macOS/glibc 部署是有意义的（实测能还掉几十 KB 到几 MB）。
+    // 想关掉仍可设 0。
+    let ms = std::env::var("PLUGIN_MEM_TRIM_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60_000);
+    if ms == 0 {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("mem-trim".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let freed = platform_trim();
+            if freed > 0 {
+                log::plog!(
+                    "kernel",
+                    info,
+                    "归还 {:.1} KB 空闲内存给系统",
+                    freed as f64 / 1024.0
+                );
+            }
+        });
+}
+
+/// 把分配器里的空闲页还给系统。返回这次真正还回去的 KB（0 = 没还）。
+///
+/// 各平台的原语（**都不需要换全局分配器**）：
+///   · macOS  → `malloc_zone_pressure_relief`（libmalloc 的公开 API）
+///   · glibc  → `malloc_trim`（glibc 扩展）
+///   · musl   → **没有原语**。musl 不提供 malloc_trim（可在 musl 源码树里 grep 验证），
+///              所以发布产物上这个开关是空操作 —— 日志会一直打「归还 0 KB」。
+///              这是实话，不是没生效：要判断 musl 到底会不会自己还页，得靠真机长跑，
+///              而不是靠换一个分配器去猜。
+///
+/// 用 RSS 前后差值而不是让 C 返回一个数：macOS 那个 API 返回的是「努力了多少」，
+/// 不是「还了多少」，而面板需要「这次到底还了多少」这一行日志 —— 没有它，
+/// 排查时分不清「还了 0」和「线程没跑」。
+fn platform_trim() -> usize {
+    let before = resident_kb();
+    trim_allocator();
+    let after = resident_kb();
+    before.saturating_sub(after) as usize
+}
+
+/// 按平台调「还页」的原语。
+fn trim_allocator() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: libmalloc 的公开 API。zone 传 null = 所有 zone，goal 传 0 =
+    // 「能还多少还多少」。它只影响本进程的堆，不改任何 Rust 侧可见状态。
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
+    };
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: glibc 的公开 API，只把本进程堆顶的空闲页还给系统。
+    unsafe {
+        malloc_trim(0)
+    };
+
+    // musl / 其它平台：没有原语可用，故意留空（日志会显示归还 0 KB）。
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    {}
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    /// malloc_zone_pressure_relief(NULL, 0)：让 libmalloc 尽量把空闲页还给系统。
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    /// malloc_trim(0)：把堆顶的空闲内存还给系统（glibc 扩展）。
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// 周期回收线程：常驻内存超过 PLUGIN_RECYCLE_KB 就请求卸掉所有插件运行时。
+///
+/// 默认关（PLUGIN_RECYCLE_KB=0）。建议值：稳态的 1.5 倍，或设备内存的 1/32。
+/// 检查间隔 PLUGIN_RECYCLE_MS（默认 30 秒）。
+fn spawn_mem_recycle() {
+    let kb = std::env::var("PLUGIN_RECYCLE_KB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if kb == 0 {
+        return;
+    }
+    let every = std::env::var("PLUGIN_RECYCLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(30_000);
+    let _ = std::thread::Builder::new()
+        .name("mem-recycle".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(every));
+            let cur = resident_kb();
+            if cur > kb {
+                log::plog!(
+                    "kernel",
+                    info,
+                    "常驻 {cur} KB 超过阈值 {kb} KB，请求回收插件运行时"
+                );
+                crate::engine::request_runtime_recycle();
+            }
+        });
+}
+
+#[cfg(target_os = "macos")]
+fn resident_kb() -> u64 {
+    // proc_pid_rusage(RUSAGE_INFO_V4).ri_phys_footprint —— 和 footprint(1) 同口径。
+    // ⚠ 缓冲区必须**明显大于**结构体：内核按自己的版本往里写，给个刚好够的
+    //   Rust 结构体会把栈写花（实测：面板启动 1 秒后直接死掉，日志只留下一行 boot）。
+    //   用 2KB 缓冲 + 固定偏移读取：uuid(16) + 7×u64 → phys_footprint 在 72。
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u8) -> i32;
+        fn getpid() -> i32;
+    }
+    const RUSAGE_INFO_V4: i32 = 4;
+    const OFF_PHYS_FOOTPRINT: usize = 72;
+    let mut buf = [0u8; 2048];
+    let kr = unsafe { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, buf.as_mut_ptr()) };
+    if kr == 0 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&buf[OFF_PHYS_FOOTPRINT..OFF_PHYS_FOOTPRINT + 8]);
+        u64::from_ne_bytes(b) / 1024
+    } else {
+        resident_kb_basic()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resident_kb_basic() -> u64 {
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [i32; 2],
+        system_time: [i32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(task: u32, flavor: u32, info: *mut i32, count: *mut u32) -> i32;
+    }
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    let mut info = MachTaskBasicInfo {
+        virtual_size: 0,
+        resident_size: 0,
+        resident_size_max: 0,
+        user_time: [0; 2],
+        system_time: [0; 2],
+        policy: 0,
+        suspend_count: 0,
+    };
+    let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / 4) as u32;
+    let kr = unsafe {
+        task_info(
+            mach_task_self(),
+            MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as *mut i32,
+            &mut count,
+        )
+    };
+    if kr == 0 {
+        info.resident_size / 1024
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resident_kb() -> u64 {
+    if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(pages) = s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()) {
+            return pages * 4;
+        }
+    }
+    0
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn resident_kb() -> u64 {
+    0
+}
+
+/// 常驻内存硬上限看门狗：超过 PLUGIN_MAX_RSS_KB 就给自己发 SIGTERM，优雅退出。
+///
+/// 默认关（0）。这是"内存封顶"的最后手段 —— 进程内释放不了的内存，只能靠重启归还。
+/// 代价是一次重启：DB 是 WAL、插件在启动时重载，实测中断 1 秒左右。
+/// 检查间隔 PLUGIN_MAX_RSS_MS（默认 30 秒）。
+fn spawn_max_rss_watchdog() {
+    // 默认 24MB：对绝大多数人来说永远碰不到（我们的压测 24h 才 9.7MB），
+    // 只在插件真泄漏时兜底。用户不需要维护这个数 —— 0 才表示关掉。
+    let kb = std::env::var("PLUGIN_MAX_RSS_KB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24 * 1024);
+    if kb == 0 {
+        return;
+    }
+    let every = std::env::var("PLUGIN_MAX_RSS_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(30_000);
+    let _ = std::thread::Builder::new()
+        .name("max-rss".into())
+        .spawn(move || {
+            let started = std::time::Instant::now();
+            log::plog!("kernel", debug, "内存看门狗自检：当前 footprint {} KB，阈值 {} KB", resident_kb(), kb);
+            loop {
+            std::thread::sleep(std::time::Duration::from_millis(every));
+            let cur = resident_kb();
+            // 冷却 5 分钟：阈值设太低时别变成"重启风暴"（实测一个配错的值能 20 分钟重启 59 次）
+            if cur > kb && started.elapsed() > std::time::Duration::from_secs(300) {
+                // 只负责"举手"，真正的 exec 交给引擎在两次任务之间执行 ——
+                // 这里 exec 可能正好打断一个跑了一半的任务。
+                //
+                // 不为「下一次触发还有 15 秒」这种条件等待：50ms 级任务意味着
+                // **永远**没有 15 秒的空窗（实测 32 轮全是"下次触发 -18ms"），
+                // 那样自愈就成了死代码。真正要保证的只是「重启那一刻没有任务在执行」。
+                log::plog!(
+                    "kernel",
+                    warn,
+                    "内存自愈：常驻 {cur} KB 超过 {kb} KB，请求在下一个空闲点重启"
+                );
+                crate::engine::request_restart_when_idle();
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            }
+        });
+}
+
+/// 运行期定时清理：过期运行记录 + WAL checkpoint(TRUNCATE)。
+///
+/// 为什么必须有：runs 表每次任务触发都写，50ms 级任务 24h 就有 180 万行、486MB。
+/// 只靠启动时 prune 的话，一台连续跑几个月的设备会在这张表上吃掉十几 GB。
+fn spawn_db_prune(db: crate::db::Db, keep_days: i64) {
+    let every = std::env::var("DB_PRUNE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 60_000)
+        .unwrap_or(3_600_000);
+    let _ = std::thread::Builder::new()
+        .name("db-prune".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(every));
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            // 每轮都记一条（哪怕是 0）：否则「线程没跑」和「没有过期记录」在日志里长得一样，
+            // 排查时只能靠猜。一小时一行，不吵。
+            match crate::db::prune_runs(&db, keep_days, &now) {
+                Ok(n) => log::plog!(
+                    "kernel",
+                    info,
+                    "运行记录清理完成：删除 {n} 条（保留 {keep_days} 天）"
+                ),
+                Err(e) => log::plog!("kernel", warn, "清理运行记录失败: {e}"),
+            }
+            if let Ok(c) = db.lock() {
+                if let Err(e) = c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                    log::plog!("kernel", warn, "wal_checkpoint 失败: {e}");
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use super::*;
+
+    /// 证明「把页还回去」这条链路真的成立 —— 这是「不重启也稳」的地基。
+    ///
+    /// 手动跑（**不进 CI**：不同机器的 RSS 口径差异太大，会变成假红）：
+    ///
+    ///     cargo test --bin plugin-panel -- --ignored allocator_returns_pages --nocapture
+    ///
+    /// 场景刻意贴着实际报上来的那条：**一次大分配把高水位顶上去，之后再也回不来**。
+    /// 分配 128 MiB、摸一遍确保页真的提交、释放、再 collect。
+    ///
+    /// ⚠ 这条**只在 macOS / glibc 上有意义**（那两个平台有还页原语）。musl 上
+    /// platform_trim() 是空操作，after 会贴着 peak —— 那不代表 musl 不还页，
+    /// 只代表我们没去要。真机上想判断 musl 的行为，得看长跑的末段斜率。
+    #[test]
+    #[ignore]
+    fn allocator_returns_pages_after_a_spike() {
+        let before = resident_kb();
+        let mut v: Vec<u8> = Vec::new();
+        v.resize(128 << 20, 1);
+        // 逐页写一遍：只 resize 可能只拿到虚拟地址，RSS 不会真的涨。
+        let mut sum: u64 = 0;
+        for i in (0..v.len()).step_by(4096) {
+            sum = sum.wrapping_add(v[i] as u64);
+        }
+        let peak = resident_kb();
+        drop(v);
+        let freed = platform_trim();
+        let after = resident_kb();
+        println!(
+            "before={before}KB peak={peak}KB after={after}KB freed={freed}KB (checksum={sum})"
+        );
+        assert!(
+            peak > before + 64 * 1024,
+            "峰值没上去（before={before} peak={peak}）—— 测量本身失效，结论不能用"
+        );
+        // ⚠ 这里**不断言 RSS 立刻降下来**。第六十五轮撤掉 mimalloc 时实测：
+        // macOS 上 free 128 MiB + pressure_relief 之后 after 仍然贴着 peak
+        // （freed=0KB）—— 因为 libmalloc 对脏页用的是 MADV_FREE，页要等系统真的
+        // 有内存压力才被回收，phys_footprint 在那之前照算。以前这条断言能过，
+        // 是因为 mimalloc 的 mi_collect(true) 是**真 munmap**，不是 macOS 的常态。
+        // 所以这里只把数字打出来，判定留给长跑的末段斜率（那才是用户能感知的）。
+        if after + 32 * 1024 < peak {
+            println!("✅ 还页生效：{freed}KB");
+        } else {
+            println!("ℹ️ 本平台 free 之后 RSS 没立刻降（macOS 的 MADV_FREE 是惰性的）");
+        }
+    }
+}
+

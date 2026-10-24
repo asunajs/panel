@@ -1298,7 +1298,7 @@ fn detect_transpiler(mode: TsMode, runtimes: &RuntimeCatalog) -> TsTranspiler {
         return TsTranspiler::None;
     }
     if matches!(mode, TsMode::Auto | TsMode::Oxc) {
-        crate::log::plog!("market", info, "TypeScript 转译器：oxc（内置）");
+        crate::log::plog!("market", debug, "TypeScript 转译器：oxc（内置）");
         return TsTranspiler::Oxc;
     }
     let bun = runtimes.bun_path().ok();

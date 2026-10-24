@@ -40,7 +40,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
 
     // WAL 更适合「一写多读」的面板场景；pragma 有返回值，必须用 query_row 取回。
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-    crate::log::plog!("db", info, "journal_mode = {mode}");
+    crate::log::plog!("db", debug, "journal_mode = {mode}");
     conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     // ---- 内存：给 page cache 设个上界 ----

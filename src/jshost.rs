@@ -78,6 +78,63 @@ Object.defineProperty(globalThis, '__fmt_args', {
     configurable: false,
 });
 
+// ---- 定时器：setTimeout / setInterval ----
+//
+// 表在 Rust 侧（`__host_timer_set` 返回 id），**回调留在 JS 侧** ——
+// Rust 不拿 `Persistent<Function>`，也就不碰「必须在 Runtime drop 前全部释放、
+// 否则 QuickJS abort 进程」那个坑（和 `__tasks` 同一条理由）。
+//
+// 边界（写进 docs/plugin-api.md）：
+//   · 回调是**同步**的：本轮还没有事件循环，回调里不能 await 等 IO；
+//     要等 IO 的周期任务仍然该用 `every` + 一次调用推进一步（同 `ws_recv(ms)`）。
+//   · 卸载 / 惰性回收时整张表清空，不会在别的 Context 上接着烧。
+//   · 单插件上限 256 条，超了抛错，而不是静默堆着。
+Object.defineProperty(globalThis, '__timers', {
+    value: Object.create(null),
+    writable: false,
+    configurable: false,
+});
+
+function __timer_register(fn, ms, repeat) {
+    if (typeof fn !== 'function') {
+        throw new TypeError((repeat ? 'setInterval' : 'setTimeout') + ': 第一个参数必须是函数');
+    }
+    var raw = Number(ms);
+    if (!isFinite(raw) || raw < 0) raw = 0;
+    var delay = Math.floor(raw);
+    // 0ms 的 setInterval 会变成忙等（每轮主循环都触发），和 Node 一样抬到 1ms。
+    if (repeat && delay < 1) delay = 1;
+    var id = __host_timer_set(delay, !!repeat);
+    if (typeof id === 'string') {
+        if (id.indexOf('!ERR:') === 0) throw new Error(id.slice(5));
+        id = Number(id);
+    }
+    __timers[id] = fn;
+    return id;
+}
+
+globalThis.setTimeout = function (fn, ms) { return __timer_register(fn, ms, false); };
+globalThis.setInterval = function (fn, ms) { return __timer_register(fn, ms, true); };
+globalThis.clearTimeout = function (id) {
+    if (id === undefined || id === null) return;
+    delete __timers[id];
+    __host_timer_clear(Number(id));
+};
+globalThis.clearInterval = globalThis.clearTimeout;
+
+// 宿主到点调这个。返回 false = JS 侧已经没有这条了（宿主据此清表）。
+Object.defineProperty(globalThis, '__fire_timer', {
+    value: function (id, repeat) {
+        var fn = __timers[id];
+        if (typeof fn !== 'function') return false;
+        if (!repeat) delete __timers[id];
+        fn();
+        return true;
+    },
+    writable: false,
+    configurable: false,
+});
+
 // ---- host_api：跨运行时的那份门面 ----
 // 只暴露所有 JS 宿主都能实现的最小公共子集，语义与 Node/Bun 的 runtime/js 一致。
 //
@@ -426,25 +483,19 @@ globalThis.require = function (spec) {
     );
 };
 
-// ══════════════════════ async 守卫（宿主没有事件循环）══════════════════
+// ══════════════════════ Promise 判定（只剩这一个）══════════════════
 //
-// 为什么必须有：`__dispatch_task` 把 handler 的返回值丢掉，于是 async 的任务
-// 「成功」了 —— 但 `await` 之后一行都没跑；路由更糟，Promise 上没有 status/body，
-// 直接回 200 + 空 body。两种都是**没有任何报错的错误**，靠调度记录永远查不出来。
+// 曾经这里有一整套 async 守卫：`__is_async_fn` + 加载期审计 `__async_audit` +
+// 调用期的错误文案 —— 因为老实现里 async handler「成功」了，但 `await` 之后
+// 一行都没跑（路由更糟：Promise 上没有 status/body，直接回 200 空 body）。
 //
-// 三个判定只认**真的会被调用**的东西（两张注册表 + `on_tick`），不扫源码：
-// 导出但没注册的 async 工具函数不该让整个插件装不进去。
-Object.defineProperty(globalThis, '__is_async_fn', {
-    value: function (f) {
-        if (typeof f !== 'function') return false;
-        var tag = Object.prototype.toString.call(f);
-        return tag === '[object AsyncFunction]' || tag === '[object AsyncGeneratorFunction]';
-    },
-    writable: false,
-    configurable: false,
-});
-
-// 同步函数返回 Promise 也算 —— 覆盖 `return doAsync()` 这种写法。
+// 第六十二/三轮把任务、路由、`on_tick` 都改成了两段式（`__dispatch_task_async` /
+// `__dispatch_route_async` / `__run_tick_async`），`await` 之后真的会跑 ——
+// 守卫的**前提**没有了，于是整套删掉：现在 async 就是一个普通函数。
+//
+// 留下的这一个只回答一个问题：「这个返回值要不要当成异步结果来接」。
+// 注意它认 thenable 而不是 `async` 关键字 —— `return doAsync()` 这种写法
+// 只看关键字会漏掉。
 Object.defineProperty(globalThis, '__is_thenable', {
     value: function (v) {
         return !!v && (typeof v === 'object' || typeof v === 'function') && typeof v.then === 'function';
@@ -453,79 +504,195 @@ Object.defineProperty(globalThis, '__is_thenable', {
     configurable: false,
 });
 
-Object.defineProperty(globalThis, '__async_call_msg', {
-    value: function (what) {
-        return what + ' 是 async（或返回了 Promise）：内嵌 QuickJS 没有事件循环，' +
-            'Promise 永远不会被驱动，`await` 之后的代码不会执行 —— 所以这次调用判失败。' +
-            '请改写成同步函数；只有 Node / Bun 引擎支持 async。';
-    },
-    writable: false,
-    configurable: false,
-});
-
-function __async_route_resp(what) {
-    return JSON.stringify({
-        status: 500,
-        headers: { 'content-type': 'text/plain; charset=utf-8' },
-        body: __async_call_msg(what),
-    });
-}
-
-// 加载期审计：返回 JSON 数组，元素是「任务 `x`」/「路由 `GET /x`」/「`on_tick`」。
-// 引擎在 eval 成功后调它一次 —— async 插件要在**装载**时就被拒，
-// 而不是三天后靠人对着一条绿色的调度记录猜。
-Object.defineProperty(globalThis, '__async_audit', {
-    value: function () {
-        var bad = [];
-        for (var t in __tasks) {
-            if (__is_async_fn(__tasks[t])) bad.push('任务 `' + t + '`');
-        }
-        for (var r in __routes) {
-            if (__is_async_fn(__routes[r])) bad.push('路由 `' + r + '`');
-        }
-        if (__is_async_fn(globalThis.on_tick)) bad.push('`on_tick`');
-        return JSON.stringify(bad);
-    },
-    writable: false,
-    configurable: false,
-});
-
 // 约定：返回空字符串 = 成功；非空字符串 = 错误消息。只用 String 一种类型。
-globalThis.__dispatch_task = function (name, payloadJson) {
+// 异步分发：handler 返回 Promise 时，挂上「结算即通知宿主」的回调。
+//
+// 为什么不能复用 `__dispatch_task`：那条路径的约定是"返回即结果"，而 async handler
+// 的续体在 Promise 里 —— 当场等它就把整条 worker 堵住了，正是要消灭的东西。
+//
+// 返回 JSON（宿主据此分流）：
+//   {"done":true}                同步跑完，成功
+//   {"done":false,"error":"..."} 同步抛错 / 没有这个任务
+//   {"pending":true}             已交给 Promise，结算时走 __host_inv_done
+globalThis.__dispatch_task_async = function (name, payloadJson, invId) {
     var h = __tasks[name];
-    if (typeof h !== 'function') return '任务 `' + name + '` 没有可调用的处理函数';
-    // 同步段能跑、`await` 之后的永久不跑 —— 那不是「支持了一部分」，是静默丢工作。
-    if (__is_async_fn(h)) return __async_call_msg('任务 `' + name + '`');
+    if (typeof h !== 'function') {
+        return JSON.stringify({ done: false, error: '任务 `' + name + '` 没有可调用的处理函数' });
+    }
+    // 诊断：插件侧"还没结算"的 invocation。宿主超时时把这个数带上 ——
+    // 0 说明 .then 已经跑过（是宿主没接住），>0 说明续体压根没跑（是泵的问题）。
+    __inv_live++;
+    __inv_ids[invId] = 1;
     var payload;
     try { payload = JSON.parse(payloadJson); } catch (e) { payload = { raw: payloadJson }; }
+    var r;
     try {
-        var r = h(payload);
-        if (__is_thenable(r)) return __async_call_msg('任务 `' + name + '`');
-        return '';
+        r = h(payload);
     } catch (e) {
-        return __fmt_err(e);
+        return JSON.stringify({ done: false, error: __fmt_err(e) });
     }
+    var id = invId;
+    if (!__is_thenable(r)) { __inv_live--; delete __inv_ids[id]; return JSON.stringify({ done: true }); }
+    r.then(
+        function () { __inv_live--; delete __inv_ids[id]; __host_inv_done(id, true, ''); },
+        function (e) { __inv_live--; delete __inv_ids[id]; __host_inv_done(id, false, __fmt_err(e)); }
+    );
+    return JSON.stringify({ pending: true });
 };
 
+// `on_tick` 的两段式入口（宿主每拍调一次）。
+//
+// 和任务/路由同一个形状：同步的当场给结果，async 的先回 pending、结算时走
+// `__host_inv_done`。区别是它**没有返回值**要交回去 —— 宿主只关心成功/失败
+// （写日志与健康判据）。
+//
+// 返回 JSON：{"gone":true} / {"done":true} / {"done":false,"error":"..."} / {"pending":true}
+globalThis.__run_tick_async = function (seq, ts, invId) {
+    var h = globalThis.on_tick;
+    if (typeof h !== 'function') return JSON.stringify({ gone: true });
+    __inv_live++;
+    __inv_ids[invId] = 1;
+    var r;
+    try {
+        r = h({ seq: seq, ts: ts });
+    } catch (e) {
+        return JSON.stringify({ done: false, error: __fmt_err(e) });
+    }
+    var id = invId;
+    if (!__is_thenable(r)) { __inv_live--; delete __inv_ids[id]; return JSON.stringify({ done: true }); }
+    r.then(
+        function () { __inv_live--; delete __inv_ids[id]; __host_inv_done(id, true, ''); },
+        function (e) { __inv_live--; delete __inv_ids[id]; __host_inv_done(id, false, __fmt_err(e)); }
+    );
+    return JSON.stringify({ pending: true });
+};
+
+// `fetch_async`：不阻塞 worker 的 HTTP 请求（返回 Promise）。
+//
+// 为什么另起一个名字而不是把 `fetch` 改成异步：`fetch` 同步返回结果这件事
+// 已经有大量插件依赖（`var r = fetch(url)`），改签名等于把所有插件打回重写。
+// 两个并存：**同步的 `fetch` 照旧**，要并发的用 `fetch_async`。
+globalThis.__fetch_pending = Object.create(null);
+
+// 被放弃的 id（看门狗已经让那条 Promise 失败了，迟到的结果直接吃掉，别报警）。
+globalThis.__fetch_abandoned = Object.create(null);
+
+globalThis.fetch_async = function (url, options) {
+    var opts = JSON.stringify(options === undefined || options === null ? {} : options);
+    // 看门狗：后台线程要是**根本回不来**（不是超时返回错误，而是压根没回音），
+    // 那条 Promise 会一直挂着，直到宿主 60 秒的墙钟预算把它判失败 —— 期间这个任务
+    // 一直占着"在途"，调度上就是丢拍。实测在 14 分钟的长跑里撞到过一次。
+    // 所以在这里兜一道：超过 timeout_ms + 5 秒还没结果，自己失败掉。
+    var tmo = options && typeof options.timeout_ms === 'number' ? options.timeout_ms : 10000;
+    var guard = Math.max(1000, tmo) + 5000;
+    return new Promise(function (resolve, reject) {
+        var id = __host_fetch_start(String(url), opts);
+        if (!(id > 0)) {
+            reject(new Error('并发请求太多（单 worker 上限 32 条），等几条回来再发'));
+            return;
+        }
+        var timer = setTimeout(function () {
+            delete __fetch_pending[id];
+            __fetch_abandoned[id] = true;
+            reject(new Error('后台请求超过 ' + guard + 'ms 没有回音，已放弃（宿主侧可能卡住了）'));
+        }, guard);
+        __fetch_pending[id] = {
+            resolve: function (v) { clearTimeout(timer); resolve(v); },
+            reject: function (e) { clearTimeout(timer); reject(e); },
+        };
+    });
+};
+
+// 由宿主在引擎线程上调：把后台线程拿到的结果交给对应的 Promise。
+// 返回 false = 这条 id 不归这个 Context（插件被热更新过），宿主只记一条 debug。
+// 诊断用：还有几条后台请求在等结果。宿主在"墙钟超时"的报错里带上它 ——
+// 有了这个数字，"卡在 fetch 上"和"插件自己 await 了个死 Promise"才分得开。
+globalThis.__diag_pending_fetch = function () {
+    return Object.keys(__fetch_pending).length;
+};
+
+// 插件侧还有几条 async invocation 没结算（见 __dispatch_task_async 里的说明）。
+globalThis.__inv_live = 0;
+globalThis.__inv_ids = Object.create(null);
+globalThis.__diag_live_inv = function () {
+    return __inv_live;
+};
+// 这条 invocation 在插件侧还"活着"吗？1 = 续体没跑（泵的问题），0 = 续体跑过（宿主没接住）。
+globalThis.__diag_has_inv = function (id) {
+    return __inv_ids[id] ? 1 : 0;
+};
+
+globalThis.__deliver_fetch = function (id, ok, text) {
+    var slot = __fetch_pending[id];
+    if (!slot) {
+        // 看门狗已经放弃过这条：结果迟到，吃掉就行，不算异常。
+        if (__fetch_abandoned[id]) {
+            delete __fetch_abandoned[id];
+            return true;
+        }
+        return false;
+    }
+    delete __fetch_pending[id];
+    if (ok) {
+        var v;
+        try { v = JSON.parse(text); } catch (e) { v = { status: 0, headers: {}, body: text }; }
+        slot.resolve(v);
+    } else {
+        slot.reject(new Error(text));
+    }
+    return true;
+};
+
+// `sleep`：Node 没有这个全局，但它是 async 插件最常用的一个原语，
+// 而且语义无歧义（等这么久，然后继续）。实现就是 setTimeout + Promise。
+globalThis.sleep = function (ms) {
+    var d = Number(ms);
+    if (!isFinite(d) || d < 0) d = 0;
+    return new Promise(function (resolve) { setTimeout(resolve, d); });
+};
+
+// 路由的返回值 → {status, headers, body}。同步与异步两条路共用这一份。
+function __route_resp(r) {
+    r = r || {};
+    return {
+        status: r.status === undefined ? 200 : r.status,
+        headers: r.headers === undefined ? {} : r.headers,
+        body: r.body === undefined ? '' : String(r.body),
+    };
+}
+
 // 路由处理：requestJson = {method, path, query, headers, body}，返回 {status, headers, body}
-globalThis.__dispatch_route = function (key, requestJson) {
+//
+// 和任务一样是**两段式**：同步 handler 当场给结果；async handler 先回 pending，
+// 结算时经 `__host_inv_done` 把**已经序列化好的响应**交回去（宿主那边只管转发，
+// 不再解释 status/body —— 少一层就能少一处不一致）。
+//
+// 返回 JSON：{"done":true,"resp":{...}} / {"pending":true}
+globalThis.__dispatch_route_async = function (key, requestJson, invId) {
     var h = __routes[key];
-    if (typeof h !== 'function') return '{"status":404,"headers":{},"body":"no route"}';
-    if (__is_async_fn(h)) return __async_route_resp('路由 `' + key + '`');
+    if (typeof h !== 'function') {
+        return JSON.stringify({ done: true, resp: { status: 404, headers: {}, body: 'no route' } });
+    }
     var req;
     try { req = JSON.parse(requestJson); } catch (e) { req = { raw: requestJson }; }
+    var r;
     try {
-        var r = h(req) || {};
-        // Promise 上没有 status/body ⇒ 不拦的话会回 200 + 空 body，比报错更难查
-        if (__is_thenable(r)) return __async_route_resp('路由 `' + key + '`');
-        return JSON.stringify({
-            status: r.status === undefined ? 200 : r.status,
-            headers: r.headers === undefined ? {} : r.headers,
-            body: r.body === undefined ? '' : String(r.body),
-        });
+        r = h(req);
     } catch (e) {
-        return JSON.stringify({ status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: __fmt_err(e) });
+        return JSON.stringify({
+            done: true,
+            resp: { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: __fmt_err(e) },
+        });
     }
+    if (!__is_thenable(r)) {
+        return JSON.stringify({ done: true, resp: __route_resp(r) });
+    }
+    var id = invId;
+    r.then(
+        function (v) { __host_inv_done(id, true, JSON.stringify(__route_resp(v))); },
+        function (e) { __host_inv_done(id, false, __fmt_err(e)); }
+    );
+    return JSON.stringify({ pending: true });
 };
 "#;
 
@@ -908,8 +1075,19 @@ pub fn install_host<'js>(
     state: Arc<HostState>,
     pending: Arc<Mutex<Vec<RawTaskDef>>>,
     nav: Arc<Mutex<Option<NavDef>>>,
+    timers: Arc<Mutex<crate::timers::Timers>>,
     logs: SharedLogs,
 ) -> rquickjs::Result<()> {
+    // ---- 插件名（只给宿主侧归因用）----
+    //
+    // 微任务队列是 **Runtime 级**的：一个 worker 上的 job 可能属于任何一个插件，
+    // 而 `JS_ExecutePendingJob` 只还给我们一个 `Context`。宿主靠这个全局把
+    // "哪个插件抛的"认出来 —— 否则一条未捕获的异步错误只能记成"引擎错误"，
+    // 插件作者在面板上看不到它。
+    //
+    // 它**不是**安全边界：插件能改它（改了就只是把自己的错误记到别人头上）。
+    ctx.globals().set("__plugin_name", plugin.clone())?;
+
     // ---- 配置 ----
     {
         let state = state.clone();
@@ -934,6 +1112,56 @@ pub fn install_host<'js>(
             state_for_log.do_log(&plugin_for_log, &level, &msg);
         }),
     )?;
+
+    // ---- 异步 invocation 的完成通知 ----
+    //
+    // JS 侧只递 id + 结果文本；真正的收尾（运行记录、熔断、reply）在引擎线程上做，
+    // 因为那些要 `&mut Scheduler` 和 DB。和 `REJECTIONS` 一样走进程级队列中转。
+    ctx.globals().set(
+        "__host_inv_done",
+        Func::new(move |id: f64, ok: bool, msg: String| {
+            if !id.is_finite() || id <= 0.0 {
+                return;
+            }
+            crate::engine::push_inv_done(id as u64, ok, msg);
+        }),
+    )?;
+
+    // ---- 定时器：表在 Rust 侧，回调留在 JS 侧（`__timers`）----
+    //
+    // 和 `__tasks` 同一条理由：Rust 侧只拿 id，不拿 `Persistent<Function>` ——
+    // 后者必须在 Runtime drop 前全部释放，否则 QuickJS 直接 abort 进程。
+    {
+        let t = timers.clone();
+        ctx.globals().set(
+            "__host_timer_set",
+            Func::new(move |ms: f64, repeat: bool| -> String {
+                // 负值/NaN 当 0；上限一天（再长就该用排班任务，而不是挂个定时器）。
+                let raw = if ms.is_finite() && ms > 0.0 { ms } else { 0.0 };
+                let delay = std::time::Duration::from_millis(raw.min(86_400_000.0) as u64);
+                let mut table = match t.lock() {
+                    Ok(g) => g,
+                    Err(_) => return "!ERR:定时器表不可用（上一轮 panic 过）".to_string(),
+                };
+                match table.set(std::time::Instant::now(), delay, repeat.then_some(delay)) {
+                    Ok(id) => id.to_string(),
+                    Err(e) => format!("!ERR:{e}"),
+                }
+            }),
+        )?;
+    }
+    {
+        let t = timers.clone();
+        ctx.globals().set(
+            "__host_timer_clear",
+            Func::new(move |id: f64| -> bool {
+                if !id.is_finite() || id <= 0.0 {
+                    return false;
+                }
+                t.lock().map(|mut g| g.clear(id as u64)).unwrap_or(false)
+            }),
+        )?;
+    }
 
     // ---- 任务注册：宿主只收「任务名 + 表达式」，handler 留在 JS 侧 ----
     // 返回空串 = 成功，非空 = 错误消息（JS 侧据此 throw）。
@@ -1167,6 +1395,30 @@ pub fn install_host<'js>(
         }),
     )?;
 
+    // ---- HTTP（异步版）----
+    //
+    // `do_http_fetch` 是**阻塞**实现，跑在引擎线程上就会把整条 worker 堵住。
+    // 所以异步版本把它扔到后台线程：立刻返回 id，完成时把结果放进本 worker 的队列
+    // 并唤醒引擎 —— 由引擎线程回到**同一个 Context** 上调 `__deliver_fetch`。
+    //
+    // 为什么不能在那个后台线程里直接 resolve Promise：QuickJS 的 Context 是
+    // 单线程绑定的，跨线程碰它就是未定义行为。
+    {
+        let state_for_fetch = state.clone();
+        let plugin_for_fetch = plugin.clone();
+        ctx.globals().set(
+            "__host_fetch_start",
+            Func::new(move |url: String, opts: String| -> f64 {
+                crate::engine::start_background_fetch(
+                    state_for_fetch.clone(),
+                    plugin_for_fetch.clone(),
+                    url,
+                    opts,
+                ) as f64
+            }),
+        )?;
+    }
+
     // ---- HTTP ----
     let state_for_http = state.clone();
     ctx.globals().set(
@@ -1312,6 +1564,96 @@ mod tests {
     }
 
     #[test]
+    fn timers_call_the_host_with_clamped_delays() {
+        // 这里只验 JS 门面这一层：`__host_timer_set` 用桩替掉，真正的表由
+        // `timers::tests` 覆盖。两边的契约就是「id 是数字、延迟已夹好、clear 转发 id」。
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__calls = [];
+                globalThis.__nextId = 100;
+                globalThis.__host_timer_set = function (ms, repeat) {
+                    __calls.push(['set', ms, repeat]);
+                    return String(__nextId++);
+                };
+                globalThis.__host_timer_clear = function (id) {
+                    __calls.push(['clear', id]);
+                    return true;
+                };
+                "#,
+            )
+            .unwrap();
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+
+            let got: String = ctx
+                .eval(
+                    r#"
+                var fired = [];
+                var one = setTimeout(function () { fired.push('once'); }, 25);
+                var rep = setInterval(function () { fired.push('rep'); }, 0);
+                clearTimeout(one);
+                var out = [
+                    typeof one,
+                    one,
+                    rep,
+                    __calls,
+                    fired,
+                ];
+                JSON.stringify(out);
+                "#,
+                )
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            let a = v.as_array().unwrap();
+            assert_eq!(a[0], "number", "id 必须是数字（宿主返回的是字符串，门面要转）");
+            assert_eq!(a[1], 100);
+            assert_eq!(a[2], 101);
+            let calls = a[3].as_array().unwrap();
+            assert_eq!(calls[0][0], "set");
+            assert_eq!(calls[0][1], 25);
+            assert_eq!(calls[0][2], false);
+            assert_eq!(calls[1][0], "set");
+            assert_eq!(calls[1][1], 1, "0ms 的 setInterval 必须抬到 1ms，否则变成忙等");
+            assert_eq!(calls[1][2], true);
+            assert_eq!(calls[2][0], "clear");
+            assert_eq!(calls[2][1], 100, "clearTimeout 要把 id 原样转给宿主");
+        });
+    }
+
+    #[test]
+    fn fire_timer_runs_the_callback_once_for_timeouts() {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__host_timer_set = function () { return '7'; };
+                globalThis.__host_timer_clear = function () { return true; };
+                "#,
+            )
+            .unwrap();
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            let got: String = ctx
+                .eval(
+                    r#"
+                var n = 0;
+                var id = setTimeout(function () { n++; }, 10);
+                var a = __fire_timer(id, false);
+                var b = __fire_timer(id, false);
+                JSON.stringify([a, b, n]);
+                "#,
+                )
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            assert_eq!(v[0], true, "第一次应该触发");
+            assert_eq!(v[1], false, "一次性的触发过就不该再触发");
+            assert_eq!(v[2], 1);
+        });
+    }
+
+    #[test]
     fn every_level_maps_to_the_expected_host_level() {
         let got = run(r#"
             host_api.log('a');
@@ -1381,11 +1723,18 @@ mod tests {
     }
 
     #[test]
-    fn async_task_handler_fails_loudly_instead_of_succeeding_silently() {
-        with_bootstrap(|ctx| {
+    fn async_task_handler_is_dispatched_as_pending_then_completes() {
+        // 契约变了：任务现在**支持** async。启动阶段只跑到第一个 `await`，
+        // 续体由宿主泵 job queue 时执行，结算后经 `__host_inv_done` 通知。
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).unwrap();
             ctx.eval::<(), _>(
                 r#"
                 globalThis.__ran = [];
+                globalThis.__done = null;
+                globalThis.__host_inv_done = function (id, ok, msg) { __done = [id, ok, msg]; };
                 __tasks.slow = async function () {
                     __ran.push('sync-part');
                     await 0;
@@ -1394,33 +1743,48 @@ mod tests {
             "#,
             )
             .unwrap();
-            let msg: String = ctx.eval("__dispatch_task('slow', '{}')").unwrap();
+            let msg: String = ctx.eval("__dispatch_task_async('slow', '{}', 7)").unwrap();
+            assert!(msg.contains(r#""pending":true"#), "async handler 必须报 pending: {msg}");
             let ran: String = ctx.eval("__ran.join(',')").unwrap();
-            // 空串 = 成功，正是老实现的行为；这里必须**不是**空串
-            assert!(
-                !msg.is_empty(),
-                "async handler 返回了空串（= 成功）: {msg:?}"
-            );
-            assert!(msg.contains("没有事件循环"), "错误要说出原因: {msg}");
-            assert!(msg.contains("Node / Bun"), "错误要给出出路: {msg}");
-            // 拦在调用之前：连同步段都不跑 —— 只跑前半段同样是丢工作
-            assert_eq!(ran, "", "拦住 async handler 时不该先执行它的同步段");
+            assert_eq!(ran, "sync-part", "启动阶段只该跑到第一个 await");
+        });
+        while rq.execute_pending_job().unwrap_or(false) {}
+        ctx.with(|ctx| {
+            let ran: String = ctx.eval("__ran.join(',')").unwrap();
+            assert_eq!(ran, "sync-part,after-await", "泵过之后续体必须执行");
+            let done: String = ctx.eval("JSON.stringify(__done)").unwrap();
+            assert_eq!(done, r#"[7,true,""]"#, "结算要通知宿主：id 原样、ok=true");
         });
     }
 
     #[test]
-    fn handler_that_returns_a_promise_is_caught_too() {
-        with_bootstrap(|ctx| {
-            // 同步函数返回 Promise（`return doAsync()`）—— 只看 `async` 关键字会漏掉这种
-            ctx.eval::<(), _>("__tasks.wrap = function () { return Promise.resolve(1); };")
-                .unwrap();
-            let msg: String = ctx.eval("__dispatch_task('wrap', '{}')").unwrap();
-            assert!(msg.contains("没有事件循环"), "{msg}");
+    fn sync_function_returning_a_promise_is_pending_too() {
+        // `return doAsync()` 这种写法：只看 `async` 关键字会漏掉
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).unwrap();
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__done = null;
+                globalThis.__host_inv_done = function (id, ok, msg) { __done = [id, ok, msg]; };
+                __tasks.wrap = function () { return Promise.reject(new Error('boom')); };
+            "#,
+            )
+            .unwrap();
+            let msg: String = ctx.eval("__dispatch_task_async('wrap', '{}', 9)").unwrap();
+            assert!(msg.contains(r#""pending":true"#), "{msg}");
+        });
+        while rq.execute_pending_job().unwrap_or(false) {}
+        ctx.with(|ctx| {
+            let done: String = ctx.eval("JSON.stringify(__done)").unwrap();
+            assert!(done.starts_with("[9,false"), "拒绝也要结算: {done}");
+            assert!(done.contains("boom"), "要把原因带回来: {done}");
         });
     }
 
     #[test]
-    fn sync_handler_still_succeeds() {
+    fn sync_handler_still_returns_done() {
         with_bootstrap(|ctx| {
             ctx.eval::<(), _>(
                 r#"
@@ -1429,24 +1793,84 @@ mod tests {
             "#,
             )
             .unwrap();
-            let msg: String = ctx.eval("__dispatch_task('ok', '{}')").unwrap();
+            let msg: String = ctx.eval("__dispatch_task_async('ok', '{}', 1)").unwrap();
             let ran: String = ctx.eval("__ran.join(',')").unwrap();
-            assert_eq!(msg, "");
+            assert_eq!(msg, r#"{"done":true}"#);
             assert_eq!(ran, "ran");
         });
     }
 
     #[test]
-    fn async_route_handler_returns_500_instead_of_empty_200() {
+    fn sync_handler_throw_comes_back_as_an_error() {
         with_bootstrap(|ctx| {
+            ctx.eval::<(), _>("__tasks.bad = function () { throw new Error('nope'); };")
+                .unwrap();
+            let msg: String = ctx.eval("__dispatch_task_async('bad', '{}', 1)").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(v["done"], false);
+            assert!(v["error"].as_str().unwrap().contains("nope"), "{v}");
+        });
+    }
+
+    #[test]
+    fn async_route_handler_is_pending_then_returns_its_response() {
+        // 路由现在也支持 async：先回 pending，结算时把**序列化好的响应**交回去。
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).unwrap();
             ctx.eval::<(), _>(
-                "__routes['GET /slow'] = async function () { return { status: 200, body: 'x' }; };",
+                r#"
+                globalThis.__done = null;
+                globalThis.__host_inv_done = function (id, ok, msg) { __done = [id, ok, msg]; };
+                __routes['GET /slow'] = async function () {
+                    await 0;
+                    return { status: 201, headers: { 'x-a': 'b' }, body: 'made' };
+                };
+            "#,
             )
             .unwrap();
-            let raw: String = ctx.eval("__dispatch_route('GET /slow', '{}')").unwrap();
-            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(v["status"], 500, "async 路由必须是 500，不能是 200 空 body");
-            assert!(v["body"].as_str().unwrap().contains("没有事件循环"), "{v}");
+            let raw: String = ctx
+                .eval("__dispatch_route_async('GET /slow', '{}', 11)")
+                .unwrap();
+            assert!(raw.contains(r#""pending":true"#), "async 路由必须报 pending: {raw}");
+        });
+        while rq.execute_pending_job().unwrap_or(false) {}
+        ctx.with(|ctx| {
+            let done: String = ctx.eval("JSON.stringify(__done)").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&done).unwrap();
+            assert_eq!(v[0], 11, "id 要原样带回");
+            assert_eq!(v[1], true);
+            let resp: serde_json::Value =
+                serde_json::from_str(v[2].as_str().unwrap()).expect("响应必须是 JSON");
+            assert_eq!(resp["status"], 201);
+            assert_eq!(resp["body"], "made");
+            assert_eq!(resp["headers"]["x-a"], "b");
+        });
+    }
+
+    #[test]
+    fn async_route_rejection_becomes_a_500() {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).unwrap();
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__done = null;
+                globalThis.__host_inv_done = function (id, ok, msg) { __done = [id, ok, msg]; };
+                __routes['GET /bad'] = async function () { throw new Error('nope'); };
+            "#,
+            )
+            .unwrap();
+            let _: String = ctx.eval("__dispatch_route_async('GET /bad', '{}', 12)").unwrap();
+        });
+        while rq.execute_pending_job().unwrap_or(false) {}
+        ctx.with(|ctx| {
+            let done: String = ctx.eval("JSON.stringify(__done)").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&done).unwrap();
+            assert_eq!(v[1], false, "失败要报 ok=false（宿主据此拼 500）: {done}");
+            assert!(v[2].as_str().unwrap().contains("nope"), "{done}");
         });
     }
 
@@ -1458,54 +1882,102 @@ mod tests {
             )
             .unwrap();
             let raw: String = ctx
-                .eval(r#"__dispatch_route('GET /ok', '{"path":"/ok"}')"#)
+                .eval(r#"__dispatch_route_async('GET /ok', '{"path":"/ok"}', 1)"#)
                 .unwrap();
             let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            assert_eq!(v["status"], 200);
-            assert_eq!(v["body"], "hi /ok");
+            assert_eq!(v["done"], true);
+            assert_eq!(v["resp"]["status"], 200);
+            assert_eq!(v["resp"]["body"], "hi /ok");
         });
     }
 
-    #[test]
-    fn async_audit_lists_exactly_what_will_be_called() {
-        with_bootstrap(|ctx| {
-            ctx.eval::<(), _>(
-                r#"
-                __tasks.sync_task = function () {};
-                __tasks.async_task = async function () {};
-                __routes['GET /sync'] = function () {};
-                __routes['POST /async'] = async function () {};
-                // 导出但没注册：不该让插件加载失败
-                globalThis.helper = async function () {};
-            "#,
-            )
-            .unwrap();
-            let audit: String = ctx.eval("__async_audit()").unwrap();
-            assert_eq!(audit, r#"["任务 `async_task`","路由 `POST /async`"]"#);
-
-            ctx.eval::<(), _>("globalThis.on_tick = async function () {};")
-                .unwrap();
-            let audit: String = ctx.eval("__async_audit()").unwrap();
-            assert!(audit.contains("`on_tick`"), "{audit}");
-        });
-    }
+    // 曾经这里有一组「async 守卫」的测试（加载期审计、`__is_async_fn` 的三种写法）。
+    // 第六十二~四轮把任务 / 路由 / on_tick 全改成两段式之后，守卫的前提没有了，
+    // 整套删掉 —— 现在 async 就是一个普通函数。留下的是「怎么判定要不要接」这一条。
 
     #[test]
-    fn async_detection_covers_the_forms_plugins_actually_write() {
+    fn thenable_detection_covers_the_shapes_plugins_actually_write() {
         with_bootstrap(|ctx| {
-            // 逐个写法确认：`[object AsyncFunction]` / `[object AsyncGeneratorFunction]`
             for (src, want) in [
-                ("async function f(){}", true),
-                ("async () => {}", true),
-                ("async function* g(){}", true),
-                ("function f(){}", false),
-                ("asyncFn => asyncFn", false),
+                ("Promise.resolve(1)", true),
+                ("({ then: function () {} })", true),
+                ("(function () {})", false),
+                ("1", false),
+                ("'x'", false),
+                ("null", false),
+                ("undefined", false),
             ] {
                 let got: bool = ctx
-                    .eval(format!("__is_async_fn(({src}))"))
+                    .eval(format!("__is_thenable({src})"))
                     .unwrap_or_else(|e| panic!("{src}: {e}"));
                 assert_eq!(got, want, "判定 {src} 出错");
             }
+            // 关键：async 函数**调用后**才是 Promise，函数本身不是 thenable
+            let got: bool = ctx.eval("__is_thenable(async function () {})").unwrap();
+            assert!(!got, "函数本身不该被当成 thenable");
+        });
+    }
+
+    #[test]
+    fn async_on_tick_is_pending_then_reports_completion() {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(BOOTSTRAP).unwrap();
+            ctx.eval::<(), _>(
+                r#"
+                globalThis.__done = null;
+                globalThis.__ran = [];
+                globalThis.__host_inv_done = function (id, ok, msg) { __done = [id, ok, msg]; };
+                globalThis.on_tick = async function (t) {
+                    __ran.push(t.seq);
+                    await 0;
+                    __ran.push('after');
+                };
+            "#,
+            )
+            .unwrap();
+            let raw: String = ctx
+                .eval("__run_tick_async(3, '2026-01-01 00:00:00', 21)")
+                .unwrap();
+            assert!(raw.contains(r#""pending":true"#), "async on_tick 必须报 pending: {raw}");
+            let ran: String = ctx.eval("__ran.join(',')").unwrap();
+            assert_eq!(ran, "3", "启动阶段只该跑到第一个 await（tick 参数也必须是 seq/ts 对象）");
+        });
+        while rq.execute_pending_job().unwrap_or(false) {}
+        ctx.with(|ctx| {
+            let ran: String = ctx.eval("__ran.join(',')").unwrap();
+            assert_eq!(ran, "3,after", "泵过之后续体必须执行");
+            let done: String = ctx.eval("JSON.stringify(__done)").unwrap();
+            assert_eq!(done, r#"[21,true,""]"#, "结算要通知宿主");
+        });
+    }
+
+    #[test]
+    fn sync_on_tick_reports_done_and_missing_one_reports_gone() {
+        with_bootstrap(|ctx| {
+            // 没定义 ⇒ gone（宿主据此停掉这个插件的 tick）
+            let raw: String = ctx.eval("__run_tick_async(1, 'ts', 1)").unwrap();
+            assert_eq!(raw, r#"{"gone":true}"#);
+            // 定义了、同步返回 ⇒ done
+            ctx.eval::<(), _>("globalThis.on_tick = function (t) { globalThis.__seq = t.seq; };")
+                .unwrap();
+            let raw: String = ctx.eval("__run_tick_async(7, 'ts', 1)").unwrap();
+            assert_eq!(raw, r#"{"done":true}"#);
+            let seq: i32 = ctx.eval("globalThis.__seq").unwrap();
+            assert_eq!(seq, 7, "tick 参数要真的传进去");
+        });
+    }
+
+    #[test]
+    fn on_tick_throw_comes_back_as_an_error() {
+        with_bootstrap(|ctx| {
+            ctx.eval::<(), _>("globalThis.on_tick = function () { throw new Error('tick boom'); };")
+                .unwrap();
+            let raw: String = ctx.eval("__run_tick_async(1, 'ts', 1)").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(v["done"], false);
+            assert!(v["error"].as_str().unwrap().contains("tick boom"), "{v}");
         });
     }
 

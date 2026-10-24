@@ -148,6 +148,8 @@ BIND_ADDR=0.0.0.0:8787 plugin-panel
 
 注意：一旦监听 `0.0.0.0`，同一网络里的人都能访问登录页。请使用强口令；如果要从公网访问，建议放在 Nginx、Caddy 或 Cloudflare Tunnel 后面，并开启 HTTPS。
 
+没有公网 IP 时不要做端口映射，改用**出站隧道**：本机主动连出去，不需要公网 IP、不需要改路由器，面板继续绑回环。cloudflared、frp、Tailscale 怎么选，完整配置和排障见 [远程访问](docs/remote-access.md)。
+
 ---
 
 ## 第一个定时任务
@@ -253,6 +255,11 @@ Python 和 Shell 脚本是普通进程，没有 `host-api`。这是有意的：�
 ## 安装插件
 
 插件适合放更复杂的功能，比如带配置页的工具、需要保持状态的签到程序。插件用 JavaScript 写，默认跑在面板内置的 QuickJS 里，不占一个 Node 进程。
+
+写法上**尽量贴近 Node**：`async` / `await` 在任务、路由、`on_tick` 里都能用，
+配 `setTimeout` / `setInterval` / `sleep(ms)` / `await fetch_async(url)`。
+`await` 期间执行线程会让给别的活 —— 毫秒级定时器照常触发，不会被一个慢任务堵住。
+（细节与边界见 [plugin-api.md §4.5](docs/plugin-api.md)、[host-api.md §1.2.11](docs/host-api.md)）
 
 ### 从插件商城安装
 
@@ -441,6 +448,7 @@ plugin-panel
 
 - 不要把没有口令的面板直接暴露到公网。
 - 公网访问请走 HTTPS 反向代理。
+- 从公网访问时优先再套一层身份校验（Cloudflare Access、VPS 上的 basic auth），不要只靠面板口令，见 [远程访问](docs/remote-access.md)。
 - 插件和脚本都是可信代码，只安装来源明确的插件。
 - 不要把 `PANEL_TOKEN`、`PANEL_TOKEN_HASH` 提交到 Git。
 - 定期备份 `data/panel.db` 和 `plugins/`。
@@ -451,6 +459,7 @@ plugin-panel
 
 - [文档索引](docs/README.md)：按「使用」「开发」「工程记录」分组
 - [部署与分发](docs/deployment.md)：systemd、Termux、镜像、Release 产物
+- [远程访问](docs/remote-access.md)：没有公网 IP 时用出站隧道（Cloudflare Tunnel、frp、Tailscale）
 - [运行与配置](docs/configuration.md)：全部环境变量
 - [脚本任务](docs/script-jobs.md)：文件头、退出码、两种来源
 - [上传插件与脚本](docs/upload.md)：单文件和 zip 的路径规则

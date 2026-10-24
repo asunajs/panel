@@ -181,6 +181,10 @@ sv-enable plugin-panel
 >
 > 默认（不设 `PLUGIN_UI`）是同源，不需要这一项。
 
+> 💡 **没有公网 IP 时不要做端口映射**，用出站隧道：cloudflared / frpc / Tailscale 从本机连出去，
+> 面板继续绑回环，域名与 TLS 由隧道那头负责。完整配置、Cloudflare Access、插件页第二个域名、
+> SSE 与上传的边界、排障表见 [远程访问](remote-access.md)。
+
 ### ARM 盒子 / 树莓派（systemd）
 
 ```ini
@@ -225,7 +229,40 @@ WantedBy=multi-user.target
 | 外部 Node/Bun 插件 | **单独子进程**，不计入上表；量级 30–80 MB/插件（待实测，见 [performance.md](performance.md#81c-第六十轮的内存账待-lead-实测)） |
 | 线程数 | 4 |
 | CPU（空闲） | 0.0–0.1% |
-| 二进制 | 9.5 MB（aarch64 静态 musl，`legacy-tls-vendored`）；无 TLS 构建 5.0 MB |
+| 二进制 | aarch64 静态 musl：`legacy-tls-vendored` **11.5 MiB**（发布用，静态链入 OpenSSL）；`--no-default-features` **7.0 MiB**（第六十四轮实测。体积拆解见 [performance.md §8.3](performance.md)） |
 | QuickJS 堆 | 225 KB |
 
 空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。
+
+### 长跑验收：在**目标机器**上怎么证明「不会越跑越大」
+
+上面那张表是 macOS 的数字，**不能替代目标机器**：musl 静态链接、分配器行为、
+文件系统都不同。发布前至少跑一次长跑，命令就两条：
+
+```bash
+# 1) 30 分钟：先确认没有明显泄漏（够看斜率）
+python3 scripts/endurance.py --bin ./plugin-panel --seconds 1800
+
+# 2) 8 小时：正式结论
+python3 scripts/endurance.py --bin ./plugin-panel --hours 8
+```
+
+报告写在 `target/perf/endurance-<时间戳>.md`，**先看这四行**：
+
+| 看什么 | 合格的形状 |
+|---|---|
+| `判定`（内存） | `✅ 平台期`；`⏳ 窗口太短` 说明跑的时间不够，不是通过 |
+| `本窗口分辨率` | 必须**远小于**外推值，否则那个外推没有意义（3 分钟窗口的分辨率约 ±312 MB/天） |
+| `文件描述符` / `线程数` | 起止相同（`起 19 → 终 19`） |
+| `触发次数 vs 理论值` | 每个任务达成率 ≥95%；掉到 80% 说明调度被堵住了 |
+
+几个已知的"看起来像问题、其实不是"：
+
+- **前几分钟涨得快**：插件加载、QuickJS 建 Context、SQLite 建 WAL 都在这一段。
+  报告会自动跳过前 10% 的采样，但 30 分钟窗口里它仍然影响斜率 —— 这就是为什么要 8 小时。
+- **`perf-fail` 每 30 秒故意失败一次**：`logs` 里的 error 计数会涨，那是压测负载本身。
+- **报告里 `HOST_API_ALLOW_PRIVATE=1`**：脚本为了让 `fetch_async` 有目标才开的，
+  只作用于那个一次性实例。
+
+⚠ 脚本会在 `target/perf/` 下留插件、数据库和面板日志，方便事后复查；
+`target/` 已在 `.gitignore` 里。

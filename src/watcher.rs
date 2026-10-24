@@ -49,7 +49,7 @@ pub fn spawn(handle: EngineHandle, paths: Vec<PathBuf>) -> Result<(), String> {
         match watcher.watch(p, RecursiveMode::Recursive) {
             Ok(()) => {
                 watched += 1;
-                crate::log::plog!("watcher", info, "监听 {}", p.display());
+                crate::log::plog!("watcher", debug, "监听 {}", p.display());
             }
             Err(e) => crate::log::plog!(
                 "watcher",

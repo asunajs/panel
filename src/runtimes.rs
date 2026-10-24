@@ -224,9 +224,11 @@ impl RuntimeCatalog {
             ("python3", &self.python),
         ] {
             if info.available {
+                // 版本号 + 路径是给排查用的，日常启动不该占一行（小白看到
+                // "/Users/xxx/.volta/bin/node" 只会以为是报错）。
                 crate::log::plog!(
                     "boot",
-                    info,
+                    debug,
                     "{label}: {}（{}）",
                     info.version.as_deref().unwrap_or("?"),
                     info.path.as_deref().unwrap_or("?")
@@ -240,12 +242,14 @@ impl RuntimeCatalog {
                 );
             }
         }
-        crate::log::plog!(
-            "boot",
-            info,
-            "JS 插件默认引擎: {}（按插件可覆盖；PANEL_JS_ENGINE 可改）",
-            self.js_default.as_str()
-        );
+        // 只说"插件怎么跑"，不说引擎名 —— 对使用者来说，quickjs / node / bun
+        // 的区别只有一句：要不要额外装东西。
+        let how = match self.js_default {
+            EngineKind::QuickJs => "插件跑在面板内置引擎里（不用另外装 Node）",
+            EngineKind::Node => "插件默认交给系统里的 Node 跑",
+            EngineKind::Bun => "插件默认交给系统里的 Bun 跑",
+        };
+        crate::log::plog!("boot", info, "{how}");
     }
 }
 

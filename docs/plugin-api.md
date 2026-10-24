@@ -170,28 +170,25 @@ function handler(payload) {
 失败时面板记录错误文本（`name: message` + stack），写进 `jobs.last_error`，交给熔断器。
 `on_tick(payload)` 是可选的每秒回调（`{seq, ts}`），定义了就会被调用。
 
-> ⚠ **QuickJS 引擎不支持 `async` 函数。** 内嵌的 QuickJS 没有事件循环，宿主从不驱动
-> Promise 队列，所以 `await` 之后的代码**永远不会执行** —— 老版本里这甚至是静默的：
-> 任务记成「成功」但只跑了 `await` 之前那几行，路由回 200 但 body 是空的。
+> ✅ **`async` / `await` 全支持了**：任务 handler、路由 handler、`on_tick` 都可以是
+> async。`await` 期间引擎线程**让出**给别的活 —— 同一 worker 上的毫秒级定时器照常触发
+> （实测：一个 `await sleep(700)` 的任务跑着，另一个 50ms 的 `setInterval` 仍然 20 次/秒）。
 >
-> 现在的行为是显式失败：
+> 四条边界：
 >
-> - **加载期**：注册表里（`register_handler` / `register_route`）或 `on_tick` 是 async 函数
->   ⇒ 插件**加载失败**，错误信息点名是哪一个，`lp.error` 与日志里都能看到。
-> - **调用期**：handler 返回了 Promise（例如 `return doAsync()`）⇒ 任务判失败、记
->   `jobs.last_error`；路由回 **500**；`on_tick` 记一条 error。
-> - **模块顶层 `await`**：只有能在微任务里 settle 的才可用（`await 1`、
->   `await Promise.resolve()`）；`await` 定时器 / 网络会让模块加载失败并说明原因。
-> - **没注册的 async 辅助函数**：插件照常加载（死代码不该让插件装不进去），但日志里
->   留一条 warn，指明是第几行。
-> - **编辑器提示**：「插件源码」页保存时，接口会返回源码里所有 `async` / `await`
->   的行号（最多 5 处），页面在编辑器上方标一条警告 —— **不阻塞保存**。
+> - **墙钟预算**：一次执行最多占 `budget_ms`（默认 `EXEC_BUDGET_MS`，60 秒）的**墙钟**时间。
+>   到点还没结算 ⇒ 任务判失败并计入熔断、路由回 **504**、`on_tick` 记一条 error。
+>   `await` 一个永远不 settle 的 Promise 就是靠这条兜住的（CPU 预算管不到它 ——
+>   那种情况下没有 JS 在跑）。
+> - **`on_tick` 不重入**：上一拍还在 `await` 里，这一拍就**跳过**（不是排队补跑）。
+>   一个 1.5 秒的 tick 会让 seq 走 1→3→5。和 Node 的 `setInterval` 不重入是同一条规矩。
+> - **日志的 run id**：`await` 之后的日志仍然进插件日志，但**不带** `runId`
+>   （run id 是引擎线程的局部状态，Promise 续体在别的一轮里跑）。按 run 过滤时看不到它们。
+> - **模块顶层的 `await`** 仍然只支持微任务内能 settle 的（`await 1`、`await Promise.resolve()`）：
+>   模块加载期间宿主不推进时钟，等定时器/网络会永久挂起。放进 handler 里就没问题。
 >
-> 需要真正的 async 请把插件切到 **Node / Bun** 引擎（它们有真事件循环），见
-> [runtimes.md](runtimes.md)。任务目录里的 `.js` **脚本任务**由外部 `node` / `bun`
-> 执行，也有真事件循环，同样不受这条限制。
-> 同一份代码在两个引擎下的能力差异，这是唯一一处「写出来
-> 不报错但行为不同」的地方，所以刻意做成硬错误而不是警告。
+> **IO 也不会堵**：`await fetch_async(url)` 把请求扔到后台线程（[host-api.md §1.4.1](host-api.md)）。
+> 同步的 `http_fetch` 仍然存在、仍然阻塞 —— 老插件不用改，新代码用 `fetch_async`。
 
 `manual` 是**告知**，不是行为：用户点「现在跑一次」意味着他已经决定了，插件照做；
 定时到点才按自己的策略判断。

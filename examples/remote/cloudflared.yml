@@ -1,0 +1,33 @@
+# Cloudflare Tunnel（命名隧道）配置示例
+#
+# 放到 ~/.cloudflared/config.yml 或 /etc/cloudflared/config.yml。
+# 完整步骤见 docs/remote-access.md。
+#
+# 准备：
+#   1. 域名已托管在 Cloudflare（NS 指向 Cloudflare）
+#   2. cloudflared tunnel login
+#   3. cloudflared tunnel create panel          # 记下输出的 UUID
+#   4. cloudflared tunnel route dns panel panel.example.com
+#   5. cloudflared tunnel run panel             # 或安装成系统服务
+#
+# 面板保持 BIND_ADDR=127.0.0.1:8787 即可：cloudflared 从本机回环连过去，
+# 不需要监听 0.0.0.0，也不需要路由器做端口映射。
+
+tunnel: <TUNNEL-UUID>
+credentials-file: /home/you/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: panel.example.com
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 30s
+      # 面板本身是明文 HTTP；cloudflared 与它之间走回环，不需要 TLS。
+      noTLSVerify: false
+
+  # 只有开了插件页隔离（PLUGIN_UI=1）才需要这一段，并且面板侧要设
+  # PLUGIN_UI_ORIGIN=https://plugins.example.com
+  # - hostname: plugins.example.com
+  #   service: http://127.0.0.1:8788
+
+  # 兜底：没匹配到 hostname 的请求一律 404，别让它落到面板上
+  - service: http_status:404

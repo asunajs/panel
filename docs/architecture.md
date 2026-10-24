@@ -97,6 +97,7 @@ rust-plugin-panel/
 │   │   └── hub.rs       多路分发 + SSE 订阅
 │   ├── cron.rs        Cron 表达式解析 + next_after
 │   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除
+│   ├── timers.rs      插件内的毫秒级定时器（setTimeout / setInterval 的宿主侧表）
 │   ├── workers.rs     worker 池（`worker_hint` 把毫秒级任务与长任务分线程）
 │   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum）
 │   ├── ratelimit.rs   第二十轮：令牌桶（登录退避、测试运行限流）

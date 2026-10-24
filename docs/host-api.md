@@ -425,6 +425,52 @@ PUT /api/plugins/{name}/config
 `PUT` 只接受 JSON 对象，原子写入，权限 `0600`。这个接口需要正常登录，
 并且带 `x-panel: 1`（和其它写接口一样）。
 
+#### 1.2.11 插件内的定时器：`setTimeout` / `setInterval`
+
+```js
+const id  = setTimeout(fn, ms);      // 一次性
+const iv  = setInterval(fn, ms);     // 周期
+clearTimeout(id); clearInterval(iv); // 同一个东西，可以混用
+```
+
+配合 async 任务还有一条原语（宿主提供的全局，不是 Node 标准）：
+
+```js
+await sleep(ms);   // 等 ms 毫秒；非法或负数按 0 处理
+```
+
+`sleep` 是这套引擎**需要**的东西：任务 handler 已经是 async 的了，没有它想「等 10 秒再查
+一次」就只能写成 `setTimeout` 套回调。实现就是 `new Promise(r => setTimeout(r, ms))`，
+所以它同样受单插件 256 条定时器上限约束 —— 循环里 `await sleep` 不会累积（每条都会结算掉）。
+
+**什么时候用它，什么时候用 `every`**：
+
+| | `setTimeout` / `setInterval` | `every` / `register_cron` |
+|---|---|---|
+| 粒度 | 毫秒（1ms 起） | 毫秒也行，但**每次触发都写一条运行记录** |
+| 账本 | **不进** `runs`，面板上看不到 | 进 `runs`，有历史、有熔断、有推送 |
+| 归属 | 插件内部状态 | 面板调度器（可在面板上暂停/改参数） |
+| 生命周期 | 跟着插件走：卸载 / 惰性回收即清空 | 跟着排班走，插件卸了任务还在 |
+
+判断标准很简单：**要人看见、要能失败告警的，用 `every`；纯内部的（攒批、防抖、
+轮询一个内存队列）用 `setInterval`**。50ms 级任务如果用 `every`，24h 就是 180 万行
+运行记录 / 几百 MB 的库 —— 那正是这条 API 要解决的问题。
+
+**四条边界**（都不是 bug，是这一版的形状）：
+
+1. **回调的返回值被忽略**：调用是同步的，但它**可以是 `async`** —— 续体由微任务泵在
+   之后的一轮跑掉。代价是**定时器不等它**：`setInterval(500)` 里一个 700ms 的 async 回调
+   会重叠（和 Node 一样），`await` 之后抛的错进"未捕获的 Promise 拒绝"而不是这条定时器
+   的失败计数。要"上一次跑完再下一次"，用 `every` + async handler（它不重入）。
+2. **有活着的定时器时插件不会被惰性回收**（和 `on_tick` / 活着的 WebSocket 同一条判据），
+   手动「卸载」也会被拒绝并说明原因 —— 先 `clearInterval` 再卸。
+3. **单插件上限 256 条**，超了抛错。在循环里反复 `setTimeout` 而不 clear 是唯一会撞到它的写法。
+4. **回调抛错不算任务失败**（它没有运行记录，也就不参与熔断）：只记一条 `warn`；
+   连续 5 次仍失败就自动停掉那条定时器 —— 否则一个 50ms 的坏 interval 一天能刷 170 万行日志。
+
+> `setInterval` 的节奏按**理论时刻**推进；如果某一拍因为别的任务被拖过了整整一个周期，
+> 下一拍从"现在"重新起算，**不补跑**（和调度器跳拍不补是同一条规矩）。
+
 ### 1.3 SQLite
 
 ```
@@ -446,6 +492,41 @@ http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
 
 `options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`
 （默认 10000，钳制到 `[100, 60000]`）。
+
+#### 1.4.1 `fetch_async`：不阻塞引擎的版本
+
+```js
+const r = await fetch_async(url, options);   // 同一个返回值形状
+```
+
+`http_fetch` 是**同步**的：它在引擎线程上阻塞，一次 10 秒的请求会把同一 worker 上
+所有毫秒级任务一起堵住（实测：60 秒的请求能吃掉 ~119 拍）。`fetch_async` 把它扔到
+后台线程，`await` 期间引擎线程照常跑定时器和别的任务。
+
+实测（同一个 worker，1 秒的请求 + 50ms 的 `setInterval`）：
+
+| | 请求期间 interval 的速度 |
+|---|---|
+| `http_fetch`（同步） | 掉到 ~10 次/秒 |
+| `fetch_async` | **20 次/秒**，不受影响 |
+
+三条边界：
+
+1. **只在 `async` handler 里有意义**。同步 handler 里调它只会得到一个悬着的 Promise
+   —— 没人 `await`，请求白跑（但它确实不会阻塞）。
+2. **并发上限 32 条/worker**。到顶直接 reject（「并发请求太多」），不排队 ——
+   一条线程一个请求，排队等于把内存换成假象。
+3. **超时与 SSRF 判定和 `http_fetch` 完全同一套**（同一个 `do_http_fetch`，
+   没有第二份实现）。请求在途时插件不会被惰性回收。
+4. **结果没人认领时会过期**：如果请求在途时插件被删/改名，那条结果 60 秒后自动丢弃 ——
+   否则一个几 MB 的响应体会一直躺在队列里（「常驻低内存」就是这么破的）。
+5. **一定有回音**：除了 `timeout_ms` 那道（服务器超时会**返回错误**），还有一道看门狗 ——
+   `timeout_ms + 5 秒` 内连错误都没回来（后台线程卡住），Promise 会自己失败：
+   `后台请求超过 15000ms 没有回音，已放弃`。没有这道兜底，一条丢失的结果会让那个任务
+   一直占着"在途"，直到 60 秒的墙钟预算把它判失败 —— 期间这个任务就是**丢拍**。
+
+> 为什么另起一个名字而不是把 `http_fetch` 改成异步：`var r = http_fetch(url)`
+> 这种写法已经有大量插件依赖，改签名等于把所有插件打回重写。两个并存。
 
 ### 出站目标的限制（SSRF 防护）
 
@@ -614,13 +695,14 @@ handler(payload) -> None
 | `opts.budget_ms` | ✅ | ✅（面板执行） | ❌ | —（用 `@timeout`） |
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅（RPC） | ✅（`node:sqlite`） | ✅ |
 | `http_fetch`（同步） | ✅ | ✅（RPC） | ✅（worker + Atomics） | ✅ |
+| `fetch_async`（不阻塞） | ✅ **后台线程** | ✅（RPC，本来就是异步） | ✅ | ✅ |
 | `node:fs` / `node:path` | ✅ **限定在数据根** | ✅ **原生、无围栏** | ✅ 原生 | ✅ 原生（脚本跑在 Node/Bun 里） |
 | `fs.rootDir()`（面板扩展） | ✅ | ❌（原生 fs 不需要） | ❌ | ✅ |
 | 执行预算（死循环防护） | ✅ interrupt handler | ✅ **杀进程组** | ❌ | ✅ 超时杀进程组 |
 | 任务熔断 | ✅ | ✅ | ❌ | ✅ |
 | 插件热更新 | ✅ mtime | ✅ mtime（重启子进程） | ❌ | —（一次性） |
 | 原生 npm / `child_process` | ❌ | ✅ **Node/Bun-only** | ✅ | ✅（JS 脚本） |
-| 扩展：`http_fetch_async` | ❌ | ❌ | ✅（Node 专有） | — |
+| 扩展：`http_fetch_async` | ✅（第六十二轮，`fetch_async`） | ❌ | ✅（Node 专有） | — |
 
 「执行预算 / 熔断 / 热更新 / 运行记录」是**宿主策略**，不是插件 API：
 Node 适配器不实现它们，插件也不应该依赖 —— 同一份脚本在面板里受保护，
@@ -746,13 +828,13 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 | 构造 | QuickJS（内嵌） | Node / Bun | 替代写法 |
 |---|---|---|---|
 | `process` / `Buffer` / `__dirname` | 无 | 有 | 走 `host-api`；宿主平台判断用 `typeof process !== 'undefined'` |
-| `setTimeout` / `setInterval` | 无 | 有 | 用调度器：`every(name, '500ms', fn)` / `register_cron` |
+| `setTimeout` / `setInterval` | **有**（插件内部定时器，回调同步） | 有（原生） | 要**账本可见**的周期任务仍用调度器：`every(name, '500ms', fn)` / `register_cron` |
 | `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现） |
 | `node:fs` / `node:path` | **受限**（数据根围栏） | 原生 | `host-api` 或只用相对路径 |
 | `node:child_process` / 其它 Node 内置 / npm 包 | 加载期报错 | 有 | 用了就是 Node/Bun-only，见 §5.4 |
 | `URL` / `URLSearchParams` / `TextEncoder` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
 | `console` / `performance` / `atob` / `btoa` | 有 | 有 | — |
-| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有 | 有 | — |
+| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有（microtask 在每轮引擎调度结束时清空） | 有 | — |
 | 模块形态 | 经典脚本 + ESM（`import`/`export`） | 经典全局脚本 + ESM；**没有 CJS 模块语义** | 拆模块用 ESM |
 
 一句话：**只用 ECMAScript 语言本身 + `host-api`，三个引擎都跑得通。**

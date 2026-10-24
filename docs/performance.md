@@ -69,7 +69,7 @@
 | Python 脚本 | 一次性进程，跑完即退 | 不计入常驻 |
 | Shell 脚本 | 一次性进程 | 同上 |
 | RPC 单次往返 | **几十 µs** | **待实测** |
-| 静态 musl 二进制（aarch64） | **9.5 MB**（`legacy-tls-vendored`）/ **5.0 MB**（`--no-default-features`） | 本地 zigbuild 实测 |
+| 静态 musl 二进制（aarch64） | **11.5 MiB**（`legacy-tls-vendored`，发布用）/ **7.0 MiB**（`--no-default-features`） | 第六十四轮本地 zigbuild 实测（12,039,272 / 7,317,640 字节），都是 `ELF … statically linked` |
 
 > 本地 macOS arm64 快速核对（2026-10-17，**不是目标 Linux**）：同一个路由处理函数里
 > 连续 500 次 `sqlite_query('SELECT 1')`，Node 子进程耗时 20 ms（≈40 µs/次），
@@ -88,6 +88,94 @@ PANEL_JS_ENGINE=quickjs ./plugin-panel &   # 基线
 # 面板上把插件 A 切到 node，比较单进程 RSS（ps -o rss）与子进程 RSS
 # 注意：ps 里会有面板 + node 两个进程，别把两者相加当"面板占用"
 ```
+
+### 8.1c2 分配器与异步机制的内存账（第六十二~四轮）
+
+**先说结论**：这一轮把「内存一直涨、必须重启」这件事按两种成因拆开处理了 ——
+**分配器高水位**（换 mimalloc + 强制归还）和**长跑里的无界结构**（全部加上限/过期）。
+musl 真机 8 小时长跑仍然没做（见本节末尾）。
+
+#### ① 发布产物上这条开关是空操作（而且我们决定就这样）
+
+`PLUGIN_MEM_TRIM_MS` 的实现按平台分：macOS 用 `malloc_zone_pressure_relief`、
+glibc 用 `malloc_trim`，**musl 没有任何对应 API**（可在 musl 源码树里直接
+`grep malloc_trim` 验证）—— 所以发布用的 musl 产物上，这条一直是 `return 0`。
+
+### 曾经为此换过 mimalloc，第六十五轮撤掉了
+
+当初的判断是「musl 不能还页 ⇒ 高水位只升不降 ⇒ 换 mimalloc 用 `mi_collect(true)`
+强制 munmap」。撤掉的理由是**这个判断从头到尾没有实测支撑，而代价是实打实的**：
+
+| | 证据 |
+|---|---|
+| **代价（实测）** | 同一套插件、同一时刻 A/B：mimalloc 版 **8.25 MB** vs 系统分配器 **5.84 MB**，**差值恒定 2.41 MB**。任务量翻倍时两边同步涨 0.93 MB，差值一点没变 —— 纯基线，换不来任何东西 |
+| **理由（没测）** | 仓库里 11 段长跑**全是 darwin**，一行 musl 运行时内存数据都没有 |
+| **引用的数据是错配的** | 支撑它的那个 24h（5.59 → 11.00 MB）是 **macOS** 跑的，而且**末 2h 是 −0.23 MB/h**（已平台期）—— 系统分配器并没有「只升不降」 |
+| **真凶另有其人** | 那次 24h 暴露的是 **DB 484.7 MB / runs 181 万行**（无界增长），那是后来单独修的（runs 清理 + WAL checkpoint），跟分配器无关 |
+
+结论：常驻内存是这台产品的硬指标，**不该为一个没验证过的假设长期多付 2.4 MB**。
+现在所有平台都用系统分配器，二进制也因此小了 110 KB（musl 无 TLS 构建
+7,317,640 → 7,206,776 字节）。
+
+> **如果真机上确实看到「不还页」怎么办**：先看长跑的**末段斜率**，别看峰值。
+> 峰值高但末段斜率为 0 = 平台期，不是泄漏。真要干预，再拿数据回来换分配器 ——
+> 那时候换也来得及，而且是有据可依的换。
+
+> 顺带一个测量陷阱（第六十五轮踩的）：`cargo test -- --ignored allocator_returns_pages`
+> 在 macOS 上 `freed=0KB` —— free 128 MiB 之后 RSS 不降。这不是 bug：libmalloc 对
+> 脏页用 MADV_FREE，页要等系统真有内存压力才回收，`phys_footprint` 在那之前照算。
+> 以前这条断言能过，是因为 mimalloc 的 `mi_collect(true)` 是**真 munmap**。
+> 所以那条测试现在只打印数字、不断言「立刻降」。
+
+#### ② 异步机制本身是有界的
+
+`await` 让出线程之后，宿主手里多了一批"在途"的东西。它们都**有上限或有出口**：
+
+| 结构 | 上限 / 出口 |
+|---|---|
+| 在途任务 / 路由 / `on_tick` | 每条有**墙钟截止**（默认 `EXEC_BUDGET_MS`），到点必收尾 |
+| `INV_DONE` 队列 | 256 条上限，且**每轮循环排空** |
+| `FETCH_DONE` 队列 | 256 条上限 + **60 秒无人认领即丢弃**（插件被删时否则会一直占着几 MB 的响应体） |
+| 定时器表 | 单插件 256 条上限，卸载即清空 |
+| 热更新撞在途 | 靠**装载代次**当场作废，不等墙钟超时 |
+
+#### ③ 怎么验，以及"数字要能说明什么"
+
+```bash
+python3 scripts/endurance.py --seconds 1800        # 30 分钟：够看斜率
+python3 scripts/endurance.py --hours 8             # 目标：musl 真机跑一夜
+```
+
+报告里的**分辨率**那一行必须一起看：3 分钟窗口的分辨率是 ±312 MB/天 ——
+那时候报"疑似增长 +40 MB/小时"就是噪声，不能当结论。窗口越长分辨率越细，
+8 小时的窗口才有资格对「会不会涨」下判断。
+
+⚠ 长跑脚本会起一个本机小服务器并给面板开 `HOST_API_ALLOW_PRIVATE=1`，
+只为让 `fetch_async` 有真实目标。**这只影响那个一次性压测实例**，报告里也会写明。
+
+#### ③b 一个真实的"越跑越慢"案例（第六十四轮）
+
+长跑报告里有个信号值得单独记：单个任务达成率掉到 93%、`lateMs` 最大 **55008ms**。
+根因不在内存，而在**结算通知被别的 worker 抢走**（详见
+[engine-safety.md §7.8b](engine-safety.md)）。修完之后同一个 30 分钟长跑：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `lateMs` 最大 | 55008ms | **73ms** |
+| `lateMs` p99 | — | **≤20ms** |
+| `perf-fetch` 达成率 | 93.48% ❌ | **99.71%** |
+| `perf-fast`（50ms）达成率 | 99.27% | **99.99%** |
+| 60 秒超时 / 迟到结算 | 各 2–3 次 | **0** |
+| 常驻内存 | 7.17→11.00 MB | 7.28→11.00 MB（末段斜率 **−2.1 MB/小时**） |
+
+教训：**长跑报告里"某个任务达成率掉了"往往不是那个任务的问题**。先看 `lateMs` 的
+最大值是不是正好等于墙钟预算 —— 那是"某次执行挂满预算"的指纹，而不是"调度慢"。
+
+#### ④ 还没做的
+
+**musl 真机 8 小时**。这台 Mac 上的 24 小时数据（5.59 → 11.00 MB，+0.126 MB/小时，
+最后 2 小时 −0.23 MB）只能说明 macOS 上是平台期；musl 的分配器行为完全不同
+（静态链接、没有 glibc 的 trim 路径），必须单独量。
 
 ### 8.1d Axum 是不是最优选择（需求里点名问的，实测对比）
 
@@ -163,13 +251,39 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features legacy-t
 cargo zigbuild --release --target aarch64-unknown-linux-musl --no-default-features
 ```
 
-产物（本地 zigbuild，含 QuickJS + SQLite；第五轮旧数字 4.4 MB 含 PocketPy，
-**第六十轮移除 PocketPy 后：9.5 MB（vendored TLS）/ 5.0 MB（无 TLS）**）：
+产物（本地 zigbuild，含 QuickJS + SQLite；第五轮旧数字 4.4 MB 含 PocketPy。
+**第六十四轮复测**：`legacy-tls-vendored` **11.5 MiB**（12,039,272 字节，发布用）/
+`--no-default-features` **7.0 MiB**（7,317,640 字节）。）：
+
+> 📏 **为什么比文档里的 9.5 / 5.0 大**（2026-10-24 实测拆解）：那两个数字是
+> **2026-10-18**（commit `2bacf9b`）记的，之后陆续加了 OXC（商城 TS 转译，
+> 注释里自己写着 **+0.9 MiB**）、zip 上传解压、ws 客户端（tokio-tungstenite）、
+> axum multipart、rusqlite hooks。**拿同一套 `--no-default-features` 编已提交的
+> HEAD 是 6.8 MiB（7,150,000 字节）** —— 也就是说 5.0 → 6.8 全是这 6 天的功能，
+> 第六十四轮（mimalloc + 定时器 + 异步机制）只加了 **164 KB**。
+>
+> 想把体积拿回来：OXC 只服务于「商城里装 `.ts`」这一条路径，把它挪到 feature
+> 后面能省约 0.9 MiB，代价是瘦身版装不了 `.ts`。
 
 ```
 ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped
 PT_INTERP: 无 → 完全静态
 ```
+
+> ⚠ **本机踩过的工具链坑**（macOS + Homebrew rust）：`which cargo` 指向
+> `/opt/homebrew/bin/cargo` 时，它的 `rustlib` 里**只有 host target**，
+> 编 musl 会报「can't find crate for `core`」（target 没装）。要用 rustup 的 toolchain：
+>
+> ```bash
+> rustup toolchain install 1.99.0 --profile minimal
+> rustup target add aarch64-unknown-linux-musl --toolchain 1.99.0
+> PATH=$HOME/.cargo/bin:$PATH cargo +1.99.0 zigbuild --release --target aarch64-unknown-linux-musl --features legacy-tls-vendored
+> ```
+>
+> 另外：rustup 里的 **1.91.1 太老**（`oxc_traverse` 要 rustc ≥ 1.97），别指望用它编。
+> 默认 features 带 `legacy-tls` ⇒ Linux 上就是 OpenSSL，**交叉编译必须显式选
+> `legacy-tls-vendored`**（把 OpenSSL 静态编进去，约 10 分钟），否则 `openssl-sys`
+> 会以"找不到 OpenSSL 安装目录"失败。
 
 **两套 C 代码要交叉编译**：
 

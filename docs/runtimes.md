@@ -59,14 +59,22 @@
 | **Node.js** | **>= 20.6**（`module.register` 解析 `host-api` 的硬要求） | 长驻子进程 + fd3/4 RPC | 需要 npm 生态、原生 `fs` / `child_process` |
 | **Bun** | **>= 1.0** | 长驻子进程 + fd3/4 RPC | 想用 Bun 的启动速度 / 内置能力 |
 
-**语言能力差异：`async` / `await` 只有 Node / Bun 能用。** 内嵌 QuickJS 没有事件循环，
-宿主不驱动 Promise 队列 —— `await` 之后的代码永远不会执行。第六十轮起这是**硬错误**
-而不是静默跳过：注册表里出现 async 函数 ⇒ 插件加载失败并点名；handler 返回 Promise ⇒
-任务判失败、路由回 500。顶层 `await` 只对微任务内能 settle 的 Promise 有效。
-细节与错误文案见 [plugin-api.md](plugin-api.md) §4.5。
+**语言能力差异：`async` / `await` 在 QuickJS 上也能用了（第六十二轮起），但边界不同。**
 
-> 这一条是「同一份代码、不同引擎、不同结果」的唯一一处，所以刻意做成加载期就拦住：
-> 「开发机上跑通、进面板才炸」正是 §10.1 否掉 PocketPy 的那条理由，不能自己再犯一次。
+| | QuickJS（内嵌） | Node / Bun（外部进程） |
+|---|---|---|
+| 任务 handler `async` | ✅ 支持，`await` 期间**让出引擎线程** | ✅ |
+| 能 `await` 什么 | 只有宿主给得出 Promise 的东西：`sleep(ms)`、`setTimeout` 包出来的 Promise、插件自己写的 Promise 链 | 任何东西（含网络、子进程） |
+| `http_fetch` / `fetch_async` | 前者阻塞、后者不阻塞（后台线程） | 都不阻塞 |
+| 路由 `async` | ✅（结算后回响应；超时回 504） | ✅ |
+| `on_tick` `async` | ✅（不重入：上一拍没回来就跳过） | ✅ |
+| 墙钟预算 | `budget_ms` 兜住不结算的 `await` | 同左 |
+
+细节见 [plugin-api.md](plugin-api.md) §4.5。异步 IO 也有了：`fetch_async` 在
+QuickJS 里走后台线程，`await` 期间不占引擎线程。剩下的差别只有一处：模块顶层的
+`await` 不能等外部事件（模块加载期间宿主不推进时钟）。`setInterval` 的 async 回调也能跑，
+但定时器**不等它**（`setInterval(500)` 里 700ms 的 async 回调会重叠，和 Node 一样）；
+要"上一次跑完再下一次"就用 `every` + async handler。
 
 选 Node 而不是「所有插件都跑外部进程」的理由写在 [10.5](#105-内存与性能取舍)：
 QuickJS 一个插件的堆约 **0.6 MB**，Node 子进程是 **40–80 MB** 量级 —— 低配盒子上

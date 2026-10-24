@@ -49,11 +49,10 @@ ureq = { version = "3", features = ["rustls"] }
 # OXC 的 minifier / isolated declarations。release 下 strip + LTO 后约 +0.9 MiB，
 # 这样安装 .ts 不再依赖外部的 Bun 或 Node。
 oxc_allocator = "0.154.0"
-# oxc_ast / oxc_ast_visit 是给 src/jslint.rs 用的（在源码里找 async / await）：
-# parser/semantic 本来就把它们拉进来编译了，所以直接依赖**不增加**编译产物，
-# 只是把「用 AST 找节点」从正则换成一次遍历。
-oxc_ast = "0.154.0"
-oxc_ast_visit = "0.154.0"
+# ⚠ `oxc_ast` / `oxc_ast_visit` 曾经是直接依赖：`src/jslint.rs`（在源码里找 async/await
+# 的编辑期警告）要用它们遍历 AST。第六十四轮删掉 jslint 之后就没有调用方了 ——
+# 它们仍然会作为 parser/semantic 的传递依赖被编译，但**不该再直接声明**，
+# 否则下次读 Cargo.toml 的人会以为还有个模块在用。
 oxc_codegen = "0.154.0"
 oxc_parser = "0.154.0"
 oxc_semantic = "0.154.0"
@@ -160,3 +159,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# （这里曾经有一个 [target.'cfg(target_env = "musl")'.dependencies] 段，只放
+#  mimalloc。第六十五轮撤掉了 —— 理由见 src/main.rs 文件头那段注释。
+#  教训留在这儿：TOML 的表头会把后面所有条目都算到它名下，直到下一个表头，
+#  所以 target 专用依赖必须放文件末尾，否则 rusqlite 之类会全变成 musl-only。）

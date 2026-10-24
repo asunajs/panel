@@ -13,6 +13,7 @@
 | Node / Bun 的精确内存未测 | 目前只有量级（Node 40–80 MB、Bun 30–60 MB）；RPC 单次延迟也未测 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
 | 外部插件没有独立 fd 上限 | 每个插件一个子进程 + 4 条管道 + 线程；插件很多时会撞 `ulimit -n`，面板不设硬上限也不告警 | [architecture.md §11](architecture.md#11-影响后续扩展的设计决策) |
 | Bun 的兼容面未测全 | 只验证了 `host-api` 解析 + 基本任务；Bun 对 `node:*` 的兼容差异没有矩阵 | [runtimes.md §10.9](runtimes.md#109-跨运行时验证) |
+| QuickJS 不支持 `async` / `await` | 引擎语言层有，缺的是宿主事件循环；重设计（向 Node 对齐 timers/fetch/fs）的目标形态与阶段在迁移文档里，**两个岔路口还没拍板** | [runtimes.md §10.1](runtimes.md#101-为什么删掉-pocketpy-与-python-插件)、[引擎迁移路线](engine-migration.md) |
 
 ## 2. 脚本任务
 
@@ -35,7 +36,8 @@
 | 时区与 DST | 时区依赖 `Local`，盒子 TZ 配错则 cron 全错；跨夏令时没有用例 | [engine-safety.md §7.8](engine-safety.md#78--p2其余) |
 
 `worker_hint` / `ENGINE_WORKERS`（第二十三轮）已经把「毫秒级任务」和「长任务」分到了不同线程上，
-但**同一个 worker 内部**仍然是串行的。
+但**同一个 worker 内部**仍然是串行的。跨插件交错（同插件仍串行）这条不变量怎么来的、代价是什么，
+写在 [引擎迁移路线 §4](engine-migration.md#4-内核不变量一个-context-一次只跑一个-invocation)。
 
 ## 4. 存储
 

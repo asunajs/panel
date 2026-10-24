@@ -1,5 +1,177 @@
 # 更新记录
 
+## 未发布
+
+- **撤掉 mimalloc，全部平台回到系统分配器。**
+  上一轮把它收窄到 musl，这一轮直接删掉 —— 因为**它换来的东西没有被验证过，而代价是实测的**：
+  · 代价：同一套插件、同一时刻 A/B，mimalloc 版 **8.25 MB** vs 系统分配器 **5.84 MB**，
+  **差值恒定 2.41 MB**（任务量翻倍时两边同步涨 0.93 MB，差值不变 ⇒ 纯基线）；
+  · 理由：仓库里 11 段长跑**全是 darwin**，一行 musl 运行时数据都没有；当年引用的
+  那个 24h（5.59 → 11.00 MB）也是 macOS 跑的，而且**末 2h 是 −0.23 MB/h**（已平台期）；
+  · 真凶：那次 24h 暴露的是 **DB 484.7 MB / runs 181 万行**，跟分配器无关，后来单独修了。
+  现在 `platform_trim` 按平台选原语（macOS → `malloc_zone_pressure_relief`、
+  glibc → `malloc_trim`、**musl → 没有，空操作**），日志照旧打「归还 N KB」。
+  产物：musl 无 TLS 构建 **7,317,640 → 7,206,648 字节**（−111 KB），macOS 6,382,592。
+  探针测试改名为 `allocator_returns_pages_after_a_spike` 且**不再断言"立刻降"** ——
+  macOS 的 libmalloc 对脏页用 MADV_FREE，实测 free 128 MiB 后 `freed=0KB`，
+  以前能过是因为 mimalloc 的 `mi_collect` 是真 munmap。
+- **mimalloc 收窄到 musl：macOS/glibc 构建的内存基线回落 2.4 MB。**（已被上一条取代）
+  换 mimalloc 的**唯一**理由是 musl 没办法把空闲页还给系统；macOS 的 libmalloc 和
+  glibc 本来就会还（实测旧二进制峰值 11.00 MB，同一段跑完自己回落到 7.06 MB）。
+  在那两个平台上换，只是白付 mimalloc 自己的 arena 预留 —— 同一套插件、同一时刻 A/B：
+  **8.25 MB（mimalloc）vs 5.84 MB（系统分配器），差值恒定 2.41 MB**，
+  连"任务量翻一倍涨 0.93 MB"这种同步变化都一模一样。
+  现在 `#[cfg(target_env = "musl")]` 才装 mimalloc，`platform_trim` 按平台选原语
+  （musl → `mi_collect`，macOS → `malloc_zone_pressure_relief`，glibc → `malloc_trim`）。
+  实测：macOS 起步 **7.28 → 5.11 MB**，二进制 6,470,352 → 6,382,592 字节；
+  musl 产物大小不变（7,317,640），mimalloc 仍在。
+- **压测脚本两处健壮性修复**（都只在特定环境才露头，但会让人怀疑被测代码）：
+  ① `scripts/endurance.py` 的 HTTP 走 **系统代理** —— macOS 上 urllib 会通过 `_scproxy`
+  读系统代理，而 curl 只认环境变量，于是「curl 通、脚本报 Connection refused、报告说
+  面板没起来」而面板日志里任务跑得好好的。改成 `ProxyHandler({})` 显式绕过。
+  ② 报告生成在**短窗口**上崩：`--seconds 60` 只采到 2–3 个点，末段取 1/4 时
+  `sts[-tailn]` 直接 IndexError，整轮数据白跑。改成 `tailn = min(len(sts), ...)`。
+- **发布产物（aarch64 静态 musl）在本轮代码上重新验证过**：`legacy-tls-vendored`
+  **11.5 MiB**、`--no-default-features` **7.0 MiB**，都是 `ELF … statically linked`。
+  顺带把 `docs/performance.md §8.3` 里过期的 9.5 / 5.0 MB 换成实测值，并记下
+  本机交叉编译的两个坑（Homebrew 的 rust 没有 musl std；rustup 1.91 太老编不了 oxc）。
+  另外清掉一处**删了模块但没删依赖**的残留：`oxc_ast` / `oxc_ast_visit` 只被
+  已经删掉的 `src/jslint.rs` 用过。
+- **修掉一个会让毫秒级任务**卡死 60 秒**的并发 bug：两个 worker 互相抢对方的结算通知。**
+  异步执行是两段式：JS 侧结算时调 `__host_inv_done`，把 `(id, ok, msg)` 塞进队列，
+  worker 循环再排空。队列原本是**进程级静态**，而默认是 **2 条执行线程**
+  （`default_engine_workers` = 核数 clamp 到 1–2）。于是：
+  A 线程推的结算被 B 线程排空，B 在**自己**的 `pending` 里找不到这个 id，
+  记一条"迟到的异步结算"扔掉；A 那条执行再也收不到通知，只能干等到 60 秒墙钟超时 ——
+  期间这个任务一直占着"在途"，调度上就是**丢拍**。
+  长跑压测里它的表现：`perf-fetch` 达成率 93.48%、`lateMs` 最大 55008ms、
+  每 30 分钟 2–3 条"异步执行超过墙钟预算仍未完成"。
+  **`ENGINE_WORKERS=1` 时完全复现不了**，所以之前的单线程冒烟全是绿的。
+  修法：队列改成 **thread-local** —— 谁推的谁排空，和"这条 invocation 归哪个 worker"
+  本来就是同一件事。诊断证据：超时那条的"插件侧未结算：0"（JS 早就结算了）
+  + 同一 id 的"迟到的异步结算"由另一个 worker 打出，两条日志时间差正好一个墙钟预算。
+  **修复后同一个 30 分钟长跑**：`lateMs` 最大 **55008ms → 73ms**（p99 ≤20ms）、
+  `perf-fetch` 达成率 **93.48% → 99.71%**、`perf-fast` **99.27% → 99.99%**、
+  超时/迟到结算/孤儿结算**全部归零**。
+- **`fetch_async` 现在"一定有回音"，而且丢结果不再静默。**
+  ① JS 侧加**看门狗** —— `timeout_ms + 5 秒` 还没回音就自己失败，绝不让 Promise 悬着
+  （后台线程万一卡死，任务不该陪着挂满整个墙钟预算）；
+  ② 宿主侧所有"结果丢了"的分支都改成 **warn 日志**（队列满、过期无人认领、插件已卸载、
+  投递时 Promise 已不在），并在超时报错里带上「该插件还有 N 条 fetch 在等结果」。
+  静默丢弃是最难查的一类问题：现场只剩一句"可能 await 了一个永远不会 settle 的 Promise"。
+  > 这条最初是冲着"某条 fetch 结果没回来"写的；后来查清那批超时的真正原因是上一条的
+  > **结算队列被别的 worker 抢走**（`fetch_async 在等结果 = 0` 就是线索：请求早回来了）。
+  > 看门狗仍然留着 —— 它兜的是另一类故障（后台线程真的没回音），代价只是一条定时器。
+- **两条只在长跑里才会露头的内存/正确性补丁（异步机制的收尾）。**
+  ① `fetch_async` 的结果如果**没人认领**（插件在请求在途时被删/改名），会一直躺在
+  进程级队列里 —— 单条不大，但响应体可能几 MB，256 条就是几百 MB，"常驻低内存"直接破功。
+  现在 60 秒后自动丢弃（`do_http_fetch` 最长 60 秒超时，之后还躺着的一定没人要）。
+  ② 热更新会**换掉整个 Context**，而这时可能正有一个 async handler 在 `await` ——
+  那条 Promise 的续体再也没人跑了。以前要等墙钟超时（默认 60 秒）才收尾，还会被记成
+  "超时"；现在给每个 `LoadedPlugin` 一个**装载代次**，在途记录存一份，循环发现代次
+  对不上就当场判失败：「插件在这条执行期间被热更新/重载了，这次执行作废」。
+  实测：reload 后 **1 秒内**收尾（以前要挂 60 秒），运行记录里写的是真原因。
+- **`async` 全通了：`on_tick` 也可以是 async，同时把整套 async 守卫删掉。**
+  `on_tick` 是 1Hz，一个重的 tick 能把 worker 堵到预算上限（60 秒）—— 这是"毫秒级任务
+  被阻挡"的最后一个入口。现在它和任务/路由同一套两段式：结算后记 `ticks`/`last_tick`，
+  **上一拍还在 `await` 里就跳过这一拍**（不排队补跑，和 Node 的 `setInterval` 不重入同理），
+  墙钟到点还没回来就记一条 error 并让下一拍重新开始。
+  既然 async 到处都能跑，那些守卫的**前提**就不存在了，于是整组删掉：
+  `__async_audit`（加载期硬失败）、`__async_call_msg` / `__async_route_resp`、
+  `__is_async_fn`、`jslint` 模块（199 行 + 编辑期警告）、`web.rs` 里返回给编辑器的
+  `warnings` 字段 —— 现在 async 就是一个普通函数，不需要任何提示。
+  实测：500ms 的 async tick 跑着时，同 worker 的 50ms `setInterval` 仍然 **20 次/秒**；
+  1.5 秒的 tick 让 seq 走 1→3→5（跳过而不是补跑）；`await` 一个永不 settle 的 Promise
+  ⇒ 每拍 2 秒判失败并说清是哪条 invocation。`cargo test` 466 项全绿。
+- **路由 handler 也可以是 `async` 了：一次慢请求不再堵住整条 worker。**
+  以前 `register_route` 的 handler 必须是同步的（`__async_audit` 会在**加载期**拒绝
+  async 路由）—— 因为响应要当场给出。现在和任务一样走两段式：引擎先挂起这次请求，
+  Promise 结算后由 `__host_inv_done` 把**已经序列化好的响应**交回去（宿主只管转发，
+  不再解释 status/body，少一层就少一处不一致）。
+  在途的路由会占一个 `BUSY`、让插件免于惰性回收，并有**墙钟兜底**：到点还没结算就回
+  **504**，而不是让浏览器一直转圈、或者让 Web 层那句"引擎没有回话"把原因指错地方。
+  实测：一条 `await fetch_async(...)` 用掉 1 秒的路由，同 worker 上 50ms 的
+  `setInterval` 仍然 **20 次/秒**（同步版本会掉到 ~10）；`await` 一个永不 settle 的
+  Promise ⇒ 2.1 秒后 504 并说清是哪条 invocation；async 抛错 ⇒ 500 + 堆栈。
+  现在只剩 `on_tick` 不支持 async（它的 TickOutcome 当场就要写进日志与健康判据）。
+- **`fetch_async`：HTTP 请求不再堵住引擎线程。**
+  `http_fetch` 是同步实现 —— 它在引擎线程上阻塞，一次 10 秒的请求会把同一 worker 上
+  所有毫秒级任务一起堵住（实测 60 秒的请求能吃掉 ~119 拍，而且**照样报成功**）。
+  新的 `fetch_async(url, opts)` 把请求扔到后台线程，完成时把结果放进进程级队列并
+  `Wake` 引擎，由**归属 worker** 回到那个 Context 上 resolve（QuickJS 的 Context
+  绑线程，跨线程碰它是未定义行为 —— 所以只能是"后台线程算、引擎线程交付"）。
+  底层**原样复用** `do_http_fetch`：SSRF 判定、超时钳制、脱敏全同一条路径，没有第二份实现。
+  并发上限 32 条/worker，到顶直接 reject（一条线程一个请求，排队只是拿内存换假象）。
+  实测：1 秒的请求期间，同 worker 的 50ms `setInterval` 仍然 **20 次/秒**
+  （同步 `http_fetch` 会掉到 ~10）；`@every 2s` 的任务在 12 秒里保持
+  46.6/48.6/50.6/52.6/54.6 的精确节奏，每条运行记录 `duration_ms≈1010, ok=1`。
+  同步的 `http_fetch` 一行没动 —— 老插件不用改。
+- **任务 handler 可以是 `async` 了：`await` 期间让出引擎线程，毫秒级任务不再被堵。**
+  这是"向 Node 看齐"里最关键的一步。以前 async handler 是**加载期硬错误**（因为
+  宿主不驱动 Promise，`await` 之后的代码永远不跑）；现在 `run_one` 拆成
+  **Start / Resume** 两段：Start 建运行记录并分发，handler 返回 Promise 就把
+  "收尾所需的一切"（`RunTail`：插件、任务名、run id、开始时刻、`lateMs`…）连同手动
+  触发的 reply 通道存进 invocation 表；Promise 结算（`__host_inv_done`）或**墙钟超时**
+  之后走 Resume 收尾 —— 运行记录、熔断、推送、日志一条都不少。
+  配套：新增 `sleep(ms)`（`new Promise(r => setTimeout(r, ms))`）；调度器加
+  `in_flight`（同一拍不重入、不把 `sleep_hint` 钉成 0 —— 没有它，一条 `@every 1s`
+  的 async 任务会在 1 秒里被触发 200+ 次，实测直接把定时器顶到单插件 256 条上限）。
+  `budget_ms` 从此是**墙钟**上限：`await` 一个永远不 settle 的 Promise，到点判失败
+  并计入熔断（实测 3 秒预算 ⇒ `duration_ms=3001` 的一条失败记录）。
+  **路由和 `on_tick` 仍然同步**（它们的结果必须当场给出），注册 async 的会在加载期被拒。
+  实测：`await sleep(700)` 的任务在跑时，同一 worker 上 50ms 的 `setInterval` 仍然
+  20 次/秒（阻塞版本只有 ~5 次/秒）。`cargo test` 471 项全绿。
+- **微任务泵：`Promise` 的 `.then` / `await` 续体现在真的会跑，未捕获的拒绝不再静默。**
+  以前面板**从不调** `JS_ExecutePendingJob`（只有模块加载时的 `promise.finish()` 顺带跑一次），
+  所以插件里 `Promise.resolve().then(fn)` 的 `fn` 实际上永远不执行 —— 这是一条真 bug，
+  不是缺功能。现在 worker 每轮在定时器/排班之后泵一次（`Runtime::execute_pending_job`，
+  **不是** `Ctx` 那个版本：后者会把 job 抛的异常 `catch` 掉还返回 true），
+  50ms 切片上限，到点就让出、剩下的下一轮继续。
+  同时装了 `JS_SetHostPromiseRejectionTracker`：`someAsync().then(...)` 漏了 `.catch`
+  以前是**完全静默**的（工作没做完，面板一片绿），现在会在该插件的日志里留一行
+  `未捕获的 Promise 拒绝: ...`。冒烟：cron 里排的 microtask 每拍都跑，
+  故意 throw 的那条被记成 `[m] 未捕获的 Promise 拒绝: Error: unhandled boom`。
+  `cargo test` 469 项全绿。
+- **插件内定时器：`setTimeout` / `setInterval` / `clearTimeout` / `clearInterval`（QuickJS）。**
+  这是「向 Node 看齐」的第一步，也顺手解决一条实际的账：`every('50ms')` 每触发一次
+  就写一条 `runs` 记录（24h 180 万行 / 几百 MB），而插件内部的攒批、防抖、轮询
+  根本不该进账本。现在它们走 `setInterval`，面板上看不到、不参与熔断。
+  实现上表在 Rust 侧（`src/timers.rs`）、**回调留在 JS 侧** —— Rust 不拿
+  `Persistent<Function>`，也就绕开了「必须在 Runtime drop 前全部释放、否则 abort
+  进程」那个坑。四条边界写进 [host-api.md §1.2.11](docs/host-api.md)：回调的返回值被忽略
+  （可以是 async，但定时器不等它，会重叠）、有活定时器不参与惰性回收、单插件上限 256 条、
+  回调抛错连续 5 次自动停（否则 50ms 的坏 interval 一天刷 170 万行日志）。
+  冒烟：50ms 的 interval 在 1 秒内触发 20 次，`clearInterval` 之后停住，
+  `setTimeout(120ms)` 按时触发；`cargo test` 466 项全绿。
+- **内存：换 mimalloc 全局分配器，musl 上第一次有「把页还回去」的手段。**
+  起因是一条实测反馈：面板常驻内存一路涨，最后只能靠重启。查下来是**机制缺失**而不是逻辑泄漏 ——
+  `PLUGIN_MEM_TRIM_MS` 只对 macOS（`malloc_zone_pressure_relief`）和 glibc（`malloc_trim`）
+  生效，而发布产物是 `aarch64/x86_64-unknown-linux-musl`，三个 `cfg` 分支一个都不命中，
+  函数直接 `return 0` ⇒ **这个开关在真机上从来没生效过**；`PLUGIN_RECYCLE_KB` 对 QuickJS
+  又实测无效（卸完 RSS 不降，页在分配器手里）。于是只剩 `PLUGIN_MAX_RSS_KB` 的 exec 重启。
+  现在全局分配器换成 mimalloc，还页改调 `mi_collect(true)`（空闲段真正 munmap），
+  `PLUGIN_MEM_TRIM_MS` 默认值从 0 改成 60000 —— 常开才是「不重启也稳」的那条路。
+  探针（`cargo test --bin plugin-panel -- --ignored mimalloc_returns_pages --nocapture`）：
+  分配 128 MiB → 释放 → collect，`peak=134400KB after=3328KB freed=131072KB`，
+  **整块还回去了**。设置页与 [configuration.md](docs/configuration.md) 补齐了六个内存相关变量
+  （原来一个都没有）。
+- 新增 [docs/remote-access.md](docs/remote-access.md)：没有公网 IP 时用**出站隧道**从外网访问面板。
+  覆盖 Cloudflare Tunnel（quick / 命名隧道）、frp + 国内 VPS、Tailscale、花生壳 / cpolar、
+  IPv6 + DDNS 的取舍，面板侧环境变量（`PANEL_TOKEN_HASH`、`PANEL_COOKIE_SECURE`、
+  `PANEL_TRUSTED_PROXIES`）、Cloudflare Access、插件页第二个域名、SSE / 上传边界、
+  安全清单与排障表，并附 `examples/remote/` 下复制即用的隧道配置与启动环境示例。
+  文档索引、README、部署与安全文档都加了入口。
+- 鉴权：`client_ip()` 新增对 `CF-Connecting-IP` 的采信，但**只在必要时**：先取
+  `X-Forwarded-For` 的**最右一跳**，那一跳不是受信代理就直接用它；只有当它**本身也是受信代理**
+  （`cloudflared → 本机 nginx → 面板`）或**没有 XFF** 时，才采信 Cloudflare 边缘覆写的
+  `CF-Connecting-IP`，最后退回 `X-Real-IP` / 对端地址。不采信的话，Tunnel 后面的请求会
+  全部记成 `127.0.0.1`（§20.1 那个洞在 Tunnel 下重现）；而无条件先看 CF 头又会让普通
+  nginx 后面的人自己填一个来源 IP 就能绕过退避、定向封禁别人。
+- 登录日志改记**真实客户端 IP**（`client_ip()` 的结果）：反代 / 隧道下原来记的是 `peer.ip()`，
+  永远是 `127.0.0.1`，想靠日志确认「转发头链路通没通」只能看到一片回环地址。顺带修掉
+  `take_failure_log_slot()` 的一个节流 bug —— 新来源的**第一条**失败日志会被 5 秒窗口吞掉
+  （表现是「有人猜了口令，日志里什么都没有」）。
+
 ## 0.1.10
 
 - **ARM 产物改成 static PIE**：新版 Termux（Android 10+ / targetSdk ≥ 29）里，

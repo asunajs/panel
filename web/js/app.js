@@ -784,7 +784,9 @@ async function pollEngine() {
     `\n防爆破：近 60 秒失败 ${failed} 次，正在退避的来源 ${blocked} 个` +
     // 蜜罐（登录页那个看不见的「账号」框）判出来的封禁：比退避重，一小时不解开
     (banned ? `，已封禁 ${banned} 个` : '') +
-    (auth.trust_proxy ? '\n反代模式：客户端 IP 取自 X-Forwarded-For 的最右一跳' : '');
+    (auth.trust_proxy
+      ? '\n反代模式：客户端 IP 取自 X-Forwarded-For 的最右一跳（Cloudflare 多层反代时用 CF-Connecting-IP）'
+      : '');
   if (logoutBtn) logoutBtn.hidden = false;
 }
 

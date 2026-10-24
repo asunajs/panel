@@ -15,6 +15,11 @@
 3. **真实动作**：周期性热更新插件、手动触发任务、暂停/恢复任务、打插件路由 ——
    这些都是长跑里最容易出问题、而短跑根本覆盖不到的路径。
 
+工作负载里刻意放了**四条异步路径**（第六十二~四轮加的机制，不压等于没测）：
+`async` 任务（`await sleep`）、`fetch_async` 后台请求、`setInterval` 内部定时器、
+async `on_tick`。它们的计数都在插件路由 `/perf` 里给出来，报告会印最后一次采样 ——
+「配了但没生效」和「真的在跑」必须能分开看。
+
 用法：
 
     # 8 小时（默认），后台跑
@@ -56,6 +61,13 @@ OUT_DIR = REPO / "target" / "perf"
 # Python 插件已移除，长跑工作负载只剩 JS。
 JS_PLUGIN = r"""// 长跑压测插件（自动生成，见 scripts/endurance.py）
 import { every, log, register_route, sqlite_exec, sqlite_query } from 'host-api';
+
+// 后台请求的目标：由 scripts/endurance.py 起一个本机小服务器并填进来
+// （面板默认禁回环，脚本会为此设 HOST_API_ALLOW_PRIVATE=1 —— 只在这个压测实例里）。
+const UPSTREAM = '__UPSTREAM__';
+
+// 异步机制的计数器（都在 /perf 里给出去，报告据此判断"真的在跑"而不是"看起来在跑"）
+let asyncDone = 0, fetchOk = 0, intervalTicks = 0, tickDone = 0;
 
 const BUCKETS = [1, 5, 20, 50, 100, 500, 1000, 5000];
 const stats = { n: 0, sumLate: 0, minLate: null, maxLate: 0, buckets: {} , over: 0 };
@@ -105,6 +117,8 @@ register_route('/perf', 'GET', function () {
                 n: stats.n, sumLate: stats.sumLate, minLate: stats.minLate,
                 maxLate: stats.maxLate, buckets: stats.buckets, over: stats.over,
             },
+            // 异步机制是不是真的在跑（长跑里最怕"配了但没生效"）
+            async: { done: asyncDone, fetchOk: fetchOk, timerTicks: intervalTicks, tickDone: tickDone },
         }),
     };
 });
@@ -113,6 +127,37 @@ register_route('/perf', 'GET', function () {
 every('perf-fail', '30s', function () {
     throw new Error('perf-fail：故意失败（长跑压测）');
 });
+
+// ---- 第六十二~四轮加的那套异步机制，长跑里必须真的压上 ----
+//
+// 只跑同步任务的话，"await 让出线程 / 后台请求 / 定时器表 / 在途 invocation"
+// 这些新东西一条都没被覆盖 —— 8 小时全绿也说明不了什么。
+
+// 2s：async handler，中间 await 200ms（走 invocation 表 + 墙钟兜底）
+every('perf-async', '2s', async function (p) {
+    note(p);
+    await sleep(200);
+    asyncDone++;
+});
+
+// 同一拍里再发一次后台请求（走后台线程 + FETCH_DONE 队列 + Wake）
+every('perf-fetch', '5s', async function (p) {
+    note(p);
+    const r = await fetch_async(UPSTREAM + '/ping');
+    fetchOk += (r && r.status === 200) ? 1 : 0;
+});
+
+// 100ms 的内部定时器：不进 runs 账本，只压在 timers 表上
+const iv = setInterval(function () {
+    intervalTicks++;
+    if (intervalTicks % 5000 === 0) log('perf-js: 内部定时器 ' + intervalTicks + ' 拍');
+}, 100);
+
+// on_tick 也走 async（1Hz，await 50ms）
+globalThis.on_tick = async function (t) {
+    await sleep(50);
+    tickDone++;
+};
 
 log('perf-js: 已加载');
 """
@@ -124,6 +169,9 @@ EXPECTED_MS = {
     "perf-fast": 50,
     "perf-write": 1000,
     "perf-fail": 30_000,
+    # 异步路径：这两个不进 runs 的会计入触发次数，正好用来验"async handler 没有丢拍"
+    "perf-async": 2000,
+    "perf-fetch": 5000,
 }
 
 
@@ -139,6 +187,14 @@ def free_port() -> int:
 PERF_TOKEN = "perf-token"
 
 
+# ⚠ **必须绕过系统代理**。macOS 上 urllib 会通过 _scproxy 读系统代理设置
+# （curl 只认环境变量，所以「curl 通、脚本报 Connection refused」是这里的典型症状）。
+# 本脚本访问的全是 127.0.0.1，走代理只会失败 —— 踩过一次：系统代理指向一个没启动的
+# 本地端口，于是 wait_ready 一直 Connection refused，报「面板没起来」，可面板日志里
+# 明明写着 Web UI: http://127.0.0.1:xxxxx/ 并且任务在跑。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def http(url: str, method: str = "GET", headers=None, body=None, timeout=10.0):
     """返回 `(状态码, 正文)`。不抛 HTTPError —— 4xx/5xx 也是要记录的数据。"""
     req = urllib.request.Request(url, data=body, method=method)
@@ -146,7 +202,7 @@ def http(url: str, method: str = "GET", headers=None, body=None, timeout=10.0):
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="replace")
@@ -263,9 +319,49 @@ def db_sizes(db_path: Path):
     return out
 
 
-def write_plugins(pdir: Path, rev: int) -> None:
+class Upstream:
+    """给 `fetch_async` 用的本机小服务器。
+
+    为什么要起一个：面板默认拒绝回环目标（SSRF 防护），而长跑要压的是
+    「后台线程 + FETCH_DONE 队列 + Wake」那条路，不是外网通不通。所以压测实例
+    开 `HOST_API_ALLOW_PRIVATE=1`，目标指向这里 —— **只在这个一次性实例里**，
+    报告里会写明。
+    """
+
+    def __init__(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):  # 别把每个请求都打到 stdout
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def close(self) -> None:
+        try:
+            self.httpd.shutdown()
+        except Exception:
+            pass
+
+
+def write_plugins(pdir: Path, rev: int, upstream: str) -> None:
     # Python 插件已移除：长跑工作负载只剩 JS。
-    (pdir / "perf-js.js").write_text(JS_PLUGIN + f"\n// rev={rev}\n")
+    src = JS_PLUGIN.replace("__UPSTREAM__", upstream)
+    (pdir / "perf-js.js").write_text(src + f"\n// rev={rev}\n")
 
 
 # ---------------------------------------------------------------- 主流程
@@ -286,6 +382,8 @@ class Runner:
         self.db = self.workdir / f"panel-{stamp}.db"
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
+        # fetch_async 的目标（见 Upstream 的说明）
+        self.upstream = Upstream()
         self.proc = None
         self.panel_logf = None
         self.samples = []
@@ -318,6 +416,9 @@ class Runner:
         # 面板没有「本机免登录」；压测用固定明文令牌，http() 每个请求带 X-Panel-Token。
         env["PANEL_TOKEN"] = PERF_TOKEN
         env["PANEL_ALLOW_PLAIN_TOKEN"] = "1"
+        # 让 fetch_async 能打到脚本起的本机小服务器（默认被 SSRF 防护拦）。
+        # 只影响这个一次性压测实例，报告里会写明。
+        env["HOST_API_ALLOW_PRIVATE"] = "1"
         self.panel_logf = open(self.panel_log, "a")
         self.panel_logf.write(f"\n===== 启动于 {datetime.now().isoformat()} =====\n")
         self.panel_logf.flush()
@@ -415,7 +516,7 @@ class Runner:
         acts = []
         if elapsed >= self.next_reload:
             rev = self.reloads + 1
-            write_plugins(self.plugins, rev)
+            write_plugins(self.plugins, rev, self.upstream.url())
             self.reloads = rev
             self.next_reload = elapsed + self.args.reload_every
             acts.append(f"热更新（rev={rev}）")
@@ -452,8 +553,31 @@ class Runner:
         return acts
 
     # ---- 主循环 ----
+
+    def _planned_total(self) -> float:
+        """计划时长：启动参数 + 运行期延长（EXTEND_HOURS 文件）。
+
+        为什么要这个文件：total 原来只在 run() 开头算一次，想延长就只能重启
+        一段新的 —— 等于把已经跑出来的连续曲线剪断。现在只要写
+        echo 168 > <段目录>/EXTEND_HOURS，下一轮循环就按新时长继续同一个进程、
+        同一个数据文件，不再重启。
+        """
+        base = self.args.seconds or self.args.hours * 3600
+        try:
+            f = Path(self.workdir) / 'EXTEND_HOURS'
+            if f.exists():
+                want = float(f.read_text(encoding='utf-8').strip()) * 3600
+                if want > base:
+                    if getattr(self, '_extended_to', None) != want:
+                        self._extended_to = want
+                        print('[extend] 计划时长延长到 %.2f 小时（%.0fs）' % (want / 3600, want), flush=True)
+                    return want
+        except Exception:
+            pass
+        return base
+
     def run(self) -> int:
-        total = self.args.seconds or self.args.hours * 3600
+        total = self._planned_total()
         print(f"输出目录: {self.workdir}")
         print(f"二进制:   {self.args.bin}")
         print(f"时长:     {total / 3600:.2f} 小时（{total:.0f}s），每 {self.args.sample_every:.0f}s 采样")
@@ -463,7 +587,7 @@ class Runner:
 
         shutil.rmtree(self.plugins, ignore_errors=True)
         self.plugins.mkdir(parents=True, exist_ok=True)
-        write_plugins(self.plugins, 0)
+        write_plugins(self.plugins, 0, self.upstream.url())
         self.spawn_panel()
         if not self.wait_ready():
             print("❌ 面板没起来，先看日志:", self.panel_log, file=sys.stderr)
@@ -495,6 +619,7 @@ class Runner:
         last_beat = -1e9
         while True:
             elapsed = time.time() - self.started
+            total = self._planned_total()
             if elapsed >= total or self.stopping:
                 break
 
@@ -545,6 +670,7 @@ class Runner:
                 self.proc.kill()
         if self.panel_logf:
             self.panel_logf.close()
+        self.upstream.close()
 
     # ---- 报告 ----
     def finish(self) -> int:
@@ -612,6 +738,15 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
       f" · 手动触发：{manual_runs} 次 · 暂停/恢复：{pauses} 轮")
     a(f"- 插件路由失败：{route_errors} 次")
     a(f"- 内存口径：`{header['rss_metric']}`")
+    last = samples[-1] if samples else {}
+    perf = last.get("perf") or {}
+    acy = (perf.get("async") or {}) if isinstance(perf, dict) else {}
+    if acy:
+        a(f"- 异步机制（最后一次采样；热更新会重置计数）：async 任务 "
+          f"**{acy.get('done')}** 次 · 后台请求成功 **{acy.get('fetchOk')}** 次 · "
+          f"内部定时器 {acy.get('timerTicks')} 拍 · async on_tick {acy.get('tickDone')} 次")
+    a("- ⚠ 本实例开着 `HOST_API_ALLOW_PRIVATE=1`（让 `fetch_async` 能打到脚本起的"
+      "本机小服务器）。这只影响这个一次性压测实例，不代表线上配置。")
     a(f"- 原始数据：`{jsonl}` · 面板日志：`{panel_log}`\n")
 
     if not ok:
@@ -630,7 +765,9 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     s1, _ = _slope(sts[:mid], smem[:mid]) if mid > 2 else (0, 0)
     s2, sg2 = _slope(sts[mid:], smem[mid:]) if mid > 2 else (0, 0)
     s1, s2 = s1 * 3600.0, s2 * 3600.0
-    tailn = max(3, len(sts) // 4)
+    # 末段取 1/4，但**不能超过可用样本数** —— 否则 sts[-tailn] 直接 IndexError
+    # （短窗口踩过：--seconds 60 只采到 2 个点，报告生成当场崩，数据全白跑）
+    tailn = min(len(sts), max(3, len(sts) // 4))
     s3_s, sg3 = _slope(sts[-tailn:], smem[-tailn:])   # 每秒，用来算涨幅
     s3 = s3_s * 3600.0                                # 每小时，用来显示
     growth_tail = s3_s * (sts[-1] - sts[-tailn])
@@ -644,8 +781,19 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     # 分辨率：2σ/窗口长度 × 一天的秒数。ys 的单位已经是 MB，不能再除 1024
     resolvable = 2 * sigma / (sts[-1] - sts[0]) * 86400 if sts[-1] > sts[0] else 0
     a(f"| 本窗口分辨率 | ±{resolvable:.2f} MB/天 |\n")
+    # 窗口太短就别下判断。
+    #
+    # 3 分钟窗口的分辨率是 ±312 MB/天 —— 那时候「+40 MB/小时」完全是噪声，
+    # 报「❌ 疑似持续增长」只会让人白折腾一轮。宁可说"还看不出来"。
+    MIN_JUDGE_SECONDS = 20 * 60
+    window = sts[-1] - sts[0] if len(sts) > 1 else 0
     # 阈值也是 MB（原来是 soak.py 的 KB 常量 80，直接用会把门槛放到 80MB，形同虚设）
-    if abs(growth_tail) < max(0.08, 2 * sg3):
+    if window < MIN_JUDGE_SECONDS:
+        a(f"**判定：⏳ 窗口太短，不下结论** —— 只覆盖 {window / 60:.1f} 分钟，"
+          f"分辨率 ±{resolvable:.0f} MB/天，比任何可信的斜率都粗。"
+          f"要判断「会不会涨」请至少跑 20 分钟（`--seconds 1200`），"
+          f"正式结论用 8 小时。")
+    elif abs(growth_tail) < max(0.08, 2 * sg3):
         a(f"**判定：✅ 平台期** —— 末段涨幅 {growth_tail:+.2f}MB 落在噪声带内，"
           f"常驻稳定在 ~{mem[-1]:.1f} MB。")
     elif abs(slope * 24) > 20:

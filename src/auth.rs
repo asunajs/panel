@@ -571,12 +571,27 @@ impl TrustedProxies {
 
 /// 从转发头里取客户端 IP。
 ///
-/// 默认**不信任**任何转发头：`X-Forwarded-For` / `X-Real-IP` 都是客户端能随便写的，
-/// 默认信它等于把退避变成「攻击者自己填个 IP 就绕过了」。
+/// 默认**不信任**任何转发头：`X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP`
+/// 都是客户端能随便写的，默认信它等于把退避变成「攻击者自己填个 IP 就绕过了」。
 ///
 /// 只有当 `peer` 在 `trusted` 里（默认空；`PANEL_TRUST_PROXY=1` 时是回环；
-/// 推荐显式配 `PANEL_TRUSTED_PROXIES`）才读，而且只取 XFF 的**最右一跳** ——
-/// 那是你自己的反代追加进去的（客户端伪造的那些在左边，取左边就等于取攻击者写的东西）。
+/// 推荐显式配 `PANEL_TRUSTED_PROXIES`）才读。读取顺序刻意是「先看 XFF 最右一跳」：
+///
+/// 1. `X-Forwarded-For` 的**最右一跳** —— 那是离面板最近的那个代理追加的地址。
+///    正常情况下它就是客户端；客户端自己伪造的那一段在左边，取不到。
+/// 2. 如果最右一跳**本身也是受信代理**（`cloudflared → 本机 nginx → 面板`：
+///    nginx 会把 cloudflared 的回环地址追加到最右），这一跳不是客户端 ——
+///    这时才采信 `CF-Connecting-IP`：它是 Cloudflare 边缘**覆写**的客户端地址，
+///    穿过多层代理仍然是真实来源。只有受信对端才能提供它，直连 8787 的人写了也不算。
+/// 3. 没有 XFF（或解析不出来）时，同样先试 `CF-Connecting-IP`，再试 `X-Real-IP`
+///    （nginx 常只给这一个）。
+///
+/// 为什么不是「无条件先看 CF 头」：面板也可能挂在**普通 nginx** 后面，而 nginx
+/// 默认不改 `CF-Connecting-IP` —— 无条件采信等于让任何能连到 nginx 的人自己填一个
+/// 来源 IP（退避失效、还能定向封禁别人）。先看 XFF 最右一跳就不会有这个问题：
+/// 只要代理正常追加，最右那一跳就是真实客户端，伪造的 CF 头根本轮不到。
+///
+/// 都缺失或解析不出来时回退到对端地址，而不是放行。
 pub fn client_ip<H: HeaderMapLike>(
     peer: SocketAddr,
     headers: &H,
@@ -586,27 +601,57 @@ pub fn client_ip<H: HeaderMapLike>(
     if !trusted.contains(peer_ip) {
         return peer_ip;
     }
-    if let Some(v) = headers.get_joined("x-forwarded-for") {
-        // 取**字面量最后一个**元素：反代追加的那一跳就在最右。
-        //
-        // 末尾是空值 / 解析不出来时**回退到对端地址**，而不是往前找一个能用的 ——
-        // 往前找就等于把「客户端自己写的那一段」当成事实（那一整段都是可以伪造的）。
-        // 代价：某些会追加空值的反代（例如 `X-Forwarded-For: 1.2.3.4, `）会让
-        // 所有客户端都塌回同一个地址 —— 那是**安全方向**的退化，
-        // 而且 `/api/state` 里能看出 `blocked_ips` 的异常（见 docs/security.md §20.3）。
-        if let Some(last) = v.rsplit(',').next() {
-            if let Ok(ip) = last.trim().parse::<IpAddr>() {
-                return normalize_ip(ip);
+
+    // XFF 的**字面量最后一个**元素：反代追加的那一跳就在最右。
+    //
+    // 末尾是空值 / 解析不出来时**不往前找** —— 往前找就等于把「客户端自己写的那一段」
+    // 当成事实（那一整段都是可以伪造的）。代价：某些会追加空值的反代
+    // （例如 `X-Forwarded-For: 1.2.3.4, `）会让所有客户端塌回同一个地址 ——
+    // 那是**安全方向**的退化，而且 `/api/state` 里能看出 `blocked_ips` 的异常
+    // （见 docs/security.md §20.3）。
+    let xff_last = headers
+        .get_joined("x-forwarded-for")
+        .and_then(|v| v.rsplit(',').next().map(str::to_string))
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .map(normalize_ip);
+
+    match xff_last {
+        // 正常路径：最右一跳就是客户端。
+        Some(ip) if !trusted.contains(ip) => return ip,
+        // 最右一跳仍是受信代理（cloudflared → 本机 nginx → 面板）：
+        // 这一跳不是客户端，改看 CF 边缘覆写的地址。
+        Some(_) => {
+            if let Some(ip) = cf_connecting_ip(headers) {
+                return ip;
+            }
+        }
+        // 没有 XFF：Cloudflare 隧道 / 只给 X-Real-IP 的反代。
+        None => {
+            if let Some(ip) = cf_connecting_ip(headers) {
+                return ip;
             }
         }
     }
-    if let Some(v) = headers.get_str("x-real-ip") {
-        if let Ok(ip) = v.trim().parse::<IpAddr>() {
-            return normalize_ip(ip);
-        }
+
+    if let Some(ip) = headers
+        .get_str("x-real-ip")
+        .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    {
+        return normalize_ip(ip);
     }
     // 头缺失或解析不出来 → 老实回退到对端地址，而不是放行
     peer_ip
+}
+
+/// `CF-Connecting-IP`：Cloudflare 边缘**覆写**的客户端地址（cloudflared 原样转给源站）。
+///
+/// 只在 [`client_ip`] 已经确认对端是受信代理、且 XFF 最右一跳不是客户端时才用。
+/// 单独抽出来是为了让「解析失败就继续往下试」这条路径只写一遍。
+fn cf_connecting_ip<H: HeaderMapLike>(headers: &H) -> Option<IpAddr> {
+    headers
+        .get_str("cf-connecting-ip")
+        .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        .map(normalize_ip)
 }
 
 /// 解析 `PANEL_ALLOW_IPS`：逗号 / 分号 / 空白分隔的 IP 列表。
@@ -748,7 +793,12 @@ impl Auth {
         let mut guard = self.fail_log.lock().unwrap();
         // 顺手清理，避免表随来源数无界增长
         guard.retain(|_, (last, _)| now.duration_since(*last) < FORGET);
-        let e = guard.entry(ip).or_insert((now, 0));
+        // 新来源的**第一条**必须立刻写：如果初始化成 `now`，第一条会落进
+        // 「5 秒窗口内」而被吞掉 —— 表现就是「有人猜了口令，日志里什么都没有」，
+        // 而排障时最需要的恰恰是第一次。初始化成「窗口之前」等于让第一条必然通过。
+        let e = guard
+            .entry(ip)
+            .or_insert((now.checked_sub(WINDOW).unwrap_or(now), 0));
         if now.duration_since(e.0) >= WINDOW {
             let suppressed = e.1;
             e.0 = now;
@@ -1457,6 +1507,113 @@ mod tests {
         assert_eq!(
             client_ip(peer, &headers, &trusted()).to_string(),
             "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn client_ip_uses_cf_connecting_ip_when_xff_ends_at_a_proxy() {
+        // Cloudflare Tunnel 直接连面板：cloudflared 从回环进来，CF 边缘覆写了
+        // CF-Connecting-IP。没有 XFF 时按它记账。
+        let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let loopback = TrustedProxies::loopback();
+        let headers = h(&[("cf-connecting-ip", "203.0.113.9")]);
+        assert_eq!(
+            client_ip(peer, &headers, &loopback).to_string(),
+            "203.0.113.9"
+        );
+
+        // cloudflared → 本机 nginx → 面板：nginx 把 cloudflared 的回环地址追加到
+        // XFF 最右，按 XFF 取会塌成 127.0.0.1；这时改看 CF 头。
+        let headers = h(&[
+            ("x-forwarded-for", "203.0.113.9, 127.0.0.1"),
+            ("cf-connecting-ip", "203.0.113.9"),
+        ]);
+        assert_eq!(
+            client_ip(peer, &headers, &loopback).to_string(),
+            "203.0.113.9"
+        );
+
+        // IPv4-mapped 表示也要归一化（双栈 / 某些代理会这么写）
+        let headers = h(&[("cf-connecting-ip", "::ffff:198.51.100.7")]);
+        assert_eq!(
+            client_ip(peer, &headers, &loopback).to_string(),
+            "198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn client_ip_does_not_let_a_client_spoof_cf_connecting_ip() {
+        // 普通 nginx 默认不改 CF-Connecting-IP。只要代理正常追加 XFF，最右一跳
+        // 就是真实客户端 —— 客户端自己填的 CF 头必须轮不到（否则退避可绕过、
+        // 还能拿它定向封禁别人）。
+        let peer: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let headers = h(&[
+            ("x-forwarded-for", "1.2.3.4, 203.0.113.7"),
+            ("cf-connecting-ip", "8.8.8.8"),
+        ]);
+        assert_eq!(
+            client_ip(peer, &headers, &trusted()).to_string(),
+            "203.0.113.7",
+            "XFF 最右一跳是真实客户端时，CF 头不参与"
+        );
+
+        // 对端根本不在受信名单里：所有转发头都不看
+        assert_eq!(
+            client_ip(
+                peer,
+                &h(&[("cf-connecting-ip", "8.8.8.8")]),
+                &TrustedProxies::default()
+            ),
+            peer.ip()
+        );
+        assert_eq!(
+            client_ip(
+                peer,
+                &h(&[("cf-connecting-ip", "8.8.8.8")]),
+                &TrustedProxies::new(vec!["127.0.0.1".parse().unwrap()])
+            ),
+            peer.ip(),
+            "只有名单里的对端才能提供转发头"
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_when_cf_header_is_garbage() {
+        // 一个写坏的头不该让整条链路塌成一个共享桶：继续试 X-Real-IP，再回退对端。
+        let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let loopback = TrustedProxies::loopback();
+        let headers = h(&[
+            ("cf-connecting-ip", "not-an-ip"),
+            ("x-real-ip", "198.51.100.8"),
+        ]);
+        assert_eq!(
+            client_ip(peer, &headers, &loopback).to_string(),
+            "198.51.100.8"
+        );
+        let headers = h(&[("cf-connecting-ip", "not-an-ip")]);
+        assert_eq!(client_ip(peer, &headers, &loopback), peer.ip());
+    }
+
+    #[test]
+    fn first_failure_from_a_new_source_is_logged_immediately() {
+        // 新来源的第一条不能被 5 秒节流窗口吞掉：排障时最需要的就是「第一次」。
+        // （实测过的现象：改了 client_ip 之后去日志里找来源 IP，结果一条都没有。）
+        let a = auth();
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(
+            a.take_failure_log_slot(ip),
+            Some(0),
+            "新来源的第一条必须立刻写日志"
+        );
+        assert_eq!(
+            a.take_failure_log_slot(ip),
+            None,
+            "同一来源 5 秒窗口内的后续请求要被合并"
+        );
+        // 每个来源有自己的窗口
+        assert_eq!(
+            a.take_failure_log_slot("203.0.113.10".parse().unwrap()),
+            Some(0)
         );
     }
 
