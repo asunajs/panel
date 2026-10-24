@@ -28,18 +28,45 @@
 
 ## 二、拿到两个包
 
-在仓库根目录的 `dist/` 下（也可以直接把 `dist/plugin-panel-testkit.zip` 整个拷过去）：
+包由 CI 构建（`.github/workflows/testkit.yml`），**不要用开发机交叉编的**：那边是
+arm64 macOS，编出来的产物没法冒烟。
 
-| 文件 | 用途 | 大小 | sha256 |
-|---|---|---|---|
-| `plugin-panel-x86_64-linux-musl` | **WSL2 里跑** | 7.8 MiB | `70535809…` |
-| `plugin-panel-x86_64-windows.exe` | Windows 原生跑 | 7.0 MiB | `eb89aded…` |
+### 方式一：命令行（推荐）
 
-完整校验和在同目录的 `SHA256SUMS` 里。
+```bash
+gh run download -n plugin-panel-testkit      # 取最新一次成功的
+```
+
+只想要某一次：
+
+```bash
+gh run list --workflow=testkit.yml           # 看 run id
+gh run download <run-id> -n plugin-panel-testkit
+```
+
+### 方式二：浏览器
+
+仓库 → **Actions** → 左边选 **Testkit** → **Run workflow** → 等绿 → 页面底部
+`Artifacts` 里下 `plugin-panel-testkit`。
+
+### 方式三：没有 gh、也不方便登录
+
+那就只能请有仓库权限的人下载后传给你 —— Actions 的 artifact 需要登录才能下。
+
+---
+
+压缩包解开是这些：
+
+| 文件 | 用途 | 大小 |
+|---|---|---|
+| `plugin-panel-x86_64-linux-musl` | **WSL2 里跑** | ~8.0 MiB |
+| `plugin-panel-x86_64-windows.exe` | Windows 原生跑 | ~6.9 MiB |
+
+校验和在同目录的 `SHA256SUMS` 里，先跑一次 `sha256sum -c SHA256SUMS` 再往下。
 
 - Linux 包是**静态链接**：不依赖 glibc、不依赖任何 .so，拷进 WSL 就能跑。
-- Windows 包是 mingw 构建，只依赖系统自带的 DLL（KERNEL32 / UCRT / bcrypt / ws2_32），
-  **不需要装任何运行时**。外部 Node/Bun 档在 Windows 上不可用（QuickJS 正常）。
+- Windows 包是 MSVC 原生构建，只依赖系统自带 DLL，**不需要装任何运行时**。
+  外部 Node/Bun 档在 Windows 上不可用（QuickJS 正常）。
 
 两个都是 `--no-default-features` 构建：**不带 legacy-tls**。
 直播那条链需要 TLS，这里测内存用不上；要测直播得用带 TLS 的包，见文末。
