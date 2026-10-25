@@ -450,10 +450,16 @@ impl ChildHandle {
         // 只在还活着时杀进程组：已经退出的 pid 可能被系统复用，对着旧 pid 发
         // SIGKILL 会误杀无关进程组。`try_wait` 会把已退出的收尸。
         let alive = matches!(self.child.try_wait(), Ok(None));
+        // ⚠ 即使**组长已经退出**，也要对着进程组发一次（安全审计 M5）。
+        //
+        // 以前整段都在 `if alive` 里：组长先退了，组里的孙子进程（脚本 fork 出来
+        // 的、可能还在跑的东西）就一个都杀不掉 —— 而它们正是最需要清掉的那批。
+        // pid 复用在这里不是问题：只要组里还有成员，这个 pgid 就不会被分配给
+        // 别的进程组；组空了才可能复用，那时发过去也只是 ESRCH。
+        unsafe {
+            libc::kill(-(self.pid as i32), libc::SIGKILL);
+        }
         if alive {
-            unsafe {
-                libc::kill(-(self.pid as i32), libc::SIGKILL);
-            }
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
