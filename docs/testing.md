@@ -125,7 +125,7 @@ BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel; echo "exit=$?"   # 非 0
 BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel; echo "exit=$?" # 同样非 0
 
 # ㉓ 重新生成文档里的截图（需要本机有 Chrome / Edge / Chromium，零 npm 依赖）
-PANEL_TOKEN=demo-token BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel &
+PANEL_ALLOW_PLAIN_TOKEN=1 PANEL_TOKEN=demo-token BIND_ADDR=127.0.0.1:8787 ./target/release/plugin-panel &
 node scripts/screenshot.mjs --auth http://127.0.0.1:8787 --token demo-token --out docs/screenshots
 
 # ㉔ 第三方组件的**运行时**验收（web/vendor/puredashboard/ 那个子集 fork）
