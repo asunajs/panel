@@ -99,6 +99,51 @@ pub fn activate(db_path: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// 暂存文件：恢复的备份先搬到这里，**下次启动时**才真正换库。
+///
+/// 为什么不在命令里直接换：面板可能正在跑，而它手里有库的句柄。
+/// 直接 `rename` 覆盖过去，正在跑的进程会继续用**旧 inode** —— 它以为自己在写库，
+/// 实际写的是已经被换掉的那份，重启之后全丢。这种「静默写进幽灵文件」是最坏的。
+pub fn staged_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(".restore-staged");
+    PathBuf::from(s)
+}
+
+/// 把备份暂存起来，并写标记。**先暂存再写标记**：反过来的话，
+/// 标记存在但暂存文件不存在，启动时会被当成一次失败的恢复。
+pub fn stage(db_path: &Path, backup: &Path) -> std::io::Result<()> {
+    let dst = staged_path(db_path);
+    std::fs::copy(backup, &dst)?;
+    // 落盘之后再写标记：崩溃在中间只会留下一份没人认领的暂存文件，无害。
+    if let Ok(f) = std::fs::File::open(&dst) {
+        let _ = f.sync_all();
+    }
+    mark(db_path, &backup.display().to_string())
+}
+
+/// 启动时调用：把暂存文件换到库的位置。返回是否真的换了。
+///
+/// ⚠ 必须**在打开数据库之前**调，而且必须顺手清掉旧的 `-wal` / `-shm`：
+/// 那两个文件属于**旧库**，留着会被 SQLite 应用到新库上 —— 那是真正的数据损坏，
+/// 而且症状是随机的（有时没事，有时表里多出一堆不该有的行）。
+pub fn take_staged(db_path: &Path) -> std::io::Result<bool> {
+    let staged = staged_path(db_path);
+    if !staged.exists() {
+        return Ok(false);
+    }
+    // 旧库的 WAL/SHM 先清掉，再换文件。顺序反了就可能让新库套上旧 WAL。
+    for suffix in ["-wal", "-shm"] {
+        let mut s = db_path.as_os_str().to_os_string();
+        s.push(suffix);
+        let p = PathBuf::from(s);
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    std::fs::rename(&staged, db_path)?;
+    Ok(true)
+}
 /// 备份文件的体检结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupCheck {
@@ -157,6 +202,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn stage_then_take_replaces_the_db_and_clears_wal() {
+        // unpanel 2.10：暂存 → 启动时换库。旧的 -wal/-shm 必须一起清掉，
+        // 否则它们会被 SQLite 应用到新库上（随机性数据损坏）。
+        let d = tmp("stage");
+        let db = d.join("panel.db");
+        std::fs::write(&db, b"OLD").unwrap();
+        std::fs::write(d.join("panel.db-wal"), b"stale wal").unwrap();
+        std::fs::write(d.join("panel.db-shm"), b"stale shm").unwrap();
+        let bk = d.join("bk.db");
+        std::fs::write(&bk, b"NEW").unwrap();
+
+        stage(&db, &bk).unwrap();
+        assert!(pending(&db).is_some(), "暂存后必须有标记");
+        assert!(staged_path(&db).exists());
+
+        assert!(take_staged(&db).unwrap());
+        assert_eq!(std::fs::read(&db).unwrap(), b"NEW");
+        assert!(!staged_path(&db).exists(), "暂存文件该被消费掉");
+        assert!(!d.join("panel.db-wal").exists(), "旧 WAL 必须清掉");
+        assert!(!d.join("panel.db-shm").exists(), "旧 SHM 必须清掉");
+        // 标记**不**在这里清：换完库仍是暂停状态，等显式激活
+        assert!(pending(&db).is_some(), "换库不等于激活");
+
+        // 没有暂存文件时什么都不做
+        assert!(!take_staged(&db).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

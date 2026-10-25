@@ -286,11 +286,13 @@ fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = env_path("DB_PATH", "data/panel.db");
     let mut verify: Option<String> = None;
     let mut activate = false;
+    let mut apply = false;
     for a in args {
         match a.as_str() {
             "--activate" => activate = true,
-            // `--verify` 是标志位，真正的文件路径是它后面那个参数。
+            // `--verify` / `--apply` 都是标志位，真正的文件路径是后面那个参数。
             "--verify" => {}
+            "--apply" => apply = true,
             other => {
                 if verify.is_some() {
                     return Err(format!("多余的参数: {other}").into());
@@ -298,6 +300,23 @@ fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 verify = Some(other.to_string());
             }
         }
+    }
+    if apply {
+        let Some(file) = verify else {
+            eprintln!("用法: plugin-panel restore --apply <备份文件>");
+            return Err("缺少备份文件路径".into());
+        };
+        let src = std::path::Path::new(&file);
+        // 先体检：一份坏备份换上去，面板下次启动就再也起不来了。
+        if let crate::restore::BackupCheck::Bad(why) = crate::restore::verify_backup(src) {
+            eprintln!("❌ {file} 不能用: {why}");
+            return Err("备份体检没通过，未做任何改动".into());
+        }
+        crate::restore::stage(&db_path, src)?;
+        println!("已暂存: {}", crate::restore::staged_path(&db_path).display());
+        println!("下次启动时替换数据库。**替换后派发保持暂停**，");
+        println!("确认数据无误后执行 `plugin-panel restore --activate` 才会恢复跑任务。");
+        return Ok(());
     }
     if activate {
         return match crate::restore::activate(&db_path)? {
@@ -516,6 +535,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = db_path.parent() {
         ensure_private_dir(parent)?;
     }
+    // 恢复的换库就在这一刻发生（unpanel 2.10）：进程刚起来、还没人打开库，
+    // 是唯一安全的时机。命令里直接换会留下「旧进程继续写旧 inode」的幽灵。
+    if crate::restore::pending(&db_path).is_some() {
+        match crate::restore::take_staged(&db_path) {
+            Ok(true) => crate::log::plog!(
+                "boot",
+                warn,
+                "已按暂存的备份替换数据库；派发保持暂停，确认无误后用 restore --activate 或 POST /api/restore/activate 显式激活"
+            ),
+            Ok(false) => {}
+            Err(e) => crate::log::plog!("boot", error, "替换数据库失败: {e}"),
+        }
+    }
+
     let db = db::open(&db_path)?;
 
     // 恢复状态机（unpanel 2.10）：标记**活过崩溃**，这里只是把它喊出来。
