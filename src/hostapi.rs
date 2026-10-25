@@ -1603,16 +1603,27 @@ fn http_fetch_native(
             Value::String(v.to_str().unwrap_or("<非 UTF-8>").to_string()),
         );
     }
+    // ⚠ 截断必须**说出来**（安全审计 L10 后半）：以前读满 1 MiB 就停，
+    // 返回的 body 看起来是完整 JSON/HTML —— 插件解析到一半失败，或者更糟，
+    // 解析出一个「看起来合法但少了一段」的结果。
+    // 现在多读一个字节用来判断「是不是真的读完了」，并在响应里带上 truncated。
+    const MAX_BODY: u64 = 1024 * 1024;
     let mut buf = Vec::new();
-    resp.take(1024 * 1024)
+    resp.take(MAX_BODY + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("响应体读取失败: {e}"))?;
+    let truncated = buf.len() as u64 > MAX_BODY;
+    if truncated {
+        buf.truncate(MAX_BODY as usize);
+    }
     let text = String::from_utf8_lossy(&buf).to_string();
 
     Ok(json!({
         "status": status,
         "headers": Value::Object(headers),
         "body": text,
+        // 插件可以据此判断「内容不全」，而不是把半截内容当成全部。
+        "truncated": truncated,
     })
     .to_string())
 }
