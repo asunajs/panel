@@ -194,20 +194,87 @@ fn backup_to(
     Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
 }
 fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(out) = args.first() else {
-        eprintln!("用法: plugin-panel backup <输出文件路径>");
-        eprintln!("  例如: plugin-panel backup /var/backups/panel-$(date +%F).db");
+    // 支持两种形态：
+    //   backup <文件>             —— 老行为，写一个指定文件，已存在就拒绝
+    //   backup [--keep N] <目录>  —— 按时间戳命名，并只保留最近 N 份（unpanel 2.10 保留份数）
+    let mut keep: u64 = 14;
+    let mut target: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--keep" {
+            let Some(v) = it.next() else {
+                return Err("--keep 后面要跟一个数字".into());
+            };
+            keep = v.parse::<u64>().map_err(|_| format!("--keep 不是数字: {v}"))?;
+            if keep == 0 {
+                return Err("--keep 不能是 0：那等于每次备份完立刻把备份删掉".into());
+            }
+            continue;
+        }
+        if target.is_some() {
+            return Err(format!("多余的参数: {a}").into());
+        }
+        target = Some(a.clone());
+    }
+    let Some(out) = target else {
+        eprintln!("用法: plugin-panel backup [--keep N] <输出文件或目录>");
+        eprintln!("  文件: plugin-panel backup /var/backups/panel-$(date +%F).db");
+        eprintln!("  目录: plugin-panel backup --keep 14 /var/backups/panel");
+        eprintln!("        （目录模式按时间戳命名，并只保留最近 N 份，默认 14）");
         return Err("缺少输出路径".into());
     };
-    if std::path::Path::new(out).exists() {
+
+    let db_path = env_path("DB_PATH", "data/panel.db");
+    let out_path = std::path::Path::new(&out);
+
+    if out_path.is_dir() {
+        // 目录模式：时间戳命名 + 保留份数。
+        let name = format!("panel-{}.db", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let file = out_path.join(&name);
+        let size = backup_to(&db_path, &file)?;
+        println!("已备份: {}（{} KiB）", file.display(), size / 1024);
+        match prune_backups(out_path, keep) {
+            Ok(removed) if removed > 0 => println!("按 --keep {keep} 删掉了 {removed} 份旧备份"),
+            Ok(_) => {}
+            Err(e) => println!("⚠ 清理旧备份失败（备份本身是好的）: {e}"),
+        }
+        println!("⚠ 这份文件是**明文**：请自己决定放哪、谁能读。");
+        return Ok(());
+    }
+
+    if out_path.exists() {
         // 不覆盖：备份文件被静默覆盖，等于把上一次的救命稻草烧了。
         return Err(format!("目标已存在，不覆盖: {out}").into());
     }
-    let db_path = env_path("DB_PATH", "data/panel.db");
-    let size = backup_to(&db_path, std::path::Path::new(out))?;
+    let size = backup_to(&db_path, out_path)?;
     println!("已备份: {out}（{} KiB）", size / 1024);
     println!("⚠ 这份文件是**明文**：请自己决定放哪、谁能读。");
     Ok(())
+}
+
+/// 只保留最近 `keep` 份 `panel-*.db`，返回删掉几份（unpanel 2.10 保留份数）。
+///
+/// 按**文件名**倒序就够了：名字里是 `panel-YYYYmmdd-HHMMSS.db`，
+/// 字典序和时间序一致，不需要读 mtime（mtime 会被 cp/rsync 改掉）。
+fn prune_backups(dir: &std::path::Path, keep: u64) -> std::io::Result<usize> {
+    let mut names: Vec<String> = Vec::new();
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.starts_with("panel-") && n.ends_with(".db") {
+            names.push(n);
+        }
+    }
+    names.sort();
+    names.reverse();
+    let mut removed = 0usize;
+    for old in names.iter().skip(keep as usize) {
+        // 只删我们认得的形状，别的一律不碰。
+        if std::fs::remove_file(dir.join(old)).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1835,7 +1902,41 @@ mod allocator_tests {
 
 #[cfg(test)]
 mod backup_tests {
-    use super::backup_to;
+    use super::{backup_to, prune_backups};
+
+    #[test]
+    fn prune_backups_keeps_newest_and_leaves_others_alone() {
+        // unpanel 2.10 保留份数：只删自己认得的 panel-*.db，别的文件一律不碰。
+        let dir = std::env::temp_dir().join(format!("panel-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for d in ["20260101-010101", "20260102-010101", "20260103-010101", "20260104-010101", "20260105-010101"] {
+            std::fs::write(dir.join(format!("panel-{d}.db")), b"x").unwrap();
+        }
+        // 不该被碰的两个
+        std::fs::write(dir.join("notes.txt"), b"keep me").unwrap();
+        std::fs::write(dir.join("other-20260101.db"), b"keep me too").unwrap();
+
+        let removed = prune_backups(&dir, 2).unwrap();
+        assert_eq!(removed, 3, "5 份留 2 份，该删 3 份");
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("panel-"))
+            .collect();
+        assert_eq!(left.len(), 2);
+        // 留下的是**最新**的两份
+        assert!(left.contains(&"panel-20260105-010101.db".to_string()));
+        assert!(left.contains(&"panel-20260104-010101.db".to_string()));
+        // 无关文件没被动
+        assert!(dir.join("notes.txt").exists());
+        assert!(dir.join("other-20260101.db").exists());
+
+        // keep 大于文件数 = 一个都不删
+        assert_eq!(prune_backups(&dir, 10).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn backup_to_creates_a_readable_snapshot() {
