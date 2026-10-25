@@ -1473,7 +1473,7 @@ mod tests {
         // 塞两条今天的
         {
             let conn = db.lock().unwrap();
-            for i in 0..2 {
+            for _ in 0..2 {
                 conn.execute(
                     "INSERT INTO push_deliveries (at, kind, channel, ok, note) VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![
