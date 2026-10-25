@@ -714,9 +714,13 @@ fn replace_binary(exe: &Path, bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         // ⚠ 不要无条件放宽成 0755（安全审计 L7）：以前不管原来是什么权限都改成 0755，
         // 用户特意收紧成 0700 也会被抹掉。沿用旧二进制的权限位，取不到才退回 0755。
+        // 沿用旧二进制的权限位，但**保证可执行**：取到的权限里一个执行位都没有时
+        // （比如测试里刚建出来的 0644，或用户误设成 0600），退回 0755 ——
+        // 否则换上去的二进制跑不起来，面板下次启动直接消失。
         let mode = std::fs::metadata(exe)
             .map(|m| m.permissions().mode() & 0o7777)
             .unwrap_or(0o755);
+        let mode = if mode & 0o111 == 0 { 0o755 } else { mode };
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
             .map_err(|e| cleanup(format!("chmod 失败：{e}")))?;
     }
