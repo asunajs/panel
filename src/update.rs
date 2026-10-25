@@ -103,6 +103,19 @@ pub struct Applied {
     pub exe: std::path::PathBuf,
 }
 
+/// 出站是否允许明文 http。
+///
+/// 默认**不允许**（安全审计 M15）：更新与商城的所有请求都该走 https，
+/// 包括**重定向目标** —— 否则一个 302 就能把 https 降级成 http，
+/// 校验和与二进制都在明文上走。
+///
+/// 只有本地冒烟测试（用 http mock 扮演 GitHub）才需要打开它。
+pub(crate) fn allow_http_outbound() -> bool {
+    std::env::var("PANEL_UPDATE_ALLOW_HTTP")
+        .map(|v| matches!(v.trim(), "1" | "on" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 impl Update {
     pub fn new(opts: UpdateOptions) -> Arc<Update> {
         Arc::new(Self::new_or(opts))
@@ -156,12 +169,14 @@ impl Update {
 
     fn new_or(opts: UpdateOptions) -> Self {
         let api = ureq::Agent::config_builder()
+            .https_only(!allow_http_outbound())
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(API_TIMEOUT))
             .build()
             .new_agent();
         let dl = ureq::Agent::config_builder()
+            .https_only(!allow_http_outbound())
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(DOWNLOAD_TIMEOUT))

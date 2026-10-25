@@ -344,12 +344,14 @@ impl Market {
         };
         let ts = detect_transpiler(opts.ts_mode, &opts.runtimes);
         let api_agent = ureq::Agent::config_builder()
+            .https_only(!crate::update::allow_http_outbound())
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(API_TIMEOUT))
             .build()
             .new_agent();
         let download_agent = ureq::Agent::config_builder()
+            .https_only(!crate::update::allow_http_outbound())
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(DOWNLOAD_TIMEOUT))
