@@ -440,7 +440,17 @@ const TITLES = {
 /** 解析 `location.hash` → `{view, params}`。 */
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
-  const parts = raw.split('/').filter(Boolean).map(decodeURIComponent);
+  // ⚠ decodeURIComponent 遇到畸形百分号编码会**抛 URIError**（安全审计 L2）：
+  // 手输 `#/tasks/edit/%E0%A4%A` 之类就会让整个 route() 抛出，页面变成空白。
+  // 解码失败就原样保留 —— 后面匹配不上任何视图，会落到默认页，比白屏好。
+  const safeDecode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+  const parts = raw.split('/').filter(Boolean).map(safeDecode);
 
   if (parts[0] === 'tasks') {
     if (parts[1] === 'new') return { view: 'task-editor', params: { mode: 'new' } };
