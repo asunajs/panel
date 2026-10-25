@@ -271,7 +271,9 @@ export async function render(root, ctx, params = {}) {
     // 同源请求自动带会话 cookie；这里原来塞的是 `window.__PANEL_TOKEN__`，
     // 而那个全局**从来没有定义过**（安全审计 L13）—— 一个永远为空的自定义头
     // 只会让后来的人以为「面板页是拿令牌鉴权的」。
-    const res = await fetch(`/api/runs/${encodeURIComponent(params.run)}`);
+    // fetchJson：401 跳登录、非 JSON 不抛（安全审计 M17）。
+    // ⚠ 注意它返回的 ok 语义和 fetch 的 res.ok 一致，但响应体在 data 里。
+    const res = await fetchJson(`/api/runs/${encodeURIComponent(params.run)}`);
     runFetchDone = true;
     if (!res.ok) {
       // 记录本身就不在（超过 30 天、或者手动拼的 id）—— 这和"日志过期"
@@ -283,7 +285,7 @@ export async function render(root, ctx, params = {}) {
       </div>`;
       return;
     }
-    const { run } = await res.json();
+    const { run } = res.data;
     runRecord = run;
     // 成功 / 失败 / 已停止：停止不是错误，横幅不能是红的（判定见 status.js）
     const out = runOutcome(run);
