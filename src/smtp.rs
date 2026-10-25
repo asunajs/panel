@@ -257,6 +257,22 @@ enum Conn {
     Tls(Box<BufReader<StreamOwned<ClientConnection, TcpStream>>>),
 }
 
+/// 从一行 SMTP 应答里取出三位状态码。
+///
+/// ⚠ 不能直接 `line[..3]`：那是按**字节**切 String，切在多字节字符中间就 panic
+/// —— 服务器回一行 "éé"（4 字节，第 3 字节不是字符边界）即可触发，
+/// 而 release 是 `panic = "abort"`，整个面板直接退出。
+/// 协议上状态码就该是 ASCII 数字，非 ASCII 一律按协议错误处理。
+fn reply_code(line: &str) -> Result<u16, String> {
+    let head = line.as_bytes();
+    if head.len() < 3 || !head[..3].iter().all(u8::is_ascii_digit) {
+        return Err(format!("响应行不是三位状态码: `{line}`"));
+    }
+    line[..3]
+        .parse()
+        .map_err(|_| format!("响应行不是三位状态码: `{line}`"))
+}
+
 impl Conn {
     fn plain(tcp: TcpStream) -> Conn {
         Conn::Plain(BufReader::new(tcp))
@@ -314,13 +330,17 @@ impl Conn {
         let mut buf = Vec::new();
         let n = self
             .reader()
+        // ⚠ 先限流再读：read_until 是**无界**的，一个不换行的恶意/故障服务器
+        //   能把内存读到 OOM —— 读完再检查长度已经晚了（那时内存已经进去了）。
+        //   take 让底层最多读 MAX_LINE+1 字节，多的那 1 字节用来判断「是不是超了」。
+            .take((MAX_LINE + 1) as u64)
             .read_until(b'\n', &mut buf)
             .map_err(|e| format!("读响应失败: {e}"))?;
         if n == 0 {
             return Err("服务器关闭了连接".to_string());
         }
         if buf.len() > MAX_LINE {
-            return Err(format!("响应行过长（{} 字节）", buf.len()));
+            return Err(format!("响应行过长（超过 {MAX_LINE} 字节）"));
         }
         while buf.last().is_some_and(|c| *c == b'\n' || *c == b'\r') {
             buf.pop();
@@ -337,8 +357,13 @@ impl Conn {
         let mut text = String::new();
         loop {
             let line = self.read_line()?;
-            if line.len() < 3 {
-                return Err(format!("响应行太短: `{line}`"));
+            // ⚠ 先确认前 3 个**字节**都是 ASCII 数字，再切片。
+            //   直接 line[..3] 会在多字节字符中间切：服务器回一行 "éé"（4 字节，
+            //   第 3 字节不是字符边界）就 panic —— 而 release 是 panic = "abort"，
+            //   整个面板直接退出。SMTP 应答按协议就该是 ASCII，非 ASCII 属协议错误。
+            let head = line.as_bytes();
+            if head.len() < 3 || !head[..3].iter().all(u8::is_ascii_digit) {
+                return Err(format!("响应行不是三位状态码: `{line}`"));
             }
             let code: u16 = line[..3]
                 .parse()
@@ -811,6 +836,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reply_code_rejects_non_ascii_without_panicking() {
+        // 这条是回归测试：以前直接 line[..3] 按字节切 String，
+        // 服务器回 "éé"（4 字节，第 3 字节不是字符边界）就 panic；
+        // release 是 panic = "abort" ⇒ 整个面板退出。
+        assert!(reply_code("éé").is_err());
+        assert!(reply_code("é").is_err());
+        assert!(reply_code("").is_err());
+        assert!(reply_code("25").is_err());
+        assert!(reply_code("2x0 ok").is_err());
+        assert!(reply_code("中文应答").is_err());
+    }
+
+    #[test]
+    fn reply_code_parses_normal_replies() {
+        assert_eq!(reply_code("250 ok").unwrap(), 250);
+        assert_eq!(reply_code("220 mail.example.com ESMTP").unwrap(), 220);
+        assert_eq!(reply_code("354").unwrap(), 354);
+    }
     #[test]
     fn tls_mode_parsing() {
         assert_eq!(TlsMode::parse("").unwrap(), TlsMode::Starttls);
