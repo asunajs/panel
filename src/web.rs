@@ -298,6 +298,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/outbox", get(api_push_outbox))
         .route("/api/push/outbox/retry", post(api_push_outbox_retry))
         .route("/readyz", get(readyz))
+        .route("/api/restore", get(api_restore))
+        .route("/api/restore/activate", post(api_restore_activate))
         // 按任务覆盖：只存偏离「跟随全局」的任务。
         .route("/api/push/task", post(api_push_task_save))
         // 插件商城：目录 / GitHub 解析 / 安装。
@@ -3944,6 +3946,45 @@ fn dir_check(p: &std::path::Path) -> String {
     match std::fs::read_dir(p) {
         Ok(_) => "ok".to_string(),
         Err(e) => format!("unreadable: {e}"),
+    }
+}
+/// `GET /api/restore` —— 有没有未完成的恢复（unpanel 2.10）。
+///
+/// `scheduler_paused` 单独回：标记存在和「真的停派发」是两件事，
+/// 如果哪天前者有、后者没有，这个字段能立刻暴露出来。
+async fn api_restore(State(st): State<AppState>) -> Response {
+    let p = crate::restore::pending(&st.db_path);
+    Json(json!({
+        "pending": p.as_ref().map(|p| json!({ "source": p.source, "at": p.at })),
+        "scheduler_paused": crate::restore::scheduler_paused(),
+        "marker": crate::restore::marker_path(&st.db_path).display().to_string(),
+    }))
+    .into_response()
+}
+
+/// `POST /api/restore/activate` —— 显式激活：清标记 + 恢复派发。
+///
+/// ⚠ 两件事必须一起做。只清标记不恢复派发 ⇒ 面板永远不跑任务；
+/// 只恢复派发不清标记 ⇒ 下次重启又变回暂停。
+async fn api_restore_activate(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    match crate::restore::activate(&st.db_path) {
+        Ok(true) => {
+            crate::restore::resume_scheduler();
+            Json(json!({ "ok": true, "activated": true })).into_response()
+        }
+        Ok(false) => Json(json!({
+            "ok": true,
+            "activated": false,
+            "note": "没有待处理的恢复标记",
+        }))
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("清除恢复标记失败: {e}"),
+        ),
     }
 }
 async fn api_market(State(st): State<AppState>, Query(q): Query<MarketQuery>) -> Response {
