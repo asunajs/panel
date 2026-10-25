@@ -297,6 +297,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "jobs", "budget_ms", "INTEGER")?;
     // 提前量（毫秒）：在 cron 目标前多久触发。NULL / 0 = 不提前。
     ensure_column(&conn, "jobs", "lead_ms", "INTEGER")?;
+    // 2.7 自动重试（第 13 轮）：退避时刻 + 发送租约。
+    // next_try_at 为 NULL 表示「还没排过重试」，视为立刻可试。
+    ensure_column(&conn, "push_outbox", "next_try_at", "TEXT")?;
+    // sending_until 是**租约**而不是布尔：进程在发送中途被杀，布尔会永远卡在 1，
+    // 那条通知就再也不会被重试。带过期时间的租约自己会失效。
+    ensure_column(&conn, "push_outbox", "sending_until", "TEXT")?;
     // 第二十六轮：**试跑的输出**。
     //
     // 只有试跑（kind='test'）会填这一列，因为试跑的输出**不进日志库**
@@ -1451,6 +1457,69 @@ pub fn get_push_outbox(db: &Db, id: &str) -> rusqlite::Result<Option<PushOutboxR
     rows.next().transpose()
 }
 
+/// 到点该重试的那些（unpanel 2.7 自动重试）。
+///
+/// 三条过滤缺一不可：
+/// 1. `next_try_at` 到点（NULL 视为立刻可试）
+/// 2. 租约已过期或没有租约 —— 别人正在发的不要抢
+/// 3. 次数没到上限
+pub fn due_push_outbox(db: &Db, now: &str, max_attempts: i64) -> rusqlite::Result<Vec<PushOutboxRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+         FROM push_outbox \
+         WHERE attempts < ?2 \
+           AND (next_try_at IS NULL OR next_try_at <= ?1) \
+           AND (sending_until IS NULL OR sending_until <= ?1) \
+         ORDER BY at ASC LIMIT 20",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![now, max_attempts], |r| {
+        Ok(PushOutboxRow {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            plugin: r.get(2)?,
+            task: r.get(3)?,
+            kind: r.get(4)?,
+            channel: r.get(5)?,
+            title: r.get(6)?,
+            body: r.get(7)?,
+            reason: r.get(8)?,
+            attempts: r.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 抢占一条（写租约）。返回 false 表示别人已经抢走了 —— 调用方应该跳过。
+///
+/// 用 `UPDATE ... WHERE` 的**条件**做抢占，而不是「先查再写」：
+/// 后者在并发下是经典的 TOCTOU，两条通知会一起被发出去。
+pub fn claim_push_outbox(db: &Db, id: &str, now: &str, until: &str) -> rusqlite::Result<bool> {
+    let conn = db.lock().unwrap();
+    let n = conn.execute(
+        "UPDATE push_outbox SET sending_until = ?2 \
+         WHERE id = ?1 AND (sending_until IS NULL OR sending_until <= ?3)",
+        rusqlite::params![id, until, now],
+    )?;
+    Ok(n > 0)
+}
+
+/// 重试仍失败：次数 +1、记下新原因、排下一次时刻、释放租约。
+pub fn reschedule_push_outbox(
+    db: &Db,
+    id: &str,
+    reason: &str,
+    next_try_at: &str,
+) -> rusqlite::Result<()> {
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE push_outbox SET attempts = attempts + 1, reason = ?2, \
+           retried_at = ?3, next_try_at = ?4, sending_until = NULL WHERE id = ?1",
+        rusqlite::params![id, reason, at, next_try_at],
+    )?;
+    Ok(())
+}
 /// 重发成功后删掉这条。
 pub fn delete_push_outbox(db: &Db, id: &str) -> rusqlite::Result<bool> {
     let conn = db.lock().unwrap();
@@ -2210,6 +2279,39 @@ mod tests {
         assert!(!job_exists(&db, "other", "tick").unwrap());
         assert!(!job_exists(&db, "demo", "nope").unwrap());
     }
+    #[test]
+    fn outbox_retry_respects_backoff_attempts_and_lease() {
+        // unpanel 2.7 自动重试的三道闸：退避时刻、次数上限、发送租约。
+        let dir = std::env::temp_dir().join(format!("panel-outbox-due-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("due.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        let id = record_push_outbox(&db, "p", "t", "failure", "bark", "标", "文", "挂了").unwrap();
+
+        // 刚插入（next_try_at 为 NULL）就该到期
+        let now = "2026-10-25 10:00:00";
+        assert_eq!(due_push_outbox(&db, now, 5).unwrap().len(), 1);
+
+        // 抢到租约之后，别人抢不到 —— 这是防重复发送的唯一手段
+        assert!(claim_push_outbox(&db, &id, now, "2026-10-25 10:02:00").unwrap());
+        assert!(!claim_push_outbox(&db, &id, now, "2026-10-25 10:02:00").unwrap(), "租约内不能被二次抢占");
+        // 租约期内不再到期
+        assert_eq!(due_push_outbox(&db, "2026-10-25 10:01:00", 5).unwrap().len(), 0);
+        // 租约过期后又能抢（进程被杀也不会永久卡住）
+        assert_eq!(due_push_outbox(&db, "2026-10-25 10:03:00", 5).unwrap().len(), 1);
+
+        // 排到未来 ⇒ 现在不到期
+        reschedule_push_outbox(&db, &id, "还是挂", "2026-10-25 10:05:00").unwrap();
+        assert_eq!(due_push_outbox(&db, "2026-10-25 10:04:00", 5).unwrap().len(), 0);
+        assert_eq!(due_push_outbox(&db, "2026-10-25 10:05:00", 5).unwrap().len(), 1);
+        let row = get_push_outbox(&db, &id).unwrap().unwrap();
+        assert_eq!(row.attempts, 2, "排下一次要 +1 次尝试");
+
+        // 次数到顶 ⇒ 不再自动重试（行还留着，人可以手动发）
+        assert_eq!(due_push_outbox(&db, "2026-10-25 10:05:00", 2).unwrap().len(), 0);
+    }
+
     #[test]
     fn push_outbox_is_capped() {
         // 整体复查时发现的缺口：一个永久坏掉的渠道会让每次失败都写一条。

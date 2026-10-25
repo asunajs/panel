@@ -1116,6 +1116,101 @@ pub struct TestOutcome {
 
 /// 试发一条。**同步**（HTTP handler 会把它丢进 spawn_blocking）：
 /// 用户点「发一条试试」就是在等结果，异步队列反而要再写一套状态。
+/// 重试退避（秒）：1 分钟 → 5 分钟 → 30 分钟 → 2 小时 → 6 小时（unpanel 2.7）。
+///
+/// 为什么不用「固定间隔」：通知失败绝大多数是**对端抖一下**，一分钟内重试成功率最高；
+/// 而如果对端真的挂了，高频重试只会把日志刷满、把配额烧光。
+const RETRY_BACKOFF_SECS: &[i64] = &[60, 300, 1800, 7200, 21600];
+
+/// 最多试几次（含第一次）。到顶就不再自动重试，留在 outbox 里等人工处理。
+pub const MAX_RETRY_ATTEMPTS: i64 = RETRY_BACKOFF_SECS.len() as i64 + 1;
+
+/// 租约时长（秒）。比单次发送的 10 秒宽裕得多 —— 但**必须有**：
+/// 进程在发送中途被杀，没有租约的话这条会永远卡在「发送中」。
+const RETRY_LEASE_SECS: i64 = 120;
+
+/// 扫一遍到点的通知并重试。返回 (发出去几条, 又失败几条)。
+///
+/// ⚠ 每次调用都是**尽力而为**：单条失败不影响后面的，整轮失败也不抛错 ——
+/// 后台循环里抛错只会让下一轮不再运行。
+pub fn retry_due(db: &Db) -> (usize, usize) {
+    let now = chrono::Local::now();
+    let now_s = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let rows = match crate::db::due_push_outbox(db, &now_s, MAX_RETRY_ATTEMPTS) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::log::plog!("push", warn, "读待重试通知失败: {e}");
+            return (0, 0);
+        }
+    };
+    // 渠道已经从配置里删掉的那些：重试也没有意义，清掉并记一笔。
+    // 逐条判断而不是整轮跳过 —— 用户可能只是删了其中一个渠道。
+    let cfg = load_config(db);
+    let configured = channels::configured(&cfg.channels);
+    let mut sent = 0usize;
+    let mut failed = 0usize;
+    for row in rows {
+        if !configured.iter().any(|c| *c == row.channel) {
+            let _ = crate::db::delete_push_outbox(db, &row.id);
+            crate::log::plog!(
+                "push",
+                warn,
+                "渠道 {} 已不在配置里，丢弃一条待重试的通知",
+                row.channel
+            );
+            continue;
+        }
+        let until = (now + chrono::Duration::seconds(RETRY_LEASE_SECS))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        // 抢不到就是别人在处理，跳过 —— 不能在这里「等一等再试」，那会串行化整轮。
+        match crate::db::claim_push_outbox(db, &row.id, &now_s, &until) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                crate::log::plog!("push", warn, "抢重试租约失败（{}）: {e}", row.id);
+                continue;
+            }
+        }
+        match retry_outbox(db, &row.id) {
+            Ok(r) if r.outcome == "sent" => {
+                sent += 1;
+                crate::log::plog!("push", info, "重试成功：{} / {}", row.plugin, row.channel);
+            }
+            Ok(r) => {
+                failed += 1;
+                schedule_next(db, &row, &r.note);
+            }
+            Err(e) => {
+                failed += 1;
+                schedule_next(db, &row, &e);
+            }
+        }
+    }
+    (sent, failed)
+}
+
+/// 排下一次重试时刻。次数已经用尽就把租约放掉、留在 outbox 里等人工。
+fn schedule_next(db: &Db, row: &crate::db::PushOutboxRow, note: &str) {
+    // attempts 是**已经试过几次**（插入时是 1）。下一次用哪一档退避看它。
+    let idx = (row.attempts.max(1) - 1) as usize;
+    let Some(backoff) = RETRY_BACKOFF_SECS.get(idx) else {
+        // 退避表用完了：不再自动重试，但行留着（人能看见、能手动重发）。
+        let _ = crate::db::reschedule_push_outbox(db, &row.id, note, "9999-12-31 23:59:59");
+        crate::log::plog!(
+            "push",
+            warn,
+            "{} 已重试 {} 次仍未成功，不再自动重试（可在推送页手动重发）",
+            row.channel,
+            row.attempts
+        );
+        return;
+    };
+    let next = (chrono::Local::now() + chrono::Duration::seconds(*backoff))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let _ = crate::db::reschedule_push_outbox(db, &row.id, note, &next);
+}
 /// 重发 outbox 里的一条（unpanel 2.7）。
 ///
 /// **复用 dispatch**，只把渠道过滤成这一条 —— 重发不能另写一条发送路径，
@@ -1503,6 +1598,22 @@ pub fn save_task(db: &Db, body: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_due_drops_notifications_for_removed_channels() {
+        // 渠道被删掉之后，那条通知重试也没有意义 —— 清掉，而不是永远挂着。
+        let dir = std::env::temp_dir().join(format!("panel-retry-gone-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rg.db");
+        let _ = std::fs::remove_file(&path);
+        let db = crate::db::open(&path).unwrap();
+        let id = crate::db::record_push_outbox(&db, "p", "t", "failure", "bark", "标", "文", "挂了").unwrap();
+        // 空配置 ⇒ 没有任何渠道是「配好的」
+        let (sent, failed) = retry_due(&db);
+        assert_eq!((sent, failed), (0, 0), "丢弃不算成功也不算失败");
+        assert!(crate::db::get_push_outbox(&db, &id).unwrap().is_none(), "该被清掉");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cap_reached_counts_today_only() {
         // 安全审计 M8：日上限要在扇出循环里逐条复查，靠的就是这个按值判定。

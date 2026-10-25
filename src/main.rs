@@ -967,6 +967,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // 推送的自动重试（unpanel 2.7）：每 60 秒扫一遍到点的通知。
+    // 放 spawn_blocking 里：发送是同步阻塞的，直接在 runtime 线程上做会卡住整个服务。
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            // 间隔可配：默认 60 秒。测试时能调到几秒，不用等一分钟才看到效果。
+            let secs = std::env::var("PUSH_RETRY_TICK_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v >= 1)
+                .unwrap_or(60);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
+            tick.tick().await; // interval 的第一次是立刻返回的，先吃掉
+            loop {
+                tick.tick().await;
+                // 未完成的恢复期间不发任何东西：那时库可能刚被换掉，
+                // 发出去的可能是「旧世界的通知」。和调度暂停保持同一条规矩。
+                if crate::restore::scheduler_paused() {
+                    continue;
+                }
+                let db = db.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let (sent, failed) = crate::push::retry_due(&db);
+                    if sent + failed > 0 {
+                        crate::log::plog!("push", info, "自动重试：成功 {sent} 条，仍失败 {failed} 条");
+                    }
+                })
+                .await;
+            }
+        });
+    }
     // into_make_service_with_connect_info: 让 handler 能拿到对端地址
     // —— 登录退避按来源 IP 计数、审计日志要记是谁登的，都得靠它。
     // 注意：放在反向代理后面时这里是**反代的地址**，见 auth.rs 顶部的边界说明。
