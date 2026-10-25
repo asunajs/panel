@@ -503,3 +503,18 @@ std 在 Unix 上的 `Instant` 是 `Timespec(i64 秒)`，`checked_add_duration` �
 | H9 校验和与二进制同走代理 | 要改更新协议的信任模型（直连取 SUMS / 显式允许未校验） |
 
 Medium/Low 本轮未逐条核验，按文档自己的排序留待后续。
+#### H8 的落地计划（下一轮照此执行，避免边改边想）
+
+1. `build_agent_uncached` / `build_agent_cached`：加 `.max_redirects(0)`；
+   `http_fetch_native` 的 reqwest builder 加 `.redirect(reqwest::redirect::Policy::none())`。
+2. `do_http_fetch` 里把「建请求 → 发 → 读响应」包进 `for hop in 0..=3`：
+   - 收到 3xx 且带 `location`：`hop == 3` 就报错；否则 `cur = resolve_location(&cur, loc)`，
+     再走一次 `ensure_outbound_url_allowed(&cur)` —— **每一跳都过同一道门**；
+   - 相对地址必须先按当前 URL 解析成绝对地址，否则判定拿到的是个相对路径。
+3. `resolve_location` 写成纯函数（`url` crate 已在依赖里），单独测：
+   绝对地址、`//host/path`、`/abs`、`rel` 四种形态。
+4. 判据（必须有）：本地 mock 返回 `302 Location: http://127.0.0.1:8787/` ⇒
+   **第二次请求没有发出**（mock 计数为 1），且 `http_fetch` 返回错误而不是 200。
+
+⚠ 不要只做第 1 步：关了自动重定向又不自己走，`http→https` 这类正常跳转会被打断，
+   插件侧看到的是 301 —— 那是把一个安全洞换成一个兼容性坑。
