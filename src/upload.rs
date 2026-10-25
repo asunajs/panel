@@ -428,13 +428,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("panel-up-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        save(Kind::Plugin, &root, "demo.js", b"// hi", true).unwrap();
-        let names: Vec<String> = std::fs::read_dir(&root)
+        save(Kind::Plugins, &root, "demo.js", b"// hi", true).unwrap();
+        // 插件落在 <root>/js/ 下
+        let dir = root.join("js");
+        assert!(dir.join("demo.js").is_file(), "正式文件应该存在");
+        let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert!(names.iter().any(|n| n == "demo.js"), "正式文件应该存在: {names:?}");
         assert!(!names.iter().any(|n| n.ends_with(".tmp")), "不该留下临时文件: {names:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
