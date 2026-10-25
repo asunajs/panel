@@ -501,6 +501,18 @@ pub fn load(
     logs: &SharedLogs,
     load_budget: Duration,
 ) -> Result<ExtLoad, String> {
+    // ⚠ 名字里不能有路径分隔符（安全审计 M6）。
+    //
+    // data_dir.join(name) 会把它当**子路径**：`a/b` 和 `a` 下的 `b` 撞同一个目录，
+    // `..` 还能跳出数据根。脚本名来自用户输入，必须在拼路径之前挡掉。
+    // 这条同时让「目录名 -> 任务」成为单射：一个名字只对应一个目录。
+    if name.is_empty()
+        || name.chars().any(std::path::is_separator)
+        || name == "."
+        || name == ".."
+    {
+        return Err(format!("脚本名不合法（不能含路径分隔符）: {name}"));
+    }
     let data_dir = host.plugin_data_dir.join(name);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("创建插件数据目录 {} 失败: {e}", data_dir.display()))?;
