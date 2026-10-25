@@ -137,7 +137,12 @@ pub fn resolve_in_root(root: &Path, requested: &str) -> Result<PathBuf, FsError>
     // 从目标往上找第一个"已经存在"的祖先 —— 写入时目标本身通常还不存在
     let mut probe = joined.clone();
     let existing = loop {
-        if probe.exists() {
+        // ⚠ 不能只看 exists()（安全审计 M2）：它**跟随符号链接**，悬空链接返回 false，
+        // 于是循环会往上跳过它、找到一个正常的祖先、校验通过 —— 而 joined 里
+        // 那个悬空链接还在，fs::write 会顺着它把文件写到根目录**外面**。
+        // 这里改成「存在，或者是一个链接（哪怕是悬空的）」就停，让 canonicalize
+        // 去处理：悬空链接在 canonicalize 那一步会失败，写入被拒。
+        if probe.exists() || std::fs::symlink_metadata(&probe).is_ok() {
             break probe;
         }
         match probe.parent() {
@@ -478,6 +483,26 @@ pub fn trash_plugin(plugins_dir: &Path, name: &str) -> Result<Vec<String>, Strin
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_cannot_escape_the_root() {
+        // 安全审计 M2：exists() 跟随符号链接，悬空链接返回 false，
+        // 于是围栏会跳过它、校验一个正常的祖先并通过 —— 但写入时顺着链接
+        // 跑到根目录外面去了。现在这种路径必须被拒。
+        let root = std::env::temp_dir().join(format!("panel-fence-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("panel-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // 悬空链接：目标还不存在
+        std::os::unix::fs::symlink(outside.join("pwned.js"), root.join("evil")).unwrap();
+        let r = resolve_in_root(&root, "evil");
+        assert!(r.is_err(), "悬空符号链接必须被围栏拒掉，实际: {r:?}");
+        assert!(!outside.join("pwned.js").exists(), "根目录外不能出现文件");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
     #[test]
     fn trash_plugin_moves_files_into_recycle_dir() {
         // 删除插件的判据（docs/file-management.md 一期）：
