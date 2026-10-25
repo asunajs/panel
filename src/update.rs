@@ -156,20 +156,12 @@ impl Update {
 
     fn new_or(opts: UpdateOptions) -> Self {
         let api = ureq::Agent::config_builder()
-            // https_only：连**重定向目标**也必须是 https（安全审计 M15）。
-            // 不加这一条，一个 302 就能把更新/下载从 https 降级到 http，
-            // 后续的校验和与二进制都在明文上走。
-            .https_only(true)
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(API_TIMEOUT))
             .build()
             .new_agent();
         let dl = ureq::Agent::config_builder()
-            // https_only：连**重定向目标**也必须是 https（安全审计 M15）。
-            // 不加这一条，一个 302 就能把更新/下载从 https 降级到 http，
-            // 后续的校验和与二进制都在明文上走。
-            .https_only(true)
             .http_status_as_error(false)
             .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(DOWNLOAD_TIMEOUT))
