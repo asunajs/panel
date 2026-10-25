@@ -475,7 +475,7 @@ std 在 Unix 上的 `Instant` 是 `Timespec(i64 秒)`，`checked_add_duration` �
 回绕成 999ms，只是立刻 504。**H1 的实质结论仍然成立**：`saturating_add` 饱和之后等于预算无限，
 死循环永久占住 worker。
 
-### 已修（10 条）
+### 已修（11 条）
 
 | 条目 | 修法 |
 |---|---|
@@ -489,15 +489,15 @@ std 在 Unix 上的 `Instant` 是 `Timespec(i64 秒)`，`checked_add_duration` �
 | H14 / H15 | 启动命令改 `hash-token` 流程；systemd 示例补 `EnvironmentFile` 与 `logs/`、`tasks/` 可写 |
 | H5 | 提前量按「理论线相邻两拍」估出周期并钳到周期以内；重对齐判据从 `base` 改成 `actual` |
 | H13 | `list_runs` 按四种组合分别拼 SQL + 三条复合索引 + `EXPLAIN QUERY PLAN` 回归测试 |
+| H4 | 预算/墙钟中断计入 `stopped`（`Watchdog.interrupted`，`arm()` 复位），不再记失败/熔断/推送 |
 
 验证：`cargo test` 470 passed / 0 failed；clippy 干净；冒烟全绿；前端资源检查 287 项全过。
 
-### 未修（5 条，已核验属实，需要单独设计）
+### 未修（4 条，已核验属实，需要单独设计）
 
 | 条目 | 为什么不在这一轮 |
 |---|---|
 | H3 停止位是全局单比特 | 要动 `Watchdog` 的语义（把已有的 `inv_id` 接进去），影响面比前 8 条大 |
-| H4 预算超时不计 `stopped` | 需要引入显式的「中断原因」枚举，会改 `runs` 的判定链 |
 | H8 `http_fetch` 只查首跳 | 要两条传输都关重定向 + 手写 ≤3 跳循环，属安全改造 |
 | H9 校验和与二进制同走代理 | 要改更新协议的信任模型（直连取 SUMS / 显式允许未校验） |
 

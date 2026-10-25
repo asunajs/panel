@@ -733,10 +733,18 @@ struct Watchdog {
     stop: Arc<AtomicBool>,
     /// 「停止当前任务」请求：和关闭分开，任务结束后要能复位
     task_stop: Arc<AtomicBool>,
+    /// 这次执行是不是被**引擎自己**打断的（预算到点 / 墙钟超时）。
+    ///
+    /// 收尾处要靠它把「预算中断」也算成「已停止」，而不是失败 ——
+    /// 以前只看 task_stop，于是预算打断的任务被记成红色失败、熔断 +1、
+    /// 还发一条失败推送，和 docs/run-history.md 写的正好相反（安全审计 H4）。
+    interrupted: Arc<AtomicBool>,
 }
 
 impl Watchdog {
     fn arm(&self, budget: Duration) {
+        // 每次派发都是一次新的执行：上一轮的中断标记不能带过来。
+        self.interrupted.store(false, Ordering::Relaxed);
         self.deadline_ms.store(
             now_ms().saturating_add(budget.as_millis() as u64),
             Ordering::Relaxed,
@@ -749,7 +757,25 @@ impl Watchdog {
     }
 
     fn take_fired(&self) -> bool {
-        self.fired.swap(0, Ordering::Relaxed) > 0
+        let n = self.fired.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            // 被打断过 ⇒ 这次的错误是「我们自己叫停的」，收尾要按已停止处理。
+            self.interrupted.store(true, Ordering::Relaxed);
+        }
+        n > 0
+    }
+
+    /// 标记「这次执行被引擎中断了」。
+    ///
+    /// 给**墙钟超时**那条路用：它不是 JS 层的中断（没有 fired 计数），
+    /// 但对外同样是「已停止」，不该记成失败。
+    fn mark_interrupted(&self) {
+        self.interrupted.store(true, Ordering::Relaxed);
+    }
+
+    /// 取走「这次执行被引擎中断过」的标记（取走即清零）。
+    fn take_interrupted(&self) -> bool {
+        self.interrupted.swap(false, Ordering::Relaxed)
     }
 
     /// 这次执行是不是被「停止」打断的。
@@ -3082,6 +3108,9 @@ fn worker_main(
             for id in expired {
                 if let Some(inv) = pending.remove(&id) {
                     inv_trace(&format!("timeout inv={id} name={}", inv.tail.name));
+                    // 墙钟超时也是「已停止」：不打这个标记，它会被记成失败、
+                    // 熔断 +1、还发失败推送（安全审计 H4）。
+                    wd.mark_interrupted();
                     note_reaped(id, "墙钟超时");
                     // 诊断：这条执行是不是卡在 fetch 上？把"还有几条请求在等结果"写进
                     // 错误里 —— 否则现场只剩一句"可能 await 了一个永远不会 settle 的
@@ -5010,7 +5039,9 @@ fn run_one(
     // 熔断计数 +1、任务状态变「执行出错」、还给用户发一条失败推送 —— 而他只是按了停止。
     //
     // 所以这里先判定一次，下面每一处（记录 / 推送 / 调度计数 / 日志）都按它分流。
-    let stopped = result.is_err() && wd.task_stop_requested();
+    // 「停止」和「预算/墙钟到点」在引擎里都是**我们**叫停的，对外都算已停止。
+    // 只看 task_stop 的话，预算打断会被记成失败（安全审计 H4）。
+    let stopped = result.is_err() && (wd.task_stop_requested() || wd.take_interrupted());
 
     if let Err(e) = db::finish_run(
         db,
@@ -7151,6 +7182,23 @@ mod pump_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn budget_interrupt_is_recorded_as_stopped() {
+        // 回归测试（安全审计 H4）：预算到点以前不算「已停止」，于是被记成红色失败、
+        // 熔断 +1、还发失败推送 —— 和 docs/run-history.md 写的正好相反。
+        let wd = Watchdog::default();
+        wd.arm(Duration::from_millis(10));
+        // 模拟一次「预算到点」：fired 计数 +1
+        wd.fired.store(1, Ordering::Relaxed);
+        assert!(wd.take_fired(), "fired 计数应被取走");
+        assert!(wd.take_interrupted(), "预算中断必须被记成已停止");
+        assert!(!wd.take_interrupted(), "取走即清零，不能重复计入下一次");
+        // 下一次 arm 必须复位，否则上一轮的中断会污染下一轮
+        wd.fired.store(1, Ordering::Relaxed);
+        let _ = wd.take_fired();
+        wd.arm(Duration::from_millis(10));
+        assert!(!wd.take_interrupted(), "arm() 应复位中断标记");
+    }
     /// 相对说明符的解析：URL 语义 + **自动找** + 边界。
     ///
     /// 自动找（省扩展名、找 index）是**放宽**，不是 ESM 规范行为 —— 所以更要钉住：
