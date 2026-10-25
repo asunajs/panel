@@ -3548,13 +3548,19 @@ struct RunsQuery {
 async fn api_runs(
     State(st): State<AppState>,
     Query(q): Query<RunsQuery>,
-) -> Json<serde_json::Value> {
+) -> Response {
     // 上限 500：这是个**界面用的**列表，不是导出接口。不设上限的话一个跑了
     // 半年的面板一开页面就要序列化几万条。
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     match db::list_runs(&st.db, q.plugin.as_deref(), q.task.as_deref(), limit) {
-        Ok(runs) => Json(serde_json::json!({ "runs": runs, "limit": limit })),
-        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        Ok(runs) => Json(serde_json::json!({ "runs": runs, "limit": limit })).into_response(),
+        // ⚠ 查库失败必须是 5xx（安全审计 L6）：以前返回 200 + {error}，
+        // 前端的 `res.ok` 为真、`data.runs` 为 undefined，于是**显示成「没有运行记录」** ——
+        // 用户以为任务从没跑过，实际是数据库坏了。这比报错糟得多。
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读运行记录失败: {e}"),
+        ),
     }
 }
 
