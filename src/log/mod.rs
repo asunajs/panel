@@ -975,7 +975,7 @@ fn redact_headers(src: &[char]) -> Vec<char> {
         let boundary = i == 0
             || src[i - 1] == '\n'
             || src[i - 1].is_whitespace()
-            || matches!(src[i - 1], '(' | '[' | '{' | ',' | ';' | '（' | '【' | '《');
+            || matches!(src[i - 1], '(' | '[' | '{' | ',' | ';' | '（' | '【' | '《' | '"' | '\'');
         if boundary {
             let mut hit = None;
             for h in SECRET_HEADERS {
@@ -983,7 +983,11 @@ fn redact_headers(src: &[char]) -> Vec<char> {
                     let after = i + h.chars().count();
                     // 头名后面允许空白，然后必须是 `:`
                     let mut k = after;
-                    while k < src.len() && (src[k] == ' ' || src[k] == '\t') {
+                    // 中间可能夹一个**收尾引号**：JSON 里写的是 "authorization": "..."，
+                    // 只跳空白的话这条整条漏脱（安全审计 M9）。
+                    while k < src.len()
+                        && (src[k] == ' ' || src[k] == '\t' || src[k] == '"' || src[k] == '\'')
+                    {
                         k += 1;
                     }
                     if k < src.len() && src[k] == ':' {
@@ -1176,6 +1180,16 @@ fn redact_phones(src: &[char]) -> Vec<char> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quoted_header_names_are_redacted() {
+        // 安全审计 M9：JSON 里写的是 "authorization": "Bearer x"，
+        // 只认「空白/括号/逗号」边界、且头名后只跳空白的话，这条整条漏脱。
+        let s = redact("{\"authorization\": \"Bearer sk-secret\"}");
+        assert!(!s.contains("sk-secret"), "引号包住的头名也必须脱: {s}");
+        let sq = format!("headers=({}Cookie{}: {}a=b{})", "'", "'", "'", "'");
+        let s2 = redact(&sq);
+        assert!(!s2.contains("a=b"), "单引号包住的头名也必须脱: {s2}");
+    }
     use super::*;
 
     #[test]
