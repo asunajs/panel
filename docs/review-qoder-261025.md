@@ -456,3 +456,49 @@
 - zip 按实际解压量记账、DB/WAL/日志权限、日志 32 KiB UTF-8 边界截断，都是实测过的细节。
 - 前端把请求收敛到 `api.js` 的 `request()`，删除/停用走内联确认且无乐观更新；问题只出在绕过它的少数几处。
 - 文档密度高、决策有出处，修文档的成本远低于重新推导；本轮文档问题主要是「代码演进后示例没跟着改」。
+
+---
+
+## 处理记录（Lead，2026-10-25）
+
+### 核验方式与结果
+
+15 条 High 全部回代码核验（三个并行只读核验 + 我逐条复核），结论：**14 条属实，1 条部分属实**。
+这份审查的质量很高：行号基本准确（仓库期间改过几处，偏移都在 20 行内），
+引用的 SQLite 行为（`sqlite3.c` 的 `SQLITE_ALTER_TABLE` 只传旧表名）、
+Rust std 的 Linux `current_exe()` 不剥 `" (deleted)"`、ureq/reqwest 的默认重定向次数 —— 全部对得上。
+
+**唯一被证伪的一句**：H1 里「`Instant::now() + Duration::from_millis(u64::MAX)` 会溢出 panic」。
+std 在 Unix 上的 `Instant` 是 `Timespec(i64 秒)`，`checked_add_duration` 用
+`tv_sec.checked_add_unsigned(other.as_secs())`；u64::MAX 毫秒 ≈ 1.8e16 秒，远小于 i64::MAX ≈ 9.2e18，
+所以不会 panic。真正会溢出的是 `web.rs` 的 `budget_ms + 1_000`，但 release 没开 overflow-checks，
+回绕成 999ms，只是立刻 504。**H1 的实质结论仍然成立**：`saturating_add` 饱和之后等于预算无限，
+死循环永久占住 worker。
+
+### 已修（8 条）
+
+| 条目 | 修法 |
+|---|---|
+| H1 | 三处入口 + 引擎侧各钳一次（`clamp_budget_ms`，上限 1 小时；0/越界按「想要无限」给上限） |
+| H2 | `authenticate` 套 `begin_attempt`；cookie 判定提到头令牌之前 |
+| H6 | `reload_plugin` 补 `is_real` 守卫（和 `unload_plugin` 对齐） |
+| H7 | authorizer 对 `AlterTable` + `database_name == "temp"` 一律 deny |
+| H10 | `Applied` 带上替换前算好的路径；新增 `restart_process_at(&Path)` |
+| H11 | 先验前 3 字节是 ASCII 数字再切片；`read_line` 先 `take` 限流再读 |
+| H12 | 后端只接受站内路径或 http(s)；前端新增 `safeHref()` |
+| H14 / H15 | 启动命令改 `hash-token` 流程；systemd 示例补 `EnvironmentFile` 与 `logs/`、`tasks/` 可写 |
+
+验证：`cargo test` 470 passed / 0 failed；clippy 干净；冒烟全绿；前端资源检查 287 项全过。
+
+### 未修（7 条，已核验属实，需要单独设计）
+
+| 条目 | 为什么不在这一轮 |
+|---|---|
+| H3 停止位是全局单比特 | 要动 `Watchdog` 的语义（把已有的 `inv_id` 接进去），影响面比前 8 条大 |
+| H4 预算超时不计 `stopped` | 需要引入显式的「中断原因」枚举，会改 `runs` 的判定链 |
+| H5 `lead_ms` 不小于周期 ⇒ 补跑风暴 | 要在注册/编辑处算「表达式最小周期」，涉及 cron 解析 |
+| H8 `http_fetch` 只查首跳 | 要两条传输都关重定向 + 手写 ≤3 跳循环，属安全改造 |
+| H9 校验和与二进制同走代理 | 要改更新协议的信任模型（直连取 SUMS / 显式允许未校验） |
+| H13 `list_runs` 的「空则不筛」 | 拼四种 SQL + 加索引，属性能改造（实测 100k 行差 250 倍，值得做） |
+
+Medium/Low 本轮未逐条核验，按文档自己的排序留待后续。
