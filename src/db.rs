@@ -1310,6 +1310,20 @@ pub fn list_file_ops(db: &Db, limit: i64) -> rusqlite::Result<Vec<FileOp>> {
     it.collect()
 }
 
+/// 这条任务在 jobs 表里存在吗。
+///
+/// 给 /stop 用（安全审计 H3）：停止位是全局单比特，对一个**不存在**的任务
+/// 反复调 /stop，等于持续打断全机 JS —— 所以入口必须先确认它真的存在。
+pub fn job_exists(db: &Db, plugin: &str, name: &str) -> rusqlite::Result<bool> {
+    let conn = db.lock().unwrap();
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE plugin = ?1 AND name = ?2",
+        params![plugin, name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
     let conn = db.lock().unwrap();
     let sql = format!("SELECT {RUN_COLS} FROM runs WHERE id = ?1");

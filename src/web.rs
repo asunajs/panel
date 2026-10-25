@@ -1062,6 +1062,17 @@ async fn stop_task(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
+    // 先确认这条任务真的存在（安全审计 H3）：停止位是全局单比特，
+    // 对不存在的任务反复调停止，等于持续打断全机 JS。
+    match crate::db::job_exists(&st.db, &plugin, &name) {
+        Ok(true) => {}
+        Ok(false) => {
+            return json_error(StatusCode::NOT_FOUND, format!("没有名为 {name} 的任务"));
+        }
+        Err(e) => {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("查任务失败: {e}"));
+        }
+    }
     st.health.request_task_stop();
     let health = st.health.clone();
     let db = st.db.clone();
