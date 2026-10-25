@@ -100,9 +100,20 @@ impl CronSchedule {
     /// 用分层跳转而不是逐秒遍历：不匹配时直接跳到下一分钟/小时/天/月，
     /// 所以像 `0 0 0 1 1 *`（每年一次）这种也只需要十几次迭代。
     pub fn next_after(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
+        self.next_after_in(from)
+    }
+
+    /// 同一份算法，换一个时区（unpanel 2.3 第二步）。
+    ///
+    /// 生产走 `Local`，DST 用例走 `chrono_tz` 的具体时区 —— **代码完全相同**。
+    pub fn next_after_in<Tz: TimeZone>(&self, from: DateTime<Tz>) -> Option<DateTime<Tz>>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
         let mut t = truncate_to_sec(from) + ChronoDuration::seconds(1);
 
-        for _ in 0..MAX_STEPS {
+        for _step in 0..MAX_STEPS {
+
             if !self.month.contains(t.month()) {
                 t = start_of_next_month(t)?;
                 continue;
@@ -134,7 +145,7 @@ impl CronSchedule {
     /// - 两个都是 `*` → 恒真
     ///
     /// 这个 OR 语义是 cron 最容易被误解的地方，很多简易实现会写错。
-    fn day_matches(&self, t: &DateTime<Local>) -> bool {
+    fn day_matches<Tz: TimeZone>(&self, t: &DateTime<Tz>) -> bool {
         let dom_ok = self.dom.contains(t.day());
         let dow_ok = self.dow.contains(t.weekday().num_days_from_sunday());
         match (self.dom.star, self.dow.star) {
@@ -237,22 +248,23 @@ fn full_mask(lo: u32, hi: u32) -> u64 {
     m
 }
 
-fn truncate_to_sec(t: DateTime<Local>) -> DateTime<Local> {
+fn truncate_to_sec<Tz: TimeZone>(t: DateTime<Tz>) -> DateTime<Tz> {
     t.with_nanosecond(0).unwrap_or(t)
 }
 
-fn start_of_next_month(t: DateTime<Local>) -> Option<DateTime<Local>> {
+fn start_of_next_month<Tz: TimeZone>(t: DateTime<Tz>) -> Option<DateTime<Tz>> {
     let (y, m) = if t.month() == 12 {
         (t.year() + 1, 1)
     } else {
         (t.year(), t.month() + 1)
     };
     // 用 earliest() 而不是 single()：DST 跳变时某些本地时刻不存在
-    Local.with_ymd_and_hms(y, m, 1, 0, 0, 0).earliest()
+    t.timezone().with_ymd_and_hms(y, m, 1, 0, 0, 0).earliest()
 }
 
-fn start_of_next_day(t: DateTime<Local>) -> Option<DateTime<Local>> {
+fn start_of_next_day<Tz: TimeZone>(t: DateTime<Tz>) -> Option<DateTime<Tz>> {
     let d = t.date_naive().succ_opt()?;
+    let tz = t.timezone();
     // ⚠ DST 的午夜空洞（安全审计 M18）。
     //
     // 有些时区的某个午夜**不存在**：春季跳变正好发生在 00:00（智利、古巴等），
@@ -262,9 +274,7 @@ fn start_of_next_day(t: DateTime<Local>) -> Option<DateTime<Local>> {
     //
     // 退一步：找当天第一个真实存在的整点（最多试 4 小时，正常时区第一轮就命中）。
     for h in 0..4 {
-        if let Some(dt) = Local
-            .from_local_datetime(&d.and_hms_opt(h, 0, 0)?)
-            .earliest()
+        if let Some(dt) = tz.from_local_datetime(&d.and_hms_opt(h, 0, 0)?).earliest()
         {
             return Some(dt);
         }
@@ -272,14 +282,29 @@ fn start_of_next_day(t: DateTime<Local>) -> Option<DateTime<Local>> {
     None
 }
 
-fn start_of_next_hour(t: DateTime<Local>) -> Option<DateTime<Local>> {
-    let h = t.with_minute(0)?.with_second(0)?.with_nanosecond(0)?;
+/// 把「秒和纳秒」抹掉，**用绝对时间减法**，不走 `with_second`。
+///
+/// ⚠ 这是 DST 秋季重叠时段的一个真 bug（unpanel 2.3 的用例抓到的）：
+/// `with_second(0)` 的实现会拿「本地墙钟」去 `from_local_datetime` 重建时刻，
+/// 而重叠那一小时里的墙钟是**歧义**的（01:30 EDT / 01:30 EST 都存在），
+/// 于是它返回 None —— 再被 `?` 一传，整条 `next_after` 返回 None。
+/// 现象就是：**秋季那天的任务从此再也不触发**。
+///
+/// 绝对时间减法没有这个问题：它不重建墙钟，只是在时间轴上做减法。
+fn floor_to_minute<Tz: TimeZone>(t: DateTime<Tz>) -> DateTime<Tz> {
+    let sec = t.second() as i64;
+    let nano = t.nanosecond() as i64;
+    t - ChronoDuration::seconds(sec) - ChronoDuration::nanoseconds(nano)
+}
+
+fn start_of_next_hour<Tz: TimeZone>(t: DateTime<Tz>) -> Option<DateTime<Tz>> {
+    let min = t.minute() as i64;
+    let h = floor_to_minute(t) - ChronoDuration::minutes(min);
     Some(h + ChronoDuration::hours(1))
 }
 
-fn start_of_next_minute(t: DateTime<Local>) -> Option<DateTime<Local>> {
-    let m = t.with_second(0)?.with_nanosecond(0)?;
-    Some(m + ChronoDuration::minutes(1))
+fn start_of_next_minute<Tz: TimeZone>(t: DateTime<Tz>) -> Option<DateTime<Tz>> {
+    Some(floor_to_minute(t) + ChronoDuration::minutes(1))
 }
 
 /// 抖动的方向。
@@ -386,10 +411,13 @@ impl Schedule {
     /// 「理论」和「实际」分开是抖动不累积的关键：理论那条线自己走，
     /// 抖动只加在实际那一份上。否则 `@every 1d ~30m` 会变成随机游走 ——
     /// 跑一个月「8 点」就漂走了。
-    pub fn next_base(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
+    pub fn next_base<Tz: TimeZone>(&self, from: DateTime<Tz>) -> Option<DateTime<Tz>>
+    where
+        Tz::Offset: std::fmt::Display,
+    {
         match self {
             Schedule::Jittered { base, .. } => base.next_base(from),
-            Schedule::Cron(c) => c.next_after(from),
+            Schedule::Cron(c) => c.next_after_in(from),
             // 注意：这里**绝对不能** truncate 到秒。
             // cron 的粒度是秒，但 @every 可以细到毫秒；一旦把 from 的毫秒抹掉再 +500ms，
             // 算出来的时刻会等于 from 本身 —— next_fire 原地踏步，任务会被无限重触发。
@@ -414,6 +442,8 @@ impl Schedule {
     pub fn next_after(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
         self.next_base(from)
     }
+
+
 }
 
 /// `@every` 后面那个参数。多给了一个 token 是最常见的写错方式，
@@ -1030,5 +1060,52 @@ mod dst_tests {
             assert!(next > t, "第 {i} 次推进没有前进: {t} -> {next}");
             t = next;
         }
+    }
+
+    /// 春季跳变：2026-03-08 凌晨 02:00 EST → 03:00 EDT，`02:30` 那天**不存在**。
+    ///
+    /// 断言「跳过那一天、去下一个 02:30」，而不是崩掉或者无限循环。
+    /// 这条用例的价值在于：它是唯一能区分「按墙钟算」和「按绝对时间算」的形状之一。
+    #[test]
+    fn dst_spring_gap_skips_the_missing_time() {
+        use chrono::TimeZone;
+        use chrono_tz::America::New_York;
+        let s = Schedule::parse("30 2 * * *").unwrap();
+        let from = New_York.with_ymd_and_hms(2026, 3, 8, 0, 0, 0).unwrap();
+        let next = s.next_base(from).expect("必须给出下一次，不能返回 None");
+        assert_eq!(next.format("%Y-%m-%d %H:%M").to_string(), "2026-03-09 02:30");
+        assert_eq!(next.offset().to_string(), "EDT", "3 月 9 日已经是夏令时");
+    }
+
+    /// 秋季重叠：2026-11-01 01:00–02:00 的墙钟出现**两次**（EDT 一次、EST 一次）。
+    ///
+    /// ⚠ 这条是回归测试：修之前 `next_after` 在这天返回 `None` ——
+    /// 原因是 `with_second(0)` 内部会拿歧义的墙钟去重建时刻、拿到 None，
+    /// 再被 `?` 传出去。现象是**秋季那天的任务从此再也不触发**。
+    #[test]
+    fn dst_fall_overlap_fires_once_per_offset() {
+        use chrono::TimeZone;
+        use chrono_tz::America::New_York;
+        let s = Schedule::parse("30 1 * * *").unwrap();
+        let from = New_York.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        let first = s.next_base(from).expect("重叠时段不能返回 None");
+        assert_eq!(first.format("%Y-%m-%d %H:%M").to_string(), "2026-11-01 01:30");
+        assert_eq!(first.offset().to_string(), "EDT", "第一次是夏令时那遍");
+        let second = s.next_base(first).expect("第二次也要给出来");
+        assert_eq!(second.format("%Y-%m-%d %H:%M").to_string(), "2026-11-01 01:30");
+        assert_eq!(second.offset().to_string(), "EST", "第二次是标准时那遍");
+        // 墙钟一样，但绝对时刻差一小时 —— 这正是「重叠」的含义
+        assert_eq!((second - first).num_minutes(), 60);
+    }
+
+    /// 普通跨天：没有 DST 的月份，行为必须和以前一样。
+    #[test]
+    fn dst_normal_cross_day_is_unaffected() {
+        use chrono::TimeZone;
+        use chrono_tz::America::New_York;
+        let s = Schedule::parse("0 3 * * *").unwrap();
+        let from = New_York.with_ymd_and_hms(2026, 6, 1, 4, 0, 0).unwrap();
+        let next = s.next_base(from).expect("普通跨天不该出问题");
+        assert_eq!(next.format("%Y-%m-%d %H:%M").to_string(), "2026-06-02 03:00");
     }
 }
