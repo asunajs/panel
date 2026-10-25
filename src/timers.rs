@@ -145,6 +145,11 @@ impl Timers {
                 }
                 None => {
                     self.by_id.remove(&id);
+                    // ⚠ 一次性定时器触发后也要清失败计数（安全审计 L4）：
+                    // 它不会再跑，所以永远等不到 record_success 来清零；
+                    // 回调抛错时记下的那条会永久留在 fails 里。
+                    // 插件反复 `setTimeout(fn, 0)` 而 fn 抛错 ⇒ fails 无界增长。
+                    self.fails.remove(&id);
                     out.push((id, false));
                 }
             }
