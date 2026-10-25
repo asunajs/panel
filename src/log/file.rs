@@ -607,6 +607,39 @@ mod tests {
     }
 
     #[test]
+    fn flush_blocking_waits_until_the_line_is_on_disk() {
+        // 安全审计 L8：`flush_blocking` 以前只是把 `Msg::Flush` 塞进队列就返回，
+        // 调用方（exec 重启前）紧接着就换进程 —— 积压的行直接丢。
+        // 这条钉的是「flush_blocking 返回时，行**已经**在盘上」。
+        //
+        // ⚠ 关键：不能靠 drop(Logger) 来触发落盘 —— 那走的是 shutdown 路径，
+        // 测不到 flush_blocking 本身。所以要把 Arc 留一份在手上。
+        let dir = tmpdir("flush-ack");
+        let t = Arc::new(FileTransport::open(&dir, "plugin", 7).unwrap());
+        let lg = Logger::with_transports("mcloud", vec![t.clone()]);
+        lg.warn("必须落盘的一行");
+        t.flush_blocking();
+
+        // 不 drop(lg)：此刻还活着，行必须已经在文件里
+        let rows = read_all(&dir, "plugin");
+        assert_eq!(rows.len(), 1, "flush_blocking 返回后行还没落盘");
+        assert_eq!(rows[0]["msg"], "必须落盘的一行");
+    }
+
+    #[test]
+    fn flush_blocking_on_an_idle_transport_returns_promptly() {
+        // 没有积压时 flush_blocking 不能卡住：exec 重启路径上卡住 = 面板不重启。
+        let dir = tmpdir("flush-idle");
+        let t = FileTransport::open(&dir, "plugin", 7).unwrap();
+        let start = std::time::Instant::now();
+        t.flush_blocking();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "空转时 flush_blocking 不该等满 2 秒超时"
+        );
+    }
+
+    #[test]
     fn read_run_filters_history_by_run_id() {
         let dir = tmpdir("read-run");
         let date = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
