@@ -130,6 +130,41 @@ enum In {
     Failed(String),
 }
 
+/// 预占名额的 RAII 守卫（安全审计 M7）。
+///
+/// 为什么用守卫而不是手写 fetch_sub：`open()` 里有十几个提前返回，
+/// 漏一个就永久泄漏一个名额 —— 症状是「用久了再也开不了新连接」，
+/// 和原因隔得很远，极难查。Drop 保证所有路径都释放。
+struct SlotGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> SlotGuard<'a> {
+    fn acquire(
+        counter: &'a std::sync::atomic::AtomicUsize,
+        conns: &Mutex<std::collections::HashMap<u64, Conn>>,
+        max: usize,
+    ) -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+        let n = counter.fetch_add(1, Ordering::AcqRel) + 1;
+        let live = conns.lock().map(|c| c.len()).unwrap_or(0);
+        if live + n > max {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return Err(format!(
+                "同时开着的 WebSocket 已达上限 {max} 条 —— 先 ws_close 掉不用的"
+            ));
+        }
+        Ok(Self { counter })
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 struct Conn {
     /// 哪个插件开的这条连接（**按插件判"能不能卸"要用它**）。
     ///
@@ -193,6 +228,11 @@ fn push_in(in_tx: &SyncSender<In>, fatal: &Mutex<Option<String>>, msg: In) -> bo
 pub struct Registry {
     rt: Handle,
     conns: Mutex<HashMap<u64, Conn>>,
+    /// 正在握手、还没进 conns 的连接数（安全审计 M7）。
+    ///
+    /// 只查 conns.len() 不够：检查与插入之间隔着一次握手（可能几百毫秒），
+    /// 并发 open 全部能通过检查。用这个计数**预占**名额。
+    opening: std::sync::atomic::AtomicUsize,
     next: AtomicU64,
     /// 出站 SSRF 放行开关（`HOST_API_ALLOW_PRIVATE=1`），**构造时读一次**。
     ///
@@ -211,6 +251,7 @@ impl Registry {
         Self {
             rt,
             conns: Mutex::new(HashMap::new()),
+            opening: std::sync::atomic::AtomicUsize::new(0),
             next: AtomicU64::new(1),
             allow_private,
         }
@@ -265,14 +306,9 @@ impl Registry {
         // 两个能力对"tls 该怎么写、写了 native 而没有它该怎么办"必须是同一个答案。
         let tls = crate::hostapi::parse_tls_choice(&opts)?;
 
-        {
-            let conns = self.conns.lock().unwrap();
-            if conns.len() >= MAX_CONNS {
-                return Err(format!(
-                    "同时开着的 WebSocket 已达上限 {MAX_CONNS} 条 —— 先 ws_close 掉不用的"
-                ));
-            }
-        }
+        // 预占一个名额（安全审计 M7）：只查 conns.len() 的话，检查与插入之间
+        // 隔着一次握手，并发 open 都能通过检查。
+        let _slot = SlotGuard::acquire(&self.opening, &self.conns, MAX_CONNS)?;
 
         let mut req = url
             .into_client_request()
