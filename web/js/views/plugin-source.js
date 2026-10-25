@@ -149,7 +149,7 @@ export async function render(root, ctx, params) {
   };
   root.addEventListener('keydown', onKey);
 
-  restoreBtn.addEventListener('click', async () => {
+  const onRestore = async () => {
     // 覆盖当前内容也算危险动作：走同一套确认条
     const row = restoreBtn.parentElement;
     const keep = row.innerHTML;
@@ -161,16 +161,26 @@ export async function render(root, ctx, params) {
     });
     if (!yes) {
       row.innerHTML = keep;
+      // ⚠ innerHTML 恢复不了事件监听（安全审计 L1）：restoreBtn 指向的已经是
+      // 脱离文档的旧节点，新画出来的按钮没有任何监听 —— 点了没反应，
+      // 用户只能刷新页面。所以恢复标记之后必须重新挂一次。
+      const again = row.querySelector('#src-restore');
+      if (again) again.addEventListener('click', onRestore);
       return;
     }
     const out = await restorePluginSource(name);
     if (!out.ok) {
       ctx.toast(`${name}：恢复失败 —— ${out.error}`, 'bad');
+      // 失败时同样要还原那一排按钮，否则它们被确认条替换掉之后就再也回不来了。
+      row.innerHTML = keep;
+      const again = row.querySelector('#src-restore');
+      if (again) again.addEventListener('click', onRestore);
       return;
     }
     ctx.toast(`${name}：已用备份覆盖（${out.lines} 行），引擎正在热更新…`, 'ok');
     ctx.navigate(`#/plugins/${encodeURIComponent(name)}/source`);
-  });
+  };
+  restoreBtn.addEventListener('click', onRestore);
 
   root.querySelector('#src-back').addEventListener('click', () => ctx.navigate('#/plugins'));
 
