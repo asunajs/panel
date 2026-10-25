@@ -17,15 +17,16 @@
 
 ## 2. 平台支持
 
-官方只有三个产物（见 `.github/workflows/release.yml`）：
+官方产物**每个平台两个变体**，共 6 个（以 `.github/workflows/release.yml` 为准）：
 
-```
-plugin-panel-x86_64-linux-musl
-plugin-panel-aarch64-linux-musl
-plugin-panel-armv7-linux-musleabihf
-```
+- 完整版：x86_64-linux-musl、aarch64-linux-musl、armv7-linux-musleabihf、windows-x86_64
+- `-slim` 变体：同上四个平台各一个，去掉 live 推流相关能力（`live_supported == false`，
+  CI 里有断言）。默认下载的是**完整版** —— 实时推流是产品的一部分，不该让大多数人
+  去装一个功能残缺的包。
 
-其它平台（macOS / Windows / 自编译的其它架构）默认**能查不能装**：界面上会直说
+（这段以前写的是“官方只有三个产物”，那是加 Windows 和 slim 变体之前的状态。）
+
+其它平台（macOS / 自编译的其它架构）默认**能查不能装**：界面上会直说
 「官方没有为 macos/aarch64 发布产物」，而不是给一个点了必然失败的按钮。
 自建产物可用 `PANEL_UPDATE_ASSET` 指定产物名（配合 `PANEL_UPDATE_REPO`），
 但替换的仍是当前正在运行的二进制，风险自负。
