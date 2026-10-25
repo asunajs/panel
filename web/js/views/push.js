@@ -21,7 +21,7 @@
   `channels` 数组**，前端不写死 —— 顺序是配置的一部分，抄一份就会漂。
 */
 
-import { getPush, savePush, savePushTask, testPush } from '../api.js';
+import { getPush, getPushOutbox, retryPushOutbox, savePush, savePushTask, testPush } from '../api.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -81,6 +81,8 @@ function maskText(v) {
 export async function renderPush(root, ctx) {
   let data = null;
   let loadError = '';
+  // 发不出去的通知（unpanel 2.7）。和 data 分开取：outbox 读失败不该让整页挂掉。
+  let outbox = [];
   let editing = ''; // 展开着的是哪个渠道（同时只展开一个）
   let testResult = null;
   let testError = '';
@@ -467,6 +469,24 @@ export async function renderPush(root, ctx) {
       .join('');
   }
 
+  /** 发不出去的通知（unpanel 2.7）：能看见、能重发。 */
+  function outboxBlock() {
+    if (!outbox.length) {
+      return '<p class="empty">没有待重发的通知。发送失败时会在这里留一条。</p>';
+    }
+    return outbox
+      .map((o) => {
+        return `<div class="push-delivery">
+          <span class="mono dim" style="flex:none">${esc(o.at || '—')}</span>
+          <span class="mono" style="flex:1 1 12rem;min-width:0">${esc(o.plugin || '—')} / ${esc(o.task || '—')}</span>
+          <span class="badge idle">${esc(o.channel || '—')}</span>
+          <span class="badge failed" title="试过 ${esc(String(o.attempts || 1))} 次">失败 ${esc(String(o.attempts || 1))} 次</span>
+          <span class="err-text" style="flex:1 1 10rem;min-width:0">${esc(o.reason || '')}</span>
+          <button class="btn ghost" data-outbox-retry="${esc(o.id)}" style="flex:none">重发</button>
+        </div>`;
+      })
+      .join('');
+  }
   // ---------------------------------------------------------------- 画
 
   // 一屏铺完 10 个渠道 + 触发设置 + 按任务 + 试发 + 最近投递要滚好几屏，
@@ -648,6 +668,15 @@ export async function renderPush(root, ctx) {
           <h2 class="section-title">最近投递（${recent().length}）</h2>
         </div>
         <div class="card">${recentBlock()}</div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <h2 class="section-title">发不出去的通知（${outbox.length}）</h2>
+        </div>
+        <p class="hint">发送失败时会留在这里。对端抖一下造成的失败，点「重发」通常就好了；
+          重发成功这条就消失。</p>
+        <div class="card">${outboxBlock()}</div>
       </div>`;
     mountTabs();
   }
@@ -695,6 +724,9 @@ export async function renderPush(root, ctx) {
     }
     loadError = '';
     data = res;
+    // outbox 单独取：它读失败不该让整页显示成「推送读不到」。
+    const ob = await getPushOutbox();
+    outbox = ob && ob.ok && Array.isArray(ob.items) ? ob.items : [];
     paint();
   }
 
@@ -879,14 +911,31 @@ export async function renderPush(root, ctx) {
 
   // 事件委托挂在 root 上（paint() 只换 innerHTML，root 本身不换）：
   // 重画之后按钮仍然能点 —— 逐个按钮绑监听必然漏掉新画出来的那批。
-  root.addEventListener('click', (ev) => {
+  root.addEventListener('click', async (ev) => {
     if (!(ev.target instanceof Element)) return;
     const btn = ev.target.closest(
       'button[data-tab], button[data-refresh], button[data-edit], button[data-remove],' +
-        ' button[data-save-chan], button[data-test], button[data-settings-save]',
+        ' button[data-save-chan], button[data-test], button[data-settings-save],' +
+        ' button[data-outbox-retry]',
     );
     if (!btn || btn.disabled) return;
     const d = btn.dataset;
+    if (d.outboxRetry !== undefined) {
+      // 重发：发送是同步的（每渠道最多 10 秒），按钮先禁掉，免得连点发出好几条。
+      btn.disabled = true;
+      btn.textContent = '重发中…';
+      const res = await retryPushOutbox(d.outboxRetry);
+      btn.disabled = false;
+      btn.textContent = '重发';
+      if (res && res.ok) {
+        ctx.toast('重发成功', 'ok');
+      } else {
+        ctx.toast(`重发失败：${(res && res.error) || '未知错误'}`, 'bad');
+      }
+      // 无论成败都重新拉一次：成功那条要消失，失败要刷新次数和原因。
+      await load(true);
+      return;
+    }
     if (d.tab !== undefined) {
       tab = d.tab;
       applyTab();

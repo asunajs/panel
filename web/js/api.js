@@ -549,6 +549,21 @@ export function getPush() {
   return request('/api/push', { panel: true });
 }
 
+/** 发不出去的通知（unpanel 2.7）。返回 {ok, items:[...]}。 */
+export function getPushOutbox() {
+  return request('/api/push/outbox', { panel: true });
+}
+
+/** 重发 outbox 里的一条。发送是同步的，超时给足。 */
+export function retryPushOutbox(id) {
+  return request('/api/push/outbox/retry', {
+    method: 'POST',
+    panel: true,
+    body: { id },
+    timeout: 30000,
+  });
+}
+
 /**
  * 改推送配置。**只发要改的那部分**：
  *   `{ enabled, title, settings }`                        —— 总开关与触发设置
