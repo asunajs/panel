@@ -474,7 +474,15 @@ async fn security_headers(State(st): State<AppState>, req: Request, next: Next) 
         } else {
             host.split(':').next().unwrap_or("")
         };
-        if hostname.is_empty() {
+        // ⚠ hostname 来自 Host 头，是**请求方可控的**（安全审计 L6 后半）：
+        // 它被拼进 CSP 的 frame-src，一个带 `;` 或空格的值就能往里塞新指令。
+        // 只放行主机名/IP 合法字符，其它一律退回 'self'。
+        let looks_like_host = !hostname.is_empty()
+            && hostname.len() <= 255
+            && hostname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+        if !looks_like_host {
             "'self'".to_string()
         } else {
             format!("'self' http://{hostname}:{port} https://{hostname}:{port}")
