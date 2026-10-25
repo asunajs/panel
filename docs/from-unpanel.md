@@ -656,3 +656,23 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 2.5、2.9、2.11 三条的前提与面板实际不符。共同原因：**按名词搜，没按行为搜**
 （`retention` vs `keep_days`、`quarantine` vs `close_dangling_runs`）。
 这条教训单独记在 §2.12 补记里。
+
+> **2.6 已实现（2026-10-25，第 4 轮续作）**
+>
+> 三步都做完了：
+>
+> | 步 | 内容 | 提交 |
+> |---|---|---|
+> | 1 | `settings.json` 加 `revision`，每次写 +1；老文件 `serde(default)` 读出 0，不丢设置 | `095d8f1` |
+> | 2 | `check_revision` + `UPDATE_LOCK`：不匹配回 **409**（不是 400）；前端把 revision 带回去并在成功后更新 | `105496a` |
+> | 3 | 改动记入 `settings_audit`（key / 改前值 / 改后值 / revision），凭据类走 `mask_for_audit` | `edb88e4` |
+>
+> 两个实现细节值得记：
+>
+> 1. **光比对 revision 不够**：`update` 是「读 → 比 → 写」三步，两个请求同时进来会都读到同一个旧值。
+>    所以加了 `static UPDATE_LOCK: Mutex<()>` 把整段串起来。
+> 2. **前端必须回写 revision**：保存成功后不更新手里的值，**下一次保存必然 409**。
+>    这是 CAS 最容易漏的一环，`saveSettings` 的注释里写死了。
+>
+> ⚠ 仍未验证：**没有跑真实的浏览器并发测试**（两个标签页同时保存、断言一个 200 一个 409）。
+> 锁和 revision 都在，但「真的 409 了」没实测。
