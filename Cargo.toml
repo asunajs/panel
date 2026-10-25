@@ -125,6 +125,9 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 # `legacy-tls-vendored` 用的那份 OpenSSL（静态编进二进制）。只在那个 feature 下才编。
 openssl = { version = "0.10", optional = true }
 sha2 = "0.10"
+# age 的 Identity 用 SecretBox 包着私钥；要取出明文必须显式 expose。
+secrecy = "0.10"
+age = { version = "0.12.1", default-features = false, features = ["armor"] }
 
 [features]
 # ⚠⚠ **默认就带**（2026-10-17 改）。
