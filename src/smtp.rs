@@ -357,17 +357,7 @@ impl Conn {
         let mut text = String::new();
         loop {
             let line = self.read_line()?;
-            // ⚠ 先确认前 3 个**字节**都是 ASCII 数字，再切片。
-            //   直接 line[..3] 会在多字节字符中间切：服务器回一行 "éé"（4 字节，
-            //   第 3 字节不是字符边界）就 panic —— 而 release 是 panic = "abort"，
-            //   整个面板直接退出。SMTP 应答按协议就该是 ASCII，非 ASCII 属协议错误。
-            let head = line.as_bytes();
-            if head.len() < 3 || !head[..3].iter().all(u8::is_ascii_digit) {
-                return Err(format!("响应行不是三位状态码: `{line}`"));
-            }
-            let code: u16 = line[..3]
-                .parse()
-                .map_err(|_| format!("响应行不是三位状态码: `{line}`"))?;
+            let code = reply_code(&line)?;
             text.push_str(&line);
             text.push('\n');
             if line.as_bytes().get(3) != Some(&b'-') {

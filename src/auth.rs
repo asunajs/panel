@@ -1261,9 +1261,7 @@ impl Auth {
             if self.check_global().is_err() || self.check_rate(ip).is_err() {
                 return None;
             }
-            let Some(_inflight) = self.begin_attempt(ip) else {
-                return None;
-            };
+            let _inflight = self.begin_attempt(ip)?;
             if self.credential_matches(&t) {
                 return Some(Via::Token);
             }
