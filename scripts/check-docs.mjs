@@ -139,6 +139,29 @@ if (existsSync(index)) {
   walk(join(ROOT, 'docs'));
 }
 
+// ---- 4：设置项与文档对账 ----
+//
+// 这一条是**审查 L12 的直接教训**：`RUN_KEEP_DAYS` 和 `PLUGIN_KEEPALIVE_MS`
+// 都在设置页里存在，却一份 markdown 都没写。用户照着文档部署就永远不知道有它们。
+//
+// 判据：`settings.rs` 的 DEFS 里每个 `key` 都必须在 `docs/configuration.md` 出现。
+// 反过来不查 —— 文档里可以写不在设置页的变量（比如只在环境里生效的那些）。
+{
+  const src = join(ROOT, 'src', 'settings.rs');
+  const cfg = join(ROOT, 'docs', 'configuration.md');
+  if (existsSync(src) && existsSync(cfg)) {
+    const code = readFileSync(src, 'utf8');
+    const doc = readFileSync(cfg, 'utf8');
+    const keys = new Set();
+    for (const m of code.matchAll(/key:\s*"([A-Z0-9_]+)"/g)) keys.add(m[1]);
+    for (const k of [...keys].sort()) {
+      if (!doc.includes('\`' + k + '\`') && !doc.includes(k)) {
+        problems.push(`docs/configuration.md 没写设置项: ${k}`);
+      }
+    }
+  }
+}
+
 if (problems.length) {
   console.error(`文档检查失败，${problems.length} 处：`);
   for (const p of problems) console.error('  ' + p);
