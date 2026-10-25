@@ -42,6 +42,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+/// 事件队列上限（安全审计 M4）。
+///
+/// 队列满时**丢事件**而不是阻塞读线程：读线程一阻塞，子进程的管道写满，
+/// 脚本就会被自己的 print 卡死 —— 那比丢几条日志糟得多。
+const EVENT_QUEUE_MAX: usize = 1024;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -713,7 +718,11 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
         .take()
         .ok_or_else(|| "拿不到子进程 stderr".to_string())?;
 
-    let (tx, rx) = mpsc::channel::<ChildEvent>();
+    // ⚠ 有界通道（安全审计 M4）。
+    //
+    // 以前是 mpsc::channel（无界）：脚本疯狂输出时，引擎读得慢，队列就无限涨 ——
+    // 一个死循环 print 的脚本能把面板内存吃光。这里给一个明确上限，满了就丢。
+    let (tx, rx) = mpsc::sync_channel::<ChildEvent>(EVENT_QUEUE_MAX);
     let mut threads = Vec::new();
 
     // stdout：协议事件 + 裸行日志
@@ -759,7 +768,7 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
 
 fn read_events(
     stdout: std::process::ChildStdout,
-    tx: mpsc::Sender<ChildEvent>,
+    tx: mpsc::SyncSender<ChildEvent>,
     shared: Arc<ExtShared>,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -772,7 +781,7 @@ fn read_events(
             .read_line(&mut buf)
         {
             Ok(0) => {
-                let _ = tx.send(ChildEvent::Eof);
+                let _ = tx.try_send(ChildEvent::Eof);
                 break;
             }
             Ok(_) => {
@@ -789,7 +798,7 @@ fn read_events(
                                     shared.record_output(&msg, false);
                                 }
                                 other => {
-                                    if tx.send(other).is_err() {
+                                    if tx.try_send(other).is_err() {
                                         break;
                                     }
                                 }
@@ -804,7 +813,7 @@ fn read_events(
             }
             Err(e) => {
                 shared.log("error", &format!("读取 stdout 失败: {e}"));
-                let _ = tx.send(ChildEvent::Eof);
+                let _ = tx.try_send(ChildEvent::Eof);
                 break;
             }
         }
