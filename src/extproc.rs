@@ -556,6 +556,11 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
     let (mut cmd, script_arg) = match spec.engine {
         EngineKind::Node => {
             let mut c = Command::new(&spec.command);
+            // 探测出来的必要标志（`node:sqlite` 在老一点的 Node 上要显式开）。
+            // 必须在 `--import` 之前：Node 的选项解析是先到先得，放在脚本名后面就不算选项了。
+            if let Some(flag) = &runtime.node_sqlite_flag {
+                c.arg(flag);
+            }
             c.arg("--no-warnings")
                 .arg("--import")
                 .arg(&runtime.register)

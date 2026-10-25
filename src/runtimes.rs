@@ -58,6 +58,11 @@ pub struct RuntimeInfo {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// 这个 node 需要带什么标志才能用 `node:sqlite`（通常是 `--experimental-sqlite`）。
+    /// **不按版本号猜**：22.5 引入这个模块、但很长一段时间里都要显式开标志，
+    /// 而分界点在哪个补丁版本各人说法不一 —— 直接问 node 自己最准。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sqlite_flag: Option<String>,
 }
 
 impl RuntimeInfo {
@@ -68,6 +73,7 @@ impl RuntimeInfo {
             version: None,
             available: false,
             reason: Some(reason.into()),
+            sqlite_flag: None,
         }
     }
 
@@ -78,6 +84,7 @@ impl RuntimeInfo {
             version: Some(version),
             available: true,
             reason: None,
+            sqlite_flag: None,
         }
     }
 }
@@ -92,6 +99,11 @@ pub struct RuntimeCatalog {
 }
 
 impl RuntimeCatalog {
+    /// 起外部 Node 插件时要带的标志（见 [`RuntimeInfo::sqlite_flag`]）。
+    pub fn node_sqlite_flag(&self) -> Option<String> {
+        self.node.sqlite_flag.clone()
+    }
+
     pub fn detect() -> Self {
         #[cfg(unix)]
         let (node, bun) = (probe_node(), probe_bun());
@@ -332,12 +344,15 @@ fn probe_cmd(env_key: &str, default: &str, args: &[&str], kind: &str) -> Runtime
 
 #[cfg(unix)]
 fn probe_node() -> RuntimeInfo {
-    let info = probe_cmd("PANEL_NODE", "node", &["--version"], "node");
+    let mut info = probe_cmd("PANEL_NODE", "node", &["--version"], "node");
     if !info.available {
         return info;
     }
     match node_major(info.version.as_deref().unwrap_or("")) {
-        Some((major, minor)) if major > 20 || (major == 20 && minor >= 6) => info,
+        Some((major, minor)) if major > 20 || (major == 20 && minor >= 6) => {
+            info.sqlite_flag = detect_sqlite_flag(info.path.as_deref());
+            info
+        }
         Some((major, minor)) => RuntimeInfo::missing(
             "node",
             format!(
@@ -346,6 +361,30 @@ fn probe_node() -> RuntimeInfo {
         ),
         None => RuntimeInfo::missing("node", "读不出 Node 版本号"),
     }
+}
+
+/// 问这个 node：`require('node:sqlite')` 直接能不能用？不能的话带 `--experimental-sqlite`
+/// 能不能用？两个都失败就返回 None（这个 Node 没有 sqlite，插件会拿到明确报错）。
+///
+/// 为什么用探测而不是版本判断：22.5 引入了 `node:sqlite`，但"哪个补丁版本开始
+/// 不用显式开标志"说法不一（用户实测 22.11 仍要、24.x 不用）。写死版本号会把
+/// 中间的版本判错，探测不会。
+#[cfg(unix)]
+fn detect_sqlite_flag(path: Option<&str>) -> Option<String> {
+    let p = PathBuf::from(path.unwrap_or("node"));
+    let probe = |extra: &[&str]| -> bool {
+        let mut args: Vec<&str> = extra.to_vec();
+        args.push("-e");
+        args.push("require('node:sqlite')");
+        run_version(&p, &args, Duration::from_secs(3)).is_ok()
+    };
+    if probe(&[]) {
+        return None; // 直接能用，不用带标志
+    }
+    if probe(&["--experimental-sqlite"]) {
+        return Some("--experimental-sqlite".to_string());
+    }
+    None
 }
 
 #[cfg(any(unix, test))]

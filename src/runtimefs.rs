@@ -53,6 +53,9 @@ pub struct RuntimePaths {
     pub register: PathBuf,
     /// Bun 的 `NODE_PATH`（包在 `<这里>/host-api`）。
     pub bun_node_path: PathBuf,
+    /// 起 Node 子进程时要额外带的标志（`node:sqlite` 在某些版本上要显式开）。
+    /// 由 [`crate::runtimes`] 探测后填，`ensure()` 里先留空。
+    pub node_sqlite_flag: Option<String>,
 }
 
 impl RuntimePaths {
@@ -97,6 +100,7 @@ impl RuntimePaths {
             runner: js_dir.join("runner.mjs"),
             register: js_dir.join("register.mjs"),
             bun_node_path: js_dir.join("node_modules"),
+            node_sqlite_flag: None,
             root,
         })
     }
@@ -110,6 +114,7 @@ impl RuntimePaths {
             runner: runtime_js.join("runner.mjs"),
             register: runtime_js.join("register.mjs"),
             bun_node_path: runtime_js.join("node_modules"),
+            node_sqlite_flag: None,
         }
     }
 }

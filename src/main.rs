@@ -458,6 +458,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("落盘外部运行时 shim 到 {} 失败: {e}", runtime_dir.display()))?;
     let catalog = std::sync::Arc::new(runtimes::RuntimeCatalog::detect());
     catalog.log_summary();
+    // 某些 Node 版本要显式开 `--experimental-sqlite` 才能用 `node:sqlite`。
+    // 探测结果在这里落到 runtime_paths 上，起子进程时带上去。
+    let mut runtime_paths = runtime_paths;
+    runtime_paths.node_sqlite_flag = catalog.node_sqlite_flag();
+    if let Some(flag) = &runtime_paths.node_sqlite_flag {
+        log::plog!("boot", debug, "这个 node 需要 {flag} 才能用 node:sqlite，起插件时会带上");
+    }
     // 任务目录：脚本任务的自动发现根（默认 `tasks`，与 plugins 同构）。
     let tasks_dir = env_path("TASKS_DIR", "tasks");
     std::fs::create_dir_all(&tasks_dir)?;

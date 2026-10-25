@@ -15,6 +15,31 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 
+// ⓪ 老一点的 Node 里 `node:sqlite` 要显式开 `--experimental-sqlite`。
+//
+// 面板那条路已经由 Rust 侧探测后补上标志（见 src/runtimes.rs 的 detect_sqlite_flag），
+// 但**直接** `node bin/run.mjs` 时没人管：结果是 sqlite 相关用例整片红，
+// 而报错（column index out of range 之类）完全指不到真正的原因。
+// 所以这里自己带上去 —— 探测而不是比版本号：同一个大版本的不同补丁行为不一样。
+try {
+  await import('node:sqlite');
+} catch {
+  if (!process.execArgv.includes('--experimental-sqlite') && !process.env.PANEL_SQLITE_REEXEC) {
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync(
+      process.execPath,
+      [
+        '--experimental-sqlite',
+        ...process.execArgv,
+        fileURLToPath(import.meta.url),
+        ...process.argv.slice(2),
+      ],
+      { stdio: 'inherit', env: { ...process.env, PANEL_SQLITE_REEXEC: '1' } }
+    );
+    process.exit(r.status ?? 1);
+  }
+}
+
 // ① 让 `import 'host-api'` 在任意路径的插件里都能解析（自引用 exports 之外的第二条路）
 try {
   register(new URL('./host-api-loader.mjs', import.meta.url));

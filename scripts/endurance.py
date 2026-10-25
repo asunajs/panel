@@ -450,6 +450,31 @@ class Runner:
             time.sleep(0.5)
         return False
 
+    def wait_perf_ready(self, timeout=30.0) -> bool:
+        """压测插件必须能答 `/perf` 且里面有 js 计数，否则这一轮测的是空气。
+
+        「插件已加载」不等于「压测插件能用」：插件可能加载成功但缺全局
+        （`setInterval` / `fetch_async`）、或者任务全被熔断，`/perf` 会 503。
+        """
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            if not self.panel_alive():
+                return False
+            code, body = http(f"{self.base}/perf", timeout=5)
+            if code == 200:
+                try:
+                    if "js" in json.loads(body):
+                        return True
+                except json.JSONDecodeError:
+                    last = "响应不是 JSON"
+            else:
+                last = f"HTTP {code}: {body[:80]}"
+            time.sleep(1.0)
+        if last:
+            print(f"   /perf 最后一次失败：{last}", file=sys.stderr)
+        return False
+
     # ---- 采样 ----
     def sample(self) -> dict:
         pid = self.proc.pid if self.panel_alive() else None
@@ -592,6 +617,18 @@ class Runner:
         if not self.wait_ready():
             print("❌ 面板没起来，先看日志:", self.panel_log, file=sys.stderr)
             return 2
+
+        # 起跑前的闸门：压测插件必须真的加载起来了。
+        # 不查会怎样：v0.1.10 上 5 个压测任务全熔断、/perf 恒 503，脚本一声不吭
+        # 跑满整轮，产出一份"没有数据"的报告 —— 时间白费，结论还是假的。
+        if not self.wait_perf_ready():
+            print(
+                "❌ 压测插件 /perf 不可用（面板起来了，但 perf-js 没加载成功）。"
+                "\n   常见原因：这个二进制的 JS 引擎缺 setInterval/fetch_async 等全局，"
+                "\n   或插件加载报错。先看日志: %s" % self.panel_log,
+                file=sys.stderr,
+            )
+            return 3
 
         header = {
             "kind": "header",
@@ -902,10 +939,14 @@ def build_report(samples, header, restarts, reloads, manual_runs, pauses,
     # 统计存在插件内存里，而热更新会重建解释器 → 计数被清零。
     # 所以要跟任务的实际触发次数对比，说清这份分布覆盖了多久。
     fast_runs = (last.get("runs") or {}).get("perf-fast", 0)
-    if fast_runs and perf.get("js", {}).get("n", 0) < fast_runs * 0.5:
+    # 取一次、只取一次：判据用 .get()，正文却下标，只要 /perf 里没有 js 键
+    # （插件没加载起来、或首采太早）就会在**出报告这一步** KeyError 崩掉，
+    # 整轮长跑的数据全白跑。判据和正文必须读同一个值。
+    js_n = (perf.get("js") or {}).get("n", 0)
+    if fast_runs and js_n < fast_runs * 0.5:
         a(f">")
         a(f"> ⚠️ 覆盖范围：上面这份分布只统计了**最后一次热更新之后**的触发"
-          f"（JS {perf['js']['n']:,} 次 vs 全程 {fast_runs:,} 次）—— "
+          f"（JS {js_n:,} 次 vs 全程 {fast_runs:,} 次）—— "
           f"统计量存在插件内存里，而热更新会重建解释器把它清零。"
           f"要看全程分布得让插件把统计落到库里再累加。\n")
     else:
