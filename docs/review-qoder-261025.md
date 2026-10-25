@@ -664,14 +664,15 @@ let fs_root = match (&task, Path::new(&plugin).file_name()) {
 |---|---|---|---|---|
 | High | 15 | **14** | 1（H9 的代理回退已用 `PANEL_UPDATE_ALLOW_UNVERIFIED` 收口） | H9 已闭合，见第 90 轮 |
 | Medium | 21 | **20** | 1（M6 后半） | M6 后半需重构脚本执行链路，判定不改；用户可见面已写入 `docs/script-jobs.md` |
-| Low | 12 | **12** | 0 | L8 改完但未补测试 |
+| Low | 12 | **12** | 0 | 含 L8 的 ack 测试（第 97 轮补，已验证「去掉修复就失败」） |
 
 ### 未做但明确记录的三处
 
 1. **M6 后半**：`.js` 与 `.py/.sh` 的数据目录不一致。修法要改「脚本 = 特殊插件」的建模，
    代价远高于审查给的 Medium 分级。已判定不改，并在 `docs/script-jobs.md` 里写明后果与迁移办法。
-2. **L8 的测试**：`flush_blocking` 的 ack 已实现，但审查要求的「入队后立即 flush，再读文件必须在」
-   这条时序用例没补。**改动没有测试覆盖。**
+2. ~~**L8 的测试**~~ → **已补**（第 97 轮）：`flush_blocking_waits_until_the_line_is_on_disk`
+   与 `flush_blocking_on_an_idle_transport_returns_promptly`。
+   **并且验证过「把 ack 等待去掉，第一条就会失败」**——不是一条恒真的测试。
 3. **审查建议的 CI 检查**（markdown 链接/锚点校验、文档与 `DEFS` 集合比对）：属于新功能，未做。
 
 ### 验证
