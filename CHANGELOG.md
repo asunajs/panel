@@ -1,7 +1,19 @@
 # 更新记录
 
-## 未发布
+## v0.1.11
 
+- **Release 开始发 Windows 产物**（`plugin-panel-windows-x86_64.exe`）。
+  之前只有 Linux 的三种架构，Windows 用户得自己编。现在 `release.yml` 多一个
+  `windows` job：windows-latest 原生编译，和 Linux 产物跑**同一条不变量断言**
+  （`build-info` 里 `live_supported` 必须为 true —— Windows 上 legacy-tls 走
+  系统自带的 schannel，不用编 OpenSSL）。
+  外部 Node/Bun 档在 Windows 上仍然不可用（`src/extproc_stub.rs` 返回明确错误），
+  QuickJS 照常 —— 这是有意为之的差异，写进产物说明里。
+- **新增 Testkit 工作流**（`.github/workflows/testkit.yml`，手动触发）：
+  产 `plugin-panel-testkit.zip`（Linux 静态包 + Windows exe + 压测脚本 + 验证手册），
+  用来在真 Windows/WSL2 机器上回答「插件卸出内存后 RSS 降不降」。
+  配套 [docs/testing-on-windows.md](docs/testing-on-windows.md) 与
+  `scripts/rss_evict_check.py`（一条命令、两分钟出结论）。
 - **撤掉 mimalloc，全部平台回到系统分配器。**
   上一轮把它收窄到 musl，这一轮直接删掉 —— 因为**它换来的东西没有被验证过，而代价是实测的**：
   · 代价：同一套插件、同一时刻 A/B，mimalloc 版 **8.25 MB** vs 系统分配器 **5.84 MB**，

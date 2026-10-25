@@ -238,11 +238,63 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------------
+  # Windows x86_64：桌面 / 家用电脑
+  #
+  # 为什么单独一个 job、不进上面那个 matrix：那些步骤（musl-gcc、static PIE、
+  # smoke.py 的 SIGTERM）全是 Unix 语义，Windows runner 上跑不了。
+  # 这里只做 Windows 能做的：原生编译 + build-info 断言直播可用。
+  #
+  # 外部 Node/Bun 档在 Windows 上不可用（src/extproc_stub.rs 返回明确错误），
+  # QuickJS 走原路径 —— 这是已知且有意为之的差异，不是漏编。
+  # ------------------------------------------------------------------
+  windows:
+    name: windows-x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建
+        run: cargo build --release
+
+      # 和 Linux 产物同一条不变量：发出去的包必须支持直播。
+      # Windows 上 legacy-tls 走 native-tls/schannel（系统自带，不用编 OpenSSL）。
+      - name: 断言这个产物**真的**支持直播
+        shell: pwsh
+        run: |
+          $bin = "target/release/plugin-panel.exe"
+          & $bin build-info
+          $json = & $bin build-info | ConvertFrom-Json
+          if (-not $json.live_supported) { throw "发出去的产物必须支持直播" }
+          Write-Host "ok: 直播可用"
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          Copy-Item target/release/plugin-panel.exe target/release/plugin-panel-windows-x86_64.exe
+          $h = (Get-FileHash target/release/plugin-panel-windows-x86_64.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  plugin-panel-windows-x86_64.exe" | Out-File -Encoding ascii target/release/SHA256SUMS-windows-x86_64
+          Get-Item target/release/plugin-panel-windows-x86_64.exe | Format-List Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-x86_64
+          path: |
+            target/release/plugin-panel-windows-x86_64.exe
+            target/release/SHA256SUMS-windows-x86_64
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
   # 汇总成一个 Release
   # ------------------------------------------------------------------
   release:
     name: 发布
-    needs: [build, armv7]
+    needs: [build, armv7, windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

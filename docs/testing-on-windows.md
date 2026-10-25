@@ -118,7 +118,8 @@ chmod +x ./plugin-panel
 ./plugin-panel build-info
 ```
 
-期望：打印一行 JSON，里面有 `"version":"0.1.10"` 和 `"live_supported":false`。
+期望：打印一行 JSON，里面有 `"version":"0.1.11"` 和 `"live_supported":false`
+（Testkit 用 `--no-default-features` 构建，直播是关的；正式 Release 里那个是开的）。
 如果报 `Exec format error`，说明拷的是 aarch64 的包，换 x86_64 那个。
 
 ### A4. 一分钟自检（确认脚本本身没问题）
