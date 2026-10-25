@@ -522,6 +522,19 @@ function assertName(fn, name) {
   }
 }
 
+
+/// 序列化参数，失败时给出**可读**的错误（安全审计 L11）。
+///
+/// 直接 `JSON.stringify(x)` 在循环引用时抛的是原生 `TypeError: Converting circular
+/// structure to JSON` —— 插件作者看到这句完全不知道是哪个参数的问题。
+function jsonArg(fn, value, name) {
+  try {
+    return JSON.stringify(value);
+  } catch (e) {
+    throw new Error(`${fn}: ${name} 不是可序列化的值（${errText(e)}）`);
+  }
+}
+
 function budgetFromOpts(opts) {
   if (opts === undefined || opts === null) return '';
   if (typeof opts !== 'object' || Array.isArray(opts)) {
@@ -570,7 +583,13 @@ export function register_cron(name, expr, handler, opts) {
       budgetRaw = String(opts.budget_ms);
     }
     if (opts.lead_ms !== undefined && opts.lead_ms !== null) {
-      leadRaw = String(opts.lead_ms);
+      // ⚠ 和 budget_ms 一样要校验（安全审计 L11）：lead_ms 是「提前多久触发」，
+      // 负数会让调度器算出过去的触发点，过大会把任务永久推后。
+      const lm = opts.lead_ms;
+      if (typeof lm !== 'number' || !Number.isFinite(lm) || !Number.isInteger(lm) || lm < 0 || lm > 3_600_000) {
+        throw new Error(`opts.lead_ms 必须是 0..3600000 的整数（收到 ${String(lm)}）`);
+      }
+      leadRaw = String(lm);
     }
     if (
       opts.surface !== undefined ||
@@ -683,7 +702,7 @@ function resultOrThrow(fn, raw) {
 export function sqlite_query(sql, params) {
   const raw = rpcCall('sqlite_query', [
     String(sql),
-    JSON.stringify(params === undefined || params === null ? [] : params),
+    jsonArg('sqlite_query', params === undefined || params === null ? [] : params, 'params'),
   ]);
   return resultOrThrow('sqlite_query', raw);
 }
@@ -691,7 +710,7 @@ export function sqlite_query(sql, params) {
 export function sqlite_exec(sql, params) {
   const raw = rpcCall('sqlite_exec', [
     String(sql),
-    JSON.stringify(params === undefined || params === null ? [] : params),
+    jsonArg('sqlite_exec', params === undefined || params === null ? [] : params, 'params'),
   ]);
   return resultOrThrow('sqlite_exec', raw);
 }
@@ -699,7 +718,7 @@ export function sqlite_exec(sql, params) {
 export function http_fetch(url, options) {
   const raw = rpcCall('http_fetch', [
     String(url),
-    JSON.stringify(options === undefined || options === null ? {} : options),
+    jsonArg('http_fetch', options === undefined || options === null ? {} : options, 'options'),
   ]);
   return parseJsonResult('http_fetch', raw);
 }
