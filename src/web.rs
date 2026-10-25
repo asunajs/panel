@@ -2681,7 +2681,20 @@ async fn upload_to(
         upload::Kind::Plugins => st.plugins_dir.clone(),
         upload::Kind::Tasks => st.host.tasks_dir.clone(),
     };
-    match upload::save(kind, &root, &filename, &data, overwrite) {
+    // ⚠ 落盘放到阻塞线程池（安全审计 M14）。
+    //
+    // upload::save 是同步文件 IO：解 zip、写文件、rename。直接在 async handler
+    // 里跑会占住一个 tokio worker —— 32 MiB 的上传在慢盘上能卡住几百毫秒，
+    // 期间同 worker 上的其它请求全部排队。
+    let save_res = {
+        let root = root.clone();
+        let filename = filename.clone();
+        let data = data.clone();
+        tokio::task::spawn_blocking(move || upload::save(kind, &root, &filename, &data, overwrite))
+            .await
+            .unwrap_or_else(|e| Err(format!("保存失败（阻塞任务异常）: {e}")))
+    };
+    match save_res {
         Ok(saved) => {
             // 文件事件监听可能还在去抖；这里再 Wake 一次，保证保存后立刻扫描。
             let _ = st.engine.broadcast(EngineCmd::Wake);
