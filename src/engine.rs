@@ -6587,7 +6587,14 @@ fn sync_script_tasks(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, host: &A
                 Some("脚本文件不存在"),
                 &now_s,
             );
-        } else if j.status == "error" {
+        } else if j.status == "error"
+            && j.last_error.as_deref() == Some("脚本文件不存在")
+        {
+            // ⚠ 只复位「文件不存在」这一种（安全审计 M12）。
+            //
+            // 以前任何 error 都会被下一次扫描（约 1 秒后）改回 running ——
+            // 一次真正的运行失败（脚本自己报错）就这样被悄悄抹掉，界面上永远
+            // 显示「运行中」，用户看不到失败。文件回来了才复位才是对的。
             let _ = db::set_job_status(db, "__script__", &j.name, "running", None, &now_s);
         }
         let Ok(schedule) = crate::cron::Schedule::parse(&j.schedule) else {
