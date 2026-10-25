@@ -279,3 +279,50 @@ python3 scripts/endurance.py --bin ./plugin-panel --hours 8
 
 ⚠ 脚本会在 `target/perf/` 下留插件、数据库和面板日志，方便事后复查；
 `target/` 已在 `.gitignore` 里。
+## 10. 健康探针
+
+两个面，回答两个不同的问题。**分开是有理由的**：磁盘满会让管理面一起坏掉，
+而那时你最需要的恰恰是「进程还活着吗」这个答案。
+
+| 路径 | 鉴权 | 回什么 | 什么时候用 |
+|---|---|---|---|
+| `/healthz` | **匿名** | 只有 `{"ok":true}` | systemd / Docker / K8s 的存活探针 |
+| `/readyz` | **要令牌** | 三项检查的真实状态 | 监控、排障 |
+
+### `/healthz`
+
+```bash
+curl -fsS http://127.0.0.1:8787/healthz
+# {"ok":true}
+```
+
+⚠ 它**刻意什么都不说** —— 不报版本、不报插件数、不报数据库状态。
+这是唯一一个不鉴权的接口，任何一点信息都会成为扫描器的免费情报。
+
+所以它只能回答「进程还在不在」。要判断「能不能用」，看 `/readyz`。
+
+### `/readyz`
+
+```bash
+curl -fsS -H "Authorization: Bearer $PANEL_TOKEN" http://127.0.0.1:8787/readyz
+# {"checks":[["db","ok"],["plugins_dir","ok"],["tasks_dir","ok"]],"ok":true}
+```
+
+三项检查都**当场算**：数据库能执行 `SELECT 1`、插件目录存在且可读、任务目录存在且可读。
+
+- 全好 → **200**
+- 有一项不好 → **503**，且 `checks` 里那一项会写明原因（`missing` / `db_error: …` / `unreadable: …`）
+
+⚠ 三项都是「现算」的，所以不存在「状态定义了但永远不会变」的情况 —— 修好之后下一次调用就会变回 `ok`。
+
+### systemd 里怎么用
+
+```ini
+[Service]
+# 存活：进程没了就重启。匿名，不需要令牌。
+ExecStartPre=/usr/bin/curl -fsS --max-time 5 http://127.0.0.1:8787/healthz
+```
+
+⚠ systemd 的 `ExecStartPre` 跑在服务启动**之前**，那时端口还没监听 —— 想用探针做
+「起来没有」的判断，应该用 `ExecStartPost`，或者干脆交给 `Restart=on-failure`。
+上面这段只在「重启前确认旧实例已经死了」这种场景下有意义。
