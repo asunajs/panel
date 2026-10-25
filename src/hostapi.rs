@@ -939,6 +939,13 @@ impl HostState {
         if host.is_empty() {
             return Err("smtp_send: host 不能为空".to_string());
         }
+        // SMTP 也必须过出站判定（安全审计 M10）。
+        //
+        // 以前只有 http_fetch 查这一道：插件可以用 smtp_send 连 127.0.0.1:25
+        // 或者云厂商的元数据地址，判定表形同虚设。
+        // 内网中继（192.168/10.x）默认会被拒 —— 和 http_fetch 是同一套规则，
+        // 真要连内网就设 PLUGIN_ALLOW_PRIVATE_OUTBOUND=1（见 allow_private_outbound_targets）。
+        ensure_outbound_url_allowed(&format!("https://{host}/"))?;
         // 端口默认跟着 tls 走：465 是 implicit、其它是 starttls。
         // 显式给了就用显式的 —— 内网中继经常跑在奇怪端口上。
         let tls = crate::smtp::TlsMode::parse(&get_str("tls"))?;
