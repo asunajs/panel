@@ -170,6 +170,37 @@ fn main() {
     }
 }
 
+/// `plugin-panel backup <输出路径>` —— 用 `VACUUM INTO` 拍一份一致的库快照。
+///
+/// 为什么不直接 `cp` 数据库文件（unpanel 2.10）：WAL 模式下拷到的是「半份」——
+/// 而且坏得最阴：能打开、不报错、数据少一块。`VACUUM INTO` 由 SQLite 自己保证一致。
+///
+/// ⚠ 这一步只做「拍快照」。加密（age）和「恢复后必须显式激活」是后续的事，
+/// 但**恢复那一步的显式激活必须一开始就有** —— 它是唯一一个「做错了会静默用错库」的地方。
+fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(out) = args.first() else {
+        eprintln!("用法: plugin-panel backup <输出文件路径>");
+        eprintln!("  例如: plugin-panel backup /var/backups/panel-$(date +%F).db");
+        return Err("缺少输出路径".into());
+    };
+    if std::path::Path::new(out).exists() {
+        // 不覆盖：备份文件被静默覆盖，等于把上一次的救命稻草烧了。
+        return Err(format!("目标已存在，不覆盖: {out}").into());
+    }
+    let db_path = env_path("DB_PATH", "data/panel.db");
+    if !db_path.exists() {
+        return Err(format!("数据库不存在: {}", db_path.display()).into());
+    }
+    let conn = rusqlite::Connection::open(&db_path)?;
+    // VACUUM INTO 的参数要转义成 SQL 字面量（它不支持绑定参数）。
+    let quoted = format!("'{}'", out.replace('\'', "''"));
+    conn.execute(&format!("VACUUM INTO {quoted}"), [])?;
+    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    println!("已备份: {out}（{} KiB）", size / 1024);
+    println!("⚠ 这份文件是**明文**：请自己决定放哪、谁能读。");
+    Ok(())
+}
+
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // 子命令要在**建 runtime / 碰数据库之前**处理：生成令牌哈希不需要起服务，
     // 也不该因为「端口被占」之类的配置问题就跑不了。
@@ -177,6 +208,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cmd) = args.first() {
         match cmd.as_str() {
             "hash-token" => return hash_token_cmd(&args[1..]),
+            "backup" => return backup_cmd(&args[1..]),
             "digest" => return digest_cmd(&args[1..]),
             "build-info" => return build_info_cmd(),
             "help" | "--help" | "-h" => {
