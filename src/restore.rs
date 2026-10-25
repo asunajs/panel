@@ -55,6 +55,10 @@ pub fn pending(db_path: &Path) -> Option<PendingRestore> {
 }
 
 /// 写标记。**在动数据库之前**调 —— 顺序反了就等于没有保护。
+///
+/// ⚠ 暂时只有测试在调：导入流程（用备份覆盖库）还没实现。
+/// 显式标注而不是删掉 —— 这个函数是那一步的前置条件，删了下一步又得写一遍。
+#[allow(dead_code)]
 pub fn mark(db_path: &Path, source: &str) -> std::io::Result<()> {
     let body = serde_json::json!({
         "source": source,
