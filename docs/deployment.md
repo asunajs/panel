@@ -100,7 +100,9 @@ pkg install curl
 # 3. 装面板
 curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 # 4. 启动（**必须先设令牌**，没配会拒绝启动 —— 反代也在本机，绑回环不等于安全）
-PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') plugin-panel
+TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+PANEL_TOKEN_HASH=$(printf %s "$TOKEN" | plugin-panel hash-token) plugin-panel
+# 登录时粘贴上面那个 $TOKEN
 ```
 
 手机上三个坑：
@@ -165,8 +167,10 @@ sv-enable plugin-panel
 > 跟绑哪个地址无关。设上令牌就能直接绑 `0.0.0.0`（见 [§13](security.md#13-第十轮面板鉴权)）：
 >
 > ```bash
-> PANEL_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') \
+> TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+> PANEL_TOKEN_HASH=$(printf %s "$TOKEN" | ./target/release/plugin-panel hash-token) \
 >   BIND_ADDR=0.0.0.0:8787 ./target/release/plugin-panel
+> # 登录时粘贴上面那个 $TOKEN
 > ```
 >
 > 走反代加 TLS 时再加 `PANEL_COOKIE_SECURE=1`。
@@ -198,15 +202,24 @@ Type=simple
 User=panel
 WorkingDirectory=/opt/plugin-panel
 Environment=BIND_ADDR=0.0.0.0:8787
+# 令牌从 EnvironmentFile 读，**不要**写在这份 unit 里（unit 常被提交进仓库）。
+# 文件内容形如：PANEL_TOKEN_HASH=prehash1:...（用 plugin-panel hash-token 生成）
+#   install -m 600 /dev/null /etc/plugin-panel/panel.env
+#   echo "PANEL_TOKEN_HASH=$(printf %s "$TOKEN" | plugin-panel hash-token)" >> /etc/plugin-panel/panel.env
+EnvironmentFile=/etc/plugin-panel/panel.env
 ExecStart=/opt/plugin-panel/plugin-panel
 Restart=always
 RestartSec=3
 
-# 收紧权限（面板只需要写 data/ 目录）
+# 收紧权限。⚠ 只放行 data/ 是不够的 —— 下面三个目录都要可写：
+#   data/  SQLite 与设置
+#   logs/  PANEL_LOG_DIR 默认是相对 cwd 的 logs/，不放行就「日志只进内存」
+#   tasks/ TASKS_DIR 默认是相对 cwd 的 tasks/，不放行则 create_dir_all 失败，
+#          **首次部署即使令牌配好了也起不来**（目录已存在时才会侥幸成功）
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/plugin-panel/data
+ReadWritePaths=/opt/plugin-panel/data /opt/plugin-panel/logs /opt/plugin-panel/tasks
 
 [Install]
 WantedBy=multi-user.target

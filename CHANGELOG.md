@@ -2,6 +2,34 @@
 
 ## 未发布
 
+- **按 Qoder 全项目审查（`docs/review-qoder-261025.md`）修了 8 条 High。**
+  我并行核验了 15 条 High：**14 条属实，1 条部分属实**（H1 里「Instant 溢出会 panic」
+  不成立 —— std 的 Instant 在 Unix 上按 i64 秒存，u64::MAX 毫秒远没到上限；
+  但「预算无上限 ⇒ 死循环永久占住 worker」是真的）。本轮已修：
+
+  · **H1** 预算无上限：`lead_ms` 一直钳 1 小时，`budget_ms` 没有。现在三处入口钳 +
+    引擎侧兜一次（`clamp_budget_ms`），0 与越界值都按「想要无限」给上限。
+  · **H2** 头令牌没有并发闸：`authenticate` 只 check 不占名额，N 个并发请求能同时
+    通过检查、各跑一次 ~19 MiB Argon2。现在套 `begin_attempt`；cookie 判定提到最前。
+  · **H6** 占位记录被 touch 会摘掉真插件的任务/路由/WS：`reload_plugin` 补上
+    `unload_plugin` 早有的 `is_real` 守卫。
+  · **H7** 插件可用 `ALTER TABLE temp.x RENAME TO jobs` 遮蔽面板表：authorizer 的
+    `AlterTable` 只拿得到旧表名，现在对 `database_name == temp` 一律 deny。
+  · **H10** 自更新后重启用 `current_exe()`：Linux 上指向已删除 inode（带 ` (deleted)`），
+    exec 必失败却报「更新成功」。现在 `Applied` 带上替换前算好的路径 + `restart_process_at()`。
+  · **H11** SMTP 应答解析可被一条非 ASCII 行 panic 掉整个进程：先验前 3 字节是 ASCII
+    数字再切片；`read_line` 改成先限流再读（原来是读完才查长度）。
+  · **H12** 插件可控的 `manage_url` 直接进 `href`：后端只接受站内路径或 http(s)，
+    前端新增 `safeHref()` 兜第二道。
+  · **H14 / H15** 文档与安装脚本给的是会被部署闸拒绝的启动命令（明文 `PANEL_TOKEN`
+    绑 `0.0.0.0`）：改成 `hash-token` 流程；systemd 示例补 `EnvironmentFile` 并把
+    `logs/`、`tasks/` 一起放进 `ReadWritePaths`（少了 `tasks/` 时首次部署即使令牌
+    配好也起不来）。
+
+  未修（已核验属实，属于需要单独设计的中等改造）：H3（停止位是全局单比特）、
+  H4（预算超时不计 `stopped`）、H5（`lead_ms` 不小于周期时补跑风暴）、
+  H8（`http_fetch` 只查首跳，重定向可进回环）、H9（自更新校验和与二进制同走代理）、
+  H13（`list_runs` 的「空则不筛」让索引失效）。
 - **`tokio` 升到 1.54.1**（RUSTSEC-2026-0386，`AsyncFd` 的 I/O 安全漏洞）。
   公告的修复区间是 `>=1.51.6, <1.52.0` 或 `>=1.53.3`，我们原来锁在 1.53.2。
   面板没有直接用 `AsyncFd`（`grep` 0 命中），所以不是可利用面，但依赖公告门禁该绿还得绿。

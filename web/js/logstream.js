@@ -104,6 +104,18 @@ export function esc(s) {
   );
 }
 
+// 安全链接：只放行站内路径与 http(s)。
+//
+// 为什么不能直接用 esc()：它只转 HTML 实体，不管 scheme。`javascript:...`
+// 转完还是 `javascript:...`，点一下就执行（安全审计 H12）。后端已经拦了一道，
+// 这里是第二道 —— 老数据、插件绕过、或者以后新增的插值点都靠它兜。
+export function safeHref(s) {
+  const t = String(s ?? '').trim();
+  if (t.startsWith('#') || (t.startsWith('/') && !t.startsWith('//'))) return esc(t);
+  if (/^https?:\/\//i.test(t)) return esc(t);
+  return '#/tasks';
+}
+
 /**
  * 一条日志 → DOM 节点。
  *

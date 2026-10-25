@@ -15,6 +15,7 @@
 import { createEditor } from '../editor.js';
 import { getState, createJob, editJob, runJs } from '../api.js';
 import { SAMPLE_CODE } from '../mock.js';
+import { safeHref } from '../logstream.js';
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -138,7 +139,7 @@ export async function render(root, ctx, params = {}) {
           <span class="badge idle">由插件页面管理</span>
         </div>
         <p class="hint">这条任务的奖品、账号和运行时间都在插件自己的页面里配置；面板只负责到点叫醒和记录。</p>
-        <div class="row"><a class="btn primary" href="${esc(url)}">去插件页配置</a></div>
+        <div class="row"><a class="btn primary" href="${safeHref(url)}">去插件页配置</a></div>
       </div></div>`;
     return;
   }

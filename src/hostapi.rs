@@ -1090,7 +1090,26 @@ fn parse_task_meta(opts_json: &str) -> Result<TaskMeta, String> {
     let manage_url = match v.get("manage_url") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s.trim().is_empty() => None,
-        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::String(s)) => {
+            // ⚠ 只接受**站内路径**（安全审计 H12）。
+            //
+            // 这个值会原样进 href。前端 esc() 只转 HTML 实体、不管 scheme，
+            // 于是插件写 javascript:fetch("/api/jobs/x/y/delete",{method:"POST",
+            // headers:{"x-panel":"1"}}) 就是一个「用户点一下就替你执行写操作」的链接
+            // （cookie 是 HttpOnly 偷不到，但同源 fetch 会自动带上会话）。
+            // CSP 也救不了：面板的 script-src 带 unsafe-inline。
+            let t = s.trim();
+            let ok = t.starts_with("#/")
+                || (t.starts_with('/') && !t.starts_with("//"))
+                || t.starts_with("https://")
+                || t.starts_with("http://");
+            if !ok {
+                return Err(format!(
+                    "manage_url 只允许站内路径（#/... 或 /...）或 http(s) 地址，收到 {t:?}"
+                ));
+            }
+            Some(t.to_string())
+        }
         Some(_) => return Err("manage_url 必须是字符串".to_string()),
     };
     Ok(TaskMeta {

@@ -236,7 +236,9 @@ esac
 
 echo
 ok "装好了。启动（**先设令牌**，否则会拒绝启动）："
-echo "    PANEL_TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') $BIN_NAME"
+echo "    TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n')"
+echo "    PANEL_TOKEN_HASH=\$(printf %s \"\$TOKEN\" | $BIN_NAME hash-token) $BIN_NAME"
+echo "    # 登录时粘贴上面那个 \$TOKEN（面板里不存明文，存的是它的哈希）"
 echo
 echo "  面板默认监听 http://127.0.0.1:8787"
 echo "  常用环境变量："
