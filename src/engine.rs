@@ -3846,10 +3846,10 @@ fn restore_job(
     name: &str,
 ) -> Result<(), String> {
     let now = Local::now();
-    let row = db::list_jobs(db)
+    // ⚠ 不能走 list_jobs：它带 LIMIT 100，任务多了以后第 101 条永远恢复不了
+    // （安全审计 M11）。这里按 (plugin, name) 精确查。
+    let row = db::get_job(db, plugin, name)
         .map_err(|e| format!("读库失败: {e}"))?
-        .into_iter()
-        .find(|j| j.plugin == plugin && j.name == name)
         .ok_or_else(|| format!("没有名为 `{name}` 的任务（插件 `{plugin}`）"))?;
     if !row.deleted {
         return Err(format!("任务 `{name}` 没有被删除，不需要恢复"));

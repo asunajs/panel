@@ -1807,6 +1807,23 @@ fn map_job_row(r: &rusqlite::Row) -> rusqlite::Result<JobRow> {
 }
 
 /// 列出全部调度任务，按插件名 + 任务名排序。
+/// 按 (plugin, name) 取一条任务。
+///
+/// 为什么不复用 list_jobs：那个带 LIMIT 100（面板展示用），任务超过 100 条之后
+/// 第 101 条开始**永远恢复不了** —— restore_job 用它 find 会报「没有这个任务」，
+/// 而任务明明在库里（安全审计 M11）。
+pub fn get_job(db: &Db, plugin: &str, name: &str) -> rusqlite::Result<Option<JobRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {JOB_COLUMNS} FROM jobs WHERE plugin = ?1 AND name = ?2 LIMIT 1"
+    ))?;
+    let mut rows = stmt.query_map(params![plugin, name], map_job_row)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
 pub fn list_jobs(db: &Db) -> rusqlite::Result<Vec<JobRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(&format!(
