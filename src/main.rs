@@ -58,6 +58,7 @@ mod market;
 mod pluginfs;
 mod push;
 mod ratelimit;
+mod restore;
 mod runtimefs;
 mod runtimes;
 mod scheduler;
@@ -277,6 +278,55 @@ fn prune_backups(dir: &std::path::Path, keep: u64) -> std::io::Result<usize> {
     Ok(removed)
 }
 
+/// `plugin-panel restore --verify <备份>` / `restore --activate`（unpanel 2.10）。
+///
+/// ⚠ 这里**没有**「把备份覆盖到库上」的选项：那一步必须建立在「显式激活」之上，
+/// 而激活的状态机刚立起来，还没接上导入流程。宁可少一个子命令，不给一个半成品入口。
+fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = env_path("DB_PATH", "data/panel.db");
+    let mut verify: Option<String> = None;
+    let mut activate = false;
+    for a in args {
+        match a.as_str() {
+            "--activate" => activate = true,
+            // `--verify` 是标志位，真正的文件路径是它后面那个参数。
+            "--verify" => {}
+            other => {
+                if verify.is_some() {
+                    return Err(format!("多余的参数: {other}").into());
+                }
+                verify = Some(other.to_string());
+            }
+        }
+    }
+    if activate {
+        return match crate::restore::activate(&db_path)? {
+            true => {
+                println!("已清除恢复标记，面板下次启动按正常流程走。");
+                Ok(())
+            }
+            false => {
+                println!("没有待处理的恢复标记，什么都没做。");
+                Ok(())
+            }
+        };
+    }
+    let Some(file) = verify else {
+        eprintln!("用法: plugin-panel restore --verify <备份文件>");
+        eprintln!("      plugin-panel restore --activate");
+        return Err("缺少参数".into());
+    };
+    match crate::restore::verify_backup(std::path::Path::new(&file)) {
+        crate::restore::BackupCheck::Ok => {
+            println!("✅ {file} 可以当备份用（能打开、integrity ok、关键表都在）");
+            Ok(())
+        }
+        crate::restore::BackupCheck::Bad(why) => {
+            eprintln!("❌ {file} 不能用: {why}");
+            Err("备份体检没通过".into())
+        }
+    }
+}
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // 子命令要在**建 runtime / 碰数据库之前**处理：生成令牌哈希不需要起服务，
     // 也不该因为「端口被占」之类的配置问题就跑不了。
@@ -285,6 +335,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         match cmd.as_str() {
             "hash-token" => return hash_token_cmd(&args[1..]),
             "backup" => return backup_cmd(&args[1..]),
+            "restore" => return restore_cmd(&args[1..]),
             "digest" => return digest_cmd(&args[1..]),
             "build-info" => return build_info_cmd(),
             "help" | "--help" | "-h" => {
@@ -466,6 +517,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         ensure_private_dir(parent)?;
     }
     let db = db::open(&db_path)?;
+
+    // 恢复状态机（unpanel 2.10）：标记**活过崩溃**，这里只是把它喊出来。
+    // ⚠ 现在还没有「不自动恢复调度」的闸 —— 真正的导入功能也还没做。
+    // 这条日志的作用是：真出现标记时，运维能在启动日志里第一时间看到，
+    // 而不是等发现「任务都跑了但数据不对」才回头查。
+    if let Some(p) = crate::restore::pending(&db_path) {
+        crate::log::plog!(
+            "boot",
+            error,
+            "检测到未完成的恢复（来源 {}，标记于 {}）。**当前版本不会自动应用它**，\
+             请确认后再手动处理。标记文件: {}",
+            p.source,
+            p.at,
+            crate::restore::marker_path(&db_path).display()
+        );
+    }
     // 后面要交给外部进程/脚本的路径必须是绝对的：它们的工作目录是插件数据目录
     // 或脚本所在目录，相对路径在那边解析出来是另一个地方（实测外部 Node 直接
     // 报 `Cannot find package 'data'`）。
