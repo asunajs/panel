@@ -76,6 +76,13 @@ jobs:
       - name: 前端资源与视图的静态检查
         run: node scripts/test-web-assets.mjs
 
+      # 文档检查：相对链接指向的文件是否存在、`#锚点` 是否真的对应一个标题、
+      # docs/ 下每份文档是否都进了索引。
+      # 锚点失效是**不报错**的坏法（点了只跳页首），人眼几乎发现不了，
+      # 而审查 L12 那批文档问题全是这一类 —— 交给脚本。
+      - name: 文档链接与索引检查
+        run: node scripts/check-docs.mjs
+
       - name: install.sh 端到端测试（用 shim 假造一个 Release）
         run: bash scripts/test-install.sh
 
