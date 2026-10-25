@@ -682,14 +682,28 @@ fn replace_binary(exe: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = exe
         .parent()
         .ok_or_else(|| format!("{} 没有父目录，不敢替换", exe.display()))?;
-    let tmp = dir.join(format!(".plugin-panel.new.{}", std::process::id()));
+    // ⚠ 名字要不可预测、且不能跟随符号链接（安全审计 L7）。
+    //
+    // 以前叫 `.plugin-panel.new.<pid>`：同机另一个用户可以先建一个同名**符号链接**
+    // 指向他想要覆盖的文件，`File::create` 会顺着链接写进去 —— 那就等于把
+    // 「更新面板」变成了「以面板的权限覆盖任意文件」。
+    // 加纳秒后缀让名字不可预测，再用 create_new(true)（O_EXCL，不跟随链接）兜底。
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".plugin-panel.new.{}.{uniq}", std::process::id()));
     let cleanup = |e: String| {
         let _ = std::fs::remove_file(&tmp);
         e
     };
 
     {
-        let mut f = std::fs::File::create(&tmp)
+        // create_new(true) = O_CREAT|O_EXCL：文件已存在就失败，且**不跟随符号链接**。
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
             .map_err(|e| cleanup(format!("写临时文件失败（{} 可写吗？）：{e}", dir.display())))?;
         f.write_all(bytes)
             .map_err(|e| cleanup(format!("写入失败：{e}")))?;
@@ -698,7 +712,12 @@ fn replace_binary(exe: &Path, bytes: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        // ⚠ 不要无条件放宽成 0755（安全审计 L7）：以前不管原来是什么权限都改成 0755，
+        // 用户特意收紧成 0700 也会被抹掉。沿用旧二进制的权限位，取不到才退回 0755。
+        let mode = std::fs::metadata(exe)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o755);
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
             .map_err(|e| cleanup(format!("chmod 失败：{e}")))?;
     }
     // 替换前再确认一次可用性，别把正在跑的二进制换成个坏文件
