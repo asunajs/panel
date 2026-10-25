@@ -253,9 +253,23 @@ fn start_of_next_month(t: DateTime<Local>) -> Option<DateTime<Local>> {
 
 fn start_of_next_day(t: DateTime<Local>) -> Option<DateTime<Local>> {
     let d = t.date_naive().succ_opt()?;
-    Local
-        .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-        .earliest()
+    // ⚠ DST 的午夜空洞（安全审计 M18）。
+    //
+    // 有些时区的某个午夜**不存在**：春季跳变正好发生在 00:00（智利、古巴等），
+    // 那一天的 00:00 被跳过。from_local_datetime 对不存在的时间返回 None，
+    // 于是 start_of_next_day 返回 None ⇒ 整条 next_after 返回 None ⇒
+    // 这条任务**再也不触发**（下一次要等一年后同一个空洞之外）。
+    //
+    // 退一步：找当天第一个真实存在的整点（最多试 4 小时，正常时区第一轮就命中）。
+    for h in 0..4 {
+        if let Some(dt) = Local
+            .from_local_datetime(&d.and_hms_opt(h, 0, 0)?)
+            .earliest()
+        {
+            return Some(dt);
+        }
+    }
+    None
 }
 
 fn start_of_next_hour(t: DateTime<Local>) -> Option<DateTime<Local>> {
