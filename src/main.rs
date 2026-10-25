@@ -1501,6 +1501,9 @@ fn platform_trim() -> usize {
 }
 
 /// 按平台调「还页」的原语。
+// SAFETY: 平台还页原语（malloc_zone_pressure_relief / malloc_trim）都是
+// 无参数副作用的系统调用，失败也只是返回 0。
+#[allow(unsafe_code)]
 fn trim_allocator() {
     #[cfg(target_os = "macos")]
     // SAFETY: libmalloc 的公开 API。zone 传 null = 所有 zone，goal 传 0 =
@@ -1566,6 +1569,8 @@ fn spawn_mem_recycle() {
 }
 
 #[cfg(target_os = "macos")]
+// SAFETY: task_info 只往调用方给的定长结构体里写，结构体由本函数持有。
+#[allow(unsafe_code)]
 fn resident_kb() -> u64 {
     // proc_pid_rusage(RUSAGE_INFO_V4).ri_phys_footprint —— 和 footprint(1) 同口径。
     // ⚠ 缓冲区必须**明显大于**结构体：内核按自己的版本往里写，给个刚好够的
@@ -1589,6 +1594,8 @@ fn resident_kb() -> u64 {
 }
 
 #[cfg(target_os = "macos")]
+// SAFETY: 同上（Mach task_info 的定长输出缓冲）。
+#[allow(unsafe_code)]
 fn resident_kb_basic() -> u64 {
     #[repr(C)]
     struct MachTaskBasicInfo {

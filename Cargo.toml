@@ -4,6 +4,16 @@ version = "0.1.11"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
+# unsafe 是**要申报的**，不是随手能用的。
+#
+# 用 deny 而不是 forbid：forbid 不允许被 #[allow] 覆盖，而这里确实有 7 处
+# 必须直接调 libc / Mach 的系统调用（进程组、rusage、fd 传递）。
+# 例外一律**函数级** #[allow(unsafe_code)]，并且必须带一句 SAFETY 说明 ——
+# scripts/check-unsafe-budget.sh 会断言"例外正好是这几个函数"，多一个少一个都红，
+# 免得某天有人顺手又开一个。
+[lints.rust]
+unsafe_code = "deny"
+
 # 32 位 ARM 没有随 rquickjs-sys 发布的 musl bindings（只有 gnueabihf）。
 # 只对 arm 目标打开 bindgen，其他架构继续用 crate 自带的预生成 bindings。
 [target.'cfg(target_arch = "arm")'.dependencies]

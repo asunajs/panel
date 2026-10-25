@@ -2,6 +2,18 @@
 
 ## 未发布
 
+- **按 `docs/from-unpanel.md` 的审查结果修了四条**（第一批，零风险那组）：
+  · **脚本超时在 Windows 上「杀不掉却宣称杀了」**：`kill_group` 在非 Unix 上恒返回
+    `Unsupported` 被 `let _ =` 吞掉，随后 `child.wait()` 无限阻塞 —— 一条不退出
+    的脚本会占死 worker 线程，而 `runs.error` 照样写「被强制终止」。
+    现在改成 `kill_tree(&mut Child)`（非 Unix 走 `child.kill()`，至少结束直接子进程）
+    + `wait_exited(5s)` 有界等待 + 四种情况分别如实报告。
+    ⚠ Windows 的 Job Object（真正兜住孙进程）**没做**，但现在会明说孙进程可能还在跑。
+  · **`auto_vacuum` 的顺序**：原来只设 WAL，没设 `auto_vacuum`；而 WAL 库上再设它是
+    空操作且不报错（删行不会让文件变小）。现在提到 WAL **之前**，并对老库检测 + 提示。
+  · **`unsafe` 收紧**：`[lints.rust] unsafe_code = "deny"` + 6 处函数级 allow（各带 SAFETY），
+    新增 `scripts/check-unsafe-budget.sh` 守卫并挂进 CI。
+  · **`synchronous = NORMAL` 的代价**写进注释（断电可能丢最近若干次提交）。
 - **修 `rss_evict_check.py` 在 Linux 上稳定误判「卸出后内存没降」。**
   卸载和还页是**两个时刻**：插件被卸出时页还在分配器手里，要等 worker 发现
   「我名下没插件了」、销毁整条 QuickJS Runtime，才 munmap 还给内核。

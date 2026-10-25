@@ -308,7 +308,6 @@ fn run_native(
             }
         }
     };
-    let pid = child.id();
     let buf = Arc::new(OutputBuf::new(output_limit_bytes()));
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
@@ -337,7 +336,7 @@ fn run_native(
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => break true,
             Err(e) => {
-                let _ = kill_group(pid);
+                let _ = kill_tree(&mut child);
                 let _ = child.wait();
                 join_readers(readers);
                 return ScriptRun {
@@ -348,15 +347,37 @@ fn run_native(
             }
         }
     };
-    if timed_out {
-        let _ = kill_group(pid);
-    }
-    let status = child.wait().ok();
+    // 超时之后：先尽力杀，再**有界地**等它退出。
+    //
+    // 为什么不能直接 child.wait()：非 Unix 上原本杀不掉（kill_group 返回 Unsupported，
+    // 又被 let _ = 吞掉），wait 会永久阻塞 ⇒ 这条 script worker 线程被一个不退出
+    // 的脚本占死；而错误文案照样写「被强制终止」—— 说了一句不成立的话。
+    let kill_err = if timed_out { kill_tree(&mut child).err() } else { None };
+    let exited = if timed_out {
+        wait_exited(&mut child, Duration::from_secs(5))
+    } else {
+        true
+    };
+    // 还在跑就别 wait()（会永久阻塞），下面如实报告「没能终止」
+    let status = if exited { child.wait().ok() } else { None };
     join_readers(readers);
     let code = status.and_then(|s| s.code());
     let output = cap_output(buf.take());
     let error = if timed_out {
-        Some(format!("执行超过 {}ms，被强制终止", timeout.as_millis()))
+        let ms = timeout.as_millis();
+        Some(match (kill_err, exited) {
+            (None, true) if cfg!(unix) => format!("执行超过 {ms}ms，被强制终止"),
+            (None, true) => format!(
+                "执行超过 {ms}ms，已结束脚本进程（非 Unix 上只杀得掉直接子进程，\
+                 它派生的孙进程可能还在跑）"
+            ),
+            (None, false) => {
+                format!("执行超过 {ms}ms，已发出终止信号但 5 秒内没退出，面板已放弃等待")
+            }
+            (Some(e), _) => format!(
+                "执行超过 {ms}ms，但**没能终止**它（{e}）；面板已放弃等待，进程可能还在跑"
+            ),
+        })
     } else {
         match code {
             Some(0) => None,
@@ -420,27 +441,50 @@ fn join_readers(readers: Vec<JoinHandle<()>>) {
         }
     }
 }
-fn kill_group(pid: u32) -> std::io::Result<()> {
+/// 杀掉脚本**整棵进程树**。
+///
+/// Unix：脚本用 process_group(0) 起了新进程组，kill(-pid) 一次带走整组；
+/// 组里第一个进程已经退出时 kill(-pid) 会 ESRCH，再退到单杀。
+///
+/// 非 Unix（Windows）：**没有等价的「整组」原语** —— 真要兜住孙进程得用 Job Object，
+/// 面板还没做（见 docs/from-unpanel.md 第 2.13 节）。这里只能 kill() 直接子进程，
+/// 孙进程会活下来。**所以调用方的文案必须如实说这一点**，不能统一宣称「被强制终止」。
+#[allow(unsafe_code)]
+fn kill_tree(child: &mut std::process::Child) -> std::io::Result<()> {
     #[cfg(unix)]
-    unsafe {
-        // 负 pid = 进程组；脚本可能自己起子进程，必须整组杀
-        if libc::kill(-(pid as i32), libc::SIGKILL) == 0 {
-            return Ok(());
+    {
+        let pid = child.id();
+        // SAFETY: kill(2) 只读两个整数参数，没有额外前置条件。
+        unsafe {
+            if libc::kill(-(pid as i32), libc::SIGKILL) == 0 {
+                return Ok(());
+            }
+            let e = std::io::Error::last_os_error();
+            if libc::kill(pid as i32, libc::SIGKILL) == 0 {
+                return Ok(());
+            }
+            Err(e)
         }
-        let e = std::io::Error::last_os_error();
-        // 组里第一个进程已经退出时 kill(-pid) 会 ESRCH；再试单杀
-        if libc::kill(pid as i32, libc::SIGKILL) == 0 {
-            return Ok(());
-        }
-        Err(e)
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "外部脚本首版只支持 Unix",
-        ))
+        child.kill()
+    }
+}
+
+/// 有界等待：杀掉之后最多等 budget，**绝不无限等**。
+///
+/// 返回 true = 确认已经退出。查不到状态时也返回 true —— 与其把 worker 线程
+/// 挂死在一个状态未知的子进程上，不如按「已退出」处理（进程句柄随后被丢弃）。
+fn wait_exited(child: &mut std::process::Child, budget: std::time::Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => return false,
+            Err(_) => return true,
+        }
     }
 }
 

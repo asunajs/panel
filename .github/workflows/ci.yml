@@ -63,6 +63,11 @@ jobs:
       - name: clippy（-D warnings）
         run: cargo clippy --all-targets -- -D warnings
 
+      # unsafe 预算守卫：lint 必须还是 deny，例外**正好** 6 处。
+      # 它挡的是「每次加一处 allow 都合法、日积月累没人记得为什么」。
+      - name: unsafe 预算守卫
+        run: ./scripts/check-unsafe-budget.sh
+
       - name: 单元测试
         run: cargo test --all-targets
 

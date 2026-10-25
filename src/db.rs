@@ -38,10 +38,38 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // 但又不至于让一次 HTTP 写请求卡到前端超时。
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
+    // ⚠ 下面三行的**顺序是判据，不是风格**：
+    //   auto_vacuum 必须在 journal_mode = WAL **之前**、并且在建表之前设。
+    //   WAL 库上再设 auto_vacuum 会「空转且不报错」（unpanel 那边实测过），
+    //   于是你以为删行会让文件变小，其实一行都没回收 —— 等以后加日志保留 /
+    //   incremental_vacuum 时就会踩这个静默坑。
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+
     // WAL 更适合「一写多读」的面板场景；pragma 有返回值，必须用 query_row 取回。
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     crate::log::plog!("db", debug, "journal_mode = {mode}");
+
+    // synchronous = NORMAL 是**取舍**，不是随手写的默认值：
+    // 它换掉的是每次提交的 fsync，代价是**断电**时可能丢掉最近若干次提交
+    // （表现是「运行记录少了最后几条」）。完整库用 FULL 能保住，但每次写都要
+    // 等磁盘。面板是自托管、写多读少的场景，选 NORMAL；真要"跑过就一定有记录"，
+    // 把这里改成 FULL（或只对 runs 表用 FULL）。
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+
+    // 老库上上面那条 auto_vacuum 是**空操作**（SQLite 只在空库或 VACUUM 时改它）。
+    // 所以开完库再读一次，为 0 就说清楚：不是没设，是这个库已经建好了，得 VACUUM。
+    let auto_vacuum: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap_or(0);
+    if auto_vacuum == 0 {
+        crate::log::plog!(
+            "db",
+            debug,
+            "这个库没开 auto_vacuum（老库）：删行不会让文件变小。要开得停机跑一次 VACUUM"
+        );
+    } else {
+        crate::log::plog!("db", debug, "auto_vacuum = {auto_vacuum}（删行会回收空闲页）");
+    }
 
     // ---- 内存：给 page cache 设个上界 ----
     // 负值单位是 KiB，-256 = 256 KiB（SQLite 默认 -2000 = 2 MB）。

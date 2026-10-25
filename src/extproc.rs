@@ -444,6 +444,8 @@ impl ChildHandle {
         }
     }
 
+    // SAFETY: 只是给子进程发信号，参数是它自己的 pid，没有内存前置条件。
+    #[allow(unsafe_code)]
     fn kill(&mut self) {
         // 只在还活着时杀进程组：已经退出的 pid 可能被系统复用，对着旧 pid 发
         // SIGKILL 会误杀无关进程组。`try_wait` 会把已退出的收尸。
@@ -550,6 +552,9 @@ fn load_budget() -> Duration {
 /* ============================== spawn ============================== */
 
 /// 启动子进程。fd3/fd4 在 `pre_exec` 里 dup2 到固定号。
+// SAFETY: pre_exec 里只做 dup2/close 这类 async-signal-safe 的系统调用，
+// 不分配、不打印、不碰任何可能加锁的状态。
+#[allow(unsafe_code)]
 fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, String> {
     let host = &shared.host;
     let runtime = &host.runtime_paths;
