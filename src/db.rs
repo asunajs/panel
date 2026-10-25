@@ -1309,6 +1309,8 @@ pub fn record_file_op(
         "INSERT INTO file_ops (id, kind, name, action, from_path, to_path, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![id, kind, name, action, from_path, to_path, at],
     )?;
+    // 文件操作可能很频繁（每次保存版本都记一条），必须封顶。
+    prune_table(&conn, "file_ops", FILE_OPS_KEEP)?;
     Ok(id)
 }
 
@@ -1333,6 +1335,22 @@ pub struct FileOp {
 /// ⚠ 暂时没有调用方：回收站界面是二期的事。先留着并显式标注，
 /// 免得它变成一条「写了但没人知道」的死代码。
 #[allow(dead_code)]
+/// 通用封顶：只留最新 `keep` 行。表名只能来自本文件的字面量（拼接进去的）。
+fn prune_table(conn: &rusqlite::Connection, table: &str, keep: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!("DELETE FROM {table} WHERE id NOT IN (SELECT id FROM {table} ORDER BY at DESC, id DESC LIMIT ?1)"),
+        rusqlite::params![keep],
+    )?;
+    Ok(())
+}
+
+/// 审计表最多留多少行。
+const SETTINGS_AUDIT_KEEP: i64 = 5000;
+/// 文件操作记录最多留多少行。
+const FILE_OPS_KEEP: i64 = 5000;
+/// outbox 最多留多少条。超出的按时间删最旧的。
+const PUSH_OUTBOX_KEEP: i64 = 200;
+
 /// outbox 里的一条（unpanel 2.7）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PushOutboxRow {
@@ -1373,6 +1391,14 @@ pub fn record_push_outbox(
         "INSERT INTO push_outbox (id, at, plugin, task, kind, channel, title, body, reason) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![id, at, plugin, task, kind, channel, title, body, reason],
+    )?;
+    // ⚠ outbox 必须有上限（整体复查时发现的缺口）：一个永久坏掉的渠道会让**每次**
+    // 任务失败都写一条，而失败的任务可能一分钟好几次。没有上限的话这张表会
+    // 无声地涨到几十万行 —— 和当初「日志不清理」是同一类问题。
+    conn.execute(
+        "DELETE FROM push_outbox WHERE id NOT IN (\
+           SELECT id FROM push_outbox ORDER BY at DESC, id DESC LIMIT ?1)",
+        rusqlite::params![PUSH_OUTBOX_KEEP],
     )?;
     Ok(id)
 }
@@ -1467,6 +1493,8 @@ pub fn record_settings_change(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![id, at, key, old_value, new_value, revision as i64],
     )?;
+    // 审计表同样要封顶：它只增不减，几年下来会攒成一份没人看的巨石。
+    prune_table(&conn, "settings_audit", SETTINGS_AUDIT_KEEP)?;
     Ok(())
 }
 
@@ -2182,6 +2210,32 @@ mod tests {
         assert!(!job_exists(&db, "other", "tick").unwrap());
         assert!(!job_exists(&db, "demo", "nope").unwrap());
     }
+    #[test]
+    fn push_outbox_is_capped() {
+        // 整体复查时发现的缺口：一个永久坏掉的渠道会让每次失败都写一条。
+        // 没有上限，这张表会无声地涨到几十万行。
+        let dir = std::env::temp_dir().join(format!("panel-outbox-cap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cap.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        for i in 0..(PUSH_OUTBOX_KEEP + 5) {
+            record_push_outbox(
+                &db,
+                "p",
+                "t",
+                "failure",
+                "bark",
+                "标题",
+                &format!("正文{i}"),
+                "挂了",
+            )
+            .unwrap();
+        }
+        let rows = list_push_outbox(&db, 10_000).unwrap();
+        assert_eq!(rows.len() as i64, PUSH_OUTBOX_KEEP, "必须封顶在 {PUSH_OUTBOX_KEEP}");
+    }
+
     #[test]
     fn push_outbox_roundtrip() {
         // unpanel 2.7：发不出去的通知要能查、能重发、能删。
