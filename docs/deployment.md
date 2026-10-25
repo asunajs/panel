@@ -326,3 +326,34 @@ ExecStartPre=/usr/bin/curl -fsS --max-time 5 http://127.0.0.1:8787/healthz
 ⚠ systemd 的 `ExecStartPre` 跑在服务启动**之前**，那时端口还没监听 —— 想用探针做
 「起来没有」的判断，应该用 `ExecStartPost`，或者干脆交给 `Restart=on-failure`。
 上面这段只在「重启前确认旧实例已经死了」这种场景下有意义。
+### 加密备份（age）
+
+备份默认是**明文**。要加密，先在自己的机器上生成一对密钥：
+
+```bash
+plugin-panel backup --keygen
+# 私钥（只显示这一次，抄到离线的地方；面板不会存它）:
+# AGE-SECRET-KEY-1JYL9H32...
+# 公钥（放在面板这边，用来加密）:
+# age12xzrg497xgxe0np8gm675w0lhg9ykf72p4ss9hj704lgv7hhc37sn932qq
+```
+
+之后备份时带上公钥（或者用环境变量 `BACKUP_AGE_RECIPIENT`）：
+
+```bash
+plugin-panel backup --recipient age12x... /var/backups/panel
+# 🔒 已加密（age / X25519）
+# 已备份: /var/backups/panel/panel-20261025-234403.db.age（152 KiB）
+```
+
+解密要在**另一台**机器上做：
+
+```bash
+age -d -i key.txt panel-20261025-234403.db.age > panel.db
+```
+
+⚠ **面板故意没有私钥**，所以它解不开自己的备份。这不是缺陷 ——
+如果面板能解密，「加密备份」只是把明文换成了另一份明文：拿到面板就等于拿到解密能力。
+
+也正因为如此，`restore --verify` 遇到 `.age` 文件只会告诉你它是加密的，
+不会假装能检查内容。先解密，再 verify。

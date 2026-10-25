@@ -1006,3 +1006,38 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 >
 > **教训**：给已有的表加「列 + 依赖该列的索引」时，顺序不是风格问题，是能不能启动的问题。
 > 这类 bug 单测全绿也发现不了，因为单测建的都是**新库**。
+
+> **2.10 age 加密已实现（2026-10-25，第 16 轮）**
+>
+> ```bash
+> plugin-panel backup --keygen                       # 生成一对密钥（私钥只打印一次）
+> plugin-panel backup --recipient age1... <目录>      # 加密备份
+> age -d -i key.txt panel-xxx.db.age > panel.db     # 在**另一台**机器上解密
+> ```
+>
+> 也可以设 `BACKUP_AGE_RECIPIENT` 环境变量，不用每次带参数。
+>
+> **核心决定：面板故意没有私钥。**
+> 如果面板能解密，「加密备份」只是把明文换成了另一份明文 —— 拿到面板就等于拿到解密能力。
+> 所以 `restore --verify` 遇到 `.age` 只说明「这是加密的」，不会假装能检查内容。
+>
+> 实测：
+>
+> ```
+> 私钥 AGE-SECRET-KEY-1JYL9H32...（只显示这一次）
+> 公钥 age12xzrg497xgxe0np8gm675w0lhg9ykf72p4ss9hj704lgv7hhc37sn932qq
+> 🔒 已加密（age / X25519）
+> 已备份: .../panel-20261025-234403.db.age（152 KiB）
+> 目录内容: panel-20261025-234403.db.age      ← 明文没有残留
+> 头 14 字节: age-encryption
+> ```
+>
+> **顺带修的一个漏洞**：`prune_backups` 原来只认 `.db` 结尾，而加密备份叫 `.db.age` ——
+> 也就是说**一旦开了加密，「保留份数」就完全失效**，备份会无限增长。
+> 测试里加了一份 `.db.age` 并断言它也会被清理。
+>
+> 依赖：`age 0.12`（`default-features = false` + `armor`）+ `secrecy 0.10`。
+> release 二进制大小基本没变（约 6.45 MB，LTO + strip 之后 age 的开销可以忽略）。
+>
+> ⚠ 仍未做：`restore --apply` 只接受**明文**库文件。加密备份要先手动解密，
+> 这是有意的（面板不该有解密能力），但意味着恢复流程多一步人工操作。
