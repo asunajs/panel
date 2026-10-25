@@ -221,9 +221,14 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             body       TEXT NOT NULL,
             reason     TEXT NOT NULL,
             attempts   INTEGER NOT NULL DEFAULT 1,
+            -- 去重键（unpanel 2.7）：同一件事重复失败只留一条待重发。
+            dedup_key  TEXT,
             retried_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_push_outbox_at ON push_outbox(at DESC);
+        -- ⚠ dedup_key 的唯一索引**不能**放在这里：老库没有那一列，
+        -- 而这一批 CREATE 跑在 ensure_column **之前** —— 会直接炸「no such column」，
+        -- 面板再也起不来。它必须等补完列之后再建（见 init 末尾）。
 
         -- 第三十一轮：**面板级推送**。
         --
@@ -303,6 +308,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     // sending_until 是**租约**而不是布尔：进程在发送中途被杀，布尔会永远卡在 1，
     // 那条通知就再也不会被重试。带过期时间的租约自己会失效。
     ensure_column(&conn, "push_outbox", "sending_until", "TEXT")?;
+    ensure_column(&conn, "push_outbox", "dedup_key", "TEXT")?;
+    // 补完列才能建唯一索引（老库升级路径）。NULL 不参与唯一约束，
+    // 所以历史行不受影响，只有新写入的 dedup_key 会去重。
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_push_outbox_dedup ON push_outbox(dedup_key);",
+    )?;
     // 第二十六轮：**试跑的输出**。
     //
     // 只有试跑（kind='test'）会填这一列，因为试跑的输出**不进日志库**
@@ -1354,6 +1365,17 @@ fn prune_table(conn: &rusqlite::Connection, table: &str, keep: i64) -> rusqlite:
 const SETTINGS_AUDIT_KEEP: i64 = 5000;
 /// 文件操作记录最多留多少行。
 const FILE_OPS_KEEP: i64 = 5000;
+/// 去重键的哈希（FNV-1a 64）。
+///
+/// 用它而不是直接存长字符串：索引小得多，而且避免把通知正文塞进索引页。
+fn dedup_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
 /// outbox 最多留多少条。超出的按时间删最旧的。
 const PUSH_OUTBOX_KEEP: i64 = 200;
 
@@ -1394,11 +1416,19 @@ pub fn record_push_outbox(
             .unwrap_or(0)
     );
     let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    // 去重键（unpanel 2.7）：**同一件事**（同插件/任务/渠道/内容）已经在等重发时，
+    // 不再插第二条。用 `INSERT OR IGNORE` + 唯一索引实现 —— 靠「先查再插」在
+    // 并发下会漏（两个线程同时查不到，然后都插进去）。
+    let dedup = format!(
+        "{:016x}",
+        dedup_hash(&format!("{plugin}|{task}|{kind}|{channel}|{title}|{body}"))
+    );
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO push_outbox (id, at, plugin, task, kind, channel, title, body, reason) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        rusqlite::params![id, at, plugin, task, kind, channel, title, body, reason],
+        "INSERT OR IGNORE INTO push_outbox \
+           (id, at, plugin, task, kind, channel, title, body, reason, dedup_key) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![id, at, plugin, task, kind, channel, title, body, reason, dedup],
     )?;
     // ⚠ outbox 必须有上限（整体复查时发现的缺口）：一个永久坏掉的渠道会让**每次**
     // 任务失败都写一条，而失败的任务可能一分钟好几次。没有上限的话这张表会
@@ -2274,6 +2304,63 @@ mod tests {
         assert!(!job_exists(&db, "other", "tick").unwrap());
         assert!(!job_exists(&db, "demo", "nope").unwrap());
     }
+    #[test]
+    fn upgrading_an_old_db_adds_new_outbox_columns() {
+        // 升级路径：老库的 push_outbox 没有 next_try_at / sending_until / dedup_key。
+        // 建唯一索引如果跑在 ensure_column **之前**，这里会直接炸「no such column」——
+        // 面板再也起不来。这条测试就是为了钉住这个顺序。
+        let dir = std::env::temp_dir().join(format!("panel-upgrade-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("old.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE push_outbox (\
+                   id TEXT PRIMARY KEY, at TEXT NOT NULL, plugin TEXT NOT NULL, \
+                   task TEXT NOT NULL, kind TEXT NOT NULL, channel TEXT NOT NULL, \
+                   title TEXT NOT NULL, body TEXT NOT NULL, reason TEXT NOT NULL, \
+                   attempts INTEGER NOT NULL DEFAULT 1, retried_at TEXT);",
+            )
+            .unwrap();
+        }
+        // 这一行在老代码上会失败（索引先于补列）
+        let db = open(&path).expect("老库必须能升级，不能因为索引顺序起不来");
+        record_push_outbox(&db, "p", "t", "failure", "bark", "标", "文", "挂了").unwrap();
+        assert_eq!(list_push_outbox(&db, 10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identical_failures_do_not_pile_up_in_the_outbox() {
+        // unpanel 2.7 去重：同一个失败（同插件/任务/渠道/内容）重复出现时，
+        // 只留一条待重发的 —— 否则一个永远失败的任务会把 outbox 塞满。
+        let dir = std::env::temp_dir().join(format!("panel-outbox-dedup-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dd.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        for _ in 0..5 {
+            record_push_outbox(&db, "p", "t", "failure", "bark", "标题", "正文", "挂了").unwrap();
+        }
+        assert_eq!(list_push_outbox(&db, 100).unwrap().len(), 1, "同样的失败只该留一条");
+
+        // 内容不同 ⇒ 是另一件事，要留
+        record_push_outbox(&db, "p", "t", "failure", "bark", "标题", "另一条", "挂了").unwrap();
+        assert_eq!(list_push_outbox(&db, 100).unwrap().len(), 2);
+
+        // 发出去（删掉）之后，同样的失败又能进来
+        let id = list_push_outbox(&db, 100)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.body == "正文")
+            .expect("该有那条正文")
+            .id;
+        delete_push_outbox(&db, &id).unwrap();
+        record_push_outbox(&db, "p", "t", "failure", "bark", "标题", "正文", "挂了").unwrap();
+        assert_eq!(list_push_outbox(&db, 100).unwrap().len(), 2, "发完之后同一件事可以再进");
+    }
+
     #[test]
     fn outbox_retry_respects_backoff_attempts_and_lease() {
         // unpanel 2.7 自动重试的三道闸：退避时刻、次数上限、发送租约。
