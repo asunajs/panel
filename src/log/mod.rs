@@ -1181,6 +1181,30 @@ fn redact_phones(src: &[char]) -> Vec<char> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn redact_never_panics_on_truncated_headers() {
+        // unpanel 2.11 的判据是「脱不了就硬失败」，而面板的清单是**编译期**的，
+        // 没有「建不出来」的运行期失败模式 —— 真正的风险反过来：redact() 自己
+        // panic。这个项目是 panic=abort，一次 panic 会带走整个进程。
+        // 这里用「头名被截断 / 只有冒号 / 只有引号」这类边界输入钉住它。
+        let cases = [
+            "",
+            "authorization",
+            "authorization:",
+            "authorization: ",
+            "\"authorization\"",
+            "\"authorization\":",
+            "(cookie",
+            "{\"x\": \"authorization",
+            "Authorization:\t",
+            "\u{feff}authorization: x",
+            "密码",
+            "cookie: a=b; authorization: c=d",
+        ];
+        for c in cases {
+            let _ = redact(c);
+        }
+    }
+    #[test]
     fn quoted_header_names_are_redacted() {
         // 安全审计 M9：JSON 里写的是 "authorization": "Bearer x"，
         // 只认「空白/括号/逗号」边界、且头名后只跳空白的话，这条整条漏脱。
