@@ -1073,7 +1073,15 @@ async fn stop_task(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("查任务失败: {e}"));
         }
     }
-    st.health.request_task_stop();
+    // 只停**正在跑的那一次**（安全审计 H3）：以前置的是全局单比特，停 A 会打断 B。
+    match crate::engine::in_flight_of(&plugin, &name) {
+        Some(inv) => st.health.request_task_stop_inv(inv),
+        None => {
+            // 没有在跑的：可能是排队中（还没派发）。退到老语义，但只对这条任务
+            // 生效——它会在下一次派发时被 Watchdog 的 cur_inv 匹配上。
+            st.health.request_task_stop();
+        }
+    }
     let health = st.health.clone();
     let db = st.db.clone();
     // 等这条任务真的收尾（`runs.finished_at` 有值），再把停止位复位。

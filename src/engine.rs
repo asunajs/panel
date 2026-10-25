@@ -739,6 +739,13 @@ struct Watchdog {
     /// 以前只看 task_stop，于是预算打断的任务被记成红色失败、熔断 +1、
     /// 还发一条失败推送，和 docs/run-history.md 写的正好相反（安全审计 H4）。
     interrupted: Arc<AtomicBool>,
+    /// 这次 Watchdog 正在跑的是哪次 invocation（派发时写入，0 = 没有）。
+    ///
+    /// 安全审计 H3：停止位以前是全局单比特，停 A 会打断 B。现在把「停谁」也记下来
+    /// （stop_inv），handler 只在两者相等时返回 true。
+    cur_inv: Arc<AtomicU64>,
+    /// 要停的是哪次 invocation（0 = 不按 inv 停，走 task_stop 的「停全部」）。
+    stop_inv: Arc<AtomicU64>,
 }
 
 impl Watchdog {
@@ -784,7 +791,24 @@ impl Watchdog {
     /// `InternalError: interrupted`），所以这个标记只回答「是不是被我们叫停的」，
     /// 不区分是用户按了停止还是预算到点 —— 对外两者都算「已停止」。
     fn task_stop_requested(&self) -> bool {
+        self.stop_matches()
+    }
+
+    /// 这次执行该不该停？
+    ///
+    /// stop_inv != 0 ⇒ 只停那一次 invocation（安全审计 H3：停 A 不该打断 B）；
+    /// stop_inv == 0 ⇒ 老语义「停全部」，给关闭进程用。
+    fn stop_matches(&self) -> bool {
+        let target = self.stop_inv.load(Ordering::Relaxed);
+        if target != 0 {
+            return target == self.cur_inv.load(Ordering::Relaxed);
+        }
         self.task_stop.load(Ordering::Relaxed)
+    }
+
+    /// 派发时告诉 Watchdog「这次是哪个 invocation」。
+    fn set_inv(&self, inv_id: u64) {
+        self.cur_inv.store(inv_id, Ordering::Relaxed);
     }
 
     fn handler(&self) -> Box<dyn FnMut() -> bool + 'static> {
@@ -836,6 +860,8 @@ pub struct EngineHealth {
     slots: Arc<Vec<WorkerSlot>>,
     stop: Arc<AtomicBool>,
     task_stop: Arc<AtomicBool>,
+    /// 要停的是哪一次 invocation（0 = 停全部）。安全审计 H3。
+    stop_inv: Arc<AtomicU64>,
     pub budget_ms: u64,
 }
 
@@ -934,8 +960,16 @@ impl EngineHealth {
         self.task_stop.store(true, Ordering::Relaxed);
     }
 
+    /// 只停某一次 invocation（安全审计 H3：停 A 不该打断 B）。
+    pub fn request_task_stop_inv(&self, inv_id: u64) {
+        self.stop_inv.store(inv_id, Ordering::Relaxed);
+        self.task_stop.store(true, Ordering::Relaxed);
+    }
+
     pub fn clear_task_stop(&self) {
         self.task_stop.store(false, Ordering::Relaxed);
+        // 必须一起复位：留着 stop_inv 会让「停全部」的老语义永远失效。
+        self.stop_inv.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1305,6 +1339,7 @@ impl JsEngine {
             slots: Arc::new((0..workers_n).map(|_| WorkerSlot::default()).collect()),
             stop: Arc::new(AtomicBool::new(false)),
             task_stop: Arc::new(AtomicBool::new(false)),
+            stop_inv: Arc::new(AtomicU64::new(0)),
             budget_ms,
         };
 
@@ -5268,6 +5303,8 @@ fn dispatch_task(
     // 登记「这条任务现在跑的是哪次 invocation」（安全审计 H3 第一步）。
     // 只记账，不改任何判定 —— 下一步才让 Watchdog 用它判停。
     register_in_flight(&plugin.name, name, inv_id);
+    // 告诉 Watchdog「这次是哪个 invocation」，/stop 才能只打断这一次。
+    wd.set_inv(inv_id);
     match plugin.runtime.as_ref() {
         None => Dispatch::Done(Err("插件加载失败，没有可用的解释器实例".to_string())),
         Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
@@ -7226,6 +7263,20 @@ mod pump_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_only_hits_the_targeted_invocation() {
+        // 安全审计 H3 的本体：停 A 不该打断 B。
+        let wd = Watchdog::default();
+        wd.set_inv(7);
+        wd.stop_inv.store(7, Ordering::Relaxed);
+        assert!(wd.task_stop_requested(), "目标 invocation 应该被打断");
+        wd.set_inv(8);
+        assert!(!wd.task_stop_requested(), "别的 invocation 不该被打断");
+        // stop_inv == 0 ⇒ 退回「停全部」的老语义（关闭进程用）
+        wd.stop_inv.store(0, Ordering::Relaxed);
+        wd.task_stop.store(true, Ordering::Relaxed);
+        assert!(wd.task_stop_requested(), "stop_inv=0 时应停全部");
+    }
     #[test]
     fn in_flight_registry_tracks_and_clears() {
         // 安全审计 H3 第一步：先让「谁现在在跑」这个数据存在。
