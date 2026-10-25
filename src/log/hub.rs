@@ -38,6 +38,19 @@ pub const MEMORY_CAP: usize = 1 << 20;
 /// 插件日志文件保留天数。
 pub const KEEP_DAYS: u64 = 7;
 
+/// 日志保留天数（`PANEL_LOG_KEEP_DAYS`，默认 [`KEEP_DAYS`]）。
+///
+/// 以前写死 7 天 —— 但「留几天」取决于盘有多大：一张 8 GB 的 SD 卡和一台
+/// 200 GB 的 VPS 显然不该同一个数。钳在 1..=365：0 会让今天的日志当场被删
+/// （等于关掉落盘），过大的值等于没有保留期。
+pub fn keep_days() -> u64 {
+    std::env::var("PANEL_LOG_KEEP_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|d| d.clamp(1, 365))
+        .unwrap_or(KEEP_DAYS)
+}
+
 /// 插件日志文件名前缀。最终是 `plugin-2026-10-15.jsonl`。
 pub const FILE_PREFIX: &str = "plugin";
 
@@ -63,7 +76,7 @@ impl Hub {
         let console_min = Level::Debug;
 
         let file = match log_dir {
-            Some(dir) => match FileTransport::open(dir, FILE_PREFIX, KEEP_DAYS) {
+            Some(dir) => match FileTransport::open(dir, FILE_PREFIX, keep_days()) {
                 Ok(f) => Some(Arc::new(f)),
                 Err(e) => {
                     crate::log::panel("boot").warn(format!(
