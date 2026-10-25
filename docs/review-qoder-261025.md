@@ -607,3 +607,26 @@ B 的 run 正常完成。以及：停不存在的任务返回 404（已在第 10
 `<data>/__script__/<任务名>` 并由引擎在派发前设置。**后者更干净**，但要动派发链路。
 
 ⚠ 这条我记为「已核实、未修」——它需要改派发链路，不是一处公式能收的。
+
+#### M6 后半的最终结论（2026-10-25，第 93 轮）
+
+核实完毕：`install_host(ctx, plugin, state, ...)` 的签名里**没有任务名**，
+`HostState` 也没有任务字段（它是插件级共享的 `Arc`，加不进去）。
+
+所以修法只有一条：**给 `install_host` 加一个 `task: Option<&str>` 参数**，
+在算 `fs_root` 时用它：
+
+```rust
+let fs_root = match (&task, Path::new(&plugin).file_name()) {
+    (Some(t), _) => state.plugin_data_dir.join("__script__").join(sanitize(t)),
+    (None, Some(name)) => state.plugin_data_dir.join(name),
+    (None, None) => state.plugin_data_dir.join("__unnamed__"),
+};
+```
+
+调用点 3 处（`engine.rs:5963`、`7050`、`7705`），其中脚本那条传 `Some(任务名)`，
+另外两条传 `None`。
+
+⚠ **为什么没做**：这会改一个被三条路径共用的函数签名，而其中两条是普通插件加载。
+改错了影响的不只是脚本，是所有插件的文件读写根。我判断需要一整轮的余量来做 + 回归，
+而连续三轮余量都不够。**记在这里，不硬做。**
