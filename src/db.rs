@@ -204,6 +204,27 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
         );
         CREATE INDEX IF NOT EXISTS idx_settings_audit_at ON settings_audit(at DESC);
 
+        -- unpanel 2.7：**发不出去的通知留在 outbox 里**。
+        --
+        -- 以前失败只写一行 push_deliveries 就丢了 —— 能看到「失败」，但没法重发。
+        -- 这里存下重发所需的全部内容（渠道 + 标题 + 正文 + 上次失败原因）。
+        --
+        -- ⚠ body 存的是**明文通知内容**（和已经发出去的那份一致），和日志同级。
+        CREATE TABLE IF NOT EXISTS push_outbox (
+            id         TEXT PRIMARY KEY,
+            at         TEXT NOT NULL,
+            plugin     TEXT NOT NULL,
+            task       TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            channel    TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            body       TEXT NOT NULL,
+            reason     TEXT NOT NULL,
+            attempts   INTEGER NOT NULL DEFAULT 1,
+            retried_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_outbox_at ON push_outbox(at DESC);
+
         -- 第三十一轮：**面板级推送**。
         --
         -- 配置单独一张单行表：它含 token / 密码，形状是嵌套的，和「运行参数」
@@ -1312,6 +1333,115 @@ pub struct FileOp {
 /// ⚠ 暂时没有调用方：回收站界面是二期的事。先留着并显式标注，
 /// 免得它变成一条「写了但没人知道」的死代码。
 #[allow(dead_code)]
+/// outbox 里的一条（unpanel 2.7）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PushOutboxRow {
+    pub id: String,
+    pub at: String,
+    pub plugin: String,
+    pub task: String,
+    pub kind: String,
+    pub channel: String,
+    pub title: String,
+    pub body: String,
+    pub reason: String,
+    pub attempts: i64,
+}
+
+/// 记一条发不出去的通知。返回 id。
+pub fn record_push_outbox(
+    db: &Db,
+    plugin: &str,
+    task: &str,
+    kind: &str,
+    channel: &str,
+    title: &str,
+    body: &str,
+    reason: &str,
+) -> rusqlite::Result<String> {
+    let id = format!(
+        "po_{}_{}",
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    );
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO push_outbox (id, at, plugin, task, kind, channel, title, body, reason) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![id, at, plugin, task, kind, channel, title, body, reason],
+    )?;
+    Ok(id)
+}
+
+/// 最近没发出去的通知（新的在前）。
+pub fn list_push_outbox(db: &Db, limit: i64) -> rusqlite::Result<Vec<PushOutboxRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+         FROM push_outbox ORDER BY at DESC, id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![limit], |r| {
+        Ok(PushOutboxRow {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            plugin: r.get(2)?,
+            task: r.get(3)?,
+            kind: r.get(4)?,
+            channel: r.get(5)?,
+            title: r.get(6)?,
+            body: r.get(7)?,
+            reason: r.get(8)?,
+            attempts: r.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// 按 id 取一条（重发前要用它的标题/正文）。
+pub fn get_push_outbox(db: &Db, id: &str) -> rusqlite::Result<Option<PushOutboxRow>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+         FROM push_outbox WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id], |r| {
+        Ok(PushOutboxRow {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            plugin: r.get(2)?,
+            task: r.get(3)?,
+            kind: r.get(4)?,
+            channel: r.get(5)?,
+            title: r.get(6)?,
+            body: r.get(7)?,
+            reason: r.get(8)?,
+            attempts: r.get(9)?,
+        })
+    })?;
+    rows.next().transpose()
+}
+
+/// 重发成功后删掉这条。
+pub fn delete_push_outbox(db: &Db, id: &str) -> rusqlite::Result<bool> {
+    let conn = db.lock().unwrap();
+    Ok(conn.execute("DELETE FROM push_outbox WHERE id = ?1", rusqlite::params![id])? > 0)
+}
+
+/// 重发仍失败：记一次尝试，把新的原因写回去（不清掉，还能再试）。
+pub fn bump_push_outbox(db: &Db, id: &str, reason: &str) -> rusqlite::Result<()> {
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE push_outbox SET attempts = attempts + 1, reason = ?2, retried_at = ?3 WHERE id = ?1",
+        rusqlite::params![id, reason, at],
+    )?;
+    Ok(())
+}
+
 /// 记一条设置改动（unpanel 2.6 第三步）。
 ///
 /// 值由调用方先脱敏 —— 这个函数不认识「哪个键是敏感的」，那是 `settings` 的事。
@@ -2052,6 +2182,49 @@ mod tests {
         assert!(!job_exists(&db, "other", "tick").unwrap());
         assert!(!job_exists(&db, "demo", "nope").unwrap());
     }
+    #[test]
+    fn push_outbox_roundtrip() {
+        // unpanel 2.7：发不出去的通知要能查、能重发、能删。
+        let dir = std::env::temp_dir().join(format!("panel-outbox-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("outbox.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+
+        let id = record_push_outbox(
+            &db,
+            "mcloud",
+            "signin",
+            "failure",
+            "bark",
+            "标题",
+            "正文",
+            "连接超时",
+        )
+        .unwrap();
+        assert!(id.starts_with("po_"));
+
+        let rows = list_push_outbox(&db, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].channel, "bark");
+        assert_eq!(rows[0].body, "正文");
+        assert_eq!(rows[0].attempts, 1);
+
+        let one = get_push_outbox(&db, &id).unwrap().unwrap();
+        assert_eq!(one.title, "标题");
+
+        // 重发仍失败：次数 +1，原因被更新，行**留着**
+        bump_push_outbox(&db, &id, "还是超时").unwrap();
+        let after = get_push_outbox(&db, &id).unwrap().unwrap();
+        assert_eq!(after.attempts, 2);
+        assert_eq!(after.reason, "还是超时");
+
+        // 重发成功：删掉
+        assert!(delete_push_outbox(&db, &id).unwrap());
+        assert!(get_push_outbox(&db, &id).unwrap().is_none());
+        assert!(!delete_push_outbox(&db, &id).unwrap(), "删第二次应返回 false");
+    }
+
     #[test]
     fn settings_audit_records_old_and_new_values() {
         // unpanel 2.6 第三步：谁在什么时候把哪个键从什么改成了什么。

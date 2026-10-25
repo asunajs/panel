@@ -295,6 +295,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push", get(api_push_get))
         .route("/api/push/config", post(api_push_save))
         .route("/api/push/test", post(api_push_test))
+        .route("/api/push/outbox", get(api_push_outbox))
+        .route("/api/push/outbox/retry", post(api_push_outbox_retry))
         // 按任务覆盖：只存偏离「跟随全局」的任务。
         .route("/api/push/task", post(api_push_task_save))
         // 插件商城：目录 / GitHub 解析 / 安装。
@@ -3834,6 +3836,52 @@ async fn api_push_test(State(st): State<AppState>, headers: HeaderMap) -> Respon
     }
 }
 
+/// GET /api/push/outbox —— 发不出去的通知（unpanel 2.7）。
+///
+/// 界面上显示「这些没发出去」，每条带一个「重发」。
+async fn api_push_outbox(State(st): State<AppState>) -> Response {
+    match crate::db::list_push_outbox(&st.db, 50) {
+        Ok(rows) => Json(json!({ "items": rows })).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("读 outbox 失败: {e}"),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OutboxRetry {
+    id: String,
+}
+
+/// POST /api/push/outbox/retry —— 重发一条。
+///
+/// 走 spawn_blocking：发送是同步阻塞的（每个渠道最多 10 秒），
+/// 在 async handler 里直接做会卡住整个 runtime 线程。
+async fn api_push_outbox_retry(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OutboxRetry>,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    let db = st.db.clone();
+    let id = req.id.clone();
+    match tokio::task::spawn_blocking(move || crate::push::retry_outbox(&db, &id)).await {
+        Ok(Ok(r)) => Json(json!({
+            "ok": r.outcome == "sent",
+            "outcome": r.outcome,
+            "note": r.note,
+        }))
+        .into_response(),
+        Ok(Err(e)) => json_error(StatusCode::BAD_REQUEST, e),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("重发失败：{e}"),
+        ),
+    }
+}
 async fn api_market(State(st): State<AppState>, Query(q): Query<MarketQuery>) -> Response {
     let refresh = matches!(
         q.refresh.as_deref().map(str::trim),

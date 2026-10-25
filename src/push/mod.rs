@@ -791,6 +791,14 @@ fn dispatch(
         if outcome != "skipped" {
             record(db, &at, plugin, task, kind, id, outcome == "sent", &note);
         }
+        // 失败的通知留一条 outbox（unpanel 2.7）：光有一行投递记录只能看到
+        // 「失败了」，**没法重发** —— 而通知的失败往往是一次性的（对端抖了一下）。
+        // 写失败不影响发送流程本身。
+        if outcome == "failed" {
+            if let Err(e) = db::record_push_outbox(db, plugin, task, kind, id, title, text, &note) {
+                crate::log::plog!("push", warn, "写 outbox 失败（{id}）: {e}");
+            }
+        }
         out.push(ChannelResult {
             channel: id.to_string(),
             label,
@@ -1108,6 +1116,42 @@ pub struct TestOutcome {
 
 /// 试发一条。**同步**（HTTP handler 会把它丢进 spawn_blocking）：
 /// 用户点「发一条试试」就是在等结果，异步队列反而要再写一套状态。
+/// 重发 outbox 里的一条（unpanel 2.7）。
+///
+/// **复用 dispatch**，只把渠道过滤成这一条 —— 重发不能另写一条发送路径，
+/// 否则两份逻辑迟早漂移，而漂移出的 bug 只在失败路径上出现，最难发现。
+///
+/// 成功就删掉这条；仍失败就把新的原因写回去（还能再试）。
+pub fn retry_outbox(db: &Db, id: &str) -> Result<ChannelResult, String> {
+    let row = crate::db::get_push_outbox(db, id)
+        .map_err(|e| format!("读 outbox 失败: {e}"))?
+        .ok_or_else(|| format!("outbox 里没有 {id}"))?;
+    let cfg = load_config(db);
+    let only = [row.channel.clone()];
+    let results = dispatch(
+        db,
+        &cfg.channels,
+        &row.title,
+        &row.body,
+        &row.kind,
+        &row.plugin,
+        &row.task,
+        &only,
+        cfg.daily_cap,
+    );
+    let Some(r) = results.into_iter().next() else {
+        // 渠道已经从配置里删了：这条重发不出去，也不该一直挂着。
+        let _ = crate::db::delete_push_outbox(db, id);
+        return Err(format!("渠道 {} 已经不在配置里，这条已丢弃", row.channel));
+    };
+    if r.outcome == "sent" {
+        let _ = crate::db::delete_push_outbox(db, id);
+    } else {
+        let _ = crate::db::bump_push_outbox(db, id, &r.note);
+    }
+    Ok(r)
+}
+
 pub fn send_test(db: &Db) -> TestOutcome {
     let cfg = load_config(db);
     let chans = channels::configured(&cfg.channels);
