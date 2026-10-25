@@ -520,3 +520,32 @@ Medium/Low 本轮未逐条核验，按文档自己的排序留待后续。
 
 ⚠ 不要只做第 1 步：关了自动重定向又不自己走，`http→https` 这类正常跳转会被打断，
    插件侧看到的是 301 —— 那是把一个安全洞换成一个兼容性坑。
+
+#### H3 本体的落地计划（停 A 打断 B）
+
+**为什么不能只改一处**：`task_stop` 是 `EngineHealth` 里一个 `Arc<AtomicBool>`，
+被所有 worker 的 `Watchdog` 共享（`engine.rs` 里 `task_stop: health.task_stop.clone()`）。
+任何一次置位都让**所有**在跑的 invocation 的 interrupt handler 返回 true。
+要按 invocation 停，必须让 handler 能判断「这次是不是我被叫停的」。
+
+**缺的那块拼图**：`/stop` 拿不到 invocation id。引擎侧有 `next_inv_id()`，
+但 id 只活在 worker 线程的 `pending: HashMap<u64, Inv>` 里 —— web 层看不到。
+（`REAPED` / `INV_DONE_TL` 都是「事后」的队列，不是「在途」的注册表。）
+
+**方案（三步，按依赖顺序）**：
+
+1. **加一张在途注册表**：`static IN_FLIGHT: Mutex<HashMap<(String, String), u64>>`，
+   键是 `(plugin, task)`，值是当前 invocation id。派发时登记、收尾时删除。
+   ⚠ 必须用**同一把锁**做「登记 / 查询 / 删除」，否则会出现「查到了但已经收尾」。
+2. **Watchdog 按 inv 判停**：`Watchdog` 加 `cur_inv: Arc<AtomicU64>`（派发时写入）
+   与 `stop_inv: Arc<AtomicU64>`（`/stop` 写入）；handler 里把
+   `task_stop.load()` 换成 `stop_inv.load() == cur_inv.load() && cur_inv != 0`。
+   保留旧的 `task_stop` 给「停全部」用（关闭进程时仍然需要）。
+3. **/stop 先查表**：`IN_FLIGHT.get(&(plugin, name))` 拿到 id 再置位；
+   查不到 = 没有在跑的，直接返回「没有正在运行的执行」（不要退化成全局置位）。
+
+**判据**：两条并发任务（都 `sleep 5s`）只停 A ⇒ A 的 run 是 `stopped=1`、
+B 的 run 正常完成。以及：停不存在的任务返回 404（已在第 10 轮做了入口校验）。
+
+⚠ 别把「在途注册表」和 `pending` 合并：`pending` 是 worker 私有的，
+跨线程读它要加锁，等于把一条热路径上的无锁结构变成有锁的 —— 得不偿失。
