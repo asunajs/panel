@@ -1275,13 +1275,37 @@ pub fn record_file_op(
 }
 
 /// 最近的文件操作（新的在前），给界面显示「删了什么」。
-pub fn list_file_ops(db: &Db, limit: i64) -> rusqlite::Result<Vec<(String, String, String, String, String, String)>> {
+/// 一条文件操作记录（见 record_file_op）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOp {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub action: String,
+    /// 回收站里的实际位置 —— 以后做「恢复」就靠它。
+    pub to_path: String,
+    pub at: String,
+}
+
+/// 最近的文件操作（新的在前）。
+///
+/// ⚠ 暂时没有调用方：回收站界面是二期的事。先留着并显式标注，
+/// 免得它变成一条「写了但没人知道」的死代码。
+#[allow(dead_code)]
+pub fn list_file_ops(db: &Db, limit: i64) -> rusqlite::Result<Vec<FileOp>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
         "SELECT id, kind, name, action, to_path, at FROM file_ops ORDER BY at DESC, id DESC LIMIT ?1",
     )?;
     let it = stmt.query_map(params![limit], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        Ok(FileOp {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            name: r.get(2)?,
+            action: r.get(3)?,
+            to_path: r.get(4)?,
+            at: r.get(5)?,
+        })
     })?;
     it.collect()
 }
@@ -1930,10 +1954,10 @@ mod tests {
         assert!(id.starts_with("fo_"), "操作 id 应带前缀: {id}");
         let rows = list_file_ops(&db, 10).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, "plugin");
-        assert_eq!(rows[0].2, "demo");
-        assert_eq!(rows[0].3, "delete");
-        assert_eq!(rows[0].4, ".trash/x/demo.js", "to_path 是回收站里的实际位置，恢复靠它");
+        assert_eq!(rows[0].kind, "plugin");
+        assert_eq!(rows[0].name, "demo");
+        assert_eq!(rows[0].action, "delete");
+        assert_eq!(rows[0].to_path, ".trash/x/demo.js", "to_path 是回收站里的实际位置，恢复靠它");
     }
     use super::*;
     use std::path::Path;
