@@ -274,6 +274,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scripts", get(list_scripts))
         .route("/api/scripts/jobs", post(create_script_job))
         .route("/api/scripts/jobs/{name}/edit", post(edit_script_job))
+        .route("/api/scripts/{name}/delete", post(delete_script_file))
         .route("/api/test/{lang}", post(test_run))
         // 只读接口
         .route("/", get(asset_index))
@@ -2169,6 +2170,53 @@ where
 }
 
 /// `POST /api/scripts/jobs/{name}/edit` —— 编辑面板脚本任务（目录任务用 `/api/jobs/.../edit`）。
+/// `POST /api/scripts/{name}/delete` —— 把脚本文件挪进回收站。
+///
+/// 和插件删除同一套口径（docs/file-management.md 一期）：**移走不是 rm**，
+/// 落一条 file_ops 记账，出事了能按 to_path 捞回来。
+async fn delete_script_file(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return json_error(StatusCode::BAD_REQUEST, format!("脚本名不合法: {name}"));
+    }
+    // 脚本文件可能带 .js/.py/.sh 三种后缀，按目录里真实存在的找。
+    let mut moved: Vec<String> = Vec::new();
+    for ext in ["js", "py", "sh"] {
+        let file = st.host.tasks_dir.join(format!("{name}.{ext}"));
+        if !file.is_file() {
+            continue;
+        }
+        let trash = st.host.tasks_dir.join(".trash").join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
+        if let Err(e) = std::fs::create_dir_all(&trash) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("建回收站目录失败: {e}"));
+        }
+        let dst = trash.join(format!("{name}.{ext}"));
+        if let Err(e) = std::fs::rename(&file, &dst) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("挪 {name}.{ext} 失败: {e}"));
+        }
+        moved.push(format!("{name}.{ext}"));
+    }
+    if moved.is_empty() {
+        return json_error(StatusCode::NOT_FOUND, format!("没有找到脚本 {name} 的文件"));
+    }
+    let op = crate::db::record_file_op(
+        &st.db,
+        "script",
+        &name,
+        "delete",
+        &format!("{}/{}", st.host.tasks_dir.display(), name),
+        &moved.join(", "),
+    )
+    .ok();
+    Json(json!({ "ok": true, "moved": moved, "op": op })).into_response()
+}
+
 async fn edit_script_job(
     State(st): State<AppState>,
     Path(name): Path<String>,
