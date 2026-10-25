@@ -581,8 +581,15 @@ async function route() {
     cleanup = next;
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页
+    //
+    // ⚠ 消息必须转义（安全审计 L2 后半）：异常文本里常带插件名/文件名，
+    // 而插件名是用户可控的 —— 直接插进 innerHTML 等于给自己开了一个 XSS。
+    const escHtml = (s) =>
+      String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+      );
     root.innerHTML = `<div class="card"><span class="badge failed">视图渲染失败</span>
-      <p class="hint" style="margin-top:var(--sp-2)">${String(e && e.message ? e.message : e)}</p></div>`;
+      <p class="hint" style="margin-top:var(--sp-2)">${escHtml(e && e.message ? e.message : e)}</p></div>`;
     console.error('[panel] 视图渲染失败', e);
   }
 
