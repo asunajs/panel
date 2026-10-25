@@ -367,13 +367,24 @@ function openOverrideDialog(job, root, ctx) {
 let rootListeners = [];
 
 function addRootListener(root, type, fn) {
-  rootListeners.push([type, fn]);
+  // ⚠ 连 root 一起记（安全审计 L3）：只记 [type, fn] 的话，两个视图实例
+  // 先后渲染时，后一个的 clearRootListeners 会把**前一个的**监听从列表里清掉
+  // 但没从它的 DOM 上摘下来 —— 那些监听就永久泄漏，而且动作会被执行多次。
+  rootListeners.push([root, type, fn]);
   root.addEventListener(type, fn);
 }
 
 function clearRootListeners(root) {
-  for (const [type, fn] of rootListeners) root.removeEventListener(type, fn);
-  rootListeners = [];
+  const keep = [];
+  for (const [r, type, fn] of rootListeners) {
+    // 只摘这个 root 的；别的 root 的监听留着，它们由自己的 cleanup 负责。
+    if (root && r !== root) {
+      keep.push([r, type, fn]);
+      continue;
+    }
+    r.removeEventListener(type, fn);
+  }
+  rootListeners = keep;
 }
 
 /** 按任务名找卡片（目录卡片与面板卡片都带 data-task）。 */
