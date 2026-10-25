@@ -1068,11 +1068,16 @@ async fn stop_task(
     tokio::spawn(async move {
         for _ in 0..120 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            // ⚠ 没有 run 记录时**不能**当成"已经收尾"（安全审计 H3）。
+            //
+            // 以前这里是 unwrap_or(true)：任务还在排队（没有 run 行）时，
+            // 第一个 250ms 就把停止位复位了 —— /stop 对排队中的任务等于空操作。
+            // 现在没有记录就继续等，等到窗口结束（30 秒）再复位。
             let done = crate::db::list_runs(&db, Some(&plugin), Some(&name), 1)
                 .ok()
                 .and_then(|v| v.into_iter().next())
                 .map(|r| r.finished_at.is_some())
-                .unwrap_or(true);
+                .unwrap_or(false);
             if done {
                 break;
             }
