@@ -461,6 +461,7 @@ fn handle_run(
         &ev.plugin,
         &ev.task,
         &rule.channels,
+        cfg.daily_cap,
     );
     if results.iter().any(|r| r.outcome != "skipped") {
         last.insert(key, Instant::now());
@@ -495,6 +496,7 @@ fn handle_breaker(db: &Db, ev: &BreakerEvent) {
         &ev.plugin,
         &ev.task,
         &rule.channels,
+        cfg.daily_cap,
     );
     log_summary("熔断", &ev.plugin, &ev.task, &results);
 }
@@ -522,6 +524,18 @@ fn cooldown_blocks(cfg: &PushConfig, key: &str, last: &HashMap<String, Instant>)
     }
     last.get(key)
         .is_some_and(|t| t.elapsed() < Duration::from_secs(cfg.cooldown_secs))
+}
+
+/// 日上限到了吗（按值判定，给 dispatch 的逐条复查用）。
+fn cap_reached(db: &Db, cap: u64) -> bool {
+    if cap == 0 {
+        return false;
+    }
+    match db::count_push_deliveries_today(db, &today_prefix()) {
+        Ok(n) => n >= cap as i64,
+        // 数不出来时**宁可发**：上限是防刷屏的，不是安全边界。
+        Err(_) => false,
+    }
 }
 
 fn daily_cap_reached(db: &Db, cfg: &PushConfig) -> bool {
@@ -675,6 +689,7 @@ fn dispatch(
     plugin: &str,
     task: &str,
     only: &[String],
+    daily_cap: u64,
 ) -> Vec<ChannelResult> {
     let now_ms = now_ms();
     let at = now_str();
@@ -684,6 +699,12 @@ fn dispatch(
         // 空 = 不限制（用全局配的所有渠道）；非空 = 这条任务只要这几条。
         if !only.is_empty() && !only.iter().any(|c| c == id) {
             continue;
+        }
+        // ⚠ 每发一条都重新看日上限（安全审计 M8）。
+        // 调用方在**扇出之前**查过一次，但那之后要连发 N 条：N 个渠道时
+        // 一次检查挡不住 N 条一起出去，超出量最多等于渠道数。逐条复查把它压到 0。
+        if cap_reached(db, daily_cap) {
+            break;
         }
         // 业务码按渠道判定（见 check_business_code）：pushplus 的「未实名」、
         // 企业微信的 errcode 都藏在 HTTP 200 里，只看状态码会报「已发送」。
@@ -1099,7 +1120,7 @@ pub fn send_test(db: &Db) -> TestOutcome {
     }
     let title = format!("{} · 试发", effective_title(&cfg));
     let text = "这是一条试发的推送。\n收到就说明配置对了。";
-    let results = dispatch(db, &cfg.channels, &title, text, "test", "", "", &[]);
+    let results = dispatch(db, &cfg.channels, &title, text, "test", "", "", &[], cfg.daily_cap);
     let sent = results.iter().filter(|r| r.outcome == "sent").count();
     let failed = results.iter().filter(|r| r.outcome == "failed").count();
     let skipped = results.iter().filter(|r| r.outcome == "skipped").count();
