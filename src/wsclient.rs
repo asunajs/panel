@@ -122,8 +122,12 @@ enum In {
     /// 握手成功（**只在 open 内部用**，不会交给插件）。
     Ready,
     Text(String),
-    /// 二进制帧，已转成 hex。
-    Binary(String),
+    /// 二进制帧，**存原始字节**（安全审计 M7 后半）。
+    ///
+    /// 以前这里直接存 hex 字符串：一帧 256 KiB 变成 512 KiB，
+    /// 队列 64 帧 ⇒ 单连接 32 MB，8 条约 256 MB —— 低配盒子直接被打爆。
+    /// 现在只在**真正交给插件时**才转 hex，队列里占的是原始大小。
+    Binary(Vec<u8>),
     /// 对端或本端关了（带一句人话）。
     Closed(String),
     /// 出错（带一句人话）。
@@ -460,7 +464,7 @@ impl Registry {
                                 )));
                                 break;
                             }
-                            if !push_in(&in_tx, &fatal_for_task, In::Binary(to_hex(&b))) { break; }
+                            if !push_in(&in_tx, &fatal_for_task, In::Binary(b.to_vec())) { break; }
                         }
                         Some(Ok(Message::Close(frame))) => {
                             let why = frame
@@ -595,7 +599,8 @@ impl Registry {
 
         match got {
             Ok(In::Text(data)) => Ok(json!({"type": "text", "data": data})),
-            Ok(In::Binary(hex)) => Ok(json!({"type": "binary", "hex": hex})),
+            // 到这里才转 hex：队列里一直是原始字节。
+            Ok(In::Binary(bytes)) => Ok(json!({"type": "binary", "hex": to_hex(&bytes)})),
             Ok(In::Closed(reason)) => {
                 self.drop_conn(id);
                 Ok(json!({"type": "close", "reason": reason}))
