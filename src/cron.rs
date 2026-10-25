@@ -1008,7 +1008,7 @@ mod dst_tests {
         // 遇到 DST 午夜空洞（智利、古巴等）就返回 None，任务停摆一年。
         // 这条测试不依赖具体时区：连推 400 天，只要有任何一次 None 就说明有洞。
         let mut t = Local::now();
-        let mut sched = Schedule::parse("0 0 * * *").expect("@daily 必须能解析");
+        let sched = Schedule::parse("0 0 * * *").expect("@daily 必须能解析");
         for i in 0..400 {
             let next = sched
                 .next_after(t)
@@ -1022,7 +1022,7 @@ mod dst_tests {
     fn hourly_schedule_never_returns_none_across_a_year() {
         // 整点表达式比 @daily 更容易撞上 DST 空洞（跳变通常就发生在整点）。
         let mut t = Local::now();
-        let mut sched = Schedule::parse("0 * * * *").expect("每小时必须能解析");
+        let sched = Schedule::parse("0 * * * *").expect("每小时必须能解析");
         for i in 0..2000 {
             let next = sched
                 .next_after(t)
