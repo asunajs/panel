@@ -188,7 +188,18 @@ function commandLoop(onTick) {
     if (stopped || (inputClosed && queue.length === 0)) process.exit(0);
   };
 
+  // ⚠ 命令**按顺序串行**处理（安全审计 L11 的定性）：`pump` 用 busy 标志保证
+  // 同一时刻只有一个 handleCommand 在跑。这是刻意的 —— 插件状态不是为并发准备的，
+  // 两条命令交错执行会让 `host.state` 出现难以复现的中间态。
+  //
+  // 但队列必须有上限：面板一旦因为 bug 猛灌命令，无界队列会把插件的内存吃光，
+  // 而那看起来像「插件自己内存泄漏」，排查方向完全错。
+  const MAX_QUEUE = 256;
   rl.on('line', (line) => {
+    if (queue.length >= MAX_QUEUE) {
+      emitLog('error', `runner: 命令队列已满（${MAX_QUEUE}），丢弃这一条`);
+      return;
+    }
     queue.push(line);
     void pump();
   });
