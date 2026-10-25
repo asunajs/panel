@@ -21,6 +21,7 @@
 */
 
 import { getState } from '../api.js';
+import { fetchJson } from '../api.js';
 // 运行结果（成功 / 失败 / 已停止）的判定与文案在 status.js —— 与运行记录弹窗共用一份
 import { runOutcome } from '../status.js';
 import {
@@ -458,10 +459,10 @@ export async function render(root, ctx, params = {}) {
       const plugin = pluginEl.value.trim();
       if (plugin) qs.set('plugin', plugin);
       try {
-        const res = await fetch(`/api/logs/history?${qs.toString()}`);
+        const res = await fetchJson(`/api/logs/history?${qs.toString()}`);
         if (gen !== historyGen || disposed) return;
         if (res.ok) {
-          const data = await res.json();
+          const data = res.data;
           for (const entry of data.lines || []) append(entry, { follow: false });
           if (followEl.checked) box.scrollTop = box.scrollHeight;
           updateNote();

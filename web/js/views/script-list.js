@@ -28,6 +28,7 @@ import {
   uploadFile,
 } from '../api.js';
 import { statusBadge, minuteOf, runOutcome } from '../status.js';
+import { fetchJson } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 // 弹窗的焦点与 Esc 走公共实现（见 ../modal.js 的文件头）
 import { openModal } from '../modal.js';
@@ -385,10 +386,10 @@ function rowOfTask(root, name) {
 /** 运行记录弹窗：复用任务卡片里那套 `/api/runs` 接口，字段完全一样。 */
 async function openRunsDialog(name) {
   // 同源 cookie 就够了（原来那个头引用的全局从未定义，见安全审计 L13）
-  const res = await fetch(
+  // fetchJson：401 跳登录、非 JSON 不抛（安全审计 M17）
+  const { data } = await fetchJson(
     `/api/runs?plugin=${encodeURIComponent(SCRIPT_PLUGIN)}&task=${encodeURIComponent(name)}&limit=30`,
   );
-  const data = res.ok ? await res.json() : { error: `HTTP ${res.status}` };
   const runs = data.runs || [];
   const rows = runs.length
     ? runs

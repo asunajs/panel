@@ -24,6 +24,7 @@ import {
   cleanupJobs,
 } from '../api.js';
 import { TASKS } from '../mock.js';
+import { fetchJson } from '../api.js';
 import { armConfirm, settleArmed, paintArmed, RISK } from '../confirm.js';
 // 弹窗的焦点与 Esc 走公共实现（五个弹窗各写一份的后果见 ../modal.js 的文件头）
 import { openModal } from '../modal.js';
@@ -300,10 +301,10 @@ function clearRootListeners(root) {
 // 「昨天下午那次失败到底输出了什么」在插件视图里翻不到；按运行看才有边界。
 async function openRunsDialog(plugin, name) {
   // 同源 cookie 就够了（原来那个头引用的全局从未定义，见安全审计 L13）
-  const res = await fetch(
+  // fetchJson：401 跳登录、非 JSON 不抛（安全审计 M17）
+  const { data } = await fetchJson(
     `/api/runs?plugin=${encodeURIComponent(plugin)}&task=${encodeURIComponent(name)}&limit=30`,
   );
-  const data = res.ok ? await res.json() : { error: `HTTP ${res.status}` };
   const runs = data.runs || [];
 
   const rows = runs.length
