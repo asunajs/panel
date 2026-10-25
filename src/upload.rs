@@ -401,11 +401,43 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("检查目标文件失败: {e}")),
     }
-    std::fs::write(dest, data).map_err(|e| format!("写入 {shown} 失败: {e}"))
+    // 先写临时文件、再 rename（安全审计 M3）。
+    //
+    // 直接 fs::write 失败（盘满、中断）会**留下半份文件** —— 而半份 JS 文件
+    // 会被引擎当成合法插件加载，报错信息还指向一个语法错误，跟真实原因无关。
+    // rename 在同盘是原子的：要么旧内容、要么新内容，没有中间态。
+    let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let tmp = dest.with_extension(format!("{ext}.tmp"));
+    if let Err(e) = std::fs::write(&tmp, data) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入 {shown} 失败: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("落盘 {shown} 失败: {e}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn successful_upload_leaves_no_tmp_file() {
+        // 安全审计 M3：先写 .tmp 再 rename。成功之后目录里不能留下临时文件，
+        // 否则下次扫描会把它当成一个奇怪的插件。
+        let root = std::env::temp_dir().join(format!("panel-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        save(Kind::Plugin, &root, "demo.js", b"// hi", true).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "demo.js"), "正式文件应该存在: {names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".tmp")), "不该留下临时文件: {names:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use super::*;
     use std::io::Write;
 
