@@ -307,7 +307,7 @@ curl -X PUT \
   -H 'x-panel: 1' \
   -H 'Content-Type: application/json' \
   --data @config.json \
-  http://127.0.0.1:3030/api/plugins/插件名/config
+  http://127.0.0.1:8787/api/plugins/插件名/config
 ```
 
 保存后下一次任务生效，不需要重载插件。
