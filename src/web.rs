@@ -1713,8 +1713,20 @@ async fn save_plugin_source(
         );
     }
 
+    // ⚠ 临时文件名必须每次唯一（安全审计 L5）：固定叫 `x.js.tmp` 时，两个标签页
+    // 同时保存同一插件会**写同一个临时文件** —— 一个 rename 走之后另一个的
+    // rename 要么失败，要么把对方的内容搬过去，结果是源码变成两次编辑的混合体。
+    // 用进程号 + 纳秒做后缀：同一个进程内也唯一，且不需要额外依赖。
+    let uniq = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
     let tmp = path.with_extension(format!(
-        "{}.tmp",
+        "{}.tmp-{uniq}",
         path.extension().and_then(|s| s.to_str()).unwrap_or("js")
     ));
     if let Err(e) = std::fs::write(&tmp, req.text.as_bytes()) {
