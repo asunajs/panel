@@ -70,7 +70,8 @@ const CAP_WARN_INTERVAL: StdDuration = StdDuration::from_secs(3600);
 
 enum Msg {
     Line(String),
-    Flush,
+    /// 带一个可选的 ack：写线程 flush 完之后回一条（安全审计 L8）。
+    Flush(Option<SyncSender<()>>),
     Shutdown,
 }
 
@@ -170,7 +171,22 @@ impl FileTransport {
     /// 等写线程把队列里的东西落盘。关面板前调用（`main.rs` 的优雅退出）。
     pub fn flush_blocking(&self) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Msg::Flush);
+            // ⚠ 必须等 ack（安全审计 L8）：以前把 Msg::Flush 塞进队列就返回，
+            // 而调用方（关面板前 / exec 重启前）紧接着就退出进程 —— exec 不跑析构，
+            // 积压的最多 8192 行直接丢。
+            // 等 2 秒，等不到就在 stderr 说一声然后继续走（不能因此卡死退出）。
+            let (ack_tx, ack_rx) = sync_channel(0);
+            if tx.send(Msg::Flush(Some(ack_tx))).is_err() {
+                return;
+            }
+            if ack_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err()
+            {
+                // 这里用 eprintln 而不是 plog!：plog! 会再走一遍日志通道，
+                // 而此刻通道正是等不到落盘的那条 —— 递归。
+                eprintln!("[panel] 等待日志落盘超时（2s），可能有积压未写");
+            }
         }
     }
 
@@ -323,6 +339,8 @@ struct CurrentFile {
     capped: bool,
     /// 上次「已到上限」提示的时刻（[`CAP_WARN_INTERVAL`] 节流）。
     last_cap_warn: Option<Instant>,
+    /// 正在等落盘确认的 flush 调用方（安全审计 L8）。
+    pending_ack: Option<SyncSender<()>>,
 }
 
 fn spawn_writer(
@@ -343,6 +361,7 @@ fn spawn_writer(
                 bytes: 0,
                 capped: false,
                 last_cap_warn: None,
+                pending_ack: None,
             };
 
             // 启动时先清一次：不然一个停了三个月的面板再启动，
@@ -414,7 +433,10 @@ fn spawn_writer(
                         }
                         true
                     }
-                    Msg::Flush => true,
+                    Msg::Flush(ack) => {
+                        cur.pending_ack = ack;
+                        true
+                    }
                     Msg::Shutdown => false,
                 }
             };
@@ -469,6 +491,10 @@ fn spawn_writer(
                 }
                 if let Some(w) = cur.sink.as_mut() {
                     let _ = w.flush();
+                }
+                // flush 完了才回 ack（安全审计 L8）：调用方等到这条才算真的落盘。
+                if let Some(ack) = cur.pending_ack.take() {
+                    let _ = ack.send(());
                 }
                 if stop {
                     if let Some(mut w) = cur.sink.take() {

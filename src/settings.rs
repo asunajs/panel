@@ -793,9 +793,11 @@ pub fn restart_process_at(exe: &std::path::Path) {
         "收到重启请求：exec {}（PID 不变）",
         exe.display()
     );
-    // 尽量把日志刷出去。stdout 是行缓冲，面板通道的 console transport 是同步写的，
-    // 这里再 yield 一下让 writer 线程把队列排空。
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // ⚠ 先**等确认**再 exec（安全审计 L8）：exec 不跑析构，队列里积压的行会直接丢。
+    // `flush()` 现在会等写线程回 ack（最多 2 秒），不再靠 sleep 猜。
+    crate::log::panel("boot").flush();
+    // 再让一步：console transport 是同步写的，但 stdout 有自己的缓冲。
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let exe = exe.to_path_buf();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
