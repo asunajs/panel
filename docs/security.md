@@ -84,7 +84,7 @@ head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'    # 48 位十六进制
 
 ```ini
 [Service]
-EnvironmentFile=/etc/plugin-panel.env      # 里面一行 PANEL_TOKEN=...
+EnvironmentFile=/etc/plugin-panel.env      # 里面一行 PANEL_TOKEN_HASH=prehash1:...
 Environment=BIND_ADDR=0.0.0.0:8787
 # 走反代加了 TLS 时再开：
 # Environment=PANEL_COOKIE_SECURE=1
