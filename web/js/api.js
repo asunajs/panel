@@ -591,3 +591,36 @@ export function checkUpdate() {
 export function applyUpdate() {
   return request('/api/update/apply', { method: 'POST', panel: true, timeout: 120000 });
 }
+
+/**
+ * 和 `request()` 同口径的裸 fetch 包装（安全审计 M17）。
+ *
+ * 有几处直接用了 `fetch()`：它们不经过 `request()`，于是
+ *   - 401 时**不会跳登录页**（用户看到一片空白，以为页面坏了）；
+ *   - 服务端返回 HTML 错误页时 `await res.json()` 直接抛，
+ *     错误信息是一句「Unexpected token <」，和真实原因无关。
+ *
+ * 这个包装把两件事补齐，返回 `{ ok, status, data }`，永不抛。
+ */
+export async function fetchJson(url, opts = {}) {
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: `网络错误：${e && e.message ? e.message : e}` } };
+  }
+  if (res.status === 401) {
+    // 和 request() 一致：会话没了就回登录页，而不是让调用方去猜。
+    location.href = "/login";
+    return { ok: false, status: 401, data: { error: "未登录" } };
+  }
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    // 不是 JSON：把前 200 字带上，至少能看出是哪一层出的错（反代 / 网关 / 服务端）
+    data = { error: `HTTP ${res.status}：${text.slice(0, 200)}` };
+  }
+  return { ok: res.ok, status: res.status, data };
+}
