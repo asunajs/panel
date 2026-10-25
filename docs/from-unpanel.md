@@ -501,3 +501,24 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 
 ⚠ 这个近似的边界：它只能发现「机制存在但没人知道」，发现不了 unpanel 说的第二类
 （**有调用方但状态活不过进程**）—— 那类必须看运行期数据。
+
+### 2.12 补记：两次「grep 不到 ≠ 不存在」的现场实例（第 64 轮）
+
+§2.12 第 3 类教训在本文里已经应验两次，两次都是**同一个机制**：
+
+| 条目 | 审查的判断 | 实际 | 为什么漏 |
+|---|---|---|---|
+| 2.5 | 「没有日志保留」 | 有：`keep_days` + `cleanup()` | 按 `retention` 搜，0 命中 |
+| 2.9 | 「kill -9 后 runs 停在 running」 | 有：`close_dangling_runs` | 按 `quarantine` 搜，0 命中 |
+
+两次都不是「功能没做」，而是**功能的名字和审查者的用词不一样**。
+
+⇒ 可操作的改法：**不要按名词搜，按行为搜**。
+
+- 找“保留几天”应该搜 `cleanup` / `prune` / `delete from` + 时间条件，而不是 `retention`；
+- 找“崩溃后收尾”应该搜 `finished_at IS NULL` 的 UPDATE，而不是 `quarantine`；
+- 找“限流”应该搜 `fetch_add` / `compare_exchange`，而不是 `rate_limit`。
+
+⚠ 这条对**我**同样适用：我这几轮也犯过反向的错 —— 看到 `job_exists` 里没有 `LIMIT`，
+就以为 `restore_job` 也不受限，实际它走的是另一个带 `LIMIT 100` 的函数（M11）。
+**看一个函数不等于看完整条调用链。**
