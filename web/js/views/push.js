@@ -153,8 +153,12 @@ export async function renderPush(root, ctx) {
     const inputs = (ch.fields || [])
       .map((f) => {
         const id = `pf-${ch.id}-${f.key}`;
-        const common = `id="${id}" data-field="${esc(f.key)}" data-numeric="${f.numeric ? '1' : '0'}"`;
-        const label = `<label class="field-label" for="${id}">${esc(f.label || f.key)}${
+        // ⚠ id 也要转义（安全审计 L3 后半）：它被拼进 `id="..."` 和 `for="..."` 两个
+        // 属性里，而 f.key 来自后端规格。属性上下文里一个双引号就能闭合属性、
+        // 再接一段事件处理器 —— 比文本上下文更危险。
+        const idAttr = esc(id);
+        const common = `id="${idAttr}" data-field="${esc(f.key)}" data-numeric="${f.numeric ? '1' : '0'}"`;
+        const label = `<label class="field-label" for="${idAttr}">${esc(f.label || f.key)}${
           f.secret ? '（留空 = 不改）' : ''
         }</label>`;
         let control;
