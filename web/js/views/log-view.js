@@ -384,10 +384,32 @@ export async function render(root, ctx, params = {}) {
     }
     ring.push(entry);
     if (paused) return; // 暂停时只进缓冲，不动 DOM（恢复时整段重画）
-    const el = lineNode(entry);
-    box.appendChild(el);
-    el.hidden = !visible(el);
-    if (qEl.value.trim()) paintHighlight(el, qEl.value.trim());
+    // 批量上屏（安全审计 M19）：以前每来一行就 appendChild + 读 scrollHeight，
+    // 后者**强制同步布局** —— 高频日志下每行都要重排一次，日志一多页面就卡。
+    // 现在按帧合并：一帧最多一次 DOM 写入、一次布局。
+    pending.push(entry);
+    scheduleFlush();
+  }
+
+  const pending = [];
+  let flushScheduled = false;
+  function scheduleFlush() {
+    if (flushScheduled) return;
+    flushScheduled = true;
+    requestAnimationFrame(flush);
+  }
+  function flush() {
+    flushScheduled = false;
+    if (!pending.length) return;
+    const frag = document.createDocumentFragment();
+    for (const e of pending) {
+      const el = lineNode(e);
+      el.hidden = !visible(el);
+      if (qEl.value.trim()) paintHighlight(el, qEl.value.trim());
+      frag.appendChild(el);
+    }
+    pending.length = 0;
+    box.appendChild(frag);
     // 超上限：从头砍（同时砍 DOM，否则节点会一直涨）
     while (box.children.length > MAX_LINES) box.removeChild(box.firstChild);
     if (follow && followEl.checked) box.scrollTop = box.scrollHeight;
