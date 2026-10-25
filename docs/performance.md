@@ -127,6 +127,35 @@ glibc 用 `malloc_trim`，**musl 没有任何对应 API**（可在 musl 源码�
 > 以前这条断言能过，是因为 mimalloc 的 `mi_collect(true)` 是**真 munmap**。
 > 所以那条测试现在只打印数字、不断言「立刻降」。
 
+#### ①b legacy-tls（CBC 直播那条链）到底值多少（WSL2 实测）
+
+WSL2 / x86_64 musl / 单插件、同样的压测路径，三种包各跑一次：
+
+| 包 | 基线 RSS | 「卸下内存」时 | worker Runtime 回收后 | 降幅 |
+|---|---|---|---|---|
+| testkit no-TLS（`5a6dcaf`） | 7.45 MB | 7.45（不动） | **7.18 MB** | −0.27 MB |
+| release v0.1.11（`589058e`，+legacy-tls） | 10.90 MB | 10.90（不动） | **10.62 MB** | −0.28 MB |
+| release v0.1.10（mimalloc 时代，+TLS） | 12.37 MB | 12.38（不动） | **12.11 MB** | −0.26 MB |
+
+三行读出来的东西：
+
+1. **TLS 栈的常驻成本是 3.45 MB**（10.90 − 7.45），二进制 5.84 MB（14.48 − 8.35）。
+   这是"为了连一个只给 `ECDHE-RSA-AES128-SHA` 的上游"付的钱 —— rustls 不实现 CBC，
+   只能走 native-tls/OpenSSL，静态构建就得把 OpenSSL 编进去。
+2. **撤掉 mimalloc 在 musl 上省了 1.47 MB**（12.37 → 10.90），和 macOS 那轮
+   A/B 的方向一致（那边是恒定 +2.41 MB）。
+3. **卸出插件时内存不动，要等 worker 销毁 Runtime 才降**（三行都这样，降幅 ~0.27 MB）。
+   在 Linux 上这一降是**真 munmap**（VmRSS 与 Pss 同步下降），不是 MADV_FREE 的惰性差值。
+
+> 测量陷阱：早期版本的 `scripts/rss_evict_check.py` 固定等「卸下内存」后 20 秒采样，
+> 而实测要 **21 秒**才等到 Runtime 回收 —— 稳定误判成"没降"。现在等的是
+> 「Runtime 已回收」那行日志，等不到才退到 45 秒兜底窗口。
+
+因为这笔钱不小且只服务于少数人的直播需求，Release 从这一轮起同时发**两档**：
+完整档（带 TLS）和 `-slim` 档（不带 TLS，体积 −5.84 MB / 内存 −3.45 MB）。
+slim 档的 `build-info` 里 `live_supported` 必须是 `false`，CI 有断言盯着 ——
+不能让"以为不带 TLS、其实带了一半"的中间态发出去。
+
 #### ② 异步机制本身是有界的
 
 `await` 让出线程之后，宿主手里多了一批"在途"的东西。它们都**有上限或有出口**：

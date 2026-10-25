@@ -31,10 +31,34 @@ jobs:
           - name: aarch64-linux-musl
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            features: --features legacy-tls-vendored
+            live: true
           # PC / VPS / 开发机
           - name: x86_64-linux-musl
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            features: --features legacy-tls-vendored
+            live: true
+          # ---------------------------------------------------------------
+          # slim 变体：不带 TLS。给"不需要直播、只想要小体积低内存"的人。
+          #
+          # 为什么值得单独发一档（实测，WSL2 / x86_64 musl）：
+          #   · 体积：14.48 MB → 8.35 MB（−6.1 MB）
+          #   · 常驻内存：10.90 MB → 7.45 MB（−3.45 MB）
+          # 代价是直播那条链不可用 —— 所以这个变体**必须在名字上就看得出来**，
+          # 并且 build-info 里 live_supported 必须是 false（下面有断言盯着）。
+          #
+          # 默认仍然是带直播的那两档：直播是这个产品的一部分，不能默认给个残的。
+          - name: aarch64-linux-musl-slim
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            features: --no-default-features
+            live: false
+          - name: x86_64-linux-musl-slim
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            features: --no-default-features
+            live: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,7 +110,10 @@ jobs:
           # linker 抓参数对比过）；再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
           # 链接器用 rust-lld + rustup 自带的 musl（含 rcrt1.o），不用 musl-gcc：
           # musl-gcc 那条路实测出来仍是 ET_EXEC（它的 specs 把 -static 又加回去了）。
-          if [ "${{ matrix.name }}" = "aarch64-linux-musl" ]; then
+          # 注意用 case 而不是 = ：aarch64 有两档（完整 / slim），两档都要走 static PIE，
+          # 否则 slim 那档在 Termux 上会因为 ET_EXEC 被 bionic linker 拒绝。
+          case "${{ matrix.name }}" in
+          aarch64-*)
             # 注意：这里**不能**再写 `-C linker=rust-lld`。cargo 会把 LINKER 环境变量
             # 变成 `-C linker=<包装脚本>`，而 RUSTFLAGS 里那条排在后面会把它盖掉 ——
             # 包装脚本就没被调用过，产物当然还是 ET_EXEC（这个坑 CI 上踩了一次）。
@@ -96,12 +123,14 @@ jobs:
             export "CFLAGS_${TARGET_LOWER}=-fPIC"
             export CFLAGS="-fPIC"
             export CXXFLAGS="-fPIC"
-          fi
-          # ⚠ `legacy-tls-vendored`（**不是** `legacy-tls`）：把 OpenSSL **静态编进**
-          #   二进制，于是"目标机不用装任何东西"与"直播能用"同时成立。
+            ;;
+          esac
+          # ⚠ 完整档用 `legacy-tls-vendored`（**不是** `legacy-tls`）：把 OpenSSL
+          #   **静态编进**二进制，于是"目标机不用装任何东西"与"直播能用"同时成立。
           #   只开 `legacy-tls` 会动态链系统 libssl —— 下面那条 NEEDED 断言会红，
           #   也就是说这个组合**跑不了**，必须带 vendored。
-          cargo build --release --target ${{ matrix.target }} --features legacy-tls-vendored
+          #   slim 档反过来：`--no-default-features`，不带 TLS，体积和常驻内存都小一圈。
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: 校验产物（架构 + 静态链接）
         run: |
@@ -145,11 +174,25 @@ jobs:
       #   "某一档少了直播"不是一种可接受的配置 —— 它会让用户装完之后
       #   撞上一句 TLS 报错，还得自己去猜"是不是我这版编漏了什么"。
       #   这条断言就是那个不变量的看门人。
-      - name: 断言这个产物**真的**支持直播
+      - name: 断言这个产物的直播能力与档位一致
         run: |
           BIN=target/${{ matrix.target }}/release/plugin-panel
           "$BIN" build-info
-          "$BIN" build-info | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["live_supported"] is True, "发出去的产物必须支持直播（legacy-tls-vendored）"; print("ok: 直播可用")'
+          # 完整档：必须能直播（不能发一个"功能残了"的包出去）。
+          # slim 档：必须**明确**不能直播 —— 名字上写了 slim，build-info 也得这么说，
+          #   不能出现"以为不带 TLS、其实带了一半"的中间态。
+          # 注意：这段 python 整体在 shell 单引号里，里面**不能出现单引号**，
+          # 所以断言消息用 % 格式化而不是 f-string（f-string 要写成 d['x'] 会截断 shell 字符串）。
+          # 注意：环境变量必须 export —— 写成 `WANT=x cmd | python3` 的话，
+          # WANT 只对管道左边那条命令生效，python 那边读不到（本机实测踩过）。
+          export WANT="${{ matrix.live }}"
+          "$BIN" build-info | python3 -c '
+          import json, os, sys
+          d = json.load(sys.stdin)
+          want = os.environ["WANT"] == "true"
+          assert d["live_supported"] is want, "档位要求 live=%s，实际 %s" % (want, d["live_supported"])
+          print("ok: live_supported =", d["live_supported"])
+          '
 
       - name: 冒烟测试（真的把服务跑起来）
         run: python3 scripts/smoke.py ./target/${{ matrix.target }}/release/plugin-panel
