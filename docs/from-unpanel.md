@@ -937,3 +937,41 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 >
 > 这是本轮最该补的一课：下次要么先读 `push::save` 的完整 payload 形状再测，
 > 要么干脆用测试直接构造配置（`save_config` 在测试里可用）。
+
+> **第 14 轮：补上了端到端验证，并因此抓到两个真 bug**
+>
+> 上一轮我老实承认「自动重试只有单测、没真跑过」。这一轮把它跑通了 —— 然后立刻翻车两次。
+>
+> **怎么跑通的**：先读 `push::save` 的完整 payload 形状（上一轮就是瞎猜才一直 `configured: []`），
+> 发现渠道配置在 `set` 里，不是 `channels`：
+>
+> ```bash
+> curl -X POST /api/push/config -d '{"set":{"workWeixinBot":{"url":"https://127.0.0.1:1/x"}}}'
+> # → {"configured":["workWeixinBot"],"ok":true}
+> ```
+>
+> ### Bug 1：每重试一次就多一条 outbox
+>
+> `retry_outbox` 调 `dispatch`，而 `dispatch` 在失败时会**再写一条 outbox**。
+> 于是 5 秒一轮的循环让 outbox 不断翻倍。
+>
+> 修法：`dispatch` 加 `retrying: bool`，重试路径不写 outbox。
+>
+> ### Bug 2：attempts 每轮加 2
+>
+> `retry_outbox` 失败时 `bump_push_outbox`（+1），`retry_due` 又 `schedule_next`（再 +1）。
+> 现象是「8 秒内 attempts 就到了 3」，而退避本该是 60 秒。
+>
+> 修法：**记账只留一处** —— 统一走 `schedule_next`，删掉 `bump_push_outbox`。
+>
+> ### 修完之后的实测
+>
+> ```
+> 试发后: [('test', 1, None)]
+> 20 秒后: [('test', 2, '2026-10-25 23:19:39')]   现在 23:18:55
+> ```
+>
+> attempts 只 +1，`next_try_at` 正好是重试时刻 + 60 秒。退避和计数都对了。
+>
+> **教训**：这两个 bug 都在「失败路径」上，单测全部通过也照样存在。
+> 上一轮我把「没端到端验证」写进文档是对的 —— 它确实是唯一能暴露这两个问题的手段。
