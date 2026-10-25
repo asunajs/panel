@@ -466,8 +466,13 @@ impl ChildHandle {
         // 读线程会在管道关闭后退出。但脚本可能把 stdout 写端交给一个逃出
         // 进程组的子进程 —— 那种情况下无限 join 会卡住引擎线程，所以只等一小会，
         // 超时就 detach（线程最终会随写端关闭退出）。
+        // ⚠ 整批线程共用一个截止时刻（安全审计 M5 后半）。
+        //
+        // 以前 deadline 在循环里算：三个读线程就是最多 2+2+2 = 6 秒。
+        // 而 kill() 是在**引擎线程**上调的 —— 引擎只有一条线程，这 6 秒里
+        // 所有任务、所有路由都停着。超时清理本来就该快，不该按线程数累加。
+        let deadline = Instant::now() + Duration::from_secs(2);
         for h in self.threads.drain(..) {
-            let deadline = Instant::now() + Duration::from_secs(2);
             while !h.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
             }
