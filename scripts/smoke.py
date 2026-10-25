@@ -2583,9 +2583,9 @@ def job_override_checks(tmp: Path) -> None:
         check(wait_for(covered, 15.0), "**重启后覆盖仍在**（这是设计的关键）")
         log_text = logpath.read_text(errors="replace")
         check(
-            "沿用面板覆盖的表达式" in log_text,
-            "启动日志写明了「沿用面板覆盖」",
-            next((l for l in log_text.splitlines() if "覆盖" in l), "（没找到）")[:90],
+            "你在面板上改过的" in log_text,
+            "启动日志写明了「面板上的改动在生效」",
+            next((l for l in log_text.splitlines() if "面板上改过" in l), "（没找到）")[:90],
         )
         # 多 worker 时不能把别的 worker 的覆盖误报成错误
         check(
@@ -3692,7 +3692,7 @@ def settings_checks(tmp: Path) -> None:
         data = json.loads(body)
         items = {i["key"]: i for i in data.get("items", [])}
         check(
-            data.get("groups") == ["引擎", "插件", "安全", "日志"],
+            data.get("groups") == ["引擎", "插件", "安全", "日志", "内存", "存储"],
             "分组按 DEFS 顺序返回（不是字典序）",
             f"{data.get('groups')}",
         )
