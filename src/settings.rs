@@ -478,6 +478,12 @@ impl Source {
 struct File {
     #[serde(default = "schema_version")]
     schema: u32,
+    /// 版本号，每次写入 +1（unpanel 2.6）。
+    ///
+    /// `#[serde(default)]` 是必须的：老文件里没有这个字段，
+    /// 读出来是 0 —— 升级不该因为多了一个字段就丢掉全部设置。
+    #[serde(default)]
+    revision: u64,
     #[serde(default)]
     values: BTreeMap<String, String>,
 }
@@ -524,15 +530,41 @@ pub fn load_file() -> BTreeMap<String, String> {
     }
 }
 
+/// 当前文件的 revision。读不出来就是 0（= 没有版本信息）。
+///
+/// 单独读一遍而不是从 `load_file` 返回：`load_file` 的调用方大多只关心 values，
+/// 改它的签名会波及一片；而这里只在写入前调一次，多读一次文件无所谓。
+pub fn current_revision() -> u64 {
+    current_revision_at(&file_path())
+}
+
+/// `current_revision` 的真实实现。**带路径参数是为了能测**：不带的话测试只能去动
+/// `DB_PATH` 环境变量，而那是进程级共享状态，并行跑测试会互相干扰。
+fn current_revision_at(path: &std::path::Path) -> u64 {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    serde_json::from_str::<File>(&raw)
+        .map(|f| f.revision)
+        .unwrap_or(0)
+}
+
 /// 原子写入：先写同目录临时文件，再 rename。权限 0600（可能含地址白名单）。
 pub fn save_file(values: &BTreeMap<String, String>) -> std::io::Result<()> {
-    let path = file_path();
+    save_file_at(&file_path(), values)
+}
+
+/// `save_file` 的真实实现（带路径参数，理由同 `current_revision_at`）。
+fn save_file_at(path: &std::path::Path, values: &BTreeMap<String, String>) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_string_pretty(&File {
         schema: schema_version(),
+        // 每次写都 +1（unpanel 2.6）：这是 CAS 的基础。
+        // 读不出来（文件不存在/坏了）就从 1 开始 —— 反正此刻没有任何读者手里有旧值。
+        revision: current_revision_at(path).saturating_add(1),
         values: values.clone(),
     })?;
     std::fs::write(&tmp, body)?;
@@ -829,6 +861,44 @@ pub fn restart_process_at(exe: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn save_file_bumps_revision_and_keeps_old_files_loadable() {
+        // unpanel 2.6 第一步：revision 是 CAS 的基础，必须每次写都 +1；
+        // 而**老文件**（没有 revision 字段）读出来要是 0，不能因此丢设置。
+        //
+        // ⚠ 这里直接驱动**生产代码** save_file_at / current_revision_at，
+        // 不是在测试里另写一遍序列化逻辑 —— 那样测的是测试自己。
+        let dir = std::env::temp_dir().join(format!("pp-settings-rev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        // 老文件：只有 schema + values，没有 revision
+        std::fs::write(&path, r#"{"schema":1,"values":{"ENGINE_WORKERS":"3"}}"#).unwrap();
+        assert_eq!(current_revision_at(&path), 0, "老文件读出来必须是 0");
+
+        let mut v = BTreeMap::new();
+        v.insert("ENGINE_WORKERS".to_string(), "4".to_string());
+        save_file_at(&path, &v).unwrap();
+        assert_eq!(current_revision_at(&path), 1, "第一次写后 revision 是 1");
+
+        v.insert("ENGINE_WORKERS".to_string(), "5".to_string());
+        save_file_at(&path, &v).unwrap();
+        assert_eq!(current_revision_at(&path), 2, "第二次写后 revision 是 2");
+
+        // 值也要真的写进去（别只测了 revision）
+        let f: File = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(f.values.get("ENGINE_WORKERS").map(|s| s.as_str()), Some("5"));
+
+        // 不存在的文件 → 0，且写入从 1 开始
+        let fresh = dir.join("fresh.json");
+        assert_eq!(current_revision_at(&fresh), 0);
+        save_file_at(&fresh, &v).unwrap();
+        assert_eq!(current_revision_at(&fresh), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn def(key: &str) -> &'static Def {
