@@ -356,6 +356,21 @@ fn install_plugin_sql_guard<'a>(
             {
                 return deny("不允许修改 writable_schema".to_string());
             }
+            // ⚠ 带值的 PRAGMA 一律拒绝（安全审计 M1）。
+            //
+            // PRAGMA 改的是**连接级**状态，而这条连接是面板和所有插件共享的：
+            // 一个插件设 synchronous=OFF / journal_mode=DELETE / foreign_keys=OFF，
+            // 改的是整个面板的持久化和约束行为 —— 它自己的事务「变快了」，
+            // 代价由别的插件和面板一起付。
+            // 不带值的 PRAGMA 是自省（table_info / index_list），继续放行。
+            AuthAction::Pragma {
+                pragma_value: Some(_),
+                pragma_name,
+            } => {
+                return deny(format!(
+                    "不允许改连接级 PRAGMA（{pragma_name}）：这条连接是面板和所有插件共享的"
+                ));
+            }
             _ => {}
         }
 
