@@ -297,6 +297,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/test", post(api_push_test))
         .route("/api/push/outbox", get(api_push_outbox))
         .route("/api/push/outbox/retry", post(api_push_outbox_retry))
+        .route("/readyz", get(readyz))
         // 按任务覆盖：只存偏离「跟随全局」的任务。
         .route("/api/push/task", post(api_push_task_save))
         // 插件商城：目录 / GitHub 解析 / 安装。
@@ -311,6 +312,8 @@ pub fn router(state: AppState) -> Router {
         .route("/login", get(login_page))
         .route("/api/login", post(do_login))
         .route("/api/logout", post(do_logout))
+        // 匿名存活探针：见 healthz 的注释（unpanel 2.8）。
+        .route("/healthz", get(healthz))
         .merge(protected)
         // 统一安全响应头（安全审计 中11）。放在最外层，401/303 也带上。
         .layer(middleware::from_fn_with_state(
@@ -3882,6 +3885,67 @@ async fn api_push_outbox_retry(
         ),
     }
 }
+/// `GET /healthz` —— **匿名**存活探针（unpanel 2.8）。
+///
+/// 只回 `{"ok":true}`，不泄漏任何状态。存在的理由只有一个：
+/// 磁盘满/管理面坏掉时，运维仍能区分「进程死了」和「进程活着但管理面坏了」。
+/// 那正是 unpanel 把探针分成三面的理由。
+///
+/// ⚠ 刻意**不**带数据库状态、版本号、插件数 —— 这是唯一一个不鉴权的接口，
+/// 任何一点信息都会成为扫描器的免费情报。
+async fn healthz() -> Response {
+    (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
+}
+
+/// `GET /readyz` —— **要令牌**的就绪探针。
+///
+/// 每个 reason 都**当场算**（所以「置上点」和「清掉点」是同一次计算）：
+/// 状态变了下一 次调用就会变，不存在「定义了但永远不成立」的那种死状态。
+async fn readyz(State(st): State<AppState>) -> Response {
+    let checks = ready_checks(&st);
+    let failed = checks.iter().filter(|(_, v)| v != "ok").count();
+    let ok = failed == 0;
+    let body = Json(json!({
+        "ok": ok,
+        "checks": checks,
+    }));
+    if ok {
+        body.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+    }
+}
+
+/// readyz 的三项检查。抽出来是为了能单测（不需要起整个 AppState）。
+fn ready_checks(st: &AppState) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    // ① 数据库：能执行一条最简单的查询就算活着。
+    //    不用 SELECT 1 之外的东西 —— 探针不该因为表结构变化而误报。
+    let db = match st.db.lock() {
+        Ok(conn) => match conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
+            Ok(1) => "ok".to_string(),
+            Ok(other) => format!("unexpected {other}"),
+            Err(e) => format!("db_error: {e}"),
+        },
+        Err(_) => "db_locked".to_string(),
+    };
+    out.push(("db", db));
+    // ② 插件目录：存在且可读。目录没了等于所有插件都不见了。
+    out.push(("plugins_dir", dir_check(&st.plugins_dir)));
+    // ③ 任务目录：同上。
+    out.push(("tasks_dir", dir_check(&st.host.tasks_dir)));
+    out
+}
+
+fn dir_check(p: &std::path::Path) -> String {
+    if !p.exists() {
+        return "missing".to_string();
+    }
+    match std::fs::read_dir(p) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("unreadable: {e}"),
+    }
+}
 async fn api_market(State(st): State<AppState>, Query(q): Query<MarketQuery>) -> Response {
     let refresh = matches!(
         q.refresh.as_deref().map(str::trim),
@@ -4331,6 +4395,17 @@ pub fn build_info() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dir_check_reports_missing_and_ok() {
+        // unpanel 2.8：每个 reason 都要有「置上点」——这里是 missing。
+        let dir = std::env::temp_dir().join(format!("panel-dircheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(dir_check(&dir), "missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(dir_check(&dir), "ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// 插件分组：名字里第一个分隔符之前那段。推导规则要钉住 ——
