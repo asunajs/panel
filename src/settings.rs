@@ -534,11 +534,9 @@ pub fn load_file() -> BTreeMap<String, String> {
 ///
 /// 单独读一遍而不是从 `load_file` 返回：`load_file` 的调用方大多只关心 values，
 /// 改它的签名会波及一片；而这里只在写入前调一次，多读一次文件无所谓。
-pub fn current_revision() -> u64 {
-    current_revision_at(&file_path())
-}
-
-/// `current_revision` 的真实实现。**带路径参数是为了能测**：不带的话测试只能去动
+///
+/// 现在只有 `save_file_at` 和测试在调它；第二步做 CAS 时，HTTP 写接口会把它
+/// 暴露成 `revision` 字段发给前端。
 /// `DB_PATH` 环境变量，而那是进程级共享状态，并行跑测试会互相干扰。
 fn current_revision_at(path: &std::path::Path) -> u64 {
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -573,7 +571,7 @@ fn save_file_at(path: &std::path::Path, values: &BTreeMap<String, String>) -> st
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, path)
 }
 
 /// 某个 key 是否被环境变量固定。
