@@ -1957,6 +1957,36 @@ pub fn list_panel_jobs(db: &Db, only_plugin: Option<&str>) -> rusqlite::Result<V
 #[cfg(test)]
 mod tests {
     #[test]
+    fn job_exists_answers_by_plugin_and_name() {
+        // /stop 的入口校验靠它（安全审计 H3）：停止位是全局单比特，
+        // 不能对不存在的任务置位。
+        let dir = std::env::temp_dir().join(format!("panel-jobex-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("jobex.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO jobs (name, plugin, schedule, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "tick",
+                    "demo",
+                    "@every 1s",
+                    "running",
+                    "2026-03-10 08:00:00",
+                    "2026-03-10 08:00:00"
+                ],
+            )
+            .unwrap();
+        }
+        assert!(job_exists(&db, "demo", "tick").unwrap());
+        // 同名的另一个插件不算
+        assert!(!job_exists(&db, "other", "tick").unwrap());
+        assert!(!job_exists(&db, "demo", "nope").unwrap());
+    }
+    #[test]
     fn file_ops_records_and_lists_deletes() {
         // docs/file-management.md 一期：删是「移进回收站」，但必须留痕。
         let dir = std::env::temp_dir().join(format!("panel-fileops-{}", std::process::id()));
