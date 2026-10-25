@@ -235,6 +235,15 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 设置页存下来的值要在**任何配置读取之前**注入环境变量：
+    // 后面所有 `env_str("…")` 就自然看到它们了（环境变量优先，见 settings.rs）。
+    //
+    // ⚠ 必须放在**建 tokio runtime 之前**（安全审计 L9）：`set_var` 改的是进程级
+    // `environ`，而多线程 runtime 一旦建好就有别的线程在跑 —— 此时改 environ
+    // 是数据竞争（C 库那边读 environ 时可能读到半更新的指针）。
+    // 放在这里还顺带让设置能影响 worker 线程数。
+    settings::boot();
+
     let workers = env_usize("TOKIO_WORKER_THREADS", default_worker_threads());
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -246,9 +255,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
 
-    // 设置页存下来的值要在**任何配置读取之前**注入环境变量：
-    // 后面所有 `env_str("…")` 就自然看到它们了（环境变量优先，见 settings.rs）。
-    settings::boot();
 
     // 面板自身日志的过滤级别。默认 debug（全都要），
     // 部署时嫌吵就用 `PANEL_LOG_LEVEL=warn` —— 注意它只影响面板通道，
