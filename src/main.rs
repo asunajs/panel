@@ -66,6 +66,7 @@ mod scheduler;
 mod scriptjob;
 mod settings;
 mod smtp;
+mod tz;
 mod update;
 mod taskdir;
 mod timers;
@@ -437,6 +438,14 @@ fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
+    // 显式时区（unpanel 2.3）：**必须最先做**。
+    // `Local` 在第一次被调用时就把时区缓存下来了，之后再改 TZ 不会生效 ——
+    // 所以这件事排在子命令分发、日志初始化、任何 `Local::now()` 之前。
+    // 配错时区时直接拒绝启动：悄悄退化成「跟随盒子」比不提供这个功能更坏。
+    if let Err(e) = crate::tz::apply_from_env() {
+        eprintln!("❌ PANEL_TZ 配置有问题，拒绝启动：{e}");
+        return Err("PANEL_TZ 无效".into());
+    }
     // 子命令要在**建 runtime / 碰数据库之前**处理：生成令牌哈希不需要起服务，
     // 也不该因为「端口被占」之类的配置问题就跑不了。
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -664,6 +673,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 报 `Cannot find package 'data'`）。
     let db_path = db_path.canonicalize().unwrap_or(db_path);
     crate::log::plog!("boot", info, "数据保存在：{}", db_path.display());
+    // 时区要写进日志（unpanel 2.3）：cron 全错时，第一个该看的就是这一行。
+    match crate::tz::configured() {
+        Some(name) => crate::log::plog!("boot", info, "时区：{name}（来自 PANEL_TZ，已覆盖盒子设置）"),
+        None => crate::log::plog!("boot", info, "时区：跟随盒子（未设 PANEL_TZ）"),
+    }
     // 这个构建支不支持直播，**启动时说一次**。
     // 不说的话，用户只会在真正跑直播那天看到一条 TLS 报错 —— 而那条报错
     // 读起来像"网络问题"，其实是"这个二进制编的时候少了个 feature"。

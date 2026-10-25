@@ -25,6 +25,7 @@ open http://127.0.0.1:8787/  # 面板
 | `PLUGINS_DIR` | `plugins` | 插件目录（递归两层，**入口只收 `.js`**；被 import 的模块可以用 `.mjs`） |
 | `TASKS_DIR` | `tasks` | **脚本任务目录**：根目录 + `js`、`py`、`sh` 各一层，收 `.js/.mjs/.py/.sh`。目录不存在会自动创建。见 [脚本任务](script-jobs.md) |
 | `DB_PATH` | `data/panel.db` | SQLite 文件 |
+| `PANEL_TZ` | 未设（跟随盒子） | **显式时区**，IANA 名（如 `Asia/Shanghai`）。设了就覆盖进程的 `TZ`，所有 `Local` 都跟着变；**写错会拒绝启动**并给出相近的候选名。没设则跟随系统时区 |
 | `EXEC_BUDGET_MS` | `60000` | 单次 JS 调用的执行预算（默认 60 秒）。任务/路由可各自声明 `budget_ms` 覆盖它；它管的是 `on_tick` 与没声明预算的路由。⚠ 健康判据 = 预算 + 3 秒，所以调大它也意味着「真卡死」更晚被发现 |
 | `TEST_RUN_BUDGET_MS` | `10000` | 试跑（`POST /api/test/js`）的预算，且不超过 `EXEC_BUDGET_MS`。试跑占着引擎线程、又是人在等结果，所以默认 10 秒 |
 | `LOAD_BUDGET_MS` | `10000` | 插件**加载期**预算（顶层初始化 / import / 外部子进程 `ready`）；上限 = 任务预算上限（10 分钟） |
