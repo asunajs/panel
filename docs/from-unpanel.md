@@ -865,3 +865,46 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 > 2. **先体检再暂存**：一份坏备份换上去，面板下次启动就再也起不来了。
 >
 > 至此 2.10 只剩 **age 加密** 一件。
+---
+
+## 整体复查（第 12 轮）
+
+这一批改动累计 20+ 个提交，之前**没有做过一次完整回归**。这一轮补齐了。
+
+### 全套 CI 等价检查（全部通过）
+
+| 检查 | 结果 |
+|---|---|
+| `cargo clippy --all-targets -- -D warnings` | ✅ 0 warning |
+| `scripts/check-unsafe-budget.sh` | ✅ 6 处，与期望一致 |
+| `cargo test` | ✅ **503 passed / 0 failed / 1 ignored** |
+| `node scripts/test-web-assets.mjs` | ✅ 287 项 |
+| `node scripts/check-docs.mjs` | ✅ 44 个文件 |
+| `bash scripts/test-install.sh` | ✅ 全部用例 |
+| `python3 scripts/smoke.py`（release 二进制） | ✅ **冒烟测试全部通过** |
+
+### 复查发现的问题（已修）
+
+**三张新表只增不减** —— 这是「配对操作只做了一半」的老毛病，和我自己在别处总结的 bug 类完全一样：
+
+| 表 | 为什么会涨 | 封顶 |
+|---|---|---|
+| `push_outbox` | 一个永久坏掉的渠道 ⇒ **每次**任务失败都写一条 | 200 |
+| `settings_audit` | 每次改设置写一条 | 5000 |
+| `file_ops` | 每次保存版本写一条 | 5000 |
+
+`push_outbox` 那个尤其危险：失败的任务可能一分钟好几次，一年下来就是几十万行，
+而且**没有任何症状** —— 直到备份体积暴涨或者查询变慢才被发现。和当初「日志不清理」是同一类。
+
+### 之前一直没验证过的一条，现在验证了
+
+设置并发写（两个浏览器标签同时保存）之前只做了单元测试，**从没在真实 HTTP 上跑过**。现在跑通了：
+
+```
+初始 revision=0
+第一个写 revision=0   → 200 {"ok":true,"revision":1,"restart":["EXEC_BUDGET_MS"]}
+第二个写 revision=0   → 409 {"error":"EDIT_CONFLICT: 设置已被别处改过（你看到的是 revision 0，当前是 1），请刷新后重试"}
+不带 revision 的写     → 200（脚本兼容，不受影响）
+```
+
+第三条是刻意留的：老脚本不带 `revision`，不能因为加了并发保护就把它们全打死。
