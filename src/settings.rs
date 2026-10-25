@@ -668,6 +668,19 @@ pub struct Applied {
 /// 把一批改动写进设置文件。
 ///
 /// 全部校验通过才写（不做「改一半」）；被环境变量固定的键直接拒绝。
+/// 审计里能存什么（unpanel 2.6 第三步）。
+///
+/// 目前 `DEFS` 里没有凭据类（`PANEL_TOKEN*` 刻意不在 DEFS 里），但这条防线必须在：
+/// 以后往 DEFS 加一个口令项，这里没拦住就会**静默漏进库**，而库文件是明文的。
+fn mask_for_audit(key: &str, value: &str) -> String {
+    const HINTS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "PASSWD", "WEBHOOK", "PRIVATE_KEY"];
+    let upper = key.to_ascii_uppercase();
+    if HINTS.iter().any(|h| upper.contains(h)) {
+        return "<已脱敏>".to_string();
+    }
+    value.to_string()
+}
+
 /// CAS 判定（unpanel 2.6）。抽成纯函数是为了能测：`update` 走的是 `file_path()`，
 /// 那条路要靠环境变量，测试里不好摆。
 ///
@@ -695,6 +708,7 @@ static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn update(
     patch: &BTreeMap<String, String>,
     expected_revision: Option<u64>,
+    db: Option<&crate::db::Db>,
 ) -> Result<Applied, String> {
     let mut normalized: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in patch {
@@ -719,11 +733,34 @@ pub fn update(
     let current = current_revision_at(&path);
     check_revision(expected_revision, current)?;
 
-    let mut values = load_file();
+    // 留一份改前的快照，审计要用（unpanel 2.6 第三步）。
+    let old_values = load_file();
+    let mut values = old_values.clone();
     for (k, v) in &normalized {
         values.insert(k.clone(), v.clone());
     }
     save_file_at(&path, &values).map_err(|e| format!("写设置文件失败: {e}"))?;
+    let new_revision = current_revision_at(&path);
+
+    // 审计：只记**这次真的变了的**键（值相同的不记，否则一次全量保存会刷一屏）。
+    // 写失败不影响保存本身 —— 审计缺失比设置没存上轻得多。
+    if let Some(db) = db {
+        for (k, v) in &normalized {
+            let old = old_values.get(k).cloned().unwrap_or_default();
+            if &old == v {
+                continue;
+            }
+            if let Err(e) = crate::db::record_settings_change(
+                db,
+                k,
+                &mask_for_audit(k, &old),
+                &mask_for_audit(k, v),
+                new_revision,
+            ) {
+                crate::log::plog!("boot", warn, "写设置审计失败（{k}）: {e}");
+            }
+        }
+    }
 
     // 热改：不碰 env（env 是启动期的快照，改它会让「同一个进程里两处读到不同值」）。
     let mut applied = Applied::default();
@@ -894,6 +931,17 @@ pub fn restart_process_at(exe: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn audit_masks_credential_like_keys() {
+        // 目前 DEFS 里没有凭据类，但防线必须在：以后加一个口令项，
+        // 没拦住就会静默漏进明文库。
+        assert_eq!(mask_for_audit("ENGINE_WORKERS", "4"), "4");
+        assert_eq!(mask_for_audit("PANEL_LOG_LEVEL", "warn"), "warn");
+        assert_eq!(mask_for_audit("PANEL_TOKEN", "abc123"), "<已脱敏>");
+        assert_eq!(mask_for_audit("SMTP_PASSWORD", "hunter2"), "<已脱敏>");
+        assert_eq!(mask_for_audit("PUSH_WEBHOOK_URL", "https://x/y"), "<已脱敏>");
+    }
+
+    #[test]
     fn check_revision_is_opt_in_and_strict() {
         // 不传 = 老语义，放行（CLI / 旧前端不能因为加了 CAS 就坏掉）
         assert!(check_revision(None, 7).is_ok());
@@ -1049,7 +1097,7 @@ mod tests {
     fn unknown_key_is_rejected() {
         let mut patch = BTreeMap::new();
         patch.insert("PANEL_TOKEN".to_string(), "x".to_string());
-        let err = update(&patch, None).unwrap_err();
+        let err = update(&patch, None, None).unwrap_err();
         assert!(err.contains("未知"), "凭据不能通过设置接口写入: {err}");
     }
 

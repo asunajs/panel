@@ -3699,11 +3699,15 @@ struct SettingsPatch {
 ///
 /// 返回里分开说「哪些要重启」「哪些已经热改」—— 前端据此提示，
 /// 而不是笼统回一句「已保存」然后用户以为生效了。
-async fn api_settings_save(headers: HeaderMap, Json(patch): Json<SettingsPatch>) -> Response {
+async fn api_settings_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(patch): Json<SettingsPatch>,
+) -> Response {
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    match crate::settings::update(&patch.values, patch.revision) {
+    match crate::settings::update(&patch.values, patch.revision, Some(&st.db)) {
         Ok(applied) => Json(json!({
             "ok": true,
             "restart": applied.restart,

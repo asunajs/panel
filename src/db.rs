@@ -187,6 +187,23 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
         );
         CREATE INDEX IF NOT EXISTS idx_file_ops_at ON file_ops(at DESC);
 
+        -- unpanel 2.6 第三步：**设置改动的审计**。
+        --
+        -- 回答的是「谁在什么时候把哪个键从什么改成了什么」。
+        -- ⚠ old_value / new_value 存的是**明文**，所以写入方必须先过一遍
+        -- `settings::mask_for_audit` —— 凭据类的键在那里被替换成 <已脱敏>。
+        -- 目前 DEFS 里没有凭据类（PANEL_TOKEN* 刻意不在 DEFS 里），但这条防线
+        -- 要在，否则以后往 DEFS 加一个口令项就静默漏进库了。
+        CREATE TABLE IF NOT EXISTS settings_audit (
+            id        TEXT PRIMARY KEY,
+            at        TEXT NOT NULL,
+            key       TEXT NOT NULL,
+            old_value TEXT NOT NULL,
+            new_value TEXT NOT NULL,
+            revision  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_settings_audit_at ON settings_audit(at DESC);
+
         -- 第三十一轮：**面板级推送**。
         --
         -- 配置单独一张单行表：它含 token / 密码，形状是嵌套的，和「运行参数」
@@ -1274,8 +1291,11 @@ pub fn record_file_op(
     Ok(id)
 }
 
-/// 最近的文件操作（新的在前），给界面显示「删了什么」。
 /// 一条文件操作记录（见 record_file_op）。
+///
+/// ⚠ 暂时没有生产调用方：回收站界面是二期的事。显式标 dead_code，
+/// 免得 `-D warnings` 的 CI 因为一个**已计划**的类型挂掉。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileOp {
     pub id: String,
@@ -1291,6 +1311,35 @@ pub struct FileOp {
 ///
 /// ⚠ 暂时没有调用方：回收站界面是二期的事。先留着并显式标注，
 /// 免得它变成一条「写了但没人知道」的死代码。
+#[allow(dead_code)]
+/// 记一条设置改动（unpanel 2.6 第三步）。
+///
+/// 值由调用方先脱敏 —— 这个函数不认识「哪个键是敏感的」，那是 `settings` 的事。
+pub fn record_settings_change(
+    db: &Db,
+    key: &str,
+    old_value: &str,
+    new_value: &str,
+    revision: u64,
+) -> rusqlite::Result<()> {
+    let id = format!(
+        "sa_{}_{}",
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    );
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO settings_audit (id, at, key, old_value, new_value, revision) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, at, key, old_value, new_value, revision as i64],
+    )?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn list_file_ops(db: &Db, limit: i64) -> rusqlite::Result<Vec<FileOp>> {
     let conn = db.lock().unwrap();
@@ -2003,6 +2052,35 @@ mod tests {
         assert!(!job_exists(&db, "other", "tick").unwrap());
         assert!(!job_exists(&db, "demo", "nope").unwrap());
     }
+    #[test]
+    fn settings_audit_records_old_and_new_values() {
+        // unpanel 2.6 第三步：谁在什么时候把哪个键从什么改成了什么。
+        let dir = std::env::temp_dir().join(format!("panel-setaudit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("audit.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+
+        record_settings_change(&db, "ENGINE_WORKERS", "2", "4", 7).unwrap();
+        record_settings_change(&db, "PANEL_LOG_LEVEL", "debug", "warn", 8).unwrap();
+
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT key, old_value, new_value, revision FROM settings_audit ORDER BY revision")
+            .unwrap();
+        let rows: Vec<(String, String, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "ENGINE_WORKERS");
+        assert_eq!(rows[0].1, "2");
+        assert_eq!(rows[0].2, "4");
+        assert_eq!(rows[0].3, 7);
+        assert_eq!(rows[1].0, "PANEL_LOG_LEVEL");
+    }
+
     #[test]
     fn file_ops_records_and_lists_deletes() {
         // docs/file-management.md 一期：删是「移进回收站」，但必须留痕。
