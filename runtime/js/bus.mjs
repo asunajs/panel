@@ -527,7 +527,15 @@ function budgetFromOpts(opts) {
   if (typeof opts !== 'object' || Array.isArray(opts)) {
     throw new Error('opts 必须是对象，形如 { params: {...}, budget_ms: 30000 }');
   }
-  return opts.budget_ms === undefined || opts.budget_ms === null ? '' : String(opts.budget_ms);
+  const b = opts.budget_ms;
+  if (b === undefined || b === null) return '';
+  // ⚠ 不能只 String()（安全审计 L11）：传 "abc"、NaN、-1、1e18 都会原样发到面板侧，
+  // 面板再校验的结果是插件收到一条看不懂的错误，而不是「你传的 budget_ms 不对」。
+  // 门面这一层就该给出指名道姓的错误。
+  if (typeof b !== 'number' || !Number.isFinite(b) || !Number.isInteger(b) || b < 0 || b > 86_400_000) {
+    throw new Error(`opts.budget_ms 必须是 0..86400000 的整数（收到 ${String(b)}）`);
+  }
+  return String(b);
 }
 
 export function register_cron(name, expr, handler, opts) {
