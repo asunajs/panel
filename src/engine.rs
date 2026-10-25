@@ -7343,7 +7343,13 @@ mod tests {
         let root = tmp.clone();
         let base = crate::engine::file_url(&tmp.join("lib/entry.js"));
 
-        let ok = |spec: &str| resolve_relative(&base, spec, &root).expect(spec);
+        // Windows 上解析结果是 `...\lib\math.js`。断言只关心「落在哪个文件」，
+        // 所以先把分隔符统一成 `/` —— 这不是在迁就平台，而是断言本来就不该关心分隔符。
+        let ok = |spec: &str| {
+            resolve_relative(&base, spec, &root)
+                .expect(spec)
+                .replace('\\', "/")
+        };
         // 原样命中
         assert!(ok("./math.js").ends_with("/lib/math.js"));
         // 省扩展名 → +.js
@@ -7397,9 +7403,10 @@ mod tests {
         assert!(err.contains("共享库目录"), "{err}");
         assert!(err.contains("不能互相 import"), "{err}");
 
-        // 共享库里的文件 → 允许
+        // 共享库里的文件 → 允许（分隔符统一成 `/` 再比，见上一条测试的说明）
         assert!(resolve_relative(&base, "./lib/shared.js", &root)
             .expect("lib/shared.js 应当允许")
+            .replace('\\', "/")
             .ends_with("/js/lib/shared.js"));
 
         let _ = std::fs::remove_dir_all(&tmp);

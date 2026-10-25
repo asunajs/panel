@@ -529,7 +529,13 @@ mod tests {
             let z = make_zip(&[(bad, b"x"), ("js/a.js", b"export default 1")]);
             let err = save(Kind::Plugins, &root, "x.zip", &z, true).unwrap_err();
             assert!(err.contains("隐藏"), "`{bad}` 应该被拒，实际: {err}");
-            assert!(err.contains(bad), "错误里要点名条目 `{bad}`，实际: {err}");
+            // 错误信息里带的是**平台路径**（Windows 上是 `js\.env`），
+            // 断言只关心「点名了哪个条目」，所以先统一分隔符。
+            let err_norm = err.replace('\\', "/");
+            assert!(
+                err_norm.contains(bad),
+                "错误里要点名条目 `{bad}`，实际: {err}"
+            );
             // 被拒时不能落盘（尤其是 .git 下的路径）
             assert!(!root.join(bad).exists(), "`{bad}` 不能落盘");
         }
@@ -697,11 +703,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // 只在 Unix 上跑：这条测的是「目标位置已经有一个符号链接时不能顺着写过去」。
+    // Windows 上创建符号链接需要管理员权限或开发者模式，CI 的 runner 默认没有 ——
+    // 造不出前置条件，就没法断言。**这不是产品差异**：Windows 上普通用户建不了
+    // 符号链接，攻击面本来就小得多。
+    #[cfg(unix)]
     #[test]
     fn existing_symlink_is_rejected() {
         let root = tmpdir("symlink");
         std::fs::create_dir_all(root.join("js")).unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink("/tmp", root.join("js/a.js")).unwrap();
         assert!(save(Kind::Plugins, &root, "a.js", b"x", true).is_err());
         let _ = std::fs::remove_dir_all(&root);
