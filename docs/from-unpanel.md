@@ -591,3 +591,44 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 > ⚠ 还有一条必须在文档里写死：**`next_fire` 的比较必须用绝对时刻（UTC），不能用本地墙钟**。
 > 秋季重复那一小时里，本地墙钟会出现「时间倒流」，用墙钟比较会让调度器认为
 > 下一个触发点在过去 ⇒ 立刻补跑 ⇒ 风暴。这正是 H5 那类问题的变种。
+
+> **2.7 的落地方案（2026-10-25，第 69 轮）**
+>
+> 现状：`push::dispatch` 是**同步扇出** —— 每条渠道当场发，失败就记一条 `push_deliveries`
+> 然后丢掉。队列满（`try_send`）直接丢。所以「通知发不出去」这件事，除了翻日志没有别的痕迹。
+>
+> **outbox 的最小形态**（一张表 + 一个状态机，不要一上来做重试调度器）：
+>
+> ```sql
+> CREATE TABLE push_outbox (
+>     id          TEXT PRIMARY KEY,
+>     dedup_key   TEXT NOT NULL UNIQUE,  -- (plugin, task, kind, 当天) 之类
+>     channel     TEXT NOT NULL,
+>     title       TEXT NOT NULL,
+>     body        TEXT NOT NULL,
+>     state       TEXT NOT NULL,         -- pending / sending / sent / failed
+>     attempts    INTEGER NOT NULL DEFAULT 0,
+>     next_try_at TEXT,                  -- 退避：1m, 5m, 30m, 2h, 6h
+>     last_error  TEXT,
+>     created_at  TEXT NOT NULL,
+>     updated_at  TEXT NOT NULL
+> );
+> ```
+>
+> **三条必须一起做**（少一条就会退化成一个更复杂的 `dispatch`）：
+>
+> 1. **`dedup_key` 唯一约束**：同一个事件重复入队只留一条。没有它，重试机制会把
+>    「一次失败」放大成「五次重复通知」—— 那比不发更糟。
+> 2. **`state=sending` 的租约**：发送前先把行改成 `sending` 并记 `updated_at`；
+>    超过租约（比如 2 分钟）还是 `sending` ⇒ 认定上次发送中断，改回 `pending` 重试。
+>    没有租约的话，进程在「发送中」被杀 ⇒ 那条通知永远卡在 `sending`，再也不发。
+> 3. **退避上限 + 放弃**：`attempts >= 5` ⇒ `failed` 并**停止重试**。
+>    无上限重试会让一条坏掉的通知永久占着队列，且每轮都在打日志。
+>
+> **入队点**：只改 `dispatch` 的入口 —— 先把行写进 outbox（同一事务），再由一个
+> 后台循环按 `next_try_at` 取出来发。这样「扇出」和「发送」解耦，
+> 日上限（M8 已修）和冷却判定都挪到后台循环里，语义不变但不再阻塞引擎线程。
+>
+> ⚠ **不要**把 outbox 做成「可靠投递」的承诺：面板重启后仍可能丢（因为后台循环和
+> 进程同生共死）。它保证的是「失败看得见、可以手动重发」，不是「一定送达」。
+> 文档里必须这么写，否则运维会以为通知不会丢。
