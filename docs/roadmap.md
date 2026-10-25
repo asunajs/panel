@@ -13,7 +13,7 @@
 | Node / Bun 的精确内存未测 | 目前只有量级（Node 40–80 MB、Bun 30–60 MB）；RPC 单次延迟也未测 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
 | 外部插件没有独立 fd 上限 | 每个插件一个子进程 + 4 条管道 + 线程；插件很多时会撞 `ulimit -n`，面板不设硬上限也不告警 | [architecture.md §11](architecture.md#11-影响后续扩展的设计决策) |
 | Bun 的兼容面未测全 | 只验证了 `host-api` 解析 + 基本任务；Bun 对 `node:*` 的兼容差异没有矩阵 | [runtimes.md §10.9](runtimes.md#109-跨运行时验证) |
-| QuickJS 不支持 `async` / `await` | 引擎语言层有，缺的是宿主事件循环；重设计（向 Node 对齐 timers/fetch/fs）的目标形态与阶段在迁移文档里，**两个岔路口还没拍板** | [runtimes.md §10.1](runtimes.md#101-为什么删掉-pocketpy-与-python-插件)、[引擎迁移路线](engine-migration.md) |
+| ~~QuickJS 不支持 `async` / `await`~~ → **已支持**（仅 7b 顶层 await 模块加载未做） | 语言层与宿主事件循环都已落地；原判断已过时，只剩模块加载那一层没做。 | [runtimes.md §10.1](runtimes.md#101-为什么删掉-pocketpy-与-python-插件)、[引擎迁移路线](engine-migration.md) |
 
 ## 2. 脚本任务
 
@@ -72,7 +72,7 @@
 
 | 项 | 说明 | 出处 |
 |---|---|---|
-| 插件市场 / 用户与权限 / 多实例 | 未开始 | [README 进度表](../README.md#当前进度) |
+| 插件市场 / 用户与权限 / 多实例 | 未开始 | [README 进度表](../README.md) |
 | 插件配置页没有共享组件库 | 面板侧已有第三方子集（`web/vendor/puredashboard/`），但插件页只被允许引用 `/css/*` + 自己的相对资源，还用不上 | [security.md §18.1](security.md#181-还没做的) |
 | 编辑不支持改 `next_run` | 想让任务「立刻跑一次」用「立即执行」，它不动调度节奏 | [changelog/12-editable-jobs.md §15.7](changelog/12-editable-jobs.md#157-这一轮没有解决的) |
 | 失效任务清理只处理面板任务 | 插件代码声明的任务若因插件加载失败而挂着，得等插件修好；脚本任务的 `script-panel` 文件缺失会被 cleanup 报出来 | [changelog/12-editable-jobs.md §15.7](changelog/12-editable-jobs.md#157-这一轮没有解决的) |
