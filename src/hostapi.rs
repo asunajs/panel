@@ -826,43 +826,64 @@ impl HostState {
             );
         }
 
-        let request = build_http_request(
-            &method,
-            url,
-            opts.get("headers").and_then(|v| v.as_object()),
-            if body.is_empty() {
-                Vec::new()
-            } else {
-                body.as_bytes().to_vec()
-            },
-        )?;
-        let agent = build_agent(timeout_ms);
-
-        let resp = agent
-            .run(request)
-            .map_err(|e| format!("请求失败: {e}{}", tls_hint(&e.to_string())))?;
-        let status = resp.status().as_u16();
-        let mut headers = serde_json::Map::new();
-        for (k, v) in resp.headers().iter() {
-            headers.insert(
-                k.as_str().to_string(),
-                Value::String(v.to_str().unwrap_or("<非 UTF-8>").to_string()),
-            );
+        // 重定向：**自己走**，每一跳都重新过 SSRF 判定（安全审计 H8）。
+        //
+        // 以前两条传输都自动跟跳（ureq 10 跳 / reqwest 10 跳）且只看初始 URL ——
+        // 公网地址回一个 302 到 http://127.0.0.1:8787/ 就能进回环或元数据地址。
+        const MAX_HOPS: usize = 3;
+        let mut cur = url.to_string();
+        for hop in 0..=MAX_HOPS {
+            ensure_outbound_url_allowed(&cur)?;
+            let request = build_http_request(
+                &method,
+                &cur,
+                opts.get("headers").and_then(|v| v.as_object()),
+                if body.is_empty() {
+                    Vec::new()
+                } else {
+                    body.as_bytes().to_vec()
+                },
+            )?;
+            let agent = build_agent(timeout_ms);
+            let mut resp = agent
+                .run(request)
+                .map_err(|e| format!("请求失败: {e}{}", tls_hint(&e.to_string())))?;
+            let status = resp.status().as_u16();
+            if (300..400).contains(&status) {
+                let loc = resp
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.to_string());
+                if let Some(loc) = loc {
+                    if hop == MAX_HOPS {
+                        return Err(format!("重定向超过 {MAX_HOPS} 跳，已中止（最后一跳 {cur}）"));
+                    }
+                    cur = resolve_location(&cur, &loc)?;
+                    continue;
+                }
+            }
+            let mut headers = serde_json::Map::new();
+            for (k, v) in resp.headers().iter() {
+                headers.insert(
+                    k.as_str().to_string(),
+                    Value::String(v.to_str().unwrap_or("<非 UTF-8>").to_string()),
+                );
+            }
+            let text = resp
+                .body_mut()
+                .with_config()
+                .limit(1024 * 1024)
+                .read_to_string()
+                .unwrap_or_else(|e| format!("<响应体读取失败: {e}>"));
+            return Ok(json!({
+                "status": status,
+                "headers": Value::Object(headers),
+                "body": text,
+            })
+            .to_string());
         }
-        let mut resp = resp;
-        let text = resp
-            .body_mut()
-            .with_config()
-            .limit(1024 * 1024) // 1 MiB 上限：低配盒子上别让插件拉个大文件把内存吃光
-            .read_to_string()
-            .unwrap_or_else(|e| format!("<响应体读取失败: {e}>"));
-
-        Ok(json!({
-            "status": status,
-            "headers": Value::Object(headers),
-            "body": text,
-        })
-        .to_string())
+        Err("重定向处理异常（不应到达）".to_string())
     }
 
     // -----------------------------------------------------------------
@@ -1400,6 +1421,35 @@ pub fn tls_hint(err: &str) -> &'static str {
 /// ⚠ **平台 TLS 不在这里**：它是 [`http_fetch_native`] 里完整的另一份实现。
 /// 让 `ureq` 只负责一件事，是为了"默认构建的行为一个字节都没变"这条性质 ——
 /// 否则每次动 legacy 那条路都要重新审视默认路径。
+/// 把 `Location` 解析成绝对 URL。
+///
+/// 相对地址必须基于当前 URL 解析 —— 否则下一跳的 SSRF 判定拿到的是个相对路径，
+/// `ensure_outbound_url_allowed` 会直接判非法，正常跳转就断了。
+/// 不引 `url` crate：只需要处理四种形态，自己写更好测。
+fn resolve_location(base: &str, loc: &str) -> Result<String, String> {
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return Ok(loc.to_string());
+    }
+    let (scheme, rest) = base
+        .split_once("://")
+        .ok_or_else(|| format!("当前 URL 不合法: {base}"))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if let Some(without) = loc.strip_prefix("//") {
+        return Ok(format!("{scheme}://{without}"));
+    }
+    if loc.starts_with('/') {
+        return Ok(format!("{scheme}://{authority}{loc}"));
+    }
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..=i],
+        None => "/",
+    };
+    Ok(format!("{scheme}://{authority}{dir}{loc}"))
+}
+
 pub fn build_agent(timeout_ms: u64) -> ureq::Agent {
     // 默认**不缓存**。实测（24h 长跑）：缓存 agent 后，面板里多出 8-12 块 128KB 的
     // 常驻连接缓冲（约 1.0-1.5MB），比它省下的"每次重建根证书"碎片更贵 ——
@@ -1428,6 +1478,10 @@ fn build_agent_uncached(timeout_ms: u64) -> ureq::Agent {
     // 5 秒过期 —— 仍然复用连接（延迟实测 574ms -> 217ms），但缓冲有界。
     ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_millis(timeout_ms)))
+        // ⚠ 不自动跟重定向（安全审计 H8）：ureq 默认跟 10 跳、且**不看目标**，
+        // 公网地址 302 到 127.0.0.1 会真的发出去，绕过 ensure_outbound_url_allowed。
+        // 由 do_http_fetch 自己走，每一跳重新判。
+        .max_redirects(0)
         .max_idle_connections(3)
         .max_idle_connections_per_host(1)
         .max_idle_age(std::time::Duration::from_secs(5))
@@ -1486,6 +1540,8 @@ fn http_fetch_native(
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
+        // 同 ureq：不自动跟重定向（安全审计 H8）。
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
         .map_err(|e| format!("构造客户端失败: {e}"))?;
@@ -1816,6 +1872,17 @@ fn sql_value_to_json(v: rusqlite::types::ValueRef<'_>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolve_location_handles_four_forms() {
+        // H8：相对 Location 必须先解析成绝对地址，否则下一跳的 SSRF 判定拿到的是
+        // 个相对路径，正常跳转会被判非法。
+        let base = "https://api.example.com/v1/items?x=1";
+        assert_eq!(resolve_location(base, "http://other/x").unwrap(), "http://other/x");
+        assert_eq!(resolve_location(base, "//cdn.example.com/a").unwrap(), "https://cdn.example.com/a");
+        assert_eq!(resolve_location(base, "/abs").unwrap(), "https://api.example.com/abs");
+        assert_eq!(resolve_location(base, "rel").unwrap(), "https://api.example.com/v1/rel");
+        assert!(resolve_location("not-a-url", "/x").is_err());
+    }
     use super::*;
 
     /// 插件配置：路径、缺失、非法 JSON、缓存失效。
