@@ -369,6 +369,21 @@ fn install_plugin_sql_guard<'a>(
         // 临时表也算：`CREATE TEMP TABLE jobs(...)` 会在同一条连接上**遮蔽**
         // 面板的 `jobs`，等 hook 摘掉之后面板自己读到的就是插件伪造的表 ——
         // 所以 CreateTempTable / CreateTempView 与 CreateTable 同等对待。
+        // ④ ALTER TABLE 在 temp 库上**一律拒绝**。
+        //
+        // 为什么不能只看表名：SQLite 调 authorizer 时 ALTER TABLE 只传**旧表名**
+        // （bundled sqlite3.c 里是 SQLITE_ALTER_TABLE, zDb, pTab->zName），
+        // 于是 `CREATE TEMP TABLE own; ALTER TABLE temp.own RENAME TO jobs` 交上来的
+        // 名字是 own —— 面板表名检查拦不住；改名之后 temp.jobs 就把主库的 jobs 遮蔽了。
+        // 实测（sqlite3 3.51）：rename 成功，随后 SELECT ... FROM jobs 读到插件伪造行。
+        // 面板侧没有任何 temp 对象清理，所以遮蔽会持续到连接关闭。
+        //
+        // 正常插件没有「重命名临时表」的需求，整库拒绝的代价可以接受。
+        if matches!(ctx.action, AuthAction::AlterTable { .. })
+            && ctx.database_name == Some("temp")
+        {
+            return deny("不允许在 temp 库上 ALTER TABLE（会遮蔽面板数据表）".to_string());
+        }
         let written_table = match ctx.action {
             AuthAction::Insert { table_name }
             | AuthAction::Update { table_name, .. }

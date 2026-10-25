@@ -17,7 +17,7 @@
 use crate::auth::{self, LoginError};
 use crate::cron::Schedule;
 use crate::db;
-use crate::engine::{test_run_budget_ms, EngineCmd};
+use crate::engine::{clamp_budget_ms, test_run_budget_ms, EngineCmd};
 use crate::ratelimit::Rejected;
 use crate::runtimes::EngineKind;
 use crate::taskdir;
@@ -1126,7 +1126,7 @@ async fn add_job(
             name: req.name.clone(),
             expr: req.expr.clone(),
             params: params_json,
-            budget_ms: req.budget_ms,
+            budget_ms: req.budget_ms.map(clamp_budget_ms),
             lead_ms: req.lead_ms.map(|v| v.min(3_600_000)),
             reply: tx,
         },
@@ -2088,7 +2088,7 @@ async fn create_script_job(
         "scheduled",
         None,
         params.as_deref(),
-        req.budget_ms,
+        req.budget_ms.map(clamp_budget_ms),
         &now,
     ) {
         return json_error(
@@ -2188,7 +2188,7 @@ async fn edit_script_job(
         None => job.budget_ms.map(|v| v as u64),
         Some(None) => None,
         Some(Some(0)) => None,
-        Some(Some(v)) => Some(v),
+        Some(Some(v)) => Some(clamp_budget_ms(v)),
     };
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     if let Err(e) = db::update_script_panel_job(
@@ -3487,9 +3487,12 @@ async fn api_update_apply(State(st): State<AppState>, headers: HeaderMap) -> Res
                 done.to
             );
             // 先让响应飞出去，再 exec
-            tokio::spawn(async {
+            // 用 apply() 捕获的路径，不用 current_exe()：Linux 上后者指向
+            // 已被 rename 覆盖掉的旧 inode（带 " (deleted)"），exec 必失败。
+            let exe = done.exe.clone();
+            tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                crate::settings::restart_process();
+                crate::settings::restart_process_at(&exe);
             });
             Json(json!({
                 "ok": true,

@@ -773,18 +773,31 @@ pub fn view() -> Vec<Item> {
 ///
 /// 失败时**不退出**（面板继续跑），只在日志里说明 —— 重启按钮失败不该让面板下线。
 pub fn restart_process() {
-    crate::log::plog!("boot", warn, "收到重启请求：exec 自身（PID 不变）");
+    match std::env::current_exe() {
+        Ok(p) => restart_process_at(&p),
+        Err(e) => {
+            crate::log::plog!("boot", error, "重启失败：拿不到当前可执行文件（{e}）");
+        }
+    }
+}
+
+/// 用**指定路径**重启（exec 自身，PID 不变）。
+///
+/// 自更新必须走这个：Linux 上二进制被 rename 覆盖之后 `current_exe()` 会返回
+/// 带 `" (deleted)"` 的路径，exec 它必然失败 —— 而更新流程手里正好握着
+/// 替换**之前**算好的那个路径，用它才是对的。
+pub fn restart_process_at(exe: &std::path::Path) {
+    crate::log::plog!(
+        "boot",
+        warn,
+        "收到重启请求：exec {}（PID 不变）",
+        exe.display()
+    );
     // 尽量把日志刷出去。stdout 是行缓冲，面板通道的 console transport 是同步写的，
     // 这里再 yield 一下让 writer 线程把队列排空。
     std::thread::sleep(std::time::Duration::from_millis(150));
 
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            crate::log::plog!("boot", error, "重启失败：拿不到当前可执行文件（{e}）");
-            return;
-        }
-    };
+    let exe = exe.to_path_buf();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
     #[cfg(unix)]

@@ -1244,10 +1244,26 @@ impl Auth {
     /// 也能触发它 —— 不上退避的话，`curl -H 'X-Panel-Token: x'` 循环就是一个
     /// 「一行命令烧掉对方 CPU 和内存」的放大器。退避**在验令牌之前**判。
     pub fn authenticate<H: HeaderMapLike>(&self, headers: &H, ip: IpAddr) -> Option<Via> {
+        // ① cookie 先判：有效会话直接过。
+        //
+        // 顺序很重要 —— 放在头之后的话，「残留的旧头 + 有效会话」会先被头那条
+        // 记一次失败，然后把正常用户推进退避（安全审计 H2）。
+        if let Some(sid) = headers.cookie(SESSION_COOKIE) {
+            if self.touch_session(&sid) {
+                return Some(Via::Session);
+            }
+        }
+        // ② 头令牌：检查 + 验令牌必须在**同一个并发名额**里完成。
+        //
+        // 只 check 不占名额的话，N 个并发请求会同时通过检查、各跑一次 ~19 MiB 的
+        // Argon2，低配 ARM 盒子上几百个请求就能打爆内存（安全审计 H2）。
         if let Some(t) = headers.bearer_token().or_else(|| headers.panel_token()) {
             if self.check_global().is_err() || self.check_rate(ip).is_err() {
                 return None;
             }
+            let Some(_inflight) = self.begin_attempt(ip) else {
+                return None;
+            };
             if self.credential_matches(&t) {
                 return Some(Via::Token);
             }
@@ -1259,11 +1275,6 @@ impl Auth {
             // 代价是「脚本写错令牌」也会被退避，那是应该的（它本来就在反复失败）。
             self.record_failure(ip);
             self.record_global_failure();
-        }
-        if let Some(sid) = headers.cookie(SESSION_COOKIE) {
-            if self.touch_session(&sid) {
-                return Some(Via::Session);
-            }
         }
         None
     }

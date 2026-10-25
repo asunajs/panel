@@ -94,6 +94,13 @@ pub struct CheckView {
 pub struct Applied {
     pub from: String,
     pub to: String,
+    /// 刚被替换掉的那个可执行文件的**绝对路径**。
+    ///
+    /// 为什么必须把它带出来：Linux 上 rename 覆盖之后，`/proc/self/exe` 指向的是
+    /// 已经删除的旧 inode，`current_exe()` 读回来带 `" (deleted)"` 后缀，拿它去
+    /// exec 必然 ENOENT —— 于是面板继续跑旧代码，界面却已经报了「更新成功」。
+    /// 这里捕获的路径是 rename **之前**算好的，指向新的那个文件。
+    pub exe: std::path::PathBuf,
 }
 
 impl Update {
@@ -391,6 +398,7 @@ impl Update {
         Ok(Applied {
             from: view.current,
             to: latest,
+            exe,
         })
     }
 

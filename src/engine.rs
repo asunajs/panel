@@ -114,6 +114,28 @@ fn load_budget() -> Duration {
 /// 上限仍是单次预算 —— 试跑不该比正式调用更宽松。
 pub const DEFAULT_TEST_RUN_BUDGET_MS: u64 = 10_000;
 
+/// 任务执行预算的硬上限：1 小时。
+///
+/// `lead_ms` 一直在入口钳这个数，`budget_ms` **没有** —— 于是 `budget_ms = u64::MAX`
+/// 会一路进到看门狗：`now_ms().saturating_add(budget)` 饱和之后等于「预算无限」，
+/// 一个死循环就能永久占住一条 worker 线程（面板不崩，但那条 worker 再也不会干活）。
+/// 落库走 `as i64` 往返也绕不过去（u64::MAX → -1 → u64::MAX）。
+///
+/// 所以入口钳一次、引擎这里再兜一次。负数（上面那个往返的产物）按「用户想要无限」
+/// 理解，给上限，而不是给 1ms —— 后者会让任务立刻「超时」，比不设还糟。
+pub(crate) const MAX_BUDGET_MS: u64 = 3_600_000;
+
+/// 把执行预算钳到 `(0, MAX_BUDGET_MS]`。
+///
+/// 0 和越界值都按「用户想要无限」理解，给上限 —— 给 0 或 1ms 会让任务立刻
+/// 「超时」，比不设还糟。
+pub(crate) fn clamp_budget_ms(v: u64) -> u64 {
+    if v == 0 {
+        MAX_BUDGET_MS
+    } else {
+        v.min(MAX_BUDGET_MS)
+    }
+}
 /// 试跑预算（环境变量可调，且不超过单次调用预算）。
 pub fn test_run_budget_ms() -> u64 {
     test_run_budget_ms_with(
@@ -4845,7 +4867,7 @@ fn run_one(
         .tasks()
         .get(idx)
         .and_then(|t| t.budget_ms)
-        .map(Duration::from_millis)
+        .map(|v| Duration::from_millis(clamp_budget_ms(v)))
         .unwrap_or_else(|| {
             if script_meta.is_some() {
                 script_timeout()
@@ -6703,17 +6725,27 @@ fn reload_plugin(
     };
     let name = plugins[pos].name.clone();
 
+    // ⚠ 和 `unload_plugin` 同一条守卫（安全审计 H6）：
+    // 被重载的文件可能是一条**占位记录**（因同名被拒绝、或语法错误没加载成功），
+    // 它自己没有任务/路由/WS。以前这里不看就摘，摘掉的是**同名真插件**的那份；
+    // 随后 `sync_jobs` 视该插件「不再声明任务」，把它的 jobs 行也删了 —— 损伤是持久的
+    // （没有任何 reconciler 会把已加载插件缺失的任务补回来）。
+    let is_real = plugins[pos].runtime.is_some() || plugins[pos].evicted;
+
     // 任务在**排班里**，和插件当前是否 evicted 无关：被惰性卸出的插件
     // 任务仍然排着，热更新时必须一起摘掉，否则 `install_tasks` 会撞名
-    // （实测：touch 一个已卸出的插件会报“已经注册过名为 … 的任务”）。
-    host.routes.lock().unwrap().retain(|r| r.plugin != name);
-    let removed = sched.remove_plugin(&name);
+    // （实测：touch 一个已卸出的插件会报「已经注册过名为 … 的任务」）。
+    let removed = if is_real {
+        host.routes.lock().unwrap().retain(|r| r.plugin != name);
+        // 热更新同样要收 WS 句柄，理由见 `unload_plugin`（安全审计 中6）。
+        host.ws.close_for(&name);
+        sched.remove_plugin(&name)
+    } else {
+        0
+    };
     // 旧的解释器实例在这里 drop（QuickJS Context / 外部子进程）
     let mut old = plugins.remove(pos);
     drop(old.runtime.take());
-    // 热更新同样要收 WS 句柄，理由见 `unload_plugin`（安全审计 中6）。
-    host.ws.close_for(&name);
-
     // 旧记录已经移出列表，这时候查冲突才是准的：如果还有另一个同名插件，
     // 说明冲突没解除（用户只是改了这个文件的内容），继续拒绝加载 ——
     // 否则这里会绕过 `sync_plugins` 的冲突检查，凭空造出第二个同名活插件。
