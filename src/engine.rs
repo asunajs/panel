@@ -7345,6 +7345,12 @@ mod tests {
 
         // Windows 上解析结果是 `...\lib\math.js`。断言只关心「落在哪个文件」，
         // 所以先把分隔符统一成 `/` —— 这不是在迁就平台，而是断言本来就不该关心分隔符。
+        // 临时诊断：把 base 和每个 spec 的真实结果打出来（失败时会被 cargo test 显示）
+        eprintln!("DIAG base = {base}");
+        eprintln!("DIAG root = {}", root.display());
+        for s in ["./math.js", "./math", "./only_mjs", "./pkg", "../lib/math"] {
+            eprintln!("DIAG {s} => {:?}", resolve_relative(&base, s, &root));
+        }
         let ok = |spec: &str| {
             resolve_relative(&base, spec, &root)
                 .expect(spec)
