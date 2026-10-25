@@ -110,6 +110,17 @@ pub struct Applied {
 /// 校验和与二进制都在明文上走。
 ///
 /// 只有本地冒烟测试（用 http mock 扮演 GitHub）才需要打开它。
+/// 是否允许「只能走代理时仍然更新」（安全审计 H9）。
+///
+/// 默认**否**：一个被接管的代理能同时返回假的 SHA256SUMS 和匹配的假二进制，
+/// 那样校验和等于不存在。只有运维明确知道代理可信时才该打开。
+pub(crate) fn allow_unverified_checksum() -> bool {
+    matches!(
+        std::env::var("PANEL_UPDATE_ALLOW_UNVERIFIED").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
 pub(crate) fn allow_http_outbound() -> bool {
     std::env::var("PANEL_UPDATE_ALLOW_HTTP")
         .map(|v| matches!(v.trim(), "1" | "on" | "true" | "yes"))
@@ -463,14 +474,37 @@ impl Update {
         // SHA256SUMS 和与它匹配的假二进制 —— sha 比较必然通过，文档承诺的
         // 「挡住传输被改、镜像被换」等于没写。
         //
-        // ⚠ 残留缺口（记在 docs/review-qoder-261025.md）：直连不通时这里仍会
-        // 退到代理。要彻底关掉，得让 fetch 能报告"这次走的是哪条路"，
-        // 然后直连失败就拒绝更新（除非显式 PANEL_UPDATE_ALLOW_UNVERIFIED=1）。
-        let (status, body) = self.fetch(url, "text/plain", 4 * 1024 * 1024, false, true)?;
-        if status != 200 {
-            return Err(format!("HTTP {status}"));
+        // ⚠ 直连失败**不再自动退到代理**（安全审计 H9 收口）：
+        // 退到代理就等于把「校验和的来源」和「二进制的来源」合并成一个，
+        // 而一个被接管的代理可以同时伪造两者。
+        // 只在显式 PANEL_UPDATE_ALLOW_UNVERIFIED=1 时才允许走代理取校验和。
+        match self.try_fetch(url, "text/plain", 4 * 1024 * 1024, false) {
+            Ok((200, body)) => Ok(String::from_utf8_lossy(&body).to_string()),
+            direct => {
+                if !allow_unverified_checksum() {
+                    let why = match direct {
+                        Ok((code, _)) => format!("直连返回 HTTP {code}"),
+                        Err(e) => format!("直连失败：{e}"),
+                    };
+                    return Err(format!(
+                        "取不到校验和（{why}）。为防代理同时伪造校验和与二进制，\
+                         面板默认拒绝在只能走代理时更新。\
+                         确认代理可信可设 PANEL_UPDATE_ALLOW_UNVERIFIED=1 强制继续"
+                    ));
+                }
+                crate::log::plog!(
+                    "update",
+                    warn,
+                    "直连取不到校验和，因 PANEL_UPDATE_ALLOW_UNVERIFIED=1 改走代理"
+                );
+                let (status, body) =
+                    self.fetch(url, "text/plain", 4 * 1024 * 1024, false, true)?;
+                if status != 200 {
+                    return Err(format!("HTTP {status}"));
+                }
+                Ok(String::from_utf8_lossy(&body).to_string())
+            }
         }
-        Ok(String::from_utf8_lossy(&body).to_string())
     }
 
     fn download(&self, url: &str) -> Result<Vec<u8>, String> {
