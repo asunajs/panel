@@ -673,10 +673,18 @@ let fs_root = match (&task, Path::new(&plugin).file_name()) {
 2. ~~**L8 的测试**~~ → **已补**（第 97 轮）：`flush_blocking_waits_until_the_line_is_on_disk`
    与 `flush_blocking_on_an_idle_transport_returns_promptly`。
    **并且验证过「把 ack 等待去掉，第一条就会失败」**——不是一条恒真的测试。
-3. **审查建议的 CI 检查**（markdown 链接/锚点校验、文档与 `DEFS` 集合比对）：属于新功能，未做。
+3. ~~**审查建议的 CI 检查**（markdown 链接/锚点校验、文档与 `DEFS` 集合比对）~~ → **已做**：
+   `scripts/check-docs.mjs`（相对链接目标存在、`#锚点` 能对上标题、每个 `docs/*.md` 都在
+   `docs/README.md` 里有索引、`settings.rs` 的每个 `key:` 都在 `configuration.md` 里有行），
+   并已接入 `.github/workflows/ci.yml`。第一次跑就抓到一个真实缺口（`DB_PRUNE_MS` 未入档）。
 
-### 验证
+### 验证（2026-10-26 更新）
 
-- `cargo test`：**487 passed / 0 failed / 1 ignored**
-- `cargo clippy --all-targets`：**0 warning**
+- `cargo test`：**519 passed / 0 failed / 1 ignored**
+- `cargo clippy --all-targets -- -D warnings`：**0 warning**
+- `scripts/check-unsafe-budget.sh`：6 处，与期望一致
+- `node scripts/test-web-assets.mjs`：287 项全过
+- `node scripts/check-docs.mjs`：44 个文件全过
+- `bash scripts/test-install.sh`：全部用例通过
+- `python3 scripts/smoke.py`（release 二进制）：**冒烟测试全部通过**
 - 全部改动已推 `main`
