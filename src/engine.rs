@@ -5221,7 +5221,13 @@ fn run_one(
         return RunOutcome::Done;
     };
     // 在途标记在这里消掉：下面 `advance` 会推进 next_fire，之后它就该重新参与调度。
-    sched.clear_in_flight(idx);
+    //
+    // ⚠ 手动触发**不置**这个标记（见上面 Dispatch::Pending 那段的 `if !tail.manual`），
+    // 所以这里也不能清：手动跑一次就清掉的话，正在跑的**排班**那次 invocation 的
+    // 标记会一起没了，调度器以为它空闲，下一拍就重复触发（安全审计 M13）。
+    if !manual {
+        sched.clear_in_flight(idx);
+    }
 
     // 停止不算失败：传 None 给调度器，连续失败计数不 +1、任务状态也不变「执行出错」。
     // 否则停几次就把任务熔断了 —— 用户越是用「停止」，任务越容易被判成坏掉。
