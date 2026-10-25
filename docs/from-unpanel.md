@@ -546,3 +546,24 @@ PLUGINS_DIR / TASKS_DIR` 字面量抽出来（67 个），逐个在 `docs/*.md` 
 >
 > ⚠ unpanel 那条判据（每个 reason 要有置上点 + 清掉点 + 一条用例）**在写 `/readyz` 时
 > 必须一起做**，否则就是它自己审计出的那类缺口：定义了状态、永远不成立。
+
+> **复核与落地方案（2026-10-25，第 66 轮）**
+>
+> 前提成立：`settings.json` 是整份读写，没有 revision，两个标签页同时改会静默覆盖。
+>
+> 分三步，每步都能独立提交、独立回滚：
+>
+> **第一步（零风险，向后兼容）**：`File` 结构加 `#[serde(default)] revision: u64`，
+> `save_file` 每次 +1。旧文件解析出来 revision=0，不影响任何现有行为。
+>
+> **第二步**：新增 `save_file_cas(values, expected: Option<u64>) -> Result<(), String>`；
+> `expected` 为 `None` 时按老语义直接写（CLI / 首次初始化用），`Some(n)` 时比对，
+> 不一致返回 `edit_conflict`。HTTP 写接口从请求体里取 `revision` 传进来。
+>
+> **第三步**：把「改前值」记进审计。面板已有 `file_ops` 表（我在 file-management 一期
+> 加的），可以直接复用：`kind="settings"`, `action="update"`, `from_path` 存改前值摘要、
+> `to_path` 存改后值摘要。⚠ 不要存完整值 —— 设置里可能有 SMTP 口令、Webhook URL。
+>
+> ⚠ 前端要一起改：现在的设置页保存按钮不带 revision，加 CAS 之后第一次保存就会 409。
+> 必须同时把 revision 读回来、放进保存请求，否则用户会看到「保存失败」而不知道为什么。
+> **这是这条最容易被做漏的地方。**
