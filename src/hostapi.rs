@@ -958,7 +958,7 @@ impl HostState {
         // 越界必须明确报错。
         let port = match opts.get("port").and_then(|v| v.as_u64()) {
             None => default_port,
-            Some(p) if p >= 1 && p <= 65535 => p as u16,
+            Some(p) if (1..=65535).contains(&p) => p as u16,
             Some(p) => return Err(format!("smtp_send: 端口越界（{p}），必须是 1..=65535")),
         };
 
