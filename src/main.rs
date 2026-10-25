@@ -177,6 +177,22 @@ fn main() {
 ///
 /// ⚠ 这一步只做「拍快照」。加密（age）和「恢复后必须显式激活」是后续的事，
 /// 但**恢复那一步的显式激活必须一开始就有** —— 它是唯一一个「做错了会静默用错库」的地方。
+/// 真正的备份动作（拆出来是为了能测：`backup_cmd` 要读环境变量，测试里不好设）。
+///
+/// 返回备份文件大小（字节）。
+fn backup_to(
+    db_path: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    if !db_path.exists() {
+        return Err(format!("数据库不存在: {}", db_path.display()).into());
+    }
+    let conn = rusqlite::Connection::open(db_path)?;
+    // VACUUM INTO 不支持绑定参数，只能拼字面量 —— 单引号翻倍是 SQL 的标准转义。
+    let quoted = format!("'{}'", out.display().to_string().replace('\'', "''"));
+    conn.execute(&format!("VACUUM INTO {quoted}"), [])?;
+    Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
+}
 fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let Some(out) = args.first() else {
         eprintln!("用法: plugin-panel backup <输出文件路径>");
@@ -188,14 +204,7 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("目标已存在，不覆盖: {out}").into());
     }
     let db_path = env_path("DB_PATH", "data/panel.db");
-    if !db_path.exists() {
-        return Err(format!("数据库不存在: {}", db_path.display()).into());
-    }
-    let conn = rusqlite::Connection::open(&db_path)?;
-    // VACUUM INTO 的参数要转义成 SQL 字面量（它不支持绑定参数）。
-    let quoted = format!("'{}'", out.replace('\'', "''"));
-    conn.execute(&format!("VACUUM INTO {quoted}"), [])?;
-    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+    let size = backup_to(&db_path, std::path::Path::new(out))?;
     println!("已备份: {out}（{} KiB）", size / 1024);
     println!("⚠ 这份文件是**明文**：请自己决定放哪、谁能读。");
     Ok(())
@@ -1817,3 +1826,34 @@ mod allocator_tests {
     }
 }
 
+
+#[cfg(test)]
+mod backup_tests {
+    use super::backup_to;
+
+    #[test]
+    fn backup_to_creates_a_readable_snapshot() {
+        // unpanel 2.10：拷活动库文件会拷到「半份」，VACUUM INTO 不会。
+        // 这条测试钉住的是「快照能打开、数据完整」。
+        let dir = std::env::temp_dir().join(format!("panel-bk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("src.db");
+        {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.execute_batch("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1),(2);")
+                .unwrap();
+        }
+        let out = dir.join("snap.db");
+        let size = backup_to(&db, &out).unwrap();
+        assert!(size > 0, "快照不能是空文件");
+        let c2 = rusqlite::Connection::open(&out).unwrap();
+        let n: i64 = c2
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "快照里的数据必须完整");
+        // 库不存在时必须是明确错误，不是静默生成一个空文件
+        assert!(backup_to(&dir.join("nope.db"), &dir.join("x.db")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
