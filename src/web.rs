@@ -1380,7 +1380,20 @@ async fn delete_plugin_files(
         Ok(moved) if moved.is_empty() => {
             json_error(StatusCode::NOT_FOUND, format!("没有找到插件 {name} 的文件"))
         }
-        Ok(moved) => Json(json!({ "ok": true, "moved": moved })).into_response(),
+        Ok(moved) => {
+            // ③ 记账：删是「移进回收站」，但必须留痕 —— 否则界面上只剩
+            // 「文件不见了」，回收站里翻半天说不清哪份是哪次删的。
+            let op = crate::db::record_file_op(
+                &st.db,
+                "plugin",
+                &name,
+                "delete",
+                &format!("{}/{}", st.plugins_dir.display(), name),
+                &moved.join(", "),
+            )
+            .ok();
+            Json(json!({ "ok": true, "moved": moved, "op": op })).into_response()
+        }
         Err(e) => json_error(StatusCode::BAD_REQUEST, e),
     }
 }

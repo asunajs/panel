@@ -171,6 +171,22 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
         CREATE INDEX IF NOT EXISTS idx_runs_task_started ON runs(task, started_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
 
+        -- 文件操作记账（docs/file-management.md 一期）。
+        --
+        -- 为什么要有它：删插件是「移进回收站」，但**谁在什么时候删了什么**
+        -- 必须留痕 —— 否则界面上只剩「文件不见了」，回收站里翻半天也说不清
+        -- 哪一份是哪次删的。to_path 就是回收站里的实际位置，恢复靠它。
+        CREATE TABLE IF NOT EXISTS file_ops (
+            id        TEXT PRIMARY KEY,
+            kind      TEXT NOT NULL,      -- plugin / script
+            name      TEXT NOT NULL,
+            action    TEXT NOT NULL,      -- delete / restore
+            from_path TEXT NOT NULL,
+            to_path   TEXT NOT NULL,
+            at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_ops_at ON file_ops(at DESC);
+
         -- 第三十一轮：**面板级推送**。
         --
         -- 配置单独一张单行表：它含 token / 密码，形状是嵌套的，和「运行参数」
@@ -1231,6 +1247,45 @@ pub fn list_runs(
         }
     }
 }
+/// 记一笔文件操作（删除 / 恢复）。返回操作 id。
+///
+/// 见 docs/file-management.md 一期：删是「移进回收站」，但必须留痕 ——
+/// 否则界面上只剩「文件不见了」，回收站里翻半天说不清哪份是哪次删的。
+pub fn record_file_op(
+    db: &Db,
+    kind: &str,
+    name: &str,
+    action: &str,
+    from_path: &str,
+    to_path: &str,
+) -> rusqlite::Result<String> {
+    let id = format!("fo_{}_{}",
+        chrono::Local::now().format("%Y%m%d%H%M%S%3f"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0));
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO file_ops (id, kind, name, action, from_path, to_path, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, kind, name, action, from_path, to_path, at],
+    )?;
+    Ok(id)
+}
+
+/// 最近的文件操作（新的在前），给界面显示「删了什么」。
+pub fn list_file_ops(db: &Db, limit: i64) -> rusqlite::Result<Vec<(String, String, String, String, String, String)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, name, action, to_path, at FROM file_ops ORDER BY at DESC, id DESC LIMIT ?1",
+    )?;
+    let it = stmt.query_map(params![limit], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    })?;
+    it.collect()
+}
+
 pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
     let conn = db.lock().unwrap();
     let sql = format!("SELECT {RUN_COLS} FROM runs WHERE id = ?1");
@@ -1863,6 +1918,23 @@ pub fn list_panel_jobs(db: &Db, only_plugin: Option<&str>) -> rusqlite::Result<V
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_ops_records_and_lists_deletes() {
+        // docs/file-management.md 一期：删是「移进回收站」，但必须留痕。
+        let dir = std::env::temp_dir().join(format!("panel-fileops-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ops.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        let id = record_file_op(&db, "plugin", "demo", "delete", "plugins/demo.js", ".trash/x/demo.js").unwrap();
+        assert!(id.starts_with("fo_"), "操作 id 应带前缀: {id}");
+        let rows = list_file_ops(&db, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "plugin");
+        assert_eq!(rows[0].2, "demo");
+        assert_eq!(rows[0].3, "delete");
+        assert_eq!(rows[0].4, ".trash/x/demo.js", "to_path 是回收站里的实际位置，恢复靠它");
+    }
     use super::*;
     use std::path::Path;
 
