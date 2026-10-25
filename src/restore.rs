@@ -16,6 +16,25 @@
 
 use std::path::{Path, PathBuf};
 
+/// 调度器是否被暂停（unpanel 2.10 的「不自动恢复调度」）。
+///
+/// 为什么用全局原子而不是传参：调度器在引擎深处，一路传下去要改一长串签名，
+/// 而这个开关**整个进程只有一个**，本来就是全局语义。
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 暂停派发。启动时检测到未完成的恢复就调它。
+pub fn pause_scheduler() {
+    PAUSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 恢复派发（显式激活之后调）。
+pub fn resume_scheduler() {
+    PAUSED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn scheduler_paused() -> bool {
+    PAUSED.load(std::sync::atomic::Ordering::SeqCst)
+}
 /// 一条待处理的恢复。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingRestore {
@@ -138,6 +157,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn pause_flag_round_trips() {
+        // unpanel 2.10 的「不自动恢复调度」开关。
+        // ⚠ 这是**全局原子**，所以测试里必须先复位，否则会影响同进程的其它用例。
+        assert!(!scheduler_paused(), "默认不该是暂停的");
+        pause_scheduler();
+        assert!(scheduler_paused());
+        resume_scheduler();
+        assert!(!scheduler_paused());
     }
 
     #[test]

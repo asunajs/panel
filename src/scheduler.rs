@@ -951,6 +951,12 @@ impl Scheduler {
 
     /// 所有已到期的任务下标。
     pub fn due(&self, now: DateTime<Local>) -> Vec<usize> {
+        // 未完成的恢复期间**不派发任何任务**（unpanel 2.10）。
+        // 只在这里挡：它是唯一的「谁该跑」出口，挡在别处都会漏。
+        // ⚠ 恢复后每个欠下的任务会各补跑一次（不是无限补），这是可接受的。
+        if crate::restore::scheduler_paused() {
+            return Vec::new();
+        }
         self.tasks
             .iter()
             .enumerate()
@@ -1172,6 +1178,26 @@ mod tests {
         s.add("q", "a", "@every 1s", every_1s(), now, None, None)
             .unwrap();
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn due_is_empty_while_scheduler_is_paused() {
+        // unpanel 2.10：未完成的恢复期间不派发任何任务。
+        // 这是**唯一的出口**（引擎只从 due() 取「谁该跑」），所以挡在这里就够。
+        let mut s = Scheduler::new(TripConfig::default());
+        let now = at(0);
+        s.add("p", "t", "@every 1s", every_1s(), now, None, None)
+            .unwrap();
+        let fire_at = now + ChronoDuration::seconds(1);
+        assert_eq!(s.due(fire_at).len(), 1, "正常情况下该到期");
+
+        crate::restore::pause_scheduler();
+        assert!(s.due(fire_at).is_empty(), "暂停期间不能有任何任务到期");
+        // 再往后推很久也不能到期
+        assert!(s.due(fire_at + ChronoDuration::hours(5)).is_empty());
+
+        crate::restore::resume_scheduler();
+        assert_eq!(s.due(fire_at).len(), 1, "恢复后仍按原计划到期");
     }
 
     #[test]

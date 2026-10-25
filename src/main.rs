@@ -523,6 +523,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 这条日志的作用是：真出现标记时，运维能在启动日志里第一时间看到，
     // 而不是等发现「任务都跑了但数据不对」才回头查。
     if let Some(p) = crate::restore::pending(&db_path) {
+        // 不只是打日志：**真的不派发**（unpanel 2.10 的「不自动恢复调度」）。
+        // 少了这一步，标记就只是个装饰 —— 那比没有更危险。
+        crate::restore::pause_scheduler();
         crate::log::plog!(
             "boot",
             error,
