@@ -234,6 +234,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/keep-warm", post(set_plugin_keep_warm))
         .route("/api/plugins/{name}/load", post(load_plugin))
         .route("/api/plugins/{name}/unload", post(unload_plugin))
+        .route("/api/plugins/{name}/delete", post(delete_plugin_files))
         .route("/api/plugins/{name}/enable", post(enable_plugin))
         .route("/api/plugins/{name}/reload", post(reload_plugin))
         // 上传：单文件或 zip，落到插件目录 / 任务目录。zip 解压保留内部路径。
@@ -1356,6 +1357,32 @@ async fn unload_plugin(
     headers: HeaderMap,
 ) -> Response {
     set_plugin_loaded(&st, &name, false, &headers).await
+}
+
+/// `POST /api/plugins/{name}/delete` —— 把插件文件挪进回收站。
+///
+/// ⚠ 这不是 `rm`：文件挪到 `<plugins>/.trash/<时间戳>-<name>/`，出事了能捞回来。
+/// 顺序照 docs/file-management.md §1 的四步走：停 → 摘任务 → 移文件 → 忘掉。
+/// 这一版做「停 + 移文件」；任务行的收敛交给引擎的下一次扫描（插件文件没了，
+/// 它就不再声明任务），记账表 `file_ops` 留到二期。
+async fn delete_plugin_files(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = guard_write(&headers) {
+        return r;
+    }
+    // ① 先摘运行时：文件没了而运行时还在，下一次调用就会指向一个不存在的文件。
+    let _ = set_plugin_loaded(&st, &name, false, &headers).await;
+    // ② 移文件（回收站，不是删除）
+    match crate::pluginfs::trash_plugin(&st.plugins_dir, &name) {
+        Ok(moved) if moved.is_empty() => {
+            json_error(StatusCode::NOT_FOUND, format!("没有找到插件 {name} 的文件"))
+        }
+        Ok(moved) => Json(json!({ "ok": true, "moved": moved })).into_response(),
+        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 /// `POST /api/plugins/{name}/keep-warm` `{keep: true|false}` —— 「长期加载」。

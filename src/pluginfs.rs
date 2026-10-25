@@ -439,8 +439,78 @@ pub fn describe_root(root: &Path) -> String {
     ok_with(format!("\"dir\":{}", jstr(&root.display().to_string())))
 }
 
+/// 把插件的文件挪进回收站（`<plugins>/.trash/<时间戳>-<name>/`）。
+///
+/// 为什么不直接 `rm`：删错了没有后悔药。回收站留一份，用户自己 rm 掉的才算真没了。
+/// 设计见 docs/file-management.md 一期（删插件拆成四件事：停 → 摘任务 → 移文件 → 忘掉）。
+///
+/// 返回被挪动的相对路径，给界面显示「挪走了什么」；空 vec = 什么都没找到。
+pub fn trash_plugin(plugins_dir: &Path, name: &str) -> Result<Vec<String>, String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("插件名不合法: {name}"));
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let trash = plugins_dir.join(".trash").join(format!("{stamp}-{name}"));
+    let mut moved: Vec<String> = Vec::new();
+
+    // ① 单文件 `plugins/<name>.js`
+    let js = plugins_dir.join(format!("{name}.js"));
+    if js.is_file() {
+        std::fs::create_dir_all(&trash).map_err(|e| format!("建回收站目录失败: {e}"))?;
+        let dst = trash.join(format!("{name}.js"));
+        std::fs::rename(&js, &dst).map_err(|e| format!("挪 {name}.js 失败: {e}"))?;
+        moved.push(format!("{name}.js"));
+    }
+
+    // ② 插件目录 `plugins/<name>/`（配置页、静态资源）
+    let dir = plugins_dir.join(name);
+    if dir.is_dir() {
+        std::fs::create_dir_all(&trash).map_err(|e| format!("建回收站目录失败: {e}"))?;
+        let dst = trash.join(name);
+        // 同盘 rename 是原子的；跨盘会失败，那时报错让用户手工处理，
+        // 不要退化成「复制一半再删」—— 半份文件比失败更糟。
+        std::fs::rename(&dir, &dst).map_err(|e| format!("挪 {name}/ 目录失败: {e}"))?;
+        moved.push(format!("{name}/"));
+    }
+
+    Ok(moved)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trash_plugin_moves_files_into_recycle_dir() {
+        // 删除插件的判据（docs/file-management.md 一期）：
+        // 文件要真的离开 plugins/，但**不能消失** —— 进 .trash 才捞得回来。
+        let root = std::env::temp_dir().join(format!("panel-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("demo.js"), "// demo").unwrap();
+        std::fs::create_dir_all(root.join("demo")).unwrap();
+        std::fs::write(root.join("demo").join("index.html"), "<h1>x</h1>").unwrap();
+
+        let moved = trash_plugin(&root, "demo").unwrap();
+        assert_eq!(moved.len(), 2, "文件和目录都该被挪走: {moved:?}");
+        assert!(!root.join("demo.js").exists(), "源文件必须已经离开 plugins/");
+        assert!(!root.join("demo").exists(), "源目录必须已经离开 plugins/");
+
+        // 回收站里必须找得到
+        let trash_root = root.join(".trash");
+        let entry = std::fs::read_dir(&trash_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(entry.join("demo.js").is_file(), "回收站里应有 demo.js");
+        assert!(entry.join("demo").join("index.html").is_file(), "回收站里应有 demo/index.html");
+
+        // 不存在的插件：什么都不挪，返回空 vec（不是报错）
+        assert!(trash_plugin(&root, "nope").unwrap().is_empty());
+        // 非法名字必须被拒（不能拿它做路径穿越）
+        assert!(trash_plugin(&root, "../etc").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -497,3 +567,4 @@ mod tests {
         assert_eq!(resolve_in_root(&root, "a\0b").unwrap_err().code(), "EINVAL");
     }
 }
+
