@@ -4546,6 +4546,44 @@ fn apply_tick_result(
     }
 }
 
+// ---- 在途 invocation 注册表（安全审计 H3 第一步）----
+//
+// 为什么要它：/stop 现在只知道「要停哪条任务」，但引擎里真正被中断的是**某一次
+// invocation**。停止位是全局单比特，任何一次置位都会打断所有在跑的东西。
+// 要按 invocation 停，先得有一张「谁现在在跑」的表 —— 而且必须是**跨线程**的，
+// 因为 worker 私有的 pending 表 web 层读不到。
+//
+// 这一步只做登记/注销，**不改变任何判定逻辑** —— 先让数据存在，下一步再让
+// Watchdog 用它判停。
+static IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashMap<(String, String), u64>>> =
+    std::sync::Mutex::new(None);
+
+/// 登记一次在途执行（plugin, task) -> inv_id。
+fn register_in_flight(plugin: &str, task: &str, inv_id: u64) {
+    if let Ok(mut g) = IN_FLIGHT.lock() {
+        g.get_or_insert_with(std::collections::HashMap::new)
+            .insert((plugin.to_string(), task.to_string()), inv_id);
+    }
+}
+
+/// 注销（收尾时调）。只删自己的那条：同一个任务可能已经被下一次派发覆盖了。
+fn clear_in_flight(plugin: &str, task: &str) {
+    if let Ok(mut g) = IN_FLIGHT.lock() {
+        if let Some(m) = g.as_mut() {
+            m.remove(&(plugin.to_string(), task.to_string()));
+        }
+    }
+}
+
+/// 这条任务现在有没有在跑的 invocation？有就返回它的 id。
+#[allow(dead_code)] // 下一步 /stop 才会用它；先让数据存在
+pub fn in_flight_of(plugin: &str, task: &str) -> Option<u64> {
+    IN_FLIGHT
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&(plugin.to_string(), task.to_string())).copied()))
+}
+
 /// invocation id 的分配器（进程级唯一，跨 worker 不冲突）。
 fn next_inv_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -5039,6 +5077,9 @@ fn run_one(
     // 熔断计数 +1、任务状态变「执行出错」、还给用户发一条失败推送 —— 而他只是按了停止。
     //
     // 所以这里先判定一次，下面每一处（记录 / 推送 / 调度计数 / 日志）都按它分流。
+    // 收尾：从在途表里注销（安全审计 H3 第一步）。
+    clear_in_flight(&plugin, &name);
+
     // 「停止」和「预算/墙钟到点」在引擎里都是**我们**叫停的，对外都算已停止。
     // 只看 task_stop 的话，预算打断会被记成失败（安全审计 H4）。
     let stopped = result.is_err() && (wd.task_stop_requested() || wd.take_interrupted());
@@ -5224,6 +5265,9 @@ fn dispatch_task(
     logs: &SharedLogs,
     inv_id: u64,
 ) -> Dispatch {
+    // 登记「这条任务现在跑的是哪次 invocation」（安全审计 H3 第一步）。
+    // 只记账，不改任何判定 —— 下一步才让 Watchdog 用它判停。
+    register_in_flight(&plugin.name, name, inv_id);
     match plugin.runtime.as_ref() {
         None => Dispatch::Done(Err("插件加载失败，没有可用的解释器实例".to_string())),
         Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
@@ -7182,6 +7226,24 @@ mod pump_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn in_flight_registry_tracks_and_clears() {
+        // 安全审计 H3 第一步：先让「谁现在在跑」这个数据存在。
+        register_in_flight("demo", "tick", 42);
+        assert_eq!(in_flight_of("demo", "tick"), Some(42));
+        // 同名不同插件互不影响
+        assert_eq!(in_flight_of("other", "tick"), None);
+        // 注销后查不到
+        clear_in_flight("demo", "tick");
+        assert_eq!(in_flight_of("demo", "tick"), None);
+        // 重复注销不 panic
+        clear_in_flight("demo", "tick");
+        // 覆盖：同一条任务再次派发，登记的是新的 inv_id
+        register_in_flight("demo", "tick", 7);
+        register_in_flight("demo", "tick", 8);
+        assert_eq!(in_flight_of("demo", "tick"), Some(8));
+        clear_in_flight("demo", "tick");
+    }
     #[test]
     fn budget_interrupt_is_recorded_as_stopped() {
         // 回归测试（安全审计 H4）：预算到点以前不算「已停止」，于是被记成红色失败、
