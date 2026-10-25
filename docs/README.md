@@ -20,6 +20,7 @@
 | [远程访问](remote-access.md) | 没有公网 IP 时用出站隧道：Cloudflare Tunnel、frp、Tailscale、IPv6 DDNS；Access、安全清单、排障 |
 | [自更新](update.md) | 设置 → 关于检查更新，SHA256 校验、原地替换、重启与代理边界 |
 | [运行与配置](configuration.md) | 环境变量总表、端口、数据目录、日志目录、运行时选择 |
+| [设置页](settings.md) | 哪些项在设置页、分几组、优先级、生效时机、哪些刻意不放进去 |
 | [脚本任务](script-jobs.md) | `tasks/` 目录、文件头、退出码、面板任务与目录任务的区别 |
 | [上传插件与脚本](upload.md) | 单文件、zip、目录插件的路径规则 |
 | [插件商城](market.md) | 从 GitHub Release / 单文件安装，私有仓库 Token，TypeScript 转译 |
@@ -78,6 +79,16 @@
 | [插件 WebUI](changelog/13-webui.md) | 插件自己的页面、零构建前端 |
 | [吞吐与编辑](changelog/14-15-throughput-and-editing.md) | 限流、worker、任务卡片 |
 | [插件目录热更新](changelog/11-live-plugin-dir.md) | 新增、删除、改名即时生效 |
+
+## 外部审查记录
+
+这两份是**外部审查**留下的原文，里面每一条都标注了处理状态（已修 / 已复核 / 判定不成立）。
+它们不是使用文档，但留着是为了让后来的人能追到「为什么当时这么改」。
+
+| 文档 | 内容 |
+|---|---|
+| [qoder 审查](review-qoder-261025.md) | 2026-10-25 的代码审查：High / Medium / Low 三档 + 处理记录 |
+| [unpanel 审查](from-unpanel.md) | 另一份对照审查：13 条，含两条被复核推翻的前提 |
 
 ## 版本
 
