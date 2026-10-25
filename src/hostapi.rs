@@ -953,11 +953,14 @@ impl HostState {
             crate::smtp::TlsMode::Implicit => 465,
             _ => 587,
         };
-        let port = opts
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .map(|p| p as u16)
-            .unwrap_or(default_port);
+        // ⚠ 不能直接 `as u16`（安全审计 L10）：u64 转 u16 会**静默截断**，
+        // 比如 70000 变成 4464 —— 用户看到的是「连不上」，而不是「端口写错了」。
+        // 越界必须明确报错。
+        let port = match opts.get("port").and_then(|v| v.as_u64()) {
+            None => default_port,
+            Some(p) if p >= 1 && p <= 65535 => p as u16,
+            Some(p) => return Err(format!("smtp_send: 端口越界（{p}），必须是 1..=65535")),
+        };
 
         // `to` 收字符串或字符串数组 —— 只写一个收件人是最常见的情况，
         // 逼用户写成 `["a@b.com"]` 没有道理
