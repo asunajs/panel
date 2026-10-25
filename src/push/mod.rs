@@ -1459,6 +1459,38 @@ pub fn save_task(db: &Db, body: &Value) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cap_reached_counts_today_only() {
+        // 安全审计 M8：日上限要在扇出循环里逐条复查，靠的就是这个按值判定。
+        let dir = std::env::temp_dir().join(format!("panel-cap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cap.db");
+        let _ = std::fs::remove_file(&path);
+        let db = crate::db::open(&path).unwrap();
+        // 空库：没到上限
+        assert!(!cap_reached(&db, 2), "空库不该算到上限");
+        assert!(!cap_reached(&db, 0), "0 = 不限");
+        // 塞两条今天的
+        {
+            let conn = db.lock().unwrap();
+            for i in 0..2 {
+                conn.execute(
+                    "INSERT INTO push_deliveries (at, kind, channel, ok, note) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                                                format!("{} 12:00:00", today_prefix()),
+                        "breaker",
+                        "webhook",
+                        1,
+                        "",
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        assert!(cap_reached(&db, 2), "已发 2 条，上限 2 应该挡住");
+        assert!(!cap_reached(&db, 3), "上限 3 还没到");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     #[test]
