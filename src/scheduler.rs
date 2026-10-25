@@ -1013,12 +1013,23 @@ impl Scheduler {
 
         // ③ 正常推进：理论线接着上一次的**理论**时刻走（不是实际时刻 —— 那样抖动会累积）
         let prev_actual = t.next_fire;
+        // ⚠ 提前量必须小于一个周期（安全审计 H5）。
+        //
+        // lead_ms 一旦 >= 周期，actual = base - lead 会一直落在过去，而 base
+        // 每拍都在前进、永远 > now ⇒ 下面那个「落后太多」的重对齐永远不触发
+        // ⇒ 引擎每轮循环都认为到点了 ⇒ 几秒内把过去几小时该跑的拍全补一遍
+        // （@every 1s + 1 小时提前量 ≈ 3600 次，每次 3 条 DB 写）。
+        //
+        // 周期用「理论线的下一拍减这一拍」来估，对 cron 和 @every 都成立。
+        let lead = effective_lead(&t.schedule, t.base_fire, t.lead_ms);
         let (mut base, mut actual, mut j) =
-            advance_from(&t.schedule, t.base_fire, Some(prev_actual), t.lead_ms);
+            advance_from(&t.schedule, t.base_fire, Some(prev_actual), lead);
         let mut realigned = false;
-        if base <= now {
+        // 判据是 **actual**（真正要触发的时刻），不是 base：提前量把它们分开了，
+        // 只看 base 的话，落后时永远重对齐不了。
+        if actual <= now {
             // 落后太多：重新对齐到 now 之后，且**不补跑、不抖**
-            (base, actual, j) = align_from(&t.schedule, now, t.lead_ms);
+            (base, actual, j) = align_from(&t.schedule, now, lead);
             realigned = true;
         }
         t.base_fire = base;
@@ -1028,6 +1039,27 @@ impl Scheduler {
     }
 }
 
+
+/// 把提前量钳到「小于一个周期」。
+///
+/// 见调用处的注释（安全审计 H5）：提前量 >= 周期会让「提前叫醒」的时刻永远
+/// 落在过去，推进逻辑就变成补跑风暴。周期用理论线的相邻两拍来估。
+fn effective_lead(schedule: &Schedule, from: DateTime<Local>, lead_ms: i64) -> i64 {
+    if lead_ms <= 0 {
+        return lead_ms;
+    }
+    let Some(base) = schedule.next_base(from) else {
+        return lead_ms;
+    };
+    let Some(next) = schedule.next_base(base) else {
+        return lead_ms;
+    };
+    let gap = (next - base).num_milliseconds();
+    if gap <= 0 {
+        return lead_ms;
+    }
+    lead_ms.min(gap.saturating_sub(1).max(0))
+}
 /// 指数退避：第 n 次熔断的冷却时长 = base × 2^(n-1)，封顶 max。
 fn cooldown_for(cfg: &TripConfig, trips: u32) -> ChronoDuration {
     let shift = trips.saturating_sub(1).min(16); // 防溢出
@@ -1060,6 +1092,21 @@ mod tests {
         Schedule::parse("@every 500ms").unwrap()
     }
 
+    #[test]
+    fn lead_larger_than_period_does_not_storm() {
+        // 回归测试（安全审计 H5）：@every 1s 配 1 小时提前量时，以前 next_fire
+        // 会落在 1 小时前，而 base 每拍前进、永远 > now ⇒ 重对齐永不触发 ⇒
+        // 引擎每轮循环都判定到点，几秒内补跑约 3600 拍。
+        let sched = every_1s();
+        let now = at(0);
+        // 提前量被钳到一个周期以内
+        let lead = effective_lead(&sched, now, 3_600_000);
+        assert!(lead < 1_000, "提前量应小于周期，实际 {lead}ms");
+        // 用它推进一次，落点必须在 now 之后
+        let (base, actual, _) = advance_from(&sched, now, Some(now), lead);
+        assert!(base > now);
+        assert!(actual > now, "next_fire 落在过去会触发补跑风暴: {actual} <= {now}");
+    }
     /// 阈值设 3、冷却 10s 的测试配置，方便快速验证
     fn test_cfg() -> TripConfig {
         TripConfig {

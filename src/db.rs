@@ -164,6 +164,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
             duration_ms INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(plugin, task, started_at DESC);
+        -- list_runs 的四分支写法要能吃上索引（安全审计 H13）：
+        -- 带 id 才能免掉 ORDER BY 的临时 B 树。
+        CREATE INDEX IF NOT EXISTS idx_runs_plugin_started ON runs(plugin, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_plugin_task_started ON runs(plugin, task, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_task_started ON runs(task, started_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
 
         -- 第三十一轮：**面板级推送**。
@@ -1190,17 +1195,42 @@ pub fn list_runs(
     limit: i64,
 ) -> rusqlite::Result<Vec<RunRecord>> {
     let conn = db.lock().unwrap();
-    // 两个条件都用「空则不筛」的写法，省掉四种 SQL 组合
-    let sql = format!(
-        "SELECT {RUN_COLS} FROM runs \
-         WHERE (?1 IS NULL OR plugin = ?1) AND (?2 IS NULL OR task = ?2) \
-         ORDER BY started_at DESC, id DESC LIMIT ?3"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let it = stmt.query_map(params![plugin, task, limit], row_to_run)?;
-    it.collect()
+    // ⚠ 四种组合分别拼 SQL，**不要**写成 `(?1 IS NULL OR plugin = ?1)`。
+    //
+    // SQLite 认不出「参数为空就不筛」这种写法，`idx_runs_task` 完全用不上。
+    // 实测（10 万行、output 8KB）：带 plugin+task 的那个形态 0.248s，等值写法
+    // 0.001s —— 差 250 倍；而 1 秒任务跑 30 天就是 260 万行。`/stop` 的 250ms
+    // 轮询正好走最慢的形态，而且它在 db.lock() 里跑，会阻塞所有其它 DB 访问。
+    let order = "ORDER BY started_at DESC, id DESC";
+    match (plugin, task) {
+        (Some(p), Some(t)) => {
+            let sql = format!(
+                "SELECT {RUN_COLS} FROM runs WHERE plugin = ?1 AND task = ?2 {order} LIMIT ?3"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let it = stmt.query_map(params![p, t, limit], row_to_run)?;
+            it.collect()
+        }
+        (Some(p), None) => {
+            let sql = format!("SELECT {RUN_COLS} FROM runs WHERE plugin = ?1 {order} LIMIT ?2");
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let it = stmt.query_map(params![p, limit], row_to_run)?;
+            it.collect()
+        }
+        (None, Some(t)) => {
+            let sql = format!("SELECT {RUN_COLS} FROM runs WHERE task = ?1 {order} LIMIT ?2");
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let it = stmt.query_map(params![t, limit], row_to_run)?;
+            it.collect()
+        }
+        (None, None) => {
+            let sql = format!("SELECT {RUN_COLS} FROM runs {order} LIMIT ?1");
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let it = stmt.query_map(params![limit], row_to_run)?;
+            it.collect()
+        }
+    }
 }
-
 pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
     let conn = db.lock().unwrap();
     let sql = format!("SELECT {RUN_COLS} FROM runs WHERE id = ?1");
@@ -1838,6 +1868,51 @@ mod tests {
 
     const NOW: &str = "2026-03-10 08:00:00";
 
+    #[test]
+    fn list_runs_query_plans_use_indexes() {
+        // 回归测试（安全审计 H13）：以前的写法是
+        //   WHERE (?1 IS NULL OR plugin = ?1) AND (?2 IS NULL OR task = ?2)
+        // SQLite 认不出「空则不筛」，索引全废 —— 10 万行时带 plugin+task 的形态
+        // 实测 0.248s，等值写法 0.001s。这条断言钉住"四种组合都要走索引"。
+        let dir = std::env::temp_dir().join(format!("panel-plan-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("plan.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        let conn = db.lock().unwrap();
+        let order = "ORDER BY started_at DESC, id DESC";
+        let cases = [
+            // 用字面量而不是占位符：EXPLAIN 也要绑定参数，写 ?1 会报参数个数不符。
+            format!("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE plugin = 'p' AND task = 't' {order} LIMIT 50"),
+            format!("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE plugin = 'p' {order} LIMIT 50"),
+            format!("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE task = 't' {order} LIMIT 50"),
+            format!("EXPLAIN QUERY PLAN SELECT id FROM runs {order} LIMIT 50"),
+        ];
+        for (i, sql) in cases.iter().enumerate() {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let plan: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            let joined = plan.join(" | ");
+            // 无过滤那一条（最后一条）允许「走索引的顺序扫描」：有 LIMIT 时
+            // 它提前终止，实测 1ms，是正确计划。其余三条必须是 SEARCH ... USING INDEX。
+            if i == cases.len() - 1 {
+                assert!(
+                    joined.contains("USING INDEX") || joined.contains("USING COVERING INDEX"),
+                    "无过滤的 list_runs 没走索引: {sql}\n  -> {joined}"
+                );
+            } else {
+                let uses_index = joined.contains("USING INDEX")
+                    || joined.contains("USING COVERING INDEX");
+                assert!(
+                    uses_index && !joined.contains("SCAN runs"),
+                    "带过滤的 list_runs 退化成全表扫描: {sql}\n  -> {joined}"
+                );
+            }
+        }
+    }
     #[test]
     fn wal_is_bounded() {
         // 回归测试：WAL 文件不设上限的话，SQLite 默认每 1000 页（≈4 MB）才 checkpoint，
