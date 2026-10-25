@@ -491,6 +491,8 @@ std 在 Unix 上的 `Instant` 是 `Timespec(i64 秒)`，`checked_add_duration` �
 | H13 | `list_runs` 按四种组合分别拼 SQL + 三条复合索引 + `EXPLAIN QUERY PLAN` 回归测试 |
 | H4 | 预算/墙钟中断计入 `stopped`（`Watchdog.interrupted`，`arm()` 复位），不再记失败/熔断/推送 |
 | H3（部分） | /stop 复位判据：没有 run 记录时不再当成"已收尾"，排队中的任务不会被 250ms 就清位。**全局单比特本身未改**，停 A 仍会打断 B |
+| H8 | 两条传输都关掉自动重定向，`do_http_fetch` 自己走 ≤3 跳，每跳重过 SSRF 判定；新增 `resolve_location` 处理四种形态 |
+| H9（部分） | 校验和从「代理优先」改成**直连优先**。⚠ 残留：直连不通时仍会退到代理，要彻底关掉得让 `fetch` 报告走的哪条路 |
 
 验证：`cargo test` 470 passed / 0 failed；clippy 干净；冒烟全绿；前端资源检查 287 项全过。
 

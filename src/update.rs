@@ -442,9 +442,16 @@ impl Update {
     }
 
     fn get_text(&self, url: &str) -> Result<String, String> {
-        // 校验和文件放在 github.com/releases/download 下 —— 那个 host 在国内网络
-        // 常常直连不通（实测 12s 超时），所以**代理优先**。
-        let (status, body) = self.fetch(url, "text/plain", 4 * 1024 * 1024, true, true)?;
+        // ⚠ 校验和改成**直连优先**（安全审计 H9）。
+        //
+        // 以前它和二进制一样是「代理优先」：一个被接管的代理可以同时返回假的
+        // SHA256SUMS 和与它匹配的假二进制 —— sha 比较必然通过，文档承诺的
+        // 「挡住传输被改、镜像被换」等于没写。
+        //
+        // ⚠ 残留缺口（记在 docs/review-qoder-261025.md）：直连不通时这里仍会
+        // 退到代理。要彻底关掉，得让 fetch 能报告"这次走的是哪条路"，
+        // 然后直连失败就拒绝更新（除非显式 PANEL_UPDATE_ALLOW_UNVERIFIED=1）。
+        let (status, body) = self.fetch(url, "text/plain", 4 * 1024 * 1024, false, true)?;
         if status != 200 {
             return Err(format!("HTTP {status}"));
         }
