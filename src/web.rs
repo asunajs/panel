@@ -3674,13 +3674,25 @@ async fn api_settings_get() -> Response {
             groups.push(it.group);
         }
     }
-    Json(json!({ "items": items, "groups": groups })).into_response()
+    Json(json!({
+        "items": items,
+        "groups": groups,
+        // 前端保存时要把它原样带回来（unpanel 2.6 的 CAS）。
+        "revision": crate::settings::current_revision(),
+    }))
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]
 struct SettingsPatch {
     #[serde(default)]
     values: std::collections::BTreeMap<String, String>,
+    /// 前端上次读到的 revision（unpanel 2.6）。
+    ///
+    /// 不给就按老语义直接写 —— CLI / 脚本 / 旧版前端仍然能用。
+    /// 给了就必须匹配，否则 409。
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 /// 保存一批设置。**全部校验通过才写**；被环境变量固定的项直接拒绝。
@@ -3691,13 +3703,19 @@ async fn api_settings_save(headers: HeaderMap, Json(patch): Json<SettingsPatch>)
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    match crate::settings::update(&patch.values) {
+    match crate::settings::update(&patch.values, patch.revision) {
         Ok(applied) => Json(json!({
             "ok": true,
             "restart": applied.restart,
             "live": applied.live,
+            // 把新 revision 回给前端：不回的话它手里的还是旧值，
+            // **下一次保存必然 409**。这是 CAS 最容易漏的一环。
+            "revision": crate::settings::current_revision(),
         }))
         .into_response(),
+        // 冲突要 409 而不是 400：前端据此提示「刷新后重试」，
+        // 而 400 会被当成「你填的值不合法」。
+        Err(e) if e.starts_with("EDIT_CONFLICT") => json_error(StatusCode::CONFLICT, e),
         Err(e) => json_error(StatusCode::BAD_REQUEST, e),
     }
 }

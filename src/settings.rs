@@ -538,6 +538,11 @@ pub fn load_file() -> BTreeMap<String, String> {
 /// 现在只有 `save_file_at` 和测试在调它；第二步做 CAS 时，HTTP 写接口会把它
 /// 暴露成 `revision` 字段发给前端。
 /// `DB_PATH` 环境变量，而那是进程级共享状态，并行跑测试会互相干扰。
+/// 当前 revision（给 HTTP 层回给前端用）。
+pub fn current_revision() -> u64 {
+    current_revision_at(&file_path())
+}
+
 fn current_revision_at(path: &std::path::Path) -> u64 {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return 0;
@@ -547,10 +552,6 @@ fn current_revision_at(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// 原子写入：先写同目录临时文件，再 rename。权限 0600（可能含地址白名单）。
-pub fn save_file(values: &BTreeMap<String, String>) -> std::io::Result<()> {
-    save_file_at(&file_path(), values)
-}
 
 /// `save_file` 的真实实现（带路径参数，理由同 `current_revision_at`）。
 fn save_file_at(path: &std::path::Path, values: &BTreeMap<String, String>) -> std::io::Result<()> {
@@ -667,7 +668,34 @@ pub struct Applied {
 /// 把一批改动写进设置文件。
 ///
 /// 全部校验通过才写（不做「改一半」）；被环境变量固定的键直接拒绝。
-pub fn update(patch: &BTreeMap<String, String>) -> Result<Applied, String> {
+/// CAS 判定（unpanel 2.6）。抽成纯函数是为了能测：`update` 走的是 `file_path()`，
+/// 那条路要靠环境变量，测试里不好摆。
+///
+/// `expected` 为 `None` = 调用方不要 CAS（CLI / 旧前端），直接放行。
+fn check_revision(expected: Option<u64>, current: u64) -> Result<(), String> {
+    match expected {
+        None => Ok(()),
+        Some(exp) if exp == current => Ok(()),
+        // 409：前端据此提示「别人刚改过，请刷新后重试」。
+        // 不能静默覆盖 —— 那正是这条要修的原始问题。
+        Some(exp) => Err(format!(
+            "EDIT_CONFLICT: 设置已被别处改过（你看到的是 revision {exp}，当前是 {current}），\
+             请刷新后重试"
+        )),
+    }
+}
+
+/// 写设置时的串行闸（unpanel 2.6）。
+///
+/// 光有 revision 比对还不够：`update` 是「读 revision → 比对 → 写」三步，
+/// 两个请求同时进来会都读到同一个旧 revision、都比对通过。
+/// 面板只有这一个进程，一把进程内互斥锁就够。
+static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn update(
+    patch: &BTreeMap<String, String>,
+    expected_revision: Option<u64>,
+) -> Result<Applied, String> {
     let mut normalized: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in patch {
         let Some(def) = DEFS.iter().find(|d| d.key == k) else {
@@ -685,11 +713,17 @@ pub fn update(patch: &BTreeMap<String, String>) -> Result<Applied, String> {
         return Ok(Applied::default());
     }
 
+    // 从这里开始是「读-比-写」，必须串行（见 UPDATE_LOCK 的说明）。
+    let _gate = UPDATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = file_path();
+    let current = current_revision_at(&path);
+    check_revision(expected_revision, current)?;
+
     let mut values = load_file();
     for (k, v) in &normalized {
         values.insert(k.clone(), v.clone());
     }
-    save_file(&values).map_err(|e| format!("写设置文件失败: {e}"))?;
+    save_file_at(&path, &values).map_err(|e| format!("写设置文件失败: {e}"))?;
 
     // 热改：不碰 env（env 是启动期的快照，改它会让「同一个进程里两处读到不同值」）。
     let mut applied = Applied::default();
@@ -860,6 +894,18 @@ pub fn restart_process_at(exe: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn check_revision_is_opt_in_and_strict() {
+        // 不传 = 老语义，放行（CLI / 旧前端不能因为加了 CAS 就坏掉）
+        assert!(check_revision(None, 7).is_ok());
+        // 匹配 = 放行
+        assert!(check_revision(Some(7), 7).is_ok());
+        // 不匹配 = EDIT_CONFLICT（前缀是 HTTP 层判 409 的依据，不能改）
+        let e = check_revision(Some(6), 7).unwrap_err();
+        assert!(e.starts_with("EDIT_CONFLICT"), "实际: {e}");
+        assert!(e.contains("revision 6") && e.contains("当前是 7"));
+    }
+
+    #[test]
     fn save_file_bumps_revision_and_keeps_old_files_loadable() {
         // unpanel 2.6 第一步：revision 是 CAS 的基础，必须每次写都 +1；
         // 而**老文件**（没有 revision 字段）读出来要是 0，不能因此丢设置。
@@ -1003,7 +1049,7 @@ mod tests {
     fn unknown_key_is_rejected() {
         let mut patch = BTreeMap::new();
         patch.insert("PANEL_TOKEN".to_string(), "x".to_string());
-        let err = update(&patch).unwrap_err();
+        let err = update(&patch, None).unwrap_err();
         assert!(err.contains("未知"), "凭据不能通过设置接口写入: {err}");
     }
 

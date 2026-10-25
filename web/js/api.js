@@ -510,9 +510,19 @@ export function getSettings() {
   return request('/api/settings', { panel: true });
 }
 
-/** 保存一批设置。`values` 是 `{KEY: "value"}`。返回 `{ok, restart:[], live:[]}`。 */
-export function saveSettings(values) {
-  return request('/api/settings/save', { method: 'POST', panel: true, body: { values } });
+/**
+ * 保存一批设置。`values` 是 `{KEY: "value"}`。
+ *
+ * `revision` 是上次 `getSettings()` 读到的版本号（unpanel 2.6 的 CAS）。
+ * 传了就必须匹配，否则后端回 409 —— 那是「别人刚改过」，不是「你填错了」。
+ * 不传仍按老语义直接写（脚本/CLI 用得上）。
+ *
+ * 返回 `{ok, restart:[], live:[], revision}`。**调用方要把新的 revision 存下来**，
+ * 否则下一次保存必然 409。
+ */
+export function saveSettings(values, revision) {
+  const body = revision == null ? { values } : { values, revision };
+  return request('/api/settings/save', { method: 'POST', panel: true, body });
 }
 
 /**

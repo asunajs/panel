@@ -378,6 +378,9 @@ function collectChanges(root, items) {
  */
 export async function renderSettings(root, ctx) {
   const res = await getSettings();
+  // CAS 用的版本号（unpanel 2.6）：保存时原样带回去，成功后换成新的。
+  // 拿不到（旧后端）就是 null，保存走老语义，不阻塞。
+  let revision = res && typeof res.revision === 'number' ? res.revision : null;
   if (!res || !res.ok) {
     root.innerHTML = `<div class="section"><div class="card">
         <p class="err-text" role="alert">读不到设置：${esc((res && res.error) || '未知错误')}</p>
@@ -491,14 +494,20 @@ async function save(root, ctx, items) {
     if (el) el.textContent = '';
   };
   clearErr();
-  const res = await saveSettings(values);
+  const res = await saveSettings(values, revision);
+  // ⚠ 成功之后必须把新 revision 存下来，否则**下一次保存必然 409**。
+  if (res && res.ok && typeof res.revision === 'number') revision = res.revision;
   btn.disabled = false;
   btn.textContent = '保存';
   if (!res || !res.ok) {
     // 同一句话进两处：toast 会自己消失，而失败原因用户往往要照着改；
     // role=alert 让屏幕阅读器也能听到（原来只有 3.2 秒的 toast，AT 用户
     // 等于什么都不知道）。
-    saveError = `保存失败：${(res && res.error) || '未知错误'}`;
+    // 409 = 别人刚改过，和「你填的值不合法」是两回事，提示要分开。
+    const conflict = res && res.status === 409;
+    saveError = conflict
+      ? '设置已被别处改过，请刷新页面后重试（你的改动没有丢，重新填一次即可）'
+      : `保存失败：${(res && res.error) || '未知错误'}`;
     // 重新查一次节点：请求期间用户可能切了页签（paint 换掉了整段 DOM），
     // 手里那个引用已经脱离文档了。saveError 还在，下一次 paint 会把它带回来。
     const cur = root.querySelector('#s-err');
