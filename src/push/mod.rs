@@ -462,6 +462,7 @@ fn handle_run(
         &ev.task,
         &rule.channels,
         cfg.daily_cap,
+        false,
     );
     if results.iter().any(|r| r.outcome != "skipped") {
         last.insert(key, Instant::now());
@@ -497,6 +498,7 @@ fn handle_breaker(db: &Db, ev: &BreakerEvent) {
         &ev.task,
         &rule.channels,
         cfg.daily_cap,
+        false,
     );
     log_summary("熔断", &ev.plugin, &ev.task, &results);
 }
@@ -690,6 +692,9 @@ fn dispatch(
     task: &str,
     only: &[String],
     daily_cap: u64,
+    // 是不是「重试」。重试**不能**再写一条 outbox —— 否则每重试一次就多一条，
+    // 越重试越多（端到端测试发现的：5 秒一轮，outbox 每轮翻一倍）。
+    retrying: bool,
 ) -> Vec<ChannelResult> {
     let now_ms = now_ms();
     let at = now_str();
@@ -794,7 +799,7 @@ fn dispatch(
         // 失败的通知留一条 outbox（unpanel 2.7）：光有一行投递记录只能看到
         // 「失败了」，**没法重发** —— 而通知的失败往往是一次性的（对端抖了一下）。
         // 写失败不影响发送流程本身。
-        if outcome == "failed" {
+        if outcome == "failed" && !retrying {
             if let Err(e) = db::record_push_outbox(db, plugin, task, kind, id, title, text, &note) {
                 crate::log::plog!("push", warn, "写 outbox 失败（{id}）: {e}");
             }
@@ -1177,9 +1182,9 @@ pub fn retry_due(db: &Db) -> (usize, usize) {
                 sent += 1;
                 crate::log::plog!("push", info, "重试成功：{} / {}", row.plugin, row.channel);
             }
-            Ok(r) => {
+            Ok(_) => {
                 failed += 1;
-                schedule_next(db, &row, &r.note);
+                // 记账已经在 retry_outbox 里做过了，这里只计数。
             }
             Err(e) => {
                 failed += 1;
@@ -1197,6 +1202,7 @@ fn schedule_next(db: &Db, row: &crate::db::PushOutboxRow, note: &str) {
     let Some(backoff) = RETRY_BACKOFF_SECS.get(idx) else {
         // 退避表用完了：不再自动重试，但行留着（人能看见、能手动重发）。
         let _ = crate::db::reschedule_push_outbox(db, &row.id, note, "9999-12-31 23:59:59");
+        // 上面这行用 `_ =` 是有意的：这里失败只影响「不再自动重试」这个标记本身，
         crate::log::plog!(
             "push",
             warn,
@@ -1209,7 +1215,10 @@ fn schedule_next(db: &Db, row: &crate::db::PushOutboxRow, note: &str) {
     let next = (chrono::Local::now() + chrono::Duration::seconds(*backoff))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
-    let _ = crate::db::reschedule_push_outbox(db, &row.id, note, &next);
+    if let Err(e) = crate::db::reschedule_push_outbox(db, &row.id, note, &next) {
+        // 排不进下一次 ⇒ 这条会被反复重试。必须喊出来，不能吞掉。
+        crate::log::plog!("push", error, "排下一次重试失败（{}）: {e}", row.id);
+    }
 }
 /// 重发 outbox 里的一条（unpanel 2.7）。
 ///
@@ -1233,6 +1242,7 @@ pub fn retry_outbox(db: &Db, id: &str) -> Result<ChannelResult, String> {
         &row.task,
         &only,
         cfg.daily_cap,
+        true, // 重试：别再写一条 outbox
     );
     let Some(r) = results.into_iter().next() else {
         // 渠道已经从配置里删了：这条重发不出去，也不该一直挂着。
@@ -1242,7 +1252,10 @@ pub fn retry_outbox(db: &Db, id: &str) -> Result<ChannelResult, String> {
     if r.outcome == "sent" {
         let _ = crate::db::delete_push_outbox(db, id);
     } else {
-        let _ = crate::db::bump_push_outbox(db, id, &r.note);
+        // ⚠ 这里**只能有一处**记账。原来这里 bump 一次、retry_due 又 schedule 一次，
+        // 结果是每轮重试 attempts 加 2（端到端测试发现的：8 秒内 attempts 就到了 3）。
+        // 现在统一走 schedule_next：次数 +1、排下一次、放租约，一步到位。
+        schedule_next(db, &row, &r.note);
     }
     Ok(r)
 }
@@ -1259,7 +1272,9 @@ pub fn send_test(db: &Db) -> TestOutcome {
     }
     let title = format!("{} · 试发", effective_title(&cfg));
     let text = "这是一条试发的推送。\n收到就说明配置对了。";
-    let results = dispatch(db, &cfg.channels, &title, text, "test", "", "", &[], cfg.daily_cap);
+    let results = dispatch(
+        db, &cfg.channels, &title, text, "test", "", "", &[], cfg.daily_cap, false,
+    );
     let sent = results.iter().filter(|r| r.outcome == "sent").count();
     let failed = results.iter().filter(|r| r.outcome == "failed").count();
     let skipped = results.iter().filter(|r| r.outcome == "skipped").count();

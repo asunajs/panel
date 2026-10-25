@@ -1370,6 +1370,8 @@ pub struct PushOutboxRow {
     pub body: String,
     pub reason: String,
     pub attempts: i64,
+    /// 下一次自动重试的时刻（NULL = 还没排）。
+    pub next_try_at: Option<String>,
 }
 
 /// 记一条发不出去的通知。返回 id。
@@ -1413,7 +1415,7 @@ pub fn record_push_outbox(
 pub fn list_push_outbox(db: &Db, limit: i64) -> rusqlite::Result<Vec<PushOutboxRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts, next_try_at \
          FROM push_outbox ORDER BY at DESC, id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![limit], |r| {
@@ -1428,6 +1430,7 @@ pub fn list_push_outbox(db: &Db, limit: i64) -> rusqlite::Result<Vec<PushOutboxR
             body: r.get(7)?,
             reason: r.get(8)?,
             attempts: r.get(9)?,
+            next_try_at: r.get(10)?,
         })
     })?;
     rows.collect()
@@ -1437,7 +1440,7 @@ pub fn list_push_outbox(db: &Db, limit: i64) -> rusqlite::Result<Vec<PushOutboxR
 pub fn get_push_outbox(db: &Db, id: &str) -> rusqlite::Result<Option<PushOutboxRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts, next_try_at \
          FROM push_outbox WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |r| {
@@ -1452,6 +1455,7 @@ pub fn get_push_outbox(db: &Db, id: &str) -> rusqlite::Result<Option<PushOutboxR
             body: r.get(7)?,
             reason: r.get(8)?,
             attempts: r.get(9)?,
+            next_try_at: r.get(10)?,
         })
     })?;
     rows.next().transpose()
@@ -1466,7 +1470,7 @@ pub fn get_push_outbox(db: &Db, id: &str) -> rusqlite::Result<Option<PushOutboxR
 pub fn due_push_outbox(db: &Db, now: &str, max_attempts: i64) -> rusqlite::Result<Vec<PushOutboxRow>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts \
+        "SELECT id, at, plugin, task, kind, channel, title, body, reason, attempts, next_try_at \
          FROM push_outbox \
          WHERE attempts < ?2 \
            AND (next_try_at IS NULL OR next_try_at <= ?1) \
@@ -1485,6 +1489,7 @@ pub fn due_push_outbox(db: &Db, now: &str, max_attempts: i64) -> rusqlite::Resul
             body: r.get(7)?,
             reason: r.get(8)?,
             attempts: r.get(9)?,
+            next_try_at: r.get(10)?,
         })
     })?;
     rows.collect()
@@ -1526,16 +1531,6 @@ pub fn delete_push_outbox(db: &Db, id: &str) -> rusqlite::Result<bool> {
     Ok(conn.execute("DELETE FROM push_outbox WHERE id = ?1", rusqlite::params![id])? > 0)
 }
 
-/// 重发仍失败：记一次尝试，把新的原因写回去（不清掉，还能再试）。
-pub fn bump_push_outbox(db: &Db, id: &str, reason: &str) -> rusqlite::Result<()> {
-    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let conn = db.lock().unwrap();
-    conn.execute(
-        "UPDATE push_outbox SET attempts = attempts + 1, reason = ?2, retried_at = ?3 WHERE id = ?1",
-        rusqlite::params![id, reason, at],
-    )?;
-    Ok(())
-}
 
 /// 记一条设置改动（unpanel 2.6 第三步）。
 ///
@@ -2370,7 +2365,7 @@ mod tests {
         assert_eq!(one.title, "标题");
 
         // 重发仍失败：次数 +1，原因被更新，行**留着**
-        bump_push_outbox(&db, &id, "还是超时").unwrap();
+        reschedule_push_outbox(&db, &id, "还是超时", "2030-01-01 00:00:00").unwrap();
         let after = get_push_outbox(&db, &id).unwrap().unwrap();
         assert_eq!(after.attempts, 2);
         assert_eq!(after.reason, "还是超时");
