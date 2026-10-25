@@ -492,10 +492,17 @@ function parseHash() {
 }
 
 let cleanup = null;
+/// 路由世代号（安全审计 M16）：每次 route() 自增。
+///
+/// render 都是 async 的，await 期间用户可能已经切走。没有世代号的话，
+/// 过期的那次渲染会把 cleanup 写进全局，覆盖掉新视图的 —— 新视图的 SSE
+/// 没人关，旧视图的又被当成新的关掉，切一次泄漏一条长连接。
+let routeGen = 0;
 /// 是不是第一次进 route()。首次加载不抢焦点（见 route() 里那段说明）。
 let firstRoute = true;
 
 async function route() {
+  const gen = ++routeGen;
   const { view, params } = parseHash();
 
   if (typeof cleanup === 'function') {
@@ -533,19 +540,35 @@ async function route() {
             ? pluginNavLabel(params.name)
             : TITLES[view] || '面板';
 
+  let next = null;
   try {
-    if (view === 'dashboard') cleanup = await renderDashboard(root);
-    else if (view === 'tasks') cleanup = await taskList.render(root, ctx);
-    else if (view === 'task-editor') cleanup = await taskEditor.render(root, ctx, params);
-    else if (view === 'scripts') cleanup = await scriptList.render(root, ctx);
-    else if (view === 'script-editor') cleanup = await scriptEditor.render(root, ctx, params);
-    else if (view === 'plugins') cleanup = await pluginList.render(root, ctx);
-    else if (view === 'market') cleanup = await market.render(root, ctx);
-    else if (view === 'logs') cleanup = await logView.render(root, ctx, params);
-    else if (view === 'plugin-source') cleanup = await pluginSource.render(root, ctx, params);
-    else if (view === 'plugin-page') cleanup = renderPluginPage(root, params);
+    if (view === 'dashboard') next = await renderDashboard(root);
+    else if (view === 'tasks') next = await taskList.render(root, ctx);
+    else if (view === 'task-editor') next = await taskEditor.render(root, ctx, params);
+    else if (view === 'scripts') next = await scriptList.render(root, ctx);
+    else if (view === 'script-editor') next = await scriptEditor.render(root, ctx, params);
+    else if (view === 'plugins') next = await pluginList.render(root, ctx);
+    else if (view === 'market') next = await market.render(root, ctx);
+    else if (view === 'logs') next = await logView.render(root, ctx, params);
+    else if (view === 'plugin-source') next = await pluginSource.render(root, ctx, params);
+    else if (view === 'plugin-page') next = renderPluginPage(root, params);
     else if (view === 'push') await renderPush(root, ctx);
     else if (view === 'settings') await renderSettings(root, ctx);
+
+    // 世代号校验（安全审计 M16）：上面的 render 都是 await，期间用户可能已经切走。
+    // 过期的那次渲染返回的 cleanup 必须**立刻执行**，不能存进全局 ——
+    // 否则它开的 SSE / 定时器永远没人关，切一次泄漏一条。
+    if (gen !== routeGen) {
+      if (typeof next === 'function') {
+        try {
+          next();
+        } catch {
+          /* 清理失败不该阻断切换 */
+        }
+      }
+      return;
+    }
+    cleanup = next;
   } catch (e) {
     // 视图里任何没被接住的异常：给出可读的错误，而不是一个空白页
     root.innerHTML = `<div class="card"><span class="badge failed">视图渲染失败</span>
