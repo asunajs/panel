@@ -224,14 +224,14 @@ fn load_one(tasks_dir: &Path, abs: &Path) -> Option<ScriptFile> {
         s.push(".task");
         PathBuf::from(s)
     };
-    let source = if kind == ScriptKind::Exe {
-        std::fs::read_to_string(&sidecar).ok()
-    } else {
-        match std::fs::read_to_string(abs) {
-            Ok(s) => Some(s),
-            // 文本种类读不出来时也给边车一次机会（比如二进制里塞了个 .ps1 名的文件）
-            Err(_) => std::fs::read_to_string(&sidecar).ok(),
-        }
+    // 顺序很重要：**边车优先**（存在就是显式覆盖），否则读文件本身。
+    //
+    // 不能因为 `kind == Exe` 就只读边车 —— `.ps1` / `.cmd` 也是 Exe 种类，
+    // 而它们是文本，头部直接写在文件里（`# @cron ...`）才是自然的写法。
+    // 只有真正读不出文本的二进制（`.exe`）才**必须**靠边车。
+    let source = match std::fs::read_to_string(&sidecar) {
+        Ok(s) => Some(s),
+        Err(_) => std::fs::read_to_string(abs).ok(),
     };
     let Some(source) = source else {
         return Some(ScriptFile {
@@ -444,13 +444,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `.ps1` / `.cmd` 是文本：头部直接写在文件里，**不需要边车**。
+    #[test]
+    fn text_based_exe_kinds_take_the_header_inline() {
+        let dir = std::env::temp_dir().join(format!("panel-sc3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("hello.ps1"),
+            "# @cron @every 1s\n# @runtime exe\nWrite-Output 'hi'\n",
+        )
+        .unwrap();
+
+        let files = scan(&dir);
+        assert_eq!(files.len(), 1);
+        let f = &files[0];
+        assert!(f.valid, "{:?}", f.error);
+        assert_eq!(f.header.cron.as_deref(), Some("@every 1s"));
+        assert_eq!(f.runtime, ScriptRuntime::Exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 没有边车的二进制：**列出来、能手动跑，但不是错误**。
     #[test]
     fn exe_without_a_sidecar_is_listed_but_unscheduled() {
         let dir = std::env::temp_dir().join(format!("panel-sc2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("tool.exe"), [0x4d, 0x5a, 0x00, 0x00]).unwrap();
+        // 故意不是 UTF-8：`0x4d 0x5a`（`MZ`）其实是合法 UTF-8，测不出「读不出文本」这条路径。
+        std::fs::write(dir.join("tool.exe"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
 
         let files = scan(&dir);
         assert_eq!(files.len(), 1);

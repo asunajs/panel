@@ -209,6 +209,29 @@ jobs:
           log('RELIMP-OK ' + twice(21));
           '@ | Set-Content -Encoding utf8 (Join-Path $plugins 'js/relimp.js')
 
+          # issue #11 的回归：脚本任务在 Windows 上曾经是死路。三条路径各钉一个：
+          #   1) `.js` + 内嵌 QuickJS（不需要外部 Node）
+          #   2) `.ps1` + exe（走 powershell -File，头部写在文件里）
+          #   3) `.cmd` + exe（走 cmd /c，`.cmd` 没有 # 注释，所以用边车头部）
+          @'
+          // @cron @every 1s
+          // @runtime quickjs
+          log('QJS-SCRIPT-OK ' + (6 * 7));
+          '@ | Set-Content -Encoding utf8 (Join-Path $tasks 'qjs.js')
+          @'
+          # @cron @every 1s
+          # @runtime exe
+          Write-Output 'PS1-SCRIPT-OK 42'
+          '@ | Set-Content -Encoding utf8 (Join-Path $tasks 'hello.ps1')
+          @'
+          @echo off
+          echo CMD-SCRIPT-OK 42
+          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'hello.cmd')
+          @'
+          # @cron @every 1s
+          # @runtime exe
+          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'hello.cmd.task')
+
           $env:DB_PATH = Join-Path $tmp 'panel.db'
           $env:PANEL_LOG_DIR = Join-Path $tmp 'logs'
           $env:PLUGINS_DIR = $plugins
@@ -246,6 +269,41 @@ jobs:
               throw '相对 import 没跑通：日志里没有 RELIMP-OK 42（issue #1 回归）'
             }
             Write-Host 'ok: 相对 import 跑通了（./lib/math.js 解析成功）'
+
+            # 脚本任务三条路径。启动 + 首轮调度要几秒，给 60 秒窗口。
+            # ⚠ 不要用「看到第一条就 break」的写法（我自己踩过：那样只能证明跑过一次）。
+            $want = @{
+              'QJS-SCRIPT-OK 42' = '`.js` + 内嵌 QuickJS'
+              'PS1-SCRIPT-OK 42' = '`.ps1` + exe（powershell -File）'
+              'CMD-SCRIPT-OK 42' = '`.cmd` + exe（cmd /c，边车头部）'
+            }
+            $seen = @{}
+            for ($i = 0; $i -lt 120; $i++) {
+              Start-Sleep -Milliseconds 500
+              $raw = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+              foreach ($k in $want.Keys) {
+                if ($raw -match [regex]::Escape($k)) { $seen[$k] = $true }
+              }
+              if ($seen.Count -eq $want.Count) { break }
+            }
+            foreach ($k in $want.Keys) {
+              if (-not $seen.ContainsKey($k)) {
+                Write-Host '--- stdout ---'; Get-Content $outLog -ErrorAction SilentlyContinue
+                throw ("脚本任务没跑通：{0} 没出现 {1}（issue #11 回归）" -f $want[$k], $k)
+              }
+              Write-Host ('ok: ' + $want[$k] + ' 跑通了')
+            }
+            # 再确认它**不是只跑一次**：等 4 秒，同一标记至少出现两次。
+            Start-Sleep -Seconds 4
+            $raw2 = Get-Content $outLog -Raw -ErrorAction SilentlyContinue
+            foreach ($k in $want.Keys) {
+              $n = ([regex]::Matches($raw2, [regex]::Escape($k))).Count
+              if ($n -lt 2) {
+                Write-Host '--- stdout ---'; Get-Content $outLog -ErrorAction SilentlyContinue
+                throw ("{0} 只出现了 {1} 次：任务没有按 @every 1s 重复触发" -f $k, $n)
+              }
+              Write-Host ('ok: ' + $k + ' 重复触发了 ' + $n + ' 次')
+            }
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
