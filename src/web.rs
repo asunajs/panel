@@ -4160,6 +4160,12 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         "plugin_ui_origin": st.plugin_ui_origin,
         "uptime_secs": st.started.elapsed().as_secs(),
         "ticks": st.ticks.load(Ordering::Relaxed),
+        // 存储读数（issue #9）：高频任务会把 `runs` 表撑大，用户得能自己看见。
+        // 取不到就是 null —— 读数缺失不该让整个 /api/state 失败。
+        "storage": match db::storage_stats(&st.db) {
+            Ok((rows, bytes)) => json!({ "runs_rows": rows, "db_bytes": bytes }),
+            Err(_) => serde_json::Value::Null,
+        },
         // 鉴权**永远是开的**（没有「本机免登录」这种模式了），所以这里不再报
         // `enabled` —— 前端也就没有「本机免登录」那个徽标分支可走（见 app.js）
         "auth": {

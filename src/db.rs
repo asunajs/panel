@@ -1640,7 +1640,20 @@ pub fn get_run(db: &Db, id: &str) -> rusqlite::Result<Option<RunRecord>> {
 ///
 /// 返回删掉几条。**只按时间删，不按"日志还在不在"删** —— 记录的价值恰恰在
 /// 日志过期之后。
-pub fn prune_runs(db: &Db, keep_days: i64, now: &str) -> rusqlite::Result<usize> {
+/// 运行记录清理，**两个维度取先到者**（issue #9）。
+///
+/// 只有天数是不够的：`@every 50ms` 那种任务 30 天能写 15 GB，而低配设备正是这个
+/// 产品的目标机型。实测 3 小时合成负载写进 63.4 MB（约 271 字节/条）。
+///
+/// 为什么保留「天数」而不直接改成条数：日志只留 7 天、记录留 30 天是**刻意的**
+/// —— 日志过期后记录还在，界面才能说清「这次跑过、日志已过期」。条数上限只是兜底，
+/// 正常情况下不该触发。
+pub fn prune_runs_capped(
+    db: &Db,
+    keep_days: i64,
+    keep_rows: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
     let cutoff = chrono::NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M:%S")
         .map(|t| {
@@ -1649,7 +1662,42 @@ pub fn prune_runs(db: &Db, keep_days: i64, now: &str) -> rusqlite::Result<usize>
                 .to_string()
         })
         .unwrap_or_else(|_| now.to_string());
-    conn.execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])
+    let mut removed = conn.execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])?;
+
+    if let Some(cap) = keep_rows {
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+        let total = total.max(0) as u64;
+        if total > cap {
+            let excess = total - cap;
+            // ⚠ 不能按 `id` 排序：`runs.id` 是 **TEXT**（不是自增整数），
+            // 字典序不等于写入顺序。按 `started_at` 升序才是「最老的先删」，
+            // `id` 只做同一秒内的稳定 tiebreak。
+            // 先选出要删的 id 再删，避免依赖 `DELETE ... LIMIT` 的编译选项。
+            removed += conn.execute(
+                "DELETE FROM runs WHERE id IN (\
+                   SELECT id FROM runs ORDER BY started_at ASC, id ASC LIMIT ?1)",
+                params![excess as i64],
+            )?;
+        }
+    }
+    Ok(removed)
+}
+
+/// 存储读数（issue #9）：`runs` 行数 + 主库字节数。
+///
+/// 为什么要在 `/api/state` 里报：高频任务把库撑到几十 MB 时，用户是靠外部脚本
+/// `stat` 文件才发现的。这是**可观测性**，不是新功能。
+///
+/// 用 `PRAGMA page_count * page_size` 而不是读文件：不依赖路径，也不受 WAL 影响。
+pub fn storage_stats(db: &Db) -> rusqlite::Result<(u64, u64)> {
+    let conn = db.lock().unwrap();
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok((
+        rows.max(0) as u64,
+        (pages.max(0) as u64) * (page_size.max(0) as u64),
+    ))
 }
 
 /// 面板重启后，把**上一轮留下的**未结束记录收尾。
@@ -3212,5 +3260,60 @@ mod tests {
         assert_eq!(recent_push_deliveries(&db, 10).unwrap().len(), 2);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 条数闸门（issue #9）：超过上限时删**最老的**，且不影响天数维度。
+    ///
+    /// 特别注意：`runs.id` 是 TEXT，按 id 排序 ≠ 按时间排序 —— 这条用例就是钉它。
+    #[test]
+    fn prune_runs_drops_the_oldest_rows_beyond_the_cap() {
+        let dir = std::env::temp_dir().join(format!("panel-cap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cap.db");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            // id 故意用**反字典序**：z 开头的是最早的。按 id 排会删错。
+            for (i, letter) in ["z", "y", "x", "w", "v", "u", "t", "s", "r", "q"]
+                .iter()
+                .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO runs (id, plugin, task, kind, started_at, ok) \
+                     VALUES (?1, 'p', ?2, 'cron', ?3, 1)",
+                    params![letter, format!("t{i}"), format!("2026-10-26 10:00:{i:02}")],
+                )
+                .unwrap();
+            }
+        }
+        let (rows, _) = storage_stats(&db).unwrap();
+        assert_eq!(rows, 10);
+
+        // 上限 4：删掉最老的 6 条（t0..t5），留下 t6..t9
+        let removed = prune_runs_capped(&db, 30, Some(4), "2026-10-26 11:00:00").unwrap();
+        assert_eq!(removed, 6, "10 条留 4 条，该删 6 条");
+        let (rows, _) = storage_stats(&db).unwrap();
+        assert_eq!(rows, 4);
+        {
+            let conn = db.lock().unwrap();
+            let left: Vec<String> = conn
+                .prepare("SELECT task FROM runs ORDER BY started_at")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|x| x.unwrap())
+                .collect();
+            assert_eq!(left, vec!["t6", "t7", "t8", "t9"], "留下的必须是最新的 4 条");
+        }
+
+        // 再跑一次：已经在上限内，不能多删
+        let removed = prune_runs_capped(&db, 30, Some(4), "2026-10-26 11:00:00").unwrap();
+        assert_eq!(removed, 0, "已经在上限内，不能多删");
+
+        // 天数维度仍然有效（保留 0 天 ⇒ 全清），不能被条数闸门替掉
+        let removed = prune_runs_capped(&db, 0, None, "2026-10-26 11:00:00").unwrap();
+        assert_eq!(removed, 4, "天数维度不能被条数闸门替掉");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

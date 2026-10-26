@@ -12,7 +12,7 @@
     "host-api-run": "./bin/run.mjs"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=24"
   },
   "files": [
     "src",

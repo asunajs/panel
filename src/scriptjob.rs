@@ -102,6 +102,24 @@ pub fn run(
     let env = script_env(
         host, &abs, &data_dir, task_name, schedule, params, manual, run_id,
     );
+    // issue #11：非 Unix 平台上 `.js` 脚本任务是**死路**（外部 Node/Bun 只支持 Unix，
+    // 而 quickjs 对脚本无效），但原来这里复用的是插件那套提示「当前平台请用内嵌
+    // QuickJS」—— 照做会得到「@runtime quickjs 认不出来」。提示必须指向真能走的路。
+    #[cfg(not(unix))]
+    if matches!(rt, ScriptRuntime::Node | ScriptRuntime::Bun) {
+        return ScriptRun {
+            ok: false,
+            error: Some(format!(
+                "当前平台（非 Unix）跑不了 .js 脚本任务：外部 {} 运行时需要 fd 传递与进程组，\
+                 这些只有 Unix 有。可行的出路：① 把脚本改成 .py 或 .sh（要在系统里装对应\
+                 解释器）；② 把这段逻辑写成插件（内嵌 QuickJS，任何平台都能跑）。\
+                 注意：`@runtime quickjs` 对脚本任务无效，改它只会得到「非法头部」。",
+                if rt == ScriptRuntime::Bun { "Bun" } else { "Node" }
+            )),
+            output: String::new(),
+        };
+    }
+
     match rt {
         ScriptRuntime::Node | ScriptRuntime::Bun => {
             let engine = if rt == ScriptRuntime::Bun {

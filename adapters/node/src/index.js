@@ -17,6 +17,8 @@
 //   - handler 正常返回 = 本次成功；抛异常 = 失败（运行器捕获、记 last_error，不退出进程）
 //   - payload 固定 {name, plugin, expr, runs, scheduledAt, firedAt, lateMs}
 
+// ⚠ 必须第一个 import：它要赶在 sqlite.js（静态 import `node:sqlite`）之前报错。
+import './version.js';
 import { createLogger, fmtValue, fmtArgs, redact, TYPES } from './log.js';
 import { Scheduler, fmtMs, fmtClock, fmtError, fmtErrorLine } from './scheduler.js';
 import { CronSchedule, Schedule, parseDuration } from './cron.js';

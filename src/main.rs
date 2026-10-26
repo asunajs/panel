@@ -752,6 +752,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<i64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(30);
+    // 第二个维度（issue #9）：天数兜不住高频任务。`@every 50ms` 一个任务 30 天
+    // 能写 15 GB，而低配设备正是这个产品的目标机型。默认 20 万条 ≈ 54 MB
+    // （实测约 271 字节/条）。正常情况下这个闸门不会触发 —— 日志留 7 天、记录留
+    // 30 天是刻意的，界面靠记录回答「这次跑过、日志已过期」。
+    // 设 0 表示**关掉**这个闸门（只按天数）。
+    let run_keep_rows: Option<u64> = std::env::var("RUN_KEEP_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v != 0);
+    let run_keep_rows = Some(run_keep_rows.unwrap_or(200_000));
 
     // 写一条 boot 记录，验证 Rust → SQLite 的写入链路
     db::upsert_task(&db, "boot", "kernel", "done", "{}", &started_at)?;
@@ -772,7 +782,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Ok(n) => crate::log::plog!("boot", warn, "收尾了 {n} 条上次没结束的运行记录"),
         Err(e) => crate::log::plog!("boot", warn, "收尾残留运行记录失败: {e}"),
     }
-    match db::prune_runs(&db, run_keep_days, &started_at) {
+    match db::prune_runs_capped(&db, run_keep_days, run_keep_rows, &started_at) {
         Ok(0) => {}
         Ok(n) => crate::log::plog!(
             "boot",
@@ -783,7 +793,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 运行期也要清理（以前只在启动时清一次）。
-    spawn_db_prune(db.clone(), run_keep_days);
+    spawn_db_prune(db.clone(), run_keep_days, run_keep_rows);
 
     // ---------- 2. 共享状态 ----------
     let registry: Registry = Arc::new(Mutex::new(Vec::new()));
@@ -2106,7 +2116,7 @@ fn spawn_max_rss_watchdog() {
 ///
 /// 为什么必须有：runs 表每次任务触发都写，50ms 级任务 24h 就有 180 万行、486MB。
 /// 只靠启动时 prune 的话，一台连续跑几个月的设备会在这张表上吃掉十几 GB。
-fn spawn_db_prune(db: crate::db::Db, keep_days: i64) {
+fn spawn_db_prune(db: crate::db::Db, keep_days: i64, keep_rows: Option<u64>) {
     let every = std::env::var("DB_PRUNE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -2119,7 +2129,7 @@ fn spawn_db_prune(db: crate::db::Db, keep_days: i64) {
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             // 每轮都记一条（哪怕是 0）：否则「线程没跑」和「没有过期记录」在日志里长得一样，
             // 排查时只能靠猜。一小时一行，不吵。
-            match crate::db::prune_runs(&db, keep_days, &now) {
+            match crate::db::prune_runs_capped(&db, keep_days, keep_rows, &now) {
                 Ok(n) => log::plog!(
                     "kernel",
                     info,

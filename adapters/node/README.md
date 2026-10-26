@@ -185,9 +185,19 @@ testdata/log-format-cases.json  八档 → 过滤级别、行格式、JSONL 字�
 
 ## 已知限制
 
-1. **这个适配器需要 Node 22.5+**：`node:sqlite`（`DatabaseSync`）是 Node 22 起内置的，本机 Node v24.16.0 实测通过；低于 22 没有这个模块（不引入 better-sqlite3，避免编译）。
+1. **这个适配器需要 Node 24+**（`engines.node: ">=24"`）。
+   `node:sqlite`（`DatabaseSync`）在 Node 22 上是**实验性**的，实测 22.11.0：
+   - 裸跑：`Error [ERR_UNKNOWN_BUILTIN_MODULE]: No such built-in module: node:sqlite`
+   - 加 `--experimental-sqlite`：**32 通过 / 6 失败** —— 其中 4 个是
+     `column index out of range`（22.x 与 24.x 的 `run()` 绑定参数语义不同），
+     2 个是子进程没有继承 flag
+
+   Node 24.22.1 上裸跑**全绿**。所以门槛是 24，不是 22.5。
+   `src/version.js` 会在加载时检查，低于 24 直接抛一条说明白的错误（而不是让用户在
+   `column index out of range` 里猜）。
+
    ⚠ 面板的**外部运行时**门槛更低（Node 20.6，因为它用 RPC 而不是 `node:sqlite`），
-   别把这两个版本要求混了：面板里的 Node 插件不需要 22.5。
+   别把这两个版本要求混了：面板里的 Node 插件不需要 24。
 2. **同步 `http_fetch` 会阻塞事件循环**：一次慢请求会推迟同轮其它任务（宿主同样如此）。因此**不能**同步请求本进程自己 `register_route` 注册的路由 —— 主线程被占住时内置 server 无法响应，会一直等到超时；跨进程（例如另一个进程里的面板 8787）没有这个问题。要自调用请用 `http_fetch_async`。
 3. **只支持 http/https**，不支持 `file://` 等；不做重定向策略配置（固定 follow）；请求体上限 1 MiB（入站）。
 4. **cron 到秒级**：不支持 `L/W/#`、`@reboot`、`@daily` 这类扩展；`next_after` 用分层跳转（月/日/时/分），上限 20 万步，解析期会拒绝永不触发的表达式。

@@ -28,13 +28,29 @@
 
 ## 二、拿到两个包
 
-包由 CI 构建（`.github/workflows/testkit.yml`），**不要用开发机交叉编的**：那边是
-arm64 macOS，编出来的产物没法冒烟。
+包由 CI 构建，**不要用开发机交叉编的**：那边是 arm64 macOS，编出来的产物没法冒烟。
 
-### 方式一：命令行（推荐）
+> ⚠ **别用「最新一次成功的 Testkit」**（issue #5）。Testkit 只在手动点的时候跑，
+> 所以它经常比当前 tag **旧好几天** —— 实测取到的是 `5a6dcaf`（v0.1.10），而 Release
+> 是 `589058e`（v0.1.11）。v0.1.10 的 QuickJS 档没注入 `setInterval`，压测插件当场
+> `ReferenceError` → `/perf` 503，看起来像产品 bug，其实是包拿错了。
+>
+> 规则：**包必须和被测 tag 同一个 commit。** 怎么核在下面「核对 commit」一节。
+
+### 方式一：Release 的 `-slim` 资产（首选）
+
+Release 除了正常产物，还有 `-slim` 档（`--no-default-features`，不带 TLS）——
+它和 tag 同源、不用等 CI、`build-info` 里 `live_supported=false` 可核对：
 
 ```bash
-gh run download -n plugin-panel-testkit      # 取最新一次成功的
+gh release download v0.1.11 -p '*slim*'
+```
+
+### 方式二：Testkit（要先核 commit）
+
+```bash
+gh run list --workflow=testkit.yml          # 先看 run 对应的 commit
+gh run download <run-id> -n plugin-panel-testkit
 ```
 
 只想要某一次：
@@ -44,14 +60,29 @@ gh run list --workflow=testkit.yml           # 看 run id
 gh run download <run-id> -n plugin-panel-testkit
 ```
 
-### 方式二：浏览器
+### 方式三：浏览器
 
 仓库 → **Actions** → 左边选 **Testkit** → **Run workflow** → 等绿 → 页面底部
-`Artifacts` 里下 `plugin-panel-testkit`。
+`Artifacts` 里下 `plugin-panel-testkit`。**同样要先核 commit。**
 
-### 方式三：没有 gh、也不方便登录
+### 方式四：没有 gh、也不方便登录
 
 那就只能请有仓库权限的人下载后传给你 —— Actions 的 artifact 需要登录才能下。
+
+### 核对 commit（必做）
+
+拿到包先跑一次，把 commit 和目标 tag 对上：
+
+```bash
+./plugin-panel-x86_64-linux-musl build-info
+# {"commit":"589058e…","features":[],"live_supported":false,"version":"0.1.11"}
+
+git rev-parse --short=12 v0.1.11    # 期望和上面 commit 一致
+```
+
+`commit` 字段是 `build.rs` 注入的（issue #3）。**对不上就换包，不要用**——
+否则报告里的「版本」这一栏没有意义，出了问题也没法归因。
+如果 `commit` 显示 `unknown`，说明那个包是更早的构建，同样不能用。
 
 ---
 
@@ -236,6 +267,7 @@ $env:TASKS_DIR="$env:TEMP\tasks"
 | 项目 | 结果 |
 |---|---|
 | 平台 | WSL2 Ubuntu（内核版本：`uname -r`） |
+| **包的 commit** | 从 `build-info` 抄（issue #3）；必须与目标 tag 一致，否则报告作废 |
 | 二进制 | x86_64-linux-musl |
 | rss_metric | VmRSS |
 | 起始 RSS | ? MB |
@@ -258,9 +290,15 @@ $env:TASKS_DIR="$env:TEMP\tasks"
   0.27 MB（基线 8.38 MB），于是一份**正确**的数据被判成「没有下降」。
   若纹丝不动，说明 Linux 也有类似的延迟回收，需要看 `/proc/<pid>/smaps` 里 `Pss`
   才准 —— 报告里附上。
-- **Q2 通过**：末段斜率接近 0，且没有单调上涨。「接近 0」用**同一份数据的噪声带**判定
-  （末段 2σ），不用写死的绝对量 —— 写死绝对值会和实测噪声脱节（issue #4）。
-  `scripts/endurance.py` 的判定就是这个口径；报告里要写清用的是哪个。
+- **Q2 通过**：`abs(末段涨幅) < max(0.08 MB, 2σ)`，且 `state_code` / `perf_code` 无异常、
+  fd 与线程数无增长。这就是 `scripts/endurance.py:825` 的口径，**文档与脚本只认这一条**
+  （issue #4）。
+  - 曾经这里写的是「末段斜率 ±0.5 MB/天以内」。那是错的：3 小时窗口的**分辨率本身**
+    就是 ±0.83 MB/天，比门槛还宽 —— 照字面执行的人必然判「不通过」，而那个「不通过」
+    不代表内存有问题（同期 fd 17→17、线程 12→12）。实测同一份数据：字面口径给
+    +1.32 MB/天「不达标」，脚本口径给 +0.04 MB「平台期」。
+  - 报告里必须带「本窗口分辨率」那一行，否则读者无法判断结论的置信度。
+  - **3 小时只是中间读数**，Q2 的终局结论必须来自 `--hours 8`。
 - **Q3 通过**：页面能打开、插件能建能跑，**并且一个用相对 import 的插件能加载成功**
   （issue #1 就是靠这一条才现形的）。
 

@@ -417,10 +417,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # node:sqlite 需要 Node 22.5+，别用 runner 自带的旧版本
+      # node:sqlite 在 22.x 是实验性的：`run()` 绑定参数会报 column index out of range，
+      # 子进程还要 --experimental-sqlite。所以门槛是 24（issue #6），不是 22.5。
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Node 适配器用例
         run: node test/run-tests.mjs
@@ -433,6 +434,44 @@ jobs:
       - name: 运行器的 --job（register_handler 的跨宿主等价物）
         run: node bin/run.mjs ../../plugins/js/panel-jobs.js --job 'echo=@every 1s' --duration 2
         working-directory: adapters/node
+
+  # ------------------------------------------------------------------
+  # Node 22：**门槛必须自己说出来**（issue #6）
+  #
+  # 22.x 上 node:sqlite 是实验性的，绑定参数会报 `column index out of range` ——
+  # 那种报错没人能联想到「版本太低」。所以这里不跑用例，只断言：
+  # 在 22 上加载适配层**必须**得到一条指出版本门槛的错误。
+  # ------------------------------------------------------------------
+  adapters-node22:
+    name: 跨运行时适配器（Node 22 必须明确拒绝）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 22 上加载必须报「需要 Node 24」
+        working-directory: adapters/node
+        run: |
+          set +e
+          out=$(node --input-type=module -e "await import('./src/index.js')" 2>&1)
+          code=$?
+          set -e
+          echo "--- 22 上的输出 ---"
+          echo "$out"
+          if [ $code -eq 0 ]; then
+            echo "::error::Node 22 居然加载成功了 —— 要么该把门槛降回 22，要么 version.js 没生效"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "需要 Node 24"; then
+            echo "::error::报错没有指出版本门槛（issue #6）：用户会看到 column index out of range 之类的天书"
+            exit 1
+          fi
+          echo "ok: 22 上给出了明确的版本门槛提示"
 
   # ------------------------------------------------------------------
   # 依赖漏洞门禁（安全审计 中14）
