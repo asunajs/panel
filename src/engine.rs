@@ -7074,6 +7074,7 @@ fn run_scratch_js(
     budget: Duration,
     code: &str,
     input: &str,
+    module_name: Option<&str>,
 ) -> Result<(), String> {
     let ctx = Context::full(rt).map_err(|e| format!("创建临时 Context 失败: {e}"))?;
 
@@ -7109,7 +7110,7 @@ fn run_scratch_js(
 
         wd.arm(budget);
         let eval = if looks_like_module(code) {
-            eval_as_module(&ctx, code, "<test-run>")
+            eval_as_module(&ctx, code, module_name.unwrap_or("<test-run>"))
         } else {
             ctx.eval::<(), _>(code)
                 .map_err(|e| render_exception(&ctx, &e))
@@ -7128,6 +7129,47 @@ fn run_scratch_js(
     })
 }
 
+/// 在一次性 Context 里跑一个**脚本任务**文件（`@runtime quickjs`）。
+///
+/// 为什么要有它（issue #11）：外部 Node/Bun 依赖 fd 传递与进程组，只有 Unix 有；
+/// 而 `.js` 脚本在 Windows 上因此变成死路。内嵌 QuickJS 是**同一份 JS 引擎**，
+/// 没有任何 Unix 依赖，所以脚本也能在里面跑 —— 只是没有外部进程那一套。
+///
+/// 返回 `Ok(输出行)` / `Err(错误文本)`，与外部运行时那条路径的语义对齐。
+pub fn run_script_in_quickjs(
+    host: &Arc<HostState>,
+    logs: &SharedLogs,
+    tasks_dir: &Path,
+    script: &Path,
+    budget: Duration,
+    params: Option<&str>,
+) -> Result<String, String> {
+    let code = std::fs::read_to_string(script)
+        .map_err(|e| format!("读脚本 {} 失败: {e}", script.display()))?;
+    let wd = Watchdog::default();
+    // 解析根用 TASKS_DIR：脚本里 `./lib/x.js` 这类相对 import 落在脚本自己的目录树里。
+    let rt = make_runtime(tasks_dir, &wd).ok_or_else(|| "创建 QuickJS Runtime 失败".to_string())?;
+    // 模块名用脚本自己的 file:// URL：相对 import 才有基准。
+    let url = file_url(script);
+    let input = params.unwrap_or("").to_string();
+
+    let (result, lines) = hostapi::capture_scope(|| {
+        run_scratch_js(&rt, host, logs, &wd, budget, &code, &input, Some(&url))
+    });
+
+    let mut out = String::new();
+    for l in &lines {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&l.msg);
+        out.push('\n');
+    }
+    match result {
+        Ok(()) => Ok(out),
+        Err(e) => Err(if out.is_empty() { e } else { format!("{e}\n{out}") }),
+    }
+}
 /// 「测试运行」的落地：跑一段代码，把输出收回来。
 #[allow(clippy::too_many_arguments)]
 fn test_run(
@@ -7144,7 +7186,7 @@ fn test_run(
     let _ = lang; // py 试跑已移除；只接受 js
 
     let (result, lines) =
-        hostapi::capture_scope(|| run_scratch_js(rt, host, logs, wd, budget, code, input));
+        hostapi::capture_scope(|| run_scratch_js(rt, host, logs, wd, budget, code, input, None));
 
     // info 档（含 start/success/fail 这三个语义 type）→ stdout，
     // warn 及以上 → stderr。跟 Node 的 console 语义对齐，

@@ -110,10 +110,9 @@ pub fn run(
         return ScriptRun {
             ok: false,
             error: Some(format!(
-                "当前平台（非 Unix）跑不了 .js 脚本任务：外部 {} 运行时需要 fd 传递与进程组，\
-                 这些只有 Unix 有。可行的出路：① 把脚本改成 .py 或 .sh（要在系统里装对应\
-                 解释器）；② 把这段逻辑写成插件（内嵌 QuickJS，任何平台都能跑）。\
-                 注意：`@runtime quickjs` 对脚本任务无效，改它只会得到「非法头部」。",
+                "外部 {} 运行时只支持 Unix（需要 fd 传递与进程组）。当前平台改用内嵌\
+                 QuickJS 即可跑同一个脚本：把头部改成 `@runtime quickjs`，或者删掉\
+                 `@runtime` 这一行（非 Unix 上 .js 的默认运行时就是 quickjs）。",
                 if rt == ScriptRuntime::Bun { "Bun" } else { "Node" }
             )),
             output: String::new(),
@@ -181,9 +180,67 @@ pub fn run(
                     }
                 }
             } else {
+                // `.sh` 需要一个 POSIX shell。Windows 上通常没有 —— 与其让它以
+                // 「找不到 /bin/sh」失败，不如直接说清该换成什么。
+                if !cfg!(unix) {
+                    return ScriptRun {
+                        ok: false,
+                        error: Some(
+                            "当前平台没有 POSIX shell，跑不了 .sh 脚本。改用 `.cmd` / `.bat` / \
+                             `.ps1`（头部写 `@runtime exe`），或者把逻辑写成 `.py` / `.js`。"
+                                .to_string(),
+                        ),
+                        output: String::new(),
+                    };
+                }
                 let mut c = Command::new("/bin/sh");
                 c.arg("-u");
                 c
+            };
+            cmd.arg(&abs);
+            run_native(cmd, &abs, &env, logs, run_id, timeout)
+        }
+        // 内嵌 QuickJS（issue #11）：不需要任何外部解释器，Windows 上也能跑 `.js`。
+        ScriptRuntime::QuickJs => {
+            let out = crate::engine::run_script_in_quickjs(
+                host,
+                logs,
+                tasks_dir,
+                &abs,
+                timeout,
+                params,
+            );
+            match out {
+                Ok(o) => ScriptRun {
+                    ok: true,
+                    error: None,
+                    output: o,
+                },
+                Err(e) => ScriptRun {
+                    ok: false,
+                    error: Some(e),
+                    output: String::new(),
+                },
+            }
+        }
+        // 直接执行文件本身（issue #11）：脚本任务就是「定时启动一个程序」，
+        // 那个程序可以是个二进制，也可以是 `.cmd` / `.bat` / `.ps1`。
+        ScriptRuntime::Exe => {
+            let ext = abs
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let mut cmd = if cfg!(windows) && ext == "ps1" {
+                let mut c = Command::new("powershell");
+                c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                c
+            } else if cfg!(windows) && (ext == "cmd" || ext == "bat") {
+                let mut c = Command::new("cmd");
+                c.arg("/c");
+                c
+            } else {
+                Command::new(&abs)
             };
             cmd.arg(&abs);
             run_native(cmd, &abs, &env, logs, run_id, timeout)
