@@ -497,10 +497,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 print_usage();
                 return Ok(());
             }
+            "version" | "--version" | "-V" => {
+                println!("plugin-panel {} ({})", crate::web::VERSION, crate::web::COMMIT);
+                return Ok(());
+            }
             "serve" => {} // 显式写 serve 也接受（systemd 里写全更好读）
             other => {
                 return Err(format!(
-                    "未知子命令 `{other}`。支持：hash-token（生成凭据哈希）、digest（口令摘要）、                     build-info（这个二进制编进了什么）。\
+                    "未知子命令 `{other}`。\n\
+                     支持：hash-token（生成凭据哈希）、digest（口令摘要）、\n\
+                     \x20      build-info（这个二进制编进了什么）、version（版本号）。\n\
                      不带子命令就是启动面板。用 `--help` 看全部。"
                 )
                 .into())
@@ -685,7 +691,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let db = db::open(&db_path)?;
+    // issue #8：打不开时必须**把路径说出来**。原来的最后一行只有 `readonly database`
+    // 或 `disk I/O error`，而 DB_PATH 可以在环境变量里改 —— 用户看不出它在说哪个文件。
+    let db = db::open(&db_path).map_err(|e| {
+        format!(
+            "打不开数据库 {}：{e}\n可能的原因：目录不可写、磁盘满、文件被别的进程独占，或者 DB_PATH 指到了别的地方。",
+            db_path.display()
+        )
+    })?;
 
     // 恢复状态机（unpanel 2.10）：标记**活过崩溃**，这里只是把它喊出来。
     // ⚠ 现在还没有「不自动恢复调度」的闸 —— 真正的导入功能也还没做。

@@ -4412,6 +4412,18 @@ const LOGIN_PAGE: &str = r##"<!DOCTYPE html>
 /// ⚠ 为什么值得单列一个字段：`legacy-tls` 决定**直播那条链能不能连**
 /// （上游只给 CBC 套件，rustls 不实现任何一个）。它默认关，于是"发出去的包
 /// 到底支不支持直播"是个**事实问题**，不该让用户在报错里反推。
+/// 版本号（`--version` 与 `build-info` 共用一处，避免两边写岔）。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 编进这个二进制的 git 提交（`build.rs` 注入；拿不到 git 时是 `unknown`）。
+///
+/// issue #3：没有它，CI 产物和 Release 产物的 `build-info` 逐字节相同，
+/// 报告里写「version 0.1.11」根本判断不出跑的是哪份代码。
+pub const COMMIT: &str = match option_env!("GIT_COMMIT") {
+    Some(s) => s,
+    None => "unknown",
+};
+
 pub fn build_info() -> serde_json::Value {
     let features: Vec<&str> = if cfg!(feature = "legacy-tls") {
         vec!["legacy-tls"]
@@ -4419,7 +4431,8 @@ pub fn build_info() -> serde_json::Value {
         vec![]
     };
     serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": VERSION,
+        "commit": COMMIT,
         "features": features,
         // 一句给界面/排查直接用的结论，省得每个调用方自己拼
         "live_supported": cfg!(feature = "legacy-tls"),
