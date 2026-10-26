@@ -197,7 +197,8 @@ pub fn run(
                 c.arg("-u");
                 c
             };
-            cmd.arg(&abs);
+            // 同上：启动器拿剥过 verbatim 前缀的路径（Windows 上 python 也吃这一套）
+            cmd.arg(crate::engine::strip_verbatim(&abs.to_string_lossy()));
             run_native(cmd, &abs, &env, logs, run_id, timeout)
         }
         // 内嵌 QuickJS（issue #11）：不需要任何外部解释器，Windows 上也能跑 `.js`。
@@ -235,18 +236,23 @@ pub fn run(
             // - `.ps1` / `.cmd` / `.bat` 需要一个壳，脚本路径作为参数传进去
             // - 其余（`.exe`、带执行位的二进制）直接执行，**不能再把路径当参数**
             //   —— 那样程序会收到自己作为 argv[1]，很多程序会因此改变行为
+            // ⚠ `fence()` 返回的是 **canonicalize 之后**的路径，Windows 上带 `\\?\` 前缀。
+            // `cmd.exe` 不认识 verbatim 路径 —— 直接把 `\\?\D:\...` 交给 `cmd /c` 会
+            // 以退出码 1 结束且**一个字都不输出**（实测 40297535598：手动跑同一个文件
+            // 退出码 0，面板跑退出码 1）。所以启动器要拿到剥掉前缀的形状。
+            let launch = crate::engine::strip_verbatim(&abs.to_string_lossy());
             let cmd = if cfg!(windows) && ext == "ps1" {
                 let mut c = Command::new("powershell");
                 c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
-                c.arg(&abs);
+                c.arg(&launch);
                 c
             } else if cfg!(windows) && (ext == "cmd" || ext == "bat") {
                 let mut c = Command::new("cmd");
                 c.arg("/c");
-                c.arg(&abs);
+                c.arg(&launch);
                 c
             } else {
-                Command::new(&abs)
+                Command::new(&launch)
             };
             run_plain(cmd, &env, logs, run_id, timeout)
         }

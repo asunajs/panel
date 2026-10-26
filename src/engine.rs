@@ -1605,7 +1605,7 @@ fn file_url(path: &Path) -> String {
 ///
 /// 入参是**已经统一成 `/`** 的路径。`canonicalize()` 在 Windows 上总是返回 verbatim
 /// 形状，不剥掉它，`file_url` 与 `url_to_path` 就不是一对可逆的映射。
-fn strip_verbatim(s: &str) -> String {
+pub(crate) fn strip_verbatim(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("//?/UNC/") {
         format!("//{rest}")
     } else if let Some(rest) = s.strip_prefix("//?/") {
