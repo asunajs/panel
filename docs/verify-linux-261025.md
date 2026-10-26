@@ -69,6 +69,17 @@ Q2 其余各节（同一份报告）：CPU 平均 3.18% 单核（区间峰值 6.
 | R8 | `adapters/node` 的版本门槛在实践中写低了：`adapters/node/package.json:14-16` 声明 `node >= 22.5.0`，但 `node:sqlite` 在 Node 22.x 仍需 `--experimental-sqlite`，而子进程走 `bin/run.mjs` 不会带上这个 flag ⇒ 22.x 上适配层是坏的 | P2 | 本轮 `ede7f980` 提到"node:sqlite 改探测"，但 `engines` 与 `adapters/node/README.md:188` 那句"需要 Node 22.5+ / 本机 v24.16.0 实测通过"仍在。**实测数据**：同一份代码，Node 22.11 → 38 项里挂 12 项（第 15、26–34、37、38 项，典型报错在 `adapters/node/src/sqlite.js`）；Node 24.22.1 → **38/38**。建议要么把 `engines` 抬到 `>=24`，要么让探测失败时明确报"请升级到 Node 24"，并在 CI 加一个 22 LTS 作业把差异钉住 |
 | R9 | 观感与容量口径三条：① `--version` / `-V` 不支持，而 `src/main.rs:466` 那条"未知子命令"的报错串里带着一坨源码缩进换来的空格；② SQLite 打不开时只报 `Error: disk I/O error`，不带 `DB_PATH`（排查第一个要问的就是哪个库）；③ 运行记录体量只有 `RUN_KEEP_DAYS`（`src/main.rs:700`、`src/db.rs:1643`，默认 30 天，见 `docs/configuration.md:74`）**一个天数维度**，没有条数/体积上限 | P3 | ①加别名 + 修字符串续行；②错误文本带路径；③保留期设计是有意的（`src/db.rs:152` 记了理由），但本轮合成负载 3 小时就写了 **63.4 MB** 运行记录 ⇒ 值得给插件作者一个量级提示（`@every` 50 ms 这种任务真跑 30 天是 GB 量级），或考虑加体积上限 |
 
+### 这四条已于 2026-10-26 开成 issue（不在本文里落码）
+
+| 编号 | issue | 说明 |
+|---|---|---|
+| R6 | #4 | 判据口径待维护者裁定；裁完还需要有人在 8 小时窗口上拿终局结论 |
+| R7 | #5 | 与 #3（`build-info` 不带 commit）是同一条链的两端，一起收才闭环 |
+| R8 | #6 | **数字有更新**：main `729a182` 的树上重跑，Node 22.11 不带 flag **当场崩**（`ERR_UNKNOWN_BUILTIN_MODULE`，0 项执行），带 `--experimental-sqlite` 是 **32 通过 / 6 失败**（第 15、26、27、29、30、34 项，两类原因）；Node 24.22.1 全绿。上表里"12 项失败"与"`bin/run.mjs` 不会带上 flag"两句已过期——`run.mjs:27-32` 现在自己探测并 re-exec，issue 里写清了 |
+| R9① | #10 | 顺带补了实测：`--version`/`-V` 退出码 1，`--help` 里完全没出现 `version` 字样 |
+| R9② | #8 | 找到了稳定复现：`chmod 400 <db>` 后启动，最后一行就是 `Error: attempt to write a readonly database`，不带路径 |
+| R9③ | #9 | 补了量级：约 271 字节/条、21 MB/小时，30 天外推 GB—十 GB 级 |
+
 ---
 
 ## 四、已知非问题（别在这些上面花时间）

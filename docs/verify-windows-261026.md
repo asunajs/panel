@@ -144,5 +144,18 @@ plugins\scripty.js            经典脚本，用全局 host（对照组，正常
 
 1. **浏览器 UI 点击流**：B3 第二项「在 UI 上建一个 JS 插件并跑起来」本轮是「预置插件文件 + 热更新加载」+ curl 层 API 等价验证，没有真点界面。
 2. **W1 的修复验证**：修完之后需要在 Windows 上重跑 §二 那套插件树，断言 `IMPWIN-OK`，并补上 §二 建议 3/4 的那条回归（单测 + CI 冒烟）。
-3. **优雅退出在 Windows 上的路径**：信号处理同时等 SIGINT 与 SIGTERM（`src/main.rs:1187-1188`），本轮用的是 `taskkill /F`（硬杀），没有验证 Ctrl+C 那条在 Windows 控制台下的收尾是否完整（Runtime 释放、在途任务等 10 分钟那套逻辑）。
+3. **优雅退出在 Windows 上的路径**：代码同时等 SIGINT 与 SIGTERM（`src/main.rs:1187-1188`），Web 层另有 `SHUTDOWN_GRACE = 5 秒` 兜底（`src/main.rs:1119`、`:1140-1144`）。本轮用的是 `taskkill /F`（硬杀），没有验证 Ctrl+C 在 Windows 控制台下的收尾是否完整（Runtime 释放、SSE 自收尾、WAL/shm 清理）。
 4. **`\\?\UNC\…` 形状**：本轮只覆盖本地盘符。共享目录 / NAS 上部署（`\\?\UNC\server\share\…`）同样会走 `file_url`，很可能是 W1 的第二个变种，值得连 §五 的「远程访问」场景一起验。
+
+## 八、已开成 issue（2026-10-26）
+
+本轮所有问题都开成了 issue，**修复不归验证者**：
+
+| 本文编号 | issue |
+|---|---|
+| W1 相对 import 仍失效 | #1（根因与四条修法）、#2（Windows CI 冒烟只打健康检查，这类问题才溜得进去） |
+| W2 两条依赖公告 | #7（含「0387 现在升不动」的约束证据与可达性判断） |
+| W3 `build-info` 分不出 CI/Release 包 | #3 |
+| §三 里 `.js` 脚本任务在 Windows 上是死路（含 `last_error` 那句错误指引） | #11 |
+| §七 四类未覆盖 | #12（UI 点击流、Ctrl+C 优雅退出、UNC 形状、Q2 八小时终局） |
+| [Linux 验证](verify-linux-261025.md) 仍开的 R6–R9 | #4、#5、#6、#8、#9、#10 |
