@@ -231,18 +231,23 @@ pub fn run(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            // 三条分支的差别只在**谁来启动它**：
+            // - `.ps1` / `.cmd` / `.bat` 需要一个壳，脚本路径作为参数传进去
+            // - 其余（`.exe`、带执行位的二进制）直接执行，**不能再把路径当参数**
+            //   —— 那样程序会收到自己作为 argv[1]，很多程序会因此改变行为
             let mut cmd = if cfg!(windows) && ext == "ps1" {
                 let mut c = Command::new("powershell");
                 c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                c.arg(&abs);
                 c
             } else if cfg!(windows) && (ext == "cmd" || ext == "bat") {
                 let mut c = Command::new("cmd");
                 c.arg("/c");
+                c.arg(&abs);
                 c
             } else {
                 Command::new(&abs)
             };
-            cmd.arg(&abs);
             run_plain(cmd, &env, logs, run_id, timeout)
         }
     }
