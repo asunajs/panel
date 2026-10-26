@@ -50,9 +50,11 @@ jobs:
 
       # 冒烟里的「外部运行时 / JS 脚本」需要 Node。统一用 22（与适配器一致）；
       # 面板的外部插件门槛是 20.6（见 docs/runtimes.md）。
+      # 冒烟里有一项「同一个插件在 Node 里也能跑」，走的是 adapters/node ——
+      # 它的门槛是 Node 24（issue #6），所以这里不能用 22。
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       # clippy 门禁：第二十七轮把 41 条清到 0，之后不许再涨。
       #
@@ -279,9 +281,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # ARM 上也要跑「外部 Node 插件」的冒烟分支
+      # 同上：冒烟里的 Node 适配器项需要 Node 24（issue #6）
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: 确认 runner 真的是 aarch64
         run: |
@@ -328,9 +331,10 @@ jobs:
 
       # 静态二进制仍然会 spawn PATH 里的 node / python3；runner 自带 Python 3，
       # 这里显式装 Node 22 让「外部运行时」分支也真的跑到。
+      # 同上：冒烟里的 Node 适配器项需要 Node 24（issue #6）
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: 安装 musl 工具链
         run: |

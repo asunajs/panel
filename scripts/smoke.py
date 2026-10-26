@@ -733,10 +733,16 @@ def cross_runtime_log_parity(tmp: Path) -> None:
             text=True,
             timeout=60,
         )
-        if not check(
+        # 适配层门槛是 Node 24（issue #6：22.x 的 node:sqlite 会报
+        # `column index out of range`）。宿主 Node 太老时**跳过而不是失败** ——
+        # 这是环境不满足，不是面板坏了；硬失败会让老机器上的冒烟永远红。
+        _err = (r.stderr or "")
+        if r.returncode != 0 and "需要 Node 24" in _err:
+            print("  ⏭  Node 适配器项跳过：宿主 Node 低于 24（适配层要求 Node 24+）")
+        elif not check(
             r.returncode == 0,
             "Node 适配器能跑同一个插件文件（run.mjs --once）",
-            (r.stderr or "").strip().splitlines()[-1] if r.stderr else f"退出码 {r.returncode}",
+            _err.strip().splitlines()[-1] if _err else f"退出码 {r.returncode}",
         ):
             return
     finally:
