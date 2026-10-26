@@ -7427,7 +7427,16 @@ mod tests {
         );
         let url = file_url(&canon);
         let back = url_to_path(url.strip_prefix("file://").unwrap()).unwrap();
-        assert_eq!(back, canon, "file_url 与 url_to_path 必须可逆");
+        // 往返**不要求 PathBuf 逐字节相等**：`canonicalize()` 给的是 verbatim 形状
+        // （`\\?\C:\…`），而 `url_to_path` 解出来是普通形状（`C:/…`）。两者指向
+        // 同一个文件就算对 —— 真正要保证的是「解得开」。所以再 canonicalize 一次比。
+        assert_eq!(
+            back.canonicalize().unwrap(),
+            canon,
+            "解出来的路径必须指向同一个文件（解出来是 {}）",
+            back.display()
+        );
+        assert_eq!(std::fs::read_to_string(&back).unwrap(), "export const x = 1;");
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
