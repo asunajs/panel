@@ -29,8 +29,6 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"PANELBK1";
-/// age 的密文魔数，用来给旧备份一句明确的指引（不是我们的格式）。
-const AGE_MAGIC: &[u8] = b"age-encryption";
 const INFO: &[u8] = b"panel-backup-v1";
 const CHUNK: usize = 64 * 1024;
 const HEADER: usize = 8 + 32 + 8 + 8;
@@ -225,14 +223,6 @@ pub fn looks_encrypted(path: &Path) -> bool {
     }
 }
 
-/// 是不是**旧版 age** 备份（只为了给一句明确的迁移指引）。
-pub fn looks_age(path: &Path) -> bool {
-    let mut buf = [0u8; AGE_MAGIC.len()];
-    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
-        Ok(()) => buf == AGE_MAGIC,
-        Err(_) => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -310,8 +300,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 只有自己的密文才算「加密备份」：普通文件、半截文件都不能被误认。
     #[test]
-    fn magic_detection_separates_our_format_from_age() {
+    fn magic_detection_is_exact() {
         let dir = tmp("magic");
         let (_, public) = keygen();
         let src = dir.join("in.db");
@@ -319,12 +310,15 @@ mod tests {
         let dst = dir.join("in.db.enc");
         encrypt_to(&src, &dst, &public).unwrap();
         assert!(looks_encrypted(&dst));
-        assert!(!looks_age(&dst));
 
-        let old = dir.join("old.db.age");
-        std::fs::write(&old, b"age-encryption.org/v1").unwrap();
-        assert!(looks_age(&old));
-        assert!(!looks_encrypted(&old));
+        let plain = dir.join("plain.db");
+        std::fs::write(&plain, b"SQLite format 3\0").unwrap();
+        assert!(!looks_encrypted(&plain));
+
+        // 短于魔数长度的文件不能 panic
+        let tiny = dir.join("tiny");
+        std::fs::write(&tiny, b"PAN").unwrap();
+        assert!(!looks_encrypted(&tiny));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

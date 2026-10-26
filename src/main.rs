@@ -207,7 +207,6 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut target: Option<String> = None;
     let mut recipient: Option<String> = std::env::var("BACKUP_RECIPIENT")
         .ok()
-        .or_else(|| std::env::var("BACKUP_AGE_RECIPIENT").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mut keygen = false;
@@ -377,12 +376,9 @@ fn prune_backups(dir: &std::path::Path, keep: u64) -> std::io::Result<usize> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let n = e.file_name().to_string_lossy().to_string();
-        // ⚠ 也要认 `.db.age`：加密备份的结尾不是 `.db`，漏了就会永远不被清理，
+        // ⚠ 也要认 `.db.enc`：加密备份的结尾不是 `.db`，漏了就会永远不被清理，
         // 而「保留份数」正是为了防止无限增长。
-        // `.db.age` 是老格式（age 时代）留下的文件，也要能被清理，否则升级前的备份永远删不掉。
-        if n.starts_with("panel-")
-            && (n.ends_with(".db") || n.ends_with(".db.enc") || n.ends_with(".db.age"))
-        {
+        if n.starts_with("panel-") && (n.ends_with(".db") || n.ends_with(".db.enc")) {
             names.push(n);
         }
     }
@@ -466,14 +462,7 @@ fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("     plugin-panel restore --verify panel.db");
         return Ok(());
     }
-    if crate::backup_crypto::looks_age(vpath) {
-        println!("🔒 {file} 是**旧版 age** 备份（本面板已不再用 age）。");
-        println!("   age 上游已归档，新版改用自带的 X25519 + ChaCha20-Poly1305 格式。");
-        println!("   旧备份仍然可以用 age 解密：");
-        println!("     age -d -i key.txt {file} > panel.db");
-        println!("     plugin-panel restore --verify panel.db");
-        return Ok(());
-    }
+
     match crate::restore::verify_backup(vpath) {
         crate::restore::BackupCheck::Ok => {
             println!("✅ {file} 可以当备份用（能打开、integrity ok、关键表都在）");
@@ -2204,12 +2193,10 @@ mod backup_tests {
         std::fs::write(dir.join("other-20260101.db"), b"keep me too").unwrap();
         // 加密备份也要能被清理（老实现只认 .db，会把加密备份永远留着）
         std::fs::write(dir.join("panel-20260106-010101.db.enc"), b"x").unwrap();
-        // 老格式（age 时代）也要能被清理，否则升级前的备份永远删不掉
-        std::fs::write(dir.join("panel-20260107-010101.db.age"), b"x").unwrap();
 
         let removed = prune_backups(&dir, 2).unwrap();
-        // 7 份（5 个 .db + 1 个 .enc + 1 个 .age）留 2 份，该删 5 份
-        assert_eq!(removed, 5, "7 份留 2 份，该删 5 份");
+        // 6 份（5 个 .db + 1 个 .enc）留 2 份，该删 4 份
+        assert_eq!(removed, 4, "6 份留 2 份，该删 4 份");
 
         let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -2218,8 +2205,8 @@ mod backup_tests {
             .collect();
         assert_eq!(left.len(), 2);
         // 留下的是**最新**的两份（含加密的那份 —— 它按文件名排序也是最新的）
-        assert!(left.contains(&"panel-20260107-010101.db.age".to_string()));
         assert!(left.contains(&"panel-20260106-010101.db.enc".to_string()));
+        assert!(left.contains(&"panel-20260105-010101.db".to_string()));
         // 无关文件没被动
         assert!(dir.join("notes.txt").exists());
         assert!(dir.join("other-20260101.db").exists());
