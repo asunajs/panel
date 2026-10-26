@@ -156,24 +156,35 @@ def main():
         print("✗ 没采到卸载后的数据，日志：%s" % log_path)
         return 2
 
-    drop = (before - after) / 1024.0
+    drop = (before - after) / 1024.0  # 正数 = 降了，负数 = 反而涨了
+    before_mb = before / 1024.0
+    # 判据**随基线缩放**（issue #13）。原来硬编码 0.5 MB，而单插件真实回收量只有
+    # 0.27 MB（基线 8.38 MB，约 3.2%）—— 于是「明明还了页」被稳定判成没降，
+    # 一份正确的数据得出相反结论。绝对阈值在没有噪声模型时只能是错的。
+    # 现在：至少降 0.1 MB，且至少是基线的 1%，两个都满足才算「明显下降」。
+    threshold = max(0.1, 0.01 * before_mb)
     print("=" * 52)
-    print("加载后       %6.2f MB" % (before / 1024))
+    print("加载后       %6.2f MB" % before_mb)
     if at_evict:
         print("卸出时       %6.2f MB  （这一步通常**不动**）" % (at_evict / 1024))
     if at_reclaim:
         print("Runtime 回收 %6.2f MB  （真还页发生在这里）" % (at_reclaim / 1024))
     print("最终         %6.2f MB" % (after / 1024))
-    print("净降 %+.2f MB" % (-drop))
-    if drop >= 0.5:
-        print("✓ 结论：插件卸出后内存**真的降下来了**（-%.2f MB）" % drop)
+    print("净降 %+.2f MB（判据：>= %.2f MB）" % (drop, threshold))
+    if drop >= threshold:
+        print("✓ 结论：插件卸出后内存**真的降下来了**（降 %.2f MB）" % drop)
         if at_evict is not None and at_reclaim is not None and evicted_at and reclaimed_at:
             gap = reclaimed_at - evicted_at
             print("  注意：降幅发生在「Runtime 已回收」那一刻（卸出后 %.0f 秒），" % gap)
             print("  不是「卸下内存」那一刻 —— 卸出只是让插件不再可用，")
             print("  页要等整条 Runtime 销毁才还给内核。")
         return 0
-    print("✗ 结论：卸出后内存**没有下降**（差 %.2f MB）" % drop)
+    # 符号口径统一成「正数 = 降」（issue #13 附带问题）：
+    # 上面一行已经是 `净降 %+.2f`，这里再说「差 X」会让人分不清正负。
+    if drop > 0:
+        print("✗ 结论：卸出后内存**降得不够明显**（降 %.2f MB，判据 %.2f MB）" % (drop, threshold))
+    else:
+        print("✗ 结论：卸出后内存**没有下降**（反而升了 %.2f MB）" % (-drop))
     print("  这个平台在进程内释放内存后不会立刻还给系统。")
     print("  面板侧再怎么做（卸插件、定时还页）都改变不了这个数字，只有重启进程才有效。")
     return 1
