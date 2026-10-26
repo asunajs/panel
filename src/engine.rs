@@ -7388,6 +7388,20 @@ mod tests {
     /// verbatim 前缀必须被剥掉 —— 这是 issue #1 的直接根因。
     ///
     /// 这条在**任何平台**都能跑：`strip_verbatim` 是纯字符串处理。
+    /// UNC 路径（`\\?\UNC\srv\share\a`）也要走通 —— issue #12 里点名的那条。
+    ///
+    /// 剥前缀后是 `//srv/share/a`，在 Windows 上就是标准 UNC 形状；
+    /// `url_to_path` 不该把开头的 `//` 当成「URL 的根斜杠」剥掉（那不是盘符）。
+    #[test]
+    fn unc_verbatim_path_round_trips() {
+        let u = file_url(std::path::Path::new("\\\\?\\UNC\\srv\\share\\a.js"));
+        assert_eq!(u, "file:////srv/share/a.js");
+        assert!(!u.contains("%5C"), "{u}");
+        assert!(!u.contains("%3F"), "verbatim 前缀没剥干净: {u}");
+        // 解回来必须还是 UNC 形状（不能变成 `/srv/share/a.js`）
+        let back = url_to_path(u.strip_prefix("file://").unwrap()).unwrap();
+        assert_eq!(back.to_string_lossy().replace('\\', "/"), "//srv/share/a.js");
+    }
     #[test]
     fn verbatim_prefix_is_stripped() {
         assert_eq!(strip_verbatim("//?/C:/a/b.js"), "C:/a/b.js");
