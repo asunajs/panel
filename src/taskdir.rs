@@ -214,19 +214,35 @@ fn load_one(tasks_dir: &Path, abs: &Path) -> Option<ScriptFile> {
         .unwrap_or("script")
         .to_string();
 
-    let source = match std::fs::read_to_string(abs) {
-        Ok(s) => s,
-        Err(e) => {
-            return Some(ScriptFile {
-                path: rel,
-                kind,
-                runtime: kind.default_runtime(),
-                header: ScriptHeader::default(),
-                valid: false,
-                error: Some(format!("读取失败: {e}")),
-                name: stem,
-            })
+    // 非文本种类（`.exe` / `.com`）**放不下文本头部**：二进制里不该去找 `@cron`。
+    // 约定 `<文件名>.task` 是它的边车头部 —— `backup.exe` + `backup.exe.task`。
+    //
+    // 没有边车也**不算错**：文件照样列出来、能手动触发，只是没有排班。
+    // 报成「读取失败」是错的（文件没坏，只是它不是文本）。
+    let sidecar = {
+        let mut s = abs.as_os_str().to_os_string();
+        s.push(".task");
+        PathBuf::from(s)
+    };
+    let source = if kind == ScriptKind::Exe {
+        std::fs::read_to_string(&sidecar).ok()
+    } else {
+        match std::fs::read_to_string(abs) {
+            Ok(s) => Some(s),
+            // 文本种类读不出来时也给边车一次机会（比如二进制里塞了个 .ps1 名的文件）
+            Err(_) => std::fs::read_to_string(&sidecar).ok(),
         }
+    };
+    let Some(source) = source else {
+        return Some(ScriptFile {
+            path: rel,
+            kind,
+            runtime: kind.default_runtime(),
+            header: ScriptHeader::default(),
+            valid: true,
+            error: None,
+            name: stem,
+        });
     };
 
     let (header, runtime, error) = match parse_header(&source, kind) {
@@ -407,6 +423,43 @@ mod tests {
     use super::*;
 
 
+    /// 二进制放不下文本头部：`<文件名>.task` 是它的边车头部（issue #11）。
+    #[test]
+    fn exe_takes_its_header_from_the_sidecar() {
+        let dir = std::env::temp_dir().join(format!("panel-sc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 二进制本体：故意不是 UTF-8
+        std::fs::write(dir.join("backup.exe"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        std::fs::write(dir.join("backup.exe.task"), "# @cron 0 3 * * *\n# @timeout 10m\n").unwrap();
+
+        let files = scan(&dir);
+        assert_eq!(files.len(), 1, "边车本身不能被当成任务");
+        let f = &files[0];
+        assert_eq!(f.name, "backup");
+        assert!(f.valid, "{:?}", f.error);
+        assert_eq!(f.header.cron.as_deref(), Some("0 3 * * *"));
+        assert_eq!(f.header.timeout_ms, Some(600_000));
+        assert_eq!(f.runtime, ScriptRuntime::Exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 没有边车的二进制：**列出来、能手动跑，但不是错误**。
+    #[test]
+    fn exe_without_a_sidecar_is_listed_but_unscheduled() {
+        let dir = std::env::temp_dir().join(format!("panel-sc2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tool.exe"), [0x4d, 0x5a, 0x00, 0x00]).unwrap();
+
+        let files = scan(&dir);
+        assert_eq!(files.len(), 1);
+        let f = &files[0];
+        assert!(f.valid, "二进制不是坏文件，不该判成无效: {:?}", f.error);
+        assert!(f.header.cron.is_none(), "没有边车就不该有排班");
+        assert_eq!(f.runtime, ScriptRuntime::Exe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// issue #11：`.js` 现在允许 `@runtime quickjs`（内嵌引擎，任何平台都能跑）。
     #[test]
     fn js_accepts_the_embedded_quickjs_runtime() {

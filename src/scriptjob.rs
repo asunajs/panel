@@ -243,11 +243,112 @@ pub fn run(
                 Command::new(&abs)
             };
             cmd.arg(&abs);
-            run_native(cmd, &abs, &env, logs, run_id, timeout)
+            run_plain(cmd, &env, logs, run_id, timeout)
         }
     }
 }
 
+/// 直接跑一个程序（`@runtime exe`）：不参与 host-api 的 fd3/fd4 协议。
+///
+/// 为什么不能复用 `run_native`：那条路径是给**适配器**用的，它要求子进程在 fd3/fd4
+/// 上收发协议帧。一个普通二进制不会说话，等它的结果就是等到超时（实测：第一次跑完，
+/// 第二次卡死到 `@timeout`）。所以这里走最朴素的一条：spawn、收 stdout/stderr、超时杀。
+fn run_plain(
+    mut cmd: Command,
+    env: &[(String, String)],
+    logs: &hostapi::SharedLogs,
+    run_id: &str,
+    timeout: Duration,
+) -> ScriptRun {
+    use std::io::Read;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ScriptRun {
+                ok: false,
+                error: Some(format!("启动失败: {e}")),
+                output: String::new(),
+            }
+        }
+    };
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let o = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = out.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let e = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = err.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return ScriptRun {
+                    ok: false,
+                    error: Some(format!("等待进程失败: {e}")),
+                    output: String::new(),
+                }
+            }
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&o.join().unwrap_or_default()).to_string();
+    let stderr = String::from_utf8_lossy(&e.join().unwrap_or_default()).to_string();
+    let mut output = String::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+        let _ = logs;
+        crate::log::plog!("__script__", info, "{}", line);
+    }
+    let _ = run_id;
+
+    if timed_out {
+        return ScriptRun {
+            ok: false,
+            error: Some(format!("执行超过 {timeout:?} 被强制终止")),
+            output,
+        };
+    }
+    let ok = status.map(|s| s.success()).unwrap_or(false);
+    ScriptRun {
+        ok,
+        error: if ok {
+            None
+        } else {
+            Some(format!("退出码 {}", status.and_then(|s| s.code()).unwrap_or(-1)))
+        },
+        output,
+    }
+}
 /// 路径围栏：只允许 `TASKS_DIR` 下的相对路径，canonicalize 后仍必须在根内。
 pub fn fence(tasks_dir: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim();
