@@ -198,7 +198,7 @@ pub fn run(
                 c
             };
             // 同上：启动器拿剥过 verbatim 前缀的路径（Windows 上 python 也吃这一套）
-            cmd.arg(crate::engine::strip_verbatim(&abs.to_string_lossy()));
+            cmd.arg(launch_path(&abs));
             run_native(cmd, &abs, &env, logs, run_id, timeout)
         }
         // 内嵌 QuickJS（issue #11）：不需要任何外部解释器，Windows 上也能跑 `.js`。
@@ -240,7 +240,7 @@ pub fn run(
             // `cmd.exe` 不认识 verbatim 路径 —— 直接把 `\\?\D:\...` 交给 `cmd /c` 会
             // 以退出码 1 结束且**一个字都不输出**（实测 40297535598：手动跑同一个文件
             // 退出码 0，面板跑退出码 1）。所以启动器要拿到剥掉前缀的形状。
-            let launch = crate::engine::strip_verbatim(&abs.to_string_lossy());
+            let launch = launch_path(&abs);
             let cmd = if cfg!(windows) && ext == "ps1" {
                 let mut c = Command::new("powershell");
                 c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
@@ -259,6 +259,48 @@ pub fn run(
     }
 }
 
+/// 交给**启动器**（`cmd` / `powershell` / 解释器）的路径。
+#[cfg(test)]
+mod launch_path_tests {
+    use super::launch_path;
+    use std::path::Path;
+
+    /// Windows 上 `canonicalize()` 返回 `\\?\D:\a\b`，交给 `cmd.exe` 会静默退出 1。
+    #[test]
+    fn verbatim_prefix_is_stripped_for_launchers() {
+        let p = Path::new(r"\\?\D:\a\tmp\tasks\cmdtest.cmd");
+        let got = launch_path(p);
+        assert!(!got.contains("?"), "verbatim 前缀没剥掉: {got}");
+        assert!(got.ends_with("cmdtest.cmd"), "{got}");
+    }
+
+    /// UNC 形状也要剥（`\\?\UNC\srv\share\a` → `\\srv\share\a`）。
+    #[test]
+    fn unc_verbatim_is_stripped_too() {
+        let p = Path::new(r"\\?\UNC\srv\share\tasks\a.cmd");
+        let got = launch_path(p);
+        assert!(!got.contains("?"), "{got}");
+        assert!(got.contains("srv"), "{got}");
+    }
+}
+
+/// 交给**启动器**（`cmd` / `powershell` / 解释器）的路径。
+///
+/// `fence()` 返回的是 `canonicalize()` 之后的路径，Windows 上带 `\\?\` 前缀，
+/// 而 `cmd.exe` 不认识 verbatim 路径 —— 直接给它会以退出码 1 结束且**一个字都不输出**
+/// （实测 40298596317：手动 `cmd /c <同一个文件>` 退出码 0，面板跑退出码 1）。
+///
+/// ⚠ `engine::strip_verbatim` 的入参是**已经统一成 `/`** 的路径，所以这里先换斜杠、
+/// 剥完再换回 `\` —— 少了这一步，剥前缀会静默失败（第一版就是这么错的）。
+fn launch_path(abs: &Path) -> String {
+    let s = abs.to_string_lossy().replace('\\', "/");
+    let s = crate::engine::strip_verbatim(&s);
+    if cfg!(windows) {
+        s.replace('/', "\\")
+    } else {
+        s
+    }
+}
 /// 直接跑一个程序（`@runtime exe`）：不参与 host-api 的 fd3/fd4 协议。
 ///
 /// 为什么不能复用 `run_native`：那条路径是给**适配器**用的，它要求子进程在 fd3/fd4
