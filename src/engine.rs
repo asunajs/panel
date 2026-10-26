@@ -7129,6 +7129,32 @@ fn run_scratch_js(
     })
 }
 
+/// 脚本任务用的全局垫片：与外部 Node 运行时暴露的那组同名函数对齐。
+///
+/// 脚本不是插件：插件用 `import { log } from 'host-api'`，而脚本（经典脚本，
+/// 没有 import）在 Node 宿主里拿到的是全局 `log`。内嵌引擎必须给一样的，
+/// 否则「同一份脚本两个宿主」这个承诺就是假的。
+const SCRIPT_GLOBALS: &str = r#"
+(function () {
+  function emit(level) {
+    return function () {
+      var parts = [];
+      for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+      __host_log_raw(level, parts.join(' '));
+    };
+  }
+  globalThis.log = emit('info');
+  globalThis.info = emit('info');
+  globalThis.debug = emit('info');
+  globalThis.warn = emit('warn');
+  globalThis.error = emit('error');
+  globalThis.host = globalThis.host || {};
+  globalThis.host.log = globalThis.log;
+  globalThis.host.warn = globalThis.warn;
+  globalThis.host.error = globalThis.error;
+})();
+"#;
+
 /// 在一次性 Context 里跑一个**脚本任务**文件（`@runtime quickjs`）。
 ///
 /// 为什么要有它（issue #11）：外部 Node/Bun 依赖 fd 传递与进程组，只有 Unix 有；
@@ -7153,6 +7179,11 @@ pub fn run_script_in_quickjs(
     let url = file_url(script);
     let input = params.unwrap_or("").to_string();
 
+    // 脚本任务在外部 Node 那条路径里拿到的是一组**全局函数**（`log` / `host.*`），
+    // 所以同一份脚本搬到内嵌引擎里也必须能直接用它们 —— 否则就变成
+    // 「能跑，但一行 log 就 ReferenceError」。这里补的是那层全局垫片。
+    let code = format!("{SCRIPT_GLOBALS}\n{code}");
+
     let (result, lines) = hostapi::capture_scope(|| {
         run_scratch_js(&rt, host, logs, &wd, budget, &code, &input, Some(&url))
     });
@@ -7164,6 +7195,14 @@ pub fn run_script_in_quickjs(
         }
         out.push_str(&l.msg);
         out.push('\n');
+        // ⚠ `capture_scope` 只是**收集**，不会落到面板日志。外部运行时那条路径
+        // 的 stdout/stderr 是会进日志的，这里必须对齐 —— 否则脚本跑成功了，
+        // 用户在界面上一个字都看不到，只能去翻 runs 表。
+        match l.level() {
+            crate::log::Level::Warn => crate::log::plog!("__script__", warn, "{}", l.msg),
+            crate::log::Level::Error => crate::log::plog!("__script__", error, "{}", l.msg),
+            _ => crate::log::plog!("__script__", info, "{}", l.msg),
+        }
     }
     match result {
         Ok(()) => Ok(out),
