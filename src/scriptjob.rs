@@ -235,7 +235,7 @@ pub fn run(
             // - `.ps1` / `.cmd` / `.bat` 需要一个壳，脚本路径作为参数传进去
             // - 其余（`.exe`、带执行位的二进制）直接执行，**不能再把路径当参数**
             //   —— 那样程序会收到自己作为 argv[1]，很多程序会因此改变行为
-            let mut cmd = if cfg!(windows) && ext == "ps1" {
+            let cmd = if cfg!(windows) && ext == "ps1" {
                 let mut c = Command::new("powershell");
                 c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
                 c.arg(&abs);
