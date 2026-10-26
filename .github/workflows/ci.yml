@@ -222,15 +222,16 @@ jobs:
           # @cron @every 1s
           # @runtime exe
           Write-Output 'PS1-SCRIPT-OK 42'
-          '@ | Set-Content -Encoding utf8 (Join-Path $tasks 'hello.ps1')
+          # ⚠ 任务名默认是**文件名去扩展名**：两个文件同名 `hello` 会被判重名、跳过其中一个。
+          '@ | Set-Content -Encoding utf8 (Join-Path $tasks 'ps1test.ps1')
           @'
           @echo off
           echo CMD-SCRIPT-OK 42
-          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'hello.cmd')
+          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'cmdtest.cmd')
           @'
           # @cron @every 1s
           # @runtime exe
-          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'hello.cmd.task')
+          '@ | Set-Content -Encoding ascii (Join-Path $tasks 'cmdtest.cmd.task')
 
           $env:DB_PATH = Join-Path $tmp 'panel.db'
           $env:PANEL_LOG_DIR = Join-Path $tmp 'logs'
