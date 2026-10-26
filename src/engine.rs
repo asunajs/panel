@@ -1577,8 +1577,14 @@ fn needs_pct(b: u8) -> bool {
 
 /// 路径 → `file://` URL（百分号编码）。
 fn file_url(path: &Path) -> String {
+    // ⚠ Windows 上路径是 `C:\a\b.js`。直接百分号编码会变成 `file://C:%5Ca%5Cb.js`：
+    // 反斜杠被编码、`url_join` 又只认 `/`，于是**相对 import 全线失效**
+    // （`../lib/x` 直接报「找不到模块」）。CI 在 Windows 上跑测试时抓到的。
+    // 正确形状是 `file:///C:/a/b.js`：分隔符统一成 `/`，再补一个根斜杠。
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let raw = if raw.starts_with('/') { raw } else { format!("/{raw}") };
     let mut out = String::from("file://");
-    for &b in path.to_string_lossy().as_bytes() {
+    for &b in raw.as_bytes() {
         if needs_pct(b) {
             out.push_str(&format!("%{b:02X}"));
         } else {
@@ -1586,6 +1592,21 @@ fn file_url(path: &Path) -> String {
         }
     }
     out
+}
+
+/// `file://` URL 的 path 部分 → 文件系统路径。
+///
+/// Windows 上 `file:///C:/a/b.js` 去掉前缀后是 `/C:/a/b.js`，那个根斜杠是 URL 的，
+/// 不是路径的 —— 不去掉的话 `PathBuf` 会指向当前盘的根，永远打不开。
+fn url_to_path(s: &str) -> Result<PathBuf, String> {
+    let decoded = pct_decode(s)?;
+    if cfg!(windows) {
+        let b = decoded.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[2] == b':' {
+            return Ok(PathBuf::from(&decoded[1..]));
+        }
+    }
+    Ok(PathBuf::from(decoded))
 }
 
 /// 百分号解码（`file://` URL 的 path 部分 → 文件系统路径）。
@@ -1672,7 +1693,7 @@ fn url_join(base: &str, spec: &str) -> Result<String, String> {
 fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, String> {
     let url = url_join(base, spec)?;
     let path_part = url.strip_prefix("file://").unwrap_or(&url);
-    let path = PathBuf::from(pct_decode(path_part)?);
+    let path = url_to_path(path_part)?;
 
     let mut tried: Vec<PathBuf> = vec![path.clone()];
     let mut cand = path.clone();
@@ -1842,7 +1863,7 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
     match resolve_relative(base, spec, root) {
         Ok(url) => {
             let path_part = url.strip_prefix("file://").unwrap_or(&url).to_string();
-            match pct_decode(&path_part) {
+            match url_to_path(&path_part) {
                 Ok(p) => match std::fs::read_to_string(&p) {
                     Ok(text) => format!(
                         "{{\"ok\":true,\"url\":{},\"text\":{}}}",
@@ -1851,7 +1872,7 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
                     ),
                     Err(e) => format!(
                         "{{\"ok\":false,\"error\":{}}}",
-                        serde_json::to_string(&format!("读不到 `{p}`：{e}"))
+                        serde_json::to_string(&format!("读不到 `{}`：{e}", p.display()))
                             .unwrap_or_else(|_| "\"?\"".into())
                     ),
                 },
@@ -1936,9 +1957,8 @@ impl Loader for HostApiLoader {
                 "只有 `host-api` 与插件目录内的文件可以被 import（解析阶段应当给出 file:// URL）",
             )
         })?;
-        let path = PathBuf::from(
-            pct_decode(path_part).map_err(|e| rquickjs::Error::new_loading_message(name, e))?,
-        );
+        let path =
+            url_to_path(path_part).map_err(|e| rquickjs::Error::new_loading_message(name, e))?;
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         if ext != "js" && ext != "mjs" {
             return Err(rquickjs::Error::new_loading_message(
@@ -7330,6 +7350,20 @@ mod tests {
     /// 自动找（省扩展名、找 index）是**放宽**，不是 ESM 规范行为 —— 所以更要钉住：
     /// ① 候选链的顺序与结果；② 找不到时把"试过哪些路径"说出来；
     /// ③ 越界仍然被挡住（边界不能因为放宽而松掉）。
+    /// `file_url` 必须把 Windows 分隔符规范化成 `/`（CI 在 Windows 上抓到的真 bug）。
+    ///
+    /// 这个断言在 Linux 上也能跑：`file_url` 做的是**字符串层面**的规范化，
+    /// 不依赖宿主平台。所以以后有人改坏了，本地就会红，不用等 CI。
+    #[test]
+    fn file_url_normalizes_windows_separators() {
+        let u = file_url(std::path::Path::new("C:\\a\\b.js"));
+        assert_eq!(u, "file:///C:/a/b.js");
+        // 反斜杠一旦被百分号编码（%5C），`url_join` 就找不到 `/`，
+        // 相对 import 会全线失效 —— 这正是修之前的行为。
+        assert!(!u.contains("%5C"), "反斜杠不能被编码: {u}");
+        // Unix 形状不受影响
+        assert_eq!(file_url(std::path::Path::new("/a/b.js")), "file:///a/b.js");
+    }
     #[test]
     fn relative_specifier_resolution() {
         let tmp = std::env::temp_dir().join(format!("pp-resolve-{}", std::process::id()));
@@ -7345,12 +7379,7 @@ mod tests {
 
         // Windows 上解析结果是 `...\lib\math.js`。断言只关心「落在哪个文件」，
         // 所以先把分隔符统一成 `/` —— 这不是在迁就平台，而是断言本来就不该关心分隔符。
-        // 临时诊断：把 base 和每个 spec 的真实结果打出来（失败时会被 cargo test 显示）
-        eprintln!("DIAG base = {base}");
-        eprintln!("DIAG root = {}", root.display());
-        for s in ["./math.js", "./math", "./only_mjs", "./pkg", "../lib/math"] {
-            eprintln!("DIAG {s} => {:?}", resolve_relative(&base, s, &root));
-        }
+
         let ok = |spec: &str| {
             resolve_relative(&base, spec, &root)
                 .expect(spec)
