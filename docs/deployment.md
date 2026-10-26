@@ -326,34 +326,53 @@ ExecStartPre=/usr/bin/curl -fsS --max-time 5 http://127.0.0.1:8787/healthz
 ⚠ systemd 的 `ExecStartPre` 跑在服务启动**之前**，那时端口还没监听 —— 想用探针做
 「起来没有」的判断，应该用 `ExecStartPost`，或者干脆交给 `Restart=on-failure`。
 上面这段只在「重启前确认旧实例已经死了」这种场景下有意义。
-### 加密备份（age）
+### 加密备份（X25519 + ChaCha20-Poly1305）
 
-备份默认是**明文**。要加密，先在自己的机器上生成一对密钥：
+备份默认是**明文**。要加密，先生成一对密钥：
 
 ```bash
 plugin-panel backup --keygen
 # 私钥（只显示这一次，抄到离线的地方；面板不会存它）:
-# AGE-SECRET-KEY-1JYL9H32...
+# ppx1secret5JYL9H32...
 # 公钥（放在面板这边，用来加密）:
-# age12xzrg497xgxe0np8gm675w0lhg9ykf72p4ss9hj704lgv7hhc37sn932qq
+# ppx1kQ7m2Vn8xzrg497xgxe0np8gm675w0lhg9ykf72p4ss9hj704
 ```
 
-之后备份时带上公钥（或者用环境变量 `BACKUP_AGE_RECIPIENT`）：
+之后备份时带上公钥（或者用环境变量 `BACKUP_RECIPIENT`）：
 
 ```bash
-plugin-panel backup --recipient age12x... /var/backups/panel
-# 🔒 已加密（age / X25519）
-# 已备份: /var/backups/panel/panel-20261025-234403.db.age（152 KiB）
+plugin-panel backup --recipient ppx1kQ7m... /var/backups/panel
+# 🔒 已加密（X25519 + ChaCha20-Poly1305）
+# 已备份: /var/backups/panel/panel-20261025-234403.db.enc（152 KiB）
 ```
 
-解密要在**另一台**机器上做：
+解密（`--identity` 指私钥文件，里面就一行 `ppx1secret...`）：
 
 ```bash
-age -d -i key.txt panel-20261025-234403.db.age > panel.db
+plugin-panel backup --decrypt panel-20261025-234403.db.enc \
+  --identity key.txt panel.db
 ```
 
-⚠ **面板故意没有私钥**，所以它解不开自己的备份。这不是缺陷 ——
+⚠ **面板进程故意没有私钥**，所以服务运行时解不开自己的备份。这不是缺陷 ——
 如果面板能解密，「加密备份」只是把明文换成了另一份明文：拿到面板就等于拿到解密能力。
+解密只发生在你手动跑 `backup --decrypt` 的那一次。
 
-也正因为如此，`restore --verify` 遇到 `.age` 文件只会告诉你它是加密的，
-不会假装能检查内容。先解密，再 verify。
+也正因为如此，`restore --verify` 遇到加密文件只会告诉你它是加密的，不会假装能检查内容。
+先解密，再 verify。
+
+#### 为什么不用 age
+
+原来用的是 `age`，但它上游已归档，且带进来两条**没有升级路径**的依赖：
+`crypto-bigint 0.5.5`（RUSTSEC-2026-0387，定时攻击）和 `basic-toml`
+（RUSTSEC-2026-0374，无人维护）。所以换成三个标准原语自己实现：
+
+| 环节 | 用什么 |
+|---|---|
+| 密钥协商 | X25519（`x25519-dalek`），每份备份一个临时密钥对 |
+| 派生 AEAD key | HKDF-SHA256，salt = `临时公钥 ‖ 收件人公钥` |
+| 加密 | ChaCha20-Poly1305，64 KiB 一块，每块独立 nonce |
+
+头部带明文总长，用来发现「最后一个块被删掉」—— 块流本身不含总长，没有它截断是静默的。
+
+**代价**：不再是 age 格式，`age -d` 解不了。旧版 `.db.age` 备份仍然可以用 `age` 解，
+面板也仍然会认它、清理它。

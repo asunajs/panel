@@ -200,15 +200,19 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 形态：
     //   backup <文件>                          —— 写一个指定文件，已存在就拒绝
     //   backup [--keep N] <目录>               —— 时间戳命名 + 只留最近 N 份
-    //   backup --keygen                        —— 生成一对 age 密钥（私钥只打印一次）
-    //   backup --recipient age1... <目标>       —— 加密后再落盘（unpanel 2.10）
+    //   backup --keygen                        —— 生成一对密钥（私钥只打印一次）
+    //   backup --recipient ppx1... <目标>       —— 加密后再落盘（unpanel 2.10）
+    //   backup --decrypt <密文> --identity <私钥文件> <明文输出>
     let mut keep: u64 = 14;
     let mut target: Option<String> = None;
-    let mut recipient: Option<String> = std::env::var("BACKUP_AGE_RECIPIENT")
+    let mut recipient: Option<String> = std::env::var("BACKUP_RECIPIENT")
         .ok()
+        .or_else(|| std::env::var("BACKUP_AGE_RECIPIENT").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mut keygen = false;
+    let mut decrypt: Option<String> = None;
+    let mut identity: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -222,9 +226,21 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--keygen" => keygen = true,
+            "--decrypt" => {
+                let Some(v) = it.next() else {
+                    return Err("--decrypt 后面要跟密文文件".into());
+                };
+                decrypt = Some(v.clone());
+            }
+            "--identity" => {
+                let Some(v) = it.next() else {
+                    return Err("--identity 后面要跟私钥文件".into());
+                };
+                identity = Some(v.clone());
+            }
             "--recipient" => {
                 let Some(v) = it.next() else {
-                    return Err("--recipient 后面要跟一个 age1... 公钥".into());
+                    return Err("--recipient 后面要跟一个 ppx1... 公钥".into());
                 };
                 recipient = Some(v.trim().to_string());
             }
@@ -246,16 +262,37 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("{public}");
         println!();
         println!("之后：plugin-panel backup --recipient {public} /var/backups/panel");
-        println!("解密（在**另一台**机器上）: age -d -i key.txt panel-xxx.db.age > panel.db");
+        println!("解密：plugin-panel backup --decrypt panel-xxx.db.enc --identity key.txt panel.db");
+        return Ok(());
+    }
+
+    if let Some(enc) = decrypt {
+        let Some(out) = target else {
+            eprintln!("用法: plugin-panel backup --decrypt <密文> --identity <私钥文件> <明文输出>");
+            return Err("缺少输出路径".into());
+        };
+        let Some(id) = identity else {
+            return Err("--decrypt 要配 --identity <私钥文件>".into());
+        };
+        let secret = std::fs::read_to_string(&id)
+            .map_err(|e| format!("读私钥文件 {id} 失败: {e}"))?;
+        let n = crate::backup_crypto::decrypt_to(
+            std::path::Path::new(&enc),
+            std::path::Path::new(&out),
+            secret.trim(),
+        )?;
+        println!("✅ 解密完成：{out}（{n} 字节）");
+        println!("   接着体检并恢复：plugin-panel restore --verify {out}");
+        println!("                  plugin-panel restore --apply {out}");
         return Ok(());
     }
 
     let Some(out) = target else {
-        eprintln!("用法: plugin-panel backup [--keep N] [--recipient age1...] <输出文件或目录>");
+        eprintln!("用法: plugin-panel backup [--keep N] [--recipient ppx1...] <输出文件或目录>");
         eprintln!("      plugin-panel backup --keygen");
         eprintln!("  文件: plugin-panel backup /var/backups/panel-$(date +%F).db");
         eprintln!("  目录: plugin-panel backup --keep 14 /var/backups/panel");
-        eprintln!("  加密: plugin-panel backup --recipient age1... /var/backups/panel");
+        eprintln!("  加密: plugin-panel backup --recipient ppx1... /var/backups/panel");
         return Err("缺少输出路径".into());
     };
 
@@ -290,7 +327,7 @@ fn backup_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 /// 实际落盘的路径（加密时多一个 `.age` 后缀）。
 fn with_age(p: &std::path::Path) -> std::path::PathBuf {
     let mut s = p.as_os_str().to_os_string();
-    s.push(".age");
+    s.push(".enc");
     std::path::PathBuf::from(s)
 }
 
@@ -325,7 +362,7 @@ fn write_backup(
             backup_to(db_path, &tmp)?;
             let dst = with_age(out);
             let size = crate::backup_crypto::encrypt_to(&tmp, &dst, rcpt)?;
-            println!("🔒 已加密（age / X25519）。解密要在**另一台**机器上用私钥做。");
+            println!("🔒 已加密（X25519 + ChaCha20-Poly1305）。解密用 backup --decrypt --identity。");
             Ok(size)
         }
     }
@@ -342,7 +379,10 @@ fn prune_backups(dir: &std::path::Path, keep: u64) -> std::io::Result<usize> {
         let n = e.file_name().to_string_lossy().to_string();
         // ⚠ 也要认 `.db.age`：加密备份的结尾不是 `.db`，漏了就会永远不被清理，
         // 而「保留份数」正是为了防止无限增长。
-        if n.starts_with("panel-") && (n.ends_with(".db") || n.ends_with(".db.age")) {
+        // `.db.age` 是老格式（age 时代）留下的文件，也要能被清理，否则升级前的备份永远删不掉。
+        if n.starts_with("panel-")
+            && (n.ends_with(".db") || n.ends_with(".db.enc") || n.ends_with(".db.age"))
+        {
             names.push(n);
         }
     }
@@ -419,9 +459,17 @@ fn restore_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // 加密备份没法在这里体检：解密要私钥，而私钥**故意不在面板这边**。
     // 与其让 SQLite 报「file is not a database」，不如直接说清该怎么做。
     if crate::backup_crypto::looks_encrypted(vpath) {
-        println!("🔒 {file} 是加密备份（age）。");
-        println!("   面板没有私钥，所以没法在这里体检 —— 这是有意的设计。");
-        println!("   先在另一台机器上解密，再对解密出来的库跑一次 verify：");
+        println!("🔒 {file} 是加密备份。");
+        println!("   面板进程没有私钥，所以没法在这里体检 —— 这是有意的设计。");
+        println!("   用你的私钥解出明文，再对明文库跑一次 verify：");
+        println!("     plugin-panel backup --decrypt {file} --identity key.txt panel.db");
+        println!("     plugin-panel restore --verify panel.db");
+        return Ok(());
+    }
+    if crate::backup_crypto::looks_age(vpath) {
+        println!("🔒 {file} 是**旧版 age** 备份（本面板已不再用 age）。");
+        println!("   age 上游已归档，新版改用自带的 X25519 + ChaCha20-Poly1305 格式。");
+        println!("   旧备份仍然可以用 age 解密：");
         println!("     age -d -i key.txt {file} > panel.db");
         println!("     plugin-panel restore --verify panel.db");
         return Ok(());
@@ -2154,12 +2202,14 @@ mod backup_tests {
         // 不该被碰的两个
         std::fs::write(dir.join("notes.txt"), b"keep me").unwrap();
         std::fs::write(dir.join("other-20260101.db"), b"keep me too").unwrap();
-        // 加密备份也要能被清理（老实现只认 .db，会把 .db.age 永远留着）
-        std::fs::write(dir.join("panel-20260106-010101.db.age"), b"x").unwrap();
+        // 加密备份也要能被清理（老实现只认 .db，会把加密备份永远留着）
+        std::fs::write(dir.join("panel-20260106-010101.db.enc"), b"x").unwrap();
+        // 老格式（age 时代）也要能被清理，否则升级前的备份永远删不掉
+        std::fs::write(dir.join("panel-20260107-010101.db.age"), b"x").unwrap();
 
         let removed = prune_backups(&dir, 2).unwrap();
-        // 6 份（5 个 .db + 1 个 .db.age）留 2 份，该删 4 份
-        assert_eq!(removed, 4, "6 份留 2 份，该删 4 份");
+        // 7 份（5 个 .db + 1 个 .enc + 1 个 .age）留 2 份，该删 5 份
+        assert_eq!(removed, 5, "7 份留 2 份，该删 5 份");
 
         let left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -2168,8 +2218,8 @@ mod backup_tests {
             .collect();
         assert_eq!(left.len(), 2);
         // 留下的是**最新**的两份（含加密的那份 —— 它按文件名排序也是最新的）
-        assert!(left.contains(&"panel-20260106-010101.db.age".to_string()));
-        assert!(left.contains(&"panel-20260105-010101.db".to_string()));
+        assert!(left.contains(&"panel-20260107-010101.db.age".to_string()));
+        assert!(left.contains(&"panel-20260106-010101.db.enc".to_string()));
         // 无关文件没被动
         assert!(dir.join("notes.txt").exists());
         assert!(dir.join("other-20260101.db").exists());
