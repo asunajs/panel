@@ -1577,11 +1577,18 @@ fn needs_pct(b: u8) -> bool {
 
 /// 路径 → `file://` URL（百分号编码）。
 fn file_url(path: &Path) -> String {
-    // ⚠ Windows 上路径是 `C:\a\b.js`。直接百分号编码会变成 `file://C:%5Ca%5Cb.js`：
-    // 反斜杠被编码、`url_join` 又只认 `/`，于是**相对 import 全线失效**
-    // （`../lib/x` 直接报「找不到模块」）。CI 在 Windows 上跑测试时抓到的。
-    // 正确形状是 `file:///C:/a/b.js`：分隔符统一成 `/`，再补一个根斜杠。
+    // ⚠ Windows 上有两层坑，缺一层都还是坏（issue #1，真机验证抓到的）：
+    //
+    // 1. 路径是 `C:\a\b.js`。直接百分号编码会变成 `file://C:%5Ca%5Cb.js`，
+    //    而 `url_join` 只认 `/` → 相对 import 全线失效。
+    // 2. **`std::fs::canonicalize()` 在 Windows 上返回的是 verbatim 路径**
+    //    `\\?\C:\a\b.js`（UNC 是 `\\?\UNC\srv\share\a`）。只做第 1 步会得到
+    //    `//?/C:/a/b.js`，`url_to_path` 的盘符判定看到第三个字符是 `?` 就失效了 ——
+    //    结果还是「找不到模块」，只是错误里的 `%5C` 变成了 `%3F`。
+    //
+    // 所以顺序是：统一分隔符 → 剥 verbatim 前缀 → 补根斜杠。
     let raw = path.to_string_lossy().replace('\\', "/");
+    let raw = strip_verbatim(&raw);
     let raw = if raw.starts_with('/') { raw } else { format!("/{raw}") };
     let mut out = String::from("file://");
     for &b in raw.as_bytes() {
@@ -1592,6 +1599,20 @@ fn file_url(path: &Path) -> String {
         }
     }
     out
+}
+
+/// 剥掉 Windows 的 verbatim 前缀（`\\?\` / `\\?\UNC\`）。
+///
+/// 入参是**已经统一成 `/`** 的路径。`canonicalize()` 在 Windows 上总是返回 verbatim
+/// 形状，不剥掉它，`file_url` 与 `url_to_path` 就不是一对可逆的映射。
+fn strip_verbatim(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// `file://` URL 的 path 部分 → 文件系统路径。
@@ -7363,6 +7384,51 @@ mod tests {
         assert!(!u.contains("%5C"), "反斜杠不能被编码: {u}");
         // Unix 形状不受影响
         assert_eq!(file_url(std::path::Path::new("/a/b.js")), "file:///a/b.js");
+    }
+    /// verbatim 前缀必须被剥掉 —— 这是 issue #1 的直接根因。
+    ///
+    /// 这条在**任何平台**都能跑：`strip_verbatim` 是纯字符串处理。
+    #[test]
+    fn verbatim_prefix_is_stripped() {
+        assert_eq!(strip_verbatim("//?/C:/a/b.js"), "C:/a/b.js");
+        assert_eq!(strip_verbatim("//?/UNC/srv/share/a.js"), "//srv/share/a.js");
+        assert_eq!(strip_verbatim("/a/b.js"), "/a/b.js", "Unix 形状不动");
+        assert_eq!(strip_verbatim("C:/a/b.js"), "C:/a/b.js", "没前缀不动");
+    }
+
+    /// verbatim 路径走完 `file_url` 后必须是 `file:///C:/...`，且不能残留 `%5C` / `%3F`。
+    #[test]
+    fn verbatim_path_becomes_a_clean_file_url() {
+        let u = file_url(std::path::Path::new("\\\\?\\C:\\a\\b.js"));
+        assert_eq!(u, "file:///C:/a/b.js");
+        assert!(!u.contains("%5C"), "反斜杠不能被编码: {u}");
+        assert!(!u.contains("%3F"), "`?` 不能被编码（说明 verbatim 没剥干净）: {u}");
+        assert!(!u.contains("//?/"), "verbatim 前缀还在: {u}");
+    }
+
+    /// Windows 上 `canonicalize()` 给的就是 verbatim 路径 —— 直接拿真路径做往返。
+    ///
+    /// 前面两条是手工构造的字符串，这一条走的是**真实文件系统**，
+    /// 所以能证明「真机上那条链路」是通的（issue #1 的回归）。
+    #[cfg(windows)]
+    #[test]
+    fn real_canonicalize_round_trips_through_file_url() {
+        let dir = std::env::temp_dir().join(format!("panel-url-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let f = dir.join("lib/math.js");
+        std::fs::write(&f, "export const x = 1;").unwrap();
+
+        let canon = f.canonicalize().unwrap();
+        assert!(
+            canon.to_string_lossy().starts_with("\\\\?\\"),
+            "Windows 上 canonicalize 就是 verbatim：{}",
+            canon.display()
+        );
+        let url = file_url(&canon);
+        let back = url_to_path(url.strip_prefix("file://").unwrap()).unwrap();
+        assert_eq!(back, canon, "file_url 与 url_to_path 必须可逆");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn relative_specifier_resolution() {

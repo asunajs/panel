@@ -184,18 +184,38 @@ jobs:
       - name: release 链接
         run: cargo build --release
 
-      - name: 最小冒烟（起进程 + 打探针）
+      - name: 冒烟（起进程 + 探针 + **真加载一个用相对 import 的插件**）
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $tmp = Join-Path $env:RUNNER_TEMP 'ppsmoke'
           New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $plugins = Join-Path $tmp 'plugins'
+          $tasks = Join-Path $tmp 'tasks'
+          New-Item -ItemType Directory -Force -Path (Join-Path $plugins 'js/lib') | Out-Null
+          New-Item -ItemType Directory -Force -Path $tasks | Out-Null
+
+          # issue #1 的回归：Windows 上相对 import 曾经全线失效（canonicalize 的
+          # verbatim 路径没进 file_url）。只打健康检查是抓不到的 —— 必须真加载一个
+          # 用相对 import 的插件，并且看它有没有打印出期望的日志。
+          @'
+          export const twice = (n) => n * 2;
+          '@ | Set-Content -Encoding utf8 (Join-Path $plugins 'js/lib/math.js')
+          @'
+          import { log } from 'host-api';
+          import { twice } from './lib/math.js';
+          log('RELIMP-OK ' + twice(21));
+          '@ | Set-Content -Encoding utf8 (Join-Path $plugins 'js/relimp.js')
+
           $env:DB_PATH = Join-Path $tmp 'panel.db'
           $env:PANEL_LOG_DIR = Join-Path $tmp 'logs'
+          $env:PLUGINS_DIR = $plugins
+          $env:TASKS_DIR = $tasks
           $env:BIND_ADDR = '127.0.0.1:18787'
           $env:PANEL_TOKEN = 'cismoke'
           $env:PANEL_ALLOW_PLAIN_TOKEN = '1'
-          $p = Start-Process -FilePath 'target/release/plugin-panel.exe' -ArgumentList 'serve' -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $tmp 'out.log') -RedirectStandardError (Join-Path $tmp 'err.log')
+          $outLog = Join-Path $tmp 'out.log'
+          $p = Start-Process -FilePath 'target/release/plugin-panel.exe' -ArgumentList 'serve' -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError (Join-Path $tmp 'err.log')
           try {
             $ok = $false
             for ($i = 0; $i -lt 40; $i++) {
@@ -206,13 +226,24 @@ jobs:
               } catch { }
             }
             if (-not $ok) {
-              Write-Host '--- stdout ---'; Get-Content (Join-Path $tmp 'out.log') -ErrorAction SilentlyContinue
-              Write-Host '--- stderr ---'; Get-Content (Join-Path $tmp 'err.log') -ErrorAction SilentlyContinue
+              Write-Host '--- stdout ---'; Get-Content $outLog -ErrorAction SilentlyContinue
               throw '服务没起来：/healthz 在 20 秒内没有回 200'
             }
             Write-Host 'ok: /healthz 回了 200'
             $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18787/readyz' -Headers @{ Authorization = 'Bearer cismoke' } -TimeoutSec 5
             Write-Host ('ok: /readyz ' + $r.StatusCode + ' ' + $r.Content)
+
+            # 插件加载是启动时扫目录，给它几秒；日志里必须出现 RELIMP-OK 42
+            $hit = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ((Get-Content $outLog -Raw -ErrorAction SilentlyContinue) -match 'RELIMP-OK 42') { $hit = $true; break }
+            }
+            if (-not $hit) {
+              Write-Host '--- stdout ---'; Get-Content $outLog -ErrorAction SilentlyContinue
+              throw '相对 import 没跑通：日志里没有 RELIMP-OK 42（issue #1 回归）'
+            }
+            Write-Host 'ok: 相对 import 跑通了（./lib/math.js 解析成功）'
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
