@@ -90,21 +90,37 @@ JS 用 `//`，Python / Shell 用 `#`；块注释里的 `* @key …` 也认。键
 `.js`/`.mjs` 脚本走的是**外部** Node/Bun，而外部运行时依赖 fd 传递（fd3/fd4）与进程组
 kill —— **这些只有 Unix 有**（见 [运行时](runtimes.md)）。所以：
 
-| 扩展名 | Linux / macOS | Windows |
-|---|---|---|
-| `.js` / `.mjs` | ✅ 需要装 `node` 或 `bun` | ❌ **跑不了** |
-| `.py` | ✅ 需要装 `python3` | ✅ 需要装 Python（`python` / `python3` 都认） |
-| `.sh` | ✅ 需要 `sh` | ❌ 一般没有 `sh` |
+脚本任务的本质是「**定时启动一个程序**」。那个程序可以是解释器 + 源码，也可以是
+一个二进制；Windows 上没有 `sh`，但有 `cmd` 与 PowerShell。所以矩阵是这样的：
 
-Windows 上 `.js` 脚本任务的三种写法**全部失败，没有例外**：
+| 扩展名 | 运行时 | Linux / macOS | Windows |
+|---|---|---|---|
+| `.js` / `.mjs` | `quickjs`（内嵌） | ✅ 不用装任何东西 | ✅ **不用装任何东西** |
+| `.js` / `.mjs` | `node` / `bun`（外部） | ✅ 需要装 `node` 或 `bun` | ❌ 外部运行时依赖 fd 传递与进程组，只有 Unix 有 |
+| `.py` | `python3` | ✅ 需要 `python3` | ✅ 需要装 Python（`python` / `python3` 都认） |
+| `.sh` | `sh` | ✅ 需要 `sh` | ❌ 没有 POSIX shell —— 用 `.cmd` / `.ps1` 代替 |
+| `.cmd` / `.bat` | `exe` | —（一般不存在） | ✅ 走 `cmd /c` |
+| `.ps1` | `exe` | —（一般不存在） | ✅ 走 `powershell -NoProfile -ExecutionPolicy Bypass -File` |
+| `.exe` / `.com` | `exe` | ✅（任何带执行位的二进制） | ✅ 直接执行 |
 
-| 写法 | 结果 |
-|---|---|
-| `@runtime node` / `@runtime bun` | 「外部 Node/Bun 运行时需要 fd 传递与进程组，这些只有 Unix 有」 |
-| `@runtime quickjs` | 「`@runtime` `quickjs` 认不出来（node\|bun\|python3\|sh）」—— 内嵌 QuickJS 只跑**插件**，不跑脚本 |
+**`.js` 在非 Unix 上默认就是 `quickjs`**：不写 `@runtime` 也不会掉进死路。想用外部 Node
+（比如需要 `node_modules`）就在 Unix 上显式写 `@runtime node`。
 
-⇒ Windows 上想要 JS 逻辑，**写成插件**（内嵌 QuickJS，任何平台都能跑），
-或者把脚本改成 `.py`。文件仍会被发现并出现在任务列表里，只是每次执行都失败、最后熔断。
+### 3.2 二进制任务没有文件头：用边车
+
+`@cron` / `@timeout` 写在文件头几行注释里。`.js` / `.py` / `.sh` / `.cmd` / `.ps1` 是文本，
+放得下；`.exe` 放不下。所以二进制任务用**边车头部**：
+
+```
+tasks/
+  backup.exe        ← 程序本体
+  backup.exe.task   ← # @cron 0 3 * * *
+                    ← # @timeout 10m
+```
+
+- 有边车 → 从边车读 `@cron` / `@timeout` / `@params` / `@name`
+- 没边车 → **不是错误**：任务照样出现在列表里、能手动触发，只是没有排班
+- 边车本身不会被当成任务（`.task` 不在识别的扩展名里）
 
 ## 4. 两种来源与优先级
 
