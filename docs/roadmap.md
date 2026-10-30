@@ -7,7 +7,7 @@
 
 | 项 | 说明 | 出处 |
 |---|---|---|
-| 外部运行时首版只支持 Unix | fd3/fd4 的 `dup2`、`process_group(0)`、`kill(-pid)` 都是 Unix 语义；Windows 上 Node/Bun 档不可用，QuickJS 照常 | [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--五条通道) |
+| 外部运行时首版只支持 Unix | fd3/fd4 的 `dup2`、`process_group(0)`、`kill(-pid)` 都是 Unix 语义；Windows 上 Node/Bun 档不可用，QuickJS 照常。**脚本任务**有 Windows 路径（内嵌 QuickJS / `@runtime exe`），受限的只有**插件**的外部运行时 | [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--五条通道) |
 | 外部插件启动开销 | 每次「装回 / 崩溃重启」都要 spawn 解释器 + 等 `ready`（Node 几十到几百 ms）；`PLUGIN_PRELOAD_MS` 对它们更重要 | [engine-safety.md §7.4](engine-safety.md#74-惰性回收外部子进程是真的会退出) |
 | 超预算 = 杀进程 | 外部插件没有「中断但保留状态」的手段；跨调用状态必须落盘 | [ext-runtime-protocol.md §8](ext-runtime-protocol.md#8-超时杀进程重启) |
 | Node / Bun 的精确内存未测 | 目前只有量级（Node 40–80 MB、Bun 30–60 MB）；RPC 单次延迟也未测 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
@@ -25,7 +25,12 @@
 | `@params` 走环境变量 | 受进程环境大小限制；大 JSON 请放文件 | [script-jobs.md §10](script-jobs.md#10-已知限制v1) |
 | 脚本 UI 首版只做「列表 + 编辑 + 操作」 | 没有脚本专用的日志聚合页；日志仍从 `/api/logs` 看 | [script-jobs.md §5](script-jobs.md#5-面板上能做什么) |
 | 脚本目录只扫两层 | `tasks/lib/foo.js` 不会被当任务（好），但也不支持更深的组织方式 | [script-jobs.md §2](script-jobs.md#2-目录布局) |
-| 脚本没有「输出结果」契约 | `runs.output` 是合并文本；结构化结果要自己写 JSON 文件 / 表 | [script-jobs.md §6](script-jobs.md#62-一次执行的生命周期) |
+| 脚本没有「输出结果」契约 | `runs.output` 是合并文本；结构化结果要自己写 JSON 文件 / 表 |
+| `.js` 脚本在非 Unix 上默认走内嵌 QuickJS | 想用外部 Node（比如需要 `node_modules`）在 Windows 上没有路径；`@runtime node` 会明确报错并指向 `quickjs` | [script-jobs.md §3.1](script-jobs.md#31-平台矩阵哪些脚本在哪个系统上真能跑) |
+| 内嵌 QuickJS 跑脚本时只有 `log` / `host.log` 垫片 | 插件那套 `register_cron` / `http_fetch` / `node:fs` 在脚本里**没有**；要这些能力请写成插件 | [script-jobs.md §3](script-jobs.md#3-文件头前-50-行里的注解) |
+| 二进制任务必须有边车才有排班 | `foo.exe` 没有 `foo.exe.task` 时只能手动触发（不算错，但不会自动跑） | [script-jobs.md §3.2](script-jobs.md#32-二进制任务没有文件头用边车) |
+| `.sh` 在 Windows 上不支持 | 没有 POSIX shell；用 `.cmd` / `.bat` / `.ps1`（`@runtime exe`）代替 | [script-jobs.md §3.1](script-jobs.md#31-平台矩阵哪些脚本在哪个系统上真能跑) |
+| 边车只认 `<文件名>.task` 一种形状 | 不支持把多个任务的头部集中写在一个清单文件里 | [script-jobs.md §3.2](script-jobs.md#32-二进制任务没有文件头用边车) | [script-jobs.md §6](script-jobs.md#62-一次执行的生命周期) |
 
 ## 3. 调度与隔离
 

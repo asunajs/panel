@@ -1,6 +1,35 @@
 # 更新记录
 
-## 未发布
+## 0.2.0 — 2026-10-30
+
+> `v0.1.11..HEAD` 共 **166 个提交**。主题两条：**Windows 真的能用**，
+> 和**脚本任务不再有死路**。下面按主题归拢，细节在各节。
+
+### 这一版的重点
+
+| 主题 | 一句话 |
+|---|---|
+| **Windows** | 相对 import 修好（verbatim 路径进 `file_url`）、CI 上真跑测试 + 冒烟、发 `.exe` 产物 |
+| **脚本任务** | `.js` 可用**内嵌 QuickJS** 跑（不需要外部 Node）；新增 `exe` 运行时跑 `.cmd`/`.bat`/`.ps1`/二进制；二进制用边车 `foo.exe.task` 写头部 |
+| **备份加密** | `age` 换成 X25519 + HKDF-SHA256 + ChaCha20-Poly1305（`ppx1` 密钥）；**age 从未发版，所以没留兼容分支** |
+| **运行记录** | 加第二个闸门 `RUN_KEEP_ROWS`（默认 20 万条），`/api/state` 报 `storage.runs_rows` / `db_bytes` |
+| **通知** | 发件走 outbox + 自动重试；`dedup_key` 去重；熔断单独发事件 |
+| **CLI** | `--version` / `-V`、`build-info` 带 commit（`GIT_COMMIT` 由 `build.rs` 注入） |
+| **适配器** | Node 门槛 22.5 → **24**（22.x 的 `node:sqlite` 会报 `column index out of range`），CI 双向钉住 |
+
+### ⚠ 还没做的（这一版明确不包含）
+
+完整清单在 [docs/roadmap.md](docs/roadmap.md)，这里只列**会咬人**的：
+
+| 没做 | 影响 |
+|---|---|
+| **外部 Node/Bun 插件仍然只支持 Unix** | Windows 上插件只能用内嵌 QuickJS；`.js` **脚本任务**可以（走内嵌），但 `@runtime node` 在 Windows 上会明确报错 |
+| **`.sh` 脚本在 Windows 上跑不了** | 用 `.cmd` / `.bat` / `.ps1` 代替（`@runtime exe`） |
+| **`@runtime quickjs` 的脚本没有 `host-api` 的完整能力** | 只有 `log` / `host.log` 这层垫片；`register_cron`、`http_fetch` 等插件能力在脚本里没有 |
+| **二进制任务必须有边车才有排班** | `foo.exe` 没有 `foo.exe.task` 时只能手动触发 |
+| **Qoder 审查里 6 条 High 未修** | H3 停止位是全局单比特、H4 预算超时不计 `stopped`、H5 `lead_ms` 不小于周期时补跑风暴、H8 `http_fetch` 只查首跳、H9 自更新校验和与二进制同走代理、H13 `list_runs` 索引失效 |
+| **Windows 的验证仍有缺口** | UI 点击流、Ctrl+C 优雅退出、8 小时长跑终局都没在真 Windows 上做过（issue #12，`help wanted`） |
+| **7b 顶层 await 模块加载** | QuickJS 的 `async`/`await` 已支持，只剩模块加载那一层没做 |
 
 - **按 Qoder 全项目审查（`docs/review-qoder-261025.md`）修了 8 条 High。**
   我并行核验了 15 条 High：**14 条属实，1 条部分属实**（H1 里「Instant 溢出会 panic」

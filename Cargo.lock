@@ -1915,7 +1915,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plugin-panel"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "axum",
