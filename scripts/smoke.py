@@ -739,7 +739,11 @@ def cross_runtime_log_parity(tmp: Path) -> None:
         _err = (r.stderr or "")
         if r.returncode != 0 and "需要 Node 24" in _err:
             print("  ⏭  Node 适配器项跳过：宿主 Node 低于 24（适配层要求 Node 24+）")
-        elif not check(
+            # ⚠ 必须**一起跳过**下面的 JSONL 对比：那次运行根本没发生，
+            # Node 侧一个文件都不会有，硬比就是必然失败（release 0.2.0 第一跑
+            # 就是这么红的：面板 1 / Node 0）。
+            return
+        if not check(
             r.returncode == 0,
             "Node 适配器能跑同一个插件文件（run.mjs --once）",
             _err.strip().splitlines()[-1] if _err else f"退出码 {r.returncode}",
