@@ -15,6 +15,45 @@
 
 ---
 
+## 最快跑起来
+
+零基础只看这三步，后面所有章节都可以先跳过。
+
+### 1. 装
+
+Linux、树莓派、旧手机（Termux）一行搞定：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
+```
+
+Windows 直接下 [`plugin-panel-windows-x86_64.exe`](https://github.com/asunajs/panel/releases/latest)，双击就能跑。
+
+### 2. 设一个口令（只需一次）
+
+```bash
+printf '%s' '换成你自己的口令' | plugin-panel hash-token
+```
+
+它会打印一行 `export PANEL_TOKEN_HASH='prehash1:...'`。**把这行原样粘贴回终端**，然后：
+
+```bash
+plugin-panel
+```
+
+### 3. 打开浏览器
+
+```text
+http://127.0.0.1:8787
+```
+
+输刚才那个口令，就进去了。
+
+> 第 2 步是现在唯一的门槛，正在改成**浏览器里点几下就设好**（不用碰命令行、不用环境变量）。
+> 在那之前它是最短的一条路；要服务化部署（systemd / 反代 / 容器）再看[第一次启动](#第一次启动)。
+
+---
+
 ## 先看一遍界面
 
 打开面板后，左侧有几项：
