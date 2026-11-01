@@ -164,6 +164,7 @@ impl LoginError {
 /// 关键那一列是「线上那份」：前两种形态下，**明文口令都要经过服务端**（浏览器把它
 /// 发上来，服务端在内存里持有并比对）—— 只要服务端能看到，环境变量、进程内存、
 /// 崩溃转储、抓包就都有机会看到它。`Prehash` 把这一步挪进浏览器，服务端只见到摘要。
+#[derive(Clone)]
 pub enum Cred {
     /// 明文口令（`PANEL_TOKEN`）。落盘就是可直接复用的凭据 —— **只给开发用**。
     Plain(String),
@@ -697,7 +698,9 @@ pub fn parse_allow_ips(raw: &str) -> (Vec<IpAddr>, Vec<String>) {
 /// 全是 `127.0.0.1`。所以「本机 = 可信」在有人挂反代的那一刻就不成立了，
 /// 而表现是「面板裸奔在公网上」。现在凭据是必需品，`main()` 里没配就拒绝启动。
 pub struct Auth {
-    cred: Cred,
+    /// 凭据可以**运行时替换**（引导页设完口令立刻生效，不依赖重启）。
+    /// `None` = 还没设过（只有 setup 模式会出现）。
+    cred: std::sync::RwLock<Option<Cred>>,
     sessions: Mutex<HashMap<String, Session>>,
     failures: Mutex<HashMap<IpAddr, FailState>>,
     /// 蜜罐封禁表（见 [`Auth::ban`]）。只在内存里：重启即解除。
@@ -748,7 +751,7 @@ impl Auth {
     /// `read_credential()` 在启动阶段挡住（写成空就等于没配，会拒绝启动）。
     pub fn new(cred: Cred, cookie_secure: bool) -> Self {
         Self {
-            cred,
+            cred: std::sync::RwLock::new(Some(cred)),
             sessions: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
             bans: Mutex::new(BanTable::new()),
@@ -823,8 +826,20 @@ impl Auth {
     ///
     /// 第二个返回值是「线上那份是明文」（旧形态），不是「明文口令」——
     /// 摘要形态下两者都为假。
+    /// 换一份凭据（引导页设完口令时用）。
+    ///
+    /// 为什么要有它：原来凭据是启动时定死的，改它只能靠重启；而重启（exec）在
+    /// 不同部署形态下并不可靠 —— 实测 Linux 上引导页设完之后进程没换上，登录 401。
+    /// 让它在内存里当场生效，重启就只是清理动作，不再是正确性的前提。
+    pub fn set_cred(&self, cred: Cred) {
+        *self.cred.write().unwrap() = Some(cred);
+    }
+
     pub fn cred_kind(&self) -> (&'static str, bool) {
-        (self.cred.kind(), self.cred.is_plain())
+        match self.cred.read().unwrap().as_ref() {
+            Some(c) => (c.kind(), c.is_plain()),
+            None => ("unset", false),
+        }
     }
 
     /// cookie 要不要带 `Secure`。
@@ -941,10 +956,17 @@ impl Auth {
     fn credential_matches(&self, candidate: &str) -> bool {
         // 空凭据永远不成立（安全审计 L2）。见 `Cred::is_empty` 的注释：
         // `Cred::Plain("")` 的 verify 对空候选会恒真，那等于免登录。
-        if candidate.trim().is_empty() || self.cred.is_empty() {
+        if candidate.trim().is_empty() {
             return false;
         }
-        let cred = &self.cred;
+        // 拷一份出来：读锁不要跨着 Argon2（几十毫秒）一直握着
+        let Some(cred) = self.cred.read().unwrap().clone() else {
+            return false;
+        };
+        if cred.is_empty() {
+            return false;
+        }
+        let cred = &cred;
         if let Cred::Plain(_) = cred {
             return cred.verify(candidate);
         }
@@ -1050,17 +1072,33 @@ impl Auth {
     /// 登录页把这个值嵌进 HTML，于是它不需要为了"我该发什么"再发一次请求 ——
     /// 未认证状态的页面不该带任何会 401 的 fetch。
     pub fn wants_digest(&self) -> bool {
-        self.cred.wants_digest()
+        self.cred
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.wants_digest())
+            .unwrap_or(true)
     }
 
     /// 当前凭据形态（启动日志 / 面板读数用）。**不含任何秘密**。
     pub fn cred_shape(&self) -> &'static str {
-        self.cred.kind()
+        self.cred
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.kind())
+            .unwrap_or("unset")
     }
 
     /// 是不是"开发口子"形态（线上那份是明文）。面板读数里露出来，让它藏不住。
     pub fn plain_token(&self) -> bool {
-        !self.cred.is_deploy_safe()
+        !self
+            .cred
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.is_deploy_safe())
+            .unwrap_or(false)
     }
 
     /// 活跃会话快照，最近登录的在前。顺带清掉过期的。

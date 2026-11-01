@@ -706,16 +706,23 @@ async fn do_setup(State(st): State<AppState>, Json(req): Json<SetupReq>) -> Resp
         )
             .into_response();
     }
-    crate::setup::clear();
-    crate::log::plog!("boot", warn, "引导页设置完成，凭据已保存；正在重启面板");
-    // 重启：`Auth` 里的凭据是启动时定死的，重启一次比改成 RwLock 风险小得多。
-    // 自更新用的就是这条路径（前台跑 = 原地 exec，PID 不变）。
-    if let Ok(exe) = std::env::current_exe() {
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(900));
-            crate::settings::restart_process_at(&exe);
-        });
+    // **当场生效**，不靠重启。
+    //
+    // 原来这里写的是「保存 → exec 自重启」，在 macOS 上验证通过，但 Linux CI 上
+    // 设完之后进程没换上凭据（登录 401）。引导页是**唯一**的设口令入口，
+    // 它不能依赖「重启一定成功」这种跨平台假设。
+    match auth::Cred::parse(&hash) {
+        Ok(c) => st.auth.set_cred(c),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
     }
+    crate::setup::clear();
+    crate::log::plog!("boot", warn, "引导页设置完成：凭据已保存并生效，引导入口已关闭");
     Json(json!({ "ok": true })).into_response()
 }
 

@@ -4110,7 +4110,7 @@ def first_run_setup(tmp: Path) -> None:
                     break
             except Exception:
                 pass
-        if not check(moved, "设完重启后不再跳引导页，而是跳登录页"):
+        if not check(moved, "设完之后不再跳引导页，而是跳登录页"):
             print(log.read_text(errors="replace"))
             return
 
