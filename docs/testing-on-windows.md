@@ -74,8 +74,12 @@ gh run download <run-id> -n plugin-panel-testkit
 拿到包先跑一次，把 commit 和目标 tag 对上：
 
 ```bash
+# Linux / WSL2
 ./plugin-panel-x86_64-linux-musl build-info
-# {"commit":"b25feddde150…","features":[],"live_supported":false,"version":"0.2.0"}
+# Windows（PowerShell 或 cmd，后缀是 .exe）
+.\plugin-panel-windows-x86_64.exe build-info
+
+# 两种形态都该打印同一行：{"commit":"b25feddde150…", …, "version":"0.2.0"}
 
 git rev-parse --short=12 'v0.2.0^{commit}'   # 注解 tag 必须加 ^{commit}，否则拿到的是 tag 对象
 ```
