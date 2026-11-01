@@ -85,7 +85,12 @@ pub fn render_page(err: Option<&str>) -> String {
     };
     let mut out = String::from(HEAD);
     out.push_str(&err_html);
-    out.push_str(TAIL);
+    out.push_str(TAIL_A);
+    // 域分隔常量**只从 auth.rs 来**，页面里不再抄一份。
+    // 抄一份的后果是：哪天改了 `DIGEST_DOMAIN`，页面照旧算老域名，
+    // 表现是「口令明明是对的但登录一直失败」—— 设口令这一步不该有这种坑。
+    out.push_str(crate::auth::DIGEST_DOMAIN);
+    out.push_str(TAIL_B);
     out
 }
 
@@ -96,14 +101,16 @@ const HEAD: &str = r##"<!doctype html><html lang=zh-CN><head><meta charset=utf-8
 <p>这是第一次启动。设完就能进面板，以后用这个口令登录。</p>
 <p>一次性口令在<strong>启动它的那个终端</strong>里，形如 <code>K7QM-3XP9</code>。</p>"##;
 
-const TAIL: &str = r##"<form id=f>
+const TAIL_A: &str = r###"<form id=f>
 <p><label>设置口令 <input id=p1 type=password minlength=8 required autocomplete=new-password></label></p>
 <p><label>再输一遍 <input id=p2 type=password minlength=8 required autocomplete=new-password></label></p>
 <p><label>一次性口令 <input id=code type=text required autocomplete=off spellcheck=false placeholder=K7QM-3XP9></label></p>
 <p><button id=b type=submit>完成设置</button></p>
 </form><p id=m></p>
 <script>
-const DOMAIN = "plugin-panel/v1:";
+const DOMAIN = ""###;
+
+const TAIL_B: &str = r##"";
 function hex(b){return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,"0")).join("");}
 async function digest(pw){
   if(!(window.crypto&&crypto.subtle)){throw new Error("这个浏览器拿不到 crypto.subtle。请在本机用 http://127.0.0.1:8787/setup 打开");}
@@ -157,6 +164,15 @@ mod tests {
         assert_eq!(read_cred(&db).as_deref(), Some("prehash1:xyz"));
         assert_eq!(cred_path(&db), dir.join("credential"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_takes_the_digest_domain_from_auth() {
+        // 页面里的 `const DOMAIN = "..."` 必须和 auth.rs 的 `DIGEST_DOMAIN` 一模一样：
+        // 它决定浏览器算什么摘要，抄错了就是「口令对但登不进去」。
+        let h = render_page(None);
+        let want = format!("const DOMAIN = \"{}\";", crate::auth::DIGEST_DOMAIN);
+        assert!(h.contains(&want), "引导页里的摘要域分隔没跟上 auth.rs: {want}");
     }
 
     #[test]
