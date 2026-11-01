@@ -29,28 +29,26 @@ curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bas
 
 Windows 直接下 [`plugin-panel-windows-x86_64.exe`](https://github.com/asunajs/panel/releases/latest)，双击就能跑。
 
-### 2. 设一个口令（只需一次）
-
-```bash
-printf '%s' '换成你自己的口令' | plugin-panel hash-token
-```
-
-它会打印一行 `export PANEL_TOKEN_HASH='prehash1:...'`。**把这行原样粘贴回终端**，然后：
+### 2. 运行
 
 ```bash
 plugin-panel
 ```
 
-### 3. 打开浏览器
+第一次启动会在终端打印一行**一次性口令**，形如 `K7QM-3XP9`。留着它，下一步要用。
+
+### 3. 打开浏览器，设一个口令
 
 ```text
 http://127.0.0.1:8787
 ```
 
-输刚才那个口令，就进去了。
+会自动跳到设置页：输两遍新口令，再填终端里那个一次性口令，点「完成设置」。
+面板会自动重启，然后用刚设的口令登录就行。
 
-> 第 2 步是现在唯一的门槛，正在改成**浏览器里点几下就设好**（不用碰命令行、不用环境变量）。
-> 在那之前它是最短的一条路；要服务化部署（systemd / 反代 / 容器）再看[第一次启动](#第一次启动)。
+> 一次性口令只在**还没设过口令**时出现，设完就没有了。
+> 要服务化部署（systemd / 反代 / 容器、想跳过引导）可以直接配 `PANEL_TOKEN_HASH`，
+> 见[第一次启动](#第一次启动)。
 
 ---
 
