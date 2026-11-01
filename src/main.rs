@@ -1424,7 +1424,16 @@ fn read_credential(
             return Err("系统随机源不可用，无法生成一次性口令；请改用 PANEL_TOKEN_HASH".into());
         }
         crate::setup::set_active(code.clone());
-        crate::log::plog!("boot", warn, "首次启动：还没设口令。请在浏览器打开 http://127.0.0.1:{}/setup", addr.port());
+        // 绑 0.0.0.0 时把**局域网地址**排在前面：无头设备上没有本机浏览器，
+        // 只给 127.0.0.1 等于让用户卡在「连接被拒绝」。
+        let urls = crate::setup::hint_urls(addr.port(), addr.ip().is_loopback());
+        crate::log::plog!("boot", warn, "首次启动：还没设口令。请在浏览器打开如下地址设置：");
+        for u in &urls {
+            crate::log::plog!("boot", warn, "    {u}");
+        }
+        if urls.len() > 1 {
+            crate::log::plog!("boot", warn, "  （第一条是局域网地址，可从别的设备访问；第二条只在本机可用）");
+        }
         crate::log::plog!("boot", warn, "一次性口令：{code}");
         crate::log::plog!("boot", warn, "（这行只在没有凭据时出现；设完就没了）");
         let mut r = [0u8; 32];

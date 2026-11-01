@@ -51,6 +51,35 @@ pub fn save_cred(db_path: &Path, hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 引导页该用哪个地址打开。
+///
+/// 绑 `0.0.0.0` 时只打印 `127.0.0.1` 是**错的**：树莓派 / 盒子 / 旧手机这类无头设备
+/// 上根本没有本机浏览器，用户照抄那个地址只会得到「连接被拒绝」，然后卡在这一步。
+/// 所以额外探一次本机出口 IP，把**能从别的机器访问**的那个地址排在前面。
+pub fn hint_urls(port: u16, bind_is_loopback: bool) -> Vec<String> {
+    let loopback = format!("http://127.0.0.1:{port}/setup");
+    if bind_is_loopback {
+        return vec![loopback];
+    }
+    match lan_ip() {
+        Some(ip) => vec![format!("http://{ip}:{port}/setup"), loopback],
+        None => vec![loopback],
+    }
+}
+
+/// 本机在局域网里的地址。
+///
+/// 不发任何包：UDP `connect` 只让内核挑一条出口路由，然后读 `local_addr()`。
+/// 拿不到（没默认路由、CI 沙箱禁网）就返回 `None`，调用方退回只打回环地址。
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    match s.local_addr().ok()?.ip() {
+        ip if ip.is_loopback() || ip.is_unspecified() => None,
+        ip => Some(ip),
+    }
+}
+
 /// 定长比较，别让「前几位对不对」从耗时里漏出去。
 pub(crate) fn code_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
@@ -188,6 +217,26 @@ mod tests {
         assert_eq!(read_cred(&db).as_deref(), Some("prehash1:xyz"));
         assert_eq!(cred_path(&db), dir.join("credential"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hint_prefers_the_lan_address_only_when_bound_widely() {
+        // 绑回环：只可能有一个地址，多打一个只会让用户困惑。
+        assert_eq!(
+            hint_urls(8787, true),
+            vec!["http://127.0.0.1:8787/setup".to_string()]
+        );
+        // 绑 0.0.0.0：回环那条**永远**在（兜底），局域网那条取决于机器有没有出口路由。
+        let wide = hint_urls(8787, false);
+        assert!(wide.contains(&"http://127.0.0.1:8787/setup".to_string()));
+        assert!(wide.len() == 1 || wide.len() == 2, "{wide:?}");
+        if wide.len() == 2 {
+            assert!(wide[1].ends_with(":8787/setup") && wide[0] != wide[1]);
+            assert!(
+                !wide[0].contains("127.0.0.1"),
+                "局域网地址不能是回环: {wide:?}"
+            );
+        }
     }
 
     #[test]
