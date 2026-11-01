@@ -89,6 +89,7 @@
 
 | 项 | 什么时候还的 | 出处 |
 |---|---|---|
+| **第一次用必须配环境变量** | 0.3.0（浏览器引导页 + 一次性口令；环境变量降级为服务化部署的可选项） | [deployment.md §9](deployment.md#9-部署旧手机--arm-盒子--pc) |
 | 面板没有鉴权 | 第十轮（第十九轮又删掉「本机免登录」） | [security.md §13](security.md#13-第十轮面板鉴权) |
 | 任务定义不能新增 / 删除 | 第九轮（`jobs.source` 区分来源） | [changelog/09-jobs-authority.md §12](changelog/09-jobs-authority.md#12-第九轮jobs-表成为任务定义的权威来源) |
 | 任务定义不能编辑 | 第十二轮（面板对插件任务用**覆盖层**） | [changelog/12-editable-jobs.md §15](changelog/12-editable-jobs.md#15-第十二轮任务定义可编辑--失效任务清理) |
