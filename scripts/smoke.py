@@ -3994,6 +3994,141 @@ def update_checks(tmp: Path) -> None:
         srv.shutdown()
 
 
+def first_run_setup(tmp: Path) -> None:
+    """首次启动的引导页：没有凭据 ⇒ /setup；设完能登录（不碰任何环境变量）。
+
+    这是「零基础用户」那条路 —— 不配 PANEL_TOKEN、不跑 hash-token，
+    直接 ./plugin-panel，浏览器里设口令。
+    """
+    import hashlib
+    import re
+
+    d = tmp / "setup-run"
+    d.mkdir(parents=True, exist_ok=True)
+    port = free_port()
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PANEL_TOKEN", "PANEL_TOKEN_HASH", "PANEL_TOKEN_FILE", "PANEL_TOKEN_HASH_FILE")
+    }
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(d / "panel.db"),
+            "PLUGINS_DIR": str(d / "plugins"),
+            "TASKS_DIR": str(d / "tasks"),
+            "PANEL_LOG_DIR": str(d / "logs"),
+        }
+    )
+    log = d / "setup.log"
+    with open(log, "w") as f:
+        proc = subprocess.Popen([str(BIN), "serve"], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+
+    def get(path, accept=None):
+        import urllib.error
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+
+        op = urllib.request.build_opener(NoRedirect)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+        if accept:
+            req.add_header("Accept", accept)
+        try:
+            with op.open(req, timeout=5) as r:
+                return r.status, r.headers.get("Location") or "", r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location") or "", e.read().decode("utf-8", "replace")
+        except Exception:
+            # 自重启（exec）那一瞬间连接会被掐掉，这是**预期**的，不是失败
+            return 0, "", ""
+
+    try:
+        # 起没起来：/setup 能打开就算起来了（/readyz 要鉴权，这里没有凭据）
+        up = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                if get("/setup")[0] == 200:
+                    up = True
+                    break
+            except Exception:
+                pass
+        if not check(up, "首次启动：/setup 能打开"):
+            print(log.read_text(errors="replace"))
+            return
+
+        st, loc, _ = get("/", accept="text/html")
+        if not check(st == 303 and loc.endswith("/setup"), "没设口令时浏览器被送到引导页", f"{st} {loc}"):
+            return
+
+        text = log.read_text(errors="replace")
+        m = re.search(r"一次性口令：([A-Z0-9-]{9})", text)
+        if not check(bool(m), "终端里打印了一次性口令"):
+            return
+        code = m.group(1)
+
+        pw = "smoke-pass-123"
+        digest = hashlib.sha256(("plugin-panel/v1:" + pw).encode()).hexdigest()
+
+        def post(path, body):
+            import urllib.error
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, r.headers.get("Set-Cookie"), r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, None, e.read().decode()
+            except Exception:
+                return 0, None, ""
+
+        st, _, _ = post("/api/setup", {"code": "AAAA-AAAA", "digest": digest})
+        if not check(st == 403, "错的一次性口令被拒", f"{st}"):
+            return
+
+        st, _, _ = post("/api/setup", {"code": code, "digest": digest})
+        if not check(st == 200, "对的一次性口令设好了口令", f"{st}"):
+            print(log.read_text(errors="replace"))
+            return
+
+        # 设完会 exec 自重启：等它回到「跳登录页」的状态
+        moved = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                st, loc, _ = get("/", accept="text/html")
+                if st == 303 and loc.endswith("/login"):
+                    moved = True
+                    break
+            except Exception:
+                pass
+        if not check(moved, "设完重启后不再跳引导页，而是跳登录页"):
+            print(log.read_text(errors="replace"))
+            return
+
+        # 重启刚结束的那一两秒里连接可能被掐，重试几次（不是失败）
+        st, cookie = 0, None
+        for _ in range(20):
+            st, cookie, body = post("/api/login", {"token": digest})
+            if st:
+                break
+            time.sleep(0.5)
+        check(st == 200 and bool(cookie), "用刚设的口令能登录", f"{st} cookie={bool(cookie)} {body[:60]}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
 def main() -> int:
     # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
@@ -4425,6 +4560,7 @@ def main() -> int:
     run_record_checks(tmp)
     plugin_fs_checks(tmp)
     cross_runtime_log_parity(tmp)
+    first_run_setup(tmp)
     auth_checks(tmp)
     auth_hash_checks(tmp)
     anti_bruteforce_checks(tmp)
