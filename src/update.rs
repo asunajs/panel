@@ -6,6 +6,9 @@
 //!
 //! 1. **只认 https**（`PANEL_UPDATE_ALLOW_HTTP=1` 才允许 http，供内网镜像调试）。
 //! 2. **必须校验 SHA256**：摘要来自**同一个 release** 的 `SHA256SUMS`。
+//!    校验和与二进制走**同一条路由**（代理优先、直连兜底）—— 因此它挡的是
+//!    「传输损坏 / 镜像串味」，**挡不住**能同时伪造两者的恶意中间人（H9 的取舍，
+//!    见 `get_text` 的注释）。
 //!    这挡的是「传输被改 / 镜像被换 / 半截文件」，**挡不住上游仓库本身被拿下**
 //!    —— 那种情况下任何人都能发一个带后门的 release，我们无从分辨。
 //!    所以它是「防篡改」而不是「防投毒」。
@@ -110,17 +113,6 @@ pub struct Applied {
 /// 校验和与二进制都在明文上走。
 ///
 /// 只有本地冒烟测试（用 http mock 扮演 GitHub）才需要打开它。
-/// 是否允许「只能走代理时仍然更新」（安全审计 H9）。
-///
-/// 默认**否**：一个被接管的代理能同时返回假的 SHA256SUMS 和匹配的假二进制，
-/// 那样校验和等于不存在。只有运维明确知道代理可信时才该打开。
-pub(crate) fn allow_unverified_checksum() -> bool {
-    matches!(
-        std::env::var("PANEL_UPDATE_ALLOW_UNVERIFIED").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-    )
-}
-
 pub(crate) fn allow_http_outbound() -> bool {
     std::env::var("PANEL_UPDATE_ALLOW_HTTP")
         .map(|v| matches!(v.trim(), "1" | "on" | "true" | "yes"))
@@ -468,43 +460,22 @@ impl Update {
     }
 
     fn get_text(&self, url: &str) -> Result<String, String> {
-        // ⚠ 校验和改成**直连优先**（安全审计 H9）。
+        // 取校验和与取二进制走**同一条**路由：代理优先，代理不通退直连。
         //
-        // 以前它和二进制一样是「代理优先」：一个被接管的代理可以同时返回假的
-        // SHA256SUMS 和与它匹配的假二进制 —— sha 比较必然通过，文档承诺的
-        // 「挡住传输被改、镜像被换」等于没写。
-        //
-        // ⚠ 直连失败**不再自动退到代理**（安全审计 H9 收口）：
-        // 退到代理就等于把「校验和的来源」和「二进制的来源」合并成一个，
-        // 而一个被接管的代理可以同时伪造两者。
-        // 只在显式 PANEL_UPDATE_ALLOW_UNVERIFIED=1 时才允许走代理取校验和。
-        match self.try_fetch(url, "text/plain", 4 * 1024 * 1024, false) {
-            Ok((200, body)) => Ok(String::from_utf8_lossy(&body).to_string()),
-            direct => {
-                if !allow_unverified_checksum() {
-                    let why = match direct {
-                        Ok((code, _)) => format!("直连返回 HTTP {code}"),
-                        Err(e) => format!("直连失败：{e}"),
-                    };
-                    return Err(format!(
-                        "取不到校验和（{why}）。为防代理同时伪造校验和与二进制，\
-                         面板默认拒绝在只能走代理时更新。\
-                         确认代理可信可设 PANEL_UPDATE_ALLOW_UNVERIFIED=1 强制继续"
-                    ));
-                }
-                crate::log::plog!(
-                    "update",
-                    warn,
-                    "直连取不到校验和，因 PANEL_UPDATE_ALLOW_UNVERIFIED=1 改走代理"
-                );
-                let (status, body) =
-                    self.fetch(url, "text/plain", 4 * 1024 * 1024, false, true)?;
-                if status != 200 {
-                    return Err(format!("HTTP {status}"));
-                }
-                Ok(String::from_utf8_lossy(&body).to_string())
-            }
+        // 0.3.0 按部署决定改的（H9 原来的收口是「直连优先，直连不通直接报错」）。
+        // 代价必须写在代码里，别让后来人以为它还能挡中间人：
+        // 一条被接管的代理可以**同时**返回假的 SHA256SUMS 和与它匹配的假二进制，
+        // sha 比较必然通过。所以现在的校验和挡的是**传输损坏 / 镜像串味**，
+        // 挡不住恶意中间人。要挡后者只能让两个来源不同（H9 原方案），
+        // 代价是「只能走代理的网络」永远更新不了 —— 实测那种网络并不罕见。
+        let (status, body) = self.fetch(url, "text/plain", 4 * 1024 * 1024, true, false)?;
+        if status != 200 {
+            return Err(format!(
+                "取校验和失败：HTTP {status}{}",
+                hint_for_status(status)
+            ));
         }
+        Ok(String::from_utf8_lossy(&body).to_string())
     }
 
     fn download(&self, url: &str) -> Result<Vec<u8>, String> {
