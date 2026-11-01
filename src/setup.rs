@@ -104,6 +104,8 @@ pub fn render_page(err: Option<&str>) -> String {
     // 表现是「口令明明是对的但登录一直失败」—— 设口令这一步不该有这种坑。
     out.push_str(crate::auth::DIGEST_DOMAIN);
     out.push_str(TAIL_B);
+    out.push_str(crate::sha256::SHA256_JS);
+    out.push_str(TAIL_C);
     out
 }
 
@@ -124,10 +126,19 @@ const TAIL_A: &str = r###"<form id=f>
 const DOMAIN = ""###;
 
 const TAIL_B: &str = r##"";
-function hex(b){return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,"0")).join("");}
-async function digest(pw){
-  if(!(window.crypto&&crypto.subtle)){throw new Error("这个浏览器拿不到 crypto.subtle。请在本机用 http://127.0.0.1:8787/setup 打开");}
-  return hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(DOMAIN+pw)));
+function hexOf(x){ if(typeof x==="string") return x;
+  return Array.from(new Uint8Array(x)).map(b=>b.toString(16).padStart(2,"0")).join(""); }
+"##;
+
+const TAIL_C: &str = r##"async function digest(pw){
+  var bytes = new TextEncoder().encode(DOMAIN + pw);
+  // ① 安全上下文（localhost / HTTPS）走 crypto.subtle
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    return hexOf(await crypto.subtle.digest("SHA-256", bytes));
+  }
+  // ② http:// + 局域网 IP 拿不到 subtle —— 用与登录页同一份纯 JS 实现。
+  //   树莓派 / 盒子这类无头设备根本没有本机浏览器，少了这条就设不了口令。
+  return hexOf(sha256(bytes));
 }
 document.getElementById("f").addEventListener("submit", async (ev)=>{
   ev.preventDefault();
@@ -201,6 +212,16 @@ mod tests {
             PathBuf::from("/var/lib/panel/credential")
         );
     }
+    #[test]
+    fn page_can_hash_without_crypto_subtle() {
+        // `crypto.subtle` 只在安全上下文里存在。面板最常见的用法是 `http://` + 局域网 IP，
+        // 而树莓派 / 盒子这类无头设备**没有本机浏览器** —— 少了兜底就根本设不了口令。
+        let h = render_page(None);
+        assert!(h.contains("function sha256(bytes)"), "引导页缺少纯 JS SHA-256 兜底");
+        assert!(h.contains("0x6a09e667"), "兜底实现不完整");
+        assert!(h.contains("hexOf(sha256(bytes))"), "兜底没有被调用");
+    }
+
     #[test]
     fn page_takes_the_digest_domain_from_auth() {
         // 页面里的 `const DOMAIN = "..."` 必须和 auth.rs 的 `DIGEST_DOMAIN` 一模一样：

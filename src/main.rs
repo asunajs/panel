@@ -65,6 +65,7 @@ mod runtimes;
 mod scheduler;
 mod scriptjob;
 mod setup;
+mod sha256;
 mod settings;
 mod smtp;
 mod tz;
