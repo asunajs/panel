@@ -3935,7 +3935,7 @@ def update_checks(tmp: Path) -> None:
             "可以安装（can_apply + 正确的产物名）",
             f"{v.get('can_apply')} {v.get('asset')}",
         )
-        code, body = post_json(f"{base}/api/update/apply", panel=False)
+        code, body = post_json(f"{base}/api/update/apply", panel=False, timeout=120)
         check(code == 403, "更新接口也要 x-panel（缺了就是 403）", f"http {code}")
     finally:
         stop(proc, logf)
@@ -3952,7 +3952,7 @@ def update_checks(tmp: Path) -> None:
             "版本不比当前新 ⇒ 不给安装入口",
             f"latest={v.get('latest')!r}",
         )
-        code, body = post_json(f"{base2}/api/update/apply")
+        code, body = post_json(f"{base2}/api/update/apply", timeout=120)
         check(
             code == 400 and "最新" in (body.get("error") or ""),
             "强行安装被拒（400 已经是最新版本）",
@@ -3967,7 +3967,9 @@ def update_checks(tmp: Path) -> None:
         base3 = f"http://127.0.0.1:{port3}"
         check(wait_ready(base3, proc3), "坏摘要实例就绪")
         before = hashlib.sha256(exe3.read_bytes()).hexdigest()
-        code, body = post_json(f"{base3}/api/update/apply")
+        # ⚠ 这里要真下载产物再算 SHA256：debug 二进制上百 MB，整机负载下
+        # 默认 10s 超时不够（macOS 上会误报成「卡住」）。和下面那条一致给 120s。
+        code, body = post_json(f"{base3}/api/update/apply", timeout=120)
         after = hashlib.sha256(exe3.read_bytes()).hexdigest()
         check(
             code == 400 and "SHA256 不匹配" in (body.get("error") or ""),
