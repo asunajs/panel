@@ -52,7 +52,8 @@ open http://127.0.0.1:8787/  # 面板
 | `PANEL_TOKEN` | 空 | **明文口令**（与下面两个哈希来源三选一）。三个都没配时**不再拒绝启动**，而是进浏览器引导页（终端打印一次性口令）—— 没有「本机免登录」模式，因为反代也跑在本机（见 [§13](security.md#13-第十轮面板鉴权)）。⚠ 第二十一轮起这是**开发口子**：还要 `PANEL_ALLOW_PLAIN_TOKEN=1`，且绑回环、没开 `PANEL_COOKIE_SECURE` 才允许启动 |
 | `PANEL_TOKEN_FILE` | 空 | 从文件读令牌（systemd 用；内容会 trim，适合放 600 权限的文件）。两个都设时 `PANEL_TOKEN` 优先 |
 | `PANEL_TOKEN_HASH` | 空 | **部署用这个**：`prehash1:$argon2id$…`（`plugin-panel hash-token` 生成）。口令在浏览器里先算摘要，服务端只收到摘要、存的是摘要的 Argon2id。与 `PANEL_TOKEN` 同时存在时**以哈希为准**并提示。见 [§18](security.md#18-令牌不再明文落盘盐--哈希用户实测指出登录令牌不应该明文保存在本地) / [§21](security.md#21-口令不再经过服务端第二十一轮) |
-| `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系 |
+| `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系
+| **（不是环境变量）** `<DB 目录>/credential` | 不存在 | 引导页设完口令后落在这里，内容与 `PANEL_TOKEN_HASH` 同形态（`prehash1:$argon2id$…`），权限 **0600**。**优先级最低**：环境变量配了就用环境变量。删掉它重启 = 回到引导页（找回口令的路子） |
 | `PANEL_ALLOW_PLAIN_TOKEN` | 空 | **开发口子**：允许「明文 / 旧哈希」形态启动（线上那份是明文口令）。绑非回环地址或开了 `PANEL_COOKIE_SECURE` 时仍然拒绝启动；开着时每次启动打 warn，面板读数里 `auth.plain_token` 为真。见 [§21](security.md#21-口令不再经过服务端第二十一轮) |
 | `PANEL_COOKIE_SECURE` | 空 | `1`/`true`/`yes`/`on` → 会话 cookie 加 `Secure`。**走反代加了 TLS 时才开**（纯 HTTP 下开了 cookie 存不下来） |
 | `PANEL_TRUST_PROXY` | 空 | 兼容开关：`1`/`true`/`yes`/`on` → **只信任回环**（`127.0.0.1` / `::1`）对端提供的 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP`。反代不在本机时请改用 `PANEL_TRUSTED_PROXIES`（见下一行） |
