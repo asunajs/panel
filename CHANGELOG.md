@@ -24,6 +24,12 @@
   · 冒烟新增 `first_run_setup()` 七条断言；`refuse_to_start_without_token()` 按新契约
     改写（原来那条 `subprocess.run(timeout=30)` 现在会超时，因为进程不再退出）。
 
+- **更新路由统一成「代理优先、直连兜底」**（含 `SHA256SUMS`）。
+  0.2.0 里校验和是「直连优先，直连不通就拒绝更新」，本意是防「代理同时伪造校验和与
+  二进制」（安全审计 H9）；实际代价是**只能走代理的网络彻底更新不了**，而那种网络并不
+  罕见。0.3.0 按部署现实选回同路由，并把代价写进 `docs/update.md`：校验和现在挡的是
+  **传输损坏 / 镜像串味**，挡不住恶意中间人。
+
 ## 0.2.0 — 2026-10-30
 
 > `v0.1.11..HEAD` 共 **166 个提交**。主题两条：**Windows 真的能用**，
@@ -51,7 +57,7 @@
 | **`.sh` 脚本在 Windows 上跑不了** | 用 `.cmd` / `.bat` / `.ps1` 代替（`@runtime exe`） |
 | **`@runtime quickjs` 的脚本没有 `host-api` 的完整能力** | 只有 `log` / `host.log` 这层垫片；`register_cron`、`http_fetch` 等插件能力在脚本里没有 |
 | **二进制任务必须有边车才有排班** | `foo.exe` 没有 `foo.exe.task` 时只能手动触发 |
-| **Qoder 审查的 6 条 High：5 条已修，1 条部分** | H3（停止位改成按 invocation 精确停，`request_task_stop_inv`）、H4（预算打断记成「已停止」而不是失败，有回归测试 `budget_interrupt_is_recorded_as_stopped`）、H5（插件 SQLite 六条护栏）、H8（`http_fetch` 不自动跟重定向，每一跳重新过 SSRF 判定）、H13（`list_runs` 四分支拼 SQL，吃得上索引）—— 这五条代码里都有对应注释与回归测试。**H9 按部署现实改回同路由**：校验和与二进制都「代理优先、直连兜底」，代价是同一代理可同时伪造两者（0.3.0 决策，见 `docs/update.md`） |
+| **Qoder 审查的 6 条 High：5 条已修，1 条部分** | H3（停止位改成按 invocation 精确停，`request_task_stop_inv`）、H4（预算打断记成「已停止」而不是失败，有回归测试 `budget_interrupt_is_recorded_as_stopped`）、H5（插件 SQLite 六条护栏）、H8（`http_fetch` 不自动跟重定向，每一跳重新过 SSRF 判定）、H13（`list_runs` 四分支拼 SQL，吃得上索引）—— 这五条代码里都有对应注释与回归测试。**H9 部分收口**：校验和改「直连优先」，直连不通时默认**拒绝更新**（`PANEL_UPDATE_ALLOW_UNVERIFIED=1` 才退代理） |
 | **Windows 的验证仍有缺口** | UI 点击流、Ctrl+C 优雅退出、8 小时长跑终局都没在真 Windows 上做过（issue #12，`help wanted`） |
 | **7b 顶层 await 模块加载** | QuickJS 的 `async`/`await` 已支持，只剩模块加载那一层没做 |
 
