@@ -323,6 +323,89 @@ jobs:
           & target/release/plugin-panel.exe build-info
         shell: pwsh
 
+      # 引导页（首次启动）单独一条：scripts/smoke.py 依赖 Unix 的 SIGTERM/fd 语义，
+      # 搬不到 Windows 上，而**凭据落盘、权限分支、设完立刻生效**这几处恰恰最容易在
+      # Windows 上坏（#[cfg(unix)] 那段在 Windows 上整个不编译）。
+      - name: 冒烟（首次启动的引导页：无凭据 → /setup → 设口令 → 登录）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = Join-Path $env:RUNNER_TEMP 'ppsetup'
+          Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $port = 18990
+          $env:BIND_ADDR = "127.0.0.1:$port"
+          $env:DB_PATH = Join-Path $tmp 'panel.db'
+          $env:PLUGINS_DIR = Join-Path $tmp 'plugins'
+          $env:TASKS_DIR = Join-Path $tmp 'tasks'
+          $env:PANEL_LOG_DIR = Join-Path $tmp 'logs'
+          foreach ($k in 'PANEL_TOKEN','PANEL_TOKEN_HASH','PANEL_TOKEN_FILE','PANEL_TOKEN_HASH_FILE') {
+            Remove-Item "Env:\$k" -ErrorAction SilentlyContinue
+          }
+          $log = Join-Path $tmp 'setup.log'
+          $p = Start-Process -FilePath 'target/release/plugin-panel.exe' -ArgumentList 'serve' -PassThru -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError (Join-Path $tmp 'setup.err')
+          $handler = [System.Net.Http.HttpClientHandler]::new()
+          $handler.AllowAutoRedirect = $false
+          $client = [System.Net.Http.HttpClient]::new($handler)
+          $client.Timeout = [TimeSpan]::FromSeconds(10)
+          try {
+            $up = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $r = $client.GetAsync("http://127.0.0.1:$port/setup").Result
+                if ([int]$r.StatusCode -eq 200) { $up = $true; break }
+              } catch { }
+            }
+            if (-not $up) { Get-Content $log -ErrorAction SilentlyContinue; throw '引导页 /setup 没起来' }
+            Write-Host 'ok: /setup 200'
+
+            $code = $null
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 250
+              $raw = Get-Content $log -Raw -ErrorAction SilentlyContinue
+              if ($raw -match '一次性口令：([A-Z0-9-]{9})') { $code = $Matches[1]; break }
+            }
+            if (-not $code) { Get-Content $log; throw '终端里没有一次性口令' }
+            if ((Get-Content $log -Raw) -notmatch "http://127\.0\.0\.1:$port/setup") {
+              Get-Content $log; throw '终端没打印可直接打开的引导页地址'
+            }
+            Write-Host "ok: 一次性口令 $code + 可用地址已打印"
+
+            $pw = 'smoke-pass-123'
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $digest = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("plugin-panel/v1:$pw")) | ForEach-Object { $_.ToString('x2') })
+
+            $json = @{ code = 'AAAA-AAAA'; digest = $digest } | ConvertTo-Json -Compress
+            $r = $client.PostAsync("http://127.0.0.1:$port/api/setup", [System.Net.Http.StringContent]::new($json, [Text.Encoding]::UTF8, 'application/json')).Result
+            if ([int]$r.StatusCode -ne 403) { throw "错的一次性口令应当 403，实际 $([int]$r.StatusCode)" }
+            Write-Host 'ok: 错口令 403'
+
+            $json = @{ code = $code; digest = $digest } | ConvertTo-Json -Compress
+            $r = $client.PostAsync("http://127.0.0.1:$port/api/setup", [System.Net.Http.StringContent]::new($json, [Text.Encoding]::UTF8, 'application/json')).Result
+            if ([int]$r.StatusCode -ne 200) { throw "设置口令失败：$([int]$r.StatusCode)" }
+            $cred = Join-Path $tmp 'credential'
+            if (-not (Test-Path $cred)) { throw '凭据文件没落盘' }
+            if (-not (Get-Content $cred -Raw).Trim().StartsWith('prehash1:')) { throw '凭据文件内容不对' }
+            Write-Host 'ok: 凭据已落盘（prehash1: 前缀）'
+
+            $req = [System.Net.Http.HttpRequestMessage]::new('GET', "http://127.0.0.1:$port/")
+            $req.Headers.Add('Accept', 'text/html')
+            $r = $client.SendAsync($req).Result
+            $loc = if ($r.Headers.Location) { $r.Headers.Location.ToString() } else { '' }
+            if ([int]$r.StatusCode -ne 303 -or -not $loc.EndsWith('/login')) {
+              throw "设完之后 / 应当 303 到 /login，实际 $([int]$r.StatusCode) $loc"
+            }
+            Write-Host 'ok: / 303 /login（引导入口已关闭）'
+
+            $json = @{ token = $digest } | ConvertTo-Json -Compress
+            $r = $client.PostAsync("http://127.0.0.1:$port/api/login", [System.Net.Http.StringContent]::new($json, [Text.Encoding]::UTF8, 'application/json')).Result
+            if ([int]$r.StatusCode -ne 200) { throw "用刚设的口令登录失败：$([int]$r.StatusCode) $($r.Content.ReadAsStringAsync().Result)" }
+            Write-Host 'ok: 用刚设的口令登录 200'
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }
+
       # 用户那边只能跑二进制，跑不了 rust —— 把产物直接挂到这次 run 上供下载。
       - name: 上传 Windows 产物
         uses: actions/upload-artifact@v4
