@@ -47,6 +47,12 @@ const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 const MIN_ASSET_BYTES: u64 = 1024 * 1024;
 const UA: &str = concat!("plugin-panel-updater/", env!("CARGO_PKG_VERSION"));
 
+/// 产物类请求（二进制 **和** `SHA256SUMS`）走同一条路由：代理优先、直连兜底。
+///
+/// 抽成常量是为了让两个调用点**不可能各改各的** —— 校验和单独换成直连优先，
+/// 就等于「只能走代理的网络永远更新不了」（0.2.0 踩过一次，见 `get_text` 注释）。
+const ARTIFACT_PROXY_FIRST: bool = true;
+
 #[derive(Debug, Clone)]
 pub struct UpdateOptions {
     pub enabled: bool,
@@ -468,7 +474,8 @@ impl Update {
         // sha 比较必然通过。所以现在的校验和挡的是**传输损坏 / 镜像串味**，
         // 挡不住恶意中间人。要挡后者只能让两个来源不同（H9 原方案），
         // 代价是「只能走代理的网络」永远更新不了 —— 实测那种网络并不罕见。
-        let (status, body) = self.fetch(url, "text/plain", 4 * 1024 * 1024, true, false)?;
+        let (status, body) =
+            self.fetch(url, "text/plain", 4 * 1024 * 1024, ARTIFACT_PROXY_FIRST, false)?;
         if status != 200 {
             return Err(format!(
                 "取校验和失败：HTTP {status}{}",
@@ -480,7 +487,7 @@ impl Update {
 
     fn download(&self, url: &str) -> Result<Vec<u8>, String> {
         let (status, body) =
-            self.fetch(url, "application/octet-stream", MAX_ASSET_BYTES, true, true)?;
+            self.fetch(url, "application/octet-stream", MAX_ASSET_BYTES, ARTIFACT_PROXY_FIRST, true)?;
         if status != 200 {
             return Err(format!("下载失败：HTTP {status}{}", hint_for_status(status)));
         }
@@ -794,6 +801,39 @@ mod tests {
         assert!(!is_newer("abc", "0.1.6"));
     }
 
+    #[test]
+    fn artifact_requests_prefer_the_proxy_then_fall_back_to_direct() {
+        // 0.3.0 的决定：`SHA256SUMS` 与二进制**同一条路由**（代理优先、直连兜底）。
+        // 顺序改回去会让「只能走代理的网络」彻底更新不了 —— 要么是故意的，
+        // 要么得同时改 `docs/update.md` 和这里的注释。
+        let opts = |proxy: Option<&str>| UpdateOptions {
+            enabled: true,
+            repo: "asunajs/panel".into(),
+            api_base: "https://api.github.com".into(),
+            token: None,
+            proxy: proxy.map(str::to_string),
+            asset: None,
+            allow_http: false,
+            allow_unverified: false,
+        };
+        let url = concat!(
+            "https://github.com/asunajs/panel/releases/download/v0.2.0/",
+            "plugin-panel-x86_64-linux-musl"
+        );
+
+        let up = Update::new(opts(Some("https://gh-proxy.example/")));
+        let t = up.targets(url, ARTIFACT_PROXY_FIRST);
+        assert_eq!(t.len(), 2, "有代理前缀时应当是两条候选: {t:?}");
+        assert!(
+            t[0].starts_with("https://gh-proxy.example/"),
+            "代理必须排在第一个: {t:?}"
+        );
+        assert_eq!(t[1], url, "直连是兜底: {t:?}");
+
+        // 没配代理：只有直连一条，别凭空造出个代理地址
+        let up2 = Update::new(opts(None));
+        assert_eq!(up2.targets(url, ARTIFACT_PROXY_FIRST), vec![url.to_string()]);
+    }
     #[test]
     fn sums_lookup_finds_the_right_line() {
         let text = "\
