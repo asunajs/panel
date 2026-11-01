@@ -17,6 +17,7 @@
 
 import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -633,6 +634,33 @@ if (loginPage) {
   );
   check(!!sha256Src, '在 src/sha256.rs 里找得到 SHA256_JS（共用兜底）');
   const lp = loginPage[1].replace('/*__SHA256__*/', sha256Src ? sha256Src[1] : '');
+  // ⚠ 这份纯 JS 的 SHA-256 **必须真的算对**。它只在局域网 http（没有
+  // `crypto.subtle`）下生效 —— 算错的表现是「口令明明是对的，但登不进去 /
+  // 引导页设完口令登不了」，而且在本机 localhost 上永远复现不出来。
+  // 所以拿 Node 的 crypto 当基准，逐字节对一遍（含 UTF-8 中文与 emoji）。
+  if (sha256Src) {
+    const isolated = new Function(
+      `return (function () { ${sha256Src[1]}; return sha256; })();`,
+    );
+    const pureSha = isolated();
+    const enc = new TextEncoder();
+    for (const s of [
+      '',
+      'abc',
+      'plugin-panel/v1:testpass123',
+      'plugin-panel/v1:中文口令\u{1F600}',
+      'a'.repeat(1000), // 跨 block 边界
+    ]) {
+      const want = createHash('sha256').update(s, 'utf8').digest('hex');
+      const got = pureSha(enc.encode(s));
+      check(
+        got === want,
+        `纯 JS SHA-256 与 Node 逐字节一致 — ${JSON.stringify(s).slice(0, 26)}`,
+        `got=${String(got).slice(0, 16)}… want=${want.slice(0, 16)}…`,
+      );
+    }
+  }
+
   // 引导页（首次设口令）必须用**同一份**：分开写的话哪天改一处就会出现
   // 「登录页能登、引导页设不了」，而且只在局域网 http 下才暴露。
   const setupRs = readFileSync(join(REPO, 'src/setup.rs'), 'utf8');
