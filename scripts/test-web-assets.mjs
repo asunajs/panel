@@ -626,7 +626,20 @@ const webRs2 = readFileSync(join(REPO, 'src/web.rs'), 'utf8');
 const loginPage = webRs2.match(/const LOGIN_PAGE: &str = r##"([\s\S]*?)"##;/);
 check(!!loginPage, '在 src/web.rs 里找得到 LOGIN_PAGE');
 if (loginPage) {
-  const lp = loginPage[1];
+  // 纯 JS 的 SHA-256 抽到了 src/sha256.rs（登录页与引导页共用一份），渲染时才
+  // 注入到 `/*__SHA256__*/` 占位符上 —— 这里做同样的替换，否则「有没有兜底」就查空了。
+  const sha256Src = readFileSync(join(REPO, 'src/sha256.rs'), 'utf8').match(
+    /const SHA256_JS: &str = r###"([\s\S]*?)"###;/,
+  );
+  check(!!sha256Src, '在 src/sha256.rs 里找得到 SHA256_JS（共用兜底）');
+  const lp = loginPage[1].replace('/*__SHA256__*/', sha256Src ? sha256Src[1] : '');
+  // 引导页（首次设口令）必须用**同一份**：分开写的话哪天改一处就会出现
+  // 「登录页能登、引导页设不了」，而且只在局域网 http 下才暴露。
+  const setupRs = readFileSync(join(REPO, 'src/setup.rs'), 'utf8');
+  check(
+    setupRs.includes('crate::sha256::SHA256_JS'),
+    '引导页复用同一份 SHA-256 兜底（别再抄一份）',
+  );
   check(lp.includes('action="/api/login"'), '登录页表单指向 /api/login');
   check(/name="token"/.test(lp), '登录页有口令输入框');
   check(/type="password"/.test(lp), '口令输入框是密码类型（不明文显示）');
