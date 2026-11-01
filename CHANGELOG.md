@@ -51,7 +51,7 @@
 | **`.sh` 脚本在 Windows 上跑不了** | 用 `.cmd` / `.bat` / `.ps1` 代替（`@runtime exe`） |
 | **`@runtime quickjs` 的脚本没有 `host-api` 的完整能力** | 只有 `log` / `host.log` 这层垫片；`register_cron`、`http_fetch` 等插件能力在脚本里没有 |
 | **二进制任务必须有边车才有排班** | `foo.exe` 没有 `foo.exe.task` 时只能手动触发 |
-| **Qoder 审查里 6 条 High 未修** | H3 停止位是全局单比特、H4 预算超时不计 `stopped`、H5 `lead_ms` 不小于周期时补跑风暴、H8 `http_fetch` 只查首跳、H9 自更新校验和与二进制同走代理、H13 `list_runs` 索引失效 |
+| **Qoder 审查的 6 条 High：5 条已修，1 条部分** | H3（停止位改成按 invocation 精确停，`request_task_stop_inv`）、H4（预算打断记成「已停止」而不是失败，有回归测试 `budget_interrupt_is_recorded_as_stopped`）、H5（插件 SQLite 六条护栏）、H8（`http_fetch` 不自动跟重定向，每一跳重新过 SSRF 判定）、H13（`list_runs` 四分支拼 SQL，吃得上索引）—— 这五条代码里都有对应注释与回归测试。**H9 仍是部分**：校验和改成「直连优先」，但直连不通时仍会退到代理 |
 | **Windows 的验证仍有缺口** | UI 点击流、Ctrl+C 优雅退出、8 小时长跑终局都没在真 Windows 上做过（issue #12，`help wanted`） |
 | **7b 顶层 await 模块加载** | QuickJS 的 `async`/`await` 已支持，只剩模块加载那一层没做 |
 
