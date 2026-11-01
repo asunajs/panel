@@ -3398,6 +3398,11 @@ def refuse_to_start_without_token(tmp: Path) -> None:
     主要验收点。
     """
     use_token(None)
+    # ⚠ 契约在 0.3.0 变了：没有凭据**不再拒绝启动**，而是进引导页模式。
+    #
+    # 原来这里是「拒绝启动 + 解释反代也在本机」，那条推理仍然成立 —— 所以替代方案
+    # 不是「随便谁都能设口令」，而是**必须出示启动时打印的一次性口令**（见
+    # `first_run_setup()` 里那两条：错口令 403、对了一次 200）。
     for bind, why in [
         ("0.0.0.0", "非回环（别人能直接连）"),
         ("127.0.0.1", "回环（但反代就在本机，转发来的就是 127.0.0.1）"),
@@ -3410,17 +3415,31 @@ def refuse_to_start_without_token(tmp: Path) -> None:
                 "PLUGINS_DIR": str(REPO / "plugins"),
             }
         )
-        # 三个凭据来源都清干净：现在没有任何「没配令牌也能跑」的口子
+        # 凭据来源清干净：这时应当进引导页，而不是「没配令牌也能跑」
         for k in ("PANEL_TOKEN", "PANEL_TOKEN_FILE", "PANEL_TOKEN_HASH", "PANEL_TOKEN_HASH_FILE"):
             env.pop(k, None)
-        r = subprocess.run([str(BIN)], capture_output=True, text=True, env=env, cwd=REPO, timeout=30)
-        out = r.stdout + r.stderr
-        check(r.returncode != 0, f"没有凭据 + 绑 {bind} → 拒绝启动（{why}）", f"exit={r.returncode}")
-        check(
-            "拒绝启动" in out and "反代" in out,
-            f"绑 {bind} 时拒绝启动的原因写明「反代也在本机」",
-            out.strip().splitlines()[1][:90] if len(out.strip().splitlines()) > 1 else out[:90],
-        )
+        bare_log = tmp / f"bare-{bind}.log"
+        with open(bare_log, "w") as f:
+            proc = subprocess.Popen([str(BIN)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+        try:
+            hit = False
+            for _ in range(30):
+                time.sleep(0.5)
+                if "一次性口令" in bare_log.read_text(errors="replace"):
+                    hit = True
+                    break
+            out = bare_log.read_text(errors="replace")
+            check(
+                hit,
+                f"没有凭据 + 绑 {bind} → 进引导页并打印一次性口令（{why}）",
+                out.strip().splitlines()[-1][:90] if out.strip() else "(没有输出)",
+            )
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     # 配了令牌就正常起来（否则上面那两条「拒绝」可能只是「这二进制本来就起不来」）
     env = dict(os.environ)
