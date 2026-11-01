@@ -235,22 +235,26 @@ case ":$PATH:" in
 esac
 
 echo
-ok "装好了。启动（**先设令牌**，否则会拒绝启动）："
-echo "    TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n')"
-echo "    PANEL_TOKEN_HASH=\$(printf %s \"\$TOKEN\" | $BIN_NAME hash-token) $BIN_NAME"
-echo "    # 登录时粘贴上面那个 \$TOKEN（面板里不存明文，存的是它的哈希）"
+ok "装好了。直接跑："
+echo "    $BIN_NAME"
 echo
-echo "  面板默认监听 http://127.0.0.1:8787"
+echo "  第一次启动会在终端打印一行**一次性口令**（形如 K7QM-3XP9）。"
+echo "  浏览器打开 http://127.0.0.1:8787 会自动跳到设置页：输两遍新口令 + 填那个一次性口令，"
+echo "  设完就能用新口令登录。**不需要配任何环境变量。**"
+echo
+echo "  想让别的设备访问："
+echo "    BIND_ADDR=0.0.0.0:8787 $BIN_NAME"
+echo
 echo "  常用环境变量："
 echo "    BIND_ADDR=0.0.0.0:8787   改监听地址（想让别的设备访问就设这个）"
 echo "    PLUGINS_DIR=./plugins    插件目录"
 echo "    DB_PATH=./data/panel.db  SQLite 路径"
 echo
-echo "  ⚠️  令牌是**必须**的：没配就拒绝启动，跟绑哪个地址无关"
-echo "     （反代 nginx/caddy 也跑在本机，转发来的请求源地址就是 127.0.0.1 ——"
-echo "      所以「绑回环 = 安全」不成立，没有「本机免登录」这种模式）"
-echo "    PANEL_TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n') $BIN_NAME"
-echo "    然后在浏览器打开面板会跳到登录页，粘贴那串令牌即可"
+echo "  服务化部署（systemd / 反代 / 容器 —— 没人能看终端，所以跳过引导页）："
+echo "    TOKEN=\$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n')"
+echo "    PANEL_TOKEN_HASH=\$(printf %s \"\$TOKEN\" | $BIN_NAME hash-token) $BIN_NAME"
+echo "    # 登录时粘贴上面那个 \$TOKEN（面板里不存明文，存的是它的哈希）"
 echo
-echo "  推荐：本地只存「盐+哈希」，不存明文（拿到那个文件也登不上）："
-echo "    printf '%s' "\$TOKEN" | $BIN_NAME hash-token   # 生成 PANEL_TOKEN_HASH"
+echo "  ⚠️  没有「本机免登录」这种模式：反代 nginx/caddy 也跑在本机，"
+echo "     转发来的请求源地址就是 127.0.0.1，所以「绑回环 = 安全」不成立。"
+echo "     没有凭据时面板只开引导页，业务接口一个都不开。"
