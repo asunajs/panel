@@ -49,7 +49,7 @@ open http://127.0.0.1:8787/  # 面板
 | `SCRIPT_TIMEOUT_MS` | `60000` | 脚本任务的默认超时（毫秒）；`@timeout` 可覆盖。超时 **SIGKILL 整个进程组** |
 | `SCRIPT_MAX_OUTPUT_KB` | `1024` | 脚本 **stdout + stderr 合计**输出上限；超了截断并留提示 |
 | `SCRIPT_WORKER` | 最后一条 worker | 脚本任务跑在哪条执行线程（0 基下标；不设 = 最后一条）。一条 worker 同时只跑一个脚本 |
-| `PANEL_TOKEN` | 空 | **明文口令**（必填其一）。没配就拒绝启动 —— 没有「本机免登录」模式，因为反代也跑在本机（见 [§13](security.md#13-第十轮面板鉴权)）。⚠ 第二十一轮起这是**开发口子**：还要 `PANEL_ALLOW_PLAIN_TOKEN=1`，且绑回环、没开 `PANEL_COOKIE_SECURE` 才允许启动 |
+| `PANEL_TOKEN` | 空 | **明文口令**（与下面两个哈希来源三选一）。三个都没配时**不再拒绝启动**，而是进浏览器引导页（终端打印一次性口令）—— 没有「本机免登录」模式，因为反代也跑在本机（见 [§13](security.md#13-第十轮面板鉴权)）。⚠ 第二十一轮起这是**开发口子**：还要 `PANEL_ALLOW_PLAIN_TOKEN=1`，且绑回环、没开 `PANEL_COOKIE_SECURE` 才允许启动 |
 | `PANEL_TOKEN_FILE` | 空 | 从文件读令牌（systemd 用；内容会 trim，适合放 600 权限的文件）。两个都设时 `PANEL_TOKEN` 优先 |
 | `PANEL_TOKEN_HASH` | 空 | **部署用这个**：`prehash1:$argon2id$…`（`plugin-panel hash-token` 生成）。口令在浏览器里先算摘要，服务端只收到摘要、存的是摘要的 Argon2id。与 `PANEL_TOKEN` 同时存在时**以哈希为准**并提示。见 [§18](security.md#18-令牌不再明文落盘盐--哈希用户实测指出登录令牌不应该明文保存在本地) / [§21](security.md#21-口令不再经过服务端第二十一轮) |
 | `PANEL_TOKEN_HASH_FILE` | 空 | 从文件读哈希（权限 600）。同 `PANEL_TOKEN_FILE` 的关系 |

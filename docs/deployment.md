@@ -109,7 +109,7 @@ curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bas
 pkg install curl
 # 3. 装面板
 curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
-# 4. 启动（**必须先设令牌**，没配会拒绝启动 —— 反代也在本机，绑回环不等于安全）
+# 4. 启动（服务化部署建议**预置令牌**；不配的话会进浏览器引导页，无人值守场景没人能设）
 TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 PANEL_TOKEN_HASH=$(printf %s "$TOKEN" | plugin-panel hash-token) plugin-panel
 # 登录时粘贴上面那个 $TOKEN
@@ -173,8 +173,8 @@ sv-enable plugin-panel
 
 > ⚠️ **令牌是必须的**（第十九轮起）：没有「本机免登录」模式了。因为反代
 > （nginx / caddy / cloudflared）就跑在本机，转发过来的请求源地址全是 `127.0.0.1` ——
-> 「绑回环 = 安全」在挂反代的那一刻就不成立。所以**没配令牌一律拒绝启动**，
-> 跟绑哪个地址无关。设上令牌就能直接绑 `0.0.0.0`（见 [§13](security.md#13-第十轮面板鉴权)）：
+> 「绑回环 = 安全」在挂反代的那一刻就不成立。所以**没有凭据时不开任何业务接口**：
+> 要么进引导页（需要终端里的一次性口令），要么预置令牌 —— 跟绑哪个地址无关。设上令牌就能直接绑 `0.0.0.0`（见 [§13](security.md#13-第十轮面板鉴权)）：
 >
 > ```bash
 > TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
