@@ -268,6 +268,15 @@ fn argon2_hash(s: &str) -> Result<String, String> {
 /// 入参是**人会输入的那个口令**（不是摘要）：这一步替他把「先算摘要、再 Argon2id」
 /// 做完，于是他不需要在任何地方把口令存下来 —— 在**自己电脑上**跑一次，
 /// 把输出的那串贴到服务器上就行。
+/// 把**浏览器算出的摘要**直接封成凭据（引导页用）。
+///
+/// `hash_token` 是「明文 → 摘要 → Argon2」，而引导页里摘要是浏览器算的、服务端只收到
+/// 摘要，所以这里跳过第一步。落盘形态与 CLI 完全一致（`prehash1:$argon2id$...`），
+/// 登录时的校验路径不需要任何改动。
+pub fn hash_digest(digest: &str) -> Result<String, String> {
+    Ok(format!("{PREHASH_PREFIX}{}", argon2_hash(digest)?))
+}
+
 pub fn hash_token(password: &str) -> Result<String, String> {
     let digest = password_digest(password);
     Ok(format!("{PREHASH_PREFIX}{}", argon2_hash(&digest)?))

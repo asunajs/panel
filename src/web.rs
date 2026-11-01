@@ -311,6 +311,10 @@ pub fn router(state: AppState) -> Router {
 
     // 登录相关是唯一的公开入口 —— 它必须公开，否则没法登录。
     Router::new()
+        // 首次启动的引导页（见 setup.rs）。只有在**完全没有凭据**时才放行，
+        // 由 require_auth 里的那道分支兜住。
+        .route("/setup", get(setup_page))
+        .route("/api/setup", post(do_setup))
         .route("/login", get(login_page))
         .route("/api/login", post(do_login))
         .route("/api/logout", post(do_logout))
@@ -560,6 +564,17 @@ async fn require_auth(
     req: Request,
     next: Next,
 ) -> Response {
+    // 首次启动：除了引导页本身，一律把人送过去。
+    //
+    // 为什么放在认证之前：setup 模式下 `Auth` 里塞的是**随机凭据**（谁都不知道），
+    // 所以正常认证必然失败；不先分流的话用户会看到登录页，而他根本没有口令。
+    if crate::setup::active().is_some() {
+        let p = req.uri().path();
+        if p == "/setup" || p == "/api/setup" {
+            return next.run(req).await;
+        }
+        return Redirect::to("/setup").into_response();
+    }
     // 没有「未配令牌就直通」这条快路：凭据是必需品（见 auth.rs 里 `Auth` 的注释，
     // 反代就跑在本机，`127.0.0.1` 不等于可信）
     let ip = auth::client_ip(peer, req.headers(), &st.trusted_proxies);
@@ -635,6 +650,88 @@ fn safe_next(next: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 /// `GET /login` —— 登录页。没开鉴权就直接回面板，已经登录过也直接回面板。
+/// 首次设置页。只在 setup 模式下可达（其余请求被 `require_auth` 302 到这里）。
+async fn setup_page() -> Response {
+    Html(crate::setup::render_page(None)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SetupReq {
+    code: String,
+    digest: String,
+}
+
+/// `POST /api/setup`：校验一次性口令 → 存凭据 → 重启。
+///
+/// 收到的 `digest` 是浏览器算的 `sha256(域分隔 + 口令)`，服务端只做 Argon2id ——
+/// 与 `hash-token` CLI 落盘的是同一种形态，登录路径完全不用改。
+async fn do_setup(State(st): State<AppState>, Json(req): Json<SetupReq>) -> Response {
+    let Some(want) = crate::setup::active() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "引导已关闭" })),
+        )
+            .into_response();
+    };
+    if !code_eq(&req.code, &want) {
+        // 一次性口令只有 32 bit，失败要慢一点，别让人在局域网里刷。
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "一次性口令不对（在启动它的那个终端里）" })),
+        )
+            .into_response();
+    }
+    if req.digest.len() != 64 || !req.digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "摘要格式不对（应当是本页算出的 64 位十六进制）" })),
+        )
+            .into_response();
+    }
+    let hash = match auth::hash_digest(&req.digest) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::setup::save_cred(&st.db_path, &hash) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response();
+    }
+    crate::setup::clear();
+    crate::log::plog!("boot", warn, "引导页设置完成，凭据已保存；正在重启面板");
+    // 重启：`Auth` 里的凭据是启动时定死的，重启一次比改成 RwLock 风险小得多。
+    // 自更新用的就是这条路径（前台跑 = 原地 exec，PID 不变）。
+    if let Ok(exe) = std::env::current_exe() {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            crate::settings::restart_process_at(&exe);
+        });
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// 定长比较，别让「前几位对不对」从耗时里漏出去。
+fn code_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 async fn login_page(
     State(st): State<AppState>,
     Query(q): Query<LoginQuery>,

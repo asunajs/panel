@@ -64,6 +64,7 @@ mod runtimefs;
 mod runtimes;
 mod scheduler;
 mod scriptjob;
+mod setup;
 mod settings;
 mod smtp;
 mod tz;
@@ -1406,7 +1407,30 @@ fn read_credential(
     for n in &notes {
         crate::log::plog!("boot", info, "{n}");
     }
-    let Some(raw) = chosen else { return Ok(None) };
+    let Some(raw) = chosen else {
+        // 没有任何凭据（环境变量、文件都没配）。两种可能：
+        //   · 之前用引导页设过 ⇒ 凭据在 <DB 目录>/credential，读它；
+        //   · 真的第一次启动 ⇒ 进 setup 模式，让用户在浏览器里设。
+        let db_path = env_path("DB_PATH", "data/panel.db");
+        if let Some(saved) = crate::setup::read_cred(&db_path) {
+            crate::log::plog!("boot", info, "凭据来自 {}", crate::setup::cred_path(&db_path).display());
+            return Ok(Some(auth::Cred::parse(&saved)?));
+        }
+        // setup 模式：塞一个**随机**凭据进去 —— 谁都不知道它，所以谁都登不进来。
+        // 入口只开 /setup 与 /api/setup，设置成功后写凭据并重启。
+        let code = crate::setup::new_code();
+        if code.is_empty() {
+            return Err("系统随机源不可用，无法生成一次性口令；请改用 PANEL_TOKEN_HASH".into());
+        }
+        crate::setup::set_active(code.clone());
+        crate::log::plog!("boot", warn, "首次启动：还没设口令。请在浏览器打开 http://127.0.0.1:{}/setup", addr.port());
+        crate::log::plog!("boot", warn, "一次性口令：{code}");
+        crate::log::plog!("boot", warn, "（这行只在没有凭据时出现；设完就没了）");
+        let mut r = [0u8; 32];
+        let _ = getrandom::getrandom(&mut r);
+        let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+        return Ok(Some(auth::Cred::parse(&auth::hash_token(&hex)?)?));
+    };
     // parse() 会当场校验哈希格式：配错了就起不来，而不是「怎么登都登不上」
     let cred = auth::Cred::parse(&raw)?;
     // ⚠ **部署闸**：只有 `prehash1:` 形态允许无条件启动。其余形态（明文 / 旧哈希）
