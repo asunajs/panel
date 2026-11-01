@@ -393,6 +393,18 @@ curl -X PUT \
 
 如果之前登录过，换口令后旧会话会失效，重新登录即可。
 
+### 口令忘了怎么办
+
+凭据存在 **`<数据库所在目录>/credential`**（默认 `data/credential`，权限 0600）。
+删掉它、重启面板，就会重新进引导页，用终端里打印的一次性口令设个新口令：
+
+```bash
+rm data/credential
+plugin-panel
+```
+
+⚠ 删之前确认你还要保留 `data/panel.db` —— 只删 `credential`，别把整个目录清空。
+
 ### 端口被占用
 
 换一个端口：
