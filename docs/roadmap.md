@@ -59,6 +59,7 @@
 | 无 ARM 真机实测 | 开发机是 arm64 macOS，Linux 二进制只能由 CI（`ubuntu-24.04-arm`）回答；本机交叉编译的产物**跑不起来**（`Exec format error`） | [performance.md §8.3](performance.md#83-本地交叉编译产物能产出但跑不起来) |
 | 没有小时级/天级长跑 | 8 分钟窗口的分辨率是 ±15 MB/天，只够证明「不是线性无界增长」 | [changelog/11-live-plugin-dir.md §14.9](changelog/11-live-plugin-dir.md#149-这一轮没有解决的) |
 | JS 侧热更新的水位线未测 | QuickJS `Runtime` 上限 64 MiB，长跑最终停在哪里没测到 | [changelog/11-live-plugin-dir.md §14.9](changelog/11-live-plugin-dir.md#149-这一轮没有解决的) |
+| **macOS 上跑不完完整冒烟** | `python3 scripts/smoke.py` 在 `update_checks` 的「坏摘要」用例卡住：`POST /api/update/apply` 无响应直到客户端超时（`TimeoutError`）。**改动前的二进制同样复现**，单独跑 `update_checks` 通过 ⇒ 与本轮改动无关的既有问题，只在 macOS 本机出现（Linux / Windows CI 全绿）。真正原因还没查到 | 无 |
 | 第六十轮的数字待补 | 静态 musl 新体积、Node/Bun RSS、RPC 延迟、Node 崩溃重启的成功率 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
 
 ## 6. 安全边界
