@@ -4086,6 +4086,14 @@ def first_run_setup(tmp: Path) -> None:
             return
 
         text = log.read_text(errors="replace")
+        # 打印的地址必须**真的能用**：无头设备上没有本机浏览器，只给 127.0.0.1 就是死路。
+        # 这里绑的是回环，所以期望恰好是这一条（绑 0.0.0.0 时局域网那条排前面）。
+        urls = re.findall(r"http://\S+/setup", text)
+        check(
+            f"http://127.0.0.1:{port}/setup" in urls,
+            "终端打印了可直接打开的引导页地址",
+            ", ".join(urls) or "(没打印)",
+        )
         m = re.search(r"一次性口令：([A-Z0-9-]{9})", text)
         if not check(bool(m), "终端里打印了一次性口令"):
             return
