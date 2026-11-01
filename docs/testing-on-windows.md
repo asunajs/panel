@@ -43,7 +43,7 @@ Release 除了正常产物，还有 `-slim` 档（`--no-default-features`，不�
 它和 tag 同源、不用等 CI、`build-info` 里 `live_supported=false` 可核对：
 
 ```bash
-gh release download v0.1.11 -p '*slim*'
+gh release download v0.2.0 -p '*slim*'
 ```
 
 ### 方式二：Testkit（要先核 commit）
@@ -75,9 +75,9 @@ gh run download <run-id> -n plugin-panel-testkit
 
 ```bash
 ./plugin-panel-x86_64-linux-musl build-info
-# {"commit":"589058e…","features":[],"live_supported":false,"version":"0.1.11"}
+# {"commit":"b25feddde150…","features":[],"live_supported":false,"version":"0.2.0"}
 
-git rev-parse --short=12 v0.1.11    # 期望和上面 commit 一致
+git rev-parse --short=12 'v0.2.0^{commit}'   # 注解 tag 必须加 ^{commit}，否则拿到的是 tag 对象
 ```
 
 `commit` 字段是 `build.rs` 注入的（issue #3）。**对不上就换包，不要用**——
@@ -149,7 +149,7 @@ chmod +x ./plugin-panel
 ./plugin-panel build-info
 ```
 
-期望：打印一行 JSON，里面有 `"version":"0.1.11"` 和 `"live_supported":false`
+期望：打印一行 JSON，里面有 `"version":"0.2.0"` 和 `"live_supported":false`
 （Testkit 用 `--no-default-features` 构建，直播是关的；正式 Release 里那个是开的）。
 如果报 `Exec format error`，说明拷的是 aarch64 的包，换 x86_64 那个。
 
