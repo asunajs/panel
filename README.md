@@ -121,9 +121,10 @@ chmod +x plugin-panel
 ./plugin-panel
 ```
 
-### 从源码运行
+<details>
+<summary>从源码运行（需要 Rust 工具链）</summary>
 
-需要 Rust 工具链。第一次编译会久一点。
+第一次编译会久一点。
 
 ```bash
 git clone https://github.com/asunajs/panel.git
@@ -131,6 +132,8 @@ cd panel
 cargo build --release
 ./target/release/plugin-panel
 ```
+
+</details>
 
 ---
 
@@ -512,6 +515,9 @@ plugin-panel
 
 ## 开发
 
+<details>
+<summary>跑测试 / 冒烟</summary>
+
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
@@ -525,6 +531,8 @@ python3 scripts/smoke.py ./target/release/plugin-panel
 ```bash
 PANEL_TOKEN=dev-token PANEL_ALLOW_PLAIN_TOKEN=1 WEB_DEV_DIR=./web ./target/release/plugin-panel
 ```
+
+</details>
 
 ---
 
