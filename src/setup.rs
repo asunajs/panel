@@ -51,6 +51,19 @@ pub fn save_cred(db_path: &Path, hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 定长比较，别让「前几位对不对」从耗时里漏出去。
+pub(crate) fn code_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 /// 当前是否处于 setup 模式（存一次性口令；None = 正常模式）。
 ///
 /// 用全局而不是 AppState 字段：这个状态只在启动早期写一次、在 /api/setup 里读一次，
@@ -166,6 +179,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn code_compare_is_exact_and_ignores_surrounding_space() {
+        // 用户会从终端里连空格一起复制，所以要 trim；但**不能**大小写不敏感、
+        // 也不能接受前缀匹配 —— 那是把一个 32 bit 的口令再削弱一截。
+        assert!(code_eq("K7QM-3XP9", "K7QM-3XP9"));
+        assert!(code_eq("  K7QM-3XP9\n", "K7QM-3XP9"));
+        assert!(!code_eq("k7qm-3xp9", "K7QM-3XP9"), "大小写必须敏感");
+        assert!(!code_eq("K7QM-3XP", "K7QM-3XP9"), "短一截不算");
+        assert!(!code_eq("K7QM-3XP99", "K7QM-3XP9"), "长一截不算");
+        assert!(!code_eq("", "K7QM-3XP9"), "空串不算");
+    }
+
+    #[test]
+    fn credential_sits_next_to_a_bare_database_filename() {
+        // DB_PATH 默认是 data/panel.db，但 `DB_PATH=panel.db`（当前目录）也合法，
+        // 那时 parent() 是空串 —— 结果必须是 "credential"，不是 "/credential"。
+        assert_eq!(cred_path(Path::new("panel.db")), PathBuf::from("credential"));
+        assert_eq!(
+            cred_path(Path::new("/var/lib/panel/panel.db")),
+            PathBuf::from("/var/lib/panel/credential")
+        );
+    }
     #[test]
     fn page_takes_the_digest_domain_from_auth() {
         // 页面里的 `const DOMAIN = "..."` 必须和 auth.rs 的 `DIGEST_DOMAIN` 一模一样：

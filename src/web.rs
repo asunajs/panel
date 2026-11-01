@@ -673,7 +673,7 @@ async fn do_setup(State(st): State<AppState>, Json(req): Json<SetupReq>) -> Resp
         )
             .into_response();
     };
-    if !code_eq(&req.code, &want) {
+    if !crate::setup::code_eq(&req.code, &want) {
         // 一次性口令只有 32 bit，失败要慢一点，别让人在局域网里刷。
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         return (
@@ -726,18 +726,7 @@ async fn do_setup(State(st): State<AppState>, Json(req): Json<SetupReq>) -> Resp
     Json(json!({ "ok": true })).into_response()
 }
 
-/// 定长比较，别让「前几位对不对」从耗时里漏出去。
-fn code_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.trim().as_bytes(), b.trim().as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
+
 
 async fn login_page(
     State(st): State<AppState>,
