@@ -4165,6 +4165,89 @@ def first_run_setup(tmp: Path) -> None:
         except Exception:
             proc.kill()
 
+def delete_file_checks(tmp: Path) -> None:
+    """删除脚本 / 删除插件：文件必须真的离开原位，进 .trash，而不是 rm 掉。
+
+    为什么单开一节：`trash_plugin` 只找平铺的 `plugins/<name>.js`，而真实插件都在
+    `plugins/js/` 下 —— 于是「删除插件」永远回 404，前端也就一直没接这个按钮。
+    这个组合没人测，bug 就一路发到 0.2.1。
+    """
+    import urllib.error
+    import urllib.request
+
+    d = tmp / "del"
+    (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
+    (d / "tasks").mkdir(parents=True, exist_ok=True)
+    (d / "plugins" / "js" / "smokedelete.js").write_text("export const x = 1;\n")
+    (d / "tasks" / "smokedelete.js").write_text("// @cron @every 1h\nlog(1);\n")
+    port = free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PANEL_TOKEN")}
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(d / "panel.db"),
+            "PLUGINS_DIR": str(d / "plugins"),
+            "TASKS_DIR": str(d / "tasks"),
+            "PANEL_LOG_DIR": str(d / "logs"),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_ALLOW_PLAIN_TOKEN": "1",
+        }
+    )
+    log = d / "del.log"
+    with open(log, "w") as f:
+        proc = subprocess.Popen([str(BIN), "serve"], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+
+    def post(path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=b"",
+            method="POST",
+            headers={"X-Panel-Token": SMOKE_TOKEN, "x-panel": "1"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    try:
+        ok = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=3) as r:
+                    if r.status == 200:
+                        ok = True
+                        break
+            except Exception:
+                pass
+        if not check(ok, "删文件检查用的实例就绪"):
+            print(log.read_text(errors="replace"))
+            return
+
+        st, body = post("/api/plugins/smokedelete/delete")
+        check(st == 200, "删插件：js/ 子目录下的插件文件能找到", f"http {st} {body[:80]}")
+        check(
+            not (d / "plugins" / "js" / "smokedelete.js").exists(),
+            "删插件：文件真的离开了 plugins/js/",
+        )
+        trashed = list((d / "plugins" / ".trash").rglob("smokedelete.js"))
+        check(bool(trashed), "删插件：文件进了 .trash（不是 rm，捞得回来）", str(trashed[:1]))
+
+        st, body = post("/api/scripts/smokedelete/delete")
+        check(st == 200, "删脚本：任务目录里的脚本文件能找到", f"http {st} {body[:80]}")
+        check(not (d / "tasks" / "smokedelete.js").exists(), "删脚本：文件真的离开了任务目录")
+        check(
+            bool(list((d / "tasks" / ".trash").rglob("smokedelete.js"))),
+            "删脚本：文件进了 .trash",
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
 def main() -> int:
     # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
@@ -4597,6 +4680,7 @@ def main() -> int:
     plugin_fs_checks(tmp)
     cross_runtime_log_parity(tmp)
     first_run_setup(tmp)
+    delete_file_checks(tmp)
     auth_checks(tmp)
     auth_hash_checks(tmp)
     anti_bruteforce_checks(tmp)

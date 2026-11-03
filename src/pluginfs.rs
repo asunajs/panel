@@ -458,13 +458,34 @@ pub fn trash_plugin(plugins_dir: &Path, name: &str) -> Result<Vec<String>, Strin
     let trash = plugins_dir.join(".trash").join(format!("{stamp}-{name}"));
     let mut moved: Vec<String> = Vec::new();
 
-    // ① 单文件 `plugins/<name>.js`
-    let js = plugins_dir.join(format!("{name}.js"));
-    if js.is_file() {
-        std::fs::create_dir_all(&trash).map_err(|e| format!("建回收站目录失败: {e}"))?;
-        let dst = trash.join(format!("{name}.js"));
-        std::fs::rename(&js, &dst).map_err(|e| format!("挪 {name}.js 失败: {e}"))?;
-        moved.push(format!("{name}.js"));
+    // ① 单文件。**两个位置都要找**：
+    //      · `plugins/<name>.js`    （平铺，老布局）
+    //      · `plugins/js/<name>.js` （加载器实际扫的目录，见 engine.rs 的 collect_entries）
+    //    ⚠ 只找平铺那个是**真出过的 bug**：真实插件全在 `plugins/js/` 下，
+    //      于是「删除插件」永远回一句「没有找到插件 X 的文件」。
+    for sub in ["", "js"] {
+        for ext in ["js", "mjs"] {
+            let src = if sub.is_empty() {
+                plugins_dir.join(format!("{name}.{ext}"))
+            } else {
+                plugins_dir.join(sub).join(format!("{name}.{ext}"))
+            };
+            if !src.is_file() {
+                continue;
+            }
+            // 回收站里保留相对层级（`trash/js/name.js`），捞回来时才不用猜原来在哪
+            let rel = if sub.is_empty() {
+                PathBuf::from(format!("{name}.{ext}"))
+            } else {
+                PathBuf::from(sub).join(format!("{name}.{ext}"))
+            };
+            let dst = trash.join(&rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("建回收站目录失败: {e}"))?;
+            }
+            std::fs::rename(&src, &dst).map_err(|e| format!("挪 {} 失败: {e}", rel.display()))?;
+            moved.push(rel.display().to_string());
+        }
     }
 
     // ② 插件目录 `plugins/<name>/`（配置页、静态资源）
@@ -483,6 +504,34 @@ pub fn trash_plugin(plugins_dir: &Path, name: &str) -> Result<Vec<String>, Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trash_plugin_finds_files_under_the_js_subdir() {
+        // 真实插件都放在 `plugins/js/` 下（加载器扫的就是那里）。只找平铺的
+        // `plugins/<name>.js` 会让「删除插件」永远 404 —— 这是真出过的 bug。
+        // ⚠ 目录名不能和 `trash_plugin_moves_files_into_recycle_dir` 撞：测试并行跑，
+        //    两个测试共用同一个 tmp 目录会互相把对方的夹具挪走。
+        let root = std::env::temp_dir().join(format!("panel-trash-jssub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("js")).unwrap();
+        std::fs::create_dir_all(root.join("demo")).unwrap();
+        std::fs::write(root.join("js/demo.js"), "// demo").unwrap();
+        std::fs::write(root.join("flat.js"), "// flat").unwrap();
+
+        let moved = super::trash_plugin(&root, "demo").unwrap();
+        assert_eq!(moved, vec!["js/demo.js".to_string(), "demo/".to_string()]);
+        assert!(!root.join("js/demo.js").exists(), "js/ 下的文件必须被移走");
+        assert!(!root.join("demo").exists());
+        // 回收站里保留相对层级，捞回来时不用猜原来在哪
+        let trash_root = root.join(".trash");
+        let one = std::fs::read_dir(&trash_root).unwrap().next().unwrap().unwrap().path();
+        assert!(one.join("js/demo.js").is_file(), "回收站里应当是 js/demo.js");
+
+        // 平铺的照样能删
+        assert_eq!(super::trash_plugin(&root, "flat").unwrap(), vec!["flat.js".to_string()]);
+        assert!(!root.join("flat.js").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn dangling_symlink_cannot_escape_the_root() {

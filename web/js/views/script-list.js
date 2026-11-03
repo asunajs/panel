@@ -24,6 +24,7 @@ import {
   resumeTask,
   editJob,
   deleteJob,
+  deleteScriptFile,
   restoreJob,
   uploadFile,
 } from '../api.js';
@@ -155,7 +156,10 @@ function fileCard(f, job) {
          )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的目录任务不受影响">用这个文件建任务</button>
          <button class="btn danger" data-act="delete" data-name="${esc(
            job.name,
-         )}" data-dir="1">删除</button>`
+         )}" data-dir="1">删除</button>
+         <button class="btn danger" data-act="delete-file" data-name="${esc(
+           job.name,
+         )}" title="把脚本文件移进 .trash/（不是 rm，可手动捞回）；上面那个「删除」只停调度、文件不动">删文件</button>`
       : deleted
         ? `<button class="btn ghost" data-act="create" data-path="${esc(
             f.path,
@@ -604,6 +608,13 @@ export async function render(root, ctx, opts = {}) {
         okText: '删除',
         risk: RISK.LOSS,
       },
+      'delete-file': {
+        question: `把 ${name} 的脚本文件移进回收站？`,
+        detail:
+          '文件会移到 .trash/<时间戳>/，面板不再调度它。这是移走不是 rm —— 想彻底删掉自己去磁盘上删。',
+        okText: '删文件',
+        risk: RISK.LOSS,
+      },
       pause: {
         question: `暂停脚本任务 \`${name}\`？`,
         detail: '它不会再按节奏跑（暂停状态重启后仍然保留）。随时可以「恢复」。',
@@ -632,6 +643,7 @@ export async function render(root, ctx, opts = {}) {
     else if (act === 'pause') out = await pauseTask(SCRIPT_PLUGIN, name);
     else if (act === 'resume') out = await resumeTask(SCRIPT_PLUGIN, name);
     else if (act === 'delete') out = await deleteJob(SCRIPT_PLUGIN, name);
+    else if (act === 'delete-file') out = await deleteScriptFile(name);
     else if (act === 'restore') out = await restoreJob(SCRIPT_PLUGIN, name);
     else {
       btn.disabled = false;
@@ -644,6 +656,7 @@ export async function render(root, ctx, opts = {}) {
       pause: '暂停',
       resume: '恢复',
       delete: '删除',
+      'delete-file': '删文件',
       restore: '恢复',
     }[act];
     if (out.ok) {

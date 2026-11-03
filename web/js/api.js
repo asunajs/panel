@@ -320,6 +320,27 @@ export function reloadPlugin(name) {
   });
 }
 
+/// 把插件**文件**移进回收站（`plugins/.trash/<时间戳>/`）。
+///
+/// ⚠ 和「卸载」不是一回事：卸载只是把插件从内存里拿掉，文件还在；
+/// 这里是**移走文件**（不是 rm，落一条 `file_ops`，出事了能按记账捞回来）。
+export function deletePluginFiles(name) {
+  return request(`/api/plugins/${encodeURIComponent(name)}/delete`, {
+    method: 'POST',
+    panel: true,
+  });
+}
+
+/// 把脚本**文件**移进回收站（`<TASKS_DIR>/.trash/<时间戳>/`）。
+///
+/// 面板脚本（存在 SQLite 里）没有文件，删它走 `deleteJob`。
+export function deleteScriptFile(name) {
+  return request(`/api/scripts/${encodeURIComponent(name)}/delete`, {
+    method: 'POST',
+    panel: true,
+  });
+}
+
 /// 取插件源码（含有没有备份，用来决定「恢复上一次」按钮给不给）。
 export function pluginSource(name) {
   return request(`/api/plugins/${encodeURIComponent(name)}/source`);
