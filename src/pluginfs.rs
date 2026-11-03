@@ -484,7 +484,9 @@ pub fn trash_plugin(plugins_dir: &Path, name: &str) -> Result<Vec<String>, Strin
                 std::fs::create_dir_all(parent).map_err(|e| format!("建回收站目录失败: {e}"))?;
             }
             std::fs::rename(&src, &dst).map_err(|e| format!("挪 {} 失败: {e}", rel.display()))?;
-            moved.push(rel.display().to_string());
+            // 统一用 `/`：这个串会进 `file_ops` 记账、也会回给前端。
+            // Windows 上 `display()` 是反斜杠，不统一的话同一份记录跨平台长得不一样。
+            moved.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
 
