@@ -4128,6 +4128,13 @@ def first_run_setup(tmp: Path) -> None:
             print(log.read_text(errors="replace"))
             return
 
+        # 引导入口必须**彻底关闭**：一张还能打开的表单会让人以为面板丢了凭据。
+        check(
+            get("/setup")[0] != 200,
+            "设完之后 /setup 不再可打开",
+            f"http {get('/setup')[0]}",
+        )
+
         # 设完会 exec 自重启：等它回到「跳登录页」的状态
         moved = False
         for _ in range(60):

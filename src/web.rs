@@ -652,6 +652,12 @@ fn safe_next(next: Option<&str>) -> String {
 /// `GET /login` —— 登录页。没开鉴权就直接回面板，已经登录过也直接回面板。
 /// 首次设置页。只在 setup 模式下可达（其余请求被 `require_auth` 302 到这里）。
 async fn setup_page() -> Response {
+    // 已经设过口令（或本来就用环境变量配了凭据）时，这个页面必须**彻底关掉**：
+    // 让人打开一张「欢迎，先设一个口令」的表单、填完才被告知「引导已关闭」，
+    // 比直接 302 到登录页糟糕得多 —— 而且容易让人以为面板丢了凭据。
+    if crate::setup::active().is_none() {
+        return Redirect::to("/login").into_response();
+    }
     Html(crate::setup::render_page(None)).into_response()
 }
 
