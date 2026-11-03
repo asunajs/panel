@@ -104,11 +104,14 @@ function fileCard(f, job) {
   const title = header.name || baseName(f.path);
   const valid = f.valid !== false;
   const disabled = header.disabled === true;
-  const scheduled = f.scheduled === true && job && !job.deleted;
+  // ⚠ 目录脚本**没有墓碑**了：文件就是唯一事实来源，要停就删文件（进 .trash）。
+  // `job.deleted` 只可能来自 0.2.1 及以前的旧数据，启动时会被清掉（见 db.rs），
+  // 这里不再为它留任何界面分支 —— 那种「删了但其实没删」的状态没有意义。
+  const scheduled = f.scheduled === true && !!job;
   // 文件被「面板任务」引用时 scheduled 也是 true（后端口径），但这里没有
   // 目录任务的 name，不能给它画「暂停 / 改运行时间」—— 只标一下，操作去面板任务卡片。
   const panelReferenced = f.scheduled === true && !scheduled && !(job && job.deleted);
-  const deleted = job && job.deleted;
+  const deleted = false;
   const covered = scheduled && !!job.override_expr;
   const effective = scheduled ? job.override_expr || job.schedule : header.cron || '';
   const extras = fileExtras(header);
@@ -154,12 +157,9 @@ function fileCard(f, job) {
          <button class="btn ghost" data-act="create" data-path="${esc(
            f.path,
          )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的目录任务不受影响">用这个文件建任务</button>
-         <button class="btn danger" data-act="delete" data-name="${esc(
-           job.name,
-         )}" data-dir="1">删除</button>
          <button class="btn danger" data-act="delete-file" data-name="${esc(
            job.name,
-         )}" title="把脚本文件移进 .trash/（不是 rm，可手动捞回）；上面那个「删除」只停调度、文件不动">删文件</button>`
+         )}" title="把脚本文件移进 .trash/（不是 rm，可手动捞回）；删除后不再调度它">删除</button>`
       : deleted
         ? `<button class="btn ghost" data-act="create" data-path="${esc(
             f.path,

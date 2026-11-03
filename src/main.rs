@@ -795,6 +795,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 运行期也要清理（以前只在启动时清一次）。
+    // 旧版本给目录脚本立过墓碑（停调度、文件还在）。现在「删除 = 删文件」，
+    // 那些墓碑必须清掉，否则脚本会卡在「没有恢复入口、也不再调度」的死角。
+    match crate::db::clear_script_dir_tombstones(&db) {
+        Ok(0) => {}
+        Ok(n) => crate::log::plog!(
+            "boot",
+            warn,
+            "清掉了 {n} 条目录脚本的旧墓碑（删除现在等于删文件，不再有「已删除但文件还在」）"
+        ),
+        Err(e) => crate::log::plog!("boot", warn, "清目录脚本旧墓碑失败：{e}"),
+    }
+
     spawn_db_prune(db.clone(), run_keep_days, run_keep_rows);
 
     // ---------- 2. 共享状态 ----------

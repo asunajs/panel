@@ -4234,6 +4234,33 @@ def delete_file_checks(tmp: Path) -> None:
         trashed = list((d / "plugins" / ".trash").rglob("smokedelete.js"))
         check(bool(trashed), "删插件：文件进了 .trash（不是 rm，捞得回来）", str(trashed[:1]))
 
+        # 先等引擎把这个脚本扫进 jobs 表：不然「拒绝立墓碑」会先撞上「没有这个任务」，
+        # 测的就不是我们要测的那条规则了。
+        seen = False
+        for _ in range(40):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/scripts",
+                headers={"X-Panel-Token": SMOKE_TOKEN, "x-panel": "1"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    if b"smokedelete" in r.read():
+                        seen = True
+                        break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        check(seen, "目录脚本已被扫进任务表（下面的墓碑断言才有意义）")
+
+        # 目录脚本**没有墓碑**：「删除任务」这种似删除非删除的状态必须被拒，
+        # 否则又会出现「卡片写着已删除、文件一点没动」。
+        st, body = post("/api/jobs/__script__/smokedelete/delete")
+        check(
+            st == 400 and "删除任务" in body,
+            "目录脚本拒绝「立墓碑」，只让你删文件",
+            f"http {st} {body[:80]}",
+        )
+
         st, body = post("/api/scripts/smokedelete/delete")
         check(st == 200, "删脚本：任务目录里的脚本文件能找到", f"http {st} {body[:80]}")
         check(not (d / "tasks" / "smokedelete.js").exists(), "删脚本：文件真的离开了任务目录")

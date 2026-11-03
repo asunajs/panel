@@ -147,7 +147,7 @@ function taskCard(t) {
            ? '<button class="btn ghost" data-act="uncover" title="恢复插件里声明的运行时间">恢复原时间</button>'
            : ''
        }
-       <button class="btn danger" data-act="delete">删除</button>`;
+       <button class="btn danger" data-act="delete">忽略</button>`;
 
   return `
     <div class="card hoverable" data-task="${esc(t.name)}" data-plugin="${esc(t.plugin)}"
@@ -459,8 +459,8 @@ export async function render(root, ctx, opts = {}) {
       ${
         gone.length
           ? `<div class="list-note" style="margin-top:var(--sp-3)">
-               <button class="btn ghost" id="show-deleted">显示 ${gone.length} 个已删除的插件任务</button>
-               <span class="hint">删除的插件任务可以恢复。</span>
+               <button class="btn ghost" id="show-deleted">显示 ${gone.length} 个已忽略的插件任务</button>
+               <span class="hint">「忽略」只是不调度它 —— 插件代码里还声明着这个任务，随时可以恢复。</span>
              </div>
              <div class="grid" id="deleted-grid" hidden></div>`
           : ''
@@ -485,7 +485,7 @@ export async function render(root, ctx, opts = {}) {
       grid.innerHTML = '';
     }
     grid.hidden = !hidden;
-    btn.textContent = hidden ? `隐藏这 ${gone.length} 个` : `显示 ${gone.length} 个已删除的任务`;
+    btn.textContent = hidden ? `隐藏这 ${gone.length} 个` : `显示 ${gone.length} 个已忽略的任务`;
   });
 
   // ---- 清理失效任务：两阶段 ----
@@ -623,12 +623,12 @@ export async function render(root, ctx, opts = {}) {
     //   不要：立即执行（只是多跑一次）、恢复 / 启用（都是往回走）、编辑（只是打开表单）
     const confirmSpec = {
       delete: {
-        question: `删除任务 \`${name}\`？`,
+        question: `忽略任务 \`${name}\`？`,
         detail:
           source === 'panel'
             ? '在面板创建的任务：删掉就没了，运行历史一起消失，要重建得重新填运行时间。'
             : '插件声明的任务：删掉后不再运行，但会留在列表底部，随时可以恢复。',
-        okText: '删除',
+        okText: '忽略',
         // 面板任务真删（不可逆）；插件代码声明的任务只是立墓碑，可恢复。
         risk: source === 'panel' ? RISK.LOSS : RISK.PAUSE,
       },
@@ -681,7 +681,7 @@ export async function render(root, ctx, opts = {}) {
       run: '运行',
       pause: '暂停',
       resume: '恢复',
-      delete: '删除',
+      delete: '忽略',
       uncover: '恢复原时间',
       restore: '恢复',
     }[act];

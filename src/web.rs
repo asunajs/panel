@@ -1300,6 +1300,26 @@ async fn delete_job(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
+    // 目录脚本**不立墓碑**。「删除」对它就等于删文件（`/api/scripts/{name}/delete` →
+    // 进 `.trash/`）：文件明明在任务目录里，却给一张「已删除」的卡片、文件一点没动，
+    // 那是似删除非删除，没有意义。
+    if plugin == crate::db::SCRIPT_PLUGIN {
+        // 判据是**文件在不在**，不是「任务行存不存在」：行是引擎扫目录之后才建出来的，
+        // 刚丢进任务目录、还没被扫到的脚本那一刻查不到行 —— 那时更该拒绝，
+        // 因为用户正想「删掉这个文件」。
+        let is_dir_script = ["js", "py", "sh"]
+            .iter()
+            .any(|ext| st.host.tasks_dir.join(format!("{name}.{ext}")).is_file());
+        if is_dir_script {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "目录脚本没有「删除任务」这回事：文件就是任务。要删请用「删除文件」\
+                     （`POST /api/scripts/{name}/delete`，会移进 .trash）"
+                ),
+            );
+        }
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Err(r) = route(
         &st,

@@ -797,6 +797,20 @@ pub fn list_job_overrides(
 ///
 /// 真删行是不行的：`sync_jobs` 每次重载都按代码收敛，插件还声明着这个任务就会被建回来。
 /// 所以删除 = 标记，`sync_jobs` 认这个标记（见它的 status CASE）。
+/// 把「目录脚本」的墓碑清掉，返回清了几条。
+///
+/// 为什么要有这一步：0.2.1 及以前，目录脚本的「删除」是立墓碑（停调度、文件还在、
+/// 还能恢复）。那是个**似删除非删除**的状态 —— 文件明明就在任务目录里，用户看着
+/// 「已删除」的卡片却什么也删不掉。现在改成「删除 = 删文件（进 .trash）」，
+/// 旧墓碑必须清掉，否则那些脚本会永远卡在「有一行 deleted=1、界面上却没有恢复入口」。
+pub fn clear_script_dir_tombstones(db: &Db) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE jobs SET deleted = 0, status = 'idle' WHERE deleted = 1 AND source = 'script-dir'",
+        [],
+    )
+}
+
 pub fn set_job_deleted(
     db: &Db,
     plugin: &str,

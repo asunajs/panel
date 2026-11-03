@@ -32,7 +32,7 @@ export const STATUS_MAP = {
   error: { cls: 'failed', text: '执行出错', title: '上一次跑到一半抛错了，下次到点还会再试' },
   idle: { cls: 'idle', text: '待触发', title: '还没排上（没有下次触发时刻）' },
   // 面板删掉的（墓碑）：插件代码仍然声明它，所以它还在库里但不调度
-  deleted: { cls: 'idle', text: '已删除', title: '插件代码里还声明着它，但面板不再调度' },
+  deleted: { cls: 'idle', text: '已忽略', title: '插件代码里还声明着它，面板不调度它（要真删得改插件源码）' },
 };
 
 /** 状态 → `{cls, text}`。认不出来的给中性样式 + 原值。 */
