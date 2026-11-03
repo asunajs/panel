@@ -1569,13 +1569,35 @@ async fn delete_plugin_files(
     };
     let mut removed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut maybe_empty: Vec<std::path::PathBuf> = Vec::new();
     for p in candidates {
         if !p.is_file() {
             continue;
         }
         match std::fs::remove_file(&p) {
-            Ok(()) => removed.push(rel_of(&p)),
+            Ok(()) => {
+                removed.push(rel_of(&p));
+                if let Some(parent) = p.parent() {
+                    maybe_empty.push(parent.to_path_buf());
+                }
+            }
             Err(e) => failed.push(format!("{}: {e}", rel_of(&p))),
+        }
+    }
+    // 更深的一层先删，才能把空掉的父目录一起收掉。
+    // `remove_dir` 对非空目录会失败，所以这里天然只删「真的空了」的目录；
+    // `js/` `lib/` `py/` 是插件**共享**的目录，插件只是住客，绝不删。
+    maybe_empty.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    maybe_empty.dedup();
+    for d in maybe_empty {
+        if d == st.plugins_dir || !d.starts_with(&st.plugins_dir) {
+            continue;
+        }
+        if matches!(d.file_name().and_then(|s| s.to_str()), Some("js" | "lib" | "py")) {
+            continue;
+        }
+        if std::fs::remove_dir(&d).is_ok() {
+            removed.push(format!("{}/（空目录）", rel_of(&d)));
         }
     }
     // ③ 插件目录（配置页 / 静态资源）
