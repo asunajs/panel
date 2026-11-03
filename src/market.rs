@@ -990,6 +990,32 @@ impl Market {
         })
     }
 
+    /// 这个插件装过哪些文件（相对 `plugins/` 目录）。市场装的插件有这份清单，
+    /// 手写的插件没有 —— 后者只能按约定路径找。
+    pub fn installed_files(&self, name: &str) -> Vec<String> {
+        read_marker(&self.marker_path)
+            .installed
+            .get(name)
+            .map(|e| e.files.clone())
+            .unwrap_or_default()
+    }
+
+    /// 忘掉一个插件的安装记录，返回它记下的文件清单。
+    ///
+    /// 「删除 = 彻底删除」的一部分：文件、库里的行、**这条安装记录**都得没，
+    /// 否则商城下次仍会显示「已安装」并指向一堆不存在的文件。
+    pub fn forget_installed(&self, name: &str) -> Vec<String> {
+        let mut marker = read_marker(&self.marker_path);
+        match marker.installed.remove(name) {
+            Some(entry) => {
+                if let Err(e) = write_marker(&self.marker_path, &marker) {
+                    crate::log::plog!("market", warn, "安装记录写入失败：{e}");
+                }
+                entry.files
+            }
+            None => Vec::new(),
+        }
+    }
     fn installed_state(&self, id: &str, provides: &[String], plugins_dir: &Path) -> InstalledState {
         let marker = read_marker(&self.marker_path);
         let entry = marker.installed.get(id);

@@ -104,7 +104,7 @@ function fileCard(f, job) {
   const title = header.name || baseName(f.path);
   const valid = f.valid !== false;
   const disabled = header.disabled === true;
-  // ⚠ 目录脚本**没有墓碑**了：文件就是唯一事实来源，要停就删文件（进 .trash）。
+  // ⚠ 目录脚本**没有墓碑**了：文件就是唯一事实来源，要停就删文件（彻底删掉）。
   // `job.deleted` 只可能来自 0.2.1 及以前的旧数据，启动时会被清掉（见 db.rs），
   // 这里不再为它留任何界面分支 —— 那种「删了但其实没删」的状态没有意义。
   const scheduled = f.scheduled === true && !!job;
@@ -159,7 +159,7 @@ function fileCard(f, job) {
          )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的目录任务不受影响">用这个文件建任务</button>
          <button class="btn danger" data-act="delete-file" data-name="${esc(
            job.name,
-         )}" title="把脚本文件移进 .trash/（不是 rm，可手动捞回）；删除后不再调度它">删除</button>`
+         )}" title="彻底删除这个脚本：文件、它的数据目录、运行记录一起删掉，不可恢复">删除</button>`
       : deleted
         ? `<button class="btn ghost" data-act="create" data-path="${esc(
             f.path,
@@ -609,10 +609,10 @@ export async function render(root, ctx, opts = {}) {
         risk: RISK.LOSS,
       },
       'delete-file': {
-        question: `把 ${name} 的脚本文件移进回收站？`,
+        question: `彻底删除脚本 ${name}？`,
         detail:
-          '文件会移到 .trash/<时间戳>/，面板不再调度它。这是移走不是 rm —— 想彻底删掉自己去磁盘上删。',
-        okText: '删文件',
+          '脚本文件、它的数据目录、这个任务的全部运行记录会一起从本地删掉，不可恢复。',
+        okText: '彻底删除',
         risk: RISK.LOSS,
       },
       pause: {
@@ -656,7 +656,7 @@ export async function render(root, ctx, opts = {}) {
       pause: '暂停',
       resume: '恢复',
       delete: '删除',
-      'delete-file': '删文件',
+      'delete-file': '删除',
       restore: '恢复',
     }[act];
     if (out.ok) {

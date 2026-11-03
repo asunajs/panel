@@ -605,7 +605,7 @@ export async function render(root, ctx, opts = {}) {
                       off ? '1' : '0'
                     }">${off ? '启用' : '停用'}</button>
                     <button class="btn danger" data-del-plugin="${esc(p.name)}"
-                      title="把插件文件移进 plugins/.trash/（不是 rm，可手动捞回）；它声明的任务会跟着消失。和「卸载」不同：卸载只是从内存拿掉，文件还在">删文件</button>`;
+                      title="彻底删除这个插件：文件、插件数据、它声明的任务和运行记录一起删掉，不可恢复。和「卸载」不同 —— 卸载只是从内存拿掉，文件还在">删除</button>`;
                   // 有配置页时按钮行里是两个按钮：内嵌打开 + 新标签页
                   // 竖排布局（见 components.css 的 .plugin-card）：
                   // 名字 + 徽章一行、路径一行、状态一行、按钮一行。
@@ -774,18 +774,18 @@ export async function render(root, ctx, opts = {}) {
       return;
     }
 
-    // 「删文件」：移进 plugins/.trash/。与「卸载」不是一回事 —— 卸载只把插件
-    // 从内存里拿掉（文件还在、任务照跑），这里是移走文件，它声明的任务跟着消失。
+    // 「删除」：彻底删掉。与「卸载」不是一回事 —— 卸载只把插件从内存里拿掉
+    // （文件还在、任务照跑），这里连文件、数据、任务、运行记录一起删干净。
     const delBtn = ev.target.closest('button[data-del-plugin]');
     if (delBtn) {
       const name = delBtn.dataset.delPlugin;
       const card = delBtn.closest('[data-plugin]');
       const yes = await armConfirm(
         {
-          question: `把插件 ${name} 的文件移进回收站？`,
+          question: `彻底删除插件 ${name}？`,
           detail:
-            '会移到 plugins/.trash/<时间戳>/，面板不再加载它，它声明的任务也跟着消失。这是移走不是 rm —— 想彻底删掉自己去磁盘上删。',
-          okText: '删文件',
+            '文件、插件数据（plugin-data/<name>）、它声明的任务和运行记录会一起从本地删掉，不可恢复。',
+          okText: '彻底删除',
           risk: RISK.LOSS,
           plugin: name,
           name,
@@ -796,12 +796,12 @@ export async function render(root, ctx, opts = {}) {
       delBtn.disabled = true;
       const res = await deletePluginFiles(name);
       if (res.ok) {
-        ctx.toast(`${name}：文件已移进回收站`, 'ok');
+        ctx.toast(`${name}：已彻底删除`, 'ok');
         // 引擎每轮扫描 1 秒，等一拍再刷新才看得到插件从列表里消失
         setTimeout(() => render(root, ctx, { silent: true }), 1200);
       } else {
         delBtn.disabled = false;
-        ctx.toast(`${name}：删文件失败 —— ${res.error}`, 'bad');
+        ctx.toast(`${name}：删除失败 —— ${res.error}`, 'bad');
       }
       return;
     }

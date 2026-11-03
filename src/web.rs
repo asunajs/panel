@@ -1300,9 +1300,9 @@ async fn delete_job(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    // 目录脚本**不立墓碑**。「删除」对它就等于删文件（`/api/scripts/{name}/delete` →
-    // 进 `.trash/`）：文件明明在任务目录里，却给一张「已删除」的卡片、文件一点没动，
-    // 那是似删除非删除，没有意义。
+    // 目录脚本**不立墓碑**。「删除」对它就是把文件彻底删掉
+    // （`/api/scripts/{name}/delete`）：文件明明在任务目录里，却给一张「已删除」的
+    // 卡片、文件一点没动，那是似删除非删除，没有意义。
     if plugin == crate::db::SCRIPT_PLUGIN {
         // 判据是**文件在不在**，不是「任务行存不存在」：行是引擎扫目录之后才建出来的，
         // 刚丢进任务目录、还没被扫到的脚本那一刻查不到行 —— 那时更该拒绝，
@@ -1315,7 +1315,7 @@ async fn delete_job(
                 StatusCode::BAD_REQUEST,
                 format!(
                     "目录脚本没有「删除任务」这回事：文件就是任务。要删请用「删除文件」\
-                     （`POST /api/scripts/{name}/delete`，会移进 .trash）"
+                     （`POST /api/scripts/{name}/delete`，会彻底删除）"
                 ),
             );
         }
@@ -1513,12 +1513,23 @@ async fn unload_plugin(
     set_plugin_loaded(&st, &name, false, &headers).await
 }
 
-/// `POST /api/plugins/{name}/delete` —— 把插件文件挪进回收站。
+/// `POST /api/plugins/{name}/delete` —— 把插件**彻底删掉**。
 ///
-/// ⚠ 这不是 `rm`：文件挪到 `<plugins>/.trash/<时间戳>-<name>/`，出事了能捞回来。
-/// 顺序照 docs/file-management.md §1 的四步走：停 → 摘任务 → 移文件 → 忘掉。
-/// 这一版做「停 + 移文件」；任务行的收敛交给引擎的下一次扫描（插件文件没了，
-/// 它就不再声明任务），记账表 `file_ops` 留到二期。
+/// 「删除」在这里只有一个意思：**从本地消失，不留一个字节**。所以删的是三样东西：
+///
+/// ① **文件**：市场装的插件按安装记录（`market-installed.json` 里的 `files`）逐条删，
+///    手写的按约定路径找（`plugins/<name>.js|.mjs`、`plugins/js/<name>.js|.mjs`、
+///    `plugins/<name>/` 配置页目录）。市场记录的清单是「哪些文件属于它」的答案 ——
+///    没有这份清单就只能靠约定路径猜，那是设计缺陷，不是删除策略。
+/// ② **数据**：`<PLUGIN_DATA_DIR>/<name>/`（插件自己写的状态、缓存、token）。
+/// ③ **库里的行**：任务、运行记录、插件状态、推送配置、安装记录（`db::purge_plugin`）。
+///
+/// 不写 `.trash`：回收站是「似删除非删除」，用户要的是真删。
+/// 唯一保留的痕迹是 `file_ops` 里一条记账（只有路径和时间，不含任何插件内容）。
+///
+/// 顺序讲究：先摘运行时（否则下一次调用会指向不存在的文件），再删磁盘，
+/// 最后清库 —— 库清完 `sync_jobs` 就再也找不到可依据的行，
+/// 「删了插件、它的 cron 任务还在后面报错」这种局面不会出现。
 async fn delete_plugin_files(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -1527,29 +1538,96 @@ async fn delete_plugin_files(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    // ① 先摘运行时：文件没了而运行时还在，下一次调用就会指向一个不存在的文件。
-    let _ = set_plugin_loaded(&st, &name, false, &headers).await;
-    // ② 移文件（回收站，不是删除）
-    match crate::pluginfs::trash_plugin(&st.plugins_dir, &name) {
-        Ok(moved) if moved.is_empty() => {
-            json_error(StatusCode::NOT_FOUND, format!("没有找到插件 {name} 的文件"))
-        }
-        Ok(moved) => {
-            // ③ 记账：删是「移进回收站」，但必须留痕 —— 否则界面上只剩
-            // 「文件不见了」，回收站里翻半天说不清哪份是哪次删的。
-            let op = crate::db::record_file_op(
-                &st.db,
-                "plugin",
-                &name,
-                "delete",
-                &format!("{}/{}", st.plugins_dir.display(), name),
-                &moved.join(", "),
-            )
-            .ok();
-            Json(json!({ "ok": true, "moved": moved, "op": op })).into_response()
-        }
-        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return json_error(StatusCode::BAD_REQUEST, format!("插件名不合法: {name}"));
     }
+    // ① 先摘运行时
+    let _ = set_plugin_loaded(&st, &name, false, &headers).await;
+
+    // ② 文件清单：安装记录优先，约定路径兜底
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for rel in st.market.installed_files(&name) {
+        candidates.push(st.plugins_dir.join(rel));
+    }
+    for sub in ["", "js"] {
+        for ext in ["js", "mjs"] {
+            candidates.push(if sub.is_empty() {
+                st.plugins_dir.join(format!("{name}.{ext}"))
+            } else {
+                st.plugins_dir.join(sub).join(format!("{name}.{ext}"))
+            });
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+
+    let rel_of = |p: &std::path::Path| {
+        p.strip_prefix(&st.plugins_dir)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        match std::fs::remove_file(&p) {
+            Ok(()) => removed.push(rel_of(&p)),
+            Err(e) => failed.push(format!("{}: {e}", rel_of(&p))),
+        }
+    }
+    // ③ 插件目录（配置页 / 静态资源）
+    let dir = st.plugins_dir.join(&name);
+    if dir.is_dir() {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed.push(format!("{name}/")),
+            Err(e) => failed.push(format!("{name}/: {e}")),
+        }
+    }
+    // ④ 插件数据
+    let data = st.host.plugin_data_dir.join(&name);
+    if data.is_dir() {
+        match std::fs::remove_dir_all(&data) {
+            Ok(()) => removed.push(format!("{name}/（插件数据）")),
+            Err(e) => failed.push(format!("{name}/（插件数据）: {e}")),
+        }
+    }
+
+    // ⑤ 库里的行 + 安装记录
+    let purged = crate::db::purge_plugin(&st.db, &name).unwrap_or_default();
+    st.market.forget_installed(&name);
+
+    if !failed.is_empty() {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("删除不完整：{}", failed.join("；")),
+        );
+    }
+    if removed.is_empty() && purged.total() == 0 {
+        return json_error(StatusCode::NOT_FOUND, format!("没有找到插件 {name}"));
+    }
+    crate::log::plog!(
+        "plugins",
+        info,
+        "彻底删除插件 {name}：{} 个文件/目录、{} 条任务、{} 条运行记录、{} 份插件状态",
+        removed.len(),
+        purged.jobs,
+        purged.runs,
+        purged.plugin_state
+    );
+    // 记账只留路径与时间，不含插件内容
+    let op = crate::db::record_file_op(
+        &st.db,
+        "plugin",
+        &name,
+        "purge",
+        &format!("{}/{}", st.plugins_dir.display(), name),
+        &removed.join(", "),
+    )
+    .ok();
+    Json(json!({ "ok": true, "removed": removed, "purged": purged, "op": op })).into_response()
 }
 
 /// `POST /api/plugins/{name}/keep-warm` `{keep: true|false}` —— 「长期加载」。
@@ -2335,10 +2413,18 @@ where
 }
 
 /// `POST /api/scripts/jobs/{name}/edit` —— 编辑面板脚本任务（目录任务用 `/api/jobs/.../edit`）。
-/// `POST /api/scripts/{name}/delete` —— 把脚本文件挪进回收站。
+/// `POST /api/scripts/{name}/delete` —— 把脚本任务**彻底删掉**。
 ///
-/// 和插件删除同一套口径（docs/file-management.md 一期）：**移走不是 rm**，
-/// 落一条 file_ops 记账，出事了能按 to_path 捞回来。
+/// 三样一起没：
+/// ① 脚本文件 `tasks/<name>.{js,py,sh}`（三种后缀都找，真实存在哪个删哪个）；
+/// ② 它自己的数据目录 `<PLUGIN_DATA_DIR>/__script__/<name>/`；
+/// ③ 库里的行：任务、运行记录、推送配置（`db::purge_script`）。
+///
+/// 不写 `.trash`：回收站是「似删除非删除」，用户要的是真删。
+/// 唯一留下的是一条 `file_ops` 记账（只有路径和时间，不含脚本内容）。
+///
+/// 顺序上先删文件再清库：文件是任务的**定义**，定义没了还留着行，
+/// 下次执行就会对着一个不存在的路径报错 —— 那正是这版要消灭的状态。
 async fn delete_script_file(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -2347,39 +2433,61 @@ async fn delete_script_file(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
         return json_error(StatusCode::BAD_REQUEST, format!("脚本名不合法: {name}"));
     }
-    // 脚本文件可能带 .js/.py/.sh 三种后缀，按目录里真实存在的找。
-    let mut moved: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for ext in ["js", "py", "sh"] {
         let file = st.host.tasks_dir.join(format!("{name}.{ext}"));
         if !file.is_file() {
             continue;
         }
-        let trash = st.host.tasks_dir.join(".trash").join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
-        if let Err(e) = std::fs::create_dir_all(&trash) {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("建回收站目录失败: {e}"));
+        match std::fs::remove_file(&file) {
+            Ok(()) => removed.push(format!("{name}.{ext}")),
+            Err(e) => failed.push(format!("{name}.{ext}: {e}")),
         }
-        let dst = trash.join(format!("{name}.{ext}"));
-        if let Err(e) = std::fs::rename(&file, &dst) {
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("挪 {name}.{ext} 失败: {e}"));
+    }
+    // 脚本自己的数据目录（`__script__/<name>`）
+    let data = st
+        .host
+        .plugin_data_dir
+        .join(crate::db::SCRIPT_PLUGIN)
+        .join(&name);
+    if data.is_dir() {
+        match std::fs::remove_dir_all(&data) {
+            Ok(()) => removed.push(format!("{name}/（脚本数据）")),
+            Err(e) => failed.push(format!("{name}/（脚本数据）: {e}")),
         }
-        moved.push(format!("{name}.{ext}"));
     }
-    if moved.is_empty() {
-        return json_error(StatusCode::NOT_FOUND, format!("没有找到脚本 {name} 的文件"));
+    let purged = crate::db::purge_script(&st.db, &name).unwrap_or_default();
+    if !failed.is_empty() {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("删除不完整：{}", failed.join("；")),
+        );
     }
+    if removed.is_empty() && purged.total() == 0 {
+        return json_error(StatusCode::NOT_FOUND, format!("没有找到脚本 {name}"));
+    }
+    crate::log::plog!(
+        "scripts",
+        info,
+        "彻底删除脚本 {name}：{} 个文件/目录、{} 条任务、{} 条运行记录",
+        removed.len(),
+        purged.jobs,
+        purged.runs
+    );
     let op = crate::db::record_file_op(
         &st.db,
         "script",
         &name,
-        "delete",
+        "purge",
         &format!("{}/{}", st.host.tasks_dir.display(), name),
-        &moved.join(", "),
+        &removed.join(", "),
     )
     .ok();
-    Json(json!({ "ok": true, "moved": moved, "op": op })).into_response()
+    Json(json!({ "ok": true, "removed": removed, "purged": purged, "op": op })).into_response()
 }
 
 async fn edit_script_job(

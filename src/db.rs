@@ -173,9 +173,9 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
 
         -- 文件操作记账（docs/file-management.md 一期）。
         --
-        -- 为什么要有它：删插件是「移进回收站」，但**谁在什么时候删了什么**
-        -- 必须留痕 —— 否则界面上只剩「文件不见了」，回收站里翻半天也说不清
-        -- 哪一份是哪次删的。to_path 就是回收站里的实际位置，恢复靠它。
+        -- 为什么要有它：删插件 / 删脚本是**真删**（一个字节都不留），但
+        -- 「谁在什么时候删了哪些路径」必须留痕 —— 这是事后唯一查得到的地方。
+        -- 只记路径与时间，不存任何被删内容；to_path 放被删掉的路径清单。
         CREATE TABLE IF NOT EXISTS file_ops (
             id        TEXT PRIMARY KEY,
             kind      TEXT NOT NULL,      -- plugin / script
@@ -801,7 +801,7 @@ pub fn list_job_overrides(
 ///
 /// 为什么要有这一步：0.2.1 及以前，目录脚本的「删除」是立墓碑（停调度、文件还在、
 /// 还能恢复）。那是个**似删除非删除**的状态 —— 文件明明就在任务目录里，用户看着
-/// 「已删除」的卡片却什么也删不掉。现在改成「删除 = 删文件（进 .trash）」，
+/// 「已删除」的卡片却什么也删不掉。现在「删除 = 把文件彻底删掉」，
 /// 旧墓碑必须清掉，否则那些脚本会永远卡在「有一行 deleted=1、界面上却没有恢复入口」。
 pub fn clear_script_dir_tombstones(db: &Db) -> rusqlite::Result<usize> {
     let conn = db.lock().unwrap();
@@ -811,6 +811,85 @@ pub fn clear_script_dir_tombstones(db: &Db) -> rusqlite::Result<usize> {
     )
 }
 
+
+/// 一次彻底删除清掉了什么。
+///
+/// 为什么要有这个结构：删除必须**可核对** —— 用户点下去以后，界面上得能说出
+/// 「删了 3 个文件、2 条任务、17 条运行记录、一份插件数据」，而不是一句「已删除」。
+#[derive(Default, Clone, Copy, serde::Serialize)]
+pub struct Purged {
+    pub jobs: usize,
+    pub runs: usize,
+    pub plugin_state: usize,
+    pub push: usize,
+    pub tasks: usize,
+}
+
+impl Purged {
+    pub fn total(&self) -> usize {
+        self.jobs + self.runs + self.plugin_state + self.push + self.tasks
+    }
+}
+
+/// 把一个插件在库里留下的**全部**痕迹删掉（任务、运行记录、状态、推送配置、任务快照）。
+///
+/// 这是「删除 = 彻底删除」的库侧实现：不立墓碑、不留历史。删完 `sync_jobs` 也找不到
+/// 任何可依据的行 —— 插件文件同样已经没了，所以「删了插件、cron 任务还在报错」不会发生。
+pub fn purge_plugin(db: &Db, plugin: &str) -> rusqlite::Result<Purged> {
+    let mut conn = db.lock().unwrap();
+    let tx = conn.transaction()?;
+    let push = tx.execute("DELETE FROM push_outbox WHERE plugin = ?1", [plugin])?
+        + tx.execute("DELETE FROM push_tasks WHERE plugin = ?1", [plugin])?
+        + tx.execute("DELETE FROM push_deliveries WHERE plugin = ?1", [plugin])?;
+    let runs = tx.execute("DELETE FROM runs WHERE plugin = ?1", [plugin])?;
+    let jobs = tx.execute("DELETE FROM jobs WHERE plugin = ?1", [plugin])?;
+    let tasks = tx.execute("DELETE FROM tasks WHERE plugin = ?1", [plugin])?;
+    let plugin_state = tx.execute("DELETE FROM plugin_state WHERE name = ?1", [plugin])?;
+    tx.commit()?;
+    Ok(Purged {
+        jobs,
+        runs,
+        plugin_state,
+        push,
+        tasks,
+    })
+}
+
+/// 彻底删掉一个**脚本任务**在库里的痕迹（`plugin` 恒为 `__script__`）。
+pub fn purge_script(db: &Db, name: &str) -> rusqlite::Result<Purged> {
+    let mut conn = db.lock().unwrap();
+    let tx = conn.transaction()?;
+    let push = tx.execute(
+        "DELETE FROM push_outbox WHERE plugin = ?1 AND task = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )? + tx.execute(
+        "DELETE FROM push_tasks WHERE plugin = ?1 AND task = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )? + tx.execute(
+        "DELETE FROM push_deliveries WHERE plugin = ?1 AND task = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )?;
+    let runs = tx.execute(
+        "DELETE FROM runs WHERE plugin = ?1 AND task = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )?;
+    let jobs = tx.execute(
+        "DELETE FROM jobs WHERE plugin = ?1 AND name = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )?;
+    let tasks = tx.execute(
+        "DELETE FROM tasks WHERE plugin = ?1 AND name = ?2",
+        params![SCRIPT_PLUGIN, name],
+    )?;
+    tx.commit()?;
+    Ok(Purged {
+        jobs,
+        runs,
+        plugin_state: 0,
+        push,
+        tasks,
+    })
+}
 pub fn set_job_deleted(
     db: &Db,
     plugin: &str,
@@ -1318,8 +1397,9 @@ pub fn list_runs(
 }
 /// 记一笔文件操作（删除 / 恢复）。返回操作 id。
 ///
-/// 见 docs/file-management.md 一期：删是「移进回收站」，但必须留痕 ——
-/// 否则界面上只剩「文件不见了」，回收站里翻半天说不清哪份是哪次删的。
+/// 删除是**真删**（文件、数据、库里的行一起没，见 `purge_plugin` / `purge_script`），
+/// 所以这条记账是事后唯一能回答「什么时候删了哪些路径」的地方 —— 只记路径与时间，
+/// 不含任何被删内容。
 pub fn record_file_op(
     db: &Db,
     kind: &str,
@@ -1356,7 +1436,7 @@ pub struct FileOp {
     pub kind: String,
     pub name: String,
     pub action: String,
-    /// 回收站里的实际位置 —— 以后做「恢复」就靠它。
+    /// 目标位置。`purge` 没有目标位置，这里放被删掉的路径清单。
     pub to_path: String,
     pub at: String,
 }

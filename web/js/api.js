@@ -320,10 +320,10 @@ export function reloadPlugin(name) {
   });
 }
 
-/// 把插件**文件**移进回收站（`plugins/.trash/<时间戳>/`）。
+/// **彻底删除**一个插件：文件、插件数据、它声明的任务与运行记录一起删掉。
 ///
 /// ⚠ 和「卸载」不是一回事：卸载只是把插件从内存里拿掉，文件还在；
-/// 这里是**移走文件**（不是 rm，落一条 `file_ops`，出事了能按记账捞回来）。
+/// 这里是真删，不可恢复（`file_ops` 里只留一条记账：路径 + 时间）。
 export function deletePluginFiles(name) {
   return request(`/api/plugins/${encodeURIComponent(name)}/delete`, {
     method: 'POST',
@@ -331,7 +331,7 @@ export function deletePluginFiles(name) {
   });
 }
 
-/// 把脚本**文件**移进回收站（`<TASKS_DIR>/.trash/<时间戳>/`）。
+/// **彻底删除**一个脚本任务：文件、它的数据目录、运行记录一起删掉，不可恢复。
 ///
 /// 面板脚本（存在 SQLite 里）没有文件，删它走 `deleteJob`。
 export function deleteScriptFile(name) {

@@ -4165,6 +4165,22 @@ def first_run_setup(tmp: Path) -> None:
         except Exception:
             proc.kill()
 
+def _rows(d: Path, plugin: str, name: str) -> int:
+    """数一下库里还剩几行属于这个插件/脚本（jobs + runs）。
+
+    「删除 = 一个字节都不留」不能只看文件：任务行、运行记录也得没。
+    直接读 sqlite（面板开着 WAL，读是安全的）。
+    """
+    import sqlite3
+
+    con = sqlite3.connect(f"file:{d / 'panel.db'}?mode=ro", uri=True)
+    try:
+        a = con.execute("SELECT COUNT(*) FROM jobs WHERE plugin = ? AND name = ?", (plugin, name)).fetchone()[0]
+        b = con.execute("SELECT COUNT(*) FROM runs WHERE plugin = ? AND task = ?", (plugin, name)).fetchone()[0]
+        return a + b
+    finally:
+        con.close()
+
 def delete_file_checks(tmp: Path) -> None:
     """删除脚本 / 删除插件：文件必须真的离开原位，进 .trash，而不是 rm 掉。
 
@@ -4178,7 +4194,12 @@ def delete_file_checks(tmp: Path) -> None:
     d = tmp / "del"
     (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
     (d / "tasks").mkdir(parents=True, exist_ok=True)
-    (d / "plugins" / "js" / "smokedelete.js").write_text("export const x = 1;\n")
+    # 让插件**真的声明一个定时任务**：否则「删完之后库里一条不剩」是 0 == 0 的空断言，
+    # 测不出「删了插件、它的 cron 任务还在后面报错」这个真问题。
+    (d / "plugins" / "js" / "smokedelete.js").write_text(
+        'import { register_cron } from "host-api";\n'
+        'register_cron("smoke任务", "@every 1s", () => {});\n'
+    )
     (d / "tasks" / "smokedelete.js").write_text("// @cron @every 1h\nlog(1);\n")
     port = free_port()
     env = {k: v for k, v in os.environ.items() if not k.startswith("PANEL_TOKEN")}
@@ -4225,14 +4246,35 @@ def delete_file_checks(tmp: Path) -> None:
             print(log.read_text(errors="replace"))
             return
 
+        # 先等它的任务落库：删之前必须**确实有行**，删之后为 0 才说明「一起删掉了」。
+        had_rows = 0
+        for _ in range(40):
+            had_rows = _rows(d, "smokedelete", "smoke任务")
+            if had_rows > 0:
+                break
+            time.sleep(0.5)
+        check(had_rows > 0, "删插件前：它的任务已落库（下面的清理断言才有意义）", str(had_rows))
+
         st, body = post("/api/plugins/smokedelete/delete")
         check(st == 200, "删插件：js/ 子目录下的插件文件能找到", f"http {st} {body[:80]}")
         check(
             not (d / "plugins" / "js" / "smokedelete.js").exists(),
-            "删插件：文件真的离开了 plugins/js/",
+            "删插件：文件真的从磁盘上没了",
         )
-        trashed = list((d / "plugins" / ".trash").rglob("smokedelete.js"))
-        check(bool(trashed), "删插件：文件进了 .trash（不是 rm，捞得回来）", str(trashed[:1]))
+        # 真删，不留回收站 —— 留着副本就是「似删除非删除」。
+        check(
+            not (d / "plugins" / ".trash").exists(),
+            "删插件：不写 .trash（没有回收站副本）",
+        )
+        check(
+            "purged" in body,
+            "删插件：回包里带了清库统计",
+            body[:100],
+        )
+        check(
+            _rows(d, "smokedelete", "smoke任务") == 0,
+            "删插件：它声明的任务和运行记录一条不剩（不会残留报错）",
+        )
 
         # 先等引擎把这个脚本扫进 jobs 表：不然「拒绝立墓碑」会先撞上「没有这个任务」，
         # 测的就不是我们要测的那条规则了。
@@ -4263,10 +4305,11 @@ def delete_file_checks(tmp: Path) -> None:
 
         st, body = post("/api/scripts/smokedelete/delete")
         check(st == 200, "删脚本：任务目录里的脚本文件能找到", f"http {st} {body[:80]}")
-        check(not (d / "tasks" / "smokedelete.js").exists(), "删脚本：文件真的离开了任务目录")
+        check(not (d / "tasks" / "smokedelete.js").exists(), "删脚本：文件真的从磁盘上没了")
+        check(not (d / "tasks" / ".trash").exists(), "删脚本：不写 .trash")
         check(
-            bool(list((d / "tasks" / ".trash").rglob("smokedelete.js"))),
-            "删脚本：文件进了 .trash",
+            _rows(d, "__script__", "smokedelete") == 0,
+            "删脚本：库里的任务行和运行记录一条不剩",
         )
     finally:
         proc.terminate()
