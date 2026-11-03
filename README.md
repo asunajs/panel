@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.2.1**。设置页可以直接看到正在运行的面板版本和构建 commit。
+当前版本：**0.2.2**。设置页可以直接看到正在运行的面板版本和构建 commit。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
