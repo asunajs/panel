@@ -1,0 +1,22 @@
+# 构建上下文里 Dockerfile 真正需要的只有 `dist/`（可选的本地产物）。
+# 镜像不编源码（见 Dockerfile 头部），所以把源码之外的大件挡在外面就够了：
+# 不挡 `.git` 的话，46 MB 的历史会被完整传进构建上下文。
+
+.git
+.github
+target
+node_modules
+adapters/node/node_modules
+
+# 运行期产物：不进镜像，也不该进上下文
+data
+logs
+run
+reports
+perf-run
+
+# 部署验证时留下的截图等本地证据
+verify
+
+*.bak
+.DS_Store

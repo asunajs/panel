@@ -1,0 +1,88 @@
+# =============================================================================
+# docker compose 部署（面板本体 = 一个静态二进制，没有数据库服务器、没有依赖服务）
+# =============================================================================
+#
+# 运行期状态**全部收在 ./data 一个目录里**，仓库工作区保持干净：
+#   ./data/panel.db           任务、账号、插件状态（SQLite）
+#   ./data/panel-token.hash   口令哈希（0600，口令本身不落盘）
+#   ./data/plugin-data/       插件/脚本自己的数据根
+#   ./data/runtime/           外部运行时（Node/Bun）的 shim
+#   ./data/plugins/           插件代码（商城安装 / 上传都落在这里）
+#   ./data/tasks/             脚本任务（.js/.mjs/.py/.sh）
+#   ./data/logs/              插件日志（JSONL，按天切、留 7 天）
+#
+# 为什么不是仓库根目录下的 plugins/ tasks/ logs/：那三个目录在仓库里**是被跟踪的**
+# （里面是自带的示例插件与示例脚本），挂出来会让「商城装个插件」「面板建个脚本任务」
+# 都变成 `git status` 里的未跟踪文件，还会把示例插件里的压力测试任务
+# （`scheduler-demo` 每 500ms 一次、`boom` 每次故意失败）当成生产任务一直跑。
+# 部署要的是空目录起步 —— 和「把 Release 二进制丢进一个空目录里跑」完全一致。
+#
+# 备份 = `cp -a ./data`；升级镜像不动它。`./data/` 已在 .gitignore 内。
+#
+# ---------------------------------------------------------------------------
+# 第一次部署（面板不接受「无口令」启动，所以要先生成一个口令哈希）
+# ---------------------------------------------------------------------------
+#   mkdir -p data/plugins data/tasks data/logs
+#   sudo chown -R 1000:1000 data          # 容器里的 panel 是 uid/gid 1000
+#   docker compose build                  # 从 Release 产物构建镜像
+#   docker compose run --rm panel hash-token > data/panel-token.hash   # 口令从终端输入
+#   chmod 600 data/panel-token.hash && sudo chown 1000:1000 data/panel-token.hash
+#   docker compose up -d
+#
+# 之后打开 http://<这台机器的 IP>:8787 ，用刚才那个口令登录。
+# （口令哈希只落 ./data 下、权限 600，不进 compose、不进 .env、不进 git。）
+#
+# ---------------------------------------------------------------------------
+# 日常
+# ---------------------------------------------------------------------------
+#   docker compose ps / logs -f                    状态与日志
+#   docker compose pull && docker compose up -d    用 ghcr.io 上的新镜像升级
+#   docker compose up -d --build                   改为从本仓库产物重新构建
+#   docker compose down                            停掉（数据全在 ./data 里）
+#
+# 想重置口令：删掉 ./data/panel-token.hash（以及引导页写下的 ./data/credential）后重启。
+# =============================================================================
+
+services:
+  panel:
+    # 默认用「打 tag 后由 .github/workflows/docker-publish.yml 推到 GitHub Packages」的镜像；
+    # 本地要直接从 Release 产物构建，加 `--build` 即可（build 段就在下面）。
+    image: ghcr.io/asunajs/panel:${PANEL_TAG:-latest}
+    build:
+      context: .
+      args:
+        PANEL_REPO: ${PANEL_REPO:-asunajs/panel}
+        PANEL_VERSION: ${PANEL_VERSION:-v0.2.2}
+    container_name: plugin-panel
+    restart: unless-stopped
+    ports:
+      # 只映射一个端口就够：面板 + 插件页面默认同源（PLUGIN_UI 关着）。
+      # 开了插件页面隔离（PLUGIN_UI=1）要再放出 8788。
+      - "${PANEL_PORT:-8787}:8787"
+    environment:
+      # 容器里必须绑 0.0.0.0，否则端口映射进来也连不上（默认是 127.0.0.1）。
+      BIND_ADDR: 0.0.0.0:8787
+      # 口令：从文件读哈希（面板自己会 trim）。与 PANEL_TOKEN 同时存在时以哈希为准。
+      # 文件在 ./data 里 —— 那里已经在 .gitignore 内，不会被提交。
+      PANEL_TOKEN_HASH_FILE: /panel/data/panel-token.hash
+      # 显式时区（IANA 名）。写错会**拒绝启动**并给出相近的候选名。
+      PANEL_TZ: ${PANEL_TZ:-Asia/Shanghai}
+      PANEL_LOG_LEVEL: ${PANEL_LOG_LEVEL:-info}
+      # 镜像里的二进制由镜像负责升级（面板自更新会把容器内文件换掉，重建容器即丢），
+      # 所以关掉面板自己的「检查更新」。
+      PANEL_UPDATE: "0"
+      # 放在 Nginx / Caddy 后面时按需打开（详见 docs/configuration.md）：
+      # PANEL_TRUSTED_PROXIES: "172.18.0.1"
+      # PANEL_ALLOW_IPS: "172.18.0.1"
+      # PANEL_COOKIE_SECURE: "1"        # 反代加了 TLS 才开
+    volumes:
+      - ./data:/panel/data
+      - ./data/plugins:/panel/plugins
+      - ./data/tasks:/panel/tasks
+      - ./data/logs:/panel/logs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
