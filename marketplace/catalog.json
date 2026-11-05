@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-10-19",
+  "updated_at": "2026-11-05",
   "plugins": [
     {
       "id": "mcloud-plugin",
@@ -17,6 +17,21 @@
       "tags": [
         "云盘",
         "签到"
+      ]
+    },
+    {
+      "id": "mgmusic-plugin",
+      "repo": "asunajs/mgmusic-plugin",
+      "type": "release",
+      "provides": [
+        "mgmusic-plugin"
+      ],
+      "name": "咪咕音乐金币中心",
+      "summary": "咪咕音乐每日签到、听歌补报、领奖",
+      "tags": [
+        "咪咕音乐",
+        "签到",
+        "听歌"
       ]
     },
     {
