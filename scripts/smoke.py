@@ -3662,20 +3662,28 @@ def script_task_checks(tmp: Path) -> None:
         j = next((x for x in st.get("jobs", []) if x.get("name") == "smoke_js"), {})
         check(j.get("override_expr") == "@every 3s", "目录脚本任务的覆盖在扫描后仍然生效", str(j.get("override_expr")))
 
-        # 目录任务墓碑 / 恢复
+        # 目录脚本没有墓碑：/api/jobs/.../delete 必须拒绝，并指向删除文件
         code, body = post_json(f"{base}/api/jobs/__script__/smoke_js/delete")
-        check(code == 200, "删除目录脚本任务（墓碑）", f"{code} {body}")
-        time.sleep(2.5)
-        _, st = fetch_json(f"{base}/api/state")
-        j = next((x for x in st.get("jobs", []) if x.get("name") == "smoke_js"), {})
-        check(j.get("deleted") is True, "目录任务删除后仍留墓碑，不会被扫描复活", str(j.get("deleted")))
-        code, body = post_json(f"{base}/api/jobs/__script__/smoke_js/restore")
-        check(code == 200, "恢复目录脚本任务", f"{code} {body}")
-        # 面板任务真删
+        check(code == 400, "删除目录脚本任务被拒绝（文件就是任务）", f"{code} {body}")
+        check(
+            "scripts/smoke_js/delete" in str((body or {}).get("error", "")),
+            "拒绝时指路「删除文件」",
+            str(body),
+        )
+
+        # 面板任务先删（它还引用 js/hello.js，先删掉才能彻底删共享文件）
         code, body = post_json(f"{base}/api/jobs/__script__/panel-x/delete")
         check(code == 200, "删除面板脚本任务", f"{code} {body}")
         _, st = fetch_json(f"{base}/api/state")
         check(not any(x.get("name") == "panel-x" for x in st.get("jobs", [])), "面板脚本任务真删掉了")
+
+        # 彻底删目录脚本：/api/scripts/.../delete 删文件 + 数据 + 运行记录
+        code, body = post_json(f"{base}/api/scripts/smoke_js/delete")
+        check(code == 200, "彻底删除目录脚本（文件）", f"{code} {body}")
+        time.sleep(2.5)
+        _, st = fetch_json(f"{base}/api/state")
+        check(not any(x.get("name") == "smoke_js" for x in st.get("jobs", [])), "目录脚本任务行已清掉")
+        check(not (tasks / "js" / "hello.js").exists(), "目录脚本文件真的删掉了")
     finally:
         proc.terminate()
         proc.wait(timeout=10)
