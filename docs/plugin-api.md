@@ -68,7 +68,8 @@ import { log, register_cron } from 'host-api';
 
 ⚠ 在 Node/Bun 下，ES 模块插件里能 `import` 什么由 Node/Bun 自己决定：npm 包、`node:fs`、
 `node:child_process` 都可以。**用了它们，这个插件就不再承诺能跑在 QuickJS 里** ——
-见 4.9「原生逃生口」。只用 `host-api` 的插件在三个引擎里行为一致。
+见 4.9「原生逃生口」。只用 `host-api`（外加 §4.10 的 Web/Node 全局：`fetch` / `URL` /
+`TextEncoder` / `crypto` / `Buffer`）的插件在三个引擎里行为一致。
 拆模块请写成 ES 模块并放子目录；CJS 写法的 `.js` / `.cjs` 不会被当成插件入口。
 
 ### 4.3 注册：任务、处理函数、路由、入口
@@ -260,10 +261,339 @@ import Database from 'better-sqlite3';
   执行预算的「可中断」语义，都享受不到。
 - 文件系统没有沙箱；面板只保证**不透传 `PANEL_TOKEN*`** 环境变量。
   见 [security.md §28](security.md#28-外部运行时与脚本可信代码不是沙箱)。
-- 跨引擎插件请只用 `host-api`（以及 QuickJS 也提供的受限 `node:fs` / `node:path`，
-  见 [plugin-fs.md](plugin-fs.md)）。
+- 跨引擎插件请只用 `host-api` + §4.10 的 Web/Node 全局（`fetch` / `URL` / `TextEncoder` /
+  `crypto` / `Buffer`；外加受限的 `node:fs` / `node:path`，见 [plugin-fs.md](plugin-fs.md)）。
 
-### 4.10 面板上的写操作
+### 4.10 Node/Web 兼容层：全局与内置模块
+
+**为什么有这一层**：面板默认跑内嵌 QuickJS，它是个**纯 ECMAScript 引擎** —— quickjs-libc
+没编进来（[engine-migration.md §2](engine-migration.md#2-事实底座本轮核对全部给可复核的读数)），
+所以 Node/Bun 天生就有的 `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer` 在这里一个都没有。
+于是同一份插件「开发机上跑通、上机就 `ReferenceError: URL is not defined`」—— 参考插件
+mgmusic-plugin 的 README 直接把「不要引入 fetch / URL / TextEncoder / crypto」写成了规矩。
+这一层就是要把那句话删掉。
+
+**导出级、可按 API 查的完整对照表在 [node-compat.md](node-compat.md)**（全局 / 内置模块 / WebCrypto / fetch / 编码，逐项标 ✅🟡❌）。
+
+实现在 `src/jscompat/`，由 `jshost::install_host` 的**最后一步**注入到每个插件 Context
+（脚本任务、`POST /api/test/js` 的一次性 Context 也走同一个入口）。三个引擎**同名同义**：
+QuickJS 用面板的实现，Node/Bun 继续用平台原生那份，插件源码一字不改。
+
+| 全局 | QuickJS（面板提供） | Node / Bun | 实现文件 |
+|---|---|---|---|
+| `URL` / `URLSearchParams` | ✅ | ✅ 原生 | `src/jscompat/url.js` |
+| `TextEncoder` / `TextDecoder` | ✅ **仅 utf-8** | ✅ 原生 | `src/jscompat/text.js` |
+| `atob` / `btoa` / `DOMException` | ✅ | ✅ 原生 | `src/jscompat/text.js` |
+| `crypto`（`getRandomValues` / `randomUUID` / `subtle`） | ✅ | ✅ 原生 | `src/jscompat/crypto.js` |
+| `fetch` + `Headers` / `Request` / `Response` / `AbortController` | ✅ | ✅ 原生 | `src/jscompat/fetch.js` |
+| `node:crypto` / `node:url` / `node:buffer`（内置模块） | ✅ | ✅ 原生 | `src/jscompat/node_crypto.js` / `node_url.js` / `node_buffer.js` |
+| `Buffer`（`from` / `alloc` / `concat` / 读写整数…） | ✅（`Uint8Array` 子类） | ✅ 原生 | `src/jscompat/buffer.js` |
+| `process` / `structuredClone` / `setImmediate` | ❌ | ✅ | 见 §4.10.6「不做」 |
+
+装载方式与 Node 对齐：挂在 `globalThis` 上、**可写 / 可配置 / 不可枚举**，并且在 prototype
+上挂 `Symbol.toStringTag` —— `Object.prototype.toString.call(new URL('https://x/'))` 得到
+`[object URL]`，`[object Headers]` / `[object Request]` / `[object Response]` /
+`[object AbortSignal]` 同理。插件里靠 `instanceof` 或 `toString` 判类型都成立。
+
+> ⚠ **名字一样、出网的路径不完全一样。** QuickJS 侧的 `fetch` 仍然走面板的数据面
+> （SSRF 判定 / 超时钳位 / 1 MiB 响应体上限 / 日志脱敏），Node/Bun 侧是平台自己的网络栈。
+> 返回值同形，但「谁在发请求」不同 —— 见 §4.10.4 与 [runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc)。
+
+> 只在**还没有**的时候装（每个文件开头都是 `typeof globalThis.X` 检查）。哪天 QuickJS 自带这些，
+> 或者某个构建把这一层换掉，平台的实现优先，不会被遮住。
+
+#### 4.10.1 `URL` / `URLSearchParams`
+
+```js
+const u = new URL('/api/list?page=2', 'https://box.local:8787/plugins/x/');
+u.href;                       // 'https://box.local:8787/api/list?page=2'
+u.searchParams.get('page');   // '2'
+u.searchParams.set('size', '20');
+u.href;                       // '…?page=2&size=20'   ← 活绑定：改 searchParams，href 立刻变
+```
+
+- `new URL(input, base?)`：`input` 非法抛 `TypeError`，带 `code = 'ERR_INVALID_URL'` 与
+  `input` 属性（与 Node 同一套，插件里 `e.code === 'ERR_INVALID_URL'` 的判断成立）；
+  `base` 也非法时抛的是 `input` 的错 —— 与 Node 一致。
+- 属性全部可读写：`href`（setter 重新解析）、`origin`、`protocol`、`username`、`password`、
+  `host`、`hostname`、`port`、`pathname`、`search`、`searchParams`（**活绑定**）、`hash`。
+  `toString()` / `toJSON()` 都返回 `href`，所以 `JSON.stringify({ u })` 就是 `{"u":"https://…"}`。
+- `URL.canParse(input, base?)` → `bool`；`URL.parse(input, base?)` → `URL | null`（不抛）。
+- `URLSearchParams`：构造（查询串 / 普通对象 / `[name, value]` 序列 / 另一个实例）、
+  `append` / `delete`（可带 value，只删匹配的那条）/ `get` / `getAll` / `has`（可带 value）/
+  `set` / `sort` / `forEach` / `keys` / `values` / `entries` / `[Symbol.iterator]` / `toString` /
+  `size`。`sort()` **稳定**、按码元排（`Y` 在 `a` 前，与 Node 一致）；`get` 查不到返回 **`null`**。
+- 特殊 scheme：`http` / `https` / `ws` / `wss` / `ftp` / `file` —— 默认端口省略、空路径补 `/`、
+  `file://` 的 host / path 规则照规范。`mailto:` / `data:` / `urn:` 走 **opaque path**
+  （`pathname` 没有前导 `/`，此时 `host` / `hostname` / `pathname` 的 setter 是空操作 —— 与 Node 一致）。
+- 百分号编码按 WHATWG 的 encode set：**path / query / fragment / userinfo 各不相同**。
+  `URLSearchParams` 用 form-urlencoded（空格 → `+`），而 `url.search = '?x=1 2'` 走 query 集
+  （空格 → `%20`）—— 这一条两条路不一样，别混。
+
+> ⚠ **两条「能跑但结果不一样」**（其余差异都是「明确不支持」，见 §4.10.6）：
+>
+> 1. **不做 IDNA / punycode。** `new URL('https://例子.测试/')` 的 `host` 原样是
+>    `例子.测试`，Node 给的是 `xn--fsqu00a.xn--0zwm56d`。要用非 ASCII 域名请自己在
+>    插件里转 punycode，或者干脆只用 ASCII 域名。
+> 2. **不复制 Node v24 的一处非规范行为。** 以 opaque base（`mailto:` / `data:`）解析
+>    相对地址、且输入里带 `#` 时，Node 24 会「成功」（例如
+>    `new URL('/x?q#f', 'mailto:a@b')`）；URL 规范与浏览器都抛 `ERR_INVALID_URL`
+>    （不带 `#` 时 Node 也抛）。这里按规范实现 —— 这种输入在插件里没有真实用例，
+>    为它复制一个 bug 反而会让行为更难解释。
+
+#### 4.10.2 `TextEncoder` / `TextDecoder` / `atob` / `btoa`
+
+「字符串 ↔ 字节」的**可移植**写法是这几样（`Buffer` 是 `Uint8Array` 子类，二进制数据仍以
+`Uint8Array` 为通用货币；见 §4.10.7）：
+
+```js
+const bytes = new TextEncoder().encode('你好');   // Uint8Array(6)
+new TextDecoder().decode(bytes);                 // '你好'
+btoa('\xff');                                    // '/w=='（latin1：一个码元 = 一个字节）
+atob('/w==');                                    // '\xff'
+```
+
+- **只有 utf-8**。`new TextDecoder('gbk')` / `'utf-16le'` 抛 `RangeError` —— 而不是悄悄
+  按 utf-8 解出一串乱码（乱码比报错难查）。Node 支持二十几种编码，全实现是另一个工程，
+  而插件真正用到的只有 utf-8：读响应体、拼签名、base64 前后。
+- `TextEncoder`：`encoding`（恒 `'utf-8'`）、`encode(str)`、`encodeInto(str, dest)` →
+  `{ read, written }`（写不下时停在**码点边界**，不会写半个字符）。
+- `TextDecoder`：`encoding` / `fatal` / `ignoreBOM`，`decode(bytes?, { stream })`。
+  `fatal: true` 遇到非法字节抛 `TypeError`（否则替换成 U+FFFD）；`stream: true` 可跨块续解
+  （半截序列留到下一次）；开头的 BOM 默认吃掉，`ignoreBOM: true` 则保留。
+- **孤立代理项**（`'\ud800'` 这种）按规范变成 U+FFFD（EF BF BD），不抛错 —— 与 Node 一致，
+  也是 HTTP 响应里偶发怪字符时最不坏的落点。
+- `atob` / `btoa`：latin1 边界。`btoa` 收到大于 0xFF 的码元抛 `DOMException`
+  `InvalidCharacterError`，`atob` 遇到非法 base64 同样。
+- **`DOMException`** 在 QuickJS 里没有，这一层补了个最小实现：`name` 与 `code` 按规范的
+  **legacy code 表**（`AbortError` = 20、`QuotaExceededError` = 22、`NotSupportedError` = 9、
+  `TypeMismatchError` = 17、`DataCloneError` = 25、`DataError` = **0**、`InvalidCharacterError` = 5 …）。
+  所以 `e.name === 'AbortError'` / `e.code === 22` 这类判断在三个引擎里都成立 ——
+  插件代码里最常见的就是这一句。（这张表容易凭印象写错：`DataError` 是 0 不是 25，
+  25 是 `DataCloneError`；两条都按 Node 24 实测对过。）
+- 只在**缺省时**才定义：平台自带就用平台的，这一层不会把原生的盖掉。
+
+#### 4.10.3 `crypto`
+
+只实现插件真正会用的三类：**取随机数**（nonce / 会话 id）、**生成 UUID**、**摘要与 HMAC 签名**。
+密码学本身**不在这里算** —— 宿主用系统库在 Rust 侧算（一次 1 MiB 响应的摘要，JS 实现是
+几十毫秒，还要算进插件的执行预算）。
+
+```js
+crypto.getRandomValues(new Uint8Array(16));   // 原地填，返回同一个数组
+crypto.randomUUID();                          // '3f2b…'，RFC 4122 v4
+const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'));
+new Uint8Array(buf);                          // 32 字节
+```
+
+| 成员 | 行为 |
+|---|---|
+| `getRandomValues(typedArray)` | 只认**整数** TypedArray（`Int8` / `Uint8` / `Uint8Clamped` / `Int16` / `Uint16` / `Int32` / `Uint32`，有 BigInt 两种时也认）。单次 ≤ **65536 字节**（不是元素个数：`new Uint32Array(16385)` 也超限）。就地填、返回**同一个**数组。数据来自系统 CSPRNG，**绝不**用 `Math.random` |
+| `randomUUID()` | RFC 4122 v4（版本位 4、变体位 10xx），小写 36 字符 |
+| `subtle.digest(algorithm, data)` | `Promise<ArrayBuffer>`；`algorithm` 可以是字符串或 `{ name }`；支持 SHA-1 / SHA-256 / SHA-384 / SHA-512 |
+| `subtle.importKey('raw', keyData, { name: 'HMAC', hash }, extractable, usages)` | 只做 **raw + HMAC**；返回 `CryptoKey`（`type: 'secret'`，`algorithm.length` 是**比特**） |
+| `subtle.sign({ name: 'HMAC', hash }, key, data)` / `subtle.verify(alg, key, sig, data)` | HMAC 签名 / 校验；`verify` 在签名长度不符时返回 **`false`** 而不是抛错 |
+
+错误边界照 Node 实测，**别混这两类**：
+
+- **同步抛**（WebIDL 层）：`getRandomValues` 的 `DOMException` —— 非整数 TypedArray
+  （`Float32Array` / `Float64Array` / `DataView` / `ArrayBuffer`）是 `TypeMismatchError`，
+  超过 65536 字节是 `QuotaExceededError`；连参数都没给是 `TypeError`（`ERR_MISSING_ARGS`）。
+- **Promise 拒绝**：`subtle.*` 全部。算法不认识 ⇒ `DOMException` `NotSupportedError`；
+  参数类型不对 ⇒ `TypeError`；`usages` 给了 HMAC 用不了的用法 ⇒ `DOMException` `SyntaxError`。
+
+> ⚠ **与 Node 的差异（故意的，不是漏的）**：`digest` 只到 SHA-512，没有 md5 / SHA-3；
+> `subtle` 只有 `digest` / `importKey` / `sign` / `verify` 四个方法 —— `generateKey` /
+> `exportKey` / `encrypt` / `decrypt` / `deriveBits` **不存在**（属性是 `undefined`，调用得到
+> "not a function"，而不是一个能 `catch` 到的 `NotSupportedError`）。RSA / ECDSA / AES /
+> PBKDF2 一概没有：面板里没有用例，把整套 WebCrypto 塞进每个插件 ~0.6 MB 的 worker 不划算。
+
+`Object.prototype.toString.call(crypto)` 得到 `'[object Crypto]'`；`subtle` 与 `CryptoKey`
+也有各自的 `Symbol.toStringTag`，插件按类型分派时不用改写法。
+
+#### 4.10.4 `fetch`：形状是 Node 的，通路是面板的
+
+```js
+// ① 最普通的写法：和 Node 一字不差
+const r = await fetch('https://example.com/api?q=1');
+if (!r.ok) throw new Error(`HTTP ${r.status}`);
+const data = await r.json();
+
+// ② 带请求头 / 超时 / 取消
+const ac = new AbortController();
+const p = fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+    body: JSON.stringify({ n: 1 }),        // 只收文本，见下面「三条硬边界」
+    timeout_ms: 8000,                      // 面板扩展：宿主钳到 100–60000，默认 10000
+    signal: ac.signal,
+});
+```
+
+`input` 可以是字符串 / `URL` 实例 / `Request`；`init` 支持 `method` / `headers` / `body` /
+`signal` / `timeout_ms` / `redirect`。返回 `Promise<Response>`。
+
+**三条硬边界**（都是宿主能力决定的，报错而不是静默降级）：
+
+| 边界 | 行为 | 为什么 |
+|---|---|---|
+| 请求体只能是文本 | `string` / `URLSearchParams` 可以；``Uint8Array` / `ArrayBuffer` / `TypedArray` / `DataView` ⇒ `fetch` 返回**已 reject 的 Promise**、`new Request(...)` 直接抛，都是 `TypeError` | 宿主的 HTTP 只收文本，二进制会被**静默损坏** —— 发出去的字节和插件以为的不一样，比报错难查一百倍。要发字节请自己编码成文本（base64） |
+| `redirect` 只支持 `'follow'` | `'manual'` / `'error'` **抛 `TypeError`** | 宿主自己跟跳（最多 3 跳，每跳重新过 SSRF 判定），3xx 的原样响应根本到不了 JS |
+| 没有流 | `response.body` 不存在；响应体宿主一次读完（**上限 1 MiB**） | 流式要有 backpressure 语义，而宿主只有「一次读完」这一种交付方式（[engine-migration.md §12](engine-migration.md#12-明确不做)） |
+
+**错误约定**（照 Node，插件里的 `try/catch` 才接得住）：
+
+- 构造期的错（URL 非法、`GET`/`HEAD` 带 body、二进制 body、`redirect` 不支持）**返回一个已 reject 的 Promise**，不是同步 throw。
+- 网络 / 宿主失败一律是 `TypeError('fetch failed', { cause })`，原始原因在 `cause` 上（宿主那边的中文错误）。
+- `abort` 时 reject 的是 `signal.reason`：默认 `DOMException('This operation was aborted', 'AbortError')`，所以 `e.name === 'AbortError'` 成立；`AbortSignal.timeout(ms)` 触发的是 `TimeoutError`。
+- 已经 abort 过的信号传给 `fetch` ⇒ 立刻 reject，一个字节都不发。
+
+> ⚠ **`abort()` 的语义是「不再等它」，不是真取消。** 宿主的 HTTP 实现阻塞且不可取消：
+> Promise 立刻以 `AbortError` 拒绝，但后台那条请求仍会跑完、结果被丢弃。对插件来说
+> observable 行为与 Node 一致（不再阻塞、不再走 `.then`），只是**流量已经发出去了**。
+> 别拿它当「省流量」或「释放连接」用。
+
+`Headers` / `Request` / `Response` 的方法表：
+
+| 类 | 有的东西 |
+|---|---|
+| `Headers` | 构造（`Headers` / 普通对象 / 键值对序列）、`append` / `delete` / `get` / `has` / `set` / `forEach` / `entries` / `keys` / `values` / `[Symbol.iterator]`。头名小写、同名多值 `get` 时用 `', '` 合并、**迭代按名字字典序**（undici 如此；插件里拿它拼签名串的写法依赖这一点）。`get` 查不到返回 **`null`**，不是 `undefined` |
+| `Response` | `ok` / `status` / `statusText` / `headers` / `url` / `redirected` / `type` / `bodyUsed`，`text()` / `json()` / `arrayBuffer()` / `bytes()` / `clone()`，静态 `Response.json(data, init?)` 与 `Response.error()`。**`headers` 只读**（`set` / `append` / `delete` 抛 `TypeError('immutable')`）；body 只能读一次（第二次抛 `TypeError`） |
+| `Request` | `url` / `method` / `headers` / `body` / `signal` / `clone()`。⚠ `request.body` 是**字符串**（没有 body 时 `null`），Node 是 `ReadableStream` |
+| `AbortController` / `AbortSignal` | `abort(reason)` / `signal` / `aborted` / `reason` / `onabort` / `addEventListener('abort')` / `removeEventListener` / `throwIfAborted()` / `AbortSignal.abort(reason)` / `AbortSignal.timeout(ms)` |
+
+`Response` 上还有三处**与 Node 不同、必须知道**（宿主只回 `status` / `headers` / `body` 三样）：
+
+- `response.url` 是**请求时**的 URL，不是重定向后的最终地址；
+- `response.redirected` **恒为 `false`**（宿主跟跳的过程 JS 看不到）；
+- `response.statusText` 由**状态码表**推出（200 → `'OK'`、404 → `'Not Found'`…），服务器自定义的 reason phrase 看不到。
+
+自己 `new Response(...)` 时反过来更宽松：本地对象的 body 可以是字节（`new Response(new Uint8Array([1,2])).bytes()` 照 Node 工作）—— 宿主的限制只管**发出去**的请求体。
+
+另外：`Request` 没有 `bodyUsed` / `duplex` / `keepalive` / `cache` / `mode` / `credentials` /
+`referrer`，`AbortSignal.any()` 也没有 —— 插件真正用到的就上面那几个，真用到了再加
+（不给一堆「写了不生效」的字段，比少给更安全）。
+
+#### 4.10.5 内置模块：`node:crypto` / `node:url`
+
+除了全局，同样的能力还有 **Node 的入口**。`import` 与 `require` 都通（和 `node:fs` /
+`node:path` 同一套包装器：一份模块体、两个壳，导出清单与模块体由测试双向钉着）：
+
+```js
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+// const { createHash } = require('node:crypto');   等价
+
+const hex = createHash('sha256').update('abc', 'utf8').digest('hex');
+const mac = createHmac('sha256', secret).update(body).digest('base64');
+```
+
+**`node:crypto`**（QuickJS 侧的全部导出；Node/Bun 里是原生模块，函数远多于这张表）：
+
+| 导出 | 说明 / 与 Node 的差异 |
+|---|---|
+| `createHash(algorithm)` → `{ update(data, encoding?), digest(encoding?) }` | 可多次 `update`（先攒字节、`digest` 时一次算）。`digest()` **无参返回 `Buffer`**（`Uint8Array` 子类，`instanceof Uint8Array` 也成立） |
+| `createHmac(algorithm, key[, options])` | 同形状；`key` 可以是字符串或任意 BufferSource。**第三个参数是 options 对象**（`{ encoding }`），字符串 key 的编码只认它。传字符串的老写法（`createHmac('sha256', key, 'hex')`）会被**静默忽略**、key 按 utf8 解 —— Node 24 实测：`createHmac('sha256','010203','hex')` 与 `{encoding:'hex'}` 算出的是**两个**不同的 HMAC。别照老博客写字符串第三参 |
+| `randomBytes(size)` | 返回 `Uint8Array`；单次上限 **16 MiB**（宿主的闸），`size` 必须是整数 |
+| `randomInt(min, max?)` | 左闭右开；区间上限 2^48−1 |
+| `randomUUID()` | 与全局 `crypto.randomUUID()` 同一份实现 |
+| `timingSafeEqual(a, b)` | 长度不等抛 `RangeError`（`ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`），等长常量时间比较 |
+| `getRandomValues` / `webcrypto` | `webcrypto` **就是**全局 `crypto`（同一个对象），与 Node 一致 |
+| `subtle` | 就是 `webcrypto.subtle`（同一个对象）。单独导出它是因为 Node 里 `import { subtle } from 'node:crypto'` 很常见 |
+
+两条容易踩的编码规则（都是**明确报错**而不是静默降级）：
+
+- `update` / `digest` 的 encoding 只认 `utf8` / `utf-8` / `hex` / `base64` / `base64url` /
+  `latin1` / `binary`。别的（`ucs2` / `ascii` / 拼错的）抛 `ERR_UNKNOWN_ENCODING` ——
+  Node 的 Buffer 会静默当 utf8 处理，于是你拿到一个**错的**摘要却看不出来。
+- `hex` / `base64` 输入严格校验，非法字符直接报错。Node 的 Buffer 会截断到第一个非法字符，
+  对签名 / 密钥这种输入，静默截断比报错危险得多。
+
+还不存在的（属性是 `undefined`，调用得到 "not a function"）：`createCipheriv` /
+`createSign` / `createVerify` / `pbkdf2` / `scrypt` / `hkdf` / `generateKeyPair` /
+`KeyObject`。算法也只有 sha1 / sha256 / sha384 / sha512（未知算法抛 `TypeError`，
+`code = 'ERR_CRYPTO_INVALID_DIGEST'`；Node 的 `createHash` 抛的是没有 code 的 `Error`）。
+
+**`node:url`**：5 个导出 —— `URL` / `URLSearchParams`（与全局同名同义，`import { URL } from
+'node:url'` 和直接用全局 `URL` 是同一个东西），加上三个 **POSIX 形态**的助手：
+
+| 导出 | 行为 / 限制 |
+|---|---|
+| `fileURLToPath(url)` | `file:` URL → 文件系统路径。`host` 只能是空或 `localhost`（否则 `ERR_INVALID_FILE_URL_HOST`）；路径里出现 `%2f` 抛 `ERR_INVALID_FILE_URL_PATH`；非 `file:` 抛 `ERR_INVALID_URL_SCHEME` |
+| `pathToFileURL(path)` | 文件系统路径 → `file:` URL。**只接受绝对路径** —— QuickJS 侧没有 `process.cwd()`，传相对路径抛 `ERR_INVALID_ARG_VALUE` |
+| `urlToHttpOptions(url)` | 给 HTTP 客户端用的扁平选项：`port` 是 **number**（没有端口时这个键不出现）、IPv6 的方括号去掉、有凭据时补 `auth` |
+
+不导出（**故意的**，不是漏的）：`url.parse` / `url.format` / `url.resolve`（Node 已标
+deprecated，语义不稳定）、`domainToASCII` / `domainToUnicode`（依赖 IDNA，见 §4.10.1）。
+Windows 的盘符 / 反斜杠转换也没模拟：`fileURLToPath` 只实现 POSIX 形态。要拼路径请用
+`node:path`（[plugin-fs.md](plugin-fs.md)）。
+
+#### 4.10.6 一张表记住边界
+
+这一层的目的**不是**「把 Node 搬进面板」，而是「照着 Node 写的插件不用改就能在这个引擎里跑」。
+所以凡是宿主给不出的能力，一律**报错**（或者明确不存在），不静默降级 —— 静默降级会变成
+「开发机上没事、上机悄悄错」这种最难查的问题。逐条：
+
+| 你在 Node 里的写法 | 面板里 |
+|---|---|
+| `Buffer.from(str)` / `buf.toString('hex')` | ✅ 有 `Buffer`（`Uint8Array` 子类；见 §4.10.7） |
+| `structuredClone(x)` | ❌ 没有它。`JSON.parse(JSON.stringify(x))`，或者自己写递归（[engine-migration.md §12](engine-migration.md#12-明确不做)） |
+| `process.env.X` | ❌ 没有 `process`。配置走 `config()`（[host-api.md §1.2.10](host-api.md#1210-插件配置config)） |
+| `fetch(url, { body: bytes })` | ❌ 请求体只收文本（`string` / `URLSearchParams`），字节会 `TypeError`；自己 base64 |
+| `for await (const chunk of res.body)` | ❌ 没有流：`response.body` 不存在，`text()` / `json()` / `bytes()` 都从**已读完**的整段切（上限 1 MiB） |
+| `new TextDecoder('gbk')` | ❌ 只有 utf-8，别的 label 抛 `RangeError` |
+| `fetch(url, { redirect: 'manual' })` | ❌ 只支持 `'follow'` |
+| cancel 一个请求来省流量 | ⚠ `abort()` 只是「不再等它」，宿主那条请求会跑完 |
+| `res.url` 是重定向后的最终地址 | ⚠ 是**请求时**的地址；`res.redirected` 恒为 `false` |
+| `res.statusText` 是服务器给的 reason phrase | ⚠ 由状态码表推出（200 → `'OK'`） |
+| `headers.get('x') === undefined` | ⚠ 查不到是 **`null`**（Node 如此，这里照抄） |
+| `new URL('https://例子.测试/')` | ⚠ 主机名**原样保留**，Node 会给 `xn--` 的 punycode（不做 IDNA） |
+| `crypto.subtle.encrypt` / `generateKey` / 非 SHA 摘要 | ❌ 只有 SHA-1/256/384/512 + HMAC |
+| `crypto.getRandomValues(new Float32Array(4))` | ❌ 抛 `DOMException` `TypeMismatchError`（Node 也是这个，不是 `TypeError`） |
+| `setImmediate` / `process.nextTick` | ❌ 不提供。**要等**用 `sleep(ms)`；**要周期**用 `every()` / `register_cron` |
+
+反过来说，下面这些**在三个引擎里都能原样跑**（这一层存在的意义）：`URL` / `URLSearchParams`、
+`TextEncoder` / `TextDecoder`（utf-8）、`atob` / `btoa`、`crypto.getRandomValues` /
+`randomUUID` / `subtle.digest` / HMAC、`fetch` + `Headers` / `Request` / `Response` /
+`AbortController`、`Buffer`（`from` / `alloc` / `concat` / 读写整数…）、
+`node:crypto` 的 `createHash` / `createHmac` / `randomBytes` /
+`randomInt` / `timingSafeEqual`、`node:url` 的 `URL` / `URLSearchParams` / `urlToHttpOptions` /
+`fileURLToPath` / `pathToFileURL`（后三个是 POSIX 形态）。
+
+跨引擎示例见 `plugins/js/node-compat.js`；三引擎同源的完整承诺与其它差异见
+[runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc) 与 [host-api.md §5.1](host-api.md#51-quickjs-与-nodebun-的差异)。
+
+#### 4.10.7 `Buffer`
+
+`Buffer` 是 `Uint8Array` 的**子类**（`buf instanceof Uint8Array` 成立，`TextDecoder` 能直接吃它），
+Node 里最常见的用法都在：
+
+`@js
+const b = Buffer.from('hello');                    // utf8
+b.toString('hex');                                 // '68656c6c6f'
+Buffer.from('aGVsbG8=', 'base64').toString();      // 'hello'
+const n = Buffer.alloc(4);
+n.writeUInt32BE(0xdeadbeef);
+n.toString('hex');                                 // 'deadbeef'
+Buffer.concat([Buffer.from([1, 2]), Buffer.from([3])]).toJSON();
+// { type: 'Buffer', data: [ 1, 2, 3 ] }
+`@
+
+- 静态：`from` / `alloc` / `allocUnsafe` / `allocUnsafeSlow` / `isBuffer` / `isEncoding` /
+  `byteLength` / `concat` / `compare` / `poolSize`。
+- 实例：`toString` / `toJSON` / `equals` / `compare` / `copy` / `fill` / `write` /
+  `subarray` / `slice` / `indexOf` / `includes`，以及 8/16/32 位整数、float/double、
+  BigInt64/BigUInt64 的读写。
+- 编码：`utf8` / `hex` / `base64` / `base64url` / `latin1`（`binary`）/ `ascii` /
+  `ucs2`（`utf16le`）。
+- `Buffer.from(arrayBuffer[, offset[, len]])` **共享**内存（Node 语义）；`Buffer.from(typedArray)` /
+  `Buffer.from(Buffer)` **复制**。`subarray` / `slice` 共享父级内存。
+- `allocUnsafe` / `allocUnsafeSlow` 也返回**清零**内存：等价于 Node 的 `--zero-fill-buffers`
+  模式。Node 默认给未初始化内存，那在常驻进程里等于把上一个插件的残留数据泄漏给下一个；
+  这里选安全，代价只是 `allocUnsafe` 不再「快」。
+- 没有 pool 复用，也没有 `transcode` / `Blob` / `File` / `resolveObjectURL`；完整导出与
+  边界见 [node-compat.md §8](node-compat.md#8-nodebuffer)。
+
+### 4.11 面板上的写操作
 
 面板上任务卡片有三个按钮：**立即执行** / **暂停·恢复** / **删除**（删除只给面板任务），
 下面有新建任务表单。
@@ -303,7 +633,7 @@ curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
 返回码：任务跑了但失败是 **`200` + `{"ok":false,"error":"..."}`**；`400` 校验没过、
 `403` 缺护栏头、`404` 任务不存在、`503` 引擎不可用、`504` 超时。
 
-### 4.11 Cron 语法
+### 4.12 Cron 语法
 
 | 形式 | 例子 | 含义 |
 |---|---|---|
@@ -316,7 +646,7 @@ curl -s -X POST -H 'x-panel: 1' -H 'content-type: application/json' \
 星期 `0` 和 `7` 都是周日；月份/星期支持 `JAN`..`DEC` / `SUN`..`SAT`。
 **日 / 周的 OR 语义**（经典 Vixie cron）：两个字段都受限时满足任一即可。
 
-### 4.12 不想写插件？
+### 4.13 不想写插件？
 
 备份、清理、一次性拉取这类「跑完就退」的事，用 **脚本任务**：把 `.js` / `.py` / `.sh`
 放进 `TASKS_DIR`，文件头写 `@cron` 就会自动被调度。JS 脚本可以用 `host-api` 的

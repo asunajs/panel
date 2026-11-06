@@ -33,7 +33,8 @@
 
 | 文档 | 内容 |
 |---|---|
-| [插件 API](plugin-api.md) | 插件入口、注册任务、注册路由、热更新、面板写操作 |
+| [插件 API](plugin-api.md) | 插件入口、注册任务、注册路由、热更新、Node/Web 兼容层、面板写操作 |
+| [Node.js 兼容表](node-compat.md) | 默认引擎里哪些 Node/Web API 有、哪些是子集、哪些没有（导出级对账） |
 | [host-api 规范](host-api.md) | `register_cron`、日志、SQLite、HTTP、WebSocket、SMTP、任务参数、提前量 |
 | [插件数据目录](plugin-fs.md) | QuickJS 的文件围栏、Node/Bun 的原生文件系统 |
 | [运行时选型](runtimes.md) | QuickJS、Node、Bun 的区别和选择建议 |

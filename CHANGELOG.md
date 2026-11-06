@@ -1,5 +1,59 @@
 # 更新记录
 
+## 0.2.3 — 2026-11-06
+
+> 这一版的主题一句话：**让「照着 Node 写的插件」在默认引擎里也能跑。**
+
+- **补上 Node / Web 兼容层（`src/jscompat/`）。** 面板默认跑内嵌 QuickJS —— 它是个
+  **纯 ECMAScript 引擎**（quickjs-libc 没编进来，`TextEncoder` / `AbortController` /
+  `structuredClone` 在源码里 0 命中）。于是 Node/Bun 天生有的 `fetch` / `URL` /
+  `TextEncoder` / `crypto` / `Buffer`，在默认引擎里一个都没有：同一份插件「开发机上跑通、
+  上机就 `ReferenceError`」。参考插件 mgmusic-plugin 的 README 里干脆写着「不要引入
+  fetch / URL / TextEncoder / crypto」—— 这一版就是把这句话删掉。
+  现在这些全局由面板注入**每个**插件 Context（`jshost::install_host` 的最后一步），
+  三个引擎**同名同义**：QuickJS 用面板的实现，Node/Bun 继续用平台原生的那份。
+- **补的不只是四个名字，还有它们的形状类。** `URLSearchParams`、`Headers`、`Request`、
+  `Response`、`AbortController` / `AbortSignal`、`atob` / `btoa` / `DOMException`。
+  少一个就有一半的 Node 代码照抄不过来（拿 `response.headers.get()` 的那一行就是）。
+- **三个内置模块：`node:crypto` / `node:url` / `node:buffer`。** `require('node:crypto')` 与
+  `import { createHash } from 'node:crypto'` 都通，和既有的 `node:fs` / `node:path`
+  同一套路（一份模块体、两个包装器，导出清单与模块体由测试钉着）。
+- **`Buffer` 也补上了。** `Uint8Array` 子类：`from` / `alloc` / `concat` / `compare` /
+  utf8·hex·base64·base64url·latin1·ascii·utf16le 编码 / 8·16·32 位整数与浮点、BigInt64 读写 /
+  `subarray` 共享内存；`node:crypto` 的 `digest()` / `randomBytes()` 与 `fs.readFileSync()`
+  现在返回 `Buffer`（与 Node 一致）。`allocUnsafe` 返回**清零**内存，不泄漏旧数据。
+- **`fetch` 走数据面，不是第二条网络路径。** QuickJS 侧只复用 `fetch_async`（后台线程），
+  SSRF 判定、超时钳位、响应体上限、日志脱敏一条都没绕 —— 没有第二份 HTTP 实现，
+  也就没有第二套语义。Node/Bun 侧仍然是平台原生的 `fetch`，这一处「通路不同源」
+  写在文档里而不是假装一致。
+- **`signal` 的语义是「不再等它」，不是真取消。** 宿主的 HTTP 实现（ureq）阻塞且不可取消：
+  `abort()` 会让 Promise 立刻 reject `AbortError`，但后台那条请求仍会跑完、结果丢弃。
+  这是取舍不是缺陷 —— 要真取消得换一整套 tokio 侧 client。
+- **明确不做（都写进文档，不假装是完整 Node）**：`process`、`structuredClone`、
+  流式响应（`response.body` 不存在，1 MiB 封顶、宿主一次读完）、二进制请求体、
+  `redirect: 'manual'/'error'`、非 utf-8 的 `TextDecoder`、IDNA / punycode、RSA/ECDSA。
+  逐条差异见 [docs/plugin-api.md §4.10](docs/plugin-api.md#410-nodeweb-兼容层全局与内置模块)。
+- **期望值来自真的 Node，不是手抄。** `scripts/gen-vectors-{text,url,crypto,buffer}.mjs` 生成
+  `src/jscompat/vectors/*.json`（`"note"` 里记着生成时的 Node 版本），Rust 测试在
+  QuickJS 里跑同一批输入逐字段对拍。手写期望值等于把「我以为 Node 会这样」固化进测试。
+- **修复：脚本任务的「删除」删不掉 `tasks/js/` 子目录里的文件。** 旧逻辑拿任务名拼
+  `tasks/<name>.{js,py,sh}`，而任务名是 `@name`、文件在 `js/` 子目录，永远对不上 ——
+  结果库里的行删了、文件还在，下一次扫描又把它当「未排班」的卡片放回来。现在按
+  `jobs.script` 的相对路径删（带路径围栏校验），`.mjs` / `.exe` / `.cmd` / `.ps1` 等扩展名都覆盖，
+  `.exe` 的 `.task` 边车一起删；仍被别的任务引用的文件会拒绝删除（409）。
+- **修复「用这个文件建任务」撞到未排班文件自己的名字**：扫描会给没有 `@cron` 的文件建一条
+  `idle` 的 `script-dir` 行，旧逻辑只按名字判断，直接 409。现在只有真的排了班（`@cron` /
+  `override_expr`）的目录任务才占名字；未排班的行在创建面板任务时原地转成 `script-panel`，
+  `runs` / `created_at` 保留，不需要改名。
+- **修复「改运行时间」弹窗的按钮行**：输入框的 focus ring 和「保存运行时间」叠在一起、按钮贴在
+  左端。新增 `.dialog-actions`（上间距 + 右对齐），按钮不再压住输入框。
+- **内存自愈默认上限 24MB → 96MB**：5 个 QuickJS 插件实测峰值约 43MB，旧默认会让面板
+  在启动约 5 分钟后 exec 自愈重启，把插件重新装一遍（正好抵消惰性加载）。96MB 只兜真泄漏；
+  仍可用 `PLUGIN_MAX_RSS_KB` 调小/关闭。
+- **示例插件 `plugins/js/node-compat.js`**：同一份文件在三个引擎里应跑出同一份结果
+  （URL 规整、UTF-8 编码、SHA-256、随机数），`fetch` 做成手动触发的路由 ——
+  示例默认不联网，离线时返回错误而不是让插件炸掉。
+
 ## 0.2.2 — 2026-11-03
 
 > 这一版只做一件事：把「删除」做成真的删除。

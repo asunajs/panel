@@ -29,6 +29,15 @@ node runtime/js/test/run-tests.mjs
 #     CSS 里没有硬编码色值、plugins/js/*.js 没用 QuickJS 不存在的全局
 node scripts/test-web-assets.mjs
 
+# ①d 兼容层（src/jscompat/）的期望值来自**真的 Node**，不是手抄。
+#      改了 text.js / url.js / crypto.js / buffer.js 之后重跑，差异会当场暴露；
+#      生成结果要提交进仓库（CI / 离线构建的机器不需要装 Node）。
+#      对拍方向：脚本用 Node 产出 vectors/*.json → Rust 测试在 QuickJS 里跑同一批输入。
+node scripts/gen-vectors-text.mjs     # → src/jscompat/vectors/text.json
+node scripts/gen-vectors-url.mjs      # → src/jscompat/vectors/url.json
+node scripts/gen-vectors-crypto.mjs   # → src/jscompat/vectors/crypto.json
+node scripts/gen-vectors-buffer.mjs   # → src/jscompat/vectors/buffer.json
+
 # ② 看面板
 open http://127.0.0.1:8787/
 
@@ -96,7 +105,7 @@ touch plugins/js/panel-jobs.js     # 触发 mtime 热更新
 
 # ⑲ 脚本任务：TASKS_DIR 里的三种语言各跑一遍
 #     看 /api/scripts（files + jobs）、jobs 表（source=script-dir）、runs 表；
-#     再测面板覆盖 / 墓碑 / 恢复
+#     再测面板覆盖 / 彻底删除（文件 + 数据目录 + 运行记录）/ 面板任务只删行
 sqlite3 -header -column data/panel.db \
   "SELECT name,source,file_path,schedule,override_expr,deleted FROM jobs WHERE source LIKE 'script-%';"
 sqlite3 -header -column data/panel.db \

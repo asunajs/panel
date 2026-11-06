@@ -36,6 +36,7 @@ use futures_util::Stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -1304,13 +1305,11 @@ async fn delete_job(
     // （`/api/scripts/{name}/delete`）：文件明明在任务目录里，却给一张「已删除」的
     // 卡片、文件一点没动，那是似删除非删除，没有意义。
     if plugin == crate::db::SCRIPT_PLUGIN {
-        // 判据是**文件在不在**，不是「任务行存不存在」：行是引擎扫目录之后才建出来的，
-        // 刚丢进任务目录、还没被扫到的脚本那一刻查不到行 —— 那时更该拒绝，
-        // 因为用户正想「删掉这个文件」。
-        let is_dir_script = ["js", "py", "sh"]
-            .iter()
-            .any(|ext| st.host.tasks_dir.join(format!("{name}.{ext}")).is_file());
-        if is_dir_script {
+        // 判据是库里的 `source = 'script-dir'`（扫描时写入）；行还没建出来时再扫目录
+        // 按任务名找。不能只看顶层 `<name>.{js,py,sh}`：`js/hello.js` 这类嵌套脚本
+        // 同样是目录脚本，早先漏判会让「删除任务」把行删掉、文件留成「未排班」。
+        let dir_script = is_dir_script(&st.db, &st.host.tasks_dir, &name);
+        if dir_script {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -2291,6 +2290,110 @@ struct ScriptJobCreate {
     params: Option<serde_json::Value>,
 }
 
+/// 一个脚本任务在 `TASKS_DIR` 下的真实相对路径。
+///
+/// **不能拿任务名拼路径**：任务名是文件头里的 `@name`（没有就用文件名去扩展名），
+/// 而文件可以在 `js/` / `py/` / `sh/` 子目录里。`tasks/js/hello.js` 的任务名可能是
+/// `hello-js` —— 早先的删除逻辑拿 `tasks/hello-js.js` 去顶层找，永远找不到，于是
+/// 「彻底删除」只删了库里的行，文件还在，下一次扫描又把它作为「未排班」的卡片放回来。
+///
+/// 先信库里的 `script`（目录同步时记下的相对路径）；行还没建出来（刚丢进任务目录、
+/// 还没被扫到）就扫一遍目录按任务名找。两条都是相对路径，真正的落盘校验在
+/// `task_file_within`。
+fn script_rel_path(db: &db::Db, tasks_dir: &FsPath, name: &str) -> Option<String> {
+    if let Ok(jobs) = db::list_script_jobs(db) {
+        if let Some(job) = jobs.iter().find(|j| j.name == name) {
+            if let Some(rel) = job.script.as_deref() {
+                if !rel.is_empty() && FsPath::new(rel).is_relative() {
+                    return Some(rel.replace('\\', "/"));
+                }
+            }
+        }
+    }
+    taskdir::scan(tasks_dir)
+        .into_iter()
+        .find(|f| f.name == name)
+        .map(|f| f.path)
+}
+
+/// `TASKS_DIR` 下的相对路径 → 真实路径；**必须**仍落在任务目录内。
+///
+/// 语法层先拒绝绝对路径与 `..`；物理层再 canonicalize 一次并 `starts_with` ——
+/// 只做语法检查的话，任务目录里一个指向 `/etc` 的软链接就能把「删脚本」变成删系统文件。
+fn task_file_within(tasks_dir: &FsPath, rel: &str) -> Option<PathBuf> {
+    let rel_path = FsPath::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let root = tasks_dir.canonicalize().ok()?;
+    let file = tasks_dir.join(rel_path).canonicalize().ok()?;
+    file.starts_with(&root).then_some(file)
+}
+
+/// 文件头是否真的会生成一条**可调度**的目录任务。
+///
+/// 没有 `@cron`、`@disabled`、或头部解析失败（`valid = false`）都算「未排班」——
+/// 这种文件只是躺在任务目录里，不该占用任务名；否则「用这个文件建任务」
+/// 永远会撞上它自己的自动任务名。
+fn script_file_is_scheduled(file: &taskdir::ScriptFile) -> bool {
+    file.valid
+        && !file.header.disabled
+        && file
+            .header
+            .cron
+            .as_deref()
+            .and_then(|e| Schedule::parse(e).ok())
+            .is_some()
+}
+/// 删除脚本时要清掉的文件清单：脚本本身 + 旧数据顶层兜底 + 可执行文件的 `.task` 边车。
+///
+/// 单独抽出来是为了让回归测试能直接断言「删哪些文件」—— 只测 handler 的话，
+/// 路径解析对不对、边车有没有漏，都要起一个 AppState 才能看到。
+fn script_delete_targets(db: &db::Db, tasks_dir: &FsPath, name: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(rel) = script_rel_path(db, tasks_dir, name) {
+        targets.push(rel);
+    }
+    // 旧数据没有 script 字段时按顶层后缀兜底（与 taskdir::ScriptKind 对齐）。
+    for ext in ["js", "mjs", "py", "sh", "exe", "cmd", "bat", "ps1", "com"] {
+        let rel = format!("{name}.{ext}");
+        if tasks_dir.join(&rel).is_file() {
+            targets.push(rel);
+        }
+    }
+    // `.exe` / `.cmd` / `.ps1` 的头部可能写在 `<file>.task` 边车里；脚本本体删了，
+    // 边车留着就成了没有主人的垃圾文件，下次看起来像「删不干净」。
+    let sidecars: Vec<String> = targets
+        .iter()
+        .map(|rel| format!("{rel}.task"))
+        .filter(|rel| tasks_dir.join(rel).is_file())
+        .collect();
+    targets.extend(sidecars);
+    targets.sort();
+    targets.dedup();
+    targets
+}
+/// 这个名字是不是一条**目录脚本**（文件就是任务）。
+///
+/// 判据是库里的 `source = 'script-dir'`（扫描时写入）；拿不到行时再扫目录按任务名找。
+/// 不能只看 `<name>.{js,py,sh}`：嵌套目录里的文件同样可能是目录脚本。
+fn is_dir_script(db: &db::Db, tasks_dir: &FsPath, name: &str) -> bool {
+    if let Ok(jobs) = db::list_script_jobs(db) {
+        if jobs.iter().any(|j| j.name == name && j.source == "script-dir") {
+            return true;
+        }
+        // 有行但不是目录脚本：这是面板任务，即使有同名文件也不该按「目录脚本」拒绝。
+        if jobs.iter().any(|j| j.name == name) {
+            return false;
+        }
+    }
+    taskdir::scan(tasks_dir).into_iter().any(|f| f.name == name)
+}
+
 fn normalize_script_path(raw: &str) -> String {
     raw.trim().trim_start_matches("./").replace('\\', "/")
 }
@@ -2342,11 +2445,38 @@ async fn create_script_job(
     else {
         return json_error(StatusCode::BAD_REQUEST, format!("任务目录里没有 `{path}`"));
     };
-    if file.name == name {
+    let existing = db::list_script_jobs(&st.db).unwrap_or_default();
+    let same_name = existing.iter().find(|j| j.name == name);
+    // 目录文件只在**真的会调度**时才占用任务名；未排班的文件只是文件，
+    // 允许面板任务用同一个名字接管（「用这个文件建任务」否则永远撞自己的自动名）。
+    let dir_active = script_file_is_scheduled(&file)
+        || same_name.is_some_and(|j| {
+            j.source == "script-dir"
+                && !j.deleted
+                && j.override_expr
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+        });
+    if file.name == name && dir_active {
         return json_error(
             StatusCode::CONFLICT,
             format!("`{}` 的目录任务已经叫 `{name}`（目录优先）", file.path),
         );
+    }
+    if let Some(j) = same_name {
+        if j.source == "script-panel" {
+            return json_error(StatusCode::CONFLICT, format!("任务 `{name}` 已经存在"));
+        }
+        // 只允许接管「同一个文件、且当前未排班」的目录行；别的同名任务不动。
+        if !(j.source == "script-dir"
+            && j.script.as_deref() == Some(file.path.as_str())
+            && !dir_active)
+        {
+            return json_error(
+                StatusCode::CONFLICT,
+                format!("任务 `{name}` 已经被另一条脚本占用（目录优先）"),
+            );
+        }
     }
     let schedule = match Schedule::parse(&req.expr) {
         Ok(s) => s,
@@ -2385,27 +2515,48 @@ async fn create_script_job(
         Ok(p) => p,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
-    let existing = db::list_script_jobs(&st.db).unwrap_or_default();
-    if existing.iter().any(|j| j.name == name) {
-        return json_error(StatusCode::CONFLICT, format!("任务 `{name}` 已经存在"));
-    }
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    if let Err(e) = db::insert_script_panel_job(
-        &st.db,
-        name,
-        &file.path,
-        runtime.as_str(),
-        &req.expr,
-        "scheduled",
-        None,
-        params.as_deref(),
-        req.budget_ms.map(clamp_budget_ms),
-        &now,
-    ) {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("写任务失败: {e}"),
-        );
+    let mut done = false;
+    if same_name.is_some() {
+        // 走上面放行的「未排班目录行接管」：原地转 source，保留 runs / created_at。
+        match db::promote_script_dir_to_panel(
+            &st.db,
+            name,
+            &file.path,
+            runtime.as_str(),
+            &req.expr,
+            params.as_deref(),
+            req.budget_ms.map(clamp_budget_ms),
+            &now,
+        ) {
+            Ok(n) if n > 0 => done = true,
+            Ok(_) => {} // 检查之后那行被删了：退回插入
+            Err(e) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("接管目录任务失败: {e}"),
+                )
+            }
+        }
+    }
+    if !done {
+        if let Err(e) = db::insert_script_panel_job(
+            &st.db,
+            name,
+            &file.path,
+            runtime.as_str(),
+            &req.expr,
+            "scheduled",
+            None,
+            params.as_deref(),
+            req.budget_ms.map(clamp_budget_ms),
+            &now,
+        ) {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("写任务失败: {e}"),
+            );
+        }
     }
     notify_scripts(&st);
     Json(json!({ "ok": true })).into_response()
@@ -2438,7 +2589,8 @@ where
 /// `POST /api/scripts/{name}/delete` —— 把脚本任务**彻底删掉**。
 ///
 /// 三样一起没：
-/// ① 脚本文件 `tasks/<name>.{js,py,sh}`（三种后缀都找，真实存在哪个删哪个）；
+/// ① 脚本文件：按库里的相对路径（`jobs.script`）找，能删到 `tasks/js/…` 这类嵌套目录；
+///    旧数据没有行时再退回 `tasks/<name>.{js,py,sh}`；
 /// ② 它自己的数据目录 `<PLUGIN_DATA_DIR>/__script__/<name>/`；
 /// ③ 库里的行：任务、运行记录、推送配置（`db::purge_script`）。
 ///
@@ -2460,14 +2612,44 @@ async fn delete_script_file(
     }
     let mut removed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for ext in ["js", "py", "sh"] {
-        let file = st.host.tasks_dir.join(format!("{name}.{ext}"));
-        if !file.is_file() {
-            continue;
+
+    // 要删的文件：库里的真实相对路径 + 旧数据顶层兜底 + `.task` 边车。
+    let targets = script_delete_targets(&st.db, &st.host.tasks_dir, &name);
+
+    // 同一个文件可能被多条脚本任务引用（「用这个文件建任务」）。删文件会把别的任务
+    // 一起弄坏 —— 拒绝并说清楚是谁，让用户先处理引用，而不是静默删除。
+    if let Ok(jobs) = db::list_script_jobs(&st.db) {
+        for rel in &targets {
+            let refs: Vec<&str> = jobs
+                .iter()
+                .filter(|j| j.name != name && j.script.as_deref() == Some(rel.as_str()))
+                .map(|j| j.name.as_str())
+                .collect();
+            if !refs.is_empty() {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "还有别的脚本任务引用 `{rel}`：{}。先删掉它们，或改用「删除任务」保留文件",
+                        refs.join("、")
+                    ),
+                );
+            }
         }
-        match std::fs::remove_file(&file) {
-            Ok(()) => removed.push(format!("{name}.{ext}")),
-            Err(e) => failed.push(format!("{name}.{ext}: {e}")),
+    }
+
+    for rel in &targets {
+        match task_file_within(&st.host.tasks_dir, rel) {
+            Some(file) => match std::fs::remove_file(&file) {
+                Ok(()) => removed.push(rel.clone()),
+                Err(e) => failed.push(format!("{rel}: {e}")),
+            },
+            // 解析不到真实路径：文件本来就不在（可能已被删）就跳过；
+            // 存在但越界（软链接逃逸）必须报错，不能静默。
+            None => {
+                if st.host.tasks_dir.join(rel).exists() {
+                    failed.push(format!("{rel}: 路径越界或无法解析"));
+                }
+            }
         }
     }
     // 脚本自己的数据目录（`__script__/<name>`）
@@ -2482,13 +2664,18 @@ async fn delete_script_file(
             Err(e) => failed.push(format!("{name}/（脚本数据）: {e}")),
         }
     }
-    let purged = crate::db::purge_script(&st.db, &name).unwrap_or_default();
+    // 删文件/数据目录有一步失败就**先别清库**：库里的行是重试的依据，行没了文件还在
+    // 就又会回到「未排班」的卡片 —— 那正是这次要修的病。
     if !failed.is_empty() {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("删除不完整：{}", failed.join("；")),
+            format!("删除不完整（库里的任务未动，可重试）：{}", failed.join("；")),
         );
     }
+    let purged = crate::db::purge_script(&st.db, &name).unwrap_or_default();
+    // 文件已经没了，但引擎内存里可能还挂着这条任务；让它重新扫一遍目录，
+    // 不要等到下一轮扫描才把「删掉的脚本」摘掉。
+    notify_scripts(&st);
     if removed.is_empty() && purged.total() == 0 {
         return json_error(StatusCode::NOT_FOUND, format!("没有找到脚本 {name}"));
     }
@@ -5020,5 +5207,167 @@ mod tests {
             let next = url.strip_prefix("/login?next=").map(percent_decode);
             assert_eq!(safe_next(next.as_deref()), path, "往返失败: {path}");
         }
+    }
+
+    #[test]
+    fn nested_and_executable_scripts_are_resolved_for_delete() {
+        // 回归：目录脚本在 js/ 子目录里时，任务名（@name）与文件名不同。
+        // 早先的删除逻辑只查 tasks/<name>.{js,py,sh}，文件永远删不掉 ——
+        // 库里的行被清了，文件还在，下一次扫描又把它当「未排班」放回来。
+        let root = std::env::temp_dir().join(format!("panel-script-del-{}", std::process::id()));
+        let tasks = root.join("tasks");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(tasks.join("js")).unwrap();
+        std::fs::write(
+            tasks.join("js/hello.js"),
+            "// @name hello-js\n// @cron 0 3 * * *\nconsole.log(1);\n",
+        )
+        .unwrap();
+
+        let db = crate::db::open(FsPath::new(":memory:")).expect("内存库");
+        crate::db::upsert_script_dir_job(
+            &db,
+            "hello-js",
+            "js/hello.js",
+            "node",
+            "0 3 * * *",
+            "idle",
+            None,
+            None,
+            None,
+            "2026-01-01 00:00:00",
+        )
+        .unwrap();
+
+        // 库里的 script 是权威：任务名 hello-js 对应文件 js/hello.js。
+        assert_eq!(
+            script_rel_path(&db, &tasks, "hello-js").as_deref(),
+            Some("js/hello.js")
+        );
+        assert!(is_dir_script(&db, &tasks, "hello-js"));
+
+        let real = task_file_within(&tasks, "js/hello.js").expect("嵌套文件要能解析");
+        assert!(real.starts_with(tasks.canonicalize().unwrap()));
+
+        // 行还没建出来（刚丢进任务目录）：扫目录也能按 @name 找到。
+        std::fs::write(
+            tasks.join("js/other.js"),
+            "// @name other-js\n// @cron 0 4 * * *\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script_rel_path(&db, &tasks, "other-js").as_deref(),
+            Some("js/other.js")
+        );
+        assert!(is_dir_script(&db, &tasks, "other-js"));
+
+        // 语法层：`..` 与绝对路径都拒绝。
+        assert!(task_file_within(&tasks, "../outside.js").is_none());
+        #[cfg(unix)]
+        {
+            assert!(task_file_within(&tasks, "/etc/passwd").is_none());
+            // 物理层：目录里的软链接指向外面，canonicalize 之后必须被拦。
+            let outside = root.join("outside.js");
+            std::fs::write(&outside, "secret").unwrap();
+            std::os::unix::fs::symlink(&outside, tasks.join("link.js")).unwrap();
+            assert!(task_file_within(&tasks, "link.js").is_none());
+        }
+
+        // .mjs：同样在 js/ 子目录，任务名来自 @name。
+        std::fs::write(
+            tasks.join("js/report.mjs"),
+            "// @name report-mjs\n// @cron 0 4 * * *\nexport default 1;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script_rel_path(&db, &tasks, "report-mjs").as_deref(),
+            Some("js/report.mjs")
+        );
+        assert!(is_dir_script(&db, &tasks, "report-mjs"));
+        assert_eq!(
+            script_delete_targets(&db, &tasks, "report-mjs"),
+            vec!["js/report.mjs"]
+        );
+
+        // .exe：二进制放根目录，头部写在 <file>.task 边车里；删除必须连边车一起清掉。
+        std::fs::write(tasks.join("runner.exe"), b"\x7fELF\x02\x01\x01").unwrap();
+        std::fs::write(
+            tasks.join("runner.exe.task"),
+            "# @name runner-exe\n# @cron 0 5 * * *\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script_rel_path(&db, &tasks, "runner-exe").as_deref(),
+            Some("runner.exe")
+        );
+        assert!(is_dir_script(&db, &tasks, "runner-exe"));
+        assert_eq!(
+            script_delete_targets(&db, &tasks, "runner-exe"),
+            vec!["runner.exe", "runner.exe.task"]
+        );
+
+        // 顶层旧数据兜底：没有 DB 行时按文件名找，.ps1 也要能删。
+        std::fs::write(
+            tasks.join("plain.ps1"),
+            "# @name plain-ps1\n# @cron 0 6 * * *\n",
+        )
+        .unwrap();
+        assert_eq!(
+            script_delete_targets(&db, &tasks, "plain-ps1"),
+            vec!["plain.ps1"]
+        );
+
+        // 真正按 helper 给出的清单删，路径围栏与 handler 用的是同一个函数。
+        for name in ["report-mjs", "runner-exe", "plain-ps1"] {
+            for rel in script_delete_targets(&db, &tasks, name) {
+                let file = task_file_within(&tasks, &rel)
+                    .unwrap_or_else(|| panic!("删不掉 {rel}：路径没解析到"));
+                std::fs::remove_file(file).unwrap();
+            }
+        }
+        assert!(!tasks.join("js/report.mjs").exists(), ".mjs 没删掉");
+        assert!(!tasks.join("runner.exe").exists(), ".exe 本体没删掉");
+        assert!(!tasks.join("runner.exe.task").exists(), ".exe 边车没删掉");
+        assert!(!tasks.join("plain.ps1").exists(), ".ps1 没删掉");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unscheduled_script_file_does_not_own_task_name() {
+        // 「用这个文件建任务」撞名 bug：文件没有 @cron 时，扫描仍会给它建一条
+        // idle 的 script-dir 行；旧逻辑只看名字，于是永远拒绝同名面板任务。
+        // 只有真的会调度的文件才占用名字。
+        let root = std::env::temp_dir().join(format!("panel-script-name-{}", std::process::id()));
+        let tasks = root.join("tasks");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(tasks.join("js")).unwrap();
+        std::fs::write(tasks.join("js/free.mjs"), "export default 1;\n").unwrap();
+        std::fs::write(
+            tasks.join("js/busy.mjs"),
+            "// @cron 0 3 * * *\nexport default 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks.join("js/disabled.mjs"),
+            "// @cron 0 3 * * *\n// @disabled\nexport default 1;\n",
+        )
+        .unwrap();
+
+        let files = taskdir::scan(&tasks);
+        let get = |path: &str| {
+            files
+                .iter()
+                .find(|f| f.path == path)
+                .unwrap_or_else(|| panic!("没扫到 {path}"))
+        };
+        assert!(!script_file_is_scheduled(get("js/free.mjs")), "没 @cron 是未排班");
+        assert!(script_file_is_scheduled(get("js/busy.mjs")), "有 @cron 才算目录任务");
+        assert!(
+            !script_file_is_scheduled(get("js/disabled.mjs")),
+            "@disabled 的文件不该占名字"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

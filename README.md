@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.2.2**。设置页可以直接看到正在运行的面板版本和构建 commit。
+当前版本：**0.2.3**。设置页可以直接看到正在运行的面板版本和构建 commit。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
@@ -370,6 +370,10 @@ curl -X PUT \
 - **Bun**：需要 Bun 1.0+
 
 切换后插件会重新加载。某个插件用了 npm 包或原生 `fs`，通常就需要 Node/Bun。
+
+反过来不必因为「它用了 `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`」就切到 Node：这些 Web/Node 全局
+由面板补进内嵌 QuickJS（[§4.10](docs/plugin-api.md#410-nodeweb-兼容层全局与内置模块)），
+照着 Node 写的插件在默认引擎里能直接跑。
 
 ---
 

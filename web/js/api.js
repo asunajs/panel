@@ -333,7 +333,7 @@ export function deletePluginFiles(name) {
 
 /// **彻底删除**一个脚本任务：文件、它的数据目录、运行记录一起删掉，不可恢复。
 ///
-/// 面板脚本（存在 SQLite 里）没有文件，删它走 `deleteJob`。
+/// 面板脚本删它走 `deleteJob`（只删任务行，脚本文件保留）。
 export function deleteScriptFile(name) {
   return request(`/api/scripts/${encodeURIComponent(name)}/delete`, {
     method: 'POST',

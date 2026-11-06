@@ -79,7 +79,11 @@ rust-plugin-panel/
 │   ├── main.rs         启动顺序：SQLite → 宿主状态 → 运行时探测 → 引擎线程 → tick 循环 → Axum
 │   ├── engine.rs       ★ 引擎线程：QuickJS + 外部插件 + 调度器 + 热更新 + 路由分发
 │   ├── hostapi.rs     ★ 宿主 API 的**唯一实现**（HostState::do_*）
-│   ├── jshost.rs      ★ QuickJS 侧适配：内置 `host-api`/`node:fs`/`node:path` 源码 + `__host_*`
+│   ├── jshost.rs      ★ QuickJS 侧适配：内置 `host-api`/`node:*` 源码 + `__host_*`
+│   ├── jscompat/      ★ Node/Web 兼容层：fetch / URL / TextEncoder / crypto + node:crypto / node:url
+│   │   ├── mod.rs       注入顺序与 install()：text → url → crypto → fetch
+│   │   ├── host.rs      宿主原语：系统随机数 / 摘要 / HMAC
+│   │   └── vectors/     Node 生成的期望值（text / url / crypto / buffer.json）
 │   ├── extproc.rs     ★ 外部运行时：子进程 spawn、fd0/1/2/3/4、超时杀进程组、RPC 分发
 │   ├── runtimes.rs    ★ 运行时探测与选择：QuickJS / Node / Bun / Python(脚本)
 │   ├── runtimefs.rs   ★ 把 runtime/js shim 从二进制落到数据目录（内容哈希目录）

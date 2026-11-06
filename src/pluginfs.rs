@@ -24,7 +24,7 @@
 //!
 //! ## 与 Node 的差异（都写在 docs/host-api.md 里）
 //!
-//! - 没有 `Buffer`。不给编码时返回/接受 `Uint8Array`（QuickJS 有 TypedArray）。
+//! - `Buffer` 由兼容层提供（`Uint8Array` 子类）：不给编码时返回/接受 `Buffer`。
 //! - 只有同步 API。QuickJS 宿主是"一次调用推进一步"的模型，没有真事件循环，
 //!   提供 `fs.promises` 只会是一句谎话。
 //! - `path.resolve()` 的"当前目录"是围栏根，于是它的结果看起来像 `/a/b`。

@@ -26,7 +26,8 @@
 | 越界 | `EACCES` | —（系统权限决定） |
 | 相对路径基准 | 数据根 | 进程 CWD（面板把它设成插件数据目录） |
 | `fs.rootDir()` | 有（面板扩展） | 没有 |
-| 异步 API / `Buffer` | 没有 | 有 |
+| 异步 API | 没有 | 有 |
+| `Buffer` | 有（`Uint8Array` 子类） | 有 |
 | 单次读写上限 | 8 MiB | 无 |
 
 **跨引擎的写法**：只用相对路径，把 `path` 的结果原样交回 `fs`；不要依赖 `rootDir()`。
@@ -82,7 +83,7 @@ QuickJS 插件:  fs.writeFileSync(path.join('data', 'x.json'), s)
 
 | | Node 原生 | QuickJS 面板内 |
 |---|---|---|
-| `Buffer` | 有 | **没有**；不给 encoding 时给 `Uint8Array` |
+| `Buffer` | 有 | 有（`Uint8Array` 子类）；不给 encoding 时返回 `Buffer` |
 | 异步 API | `fs.promises` | **没有**（宿主是"一次调用推进一步"，没有真事件循环） |
 | 单次读写上限 | 无 | 8 MiB（返回值要穿过 JSON 桥，超大文件会卡住引擎线程） |
 | encoding | 很多 | 只有 `utf8`（省略 = 字节） |

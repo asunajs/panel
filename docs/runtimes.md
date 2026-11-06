@@ -69,6 +69,7 @@
 | 路由 `async` | ✅（结算后回响应；超时回 504） | ✅ |
 | `on_tick` `async` | ✅（不重入：上一拍没回来就跳过） | ✅ |
 | 墙钟预算 | `budget_ms` 兜住不结算的 `await` | 同左 |
+| Web / Node 全局（`fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`） | ✅ 面板提供（`src/jscompat/`，形状按 Node） | ✅ 平台原生 |
 
 细节见 [plugin-api.md](plugin-api.md) §4.5。异步 IO 也有了：`fetch_async` 在
 QuickJS 里走后台线程，`await` 期间不占引擎线程。剩下的差别只有一处：模块顶层的
@@ -159,6 +160,7 @@ Bun 的 `host-api` 解析走 `NODE_PATH=<runtime>/js/node_modules`（`package.js
 | `register_nav` | 进程内 | **RPC** | 侧边栏入口 |
 | `sqlite_query` / `sqlite_exec` | 进程内 | **RPC** | 插件不直接开 DB 文件 |
 | `http_fetch` | 进程内（ureq） | **RPC** | 统一 TLS 信任库 / 超时 / 体积上限 |
+| `fetch`（Web 形状，[§4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)） | 进程内，复用 `fetch_async`（后台线程） | **平台原生** | 名字与形状同源，**通路不同源**：QuickJS 侧仍过 SSRF 判定 / 超时钳位 / 1 MiB / 脱敏，Node/Bun 侧走它们自己的网络栈 |
 | `ws_*` | 进程内 | **RPC** | 句柄活在面板里，跨调用有效 |
 | `smtp_send` | 进程内 | **RPC** | 同上 |
 | `worker_hint` | 源码扫描（声明式） | **RPC（只校验）** | 分配发生在解释器存在之前 |
@@ -189,8 +191,9 @@ import Database from 'better-sqlite3';    // 任何 npm 包
 - **子进程与文件系统是真实的**：插件能读 `PANEL_TOKEN_HASH` 之外的一切当前用户能读的东西
   —— 面板**不透传** `PANEL_TOKEN*`（环境变量白名单），但文件系统没有沙箱。
   见 [security.md §28](security.md#28-外部运行时与脚本可信代码不是沙箱)。
-- 想让插件「在三个引擎里都能跑」：**只用 `host-api`**。仓库里的示例插件
-  （`plugins/js/host-api-demo.js`、`fs-demo.js`）就是这条路线。
+- 想让插件「在三个引擎里都能跑」：**只用 `host-api` + 那些兼容全局**
+  （`fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`，见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
+  仓库里的示例插件（`plugins/js/node-compat.js`、`host-api-demo.js`、`fs-demo.js`）就是这条路线。
 
 ### 10.8 能力边界（写死的，不是漏掉的）
 
@@ -200,6 +203,9 @@ import Database from 'better-sqlite3';    // 任何 npm 包
   但没有围栏。两者不是同一件事，见 [plugin-fs.md](plugin-fs.md)。
 - **`http_fetch` 是同步阻塞调用**（三个引擎一致）：一次慢请求会占住执行线程；
   Node 子进程里它还会阻塞事件循环。超时上限 60s、响应体上限 1 MiB。
+- **`fetch` 不是 Node 的 undici**：没有流式响应（`response.body` 不存在，1 MiB 封顶、
+  宿主一次读完）、没有二进制请求体、`redirect` 只支持 `'follow'`、`abort()` 只是
+  「不再等它」而不是真取消。逐条见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)。
 - **执行预算 / 熔断 / 热更新 / 运行记录是宿主策略**，不属于 `host-api` 规范。
   外部引擎的「预算」实现是**杀进程组**，不是中断一个循环 —— 语义差别写在
   [engine-safety.md](engine-safety.md)。

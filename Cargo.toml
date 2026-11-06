@@ -1,6 +1,6 @@
 [package]
 name = "plugin-panel"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
@@ -127,6 +127,11 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 # `legacy-tls-vendored` 用的那份 OpenSSL（静态编进二进制）。只在那个 feature 下才编。
 openssl = { version = "0.10", optional = true }
 sha2 = "0.10"
+# Node 兼容层的 crypto：SHA-1 来自 tungstenite 的 handshake（依赖树里本来就有
+# `sha1 0.11`），加为直接依赖**不增加任何编译单元** —— 和上面 getrandom / blake2 同一条理由。
+# ⚠ 版本必须是 0.11：0.10 那条是 digest 0.10，而 tungstenite 用的是 digest 0.11；
+# 改成 0.10 会**多编一份 digest**（离线缓存里也不一定有）。
+sha1 = "0.11"
 # 备份加密（unpanel 2.10）。原来用 `age`，但上游已归档，且它带进来的
 # `crypto-bigint 0.5.5`（RUSTSEC-2026-0387，定时攻击）和 `basic-toml`
 # （RUSTSEC-2026-0374，无人维护）都没有升级路径。所以改成直接用三个标准原语：

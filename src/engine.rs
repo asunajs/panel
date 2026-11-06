@@ -1794,12 +1794,18 @@ fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, Strin
 /// 哪些 Node 内置模块在面板里有等价实现。
 ///
 /// 名单刻意很短：每加一个就要在 `src/jshost.rs` 里真实现一遍，**假实现比不实现更坏**
-/// ——插件在里面跑得通、出去跑不通（或者反过来）都难查。目前是路径与文件系统这一对，
-/// 因为它们是「把状态写下来」这件事的最小集合。
+/// ——插件在里面跑得通、出去跑不通（或者反过来）都难查。
+///
+/// 现在四组：路径 / 文件系统（把状态写下来）+ crypto / url（Node/Web 兼容层，
+/// 见 `src/jscompat/`）。裸名与 `node:` 前缀都认 —— Node 两种都收，
+/// 而内置模块在 Node 的解析里**优先于**同名 npm 包，所以 `import 'url'` 也是内置那个。
 pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
     match name {
         "node:path" | "path" => Some("node:path"),
         "node:fs" | "fs" => Some("node:fs"),
+        "node:crypto" | "crypto" => Some("node:crypto"),
+        "node:url" | "url" => Some("node:url"),
+        "node:buffer" | "buffer" => Some("node:buffer"),
         _ => None,
     }
 }
@@ -1808,9 +1814,9 @@ pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
 /// 只是写法不对（比如 `require('fs/promises')`）—— 那种情况要指路，不是给一句
 /// 「没有 node_modules」让人去翻半天。
 pub(crate) const BUILTIN_HINT: &str =
-    "面板里只内置了 `host-api`（宿主 API）、`node:path` 与 `node:fs`（限定在插件自己\
-的目录内）。`fs/promises` / `node:os` / 第三方包都没有；要引自己的文件请用相对说明符\
-（如 './lib/core.js'）";
+    "面板里只内置了 `host-api`（宿主 API）、`node:path` / `node:fs`（限定在插件自己\
+的目录内）与 `node:crypto` / `node:url` / `node:buffer`（Node 兼容层）。`fs/promises` /\
+`node:os` / 第三方包都没有；要引自己的文件请用相对说明符（如 './lib/core.js'）";
 
 /// 模块解析器：`host-api` 内置；相对说明符按 URL 语义解析成 `file://` URL。
 struct HostApiResolver {
@@ -1834,9 +1840,8 @@ impl Resolver for HostApiResolver {
         if name == "host-api" {
             return Ok(name.to_string());
         }
-        // Node 的内置模块：只放这两个 —— 它们是**跨运行时**写法里最常出现的一对
-        // （`fs.writeFileSync(path.join(dir, 'x.json'), s)`）。裸名与 `node:` 前缀
-        // 都收：Node 两种都认，插件里两种写法都有。
+        // Node 的内置模块：名单在 builtin_node_module 里维护（path/fs/crypto/url）。
+        // 裸名与 `node:` 前缀都收：Node 两种都认，插件里两种写法都有。
         if let Some(builtin) = builtin_node_module(name) {
             return Ok(builtin.to_string());
         }
@@ -1876,7 +1881,7 @@ pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
         return format!(
             "{{\"ok\":false,\"error\":{}}}",
             serde_json::to_string(&format!(
-                "只支持 `host-api` 与插件目录内的相对路径；`{spec}` 是 Node 内置或第三方包，这里没有"
+                "只支持 `host-api` / `node:path` / `node:fs` / `node:crypto` / `node:url` / `node:buffer` 与插件目录内的相对路径；`{spec}` 是别的 Node 内置或第三方包，这里没有"
             ))
             .unwrap_or_else(|_| "\"?\"".into())
         );
@@ -6406,9 +6411,23 @@ fn sync_script_tasks(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, host: &A
         }
         seen_dir.push(f.name.clone());
 
+        let schedule_expr = f
+            .header
+            .cron
+            .clone()
+            .filter(|_| f.valid && !f.header.disabled);
+        let schedule = schedule_expr
+            .as_deref()
+            .and_then(|e| crate::cron::Schedule::parse(e).ok());
+
         let existing = jobs.iter().find(|j| j.name == f.name);
         if let Some(j) = existing {
             if j.source == "script-panel" {
+                // 文件没有可执行的目录调度（没 @cron / disabled / 头部坏了）时，
+                // 它只是未排班文件，不占用任务名：同名面板任务继续由下面的面板循环调度。
+                if schedule.is_none() {
+                    continue;
+                }
                 // 目录优先：同名时不让目录任务抢面板任务的名字，但要让用户知道冲突。
                 // 这个函数每 2 秒跑一次，不能每轮都刷同一条 warn。
                 let key = format!("{}::{}", f.path, f.name);
@@ -6428,15 +6447,6 @@ fn sync_script_tasks(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, host: &A
                 // 等文件被删/改名后再由下面的面板循环接管。
             }
         }
-
-        let schedule_expr = f
-            .header
-            .cron
-            .clone()
-            .filter(|_| f.valid && !f.header.disabled);
-        let schedule = schedule_expr
-            .as_deref()
-            .and_then(|e| crate::cron::Schedule::parse(e).ok());
 
         if let Some(j) = existing {
             // 文件头变了：收敛 DB 里的脚本元数据（不动 override_expr / deleted / paused）。
@@ -7398,6 +7408,30 @@ mod pump_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn builtin_node_modules_cover_crypto_and_url() {
+        // 面板内置的 node:* 模块名单：裸名与 node: 前缀都必须解析到同一份实现。
+        // 少一个的后果是加载期 "Cannot find module 'url'"，而插件作者会以为是自己
+        // 写错了 —— 这条测试钉住名单本身（模块体的实现由 jscompat 的单测覆盖）。
+        for (spec, want) in [
+            ("node:path", "node:path"),
+            ("path", "node:path"),
+            ("node:fs", "node:fs"),
+            ("fs", "node:fs"),
+            ("node:crypto", "node:crypto"),
+            ("crypto", "node:crypto"),
+            ("node:url", "node:url"),
+            ("url", "node:url"),
+            ("node:buffer", "node:buffer"),
+            ("buffer", "node:buffer"),
+        ] {
+            assert_eq!(super::builtin_node_module(spec), Some(want), "{spec}");
+        }
+        for absent in ["node:os", "node:child_process", "fs/promises", "lodash"] {
+            assert_eq!(super::builtin_node_module(absent), None, "{absent}");
+        }
+    }
+
     #[test]
     fn stop_only_hits_the_targeted_invocation() {
         // 安全审计 H3 的本体：停 A 不该打断 B。

@@ -1918,6 +1918,7 @@ pub fn upsert_script_dir_job(
             budget_ms = excluded.budget_ms,
             kind = 'script',
             updated_at = excluded.updated_at
+        WHERE source = 'script-dir'
         "#,
         params![
             name,
@@ -1973,6 +1974,43 @@ pub fn insert_script_panel_job(
     Ok(())
 }
 
+
+/// 未排班的目录行被面板任务接管：原地转成 `script-panel`。
+///
+/// 不 delete + insert：`runs` 是按 `(plugin, name)` 挂的，行换了身份但历史要保留；
+/// 原地 UPDATE 也避免中间失败把任务弄丢。只匹配 `source='script-dir'` 且 `script` 对得上的行。
+#[allow(clippy::too_many_arguments)]
+pub fn promote_script_dir_to_panel(
+    db: &Db,
+    name: &str,
+    script: &str,
+    runtime: &str,
+    schedule: &str,
+    params: Option<&str>,
+    budget_ms: Option<u64>,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        r#"
+        UPDATE jobs SET source = 'script-panel', schedule = ?3, script = ?4,
+            runtime = ?5, params = ?6, budget_ms = ?7, status = 'scheduled',
+            next_run = NULL, paused = 0, deleted = 0, override_expr = NULL,
+            updated_at = ?8
+        WHERE plugin = ?1 AND name = ?2 AND source = 'script-dir' AND script = ?4
+        "#,
+        params![
+            SCRIPT_PLUGIN,
+            name,
+            schedule,
+            script,
+            runtime,
+            params,
+            budget_ms.map(|v| v as i64),
+            now
+        ],
+    )
+}
 /// 编辑面板脚本任务（DB 权威）。名字是身份，不改。
 #[allow(clippy::too_many_arguments)]
 pub fn update_script_panel_job(
@@ -3409,5 +3447,61 @@ mod tests {
         let removed = prune_runs_capped(&db, 0, None, "2026-10-26 11:00:00").unwrap();
         assert_eq!(removed, 4, "天数维度不能被条数闸门替掉");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn promote_unscheduled_dir_job_to_panel_keeps_row() {
+        // 「用这个文件建任务」：未排班的目录行原地转成 script-panel，
+        // 不能 delete + insert（runs / created_at 要留着）。
+        let db = open(Path::new(":memory:")).unwrap();
+        upsert_script_dir_job(
+            &db,
+            "x",
+            "js/x.mjs",
+            "node",
+            "",
+            "idle",
+            None,
+            None,
+            None,
+            NOW,
+        )
+        .unwrap();
+        let created = list_script_jobs(&db).unwrap()[0].created_at.clone();
+
+        let n = promote_script_dir_to_panel(
+            &db,
+            "x",
+            "js/x.mjs",
+            "node",
+            "*/5 * * * * *",
+            Some("{\"a\":1}"),
+            None,
+            "2026-03-10 09:00:00",
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+
+        let row = &list_script_jobs(&db).unwrap()[0];
+        assert_eq!(row.source, "script-panel");
+        assert_eq!(row.schedule, "*/5 * * * * *");
+        assert_eq!(row.status, "scheduled");
+        assert_eq!(row.created_at, created, "接管要保留原行，不能换 created_at");
+
+        // 路径对不上 / source 已经不是 script-dir：不许误接管。
+        assert_eq!(
+            promote_script_dir_to_panel(
+                &db,
+                "x",
+                "js/other.mjs",
+                "node",
+                "* * * * * *",
+                None,
+                None,
+                NOW,
+            )
+            .unwrap(),
+            0
+        );
     }
 }

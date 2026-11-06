@@ -168,7 +168,9 @@ function fileCard(f, job) {
           ? `<button class="btn ghost" data-act="create" data-path="${esc(
               f.path,
             )}" title="用这份文件另建一条在面板上管理的脚本任务；原来的脚本任务不受影响">用这个文件另建任务</button>`
-          : '';
+          : `<button class="btn danger" data-act="delete-file" data-name="${esc(
+              f.name,
+            )}" title="彻底删除这个脚本：文件、它的数据目录、运行记录一起删掉，不可恢复">删除</button>`;
 
   const summary = scheduled
     ? `<div class="task-summary">
@@ -319,7 +321,7 @@ function openOverrideDialog(job, root, ctx) {
                value="${esc(current || declared)}" placeholder="*/5 * * * * * 或 @every 30s">
       </div>
       <p class="err-text" id="ov-err"></p>
-      <div class="row" style="align-items:center">
+      <div class="dialog-actions">
         <button class="btn primary" id="ov-save">保存运行时间</button>
         ${
           current
@@ -597,14 +599,11 @@ export async function render(root, ctx, opts = {}) {
     }
 
     // 运行级 / 定义级动作。删除和暂停要确认（与插件任务页同一套理由）：
-    // 删除对目录脚本是墓碑、对面板脚本不可逆；暂停会停掉排班。
-    const isDir = btn.dataset.dir === '1';
+    // 目录脚本的「删除」是彻底删文件；面板脚本只删任务行、文件保留。
     const confirmSpec = {
       delete: {
         question: `删除脚本任务 \`${name}\`？`,
-        detail: isDir
-          ? '任务目录里的脚本：删除后不再调度，文件本身不动，卡片留在列表里可以恢复。'
-          : '在面板创建的脚本：删掉就没了，运行历史一起消失，要重建得重新填路径和运行时间。',
+        detail: '在面板创建的脚本：只删任务行，脚本文件保留；运行历史一起消失。',
         okText: '删除',
         risk: RISK.LOSS,
       },

@@ -114,11 +114,11 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 | 层 | 内容 | 来源 | 状态 |
 |---|---|---|---|
 | L0 | Promise / microtask / 顶层 await / `WeakRef` / `FinalizationRegistry` | 引擎自带（§2） | 免费 |
-| L0.5 | `TextEncoder`/`TextDecoder`、`URL`/`URLSearchParams`、`AbortController`、`structuredClone` | 必须 host 造（§2：quickjs-libc 没编） | **fetch 依赖前三件，属于必做** |
+| L0.5 ✅ | `TextEncoder`/`TextDecoder`（仅 utf-8）、`URL`/`URLSearchParams`、`AbortController`/`AbortSignal`、`atob`/`btoa`、`Buffer`（`Uint8Array` 子类） | 必须 host 造（§2：quickjs-libc 没编） | **已完成（2026-11-05）**：`src/jscompat/text.js` + `url.js` + `fetch.js` + `buffer.js`。`structuredClone` **不做**（§12） |
 | L1 | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/`queueMicrotask`/`sleep` | Rust 侧定时器堆 | 已定（`sleep` + timers） |
-| L2 | `fetch(url, {signal, method, headers, body, timeout_ms})` → `Response` 形状 | 走面板数据面 | 已定（`http_fetch_async`），形状建议按 Node |
+| L2 ✅ | `fetch(url, {signal, method, headers, body, timeout_ms, redirect})` → `Response` 形状 | 走面板数据面 | **已完成（2026-11-05）**：`src/jscompat/fetch.js`，只复用 `fetch_async`。`signal` 的实测结论见下面那条：**只能「不再等它」** |
 | L3 | `node:fs/promises` 子集 + `node:path` + `node:os` 子集 | host + 插件数据目录围栏（[plugin-fs.md](plugin-fs.md)） | 建议 |
-| L4 | `child_process`、`net`/`http` 监听、完整 streams、`Buffer` | — | **建议不做**（见 §12） |
+| L4 | `child_process`、`net`/`http` 监听、完整 streams | — | **建议不做**（见 §12） |
 
 两条要单独说清：
 
@@ -126,7 +126,10 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
   （`src/hostapi.rs:1738` `ensure_outbound_url_allowed`，判定表在 `1744`）、超时钳位
   （现在是 `clamp(100, 60_000)`、默认 10s，`src/hostapi.rs:783`）、响应体上限、日志脱敏。
   `hostapi.rs:764` 的注释写明了今天它是**阻塞调用、跑在引擎线程上**，这正是它要 async 化的原因。
-  ❓ `signal` 能不能真取消待验证：ureq 是阻塞且不可取消的，要么换 tokio 侧的 client，要么明说「abort 只是不再等它」。
+  ✅ `signal` 的结论已定（2026-11-05）：**不能真取消**。ureq 是阻塞且不可取消的，宿主侧没有
+  「撤掉一个在途请求」的接口 —— 所以 `abort()` 的语义是**不再等它**（Promise 立刻 reject
+  `AbortError`，后台那条请求仍然会跑完，结果被丢弃）。这条**必须**写进文档，
+  否则插件作者会以为它省了流量、或者在宿主侧释放了连接。
 - **不提供 `setImmediate` / `process.nextTick`**。它们的语义是 Node 的队列特权（微任务之后、I/O 回调之前那一格），
   和面板按 invocation 记预算的方式直接冲突。文档要写明「不提供」，别让人从 Node 那边照抄过来撞墙上。
 
@@ -186,7 +189,7 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 | 4b ✅ | **已完成（2026-10-24）**：`on_tick` async（`__run_tick_async` 两段式；上一拍没回来就跳过这一拍，不排队补跑） | 实测：500ms 的 async tick 跑着时同 worker 的 50ms interval 仍 20 次/秒；1.5 秒的 tick 让 seq 走 1→3→5 | 同 7a |
 | 4c ✅ | **收尾补丁**：① `fetch_async` 的结果 60 秒无人认领就丢弃（插件被删时否则会一直占内存）；② 给 `LoadedPlugin` 加**装载代次**，热更新期间在途的执行当场作废（以前要挂到墙钟超时 60 秒，还记成"超时"） | 实测：reload 后 1 秒内收尾，运行记录写的是"插件被热更新/重载了" | — |
 | 4d ✅ | **P0：结算队列改成每线程一份**。两段式执行的完成通知原来是进程级静态，而默认 2 条执行线程 —— A 线程推的结算被 B 线程排空、B 在自己的 `pending` 里找不到就扔掉，A 只能干等 60 秒墙钟（任务占着"在途"= 丢拍）。`ENGINE_WORKERS=1` 复现不了，所以单线程冒烟全绿 | 同一负载（600s + 后台压满 CPU）：孤儿结算 2→**0**、60 秒超时 2→**0**、`perf-fetch` 达成率 93.48%→**99.98%**、`lateMs` 最大 55008ms→正常。回归测试 `settlement_queue_is_per_thread…` | 见 [engine-safety.md §7.8b](engine-safety.md) |
-| 4 | `fetch` + `AbortController`；**先验证能否真取消** | 三引擎对拍同一份脚本；SSRF/超时/脱敏的既有用例全绿；`signal` 的行为写进文档（能取消或不能取消，都要实测结论） | 保留同步 `http_fetch` 不删 |
+| 4 ✅ | **已完成（2026-11-05）**：`fetch` + `Headers` / `Request` / `Response` + `AbortController` / `AbortSignal`（`src/jscompat/fetch.js`）。同一批还补了 L0.5 的 `URL` / `TextEncoder` / `crypto` / `Buffer`，以及 `node:crypto` / `node:url` / `node:buffer` 三个内置模块 | QuickJS 侧与**真的 Node** 生成的向量逐条对拍（`cargo test --bin plugin-panel jscompat`）；SSRF / 超时 / 脱敏沿用 `fetch_async` 同一条通路（没有第二份网络实现）；`signal` 的结论写进 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)：**不能真取消**，只是不再等它 | 保留同步 `http_fetch` 不删；删掉 `src/jscompat/fetch.js` 即回退（`fetch_async` 一直没动） |
 | 5 | L3 `node:fs/promises` 子集 | 围栏用例（越界必拒）全绿；同步版行为不变 | — |
 | 6 | source map + `.d.ts` 生成 + `panel dev` | 一条 `.ts` 插件报错能指回源码行；类型声明与 docs 同一张表产出 | 独立子命令，不动主链路 |
 | 7a ✅ | **已完成（2026-10-24）**：摘掉守卫。删 `__async_audit` / `__async_call_msg` / `__async_route_resp` / `__is_async_fn`（只剩 `__is_thenable`）、删加载期审计、删 `jslint` 模块与编辑期警告、`fire_tick` 接受 Promise（`__run_tick_async` 两段式，结算记 `ticks/last_tick`，上一拍没回来就**跳过**这一拍） | 实测：500ms 的 async tick 跑着时同 worker 的 50ms interval 仍 20 次/秒；1.5 秒的 tick 会让 seq 1→3→5（**跳过**而不是补跑）；`await` 永不 settle ⇒ 每拍 2 秒判失败并说清原因；`cargo test` 全绿 | 守卫全删了，回退等于重写那三处两段式 |
@@ -205,7 +208,8 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 
 1. **QuickJS worker 的常驻 RSS** —— 按 `docs/performance.md §8.1` 的纪律，在 Linux 静态产物上量，和 0.6 MB/插件堆一起报两个数。
 2. **异步多路复用后的 RPC 单次延迟** —— 现有那格还是「几十 µs（待实测）」。
-3. **`signal` 能否真取消一次出网** —— ureq 阻塞不可取消；换 tokio client 是另一笔账。测法：一个必挂的 URL，看 deadline 到点后 worker 是否真的继续跑别的 invocation。
+3. ~~**`signal` 能否真取消一次出网**~~ —— **已定（2026-11-05）：不能**。见 §6 的结论：
+   `abort()` = 不再等它，宿主请求照旧跑完、结果丢弃。要真取消得换 tokio 侧的 client（没做）。
 4. **parked await 的挂起预算和任务熔断怎么相互作用** —— 现在熔断看连续失败（`engine-safety.md §7.3`），timeout run 算不算一次失败要定。
 5. **quickjs-ng 升级到 0.17+ 的兼容面** —— 现在锁在 0.16.2，升版要重跑对拍。
 6. **worker 形态下 `ENGINE_WORKERS` 的合理默认** —— 现在 `min(2, cores)`（`src/engine.rs:5569`）是按进程内线程算的。
@@ -216,7 +220,11 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 
 - 不引入真线程 / 共享内存（引擎没有 `Agent`，§2）。
 - 不给插件监听端口、不给 `child_process` —— 破了「能力全部过面板」这条。
-- 不做 `Buffer`；`Uint8Array` 够用，差别写进文档而不是假装一致。
+- `Buffer` **做了**（L0.5 的一部分，`src/jscompat/buffer.js`）：`Uint8Array` 子类，常用 API 覆盖；
+  `allocUnsafe` 返回**清零**内存（不把上一个插件的残留泄漏给下一个），没有 pool 复用。
+- 不做 `structuredClone`（L0.5 里和它并列的三件都做了，见 §6）。插件里复制对象用
+  `JSON.parse(JSON.stringify(x))` 或者自己写递归 —— 面板侧没有可用的深拷贝原语，
+  而「假装有」会让插件在 Node 里调试通过、上机才炸。
 - 不承诺 `process.nextTick` / `setImmediate` 语义（§6）。
 - 完整 streams（backpressure 语义）不做；`node:events` 只给纯 JS 的最小 `EventEmitter`，它不需要 host。
 - 本轮不改 Node/Bun 外部 runner 的串行 command loop（只保证 API 同名同义）。

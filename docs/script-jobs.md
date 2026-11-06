@@ -126,25 +126,33 @@ tasks/
 
 | `jobs.source` | 谁创建 | 调度来自 | 能删吗 |
 |---|---|---|---|
-| `script-dir` | 扫描 `TASKS_DIR` | 文件头 `@cron`（可被面板 `override_expr` 覆盖） | **只能删文件**（进 `.trash/`），没有墓碑 |
+| `script-dir` | 扫描 `TASKS_DIR` | 文件头 `@cron`（可被面板 `override_expr` 覆盖） | **只能删文件**（真删，不进 `.trash`），没有墓碑 |
 | `script-panel` | 面板「新建脚本任务」 | 面板填的表达式 | 可以（真删除） |
 
 两种脚本在 `jobs` / `runs` 里的 **`plugin` 身份都是 `__script__`**，`name` 是任务名。
 所以任务操作接口是 `/api/tasks/__script__/<name>/...`，运行记录的 `plugin` 也是它。
 
-**同名冲突：目录优先。** 如果 `tasks/js/report.js` 叫 `report`，而面板也建了一条叫 `report`
-的 `script-panel` 任务，**目录那条生效**，面板那条暂不调度（行还在，文件删掉/改名后接管；
-不静默覆盖，也不两条都跑）。
+**同名冲突：只有「真的排了班」的目录任务才优先。** 如果 `tasks/js/report.js` 写了 `@cron`
+（或面板给它设了 `override_expr`），而面板也建了一条叫 `report` 的 `script-panel` 任务，
+**目录那条生效**，面板那条暂不调度（行还在，文件删掉/改名后接管；不静默覆盖，也不两条都跑）。
+
+反过来，**没有 `@cron` 的未排班文件不占用任务名**：它只是任务目录里的一份文件，
+面板可以用同一个名字「用这个文件建任务」——创建时那条 `script-dir` 行原地转成
+`script-panel`（`runs` / `created_at` 保留），不需要改名。
 
 ### 4.1 `script-dir`：文件就是定义
 
 - 启动时扫一遍；运行期约**每 2 秒**看目录（新文件、mtime 变了、文件删了）。
 - 文件头 `@cron` 变了 ⇒ 更新调度（保留 `runs` 与暂停状态）。
 - 文件**删了** ⇒ 对应的 `script-dir` 行被删除。
-- 面板上点**删除** ⇒ 调 `POST /api/scripts/{name}/delete`，把**文件**移进 `TASKS_DIR/.trash/<时间戳>/`，
-  行随之消失。**没有墓碑**：以前那个「删了任务但文件还在、还能恢复」的状态已经删掉了 ——
-  文件就是任务，删任务就是删文件。`POST /api/jobs/__script__/{name}/delete` 对目录脚本会直接 400。
-  面板上的「恢复」清掉墓碑：文件仍然有合法 `@cron` 才会回来。
+- 面板上点**删除** ⇒ 调 `POST /api/scripts/{name}/delete`：**文件**、脚本自己的数据目录
+  （`<PLUGIN_DATA_DIR>/__script__/<name>/`）和这个任务的全部运行记录一起**真删**，
+  不进 `.trash`、没有墓碑。文件可能在 `js/` / `py/` / `sh/` 子目录里 —— 后端按 `jobs.script`
+  里的相对路径删（先做路径围栏校验），不拿任务名去拼 `tasks/<name>.js`。
+  可执行文件（`.exe` / `.cmd` / `.ps1`）的 `<file>.task` 边车也会一起删，
+  不会留下没有主人的头部文件。
+  `POST /api/jobs/__script__/{name}/delete` 对目录脚本会直接 400。
+  还有别的脚本任务引用同一个文件时会拒绝（409）：先删引用，或改用「删除任务」保留文件。
 - 面板可以**覆盖调度**（`override_expr`），文件头的 `@cron` 保留为「原始定义」；
   撤销覆盖后回到文件头。暂停 / 恢复同样跨重启保留。
 
@@ -152,6 +160,7 @@ tasks/
 
 - 面板上填写：**文件路径**（必须在 `TASKS_DIR` 内）+ 任务名 + 表达式（+ 可选 params / timeout）。
 - 文件可以没有 `@cron`，甚至没有合法头部 —— 调度由面板提供。
+- 文件没有 `@cron` 时，面板任务可以和文件同名；文件写了 `@cron` 时同名创建会被拒绝（目录优先）。
 - **文件消失时任务保留**，状态变 `error`（`file missing`），不会被自动删除；
   文件回来之后状态恢复，下一次执行照常。
 - 删除就是真删行，没有「恢复」。
@@ -163,8 +172,8 @@ tasks/
 | 立即执行 | 跑一次，**不推进** `next_fire`，不动熔断状态 |
 | 暂停 / 恢复 | 暂停状态写 `jobs.paused`，跨重启保留；恢复从当前时刻重新对齐，**不补跑** |
 | 编辑表达式 | 覆盖层（`override_expr`）；`null` 撤销覆盖，回到文件头 |
-| 删除 | `script-dir` ⇒ 墓碑；`script-panel` ⇒ 真删除 |
-| 恢复 | 清墓碑（仅 `script-dir`） |
+| 删除 | `script-dir` ⇒ 彻底删文件（+ 数据目录 + 运行记录）；`script-panel` ⇒ 真删任务行（文件保留） |
+| 恢复 | 脚本任务没有墓碑；目录脚本的「恢复」入口已移除 |
 | 新建 | `script-panel`：引用 `TASKS_DIR` 里的一个文件 |
 
 接口（写请求都要 `x-panel: 1`；认证见 [§13](security.md#13-第十轮面板鉴权)）：
@@ -176,6 +185,7 @@ tasks/
 | `POST /api/scripts/jobs/{name}/edit` | 改 `path` / `expr` / `runtime` / `budget_ms` / `params`（`name` 是身份，不能改） |
 | `POST /api/tasks/__script__/{name}/run` | 立即执行（脚本任务的 plugin 身份是 `__script__`） |
 | `POST /api/tasks/__script__/{name}/pause` · `/resume` | 暂停 / 恢复，与插件任务同一套 |
+| `POST /api/scripts/{name}/delete` | 彻底删除目录脚本：文件 + 数据目录 + 运行记录（不可恢复） |
 
 列表里会显示：任务名、来源（目录 / 面板）、表达式、下次触发、最近一次结果、文件路径。
 「未调度」是**正常状态**（文件没有 `@cron`），不是错误。

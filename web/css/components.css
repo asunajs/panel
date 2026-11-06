@@ -1322,6 +1322,19 @@
   overflow: auto;
 }
 
+/* 弹窗底部按钮行：右对齐、和上方表单留出间距。
+   reset.css 把 p 的 margin 清零了，所以表单控件后直接跟 .row 时按钮会贴住输入框；
+   输入框的 focus ring 有 2px outline + 2px offset，视觉上就叠到按钮上了
+   （脚本任务「改运行时间」实测）。`margin-top` 是这里唯一需要补的东西。 */
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
 
 /* ── 窄屏的日志页 / 区块头 ───────────────────────────────────────────────
    日志页的标题、连接徽章、统计、五个导出按钮全挤在一行时，标题会被压成

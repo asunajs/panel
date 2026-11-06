@@ -868,7 +868,7 @@ const win32 = posix;
 /// 越界报 `EACCES`，与 Node 同码 —— 插件里 `catch (e) { if (e.code === …) }` 照旧能跑。
 ///
 /// 与 Node 的差异（刻意，写在 docs/host-api.md）：
-///   · 没有 `Buffer`：不给 encoding 时读写 `Uint8Array`
+///   · `Buffer` 由兼容层提供：不给 encoding 时读写 `Buffer`（`Uint8Array` 子类）
 ///   · 只有同步 API：QuickJS 宿主没有真事件循环，`fs.promises` 只会是一句谎话
 ///   · 单次读写上限 8 MiB（要穿过 JSON 桥，超大文件会卡住引擎线程）
 pub const NODE_FS_BODY: &str = r#"
@@ -903,7 +903,10 @@ function readFileSync(path, options) {
     const encoding = opt(options, 'encoding', '');
     const r = call(globalThis.__host_fs_read(String(path), String(encoding || '')));
     if (typeof r.data === 'string') return r.data;
-    return new Uint8Array(r.data);
+    // Node 的 readFileSync 不给 encoding 时返回 Buffer；Buffer 是 Uint8Array 子类，
+    // 老代码不受影响。万一兼容层没装（测试里的最小宿主），退化成 Uint8Array。
+    const B = globalThis.Buffer;
+    return B ? B.from(r.data) : new Uint8Array(r.data);
 }
 
 function writeFileSync(path, data, options) {
@@ -984,7 +987,7 @@ const fs = {
 /// ESM（`import`）与 CJS（`require`）两个包装器**都按它生成** —— 各写一份清单的话，
 /// 加一个函数只会加上其中一种写法，另一种静默少一个名字。这正是适配器那边
 /// （三份实现共用向量）反复吃过的那类问题，在同一个文件里就不该重演。
-const NODE_PATH_EXPORTS: &[&str] = &[
+pub(crate) const NODE_PATH_EXPORTS: &[&str] = &[
     "sep",
     "delimiter",
     "win32",
@@ -1000,7 +1003,7 @@ const NODE_PATH_EXPORTS: &[&str] = &[
     "parse",
     "format",
 ];
-const NODE_FS_EXPORTS: &[&str] = &[
+pub(crate) const NODE_FS_EXPORTS: &[&str] = &[
     "readFileSync",
     "writeFileSync",
     "appendFileSync",
@@ -1019,9 +1022,39 @@ fn node_module_parts(name: &str) -> Option<(&'static str, &'static [&'static str
     match name {
         "node:path" => Some((NODE_PATH_BODY, NODE_PATH_EXPORTS, "posix")),
         "node:fs" => Some((NODE_FS_BODY, NODE_FS_EXPORTS, "fs")),
+        // crypto / url 的实现放在 jscompat 里（JS 体 + 导出清单分文件），
+        // 与 path/fs 一样走「一份模块体、两个包装器」的规矩。
+        "node:crypto" => Some((
+            crate::jscompat::crypto::BODY,
+            crate::jscompat::crypto::EXPORTS,
+            "crypto",
+        )),
+        "node:url" => Some((
+            crate::jscompat::url::BODY,
+            crate::jscompat::url::EXPORTS,
+            "url",
+        )),
+        "node:buffer" => Some((
+            crate::jscompat::buffer::BODY,
+            crate::jscompat::buffer::EXPORTS,
+            "buffer",
+        )),
         _ => None,
     }
 }
+
+/// 面板内置的 `node:*` 模块清单。
+///
+/// **只在这一处定义**：注入（`install_builtin_node_modules`）与对账测试都从它取。
+/// 两处各写一份的话，加一个模块只加上其中一处 —— 于是"require 能用、import 不能用"
+/// 这类最难查的偏差会静默存在（见下面 `every_exported_builtin_name_is_actually_defined`）。
+const BUILTIN_NODE_MODULES: &[&str] = &[
+    "node:path",
+    "node:fs",
+    "node:crypto",
+    "node:url",
+    "node:buffer",
+];
 
 /// 内置模块的 **ESM** 源码（给 `import` 用）。
 ///
@@ -1058,7 +1091,7 @@ pub fn node_module_for_require(name: &str) -> Option<String> {
 /// 测试里另写一份的话，验的就不是面板真正跑的那条路了。
 fn install_builtin_node_modules<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     let map = rquickjs::Object::new(ctx.clone())?;
-    for name in ["node:path", "node:fs"] {
+    for &name in BUILTIN_NODE_MODULES {
         if let Some(src) = node_module_for_require(name) {
             map.set(name, src)?;
         }
@@ -1525,6 +1558,9 @@ pub fn install_host<'js>(
 
     let _ = logs;
     ctx.eval::<(), _>(BOOTSTRAP)?;
+    // Node/Web 兼容层（fetch / URL / TextEncoder / crypto）。**必须在 BOOTSTRAP 之后**：
+    // 它用到 BOOTSTRAP 装好的 setTimeout 与 __fmt，见 src/jscompat/mod.rs 的说明。
+    crate::jscompat::install(ctx)?;
     Ok(())
 }
 
@@ -2221,7 +2257,7 @@ mod tests {
         //   「require 能用、import 不能用」，排查起来非常费劲。
         //
         // 两处都对上的话，上面两条都不会发生。这条测试就是那个"对上"。
-        for name in ["node:path", "node:fs"] {
+        for &name in BUILTIN_NODE_MODULES {
             let (body, names, _default) = node_module_parts(name).expect("内置模块必须存在");
             for n in names {
                 // 三种定义形式都要认：`function f(`、`const f =`、对象字面量里的 `f:`

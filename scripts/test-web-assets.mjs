@@ -728,10 +728,10 @@ const FORBIDDEN = [
   ['setTimeout', /(?<![.\w$])setTimeout\s*\(/],
   ['setInterval', /(?<![.\w$])setInterval\s*\(/],
   ['setImmediate', /(?<![.\w$])setImmediate\s*\(/],
-  ['fetch', /(?<![.\w$])fetch\s*\(/],
-  ['new URL', /(?<![.\w$])new\s+URL\s*\(/],
-  ['TextEncoder', /(?<![.\w$])TextEncoder\b/],
-  ['TextDecoder', /(?<![.\w$])TextDecoder\b/],
+  // fetch / URL / TextEncoder / TextDecoder / crypto / atob / btoa **已经从这张表里删掉**：
+  // 它们由 src/jscompat 注入到每个插件 Context（见 docs/plugin-api.md §4.10），
+  // 插件里写 `await fetch(url)` / `new URL(u)` 在默认引擎里是**合法**的。
+  // 这张表只留"内嵌宿主真的没有、写了就 ReferenceError"的名字。
   ['structuredClone', /(?<![.\w$])structuredClone\b/],
   ['localStorage', /(?<![.\w$])localStorage\b/],
   ['document', /(?<![.\w$])document\b/],

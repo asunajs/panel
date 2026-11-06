@@ -53,6 +53,7 @@ mod extproc;
 #[path = "extproc_stub.rs"]
 mod extproc;
 mod hostapi;
+mod jscompat;
 mod jshost;
 mod log;
 mod market;
@@ -2116,12 +2117,13 @@ fn resident_kb() -> u64 {
 /// 代价是一次重启：DB 是 WAL、插件在启动时重载，实测中断 1 秒左右。
 /// 检查间隔 PLUGIN_MAX_RSS_MS（默认 30 秒）。
 fn spawn_max_rss_watchdog() {
-    // 默认 24MB：对绝大多数人来说永远碰不到（我们的压测 24h 才 9.7MB），
-    // 只在插件真泄漏时兜底。用户不需要维护这个数 —— 0 才表示关掉。
+    // 默认 96MB：一台加载 5 个 QuickJS 插件的机器实测峰值 ~43MB，24MB 会在启动
+    // 5 分钟后触发自愈重启，把插件重新装一遍 —— 正好抵消惰性加载。96MB 给正常
+    // 插件留余量，只在插件真泄漏时兜底。0 才表示关掉。
     let kb = std::env::var("PLUGIN_MAX_RSS_KB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(24 * 1024);
+        .unwrap_or(96 * 1024);
     if kb == 0 {
         return;
     }

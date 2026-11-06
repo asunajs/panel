@@ -528,6 +528,30 @@ const r = await fetch_async(url, options);   // 同一个返回值形状
 > 为什么另起一个名字而不是把 `http_fetch` 改成异步：`var r = http_fetch(url)`
 > 这种写法已经有大量插件依赖，改签名等于把所有插件打回重写。两个并存。
 
+#### 1.4.2 `fetch`：Web 形状，通路还是这一条
+
+```js
+const r = await fetch(url, { headers: { accept: 'application/json' }, timeout_ms: 8000 });
+const data = await r.json();          // { ok, status, headers.get(...), text()/json()/bytes() }
+```
+
+`fetch` 是**形状**，不是第二条网络路径：QuickJS 侧它内部只调 `fetch_async`（§1.4.1），
+SSRF 判定、超时钳位、响应体上限（1 MiB）、日志脱敏一条都没绕。名字在三个引擎里相同，
+但**只有 QuickJS 侧会过面板** —— Node/Bun 的 `fetch` 是平台原生的，走它们自己的网络栈
+（这条差别写在 [runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc)）。
+
+三条和本页其它函数不一样的地方：
+
+- **只收文本请求体**。`Uint8Array` / `ArrayBuffer` 会让 `fetch` 返回一个**已 reject 的
+  Promise**（`new Request(...)` 则直接抛 `TypeError`）—— 宿主的 HTTP 实现只吃文本，
+  二进制会被静默损坏，所以这里宁可不支持。
+- **只给文本响应体**，没有流式：`response.body` 不存在，`text()` / `json()` /
+  `arrayBuffer()` / `bytes()` 都是从**已读完**的整段里切。
+- `abort()` **不是真取消**：宿主请求跑完，结果丢弃（[plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
+
+完整形状、`Headers` / `Request` / `Response` 的方法表与已知差异见
+[plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)。
+
 ### 出站目标的限制（SSRF 防护）
 
 `http_fetch` 与 `ws_open` 会先检查目标，命中下面这些**直接报错**（不会发出连接）：
@@ -696,6 +720,7 @@ handler(payload) -> None
 | `sqlite_query` / `sqlite_exec` | ✅ | ✅（RPC） | ✅（`node:sqlite`） | ✅ |
 | `http_fetch`（同步） | ✅ | ✅（RPC） | ✅（worker + Atomics） | ✅ |
 | `fetch_async`（不阻塞） | ✅ **后台线程** | ✅（RPC，本来就是异步） | ✅ | ✅ |
+| `fetch`（Web 形状，[§4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)） | ✅ 复用 `fetch_async` | ✅ 平台原生（不走面板） | ✅ 原生 | ✅ |
 | `node:fs` / `node:path` | ✅ **限定在数据根** | ✅ **原生、无围栏** | ✅ 原生 | ✅ 原生（脚本跑在 Node/Bun 里） |
 | `fs.rootDir()`（面板扩展） | ✅ | ❌（原生 fs 不需要） | ❌ | ✅ |
 | 执行预算（死循环防护） | ✅ interrupt handler | ✅ **杀进程组** | ❌ | ✅ 超时杀进程组 |
@@ -773,13 +798,17 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 | 越界 | `EACCES`（**拒绝**，不是夹回根目录） | — |
 | 相对路径的基准 | 那个数据根 | 进程 CWD（面板把 CWD 设成插件数据目录；脚本是脚本所在目录） |
 | `path.resolve()` | 绝对结果是 `/a/b` 形状（根 = 数据根） | 真实绝对路径 |
-| `Buffer` | 没有；不给 encoding 返回 `Uint8Array` | 有 |
+| `Buffer` | 有（`Uint8Array` 子类）；不给 encoding 返回 `Buffer` | 有 |
 | 异步 API（`fs.promises`） | 没有 | 有 |
 | 单次读写上限 | 8 MiB | 无 |
 
 **可移植的写法是只用相对路径**，并把 `path` 的结果原样交回 `fs` —— 两边都对。
 完整的 QuickJS fs 函数清单（与 `src/jshost.rs` 导出表由测试双向钉着）见
 [plugin-fs.md §22.4](plugin-fs.md#224-与-node-原生-fs-的差异quickjs-侧)。
+
+> 面板内置的 `node:*` 模块一共**五个**：`node:path` 与 `node:fs`（本节）、`node:crypto` /
+> `node:url` / `node:buffer`（见 [plugin-api.md §4.10.5](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
+> 清单在 `src/jshost.rs` 的 `BUILTIN_NODE_MODULES` 里只定义一次，`import` 与 `require` 共用它。
 
 ### 4.3.0 能用哪些函数（QuickJS）
 
@@ -789,7 +818,7 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 
 | `node:fs` | 说明 |
 | --- | --- |
-| `readFileSync(path[, encoding])` | 不给 encoding 返回 `Uint8Array`（不是 `Buffer`） |
+| `readFileSync(path[, encoding])` | 不给 encoding 返回 `Buffer`（`Uint8Array` 子类） |
 | `writeFileSync(path, data)` | 不会自动建父目录（与 Node 一致：报 `ENOENT`） |
 | `appendFileSync(path, data)` | 追加而不是覆盖 |
 | `existsSync(path)` | → `bool` |
@@ -827,17 +856,19 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 
 | 构造 | QuickJS（内嵌） | Node / Bun | 替代写法 |
 |---|---|---|---|
-| `process` / `Buffer` / `__dirname` | 无 | 有 | 走 `host-api`；宿主平台判断用 `typeof process !== 'undefined'` |
+| `process` / `__dirname` | 无 | 有 | 走 `host-api`；宿主平台判断用 `typeof process !== 'undefined'` |
+| `Buffer` | **有**（`Uint8Array` 子类，兼容层） | 有 | 直接用；`node:crypto` 的 `digest()` / `randomBytes()` 也返回它 |
 | `setTimeout` / `setInterval` | **有**（插件内部定时器，回调同步） | 有（原生） | 要**账本可见**的周期任务仍用调度器：`every(name, '500ms', fn)` / `register_cron` |
-| `fetch` | 无 | 有 | `http_fetch(url, opts)`（宿主侧同步实现） |
+| `fetch` | **有**（兼容层；走面板数据面） | 有（平台原生） | 同步写法仍是 `http_fetch(url, opts)`；要并发用 `await fetch` / `fetch_async` |
 | `node:fs` / `node:path` | **受限**（数据根围栏） | 原生 | `host-api` 或只用相对路径 |
 | `node:child_process` / 其它 Node 内置 / npm 包 | 加载期报错 | 有 | 用了就是 Node/Bun-only，见 §5.4 |
-| `URL` / `URLSearchParams` / `TextEncoder` / `crypto` | 无 | 有 | 自己拼字符串 / 走 `host-api` |
-| `console` / `performance` / `atob` / `btoa` | 有 | 有 | — |
+| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `crypto` / `Buffer` / `atob` / `btoa` | **有**（兼容层，形状按 Node；编解码只有 utf-8） | 有（平台原生） | 见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)，不必再手搓 |
+| `console` / `performance` | 有 | 有 | `atob` / `btoa` 在上一行（兼容层提供） |
 | ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有（microtask 在每轮引擎调度结束时清空） | 有 | — |
 | 模块形态 | 经典脚本 + ESM（`import`/`export`） | 经典全局脚本 + ESM；**没有 CJS 模块语义** | 拆模块用 ESM |
 
-一句话：**只用 ECMAScript 语言本身 + `host-api`，三个引擎都跑得通。**
+一句话：**只用 ECMAScript 语言本身 + `host-api` + `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`
+（§4.10），三个引擎都跑得通。**
 `setTimeout` 这类计时器两边不能通用，延时一律交给调度器。
 
 ### 5.2 绑定名：`host-api` 模块、`host_api` 全局、`host` 别名
@@ -885,7 +916,8 @@ import Database from 'better-sqlite3';    // 任何 npm 包
 - 原生 API **绕过面板的统一审计**：不走日志脱敏、不走 `http_fetch` 的信任库、
   不经过 SQLite 的那把锁、不受「可中断」的执行预算保护（只有杀进程这一层）。
 - 文件系统没有沙箱；面板只保证不透传 `PANEL_TOKEN*` 环境变量。
-- 跨引擎插件请只用 `host-api`（以及 QuickJS 也提供的受限 `node:fs` / `node:path`）。
+- 跨引擎插件请只用 `host-api` + [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)
+  的 Web/Node 全局（以及 QuickJS 也提供的受限 `node:fs` / `node:path` / `node:crypto` / `node:url` / `node:buffer`）。
 
 ### 5.5 测试运行（面板侧接口）
 
