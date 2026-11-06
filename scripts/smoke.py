@@ -1415,6 +1415,18 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             proc.kill()
         f.close()
 
+    def wait_http_200(url, headers=None, timeout=15.0):
+        """等插件页真的能打开：新实例的插件加载是异步的，早 100ms 就是 404。"""
+        deadline = time.time() + timeout
+        code = 0
+        while time.time() < deadline:
+            code, _, _ = http(url, headers=headers)
+            if code == 200:
+                return code
+            time.sleep(0.2)
+        return code
+
+
     # ── 实例 ①：默认（不信任转发头）──
     port1, proc1, f1 = make({"PANEL_TOKEN": SMOKE_TOKEN}, "default")
     try:
@@ -1602,7 +1614,7 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             "插件页面默认与面板同源（不再默认多开一个端口）",
             f"plugin_ui_port={ui_port!r}",
         )
-        c1, _, _ = http(f"http://127.0.0.1:{port3}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
+        c1 = wait_http_200(f"http://127.0.0.1:{port3}/plugins/demo/", {"X-Panel-Token": SMOKE_TOKEN})
         check(c1 == 200, "同源插件页能正常打开", f"http {c1}")
         c2, _, _ = http(f"http://127.0.0.1:{port3}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
         check(c2 == 200, "同源插件页能读面板接口（这是同源模式的已知代价）", f"http {c2}")
@@ -1625,7 +1637,7 @@ def anti_bruteforce_checks(tmp: Path) -> None:
             f"plugin_ui_port={ui_port!r}",
         )
         ui_base = f"http://127.0.0.1:{ui_port}"
-        c1, _, _ = http(f"{ui_base}/plugins/demo/", headers={"X-Panel-Token": SMOKE_TOKEN})
+        c1 = wait_http_200(f"{ui_base}/plugins/demo/", {"X-Panel-Token": SMOKE_TOKEN})
         check(c1 == 200, "插件 origin 上能打开插件页", f"http {c1}")
         c2, _, _ = http(f"{ui_base}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN})
         check(c2 == 200, "插件 origin 上白名单接口 /api/state 可用（插件页要读任务表）", f"http {c2}")
