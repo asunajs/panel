@@ -116,8 +116,28 @@ https://raw.githubusercontent.com/asunajs/panel/main/marketplace/catalog.json
 | `version` | 否 | 覆盖展示/比较用的版本。不填用 Release 的 `tag_name` |
 | `sha256` | 否 | 覆盖或补充 GitHub 的 `digest`。两者都存在时必须一致，否则拒绝安装 |
 | `size` | 否 | 期望字节数；下载后不一致会拒绝 |
+| `min_panel` | 否 | 需要面板 ≥ 这个版本（semver，如 `"0.3.0"`）。当前面板不够时**按钮置灰**、安装接口直接报错（不下载）。不填 = 不设限 |
 
 版本比较会忽略开头的 `v`，例如 `v0.1.1` 与 `0.1.1` 视为同一版。若版本相同但 Release digest 变了，仍会提示更新。
+
+### `min_panel`：版本门禁（0.3.0）
+
+```json
+{ "id": "yangshipin", "min_panel": "0.3.0", "…": "其余字段不变" }
+```
+
+插件用了新宿主能力（比如 0.3.0 的字节 `fetch` / `node:zlib`）时，老面板装上去
+只有两种结局：加载就炸，或者跑一半才炸。`min_panel` 把这件事**提前到点安装之前**：
+
+- 面板版本 < `min_panel` ⇒ 卡片上的按钮显示「需要面板 ≥ 0.3.0」并置灰，
+  `POST /api/market/install` 直接返回带双方版本的错误（**不会**发下载请求）；
+- 不填 = 不设限，现有条目零改动；
+- 非法版本串在**解析目录时**就报错，不会拖到用户点安装。
+
+> ⚠ 商城只挡「从商城装」这一条路，挡不住手动放文件 / scp / 恢复旧备份。
+> 真正的保证在**加载时**读插件源文件头的 `@panel` 声明
+> （[plugin-api.md §4.10.8](plugin-api.md#4108-版本门禁panel-头与-panelatleast)）。
+> 两个门禁互补：商城那条给用户即时反馈，加载那条是兜底。
 
 ### `type: "file"`
 
@@ -142,6 +162,7 @@ https://raw.githubusercontent.com/asunajs/panel/main/marketplace/catalog.json
 | `version` | 否 | 不填时取该文件 blob SHA 的前 12 位 |
 | `sha256` | 否 | 可选；不填时安装阶段计算并记录 |
 | `size` | 否 | 可选；用于下载前检查上限和安装后校验 |
+| `min_panel` | 否 | 同 `type: release`：需要面板 ≥ 这个版本才让装 |
 
 单文件下载上限 32 MiB；Release 资产（zip）上限 64 MiB。
 

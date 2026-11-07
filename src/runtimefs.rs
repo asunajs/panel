@@ -25,6 +25,9 @@ const FILES: &[(&str, &str)] = &[
     ),
     ("js/resolve.mjs", include_str!("../runtime/js/resolve.mjs")),
     ("js/bus.mjs", include_str!("../runtime/js/bus.mjs")),
+    // panel.version()/atLeast() 的实现（0.3.0）。**必须列在这里**：
+    // bus.mjs 里 import 了它，漏一个文件就是「外部引擎进程起来就退出」。
+    ("js/panel.mjs", include_str!("../runtime/js/panel.mjs")),
     (
         "js/host-api/package.json",
         include_str!("../runtime/js/host-api/package.json"),

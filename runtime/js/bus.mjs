@@ -861,6 +861,10 @@ function makeConsole() {
  * The host-api ESM module and these globals share the exact same function
  * objects, so a plugin can mix `import` and `host.*` freely.
  */
+export { panel } from './panel.mjs';
+
+import { panel as panelNs } from './panel.mjs';
+
 export function installGlobals() {
   const api = {
     // logging
@@ -897,6 +901,8 @@ export function installGlobals() {
     ws_close,
     // misc
     serverUrl,
+    // panel version (0.3.0) -- same name and meaning as the embedded QuickJS host
+    panel: panelNs,
   };
 
   const host = {
@@ -926,6 +932,9 @@ export function installGlobals() {
   // The embedded QuickJS host exposes this name too; keeping it helps plugins
   // that were written against it.
   globalThis.host_api = host;
+  // Bare `panel` (same object as host.panel and host-api's named export): the
+  // bare-name loop below only copies functions, and panel is an object.
+  globalThis.panel = panelNs;
 
   // Mirror the Node adapter's convenience: bare names are available if the
   // runtime does not already define them. `host.*` remains the documented API.

@@ -1,6 +1,6 @@
 [package]
 name = "plugin-panel"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
 
@@ -95,6 +95,13 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pki-types = "1"
 webpki-roots = "1"
 base64 = "0.23"
+# gzip / gunzip（QuickJS 的 node:zlib 兼容层）。**本来就在依赖树里**
+# （ureq 3 → flate2 1.1.10），加为直接依赖不增加任何编译单元 —— 与上面几个同一条理由。
+# 只用默认后端（miniz_oxide，纯 Rust）：不引 zlib-ng/C，静态二进制不受影响。
+flate2 = "1.1"
+# 版本门禁（src/panelversion.rs）的 semver 比较。**本来就在依赖树里**
+# （rustc_version → semver 1.0.28），加为直接依赖不增加编译单元。
+semver = "1"
 # 上传：zip 解压到插件目录 / 任务目录。只编 deflate，不把 bzip2/lzma/zstd 全拖进来。
 #
 # 2.6 → 9：2.6.1 命中 3 条公告（2026-0367/0368/0369，前提是调用 `extract()`，

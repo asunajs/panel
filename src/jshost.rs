@@ -360,6 +360,28 @@ globalThis.host_api = {
         __register_route(String(method).toUpperCase() + ' ' + String(path), handler);
         return path;
     },
+    // ---- 面板版本（0.3.0）----
+    //
+    // 给插件做**能力降级**用的，不是给门禁用的：门禁在加载前由 Rust 侧读
+    // 源文件头的 @panel 声明（src/panelversion.rs），那时 JS 还没跑起来。
+    //
+    // 为什么挂在 host_api 上（并且同时是全局 panel）：插件里的写法有两种
+    // —— import { panel } from 'host-api' 和直接 panel.version()。两种都得能用，
+    // 而且必须是**同一个对象**（插件拿它做 === 比较时不能出岔子）。
+    panel: {
+        version: function () {
+            return typeof __host_panel_version === 'function'
+                ? String(__host_panel_version())
+                : '0.0.0';
+        },
+        atLeast: function (v) {
+            if (typeof __host_panel_at_least !== 'function') return false;
+            var r = String(__host_panel_at_least(String(v)));
+            // 宿主用 "!ERR:" 前缀回报「版本串非法」—— 那是插件写错了，必须抛。
+            if (r.indexOf('!ERR:') === 0) throw new Error(r.slice(5));
+            return r === '1';
+        },
+    },
 };
 
 // ---- 向后兼容：host.* 是同一个东西的老名字 ----
@@ -371,6 +393,8 @@ globalThis.host_api = {
 // **看起来像**少了一堆：现在除了 cron 这个名字，host 上有什么完全由 host_api 决定。
 globalThis.host = Object.create(host_api);
 globalThis.host.cron = host_api.register_cron;
+// 裸名 panel：插件里直接写 panel.version() 也能用（与 host-api 的具名导出同一个对象）。
+globalThis.panel = host_api.panel;
 // console 逐档映射到对应的日志级别。
 //
 // ⚠ 老实现把 `console.info` / `console.debug` **都**塞进 info —— 那是错的：
@@ -726,6 +750,7 @@ export const ws_open = api.ws_open;
 export const ws_send = api.ws_send;
 export const ws_recv = api.ws_recv;
 export const ws_close = api.ws_close;
+export const panel = api.panel;
 export const register_route = api.register_route;
 export const register_nav = api.register_nav;
 export const set_job_paused = api.set_job_paused;
@@ -1039,6 +1064,12 @@ fn node_module_parts(name: &str) -> Option<(&'static str, &'static [&'static str
             crate::jscompat::buffer::EXPORTS,
             "buffer",
         )),
+        // zlib 只有 gzip/gunzip 两个同步函数（见 docs/node-compat.md 的 node:zlib 行）。
+        "node:zlib" => Some((
+            crate::jscompat::zlib::BODY,
+            crate::jscompat::zlib::EXPORTS,
+            "zlib",
+        )),
         _ => None,
     }
 }
@@ -1054,6 +1085,7 @@ const BUILTIN_NODE_MODULES: &[&str] = &[
     "node:crypto",
     "node:url",
     "node:buffer",
+    "node:zlib",
 ];
 
 /// 内置模块的 **ESM** 源码（给 `import` 用）。
@@ -1097,6 +1129,29 @@ fn install_builtin_node_modules<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         }
     }
     ctx.globals().set("__host_node_cjs", map)
+}
+
+/// 面板版本原语（0.3.0）：给 BOOTSTRAP 里的 `panel` 命名空间用。
+///
+/// 单独抽成函数是因为**两处都要装同一份**：真实的插件 Context（`install_host`）
+/// 与兼容层的单测宿主（`jscompat::with_compat`）。各写一份的话，测试验的就不是
+/// 生产跑的那条路 —— 而版本比较恰好是最容易「两边都对、但结果不一样」的那种代码。
+pub(crate) fn install_panel_primitives<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    ctx.globals().set(
+        "__host_panel_version",
+        Func::new(|| -> String { crate::panelversion::current().to_string() }),
+    )?;
+    ctx.globals().set(
+        "__host_panel_at_least",
+        Func::new(|v: String| -> String {
+            match crate::panelversion::at_least(&v) {
+                Ok(true) => "1".to_string(),
+                Ok(false) => "0".to_string(),
+                Err(e) => format!("!ERR:{e}"),
+            }
+        }),
+    )?;
+    Ok(())
 }
 
 /// 把宿主能力注入 Context：底层 `__host_*` 函数 + 引导脚本。
@@ -1557,6 +1612,8 @@ pub fn install_host<'js>(
     )?;
 
     let _ = logs;
+    // 必须在 BOOTSTRAP 之前：引导脚本里的 panel 命名空间要用这两个原语。
+    install_panel_primitives(ctx)?;
     ctx.eval::<(), _>(BOOTSTRAP)?;
     // Node/Web 兼容层（fetch / URL / TextEncoder / crypto）。**必须在 BOOTSTRAP 之后**：
     // 它用到 BOOTSTRAP 装好的 setTimeout 与 __fmt，见 src/jscompat/mod.rs 的说明。
@@ -2244,6 +2301,47 @@ mod tests {
             offenders.is_empty(),
             "§4.3.0 里写了代码没有的函数: {offenders:?} —— 照着文档写会拿到 undefined"
         );
+    }
+
+    /// 0.3.0：panel.version() / panel.atLeast() —— 插件用它做**能力降级**，
+    /// 而不是硬拒。三条不变量：与 web.rs 的 VERSION 同源、与 host-api 的具名导出
+    /// 是同一个对象、非法版本串抛错（不静默 false）。
+    #[test]
+    fn panel_namespace_exposes_version_and_at_least() {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            install_panel_primitives(&ctx).unwrap();
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            let got: String = ctx
+                .eval(
+                    r#"
+                    JSON.stringify({
+                        version: panel.version(),
+                        same: panel === host_api.panel,
+                        old: panel.atLeast('0.0.1'),
+                        future: panel.atLeast('999.0.0'),
+                        self: panel.atLeast(panel.version()),
+                        bad: (function () {
+                            try { panel.atLeast('nope'); return 'no throw'; }
+                            catch (e) { return e.message; }
+                        })(),
+                    })
+                    "#,
+                )
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            assert_eq!(v["version"], crate::web::VERSION, "必须与 web.rs 的 VERSION 同源");
+            assert_eq!(v["same"], true, "裸名 panel 与 host-api 的具名导出必须是同一个对象");
+            assert_eq!(v["old"], true, "0.0.1 当然满足");
+            assert_eq!(v["future"], false, "999.0.0 不满足");
+            assert_eq!(v["self"], true, "当前版本满足自己");
+            assert!(
+                v["bad"].as_str().unwrap().contains("不是合法版本号"),
+                "非法版本串要抛错，不能静默 false: {}",
+                v["bad"]
+            );
+        });
     }
 
     #[test]

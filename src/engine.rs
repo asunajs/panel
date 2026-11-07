@@ -5788,6 +5788,19 @@ fn load_one(
         }
     };
 
+    // ---- 版本门禁（0.3.0）----
+    //
+    // **在任何引擎启动之前**判：QuickJS 的 Context 还没建、Node/Bun 的子进程还没
+    // spawn。三个引擎都经过 load_one，所以这里是唯一的一处。
+    //
+    // 为什么错误文案要原样进 lp.error：面板的插件卡片直接显示它。用户看到的应该是
+    // 「需要面板 ≥ 0.3.0（当前 0.2.3），去这里升级」，而不是「插件坏了」。
+    if let Err(e) = crate::panelversion::gate(&name, &source) {
+        lp.error = Some(e.clone());
+        hostapi::push_log(logs, &name, "error", &format!("插件未加载: {e}"));
+        return (lp, Vec::new());
+    }
+
     // ---- 选引擎 ----
     let (engine, command) = match choose_engine(host, &name) {
         Ok(e) => e,

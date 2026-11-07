@@ -15,15 +15,16 @@
 // 这些**不是**没写完的 TODO，是宿主能力决定的上限。写进文件头，是为了让下一个
 // 读到 "fetch failed" 的人先看这里，而不是去翻宿主代码猜：
 //
-// 1. **请求体只能是文本**（string / URLSearchParams）。Uint8Array / ArrayBuffer /
-//    DataView 一律抛 TypeError：宿主 http_fetch 的 body 是 JSON 里的字符串，
-//    二进制会被静默损坏 —— 发出去的字节和插件以为的不一样，这比报错难查一百倍。
-//    （响应侧可以拿字节：new Response(new Uint8Array([1,2])).bytes() 是本地对象，
-//    不经宿主，所以照 Node 支持。）
+// 1. **请求体支持文本与字节**（与 Node 一致）：string / URLSearchParams 走文本，
+//    Uint8Array / ArrayBuffer / Buffer / DataView 走字节。字节不进 JSON 字符串 ——
+//    宿主 RPC 有一个**内部**字段 body_b64（base64）专门收它，插件永远看不到：
+//    插件面就是 Node 的 `body: Uint8Array`（见 src/hostapi.rs 的 request_body_bytes）。
+//    ReadableStream 仍然不支持（没有流，见第 3 条）。
+//    ⚠ 0.3.0 起才接受字节；之前一律 TypeError（docs/plugin-api.md §4.10.4 有记）。
 // 2. **redirect 只支持 'follow'**。宿主自己跟跳（最多 3 跳、每跳重新过 SSRF），
 //    'manual' / 'error' 抛 TypeError：3xx 的原样响应根本到不了 JS 这一层。
 // 3. **没有流**。宿主一次把响应读完（上限 1 MiB），所以 response.body 不存在，
-//    request.body 是**字符串**（Node 是 ReadableStream）。
+//    request.body 是**字符串或 Uint8Array**（Node 是 ReadableStream）。
 // 4. **重定向后的最终 URL 不知道**：response.url 是请求时的 URL，
 //    response.redirected 恒为 false（宿主只回 status / headers / body）。
 // 5. **statusText 由状态码表推出**（见下面 STATUS_TEXT，取自 node:http 的
@@ -52,7 +53,8 @@
 
 var C = globalThis.__jscompat;
 if (!C || typeof C.utf8Encode !== 'function' || typeof C.utf8Decode !== 'function'
-    || typeof C.toBytes !== 'function') {
+    || typeof C.toBytes !== 'function' || typeof C.b64encode !== 'function'
+    || typeof C.b64decode !== 'function') {
     throw new Error('jscompat/fetch.js 必须在 text.js 之后加载（缺 __jscompat 的字节工具）');
 }
 
@@ -67,6 +69,8 @@ if (typeof globalThis.fetch_async !== 'function') {
 var utf8Encode = C.utf8Encode;
 var utf8Decode = C.utf8Decode;
 var toBytes = C.toBytes;
+var b64encode = C.b64encode;
+var b64decode = C.b64decode;
 
 // ════════════════════════════════════════════════════ 小工具
 
@@ -360,18 +364,27 @@ function cloneHeaders(src, guard) {
 
 // ════════════════════════════════════════════════════ body 工具
 
-/// 请求体 → 文本。**二进制明确拒绝**（见文件头已知差异 1）。
-function bodyToText(body, what) {
-    if (typeof body === 'string') return body;
-    if (isURLSearchParams(body)) return String(body);
+/// 请求体 → { text, bytes }。两个字段**至多一个**非 null。
+///
+/// 与 Node 的 body 类型对齐：string / URLSearchParams 走文本；
+/// ArrayBuffer / TypedArray / DataView（含 Buffer）走字节 —— 字节不进 JSON
+/// 字符串，改走宿主 RPC 的内部字段 body_b64（见文件头已知差异 1）。
+///
+/// ReadableStream 仍然明确拒绝：面板的 fetch 没有流，硬接受只会发出一个空 body，
+/// 那比报错难查得多。
+function bodyToParts(body, what) {
+    if (typeof body === 'string') return { text: body, bytes: null };
+    if (isURLSearchParams(body)) return { text: String(body), bytes: null };
     if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+        return { text: null, bytes: copyBytes(toBytes(body, what)) };
+    }
+    if (body !== null && typeof body === 'object' && typeof body.getReader === 'function') {
         throw new TypeError(
-            what + ' 只支持文本（string / URLSearchParams）：宿主 http_fetch 的 body 走 JSON 字符串，' +
-            '二进制会被静默损坏。要发字节请自己编码成文本（如 base64）。' +
-            '（Node 支持二进制 body，这是本面板的已知差异。）'
+            what + ' 不支持 ReadableStream：面板的 fetch 没有流（响应体也是整段读的）。' +
+            '请先把流读完再用 string / Uint8Array 发。'
         );
     }
-    return String(body);
+    return { text: String(body), bytes: null };
 }
 
 /// 响应体 → 字节。这里允许二进制：Response 是本地的快照，谁也拦不着，
@@ -772,16 +785,22 @@ class Request {
         else headers = new Headers();
 
         var bodyText = null;
+        var bodyBytes = null;
         if (init.body !== undefined && init.body !== null) {
-            bodyText = bodyToText(init.body, 'Request 的 body');
-        } else if (base && base._bodyText !== null) {
+            var parts = bodyToParts(init.body, 'Request 的 body');
+            bodyText = parts.text;
+            bodyBytes = parts.bytes;
+        } else if (base && (base._bodyText !== null || base._bodyBytes !== null)) {
             bodyText = base._bodyText;
+            bodyBytes = base._bodyBytes === null ? null : copyBytes(base._bodyBytes);
         }
 
         // GET/HEAD 不能带 body —— 规范如此，宿主那边也会把 body 发出去（更糟）
-        if (bodyText !== null && (method === 'GET' || method === 'HEAD')) {
+        if ((bodyText !== null || bodyBytes !== null) && (method === 'GET' || method === 'HEAD')) {
             throw new TypeError('Request with GET/HEAD method cannot have body.');
         }
+        // 与 Node 一致：**只有**文本 body 补默认 content-type。
+        // 字节 body 不猜类型（猜成 text/plain 会把二进制说成文本，服务器那边可能据此改行为）。
         if (bodyText !== null && !headers.has('content-type')) {
             ensureContentType(headers, isURLSearchParams(init.body) ? FORM_CONTENT_TYPE : TEXT_CONTENT_TYPE);
         }
@@ -795,14 +814,20 @@ class Request {
         this._method = method;
         this._headers = headers;
         this._bodyText = bodyText;
+        this._bodyBytes = bodyBytes;
         this._signal = signal;
     }
 
     get url() { return this._url; }
     get method() { return this._method; }
     get headers() { return this._headers; }
-    /// ⚠ 与 Node 的差异：这里是**字符串**（没有 body 时是 null），Node 是 ReadableStream。
-    get body() { return this._bodyText; }
+    /// ⚠ 与 Node 的差异：这里是**字符串或 Uint8Array**（没有 body 时是 null），
+    /// Node 是 ReadableStream。文本 body 仍然返回字符串（0.2.x 就是这样，老代码不受影响）；
+    /// 字节 body 返回一份**拷贝**（调用方之后改自己那块内存不该影响 Request）。
+    get body() {
+        if (this._bodyText !== null) return this._bodyText;
+        return this._bodyBytes === null ? null : copyBytes(this._bodyBytes);
+    }
     get signal() { return this._signal; }
 
     clone() {
@@ -811,6 +836,7 @@ class Request {
         c._method = this._method;
         c._headers = cloneHeaders(this._headers, 'none');
         c._bodyText = this._bodyText;
+        c._bodyBytes = this._bodyBytes === null ? null : copyBytes(this._bodyBytes);
         c._signal = this._signal;
         return c;
     }
@@ -852,7 +878,10 @@ function hostOptionsOf(req, opts) {
     var o = { method: req.method, headers: {} };
     var pairs = req._headers._pairs();
     for (var i = 0; i < pairs.length; i++) o.headers[pairs[i][0]] = pairs[i][1];
-    if (req._bodyText !== null) o.body = req._bodyText;
+    // 字节 body 走**内部**字段 body_b64：宿主 RPC 是 JSON 载体，二进制塞进字符串
+    // 会被改写（UTF-8 往返）。插件看不到这个名字，它只写 Node 的 `body: Uint8Array`。
+    if (req._bodyBytes !== null) o.body_b64 = b64encode(req._bodyBytes);
+    else if (req._bodyText !== null) o.body = req._bodyText;
     if (opts.timeout_ms !== null) o.timeout_ms = opts.timeout_ms;
     return o;
 }
@@ -864,9 +893,23 @@ function responseFromHost(raw, url) {
     if (!isFinite(status)) status = 0;
     status = Math.floor(status);
 
-    var bodyText = '';
-    if (raw && typeof raw.body === 'string') bodyText = raw.body;
-    else if (raw && raw.body !== undefined && raw.body !== null) bodyText = String(raw.body);
+    // 响应体：**优先**用宿主给的原始字节（body_b64）。以前是从文本再 encode 回去 ——
+    // 文本是 UTF-8 宽松解码的产物，二进制一旦进过那一步就回不来了（这是
+    // 「发出去 703 字节而不是 489」那类 bug 的响应侧孪生）。
+    var bodyBytes = null;
+    if (raw && typeof raw.body_b64 === 'string' && raw.body_b64 !== '') {
+        try {
+            bodyBytes = b64decode(raw.body_b64, false);
+        } catch (e) {
+            bodyBytes = null;   // 宿主给的 base64 坏了：退回文本，别让整个响应炸掉
+        }
+    }
+    if (bodyBytes === null) {
+        var bodyText = '';
+        if (raw && typeof raw.body === 'string') bodyText = raw.body;
+        else if (raw && raw.body !== undefined && raw.body !== null) bodyText = String(raw.body);
+        bodyBytes = utf8Encode(bodyText);
+    }
 
     var headers = new Headers();
     var h = raw && raw.headers;
@@ -880,7 +923,7 @@ function responseFromHost(raw, url) {
     }
 
     return responseFromParts(
-        status, statusTextOf(status), headers, utf8Encode(bodyText), url, 'basic', false
+        status, statusTextOf(status), headers, bodyBytes, url, 'basic', false
     );
 }
 
@@ -895,7 +938,7 @@ function fetchFailed(cause) {
 /// fetch(input, init)。
 ///
 /// 形状与 Node 对齐的几处**容易写错**的地方：
-///   · 构造阶段的错误（URL 非法、GET 带 body、二进制 body）**返回 reject 的
+///   · 构造阶段的错误（URL 非法、GET 带 body、ReadableStream body）**返回 reject 的
 ///     Promise 而不是同步 throw** —— Node 就是这样，await fetch(...) 的
 ///     try/catch 才接得住；
 ///   · 网络/宿主失败一律包成 TypeError('fetch failed', { cause })；

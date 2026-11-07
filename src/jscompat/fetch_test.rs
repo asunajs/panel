@@ -115,6 +115,16 @@ fn host_response(status: i64, headers: &[(&str, &str)], body: &str) -> String {
     serde_json::json!({ "status": status, "headers": map, "body": body }).to_string()
 }
 
+/// 带 body_b64 的宿主响应（0.3.0 起 do_http_fetch 总是同时给文本与原始字节）。
+fn host_response_with_b64(status: i64, headers: &[(&str, &str)], body: &str, b64: &str) -> String {
+    let mut map = serde_json::Map::new();
+    for (k, v) in headers {
+        map.insert((*k).to_string(), serde_json::Value::String((*v).to_string()));
+    }
+    serde_json::json!({ "status": status, "headers": map, "body": body, "body_b64": b64 })
+        .to_string()
+}
+
 // ════════════════════════════════════════════════ fetch 的形状
 
 #[test]
@@ -326,37 +336,90 @@ fn fetch_rejects_invalid_urls_without_touching_the_host() {
     });
 }
 
+/// 二进制请求体走**内部** body_b64 通道（0.3.0 起；之前是 TypeError）。
+///
+/// 这条测试盯的是「字节一个都不能变」：[0x00, 0xff, 0x13] 里既有 NUL 又有
+/// 非法 UTF-8 起始字节 —— 只要中间经过一次 String 往返，字节就会变。
 #[test]
-fn binary_request_bodies_are_rejected_with_an_explanation() {
+fn binary_request_bodies_ride_the_internal_body_b64_channel() {
     with_fetch_compat(|rt, ctx| {
         stub_host(ctx);
         eval_unit(ctx, r#"
-            globalThis.__out = { sync: [], async: [] };
+            globalThis.__out = { sync: [], async: null };
             [new Uint8Array([1, 2]), new ArrayBuffer(2), new DataView(new ArrayBuffer(1))].forEach(function (b) {
-                try { new Request('http://x.test/', { method: 'POST', body: b }); __out.sync.push('no throw'); }
+                try { new Request('http://x.test/', { method: 'POST', body: b }); __out.sync.push('ok'); }
                 catch (e) { __out.sync.push([e.name, e.message]); }
             });
-            fetch('http://x.test/', { method: 'POST', body: new Uint8Array([1]) }).then(function () {
-                __out.async.push('no throw');
-            }, function (e) {
-                __out.async.push([e.name, e.message]);
-            });
+            fetch('http://x.test/bin', { method: 'POST', body: new Uint8Array([0x00, 0xff, 0x13]) })
+                .then(function () { __out.async = 'ok'; },
+                      function (e) { __out.async = [e.name, e.message]; });
         "#);
+        let calls = eval_json(ctx, "return __fetch_calls;");
+        let opts = &calls[0]["opts"];
+        assert_eq!(
+            opts["body_b64"], "AP8T",
+            "字节 body 必须走内部字段 body_b64，且 base64 逐字节对应: {opts}"
+        );
+        assert!(
+            opts.get("body").is_none(),
+            "同一次请求不能既给 body 又给 body_b64: {opts}"
+        );
+        assert!(
+            opts["headers"].get("content-type").is_none(),
+            "字节 body 不猜 content-type（Node 如此）: {}",
+            opts["headers"]
+        );
+
+        let id = calls[0]["id"].as_i64().unwrap();
+        deliver(ctx, id, true, &host_response(200, &[], ""));
         pump(rt);
         let out = eval_json(ctx, "return __out;");
-        let sync = out["sync"].as_array().unwrap();
-        assert_eq!(sync.len(), 3);
-        for item in sync {
-            let pair = item.as_array().unwrap();
-            assert_eq!(pair[0], "TypeError", "二进制 body 必须是 TypeError");
-            let msg = pair[1].as_str().unwrap();
-            assert!(msg.contains("只支持文本"), "文案要讲清楚为什么: {msg}");
-            assert!(msg.contains("静默损坏"), "要说清后果（宿主会静默损坏）: {msg}");
-        }
-        let async_first = &out["async"][0];
-        assert_eq!(async_first[0], "TypeError", "fetch 侧同样要 reject（不是 throw）");
+        assert_eq!(
+            out["sync"],
+            serde_json::json!(["ok", "ok", "ok"]),
+            "Uint8Array / ArrayBuffer / DataView 都该接受"
+        );
+        assert_eq!(out["async"], "ok", "fetch 侧也不该再 reject");
+    });
+}
+
+/// 响应侧：arrayBuffer() / bytes() 拿的是**宿主给的原始字节**，
+/// 不是从「已经被 UTF-8 宽松解码过的文本」再 encode 回去的那一份。
+#[test]
+fn response_bytes_come_from_the_host_raw_bytes() {
+    with_fetch_compat(|rt, ctx| {
+        stub_host(ctx);
+        eval_unit(ctx, r#"
+            globalThis.__out = null;
+            fetch('http://x.test/bin').then(function (r) {
+                var a = r.clone(), b = r.clone();
+                return Promise.all([r.arrayBuffer(), a.bytes(), b.text()]).then(function (v) {
+                    __out = {
+                        ab: Array.prototype.slice.call(new Uint8Array(v[0])),
+                        bytes: Array.prototype.slice.call(v[1]),
+                        text: v[2]
+                    };
+                });
+            }, function (e) { __out = { err: e.message }; });
+        "#);
         let calls = eval_json(ctx, "return __fetch_calls;");
-        assert_eq!(calls.as_array().map(|a| a.len()), Some(0), "二进制 body 绝不能发出去");
+        let id = calls[0]["id"].as_i64().unwrap();
+        // 0x00 0xff 0x13 的标准 base64 是 AP8T；body 文本是同一份字节的宽松解码
+        deliver(ctx, id, true, &host_response_with_b64(200, &[], "\u{0}\u{FFFD}\u{13}", "AP8T"));
+        pump(rt);
+
+        let out = eval_json(ctx, "return __out;");
+        assert_eq!(
+            out["ab"],
+            serde_json::json!([0, 255, 19]),
+            "arrayBuffer 必须逐字节等于服务器内容: {out}"
+        );
+        assert_eq!(
+            out["bytes"],
+            serde_json::json!([0, 255, 19]),
+            "bytes() 与 arrayBuffer() 同源: {out}"
+        );
+        assert_eq!(out["text"], "\u{0}\u{FFFD}\u{13}", "text() 仍然是宽松解码: {out}");
     });
 }
 
@@ -1117,11 +1180,11 @@ fn compat_globals_are_writable_configurable_but_not_enumerable() {
 //      [object AbortController] / [object AbortSignal]
 //
 // 与 Node **不一致**的地方（都在 fetch.js 文件头「已知差异」里，这里只列测试覆盖到的）：
-//   · 二进制请求体：Node 支持，这里 TypeError（宿主只收文本）
-//     —— binary_request_bodies_are_rejected_with_an_explanation
+//   · 二进制请求体：**已对齐**（0.3.0）。字节走宿主 RPC 的内部字段 body_b64，
+//     插件面就是 Node 的 body: Uint8Array —— binary_request_bodies_ride_the_internal_body_b64_channel
 //   · redirect 'manual'/'error'：Node 支持，这里 TypeError（宿主已经跟完了）
 //     —— redirect_only_supports_follow_and_says_why
 //   · response.redirected 恒 false、response.url 是请求 URL（拿不到最终 URL）
 //   · statusText 是查表（服务器自定义短语看不到）；自己 new 的 Response 与 Node 一样是 ''
 //   · response.headers 一律只读（Node 24 对 new 出来的 Response 允许改）
-//   · request.body 是字符串（Node 是 ReadableStream）
+//   · request.body 是字符串或 Uint8Array（Node 是 ReadableStream）

@@ -57,6 +57,7 @@ mod jscompat;
 mod jshost;
 mod log;
 mod market;
+mod panelversion;
 mod pluginfs;
 mod push;
 mod ratelimit;

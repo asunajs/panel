@@ -42,7 +42,7 @@
 | `CryptoKey` | 🟡 | ✅ | 类本身；只由 `subtle.importKey('raw', …)` 产出（HMAC） |
 | `fetch` | 🟡 | ✅ | 形状按 Node，**通路走面板数据面**（SSRF/超时/1 MiB/脱敏）；边界见 §10 |
 | `Headers` | ✅ | ✅ | 大小写不敏感、多值 `', '` 合并、迭代按名字字典序；`getSetCookie` 没有 |
-| `Request` | 🟡 | ✅ | `url` / `method` / `headers` / `body`（字符串）/ `signal` / `clone()`；没有 Node 的流式 body 与那些请求选项 |
+| `Request` | 🟡 | ✅ | `url` / `method` / `headers` / `body`（字符串或 `Uint8Array`）/ `signal` / `clone()`；没有 Node 的流式 body 与那些请求选项 |
 | `Response` | 🟡 | ✅ | `text/json/bytes/arrayBuffer/clone` + 静态 `json()/error()`；`headers` 只读、没有 `body` 流 |
 | `AbortController` | ✅ | ✅ | `abort(reason)` / `signal` |
 | `AbortSignal` | 🟡 | ✅ | `aborted` / `reason` / `onabort` / `addEventListener` / `throwIfAborted` / `AbortSignal.abort` / `AbortSignal.timeout`；**没有** `AbortSignal.any` |
@@ -55,6 +55,7 @@
 | `performance` | 🟡 | ✅ | 只有 `now()` 与 `timeOrigin`；没有 mark/measure/observer |
 | `sleep` | ✅ | ❌ | **面板扩展**：`await sleep(ms)`（Node 用 timers/promises） |
 | `fetch_async` | ✅ | ❌ | **面板扩展**：不阻塞 worker 的 HTTP，返回 `{status, headers, body}` |
+| `panel` | ✅ | 🟡 | **面板扩展**：`version()` / `atLeast(v)`（[host-api.md §1.2.12](host-api.md#1212-面板版本panelversion--panelatleast)）。Node/Bun 侧也有，版本从 `PANEL_VERSION` 读 |
 | `host_api` | ✅ | ❌ | **面板扩展**：宿主 API 门面（Node/Bun 里用 `host-api` 模块，同名同义） |
 | `host` | ✅ | ❌ | `host_api` 的历史别名（多一个 `cron` 名字） |
 | `require` | 🟡 | ✅ | CJS 兼容层：相对文件 + `node:path/fs/crypto/url`；**没有** npm / package.json / `require.resolve` |
@@ -69,7 +70,7 @@
 | `EventTarget` | ❌ | ✅ | 同上 |
 | `TextEncoderStream` | ❌ | ✅ | 没有流 |
 | `TextDecoderStream` | ❌ | ✅ | 没有流 |
-| `FormData` | ❌ | ✅ | 请求体只收文本；自己拼 `application/x-www-form-urlencoded` 或 JSON |
+| `FormData` | ❌ | ✅ | 自己拼 `application/x-www-form-urlencoded` 或 JSON（body 支持字节，见 §10.1） |
 | `Blob` | ❌ | ✅ | |
 | `File` | ❌ | ✅ | |
 | `URLPattern` | ❌ | ✅ | 路由匹配自己写 |
@@ -89,7 +90,7 @@
 
 ## 3. Node 内置模块总表
 
-面板内置模块只有**五个**（外加面板自己的 `host-api`）：
+面板内置模块只有**六个**（外加面板自己的 `host-api`）：
 
 | 模块 | 默认引擎 | Node/Bun | 说明 |
 |---|---|---|---|
@@ -98,6 +99,7 @@
 | `node:crypto` | 🟡 | ✅ | 9 个导出；算法只有 SHA-1/256/384/512 + HMAC |
 | `node:url` | 🟡 | ✅ | 5 个导出；POSIX 形态；没有 legacy `parse/format/resolve` |
 | `node:buffer` | ✅ | ✅ | 10 个导出：`Buffer` / `SlowBuffer` / `atob` / `btoa` / `constants` / `isUtf8` / `isAscii` / `kMaxLength` / `kStringMaxLength` / `INSPECT_MAX_BYTES` |
+| `node:zlib` | 🟡 | ✅ | 3 个导出：`gzipSync` / `gunzipSync` / `constants`（**只有**这两个同步函数；§8.1） |
 | `node:os` | ❌ | ✅ | 没有 homedir/tmpdir/platform；路径基准用 `fs.rootDir()` |
 | `node:child_process` | ❌ | ✅ | 要跑外部命令请写成**脚本任务**（`TASKS_DIR`），或用 Node/Bun 运行时 |
 | `node:net` / `node:http` / `node:https` | ❌ | ✅ | 客户端用 `fetch` / `http_fetch`；**不能**在 QuickJS 里监听端口 |
@@ -106,7 +108,6 @@
 | `node:util` | ❌ | ✅ | 没有 util.format/promisify/inspect |
 | `node:timers` | ❌ | ✅ | 全局 `setTimeout` 等可用；`timers/promises` 没有（用 `sleep`） |
 | `node:assert` | ❌ | ✅ | 自己写 `if (!x) throw new Error(...)` |
-| `node:zlib` | ❌ | ✅ | 没有压缩/解压 |
 | `node:dns` | ❌ | ✅ | 出网只通过 `fetch` / `http_fetch` / `ws_*` |
 | `node:worker_threads` | ❌ | ✅ | 面板的并行单位是 worker（由 `worker_hint` 声明），插件不能自己开线程 |
 | `node:fs/promises` | ❌ | ✅ | 只有同步 fs |
@@ -273,6 +274,39 @@
 | 读写 64 位整数 | `readBigInt64BE|LE` / `readBigUInt64BE|LE` 与对应 `write*` | 用 `BigInt` |
 | 没有 | pool 复用 / `lastIndexOf` / `swap16/32/64` / legacy 别名 | 插件里罕见；需要可再加 |
 
+### 8.1 `node:zlib`：只有 gzip / gunzip（同步、Buffer 进出）
+
+```js
+import { gzipSync, gunzipSync } from 'node:zlib';
+
+const gz = gzipSync(Buffer.from('hello'));   // Buffer，1f 8b 开头
+gunzipSync(gz).toString('utf8');             // 'hello'
+```
+
+**gzip 头的 mtime 恒为 0**，且 `options.mtime` 被忽略 —— 这正是 Node 的行为（Node 的 zlib
+根本没有 mtime 选项，头一直是 0），所以 `gzipSync(buf, { mtime: 0 })` 两边同义。
+同一份输入压两次得到**完全一样**的字节（缓存 / 签名 / 逐字节对拍都靠这条）。
+
+单次输入与输出各 **16 MiB** 上限：解压炸弹（几 KB 压出几 GB）必须在面板进程外面挡住。
+
+#### 导出清单：node:zlib
+
+| 导出 | 状态 | 说明 |
+|---|---|---|
+| `gzipSync` | ✅ | `(buffer[, options])`。`buffer` 可以是 string（utf8）/ Buffer / Uint8Array / ArrayBuffer / DataView；返回 **Buffer**。`options.level` 支持 0–9，其它选项忽略 |
+| `gunzipSync` | ✅ | `(buffer[, options])`。返回 **Buffer**；坏数据抛 `Error`，`code = 'Z_DATA_ERROR'`（与 Node 一致） |
+| `constants` | 🟡 | 常用子集：压缩级别 / flush / 错误码（`Z_NO_COMPRESSION`…`Z_VERSION_ERROR`）。Node 还有 Brotli 那一套，这里没有 |
+
+#### 不支持：node:zlib
+
+| 名称 | 说明 |
+|---|---|
+| `deflateSync` / `inflateSync` | 没有裸 DEFLATE（只有带 gzip 头的两个）。要裸流请切 Node/Bun |
+| `brotliCompressSync` / `brotliDecompressSync` | 没有 Brotli |
+| `createGzip` / `createGunzip` | 没有流 |
+| `gzip` / `gunzip`（异步回调形态） | 只有同步版本 |
+| `crc32` | Node 22+；自己算或用 `node:crypto` 的摘要 |
+
 ## 9. WebCrypto（`crypto.subtle`）矩阵
 
 | 方法 | 状态 | 说明 |
@@ -310,7 +344,8 @@
 | `method` | ✅ | 默认 GET；大小写归一 |
 | `headers` | ✅ | `Headers` / 普通对象 / 键值对数组 |
 | `body`（string / URLSearchParams） | ✅ | 自动补 `content-type`（Node 同款默认值） |
-| `body`（Uint8Array / ArrayBuffer / DataView） | ❌ | **抛 TypeError**：宿主 HTTP 只收文本，二进制会被静默损坏 |
+| `body`（Uint8Array / ArrayBuffer / Buffer / DataView） | ✅ | **0.3.0 起**逐字节原样发出（compat 层走宿主 RPC 的内部字段 `body_b64`，插件看不到它） |
+| `body`（ReadableStream） | ❌ | **抛 TypeError**：没有流（响应体也是整段读的） |
 | `signal` | 🟡 | 已 abort 立刻拒绝；**abort 只是「不再等它」**，宿主请求仍会跑完（不可取消） |
 | `timeout_ms` | ✅ | **面板扩展**；宿主钳位 100–60000，默认 10000 |
 | `redirect: 'follow'` | ✅ | 宿主自己跟（最多 3 跳，每跳重新过 SSRF 判定） |
@@ -332,7 +367,7 @@
 | `Response.json()` / `Response.error()` | ✅ | 静态方法 |
 | `headers.append/delete/get/has/set/forEach/entries/keys/values/[Symbol.iterator]` | ✅ | 迭代按名字字典序、同名多值合并 |
 | `headers.getSetCookie()` | ❌ | |
-| `request.url/method/headers/body/signal/clone()` | ✅ | `request.body` 是**字符串**（没有 body 时 `null`） |
+| `request.url/method/headers/body/signal/clone()` | ✅ | `request.body` 是**字符串或 `Uint8Array`**（没有 body 时 `null`） |
 | `request.bodyUsed` / `duplex` / `keepalive` / `cache` / `mode` / `credentials` / `referrer` | ❌ | 不存在 |
 | `AbortSignal.aborted/reason/onabort/addEventListener/removeEventListener/throwIfAborted` | ✅ | |
 | `AbortSignal.abort()` / `AbortSignal.timeout()` | ✅ | 静态方法 |
@@ -377,7 +412,7 @@
 | `Buffer.allocUnsafe` 给未初始化内存 | 面板返回**清零**内存 —— 等价于 Node 启动时永远带 `--zero-fill-buffers`（Node 官方支持的模式），不会把上一个插件的残留泄漏给下一个 | 只会更安全；依赖「未初始化」内容的程序本来就违反 Node 契约 |
 | `Buffer.from(new DataView(...))` | Node 24 返回**空 Buffer**（DataView 没有 `length`，Node 当成 array-like）；面板复制 DataView 覆盖的那段 | 面板行为更接近使用意图；要严格 Node 行为请先 `Buffer.from(new Uint8Array(dv))` |
 | Buffer 读写的越界错误码 | 面板统一 `RangeError` `ERR_OUT_OF_RANGE`；Node 混用 `ERR_OUT_OF_RANGE` 与 `ERR_BUFFER_OUT_OF_BOUNDS` | 判 `e instanceof RangeError` 最稳；只看 `e.code` 的话以 `ERR_OUT_OF_RANGE` 为准 |
-| `fetch` 无流、无二进制请求体、无 redirect manual | 见 §10 | 需要这些能力就切 Node/Bun 运行时 |
+| `fetch` 无流、无 redirect manual | 见 §10 | 需要流式响应就切 Node/Bun 运行时（字节 body / 字节响应 **0.3.0 起已有**） |
 | `crypto` 只有摘要/HMAC | 见 §9 | 对称/非对称加密切 Node/Bun |
 
 ## 14. 这张表怎么保证不漂移

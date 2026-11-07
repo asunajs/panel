@@ -639,7 +639,10 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
             cmd.env(key, v);
         }
     }
-    cmd.env("PANEL_PLUGIN_NAME", &spec.name)
+    // 面板版本：外部运行时的 panel.version() 从这里读（0.3.0）。
+    // env_clear 之后**不显式加就没有**，所以这一行是必需的。
+    cmd.env("PANEL_VERSION", crate::web::VERSION)
+        .env("PANEL_PLUGIN_NAME", &spec.name)
         .env("PANEL_PLUGIN_FILE", &spec.file)
         .env("PANEL_SCRIPT", if spec.script { "1" } else { "0" })
         .env("PANEL_PLUGIN_DATA_DIR", &spec.data_dir)

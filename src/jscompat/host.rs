@@ -173,6 +173,83 @@ fn hmac_hex(alg: &str, key_b64: &str, data_b64: &str) -> String {
     hex_of(&hmac(alg, &key, &data))
 }
 
+// ──────────────────────────────────────────────── gzip / gunzip（node:zlib）
+//
+// 为什么在 compat 层而不是 hostapi：这两个是**纯函数**（没有宿主状态、不碰
+// 文件/网络/DB），和上面的摘要原语同类。放进 hostapi 就得为了拿不到 HostState
+// 绕一圈，反而多一层。
+//
+// gzip 头 mtime 固定 0：Node 的 zlib 也是这样（它根本不提供 mtime 选项），
+// 而协议信封（央视频 jacc 之类）会对头字节敏感 —— `gzipSync(buf, {mtime: 0})`
+// 是插件侧最常见的写法，语义上必须对得上。
+
+/// 单次 gzip / gunzip 的**输出**上限。解压炸弹（几 KB 压出几 GB）必须在这里挡住：
+/// 插件跑在面板进程里，一次 OOM 就是整个面板重启。
+const MAX_ZLIB_OUT: usize = 16 * 1024 * 1024;
+
+fn gzip_bytes(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let level = if level < 0 {
+        flate2::Compression::default()
+    } else if level <= 9 {
+        flate2::Compression::new(level as u32)
+    } else {
+        return Err(format!("gzip 的 level 必须在 0–9 之间，收到 {level}"));
+    };
+    // mtime(0)：见上面的说明。GzBuilder 的默认 mtime 是**当前时间**，
+    // 不显式置 0 会让同一份输入每次压出来的字节都不一样（缓存/签名全失效）。
+    let mut enc = flate2::GzBuilder::new().mtime(0).write(Vec::new(), level);
+    enc.write_all(data).map_err(|e| format!("gzip 失败: {e}"))?;
+    enc.finish().map_err(|e| format!("gzip 失败: {e}"))
+}
+
+fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .take(MAX_ZLIB_OUT as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("gunzip 失败: {e}（输入不是合法的 gzip 数据？）"))?;
+    if out.len() > MAX_ZLIB_OUT {
+        return Err(format!(
+            "gunzip 的输出超过 {MAX_ZLIB_OUT} 字节上限（疑似压缩炸弹），已中止"
+        ));
+    }
+    Ok(out)
+}
+
+fn gzip_b64(data_b64: &str, level: i32) -> String {
+    let data = match decode_b64(data_b64) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    if data.len() > MAX_INPUT {
+        return err(format!("gzip 输入太大（{} 字节，上限 {MAX_INPUT}）", data.len()));
+    }
+    match gzip_bytes(&data, level) {
+        Ok(v) => b64_encode_std(&v),
+        Err(e) => err(e),
+    }
+}
+
+fn gunzip_b64(data_b64: &str) -> String {
+    let data = match decode_b64(data_b64) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    if data.len() > MAX_INPUT {
+        return err(format!("gunzip 输入太大（{} 字节，上限 {MAX_INPUT}）", data.len()));
+    }
+    match gunzip_bytes(&data) {
+        Ok(v) => b64_encode_std(&v),
+        Err(e) => err(e),
+    }
+}
+
+fn b64_encode_std(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// 把三个 `__host_*` 原语装进 Context。
 ///
 /// 名字都带 `_hex` / `_b64` 后缀：**传输格式写在名字里**，读 `crypto.js` 的人
@@ -192,12 +269,56 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
             hmac_hex(&alg, &key_b64, &data_b64)
         }),
     )?;
+    // 0.3.0：node:zlib 的两个原语。level < 0 = 默认档（Node 的默认也是 6 附近，
+    // flate2 的 default 是 6 —— 插件要精确控制就显式传 level）。
+    ctx.globals().set(
+        "__host_gzip_b64",
+        Func::new(|data_b64: String, level: i32| -> String { gzip_b64(&data_b64, level) }),
+    )?;
+    ctx.globals().set(
+        "__host_gunzip_b64",
+        Func::new(|data_b64: String| -> String { gunzip_b64(&data_b64) }),
+    )?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── gzip / gunzip（node:zlib 的 Rust 侧）──────────────────────────────
+
+    #[test]
+    fn gzip_header_has_zero_mtime_and_round_trips() {
+        let raw: Vec<u8> = (0u16..100).map(|i| (i % 251) as u8).collect();
+        let gz = gzip_bytes(&raw, -1).unwrap();
+        assert_eq!(&gz[..3], &[0x1f, 0x8b, 0x08], "gzip 魔数 + DEFLATE");
+        assert_eq!(&gz[4..8], &[0, 0, 0, 0], "mtime 必须置 0");
+        assert_eq!(gunzip_bytes(&gz).unwrap(), raw, "必须逐字节还原");
+        // 同一份输入压两次要得到**完全一样**的字节（mtime 为 0 才有这个性质）
+        assert_eq!(gz, gzip_bytes(&raw, -1).unwrap());
+    }
+
+    #[test]
+    fn gunzip_reports_bad_input_and_bombs() {
+        let e = gunzip_bytes(&[1, 2, 3, 4]).unwrap_err();
+        assert!(e.contains("gunzip"), "{e}");
+
+        // 解压炸弹：20 MiB 的零压成几十 KB，解开必须被输出闸挡住。
+        let big = vec![0u8; 20 * 1024 * 1024];
+        let gz = gzip_bytes(&big, -1).unwrap();
+        assert!(gz.len() < 100 * 1024, "零压出来应该很小，实际 {}", gz.len());
+        let e = gunzip_bytes(&gz).unwrap_err();
+        assert!(e.contains("上限"), "要说明是上限: {e}");
+    }
+
+    #[test]
+    fn gzip_level_out_of_range_is_reported() {
+        let e = gzip_bytes(b"x", 99).unwrap_err();
+        assert!(e.contains("level"), "{e}");
+        assert!(gzip_bytes(b"x", 9).is_ok());
+        assert!(gzip_bytes(b"x", 0).is_ok());
+    }
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)

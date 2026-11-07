@@ -169,6 +169,12 @@ struct CatalogEntry {
     sha256: Option<String>,
     #[serde(default)]
     size: Option<u64>,
+    /// 需要面板 ≥ 这个版本才能装（0.3.0）。不填 = 不设限。
+    ///
+    /// 只挡「从商城装」这一条路；真正的保证在加载时的 @panel 头
+    /// （src/panelversion.rs）。两个门禁是**互补**的，不是二选一。
+    #[serde(default)]
+    min_panel: Option<String>,
 }
 
 fn default_kind() -> String {
@@ -274,6 +280,10 @@ pub struct MarketItem {
     pub update_available: bool,
     pub broken: bool,
     pub transpiler: Option<String>,
+    /// 目录条目声明的最低面板版本（None = 不设限）。
+    pub min_panel: Option<String>,
+    /// 当前面板版本够不够（前端据此置灰安装按钮）。
+    pub min_panel_ok: bool,
     pub error: Option<String>,
 }
 
@@ -544,6 +554,8 @@ impl Market {
                     } else {
                         None
                     },
+                    min_panel: entry.min_panel.clone(),
+                    min_panel_ok: min_panel_ok(entry),
                     error: None,
                 }
             }
@@ -576,6 +588,8 @@ impl Market {
                 update_available: false,
                 broken: state.broken,
                 transpiler: None,
+                min_panel: entry.min_panel.clone(),
+                min_panel_ok: min_panel_ok(entry),
                 error: Some(e),
             },
         }
@@ -820,6 +834,11 @@ impl Market {
             .iter()
             .find(|e| e.id == id)
             .ok_or_else(|| format!("目录里没有 `{id}`"))?;
+
+        // 版本门禁（0.3.0）：**在下载之前**判 —— 不然用户白等一次网络往返，
+        // 而且回包里那句「装不了」会和「下载失败」混在一起。
+        ensure_min_panel(id, entry)?;
+
         let meta = self.resolve_cached(entry, false)?;
         if meta.source_type == "ts" && matches!(self.ts, TsTranspiler::None) {
             return Err(format!(
@@ -1630,6 +1649,11 @@ fn normalize_entry(e: &mut CatalogEntry) -> Result<(), String> {
             return Err(format!("`{}` 的 size 超过 64 MiB", e.id));
         }
     }
+    // min_panel 必须是合法 semver：写错了在**解析目录时**就报，不拖到用户点安装。
+    if let Some(min) = &e.min_panel {
+        crate::panelversion::at_least(min)
+            .map_err(|err| format!("`{}` 的 min_panel 不合法：{err}", e.id))?;
+    }
     if e.tags.len() > 8 {
         return Err(format!("`{}` 的 tags 太多（最多 8 个）", e.id));
     }
@@ -1639,6 +1663,34 @@ fn normalize_entry(e: &mut CatalogEntry) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 商城门禁（0.3.0）：目录条目要求的面板版本比当前新就拒绝安装。
+///
+/// 抽成自由函数是为了能直接测 —— install() 会真的去下载，单测不该碰网络。
+fn ensure_min_panel(id: &str, entry: &CatalogEntry) -> Result<(), String> {
+    match &entry.min_panel {
+        None => Ok(()),
+        Some(min) => {
+            if crate::panelversion::at_least(min)? {
+                Ok(())
+            } else {
+                Err(format!(
+                    "插件 {id} 需要面板 ≥ {min}（当前 {}），不能安装。请升级面板：https://github.com/asunajs/panel/releases",
+                    crate::panelversion::current()
+                ))
+            }
+        }
+    }
+}
+
+fn min_panel_ok(entry: &CatalogEntry) -> bool {
+    match &entry.min_panel {
+        None => true,
+        // 目录解析阶段已经校验过格式；这里再判一次是为了「万一」，并且
+        // **宁可显示不可装**（false）也不要让用户点了才知道。
+        Some(min) => crate::panelversion::at_least(min).unwrap_or(false),
+    }
 }
 
 fn valid_id(s: &str) -> bool {
@@ -1883,6 +1935,41 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    /// 版本门禁（0.3.0）：目录条目声明 min_panel。
+    #[test]
+    fn min_panel_is_parsed_validated_and_enforced() {
+        let text = r#"{
+          "schema": 1,
+          "plugins": [
+            {"id":"old-host","repo":"o/r","type":"file","path":"a.js","min_panel":"999.0.0"},
+            {"id":"fine","repo":"o/r2","type":"file","path":"b.js","min_panel":"0.0.1"},
+            {"id":"unset","repo":"o/r3","type":"file","path":"c.js"}
+          ]
+        }"#;
+        let entries = parse_catalog(text).unwrap();
+        let by_id = |id: &str| entries.iter().find(|e| e.id == id).unwrap().clone();
+
+        let old = by_id("old-host");
+        assert_eq!(old.min_panel.as_deref(), Some("999.0.0"));
+        assert!(!min_panel_ok(&old), "当前面板不够：按钮该置灰");
+        let e = ensure_min_panel("old-host", &old).unwrap_err();
+        assert!(e.contains("999.0.0"), "要写清需要什么版本: {e}");
+        assert!(e.contains(crate::panelversion::current()), "要写清当前版本: {e}");
+        assert!(e.contains("https://github.com/asunajs/panel/releases"), "{e}");
+
+        assert!(min_panel_ok(&by_id("fine")));
+        assert!(ensure_min_panel("fine", &by_id("fine")).is_ok());
+
+        // 不填 = 不设限：现有条目零改动
+        assert!(by_id("unset").min_panel.is_none());
+        assert!(ensure_min_panel("unset", &by_id("unset")).is_ok());
+
+        // 非法版本串在**解析目录时**就报错，不拖到用户点安装
+        let bad = r#"{"schema":1,"plugins":[{"id":"x","repo":"o/r","type":"file","path":"a.js","min_panel":"latest"}]}"#;
+        let err = parse_catalog(bad).unwrap_err();
+        assert!(err.contains("min_panel 不合法"), "{err}");
     }
 
     #[test]

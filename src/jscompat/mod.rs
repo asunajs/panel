@@ -64,6 +64,8 @@ pub mod buffer;
 pub mod url;
 /// `node:crypto` 内置模块（`import { createHash } from 'node:crypto'`）。
 pub mod crypto;
+/// `node:zlib` 内置模块（`import { gzipSync } from 'node:zlib'`）。
+pub mod zlib;
 
 /// 把兼容层装进一个插件 Context。
 ///
@@ -86,6 +88,8 @@ mod crypto_test;
 mod fetch_test;
 #[cfg(test)]
 mod buffer_test;
+#[cfg(test)]
+mod zlib_test;
 #[cfg(test)]
 mod node_compat_test;
 
@@ -110,6 +114,8 @@ pub(crate) fn with_compat<R>(
     let rt = rquickjs::Runtime::new().expect("建 Runtime");
     let ctx = rquickjs::Context::full(&rt).expect("建 Context");
     ctx.with(|ctx| {
+        // 与 install_host 同一份原语（见 jshost::install_panel_primitives 的说明）。
+        crate::jshost::install_panel_primitives(&ctx).expect("panel 版本原语注入失败");
         ctx.eval::<(), _>(crate::jshost::BOOTSTRAP)
             .expect("BOOTSTRAP 自身要能跑");
         install(&ctx).expect("兼容层自身要能跑");

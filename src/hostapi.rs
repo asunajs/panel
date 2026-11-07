@@ -46,6 +46,7 @@ use crate::runtimefs::RuntimePaths;
 use crate::runtimes::RuntimeCatalog;
 use crate::scheduler::{JobControl, JobPatch, TaskMeta, TaskSurface};
 use crate::wsclient;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -805,7 +806,13 @@ impl HostState {
             .and_then(|v| v.as_str())
             .unwrap_or("GET")
             .to_uppercase();
-        let body = opts.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        // 请求体：`body`（文本）与 `body_b64`（原始字节的 base64）二选一。
+        //
+        // `body_b64` 是 **compat 层与宿主之间的内部约定**，不是插件可见的 API：
+        // 插件面只写 Node 形状的 `body: Uint8Array`，由 src/jscompat/fetch.js 负责
+        // 编码（见 docs/plugin-api.md §4.10.4）。放在这里而不是给插件加一个
+        // 「面板专属参数」，是因为插件代码不该知道自己跑在哪个引擎上。
+        let body = request_body_bytes(&opts)?;
         let timeout_ms = opts
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
@@ -836,7 +843,7 @@ impl HostState {
                 &method,
                 url,
                 opts.get("headers").and_then(|v| v.as_object()),
-                body,
+                &body,
                 timeout_ms,
             );
         }
@@ -853,11 +860,9 @@ impl HostState {
                 &method,
                 &cur,
                 opts.get("headers").and_then(|v| v.as_object()),
-                if body.is_empty() {
-                    Vec::new()
-                } else {
-                    body.as_bytes().to_vec()
-                },
+                // 字节原样交给传输层。**不要**在这里再转 String ——
+                // 「二进制被转成文本」正是这次要修的 bug（489B 信封会变 703B）。
+                body.clone(),
             )?;
             let agent = build_agent(timeout_ms);
             let mut resp = agent
@@ -885,16 +890,33 @@ impl HostState {
                     Value::String(v.to_str().unwrap_or("<非 UTF-8>").to_string()),
                 );
             }
-            let text = resp
+            // 读**字节**而不是 String：`body_b64` 要的是服务器给的原始字节，
+            // 而 `read_to_string` 遇到非 UTF-8 会整段失败（以前只能回一句占位文本）。
+            // 文本侧仍按 UTF-8 宽松解码，非法字节变成 U+FFFD —— 与 Node 的
+            // `response.text()` 一致；要精确字节就取 `body_b64`。
+            let (bytes, truncated) = match resp
                 .body_mut()
                 .with_config()
-                .limit(1024 * 1024)
-                .read_to_string()
-                .unwrap_or_else(|e| format!("<响应体读取失败: {e}>"));
+                .limit(MAX_BODY_BYTES + 1)
+                .read_to_vec()
+            {
+                Ok(mut buf) => {
+                    let truncated = buf.len() as u64 > MAX_BODY_BYTES;
+                    if truncated {
+                        buf.truncate(MAX_BODY_BYTES as usize);
+                    }
+                    (buf, truncated)
+                }
+                // 读一半断了：保留「状态 + 头仍然可用」的老行为，
+                // 但占位文本同时进 body_b64 —— 两个字段永远指向同一份字节。
+                Err(e) => (format!("<响应体读取失败: {e}>").into_bytes(), false),
+            };
             return Ok(json!({
                 "status": status,
                 "headers": Value::Object(headers),
-                "body": text,
+                "body": String::from_utf8_lossy(&bytes).to_string(),
+                "body_b64": b64_encode(&bytes),
+                "truncated": truncated,
             })
             .to_string());
         }
@@ -1558,7 +1580,7 @@ fn http_fetch_native(
     method: &str,
     url: &str,
     plugin_headers: Option<&serde_json::Map<String, Value>>,
-    body: &str,
+    body: &[u8],
     timeout_ms: u64,
 ) -> Result<String, String> {
     use std::io::Read as _;
@@ -1589,7 +1611,8 @@ fn http_fetch_native(
         req = req.header("user-agent", DEFAULT_USER_AGENT);
     }
     if !body.is_empty() {
-        req = req.body(body.to_string());
+        // 字节原样发（与 ureq 那条路同一语义，见 do_http_fetch 的说明）。
+        req = req.body(body.to_vec());
     }
 
     let resp = req
@@ -1607,7 +1630,7 @@ fn http_fetch_native(
     // 返回的 body 看起来是完整 JSON/HTML —— 插件解析到一半失败，或者更糟，
     // 解析出一个「看起来合法但少了一段」的结果。
     // 现在多读一个字节用来判断「是不是真的读完了」，并在响应里带上 truncated。
-    const MAX_BODY: u64 = 1024 * 1024;
+    const MAX_BODY: u64 = MAX_BODY_BYTES;
     let mut buf = Vec::new();
     resp.take(MAX_BODY + 1)
         .read_to_end(&mut buf)
@@ -1616,16 +1639,57 @@ fn http_fetch_native(
     if truncated {
         buf.truncate(MAX_BODY as usize);
     }
-    let text = String::from_utf8_lossy(&buf).to_string();
 
     Ok(json!({
         "status": status,
         "headers": Value::Object(headers),
-        "body": text,
+        "body": String::from_utf8_lossy(&buf).to_string(),
+        // 原始字节。文本响应多一个字段没人用；二进制响应（jacc 信封之类）就靠它。
+        "body_b64": b64_encode(&buf),
         // 插件可以据此判断「内容不全」，而不是把半截内容当成全部。
         "truncated": truncated,
     })
     .to_string())
+}
+
+/// 响应体上限（1 MiB）。两条传输路径共用同一个数 —— 一个数字写两遍，
+/// 迟早会出现「换 tls 之后上限不一样」。
+const MAX_BODY_BYTES: u64 = 1024 * 1024;
+
+/// base64（标准字母表、带 padding）。宿主 → JS 的二进制通道用。
+fn b64_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 解析请求体：`body`（文本）与 `body_b64`（原始字节）**互斥**。
+///
+/// 为什么互斥要报错而不是「谁优先」：`body_b64` 是 compat 层内部用的字段，
+/// 两个都出现只可能是 compat 层自己的 bug。静默选一个会让「发出去的字节和
+/// 插件以为的不一样」，而这正是这次要修的那类 bug —— 宁可当场炸。
+///
+/// base64 解码对 padding **宽松**（`+/=` 带不带 = 都收）：compat 层的
+/// `btoa`/`Buffer.toString('base64')` 会带 padding，而手写的插件代码常常省掉它。
+fn request_body_bytes(opts: &Value) -> Result<Vec<u8>, String> {
+    let text = opts.get("body").and_then(|v| v.as_str());
+    let b64 = opts.get("body_b64").and_then(|v| v.as_str());
+    match (text, b64) {
+        (Some(_), Some(_)) => Err(
+            "body 与 body_b64 只能给一个（前者是文本，后者是原始字节的 base64）".to_string(),
+        ),
+        (Some(t), None) => Ok(t.as_bytes().to_vec()),
+        (None, Some(s)) => {
+            // Indifferent：带不带 padding 都收（见上面的说明）。
+            let engine = base64::engine::GeneralPurpose::new(
+                &base64::alphabet::STANDARD,
+                base64::engine::GeneralPurposeConfig::new()
+                    .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+            );
+            engine
+                .decode(s.trim())
+                .map_err(|e| format!("body_b64 不是合法 base64: {e}"))
+        }
+        (None, None) => Ok(Vec::new()),
+    }
 }
 
 /// 按插件给的选项构造请求。**抽成纯函数是为了能测** —— 尤其"UA 到底是谁的"这件事。
@@ -2003,6 +2067,71 @@ mod tests {
         }
         // 不属于任何插件的普通路径：仍然允许（这是插件自定义 API 的正常用法）
         assert!(validate_route("demo", "/demo-api/status", "GET", "").is_ok());
+    }
+
+    /// 功能 A：请求体的两条路（文本 / 原始字节）与互斥校验。
+    #[test]
+    fn request_body_is_text_or_base64_but_never_both() {
+        assert_eq!(
+            request_body_bytes(&json!({ "body": "你好" })).unwrap(),
+            "你好".as_bytes().to_vec(),
+            "文本路径必须逐字节不变（向后兼容）"
+        );
+        // 字节：带 padding / 不带 padding 都收（btoa 带，手写常省）
+        assert_eq!(
+            request_body_bytes(&json!({ "body_b64": "AP8T" })).unwrap(),
+            vec![0x00, 0xff, 0x13]
+        );
+        assert_eq!(
+            request_body_bytes(&json!({ "body_b64": "AP8" })).unwrap(),
+            vec![0x00, 0xff]
+        );
+        assert_eq!(
+            request_body_bytes(&json!({ "body_b64": "+/8=" })).unwrap(),
+            vec![0xfb, 0xff]
+        );
+        assert!(request_body_bytes(&json!({})).unwrap().is_empty());
+
+        // 互斥：同给报错。compat 层的 bug 不能静默变成「发出去一半」。
+        let e = request_body_bytes(&json!({ "body": "x", "body_b64": "AP8T" })).unwrap_err();
+        assert!(e.contains("只能给一个"), "{e}");
+
+        // 非法 base64：报错（调用方因此在发请求**之前**就返回）
+        let e = request_body_bytes(&json!({ "body_b64": "不是base64" })).unwrap_err();
+        assert!(e.contains("body_b64 不是合法 base64"), "{e}");
+    }
+
+    /// 解码出来的字节必须**原样**到传输层。
+    ///
+    /// 用 489 字节的伪信封：这个数字来自真实协议（央视频 jacc），走文本层会被
+    /// UTF-8 改写成一个更大的长度 —— 这条断言就是那个 bug 的看门人。
+    #[test]
+    fn decoded_body_bytes_reach_the_transport_untouched() {
+        let raw: Vec<u8> = (0u16..=488).map(|i| (i % 251) as u8).collect();
+        assert_eq!(raw.len(), 489);
+        let body = request_body_bytes(&json!({ "body_b64": b64_encode(&raw) })).unwrap();
+        assert_eq!(body.len(), 489, "解码后必须还是 489 字节");
+
+        let headers = json!({ "content-type": "application/octet-stream" });
+        let req = build_http_request(
+            "POST",
+            "https://example.com/x",
+            headers.as_object(),
+            body.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            req.body().as_slice(),
+            raw.as_slice(),
+            "传输层的字节必须与解码结果逐字节相等"
+        );
+        // 二进制响应侧：base64 是往返无损的
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64_encode(&raw))
+                .unwrap(),
+            raw
+        );
     }
 
     fn req_with(headers: Value) -> ureq::http::Request<Vec<u8>> {

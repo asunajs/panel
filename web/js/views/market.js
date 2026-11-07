@@ -55,6 +55,16 @@ function stateBadge(item) {
 
 function buttonSpec(item, tsTranspiler) {
   if (item.error) return { label: '重试', disabled: false, retry: true };
+  // 版本门禁（0.3.0）：目录条目要求的面板版本比当前新 —— 装了也跑不起来，
+  // 所以在**点之前**就置灰，并把「需要什么版本、当前是什么版本」写进 title。
+  if (item.min_panel && item.min_panel_ok === false) {
+    return {
+      label: '需要面板 ≥ ' + item.min_panel,
+      disabled: true,
+      title:
+        '当前面板版本不够（需要 ≥ ' + item.min_panel + '）。请升级面板：https://github.com/asunajs/panel/releases',
+    };
+  }
   if (item.broken) return { label: '需修复，重新安装', disabled: false };
   if (item.installed && !item.installed_version) {
     return { label: '重新安装', disabled: false, title: '已存在同类插件，但没有安装记录' };
@@ -100,6 +110,12 @@ function cardHtml(item, tsTranspiler) {
         ${sourceBadge(item)}
         ${item.private ? '<span class="badge warning">私有</span>' : ''}
         ${item.archived ? '<span class="badge idle">已归档</span>' : ''}
+        ${
+          item.min_panel
+            ? '<span class="badge ' + (item.min_panel_ok ? 'idle' : 'warning') +
+              '" title="需要面板 ≥ ' + esc(item.min_panel) + '">面板 ≥ ' + esc(item.min_panel) + '</span>'
+            : ''
+        }
         ${stateBadge(item)}
       </div>
     </div>

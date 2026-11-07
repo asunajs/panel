@@ -111,6 +111,7 @@ fn documented_exports_match_the_code() {
     assert_exports_match("node:crypto", crate::jscompat::crypto::EXPORTS);
     assert_exports_match("node:url", crate::jscompat::url::EXPORTS);
     assert_exports_match("node:buffer", crate::jscompat::buffer::EXPORTS);
+    assert_exports_match("node:zlib", crate::jscompat::zlib::EXPORTS);
 }
 
 #[test]
@@ -121,6 +122,7 @@ fn unsupported_lists_do_not_contradict_exports() {
         ("node:crypto", crate::jscompat::crypto::EXPORTS),
         ("node:url", crate::jscompat::url::EXPORTS),
         ("node:buffer", crate::jscompat::buffer::EXPORTS),
+        ("node:zlib", crate::jscompat::zlib::EXPORTS),
     ] {
         let body = section(&format!("不支持：{module}"));
         let mut unsupported = Vec::new();

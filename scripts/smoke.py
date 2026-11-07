@@ -3490,8 +3490,11 @@ def external_runtime_checks(tmp: Path) -> None:
     pdir = tmp / "ext-plugins" / "js"
     pdir.mkdir(parents=True)
     (pdir / "extprobe.js").write_text(
-        "import { log, register_cron, register_route } from 'host-api';\n"
+        "import { log, register_cron, register_route, panel as apiPanel } from 'host-api';\n"
         "log('extprobe loaded');\n"
+        # 0.3.0：外部引擎也要有 panel（版本从 PANEL_VERSION 注入的环境变量读）
+        "log('extprobe panel=' + panel.version() + ' atLeast-0.0.1=' + panel.atLeast('0.0.1')"
+        " + ' same=' + (panel === apiPanel));\n"
         "register_cron('ext-tick', '@every 1s', function () { log('ext-tick ran'); });\n"
         "register_route('/extprobe', 'GET', function () { return { status: 200, body: 'ext-ok' }; });\n",
         encoding="utf-8",
@@ -3516,6 +3519,18 @@ def external_runtime_checks(tmp: Path) -> None:
         _, st = fetch_json(f"{base}/api/state")
         p = next((x for x in st.get("plugins", []) if x.get("name") == "extprobe"), {})
         check(p.get("engine") == "node", "插件引擎是 node", str(p.get("engine")))
+        # 0.3.0：外部引擎的 panel.version()/atLeast() 与内嵌引擎同义（版本来自 PANEL_VERSION）
+        text = ""
+        for _ in range(20):
+            text = logpath.read_text(errors="replace")
+            if "extprobe panel=" in text:
+                break
+            time.sleep(0.3)
+        check(
+            "atLeast-0.0.1=true" in text and "same=true" in text,
+            "Node 引擎里 panel.version()/atLeast() 可用（与 host-api 具名导出同一对象）",
+            text[-200:],
+        )
         code, _, body = http(f"{base}/extprobe")
         check(code == 200 and body == "ext-ok", "外部插件的 HTTP 路由可用", f"{code} {body!r}")
         # 等任务跑一轮
@@ -4338,6 +4353,270 @@ def delete_file_checks(tmp: Path) -> None:
         except Exception:
             proc.kill()
 
+def binary_fetch_checks(tmp: Path) -> None:
+    """功能 A 端到端：QuickJS 的 fetch 发**原始字节**，echo 逐字节收回来。
+
+    这是「489 字节信封经文本层变成 703 字节」那个 bug 的看门狗。0.3.0 之前这条路
+    直接 reject（TypeError）；现在插件代码与 Node 分支逐字相同：
+    `body: new Uint8Array(...)` → `await res.arrayBuffer()`。
+
+    为什么必须端到端：单元测试只能证明「base64 编解码对」，证明不了
+    「插件写的那一行字节真的原样出了网卡」。这里让 echo 服务器把收到的字节**原样
+    回显**，一次测往返两侧。
+    """
+    import http.server
+    import threading
+    import urllib.error
+    import urllib.request
+
+    payload = bytes(((i * 37 + 11) % 256) for i in range(489))
+
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            body = self.rfile.read(n)
+            self.server.last_body = body  # type: ignore[attr-defined]
+            self.send_response(200)
+            self.send_header("content-type", "application/octet-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # 别把每个请求打到 stdout
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+    srv.last_body = b""  # type: ignore[attr-defined]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    echo_url = f"http://127.0.0.1:{srv.server_address[1]}/echo"
+
+    d = tmp / "binfetch"
+    (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
+    (d / "plugin-data" / "binfetch").mkdir(parents=True, exist_ok=True)
+    (d / "plugin-data" / "binfetch" / "config.json").write_text(
+        json.dumps({"url": echo_url}), encoding="utf-8"
+    )
+    # 插件源码：**只写 Node 形状**的 fetch，没有任何面板专属参数。
+    # 这段代码拿到裸 Node 里也是能跑的（除了 import host-api）。
+    (d / "plugins" / "js" / "binfetch.js").write_text(
+        'import { config, register_route } from "host-api";\n'
+        "register_route('/plugins/binfetch/api/run', 'GET', async () => {\n"
+        "    const sent = new Uint8Array(489);\n"
+        "    for (let i = 0; i < sent.length; i++) sent[i] = (i * 37 + 11) % 256;\n"
+        "    const res = await fetch(config().url, {\n"
+        "        method: 'POST', body: sent,\n"
+        "        headers: { 'content-type': 'application/octet-stream' },\n"
+        "    });\n"
+        "    const back = new Uint8Array(await res.arrayBuffer());\n"
+        "    let same = back.length === sent.length;\n"
+        "    if (same) for (let i = 0; i < sent.length; i++) {\n"
+        "        if (back[i] !== sent[i]) { same = false; break; }\n"
+        "    }\n"
+        "    return { status: 200, headers: { 'content-type': 'application/json' },\n"
+        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same }) };\n"
+        "});\n",
+        encoding="utf-8",
+    )
+
+    port = free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PANEL_TOKEN")}
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(d / "panel.db"),
+            "PLUGINS_DIR": str(d / "plugins"),
+            "PLUGIN_DATA_DIR": str(d / "plugin-data"),
+            "PANEL_LOG_DIR": str(d / "logs"),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_ALLOW_PLAIN_TOKEN": "1",
+            # echo 服务器在回环上：默认会被 SSRF 闸挡掉，这里显式放行。
+            "HOST_API_ALLOW_PRIVATE": "1",
+        }
+    )
+    log = d / "binfetch.log"
+    with open(log, "w") as f:
+        proc = subprocess.Popen([str(BIN), "serve"], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        ok = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=3) as r:
+                    if r.status == 200:
+                        ok = True
+                        break
+            except Exception:
+                pass
+        if not check(ok, "二进制 fetch 检查用的实例就绪"):
+            print(log.read_text(errors="replace"))
+            return
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/plugins/binfetch/api/run",
+            headers={"X-Panel-Token": SMOKE_TOKEN},
+        )
+        got = None
+        for _ in range(40):
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    got = json.loads(r.read().decode())
+                break
+            except Exception:
+                time.sleep(0.5)
+        if not check(got is not None, "插件路由跑完了一次二进制 fetch", str(got)):
+            print(log.read_text(errors="replace"))
+            return
+
+        check(got.get("sent") == 489, "插件发出 489 字节", str(got))
+        check(
+            got.get("back") == 489,
+            "响应体拿回 489 字节（不是从文本切出来的）",
+            str(got),
+        )
+        check(got.get("same") is True, "往返逐字节相等", str(got))
+        check(
+            srv.last_body == payload,  # type: ignore[attr-defined]
+            "echo 服务器收到的字节与插件写的一模一样（0x00 / 0xff 都不许被改写）",
+            f"{len(srv.last_body)} 字节",  # type: ignore[attr-defined]
+        )
+    finally:
+        srv.shutdown()
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def version_gate_checks(tmp: Path) -> None:
+    """版本门禁（0.3.0）：@panel 头拒载 + panel.version()/atLeast()。
+
+    三件事必须同时成立，少一件都不算做完：
+      1. 带 @panel min 太高的插件**拒载**，错误里同时有双方版本与升级链接；
+      2. 没有 @panel 头的插件照常加载（现有插件零改动，绝不能误伤）；
+      3. 运行时 panel.version() / panel.atLeast() 与面板版本一致。
+    """
+    import urllib.error
+    import urllib.request
+
+    d = tmp / "gate"
+    (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
+    (d / "plugins" / "js" / "needs-newer.js").write_text(
+        '/* @panel { "min": "999.0.0" } */\n'
+        'import { register_cron } from "host-api";\n'
+        'register_cron("不该被装上的任务", "@every 1h", () => {});\n',
+        encoding="utf-8",
+    )
+    (d / "plugins" / "js" / "fine.js").write_text(
+        '/* @panel { "min": "0.0.1" } */\n'
+        'import { register_cron } from "host-api";\n'
+        'register_cron("gate-fine", "@every 1h", () => {});\n',
+        encoding="utf-8",
+    )
+    (d / "plugins" / "js" / "noheader.js").write_text(
+        'import { register_cron } from "host-api";\n'
+        'register_cron("gate-noheader", "@every 1h", () => {});\n',
+        encoding="utf-8",
+    )
+    # 运行时查询：把结果打进日志，下面按日志断言（日志比 /api/state 更贴近插件视角）
+    (d / "plugins" / "js" / "versionprobe.js").write_text(
+        'import { log, panel as apiPanel } from "host-api";\n'
+        # 两条路都要能用：裸名 panel 与 host-api 的具名导出，而且是同一个对象。
+        "log('panel-version=' + panel.version()"
+        " + ' atLeast-0.0.1=' + panel.atLeast('0.0.1')"
+        " + ' atLeast-999=' + panel.atLeast('999.0.0')"
+        " + ' same-object=' + (panel === apiPanel));\n",
+        encoding="utf-8",
+    )
+
+    port = free_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PANEL_TOKEN")}
+    env.update(
+        {
+            "BIND_ADDR": f"127.0.0.1:{port}",
+            "DB_PATH": str(d / "panel.db"),
+            "PLUGINS_DIR": str(d / "plugins"),
+            "PANEL_LOG_DIR": str(d / "logs"),
+            "PANEL_TOKEN": SMOKE_TOKEN,
+            "PANEL_ALLOW_PLAIN_TOKEN": "1",
+        }
+    )
+    log = d / "gate.log"
+    with open(log, "w") as f:
+        proc = subprocess.Popen([str(BIN), "serve"], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    try:
+        ok = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=3) as r:
+                    if r.status == 200:
+                        ok = True
+                        break
+            except Exception:
+                pass
+        if not check(ok, "版本门禁检查用的实例就绪"):
+            print(log.read_text(errors="replace"))
+            return
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN}
+        )
+        st = {}
+        for _ in range(30):
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    st = json.loads(r.read().decode())
+                break
+            except Exception:
+                time.sleep(0.5)
+
+        plugins = {p.get("name"): p for p in st.get("plugins", [])}
+        bad = plugins.get("needs-newer", {})
+        err = bad.get("error") or ""
+        check(bad != {} and err != "", "min 太高的插件被拒载（卡片上有错误）", str(bad)[:160])
+        check("999.0.0" in err, "拒载错误写清了需要的版本", err[:160])
+        check("当前" in err, "拒载错误写清了当前版本", err[:160])
+        check(
+            "https://github.com/asunajs/panel/releases" in err,
+            "拒载错误给了可操作的升级入口",
+            err[:160],
+        )
+
+        check(
+            "fine" in plugins and not (plugins["fine"].get("error") or ""),
+            "@panel min 满足的插件照常加载",
+            str(plugins.get("fine"))[:120],
+        )
+        check(
+            "noheader" in plugins and not (plugins["noheader"].get("error") or ""),
+            "**没有** @panel 头的插件照常加载（绝不能误伤现有插件）",
+            str(plugins.get("noheader"))[:120],
+        )
+
+        # 运行时查询：等日志落盘
+        text = ""
+        for _ in range(30):
+            text = log.read_text(errors="replace")
+            if "panel-version=" in text:
+                break
+            time.sleep(0.5)
+        check("panel-version=" in text, "插件能调到 panel.version()", text[-200:])
+        check("atLeast-0.0.1=true" in text, "panel.atLeast('0.0.1') 为真", text[-200:])
+        check("atLeast-999=false" in text, "panel.atLeast('999.0.0') 为假", text[-200:])
+        check(
+            "same-object=true" in text,
+            "裸名 panel 与 host-api 的具名导出是同一个对象",
+            text[-200:],
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main() -> int:
     # 第十九轮起没有「本机免登录」模式了（反代也在本机，绑回环不等于安全）——
     # 不配凭据这个二进制直接拒绝启动。所以令牌要**默认存在**：
@@ -4787,6 +5066,8 @@ def main() -> int:
     plugin_source_edit_checks(tmp)
     external_runtime_checks(tmp)
     script_task_checks(tmp)
+    binary_fetch_checks(tmp)
+    version_gate_checks(tmp)
     settings_checks(tmp)
     update_checks(tmp)
 

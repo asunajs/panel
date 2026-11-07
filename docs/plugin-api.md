@@ -424,7 +424,7 @@ const ac = new AbortController();
 const p = fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
-    body: JSON.stringify({ n: 1 }),        // 只收文本，见下面「三条硬边界」
+    body: JSON.stringify({ n: 1 }),        // 文本；也可以是 Uint8Array / Buffer，见下面「三条边界」
     timeout_ms: 8000,                      // 面板扩展：宿主钳到 100–60000，默认 10000
     signal: ac.signal,
 });
@@ -433,17 +433,17 @@ const p = fetch(url, {
 `input` 可以是字符串 / `URL` 实例 / `Request`；`init` 支持 `method` / `headers` / `body` /
 `signal` / `timeout_ms` / `redirect`。返回 `Promise<Response>`。
 
-**三条硬边界**（都是宿主能力决定的，报错而不是静默降级）：
+**三条边界**（都是宿主能力决定的，报错而不是静默降级）：
 
 | 边界 | 行为 | 为什么 |
 |---|---|---|
-| 请求体只能是文本 | `string` / `URLSearchParams` 可以；``Uint8Array` / `ArrayBuffer` / `TypedArray` / `DataView` ⇒ `fetch` 返回**已 reject 的 Promise**、`new Request(...)` 直接抛，都是 `TypeError` | 宿主的 HTTP 只收文本，二进制会被**静默损坏** —— 发出去的字节和插件以为的不一样，比报错难查一百倍。要发字节请自己编码成文本（base64） |
+| 请求体：文本或字节（**0.3.0 起**） | `string` / `URLSearchParams` 走文本；`Uint8Array` / `ArrayBuffer` / `Buffer` / `DataView` 走字节，**逐字节原样发出**。`ReadableStream` ⇒ `fetch` 返回**已 reject 的 Promise**、`new Request(...)` 直接抛，都是 `TypeError` | 0.3.0 之前宿主只收文本（字节 body 直接 `TypeError`）。现在 compat 层把字节编码成宿主 RPC 的**内部字段** `body_b64`，插件看不到这个名字 —— 插件面就是 Node 的 `body: Uint8Array` |
 | `redirect` 只支持 `'follow'` | `'manual'` / `'error'` **抛 `TypeError`** | 宿主自己跟跳（最多 3 跳，每跳重新过 SSRF 判定），3xx 的原样响应根本到不了 JS |
 | 没有流 | `response.body` 不存在；响应体宿主一次读完（**上限 1 MiB**） | 流式要有 backpressure 语义，而宿主只有「一次读完」这一种交付方式（[engine-migration.md §12](engine-migration.md#12-明确不做)） |
 
 **错误约定**（照 Node，插件里的 `try/catch` 才接得住）：
 
-- 构造期的错（URL 非法、`GET`/`HEAD` 带 body、二进制 body、`redirect` 不支持）**返回一个已 reject 的 Promise**，不是同步 throw。
+- 构造期的错（URL 非法、`GET`/`HEAD` 带 body、`ReadableStream` body、`redirect` 不支持）**返回一个已 reject 的 Promise**，不是同步 throw。
 - 网络 / 宿主失败一律是 `TypeError('fetch failed', { cause })`，原始原因在 `cause` 上（宿主那边的中文错误）。
 - `abort` 时 reject 的是 `signal.reason`：默认 `DOMException('This operation was aborted', 'AbortError')`，所以 `e.name === 'AbortError'` 成立；`AbortSignal.timeout(ms)` 触发的是 `TimeoutError`。
 - 已经 abort 过的信号传给 `fetch` ⇒ 立刻 reject，一个字节都不发。
@@ -459,7 +459,7 @@ const p = fetch(url, {
 |---|---|
 | `Headers` | 构造（`Headers` / 普通对象 / 键值对序列）、`append` / `delete` / `get` / `has` / `set` / `forEach` / `entries` / `keys` / `values` / `[Symbol.iterator]`。头名小写、同名多值 `get` 时用 `', '` 合并、**迭代按名字字典序**（undici 如此；插件里拿它拼签名串的写法依赖这一点）。`get` 查不到返回 **`null`**，不是 `undefined` |
 | `Response` | `ok` / `status` / `statusText` / `headers` / `url` / `redirected` / `type` / `bodyUsed`，`text()` / `json()` / `arrayBuffer()` / `bytes()` / `clone()`，静态 `Response.json(data, init?)` 与 `Response.error()`。**`headers` 只读**（`set` / `append` / `delete` 抛 `TypeError('immutable')`）；body 只能读一次（第二次抛 `TypeError`） |
-| `Request` | `url` / `method` / `headers` / `body` / `signal` / `clone()`。⚠ `request.body` 是**字符串**（没有 body 时 `null`），Node 是 `ReadableStream` |
+| `Request` | `url` / `method` / `headers` / `body` / `signal` / `clone()`。⚠ `request.body` 是**字符串或 `Uint8Array`**（没有 body 时 `null`），Node 是 `ReadableStream` |
 | `AbortController` / `AbortSignal` | `abort(reason)` / `signal` / `aborted` / `reason` / `onabort` / `addEventListener('abort')` / `removeEventListener` / `throwIfAborted()` / `AbortSignal.abort(reason)` / `AbortSignal.timeout(ms)` |
 
 `Response` 上还有三处**与 Node 不同、必须知道**（宿主只回 `status` / `headers` / `body` 三样）：
@@ -468,13 +468,15 @@ const p = fetch(url, {
 - `response.redirected` **恒为 `false`**（宿主跟跳的过程 JS 看不到）；
 - `response.statusText` 由**状态码表**推出（200 → `'OK'`、404 → `'Not Found'`…），服务器自定义的 reason phrase 看不到。
 
-自己 `new Response(...)` 时反过来更宽松：本地对象的 body 可以是字节（`new Response(new Uint8Array([1,2])).bytes()` 照 Node 工作）—— 宿主的限制只管**发出去**的请求体。
+`Response.arrayBuffer()` / `.bytes()` 拿到的是**宿主给的原始字节**（不是从文本再 encode 回去的）：
+文本响应用它和用 `text()` 等价，二进制响应（图片、protobuf、自定义信封）只有这条路是对的。
+自己 `new Response(...)` 的本地对象同样支持字节 body（`new Response(new Uint8Array([1,2])).bytes()` 照 Node 工作）。
 
 另外：`Request` 没有 `bodyUsed` / `duplex` / `keepalive` / `cache` / `mode` / `credentials` /
 `referrer`，`AbortSignal.any()` 也没有 —— 插件真正用到的就上面那几个，真用到了再加
 （不给一堆「写了不生效」的字段，比少给更安全）。
 
-#### 4.10.5 内置模块：`node:crypto` / `node:url`
+#### 4.10.5 内置模块：`node:crypto` / `node:url` / `node:buffer` / `node:zlib`
 
 除了全局，同样的能力还有 **Node 的入口**。`import` 与 `require` 都通（和 `node:fs` /
 `node:path` 同一套包装器：一份模块体、两个壳，导出清单与模块体由测试双向钉着）：
@@ -513,6 +515,13 @@ const mac = createHmac('sha256', secret).update(body).digest('base64');
 `KeyObject`。算法也只有 sha1 / sha256 / sha384 / sha512（未知算法抛 `TypeError`，
 `code = 'ERR_CRYPTO_INVALID_DIGEST'`；Node 的 `createHash` 抛的是没有 code 的 `Error`）。
 
+**`node:zlib`**（0.3.0 起）：只有两个同步函数 —— `gzipSync(buffer[, options])` 与
+`gunzipSync(buffer[, options])`，进出都是 `Buffer`。`options.level` 支持 0–9；其它选项
+（含 `mtime`）**被忽略**，gzip 头的 mtime **恒为 0** —— 这正是 Node 的行为（Node 的 zlib
+根本没有 mtime 选项），所以 `gzipSync(buf, { mtime: 0 })` 这种写法两边同义。
+没有 `deflateSync` / `inflateSync` / `brotli*` / 流式 API；单次输入与输出各 **16 MiB** 上限
+（解压炸弹必须挡在面板进程外面）。
+
 **`node:url`**：5 个导出 —— `URL` / `URLSearchParams`（与全局同名同义，`import { URL } from
 'node:url'` 和直接用全局 `URL` 是同一个东西），加上三个 **POSIX 形态**的助手：
 
@@ -538,7 +547,8 @@ Windows 的盘符 / 反斜杠转换也没模拟：`fileURLToPath` 只实现 POSI
 | `Buffer.from(str)` / `buf.toString('hex')` | ✅ 有 `Buffer`（`Uint8Array` 子类；见 §4.10.7） |
 | `structuredClone(x)` | ❌ 没有它。`JSON.parse(JSON.stringify(x))`，或者自己写递归（[engine-migration.md §12](engine-migration.md#12-明确不做)） |
 | `process.env.X` | ❌ 没有 `process`。配置走 `config()`（[host-api.md §1.2.10](host-api.md#1210-插件配置config)） |
-| `fetch(url, { body: bytes })` | ❌ 请求体只收文本（`string` / `URLSearchParams`），字节会 `TypeError`；自己 base64 |
+| `fetch(url, { body: bytes })` | ✅ **0.3.0 起**字节 body 原样发出（`Uint8Array` / `ArrayBuffer` / `Buffer` / `DataView`）；`res.arrayBuffer()` 拿回的也是真字节 |
+| `zlib.gzipSync(buf)` / `gunzipSync(buf)` | ✅ 有（`import { gzipSync } from 'node:zlib'`，Buffer 进出；只有这两个同步函数，见 §4.10.5） |
 | `for await (const chunk of res.body)` | ❌ 没有流：`response.body` 不存在，`text()` / `json()` / `bytes()` 都从**已读完**的整段切（上限 1 MiB） |
 | `new TextDecoder('gbk')` | ❌ 只有 utf-8，别的 label 抛 `RangeError` |
 | `fetch(url, { redirect: 'manual' })` | ❌ 只支持 `'follow'` |
@@ -557,7 +567,8 @@ Windows 的盘符 / 反斜杠转换也没模拟：`fileURLToPath` 只实现 POSI
 `AbortController`、`Buffer`（`from` / `alloc` / `concat` / 读写整数…）、
 `node:crypto` 的 `createHash` / `createHmac` / `randomBytes` /
 `randomInt` / `timingSafeEqual`、`node:url` 的 `URL` / `URLSearchParams` / `urlToHttpOptions` /
-`fileURLToPath` / `pathToFileURL`（后三个是 POSIX 形态）。
+`fileURLToPath` / `pathToFileURL`（后三个是 POSIX 形态）、`node:zlib` 的 `gzipSync` /
+`gunzipSync`（Buffer 进出，gzip 头 mtime 恒 0 —— 与 Node 一致）。
 
 跨引擎示例见 `plugins/js/node-compat.js`；三引擎同源的完整承诺与其它差异见
 [runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc) 与 [host-api.md §5.1](host-api.md#51-quickjs-与-nodebun-的差异)。
@@ -592,6 +603,63 @@ Buffer.concat([Buffer.from([1, 2]), Buffer.from([3])]).toJSON();
   这里选安全，代价只是 `allocUnsafe` 不再「快」。
 - 没有 pool 复用，也没有 `transcode` / `Blob` / `File` / `resolveObjectURL`；完整导出与
   边界见 [node-compat.md §8](node-compat.md#8-nodebuffer)。
+
+#### 4.10.8 版本门禁：`@panel` 头与 `panel.atLeast`
+
+插件在进化，宿主也在进化。用了新宿主能力（0.3.0 的字节 `fetch` / `node:zlib`）的插件，
+装到老面板上只有两种结局：**加载就炸**（`gzipSync is not defined`，用户只知道「插件坏了」），
+或者更糟 —— **跑一半才炸**（装好了、任务跑了、结算到一半抛错）。
+
+面板给两件工具，**一个用来硬拒、一个用来降级**：
+
+**① 硬拒：源文件头声明 `@panel`**
+
+```js
+/* @panel { "min": "0.3.0" } */
+import { gzipSync } from 'node:zlib';
+// …
+```
+
+- 位置：文件头**前 50 行**、**注释形态**（`//` 或 `/*` 开头）。代码里一句
+  `log('@panel')` 不会被当成声明 —— 只认注释，避免误伤。
+- 版本不够 ⇒ **不加载**，插件卡片上的错误是：
+
+  ```
+  插件 yangshipin 需要面板 ≥ 0.3.0（当前 0.2.3）。请升级面板：https://github.com/asunajs/panel/releases
+  ```
+
+- 不写 = 不设限。**现有插件零改动**（绝大多数插件都不需要写）。
+- 写错（JSON 坏了、版本串非法、`min` 不是字符串）⇒ 加载期**报错**，不静默降级 ——
+  静默降级的结果是插件以为自己被门禁放过了。
+
+**② 降级：运行时查 `panel`**
+
+```js
+import { panel } from 'host-api';   // 裸名 panel 也可以，是同一个对象
+
+if (panel.atLeast('0.3.0')) {
+    const gz = gzipSync(inner);                    // 新路径
+} else {
+    log('面板版本 ' + panel.version() + ' 太旧，走兼容路径');
+}
+```
+
+语义见 [host-api.md §1.2.12](host-api.md#1212-面板版本panelversion--panelatleast)：
+semver 比较、`0.3` ≡ `0.3.0`、预发布小于正式版、非法版本串抛错。
+
+**③ 商城侧：目录条目 `min_panel`**
+
+```json
+{ "id": "yangshipin", "min_panel": "0.3.0" }
+```
+
+面板不够时按钮置灰、安装接口直接拒绝（不下载）。它只挡「从商城装」，
+**挡不住**手动放文件 / scp / 恢复旧备份 —— 所以 ① 那条加载门禁不能省。
+见 [market.md §`min_panel`](market.md#min_panel版本门禁030)。
+
+> 三者的分工：商城那条给用户**即时反馈**（点之前就知道装不了），
+> `@panel` 头是**兜底**（任何安装路径都逃不掉），`panel.atLeast` 是给
+> 「能降级就别拒绝」的场景用的。
 
 ### 4.11 面板上的写操作
 

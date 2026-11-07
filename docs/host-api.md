@@ -471,6 +471,35 @@ await sleep(ms);   // 等 ms 毫秒；非法或负数按 0 处理
 > `setInterval` 的节奏按**理论时刻**推进；如果某一拍因为别的任务被拖过了整整一个周期，
 > 下一拍从"现在"重新起算，**不补跑**（和调度器跳拍不补是同一条规矩）。
 
+#### 1.2.12 面板版本：`panel.version()` / `panel.atLeast()`
+
+```js
+import { panel } from 'host-api';
+
+panel.version();          // "0.3.0" —— 正在跑的面板版本
+panel.atLeast('0.3.0');   // true / false —— 够不够这个版本
+```
+
+`panel` 同时是**全局**（裸名 `panel.version()` 也能用），两处是**同一个对象**
+（`panel === (await import('host-api')).panel`）。
+
+它的用途是**能力降级**，不是硬拒：
+
+```js
+if (panel.atLeast('0.3.0')) {
+    // 用字节 fetch / node:zlib 的新路径
+} else {
+    log('面板版本较旧，走兼容路径；建议升级到 0.3.0 以上');
+}
+```
+
+版本比较是 **semver**：`0.3` ≡ `0.3.0`、`v` 前缀被忽略、
+预发布 `0.3.0-rc.1 < 0.3.0`。非法版本串**抛错**（不静默返回 `false`）——
+「版本写错了」和「版本不够」是两件事。
+
+> 想**硬拒**而不是降级？在插件源文件头写 `/* @panel { "min": "0.3.0" } */`，
+> 面板会在加载前判，版本不够就不加载（见 [plugin-api.md §4.10.8](plugin-api.md#4108-版本门禁panel-头与-panelatleast)）。
+
 ### 1.3 SQLite
 
 ```
@@ -487,11 +516,20 @@ sqlite_exec(sql, params)  -> { "changes": n, "lastInsertRowid": id }
 ### 1.4 HTTP
 
 ```
-http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str }
+http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str, "body_b64": str, "truncated": bool }
 ```
 
 `options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`
 （默认 10000，钳制到 `[100, 60000]`）。
+
+- `body` 是**文本**；要发原始字节，用内部字段 `body_b64`（标准 base64，padding 可省）。
+  两者**互斥**，同时给会报错 `body 与 body_b64 只能给一个`。⚠ `body_b64` 是
+  compat 层与宿主之间的**内部约定**，插件不该直接写它 —— 插件面请用 Web 形状的
+  `fetch(url, { body: new Uint8Array(...) })`（§1.4.2），由 `src/jscompat/fetch.js`
+  负责编码。写成面板专属参数会让「同一份插件在 Node 里跑不通」，那是本仓明确不要的。
+- 响应**总是**同时给 `body`（文本，UTF-8 宽松解码）与 `body_b64`（服务器原始字节的
+  base64）。文本场景多一个字段没人用；二进制场景（图片 / protobuf / 自定义信封）只有它是对的。
+- `truncated`：响应体超过 **1 MiB** 时为 `true`（内容已截断，不是完整响应）。
 
 #### 1.4.1 `fetch_async`：不阻塞引擎的版本
 
@@ -542,11 +580,13 @@ SSRF 判定、超时钳位、响应体上限（1 MiB）、日志脱敏一条都�
 
 三条和本页其它函数不一样的地方：
 
-- **只收文本请求体**。`Uint8Array` / `ArrayBuffer` 会让 `fetch` 返回一个**已 reject 的
-  Promise**（`new Request(...)` 则直接抛 `TypeError`）—— 宿主的 HTTP 实现只吃文本，
-  二进制会被静默损坏，所以这里宁可不支持。
-- **只给文本响应体**，没有流式：`response.body` 不存在，`text()` / `json()` /
-  `arrayBuffer()` / `bytes()` 都是从**已读完**的整段里切。
+- **请求体可以是文本或字节**（0.3.0 起）。`string` / `URLSearchParams` 走文本；
+  `Uint8Array` / `ArrayBuffer` / `Buffer` / `DataView` 走字节，**逐字节原样发出**
+  （compat 层编码成 `body_b64`，插件看不到这个名字）。`ReadableStream` 仍会抛
+  `TypeError` —— 面板没有流。
+- **响应体是真字节**：`arrayBuffer()` / `bytes()` 取宿主给的原始字节（`body_b64`），
+  `text()` / `json()` 是同一份字节的 UTF-8 宽松解码。**没有流式**：`response.body`
+  不存在，全都从**已读完**的整段里切（上限 1 MiB）。
 - `abort()` **不是真取消**：宿主请求跑完，结果丢弃（[plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
 
 完整形状、`Headers` / `Request` / `Response` 的方法表与已知差异见

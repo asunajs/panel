@@ -1,5 +1,46 @@
 # 更新记录
 
+## 0.3.0 — 2026-11-08
+
+> 这一版的主题一句话：**QuickJS 补上「发字节」和「压字节」，插件不再需要按引擎分叉。**
+
+- **QuickJS 的 `fetch` 接受二进制请求体（插件面与 Node 一致）。** 之前
+  `Uint8Array` / `ArrayBuffer` 直接 `TypeError`，文档还建议「自己 base64」——
+  而宿主的 RPC 是 JSON 载体，插件 base64 之后宿主并不会解码，那条建议其实是死路。
+  现在 `string` / `URLSearchParams` 走文本，`Uint8Array` / `ArrayBuffer` / `Buffer` /
+  `DataView` 走字节，**逐字节原样发出**。base64 隧道（宿主 RPC 的内部字段
+  `body_b64`）藏在 compat 层与宿主之间，**插件永远看不到** —— 插件写的仍然是
+  Node 的 `body: new Uint8Array([...])`。
+- **`Response.arrayBuffer()` / `.bytes()` 拿到的是真字节。** 宿主的 HTTP 响应现在
+  同时给 `body`（UTF-8 宽松解码的文本）与 `body_b64`（服务器原始字节）；
+  以前响应字节是从「已经被解码过的文本」再 encode 回去的，二进制必坏。
+  实测（`scripts/smoke.py` 的端到端）：489 字节的信封往返**逐字节相等**；
+  走文本层会变成 703 字节 —— 那个数字就是这次修的 bug。
+- **新增 `node:zlib`（`gzipSync` / `gunzipSync` / `constants`）。** 同步、Buffer 进出，
+  gzip 头的 **mtime 恒为 0**（Node 也是这样，它根本没有 mtime 选项），所以
+  `gzipSync(buf, { mtime: 0 })` 两边同义。单次输入与输出各 16 MiB 上限 ——
+  解压炸弹必须挡在面板进程外面。没有 `deflateSync` / `inflateSync` / `brotli*` / 流式 API。
+- **插件版本门禁（三层）。**
+  1. 商城目录条目新增 `min_panel`：面板版本不够时按钮置灰、安装接口在**下载之前**
+     就拒绝，错误里带双方版本与升级链接；
+  2. 插件源文件头新增 `/* @panel { "min": "0.3.0" } */`：加载时（三个引擎的唯一入口
+     `engine::load_one`）判定，版本不够**拒载**。只认注释形态、只看前 50 行 ——
+     代码里一句 `log('@panel')` 不会被误判；不写 = 不设限，**现有插件零改动**；
+  3. 运行时 `panel.version()` / `panel.atLeast(v)`（全局 + `host-api` 具名导出，
+     同一个对象）：给「能降级就别硬拒」的场景用。semver 比较（`0.3` ≡ `0.3.0`、
+     预发布小于正式版），非法版本串**抛错**而不是静默 `false`。
+- **三个引擎同名同义。** Node/Bun 侧同样有 `panel`（版本从 `PANEL_VERSION` 读），
+  而字节 fetch 与 zlib 在那边本来就是平台原生能力 —— 于是同一份插件代码
+  （`body: new Uint8Array(...)` + `gzipSync(...)`）在三个引擎里**一个字都不用改**。
+- **测试补在三个层次**：Rust 单测（base64 解码/互斥/传输层字节数、gzip 往返与 mtime、
+  解压炸弹、版本比较与头解析）、QuickJS compat 测试（`body_b64` 通道、响应真字节、
+  `node:zlib` 的错误码）、`scripts/smoke.py` 端到端（真起一个 echo 服务器 +
+  真加载插件，489 字节往返；`@panel` 拒载 + 未声明插件照常加载）。
+- **文档**：`docs/node-compat.md` 的 `node:zlib` 行 ❌ → 🟡（含导出/不支持清单）、
+  `fetch` 的 body 行改为「文本或字节」、`docs/host-api.md` 的 `http_fetch` 返回形状
+  （`body_b64` / `truncated`）与 §1.2.12、`docs/plugin-api.md` §4.10.8（怎么写门禁）、
+  `docs/market.md` 的 `min_panel`。那句误导性的「要发字节请自己 base64」已删除。
+
 ## 0.2.3 — 2026-11-06
 
 > 这一版的主题一句话：**让「照着 Node 写的插件」在默认引擎里也能跑。**
