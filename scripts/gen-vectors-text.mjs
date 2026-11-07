@@ -92,6 +92,13 @@ const ATOB_INPUTS = ['', 'YWJj', 'YQ', 'YQ==', ' Y W J j ', 'YWJj\nZA==', '////'
 // atob 的失败用例：注意 node 会**先去掉 ASCII 空白**再判 —— 'Y W = =' 是合法的（= 'YQ=='）。
 const ATOB_THROWS = ['!!!!', 'a', 'YQ=', 'YQ===', 'YQ==extra', 'AA=', '=AAA', '_-w', '_w'];
 
+// latin1 / windows-1252（0.3.0）。央视频插件的 JCE 解析要「把二进制当 ASCII 扫」，
+// 写法就是 new TextDecoder('latin1') —— Node 里成立的一行，面板也得成立。
+// WHATWG 把 latin1 / iso-8859-1 / ascii 全规范成 windows-1252，所以 0x80–0x9F 是
+// 那 32 个特殊码位，不是控制字符。
+const LATIN1_INPUTS = ['', '61', '80', '8182', '9f', 'a0ff', 'c3a9', 'e4bda0', '00ff80', '418042'];
+const LATIN1_ALIASES = ['latin1', 'iso-8859-1', 'iso8859-1', 'ascii', 'us-ascii', 'windows-1252', 'cp1252'];
+
 const enc = new TextEncoder();
 
 const out = {
@@ -118,6 +125,14 @@ const out = {
         let name = null;
         try { atob(s); } catch (e) { name = e.name; }
         return { input: s, name };
+    }),
+    latin1: LATIN1_INPUTS.map((h) => {
+        const dec = new TextDecoder('latin1');
+        return { bytes: h, encoding: dec.encoding, units: units(dec.decode(bytes(h))) };
+    }),
+    latin1_aliases: LATIN1_ALIASES.map((label) => {
+        const dec = new TextDecoder(label);
+        return { label, encoding: dec.encoding, units: units(dec.decode(bytes('8080ff41'))) };
     }),
     fatal_throws: FATAL_INPUTS.map((h) => {
         let name = null;

@@ -353,9 +353,12 @@ btoa('\xff');                                    // '/w=='（latin1：一个码�
 atob('/w==');                                    // '\xff'
 ```
 
-- **只有 utf-8**。`new TextDecoder('gbk')` / `'utf-16le'` 抛 `RangeError` —— 而不是悄悄
-  按 utf-8 解出一串乱码（乱码比报错难查）。Node 支持二十几种编码，全实现是另一个工程，
-  而插件真正用到的只有 utf-8：读响应体、拼签名、base64 前后。
+- **两种编码：utf-8 与 latin1**（自 0.3.0 起）。`new TextDecoder('gbk')` / `'utf-16le'` 仍抛
+  `RangeError` —— 而不是悄悄按 utf-8 解出一串乱码（乱码比报错难查）。Node 支持二十几种编码，
+  全实现是另一个工程；`latin1` 是补的第二种，因为**把二进制当 ASCII 扫**（在字节流里找
+  可读串）绕不开它：央视频插件的 JCE 解析就写着 `new TextDecoder('latin1')`。
+  WHATWG 把 `latin1` / `iso-8859-1` / `ascii` 都规范成 **windows-1252**（Node 一样），
+  所以 `0x80–0x9F` 是那 32 个特殊码位、`encoding` 回 `'windows-1252'`；其余字节一一对应。
 - `TextEncoder`：`encoding`（恒 `'utf-8'`）、`encode(str)`、`encodeInto(str, dest)` →
   `{ read, written }`（写不下时停在**码点边界**，不会写半个字符）。
 - `TextDecoder`：`encoding` / `fatal` / `ignoreBOM`，`decode(bytes?, { stream })`。
@@ -550,7 +553,7 @@ Windows 的盘符 / 反斜杠转换也没模拟：`fileURLToPath` 只实现 POSI
 | `fetch(url, { body: bytes })` | ✅ **0.3.0 起**字节 body 原样发出（`Uint8Array` / `ArrayBuffer` / `Buffer` / `DataView`）；`res.arrayBuffer()` 拿回的也是真字节 |
 | `zlib.gzipSync(buf)` / `gunzipSync(buf)` | ✅ 有（`import { gzipSync } from 'node:zlib'`，Buffer 进出；只有这两个同步函数，见 §4.10.5） |
 | `for await (const chunk of res.body)` | ❌ 没有流：`response.body` 不存在，`text()` / `json()` / `bytes()` 都从**已读完**的整段切（上限 1 MiB） |
-| `new TextDecoder('gbk')` | ❌ 只有 utf-8，别的 label 抛 `RangeError` |
+| `new TextDecoder('gbk')` | ❌ 只有 utf-8 / latin1，别的 label 抛 `RangeError` |
 | `fetch(url, { redirect: 'manual' })` | ❌ 只支持 `'follow'` |
 | cancel 一个请求来省流量 | ⚠ `abort()` 只是「不再等它」，宿主那条请求会跑完 |
 | `res.url` 是重定向后的最终地址 | ⚠ 是**请求时**的地址；`res.redirected` 恒为 `false` |

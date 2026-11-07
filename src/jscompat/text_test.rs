@@ -39,6 +39,59 @@ fn internal_utf8_helpers_round_trip() {
     });
 }
 
+/// latin1 / windows-1252（0.3.0）。
+///
+/// 央视频插件的 JCE 解析里有 `new TextDecoder('latin1').decode(inner)` —— 那是
+/// Node 里成立的一行。面板之前只实现 utf-8，这一行直接 RangeError。
+/// 期望值同样来自 Node（scripts/gen-vectors-text.mjs 的 latin1 段）。
+#[test]
+fn latin1_decoding_matches_node() {
+    with_compat(|_, ctx| {
+        let script = format!(
+            r#"
+            (function () {{
+                var V = {VECTORS};
+                function bytes(h) {{
+                    var a = [];
+                    for (var i = 0; i < h.length; i += 2) a.push(parseInt(h.substr(i, 2), 16));
+                    return new Uint8Array(a);
+                }}
+                function u2s(u) {{
+                    var s = '';
+                    for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+                    return s;
+                }}
+                function units(s) {{
+                    var a = [];
+                    for (var i = 0; i < s.length; i++) a.push(s.charCodeAt(i));
+                    return a;
+                }}
+                var bad = [];
+                V.latin1.forEach(function (c) {{
+                    var d = new TextDecoder('latin1');
+                    if (d.encoding !== c.encoding) bad.push('encoding:' + c.bytes);
+                    if (JSON.stringify(units(d.decode(bytes(c.bytes)))) !== JSON.stringify(c.units)) {{
+                        bad.push('bytes:' + c.bytes);
+                    }}
+                }});
+                V.latin1_aliases.forEach(function (c) {{
+                    var d = new TextDecoder(c.label);
+                    if (d.encoding !== c.encoding) bad.push('alias-encoding:' + c.label);
+                    if (JSON.stringify(units(d.decode(bytes('8080ff41')))) !== JSON.stringify(c.units)) {{
+                        bad.push('alias:' + c.label);
+                    }}
+                }});
+                // 没实现的编码仍然要明确抛 RangeError（别悄悄按 utf-8 解）
+                try {{ new TextDecoder('gbk'); bad.push('gbk:no-throw'); }}
+                catch (e) {{ if (e.name !== 'RangeError') bad.push('gbk:' + e.name); }}
+                return JSON.stringify(bad);
+            }})()
+            "#
+        );
+        let got: String = ctx.eval(script).unwrap();
+        assert_eq!(got, "[]", "latin1 解码与 Node 不一致: {got}");
+    });
+}
 #[test]
 fn text_encoder_decoder_match_node() {
     with_compat(|_, ctx| {
@@ -126,6 +179,11 @@ fn text_encoder_decoder_match_node() {
         // 否则一个 200 条的向量表只会回一句 "assertion failed"。
         for (key, items) in want.as_object().unwrap() {
             if key == "note" {
+                continue;
+            }
+            // latin1 / windows-1252 有自己那条测试（latin1_decoding_matches_node）：
+            // 这个脚本只跑 utf-8 那套，别在这里假装验过。
+            if key.starts_with("latin1") {
                 continue;
             }
             let actual = got.get(key).unwrap_or_else(|| panic!("缺 {key}"));

@@ -32,7 +32,7 @@
 | `URL` | ✅ | ✅ | WHATWG URL（`src/jscompat/url.js`）。非法输入抛 `TypeError` 且 `code='ERR_INVALID_URL'`；不做 IDNA/punycode（§13） |
 | `URLSearchParams` | ✅ | ✅ | 与 `URL.searchParams` **活绑定**；`sort()` 稳定按码元 |
 | `TextEncoder` | ✅ | ✅ | `encode()` / `encodeInto()`，UTF-8 |
-| `TextDecoder` | 🟡 | ✅ | **只有 utf-8**（别名 utf8 / unicode-1-1-utf-8）；别的 label 抛 `RangeError`。支持 fatal / ignoreBOM / stream |
+| `TextDecoder` | 🟡 | ✅ | **utf-8 与 latin1**（自 0.3.0；latin1 按 windows-1252 解，别名 iso-8859-1 / ascii）；别的 label 抛 `RangeError`。支持 fatal / ignoreBOM / stream |
 | `atob` | ✅ | ✅ | latin1 边界；非法输入抛 `DOMException InvalidCharacterError`（Node 同款） |
 | `btoa` | ✅ | ✅ | 码元 > 0xFF 抛 `InvalidCharacterError` |
 | `DOMException` | ✅ | ✅ | 最小实现；`name` / `code` 按规范表（AbortError=20、QuotaExceededError=22…） |
@@ -377,7 +377,7 @@ gunzipSync(gz).toString('utf8');             // 'hello'
 
 | 场景 | 支持 | 不支持（报错） |
 |---|---|---|
-| `TextDecoder` label | `utf-8` / `utf8` / `unicode-1-1-utf-8` / `unicode11utf8` / `unicode20utf8` | 其它一律 `RangeError`（utf-16le/be、gbk、gb18030、big5、shift_jis、euc-jp、iso-8859-*…） |
+| `TextDecoder` label | `utf-8` / `utf8` / `unicode-1-1-utf-8` / `unicode11utf8` / `unicode20utf8`；`latin1` / `iso-8859-1` / `iso8859-1` / `ascii` / `us-ascii` / `windows-1252` / `cp1252`（都回 `encoding === 'windows-1252'`） | 其它一律 `RangeError`（utf-16le/be、gbk、gb18030、big5、shift_jis、euc-jp…） |
 | `node:crypto` 的 `update` / `digest` encoding | `utf8` / `utf-8` / `hex` / `base64` / `base64url` / `latin1` / `binary` | `ascii` / `ucs2` / `utf16le` 等 → `ERR_UNKNOWN_ENCODING`（Node 的 Buffer 会静默当 utf8，这里**故意报错**） |
 | `node:crypto` 的 hex / base64 **输入** | 严格校验 | 非法字符直接报错（Node 的 Buffer 会截断到第一个非法字符 —— 对签名/密钥太危险） |
 | `node:fs` encoding | `utf8` / `utf-8`（`readFileSync`） | 其它 → 报错；`writeFileSync` 不转码（options 忽略） |

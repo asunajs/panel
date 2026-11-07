@@ -1797,18 +1797,23 @@ fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, Strin
 /// 名单刻意很短：每加一个就要在 `src/jshost.rs` 里真实现一遍，**假实现比不实现更坏**
 /// ——插件在里面跑得通、出去跑不通（或者反过来）都难查。
 ///
-/// 现在四组：路径 / 文件系统（把状态写下来）+ crypto / url（Node/Web 兼容层，
+/// 现在五组：路径 / 文件系统（把状态写下来）+ crypto / url / zlib（Node/Web 兼容层，
 /// 见 `src/jscompat/`）。裸名与 `node:` 前缀都认 —— Node 两种都收，
 /// 而内置模块在 Node 的解析里**优先于**同名 npm 包，所以 `import 'url'` 也是内置那个。
 pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
-    match name {
-        "node:path" | "path" => Some("node:path"),
-        "node:fs" | "fs" => Some("node:fs"),
-        "node:crypto" | "crypto" => Some("node:crypto"),
-        "node:url" | "url" => Some("node:url"),
-        "node:buffer" | "buffer" => Some("node:buffer"),
-        _ => None,
-    }
+    // **名单只有一份**：jshost::BUILTIN_NODE_MODULES。以前这里是手抄的第二份，
+    // 加 node:zlib 时只加了一处 —— 于是 require('node:zlib') 能用、
+    // import { gzipSync } from 'node:zlib' 报 "Error resolving module"。
+    // 现在按 Node 的规则从同一份名单推：裸名等价于加 node: 前缀。
+    let want = if name.starts_with("node:") {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(format!("node:{name}"))
+    };
+    crate::jshost::BUILTIN_NODE_MODULES
+        .iter()
+        .copied()
+        .find(|m| *m == want)
 }
 
 /// 裸标识符解析失败时的提示。`path` / `fs` 单独说，因为它们是**有**等价实现的，
@@ -1816,7 +1821,7 @@ pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
 /// 「没有 node_modules」让人去翻半天。
 pub(crate) const BUILTIN_HINT: &str =
     "面板里只内置了 `host-api`（宿主 API）、`node:path` / `node:fs`（限定在插件自己\
-的目录内）与 `node:crypto` / `node:url` / `node:buffer`（Node 兼容层）。`fs/promises` /\
+的目录内）与 `node:crypto` / `node:url` / `node:buffer` / `node:zlib`（Node 兼容层）。`fs/promises` /\
 `node:os` / 第三方包都没有；要引自己的文件请用相对说明符（如 './lib/core.js'）";
 
 /// 模块解析器：`host-api` 内置；相对说明符按 URL 语义解析成 `file://` URL。

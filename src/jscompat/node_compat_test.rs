@@ -114,6 +114,29 @@ fn documented_exports_match_the_code() {
     assert_exports_match("node:zlib", crate::jscompat::zlib::EXPORTS);
 }
 
+/// 两份内置模块名单必须一致：`jshost::BUILTIN_NODE_MODULES`（require + 文档核对）
+/// 与 `engine::builtin_node_module`（**ESM import 的解析器**）。
+///
+/// 漏一处就是「`require('node:zlib')` 能用、`import { gzipSync } from 'node:zlib'`
+/// 报 Error resolving module」—— 央视频插件正是这么撞上的：它写的是 import。
+#[test]
+fn every_builtin_module_also_resolves_for_esm_import() {
+    for &name in crate::jshost::BUILTIN_NODE_MODULES {
+        assert_eq!(
+            crate::engine::builtin_node_module(name),
+            Some(name),
+            "{name} 在 BUILTIN_NODE_MODULES 里，但 ESM 解析器不认它 —— 插件 import 会失败"
+        );
+        if let Some(bare) = name.strip_prefix("node:") {
+            assert_eq!(
+                crate::engine::builtin_node_module(bare),
+                Some(name),
+                "裸名 {bare} 没被认成 {name}（Node 两种写法都收）"
+            );
+        }
+    }
+}
+
 #[test]
 fn unsupported_lists_do_not_contradict_exports() {
     for (module, code) in [

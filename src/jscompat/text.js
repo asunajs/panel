@@ -376,29 +376,55 @@ Object.defineProperty(TextEncoder.prototype, Symbol.toStringTag, {
 
 // ──────────────────────────────────────────────────────── TextDecoder
 
-/// 把 label 规整成「是否 utf-8」。
+/// 把 label 规整成**面板实现的编码名**：'utf-8' 或 'windows-1252'。
 ///
-/// node 认 utf-8 / utf8 / unicode-1-1-utf-8 等别名（都是同一个编码），
-/// 别的编码这里没有实现 —— 明确抛 RangeError，别让人以为"能解"。
-function isUtf8Label(label) {
+/// 只实现这两种，别的明确抛 RangeError —— 别让人以为"能解"。
+///
+/// 为什么 0.3.0 要加 windows-1252：央视频插件的 JCE 解析要在二进制里扫 ASCII
+/// 字符串，写法是 `new TextDecoder('latin1')` —— 那是 Node 里成立的一行。
+/// WHATWG 把 latin1 / iso-8859-1 / ascii 都规范成 **windows-1252**（Node 一样），
+/// 所以这里也按 windows-1252 解：0x80–0x9F 那 32 个码位有各自的字符，
+/// 其余字节一一对应。
+function normalizeEncoding(label) {
     var s = String(label).trim().toLowerCase();
-    return s === 'utf-8' || s === 'utf8' || s === 'unicode-1-1-utf-8' ||
-        s === 'unicode11utf8' || s === 'unicode20utf8';
+    if (s === 'utf-8' || s === 'utf8' || s === 'unicode-1-1-utf-8' ||
+        s === 'unicode11utf8' || s === 'unicode20utf8') {
+        return 'utf-8';
+    }
+    if (s === 'latin1' || s === 'iso-8859-1' || s === 'iso8859-1' || s === 'ascii' ||
+        s === 'us-ascii' || s === 'windows-1252' || s === 'cp1252' ||
+        s === 'x-cp1252' || s === 'iso88591') {
+        return 'windows-1252';
+    }
+    throw new RangeError('The "' + String(label) + '" encoding is not supported');
+}
+
+/// windows-1252 的 0x80–0x9F（其余字节 = 同码位）。表与 WHATWG 一致。
+const CP1252_HIGH = '\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021' +
+    '\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f' +
+    '\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014' +
+    '\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178';
+
+function cp1252Decode(bytes) {
+    var out = '';
+    for (var i = 0; i < bytes.length; i++) {
+        var b = bytes[i];
+        out += (b >= 0x80 && b <= 0x9f) ? CP1252_HIGH.charAt(b - 0x80) : String.fromCharCode(b);
+    }
+    return out;
 }
 
 class TextDecoder {
     constructor(label, options) {
         if (label === undefined) label = 'utf-8';
-        if (!isUtf8Label(label)) {
-            throw new RangeError('The "' + String(label) + '" encoding is not supported');
-        }
+        this._encoding = normalizeEncoding(label);
         options = options || {};
         this._fatal = options.fatal === true;
         this._ignoreBOM = options.ignoreBOM === true;
         this._state = newDecoderState();
     }
 
-    get encoding() { return 'utf-8'; }
+    get encoding() { return this._encoding; }
     get fatal() { return this._fatal; }
     get ignoreBOM() { return this._ignoreBOM; }
 
@@ -415,6 +441,8 @@ class TextDecoder {
         } else {
             throw new TypeError('The "input" argument must be an instance of ArrayBuffer or ArrayBufferView');
         }
+        // windows-1252：任何字节序列都合法（没有 fatal 这回事），也不吃 BOM。
+        if (this._encoding === 'windows-1252') return cp1252Decode(bytes);
         var text = utf8DecodeChunk(this._state, bytes, this._fatal, this._ignoreBOM, stream);
         if (!stream) this._state = newDecoderState();
         return text;

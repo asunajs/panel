@@ -1079,7 +1079,7 @@ fn node_module_parts(name: &str) -> Option<(&'static str, &'static [&'static str
 /// **只在这一处定义**：注入（`install_builtin_node_modules`）与对账测试都从它取。
 /// 两处各写一份的话，加一个模块只加上其中一处 —— 于是"require 能用、import 不能用"
 /// 这类最难查的偏差会静默存在（见下面 `every_exported_builtin_name_is_actually_defined`）。
-const BUILTIN_NODE_MODULES: &[&str] = &[
+pub(crate) const BUILTIN_NODE_MODULES: &[&str] = &[
     "node:path",
     "node:fs",
     "node:crypto",

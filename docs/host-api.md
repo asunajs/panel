@@ -902,7 +902,7 @@ fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 | `fetch` | **有**（兼容层；走面板数据面） | 有（平台原生） | 同步写法仍是 `http_fetch(url, opts)`；要并发用 `await fetch` / `fetch_async` |
 | `node:fs` / `node:path` | **受限**（数据根围栏） | 原生 | `host-api` 或只用相对路径 |
 | `node:child_process` / 其它 Node 内置 / npm 包 | 加载期报错 | 有 | 用了就是 Node/Bun-only，见 §5.4 |
-| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `crypto` / `Buffer` / `atob` / `btoa` | **有**（兼容层，形状按 Node；编解码只有 utf-8） | 有（平台原生） | 见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)，不必再手搓 |
+| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `crypto` / `Buffer` / `atob` / `btoa` | **有**（兼容层，形状按 Node；编解码 utf-8 与 latin1） | 有（平台原生） | 见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)，不必再手搓 |
 | `console` / `performance` | 有 | 有 | `atob` / `btoa` 在上一行（兼容层提供） |
 | ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有（microtask 在每轮引擎调度结束时清空） | 有 | — |
 | 模块形态 | 经典脚本 + ESM（`import`/`export`） | 经典全局脚本 + ESM；**没有 CJS 模块语义** | 拆模块用 ESM |

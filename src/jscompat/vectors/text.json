@@ -853,6 +853,157 @@
       "name": "InvalidCharacterError"
     }
   ],
+  "latin1": [
+    {
+      "bytes": "",
+      "encoding": "windows-1252",
+      "units": []
+    },
+    {
+      "bytes": "61",
+      "encoding": "windows-1252",
+      "units": [
+        97
+      ]
+    },
+    {
+      "bytes": "80",
+      "encoding": "windows-1252",
+      "units": [
+        8364
+      ]
+    },
+    {
+      "bytes": "8182",
+      "encoding": "windows-1252",
+      "units": [
+        129,
+        8218
+      ]
+    },
+    {
+      "bytes": "9f",
+      "encoding": "windows-1252",
+      "units": [
+        376
+      ]
+    },
+    {
+      "bytes": "a0ff",
+      "encoding": "windows-1252",
+      "units": [
+        160,
+        255
+      ]
+    },
+    {
+      "bytes": "c3a9",
+      "encoding": "windows-1252",
+      "units": [
+        195,
+        169
+      ]
+    },
+    {
+      "bytes": "e4bda0",
+      "encoding": "windows-1252",
+      "units": [
+        228,
+        189,
+        160
+      ]
+    },
+    {
+      "bytes": "00ff80",
+      "encoding": "windows-1252",
+      "units": [
+        0,
+        255,
+        8364
+      ]
+    },
+    {
+      "bytes": "418042",
+      "encoding": "windows-1252",
+      "units": [
+        65,
+        8364,
+        66
+      ]
+    }
+  ],
+  "latin1_aliases": [
+    {
+      "label": "latin1",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "iso-8859-1",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "iso8859-1",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "ascii",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "us-ascii",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "windows-1252",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    },
+    {
+      "label": "cp1252",
+      "encoding": "windows-1252",
+      "units": [
+        8364,
+        8364,
+        255,
+        65
+      ]
+    }
+  ],
   "fatal_throws": [
     {
       "bytes": "80",
