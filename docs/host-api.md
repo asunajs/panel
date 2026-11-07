@@ -221,7 +221,7 @@ register_route('/plugins/x/run', 'POST', handler, { budget_ms: 120_000 });
 
 | | |
 |---|---|
-| 默认 | 全局 `EXEC_BUDGET_MS`（默认 **60000ms**；试跑走 `TEST_RUN_BUDGET_MS`，默认 10000ms） |
+| 默认 | 全局 `EXEC_BUDGET_MS`（默认 **600000ms**；试跑走 `TEST_RUN_BUDGET_MS`，默认 10000ms） |
 | 范围 | 100ms ~ 600000ms（10 分钟）。越界**报错**，不静默夹紧 |
 | 生效范围 | 任务（`register_cron` / `every`）和路由（`register_route`）都能声明 |
 | 落库 | `jobs.budget_ms` —— 面板上能看到，重启后还在 |
@@ -933,7 +933,7 @@ POST /api/test/js    { "code": "...", "input": "...", "plugin"?, "task"?, "engin
 - 输入以全局 `input` 提供。
 - 输出约定：`log`/`console.log` → `stdout`；`warn`/`error` → `stderr`；
   代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码。
-- 受执行预算保护：死循环被 interrupt handler 打断（默认预算 60 秒；试跑 10 秒）。
+- 受执行预算保护：死循环被 interrupt handler 打断（默认预算 600 秒；试跑 10 秒）。
 - 输出**不进**面板的实时日志（用捕获缓冲收走），否则跑几次就把日志刷满了。
 - `POST /api/test/py` **已删除**（Python 插件退场）。
 

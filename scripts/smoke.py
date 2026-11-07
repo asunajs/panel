@@ -3746,8 +3746,8 @@ def settings_checks(tmp: Path) -> None:
             f"{data.get('groups')}",
         )
         check(
-            "EXEC_BUDGET_MS" in items and items["EXEC_BUDGET_MS"]["value"] == "60000",
-            "单次预算默认 60000 出现在设置里",
+            "EXEC_BUDGET_MS" in items and items["EXEC_BUDGET_MS"]["value"] == "600000",
+            "单次预算默认 600000 出现在设置里",
             f"{items.get('EXEC_BUDGET_MS')}",
         )
         check(

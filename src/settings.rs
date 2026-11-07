@@ -81,7 +81,7 @@ pub const DEFS: &[Def] = &[
         label: "单次执行预算",
         group: "引擎",
         kind: Kind::Int,
-        default: "60000",
+        default: "600000",
         min: Some(1_000),
         max: Some(600_000),
         choices: &[],

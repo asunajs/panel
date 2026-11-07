@@ -177,7 +177,7 @@ function handler(payload) {
 >
 > 四条边界：
 >
-> - **墙钟预算**：一次执行最多占 `budget_ms`（默认 `EXEC_BUDGET_MS`，60 秒）的**墙钟**时间。
+> - **墙钟预算**：一次执行最多占 `budget_ms`（默认 `EXEC_BUDGET_MS`，600 秒）的**墙钟**时间。
 >   到点还没结算 ⇒ 任务判失败并计入熔断、路由回 **504**、`on_tick` 记一条 error。
 >   `await` 一个永远不 settle 的 Promise 就是靠这条兜住的（CPU 预算管不到它 ——
 >   那种情况下没有 JS 在跑）。
