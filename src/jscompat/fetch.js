@@ -21,8 +21,12 @@
 //    插件面就是 Node 的 `body: Uint8Array`（见 src/hostapi.rs 的 request_body_bytes）。
 //    ReadableStream 仍然不支持（没有流，见第 3 条）。
 //    ⚠ 0.3.0 起才接受字节；之前一律 TypeError（docs/plugin-api.md §4.10.4 有记）。
-// 2. **redirect 只支持 'follow'**。宿主自己跟跳（最多 3 跳、每跳重新过 SSRF），
-//    'manual' / 'error' 抛 TypeError：3xx 的原样响应根本到不了 JS 这一层。
+// 2. **redirect 支持 'follow'（默认）/ 'manual' / 'error'**。'follow' 由宿主自己跟
+//    （最多 3 跳、每跳重新过 SSRF）；'manual'/'error' 时宿主**不跟跳**，把 3xx 原样
+//    交回（status + headers + body），这是读「跳转那一跳的 Set-Cookie」的唯一办法。
+//    ⚠ 0.3.0 拿到过 `Cookie` 的会话类接口常在这一跳下发十几条 cookie，
+//    跟跳跟完就丢了 —— 所以这个选项是必要的，不是可选优化。
+//    `Set-Cookie` 多值用 `headers.getSetCookie()` 取（普通 get() 只给最后一条）。
 // 3. **没有流**。宿主一次把响应读完（上限 1 MiB），所以 response.body 不存在，
 //    request.body 是**字符串或 Uint8Array**（Node 是 ReadableStream）。
 // 4. **重定向后的最终 URL 不知道**：response.url 是请求时的 URL，
@@ -332,6 +336,16 @@ class Headers {
         for (var i = 0; i < pairs.length; i++) {
             callback.call(thisArg, pairs[i][1], pairs[i][0], this);
         }
+    }
+
+    /// Node 20+/fetch 规范：`Set-Cookie` 是多值头，**不允许合并**，逐条返回。
+    /// 其它头用 get() 拿合并后的值；这个方法只服务 set-cookie。
+    getSetCookie() {
+        var out = [];
+        for (var i = 0; i < this._list.length; i++) {
+            if (this._list[i][0] === 'set-cookie') out.push(this._list[i][1]);
+        }
+        return out;
     }
 
     entries() { return makeHeadersIterator(this, 'entries'); }
@@ -846,19 +860,20 @@ class Request {
 
 /// init 里的面板扩展项（timeout_ms）与 redirect 策略校验。
 function fetchOptions(init) {
-    var out = { timeout_ms: null };
+    var out = { timeout_ms: null, redirect: 'follow' };
     if (init === undefined || init === null) return out;
     if (typeof init !== 'object') throw new TypeError('fetch 的 init 必须是对象');
 
     if (init.redirect !== undefined && init.redirect !== null) {
         var redirect = String(init.redirect);
-        if (redirect !== 'follow') {
-            // 宿主自己跟跳，3xx 的原样响应到不了 JS —— 与其假装支持，不如说清楚
+        // 'manual' / 'error' 会让宿主**不跟跳**，把 3xx 原样交回 —— 这是读
+        // 「跳转那一跳的 Set-Cookie」的唯一办法（免登 / OpenID 类 302 就是这样下发会话的）。
+        if (redirect !== 'follow' && redirect !== 'manual' && redirect !== 'error') {
             throw new TypeError(
-                "fetch: redirect 只支持 'follow'（宿主会自己跟，最多 3 跳）：" +
-                "收到 '" + redirect + "'。'manual'/'error' 需要把 3xx 原样交回，而宿主 http_fetch 已经跟完了。"
+                "fetch: redirect 只支持 'follow' / 'manual' / 'error'，收到 '" + redirect + "'"
             );
         }
+        out.redirect = redirect;
     }
     if (init.timeout_ms !== undefined && init.timeout_ms !== null) {
         var n = Number(init.timeout_ms);
@@ -883,6 +898,7 @@ function hostOptionsOf(req, opts) {
     if (req._bodyBytes !== null) o.body_b64 = b64encode(req._bodyBytes);
     else if (req._bodyText !== null) o.body = req._bodyText;
     if (opts.timeout_ms !== null) o.timeout_ms = opts.timeout_ms;
+    if (opts.redirect && opts.redirect !== 'follow') o.redirect = opts.redirect;
     return o;
 }
 
@@ -919,6 +935,14 @@ function responseFromHost(raw, url) {
             var v = h[k];
             if (v === undefined || v === null) continue;
             headers._appendRaw(String(k).toLowerCase(), String(v));
+        }
+    }
+    // 宿主另给的 Set-Cookie 完整列表（headers 对象里只有最后一条）：
+    // 逐条追加，供 getSetCookie() 取；同时覆盖掉上面那条被合并过的。
+    if (raw && raw.set_cookie && raw.set_cookie.length) {
+        headers._list = headers._list.filter(function (p) { return p[0] !== 'set-cookie'; });
+        for (var si = 0; si < raw.set_cookie.length; si++) {
+            headers._appendRaw('set-cookie', String(raw.set_cookie[si]));
         }
     }
 

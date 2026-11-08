@@ -819,6 +819,23 @@ impl HostState {
             .unwrap_or(10_000)
             .clamp(100, 60_000);
 
+        // `redirect`：`follow`（默认，最多 3 跳）或 `manual`（3xx 原样交回）。
+        //
+        // `manual` 是给「必须读中间那一跳响应头」的场景用的 —— 典型是 OpenID/免登类
+        // 302 在 **Location 那一跳**上用 Set-Cookie 下发会话，跟跳跟完就丢了。
+        // `error` 语义上等于 manual + 调用方自己判 3xx，这里一并按 manual 处理。
+        let redirect_policy = opts
+            .get("redirect")
+            .and_then(|v| v.as_str())
+            .unwrap_or("follow")
+            .to_ascii_lowercase();
+        if redirect_policy != "follow" && redirect_policy != "manual" && redirect_policy != "error" {
+            return Err(format!(
+                "redirect 只支持 'follow' / 'manual' / 'error'，收到 `{redirect_policy}`"
+            ));
+        }
+        let follow_redirects = redirect_policy == "follow";
+
         // 校验 `tls` 选项。**两种构建都要校验**（默认构建里 `tls:"native"` 会在这里
         // 明确报错，而不是被静默忽略）—— 只是默认构建里返回值没人用，所以分开写。
         #[cfg(not(feature = "legacy-tls"))]
@@ -869,7 +886,7 @@ impl HostState {
                 .run(request)
                 .map_err(|e| format!("请求失败: {e}{}", tls_hint(&e.to_string())))?;
             let status = resp.status().as_u16();
-            if (300..400).contains(&status) {
+            if follow_redirects && (300..400).contains(&status) {
                 let loc = resp
                     .headers()
                     .get("location")
@@ -911,9 +928,20 @@ impl HostState {
                 // 但占位文本同时进 body_b64 —— 两个字段永远指向同一份字节。
                 Err(e) => (format!("<响应体读取失败: {e}>").into_bytes(), false),
             };
+            // `Set-Cookie` 是唯一一个**不允许被合并**的头：多条必须逐条交给 JS，
+            // 否则 `wdata3`/`tokenId` 这类一次下发十几条的免登跳转只会剩最后一条。
+            // headers 对象里仍按「后写覆盖」保留最后一条（兼容老插件），
+            // 完整列表走这个数组，由 fetch.js 映射成 `Headers.prototype.getSetCookie()`。
+            let mut set_cookies: Vec<String> = Vec::new();
+            for v in resp.headers().get_all("set-cookie").iter() {
+                if let Ok(s) = v.to_str() {
+                    set_cookies.push(s.to_string());
+                }
+            }
             return Ok(json!({
                 "status": status,
                 "headers": Value::Object(headers),
+                "set_cookie": set_cookies,
                 "body": String::from_utf8_lossy(&bytes).to_string(),
                 "body_b64": b64_encode(&bytes),
                 "truncated": truncated,

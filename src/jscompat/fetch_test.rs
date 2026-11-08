@@ -449,38 +449,48 @@ fn get_and_head_with_a_body_match_nodes_error() {
 }
 
 #[test]
-fn redirect_only_supports_follow_and_says_why() {
+fn redirect_policy_is_follow_manual_or_error() {
     with_fetch_compat(|rt, ctx| {
         stub_host(ctx);
         eval_unit(ctx, r#"
-            globalThis.__out = { manual: null, error: null, follow: null };
-            fetch('http://x.test/r', { redirect: 'manual' }).then(function () {
-                __out.manual = 'no throw';
+            globalThis.__out = { manual: null, error: null, follow: null, bad: null };
+            fetch('http://x.test/m', { redirect: 'manual' }).then(function (r) {
+                __out.manual = r.status;
             }, function (e) { __out.manual = [e.name, e.message]; });
-            fetch('http://x.test/r', { redirect: 'error' }).then(function () {
-                __out.error = 'no throw';
+            fetch('http://x.test/e', { redirect: 'error' }).then(function (r) {
+                __out.error = r.status;
             }, function (e) { __out.error = [e.name, e.message]; });
-            fetch('http://x.test/r', { redirect: 'follow' }).then(function (r) {
+            fetch('http://x.test/f', { redirect: 'follow' }).then(function (r) {
                 __out.follow = r.status;
             }, function (e) { __out.follow = 'rejected'; });
+            fetch('http://x.test/b', { redirect: 'nonsense' }).then(function () {
+                __out.bad = 'no throw';
+            }, function (e) { __out.bad = e.name; });
         "#);
         let calls = eval_json(ctx, "return __fetch_calls;");
+        let arr = calls.as_array().expect("__fetch_calls 是数组").clone();
         assert_eq!(
-            calls.as_array().map(|a| a.len()),
-            Some(1),
-            "只有 follow 该真的发出去；manual/error 在参数校验阶段就拒绝"
+            arr.len(),
+            3,
+            "follow / manual / error 三条都该真的发出去；只有非法值在校验阶段被拒"
         );
-        let id = calls[0]["id"].as_i64().unwrap();
-        deliver(ctx, id, true, &host_response(200, &[], "ok"));
-        pump(rt);
-
-        let out = eval_json(ctx, "return __out;");
-        for key in ["manual", "error"] {
-            assert_eq!(out[key][0], "TypeError", "{key} 必须是 TypeError");
-            let msg = out[key][1].as_str().unwrap();
-            assert!(msg.contains("只支持 'follow'"), "{key} 的文案要讲清楚限制: {msg}");
+        // manual / error 必须把策略透给宿主 —— 宿主据此决定跟不跟跳
+        assert_eq!(arr[0]["opts"]["redirect"], "manual", "manual 要传下去");
+        assert_eq!(arr[1]["opts"]["redirect"], "error", "error 要传下去");
+        assert!(
+            arr[2]["opts"].get("redirect").is_none(),
+            "follow 是默认值，不该多传一个字段给宿主"
+        );
+        // 让三条都回同一个 200，验证 Promise 都正常结算
+        for c in arr.iter() {
+            deliver(ctx, c["id"].as_i64().unwrap(), true, &host_response(200, &[], "ok"));
         }
+        pump(rt);
+        let out = eval_json(ctx, "return __out;");
+        assert_eq!(out["manual"], 200, "manual 必须能拿到响应（哪怕是 3xx 原样）");
+        assert_eq!(out["error"], 200, "error 语义同 manual，响应照常交给 JS");
         assert_eq!(out["follow"], 200, "follow 是默认，必须能用");
+        assert_eq!(out["bad"], "TypeError", "非法 redirect 值必须抛 TypeError");
     });
 }
 
