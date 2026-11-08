@@ -2984,7 +2984,9 @@ fn worker_main(
         // 按 Node 的规矩在"当前任务结束"时清空。异常在这里被认领成
         // 「未捕获的异步错误」，记到对应插件的日志里 —— 而不是静默消失。
         if let Some(qjs) = rt.as_ref() {
-            if let Some((plugin, msg)) = pump_jobs(qjs, &wd, job_slice()) {
+            let slice = job_slice();
+            let guard = pump_guard(&pending, &pending_routes, &pending_ticks, budget, slice);
+            if let Some((plugin, msg)) = pump_jobs(qjs, &wd, slice, guard) {
                 hostapi::push_log(&logs, &plugin, "error", &format!("未捕获的异步错误: {msg}"));
             }
         }
@@ -4443,9 +4445,48 @@ fn job_slice() -> Duration {
 /// 多持一次锁。
 ///
 /// 返回 `Some((插件名, 错误文本))` = 有一条 job 抛了没人接的异常。
-fn pump_jobs(rt: &Runtime, wd: &Watchdog, slice: Duration) -> Option<(String, String)> {
+/// 微任务泵的看门狗预算（**不是**让出切片）。
+///
+/// 泵里跑的是 await 之后的续体，它仍然属于产生它的那次执行 —— 所以上限该取那次
+/// 执行的墙钟死线，而不是「这一轮泵跑多久」。取在途执行里**最晚**的那个死线：
+/// 宁可晚一点打断，也不要误杀另一个插件的正常续体。
+/// 一条在途都没有时退回单次执行预算 —— 悬空的 Promise 链也不该把引擎线程永远占住。
+fn pump_guard(
+    pending: &Pending,
+    routes: &PendingRoutes,
+    ticks: &PendingTicks,
+    budget: Duration,
+    slice: Duration,
+) -> Duration {
+    let now = Instant::now();
+    pending
+        .values()
+        .map(|i| i.deadline)
+        .chain(routes.values().map(|r| r.deadline))
+        .chain(ticks.values().map(|t| t.deadline))
+        .max()
+        .map(|d| d.saturating_duration_since(now))
+        .unwrap_or(budget)
+        .max(slice)
+}
+
+fn pump_jobs(
+    rt: &Runtime,
+    wd: &Watchdog,
+    slice: Duration,
+    guard: Duration,
+) -> Option<(String, String)> {
     let started = Instant::now();
-    wd.arm(slice);
+    // ⚠ 这里装的**不是** slice，是 guard（见 pump_guard）。
+    //
+    // QuickJS 的 interrupt handler 只能**抛异常**，不能暂停正在执行的同步代码 ——
+    // 所以「跑满 50ms 就让出」如果靠 wd.arm(slice) 实现，实际效果是「把正在跑的
+    // 那条 job 直接打死」，而不是让它下一轮继续。一个 job 内部的同步解码（几十 KB
+    // JSON 走纯 JS 的 UTF-8 状态机）在 aarch64 上本来就 >50ms，一 arm 必炸：
+    // InternalError: interrupted（issue #1）。
+    //
+    // 让出的正确做法是**不再取下一个 job** —— job 队列是 Runtime 级的，不会丢。
+    wd.arm(guard);
     let mut out = None;
     loop {
         match rt.execute_pending_job() {
@@ -7300,11 +7341,98 @@ mod pump_tests {
         let n0: i32 = ctx.with(|ctx| ctx.globals().get("__n").unwrap());
         assert_eq!(n0, 0, "同步段结束时 microtask 还没跑 —— 这正是必须显式泵的原因");
         let wd = Watchdog::default();
-        assert!(pump_jobs(&rt, &wd, Duration::from_millis(50)).is_none());
+        assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
         let n1: i32 = ctx.with(|ctx| ctx.globals().get("__n").unwrap());
         assert_eq!(n1, 1);
     }
 
+
+    /// 回归（issue #1）：一个 job 内部的**同步**长任务不能被泵的切片打死。
+    ///
+    /// 线上表现：QuickJS 下 `await res.json()` 读几十 KB 的 JSON，纯 JS 的 UTF-8
+    /// 解码 >50ms，被 50ms 的 interrupt 打断成 `InternalError: interrupted` ——
+    /// 而且是**未捕获拒绝**，插件 try/catch 接不住。
+    ///
+    /// 根因不在解码，在泵：QuickJS 的 interrupt 只能抛异常，不能暂停同步代码，
+    /// 所以「跑满 50ms 就让出」不能靠 arm 实现。
+    #[test]
+    fn a_long_microtask_is_not_killed_by_the_slice() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.__plugin_name = 'slow'; \
+                 globalThis.__done = 0; \
+                 globalThis.__spin = function (ms) { var t = Date.now(); while (Date.now() - t < ms) {} }; \
+                 Promise.resolve().then(function () { __spin(120); __done = 1; });",
+            )
+            .unwrap();
+        });
+        let wd = Watchdog::default();
+        let r = pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5));
+        assert!(r.is_none(), "50ms 切片不该打断正在跑的 job：{r:?}");
+        let done: i32 = ctx.with(|ctx| ctx.globals().get("__done").unwrap());
+        assert_eq!(done, 1, "job 必须真的跑完（120ms > 50ms 切片）");
+    }
+
+    /// 切片的**正确**语义：到点就不再取下一个 job，但已经在队列里的一个都不丢。
+    #[test]
+    fn the_slice_stops_taking_new_jobs_but_keeps_the_queue() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.__plugin_name = 'q'; \
+                 globalThis.__n = 0; \
+                 globalThis.__spin = function (ms) { var t = Date.now(); while (Date.now() - t < ms) {} }; \
+                 for (var i = 0; i < 6; i++) { \
+                   Promise.resolve().then(function () { __spin(40); __n++; }); \
+                 }",
+            )
+            .unwrap();
+        });
+        let wd = Watchdog::default();
+        let count = |ctx: &Context| -> i32 { ctx.with(|ctx| ctx.globals().get("__n").unwrap()) };
+        assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
+        let first = count(&ctx);
+        assert!(first >= 1, "至少跑完一个（实际 {first}）");
+        assert!(first < 6, "6 个 40ms 的 job 不可能在 50ms 切片里全跑完（实际 {first}）");
+        // 剩下的还在 Runtime 级的 job 队列里：接着泵，一个都不能丢
+        let mut guard = 0;
+        while count(&ctx) < 6 && guard < 10 {
+            assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
+            guard += 1;
+        }
+        assert_eq!(count(&ctx), 6, "切片只该推迟剩下的 job，不该丢");
+    }
+
+    /// 去掉切片 interrupt 之后，**看门狗本身还得管用**：死循环必须到点被打断。
+    /// 否则「不误杀」就换成了「一条 while(true) 把引擎线程永久占住」。
+    #[test]
+    fn the_guard_still_interrupts_a_runaway_job() {
+        let rt = Runtime::new().unwrap();
+        let ctx = Context::full(&rt).unwrap();
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.__plugin_name = 'hang'; \
+                 globalThis.__fmt_err = function (e) { return 'E:' + e; }; \
+                 queueMicrotask(function () { while (true) {} });",
+            )
+            .unwrap();
+        });
+        let wd = Watchdog::default();
+        // ⚠ 必须真的把 handler 挂到 Runtime 上：只 `arm` 改的是原子量，没挂 handler
+        //   的 Runtime 根本不会被打断（第一版这条测试就是这么挂住的）。
+        rt.set_interrupt_handler(Some(wd.handler()));
+        let started = Instant::now();
+        let r = pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_millis(120));
+        assert!(r.is_some(), "死循环必须被看门狗打断");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "打断要按时，实际 {:?}",
+            started.elapsed()
+        );
+    }
     #[test]
     fn a_throwing_job_is_reported_not_swallowed() {
         // `queueMicrotask` 的 job 直接抛错 ⇒ JS_ExecutePendingJob 返回 -1。
@@ -7322,7 +7450,7 @@ mod pump_tests {
         });
         let wd = Watchdog::default();
         let (plugin, msg) =
-            pump_jobs(&rt, &wd, Duration::from_millis(50)).expect("job 抛错必须被报出来");
+            pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).expect("job 抛错必须被报出来");
         assert_eq!(plugin, "boom");
         assert!(msg.contains("kaput"), "错误文本要带原始信息，实际是 {msg}");
     }
@@ -7413,7 +7541,7 @@ mod pump_tests {
         }
         // 拒绝不是 job 异常 ⇒ 泵本身返回 None，真正的信息在 tracker 的队列里
         assert!(
-            pump_jobs(&rt, &wd, Duration::from_millis(50)).is_none(),
+            pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none(),
             "Promise 拒绝不该被当成 job 异常"
         );
         let q = REJECTIONS.lock().unwrap();

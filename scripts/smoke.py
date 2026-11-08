@@ -4381,7 +4381,23 @@ def binary_fetch_checks(tmp: Path) -> None:
 
     payload = bytes(((i * 37 + 11) % 256) for i in range(489))
 
+    # 一块「够大」的 JSON：纯 JS 的 UTF-8 解码在慢机器上要几十毫秒。
+    # issue #1 就是这块东西被微任务泵的 50ms interrupt 打断的。
+    big_json = json.dumps(
+        {"items": [{"i": i, "s": "x" * 96} for i in range(600)]}
+    ).encode()
+
     class Echo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path != "/big.json":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(big_json)))
+            self.end_headers()
+            self.wfile.write(big_json)
+
         def do_POST(self):  # noqa: N802
             n = int(self.headers.get("content-length") or 0)
             body = self.rfile.read(n)
@@ -4399,12 +4415,13 @@ def binary_fetch_checks(tmp: Path) -> None:
     srv.last_body = b""  # type: ignore[attr-defined]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     echo_url = f"http://127.0.0.1:{srv.server_address[1]}/echo"
+    json_url = f"http://127.0.0.1:{srv.server_address[1]}/big.json"
 
     d = tmp / "binfetch"
     (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
     (d / "plugin-data" / "binfetch").mkdir(parents=True, exist_ok=True)
     (d / "plugin-data" / "binfetch" / "config.json").write_text(
-        json.dumps({"url": echo_url}), encoding="utf-8"
+        json.dumps({"url": echo_url, "json_url": json_url}), encoding="utf-8"
     )
     # 插件源码：**只写 Node 形状**的 fetch，没有任何面板专属参数。
     # 这段代码拿到裸 Node 里也是能跑的（除了 import host-api）。
@@ -4426,8 +4443,12 @@ def binary_fetch_checks(tmp: Path) -> None:
         "    if (same) for (let i = 0; i < sent.length; i++) {\n"
         "        if (back[i] !== sent[i]) { same = false; break; }\n"
         "    }\n"
+        # issue #1 回归：大响应体走 await res.json()（纯 JS 解码 >1ms 切片）
+        "    const jr = await fetch(config().json_url);\n"
+        "    const j = await jr.json();\n"
+        "    const jsonItems = j.items.length;\n"
         "    return { status: 200, headers: { 'content-type': 'application/json' },\n"
-        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept }) };\n"
+        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept, jsonItems }) };\n"
         "});\n",
         encoding="utf-8",
     )
@@ -4445,6 +4466,9 @@ def binary_fetch_checks(tmp: Path) -> None:
             "PANEL_ALLOW_PLAIN_TOKEN": "1",
             # echo 服务器在回环上：默认会被 SSRF 闸挡掉，这里显式放行。
             "HOST_API_ALLOW_PRIVATE": "1",
+            # 把让出切片压到 1ms：修复前这条请求必被 interrupt 打断（issue #1），
+            # 修复后切片只决定「这一轮泵还取不取下一个 job」，不再打断正在跑的那个。
+            "JOB_SLICE_MS": "1",
         }
     )
     log = d / "binfetch.log"
@@ -4491,6 +4515,11 @@ def binary_fetch_checks(tmp: Path) -> None:
         check(
             isinstance(got.get("slept"), int) and got["slept"] >= 110,
             "QuickJS 的 await sleep(120) 真的等了（面板扩展，Node 没有）",
+            str(got),
+        )
+        check(
+            got.get("jsonItems") == 600,
+            "60 KB JSON 的 await res.json() 没被微任务泵切片打断（JOB_SLICE_MS=1，issue #1）",
             str(got),
         )
         check(

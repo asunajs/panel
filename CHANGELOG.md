@@ -1,5 +1,24 @@
 # 更新记录
 
+## 0.3.1 — 2026-11-08
+
+> 这一版只有一个主题：**微任务泵不该打断正在跑的 job。**
+
+- **修掉 `InternalError: interrupted`（issue #1，QuickJS）。** 泵为了「跑满 50ms 就让出」
+  调用 `wd.arm(50ms)`，而 QuickJS 的 interrupt handler **只能抛异常，不能暂停同步代码** ——
+  于是「让出」实际变成了「把正在跑的那条 job 打死」。0.3.0 新加的 `fetch` 用纯 JS 的
+  UTF-8 状态机解码响应体，几十 KB 的 JSON 在 aarch64 上就超过 50ms，`await res.json()`
+  必然中招。现在泵只在**取下一个 job 之前**看死线，到点就停，队列里的续体一个都不丢。
+- **看门狗没被拿掉。** 泵改用一个**执行预算**（取在途执行里最晚的那个墙钟死线，没有在途
+  就退回 `EXEC_BUDGET_MS`）：`while (true) {}` 仍然会被到点打断，只是不再拿 50ms 去切
+  正常的同步工作。
+- **`Response#text()` / `#json()` 的解码进 try。** 以前 `decodeUtf8(bytes)` 写在 Promise
+  executor 里但 try 之外，抛出来就是「未捕获的 Promise 拒绝」—— 插件连 `try/catch` 都接不住，
+  面板上只能看到一条没人认领的 error。现在它是正常的 `reject`。
+- **回归测试三层**：Rust（长 job 不被切片打死 / 切片只推迟不丢 job / 死循环仍被预算打断，
+  三条都带反向例）、冒烟（`JOB_SLICE_MS=1` 下 60 KB JSON 的 `await res.json()` 必须成功 ——
+  修复前这条请求是**挂死不回**，不是 500）。
+- `docs/configuration.md` 里 `JOB_SLICE_MS` 的说明改成实际语义（它不打断，只决定还取不取下一个 job）。
 ## 0.3.0 — 2026-11-08
 
 > 这一版的主题一句话：**QuickJS 补上「发字节」和「压字节」，插件不再需要按引擎分叉。**

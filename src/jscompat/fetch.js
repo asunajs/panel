@@ -513,7 +513,13 @@ class Response {
         return new Promise(function (resolve, reject) {
             var bytes;
             try { bytes = self._consume(); } catch (e) { reject(e); return; }
-            resolve(bytes === null ? '' : decodeUtf8(bytes));
+            // ⚠ 解码也必须在 try 里：decodeUtf8 是纯 JS 状态机，跑的是**同步**代码，
+            //   引擎的预算打断（InternalError: interrupted）就落在这几十行里。
+            //   放在 executor 里但 try 之外的话，异常会直接穿透 executor ⇒ 变成
+            //   「未捕获的 Promise 拒绝」，插件连 try/catch 都接不住（issue #1）。
+            var text;
+            try { text = bytes === null ? '' : decodeUtf8(bytes); } catch (e) { reject(e); return; }
+            resolve(text);
         });
     }
 
@@ -522,7 +528,9 @@ class Response {
         return new Promise(function (resolve, reject) {
             var bytes;
             try { bytes = self._consume(); } catch (e) { reject(e); return; }
-            var text = bytes === null ? '' : decodeUtf8(bytes);
+            // 同上：解码在 try 里，打断/解码错误都变成一次正常的 reject
+            var text;
+            try { text = bytes === null ? '' : decodeUtf8(bytes); } catch (e) { reject(e); return; }
             // SyntaxError 原样冒出去（Node 也是 SyntaxError，文案不同）
             try { resolve(JSON.parse(text)); } catch (e2) { reject(e2); }
         });
