@@ -56,17 +56,17 @@
       "id": "yangshipin",
       "repo": "asunajs/panel-single-plugins",
       "type": "release",
-      "asset": "yangshipin-0.1.0.zip",
-      "tag": "v0.1.0",
-      "version": "v0.1.0",
-      "sha256": "996ee8decc1d809cbc697548e876506169ef52edd3cbd1315bc5359fe0029469",
-      "size": 21467,
+      "asset": "yangshipin-0.1.1.zip",
+      "tag": "v0.1.1",
+      "version": "v0.1.1",
+      "sha256": "3adc5a68213d9e045e94ec7285733c65cbe34c0e98f34cb6a5d74c74e1f4a775",
+      "size": 21624,
       "provides": [
         "yangshipin"
       ],
       "min_panel": "0.3.0",
       "name": "央视频短信登录+任务",
-      "summary": "短信登录央视频（WebUI），一次跑完当天 7 个积分任务并领取；早 5 点 / 晚 5 点各 ±1 小时随机触发",
+      "summary": "短信登录央视频（WebUI），一次跑完当天任务并领取；观看类按 30 秒要求拉开间隔；早 5 点/晚 5 点各 ±1 小时随机",
       "tags": [
         "央视频",
         "登录",
