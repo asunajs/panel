@@ -56,6 +56,18 @@ jobs:
         with:
           node-version: '24'
 
+      # 仓库卫生：误建的空文件不该进仓库。
+      # 2026-10-26 混进来过 `=0.7.6`（`cargo add x >=0.7.6` 少了引号）和 `n` 两个
+      # 0 字节文件 —— 它们被跟踪之后会跟着每个人的 clone 走。
+      - name: 仓库卫生（0 字节的已跟踪文件）
+        run: |
+          bad=$(git ls-files | while read -r f; do [ -f "$f" ] && [ ! -s "$f" ] && echo "$f"; done)
+          if [ -n "$bad" ]; then
+            echo "::error::仓库里有 0 字节的已跟踪文件（多半是 shell 重定向误建）："
+            echo "$bad"
+            exit 1
+          fi
+
       # clippy 门禁：第二十七轮把 41 条清到 0，之后不许再涨。
       #
       # 它挡的不是风格 —— 是**编译和测试都抓不到**的那类问题：文档注释被后来插入的
