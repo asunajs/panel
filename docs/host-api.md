@@ -433,11 +433,16 @@ const iv  = setInterval(fn, ms);     // 周期
 clearTimeout(id); clearInterval(iv); // 同一个东西，可以混用
 ```
 
-配合 async 任务还有一条原语（宿主提供的全局，不是 Node 标准）：
+配合 async 任务还有一条原语（**面板扩展**，不是 Node 标准）：
 
 ```js
-await sleep(ms);   // 等 ms 毫秒；非法或负数按 0 处理
+import { sleep } from 'host-api';   // 裸名 sleep(...) 也一样（同一个函数）
+await sleep(ms);                    // 等 ms 毫秒；非法或负数按 0 处理
 ```
+
+**三个引擎都有、语义一致**（QuickJS / Node / Bun）。这一条不是可有可无的糖：插件
+按引擎分叉写 `await sleep` 与 `new Promise(...)` 是最没意义的一种差异 —— 同一份代码
+在 QuickJS 能跑、切到 Node 就 `ReferenceError`，而报错点和真正的原因（少个全局）离得很远。
 
 `sleep` 是这套引擎**需要**的东西：任务 handler 已经是 async 的了，没有它想「等 10 秒再查
 一次」就只能写成 `setTimeout` 套回调。实现就是 `new Promise(r => setTimeout(r, ms))`，

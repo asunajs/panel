@@ -143,6 +143,14 @@ Object.defineProperty(globalThis, '__fire_timer', {
 //   start / success / fail               —— **语义着色**（过滤级别都算 info）
 // 过滤级别由宿主决定（见 log::Type::level），插件只管语义。
 globalThis.host_api = {
+    // 等 ms 毫秒（**面板扩展**，Node 没有这个全局）。三个引擎同义：
+    // 非法/负数按 0，实现就是 setTimeout + Promise。
+    //
+    // 转发一层而不是直接赋值：真正的函数定义在下面（globalThis.sleep），
+    // 直接写 sleep: globalThis.sleep 会依赖对象字面量的求值顺序 —— 现在那个函数
+    // 还在定义之前，拿到的会是 undefined。
+    sleep: function (ms) { return globalThis.sleep(ms); },
+
     // 插件级配置：`<PLUGIN_DATA_DIR>/<plugin>/config.json`。
     // 返回解析后的对象；缺文件是 {}，非法 JSON 直接抛错。
     config: function () {
@@ -751,6 +759,8 @@ export const ws_send = api.ws_send;
 export const ws_recv = api.ws_recv;
 export const ws_close = api.ws_close;
 export const panel = api.panel;
+// 面板扩展：await sleep(ms)。三个引擎都有（Node/Bun 那份在 runtime/js/panel.mjs 旁边）。
+export const sleep = api.sleep;
 export const register_route = api.register_route;
 export const register_nav = api.register_nav;
 export const set_job_paused = api.set_job_paused;
@@ -2303,6 +2313,46 @@ mod tests {
         );
     }
 
+    /// sleep 是**面板扩展**（Node 没有），但三个引擎都得有 —— 不然同一份插件
+    /// 在 QuickJS 里能跑、切到 Node 就 ReferenceError。这里验 QuickJS 侧：
+    /// 全局有、host-api 具名导出有、返回的是 Promise。真实计时由冒烟测。
+    #[test]
+    fn sleep_is_a_promise_on_the_quickjs_side_too() {
+        let rq = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rq).unwrap();
+        ctx.with(|ctx| {
+            install_panel_primitives(&ctx).unwrap();
+            ctx.eval::<(), _>(BOOTSTRAP).expect("引导脚本自身要能跑");
+            let got: String = ctx
+                .eval(
+                    r#"
+                    JSON.stringify({
+                        global: typeof sleep,
+                        api: typeof host_api.sleep,
+                        promise: typeof sleep(0).then === 'function',
+                        instance: sleep(0) instanceof Promise,
+                        neg: sleep(-5) instanceof Promise,
+                        junk: sleep('abc') instanceof Promise,
+                        same: host_api.sleep(0) instanceof Promise,
+                    })
+                    "#,
+                )
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+            assert_eq!(v["global"], "function", "全局 sleep 没了");
+            assert_eq!(v["api"], "function", "host-api 上没有 sleep");
+            assert_eq!(v["promise"], true, "sleep() 必须返回 Promise（await 得到）");
+            assert_eq!(v["instance"], true);
+            assert_eq!(v["neg"], true, "负数按 0 处理，仍然返回 Promise");
+            assert_eq!(v["junk"], true, "非法值按 0 处理");
+            assert_eq!(v["same"], true);
+        });
+        // ESM 门面也得有：`import { sleep } from 'host-api'` 是跨引擎写法
+        assert!(
+            HOST_API_MODULE.contains("export const sleep = api.sleep;"),
+            "host-api 模块少了 sleep 的具名导出"
+        );
+    }
     /// 0.3.0：panel.version() / panel.atLeast() —— 插件用它做**能力降级**，
     /// 而不是硬拒。三条不变量：与 web.rs 的 VERSION 同源、与 host-api 的具名导出
     /// 是同一个对象、非法版本串抛错（不静默 false）。

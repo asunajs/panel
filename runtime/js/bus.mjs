@@ -861,6 +861,19 @@ function makeConsole() {
  * The host-api ESM module and these globals share the exact same function
  * objects, so a plugin can mix `import` and `host.*` freely.
  */
+/**
+ * `await sleep(ms)` —— **面板扩展**（Node 没有这个全局；要等就用 `timers/promises`，
+ * 但插件里最常见的一句是 `await sleep(1000)`，所以三个引擎都提供它）。
+ *
+ * 语义与内嵌 QuickJS 那份**逐字对齐**（src/jshost.rs 的 globalThis.sleep）：
+ * 非法/负数按 0；返回 Promise；实现就是 setTimeout。
+ */
+export function sleep(ms) {
+  const n = Number(ms);
+  const d = Number.isFinite(n) && n > 0 ? n : 0;
+  return new Promise((resolve) => setTimeout(resolve, d));
+}
+
 export { panel } from './panel.mjs';
 
 import { panel as panelNs } from './panel.mjs';
@@ -903,6 +916,8 @@ export function installGlobals() {
     serverUrl,
     // panel version (0.3.0) -- same name and meaning as the embedded QuickJS host
     panel: panelNs,
+    // 面板扩展：await sleep(ms)。下面那段「裸名补齐」只拷函数，sleep 正好是函数。
+    sleep,
   };
 
   const host = {

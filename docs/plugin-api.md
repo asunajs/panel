@@ -175,6 +175,9 @@ function handler(payload) {
 > async。`await` 期间引擎线程**让出**给别的活 —— 同一 worker 上的毫秒级定时器照常触发
 > （实测：一个 `await sleep(700)` 的任务跑着，另一个 50ms 的 `setInterval` 仍然 20 次/秒）。
 >
+> `sleep` 是**面板扩展**（Node 没有这个全局），但**三个引擎都有**，而且全局与
+> `import { sleep } from 'host-api'` 是同一个函数 —— 见 [host-api.md §1.2.11](host-api.md#1211-插件内的定时器settimeout--setinterval)。
+>
 > 四条边界：
 >
 > - **墙钟预算**：一次执行最多占 `budget_ms`（默认 `EXEC_BUDGET_MS`，600 秒）的**墙钟**时间。

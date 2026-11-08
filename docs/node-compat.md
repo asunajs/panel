@@ -53,7 +53,7 @@
 | `clearInterval` | ✅ | ✅ | |
 | `queueMicrotask` | ✅ | ✅ | 引擎自带；微任务在**每轮引擎调度结束**时清空（不是 Node 的 tick 队列） |
 | `performance` | 🟡 | ✅ | 只有 `now()` 与 `timeOrigin`；没有 mark/measure/observer |
-| `sleep` | ✅ | ❌ | **面板扩展**：`await sleep(ms)`（Node 用 timers/promises） |
+| `sleep` | ✅ | ✅ | **面板扩展**：`await sleep(ms)`。三个引擎同义（非法/负数按 0），既是全局也是 `host-api` 的具名导出 |
 | `fetch_async` | ✅ | ❌ | **面板扩展**：不阻塞 worker 的 HTTP，返回 `{status, headers, body}` |
 | `panel` | ✅ | 🟡 | **面板扩展**：`version()` / `atLeast(v)`（[host-api.md §1.2.12](host-api.md#1212-面板版本panelversion--panelatleast)）。Node/Bun 侧也有，版本从 `PANEL_VERSION` 读 |
 | `host_api` | ✅ | ❌ | **面板扩展**：宿主 API 门面（Node/Bun 里用 `host-api` 模块，同名同义） |

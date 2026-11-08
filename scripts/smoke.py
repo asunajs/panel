@@ -3492,6 +3492,10 @@ def external_runtime_checks(tmp: Path) -> None:
     (pdir / "extprobe.js").write_text(
         "import { log, register_cron, register_route, panel as apiPanel } from 'host-api';\n"
         "log('extprobe loaded');\n"
+        # sleep 在三个引擎同义：这里验 Node/Bun 也有（内嵌引擎那份在 QuickJS 侧验）
+        "const __t0 = Date.now();\n"
+        "await sleep(120);\n"
+        "log('extprobe sleep=' + (Date.now() - __t0));\n"
         # 0.3.0：外部引擎也要有 panel（版本从 PANEL_VERSION 注入的环境变量读）
         "log('extprobe panel=' + panel.version() + ' atLeast-0.0.1=' + panel.atLeast('0.0.1')"
         " + ' same=' + (panel === apiPanel));\n"
@@ -3526,6 +3530,12 @@ def external_runtime_checks(tmp: Path) -> None:
             if "extprobe panel=" in text:
                 break
             time.sleep(0.3)
+        slept = re.search(r"extprobe sleep=(\d+)", text)
+        check(
+            slept is not None and int(slept.group(1)) >= 110,
+            "Node 引擎里 await sleep(120) 也真的等了",
+            text[-200:],
+        )
         check(
             "atLeast-0.0.1=true" in text and "same=true" in text,
             "Node 引擎里 panel.version()/atLeast() 可用（与 host-api 具名导出同一对象）",
@@ -4408,12 +4418,16 @@ def binary_fetch_checks(tmp: Path) -> None:
         "        headers: { 'content-type': 'application/octet-stream' },\n"
         "    });\n"
         "    const back = new Uint8Array(await res.arrayBuffer());\n"
+        # sleep 是面板扩展（Node 没有），三个引擎都得有 —— 这里验 QuickJS 真的等够了
+        "    const t0 = Date.now();\n"
+        "    await sleep(120);\n"
+        "    const slept = Date.now() - t0;\n"
         "    let same = back.length === sent.length;\n"
         "    if (same) for (let i = 0; i < sent.length; i++) {\n"
         "        if (back[i] !== sent[i]) { same = false; break; }\n"
         "    }\n"
         "    return { status: 200, headers: { 'content-type': 'application/json' },\n"
-        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same }) };\n"
+        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept }) };\n"
         "});\n",
         encoding="utf-8",
     )
@@ -4474,6 +4488,11 @@ def binary_fetch_checks(tmp: Path) -> None:
             str(got),
         )
         check(got.get("same") is True, "往返逐字节相等", str(got))
+        check(
+            isinstance(got.get("slept"), int) and got["slept"] >= 110,
+            "QuickJS 的 await sleep(120) 真的等了（面板扩展，Node 没有）",
+            str(got),
+        )
         check(
             srv.last_body == payload,  # type: ignore[attr-defined]
             "echo 服务器收到的字节与插件写的一模一样（0x00 / 0xff 都不许被改写）",

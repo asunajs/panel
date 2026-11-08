@@ -38,6 +38,7 @@ export {
   sqlite_exec,
   http_fetch,
   panel,
+  sleep,
   smtp_send,
   ws_open,
   ws_send,
