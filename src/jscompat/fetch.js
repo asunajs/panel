@@ -483,6 +483,9 @@ class Response {
         // 规范要求 Response 的头是只读视图（文件头已知差异 7）
         this._headers._guard = 'immutable';
         this._body = bytes;
+        // 从字符串构造时，文本就是入参本身 —— 不用再解码一遍
+        this._cachedText = typeof body === 'string' ? body : null;
+        this._bodyB64 = null;
         this._used = false;
         this._url = '';
         this._redirected = false;
@@ -505,20 +508,34 @@ class Response {
             throw new TypeError('Body is unusable: Body has already been read');
         }
         this._used = true;
+    }
+
+    /// 字节**按需**解码。宿主给的 `body_b64` 在 JS 里解一次 60 KB 要 73 ms；
+    /// 只读文本的调用方（`await res.json()` 这种）一秒都不该花在这上面。
+    _bytes() {
+        if (this._body === null && this._bodyB64 !== null) {
+            var b = null;
+            try { b = b64decode(this._bodyB64, false); } catch (e) { b = new Uint8Array(0); }
+            this._body = b;
+            this._bodyB64 = null;
+        }
         return this._body;
     }
 
     text() {
         var self = this;
         return new Promise(function (resolve, reject) {
-            var bytes;
-            try { bytes = self._consume(); } catch (e) { reject(e); return; }
-            // ⚠ 解码也必须在 try 里：decodeUtf8 是纯 JS 状态机，跑的是**同步**代码，
-            //   引擎的预算打断（InternalError: interrupted）就落在这几十行里。
-            //   放在 executor 里但 try 之外的话，异常会直接穿透 executor ⇒ 变成
-            //   「未捕获的 Promise 拒绝」，插件连 try/catch 都接不住（issue #1）。
+            try { self._consume(); } catch (e) { reject(e); return; }
+            // 宿主已经解好的文本（body_utf8）：一个字节都不用碰
+            if (self._cachedText !== null) { resolve(self._cachedText); return; }
+            // ⚠ 解码必须在 try 里：跑的是**同步**代码，引擎的预算打断
+            //   （InternalError: interrupted）就落在这里。放在 try 之外的话，异常会
+            //   直接穿透 executor ⇒ 变成「未捕获的 Promise 拒绝」，插件接不住（issue #1）。
             var text;
-            try { text = bytes === null ? '' : decodeUtf8(bytes); } catch (e) { reject(e); return; }
+            try {
+                var b = self._bytes();
+                text = b === null ? '' : decodeUtf8(b);
+            } catch (e) { reject(e); return; }
             resolve(text);
         });
     }
@@ -526,11 +543,17 @@ class Response {
     json() {
         var self = this;
         return new Promise(function (resolve, reject) {
-            var bytes;
-            try { bytes = self._consume(); } catch (e) { reject(e); return; }
-            // 同上：解码在 try 里，打断/解码错误都变成一次正常的 reject
+            try { self._consume(); } catch (e) { reject(e); return; }
+            // 同上：宿主解好的文本直接用，解码错误/打断都变成一次正常的 reject
+            if (self._cachedText !== null) {
+                try { resolve(JSON.parse(self._cachedText)); } catch (e3) { reject(e3); }
+                return;
+            }
             var text;
-            try { text = bytes === null ? '' : decodeUtf8(bytes); } catch (e) { reject(e); return; }
+            try {
+                var b = self._bytes();
+                text = b === null ? '' : decodeUtf8(b);
+            } catch (e) { reject(e); return; }
             // SyntaxError 原样冒出去（Node 也是 SyntaxError，文案不同）
             try { resolve(JSON.parse(text)); } catch (e2) { reject(e2); }
         });
@@ -539,8 +562,8 @@ class Response {
     arrayBuffer() {
         var self = this;
         return new Promise(function (resolve, reject) {
-            var bytes;
-            try { bytes = self._consume(); } catch (e) { reject(e); return; }
+            try { self._consume(); } catch (e) { reject(e); return; }
+            var bytes = self._bytes();
             if (bytes === null) { resolve(new ArrayBuffer(0)); return; }
             // 返回**新**的 buffer：直接给内部那块的话，调用方一改就把 Response 改了
             resolve(copyBytes(bytes).buffer);
@@ -552,8 +575,8 @@ class Response {
     bytes() {
         var self = this;
         return new Promise(function (resolve, reject) {
-            var bytes;
-            try { bytes = self._consume(); } catch (e) { reject(e); return; }
+            try { self._consume(); } catch (e) { reject(e); return; }
+            var bytes = self._bytes();
             resolve(bytes === null ? new Uint8Array(0) : copyBytes(bytes));
         });
     }
@@ -565,7 +588,8 @@ class Response {
         return responseFromParts(
             this._status, this._statusText, cloneHeaders(this._headers, 'immutable'),
             this._body === null ? null : copyBytes(this._body),
-            this._url, this._type, this._redirected
+            this._url, this._type, this._redirected, this._cachedText,
+            this._body === null ? this._bodyB64 : null
         );
     }
 
@@ -597,13 +621,19 @@ class Response {
 }
 
 /// 内部构造：绕过公开构造函数的校验（status 0 / 宿主头 / 只读 guard）。
-function responseFromParts(status, statusText, headers, body, url, type, redirected) {
+function responseFromParts(status, statusText, headers, body, url, type, redirected, bodyText, bodyB64) {
     var r = Object.create(Response.prototype);
     r._status = status;
     r._statusText = statusText;
     r._headers = headers;
     r._headers._guard = 'immutable';
     r._body = body;
+    // 宿主已经解好的文本（body_utf8 为真时才有）：text()/json() 直接用它，
+    // 不再把同一份字节在 JS 里解第二遍。见 responseFromHost。
+    r._cachedText = bodyText === undefined || bodyText === null ? null : String(bodyText);
+    // 原始字节的 base64 **不解**：b64decode 一次 60 KB 要 73 ms，而只读 .text()/.json()
+    // 的调用方（JSON 接口的绝大多数）根本不需要字节。见 _bytes()。
+    r._bodyB64 = bodyB64 === undefined || bodyB64 === null ? null : String(bodyB64);
     r._used = false;
     r._url = url || '';
     r._type = type || 'default';
@@ -920,15 +950,12 @@ function responseFromHost(raw, url) {
     // 响应体：**优先**用宿主给的原始字节（body_b64）。以前是从文本再 encode 回去 ——
     // 文本是 UTF-8 宽松解码的产物，二进制一旦进过那一步就回不来了（这是
     // 「发出去 703 字节而不是 489」那类 bug 的响应侧孪生）。
+    // ⚠ 这里**不**解 base64：60 KB 的 b64decode 在 JS 里要 73 ms，而绝大多数调用方
+    // 只读文本（`await res.json()`）。字节由 Response._bytes() 按需解码。
+    var bodyB64 = null;
+    if (raw && typeof raw.body_b64 === 'string' && raw.body_b64 !== '') bodyB64 = raw.body_b64;
     var bodyBytes = null;
-    if (raw && typeof raw.body_b64 === 'string' && raw.body_b64 !== '') {
-        try {
-            bodyBytes = b64decode(raw.body_b64, false);
-        } catch (e) {
-            bodyBytes = null;   // 宿主给的 base64 坏了：退回文本，别让整个响应炸掉
-        }
-    }
-    if (bodyBytes === null) {
+    if (bodyB64 === null) {
         var bodyText = '';
         if (raw && typeof raw.body === 'string') bodyText = raw.body;
         else if (raw && raw.body !== undefined && raw.body !== null) bodyText = String(raw.body);
@@ -954,8 +981,14 @@ function responseFromHost(raw, url) {
         }
     }
 
+    // 宿主给的 body 与 UTF-8 解码结果**逐字相同**时（body_utf8），直接拿来当文本缓存：
+    // 60 KB 的 JSON 在 aarch64 上纯 JS 解码要 100 ms+，这一步是 0。
+    var hostText = null;
+    if (bodyB64 !== null && raw && raw.body_utf8 === true && typeof raw.body === 'string') {
+        hostText = raw.body;
+    }
     return responseFromParts(
-        status, statusTextOf(status), headers, bodyBytes, url, 'basic', false
+        status, statusTextOf(status), headers, bodyBytes, url, 'basic', false, hostText, bodyB64
     );
 }
 
@@ -1031,6 +1064,12 @@ function fetch(input, init) {
 
         pending.then(function (raw) {
             if (settled) return;   // 已经 abort 过了：迟到的结果丢掉
+            // 传输层读正文失败（超过传输上限、连接中途断）：Node 的 fetch 是 **reject**，
+            // 不是给你一个 status=200 + 一句错误文本 —— 后者会让插件把错误当正文去解析。
+            if (raw && typeof raw.body_error === 'string' && raw.body_error !== '') {
+                fail(fetchFailed(raw.body_error));
+                return;
+            }
             cleanup();
             resolve(responseFromHost(raw, req.url));
         }, function (err) {

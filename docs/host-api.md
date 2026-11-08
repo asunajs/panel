@@ -535,6 +535,13 @@ http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str, "bo
 - 响应**总是**同时给 `body`（文本，UTF-8 宽松解码）与 `body_b64`（服务器原始字节的
   base64）。文本场景多一个字段没人用；二进制场景（图片 / protobuf / 自定义信封）只有它是对的。
 - `truncated`：响应体超过 **1 MiB** 时为 `true`（内容已截断，不是完整响应）。
+- 两个 compat 层的**内部字段**（插件不该读，`docs/plugin-api.md` 也不提）：
+  - `body_utf8`：`body` 是否**恰好等于** WHATWG 的 UTF-8 解码结果（合法 UTF-8 且不以 BOM 开头）。
+    为真时 `Response#text()/#json()` 直接用 `body`，一个字节都不用再解 —— 60 KB 的 JSON
+    在 aarch64 上纯 JS 解码要 100 ms+，这一步是 0。为假（BOM / 非法字节 / 截断）走精确解码器。
+  - `body_error`：传输层读正文失败时非空（比如超过 1 MiB 的传输上限）。`fetch` 见到它就
+    **reject**（`TypeError('fetch failed', { cause })`）—— 0.3.2 之前这里会漏成
+    「status=200 + 一句错误文本」，插件会把它当正文去 `JSON.parse`。
 
 #### 1.4.1 `fetch_async`：不阻塞引擎的版本
 

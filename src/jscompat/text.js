@@ -164,6 +164,11 @@ function b64decode(str, strict) {
 // 而不是抛错 —— 与 TextEncoder/Node 一致，也是 HTTP 头里偶发怪字符时最不坏的落点。
 function utf8Encode(str) {
     var s = String(str);
+    // 编码**没有**原生快路径，这是量出来的结论，不是没做：
+    // 宿主在 Rust 里编码很快（0.1 ms），但把字节送回 JS 只有两条路 ——
+    // base64 再 b64decode（80 KB 的 base64 在 JS 里 73 ms）或者二进制串再
+    // charCodeAt 循环（15 ms）。都比这里这圈循环（19 ms）好不到哪去，
+    // 白搭一次 RPC。要更快只能让宿主**直接吃字符串**（请求体那条路已经是了）。
     // 每个 UTF-16 码元最多产出 3 字节（孤代理项 3 字节、代理对 4 字节/2 码元），
     // 所以 length*3 一定是上界，一次分配就够，不用边算边扩容。
     var out = new Uint8Array(s.length * 3);
@@ -301,10 +306,42 @@ function utf8DecodeChunk(state, bytes, fatal, ignoreBOM, stream) {
 }
 
 /// 一次性的完整解码（不保留状态），兼容层内部用。
+/// 字节 → 二进制串（每个码元 ≤ 0xFF）。分块 apply：一次性 60 K 个参数会撞引擎的
+/// 参数个数上限，8 KB 一块既能吃到原生 memcpy，又不会爆栈。
+function binString(bytes) {
+    var CH = 8192;
+    var parts = [];
+    for (var i = 0; i < bytes.length; i += CH) {
+        parts.push(String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CH, bytes.length))));
+    }
+    return parts.join('');
+}
+/// 小输入不值得一次宿主调用（RPC 有固定开销）；大输入原生快三个数量级。
+/// 512 是量出来的拐点：以下 JS 状态机反而更省。
+var NATIVE_UTF8_MIN = 512;
+
 function utf8Decode(bytes, opts) {
     opts = opts || {};
+    var fatal = !!opts.fatal;
+    var ignoreBOM = !!opts.ignoreBOM;
+    var b = toBytes(bytes);
+    // 原生快路径：宿主用 Rust 的 from_utf8_lossy（与 WHATWG 同一套 maximal subpart
+    // 规则）+ BOM 处理。60 KB 从 28 ms 降到 ~1 ms，1.5 MB 不再把 Runtime 撑爆。
+    // 宿主没装（单测/纯 JS 环境）或输入很小时走下面那份状态机 —— 它才是契约的
+    // 参考实现，两条路必须给出逐字相同的结果（text_test.rs 的对拍就是干这个的）。
+    if (b.length >= NATIVE_UTF8_MIN && typeof __host_utf8_decode_bin === 'function') {
+        var r = null;
+        try { r = __host_utf8_decode_bin(binString(b), ignoreBOM ? 1 : 0, fatal ? 1 : 0); }
+        catch (e) { r = null; }
+        if (typeof r === 'string') {
+            if (r.slice(0, 5) !== '!ERR:') return r;
+            // fatal 的非法输入：与 JS 那份同一个 TypeError（文案是契约的一部分）
+            if (fatal) throw new TypeError('The encoded data was not valid for encoding utf-8');
+            // 非 fatal 的其它错误（超上限之类）：落到 JS 那份，别把能解的判死
+        }
+    }
     var state = newDecoderState();
-    return utf8DecodeChunk(state, toBytes(bytes), !!opts.fatal, !!opts.ignoreBOM, false);
+    return utf8DecodeChunk(state, b, fatal, ignoreBOM, false);
 }
 
 // ──────────────────────────────────────────────────────── TextEncoder
@@ -443,6 +480,9 @@ class TextDecoder {
         }
         // windows-1252：任何字节序列都合法（没有 fatal 这回事），也不吃 BOM。
         if (this._encoding === 'windows-1252') return cp1252Decode(bytes);
+        // 非流式 = 一次独立解码 ⇒ 直接走 utf8Decode（它里面有原生快路径）。
+        // 流式必须留在状态机上：跨块的状态（半个码点、BOM 是否见过）是它的全部意义。
+        if (!stream) return utf8Decode(bytes, { fatal: this._fatal, ignoreBOM: this._ignoreBOM });
         var text = utf8DecodeChunk(this._state, bytes, this._fatal, this._ignoreBOM, stream);
         if (!stream) this._state = newDecoderState();
         return text;

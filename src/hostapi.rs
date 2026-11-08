@@ -911,7 +911,7 @@ impl HostState {
             // 而 `read_to_string` 遇到非 UTF-8 会整段失败（以前只能回一句占位文本）。
             // 文本侧仍按 UTF-8 宽松解码，非法字节变成 U+FFFD —— 与 Node 的
             // `response.text()` 一致；要精确字节就取 `body_b64`。
-            let (bytes, truncated) = match resp
+            let (bytes, truncated, body_error) = match resp
                 .body_mut()
                 .with_config()
                 .limit(MAX_BODY_BYTES + 1)
@@ -922,11 +922,21 @@ impl HostState {
                     if truncated {
                         buf.truncate(MAX_BODY_BYTES as usize);
                     }
-                    (buf, truncated)
+                    (buf, truncated, None)
                 }
-                // 读一半断了：保留「状态 + 头仍然可用」的老行为，
-                // 但占位文本同时进 body_b64 —— 两个字段永远指向同一份字节。
-                Err(e) => (format!("<响应体读取失败: {e}>").into_bytes(), false),
+                // 读一半断了 / 撞上传输层自己的上限（ureq 的 1 MiB）：body 里仍然放
+                // 那句占位文本（老行为，http_fetch 的调用方可能认它），但**同时**带上
+                // body_error —— fetch 必须 reject，而不是给插件一个 200 + 一句话。
+                // 踩过的坑：1.5 MB 的响应以前在 fetch 里表现为 status=200、
+                // body=<响应体读取失败: …>，插件会把它当正文去 JSON.parse。
+                Err(e) => {
+                    let msg = format!("响应体读取失败: {e}");
+                    (
+                        format!("<{msg}>").into_bytes(),
+                        false,
+                        Some(msg),
+                    )
+                }
             };
             // `Set-Cookie` 是唯一一个**不允许被合并**的头：多条必须逐条交给 JS，
             // 否则 `wdata3`/`tokenId` 这类一次下发十几条的免登跳转只会剩最后一条。
@@ -944,6 +954,10 @@ impl HostState {
                 "set_cookie": set_cookies,
                 "body": String::from_utf8_lossy(&bytes).to_string(),
                 "body_b64": b64_encode(&bytes),
+                // compat 层的内部字段：body 是否就等于 UTF-8 解码结果（见 body_is_plain_utf8）
+                "body_utf8": body_is_plain_utf8(&bytes),
+                // 传输层失败时非空：fetch 据此 reject（见 fetch.js 的 pending.then）
+                "body_error": body_error,
                 "truncated": truncated,
             })
             .to_string());
@@ -1674,10 +1688,22 @@ fn http_fetch_native(
         "body": String::from_utf8_lossy(&buf).to_string(),
         // 原始字节。文本响应多一个字段没人用；二进制响应（jacc 信封之类）就靠它。
         "body_b64": b64_encode(&buf),
+        // compat 层的内部字段：body 是否就等于 UTF-8 解码结果（见 body_is_plain_utf8）
+        "body_utf8": body_is_plain_utf8(&buf),
         // 插件可以据此判断「内容不全」，而不是把半截内容当成全部。
         "truncated": truncated,
     })
     .to_string())
+}
+
+/// 这份字节是不是「`body` 字段恰好等于 WHATWG 的 UTF-8 解码结果」。
+///
+/// compat 层拿它决定 `Response#text()` 要不要再解一遍：true 就直接用 `body`
+/// （0 成本，60 KB 省 28 ms），false 走解码器。两处必须排除：
+/// - 开头的 UTF-8 BOM：WHATWG 解码会**吃掉**它，而 `body` 是 from_utf8_lossy 的原样；
+/// - 非法 UTF-8：lossy 的替换字符个数与 WHATWG 的 maximal subpart 规则未必一致。
+fn body_is_plain_utf8(bytes: &[u8]) -> bool {
+    !bytes.starts_with(&[0xef, 0xbb, 0xbf]) && std::str::from_utf8(bytes).is_ok()
 }
 
 /// 响应体上限（1 MiB）。两条传输路径共用同一个数 —— 一个数字写两遍，

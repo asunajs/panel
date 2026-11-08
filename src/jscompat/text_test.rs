@@ -39,6 +39,72 @@ fn internal_utf8_helpers_round_trip() {
     });
 }
 
+/// 原生 UTF-8 快路径与 JS 参考实现必须**逐字**一致（0.3.2）。
+///
+/// 为什么非测不可：`text.js` 那份状态机是 WHATWG 的参考实现（期望值来自真 Node 的
+/// vectors），原生那份是 Rust 的 `from_utf8_lossy` + 手工 BOM 处理。两者在
+/// 「非法字节吐几个 U+FFFD」「BOM 吃不吃」上只要有分歧，插件看到的就是两套行为。
+///
+/// 手法：把宿主那个全局删掉再调一次 —— `utf8Decode` 里的 `typeof` 检查是按调用做的，
+/// 所以同一份字节可以分别走两条路，直接比结果。
+#[test]
+fn native_utf8_matches_the_js_reference() {
+    with_compat(|_, ctx| {
+        crate::jscompat::host::install(ctx).expect("宿主原语注入失败");
+        let got: String = ctx
+            .eval(
+                r#"
+                (function () {
+                    var C = globalThis.__jscompat;
+                    function mk(fill) {
+                        var a = [];
+                        for (var i = 0; i < 600; i++) a.push(fill(i));
+                        return new Uint8Array(a);
+                    }
+                    var cjk = C.utf8Encode('中文测试😀 end');
+                    var cases = [
+                        ['ascii', mk(function (i) { return 65 + (i % 26); })],
+                        ['cjk', (function () {
+                            var a = [];
+                            for (var i = 0; i < 40; i++) for (var j = 0; j < cjk.length; j++) a.push(cjk[j]);
+                            return new Uint8Array(a);
+                        })()],
+                        ['bad', mk(function (i) { return [0xff, 0xc0, 0x80, 0xe4, 0xbd][i % 5]; })],
+                        ['bom', (function () {
+                            var a = [0xef, 0xbb, 0xbf];
+                            for (var i = 0; i < 600; i++) a.push(65 + (i % 26));
+                            return new Uint8Array(a);
+                        })()],
+                    ];
+                    var savedB = globalThis.__host_utf8_decode_bin;
+                    var out = [];
+                    for (var k = 0; k < cases.length; k++) {
+                        var b = cases[k][1];
+                        delete globalThis.__host_utf8_decode_bin;
+                        var js = C.utf8Decode(b, {});
+                        var jsBom = C.utf8Decode(b, { ignoreBOM: true });
+                        var jsFatal = null;
+                        try { C.utf8Decode(b, { fatal: true }); } catch (e) { jsFatal = e.name + ':' + e.message; }
+                        globalThis.__host_utf8_decode_bin = savedB;
+                        var nat = C.utf8Decode(b, {});
+                        var natBom = C.utf8Decode(b, { ignoreBOM: true });
+                        var natFatal = null;
+                        try { C.utf8Decode(b, { fatal: true }); } catch (e2) { natFatal = e2.name + ':' + e2.message; }
+                        out.push(cases[k][0] + '=' + (js === nat) + ',' + (jsBom === natBom) + ',' + (jsFatal === natFatal));
+                    }
+                    globalThis.__host_utf8_decode_bin = savedB;
+                    return out.join('|');
+                })()
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            got, "ascii=true,true,true|cjk=true,true,true|bad=true,true,true|bom=true,true,true",
+            "原生 UTF-8 与 JS 参考实现有分歧：{got}"
+        );
+    });
+}
+
 /// latin1 / windows-1252（0.3.0）。
 ///
 /// 央视频插件的 JCE 解析里有 `new TextDecoder('latin1').decode(inner)` —— 那是

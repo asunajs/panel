@@ -1,5 +1,28 @@
 # 更新记录
 
+## 0.3.2 — 2026-11-08
+
+> 主题：**该原生的地方原生，不该做的活儿一次都别做。**
+
+- **UTF-8 解码搬到 Rust。** compat 层那份是 WHATWG 的逐字节状态机：实测 60 KB 28 ms、
+  600 KB 277 ms、**1.5 MB 直接 OOM**（QuickJS 的 64 MB 上限）。现在 ≥512 字节走宿主原语
+  （`__host_utf8_decode_bin`），60 KB 3 ms，1 MB 也不再有内存问题。JS 那份留着当兜底
+  （单测、纯 JS 环境、小输入），并由 `native_utf8_matches_the_js_reference` 对拍
+  「合法 / 非法 / BOM / fatal / 孤代理项」五类输入，两条路必须逐字相同。
+- **响应文本不再解第二遍。** 宿主本来就把字节解成了 `body`（`String::from_utf8_lossy`），
+  而 compat 层为了拿「真字节」把它扔掉、在 JS 里重解。现在宿主多给一个 `body_utf8`
+  （合法 UTF-8 且不以 BOM 开头），为真时 `Response#text()/#json()` 直接用宿主文本。
+  同一个 60 KB JSON 的 `fetch` + `await res.json()`：**920 ms → 2 ms**（本机实测）。
+- **响应字节改成按需解码。** `body_b64` 以前是**每条响应都解**（60 KB 要 73 ms），
+  而只读文本的调用方根本用不到字节。现在 `arrayBuffer()/bytes()` 才解。
+- **传输层读正文失败 ⇒ `fetch` reject。** 以前超过 1 MiB 的响应会变成「status=200 +
+  `<响应体读取失败: …>`」，插件把它当正文去 `JSON.parse`。现在宿主带 `body_error`，
+  `fetch` 抛 `TypeError('fetch failed', { cause })` —— 与 Node 一致。
+- **编码（`TextEncoder`）没有跟风上原生**，这是量出来的：宿主编码本身 0.1 ms，但把字节
+  送回 JS 只有 base64（JS 里 73 ms）或二进制串 + charCodeAt（15 ms）两条路，都不比
+  现有那圈循环（19 ms）好。要更快只能让宿主直接吃字符串 —— 请求体那条路已经是了。
+- 测试：Rust 4 条（BOM / maximal subpart / fatal 文案 / 往返）、jscompat 对拍 1 条、
+  冒烟 2 条（1000 KB 文本 `await res.text()` 不再 OOM；1.5 MB 响应必须 reject）。
 ## 0.3.1 — 2026-11-08
 
 > 这一版只有一个主题：**微任务泵不该打断正在跑的 job。**

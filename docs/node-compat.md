@@ -32,7 +32,7 @@
 | `URL` | ✅ | ✅ | WHATWG URL（`src/jscompat/url.js`）。非法输入抛 `TypeError` 且 `code='ERR_INVALID_URL'`；不做 IDNA/punycode（§13） |
 | `URLSearchParams` | ✅ | ✅ | 与 `URL.searchParams` **活绑定**；`sort()` 稳定按码元 |
 | `TextEncoder` | ✅ | ✅ | `encode()` / `encodeInto()`，UTF-8 |
-| `TextDecoder` | 🟡 | ✅ | **utf-8 与 latin1**（自 0.3.0；latin1 按 windows-1252 解，别名 iso-8859-1 / ascii）；别的 label 抛 `RangeError`。支持 fatal / ignoreBOM / stream |
+| `TextDecoder` | 🟡 | ✅ | **utf-8 与 latin1**（自 0.3.0；latin1 按 windows-1252 解，别名 iso-8859-1 / ascii）；别的 label 抛 `RangeError`。支持 fatal / ignoreBOM / stream。**自 0.3.2 起 utf-8 的解码在 Rust 里做**（≥512 字节走原生，实测 60 KB 从 28 ms 降到 3 ms，1 MB 不再把 Runtime 撑爆）；结果与 JS 那份逐字相同，由 `native_utf8_matches_the_js_reference` 对拍 |
 | `atob` | ✅ | ✅ | latin1 边界；非法输入抛 `DOMException InvalidCharacterError`（Node 同款） |
 | `btoa` | ✅ | ✅ | 码元 > 0xFF 抛 `InvalidCharacterError` |
 | `DOMException` | ✅ | ✅ | 最小实现；`name` / `code` 按规范表（AbortError=20、QuotaExceededError=22…） |

@@ -246,6 +246,32 @@ fn gunzip_b64(data_b64: &str) -> String {
     }
 }
 
+/// 二进制串（每个码元 ≤ 0xFF）→ UTF-8 字符串。
+///
+/// 为什么不走 base64：JS 侧把 60 KB 字节编成 base64 要 **20 ms**（实测，字符串
+/// 拼接的固有开销），而 `String.fromCharCode.apply` 分块拼同一个字节串只要 2 ms。
+/// 传输格式选错，原生解码省下的时间会被编解码全部吃回去。
+fn utf8_decode_bin(s: &str, ignore_bom: i32, fatal: i32) -> String {
+    let mut data: Vec<u8> = Vec::with_capacity(s.len());
+    for ch in s.chars() {
+        let cp = ch as u32;
+        if cp > 0xff {
+            return err(format!("utf8 解码输入不是字节串（出现了 U+{cp:04X}）"));
+        }
+        data.push(cp as u8);
+    }
+    if data.len() > MAX_INPUT {
+        return err(format!("utf8 解码输入太大（{} 字节，上限 {MAX_INPUT}）", data.len()));
+    }
+    if ignore_bom == 0 && data.starts_with(&[0xef, 0xbb, 0xbf]) {
+        data.drain(..3);
+    }
+    match std::str::from_utf8(&data) {
+        Ok(v) => v.to_string(),
+        Err(_) if fatal != 0 => err("The encoded data was not valid for encoding utf-8"),
+        Err(_) => String::from_utf8_lossy(&data).into_owned(),
+    }
+}
 fn b64_encode_std(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -279,12 +305,70 @@ pub(super) fn install<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         "__host_gunzip_b64",
         Func::new(|data_b64: String| -> String { gunzip_b64(&data_b64) }),
     )?;
+    // 0.3.2：UTF-8 编解码的原生实现。JS 侧那份状态机留着当兜底（单测里没有宿主，
+    // 以及 small input 不值得一次 RPC）。
+    ctx.globals().set(
+        "__host_utf8_decode_bin",
+        Func::new(|s: String, ignore_bom: i32, fatal: i32| -> String {
+            utf8_decode_bin(&s, ignore_bom, fatal)
+        }),
+    )?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── UTF-8 解码（0.3.2 的原生快路径）────────────────────────────────
+
+    /// 字节 → 宿主那个「二进制串」入参（每个码元一个字节）。
+    fn bin(bytes: &[u8]) -> String {
+        bytes.iter().map(|&b| b as char).collect()
+    }
+
+    #[test]
+    fn utf8_decode_strips_bom_only_when_asked() {
+        let s = bin(&[0xef, 0xbb, 0xbf, b'a']);
+        assert_eq!(utf8_decode_bin(&s, 0, 0), "a", "默认要吃 BOM（WHATWG）");
+        assert_eq!(
+            utf8_decode_bin(&s, 1, 0).chars().count(),
+            2,
+            "ignoreBOM 要保留它"
+        );
+    }
+
+    #[test]
+    fn utf8_decode_replaces_each_maximal_subpart_once() {
+        // 0xE4 0xBD 是截断的三字节序列：按 WHATWG 只吐**一个** U+FFFD，不是两个
+        let s = utf8_decode_bin(&bin(&[0xe4, 0xbd, b'a']), 0, 0);
+        assert_eq!(s.chars().count(), 2, "实际：{s:?}");
+        assert!(s.starts_with('\u{fffd}') && s.ends_with('a'), "实际：{s:?}");
+    }
+
+    #[test]
+    fn utf8_decode_fatal_uses_the_node_message() {
+        let e = utf8_decode_bin(&bin(&[0xff]), 0, 1);
+        assert!(e.starts_with("!ERR:"), "错误要带 !ERR: 前缀：{e}");
+        assert!(
+            e.contains("The encoded data was not valid for encoding utf-8"),
+            "文案要和 JS 那份一致（插件可能靠它做断言）：{e}"
+        );
+    }
+
+    #[test]
+    fn utf8_decode_round_trips_multibyte() {
+        let s = "中文😀abc";
+        let bytes: Vec<u8> = s.as_bytes().to_vec();
+        assert_eq!(utf8_decode_bin(&bin(&bytes), 0, 0), s);
+    }
+
+    #[test]
+    fn utf8_decode_rejects_non_byte_input() {
+        // JS 那边只会塞 ≤0xFF 的码元；塞错了要报错，而不是悄悄截断成垃圾
+        let e = utf8_decode_bin("\u{4f60}", 0, 0);
+        assert!(e.starts_with("!ERR:"), "实际：{e}");
+    }
 
     // ── gzip / gunzip（node:zlib 的 Rust 侧）──────────────────────────────
 

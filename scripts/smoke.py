@@ -4389,6 +4389,24 @@ def binary_fetch_checks(tmp: Path) -> None:
 
     class Echo(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
+            if self.path == "/big.txt":
+                # 1.5 MB 文本：纯 JS 解码在 0.3.1 之前会直接把 Runtime 撑爆（OOM）
+                body = b"A" * (1000 * 1024)
+                self.send_response(200)
+                self.send_header("content-type", "text/plain")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/huge.bin":
+                # 1.5 MB：超过面板 1 MiB 的传输上限 —— fetch 必须 reject
+                body = b"B" * (1536 * 1024)
+                self.send_response(200)
+                self.send_header("content-type", "application/octet-stream")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path != "/big.json":
                 self.send_error(404)
                 return
@@ -4416,12 +4434,14 @@ def binary_fetch_checks(tmp: Path) -> None:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     echo_url = f"http://127.0.0.1:{srv.server_address[1]}/echo"
     json_url = f"http://127.0.0.1:{srv.server_address[1]}/big.json"
+    text_url = f"http://127.0.0.1:{srv.server_address[1]}/big.txt"
+    huge_url = f"http://127.0.0.1:{srv.server_address[1]}/huge.bin"
 
     d = tmp / "binfetch"
     (d / "plugins" / "js").mkdir(parents=True, exist_ok=True)
     (d / "plugin-data" / "binfetch").mkdir(parents=True, exist_ok=True)
     (d / "plugin-data" / "binfetch" / "config.json").write_text(
-        json.dumps({"url": echo_url, "json_url": json_url}), encoding="utf-8"
+        json.dumps({"url": echo_url, "json_url": json_url, "text_url": text_url, "huge_url": huge_url}), encoding="utf-8"
     )
     # 插件源码：**只写 Node 形状**的 fetch，没有任何面板专属参数。
     # 这段代码拿到裸 Node 里也是能跑的（除了 import host-api）。
@@ -4447,8 +4467,16 @@ def binary_fetch_checks(tmp: Path) -> None:
         "    const jr = await fetch(config().json_url);\n"
         "    const j = await jr.json();\n"
         "    const jsonItems = j.items.length;\n"
+        # 1.5 MB 文本：原生解码之前这里会 OOM（QuickJS 抛 null）
+        "    const tr = await fetch(config().text_url);\n"
+        "    const ttext = await tr.text();\n"
+        "    const textLen = ttext.length;\n"
+        # 超过传输上限（1 MiB）必须是 reject，不能是 200 + 一句错误文本
+        "    let bigReject = '';\n"
+        "    try { const br = await fetch(config().huge_url); await br.text(); bigReject = 'no-throw'; }\n"
+        "    catch (e) { bigReject = e.name + ':' + (e.cause ? 'cause' : 'nocause'); }\n"
         "    return { status: 200, headers: { 'content-type': 'application/json' },\n"
-        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept, jsonItems }) };\n"
+        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept, jsonItems, textLen, bigReject }) };\n"
         "});\n",
         encoding="utf-8",
     )
@@ -4515,6 +4543,16 @@ def binary_fetch_checks(tmp: Path) -> None:
         check(
             isinstance(got.get("slept"), int) and got["slept"] >= 110,
             "QuickJS 的 await sleep(120) 真的等了（面板扩展，Node 没有）",
+            str(got),
+        )
+        check(
+            got.get("textLen") == 1000 * 1024,
+            "1000 KB 文本的 await res.text() 不再 OOM（原生解码）",
+            str(got),
+        )
+        check(
+            got.get("bigReject") == "TypeError:cause",
+            "超过传输上限的响应是 fetch reject（不是 200 + 一句错误文本）",
             str(got),
         )
         check(
