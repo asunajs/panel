@@ -32,6 +32,21 @@
 - **三个引擎同名同义。** Node/Bun 侧同样有 `panel`（版本从 `PANEL_VERSION` 读），
   而字节 fetch 与 zlib 在那边本来就是平台原生能力 —— 于是同一份插件代码
   （`body: new Uint8Array(...)` + `gzipSync(...)`）在三个引擎里**一个字都不用改**。
+- **`sleep(ms)` 三个引擎都有了。** 它一直是**面板扩展**（Node 没有这个全局），但之前只有
+  QuickJS 有：同一份插件在 QuickJS 里 `await sleep(1000)` 能跑，切到 Node/Bun 就
+  `ReferenceError`。现在三端同义（非法/负数按 0），既是全局也是 `host-api` 的具名导出，
+  而且是**同一个函数**。
+- **`TextDecoder` 支持 `latin1`**（按 WHATWG 解成 windows-1252，别名 `iso-8859-1` /
+  `ascii`）。补它的原因很具体：在二进制里扫 ASCII 串（JCE 解析）绕不开这一行，
+  而 Node 里它是成立的。期望值仍由 `scripts/gen-vectors-text.mjs` 用真 Node 生成。
+- **修掉一个只有 `import` 才会撞上的坑**：`import { gzipSync } from 'node:zlib'` 曾报
+  `Error resolving module` —— ESM 解析器那份内置模块名单是手抄的第二份，加 zlib 时
+  只加了一处。现在解析器直接从唯一那份名单推（裸名 = 加 `node:` 前缀），并加了
+  对账测试盯住两处名单一致。
+- **实测（央视频插件，QuickJS，不切 Node）**：`h5-check` / `tasks` 正常；
+  二进制 `TaskComplete` 真的写进服务端（任务计数 1/3 → 3/3）；一键结算
+  **3 新完成 / 已领取 8 条 / 积分 75 → 115**；同一批 token 用 CLI 复核，积分与任务
+  状态逐条一致。
 - **测试补在三个层次**：Rust 单测（base64 解码/互斥/传输层字节数、gzip 往返与 mtime、
   解压炸弹、版本比较与头解析）、QuickJS compat 测试（`body_b64` 通道、响应真字节、
   `node:zlib` 的错误码）、`scripts/smoke.py` 端到端（真起一个 echo 服务器 +
