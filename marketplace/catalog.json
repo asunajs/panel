@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-11-08",
+  "updated_at": "2026-11-09T01:39:33Z",
   "plugins": [
     {
       "id": "mcloud-plugin",
@@ -50,28 +50,6 @@
         "夸克",
         "签到",
         "网盘"
-      ]
-    },
-    {
-      "id": "yangshipin",
-      "repo": "asunajs/panel-single-plugins",
-      "type": "release",
-      "asset": "yangshipin-0.2.0.zip",
-      "tag": "v0.2.0",
-      "version": "v0.2.0",
-      "sha256": "412c78258d0d4070d5c5b856e02910282cb1936621ab79e57b0678d6d8a625c9",
-      "size": 23833,
-      "provides": [
-        "yangshipin"
-      ],
-      "min_panel": "0.3.0",
-      "name": "央视频短信登录+任务",
-      "summary": "短信登录央视频（WebUI），一次跑完当天任务并领取；兑吧真签到（连续7天周期，纯HTTP）；观看类按30秒要求拉开间隔；早5点/晚5点各±1小时随机",
-      "tags": [
-        "央视频",
-        "登录",
-        "积分",
-        "任务"
       ]
     }
   ]
