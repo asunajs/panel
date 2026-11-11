@@ -250,6 +250,18 @@ pub enum Cmd {
         task: String,
         reply: oneshot::Sender<Result<i64, String>>,
     },
+    /// 插件 WebUI 的动态请求：交给插件注册的 handler，把它的返回值带回去。
+    /// 和 RunNow 一样占用 busy：同一个 Context 不能并发派发。
+    WebCall {
+        plugin: String,
+        handler: String,
+        evt: serde_json::Value,
+        budget_ms: u64,
+        reply: oneshot::Sender<Result<Option<serde_json::Value>, String>>,
+    },
+    WebDone {
+        plugin: String,
+    },
     /// 停这个插件**当前在途的那一次** invocation。纯 Rust 置位，不碰 JS 锁。
     Stop {
         plugin: String,
@@ -313,6 +325,28 @@ impl Scheduler {
             reply,
         })
         .await?
+    }
+
+    /// 插件 WebUI 的动态调用：把请求交给插件注册的 handler，返回它的返回值。
+    /// 走调度器是为了和 cron 派发共用同一把 busy 锁 —— 同一个 Context 不能并发。
+    pub async fn web_call(
+        &self,
+        plugin: &str,
+        handler: &str,
+        evt: serde_json::Value,
+        budget_ms: u64,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::WebCall {
+                plugin: plugin.to_string(),
+                handler: handler.to_string(),
+                evt,
+                budget_ms,
+                reply: tx,
+            })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
     }
 
     pub async fn run_now(&self, plugin: &str, task: &str) -> Result<i64, String> {
@@ -491,6 +525,36 @@ impl Inner {
                     .collect();
                 v.sort_by(|a, b| a.name.cmp(&b.name));
                 let _ = reply.send(v);
+            }
+            Cmd::WebCall {
+                plugin,
+                handler,
+                evt,
+                budget_ms,
+                reply,
+            } => {
+                let blocked = match self.plugins.get(&plugin) {
+                    None => Some(format!("插件未加载: {plugin}")),
+                    Some(l) if l.busy => Some(format!("{plugin} 正忙（有任务在跑），稍后再试")),
+                    Some(_) => None,
+                };
+                if let Some(e) = blocked {
+                    let _ = reply.send(Err(e));
+                    return;
+                }
+                let p = self.plugins[&plugin].plugin.clone();
+                self.plugins.get_mut(&plugin).unwrap().busy = true;
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let out = catch_engine_panic(p.call_json(&handler, &evt, budget_ms)).await;
+                    let _ = reply.send(out);
+                    let _ = tx.send(Cmd::WebDone { plugin });
+                });
+            }
+            Cmd::WebDone { plugin } => {
+                if let Some(l) = self.plugins.get_mut(&plugin) {
+                    l.busy = false;
+                }
             }
             Cmd::RunNow {
                 plugin,
@@ -838,9 +902,9 @@ impl Inner {
 /// 若 `plugin.dispatch` 内部 panic（QuickJS/rquickjs 的某些路径会），unwind 会跳过
 /// 末尾那条 [`Cmd::Finished`] —— `busy`/`in_flight` 就永远停在 true，插件再也派发不动。
 /// `panic = "unwind"`（Cargo.toml）让这里能接住；接住后走正常失败路径，熔断照常计数。
-async fn catch_engine_panic<F>(fut: F) -> Result<(), String>
+async fn catch_engine_panic<T, F>(fut: F) -> Result<T, String>
 where
-    F: Future<Output = Result<(), String>>,
+    F: Future<Output = Result<T, String>>,
 {
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(r) => r,

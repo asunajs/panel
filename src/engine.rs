@@ -305,6 +305,25 @@ impl Plugin {
         evt: &serde_json::Value,
         budget_ms: u64,
     ) -> std::result::Result<(), String> {
+        self.call_inner(handler, evt, budget_ms).await.map(|_| ())
+    }
+
+    /// 同 `dispatch`，但把 handler 的**返回值**带出来 —— 插件 WebUI 靠它回响应。
+    pub async fn call_json(
+        &self,
+        handler: &str,
+        evt: &serde_json::Value,
+        budget_ms: u64,
+    ) -> std::result::Result<Option<serde_json::Value>, String> {
+        self.call_inner(handler, evt, budget_ms).await
+    }
+
+    async fn call_inner(
+        &self,
+        handler: &str,
+        evt: &serde_json::Value,
+        budget_ms: u64,
+    ) -> std::result::Result<Option<serde_json::Value>, String> {
         self.inv.reset();
         let deadline = Instant::now() + Duration::from_millis(budget_ms);
         let stopped = self.inv.clone();
@@ -318,9 +337,10 @@ impl Plugin {
         // 包一层 try/catch 把结果落到 __result：顶层 await 的 rejection 不会从
         // idle() 冒出来，而 interrupt 抛的是 uncatchable 异常 —— 它会让 __result
         // 保持未设置，正好成为「被预算/停止打断」的判据。
+        // 返回值也带出来：`dispatch` 不要它，`call_json`（WebUI）要。
         let call = format!(
-            "(async () => {{ try {{ await globalThis.__dispatch({}, {}); \
-             globalThis.__result = '{{\"ok\":true}}'; }} \
+            "(async () => {{ try {{ const v = await globalThis.__dispatch({}, {}); \
+             globalThis.__result = JSON.stringify({{ok:true, value: v === undefined ? null : v}}); }} \
              catch (e) {{ globalThis.__result = JSON.stringify({{ok:false, error: String((e && e.stack) || e)}}); }} }})()",
             serde_json::to_string(handler).map_err(|e| e.to_string())?,
             serde_json::to_string(&evt_json).map_err(|e| e.to_string())?
@@ -366,7 +386,7 @@ impl Plugin {
                                 let v: serde_json::Value =
                                     serde_json::from_str(&s).map_err(|e| e.to_string())?;
                                 if v["ok"].as_bool() == Some(true) {
-                                    Ok(())
+                                    Ok(Some(v["value"].clone()))
                                 } else {
                                     Err(v["error"].as_str().unwrap_or("未知错误").to_string())
                                 }

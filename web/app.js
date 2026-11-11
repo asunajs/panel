@@ -464,6 +464,8 @@ function renderPlugins() {
       b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
       return b;
     };
+    const hasWebui = state.files.some((f) => f.name === p.name && f.webui);
+    if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
     acts.append(
       mk('编辑', () => { showPlugin(p.name); }),
       mk('重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)),
@@ -787,6 +789,17 @@ async function showRun(id) {
   }
 }
 
+/** 插件界面的地址。面板启用了令牌时带上 ?t= —— 新标签页加不了自定义头，
+ *  宿主只对 /plugins/* 接受 query 令牌（见 web.rs require_token）。 */
+function webuiUrl(name) {
+  const base = '/plugins/' + encodeURIComponent(name) + '/';
+  return state.token ? base + '?t=' + encodeURIComponent(state.token) : base;
+}
+
+function openWebui(name) {
+  window.open(webuiUrl(name), '_blank', 'noopener');
+}
+
 async function showPlugin(name) {
   state.drawerKind = 'plugin';
   state.drawerPlugin = name;
@@ -810,6 +823,9 @@ async function showPlugin(name) {
       b.addEventListener('click', fn);
       return b;
     };
+    if (state.files.some((f) => f.name === name && f.webui)) {
+      ops.append(mkOp('打开界面', () => openWebui(name)));
+    }
     ops.append(
       mkOp('编辑源码', () => openPluginSource(name)),
       mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),

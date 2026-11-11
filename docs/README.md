@@ -20,6 +20,8 @@
 设置页拆成常规 / 配置 / 安全 / 数据四个 tabs。
 **同一天还补了两块**：脚本（独立 `.js`，手动跑或按 `cron` 跑，运行记录/日志复用现有两张表）
 和开机自启动（`panel-llrt service print|install|uninstall|status`）。
+插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
+契约见 [plugin-webui.md](plugin-webui.md)。
 功能对照与下一步见 [parity.md](parity.md)。
 
 ## 从零构建
@@ -52,6 +54,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [verification.md](verification.md) | Stage 1 端到端验证读数与复跑命令、仍然敞开的清单 |
 | [auth.md](auth.md) | 面板令牌：盐 + PBKDF2 哈希的读数、取舍、红队复审修订表 |
 | [ui.md](ui.md) | 控制台：形态、设计令牌、零构建约束、交互细节、读数与已知短板 |
+| [plugin-webui.md](plugin-webui.md) | 插件自带界面：目录约定、三条路由、evt 形状、鉴权与嵌入取舍 |
 | [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |
 
 ## 三态约定

@@ -660,3 +660,87 @@ async fn script_names_cannot_escape_the_scripts_dir() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应当被挡");
     }
 }
+
+// ---------------------------------------------------------------- 插件 WebUI
+
+async fn load_plugin(app: &Router, name: &str, source: &str) {
+    let (status, body) = send(
+        app,
+        with_csrf("POST", "/api/plugins", Some(json!({ "name": name }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app,
+        with_csrf(
+            "PUT",
+            &format!("/api/plugins/{name}/source"),
+            Some(json!({ "source": source })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn plugin_webui_serves_index_assets_and_refuses_traversal() {
+    let (app, plugins, _data, _store) = setup_dirs("webui1").await;
+    load_plugin(
+        &app,
+        "u",
+        "import host from 'panel:host';\nawait host.register_handler('hi', async () => ({ ok: 1 }));\n",
+    )
+    .await;
+    let dir = plugins.join("u.webui");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<h1>hi</h1>").unwrap();
+    std::fs::write(dir.join("a.css"), "body{}").unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/plugins/u/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "text/html; charset=utf-8");
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/plugins/u/a.css").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "text/css; charset=utf-8");
+
+    let (status, _) = get(&app, "/plugins/u/nope.js").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn plugin_webui_api_returns_the_handlers_value() {
+    let (app, _plugins, _data, _store) = setup_dirs("webui2").await;
+    load_plugin(
+        &app,
+        "api-demo",
+        "import host from 'panel:host';\nawait host.register_handler('echo', async (req) => ({ got: req.body, q: req.query }));\n",
+    )
+    .await;
+    let req = Request::post("/plugins/api-demo/api/echo")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"body":{"x":1},"query":""}"#))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    // handler 收到的是整个 evt：{ body, query, path, handler }
+    assert_eq!(body["value"]["got"]["body"]["x"], 1, "handler 的返回值要带出来: {body}");
+}
+
+#[tokio::test]
+async fn plugin_webui_api_on_an_unloaded_plugin_is_a_502() {
+    let (app, _plugins, _data, _store) = setup_dirs("webui3").await;
+    let req = Request::post("/plugins/nobody/api/hi").body(Body::empty()).unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+}

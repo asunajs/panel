@@ -177,7 +177,7 @@ fn manual_tasks_never_become_due_and_never_trip() {
 async fn catch_engine_panic_passes_ok_and_err_through() {
     assert_eq!(catch_engine_panic(async { Ok(()) }).await, Ok(()));
     assert_eq!(
-        catch_engine_panic(async { Err("boom".to_string()) }).await,
+        catch_engine_panic::<(), _>(async { Err("boom".to_string()) }).await,
         Err("boom".to_string())
     );
 }
@@ -185,11 +185,11 @@ async fn catch_engine_panic_passes_ok_and_err_through() {
 #[tokio::test]
 async fn catch_engine_panic_turns_a_panic_into_a_failed_run() {
     // &str 与 String 两种 payload 都要能取出文本；否则 busy 会卡死（见 helper 文档）。
-    let e = catch_engine_panic(async { panic!("kaboom") }).await.unwrap_err();
+    let e = catch_engine_panic::<(), _>(async { panic!("kaboom") }).await.unwrap_err();
     assert!(e.contains("引擎 panic"), "实际: {e}");
     assert!(e.contains("kaboom"), "实际: {e}");
 
-    let e = catch_engine_panic(async { panic!("{}", "owned".to_string()) })
+    let e = catch_engine_panic::<(), _>(async { panic!("{}", "owned".to_string()) })
         .await
         .unwrap_err();
     assert!(e.contains("owned"), "实际: {e}");

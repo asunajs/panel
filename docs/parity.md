@@ -24,8 +24,8 @@
 
 | 功能 | 旧面板 | 现在 | 下一轮怎么做 |
 |---|---|---|---|
-| 插件 WebUI | ✅ `register_route` + `/plugins/<name>/*` 静态资源 | ⬜ | 引擎加路由分发 + 静态目录 + iframe 沙箱（CSP `frame-src 'self'`），面板侧只做入口列表 |
-| 自启动 | ✅ `install.sh`（systemd/launchd） | ⬜ | `panel-llrt service install\|uninstall\|status` 生成 launchd plist / systemd unit；先做 `--print` 干跑 + `plutil -lint` 验证 |
+| **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ 本轮 | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，返回值带出来）。新标签打开，不做 iframe。契约见 [plugin-webui.md](plugin-webui.md) |
+| **自启动** | ✅ `install.sh`（systemd/launchd） | ✅ 本轮 | `panel-llrt service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
 | 推送（push 通道/outbox） | ✅ | ⬜ 暂不做 | 依赖外部通道（SMTP/Webhook），先把插件侧 `host.notify` 定清楚再说 |
 | 市场 / 在线更新 / 备份恢复 | ✅ | ⬜ 暂不做 | 需要网络与签名信任链，和「离线可构建」的取舍冲突 |
 | 上传插件 zip | ✅ | ⬜ 视需求 | 单文件插件用「新建 + 编辑」已经够；多文件要等插件 WebUI |

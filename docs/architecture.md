@@ -215,6 +215,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `cron.rs` | 5/6 字段 + `@every` + jitter + DST（移植基线，1112 行） |
 | `config.rs` | 面板级配置 `config.json`：默认 4 MiB 上限（超限拒启，不截断）；加载、校验、原子写（0600） |
 | `config_store.rs` | 配置的**热快照**（`RwLock<Arc<str>>`）：写入侧序列化一次，`host.config()` 只 clone 一个 `Arc`。界面保存后插件立刻读到新值，不用重启 |
+| `service.rs` | 开机自启动：`panel-llrt service print\|install\|uninstall\|status`，生成 launchd plist / systemd --user unit（绝对路径、RunAtLoad+KeepAlive / Restart=always），日志落 `data/` |
 | `scripts.rs` | 脚本：独立 `.js` + 记录里的 cron；每次运行新建 Context、带墙钟死线（`Plugin::load_with_budget`）；注册任务会直接报错；15 秒粒度排程循环 |
 | `db.rs` | DB actor（channel + 专用连接，无 `Mutex` 可 poison） |
 | `log/` | `LogHub`（SSE 广播）+ `redact`（6 道有序幂等脱敏） |

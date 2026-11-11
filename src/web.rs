@@ -72,6 +72,11 @@ pub fn router(st: AppState) -> Router {
             get(script_get).put(script_save).delete(script_delete),
         )
         .route("/api/scripts/{name}/run", post(script_run))
+        // 插件 WebUI：静态文件 + 动态 handler（同一个令牌门，见 require_token）
+        .route("/plugins/{name}", get(plugin_webui_index))
+        .route("/plugins/{name}/", get(plugin_webui_index))
+        .route("/plugins/{name}/api/{handler}", post(plugin_webui_api))
+        .route("/plugins/{name}/{*rel}", get(plugin_webui_asset))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
@@ -158,7 +163,17 @@ async fn require_token(
         }
         return next.run(req).await;
     };
-    let ok = match presented_token(req.headers()) {
+    // 插件界面是插件自己的 HTML，在新标签/iframe 里打开时加不了自定义头，
+    // 所以只对 /plugins/* 放宽到 query（?t=）。代价是令牌会进浏览器历史；
+    // 面板自己的页面一律走请求头，不碰 query。
+    let presented = presented_token(req.headers()).or_else(|| {
+        if req.uri().path().starts_with("/plugins/") {
+            query_token(req.uri().query())
+        } else {
+            None
+        }
+    });
+    let ok = match presented {
         Some(t) => tokio::task::spawn_blocking(move || auth.verify(&t))
             .await
             .unwrap_or(false),
@@ -173,6 +188,36 @@ async fn require_token(
 /// 从请求头取令牌。**`x-panel-token` 优先** —— `Authorization` 存在但不是 Bearer
 /// 时不该把可用的头吞掉（实测过：`Authorization: Bearer nope` + 正确的
 /// `x-panel-token` 会 401）。scheme 按 RFC 7235 大小写不敏感。
+fn query_token(q: Option<&str>) -> Option<String> {
+    for pair in q?.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        if k == "t" && !v.is_empty() {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+/// 只处理百分号编码：够用于令牌（base64url，可能带 =），不引第三方依赖。
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("");
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 fn presented_token(h: &HeaderMap) -> Option<String> {
     if let Some(v) = h.get("x-panel-token").and_then(|v| v.to_str().ok()) {
         if !v.is_empty() {
@@ -721,6 +766,11 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             continue;
         };
         let meta = ent.metadata().await.ok();
+        // 插件自己的界面放在 <name>.webui/ 里，有 index.html 才算有界面。
+        let webui = st
+            .plugins_dir
+            .join(format!("{name}.webui/index.html"))
+            .exists();
         files.push(json!({
             "name": name,
             "bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
@@ -730,6 +780,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64),
             "loaded": loaded.contains(name),
+            "webui": webui,
         }));
     }
     files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -1114,4 +1165,107 @@ async fn script_run(
     guard_write(&h)?;
     let run_id = st.scripts.run(&name, true).await.map_err(bad)?;
     Ok(Json(json!({ "ok": true, "run_id": run_id })))
+}
+
+// ---------------------------------------------------------------- 插件 WebUI
+
+/// 插件自己的界面放在 `plugins/<name>.webui/` 里，挂在 `/plugins/<name>/`。
+/// 动态请求走 `/plugins/<name>/api/<handler>`，交给插件注册的 handler。
+const WEBUI_BUDGET_MS: u64 = 30_000;
+
+fn webui_dir(st: &AppState, name: &str) -> Result<PathBuf, ApiError> {
+    crate::scripts::safe_name(name).map_err(bad)?;
+    Ok(st.plugins_dir.join(format!("{name}.webui")))
+}
+
+fn mime_of(rel: &str) -> &'static str {
+    match rel.rsplit('.').next().unwrap_or("") {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_webui_file(
+    st: &AppState,
+    name: &str,
+    rel: &str,
+) -> Result<Response, ApiError> {
+    let dir = webui_dir(st, name)?;
+    // 只允许普通路径段：`..`、绝对路径、盘符统统拒掉，再叠一层前缀校验。
+    let rel_path = std::path::Path::new(rel);
+    if rel_path
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(bad(format!("非法路径: {rel}")));
+    }
+    let path = dir.join(rel_path);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("没有这个文件: {}", path.display()),
+            ))
+        }
+        Err(e) => return Err(internal(format!("读 {} 失败: {e}", path.display()))),
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime_of(rel)),
+            // 插件界面是手改的：不许浏览器缓存，改完刷新就能看到。
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn plugin_webui_index(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    serve_webui_file(&st, &name, "index.html").await
+}
+
+async fn plugin_webui_asset(
+    State(st): State<AppState>,
+    Path((name, rel)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    serve_webui_file(&st, &name, &rel).await
+}
+
+async fn plugin_webui_api(
+    State(st): State<AppState>,
+    Path((name, handler)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, ApiError> {
+    crate::scripts::safe_name(&name).map_err(bad)?;
+    let evt = json!({
+        "body": body.map(|Json(v)| v).unwrap_or(Value::Null),
+        "query": uri.query().unwrap_or(""),
+        "path": uri.path(),
+        "handler": handler,
+    });
+    match st
+        .sched
+        .web_call(&name, &handler, evt, WEBUI_BUDGET_MS)
+        .await
+    {
+        Ok(v) => Ok(Json(json!({ "ok": true, "value": v }))),
+        Err(e) => Err((StatusCode::BAD_GATEWAY, e)),
+    }
 }
