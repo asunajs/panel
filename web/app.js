@@ -30,6 +30,8 @@ const state = {
   onlyFailed: false,
   sort: { tasks: { key: 'next_at', dir: 1 }, runs: { key: 'id', dir: -1 } },
   loaded: false,
+  lastSync: 0,
+  syncFailed: false,
   frame: 0,
 };
 
@@ -139,6 +141,22 @@ function toast(msg, isErr) {
   toast.timer = setTimeout(() => { t.className = 'toast hidden'; }, 2600);
 }
 
+/** 顶栏的「刚刚更新 / N 秒前」：轮询没有反馈，用户会怀疑面板是不是死的。 */
+function setSync(ok) {
+  state.lastSync = ok ? Date.now() : 0;
+  state.syncFailed = !ok;
+  paintSync();
+}
+
+function paintSync() {
+  const t = $('sync-text');
+  if (!t) return;
+  if (state.syncFailed) { t.textContent = '连接中断，重试中'; return; }
+  if (!state.lastSync) { t.textContent = '正在读取…'; return; }
+  const s = Math.round((Date.now() - state.lastSync) / 1000);
+  t.textContent = s < 3 ? '刚刚更新' : s + ' 秒前更新';
+}
+
 function banner(msg, isOk) {
   const b = $('banner');
   if (!msg) { b.className = 'banner hidden'; return; }
@@ -236,30 +254,40 @@ function card(label, value, note, small) {
   return c;
 }
 
+function skeletonCards(box, n) {
+  for (let i = 0; i < n; i++) {
+    const c = el('div', 'card');
+    c.append(el('div', 'skeleton'));
+    c.append(el('div', 'skeleton'));
+    box.append(c);
+  }
+}
+
+/** 指标分两组：引擎侧（活不活、跑多久）和任务侧（多少活、压不压得住）。 */
 function renderCards() {
-  const box = $('stat-cards');
-  clear(box);
+  const engine = $('cards-engine');
+  const taskBox = $('cards-tasks');
+  clear(engine);
+  clear(taskBox);
   if (!state.loaded) {
-    for (let i = 0; i < 8; i++) {
-      const c = el('div', 'card');
-      c.append(el('div', 'skeleton'));
-      c.append(el('div', 'skeleton'));
-      box.append(c);
-    }
+    skeletonCards(engine, 4);
+    skeletonCards(taskBox, 4);
     return;
   }
   const s = state.stats || {};
   const busy = state.plugins.filter((p) => p.busy).length;
   const tripped = state.tasks.filter((t) => t.tripped).length;
-  box.append(
+  engine.append(
     card('运行时长', humanMs(s.uptime_ms), '自进程启动'),
     card('调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描'),
     card('心跳', s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1), '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms'),
+    card('JS 内存', humanBytes(s.js_memory_bytes), s.js_memory_bytes === null ? '未接：取它要等插件空闲' : '各 runtime 合计'),
+  );
+  taskBox.append(
     card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
     card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
     card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
     card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
-    card('JS 内存', humanBytes(s.js_memory_bytes), s.js_memory_bytes === null ? '未接：取它要等插件空闲' : '各 runtime 合计'),
   );
 }
 
@@ -325,33 +353,57 @@ function sortHeaders(view) {
 }
 
 function renderPlugins() {
-  const body = $('plugins-body');
+  const grid = $('plugin-grid');
   const q = state.q.plugins;
   const rows = state.plugins.filter((p) => matches(p.name, q));
   $('plugins-count').textContent = state.plugins.length;
-  clear(body);
+  clear(grid);
   if (!state.plugins.length) {
-    body.append(rowMessage('还没有加载任何插件', 4, '把 .js 放进 plugins/ 目录后刷新'));
+    emptyState(grid, '还没有加载任何插件', '把 .js 放进 plugins/ 目录后刷新页面');
     return;
   }
-  if (!rows.length) { body.append(rowMessage('没有匹配的插件', 4)); return; }
+  if (!rows.length) { emptyState(grid, '没有匹配的插件'); return; }
   for (const p of rows) {
-    const tr = el('tr', 'clickable');
-    tr.append(el('td', 'strong', p.name));
-    tr.append(el('td', 'num', String(p.tasks)));
-    const st = el('td');
-    st.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
-    tr.append(st);
-    tr.append(actionsCell([
-      ['重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)],
-      ['停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)],
-      ['卸载', async () => {
+    const mine = state.tasks.filter((t) => t.plugin === p.name);
+    const lastRun = mine.reduce((m, t) => Math.max(m, t.last_run || 0), 0);
+    const cardEl = el('article', 'plugin-card');
+    cardEl.tabIndex = 0;
+    const head = el('div', 'plugin-head');
+    head.append(el('div', 'plugin-name', p.name));
+    head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
+    cardEl.append(head);
+    const meta = el('div', 'plugin-meta');
+    meta.append(el('span', '', mine.length + ' 个任务'));
+    meta.append(el('span', '', '·'));
+    // last_run 是**进程内**状态：重启后为 null，但数据库里仍有历史运行记录。
+    // 所以这里不说「还没运行过」，说「本次启动后未运行」—— 别让用户以为历史丢了。
+    meta.append(el('span', '', lastRun ? '最近运行 ' + relTime(lastRun) : '本次启动后未运行'));
+    cardEl.append(meta);
+    if (mine.length) {
+      const chips = el('div', 'chips');
+      for (const t of mine.slice(0, 4)) chips.append(el('span', 'chip', t.name));
+      if (mine.length > 4) chips.append(el('span', 'chip', '+' + (mine.length - 4)));
+      cardEl.append(chips);
+    }
+    const acts = el('div', 'plugin-actions');
+    const mk = (label, fn, danger) => {
+      const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
+      b.type = 'button';
+      b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
+      return b;
+    };
+    acts.append(
+      mk('重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)),
+      mk('停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)),
+      mk('卸载', async () => {
         if (!(await askConfirm('卸载「' + p.name + '」？它注册的定时任务会一起消失，插件文件不会删。', '卸载'))) return;
         act('/api/plugins/' + encodeURIComponent(p.name) + '/unload', '已卸载 ' + p.name);
-      }, true],
-    ]));
-    tr.addEventListener('click', () => showPlugin(p.name));
-    body.append(tr);
+      }, true),
+    );
+    cardEl.append(acts);
+    cardEl.addEventListener('click', () => showPlugin(p.name));
+    cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
+    grid.append(cardEl);
   }
 }
 
@@ -780,10 +832,12 @@ async function refresh() {
     if (state.auth && !state.token) showGate(true, '这个面板启用了令牌鉴权');
     else if (state.token) showGate(false);
     banner('');
+    setSync(true);
     render();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, state.token ? '令牌无效' : '需要令牌'); return; }
     banner('读取面板状态失败：' + (e.message || e) + '（自动重试中）');
+    setSync(false);
     setConn(false);
   }
 }
@@ -845,13 +899,23 @@ function bind() {
     applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
 
-  $('refresh-btn').addEventListener('click', () => {
-    refresh();
-    if (state.view === 'dashboard') loadDashboard();
-    if (state.view === 'runs') loadRuns();
-    if (state.view === 'settings') loadConfig();
-    toast('已刷新');
+  $('refresh-btn').addEventListener('click', async () => {
+    const btn = $('refresh-btn');
+    btn.classList.add('spinning');
+    btn.disabled = true;
+    try {
+      await refresh();
+      if (state.view === 'dashboard') await loadDashboard();
+      if (state.view === 'runs') await loadRuns();
+      if (state.view === 'settings') await loadConfig();
+      toast('已刷新');
+    } finally {
+      btn.classList.remove('spinning');
+      btn.disabled = false;
+    }
   });
+
+  setInterval(paintSync, 1000);
 
   $('gate-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -900,7 +964,15 @@ function bind() {
   }
 
   // 日志
-  $('log-level').addEventListener('change', (ev) => { state.logLevel = ev.target.value; renderLogs(); });
+  for (const btn of document.querySelectorAll('.seg-item')) {
+    btn.addEventListener('click', () => {
+      state.logLevel = btn.dataset.level || '';
+      for (const other of document.querySelectorAll('.seg-item')) {
+        other.setAttribute('aria-pressed', String(other === btn));
+      }
+      renderLogs();
+    });
+  }
   $('log-search').addEventListener('input', (ev) => { state.logQuery = ev.target.value.trim(); renderLogs(); });
   $('log-pause').addEventListener('click', (ev) => {
     state.logsPaused = !state.logsPaused;

@@ -439,6 +439,68 @@ button, input, select { font: inherit; color: inherit; }
   .log-plugin { display: none; }
 }
 
+/* ---------- 仪表盘分组 / 插件卡片 / 同步提示 ---------- */
+
+.group { display: flex; flex-direction: column; gap: 10px; }
+.group-title {
+  font-size: 11.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--dim); padding-left: 2px;
+}
+
+.view-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 2px 2px;
+}
+.view-head h2 { margin-right: 2px; }
+
+.plugin-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); }
+.plugin-grid .empty { grid-column: 1 / -1; }
+.plugin-card {
+  display: flex; flex-direction: column; gap: 9px; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow-sm); cursor: pointer;
+  transition: border-color .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.plugin-card:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.plugin-head { display: flex; align-items: center; gap: 8px; }
+.plugin-name { font-size: 14px; font-weight: 650; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-meta { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.plugin-actions { display: flex; gap: 6px; margin-top: 2px; }
+
+.sync { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.btn.spinning .ico { animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 620px) {
+  .plugin-grid { grid-template-columns: minmax(0, 1fr); }
+  .sync { display: none; }
+}
+
+/* ---------- 段控 / 滚动条 / 密度微调 ---------- */
+
+.seg {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px;
+}
+.seg-item {
+  padding: 4px 10px; border: 0; border-radius: 7px; background: transparent;
+  font-size: 12px; color: var(--dim); cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.seg-item:hover { color: var(--fg-2); }
+.seg-item[aria-pressed="true"] {
+  background: var(--surface); color: var(--fg); font-weight: 600; box-shadow: var(--shadow-sm);
+}
+
+.console::-webkit-scrollbar, .table-wrap::-webkit-scrollbar, .drawer-body::-webkit-scrollbar { width: 10px; height: 10px; }
+.console::-webkit-scrollbar-thumb, .table-wrap::-webkit-scrollbar-thumb, .drawer-body::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 8px; border: 3px solid transparent; background-clip: content-box;
+}
+.console::-webkit-scrollbar-track, .table-wrap::-webkit-scrollbar-track { background: transparent; }
+
+.table th, .table td { padding: 8px 16px; }
+
 /* ---------- 搜索 / 勾选 / 排序 / 弹窗 / 命中高亮 ---------- */
 
 .search { margin-left: auto; }
