@@ -12,6 +12,7 @@ mod engine;
 mod hostapi;
 mod log;
 mod scheduler;
+mod notify;
 mod scripts;
 mod service;
 mod ssrf;

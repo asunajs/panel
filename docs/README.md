@@ -22,6 +22,7 @@
 和开机自启动（`panel-llrt service print|install|uninstall|status`）。
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
 契约见 [plugin-webui.md](plugin-webui.md)。
+任务失败、熔断和插件主动喊话都会进顶栏铃铛，配 `PANEL_NOTIFY_WEBHOOK` 还能推到外部。
 功能对照与下一步见 [parity.md](parity.md)。
 
 ## 从零构建

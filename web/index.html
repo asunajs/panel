@@ -41,10 +41,22 @@
           <div class="topbar-right">
             <span class="pill pill-ok" id="health-pill"><span class="dot"></span><span class="label">引擎健康</span></span>
             <span class="sync" id="sync-text">正在读取…</span>
+            <button class="icon-btn bell" id="bell" type="button" aria-label="通知" aria-expanded="false" data-tip="通知">
+              <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M13.7 19a2 2 0 0 1-3.4 0"/></svg>
+              <span class="bell-dot hidden" id="bell-dot"></span>
+            </button>
             <button class="icon-btn" id="theme-toggle" type="button" aria-label="切换主题" data-tip="切换主题"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 13a8.5 8.5 0 1 1-9.5-9.5 7 7 0 0 0 9.5 9.5z"/></svg></button>
             <button class="btn" id="refresh-btn" type="button"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg><span>刷新</span></button>
           </div>
         </header>
+
+        <div class="notify-pop hidden" id="notify-pop" role="dialog" aria-label="通知">
+          <header class="notify-head">
+            <strong>通知</strong>
+            <button class="btn btn-sm" id="notify-read" type="button">全部已读</button>
+          </header>
+          <div class="notify-list" id="notify-list"></div>
+        </div>
 
         <div class="banner hidden" id="banner" role="status"></div>
 

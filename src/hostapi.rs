@@ -89,6 +89,8 @@ const WRAP: &str = r#"(raw) => {
   const j = (v) => (v === undefined ? undefined : JSON.stringify(v));
   return {
     log: raw.log, info: raw.info, warn: raw.warn, error: raw.error,
+    // 通知：标题/正文都是纯文本，别走 JSON.stringify（那会多一对引号）。
+    notify: async (title, body) => raw.notify(String(title), body === undefined ? undefined : String(body)),
     sleep: raw.sleep,
     register_cron: async (name, cron, budget_ms) => raw.register_cron(name, cron, budget_ms),
     register_handler: raw.register_handler,
@@ -99,11 +101,12 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 11] = [
+const OP_NAMES: [&str; 12] = [
     "log",
     "info",
     "warn",
     "error",
+    "notify",
     "sleep",
     "config",
     "sqlite_query",
@@ -143,6 +146,7 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("info", Func::from(Async(op_info)).into_js(ctx)?),
         ("warn", Func::from(Async(op_warn)).into_js(ctx)?),
         ("error", Func::from(Async(op_error)).into_js(ctx)?),
+        ("notify", Func::from(Async(op_notify)).into_js(ctx)?),
         ("sleep", Func::from(Async(op_sleep)).into_js(ctx)?),
         ("config", Func::from(Async(op_config)).into_js(ctx)?),
         (
@@ -179,6 +183,24 @@ async fn op_warn(ctx: Ctx<'_>, msg: String) -> Result<()> {
 }
 async fn op_error(ctx: Ctx<'_>, msg: String) -> Result<()> {
     emit(&ctx, Level::Error, msg)
+}
+
+/// 插件主动发一条通知：进面板的通知列表，配了 webhook 的话也发出去。
+async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Result<()> {
+    let host = host(&ctx)?;
+    crate::notify::record_bg(
+        host.db.clone(),
+        host.log.clone(),
+        crate::notify::Notice {
+            level: "info",
+            plugin: host.plugin.clone(),
+            task: None,
+            run_id: host.inv.run_id(),
+            title,
+            body: body.0.unwrap_or_default(),
+        },
+    );
+    Ok(())
 }
 
 async fn op_config(ctx: Ctx<'_>) -> Result<String> {

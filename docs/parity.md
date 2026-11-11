@@ -26,7 +26,7 @@
 |---|---|---|---|
 | **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ 本轮 | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，返回值带出来）。新标签打开，不做 iframe。契约见 [plugin-webui.md](plugin-webui.md) |
 | **自启动** | ✅ `install.sh`（systemd/launchd） | ✅ 本轮 | `panel-llrt service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
-| 推送（push 通道/outbox） | ✅ | ⬜ 暂不做 | 依赖外部通道（SMTP/Webhook），先把插件侧 `host.notify` 定清楚再说 |
+| **推送（通知）** | ✅ push 通道 / outbox | ✅ 本轮 | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 可选 webhook（`PANEL_NOTIFY_WEBHOOK`）。不做 SMTP：那要维护一堆凭据 |
 | **备份 / 恢复** | ✅ `/api/restore*` | ✅ 本轮 | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
 | 市场 / 在线更新 | ✅ | ⬜ 暂不做 | 需要网络与签名信任链，和「离线可构建」的取舍冲突 |
 | 上传插件 zip | ✅ | ⬜ 视需求 | 单文件插件用「新建 + 编辑」已经够；多文件要等插件 WebUI |

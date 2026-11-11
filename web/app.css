@@ -641,6 +641,43 @@ button, input, select { font: inherit; color: inherit; }
   white-space: pre;
 }
 
+
+/* ---------- 通知 ---------- */
+
+.bell { position: relative; }
+.bell-dot {
+  position: absolute; top: 5px; right: 5px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--err); box-shadow: 0 0 0 2px var(--surface);
+}
+.notify-pop {
+  position: absolute; top: 58px; right: 22px; z-index: 60;
+  width: min(380px, calc(100vw - 32px)); max-height: min(60vh, 520px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-md);
+}
+.notify-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.notify-list { overflow-y: auto; }
+.notify-item { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.notify-item:last-child { border-bottom: 0; }
+.notify-item.unread { background: var(--accent-soft); }
+.notify-item .t { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.notify-item .m { margin-top: 2px; font-size: 11.5px; color: var(--dim); }
+.notify-item .b {
+  margin-top: 4px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+  color: var(--fg-2); white-space: pre-wrap; word-break: break-word;
+  max-height: 5.2em; overflow: hidden;
+}
+.notify-empty { padding: 22px 12px; text-align: center; font-size: 13px; color: var(--dim); }
+
+
+.notify-item.notify-clickable { cursor: pointer; }
+.notify-item.notify-clickable:hover { background: var(--surface-2); }
+
 @media (max-width: 720px) {
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }

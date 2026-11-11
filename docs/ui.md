@@ -119,6 +119,9 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 - **插件源码在界面里改**：抽屉「源码」页 = 一个 textarea + 重新读取 / 保存并重载。
   保存成功后**只更新元信息、不把内容读回来覆盖**：用户刚写完的东西不该被抢走，
   而且「保存 → 重新读取」两个异步动作叠在一起会吞掉随后的错误提示（踩过）。
+- **通知在顶栏铃铛里**：未读红点 + 点开就是列表（失败/提醒/信息三档），每条带
+  插件·任务·时间和正文；有 run id 的点一下直接开那次运行的抽屉。任务失败和熔断
+  由调度器自己发，插件也可以用 `host.notify()` 喊话。
 - **插件界面在新标签打开**：卡片/抽屉上的「界面」按钮只在 `plugins/<name>.webui/index.html` 存在时出现。
   不内嵌 iframe：`x-frame-options: DENY` 对所有响应生效，放宽它只省一个标签页，不值。契约见 [plugin-webui.md](plugin-webui.md)。
 - **自启动不在界面里点**：设置页只给四条命令（`print` / `install` / `status` / `uninstall`）。
@@ -183,7 +186,8 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 | 日志级别段控 | 四个按钮，当前项高亮（`aria-pressed`），点 warn 只剩 WARN 行 |
 | 窄屏表格 | 520×1000 下任务表折成 7 行「标签 + 值」+ 两个操作按钮，无横向滚动 |
 | 首次使用引导 | 空 plugins 目录起一个实例（8790）：「开始使用」三步 + 代码示例正常显示 |
-| 备份 / 恢复（真面板 8787） | 导出 3 个插件 + 1 个脚本 + 配置原文；把 webui-demo 改成 27 字节的坏源码后恢复 → 回到 408 字节、首行复原、三个插件全部 loaded；带 `../evil` 的备份整批 400，一个文件都不写 || 插件 WebUI（真面板 8787） | `/plugins/webui-demo/` 返回 html/css/js（MIME 正确、`no-store`）；`POST .../api/hello` 拿到 handler 返回值；穿目录 400；缺文件 404；未加载插件 502 |
+| 备份 / 恢复（真面板 8787） | 导出 3 个插件 + 1 个脚本 + 配置原文；把 webui-demo 改成 27 字节的坏源码后恢复 → 回到 408 字节、首行复原、三个插件全部 loaded；带 `../evil` 的备份整批 400，一个文件都不写 || 通知（真面板 8787） | 跑 `hello/boom` → 铃铛红点 + 列表「失败 · 任务 boom 失败 · Error: 故意失败…」，带 run id；设 `PANEL_NOTIFY_WEBHOOK=http://127.0.0.1:8899/hook` 时本机监听器收到同样的 JSON；全部已读后 unread=0 |
+| 插件 WebUI（真面板 8787） | `/plugins/webui-demo/` 返回 html/css/js（MIME 正确、`no-store`）；`POST .../api/hello` 拿到 handler 返回值；穿目录 400；缺文件 404；未加载插件 502 |
 | 自启动干跑 | `panel-llrt service print` 出来的 plist 过 `plutil -lint`（OK）；`status`/`uninstall` 在空 HOME 下正确报「不存在 / 没装过」，没有副作用 |
 | 脚本 CRUD（真面板 8787） | 新建 376 字节模板 → 保存带 `0 9 * * *` → `next_at` 算出 11-12 09:00；坏表达式 400 且不落文件；删除进 `data/trash/script-<name>-<ts>.js` |
 | 脚本手动运行 | `POST /api/scripts/demo-script/run` → run 237：`status=ok plugin=@script`，日志三条（开始 / 脚本跑起来了 / 完成 5ms） |

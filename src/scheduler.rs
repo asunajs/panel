@@ -862,10 +862,48 @@ impl Inner {
             l.busy = false;
         }
         let now = Local::now();
+        let was_tripped = self
+            .find(plugin, task)
+            .map(|i| self.tasks[i].tripped)
+            .unwrap_or(false);
         if let Some(i) = self.find(plugin, task) {
             self.tasks[i].in_flight = false;
             self.tasks[i].advance(&self.cfg, now, error.clone());
             self.persist_task(i);
+        }
+        // 失败和「刚刚熔断」都要通知：面板是没人的时候在跑东西的地方，
+        // 只把错误写进日志等于默认你会去翻。
+        if let Some(e) = &error {
+            crate::notify::record_bg(
+                self.db.clone(),
+                self.log.clone(),
+                crate::notify::Notice {
+                    level: "error",
+                    plugin: plugin.to_string(),
+                    task: Some(task.to_string()),
+                    run_id: (run_id >= 0).then_some(run_id),
+                    title: format!("任务 {task} 失败"),
+                    body: e.clone(),
+                },
+            );
+        }
+        let now_tripped = self
+            .find(plugin, task)
+            .map(|i| self.tasks[i].tripped)
+            .unwrap_or(false);
+        if now_tripped && !was_tripped {
+            crate::notify::record_bg(
+                self.db.clone(),
+                self.log.clone(),
+                crate::notify::Notice {
+                    level: "error",
+                    plugin: plugin.to_string(),
+                    task: Some(task.to_string()),
+                    run_id: None,
+                    title: format!("任务 {task} 已熔断"),
+                    body: "连续失败达到阈值，已暂停派发；检查完可以手动恢复".to_string(),
+                },
+            );
         }
         if let Some(e) = &error {
             self.log.emit(

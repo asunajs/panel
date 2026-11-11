@@ -21,6 +21,8 @@ const state = {
   /** 脚本列表（独立 JS 文件 + 可选 cron）。 */
   scripts: [],
   scriptMeta: null,
+  /** 通知：铃铛上的未读数 + 列表。 */
+  notify: { unread: 0, items: [] },
   tasks: [],
   stats: null,
   config: null,
@@ -1324,6 +1326,69 @@ function renderSettings() {
 }
 
 
+
+// ---------------------------------------------------------------- 通知
+
+async function loadNotifications() {
+  try {
+    const d = await api("/api/notifications");
+    state.notify = d;
+    renderNotify();
+  } catch (e) {
+    // 通知拉不到不该把整页搞红：它只是提示层。
+  }
+}
+
+function renderNotify() {
+  const d = state.notify || { unread: 0, items: [] };
+  const dot = $("bell-dot");
+  if (dot) dot.classList.toggle("hidden", !d.unread);
+  const list = $("notify-list");
+  if (!list) return;
+  clear(list);
+  if (!d.items || !d.items.length) {
+    list.append(el("div", "notify-empty", "还没有通知。任务失败、熔断、插件主动喊话都会出现在这里。"));
+    return;
+  }
+  for (const n of d.items) {
+    const item = el("div", "notify-item" + (n.read ? "" : " unread"));
+    const head = el("div", "t");
+    const kind = n.level === "error" ? ["pill-err", "失败"] : n.level === "warn" ? ["pill-warn", "提醒"] : ["pill", "信息"];
+    head.append(pill(kind[0], kind[1]));
+    head.append(el("span", "", n.title));
+    item.append(head);
+    item.append(el("div", "m", n.plugin + (n.task ? " · " + n.task : "") + " · " + fmtDateTime(n.ts)));
+    if (n.body) item.append(el("div", "b", n.body));
+    if (n.run_id) {
+      item.classList.add("notify-clickable");
+      item.addEventListener("click", () => { toggleNotify(false); showRun(n.run_id); });
+    }
+    list.append(item);
+  }
+}
+
+function toggleNotify(force) {
+  const pop = $("notify-pop");
+  const open = force === undefined ? pop.classList.contains("hidden") : force;
+  pop.classList.toggle("hidden", !open);
+  $("bell").setAttribute("aria-expanded", String(open));
+  if (open) loadNotifications();
+}
+
+async function markAllRead() {
+  try {
+    const d = await api("/api/notifications/read", { method: "POST", body: {} });
+    state.notify = {
+      unread: d.unread || 0,
+      items: (state.notify.items || []).map((n) => Object.assign({}, n, { read: true })),
+    };
+    renderNotify();
+    toast("已全部标记已读");
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "操作失败"), true);
+  }
+}
+
 // ---------------------------------------------------------------- 备份 / 恢复
 
 async function exportBackup() {
@@ -1464,6 +1529,7 @@ function render() {
     renderFilterDropdowns();
     renderTasks();
     if (state.view === 'scripts') { loadScripts().then(renderScripts); }
+    loadNotifications();
     if (state.view === 'runs') renderRuns();
   });
 }
@@ -1807,6 +1873,11 @@ function bind() {
 
   // 脚本
   $('script-new').addEventListener('click', openNewScript);
+  // 通知
+  $('bell').addEventListener('click', (ev) => { ev.stopPropagation(); toggleNotify(); });
+  $('notify-read').addEventListener('click', (ev) => { ev.stopPropagation(); markAllRead(); });
+  $('notify-pop').addEventListener('click', (ev) => ev.stopPropagation());
+  document.addEventListener('click', () => { if (!$('notify-pop').classList.contains('hidden')) toggleNotify(false); });
   $('restore-file').addEventListener('change', async (ev) => {
     const f = ev.target.files && ev.target.files[0];
     ev.target.value = '';
@@ -1844,6 +1915,7 @@ function bind() {
     settleConfirm(false);
     $('new-plugin').classList.add('hidden');
     $('new-script').classList.add('hidden');
+    toggleNotify(false);
     $('sidebar').classList.remove('open');
   });
 }

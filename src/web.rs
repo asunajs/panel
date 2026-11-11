@@ -66,6 +66,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
+        .route("/api/notifications", get(api_notifications))
+        .route("/api/notifications/read", post(api_notifications_read))
         .route("/api/backup", get(api_backup).post(api_restore))
         .route("/api/scripts", get(scripts_list).post(script_create))
         .route(
@@ -1459,4 +1461,30 @@ async fn api_restore(
         "scripts": restored_scripts,
         "config_applied": config_applied,
     })))
+}
+
+// ---------------------------------------------------------------- 通知
+
+async fn api_notifications(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let items = crate::notify::list(&st.db, 50).await.map_err(internal)?;
+    let unread = crate::notify::unread(&st.db).await.map_err(internal)?;
+    Ok(Json(json!({ "unread": unread, "items": items })))
+}
+
+#[derive(Deserialize)]
+struct ReadBody {
+    #[serde(default)]
+    ids: Option<Vec<i64>>,
+}
+
+async fn api_notifications_read(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    body: Option<Json<ReadBody>>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let ids = body.and_then(|Json(b)| b.ids);
+    crate::notify::mark_read(&st.db, ids).await.map_err(internal)?;
+    let unread = crate::notify::unread(&st.db).await.map_err(internal)?;
+    Ok(Json(json!({ "ok": true, "unread": unread })))
 }

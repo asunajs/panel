@@ -28,10 +28,28 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 网络 | `fetch` |
 | 时间 | `sleep` |
 | 注册 | `register_cron` / `register_handler` |
+| 通知 | `notify(title, body?)` —— 进面板通知列表；配了 `PANEL_NOTIFY_WEBHOOK` 也 POST 出去（见 [notify 一节](#通知)） |
 | 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`） |
 
-**明确不做**：市场、推送、备份/恢复、自更新、脚本任务、上传、完整鉴权面（先单令牌）、
-Bun/Node 外部运行时、插件 UI iframe 隔离源。
+**第一版明确不做的**（现在多半已经补上了，逐个看 [parity.md](parity.md)）：
+推送、备份/恢复、脚本任务、上传、完整鉴权面（先单令牌）、Bun/Node 外部运行时。
+**仍然不做**：市场、自更新、插件 UI 的 iframe 隔离源。
+
+### 通知
+
+notify(title, body?)：插件主动喊话。落到面板的通知表（铃铛上的未读数），
+配了 PANEL_NOTIFY_WEBHOOK 时额外 POST 一个 JSON 到那个 URL：
+
+```json
+{ "ts": 1794409631603, "level": "info", "plugin": "hello", "task": null,
+  "run_id": 267, "title": "备份完成", "body": "3 个插件已导出" }
+```
+
+- **不阻塞调用方**：记录和投递都在后台，插件不会因为 webhook 慢而被拖住。
+- **失败也只进日志**：webhook 挂了不会让任务失败 —— 通知是旁路，不是依赖。
+- 任务失败、熔断由调度器自己发通知（level=error），插件不用操心。
+- URL 是**运维填的**（环境变量），不是插件给的，所以不套插件的 SSRF 门；
+  插件只能决定标题和正文。
 
 ### 2.1 DB 必须走 host-api（已定）
 

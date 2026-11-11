@@ -835,3 +835,82 @@ async fn restore_never_deletes_things_that_are_not_in_the_backup() {
     assert!(plugins.join("keepme.js").exists(), "恢复不是清空再灌");
     assert!(plugins.join("newone.js").exists());
 }
+
+// ---------------------------------------------------------------- 通知
+
+async fn wait_notifications(app: &Router, want: usize) -> Value {
+    for _ in 0..80 {
+        let (_, body) = get(app, "/api/notifications").await;
+        if body["items"].as_array().map(|a| a.len()).unwrap_or(0) >= want {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("等不到通知");
+}
+
+#[tokio::test]
+async fn a_plugin_can_raise_a_notification() {
+    let (app, _plugins, _data, _store) = setup_dirs("ntf1").await;
+    load_plugin(
+        &app,
+        "n",
+        "import host from 'panel:host';\nawait host.register_handler('tell', async () => { await host.notify('备份完成', '3 个插件已导出'); return 1; });\n",
+    )
+    .await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/n/tell/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = wait_notifications(&app, 1).await;
+    let item = &list["items"][0];
+    assert_eq!(item["title"], "备份完成", "{list}");
+    assert_eq!(item["body"], "3 个插件已导出");
+    assert_eq!(item["plugin"], "n");
+    assert_eq!(item["level"], "info");
+    assert_eq!(item["read"], false);
+    assert_eq!(list["unread"], 1);
+}
+
+#[tokio::test]
+async fn a_failed_run_raises_an_error_notification() {
+    let (app, _plugins, _data, _store) = setup_dirs("ntf2").await;
+    load_plugin(
+        &app,
+        "boom",
+        "import host from 'panel:host';\nawait host.register_handler('go', async () => { throw new Error('故意失败'); });\n",
+    )
+    .await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/boom/go/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let run_id = body["run_id"].as_i64().unwrap();
+    let done = wait_run_done(&app, run_id).await;
+    assert_eq!(done["run"]["status"], "error", "{done}");
+    let list = wait_notifications(&app, 1).await;
+    let item = &list["items"][0];
+    assert_eq!(item["level"], "error", "{list}");
+    assert!(
+        item["title"].as_str().unwrap_or("").contains("失败"),
+        "{list}"
+    );
+    assert!(item["body"].as_str().unwrap_or("").contains("故意失败"));
+    assert_eq!(item["run_id"], run_id, "通知要能点回那次运行");
+}
+
+#[tokio::test]
+async fn marking_read_clears_the_badge() {
+    let (app, _plugins, _data, _store) = setup_dirs("ntf3").await;
+    load_plugin(
+        &app,
+        "m",
+        "import host from 'panel:host';\nawait host.register_handler('t', async () => { await host.notify('hi'); return 1; });\n",
+    )
+    .await;
+    let (_, _) = send(&app, with_csrf("POST", "/api/tasks/m/t/run", None)).await;
+    let before = wait_notifications(&app, 1).await;
+    assert_eq!(before["unread"], 1);
+    let (status, out) = send(&app, with_csrf("POST", "/api/notifications/read", Some(json!({})))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["unread"], 0);
+    let (_, after) = get(&app, "/api/notifications").await;
+    assert_eq!(after["unread"], 0);
+    assert_eq!(after["items"][0]["read"], true);
+}

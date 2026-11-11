@@ -70,6 +70,19 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             UNIQUE(plugin, name)
         );
 
+        CREATE TABLE IF NOT EXISTS notifications (
+            id      INTEGER PRIMARY KEY,
+            ts      INTEGER NOT NULL,
+            level   TEXT NOT NULL,
+            plugin  TEXT NOT NULL,
+            task    TEXT,
+            run_id  INTEGER,
+            title   TEXT NOT NULL,
+            body    TEXT NOT NULL,
+            read    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS notifications_ts ON notifications(ts DESC);
+
         CREATE TABLE IF NOT EXISTS scripts (
             name        TEXT PRIMARY KEY,
             cron        TEXT,
