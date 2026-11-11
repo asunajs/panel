@@ -5,6 +5,7 @@
 
 mod auth;
 mod config;
+mod config_store;
 mod cron;
 mod db;
 mod engine;
@@ -63,8 +64,9 @@ async fn main() -> Result<(), String> {
     if let Some(note) = provisioned.note.clone() {
         log.emit("panel", None, Level::Info, note);
     }
-    let config = config::load(&data_dir)?;
-    let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config);
+    // 配置做成热快照：界面保存后插件立刻读到新值（旧实现是启动时快照，要重启）。
+    let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
+    let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone());
 
     if ssrf::allow_private_outbound_targets() {
         log.emit(
@@ -96,6 +98,7 @@ async fn main() -> Result<(), String> {
         sched: sched.clone(),
         plugins_dir,
         data_dir,
+        config,
         auth: provisioned.auth.map(Arc::new),
     };
     let app = web::router(st);

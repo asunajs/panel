@@ -558,6 +558,57 @@ button, input, select { font: inherit; color: inherit; }
 .seg { height: var(--h-control); align-items: center; }
 .seg-item { display: inline-flex; align-items: center; height: calc(var(--h-control) - 6px); }
 
+
+/* ---------- 页签 / 编辑器 / 源码面板 ---------- */
+
+.tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.tab {
+  padding: 8px 13px; margin-bottom: -1px;
+  border: 0; border-bottom: 2px solid transparent; background: transparent;
+  font-size: 13px; color: var(--dim); cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+.tab:hover { color: var(--fg-2); }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs-sm { margin-bottom: 10px; }
+.tabs-sm .tab { padding: 5px 10px; font-size: 12.5px; }
+
+.editor {
+  width: 100%; min-height: 340px; resize: vertical;
+  padding: 12px 14px; tab-size: 2;
+  background: var(--surface-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55; outline: none;
+}
+.editor:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+#drawer-source .editor { min-height: 55vh; }
+
+.src-toolbar { margin-bottom: 8px; }
+.src-toolbar .src-meta { margin-right: auto; }
+.src-meta { font-family: var(--mono); font-size: 11.5px; color: var(--dim); overflow-wrap: anywhere; }
+.src-error {
+  margin: 0 0 8px; padding: 8px 11px; border-radius: 8px;
+  font-size: 12.5px; white-space: pre-wrap;
+  color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 34%, transparent);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+.plugin-card-bad { border-style: dashed; }
+
+.modal-input {
+  width: 100%; height: var(--h-control); margin: 4px 0 10px; padding: 0 11px;
+  background: var(--surface-2); color: var(--fg);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  font-family: var(--mono); font-size: 13px; outline: none;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-card code {
+  padding: 1px 5px; border-radius: 5px; background: var(--surface-2);
+  border: 1px solid var(--line); font-family: var(--mono); font-size: 12px;
+}
+
 @media (max-width: 720px) {
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }

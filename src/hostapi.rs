@@ -54,9 +54,9 @@ pub struct HostHandle {
     pub log: LogHub,
     pub db: Db,
     pub reg: mpsc::UnboundedSender<Registration>,
-    /// 面板级只读配置的 **JSON 文本**（启动时序列化一次，多插件共享同一个 Arc）。
-    /// 不存 `serde_json::Value`：`config()` 是热路径，现序列化会按体积付费。
-    pub config_json: Arc<str>,
+    /// 面板级配置的**热快照**。取一次只 clone 一个 `Arc`，
+    /// 所以 `config()` 既是热路径便宜的，又能读到界面刚保存的新值（见 `crate::config_store`）。
+    pub config: Arc<crate::config_store::ConfigStore>,
 }
 
 fn host(ctx: &Ctx<'_>) -> Result<HostHandle> {
@@ -183,7 +183,7 @@ async fn op_error(ctx: Ctx<'_>, msg: String) -> Result<()> {
 
 async fn op_config(ctx: Ctx<'_>) -> Result<String> {
     // 已经是 JSON 文本，直接拷贝一份过桥；不做 serde 序列化。
-    Ok(host(&ctx)?.config_json.as_ref().to_string())
+    Ok(host(&ctx)?.config.snapshot().as_ref().to_string())
 }
 
 /// 挂起预算的取消臂：停了就投 AbortError，而不是让 Promise 永远挂着。

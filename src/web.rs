@@ -38,6 +38,8 @@ pub struct AppState {
     pub plugins_dir: PathBuf,
     /// 数据目录：`/api/config` 要告诉界面「配置文件在哪」。
     pub data_dir: PathBuf,
+    /// 面板级配置的热快照：`PUT /api/config` 换掉它，插件立刻读到新值。
+    pub config: Arc<crate::config_store::ConfigStore>,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
     pub auth: Option<Arc<crate::auth::Auth>>,
@@ -56,7 +58,11 @@ fn internal(msg: impl Into<String>) -> ApiError {
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
         .route("/api/state", get(api_state))
-        .route("/api/config", get(api_config))
+        .route("/api/config", get(api_config).put(api_config_save))
+        .route("/api/plugins/files", get(plugin_files))
+        .route("/api/plugins", post(plugin_create))
+        .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
+        .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
@@ -67,6 +73,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/runs/{id}", get(api_run_one))
         .route("/api/logs", get(api_logs))
         .route("/api/logs/stream", get(api_logs_stream))
+        // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
+        .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(st.clone(), require_token));
 
     Router::new()
@@ -376,6 +384,14 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
     } else {
         text
     };
+    // 编辑器要的是**磁盘上的原文**（保留用户的键顺序和缩进），不是我们 pretty 过的版本。
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let raw_truncated = raw.chars().count() > 200_000;
+    let raw_shown: String = if raw_truncated {
+        raw.chars().take(200_000).collect()
+    } else {
+        raw
+    };
     Ok(Json(json!({
         "path": path.display().to_string(),
         "exists": path.exists(),
@@ -384,7 +400,10 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
         "keys": keys,
         "json": shown,
         "truncated": truncated,
+        "text": raw_shown,
+        "text_truncated": raw_truncated,
         "plugins_dir": st.plugins_dir.display().to_string(),
+        "trash_dir": st.data_dir.join("trash").display().to_string(),
     })))
 }
 
@@ -628,3 +647,324 @@ mod tests {
 #[cfg(test)]
 #[path = "web_tests.rs"]
 mod router_tests;
+// ---------------------------------------------------------------- 插件文件（增删改查）
+
+/// 单文件源码上限。JS 插件是单文件，512 KiB 已远超正常规模；
+/// 上限在这里是**保护面板**（读进内存、发给浏览器），不是限制功能。
+const SOURCE_MAX: usize = 512 * 1024;
+
+fn plugin_path(dir: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {
+    safe_name(name)?;
+    Ok(dir.join(format!("{name}.js")))
+}
+
+/// 原子写：同目录临时文件 + rename。
+///
+/// 直接 `fs::write` 到目标路径，写到一半断电/被杀就是**半截文件**，
+/// 而半截的插件文件下次启动会被当成真插件去加载 —— 比写失败更糟。
+async fn write_atomic(
+    path: &std::path::Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(dir).await.ok();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
+    tokio::fs::write(&tmp, bytes).await?;
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m)).await?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+/// 插件目录里所有 `.js`（`.bak` / `.tmp` 不算）。
+///
+/// 为什么需要它：`/api/state` 里的插件是**已加载**的，语法错/启动失败的文件不在里面，
+/// 但用户恰恰要去界面里修那些文件。
+async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut rd = tokio::fs::read_dir(&st.plugins_dir)
+        .await
+        .map_err(|e| bad(format!("读插件目录失败 {}: {e}", st.plugins_dir.display())))?;
+    let loaded: std::collections::HashSet<String> = st
+        .sched
+        .plugins()
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    let mut files = Vec::new();
+    while let Ok(Some(ent)) = rd.next_entry().await {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let meta = ent.metadata().await.ok();
+        files.push(json!({
+            "name": name,
+            "bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            "modified_ms": meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64),
+            "loaded": loaded.contains(name),
+        }));
+    }
+    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(Json(json!({
+        "dir": st.plugins_dir.display().to_string(),
+        "max_bytes": SOURCE_MAX,
+        "files": files,
+    })))
+}
+
+async fn plugin_source(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let path = plugin_path(&st.plugins_dir, &name)?;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))?;
+    if meta.len() > SOURCE_MAX as u64 {
+        return Err(bad(format!(
+            "插件源码有 {} 字节，超过上限 {SOURCE_MAX} 字节",
+            meta.len()
+        )));
+    }
+    let source = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))?;
+    let bak = st.plugins_dir.join(format!("{name}.js.bak"));
+    Ok(Json(json!({
+        "name": name,
+        "path": path.display().to_string(),
+        "bytes": meta.len(),
+        "source": source,
+        "has_backup": bak.exists(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SourceBody {
+    source: String,
+}
+
+/// 保存插件源码：**先写盘再重载**，重载失败就回滚文件并把旧版本装回去。
+///
+/// 顺序不能反过来（先重载后写盘）：那样内存里跑的是新代码、磁盘上是旧代码，
+/// 下次重启就「行为变了」，最难查的一类问题。
+async fn plugin_save(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+    Json(body): Json<SourceBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let path = plugin_path(&st.plugins_dir, &name)?;
+    if body.source.len() > SOURCE_MAX {
+        return Err(bad(format!(
+            "源码有 {} 字节，超过上限 {SOURCE_MAX} 字节",
+            body.source.len()
+        )));
+    }
+    if body.source.trim().is_empty() {
+        return Err(bad("源码不能为空：要删插件请用删除".to_string()));
+    }
+    let old = tokio::fs::read_to_string(&path).await.ok();
+    write_atomic(&path, body.source.as_bytes(), None)
+        .await
+        .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
+    if let Some(prev) = &old {
+        let bak = st.plugins_dir.join(format!("{name}.js.bak"));
+        let _ = write_atomic(&bak, prev.as_bytes(), None).await;
+    }
+    st.sched.unload(&name);
+    match st.sched.load(&name, body.source.clone()).await {
+        Ok(()) => {
+            st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Info,
+                format!("插件 {name} 已保存并重载（{} 字节）", body.source.len()),
+            );
+            Ok(Json(json!({
+                "ok": true,
+                "name": name,
+                "bytes": body.source.len(),
+                "created": old.is_none(),
+                "reloaded": true,
+            })))
+        }
+        Err(e) => {
+            // 回滚：文件回到旧内容，旧版本重新加载回去，插件继续能跑。
+            if let Some(prev) = old {
+                let _ = write_atomic(&path, prev.as_bytes(), None).await;
+                st.sched.unload(&name);
+                let _ = st.sched.load(&name, prev).await;
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            Err(bad(format!("保存失败，已回滚：{e}")))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct NewPlugin {
+    name: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// 新建插件的模板。`$` 与反引号都在这里，别让格式串吃掉它们。
+fn plugin_template(name: &str) -> String {
+    format!(
+        r#"// {name}：新建的空白插件。改完点「保存并重载」。
+import host from 'panel:host';
+
+await host.register_handler('hello', async (evt) => {{
+  await host.info(`hello 跑了一次 manual=${{evt.manual}} run=${{evt.run_id}}`);
+}});
+
+// 只注册 handler 不注册 cron = 手动任务；要定时就解开下一行。
+// await host.register_cron('hello', '@every 5m');
+"#
+    )
+}
+
+async fn plugin_create(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(body): Json<NewPlugin>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let path = plugin_path(&st.plugins_dir, &body.name)?;
+    if path.exists() {
+        return Err(bad(format!("插件 {} 已存在", body.name)));
+    }
+    let source = body
+        .source
+        .unwrap_or_else(|| plugin_template(&body.name));
+    if source.len() > SOURCE_MAX {
+        return Err(bad(format!("源码超过上限 {SOURCE_MAX} 字节")));
+    }
+    write_atomic(&path, source.as_bytes(), None)
+        .await
+        .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
+    match st.sched.load(&body.name, source.clone()).await {
+        Ok(()) => {
+            st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Info,
+                format!("插件 {} 已创建", body.name),
+            );
+            Ok(Json(json!({ "ok": true, "name": body.name, "bytes": source.len() })))
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            Err(bad(format!("创建失败（文件已删）：{e}")))
+        }
+    }
+}
+
+/// 删除插件：**移进数据目录的 trash**，不是直接删。
+///
+/// 面板上的误点代价太高（插件是手写的、不在版本库里），留一份可捞的副本。
+async fn plugin_delete(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let path = plugin_path(&st.plugins_dir, &name)?;
+    let trash = st.data_dir.join("trash");
+    tokio::fs::create_dir_all(&trash)
+        .await
+        .map_err(|e| internal(format!("建 trash 目录失败: {e}")))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = trash.join(format!("{name}-{stamp}.js"));
+    st.sched.unload(&name);
+    match tokio::fs::rename(&path, &dest).await {
+        Ok(()) => {
+            st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Warn,
+                format!("插件 {name} 已删除（副本在 {}）", dest.display()),
+            );
+            Ok(Json(json!({
+                "ok": true,
+                "name": name,
+                "moved_to": dest.display().to_string(),
+            })))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 文件本来就没有：卸载掉了也算成功，别让界面卡在「删除失败」。
+            Ok(Json(json!({ "ok": true, "name": name, "moved_to": null })))
+        }
+        Err(e) => Err(internal(format!("移走 {} 失败: {e}", path.display()))),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfigBody {
+    text: String,
+}
+
+/// 保存配置：校验 → 原子写（0600）→ 换掉热快照。插件立刻读到新值，不用重启。
+async fn api_config_save(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(body): Json<ConfigBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let cap = crate::config::max_bytes();
+    let bytes = body.text.len() as u64;
+    if bytes > cap {
+        return Err(bad(format!(
+            "配置有 {bytes} 字节，超过上限 {cap} 字节（PANEL_CONFIG_MAX_BYTES 可调）"
+        )));
+    }
+    let value: Value = serde_json::from_str(&body.text)
+        .map_err(|e| bad(format!("JSON 解析失败：{e}")))?;
+    if !value.is_object() {
+        return Err(bad(
+            "配置必须是 JSON 对象：host.config() 返回的就是对象".to_string(),
+        ));
+    }
+    let path = st.data_dir.join(crate::config::FILE);
+    // 配置里可能有账号/令牌，落盘就是 0600。
+    write_atomic(&path, body.text.as_bytes(), Some(0o600))
+        .await
+        .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
+    st.config.set(&value);
+    let keys: Vec<String> = value
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("配置已更新（{bytes} 字节，{} 个顶层键），插件即刻生效", keys.len()),
+    );
+    Ok(Json(json!({ "ok": true, "bytes": bytes, "keys": keys, "hot": true })))
+}

@@ -1,0 +1,2 @@
+import host from "panel:host";
+await host.register_handler("ping", async () => { await host.info("pong"); });

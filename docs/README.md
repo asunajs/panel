@@ -15,6 +15,10 @@
 控制台（WebUI）在 2026-11-11 晚**整体重写**：侧栏 + 仪表盘指标 + 五视图 + 浅/深两套主题
 （主色粉），设计约束与读数见 [ui.md](ui.md)。
 
+**2026-11-12：面板开始「自己管自己」** —— 插件源码可以在界面里读/写/新建/删除
+（保存 = 写盘 → 重载，失败自动回滚），配置可以在设置页直接改并**热生效**（不用重启），
+设置页拆成常规 / 配置 / 安全 / 数据四个 tabs。功能对照与下一步见 [parity.md](parity.md)。
+
 ## 从零构建
 
 ```bash
@@ -44,6 +48,8 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [host-api.md](host-api.md) | async host-api 契约、限额、SSRF / 脱敏边界、代码纪律 |
 | [verification.md](verification.md) | Stage 1 端到端验证读数与复跑命令、仍然敞开的清单 |
 | [auth.md](auth.md) | 面板令牌：盐 + PBKDF2 哈希的读数、取舍、红队复审修订表 |
+| [ui.md](ui.md) | 控制台：形态、设计令牌、零构建约束、交互细节、读数与已知短板 |
+| [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |
 
 ## 三态约定
 

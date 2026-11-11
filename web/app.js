@@ -16,6 +16,8 @@ const state = {
   version: '',
   auth: false,
   plugins: [],
+  /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
+  files: [],
   tasks: [],
   stats: null,
   config: null,
@@ -30,6 +32,9 @@ const state = {
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
   fp: { tasks: '', runs: '' },
   onlyFailed: false,
+  /** 抽屉当前打开的插件（源码页签保存要用）。 */
+  drawerPlugin: null,
+  settingsTab: 'general',
   sort: { tasks: { key: 'next_at', dir: 1 }, runs: { key: 'id', dir: -1 } },
   loaded: false,
   lastSync: 0,
@@ -209,7 +214,13 @@ async function api(path, opt = {}) {
   const headers = Object.assign({}, opt.headers || {});
   if (state.token) headers['x-panel-token'] = state.token;
   if (opt.method && opt.method !== 'GET') headers['x-panel'] = '1';
-  const resp = await fetch(path, Object.assign({}, opt, { headers }));
+  // body 给对象就自动序列化：调用处只关心「发什么」，不关心 content-type。
+  let body = opt.body;
+  if (body !== undefined && typeof body !== 'string') {
+    body = JSON.stringify(body);
+    headers['content-type'] = 'application/json';
+  }
+  const resp = await fetch(path, Object.assign({}, opt, { headers, body }));
   if (resp.status === 401) throw new Unauthorized('需要令牌');
   if (!resp.ok) {
     const text = (await resp.text().catch(() => '')).trim();
@@ -448,16 +459,44 @@ function renderPlugins() {
       return b;
     };
     acts.append(
+      mk('编辑', () => { showPlugin(p.name); }),
       mk('重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)),
       mk('停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)),
-      mk('卸载', async () => {
-        if (!(await askConfirm('卸载「' + p.name + '」？它注册的定时任务会一起消失，插件文件不会删。', '卸载'))) return;
-        act('/api/plugins/' + encodeURIComponent(p.name) + '/unload', '已卸载 ' + p.name);
-      }, true),
+      mk('删除', () => deletePlugin(p.name), true),
     );
     cardEl.append(acts);
     cardEl.addEventListener('click', () => showPlugin(p.name));
     cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
+    grid.append(cardEl);
+  }
+
+  // 目录里有、但没加载成功的文件：语法错/启动失败的插件只能从这里进去修。
+  const loadedNames = new Set(state.plugins.map((p) => p.name));
+  const orphans = state.files.filter((f) => !loadedNames.has(f.name) && matches(f.name, q));
+  for (const f of orphans) {
+    const cardEl = el('article', 'plugin-card plugin-card-bad');
+    const head = el('div', 'plugin-head');
+    head.append(el('div', 'plugin-name', f.name));
+    head.append(pill('pill-err', '未加载'));
+    cardEl.append(head);
+    const meta = el('div', 'plugin-meta');
+    meta.append(el('span', '', humanBytes(f.bytes)));
+    meta.append(el('span', '', '·'));
+    meta.append(el('span', '', '加载失败或还没加载'));
+    cardEl.append(meta);
+    const acts = el('div', 'plugin-actions');
+    const mk = (label, fn, danger) => {
+      const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
+      b.type = 'button';
+      b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
+      return b;
+    };
+    acts.append(
+      mk('编辑源码', () => { state.drawerPlugin = f.name; openDrawer('插件 ' + f.name, true); openPluginSource(f.name); }),
+      mk('尝试加载', () => act('/api/plugins/' + encodeURIComponent(f.name) + '/reload', '已尝试加载 ' + f.name)),
+      mk('删除', () => deletePlugin(f.name), true),
+    );
+    cardEl.append(acts);
     grid.append(cardEl);
   }
 }
@@ -681,16 +720,29 @@ function setConn(ok) {
 
 // ---------------------------------------------------------------- 抽屉
 
-function openDrawer(title) {
+function setDrawerTab(name) {
+  for (const b of document.querySelectorAll('[data-drawer-tab]')) {
+    b.setAttribute('aria-selected', String(b.dataset.drawerTab === name));
+  }
+  $('drawer-overview').classList.toggle('hidden', name !== 'overview');
+  $('drawer-source').classList.toggle('hidden', name !== 'source');
+}
+
+function openDrawer(title, withTabs) {
   $('drawer').classList.remove('hidden');
   $('drawer-title').textContent = title;
-  const body = $('drawer-body');
+  $('drawer-tabs').classList.toggle('hidden', !withTabs);
+  setDrawerTab('overview');
+  const body = $('drawer-overview');
   clear(body);
   body.append(el('div', 'skeleton'));
   return body;
 }
 
-function closeDrawer() { $('drawer').classList.add('hidden'); }
+function closeDrawer() {
+  $('drawer').classList.add('hidden');
+  state.drawerPlugin = null;
+}
 
 function kvList(pairs) {
   const dl = el('dl', 'kv');
@@ -730,7 +782,8 @@ async function showRun(id) {
 }
 
 async function showPlugin(name) {
-  const body = openDrawer('插件 ' + name);
+  state.drawerPlugin = name;
+  const body = openDrawer('插件 ' + name, true);
   const p = state.plugins.find((x) => x.name === name);
   const tasks = state.tasks.filter((t) => t.plugin === name);
   try {
@@ -742,20 +795,18 @@ async function showPlugin(name) {
       ['最近运行', (data.runs || []).length + ' 条'],
     ]));
     const ops = el('div', 'actions');
-    for (const [label, path, msg, danger] of [
-      ['重载', '/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name, false],
-      ['停止', '/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name, false],
-      ['卸载', '/api/plugins/' + encodeURIComponent(name) + '/unload', '已卸载 ' + name, true],
-    ]) {
+    const mkOp = (label, fn, danger) => {
       const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
       b.type = 'button';
-      b.addEventListener('click', async () => {
-        if (danger && !(await askConfirm('卸载「' + name + '」？它注册的定时任务会一起消失，插件文件不会删。', '卸载'))) return;
-        closeDrawer();
-        act(path, msg);
-      });
-      ops.append(b);
-    }
+      b.addEventListener('click', fn);
+      return b;
+    };
+    ops.append(
+      mkOp('编辑源码', () => openPluginSource(name)),
+      mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),
+      mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
+      mkOp('删除插件', () => deletePlugin(name), true),
+    );
     body.append(ops);
 
     body.append(el('h3', 'card-label', '它的任务'));
@@ -799,49 +850,219 @@ async function showPlugin(name) {
   }
 }
 
+// ---------------------------------------------------------------- 插件文件（增删改查）
+
+async function loadPluginFiles() {
+  try {
+    const d = await api("/api/plugins/files");
+    state.files = d.files || [];
+  } catch (e) {
+    state.files = [];
+  }
+}
+
+async function openPluginSource(name) {
+  state.drawerPlugin = name;
+  setDrawerTab("source");
+  const ta = $("src-text");
+  ta.value = "";
+  $("src-error").classList.add("hidden");
+  $("src-meta").textContent = "读取中…";
+  try {
+    const d = await api("/api/plugins/" + encodeURIComponent(name) + "/source");
+    ta.value = d.source;
+    $("src-meta").textContent =
+      d.path + " · " + humanBytes(d.bytes) + (d.has_backup ? " · 有上一版备份" : "");
+  } catch (e) {
+    srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "读取失败"));
+  }
+}
+
+function srcError(msg) {
+  const box = $("src-error");
+  box.textContent = msg;
+  box.classList.remove("hidden");
+}
+
+/// 保存：后端会「写盘 → 重载」，失败则回滚文件并把旧版本装回去。
+async function savePluginSource() {
+  const name = state.drawerPlugin;
+  if (!name) return;
+  const btn = $("src-save");
+  btn.disabled = true;
+  try {
+    const d = await api("/api/plugins/" + encodeURIComponent(name) + "/source", {
+      method: "PUT",
+      body: { source: $("src-text").value },
+    });
+    $("src-error").classList.add("hidden");
+    // 只更新元信息，不把编辑器里的内容读回来覆盖 —— 用户刚写完的东西不该被抢走，
+    // 而且「保存 → 重新读取」这两个异步动作叠在一起会把随后出现的错误提示吞掉。
+    $("src-meta").textContent = "已保存并重载 · " + humanBytes(d.bytes);
+    toast("已保存并重载 " + name + "（" + humanBytes(d.bytes) + "）");
+    await refresh();
+  } catch (e) {
+    srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "保存失败"));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deletePlugin(name) {
+  const ok = await askConfirm(
+    "删除插件「" + name + "」？文件会移到数据目录的 trash（还能找回），它注册的任务一起消失。",
+    "删除",
+  );
+  if (!ok) return;
+  try {
+    const d = await api("/api/plugins/" + encodeURIComponent(name), { method: "DELETE" });
+    toast("已删除 " + name + (d.moved_to ? "（副本在 trash）" : ""));
+    closeDrawer();
+    await refresh();
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), true);
+  }
+}
+
+function openNewPlugin() {
+  $("new-plugin").classList.remove("hidden");
+  $("new-plugin-hint").classList.add("hidden");
+  $("new-plugin-name").value = "";
+  setTimeout(() => $("new-plugin-name").focus(), 30);
+}
+
+async function createPlugin() {
+  const name = $("new-plugin-name").value.trim();
+  const hint = $("new-plugin-hint");
+  const showHint = (m) => { hint.textContent = m; hint.className = "hint hint-err"; };
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name) || name.includes("..")) {
+    showHint("名字只允许字母、数字、- _ .，且不能含 ..");
+    return;
+  }
+  const btn = $("new-plugin-ok");
+  btn.disabled = true;
+  try {
+    await api("/api/plugins", { method: "POST", body: { name } });
+    $("new-plugin").classList.add("hidden");
+    toast("已创建 " + name);
+    await refresh();
+    showPlugin(name);
+    openPluginSource(name);
+  } catch (e) {
+    showHint(e instanceof Unauthorized ? "需要令牌" : (e.message || "创建失败"));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------- 设置
 
+const SETTINGS_TABS = ["general", "config", "security", "data"];
+
+function setSettingsTab(name) {
+  if (!SETTINGS_TABS.includes(name)) name = "general";
+  state.settingsTab = name;
+  for (const b of document.querySelectorAll("[data-tab]")) {
+    b.setAttribute("aria-selected", String(b.dataset.tab === name));
+  }
+  for (const t of SETTINGS_TABS) $("tab-" + t).classList.toggle("hidden", t !== name);
+  if (name === "config") loadConfigEditor();
+  if (name !== "config") renderSettings();
+}
+
+/// 顶栏刷新按钮用：只把配置读回来，不切页签。
 async function loadConfig() {
+  await loadConfigEditor();
+}
+
+async function loadConfigEditor() {
+  const ta = $("config-editor");
   try {
-    state.config = await api('/api/config');
-    if (state.view === 'settings') renderSettings();
+    const d = await api("/api/config");
+    state.config = d;
+    $("config-chip").textContent =
+      (d.exists ? humanBytes(d.bytes) : "缺文件") + " / 上限 " + humanBytes(d.max_bytes);
+    $("config-meta").textContent =
+      d.path + (d.text_truncated ? " · 只显示前 20 万字符" : "");
+    // 编辑器里放磁盘原文：保留用户的键顺序和缩进，别拿 pretty 版本覆盖人家。
+    ta.value = d.exists ? (d.text || "") : "{\n  \n}\n";
+    $("config-error").classList.add("hidden");
+    renderSettings();
   } catch (e) {
-    if (!(e instanceof Unauthorized)) toast('读取配置失败', true);
+    configError(e instanceof Unauthorized ? "需要令牌" : (e.message || "读取配置失败"));
+  }
+}
+
+function configError(msg) {
+  const box = $("config-error");
+  box.textContent = msg;
+  box.classList.remove("hidden");
+}
+
+async function saveConfig() {
+  const btn = $("config-save");
+  btn.disabled = true;
+  try {
+    const d = await api("/api/config", {
+      method: "PUT",
+      body: { text: $("config-editor").value },
+    });
+    $("config-error").classList.add("hidden");
+    toast("配置已保存，插件即刻生效（" + humanBytes(d.bytes) + "）");
+    await loadConfigEditor();
+  } catch (e) {
+    configError(e instanceof Unauthorized ? "需要令牌" : (e.message || "保存失败"));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function formatConfig() {
+  const ta = $("config-editor");
+  try {
+    ta.value = JSON.stringify(JSON.parse(ta.value), null, 2) + "\n";
+    $("config-error").classList.add("hidden");
+    toast("已格式化");
+  } catch (e) {
+    configError("JSON 解析失败：" + e.message);
   }
 }
 
 function renderSettings() {
-  const info = $('settings-info');
   const cfg = state.config;
+  const info = $("settings-info");
   clear(info);
   info.append(kvList([
-    ['版本', state.version],
-    ['令牌', state.auth ? '已启用（盐 + PBKDF2 哈希）' : '未启用（只允许绑回环）'],
-    ['运行时长', humanMs(state.stats && state.stats.uptime_ms)],
-    ['调度循环', state.stats && state.stats.ticks],
-    ['默认预算', humanMs(state.stats && state.stats.default_budget_ms)],
-    ['插件目录', cfg && cfg.plugins_dir],
-    ['配置文件', cfg && cfg.path],
+    ["版本", state.version],
+    ["令牌", state.auth ? "已启用（盐 + PBKDF2 哈希）" : "未启用（只允许绑回环）"],
+    ["运行时长", humanMs(state.stats && state.stats.uptime_ms)],
+    ["调度循环", state.stats && state.stats.ticks],
+    ["默认预算", humanMs(state.stats && state.stats.default_budget_ms)],
+    ["插件", state.plugins.length + " 个已加载"],
+    ["任务", state.tasks.length + " 个"],
   ]));
-  info.append(el('p', 'settings-note', '改配置要改文件再重启面板：配置在启动时读一次，运行期不热改。'));
+  info.append(el("p", "settings-note", "主题在右上角切换，记在本机浏览器；这一页的其它内容都来自引擎实时状态。"));
 
-  const box = $('settings-config');
-  clear(box);
-  if (!cfg) { emptyState(box, '读取中…'); return; }
-  $('config-chip').textContent = (cfg.exists ? humanBytes(cfg.bytes) : '缺文件') + ' / 上限 ' + humanBytes(cfg.max_bytes);
-  if (!cfg.exists) {
-    emptyState(box, '还没有 config.json', '缺文件 = 空配置，插件拿到的 host.config() 是 {}');
-    return;
-  }
-  if (cfg.keys && cfg.keys.length) {
-    const wrap = el('div', 'actions');
-    wrap.className = 'chips';
-    for (const k of cfg.keys) wrap.append(el('span', 'chip', k));
-    box.append(wrap);
-  }
-  const pre = el('pre', 'pre json-box', cfg.json);
-  box.append(pre);
-  if (cfg.truncated) box.append(el('p', 'settings-note', '内容超过 20 万字符，这里只显示前 20 万。'));
+  const sec = $("settings-security");
+  clear(sec);
+  sec.append(kvList([
+    ["面板令牌", state.auth ? "已启用" : "未启用"],
+    ["暴露面", state.auth ? "需要令牌才能调用 API" : "只允许绑回环 + 回环 Host 头"],
+    ["写接口", "要求 x-panel: 1 请求头（防 CSRF）"],
+    ["插件", "视为可信代码：能读写数据库、发 HTTP、读配置"],
+  ]));
+  sec.append(el("p", "settings-note", "插件不是沙箱里跑的：它和你本机的其它程序同权。只装自己看得懂的插件。"));
+
+  const dat = $("settings-data");
+  clear(dat);
+  dat.append(kvList([
+    ["插件目录", cfg && cfg.plugins_dir],
+    ["配置文件", cfg && cfg.path],
+    ["配置大小", cfg ? (cfg.exists ? humanBytes(cfg.bytes) + " / 上限 " + humanBytes(cfg.max_bytes) : "缺文件（= 空配置）") : "—"],
+    ["删除回收站", cfg && cfg.trash_dir],
+    ["顶层键", cfg && cfg.keys && cfg.keys.length ? cfg.keys.join("、") : "（无）"],
+  ]));
+  dat.append(el("p", "settings-note", "删掉的插件文件会进 trash 目录，需要时可以从那里捞回来。"));
 }
 
 // ---------------------------------------------------------------- 视图
@@ -852,7 +1073,7 @@ const VIEWS = {
   tasks: ['任务', '定时计划、预算与熔断状态'],
   runs: ['运行记录', '最近 50 次派发的结果'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],
-  settings: ['设置', '面板信息与只读配置'],
+  settings: ['设置', '面板信息、配置与安全'],
 };
 
 function setView(name) {
@@ -881,6 +1102,7 @@ async function refresh() {
   try {
     const data = await api('/api/state');
     state.plugins = data.plugins || [];
+    await loadPluginFiles();
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
@@ -1236,16 +1458,45 @@ function bind() {
   });
   $('log-clear').addEventListener('click', () => { state.logs = []; renderLogs(); });
 
-  // 配置复制
+  // 设置页签
+  for (const b of document.querySelectorAll('[data-tab]')) {
+    b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
+  }
+  $('config-save').addEventListener('click', saveConfig);
+  $('config-format').addEventListener('click', formatConfig);
+  $('config-reload').addEventListener('click', () => loadConfigEditor());
   $('config-copy').addEventListener('click', async () => {
-    const text = state.config && state.config.json;
+    const text = $('config-editor').value;
     if (!text) return toast('没有可复制的内容', true);
     try {
       await navigator.clipboard.writeText(text);
-      toast('已复制配置 JSON');
+      toast('已复制配置内容');
     } catch (_) {
       toast('浏览器不允许写剪贴板', true);
     }
+  });
+
+  // 抽屉页签 + 源码保存
+  for (const b of document.querySelectorAll('[data-drawer-tab]')) {
+    b.addEventListener('click', () => {
+      const tab = b.dataset.drawerTab;
+      setDrawerTab(tab);
+      if (tab === 'source' && state.drawerPlugin) openPluginSource(state.drawerPlugin);
+    });
+  }
+  $('src-save').addEventListener('click', savePluginSource);
+  $('src-reload').addEventListener('click', () => {
+    if (state.drawerPlugin) openPluginSource(state.drawerPlugin);
+  });
+
+  // 新建插件
+  $('plugin-new').addEventListener('click', openNewPlugin);
+  $('new-plugin-ok').addEventListener('click', createPlugin);
+  $('new-plugin-name').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); createPlugin(); }
+  });
+  $('new-plugin').addEventListener('click', (ev) => {
+    if (ev.target.dataset.close) $('new-plugin').classList.add('hidden');
   });
 
   // 抽屉 / 弹窗关闭
@@ -1256,6 +1507,7 @@ function bind() {
     if (ev.key !== 'Escape') return;
     closeDrawer();
     settleConfirm(false);
+    $('new-plugin').classList.add('hidden');
     $('sidebar').classList.remove('open');
   });
 }

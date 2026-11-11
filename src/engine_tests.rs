@@ -35,7 +35,7 @@ async fn load_cfg(
         log,
         db,
         reg,
-        config_json: std::sync::Arc::from(cfg),
+        config: crate::config_store::ConfigStore::new(&serde_json::from_str(cfg).unwrap_or(serde_json::json!({}))),
     };
     (Plugin::load(source, handle).await, rx)
 }

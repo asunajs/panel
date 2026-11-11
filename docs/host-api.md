@@ -28,7 +28,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 网络 | `fetch` |
 | 时间 | `sleep` |
 | 注册 | `register_cron` / `register_handler` |
-| 配置 | `config` |
+| 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`） |
 
 **明确不做**：市场、推送、备份/恢复、自更新、脚本任务、上传、完整鉴权面（先单令牌）、
 Bun/Node 外部运行时、插件 UI iframe 隔离源。

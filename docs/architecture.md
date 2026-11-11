@@ -213,12 +213,13 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `ssrf.rs` | 出站判定表（字面量 + 内网别名，**不读环境**，开关作参数）；重定向每跳重判 |
 | `scheduler.rs` | 插件表/任务表的**唯一所有者**（actor）；cron 派发 + 预算 + 熔断 + run 记录；`catch_engine_panic` 引擎边界 |
 | `cron.rs` | 5/6 字段 + `@every` + jitter + DST（移植基线，1112 行） |
-| `config.rs` | 面板级只读配置 `config.json`：默认 4 MiB 上限（超限拒启，不截断）；启动序列化一次成 `Arc<str>` 给插件共享 |
+| `config.rs` | 面板级配置 `config.json`：默认 4 MiB 上限（超限拒启，不截断）；加载、校验、原子写（0600） |
+| `config_store.rs` | 配置的**热快照**（`RwLock<Arc<str>>`）：写入侧序列化一次，`host.config()` 只 clone 一个 `Arc`。界面保存后插件立刻读到新值，不用重启 |
 | `db.rs` | DB actor（channel + 专用连接，无 `Mutex` 可 poison） |
 | `log/` | `LogHub`（SSE 广播）+ `redact`（6 道有序幂等脱敏） |
 | `auth.rs` | 令牌凭据：随机盐 + PBKDF2-HMAC-SHA256 落 `auth.json`（0600）；派生完擦掉 `PANEL_TOKEN`；校验走阻塞线程池 + 成功后的内存 memo + 失败限速（见 §10） |
 | `stats.rs` | 进程级只读计数（运行时长 / 调度圈数 / 心跳 / 预算打断），只给仪表盘读；**JS 内存恒 null**，理由见 [ui.md](ui.md) §5 |
-| `web.rs` | axum 路由 + 单令牌鉴权（**令牌只走 header**，校验的是派生值）+ `x-panel` CSRF 头 + 零构建静态资源（`include_str!` 嵌入，`PANEL_WEB_DIR` 可改成读盘）。界面见 [ui.md](ui.md) |
+| `web.rs` | axum 路由 + 单令牌鉴权（**令牌只走 header**，校验的是派生值）+ `x-panel` CSRF 头 + 零构建静态资源（`include_str!` 嵌入，`PANEL_WEB_DIR` 可改成读盘）。插件文件增删改查（读/写/新建/删除到 trash）、配置保存都在这层。界面见 [ui.md](ui.md)，功能对照见 [parity.md](parity.md) |
 
 两条设计约束在 Stage 1 落到了实处：
 

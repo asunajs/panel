@@ -12,13 +12,14 @@ use tower::ServiceExt;
 async fn setup() -> (Router, Db) {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
     let st = AppState {
         db: db.clone(),
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
         data_dir: PathBuf::from("data"),
+        config: crate::config_store::ConfigStore::new(&json!({})),
         auth: None,
     };
     (router(st), db)
@@ -159,10 +160,11 @@ async fn state_and_healthz_answer_on_an_empty_panel() {
 
 #[tokio::test]
 async fn config_endpoint_reports_an_absent_file_honestly() {
-    let (app, _db) = setup().await;
+    // 用独立的临时数据目录：以前借用相对路径 "data"，本机真跑过面板之后
+    // 那里就有 config.json 了，这条断言会莫名其妙变红（实测踩过）。
+    let (app, _plugins, _data, _store) = setup_dirs("cfgabsent").await;
     let (status, body) = get(&app, "/api/config").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // 测试的 data_dir 是相对路径 "data"，正常不存在：
     assert_eq!(body["exists"], false, "{body}");
     assert_eq!(body["json"], "{}", "缺文件也要给出可用的空配置");
     assert_eq!(body["keys"].as_array().unwrap().len(), 0);
@@ -205,13 +207,14 @@ async fn traversal_in_a_plugin_name_is_rejected_before_touching_disk() {
 async fn token_gates_the_api_but_not_the_assets() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
     let app = router(AppState {
         db,
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
         data_dir: PathBuf::from("data"),
+        config: crate::config_store::ConfigStore::new(&json!({})),
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
@@ -257,13 +260,14 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
     // 有令牌时 Host 闸不参与 —— 认证本身就是更强的边界
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
     let app = router(AppState {
         db,
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
         data_dir: PathBuf::from("data"),
+        config: crate::config_store::ConfigStore::new(&json!({})),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
     let req = Request::get("/api/state")
@@ -292,4 +296,193 @@ async fn log_hub_writes_are_redacted_before_they_reach_the_api() {
     }
     let msg = body["logs"][0]["message"].as_str().expect("日志没落库");
     assert!(!msg.contains("abcdefgh12345678"), "明文令牌不该出现在接口里: {msg}");
+}
+// ---------------------------------------------------------------- 插件文件 / 配置写入
+
+/// 每个用例一份临时目录（插件目录 + 数据目录），跑完不清理也不影响别的用例。
+fn temp_dirs(tag: &str) -> (PathBuf, PathBuf) {
+    let base = std::env::temp_dir().join(format!("panel-web-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let plugins = base.join("plugins");
+    let data = base.join("data");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    (plugins, data)
+}
+
+async fn setup_dirs(
+    tag: &str,
+) -> (Router, PathBuf, PathBuf, Arc<crate::config_store::ConfigStore>) {
+    crate::engine::global_inits();
+    let (plugins, data) = temp_dirs(tag);
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let st = AppState {
+        db,
+        log,
+        sched,
+        plugins_dir: plugins.clone(),
+        data_dir: data.clone(),
+        config: store.clone(),
+        auth: None,
+    };
+    (router(st), plugins, data, store)
+}
+
+fn with_csrf(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
+    let has_body = body.is_some();
+    let b = axum::body::Body::from(body.map(|v| v.to_string()).unwrap_or_default());
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-panel", "1");
+    if has_body {
+        req = req.header("content-type", "application/json");
+    }
+    req.body(b).unwrap()
+}
+
+async fn status_of(app: &Router, req: Request<Body>) -> StatusCode {
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn config_save_hot_swaps_and_rejects_bad_json() {
+    let (app, _plugins, data, store) = setup_dirs("cfg").await;
+    let text = "{\n  \"greet\": \"hi\"\n}";
+    let (status, body) = send(&app, with_csrf("PUT", "/api/config", Some(json!({ "text": text })))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["hot"], true);
+    // 插件侧读到的就是新值（热快照换了）
+    assert_eq!(store.snapshot().as_ref(), r#"{"greet":"hi"}"#);
+    // 盘上是**用户原文**，不是我们 pretty 过的版本
+    let on_disk = std::fs::read_to_string(data.join("config.json")).unwrap();
+    assert_eq!(on_disk, text);
+
+    // 非法 JSON：400，盘上和内存都不动
+    let (status, _) = send(&app, with_csrf("PUT", "/api/config", Some(json!({ "text": "{ oops" })))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(store.snapshot().as_ref(), r#"{"greet":"hi"}"#);
+    assert_eq!(std::fs::read_to_string(data.join("config.json")).unwrap(), text);
+
+    // 顶层必须是对象：host.config() 返回的就是对象
+    let (status, _) = send(&app, with_csrf("PUT", "/api/config", Some(json!({ "text": "[1,2]" })))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 没有 x-panel: 1 → 403（CSRF 护栏）
+    let req = Request::put("/api/config")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "text": "{}" }).to_string()))
+        .unwrap();
+    assert_eq!(status_of(&app, req).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn plugin_save_creates_then_rolls_back_a_broken_source() {
+    let (app, plugins, _data, _store) = setup_dirs("psave").await;
+    let good = "import host from 'panel:host';\nawait host.register_handler('x', async () => { await host.info('ok'); });\n";
+    let (status, body) = send(
+        &app,
+        with_csrf("PUT", "/api/plugins/demo/source", Some(json!({ "source": good }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["created"], true);
+    let path = plugins.join("demo.js");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), good);
+
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "demo"),
+        "保存后应当已经加载: {state}"
+    );
+
+    // 语法错的源码：加载失败 → 400，文件回滚，旧版本装回去
+    let broken = "import host from 'panel:host';\nawait host.register_handler('x', async () => {";
+    let (status, _) = send(
+        &app,
+        with_csrf("PUT", "/api/plugins/demo/source", Some(json!({ "source": broken }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), good, "文件要回滚");
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "demo"),
+        "回滚后插件应当还在跑: {state}"
+    );
+    // 覆盖前留了一份 .bak
+    assert_eq!(std::fs::read_to_string(plugins.join("demo.js.bak")).unwrap(), good);
+}
+
+#[tokio::test]
+async fn plugin_create_refuses_an_existing_name_and_writes_a_template() {
+    let (app, plugins, _data, _store) = setup_dirs("pnew").await;
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/plugins", Some(json!({ "name": "fresh" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = std::fs::read_to_string(plugins.join("fresh.js")).unwrap();
+    assert!(text.contains("register_handler"), "{text}");
+    assert!(text.contains("fresh"), "模板里要写插件名: {text}");
+
+    // 同名再来一次：400，且不覆盖已有文件
+    std::fs::write(plugins.join("fresh.js"), "// 用户改过的").unwrap();
+    let (status, _) = send(
+        &app,
+        with_csrf("POST", "/api/plugins", Some(json!({ "name": "fresh" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_to_string(plugins.join("fresh.js")).unwrap(), "// 用户改过的");
+}
+
+#[tokio::test]
+async fn plugin_delete_moves_the_file_into_trash() {
+    let (app, plugins, data, _store) = setup_dirs("pdel").await;
+    std::fs::write(plugins.join("gone.js"), "import host from 'panel:host';\n").unwrap();
+    let (status, body) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!plugins.join("gone.js").exists(), "原文件应当被移走");
+    let names: Vec<String> = std::fs::read_dir(data.join("trash"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].starts_with("gone-") && names[0].ends_with(".js"), "{names:?}");
+
+    // 再删一次：文件已经不在，仍然 200（幂等，别让界面卡在「删除失败」）
+    let (status, _) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn plugin_files_lists_only_js_and_reports_loaded() {
+    let (app, plugins, _data, _store) = setup_dirs("pfiles").await;
+    std::fs::write(plugins.join("a.js"), "import host from 'panel:host';\n").unwrap();
+    std::fs::write(plugins.join("a.js.bak"), "old").unwrap();
+    std::fs::write(plugins.join("note.txt"), "x").unwrap();
+    let (status, body) = get(&app, "/api/plugins/files").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["name"], "a");
+    assert_eq!(files[0]["loaded"], false);
+}
+
+#[tokio::test]
+async fn plugin_names_cannot_escape_the_plugins_dir() {
+    let (app, _plugins, _data, _store) = setup_dirs("ptrav").await;
+    for uri in [
+        "/api/plugins/..%2F..%2Fetc/source",
+        "/api/plugins/%2E%2E/source",
+    ] {
+        let (status, _) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应当被挡");
+    }
 }

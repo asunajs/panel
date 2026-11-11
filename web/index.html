@@ -73,6 +73,7 @@
           <section class="view hidden" id="view-plugins" data-view="plugins">
             <header class="view-head">
               <h2>插件</h2><span class="chip" id="plugins-count">0</span>
+              <button class="btn btn-primary" id="plugin-new" type="button">新建插件</button>
               <label class="search"><span class="sr-only">搜索插件</span>
                   <span class="search-box">
                     <input id="plugins-search" type="search" placeholder="搜索插件…" autocomplete="off" />
@@ -173,17 +174,51 @@
           </section>
 
           <section class="view hidden" id="view-settings" data-view="settings">
-            <div class="split">
+            <div class="tabs" role="tablist" aria-label="设置分类">
+              <button class="tab" type="button" role="tab" data-tab="general" aria-selected="true">常规</button>
+              <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false">配置</button>
+              <button class="tab" type="button" role="tab" data-tab="security" aria-selected="false">安全</button>
+              <button class="tab" type="button" role="tab" data-tab="data" aria-selected="false">数据</button>
+            </div>
+
+            <div class="tab-pane" id="tab-general">
               <section class="panel">
                 <header class="panel-head"><h2>面板信息</h2></header>
                 <div class="panel-body" id="settings-info"></div>
               </section>
+            </div>
+
+            <div class="tab-pane hidden" id="tab-config">
               <section class="panel">
                 <header class="panel-head">
-                  <h2>配置 config.json</h2><span class="chip" id="config-chip">—</span>
-                  <button class="btn btn-sm" id="config-copy" type="button">复制 JSON</button>
+                  <h2>config.json</h2><span class="chip" id="config-chip">—</span>
+                  <div class="toolbar">
+                    <button class="btn btn-sm" id="config-format" type="button">格式化</button>
+                    <button class="btn btn-sm" id="config-reload" type="button">重新读取</button>
+                    <button class="btn btn-sm" id="config-copy" type="button">复制</button>
+                    <button class="btn btn-sm btn-primary" id="config-save" type="button">保存</button>
+                  </div>
                 </header>
-                <div class="panel-body" id="settings-config"></div>
+                <div class="panel-body">
+                  <p class="settings-note" id="config-note">保存后插件立刻读到新值，不用重启面板；配置里可能有凭据，文件按 0600 落盘。</p>
+                  <div class="src-error hidden" id="config-error"></div>
+                  <textarea class="editor" id="config-editor" spellcheck="false" aria-label="config.json 内容"></textarea>
+                  <div class="src-meta" id="config-meta">—</div>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-pane hidden" id="tab-security">
+              <section class="panel">
+                <header class="panel-head"><h2>鉴权与暴露面</h2></header>
+                <div class="panel-body" id="settings-security"></div>
+              </section>
+            </div>
+
+            <div class="tab-pane hidden" id="tab-data">
+              <section class="panel">
+                <header class="panel-head"><h2>数据与目录</h2></header>
+                <div class="panel-body" id="settings-data"></div>
               </section>
             </div>
           </section>        </main>
@@ -208,10 +243,39 @@
           <h2 id="drawer-title">运行详情</h2>
           <button class="icon-btn" type="button" data-close="1" aria-label="关闭">✕</button>
         </header>
-        <div class="drawer-body" id="drawer-body"></div>
+        <div class="drawer-body">
+          <div class="tabs tabs-sm" role="tablist" aria-label="插件详情" id="drawer-tabs">
+            <button class="tab" type="button" role="tab" data-drawer-tab="overview" aria-selected="true">概览</button>
+            <button class="tab" type="button" role="tab" data-drawer-tab="source" aria-selected="false">源码</button>
+          </div>
+          <div class="tab-pane" id="drawer-overview"></div>
+          <div class="tab-pane hidden" id="drawer-source">
+            <div class="toolbar src-toolbar">
+              <span class="src-meta" id="src-meta">—</span>
+              <button class="btn btn-sm" id="src-reload" type="button">重新读取</button>
+              <button class="btn btn-sm btn-primary" id="src-save" type="button">保存并重载</button>
+            </div>
+            <div class="src-error hidden" id="src-error"></div>
+            <textarea class="editor" id="src-text" spellcheck="false" aria-label="插件源码"></textarea>
+          </div>
+        </div>
       </div>
     </div>
 
+
+    <div class="modal hidden" id="new-plugin" role="dialog" aria-modal="true" aria-labelledby="new-plugin-title">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card">
+        <h2 id="new-plugin-title">新建插件</h2>
+        <p class="muted">名字就是文件名：<code>plugins/&lt;名字&gt;.js</code>。只允许字母、数字、<code>-</code> <code>_</code> <code>.</code>。</p>
+        <input id="new-plugin-name" class="modal-input" type="text" placeholder="例如 my-plugin" autocomplete="off" />
+        <p class="hint hidden" id="new-plugin-hint"></p>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-close="1">取消</button>
+          <button class="btn btn-primary" type="button" id="new-plugin-ok">创建</button>
+        </div>
+      </div>
+    </div>
 
     <div class="modal hidden" id="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
       <div class="modal-backdrop" data-close="1"></div>
