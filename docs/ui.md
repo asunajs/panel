@@ -179,6 +179,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 | 日志级别段控 | 四个按钮，当前项高亮（`aria-pressed`），点 warn 只剩 WARN 行 |
 | 窄屏表格 | 520×1000 下任务表折成 7 行「标签 + 值」+ 两个操作按钮，无横向滚动 |
 | 首次使用引导 | 空 plugins 目录起一个实例（8790）：「开始使用」三步 + 代码示例正常显示 |
+| 自启动干跑 | `panel-llrt service print` 出来的 plist 过 `plutil -lint`（OK）；`status`/`uninstall` 在空 HOME 下正确报「不存在 / 没装过」，没有副作用 |
 | 脚本 CRUD（真面板 8787） | 新建 376 字节模板 → 保存带 `0 9 * * *` → `next_at` 算出 11-12 09:00；坏表达式 400 且不落文件；删除进 `data/trash/script-<name>-<ts>.js` |
 | 脚本手动运行 | `POST /api/scripts/demo-script/run` → run 237：`status=ok plugin=@script`，日志三条（开始 / 脚本跑起来了 / 完成 5ms） |
 | 脚本定时运行 | `@every 5s` 的脚本，20 秒内自己跑了一次：run 239，日志「脚本 tick-test 开始（定时）」 |

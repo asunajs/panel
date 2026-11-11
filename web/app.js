@@ -1251,6 +1251,22 @@ function renderSettings() {
     ["任务", state.tasks.length + " 个"],
   ]));
   info.append(el("p", "settings-note", "主题在右上角切换，记在本机浏览器；这一页的其它内容都来自引擎实时状态。"));
+  // 自启动：只给命令，不给按钮。装自启动要动 launchd / systemd，属于
+  // 「出了事得能自己修」的操作，留在命令行里才有原始输出可看。
+  info.append(el("h3", "settings-sub", "开机自启动"));
+  info.append(el("p", "settings-note", "由命令行安装（macOS 用 launchd，Linux 用 systemd --user）："));
+  info.append(
+    el(
+      "pre",
+      "settings-code",
+      [
+        "panel-llrt service print      # 干跑：打印将要写入的单元文件",
+        "panel-llrt service install    # 写入并启用",
+        "panel-llrt service status     # 装没装、系统认不认",
+        "panel-llrt service uninstall  # 卸载",
+      ].join("\n"),
+    ),
+  );
 
   const sec = $("settings-security");
   clear(sec);

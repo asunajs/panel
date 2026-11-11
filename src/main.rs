@@ -13,6 +13,7 @@ mod hostapi;
 mod log;
 mod scheduler;
 mod scripts;
+mod service;
 mod ssrf;
 mod stats;
 mod web;
@@ -30,6 +31,12 @@ fn env_or(key: &str, default: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    // 子命令：开机自启动的安装/卸载/查看。它不启动面板，所以放在最前面。
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("service") {
+        return service::run(&args[1..]);
+    }
+
     // 先起计时器：仪表盘的「运行时长」从这里开始算。
     stats::stats();
     let data_dir = PathBuf::from(env_or("PANEL_DATA_DIR", "data"));

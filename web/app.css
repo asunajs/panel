@@ -632,6 +632,15 @@ button, input, select { font: inherit; color: inherit; }
 .field-inline .unit { color: var(--dim); }
 .script-bar .btn { margin-left: auto; }
 
+
+.settings-sub { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--fg); }
+.settings-code {
+  margin: 0; padding: 10px 12px; overflow-x: auto;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
+  font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--fg);
+  white-space: pre;
+}
+
 @media (max-width: 720px) {
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
