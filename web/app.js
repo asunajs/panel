@@ -1304,6 +1304,72 @@ function renderSettings() {
     ["顶层键", cfg && cfg.keys && cfg.keys.length ? cfg.keys.join("、") : "（无）"],
   ]));
   dat.append(el("p", "settings-note", "删掉的插件文件会进 trash 目录，需要时可以从那里捞回来。"));
+
+  const bar = el("div", "actions");
+  const expBtn = el("button", "btn btn-sm", "导出备份");
+  expBtn.type = "button";
+  expBtn.addEventListener("click", exportBackup);
+  const impBtn = el("button", "btn btn-sm", "导入备份…");
+  impBtn.type = "button";
+  impBtn.addEventListener("click", () => $("restore-file").click());
+  bar.append(expBtn, impBtn);
+  dat.append(bar);
+  dat.append(
+    el(
+      "p",
+      "settings-note",
+      "备份 = 配置 + 插件源码 + 脚本（含排程），不含运行记录和日志。恢复只增/覆盖，不删除。",
+    ),
+  );
+}
+
+
+// ---------------------------------------------------------------- 备份 / 恢复
+
+async function exportBackup() {
+  try {
+    const d = await api("/api/backup");
+    const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "panel-llrt-backup-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "") + ".json";
+    document.body.append(a);
+    a.click();
+    a.remove();
+    // 立刻 revoke 会让部分浏览器取消下载，等一会儿。
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast("已导出备份（" + (d.plugins || []).length + " 插件 / " + (d.scripts || []).length + " 脚本）");
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "导出失败"), true);
+  }
+}
+
+async function importBackup(file) {
+  const text = await file.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    toast("这个文件不是合法 JSON", true);
+    return;
+  }
+  const ok = await askConfirm(
+    "用备份覆盖同名插件、脚本和配置？备份里没有的东西不会被删除。",
+    "恢复",
+  );
+  if (!ok) return;
+  try {
+    const r = await api("/api/backup", { method: "POST", body: data });
+    const bad = [...(r.plugins || []), ...(r.scripts || [])].filter((x) => x.loaded === false || x.ok === false);
+    toast(
+      "已恢复 " + (r.plugins || []).length + " 个插件、" + (r.scripts || []).length + " 个脚本" +
+        (bad.length ? "（" + bad.length + " 个有问题，看日志）" : ""),
+    );
+    await refresh();
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "恢复失败"), true);
+  }
 }
 
 // ---------------------------------------------------------------- 视图
@@ -1741,6 +1807,11 @@ function bind() {
 
   // 脚本
   $('script-new').addEventListener('click', openNewScript);
+  $('restore-file').addEventListener('change', async (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (f) await importBackup(f);
+  });
   $('new-script-ok').addEventListener('click', createScript);
   $('new-script-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createScript(); }

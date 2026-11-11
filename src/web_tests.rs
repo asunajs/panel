@@ -744,3 +744,94 @@ async fn plugin_webui_api_on_an_unloaded_plugin_is_a_502() {
     let (status, body) = send(&app, req).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
 }
+
+// ---------------------------------------------------------------- 备份 / 恢复
+
+#[tokio::test]
+async fn backup_round_trips_plugins_scripts_and_config() {
+    let (app, plugins, data, _store) = setup_dirs("bak1").await;
+    // 造点东西：一个插件、一个脚本、一份配置
+    let (status, _) = send(
+        &app,
+        with_csrf("POST", "/api/plugins", Some(json!({ "name": "bk" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/scripts/tick",
+            Some(json!({ "source": "await 1;", "cron": "@every 1h" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        with_csrf("PUT", "/api/config", Some(json!({ "text": "{\n  \"k\": 1\n}" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, backup) = get(&app, "/api/backup").await;
+    assert_eq!(status, StatusCode::OK, "{backup}");
+    assert_eq!(backup["format"], "panel-llrt-backup");
+    assert!(backup["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "bk"));
+    assert!(backup["scripts"].as_array().unwrap().iter().any(|s| s["name"] == "tick"));
+    // 配置给的是磁盘原文，缩进要保住
+    assert_eq!(backup["config_text"], "{\n  \"k\": 1\n}");
+
+    // 全删掉，再从备份恢复
+    std::fs::remove_file(plugins.join("bk.js")).unwrap();
+    std::fs::remove_file(data.join("scripts/tick.js")).unwrap();
+    std::fs::remove_file(data.join("config.json")).unwrap();
+
+    let (status, out) = send(
+        &app,
+        with_csrf("POST", "/api/backup", Some(backup.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["config_applied"], true, "{out}");
+    assert!(plugins.join("bk.js").exists(), "插件要回来");
+    assert!(data.join("scripts/tick.js").exists(), "脚本要回来");
+    assert!(data.join("config.json").exists(), "配置要回来");
+
+    let (_, cfg) = get(&app, "/api/config").await;
+    assert_eq!(cfg["keys"][0], "k", "恢复的配置要立刻生效: {cfg}");
+    let (_, scripts) = get(&app, "/api/scripts").await;
+    assert_eq!(scripts["scripts"][0]["cron"], "@every 1h");
+}
+
+#[tokio::test]
+async fn restore_validates_every_name_before_writing_anything() {
+    let (app, plugins, _data, _store) = setup_dirs("bak2").await;
+    let body = json!({
+        "format": "panel-llrt-backup",
+        "plugins": [
+            { "name": "good", "source": "await 1;" },
+            { "name": "../evil", "source": "await 1;" }
+        ],
+    });
+    let (status, _) = send(&app, with_csrf("POST", "/api/backup", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !plugins.join("good.js").exists(),
+        "有一个名字非法就整批不写，不能只写一半"
+    );
+}
+
+#[tokio::test]
+async fn restore_never_deletes_things_that_are_not_in_the_backup() {
+    let (app, plugins, _data, _store) = setup_dirs("bak3").await;
+    std::fs::write(plugins.join("keepme.js"), "await 1;").unwrap();
+    let body = json!({
+        "format": "panel-llrt-backup",
+        "plugins": [{ "name": "newone", "source": "await 1;" }],
+    });
+    let (status, out) = send(&app, with_csrf("POST", "/api/backup", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert!(plugins.join("keepme.js").exists(), "恢复不是清空再灌");
+    assert!(plugins.join("newone.js").exists());
+}
