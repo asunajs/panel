@@ -26,6 +26,12 @@
   --shadow-md: 0 8px 24px -12px rgba(16, 24, 40, .18), 0 2px 6px rgba(16, 24, 40, .06);
   --radius: 14px;
   --radius-sm: 10px;
+  /* 控件尺寸只从这里取：按钮/输入/下拉/段控必须一样高，否则并排就歪 */
+  --h-control: 32px;
+  --h-control-sm: 28px;
+  --r-control: 9px;
+  --pad-control: 12px;
+  --pad-control-sm: 9px;
   --sidebar-w: 236px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
@@ -152,11 +158,11 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- 通用控件 ---------- */
 
 .btn {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 32px; padding: 0 12px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: var(--h-control); padding: 0 var(--pad-control);
   background: var(--surface); color: var(--fg-2);
-  border: 1px solid var(--line-strong); border-radius: 9px;
-  font-size: 13px; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  font-size: 13px; line-height: 1; cursor: pointer; white-space: nowrap;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
 .btn .ico { width: 15px; height: 15px; }
@@ -168,12 +174,12 @@ button, input, select { font: inherit; color: inherit; }
 .btn-ghost:hover { background: var(--surface-2); color: var(--fg); border-color: transparent; }
 .btn-danger { color: var(--err); }
 .btn-danger:hover { background: var(--err-soft); border-color: transparent; color: var(--err); }
-.btn-sm { height: 27px; padding: 0 9px; font-size: 12.5px; border-radius: 8px; }
+.btn-sm { height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px; border-radius: 8px; }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 32px; height: 32px; padding: 0;
+  width: var(--h-control); height: var(--h-control); padding: 0; flex: none;
   background: transparent; border: 1px solid transparent; border-radius: 9px;
   color: var(--dim); cursor: pointer;
 }
@@ -487,6 +493,71 @@ button, input, select { font: inherit; color: inherit; }
 
 /* ---------- 窄屏：表格折成「标签 + 值」的行内卡片 ---------- */
 
+
+/* ---------- 自绘控件：勾选框 / 提示气泡 / 下拉 ---------- */
+
+.check {
+  position: relative; display: inline-flex; align-items: center; gap: 7px;
+  height: var(--h-control); padding: 0 2px;
+  font-size: 12.5px; color: var(--dim); cursor: pointer; user-select: none;
+}
+.check input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; }
+.check-box {
+  position: relative; width: 16px; height: 16px; flex: none;
+  border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface);
+  transition: background .12s ease, border-color .12s ease;
+}
+.check-box::after {
+  content: ""; position: absolute; left: 5px; top: 2px; width: 5px; height: 9px;
+  border-right: 2px solid var(--accent-fg); border-bottom: 2px solid var(--accent-fg);
+  transform: rotate(40deg) scale(0); transform-origin: center;
+  transition: transform .12s ease;
+}
+.check input:checked + .check-box { background: var(--accent); border-color: var(--accent); }
+.check input:checked + .check-box::after { transform: rotate(40deg) scale(1); }
+.check input:focus-visible + .check-box { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check input:checked ~ .check-label { color: var(--fg-2); }
+
+.tip {
+  position: fixed; z-index: 90; max-width: 280px; padding: 5px 9px;
+  border-radius: 8px; background: var(--fg); color: var(--bg);
+  font-size: 12px; line-height: 1.45; box-shadow: var(--shadow-md);
+  pointer-events: none; opacity: 0; transform: translateY(2px);
+  transition: opacity .12s ease, transform .12s ease;
+}
+.tip.show { opacity: 1; transform: none; }
+
+.dropdown { position: relative; display: inline-flex; }
+.dropdown-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: var(--h-control); padding: 0 10px 0 var(--pad-control);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  font-size: 12.5px; color: var(--fg-2); cursor: pointer; white-space: nowrap;
+  transition: border-color .12s ease, color .12s ease;
+}
+.dropdown-btn:hover { border-color: var(--dim); color: var(--fg); }
+.dropdown-btn .chev { width: 13px; height: 13px; opacity: .65; transition: transform .12s ease; }
+.dropdown[data-open="true"] .dropdown-btn { border-color: var(--accent); color: var(--fg); }
+.dropdown[data-open="true"] .chev { transform: rotate(180deg); }
+.dropdown-menu {
+  position: absolute; z-index: 45; top: calc(100% + 6px); left: 0; min-width: 190px;
+  max-height: 300px; overflow: auto; padding: 5px; margin: 0; list-style: none;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 11px;
+  box-shadow: var(--shadow-md);
+}
+.dropdown-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px; border-radius: 7px;
+  font-size: 12.5px; color: var(--fg-2); cursor: pointer;
+}
+.dropdown-item:hover, .dropdown-item[data-active="true"] { background: var(--surface-2); color: var(--fg); }
+.dropdown-item[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+.dropdown-item[aria-selected="true"]::after { content: "✓"; margin-left: auto; }
+.dropdown-item .count { margin-left: auto; color: var(--dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+.seg { height: var(--h-control); align-items: center; }
+.seg-item { display: inline-flex; align-items: center; height: calc(var(--h-control) - 6px); }
+
 @media (max-width: 720px) {
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
@@ -532,17 +603,30 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- 搜索 / 勾选 / 排序 / 弹窗 / 命中高亮 ---------- */
 
 .search { margin-left: auto; }
-.search input {
-  height: 30px; width: 190px; padding: 0 10px;
-  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+.search-box { position: relative; display: inline-flex; align-items: center; }
+.search input,
+.field input {
+  height: var(--h-control); width: 200px; padding: 0 30px 0 11px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
   font-size: 12.5px; color: var(--fg); outline: none;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
+/* 浏览器给 type=search 自带一个 ✕，各浏览器长得都不一样 —— 一律关掉，用我们自己的 */
+.search input::-webkit-search-cancel-button,
+.search input::-webkit-search-decoration,
+.field input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--dim); font-size: 13px; line-height: 1; cursor: pointer;
+}
+.search-clear:hover { background: var(--line); color: var(--fg); }
+/* 类选择器会盖掉 UA 的 [hidden] { display: none }，得显式补一条 */
+.search-clear[hidden] { display: none; }
 .search input::placeholder { color: var(--dim); }
 .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
-
-.check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dim); cursor: pointer; user-select: none; }
-.check input { accent-color: var(--accent); width: 14px; height: 14px; }
 
 th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--fg-2); }

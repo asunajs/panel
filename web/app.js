@@ -27,6 +27,8 @@ const state = {
   logLevel: '',
   logQuery: '',
   q: { plugins: '', tasks: '', runs: '' },
+  /** 下拉筛选：按插件过滤任务 / 运行记录。 */
+  fp: { tasks: '', runs: '' },
   onlyFailed: false,
   sort: { tasks: { key: 'next_at', dir: 1 }, runs: { key: 'id', dir: -1 } },
   loaded: false,
@@ -464,7 +466,9 @@ function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
   const rows = sortBy(
-    state.tasks.filter((t) => matches(t.plugin, q) || matches(t.name, q) || matches(t.cron, q)),
+    state.tasks
+      .filter((t) => !state.fp.tasks || t.plugin === state.fp.tasks)
+      .filter((t) => matches(t.plugin, q) || matches(t.name, q) || matches(t.cron, q)),
     state.sort.tasks,
     { status: (t) => (t.tripped ? 2 : !t.enabled ? 1 : 0) },
   );
@@ -504,7 +508,9 @@ function taskPath(t, verb) {
 function renderRuns() {
   const body = $('runs-body');
   const q = state.q.runs;
-  let rows = state.runs.filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
+  let rows = state.runs
+    .filter((r) => !state.fp.runs || r.plugin === state.fp.runs)
+    .filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
   if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok');
   rows = sortBy(rows, state.sort.runs, { dur: (r) => (r.ended_at ? r.ended_at - r.started_at : null) });
   $('runs-count').textContent = state.runs.length;
@@ -518,7 +524,7 @@ function renderRuns() {
     tr.append(td('任务', 'strong', r.task));
     const started = td('开始', 'mono dim');
     started.append(markText(fmtTime(r.started_at), ''));
-    started.title = fmtDateTime(r.started_at);
+    started.dataset.tip = '开始于 ' + fmtDateTime(r.started_at);
     tr.append(started);
     tr.append(td('耗时', 'num', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
     const res = td('结果');
@@ -580,7 +586,7 @@ function logLine(l) {
   row.append(el('span', 'log-plugin', l.plugin || ''));
   const msg = el('span', 'log-msg');
   msg.append(markText(l.message || '', state.logQuery));
-  if (l.run_id) msg.title = 'run #' + l.run_id;
+  if (l.run_id) msg.dataset.tip = 'run #' + l.run_id;
   row.append(msg);
   return row;
 }
@@ -922,6 +928,7 @@ function render() {
     renderCards();
     renderFirstRun();
     renderPlugins();
+    renderFilterDropdowns();
     renderTasks();
     if (state.view === 'runs') renderRuns();
   });
@@ -940,6 +947,206 @@ async function act(path, okMsg) {
 }
 
 // ---------------------------------------------------------------- 事件
+
+// ---------------------------------------------------------------- 自绘控件
+
+/** 搜索框：自带清空按钮（浏览器给 type=search 那个 ✕ 各家长得都不一样，已关掉）。 */
+function wireSearch(inputId, setValue, rerender) {
+  const input = $(inputId);
+  const clearBtn = document.querySelector('[data-clear="' + inputId + '"]');
+  const syncClear = () => { if (clearBtn) clearBtn.hidden = !input.value; };
+  input.addEventListener("input", () => {
+    setValue(input.value.trim());
+    syncClear();
+    rerender();
+  });
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      input.value = "";
+      setValue("");
+      syncClear();
+      rerender();
+      input.focus();
+    });
+  }
+  syncClear();
+}
+
+let openDropdown = null;
+
+const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+
+/**
+ * 自绘下拉（listbox）。不用 <select>：原生下拉的展开层、字号、触摸行为在
+ * Chrome/Safari/Firefox 和不同 DPI 的设备上完全不一样，样式也管不住。
+ * opts: [{ value, label, count }]，value="" 表示「全部」。
+ */
+function makeDropdown(box, opts, current, onPick) {
+  // 上一轮挂到 body 的菜单要先摘掉，否则每次重渲染都在 body 里留一个孤儿菜单
+  if (box.__menu && box.__menu.parentNode) box.__menu.parentNode.removeChild(box.__menu);
+  if (openDropdown && openDropdown !== box) openDropdown.__close && openDropdown.__close();
+  clear(box);
+  const chosen = opts.find((o) => o.value === current) || opts[0];
+  const btn = el("button", "dropdown-btn");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "listbox");
+  btn.setAttribute("aria-expanded", "false");
+  const label = el("span", "dropdown-label", chosen.label);
+  btn.innerHTML = "";
+  btn.append(label);
+  btn.insertAdjacentHTML("beforeend", CHEV);
+
+  // 菜单挂到 body 上（fixed 定位）：面板是 overflow:hidden，绝对定位会被裁掉；
+  // 抽屉里、表格滚动容器里也一样会被裁，所以统一走 portal。
+  const menu = el("ul", "dropdown-menu");
+  menu.setAttribute("role", "listbox");
+  menu.style.position = "fixed";
+  menu.hidden = true;
+  let active = -1;
+
+  const items = opts.map((o, i) => {
+    const li = el("li", "dropdown-item");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(o.value === current));
+    li.dataset.value = o.value;
+    li.append(el("span", "", o.label));
+    if (o.count !== undefined) li.append(el("span", "count", String(o.count)));
+    li.addEventListener("click", () => {
+      onPick(o.value);
+      close();
+    });
+    li.addEventListener("mouseenter", () => setActive(i));
+    menu.append(li);
+    return li;
+  });
+
+  function setActive(i) {
+    active = i;
+    items.forEach((li, idx) => li.setAttribute("data-active", String(idx === i)));
+  }
+  function open() {
+    if (openDropdown && openDropdown !== box) openDropdown.__close && openDropdown.__close();
+    openDropdown = box;
+    box.__menu = menu;
+    document.body.append(menu);
+    const r = btn.getBoundingClientRect();
+    menu.style.left = Math.round(r.left) + "px";
+    menu.style.top = Math.round(r.bottom + 6) + "px";
+    menu.style.minWidth = Math.max(190, Math.round(r.width)) + "px";
+    menu.hidden = false;
+    box.dataset.open = "true";
+    btn.setAttribute("aria-expanded", "true");
+    setActive(Math.max(0, opts.findIndex((o) => o.value === current)));
+    document.addEventListener("mousedown", onOutside, true);
+  }
+  function close() {
+    menu.hidden = true;
+    if (menu.parentNode) menu.parentNode.removeChild(menu);
+    if (openDropdown === box) openDropdown = null;
+    box.dataset.open = "false";
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("mousedown", onOutside, true);
+  }
+  function onOutside(ev) {
+    if (!box.contains(ev.target)) close();
+  }
+
+  btn.addEventListener("click", () => (menu.hidden ? open() : close()));
+  btn.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown" || ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      if (menu.hidden) open();
+      else setActive(Math.min(active + 1, items.length - 1));
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      setActive(Math.max(active - 1, 0));
+    } else if (ev.key === "Escape") {
+      close();
+    } else if (ev.key === "Enter" && !menu.hidden && active >= 0) {
+      items[active].click();
+    }
+  });
+
+  box.__close = close;
+  box.append(btn, menu);
+}
+
+/** 插件筛选下拉：选项来自当前已加载的插件。 */
+function renderFilterDropdowns() {
+  for (const [view, boxId] of [["tasks", "tasks-plugin-filter"], ["runs", "runs-plugin-filter"]]) {
+    const box = $(boxId);
+    if (!box) continue;
+    // 「全部」上的数字是这一页的行数（任务页=任务数），不是插件数 —— 别让两个数字对不上。
+    const opts = [{
+      value: "",
+      label: "全部插件",
+      count: view === "tasks" ? state.tasks.length : undefined,
+    }];
+    for (const p of state.plugins) {
+      const n = view === "tasks"
+        ? state.tasks.filter((t) => t.plugin === p.name).length
+        : undefined;
+      opts.push({ value: p.name, label: p.name, count: n });
+    }
+    const sig = view + "|" + state.fp[view] + "|" + opts.map((o) => o.value + ":" + o.count).join(",");
+    if (box.dataset.sig === sig && box.querySelector(".dropdown-btn")) continue;
+    box.dataset.sig = sig;
+    makeDropdown(box, opts, state.fp[view], (v) => {
+      state.fp[view] = v;
+      renderFilterDropdowns();
+      if (view === "tasks") renderTasks();
+      else renderRuns();
+    });
+  }
+}
+
+/** 自绘提示气泡：不用 title（原生提示延迟、不可样式化、触摸设备上根本不出现）。 */
+let tipTimer = 0;
+
+function showTip(target) {
+  const text = target.getAttribute("data-tip");
+  const node = $("tip");
+  if (!text || !node) return;
+  node.textContent = text;
+  node.classList.add("show");
+  node.setAttribute("aria-hidden", "false");
+  const r = target.getBoundingClientRect();
+  const tw = node.offsetWidth;
+  const th = node.offsetHeight;
+  let left = Math.min(Math.max(8, r.left + r.width / 2 - tw / 2), window.innerWidth - tw - 8);
+  let top = r.top - th - 8;
+  if (top < 8) top = r.bottom + 8;
+  node.style.left = left + "px";
+  node.style.top = top + "px";
+}
+
+function hideTip() {
+  const node = $("tip");
+  if (!node) return;
+  node.classList.remove("show");
+  node.setAttribute("aria-hidden", "true");
+}
+
+function bindTips() {
+  document.addEventListener("mouseover", (ev) => {
+    const t = ev.target.closest && ev.target.closest("[data-tip]");
+    if (!t) return;
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => showTip(t), 140);
+  });
+  document.addEventListener("mouseout", (ev) => {
+    if (ev.target.closest && ev.target.closest("[data-tip]")) {
+      clearTimeout(tipTimer);
+      hideTip();
+    }
+  });
+  document.addEventListener("focusin", (ev) => {
+    const t = ev.target.closest && ev.target.closest("[data-tip]");
+    if (t) showTip(t);
+  });
+  document.addEventListener("focusout", hideTip);
+  window.addEventListener("scroll", hideTip, true);
+}
 
 function bind() {
   window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
@@ -989,16 +1196,10 @@ function bind() {
     }
   });
 
-  // 搜索
-  const onSearch = (key, id, rerender) => {
-    $(id).addEventListener('input', (ev) => {
-      state.q[key] = ev.target.value.trim();
-      rerender();
-    });
-  };
-  onSearch('plugins', 'plugins-search', renderPlugins);
-  onSearch('tasks', 'tasks-search', renderTasks);
-  onSearch('runs', 'runs-search', renderRuns);
+  // 搜索（自绘清空按钮）
+  wireSearch('plugins-search', (v) => { state.q.plugins = v; }, renderPlugins);
+  wireSearch('tasks-search', (v) => { state.q.tasks = v; }, renderTasks);
+  wireSearch('runs-search', (v) => { state.q.runs = v; }, renderRuns);
   $('runs-only-failed').addEventListener('change', (ev) => {
     state.onlyFailed = ev.target.checked;
     renderRuns();
@@ -1027,7 +1228,7 @@ function bind() {
       renderLogs();
     });
   }
-  $('log-search').addEventListener('input', (ev) => { state.logQuery = ev.target.value.trim(); renderLogs(); });
+  wireSearch('log-search', (v) => { state.logQuery = v; }, renderLogs);
   $('log-pause').addEventListener('click', (ev) => {
     state.logsPaused = !state.logsPaused;
     ev.target.textContent = state.logsPaused ? '继续' : '暂停';
@@ -1064,6 +1265,7 @@ function bind() {
 async function main() {
   initTheme();
   bind();
+  bindTips();
   setView(location.hash.slice(1) || 'dashboard');
   await refresh();
   await loadDashboard();

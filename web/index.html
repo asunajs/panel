@@ -40,7 +40,7 @@
           <div class="topbar-right">
             <span class="pill pill-ok" id="health-pill"><span class="dot"></span><span class="label">引擎健康</span></span>
             <span class="sync" id="sync-text">正在读取…</span>
-            <button class="icon-btn" id="theme-toggle" type="button" aria-label="切换主题" title="切换主题"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 13a8.5 8.5 0 1 1-9.5-9.5 7 7 0 0 0 9.5 9.5z"/></svg></button>
+            <button class="icon-btn" id="theme-toggle" type="button" aria-label="切换主题" data-tip="切换主题"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 13a8.5 8.5 0 1 1-9.5-9.5 7 7 0 0 0 9.5 9.5z"/></svg></button>
             <button class="btn" id="refresh-btn" type="button"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg><span>刷新</span></button>
           </div>
         </header>
@@ -73,7 +73,12 @@
           <section class="view hidden" id="view-plugins" data-view="plugins">
             <header class="view-head">
               <h2>插件</h2><span class="chip" id="plugins-count">0</span>
-              <label class="search"><span class="sr-only">搜索插件</span><input id="plugins-search" type="search" placeholder="搜索插件…" /></label>
+              <label class="search"><span class="sr-only">搜索插件</span>
+                  <span class="search-box">
+                    <input id="plugins-search" type="search" placeholder="搜索插件…" autocomplete="off" />
+                    <button class="search-clear" type="button" data-clear="plugins-search" aria-label="清空" hidden>✕</button>
+                  </span>
+                </label>
             </header>
             <div class="plugin-grid" id="plugin-grid"></div>
           </section>
@@ -82,7 +87,13 @@
             <section class="panel">
               <header class="panel-head">
                 <h2>任务</h2><span class="chip" id="tasks-count">0</span>
-                <label class="search"><span class="sr-only">搜索任务</span><input id="tasks-search" type="search" placeholder="搜索插件 / 任务…" /></label>
+                <div class="dropdown" id="tasks-plugin-filter" data-open="false"></div>
+                <label class="search"><span class="sr-only">搜索任务</span>
+                  <span class="search-box">
+                    <input id="tasks-search" type="search" placeholder="搜索插件 / 任务…" autocomplete="off" />
+                    <button class="search-clear" type="button" data-clear="tasks-search" aria-label="清空" hidden>✕</button>
+                  </span>
+                </label>
               </header>
               <div class="panel-body table-wrap">
                 <table class="table">
@@ -106,8 +117,18 @@
             <section class="panel">
               <header class="panel-head">
                 <h2>运行记录</h2><span class="chip" id="runs-count">0</span>
-                <label class="search"><span class="sr-only">搜索运行记录</span><input id="runs-search" type="search" placeholder="搜索插件 / 任务 / 错误…" /></label>
-                <label class="check"><input id="runs-only-failed" type="checkbox" /> 只看失败</label>
+                <div class="dropdown" id="runs-plugin-filter" data-open="false"></div>
+                <label class="search"><span class="sr-only">搜索运行记录</span>
+                  <span class="search-box">
+                    <input id="runs-search" type="search" placeholder="搜索插件 / 任务 / 错误…" autocomplete="off" />
+                    <button class="search-clear" type="button" data-clear="runs-search" aria-label="清空" hidden>✕</button>
+                  </span>
+                </label>
+                <label class="check">
+                  <input id="runs-only-failed" type="checkbox" />
+                  <span class="check-box" aria-hidden="true"></span>
+                  <span class="check-label">只看失败</span>
+                </label>
               </header>
               <div class="panel-body table-wrap table-scroll">
                 <table class="table">
@@ -137,8 +158,11 @@
                     <button class="seg-item" type="button" data-level="warn" aria-pressed="false">warn</button>
                     <button class="seg-item" type="button" data-level="error" aria-pressed="false">error</button>
                   </div>
-                  <label class="field"><span class="sr-only">搜索</span>
-                    <input id="log-search" type="search" placeholder="搜索插件 / 内容" />
+                  <label class="search"><span class="sr-only">搜索日志</span>
+                    <span class="search-box">
+                      <input id="log-search" type="search" placeholder="搜索插件 / 内容" autocomplete="off" />
+                      <button class="search-clear" type="button" data-clear="log-search" aria-label="清空" hidden>✕</button>
+                    </span>
                   </label>
                   <button class="btn btn-ghost" id="log-pause" type="button">暂停</button>
                   <button class="btn btn-ghost" id="log-clear" type="button">清空视图</button>
@@ -201,6 +225,7 @@
       </div>
     </div>
 
+    <div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
     <div class="toast hidden" id="toast" role="status"></div>
     <script src="/app.js"></script>
   </body>
