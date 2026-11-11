@@ -186,6 +186,26 @@ pub struct Plugin {
 
 impl Plugin {
     pub async fn load(source: &str, handle: HostHandle) -> std::result::Result<Self, String> {
+        Self::load_inner(source, handle, None).await
+    }
+
+    /// 跑「脚本」用：顶层代码带**墙钟死线**。
+    ///
+    /// 脚本是一次性的（跑完就扔），没有 dispatch 那层预算保护，
+    /// 所以死线必须在这里装 —— 否则一个死循环脚本能把面板拖死。
+    pub async fn load_with_budget(
+        source: &str,
+        handle: HostHandle,
+        budget_ms: u64,
+    ) -> std::result::Result<Self, String> {
+        Self::load_inner(source, handle, Some(budget_ms)).await
+    }
+
+    async fn load_inner(
+        source: &str,
+        handle: HostHandle,
+        budget_ms: Option<u64>,
+    ) -> std::result::Result<Self, String> {
         let inv = handle.inv.clone();
         let (module_resolver, module_loader, globals) =
             ModuleBuilder::default().with_module(HostModule).build();
@@ -226,6 +246,15 @@ impl Plugin {
             init().map_err(|e| describe(&ctx, e))
         })
         .await?;
+
+        if let Some(ms) = budget_ms {
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            let stopped = inv.clone();
+            rt.set_interrupt_handler(Some(Box::new(move || {
+                stopped.is_stopped() || Instant::now() >= deadline
+            })))
+            .await;
+        }
 
         let plugin = Self { rt, ctx, inv };
         plugin.eval_module(source).await?;

@@ -13,11 +13,20 @@ async fn setup() -> (Router, Db) {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
     let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        PathBuf::from("scripts"),
+        PathBuf::from("data/trash"),
+        crate::config_store::ConfigStore::new(&json!({})),
+    );
     let st = AppState {
         db: db.clone(),
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        scripts_dir: PathBuf::from("scripts"),
+        scripts,
         data_dir: PathBuf::from("data"),
         config: crate::config_store::ConfigStore::new(&json!({})),
         auth: None,
@@ -207,14 +216,24 @@ async fn traversal_in_a_plugin_name_is_rejected_before_touching_disk() {
 async fn token_gates_the_api_but_not_the_assets() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        PathBuf::from("scripts"),
+        PathBuf::from("data/trash"),
+        store.clone(),
+    );
     let app = router(AppState {
         db,
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        scripts_dir: PathBuf::from("scripts"),
+        scripts,
         data_dir: PathBuf::from("data"),
-        config: crate::config_store::ConfigStore::new(&json!({})),
+        config: store,
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
@@ -260,14 +279,24 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
     // 有令牌时 Host 闸不参与 —— 认证本身就是更强的边界
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        PathBuf::from("scripts"),
+        PathBuf::from("data/trash"),
+        store.clone(),
+    );
     let app = router(AppState {
         db,
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        scripts_dir: PathBuf::from("scripts"),
+        scripts,
         data_dir: PathBuf::from("data"),
-        config: crate::config_store::ConfigStore::new(&json!({})),
+        config: store,
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
     let req = Request::get("/api/state")
@@ -319,11 +348,22 @@ async fn setup_dirs(
     let log = LogHub::new(db.clone());
     let store = crate::config_store::ConfigStore::new(&json!({}));
     let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let scripts_dir = data.join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        scripts_dir.clone(),
+        data.join("trash"),
+        store.clone(),
+    );
     let st = AppState {
         db,
         log,
         sched,
         plugins_dir: plugins.clone(),
+        scripts_dir,
+        scripts,
         data_dir: data.clone(),
         config: store.clone(),
         auth: None,
@@ -482,6 +522,140 @@ async fn plugin_names_cannot_escape_the_plugins_dir() {
         "/api/plugins/..%2F..%2Fetc/source",
         "/api/plugins/%2E%2E/source",
     ] {
+        let (status, _) = get(&app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应当被挡");
+    }
+}
+
+// ---------------------------------------------------------------- 脚本（增删改查 + 跑）
+
+async fn wait_run_done(app: &Router, id: i64) -> Value {
+    for _ in 0..80 {
+        let (_, body) = get(app, &format!("/api/runs/{id}")).await;
+        let status = body["run"]["status"].as_str().unwrap_or("").to_string();
+        if status != "running" {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("脚本运行没有在 4 秒内结束");
+}
+
+#[tokio::test]
+async fn script_save_get_and_schedule_round_trip() {
+    let (app, _plugins, data, _store) = setup_dirs("script1").await;
+    let source = "import host from 'panel:host';\nawait host.info('跑一次');\n";
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/scripts/demo",
+            Some(json!({ "source": source, "cron": "@every 1h", "budget_ms": 5000 })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cron"], "@every 1h");
+    assert!(body["next_at"].is_i64(), "有 cron 就该算出下次触发: {body}");
+    let p = data.join("scripts/demo.js");
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), source);
+
+    let (status, body) = get(&app, "/api/scripts/demo").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], source);
+    assert_eq!(body["budget_ms"], 5000);
+    assert_eq!(body["enabled"], true);
+
+    let (_, list) = get(&app, "/api/scripts").await;
+    assert_eq!(list["scripts"].as_array().unwrap().len(), 1);
+    assert_eq!(list["scripts"][0]["name"], "demo");
+}
+
+#[tokio::test]
+async fn script_with_a_bad_cron_is_rejected_before_anything_is_written() {
+    let (app, _plugins, data, _store) = setup_dirs("script2").await;
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/scripts/bad",
+            Some(json!({ "source": "await 1;", "cron": "不是表达式" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!data.join("scripts/bad.js").exists(), "校验失败不该落文件");
+}
+
+#[tokio::test]
+async fn script_run_records_a_run_with_logs() {
+    let (app, _plugins, _data, _store) = setup_dirs("script3").await;
+    let source = "import host from 'panel:host';\nawait host.info('hello from script');\n";
+    let (status, _) = send(
+        &app,
+        with_csrf("PUT", "/api/scripts/runme", Some(json!({ "source": source }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/scripts/runme/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["run_id"].as_i64().unwrap();
+    let done = wait_run_done(&app, id).await;
+    assert_eq!(done["run"]["status"], "ok", "{done}");
+    assert_eq!(done["run"]["plugin"], crate::scripts::PLUGIN);
+    assert_eq!(done["run"]["task"], "runme");
+    let logs = done["logs"].as_array().unwrap();
+    assert!(
+        logs.iter().any(|l| l["message"].as_str().unwrap_or("").contains("hello from script")),
+        "脚本的日志要挂到这次 run 上: {done}"
+    );
+}
+
+#[tokio::test]
+async fn script_that_registers_tasks_fails_loudly() {
+    let (app, _plugins, _data, _store) = setup_dirs("script4").await;
+    let source = "import host from 'panel:host';\nawait host.register_handler('x', async () => {});\n";
+    let (status, _) = send(
+        &app,
+        with_csrf("PUT", "/api/scripts/sneaky", Some(json!({ "source": source }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(&app, with_csrf("POST", "/api/scripts/sneaky/run", None)).await;
+    let id = body["run_id"].as_i64().unwrap();
+    let done = wait_run_done(&app, id).await;
+    assert_eq!(done["run"]["status"], "error", "{done}");
+    let err = done["run"]["error"].as_str().unwrap_or("");
+    assert!(err.contains("不能注册任务"), "要说清为什么: {err}");
+}
+
+#[tokio::test]
+async fn script_delete_moves_the_file_into_trash() {
+    let (app, _plugins, data, _store) = setup_dirs("script5").await;
+    let (status, _) = send(
+        &app,
+        with_csrf("PUT", "/api/scripts/tmp", Some(json!({ "source": "await 1;" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&app, with_csrf("DELETE", "/api/scripts/tmp", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!data.join("scripts/tmp.js").exists());
+    let names: Vec<String> = std::fs::read_dir(data.join("trash"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(names.iter().any(|n| n.starts_with("script-tmp-")), "{names:?}");
+    let (_, list) = get(&app, "/api/scripts").await;
+    assert_eq!(list["scripts"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn script_names_cannot_escape_the_scripts_dir() {
+    let (app, _plugins, _data, _store) = setup_dirs("script6").await;
+    for uri in ["/api/scripts/..%2F..%2Fetc", "/api/scripts/%2E%2E"] {
         let (status, _) = get(&app, uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应当被挡");
     }

@@ -18,12 +18,12 @@
 | **配置 UI 化（读 + 写 + 校验）** | ✅（settings/save，需重启） | ✅ 本轮 | 4 MiB 上限、必须是 JSON 对象、0600 原子写；**保存即生效**（热快照），旧面板要重启 |
 | **设置页 tabs 分页** | ✅ | ✅ 本轮 | 常规 / 配置 / 安全 / 数据 |
 | 未加载插件的可见性 | ❌（列表只看已加载） | ✅ 本轮 | `/api/plugins/files` 列出目录里所有 `.js`，语法错的也能进去修 |
+| **脚本增删改查 + 手动/定时运行** | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ 本轮 | 脚本 = 独立 `.js`，排程在记录里（不在代码里）；每次运行新建 Context，日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`） |
 
 ## 2. 还没做的（按优先级）
 
 | 功能 | 旧面板 | 现在 | 下一轮怎么做 |
 |---|---|---|---|
-| 脚本增删改查 | ✅ `/api/scripts`、`/api/scripts/jobs`、`/api/test/{lang}` | ⬜ | 脚本 = 独立 JS 文件 + 可选 cron；执行走同一个 LLRT 引擎但**不注册任务表**，产出单独记 runs；先落 `docs/scripts.md` |
 | 插件 WebUI | ✅ `register_route` + `/plugins/<name>/*` 静态资源 | ⬜ | 引擎加路由分发 + 静态目录 + iframe 沙箱（CSP `frame-src 'self'`），面板侧只做入口列表 |
 | 自启动 | ✅ `install.sh`（systemd/launchd） | ⬜ | `panel-llrt service install\|uninstall\|status` 生成 launchd plist / systemd unit；先做 `--print` 干跑 + `plutil -lint` 验证 |
 | 推送（push 通道/outbox） | ✅ | ⬜ 暂不做 | 依赖外部通道（SMTP/Webhook），先把插件侧 `host.notify` 定清楚再说 |

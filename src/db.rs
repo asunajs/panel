@@ -70,6 +70,15 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             UNIQUE(plugin, name)
         );
 
+        CREATE TABLE IF NOT EXISTS scripts (
+            name        TEXT PRIMARY KEY,
+            cron        TEXT,
+            budget_ms   INTEGER NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            next_at     INTEGER,
+            updated_at  INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY,
             plugin      TEXT NOT NULL,

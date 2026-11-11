@@ -18,6 +18,9 @@ const state = {
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
   files: [],
+  /** 脚本列表（独立 JS 文件 + 可选 cron）。 */
+  scripts: [],
+  scriptMeta: null,
   tasks: [],
   stats: null,
   config: null,
@@ -28,12 +31,15 @@ const state = {
   logsPaused: false,
   logLevel: '',
   logQuery: '',
-  q: { plugins: '', tasks: '', runs: '' },
+  q: { plugins: '', tasks: '', runs: '', scripts: '' },
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
   fp: { tasks: '', runs: '' },
   onlyFailed: false,
   /** 抽屉当前打开的插件（源码页签保存要用）。 */
   drawerPlugin: null,
+  /** 抽屉里放的是插件还是脚本：保存按钮要分流。 */
+  drawerKind: 'plugin',
+  drawerScript: null,
   settingsTab: 'general',
   sort: { tasks: { key: 'next_at', dir: 1 }, runs: { key: 'id', dir: -1 } },
   loaded: false,
@@ -782,7 +788,10 @@ async function showRun(id) {
 }
 
 async function showPlugin(name) {
+  state.drawerKind = 'plugin';
   state.drawerPlugin = name;
+  $('script-bar').classList.add('hidden');
+  $('src-save').textContent = '保存并重载';
   const body = openDrawer('插件 ' + name, true);
   const p = state.plugins.find((x) => x.name === name);
   const tasks = state.tasks.filter((t) => t.plugin === name);
@@ -850,7 +859,204 @@ async function showPlugin(name) {
   }
 }
 
+// ---------------------------------------------------------------- 脚本
+
+async function loadScripts() {
+  try {
+    const d = await api("/api/scripts");
+    state.scripts = d.scripts || [];
+    state.scriptMeta = d;
+  } catch (e) {
+    state.scripts = [];
+  }
+}
+
+function renderScripts() {
+  const body = $("scripts-body");
+  if (!body) return;
+  const q = state.q.scripts || "";
+  const rows = state.scripts.filter((s) => matches(s.name, q) || matches(s.cron, q));
+  $("scripts-count").textContent = state.scripts.length;
+  clear(body);
+  if (!state.scripts.length) {
+    body.append(rowMessage("还没有脚本", 6, "点「新建脚本」写一个：跑一次就结束，也可以填计划定时跑"));
+    return;
+  }
+  if (!rows.length) {
+    body.append(rowMessage("没有匹配的脚本", 6));
+    return;
+  }
+  for (const s of rows) {
+    const tr = el("tr");
+    tr.append(td("名字", "strong", s.name));
+    tr.append(td("计划", "mono", s.cron || "手动"));
+    tr.append(td("预算", "num", humanMs(s.budget_ms)));
+    tr.append(td("下次运行", "mono dim", s.cron && s.enabled ? fmtDateTime(s.next_at) : "—"));
+    const st = td("状态");
+    if (!s.exists) st.append(pill("pill-err", "文件缺失"));
+    else if (!s.cron) st.append(pill("pill", "手动"));
+    else if (s.enabled) st.append(pill("pill-ok", "定时中"));
+    else st.append(pill("pill-warn", "已暂停"));
+    tr.append(st);
+    tr.append(actionsCell([
+      ["运行", () => runScript(s.name), false],
+      ["编辑", () => openScript(s.name), false],
+      ["删除", () => deleteScript(s.name), true],
+    ]));
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest("button")) return;
+      openScript(s.name);
+    });
+    body.append(tr);
+  }
+}
+
+async function openScript(name) {
+  state.drawerKind = "script";
+  state.drawerScript = name;
+  const body = openDrawer("脚本 " + name, true);
+  setDrawerTab("overview");
+  try {
+    const d = await api("/api/scripts/" + encodeURIComponent(name));
+    clear(body);
+    body.append(kvList([
+      ["文件", d.path, true],
+      ["大小", humanBytes(d.bytes)],
+      ["计划", d.cron || "手动（只在你点运行时跑）", true],
+      ["预算", humanMs(d.budget_ms)],
+      ["下次运行", d.cron && d.enabled ? fmtDateTime(d.next_at) : "—"],
+      ["状态", d.cron ? (d.enabled ? "定时中" : "已暂停") : "手动"],
+    ]));
+    body.append(el("p", "settings-note", "脚本每次运行都是新的 Context：没有常驻状态，跑完就扔。运行记录在「运行记录」页（插件列显示 @script）。"));
+    const ops = el("div", "actions");
+    const mk = (label, fn, danger) => {
+      const b = el("button", "btn btn-sm" + (danger ? " btn-danger" : ""), label);
+      b.type = "button";
+      b.addEventListener("click", fn);
+      return b;
+    };
+    ops.append(
+      mk("编辑源码", () => openScriptSource(name)),
+      mk("立即运行", () => runScript(name)),
+      mk("删除", () => deleteScript(name), true),
+    );
+    body.append(ops);
+  } catch (e) {
+    clear(body);
+    body.append(el("p", "muted", e instanceof Unauthorized ? "需要令牌" : (e.message || "读取失败")));
+  }
+}
+
+async function openScriptSource(name) {
+  state.drawerKind = "script";
+  state.drawerScript = name;
+  $("script-bar").classList.remove("hidden");
+  $("src-save").textContent = "保存";
+  setDrawerTab("source");
+  $("src-meta").textContent = "读取中…";
+  $("src-error").classList.add("hidden");
+  try {
+    const d = await api("/api/scripts/" + encodeURIComponent(name));
+    $("src-text").value = d.source;
+    $("script-cron").value = d.cron || "";
+    $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
+    $("script-enabled").checked = !!d.enabled;
+    $("src-meta").textContent = d.path + " · " + humanBytes(d.bytes);
+  } catch (e) {
+    srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "读取失败"));
+  }
+}
+
+async function saveScriptSource() {
+  const name = state.drawerScript;
+  if (!name) return;
+  const btn = $("src-save");
+  btn.disabled = true;
+  const seconds = Number($("script-budget").value || 0);
+  try {
+    const d = await api("/api/scripts/" + encodeURIComponent(name), {
+      method: "PUT",
+      body: {
+        source: $("src-text").value,
+        cron: $("script-cron").value.trim(),
+        budget_ms: Math.max(1, Math.round(seconds)) * 1000,
+        enabled: $("script-enabled").checked,
+      },
+    });
+    $("src-error").classList.add("hidden");
+    $("src-meta").textContent = "已保存 · " + humanBytes(d.bytes);
+    toast("已保存 " + name);
+    await loadScripts();
+    renderScripts();
+  } catch (e) {
+    srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "保存失败"));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runScript(name) {
+  try {
+    const d = await api("/api/scripts/" + encodeURIComponent(name) + "/run", { method: "POST" });
+    toast("已触发 " + name + "（run #" + d.run_id + "）");
+    await loadScripts();
+    renderScripts();
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "运行失败"), true);
+  }
+}
+
+async function deleteScript(name) {
+  const ok = await askConfirm(
+    "删除脚本「" + name + "」？文件会移到数据目录的 trash（还能找回）。",
+    "删除",
+  );
+  if (!ok) return;
+  try {
+    await api("/api/scripts/" + encodeURIComponent(name), { method: "DELETE" });
+    toast("已删除 " + name);
+    closeDrawer();
+    await loadScripts();
+    renderScripts();
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), true);
+  }
+}
+
+function openNewScript() {
+  $("new-script").classList.remove("hidden");
+  $("new-script-hint").classList.add("hidden");
+  $("new-script-name").value = "";
+  setTimeout(() => $("new-script-name").focus(), 30);
+}
+
+async function createScript() {
+  const name = $("new-script-name").value.trim();
+  const hint = $("new-script-hint");
+  const showHint = (m) => { hint.textContent = m; hint.className = "hint hint-err"; };
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name) || name.includes("..")) {
+    showHint("名字只允许字母、数字、- _ .，且不能含 ..");
+    return;
+  }
+  const btn = $("new-script-ok");
+  btn.disabled = true;
+  try {
+    await api("/api/scripts", { method: "POST", body: { name } });
+    $("new-script").classList.add("hidden");
+    toast("已创建 " + name);
+    await loadScripts();
+    renderScripts();
+    await openScript(name);
+    await openScriptSource(name);
+  } catch (e) {
+    showHint(e instanceof Unauthorized ? "需要令牌" : (e.message || "创建失败"));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------- 插件文件（增删改查）
+
 
 async function loadPluginFiles() {
   try {
@@ -862,7 +1068,10 @@ async function loadPluginFiles() {
 }
 
 async function openPluginSource(name) {
+  state.drawerKind = 'plugin';
   state.drawerPlugin = name;
+  $('script-bar').classList.add('hidden');
+  $('src-save').textContent = '保存并重载';
   setDrawerTab("source");
   const ta = $("src-text");
   ta.value = "";
@@ -1070,6 +1279,7 @@ function renderSettings() {
 const VIEWS = {
   dashboard: ['仪表盘', '引擎运行状态与最近活动'],
   plugins: ['插件', '已加载的插件与启停操作'],
+  scripts: ['脚本', '独立 JS 文件：手动跑或按计划跑'],
   tasks: ['任务', '定时计划、预算与熔断状态'],
   runs: ['运行记录', '最近 50 次派发的结果'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],
@@ -1085,6 +1295,9 @@ function setView(name) {
   for (const a of document.querySelectorAll('.nav-item')) {
     if (a.dataset.view === name) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
+  }
+  if (name === 'scripts') {
+    loadScripts().then(renderScripts);
   }
   $('page-title').textContent = VIEWS[name][0];
   $('page-sub').textContent = VIEWS[name][1];
@@ -1152,6 +1365,7 @@ function render() {
     renderPlugins();
     renderFilterDropdowns();
     renderTasks();
+    if (state.view === 'scripts') { loadScripts().then(renderScripts); }
     if (state.view === 'runs') renderRuns();
   });
 }
@@ -1484,10 +1698,28 @@ function bind() {
       if (tab === 'source' && state.drawerPlugin) openPluginSource(state.drawerPlugin);
     });
   }
-  $('src-save').addEventListener('click', savePluginSource);
-  $('src-reload').addEventListener('click', () => {
-    if (state.drawerPlugin) openPluginSource(state.drawerPlugin);
+  $('src-save').addEventListener('click', () => {
+    if (state.drawerKind === 'script') saveScriptSource();
+    else savePluginSource();
   });
+  $('src-reload').addEventListener('click', () => {
+    if (state.drawerKind === 'script' && state.drawerScript) openScriptSource(state.drawerScript);
+    else if (state.drawerPlugin) openPluginSource(state.drawerPlugin);
+  });
+
+  // 脚本
+  $('script-new').addEventListener('click', openNewScript);
+  $('new-script-ok').addEventListener('click', createScript);
+  $('new-script-name').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); createScript(); }
+  });
+  $('new-script').addEventListener('click', (ev) => {
+    if (ev.target.dataset.close) $('new-script').classList.add('hidden');
+  });
+  $('script-run').addEventListener('click', () => {
+    if (state.drawerScript) runScript(state.drawerScript);
+  });
+  wireSearch('scripts-search', (v) => { state.q.scripts = v; }, renderScripts);
 
   // 新建插件
   $('plugin-new').addEventListener('click', openNewPlugin);
@@ -1508,6 +1740,7 @@ function bind() {
     closeDrawer();
     settleConfirm(false);
     $('new-plugin').classList.add('hidden');
+    $('new-script').classList.add('hidden');
     $('sidebar').classList.remove('open');
   });
 }

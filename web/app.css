@@ -609,6 +609,29 @@ button, input, select { font: inherit; color: inherit; }
   border: 1px solid var(--line); font-family: var(--mono); font-size: 12px;
 }
 
+
+/* ---------- 脚本 ---------- */
+
+.script-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; margin-bottom: 10px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r-control);
+}
+.field-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dim); }
+.field-inline input[type="text"],
+.field-inline input[type="number"] {
+  height: var(--h-control-sm); padding: 0 9px;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  font-family: var(--mono); font-size: 12px; outline: none;
+}
+.field-inline input[type="text"] { width: 250px; }
+.field-inline input[type="number"] { width: 76px; }
+.field-inline input:focus { border-color: var(--accent); }
+.field-inline .unit { color: var(--dim); }
+.script-bar .btn { margin-left: auto; }
+
 @media (max-width: 720px) {
   .table thead { display: none; }
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }

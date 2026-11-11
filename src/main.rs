@@ -12,6 +12,7 @@ mod engine;
 mod hostapi;
 mod log;
 mod scheduler;
+mod scripts;
 mod ssrf;
 mod stats;
 mod web;
@@ -68,6 +69,18 @@ async fn main() -> Result<(), String> {
     let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone());
 
+    // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
+    let scripts_dir = PathBuf::from(env_or("PANEL_SCRIPTS_DIR", "scripts"));
+    std::fs::create_dir_all(&scripts_dir).map_err(|e| format!("建脚本目录失败: {e}"))?;
+    let scripts = scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        scripts_dir.clone(),
+        data_dir.join("trash"),
+        config.clone(),
+    );
+    let _scripts_task = scripts.clone().spawn_ticker();
+
     if ssrf::allow_private_outbound_targets() {
         log.emit(
             "panel",
@@ -97,6 +110,8 @@ async fn main() -> Result<(), String> {
         log: log.clone(),
         sched: sched.clone(),
         plugins_dir,
+        scripts_dir,
+        scripts,
         data_dir,
         config,
         auth: provisioned.auth.map(Arc::new),

@@ -38,6 +38,9 @@ pub struct AppState {
     pub plugins_dir: PathBuf,
     /// 数据目录：`/api/config` 要告诉界面「配置文件在哪」。
     pub data_dir: PathBuf,
+    /// 脚本目录（`scripts/*.js`）与执行器：脚本不进任务表，见 `crate::scripts`。
+    pub scripts_dir: PathBuf,
+    pub scripts: crate::scripts::Scripts,
     /// 面板级配置的热快照：`PUT /api/config` 换掉它，插件立刻读到新值。
     pub config: Arc<crate::config_store::ConfigStore>,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
@@ -63,6 +66,12 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
+        .route("/api/scripts", get(scripts_list).post(script_create))
+        .route(
+            "/api/scripts/{name}",
+            get(script_get).put(script_save).delete(script_delete),
+        )
+        .route("/api/scripts/{name}/run", post(script_run))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
@@ -967,4 +976,142 @@ async fn api_config_save(
         format!("配置已更新（{bytes} 字节，{} 个顶层键），插件即刻生效", keys.len()),
     );
     Ok(Json(json!({ "ok": true, "bytes": bytes, "keys": keys, "hot": true })))
+}
+
+// ---------------------------------------------------------------- 脚本（增删改查 + 跑）
+
+async fn scripts_list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows = st.scripts.list().await.map_err(bad)?;
+    Ok(Json(json!({
+        "dir": st.scripts_dir.display().to_string(),
+        "max_bytes": crate::scripts::FILE_MAX,
+        "default_budget_ms": crate::scripts::DEFAULT_BUDGET_MS,
+        "max_budget_ms": crate::scripts::MAX_BUDGET_MS,
+        "scripts": rows,
+    })))
+}
+
+async fn script_get(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    st.scripts.get(&name).await.map(Json).map_err(bad)
+}
+
+#[derive(Deserialize)]
+struct ScriptBody {
+    source: String,
+    #[serde(default)]
+    cron: Option<String>,
+    #[serde(default)]
+    budget_ms: Option<u64>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+async fn script_save(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+    Json(body): Json<ScriptBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let out = st
+        .scripts
+        .save(
+            &name,
+            &body.source,
+            body.cron,
+            body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+            body.enabled.unwrap_or(true),
+        )
+        .await
+        .map_err(bad)?;
+    st.log.emit(
+        crate::scripts::PLUGIN,
+        None,
+        crate::log::Level::Info,
+        format!("脚本 {name} 已保存"),
+    );
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct NewScript {
+    name: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+fn script_template(name: &str) -> String {
+    let q = char::from(39);
+    [
+        format!("// {name}：手动跑，或者填「计划」后定时跑。"),
+        "// host-api 全 async —— 每个 op 都要 await。".to_string(),
+        format!("import host from {q}panel:host{q};"),
+        String::new(),
+        format!("await host.info({q}{name} 跑了一次{q});"),
+        String::new(),
+        "// 能用到的：host.fetch / host.sqlite_query / host.sqlite_exec / host.config".to_string(),
+        "// 注意：脚本不能注册任务（不要调 register_cron），排程请填「计划」。".to_string(),
+    ]
+    .join("\n")
+}
+
+async fn script_create(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(body): Json<NewScript>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    crate::scripts::safe_name(&body.name).map_err(bad)?;
+    let path = st.scripts_dir.join(format!("{}.js", body.name));
+    if path.exists() {
+        return Err(bad(format!("脚本 {} 已存在", body.name)));
+    }
+    let source = body.source.unwrap_or_else(|| script_template(&body.name));
+    let out = st
+        .scripts
+        .save(
+            &body.name,
+            &source,
+            None,
+            crate::scripts::DEFAULT_BUDGET_MS,
+            true,
+        )
+        .await
+        .map_err(bad)?;
+    st.log.emit(
+        crate::scripts::PLUGIN,
+        None,
+        crate::log::Level::Info,
+        format!("脚本 {} 已创建", body.name),
+    );
+    Ok(Json(out))
+}
+
+async fn script_delete(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let moved = st.scripts.delete(&name).await.map_err(bad)?;
+    st.log.emit(
+        crate::scripts::PLUGIN,
+        None,
+        crate::log::Level::Warn,
+        format!("脚本 {name} 已删除"),
+    );
+    Ok(Json(json!({ "ok": true, "name": name, "moved_to": moved })))
+}
+
+async fn script_run(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let run_id = st.scripts.run(&name, true).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "run_id": run_id })))
 }
