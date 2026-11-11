@@ -605,6 +605,12 @@ async fn script_run_records_a_run_with_logs() {
     assert_eq!(done["run"]["status"], "ok", "{done}");
     assert_eq!(done["run"]["plugin"], crate::scripts::PLUGIN);
     assert_eq!(done["run"]["task"], "runme");
+    // 列表要带上「上次跑成什么样」：脚本页最想知道的第二件事。
+    let (_, list) = get(&app, "/api/scripts").await;
+    let row = &list["scripts"][0];
+    assert_eq!(row["last_status"], "ok", "{list}");
+    assert!(row["last_run"].is_i64(), "上次运行时间要回来: {list}");
+
     let logs = done["logs"].as_array().unwrap();
     assert!(
         logs.iter().any(|l| l["message"].as_str().unwrap_or("").contains("hello from script")),

@@ -93,11 +93,15 @@ impl Scripts {
         let rows = self
             .db
             .call(|c| {
+                // 顺带带上「上次跑成什么样」：脚本页最想知道的第二件事就是这个，
+                // 让人再去运行记录页翻一遍是多余的。
                 let mut stmt = c
-                    .prepare("SELECT name,cron,budget_ms,enabled,next_at,updated_at FROM scripts ORDER BY name")
+                    .prepare(
+                        "SELECT s.name,s.cron,s.budget_ms,s.enabled,s.next_at,s.updated_at,                         (SELECT started_at FROM runs r WHERE r.plugin=?1 AND r.task=s.name                           ORDER BY r.id DESC LIMIT 1),                         (SELECT status FROM runs r WHERE r.plugin=?1 AND r.task=s.name                           ORDER BY r.id DESC LIMIT 1)                          FROM scripts s ORDER BY s.name",
+                    )
                     .map_err(|e| e.to_string())?;
-                let out: Vec<(String, Option<String>, i64, i64, Option<i64>, i64)> = stmt
-                    .query_map([], |r| {
+                let out: Vec<(String, Option<String>, i64, i64, Option<i64>, i64, Option<i64>, Option<String>)> = stmt
+                    .query_map([PLUGIN], |r| {
                         Ok((
                             r.get(0)?,
                             r.get(1)?,
@@ -105,6 +109,8 @@ impl Scripts {
                             r.get(3)?,
                             r.get(4)?,
                             r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
                         ))
                     })
                     .map_err(|e| e.to_string())?
@@ -114,7 +120,7 @@ impl Scripts {
             })
             .await?;
         let mut out = Vec::new();
-        for (name, cron, budget_ms, enabled, next_at, updated_at) in rows {
+        for (name, cron, budget_ms, enabled, next_at, updated_at, last_run, last_status) in rows {
             let p = self.dir.join(format!("{name}.js"));
             let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             out.push(json!({
@@ -126,6 +132,8 @@ impl Scripts {
                 "updated_at": updated_at,
                 "bytes": bytes,
                 "exists": p.exists(),
+                "last_run": last_run,
+                "last_status": last_status,
             }));
         }
         Ok(out)

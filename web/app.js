@@ -909,6 +909,16 @@ function renderScripts() {
     tr.append(td("名字", "strong", s.name));
     tr.append(td("计划", "mono", s.cron || "手动"));
     tr.append(td("预算", "num", humanMs(s.budget_ms)));
+    const lastCell = td("上次运行");
+    if (!s.last_run) {
+      lastCell.append(el("span", "dim", "—"));
+    } else {
+      lastCell.append(
+        pill(s.last_status === "error" ? "pill-err" : "pill-ok", s.last_status === "error" ? "失败" : "成功"),
+      );
+      lastCell.append(el("span", "mono dim", " " + relTime(s.last_run)));
+    }
+    tr.append(lastCell);
     tr.append(td("下次运行", "mono dim", s.cron && s.enabled ? fmtDateTime(s.next_at) : "—"));
     const st = td("状态");
     if (!s.exists) st.append(pill("pill-err", "文件缺失"));
@@ -1459,6 +1469,9 @@ function setView(name) {
     if (a.dataset.view === name) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
+  // 换页就收起通知弹层：它挂在顶栏上，留着会挡住新页面的内容。
+  const pop = $('notify-pop');
+  if (pop && !pop.classList.contains('hidden')) toggleNotify(false);
   if (name === 'scripts') {
     loadScripts().then(renderScripts);
   }
