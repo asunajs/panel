@@ -38,6 +38,11 @@ pub enum Registration {
         plugin: String,
         name: String,
     },
+    /// 插件自己带 HTTP 路由（`register_web`）：宿主把 `/plugins/<name>/*` 里
+    /// 没命中静态文件的请求交给它，handler 名固定 `__route`。
+    Web {
+        plugin: String,
+    },
 }
 
 /// 挂在 Ctx userdata 上的宿主句柄。全是 'static 字段，没有 JS 值。
@@ -88,6 +93,7 @@ const WRAP: &str = r#"(raw) => {
     sleep: raw.sleep,
     register_cron: async (name, cron, budget_ms) => raw.register_cron(name, cron, budget_ms),
     register_handler: raw.register_handler,
+    register_web: raw.register_web,
     config: async () => JSON.parse(await raw.config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
@@ -99,7 +105,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 15] = [
+const OP_NAMES: [&str; 16] = [
     "log",
     "info",
     "warn",
@@ -115,6 +121,7 @@ const OP_NAMES: [&str; 15] = [
     "sqlite_exec_sync",
     "register_cron",
     "register_handler",
+    "register_web",
 ];
 
 impl ModuleDef for HostModule {
@@ -171,6 +178,7 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
             "register_handler",
             Func::from(Async(op_register_handler)).into_js(ctx)?,
         ),
+        ("register_web", Func::from(Async(op_register_web)).into_js(ctx)?),
     ])
 }
 
@@ -404,6 +412,25 @@ async fn op_register_cron(
             name,
             cron,
             budget_ms: budget,
+        })
+        .map_err(|_| err(&ctx, "调度器已退出".into()))
+}
+
+/// 声明「这个插件自己处理 HTTP 路由」。
+///
+/// 和 `register_handler` 分开是为了**不建任务**：路由是服务，不是定时任务，
+/// 让它出现在任务列表里只是噪音。
+async fn op_register_web<'js>(ctx: Ctx<'js>, func: Value<'js>) -> Result<()> {
+    let h = host(&ctx)?;
+    if !func.is_function() {
+        return Err(err(&ctx, "register_web 的参数必须是函数".into()));
+    }
+    // 函数挂在固定名字上：面板按名字派发，不跨 idle() 持 JS 引用。
+    let handlers: Object<'js> = ctx.globals().get("__handlers")?;
+    handlers.set("__route", func)?;
+    h.reg
+        .send(Registration::Web {
+            plugin: h.plugin.clone(),
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
 }

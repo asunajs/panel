@@ -30,6 +30,15 @@ const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const APP_CSS: &str = include_str!("../web/app.css");
 
+/// 旧面板（rust-plugin-panel）那套组件样式。插件的界面 HTML 里写的是绝对路径
+/// /css/reset.css 之类 —— 它们和旧面板共享同一套 token 与组件类（.btn、.dialog…），
+/// 换一套等于要重画所有插件界面。所以照原样提供这三个文件，**只这三个**（白名单）。
+const OLD_CSS: [(&str, &str); 3] = [
+    ("reset.css", include_str!("../web/css/reset.css")),
+    ("theme.css", include_str!("../web/css/theme.css")),
+    ("components.css", include_str!("../web/css/components.css")),
+];
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
@@ -78,8 +87,7 @@ pub fn router(st: AppState) -> Router {
         // 插件 WebUI：静态文件 + 动态 handler（同一个令牌门，见 require_token）
         .route("/plugins/{name}", get(plugin_webui_index))
         .route("/plugins/{name}/", get(plugin_webui_index))
-        .route("/plugins/{name}/api/{handler}", post(plugin_webui_api))
-        .route("/plugins/{name}/{*rel}", get(plugin_webui_asset))
+        .route("/plugins/{name}/{*rel}", axum::routing::any(plugin_webui_any))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
@@ -100,6 +108,7 @@ pub fn router(st: AppState) -> Router {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
+        .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
         .route("/healthz", get(|| async { "ok\n" }))
         .merge(api)
@@ -134,6 +143,16 @@ fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
         body,
     )
         .into_response()
+}
+
+/// 插件界面引的 /css/*（见 [OLD_CSS]）。白名单，不做通用静态目录。
+async fn panel_css(Path(rel): Path<String>) -> Response {
+    for (name, body) in OLD_CSS {
+        if rel == name {
+            return asset(body, "text/css; charset=utf-8", &format!("css/{name}"));
+        }
+    }
+    (StatusCode::NOT_FOUND, "没有这个样式表").into_response()
 }
 
 /// 单令牌鉴权。没配令牌时不拦 —— 那种部署必须只绑回环（main.rs 负责强制）。
@@ -708,7 +727,9 @@ mod router_tests;
 
 /// 单文件源码上限。JS 插件是单文件，512 KiB 已远超正常规模；
 /// 上限在这里是**保护面板**（读进内存、发给浏览器），不是限制功能。
-const SOURCE_MAX: usize = 512 * 1024;
+/// 插件源码上限。原来是 512 KiB，mcloud 的主插件 531 KB 就撞线了 ——
+/// 插件是可信代码，这个上限只防手滑（把整个仓库粘进来），不防恶意。
+const SOURCE_MAX: usize = 2 * 1024 * 1024;
 
 fn plugin_path(dir: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {
     safe_name(name)?;
@@ -1243,34 +1264,99 @@ async fn plugin_webui_index(
     serve_webui_file(&st, &name, "index.html").await
 }
 
-async fn plugin_webui_asset(
+/// `/plugins/<name>/<*rel>` 的统一入口：静态文件优先，其次交给插件自己的路由。
+///
+/// 旧面板的插件把「静态资源」和「接口」放在同一个命名空间里
+/// （`plugins/mcloud/api/accounts`、`plugins/mcloud/app.js` 是同一层），
+/// mcloud 那一族就是这么写的。所以这里按「文件 → 插件路由」的顺序找，
+/// 而不是要求插件把接口挪到 `api/<handler>` 下面。
+async fn plugin_webui_any(
     State(st): State<AppState>,
     Path((name, rel)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    serve_webui_file(&st, &name, &rel).await
-}
-
-async fn plugin_webui_api(
-    State(st): State<AppState>,
-    Path((name, handler)): Path<(String, String)>,
+    method: axum::http::Method,
     uri: axum::http::Uri,
-    body: Option<Json<Value>>,
-) -> Result<Json<Value>, ApiError> {
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
     crate::scripts::safe_name(&name).map_err(bad)?;
-    let evt = json!({
-        "body": body.map(|Json(v)| v).unwrap_or(Value::Null),
-        "query": uri.query().unwrap_or(""),
-        "path": uri.path(),
-        "handler": handler,
-    });
-    match st
-        .sched
-        .web_call(&name, &handler, evt, WEBUI_BUDGET_MS)
-        .await
-    {
-        Ok(v) => Ok(Json(json!({ "ok": true, "value": v }))),
-        Err(e) => Err((StatusCode::BAD_GATEWAY, e)),
+
+    // 1) 静态文件（只有 GET/HEAD 才有意义）
+    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
+        if let Ok(resp) = serve_webui_file(&st, &name, &rel).await {
+            return Ok(resp);
+        }
     }
+
+    // 2) 简单插件的老契约：`POST /plugins/<name>/api/<handler>` → 调同名 handler
+    if !st.sched.plugin_has_web(&name).await && rel.starts_with("api/") {
+        let handler = rel.trim_start_matches("api/").to_string();
+        if handler.is_empty() || handler.contains('/') {
+            return Err(bad(format!("handler 名不合法: {handler}")));
+        }
+        let evt = json!({
+            "body": serde_json::from_str::<Value>(&String::from_utf8_lossy(&body)).unwrap_or(Value::Null),
+            "query": uri.query().unwrap_or(""),
+            "path": uri.path(),
+            "handler": handler,
+        });
+        let out = st
+            .sched
+            .web_call(&name, &handler, evt, WEBUI_BUDGET_MS)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        return Ok(Json(json!({ "ok": true, "value": out.unwrap_or(Value::Null) })).into_response());
+    }
+
+    // 3) 插件自己注册过路由
+    if st.sched.plugin_has_web(&name).await {
+        let mut h = serde_json::Map::new();
+        for (k, v) in headers.iter() {
+            h.insert(
+                k.as_str().to_ascii_lowercase(),
+                Value::String(String::from_utf8_lossy(v.as_bytes()).into_owned()),
+            );
+        }
+        let evt = json!({
+            "method": method.as_str(),
+            "path": uri.path(),
+            "rel": rel,
+            "query": uri.query().unwrap_or(""),
+            "headers": Value::Object(h),
+            "body": String::from_utf8_lossy(&body),
+        });
+        let out = st
+            .sched
+            .web_call(&name, "__route", evt, WEBUI_BUDGET_MS)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+            .unwrap_or(Value::Null);
+
+        // 插件返回 {status, headers, body} 就照着发；否则当 JSON 值发。
+        let status = out
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(200);
+        let mut builder = Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK));
+        if let Some(hs) = out.get("headers").and_then(Value::as_object) {
+            for (k, v) in hs {
+                if let Some(text) = v.as_str() {
+                    builder = builder.header(k.as_str(), text);
+                }
+            }
+        }
+        let payload = match out.get("body") {
+            Some(Value::String(text)) => text.clone(),
+            Some(other) => other.to_string(),
+            None => out.to_string(),
+        };
+        return builder
+            .body(axum::body::Body::from(payload))
+            .map_err(|e| internal(format!("构造响应失败: {e}")));
+    }
+
+    Err((StatusCode::NOT_FOUND, format!("没有这个文件: {rel}")))
 }
 
 // ---------------------------------------------------------------- 备份 / 恢复

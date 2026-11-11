@@ -1,0 +1,211 @@
+/*
+  web/css/theme.css —— 主题变量。
+
+  深色 = Catppuccin Mocha，亮色 = Catppuccin Latte（同一套变量的另一组取值）。
+  切换只改 <html data-theme="dark|light">，JS 不碰任何具体样式 ——
+  这样加主题（比如高对比度）只需要再加一个 [data-theme=...] 块。
+
+  插件可以**直接复用**这些变量（web/plugins/demo/style.css 就是这么做的）：
+  插件样式表里写 var(--surface) / var(--accent)，就自动跟着主面板换主题。
+*/
+
+:root,
+:root[data-theme='dark'] {
+  /* ---- Catppuccin Mocha ---- */
+  --bg: #1e1e2e;          /* base：主区域背景 */
+  --bg-deep: #181825;     /* mantle：侧边栏 / 控制台等更深的底 */
+  --surface: #313244;     /* surface0：卡片、输入框 */
+  --surface-2: #45475a;   /* surface1：悬停、分隔 */
+  --border: #45475a;
+  --border-soft: #313244;
+  /* 交互控件的边框（输入框 / 按钮 / 编辑器）单独一档。
+     为什么不能和 --border 共用：WCAG 1.4.11 要求**用来识别组件的边界**至少 3:1，
+     --border 在底色上只有 1.80:1 —— 当卡片分隔线没问题（卡片另有自己的面色），
+     当输入框的边框就不合格了（看不清哪里能输入）。
+     取 overlay0 #6c7086 = 3.36:1，是能过的最轻的一档。 */
+  --border-control: #6c7086;
+
+  /* ---- 文字三档（第二十八轮重定）----
+     **三档都要能读**。原来 dim=#a6adc8、mute=#6c7086，而 #6c7086 是 Mocha 的
+     overlay0 —— 官方口径里那一档是"很少用、比如禁用态"，拿来当表头 / 卡片小字 /
+     统计标签的颜色就太淡了：在 --bg 上 3.36:1、在卡片 --surface 上 2.57:1、
+     在悬停底 --surface-2 上 1.87:1（WCAG AA 正文要 4.5:1）。
+     表现就是"字糊成一片"—— 这种问题肉眼看不出是哪一档，算一下才知道。
+
+     现在整体上移一档，取值全是 Mocha 官方色，不自己调色：
+
+       档位    值          在 --bg   在 --surface   在 --surface-2
+       text   #cdd6f4     11.34     9.02           6.31
+       dim    #bac2de      9.26     7.10           5.15
+       mute   #a6adc8      7.37     5.65           4.10
+
+     ⚠ 结论：**overlay0 / overlay1 不许当文字色**（官方口径里它们是装饰色）。
+       非文字的边界仍走 --border-control（那一档按 WCAG 1.4.11 只要 3:1）。
+       scripts/test-web-assets.mjs ⑥b 现在会按"文字档 × 各个底"逐对算，改回去就红。 */
+  --text: #cdd6f4;
+  --text-dim: #bac2de;
+  --text-mute: #a6adc8;
+
+  /* ---- 粉色系（第二十七轮）----
+     accent 从 Mocha 的蓝 #89b4fa 换成官方粉 #f5c2e7（对比度 10.74:1，比蓝还好）。
+     危险色**跟着改了**：原来用 Mocha red #f38ba8，它本身就是粉红 ——
+     和粉 accent 只差 1.52:1，任务失败在列表里读起来像"高亮"。
+     #f87171 是 5.93:1，且色相 0° 离粉的 316° 有 44°，"出事了"一眼能认出来。 */
+  --accent: #f5c2e7;      /* Mocha pink */
+  --accent-ink: #11111b;  /* 强调色底上的文字（深字在粉底上 12.28:1） */
+  --success: #a6e3a1;
+  --error: #f87171;
+  --warning: #f9e2af;
+
+  /* 徽章背景：强调色的低饱和底，避免整行都在喊 */
+  --accent-soft: rgba(245, 194, 231, 0.16);
+  --success-soft: rgba(166, 227, 161, 0.16);
+  --error-soft: rgba(248, 113, 113, 0.16);
+  --warning-soft: rgba(249, 226, 175, 0.16);
+  --mute-soft: rgba(108, 112, 134, 0.18);
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 6px 16px rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme='light'] {
+  /* ---- Catppuccin Latte ---- */
+  --bg: #eff1f5;
+  --bg-deep: #e6e9ef;
+  --surface: #ffffff;
+  --surface-2: #e6e9ef;
+  --border: #ccd0da;
+  --border-soft: #e6e9ef;
+  /* 交互控件的边框：见暗色主题里那段说明。
+     Latte 的 overlay0/1（#9ca0b0 2.30:1、#8c8fa1 2.83:1）**都过不了 3:1**，
+     得用 overlay2 #7c7f93 = 3.49:1 —— 亮色这边能过的最轻的一档比暗色更靠后。 */
+  --border-control: #7c7f93;
+
+  /* 文字三档。亮色这边**没有现成的第三档能过 AA**：
+     Latte 的 overlay2 #7c7f93 是 3.50:1、subtext0 #6c6f85 是 4.37:1 —— 都不到 4.5。
+     （注意这与上面 --border-control 是同一个坑：overlay 那几档是装饰色，
+       拿来当文字比当边框更糟 —— 边框只要 3:1，文字要 4.5:1。）
+
+     所以第三档取 subtext0 与 subtext1 之间的一档 #64687e（4.86:1，实测）。
+     它是内插值，仍在 Latte 的冷灰区间里，不引入新色相：
+
+       档位    值          在 --bg   在 --surface(#fff)
+       text   #4c4f69      7.06     8.42
+       dim    #5c5f77      5.53     6.25
+       mute   #64687e      4.86     5.49 */
+  --text: #4c4f69;
+  --text-dim: #5c5f77;
+  --text-mute: #64687e;
+
+  /* ---- 粉色系（第二十七轮）----
+     **不能**直接用 Latte 官方的粉 #ea76cb：它在这个底色上只有 2.34:1，
+     而 --accent 在这个项目里既当底（primary 按钮）又当字（链接、token、
+     控制台 system 行、激活的导航项）—— 当字用就不合格了。
+     所以亮色用加深的粉 #a32480：--bg 上 5.95:1、--bg-deep 上 5.53:1，
+     白字在它上面 6.73:1，两头都过。
+     危险色用 #b30d32（--bg 上 6.15:1），它离这个粉更远、更深，不撞。 */
+  --accent: #a32480;
+  --accent-ink: #ffffff;
+  /* 这两个**不是** Latte 的官方值（官方 #40a02b / #df8e1d 在这个底色上只有
+     2.96:1 / 2.31:1）。它们当 `color` 用（徽章文字、日志级别、编辑器 token、
+     控制台 stderr），2.31:1 是真的读不清 —— 是 `⑥b 配色对比度` 那条检查
+     抓出来的既有缺陷。加深后 success #256b18 = 5.81:1、warning #8a4f05 = 5.80:1
+     （都在 --bg 上；--bg-deep 上也分别有 5.40 / 5.39）。它们不当底色用，
+     所以白字变差这件事不存在。
+
+     soft 底也一起收了一档：徽章是"淡色底 + 同色字"，14%~16% 的 tint 会把
+     对比度从 5 档拉到 4.4 以下（Lighthouse / axe 在 51 件兑换徽章上抓到 4.43）。
+     现在 .10~.12 的 tint 在两种底色上都能过 4.5。 */
+  --success: #256b18;
+  --error: #b30d32;
+  --warning: #8a4f05;
+
+  --accent-soft: rgba(163, 36, 128, 0.08);
+  --success-soft: rgba(64, 160, 43, 0.10);
+  --error-soft: rgba(210, 15, 57, 0.12);
+  --warning-soft: rgba(223, 142, 29, 0.10);
+  --mute-soft: rgba(156, 160, 176, 0.18);
+
+  --shadow: 0 1px 2px rgba(76, 79, 105, 0.08), 0 6px 16px rgba(76, 79, 105, 0.10);
+  --scrim: rgba(76, 79, 105, 0.35);
+}
+
+:root {
+  /* ---- 不随主题变的东西：字体、圆角、间距、过渡 ---- */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 过渡只给颜色和背景：给 all 会在滚动/布局变化时触发无谓的重排动画 */
+  --t-fast: 120ms ease;
+  --t-mid: 200ms ease;
+
+  --sidebar-w: 216px;
+  --topbar-h: 56px;
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+/* ---- 第三方组件（PureDashboard 子集）的桥接 ----------------------------
+   见 web/vendor/puredashboard/FORK.md。它的每个组件都按
+   `var(--panel, var(--pd-panel, Canvas))` 这样的链读变量 —— **先读通用名**。
+
+   所以我们把通用名接到自己的变量上，而不是去写它的 `--pd-*`：
+   ① 这是上游文档给的扩展点；
+   ② 好处是**以后再加它的组件也会自动跟着我们的主题走**，不用一个个配。
+
+   只接「名字不一样」的那些 —— `--text` / `--accent` / `--accent-ink` /
+   `--success` / `--warning` / `--border` 双方同名，什么都不用写。
+
+   它的组件局部变量（`--pd-menu-*` / `--pd-tooltip-*` / `--pd-popconfirm-*`）
+   自己兜底到这一层，所以不需要我们操心。 */
+:root {
+  /* 颜色：我们有分层语义（surface / error / warning），它是直白的颜色名 */
+  --panel: var(--surface);
+  --panel-2: var(--surface-2);
+  --panel-3: var(--surface-2); /* 我们没有第三层，退到第二层 —— 比让它兜底成 Canvas 好 */
+  --muted: var(--text-dim);
+  --red: var(--error);
+  --danger: var(--error);
+  --green: var(--success);
+  --amber: var(--warning);
+
+  /* 形状与动效 */
+  --radius: var(--r-md);
+  --radius-sm: var(--r-sm);
+  /* 我们的 `--t-fast` 是 `120ms ease` 这个**简写**，而它要的是分开的两个值 */
+  --duration-fast: 120ms;
+  --ease-standard: ease;
+  --focus-ring: 0 0 0 3px var(--accent-soft);
+  /* 控件高度对齐我们自己的 .btn（padding 6px 12px + 1px 边框 ≈ 34px） */
+  --control-height-md: 34px;
+  --control-height-lg: 42px;
+  --control-pad-x: 12px;
+  --disabled-opacity: 0.55;
+  --weight-medium: 500;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}

@@ -234,6 +234,8 @@ pub struct PluginView {
     pub name: String,
     pub busy: bool,
     pub tasks: usize,
+    /// 这个插件自己处理 `/plugins/<name>/*` 的路由（`register_web`）。
+    pub has_web: bool,
 }
 
 pub enum Cmd {
@@ -261,6 +263,10 @@ pub enum Cmd {
     },
     WebDone {
         plugin: String,
+    },
+    HasWeb {
+        plugin: String,
+        reply: oneshot::Sender<bool>,
     },
     /// 停这个插件**当前在途的那一次** invocation。纯 Rust 置位，不碰 JS 锁。
     Stop {
@@ -349,6 +355,22 @@ impl Scheduler {
         rx.await.map_err(|e| e.to_string())?
     }
 
+    /// 这个插件是否自己处理 `/plugins/<name>/*` 的路由。
+    pub async fn plugin_has_web(&self, plugin: &str) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(Cmd::HasWeb {
+                plugin: plugin.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     pub async fn run_now(&self, plugin: &str, task: &str) -> Result<i64, String> {
         let (plugin, task) = (plugin.to_string(), task.to_string());
         self.call(|reply| Cmd::RunNow {
@@ -389,6 +411,9 @@ struct Loaded {
 }
 
 struct Inner {
+    /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
+    /// 那时插件还没进 `plugins` 表，所以单独记一份。
+    web: std::collections::HashSet<String>,
     db: Db,
     log: LogHub,
     cfg: TripConfig,
@@ -410,6 +435,7 @@ pub fn start(
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     let (reg_tx, mut reg_rx) = mpsc::unbounded_channel::<Registration>();
     let mut inner = Inner {
+        web: std::collections::HashSet::new(),
         db,
         log,
         cfg: TripConfig::default(),
@@ -498,6 +524,7 @@ impl Inner {
                     l.plugin.invocation().stop();
                 }
                 self.plugins.remove(&name);
+                self.web.remove(&name);
                 self.tasks.retain(|t| t.plugin != name);
                 let db = self.db.clone();
                 tokio::spawn(async move {
@@ -521,6 +548,7 @@ impl Inner {
                         name: name.clone(),
                         busy: l.busy,
                         tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
+                        has_web: self.web.contains(name),
                     })
                     .collect();
                 v.sort_by(|a, b| a.name.cmp(&b.name));
@@ -550,6 +578,9 @@ impl Inner {
                     let _ = reply.send(out);
                     let _ = tx.send(Cmd::WebDone { plugin });
                 });
+            }
+            Cmd::HasWeb { plugin, reply } => {
+                let _ = reply.send(self.web.contains(&plugin));
             }
             Cmd::WebDone { plugin } => {
                 if let Some(l) = self.plugins.get_mut(&plugin) {
@@ -710,6 +741,9 @@ impl Inner {
             // handler 的名字已经在 JS 侧注册表里。这里建一条**手动任务**，
             // 否则只注册 handler、没注册 cron 的插件在界面上根本点不到。
             // 随后同名 register_cron 会把它升级成定时任务。
+            Registration::Web { plugin } => {
+                self.web.insert(plugin);
+            }
             Registration::Handler { plugin, name } => {
                 if self.find(&plugin, &name).is_none() {
                     self.tasks.push(Task::manual(plugin.clone(), name.clone()));
@@ -842,7 +876,12 @@ impl Inner {
             // run_id 必须在派发**之前**置好：日志在 op 边界上读它做归属。
             inv.run_id
                 .store(run_id, std::sync::atomic::Ordering::SeqCst);
-            let evt = serde_json::json!({ "task": task_name, "manual": manual, "run_id": run_id });
+            let evt = serde_json::json!({
+                "task": task_name,
+                "plugin": plugin_name,
+                "manual": manual,
+                "run_id": run_id
+            });
             let error = catch_engine_panic(plugin.dispatch(&task_name, &evt, budget))
                 .await
                 .err();

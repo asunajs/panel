@@ -1,0 +1,1358 @@
+/*
+  云盘插件的样式表。**颜色与组件都走主面板那一套**，这里只放这个插件特有的布局。
+
+  这个页面跑在 iframe 里（是另一个 document），但这件事**不影响引样式表**：
+  index.html 的 <head> 按 reset → theme → components → 本文件的顺序引了 `/css/*`
+  （面板那三份），所以面板的 token 与组件类在这里直接可用 ——
+  `.btn` / `.badge` / `.field` / `.input` / `.empty` / `.table-wrap` / `.dialog*`
+  之类**不在这里重画**，重画的后果是同一个组件有两份定义、改一处漏一处。
+
+  # 主题是怎么跟随的（以及为什么这里**不许**写 prefers-color-scheme）
+
+  面板把主题存在 localStorage 的 `panel-theme-v2` 里，`boot.js` 读它、并给 <html>
+  挂 `data-theme`（iframe 与面板同源，所以读得到；别人的文档改了 localStorage
+  这边还会收到 `storage` 事件，所以在面板上切主题这一页立刻跟着变）。
+  面板的 theme.css 正是按 `:root[data-theme='light']` 取浅色那一套的 —— 两个条件
+  对齐了，配色自动一致。
+
+  ⚠ 在这里再补一条 prefers-color-scheme 的媒体查询会**盖掉用户的选择**：
+    系统的深浅色偏好与面板里选的主题是两件事，用户把面板切成浅色、系统还是深色时，
+    媒体查询会把这一页拽回深色，于是"面板浅、插件页深"。
+
+  # 三条约束（没变）
+
+  ① **一次只显示一块**。`.block` 默认隐藏，`.block.is-on` 才显示。
+     这是「菜单栏 + 一次一屏」的落点：用户不用在一堆卡片里找。
+  ② **读数比按钮显眼**。`.hero` 是每块第一行，字号最大 —— 它回答那个区块的
+     核心问题（「登录了吗」「今天跑了吗」）。按钮是次要的。
+  ③ **窄屏可用**。面板的 iframe 可能很窄（手机上看），所以：
+     菜单栏横向滚动、表格可横滚、输入框撑满。不设固定宽度。
+*/
+
+/* 颜色一律走主面板的 token（/css/theme.css）—— 这里只把本文件用的短名字
+   接到那些 token 上。⚠ 不要重定义 --bg / --accent / --radius：
+   它们是主面板的名字，重定义会把面板的值盖掉（本文件在面板的 CSS 之后加载）。 */
+:root {
+  --fg: var(--text);
+  --dim: var(--text-dim);
+  --line: var(--border-soft);
+  --soft: var(--surface-2);
+  --ok: var(--success);
+  --bad: var(--error);
+  --ok-soft: var(--success-soft);
+  --bad-soft: var(--error-soft);
+}
+
+/* 为什么还留着这几个短名字：界面上还有 6 个区块这轮不重写
+   （日常 / 兑换 / 直播 / 数据 / 推送 / 设置），它们内部仍写着 `var(--fg)` 这一套 ——
+   接上主面板的 token 之后，那 6 块一个字不改就跟着面板换配色。 */
+
+/* 底色 / 字色 / 字体族由 theme.css 的 body 规则给，`box-sizing` 与各处默认外边距
+   由 reset.css 给（都在 <head> 里引过了，这里不重复一遍）。
+   只补面板没定的那点：1.6 的行高 —— 这一页多是「一行一条」的清单，1.55 偏挤。 */
+body {
+  line-height: 1.6;
+}
+
+/* ── 顶栏 ── */
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  /* 长清单（兑换页 51 行）滚下去之后仍能看见登录状态与刷新；
+     面板的 topbar 也是 sticky，两边行为一致。 */
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* 嵌在面板里时（`boot.js` 给 <html> 挂 `data-embed="1"`）面板上面已经有一行
+   「插件名」的标题，本页再画一次就是**两层标题**、还白占一行高度。
+   ⚠ 只收标题，不收整条顶栏 —— 顶栏右边还有登录状态和「刷新」，收了就没得点了。 */
+[data-embed='1'] .title {
+  display: none;
+}
+
+.top-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* 顶栏右边那个「登录状态 / 几个账号」的小药丸是面板的 `.badge`
+   （index.html 与 app.js 都已经改用 `badge idle` / `badge success`），
+   原先本文件自带的 `.chip` / `.chip-ok` / `.chip-idle` 三条随之删掉 ——
+   ⚠ 顺带一提：本页面的类名不能随便叫 `.chip`，面板 components.css 里那个 `.chip`
+     是日志页**能点**的过滤开关，撞名会让只读的状态标签长出 cursor 和悬停态。 */
+
+/* ── 菜单栏 ── */
+
+.menu {
+  display: flex;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  /* 窄屏时横向滚动而不是换行 —— 换行会让菜单占掉半屏 */
+  overflow-x: auto;
+  scrollbar-width: none;
+  /* 顶栏实测高 59.8px；菜单贴在它下面，别用 58 造成 1~2px 重叠。 */
+  position: sticky;
+  top: 60px;
+  z-index: 19;
+  background: var(--bg);
+}
+
+.menu::-webkit-scrollbar {
+  display: none;
+}
+
+.menu-item {
+  appearance: none;
+  background: none;
+  border: none;
+  /* 选中态靠这条下划线：它比"变个颜色"更能在横排里指认"现在在哪一块" */
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font: inherit;
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+
+.menu-item:hover {
+  color: var(--fg);
+}
+
+.menu-item.is-on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── 区块 ── */
+
+.main {
+  padding: var(--sp-4) var(--sp-4) var(--sp-6);
+  /* 外壳放到 1000px，具体区块再各自收窄：兑换清单是 6 列数据表，
+     760px 在宽屏上太挤；账号/日常等阅读型区块仍保持 760px。 */
+  max-width: 1000px;
+  margin-inline: auto;
+}
+
+.block {
+  display: none;
+  /* 默认阅读宽度；兑换那一块单独放宽。 */
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+.block.is-on {
+  display: block;
+}
+
+/* 同一块里相邻卡片之间统一留出间隔 —— 之前数据页 / 兑换页的卡片是贴着的。 */
+.block > .card + .card {
+  margin-top: var(--sp-3);
+}
+
+/* 兑换页：清单是数据表，宽一点能少折行；仍不超过外层 1000px。 */
+#block-exchange {
+  max-width: 1000px;
+}
+
+/* 每块第一行：回答这个区块的核心问题 */
+.hero {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 var(--sp-1);
+  line-height: 1.35;
+}
+
+.sub {
+  color: var(--dim);
+  margin: 0 0 var(--sp-3);
+  font-size: 13px;
+}
+
+/* 块内的小标题。面板的 `.section-title` 是同一档（13px / 半粗 / 压暗），但它带了
+   `text-transform: uppercase` + 0.06em 字距 —— 那是给英文标签排的，中文标题
+   撑不出这个效果，只会显得字距发开。所以这一页保留自己的 `.h3`。 */
+.h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+
+/* 面板的 `.hint`（12px / --text-mute）就是本页说明文字的主样式，这里不重画。
+   下面这条**只补一件事**：`reset.css` 把 `p` 的外边距清零了，而面板那边 `.hint`
+   多塞在 `.field` 里（靠 gap 拉开），本页的 `.hint` 是**独立成段**的 ——
+   相邻两段说明（弹窗里、凭据页里都有）会直接贴在一起。 */
+.hint {
+  margin-bottom: var(--sp-2);
+}
+
+/* 说明文字里的行内代码（`<code>Authorization</code>` 这种"要照抄的东西"）。
+   面板没有这一条，reset.css 只把 code 的字体族换成等宽 —— 底色还得自己给，
+   否则它和正文糊在一起，看不出哪一段是要原样粘的。 */
+.hint code {
+  color: var(--text);
+  background: var(--soft);
+  padding: 1px var(--sp-1);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+}
+
+/* ── 控件 ── */
+
+/* `.row` 的横排布局走面板那条（横向 flex + 折行 + gap --sp-3），本文件不重画。
+   这里只补面板**没有**的纵向留白：面板里 `.row` 外面总有 `.field` / 卡片撑开间距，
+   而这一页的 `.row` 是区块里独立成行的一段（「现在跑一次」那一行、运行摘要那些行），
+   去掉就会贴住上下的元素。
+   ⚠ 顺带记一笔取舍：面板那条是 `align-items: flex-end`（给「输入框 + 按钮」底对齐
+     用的），原先这里是 `center` —— 一行里两者高度差只有一两像素，就照面板的来。 */
+.row {
+  margin: var(--sp-2) 0;
+}
+
+/* 一行两端对齐（登录第 2 步顶上那行：`138****0000` + 「改」）。 */
+.row.between {
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* 操作行靠右（对话框底部那排「取消 / 保存定时」）。
+   为什么靠右而不是靠左：`取消` 是退路、`保存` 是正事，视线从左往右读完表单后
+   正好落在右下角 —— 这也是桌面端对话框的惯例位置。靠左会让这排按钮看起来
+   像表单里的又一个字段。 */
+.row.end {
+  justify-content: flex-end;
+}
+
+/* 「输入框 + 行内按钮」合成一格 —— 照参考实现自己的登录页那个形状：
+   一个边框包住两者，中间一条竖线（`请输入手机号 | 获取验证码`）。
+   为什么要合成一格而不是并排两个方块：这样按钮的**从属关系**一眼可见 ——
+   它是"给这个输入框"用的，不是旁边另一个独立动作（第一版并排时看不出来）。
+   ⚠ 这里确实动了颜色 / 边框（这一页的规矩是"颜色一律走面板的 `.btn`"）——
+     这是有意的一个例外：行内按钮要长得像输入框的一部分，而不是一颗按钮。
+     所以它没有底色、没有自己的圆角，只有一条左边线。 */
+.input-group {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-control);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* 聚焦时整格变色（输入框自己没有边框了，`input:focus` 那条改不动它） */
+.input-group:focus-within {
+  border-color: var(--accent);
+}
+
+.input-group input {
+  flex: 1 1 auto;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.input-group .btn {
+  flex: 0 0 auto;
+  border: none;
+  border-left: 1px solid var(--border-control);
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* 禁用态。面板的 `.btn` 没写这一条，而"还不能点"在这里是**有信息**的
+   （号码不满 11 位 / 码不满 6 位 / 重发倒计时里）—— 不给样子的话，
+   用户只会觉得按钮坏了，而"点了没反应"是最糟的反馈。 */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 一行的三个位置：名字（左边、可伸展）、状态（中间）、说明（右边）。
+   固定成这三段之后，一列行看上去是**对齐的表格**，而不是一堆散字。 */
+/* ⚠ `flex-basis: 0`（不是 `auto`）是关键：用 `auto` 时名字会**先占满一整行**，
+   于是状态、耗时、按钮全被挤到下面几行 —— 第一版就是这样，"看"按钮单独
+   掉到第三行。`basis: 0` 让三个元素在同一行里按比例分宽度。 */
+.row-name {
+  flex: 1 1 0;
+  min-width: 0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-state {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+/* 耗时单独一档：等宽数字，这样一列行的秒数是对齐的 */
+.row-dur {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  min-width: 3.5em;
+  text-align: right;
+}
+
+/* 一整行宽度的补充说明（摘要那一句） */
+.row-note {
+  flex: 1 1 100%;
+  color: var(--dim);
+  font-size: 0.88em;
+  line-height: 1.5;
+  padding-left: var(--sp-1);
+}
+
+/* 「已配」「成了」这一类：左边一道色条 + 浅底。**不刷满整块** ——
+   十行都刷成绿的等于没标重点。 */
+.row.is-on {
+  border-left: 3px solid var(--ok);
+  background: var(--ok-soft);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding-left: var(--sp-2);
+}
+
+/* 裸 `input` / `textarea`：面板的 `.input` 要显式加类，而这一页还有 6 个区块这轮
+   不重写（它们的输入框没有类名），所以这条按元素选中的兜底样式留着。
+   ⚠ 边框用 `--border-control`，不是 `--line`（= --border-soft）：输入框的边框是
+     "这里能输入"的唯一线索，面板有一条 WCAG 1.4.11 的规矩 ——
+     识别控件用的边框至少 3:1，`--border-soft` 只有 1.8:1 左右，不够。
+     面板的 `.input` / `.btn` 就是这么写的（见 components.css 里那段说明）。 */
+input,
+textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-control);
+  border-radius: var(--r-md);
+  font: inherit;
+  padding: 7px 10px;
+  width: 100%;
+  min-width: 0;
+  transition: border-color var(--t-fast);
+}
+
+/* 凭据那类多行框：等宽才好贴、好读协议原文 */
+textarea {
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* 聚焦时只换边框色（面板的 `.input` 同样这么做）：换整圈描边会让一行里的
+   输入框跳一下，而这页的输入框几乎都在 `.row` 里相邻排列。 */
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 一行里"能撑满就撑满"的那个输入框。`.row` 是 flex，所以给的是 flex 基准 ——
+   手机上它会自己独占一行，宽屏下和按钮同排。 */
+.grow {
+  flex: 1 1 160px;
+  width: auto;
+}
+
+/* 尺寸档。面板的 `.btn` 只有一种大小，而这一页的小按钮多（顶栏、行内动作、选择器）。
+   ⚠ **只留尺寸** —— 颜色 / 边框 / 圆角一律走面板的 `.btn`：两处都写就会各说各话，
+     面板改一次观感、这里没跟上，看起来就是"这个按钮和别的不是一套的"。 */
+.btn-sm {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: 12px;
+}
+
+/* 二选一的按钮组（添加账号弹窗里的「客户端形态：Windows / macOS」）。
+   面板没有「切换按钮」这个组件，所以自己写一条 —— 但只写**选中态**，
+   按钮本身的样子走面板的 `.btn`。
+   ⚠ 这段是补上的：原来 `paintAddPc()` 一直在切 `.is-on`，而样式表里
+   **从来没有** `.btn.is-on` 这条规则 —— 于是"选中的是哪个"根本看不出来，
+   用户只能靠猜（两个按钮长得一模一样）。 */
+.btn.is-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ── 页签（添加账号弹窗的五条路） ── */
+
+/* ⚠ 面板没有页签组件；这套是插件自己的。选中态用面板的强调色，
+   与全站的"当前是哪个"是同一个颜色。 */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+
+.tab:hover {
+  color: var(--fg);
+}
+
+.tab.is-on {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 页签里的一个面板（登录的五条路各一块）。底色用面板的「第二层」面色，
+   它比页面底色亮一档，读起来是「这一块是自己的」，而不是又一层卡片。 */
+.pane {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  margin: var(--sp-3) 0;
+  background: var(--soft);
+}
+
+/* ── 几个纯容器 ──
+   `.rows` / `.form` / `.is-muted` 这三个类名在页面里一直有用，
+   而样式表里**从来没有定义过**（靠的是 `.row` 自带的纵向留白和浏览器默认）。
+   这里给它们补上最小定义：`gap` 走容器而不是靠每个子项自己带 margin ——
+   后者会折叠，间距看着时有时无。 */
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.form .field {
+  margin-bottom: var(--sp-3);
+}
+
+.is-muted {
+  opacity: 0.6;
+}
+
+/* ── 步骤列表（一次运行的细节） ── */
+
+.steps {
+  list-style: none;
+  margin: var(--sp-2) 0;
+  padding: 0;
+}
+
+.steps li {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  padding: var(--sp-1) var(--sp-2);
+  /* 左边这道色条就是状态本身（见下面三态），所以底色不铺满 */
+  border-left: 3px solid var(--line);
+  margin: var(--sp-1) 0;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+/* ⚠ 固定宽度（不是 `auto` + `min-width`）：名字长短不一时，`auto` 会让
+   每行的说明从**不同位置**开始 —— 一列看下来是锯齿状的。
+   固定之后名字那一列是对齐的，长的名字在这一列里换行。 */
+.steps .step-name {
+  flex: 0 0 9.5em;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.steps .step-note {
+  flex: 1 1 auto;
+  color: var(--dim);
+}
+
+/* 三态：成功 / 失败 / **没做事**。
+   ⚠ 「没做事」（条件不成立，比如今天已经签过了）必须与"失败"分开显示 ——
+   混在一起的话，一个正常跳过会被看成出错，用户就会去查一个不存在的问题。 */
+.steps li.is-ok {
+  border-left-color: var(--ok);
+}
+
+.steps li.is-bad {
+  border-left-color: var(--bad);
+  background: var(--bad-soft);
+}
+
+.steps li.is-idle {
+  border-left-color: var(--line);
+  opacity: 0.75;
+}
+
+/* ── 二维码与滑块图 ── */
+
+/* 二维码：**白底**是必须的 —— 深色主题下透明底等于把浅色模块变暗，
+   对比度没了，手机就扫不出来（编码器那边也画了白底，这里是第二道保险）。
+   ⚠ 这是本文件**唯一**一处写死的颜色值：它不能跟着主题走，也不该跟着走。 */
+.qr {
+  display: flex;
+  justify-content: center;
+  width: fit-content;
+  padding: var(--sp-3);
+  margin: var(--sp-2) auto;
+  background: #fff;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+}
+
+.qr svg {
+  display: block;
+  width: 260px;
+  max-width: 70vw;
+  height: auto;
+  image-rendering: pixelated;
+}
+
+/* 还没生成二维码时它就是个空盒子，别留一块白 */
+.qr:empty {
+  display: none;
+}
+
+/* ── 添加账号弹窗 ──
+   面板的 `.dialog` 会铺满可用宽度（那是给表格/长内容准备的），套到登录这种
+   一列表单上就把输入框拉到上千像素。认证弹窗收在一列（Bootstrap 标准弹窗
+   500px、`modal-sm` 300px，登录取中间）：桌面 400px、窄屏留边距。
+   用 `#add-dialog` 提特异性，只盖这一处，不动面板的共享组件。 */
+#add-dialog .dialog {
+  width: min(400px, 92vw);
+}
+
+/* 定时抢兑弹窗：一列表单，桌面 520px；太宽会把 stepper 和说明拉散。
+   手机上字段多，必须让 body 自己滚，否则「保存定时」会被切在屏幕外。 */
+#ex-plan-dialog .dialog {
+  width: min(520px, 92vw);
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+#ex-plan-dialog .dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 登录表单：竖排，一个字段一段 —— 标签在上、输入框占满列宽（各家登录卡的通用
+   形状）。不再把输入框和按钮挤在同一横排里：横排下 400px 装不下「输入 + 发码 +
+   登录」三样，只会把它们压扁、留大片空隙。 */
+#add-dialog .form .field {
+  margin-bottom: var(--sp-3);
+}
+
+/* 主操作（下一步 / 登录）单独成行、占满宽度：拇指好点，也给出明确的下一步。 */
+#add-dialog .form .actions .btn {
+  width: 100%;
+}
+
+.slider {
+  margin: var(--sp-3) 0;
+}
+
+.slider img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--soft);
+}
+
+/* ── 列表 ── */
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+/* 外框已经有上边了，第一项再画一条就是双线 */
+.item:first-child {
+  border-top: none;
+}
+
+.item-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.item-t {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.item-s {
+  display: block;
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: 1px;
+  overflow-wrap: anywhere;
+}
+
+.item-r {
+  display: flex;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+/* 本机设备指纹那一串。⚠ **必须能断行** —— 它是一个长到几十字符、中间没有空格的
+   token（`BF3E4AC4…-ENDIN`）。不设断行的话它会把容器撑宽，而撑宽之后**下面那段
+   说明也不换行了**（一整行冲出视口，被切在"不受影"那里）——
+   现象看起来像"文字被裁了"，而根因在上一行的那个 token 上。
+   参考实现那里也是 `<code class="break-all">`。 */
+.finger {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 2px 0 6px;
+  color: var(--fg);
+  font-size: 13px;
+}
+
+/* 「账号」区块顶上那排动作：贴右。它能贴右是因为 `.row`（面板那条）是 flex ——
+   这条只管方向，横排与间距仍归面板。 */
+.toolbar {
+  justify-content: flex-end;
+  padding-bottom: var(--sp-1);
+}
+
+/* ══════════ 定时计划列表 ══════════ */
+
+/* 一条计划一行：左边“谁、换什么、几点”，右边三个按钮。 */
+.plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+}
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* 暂停的计划：标题压暗一档（状态本身由按钮文字表达，颜色不是唯一载体）。 */
+.plan-row.is-off .plan-main strong {
+  color: var(--text-mute);
+}
+
+.plan-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan-main .hint {
+  overflow-wrap: anywhere;
+}
+
+.plan-row .row {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+/* ══════════ 账号卡 ══════════ */
+
+/* 一条一张卡，卡片**表皮走主面板的 `.card`**（边框、圆角、内边距、底色都在那边）。
+   这里只留列表容器的排布。
+
+   ⚠ 这里原来还写着 `display:flex; justify-content:space-between` + 自己一份
+   border/radius/padding/background —— 那是上一版「左边信息、右边五个按钮」的两栏卡片。
+   卡片换成面板的结构之后（`.card-head` 里标题在左、按钮组在右，`.card-sub` 另起一行），
+   这套规则把新结构又顶回横排：按钮组被挤到标题下面、`.card-sub` 飘到右边还折成两行
+   （截图里一眼能看出来）。**表皮交给面板的组件之后，插件这边就不该再写布局。** */
+.acct-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 停用的账号：标题压暗一档。这是**第二层**提示 —— 状态本身由「已停用」徽章说
+   （颜色不能是唯一的信息载体，见 WCAG 1.4.1）。
+   ⚠ 是 `.card-title.is-off` 不是 `.acct-title.is-off`：标题现在用面板的 `.card-title`。 */
+.card-title.is-off {
+  /* 用文字档而不是 opacity：opacity 会把对比度一起降下去（Lighthouse
+     在账号卡上抓到过），而"已停用"已经由徽章表达。 */
+  color: var(--text-mute);
+}
+
+/* 长设备号要能折断，否则会顶破卡片 */
+.acct-card .card-sub {
+  overflow-wrap: anywhere;
+}
+
+
+/* ── 数字步进器（兑换页的「每天几点 / 提前多少毫秒」）──
+   原来两个 `type=number` 是 `.field` 的直接子元素，被 flex 撑成整行宽；
+   现在输入框收窄，左右各一颗减/加按钮。 */
+.ex-num-field {
+  flex: 0 0 auto;
+}
+
+/* 数字步进：整条是一个胶囊，左右是减/加，中间是数字。
+   参考面板的 Instances 输入：不要三颗各自带边框的按钮。 */
+.stepper {
+  display: inline-flex;
+  align-items: stretch;
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.stepper-btn {
+  width: 42px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  flex: none;
+}
+
+.stepper-btn:hover:not(:disabled) {
+  background: var(--soft);
+}
+
+.stepper-btn:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.stepper-btn:last-child {
+  border-left: 1px solid var(--border);
+}
+
+.stepper-input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  /* 原生上下箭头在深色主题里像两个小白块，且和左右按钮重复 */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.stepper-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.stepper-input::-webkit-outer-spin-button,
+.stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.ex-num-field {
+  width: 100%;
+}
+
+
+/* ══════════ 账号选择器（多选 + 全部） ══════════
+   参考实现为这个控件单独写了一个组件，理由有两条，这里都照办：
+   · 原生 `<select multiple>` 要靠"按住 + 点选"，**移动端几乎不可用**；
+   · 展开面板**不能进文档流**（那会把卡片撑高、把下面的内容顶下去），
+     所以这里是**浮层**，而且点外部要能关。 */
+.picker {
+  position: relative;
+  display: inline-block;
+  margin-bottom: var(--sp-2);
+}
+
+/* 放进 `.row` 时别再留底边距：`.row` 是 `align-items: flex-end`，
+   底边距会把选择器整体顶高一截，旁边两颗按钮就看起来没对齐（截图 2026-10-18）。 */
+.row > .picker {
+  margin-bottom: 0;
+}
+
+/* 按钮本体是面板的 `.btn`（+ 本页的 `.btn-sm`）；这里只定它在这个位置上的尺寸 */
+.picker-btn {
+  min-width: 140px;
+  /* 按钮里是"标签 + ▾"，两端对齐，箭头不会随标签长短乱跑 */
+  justify-content: space-between;
+}
+
+/* 浮层。底色用 `--surface` 而不是 `--bg`：面板的 `.dialog` 就是这么定的 ——
+   浮在卡片（--surface-2 底）上面的一层要比页面底色亮一档，不然它看起来像"凹进去"。
+   阴影也用面板那条 `--shadow`，两处浮层的投影保持一致。 */
+.picker-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.picker-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+
+.picker-row:hover {
+  background: var(--soft);
+}
+
+/* ⚠ 复选框要把全局那条 `input { width: 100% }` **抵掉** ——
+   不然它会被撑满整行，文字被推到很远的地方（看起来像"文字居中"）。
+   全局那条还给了边框和内边距，复选框上也要撤掉（浏览器自己的样式才对）。 */
+.picker-row input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  margin: 3px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+/* 「全部」那一行与下面的名单之间画一条线 —— 它是**开关**，不是名单里的一项。 */
+.picker-all {
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  margin-bottom: var(--sp-1);
+  padding-bottom: var(--sp-2);
+}
+
+/* 「这份账号是沿用的」那条说明。放在「全部账号」开关**上面**：先说这份值
+   是怎么来的，再说能改成什么。字号/颜色沿用面板的 `.hint`，这里只补浮层
+   里的左右留白（浮层自身只有 `--sp-1` 的内边距，文字会贴到边上）。 */
+.picker-note {
+  padding: var(--sp-1) var(--sp-2) 0;
+  line-height: 1.5;
+}
+
+.picker-list .picker-row {
+  font-size: 13px;
+}
+
+.picker-row.is-off {
+  opacity: 0.5;
+}
+
+/* ── 带搜索框的那种浮层（兑换里选奖品） ─────────────────────────────
+   名单几十件，**滚到下面时搜索框必须还在** —— 它正是滚到那里的理由。
+   所以浮层改成竖排：框钉在上面，下面那块名单自己滚。
+   ⚠ 只认带 `.picker-filter` 的这一种：账号选择器那块浮层没有搜索框，
+     它整块滚（`max-height` + `overflow-y` 那套），别动它。 */
+.picker-panel.is-search {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.picker-panel.is-search .picker-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 搜索框：宽度吃满浮层，别的都跟全局那条 `input`（边框要 `--border-control`，
+   控件轮廓靠它）。浮层里挨着两样东西，所以自己带一点下边距。 */
+.picker-filter {
+  flex: 0 0 auto;
+  width: 100%;
+  margin: 0 0 var(--sp-1);
+  font-size: 13px;
+}
+
+/* 下拉里的行是 `<button>`（不是账号选择器那种 `<label>`）：整行可点，
+   键盘 Tab 也走得到。面板的 `reset.css` 已经把 button 的字体/颜色/边框/底色
+   收回来了，这里只需要把 `.grow` 那一格撑开、让右边的"能不能换"贴右。 */
+button.picker-row {
+  width: 100%;
+  text-align: left;
+}
+
+/* ══════════ 运行日志（终端样式） ══════════
+   数据源是面板的日志流（SSE）。这里只管"长得像终端"：等宽字体、深底、级别配色、
+   自己滚动。⚠ 不要给它加圆角阴影那种"卡片感" —— 它是一片**输出**，不是一张卡。 */
+.term {
+  margin: 14px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  /* ⚠ 底色走 token，不写死黑。面板自己的日志台（components.css 的 `.console`）
+     用的就是 `--bg-deep` —— 深色主题下它是"更深一档的底"，浅色主题下是浅灰。
+     写死 `#0b0e14` 的后果：面板切浅色之后，这一块是白纸上的一条黑砖。 */
+  background: var(--bg-deep);
+  overflow: hidden;
+}
+.term-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.term-title { color: var(--text); font-weight: 600; }
+.term-meta { color: var(--text-dim); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.term-follow { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); white-space: nowrap; }
+.term-level {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-control);
+  border-radius: 6px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.term-clear { padding: 2px 8px; font-size: 12px; }
+.term-body {
+  margin: 0;
+  padding: 8px 10px 10px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-overflow-scrolling: touch;
+}
+.term-line { display: block; }
+.term-ts { color: var(--text-mute); }
+.term-lv { display: inline-block; min-width: 3.2em; }
+.term-lv-info { color: var(--accent); }
+.term-lv-debug { color: var(--text-mute); }
+.term-lv-warn { color: var(--warning); }
+.term-lv-error, .term-lv-fatal { color: var(--error); }
+.term-lv-error { font-weight: 600; }
+.term-lv-fatal { font-weight: 700; }
+.term-lv-start { color: var(--accent); }
+.term-lv-success { color: var(--success); }
+.term-lv-fail { color: var(--error); }
+.term-line-warn .term-msg { color: var(--warning); }
+.term-line-error .term-msg, .term-line-fatal .term-msg { color: var(--error); }
+.term-line-error .term-msg { font-weight: 600; }
+.term-line-fatal .term-msg { font-weight: 700; }
+.term-line-debug .term-msg { color: var(--text-dim); }
+.term-line-start .term-msg { color: var(--accent); font-weight: 600; }
+.term-line-success .term-msg { color: var(--success); }
+.term-line-fail .term-msg { color: var(--error); }
+.term-empty { color: var(--text-mute); }
+@media (max-width: 720px) {
+  .term-body { max-height: 42vh; font-size: 11px; }
+  /* 终端标题、跟随/级别/清空在窄屏上分两行：标题和按钮第一行，计数第二行。
+     否则「运行日志」会被挤成竖排。 */
+  .term-bar { flex-wrap: wrap; }
+  .term-title { white-space: nowrap; }
+  .term-meta { flex: 1 1 100%; order: 3; }
+  .term-actions { gap: 6px; margin-left: auto; }
+
+  /* 组头的件数/时间窗太长，窄屏上换到第二行，别横向截断。 */
+  .ex-group-toggle { flex-wrap: wrap; }
+  .ex-group-row .hint {
+    flex: 1 1 100%;
+    padding-left: 16px;
+    white-space: normal;
+  }
+}
+
+/* 上一次每个号的结果（多账号时的一眼可见）。一行 chips，不换行地横向排。 */
+.acct-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 2px;
+}
+.acct-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 12px;
+  /* ⚠ 这两个名字以前写的是 `--fg-dim` / `--bg-2` —— 面板的 theme.css 里
+     **根本没有这两个 token**，于是每次都落到兜底值（`#a0a8b4` / `#14181f`）。
+     深色主题下看不出来；面板切浅色之后，那几枚 chip 就是**白底上的黑药丸**。
+     用面板真有的 `--text-dim` / `--surface-2`，两种主题就都跟着走。 */
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.acct-chip b { color: var(--fg); font-weight: 600; }
+.acct-chip.is-bad { border-color: var(--error); }
+.acct-chip.is-bad b { color: var(--error); }
+.acct-chip.is-good b { color: var(--success); }
+
+/* chip 点开之后：那个号那一次的每一步（失败的在前面） */
+.acct-chip { cursor: pointer; }
+.acct-chip.is-open { border-color: var(--accent); }
+.steps li.is-bad { color: var(--error); }
+
+/* 历史与实时的分界线（**不能**用 `.term-empty` —— 那个会被第一行新日志删掉） */
+.term-gap { display: block; color: var(--text-mute); padding: 2px 0 4px; }
+
+/* 强调用的那半句（跑单给的下一步）。⚠ 用 token 而不是写死一个淡红：
+   浅色主题下那个写死的淡红在白底上几乎看不见。 */
+.card-sub b.is-bad {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* App 任务的**条目**（「数据」页那一格）：比市场那一行缩进一层，
+   不然"组标题"和"组里的每一条"看起来是同一级。 */
+.item.is-sub {
+  padding-left: var(--sp-4);
+}
+
+/* 「其余 N 条 —— 点一下展开」那一行：可点，所以要像能点的样子 */
+.item.is-more {
+  cursor: pointer;
+}
+.item.is-more .item-t {
+  color: var(--accent);
+  font-weight: 400;
+}
+
+/* 组标题那一行加粗一点 —— 它是"下面这几条属于哪个市场"的标题 */
+#matrix-list .item:not(.is-sub) .item-t {
+  font-weight: 600;
+}
+
+/* ── 兑换页：关注区 / 分组清单 / 行内动作（对齐原 Rust mcloud 的兑换页）── */
+
+#ex-subs-card {
+  margin-bottom: var(--sp-3);
+}
+
+.ex-sub-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.ex-sub-row:last-child {
+  border-bottom: none;
+}
+
+.ex-sub-name {
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ex-sub-row .grow {
+  flex: 1 1 160px;
+}
+
+.ex-star {
+  min-width: 2.2em;
+  padding-inline: 0.45em;
+  color: var(--dim);
+}
+
+.ex-star.is-on {
+  color: var(--accent);
+}
+
+.ex-group-row td {
+  background: var(--soft);
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+
+/* 组头整行都是展开/折叠按钮：组名是主信息，件数/可兑数/时间窗退到 hint。 */
+.ex-group-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  width: 100%;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.ex-group-toggle:hover .ex-group-name {
+  color: var(--accent);
+}
+
+.ex-group-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--text-dim);
+  transition: transform 0.15s ease;
+}
+
+.ex-group-toggle[aria-expanded='true'] .ex-group-caret {
+  transform: rotate(90deg);
+}
+
+.ex-group-name {
+  font-weight: 600;
+}
+
+.ex-group-rule {
+  /* 组头底是 --soft/--surface-2；text-mute 在这里只有 4.10:1，上移一档。 */
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* 组头在 --surface-2 上：text-mute 只有 4.10:1（12px 正文要 4.5），上移一档。 */
+.ex-group-row .hint {
+  color: var(--text-dim);
+}
+
+/* 桌面端把件数/时间窗推到右边，填掉组头右侧那片空白；
+   窄屏由上面的媒体查询换到第二行左对齐。 */
+@media (min-width: 721px) {
+  .ex-group-row .hint {
+    margin-left: auto;
+    text-align: right;
+  }
+}
+
+.ex-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  /* 操作列就三颗小按钮（关注 / 定时 / 立即兑换）。换行会让"立即兑换"
+     单独掉到第二行，看起来像两段不同的动作；保持一排。 */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+/* 桌面表格：操作列按内容撑开，别让表格把三颗按钮挤到换行。 */
+#ex-tbl td:last-child {
+  white-space: nowrap;
+  width: 1%;
+}
+
+#ex-result {
+  margin-top: var(--sp-2);
+}
+
+#ex-result .is-bad {
+  color: var(--bad);
+}
+
+#ex-account {
+  min-width: 12rem;
+}
+
+#ex-filter {
+  flex: 1 1 12rem;
+}
+
+/* 窄屏：表格改成一行一张卡（原 Rust 页面也是卡片，不是横向滚的宽表）。
+   ⚠ 表头保留在 DOM 里（语义/测试用），视觉上藏掉；每个 td 用 data-label 自带字段名。 */
+@media (max-width: 700px) {
+  #ex-tbl,
+  #ex-tbl tbody,
+  #ex-tbl tr,
+  #ex-tbl td {
+    display: block;
+    width: 100%;
+  }
+
+  #ex-tbl {
+    min-width: 0;
+  }
+
+  #ex-tbl thead {
+    display: none;
+  }
+
+  #ex-tbl tr {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: var(--sp-2);
+    padding: var(--sp-2);
+    background: var(--surface);
+  }
+
+  #ex-tbl tr.ex-group-row {
+    border: none;
+    background: none;
+    margin: 0;
+    padding: var(--sp-2) 0 var(--sp-1);
+  }
+
+  #ex-tbl td {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    border: none;
+    padding: 2px 0;
+    text-align: left;
+  }
+
+  /* 桌面那条 `width: 1%` 是给表格列撑开用的；卡片布局里每格都是整行，
+     留 1% 会把操作列挤到一边。 */
+  #ex-tbl td:last-child {
+    width: auto;
+  }
+
+  #ex-tbl td::before {
+    content: attr(data-label);
+    flex: 0 0 5.5em;
+    color: var(--dim);
+    font-size: 12px;
+  }
+
+  #ex-tbl tr.ex-group-row td::before,
+  #ex-tbl td.empty::before {
+    content: none;
+  }
+
+  #ex-tbl tr.ex-group-row td {
+    display: flex;
+    justify-content: flex-start;
+    align-items: baseline;
+    gap: var(--sp-2);
+  }
+
+  #ex-tbl td.empty {
+    display: block;
+  }
+
+  #ex-tbl td[data-label='奖品'] {
+    font-weight: 600;
+  }
+
+  #ex-tbl .ex-row-actions {
+    justify-content: flex-end;
+  }
+}
+
+/* 兑换页：网页会话过期的提醒（不是"这 50 件都不可兑"）。 */
+#ex-session-warn.is-warning {
+  color: var(--warning);
+}
+
+#ex-session-refresh {
+  margin-bottom: var(--sp-2);
+}
+
+
+/* ── 领奖页 ── */
+
+/* 弹窗里「验证码 + 确认领取」那一行：输入框撑满、按钮跟在后面。
+   `.grow` 已经给了 flex 基准，这里只钉底对齐（`.row` 是 flex，窄屏会自己折行）。 */
+#prize-code-row {
+  align-items: flex-end;
+}
+
+/* 说明那一行同时承担"正在发 / 已发到某个号 / 没发出去 + 原因"，给个最小高度：
+   这几种状态来回切时弹窗不会跟着上下跳。 */
+#prize-note {
+  min-height: 1.4em;
+}
+
+/* 切换区块时给一点 160ms 的入场，避免内容"啪"地换掉。
+   只动透明度与 4px 位移；系统开了「减少动态效果」就关掉。 */
+@keyframes block-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.block.is-on {
+  animation: block-in 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .block.is-on {
+    animation: none;
+  }
+}
+
+/* 顶栏那个版本号：小、暗、不抢注意力，但一眼能找到。
+   ⚠ 颜色走本文件的短名字 `--dim`（= 面板的 `--text-dim`），别自造 `--muted`
+     —— 那个变量在这个文件里不存在，只会恒等于硬编码值（评审 2026-11-01）。
+   ⚠ 没有版本时（`/readings` 没给）要**整格消失**，别留一个空边框药丸。 */
+.ver {
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim);
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+#plugin-ver:empty {
+  display: none;
+}
