@@ -23,7 +23,12 @@
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
 契约见 [plugin-webui.md](plugin-webui.md)。
 任务失败、熔断和插件主动喊话都会进顶栏铃铛，配 `PANEL_NOTIFY_WEBHOOK` 还能推到外部。
-功能对照与下一步见 [parity.md](parity.md)。
+备份/恢复（`GET/POST /api/backup`）也在设置页数据 tab 里。
+最后做了一轮「浅色/暗色 × 宽屏/窄屏」的界面一致性核查。
+
+**与旧面板的功能对照见 [parity.md](parity.md)**：用户点名的六项（插件增删改查、脚本增删改查、
+插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，另外补了备份/恢复和通知；
+只剩「市场 / 在线更新」和「zip 上传」两项，理由写在那张表里。
 
 ## 从零构建
 

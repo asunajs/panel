@@ -1,0 +1,2 @@
+import host from "panel:host";
+await host.register_handler("go", async () => 1);
