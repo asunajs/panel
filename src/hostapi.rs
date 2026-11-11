@@ -8,11 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
 use llrt_core::{
     module::{Declarations, Exports, ModuleDef},
-    modules::https::HTTP_CLIENT,
     libs::utils::option::Undefined,
     prelude::{Async, Func},
     Ctx, Error, Exception, Function, IntoJs, Object, Result, Value,
@@ -23,14 +20,11 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::engine::{invocation, Invocation};
 use crate::log::{Level, LogHub};
-use crate::ssrf;
 
 /// 响应体上限。超了截断并置 `truncated`，不静默丢尾巴。
-const BODY_CAP: usize = 1024 * 1024;
 /// 查询结果行数上限（低配设备上不让一个 `SELECT *` 把内存吃光）。
 const ROW_CAP: usize = 1000;
 /// 重定向跳数上限，**每跳重判 SSRF**。
-const MAX_HOPS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub enum Registration {
@@ -98,10 +92,14 @@ const WRAP: &str = r#"(raw) => {
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
     fetch: async (url, opts) => JSON.parse(await raw.fetch(url, j(opts))),
+    // 同步入口：raw 那边是阻塞调用，这里不包 async
+    http_fetch: (url, opts) => JSON.parse(raw.http_fetch(url, j(opts))),
+    sqlite_query_sync: (sql, params) => JSON.parse(raw.sqlite_query_sync(sql, j(params))),
+    sqlite_exec_sync: (sql, params) => JSON.parse(raw.sqlite_exec_sync(sql, j(params))),
   };
 }"#;
 
-const OP_NAMES: [&str; 12] = [
+const OP_NAMES: [&str; 15] = [
     "log",
     "info",
     "warn",
@@ -112,6 +110,9 @@ const OP_NAMES: [&str; 12] = [
     "sqlite_query",
     "sqlite_exec",
     "fetch",
+    "http_fetch",
+    "sqlite_query_sync",
+    "sqlite_exec_sync",
     "register_cron",
     "register_handler",
 ];
@@ -158,6 +159,10 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
             Func::from(Async(op_sqlite_exec)).into_js(ctx)?,
         ),
         ("fetch", Func::from(Async(op_fetch)).into_js(ctx)?),
+        // 同步版：给「同步步骤机」风格的插件（mcloud 那一族），见 sync_bridge.rs
+        ("http_fetch", Func::from(op_http_fetch).into_js(ctx)?),
+        ("sqlite_query_sync", Func::from(op_sqlite_query_sync).into_js(ctx)?),
+        ("sqlite_exec_sync", Func::from(op_sqlite_exec_sync).into_js(ctx)?),
         (
             "register_cron",
             Func::from(Async(op_register_cron)).into_js(ctx)?,
@@ -256,48 +261,67 @@ fn params_of(v: Option<String>, ctx: &Ctx<'_>) -> Result<Vec<rusqlite::types::Va
     })
 }
 
+/// SQL 查询（纯 Rust，同步风格插件和 async op 共用）。
+pub async fn db_query(
+    db: crate::db::Db,
+    sql: String,
+    binds: Vec<rusqlite::types::Value>,
+) -> std::result::Result<String, String> {
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 准备失败: {e}"))?;
+        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(binds.iter()))
+            .map_err(|e| format!("SQL 查询失败: {e}"))?;
+        let mut out = Vec::new();
+        let mut truncated = false;
+        while let Some(row) = rows.next().map_err(|e| format!("读行失败: {e}"))? {
+            if out.len() >= ROW_CAP {
+                truncated = true;
+                break;
+            }
+            let mut m = Map::new();
+            for (i, name) in cols.iter().enumerate() {
+                let v = row.get_ref(i).map_err(|e| format!("取列失败: {e}"))?;
+                m.insert(name.clone(), sql_to_json(v));
+            }
+            out.push(Json::Object(m));
+        }
+        Ok(json!({ "rows": out, "truncated": truncated }).to_string())
+    })
+    .await
+}
+
 async fn op_sqlite_query(ctx: Ctx<'_>, sql: String, params: Undefined<String>) -> Result<String> {
     let h = host(&ctx)?;
     let binds = params_of(params.0, &ctx)?;
-    let out = h
-        .db
-        .call(move |conn| {
-            let mut stmt = conn.prepare(&sql).map_err(|e| format!("SQL 准备失败: {e}"))?;
-            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-            let mut rows = stmt
-                .query(rusqlite::params_from_iter(binds.iter()))
-                .map_err(|e| format!("SQL 查询失败: {e}"))?;
-            let mut out = Vec::new();
-            let mut truncated = false;
-            while let Some(row) = rows.next().map_err(|e| format!("读行失败: {e}"))? {
-                if out.len() >= ROW_CAP {
-                    truncated = true;
-                    break;
-                }
-                let mut m = Map::new();
-                for (i, name) in cols.iter().enumerate() {
-                    let v = row.get_ref(i).map_err(|e| format!("取列失败: {e}"))?;
-                    m.insert(name.clone(), sql_to_json(v));
-                }
-                out.push(Json::Object(m));
-            }
-            Ok(json!({ "rows": out, "truncated": truncated }).to_string())
-        })
-        .await
-        .map_err(|e| err(&ctx, e))?;
-    Ok(out)
+    db_query(h.db.clone(), sql, binds).await.map_err(|e| err(&ctx, e))
 }
 
-async fn op_sqlite_exec(ctx: Ctx<'_>, sql: String, params: Undefined<String>) -> Result<String> {
+/// 同步版查询：阻塞 JS 线程，SQL 在独立线程上跑（见 `sync_bridge.rs`）。
+fn op_sqlite_query_sync(ctx: Ctx<'_>, sql: String, params: Undefined<String>) -> Result<String> {
     let h = host(&ctx)?;
     let binds = params_of(params.0, &ctx)?;
-    h.db.call(move |conn| {
-        // ⚠ 不能用 `execute()` 的返回值当 changes，也不能无条件读 `last_insert_rowid()`：
-        // 两者都是**连接级**状态。`execute()` 内部读的是 `sqlite3_changes`，而 DDL
+    crate::sync_bridge::run(
+        db_query(h.db.clone(), sql, binds),
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| err(&ctx, e))
+}
+
+/// SQL 执行（纯 Rust，和 async op 共用）。
+pub async fn db_exec(
+    db: crate::db::Db,
+    sql: String,
+    binds: Vec<rusqlite::types::Value>,
+) -> std::result::Result<String, String> {
+    db.call(move |conn| {
+        // ⚠ 不能用 execute() 的返回值当 changes，也不能无条件读 last_insert_rowid()：
+        // 两者都是**连接级**状态。execute() 内部读的是 sqlite3_changes，而 DDL
         // （CREATE TABLE 之类）不会重置它 —— 于是返回值是**上一条语句**的残留（实测：
         // CREATE TABLE 报 changes:1 / rowid:2，那是前一条 LogHub 日志 INSERT 的）。
         // 连接是和 LogHub 共用的，日志写入随时插进来，所以这个污染不是偶发。
-        // 改法：changes 用 `total_changes()` 的差值（对 DDL 是 0，对 DML 准确）；
+        // 改法：changes 用 total_changes() 的差值（对 DDL 是 0，对 DML 准确）；
         // rowid 只在它**真的变了**的时候给，否则给 null —— 不撒一个看起来像数的谎。
         let before_rowid = conn.last_insert_rowid();
         let before_total = conn.total_changes();
@@ -313,38 +337,26 @@ async fn op_sqlite_exec(ctx: Ctx<'_>, sql: String, params: Undefined<String>) ->
         Ok(json!({ "changes": changes, "last_insert_rowid": rowid }).to_string())
     })
     .await
+}
+
+async fn op_sqlite_exec(ctx: Ctx<'_>, sql: String, params: Undefined<String>) -> Result<String> {
+    let h = host(&ctx)?;
+    let binds = params_of(params.0, &ctx)?;
+    db_exec(h.db.clone(), sql, binds).await.map_err(|e| err(&ctx, e))
+}
+
+/// 同步版执行：阻塞 JS 线程，SQL 在独立线程上跑。
+fn op_sqlite_exec_sync(ctx: Ctx<'_>, sql: String, params: Undefined<String>) -> Result<String> {
+    let h = host(&ctx)?;
+    let binds = params_of(params.0, &ctx)?;
+    crate::sync_bridge::run(
+        db_exec(h.db.clone(), sql, binds),
+        std::time::Duration::from_secs(30),
+    )
     .map_err(|e| err(&ctx, e))
 }
 
-fn clamp_timeout(v: Option<i64>) -> u64 {
-    v.unwrap_or(10_000).clamp(100, 60_000) as u64
-}
 
-fn headers_to_json(h: &http::HeaderMap) -> Json {
-    let mut m = Map::new();
-    for (k, v) in h {
-        let name = k.as_str().to_ascii_lowercase();
-        let text = String::from_utf8_lossy(v.as_bytes()).into_owned();
-        match m.remove(&name) {
-            Some(Json::String(prev)) => {
-                m.insert(name, json!(format!("{prev}, {text}")));
-            }
-            Some(Json::Array(mut a)) => {
-                a.push(Json::String(text));
-                m.insert(name, Json::Array(a));
-            }
-            _ => {
-                // set-cookie 不能被逗号拼起来 —— 值里本来就可能有逗号（Expires）
-                if name == "set-cookie" {
-                    m.insert(name, json!([text]));
-                } else {
-                    m.insert(name, Json::String(text));
-                }
-            }
-        }
-    }
-    Json::Object(m)
-}
 
 async fn op_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<String> {
     let inv = invocation(&ctx)?;
@@ -354,115 +366,26 @@ async fn op_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<
         }
         None => Json::Null,
     };
-    let get_str = |k: &str| o.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let timeout = clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64));
-    let method = get_str("method").unwrap_or_else(|| "GET".into());
-    let body = get_str("body").unwrap_or_default();
-    let redirect = get_str("redirect").unwrap_or_else(|| "follow".into());
-    let extra_headers: Vec<(String, String)> = o
-        .get("headers")
-        .and_then(Json::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let out = crate::outbound::fetch_json(url, &o, Some(inv))
+        .await
+        .map_err(|e| err(&ctx, e))?;
+    Ok(out.to_string())
+}
 
-    let client = HTTP_CLIENT
-        .as_ref()
-        .map_err(|e| err(&ctx, format!("HTTP 客户端不可用: {e}")))?
-        .clone();
-
-    let mut current = url;
-    let mut hops = 0usize;
-    let mut redirected = false;
-    loop {
-        if inv.is_stopped() {
-            return Err(err(&ctx, "AbortError: invocation 已停止".into()));
-        }
-        ssrf::ensure_outbound_url_allowed(&current).map_err(|e| err(&ctx, e))?;
-
-        let mut builder = http::Request::builder()
-            .method(method.as_str())
-            .uri(&current);
-        for (k, v) in &extra_headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let req = builder
-            .body(Full::new(Bytes::from(body.clone())).boxed())
-            .map_err(|e| err(&ctx, format!("请求构造失败: {e}")))?;
-
-        let resp = tokio::select! {
-            r = tokio::time::timeout(Duration::from_millis(timeout), client.request(req)) => {
-                match r {
-                    Ok(Ok(resp)) => resp,
-                    Ok(Err(e)) => return Err(err(&ctx, format!("请求失败: {e}"))),
-                    Err(_) => return Err(err(&ctx, format!("请求超时（{timeout}ms）"))),
-                }
-            }
-            _ = inv.cancelled() => return Err(err(&ctx, "AbortError: invocation 已停止".into())),
-        };
-
-        let status = resp.status().as_u16();
-        if redirect == "follow" && (300..400).contains(&status) {
-            if let Some(loc) = resp.headers().get(http::header::LOCATION) {
-                if hops >= MAX_HOPS {
-                    return Err(err(&ctx, format!("重定向超过 {MAX_HOPS} 跳，已中止")));
-                }
-                let loc = String::from_utf8_lossy(loc.as_bytes()).into_owned();
-                current = ssrf::resolve_location(&current, &loc).map_err(|e| err(&ctx, e))?;
-                hops += 1;
-                redirected = true;
-                continue;
-            }
-        }
-
-        let headers = headers_to_json(resp.headers());
-        let mut buf: Vec<u8> = Vec::new();
-        let mut truncated = false;
-        let mut body_error: Option<String> = None;
-        let mut incoming = resp.into_body();
-        loop {
-            let frame = tokio::select! {
-                f = tokio::time::timeout(Duration::from_millis(timeout), incoming.frame()) => f,
-                _ = inv.cancelled() => return Err(err(&ctx, "AbortError: invocation 已停止".into())),
-            };
-            match frame {
-                Ok(Some(Ok(f))) => {
-                    if let Some(data) = f.data_ref() {
-                        let room = BODY_CAP.saturating_sub(buf.len());
-                        if data.len() > room {
-                            buf.extend_from_slice(&data[..room]);
-                            truncated = true;
-                            break;
-                        }
-                        buf.extend_from_slice(data);
-                    }
-                }
-                Ok(Some(Err(e))) => {
-                    body_error = Some(e.to_string());
-                    break;
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    body_error = Some(format!("读正文超时（{timeout}ms）"));
-                    break;
-                }
-            }
-        }
-
-        return Ok(json!({
-            "status": status,
-            "url": current,
-            "redirected": redirected,
-            "headers": headers,
-            "body": String::from_utf8_lossy(&buf),
-            "truncated": truncated,
-            "body_error": body_error,
-        })
-        .to_string());
-    }
+/// 同步版 `fetch`：给同步风格的插件用（见 `sync_bridge.rs`）。
+fn op_http_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<String> {
+    let o: Json = match opts.0 {
+        Some(text) => serde_json::from_str(&text).map_err(|e| err(&ctx, format!("opts 不是合法 JSON: {e}")))?,
+        None => Json::Null,
+    };
+    let wait = crate::outbound::clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64)) + 5_000;
+    let inv = invocation(&ctx).ok();
+    let out = crate::sync_bridge::run(
+        async move { crate::outbound::fetch_json(url, &o, inv).await },
+        std::time::Duration::from_millis(wait),
+    )
+    .map_err(|e| err(&ctx, e))?;
+    Ok(out.to_string())
 }
 
 async fn op_register_cron(
