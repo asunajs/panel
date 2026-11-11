@@ -392,6 +392,7 @@ pub fn start(
     };
     let handle = tokio::spawn(async move {
         loop {
+            let loop_start = std::time::Instant::now();
             let sleep = inner.sleep_hint(Local::now());
             tokio::select! {
                 cmd = rx.recv() => match cmd {
@@ -404,6 +405,8 @@ pub fn start(
                 },
                 _ = tokio::time::sleep(sleep) => inner.fire_due(Local::now()),
             }
+            // 心跳 = 这一圈本身花了多久（不含 select 的等待）。
+            crate::stats::stats().record_loop(loop_start.elapsed());
         }
     });
     (Scheduler { tx }, handle)

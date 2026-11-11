@@ -12,11 +12,13 @@
 **Stage 1（最小垂直切片）已实现并验证**：`src/` 是产品代码，`spike/` 是探针；
 端到端读数（构建/测试、九个 op、fetch 限额、SSRF 单通道、20 分钟长任务 p99、熔断/SSE/热重载）
 见 [verification.md](verification.md)。
+控制台（WebUI）在 2026-11-11 晚**整体重写**：侧栏 + 仪表盘指标 + 五视图 + 浅/深两套主题
+（主色粉），设计约束与读数见 [ui.md](ui.md)。
 
 ## 从零构建
 
 ```bash
-cargo build && cargo test      # 106 passed，零 warning
+cargo build && cargo test      # 114 passed，零 warning
 ```
 
 **离线可构建**：仓库里带了 `vendor/llrt/bundle/js`（168K）。它是 LLRT 的 JS 侧字节码源，

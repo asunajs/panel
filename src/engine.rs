@@ -330,6 +330,7 @@ impl Plugin {
                             None => Err(if self.inv.is_stopped() {
                                 "invocation 被停止".to_string()
                             } else {
+                                crate::stats::stats().record_budget_kill();
                                 format!("CPU 预算耗尽（{budget_ms}ms 墙钟死线）")
                             }),
                             Some(s) => {

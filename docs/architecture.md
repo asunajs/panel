@@ -217,7 +217,8 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `db.rs` | DB actor（channel + 专用连接，无 `Mutex` 可 poison） |
 | `log/` | `LogHub`（SSE 广播）+ `redact`（6 道有序幂等脱敏） |
 | `auth.rs` | 令牌凭据：随机盐 + PBKDF2-HMAC-SHA256 落 `auth.json`（0600）；派生完擦掉 `PANEL_TOKEN`；校验走阻塞线程池 + 成功后的内存 memo + 失败限速（见 §10） |
-| `web.rs` | axum 路由 + 单令牌鉴权（**令牌只走 header**，校验的是派生值）+ `x-panel` CSRF 头 + 零构建静态资源 |
+| `stats.rs` | 进程级只读计数（运行时长 / 调度圈数 / 心跳 / 预算打断），只给仪表盘读；**JS 内存恒 null**，理由见 [ui.md](ui.md) §5 |
+| `web.rs` | axum 路由 + 单令牌鉴权（**令牌只走 header**，校验的是派生值）+ `x-panel` CSRF 头 + 零构建静态资源（`include_str!` 嵌入，`PANEL_WEB_DIR` 可改成读盘）。界面见 [ui.md](ui.md) |
 
 两条设计约束在 Stage 1 落到了实处：
 

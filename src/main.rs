@@ -12,6 +12,7 @@ mod hostapi;
 mod log;
 mod scheduler;
 mod ssrf;
+mod stats;
 mod web;
 
 use std::net::SocketAddr;
@@ -27,6 +28,8 @@ fn env_or(key: &str, default: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    // 先起计时器：仪表盘的「运行时长」从这里开始算。
+    stats::stats();
     let data_dir = PathBuf::from(env_or("PANEL_DATA_DIR", "data"));
     let plugins_dir = PathBuf::from(env_or("PANEL_PLUGINS_DIR", "plugins"));
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("建数据目录失败: {e}"))?;

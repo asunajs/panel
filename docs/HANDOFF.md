@@ -52,6 +52,9 @@
 - `cron.rs` 5/6 字段+`@every`+jitter+DST（**1112 行，偏大**）。
 - `config.rs` 面板级只读配置：`<PANEL_DATA_DIR>/config.json`，默认 4 MiB 上限（超限拒启），
   启动时序列化一次成 `Arc<str>` 给所有插件共享（`config()` 不再现序列化）。
+- `stats.rs` 进程级只读计数（运行时长/圈数/心跳/预算打断），`/api/state` 的 `stats` 字段。
+- `web/` 前端三件（`index.html`/`app.css`/`app.js`）：**零构建、无外部依赖**，CSP 禁内联，
+  资源 `include_str!` 嵌进二进制。界面与读数见 [ui.md](ui.md)。
 - `db.rs` DB actor（channel+专用连接，无 Mutex poison）。
 - `log/` LogHub（SSE）+ redact（6 道有序幂等脱敏）。
 - `web.rs` axum 路由+单令牌（**令牌只走 header**，校验的是派生值不是明文）+`x-panel` CSRF 头+零构建静态资源。

@@ -67,11 +67,11 @@ pub fn router(st: AppState) -> Router {
         .layer(middleware::from_fn_with_state(st.clone(), require_token));
 
     Router::new()
-        .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8") }))
+        .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
         .route("/app.js", get(|| async {
-            asset(APP_JS, "text/javascript; charset=utf-8")
+            asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
-        .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
+        .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
         .route("/healthz", get(|| async { "ok\n" }))
         .merge(api)
@@ -79,8 +79,33 @@ pub fn router(st: AppState) -> Router {
         .with_state(st)
 }
 
-fn asset(body: &'static str, ct: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, ct)], body).into_response()
+/// 前端资源：默认是**编译进二进制**的那份（发布形态 = 单文件、无外部依赖）。
+///
+/// 设了 PANEL_WEB_DIR=<目录> 就改成**每次请求从磁盘读**：只为调样式时不用重编译。
+/// 这是开发口子，别在生产上开 —— 它让「二进制里的界面」和「实际发出的界面」可能不是一份。
+fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
+    let body = match std::env::var_os("PANEL_WEB_DIR") {
+        Some(dir) => {
+            let path = std::path::PathBuf::from(dir).join(file);
+            match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("读 {} 失败: {e}", path.display()),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        None => embedded.to_string(),
+    };
+    // no-store：改完刷新就能看到，不会拿旧的对着新后端猜。
+    (
+        [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "no-store")],
+        body,
+    )
+        .into_response()
 }
 
 /// 单令牌鉴权。没配令牌时不拦 —— 那种部署必须只绑回环（main.rs 负责强制）。
@@ -220,6 +245,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         "auth": st.auth.is_some(),
         "plugins": plugins,
         "tasks": tasks,
+        // 仪表盘读数：全是宿主侧计数，不碰插件 runtime（拿它的锁会被 idle 挡住）。
+        "stats": crate::stats::stats().snapshot(),
     })))
 }
 

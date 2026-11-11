@@ -139,6 +139,16 @@ async fn state_and_healthz_answer_on_an_empty_panel() {
     assert_eq!(body["plugins"].as_array().unwrap().len(), 0);
     assert_eq!(body["auth"], false);
 
+    // 仪表盘读数：字段在、类型对。JS 内存**明确是 null** —— 没接就是没接，
+    // 不能给 0，否则界面上「0 KB」会被当成真的测出来了。
+    let stats = &body["stats"];
+    assert!(stats["uptime_ms"].is_u64(), "{stats}");
+    assert!(stats["ticks"].is_u64(), "{stats}");
+    assert!(stats["heartbeat_ms"].is_f64() || stats["heartbeat_ms"].is_u64(), "{stats}");
+    assert!(stats["budget_kills"].is_u64(), "{stats}");
+    assert!(stats["default_budget_ms"].is_u64(), "{stats}");
+    assert_eq!(stats["js_memory_bytes"], Value::Null, "内存没接就不能报 0");
+
     let resp = app.oneshot(Request::get("/healthz").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     // 存活探针不经过鉴权层，也不该漏面板状态
