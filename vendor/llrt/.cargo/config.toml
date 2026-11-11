@@ -1,0 +1,37 @@
+# rustc passes -Wl,-O1 on optimized links; zig's lld warns on any numeric -O, which build.warnings=deny turns into a failure
+[target.aarch64-unknown-linux-musl]
+rustflags = [
+    "-Ctarget-feature=+lse,+crt-static",
+    "-Ctarget-cpu=neoverse-n1",
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
+    "-Zpanic_abort_tests",
+    "-Zthreads=8",
+    "-Cforce-unwind-tables=no",
+    "-Zlocation-detail=none",
+    "-Crelocation-model=static",
+    "-Alinker_messages",
+]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+    "-Ctarget-feature=+crt-static",
+    "-Ctarget-cpu=haswell",
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
+    "-Zpanic_abort_tests",
+    "-Zthreads=8",
+    "-Cforce-unwind-tables=no",
+    "-Zlocation-detail=none",
+    "-Crelocation-model=static",
+    "-Alinker_messages",
+]
+
+[env]
+CC_aarch64_apple_darwin = "/usr/bin/clang"
+CC_x86_64_apple_darwin = "/usr/bin/clang"
+CXX_aarch64_apple_darwin = "/usr/bin/clang"
+CXX_x86_64_apple_darwin = "/usr/bin/clang"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc", "std", "panic_abort"]

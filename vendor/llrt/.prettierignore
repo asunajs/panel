@@ -1,0 +1,3 @@
+# Ignore web-platform-tests to avoid collisions!
+/wpt
+**/node_modules

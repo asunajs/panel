@@ -1,0 +1,21 @@
+[package]
+name = "llrt_stream_web"
+description = "LLRT Module stream/web"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+
+[lib]
+name = "llrt_stream_web"
+path = "src/lib.rs"
+
+[dependencies]
+llrt_abort = { version = "0.10.0-beta", path = "../llrt_abort" }
+llrt_exceptions = { version = "0.10.0-beta", path = "../llrt_exceptions" }
+llrt_utils = { version = "0.10.0-beta", path = "../../libs/llrt_utils", default-features = false }
+rquickjs = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+llrt_test = { path = "../../libs/llrt_test" }
+tokio = { version = "1", features = ["macros", "rt", "test-util"], default-features = false }

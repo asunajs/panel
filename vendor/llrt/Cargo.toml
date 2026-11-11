@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+
+members = [
+  "libs/llrt_build",
+  "libs/llrt_compression",
+  "libs/llrt_context",
+  "libs/llrt_encoding",
+  "libs/llrt_json",
+  "libs/llrt_net_policy",
+  "libs/llrt_numbers",
+  "libs/llrt_test",
+  "libs/llrt_test_tls",
+  "libs/llrt_utils",
+  "modules/llrt_abort",
+  "modules/llrt_async_hooks",
+  "modules/llrt_buffer",
+  "modules/llrt_child_process",
+  "modules/llrt_console",
+  "modules/llrt_crypto",
+  "modules/llrt_dgram",
+  "modules/llrt_events",
+  "modules/llrt_exceptions",
+  "modules/llrt_fetch",
+  "modules/llrt_fs",
+  "modules/llrt_http",
+  "modules/llrt_intl",
+  "modules/llrt_navigator",
+  "modules/llrt_net",
+  "modules/llrt_os",
+  "modules/llrt_path",
+  "modules/llrt_perf_hooks",
+  "modules/llrt_process",
+  "modules/llrt_stream",
+  "modules/llrt_stream_web",
+  "modules/llrt_string_decoder",
+  "modules/llrt_temporal",
+  "modules/llrt_timers",
+  "modules/llrt_tls",
+  "modules/llrt_tty",
+  "modules/llrt_url",
+  "modules/llrt_util",
+  "modules/llrt_zlib",
+  "llrt_modules",
+  "llrt_core",
+  "llrt",
+]
+
+[profile.flame]
+inherits = "release"
+strip = false
+debug = true
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.test]
+opt-level = 3

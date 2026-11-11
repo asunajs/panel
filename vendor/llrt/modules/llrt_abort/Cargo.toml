@@ -1,0 +1,34 @@
+[package]
+name = "llrt_abort"
+description = "LLRT Module abort"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+
+[lib]
+name = "llrt_abort"
+path = "src/lib.rs"
+
+[features]
+default = ["sleep-timers"]
+
+sleep-timers = ["llrt_timers"]
+sleep-tokio = ["tokio"]
+
+[dependencies]
+llrt_async_hooks = { version = "0.10.0-beta", path = "../llrt_async_hooks" }
+llrt_exceptions = { version = "0.10.0-beta", path = "../llrt_exceptions" }
+llrt_events = { version = "0.10.0-beta", path = "../llrt_events" }
+llrt_utils = { version = "0.10.0-beta", path = "../../libs/llrt_utils", default-features = false }
+rquickjs = { version = "0.14", default-features = false }
+
+# Optional
+llrt_timers = { version = "0.10.0-beta", path = "../llrt_timers", optional = true }
+tokio = { version = "1", features = [
+    "time",
+], default-features = false, optional = true }
+
+[dev-dependencies]
+llrt_test = { path = "../../libs/llrt_test" }
+tokio = { version = "1", features = ["macros", "rt", "test-util"], default-features = false }

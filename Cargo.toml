@@ -1,0 +1,72 @@
+[package]
+name = "panel-llrt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# vendored 而非 git dep：本机 github.com 直连不通。理由见 docs/architecture.md §1.2。
+# 构建前必须先生成 vendor/llrt/bundle/js（node tools/bundle/build.mjs），
+# 因为 llrt_core/build.rs 要读它，而它不在上游 git 里。
+llrt_core = { path = "vendor/llrt/llrt_core", default-features = false, features = [
+  "no-sdk",
+  "macro",
+  "tls-ring",
+  "crypto-rust",
+  "intl402",
+] }
+
+# rquickjs 与 llrt_core 用的是同一个 crates.io 版本（0.14.0，无 patch），
+# 加为直接依赖不增加编译单元，但让 derive 宏能按名字找到它 —— 否则
+# JsLifetime / FromJs 的 derive 会报 "could not find rquickjs package"。
+# feature 必须与 llrt_core/Cargo.toml:62-66 一致，否则会被拆成两份。
+rquickjs = { version = "0.14", default-features = false, features = [
+  "futures",
+  "parallel",
+  "rust-alloc",
+  "macro",
+] }
+
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "signal",
+  "sync",
+  "fs",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = "0.8"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+# 本来就在依赖树里（llrt_core → hyper → http），加为直接依赖不增加编译单元。
+# ssrf.rs 用 http::Uri 取 host；hostapi.rs 用 Full/BodyExt 造请求体、读响应帧。
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
+# cron.rs 的抖动随机源。0.2 已在树里（ring → getrandom），不增加编译单元。
+getrandom = "0.2"
+# auth.rs 的 PBKDF2 / SHA256 / 系统随机源。ring 0.17 已在树里
+# （llrt tls-ring → rustls → ring），加为直接依赖不增加编译单元。
+ring = "0.17"
+# 引擎边界的 catch_unwind 用 FutureExt。futures 已在依赖树里（rquickjs 的 futures feature）。
+futures = "0.3"
+
+[dev-dependencies]
+# cron.rs 的夏令时回归用例要真实时区表（America/New_York 的跳变日）。
+chrono-tz = "0.10"
+# 路由级测试用 oneshot 直接打 Router，不起真监听。axum 自己就依赖
+# tower/util（axum-0.8 Cargo.toml:268-271），所以不增加编译单元。
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+# 基线是 abort：一个引擎线程 panic 带走整个面板。新版要 unwind + 引擎边界 catch_unwind。
+panic = "unwind"
+
+[workspace]

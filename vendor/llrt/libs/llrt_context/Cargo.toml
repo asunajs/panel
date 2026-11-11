@@ -1,0 +1,21 @@
+[package]
+name = "llrt_context"
+description = "LLRT context helpers"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+
+[dependencies]
+rquickjs = { version = "0.14", features = [
+    "futures",
+], default-features = false }
+llrt_utils = { version = "0.10.0-beta", path = "../llrt_utils", default-features = false }
+tokio = { version = "1", features = ["sync"], default-features = false }
+tracing = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+llrt_test = { version = "0.10.0-beta", path = "../llrt_test" }
+
+[build-dependencies]
+llrt_build = { version = "0.10.0-beta", path = "../llrt_build" }

@@ -1,0 +1,358 @@
+use llrt_utils::primordials::Primordial;
+use rquickjs::{
+    class::{OwnedBorrowMut, Trace},
+    prelude::{Opt, This},
+    Class, Ctx, Exception, Function, JsLifetime, Object, Promise, Result, Value,
+};
+
+use crate::{
+    readable::stream::ReadableStreamState,
+    readable::{
+        readable_stream_default_controller_close_stream,
+        readable_stream_default_controller_enqueue_value_strict,
+        readable_stream_default_controller_error_stream, ReadableStreamDefaultControllerClass,
+    },
+    utils::promise::{promise_resolved_with, ResolveablePromise},
+    writable::WritableStream,
+};
+
+use super::stream::TransformStreamClass;
+
+#[rquickjs::class]
+#[derive(JsLifetime, Trace)]
+pub(crate) struct TransformStreamDefaultController<'js> {
+    pub(super) stream: TransformStreamClass<'js>,
+    pub(super) transform_algorithm: Option<TransformAlgorithm<'js>>,
+    pub(super) flush_algorithm: Option<FlushAlgorithm<'js>>,
+    pub(super) cancel_algorithm: Option<CancelAlgorithm<'js>>,
+    pub(super) finish_promise: Option<ResolveablePromise<'js>>,
+}
+
+pub(crate) type TransformStreamDefaultControllerClass<'js> =
+    Class<'js, TransformStreamDefaultController<'js>>;
+
+fn get_readable_default_controller<'js>(
+    stream_class: &TransformStreamClass<'js>,
+) -> Option<ReadableStreamDefaultControllerClass<'js>> {
+    let stream = stream_class.borrow();
+    let readable = stream.readable.as_ref()?;
+    let readable = readable.borrow();
+    match &readable.controller {
+        crate::readable::ReadableStreamControllerClass::ReadableStreamDefaultController(c) => {
+            Some(c.clone())
+        },
+        _ => None,
+    }
+}
+
+#[rquickjs::methods(rename_all = "camelCase")]
+impl<'js> TransformStreamDefaultController<'js> {
+    #[qjs(constructor)]
+    fn new(ctx: Ctx<'js>) -> Result<Class<'js, Self>> {
+        Err(Exception::throw_type(&ctx, "Illegal constructor"))
+    }
+
+    #[qjs(get)]
+    fn desired_size(&self) -> Option<f64> {
+        let stream = self.stream.borrow();
+        let readable_class = stream.readable.as_ref()?;
+        let readable = readable_class.borrow();
+        match &readable.controller {
+            crate::readable::ReadableStreamControllerClass::ReadableStreamDefaultController(c) => {
+                let c = c.borrow();
+                c.readable_stream_default_controller_get_desired_size(&readable)
+                    .0
+            },
+            _ => None,
+        }
+    }
+
+    fn enqueue(
+        ctx: Ctx<'js>,
+        this: This<OwnedBorrowMut<'js, Self>>,
+        chunk: Opt<Value<'js>>,
+    ) -> Result<()> {
+        let chunk = chunk.0.unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+        let stream_class = this.stream.clone();
+        drop(this);
+        transform_stream_default_controller_enqueue(ctx, &stream_class, chunk)
+    }
+
+    fn error(
+        ctx: Ctx<'js>,
+        this: This<OwnedBorrowMut<'js, Self>>,
+        reason: Opt<Value<'js>>,
+    ) -> Result<()> {
+        let reason = reason
+            .0
+            .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+        let stream_class = this.stream.clone();
+        drop(this);
+        transform_stream_error(ctx, &stream_class, reason)
+    }
+
+    fn terminate(ctx: Ctx<'js>, this: This<OwnedBorrowMut<'js, Self>>) -> Result<()> {
+        let stream_class = this.stream.clone();
+        drop(this);
+        transform_stream_default_controller_terminate(ctx, &stream_class)
+    }
+}
+
+impl<'js> TransformStreamDefaultController<'js> {
+    pub(super) fn clear_algorithms(&mut self) {
+        self.transform_algorithm = None;
+        self.flush_algorithm = None;
+        self.cancel_algorithm = None;
+    }
+}
+
+#[derive(Trace, JsLifetime, Clone)]
+pub(super) enum TransformAlgorithm<'js> {
+    Identity,
+    Function {
+        f: Function<'js>,
+        transformer: Option<Object<'js>>,
+    },
+}
+
+#[derive(Trace, JsLifetime, Clone)]
+pub(super) enum FlushAlgorithm<'js> {
+    Noop,
+    Function {
+        f: Function<'js>,
+        transformer: Option<Object<'js>>,
+    },
+}
+
+#[derive(Trace, JsLifetime, Clone)]
+pub(super) enum CancelAlgorithm<'js> {
+    Noop,
+    Function {
+        f: Function<'js>,
+        transformer: Option<Object<'js>>,
+    },
+}
+
+// --- Abstract operations ---
+
+pub(super) fn transform_stream_default_controller_enqueue<'js>(
+    ctx: Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+    chunk: Value<'js>,
+) -> Result<()> {
+    let controller_class = get_readable_default_controller(stream_class)
+        .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
+    let was_readable = transform_stream_readable_is_readable(stream_class);
+
+    if let Err(error) = readable_stream_default_controller_enqueue_value_strict(
+        ctx.clone(),
+        controller_class.clone(),
+        chunk,
+    ) {
+        if matches!(error, rquickjs::Error::Exception) {
+            let thrown = ctx.catch();
+            let reason = stream_class
+                .borrow()
+                .readable
+                .as_ref()
+                .and_then(|readable| match &readable.borrow().state {
+                    ReadableStreamState::Errored(reason) if was_readable => Some(reason.clone()),
+                    _ => None,
+                })
+                .unwrap_or(thrown);
+            let writable = stream_class.borrow().writable.clone().unwrap();
+            WritableStream::error_stream(ctx.clone(), writable, reason.clone())?;
+            return Err(ctx.throw(reason));
+        }
+        return Err(error);
+    }
+
+    // Update backpressure
+    if !transform_stream_readable_is_readable(stream_class) {
+        return Ok(());
+    }
+    let has_backpressure = {
+        let stream = stream_class.borrow();
+        let readable_class = stream.readable.as_ref().unwrap();
+        let readable = readable_class.borrow();
+        let c = controller_class.borrow();
+        let desired = c.readable_stream_default_controller_get_desired_size(&readable);
+        desired.0.is_none_or(|size| size <= 0.0)
+    };
+
+    let current_bp = stream_class.borrow().backpressure;
+    if has_backpressure != current_bp {
+        transform_stream_set_backpressure(&ctx, stream_class, has_backpressure)?;
+    }
+
+    Ok(())
+}
+
+pub(super) fn transform_stream_default_controller_terminate<'js>(
+    ctx: Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+) -> Result<()> {
+    let controller_class = get_readable_default_controller(stream_class)
+        .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
+
+    readable_stream_default_controller_close_stream(ctx.clone(), controller_class)?;
+
+    let error = ctx.eval::<Value, _>("new TypeError('TransformStream terminated')")?;
+    transform_stream_error_writable_and_unblock_write(stream_class, error)?;
+    Ok(())
+}
+
+pub(super) fn transform_stream_error<'js>(
+    ctx: Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+    e: Value<'js>,
+) -> Result<()> {
+    if stream_class.borrow().cancel_callback_in_progress {
+        stream_class.borrow_mut().cancel_error = Some(e.clone());
+    }
+
+    let controller_class = get_readable_default_controller(stream_class)
+        .ok_or_else(|| Exception::throw_type(&ctx, "readable controller not available"))?;
+
+    readable_stream_default_controller_error_stream(controller_class, e.clone())?;
+    transform_stream_error_writable_and_unblock_write(stream_class, e)?;
+    Ok(())
+}
+
+pub(super) fn transform_stream_error_writable_and_unblock_write<'js>(
+    stream_class: &TransformStreamClass<'js>,
+    e: Value<'js>,
+) -> Result<()> {
+    let writable = stream_class.borrow().writable.clone();
+    if let Some(writable) = writable {
+        WritableStream::error_stream(e.ctx().clone(), writable, e.clone())?;
+    }
+    let mut stream = stream_class.borrow_mut();
+    if let Some(ref controller_class) = stream.controller {
+        controller_class.borrow_mut().clear_algorithms();
+    }
+    // Reject and clear the backpressure promise to break reference cycles
+    if let Some(ref bp) = stream.backpressure_change_promise {
+        bp.reject(e.clone())?;
+    }
+    stream.backpressure_change_promise = None;
+    stream.backpressure = false;
+    Ok(())
+}
+
+pub(super) fn transform_stream_set_backpressure<'js>(
+    ctx: &Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+    backpressure: bool,
+) -> Result<Promise<'js>> {
+    let new_bp_promise = ResolveablePromise::new(ctx)?;
+    let promise = new_bp_promise.promise.clone();
+    let mut stream = stream_class.borrow_mut();
+    if let Some(ref bp_promise) = stream.backpressure_change_promise {
+        bp_promise.resolve_undefined()?;
+    }
+    stream.backpressure_change_promise = Some(new_bp_promise);
+    stream.backpressure = backpressure;
+    Ok(promise)
+}
+
+pub(super) fn transform_stream_default_controller_perform_transform<'js>(
+    ctx: Ctx<'js>,
+    stream_class: &TransformStreamClass<'js>,
+    controller_class: &TransformStreamDefaultControllerClass<'js>,
+    chunk: Value<'js>,
+) -> Result<Promise<'js>> {
+    let controller = controller_class.borrow();
+    let Some(algorithm) = controller.transform_algorithm.clone() else {
+        let promise_primordials = crate::utils::promise::PromisePrimordials::get(&ctx)?.clone();
+        return promise_resolved_with(
+            &ctx,
+            &promise_primordials,
+            Err(Exception::throw_type(
+                &ctx,
+                "TransformStream is no longer writable",
+            )),
+        );
+    };
+    drop(controller);
+
+    let promise_primordials = crate::utils::promise::PromisePrimordials::get(&ctx)?.clone();
+
+    let transform_promise = match algorithm {
+        TransformAlgorithm::Identity => {
+            let result =
+                transform_stream_default_controller_enqueue(ctx.clone(), stream_class, chunk);
+            promise_resolved_with(
+                &ctx,
+                &promise_primordials,
+                result.map(|_| Value::new_undefined(ctx.clone())),
+            )?
+        },
+        TransformAlgorithm::Function { f, transformer } => {
+            let result: Result<Value> =
+                f.call((This(transformer), chunk, controller_class.clone()));
+            promise_resolved_with(&ctx, &promise_primordials, result)?
+        },
+    };
+
+    Ok(transform_promise)
+}
+
+pub(super) fn perform_flush<'js>(
+    ctx: Ctx<'js>,
+    _stream_class: &TransformStreamClass<'js>,
+    controller_class: &TransformStreamDefaultControllerClass<'js>,
+) -> Result<Promise<'js>> {
+    let controller = controller_class.borrow();
+    let algorithm = controller
+        .flush_algorithm
+        .clone()
+        .unwrap_or(FlushAlgorithm::Noop);
+    drop(controller);
+
+    let promise_primordials = crate::utils::promise::PromisePrimordials::get(&ctx)?.clone();
+
+    match algorithm {
+        FlushAlgorithm::Noop => Ok(promise_primordials.promise_resolved_with_undefined.clone()),
+        FlushAlgorithm::Function { f, transformer } => {
+            let result: Result<Value> = f.call((This(transformer), controller_class.clone()));
+            promise_resolved_with(&ctx, &promise_primordials, result)
+        },
+    }
+}
+
+pub(super) fn perform_cancel<'js>(
+    ctx: Ctx<'js>,
+    controller_class: &TransformStreamDefaultControllerClass<'js>,
+    reason: Value<'js>,
+) -> Result<Promise<'js>> {
+    let controller = controller_class.borrow();
+    let algorithm = controller
+        .cancel_algorithm
+        .clone()
+        .unwrap_or(CancelAlgorithm::Noop);
+    drop(controller);
+
+    let promise_primordials = crate::utils::promise::PromisePrimordials::get(&ctx)?.clone();
+
+    match algorithm {
+        CancelAlgorithm::Noop => Ok(promise_primordials.promise_resolved_with_undefined.clone()),
+        CancelAlgorithm::Function { f, transformer } => {
+            controller_class
+                .borrow()
+                .stream
+                .borrow_mut()
+                .cancel_callback_in_progress = true;
+            let result: Result<Value> = f.call((This(transformer), reason));
+            promise_resolved_with(&ctx, &promise_primordials, result)
+        },
+    }
+}
+
+fn transform_stream_readable_is_readable<'js>(stream_class: &TransformStreamClass<'js>) -> bool {
+    stream_class
+        .borrow()
+        .readable
+        .as_ref()
+        .is_some_and(|readable| matches!(readable.borrow().state, ReadableStreamState::Readable))
+}

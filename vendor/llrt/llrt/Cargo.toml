@@ -1,0 +1,64 @@
+[package]
+name = "llrt"
+version = "0.10.0-beta"
+edition = "2021"
+license-file = "LICENSE"
+
+[features]
+default = ["macro", "tls-ring", "crypto-rust", "pqc"]
+macro = ["llrt_core/macro"]
+lambda = ["llrt_core/lambda"]
+no-sdk = ["llrt_core/no-sdk"]
+uncompressed = ["llrt_core/uncompressed"]
+bindgen = ["llrt_core/bindgen"]
+
+pqc = ["llrt_core/pqc"]
+intl402 = ["llrt_core/intl402"]
+
+# TLS crypto backend features
+tls-ring = ["llrt_core/tls-ring"]
+tls-aws-lc = ["llrt_core/tls-aws-lc"]
+tls-graviola = ["llrt_core/tls-graviola"]
+tls-openssl = ["llrt_core/tls-openssl"]
+
+# Crypto provider features
+crypto-rust = ["llrt_core/crypto-rust"]
+crypto-ring = ["llrt_core/crypto-ring"]
+crypto-ring-rust = ["llrt_core/crypto-ring-rust"]
+crypto-graviola = ["llrt_core/crypto-graviola"]
+crypto-graviola-rust = ["llrt_core/crypto-graviola-rust"]
+crypto-openssl = ["llrt_core/crypto-openssl"]
+
+# OpenSSL vendored (builds OpenSSL from source)
+openssl-vendored = ["llrt_core/openssl-vendored"]
+
+[dependencies]
+constcat = { version = "0.6", default-features = false }
+crossterm = { version = "0.29", features = [
+  "events",
+  "windows",
+], default-features = false }
+jiff = { version = "0.2" }
+llrt_core = { path = "../llrt_core", default-features = false }
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+], default-features = false }
+tracing = { version = "0.1", features = ["log"], default-features = false }
+tracing-core = { version = "0.1", default-features = false }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+snmalloc-rs = { version = "0.7", features = [
+  "default",
+  "lto",
+], default-features = false }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+llrt_test = { version = "0.10.0-beta", path = "../libs/llrt_test" }
+
+[[bin]]
+name = "llrt"
+path = "src/main.rs"

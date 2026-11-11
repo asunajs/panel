@@ -1,0 +1,20 @@
+[package]
+name = "llrt_test"
+description = "LLRT test helpers"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+
+[lib]
+name = "llrt_test"
+path = "src/lib.rs"
+
+[dependencies]
+rquickjs = { version = "0.14", features = [
+  "futures",
+  "loader",
+  "parallel",
+], default-features = false }
+tokio = { version = "1", features = ["fs"], default-features = false }
+uuid = { version = "1", features = ["v4"], default-features = false }

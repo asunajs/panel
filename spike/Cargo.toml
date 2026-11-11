@@ -1,0 +1,18 @@
+[package]
+name = "spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+llrt_core = { path = "../vendor/llrt/llrt_core", default-features = false, features = [
+  "no-sdk",
+  "macro",
+  "tls-ring",
+  "crypto-rust",
+  "intl402",
+] }
+mach2 = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[workspace]

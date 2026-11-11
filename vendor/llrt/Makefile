@@ -1,0 +1,387 @@
+TARGET_linux_x86_64 = x86_64-unknown-linux-musl
+TARGET_linux_arm64 = aarch64-unknown-linux-musl
+TARGET_darwin_x86_64 = x86_64-apple-darwin
+TARGET_darwin_arm64 = aarch64-apple-darwin
+TARGET_windows_x86_64 = x86_64-pc-windows-gnu
+TARGET_windows_arm64 = aarch64-is-not-yet-supported
+RUST_VERSION = nightly-2026-08-26
+TOOLCHAIN = +$(RUST_VERSION)
+BUILD_ARG = $(TOOLCHAIN) build -r
+ZIGBUILD_ARG = $(TOOLCHAIN) zigbuild -r
+ZIGBUILD_RUN = RUSTUP_TOOLCHAIN=$(RUST_VERSION) cargo-zigbuild run -r
+ZIGBUILD_TEST = RUSTUP_TOOLCHAIN=$(RUST_VERSION) cargo-zigbuild test
+BUILD_DIR = ./target/release
+BUNDLE_DIR = bundle
+
+TS_SOURCES = $(wildcard llrt_core/src/modules/js/*.ts) $(wildcard llrt_core/src/modules/js/@llrt/test/*.ts) $(wildcard llrt_core/src/modules/js/@llrt/*.ts) $(wildcard tests/unit/*.ts)
+STD_JS_FILE = $(BUNDLE_DIR)/js/@llrt/std.js
+
+RELEASE_ARCH_NAME_x64 = x86_64
+RELEASE_ARCH_NAME_arm64 = arm64
+
+LAMBDA_PREFIX = llrt-lambda
+RELEASE_TARGETS = arm64 x64
+RELEASE_ZIPS = $(addprefix $(LAMBDA_PREFIX)-,$(RELEASE_TARGETS))
+
+ifeq ($(OS),Windows_NT)
+	DETECTED_OS := windows
+	ARCH = x86_64
+else
+	DETECTED_OS := $(shell uname | tr A-Z a-z)
+	ARCH = $(shell uname -m)
+endif
+
+ifeq ($(ARCH),aarch64)
+	ARCH = arm64
+endif
+
+ZSTD_LIB_CC_ARGS = -s -O3 -flto
+ZSTD_LIB_ARGS = -j lib-nomt UNAME=Linux ZSTD_LIB_COMPRESSION=0 ZSTD_LIB_DICTBUILDER=0 AR="zig ar"
+ifeq ($(DETECTED_OS),windows)
+ZSTD_LIB_CC_x64 = CC="zig cc -target x86_64-windows-gnu $(ZSTD_LIB_CC_ARGS)"
+else
+ZSTD_LIB_CC_arm64 = CC="zig cc -target aarch64-linux-musl $(ZSTD_LIB_CC_ARGS)"
+ZSTD_LIB_CC_x64 = CC="zig cc -target x86_64-linux-musl $(ZSTD_LIB_CC_ARGS)"
+endif
+
+CURRENT_TARGET ?= $(TARGET_$(DETECTED_OS)_$(ARCH))
+
+ifeq ($(DETECTED_OS),linux)
+CURRENT_BUILD_ARG = $(ZIGBUILD_ARG)
+CURRENT_BUILD_SUBCOMMAND = zigbuild
+CURRENT_TEST = $(ZIGBUILD_TEST)
+CURRENT_RUN = $(ZIGBUILD_RUN)
+else
+CURRENT_BUILD_ARG = $(BUILD_ARG)
+CURRENT_BUILD_SUBCOMMAND = build
+CURRENT_TEST = cargo $(TOOLCHAIN) test
+CURRENT_RUN = cargo $(TOOLCHAIN) run -r
+endif
+
+define alias_template
+release${1}: llrt-$(DETECTED_OS)-$(ARCH)${1}.zip
+
+llrt-linux-x86_64${1}.zip: llrt-linux-x64${1}.zip
+llrt-windows-x86_64${1}.zip: llrt-windows-x64${1}.zip
+llrt-darwin-x86_64${1}.zip: llrt-darwin-x64${1}.zip
+endef
+
+$(eval $(call alias_template,-full-sdk))
+$(eval $(call alias_template,))
+$(eval $(call alias_template,-no-sdk))
+
+define release_template
+release-aws-${1}${2}: | llrt-lambda-${1}${2}.zip llrt-container-${1}${2} llrt-linux-${1}${2}.zip
+
+llrt-lambda-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
+llrt-lambda-${1}${2}.zip: | clean-js js
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda
+	./pack target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/bootstrap
+	@rm -rf $$@
+	zip -j $$@ target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/bootstrap
+
+llrt-container-${1}${2}: export SDK_BUNDLE_MODE = ${3}
+llrt-container-${1}${2}: | clean-js js
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1})) --features lambda,uncompressed
+	mv target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt $$@
+
+llrt-linux-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
+llrt-linux-${1}${2}.zip: | clean-js js
+	cargo $$(ZIGBUILD_ARG) --target $$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))
+	@rm -rf $$@
+	zip -j $$@ target/$$(TARGET_linux_$$(RELEASE_ARCH_NAME_${1}))/release/llrt
+
+llrt-darwin-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
+llrt-darwin-${1}${2}.zip: | clean-js js
+	cargo $$(BUILD_ARG) --target $$(TARGET_darwin_$$(RELEASE_ARCH_NAME_${1}))
+	@rm -rf $$@
+	zip -j $$@ target/$$(TARGET_darwin_$$(RELEASE_ARCH_NAME_${1}))/release/llrt
+
+# llrt-windows-arm64* is automatically generated, but not currently supported.
+llrt-windows-${1}${2}.zip: export SDK_BUNDLE_MODE = ${3}
+llrt-windows-${1}${2}.zip: | clean-js js
+	cargo $$(BUILD_ARG) --target $$(TARGET_windows_$$(RELEASE_ARCH_NAME_${1}))
+	zip -j $$@ target/$$(TARGET_windows_$$(RELEASE_ARCH_NAME_${1}))/release/llrt.exe
+endef
+
+$(foreach target,$(RELEASE_TARGETS),$(eval $(call release_template,$(target),-full-sdk,FULL)))
+$(foreach target,$(RELEASE_TARGETS),$(eval $(call release_template,$(target),,STD)))
+$(foreach target,$(RELEASE_TARGETS),$(eval $(call release_template,$(target),-no-sdk,NONE)))
+
+build: js
+	cargo $(CURRENT_BUILD_ARG) --target $(CURRENT_TARGET)
+
+ifeq ($(DETECTED_OS),windows)
+stdlib:
+	rustup toolchain install $(RUST_VERSION) --target $(TARGET_windows_x86_64)
+	rustup target add $(TARGET_windows_x86_64)
+	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(TARGET_windows_x86_64)
+else
+stdlib-x64:
+	rustup toolchain install $(RUST_VERSION) --target $(TARGET_linux_x86_64)
+	rustup target add $(TARGET_linux_x86_64)
+	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(TARGET_linux_x86_64)
+
+stdlib-arm64:
+	rustup toolchain install $(RUST_VERSION) --target $(TARGET_linux_arm64)
+	rustup target add $(TARGET_linux_arm64)
+	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(TARGET_linux_arm64)
+
+stdlib: | stdlib-x64 stdlib-arm64
+	command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild
+endif
+
+toolchain:
+	rustup toolchain install $(RUST_VERSION) --target $(CURRENT_TARGET)
+	rustup target add $(CURRENT_TARGET)
+	rustup component add rust-src --toolchain $(RUST_VERSION) --target $(CURRENT_TARGET)
+ifeq ($(DETECTED_OS),linux)
+	command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild
+endif
+
+clean-js:
+	rm -rf ./bundle
+
+clean: clean-js
+	rm -rf ./target
+	rm -rf ./lib
+
+js: $(STD_JS_FILE)
+
+bundle/js/%.js: $(TS_SOURCES)
+	node build.mjs
+
+fix:
+	npx pretty-quick
+	cargo fix --allow-dirty
+	cargo clippy --fix --allow-dirty
+	cargo fmt
+
+bloat: js
+	cargo $(CURRENT_BUILD_SUBCOMMAND) --profile=flame --target $(CURRENT_TARGET)
+	cargo bloat --profile=flame --crates
+
+run: export AWS_LAMBDA_FUNCTION_NAME = n/a
+run: export AWS_LAMBDA_FUNCTION_MEMORY_SIZE = 1
+run: export AWS_LAMBDA_FUNCTION_VERSION = 1
+run: export AWS_LAMBDA_RUNTIME_API = localhost:3000
+run: export _EXIT_ITERATIONS = 1
+run: export JS_MINIFY = 0
+run: export RUST_LOG = llrt=trace
+run: export _HANDLER = index.handler
+run:
+	cargo run -vv
+
+run-ssr: export AWS_LAMBDA_RUNTIME_API = localhost:3000
+run-ssr: export TABLE_NAME=quickjs-table
+run-ssr: export AWS_REGION = us-east-1
+run-ssr: export _HANDLER = index.handler
+run-ssr: js
+	cargo build
+	cd example/functions && yarn build && cd build && ../../../target/debug/llrt
+
+flame:
+	cargo flamegraph --profile flame -- index.mjs
+
+run-cli: export RUST_LOG = llrt=trace
+run-cli: js
+	cargo run
+
+test: export JS_MINIFY = 0
+test: export TEST_SUB_DIR = unit
+test: export LLRT_ASYNC_HOOKS = 1
+test: js
+	cargo run --features intl402 -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+
+setup-wpt:
+	@if [ ! -d wpt/.git ]; then \
+		echo "Cloning WPT (shallow, master HEAD only — this may take a few minutes)..."; \
+		git submodule add --force --depth 1 -b master --progress https://github.com/web-platform-tests/wpt wpt || \
+		git submodule update --init --depth 1 --progress wpt; \
+	fi
+	@echo "Configuring sparse-checkout..."
+	cd wpt && \
+	git sparse-checkout init --no-cone && \
+	git sparse-checkout set \
+		/README.md \
+		/common \
+		/console \
+		/docs \
+		/encoding \
+		/FileAPI \
+		/fetch \
+		/hr-time \
+		/resources \
+		/streams \
+		/third_party/test262/harness/assert.js \
+		/third_party/test262/harness/sta.js \
+		/third_party/test262/harness/temporalHelpers.js \
+		/third_party/test262/test/intl402/Temporal \
+		/tools \
+		/url \
+		/WebCryptoAPI \
+		/webidl \
+		/wpt \
+		/xhr
+	@$(MAKE) setup-wpt-hosts
+
+setup-wpt-hosts:
+	@if grep -q 'web-platform.test' /etc/hosts 2>/dev/null; then exit 0; fi; \
+	if [ -n "$$CI" ]; then \
+		./wpt/wpt make-hosts-file | sudo tee -a /etc/hosts; \
+	else \
+		echo ""; \
+		echo "WPT requires entries in /etc/hosts that are not yet present."; \
+		echo "Run: ./wpt/wpt make-hosts-file | sudo tee -a /etc/hosts"; \
+		echo ""; \
+		printf "Add now? [y/N] "; \
+		read -r answer; \
+		if [ "$$answer" = "y" ] || [ "$$answer" = "Y" ]; then \
+			./wpt/wpt make-hosts-file | sudo tee -a /etc/hosts; \
+		else \
+			echo "Skipped."; \
+		fi; \
+	fi
+
+update-wpt: setup-wpt
+	( cd wpt && git fetch origin master && git reset --hard FETCH_HEAD && git log -1 --oneline > ../tests/wpt/revision )
+
+test-wpt: export JS_MINIFY = 0
+test-wpt: export TEST_SUB_DIR = wpt
+test-wpt: export TEST_TIMEOUT = 20000
+test-wpt: setup-wpt js
+	@echo "Starting WPT server (logs: wpt_server.log)..."
+	@./wpt/wpt serve >wpt_server.log 2>&1 & WPT_PID=$$!; \
+	trap 'kill $$WPT_PID 2>/dev/null' EXIT; \
+	for url in http://web-platform.test:8000/ \
+	           http://www1.web-platform.test:8000/ \
+	           https://web-platform.test:8443/; do \
+		printf "Waiting for %s " "$$url"; \
+		ready=; \
+		for i in $$(seq 1 150); do \
+			curl -sfk --connect-timeout 1 "$$url" >/dev/null 2>&1 && { ready=1; echo " ready."; break; }; \
+			if ! kill -0 $$WPT_PID 2>/dev/null; then \
+				echo "WPT server exited unexpectedly:"; cat wpt_server.log; exit 1; \
+			fi; \
+			printf "."; \
+			sleep 0.2; \
+		done; \
+		[ -n "$$ready" ] || { echo " timeout."; cat wpt_server.log; exit 1; }; \
+	done; \
+	npx pretty-quick --pattern "tests/wpt/**/*.{js,ts,json}"; \
+	TEST_REPORT_FILE=wpt_errors.txt cargo run --features intl402 -- test -d bundle/js/__tests__/$(TEST_SUB_DIR); \
+	kill $$WPT_PID 2>/dev/null
+
+# Run the WPT suite and compare the failing-test list (wpt_errors.txt, written
+# by test-wpt) against the committed baseline. Fails on any difference: a new
+# entry is a regression; a removed entry means a test now passes and the
+# baseline is stale. On a mismatch the regenerated wpt_errors.txt is left in
+# place, so to accept the change just `git add wpt_errors.txt` and commit.
+check-wpt:
+	@cp wpt_errors.txt wpt_errors.baseline 2>/dev/null || : > wpt_errors.baseline
+	@$(MAKE) test-wpt
+	@if diff -ua wpt_errors.baseline wpt_errors.txt; then \
+		rm -f wpt_errors.baseline; \
+		echo "WPT results match the committed baseline."; \
+	else \
+		rm -f wpt_errors.baseline; \
+		echo ""; \
+		echo "WPT results differ from the committed baseline (diff above)."; \
+		echo "If the change is intended, commit the regenerated wpt_errors.txt."; \
+		exit 1; \
+	fi
+
+E2E_STACK_NAME := LLRTReleaseIntegTestResourcesStack
+E2E_TEMPLATE := tests/e2e/IntegTestResourcesStack.template.yml
+
+setup-e2e:
+	@echo "Deploying $(E2E_STACK_NAME)..."
+	aws cloudformation deploy \
+		--stack-name $(E2E_STACK_NAME) \
+		--template-file $(E2E_TEMPLATE) \
+		--capabilities CAPABILITY_IAM \
+		--no-fail-on-empty-changeset
+	@echo "Stack ready. Export env vars with:"
+	@echo '  eval $$(make e2e-env)'
+
+E2E_OUTPUTS := \
+	AwsSmokeTestBucket:AWS_SMOKE_TEST_BUCKET \
+	AwsSmokeTestIdentityPoolId:AWS_SMOKE_TEST_IDENTITY_POOL_ID \
+	AwsSmokeTestMrapArn:AWS_SMOKE_TEST_MRAP_ARN
+
+e2e-env:
+	@outputs=$$(aws cloudformation describe-stacks --stack-name $(E2E_STACK_NAME) \
+		--query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output text); \
+	for mapping in $(E2E_OUTPUTS); do \
+		echo "$$outputs" | sed -n "s/^$${mapping%%:*}\t/export $${mapping##*:}=/p"; \
+	done; \
+	echo "export AWS_REGION=$$(aws cloudformation describe-stacks --stack-name $(E2E_STACK_NAME) --query 'Stacks[0].StackId' --output text | cut -d: -f4)"; \
+	aws configure export-credentials --format env-no-export 2>/dev/null | sed 's/^/export /'
+
+test-e2e: export JS_MINIFY = 0
+test-e2e: export TEST_TIMEOUT = 60000
+test-e2e: export SDK_BUNDLE_MODE = STD
+test-e2e: export TEST_SUB_DIR = e2e
+test-e2e: setup-e2e js
+	eval $$($(MAKE) e2e-env) && cargo run -- test -d bundle/js/__tests__/$(TEST_SUB_DIR) $(TEST_FILTER)
+
+test-ci: export JS_MINIFY = 0
+test-ci: export RUST_BACKTRACE = 1
+test-ci: export TEST_SUB_DIR = unit
+test-ci: export LLRT_ASYNC_HOOKS = 1
+test-ci: clean-js | toolchain js
+ifdef CARGO_FEATURES
+	$(CURRENT_TEST) --target $(CURRENT_TARGET) -Z build-std -Z build-std-features $(CARGO_FEATURES) -- --nocapture --show-output
+	$(CURRENT_RUN) --target $(CURRENT_TARGET) $(CARGO_FEATURES) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+else
+	$(CURRENT_TEST) --target $(CURRENT_TARGET) -Z build-std -Z build-std-features --features lambda -- --nocapture --show-output
+	$(CURRENT_RUN) --target $(CURRENT_TARGET) -- test -d bundle/js/__tests__/$(TEST_SUB_DIR)
+endif
+
+libs-arm64: lib/arm64/libzstd.a lib/zstd.h lib/zstd_errors.h
+libs-x64: lib/x64/libzstd.a lib/zstd.h lib/zstd_errors.h
+
+libs: | libs-arm64 libs-x64
+
+lib/zstd.h:
+	cp zstd/lib/zstd.h $@
+
+lib/zstd_errors.h:
+	cp zstd/lib/zstd_errors.h $@
+
+lib/arm64/libzstd.a:
+	mkdir -p $(dir $@)
+	rm -f zstd/lib/-.o
+	cd zstd/lib && make clean && make $(ZSTD_LIB_ARGS) $(ZSTD_LIB_CC_arm64)
+	cp zstd/lib/libzstd.a $@
+
+lib/x64/libzstd.a:
+	mkdir -p $(dir $@)
+	rm -f zstd/lib/-.o
+	cd zstd/lib && make clean && make $(ZSTD_LIB_ARGS) $(ZSTD_LIB_CC_x64)
+	cp zstd/lib/libzstd.a $@
+
+bench:
+	cargo build -r
+	hyperfine -N --warmup=100 "node fixtures/hello.js" "deno run fixtures/hello.js" "bun fixtures/hello.js" "$(BUILD_DIR)/llrt fixtures/hello.js" "qjs fixtures/hello.js"
+
+deploy:
+	cd example/infrastructure && yarn deploy --require-approval never
+
+check:
+	cargo clippy --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring,pqc,intl402" -- -D warnings
+	cargo clippy --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring" -- -D warnings
+
+test-rs:
+	cargo test --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring,pqc,intl402"
+	cargo test --all-targets --no-default-features --features "lambda,macro,no-sdk,uncompressed,crypto-rust,tls-ring"
+
+check-crates:
+	cargo metadata --no-deps --format-version 1 --quiet | \
+	jq -r '.packages[] | select(.manifest_path | contains("modules/")) | .name' | \
+	while read crate; do \
+	  echo "Checking crate: $$crate"; \
+	  cargo check -p "$$crate"; \
+	done
+
+.PHONY: libs check check-all check-crates libs-arm64 libs-x64 toolchain clean-js release-linux release-darwin release-windows lambda stdlib stdlib-x64 stdlib-arm64 test test-ci test-e2e setup-e2e e2e-env run js run-release build release clean flame deploy

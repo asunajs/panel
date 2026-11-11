@@ -1,0 +1,26 @@
+[package]
+name = "llrt_numbers"
+description = "LLRT numbers helpers"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+
+[lib]
+name = "llrt_numbers"
+path = "src/lib.rs"
+
+[dependencies]
+itoa = { version = "1", default-features = false }
+llrt_utils = { version = "0.10.0-beta", path = "../llrt_utils", default-features = false }
+rquickjs = { version = "0.14", default-features = false }
+ryu = { version = "1", default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false }
+llrt_test = { version = "0.10.0-beta", path = "../llrt_test" }
+rand = { version = "0.10", features = ["alloc"], default-features = false }
+
+[[bench]]
+name = "numbers"
+harness = false

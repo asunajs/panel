@@ -1,0 +1,43 @@
+[package]
+name = "llrt_os"
+description = "LLRT Module OS"
+version = "0.10.0-beta"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/awslabs/llrt"
+readme = "README.md"
+
+[features]
+default = ["network", "statistics", "system"]
+
+network = ["sysinfo/network", "system"]
+statistics = ["system"]
+system = ["sysinfo/system"]
+
+[dependencies]
+home = { version = "0.5", default-features = false }
+llrt_utils = { version = "0.10.0-beta", path = "../../libs/llrt_utils", default-features = false }
+num_cpus = { version = "1", default-features = false }
+once_cell = { version = "1", features = ["std"], default-features = false }
+rquickjs = { version = "0.14", features = ["std"], default-features = false }
+
+# Optional
+sysinfo = { version = "0.40", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false }
+uzers = { version = "0.12", features = ["cache"], default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+whoami = { version = "2", default-features = false }
+windows-registry = { version = "0.100", features = [
+  "std",
+], default-features = false }
+windows-result = { version = "0.100", features = [
+  "std",
+], default-features = false }
+windows-version = { version = "0.100", default-features = false }
+
+[dev-dependencies]
+llrt_test = { path = "../../libs/llrt_test" }
+tokio = { version = "1", features = ["macros", "rt", "test-util"], default-features = false }

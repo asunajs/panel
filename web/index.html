@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>panel-llrt</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header>
+      <h1>panel-llrt</h1>
+      <nav>
+        <a href="#plugins">插件</a>
+        <a href="#tasks">任务</a>
+        <a href="#runs">运行记录</a>
+        <a href="#logs">日志</a>
+      </nav>
+      <div id="conn" class="conn">连接中</div>
+    </header>
+
+    <section id="token-box" class="token-box hidden">
+      <label for="token">面板令牌</label>
+      <input id="token" type="password" autocomplete="current-password" />
+      <button id="token-save" type="button">保存</button>
+      <span class="hint">令牌只存在本机 localStorage，通过请求头发送。</span>
+    </section>
+
+    <main>
+      <section id="plugins">
+        <h2>插件</h2>
+        <table>
+          <thead>
+            <tr><th>名称</th><th>任务数</th><th>状态</th><th>操作</th></tr>
+          </thead>
+          <tbody id="plugins-body"></tbody>
+        </table>
+      </section>
+
+      <section id="tasks">
+        <h2>任务</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>插件</th><th>任务</th><th>表达式</th><th>预算</th>
+              <th>下次</th><th>跑过</th><th>状态</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tasks-body"></tbody>
+        </table>
+      </section>
+
+      <section id="runs">
+        <h2>运行记录</h2>
+        <table>
+          <thead>
+            <tr><th>#</th><th>插件</th><th>任务</th><th>开始</th><th>耗时</th><th>结果</th></tr>
+          </thead>
+          <tbody id="runs-body"></tbody>
+        </table>
+        <div id="run-detail" class="detail hidden"></div>
+      </section>
+
+      <section id="logs">
+        <h2>日志 <button id="logs-clear" type="button">清空视图</button></h2>
+        <div id="logs-view" class="logs"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
