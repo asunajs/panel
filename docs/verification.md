@@ -223,3 +223,38 @@ PY
 **回归用例**：`engine::tests::sqlite_exec_does_not_report_stale_changes_or_rowid`，
 覆盖 DDL、INSERT、空 UPDATE，以及「先 INSERT 再 DDL」这个原始污染场景。
 反向验证过：退回旧写法即红（`INSERT 之后的 DDL 报了陈旧的 changes`）。
+
+## 14. 本地实跑（已定，2026-11-11 晚，默认配置）
+
+`./target/debug/panel-llrt`，全用默认值：`PANEL_BIND=127.0.0.1:8787`、
+`PANEL_DATA_DIR=data`、`PANEL_PLUGINS_DIR=plugins`、**不设令牌**（回环 + Host 闸）。
+
+启动输出（无凭据态是**吵**的，这是 §5 S3 的修法）：
+
+```
+⚠ 没有令牌凭据（既没有 PANEL_TOKEN，也没有 data/auth.json）：API 完全不鉴权。
+仅允许绑回环，且只接受回环 Host 头（挡 DNS rebinding）。
+需要鉴权就设 PANEL_TOKEN=<令牌> 后重启。
+panel-llrt listening on http://127.0.0.1:8787
+```
+
+| 检查 | 读数 |
+|---|---|
+| `/healthz` / `/` / `/app.js` / `/app.css` | 200 / 200 / 200(10682B) / 200(3235B) |
+| `/api/state` | `auth:false`，插件 `hello`(2 任务) + `long`(1 任务)，3 个任务表项 |
+| 手动派发 `hello/tick` | 200，run#1 `ok`，`hello_ticks` 落一行 `manual` |
+| 熔断 | `boom` 第 5 次连续失败 → `tripped:true, trips:1`（阈值 5）；熔断后手动触发仍派发（人触发优先），`trips:2` |
+| SSE `/api/logs/stream` | 边流边触发 tick，收到 2 条 `data:`，带 `run_id:11` 归属 |
+| CSRF | 写接口不带 `x-panel: 1` → 403 |
+| 插件名穿越 | `/api/plugins/..%2F..%2Fetc/reload` → 400 |
+| 热重载 | `POST /api/plugins/hello/reload` → 200，任务表随之重置 |
+| Host 闸 | `Host: evil.com` → 403；`Host: localhost` → 200 |
+| 安全头 | CSP / `x-frame-options: DENY` / `nosniff` / `no-referrer` 全在 |
+| `/api/runs/99999`、未知任务 | 400（不是 500、不是 panic） |
+| 未知插件的 `unload` | 200（幂等：没加载过也算卸完，记录在案，不当 bug） |
+
+**WebUI 真的渲染出来了**（headless Edge，`--dump-dom` + `--screenshot`）：DOM 里能查到
+`hello` / `long` / `tick` / `boom`，截图见本轮交付；界面显示插件表（2+1 任务、状态「空闲」）、
+任务表（`@every 30s` / `@every 5m` / `@every 1d`，`跑过` 计数、`熔断 ×2 | Error: 故意失败…`）、
+运行记录 12 条（耗时 1–3ms），右上角 `日志已连接`（SSE 握手成功）。
+`node --check web/app.js` 通过。
