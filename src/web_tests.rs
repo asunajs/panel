@@ -18,6 +18,7 @@ async fn setup() -> (Router, Db) {
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        data_dir: PathBuf::from("data"),
         auth: None,
     };
     (router(st), db)
@@ -155,6 +156,20 @@ async fn state_and_healthz_answer_on_an_empty_panel() {
     assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
 }
 
+
+#[tokio::test]
+async fn config_endpoint_reports_an_absent_file_honestly() {
+    let (app, _db) = setup().await;
+    let (status, body) = get(&app, "/api/config").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 测试的 data_dir 是相对路径 "data"，正常不存在：
+    assert_eq!(body["exists"], false, "{body}");
+    assert_eq!(body["json"], "{}", "缺文件也要给出可用的空配置");
+    assert_eq!(body["keys"].as_array().unwrap().len(), 0);
+    assert!(body["max_bytes"].as_u64().unwrap() >= 4096);
+    assert_eq!(body["truncated"], false);
+}
+
 #[tokio::test]
 async fn write_without_the_custom_header_is_forbidden() {
     let (app, _db) = setup().await;
@@ -196,6 +211,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        data_dir: PathBuf::from("data"),
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
@@ -247,6 +263,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         log,
         sched,
         plugins_dir: PathBuf::from("plugins"),
+        data_dir: PathBuf::from("data"),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
     let req = Request::get("/api/state")

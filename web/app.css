@@ -2,26 +2,27 @@
 /* panel-llrt 控制台样式。零构建：一个文件、无外部依赖、无 @import。 */
 
 :root {
-  /* 亮色 = 粉色系：底、线、字都带一点粉调，主色用 pink-500（不是玫瑰红）。 */
-  --bg: #fdf6f9;
-  --bg-grad: radial-gradient(1100px 620px at 100% -12%, #fbd5e6 0%, transparent 64%);
-  --surface: #ffffff;
-  --surface-2: #fdf2f7;
-  --line: #f3e2ea;
-  --line-strong: #e8cdd9;
-  --fg: #2a1620;
-  --fg-2: #5d4150;
-  --dim: #8d6f7d;
-  --accent: #ec4899;
-  --accent-fg: #ffffff;
-  --accent-soft: #fce4f0;
-  --ok: #0f7a4a;
-  --ok-soft: #e4f6ec;
-  --warn: #9a5b00;
-  --warn-soft: #fdf1e0;
-  --err: #c02545;
-  --err-soft: #fde9ee;
-  --shadow-sm: 0 1px 2px rgba(60, 20, 40, .05), 0 1px 3px rgba(60, 20, 40, .06);
+  /* 亮色 = 粉色系，但要**不刺眼**：底色偏暖灰粉、卡片是米白不是纯白、
+     主色降饱和（`#ec4899` 那种荧光粉在浅底上会晃眼）。 */
+  --bg: #f4eef1;
+  --bg-grad: radial-gradient(1200px 600px at 100% -14%, #ecdfe6 0%, transparent 70%);
+  --surface: #fbf9fa;
+  --surface-2: #f6f0f3;
+  --line: #e7dde2;
+  --line-strong: #d6c8d0;
+  --fg: #3a2f35;
+  --fg-2: #5f5158;
+  --dim: #8c7c84;
+  --accent: #c25f88;
+  --accent-fg: #fffafc;
+  --accent-soft: #f2e2ea;
+  --ok: #3f7f5f;
+  --ok-soft: #e6f0ea;
+  --warn: #96702c;
+  --warn-soft: #f4ece0;
+  --err: #a8495d;
+  --err-soft: #f6e6ea;
+  --shadow-sm: 0 1px 2px rgba(70, 40, 55, .04), 0 1px 3px rgba(70, 40, 55, .05);
   --shadow-md: 0 8px 24px -12px rgba(16, 24, 40, .18), 0 2px 6px rgba(16, 24, 40, .06);
   --radius: 14px;
   --radius-sm: 10px;
@@ -31,25 +32,27 @@
           "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* 深色 = 紫罗兰，同样降刺眼：底不压到纯黑、字不顶到纯白、主色降饱和。
+   纯黑底 + 纯白字的高对比是「刺眼」的主要来源，比主色本身更影响观感。 */
 [data-theme="dark"] {
-  --bg: #0e1015;
-  --bg-grad: radial-gradient(1200px 600px at 100% -10%, #3a1428 0%, transparent 62%);
-  --surface: #161922;
-  --surface-2: #1b1f2a;
-  --line: #262b36;
-  --line-strong: #333a48;
-  --fg: #eef1f6;
-  --fg-2: #c2c8d4;
-  --dim: #8b93a3;
-  --accent: #f472b6;
-  --accent-fg: #1b0a14;
-  --accent-soft: #3a1428;
-  --ok: #4ade80;
-  --ok-soft: #10261a;
-  --warn: #fbbf24;
-  --warn-soft: #2a2110;
-  --err: #f87171;
-  --err-soft: #2b1414;
+  --bg: #14161c;
+  --bg-grad: radial-gradient(1200px 600px at 100% -14%, #1b1930 0%, transparent 66%);
+  --surface: #191c23;
+  --surface-2: #1e222a;
+  --line: #272b35;
+  --line-strong: #333845;
+  --fg: #ccd2dd;
+  --fg-2: #a7aebc;
+  --dim: #7b8393;
+  --accent: #8b82e0;
+  --accent-fg: #101218;
+  --accent-soft: #232044;
+  --ok: #5cb98a;
+  --ok-soft: #16261d;
+  --warn: #cfa257;
+  --warn-soft: #26200f;
+  --err: #d97a78;
+  --err-soft: #2a191b;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-md: 0 10px 30px -12px rgba(0, 0, 0, .7);
 }
@@ -100,6 +103,11 @@ button, input, select { font: inherit; color: inherit; }
   background: linear-gradient(140deg, #f9a8d4, #ec4899 52%, #d6336c);
   box-shadow: 0 4px 10px -3px rgba(236, 72, 153, .5);
 }
+[data-theme="dark"] .brand-mark {
+  background: linear-gradient(140deg, #a99ef0, #8b82e0 52%, #6f68c4);
+  box-shadow: 0 4px 10px -3px rgba(139, 130, 224, .35);
+}
+
 .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
 .brand-text strong { font-size: 14px; }
 .brand-text span { font-size: 11px; color: var(--dim); letter-spacing: .02em; }
@@ -430,3 +438,40 @@ button, input, select { font: inherit; color: inherit; }
   .log-line { grid-template-columns: 64px 52px 1fr; }
   .log-plugin { display: none; }
 }
+
+/* ---------- 搜索 / 勾选 / 排序 / 弹窗 / 命中高亮 ---------- */
+
+.search { margin-left: auto; }
+.search input {
+  height: 30px; width: 190px; padding: 0 10px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12.5px; color: var(--fg); outline: none;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.search input::placeholder { color: var(--dim); }
+.search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dim); cursor: pointer; user-select: none; }
+.check input { accent-color: var(--accent); width: 14px; height: 14px; }
+
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--fg-2); }
+th.sortable[aria-sort] { color: var(--accent); }
+th .arrow { margin-left: 3px; font-size: 10px; opacity: .8; }
+
+tr.clickable { cursor: pointer; }
+mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
+
+.modal { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(24, 18, 26, .38); backdrop-filter: blur(3px); }
+.modal-card {
+  position: relative; width: min(420px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 10px; padding: 20px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow-md);
+}
+.modal-card h2 { font-size: 15px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
+.settings-note { margin: 10px 0 0; font-size: 11.5px; color: var(--dim); }
+.json-box { max-height: 420px; }

@@ -95,6 +95,7 @@ async fn main() -> Result<(), String> {
         log: log.clone(),
         sched: sched.clone(),
         plugins_dir,
+        data_dir,
         auth: provisioned.auth.map(Arc::new),
     };
     let app = web::router(st);

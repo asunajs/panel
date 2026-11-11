@@ -20,6 +20,7 @@
         <a class="nav-item" href="#tasks" data-view="tasks"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg><span>任务</span></a>
         <a class="nav-item" href="#runs" data-view="runs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>运行记录</span></a>
         <a class="nav-item" href="#logs" data-view="logs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h10"/></svg><span>日志</span></a>
+        <a class="nav-item" href="#settings" data-view="settings"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span></a>
         </nav>
         <div class="sidebar-foot">
           <div class="engine" id="engine-state"><span class="dot dot-idle"></span><span id="engine-text">连接中…</span></div>
@@ -62,7 +63,10 @@
 
           <section class="view hidden" id="view-plugins" data-view="plugins">
             <section class="panel">
-              <header class="panel-head"><h2>插件</h2><span class="chip" id="plugins-count">0</span></header>
+              <header class="panel-head">
+                <h2>插件</h2><span class="chip" id="plugins-count">0</span>
+                <label class="search"><span class="sr-only">搜索插件</span><input id="plugins-search" type="search" placeholder="搜索插件…" /></label>
+              </header>
               <div class="panel-body table-wrap">
                 <table class="table">
                   <thead><tr><th>名称</th><th class="num">任务数</th><th>状态</th><th class="right">操作</th></tr></thead>
@@ -74,12 +78,21 @@
 
           <section class="view hidden" id="view-tasks" data-view="tasks">
             <section class="panel">
-              <header class="panel-head"><h2>任务</h2><span class="chip" id="tasks-count">0</span></header>
+              <header class="panel-head">
+                <h2>任务</h2><span class="chip" id="tasks-count">0</span>
+                <label class="search"><span class="sr-only">搜索任务</span><input id="tasks-search" type="search" placeholder="搜索插件 / 任务…" /></label>
+              </header>
               <div class="panel-body table-wrap">
                 <table class="table">
                   <thead><tr>
-                    <th>插件</th><th>任务</th><th>计划</th><th class="num">预算</th>
-                    <th>下次运行</th><th class="num">跑过</th><th>状态</th><th class="right">操作</th>
+                    <th class="sortable" data-sort="plugin">插件</th>
+                    <th class="sortable" data-sort="name">任务</th>
+                    <th class="sortable" data-sort="cron">计划</th>
+                    <th class="sortable num" data-sort="budget_ms">预算</th>
+                    <th class="sortable" data-sort="next_at">下次运行</th>
+                    <th class="sortable num" data-sort="runs">跑过</th>
+                    <th class="sortable" data-sort="status">状态</th>
+                    <th class="right">操作</th>
                   </tr></thead>
                   <tbody id="tasks-body"></tbody>
                 </table>
@@ -89,12 +102,21 @@
 
           <section class="view hidden" id="view-runs" data-view="runs">
             <section class="panel">
-              <header class="panel-head"><h2>运行记录</h2><span class="chip" id="runs-count">0</span></header>
+              <header class="panel-head">
+                <h2>运行记录</h2><span class="chip" id="runs-count">0</span>
+                <label class="search"><span class="sr-only">搜索运行记录</span><input id="runs-search" type="search" placeholder="搜索插件 / 任务 / 错误…" /></label>
+                <label class="check"><input id="runs-only-failed" type="checkbox" /> 只看失败</label>
+              </header>
               <div class="panel-body table-wrap table-scroll">
                 <table class="table">
                   <thead><tr>
-                    <th class="num">#</th><th>插件</th><th>任务</th><th>开始</th>
-                    <th class="num">耗时</th><th>结果</th><th class="right">操作</th>
+                    <th class="sortable num" data-sort="id">#</th>
+                    <th class="sortable" data-sort="plugin">插件</th>
+                    <th class="sortable" data-sort="task">任务</th>
+                    <th class="sortable" data-sort="started_at">开始</th>
+                    <th class="sortable num" data-sort="dur">耗时</th>
+                    <th class="sortable" data-sort="status">结果</th>
+                    <th class="right">操作</th>
                   </tr></thead>
                   <tbody id="runs-body"></tbody>
                 </table>
@@ -125,7 +147,22 @@
               <div class="console" id="logs-view" aria-live="polite"></div>
             </section>
           </section>
-        </main>
+
+          <section class="view hidden" id="view-settings" data-view="settings">
+            <div class="split">
+              <section class="panel">
+                <header class="panel-head"><h2>面板信息</h2></header>
+                <div class="panel-body" id="settings-info"></div>
+              </section>
+              <section class="panel">
+                <header class="panel-head">
+                  <h2>配置 config.json</h2><span class="chip" id="config-chip">—</span>
+                  <button class="btn btn-sm" id="config-copy" type="button">复制 JSON</button>
+                </header>
+                <div class="panel-body" id="settings-config"></div>
+              </section>
+            </div>
+          </section>        </main>
       </div>
     </div>
 
@@ -148,6 +185,19 @@
           <button class="icon-btn" type="button" data-close="1" aria-label="关闭">✕</button>
         </header>
         <div class="drawer-body" id="drawer-body"></div>
+      </div>
+    </div>
+
+
+    <div class="modal hidden" id="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card">
+        <h2 id="confirm-title">确认操作</h2>
+        <p class="muted" id="confirm-text"></p>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-close="1">取消</button>
+          <button class="btn btn-primary" type="button" id="confirm-ok">确认</button>
+        </div>
       </div>
     </div>
 

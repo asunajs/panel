@@ -36,6 +36,8 @@ pub struct AppState {
     pub log: LogHub,
     pub sched: Scheduler,
     pub plugins_dir: PathBuf,
+    /// 数据目录：`/api/config` 要告诉界面「配置文件在哪」。
+    pub data_dir: PathBuf,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
     pub auth: Option<Arc<crate::auth::Auth>>,
@@ -54,6 +56,7 @@ fn internal(msg: impl Into<String>) -> ApiError {
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
         .route("/api/state", get(api_state))
+        .route("/api/config", get(api_config))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
@@ -352,6 +355,37 @@ struct Page {
 
 fn limit_of(p: &Page, default: i64, cap: i64) -> i64 {
     p.limit.unwrap_or(default).clamp(1, cap)
+}
+
+/// 面板自身信息：配置文件在哪、多大、有哪些顶层键，以及插件目录。
+///
+/// 只读，走同一道鉴权 —— 它和插件 host.config() 看到的是同一份，不算新增泄露面。
+/// JSON 超过 20 万字符就截断并标 truncated：4 MiB 的配置原样塞进浏览器没有意义。
+async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let path = st.data_dir.join(crate::config::FILE);
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let value = crate::config::load(&st.data_dir).map_err(internal)?;
+    let keys: Vec<String> = match value.as_object() {
+        Some(o) => o.keys().cloned().collect(),
+        None => Vec::new(),
+    };
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string());
+    let truncated = text.chars().count() > 200_000;
+    let shown: String = if truncated {
+        text.chars().take(200_000).collect()
+    } else {
+        text
+    };
+    Ok(Json(json!({
+        "path": path.display().to_string(),
+        "exists": path.exists(),
+        "bytes": bytes,
+        "max_bytes": crate::config::max_bytes(),
+        "keys": keys,
+        "json": shown,
+        "truncated": truncated,
+        "plugins_dir": st.plugins_dir.display().to_string(),
+    })))
 }
 
 async fn api_runs(

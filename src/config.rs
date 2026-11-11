@@ -21,6 +21,8 @@ pub const DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const MIN_MAX_BYTES: u64 = 4 * 1024;
 /// 覆盖上限的环境变量（运维自己调，不是给插件用的）。
 pub const ENV_MAX: &str = "PANEL_CONFIG_MAX_BYTES";
+/// 文件名（相对 `PANEL_DATA_DIR`）。
+pub const FILE: &str = "config.json";
 
 /// 本次启动生效的上限。环境变量非法就退回默认值（不因为一个笔误拒绝启动）。
 pub fn max_bytes() -> u64 {
@@ -35,7 +37,7 @@ pub fn max_bytes() -> u64 {
 
 /// 读配置。缺文件 = 空对象（不是错误：新装的面板没有 config.json 很正常）。
 pub fn load(dir: &Path) -> Result<Value, String> {
-    let path = dir.join("config.json");
+    let path = dir.join(FILE);
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

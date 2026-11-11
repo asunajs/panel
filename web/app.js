@@ -2,7 +2,7 @@
 //
 // 纪律（沿用仓库其它部分）：
 // - 令牌只走请求头，绝不进 URL；只存本机 localStorage。
-// - 所有用户/插件可控文本一律 textContent，不用 innerHTML 拼字符串。
+// - 所有外部可控文本一律 textContent / createTextNode，不用 innerHTML 拼字符串。
 // - 页面状态只有一份 state，渲染函数只读它。
 
 const TOKEN_KEY = 'panel-llrt-token';
@@ -13,9 +13,12 @@ const POLL_MS = 5000;
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   view: 'dashboard',
+  version: '',
+  auth: false,
   plugins: [],
   tasks: [],
   stats: null,
+  config: null,
   runs: [],
   dashRuns: [],
   dashLogs: [],
@@ -23,6 +26,9 @@ const state = {
   logsPaused: false,
   logLevel: '',
   logQuery: '',
+  q: { plugins: '', tasks: '', runs: '' },
+  onlyFailed: false,
+  sort: { tasks: { key: 'next_at', dir: 1 }, runs: { key: 'id', dir: -1 } },
   loaded: false,
   frame: 0,
 };
@@ -45,7 +51,19 @@ function fmtDateTime(ms) {
   return (d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
-/** 把毫秒说成人话：1 天 3 小时 / 42 分 / 8.4 秒。 */
+/** 普通用户看的是「多久以前」，不是时间戳。 */
+function relTime(ms) {
+  if (!ms) return '—';
+  const diff = Date.now() - ms;
+  if (diff < 0) return '待运行';
+  const s = Math.floor(diff / 1000);
+  if (s < 45) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  if (s < 86400 * 7) return Math.floor(s / 86400) + ' 天前';
+  return fmtDateTime(ms);
+}
+
 function humanMs(ms) {
   if (ms === null || ms === undefined) return '—';
   const s = Math.round(ms / 1000);
@@ -54,15 +72,13 @@ function humanMs(ms) {
   if (m < 60) return m + ' 分 ' + (s % 60) + ' 秒';
   const h = Math.floor(m / 60);
   if (h < 24) return h + ' 小时 ' + (m % 60) + ' 分';
-  const d = Math.floor(h / 24);
-  return d + ' 天 ' + (h % 24) + ' 小时';
+  return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 小时';
 }
 
-/** 耗时：短任务给毫秒，长的给秒。 */
 function humanDur(ms) {
   if (ms === null || ms === undefined) return '进行中';
   if (ms < 1000) return ms + ' ms';
-  if (ms < 60_000) return (ms / 1000).toFixed(2) + ' s';
+  if (ms < 60000) return (ms / 1000).toFixed(2) + ' s';
   return humanMs(ms);
 }
 
@@ -84,11 +100,35 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-function emptyState(node, text) {
+function emptyState(node, text, hint) {
   clear(node);
   const wrap = el('div', 'empty');
   wrap.append(el('div', '', '∅'), el('div', '', text));
+  if (hint) wrap.append(el('div', 'hint', hint));
   node.append(wrap);
+}
+
+/** 命中高亮：返回 DocumentFragment（不拼 HTML）。 */
+function markText(text, q) {
+  const frag = document.createDocumentFragment();
+  if (!q) {
+    frag.append(document.createTextNode(text));
+    return frag;
+  }
+  const lower = text.toLowerCase();
+  const ql = q.toLowerCase();
+  let i = 0;
+  for (;;) {
+    const at = lower.indexOf(ql, i);
+    if (at < 0) break;
+    if (at > i) frag.append(document.createTextNode(text.slice(i, at)));
+    const m = document.createElement('mark');
+    m.textContent = text.slice(at, at + q.length);
+    frag.append(m);
+    i = at + q.length;
+  }
+  if (i < text.length) frag.append(document.createTextNode(text.slice(i)));
+  return frag;
 }
 
 function toast(msg, isErr) {
@@ -106,20 +146,39 @@ function banner(msg, isOk) {
   b.className = 'banner' + (isOk ? ' banner-ok' : '');
 }
 
+function matches(text, q) {
+  return !q || String(text || '').toLowerCase().includes(q.toLowerCase());
+}
+
+/** 通用排序：undefined/null 永远排在后面，数字按数值、其它按本地化字符串。 */
+function sortBy(rows, sort, getters) {
+  const arr = rows.slice();
+  const get = getters[sort.key] || ((r) => r[sort.key]);
+  arr.sort((a, b) => {
+    const va = get(a);
+    const vb = get(b);
+    if (va === vb) return 0;
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * sort.dir;
+    return String(va).localeCompare(String(vb), 'zh') * sort.dir;
+  });
+  return arr;
+}
+
 // ---------------------------------------------------------------- 主题
 
 function applyTheme(name) {
   document.documentElement.setAttribute('data-theme', name);
-  const btn = $('theme-toggle');
-  btn.setAttribute('aria-label', name === 'dark' ? '切换到浅色' : '切换到深色');
+  $('theme-toggle').setAttribute('aria-label', name === 'dark' ? '切换到浅色' : '切换到深色');
   localStorage.setItem(THEME_KEY, name);
 }
 
 function initTheme() {
   const saved = localStorage.getItem(THEME_KEY);
   if (saved === 'dark' || saved === 'light') { applyTheme(saved); return; }
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  applyTheme(prefersDark ? 'dark' : 'light');
+  const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(dark ? 'dark' : 'light');
 }
 
 // ---------------------------------------------------------------- API
@@ -147,10 +206,28 @@ function showGate(show, hint) {
   if (show) setTimeout(() => $('token').focus(), 30);
 }
 
-// ---------------------------------------------------------------- 渲染：卡片
+// ---------------------------------------------------------------- 确认弹窗
 
-function card(label, value, note, accent, small) {
-  const c = el('div', 'card' + (accent ? ' card-accent' : ''));
+let confirmResolve = null;
+
+function askConfirm(text, okLabel) {
+  $('confirm-text').textContent = text;
+  $('confirm-ok').textContent = okLabel || '确认';
+  $('confirm').classList.remove('hidden');
+  return new Promise((resolve) => { confirmResolve = resolve; });
+}
+
+function settleConfirm(ok) {
+  $('confirm').classList.add('hidden');
+  const fn = confirmResolve;
+  confirmResolve = null;
+  if (fn) fn(ok);
+}
+
+// ---------------------------------------------------------------- 卡片
+
+function card(label, value, note, small) {
+  const c = el('div', 'card');
   c.append(el('div', 'card-label', label));
   const v = el('div', 'card-value', value);
   if (small) v.append(el('small', '', small));
@@ -161,88 +238,48 @@ function card(label, value, note, accent, small) {
 
 function renderCards() {
   const box = $('stat-cards');
-  const s = state.stats || {};
-  const tasks = state.tasks.length;
-  const plugins = state.plugins.length;
-  const busy = state.plugins.filter((p) => p.busy).length;
   clear(box);
+  if (!state.loaded) {
+    for (let i = 0; i < 8; i++) {
+      const c = el('div', 'card');
+      c.append(el('div', 'skeleton'));
+      c.append(el('div', 'skeleton'));
+      box.append(c);
+    }
+    return;
+  }
+  const s = state.stats || {};
+  const busy = state.plugins.filter((p) => p.busy).length;
+  const tripped = state.tasks.filter((t) => t.tripped).length;
   box.append(
-    card('运行时长', humanMs(s.uptime_ms), '自进程启动', true),
-    card('调度循环', String(s.ticks ?? 0), '每圈一次任务扫描'),
-    card('心跳', s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1), '最近一圈调度耗时', false, s.heartbeat_ms === undefined ? '' : 'ms'),
-    card('插件', String(plugins), busy ? busy + ' 个正在跑' : '全部空闲'),
-    card('任务', String(tasks), state.tasks.filter((t) => t.tripped).length + ' 个熔断中'),
+    card('运行时长', humanMs(s.uptime_ms), '自进程启动'),
+    card('调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描'),
+    card('心跳', s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1), '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms'),
+    card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
+    card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
     card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
-    card('预算打断', String(s.budget_kills ?? 0), 'CPU 预算耗尽次数'),
+    card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
     card('JS 内存', humanBytes(s.js_memory_bytes), s.js_memory_bytes === null ? '未接：取它要等插件空闲' : '各 runtime 合计'),
   );
 }
 
-// ---------------------------------------------------------------- 渲染：表格
+// ---------------------------------------------------------------- 表格
 
-function statusPill(ok, text) {
-  return el('span', 'pill ' + (ok ? 'pill-ok' : ''), text);
+function pill(cls, text) {
+  return el('span', 'pill ' + cls, text);
 }
 
-function taskStatus(t) {
-  if (t.tripped) return { cls: 'pill-err', text: '熔断 ×' + t.trips };
-  if (!t.enabled) return { cls: '', text: '已暂停' };
-  if (t.in_flight) return { cls: 'pill-accent', text: '运行中' };
-  return { cls: 'pill-ok', text: '已启用' };
+function runPill(status) {
+  if (status === 'ok') return pill('pill-ok', '成功');
+  if (status === 'running') return pill('pill-accent', '运行中');
+  return pill('pill-err', '失败');
 }
 
-function renderPlugins() {
-  const body = $('plugins-body');
-  $('plugins-count').textContent = state.plugins.length;
-  clear(body);
-  if (!state.plugins.length) { body.append(rowMessage('还没有加载任何插件', 4)); return; }
-  for (const p of state.plugins) {
-    const tr = el('tr');
-    tr.append(el('td', 'strong', p.name));
-    const n = el('td', 'num', String(p.tasks));
-    tr.append(n);
-    const st = el('td');
-    st.append(el('span', 'pill ' + (p.busy ? 'pill-accent' : 'pill-ok'), p.busy ? '运行中' : '空闲'));
-    tr.append(st);
-    tr.append(actionsCell([
-      ['重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)],
-      ['停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)],
-      ['卸载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/unload', '已卸载 ' + p.name), true],
-    ]));
-    body.append(tr);
-  }
-}
-
-function renderTasks() {
-  const body = $('tasks-body');
-  $('tasks-count').textContent = state.tasks.length;
-  clear(body);
-  if (!state.tasks.length) { body.append(rowMessage('还没有注册任何定时任务', 8)); return; }
-  for (const t of state.tasks) {
-    const tr = el('tr');
-    tr.append(el('td', 'dim', t.plugin));
-    tr.append(el('td', 'strong', t.name));
-    tr.append(el('td', 'mono', t.cron));
-    tr.append(el('td', 'num', humanMs(t.budget_ms)));
-    tr.append(el('td', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
-    tr.append(el('td', 'num', String(t.runs)));
-    const st = el('td');
-    const s = taskStatus(t);
-    st.append(el('span', 'pill ' + s.cls, s.text));
-    if (t.last_error) {
-      st.append(el('div', 'mini-sub err-text', t.last_error));
-    }
-    tr.append(st);
-    const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
-    if (t.enabled) ops.push(['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]);
-    else ops.push(['恢复', () => act(taskPath(t, 'resume'), '已恢复 ' + t.name)]);
-    tr.append(actionsCell(ops));
-    body.append(tr);
-  }
-}
-
-function taskPath(t, verb) {
-  return '/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/' + verb;
+function taskPill(t) {
+  if (t.tripped) return pill('pill-err', '熔断 ×' + t.trips);
+  if (!t.enabled) return pill('', '已暂停');
+  if (t.in_flight) return pill('pill-accent', '运行中');
+  return pill('pill-ok', '已启用');
 }
 
 function actionsCell(ops) {
@@ -258,57 +295,136 @@ function actionsCell(ops) {
   return td;
 }
 
-function rowMessage(text, span) {
+function rowMessage(text, span, hint) {
   const tr = el('tr');
   const td = el('td');
   td.colSpan = span;
   const wrap = el('div', 'empty');
   wrap.append(el('div', '', '∅'), el('div', '', text));
+  if (hint) wrap.append(el('div', 'hint', hint));
   td.append(wrap);
   tr.append(td);
   return tr;
 }
 
-async function act(path, okMsg) {
-  try {
-    await api(path, { method: 'POST' });
-    toast(okMsg);
-    await refresh();
-  } catch (e) {
-    if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
-    toast(e.message || '操作失败', true);
+function sortHeaders(view) {
+  const ths = document.querySelectorAll('#view-' + view + ' th[data-sort]');
+  const sort = state.sort[view];
+  for (const th of ths) {
+    if (th.dataset.sort === sort.key) {
+      th.setAttribute('aria-sort', sort.dir > 0 ? 'ascending' : 'descending');
+      let arrow = th.querySelector('.arrow');
+      if (!arrow) { arrow = el('span', 'arrow'); th.append(arrow); }
+      arrow.textContent = sort.dir > 0 ? '▲' : '▼';
+    } else {
+      th.removeAttribute('aria-sort');
+      const arrow = th.querySelector('.arrow');
+      if (arrow) arrow.remove();
+    }
   }
 }
 
-// ---------------------------------------------------------------- 渲染：运行记录
+function renderPlugins() {
+  const body = $('plugins-body');
+  const q = state.q.plugins;
+  const rows = state.plugins.filter((p) => matches(p.name, q));
+  $('plugins-count').textContent = state.plugins.length;
+  clear(body);
+  if (!state.plugins.length) {
+    body.append(rowMessage('还没有加载任何插件', 4, '把 .js 放进 plugins/ 目录后刷新'));
+    return;
+  }
+  if (!rows.length) { body.append(rowMessage('没有匹配的插件', 4)); return; }
+  for (const p of rows) {
+    const tr = el('tr', 'clickable');
+    tr.append(el('td', 'strong', p.name));
+    tr.append(el('td', 'num', String(p.tasks)));
+    const st = el('td');
+    st.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
+    tr.append(st);
+    tr.append(actionsCell([
+      ['重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)],
+      ['停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)],
+      ['卸载', async () => {
+        if (!(await askConfirm('卸载「' + p.name + '」？它注册的定时任务会一起消失，插件文件不会删。', '卸载'))) return;
+        act('/api/plugins/' + encodeURIComponent(p.name) + '/unload', '已卸载 ' + p.name);
+      }, true],
+    ]));
+    tr.addEventListener('click', () => showPlugin(p.name));
+    body.append(tr);
+  }
+}
 
-function runStatusPill(status) {
-  if (status === 'ok') return el('span', 'pill pill-ok', '成功');
-  if (status === 'running') return el('span', 'pill pill-accent', '运行中');
-  return el('span', 'pill pill-err', '失败');
+function renderTasks() {
+  const body = $('tasks-body');
+  const q = state.q.tasks;
+  const rows = sortBy(
+    state.tasks.filter((t) => matches(t.plugin, q) || matches(t.name, q) || matches(t.cron, q)),
+    state.sort.tasks,
+    { status: (t) => (t.tripped ? 2 : !t.enabled ? 1 : 0) },
+  );
+  $('tasks-count').textContent = state.tasks.length;
+  clear(body);
+  if (!state.tasks.length) {
+    body.append(rowMessage('还没有注册任何定时任务', 8, '插件里调 host.register_cron 就会出现在这里'));
+    return;
+  }
+  if (!rows.length) { body.append(rowMessage('没有匹配的任务', 8)); return; }
+  for (const t of rows) {
+    const tr = el('tr');
+    tr.append(el('td', 'dim', t.plugin));
+    tr.append(el('td', 'strong', t.name));
+    tr.append(el('td', 'mono', t.cron));
+    tr.append(el('td', 'num', humanMs(t.budget_ms)));
+    tr.append(el('td', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
+    tr.append(el('td', 'num', String(t.runs)));
+    const st = el('td');
+    st.append(taskPill(t));
+    if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
+    tr.append(st);
+    const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
+    ops.push(t.enabled
+      ? ['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]
+      : ['恢复', () => act(taskPath(t, 'resume'), '已恢复 ' + t.name)]);
+    tr.append(actionsCell(ops));
+    body.append(tr);
+  }
+  sortHeaders('tasks');
+}
+
+function taskPath(t, verb) {
+  return '/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/' + verb;
 }
 
 function renderRuns() {
   const body = $('runs-body');
+  const q = state.q.runs;
+  let rows = state.runs.filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
+  if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok');
+  rows = sortBy(rows, state.sort.runs, { dur: (r) => (r.ended_at ? r.ended_at - r.started_at : null) });
   $('runs-count').textContent = state.runs.length;
   clear(body);
-  if (!state.runs.length) { body.append(rowMessage('还没有运行记录', 7)); return; }
-  for (const r of state.runs) {
-    const tr = el('tr');
+  if (!state.runs.length) { body.append(rowMessage('还没有运行记录', 7, '任务的第一次执行会记在这里')); return; }
+  if (!rows.length) { body.append(rowMessage('没有匹配的运行记录', 7)); return; }
+  for (const r of rows) {
+    const tr = el('tr', 'clickable');
     tr.append(el('td', 'num dim', String(r.id)));
     tr.append(el('td', 'dim', r.plugin));
     tr.append(el('td', 'strong', r.task));
-    tr.append(el('td', 'mono dim', fmtTime(r.started_at)));
-    const dur = r.ended_at ? r.ended_at - r.started_at : null;
-    tr.append(el('td', 'num', humanDur(dur)));
+    const started = el('td', 'mono dim');
+    started.append(markText(fmtTime(r.started_at), ''));
+    started.title = fmtDateTime(r.started_at);
+    tr.append(started);
+    tr.append(el('td', 'num', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
     const res = el('td');
-    res.append(runStatusPill(r.status));
+    res.append(runPill(r.status));
     if (r.error) res.append(el('div', 'mini-sub err-text', r.error));
     tr.append(res);
     tr.append(actionsCell([['日志', () => showRun(r.id)]]));
     tr.addEventListener('click', () => showRun(r.id));
     body.append(tr);
   }
+  sortHeaders('runs');
 }
 
 function renderDashRuns() {
@@ -320,12 +436,12 @@ function renderDashRuns() {
     const row = el('div', 'mini-row');
     const main = el('div', 'mini-main');
     const title = el('div', 'mini-title');
-    title.append(el('span', '', r.plugin + ' / ' + r.task), runStatusPill(r.status));
+    title.append(el('span', '', r.plugin + ' / ' + r.task), runPill(r.status));
     main.append(title);
     if (r.error) main.append(el('div', 'mini-sub err-text', r.error));
     const right = el('div', 'mini-right');
     right.append(el('div', '', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
-    right.append(el('div', '', fmtTime(r.started_at)));
+    right.append(el('div', '', relTime(r.started_at)));
     row.append(main, right);
     list.append(row);
   }
@@ -344,20 +460,21 @@ function renderDashLogs() {
     title.append(el('span', 'level level-' + (l.level || 'info'), l.level || 'info'));
     title.append(el('span', 'dim', l.plugin));
     main.append(title, el('div', 'mini-sub', l.message));
-    row.append(main, el('div', 'mini-right', fmtTime(l.ts)));
+    row.append(main, el('div', 'mini-right', relTime(l.ts)));
     list.append(row);
   }
   box.append(list);
 }
 
-// ---------------------------------------------------------------- 日志流
+// ---------------------------------------------------------------- 日志
 
 function logLine(l) {
   const row = el('div', 'log-line');
   row.append(el('span', 'log-time', fmtTime(l.ts)));
   row.append(el('span', 'level level-' + (l.level || 'info'), l.level || 'info'));
   row.append(el('span', 'log-plugin', l.plugin || ''));
-  const msg = el('span', 'log-msg', l.message);
+  const msg = el('span', 'log-msg');
+  msg.append(markText(l.message || '', state.logQuery));
   if (l.run_id) msg.title = 'run #' + l.run_id;
   row.append(msg);
   return row;
@@ -365,30 +482,17 @@ function logLine(l) {
 
 function logMatches(l) {
   if (state.logLevel && l.level !== state.logLevel) return false;
-  if (state.logQuery) {
-    const q = state.logQuery.toLowerCase();
-    return (l.message || '').toLowerCase().includes(q) || (l.plugin || '').toLowerCase().includes(q);
-  }
-  return true;
-}
-
-/** 日志页首次进入时回填历史：SSE 只送「连上之后」的，不回填就是一片空白。 */
-async function backfillLogs() {
-  if (state.logs.length) return;
-  try {
-    const data = await api('/api/logs?limit=200');
-    const rows = (data.logs || []).slice().reverse();
-    if (!rows.length) return;
-    state.logs = rows;
-    if (state.view === 'logs') renderLogs();
-  } catch (_) { /* 回填失败不影响实时流 */ }
+  return matches(l.message, state.logQuery) || matches(l.plugin, state.logQuery);
 }
 
 function renderLogs() {
   const box = $('logs-view');
   clear(box);
   const rows = state.logs.filter(logMatches);
-  if (!rows.length) { emptyState(box, state.logs.length ? '当前过滤条件下没有日志' : '还没有日志'); return; }
+  if (!rows.length) {
+    emptyState(box, state.logs.length ? '当前过滤条件下没有日志' : '还没有日志', state.logs.length ? '' : '插件第一次打日志就会出现在这里');
+    return;
+  }
   for (const l of rows) box.append(logLine(l));
   box.scrollTop = box.scrollHeight;
 }
@@ -399,10 +503,20 @@ function appendLog(l) {
   if (state.logsPaused || state.view !== 'logs' || !logMatches(l)) return;
   const box = $('logs-view');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  const onlyEmpty = box.querySelector('.empty');
-  if (onlyEmpty) clear(box);
+  if (box.querySelector('.empty')) clear(box);
   box.append(logLine(l));
   if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function backfillLogs() {
+  if (state.logs.length) return;
+  try {
+    const data = await api('/api/logs?limit=200');
+    const rows = (data.logs || []).slice().reverse();
+    if (!rows.length) return;
+    state.logs = rows;
+    if (state.view === 'logs') renderLogs();
+  } catch (_) { /* 回填失败不影响实时流 */ }
 }
 
 let streamAbort = null;
@@ -432,7 +546,7 @@ async function streamLogs() {
         for (const chunk of parts) {
           const line = chunk.split('\n').find((s) => s.startsWith('data: '));
           if (!line) continue;
-          try { appendLog(JSON.parse(line.slice(6))); } catch (_) { /* 忽略半截帧 */ }
+          try { appendLog(JSON.parse(line.slice(6))); } catch (_) { /* 半截帧丢掉 */ }
         }
       }
     } catch (e) {
@@ -449,36 +563,47 @@ function setConn(ok) {
   const dot = box.querySelector('.dot');
   dot.className = 'dot ' + (ok ? 'dot-ok' : 'dot-err');
   $('engine-text').textContent = ok ? '引擎正常' : '日志流断开，重连中…';
-  const pill = $('health-pill');
-  pill.className = 'pill ' + (ok ? 'pill-ok' : 'pill-warn');
-  pill.lastChild.textContent = ok ? '引擎健康' : '连接异常';
+  const p = $('health-pill');
+  p.className = 'pill ' + (ok ? 'pill-ok' : 'pill-warn');
+  p.lastChild.textContent = ok ? '引擎健康' : '连接异常';
 }
 
-// ---------------------------------------------------------------- 运行详情抽屉
+// ---------------------------------------------------------------- 抽屉
 
-async function showRun(id) {
-  const drawer = $('drawer');
+function openDrawer(title) {
+  $('drawer').classList.remove('hidden');
+  $('drawer-title').textContent = title;
   const body = $('drawer-body');
-  drawer.classList.remove('hidden');
-  $('drawer-title').textContent = '运行 #' + id;
   clear(body);
   body.append(el('div', 'skeleton'));
+  return body;
+}
+
+function closeDrawer() { $('drawer').classList.add('hidden'); }
+
+function kvList(pairs) {
+  const dl = el('dl', 'kv');
+  for (const [k, v, mono] of pairs) {
+    dl.append(el('dt', '', k));
+    dl.append(el('dd', mono ? 'mono' : '', v === null || v === undefined || v === '' ? '—' : String(v)));
+  }
+  return dl;
+}
+
+async function showRun(id) {
+  const body = openDrawer('运行 #' + id);
   try {
     const data = await api('/api/runs/' + id);
     const r = data.run;
     clear(body);
-    const kv = el('dl', 'kv');
-    const add = (k, v, mono) => {
-      kv.append(el('dt', '', k));
-      kv.append(el('dd', mono ? 'mono' : '', v === null || v === undefined || v === '' ? '—' : String(v)));
-    };
-    add('插件', r.plugin);
-    add('任务', r.task);
-    add('开始', fmtDateTime(r.started_at));
-    add('耗时', humanDur(r.ended_at ? r.ended_at - r.started_at : null));
-    add('结果', r.status === 'ok' ? '成功' : r.status === 'running' ? '运行中' : '失败');
-    add('错误', r.error || '—', true);
-    body.append(kv);
+    body.append(kvList([
+      ['插件', r.plugin],
+      ['任务', r.task],
+      ['开始', fmtDateTime(r.started_at)],
+      ['耗时', humanDur(r.ended_at ? r.ended_at - r.started_at : null)],
+      ['结果', r.status === 'ok' ? '成功' : r.status === 'running' ? '运行中' : '失败'],
+      ['错误', r.error || '—', true],
+    ]));
     body.append(el('h3', 'card-label', '本次运行的日志'));
     if (!data.logs || !data.logs.length) {
       body.append(el('p', 'muted', '这次运行没有日志。'));
@@ -493,9 +618,122 @@ async function showRun(id) {
   }
 }
 
-function closeDrawer() { $('drawer').classList.add('hidden'); }
+async function showPlugin(name) {
+  const body = openDrawer('插件 ' + name);
+  const p = state.plugins.find((x) => x.name === name);
+  const tasks = state.tasks.filter((t) => t.plugin === name);
+  try {
+    const data = await api('/api/runs?limit=8&plugin=' + encodeURIComponent(name));
+    clear(body);
+    body.append(kvList([
+      ['状态', p ? (p.busy ? '运行中' : '空闲') : '—'],
+      ['任务数', tasks.length],
+      ['最近运行', (data.runs || []).length + ' 条'],
+    ]));
+    const ops = el('div', 'actions');
+    for (const [label, path, msg, danger] of [
+      ['重载', '/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name, false],
+      ['停止', '/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name, false],
+      ['卸载', '/api/plugins/' + encodeURIComponent(name) + '/unload', '已卸载 ' + name, true],
+    ]) {
+      const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
+      b.type = 'button';
+      b.addEventListener('click', async () => {
+        if (danger && !(await askConfirm('卸载「' + name + '」？它注册的定时任务会一起消失，插件文件不会删。', '卸载'))) return;
+        closeDrawer();
+        act(path, msg);
+      });
+      ops.append(b);
+    }
+    body.append(ops);
 
-// ---------------------------------------------------------------- 视图切换
+    body.append(el('h3', 'card-label', '它的任务'));
+    if (!tasks.length) {
+      body.append(el('p', 'muted', '这个插件没有注册定时任务。'));
+    } else {
+      const list = el('div', 'mini');
+      for (const t of tasks) {
+        const row = el('div', 'mini-row');
+        const main = el('div', 'mini-main');
+        const title = el('div', 'mini-title');
+        title.append(el('span', '', t.name), taskPill(t));
+        main.append(title, el('div', 'mini-sub', t.cron + ' · 预算 ' + humanMs(t.budget_ms)));
+        row.append(main, el('div', 'mini-right', '跑过 ' + t.runs));
+        list.append(row);
+      }
+      body.append(list);
+    }
+
+    body.append(el('h3', 'card-label', '最近运行'));
+    if (!(data.runs || []).length) {
+      body.append(el('p', 'muted', '还没有运行记录。'));
+    } else {
+      const list = el('div', 'mini');
+      for (const r of data.runs) {
+        const row = el('div', 'mini-row clickable');
+        const main = el('div', 'mini-main');
+        const title = el('div', 'mini-title');
+        title.append(el('span', '', r.task), runPill(r.status));
+        main.append(title);
+        if (r.error) main.append(el('div', 'mini-sub err-text', r.error));
+        row.append(main, el('div', 'mini-right', relTime(r.started_at)));
+        row.addEventListener('click', () => showRun(r.id));
+        list.append(row);
+      }
+      body.append(list);
+    }
+  } catch (e) {
+    clear(body);
+    body.append(el('p', 'muted', e instanceof Unauthorized ? '需要令牌' : (e.message || '读取失败')));
+  }
+}
+
+// ---------------------------------------------------------------- 设置
+
+async function loadConfig() {
+  try {
+    state.config = await api('/api/config');
+    if (state.view === 'settings') renderSettings();
+  } catch (e) {
+    if (!(e instanceof Unauthorized)) toast('读取配置失败', true);
+  }
+}
+
+function renderSettings() {
+  const info = $('settings-info');
+  const cfg = state.config;
+  clear(info);
+  info.append(kvList([
+    ['版本', state.version],
+    ['令牌', state.auth ? '已启用（盐 + PBKDF2 哈希）' : '未启用（只允许绑回环）'],
+    ['运行时长', humanMs(state.stats && state.stats.uptime_ms)],
+    ['调度循环', state.stats && state.stats.ticks],
+    ['默认预算', humanMs(state.stats && state.stats.default_budget_ms)],
+    ['插件目录', cfg && cfg.plugins_dir],
+    ['配置文件', cfg && cfg.path],
+  ]));
+  info.append(el('p', 'settings-note', '改配置要改文件再重启面板：配置在启动时读一次，运行期不热改。'));
+
+  const box = $('settings-config');
+  clear(box);
+  if (!cfg) { emptyState(box, '读取中…'); return; }
+  $('config-chip').textContent = (cfg.exists ? humanBytes(cfg.bytes) : '缺文件') + ' / 上限 ' + humanBytes(cfg.max_bytes);
+  if (!cfg.exists) {
+    emptyState(box, '还没有 config.json', '缺文件 = 空配置，插件拿到的 host.config() 是 {}');
+    return;
+  }
+  if (cfg.keys && cfg.keys.length) {
+    const wrap = el('div', 'actions');
+    wrap.className = 'chips';
+    for (const k of cfg.keys) wrap.append(el('span', 'chip', k));
+    box.append(wrap);
+  }
+  const pre = el('pre', 'pre json-box', cfg.json);
+  box.append(pre);
+  if (cfg.truncated) box.append(el('p', 'settings-note', '内容超过 20 万字符，这里只显示前 20 万。'));
+}
+
+// ---------------------------------------------------------------- 视图
 
 const VIEWS = {
   dashboard: ['仪表盘', '引擎运行状态与最近活动'],
@@ -503,6 +741,7 @@ const VIEWS = {
   tasks: ['任务', '定时计划、预算与熔断状态'],
   runs: ['运行记录', '最近 50 次派发的结果'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],
+  settings: ['设置', '面板信息与只读配置'],
 };
 
 function setView(name) {
@@ -522,6 +761,7 @@ function setView(name) {
   if (name === 'logs') { renderLogs(); backfillLogs(); }
   if (name === 'runs') loadRuns();
   if (name === 'dashboard') loadDashboard();
+  if (name === 'settings') { renderSettings(); loadConfig(); }
 }
 
 // ---------------------------------------------------------------- 数据
@@ -532,10 +772,12 @@ async function refresh() {
     state.plugins = data.plugins || [];
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;
+    state.version = data.version || '';
+    state.auth = !!data.auth;
     state.loaded = true;
-    $('version').textContent = 'v' + (data.version || '—');
-    $('auth-state').textContent = data.auth ? '令牌已启用' : '未启用令牌';
-    if (data.auth && !state.token) showGate(true, '这个面板启用了令牌鉴权');
+    $('version').textContent = 'v' + (state.version || '—');
+    $('auth-state').textContent = state.auth ? '令牌已启用' : '未启用令牌';
+    if (state.auth && !state.token) showGate(true, '这个面板启用了令牌鉴权');
     else if (state.token) showGate(false);
     banner('');
     render();
@@ -577,7 +819,19 @@ function render() {
   });
 }
 
-// ---------------------------------------------------------------- 事件绑定
+async function act(path, okMsg) {
+  try {
+    await api(path, { method: 'POST' });
+    toast(okMsg);
+    await refresh();
+    if (state.view === 'runs') await loadRuns();
+  } catch (e) {
+    if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+    toast(e.message || '操作失败', true);
+  }
+}
+
+// ---------------------------------------------------------------- 事件
 
 function bind() {
   window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
@@ -588,11 +842,16 @@ function bind() {
   });
 
   $('theme-toggle').addEventListener('click', () => {
-    const now = document.documentElement.getAttribute('data-theme');
-    applyTheme(now === 'dark' ? 'light' : 'dark');
+    applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
 
-  $('refresh-btn').addEventListener('click', () => { refresh(); loadDashboard(); loadRuns(); toast('已刷新'); });
+  $('refresh-btn').addEventListener('click', () => {
+    refresh();
+    if (state.view === 'dashboard') loadDashboard();
+    if (state.view === 'runs') loadRuns();
+    if (state.view === 'settings') loadConfig();
+    toast('已刷新');
+  });
 
   $('gate-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -612,6 +871,35 @@ function bind() {
     }
   });
 
+  // 搜索
+  const onSearch = (key, id, rerender) => {
+    $(id).addEventListener('input', (ev) => {
+      state.q[key] = ev.target.value.trim();
+      rerender();
+    });
+  };
+  onSearch('plugins', 'plugins-search', renderPlugins);
+  onSearch('tasks', 'tasks-search', renderTasks);
+  onSearch('runs', 'runs-search', renderRuns);
+  $('runs-only-failed').addEventListener('change', (ev) => {
+    state.onlyFailed = ev.target.checked;
+    renderRuns();
+  });
+
+  // 排序
+  for (const view of ['tasks', 'runs']) {
+    for (const th of document.querySelectorAll('#view-' + view + ' th[data-sort]')) {
+      th.addEventListener('click', () => {
+        const key = th.dataset.sort;
+        const cur = state.sort[view];
+        state.sort[view] = { key, dir: cur.key === key ? -cur.dir : 1 };
+        if (view === 'tasks') renderTasks();
+        else renderRuns();
+      });
+    }
+  }
+
+  // 日志
   $('log-level').addEventListener('change', (ev) => { state.logLevel = ev.target.value; renderLogs(); });
   $('log-search').addEventListener('input', (ev) => { state.logQuery = ev.target.value.trim(); renderLogs(); });
   $('log-pause').addEventListener('click', (ev) => {
@@ -621,11 +909,27 @@ function bind() {
   });
   $('log-clear').addEventListener('click', () => { state.logs = []; renderLogs(); });
 
-  $('drawer').addEventListener('click', (ev) => {
-    if (ev.target.dataset.close) closeDrawer();
+  // 配置复制
+  $('config-copy').addEventListener('click', async () => {
+    const text = state.config && state.config.json;
+    if (!text) return toast('没有可复制的内容', true);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('已复制配置 JSON');
+    } catch (_) {
+      toast('浏览器不允许写剪贴板', true);
+    }
   });
+
+  // 抽屉 / 弹窗关闭
+  $('drawer').addEventListener('click', (ev) => { if (ev.target.dataset.close) closeDrawer(); });
+  $('confirm').addEventListener('click', (ev) => { if (ev.target.dataset.close) settleConfirm(false); });
+  $('confirm-ok').addEventListener('click', () => settleConfirm(true));
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') { closeDrawer(); $('sidebar').classList.remove('open'); }
+    if (ev.key !== 'Escape') return;
+    closeDrawer();
+    settleConfirm(false);
+    $('sidebar').classList.remove('open');
   });
 }
 
@@ -634,14 +938,17 @@ function bind() {
 async function main() {
   initTheme();
   bind();
-  const initial = location.hash.slice(1) || 'dashboard';
-  setView(initial);
+  setView(location.hash.slice(1) || 'dashboard');
   await refresh();
   await loadDashboard();
   if (state.view === 'runs') await loadRuns();
   if (state.view === 'logs') await backfillLogs();
+  if (state.view === 'settings') await loadConfig();
   streamLogs();
-  setInterval(() => { refresh(); if (state.view === 'dashboard') loadDashboard(); }, POLL_MS);
+  setInterval(() => {
+    refresh();
+    if (state.view === 'dashboard') loadDashboard();
+  }, POLL_MS);
 }
 
 main();
