@@ -2,25 +2,26 @@
 /* panel-llrt 控制台样式。零构建：一个文件、无外部依赖、无 @import。 */
 
 :root {
-  --bg: #f4f5f8;
-  --bg-grad: radial-gradient(1200px 600px at 100% -10%, #fce7f3 0%, transparent 62%);
+  /* 亮色 = 粉色系：底、线、字都带一点粉调，主色用 pink-500（不是玫瑰红）。 */
+  --bg: #fdf6f9;
+  --bg-grad: radial-gradient(1100px 620px at 100% -12%, #fbd5e6 0%, transparent 64%);
   --surface: #ffffff;
-  --surface-2: #fafbfc;
-  --line: #e6e8ee;
-  --line-strong: #d6dae2;
-  --fg: #12141a;
-  --fg-2: #414651;
-  --dim: #6b7280;
-  --accent: #db2777;
+  --surface-2: #fdf2f7;
+  --line: #f3e2ea;
+  --line-strong: #e8cdd9;
+  --fg: #2a1620;
+  --fg-2: #5d4150;
+  --dim: #8d6f7d;
+  --accent: #ec4899;
   --accent-fg: #ffffff;
-  --accent-soft: #fdeef5;
-  --ok: #14804a;
-  --ok-soft: #e6f6ec;
-  --warn: #a05a00;
-  --warn-soft: #fdf3e0;
-  --err: #b42318;
-  --err-soft: #fdecea;
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .06);
+  --accent-soft: #fce4f0;
+  --ok: #0f7a4a;
+  --ok-soft: #e4f6ec;
+  --warn: #9a5b00;
+  --warn-soft: #fdf1e0;
+  --err: #c02545;
+  --err-soft: #fde9ee;
+  --shadow-sm: 0 1px 2px rgba(60, 20, 40, .05), 0 1px 3px rgba(60, 20, 40, .06);
   --shadow-md: 0 8px 24px -12px rgba(16, 24, 40, .18), 0 2px 6px rgba(16, 24, 40, .06);
   --radius: 14px;
   --radius-sm: 10px;
@@ -96,8 +97,8 @@ button, input, select { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 6px 2px; }
 .brand-mark {
   width: 26px; height: 26px; border-radius: 9px; flex: none;
-  background: linear-gradient(140deg, #f9a8d4, #ec4899 52%, #be185d);
-  box-shadow: 0 4px 10px -3px rgba(219, 39, 119, .55);
+  background: linear-gradient(140deg, #f9a8d4, #ec4899 52%, #d6336c);
+  box-shadow: 0 4px 10px -3px rgba(236, 72, 153, .5);
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
 .brand-text strong { font-size: 14px; }
