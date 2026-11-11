@@ -362,7 +362,10 @@ struct Inner {
     tasks: Vec<Task>,
     tx: mpsc::UnboundedSender<Cmd>,
     reg: mpsc::UnboundedSender<Registration>,
-    config: serde_json::Value,
+    /// 面板级只读配置，**启动时序列化一次**成 JSON 文本，插件拿 `Arc` 共享。
+    /// 为什么不在 `host.config()` 里现序列化：那是热路径（每次派发都可能读），
+    /// 开销会按配置体积线性放大。见 src/config.rs。
+    config_json: std::sync::Arc<str>,
 }
 
 /// 起调度器。`config` 是所有插件共享的只读配置（`host.config()`）。
@@ -381,7 +384,11 @@ pub fn start(
         tasks: Vec::new(),
         tx: tx.clone(),
         reg: reg_tx.clone(),
-        config,
+        // JSON 解析出来的 Value 序列化不会失败（键一定是字符串、数字一定有限）；
+        // 万一失败就退成空对象，别为了一个不可能的路径把启动搞挂。
+        config_json: std::sync::Arc::from(
+            serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
+        ),
     };
     let handle = tokio::spawn(async move {
         loop {
@@ -582,7 +589,7 @@ impl Inner {
             log: self.log.clone(),
             db: self.db.clone(),
             reg: self.reg_sender(),
-            config: self.config.clone(),
+            config_json: self.config_json.clone(),
         };
         let tx = self.tx.clone();
         // 加载期可能有很长的顶层 await，不能占着调度循环

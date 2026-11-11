@@ -79,7 +79,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | `fetch` `timeout_ms` | 默认 **10000**，钳到 `[100, 60000]` | 已实现 `clamp_timeout`；实测 500ms 打 4s 慢响应 → 502ms 报超时 |
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
 | 单插件定时器 | 基线 **256 条** | **未实现**：定时器改用 LLRT 原生（抛弃 `timers.rs`），宿主没有定时器注册表可数。❓ 要不要在 host 侧补一层计数 |
-| `config` 体积 | 基线 **64 KiB** | **未实现**：`load_config` 只校验 JSON 合法性，不校验体积 |
+| `config` 体积 | **4 MiB**（`PANEL_CONFIG_MAX_BYTES` 可调，下限 4 KiB） | 已实现：`src/config.rs`。超限**拒绝启动**并报出真实字节数，不截断（截断 = 插件看到半个配置）。基线那个 64 KiB 是**任务参数**的上限，不是配置 |
 | 执行预算默认 | 基线 600000ms（10 分钟） | **新版改成 30000ms**（`scheduler.rs` `DEFAULT_BUDGET_MS`）。理由：默认值应当是「短任务够用、写错了早点暴露」，长任务显式声明 `budget_ms` |
 | **新版执行预算上限** | **5400000ms（90 分钟）** | 已实现 `MAX_BUDGET_MS`；单测钉着 20 分钟放行、90 分钟封顶、0 钳到 1 |
 

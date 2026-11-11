@@ -1,5 +1,7 @@
 /target
 /spike/target
+# 面板默认数据目录（PANEL_DATA_DIR 的默认值）：panel.db / auth.json / config.json
+/data
 node_modules
 *.log
 .DS_Store

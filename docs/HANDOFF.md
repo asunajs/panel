@@ -50,6 +50,8 @@
 - `ssrf.rs` 出站判定表（不读环境，开关作参数）；重定向每跳重判。
 - `scheduler.rs` 插件表/任务表唯一所有者（actor）；cron+预算+熔断+run 记录；`catch_engine_panic` 引擎边界。`DEFAULT_BUDGET_MS=30_000`、`MAX_BUDGET_MS=5_400_000`。
 - `cron.rs` 5/6 字段+`@every`+jitter+DST（**1112 行，偏大**）。
+- `config.rs` 面板级只读配置：`<PANEL_DATA_DIR>/config.json`，默认 4 MiB 上限（超限拒启），
+  启动时序列化一次成 `Arc<str>` 给所有插件共享（`config()` 不再现序列化）。
 - `db.rs` DB actor（channel+专用连接，无 Mutex poison）。
 - `log/` LogHub（SSE）+ redact（6 道有序幂等脱敏）。
 - `web.rs` axum 路由+单令牌（**令牌只走 header**，校验的是派生值不是明文）+`x-panel` CSRF 头+零构建静态资源。
@@ -84,8 +86,9 @@
 |---|---|---|
 | ~~`fs`/`dns` 不受限~~ | **已定不加 jail**（插件=可信代码） | 补偿控制：令牌明文不落盘、不进 env、hash 不能当令牌（auth.md） |
 | fetch body lossy UTF-8 | 非 UTF-8 字节到插件前就丢 | ❓ `body_base64`/按 charset 解；先确认央视频是否真需要 |
-| `sqlite_exec` 的 changes/rowid | 非 INSERT 返回陈旧值（与 LogHub 共用 Connection 被污染） | ❓ op 独立连接 / 只在 DML 后取值 |
-| 定时器 256 / config 64KiB 上限 | 未实现 | 待补 |
+| ~~`sqlite_exec` 的 changes/rowid~~ | **已修**：`changes` 用 `total_changes()` 差值、`rowid` 只在真变了才给。回归用例 `engine::tests::sqlite_exec_does_not_report_stale_changes_or_rowid`（反向验证过：退回旧写法即红） | 见 verification.md §13 |
+| 单插件定时器 256 条上限 | 未实现（定时器走 LLRT 原生，宿主没有注册表可数） | 待补 |
+| ~~config 体积上限~~ | **已补**：默认 4 MiB + `PANEL_CONFIG_MAX_BYTES`；超限拒绝启动。基线那个 64 KiB 是任务参数上限，不是配置 | 见 verification.md §12 |
 | 惰性回收 idle eviction | 不在切片 | 后续 |
 | 市场/推送/备份/自更新/脚本任务/上传/完整鉴权/外部运行时/UI iframe 隔离源 | 明确不做 | 后续逐子系统移植 |
 | 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 llrt-spike.md §7 |

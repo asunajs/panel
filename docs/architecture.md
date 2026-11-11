@@ -213,6 +213,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `ssrf.rs` | 出站判定表（字面量 + 内网别名，**不读环境**，开关作参数）；重定向每跳重判 |
 | `scheduler.rs` | 插件表/任务表的**唯一所有者**（actor）；cron 派发 + 预算 + 熔断 + run 记录；`catch_engine_panic` 引擎边界 |
 | `cron.rs` | 5/6 字段 + `@every` + jitter + DST（移植基线，1112 行） |
+| `config.rs` | 面板级只读配置 `config.json`：默认 4 MiB 上限（超限拒启，不截断）；启动序列化一次成 `Arc<str>` 给插件共享 |
 | `db.rs` | DB actor（channel + 专用连接，无 `Mutex` 可 poison） |
 | `log/` | `LogHub`（SSE 广播）+ `redact`（6 道有序幂等脱敏） |
 | `auth.rs` | 令牌凭据：随机盐 + PBKDF2-HMAC-SHA256 落 `auth.json`（0600）；派生完擦掉 `PANEL_TOKEN`；校验走阻塞线程池 + 成功后的内存 memo + 失败限速（见 §10） |

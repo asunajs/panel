@@ -54,7 +54,9 @@ pub struct HostHandle {
     pub log: LogHub,
     pub db: Db,
     pub reg: mpsc::UnboundedSender<Registration>,
-    pub config: Json,
+    /// 面板级只读配置的 **JSON 文本**（启动时序列化一次，多插件共享同一个 Arc）。
+    /// 不存 `serde_json::Value`：`config()` 是热路径，现序列化会按体积付费。
+    pub config_json: Arc<str>,
 }
 
 fn host(ctx: &Ctx<'_>) -> Result<HostHandle> {
@@ -180,7 +182,8 @@ async fn op_error(ctx: Ctx<'_>, msg: String) -> Result<()> {
 }
 
 async fn op_config(ctx: Ctx<'_>) -> Result<String> {
-    Ok(host(&ctx)?.config.to_string())
+    // 已经是 JSON 文本，直接拷贝一份过桥；不做 serde 序列化。
+    Ok(host(&ctx)?.config_json.as_ref().to_string())
 }
 
 /// 挂起预算的取消臂：停了就投 AbortError，而不是让 Promise 永远挂着。
@@ -267,10 +270,25 @@ async fn op_sqlite_exec(ctx: Ctx<'_>, sql: String, params: Undefined<String>) ->
     let h = host(&ctx)?;
     let binds = params_of(params.0, &ctx)?;
     h.db.call(move |conn| {
-        let changes = conn
-            .execute(&sql, rusqlite::params_from_iter(binds.iter()))
+        // ⚠ 不能用 `execute()` 的返回值当 changes，也不能无条件读 `last_insert_rowid()`：
+        // 两者都是**连接级**状态。`execute()` 内部读的是 `sqlite3_changes`，而 DDL
+        // （CREATE TABLE 之类）不会重置它 —— 于是返回值是**上一条语句**的残留（实测：
+        // CREATE TABLE 报 changes:1 / rowid:2，那是前一条 LogHub 日志 INSERT 的）。
+        // 连接是和 LogHub 共用的，日志写入随时插进来，所以这个污染不是偶发。
+        // 改法：changes 用 `total_changes()` 的差值（对 DDL 是 0，对 DML 准确）；
+        // rowid 只在它**真的变了**的时候给，否则给 null —— 不撒一个看起来像数的谎。
+        let before_rowid = conn.last_insert_rowid();
+        let before_total = conn.total_changes();
+        conn.execute(&sql, rusqlite::params_from_iter(binds.iter()))
             .map_err(|e| format!("SQL 执行失败: {e}"))?;
-        Ok(json!({ "changes": changes, "last_insert_rowid": conn.last_insert_rowid() }).to_string())
+        let changes = conn.total_changes() - before_total;
+        let after_rowid = conn.last_insert_rowid();
+        let rowid = if after_rowid != before_rowid {
+            json!(after_rowid)
+        } else {
+            Json::Null
+        };
+        Ok(json!({ "changes": changes, "last_insert_rowid": rowid }).to_string())
     })
     .await
     .map_err(|e| err(&ctx, e))

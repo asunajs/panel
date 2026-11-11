@@ -17,6 +17,14 @@ type LoadResult = std::result::Result<Plugin, String>;
 
 /// 每个用例独立的库与 invocation。`_rx` 必须活着，否则 register_* 会报「调度器已退出」。
 async fn load(source: &str) -> (LoadResult, mpsc::UnboundedReceiver<Registration>) {
+    load_cfg(source, "{}").await
+}
+
+/// 同上，但带一份指定的面板配置 JSON 文本（`host.config()` 的来源）。
+async fn load_cfg(
+    source: &str,
+    cfg: &str,
+) -> (LoadResult, mpsc::UnboundedReceiver<Registration>) {
     global_inits();
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
@@ -27,7 +35,7 @@ async fn load(source: &str) -> (LoadResult, mpsc::UnboundedReceiver<Registration
         log,
         db,
         reg,
-        config: json!({}),
+        config_json: std::sync::Arc::from(cfg),
     };
     (Plugin::load(source, handle).await, rx)
 }
@@ -104,6 +112,54 @@ async fn a_non_utf8_env_var_does_not_kill_the_plugin() {
     let out = p.dispatch("h", &json!({}), 5_000).await;
     std::env::remove_var(key);
     out.expect("非 UTF-8 环境变量不该让插件加载或派发失败");
+}
+
+/// `config()` 走的是「启动时序列化一次、插件共享 Arc<str>」这条路：
+/// 每次调用只拷贝文本，不重新 serde 序列化。这里钉住「同一份文本、同一份内容」。
+/// `sqlite_exec` 的返回值不能是**连接级残留**：连接和 LogHub 共用，日志 INSERT 随时插进来。
+/// 回归的原始读数（verification.md §9 老账）：CREATE TABLE 报 `changes:1, rowid:2`。
+#[tokio::test]
+async fn sqlite_exec_does_not_report_stale_changes_or_rowid() {
+    let p = ok(&format!(
+        "{HANDLERS}await host.register_handler('h', async () => {{\n\
+           const a = await host.sqlite_exec('CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)');\n\
+           if (a.changes !== 0) throw new Error('DDL 的 changes 不是 0: ' + JSON.stringify(a));\n\
+           if (a.last_insert_rowid !== null) throw new Error('DDL 不该给 rowid: ' + JSON.stringify(a));\n\
+           const b = await host.sqlite_exec('INSERT INTO t(v) VALUES(?1)', ['x']);\n\
+           if (b.changes !== 1) throw new Error('INSERT 的 changes 不对: ' + JSON.stringify(b));\n\
+           if (typeof b.last_insert_rowid !== 'number') throw new Error('INSERT 应当给出 rowid: ' + JSON.stringify(b));\n\
+           const d = await host.sqlite_exec('CREATE TABLE IF NOT EXISTS t2 (id INTEGER PRIMARY KEY)');\n\
+           if (d.changes !== 0) throw new Error('INSERT 之后的 DDL 报了陈旧的 changes: ' + JSON.stringify(d));\n\
+           if (d.last_insert_rowid !== null) throw new Error('INSERT 之后的 DDL 报了陈旧的 rowid: ' + JSON.stringify(d));\n\
+           const c = await host.sqlite_exec('UPDATE t SET v=?1 WHERE 1=0', ['y']);\n\
+           if (c.changes !== 0) throw new Error('空 UPDATE 的 changes 不对: ' + JSON.stringify(c));\n\
+           if (c.last_insert_rowid !== null) throw new Error('UPDATE 不该给 rowid: ' + JSON.stringify(c));\n\
+         }});"
+    ))
+    .await;
+    p.dispatch("h", &json!({}), 5_000).await.unwrap();
+}
+
+#[tokio::test]
+async fn config_is_the_same_text_on_every_call() {
+    let cfg = r#"{"greet":"hi","list":[1,2,3]}"#;
+    let (p, _rx) = load_cfg(
+        &format!(
+            "{HANDLERS}await host.register_handler('h', async () => {{\n\
+               const a = await host.config();\n\
+               const b = await host.config();\n\
+               if (a.greet !== 'hi') throw new Error('配置内容不对: ' + a.greet);\n\
+               if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error('两次 config() 不一致');\n\
+               if (a.list.length !== 3) throw new Error('数组没解出来');\n\
+             }});"
+        ),
+        cfg,
+    )
+    .await;
+    p.expect("插件应当加载成功")
+        .dispatch("h", &json!({}), 5_000)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

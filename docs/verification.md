@@ -29,7 +29,7 @@ SSRF 靶子是**面板自己的回环** `/healthz`。**不碰任何真实账号�
 OK config: {}
 OK info: "sent"
 OK sleep: 1
-OK sqlite_exec 1arg: {"changes":1,"last_insert_rowid":2}   ← 见 §9 rowid 污染
+OK sqlite_exec 1arg: {"changes":1,"last_insert_rowid":2}   ← 当时是污染读数，已修，见 §13
 OK sqlite_exec 2arg: {"changes":1,"last_insert_rowid":1}
 OK sqlite_query 1arg: {"rows":[{"x":1}],"truncated":false}
 OK register_handler: undefined
@@ -140,9 +140,9 @@ scheduler::tests::catch_engine_panic_turns_a_panic_into_a_failed_run ... ok   (&
 |---|---|---|
 | `fs` / `dns` 不受限 | 插件能读 `panel.db`（§4 BYPASS 读数） | **已定：不加 jail**（用户拍板：插件是可信代码，安全面只收在面板令牌上）。补偿控制见 §11：令牌明文不落盘、不进 `process.env`，所以读得到文件也拿不到令牌 |
 | `fetch` body 是 lossy UTF-8 | windows-1252 `café 中文` → `caf ??`（§3），非 UTF-8 字节到插件前就丢了 | ❓ 要不要 `body_base64` / 按 charset 解 —— 先确认改写后的央视频是否真需要 |
-| `sqlite_exec` 的 `changes`/`last_insert_rowid` | 非 INSERT 语句返回**陈旧值**（CREATE TABLE → `changes:1,rowid:2`）：LogHub 写与 op 共用一条 Connection，`changes()`/`last_insert_rowid()` 被交错的日志写污染 | ❓ 要不要给 op 用独立连接 / 只在 DML 后取这两个值 |
+| ~~`sqlite_exec` 的 `changes`/`last_insert_rowid`~~ | **已修**（§13）：`changes` 改用 `total_changes()` 差值，`rowid` 只在真的变了才给、否则 `null`。不用「op 独立连接」—— 那是给污染换一条连接，没解决「连接级状态」这个根因 | 见 §13 |
 | 单插件定时器 256 条上限 | **未实现**：定时器走 LLRT 原生，宿主没有注册表可数 | ❓ 要不要 host 侧补计数 |
-| `config` 64 KiB 上限 | **未实现**：`load_config` 只校验 JSON 合法性 | 待补 |
+| ~~`config` 体积上限~~ | **已补**：默认 4 MiB，`PANEL_CONFIG_MAX_BYTES` 可调；超限拒绝启动并报真实字节数。顺带把 `config()` 从「每次现序列化」改成「启动序列化一次、插件共享 `Arc<str>`」 | 见 §12 |
 | 惰性回收（idle eviction） | **不在切片里**：插件加载后常驻，不按空闲回收 | 后续子系统 |
 | 手动触发 vs 熔断 | 熔断 tripped 时手动 RunNow 仍派发（人触发优先） | 语义如此，记录在案 |
 | `runs`/`last_run`/`last_error` 计数 | 调度器内存态，重启清零（run 记录本身在 DB） | 记录在案 |
@@ -170,6 +170,7 @@ PY
 ```
 
 合成靶子与探针脚本在 `/tmp/llrt-smoke/`（`target.py`、`probe/`、`fetchprobe/`、`bypass/`、`longrun/`）。
+
 ## 11. 面板令牌（已拆成独立文档）
 
 内容搬到 **[auth.md](auth.md)**：磁盘上只有盐 + PBKDF2 哈希、明文不进 `process.env`、
@@ -177,3 +178,48 @@ PY
 
 留在这里的一句话结论：**拿到 `auth.json` 也认证不了** —— 校验是把来件再派生一次再比，
 `hash(hash) != hash`，所以落盘的哈希不是 bearer 凭据。
+
+## 12. 面板级配置的体积上限（已定，有一手读数）
+
+代码 `src/config.rs`。基线写的「64 KiB」是**任务参数**的上限
+（`rust-plugin-panel` 的 `docs/host-api.md:197`），本面板没有任务参数这个面；
+配置自身此前**完全没有**上限。
+
+**上限**：默认 **4 MiB**，`PANEL_CONFIG_MAX_BYTES` 可调（下限 4 KiB，非法值退回默认）。
+超限**拒绝启动**并报出真实字节数 —— 不截断：截断会让插件看到半个配置，
+同基线 §22.2「越界要拒绝不要夹回」的纪律。
+
+读数（`/tmp/cfg-a`、`/tmp/cfg-b`、`/tmp/cfg-c`，debug 构建）：
+
+| 场景 | 读数 |
+|---|---|
+| 5011 字节配置 + `PANEL_CONFIG_MAX_BYTES=4096` | `Error: "…/config.json 有 5011 字节，超过上限 4096 字节（PANEL_CONFIG_MAX_BYTES 可调）…"`，面板不启动 |
+| 2 MiB 配置（默认上限） | 正常启动；插件里 `host.config()` 拿到 `greet=hi`、`pad.length=2097152` |
+| 6 MiB 配置 + `PANEL_CONFIG_MAX_BYTES=8388608` | 正常启动 |
+
+**顺带改掉的另一处**：`host.config()` 原来是每次调用 `config.to_string()` 全量重新序列化，
+而它在热路径上（每次派发都可能读）。现在启动时序列化一次成 `Arc<str>`，所有插件共享，
+`config()` 只拷贝文本。回归用例 `engine::tests::config_is_the_same_text_on_every_call`；
+上限的用例在 `src/config_tests.rs`（超限、边界恰好等于上限、缺文件、坏 JSON、环境变量覆盖）。
+
+## 13. `sqlite_exec` 的 changes / rowid（已定，已修）
+
+老账（§9 那行）的原始读数：`CREATE TABLE` 返回 `{"changes":1,"last_insert_rowid":2}` ——
+那是**上一条语句**（LogHub 写日志）的残留。
+
+根因不是「该用独立连接」，而是这两个值都是**连接级**状态：
+
+| 值 | 为什么脏 |
+|---|---|
+| `changes` | `execute()` 内部读 `sqlite3_changes`；DDL 不重置它，于是报的是上一条 DML 的行数 |
+| `last_insert_rowid` | 连接上最后一次 INSERT 的 rowid，对 UPDATE/DELETE/DDL 都是陈旧值 |
+
+改法（`src/hostapi.rs` `op_sqlite_exec`）：
+
+- `changes` = `conn.total_changes()` 的前后差值 —— DDL 得 0，DML 得本语句的行数；
+- `last_insert_rowid` = 只在**它真的变了**的时候给数字，否则给 `null`。
+  宁可给 `null` 也不撒一个看起来像数的谎。
+
+**回归用例**：`engine::tests::sqlite_exec_does_not_report_stale_changes_or_rowid`，
+覆盖 DDL、INSERT、空 UPDATE，以及「先 INSERT 再 DDL」这个原始污染场景。
+反向验证过：退回旧写法即红（`INSERT 之后的 DDL 报了陈旧的 changes`）。

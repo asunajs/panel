@@ -4,6 +4,7 @@
 //! 插件加载放在 HTTP 之前，这样首个请求看到的任务表已经是全的。
 
 mod auth;
+mod config;
 mod cron;
 mod db;
 mod engine;
@@ -16,8 +17,6 @@ mod web;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use serde_json::Value;
 
 use crate::db::Db;
 use crate::log::{Level, LogHub};
@@ -61,7 +60,7 @@ async fn main() -> Result<(), String> {
     if let Some(note) = provisioned.note.clone() {
         log.emit("panel", None, Level::Info, note);
     }
-    let config = load_config(&data_dir)?;
+    let config = config::load(&data_dir)?;
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config);
 
     if ssrf::allow_private_outbound_targets() {
@@ -116,16 +115,6 @@ async fn main() -> Result<(), String> {
         .map_err(|e| format!("HTTP 服务退出: {e}"))
 }
 
-/// 面板级只读配置，所有插件共享（`host.config()`）。缺文件就是空对象。
-fn load_config(data_dir: &PathBuf) -> Result<Value, String> {
-    let path = data_dir.join("config.json");
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s)
-            .map_err(|e| format!("{} 不是合法 JSON: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Default::default())),
-        Err(e) => Err(format!("读 {} 失败: {e}", path.display())),
-    }
-}
 
 /// 扫 `plugins/*.js` 逐个加载。**一个插件失败不影响其它插件** ——
 /// 这正是不用 `Vm::from_options` 的理由。
