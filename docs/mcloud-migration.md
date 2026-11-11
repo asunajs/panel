@@ -67,8 +67,61 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
   `panel-llrt/plugins/` 与 `panel-llrt/plugins/mcloud.webui/`。
 - **不在面板里写旧契约垫片**：面板只多「同步 op」这一种能力，适配全在插件侧。
 
-## 6. 现状
+## 6. 现状（2026-11-12 凌晨）
 
 - [x] 停掉 3030（含 launchd 的 KeepAlive 与 watchdog）
-- [x] 契约差异盘清（本文件 §2）
-- [ ] 阶段 A
+- [x] 契约差异盘清（§2）
+- [x] **阶段 A**：服务型插件 + 界面 + 数据搬家
+- [x] **阶段 B**：`mcloud-daily` 真跑一趟
+- [x] 阶段 C/D 的评估（§7）
+
+### 阶段 A 的读数
+
+| 项 | 结果 |
+|---|---|
+| 四个插件加载 | `mcloud`（has_web）/ `mcloud-daily` / `mcloud-exchange` / `mcloud-live` 全部 ok |
+| 任务注册 | 日常 `0 8,20 * * *`、兑换 `0 10 * * *`、直播 `30 10,15 * * *` |
+| `GET /plugins/mcloud/api/readings` | 3 个账号的真实读数（含 jwt 到期、掩码） |
+| `GET /plugins/mcloud/api/log/tail` | 搬过来的历史日志（`state` 里的 log ring） |
+| `GET /plugins/mcloud/api/selftest` | **7/7 通过**（md5 / sha256 / utf8 往返 / BigInt / 10 万字符 apply） |
+| 界面 `/plugins/mcloud/` | 完整渲染：6 个区块 + 3 张账号卡 + 深色主题 |
+| 数据搬家 | `state` 41 键（含 3 个账号会话）+ `mcloud_runs` 502 行 |
+
+### 阶段 B 的读数
+
+手动跑一次「日常」（run 387，48.1s）：96 行日志，末行 `日常完成：1/1 个账号好了`；
+插件自己的 `mcloud_runs` 也落了行（`15 步都有结果（1 步有动作，2 项等服务端确认，用时 48.1s）`）
+—— 说明**同步写库**这条路也是通的。
+
+## 7. 阶段 C / D 的评估
+
+### 兑换（mcloud-exchange）
+
+- 它能加载、注册任务、路由可用，**代码路径不依赖 WebSocket**；
+- 但它要的是**毫秒级时序**（`lead_ms`、`target_hour`、`schedule.until`），旧面板为此专门做过
+  `lead_ms` 提前触发与 `lateMs` 记录。新面板的调度器是秒级 tick，没有 `lead_ms`；
+- 更关键的是：跑一次兑换是**真花钱**的动作，不该由我在没人看着的时候触发。
+
+⇒ 结论：**可以迁，但要么先补 `lead_ms`（调度器提前唤醒），要么接受精度退化**。要跑得你点头。
+
+### 直播（mcloud-live）
+
+- 硬阻塞 1：**WebSocket**。LLRT 没有 ws 模块（`llrt_fetch` / `llrt_http` 里都没有），
+  `vendor/llrt` 也没有 `tokio-tungstenite`。听播、小红花、抽奖都要它；
+- 硬阻塞 2：**legacy TLS**。直播主机只给 CBC 套件，LLRT 走 rustls 连不上
+  （`tls: 'native'` 在旧面板要专门编译特性，见 [llrt-spike.md](llrt-spike.md) §7）；
+- 适配层对 `ws_*` 的处理是**明确抛错**（不装作有），所以这个插件加载正常、
+  但一走到听播就会得到一句清楚的失败，而不是莫名其妙的超时。
+
+⇒ 结论：**要让它跑，得先给面板加 WebSocket 客户端（新依赖 + 同步桥）+ legacy TLS 后端**。
+这两件都不是迁移，是新能力，等你决定。
+
+## 8. 怎么重新构建插件
+
+```bash
+cd workspace/mcloud-plugin
+npm run build:panelllrt     # host-api → 适配层，产物落 ../panel-llrt/plugins/
+```
+
+产物是**构建出来的**（`plugins/mcloud*.js` + `plugins/mcloud.webui/`），别手改 ——
+改代码改 `src/`，界面改 `plugins/mcloud/`。
