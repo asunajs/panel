@@ -310,6 +310,13 @@ function taskPill(t) {
   return pill('pill-ok', '已启用');
 }
 
+/** 带 data-label 的单元格：窄屏时 ::before 会把它当行内标签显示。 */
+function td(label, cls, text) {
+  const cell = el('td', cls, text);
+  cell.dataset.label = label;
+  return cell;
+}
+
 function actionsCell(ops) {
   const td = el('td', 'right');
   const wrap = el('div', 'actions');
@@ -350,6 +357,52 @@ function sortHeaders(view) {
       if (arrow) arrow.remove();
     }
   }
+}
+
+let firstRunBuilt = false;
+
+/** 一个插件都没有时的引导：光说「还没有加载任何插件」，新用户不知道下一步做什么。 */
+function renderFirstRun() {
+  const box = $('first-run');
+  if (!box) return;
+  if (state.plugins.length) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  if (firstRunBuilt) return;
+  firstRunBuilt = true;
+
+  const code = (t) => el('code', '', t);
+  const step = (parts) => {
+    const li = el('li');
+    for (const p of parts) li.append(typeof p === 'string' ? document.createTextNode(p) : p);
+    return li;
+  };
+
+  const panel = el('section', 'panel');
+  const head = el('header', 'panel-head');
+  head.append(el('h2', '', '开始使用'));
+  const body = el('div', 'panel-body');
+
+  const steps = el('ol', 'steps');
+  steps.append(
+    step(['把插件文件放进 ', code('plugins/'), ' 目录，例如 ', code('plugins/hello.js')]),
+    step(['刷新页面。面板启动时会加载目录里所有 .js；之后改了文件用插件卡上的「重载」']),
+    step(['插件里调 ', code("host.register_cron('名字', '@every 1m')"), ' 之后，任务就会出现在「任务」页']),
+  );
+  body.append(steps);
+
+  const sample = [
+    "import host from 'panel:host';",
+    "",
+    "await host.register_handler('hello', async () => {",
+    "  await host.info('hello 跑了一次');",
+    "});",
+    "",
+    "await host.register_cron('hello', '@every 1m');",
+  ].join('\n');
+  body.append(el('pre', 'pre', sample));
+
+  panel.append(head, body);
+  box.append(panel);
 }
 
 function renderPlugins() {
@@ -424,13 +477,13 @@ function renderTasks() {
   if (!rows.length) { body.append(rowMessage('没有匹配的任务', 8)); return; }
   for (const t of rows) {
     const tr = el('tr');
-    tr.append(el('td', 'dim', t.plugin));
-    tr.append(el('td', 'strong', t.name));
-    tr.append(el('td', 'mono', t.cron));
-    tr.append(el('td', 'num', humanMs(t.budget_ms)));
-    tr.append(el('td', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
-    tr.append(el('td', 'num', String(t.runs)));
-    const st = el('td');
+    tr.append(td('插件', 'dim', t.plugin));
+    tr.append(td('任务', 'strong', t.name));
+    tr.append(td('计划', 'mono', t.cron));
+    tr.append(td('预算', 'num', humanMs(t.budget_ms)));
+    tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
+    tr.append(td('跑过', 'num', String(t.runs)));
+    const st = td('状态');
     st.append(taskPill(t));
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
@@ -460,15 +513,15 @@ function renderRuns() {
   if (!rows.length) { body.append(rowMessage('没有匹配的运行记录', 7)); return; }
   for (const r of rows) {
     const tr = el('tr', 'clickable');
-    tr.append(el('td', 'num dim', String(r.id)));
-    tr.append(el('td', 'dim', r.plugin));
-    tr.append(el('td', 'strong', r.task));
-    const started = el('td', 'mono dim');
+    tr.append(td('#', 'num dim', String(r.id)));
+    tr.append(td('插件', 'dim', r.plugin));
+    tr.append(td('任务', 'strong', r.task));
+    const started = td('开始', 'mono dim');
     started.append(markText(fmtTime(r.started_at), ''));
     started.title = fmtDateTime(r.started_at);
     tr.append(started);
-    tr.append(el('td', 'num', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
-    const res = el('td');
+    tr.append(td('耗时', 'num', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
+    const res = td('结果');
     res.append(runPill(r.status));
     if (r.error) res.append(el('div', 'mini-sub err-text', r.error));
     tr.append(res);
@@ -867,6 +920,7 @@ function render() {
   state.frame = requestAnimationFrame(() => {
     state.frame = 0;
     renderCards();
+    renderFirstRun();
     renderPlugins();
     renderTasks();
     if (state.view === 'runs') renderRuns();

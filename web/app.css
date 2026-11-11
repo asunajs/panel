@@ -477,6 +477,34 @@ button, input, select { font: inherit; color: inherit; }
   .sync { display: none; }
 }
 
+/* ---------- 首次使用引导 ---------- */
+
+.steps { margin: 0 0 12px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--fg-2); }
+.steps code, .settings-note code {
+  padding: 1px 5px; border-radius: 5px; background: var(--surface-2);
+  border: 1px solid var(--line); font-family: var(--mono); font-size: 12px;
+}
+
+/* ---------- 窄屏：表格折成「标签 + 值」的行内卡片 ---------- */
+
+@media (max-width: 720px) {
+  .table thead { display: none; }
+  .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
+  .table tbody tr { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .table tbody tr:hover { background: transparent; }
+  .table tbody td {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 1px 0; border: 0; text-align: left !important;
+  }
+  .table tbody td::before {
+    content: attr(data-label); flex: none; min-width: 62px;
+    color: var(--dim); font-size: 11.5px;
+  }
+  .table tbody td:empty { display: none; }
+  .table .actions { justify-content: flex-start; margin-top: 6px; }
+  .table tbody td.right::before { content: none; }
+}
+
 /* ---------- 段控 / 滚动条 / 密度微调 ---------- */
 
 .seg {
