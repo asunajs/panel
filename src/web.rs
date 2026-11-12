@@ -1066,6 +1066,8 @@ struct Page {
     limit: Option<i64>,
     plugin: Option<String>,
     run_id: Option<i64>,
+    /// 全文搜索（插件/任务/状态/错误四个字段，LIKE 子串）。空串等于没搜。
+    q: Option<String>,
     /// 游标分页：只要 id **小于** 它的行（列表按 id 倒序）。
     ///
     /// 为什么用 id 而不是 offset：运行记录一直在新增，offset 分页会漏行/重行 ——
@@ -1119,6 +1121,34 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
     })))
 }
 
+/// 运行记录里那条 WHERE：插件筛选、游标、全文搜索三者共用一份，
+/// 列表和总数用**同一个条件**，否则「已加载 3 / 共 200」这种自相矛盾的数字就出来了。
+const RUNS_WHERE: &str = " WHERE (?1 IS NULL OR plugin=?1) \
+     AND (?2 IS NULL OR id<?2) \
+     AND (?3 IS NULL OR plugin LIKE ?3 ESCAPE '\\' OR task LIKE ?3 ESCAPE '\\' \
+          OR status LIKE ?3 ESCAPE '\\' OR ifnull(error,'') LIKE ?3 ESCAPE '\\')";
+
+/// 把用户输入包成 LIKE 模式，并转义 LIKE 的通配符。
+///
+/// 不转义的话，搜「50%」会变成「50 + 任意串」，搜「a_b」会匹配「axb」—— 都是假命中，
+/// 比搜不到更糟（用户会以为系统里有这么一条）。
+fn like_pat(q: &Option<String>) -> Option<String> {
+    let q = q.as_ref()?.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(q.len() + 2);
+    out.push('%');
+    for ch in q.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    Some(out)
+}
+
 async fn api_runs(
     State(st): State<AppState>,
     Query(p): Query<Page>,
@@ -1126,19 +1156,17 @@ async fn api_runs(
     let limit = limit_of(&p, 50, 500);
     let plugin = p.plugin.clone();
     let before = p.before;
+    let q = like_pat(&p.q);
     let (rows, total) = st
         .db
         .call(move |c| {
-            let mut stmt = c
-                .prepare(
-                    "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs
-                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR id<?2)
-                     ORDER BY id DESC LIMIT ?3",
-                )
-                .map_err(|e| e.to_string())?;
-            let plugin2 = plugin.clone();
+            let sql = format!(
+                "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs{RUNS_WHERE} \
+                 ORDER BY id DESC LIMIT ?4"
+            );
+            let mut stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
             let out: Vec<Value> = stmt
-                .query(rusqlite::params![plugin, before, limit])
+                .query(rusqlite::params![plugin, before, q, limit])
                 .map_err(|e| e.to_string())?
                 .mapped(|r| {
                     Ok(json!({
@@ -1153,12 +1181,13 @@ async fn api_runs(
                 })
                 .collect::<rusqlite::Result<_>>()
                 .map_err(|e| e.to_string())?;
-            // 总数按**同一个插件筛选**算（不含游标）：界面拿它显示「已加载 50 / 共 312」，
-            // 也靠它决定还要不要给「加载更多」。
+            // 总数：同一个 WHERE，但**不带游标**（?2 传 NULL）—— 它回答的是
+            // 「这个筛选/搜索一共有多少条」，不是「还剩多少」。
+            let csql = format!("SELECT COUNT(*) FROM runs{RUNS_WHERE}");
             let total: i64 = c
                 .query_row(
-                    "SELECT COUNT(*) FROM runs WHERE (?1 IS NULL OR plugin=?1)",
-                    rusqlite::params![plugin2],
+                    &csql,
+                    rusqlite::params![plugin, None::<i64>, q],
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
@@ -1359,11 +1388,11 @@ mod tests {
 
     #[test]
     fn limit_is_clamped() {
-        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None };
+        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None };
         assert_eq!(limit_of(&p, 50, 500), 500);
-        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None };
+        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None };
         assert_eq!(limit_of(&p, 50, 500), 1);
-        let p = Page { limit: None, plugin: None, run_id: None, before: None };
+        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None };
         assert_eq!(limit_of(&p, 50, 500), 50);
     }
 }

@@ -631,8 +631,15 @@ function renderRuns() {
   const total = typeof state.runsTotal === 'number' ? state.runsTotal : state.runs.length;
   $('runs-count').textContent = '已加载 ' + state.runs.length + ' / 共 ' + total;
   clear(body);
-  if (!state.runs.length) { body.append(rowMessage('还没有运行记录', 7, '任务的第一次执行会记在这里')); return; }
-  if (!rows.length) { body.append(rowMessage('没有匹配的运行记录', 7)); return; }
+  // 「一条都没有」和「筛完一条都不剩」是两件事，别用同一句话。
+  const narrowing = !!(state.q.runs || state.fp.runs || state.onlyFailed);
+  if (!state.runs.length) {
+    body.append(narrowing
+      ? rowMessage('没有匹配的运行记录', 7, '换个词，或者清掉筛选')
+      : rowMessage('还没有运行记录', 7, '任务的第一次执行会记在这里'));
+    return;
+  }
+  if (!rows.length) { body.append(rowMessage('没有匹配的运行记录', 7, '换个词，或者清掉筛选')); return; }
   for (const r of rows) {
     const tr = el('tr', 'clickable');
     tr.append(td('#', 'num dim', String(r.id)));
@@ -1822,6 +1829,8 @@ async function loadRuns(reset = true) {
   try {
     const qs = ['limit=50'];
     if (state.fp.runs) qs.push('plugin=' + encodeURIComponent(state.fp.runs));
+    // 搜索也走服务端：在已加载的行里搜，「搜不到」和「没有」分不清 —— 和插件筛选同一个病。
+    if (state.q.runs) qs.push('q=' + encodeURIComponent(state.q.runs));
     if (!reset && state.runs.length) qs.push('before=' + state.runs[state.runs.length - 1].id);
     const data = await api('/api/runs?' + qs.join('&'));
     const got = data.runs || [];
@@ -2148,7 +2157,14 @@ function bind() {
   // 搜索（自绘清空按钮）
   wireSearch('plugins-search', (v) => { state.q.plugins = v; }, renderPlugins);
   wireSearch('tasks-search', (v) => { state.q.tasks = v; }, renderTasks);
-  wireSearch('runs-search', (v) => { state.q.runs = v; }, renderRuns);
+  // 运行记录的搜索：**先本地过一遍**（打字立刻有反馈），250ms 后再问服务端要准确结果。
+  // 只做本地那一步的话，搜到的是「已加载的 50 条里有没有」，不是「有没有」。
+  let runsSearchTimer = 0;
+  wireSearch('runs-search', (v) => {
+    state.q.runs = v;
+    clearTimeout(runsSearchTimer);
+    runsSearchTimer = setTimeout(() => loadRuns(true), 250);
+  }, renderRuns);
   $('runs-only-failed').addEventListener('change', (ev) => {
     state.onlyFailed = ev.target.checked;
     renderRuns();

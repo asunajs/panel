@@ -1839,3 +1839,52 @@ async fn runs_page_by_cursor_and_count_by_plugin() {
     assert_eq!(pn["total"], 0);
     assert_eq!(pn["runs"].as_array().unwrap().len(), 0);
 }
+
+/// 运行记录的搜索：真的走服务端（不只是过滤已加载的行），通配符按字面量处理。
+#[tokio::test]
+async fn runs_search_hits_all_rows_and_escapes_wildcards() {
+    let (app, plugins, _data, _store) = setup_dirs("q").await;
+    std::fs::write(
+        plugins.join("fail.js"),
+        "import host from 'panel:host';\n\
+         await host.register_handler('go', async () => { throw new Error('kaboom-42'); });\n",
+    )
+    .unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/fail/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..3 {
+        let (status, _) = send(&app, with_csrf("POST", "/api/tasks/fail/go/run", None)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // 错误文本里搜得到
+    let (_, b) = get(&app, "/api/runs?limit=50&q=kaboom").await;
+    assert_eq!(b["total"], 3, "{b}");
+    // 插件名 / 任务名 / 状态也都在搜索面里
+    let (_, b) = get(&app, "/api/runs?limit=50&q=fail").await;
+    assert_eq!(b["total"], 3);
+    let (_, b) = get(&app, "/api/runs?limit=50&q=error").await;
+    assert_eq!(b["total"], 3, "状态字段也算命中面");
+    // 通配符必须被转义：kab%om 不是「kab + 任意 + om」
+    let (_, b) = get(&app, "/api/runs?limit=50&q=kab%25om").await;
+    assert_eq!(b["total"], 0, "%25 = %%，按字面量搜应当 0 条");
+    let (_, b) = get(&app, "/api/runs?limit=50&q=kab_om").await;
+    assert_eq!(b["total"], 0);
+    // 搜不到时 total=0、行数 0（前端据此区分「没有」和「没搜到」）
+    let (_, b) = get(&app, "/api/runs?limit=50&q=zzz").await;
+    assert_eq!(b["total"], 0);
+    assert_eq!(b["runs"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn like_pattern_escapes_wildcards() {
+    use crate::web::like_pat;
+    assert_eq!(like_pat(&None), None);
+    assert_eq!(like_pat(&Some("   ".into())), None, "空白等于没搜");
+    assert_eq!(like_pat(&Some("boom".into())), Some("%boom%".into()));
+    // 用户搜的 % 和 _ 是字面量，不是通配符 —— 否则「50%」会匹配一切
+    assert_eq!(like_pat(&Some("50%".into())), Some("%50\\%%".into()));
+    assert_eq!(like_pat(&Some("a_b".into())), Some("%a\\_b%".into()));
+    // 反斜杠自己也要转义（它是 ESCAPE 字符）
+    assert_eq!(like_pat(&Some("a\\b".into())), Some("%a\\\\b%".into()));
+}
