@@ -27,6 +27,9 @@ const state = {
   stats: null,
   config: null,
   runs: [],
+  /** 服务端算的总条数（按当前插件筛选），用来显示「已加载 N / 共 M」。 */
+  runsTotal: null,
+  runsLoading: false,
   dashRuns: [],
   dashLogs: [],
   logs: [],
@@ -625,7 +628,8 @@ function renderRuns() {
     .filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
   if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok');
   rows = sortBy(rows, state.sort.runs, { dur: (r) => (r.ended_at ? r.ended_at - r.started_at : null) });
-  $('runs-count').textContent = state.runs.length;
+  const total = typeof state.runsTotal === 'number' ? state.runsTotal : state.runs.length;
+  $('runs-count').textContent = '已加载 ' + state.runs.length + ' / 共 ' + total;
   clear(body);
   if (!state.runs.length) { body.append(rowMessage('还没有运行记录', 7, '任务的第一次执行会记在这里')); return; }
   if (!rows.length) { body.append(rowMessage('没有匹配的运行记录', 7)); return; }
@@ -648,6 +652,20 @@ function renderRuns() {
     body.append(tr);
   }
   sortHeaders('runs');
+  // 还有更老的就给一个「加载更多」。排序/搜索只作用在已加载的行上 ——
+  // 这一点要写在按钮上，否则用户会以为「搜不到 = 没有」。
+  if (state.runs.length < total) {
+    const tr = el('tr');
+    const cell = el('td');
+    cell.colSpan = 7;
+    cell.style.textAlign = 'center';
+    const more = el('button', 'btn btn-sm', '加载更多（还有 ' + (total - state.runs.length) + ' 条）');
+    more.type = 'button';
+    more.addEventListener('click', (ev) => { ev.stopPropagation(); loadRuns(false); });
+    cell.append(more);
+    tr.append(cell);
+    body.append(tr);
+  }
 }
 
 function renderDashRuns() {
@@ -1732,7 +1750,7 @@ const VIEWS = {
   plugins: ['插件', '已加载的插件与启停操作'],
   scripts: ['脚本', '独立 JS 文件：手动跑或按计划跑'],
   tasks: ['任务', '定时计划、预算与熔断状态'],
-  runs: ['运行记录', '最近 50 次派发的结果'],
+  runs: ['运行记录', '每次派发的耗时与结果，点开看这一次的日志'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],
   settings: ['设置', '面板信息、配置与安全'],
 };
@@ -1793,12 +1811,25 @@ async function refresh() {
   }
 }
 
-async function loadRuns() {
+/** 运行记录：游标分页 + **服务端**按插件筛。
+ *
+ *  为什么筛选要放服务端：原来是在已加载的 50 条里过一遍，筛一个跑得少的插件
+ *  直接得到空表 —— 那不是「没跑过」，是「最近 50 条里没有」。
+ *  reset=false 时带 before=<最后一行的 id> 取下一页（id 倒序，所以是「更老的」）。 */
+async function loadRuns(reset = true) {
+  if (state.runsLoading) return;
+  state.runsLoading = true;
   try {
-    const data = await api('/api/runs?limit=50');
-    state.runs = data.runs || [];
+    const qs = ['limit=50'];
+    if (state.fp.runs) qs.push('plugin=' + encodeURIComponent(state.fp.runs));
+    if (!reset && state.runs.length) qs.push('before=' + state.runs[state.runs.length - 1].id);
+    const data = await api('/api/runs?' + qs.join('&'));
+    const got = data.runs || [];
+    state.runs = reset ? got : state.runs.concat(got);
+    state.runsTotal = typeof data.total === 'number' ? data.total : state.runs.length;
     if (state.view === 'runs') renderRuns();
   } catch (e) { if (!(e instanceof Unauthorized)) toast('读取运行记录失败', true); }
+  finally { state.runsLoading = false; }
 }
 
 async function loadDashboard() {
@@ -1985,11 +2016,16 @@ function renderFilterDropdowns() {
       label: "全部插件",
       count: view === "tasks" ? state.tasks.length : undefined,
     }];
-    for (const p of state.plugins) {
+    // 运行记录页的选项要**多看一步**：已卸载的插件也会留下历史行，
+    // 只列 state.plugins 的话那些行在界面上永远筛不出来。
+    const names = view === "runs"
+      ? Array.from(new Set([...state.plugins.map((p) => p.name), ...state.runs.map((r) => r.plugin)])).sort()
+      : state.plugins.map((p) => p.name);
+    for (const name of names) {
       const n = view === "tasks"
-        ? state.tasks.filter((t) => t.plugin === p.name).length
+        ? state.tasks.filter((t) => t.plugin === name).length
         : undefined;
-      opts.push({ value: p.name, label: p.name, count: n });
+      opts.push({ value: name, label: name, count: n });
     }
     // sig 里必须带上「当前选中值」：不带的话选完这一项，opts 没变 ⇒ sig 没变 ⇒ 直接跳过重建，
     // 按钮标题就停在旧值上（选了 hello，标题还是「全部插件」）。
@@ -2000,7 +2036,7 @@ function renderFilterDropdowns() {
       state.fp[view] = v;
       renderFilterDropdowns();
       if (view === "tasks") renderTasks();
-      else renderRuns();
+      else loadRuns(true);
     });
   }
 }

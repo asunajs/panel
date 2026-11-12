@@ -1772,3 +1772,70 @@ async fn notify_channels_and_outbox_round_trip() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0, "试发不该进铃铛");
 }
+
+/// 运行记录分页：游标往下翻不漏不重，total 按插件筛选算。
+///
+/// 数据靠真跑出来（setup_dirs 用的是内存库，测试里拿不到库句柄去塞行）：
+/// 装一个 hello 插件，跑 tick 几次，再用 limit=2 的游标翻。
+#[tokio::test]
+async fn runs_page_by_cursor_and_count_by_plugin() {
+    let (app, plugins, _data, _store) = setup_dirs("pg").await;
+    std::fs::write(
+        plugins.join("hello.js"),
+        "import host from 'panel:host';
+\
+         await host.register_handler('tick', async () => 1);
+",
+    )
+    .unwrap();
+    let (status, _) = send(
+        &app,
+        with_csrf("POST", "/api/plugins/hello/reload", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for _ in 0..5 {
+        let (status, body) =
+            send(&app, with_csrf("POST", "/api/tasks/hello/tick/run", None)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let (_, p1) = get(&app, "/api/runs?limit=2").await;
+    let ids1: Vec<i64> = p1["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids1.len(), 2);
+    assert_eq!(p1["total"], 5, "总数不受 limit 影响");
+
+    let (_, p2) = get(&app, &format!("/api/runs?limit=2&before={}", ids1[1])).await;
+    let ids2: Vec<i64> = p2["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids2.len(), 2);
+    assert!(ids2[0] < ids1[1], "第二页必须比第一页更老");
+    assert!(
+        ids1.iter().all(|a| !ids2.contains(a)),
+        "两页不能重行：{ids1:?} vs {ids2:?}"
+    );
+
+    // 再翻一页拿到最后一条，然后就没有了
+    let (_, p3) = get(&app, &format!("/api/runs?limit=2&before={}", ids2[1])).await;
+    assert_eq!(p3["runs"].as_array().unwrap().len(), 1);
+    let (_, p4) = get(&app, &format!("/api/runs?limit=2&before={}", p3["runs"][0]["id"])).await;
+    assert_eq!(p4["runs"].as_array().unwrap().len(), 0, "翻到底就是空");
+    assert_eq!(p4["total"], 5, "total 不随游标变");
+
+    // 插件筛选：总数只算这个插件
+    let (_, ph) = get(&app, "/api/runs?limit=50&plugin=hello").await;
+    assert_eq!(ph["total"], 5);
+    let (_, pn) = get(&app, "/api/runs?limit=50&plugin=nobody").await;
+    assert_eq!(pn["total"], 0);
+    assert_eq!(pn["runs"].as_array().unwrap().len(), 0);
+}

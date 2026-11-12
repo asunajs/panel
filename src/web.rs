@@ -1066,6 +1066,11 @@ struct Page {
     limit: Option<i64>,
     plugin: Option<String>,
     run_id: Option<i64>,
+    /// 游标分页：只要 id **小于** 它的行（列表按 id 倒序）。
+    ///
+    /// 为什么用 id 而不是 offset：运行记录一直在新增，offset 分页会漏行/重行 ——
+    /// 翻到第二页时第一页的行可能已经被新行挤下去了。
+    before: Option<i64>,
 }
 
 fn limit_of(p: &Page, default: i64, cap: i64) -> i64 {
@@ -1120,17 +1125,20 @@ async fn api_runs(
 ) -> Result<Json<Value>, ApiError> {
     let limit = limit_of(&p, 50, 500);
     let plugin = p.plugin.clone();
-    let rows = st
+    let before = p.before;
+    let (rows, total) = st
         .db
         .call(move |c| {
             let mut stmt = c
                 .prepare(
                     "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs
-                     WHERE (?1 IS NULL OR plugin=?1) ORDER BY id DESC LIMIT ?2",
+                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR id<?2)
+                     ORDER BY id DESC LIMIT ?3",
                 )
                 .map_err(|e| e.to_string())?;
+            let plugin2 = plugin.clone();
             let out: Vec<Value> = stmt
-                .query(rusqlite::params![plugin, limit])
+                .query(rusqlite::params![plugin, before, limit])
                 .map_err(|e| e.to_string())?
                 .mapped(|r| {
                     Ok(json!({
@@ -1145,11 +1153,20 @@ async fn api_runs(
                 })
                 .collect::<rusqlite::Result<_>>()
                 .map_err(|e| e.to_string())?;
-            Ok(out)
+            // 总数按**同一个插件筛选**算（不含游标）：界面拿它显示「已加载 50 / 共 312」，
+            // 也靠它决定还要不要给「加载更多」。
+            let total: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE (?1 IS NULL OR plugin=?1)",
+                    rusqlite::params![plugin2],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            Ok((out, total))
         })
         .await
         .map_err(internal)?;
-    Ok(Json(json!({ "runs": rows })))
+    Ok(Json(json!({ "runs": rows, "total": total })))
 }
 
 async fn api_run_one(
@@ -1342,11 +1359,11 @@ mod tests {
 
     #[test]
     fn limit_is_clamped() {
-        let p = Page { limit: Some(10_000), plugin: None, run_id: None };
+        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None };
         assert_eq!(limit_of(&p, 50, 500), 500);
-        let p = Page { limit: Some(-1), plugin: None, run_id: None };
+        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None };
         assert_eq!(limit_of(&p, 50, 500), 1);
-        let p = Page { limit: None, plugin: None, run_id: None };
+        let p = Page { limit: None, plugin: None, run_id: None, before: None };
         assert_eq!(limit_of(&p, 50, 500), 50);
     }
 }
