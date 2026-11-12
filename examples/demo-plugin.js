@@ -72,7 +72,34 @@ async function probe() {
   await host.set_job_blockers('probe', ['演示：这条会显示成「未就绪」']);
   await host.set_job_schedule('probe', { expr: '@every 6h' });
 
-  // 9) 写错键名必须报错（而不是静默当成默认值）—— 第 73 轮就是这么踩到的
+  // 9) WebSocket：要走**局域网**地址 —— 回环被 SSRF 门挡（那是面板自己）。
+  //    对端用 `node scripts/test-servers.mjs` 起一个 echo。
+  try {
+    const id = await host.ws_open('ws://192.168.3.196:9911/');
+    host.ws_send(id, 'hello from demo');
+    const frame = host.ws_recv(id, 3000);
+    host.ws_close(id);
+    out.ws = frame;
+  } catch (e) {
+    out.ws = 'err: ' + e.message;
+  }
+
+  // 10) SMTP：同样过出站判定，所以也用局域网地址 + 假服务器（tls: none）
+  try {
+    out.smtp = await host.smtp_send({
+      host: '192.168.3.196',
+      port: 9925,
+      tls: 'none',
+      from: 'demo@panel.local',
+      to: 'you@example.com',
+      subject: 'demo 自检',
+      text: '来自 demo 插件的一封信',
+    });
+  } catch (e) {
+    out.smtp = 'err: ' + e.message;
+  }
+
+  // 11) 写错键名必须报错（而不是静默当成默认值）—— 第 73 轮就是这么踩到的
   try {
     await host.set_job_schedule('probe', { cron: '@every 6h' });
     out.bad_key = '没报错（不对）';

@@ -42,3 +42,34 @@ GET  /plugins/demo/other        → 插件返回的 HTML 兜底页
 **踩到的坑**：`set_job_schedule('x', {cron: ...})` 以前**静默无效**（op 只认 `expr`），
 插件作者看不到任何反馈。现在 host op 也做 opts 键名白名单（`only_keys`），
 写错直接抛「只认 expr / lead_ms，收到 "cron"」。HTTP 侧同类问题见 [api-bodies.md](api-bodies.md)。
+
+## 出站三件：WebSocket / SMTP / 静态文件（第 74 轮补）
+
+`fetch` 之外还有三条出站/界面入口，这轮补进自检。它们都要过同一道 SSRF 门，
+所以**对端不能是回环**（那是面板自己）—— 用这台机器的局域网地址，配合
+`node scripts/test-servers.mjs`（一个 WS echo + 一个假 SMTP，都绑 `0.0.0.0`）。
+
+```bash
+node scripts/test-servers.mjs 9911 9925   # [ws] echo / [smtp] fake
+```
+
+读数（临时面板 8797，一次 probe `status=ok`）：
+
+```text
+probe ws    = {"data":"hello from demo","type":"text"}      ws_open → ws_send → ws_recv → ws_close 全通
+probe smtp  = {"ok":true,"response":"250 queued"}           smtp_send（tls: none）走完 EHLO/MAIL/RCPT/DATA
+```
+
+服务器侧看到的是同一来一回（echo 回来的正是发出去的文本；SMTP 收到了完整一封信）。
+
+### 插件自带界面的两种来源
+
+`/plugins/<name>/` 先找**静态文件** `<plugins_dir>/<name>.webui/`，找不到才交给 `register_web` 注册的路由
+（见 [plugin-webui.md](plugin-webui.md)）。实测同时挂两种：
+
+```text
+GET /plugins/demo/             → 200 text/html; charset=utf-8（来自 demo.webui/index.html）
+GET /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/demo/api/ping","query":"x=1"}
+```
+
+样例文件在 `examples/demo-plugin.webui/index.html`：要试就 `cp -r examples/demo-plugin.webui plugins/demo.webui`。
