@@ -366,20 +366,7 @@ impl Scripts {
         }
 
         let started = now_ms();
-        let run_id = self
-            .db
-            .call({
-                let n = name.to_string();
-                move |c| {
-                    c.execute(
-                        "INSERT INTO runs(plugin,task,started_at,status) VALUES(?1,?2,?3,'running')",
-                        rusqlite::params![PLUGIN, n, started],
-                    )
-                    .map_err(|e| format!("建 run 记录失败: {e}"))?;
-                    Ok(c.last_insert_rowid())
-                }
-            })
-            .await?;
+        let run_id = crate::runs::open(&self.db, PLUGIN, &name, started).await?;
 
         self.log.emit(
             PLUGIN,
@@ -464,20 +451,9 @@ impl Scripts {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&name);
-        let _ = self
-            .db
-            .call({
-                let (s, e) = (status.to_string(), error.clone());
-                move |c| {
-                    c.execute(
-                        "UPDATE runs SET ended_at=?1, status=?2, error=?3 WHERE id=?4",
-                        rusqlite::params![ended, s, e, run_id],
-                    )
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-                }
-            })
-            .await;
+        if let Err(e) = crate::runs::close(&self.db, &self.log, run_id, ended, status, error.clone()).await {
+            self.log.emit(PLUGIN, Some(run_id), Level::Warn, format!("收尾运行记录失败: {e}"));
+        }
         match &result {
             Ok(()) => self.log.emit(
                 PLUGIN,

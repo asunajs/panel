@@ -286,3 +286,9 @@
     另：导出接口只认筛选参数，`limit/sort/dir/after_*` 传了要 400（不然又是静默忽略）。
     守卫：`csv_fields_are_quoted_escaped_and_guarded_against_formulas`、
     `exporting_csv_has_the_right_headers_bom_and_rejects_paging_args`。
+
+66. **收尾 `runs` 写了 `let _ = ...`，命中 0 行时静默**：任务和脚本各写了一份 INSERT/UPDATE，
+    两份都用 `let _ =` 吞结果。0 行意味着「界面上这次运行既没有成功也没有失败」——
+    最该说出来的情况反而最安静（第 84 轮的保留策略剪掉正在跑的行就是它的成因）。
+    现在两处共用 `runs::open` / `runs::close`，close 命中 0 行会写一条 warn 并返回 false。
+    守卫：`open_then_close_round_trips`、`closing_a_missing_run_says_so_instead_of_swallowing_it`。

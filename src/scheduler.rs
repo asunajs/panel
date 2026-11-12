@@ -1619,20 +1619,7 @@ impl Inner {
 
         let started = Local::now().timestamp_millis();
         // 建 run 记录：失败就别派发（没有记录的成功等于没发生过）。
-        let run_id = self
-            .db
-            .call({
-                let (p, n) = (plugin_name.clone(), task_name.clone());
-                move |c| {
-                    c.execute(
-                        "INSERT INTO runs(plugin,task,started_at,status) VALUES(?1,?2,?3,'running')",
-                        rusqlite::params![p, n, started],
-                    )
-                    .map_err(|e| format!("建 run 记录失败: {e}"))?;
-                    Ok(c.last_insert_rowid())
-                }
-            })
-            .await;
+        let run_id = crate::runs::open(&self.db, &plugin_name, &task_name, started).await;
         let run_id = match run_id {
             Ok(id) => id,
             Err(e) => {
@@ -1829,15 +1816,11 @@ impl Inner {
             now.timestamp_millis(),
         );
         let db = self.db.clone();
+        let log = self.log.clone();
         tokio::spawn(async move {
-            let _ = db.call(move |c| {
-                c.execute(
-                    "UPDATE runs SET ended_at=?1, status=?2, error=?3 WHERE id=?4",
-                    rusqlite::params![ended, status, error, run_id],
-                )
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-            }).await;
+            if let Err(e) = crate::runs::close(&db, &log, run_id, ended, status, error).await {
+                log.emit("panel", Some(run_id), Level::Warn, format!("收尾运行记录失败: {e}"));
+            }
         });
     }
 }

@@ -20,6 +20,7 @@ mod outbound;
 mod jsslots;
 mod ratelimit;
 mod retention;
+mod runs;
 mod panelversion;
 mod scripts;
 mod sync_bridge;
