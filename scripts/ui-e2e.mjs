@@ -16,6 +16,8 @@
 // 环境变量：UI_BASE（默认 http://127.0.0.1:8797）、CDP（默认 http://127.0.0.1:9333）。
 // 面板没有令牌才能直接写：脚本会自己塞一个 ui-e2e 插件进来，跑完不管它。
 
+import { writeFileSync } from 'node:fs';
+
 const base = process.env.UI_BASE || 'http://127.0.0.1:8797';
 const cdp = process.env.CDP || 'http://127.0.0.1:9333';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -41,7 +43,7 @@ async function seed() {
     body: JSON.stringify({ source: SRC }),
   });
   if (!r.ok) throw new Error('塞插件失败: ' + r.status + ' ' + (await r.text()));
-  await sleep(800);
+  await sleep(1500);
 }
 
 // ---------------------------------------------------------------- CDP
@@ -153,6 +155,74 @@ const reload = await ev("(() => { const b = [...document.querySelectorAll('butto
 check('插件页有「重载」按钮', reload === 'clicked', reload);
 await sleep(1500);
 check('重载后有提示', /已重载/.test((await ev("document.getElementById('toast').textContent")) || ''));
+
+
+// ---------------------------------------------------------------- 设置页的失败路径
+//
+// 成功路径 API 层测过；用户最容易撞的其实是失败路径（粘错一段 JSON、令牌太短、
+// 选错文件）。这类地方如果只说「保存失败」，用户会以为面板坏了。
+
+const checkFail = (name, ok, extra) => {
+  if (ok) { pass.push(name); console.log('  \u2713 ' + name); }
+  else { fail.push(name + (extra ? ' -> ' + extra : '')); console.log('  \u2717 ' + name + (extra ? ' -> ' + extra : '')); }
+};
+
+await ev("document.querySelector('[data-view=\"settings\"]').click()");
+await sleep(600);
+await ev("document.querySelector('[data-tab=\"config\"]').click()");
+await sleep(600);
+
+// 1) 配置：粘一段坏 JSON，保存要报出「哪一行」并且不动盘上的文件
+const beforeCfg = await ev("fetch('/api/config').then(r=>r.json()).then(d=>d.text)");
+await ev("(() => { const t = document.getElementById('config-editor'); t.value = '{\"ok\":1, 坏的'; t.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('config-save').click()");
+await sleep(1200);
+const errShown = await ev("!document.getElementById('config-error').classList.contains('hidden')");
+const errText = await ev("document.getElementById('config-error').textContent");
+checkFail('坏 JSON 保存后显示错误块', errShown === true, String(errShown));
+checkFail('错误里说清哪一行/列', /line|column|行|列/.test(errText || ''), errText);
+const afterCfg = await ev("fetch('/api/config').then(r=>r.json()).then(d=>d.text)");
+checkFail('坏 JSON 不落盘（配置没变）', beforeCfg === afterCfg, '变了');
+
+// 2) 配置：改回合法 JSON，保存成功且插件立刻能读到
+await ev("(() => { const t = document.getElementById('config-editor'); t.value = '{\"ui_e2e\":true}'; t.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('config-save').click()");
+await sleep(1400);
+const errGone = await ev("document.getElementById('config-error').classList.contains('hidden')");
+checkFail('合法 JSON 保存后错误块隐藏', errGone === true, String(errGone));
+const savedCfg = await ev("fetch('/api/config').then(r=>r.json()).then(d=>d.text)");
+checkFail('合法 JSON 真的落盘了', /ui_e2e/.test(savedCfg || ''), (savedCfg || '').slice(0, 60));
+
+// 3) 安全：令牌太短要有一句人话（面板现在没有令牌，才会出现这个表单）
+await ev("document.querySelector('[data-tab=\"security\"]').click()");
+await sleep(500);
+const hasSetup = await ev("!!document.querySelector('.setup-input')");
+if (hasSetup) {
+  await ev("(() => { const i = document.querySelector('.setup-input'); i.value = 'abc'; i.dispatchEvent(new Event('input', {bubbles:true})); })()");
+  await ev("(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === '就用这个'); if (b) b.click(); })()");
+  await sleep(900);
+  // 太短是**前端**挡住的（直接 toast + 聚焦输入框），不会发请求
+  const out = await ev("document.getElementById('toast').textContent");
+  checkFail('令牌太短有明确提示（toast）', /至少 8|太短|8 个字符/.test(out || ''), out);
+  const focused = await ev("document.activeElement === document.querySelector('.setup-input')");
+  checkFail('令牌太短时焦点回到输入框', focused === true, String(focused));
+  const setupOut = await ev("document.querySelector('.setup-out').textContent");
+  checkFail('令牌太短时没有提交（输出区还是空的）', !setupOut || setupOut.trim() === '', setupOut);
+} else {
+  checkFail('令牌太短有明确提示', true, '面板已有令牌，跳过（这条只在无令牌时能测）');
+}
+
+// 4) 数据：选一个不是 JSON 的备份文件，要说「不是合法 JSON」而不是静默
+await ev("document.querySelector('[data-tab=\"data\"]').click()");
+await sleep(500);
+const badFile = '/tmp/ui-e2e-bad.bk';
+writeFileSync(badFile, '这不是 JSON，只是随便一个文件\n');
+const doc = await send('DOM.getDocument', { depth: 1 });
+const q = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector: '#restore-file' });
+await send('DOM.setFileInputFiles', { files: [badFile], nodeId: q.result.nodeId });
+await sleep(900);
+const badToast = await ev("document.getElementById('toast').textContent");
+checkFail('选错文件时提示「不是合法 JSON」', /不是合法 JSON/.test(badToast || ''), badToast);
 
 ws.close();
 console.log('');
