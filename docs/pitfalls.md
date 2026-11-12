@@ -305,3 +305,10 @@
     现在靠 `Flight` 的 Drop 保证摘除（正常/提前返回/panic 都覆盖），并给脚本加载套上
     `engine::catch_panic`（原来是任务专用的 `catch_engine_panic`，已上移成公共函数）。
     守卫：`flight_guard_releases_the_name_even_on_panic`、`catch_panic_passes_ok_and_err_through`。
+
+69. **通知弹层在 `.shell` 里用 `position: absolute`，于是按「文档顶部」定位**：祖先里没有已定位元素
+    （`.shell`/`.app` 都没 `position`），`top: 58px` 是相对初始包含块算的 —— 页面一滚，弹层跟着滚出视口，
+    用户在任务列表往下翻时根本看不到通知。
+    现在把它移进顶栏右侧，给 `.topbar-right { position: relative }`，`top: calc(100% + 8px)`：
+    跟着 sticky 顶栏走。
+    守卫：ui-check 两条（`offsetParent` 必须是 `topbar-right`；弹层整个在视口内）。

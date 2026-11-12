@@ -433,6 +433,23 @@ async function main() {
     csvProbe && csvProbe.status === 200 && /text\/csv/.test(csvProbe.ct || '') && /插件/.test(csvProbe.head || ''),
     JSON.stringify(csvProbe),
   );
+  // 通知弹层必须跟着 sticky 顶栏走（第 87 轮）：它原来是 .shell 的直接子元素，
+  // position:absolute 找不到已定位的祖先 → 按文档顶部定位，页面一滚就滚出视口。
+  // 判据用 offsetParent（= 定位祖先）而不是「滚动后还在不在」—— 数据集小时页面根本滚不动，
+  // 那种断言会因为「没滚」而假通过/假失败。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
+  await sleep(600);
+  await js("document.getElementById('bell').click()");
+  await sleep(400);
+  const popRect = JSON.parse(await js(
+    "JSON.stringify((()=>{const p=document.getElementById('notify-pop');const b=p.getBoundingClientRect();" +
+    "return {top:Math.round(b.top),bottom:Math.round(b.bottom),vh:innerHeight," +
+    " anchor:p.offsetParent && p.offsetParent.className, pos:getComputedStyle(p).position};})())"
+  ));
+  check('通知弹层挂在顶栏右侧上（滚动时会跟着走）', popRect.anchor === 'topbar-right', JSON.stringify(popRect));
+  check('通知弹层整个在视口里', popRect.top >= 0 && popRect.bottom <= popRect.vh + 1, JSON.stringify(popRect));
+  await js("document.getElementById('bell').click()");
+  await sleep(200);
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

@@ -725,8 +725,10 @@ button, input, select { font: inherit; color: inherit; }
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--err); box-shadow: 0 0 0 2px var(--surface);
 }
+/* 顶栏右侧是通知弹层的定位祖先：跟着 sticky 顶栏走，页面滚动时不会跑掉。 */
+.topbar-right { position: relative; }
 .notify-pop {
-  position: absolute; top: 58px; right: 22px; z-index: 60;
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 60;
   width: min(380px, calc(100vw - 32px)); max-height: min(60vh, 520px);
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--surface); border: 1px solid var(--line);
