@@ -566,7 +566,7 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
     tokio::fs::write(&tmp, bytes)
         .await
-        .map_err(|e| format!("写临时文件失败: {e}"))?;
+        .map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
     tokio::fs::rename(&tmp, path)
         .await
         .map_err(|e| format!("替换 {} 失败: {e}", path.display()))

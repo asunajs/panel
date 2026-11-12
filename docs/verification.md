@@ -297,3 +297,4 @@ register_handler                 → ok:false「试跑不能注册任务或处�
 
 界面上在**设置 → 常规 → 引擎试跑**：一个编辑框、一个预算输入、一个「运行」，输出贴在下面。
 
+存储/磁盘出问题时的读数另开一篇：[storage-failures.md](storage-failures.md)。

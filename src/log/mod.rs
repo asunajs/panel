@@ -52,6 +52,14 @@ pub struct LogHub {
     q: tokio::sync::mpsc::UnboundedSender<LogLine>,
 }
 
+/// 写库失败的告警要不要说出来：**同一个错误只说一次**（磁盘满时每批都失败，
+/// 不节流会把终端刷爆，反而看不到第一行）。错误变了或恢复了再说。
+fn should_report(last: &Option<String>, now: &str) -> bool {
+    match last {
+        Some(l) => l != now,
+        None => true,
+    }
+}
 impl LogHub {
     pub fn new(db: Db) -> Self {
         let (tx, _) = broadcast::channel(1024);
@@ -60,6 +68,8 @@ impl LogHub {
         // 没有 tokio 反应堆时（个别同步测试）退化成逐条 spawn，行为不变。
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(async move {
+                // 记在循环**外面**：写在循环里等于每批都重置，磁盘满时照样刷屏（实测 34 行）。
+                let mut last_err: Option<String> = None;
                 while let Some(first) = rx.recv().await {
                     // 同一批尽量一次事务写完：风暴时 300 次往返没必要。
                     let mut batch = vec![first];
@@ -92,7 +102,14 @@ impl LogHub {
                         })
                         .await
                     {
-                        eprintln!("[log] {e}");
+                        // 磁盘满（ENOSPC）时每一批都会失败：不节流就是每 512 行刷一次屏。
+                        // 同一个错误只说一次，恢复了再重置；文案要点明「日志没进库」。
+                        if should_report(&last_err, &e) {
+                            eprintln!("[log] 日志没写进库（磁盘满了？）：{e}");
+                            last_err = Some(e);
+                        }
+                    } else {
+                        last_err = None;
                     }
                 }
             });
@@ -118,5 +135,21 @@ impl LogHub {
         if self.q.send(line).is_err() {
             eprintln!("[log] 落库队列已关闭，这一行只走了 SSE");
         }
+    }
+}
+#[cfg(test)]
+mod report_tests {
+    use super::should_report;
+
+    /// 磁盘满时每批都失败：第一次要说，之后同一个错误别再刷屏；错误变了再说。
+    #[test]
+    fn the_same_write_error_is_only_reported_once() {
+        let mut last: Option<String> = None;
+        assert!(should_report(&last, "database or disk is full"));
+        last = Some("database or disk is full".to_string());
+        assert!(!should_report(&last, "database or disk is full"), "同一句别说第二遍");
+        assert!(should_report(&last, "disk I/O error"), "换了错误要再说");
+        last = None;
+        assert!(should_report(&last, "database or disk is full"), "恢复之后又能报");
     }
 }

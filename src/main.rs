@@ -60,7 +60,10 @@ async fn main() -> Result<(), String> {
     stats::stats();
     let data_dir = PathBuf::from(env_or("PANEL_DATA_DIR", "data"));
     let plugins_dir = PathBuf::from(env_or("PANEL_PLUGINS_DIR", "plugins"));
-    std::fs::create_dir_all(&data_dir).map_err(|e| format!("建数据目录失败: {e}"))?;
+    // 带上路径：机器上可能挂了多个盘，「Permission denied」不说清是哪一个的话，
+    // 运维只能靠猜（第 70 轮：只读目录下启动，报的就是一句没有路径的 Permission denied）。
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("建数据目录失败 {}: {e}", data_dir.display()))?;
 
     // 令牌只以「盐 + PBKDF2 哈希」的形式存在：`PANEL_TOKEN` 在这里被派生成
     // `<PANEL_DATA_DIR>/auth.json`，随即从进程环境里擦掉 —— 插件的 `process.env`
@@ -114,7 +117,8 @@ async fn main() -> Result<(), String> {
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
     let scripts_dir = PathBuf::from(env_or("PANEL_SCRIPTS_DIR", "scripts"));
-    std::fs::create_dir_all(&scripts_dir).map_err(|e| format!("建脚本目录失败: {e}"))?;
+    std::fs::create_dir_all(&scripts_dir)
+        .map_err(|e| format!("建脚本目录失败 {}: {e}", scripts_dir.display()))?;
     let scripts = scripts::Scripts::new(
         db.clone(),
         log.clone(),

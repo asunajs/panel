@@ -74,6 +74,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [plugin-lifecycle.md](plugin-lifecycle.md) | 加载/重载/停用/卸载/删除各保住什么：tasks 是配置、runs 是历史；trash 找回的边界 |
 | [upload.md](upload.md) | 上传：单文件/zip 的落点与限制、同名覆盖、挡 zip bomb 与路径逃逸（带读数） |
 | [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
+| [storage-failures.md](storage-failures.md) | 只读目录 / 磁盘满时的行为与错误文案；日志写库失败只报一次 |
 | [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
 | [performance.md](performance.md) | 量过的时间分布：一次运行 0–4ms、启动 0.47s（慢的形状是顶层语句条数）、忙/排队怎么看 |

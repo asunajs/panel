@@ -248,3 +248,9 @@
     客户端没法区分「等会儿重试」和「参数错了别重试」。现在 `scheduler::is_busy_error()` 判定后回 409。
     顺带实测确认：同插件严格串行（并发 3 个只有 1 个跑），跨插件才是真并行（三个 2s 任务同在 +1306ms 开始、+3308ms 结束）。
     守卫：`a_second_run_on_a_busy_plugin_is_a_conflict_not_a_bad_request`。
+
+58. **存储类失败别说成 400**：脚本目录只读时新建脚本以前回 400（「非法脚本名」也是 400），
+    用户会以为是自己填错。现在 `web::write_err` 把带 `os error` / `No space left` 的错误升成 500。
+    守卫：脚本只读实测（`写 …/.s1.js.tmp… 失败: Permission denied` → 500）。
+59. **告警去重的状态别写在循环里**：磁盘满时日志批插每批都失败，`last_err` 若在 `while` 里声明
+    等于每批重置，实测刷出 34 行同样的错。要记在循环外面。守卫：`the_same_write_error_is_only_reported_once`。

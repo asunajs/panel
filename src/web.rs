@@ -166,6 +166,18 @@ fn bad(msg: impl Into<String>) -> ApiError {
     (StatusCode::BAD_REQUEST, msg.into())
 }
 
+/// 存储/权限类失败是**服务端**问题（500），不是「你的请求写错了」（400）。
+///
+/// 为什么按文本判：脚本层的错误全都是 `String`，OS 失败一定带 `(os error N)`，
+/// 而校验类错误（名字不合法、表达式不合法）不会。第 70 轮实测：脚本目录只读时
+/// 新建脚本回的是 400 —— 用户会以为是自己填错了。
+fn write_err(e: String) -> ApiError {
+    if e.contains("os error") || e.contains("No space left") {
+        (StatusCode::INTERNAL_SERVER_ERROR, e)
+    } else {
+        bad(e)
+    }
+}
 fn internal(msg: impl Into<String>) -> ApiError {
     (StatusCode::INTERNAL_SERVER_ERROR, msg.into())
 }
@@ -1270,7 +1282,7 @@ async fn task_pause(
     st.sched
         .set_enabled(&plugin, &name, false)
         .await
-        .map_err(bad)?;
+        .map_err(write_err)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2238,7 +2250,7 @@ async fn api_config_reload(State(st): State<AppState>, h: HeaderMap) -> Result<J
 // ---------------------------------------------------------------- 脚本（增删改查 + 跑）
 
 async fn scripts_list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let rows = st.scripts.list().await.map_err(bad)?;
+    let rows = st.scripts.list().await.map_err(write_err)?;
     Ok(Json(json!({
         "dir": st.scripts_dir.display().to_string(),
         "max_bytes": crate::scripts::FILE_MAX,
@@ -2284,7 +2296,7 @@ async fn script_save(
             body.enabled.unwrap_or(true),
         )
         .await
-        .map_err(bad)?;
+        .map_err(write_err)?;
     st.log.emit(
         crate::scripts::PLUGIN,
         None,
@@ -2347,7 +2359,7 @@ async fn script_create(
             true,
         )
         .await
-        .map_err(bad)?;
+        .map_err(write_err)?;
     st.log.emit(
         crate::scripts::PLUGIN,
         None,
@@ -2363,7 +2375,7 @@ async fn script_delete(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let moved = st.scripts.delete(&name).await.map_err(bad)?;
+    let moved = st.scripts.delete(&name).await.map_err(write_err)?;
     st.log.emit(
         crate::scripts::PLUGIN,
         None,
@@ -2379,7 +2391,7 @@ async fn script_run(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let run_id = st.scripts.run(&name, true).await.map_err(bad)?;
+    let run_id = st.scripts.run(&name, true).await.map_err(write_err)?;
     Ok(Json(json!({ "ok": true, "run_id": run_id })))
 }
 
