@@ -230,3 +230,8 @@
     改计划 `cron` 被当成撤销覆盖（65）—— 三次都是「参数进了门却没生效」。现在十个 body 结构体
     都 `deny_unknown_fields`，错误经 `JsonBody<T>` 翻成 400 + 中文（`content-type` 缺失仍是 415）。
     **例外**：备份文档不拒绝未知字段（要前向兼容）。守卫：`unknown_keys_in_request_bodies_are_rejected`。
+
+54. **查询参数写错会静默变成「没有数据」**：`?level=warnn` 以前返回 `{logs:[],total:0}`，
+    看着像「真的没有这类日志」；`?dir=ascending` 被当 desc（顺序反了）；`?limt=10` 直接被忽略。
+    现在 `Page` 拒绝未知键、`level`/`dir` 走白名单、解析失败翻成中文 400。
+    `sort` 例外（白名单外落回 id 并在响应回显）。守卫：`query_params_that_are_typoed_are_rejected`。

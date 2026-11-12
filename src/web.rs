@@ -136,6 +136,30 @@ where
     }
 }
 
+/// 查询参数的提取器：解析失败翻成 **400 + 中文**（axum 默认是英文
+/// 「Failed to deserialize query string: limit: invalid digit found in string」）。
+struct QueryArgs<T>(T);
+
+impl<T, S> axum::extract::FromRequestParts<S> for QueryArgs<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Query::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Query(v)) => Ok(QueryArgs(v)),
+            Err(rej) => Err((
+                StatusCode::BAD_REQUEST,
+                format!("查询参数有问题：{rej}"),
+            )),
+        }
+    }
+}
 type ApiError = (StatusCode, String);
 
 fn bad(msg: impl Into<String>) -> ApiError {
@@ -1313,6 +1337,9 @@ async fn task_resume(
 }
 
 #[derive(Deserialize)]
+/// 查询参数。**认不出的键直接 400**：`?limt=10`、`?lvl=warn` 这种拼错以前是被静默忽略的
+/// （界面照常返回默认结果，用户以为筛选生效了）。
+#[serde(deny_unknown_fields)]
 struct Page {
     limit: Option<i64>,
     plugin: Option<String>,
@@ -1431,7 +1458,7 @@ fn sort_is_num(key: &str) -> bool {
 
 async fn api_runs(
     State(st): State<AppState>,
-    Query(p): Query<Page>,
+    QueryArgs(p): QueryArgs<Page>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = limit_of(&p, 50, 500);
     let plugin = p.plugin.clone();
@@ -1444,7 +1471,18 @@ async fn api_runs(
         _ => "id".to_string(),
     };
     let expr = sort_expr(&key);
-    let dir = if p.dir.as_deref() == Some("asc") { "ASC" } else { "DESC" };
+    // `dir` 只认 asc / desc：传 `ascending` 这种以前会被静默当 desc（顺序反了还以为生效了）。
+    let dir = match p.dir.as_deref().map(|d| d.trim().to_ascii_lowercase()) {
+        None => "DESC".to_string(),
+        Some(d) if d == "asc" => "ASC".to_string(),
+        Some(d) if d == "desc" => "DESC".to_string(),
+        Some(other) => {
+            return Err(bad(format!(
+                "dir 只认 asc 或 desc，收到 {other:?}"
+            )))
+        }
+    };
+    let dir = dir.as_str();
     let cmp = if dir == "ASC" { ">" } else { "<" };
     // 游标值：数值列按整数解析（解析不了就当没给），文本列原样。
     let after_v: Option<rusqlite::types::Value> = match p.after_v.as_deref() {
@@ -1568,17 +1606,22 @@ async fn api_run_one(
 
 async fn api_logs(
     State(st): State<AppState>,
-    Query(p): Query<Page>,
+    QueryArgs(p): QueryArgs<Page>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = limit_of(&p, 200, 2000);
     let (plugin, run_id) = (p.plugin.clone(), p.run_id);
     // 等级是**精确匹配**（和界面上那排 seg 按钮的语义一致：点 warn 就只看 warn）。
-    let level = p
-        .level
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    // 但写错要报错：`level=warnn` 以前返回「0 条」，看着像「真的没有这类日志」。
+    let level = match p.level.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        None => None,
+        Some(s) if s.is_empty() => None,
+        Some(s) if matches!(s.as_str(), "info" | "warn" | "error") => Some(s),
+        Some(other) => {
+            return Err(bad(format!(
+                "level 只认 info / warn / error，收到 {other:?}"
+            )))
+        }
+    };
     let q = like_pat(&p.q);
     // 往前翻的游标：id 单调，比时间戳可靠（同一毫秒里可能有多条）。
     let before = p.before;

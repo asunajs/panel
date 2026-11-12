@@ -2937,3 +2937,33 @@ async fn unknown_keys_in_request_bodies_are_rejected() {
     let (status, out) = send(&app, with_csrf("POST", "/api/test/js", Some(body))).await;
     assert_eq!(status, StatusCode::OK, "{out}");
 }
+
+/// 查询参数写错要报错，别静默返回「没有数据」。
+///
+/// 第 67 轮实测：`level=warnn` 返回 `{logs:[], total:0}` —— 看着像「真的没有 warn 日志」；
+/// `dir=ascending` 被静默当 desc（顺序反了还以为生效）；`limt=10` 直接被忽略（默认 50）。
+#[tokio::test]
+async fn query_params_that_are_typoed_are_rejected() {
+    let (app, _plugins, _data, _store) = setup_dirs("qparam").await;
+
+    let bad = [
+        ("/api/logs?level=warnn", "level"),
+        ("/api/runs?dir=ascending", "dir"),
+        ("/api/runs?limt=10", "limt"),
+        ("/api/logs?lvl=warn", "lvl"),
+        ("/api/runs?limit=abc", "limit"),
+    ];
+    for (path, needle) in bad {
+        let (status, out) = get(&app, path).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path} 应当 400，实际 {status} {out}");
+    }
+
+    // 大小写不该成为坑：`level=INFO` 按 info 处理
+    let (status, out) = get(&app, "/api/logs?level=INFO").await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+
+    // `sort` 仍是「白名单外的值落回 id，并在响应里回显实际生效的键」（防注入 + 让人看得见）
+    let (status, out) = get(&app, "/api/runs?sort=bogus").await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["sort"], "id", "{out}");
+}
