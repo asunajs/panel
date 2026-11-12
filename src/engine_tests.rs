@@ -332,3 +332,31 @@ await host.register_handler('go', async () => 1);
     assert_eq!(crons[3], ("d".into(), 1234, true), "给了就照给: {crons:?}");
 }
 
+
+/// §7.4 预算用的是**不可捕获**的中断：插件用 try/catch 吞不掉。
+///
+/// 这条比 `cpu_budget_kills_a_busy_loop_and_the_runtime_survives` 更狠 —— 那个死循环没有
+/// try/catch，可捕获的异常也能杀掉它。这里包一层 `for(;;) { try { 死循环 } catch {} }`：
+/// 如果哪天中断变成可捕获的（比如误用了 OOM 那条路），异常会被吞掉、外层继续转，
+/// 这条测试就会超时失败。
+#[tokio::test]
+async fn the_budget_interrupt_cannot_be_swallowed_by_try_catch() {
+    let src = "import host from 'panel:host';\n\
+await host.register_handler('sneaky', async () => {\n\
+  for (;;) { try { while (true) {} } catch (e) { /* 想吞掉预算中断 */ } }\n\
+});\n\
+await host.register_handler('calm', async () => 1);\n";
+    let p = ok(src).await;
+    // 用外层 timeout 兜住：万一中断变成可捕获的，这个 dispatch 永远不会返回，
+    // 让用例**红**，而不是把测试挂住。
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        p.dispatch("sneaky", &json!({}), 300),
+    )
+    .await
+    .expect("死循环被吞掉了：预算中断变成了可捕获的")
+    .unwrap_err();
+    assert!(err.contains("预算"), "吞不掉，必须报预算耗尽: {err}");
+    // runtime 还得能用
+    p.dispatch("calm", &json!({}), 5_000).await.unwrap();
+}
