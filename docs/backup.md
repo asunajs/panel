@@ -193,3 +193,56 @@ POST /api/backup（带库） → 400 这份备份里带着数据库，只能在�
 
 界面上的说明也跟着改了：以前只写「不含运行记录和日志」，现在把「任务状态（暂停、摘要、
 改过的计划、提前量）」也点明，并给出 `--with-db` 那一行命令。
+
+## CLI 只认自己那几个开关（第 61 轮的血的教训）
+
+`backup` 只认 `--out / --with-db / --with-auth / --secret`，`restore` 只认 `--in / --secret`。
+**其余参数一律报错**。目录不是开关，是环境变量（`PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR`）。
+
+为什么强调：以前多传的参数被**静默忽略**，于是
+
+```text
+./panel-llrt backup  --out /tmp/x.bk --data-dir /tmp/scratch   # --data-dir 被忽略
+./panel-llrt restore --in  /tmp/x.bk --data-dir /tmp/scratch   # 也一样
+```
+实际备份的是**真面板**、恢复也写进了**真面板的 plugins/ 和 panel.db**。因为备份是刚做的、
+内容是同一堆东西，才没造成数据丢失 —— 换个时序就是事故。现在两条命令都会直接报错：
+
+```text
+Error: backup 不认识这个参数：--data-dir
+       可用的：--out --with-db --with-auth --secret
+       数据/插件/脚本目录不是命令行开关，用环境变量指：PANEL_DATA_DIR / PANEL_PLUGINS_DIR / PANEL_SCRIPTS_DIR
+```
+
+同时 `backup` / `restore` 都会先打一行**实际用到的目录**，指错了一眼能看见。
+
+## 令牌哈希：默认不打包，`--with-auth` 才带
+
+`auth.json` 是 PBKDF2 哈希（不是明文令牌）。默认**不**进备份 —— 备份文件本来就有插件源码和
+SMTP 凭据，再塞一份可离线爆破的哈希没必要。要整机迁移就加 `--with-auth`：
+
+| 情况 | 输出 | 恢复后 |
+|---|---|---|
+| 有 `auth.json`，没加 `--with-auth` | `令牌哈希**没有**打包；要连令牌一起迁移加 --with-auth` | 面板**未启用令牌**（会明说） |
+| 加了 `--with-auth` | `令牌哈希已打包（auth.json，PBKDF2 哈希，不是明文令牌）` | 仍要求原令牌；无令牌/错令牌 401、旧令牌 200 |
+| 本来就没有 `auth.json` | `没有 auth.json（面板本来就没设令牌），这一项跳过` | 未启用令牌 |
+
+没带令牌的备份恢复后会**大声说**：「这份备份里没有令牌哈希 —— 面板现在是未启用令牌状态」。
+以前的版本什么都不说，恢复完你会以为令牌还在。
+
+## 实测：带库 + 带令牌的往返（临时目录）
+
+```text
+备份前  tasks.enabled=0  runs=1  notify_outbox=1  auth.json 有
+backup --with-db --with-auth   → 87973 字节（明文）
+restore 到空目录                 → 1 个插件、配置已覆盖、数据库已替换
+恢复后  tasks.enabled=0  runs=1  notify_outbox=1  auth.json 有
+面板   无令牌=401  旧令牌=200  错令牌=401；任务仍是暂停的
+```
+
+### 另外两条边界
+
+| 输入 | 结果 |
+|---|---|
+| 备份文件被截断（`head -c 200`） | `不是合法的备份 JSON: EOF while parsing…`，**一个字节都不写**（临时目录仍是空的） |
+| 备份里多一个未知字段（`future_key`） | 正常恢复（前向兼容，不因为多了字段就拒绝） |

@@ -201,3 +201,8 @@
     「Handshake not finished」，看着像客户端坏了，其实是环境。而且 TCP connect 成功**不足以**
     判断可用，所以按网段排除（198.18/15、198.19/15、169.254/16）+ 一次真往返探测；
     两条都不行时退到回环，用 `#[cfg(test)]` 的 `allow_loopback` 逃生门（SSRF 门有自己的测试）。
+
+48. **命令行参数被静默忽略，会把「临时目录」变成「真目录」**：`backup --out x --data-dir /tmp/scratch`
+    里的 `--data-dir` 不认识却被无声吞掉，于是备份了真面板、恢复又写回真面板（第 61 轮亲手踩到，
+    靠「备份和恢复的是同一堆数据」侥幸没丢东西）。凡是接参数的地方都要**拒绝不认识的东西**，
+    并且把实际使用的目录打印出来。守卫：`backup.rs::unknown_flags_are_rejected_instead_of_ignored`。

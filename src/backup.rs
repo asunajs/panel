@@ -134,6 +134,14 @@ pub fn validate(data: &Value) -> Result<Option<(String, Value)>, String> {
         }
     }
 
+    if let Some(t) = data.get("auth_text").and_then(Value::as_str) {
+        let v: Value = serde_json::from_str(t)
+            .map_err(|e| format!("备份里的 auth.json 不是合法 JSON: {e}"))?;
+        if !v.is_object() {
+            return Err("备份里的 auth.json 必须是 JSON 对象".to_string());
+        }
+    }
+
     let cfg = match data.get("config_text").and_then(Value::as_str) {
         None => None,
         Some(text) => {
@@ -219,6 +227,39 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
 // ---------------------------------------------------------------- CLI
 
 /// 取 --flag 的值（支持 --flag v 与 --flag=v 两种写法）。
+/// 只认识列出来的这些开关，**其余一律报错**。
+///
+/// 第 61 轮亲手踩到：`backup --out x --data-dir /tmp/scratch` 里的 `--data-dir` 被**静默忽略**，
+/// 于是「备份临时目录」实际备份了**真面板**，「恢复到临时目录」实际覆盖了真面板的 plugins/ 和 panel.db。
+/// 目录来自环境变量（PANEL_DATA_DIR 等），不是命令行开关 —— 那更要把它说清楚，别装听不见。
+fn reject_unknown_args(args: &[String], known: &[&str], cmd: &str) -> Result<(), String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let name = a.split('=').next().unwrap_or(a);
+        if known.contains(&name) {
+            // `--out x` 这种分开写的，把后面的值也跳过
+            if !a.contains('=') && known.iter().any(|k| *k == name) && takes_value(name) {
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        return Err(format!(
+            "{cmd} 不认识这个参数：{a}
+             可用的：{}
+             数据/插件/脚本目录不是命令行开关，用环境变量指：             PANEL_DATA_DIR / PANEL_PLUGINS_DIR / PANEL_SCRIPTS_DIR",
+            known.join(" ")
+        ));
+    }
+    Ok(())
+}
+
+fn takes_value(flag: &str) -> bool {
+    matches!(flag, "--out" | "--in" | "--secret")
+}
+
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     let eq = format!("{flag}=");
     let mut it = args.iter();
@@ -285,8 +326,12 @@ async fn ctx() -> Result<Ctx, String> {
 
 /// backup --out <文件> [--encrypt-to <公钥>]
 pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
+    reject_unknown_args(args, &["--out", "--with-db", "--with-auth", "--secret"], "backup")?;
     let out = arg_value(args, "--out").ok_or("缺 --out <文件>")?;
     let c = ctx().await?;
+    // 把**实际用到**的目录打出来：指错目录时一眼能看见，而不是备份完才发现。
+    println!("数据目录 {}", c.data_dir.display());
+    println!("插件目录 {}", c.plugins_dir.display());
     let cfg_text = match std::fs::read_to_string(c.data_dir.join("config.json")) {
         Ok(t) => t,
         Err(_) => c.config.snapshot().as_ref().to_string(),
@@ -298,6 +343,21 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
     // 调度覆盖/提前量）全在 panel.db 里，不带它就是没有。
     let db_path = c.data_dir.join("panel.db");
     let db_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    // 令牌哈希（auth.json）默认**不**打包：备份文件本来就有插件源码和 SMTP 凭据，
+    // 再塞一份可离线爆破的哈希没必要。要整机迁移就加 --with-auth。
+    let auth_path = c.data_dir.join("auth.json");
+    if args.iter().any(|a| a == "--with-auth") {
+        match std::fs::read_to_string(&auth_path) {
+            Ok(t) => {
+                data["auth_text"] = json!(t);
+                println!("令牌哈希已打包（auth.json，PBKDF2 哈希，不是明文令牌）");
+            }
+            Err(_) => println!("没有 auth.json（面板本来就没设令牌），这一项跳过"),
+        }
+    } else if auth_path.exists() {
+        println!("令牌哈希**没有**打包；要连令牌一起迁移加 --with-auth");
+    }
+
     if args.iter().any(|a| a == "--with-db") {
         let snap = PathBuf::from(format!("{out}.db.tmp"));
         let n = match db_snapshot(&db_path, &snap) {
@@ -348,6 +408,7 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
 
 /// restore --in <文件> [--secret <私钥>]
 pub async fn restore_cmd(args: &[String]) -> Result<(), String> {
+    reject_unknown_args(args, &["--in", "--secret"], "restore")?;
     let input = arg_value(args, "--in").ok_or("缺 --in <文件>")?;
     let secret = arg_value(args, "--secret");
     let (data, decrypted) = load_backup(Path::new(&input), secret.as_deref())?;
@@ -356,6 +417,27 @@ pub async fn restore_cmd(args: &[String]) -> Result<(), String> {
 
     // 数据库要在 `ctx()` 打开它**之前**换掉，否则连上的是旧库。
     let data_dir = PathBuf::from(crate::env_or("PANEL_DATA_DIR", "data"));
+    println!("数据目录 {}", data_dir.display());
+    // 面板正在跑的话，它手里是**旧文件**：恢复写进去的新库要等它重启才用得上，
+    // 而它这期间的写入会落到已经被换掉的那个句柄上。这种分叉必须说出来。
+    if data_dir.join("panel.db-wal").exists() || data_dir.join("panel.db-shm").exists() {
+        println!(
+            "注意：{} 里还有 panel.db-wal / -shm，说明面板可能正在运行。             恢复后要重启面板才会用上新库（运行中的进程还连着旧文件）。",
+            data_dir.display()
+        );
+    }
+    // 令牌哈希：备份里有就写回（0600），没有就**明说**面板现在是没令牌的状态。
+    let mut auth_restored = false;
+    if let Some(t) = data.get("auth_text").and_then(Value::as_str) {
+        let p = data_dir.join("auth.json");
+        std::fs::write(&p, t).map_err(|e| format!("写 {} 失败: {e}", p.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+        auth_restored = true;
+    }
     let mut db_restored = None;
     if let Some(b64) = data.get("db_base64").and_then(Value::as_str) {
         use base64::Engine as _;
@@ -415,6 +497,13 @@ pub async fn restore_cmd(args: &[String]) -> Result<(), String> {
         if s["ok"] == false {
             println!("  脚本 {} 没恢复: {}", s["name"], s["error"]);
         }
+    }
+    if auth_restored {
+        println!("令牌哈希已恢复：面板仍要求原来的令牌（会话票要重新登录一次）。");
+    } else {
+        println!(
+            "注意：这份备份里没有令牌哈希 —— 面板现在是**未启用令牌**状态，             要在「安全」页重新设一个（或者别把面板绑到 0.0.0.0）。"
+        );
     }
     println!("提示：面板正在运行的话，重启它（或界面上重载）才会加载新文件。");
     Ok(())
@@ -594,4 +683,31 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// 不认识的开关要报错。第 61 轮的教训：`backup --data-dir /tmp/x` 里的 `--data-dir` 被静默忽略，
+/// 于是「备份临时目录」实际备份了真面板，「恢复到临时目录」实际覆盖了真面板的 plugins/ 和 panel.db。
+#[test]
+fn unknown_flags_are_rejected_instead_of_ignored() {
+    let ok = vec!["--out".to_string(), "b.bk".to_string(), "--with-db".to_string()];
+    assert!(reject_unknown_args(&ok, &["--out", "--with-db", "--with-auth"], "backup").is_ok());
+    // --out=x 这种写法也算认识
+    assert!(reject_unknown_args(&["--out=x.bk".to_string()], &["--out"], "backup").is_ok());
+
+    let bad = vec!["--out".to_string(), "b.bk".to_string(), "--data-dir".to_string(), "/tmp/x".to_string()];
+    let e = reject_unknown_args(&bad, &["--out", "--with-db"], "backup").unwrap_err();
+    assert!(e.contains("--data-dir"), "{e}");
+    assert!(e.contains("PANEL_DATA_DIR"), "要告诉人目录怎么指: {e}");
+}
+
+/// 令牌哈希（auth.json）是可选的：带了要认，坏了要拒。
+#[test]
+fn auth_text_is_optional_but_validated() {
+    let good = json!({ "plugins": [], "scripts": [], "auth_text": "{\"v\":1,\"salt\":\"x\"}" });
+    assert!(validate(&good).is_ok());
+    let bad = json!({ "plugins": [], "scripts": [], "auth_text": "不是 json" });
+    let e = validate(&bad).unwrap_err();
+    assert!(e.contains("auth.json"), "{e}");
+    let notobj = json!({ "plugins": [], "scripts": [], "auth_text": "[1,2]" });
+    assert!(validate(&notobj).is_err());
 }
