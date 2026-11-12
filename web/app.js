@@ -27,6 +27,8 @@ const state = {
   stats: null,
   config: null,
   runs: [],
+  /** 运行记录里出现过的插件名（服务端去重）：筛选下拉要用，含已卸载插件的历史行。 */
+  runPlugins: [],
   /** 服务端算的总条数（按当前插件筛选），用来显示「已加载 N / 共 M」。 */
   runsTotal: null,
   runsLoading: false,
@@ -1782,7 +1784,7 @@ function setView(name) {
   document.title = VIEWS[name][0] + ' · 插件面板';
   $('sidebar').classList.remove('open');
   if (name === 'logs') { renderLogs(); backfillLogs(); }
-  if (name === 'runs') loadRuns();
+  if (name === 'runs') { loadRunPlugins(); loadRuns(); }
   if (name === 'dashboard') loadDashboard();
   if (name === 'settings') { renderSettings(); loadConfig(); }
 }
@@ -1815,6 +1817,16 @@ async function refresh() {
     setSync(false);
     setConn(false);
   }
+}
+
+/** 运行记录里出现过的插件名。单独一个接口，因为「已加载的那一页」里不一定有它 ——
+ *  插件删掉之后历史行还在，筛选下拉得能列出这些名字，否则那些行永远筛不出来。 */
+async function loadRunPlugins() {
+  try {
+    const d = await api('/api/runs/plugins');
+    state.runPlugins = d.plugins || [];
+    renderFilterDropdowns();
+  } catch (e) { /* 拉不到就退回「只看已加载的插件」，不该把整页搞红 */ }
 }
 
 /** 运行记录：游标分页 + **服务端**按插件筛。
@@ -2037,7 +2049,7 @@ function renderFilterDropdowns() {
     // 运行记录页的选项要**多看一步**：已卸载的插件也会留下历史行，
     // 只列 state.plugins 的话那些行在界面上永远筛不出来。
     const names = view === "runs"
-      ? Array.from(new Set([...state.plugins.map((p) => p.name), ...state.runs.map((r) => r.plugin)])).sort()
+      ? Array.from(new Set([...state.plugins.map((p) => p.name), ...state.runPlugins])).sort()
       : state.plugins.map((p) => p.name);
     for (const name of names) {
       const n = view === "tasks"

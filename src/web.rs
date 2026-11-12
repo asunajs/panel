@@ -122,6 +122,7 @@ pub fn router(st: AppState) -> Router {
         // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
         .route("/api/runs", get(api_runs))
+        .route("/api/runs/plugins", get(api_run_plugins))
         .route("/api/runs/{id}", get(api_run_one))
         .route("/api/logs", get(api_logs))
         .route("/api/logs/stream", get(api_logs_stream))
@@ -1242,6 +1243,29 @@ async fn api_runs(
         .await
         .map_err(internal)?;
     Ok(Json(json!({ "runs": rows, "total": total, "sort": key, "dir": dir.to_lowercase() })))
+}
+
+/// 运行记录里出现过的插件名（去重）。
+///
+/// 界面上的插件筛选要靠它：只看已加载的插件不够 —— 插件被删掉之后，它留下的历史行
+/// 还在库里，那些行就永远筛不出来了。
+async fn api_run_plugins(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let names = st
+        .db
+        .call(|c| {
+            let mut stmt = c
+                .prepare("SELECT DISTINCT plugin FROM runs ORDER BY plugin")
+                .map_err(|e| e.to_string())?;
+            let out: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(|e| e.to_string())?;
+            Ok(out)
+        })
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({ "plugins": names })))
 }
 
 async fn api_run_one(

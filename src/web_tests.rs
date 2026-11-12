@@ -1953,3 +1953,30 @@ async fn runs_sort_by_duration_and_page_by_composite_cursor() {
     assert_eq!(b["sort"], "id", "白名单外的值必须落回 id：{b}");
     assert_eq!(b["runs"].as_array().unwrap().len(), 1, "表还在");
 }
+
+/// `/api/runs/plugins`：运行记录里出现过的插件名（去重）。
+/// 界面上的筛选下拉靠它，所以插件卸载之后那些历史行才筛得出来。
+#[tokio::test]
+async fn runs_plugins_lists_names_seen_in_runs() {
+    let (app, plugins, _data, _store) = setup_dirs("rp").await;
+    std::fs::write(
+        plugins.join("hello.js"),
+        "import host from 'panel:host';\nawait host.register_handler('tick', async () => 1);\n",
+    )
+    .unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/hello/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        send(&app, with_csrf("POST", "/api/tasks/hello/tick/run", None)).await.0,
+        StatusCode::OK
+    );
+
+    let (status, body) = get(&app, "/api/runs/plugins").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["plugins"], json!(["hello"]), "{body}");
+
+    // 一条运行记录都没有的库：返回空数组，不是 null（前端直接 .includes）
+    let (app2, _p2, _d2, _s2) = setup_dirs("rp2").await;
+    let (_, body) = get(&app2, "/api/runs/plugins").await;
+    assert_eq!(body["plugins"], json!([]));
+}
