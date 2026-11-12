@@ -206,3 +206,9 @@
     里的 `--data-dir` 不认识却被无声吞掉，于是备份了真面板、恢复又写回真面板（第 61 轮亲手踩到，
     靠「备份和恢复的是同一堆数据」侥幸没丢东西）。凡是接参数的地方都要**拒绝不认识的东西**，
     并且把实际使用的目录打印出来。守卫：`backup.rs::unknown_flags_are_rejected_instead_of_ignored`。
+
+49. **自己刚加的白名单把功能挡了**：第 61 轮给 `backup` 加「不认识就报错」，白名单写的是
+    `--out --with-db --with-auth --secret`；可加密导出用的是 **`--encrypt-to`**，于是第 62 轮
+    一开始 `backup --encrypt-to` 直接报错，加密路径整个不可用 —— 而没有任何测试盯着这个开关。
+    教训：白名单要和**真实开关一一对应**，并且测试里把完整开关列表写一遍（不是只测「坏参数被拒」）。
+    守卫：`unknown_flags_are_rejected_instead_of_ignored` 现在显式带 `--encrypt-to`。

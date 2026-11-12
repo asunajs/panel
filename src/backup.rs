@@ -257,7 +257,21 @@ fn reject_unknown_args(args: &[String], known: &[&str], cmd: &str) -> Result<(),
 }
 
 fn takes_value(flag: &str) -> bool {
-    matches!(flag, "--out" | "--in" | "--secret")
+    matches!(flag, "--out" | "--in" | "--secret" | "--encrypt-to")
+}
+
+/// 备份文件按 0600 落盘：里面是插件源码、配置（可能有 SMTP 凭据），
+/// 加密导出虽然已经是密文，但同目录的其它用户没有理由能读它。
+fn restrict_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
@@ -326,7 +340,7 @@ async fn ctx() -> Result<Ctx, String> {
 
 /// backup --out <文件> [--encrypt-to <公钥>]
 pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
-    reject_unknown_args(args, &["--out", "--with-db", "--with-auth", "--secret"], "backup")?;
+    reject_unknown_args(args, &["--out", "--with-db", "--with-auth", "--encrypt-to"], "backup")?;
     let out = arg_value(args, "--out").ok_or("缺 --out <文件>")?;
     let c = ctx().await?;
     // 把**实际用到**的目录打出来：指错目录时一眼能看见，而不是备份完才发现。
@@ -396,11 +410,16 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
                     return Err(e);
                 }
             };
-            println!("已加密写出 {out}（{n} 字节；解密要那把私钥）");
+            restrict_perms(Path::new(&out));
+            println!("已加密写出 {out}（{n} 字节，权限 0600；解密要那把私钥）");
         }
         None => {
             std::fs::rename(&tmp, &out).map_err(|e| format!("落盘 {out} 失败: {e}"))?;
-            println!("已写出 {out}（{} 字节，**明文** —— 里面是插件源码和配置）", bytes.len());
+            restrict_perms(Path::new(&out));
+            println!(
+                "已写出 {out}（{} 字节，**明文** —— 里面是插件源码和配置；权限 0600）",
+                bytes.len()
+            );
         }
     }
     Ok(())
@@ -694,6 +713,21 @@ fn unknown_flags_are_rejected_instead_of_ignored() {
     // --out=x 这种写法也算认识
     assert!(reject_unknown_args(&["--out=x.bk".to_string()], &["--out"], "backup").is_ok());
 
+    // backup 真正的开关（第 62 轮：我自己加的守卫把 --encrypt-to 挡了，加密导出直接不可用）
+    assert!(reject_unknown_args(
+        &[
+            "--out".to_string(),
+            "b.bk".to_string(),
+            "--with-db".to_string(),
+            "--with-auth".to_string(),
+            "--encrypt-to".to_string(),
+            "ppx1abc".to_string()
+        ],
+        &["--out", "--with-db", "--with-auth", "--encrypt-to"],
+        "backup"
+    )
+    .is_ok());
+
     let bad = vec!["--out".to_string(), "b.bk".to_string(), "--data-dir".to_string(), "/tmp/x".to_string()];
     let e = reject_unknown_args(&bad, &["--out", "--with-db"], "backup").unwrap_err();
     assert!(e.contains("--data-dir"), "{e}");
@@ -710,4 +744,19 @@ fn auth_text_is_optional_but_validated() {
     assert!(e.contains("auth.json"), "{e}");
     let notobj = json!({ "plugins": [], "scripts": [], "auth_text": "[1,2]" });
     assert!(validate(&notobj).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_files_are_written_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("perm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("b.bk");
+    std::fs::write(&p, "x").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    restrict_perms(&p);
+    let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "备份文件要是 0600，实际 {mode:o}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
