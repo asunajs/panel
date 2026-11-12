@@ -310,6 +310,76 @@ checkFail('坏通知配置有红条说原因', ne && ne.hidden === false && /配
 
 await putCfg(goodCfg);
 recv.close();
+
+// ---------------------------------------------------------------- 插件源码编辑器（唯一会改磁盘的界面）
+//
+// 「保存并重载」= 写盘 → 重载，失败要回滚。这条路上有三个必须成立的东西：
+//   1) 保存后真的重载了（新注册的任务出现在任务表里）
+//   2) 写坏语法时回滚 + 报错（盘上还是上一版，插件还在跑）
+//   3) 重载不吃掉人的决定（暂停/改过的计划）—— 第 37 轮修的就是这个
+await ev("document.querySelector('[data-view=\"plugins\"]').click()");
+await sleep(900);
+
+const openEditor = () => ev(
+  "(() => { const grid = document.getElementById('plugin-grid');" +
+  " if (!grid) return 'no-grid';" +
+  " const card = [...grid.querySelectorAll('button')].find(x => x.textContent.trim() === '编辑');" +
+  " if (!card) return 'no-button:' + [...grid.querySelectorAll('button')].map(b => b.textContent.trim()).slice(0, 6).join('/');" +
+  " card.click(); return 'clicked'; })()");
+const opened = await openEditor();
+checkFail('插件页有「编辑」按钮', opened === 'clicked', opened);
+await sleep(1200);
+// 详情抽屉里切到「源码」页
+await ev("(() => { const b = document.querySelector('[data-drawer-tab]'); const all = [...document.querySelectorAll('[data-drawer-tab]')]; const hit = all.find(x => x.textContent.trim() === '源码'); if (hit) hit.click(); })()");
+await sleep(1400);
+const srcLen = await ev("document.getElementById('src-text').value.length");
+checkFail('编辑器读到了源码', srcLen > 20, 'len=' + srcLen);
+
+// 1) 改一版合法的：多注册一个任务 tick2，保存后它应该出现在任务表里
+const newSrc = await ev("document.getElementById('src-text').value");
+const withExtra = newSrc + "\nawait host.register_handler('tick2', async () => { await host.info('from v2'); });\nawait host.register_cron('tick2', '@every 45s', 5000, {});\n";
+await ev("(() => { const t = document.getElementById('src-text'); t.value = " + JSON.stringify(withExtra) + "; t.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('src-save').click()");
+await sleep(2200);
+const saveToast = await ev("document.getElementById('toast').textContent");
+checkFail('保存后有「已保存并重载」提示', /已保存并重载/.test(saveToast || ''), saveToast);
+let st = JSON.parse(await ev("fetch('/api/state').then(r => r.text())"));
+checkFail('新注册的任务出现了（说明真的重载了）', st.tasks.some((x) => x.name === 'tick2'), JSON.stringify(st.tasks.map((x) => x.name)));
+checkFail('原来的任务还在', st.tasks.some((x) => x.name === 'tick'));
+
+// 2) 人的决定要留住：先暂停 tick2，再存一版（只改日志文案）
+await fetch(base + '/api/tasks/ui-e2e/tick2/pause', { method: 'POST', headers: { 'x-panel': '1' } });
+await sleep(900);
+st = JSON.parse(await ev("fetch('/api/state').then(r => r.text())"));
+checkFail('tick2 已暂停', st.tasks.find((x) => x.name === 'tick2').enabled === false);
+const v3 = withExtra.replace("from v2", "from v3");
+await ev("(() => { const t = document.getElementById('src-text'); t.value = " + JSON.stringify(v3) + "; t.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('src-save').click()");
+await sleep(2200);
+st = JSON.parse(await ev("fetch('/api/state').then(r => r.text())"));
+checkFail('再存一版之后，tick2 仍然是暂停的（人的决定没被冲掉）', st.tasks.find((x) => x.name === 'tick2').enabled === false);
+
+// 3) 写坏语法：要报错、要回滚、插件不能消失
+const broken = v3 + "\nawait host.register_handler('oops', async () => {";
+await ev("(() => { const t = document.getElementById('src-text'); t.value = " + JSON.stringify(broken) + "; t.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('src-save').click()");
+await sleep(2500);
+const srcErrShown = await ev("!document.getElementById('src-error').classList.contains('hidden')");
+const srcErrMsg = await ev("document.getElementById('src-error').textContent");
+checkFail('写坏语法时编辑器里报错', srcErrShown === true, String(srcErrShown));
+checkFail('错误里带位置或原因', /line|column|行|列|Syntax|Uncaught|Unexpected|token/i.test(srcErrMsg || ''), (srcErrMsg || '').slice(0, 120));
+st = JSON.parse(await ev("fetch('/api/state').then(r => r.text())"));
+checkFail('插件没被写坏的文件弄挂（tick/tick2 都还在）', st.tasks.some((x) => x.name === 'tick') && st.tasks.some((x) => x.name === 'tick2'), JSON.stringify(st.tasks.map((x) => x.name)));
+const disk = await (await fetch(base + '/api/plugins/ui-e2e/source')).json();
+checkFail('盘上还是上一版好源码（回滚了）', /from v3/.test(disk.source || '') && !/oops/.test(disk.source || ''), (disk.source || '').slice(-80));
+
+// 恢复成好的一版，别把临时损坏留在临时面板里
+await fetch(base + '/api/plugins/ui-e2e/source', {
+  method: 'PUT',
+  headers: { 'content-type': 'application/json', 'x-panel': '1' },
+  body: JSON.stringify({ source: v3 }),
+});
+await sleep(1200);
 ws.close();
 console.log('');
 console.log('ok: ' + pass.length + ' 条界面端到端全过' + (fail.length ? '，' + fail.length + ' 条失败' : ''));
