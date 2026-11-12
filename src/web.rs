@@ -72,6 +72,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/config", get(api_config).put(api_config_save))
         .route("/api/plugins/files", get(plugin_files))
+        // 重启进程：改了环境变量（PANEL_TOKEN / PANEL_BIND）才需要。
+        .route("/api/restart", post(api_restart))
         // 上传：单文件或 zip。body 是**原始字节**（不走 multipart：浏览器端
         // `file.arrayBuffer()` 直接 POST 更简单，也不用自己解析边界）。
         .route(
@@ -415,6 +417,47 @@ struct UploadQuery {
 ///
 /// 单文件只收 `.js`；zip 解压到 `plugins/`（保留内部路径），`mcloud.webui/…`
 /// 这种目录结构原样落盘。写完**自动重载**受影响的插件（禁用的跳过）。
+/// `POST /api/restart` —— 重启面板进程（`exec` 自身，**PID 不变**）。
+///
+/// 为什么是 exec 而不是 exit：手动跑起来的面板没有守护进程，exit 就是「关掉」；
+/// exec 把当前进程镜像换成新的一份，参数/环境/工作目录都还在，也不需要谁来拉起。
+/// 配了 launchd/systemd 的机器上两种都行，但 exec 更省事。
+///
+/// 先回包再重启（延迟 300ms），否则浏览器拿到的是连接被掐断的错。
+async fn api_restart(
+    State(st): State<AppState>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Warn,
+        "收到重启请求：进程将 exec 自身（正在跑的任务会中断）".to_string(),
+    );
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        restart_now();
+    });
+    Ok(Json(json!({ "ok": true, "note": "正在重启，稍等几秒刷新" })))
+}
+
+/// 用当前可执行文件替换自己。**只有失败才返回**。
+fn restart_now() -> ! {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("panel-llrt"));
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec 成功就不会回来了；返回一定是失败。
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        eprintln!("重启失败（exec {}）: {err}", exe.display());
+    }
+    // 非 Unix：没有 exec，只能退而求其次。守护进程会拉起来，手动跑的就到此为止。
+    eprintln!("重启失败：这个平台没有 exec，进程退出（有守护进程的话会被拉起来）");
+    std::process::exit(1);
+}
+
 async fn plugins_upload(
     State(st): State<AppState>,
     Query(q): Query<UploadQuery>,

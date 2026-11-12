@@ -202,6 +202,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 | 改计划（任务页，真鼠标） | 每行多了「改计划」（手动任务没有）；弹窗里预填当前表达式、副标题写「插件注册的是「@every 30s」」。真鼠标点开 → 输入 `@every 45s` → 保存：行变 `@every 45s` + 小字「已改」，toast「计划已改成 @every 45s」；再点开 → 「恢复默认」出现 → 点它 → 回到 `@every 30s`、标记消失。后端读数：改完 7 秒内按新计划跑了两次（间隔 5.0s）；插件热重载后覆盖仍在；面板重启后仍在；库里 `tasks.override_expr` 有值，恢复默认后为 NULL；非法表达式 400 且不改原值。 |
 | 插件禁用（真面板 8787） | 禁用 webui-demo → 已加载列表少一个、`disabled:["webui-demo"]`；**重启面板后仍然不加载**（日志「插件 webui-demo 已禁用，跳过」），卡片变成虚线 + 琥珀「已禁用」+「禁用了，不加载（重启也不加载）」+ 启用/编辑源码/删除三个按钮；点「启用」→ 回到已加载列表。 |
 | 上传（真面板 8787） | 单文件 `up-single.js` → `{files:["up-single.js"], reloaded:["up-single"]}`，立刻出现在插件列表；zip（`ziptest.js` + `ziptest.webui/index.html`）→ 两个文件按内部路径落盘、插件重载、`/plugins/ziptest/` 取到 zip 里的 HTML、`/plugins/ziptest/api/hi` 返回 `zipped webui`；穿越 zip（`../../evil.js`）→ 400「zip 里有不安全的路径」；脚本上传 `.mjs` → 落成 `up-script.js` 并建出记录。界面：插件/脚本页头都有「上传」，点它真的把隐藏 file input 点开（CDP 里拦截 `input.click` 计数 1），`accept=".js,.zip"`。 |
+| 重启进程（真面板 8787） | `POST /api/restart`（带 `x-panel`）→ `{"ok":true}`；3 秒后 **PID 不变**（35359 → 35359），`/api/state` 200、7 个插件 7 个任务照旧，日志里出现第二条 `listening`（说明真的换了进程镜像）。不带 `x-panel` → 403。设置 → 常规 里有「重启进程」按钮（先弹确认，成功后 3 秒自动刷新）。 |
 | 控件探针（12 项） | `?probe=1` 全绿：下拉开/3 个选项/选中/按插件过滤/复位、搜索过滤/清空按钮显隐/清空复位、勾选框结构/只看失败、提示气泡直调/事件路径 |
 | 控件等高 | `.btn` `.icon-btn` `.search input` `.dropdown-btn` `.seg` 全部取自 `--h-control`（32px） |
 | 下拉不被裁 | 菜单 portal 到 `body` + `position: fixed`，任务页实测压在表格之上（`.panel` 是 `overflow: hidden`，原地会被裁掉） |

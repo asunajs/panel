@@ -230,6 +230,14 @@
                 <header class="panel-head"><h2>面板信息</h2></header>
                 <div class="panel-body" id="settings-info"></div>
               </section>
+              <section class="panel">
+                <header class="panel-head"><h2>重启进程</h2></header>
+                <div class="panel-body">
+                  <p class="muted">改了环境变量（<code>PANEL_TOKEN</code> / <code>PANEL_BIND</code> 这类）才需要重启。配置、插件源码、任务计划都是热生效的，不用重启。</p>
+                  <p class="muted">重启方式是 <code>exec</code> 自身：进程号不变，正在跑的任务会中断。</p>
+                  <button class="btn" id="panel-restart" type="button">重启进程</button>
+                </div>
+              </section>
             </div>
 
             <div class="tab-pane hidden" id="tab-config">

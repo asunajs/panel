@@ -42,7 +42,7 @@
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
 | `/login` `/api/login` `/api/logout` | ❌ | 只有令牌（header / `?t=`），没有登录页与登出 |
 | `/setup` `/api/setup`（首次设令牌向导） | ❌ | 得手工 `PANEL_TOKEN` 或生成 `auth.json` |
-| `/api/restart` | ❌ | 改完配置只能自己重启进程 |
+| `/api/restart` | ✅ 11-12 | `exec` 自身：**PID 不变**、参数/环境/工作目录都在；设置页有按钮（带确认） |
 | `/api/test/{lang}`（引擎自测页） | ❌ | 想验证引擎得建脚本 |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/config|task|test|outbox|retry` | 部分 | 只有「通知 + 一个 webhook」，没有渠道管理、发件箱、重试、按任务开关 |
 | 备份加密（`backup_crypto.rs`）+ `/api/restore/activate` | 部分 | 备份是明文 JSON，恢复只增/覆盖、无原子切换 |

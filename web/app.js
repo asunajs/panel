@@ -1994,6 +1994,7 @@ function bind() {
   // 新建插件
   $('plugin-new').addEventListener('click', openNewPlugin);
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
+  $('panel-restart').addEventListener('click', restartPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
   $('new-plugin-ok').addEventListener('click', createPlugin);
@@ -2062,5 +2063,21 @@ async function uploadFile(inputId, url, okPrefix) {
     toast(e.message || '上传失败', true);
   } finally {
     input.value = '';
+  }
+}
+
+/** 重启进程：exec 自身，PID 不变。要确认一次 —— 正在跑的任务会断。 */
+async function restartPanel() {
+  const ok = await askConfirm(
+    "重启面板进程？正在跑的任务会中断，之后要手动刷新页面（进程号不变，几秒就回来）。",
+    "重启",
+  );
+  if (!ok) return;
+  try {
+    await api("/api/restart", { method: "POST" });
+    toast("正在重启，3 秒后自动刷新…");
+    setTimeout(() => location.reload(), 3000);
+  } catch (e) {
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "重启失败"), true);
   }
 }
