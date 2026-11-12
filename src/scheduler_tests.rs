@@ -308,10 +308,19 @@ fn only_a_real_abort_counts_as_cancelled() {
 
 #[test]
 fn cancel_text_is_human() {
-    let t = cancel_text();
-    assert!(t.contains("已停止"), "{t}");
-    assert!(t.contains("重载"), "要说清是谁停的: {t}");
-    assert!(!t.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {t}");
+    // 两种停法说法必须不同：人点的停止说「重载」会让人去查是谁卸载了插件（第 83 轮实测撞到）。
+    let by_hand = cancel_text(true);
+    assert!(by_hand.contains("已停止"), "{by_hand}");
+    assert!(by_hand.contains("人点了停止"), "{by_hand}");
+    assert!(!by_hand.contains("重载"), "人点的停止不该提重载: {by_hand}");
+
+    let reload = cancel_text(false);
+    assert!(reload.contains("已停止"), "{reload}");
+    assert!(reload.contains("重载"), "要说清是谁停的: {reload}");
+
+    for t in [by_hand, reload] {
+        assert!(!t.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {t}");
+    }
 }
 
     /// 时钟回拨要能被发现：这是「面板好像卡住了」最难查的一种。

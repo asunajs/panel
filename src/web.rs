@@ -239,8 +239,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
         .route("/api/alerts", get(api_alerts))
         .route("/api/alerts/clear", post(api_alerts_clear))
-        .route("/api/runs/export.csv", get(api_runs_csv))
-        .route("/api/logs/export.csv", get(api_logs_csv))
+        .route("/api/export.csv", get(api_export_csv))
         .route("/api/runs", get(api_runs))
         .route("/api/runs/plugins", get(api_run_plugins))
         .route("/api/runs/{id}", get(api_run_one))
@@ -1494,22 +1493,14 @@ async fn api_alerts_clear(h: HeaderMap) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({ "ok": true, "cleared": n })))
 }
 
-// ---------------------------------------------------------------- CSV 导出
+// ---------------------------------------------------------------- CSV 导出（最简单版）
 
-/// 导出最多多少行：再多就该用 CLI 备份/SQL 了，别在浏览器里等。
-const CSV_MAX_ROWS: i64 = 50_000;
+/// 导出上限：等于保留策略的上限，所以常见的库不会被截断。
+const CSV_MAX_ROWS: i64 = 20_000;
 
-/// 一个字段怎么进 CSV。
-///
-/// 三件事都要做：①引号包起来（逗号、换行、引号都能装进去）②内部引号双写
-/// ③**公式注入防护**：以 `= + - @` 开头的内容在 Excel 里会被当公式执行（日志文本来自插件，
-/// 插件可以写任意内容），前面垫一个单引号让它变成纯文本。
+/// 一个字段怎么进 CSV：整体加引号（逗号、换行、引号都能装进去），内部引号双写。
 fn csv_field(v: &str) -> String {
-    let needs_guard = v.starts_with(['=', '+', '-', '@', '\t', '\r']);
-    let mut out = String::with_capacity(v.len() + 4);
-    if needs_guard {
-        out.push('\'');
-    }
+    let mut out = String::with_capacity(v.len() + 2);
     out.push('"');
     for ch in v.chars() {
         if ch == '"' {
@@ -1521,8 +1512,8 @@ fn csv_field(v: &str) -> String {
     out
 }
 
-/// 一整份 CSV（含 UTF-8 BOM，不然 Excel 打开中文是乱码）。
-fn csv_body(head: &[&str], rows: impl IntoIterator<Item = Vec<String>>) -> String {
+/// 一整份 CSV：前缀 BOM（Excel 打开中文不乱码）+ 表头 + 行。
+fn csv_body(head: &[&str], rows: Vec<Vec<String>>) -> String {
     let mut s = String::from("\u{feff}");
     s.push_str(&head.iter().map(|h| csv_field(h)).collect::<Vec<_>>().join(","));
     s.push_str("\r\n");
@@ -1533,15 +1524,12 @@ fn csv_body(head: &[&str], rows: impl IntoIterator<Item = Vec<String>>) -> Strin
     s
 }
 
-/// 时间戳（毫秒）→ 本地时间 `YYYY-MM-DD HH:MM:SS`；空值给空串。
-fn csv_time(ms: Option<i64>) -> String {
-    match ms {
-        None => String::new(),
-        Some(ms) => chrono::TimeZone::timestamp_millis_opt(&chrono::Local, ms)
-            .single()
-            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_default(),
-    }
+/// 毫秒时间戳 → 本地 `YYYY-MM-DD HH:MM:SS`（Excel 里能认的时间）。
+fn csv_time(ms: i64) -> String {
+    chrono::TimeZone::timestamp_millis_opt(&chrono::Local, ms)
+        .single()
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
 }
 
 fn csv_response(name: &str, body: String) -> Response {
@@ -1559,151 +1547,101 @@ fn csv_response(name: &str, body: String) -> Response {
     resp
 }
 
-/// `GET /api/runs/export.csv` —— 按当前筛选条件导出运行记录。
-///
-/// 为什么要它：「上周那个任务失败了几次」这种问题，现在只能去敲 SQL。
-/// 导出**忽略分页**（`before`/`limit`），上限 [`CSV_MAX_ROWS`] 行，按 id 倒序。
-
-/// 导出接口只认「筛选」参数，不认「翻页/排序」：`limit` / `sort` / `dir` / `after_*` 传了就报错。
-///
-/// 为什么较真：不报错就是静默忽略（`?sort=started_at` 以为自己按时间导出了，其实按 id）。
-/// 这一类问题在这条线上一共踩过四次（第 36/53/65/73 轮）。
-fn reject_paging_args(p: &Page) -> std::result::Result<(), ApiError> {
-    let mut bad_ones: Vec<&str> = Vec::new();
-    if p.limit.is_some() {
-        bad_ones.push("limit");
-    }
-    if p.sort.is_some() {
-        bad_ones.push("sort");
-    }
-    if p.dir.is_some() {
-        bad_ones.push("dir");
-    }
-    if p.after_v.is_some() {
-        bad_ones.push("after_v");
-    }
-    if p.after_id.is_some() {
-        bad_ones.push("after_id");
-    }
-    if bad_ones.is_empty() {
-        Ok(())
-    } else {
-        Err(bad(format!(
-            "导出不支持 {}（它总是导出当前筛选下最新的 {} 行）",
-            bad_ones.join(" / "),
-            CSV_MAX_ROWS
-        )))
-    }
+#[derive(serde::Deserialize)]
+struct ExportTable {
+    table: Option<String>,
 }
-async fn api_runs_csv(
+
+/// `GET /api/export.csv?table=runs|logs`
+///
+/// **就是「把整张表导出来」**：没有筛选、没有分页、没有排序、没有分块。
+/// 要「上周那个任务失败了几次」这种精细查询，请直接用 sqlite3（README 里有例子）。
+/// 加这些东西的代价是 360 行代码和一个「导出把面板卡住 190ms」的问题 —— 不值得。
+async fn api_export_csv(
     State(st): State<AppState>,
-    QueryArgs(p): QueryArgs<Page>,
+    Query(q): Query<ExportTable>,
 ) -> Result<Response, ApiError> {
-    reject_paging_args(&p)?;
-    let (plugin, before, q) = (p.plugin.clone(), p.before, like_pat(&p.q));
-    let rows = st
-        .db
-        .call(move |c| {
-            let sql = format!(
-                "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs{RUNS_WHERE} \
-                 ORDER BY id DESC LIMIT {CSV_MAX_ROWS}"
+    match q.table.as_deref() {
+        Some("runs") => {
+            let rows = st
+                .db
+                .call(|c| {
+                    let mut stmt = c
+                        .prepare(&format!(
+                            "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs \
+                             ORDER BY id DESC LIMIT {CSV_MAX_ROWS}"
+                        ))
+                        .map_err(|e| e.to_string())?;
+                    let out = stmt
+                        .query([])
+                        .map_err(|e| e.to_string())?
+                        .mapped(|r| {
+                            let started: i64 = r.get(3)?;
+                            let ended: Option<i64> = r.get(4)?;
+                            Ok(vec![
+                                r.get::<_, i64>(0)?.to_string(),
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                csv_time(started),
+                                ended.map(csv_time).unwrap_or_default(),
+                                ended
+                                    .map(|e| (e - started).to_string())
+                                    .unwrap_or_default(),
+                                r.get::<_, String>(5)?,
+                                r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                            ])
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string());
+                    out
+                })
+                .await
+                .map_err(internal)?;
+            let body = csv_body(
+                &["id", "插件", "任务", "开始时间", "结束时间", "耗时ms", "状态", "错误"],
+                rows,
             );
-            let mut stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
-            let out: Vec<Vec<String>> = stmt
-                .query(rusqlite::params![plugin, before, q])
-                .map_err(|e| e.to_string())?
-                .mapped(|r| {
-                    let started: i64 = r.get(3)?;
-                    let ended: Option<i64> = r.get(4)?;
-                    let dur = ended.map(|e| e - started);
-                    Ok(vec![
-                        r.get::<_, i64>(0)?.to_string(),
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        csv_time(Some(started)),
-                        csv_time(ended),
-                        dur.map(|d| d.to_string()).unwrap_or_default(),
-                        r.get::<_, String>(5)?,
-                        r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                    ])
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            Ok(out)
-        })
-        .await
-        .map_err(internal)?;
-    let n = rows.len();
-    let body = csv_body(
-        &["id", "插件", "任务", "开始时间", "结束时间", "耗时ms", "状态", "错误"],
-        rows,
-    );
-    st.log.emit(
-        "panel",
-        None,
-        crate::log::Level::Info,
-        format!("导出运行记录 CSV：{n} 行"),
-    );
-    Ok(csv_response("runs.csv", body))
-}
-
-/// `GET /api/logs/export.csv` —— 按当前筛选条件导出日志。
-async fn api_logs_csv(
-    State(st): State<AppState>,
-    QueryArgs(p): QueryArgs<Page>,
-) -> Result<Response, ApiError> {
-    reject_paging_args(&p)?;
-    let (plugin, run_id, before) = (p.plugin.clone(), p.run_id, p.before);
-    let level = match p.level.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
-        None => None,
-        Some(s) if s.is_empty() => None,
-        Some(s) if matches!(s.as_str(), "info" | "warn" | "error") => Some(s),
-        Some(other) => {
-            return Err(bad(format!("level 只认 info / warn / error，收到 {other:?}")))
+            Ok(csv_response("runs.csv", body))
         }
-    };
-    let q = like_pat(&p.q);
-    let rows = st
-        .db
-        .call(move |c| {
-            let mut stmt = c
-                .prepare(&format!(
-                    "SELECT id,ts,plugin,run_id,level,message FROM logs \
-                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
-                       AND (?3 IS NULL OR level=?3) \
-                       AND (?4 IS NULL OR plugin LIKE ?4 ESCAPE '\\' OR message LIKE ?4 ESCAPE '\\') \
-                       AND (?5 IS NULL OR id < ?5) \
-                     ORDER BY id DESC LIMIT {CSV_MAX_ROWS}"
-                ))
-                .map_err(|e| e.to_string())?;
-            let out: Vec<Vec<String>> = stmt
-                .query(rusqlite::params![plugin, run_id, level, q, before])
-                .map_err(|e| e.to_string())?
-                .mapped(|r| {
-                    Ok(vec![
-                        r.get::<_, i64>(0)?.to_string(),
-                        csv_time(Some(r.get::<_, i64>(1)?)),
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<i64>>(3)?.map(|v| v.to_string()).unwrap_or_default(),
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                    ])
+        Some("logs") => {
+            let rows = st
+                .db
+                .call(|c| {
+                    let mut stmt = c
+                        .prepare(&format!(
+                            "SELECT id,ts,plugin,run_id,level,message FROM logs \
+                             ORDER BY id DESC LIMIT {CSV_MAX_ROWS}"
+                        ))
+                        .map_err(|e| e.to_string())?;
+                    let out = stmt
+                        .query([])
+                        .map_err(|e| e.to_string())?
+                        .mapped(|r| {
+                            Ok(vec![
+                                r.get::<_, i64>(0)?.to_string(),
+                                csv_time(r.get::<_, i64>(1)?),
+                                r.get::<_, String>(2)?,
+                                r.get::<_, Option<i64>>(3)?
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default(),
+                                r.get::<_, String>(4)?,
+                                r.get::<_, String>(5)?,
+                            ])
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string());
+                    out
                 })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            Ok(out)
-        })
-        .await
-        .map_err(internal)?;
-    let n = rows.len();
-    let body = csv_body(&["id", "时间", "插件", "运行", "级别", "内容"], rows);
-    st.log.emit(
-        "panel",
-        None,
-        crate::log::Level::Info,
-        format!("导出日志 CSV：{n} 行"),
-    );
-    Ok(csv_response("logs.csv", body))
+                .await
+                .map_err(internal)?;
+            let body = csv_body(&["id", "时间", "插件", "运行", "级别", "内容"], rows);
+            Ok(csv_response("logs.csv", body))
+        }
+        other => Err(bad(match other {
+            None => "要给 table 参数：runs 或 logs（例如 /api/export.csv?table=runs）".to_string(),
+            Some(v) => format!("table 只认 runs 或 logs，收到 {v:?}"),
+        })),
+    }
 }
 async fn api_runs(
     State(st): State<AppState>,

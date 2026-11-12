@@ -2080,23 +2080,14 @@ async function act(path, okMsg) {
 
 
 
-/** 按当前筛选导出 CSV：直接让浏览器去下（GET，带 cookie 就能过鉴权）。
+/** 导出 CSV：整表导出，不带筛选（服务端就是 SELECT 整表，简单到没有参数可传）。
  *
- * 导出接口**不接受** sort/dir/limit/before 之外的翻页参数（会 400），所以这里只传筛选。
+ * 要精细查询请用 sqlite3；界面上的筛选只管「看」，不管「导出」——第 83 轮删掉的正是那套筛选导出。
  */
 function exportCsv(which) {
-  const qs = [];
-  if (which === 'runs') {
-    if (state.fp.runs) qs.push('plugin=' + encodeURIComponent(state.fp.runs));
-    if (state.q.runs) qs.push('q=' + encodeURIComponent(state.q.runs));
-    window.location = '/api/runs/export.csv' + (qs.length ? '?' + qs.join('&') : '');
-    return;
-  }
-  if (state.fp.logs) qs.push('plugin=' + encodeURIComponent(state.fp.logs));
-  if (state.q.logs) qs.push('q=' + encodeURIComponent(state.q.logs));
-  if (state.logLevel) qs.push('level=' + encodeURIComponent(state.logLevel));
-  window.location = '/api/logs/export.csv' + (qs.length ? '?' + qs.join('&') : '');
+  window.location = '/api/export.csv?table=' + (which === 'runs' ? 'runs' : 'logs');
 }
+
 // ---------------------------------------------------------------- 运行告警（第 71 轮）
 
 /** 画顶部那条黄条。数据来自 state.alerts（进程内、不落库）。

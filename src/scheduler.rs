@@ -122,8 +122,14 @@ pub fn is_busy_error(msg: &str) -> bool {
 }
 
 /// 给人看的说法（原来是 `Error: AbortError: invocation 已停止`）。
-fn cancel_text() -> String {
-    "已停止（插件被重载或卸载）".to_string()
+///
+/// `by_hand`：人点的停止，还是重载/卸载顺手停的 —— 说错会让人去查「谁卸载了插件」。
+fn cancel_text(by_hand: bool) -> String {
+    if by_hand {
+        "已停止（人点了停止）".to_string()
+    } else {
+        "已停止（插件被重载或卸载）".to_string()
+    }
 }
 
 /// 「落后」告警要不要现在说：第一次一定说，之后每个任务最多 60 秒一次。
@@ -1167,7 +1173,8 @@ impl Inner {
                     None => Err(format!("插件未加载: {plugin}")),
                     Some(l) if !l.busy => Err(format!("{plugin} 当前没有在跑的任务")),
                     Some(l) => {
-                        l.plugin.invocation().stop();
+                        // 人点的停止：和重载/卸载区分开，落库的说法不一样。
+                        l.plugin.invocation().stop_by_hand();
                         Ok(())
                     }
                 };
@@ -1727,8 +1734,14 @@ impl Inner {
         // 被主动停掉（重载/卸载）不算任务失败：不计熔断、不发「任务失败」通知。
         let cancelled = error.as_deref().map(cancelled).unwrap_or(false);
         // 落库/日志里都换成给人看的说法（`Error: AbortError: invocation 已停止` 太开发者了）。
+        // 「人点的停止」和「重载/卸载顺手停的」说法必须不同：后者会让人去查是谁卸载了插件。
+        let by_hand = self
+            .plugins
+            .get(plugin)
+            .map(|l| l.plugin.invocation().stopped_by_hand())
+            .unwrap_or(false);
         let error = if cancelled {
-            Some(cancel_text())
+            Some(cancel_text(by_hand))
         } else {
             error
         };
@@ -1746,7 +1759,14 @@ impl Inner {
                 plugin,
                 None,
                 Level::Warn,
-                format!("任务 {task} 被中止（插件被重载或卸载），这次不算失败"),
+                format!(
+                    "任务 {task} 被中止（{}），这次不算失败",
+                    if by_hand {
+                        "人点了停止"
+                    } else {
+                        "插件被重载或卸载"
+                    }
+                ),
             );
         }
         // 失败和「刚刚熔断」都要通知：面板是没人的时候在跑东西的地方，

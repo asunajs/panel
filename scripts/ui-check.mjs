@@ -407,7 +407,7 @@ async function main() {
   const hasLogsExport = await js("!!document.getElementById('log-export')");
   check('运行记录页有「导出 CSV」按钮', hasRunsExport === true, String(hasRunsExport));
   check('日志页有「导出 CSV」按钮', hasLogsExport === true, String(hasLogsExport));
-  const csvProbe = await js("fetch('/api/runs/export.csv', { method: 'GET' }).then(async (r) => ({ status: r.status, ct: r.headers.get('content-type'), head: (await r.text()).slice(0, 40) }))");
+  const csvProbe = await js("fetch('/api/export.csv?table=runs', { method: 'GET' }).then(async (r) => ({ status: r.status, ct: r.headers.get('content-type'), head: (await r.text()).slice(0, 40) }))");
   check(
     '导出接口回 text/csv 且带表头',
     csvProbe && csvProbe.status === 200 && /text\/csv/.test(csvProbe.ct || '') && /插件/.test(csvProbe.head || ''),

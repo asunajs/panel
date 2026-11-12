@@ -73,6 +73,9 @@ pub struct TestOutcome {
 #[derive(rquickjs::JsLifetime)]
 pub struct Invocation {
     stopped: AtomicBool,
+    /// 是不是**人**点的「停止」（而不是重载/卸载顺手停的）。
+    /// 两者都置 `stopped`，但给人看的说法不一样 —— 说错会让人以为插件被卸载了。
+    manual: AtomicBool,
     notify: Notify,
     /// 当前 run 的 id，供日志归属；-1 = 没有。
     pub run_id: AtomicI64,
@@ -84,6 +87,7 @@ impl Default for Invocation {
         // 加载期的日志会被错记到「第 0 次运行」上。
         Self {
             stopped: AtomicBool::new(false),
+            manual: AtomicBool::new(false),
             notify: Notify::new(),
             run_id: AtomicI64::new(-1),
         }
@@ -98,8 +102,18 @@ impl Invocation {
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
+    /// 人点的「停止」（面板按钮 / `POST /api/plugins/<name>/stop`）。
+    pub fn stop_by_hand(&self) {
+        self.manual.store(true, Ordering::SeqCst);
+        self.stop();
+    }
+    /// 这次停下来是不是人点的。只在 `stopped` 为真时有意义。
+    pub fn stopped_by_hand(&self) -> bool {
+        self.manual.load(Ordering::SeqCst)
+    }
     pub fn reset(&self) {
         self.stopped.store(false, Ordering::SeqCst);
+        self.manual.store(false, Ordering::SeqCst);
     }
     /// 已经停了就立刻返回，否则等通知。host op 用它做挂起预算的取消臂。
     pub async fn cancelled(&self) {

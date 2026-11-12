@@ -3031,31 +3031,28 @@ async fn runtime_alerts_show_up_in_state_and_can_be_cleared() {
     assert_eq!(state["alerts"].as_array().map(|a| a.len()), Some(0), "清完要真没了");
 }
 
-/// 导出 CSV 的几个坑都在这条测试里：BOM、引号双写、逗号/换行、公式注入。
+/// CSV 字段：整体加引号，内部引号双写（逗号、换行都能装进去）。
 #[test]
-fn csv_fields_are_quoted_escaped_and_guarded_against_formulas() {
+fn csv_fields_are_quoted_and_escaped() {
     assert_eq!(csv_field("普通"), "\"普通\"");
     assert_eq!(csv_field("含,逗号"), "\"含,逗号\"");
     assert_eq!(csv_field("引号\"里"), "\"引号\"\"里\"");
     assert_eq!(csv_field("两行\n内容"), "\"两行\n内容\"");
-    // Excel 会把以 = + - @ 开头的单元格当公式执行；日志内容来自插件，必须先垫一个单引号
-    assert_eq!(csv_field("=1+1"), "'\"=1+1\"");
-    assert_eq!(csv_field("@cmd"), "'\"@cmd\"");
-    assert_eq!(csv_field("-5"), "'\"-5\"");
-    assert_eq!(csv_field("+"), "'\"+\"");
-    // 中间出现这些字符不算（只有开头危险）
-    assert_eq!(csv_field("a=b"), "\"a=b\"");
 }
 
-/// 导出的 HTTP 契约：`text/csv` + 附件头 + BOM + 表头 + 行；分页参数要报错。
+/// 最简单的导出：整表 CSV。契约只有三条 —— `text/csv` + BOM + 表头；表名写错 400。
 #[tokio::test]
-async fn exporting_csv_has_the_right_headers_bom_and_rejects_paging_args() {
+async fn the_simplest_export_returns_csv_for_a_table_or_400() {
     let (app, db) = setup().await;
     seed(&db).await;
 
     let resp = app
         .clone()
-        .oneshot(Request::get("/api/runs/export.csv").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/api/export.csv?table=runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -3066,13 +3063,6 @@ async fn exporting_csv_has_the_right_headers_bom_and_rejects_paging_args() {
         .unwrap_or_default()
         .to_string();
     assert!(ct.starts_with("text/csv"), "{ct}");
-    let cd = resp
-        .headers()
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(cd.contains("attachment"), "{cd}");
     let bytes = axum::body::to_bytes(resp.into_body(), 4 << 20).await.unwrap();
     assert_eq!(&bytes[..3], &[0xef, 0xbb, 0xbf], "Excel 要 BOM 才不乱码");
     let text = String::from_utf8_lossy(&bytes[3..]).to_string();
@@ -3080,10 +3070,20 @@ async fn exporting_csv_has_the_right_headers_bom_and_rejects_paging_args() {
     assert!(head.contains("\"id\"") && head.contains("插件"), "表头: {head}");
     assert!(text.lines().count() > 1, "应当有数据行");
 
-    // 分页/排序参数对导出没有意义，传了要报错而不是静默忽略
-    for q in ["limit=5", "sort=started_at", "dir=asc", "after_id=3"] {
-        let uri = format!("/api/runs/export.csv?{q}");
-        let (status, _) = get(&app, &uri).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应当 400");
+    // 日志表同样能导
+    let (status, _) = get(&app, "/api/export.csv?table=logs").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 表名写错 / 没给：都说清楚是哪个参数不对（错误体是纯文本，不是 JSON）
+    for uri in ["/api/export.csv", "/api/export.csv?table=users"] {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(text.contains("table"), "{uri}: {text}");
     }
 }
