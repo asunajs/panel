@@ -2579,3 +2579,83 @@ async fn deleting_a_plugin_keeps_its_run_history() {
         "插件没了，它的任务不该还挂在任务表里: {state}"
     );
 }
+
+/// 并列值下的复合游标：`started_at` 相同的一批行必须靠 `id` 兜底，一个都不能漏/重。
+///
+/// 第 56 轮用 20000 行（每 5 行同一个 started_at）实测 40 页、0 重、0 漏。这里把那个性质
+/// 固化成内存库里的守卫：只删掉游标里的 `id` 那一半，这条就会红。
+#[tokio::test]
+async fn paging_by_started_at_keeps_ties_in_order() {
+    let (app, _plugins, _data, _store, db) = setup_core("ties").await;
+    // 60 行：12 个时间点，每个时间点 5 行（并列）
+    db.call(|c| {
+        let base = 1_700_000_000_000i64;
+        for i in 0..60i64 {
+            c.execute(
+                "INSERT INTO runs(plugin,task,started_at,ended_at,status) VALUES (?1,?2,?3,?4,'ok')",
+                rusqlite::params![
+                    if i % 2 == 0 { "a" } else { "b" },
+                    format!("t{}", i % 3),
+                    base + (i / 5) * 1000,
+                    base + (i / 5) * 1000 + 5
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    let (mut after_v, mut after_id) = (None, None);
+    for _ in 0..20 {
+        let path = match (after_v, after_id) {
+            (Some(v), Some(i)) => format!(
+                "/api/runs?limit=7&sort=started_at&dir=desc&after_v={v}&after_id={i}"
+            ),
+            _ => "/api/runs?limit=7&sort=started_at&dir=desc".to_string(),
+        };
+        let (_, b) = get(&app, &path).await;
+        assert_eq!(b["total"], 60, "total 不随游标变: {b}");
+        let rows = b["runs"].as_array().unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        for r in rows {
+            seen.push((
+                r["started_at"].as_i64().unwrap(),
+                r["id"].as_i64().unwrap(),
+            ));
+        }
+        let last = rows.last().unwrap();
+        after_v = last["started_at"].as_i64();
+        after_id = last["id"].as_i64();
+    }
+    assert_eq!(seen.len(), 60, "翻完应当正好 60 行: {seen:?}");
+    let mut ids: Vec<i64> = seen.iter().map(|(_, i)| *i).collect();
+    let n = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "不能重行");
+    for w in seen.windows(2) {
+        assert!(
+            (w[1].0, w[1].1) < (w[0].0, w[0].1),
+            "必须是 (started_at, id) 严格递减: {:?} -> {:?}",
+            w[0],
+            w[1]
+        );
+    }
+
+    // limit 夹取：0 / 负数 → 1；超过上限 → cap（这里用 9999 看它被夹到 500 的效果）
+    let (_, b) = get(&app, "/api/runs?limit=0").await;
+    assert_eq!(b["runs"].as_array().unwrap().len(), 1, "limit=0 应当等于 1: {b}");
+    let (_, b) = get(&app, "/api/runs?limit=-5").await;
+    assert_eq!(b["runs"].as_array().unwrap().len(), 1, "负数也应当是 1: {b}");
+    let (_, b) = get(&app, "/api/runs?limit=9999").await;
+    assert_eq!(
+        b["runs"].as_array().unwrap().len(),
+        60,
+        "只有 60 行，夹到 500 后也还是 60: {b}"
+    );
+}

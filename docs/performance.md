@@ -114,3 +114,39 @@ cron 别都写 `0 * * * *`）。面板能做的是**如实报出来**。
 
 - release 构建（`--release`）的启动与运行开销 —— 上面全是 debug 数字，真实部署会更快
 - 20 分钟长任务的 p99（基线里有读数，见 [verification.md](verification.md)，本机未复测）
+
+## 运行记录查询：20000 行实测（保留策略的上限就是 20 000，所以这是最差情况）
+
+库是手工塞的 20000 行（plugin 交替 a/b，每 5 行共用一个 `started_at`，专门制造并列），
+临时面板 8797，每条查询跑 7 次取中位：
+
+| 查询 | 中位耗时 | 条数 / total |
+|---|---|---|
+| 默认（id 倒序） | 2.2 ms | 50 / 20000 |
+| 按开始时间倒序 | 24.8 ms | 50 / 20000 |
+| 按耗时倒序 | 25.8 ms | 50 / 20000 |
+| plugin=a + 按开始时间 | 15.3 ms | 50 / 9997 |
+| 全文搜 boom | 11.4 ms | 50 / 2857 |
+| 搜索 + 翻到第 10 页 | 11.4 ms | 50 / 2857 |
+
+翻页：`limit=500&sort=started_at&dir=desc` 一路翻到底 = 40 页、20000 行、**0 重复、0 漏行、顺序反了 0 处**。
+边翻边插新行（每页插 1 条）翻 6 页 600 行，也是 0 重复。
+
+limit 夹取：`0`→1 条、`-5`→1 条、`9999`→500 条（cap），`total` 不随游标和 limit 变。
+
+查询计划（`EXPLAIN QUERY PLAN`）
+
+```text
+默认 id 倒序                     SCAN runs                ← 逆着 rowid 走，够快
+按 started_at 排序（无筛选）      SCAN runs USING COVERING INDEX runs_plugin_started
+                                 + USE TEMP B-TREE FOR ORDER BY
+带 plugin 筛选 + 按开始时间       SEARCH runs USING COVERING INDEX runs_plugin_started (plugin=?)
+                                 + TEMP B-TREE FOR LAST TERM OF ORDER BY
+```
+
+结论：**不加索引**。按开始时间排序要多一次临时排序（20000 行的排序 ~25 ms），
+但保留策略把表钉在 20 000 行，这个值不会随使用时间变差；为一个点列的排序多养一个索引
+（每次插入都要维护）不划算。真要再快，加 `runs(plugin, started_at DESC, id DESC)` 才能同时消掉
+两边，那是另一个权衡。
+
+这条下限靠一个守卫钉着（并列值靠 `id` 兜底，见 pitfalls 第 42 条）。

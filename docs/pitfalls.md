@@ -167,3 +167,9 @@
     把 `cron` 写死成 None，调用方传 `cron` 被**静默忽略**（建出来是手动脚本）。和第 36 轮 `lead_ms`
     静默截断是同一类：参数进了门却没生效，日志里一个字都没有。现在 `NewScript` 接住 `cron`/`budget_ms`。
     守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`。
+
+42. **复合游标少写一半 `id`，翻页会静默漏行**：`ORDER BY started_at DESC` 时游标是
+    `(started_at, id)` 两段；只写 `started_at < ?` 会把**同一个 started_at 的后续行**整批跳过。
+    实测（60 行、每 5 行并列、limit=7）：去掉 `id` 那一段后只翻到 42/60 行 —— 少了 18 行，
+    而且不报错、不重复，用户只会觉得「记录怎么少了一段」。守卫：
+    `web_tests.rs::paging_by_started_at_keeps_ties_in_order`（做过反向例确认会红）。
