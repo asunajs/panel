@@ -1078,13 +1078,17 @@ impl Inner {
                 let total = plugins.len();
                 tokio::spawn(async move {
                     let wait = std::time::Duration::from_millis(wait_ms);
+                    // **并发**量，不是一个个等：每个插件最多等 `wait`，串着量最坏是 N × wait
+                    // （30 个全忙时实测 /api/state 从 7ms 掉到 45ms）。并发之后最坏只多 `wait`。
+                    let measured = futures::future::join_all(
+                        plugins.into_iter().map(|p| async move { p.memory_usage(wait).await }),
+                    )
+                    .await;
                     let mut sum = 0u64;
                     let mut got = 0usize;
-                    for p in plugins {
-                        if let Some(bytes) = p.memory_usage(wait).await {
-                            sum += bytes;
-                            got += 1;
-                        }
+                    for m in measured.into_iter().flatten() {
+                        sum += m;
+                        got += 1;
                     }
                     let _ = reply.send((sum, got, total));
                 });
