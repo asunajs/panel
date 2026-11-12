@@ -160,6 +160,11 @@
     要么在中间件里读 `req.extensions()`（我们这么做），要么 handler 直接要它（单测里就没有连接信息了）。
 14. **前端 `api()` 传 string body 不会带 content-type**：`body: JSON.stringify(o)` 少了 `content-type: application/json`，
     axum 的 `Json` 提取器回 415。传对象，让它自己序列化。
+16. **`kill -9` 会在 `runs` 里留下 `status='running'` 的僵尸行**：先写 running、跑完再回填
+    `ended_at`+结果，进程被杀就永远停在 running（界面一直显示「运行中」，也不会有人收尾）。
+    启动时 `db::reap_stale_runs` 统一标成 error + 「面板重启：这次运行没有跑完」。
+    有测试：`db::tests::reap_marks_stale_running_runs_as_error`（含「已经跑完的不能动」）。
+    面板日志里会留一行「有 N 条运行记录上次没跑完」。
 15. **llrt 的 `console` 直写进程 stdout**：守护进程跑起来就是 journal，插件里的输出在面板上看不到。
     要看到得走 `host.log`；试跑（`/api/test/js`）另把 `console.*` 抢进了响应。
 

@@ -90,6 +90,17 @@ async fn main() -> Result<(), String> {
     if let Some(note) = provisioned.note.clone() {
         log.emit("panel", None, Level::Info, note);
     }
+    // 上次没跑完的运行记录（进程被杀/崩溃）在这里收尾，别让界面一直显示「运行中」。
+    match crate::db::reap_stale_runs(&db).await {
+        Ok(n) if n > 0 => log.emit(
+            "panel",
+            None,
+            Level::Warn,
+            format!("有 {n} 条运行记录上次没跑完（进程被杀或崩溃），已标成失败"),
+        ),
+        Ok(_) => {}
+        Err(e) => log.emit("panel", None, Level::Warn, format!("收尾未完成的运行记录失败: {e}")),
+    }
     // 配置做成热快照：界面保存后插件立刻读到新值（旧实现是启动时快照，要重启）。
     let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone());

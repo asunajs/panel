@@ -197,3 +197,27 @@ pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<()
     })
     .await
 }
+
+/// 启动时收尾：把上次没跑完的运行记录标成失败。
+///
+/// `runs` 先写一行 `status='running'`，跑完再回填 `ended_at` + 结果。面板被 kill -9 /
+/// 断电时那行就永远停在 running：界面会一直显示「运行中」，而且永远不会有人来收尾。
+/// 启动时统一标成 error 并写明原因 —— 比留一条假「运行中」诚实。
+pub async fn reap_stale_runs(db: &Db) -> Result<usize, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    db.call(move |c| {
+        c.execute(
+            "UPDATE runs SET status='error', ended_at=?1, error=?2 WHERE status='running'",
+            rusqlite::params![now, "面板重启：这次运行没有跑完（进程被杀或崩溃）"],
+        )
+        .map_err(|e| format!("收尾未完成的运行记录失败: {e}"))
+    })
+    .await
+}
+
+#[cfg(test)]
+#[path = "db_tests.rs"]
+mod tests;

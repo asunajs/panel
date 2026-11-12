@@ -66,6 +66,13 @@ else
   bad 'api() 收到字符串 body 不会带 content-type，后端会 415 —— 传对象'
 fi
 
+# HANDOFF §7.16：启动时要收尾僵尸 running 行
+if grep -q 'reap_stale_runs' src/main.rs; then
+  ok '启动时会收尾上次没跑完的运行记录（reap_stale_runs）'
+else
+  bad 'main.rs 里没有 reap_stale_runs —— kill -9 之后 running 行会永远留着'
+fi
+
 # retention.md：清理任务必须还挂在 main 里（删了它 runs/logs 就会无限长）
 if grep -q 'retention::spawn_ticker' src/main.rs; then
   ok '运行记录/日志的清理任务还接着（retention::spawn_ticker）'
@@ -83,7 +90,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 9 条坑的守卫全过"
+  echo "ok: 10 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi
