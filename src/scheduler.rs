@@ -1681,8 +1681,16 @@ impl Inner {
         if run_id < 0 {
             return;
         }
+        // 被重载/卸载打断的那次单独记 `cancelled`：它**不是失败**（不计熔断、不发通知），
+        // 但以前和真失败一样记成 `error`，于是界面「只看失败」把它算进去、列表里也是红的。
         let (status, ended) = (
-            if error.is_some() { "error" } else { "ok" },
+            if cancelled {
+                "cancelled"
+            } else if error.is_some() {
+                "error"
+            } else {
+                "ok"
+            },
             now.timestamp_millis(),
         );
         let db = self.db.clone();

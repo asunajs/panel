@@ -212,3 +212,9 @@
     一开始 `backup --encrypt-to` 直接报错，加密路径整个不可用 —— 而没有任何测试盯着这个开关。
     教训：白名单要和**真实开关一一对应**，并且测试里把完整开关列表写一遍（不是只测「坏参数被拒」）。
     守卫：`unknown_flags_are_rejected_instead_of_ignored` 现在显式带 `--encrypt-to`。
+
+50. **中断是协作式的，只有 host op 才是中断点**：`invocation().stop()` 只置标志；
+    `await host.sleep(4000)` 会在 0.7 秒内被断（`AbortError` → 记 `cancelled`），
+    但 `new Promise(r => setTimeout(r, 4000))` 会**跑满 4 秒并记 `ok`** —— 重载不会打断纯 JS 的等待。
+    另：被打断的运行状态是 `cancelled` 而不是 `error`（第 64 轮改的），
+    否则界面「只看失败」会把「人点了重载」算成失败。守卫：`reloading_during_a_run_stops_it_without_a_failure_notice`。

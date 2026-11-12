@@ -2481,6 +2481,8 @@ async fn reloading_during_a_run_stops_it_without_a_failure_notice() {
     );
     assert!(!err.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {r}");
     assert!(r["ended_at"].as_i64().is_some(), "必须写结束时间: {r}");
+    // 第 64 轮：状态单独记 cancelled，不是 error —— 界面「只看失败」不该把它算进去。
+    assert_eq!(r["status"], "cancelled", "被重载打断不是失败: {r}");
 
     let (_, notes) = get(&app, "/api/notifications").await;
     let notices = notes.as_array().cloned().unwrap_or_else(|| {

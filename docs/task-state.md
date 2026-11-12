@@ -105,7 +105,7 @@ POST reset   200，tripped=false trips=0，next_at 距现在 2.0s
 
 | | 以前 | 现在 |
 |---|---|---|
-| 运行记录 | `status=error`，错误是 `Error: AbortError: invocation 已停止` | `status=error`，错误是 `已停止（插件被重载或卸载）` |
+| 运行记录 | `status=error`，错误是 `Error: AbortError: invocation 已停止` | `status=cancelled`（第 64 轮改的），错误是 `已停止（插件被重载或卸载）` |
 | 日志 | `任务 X 失败: …`（error） | `任务 X 被中止（插件被重载或卸载），这次不算失败`（warn） |
 | 通知 | 发「任务失败」 | 不发 |
 | 熔断 | 计入连续失败 | 不计入（按成功对齐节奏） |
@@ -124,3 +124,23 @@ run1 status=error dur=2079 err=已停止（插件被重载或卸载）
 
 判定只看错误文本里有没有 `invocation 已停止`（`cancelled()`），所以**真的**失败、
 预算耗尽、加载期被中断都不会被误判（各有各的文案）。
+
+
+### 中断是**协作式**的：只有 host op 才是中断点（第 64 轮实测）
+
+`invocation().stop()` 只是置一个标志；真正会抛 `AbortError` 的是**等在这个标志上的 host op**
+（`host.sleep`、带超时的出站请求等）。纯 JS 的 `setTimeout` / 死循环不认这个标志。
+
+矩阵（临时面板 8797，两种 handler × 三种动作，都是跑到 0.7 秒时动手，再等 5 秒）：
+
+| handler | 动作（重载 / 卸载 / 删除） | 结果 |
+|---|---|---|
+| `await host.sleep(4000)` | 任一 | **0.72 秒就断**：`status=cancelled`，错误 `已停止（插件被重载或卸载）`，「跑完了」没打印 |
+| `new Promise(r => setTimeout(r, 4000))` | 任一 | **跑满 4.0 秒**：`status=ok`，「跑完了」照常打印 |
+
+所以「重载会让在途调用停下」这句话的准确版本是：**停在下一个 host op**。
+插件里如果有长跑的原生 JS 循环，它会把这一轮跑完（面板不会崩：旧 runtime 由那次调用自己持有，
+跑完后一起释放）。
+
+`status=cancelled` 是给界面看的：列表里是灰色的「已停止」而不是红色的「失败」，
+「只看失败」筛选也会把它排除 —— 它是人点重载的结果，不是插件的毛病。

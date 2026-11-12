@@ -301,12 +301,16 @@ checkFail('点「重试失败的」有回执', /已打回/.test(toast3 || ''), t
 const stillPending = execSync('sqlite3 ' + db + " \"SELECT count(*) FROM notify_outbox WHERE channel='dead' AND done=0\"").toString().trim();
 checkFail('放弃的行被拉回待发（done=0）', stillPending === '1', 'count=' + stillPending);
 
-// 坏配置：channels 不是数组，红条要说原因
-await putCfg({ notify: { channels: 'oops' } });
+// 坏配置：第 60 轮起 PUT /api/config 会在**进门时**拒绝语义错的通知配置（不再等红条），
+// 所以这里验的是「保存被拒 + 生效中的配置没被换掉」。
+const badPut = await putCfg({ notify: { channels: 'oops' } });
+checkFail('坏通知配置保存被拒（400）', badPut.ok === false && badPut.status === 400, 'status=' + badPut.status);
+const badText = await badPut.text();
+checkFail('拒绝时说明原因', /配置有问题/.test(badText), badText.slice(0, 120));
 await ev("document.getElementById('notify-reload').click()");
 await sleep(1400);
-const ne = await ev("({ hidden: document.getElementById('notify-error').classList.contains('hidden'), text: document.getElementById('notify-error').textContent })");
-checkFail('坏通知配置有红条说原因', ne && ne.hidden === false && /配置有问题/.test(ne.text || ''), JSON.stringify(ne));
+const stillOk = await ev("fetch('/api/notify').then(r => r.json()).then(d => d.ok)");
+checkFail('被拒之后通知配置仍然有效', stillOk === true, String(stillOk));
 
 await putCfg(goodCfg);
 recv.close();
@@ -424,6 +428,12 @@ checkFail('环里没有重复的 id（补发去重生效）', dupIds === 0, 'dup
 const seenAll = await ev("(() => { const ids = state.logs.filter(l => l.id != null).map(l => l.id); return ids.length ? Math.max(...ids) === state.logLastId : false; })()");
 checkFail('游标就是环里最大的 id', seenAll === true);
 void duringLen;
+
+// ---------------------------------------------------------------- 运行状态徽标（第 64 轮：取消≠失败）
+const pillTexts = await ev("(() => ({ ok: runPill('ok').textContent, running: runPill('running').textContent, cancelled: runPill('cancelled').textContent, error: runPill('error').textContent }))()");
+checkFail('运行状态 ok → 成功', /成功/.test(pillTexts.ok), JSON.stringify(pillTexts));
+checkFail('运行状态 cancelled → 已停止（不叫失败）', /已停止/.test(pillTexts.cancelled), JSON.stringify(pillTexts));
+checkFail('运行状态 error → 失败', /失败/.test(pillTexts.error), JSON.stringify(pillTexts));
 ws.close();
 console.log('');
 console.log('ok: ' + pass.length + ' 条界面端到端全过' + (fail.length ? '，' + fail.length + ' 条失败' : ''));

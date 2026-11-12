@@ -378,6 +378,8 @@ function pill(cls, text) {
 function runPill(status) {
   if (status === 'ok') return pill('pill-ok', '成功');
   if (status === 'running') return pill('pill-accent', '运行中');
+  // 被重载/卸载打断：既不是成功也不是失败，别用红色吓人。
+  if (status === 'cancelled') return pill('pill', '已停止');
   return pill('pill-err', '失败');
 }
 
@@ -680,7 +682,8 @@ function renderRuns() {
   let rows = state.runs
     .filter((r) => !state.fp.runs || r.plugin === state.fp.runs)
     .filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
-  if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok');
+  // 「只看失败」不该把「被重载打断」算成失败（那是人的操作，不是插件的毛病）
+  if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok' && r.status !== 'cancelled');
   const total = typeof state.runsTotal === 'number' ? state.runsTotal : state.runs.length;
   $('runs-count').textContent = '已加载 ' + state.runs.length + ' / 共 ' + total;
   clear(body);
@@ -1009,7 +1012,7 @@ async function showRun(id) {
       ['任务', r.task],
       ['开始', fmtDateTime(r.started_at)],
       ['耗时', humanDur(r.ended_at ? r.ended_at - r.started_at : null)],
-      ['结果', r.status === 'ok' ? '成功' : r.status === 'running' ? '运行中' : '失败'],
+      ['结果', r.status === 'ok' ? '成功' : r.status === 'running' ? '运行中' : r.status === 'cancelled' ? '已停止（插件被重载或卸载）' : '失败'],
       ['错误', r.error || '—', true],
     ]));
     body.append(el('h3', 'card-label', '本次运行的日志'));
