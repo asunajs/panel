@@ -76,6 +76,16 @@ fn cooldown_for(cfg: &TripConfig, trips: u32) -> ChronoDuration {
     ChronoDuration::milliseconds(ms as i64)
 }
 
+/// 该落库的提前量：**只有面板改过的**才写。
+///
+/// `register_cron(..., {lead_ms})` 给的是插件的默认值，它不该盖住下次注册时插件
+/// 自己改过的值；`set_job_schedule({lead_ms})` 是人的决定，必须留住。
+/// 第 36 轮的 bug 就是没分这两种：注册值也被写库，于是「handler 先注册、cron 后注册」
+/// 这条最常见的写法里，cron 的 lead_ms 被库里那份 0 盖掉了。
+fn saved_lead(lead_override: bool, lead_ms: u64) -> Option<u64> {
+    lead_override.then_some(lead_ms)
+}
+
 /// 实际触发时刻 = 计划时刻 - 提前量（lead_ms）。0 就是准点。
 fn trigger_at(t: &Task) -> DateTime<Local> {
     t.next_fire - ChronoDuration::milliseconds(t.lead_ms.min(LEAD_MAX_MS) as i64)
@@ -95,8 +105,15 @@ struct Task {
     summary: Option<String>,
     /// 插件说「现在还不能跑」的原因；非空只挡**定时**触发，手动运行照旧。
     blockers: Vec<String>,
-    /// 提前多少毫秒唤醒（set_job_schedule 里的 lead_ms）。0 = 准点。
+    /// 提前多少毫秒唤醒（register_cron 的 opts 或 set_job_schedule 的 lead_ms）。0 = 准点。
     lead_ms: u64,
+    /// `lead_ms` 是不是**面板改的**（`set_job_schedule`），而不是插件注册时给的默认值。
+    ///
+    /// 为什么要分：插件热重载/重启时 `apply_saved` 会用库里的值盖掉注册值。如果注册值
+    /// 也算「面板改过」，那 `register_cron(name, cron, budget, {lead_ms})` 给的提前量
+    /// 会被库里那份 0 盖掉 —— 第 36 轮实测：任务表里 lead=0、事件 early=false。
+    /// 所以只有面板改过的才写库、才在注册后盖回去。
+    lead_override: bool,
     /// 注册时给的参数，派发时原样交给 handler 的 payload.params。
     params: Option<Json>,
     /// None = 手动任务，永远不自动到期。
@@ -143,7 +160,8 @@ impl Task {
             override_expr: None,
             summary: None,
             blockers: Vec::new(),
-            lead_ms: lead_ms.min(LEAD_MAX_MS),
+            lead_ms,
+            lead_override: false,
             params,
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
@@ -172,6 +190,7 @@ impl Task {
             summary: None,
             blockers: Vec::new(),
             lead_ms: 0,
+            lead_override: false,
             params: None,
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
@@ -673,7 +692,8 @@ struct SavedTask {
     enabled: bool,
     summary: Option<String>,
     blockers: Vec<String>,
-    lead_ms: u64,
+    /// `None` = 面板没改过提前量（库里存 NULL），注册时用插件的默认值。
+    lead_ms: Option<u64>,
 }
 
 async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
@@ -684,7 +704,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                     "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms FROM tasks",
                 )
                 .map_err(|e| e.to_string())?;
-            let out: Vec<(String, String, Option<String>, i64, Option<String>, String, i64)> = st
+            let out: Vec<(String, String, Option<String>, i64, Option<String>, String, Option<i64>)> = st
                 .query_map([], |r| {
                     Ok((
                         r.get(0)?,
@@ -693,7 +713,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5).unwrap_or_else(|_| "[]".to_string()),
-                        r.get(6).unwrap_or(0),
+                        r.get::<_, Option<i64>>(6)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
@@ -713,7 +733,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         enabled: en != 0,
                         summary: sum,
                         blockers: serde_json::from_str(&bl).unwrap_or_default(),
-                        lead_ms: lead.max(0) as u64,
+                        lead_ms: lead.map(|v| v.max(0) as u64),
                     },
                 )
             })
@@ -869,8 +889,17 @@ impl Inner {
                                     self.tasks[i].override_expr = None;
                                 }
                             }
+                            // 和 register_cron 一个口径：超上限**报错**，不静默截断。
+                            // 静默截断的话，插件以为「提前了两小时」，实际只有一小时，
+                            // 而日志里一个字都不会有 —— 这种「悄悄改了你的参数」最难查。
                             if let Some(l) = lead_ms {
-                                self.tasks[i].lead_ms = l.min(LEAD_MAX_MS);
+                                if l > LEAD_MAX_MS {
+                                    return Err(format!(
+                                        "lead_ms 最大 {LEAD_MAX_MS} 毫秒（一小时），给的是 {l}"
+                                    ));
+                                }
+                                self.tasks[i].lead_ms = l;
+                                self.tasks[i].lead_override = true;
                             }
                         }
                     }
@@ -1063,7 +1092,7 @@ impl Inner {
                 enabled: t.enabled,
                 summary: t.summary.clone(),
                 blockers: t.blockers.clone(),
-                lead_ms: t.lead_ms,
+                lead_ms: saved_lead(t.lead_override, t.lead_ms),
             },
         );
     }
@@ -1077,7 +1106,10 @@ impl Inner {
         self.tasks[i].enabled = s.enabled;
         self.tasks[i].summary = s.summary;
         self.tasks[i].blockers = s.blockers;
-        self.tasks[i].lead_ms = s.lead_ms.min(LEAD_MAX_MS);
+        if let Some(l) = s.lead_ms {
+            self.tasks[i].lead_ms = l.min(LEAD_MAX_MS);
+            self.tasks[i].lead_override = true;
+        }
         if let Some(expr) = s.override_expr {
             let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
             match self.tasks[i].set_schedule(&expr) {
@@ -1184,7 +1216,9 @@ impl Inner {
         let (summary, blockers, lead) = (
             t.summary.clone(),
             serde_json::to_string(&t.blockers).unwrap_or_else(|_| "[]".into()),
-            t.lead_ms as i64,
+            // 只有面板改过的提前量才落库：插件注册给的是默认值，重启时应当以插件
+            // 当时的注册为准（插件可能在两次启动之间改了 lead_ms）。
+            saved_lead(t.lead_override, t.lead_ms).map(|v| v as i64),
         );
         let db = self.db.clone();
         tokio::spawn(async move {

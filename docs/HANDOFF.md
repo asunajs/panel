@@ -217,7 +217,17 @@
     `/api/state` 从 4ms 涨到 **1963ms**（第 34 轮实测）。现在 `Scripts` 有全局并发上限
     `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 —— 同样 12 个死循环，
     HTTP 稳定在 2~5ms。有测试/守卫：`the_concurrency_cap_leaves_room_for_the_server`、
-    `check-pitfalls` 第 11 条。
+    `check-pitfalls` 第 11 条。27. **插件注册给的 `lead_ms` 会被库里那份 0 盖掉（「handler 先注册、cron 后注册」必踩）**：
+    `apply_saved` 在每次注册后用库里的值恢复「人的改动」，而 `persist_task` 连**插件给的默认值**
+    也写库。于是最常见的写法 `register_handler('t')` + `register_cron('t', cron, b, {lead_ms:4000})`
+    里，前一行先把 lead=0 落了库，后一行注册时又被盖回 0 —— 任务表显示 lead=0、事件 `early=false`，
+    而且**一个错都不报**。现在只有面板 `set_job_schedule` 改过的提前量才落库（`saved_lead()`），
+    注册值每次都以插件当时给的为准。
+    读数：修前 `lead=0 / early=false`；修后 `lead=4000 / early=true`，运行比 next_at 早 3998ms。
+28. **同一个字段不能一个入口报错、另一个入口静默截断**：`register_cron` 的 `lead_ms` 超上限会报错，
+    但 `set_job_schedule` 之前是 `l.min(LEAD_MAX_MS)` 静默截断 —— 插件以为提前了两小时，
+    实际只有一小时，日志里一个字都没有。现在两条路都报错。
+
 ## 8. 运行中的面板
 
 - **8787** = 常用面板（`PANEL_WEB_DIR=web ./target/debug/panel-llrt`，无令牌、只绑回环，数据在 `data/`）。

@@ -65,6 +65,9 @@ register_handler(name, handler)                // 只手动/被派发的任务
 `lead_ms` 提前那一拍派发时，事件里 `early: true` 并带上 `lead_ms` —— 插件据此知道
 「还没到点，是让我先准备」。它和 `set_job_schedule` 写的是同一个字段（落库，重启不丢）。
 
+> `lead_ms` 有两个来源：`register_cron` 的 opts（**插件默认值**，每次注册都以它为准）和
+> `set_job_schedule`（**人的改动**，落库、热重载和重启都留住）。超上限（`LEAD_MAX_MS` = 1 小时）两边都报错。
+
 ```js
 register_cron('兑换', '0 10 * * *', 600_000, {
   params: { accounts: ['a', 'b'], mode: 'fast' },

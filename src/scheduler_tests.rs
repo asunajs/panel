@@ -194,3 +194,64 @@ async fn catch_engine_panic_turns_a_panic_into_a_failed_run() {
         .unwrap_err();
     assert!(e.contains("owned"), "实际: {e}");
 }
+// ---------------------------------------------------------------- 提前唤醒（lead_ms）
+//
+// `lead_ms` 是「提前多少毫秒唤醒」。语义：派发时刻 = 计划时刻 - lead_ms，事件里
+// `early=true` + `lead_ms=N`，插件据此知道「还没到点，先做准备」。
+// 这几条把「提前量算得对」「准点的不算早」「超上限要报错」钉住。
+
+#[test]
+fn trigger_time_is_the_plan_minus_the_lead() {
+    let mut t = task("@every 1h");
+    t.next_fire = Local::now() + ChronoDuration::seconds(100);
+    let plan = t.next_fire;
+
+    // 没有提前量：准点
+    t.lead_ms = 0;
+    assert_eq!(trigger_at(&t), plan, "lead_ms=0 就该准点");
+
+    // 提前 30 秒：触发时刻早 30 秒，计划时刻本身不变
+    t.lead_ms = 30_000;
+    assert_eq!(
+        trigger_at(&t),
+        plan - ChronoDuration::milliseconds(30_000),
+        "提前 30 秒唤醒"
+    );
+    assert_eq!(t.next_fire, plan, "next_fire（计划时刻）不该被 lead 改掉");
+}
+
+#[test]
+fn a_task_with_a_lead_is_due_before_its_plan_time() {
+    // 这就是「提前唤醒」的全部含义：now 还没到 next_fire，但已经到 trigger_at 了。
+    let mut t = task("@every 1h");
+    let now = Local::now();
+    t.next_fire = now + ChronoDuration::seconds(10);
+    t.lead_ms = 20_000;
+    assert!(trigger_at(&t) <= now, "提前 20 秒的任务，now 就该到期了");
+    assert!(t.next_fire > now, "但计划时刻还没到 —— 事件里 early 才为 true");
+
+    // 反过来：提前量不够，就不该到期
+    t.lead_ms = 5_000;
+    assert!(trigger_at(&t) > now, "只提前 5 秒，还不到时候");
+}
+
+#[test]
+fn the_lead_is_capped_when_computing_the_trigger_time() {
+    // 防御性：就算库里存了一个超上限的值（旧数据/手改库），算触发时刻时也不能
+    // 提前一天就把任务点着。写入侧已经在报错了，这里兜住读出来的脏数据。
+    let mut t = task("@every 1h");
+    t.next_fire = Local::now() + ChronoDuration::seconds(100);
+    t.lead_ms = LEAD_MAX_MS * 10;
+    let want = t.next_fire - ChronoDuration::milliseconds(LEAD_MAX_MS as i64);
+    assert_eq!(trigger_at(&t), want, "算触发时刻时按上限裁剪");
+}
+
+#[test]
+fn only_a_panel_set_lead_is_persisted() {
+    // 插件注册给的默认值：不落库（下次注册以插件当时给的为准）
+    assert_eq!(saved_lead(false, 4000), None, "注册值不该写库");
+    assert_eq!(saved_lead(false, 0), None);
+    // 面板改过的：落库（热重载/重启都要留住）
+    assert_eq!(saved_lead(true, 2000), Some(2000));
+    assert_eq!(saved_lead(true, 0), Some(0), "面板明确改成 0 也要留住");
+}
