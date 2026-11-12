@@ -168,6 +168,12 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `var(--bg-soft, #fafafc)`，而 `--bg-soft` 从来没定义过。守卫在 `check-pitfalls.sh` 第 8 条：
 扫出未定义的变量、或任何带 fallback 的引用都判红（注释里的示例不算）。
 
+**垂直节奏只有一个来源：容器上的 `gap`**（抽屉 14px、卡片正文 14px、note 之间 12px）。
+别靠给单个元素加 `margin` 凑 —— 一旦某个容器忘了挂 `gap`，里面的块就会挤成一坨。
+第 24 轮用户连着报了两处「太紧凑」：插件抽屉里一排按钮**顶着**「它的任务」（2px），
+数据页的备份说明与按钮也是贴着的。根因都是 `gap` 挂在了外层（`.drawer-body`），
+管不到 pane 内部的子元素。`ui-check.mjs` 有两条断言盯着：抽屉与数据页里相邻块间距 <8px 即红。
+
 下拉菜单必须挂到 `body` 再 `position: fixed` 定位：`.panel` 是 `overflow: hidden`，
 菜单留在原地会被裁掉；同一时刻只允许开一个（`openDropdown` 全局引用）。
 

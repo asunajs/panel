@@ -1615,7 +1615,7 @@ function renderSettings() {
   ]));
   dat.append(el("p", "settings-note", "删掉的插件文件会进 trash 目录，需要时可以从那里捞回来。"));
 
-  const bar = el("div", "actions");
+  const bar = el("div", "actions backup-bar");
   const expBtn = el("button", "btn btn-sm", "导出备份");
   expBtn.type = "button";
   expBtn.addEventListener("click", exportBackup);
@@ -1627,20 +1627,29 @@ function renderSettings() {
   dat.append(
     el(
       "p",
-      "settings-note",
+      "settings-note backup-note",
       "备份 = 配置 + 插件源码 + 脚本（含排程），不含运行记录和日志。恢复只增/覆盖，不删除。",
     ),
   );
-  dat.append(
-    el(
-      "p",
-      "settings-note",
-      "这里的导出是**明文**（插件源码 + 配置原样在 JSON 里）。要加密导出得在终端跑：" +
-        "panel-llrt keygen 生成一对密钥（私钥自己收着），然后 " +
-        "panel-llrt backup --out 备份.bk --encrypt-to <公钥>；恢复用 " +
-        "panel-llrt restore --in 备份.bk --secret <私钥>。私钥故意不进 HTTP。",
-    ),
+  // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**（第 24 轮用户抓到）。
+  // 这里改成 strong，长句里的命令也用 code 包起来，别让它糊成一片。
+  const plain = el("p", "settings-note backup-note");
+  plain.append("这里的导出是", el("strong", "", "明文"), "（插件源码 + 配置原样在 JSON 里）。要加密导出得在终端跑：");
+  const steps = el("ol", "backup-steps");
+  // 注意：append 对字符串是建文本节点、对元素是插入 —— 别再包一层 el('code')，
+  // 那会把元素当文本塞进去，页面上显示成 [object HTMLElement]（这次自己踩的）。
+  const li = (parts) => {
+    const li = el("li", "");
+    for (const p of parts) li.append(p);
+    return li;
+  };
+  steps.append(
+    li([el("code", "", "panel-llrt keygen"), " 生成一对密钥（私钥自己收着）"]),
+    li([el("code", "", "panel-llrt backup --out 备份.bk --encrypt-to <公钥>"), " 加密导出"]),
+    li([el("code", "", "panel-llrt restore --in 备份.bk --secret <私钥>"), " 恢复"]),
   );
+  plain.append(steps, "私钥故意不进 HTTP。");
+  dat.append(plain);
 }
 
 

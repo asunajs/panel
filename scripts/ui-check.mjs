@@ -271,6 +271,27 @@ async function main() {
   }
   check('设置页扫到的控件够多（防假绿）', scanned >= 3, '只扫到 ' + scanned + ' 个');
   check('没有掉回系统样式的控件', uaStyled.length === 0, JSON.stringify(uaStyled));
+  // 垂直节奏：相邻块间距 < 8px 就是「太紧凑」（第 24 轮用户连着报了两处）。
+  const tightGaps = async (sel) => JSON.parse(await js(
+    "JSON.stringify((()=>{const p=document.querySelector('" + sel + "'); if(!p) return ['没找到 '+ '" + sel + "'];" +
+    " const k=[...p.children].filter(e=>e.getBoundingClientRect().height>0); const out=[];" +
+    " for(let i=0;i<k.length-1;i++){const a=k[i].getBoundingClientRect(),b=k[i+1].getBoundingClientRect();" +
+    " const g=Math.round(b.top-a.bottom); if(g<8) out.push(k[i].tagName+'/'+(k[i].className||'')+' → '+k[i+1].tagName+'/'+(k[i+1].className||'')+': '+g+'px');}" +
+    " return out;})())"));
+  await js("location.hash = '#plugins'");
+  await sleep(1100);
+  await js("showPlugin('seed')");
+  await sleep(1600);
+  const drawerTight = await tightGaps('#drawer-overview');
+  check('插件抽屉里的块间距 ≥ 8px', drawerTight.length === 0, JSON.stringify(drawerTight));
+  await js("document.querySelector('.drawer [data-close]').click()");
+  await sleep(600);
+  await js("location.hash = '#settings'");
+  await sleep(1100);
+  await js("document.querySelector('[data-tab=data]').click()");
+  await sleep(800);
+  const dataTight = await tightGaps('#settings-data');
+  check('设置·数据页的块间距 ≥ 8px', dataTight.length === 0, JSON.stringify(dataTight));
   // 深色主题下不许有大块近白背景：第 24 轮「还没有令牌」那张白卡片就是
   // var(--bg-soft, #fafafc) 静默回落来的。这里用面积 + 亮度兜一遍。
   const theme = await js("document.documentElement.getAttribute('data-theme')");

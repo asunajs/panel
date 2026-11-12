@@ -8,7 +8,7 @@
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 24 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 26 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
@@ -33,6 +33,8 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 | 没有掉回系统样式的控件 | 五个设置页签里的每个 input/select/textarea：白底 + 0 圆角 / 2px 灰边即红 |
 | 扫到的控件够多（防假绿） | 扫到 0 个也绿就没意义，所以另加一条计数断言 |
 | 深色主题下没有大块浅色背景 | 切到深色 + 安全页，扫所有面积 >4000px² 且亮度 >200 的背景 |
+| 插件抽屉里的块间距 ≥ 8px | 相邻子块 top/bottom 差 <8px 即「太紧凑」 |
+| 设置·数据页的块间距 ≥ 8px | 同上，盯备份那一段 |
 | 没有 JS 报错 | 收集 `Runtime.exceptionThrown` 与 `console.error` |
 | 窄屏没有横向溢出 | `Emulation.setDeviceMetricsOverride` 到 390×844 后 `scrollWidth - innerWidth <= 1` |
 | 窄屏表头隐藏（卡片模式） | `thead.offsetHeight === 0` |
