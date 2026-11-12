@@ -146,3 +146,49 @@ fn a_corrupt_zip_is_rejected_with_a_readable_error() {
     let e = save(Kind::Plugins, &root, "b.zip", b"not a zip at all", false).unwrap_err();
     assert!(e.contains("不是有效的 zip"), "{e}");
 }
+
+/// zip bomb：压缩后几十 KB，解压后 64 MB 以上。**按实际解压量记账**，不看中央目录的声明。
+///
+/// 这条以前没有守卫：第 54 轮 e2e 里它是拦住的（`zip 解压后太大（上限 64 MiB）`），
+/// 但代码里两个常量一旦被调大或被删掉，只有真上传一个炸弹才知道。
+#[test]
+fn a_zip_bomb_is_stopped_by_actually_expanding_it() {
+    let dir = tmp("bomb");
+    // 分块写，别在测试里真的拿一块 70MB 的 buffer
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    z.start_file("bomb.js", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    let chunk = vec![0u8; 1024 * 1024];
+    for _ in 0..70 {
+        std::io::Write::write_all(&mut z, &chunk).unwrap();
+    }
+    let bytes = z.finish().unwrap().into_inner();
+    assert!(
+        bytes.len() < 2 * 1024 * 1024,
+        "压缩后应当很小（真炸弹才可怕）：{} 字节",
+        bytes.len()
+    );
+
+    let e = save(Kind::Plugins, &dir, "bomb.zip", &bytes, true).unwrap_err();
+    assert!(e.contains("解压后太大"), "{e}");
+    // 一个字节都不能落盘
+    assert!(!dir.join("bomb.js").exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}
+
+/// 单个文件超过 32 MB：挡的是「一个巨大的合法文件名」。
+#[test]
+fn a_single_huge_file_is_rejected() {
+    let dir = tmp("huge");
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    z.start_file("big.js", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    let chunk = vec![b'x'; 1024 * 1024];
+    for _ in 0..33 {
+        std::io::Write::write_all(&mut z, &chunk).unwrap();
+    }
+    let bytes = z.finish().unwrap().into_inner();
+    let e = save(Kind::Plugins, &dir, "big.zip", &bytes, true).unwrap_err();
+    assert!(e.contains("单个文件太大"), "{e}");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}

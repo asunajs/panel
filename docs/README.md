@@ -69,6 +69,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [logs.md](logs.md) | 日志流水线：脱敏 → SSE + 单消费者队列落库；`run_id` 归属表；顺序不能乱 |
 | [task-state.md](task-state.md) | 任务状态谁说了算：九个字段在热重载 / 重启后的归属、三个坑、实测 |
 | [js-slots.md](js-slots.md) | JS 执行通道：插件与脚本共用的并发上限、满了的行为、派发顺序、读数 |
+| [upload.md](upload.md) | 上传：单文件/zip 的落点与限制、同名覆盖、挡 zip bomb 与路径逃逸（带读数） |
 | [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
 | [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
