@@ -136,3 +136,28 @@ POST outbox/retry → retried:1，counts.failed 0 / pending 1
 顺带确认：重启不会丢待发的行 —— 它们在库里（`done=0`），启动后第一个 tick 就会扫。
 语义是**至少一次**：如果进程恰好在「对端已收到、还没写 done=1」之间被杀，重启后会重发一次。
 外部渠道要能接受重复。
+
+## 面板重启时收尾的那几条运行，也会通知
+
+`kill -9` / 崩溃之后重启，`reap_stale_runs()` 会把还挂在 `status='running'` 的行标成失败
+（错误文案：`面板重启：这次运行没有跑完（进程被杀或崩溃）`），并**发一条通知**：
+
+```text
+标题  面板重启：N 条运行没有跑完
+级别  warn，plugin=panel，run_id=null（这不是某一次运行的失败）
+正文  上一次进程被杀（或崩溃）时还在跑的运行，已按失败收尾。运行记录里筛 status=error 能看是哪些。
+```
+
+只写日志不够：面板是「你不在的时候在跑东西」的地方，被杀掉的那次运行正是最该让人知道的事。
+第二次重启不会重复发（那条记录已经是 `error`，不再被收尾）。
+
+实测（临时面板 8797，`sleep(30000)` 跑到一半 `kill -9`）：
+
+```text
+杀之前   run1 status=running，WAL 173 KB
+kill -9 之后 sqlite3 PRAGMA integrity_check → ok（WAL 自动恢复，没写坏）
+重启后   run1 status=error ended_at=… err=面板重启：这次运行没有跑完（进程被杀或崩溃）
+         通知表 1 条，发件箱 done=1 attempts=1，webhook 收到 1 条
+再重启   通知还是 1 条（不重复）
+任务还能跑（run2 200）
+```

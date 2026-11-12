@@ -91,19 +91,25 @@ async fn main() -> Result<(), String> {
     if let Some(note) = provisioned.note.clone() {
         log.emit("panel", None, Level::Info, note);
     }
+    // 配置做成热快照：界面保存后插件立刻读到新值（旧实现是启动时快照，要重启）。
+    // 提到收尾之前：收尾要发通知，而通知渠道在配置里。
+    let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
     // 上次没跑完的运行记录（进程被杀/崩溃）在这里收尾，别让界面一直显示「运行中」。
     match crate::db::reap_stale_runs(&db).await {
-        Ok(n) if n > 0 => log.emit(
-            "panel",
-            None,
-            Level::Warn,
-            format!("有 {n} 条运行记录上次没跑完（进程被杀或崩溃），已标成失败"),
-        ),
+        Ok(n) if n > 0 => {
+            log.emit(
+                "panel",
+                None,
+                Level::Warn,
+                format!("有 {n} 条运行记录上次没跑完（进程被杀或崩溃），已标成失败"),
+            );
+            // 也发一条通知：面板是「你不在的时候在跑东西」的地方，被杀掉的那次正是
+            // 最该让人知道的事 —— 只写进日志等于默认你会去翻。
+            crate::notify::record(&db, &log, &config, crate::db::stale_notice(n)).await;
+        }
         Ok(_) => {}
         Err(e) => log.emit("panel", None, Level::Warn, format!("收尾未完成的运行记录失败: {e}")),
     }
-    // 配置做成热快照：界面保存后插件立刻读到新值（旧实现是启动时快照，要重启）。
-    let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone());
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。

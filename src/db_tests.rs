@@ -60,3 +60,16 @@ async fn reap_is_a_noop_when_nothing_is_running() {
     // 再来一次也不出错（幂等）
     assert_eq!(reap_stale_runs(&db).await.unwrap(), 0);
 }
+
+/// 收尾通知的文案：要能一眼看出「几条」「为什么」「去哪看」。
+#[test]
+fn stale_notice_says_how_many_and_where_to_look() {
+    let n = stale_notice(3);
+    assert_eq!(n.level, "warn");
+    assert_eq!(n.plugin, "panel");
+    assert!(n.run_id.is_none(), "这不是某一次运行的失败，别挂 run_id");
+    assert!(n.task.is_none());
+    assert!(n.title.contains('3'), "标题要带条数: {}", n.title);
+    assert!(n.title.contains("没有跑完"), "{}", n.title);
+    assert!(n.body.contains("status=error"), "正文要说去哪看: {}", n.body);
+}

@@ -203,6 +203,22 @@ pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<()
 /// `runs` 先写一行 `status='running'`，跑完再回填 `ended_at` + 结果。面板被 kill -9 /
 /// 断电时那行就永远停在 running：界面会一直显示「运行中」，而且永远不会有人来收尾。
 /// 启动时统一标成 error 并写明原因 —— 比留一条假「运行中」诚实。
+/// 「面板重启时收尾了 N 条没跑完的运行」这条通知的内容。
+///
+/// 单独拿出来是为了能测：面板是「你不在的时候在跑东西」的地方，被杀掉的那次运行
+/// 正是最该让人知道的事 —— 只写进日志等于默认有人会去翻。
+pub fn stale_notice(n: usize) -> crate::notify::Notice {
+    crate::notify::Notice {
+        level: "warn",
+        plugin: "panel".to_string(),
+        task: None,
+        run_id: None,
+        title: format!("面板重启：{n} 条运行没有跑完"),
+        body: "上一次进程被杀（或崩溃）时还在跑的运行，已按失败收尾。运行记录里筛 status=error 能看是哪些。"
+            .to_string(),
+    }
+}
+
 pub async fn reap_stale_runs(db: &Db) -> Result<usize, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

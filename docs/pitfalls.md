@@ -156,3 +156,9 @@
     `已停止（插件被重载或卸载）`、日志降成 warn、不发通知、不计熔断。
     守卫：`scheduler_tests.rs::only_a_real_abort_counts_as_cancelled`、
     `web_tests.rs::reloading_during_a_run_stops_it_without_a_failure_notice`。
+
+40. **面板重启收尾「没跑完的运行」时要发通知，不只是写日志**：`kill -9` / 崩溃之后重启，
+    `reap_stale_runs()` 把 `status='running'` 标成 `面板重启：这次运行没有跑完（进程被杀或崩溃）`，
+    以前只写一条 panel warn 日志 —— 而那正是「你不在时出事」最该让人知道的一条。
+    现在同时发通知（`panel重启：N 条运行没有跑完`，level=warn，run_id=null），第二次重启不会重复发。
+    守卫：`db_tests.rs::stale_notice_says_how_many_and_where_to_look`。
