@@ -1214,6 +1214,15 @@ async fn task_schedule(
     body: Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    // 只认 expr 这一个键：{"cron": "@every 10m"} 这种以前会被当成「没有 expr = 撤销覆盖」，
+    // 于是「改计划」看起来成功了、其实什么都没改（第 65 轮实测踩到）。认不出的键直接报错。
+    if let Some(o) = body.as_object() {
+        if let Some(k) = o.keys().find(|k| *k != "expr") {
+            return Err(bad(format!(
+                "只认 expr 这个键（收到 {k}）。改计划请传 {{\"expr\": \"@every 10m\"}}"
+            )));
+        }
+    }
     let expr = match body.get("expr") {
         Some(Value::Null) | None => None,
         Some(Value::String(s)) => {

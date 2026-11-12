@@ -2842,3 +2842,62 @@ async fn config_reload_reads_the_file_and_keeps_the_old_one_when_it_is_broken() 
     let (_, n) = get(&app, "/api/notify").await;
     assert_eq!(n["min_level"], "error", "{n}");
 }
+
+/// 改计划只认 `expr` 这个键。第 65 轮实测踩到：传 `{"cron": "..."}` 时它被当成
+/// 「没有 expr = 撤销覆盖」，接口 200、什么都没改 —— 又是一次「静默忽略参数」。
+#[tokio::test]
+async fn saving_a_schedule_rejects_unknown_keys() {
+    let (app, plugins, _data, _store) = setup_dirs("schedkey").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('t', async () => 1);
+await host.register_cron('t', '@every 30s', 5000, {});
+"#;
+    std::fs::write(plugins.join("p.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/p/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let body = json!({ "cron": "@every 10m" });
+    let (status, out) = send(&app, with_csrf("POST", "/api/tasks/p/t/schedule", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+
+    // 正确的键照常生效
+    let body = json!({ "expr": "@every 10m" });
+    let (status, out) = send(&app, with_csrf("POST", "/api/tasks/p/t/schedule", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = state["tasks"].as_array().unwrap().iter().find(|t| t["name"] == "t").cloned().unwrap();
+    assert_eq!(t["cron"], "@every 10m", "{t}");
+    assert!(t["next_at"].as_i64().unwrap_or(0) > 0, "改了计划要重算下一次: {t}");
+}
+
+/// 暂停的任务不报「下次运行」：`next_at` 给 0，界面显示「—」。
+/// 以前它照旧返回一个未来时刻，「已暂停」旁边挂着未来时间会让人以为它还要跑。
+#[tokio::test]
+async fn a_paused_task_reports_no_next_run() {
+    let (app, plugins, _data, _store) = setup_dirs("schedpause").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('t', async () => 1);
+await host.register_cron('t', '@every 30s', 5000, {});
+"#;
+    std::fs::write(plugins.join("p.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/p/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, state) = get(&app, "/api/state").await;
+    let before = state["tasks"].as_array().unwrap()[0]["next_at"].as_i64().unwrap_or(0);
+    assert!(before > 0, "没暂停时应当有下一次: {state}");
+
+    let (status, _) = send(&app, with_csrf("POST", "/api/tasks/p/t/pause", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, state) = get(&app, "/api/state").await;
+    let t = &state["tasks"].as_array().unwrap()[0];
+    assert_eq!(t["enabled"], false, "{state}");
+    assert_eq!(t["next_at"].as_i64().unwrap_or(-1), 0, "暂停后不该报下次运行: {state}");
+
+    // 恢复之后要重新算，而不是把暂停前那个时刻拿回来
+    let (status, _) = send(&app, with_csrf("POST", "/api/tasks/p/t/resume", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, state) = get(&app, "/api/state").await;
+    let t = &state["tasks"].as_array().unwrap()[0];
+    assert!(t["next_at"].as_i64().unwrap_or(0) > 0, "恢复后要有下一次: {state}");
+}

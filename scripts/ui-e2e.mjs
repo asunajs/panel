@@ -133,6 +133,9 @@ let s = await state();
 let t = s.tasks.find((x) => x.plugin === 'ui-e2e' && x.name === 'tick');
 check('后端 enabled=false', t && t.enabled === false, String(t && t.enabled));
 check('界面状态列显示「已暂停」', /已暂停|暂停中/.test(await statusCell('ui-e2e', 'tick')));
+// 暂停之后「下次运行」要显示 —，不能挂一个未来时刻（会让人以为它还要跑）
+const nextCell = await ev("(() => { const all = [...document.querySelectorAll('#tasks-body tr')]; const tr = all.find(x => { const c = x.querySelectorAll('td'); return c.length > 1 && c[0].textContent.trim() === 'ui-e2e' && c[1].textContent.includes('tick'); }); return tr ? tr.querySelectorAll('td')[4].textContent.trim() : 'no-row'; })()");
+check('暂停后「下次运行」显示 —', nextCell === '—', nextCell);
 
 // 恢复
 check('点「恢复」', (await clickRowButton(i + 1, '恢复')) === 'clicked');

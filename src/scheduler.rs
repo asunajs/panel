@@ -1156,7 +1156,12 @@ impl Inner {
                 manual: t.schedule.is_none(),
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
-                next_at: t.next_fire.timestamp_millis(),
+                // 暂停的任务不报「下次运行」：界面上「已暂停」旁边挂一个未来时间只会让人以为它要跑。
+                next_at: if t.enabled {
+                    t.next_fire.timestamp_millis()
+                } else {
+                    0
+                },
                 tripped: t.tripped,
                 trips: t.trips,
                 in_flight: t.in_flight,

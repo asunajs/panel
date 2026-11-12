@@ -218,3 +218,10 @@
     但 `new Promise(r => setTimeout(r, 4000))` 会**跑满 4 秒并记 `ok`** —— 重载不会打断纯 JS 的等待。
     另：被打断的运行状态是 `cancelled` 而不是 `error`（第 64 轮改的），
     否则界面「只看失败」会把「人点了重载」算成失败。守卫：`reloading_during_a_run_stops_it_without_a_failure_notice`。
+
+51. **「暂停」的旁边挂着一个未来的运行时间**：`/api/state` 的 `next_at` 以前不看 `enabled`，
+   暂停的任务照样返回一个未来时刻，界面上「已暂停」+「下次运行 19:52」并列 —— 看着像它还要跑。
+   现在暂停时给 0，界面显示「—」。守卫：`a_paused_task_reports_no_next_run`。
+52. **改计划的请求体只认 `expr`**：传 `{"cron": "..."}` 会被当成「没有 expr = 撤销覆盖」，
+   接口 200、什么都没改（第 65 轮实测）。认不出的键要报错，别静默当默认值。
+   守卫：`saving_a_schedule_rejects_unknown_keys`。

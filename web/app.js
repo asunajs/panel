@@ -646,7 +646,8 @@ function renderTasks() {
     }
     tr.append(cronCell);
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
-    tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
+    // 暂停的任务不显示「下次运行」：'已暂停' 旁边挂一个未来时间会让人以为它还要跑。
+    tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (!t.enabled ? '—' : fmtDateTime(t.next_at))));
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
     st.append(taskPill(t));
