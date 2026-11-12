@@ -2343,9 +2343,15 @@ async fn api_backup(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
         Ok(t) => t,
         Err(_) => st.config.snapshot().as_ref().to_string(),
     };
-    let v = crate::backup::collect(&st.plugins_dir, &st.scripts, config_text)
+    let mut v = crate::backup::collect(&st.plugins_dir, &st.scripts, config_text)
         .await
         .map_err(internal)?;
+    // 界面导出的永远是「不带数据库」那份，那就明说 —— 让人知道运行历史和任务状态没在里面。
+    // 要带库就走 CLI：`panel-llrt backup --out x --with-db`（库不能在线被自己换掉）。
+    v["db_included"] = json!(false);
+    v["db_bytes"] = json!(std::fs::metadata(st.data_dir.join("panel.db"))
+        .map(|m| m.len())
+        .unwrap_or(0));
     Ok(Json(v))
 }
 
