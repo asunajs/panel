@@ -38,7 +38,7 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
 | `set_job_paused/blockers/summary/schedule` | 无 | v1 忽略（记 debug）；需要的话后面加 op |
 | `ws_open/send/recv/close` | **没有**（LLRT 没有 WebSocket 模块） | v1 不做 → live 插件的听播/抽奖跑不了，要单独评估（tokio-tungstenite 或自写帧） |
 | `smtp_send` | 没有 | v1 不做（插件里只在推送通道用到） |
-| `tls: 'native'`（legacy CBC 套件） | LLRT 用 rustls | 见 [llrt-spike.md](llrt-spike.md) §7 未决；live 的主机可能连不上 |
+| `tls: 'native'`（legacy CBC 套件） | LLRT 用 rustls | 见 [llrt-spike-notes.md](llrt-spike-notes.md) §7 未决；live 的主机可能连不上 |
 
 ## 3. 同步桥（新增能力，不是兼容垫片）
 

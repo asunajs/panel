@@ -195,7 +195,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 
 | 问题 | 怎么测 |
 |---|---|
-| 央视频需要的 **CBC+SHA1  legacy TLS** LLRT 能不能谈 | 见 [llrt-spike.md](llrt-spike.md) §7。`tls-openssl` 走真 OpenSSL，但 feature 转发有缺口，要实编一次 |
+| 央视频需要的 **CBC+SHA1  legacy TLS** LLRT 能不能谈 | 见 [llrt-spike-notes.md](llrt-spike-notes.md) §7。`tls-openssl` 走真 OpenSSL，但 feature 转发有缺口，要实编一次 |
 | `structuredClone` 要不要补 | 先查真实插件用量，再决定 |
 | CPU 密集插件占住 worker 时的排队行为 | 本机负载 14~28，读数无法归因；要在空载机器上重跑（判据 6） |
 | 内存不还给 OS（drop 全部 runtime 后仍留 21.3 MiB） | ❓ 是 QuickJS 分配器还是 Rust 分配器缓存；测法：`malloc_zone_pressure_relief` 前后对比 |

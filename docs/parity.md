@@ -75,7 +75,7 @@
 | 旧 | 我们 |
 |---|---|
 | 多运行时（`runtimes.rs`：Node / Bun；内嵌 QuickJS 已在他们那版移除） | 内嵌 LLRT（QuickJS-ng），单运行时 |
-| 外部进程插件（`extproc.rs`，native 逃生口） | ❌ |
+| 外部进程插件（`extproc.rs`，native 逃生口） | ❌ **明确不做** | 基线是 1592 行 Rust + 1760 行子进程侧 JS 的第二套插件运行时（双通道 + 杀进程即预算）。判断不做的理由、改判条件、以及真要做的形状都写在 [extproc.md](extproc.md)。替代：`host.fetch` 外置 / 调度器长任务 / 引擎试跑 |
 | 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
 | 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；我们没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
 | 时区（`tz.rs`） | 本地时（chrono `Local`） |

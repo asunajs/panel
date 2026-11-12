@@ -16,6 +16,7 @@ SSRF 靶子是**面板自己的回环** `/healthz`。**不碰任何真实账号�
 | 增量构建 | **36.33s**，**零 warning** | `cargo build` |
 | 全量测试 | **106 passed; 0 failed**（原 82 + `auth` 21 条 + `web` 2 条 + `engine` 1 条） | `cargo test` |
 | unsafe 预算 | `ok: unsafe 例外 0 处（期望 0），lint 仍是 deny`，rc=0 | `bash scripts/check-unsafe-budget.sh` |
+| 文档守卫 | `ok: 17 篇文档，内链全通、都在 300 行内`，rc=0（三个反向例都验过：断链 / 超 300 行 / 无一级标题） | `bash scripts/check-docs.sh` |
 
 `src/` 零 `unsafe`（`grep -rnE '\bunsafe\b' src/` 无命中）。守卫三个方向都验过：
 绿（0 处）、红（注入一处行首 allow）、红（`Cargo.toml` lint 改 `warn`），验完还原。

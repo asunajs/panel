@@ -94,7 +94,7 @@
 | ~~config 体积上限~~ | **已补**：默认 4 MiB + `PANEL_CONFIG_MAX_BYTES`；超限拒绝启动。基线那个 64 KiB 是任务参数上限，不是配置 | 见 verification.md §12 |
 | 惰性回收 idle eviction | 不在切片 | 后续 |
 | 市场/推送/备份/自更新/脚本任务/上传/完整鉴权/外部运行时/UI iframe 隔离源 | 明确不做 | 后续逐子系统移植 |
-| 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 llrt-spike.md §7 |
+| 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 llrt-spike-notes.md §7 |
 | `structuredClone` 缺失 | ❓ 绕过 Vm 的代价 | 先查真实插件用量再决定补不补 |
 
 **现有插件（含央视频）不能原样跑**，要按 async host-api 改写 —— 这是用户已接受的重写代价，不当阻断项。
