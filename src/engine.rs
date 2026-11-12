@@ -309,6 +309,18 @@ impl Plugin {
     }
 
     /// 同 `dispatch`，但把 handler 的**返回值**带出来 —— 插件 WebUI 靠它回响应。
+    /// 读一次 JS 堆占用（QuickJS 的 \`malloc_size\`）。
+    ///
+    /// **不等**：插件在跑的时候 runtime 锁在 \`idle()\` 手里（architecture.md §2.1），
+    /// 等它等于让仪表盘跟着一个 20 分钟的长任务一起卡住。所以只给一个很短的等待上限，
+    /// 拿不到就返回 None —— 界面上说清楚「这次没取到」，而不是报个假的 0。
+    pub async fn memory_usage(&self, wait: std::time::Duration) -> Option<u64> {
+        match tokio::time::timeout(wait, self.rt.memory_usage()).await {
+            Ok(m) => Some(m.malloc_size.max(0) as u64),
+            Err(_) => None,
+        }
+    }
+
     pub async fn call_json(
         &self,
         handler: &str,

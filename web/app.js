@@ -302,7 +302,15 @@ function renderCards() {
     card('运行时长', humanMs(s.uptime_ms), '自进程启动'),
     card('调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描'),
     card('心跳', s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1), '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms'),
-    card('JS 内存', humanBytes(s.js_memory_bytes), s.js_memory_bytes === null ? '未接：取它要等插件空闲' : '各 runtime 合计'),
+    card(
+      'JS 内存',
+      humanBytes(s.js_memory_bytes),
+      s.js_memory_bytes === null
+        ? (s.js_memory_total ? '这次没取到：插件正忙，runtime 锁在它手里' : '还没有已加载的插件')
+        : s.js_memory_measured < s.js_memory_total
+          ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
+          : '各 runtime 合计',
+    ),
   );
   taskBox.append(
     card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),

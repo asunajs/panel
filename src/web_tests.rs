@@ -158,7 +158,18 @@ async fn state_and_healthz_answer_on_an_empty_panel() {
     assert!(stats["heartbeat_ms"].is_f64() || stats["heartbeat_ms"].is_u64(), "{stats}");
     assert!(stats["budget_kills"].is_u64(), "{stats}");
     assert!(stats["default_budget_ms"].is_u64(), "{stats}");
-    assert_eq!(stats["js_memory_bytes"], Value::Null, "内存没接就不能报 0");
+    // JS 内存：量到就是数字，量不到就是 null —— **不能是 0**（0 会被当成真的测出来了）。
+    assert!(
+        stats["js_memory_bytes"].is_null() || stats["js_memory_bytes"].is_u64(),
+        "{stats}"
+    );
+    assert!(stats["js_memory_measured"].is_u64(), "{stats}");
+    assert!(stats["js_memory_total"].is_u64(), "{stats}");
+    assert_eq!(
+        stats["js_memory_bytes"].is_null(),
+        stats["js_memory_measured"].as_u64().unwrap() == 0,
+        "量到 0 个就必须是 null，量到了就不能是 null: {stats}"
+    );
 
     let resp = app.oneshot(Request::get("/healthz").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

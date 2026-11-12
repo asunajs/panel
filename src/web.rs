@@ -327,13 +327,20 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let plugins = st.sched.plugins().await.map_err(internal)?;
     let tasks = st.sched.tasks().await.map_err(internal)?;
+    // JS 内存要拿各 runtime 的锁：给 2ms 的耐心，插件正忙就跳过它。
+    // 7 个插件最坏 14ms，而且测量在独立任务里跑（见 scheduler 的 Cmd::Memory）。
+    let (js_mem, measured, total) = st.sched.memory(std::time::Duration::from_millis(2)).await;
+    let mut stats = crate::stats::stats().snapshot();
+    // 一个都没量到就是 null，不报 0（0 会被当成真的测出来了）。
+    stats["js_memory_bytes"] = if measured == 0 { Value::Null } else { json!(js_mem) };
+    stats["js_memory_measured"] = json!(measured);
+    stats["js_memory_total"] = json!(total);
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "auth": st.auth.is_some(),
         "plugins": plugins,
         "tasks": tasks,
-        // 仪表盘读数：全是宿主侧计数，不碰插件 runtime（拿它的锁会被 idle 挡住）。
-        "stats": crate::stats::stats().snapshot(),
+        "stats": stats,
     })))
 }
 

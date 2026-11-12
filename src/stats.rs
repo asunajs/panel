@@ -1,9 +1,8 @@
 //! 进程级只读计数，只给仪表盘用。
 //!
-//! 为什么不做「JS 内存」：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，而 `idle()`
-//! 全程持锁（architecture.md §2.1）—— 插件跑着的时候去取，采样任务会一直等到它跑完，
-//! 一个 20 分钟的长任务就能把仪表盘冻住。要做得单独起采样任务 + 弱引用，属独立小系统，
-//! 本轮不接，前端显示「—」并标注原因。
+//! 「JS 内存」**不在这里**：它要拿各插件 runtime 的锁，而这个模块是纯计数、没有
+//! 调度器的句柄。真实读数由 \`Scheduler::memory()\` 量出来、在 \`/api/state\` 里盖上去
+//! （见 \`web::api_state\`）。这里留的 null 是「没量到」的默认值，不是「不支持」。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -55,7 +54,7 @@ impl Stats {
             "budget_kills": self.budget_kills.load(Ordering::Relaxed),
             "default_budget_ms": crate::scheduler::DEFAULT_BUDGET_MS,
             "max_budget_ms": crate::scheduler::MAX_BUDGET_MS,
-            // 明确写成 null 而不是 0：没接就是没接，别在界面上假装是 0 KB。
+            // 默认 null（没量到），/api/state 会用量到的值覆盖它。
             "js_memory_bytes": serde_json::Value::Null,
         })
     }

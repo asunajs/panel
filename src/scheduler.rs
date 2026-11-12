@@ -268,6 +268,11 @@ pub enum Cmd {
         plugin: String,
         reply: oneshot::Sender<bool>,
     },
+    /// 各 runtime 的 JS 堆占用。回 (字节合计, 取到的个数, 插件总数)。
+    Memory {
+        wait_ms: u64,
+        reply: oneshot::Sender<(u64, usize, usize)>,
+    },
     /// 停这个插件**当前在途的那一次** invocation。纯 Rust 置位，不碰 JS 锁。
     Stop {
         plugin: String,
@@ -353,6 +358,25 @@ impl Scheduler {
             })
             .map_err(|e| e.to_string())?;
         rx.await.map_err(|e| e.to_string())?
+    }
+
+    /// 量一次 JS 堆占用：\`(字节合计, 取到的个数, 插件总数)\`。
+    ///
+    /// 取不到的（插件正忙，runtime 锁被 idle() 拿着）不计入合计，个数也单独回 ——
+    /// 界面上要能说「7 个里量到 5 个」，而不是把 5 个的和当成全部。
+    pub async fn memory(&self, wait: std::time::Duration) -> (u64, usize, usize) {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(Cmd::Memory {
+                wait_ms: wait.as_millis().max(1) as u64,
+                reply: tx,
+            })
+            .is_err()
+        {
+            return (0, 0, 0);
+        }
+        rx.await.unwrap_or((0, 0, 0))
     }
 
     /// 这个插件是否自己处理 `/plugins/<name>/*` 的路由。
@@ -577,6 +601,25 @@ impl Inner {
                     let out = catch_engine_panic(p.call_json(&handler, &evt, budget_ms)).await;
                     let _ = reply.send(out);
                     let _ = tx.send(Cmd::WebDone { plugin });
+                });
+            }
+            Cmd::Memory { wait_ms, reply } => {
+                // 每个插件量一次要拿它的 runtime 锁；放在 actor 循环里 await 会把这个
+                // 循环钉住（最坏 N × wait）。所以克隆 Arc 出去量，量完再回信。
+                let plugins: Vec<std::sync::Arc<Plugin>> =
+                    self.plugins.values().map(|l| l.plugin.clone()).collect();
+                let total = plugins.len();
+                tokio::spawn(async move {
+                    let wait = std::time::Duration::from_millis(wait_ms);
+                    let mut sum = 0u64;
+                    let mut got = 0usize;
+                    for p in plugins {
+                        if let Some(bytes) = p.memory_usage(wait).await {
+                            sum += bytes;
+                            got += 1;
+                        }
+                    }
+                    let _ = reply.send((sum, got, total));
                 });
             }
             Cmd::HasWeb { plugin, reply } => {
