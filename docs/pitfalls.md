@@ -162,3 +162,8 @@
     以前只写一条 panel warn 日志 —— 而那正是「你不在时出事」最该让人知道的一条。
     现在同时发通知（`panel重启：N 条运行没有跑完`，level=warn，run_id=null），第二次重启不会重复发。
     守卫：`db_tests.rs::stale_notice_says_how_many_and_where_to_look`。
+
+41. **接口里写死的参数会让调用方以为生效**：`POST /api/scripts` 的 handler 里 `save(..., None, ...)`
+    把 `cron` 写死成 None，调用方传 `cron` 被**静默忽略**（建出来是手动脚本）。和第 36 轮 `lead_ms`
+    静默截断是同一类：参数进了门却没生效，日志里一个字都没有。现在 `NewScript` 接住 `cron`/`budget_ms`。
+    守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`。

@@ -2087,6 +2087,12 @@ struct NewScript {
     name: String,
     #[serde(default)]
     source: Option<String>,
+    /// 可选：创建时就带上计划（省得「先建再改」两趟）。
+    #[serde(default)]
+    cron: Option<String>,
+    /// 可选：预算，默认 DEFAULT_BUDGET_MS。
+    #[serde(default)]
+    budget_ms: Option<u64>,
 }
 
 fn script_template(name: &str) -> String {
@@ -2116,13 +2122,15 @@ async fn script_create(
         return Err(bad(format!("脚本 {} 已存在", body.name)));
     }
     let source = body.source.unwrap_or_else(|| script_template(&body.name));
+    // 以前这里写死 `cron: None`：调用方传了 `cron` 会被**静默忽略**（建出来是手动脚本）。
+    // 静默忽略参数是最难查的一类问题（第 36 轮 lead_ms 也是这个毛病），所以现在接住它。
     let out = st
         .scripts
         .save(
             &body.name,
             &source,
-            None,
-            crate::scripts::DEFAULT_BUDGET_MS,
+            body.cron.clone(),
+            body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
             true,
         )
         .await

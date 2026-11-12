@@ -2494,3 +2494,41 @@ async fn reloading_during_a_run_stops_it_without_a_failure_notice() {
         "重载不是任务失败，不该发失败通知: {notes}"
     );
 }
+
+/// 「新建脚本」要能一次带上计划：以前 handler 里写死 `cron: None`，调用方传 cron 被**静默忽略**
+/// （建出来是手动脚本，用户以为排上了）。顺手把「计划写错」也钉住。
+#[tokio::test]
+async fn creating_a_script_can_carry_its_schedule() {
+    let (app, _plugins, _data, _store) = setup_dirs("pscript").await;
+    let src = "import host from 'panel:host';\nawait host.info('x');\n";
+    let body = json!({ "name": "plan", "source": src, "cron": "@every 2h", "budget_ms": 45000 });
+    let (status, out) = send(&app, with_csrf("POST", "/api/scripts", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["cron"], "@every 2h", "计划要真的落下去: {out}");
+    assert_eq!(out["budget_ms"], 45000, "预算也要接住: {out}");
+    assert!(out["next_at"].as_i64().unwrap_or(0) > 0, "有计划的脚本该算出下一次: {out}");
+
+    // 不传 cron：手动脚本
+    let body = json!({ "name": "manual", "source": src });
+    let (status, out) = send(&app, with_csrf("POST", "/api/scripts", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert!(out["cron"].is_null(), "不给计划就是手动: {out}");
+    assert!(out["next_at"].is_null(), "{out}");
+
+    // 计划写错：400 说清是表达式的问题，脚本不该被建出来
+    let body = json!({ "name": "bad", "source": src, "cron": "@every 不是时间" });
+    let (status, out) = send(&app, with_csrf("POST", "/api/scripts", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    // 错误响应是纯文本（send 只解析 JSON，所以这里拿到 null）—— 文案不在这里断言
+
+    let (_, list) = get(&app, "/api/scripts").await;
+    let names: Vec<String> = list["scripts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.contains(&"plan".to_string()));
+    assert!(names.contains(&"manual".to_string()));
+    assert!(!names.contains(&"bad".to_string()), "写错计划的不该建出来: {names:?}");
+}

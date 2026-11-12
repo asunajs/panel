@@ -121,3 +121,20 @@ status=error  error=脚本不能注册任务：请用「计划」字段排程，
 6 | 1 | @script | 脚本干完了
 7 | 1 | @script | 脚本 slow 完成（2512ms）
 ```
+
+## 实测：CRUD、收编、删除（2026-11-12，临时面板 8797）
+
+| 动作 | 读数 |
+|---|---|
+| `POST /api/scripts` 带 `cron`/`budget_ms` | `cron=@every 2h budget=45000 next_at=…`（创建即排上） |
+| 不带 `cron` | `cron=null next_at=null`（手动脚本） |
+| `cron` 写错 | `400 调度表达式无效`，脚本**不会**被建出来 |
+| 连跑两次 | `runs` 里 2 条（`plugin=@script task=a1`） |
+| 手放一个 `.js` 进目录 → 重启 | 收编一次，列表多一个 `handmade`；**再重启不重复**（收编日志只 1 条） |
+| 删脚本 | 列表里没了、文件没了、`trash/script-a1-<ts>.js` 留了底；**历史 2 条运行还在** |
+
+### 第 53 轮修的一处「静默忽略参数」
+
+`POST /api/scripts` 以前 handler 里写死 `cron: None`：调用方传了 `cron` 会被**静默忽略**
+（建出来是手动脚本，用户以为排上了）。现在 `NewScript` 接住 `cron` 和 `budget_ms` 并原样交给 `save`。
+守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`（带计划 / 不带计划 / 计划写错三条）。
