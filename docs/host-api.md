@@ -103,7 +103,7 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 ```js
 import { panel } from 'panel:host';
 
-panel.version();          // "0.1.0" —— 正在跑的面板版本
+panel.version();          // "0.4.0" —— 正在跑的面板版本
 panel.atLeast('0.3.0');   // true / false —— 够不够这个版本
 ```
 
@@ -129,7 +129,7 @@ if (panel.atLeast('0.3.0')) {
 
 ```text
 读数（2026-11-12，真面板）
-  version=0.1.0
+  version=0.4.0
   atLeast 0.0.1 = true    atLeast 0.3.0 = false    atLeast v0.1 = true
   非法 → "nope" 不是合法版本号（要 semver，例如 "0.3.0"）: unexpected character 'n'
 ```
@@ -501,7 +501,7 @@ curl localhost:8787/plugins/demo/api/ping?x=1                          # 插件�
 
 ```text
 probe logs             = ok                      四级日志（log/info/warn/error）都进库
-probe panel_version    = 0.1.0                   panel_at_least('0.1.0') = true
+probe panel_version    = 0.4.0                   panel_at_least('0.1.0') = true
 probe config_keys      = []                      没有 config.json 时是空对象，不报错
 probe rows_async       = {rows:[{c:2}]}          sqlite_exec/query 异步版
 probe rows_sync        = {rows:[{c:2}]}          sqlite_exec_sync/query_sync 同步版

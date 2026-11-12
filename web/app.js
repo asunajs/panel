@@ -254,6 +254,54 @@ async function api(path, opt = {}) {
   return ct.includes('json') ? resp.json() : resp.text();
 }
 
+/** 首次运行：还没有口令凭据时，让用户当场设一个（第 87 轮）。
+ *
+ * 为什么要有：面板没凭据时是「谁打开都能用」，但界面上只有一行日志说这事 —— 用户看不见。
+ * 设完**立即生效并当场登录**（服务端已经把 auth 换掉并发好了会话票），不用重启。
+ * 「先不设」要留着：本地开发就是图快，强迫设置会把人挡在门外。
+ */
+function showFirstRun(show) {
+  // 注意别和「一个插件都没有时的引导」（也用了 first-run）撞 id —— 撞了就会互相抢 class。
+  $('setup-gate').classList.toggle('hidden', !show);
+  if (show) setTimeout(() => $('fu-token').focus(), 30);
+}
+
+async function submitFirstRun(body) {
+  const out = $('fu-out');
+  clear(out);
+  $('fu-hint').textContent = '';
+  $('fu-hint').className = 'hint';
+  try {
+    const r = await api('/api/setup', { method: 'POST', body });
+    if (r.token) {
+      // 面板生成的：只显示这一次，必须让人抄下来再继续
+      out.append(el('p', 'hint', '这是面板生成的口令，只显示这一次，请先抄下来：'));
+      out.append(el('code', 'setup-token', r.token));
+      const go = el('button', 'btn btn-primary', '抄好了，继续');
+      go.type = 'button';
+      go.addEventListener('click', async () => {
+        showFirstRun(false);
+        state.auth = true;
+        state.loaded = true;
+        await refresh();
+        await loadDashboard();
+      });
+      out.append(go);
+      return;
+    }
+    // 不 reload：服务端已经把凭据换掉、会话票也发下来了，直接收浮层 + 重跑一遍刷新即可。
+    // （reload 会和「页面还没导航完就读 DOM」抢时间，实测会看到浮层还在的那一帧。）
+    showFirstRun(false);
+    state.auth = true;
+    state.loaded = true;
+    toast('口令已生效，浏览器这边已经登录');
+    await refresh();
+    await loadDashboard();
+  } catch (e) {
+    $('fu-hint').textContent = e.message || '设置失败';
+    $('fu-hint').className = 'hint hint-err';
+  }
+}
 function showGate(show, hint) {
   $('gate').classList.toggle('hidden', !show);
   $('gate-hint').textContent = hint || '';
@@ -1640,11 +1688,9 @@ function setupBox() {
       } else {
         out.append(el('p', 'settings-note', '令牌已写入 auth.json（明文没有落盘）。'));
       }
-      const restart = el('button', 'btn btn-primary btn-sm', '重启生效');
-      restart.type = 'button';
-      restart.addEventListener('click', restartPanel);
-      out.append(restart);
-      out.append(el('p', 'settings-note', '重启后浏览器会要求输入令牌；登进去之后就不用再输了（30 天会话票）。'));
+      // 第 87 轮起**立即生效**：服务端换掉了内存里的凭据并给这个浏览器发了会话票，不用重启。
+      out.append(el('p', 'settings-note', '**已经生效**：别的设备下次打开会要求输入令牌；这个浏览器已经登录（30 天会话票）。'));
+      state.auth = true;
     } catch (e) {
       out.append(el('p', 'hint-err', e.message || '设置失败'));
     }
@@ -2514,6 +2560,20 @@ function bind() {
     clearTimeout(runsSearchTimer);
     runsSearchTimer = setTimeout(() => loadRuns(true), 250);
   }, renderRuns);
+  $('fu-ok').addEventListener('click', () => {
+    const v = $('fu-token').value.trim();
+    if (v.length < 8) { toast('至少 8 个字符'); $('fu-token').focus(); return; }
+    submitFirstRun({ token: v });
+  });
+  $('fu-token').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); $('fu-ok').click(); }
+  });
+  $('fu-gen').addEventListener('click', () => submitFirstRun({ generate: true }));
+  $('fu-skip').addEventListener('click', () => {
+    localStorage.setItem('panel.skipSetup', '1');
+    showFirstRun(false);
+    toast('好，先在本机用。想设口令：设置 → 安全');
+  });
   $('runs-export').addEventListener('click', () => exportCsv('runs'));
   $('log-export').addEventListener('click', () => exportCsv('logs'));
   $('runs-only-failed').addEventListener('change', (ev) => {
@@ -2705,6 +2765,11 @@ async function main() {
   await migrateLegacyToken();
   setView(location.hash.slice(1) || 'dashboard');
   await refresh();
+  // 只在「确实读回了 state 且确实没有口令」时问。读不到 state（401 = 面板有口令但还没登录）
+  // 必须走 #gate，否则两个浮层会同时出现（第 87 轮实测撞到）。
+  if (state.loaded && state.auth === false && !localStorage.getItem('panel.skipSetup')) {
+    showFirstRun(true);
+  }
   await loadDashboard();
   if (state.view === 'runs') await loadRuns();
   if (state.view === 'logs') await backfillLogs();

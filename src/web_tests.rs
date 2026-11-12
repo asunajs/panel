@@ -31,7 +31,7 @@ async fn setup() -> (Router, Db) {
         config: crate::config_store::ConfigStore::new(&json!({})),
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: None,
+        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
     };
     (router(st), db)
 }
@@ -87,7 +87,7 @@ async fn setup_authed() -> Router {
         config: store,
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
     })
 }
 /// 带响应头的版本：登录要读 Set-Cookie。
@@ -297,7 +297,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
     });
 
     let (status, _) = get(&app, "/api/state").await;
@@ -361,7 +361,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         config: store,
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
     });
     let req = Request::get("/api/state")
         .header("host", "evil.example.com")
@@ -446,7 +446,7 @@ async fn setup_core(
         config: store.clone(),
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: None,
+        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
     };
     (router(st), plugins, data, store, db)
 }
@@ -1559,7 +1559,9 @@ async fn setup_writes_auth_json_once_and_never_the_plaintext() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let token = body["token"].as_str().unwrap_or_default().to_string();
     assert_eq!(token.len(), 43, "32 字节 base64url 应当是 43 字符: {token}");
-    assert_eq!(body["restart_required"], true);
+    // 第 87 轮：写完就生效，不用重启；同时给浏览器发一张会话票
+    assert_eq!(body["restart_required"], false);
+    assert_eq!(body["applied"], true);
 
     // 文件写出来了，而且**没有明文**
     let path = data.join("auth.json");
@@ -3098,4 +3100,59 @@ fn plugin_group_by_name_prefix() {
     assert_eq!(crate::plugin_group("panel-jobs"), "panel");
     // 名字以分隔符开头时不要给出空组名
     assert_eq!(crate::plugin_group("-x"), "");
+}
+
+/// 第 87 轮：`/api/setup` 写完**立即生效**（不用重启），并给浏览器发一张会话票。
+#[tokio::test]
+async fn setup_takes_effect_immediately_and_logs_this_browser_in() {
+    let (app, _plugins, _data, _store) = setup_dirs("setup-live").await;
+
+    // 设之前：无鉴权，能直接读 state
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "还没设口令时应当能读");
+
+    // 设一个
+    let resp = app
+        .clone()
+        .oneshot(with_csrf(
+            "POST",
+            "/api/setup",
+            Some(json!({ "token": "hello-panel-2026" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // 响应里带 Set-Cookie：浏览器当场就登录了，不用再输一遍
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(cookie.contains("panel_session="), "{cookie}");
+
+    // 设之后：同一个 router（内存里的凭据已经换掉）不带令牌 → 401
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "设完就该要令牌了，不用重启");
+
+    // 带上那张会话票就能读（说明票是有效的，不是随便发的）
+    let only = cookie.split(';').next().unwrap_or_default().to_string();
+    let resp = app
+        .oneshot(
+            Request::get("/api/state")
+                .header("cookie", only)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "会话票要能直接进");
 }

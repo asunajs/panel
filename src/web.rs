@@ -61,7 +61,23 @@ pub struct AppState {
     pub load_errors: LoadErrors,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
-    pub auth: Option<Arc<crate::auth::Auth>>,
+    /// 令牌材料：**可热替换**（第 87 轮）。
+    ///
+    /// 原来它是只读的 `Option`，于是 `/api/setup` 写完 auth.json 只能提示「重启生效」——
+    /// 用户设完口令被挡在门外，还得自己重启一次。现在设完立即生效并当场登录。
+    pub auth: std::sync::Arc<std::sync::RwLock<Option<Arc<crate::auth::Auth>>>>,
+}
+
+impl AppState {
+    /// 当前令牌材料（没有就是 `None` = 不鉴权）。
+    ///
+    /// 拿到的是一份 `Arc` 快照：判完就一直用它，中途被 `/api/setup` 换掉也不会自相矛盾。
+    pub fn auth(&self) -> Option<Arc<crate::auth::Auth>> {
+        self.auth
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
 }
 
 /// 加载失败的插件（`名字 -> 原因`）。启动加载和「启用」失败都往里写，成功就删掉。
@@ -529,8 +545,8 @@ struct SetupBody {
 /// 只在「还没有任何凭据」时可用（`st.auth.is_none()`），而那种部署本来就只绑回环、
 /// 只认回环 Host（见 require_token 的降级分支），所以这个口子的暴露面和面板首页一样。
 ///
-/// 写完 `auth.json` **不自己重启**：把令牌回给前端显示一次，由人抄下来再点「重启生效」。
-/// 自动重启会让人在「令牌已经生效、但没抄下来」的窗口里丢掉面板。
+/// 写完 `auth.json` **立刻生效并当场发会话票**（第 87 轮）：设完口令就能用，不用重启。
+/// 面板生成的那种会回显一次给人抄（人自己给的就不回显，免得响应里留痕）。
 async fn api_setup(
     State(st): State<AppState>,
     h: HeaderMap,
@@ -539,7 +555,7 @@ async fn api_setup(
     guard_write(&h)?;
     // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
     // 但再写一次会把用户刚抄下来的令牌**静默换掉**。
-    if st.auth.is_some() || st.data_dir.join(crate::auth::FILE).exists() {
+    if st.auth().is_some() || st.data_dir.join(crate::auth::FILE).exists() {
         return Err((
             StatusCode::CONFLICT,
             "这个面板已经设置过令牌了。要换令牌：停掉面板，设 PANEL_TOKEN 后启动（或删掉 data/auth.json 再来一次）\n"
@@ -569,22 +585,40 @@ async fn api_setup(
     let path = crate::auth::write_new(&st.data_dir, &token).map_err(|e| {
         internal(format!("写 auth.json 失败: {e}"))
     })?;
+    // 写完**立刻生效**（第 87 轮）：从刚写的文件读回材料，换掉内存里那一份，
+    // 再给浏览器发一张会话票 —— 否则用户设完口令就被挡在门外，还得自己去重启。
+    // 读回文件（而不是用 Auth::derive(&token) 重新派生）：盐要和磁盘上一致，
+    // 不然重启后这张会话票会失效。
+    let applied = crate::auth::provision(&st.data_dir, None).map_err(internal)?;
+    let Some(auth) = applied.auth.map(std::sync::Arc::new) else {
+        return Err(internal("刚写完 auth.json 却读不回来".to_string()));
+    };
+    *st.auth.write().unwrap_or_else(|p| p.into_inner()) = Some(auth.clone());
     st.log.emit(
         "panel",
         None,
         crate::log::Level::Warn,
         format!(
-            "已写入 {}：**重启面板后**开始要求令牌（明文只在内存里过了一次，没有落盘）",
+            "已写入 {}：**从现在起**所有请求都要令牌（明文只在内存里过了一次，没有落盘）",
             path.display()
         ),
     );
-    Ok(Json(json!({
+    let mut resp = Json(json!({
         "ok": true,
         // 只有面板生成的才回显：人给的那份他自己知道，别在响应里留痕
         "token": if generated { Value::String(token) } else { Value::Null },
-        "restart_required": true,
+        // 已经生效了：不用重启，浏览器也已经拿到会话票
+        "restart_required": false,
+        "applied": true,
     }))
-    .into_response())
+    .into_response();
+    if let Ok(v) = HeaderValue::from_str(&session_cookie(
+        &auth.issue_session(now_secs()),
+        crate::auth::SESSION_TTL_SECS,
+    )) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    Ok(resp)
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -601,7 +635,7 @@ async fn api_login(
     State(st): State<AppState>,
     JsonBody(b): JsonBody<LoginBody>,
 ) -> Result<Response, ApiError> {
-    let Some(auth) = st.auth.clone() else {
+    let Some(auth) = st.auth() else {
         // 没配令牌就没有「登录」这回事，直接告诉前端「不需要会话」
         return Ok(Json(json!({ "ok": true, "session": false })).into_response());
     };
@@ -687,7 +721,7 @@ async fn require_token(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(auth) = st.auth.clone() else {
+    let Some(auth) = st.auth() else {
         // 无鉴权时唯一的边界是 Host 头：浏览器发起的 DNS rebinding 会把 Host 设成
         // 攻击者域名而连到 127.0.0.1，`x-panel: 1` 在同源下随便加，挡不住它。
         if !host_allowed(req.headers()) {
@@ -934,7 +968,7 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
     stats["js_memory_total"] = json!(total);
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "auth": st.auth.is_some(),
+        "auth": st.auth().is_some(),
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
         "disabled": crate::db::plugin_disabled_names(&st.db).await,

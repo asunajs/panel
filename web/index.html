@@ -352,6 +352,23 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
 
     <input id="restore-file" type="file" accept="application/json,.json" hidden />
 
+    <!-- 首次运行：还没有任何口令凭据（第 87 轮）。这不是「登录」，是「设一个」。
+         没设也能用（只绑回环），所以给「先不设」的出口 —— 强迫设置会把本地开发的路堵死。 -->
+    <div class="gate hidden" id="setup-gate">
+      <div class="gate-card">
+        <h2>给面板设一个口令</h2>
+        <p class="muted">现在这个面板谁打开都能用（只绑在本机）。设个口令之后，打开就要输它。</p>
+        <label for="fu-token">口令（至少 8 个字符）</label>
+        <input id="fu-token" type="password" autocomplete="new-password" placeholder="自己设一个，或点右边随机生成" />
+        <div class="gate-actions">
+          <button class="btn btn-primary" id="fu-ok" type="button">设好，开始用</button>
+          <button class="btn" id="fu-gen" type="button">随机生成一个</button>
+          <button class="btn btn-ghost" id="fu-skip" type="button">先不设（仅本机）</button>
+        </div>
+        <div id="fu-out"></div>
+        <p class="hint" id="fu-hint"></p>
+      </div>
+    </div>
     <div class="gate hidden" id="gate">
       <form class="gate-card" id="gate-form">
         <h2>需要面板令牌</h2>

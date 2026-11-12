@@ -177,6 +177,15 @@ async function main() {
   const views = await js("JSON.stringify([...document.querySelectorAll('.nav-item, [data-view]')].length)");
   check('侧栏有导航项', Number(views) >= 5, 'nav 项 ' + views);
 
+  // 首次运行：没有口令凭据时要主动请他设一个（第 87 轮，0.4.0 的「口令初始化」）。
+  // 这个用例的面板本来就没设令牌，正好是首次运行的现场。
+  const setupVisible = await js("!document.getElementById('setup-gate').classList.contains('hidden')");
+  check('没有口令时弹出「设置口令」', setupVisible === true, String(setupVisible));
+  await js("document.getElementById('fu-skip').click()");
+  await sleep(400);
+  const setupHidden = await js("document.getElementById('setup-gate').classList.contains('hidden')");
+  check('点「先不设」后收起，且记住了选择',
+    setupHidden === true && (await js("localStorage.getItem('panel.skipSetup')")) === '1', String(setupHidden));
   // 运行记录：首屏 / 分页 / 筛选 / 搜索 / 排序
   await js("location.hash = '#runs'");
   await sleep(1200);

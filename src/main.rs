@@ -192,7 +192,8 @@ async fn main() -> Result<(), String> {
         data_dir,
         config,
         load_errors: load_errors.clone(),
-        auth: provisioned.auth.map(Arc::new),
+        // 可热替换：`/api/setup` 设完口令当场生效，不用重启（第 87 轮）。
+        auth: Arc::new(std::sync::RwLock::new(provisioned.auth.map(Arc::new))),
     };
     let app = web::router(st);
     let listener = tokio::net::TcpListener::bind(addr)
