@@ -50,6 +50,24 @@ const MIN_SLEEP: Duration = Duration::from_millis(1);
 /// `next_base` 返回 None 的兜底（parse 阶段已挡过，理论上走不到）。
 const FALLBACK_DAYS: i64 = 365;
 
+/// 一圈最多睡这么久。为什么要有上限：`next_fire` 是绝对时刻，机器休眠/被改时钟之后
+/// 那个「还有 3 小时」可能已经不对了。睡一小段就醒来看一眼（一次醒来就是一次 select，
+/// 不做任何 IO），代价可以忽略，换来的是「时间被改」最多 60 秒内被发现。
+const MAX_SLEEP: Duration = Duration::from_secs(60);
+
+/// 系统时间往回跳了超过这个量，就当「时钟被改了」处理好（而不是「任务该跑了」）。
+///
+/// 为什么需要它：调度器的下一次触发时刻是**算好存下来的**绝对时间。时钟往回退一小时，
+/// 那个 `next_fire` 就变成「一小时后」—— 任务会静默停摆一小时，日志里一个字都没有。
+/// 移动端盒子（上电没 RTC、NTP 后校正）很容易撞上；桌面开发永远遇不到。
+const CLOCK_BACK_SLACK_MS: i64 = 10_000;
+
+/// 时间往回跳了吗（超出容忍量的那种）。
+fn clock_went_back(prev: DateTime<Local>, now: DateTime<Local>) -> bool {
+    (prev - now).num_milliseconds() > CLOCK_BACK_SLACK_MS
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct TripConfig {
     pub threshold: u32,
@@ -756,9 +774,16 @@ pub fn start(
         // 先把用户改过的调度读进内存：注册发生在 actor 循环里（同步），
         // 那里没法 await DB，所以只能提前备好。
         inner.saved = load_saved(&inner.db).await;
+        // 上一圈看到的「现在」：用来发现系统时钟往回跳（见 clock_went_back）。
+        let mut last_now = Local::now();
         loop {
             let loop_start = std::time::Instant::now();
-            let sleep = inner.sleep_hint(Local::now());
+            let now = Local::now();
+            if clock_went_back(last_now, now) {
+                inner.on_clock_rolled_back(last_now, now);
+            }
+            last_now = now;
+            let sleep = inner.sleep_hint(now);
             tokio::select! {
                 cmd = rx.recv() => match cmd {
                     Some(cmd) => inner.handle(cmd).await,
@@ -871,10 +896,12 @@ impl Inner {
                 best = Some(at);
             }
         }
-        match best {
+        let want = match best {
             None => IDLE_SLEEP,
             Some(at) => (at - now).to_std().unwrap_or(MIN_SLEEP).max(MIN_SLEEP),
-        }
+        };
+        // 上限：见 MAX_SLEEP 的注释。
+        want.min(MAX_SLEEP)
     }
 
     async fn handle(&mut self, cmd: Cmd) {
@@ -1374,6 +1401,37 @@ impl Inner {
         }
     }
 
+    /// 系统时钟往回跳了：把每条有计划的活任务按「现在」重新对齐，并说清楚。
+    ///
+    /// 不对齐的后果：`next_fire` 是算好的绝对时刻，回拨一小时它就跟着推后一小时，
+    /// 任务静默停摆，而日志里什么都没有 —— 这是最难查的一类「面板好像卡住了」。
+    fn on_clock_rolled_back(&mut self, was: DateTime<Local>, now: DateTime<Local>) {
+        let back = (was - now).num_seconds();
+        let mut fixed = 0usize;
+        for i in 0..self.tasks.len() {
+            if self.tasks[i].schedule.is_none() {
+                continue;
+            }
+            self.tasks[i].realign(now);
+            self.persist_task(i);
+            fixed += 1;
+        }
+        self.log.emit(
+            "panel",
+            None,
+            Level::Warn,
+            format!(
+                "检测到系统时间往回跳了 {back} 秒（{} → {}），已把 {fixed} 条任务按现在重新对齐；",
+                was.format("%H:%M:%S"),
+                now.format("%H:%M:%S")
+            ) + "否则它们会按旧时刻静默等下去",
+        );
+        crate::alerts::global().push(
+            "warn",
+            "clock",
+            format!("系统时间往回跳了 {back} 秒，任务已重新对齐（否则会静默停摆）"),
+        );
+    }
     async fn fire_due(&mut self, now: DateTime<Local>) {
         // 先记「该跑却跑不了」：计划已过点，但上一拍还没收尾（`in_flight`）或插件还在忙。
         // 这些拍会被跳过 —— 必须说出来，否则用户只会看到「有的整点任务没跑」，无从下手。

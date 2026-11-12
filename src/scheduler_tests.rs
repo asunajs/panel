@@ -313,3 +313,36 @@ fn cancel_text_is_human() {
     assert!(t.contains("重载"), "要说清是谁停的: {t}");
     assert!(!t.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {t}");
 }
+
+    /// 时钟回拨要能被发现：这是「面板好像卡住了」最难查的一种。
+    ///
+    /// 第 78 轮：`next_fire` 是算好存下来的绝对时刻，回拨一小时它就跟着推后一小时。
+    /// 检测阈值 10 秒（NTP 微调不会有这么大动作，只有真改时间才会）。
+    #[test]
+    fn a_clock_that_goes_back_is_detected_but_small_drift_is_not() {
+        let now = Local::now();
+        assert!(clock_went_back(now, now - ChronoDuration::hours(1)), "回拨一小时必须发现");
+        assert!(clock_went_back(now, now - ChronoDuration::seconds(11)), "11 秒也要发现");
+        assert!(!clock_went_back(now, now - ChronoDuration::seconds(5)), "5 秒算抖动");
+        assert!(!clock_went_back(now, now + ChronoDuration::minutes(5)), "往前走不算回拨");
+    }
+
+    /// 回拨之后 realign：下一次触发要落在「现在 + 一个周期」附近，而不是旧时刻 + 一个周期。
+    #[test]
+    fn realigning_after_a_rollback_moves_the_next_fire_near_now() {
+        let t0 = Local::now();
+        let mut t = Task::new("p".into(), "t".into(), "@every 1h".into(), 1000).unwrap();
+        t.realign(t0);
+        let before = t.next_fire;
+        assert_eq!(before, t0 + ChronoDuration::hours(1), "对齐后是一小时后");
+        // 时钟往回跳 30 分钟，再「现在」对齐一次
+        let now = t0 - ChronoDuration::minutes(30);
+        t.realign(now);
+        assert_eq!(t.next_fire, now + ChronoDuration::hours(1));
+        assert!(t.next_fire < before, "新时刻应当比旧时刻早（否则就是停摆）");
+        assert!(
+            (t.next_fire - now).num_minutes() <= 60,
+            "下一次必须在「现在」之后的一个周期内: {}",
+            t.next_fire
+        );
+    }

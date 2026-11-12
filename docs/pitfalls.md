@@ -268,3 +268,9 @@
     写错就是**静默无效**（第 73 轮跑 examples/demo-plugin.js 时踩到：任务没按计划跑，插件作者毫无反馈）。
     现在 `only_keys()` 白名单，`set_job_schedule` / `register_cron` 都挡。
     守卫：`only_keys_tests` 两条 + 演示插件的 `bad_key` 自检。
+
+63. **时钟往回跳会让任务静默停摆**：`next_fire` 是绝对时刻，系统时间退一小时它就跟着推后一小时，
+    日志里没有任何痕迹（只有移动端盒子会遇到，桌面开发永远复现不了）。
+    现在每圈检查「比上圈早 10 秒以上」→ 全部 realign + warn + 黄条；并把单圈睡眠上限压到 60 秒，
+    否则三小时的 `next_fire` 会让循环一直睡着、根本来不及发现。
+    守卫：`a_clock_that_goes_back_is_detected_but_small_drift_is_not`、`realigning_after_a_rollback_moves_the_next_fire_near_now`。
