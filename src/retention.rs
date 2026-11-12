@@ -53,7 +53,7 @@ pub async fn prune(db: &Db) -> Result<Pruned, String> {
 pub async fn prune_with(db: &Db, runs_keep: i64, logs_keep: i64) -> Result<Pruned, String> {
     let out = db
         .call(move |c| {
-            let runs = trim(c, "runs", runs_keep)?;
+            let runs = trim_runs(c, runs_keep)?;
             let logs = trim(c, "logs", logs_keep)?;
             if runs > 0 || logs > 0 {
                 // 删完把 WAL 截回去：不 VACUUM 也不会把空间还给系统，但 WAL 可以截断，
@@ -64,6 +64,26 @@ pub async fn prune_with(db: &Db, runs_keep: i64, logs_keep: i64) -> Result<Prune
         })
         .await?;
     Ok(out)
+}
+
+/// 运行记录的裁剪：**正在跑的那条不删**。
+///
+/// 为什么单独写一份：`runs` 里的行先以 `status='running'` 落库、跑完才回填结果。
+/// 如果这条还没跑完就被保留策略按 id 剪掉，`finish()` 那条 UPDATE 会静默命中 0 行 ——
+/// 界面上这次运行就「凭空消失」了（既没有成功也没有失败）。20 分钟的长任务刚好最容易撞上，
+/// 而它正是这个面板的主要用途。
+fn trim_runs(conn: &Connection, keep: i64) -> Result<i64, String> {
+    if keep <= 0 {
+        return Ok(0);
+    }
+    let n = conn
+        .execute(
+            "DELETE FROM runs WHERE status <> 'running' AND id < \
+             (SELECT id FROM runs WHERE status <> 'running' ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+            rusqlite::params![keep - 1],
+        )
+        .map_err(|e| format!("清理 runs 失败: {e}"))?;
+    Ok(n as i64)
 }
 
 /// 保留最新 `keep` 条，删掉更旧的。行数不足时子查询是 NULL，一条都不删。

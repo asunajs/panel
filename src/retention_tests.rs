@@ -146,11 +146,16 @@ async fn the_newest_row_survives_even_if_keep_is_one() {
     .await
     .unwrap();
     crate::retention::prune_with(&db, 1, 1).await.unwrap();
-    assert_eq!(count(&db, "runs").await, 1);
+    // 留 1 条 ok + 那条 running：正在跑的不占 keep 名额，也不许被剪（第 84 轮）。
+    assert_eq!(count(&db, "runs").await, 2);
     let st: String = db
         .call(|c| {
-            c.query_row("SELECT status FROM runs", [], |r| r.get(0))
-                .map_err(|e| e.to_string())
+            c.query_row(
+                "SELECT status FROM runs WHERE status='running'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
         })
         .await
         .unwrap();
@@ -173,4 +178,38 @@ async fn a_failed_prune_is_announced_on_the_alert_bar() {
     assert_eq!(mine[0].count, 2, "第二次是累加而不是新开一条");
     assert!(mine[0].message.contains("database is locked"), "{}", mine[0].message);
     crate::alerts::global().clear();
+}
+
+/// 正在跑的那次就算**老到该剪**也不许剪（第 84 轮修）。
+///
+/// 场景：20 分钟的长任务在跑，期间又跑了两万多次短任务。按 id 剪时它是最老的，
+/// 一剪掉，`finish()` 那条 UPDATE 就静默命中 0 行 —— 界面上这次运行凭空消失（既不是成功也不是失败）。
+#[tokio::test]
+async fn a_running_row_is_never_pruned_even_when_it_is_the_oldest() {
+    let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+    seed(&db, 5, 0).await;
+    // 最老的那条标成 running：模拟「长任务先开始，后面又来了很多短任务」
+    db.call(|c| {
+        c.execute(
+            "UPDATE runs SET status='running', ended_at=NULL WHERE id=(SELECT min(id) FROM runs)",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap();
+    crate::retention::prune_with(&db, 2, 0).await.unwrap();
+    // 留 2 条 ok + 那条 running
+    assert_eq!(count(&db, "runs").await, 3, "running 那条被剪掉了");
+    let running: i64 = db
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM runs WHERE status='running'", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(running, 1, "正在跑的那条必须还在");
 }

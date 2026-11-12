@@ -554,19 +554,28 @@ WAL              4.1 MB → 16 KB    ← checkpoint(TRUNCATE) 生效
 
 ```text
 灌入            runs 25000 / logs 25000 / notify_outbox 1 行
-               其中 id=1 那条被标成 status='running'（模拟卡住的运行）
-启动 3 秒后     runs 20000（min id 5001）/ logs 20003
+                其中 id=1 那条被标成 status='running'（模拟卡住的运行）
+启动 3 秒后     runs 20001（20000 条 + 那条 running）/ logs 20003
 清理日志        清理旧记录：运行记录 -5000 条、日志 -5005 条（各保留最近 20000 条）
 发件箱         1 行，没被清理带走
-卡住的那条     被剪掉了（id=1 太老）—— 见下面「按 id 剪、不看状态」
-游标边界       before=1 → 0 条；before=5000 → 0 条（现存最老 5001），都不报错、total 仍是 20000
+卡住的那条     **留下了** —— 见下面「正在跑的那条不剪」
+游标边界       before=1 → 0 条；before=5000 → 0 条（现存最老 5001），都不报错、total 仍是 20001
 ```
 
-#### 按 id 剪，不看状态
+#### 正在跑的那条不剪（第 84 轮修）
 
-`trim` 只认 id。真正**正在跑**的那次永远是最新的（id 最大），所以剪不到它；
-能剪到的「running」只可能是残留（进程崩过、重启时会先 reap 成失败）。
-守卫：`the_newest_row_survives_even_if_keep_is_one`（keep=1 时留下的必须是最新那条，哪怕它 running）。
+`runs` 的行先以 `status='running'` 落库、跑完才回填结果。原来是「只认 id、不看状态」，
+当时的理由是「正在跑的那次永远是最新的（id 最大），剪不到它」—— **这个理由对长任务不成立**：
+20 分钟的任务在跑，期间完全可能又落两万条短任务记录，它就成了最老的那条。
+被剪掉之后，`finish()` 那条 `UPDATE ... WHERE id=?` 会静默命中 0 行 —— 界面上这次运行
+**凭空消失**（既不是成功也不是失败），而那恰恰是这个面板最该有正确记录的场景。
+
+现在 `trim_runs` 的 DELETE 带 `status <> 'running'`（子查询取第 keep 新的**非 running** 行），
+running 的行既不删、也不占 keep 名额。
+
+守卫：`a_running_row_is_never_pruned_even_when_it_is_the_oldest`（5 条里最老那条 running、keep=2
+→ 留 2 条 ok + 那条 running；**先验证过：去掉修法这条会失败**）、
+`the_newest_row_survives_even_if_keep_is_one`（keep=1 → 1 条 ok + 那条 running）。
 
 #### 只碰这两张表
 
