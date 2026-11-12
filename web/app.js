@@ -1603,8 +1603,12 @@ const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentC
  * opts: [{ value, label, count }]，value="" 表示「全部」。
  */
 function makeDropdown(box, opts, current, onPick) {
+  // 菜单开着的时候**不重建**：重建会把用户眼前那个菜单变成孤儿（还在 body 上，
+  // 但已经和新按钮脱钩），点了也没反应 —— 先关掉，下一轮再建。
+  if (openDropdown === box) box.__close && box.__close();
   // 上一轮挂到 body 的菜单要先摘掉，否则每次重渲染都在 body 里留一个孤儿菜单
   if (box.__menu && box.__menu.parentNode) box.__menu.parentNode.removeChild(box.__menu);
+  box.__menu = null;
   if (openDropdown && openDropdown !== box) openDropdown.__close && openDropdown.__close();
   clear(box);
   const chosen = opts.find((o) => o.value === current) || opts[0];
@@ -1669,7 +1673,12 @@ function makeDropdown(box, opts, current, onPick) {
     document.removeEventListener("mousedown", onOutside, true);
   }
   function onOutside(ev) {
-    if (!box.contains(ev.target)) close();
+    // 菜单是 portal（挂在 body 上，fixed 定位），所以 box.contains 对它恒为 false ——
+    // 只判 box 的话，**按下菜单项的那一刻就把菜单摘掉了**，click 永远发不到 li 上：
+    // 表现就是「下拉能开、点不动」。菜单自己也得算「里面」。
+    if (box.contains(ev.target)) return;
+    if (menu.contains(ev.target)) return;
+    close();
   }
 
   btn.addEventListener("click", () => (menu.hidden ? open() : close()));
@@ -1709,6 +1718,8 @@ function renderFilterDropdowns() {
         : undefined;
       opts.push({ value: p.name, label: p.name, count: n });
     }
+    // sig 里必须带上「当前选中值」：不带的话选完这一项，opts 没变 ⇒ sig 没变 ⇒ 直接跳过重建，
+    // 按钮标题就停在旧值上（选了 hello，标题还是「全部插件」）。
     const sig = view + "|" + state.fp[view] + "|" + opts.map((o) => o.value + ":" + o.count).join(",");
     if (box.dataset.sig === sig && box.querySelector(".dropdown-btn")) continue;
     box.dataset.sig = sig;

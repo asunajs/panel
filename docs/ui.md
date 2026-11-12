@@ -88,6 +88,7 @@ SSE 用 `fetch` 而不是 `EventSource`：**要带 `x-panel-token` 头**，`Even
 | 插件 / 任务 | `/api/state` | 数组长度；副标题给「几个在跑」「几个熔断」 |
 | 单次预算 | `stats.default_budget_ms` | 默认值，任务可覆盖 |
 | 预算打断 | `stats.budget_kills` | 墙钟死线命中次数（`engine.rs` 记账） |
+| 下拉点不动（修） | 筛选下拉的菜单是 **portal**（挂到 body、fixed 定位），而 `onOutside` 只判 `box.contains(ev.target)` —— 对菜单项恒为 false，于是 mousedown 一按下就把菜单摘掉，click 永远发不到 li 上：表现是「能开、点不动」。修法：菜单自己也算「里面」；另外菜单开着时**不重建**（重建会把眼前那个菜单变成孤儿）。验证：CDP 真鼠标事件点 mcloud → 标题变 mcloud、行数 8→1。 |
 | JS 内存 | `stats.js_memory_bytes` | **恒为 `null`**，界面显示「—」+ 原因，见下 |
 
 JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，而 `idle()` 全程持锁
