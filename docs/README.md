@@ -62,6 +62,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [ui.md](ui.md) | 控制台：形态、设计令牌、零构建约束、交互细节、读数与已知短板 |
 | [plugin-webui.md](plugin-webui.md) | 插件自带界面：目录约定、三条路由、evt 形状、鉴权与嵌入取舍 |
 | [session.md](session.md) | 登录：会话 cookie 的形状与密钥、首次设置令牌（`/api/setup`） |
+| [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：已知未修，三组探针 + 四条修法 |
 | [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
 | [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |

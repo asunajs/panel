@@ -211,8 +211,14 @@ impl Resolver for GatedResolver {
 }
 
 pub struct Plugin {
-    rt: AsyncRuntime,
+    // 顺序有讲究：**ctx 必须先于 rt 释放**（Rust 按声明顺序 drop）。反过来是
+    // AsyncRuntime 先走、Context 后走，QuickJS 在 JS_FreeRuntime 里就有机会撞上
+    // 还没释放的对象。
+    //
+    // 注意：只调这个顺序**治不好**定时器那个坑（见 docs/engine-teardown.md），
+    // 但它是正确顺序，留着。
     ctx: AsyncContext,
+    rt: AsyncRuntime,
     inv: Arc<Invocation>,
 }
 

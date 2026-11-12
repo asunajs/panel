@@ -78,6 +78,7 @@
 |---|---|
 | `README.md` | 索引 + 三态约定 |
 | `architecture.md` | 嵌入形态、隔离模型、两条预算、取消归属、抛弃清单、模块划分 |
+| `engine-teardown.md` | **插件退出时的定时器**（已知未修）：`setInterval` 卡住 load、待触发 `setTimeout` 让卸载等、handler 用过定时器再卸载可能 assert abort。探针 + 四条修法 |
 | `parity.md` | **与旧面板的功能对照**（31 ✅ / 0 部分 / 2 ❌）—— 想知道「还差什么」只看这篇 |
 | `verification.md` | 端到端读数与复跑命令（含 §9 引擎试跑、§10 复跑清单） |
 | `host-api.md` | host-api 契约、限额、SSRF / 脱敏边界、代码纪律 |

@@ -245,3 +245,28 @@ async fn an_unknown_handler_is_an_error_not_a_hang() {
     let err = p.dispatch("没有这个", &json!({}), 5_000).await.unwrap_err();
     assert!(err.contains("没有这个 handler"), "应当报 handler 不存在: {err}");
 }
+
+/// 探针（默认 ignore）：只 setInterval，没有 setTimeout。
+#[tokio::test]
+#[ignore]
+async fn probe_interval_only_load() {
+    let src = "import host from 'panel:host';\nsetInterval(() => {}, 1000);\nawait host.register_handler('go', async () => 1);";
+    eprintln!("PROBE interval: before load");
+    let (p, _rx) = load(src).await;
+    eprintln!("PROBE interval: load returned ok={}", p.is_ok());
+}
+
+/// 探针（默认 ignore）：只一个 60 秒的 setTimeout。
+#[tokio::test]
+#[ignore]
+async fn probe_long_timeout_load_and_drop() {
+    let src = "import host from 'panel:host';\nsetTimeout(() => {}, 60000);\nawait host.register_handler('go', async () => 1);";
+    eprintln!("PROBE timeout: before load");
+    let (p, _rx) = load(src).await;
+    eprintln!("PROBE timeout: load returned ok={}", p.is_ok());
+    if let Ok(plugin) = p {
+        let t0 = std::time::Instant::now();
+        drop(plugin);
+        eprintln!("PROBE timeout: drop 用了 {}ms", t0.elapsed().as_millis());
+    }
+}
