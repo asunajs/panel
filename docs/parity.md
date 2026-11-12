@@ -27,12 +27,69 @@
 **用户点名的六项**（插件增删改查、脚本增删改查、插件 webui、配置 ui 化、设置 tabs、自启动）
 **全部落地**，另外补了备份/恢复和通知两块，以及一轮「双主题 × 窄屏」的界面一致性核查。
 
-## 2. 还没做的
+## 2. 还差的（2026-11-12 复核）
 
-| 功能 | 旧面板 | 现在 | 为什么不做 |
-|---|---|---|---|
-| 市场 / 在线更新 | ✅ | ⬜ | 需要网络与签名信任链，和「离线可构建」（[architecture.md §1.2](architecture.md)）的取舍直接冲突。真要做得先解决信任链，不是面板这层能拍板的 |
-| 上传插件 zip | ✅ | ⬜ | 单文件插件用「新建 + 编辑源码」已经够；多文件包要配插件 WebUI 才有意义，现在放进去只是多一条攻击面 |
+复核方法：把旧面板 `src/web.rs` 的路由表、`src/*.rs` 的模块、`web/index.html` 的导航，
+和旧库 `panel.db` 的表结构（`jobs` / `plugin_state` / `push_*`）逐条对我们这边对了一遍。
+
+### 2.1 面板功能
+
+| 旧面板 | 我们 | 差在哪 / 影响 |
+|---|---|---|
+| `POST /api/jobs/{p}/{n}/edit`（只换表达式，`override_expr` 可撤销，runs/trips 全保留） | ❌ | **任务调度改不了**：cron 写死在插件里，用户只能跑/暂停 |
+| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复 |
+| `plugin_state.disabled` / `keep_warm` / `engine` / `command` + `/api/plugins/{n}/enable|disable|keep-warm|runtime` | ❌（只有 reload/unload/stop） | 插件启停不持久化、不能选引擎、没有常驻预热 |
+| `/api/plugins/upload`、`/api/tasks/upload`（单文件或 zip） | ❌ | 只能界面里新建/编辑，不能传包 |
+| `/login` `/api/login` `/api/logout` | ❌ | 只有令牌（header / `?t=`），没有登录页与登出 |
+| `/setup` `/api/setup`（首次设令牌向导） | ❌ | 得手工 `PANEL_TOKEN` 或生成 `auth.json` |
+| `/api/restart` | ❌ | 改完配置只能自己重启进程 |
+| `/api/test/{lang}`（引擎自测页） | ❌ | 想验证引擎得建脚本 |
+| 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/config|task|test|outbox|retry` | 部分 | 只有「通知 + 一个 webhook」，没有渠道管理、发件箱、重试、按任务开关 |
+| 备份加密（`backup_crypto.rs`）+ `/api/restore/activate` | 部分 | 备份是明文 JSON，恢复只增/覆盖、无原子切换 |
+| `/api/market*`、`/api/update*` | ❌ | 已声明不做（见 §3） |
+| `/readyz` | ❌ | 只有 `/healthz` |
+
+已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
+`/api/plugins/{n}/source|reload|unload|delete`、`/api/config`（比旧的 `/api/settings/save` 强：热生效）、
+`/api/backup`、`/api/tasks/{p}/{n}/run|pause|resume`。
+
+### 2.2 宿主 API（插件能力）
+
+| 旧 | 我们 | 影响 |
+|---|---|---|
+| `ws_open/ws_send/ws_recv/ws_close` | ❌ | 直播那套（mcloud-live）跑不了 |
+| `smtp_send` | ❌ | 插件发不了邮件 |
+| `tls: 'native'`（legacy CBC 套件） | ❌ | 只给 CBC 的主机连不上 |
+| `register_nav({label,icon,path})` | ❌（记一行日志） | 插件不会出现在侧栏；走「插件页 → 界面」 |
+| `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |
+| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 只认 `budget_ms` | 任务参数、提前量、卡片摘要/未就绪原因都没有 |
+| `set_job_paused/blockers/summary/schedule` | ❌ | 插件运行期改不了自己任务的状态 |
+| `panel.version()` / `panel.atLeast()` | ❌ | 插件判断不了宿主版本 |
+
+实测**已经有的**（2026-11-12 用脚本探过）：`setTimeout` / `setInterval` / `queueMicrotask` /
+`TextEncoder` / `crypto` / `performance` / `node:fs`（可 import，且我们**没有**旧面板那种
+「限制在插件数据根」的约束）。
+
+### 2.3 工程层
+
+| 旧 | 我们 |
+|---|---|
+| 多运行时（`runtimes.rs`：Node / Bun；内嵌 QuickJS 已在他们那版移除） | 内嵌 LLRT（QuickJS-ng），单运行时 |
+| 外部进程插件（`extproc.rs`，native 逃生口） | ❌ |
+| 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
+| 限流（`ratelimit.rs`） | ❌ |
+| 时区（`tz.rs`） | 本地时（chrono `Local`） |
+| 面板版本 / 自更新（`panelversion.rs`） | 只有 `CARGO_PKG_VERSION` |
+| 任务目录（`taskdir.rs`，`tasks/*.json`） | 任务在 DB |
+| 懒加载（`docs/lazy-plugins.md`） | 启动即全加载 |
+
+### 2.4 对「把剩下的插件也迁过来」的实际影响
+
+| 插件 | 还缺什么 |
+|---|---|
+| `mcloud` | 已跑（阶段 A/B 完成）；只差 `ws_*` + native TLS（直播那半） |
+| `cmread` / `mgmusic` / `yangshipin` | 只用 `node:fs` + `setTimeout` + `register_nav` —— 前两个我们有，nav 忽略；**纯 JS 插件，用 esbuild alias 换 host-api 就能打** |
+| `quark` | 只用 host-api 的 fetch/sqlite，最容易 |
 
 ## 3. 明确不做的
 
