@@ -86,13 +86,15 @@
           <section class="view hidden" id="view-plugins" data-view="plugins">
             <header class="view-head">
               <h2>插件</h2><span class="chip" id="plugins-count">0</span>
-              <button class="btn btn-primary" id="plugin-new" type="button">新建插件</button>
-              <label class="search"><span class="sr-only">搜索插件</span>
+              <div class="head-actions">
+                <button class="btn btn-primary" id="plugin-new" type="button">新建插件</button>
+                <label class="search"><span class="sr-only">搜索插件</span>
                   <span class="search-box">
                     <input id="plugins-search" type="search" placeholder="搜索插件…" autocomplete="off" />
                     <button class="search-clear" type="button" data-clear="plugins-search" aria-label="清空" hidden>✕</button>
                   </span>
                 </label>
+              </div>
             </header>
             <div class="plugin-grid" id="plugin-grid"></div>
           </section>
@@ -101,13 +103,15 @@
             <section class="panel">
               <header class="panel-head">
                 <h2>脚本</h2><span class="chip" id="scripts-count">0</span>
-                <button class="btn btn-primary" id="script-new" type="button">新建脚本</button>
-                <label class="search"><span class="sr-only">搜索脚本</span>
-                  <span class="search-box">
-                    <input id="scripts-search" type="search" placeholder="搜索脚本…" autocomplete="off" />
-                    <button class="search-clear" type="button" data-clear="scripts-search" aria-label="清空" hidden>✕</button>
-                  </span>
-                </label>
+                <div class="head-actions">
+                  <button class="btn btn-primary" id="script-new" type="button">新建脚本</button>
+                  <label class="search"><span class="sr-only">搜索脚本</span>
+                    <span class="search-box">
+                      <input id="scripts-search" type="search" placeholder="搜索脚本…" autocomplete="off" />
+                      <button class="search-clear" type="button" data-clear="scripts-search" aria-label="清空" hidden>✕</button>
+                    </span>
+                  </label>
+                </div>
               </header>
               <div class="table-wrap">
                 <table class="table">

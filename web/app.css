@@ -256,7 +256,12 @@ button, input, select { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 13px 16px; border-bottom: 1px solid var(--line);
 }
-.panel-head h2 { margin-right: auto; }
+/* 标题贴左，操作靠右：原来 h2 是 margin-right:auto，而 .search 也是 margin-left:auto ——
+   **两个 auto 平分空白**，中间那组（计数 + 主按钮）就被顶到正中间，两头各留一大块空。 */
+.panel-head h2 { margin-right: 2px; }
+/* 主按钮和搜索一起靠右（脚本 / 插件页头） */
+.head-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.head-actions .search { margin-left: 0; }
 .panel-body { padding: 6px 16px 14px; }
 .panel-body-tight { padding: 4px 8px 10px; }
 .panel-body.table-wrap { padding: 0; overflow-x: auto; }

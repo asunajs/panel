@@ -5209,6 +5209,15 @@ function parseNoteHeaders(body) {
     return void 0;
   }
 }
+function parseNoteCreated(body) {
+  try {
+    const v = JSON.parse(body);
+    const id = typeof v.noteid === "string" ? v.noteid : typeof v.result?.noteid === "string" ? v.result.noteid : "";
+    return id.trim() === "" ? void 0 : id.trim();
+  } catch {
+    return void 0;
+  }
+}
 function noteCreateRequest(noteId, title, phone, headers, nowMs) {
   const ts = String(nowMs);
   return {
@@ -8215,6 +8224,7 @@ function stepAction(deps, s, a) {
     if (!res.ok) return fail3(`备份快照没建起来：${res.error ?? "未知失败"}`);
     const parsed = parseSnapshotCreate(res.text);
     if (!parsed.ok || !parsed.created) return fail3(`备份快照响应解析不了：${parsed.error ?? ""}`);
+    registerOwnedFile(deps, parsed.created.fileId);
     advance2(a, parsed.created.rapidUpload ? "snapshot-complete" : "snapshot-put", {
       snapFileId: parsed.created.fileId,
       snapUploadId: parsed.created.uploadId,
@@ -8259,19 +8269,27 @@ function stepAction(deps, s, a) {
     return done(`分享了一个文件 ——「${a.name}」`);
   }
   if (a.step === "note-auth") {
+    let logFallbackAuth = false;
     const auth = parseAuth(loadAuthRaw(deps.store));
     if (auth === void 0 || auth.token === "") return fail3("云笔记：这个号没有 authToken");
     const res = send2(deps, noteAuthRequest(auth.token, auth.phone));
     if (!res.ok) return fail3(`云笔记鉴权没成：${res.error ?? "未知失败"}`);
-    const headers = parseNoteHeaders(res.text);
-    if (headers === void 0) return fail3("云笔记：鉴权响应里没有 headers.app_auth");
+    let headers = parseNoteHeaders(res.text);
+    if (headers === void 0) {
+      const raw = parseAuth(loadAuthRaw(deps.store))?.raw ?? "";
+      if (raw === "") return fail3("云笔记：既没有 headers.app_auth，也没有 auth 可兜底");
+      headers = { app_auth: raw };
+      logFallbackAuth = true;
+    }
     const noteId = uuidV4().replace(/-/g, "").padEnd(32, "0").slice(0, 32);
     advance2(a, "note-create", {
       noteId,
       noteTitle: noteId.slice(0, 3),
       noteHeaders: JSON.stringify(headers)
     });
-    return more("云笔记鉴权好了 —— 下一步建笔记");
+    return more(
+      logFallbackAuth ? "云笔记鉴权：服务端没给 app_auth，改用手上的 auth 兜底 —— 下一步建笔记（成不成看回包）" : "云笔记鉴权好了 —— 下一步建笔记"
+    );
   }
   if (a.step === "note-create") {
     const auth = parseAuth(loadAuthRaw(deps.store));
@@ -8285,8 +8303,14 @@ function stepAction(deps, s, a) {
       deps,
       noteCreateRequest(data.noteId ?? "", data.noteTitle ?? "", auth?.phone ?? "", headers, Date.now())
     );
-    advance2(a, "note-wait");
-    return more(res.ok ? "云笔记已建 —— 等一下再删" : `建笔记没成（旧实现也忽略）：${res.error ?? ""}`);
+    const created = res.ok ? parseNoteCreated(res.text) : void 0;
+    if (created === void 0) {
+      return done(
+        `云笔记没建成（鉴权没通过：回包里没有 noteid）——「${a.name}」。服务端 ${res.ok ? "回 200 但正文是空模板" : `失败：${res.error ?? "未知失败"}`}`
+      );
+    }
+    advance2(a, "note-wait", { noteCreated: "1" });
+    return more(`云笔记已建（noteid ${created.slice(0, 8)}…）—— 等一下再删`);
   }
   if (a.step === "note-wait") {
     waitMs(deps, deps.settleMs ?? 2e3);
@@ -8401,6 +8425,7 @@ function stepUpload(deps, a, data) {
   if (!out.ok) return fail3(`上传「${a.name}」没成：${out.note}`);
   if (!uploadDone(deps, key)) return more(`上传中 —— ${out.note}`);
   const fileId = loadUpload(deps, key)?.fileId ?? "";
+  if (loadUpload(deps, key)?.ownedByUs !== false) registerOwnedFile(deps, fileId);
   if (a.key === "shareFile") {
     advance2(a, "outlink", fileId === "" ? {} : { fileId });
     return more("文件传完了 —— 下一步建外链");
