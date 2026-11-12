@@ -346,3 +346,17 @@ fn cancel_text_is_human() {
             t.next_fire
         );
     }
+
+    /// 进程被挂起 / 机器休眠过之后，「中间漏了几拍」要能算出来（第 79 轮）。
+    ///
+    /// `@every 5s` 从 T 起、醒来时已是 T+30s → 中间有 6 个下次时刻（5/10/15/20/25/30 秒）。
+    #[test]
+    fn a_suspended_process_reports_how_many_beats_it_missed() {
+        let t0 = chrono::Local::now();
+        let s = crate::cron::Schedule::parse("@every 5s").unwrap();
+        assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::seconds(30)), 6);
+        assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::seconds(4)), 0, "没跨过下一拍");
+        assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::seconds(5)), 1);
+        // 睡很久也不会数到爆：上限 1000
+        assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::days(30)), 1000);
+    }

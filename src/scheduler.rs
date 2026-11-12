@@ -191,6 +191,29 @@ struct Task {
     last_error: Option<String>,
 }
 
+/// 这次到点时，中间**漏了几拍**（进程被挂起、机器休眠过）。
+///
+/// 为什么要单独算：调度器只认「现在到点了」，不知道中间那段时间进程没在跑。
+/// 醒来时它会**补跑一次**然后按现在的节拍继续（不补一长串，否则插件会被打爆），
+/// 但「少了 6 拍」这件事得说出来 —— 否则用户看到的是「日志里少了几次」，无从判断。
+fn skipped_beats(
+    schedule: &crate::cron::Schedule,
+    at: DateTime<Local>,
+    now: DateTime<Local>,
+) -> usize {
+    let mut cur = at;
+    let mut n = 0usize;
+    while n < 1000 {
+        match schedule.next_base(cur) {
+            Some(next) if next <= now => {
+                n += 1;
+                cur = next;
+            }
+            _ => break,
+        }
+    }
+    n
+}
 impl Task {
     #[cfg(test)]
     fn new(plugin: String, name: String, cron: String, budget_ms: u64) -> Result<Self, String> {
@@ -1489,6 +1512,23 @@ impl Inner {
             .map(|(i, _)| i)
             .collect();
         for i in due {
+            // 先记「中间漏了几拍」：进程被挂起 / 机器休眠过才会有。补跑只补这一次，
+            // 但少了几拍必须说出来（下面是「按现在的节拍继续」，不是「重放」）。
+            if let Some(schedule) = self.tasks[i].schedule.clone() {
+                let at = trigger_at(&self.tasks[i]);
+                let missed = skipped_beats(&schedule, at, now);
+                if missed > 0 {
+                    let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+                    self.log.emit(
+                        &p,
+                        None,
+                        Level::Warn,
+                        format!(
+                            "任务 {n} 中间少了 {missed} 拍没跑（进程被挂起或机器休眠过？）已跳过，不补跑"
+                        ),
+                    );
+                }
+            }
             // blockers 非空只挡**定时**触发（手动运行是显式动作，照旧）。
             // 而且不能「攒着等就绪再补触发」：把计划直接对齐到下一次。
             if !self.tasks[i].blockers.is_empty() {

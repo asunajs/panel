@@ -274,3 +274,8 @@
     现在每圈检查「比上圈早 10 秒以上」→ 全部 realign + warn + 黄条；并把单圈睡眠上限压到 60 秒，
     否则三小时的 `next_fire` 会让循环一直睡着、根本来不及发现。
     守卫：`a_clock_that_goes_back_is_detected_but_small_drift_is_not`、`realigning_after_a_rollback_moves_the_next_fire_near_now`。
+
+64. **休眠醒来别把漏掉的拍「补跑」**：`SIGSTOP` 30 秒后恢复，`@every 5s` 的任务**只补 1 次**
+    然后按现在的节拍继续 —— 丢掉的 6 拍不会重放（重放会让抓取类任务醒来连发 6 个请求）。
+    但「少了 5 拍」要写一行 warn，否则用户只看到「日志里少了几次」。
+    守卫：`a_suspended_process_reports_how_many_beats_it_missed`。
