@@ -1046,7 +1046,7 @@ impl Inner {
                 self.plugins.get_mut(&plugin).unwrap().busy = true;
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    let out = catch_engine_panic(p.call_json(&handler, &evt, budget_ms)).await;
+                    let out = crate::engine::catch_panic(p.call_json(&handler, &evt, budget_ms)).await;
                     let _ = reply.send(out);
                     let _ = tx.send(Cmd::WebDone { plugin });
                 });
@@ -1693,7 +1693,7 @@ impl Inner {
                 "early": early,
                 "lead_ms": lead_ms
             });
-            let error = catch_engine_panic(plugin.dispatch(&task_name, &evt, budget))
+            let error = crate::engine::catch_panic(plugin.dispatch(&task_name, &evt, budget))
                 .await
                 .err();
             // 先还名额再收尾：收尾要写库/发通知，不该占着 JS 通道。
@@ -1822,32 +1822,6 @@ impl Inner {
                 log.emit("panel", Some(run_id), Level::Warn, format!("收尾运行记录失败: {e}"));
             }
         });
-    }
-}
-
-/// 引擎边界：把一次 invocation 的 panic 收成 `Err`，而不是让它 unwind 掉整个派发 task。
-///
-/// 派发是 `tokio::spawn` 出去、不 await JoinHandle 的（见 [`Scheduler::dispatch`]）。
-/// 若 `plugin.dispatch` 内部 panic（QuickJS/rquickjs 的某些路径会），unwind 会跳过
-/// 末尾那条 [`Cmd::Finished`] —— `busy`/`in_flight` 就永远停在 true，插件再也派发不动。
-/// `panic = "unwind"`（Cargo.toml）让这里能接住；接住后走正常失败路径，熔断照常计数。
-async fn catch_engine_panic<T, F>(fut: F) -> Result<T, String>
-where
-    F: Future<Output = Result<T, String>>,
-{
-    match AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(r) => r,
-        Err(p) => Err(format!("引擎 panic: {}", panic_text(p.as_ref()))),
-    }
-}
-
-fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = p.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = p.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "未知 panic".to_string()
     }
 }
 

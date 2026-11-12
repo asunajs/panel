@@ -137,3 +137,20 @@ async fn a_spinning_script_is_interrupted_with_a_readable_reason() {
     );
     assert!(error.contains("1000ms"), "带上配置的预算值: {error}");
 }
+
+/// `in_flight` 的摘除必须靠 Drop：`execute` 跑在 spawn 里没人 await，panic 会跳过末尾那行，
+/// 那个脚本从此永远「正在运行」（再点就报「等这次跑完」，其实什么都没在跑）。
+#[test]
+fn flight_guard_releases_the_name_even_on_panic() {
+    let set = Arc::new(Mutex::new(HashSet::from(["s".to_string()])));
+    let s2 = set.clone();
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _f = Flight(s2, "s".to_string());
+        panic!("引擎炸了");
+    }));
+    assert!(out.is_err(), "这个测试本身要 panic");
+    assert!(
+        set.lock().unwrap_or_else(|p| p.into_inner()).is_empty(),
+        "panic 之后名字必须摘掉，否则这个脚本永远跑不了第二次"
+    );
+}

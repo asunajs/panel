@@ -298,3 +298,10 @@
     于是侧栏的 ✕ 和内容区的汉堡在**所有**宽度都显示（宽屏上纯噪音，汉堡还压住页标题）。
     改成 `.icon-btn.nav-toggle` / `.icon-btn.sidebar-close`（0,2,0）。
     守卫：ui-check 的三条断点检查（820px 没有这两个按钮、侧栏是常驻列；700px 两个都在）。
+
+68. **脚本的 `in_flight` 只靠末尾那行 `remove` 摘除**：`execute` 跑在 `tokio::spawn` 里没人 await，
+    panic 或任何提前 return 都会跳过它 —— 那个脚本从此永远「正在运行」，再点就报
+    「脚本 X 正在运行，等这次跑完」，而其实什么都没在跑。
+    现在靠 `Flight` 的 Drop 保证摘除（正常/提前返回/panic 都覆盖），并给脚本加载套上
+    `engine::catch_panic`（原来是任务专用的 `catch_engine_panic`，已上移成公共函数）。
+    守卫：`flight_guard_releases_the_name_even_on_panic`、`catch_panic_passes_ok_and_err_through`。

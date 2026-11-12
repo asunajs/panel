@@ -17,6 +17,21 @@ use tokio::sync::mpsc;
 use crate::db::Db;
 use crate::log::{Level, LogHub};
 
+/// `in_flight` 的离开保证：**无论怎么退出**（正常、提前 return、panic）都要把名字摘掉。
+///
+/// 为什么不能只靠末尾那行 `remove`：`execute` 跑在 `tokio::spawn` 里，没人 await 它。
+/// 引擎 panic 或任何提前 return 都会跳过末尾那行 —— 那个脚本从此永远「正在运行」，
+/// 再点就报「脚本 X 正在运行，等这次跑完」，而其实什么都没在跑（第 86 轮）。
+struct Flight(Arc<Mutex<HashSet<String>>>, String);
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.1);
+    }
+}
 /// `runs` / `logs` 里脚本的 plugin 字段。
 pub const PLUGIN: &str = "@script";
 pub const FILE_MAX: usize = 512 * 1024;
@@ -384,6 +399,8 @@ impl Scripts {
     }
 
     async fn execute(&self, name: String, source: String, budget_ms: u64, run_id: i64) {
+        // 从这一行起，无论怎么退出都会把名字从 in_flight 里摘掉（含 panic）。
+        let _flight = Flight(self.in_flight.clone(), name.clone());
         // 先抢一个并发位。抢不到就在这里排队 —— 排队时间算进这次运行的耗时，
         // 但比「把面板一起拖死」好得多。
         let _permit = match crate::jsslots::try_acquire() {
@@ -407,10 +424,6 @@ impl Scripts {
                             Level::Error,
                             format!("脚本 {name} 拿不到 JS 执行名额"),
                         );
-                        self.in_flight
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .remove(&name);
                         return;
                     }
                 }
@@ -432,25 +445,27 @@ impl Scripts {
             // 脚本没有任务表：set_job_* 在脚本里会直接报错
             sched: None,
         };
-        let result = match crate::engine::Plugin::load_with_budget(&source, handle, budget_ms).await {
-            Ok(_plugin) => {
-                // 脚本不该注册任务：排程在记录里。注册了就是写错了，要吵出来。
-                match rx.try_recv() {
-                    Ok(_) => Err("脚本不能注册任务：请用「计划」字段排程，别调 register_cron".to_string()),
-                    Err(_) => Ok(()),
+        let result = crate::engine::catch_panic(async move {
+            match crate::engine::Plugin::load_with_budget(&source, handle, budget_ms).await {
+                Ok(_plugin) => {
+                    // 脚本不该注册任务：排程在记录里。注册了就是写错了，要吵出来。
+                    match rx.try_recv() {
+                        Ok(_) => {
+                            Err("脚本不能注册任务：请用「计划」字段排程，别调 register_cron".into())
+                        }
+                        Err(_) => Ok(()),
+                    }
                 }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
-        };
+        })
+        .await;
         let ended = now_ms();
         let (status, error) = match &result {
             Ok(()) => ("ok", None),
             Err(e) => ("error", Some(e.clone())),
         };
-        self.in_flight
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&name);
+        // 名字由 _flight 在离开作用域时摘掉（见 Flight）。
         if let Err(e) = crate::runs::close(&self.db, &self.log, run_id, ended, status, error.clone()).await {
             self.log.emit(PLUGIN, Some(run_id), Level::Warn, format!("收尾运行记录失败: {e}"));
         }

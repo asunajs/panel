@@ -554,6 +554,34 @@ impl Plugin {
     }
 }
 
+
+/// 引擎边界：把一次调用的 panic 收成 `Err`，而不是让它 unwind 掉整个派发 task。
+///
+/// 为什么要这一层：派发是 `tokio::spawn` 出去、不 await JoinHandle 的。若引擎内部 panic
+/// （QuickJS/rquickjs 某些路径会），unwind 会跳过收尾逻辑 —— 任务卡的 `busy`/`in_flight`
+/// 就永远停在 true，那个插件再也派发不动；脚本那份更是连运行记录都不回填。
+/// `panic = "unwind"`（Cargo.toml）让这里能接住；接住后走正常失败路径。
+pub async fn catch_panic<T, F>(fut: F) -> std::result::Result<T, String>
+where
+    F: std::future::Future<Output = std::result::Result<T, String>>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(r) => r,
+        Err(p) => Err(format!("引擎 panic: {}", panic_text(p.as_ref()))),
+    }
+}
+
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(未知类型)".to_string()
+    }
+}
+
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
