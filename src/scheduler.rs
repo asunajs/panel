@@ -386,7 +386,14 @@ pub enum Cmd {
     Loaded {
         name: String,
         result: Result<Arc<Plugin>, String>,
+        /// 这次加载用的源码：成功时要记下来，供以后回滚。
+        source: String,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 问「这个插件最后一次成功加载用的是哪段源码」。
+    SourceOf {
+        name: String,
+        reply: oneshot::Sender<Option<String>>,
     },
 }
 
@@ -423,6 +430,20 @@ impl Scheduler {
             reply,
         })
         .await?
+    }
+
+    /// 这个插件最后一次**成功**加载用的源码（没加载过就是 None）。
+    ///
+    /// 重载失败时拿它把上一个能跑的版本装回去 —— 磁盘上的文件可能被改坏了。
+    pub async fn last_good_source(&self, name: &str) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::SourceOf {
+                name: name.to_string(),
+                reply: tx,
+            })
+            .ok()?;
+        rx.await.ok().flatten()
     }
 
     /// 插件 WebUI 的动态调用：把请求交给插件注册的 handler，返回它的返回值。
@@ -550,6 +571,12 @@ struct Loaded {
     plugin: Arc<Plugin>,
     /// 同一 Context 同时只允许一个在途 invocation。
     busy: bool,
+    /// 这份插件是**哪段源码**加载起来的（最后一次成功的那份）。
+    ///
+    /// 为什么留一份：磁盘上的文件可能被编辑器改坏，此时「重载」会把能跑的插件卸掉、
+    /// 新的又装不回来 —— 插件直接消失。有了这份就能把上一个能跑的版本装回去。
+    /// 代价是每插件多存一份源码（几 KB）。
+    source: String,
 }
 
 struct Inner {
@@ -728,6 +755,7 @@ impl Inner {
             Cmd::Loaded {
                 name,
                 result,
+                source,
                 reply,
             } => {
                 let out = match result {
@@ -737,6 +765,7 @@ impl Inner {
                             Loaded {
                                 plugin: p,
                                 busy: false,
+                                source,
                             },
                         );
                         Ok(())
@@ -748,6 +777,9 @@ impl Inner {
                     }
                 };
                 let _ = reply.send(out);
+            }
+            Cmd::SourceOf { name, reply } => {
+                let _ = reply.send(self.plugins.get(&name).map(|l| l.source.clone()));
             }
             Cmd::Unload { name } => {
                 if let Some(l) = self.plugins.get(&name) {
@@ -1015,6 +1047,7 @@ impl Inner {
             let _ = tx.send(Cmd::Loaded {
                 name,
                 result,
+                source,
                 reply,
             });
         });

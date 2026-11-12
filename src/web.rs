@@ -775,10 +775,29 @@ async fn plugin_reload(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let source = read_source(&st.plugins_dir, &name).await?;
+    // 磁盘上的文件可能被编辑器改坏了。先把「上一次能跑的源码」拿到手，
+    // 装不回去就把这份装回去 —— 否则点一次「重载」会把能跑的插件变成消失。
+    let prev = st.sched.last_good_source(&name).await;
     // 命令通道是串行的：Unload 一定先于 Load 被处理
     st.sched.unload(&name);
-    st.sched.load(&name, source).await.map_err(bad)?;
-    Ok(Json(json!({ "ok": true, "name": name })))
+    match st.sched.load(&name, source).await {
+        Ok(()) => Ok(Json(json!({ "ok": true, "name": name }))),
+        Err(e) => {
+            if let Some(prev) = prev {
+                st.sched.unload(&name);
+                match st.sched.load(&name, prev).await {
+                    Ok(()) => Err(bad(format!(
+                        "重载失败，已装回上一个能跑的版本：{e}"
+                    ))),
+                    Err(e2) => Err(bad(format!(
+                        "重载失败，连上一个版本也装不回去了：{e} / {e2}"
+                    ))),
+                }
+            } else {
+                Err(bad(e))
+            }
+        }
+    }
 }
 
 /// 禁用：从调度器卸下来，并在库里记一笔 —— **重启后不再加载**。

@@ -2046,3 +2046,62 @@ await host.register_handler('go', async () => {\n\
         assert_eq!(it["body"], "", "不传正文应当是空串: {it}");
     }
 }
+
+/// 重载时磁盘上的文件被改坏了：不能把能跑的插件搞丢。
+///
+/// 这是「保存」和「重载」的区别：保存有文件级回滚（写盘前留了 old），
+/// 重载是**从磁盘读**，读到的是坏的就只能靠内存里那份「上次能跑的源码」。
+#[tokio::test]
+async fn reload_of_a_broken_file_keeps_the_previous_version_running() {
+    let (app, plugins, _data, _store) = setup_dirs("prel").await;
+    let good = "import host from 'panel:host';\nawait host.register_handler('x', async () => 'ok');\n";
+    load_plugin(&app, "demo", good).await;
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "demo"));
+
+    // 模拟「在编辑器里改坏了」：直接写坏磁盘文件，再点重载
+    std::fs::write(plugins.join("demo.js"), "await host.register_handler('x', async () => {").unwrap();
+    // 错误响应是纯文本，send() 会把它当成 Null，这里要读原始 body
+    let resp = app
+        .clone()
+        .oneshot(with_csrf("POST", "/api/plugins/demo/reload", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let msg = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(msg.contains("已装回上一个能跑的版本"), "要说明做了回滚: {msg}");
+
+    // 关键：插件还在，而且还能跑
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "demo"),
+        "重载失败后插件不该消失: {state}"
+    );
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/demo/x/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "回滚后旧版本应当还能跑: {body}");
+
+    // 文件本身没被面板改回去（那是用户的东西），但插件跑的是内存里的旧版本
+    assert!(std::fs::read_to_string(plugins.join("demo.js")).unwrap().contains("register_handler('x', async () => {"));
+}
+
+/// 新建插件时源码就是坏的：不能留下一个加载不了的文件。
+#[tokio::test]
+async fn saving_a_broken_source_for_a_new_plugin_leaves_no_file() {
+    let (app, plugins, _data, _store) = setup_dirs("pnewbad").await;
+    let broken = "import host from 'panel:host';\nawait host.register_handler('x', async () => {";
+    let (status, body) = send(
+        &app,
+        with_csrf("PUT", "/api/plugins/ghost/source", Some(json!({ "source": broken }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!plugins.join("ghost.js").exists(), "新建失败不该留文件");
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(!state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "ghost"));
+}

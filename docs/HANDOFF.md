@@ -171,6 +171,12 @@
     面板里根本看不见（第 27 轮做备份往返时发现：备份里 0 个脚本，因为那文件从没被登记）。
     启动时 `Scripts::reconcile()` 把目录里没登记过的 `.js` 收编成「只手动跑」，
     已有的行一个字段都不动。有测试：`scripts::tests::reconcile_*` 两条。
+18. **「重载」是从磁盘读源码，磁盘被改坏时会把能跑的插件搞丢**：`Cmd::Load` 在插件已加载时
+    直接拒（`插件已加载`），所以重载必须先 `unload`；卸载之后新源码装不回来，插件就没了。
+    现在 `Loaded` 里记着**最后一次成功加载的源码**（`sched.last_good_source`），
+    重载失败时把它装回去并回 400「重载失败，已装回上一个能跑的版本」。
+    有测试：`web::router_tests::reload_of_a_broken_file_keeps_the_previous_version_running`。
+    「保存」那条路不靠这个 —— 它写盘前自己留了 old，见 `plugin_save`。
 
 ## 8. 运行中的面板
 
