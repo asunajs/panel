@@ -2104,6 +2104,8 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             .exists();
         files.push(json!({
             "name": name,
+            // 界面按系列分组要用：禁用/未加载的插件也得能归到自己的系列里。
+            "group": crate::plugin_group(name),
             "bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
             "modified_ms": meta
                 .as_ref()

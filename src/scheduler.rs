@@ -397,6 +397,12 @@ pub struct TaskView {
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginView {
     pub name: String,
+    /// 「系列」名：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。
+    ///
+    /// 为什么由面板**推导**而不是让插件声明：插件就是一个 .js 文件，为了一个字符串
+    /// 再加一套清单格式/API 不划算；而「按系列起名」本来就是插件作者的常态。
+    /// 这条规则从旧面板（`rust-plugin-panel` 的 `plugin_group`）原样搬来。
+    pub group: String,
     pub busy: bool,
     pub tasks: usize,
     /// 这个插件自己处理 `/plugins/<name>/*` 的路由（`register_web`）。
@@ -1018,6 +1024,7 @@ impl Inner {
                     .iter()
                     .map(|(name, l)| PluginView {
                         name: name.clone(),
+                        group: crate::plugin_group(name),
                         busy: l.busy,
                         tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
                         has_web: self.web.contains(name),

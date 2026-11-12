@@ -280,6 +280,35 @@ async function main() {
   await sleep(1200);
   const hasCard = await js("document.querySelector('#plugin-grid').innerText.includes('seed')");
   check('插件页有 seed 卡片', hasCard === true);
+  // 插件按「系列」分组（第 88 轮，规则搬自旧面板：名字里第一个 -/_ 之前那段）。
+  const groups = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('.plugin-group')].map(s=>({" +
+    " t:s.querySelector('.group-title').textContent," +
+    " n:s.querySelectorAll('.plugin-card').length," +
+    " b:[...s.querySelectorAll('.plugin-group-actions button')].map(x=>x.textContent)})))"
+  ));
+  const allCards = await js("document.querySelectorAll('#plugin-grid .plugin-card').length");
+  check('插件按系列分组了', groups.length >= 1, JSON.stringify(groups));
+  check(
+    '每张卡片都在某个系列里（没有漏在外面）',
+    groups.reduce((a, g) => a + g.n, 0) === allCards,
+    JSON.stringify({ groups: groups.map((g) => g.n), allCards }),
+  );
+  check(
+    '系列标题带数量',
+    groups.every((g) => /系列（\d+）/.test(g.t) && Number(g.t.match(/（(\d+)）/)[1]) === g.n),
+    JSON.stringify(groups.map((g) => g.t)),
+  );
+  check(
+    '每个系列都有「全部重载 / 全部启用」',
+    groups.every((g) => g.b.join(',') === '全部重载,全部启用'),
+    JSON.stringify(groups.map((g) => g.b)),
+  );
+  // 点一次「全部重载」：要真的走到接口并给出系列级结果（不是逐个悄悄跑）
+  await js("document.querySelector('.plugin-group-actions button').click()");
+  await sleep(1500);
+  const groupToast = await js("(()=>{const t=document.getElementById('toast');return t.classList.contains('hidden')?'':t.textContent;})()");
+  check('「全部重载」有系列级结果提示', /系列：/.test(groupToast), groupToast);
   // 控件不许掉回系统样式（§7「一律自绘」）。UA 默认的三件套：白底 / 0 圆角 / 2px 灰边。
   // 第 24 轮用户抓到的试跑「预算」框就是漏了 class —— 裸 input 在深色主题下白底刺眼。
   // 先回到设置页：上面几段会跳到任务/插件页，视图隐藏时 input 的 rect 是 0，会被漏掉。

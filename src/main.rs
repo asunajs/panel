@@ -19,6 +19,14 @@ mod notify;
 mod outbound;
 mod jsslots;
 mod ratelimit;
+/// 插件「系列」名：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。
+///
+/// 规则从旧面板（`rust-plugin-panel` 的 `plugin_group`）原样搬来 —— 那边界面按它分组、
+/// 给每组建「全部重载 / 全部启用」。为什么要推导而不是让插件声明：插件就是一个 .js 文件，
+/// 为了填一个字符串再加一套清单格式不划算；而「按系列起名」本来就是插件作者的常态。
+pub fn plugin_group(name: &str) -> String {
+    name.split(['-', '_']).next().unwrap_or(name).to_string()
+}
 mod retention;
 mod runs;
 mod panelversion;

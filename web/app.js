@@ -497,6 +497,35 @@ function renderPlugins() {
   }
   const off = (state.disabled || []).filter((n) => matches(n, q));
   if (!rows.length && !off.length) { emptyState(grid, '没有匹配的插件'); return; }
+
+  // 按「系列」分组（第 88 轮，从旧面板搬过来）：插件现实里成系列（mcloud-* / bilibili-*），
+  // 摆在一起才看得清「这一系列有哪几个、哪个挂了」。组名由服务端推导（名字里第一个
+  // `-`/`_` 之前那段，见 plugin_group），前端只负责摆。
+  const sections = new Map();
+  const slot = (g) => {
+    let s = sections.get(g);
+    if (s) return s;
+    const sec = el('section', 'plugin-group');
+    const head = el('div', 'plugin-group-head');
+    const title = el('h3', 'group-title', '');
+    head.append(title);
+    const gacts = el('div', 'plugin-group-actions');
+    for (const [label, kind] of [['全部重载', 'reload'], ['全部启用', 'enable']]) {
+      const b = el('button', 'btn btn-sm', label);
+      b.type = 'button';
+      b.addEventListener('click', () => groupAct(g, kind));
+      gacts.append(b);
+    }
+    head.append(gacts);
+    sec.append(head);
+    const inner = el('div', 'plugin-grid');
+    sec.append(inner);
+    grid.append(sec);
+    s = { inner, title };
+    sections.set(g, s);
+    return s;
+  };
+
   for (const p of rows) {
     const mine = state.tasks.filter((t) => t.plugin === p.name);
     const lastRun = mine.reduce((m, t) => Math.max(m, t.last_run || 0), 0);
@@ -535,11 +564,9 @@ function renderPlugins() {
       mk('删除', () => deletePlugin(p.name), true),
     );
     cardEl.append(acts);
-    {
-      cardEl.addEventListener('click', () => showPlugin(p.name));
-      cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
-      grid.append(cardEl);
-    }
+    cardEl.addEventListener('click', () => showPlugin(p.name));
+    cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
+    slot(p.group || p.name).inner.append(cardEl);
   }
   // 目录里有、但没加载成功的文件：语法错/启动失败的插件只能从这里进去修。
   const loadedNames = new Set(state.plugins.map((p) => p.name));
@@ -576,10 +603,49 @@ function renderPlugins() {
     btns.push(mk('删除', () => deletePlugin(f.name), true));
     acts.append(...btns);
     cardEl.append(acts);
-    grid.append(cardEl);
+    slot(f.group || f.name).inner.append(cardEl);
+  }
+  // 组头的数量最后补：卡片是边建边塞进各组的，这时才数得准。
+  for (const [g, s] of sections) {
+    s.title.textContent = g + ' 系列（' + s.inner.children.length + '）';
   }
 }
 
+/** 整个系列一起动：重载已加载的 / 启用被停用的。
+ *
+ * 从旧面板搬来的两条：①**不做「全部停用」** —— 那是破坏性的，逐条停用有确认流程，
+ * 批量那条路不该绕过它；②每个都单独发请求，失败的列出来（一个失败不影响其它）。
+ */
+async function groupAct(group, kind) {
+  const loaded = state.plugins.filter((p) => (p.group || p.name) === group).map((p) => p.name);
+  const disabled = state.files
+    .filter((f) => (f.group || f.name) === group && (state.disabled || []).includes(f.name))
+    .map((f) => f.name);
+  const names = kind === 'reload' ? loaded : disabled;
+  if (!names.length) {
+    toast(kind === 'reload' ? '这个系列没有已加载的插件' : '这个系列没有已停用的插件');
+    return;
+  }
+  const fails = [];
+  for (const n of names) {
+    try {
+      await api('/api/plugins/' + encodeURIComponent(n) + '/' + (kind === 'reload' ? 'reload' : 'enable'), {
+        method: 'POST',
+      });
+    } catch (e) {
+      if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+      fails.push(n + '（' + (e.message || '失败') + '）');
+    }
+  }
+  const ok = names.length - fails.length;
+  toast(
+    fails.length
+      ? group + ' 系列：' + ok + ' 个成功，失败 ' + fails.join('、')
+      : group + ' 系列：' + names.length + ' 个' + (kind === 'reload' ? '已重载' : '已启用'),
+    fails.length > 0,
+  );
+  await refresh();
+}
 /** 正在改哪条任务（弹窗共用一份）。 */
 let scheduleTarget = null;
 

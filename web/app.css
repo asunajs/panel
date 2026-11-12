@@ -953,3 +953,16 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .alerts-bar .alert-clear {
   align-self: flex-end;
 }
+/* ---------- 插件「系列」分组（第 88 轮，从旧面板搬来） ---------- */
+
+/* 每组占满整行（外层 #plugin-grid 本身是 grid）：组头一行 + 组内自己的卡片格。 */
+.plugin-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 9px; }
+.plugin-group + .plugin-group { margin-top: 6px; }
+.plugin-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* 组名是用户起的（插件名的前缀），**不要**跟着 `.group-title` 变全大写：
+   `mcloud` 显示成 `MCLOUD` 会认不出来。这里覆盖掉。 */
+.plugin-group .group-title {
+  text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 650;
+  color: var(--fg);
+}
+.plugin-group-actions { display: flex; gap: 6px; margin-left: auto; }

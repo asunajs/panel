@@ -3087,3 +3087,15 @@ async fn the_simplest_export_returns_csv_for_a_table_or_400() {
         assert!(text.contains("table"), "{uri}: {text}");
     }
 }
+
+/// 「系列」名推导：名字里第一个分隔符之前那段（规则搬自旧面板，界面按它分组）。
+#[test]
+fn plugin_group_by_name_prefix() {
+    assert_eq!(crate::plugin_group("mcloud"), "mcloud");
+    assert_eq!(crate::plugin_group("mcloud-signin"), "mcloud");
+    assert_eq!(crate::plugin_group("mcloud-daily-check"), "mcloud");
+    assert_eq!(crate::plugin_group("bilibili_dynamic"), "bilibili");
+    assert_eq!(crate::plugin_group("panel-jobs"), "panel");
+    // 名字以分隔符开头时不要给出空组名
+    assert_eq!(crate::plugin_group("-x"), "");
+}

@@ -212,6 +212,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 插件源码查看 + 编辑 + 保存并重载 | ✅（source / source/restore） | ✅ | 保存 = 写盘 → 重载；重载失败**自动回滚文件**并把旧版本装回去 |
 | 新建插件（模板起步） | ✅（upload） | ✅ | 界面填名字，后端写模板文件并加载 |
 | 删除插件 | ✅（delete 文件） | ✅ | 移进 `data/trash/`，不是直接删 —— 误点可捞 |
+| **插件分组（系列）** | ✅ 按名字前缀推导，组头带「全部重载 / 全部启用」 | ✅ | 规则原样搬来：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。后端 `plugin_group()` 推导并放进 `/api/state`、`/api/plugins/files`，前端只负责摆；**不做「全部停用」**（破坏性动作不该走批量路径）。第 88 轮补 |
 | 未加载插件的可见性 | ❌（列表只看已加载） | ✅ | `/api/plugins/files` 列出目录里所有 `.js`，语法错的也能进去修 |
 | **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。新标签打开，不做 iframe。契约见 [plugins.md](plugins.md) |
 | 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = 独立 `.js`，排程在记录里（不在代码里）；每次运行新建 Context，日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
