@@ -737,6 +737,11 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         "disabled": crate::db::plugin_disabled_names(&st.db).await,
         "tasks": tasks,
         "stats": stats,
+        // 保留策略：界面上「数据」页要能说清「记录会留多久」（见 retention.rs）。
+        "retention": {
+            "runs_keep": crate::retention::RUNS_KEEP,
+            "logs_keep": crate::retention::LOGS_KEEP,
+        },
     })))
 }
 

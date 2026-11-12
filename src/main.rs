@@ -17,6 +17,7 @@ mod scheduler;
 mod notify;
 mod outbound;
 mod ratelimit;
+mod retention;
 mod panelversion;
 mod scripts;
 mod sync_bridge;
@@ -106,6 +107,8 @@ async fn main() -> Result<(), String> {
     let _scripts_task = scripts.clone().spawn_ticker();
     // 通知发件箱：外部渠道失败要重试，不能发一次就丢。
     let _notify_task = crate::notify::spawn_ticker(db.clone(), log.clone(), config.clone());
+    // 运行记录/日志只增不减：后台定期剪到最近 N 条（见 retention.rs）。
+    let _retention_task = crate::retention::spawn_ticker(db.clone(), log.clone());
 
     if ssrf::allow_private_outbound_targets() {
         log.emit(

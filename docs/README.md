@@ -65,6 +65,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [session.md](session.md) | 登录：会话 cookie 的形状与密钥、首次设置令牌（`/api/setup`） |
 | [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：根因、修法（vendor 补丁 + 加载期闸门）、升级时怎么重打 |
 | [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
+| [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
 | [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |
 

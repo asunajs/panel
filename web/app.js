@@ -1613,7 +1613,14 @@ function renderSettings() {
     ["删除回收站", cfg && cfg.trash_dir],
     ["顶层键", cfg && cfg.keys && cfg.keys.length ? cfg.keys.join("、") : "（无）"],
   ]));
-  dat.append(el("p", "settings-note", "删掉的插件文件会进 trash 目录，需要时可以从那里捞回来。"));
+  const keep = state.retention;
+  dat.append(el("p", "settings-note",
+    "删掉的插件文件会进 trash 目录，需要时可以从那里捞回来。"));
+  if (keep) {
+    dat.append(el("p", "settings-note",
+      "运行记录与日志各保留最近 " + keep.runs_keep + " / " + keep.logs_keep +
+      " 条，超出的每 5 分钟自动清理一次（只删最旧的，不归档）。"));
+  }
 
   const bar = el("div", "actions backup-bar");
   const expBtn = el("button", "btn btn-sm", "导出备份");

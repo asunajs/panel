@@ -66,6 +66,13 @@ else
   bad 'api() 收到字符串 body 不会带 content-type，后端会 415 —— 传对象'
 fi
 
+# retention.md：清理任务必须还挂在 main 里（删了它 runs/logs 就会无限长）
+if grep -q 'retention::spawn_ticker' src/main.rs; then
+  ok '运行记录/日志的清理任务还接着（retention::spawn_ticker）'
+else
+  bad 'main.rs 里没有 retention::spawn_ticker —— 运行记录/日志会无限增长'
+fi
+
 # ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
 # 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
 if python3 scripts/check-css-tokens.py; then
@@ -76,7 +83,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 8 条坑的守卫全过"
+  echo "ok: 9 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi
