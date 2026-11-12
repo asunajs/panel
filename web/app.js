@@ -659,6 +659,9 @@ function renderTasks() {
     ops.push(t.enabled
       ? ['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]
       : ['恢复', () => act(taskPath(t, 'resume'), '已恢复 ' + t.name)]);
+    // 熔断了才给这个按钮：冷却是指数退避，人修好原因之后得有个立刻能恢复的出口
+    // （通知里那句「检查完可以手动恢复」指的就是它）。
+    if (t.tripped) ops.push(['重置熔断', () => act(taskPath(t, 'reset'), '已重置熔断 ' + t.name)]);
     tr.append(actionsCell(ops));
     body.append(tr);
   }

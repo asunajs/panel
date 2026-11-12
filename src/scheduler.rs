@@ -409,6 +409,17 @@ pub enum Cmd {
         source: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 清掉一条任务的熔断状态（`tripped` / `trips` / 连续失败计数）。
+    ///
+    /// 熔断的语义是「指数退避冷却」：失败一次冷却翻倍（30s → 60s → … → 10min 封顶），
+    /// 冷却结束就半开重试。问题是没有出口 —— 人把原因修好了（重新登录之类），
+    /// 也只能等下一次冷却到期；`trips` 还会一直累着，越等越久。
+    /// 通知里写着「检查完可以手动恢复」，那就得真的能恢复。
+    ResetTrip {
+        plugin: String,
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// 问「这个插件最后一次成功加载用的是哪段源码」。
     SourceOf {
         name: String,
@@ -446,6 +457,17 @@ impl Scheduler {
         self.call(|reply| Cmd::Load {
             name,
             source,
+            reply,
+        })
+        .await?
+    }
+
+    /// 清掉一条任务的熔断状态，并把下一拍对齐到现在（立刻可以再跑）。
+    pub async fn reset_trip(&self, plugin: &str, task: &str) -> Result<(), String> {
+        let (plugin, task) = (plugin.to_string(), task.to_string());
+        self.call(|reply| Cmd::ResetTrip {
+            plugin,
+            name: task,
             reply,
         })
         .await?
@@ -839,6 +861,34 @@ impl Inner {
                         // 加载失败：注册进来的任务是孤儿，清掉，别让它们钉住 sleep_hint
                         self.tasks.retain(|t| t.plugin != name);
                         Err(e)
+                    }
+                };
+                let _ = reply.send(out);
+            }
+            Cmd::ResetTrip {
+                plugin,
+                name,
+                reply,
+            } => {
+                let out = match self.find(&plugin, &name) {
+                    None => Err(format!("没有这个任务: {plugin}/{name}")),
+                    Some(i) => {
+                        let was = (self.tasks[i].tripped, self.tasks[i].trips);
+                        self.tasks[i].tripped = false;
+                        self.tasks[i].trips = 0;
+                        self.tasks[i].consecutive_failures = 0;
+                        self.tasks[i].realign(Local::now());
+                        self.persist_task(i);
+                        self.log.emit(
+                            &plugin,
+                            None,
+                            Level::Info,
+                            format!(
+                                "任务 {name} 的熔断已重置（原来 tripped={} trips={}），下一拍按现在重算",
+                                was.0, was.1
+                            ),
+                        );
+                        Ok(())
                     }
                 };
                 let _ = reply.send(out);

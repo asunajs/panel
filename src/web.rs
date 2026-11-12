@@ -142,6 +142,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/run", post(task_run))
         .route("/api/tasks/{plugin}/{name}/pause", post(task_pause))
         .route("/api/tasks/{plugin}/{name}/resume", post(task_resume))
+        .route("/api/tasks/{plugin}/{name}/reset", post(task_reset))
         // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
         .route("/api/runs", get(api_runs))
@@ -1181,6 +1182,21 @@ async fn task_pause(
         .await
         .map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/tasks/{plugin}/{name}/reset` —— 清掉熔断状态。
+///
+/// 熔断是「指数退避冷却」：失败一次冷却翻倍（30s → 60s → … → 10min 封顶），冷却结束半开重试。
+/// 人把原因修好之后（重新登录之类），没有出口就只能干等下一次冷却；通知里写着
+/// 「检查完可以手动恢复」，这个接口就是那个「恢复」。
+async fn task_reset(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    st.sched.reset_trip(&plugin, &name).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "plugin": plugin, "name": name })))
 }
 
 /// `POST /api/tasks/{plugin}/{name}/schedule` —— 改一条任务的调度。

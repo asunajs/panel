@@ -240,6 +240,11 @@
     现在走 `Inner::persist` 通道，一条一条按发出顺序写。
 
     字段归属表见 `docs/task-state.md`。
+32. **熔断没有「手动恢复」的出口**：`resume` 只动 `enabled`，`trips` 一直累着（冷却翻倍），
+    而通知文案写着「检查完可以手动恢复」。第 38 轮补 `POST /api/tasks/{p}/{n}/reset`
+    （界面任务行「重置熔断」按钮），清 `tripped`/`trips`/`consecutive_failures` 并把下一拍对齐到现在。
+    另外 `tripped`/`trips` **不落库**，热重载和重启都会清零 —— 有意的（重启往往是「刚改完」），
+    代价是必然失败的任务每次重启要先失败 5 次才重新熔断。见 `docs/task-state.md`。
 
 ## 8. 运行中的面板
 

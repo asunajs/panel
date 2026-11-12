@@ -2383,3 +2383,61 @@ async fn logs_can_be_filtered_searched_and_paged() {
     assert_eq!(v6["total"], 0);
     assert!(v6["logs"].as_array().unwrap().is_empty());
 }
+
+/// 熔断之后必须能手动恢复：不然人把原因修好了也只能干等冷却（指数退避越来越久）。
+#[tokio::test]
+async fn a_tripped_task_can_be_reset() {
+    let (app, plugins, _data, _store) = setup_dirs("ptrip").await;
+    std::fs::write(
+        plugins.join("bad.js"),
+        [
+            "import host from 'panel:host';",
+            "await host.register_handler('t', async () => { throw new Error('always-fail'); });",
+            "await host.register_cron('t', '@every 1h', 3000, {});",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/bad/reload", None)).await;
+    assert_eq!(status, StatusCode::OK, "插件要能加载");
+
+    // 连续失败到阈值（TripConfig::default().threshold = 5）
+    for _ in 0..5 {
+        let (status, body) = send(&app, with_csrf("POST", "/api/tasks/bad/t/run", None)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // 等这次跑完（失败很快，但要等 Finished 回到调度器）
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (_, state) = get(&app, "/api/state").await;
+    let t = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "t")
+        .cloned()
+        .unwrap_or_else(|| panic!("没有任务 t: {state}"));
+    assert_eq!(t["tripped"], true, "5 次失败之后应当熔断: {t}");
+    assert!(t["trips"].as_u64().unwrap_or(0) >= 1);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/bad/t/reset", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "t")
+        .cloned()
+        .unwrap();
+    assert_eq!(t["tripped"], false, "重置后不该还熔断: {t}");
+    assert_eq!(t["trips"], 0, "冷却档位也要归零，否则下次失败又是长冷却");
+}
+
+/// 重置一个不存在的任务：400 说清楚，不要 500。
+#[tokio::test]
+async fn resetting_an_unknown_task_is_a_400() {
+    let (app, _plugins, _data, _store) = setup_dirs("ptrip2").await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/nope/nope/reset", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
