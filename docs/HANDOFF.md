@@ -167,6 +167,10 @@
     启动时 `db::reap_stale_runs` 统一标成 error + 「面板重启：这次运行没有跑完」。
     有测试：`db::tests::reap_marks_stale_running_runs_as_error`（含「已经跑完的不能动」）。
     面板日志里会留一行「有 N 条运行记录上次没跑完」。
+17. **脚本的「内容在文件、排程在库」，`list()` 只读库**：手写一个 `scripts/x.js` 丢进去，
+    面板里根本看不见（第 27 轮做备份往返时发现：备份里 0 个脚本，因为那文件从没被登记）。
+    启动时 `Scripts::reconcile()` 把目录里没登记过的 `.js` 收编成「只手动跑」，
+    已有的行一个字段都不动。有测试：`scripts::tests::reconcile_*` 两条。
 
 ## 8. 运行中的面板
 

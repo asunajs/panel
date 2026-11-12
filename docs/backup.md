@@ -48,6 +48,26 @@ magic 8B "PANELBK1" | eph_pub 32B | nonce_prefix 8B | plaintext_len 8B | 若干�
 **只增 / 覆盖，绝不删。** 备份里没有的东西保持原样 —— 把「恢复」做成「清空再灌」
 是最容易让人丢数据的实现方式。配置在落任何插件文件**之前**先校验（坏 JSON 整批不写）。
 
+## 失败路径（2026-11-12 补，都有测试盯着）
+
+加密备份最怕的不是解不开，是**以为加密了其实没有**。这轮把这些边界都钉住了：
+
+| 场景 | 行为 | 用例 |
+|---|---|---|
+| 公钥写错 / 长度不对 | 报错，且**删掉明文临时文件** | `backup_crypto::extra_tests` + e2e |
+| 加密成功 | 密文落盘后才删明文（顺序不能反） | `encrypt_then_decrypt_round_trips_and_removes_the_plaintext` |
+| 私钥错 / 不匹配 | 报错，dst 不留半截明文 | `the_wrong_secret_is_rejected_with_a_readable_error` |
+| 密文被改过 | 认证失败，dst 删掉 | `tampered_ciphertext_is_rejected` |
+| 文件截断 | 报「太短/不是」，不 panic | `a_truncated_file_errors_instead_of_panicking` |
+| 明文备份当成密文 | 不误判（魔数精确匹配） | `a_plain_json_file_is_not_mistaken_for_ciphertext` |
+| 解密临时明文 | 读完立刻删 | `load_backup_requires_a_secret_for_ciphertext` |
+
+两条是这轮**改出来的**（写测试时先红后绿）：
+
+- `decrypt_to` 原来在认证失败时会把前面几块的明文留在 dst 上 —— 加密备份的意义就是明文不落盘，
+  失败留半截正好破坏它。现在失败一律删 dst。
+- `backup --encrypt-to` 加密失败时会把 `*.plain.tmp` 留在盘上。现在失败也删。
+
 ## 读数（2026-11-12，真数据）
 
 ```text

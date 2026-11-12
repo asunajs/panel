@@ -231,7 +231,15 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
     std::fs::write(&tmp, &bytes).map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
     match arg_value(args, "--encrypt-to") {
         Some(key) => {
-            let n = crate::backup_crypto::encrypt_to(&tmp, Path::new(&out), &key)?;
+            // 加密失败（公钥写错之类）不能把明文临时文件留在盘上 —— 那等于「以为加密了，
+            // 其实旁边躺着一份明文」（第 27 轮 e2e 时抓到）。
+            let n = match crate::backup_crypto::encrypt_to(&tmp, Path::new(&out), &key) {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            };
             println!("已加密写出 {out}（{n} 字节；解密要那把私钥）");
         }
         None => {

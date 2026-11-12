@@ -139,6 +139,64 @@ impl Scripts {
         Ok(out)
     }
 
+    /// 启动时对账：目录里有、库里没有的 `.js` 收编成「只手动跑」的脚本。
+    ///
+    /// 为什么要有：脚本的**内容**在文件里，**排程**在库里，而 `list()` 只读库。
+    /// 于是手写一个 `scripts/x.js` 丢进去，面板里根本看不见 —— 用户会以为坏了
+    ///（第 27 轮做备份往返时发现：备份里 0 个脚本，因为那个文件从没被登记）。
+    /// 插件那边是扫目录的，脚本这边不该两套规矩。
+    ///
+    /// 只做「补登记」，不动已有的行：库里已经有排程的脚本不能被一次重启改掉。
+    pub async fn reconcile(&self) -> Result<usize, String> {
+        let mut on_disk = Vec::new();
+        let mut rd = match tokio::fs::read_dir(&self.dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(format!("读脚本目录失败: {e}")),
+        };
+        while let Some(ent) = rd.next_entry().await.map_err(|e| e.to_string())? {
+            let p = ent.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("js") {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+                if safe_name(stem).is_ok() {
+                    on_disk.push(stem.to_string());
+                }
+            }
+        }
+        if on_disk.is_empty() {
+            return Ok(0);
+        }
+        let adopted = self
+            .db
+            .call(move |c| {
+                let known: Vec<String> = c
+                    .prepare("SELECT name FROM scripts")
+                    .map_err(|e| e.to_string())?
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?
+                    .collect::<rusqlite::Result<_>>()
+                    .map_err(|e| e.to_string())?;
+                let mut n = 0usize;
+                for name in on_disk {
+                    if known.contains(&name) {
+                        continue;
+                    }
+                    c.execute(
+                        "INSERT INTO scripts(name,cron,budget_ms,enabled,next_at,updated_at)
+                         VALUES(?1,NULL,?2,1,NULL,?3)",
+                        rusqlite::params![name, DEFAULT_BUDGET_MS as i64, now_ms()],
+                    )
+                    .map_err(|e| format!("登记脚本 {name} 失败: {e}"))?;
+                    n += 1;
+                }
+                Ok(n)
+            })
+            .await?;
+        Ok(adopted)
+    }
+
     pub async fn get(&self, name: &str) -> Result<Value, String> {
         let p = path_of(&self.dir, name)?;
         let source = tokio::fs::read_to_string(&p)
@@ -473,3 +531,7 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .await
         .map_err(|e| format!("替换 {} 失败: {e}", path.display()))
 }
+
+#[cfg(test)]
+#[path = "scripts_tests.rs"]
+mod tests;

@@ -115,6 +115,17 @@ async fn main() -> Result<(), String> {
         data_dir.join("trash"),
         config.clone(),
     );
+    // 目录里有、库里没有的 .js 收编成「只手动跑」的脚本（不然手写的脚本面板里看不见）。
+    match scripts.reconcile().await {
+        Ok(n) if n > 0 => log.emit(
+            "panel",
+            None,
+            Level::Info,
+            format!("脚本目录里发现 {n} 个没登记过的 .js，已按「只手动跑」收编"),
+        ),
+        Ok(_) => {}
+        Err(e) => log.emit("panel", None, Level::Warn, format!("脚本目录对账失败: {e}")),
+    }
     let _scripts_task = scripts.clone().spawn_ticker();
     // 通知发件箱：外部渠道失败要重试，不能发一次就丢。
     let _notify_task = crate::notify::spawn_ticker(db.clone(), log.clone(), config.clone());
