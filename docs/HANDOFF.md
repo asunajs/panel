@@ -8,8 +8,8 @@
 用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/parity.md` **31 ✅ / 0 部分 / 2 ❌**，
 两条 ❌ 都是「明确不做」（任务软删、市场/自更新）。
 
-- `cargo build` 零 warning；`cargo test` **205 passed**；`bash scripts/check-unsafe-budget.sh` → 0 处；
-  `bash scripts/check-docs.sh` → 17 篇文档内链全通、都在 300 行内。
+- `cargo build` 零 warning；`cargo test` **214 passed**（+2 个 `#[ignore]` 探针）；`bash scripts/check-unsafe-budget.sh` → 0 处；
+  `bash scripts/check-docs.sh` → 19 篇文档内链全通、都在 300 行内。
 - `src/` 33 个文件 / 15309 行（含测试）；host-api **27 个 op**，全 async。
 - 40 个 commit，**无 remote、未 push**，工作树干净。
 - 面板跑在 **http://127.0.0.1:8787**（无令牌、只绑回环），7 个插件 / 7 个任务：
@@ -171,9 +171,9 @@
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
-cargo build --offline && cargo test --offline   # 零 warning / 205 passed
+cargo build --offline && cargo test --offline   # 零 warning / 214 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
-bash scripts/check-docs.sh                      # ok: 17 篇文档，内链全通、都在 300 行内
+bash scripts/check-docs.sh                      # ok: 19 篇文档，内链全通、都在 300 行内
 ```
 
 端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。
