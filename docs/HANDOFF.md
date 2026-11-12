@@ -126,6 +126,9 @@
 
 ## 7. 接手必知的技术坑（踩过的，按踩到的顺序）
 
+> 其中 7 条已经是**跑得出来的守卫**：`bash scripts/check-pitfalls.sh`（§7.5 / §7.11 / §7.12 /
+> §7.13 / §7.14 + 两个 vendor 补丁）。改坏了当场红，不用等线上发现限流是装饰品。
+
 1. **没有 serde_json↔JS 转换器**（rquickjs-core 0.14 无 serde feature，vendored LLRT 零 serde_json）。
    结构化数据过边界走 **JSON 文本**，JS 侧 `WRAP` 工厂用引擎自己的 JSON.parse/stringify。别造 native 转换器。
 2. **可选参数 arity gap**：rquickjs `Opt<T>`（少传 OK/显式 undefined 炸）、LLRT `Undefined<T>`（少传炸/undefined OK）、
@@ -167,7 +170,7 @@
 `vendor/llrt/bundle/js`（168K，生成物）**刻意 force-add 入库** —— 本机 github 不通，离线构建需要它。
 旧仓库 `rust-plugin-panel` 全程只读未碰。
 
-## 10. 复跑（四条命令）
+## 10. 复跑（五条命令）
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
@@ -175,6 +178,7 @@ cargo build --offline && cargo test --offline   # 零 warning / 216 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
 bash scripts/check-docs.sh                      # ok: 19 篇文档，内链全通、都在 300 行内
 node scripts/ui-check.mjs                       # 界面 21 条断言（自起面板 + 无头 Edge）
+bash scripts/check-pitfalls.sh                   # 坑的守卫 7 条（静态检查）
 ```
 
 端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。

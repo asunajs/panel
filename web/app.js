@@ -227,9 +227,13 @@ async function api(path, opt = {}) {
   const headers = Object.assign({}, opt.headers || {});
   if (state.token) headers['x-panel-token'] = state.token;
   if (opt.method && opt.method !== 'GET') headers['x-panel'] = '1';
-  // body 给对象就自动序列化：调用处只关心「发什么」，不关心 content-type。
+  // body 只收对象：字符串不会带 content-type，后端的 Json 提取器会回 415
+  // （HANDOFF §7.14 踩过）。这里直接拦，比在调用处写注释管用。
   let body = opt.body;
-  if (body !== undefined && typeof body !== 'string') {
+  if (typeof body === 'string') {
+    throw new Error('api() 别传字符串 body：传对象，让它自己序列化（字符串不带 content-type，后端会 415）');
+  }
+  if (body !== undefined) {
     body = JSON.stringify(body);
     headers['content-type'] = 'application/json';
   }

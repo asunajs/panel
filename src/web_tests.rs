@@ -1980,3 +1980,35 @@ async fn runs_plugins_lists_names_seen_in_runs() {
     let (_, body) = get(&app2, "/api/runs/plugins").await;
     assert_eq!(body["plugins"], json!([]));
 }
+
+/// 字符串 body 不带 content-type ⇒ axum 的 `Json` 提取器回 415。
+///
+/// 这条不是「测 axum」，是把前端那个坑（HANDOFF §7.14）钉在服务端这一侧：
+/// 只要 415 的行为还在，`web/app.js` 里 api() 拒绝字符串 body 就是有意义的。
+#[tokio::test]
+async fn a_string_body_without_content_type_is_415() {
+    let (app, _plugins, _data, _store) = setup_dirs("ct").await;
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/config")
+        .header("x-panel", "1")
+        .body(Body::from("{\"a\":1}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "没带 content-type 的字符串 body 必须 415"
+    );
+
+    // 带上 content-type 就能过：说明拒绝的原因是「缺 content-type」而不是「body 是字符串」
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/config")
+        .header("x-panel", "1")
+        .header("content-type", "application/json")
+        .body(Body::from("{\"text\":\"{}\"}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
