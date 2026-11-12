@@ -263,3 +263,8 @@
 61. **去重键里别放每次都变的字段**：通知失败告警本来写成「第 {attempts} 次」，于是每次重试都是新消息，
     去重完全失效（一次退避能刷 5 条）。文案里只留「渠道 + 原因」。
     守卫：`a_failed_prune_is_announced_on_the_alert_bar`（同一句两次 → 一条、count=2）。
+
+62. **host op 的 `opts` 也要挡写错的键名**：`set_job_schedule('x', {cron: ...})` 只认 `expr`，
+    写错就是**静默无效**（第 73 轮跑 examples/demo-plugin.js 时踩到：任务没按计划跑，插件作者毫无反馈）。
+    现在 `only_keys()` 白名单，`set_job_schedule` / `register_cron` 都挡。
+    守卫：`only_keys_tests` 两条 + 演示插件的 `bad_key` 自检。

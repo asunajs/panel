@@ -652,12 +652,32 @@ async fn op_set_job_blockers(ctx: Ctx<'_>, name: String, blockers: String) -> Re
 
 /// set_job_schedule(name, { expr, lead_ms }) —— 写的是面板的 override_expr，
 /// 所以插件更新不会丢、界面上还能「恢复默认」。
+/// `opts` 里的键只认这几个：多传了要**报错**，别静默当默认值。
+///
+/// 为什么较真：`set_job_schedule('x', {cron: '@every 6h'})` 这种写错键名的调用，
+/// 以前会静默变成「撤销覆盖」——HTTP 侧连续踩过三次同类问题（第 36/53/65 轮），
+/// 这次是 host op 这一侧（第 73 轮跑演示插件时踩到）。插件作者看不到任何反馈，
+/// 只能干瞪眼「为什么我的任务没有按计划跑」。
+fn only_keys(o: &Json, allowed: &[&str], what: &str) -> std::result::Result<(), String> {
+    let Some(map) = o.as_object() else {
+        // null / 非对象：交给各 op 自己的默认值逻辑（null 表示「没传」）
+        return Ok(());
+    };
+    if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{what} 的 opts 只认 {}，收到 {k:?}（是不是写成别的名字了？）",
+            allowed.join(" / ")
+        ));
+    }
+    Ok(())
+}
 async fn op_set_job_schedule(ctx: Ctx<'_>, name: String, opts: String) -> Result<()> {
     let h = host(&ctx)?;
     let sched = sched_of(&ctx, &h)?;
     let (p, t) = job_target(&h, &name).map_err(|e| err(&ctx, e))?;
     let o: Json =
         serde_json::from_str(&opts).map_err(|e| err(&ctx, format!("参数不是合法 JSON: {e}")))?;
+    only_keys(&o, &["expr", "lead_ms"], "set_job_schedule").map_err(|e| err(&ctx, e))?;
     let expr = o
         .get("expr")
         .and_then(Json::as_str)
@@ -742,6 +762,7 @@ async fn op_register_cron(
         Some(t) => serde_json::from_str(t)
             .map_err(|e| err(&ctx, format!("register_cron 的 opts 不是合法 JSON: {e}")))?,
     };
+    only_keys(&o, &["params", "lead_ms"], "register_cron").map_err(|e| err(&ctx, e))?;
     let params = match o.get("params") {
         None | Some(Json::Null) => None,
         Some(v) => Some(v.clone()),
@@ -807,4 +828,25 @@ async fn op_register_handler<'js>(
             name,
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
+}
+#[cfg(test)]
+mod only_keys_tests {
+    use super::only_keys;
+    use serde_json::json;
+
+    /// 写错键名要报错：第 73 轮跑演示插件时踩到 `{cron: ...}` 被静默当成「撤销覆盖」。
+    #[test]
+    fn a_misspelled_option_is_rejected_with_the_allowed_list() {
+        let e = only_keys(&json!({ "cron": "@every 6h" }), &["expr", "lead_ms"], "set_job_schedule")
+            .unwrap_err();
+        assert!(e.contains("只认 expr / lead_ms"), "{e}");
+        assert!(e.contains("cron"), "要把写错的键名说出来: {e}");
+    }
+
+    #[test]
+    fn the_documented_keys_and_null_pass() {
+        assert!(only_keys(&json!({ "expr": "@every 6h" }), &["expr", "lead_ms"], "x").is_ok());
+        assert!(only_keys(&json!(null), &["expr"], "x").is_ok(), "null 表示没传");
+        assert!(only_keys(&json!({}), &["expr"], "x").is_ok(), "空对象合法");
+    }
 }

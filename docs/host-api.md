@@ -283,3 +283,5 @@ stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 3. **`structuredClone` 缺失**（绕过 `Vm` 的代价）⇒ 见 [architecture.md §1.1](architecture.md#11-不用-vmfrom_options已定)。
 
 现有插件（含央视频）**不能原样跑**，要按 async host-api 改写。这是已接受的重写代价。
+
+逐个入口的自检读数（样例插件跑一遍）另开一篇：[host-api-demo.md](host-api-demo.md)。
