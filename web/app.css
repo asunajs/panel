@@ -981,3 +981,9 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   background: var(--warn-soft); color: var(--warn);
 }
 .ready-chip.ok .ready-dot { background: var(--ok-soft); color: var(--ok); }
+
+/* 触屏：图标按钮的点击目标要够大（苹果/谷歌都写 ≥44px，这里给 40px + 内边距补偿）。
+   手机上顶栏的铃铛、主题、抽屉的 ✕ 原来是 32px，指头按不准 —— 第 90 轮实测。 */
+@media (max-width: 720px) {
+  .icon-btn { width: 40px; height: 40px; }
+}

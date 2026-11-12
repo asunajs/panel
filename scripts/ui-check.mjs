@@ -425,6 +425,19 @@ async function main() {
   await sleep(1200);
   const overflow = await js('document.documentElement.scrollWidth - window.innerWidth');
   check('窄屏没有横向溢出', overflow <= 1, 'scrollWidth 比视口多 ' + overflow + 'px');
+  // 触屏尺寸（第 90 轮）：图标按钮的点击目标要够大，指头按得准。
+  // 32px 是桌面尺寸；手机上（≤720px）给 40px（苹果/谷歌建议 ≥44，40 是折中，
+  // 再大顶栏就挤了 —— 实测三个图标 40x40 刚好不溢出）。
+  const iconBox = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('.topbar .icon-btn')].filter(b=>getComputedStyle(b).display!=='none')" +
+    ".map(b=>{const r=b.getBoundingClientRect();return {id:b.id,w:Math.round(r.width),h:Math.round(r.height)}}))",
+  ));
+  check(
+    '触屏上图标按钮的点击目标 ≥40px',
+    iconBox.length > 0 && iconBox.every((b) => b.w >= 40 && b.h >= 40),
+    JSON.stringify(iconBox),
+  );
+
   const theadH = await js("document.querySelector('#view-runs thead') ? document.querySelector('#view-runs thead').offsetHeight : -1");
   check('窄屏表头隐藏（卡片模式）', theadH === 0, 'thead 高 ' + theadH);
   const cells = JSON.parse(await js(
