@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-**Stage 0（spike 退风险）六条判据全部通过**，读数见 [llrt-spike.md](llrt-spike.md)。
+**Stage 0（spike 退风险）六条判据全部通过**，读数见 [engine.md](engine.md)。
 **Stage 1（最小垂直切片）已实现并验证**：`src/` 是产品代码，`spike/` 是探针；
 端到端读数（构建/测试、九个 op、fetch 限额、SSRF 单通道、20 分钟长任务 p99、熔断/SSE/热重载）
 见 [verification.md](verification.md)。
@@ -21,12 +21,12 @@
 **同一天还补了两块**：脚本（独立 `.js`，手动跑或按 `cron` 跑，运行记录/日志复用现有两张表）
 和开机自启动（`panel-llrt service print|install|uninstall|status`）。
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
-契约见 [plugin-webui.md](plugin-webui.md)。
+契约见 [plugins.md](plugins.md)。
 任务失败、熔断和插件主动喊话都会进顶栏铃铛，配 `PANEL_NOTIFY_WEBHOOK` 还能推到外部。
 备份/恢复（`GET/POST /api/backup`）也在设置页数据 tab 里。
 最后做了一轮「浅色/暗色 × 宽屏/窄屏」的界面一致性核查。
 
-**与旧面板的功能对照见 [parity.md](parity.md)**：用户点名的六项（插件增删改查、脚本增删改查、
+**与旧面板的功能对照见 [plugins.md](plugins.md)**：用户点名的六项（插件增删改查、脚本增删改查、
 插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，另外补了备份/恢复和通知；
 只剩「市场 / 在线更新」和「zip 上传」两项，理由写在那张表里。
 
@@ -38,7 +38,7 @@ cargo build && cargo test      # 114 passed，零 warning
 
 **离线可构建**：仓库里带了 `vendor/llrt/bundle/js`（168K）。它是 LLRT 的 JS 侧字节码源，
 由 `tools/bundle/build.mjs` 生成、上游不跟踪 —— 但本仓库**刻意入库**，因为本机 github.com
-直连不通（见 [architecture.md §1.2](architecture.md)），构建必须完全离线。
+直连不通（见 [engine.md §1.2](engine.md)），构建必须完全离线。
 
 要重新生成（改了 LLRT 的 js 源，或重新 vendor 上游时）：
 
@@ -48,39 +48,23 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 ```
 
 ⚠ `vendor/` 里有**一处本仓库补丁**（`llrt_process` 的环境变量初始化，见
-[auth.md §7](auth.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`。
+[api.md §7](api.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`。
 
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [architecture.md](architecture.md) | 嵌入形态、隔离模型、两条预算、取消归属、抛弃清单、Stage 1 模块划分 |
-| [llrt-spike.md](llrt-spike.md) | Stage 0 六条判据的一手读数与复跑命令 |
-| [host-api.md](host-api.md) | async host-api 契约、限额、SSRF / 脱敏边界、代码纪律 |
-| [verification.md](verification.md) | Stage 1 端到端验证读数与复跑命令、仍然敞开的清单 |
-| [auth.md](auth.md) | 面板令牌：盐 + PBKDF2 哈希的读数、取舍、红队复审修订表 |
-| [ui.md](ui.md) | 控制台：形态、设计令牌、零构建约束、交互细节、读数与已知短板 |
-| [ui-check.md](ui-check.md) | 界面门禁：`scripts/ui-check.mjs` 的 24 条断言、反向例、窄屏读数 |
-| [plugin-webui.md](plugin-webui.md) | 插件自带界面：目录约定、三条路由、evt 形状、鉴权与嵌入取舍 |
-| [session.md](session.md) | 登录：会话 cookie 的形状与密钥、首次设置令牌（`/api/setup`） |
-| [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：根因、修法（vendor 补丁 + 加载期闸门）、升级时怎么重打 |
-| [api-bodies.md](api-bodies.md) | 请求体/查询参数多余或写错一律 400；「参数静默忽略」的清单；415 例外 |
-| [config.md](config.md) | config.json 三个入口各自校验什么、为什么启动不查语义、reload 取代重启 |
-| [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
-| [health.md](health.md) | 健康摘要：`/readyz`（无鉴权探针）与 `/api/health`（带名字的明细）、warnings 阈值、读数 |
-| [logs.md](logs.md) | 日志流水线：脱敏 → SSE + 单消费者队列落库；`run_id` 归属表；顺序不能乱 |
-| [task-state.md](task-state.md) | 任务状态谁说了算：九个字段在热重载 / 重启后的归属、三个坑、实测 |
-| [js-slots.md](js-slots.md) | JS 执行通道：插件与脚本共用的并发上限、满了的行为、派发顺序、读数 |
-| [plugin-lifecycle.md](plugin-lifecycle.md) | 加载/重载/停用/卸载/删除各保住什么：tasks 是配置、runs 是历史；trash 找回的边界 |
-| [export.md](export.md) | 导出 CSV：BOM / 引号 / 公式注入 / 只认筛选参数；20000 行读数 |
-| [upload.md](upload.md) | 上传：单文件/zip 的落点与限制、同名覆盖、挡 zip bomb 与路径逃逸（带读数） |
-| [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
-| [storage-failures.md](storage-failures.md) | 只读目录 / 磁盘满时的行为与错误文案；日志写库失败只报一次 |
-| [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
-| [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
-| [performance.md](performance.md) | 量过的时间分布：一次运行 0–4ms、启动 0.47s（慢的形状是顶层语句条数）、忙/排队怎么看 |
-| [pitfalls.md](pitfalls.md) | 踩过的 37 条坑（按踩到的顺序；每条带复现方式或守卫位置） |
-| [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |
+| [engine.md](engine.md) | LLRT 嵌入形态、隔离模型、两条预算、取消归属、JS 通道、定时器坑、外部进程插件为什么不做的清单 |
+| [host-api.md](host-api.md) | async host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
+| [plugins.md](plugins.md) | 插件生命周期（加载/重载/停用/卸载/删除各保住什么）、自带界面与三条路由、上传（zip 与路径逃逸）、与旧面板的对照 |
+| [scheduler.md](scheduler.md) | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
+| [api.md](api.md) | 请求体/查询参数（多余或写错一律 400）、CSV 导出、令牌与会话 |
+| [ui.md](ui.md) | 控制台形态与设计令牌、零构建约束、界面门禁（`scripts/ui-check.mjs` / `ui-e2e.mjs`） |
+| [ops.md](ops.md) | 配置、通知、备份恢复、保留策略、日志流水线、健康摘要、脚本、磁盘/权限故障 |
+| [verification.md](verification.md) | 端到端读数（历史记录，按轮次） |
+| [pitfalls.md](pitfalls.md) | 踩过的坑（按顺序，每条带复现方式或守卫位置） |
+| [HANDOFF.md](HANDOFF.md) | 交接：现状、复跑命令、协作规则 |
+| [mcloud-migration.md](mcloud-migration.md) | mcloud 那一族的插件迁移进度 |
 
 ## 三态约定
 
@@ -93,7 +77,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 ## 目录
 
 ```
-vendor/llrt/     LLRT v0.10.0-beta 源码（vendored，理由见 llrt-spike.md 判据 1）
+vendor/llrt/     LLRT v0.10.0-beta 源码（vendored，理由见 engine.md 判据 1）
 tools/bundle/    生成 vendor/llrt/bundle/js 的最小 esbuild 脚本
 tools/parity/    跨运行时对拍：一份源两边跑（LLRT vs 真 Node）
 spike/           Stage 0 探针（不是产品代码）

@@ -5,7 +5,7 @@
 
 ## 0. 一句话现状（2026-11-12）
 
-用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/parity.md` **31 ✅ / 0 部分 / 2 ❌**，
+用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/plugins.md` **31 ✅ / 0 部分 / 2 ❌**，
 两条 ❌ 都是「明确不做」（任务软删、市场/自更新）。
 
 - `cargo build` 零 warning；`cargo test` **216 passed**；`bash scripts/check-unsafe-budget.sh` → 0 处；
@@ -72,24 +72,24 @@
 
 测试在同名 `*_tests.rs`（`#[path]` 挂进模块），路由级测试直接打真 `Router`，不起监听。
 
-### 4.2 文档（`docs/`，17 篇 / 2656 行）
+### 4.2 文档（`docs/`，12 篇）
+
+第 82 轮合并过：原来是 35 篇「一个读数一篇」，现在是 11 篇「一章一篇」（上限也从 300 行抬到 1000 行）。
 
 | 篇 | 讲什么 |
 |---|---|
-| `README.md` | 索引 + 三态约定 |
-| `architecture.md` | 嵌入形态、隔离模型、两条预算、取消归属、抛弃清单、模块划分 |
-| `engine-teardown.md` | **插件退出时的定时器**（已知未修）：`setInterval` 卡住 load、待触发 `setTimeout` 让卸载等、handler 用过定时器再卸载可能 assert abort。探针 + 四条修法 |
-| `parity.md` | **与旧面板的功能对照**（31 ✅ / 0 部分 / 2 ❌）—— 想知道「还差什么」只看这篇 |
-| `verification.md` | 端到端读数与复跑命令（含 §9 引擎试跑、§10 复跑清单） |
-| `host-api.md` | host-api 契约、限额、SSRF / 脱敏边界、代码纪律 |
-| `host-api-net.md` / `ssrf.md` | 出站能力的形状与判定表 |
-| `auth.md` / `session.md` | 凭据怎么存 / 浏览器怎么带着它 |
-| `ui.md` | 控制台形态、设计令牌、零构建约束、**逐条读数**与已知短板 |
-| `plugin-webui.md` | 插件自带界面的目录约定与三条路由 |
-| `backup.md` / `mcloud-migration.md` | 备份格式 / mcloud 插件迁移到本仓的记录 |
-| `extproc.md` | 外部进程插件**为什么不做**（含改判条件与真要做的形状） |
-| `llrt-spike.md` / `llrt-spike-notes.md` | Stage 0 六条判据读数 / legacy TLS 与推翻的结论 |
-| `HANDOFF.md` | 本文 |
+| `README.md` | 索引 + 三态约定 + 构建 |
+| `HANDOFF.md` | 本文：现状、复跑命令、协作规则 |
+| `engine.md` | LLRT 嵌入形态、隔离模型、两条预算、取消归属、JS 通道、定时器坑、外部进程插件为什么不做的清单、Stage 0 判据 |
+| `host-api.md` | host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
+| `plugins.md` | 生命周期、自带界面与三条路由、上传、**与旧面板的功能对照** |
+| `scheduler.md` | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
+| `api.md` | 请求体/查询参数、CSV 导出、令牌与会话 |
+| `ui.md` | 控制台形态与设计令牌、界面门禁（ui-check / ui-e2e） |
+| `ops.md` | 配置、通知、备份恢复、保留策略、日志、健康、脚本、磁盘故障 |
+| `verification.md` | 端到端读数（历史记录，按轮次） |
+| `pitfalls.md` | 踩过的坑（按顺序，每条带复现方式或守卫位置） |
+| `mcloud-migration.md` | mcloud 那一族的迁移记录 |
 
 ### 4.3 其它
 
@@ -115,12 +115,12 @@
 | 项 | 现状 | 下一步 |
 |---|---|---|
 | 任务软删（`/api/jobs/{p}/{n}/delete` / `restore` / `cleanup`） | **明确不做** | 任务由插件注册，删了下次加载又回来；要停用请用「禁用插件」 |
-| 市场 / 自更新（`/api/market*`、`/api/update*`） | **明确不做** | 见 parity.md §3 |
-| 外部进程插件（`extproc.rs`） | **明确不做**（决策记录） | 改判条件与真要做的形状见 [extproc.md](extproc.md) |
+| 市场 / 自更新（`/api/market*`、`/api/update*`） | **明确不做** | 见 plugins.md §3 |
+| 外部进程插件（`extproc.rs`） | **明确不做**（决策记录） | 改判条件与真要做的形状见 [engine.md](engine.md) |
 | `fetch` 非 UTF-8 响应体 | ❓ 到插件前就 lossy | 先确认真需要，再谈 `body_base64` / 按 charset 解 |
 | `structuredClone` 缺失 | ❓ 绕过 `Vm` 的代价 | 先查真实插件用量 |
 | 单插件定时器条数上限 | 未实现（定时器走 LLRT 原生，宿主没有注册表可数） | 要限就得自己维护注册表 |
-| 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 [llrt-spike-notes.md](llrt-spike-notes.md) §7 |
+| 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 [engine.md](engine.md) §7 |
 | 惰性回收 idle eviction | 不在切片 | 常驻内存的边际成本见 llrt-spike 判据 3 |
 | mcloud phase C / D（兑换、直播） | 代码就位，**没跑过真任务** | 需要用户当轮点头（花钱 / 开播） |
 
@@ -159,7 +159,7 @@ node scripts/ui-check.mjs                       # 界面 40 条断言（自起�
 node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）
 ```
 
-要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui-check.md](ui-check.md)。
+要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui.md](ui.md)。
 
 端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。
 

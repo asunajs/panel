@@ -1,12 +1,14 @@
-# host-api 契约
+# host API：能力、出站门（SSRF）、自检
+
+## host-api 契约
 
 三态：**已定**＝用户确认过 / 计划已批准 / 有一手读数 · **建议**＝agent 侧未拍板 · **❓**＝未测。
 
 **状态：Stage 1 已实现。** 本文描述的是 `src/hostapi.rs` 的现状；每条限额都标了
  enforcement 位置。端到端读数在 [verification.md](verification.md)，
-Stage 0 的引擎判据在 [llrt-spike.md](llrt-spike.md)。
+Stage 0 的引擎判据在 [engine.md](engine.md)。
 
-## 1. 全 async（已定）
+### 1. 全 async（已定）
 
 用户当场确认：host-api **全部 async**，插件写 `await host.fetch(...)`。
 
@@ -17,7 +19,7 @@ Stage 0 的引擎判据在 [llrt-spike.md](llrt-spike.md)。
 实现形状：`ModuleBuilder::with_module(HostModule)`，op 用 `Func::from(Async(f))`，
 Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序列化边界。**
 
-## 2. 最小集（已定＝计划批准的范围）
+### 2. 最小集（已定＝计划批准的范围）
 
 第一版只做这些，其余子系统后续逐个移植：
 
@@ -31,11 +33,11 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 通知 | `notify(title, body?)` —— 进面板通知列表；配了 `PANEL_NOTIFY_WEBHOOK` 也 POST 出去（见 [notify 一节](#通知)） |
 | 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`） |
 
-**第一版明确不做的**（现在多半已经补上了，逐个看 [parity.md](parity.md)）：
+**第一版明确不做的**（现在多半已经补上了，逐个看 [plugins.md](plugins.md)）：
 推送、备份/恢复、脚本任务、上传、完整鉴权面（先单令牌）、Bun/Node 外部运行时。
 **仍然不做**：市场、自更新、插件 UI 的 iframe 隔离源。
 
-### 同步 op（给「同步步骤机」风格的插件）
+#### 同步 op（给「同步步骤机」风格的插件）
 
 | op | 说明 |
 |---|---|
@@ -48,7 +50,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 **独立线程**的 current-thread runtime 上跑（不在 tokio worker 里 `block_on`，也不占着 worker）。
 代价写清楚：同步 op 会占住这个插件的引擎线程，一次慢请求会推迟它自己的其它工作。
 
-### 注册任务
+#### 注册任务
 
 ```js
 register_cron(name, cron, budget_ms?, opts?)   // 定时任务
@@ -75,7 +77,7 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 });
 ```
 
-### 任务状态（set_job_*）
+#### 任务状态（set_job_*）
 
 | op | 说明 |
 |---|---|
@@ -96,7 +98,7 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 * 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
 * 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
 
-### 面板版本：panel.version() / panel.atLeast()
+#### 面板版本：panel.version() / panel.atLeast()
 
 ```js
 import { panel } from 'panel:host';
@@ -132,13 +134,13 @@ if (panel.atLeast('0.3.0')) {
   非法 → "nope" 不是合法版本号（要 semver，例如 "0.3.0"）: unexpected character 'n'
 ```
 
-### 出站：邮件 / WebSocket / TLS 后端
+#### 出站：邮件 / WebSocket / TLS 后端
 
-挪到单独一篇了：[host-api-net.md](host-api-net.md)。
+挪到单独一篇了：[host-api.md](host-api.md)。
 一句话：`smtp_send(opts)` 发邮件、`ws_open/send/recv/close` 长连接、
 `fetch` 的 `tls: 'rustls' | 'native'` 选 TLS 后端；三者共用一道 SSRF 门与一份信任库。
 
-### 通知
+#### 通知
 
 notify(title, body?)：插件主动喊话。落到面板的通知表（铃铛上的未读数），
 配了 PANEL_NOTIFY_WEBHOOK 时额外 POST 一个 JSON 到那个 URL：
@@ -154,13 +156,13 @@ notify(title, body?)：插件主动喊话。落到面板的通知表（铃铛上
 - URL 是**运维填的**（环境变量），不是插件给的，所以不套插件的 SSRF 门；
   插件只能决定标题和正文。
 
-### 2.1 DB 必须走 host-api（已定）
+#### 2.1 DB 必须走 host-api（已定）
 
 LLRT **没有 `node:sqlite`**（判据 5 实测 MISSING）⇒ 插件不能自己开库。
 宿主侧用专用 DB actor（`src/db.rs`），**不用**基线那种 `Arc<Mutex<Connection>>` +
 168 处 `lock().unwrap()`（基线 `src/db.rs:11`，poison 之后全 500）。错误向上传播。
 
-### 2.2 结构化数据过边界走 JSON 文本（已定，有编译期读数）
+#### 2.2 结构化数据过边界走 JSON 文本（已定，有编译期读数）
 
 rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_json` 使用
 （`grep -r serde_json vendor/llrt --include=*.rs` 无命中）。所以不存在现成的
@@ -174,7 +176,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 代价：每次调用多一次序列化 + 一次解析。对 sqlite 行结果（≤1000 行）与 fetch 响应
 （≤1 MiB）这个量级可接受；**不**为它造 native 转换器。
 
-### 2.3 可选参数必须把参数列表填满（已定，有实测）
+#### 2.3 可选参数必须把参数列表填满（已定，有实测）
 
 三个现成 helper 各覆盖一半，没有一个覆盖「少传 **或** 显式 undefined」：
 
@@ -191,7 +193,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 （`register_cron: async (name, cron, budget_ms) => raw.register_cron(name, cron, budget_ms)`），
 把参数列表填满，同时满足两种语义。**新增 op 时照这个形状写**，否则少传参数会炸。
 
-## 3. 限额（沿用基线，计划已批准）
+### 3. 限额（沿用基线，计划已批准）
 
 | 项 | 值 | 现状 / enforcement |
 |---|---|---|
@@ -199,7 +201,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | `fetch` 响应体 | **不设上限**（2026-11-12 起） | 插件是可信代码，正文要多少给多少；`truncated` 字段留着但恒为 false。实测 3 MB 响应 → `len=3000000, truncated=false`（rustls 与 native 两条路都验过） |
 | `fetch` `timeout_ms` | 默认 **10000**，钳到 `[100, 60000]` | 已实现 `clamp_timeout`；实测 500ms 打 4s 慢响应 → 502ms 报超时 |
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
-| 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine-teardown.md](engine-teardown.md) |
+| 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine.md](engine.md) |
 | `config` 体积 | **4 MiB**（`PANEL_CONFIG_MAX_BYTES` 可调，下限 4 KiB） | 已实现：`src/config.rs`。超限**拒绝启动**并报出真实字节数，不截断（截断 = 插件看到半个配置）。基线那个 64 KiB 是**任务参数**的上限，不是配置 |
 | 执行预算默认 | 基线 600000ms（10 分钟） | **新版改成 30000ms**（`scheduler.rs` `DEFAULT_BUDGET_MS`）。理由：默认值应当是「短任务够用、写错了早点暴露」，长任务显式声明 `budget_ms` |
 | **新版执行预算上限** | **5400000ms（90 分钟）** | 已实现 `MAX_BUDGET_MS`；单测钉着 20 分钟放行、90 分钟封顶、0 钳到 1 |
@@ -212,7 +214,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 ❓ 要不要加 `body_base64`（或按 charset 解）—— 测法：先确认改写后的央视频插件是否真的
 需要非 UTF-8 正文，再决定加字段还是让插件走别的 op。**不预先造。**
 
-## 4. 两条预算怎么落到 op 上（已定，已实现）
+### 4. 两条预算怎么落到 op 上（已定，已实现）
 
 - **CPU 预算**：`AsyncRuntime::set_interrupt_handler`，死线 = 该 invocation 的墙钟 deadline。
   **绝不用固定切片。** 已实测：精确触发、uncatchable、触发后 runtime 仍可用
@@ -223,18 +225,18 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
   （`sleep(1200)` 在 10s 预算下跑满）。
 
 ⚠ **取消不能走 `ctx.with()`**：`idle()` 全程持 runtime 锁，外部 JS 访问会排队到插件跑完
-（已实测，见 [architecture.md §2.1](architecture.md#21-idle-全程持锁已定硬约束)）。
+（已实测，见 [engine.md §2.1](engine.md#21-idle-全程持锁已定硬约束)）。
 stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 
 ⚠ **stop token 绑 invocation，不绑插件、不绑全局**。基线 R1 High 就是绑错了层
 （`src/engine.rs:815-834`）。跨插件取消回归已 PASS。
 
-## 5. SSRF 门
+### 5. SSRF 门
 
-挪到单独一篇了：[ssrf.md](ssrf.md)（判定表、门挂在哪一层、每条出口的读数）。
+挪到单独一篇了：[host-api.md](host-api.md)（判定表、门挂在哪一层、每条出口的读数）。
 一句话：`src/outbound.rs` 里一道门，fetch / 重定向每一跳 / native TLS 都走它。
 
-## 6. 日志脱敏（沿用基线的 6 道有序幂等）
+### 6. 日志脱敏（沿用基线的 6 道有序幂等）
 
 基线 `src/log/mod.rs:705-727`，**顺序有意义**，前一条的结果会被后一条再扫一遍：
 
@@ -255,7 +257,7 @@ stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 （`src/log/mod.rs:712`）。新版是否照抄**未拍板**。
 （另：本仓库**任何文档里都不许出现真实手机号**，示例一律用合成号。）
 
-## 7. 代码纪律（已实现）
+### 7. 代码纪律（已实现）
 
 - `unsafe_code = "deny"`（`Cargo.toml`）+ 预算脚本 `scripts/check-unsafe-budget.sh`。
   脚本断言两件事：lint 还是 deny、`src/` 里**行首**的 `#[allow(unsafe_code)]` 数量**正好**
@@ -275,13 +277,305 @@ stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 - `Invocation` 用 `#[derive(rquickjs::JsLifetime)]`（`engine.rs:41`），**不是**手写 unsafe impl，
   所以产品代码不需要任何 unsafe 例外（基线那 6 处、spike 那 2 处都不在产品预算里）。
 
-## 8. 移植时最容易踩的三脚（已定，有读数）
+### 8. 移植时最容易踩的三脚（已定，有读数）
 
 1. **`process.versions.node == "0.0.0"`** ⇒ 任何 `>= 20.6` 版本闸在 LLRT 上失败。
 2. **`crypto.createCipheriv` / `publicEncrypt` 缺失** ⇒ 用到对称加密/RSA 的插件要改走
    `crypto.subtle` 或 host-api。
-3. **`structuredClone` 缺失**（绕过 `Vm` 的代价）⇒ 见 [architecture.md §1.1](architecture.md#11-不用-vmfrom_options已定)。
+3. **`structuredClone` 缺失**（绕过 `Vm` 的代价）⇒ 见 [engine.md §1.1](engine.md#11-不用-vmfrom_options已定)。
 
 现有插件（含央视频）**不能原样跑**，要按 async host-api 改写。这是已接受的重写代价。
 
-逐个入口的自检读数（样例插件跑一遍）另开一篇：[host-api-demo.md](host-api-demo.md)。
+逐个入口的自检读数（样例插件跑一遍）另开一篇：[host-api.md](host-api.md)。
+
+## 出站能力：邮件 / WebSocket / TLS 后端
+
+> 从 [host-api.md](host-api.md) 拆出来的。三件事都是「插件往外连」，共用同一道 SSRF 门
+> （[host-api.md](host-api.md)）和同一份信任库（`webpki-roots`）。
+
+#### 发邮件：smtp_send(opts)
+
+```js
+import { smtp_send } from 'panel:host';
+
+smtp_send({
+  host: 'smtp.example.com',
+  port: 587,                    // 不给就按 tls 推：implicit → 465，其余 → 587
+  tls: 'starttls',              // starttls（默认）| implicit | none
+  user: 'robot@example.com',
+  pass: '…',
+  from: '机器人 <robot@example.com>',
+  to: ['me@example.com'],       // 也可以直接给一个字符串
+  subject: '日常任务完成',
+  text: '3 个账号都跑完了',
+  html: '<b>3 个账号都跑完了</b>',   // text + html 都给 = multipart/alternative
+});
+// → { ok: true, response: "250 message accepted" }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `host` | 必填。**过 SSRF 门**（和 fetch 同一套，见 [host-api.md](host-api.md)） |
+| `port` | 1..=65535，越界**报错**（不静默截断成 4464） |
+| `tls` | `starttls`（默认）/ `implicit` / `none`。**拼错报错**，不会默认成 `none` |
+| `user` / `pass` | `user` 为空就跳过 `AUTH`（内网中继常见） |
+| `from` | 可以写 `显示名 <a@b>`；**信封里只用裸地址**。含 `\r` / `\n` 的地址直接拒绝，不清洗 |
+| `to` | 字符串或字符串数组 |
+| `subject` / `text` / `html` | 至少给一个正文；中文主题走 RFC 2047 编码字 |
+| `ca_file` | 额外信任锚（PEM），给自建 SMTP / 内网中继。必须是普通文件且 ≤ 1 MiB（`/dev/zero` 会拒） |
+| `timeout_ms` | 默认 15000，夹在 1s ~ 60s |
+| `ehlo` | EHLO 自报的名字，默认 `localhost` |
+
+- 失败**抛错**，错误文本是服务器那句原话（`535 bad credentials` / `553 authentication is required`）。
+- **阻塞调用**（和 `http_fetch` 同构），默认 15 秒，比默认执行预算长 —— 别放进要毫秒精度的链里。
+- `tls: 'none'` 且 `user` 非空 ⇒ **拒绝**（明文通道上的 `AUTH` 只是 base64，等于明文过网）。
+  这个开关只在宿主侧，插件打不开。
+- 信任库与 `fetch` / `ws_*` 同一份（`webpki-roots`），目标机不需要装 CA。
+- **不做附件**、不做 `8BITMIME` / `SMTPUTF8` 协商（正文一律 base64，头里有非 ASCII 就走编码字）。
+  理由在 `src/smtp.rs` 文件头。
+
+```text
+读数（2026-11-12，真面板）
+  tls:none      → {"ok":true,"response":"250 message accepted"}；服务器收到
+                  Subject: =?UTF-8?B?5Lit5paH5Li76aKY5rWL6K+V?=、base64 正文、多收件人
+  tls:implicit  → 自建 TLS 服务器 + ca_file：250；不给 ca_file → invalid peer certificate: UnknownIssuer
+  tls:starttls  → 升级后重新 EHLO：250
+  163:465       → TLS 握手通过，AUTH 被拒 535（假凭据，符合预期）
+  tls 拼错      → tls 只认 "starttls" / "implicit" / "none"，收到 starltls
+  回环          → 出站目标被 SSRF 防护拒绝：127.0.0.1（回环地址 127.0.0.0/8）
+  端口 70000    → 端口越界（70000），必须是 1..=65535
+```
+
+⚠ 已知：`smtp.qq.com` / `smtp.gmail.com` 的 465 与 587 在握手后被对端直接断开
+（`peer closed connection without sending TLS close_notify`），同机 `openssl s_client`
+却能通 —— 我们的 ClientHello 带了 SNI 与 TLS1.3（已 dump 核对），所以不是「没发 SNI」。
+163 与自建服务器正常。主场景（自建 / 内网中继 / 常见服务商）不受影响，但这条没查清。
+
+#### WebSocket（长连接）
+
+| op | 说明 |
+|---|---|
+| `ws_open(url, opts?)` | 开一条连接，返回句柄（数字）。握手失败**抛错**，不留半死句柄 |
+| `ws_send(id, text)` | 发一帧文本，入队即返回 |
+| `ws_recv(id, timeout_ms?)` | 收一帧，**带超时**。默认 1500ms，最多 1800ms |
+| `ws_close(id)` | 关掉，**幂等** |
+
+`ws_recv` 返回**五种形状**（不是异常）：`{type:'text',data}` / `{type:'binary',hex}` /
+`{type:'timeout'}` / `{type:'close',reason}` / `{type:'error',message}`。
+**超时是结果不是错误** —— 插件按「一次调用推进一步」写：`recv(1500)` 超时等于
+「这一步没收到东西」，状态落库、下次接着收，插件里不需要事件循环。
+
+约束：同时最多 **8 条**连接；单帧 **256 KiB**（超了回 `error` 并关连接，不静默截断）；
+**不自动重连**（重连策略是插件的业务判断）；句柄活在进程内存里，**面板重启后失效**，
+插件拿到「句柄不存在」就应当重新 `ws_open`。
+
+实现见 `src/wsclient.rs`（tokio-tungstenite）。同步语义由 `sync_bridge::run_on` 桥到
+**进程级 runtime** 上 —— 长连接不能建在一次性 runtime 上：那个 runtime 一 drop，
+socket 的 reactor 就没了，后续 send 会报「context is being shutdown」。
+
+#### TLS 后端：`tls: 'rustls' | 'native'`
+
+`fetch` 与 `ws_open` 都认这个选项（同一个判据，见 `wsclient::tls_choice`）：
+
+| 值 | 传输 | 什么时候用 |
+|---|---|---|
+| `'rustls'`（默认） | LLRT 的 HTTP 客户端 / tungstenite + rustls | 绝大多数主机 |
+| `'native'` | reqwest + 平台 TLS（macOS Security.framework / Linux OpenSSL） | **只给 CBC 套件的主机** |
+
+rustls **不实现任何 CBC 套件**（设计选择，不是配置问题），所以只给 CBC 的主机在默认路径上
+必然握手失败。`tls:'native'` 走另一条传输，**每跳仍然过 SSRF 门**、仍然不自动跟重定向、
+正文仍然 1 MiB 上限。
+
+实测（2026-11-12，mcloud 直播那两个主机）：
+
+```text
+GET https://v.cmcc-cs.cn/             rustls → 失败(Connect)      native → 200
+GET https://videoim.cmcc-cs.cn:20102  rustls → 失败(Connect)      native → 200
+WSS wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → 过了 TLS（HTTP 200，不是 101）
+```
+
+## SSRF 门
+
+> 从 [host-api.md](host-api.md) 拆出来的：它比「op 清单」长得快，单独一篇更好读。
+> 代码在 `src/outbound.rs`（fetch / 重定向 / native TLS 三条路共用同一道门）。
+
+### 判定表（沿用基线）
+
+**必须自己做。** LLRT 的 `llrt_net_policy` 本轮一手核过：`set_deny_list` / `set_allow_list`
+是**公开** API（`vendor/llrt/libs/llrt_net_policy/src/lib.rs:23,28`），且被 fetch / net / dgram
+每个出口共用（`llrt_fetch/src/fetch.rs:106,480`、`llrt_net/src/socket.rs:245,249`、
+`llrt_dgram/src/socket.rs:375`）。但它当不了面板的门，两个硬缺口：
+
+1. **没有 CIDR**：`host_matches` 只做 IP 字面量相等或域名后缀匹配（`:202-216`），
+   表达不了 `127.0.0.0/8`、`169.254.0.0/16` 这类段 —— 而 SSRF 判定表全是段。
+2. **不做 DNS 解析**：`parse_host` 只规范化字面量（`:184-200`）。
+
+外加它是 `OnceLock` 进程级全局，不是 per-plugin。所以面板的门在 `src/ssrf.rs`，
+LLRT 那层只作为「出口已被关掉」之后的纵深防御备选，不依赖它。
+
+命中下表**直接报错，不发出连接**：
+
+| 被拒 | 为什么 |
+|---|---|
+| 回环 `127.0.0.0/8`、`::1`、`localhost` | 那就是**面板自己**。插件能打 `/api/login` 就能把登录退避桶打满、把运维锁在门外 |
+| 链路本地 `169.254.0.0/16`（含云元数据 `169.254.169.254`）、`fe80::/10` | 云上跑时这里能直接拿到实例凭据 |
+| `0.0.0.0` / `::`、组播、广播 | 没有正常用途 |
+| inet_aton 变体 `0x7f.0.0.1`、`0177.0.0.1`、`2130706433` | 换个写法就绕过上一条 |
+| 单标签主机名（`metadata`、`redis`）、`*.internal`、`*.localhost` | 云厂商/容器编排的内网别名 |
+
+**局域网放行**：`10/8`、`172.16/12`、`192.168/16`、`fc00::/7`、`*.local` ——
+家里的 NAS / 打印机 / Home Assistant 正是这个 API 的主要用途。
+
+⚠ 这一层**不做 DNS 解析后的校验**：挡的是字面量与常见内网别名，挡不住
+「公网域名解析到 127.0.0.1」的 DNS 重绑定。**插件是可信代码，这层是纵深防御，不是沙箱。**
+
+重定向：**≤3 跳，每跳重判**（基线 `src/hostapi.rs:868-897`：「重定向：**自己走**，
+每一跳都重新过 SSRF 判定（安全审计 H8）」，超 `MAX_HOPS` 中止）。
+门本身是 `ensure_outbound_url_allowed` / `ensure_outbound_url_allowed_with`（`:1982,1988`）。
+判定内核**不读环境**，开关作为参数传入 —— 基线注释写明了理由：单测并行跑，
+改进程环境会让别的用例看到随机开关状态。这条要照抄。
+
+### 门挂在哪一层（已定，已实现，有前后读数）
+
+**问题**：全局 `fetch` 在 LLRT 上是 `function`，插件能直接调。
+**只包一层 `host.fetch` 挡不住绕过**。修复前实测（靶子 = 本机面板自己的回环 `/healthz`）：
+
+```
+BLOCKED host.fetch        : 出站目标被 SSRF 防护拒绝：127.0.0.1（回环地址 127.0.0.0/8）
+BYPASS  global fetch      : 200
+BYPASS  import('https')   : ["Agent","default"]
+BYPASS  import('node:https'): ["Agent","default"]
+BYPASS  import('net')     : ["Server","Socket","connect",...]
+BYPASS  import('dgram')   : ["Socket","createSocket","default"]
+BYPASS  import('child_process'): ["default","execFile","spawn"]
+BYPASS  net.connect       : "connected"      ← 真连上了
+```
+
+**原建议是 `ModuleBuilder::new()` + 显式列举模块。没采纳**：`default()` 的清单有约 30 项
+且全是 feature-gated（`module_builder.rs:44-194`），手抄一份会随上游 feature 变化腐烂，
+也违背「能用 LLRT 的就别手写」。
+
+**实际做法**（`src/engine.rs`）：保留 `default()`，在**解析层**加一道闸 + 摘掉 fetch 全局：
+
+- `GatedResolver(ModuleResolver)` 实现公开的 `rquickjs::loader::Resolver`，
+  先让内层归一化（`node:` 前缀、CJS 前缀、结尾斜杠都在它里面处理），再按归一化后的名字拒
+  `["https", "net", "dgram", "child_process"]`。自己按原始名字判会漏掉 `node:https`。
+- `globals().remove("fetch")`：fetch 全局是 `default()` 挂的，直连 `HTTP_CLIENT`，
+  不过 hostapi 的 SSRF/限额。`Request/Response/Headers/FormData` 是纯数据类，留着。
+- `child_process` 也在禁用名单里：留着它，插件 spawn 一个 curl 就绕过整道门。
+
+修复后同一探针：
+
+```
+BLOCKED global fetch        : fetch is not defined
+BLOCKED import('https')     : https 被面板禁用：出站请求请用 panel:host 的 fetch
+BLOCKED import('node:https'): 同上（归一化生效）
+BLOCKED require('https')    : 同上（CJS 路径也过闸）
+BLOCKED net.connect         : 解析期就失败，连接没发出
+```
+
+**原 ❓ 已解决**：摘 fetch 全局不连带弄坏别的模块。回归测试
+`engine_tests::ordinary_modules_still_resolve` 钉着 buffer / zlib / crypto 仍可用；
+`the_fetch_global_is_gone` 钉着 `typeof fetch === 'undefined'`（走 miss 态）。
+
+**`fs` 与 `dns` 没禁 —— 已定不加 jail**（用户拍板：插件按可信代码对待）。
+`fs` 不受限意味着插件能读 `panel.db`，这比基线的 pluginfs jail 宽，是嵌入 LLRT 带来的
+**新**攻击面。补偿控制落在令牌上：明文不落盘、不进 `process.env`、文件里的哈希不能当
+令牌用（[engine.md §10](engine.md)、[api.md](api.md)）。
+
+## 把 host API 挨个跑一遍（examples/demo-plugin.js）
+
+这篇是一份**读数**：样例插件把 panel:host 的入口都跑一遍，证明它们真的通。
+
+
+把 `panel:host` 的入口**都跑一遍**的样例插件。它是样例 + 自检，不默认加载：
+
+```bash
+cp examples/demo-plugin.js plugins/demo.js
+curl -X POST -H 'x-panel: 1' localhost:8787/api/plugins/demo/reload
+curl -X POST -H 'x-panel: 1' localhost:8787/api/tasks/demo/probe/run   # 读日志里的 probe … 行
+curl localhost:8787/plugins/demo/api/ping?x=1                          # 插件自己的 HTTP
+```
+
+#### 实测读数（临时面板 8797，一次 probe 3.9 秒，`status=ok`）
+
+```text
+probe logs             = ok                      四级日志（log/info/warn/error）都进库
+probe panel_version    = 0.1.0                   panel_at_least('0.1.0') = true
+probe config_keys      = []                      没有 config.json 时是空对象，不报错
+probe rows_async       = {rows:[{c:2}]}          sqlite_exec/query 异步版
+probe rows_sync        = {rows:[{c:2}]}          sqlite_exec_sync/query_sync 同步版
+probe sleep_ms         = 42                      host.sleep 真挂起、可被重载打断
+probe fetch            = {status:403, …}         出站打通（这台机器的代理回 403，但链路是通的）
+probe http_fetch       = {status:403}            同步版同样通
+probe fetch_loopback   = 被挡住（对）：出站目标被 SSRF 防护拒绝：127.0.0.1（回环地址 127.0.0.0/8）
+probe notify           = ok                      没配渠道时只落发件箱，不报错
+probe bad_key          = 被拒绝（对）：set_job_schedule 的 opts 只认 expr / lead_ms，收到 "cron"
+```
+
+任务自述：`summary` = 「跑过 11 个入口」、`blockers` = 一条演示用 blocker，都在 `/api/state` 里看得见。
+`set_job_schedule('probe', {expr: '@every 6h'})` 之后：`cron=@every 6h`、`cron_override=@every 6h`、`manual=false`。
+
+插件 HTTP（`register_web`）实测：
+
+```text
+GET  /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/demo/api/ping","query":"x=1"}
+POST /plugins/demo/api/ping     → 同样 200（body 也传给了插件）
+GET  /plugins/demo/other        → 插件返回的 HTML 兜底页
+```
+
+**踩到的坑**：`set_job_schedule('x', {cron: ...})` 以前**静默无效**（op 只认 `expr`），
+插件作者看不到任何反馈。现在 host op 也做 opts 键名白名单（`only_keys`），
+写错直接抛「只认 expr / lead_ms，收到 "cron"」。HTTP 侧同类问题见 [api.md](api.md)。
+
+### 出站三件：WebSocket / SMTP / 静态文件（第 74 轮补）
+
+`fetch` 之外还有三条出站/界面入口，这轮补进自检。它们都要过同一道 SSRF 门，
+所以**对端不能是回环**（那是面板自己）—— 用这台机器的局域网地址，配合
+`node scripts/test-servers.mjs`（一个 WS echo + 一个假 SMTP，都绑 `0.0.0.0`）。
+
+```bash
+node scripts/test-servers.mjs 9911 9925   # [ws] echo / [smtp] fake
+```
+
+读数（临时面板 8797，一次 probe `status=ok`）：
+
+```text
+probe ws    = {"data":"hello from demo","type":"text"}      ws_open → ws_send → ws_recv → ws_close 全通
+probe smtp  = {"ok":true,"response":"250 queued"}           smtp_send（tls: none）走完 EHLO/MAIL/RCPT/DATA
+```
+
+服务器侧看到的是同一来一回（echo 回来的正是发出去的文本；SMTP 收到了完整一封信）。
+
+#### 插件自带界面的两种来源
+
+`/plugins/<name>/` 先找**静态文件** `<plugins_dir>/<name>.webui/`，找不到才交给 `register_web` 注册的路由
+（见 [plugins.md](plugins.md)）。实测同时挂两种：
+
+```text
+GET /plugins/demo/             → 200 text/html; charset=utf-8（来自 demo.webui/index.html）
+GET /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/demo/api/ping","query":"x=1"}
+```
+
+样例文件在 `examples/demo-plugin.webui/index.html`：要试就 `cp -r examples/demo-plugin.webui plugins/demo.webui`。
+
+### 门禁：`node scripts/plugin-selftest.mjs`（第 75 轮）
+
+把上面这些手工读数变成一条命令：起临时面板 → 起三个本地对端 → 加载样例插件 → 跑 probe → 逐条断言。
+
+```bash
+node scripts/plugin-selftest.mjs          # ok: 24 条 host API 自检全过
+KEEP=1 node scripts/plugin-selftest.mjs   # 保留临时目录看现场
+```
+
+24 条覆盖：插件加载 / 任务与入口登记 / `has_web` / probe 能派发并成功 / 四级日志 / `panel_version` /
+config / sqlite 异步与同步 / `sleep` 真挂起 / `fetch` 与 `http_fetch`（打本地对端 200）/
+回环被 SSRF 挡 / `notify` / WebSocket 回声 / SMTP 250 / 写错 opts 键名被拒 /
+`set_job_summary` / `blockers` / `schedule` 生效 / 静态 `index.html` / 插件路由的 GET 与 POST。
+
+**为什么用本地对端**：以前 fetch 打 `api.github.com`，这台机器要过一个会回 403 的代理，
+门禁就成了「看网络脸色」。现在 `scripts/test-servers.mjs` 同时起 WS echo、假 SMTP、本地 HTTP 三个服务，
+插件从配置里读地址（`demo.ws_url` / `demo.smtp_host` / `demo.smtp_port` / `demo.http_url`），**不依赖外网**。
+
+对端必须绑 `0.0.0.0` 并用本机**局域网地址**去连：回环被 SSRF 门挡（那是面板自己）。
+机器上没有局域网地址时脚本会跳过（exit 0）而不是假装通过。

@@ -1,15 +1,17 @@
-# Stage 1 验证
+# 端到端读数（历史验证记录）
+
+## Stage 1 验证
 
 三态：**已定**＝有一手读数 / **建议**＝未拍板 / **❓**＝未测（附测法）。
-本文是 Stage 1 最小垂直切片的端到端读数；引擎层判据在 [llrt-spike.md](llrt-spike.md)，
-契约与限额在 [host-api.md](host-api.md)，设计在 [architecture.md](architecture.md)。
+本文是 Stage 1 最小垂直切片的端到端读数；引擎层判据在 [engine.md](engine.md)，
+契约与限额在 [host-api.md](host-api.md)，设计在 [engine.md](engine.md)。
 
 **读数环境**：本机 macOS（arm64），`./target/debug/panel-llrt`，多个面板各占一个端口、
 各自的 `PANEL_DATA_DIR`。出站靶子是**本机合成服务** `127.0.0.1:8798`（`/tmp/llrt-smoke/target.py`），
 SSRF 靶子是**面板自己的回环** `/healthz`。**不碰任何真实账号、不碰外部服务。**
 探针产物在 `/tmp/llrt-smoke/`，不污染旧仓库。
 
-## 1. 构建 / 测试 / 守卫（已定）
+### 1. 构建 / 测试 / 守卫（已定）
 
 | 项 | 读数 | 命令 |
 |---|---|---|
@@ -22,7 +24,7 @@ SSRF 靶子是**面板自己的回环** `/healthz`。**不碰任何真实账号�
 绿（0 处）、红（注入一处行首 allow）、红（`Cargo.toml` lint 改 `warn`），验完还原。
 ⚠ pipefail 坑见 [host-api.md §7](host-api.md)。
 
-## 2. 九个 op 冒烟（已定）
+### 2. 九个 op 冒烟（已定）
 
 探针 `/tmp/llrt-smoke/probe/probe.js` 加载即跑，`host.info` 落库。读数（`pdata2/panel.db`）：
 
@@ -40,7 +42,7 @@ OK register_cron 3arg: undefined
 
 `register_cron 2arg` 通过钉住了 [host-api.md §2.3](host-api.md) 的「参数列表填满」修复。
 
-## 3. host.fetch 限额（已定）
+### 3. host.fetch 限额（已定）
 
 摘掉全局 `fetch` 之后，宿主自己的 `host.fetch` 仍可用。靶子 = 合成服务 `127.0.0.1:8798`，
 面板带 `HOST_API_ALLOW_PRIVATE=1`（否则回环靶子会被 SSRF 门拒）。读数（`fdata/panel.db`）：
@@ -58,7 +60,7 @@ OK register_cron 3arg: undefined
 | latin1 body | `body="caf ??", len=7`（靶子发 windows-1252 `café 中文`） | ⚠ lossy UTF-8，见 §9 |
 | 404 | `status 404, body {"nope":true}` | 404 是响应不是 throw |
 
-## 4. SSRF 单通道（已定，有前后读数）
+### 4. SSRF 单通道（已定，有前后读数）
 
 机制与修复前读数在 [host-api.md §5.1](host-api.md)。修复后同一探针（`bdata2/panel.db`，
 靶子 = 面板自己的回环 `/healthz`）：
@@ -81,7 +83,7 @@ BLOCKED net.connect       : 解析期就失败，连接没发出
 补偿控制是「令牌不落明文」——见 §11。
 （`import('tls')` 也 BLOCKED，但那是 LLRT 没有该模块、解析失败，**不是**面板的闸。）
 
-## 5. 调度 / 熔断 / run 记录 / SSE / 热重载（已定）
+### 5. 调度 / 熔断 / run 记录 / SSE / 热重载（已定）
 
 | 能力 | 一手读数 |
 |---|---|
@@ -92,7 +94,7 @@ BLOCKED net.connect       : 解析期就失败，连接没发出
 | 热重载 | `hot` 面板重载后**新增** handler `added` 也跑了（runs=1），不只改现有 handler |
 | 卸载隔离 | 卸载一个插件不影响其它（引擎层回归 `stopping_one_plugin_does_not_touch_another`） |
 
-## 6. `/api/runs` 修复（已定，有红测）
+### 6. `/api/runs` 修复（已定，有红测）
 
 **修复前**：无 `plugin` 过滤分支 `LIMIT ?2` 只绑了 1 个参数 →
 `500 Wrong number of parameters… Got 1, needed 2`。
@@ -101,7 +103,7 @@ BLOCKED net.connect       : 解析期就失败，连接没发出
 回归 `web::router_tests::runs_list_works_with_and_without_the_plugin_filter`
 **在原 bug 上会红**（验过再还原），不是只测纯函数。
 
-## 7. 20 分钟长任务 + 并发 p99（已定，一手读数）
+### 7. 20 分钟长任务 + 并发 p99（已定，一手读数）
 
 探针：`slow.js` 一次 invocation 挂起 20 分钟（5s 一段 `host.sleep`，预算 25 分钟），
 `fast.js` `@every 50ms` 空操作。同面板（8796，`ldata/panel.db`）。
@@ -121,7 +123,7 @@ BLOCKED net.connect       : 解析期就失败，连接没发出
 p99 算法：`fast` _runs 按 id 排序，取相邻 `started_at` 差分；以长任务 `started_at` 为界分两段，
 各取 99 分位。复跑见 §10。
 
-## 8. catch_unwind 引擎边界（已定）
+### 8. catch_unwind 引擎边界（已定）
 
 `panic = "unwind"` + `scheduler.rs::catch_engine_panic` 把 `plugin.dispatch` 包起来：
 panic 收成 `Err` → 照发 `Cmd::Finished` → 清 `busy`/`in_flight` → 熔断计数。
@@ -135,7 +137,7 @@ scheduler::tests::catch_engine_panic_turns_a_panic_into_a_failed_run ... ok   (&
 
 零 warning 也间接钉住它**接进了派发路径** —— 没接的话 `catch_engine_panic`/`panic_text` 会报 dead_code。
 
-## 9. 仍然敞开的（如实记，不当已修 / 不在最小切片里）
+### 9. 仍然敞开的（如实记，不当已修 / 不在最小切片里）
 
 | 项 | 现状 | 性质 |
 |---|---|---|
@@ -149,14 +151,14 @@ scheduler::tests::catch_engine_panic_turns_a_panic_into_a_failed_run ... ok   (&
 | `runs`/`last_run`/`last_error` 计数 | 调度器内存态，重启清零（run 记录本身在 DB） | 记录在案 |
 | 市场/推送/备份/自更新/脚本任务/上传/完整鉴权/外部运行时/UI iframe 隔离源 | **明确不做**（计划批准的范围外） | 后续逐子系统移植 |
 
-## 10. 复跑命令
+### 10. 复跑命令
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
 cargo build && cargo test                 # §1：106 passed，零 warning
 bash scripts/check-unsafe-budget.sh       # §1：ok 0 处
 
-# §7 p99（长任务面板的库；boundary/long_start 见 /tmp/llrt-smoke/*.txt）
+## §7 p99（长任务面板的库；boundary/long_start 见 /tmp/llrt-smoke/*.txt）
 python3 - <<'PY'
 import sqlite3
 db=sqlite3.connect('/tmp/llrt-smoke/ldata/panel.db');c=db.cursor()
@@ -172,15 +174,15 @@ PY
 
 合成靶子与探针脚本在 `/tmp/llrt-smoke/`（`target.py`、`probe/`、`fetchprobe/`、`bypass/`、`longrun/`）。
 
-## 11. 面板令牌（已拆成独立文档）
+### 11. 面板令牌（已拆成独立文档）
 
-内容搬到 **[auth.md](auth.md)**：磁盘上只有盐 + PBKDF2 哈希、明文不进 `process.env`、
+内容搬到 **[api.md](api.md)**：磁盘上只有盐 + PBKDF2 哈希、明文不进 `process.env`、
 文件里的哈希不能当令牌用，以及一轮红队复审后的 11 条修订与前后读数。
 
 留在这里的一句话结论：**拿到 `auth.json` 也认证不了** —— 校验是把来件再派生一次再比，
 `hash(hash) != hash`，所以落盘的哈希不是 bearer 凭据。
 
-## 12. 面板级配置的体积上限（已定，有一手读数）
+### 12. 面板级配置的体积上限（已定，有一手读数）
 
 代码 `src/config.rs`。基线写的「64 KiB」是**任务参数**的上限
 （`rust-plugin-panel` 的 `docs/host-api.md:197`），本面板没有任务参数这个面；
@@ -203,7 +205,7 @@ PY
 `config()` 只拷贝文本。回归用例 `engine::tests::config_is_the_same_text_on_every_call`；
 上限的用例在 `src/config_tests.rs`（超限、边界恰好等于上限、缺文件、坏 JSON、环境变量覆盖）。
 
-## 13. `sqlite_exec` 的 changes / rowid（已定，已修）
+### 13. `sqlite_exec` 的 changes / rowid（已定，已修）
 
 老账（§9 那行）的原始读数：`CREATE TABLE` 返回 `{"changes":1,"last_insert_rowid":2}` ——
 那是**上一条语句**（LogHub 写日志）的残留。
@@ -225,7 +227,7 @@ PY
 覆盖 DDL、INSERT、空 UPDATE，以及「先 INSERT 再 DDL」这个原始污染场景。
 反向验证过：退回旧写法即红（`INSERT 之后的 DDL 报了陈旧的 changes`）。
 
-## 14. 本地实跑（已定，2026-11-11 晚，默认配置）
+### 14. 本地实跑（已定，2026-11-11 晚，默认配置）
 
 `./target/debug/panel-llrt`，全用默认值：`PANEL_BIND=127.0.0.1:8787`、
 `PANEL_DATA_DIR=data`、`PANEL_PLUGINS_DIR=plugins`、**不设令牌**（回环 + Host 闸）。
@@ -264,7 +266,7 @@ panel-llrt listening on http://127.0.0.1:8787
 > 五个视图、指标口径、零构建约束与新的读数都在 [ui.md](ui.md)。本节上面那段 WebUI 描述
 > 属于重写前的版本，保留只为记录当时的读数（DOM 里有 `hello`/`long`/`tick`/`boom` 那条结论仍成立）。
 
-## 9. 引擎试跑（`POST /api/test/js`）
+### 9. 引擎试跑（`POST /api/test/js`）
 
 想知道「这台机器上 `node:crypto` / 定时器 / `host.*` 到底什么行为」，以前只能建个脚本、
 跑一次、去运行记录里翻 —— 而脚本会留档、会排程、会进统计。试跑跑完就扔：
@@ -281,7 +283,7 @@ POST /api/test/js  {"code": "console.log(1+1)", "budget_ms": 2000}
 - 同时只跑**一个**（信号量）：速率限流挡「狂点」，这个挡「排队」—— 排队的那几个即使
   HTTP 已经超时，也照样占着执行预算。
 - 试跑**不能**注册任务/处理器（`register_cron` / `register_handler` 会报错），和脚本同一条规矩。
-- `fetch` 在试跑里也是 `undefined` —— 和插件一样，出站只能走 `host.fetch`（见 [ssrf.md](ssrf.md)）。
+- `fetch` 在试跑里也是 `undefined` —— 和插件一样，出站只能走 `host.fetch`（见 [host-api.md](host-api.md)）。
 
 读数（2026-11-12，真面板 8796）：
 
@@ -297,4 +299,4 @@ register_handler                 → ok:false「试跑不能注册任务或处�
 
 界面上在**设置 → 常规 → 引擎试跑**：一个编辑框、一个预算输入、一个「运行」，输出贴在下面。
 
-存储/磁盘出问题时的读数另开一篇：[storage-failures.md](storage-failures.md)。
+存储/磁盘出问题时的读数另开一篇：[ops.md](ops.md)。
