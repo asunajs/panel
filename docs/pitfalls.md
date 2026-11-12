@@ -312,3 +312,9 @@
     现在把它移进顶栏右侧，给 `.topbar-right { position: relative }`，`top: calc(100% + 8px)`：
     跟着 sticky 顶栏走。
     守卫：ui-check 两条（`offsetParent` 必须是 `topbar-right`；弹层整个在视口内）。
+
+70. **通知点了不会变已读**：原来只有「带 run_id 的那种」才绑点击，而且点了只跳转、不发标记请求 ——
+    用户看完那次运行回来，红点和未读底色都还在，看起来像点击没生效。
+    现在每一条都能点：先 `POST /api/notifications/read {ids:[id]}` 标已读（本地状态同步改，
+    红点立刻消失），有 run_id 再跳到那次运行。「全部已读」复用同一个 `markRead(null)`。
+    实测：1 条未读 → 点一下 → 服务端 unread=0、红点消失；2 条未读 → 全部已读 → 0。

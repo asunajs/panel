@@ -1911,10 +1911,14 @@ function renderNotify() {
     item.append(head);
     item.append(el("div", "m", n.plugin + (n.task ? " · " + n.task : "") + " · " + fmtDateTime(n.ts)));
     if (n.body) item.append(el("div", "b", n.body));
-    if (n.run_id) {
-      item.classList.add("notify-clickable");
-      item.addEventListener("click", () => { toggleNotify(false); showRun(n.run_id); });
-    }
+    // 每一条都能点：**点一下就标记已读**（第 89 轮修）。原来是「只有带 run_id 的能点，
+    // 且点了只跳转、不标已读」—— 用户点了通知、看完那次运行，红点还在，像是没生效。
+    item.classList.add("notify-clickable");
+    item.addEventListener("click", async () => {
+      toggleNotify(false);
+      if (!n.read) await markRead([n.id]);
+      if (n.run_id) showRun(n.run_id);
+    });
     list.append(item);
   }
 }
@@ -1927,18 +1931,34 @@ function toggleNotify(force) {
   if (open) loadNotifications();
 }
 
-async function markAllRead() {
+/** 标记已读：`ids` 为数组就只标这几条，传 null 就是全部。
+ *
+ * 本地状态跟着改（红点/未读底色立刻消失），再把服务端回的 unread 覆盖上去 ——
+ * 不重新拉一遍列表：否则刚点开的那条会因为排序/刷新闪一下。
+ */
+async function markRead(ids) {
   try {
-    const d = await api("/api/notifications/read", { method: "POST", body: {} });
+    const d = await api("/api/notifications/read", {
+      method: "POST",
+      body: ids ? { ids } : {},
+    });
+    const set = new Set(ids || []);
     state.notify = {
       unread: d.unread || 0,
-      items: (state.notify.items || []).map((n) => Object.assign({}, n, { read: true })),
+      items: (state.notify.items || []).map((n) =>
+        ids === null || set.has(n.id) ? Object.assign({}, n, { read: true }) : n,
+      ),
     };
     renderNotify();
-    toast("已全部标记已读");
+    return true;
   } catch (e) {
-    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "操作失败"), true);
+    toast(e instanceof Unauthorized ? "需要令牌" : (e.message || "标记已读失败"), true);
+    return false;
   }
+}
+
+async function markAllRead() {
+  if (await markRead(null)) toast("已全部标记已读");
 }
 
 // ---------------------------------------------------------------- 备份 / 恢复
