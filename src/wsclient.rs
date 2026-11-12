@@ -120,7 +120,18 @@ pub async fn open(url: &str, opts: &Json) -> Result<i64, String> {
             return Err(format!("同时最多 {MAX_CONNS} 条 ws 连接，已经开了 {n} 条"));
         }
     }
-    crate::ssrf::ensure_outbound_url_allowed(url)?;
+    // 测试专用逃生门：本机没有可用的 LAN 地址时（TUN 代理把本机地址变成虚拟网段），
+    // 允许测试连回环来验 send/recv/close 这套语义。SSRF 门本身有自己的测试，不受影响。
+    #[cfg(test)]
+    let allow_loopback = opts
+        .get("allow_loopback")
+        .and_then(Json::as_bool)
+        .unwrap_or(false);
+    #[cfg(not(test))]
+    let allow_loopback = false;
+    if !allow_loopback {
+        crate::ssrf::ensure_outbound_url_allowed(url)?;
+    }
 
     let tls = tls_choice(opts)?;
     let wait = opts
@@ -248,9 +259,28 @@ mod tests {
         Some(s.local_addr().ok()?.ip().to_string())
     }
 
+    /// 那个「到 8.8.8.8 会走哪张网卡」的地址**不一定真能连回自己**。
+    ///
+    /// 第 60 轮踩到：开了 TUN 模式的代理/加速器之后，本机地址变成 `198.18.0.1`
+    /// （`198.18.0.0/15` 是 RFC 2544 的基准测试保留段，被拿来当虚拟网段），
+    /// 往里连能 accept、但一个字节都不会到 —— 测试报「Handshake not finished」，
+    /// 看着像 ws 客户端坏了，其实是这个环境问题。这里用一次真往返验证，验不过就跳过。
+    async fn can_reach_self(ip: &str, port: u16) -> bool {
+        let addr = match format!("{ip}:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::net::TcpStream::connect(std::net::SocketAddr::V4(addr)),
+        )
+        .await;
+        matches!(conn, Ok(Ok(_)))
+    }
+
     /// 绑 0.0.0.0，用本机 LAN 地址连 —— SSRF 门挡回环，但 RFC1918 是**放行**的
     /// （面板的主力场景就是家里的 NAS），所以这条测试走的是真路径。
-    async fn echo_server() -> Option<String> {
+    async fn echo_server() -> Option<(String, bool)> {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.ok()?;
         let port = listener.local_addr().ok()?.port();
         tokio::spawn(async move {
@@ -266,16 +296,32 @@ mod tests {
                 });
             }
         });
-        Some(format!("ws://{}:{}/", local_ip()?, port))
+        // 本机地址不可用时退到回环（测试专用逃生门 `allow_loopback`）：
+        // 这条测试要验的是 send/recv/timeout/close 的语义，不是 SSRF 门。
+        if let Some(ip) = local_ip() {
+            // 198.18.0.0/15（RFC 2544 基准测试段）常被 TUN 代理拿来当虚拟网段：
+            // 往里连能 accept，但数据一个字节都不通 —— TCP connect 成功**不足以**说明能用，
+            // 所以直接按网段排除。169.254/16 是链路本地，同理排除。
+            let synthetic = ip.starts_with("198.18.")
+                || ip.starts_with("198.19.")
+                || ip.starts_with("169.254.");
+            if !synthetic && can_reach_self(&ip, port).await {
+                return Some((format!("ws://{ip}:{port}/"), false));
+            }
+            eprintln!("本机地址 {ip} 连不回自己（VPN/TUN？），改用回环");
+        }
+        Some((format!("ws://127.0.0.1:{port}/"), true))
     }
 
     #[tokio::test]
     async fn echo_roundtrip_timeout_and_idempotent_close() {
-        let Some(url) = echo_server().await else {
-            eprintln!("跳过：拿不到本机 LAN 地址");
+        let Some((url, allow_loopback)) = echo_server().await else {
+            eprintln!("跳过：开不了本地服务端");
             return;
         };
-        let id = open(&url, &json!({})).await.expect("握手应当成功");
+        let id = open(&url, &json!({ "allow_loopback": allow_loopback }))
+            .await
+            .expect("握手应当成功");
 
         send(id, "你好".into()).await.unwrap();
         let f = recv(id, Some(1000)).await.unwrap();

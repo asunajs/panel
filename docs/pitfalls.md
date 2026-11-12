@@ -194,3 +194,10 @@
 46. **「重新读取」按钮只刷新了编辑器**：手改 `config.json` 后必须重启才生效，而按钮名字和
     实际行为不符（它只是重新 GET 了一遍文本）。现在它真的 `POST /api/config/reload`（读盘→校验→换快照）。
     守卫：`config_reload_reads_the_file_and_keeps_the_old_one_when_it_is_broken`。
+
+47. **测试里「本机 LAN 地址」不一定连得回自己**：开了 TUN 模式的代理/加速器后，
+    `UdpSocket::connect("8.8.8.8:80")` 拿到的本机地址会是 `198.18.0.1`（RFC 2544 基准测试段，
+    被当虚拟网段用）。往里连 **accept 成功但一个字节都不通** —— ws 测试报
+    「Handshake not finished」，看着像客户端坏了，其实是环境。而且 TCP connect 成功**不足以**
+    判断可用，所以按网段排除（198.18/15、198.19/15、169.254/16）+ 一次真往返探测；
+    两条都不行时退到回环，用 `#[cfg(test)]` 的 `allow_loopback` 逃生门（SSRF 门有自己的测试）。
