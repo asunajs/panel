@@ -271,6 +271,23 @@ async function main() {
   }
   check('设置页扫到的控件够多（防假绿）', scanned >= 3, '只扫到 ' + scanned + ' 个');
   check('没有掉回系统样式的控件', uaStyled.length === 0, JSON.stringify(uaStyled));
+  // 深色主题下不许有大块近白背景：第 24 轮「还没有令牌」那张白卡片就是
+  // var(--bg-soft, #fafafc) 静默回落来的。这里用面积 + 亮度兜一遍。
+  const theme = await js("document.documentElement.getAttribute('data-theme')");
+  if (theme !== 'dark') { await js("document.getElementById('theme-toggle').click()"); await sleep(400); }
+  await js("location.hash = '#settings'");
+  await sleep(900);
+  await js("document.querySelector('[data-tab=security]').click()");
+  await sleep(700);
+  const bright = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('body *')].filter(e => {" +
+    " const r = e.getBoundingClientRect(); if (r.width * r.height < 4000) return false;" +
+    " const bg = getComputedStyle(e).backgroundColor;" +
+    " const m = bg.match(/rgba?\\((\\d+), (\\d+), (\\d+)/); if (!m) return false;" +
+    " if (/rgba\\([^)]*,\\s*0\\)$/.test(bg)) return false;" +
+    " const lum = (+m[1]) * 0.299 + (+m[2]) * 0.587 + (+m[3]) * 0.114;" +
+    " return lum > 200; }).map(e => e.id || e.className || e.tagName))"));
+  check('深色主题下没有大块浅色背景', bright.length === 0, JSON.stringify(bright));
   // 窄屏（手机）：表格要折成「标签 + 值」的卡片，且不许横向溢出
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await js("location.hash = '#runs'");

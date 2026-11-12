@@ -781,12 +781,15 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .json-box { max-height: 420px; }
 
 /* 首次设置令牌的框（设置 → 安全，只在没凭据时出现） */
+/* 首次设令牌的框。原来写的是 var(--bg-soft, #fafafc) —— 这个变量**根本没定义**，
+   于是静默回落到近白，深色主题下整块白得像外来户（第 24 轮用户抓到）。
+   规矩：只许用定义过的 token，不许写 fallback 兜底。 */
 .setup-box {
   margin-top: 14px;
   padding: 14px 16px;
-  border: 1px dashed var(--line, #d9d9e3);
+  border: 1px dashed var(--line-strong);
   border-radius: 10px;
-  background: var(--bg-soft, #fafafc);
+  background: var(--surface-2);
 }
 .setup-box h3 { margin: 0 0 6px; font-size: 14px; }
 .setup-out { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -795,19 +798,26 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;
-  background: #fff;
-  border: 1px solid var(--line, #d9d9e3);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  font-family: var(--mono);
   font-size: 12px;
   word-break: break-all;
 }
 .setup-input {
-  padding: 6px 10px;
+  height: var(--h-control-sm);
+  padding: 0 10px;
   border-radius: 8px;
-  border: 1px solid var(--line, #d9d9e3);
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  font-family: var(--mono);
   font-size: 13px;
   min-width: 240px;
+  outline: none;
 }
+.setup-input:focus { border-color: var(--accent); }
 
 /* 引擎试跑 */
 .editor-sm { min-height: 120px; }

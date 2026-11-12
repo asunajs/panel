@@ -163,6 +163,11 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 跟旁边 `#script-budget` 的 `28px` / 圆角 `8px` 完全两回事。修法是换成 `.field-inline` + `span.unit`。
 `ui-check.mjs` 有一条断言扫这件事（白底 + 0 圆角 / 2px 灰边即判红），另有一条断言防止它扫到 0 个控件还绿。
 
+**不许写 `var(--x, 兜底值)`**。带 fallback 的 var() 会在变量名打错时**静默回落**到兜底值，
+不报错也不警告 —— 深色主题下才现形。第 24 轮那张白卡片就是 `.setup-box` 写了
+`var(--bg-soft, #fafafc)`，而 `--bg-soft` 从来没定义过。守卫在 `check-pitfalls.sh` 第 8 条：
+扫出未定义的变量、或任何带 fallback 的引用都判红（注释里的示例不算）。
+
 下拉菜单必须挂到 `body` 再 `position: fixed` 定位：`.panel` 是 `overflow: hidden`，
 菜单留在原地会被裁掉；同一时刻只允许开一个（`openDropdown` 全局引用）。
 
@@ -251,7 +256,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 23 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 24 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
@@ -275,6 +280,7 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 | 插件页有 seed 卡片 | 插件网格按 `/api/state` 渲染 |
 | 没有掉回系统样式的控件 | 五个设置页签里的每个 input/select/textarea：白底 + 0 圆角 / 2px 灰边即红 |
 | 扫到的控件够多（防假绿） | 扫到 0 个也绿就没意义，所以另加一条计数断言 |
+| 深色主题下没有大块浅色背景 | 切到深色 + 安全页，扫所有面积 >4000px² 且亮度 >200 的背景 |
 | 没有 JS 报错 | 收集 `Runtime.exceptionThrown` 与 `console.error` |
 | 窄屏没有横向溢出 | `Emulation.setDeviceMetricsOverride` 到 390×844 后 `scrollWidth - innerWidth <= 1` |
 | 窄屏表头隐藏（卡片模式） | `thead.offsetHeight === 0` |

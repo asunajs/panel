@@ -17,7 +17,7 @@ bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 # 命中数（剔除纯注释行）
 hits() { grep -rn "$1" "$2" 2>/dev/null | grep -vE "$CODE" | wc -l | tr -d ' '; }
 
-echo '坑的守卫（HANDOFF §7）'
+echo '坑的守卫（HANDOFF §7 + ui.md §7）'
 
 # §7.12 限流键必须按 IP：按 IP:端口分桶等于每个请求一个新桶，限流器变装饰
 if [ "$(grep -c 'SocketAddr' src/ratelimit.rs 2>/dev/null || true)" = "0" ]; then
@@ -66,9 +66,17 @@ else
   bad 'api() 收到字符串 body 不会带 content-type，后端会 415 —— 传对象'
 fi
 
+# ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
+# 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
+if python3 scripts/check-css-tokens.py; then
+  :
+else
+  FAIL=$((FAIL+1))
+fi
+
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 7 条坑的守卫全过"
+  echo "ok: 8 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi
