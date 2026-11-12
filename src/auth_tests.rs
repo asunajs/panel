@@ -375,3 +375,48 @@ fn no_credential_material_appears_in_the_debug_output() {
     assert!(!s.contains(&to_hex(&auth.salt)));
     assert!(!s.contains(&to_hex(&auth.hash)));
 }
+/// 会话票：签发 → 校验；过期、篡改、换令牌、垃圾输入都要拒。
+#[test]
+fn session_ticket_round_trips_and_expires() {
+    let a = Auth::derive("token-one");
+    let now = 1_700_000_000u64;
+    let c = a.issue_session(now);
+
+    assert!(a.verify_session(&c, now), "刚签发就该有效");
+    assert!(
+        a.verify_session(&c, now + SESSION_TTL_SECS - 1),
+        "有效期最后一秒仍有效"
+    );
+    assert!(!a.verify_session(&c, now + SESSION_TTL_SECS + 1), "过期要拒");
+
+    // 篡改签名（最后一位换掉）
+    let mut bad: Vec<char> = c.chars().collect();
+    let last = bad.len() - 1;
+    bad[last] = if bad[last] == 'a' { 'b' } else { 'a' };
+    let bad: String = bad.into_iter().collect();
+    assert!(!a.verify_session(&bad, now), "改过签名要拒");
+
+    // 篡改到期时间（把 exp 改大）也不行 —— 签名覆盖了它
+    let mut parts: Vec<&str> = c.split('.').collect();
+    let forged_exp = format!("{}", now + SESSION_TTL_SECS * 2);
+    parts[0] = &forged_exp;
+    let forged = parts.join(".");
+    assert!(!a.verify_session(&forged, now), "改 exp 要拒");
+
+    // 换令牌 ⇒ 旧票立刻失效（密钥是从令牌哈希派生的）
+    let b = Auth::derive("token-two");
+    assert!(!b.verify_session(&c, now), "换令牌后旧会话必须失效");
+
+    // 垃圾输入
+    for junk in [
+        "",
+        ".",
+        "a.b",
+        "1.2.3",
+        "1.2.3.4",
+        "notanumber.0123456789abcdef.0000",
+        "999999999999999999999999.0123456789abcdef.0000",
+    ] {
+        assert!(!a.verify_session(junk, now), "垃圾输入要拒: {junk}");
+    }
+}

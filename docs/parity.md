@@ -40,14 +40,14 @@
 | `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
-| `/login` `/api/login` `/api/logout` | ❌ | 只有令牌（header / `?t=`），没有登录页与登出 |
+| `/login` `/api/login` `/api/logout` | ✅ 11-12（换了形状） | 没做独立登录页，做的是**会话 cookie**：`POST /api/login` 用令牌换一张 30 天 HttpOnly 票，`/api/logout` 清掉。好处是插件界面不再需要 `?t=`（令牌不进 URL）。见 [auth.md §8](auth.md) |
 | `/setup` `/api/setup`（首次设令牌向导） | ❌ | 得手工 `PANEL_TOKEN` 或生成 `auth.json` |
 | `/api/restart` | ✅ 11-12 | `exec` 自身：**PID 不变**、参数/环境/工作目录都在；设置页有按钮（带确认） |
 | `/api/test/{lang}`（引擎自测页） | ❌ | 想验证引擎得建脚本 |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/config|task|test|outbox|retry` | 部分 | 只有「通知 + 一个 webhook」，没有渠道管理、发件箱、重试、按任务开关 |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [backup.md](backup.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
 | `/api/market*`、`/api/update*` | ❌ | 已声明不做（见 §3） |
-| `/readyz` | ❌ | 只有 `/healthz` |
+| `/readyz` | ✅ 11-12 | 库能读 + 调度器活着才 200，否则 **503**（不是 200+`ok:false` —— 反向代理会把它当健康） |
 
 已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
 `/api/plugins/{n}/source|reload|unload|delete`、`/api/config`（比旧的 `/api/settings/save` 强：热生效）、

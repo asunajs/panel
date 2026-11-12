@@ -238,6 +238,13 @@
                   <button class="btn" id="panel-restart" type="button">重启进程</button>
                 </div>
               </section>
+              <section class="panel" id="session-card">
+                <header class="panel-head"><h2>登录会话</h2></header>
+                <div class="panel-body">
+                  <p class="muted">登录后浏览器持有一张 HttpOnly 会话票（30 天），令牌本身不存本地、也不进 URL。换令牌会让所有会话立刻失效。</p>
+                  <button class="btn" id="panel-logout" type="button">登出</button>
+                </div>
+              </section>
             </div>
 
             <div class="tab-pane hidden" id="tab-config">

@@ -60,6 +60,44 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
     (status, body)
 }
 
+/// 带令牌的 app（setup() 那个是无鉴权降级态）。
+async fn setup_authed() -> Router {
+    crate::engine::global_inits();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        PathBuf::from("scripts"),
+        PathBuf::from("data/trash"),
+        store.clone(),
+    );
+    router(AppState {
+        db,
+        log,
+        sched,
+        plugins_dir: PathBuf::from("plugins"),
+        scripts_dir: PathBuf::from("scripts"),
+        scripts,
+        data_dir: PathBuf::from("data"),
+        config: store,
+        auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
+    })
+}
+/// 带响应头的版本：登录要读 Set-Cookie。
+async fn send_cookie(app: &Router, req: Request<Body>) -> (StatusCode, String) {
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    (status, cookie)
+}
 async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
     send(app, Request::get(uri).body(Body::empty()).unwrap()).await
 }
@@ -1359,4 +1397,77 @@ await host.register_handler('go', async () => {\n\
     assert!(has("出站目标被 SSRF 防护拒绝"), "{msgs:?}");
     // 正文至少给一个（这条也在连网前就判）
     assert!(has("正文"), "{msgs:?}");
+}
+
+/// 登录换会话票 / 登出清票；票能顶替请求头，篡改的票不行。
+#[tokio::test]
+async fn login_issues_a_session_cookie_that_works_like_a_token() {
+    let app = setup_authed().await;
+
+    // 无凭据：401
+    assert_eq!(get(&app, "/api/state").await.0, StatusCode::UNAUTHORIZED);
+
+    // 错令牌：401，且不发 cookie
+    let req = Request::post("/api/login")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"token":"wrong"}"#))
+        .unwrap();
+    let (status, _) = send_cookie(&app, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // 对令牌：200 + Set-Cookie（HttpOnly / SameSite=Strict）
+    let req = Request::post("/api/login")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"token":"s3cret"}"#))
+        .unwrap();
+    let (status, cookie) = send_cookie(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cookie.contains("panel_session="), "{cookie}");
+    assert!(cookie.contains("HttpOnly"), "会话票必须是 HttpOnly: {cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    let value = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("panel_session=")
+        .to_string();
+
+    // 带票能读，且不需要任何请求头
+    let req = Request::get("/api/state")
+        .header("cookie", format!("panel_session={value}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 篡改签名：401（改签名段的第一个字符 —— 别改最后一位，可能改回原值）
+    let parts: Vec<&str> = value.split('.').collect();
+    let mut sig: Vec<char> = parts[2].chars().collect();
+    sig[0] = if sig[0] == '0' { '1' } else { '0' };
+    let bad = format!("{}.{}.{}", parts[0], parts[1], sig.into_iter().collect::<String>());
+    let req = Request::get("/api/state")
+        .header("cookie", format!("panel_session={bad}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::UNAUTHORIZED);
+
+    // 登出：Set-Cookie 把 Max-Age 置 0
+    let (status, cleared) = send_cookie(
+        &app,
+        Request::post("/api/logout").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+}
+
+/// 就绪探针：库和调度器都在 → 200 + 计数；健康探针依旧匿名。
+#[tokio::test]
+async fn readyz_reports_live_counts() {
+    let (app, _plugins, _data, _store) = setup_dirs("ready").await;
+    let (status, body) = get(&app, "/readyz").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert!(body["tasks"].is_number(), "{body}");
+    assert!(body["plugins"].is_number(), "{body}");
 }

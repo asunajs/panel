@@ -118,11 +118,15 @@ pub fn router(st: AppState) -> Router {
         .route("/api/runs/{id}", get(api_run_one))
         .route("/api/logs", get(api_logs))
         .route("/api/logs/stream", get(api_logs_stream))
+
         // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
         .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(st.clone(), require_token));
 
     Router::new()
+        // 登录/登出挂在外层：它们**不能**被 require_token 挡住（login 就是用来换凭据的）
+        .route("/api/login", post(api_login))
+        .route("/api/logout", post(api_logout))
         .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
@@ -131,6 +135,8 @@ pub fn router(st: AppState) -> Router {
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
         .route("/healthz", get(|| async { "ok\n" }))
+        // 就绪探针：库能读 + 调度器活着才算就绪（不就绪给 503）
+        .route("/readyz", get(readyz))
         .merge(api)
         .layer(middleware::from_fn(security_headers))
         .with_state(st)
@@ -177,6 +183,113 @@ async fn panel_css(Path(rel): Path<String>) -> Response {
 
 /// 单令牌鉴权。没配令牌时不拦 —— 那种部署必须只绑回环（main.rs 负责强制）。
 ///
+/// 从 Cookie 头里取会话票。只认一个名字，别的 cookie 一律不管。
+fn presented_session(h: &HeaderMap) -> Option<String> {
+    let raw = h.get(header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        let (k, v) = part.trim().split_once('=')?;
+        if k == crate::auth::SESSION_COOKIE && !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 会话 cookie 的公共属性。
+///
+/// 不加 `Secure`：面板的常规部署是**局域网明文 HTTP**，加了这条浏览器就不肯存，
+/// 于是「登录一次管一个月」这件事在主力场景里直接失效。真正挡住跨站的是
+/// `SameSite=Strict` + 写接口的 `x-panel: 1`。
+fn session_cookie(value: &str, max_age: u64) -> String {
+    format!(
+        "{}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}",
+        crate::auth::SESSION_COOKIE
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct LoginBody {
+    token: String,
+}
+
+/// `POST /api/login` —— 用令牌换一张会话票（HttpOnly cookie）。
+///
+/// 为什么要有它：浏览器**导航**（新标签打开插件界面、手机上点书签）带不了自定义头，
+/// 只能把令牌塞进 URL —— 那会进历史记录、Referer 和代理日志。换成 cookie 之后
+/// 令牌只走一次请求体。
+async fn api_login(
+    State(st): State<AppState>,
+    Json(b): Json<LoginBody>,
+) -> Result<Response, ApiError> {
+    let Some(auth) = st.auth.clone() else {
+        // 没配令牌就没有「登录」这回事，直接告诉前端「不需要会话」
+        return Ok(Json(json!({ "ok": true, "session": false })).into_response());
+    };
+    let a = auth.clone();
+    let ok = tokio::task::spawn_blocking(move || a.verify(&b.token))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return Err((StatusCode::UNAUTHORIZED, "令牌不对\n".into()));
+    }
+    let cookie = session_cookie(
+        &auth.issue_session(now_secs()),
+        crate::auth::SESSION_TTL_SECS,
+    );
+    let mut resp = Json(json!({ "ok": true, "session": true })).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    Ok(resp)
+}
+
+/// `POST /api/logout` —— 清掉会话 cookie（无状态票，服务端没有表要删）。
+async fn api_logout() -> Response {
+    let mut resp = Json(json!({ "ok": true })).into_response();
+    if let Ok(v) = HeaderValue::from_str(&session_cookie("", 0)) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// `GET /readyz` —— 就绪探针：比 `/healthz` 多查两件事（库能读、调度器活着）。
+///
+/// 不就绪时返回 **503**：反向代理/系统服务管理器的语义是「现在别把流量给我」，
+/// 而 200 + `{"ok":false}` 会被它们当成健康。
+async fn readyz(State(st): State<AppState>) -> Response {
+    // 库能不能读（`plugins` 表只是个探针，别拿它的行数当插件数 ——
+    // 那张表只记「被禁用的」，行数跟实际加载数无关）。
+    let db = st
+        .db
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM plugins", [], |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        })
+        .await;
+    // 调度器还活着吗：能应答就说明 actor 循环没卡死
+    let plugins = st.sched.plugins().await.map(|p| p.len()).unwrap_or(0);
+    let tasks = st.sched.tasks().await.map(|t| t.len()).unwrap_or(0);
+    let ok = db.is_ok();
+    let body = json!({
+        "ok": ok,
+        "plugins": plugins,
+        "tasks": tasks,
+        "error": db.err(),
+    });
+    let code = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(body)).into_response()
+}
 /// 校验的是**来件的派生值**，不是「来件等于某个明文」：磁盘上只有盐 + 哈希
 /// （见 `crate::auth`），所以
 /// - 令牌明文既不落盘、也不留在进程环境里（插件读 `process.env` 也拿不到）；
@@ -215,12 +328,22 @@ async fn require_token(
             None
         }
     });
-    let ok = match presented {
-        Some(t) => tokio::task::spawn_blocking(move || auth.verify(&t))
-            .await
-            .unwrap_or(false),
-        None => false,
-    };
+    // 令牌（请求头 / 插件页的 ?t=）优先；没有再认**会话 cookie** ——
+    // 浏览器导航带不了自定义头，靠它才能「登录一次、之后直接开页面」。
+    let mut ok = false;
+    match presented {
+        Some(t) => {
+            let a = auth.clone();
+            ok = tokio::task::spawn_blocking(move || a.verify(&t))
+                .await
+                .unwrap_or(false);
+        }
+        None => {
+            if let Some(c) = presented_session(req.headers()) {
+                ok = auth.verify_session(&c, now_secs());
+            }
+        }
+    }
     if ok {
         return next.run(req).await;
     }

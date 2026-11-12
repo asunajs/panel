@@ -83,6 +83,61 @@ impl std::fmt::Debug for Auth {
     }
 }
 
+/// 会话 cookie 的名字。
+pub const SESSION_COOKIE: &str = "panel_session";
+
+/// 会话有效期：30 天。
+///
+/// 面板是「家里那台机器上的东西」：短会话只会让人把令牌写在便签上贴在屏幕边。
+/// 真正的撤销手段是换令牌（auth.json 一换，所有旧会话立刻失效，见下面的密钥派生）。
+pub const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+
+impl Auth {
+    /// 会话签名密钥 = HMAC-SHA256，key 用**令牌哈希**。
+    ///
+    /// 三个好处：不用额外存密钥、不用落盘、换令牌等于吊销所有会话。
+    /// 反过来，拿到 auth.json 的人能伪造会话 —— 但那时他已经能离线爆破令牌了，
+    /// 而 auth.json 本来就要按凭据保管（见文件头）。
+    fn session_key(&self) -> ring::hmac::Key {
+        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.hash)
+    }
+
+    /// 签发一张无状态会话票：exp.nonce.hmac（全是 ASCII，不需要 base64）。
+    ///
+    /// 无状态是刻意的：面板进程重启不该把所有人踢下线，也不需要一张会泄漏内存的会话表。
+    pub fn issue_session(&self, now: u64) -> String {
+        let exp = now + SESSION_TTL_SECS;
+        let mut nb = [0u8; 8];
+        SystemRandom::new()
+            .fill(&mut nb)
+            .expect("系统随机源不可用");
+        let payload = format!("{exp}.{}", to_hex(&nb));
+        let tag = ring::hmac::sign(&self.session_key(), payload.as_bytes());
+        format!("{payload}.{}", to_hex(tag.as_ref()))
+    }
+
+    /// 校验会话票：格式 → 时间窗 → 常量时间比签名。
+    pub fn verify_session(&self, cookie: &str, now: u64) -> bool {
+        let parts: Vec<&str> = cookie.split('.').collect();
+        let [exp, nonce, sig] = parts[..] else {
+            return false;
+        };
+        let Ok(exp) = exp.parse::<u64>() else {
+            return false;
+        };
+        // 过期；或者「太远」（时钟回拨 / 伪造）。上限留一天余量给时钟误差。
+        if exp <= now || exp > now + SESSION_TTL_SECS + 86_400 {
+            return false;
+        }
+        if nonce.len() != 16 || sig.len() != 64 {
+            return false;
+        }
+        let payload = format!("{exp}.{nonce}");
+        let want = ring::hmac::sign(&self.session_key(), payload.as_bytes());
+        ct_eq(sig.as_bytes(), to_hex(want.as_ref()).as_bytes())
+    }
+}
+
 impl Auth {
     /// 用随机盐派生一份新凭据。
     pub fn derive(plaintext: &str) -> Self {

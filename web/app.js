@@ -854,11 +854,13 @@ async function showRun(id) {
   }
 }
 
-/** 插件界面的地址。面板启用了令牌时带上 ?t= —— 新标签页加不了自定义头，
- *  宿主只对 /plugins/* 接受 query 令牌（见 web.rs require_token）。 */
+/** 插件界面的地址。
+ *
+ *  ⚠ 这里**不再**拼 ?t=：令牌进 URL 会留在浏览器历史、Referer 和代理日志里。
+ *  现在靠 HttpOnly 会话 cookie —— 浏览器导航会自动带上，新标签页也认。
+ *  宿主仍然接受 /plugins/* 的 ?t=（给脚本和书签留的后路）。 */
 function webuiUrl(name) {
-  const base = '/plugins/' + encodeURIComponent(name) + '/';
-  return state.token ? base + '?t=' + encodeURIComponent(state.token) : base;
+  return '/plugins/' + encodeURIComponent(name) + '/';
 }
 
 function openWebui(name) {
@@ -1573,8 +1575,10 @@ async function refresh() {
     state.loaded = true;
     $('version').textContent = 'v' + (state.version || '—');
     $('auth-state').textContent = state.auth ? '令牌已启用' : '未启用令牌';
-    if (state.auth && !state.token) showGate(true, '这个面板启用了令牌鉴权');
-    else if (state.token) showGate(false);
+    // 能读到 /api/state 就说明凭据是通的（请求头或会话 cookie），不用再看 state.token
+    showGate(false);
+    // 没配令牌就没有「登出」这回事（会话卡是给启用令牌的部署看的）
+    $('session-card')?.classList.toggle('hidden', !state.auth);
     banner('');
     setSync(true);
     render();
@@ -1880,10 +1884,18 @@ function bind() {
     ev.preventDefault();
     const value = $('token').value.trim();
     if (!value) return;
-    state.token = value;
-    localStorage.setItem(TOKEN_KEY, value);
     $('token').value = '';
     try {
+      // 用令牌换一张 HttpOnly 会话票：之后所有请求（含浏览器导航）都靠它，
+      // 令牌本身不再落 localStorage、也不进 URL。
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: value }),
+      });
+      if (!r.ok) throw new Unauthorized();
+      state.token = '';
+      localStorage.removeItem(TOKEN_KEY);
       await api('/api/state');
       showGate(false);
       toast('已解锁');
@@ -2014,6 +2026,7 @@ function bind() {
   $('plugin-new').addEventListener('click', openNewPlugin);
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
+  $('panel-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
   $('new-plugin-ok').addEventListener('click', createPlugin);
@@ -2041,10 +2054,31 @@ function bind() {
 
 // ---------------------------------------------------------------- 启动
 
+/** 老版本把令牌存在 localStorage 里，还把它拼进插件页 URL。
+ *  现在换成 HttpOnly 会话 cookie：先把老令牌换成会话票，再从 localStorage 删掉。
+ *  删掉之后 api() 不再发 x-panel-token 头，插件页也不用带 ?t= 了。 */
+async function migrateLegacyToken() {
+  const legacy = localStorage.getItem(TOKEN_KEY);
+  if (!legacy) return;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: legacy }),
+    });
+    if (!r.ok) return; // 换不了就留着，走老的请求头那条路
+  } catch {
+    return;
+  }
+  localStorage.removeItem(TOKEN_KEY);
+  state.token = '';
+}
+
 async function main() {
   initTheme();
   bind();
   bindTips();
+  await migrateLegacyToken();
   setView(location.hash.slice(1) || 'dashboard');
   await refresh();
   await loadDashboard();
@@ -2083,6 +2117,20 @@ async function uploadFile(inputId, url, okPrefix) {
   } finally {
     input.value = '';
   }
+}
+
+/** 登出：清掉服务端 cookie，回到「需要令牌」那一步。
+ *  无状态会话票没有服务端表要删，所以这里只是让浏览器把 cookie 扔掉。 */
+async function logoutPanel() {
+  if (!(await askConfirm('登出后要重新输入面板令牌才能再进来。继续？', '登出'))) return;
+  try {
+    await fetch('/api/logout', { method: 'POST', headers: { 'x-panel': '1' } });
+  } catch {
+    // 服务端不可达也要把本地状态清掉
+  }
+  state.token = '';
+  localStorage.removeItem(TOKEN_KEY);
+  showGate(true, '已登出');
 }
 
 /** 重启进程：exec 自身，PID 不变。要确认一次 —— 正在跑的任务会断。 */
