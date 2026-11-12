@@ -81,3 +81,29 @@ restore --in x.enc        不给 --secret → 「这是加密备份，要给 --s
 错私钥                     → 第 0 块解密失败
 明文备份 restore           → 不用 --secret 也能恢复
 ```
+
+## 恢复：先整份校验，再动磁盘
+
+`validate()` 是**不碰磁盘**的一步：格式、每个插件名（`safe_name`，不许 `../`）、源码非空、
+插件/脚本大小上限、`config_text` 是不是合法 JSON 对象且不超上限 —— 全过才允许写。
+
+为什么非要分成两步：恢复是**覆盖**现有插件和配置。第 41 轮实测发现 CLI 的 `restore`
+以前是「先 `apply()` 写插件 + 脚本，**之后**才验配置 JSON」。一份「插件合法、
+`config_text` 坏掉」的备份会把插件全换掉再报错 —— 留下一半新一半旧的面板，
+而那时候人通常已经没有第二份备份了。
+
+实测（`/tmp` 下的临时目录，`good.js` + `config.json`）：
+
+```text
+1) 正常备份 → 恢复        已恢复：1 个插件、0 个脚本、配置已覆盖；good.js 在
+2) config_text 坏掉        Error: 备份里的配置不是合法 JSON: key must be a string...
+                           plugins 目录仍是 good.js，evil.js **没有**被写出来，配置没动
+3) 插件名 ../escape        Error: 非法脚本名: ../escape（只允许字母、数字、- _ .）
+                           plugins 目录不变
+```
+
+HTTP 的 `POST /api/backup` 本来就在写文件前验配置；现在两边共用同一个 `validate()`，
+口径不会再分叉。
+
+守卫：`backup.rs` 的 `validate_rejects_a_broken_payload_before_anything_is_written`
+（7 个反例：配置非 JSON / 配置非对象 / 名字越界 / 空源码 / 未知格式 / 空备份合法）。

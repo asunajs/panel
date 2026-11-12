@@ -254,6 +254,10 @@
     现在 `enqueue_all` 一次事务写完。守卫：`notify_outbox_tests.rs` 的 `one_notice_writes_one_row_per_channel_in_one_go`。
 35. **发件箱一轮只发 10 条是个坑**：积压 25 条要等 3 个 tick（90 秒）。`spawn_ticker` 现在连着扫到
     「某批不足 10 条」（上限 50 批）；实测重启后 25 条 0.0s 全发完。语义是**至少一次**（写 done=1 前被杀会重发）。
+36. **恢复备份必须「先整份校验、再动磁盘」**：CLI 的 `restore` 原来是「先 `apply()` 写插件 +
+    脚本，之后才验 `config_text`」。一份「插件合法、配置坏掉」的备份会把插件全换掉再报错 ——
+    半恢复状态，而那时人通常已经没有第二份备份。现在只有一个 `validate()`（不碰磁盘），
+    HTTP 和 CLI 共用。守卫：`backup.rs::validate_rejects_a_broken_payload_before_anything_is_written`。
 
 ## 8. 运行中的面板
 
