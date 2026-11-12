@@ -618,6 +618,27 @@ struct Inner {
     /// 面板级配置的热快照。取一次只 clone 一个 `Arc`，所以既能扛住热路径，
     /// 又能在界面保存配置后立刻生效（见 src/config_store.rs）。
     config: std::sync::Arc<crate::config_store::ConfigStore>,
+    /// 任务状态的**串行**写通道。
+    ///
+    /// 为什么不是每次 `tokio::spawn` 一个写：两次注册挨着发生（handler 先、cron 后，
+    /// 最常见的写法）时，两个写任务谁先落库是不确定的 —— 第 37 轮实测库里留下了
+    /// 「cron 空、budget=默认值」的**旧版本**那一行，重启后 `enabled=true` 会把用户
+    /// 暂停过的任务重新打开。串行通道保证「谁先调用谁先落库」。
+    persist: mpsc::UnboundedSender<PersistJob>,
+}
+
+/// 一次任务状态落库（按发出顺序串行执行）。
+struct PersistJob {
+    plugin: String,
+    name: String,
+    cron: String,
+    budget: i64,
+    enabled: bool,
+    next: i64,
+    ov: Option<String>,
+    summary: Option<String>,
+    blockers: String,
+    lead: Option<i64>,
 }
 
 /// 起调度器。`config` 是所有插件共享的只读配置（`host.config()`）。
@@ -628,6 +649,7 @@ pub fn start(
 ) -> (Scheduler, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     let (reg_tx, mut reg_rx) = mpsc::unbounded_channel::<Registration>();
+    let (persist_tx, mut persist_rx) = mpsc::unbounded_channel::<PersistJob>();
     let mut inner = Inner {
         web: std::collections::HashSet::new(),
         saved: HashMap::new(),
@@ -639,7 +661,30 @@ pub fn start(
         tx: tx.clone(),
         reg: reg_tx.clone(),
         config,
+        persist: persist_tx,
     };
+    // 串行落库：一条一条来，顺序就是调用顺序（见 `Inner::persist` 的注释）。
+    let pdb = inner.db.clone();
+    tokio::spawn(async move {
+        while let Some(j) = persist_rx.recv().await {
+            let _ = pdb
+                .call(move |c| {
+                    c.execute(
+                        "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                         ON CONFLICT(plugin,name) DO UPDATE SET
+                           cron=excluded.cron, budget_ms=excluded.budget_ms,
+                           enabled=excluded.enabled, next_at=excluded.next_at,
+                           override_expr=excluded.override_expr, summary=excluded.summary,
+                           blockers=excluded.blockers, lead_ms=excluded.lead_ms",
+                        rusqlite::params![j.plugin, j.name, j.cron, j.budget, j.enabled, j.next, j.ov, j.summary, j.blockers, j.lead],
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                })
+                .await;
+        }
+    });
     let handle = tokio::spawn(async move {
         // 先把用户改过的调度读进内存：注册发生在 actor 循环里（同步），
         // 那里没法 await DB，所以只能提前备好。
@@ -808,16 +853,10 @@ impl Inner {
                 self.plugins.remove(&name);
                 self.web.remove(&name);
                 self.tasks.retain(|t| t.plugin != name);
-                let db = self.db.clone();
-                tokio::spawn(async move {
-                    let _ = db
-                        .call(move |c| {
-                            c.execute("DELETE FROM tasks WHERE plugin=?1", [&name])
-                                .map(|_| ())
-                                .map_err(|e| e.to_string())
-                        })
-                        .await;
-                });
+                // **不删** tasks 里的行：那是「人的改动」（暂停/摘要/blockers/调度覆盖/提前量），
+                // 卸下插件不该把它抹掉 —— 重载/再启用之后还要靠它恢复。
+                // 代价：插件被删掉后留下几行孤儿（只在注册时被读，没有副作用）。
+                // 第 37 轮实测：原来在这里 DELETE，于是「重载」等于「清空这个插件的所有设置」。
             }
             Cmd::Tasks { reply } => {
                 let _ = reply.send(self.views());
@@ -1192,9 +1231,11 @@ impl Inner {
             Registration::Handler { plugin, name } => {
                 if self.find(&plugin, &name).is_none() {
                     self.tasks.push(Task::manual(plugin.clone(), name.clone()));
-                    if let Some(i) = self.find(&plugin, &name) {
-                        self.persist_task(i);
-                    }
+                    // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
+                    // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
+                    // 随后同名 register_cron 的 apply_saved 就读不回来了 ——
+                    // 第 37 轮实测：热重载后暂停被恢复成「启用」、调度覆盖和摘要全丢。
+                    // 手动任务本身不需要落库：它的状态是靠 set_job_* 落库的。
                 }
             }
         }
@@ -1204,39 +1245,29 @@ impl Inner {
         // 先同步内存里的 saved（下次注册/重启按它恢复），再落库。
         self.remember(idx);
         let t = &self.tasks[idx];
-        let (plugin, name, cron, budget, enabled, next, ov) = (
-            t.plugin.clone(),
-            t.name.clone(),
-            t.cron.clone(),
-            t.budget_ms as i64,
-            t.enabled,
-            t.next_fire.timestamp_millis(),
-            t.override_expr.clone(),
-        );
-        let (summary, blockers, lead) = (
-            t.summary.clone(),
-            serde_json::to_string(&t.blockers).unwrap_or_else(|_| "[]".into()),
+        let job = PersistJob {
+            plugin: t.plugin.clone(),
+            name: t.name.clone(),
+            cron: t.cron.clone(),
+            budget: t.budget_ms as i64,
+            enabled: t.enabled,
+            next: t.next_fire.timestamp_millis(),
+            ov: t.override_expr.clone(),
+            summary: t.summary.clone(),
+            blockers: serde_json::to_string(&t.blockers).unwrap_or_else(|_| "[]".into()),
             // 只有面板改过的提前量才落库：插件注册给的是默认值，重启时应当以插件
             // 当时的注册为准（插件可能在两次启动之间改了 lead_ms）。
-            saved_lead(t.lead_override, t.lead_ms).map(|v| v as i64),
-        );
-        let db = self.db.clone();
-        tokio::spawn(async move {
-            let _ = db.call(move |c| {
-                c.execute(
-                    "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                     ON CONFLICT(plugin,name) DO UPDATE SET
-                       cron=excluded.cron, budget_ms=excluded.budget_ms,
-                       enabled=excluded.enabled, next_at=excluded.next_at,
-                       override_expr=excluded.override_expr, summary=excluded.summary,
-                       blockers=excluded.blockers, lead_ms=excluded.lead_ms",
-                    rusqlite::params![plugin, name, cron, budget, enabled, next, ov, summary, blockers, lead],
-                )
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-            }).await;
-        });
+            lead: saved_lead(t.lead_override, t.lead_ms).map(|v| v as i64),
+        };
+        let (p, n) = (job.plugin.clone(), job.name.clone());
+        if self.persist.send(job).is_err() {
+            self.log.emit(
+                &p,
+                None,
+                Level::Warn,
+                format!("任务 {n} 的状态没能落库（写通道已关闭）"),
+            );
+        }
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {

@@ -227,6 +227,19 @@
 28. **同一个字段不能一个入口报错、另一个入口静默截断**：`register_cron` 的 `lead_ms` 超上限会报错，
     但 `set_job_schedule` 之前是 `l.min(LEAD_MAX_MS)` 静默截断 —— 插件以为提前了两小时，
     实际只有一小时，日志里一个字都没有。现在两条路都报错。
+29. **`register_handler` 那条路径落库会清空用户的设置**：它 `persist_task` → `remember`，
+    把内存 saved 里的用户状态换成刚建出来的默认值；随后同名 `register_cron` 的 `apply_saved`
+    读到的就是默认值。症状：点一次「重载」= 清空这个插件的暂停/摘要/blockers/调度覆盖/提前量，
+    一个错都不报。现在该路径不落库（手动态靠 `set_job_*` 落库）。
+30. **`Cmd::Unload` 不能删 `tasks` 里的行**：那是人的改动，重载/再启用还要靠它恢复。
+    原来在那里 `DELETE FROM tasks WHERE plugin=?1`，等于「重载 = 全部设置归零」。
+    代价：插件删掉后留几行孤儿（只在注册时被读）。
+31. **任务状态落库必须串行**：两次注册挨着发生（handler 先、cron 后，最常见的写法）时，
+    每次都 `tokio::spawn` 一个写 → 谁先落库不确定，库里可能留下旧版本那一行（cron 空、
+    budget 默认值），重启后 `enabled=true` 会把用户暂停过的任务重新打开。
+    现在走 `Inner::persist` 通道，一条一条按发出顺序写。
+
+    字段归属表见 `docs/task-state.md`。
 
 ## 8. 运行中的面板
 
