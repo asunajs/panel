@@ -687,6 +687,13 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .unwrap_or(s.len());
     let (num_s, unit) = s.split_at(digits_end);
+    // 不以数字开头是最常见的手滑（`@every 不是时间`、`@every */5`）。
+    // 以前这里会报「`` 不是合法数字」—— 空的引号，等于什么都没说。
+    if num_s.is_empty() {
+        return Err(format!(
+            "@every 后面要跟「数字 + 单位」（例如 30s、5m、1h、1d），收到 `{s}`"
+        ));
+    }
     let num: f64 = num_s
         .parse()
         .map_err(|_| format!("`{num_s}` 不是合法数字"))?;
@@ -1029,6 +1036,19 @@ mod tests {
 }
 
 #[cfg(test)]
+    #[test]
+    fn every_with_a_non_numeric_part_says_what_it_wants() {
+        // 第 68 轮：以前报「`` 不是合法数字」（空引号），等于没说。
+        let e = parse_duration("不是时间").unwrap_err();
+        assert!(e.contains("数字 + 单位"), "{e}");
+        assert!(e.contains("不是时间"), "要把用户输入原样带回来: {e}");
+        // 其余几条既有文案别退化
+        assert!(parse_duration("").unwrap_err().contains("缺少数值"));
+        assert!(parse_duration("30x").unwrap_err().contains("无法识别的单位"));
+        assert!(parse_duration("0s").unwrap_err().contains("必须大于 0"));
+        assert_eq!(parse_duration("30s").unwrap(), std::time::Duration::from_secs(30));
+    }
+
 mod dst_tests {
     use super::Schedule;
     use chrono::Local;

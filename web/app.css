@@ -431,6 +431,14 @@ button, input, select { font: inherit; color: inherit; }
   z-index: 70; padding: 9px 14px; border-radius: 10px;
   background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: var(--shadow-md);
   animation: rise .16s ease-out;
+  /* 接口的错误文案可能很长（serde 的原话、带字段名的中文提示）。
+     不限宽 + 不换行的话，这种 toast 会横着撑出视口、两头都被切掉 ——
+     用户只看到中间半句，还不如不显示。 */
+  max-width: min(560px, calc(100vw - 32px));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: 1.45;
 }
 .toast-err { background: var(--err); color: #fff; }
 @keyframes rise { from { transform: translate(-50%, 8px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }

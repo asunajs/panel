@@ -86,7 +86,7 @@ PANEL_DATA_DIR=/tmp/uie PANEL_PLUGINS_DIR=/tmp/uie/plugins \
 UI_BASE=http://127.0.0.1:8797 CDP=http://127.0.0.1:9333 node scripts/ui-e2e.mjs
 ```
 
-覆盖 57 条。前 15 条是「点了之后两边要对得上」：
+覆盖 61 条。前 15 条是「点了之后两边要对得上」：
 
 | 动作 | 断言 |
 |---|---|
@@ -129,7 +129,7 @@ UI_BASE=http://127.0.0.1:8797 CDP=http://127.0.0.1:9333 node scripts/ui-e2e.mjs
 它抓到的真实问题（第 49 轮）：**点「暂停」后后端变了、界面状态列没变** ——
 纯 API 测试和静态断言都发现不了这一条。
 
-实测：`ok: 57 条界面端到端全过`（Edge 157，headless，调试端口 9333）。
+实测：`ok: 61 条界面端到端全过`（Edge 157，headless，调试端口 9333）。
 
 一个自查记录：第一版「令牌太短」那条断言读错了位置（读 `.setup-out`，而提示在 toast 里），
 失败了一次；`seed()` 之后原来只等 800ms，机器忙时任务行还没渲染出来也会假失败 ——
@@ -173,6 +173,21 @@ UI_BASE=http://127.0.0.1:8797 CDP=http://127.0.0.1:9333 node scripts/ui-e2e.mjs
 | `runPill("ok")` → 成功 | 正常收尾 |
 | `runPill("cancelled")` → 已停止 | 被重载/卸载打断**不叫失败** |
 | `runPill("error")` → 失败 | 真失败还是红的 |
+
+### 再 4 条：长错误文案（第 68 轮）
+
+接口返回的 400 文案可能很长（serde 原话、带字段名的中文提示）。以前 `.toast` 不限宽、不换行，
+这种 toast 会横着撑出视口、两头被切掉 —— 用户只看到中间半句。
+
+| 断言 | 盯的是什么 |
+|---|---|
+| 长 toast（400 个字符）不超出视口 | `getBoundingClientRect()` 的 left/right 都在 `innerWidth` 内 |
+| 长 toast 自动换行（`scrollWidth <= clientWidth`） | `white-space` 不是 nowrap |
+| 计划写错时红字说清要什么 | 文案里有「数字 + 单位」或「无法识别」 |
+| 红字没被挤成一行 | 高度 > 0 且不横向溢出 |
+
+`.toast` 现在有 `max-width: min(560px, calc(100vw - 32px))` + `white-space: pre-wrap` +
+`overflow-wrap: anywhere` + 左对齐 + `line-height: 1.45`。
 
 第三处（第 51 轮）：`#tasks-body tr` 在「还没有注册任何定时任务」时也有**一行**（colspan 提示），
 于是「任务表渲染出行」这条在空表时假通过，后面的 `idx=-1` 才炸。现在改成「必须有带多列单元格的数据行」，

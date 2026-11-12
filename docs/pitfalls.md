@@ -235,3 +235,11 @@
     看着像「真的没有这类日志」；`?dir=ascending` 被当 desc（顺序反了）；`?limt=10` 直接被忽略。
     现在 `Page` 拒绝未知键、`level`/`dir` 走白名单、解析失败翻成中文 400。
     `sort` 例外（白名单外落回 id 并在响应回显）。守卫：`query_params_that_are_typoed_are_rejected`。
+
+55. **长 toast 会撑出视口、两头被切掉**：`.toast` 以前既没 `max-width` 也不换行，
+    接口那串 serde 原话（150+ 字符）横着排成一行，居中的 `translateX(-50%)` 让它两头都跑出屏幕，
+    用户只看到中间半句。现在 `max-width: min(560px, calc(100vw - 32px))` + `pre-wrap` + `overflow-wrap: anywhere`。
+    守卫：界面端到端「长 toast 不超出视口」「长 toast 会自动换行」。
+56. **`@every` 后面不是数字时报「`` 不是合法数字」**：空引号，等于没说。
+    现在「@every 后面要跟『数字 + 单位』（例如 30s、5m、1h、1d），收到 `不是时间`」。
+    守卫：`every_with_a_non_numeric_part_says_what_it_wants`。

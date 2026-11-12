@@ -318,6 +318,27 @@ checkFail('被拒之后通知配置仍然有效', stillOk === true, String(still
 await putCfg(goodCfg);
 recv.close();
 
+
+// ---------------------------------------------------------------- 长错误文案（第 68 轮）
+// 接口的 400 文案可能很长（serde 原话 / 带字段名的中文提示）。以前 toast 不限宽、不换行，
+// 这种文案会横着撑出视口、两头被切掉，用户只看到中间半句。
+await ev("(toast('长错误文案' + 'x'.repeat(400), true), 'ok')");
+await sleep(250);
+const tb = await ev("(() => { const t = document.getElementById('toast'); const r = t.getBoundingClientRect(); const cs = getComputedStyle(t); return { left: r.left, right: r.right, vw: innerWidth, sw: t.scrollWidth, cw: t.clientWidth, ws: cs.whiteSpace }; })()");
+check('长 toast 不超出视口', tb.left >= -1 && tb.right <= tb.vw + 1, JSON.stringify(tb));
+check('长 toast 会自动换行（没有横向溢出）', tb.sw <= tb.cw + 1 && tb.ws !== 'nowrap', JSON.stringify(tb));
+
+// 改计划填一个解析不了的表达式：红字要能看懂（不是「`` 不是合法数字」那种空引号）
+await ev("(() => { const b = [...document.querySelectorAll('#tasks-body button')].find(x => x.textContent.trim() === '改计划'); b.click(); })()");
+await sleep(400);
+await ev("(() => { const el = document.getElementById('task-schedule-expr'); el.value = '@every 不是时间'; el.dispatchEvent(new Event('input', {bubbles:true})); })()");
+await ev("document.getElementById('task-schedule-ok').click()");
+await sleep(1200);
+const hint2 = await ev("(() => { const h = document.getElementById('task-schedule-hint'); const r = h.getBoundingClientRect(); return { text: h.textContent, sw: h.scrollWidth, cw: h.clientWidth, err: h.classList.contains('err-text'), h: Math.round(r.height) }; })()");
+check('计划写错时红字说清要什么', /数字 \+ 单位|无法识别/.test(hint2.text || ''), JSON.stringify(hint2));
+check('红字没被挤成一行（高度 > 0 且不横向溢出）', hint2.h > 0 && hint2.sw <= hint2.cw + 1, JSON.stringify(hint2));
+await ev("document.querySelector('#task-schedule .modal-actions .btn:not(.btn-primary):not(#task-schedule-reset)').click()");
+await sleep(300);
 // ---------------------------------------------------------------- 插件源码编辑器（唯一会改磁盘的界面）
 //
 // 「保存并重载」= 写盘 → 重载，失败要回滚。这条路上有三个必须成立的东西：
