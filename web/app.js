@@ -40,6 +40,8 @@ const state = {
   dashRuns: [],
   dashLogs: [],
   logs: [],
+  /** 最后一条**带 id** 的日志（补发/回填来的才有）。断线重连带它去补空档。 */
+  logLastId: null,
   logsPaused: false,
   logLevel: '',
   logQuery: '',
@@ -847,7 +849,31 @@ function renderLogSearch(box) {
   box.append(foot);
 }
 
+/** 没 id 的实时行：和环里最后几行比一次（补发与广播的重叠窗口最多几行）。 */
+function dupWithoutId(l) {
+  const tail = state.logs.slice(-20);
+  return tail.some((x) =>
+    x.ts === l.ts && x.plugin === l.plugin && String(x.run_id) === String(l.run_id) &&
+    x.level === l.level && x.message === l.message);
+}
+
 function appendLog(l) {
+  if (l.id != null) {
+    if (state.logs.some((x) => x.id === l.id)) return;   // 补发和实时重叠：同一条只留一份
+    // 环里可能已经有一条**没 id** 的同一行（重连前收到的实时行）：给它补上 id 就够，
+    // 不要再画一遍；补上之后以后的重连才能按 id 去重。
+    const twin = state.logs.find((x) =>
+      x.id == null && x.ts === l.ts && x.plugin === l.plugin &&
+      String(x.run_id) === String(l.run_id) && x.level === l.level && x.message === l.message);
+    if (twin) {
+      twin.id = l.id;
+      if (!state.logLastId || l.id > state.logLastId) state.logLastId = l.id;
+      return;
+    }
+    if (!state.logLastId || l.id > state.logLastId) state.logLastId = l.id;
+  } else if (dupWithoutId(l)) {
+    return;
+  }
   state.logs.push(l);
   if (state.logs.length > LOG_RING) state.logs.splice(0, state.logs.length - LOG_RING);
   if (state.logMode || state.logsPaused || state.view !== 'logs' || !logMatches(l)) return;
@@ -865,6 +891,8 @@ async function backfillLogs() {
     const rows = (data.logs || []).slice().reverse();
     if (!rows.length) return;
     state.logs = rows;
+    const maxId = rows.reduce((m, r) => (r.id && r.id > m ? r.id : m), 0);
+    if (maxId) state.logLastId = maxId;
     if (state.view === 'logs') renderLogs();
   } catch (_) { /* 回填失败不影响实时流 */ }
 }
@@ -879,7 +907,24 @@ async function streamLogs() {
     try {
       const headers = {};
       if (state.token) headers['x-panel-token'] = state.token;
-      const resp = await fetch('/api/logs/stream', { headers, signal: streamAbort.signal });
+      // 没有游标（页面刚开、或者环里只有实时行没 id）时先从库里取一个：
+      // 不取的话第一次重连没有 since，断线那段就补不回来。
+      if (!state.logLastId) {
+        try {
+          const d = await api('/api/logs?limit=200');
+          const rows = (d.logs || []).slice().reverse();
+          if (rows.length) {
+            state.logLastId = rows[rows.length - 1].id;
+            if (!state.logs.length) {
+              state.logs = rows;
+              if (state.view === 'logs') renderLogs();
+            }
+          }
+        } catch (_) { /* 取不到就这次先不补，下次再试 */ }
+      }
+      // 重连时带上「我最后看到的那条 id」：服务端先把断线期间的行补发过来，再走实时。
+      const since = state.logLastId ? ('?since=' + state.logLastId) : '';
+      const resp = await fetch('/api/logs/stream' + since, { headers, signal: streamAbort.signal });
       if (resp.status === 401) { showGate(true, '需要令牌才能读日志'); return; }
       if (!resp.ok || !resp.body) throw new Error('SSE 握手失败');
       setConn(true);

@@ -1563,20 +1563,67 @@ async fn api_logs(
 ///
 /// 慢消费者会被 broadcast 落下（`Lagged`）—— 这里显式告诉前端丢了多少条，
 /// 不静默跳过，否则界面上会看到一段无法解释的空白。
-async fn api_logs_stream(State(st): State<AppState>) -> Response {
+async fn api_logs_stream(State(st): State<AppState>, Query(q): Query<StreamQuery>) -> Response {
     let rx = st.log.subscribe();
-    let stream = BroadcastStream::new(rx).map(|item| {
+    // `since=<id>`：断线重连时把这段空档补上。
+    //
+    // 先订阅、再查库：这样查库期间发出的行**至少**会走广播（可能重复，不会丢），
+    // 重复由前端按 id 去重。反过来先查库再订阅会真丢行 —— 丢比重要糟得多。
+    let replay: Vec<Value> = match q.since {
+        Some(since) => {
+            let out = st
+                .db
+                .call(move |c| {
+                    let mut stmt = c
+                        .prepare(
+                            "SELECT id,ts,plugin,run_id,level,message FROM logs                              WHERE id > ?1 ORDER BY id ASC LIMIT 1000",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let rows: Vec<Value> = stmt
+                        .query_map([since], |r| {
+                            Ok(json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "ts": r.get::<_, i64>(1)?,
+                                "plugin": r.get::<_, String>(2)?,
+                                "run_id": r.get::<_, Option<i64>>(3)?,
+                                "level": r.get::<_, String>(4)?,
+                                "message": r.get::<_, String>(5)?,
+                            }))
+                        })
+                        .map_err(|e| e.to_string())?
+                        .collect::<rusqlite::Result<_>>()
+                        .map_err(|e| e.to_string())?;
+                    Ok(rows)
+                })
+                .await
+                .unwrap_or_default();
+            out
+        }
+        None => Vec::new(),
+    };
+    // 补发的行和实时行用同一个 `data:` 形状（补发的多一个 `id`，前端靠它去重/记游标）。
+    let head = tokio_stream::iter(replay.into_iter().map(|v| {
+        Ok::<String, std::io::Error>(format!("data: {v}
+
+"))
+    }));
+    let live = BroadcastStream::new(rx).map(|item| {
         let event = match item {
             Ok(line) => format!(
-                "data: {}\n\n",
+                "data: {}
+
+",
                 serde_json::to_string(&line).unwrap_or_else(|_| "{}".into())
             ),
             Err(e) => format!(
-                "event: lagged\ndata: {}\n\n",
+                "event: lagged
+data: {}
+
+",
                 json!({ "skipped": e.to_string() })
             ),
         };
-        Ok::<_, std::io::Error>(event)
+        Ok::<String, std::io::Error>(event)
     });
     (
         [
@@ -1584,10 +1631,17 @@ async fn api_logs_stream(State(st): State<AppState>) -> Response {
             (header::CACHE_CONTROL, "no-cache"),
             (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
-        Body::from_stream(stream),
+        Body::from_stream(head.chain(live)),
     )
         .into_response()
 }
+
+/// 日志流参数：`since` 传「我最后看到的那条 id」。
+#[derive(Debug, Deserialize)]
+struct StreamQuery {
+    since: Option<i64>,
+}
+
 
 #[cfg(test)]
 mod tests {

@@ -2722,3 +2722,60 @@ async fn searching_percent_and_underscore_matches_them_literally() {
     assert_eq!(total_of(&app, "/api/runs?limit=1&q=50%25").await, 1);
     assert_eq!(total_of(&app, "/api/runs?limit=1&q=50").await, 2);
 }
+
+/// 断线重连补日志：`/api/logs/stream?since=<id>` 要先补发 `id > since` 的行，再走实时。
+///
+/// 第 58 轮之前没有这个参数：SSE 一断，断线期间产生的日志**静默消失**（ring 里还是旧的，
+/// 新行只从重连那一刻开始流），用户只会看到「中间少了一段」。现在补发的行带 `id`，
+/// 前端用它去重并记住游标。
+#[tokio::test]
+async fn the_log_stream_can_replay_what_was_missed() {
+    let (app, _plugins, _data, _store, db) = setup_core("sse").await;
+    db.call(|c| {
+        for m in ["一", "二", "三"] {
+            c.execute(
+                "INSERT INTO logs(ts,plugin,run_id,level,message) VALUES (1,'p',NULL,'info',?1)",
+                [m],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // 读若干帧（SSE 是无限流，不能 to_bytes）
+    async fn frames(app: &Router, uri: &str, want: usize) -> String {
+        use tokio_stream::StreamExt as _;
+        let req = Request::get(uri).header("x-panel", "1").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut body = resp.into_body().into_data_stream();
+        let mut got = String::new();
+        for _ in 0..want {
+            match tokio::time::timeout(std::time::Duration::from_millis(400), body.next()).await {
+                Ok(Some(Ok(chunk))) => got.push_str(&String::from_utf8_lossy(&chunk)),
+                _ => break,
+            }
+        }
+        got
+    }
+
+    // since=1：补「二」「三」两行，且带 id
+    let got = frames(&app, "/api/logs/stream?since=1", 2).await;
+    assert!(got.contains("二"), "补发要含 id=2 那行: {got}");
+    assert!(got.contains("三"), "补发要含 id=3 那行: {got}");
+    assert!(got.contains("\"id\":2"), "补发的行要带 id（前端靠它去重/记游标）: {got}");
+    assert!(
+        got.find("二").unwrap() < got.find("三").unwrap(),
+        "补发要按 id 升序（和实时方向一致）: {got}"
+    );
+
+    // since=3（已经是最新）：没有补发，等到超时为 0 帧
+    let got = frames(&app, "/api/logs/stream?since=3", 1).await;
+    assert!(got.is_empty(), "已经是最后一条时不该补发: {got}");
+
+    // 不带 since：没有补发（老行为），只接实时
+    let got = frames(&app, "/api/logs/stream", 1).await;
+    assert!(got.is_empty(), "不给 since 就不补发: {got}");
+}

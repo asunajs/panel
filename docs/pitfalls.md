@@ -179,3 +179,9 @@
     `/api/runs` 写了、`/api/logs` 漏了两年（第 57 轮才发现）：界面上看到的是「没有匹配的日志」，
     用户只会以为没这类日志。凡是给 `LIKE ?` 传转义过的模式，就一定要带 `ESCAPE`。
     守卫：`web_tests.rs::searching_percent_and_underscore_matches_them_literally`（做过反向例）。
+
+44. **SSE 断线期间的行会静默消失**：实时流只广播「以后」的行，重连不会补「刚才」。
+    用户看到的是「中间少了一段」，而且界面没有任何提示。修法是重连带 `?since=<最后一条 id>`，
+    服务端**先订阅再查库**补发（重复由前端按 id 去掉；反过来先查库再订阅会真丢行）。
+    注意实时行没有 `id`（落库是异步的），所以游标只能由补发/回填的行推进。
+    守卫：`the_log_stream_can_replay_what_was_missed`。

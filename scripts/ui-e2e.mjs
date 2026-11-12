@@ -380,6 +380,50 @@ await fetch(base + '/api/plugins/ui-e2e/source', {
   body: JSON.stringify({ source: v3 }),
 });
 await sleep(1200);
+
+// ---------------------------------------------------------------- 日志断线重连：补空档（第 58 轮）
+//
+// SSE 一断，断线期间的日志以前是**静默消失**的。现在客户端记住最后一条 id，重连时带 ?since=。
+await ev("document.querySelector('[data-view=\"logs\"]').click()");
+await sleep(800);
+// 让实时流先跑起来（页面加载时已经在跑；这里显式再起一次，确保状态干净）
+await ev("(streamLogs(), 'started')");
+await sleep(1200);
+
+const sayLogs = async (tag) => {
+  for (let i = 1; i <= 2; i++) {
+    await fetch(base + '/api/tasks/ui-e2e/tick/run', { method: 'POST', headers: { 'x-panel': '1' } });
+    void tag;
+  }
+};
+await sayLogs('pre');
+await sleep(1200);
+const beforeLen = await ev("state.logs.length");
+const lastId0 = await ev("state.logLastId");
+checkFail('实时流里有日志、也记住了最后一条 id', beforeLen > 0 && !!lastId0, 'len=' + beforeLen + ' lastId=' + lastId0);
+
+// 断开：断开期间产生 4 条（两次运行，每次两行日志）
+await ev("(streamAbort && streamAbort.abort(), 'aborted')");
+await sleep(300);
+for (let i = 0; i < 2; i++) {
+  await fetch(base + '/api/tasks/ui-e2e/tick/run', { method: 'POST', headers: { 'x-panel': '1' } });
+  await sleep(200);
+}
+await sleep(600);
+const duringLen = (await (await fetch(base + '/api/logs?limit=1')).json()).total;
+
+// 重连：应当把断线期间的行补回来
+await ev("(streamLogs(), 'started')");
+await sleep(1800);
+const afterLen = await ev("state.logs.length");
+const lastId1 = await ev("state.logLastId");
+checkFail('重连后日志条数变多（补回了空档）', afterLen > beforeLen, beforeLen + ' -> ' + afterLen);
+checkFail('重连后最后一条 id 前进了', lastId1 > lastId0, lastId0 + ' -> ' + lastId1);
+const dupIds = await ev("(() => { const ids = state.logs.filter(l => l.id != null).map(l => l.id); return ids.length - new Set(ids).size; })()");
+checkFail('环里没有重复的 id（补发去重生效）', dupIds === 0, 'dups=' + dupIds);
+const seenAll = await ev("(() => { const ids = state.logs.filter(l => l.id != null).map(l => l.id); return ids.length ? Math.max(...ids) === state.logLastId : false; })()");
+checkFail('游标就是环里最大的 id', seenAll === true);
+void duringLen;
 ws.close();
 console.log('');
 console.log('ok: ' + pass.length + ' 条界面端到端全过' + (fail.length ? '，' + fail.length + ' 条失败' : ''));
