@@ -4,6 +4,7 @@
 :root {
   /* 亮色 = 粉色系，但要**不刺眼**：底色偏暖灰粉、卡片是米白不是纯白、
      主色降饱和（`#ec4899` 那种荧光粉在浅底上会晃眼）。 */
+  --scrim: rgba(20, 12, 18, .34);
   --bg: #f4eef1;
   --bg-grad: radial-gradient(1200px 600px at 100% -14%, #ecdfe6 0%, transparent 70%);
   --surface: #fbf9fa;
@@ -41,6 +42,7 @@
 /* 深色 = 紫罗兰，同样降刺眼：底不压到纯黑、字不顶到纯白、主色降饱和。
    纯黑底 + 纯白字的高对比是「刺眼」的主要来源，比主色本身更影响观感。 */
 [data-theme="dark"] {
+  --scrim: rgba(0, 0, 0, .5);
   --bg: #14161c;
   --bg-grad: radial-gradient(1200px 600px at 100% -14%, #1b1930 0%, transparent 66%);
   --surface: #191c23;
@@ -154,6 +156,9 @@ button, input, select { font: inherit; color: inherit; }
 .page-sub { margin: 2px 0 0; font-size: 12.5px; color: var(--dim); }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .nav-toggle { display: none; }
+/* 侧栏收起按钮只在窄屏（浮层模式）出现 */
+.sidebar-close { display: none; }
+.sidebar-backdrop { display: none; }
 
 /* ---------- 通用控件 ---------- */
 
@@ -446,7 +451,16 @@ button, input, select { font: inherit; color: inherit; }
     box-shadow: var(--shadow-md);
   }
   .sidebar.open { transform: none; }
-  .nav-toggle { display: inline-flex; }
+  /* 汉堡必须压在侧栏（40）和遮罩（35）之上：否则侧栏一开，按钮被盖住，
+     点上去是侧栏本身 —— 用户看到的就是「点了没反应」（第 24 轮）。 */
+  .nav-toggle { display: inline-flex; position: relative; z-index: 45; }
+  /* 浮层侧栏的遮罩：点一下就收起。z-index 在侧栏（40）与顶栏（20）之间。 */
+  .sidebar-backdrop:not([hidden]) {
+    position: fixed; inset: 0; z-index: 35; display: block;
+    background: var(--scrim); backdrop-filter: blur(1px);
+  }
+  .sidebar-close { display: inline-flex; margin-left: auto; }
+  .brand { align-items: center; }
   .content { padding: 16px 14px 32px; }
   .topbar { padding: 12px 14px; }
   .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -328,6 +328,28 @@ async function main() {
   // 仪表盘在窄屏也要能用（卡片单列）
   await js("location.hash = '#dashboard'");
   await sleep(1200);
+  // 窄屏侧栏：浮层要能收起（遮罩 / Esc / ✕）。第 24 轮用户报「无法收起 / 点击无效」，
+  // 当时汉堡按钮在侧栏底下，点上去是侧栏本身。
+  const drawerState = () => js("document.getElementById('sidebar').classList.contains('open')");
+  await js("setSidebar(true)");
+  await sleep(400);
+  check('窄屏侧栏能打开', (await drawerState()) === true);
+  const backdropShown = await js("!document.getElementById('sidebar-backdrop').hidden");
+  check('打开时有遮罩', backdropShown === true);
+  await js("document.getElementById('sidebar-backdrop').click()");
+  await sleep(400);
+  check('点遮罩能收起', (await drawerState()) === false);
+  await js("setSidebar(true)");
+  await sleep(300);
+  await js("document.getElementById('sidebar-close').click()");
+  await sleep(400);
+  check('侧栏里的 ✕ 能收起', (await drawerState()) === false);
+  await js("setSidebar(true)");
+  await sleep(300);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await sleep(400);
+  check('Esc 能收起', (await drawerState()) === false);
   const dashOverflow = await js('document.documentElement.scrollWidth - window.innerWidth');
   check('窄屏仪表盘不溢出', dashOverflow <= 1, '多出 ' + dashOverflow + 'px');
   await cdp.send('Emulation.clearDeviceMetricsOverride');

@@ -1795,7 +1795,7 @@ function setView(name) {
   $('page-title').textContent = VIEWS[name][0];
   $('page-sub').textContent = VIEWS[name][1];
   document.title = VIEWS[name][0] + ' · 插件面板';
-  $('sidebar').classList.remove('open');
+  setSidebar(false);
   if (name === 'logs') { renderLogs(); backfillLogs(); }
   if (name === 'runs') { loadRunPlugins(); loadRuns(); }
   if (name === 'dashboard') loadDashboard();
@@ -2132,12 +2132,27 @@ function bindTips() {
   window.addEventListener("scroll", hideTip, true);
 }
 
+/** 窄屏侧栏是浮层：open 时同时挂遮罩、把汉堡按钮的 aria-expanded 同步过去。 */
+function setSidebar(open) {
+  $('sidebar').classList.toggle('open', open);
+  $('sidebar-backdrop').hidden = !open;
+  $('nav-toggle').setAttribute('aria-expanded', String(open));
+  document.body.classList.toggle('nav-open', open);
+}
+
+function toggleSidebar() {
+  setSidebar(!$('sidebar').classList.contains('open'));
+}
+
 function bind() {
   window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
 
-  $('nav-toggle').addEventListener('click', () => {
-    const open = $('sidebar').classList.toggle('open');
-    $('nav-toggle').setAttribute('aria-expanded', String(open));
+  $('nav-toggle').addEventListener('click', () => toggleSidebar());
+  $('sidebar-close').addEventListener('click', () => setSidebar(false));
+  $('sidebar-backdrop').addEventListener('click', () => setSidebar(false));
+  // Esc 收起浮层侧栏：手机上最常见的「退出去」手势
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && $('sidebar').classList.contains('open')) setSidebar(false);
   });
 
   $('theme-toggle').addEventListener('click', () => {
@@ -2344,7 +2359,7 @@ function bind() {
     $('new-plugin').classList.add('hidden');
     $('new-script').classList.add('hidden');
     toggleNotify(false);
-    $('sidebar').classList.remove('open');
+    setSidebar(false);
   });
 }
 
