@@ -250,6 +250,7 @@ async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Resu
     crate::notify::record_bg(
         host.db.clone(),
         host.log.clone(),
+        host.config.clone(),
         crate::notify::Notice {
             level: "info",
             plugin: host.plugin.clone(),

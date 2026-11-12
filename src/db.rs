@@ -83,6 +83,24 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS notifications_ts ON notifications(ts DESC);
 
+        -- 外部通知渠道的发件箱：一条 = 一次「要发到某个渠道」的尝试。
+        -- 为什么要有它：webhook / SMTP 失败是常态（对端重启、网络抖动），
+        -- 失败一次就把这条通知丢掉，等于渠道形同虚设。done: 0=待发 1=成功 2=放弃。
+        CREATE TABLE IF NOT EXISTS notify_outbox (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         INTEGER NOT NULL,
+            channel    TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            body       TEXT NOT NULL,
+            payload    TEXT NOT NULL,
+            attempts   INTEGER NOT NULL DEFAULT 0,
+            next_try   INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            done       INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS notify_outbox_due ON notify_outbox(done, next_try);
+
         CREATE TABLE IF NOT EXISTS scripts (
             name        TEXT PRIMARY KEY,
             cron        TEXT,

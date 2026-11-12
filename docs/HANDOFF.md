@@ -5,8 +5,8 @@
 
 ## 0. 一句话现状（2026-11-12）
 
-用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/parity.md` **30 ✅ / 1 部分 / 2 ❌**，
-两条 ❌ 都是「明确不做」（任务软删、市场/自更新），一条部分是「推送渠道管理」。
+用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/parity.md` **31 ✅ / 0 部分 / 2 ❌**，
+两条 ❌ 都是「明确不做」（任务软删、市场/自更新）。
 
 - `cargo build` 零 warning；`cargo test` **205 passed**；`bash scripts/check-unsafe-budget.sh` → 0 处；
   `bash scripts/check-docs.sh` → 17 篇文档内链全通、都在 300 行内。
@@ -78,7 +78,7 @@
 |---|---|
 | `README.md` | 索引 + 三态约定 |
 | `architecture.md` | 嵌入形态、隔离模型、两条预算、取消归属、抛弃清单、模块划分 |
-| `parity.md` | **与旧面板的功能对照**（30 ✅ / 1 部分 / 2 ❌）—— 想知道「还差什么」只看这篇 |
+| `parity.md` | **与旧面板的功能对照**（31 ✅ / 0 部分 / 2 ❌）—— 想知道「还差什么」只看这篇 |
 | `verification.md` | 端到端读数与复跑命令（含 §9 引擎试跑、§10 复跑清单） |
 | `host-api.md` | host-api 契约、限额、SSRF / 脱敏边界、代码纪律 |
 | `host-api-net.md` / `ssrf.md` | 出站能力的形状与判定表 |
@@ -113,7 +113,6 @@
 
 | 项 | 现状 | 下一步 |
 |---|---|---|
-| 推送渠道管理（`push_config`/`push_tasks`/`push_outbox`/`push_deliveries` + 试发/重试） | **部分**：只有通知 + 一个 webhook | 要做得先定「渠道」是什么（webhook 之外还要什么）；发件箱/重试是独立一张表 |
 | 任务软删（`/api/jobs/{p}/{n}/delete` / `restore` / `cleanup`） | **明确不做** | 任务由插件注册，删了下次加载又回来；要停用请用「禁用插件」 |
 | 市场 / 自更新（`/api/market*`、`/api/update*`） | **明确不做** | 见 parity.md §3 |
 | 外部进程插件（`extproc.rs`） | **明确不做**（决策记录） | 改判条件与真要做的形状见 [extproc.md](extproc.md) |

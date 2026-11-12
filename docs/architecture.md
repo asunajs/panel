@@ -215,7 +215,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `cron.rs` | 5/6 字段 + `@every` + jitter + DST（移植基线，1112 行） |
 | `config.rs` | 面板级配置 `config.json`：默认 4 MiB 上限（超限拒启，不截断）；加载、校验、原子写（0600） |
 | `config_store.rs` | 配置的**热快照**（`RwLock<Arc<str>>`）：写入侧序列化一次，`host.config()` 只 clone 一个 `Arc`。界面保存后插件立刻读到新值，不用重启 |
-| `notify.rs` | 通知：失败/熔断/插件喊话 → `notifications` 表（留最近 500 条）+ 可选 webhook（后台投递，5 秒超时，失败只进日志） |
+| `notify.rs` | 通知：铃铛表 + 外部渠道（webhook / SMTP）。先落 `notify_outbox` 再投递，失败按 1m/5m/15m/1h/6h 退避、5 次放弃且留在表里可手动重试。渠道配置在 config.json 的 `notify` 键（见 [notify.md](notify.md)） |
 | `service.rs` | 开机自启动：`panel-llrt service print\|install\|uninstall\|status`，生成 launchd plist / systemd --user unit（绝对路径、RunAtLoad+KeepAlive / Restart=always），日志落 `data/` |
 | `scripts.rs` | 脚本：独立 `.js` + 记录里的 cron；每次运行新建 Context、带墙钟死线（`Plugin::load_with_budget`）；注册任务会直接报错；15 秒粒度排程循环 |
 | `smtp.rs` | SMTP 客户端（移植自基线）：EHLO / STARTTLS / AUTH / MAIL / RCPT / DATA，RFC 2047 头编码、base64 正文、`ca_file` 追加信任锚。阻塞实现，跑在 blocking 池上（占住 sync_bridge 那条线程的话外层超时就触发不了） |

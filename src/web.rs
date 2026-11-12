@@ -95,6 +95,11 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
         .route("/api/notifications", get(api_notifications))
         .route("/api/notifications/read", post(api_notifications_read))
+        // 通知渠道与发件箱（渠道配置本身在 config.json 的 notify 键里）
+        .route("/api/notify", get(api_notify_state))
+        .route("/api/notify/outbox", get(api_notify_outbox))
+        .route("/api/notify/test", post(api_notify_test))
+        .route("/api/notify/outbox/retry", post(api_notify_retry))
         .route("/api/backup", get(api_backup).post(api_restore))
         .route("/api/scripts", get(scripts_list).post(script_create))
         .route(
@@ -2098,6 +2103,86 @@ async fn api_restore(
 }
 
 // ---------------------------------------------------------------- 通知
+/// 通知渠道 + 发件箱的读数。
+async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let parsed = crate::notify::from_store(&st.config);
+    let (channels, error, min_level, mute) = match parsed {
+        Ok(c) => (
+            c.channels
+                .iter()
+                .map(crate::notify::channel_view)
+                .collect::<Vec<_>>(),
+            Value::Null,
+            c.level().to_string(),
+            json!(c.mute),
+        ),
+        // 配置写错了要**看见**：静默当成「没配渠道」是最难查的一种
+        Err(e) => (Vec::new(), json!(e), String::new(), json!([])),
+    };
+    let counts = crate::notify::counts(&st.db).await.map_err(internal)?;
+    let outbox = crate::notify::outbox(&st.db, "all", 30).await.map_err(internal)?;
+    Ok(Json(json!({
+        "ok": error.is_null(),
+        "error": error,
+        "min_level": min_level,
+        "mute": mute,
+        "channels": channels,
+        "counts": counts,
+        "outbox": outbox,
+    })))
+}
+
+#[derive(Deserialize)]
+struct OutboxQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn api_notify_outbox(
+    State(st): State<AppState>,
+    Query(q): Query<OutboxQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let status = q.status.unwrap_or_else(|| "all".to_string());
+    let items = crate::notify::outbox(&st.db, &status, q.limit.unwrap_or(100))
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({ "status": status, "items": items })))
+}
+
+#[derive(Deserialize)]
+struct NotifyTestBody {
+    /// 只试这一个渠道。不给就是全部。
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+async fn api_notify_test(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    body: Option<Json<NotifyTestBody>>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let only = body.and_then(|Json(b)| b.channel);
+    let out = crate::notify::test_send(&st.db, &st.log, &st.config, only.as_deref())
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}\n")))?;
+    Ok(Json(out))
+}
+
+async fn api_notify_retry(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    body: Option<Json<ReadBody>>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let ids = body.and_then(|Json(b)| b.ids);
+    let n = crate::notify::retry(&st.db, ids).await.map_err(internal)?;
+    let counts = crate::notify::counts(&st.db).await.map_err(internal)?;
+    Ok(Json(json!({ "ok": true, "retried": n, "counts": counts })))
+}
+
 
 async fn api_notifications(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let items = crate::notify::list(&st.db, 50).await.map_err(internal)?;

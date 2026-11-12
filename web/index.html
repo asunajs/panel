@@ -223,6 +223,7 @@
               <button class="tab" type="button" role="tab" data-tab="config" aria-selected="false">配置</button>
               <button class="tab" type="button" role="tab" data-tab="security" aria-selected="false">安全</button>
               <button class="tab" type="button" role="tab" data-tab="data" aria-selected="false">数据</button>
+              <button class="tab" type="button" role="tab" data-tab="notify" aria-selected="false">通知</button>
             </div>
 
             <div class="tab-pane" id="tab-general">
@@ -245,8 +246,6 @@
                   <button class="btn" id="panel-logout" type="button">登出</button>
                 </div>
               </section>
-            </div>
-
               <section class="panel" id="test-card">
                 <header class="panel-head"><h2>引擎试跑</h2></header>
                 <div class="panel-body">
@@ -263,6 +262,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
                   <div class="test-out" id="test-out"></div>
                 </div>
               </section>
+            </div>
+
             <div class="tab-pane hidden" id="tab-config">
               <section class="panel">
                 <header class="panel-head">
@@ -287,6 +288,36 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
               <section class="panel">
                 <header class="panel-head"><h2>鉴权与暴露面</h2></header>
                 <div class="panel-body" id="settings-security"></div>
+              </section>
+            </div>
+
+            <div class="tab-pane hidden" id="tab-notify">
+              <section class="panel">
+                <header class="panel-head">
+                  <h2>通知渠道</h2>
+                  <div class="toolbar">
+                    <button class="btn btn-sm" id="notify-test-all" type="button">全部试发</button>
+                    <button class="btn btn-sm" id="notify-reload" type="button">刷新</button>
+                  </div>
+                </header>
+                <div class="panel-body">
+                  <p class="settings-note">渠道写在 <code>config.json</code> 的 <code>notify</code> 键里（含 SMTP 凭据，文件是 0600）。这里的「试发」会真的发一条，并在下面的发件箱里留痕。</p>
+                  <div class="src-error hidden" id="notify-error"></div>
+                  <div id="notify-channels"></div>
+                </div>
+              </section>
+              <section class="panel">
+                <header class="panel-head">
+                  <h2>发件箱</h2>
+                  <span class="chip" id="notify-counts">—</span>
+                  <div class="toolbar">
+                    <button class="btn btn-sm" id="notify-retry" type="button">重试失败的</button>
+                  </div>
+                </header>
+                <div class="panel-body">
+                  <p class="settings-note">外部渠道失败是常态（对端重启、网络抖）。每条通知先落发件箱再投递，失败按 1m / 5m / 15m / 1h / 6h 退避重试，5 次后放弃；放弃的行留在这里，可以手动重试。</p>
+                  <div id="notify-outbox"></div>
+                </div>
               </section>
             </div>
 

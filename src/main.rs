@@ -104,6 +104,8 @@ async fn main() -> Result<(), String> {
         config.clone(),
     );
     let _scripts_task = scripts.clone().spawn_ticker();
+    // 通知发件箱：外部渠道失败要重试，不能发一次就丢。
+    let _notify_task = crate::notify::spawn_ticker(db.clone(), log.clone(), config.clone());
 
     if ssrf::allow_private_outbound_targets() {
         log.emit(

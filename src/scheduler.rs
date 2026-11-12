@@ -1333,6 +1333,7 @@ impl Inner {
             crate::notify::record_bg(
                 self.db.clone(),
                 self.log.clone(),
+                self.config.clone(),
                 crate::notify::Notice {
                     level: "error",
                     plugin: plugin.to_string(),
@@ -1351,6 +1352,7 @@ impl Inner {
             crate::notify::record_bg(
                 self.db.clone(),
                 self.log.clone(),
+                self.config.clone(),
                 crate::notify::Notice {
                     level: "error",
                     plugin: plugin.to_string(),

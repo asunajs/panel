@@ -20,7 +20,7 @@
 | 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = 独立 `.js`，排程在记录里（不在代码里）；每次运行新建 Context，日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
 | 配置 UI 化（读 + 写 + 校验） | ✅（settings/save，需重启） | ✅ | 4 MiB 上限、必须是 JSON 对象、0600 原子写；**保存即生效**（热快照），旧面板要重启 |
 | 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 数据 |
-| 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 可选 webhook（`PANEL_NOTIFY_WEBHOOK`）。不做 SMTP：那要维护一堆凭据 |
+| 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（webhook / SMTP，见 [notify.md](notify.md)） |
 | 备份 / 恢复 | ✅ `/api/restore*` | ✅ | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
 | 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel-llrt service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
 
@@ -44,7 +44,7 @@
 | `/setup` `/api/setup`（首次设令牌） | ✅ 11-12（形状不同） | 没做独立向导页：设置 → 安全 里一个框，能「生成一个」或自己输入；写入 PBKDF2 哈希（明文不落盘），**不自动重启**（生成的令牌要让人先抄下来）。已存在凭据 → 409。见 [session.md §2](session.md) |
 | `/api/restart` | ✅ 11-12 | `exec` 自身：**PID 不变**、参数/环境/工作目录都在；设置页有按钮（带确认） |
 | `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框。见 [verification.md §9](verification.md) |
-| 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/config|task|test|outbox|retry` | 部分 | 只有「通知 + 一个 webhook」，没有渠道管理、发件箱、重试、按任务开关 |
+| 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/*` | ✅ 11-12（形状不同） | 渠道写在 `config.json` 的 `notify` 键（webhook / SMTP 两种）；发件箱 `notify_outbox` 一条一渠道，失败按 1m/5m/15m/1h/6h 退避，5 次放弃且**留在表里**可手动重试；按任务开关用 `mute` 名单（`插件` 或 `插件/任务`）而不是 `push_tasks` 那张表；没有独立的 deliveries 表（发件箱行本身就是记录）。见 [notify.md](notify.md) |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [backup.md](backup.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
 | `/api/market*`、`/api/update*` | ❌ | 已声明不做（见 §3） |
 | `/readyz` | ✅ 11-12 | 库能读 + 调度器活着才 200，否则 **503**（不是 200+`ok:false` —— 反向代理会把它当健康） |

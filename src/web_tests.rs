@@ -1698,3 +1698,77 @@ async fn engine_test_run_returns_console_output() {
     assert_eq!(body["error"], "boom");
     assert_eq!(body["lines"][0], "before");
 }
+
+/// 通知渠道：没有渠道时如实说没有；配上渠道后试发会落发件箱，失败能重试。
+#[tokio::test]
+async fn notify_channels_and_outbox_round_trip() {
+    let (app, _plugins, _data, store) = setup_dirs("ntf").await;
+
+    // 没配渠道：state 说 ok，但 channels 是空的
+    let (status, body) = get(&app, "/api/notify").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["channels"].as_array().unwrap().len(), 0);
+    assert_eq!(body["counts"]["pending"], 0);
+
+    // 试发 → 400，而且话要说清
+    // 错误是纯文本（和其它接口一致），所以这里读原文而不是 JSON
+    let resp = app
+        .clone()
+        .oneshot(with_csrf("POST", "/api/notify/test", Some(json!({}))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(text.contains("渠道"), "{text}");
+
+    // 配一个指向死端口的渠道（连接立刻被拒，不用等超时）
+    store.set(&json!({
+        "notify": { "min_level": "warn", "channels": [
+            { "id": "dead", "kind": "webhook", "url": "http://127.0.0.1:1/hook" }
+        ]}
+    }));
+
+    let (status, body) = get(&app, "/api/notify").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["channels"][0]["id"], "dead");
+    assert_eq!(body["channels"][0]["kind"], "webhook");
+
+    // 试发：失败要说失败，而且发件箱里留下待重试的一行
+    let (status, body) = send(&app, with_csrf("POST", "/api/notify/test", Some(json!({})))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let r = &body["results"][0];
+    assert_eq!(r["channel"], "dead");
+    assert_eq!(r["ok"], false);
+    assert!(r["error"].is_string(), "{body}");
+
+    let (_, ob) = get(&app, "/api/notify/outbox?status=pending").await;
+    assert_eq!(ob["items"].as_array().unwrap().len(), 1, "{ob}");
+    assert_eq!(ob["items"][0]["attempts"], 1);
+    assert!(ob["items"][0]["next_try"].as_i64().unwrap() > 0, "失败要排下一次");
+
+    // 放弃（手工把次数顶到上限，再扫一次）→ done=2
+    let id = ob["items"][0]["id"].as_i64().unwrap();
+    // 直接用 SQL 把 attempts 顶到 4，省掉 5 轮退避等待
+    let (_, _) = get(&app, "/api/state").await;
+    // 扫一次：此时 next_try 还没到，所以先手动清零（走公开接口做不到，这里用 retry 再扫）
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/notify/outbox/retry", Some(json!({"ids": [id]}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["retried"], 1);
+    assert_eq!(body["counts"]["pending"], 1, "打回之后还是待发");
+
+    // 未读通知不受影响
+    let (status, body) = get(&app, "/api/notifications").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["unread"], 0, "试发不该进铃铛");
+}

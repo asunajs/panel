@@ -826,3 +826,17 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .test-out:empty { display: none; }
 .test-line { color: #d7dae0; }
 .test-err { color: #ff8b8b; }
+
+/* 通知渠道页 */
+.snippet {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: auto;
+  max-height: 320px;
+}

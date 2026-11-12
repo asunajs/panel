@@ -1259,7 +1259,7 @@ async function createPlugin() {
 
 // ---------------------------------------------------------------- 设置
 
-const SETTINGS_TABS = ["general", "config", "security", "data"];
+const SETTINGS_TABS = ["general", "config", "security", "notify", "data"];
 
 function setSettingsTab(name) {
   if (!SETTINGS_TABS.includes(name)) name = "general";
@@ -1270,6 +1270,7 @@ function setSettingsTab(name) {
   for (const t of SETTINGS_TABS) $("tab-" + t).classList.toggle("hidden", t !== name);
   if (name === "config") loadConfigEditor();
   if (name !== "config") renderSettings();
+  if (name === "notify") renderNotifyTab();
 }
 
 /// 顶栏刷新按钮用：只把配置读回来，不切页签。
@@ -1418,6 +1419,119 @@ function setupBox() {
   return box;
 }
 
+// ---------------------------------------------------------------- 通知渠道
+
+const NOTIFY_STATE = { pending: [], failed: [], ok: [] };
+
+/** 拉一次渠道 + 发件箱，重画这一页。 */
+async function renderNotifyTab() {
+  const box = $('notify-channels');
+  const errBox = $('notify-error');
+  const out = $('notify-outbox');
+  const counts = $('notify-counts');
+  if (!box) return;
+  let d;
+  try {
+    d = await api('/api/notify');
+  } catch (e) {
+    clear(box);
+    box.append(el('p', 'hint-err', e.message || '读不到通知配置'));
+    return;
+  }
+  clear(box);
+  errBox.classList.toggle('hidden', d.ok !== false);
+  errBox.textContent = d.ok === false ? ('配置有问题：' + d.error) : '';
+  counts.textContent = '待发 ' + d.counts.pending + ' · 成功 ' + d.counts.ok + ' · 放弃 ' + d.counts.failed;
+
+  if (!d.channels.length) {
+    box.append(el('p', 'muted', '还没有配任何渠道。在「配置」页给 config.json 加一个 notify.channels 数组就行，例如：'));
+    const pre = el('pre', 'snippet');
+    pre.textContent = JSON.stringify({ notify: { min_level: 'warn', channels: [
+      { id: 'ops', kind: 'webhook', url: 'https://example.com/hook' },
+      { id: 'mail', kind: 'smtp', host: 'smtp.example.com', port: 465, tls: 'implicit',
+        user: 'me@example.com', pass: '***', to: ['me@example.com'] },
+    ] } }, null, 2);
+    box.append(pre);
+  } else {
+    const t = el('table', 'table');
+    const thead = el('thead');
+    const head = el('tr');
+    for (const h of ['渠道', '类型', '目标', '门槛', '状态', '']) head.append(el('th', '', h));
+    thead.append(head);
+    t.append(thead);
+    const tbody = el('tbody');
+    t.append(tbody);
+    for (const c of d.channels) {
+      const tr = el('tr');
+      const target = c.kind === 'webhook' ? c.url : (c.to || []).join(', ') + ' @ ' + c.host + ':' + c.port;
+      tr.append(
+        el('td', '', c.id),
+        el('td', '', c.kind),
+        el('td', 'mono', target),
+        el('td', '', c.min_level || d.min_level || 'warn'),
+        el('td', '', c.enabled ? '启用' : '停用'),
+      );
+      const td = el('td');
+      const b = el('button', 'btn btn-sm', '试发');
+      b.type = 'button';
+      b.addEventListener('click', () => testNotify(c.id));
+      td.append(b);
+      tr.append(td);
+      tbody.append(tr);
+    }
+    box.append(t);
+    box.append(el('p', 'settings-note', '全局门槛 ' + (d.min_level || 'warn') + '；静音名单 ' + ((d.mute || []).join('、') || '（空）')));
+  }
+
+  clear(out);
+  if (!d.outbox.length) {
+    out.append(el('p', 'muted', '（发件箱是空的）'));
+    return;
+  }
+  const t = el('table', 'table');
+  const thead = el('thead');
+  const head = el('tr');
+  for (const h of ['时间', '渠道', '标题', '次数', '状态', '错误']) head.append(el('th', '', h));
+  thead.append(head);
+  t.append(thead);
+  const tbody = el('tbody');
+  t.append(tbody);
+  for (const r of d.outbox) {
+    const tr = el('tr');
+    const status = r.done === 1 ? '已送达' : (r.done === 2 ? '放弃' : '待重试');
+    tr.append(
+      el('td', '', new Date(r.ts).toLocaleString()),
+      el('td', '', r.channel),
+      el('td', '', r.title),
+      el('td', '', String(r.attempts)),
+      el('td', r.done === 2 ? 'hint-err' : '', status),
+      el('td', 'mono', r.last_error || ''),
+    );
+    tbody.append(tr);
+  }
+  out.append(t);
+}
+
+async function testNotify(id) {
+  try {
+    const r = await api('/api/notify/test', { method: 'POST', body: id ? { channel: id } : {} });
+    const bad = (r.results || []).filter(x => !x.ok);
+    toast(bad.length ? (bad[0].channel + ' 失败：' + bad[0].error) : '试发成功');
+  } catch (e) {
+    toast(e.message || '试发失败');
+  }
+  renderNotifyTab();
+}
+
+async function retryNotify() {
+  try {
+    const r = await api('/api/notify/outbox/retry', { method: 'POST', body: {} });
+    toast(r.retried ? ('已打回 ' + r.retried + ' 条，等下一次扫描') : '没有要重试的');
+  } catch (e) {
+    toast(e.message || '重试失败');
+  }
+  renderNotifyTab();
+}
 function renderSettings() {
   const cfg = state.config;
   const info = $("settings-info");
@@ -2116,6 +2230,9 @@ function bind() {
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
   $('test-run').addEventListener('click', runTest);
+  $('notify-test-all').addEventListener('click', () => testNotify(null));
+  $('notify-retry').addEventListener('click', retryNotify);
+  $('notify-reload').addEventListener('click', renderNotifyTab);
   $('panel-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
