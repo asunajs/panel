@@ -939,3 +939,7 @@ pub async fn mark_read(db: &Db, ids: Option<Vec<i64>>) -> Result<(), String> {
 #[cfg(test)]
 #[path = "notify_tests.rs"]
 mod notify_tests;
+
+#[cfg(test)]
+#[path = "notify_outbox_tests.rs"]
+mod outbox_tests;

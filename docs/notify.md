@@ -72,7 +72,30 @@ webhook 渠道 —— 老部署升级后不用改配置。
 界面在**设置 → 通知**：渠道表（每行一个「试发」）+ 发件箱（时间/渠道/标题/次数/状态/错误）
 + 「重试失败的」。渠道配置本身在**设置 → 配置**里改（那份 JSON 编辑器已经在）。
 
-## 5. 读数（2026-11-12，真面板 8795 + 假对端）
+## 5. 两个渠道真的投出去是什么样（2026-11-12 端到端）
+
+**webhook**：`POST` 到配置的 url，`content-type: application/json`，body 是：
+
+```json
+{"ts":1794464150607,"level":"warn","plugin":"panel","task":null,
+ "run_id":null,"title":"测试通知","body":"这条是面板的「试发」，收到就说明渠道通了。"}
+```
+
+（`task` / `run_id` 在任务通知里是具体的值，面板级通知是 null。）
+
+**smtp**：标准 MIME 邮件，主题 `=?UTF-8?B?...?=` 编码（`[panel-llrt] 通知 测试通知`），
+正文 `text/plain; charset=utf-8` + base64，带 `Date` 和 `Message-ID`。
+
+失败时的读数（假接收方回 500）：
+
+```text
+试发返回    {ok:false, attempts:1, error:"webhook 返回 500 Internal Server Error"}
+发件箱行    done=0 attempts=1 next_try=+59s（BACKOFF_SECS[0]=60）
+再等一个 tick done=0 attempts=2 next_try=+279s（BACKOFF_SECS[1]=300）
+到第 5 次   done=2，日志「通知发不出去，放弃渠道 hook: ...」
+```
+
+## 6. 读数（2026-11-12，真面板 8795 + 假对端）
 
 假 webhook（前 2 次 500，之后 200）+ 假 SMTP（`192.168.3.197:2525`）：
 
