@@ -149,3 +149,10 @@
     （本该 5 次），日志里一条 warn 都没有 —— 用户只看到「有的整点任务没跑」。
     现在先扫一遍「已过点但派发不了」，按任务 60 秒节流报「任务 X 落后：N 拍该跑没跑（原因）」。
     守卫：`scheduler_tests.rs::behind_is_noted_at_once_then_at_most_every_minute`。
+
+39. **「被主动停掉」不能算任务失败**：插件重载/卸载会 stop 在途 invocation，rquickjs 抛 `AbortError`。
+    以前这走普通失败路径：发「任务 X 失败」通知（重载一次响一次）、还计入熔断的连续失败
+    —— 重载 5 次就能把一个好任务熔断。现在 `cancelled()` 单独识别，运行记录写
+    `已停止（插件被重载或卸载）`、日志降成 warn、不发通知、不计熔断。
+    守卫：`scheduler_tests.rs::only_a_real_abort_counts_as_cancelled`、
+    `web_tests.rs::reloading_during_a_run_stops_it_without_a_failure_notice`。

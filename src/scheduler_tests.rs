@@ -290,3 +290,26 @@ fn behind_counter_accumulates_until_reported() {
     t.behind = 0;
     assert!(!should_note_behind(t.behind_noted, now), "刚报过就不再报");
 }
+
+// ---------------------------------------------------------------- 被主动停掉 ≠ 失败
+//
+// 插件重载/卸载会把在途 invocation 停掉，rquickjs 冒出来的是 AbortError。
+// 以前这被当成任务失败：发一条「任务 X 失败」通知，还记进熔断的连续失败 ——
+// 连着重载几次就能把一个好好的任务熔断。
+
+#[test]
+fn only_a_real_abort_counts_as_cancelled() {
+    assert!(cancelled("Error: AbortError: invocation 已停止"));
+    assert!(cancelled("AbortError: invocation 已停止"));
+    assert!(!cancelled("Error: 真的失败了"));
+    assert!(!cancelled("CPU 预算耗尽（20000ms 墙钟死线）"));
+    assert!(!cancelled("已停止（加载期被中断）：interrupted"));
+}
+
+#[test]
+fn cancel_text_is_human() {
+    let t = cancel_text();
+    assert!(t.contains("已停止"), "{t}");
+    assert!(t.contains("重载"), "要说清是谁停的: {t}");
+    assert!(!t.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {t}");
+}

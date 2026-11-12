@@ -92,3 +92,35 @@ POST reset   200，tripped=false trips=0，next_at 距现在 2.0s
 
 - 提前唤醒的语义见 [host-api.md](host-api.md)（`lead_ms` / `early`）
 - 落库的表结构见 `src/db.rs` 的 `tasks`
+
+## 运行中途被停掉（重载 / 卸载）≠ 任务失败
+
+插件重载或卸载时，在途的那次调用会被 `invocation().stop()` 打断，rquickjs 抛 `AbortError`。
+这条路径以前当成普通失败处理，有两个副作用：
+
+1. 发一条 `任务 X 失败 — Error: AbortError: invocation 已停止` 的通知（重载一次响一次）
+2. **记进熔断的连续失败** —— 重载 5 次就可能把一个毫无问题的任务熔断
+
+现在分开了：
+
+| | 以前 | 现在 |
+|---|---|---|
+| 运行记录 | `status=error`，错误是 `Error: AbortError: invocation 已停止` | `status=error`，错误是 `已停止（插件被重载或卸载）` |
+| 日志 | `任务 X 失败: …`（error） | `任务 X 被中止（插件被重载或卸载），这次不算失败`（warn） |
+| 通知 | 发「任务失败」 | 不发 |
+| 熔断 | 计入连续失败 | 不计入（按成功对齐节奏） |
+| 之后还能跑吗 | 能 | 能（`in_flight` 会被清掉） |
+
+实测（临时面板 8797，handler `sleep(20000)`，跑到 2 秒时热重载）：
+
+```text
+run1 status=error dur=2079 err=已停止（插件被重载或卸载）
+日志：任务 t 被中止（插件被重载或卸载），这次不算失败
+没有再点一次 → run2 200，能跑
+
+连做 6 次「跑到一半重载」：slow tripped=False trips=0 enabled=True，熔断通知 0 条
+真失败（throw new Error('真的失败了')）：仍然发「任务 bad 失败 — Error: 真的失败了」
+```
+
+判定只看错误文本里有没有 `invocation 已停止`（`cancelled()`），所以**真的**失败、
+预算耗尽、加载期被中断都不会被误判（各有各的文案）。

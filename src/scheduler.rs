@@ -86,6 +86,20 @@ fn saved_lead(lead_override: bool, lead_ms: u64) -> Option<u64> {
     lead_override.then_some(lead_ms)
 }
 
+/// 这次运行是被**主动停掉**的（插件重载/卸载、进程收尾把 invocation 停了），
+/// 不是任务自己失败。rquickjs 那边冒出来的是 `AbortError: invocation 已停止`。
+///
+/// 为什么要分出来：这是人点「重载」的结果，不是插件的毛病。按失败处理会 ① 发一条
+/// `任务 X 失败` 的通知（噪音）② 记进熔断的连续失败（重载几次就可能把任务熔断）。
+fn cancelled(error: &str) -> bool {
+    error.contains("invocation 已停止")
+}
+
+/// 给人看的说法（原来是 `Error: AbortError: invocation 已停止`）。
+fn cancel_text() -> String {
+    "已停止（插件被重载或卸载）".to_string()
+}
+
 /// 「落后」告警要不要现在说：第一次一定说，之后每个任务最多 60 秒一次。
 ///
 /// 为什么要节流：调度循环每秒都在看，一个被拖住的任务会连续几十圈都「已过点但跑不了」，
@@ -1595,14 +1609,34 @@ impl Inner {
             .find(plugin, task)
             .map(|i| self.tasks[i].tripped)
             .unwrap_or(false);
+        // 被主动停掉（重载/卸载）不算任务失败：不计熔断、不发「任务失败」通知。
+        let cancelled = error.as_deref().map(cancelled).unwrap_or(false);
+        // 落库/日志里都换成给人看的说法（`Error: AbortError: invocation 已停止` 太开发者了）。
+        let error = if cancelled {
+            Some(cancel_text())
+        } else {
+            error
+        };
         if let Some(i) = self.find(plugin, task) {
             self.tasks[i].in_flight = false;
-            self.tasks[i].advance(&self.cfg, now, error.clone());
+            self.tasks[i].advance(
+                &self.cfg,
+                now,
+                if cancelled { None } else { error.clone() },
+            );
             self.persist_task(i);
+        }
+        if cancelled {
+            self.log.emit(
+                plugin,
+                None,
+                Level::Warn,
+                format!("任务 {task} 被中止（插件被重载或卸载），这次不算失败"),
+            );
         }
         // 失败和「刚刚熔断」都要通知：面板是没人的时候在跑东西的地方，
         // 只把错误写进日志等于默认你会去翻。
-        if let Some(e) = &error {
+        if let Some(e) = error.as_ref().filter(|_| !cancelled) {
             crate::notify::record_bg(
                 self.db.clone(),
                 self.log.clone(),
@@ -1636,7 +1670,7 @@ impl Inner {
                 },
             );
         }
-        if let Some(e) = &error {
+        if let Some(e) = error.as_ref().filter(|_| !cancelled) {
             self.log.emit(
                 plugin,
                 (run_id >= 0).then_some(run_id),

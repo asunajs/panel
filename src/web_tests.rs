@@ -2441,3 +2441,56 @@ async fn resetting_an_unknown_task_is_a_400() {
     let (status, body) = send(&app, with_csrf("POST", "/api/tasks/nope/nope/reset", None)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
+
+/// 跑到一半把插件重载掉：这次运行要标成「已停止」的人话，而且**不发失败通知**。
+#[tokio::test]
+async fn reloading_during_a_run_stops_it_without_a_failure_notice() {
+    let (app, plugins, _data, _store) = setup_dirs("pcancel").await;
+    std::fs::write(
+        plugins.join("slow.js"),
+        [
+            "import host from 'panel:host';",
+            "await host.register_handler('t', async () => { await host.sleep(3000); });",
+            "await host.register_cron('t', '@every 1h', 20000, {});",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/slow/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/slow/t/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 等它真的进到 sleep 里再重载
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/slow/reload", None)).await;
+    assert_eq!(status, StatusCode::OK, "重载要成功");
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    let (_, runs_doc) = get(&app, "/api/runs").await;
+    let runs = runs_doc["runs"].as_array().cloned().unwrap_or_default();
+    let r = runs
+        .iter()
+        .find(|r| r["task"] == "t")
+        .cloned()
+        .unwrap_or_else(|| panic!("没有这次运行: {runs_doc}"));
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("已停止"),
+        "运行要收尾成「已停止」而不是永远 running: {r}"
+    );
+    assert!(!err.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {r}");
+    assert!(r["ended_at"].as_i64().is_some(), "必须写结束时间: {r}");
+
+    let (_, notes) = get(&app, "/api/notifications").await;
+    let notices = notes.as_array().cloned().unwrap_or_else(|| {
+        notes["notifications"].as_array().cloned().unwrap_or_default()
+    });
+    assert!(
+        !notices.iter().any(|n| n["title"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("失败")),
+        "重载不是任务失败，不该发失败通知: {notes}"
+    );
+}
