@@ -73,3 +73,24 @@ GET /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/de
 ```
 
 样例文件在 `examples/demo-plugin.webui/index.html`：要试就 `cp -r examples/demo-plugin.webui plugins/demo.webui`。
+
+## 门禁：`node scripts/plugin-selftest.mjs`（第 75 轮）
+
+把上面这些手工读数变成一条命令：起临时面板 → 起三个本地对端 → 加载样例插件 → 跑 probe → 逐条断言。
+
+```bash
+node scripts/plugin-selftest.mjs          # ok: 24 条 host API 自检全过
+KEEP=1 node scripts/plugin-selftest.mjs   # 保留临时目录看现场
+```
+
+24 条覆盖：插件加载 / 任务与入口登记 / `has_web` / probe 能派发并成功 / 四级日志 / `panel_version` /
+config / sqlite 异步与同步 / `sleep` 真挂起 / `fetch` 与 `http_fetch`（打本地对端 200）/
+回环被 SSRF 挡 / `notify` / WebSocket 回声 / SMTP 250 / 写错 opts 键名被拒 /
+`set_job_summary` / `blockers` / `schedule` 生效 / 静态 `index.html` / 插件路由的 GET 与 POST。
+
+**为什么用本地对端**：以前 fetch 打 `api.github.com`，这台机器要过一个会回 403 的代理，
+门禁就成了「看网络脸色」。现在 `scripts/test-servers.mjs` 同时起 WS echo、假 SMTP、本地 HTTP 三个服务，
+插件从配置里读地址（`demo.ws_url` / `demo.smtp_host` / `demo.smtp_port` / `demo.http_url`），**不依赖外网**。
+
+对端必须绑 `0.0.0.0` 并用本机**局域网地址**去连：回环被 SSRF 门挡（那是面板自己）。
+机器上没有局域网地址时脚本会跳过（exit 0）而不是假装通过。

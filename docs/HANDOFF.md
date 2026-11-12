@@ -147,16 +147,19 @@
 `vendor/llrt/bundle/js`（168K，生成物）**刻意 force-add 入库** —— 本机 github 不通，离线构建需要它。
 旧仓库 `rust-plugin-panel` 全程只读未碰。
 
-## 10. 复跑（五条命令）
+## 10. 复跑（六条命令）
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
-cargo build --offline && cargo test --offline   # 零 warning / 216 passed
+cargo build --offline && cargo test --offline   # 311 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
-bash scripts/check-docs.sh                      # ok: 20 篇文档，内链全通、都在 300 行内
-node scripts/ui-check.mjs                       # 界面 31 条断言（自起面板 + 无头 Edge）
-bash scripts/check-pitfalls.sh                   # 坑的守卫 8 条（静态检查，含 CSS token）
+bash scripts/check-docs.sh                      # ok: 34 篇文档，内链全通、都在 300 行内
+bash scripts/check-pitfalls.sh                  # 坑的守卫 12 条（静态检查，含 CSS token）
+node scripts/ui-check.mjs                       # 界面 40 条断言（自起面板 + 无头 Edge）
+node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）
 ```
+
+要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui-check.md](ui-check.md)。
 
 端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。
 

@@ -23,8 +23,15 @@ async function probe() {
   out.panel_at_least = host.panel_at_least('0.1.0');
 
   // 3) 配置（热快照）
-  const cfg = await host.config();
-  out.config_keys = Object.keys(cfg || {});
+  const cfg = (await host.config()) || {};
+  out.config_keys = Object.keys(cfg);
+  // 出站的两个对端从配置里读（自检脚本会写好），没配就用本机局域网默认值。
+  const demo = cfg.demo || {};
+  const wsUrl = demo.ws_url || 'ws://192.168.3.196:9911/';
+  const smtpHost = demo.smtp_host || '192.168.3.196';
+  const smtpPort = Number(demo.smtp_port || 9925);
+  // 出站 HTTP 的默认对端：配了就用本地假服务器（自检离线可跑），没配就打公网。
+  const httpUrl = demo.http_url || 'https://api.github.com/zen';
 
   // 4) 自己的表：异步 + 同步两套都要能用
   await host.sqlite_exec('CREATE TABLE IF NOT EXISTS demo_counter(n INTEGER)');
@@ -40,13 +47,13 @@ async function probe() {
 
   // 6) 出站：走 ssrf 门（回环/内网被挡，所以这里用公网地址；失败也要能说清）
   try {
-    const r = await host.fetch('https://api.github.com/zen');
+    const r = await host.fetch(httpUrl);
     out.fetch = { status: r.status, body: String(r.body || '').slice(0, 40) };
   } catch (e) {
     out.fetch = 'err: ' + e.message;
   }
   try {
-    const r = host.http_fetch('https://api.github.com/zen');
+    const r = host.http_fetch(httpUrl);
     out.http_fetch = { status: r.status };
   } catch (e) {
     out.http_fetch = 'err: ' + e.message;
@@ -75,7 +82,7 @@ async function probe() {
   // 9) WebSocket：要走**局域网**地址 —— 回环被 SSRF 门挡（那是面板自己）。
   //    对端用 `node scripts/test-servers.mjs` 起一个 echo。
   try {
-    const id = await host.ws_open('ws://192.168.3.196:9911/');
+    const id = await host.ws_open(wsUrl);
     host.ws_send(id, 'hello from demo');
     const frame = host.ws_recv(id, 3000);
     host.ws_close(id);
@@ -85,16 +92,17 @@ async function probe() {
   }
 
   // 10) SMTP：同样过出站判定，所以也用局域网地址 + 假服务器（tls: none）
+  // 注意：smtp_send 回的是 **JSON 文本**（不是一个对象），这里显式解析一次。
   try {
-    out.smtp = await host.smtp_send({
-      host: '192.168.3.196',
-      port: 9925,
+    out.smtp = JSON.parse(await host.smtp_send({
+      host: smtpHost,
+      port: smtpPort,
       tls: 'none',
       from: 'demo@panel.local',
       to: 'you@example.com',
       subject: 'demo 自检',
       text: '来自 demo 插件的一封信',
-    });
+    }));
   } catch (e) {
     out.smtp = 'err: ' + e.message;
   }

@@ -6,7 +6,7 @@
 // （那是面板自己），但允许局域网。所以自检要用这台机器的局域网地址去连，
 // 例如 ws://192.168.3.196:9911/ 。
 //
-// 用法：node scripts/test-servers.mjs [wsPort] [smtpPort]
+// 用法：node scripts/test-servers.mjs [wsPort] [smtpPort] [httpPort]
 import net from 'node:net';
 import crypto from 'node:crypto';
 
@@ -114,3 +114,12 @@ const smtp = net.createServer((sock) => {
   sock.on('error', () => {});
 });
 smtp.listen(smtpPort, '0.0.0.0', () => console.log('[smtp] fake on 0.0.0.0:' + smtpPort));
+
+// ---------------------------------------------------------------- 本地 HTTP（给 fetch/http_fetch 用，离线可跑）
+import http from 'node:http';
+const httpPort = Number(process.argv[4] || 9910);
+const web = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ hello: 'world', path: req.url }));
+});
+web.listen(httpPort, '0.0.0.0', () => console.log('[http] local on 0.0.0.0:' + httpPort));
