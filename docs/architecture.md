@@ -286,3 +286,5 @@ env 里，`ps -E` 同用户可读；Linux 上 `/proc/self/environ` 也还带着�
 另有一处 vendor 侧的坑**已打补丁**：任意非 UTF-8 环境变量会让 LLRT 的 `process.env` 初始化 panic，
 已把 `llrt_process::init` 改成 `vars_os()/args_os()` + lossy（`PANEL PATCH` 注释，
 见 [auth.md §7](auth.md)）。这是本仓库对 vendored LLRT 的**唯一**改动，重新 vendor 时必须重打。
+
+接口请求体的规矩另开一篇：[api-bodies.md](api-bodies.md)。

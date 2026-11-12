@@ -81,6 +81,61 @@ fn failed_plugins(errors: &LoadErrors) -> Vec<Value> {
     out
 }
 
+/// 请求体的提取器：反序列化失败翻成 **400 + 中文**，而不是 axum 默认的
+/// 「Failed to deserialize the JSON body into the target type: ...」422。
+///
+/// 为什么较真：这些错会原样弹到界面的 toast 里。给用户看英文的 serde 报错，
+/// 和「保存失败」没多大区别 —— 而它其实能说清「哪个字段不认识、认识的有哪些」。
+struct JsonBody<T>(T);
+
+impl<T, S> axum::extract::FromRequest<S> for JsonBody<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(v)) => Ok(JsonBody(v)),
+            Err(rej) => Err((body_status(&rej), format!("请求体有问题：{rej}"))),
+        }
+    }
+}
+
+/// 请求体错误的状态码：**没带 content-type 仍然是 415**（那是「你发的东西类型不对」，
+/// 不是「内容写错了」），其余（语法错、字段不认识、缺字段）一律 400。
+fn body_status(rej: &axum::extract::rejection::JsonRejection) -> StatusCode {
+    if rej.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+/// `Option<JsonBody<T>>` 也要能用（有几个接口的请求体可有可无）。
+impl<T, S> axum::extract::OptionalFromRequest<S> for JsonBody<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        match <axum::Json<T> as axum::extract::OptionalFromRequest<S>>::from_request(req, state).await {
+            Ok(Some(axum::Json(v))) => Ok(Some(JsonBody(v))),
+            Ok(None) => Ok(None),
+            Err(rej) => Err((body_status(&rej), format!("请求体有问题：{rej}"))),
+        }
+    }
+}
+
 type ApiError = (StatusCode, String);
 
 fn bad(msg: impl Into<String>) -> ApiError {
@@ -339,6 +394,7 @@ fn session_cookie(value: &str, max_age: u64) -> String {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TestRunBody {
     /// 要跑的源码。
     code: String,
@@ -361,7 +417,7 @@ const TEST_PLUGIN: &str = "__test__";
 async fn api_test_js(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(b): Json<TestRunBody>,
+    JsonBody(b): JsonBody<TestRunBody>,
 ) -> Result<Response, ApiError> {
     guard_write(&h)?;
     if b.code.trim().is_empty() {
@@ -420,6 +476,7 @@ async fn api_test_js(
     .into_response())
 }
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetupBody {
     /// 用户自己给的令牌。
     token: Option<String>,
@@ -438,7 +495,7 @@ struct SetupBody {
 async fn api_setup(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(b): Json<SetupBody>,
+    JsonBody(b): JsonBody<SetupBody>,
 ) -> Result<Response, ApiError> {
     guard_write(&h)?;
     // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
@@ -491,6 +548,7 @@ async fn api_setup(
     .into_response())
 }
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginBody {
     token: String,
 }
@@ -502,7 +560,7 @@ struct LoginBody {
 /// 令牌只走一次请求体。
 async fn api_login(
     State(st): State<AppState>,
-    Json(b): Json<LoginBody>,
+    JsonBody(b): JsonBody<LoginBody>,
 ) -> Result<Response, ApiError> {
     let Some(auth) = st.auth.clone() else {
         // 没配令牌就没有「登录」这回事，直接告诉前端「不需要会话」
@@ -1862,6 +1920,7 @@ async fn plugin_source(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceBody {
     source: String,
 }
@@ -1874,7 +1933,7 @@ async fn plugin_save(
     State(st): State<AppState>,
     Path(name): Path<String>,
     h: HeaderMap,
-    Json(body): Json<SourceBody>,
+    JsonBody(body): JsonBody<SourceBody>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let path = plugin_path(&st.plugins_dir, &name)?;
@@ -1931,6 +1990,7 @@ async fn plugin_save(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewPlugin {
     name: String,
     #[serde(default)]
@@ -1956,7 +2016,7 @@ await host.register_handler('hello', async (evt) => {{
 async fn plugin_create(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(body): Json<NewPlugin>,
+    JsonBody(body): JsonBody<NewPlugin>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let path = plugin_path(&st.plugins_dir, &body.name)?;
@@ -2044,6 +2104,7 @@ async fn plugin_delete(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConfigBody {
     text: String,
 }
@@ -2052,7 +2113,7 @@ struct ConfigBody {
 async fn api_config_save(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(body): Json<ConfigBody>,
+    JsonBody(body): JsonBody<ConfigBody>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let cap = crate::config::max_bytes();
@@ -2145,6 +2206,7 @@ async fn script_get(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScriptBody {
     source: String,
     #[serde(default)]
@@ -2159,7 +2221,7 @@ async fn script_save(
     State(st): State<AppState>,
     Path(name): Path<String>,
     h: HeaderMap,
-    Json(body): Json<ScriptBody>,
+    JsonBody(body): JsonBody<ScriptBody>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let out = st
@@ -2183,6 +2245,7 @@ async fn script_save(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewScript {
     name: String,
     #[serde(default)]
@@ -2213,7 +2276,7 @@ fn script_template(name: &str) -> String {
 async fn script_create(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(body): Json<NewScript>,
+    JsonBody(body): JsonBody<NewScript>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     crate::scripts::safe_name(&body.name).map_err(bad)?;
@@ -2602,6 +2665,7 @@ async fn api_notify_outbox(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NotifyTestBody {
     /// 只试这一个渠道。不给就是全部。
     #[serde(default)]
@@ -2611,10 +2675,10 @@ struct NotifyTestBody {
 async fn api_notify_test(
     State(st): State<AppState>,
     h: HeaderMap,
-    body: Option<Json<NotifyTestBody>>,
+    body: Option<JsonBody<NotifyTestBody>>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let only = body.and_then(|Json(b)| b.channel);
+    let only = body.and_then(|JsonBody(b)| b.channel);
     let out = crate::notify::test_send(&st.db, &st.log, &st.config, only.as_deref())
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}\n")))?;
@@ -2624,10 +2688,10 @@ async fn api_notify_test(
 async fn api_notify_retry(
     State(st): State<AppState>,
     h: HeaderMap,
-    body: Option<Json<ReadBody>>,
+    body: Option<JsonBody<ReadBody>>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let ids = body.and_then(|Json(b)| b.ids);
+    let ids = body.and_then(|JsonBody(b)| b.ids);
     let n = crate::notify::retry(&st.db, ids).await.map_err(internal)?;
     let counts = crate::notify::counts(&st.db).await.map_err(internal)?;
     Ok(Json(json!({ "ok": true, "retried": n, "counts": counts })))
@@ -2641,6 +2705,7 @@ async fn api_notifications(State(st): State<AppState>) -> Result<Json<Value>, Ap
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadBody {
     #[serde(default)]
     ids: Option<Vec<i64>>,
@@ -2649,10 +2714,10 @@ struct ReadBody {
 async fn api_notifications_read(
     State(st): State<AppState>,
     h: HeaderMap,
-    body: Option<Json<ReadBody>>,
+    body: Option<JsonBody<ReadBody>>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let ids = body.and_then(|Json(b)| b.ids);
+    let ids = body.and_then(|JsonBody(b)| b.ids);
     crate::notify::mark_read(&st.db, ids).await.map_err(internal)?;
     let unread = crate::notify::unread(&st.db).await.map_err(internal)?;
     Ok(Json(json!({ "ok": true, "unread": unread })))

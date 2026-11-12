@@ -225,3 +225,8 @@
 52. **改计划的请求体只认 `expr`**：传 `{"cron": "..."}` 会被当成「没有 expr = 撤销覆盖」，
    接口 200、什么都没改（第 65 轮实测）。认不出的键要报错，别静默当默认值。
    守卫：`saving_a_schedule_rejects_unknown_keys`。
+
+53. **请求体多余字段一律报错，别再静默当成默认值**：`lead_ms` 截断（36）、脚本 `cron` 写死（53）、
+    改计划 `cron` 被当成撤销覆盖（65）—— 三次都是「参数进了门却没生效」。现在十个 body 结构体
+    都 `deny_unknown_fields`，错误经 `JsonBody<T>` 翻成 400 + 中文（`content-type` 缺失仍是 415）。
+    **例外**：备份文档不拒绝未知字段（要前向兼容）。守卫：`unknown_keys_in_request_bodies_are_rejected`。

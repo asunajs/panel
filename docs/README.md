@@ -64,6 +64,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [plugin-webui.md](plugin-webui.md) | 插件自带界面：目录约定、三条路由、evt 形状、鉴权与嵌入取舍 |
 | [session.md](session.md) | 登录：会话 cookie 的形状与密钥、首次设置令牌（`/api/setup`） |
 | [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：根因、修法（vendor 补丁 + 加载期闸门）、升级时怎么重打 |
+| [api-bodies.md](api-bodies.md) | 请求体多余字段一律 400；三次「参数静默忽略」的清单；415 例外 |
 | [config.md](config.md) | config.json 三个入口各自校验什么、为什么启动不查语义、reload 取代重启 |
 | [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
 | [health.md](health.md) | 健康摘要：`/readyz`（无鉴权探针）与 `/api/health`（带名字的明细）、warnings 阈值、读数 |

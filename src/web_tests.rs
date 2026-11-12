@@ -2901,3 +2901,39 @@ await host.register_cron('t', '@every 30s', 5000, {});
     let t = &state["tasks"].as_array().unwrap()[0];
     assert!(t["next_at"].as_i64().unwrap_or(0) > 0, "恢复后要有下一次: {state}");
 }
+
+/// 所有请求体结构体都 `deny_unknown_fields`：键名写错要**报错**，不能静默当成默认值。
+///
+/// 三次踩到同一类问题（第 36 轮 `lead_ms`、第 53 轮脚本 `cron`、第 65 轮改计划 `cron` 被当成
+/// 「撤销覆盖」），所以这轮把所有 body 结构一次收紧，并配一条守卫盯着。
+#[tokio::test]
+async fn unknown_keys_in_request_bodies_are_rejected() {
+    let (app, _plugins, _data, _store) = setup_dirs("denykeys").await;
+    let cases: Vec<(&str, &str, Value)> = vec![
+        ("POST", "/api/plugins", json!({ "name": "x", "src": "// y" })),
+        ("POST", "/api/scripts", json!({ "name": "s", "schedul": "@every 1h" })),
+        ("PUT", "/api/config", json!({ "text": "{}", "encrypted": true })),
+        ("POST", "/api/test/js", json!({ "code": "1+1", "budget": 5 })),
+        ("POST", "/api/login", json!({ "token": "x", "remember": true })),
+        ("POST", "/api/setup", json!({ "token": "123456789", "gen": true })),
+        ("POST", "/api/notifications/read", json!({ "id": [1] })),
+        ("POST", "/api/notify/test", json!({ "chanel": "x" })),
+    ];
+    for (method, path, body) in cases {
+        let (status, out) = send(&app, with_csrf(method, path, Some(body.clone()))).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path} 收到多余字段 {body} 应当 400，实际 {status}"
+        );
+        let _ = out; // 错误体是纯文本，send() 解析不了 JSON
+    }
+
+    // 字段名写对就照常（别把正常请求误伤）
+    let body = json!({ "name": "ok1", "source": "// y" });
+    let (status, out) = send(&app, with_csrf("POST", "/api/plugins", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let body = json!({ "code": "1+1", "budget_ms": 1000 });
+    let (status, out) = send(&app, with_csrf("POST", "/api/test/js", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+}
