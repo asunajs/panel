@@ -3,6 +3,7 @@
 //! 启动顺序有依赖：DB actor → LogHub → 调度器 → 加载插件 → HTTP。
 //! 插件加载放在 HTTP 之前，这样首个请求看到的任务表已经是全的。
 
+mod alerts;
 mod auth;
 mod backup;
 mod backup_crypto;

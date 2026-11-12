@@ -54,6 +54,10 @@
           </div>
         </header>
 
+        <!-- 进程内告警（第 71 轮）：数据库自己写不进去的时候，只有这条路能把话说出来。
+             内容来自 /api/state 的 alerts（纯内存，不落库）。 -->
+        <div class="alerts-bar hidden" id="alerts-bar" role="status" aria-live="polite"></div>
+
         <div class="notify-pop hidden" id="notify-pop" role="dialog" aria-label="通知">
           <header class="notify-head">
             <strong>通知</strong>

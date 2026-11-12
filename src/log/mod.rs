@@ -106,6 +106,12 @@ impl LogHub {
                         // 同一个错误只说一次，恢复了再重置；文案要点明「日志没进库」。
                         if should_report(&last_err, &e) {
                             eprintln!("[log] 日志没写进库（磁盘满了？）：{e}");
+                            // 终端上看不到的人还有呢：界面上也得有一条（纯内存，不落库）。
+                            crate::alerts::global().push(
+                                "error",
+                                "logs",
+                                format!("日志没写进库（磁盘满了？）：{e}"),
+                            );
                             last_err = Some(e);
                         }
                     } else {

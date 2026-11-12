@@ -237,6 +237,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/reset", post(task_reset))
         // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
+        .route("/api/alerts", get(api_alerts))
+        .route("/api/alerts/clear", post(api_alerts_clear))
         .route("/api/runs", get(api_runs))
         .route("/api/runs/plugins", get(api_run_plugins))
         .route("/api/runs/{id}", get(api_run_one))
@@ -944,6 +946,9 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
             "runs_keep": crate::retention::RUNS_KEEP,
             "logs_keep": crate::retention::LOGS_KEEP,
         },
+        // 进程内的运行告警（不落库）：磁盘满、日志写不进去这类「库自己坏了」的事，
+        // 只能靠它说出来 —— 落库的路已经断了。界面顶部黄条就是它。
+        "alerts": crate::alerts::global().list(),
     })))
 }
 
@@ -1475,6 +1480,17 @@ fn sort_is_num(key: &str) -> bool {
     matches!(key, "id" | "started_at" | "dur")
 }
 
+/// `GET /api/alerts` —— 进程内告警（和 `/api/state` 里那份同源）。
+async fn api_alerts() -> Json<Value> {
+    Json(json!({ "alerts": crate::alerts::global().list() }))
+}
+
+/// `POST /api/alerts/clear` —— 人点「知道了」。
+async fn api_alerts_clear(h: HeaderMap) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let n = crate::alerts::global().clear();
+    Ok(Json(json!({ "ok": true, "cleared": n })))
+}
 async fn api_runs(
     State(st): State<AppState>,
     QueryArgs(p): QueryArgs<Page>,

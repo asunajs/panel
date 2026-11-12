@@ -3003,3 +3003,30 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
     assert_eq!(status, StatusCode::OK, "跑完要能再派: {body}");
 }
+
+/// 进程内告警：`/api/state` 要带出来，`/api/alerts/clear` 要能清。
+///
+/// 为什么重要：磁盘满时日志**落不了库**，这是唯一还能把话说出来的通道。
+#[tokio::test]
+async fn runtime_alerts_show_up_in_state_and_can_be_cleared() {
+    let (app, _plugins, _data, _store) = setup_dirs("alerts").await;
+    crate::alerts::global().clear();
+
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(state["alerts"].as_array().map(|a| a.len()), Some(0), "一开始应当是空的");
+
+    crate::alerts::global().push("error", "logs", "日志没写进库（磁盘满了？）：database or disk is full");
+    let (_, state) = get(&app, "/api/state").await;
+    let alerts = state["alerts"].as_array().cloned().unwrap_or_default();
+    assert_eq!(alerts.len(), 1, "推进去的告警要能从 state 里读出来: {state}");
+    assert_eq!(alerts[0]["scope"], "logs");
+    assert_eq!(alerts[0]["level"], "error");
+    assert_eq!(alerts[0]["count"], 1);
+    assert!(alerts[0]["message"].as_str().unwrap_or_default().contains("磁盘满"));
+
+    let (status, out) = send(&app, with_csrf("POST", "/api/alerts/clear", None)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["cleared"], 1, "{out}");
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(state["alerts"].as_array().map(|a| a.len()), Some(0), "清完要真没了");
+}

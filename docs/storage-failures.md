@@ -24,3 +24,39 @@
 
 **没有做**：磁盘满时把告警推进界面。数据库写不进去，能走的只剩 SSE 直播通道；
 而界面切走再回来就看不到了。留作以后（要一个进程内的「运行告警」环，不落库）。
+
+## 进程内告警（第 71 轮补上的缺口）
+
+上一节最后写了「没做：磁盘满时把告警推进界面」。这轮补上了。
+
+`src/alerts.rs` 是一个**纯内存**的环（`CAP = 16`）：
+
+- `push(level, scope, message)`：同一个 `scope + message` **紧挨着**再来时只累加 `count`；
+  中间插了别的问题就是新的一条（`id` 单调递增，清空后也不回退）。
+- `list()` / `clear()`：给接口和界面用。
+- `global()`：进程级单例（和 `jsslots` 一样，不走 AppState）。
+
+接进来的地方：**日志批插失败**（`log::should_report` 那一支）。因为那正是「库自己坏了」的场景 ——
+落库的路已经断了，只剩内存这一条。
+
+```text
+GET  /api/state          → alerts: [{id, ts, level, scope, message, count}]
+GET  /api/alerts         → {alerts: [...]}
+POST /api/alerts/clear   → {ok: true, cleared: N}
+```
+
+界面上是顶部一条黄条（`#alerts-bar`），最多显示 3 条 + 一条「还有 N 条告警」，
+带一个「知道了」按钮（清空）。没有告警时整条 `hidden`，不占地方。
+
+### 实测（临时镜像 24MB 塞到 91%，灌 8000 条日志）
+
+```text
+终端                [log] 日志没写进库（磁盘满了？）：database or disk is full     ← 只 1 行
+/api/state.alerts   [{count:1, id:1, level:error, scope:logs,
+                     message:日志没写进库（磁盘满了？）：database or disk is full}]
+界面黄条            [logs]日志没写进库（磁盘满了？）：database or disk is full 知道了（hidden=false）
+点「知道了」        黄条 hidden=true，/api/alerts 变成 []
+```
+
+守卫：`alerts::tests` 四条（连续去重 / 中间插别的不合并 / 超过 CAP 留最新 / 清空后 id 不回退）、
+`runtime_alerts_show_up_in_state_and_can_be_cleared`、ui-check 四条（隐藏 / 文案与 ×N / 按钮 / 清空后收起）。

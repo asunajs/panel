@@ -919,3 +919,24 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   overflow: auto;
   max-height: 320px;
 }
+
+/* ---------- 运行告警黄条（第 71 轮） ----------
+   什么时候出现：库自己坏了（磁盘满、日志写不进去）—— 那些事没法落库，
+   只能在内存里记一条，靠这条黄条说出来。 */
+.alerts-bar {
+  margin: 0 0 14px; padding: 10px 12px; border-radius: 10px;
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  color: var(--warn);
+  font-size: 12.5px; line-height: 1.5;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.alerts-bar .alert-row { display: flex; gap: 8px; align-items: flex-start; }
+.alerts-bar .alert-msg { flex: 1; overflow-wrap: anywhere; }
+.alerts-bar .alert-scope {
+  font-family: var(--mono); opacity: .8; margin-right: 4px;
+}
+.alerts-bar .alert-count { opacity: .85; }
+.alerts-bar .alert-clear {
+  align-self: flex-end;
+}

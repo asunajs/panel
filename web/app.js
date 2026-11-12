@@ -1974,6 +1974,8 @@ async function refresh() {
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
+    // 进程内告警（磁盘满 / 日志写不进库）：每次刷新都重画，数据没了条就自己消失。
+    renderAlerts(data.alerts || []);
     state.auth = !!data.auth;
     state.loaded = true;
     $('version').textContent = 'v' + (state.version || '—');
@@ -2076,6 +2078,47 @@ async function act(path, okMsg) {
   }
 }
 
+
+// ---------------------------------------------------------------- 运行告警（第 71 轮）
+
+/** 画顶部那条黄条。数据来自 state.alerts（进程内、不落库）。
+ *
+ * 为什么要有它：磁盘满 / 日志写不进库这类事**没法落库**（库本身就是坏的），
+ * 只留终端上的一句话，人看不到。这里最多显示 3 条，多的折成「还有 N 条」。
+ */
+function renderAlerts(alerts) {
+  const bar = $('alerts-bar');
+  if (!bar) return;
+  const list = Array.isArray(alerts) ? alerts : [];
+  bar.textContent = '';
+  if (list.length === 0) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  list.slice(-3).forEach((a) => {
+    const row = el('div', 'alert-row');
+    const msg = el('div', 'alert-msg');
+    if (a.scope) msg.append(el('span', 'alert-scope', '[' + a.scope + ']'));
+    msg.append(document.createTextNode(a.message || ''));
+    if (a.count > 1) msg.append(el('span', 'alert-count', ' ×' + a.count));
+    row.append(msg);
+    bar.append(row);
+  });
+  if (list.length > 3) bar.append(el('div', 'alert-msg', '还有 ' + (list.length - 3) + ' 条告警'));
+  const btn = el('button', 'btn btn-sm alert-clear', '知道了');
+  btn.type = 'button';
+  btn.addEventListener('click', async () => {
+    try {
+      await api('/api/alerts/clear', { method: 'POST', body: {} });
+    } catch (e) {
+      if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+    }
+    renderAlerts([]);
+    await refresh();
+  });
+  bar.append(btn);
+}
 // ---------------------------------------------------------------- 事件
 
 // ---------------------------------------------------------------- 自绘控件

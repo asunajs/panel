@@ -254,3 +254,8 @@
     守卫：脚本只读实测（`写 …/.s1.js.tmp… 失败: Permission denied` → 500）。
 59. **告警去重的状态别写在循环里**：磁盘满时日志批插每批都失败，`last_err` 若在 `while` 里声明
     等于每批重置，实测刷出 34 行同样的错。要记在循环外面。守卫：`the_same_write_error_is_only_reported_once`。
+
+60. **「库坏了」的时候日志这条路是断的**：磁盘满 / 只读时日志落不了库，界面上什么都没变，
+    人只会觉得面板变哑了。所以要有一个**纯内存**的告警环（`alerts.rs`，CAP 16，按 `scope+message`
+    连续去重）走 `/api/state` 带出来，界面顶部黄条显示。
+    守卫：`alerts::tests` 四条 + `runtime_alerts_show_up_in_state_and_can_be_cleared` + ui-check 四条。

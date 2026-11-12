@@ -189,6 +189,14 @@ UI_BASE=http://127.0.0.1:8797 CDP=http://127.0.0.1:9333 node scripts/ui-e2e.mjs
 `.toast` 现在有 `max-width: min(560px, calc(100vw - 32px))` + `white-space: pre-wrap` +
 `overflow-wrap: anywhere` + 左对齐 + `line-height: 1.45`。
 
+### 再 4 条：运行告警黄条（第 71 轮）
+
+| 断言 | 盯的是什么 |
+|---|---|
+| 没有告警时黄条是隐藏的 | `#alerts-bar` 带 `hidden`，不占版面 |
+| 有告警时黄条显示消息与次数 | 文案里有消息本身和 `×N` |
+| 黄条带「知道了」按钮 | 清空入口在 |
+| 告警清空后黄条自己收起 | `renderAlerts([])` → 又 `hidden` |
 第三处（第 51 轮）：`#tasks-body tr` 在「还没有注册任何定时任务」时也有**一行**（colspan 提示），
 于是「任务表渲染出行」这条在空表时假通过，后面的 `idx=-1` 才炸。现在改成「必须有带多列单元格的数据行」，
 等不到就把插件列表和加载失败原因打出来。

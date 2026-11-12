@@ -390,6 +390,17 @@ async function main() {
   check('窄屏仪表盘不溢出', dashOverflow <= 1, '多出 ' + dashOverflow + 'px');
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   await sleep(300);
+
+  // ---------------------------------------------------------------- 运行告警黄条（第 71 轮）
+  // 数据来自 /api/state 的 alerts（进程内、不落库）。验「隐藏 / 画得对 / 清空后收起」。
+  const alertHidden0 = await js("document.getElementById('alerts-bar').classList.contains('hidden')");
+  check('没有告警时黄条是隐藏的', alertHidden0 === true, String(alertHidden0));
+  await js("renderAlerts([{ id: 1, ts: 1, level: 'error', scope: 'logs', message: '日志没写进库（磁盘满了？）', count: 3 }])");
+  const alertBody = await js("(() => { const b = document.getElementById('alerts-bar'); return { hidden: b.classList.contains('hidden'), text: b.textContent, hasBtn: !!b.querySelector('button') }; })()");
+  check('有告警时黄条显示消息与次数', alertBody.hidden === false && /日志没写进库/.test(alertBody.text) && /×3/.test(alertBody.text), JSON.stringify(alertBody));
+  check('黄条带「知道了」按钮', alertBody.hasBtn === true, JSON.stringify(alertBody));
+  await js("renderAlerts([])");
+  check('告警清空后黄条自己收起', (await js("document.getElementById('alerts-bar').classList.contains('hidden')")) === true, 'still visible');
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 
