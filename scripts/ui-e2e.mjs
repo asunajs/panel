@@ -17,9 +17,12 @@
 // 面板没有令牌才能直接写：脚本会自己塞一个 ui-e2e 插件进来，跑完不管它。
 
 import { writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { execSync } from 'node:child_process';
 
 const base = process.env.UI_BASE || 'http://127.0.0.1:8797';
 const cdp = process.env.CDP || 'http://127.0.0.1:9333';
+const db = process.env.UI_DB || '/tmp/uie/panel.db';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pass = [], fail = [];
 const check = (name, ok, extra) => {
@@ -89,11 +92,20 @@ await send('Network.enable');
 await send('Network.setCacheDisabled', { cacheDisabled: true });
 await send('Page.navigate', { url: base + '/#tasks' });
 await sleep(1500);
-for (let i = 0; i < 40; i++) {
-  if ((await ev("document.querySelectorAll('#tasks-body tr').length")) > 0) break;
+// 「还没有任务」那种一行 colspan 的提示也是 tr，别把它当成数据行：
+// 必须等到有一行真的带多列单元格。等不到就把插件列表打出来，免得只看到 idx=-1。
+let dataRows = 0;
+for (let i = 0; i < 60; i++) {
+  dataRows = await ev("(() => [...document.querySelectorAll('#tasks-body tr')].filter(tr => tr.querySelectorAll('td').length > 1).length)()");
+  if (dataRows > 0) break;
   await sleep(250);
 }
-check('任务表渲染出行', (await ev("document.querySelectorAll('#tasks-body tr').length")) > 0);
+check('任务表出现数据行', dataRows > 0, 'rows=' + dataRows);
+if (dataRows === 0) {
+  const st = JSON.parse(await ev("fetch('/api/state').then(r => r.text())"));
+  console.log('  插件: ' + JSON.stringify(st.plugins.map((p) => p.name + (p.has_web ? '(web)' : ''))));
+  console.log('  失败加载: ' + JSON.stringify(st.failed));
+}
 
 const rowIdx = (plugin, task) => ev(
   "(() => { const all = [...document.querySelectorAll('#tasks-body tr')]; return all.findIndex(x => {" +
@@ -224,6 +236,80 @@ await sleep(900);
 const badToast = await ev("document.getElementById('toast').textContent");
 checkFail('选错文件时提示「不是合法 JSON」', /不是合法 JSON/.test(badToast || ''), badToast);
 
+
+// ---------------------------------------------------------------- 通知 tab（真会往外部发东西的那一页）
+const hits = [];
+const recv = createServer((req, res) => {
+  let b = '';
+  req.on('data', (c) => (b += c));
+  req.on('end', () => { hits.push(b); res.writeHead(200); res.end('ok'); });
+});
+await new Promise((r) => recv.listen(9922, '127.0.0.1', r));
+
+const putCfg = (obj) =>
+  fetch(base + '/api/config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-panel': '1' },
+    body: JSON.stringify({ text: JSON.stringify(obj, null, 2) }),
+  });
+const goodCfg = {
+  notify: {
+    min_level: 'info',
+    channels: [
+      { id: 'ok', kind: 'webhook', url: 'http://127.0.0.1:9922/x' },
+      { id: 'dead', kind: 'webhook', url: 'http://127.0.0.1:9999/x' },
+    ],
+  },
+};
+await putCfg(goodCfg);
+await ev("document.querySelector('[data-view=\"settings\"]').click()");
+await sleep(400);
+await ev("document.querySelector('[data-tab=\"notify\"]').click()");
+await sleep(1400);
+
+const channelIds = await ev("[...document.querySelectorAll('#notify-channels tbody tr')].map(tr => tr.querySelectorAll('td')[0].textContent)");
+checkFail('通知页列出两个渠道', (channelIds || []).length === 2 && channelIds.includes('ok') && channelIds.includes('dead'), JSON.stringify(channelIds));
+
+const clickTest = (id) => ev(
+  "(() => { const tr = [...document.querySelectorAll('#notify-channels tbody tr')].find(x => x.querySelectorAll('td')[0].textContent === " + JSON.stringify(id) + ");" +
+  " if (!tr) return 'no-row'; const b = [...tr.querySelectorAll('button')].find(x => x.textContent.trim() === '试发');" +
+  " if (!b) return 'no-button'; b.click(); return 'clicked'; })()");
+
+checkFail('点 ok 渠道的「试发」', (await clickTest('ok')) === 'clicked');
+await sleep(1600);
+const toast1 = await ev("document.getElementById('toast').textContent");
+checkFail('试发成功有提示', /试发成功/.test(toast1 || ''), toast1);
+checkFail('接收端真的收到了一条', hits.length >= 1, 'hits=' + hits.length);
+
+checkFail('点 dead 渠道的「试发」', (await clickTest('dead')) === 'clicked');
+await sleep(2600);
+const toast2 = await ev("document.getElementById('toast').textContent");
+checkFail('试发失败说清哪个渠道 + 原因', /dead/.test(toast2 || '') && /失败/.test(toast2 || ''), toast2);
+const boxRows = await ev("[...document.querySelectorAll('#notify-outbox tbody tr')].length");
+checkFail('发件箱里留下了这一条', boxRows >= 1, 'rows=' + boxRows);
+
+// 造一条「放弃」的行（真等 5 次退避要 7 小时），然后点「重试失败的」
+execSync('sqlite3 ' + db + " \"UPDATE notify_outbox SET done=2, attempts=5 WHERE channel='dead'\"");
+await ev("document.getElementById('notify-reload').click()");
+await sleep(1400);
+const abandoned = await ev("[...document.querySelectorAll('#notify-outbox tbody tr')].some(tr => tr.textContent.includes('放弃'))");
+checkFail('放弃的行在界面上标「放弃」', abandoned === true, String(abandoned));
+await ev("document.getElementById('notify-retry').click()");
+await sleep(1600);
+const toast3 = await ev("document.getElementById('toast').textContent");
+checkFail('点「重试失败的」有回执', /已打回/.test(toast3 || ''), toast3);
+const stillPending = execSync('sqlite3 ' + db + " \"SELECT count(*) FROM notify_outbox WHERE channel='dead' AND done=0\"").toString().trim();
+checkFail('放弃的行被拉回待发（done=0）', stillPending === '1', 'count=' + stillPending);
+
+// 坏配置：channels 不是数组，红条要说原因
+await putCfg({ notify: { channels: 'oops' } });
+await ev("document.getElementById('notify-reload').click()");
+await sleep(1400);
+const ne = await ev("({ hidden: document.getElementById('notify-error').classList.contains('hidden'), text: document.getElementById('notify-error').textContent })");
+checkFail('坏通知配置有红条说原因', ne && ne.hidden === false && /配置有问题/.test(ne.text || ''), JSON.stringify(ne));
+
+await putCfg(goodCfg);
+recv.close();
 ws.close();
 console.log('');
 console.log('ok: ' + pass.length + ' 条界面端到端全过' + (fail.length ? '，' + fail.length + ' 条失败' : ''));
