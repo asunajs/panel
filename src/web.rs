@@ -94,6 +94,7 @@ fn internal(msg: impl Into<String>) -> ApiError {
 pub fn router(st: AppState) -> Router {
     let api = Router::new()
         .route("/api/state", get(api_state))
+        .route("/api/health", get(api_health))
         .route("/api/config", get(api_config).put(api_config_save))
         .route("/api/plugins/files", get(plugin_files))
         // 重启进程：改了环境变量（PANEL_TOKEN / PANEL_BIND）才需要。
@@ -550,10 +551,19 @@ async fn readyz(State(st): State<AppState>) -> Response {
     let plugins = st.sched.plugins().await.map(|p| p.len()).unwrap_or(0);
     let tasks = st.sched.tasks().await.map(|t| t.len()).unwrap_or(0);
     let ok = db.is_ok();
+    // 探针是**无鉴权**的（反代要能打）：只给计数，不给插件名、不给库体积。
+    let failed_plugins = st.load_errors.lock().map(|g| g.len()).unwrap_or(0);
+    let outbox_failed = crate::notify::counts(&st.db)
+        .await
+        .ok()
+        .and_then(|v| v["failed"].as_i64())
+        .unwrap_or(0);
     let body = json!({
         "ok": ok,
         "plugins": plugins,
         "tasks": tasks,
+        "failed_plugins": failed_plugins,
+        "outbox_failed": outbox_failed,
         "error": db.err(),
     });
     let code = if ok {
@@ -738,6 +748,78 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
         ),
     );
     resp
+}
+
+
+/// `GET /api/health` —— 面板自己的健康摘要（要令牌，因为里面有插件名和库体积）。
+///
+/// 和 `/readyz` 的分工：readyz 是给反向代理看的探针（不带令牌、只给计数），
+/// 这里是给人看的：**哪几个**插件没起来、发件箱积压多少、库涨到多大了。
+async fn api_health(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let failed = failed_plugins(&st.load_errors);
+    let outbox = crate::notify::counts(&st.db).await.unwrap_or_else(|_| json!({}));
+    let pending = outbox["pending"].as_i64().unwrap_or(0);
+    let outbox_failed = outbox["failed"].as_i64().unwrap_or(0);
+    let (db_bytes, wal_bytes) = db_sizes(&st.data_dir);
+    let plugins = st.sched.plugins().await.map(|p| p.len()).unwrap_or(0);
+    let tasks = st.sched.tasks().await.map(|t| t.len()).unwrap_or(0);
+
+    let mut warnings: Vec<String> = Vec::new();
+    if !failed.is_empty() {
+        warnings.push(format!("{} 个插件没加载起来", failed.len()));
+    }
+    if outbox_failed > 0 {
+        warnings.push(format!("{outbox_failed} 条通知发不出去（已放弃）"));
+    }
+    // 积压本身不算问题（对端慢/离线很正常），但长时间不动的积压值得看一眼。
+    if pending >= 50 {
+        warnings.push(format!("发件箱积压 {pending} 条待发"));
+    }
+    if wal_bytes > 64 * 1024 * 1024 {
+        warnings.push(format!("WAL 已经 {}（正常会自动截断）", human_size(wal_bytes)));
+    }
+    if plugins == 0 {
+        warnings.push("一个插件都没加载".to_string());
+    }
+
+    Ok(Json(json!({
+        "ok": true,
+        "plugins": plugins,
+        "tasks": tasks,
+        "failed": failed,
+        "outbox": { "pending": pending, "failed": outbox_failed },
+        "db": { "bytes": db_bytes, "wal_bytes": wal_bytes },
+        "retention": {
+            "runs_keep": crate::retention::RUNS_KEEP,
+            "logs_keep": crate::retention::LOGS_KEEP,
+        },
+        "warnings": warnings,
+    })))
+}
+
+/// 主库与 WAL 的体积（字节）。读不到就是 0 —— 这只是给人看的数字，不该让接口失败。
+fn db_sizes(data_dir: &std::path::Path) -> (u64, u64) {
+    let sz = |name: &str| {
+        std::fs::metadata(data_dir.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    (sz("panel.db"), sz("panel.db-wal"))
+}
+
+/// 人类可读的体积（健康摘要里用，和界面上的口径一致）。
+fn human_size(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let f = n as f64;
+    if f < KB {
+        format!("{n} B")
+    } else if f < KB * KB {
+        format!("{:.1} KB", f / KB)
+    } else if f < KB * KB * KB {
+        format!("{:.1} MB", f / (KB * KB))
+    } else {
+        format!("{:.2} GB", f / (KB * KB * KB))
+    }
 }
 
 async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {

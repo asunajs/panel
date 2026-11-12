@@ -2240,3 +2240,82 @@ async fn upload_overwrites_by_default_and_can_be_made_a_conflict() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "overwrite=0 应当冲突");
     assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), newer);
 }
+
+/// 健康摘要：插件没起来、通知发不出去，都要能在这一屏看见。
+#[tokio::test]
+async fn health_reports_failed_plugins_and_abandoned_notices() {
+    let (app, plugins, _data, _store, db) = setup_core("phealth").await;
+    std::fs::write(
+        plugins.join("bad.js"),
+        "import host from 'panel:host';\nawait host.register_handler('x', async () => {",
+    )
+    .unwrap();
+    // 让它记进 load_errors（启用失败会写）
+    let _ = send(&app, with_csrf("POST", "/api/plugins/bad/enable", None)).await;
+    // 一条放弃掉的通知
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO notify_outbox(channel,kind,title,body,payload,attempts,next_try,done,last_error,ts) \
+             VALUES('hook','webhook','t','b','{}',5,0,2,'boom',0)",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap();
+
+    let (status, h) = get(&app, "/api/health").await;
+    assert_eq!(status, StatusCode::OK, "{h}");
+    assert_eq!(h["ok"], true);
+    assert_eq!(h["failed"][0]["name"], "bad");
+    assert_eq!(h["outbox"]["failed"], 1);
+    assert!(h["db"]["bytes"].is_u64());
+    let warns: Vec<String> = h["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        warns.iter().any(|w| w.contains("1 个插件没加载起来")),
+        "{warns:?}"
+    );
+    assert!(
+        warns.iter().any(|w| w.contains("1 条通知发不出去")),
+        "{warns:?}"
+    );
+}
+
+/// readyz 是**无鉴权**探针：只给计数，不能把插件名/库体积吐出去。
+#[tokio::test]
+async fn readyz_reports_counts_but_not_names() {
+    let (app, plugins, _data, _store, _db) = setup_core("pready").await;
+    std::fs::write(
+        plugins.join("secretname.js"),
+        "await host.register_handler('x', async () => {",
+    )
+    .unwrap();
+    let _ = send(&app, with_csrf("POST", "/api/plugins/secretname/enable", None)).await;
+
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "有插件失败也不算不就绪");
+    let text = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["failed_plugins"], 1);
+    assert!(v["outbox_failed"].is_i64());
+    assert!(
+        !text.contains("secretname"),
+        "探针不该吐插件名: {text}"
+    );
+}

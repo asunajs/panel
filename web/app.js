@@ -29,6 +29,7 @@ const state = {
   runs: [],
   /** 运行记录里出现过的插件名（服务端去重）：筛选下拉要用，含已卸载插件的历史行。 */
   runPlugins: [],
+  health: null,
   /** 服务端算的总条数（按当前插件筛选），用来显示「已加载 N / 共 M」。 */
   runsTotal: null,
   runsLoading: false,
@@ -321,12 +322,45 @@ function renderCards() {
           : '各 runtime 合计',
     ),
   );
+  renderHealthCards();
   taskBox.append(
     card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
     card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
     card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
     card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
   );
+}
+
+/** 面板自己的健康摘要：插件有没有全起来、通知发得出去吗、库涨到多大了。 */
+async function loadHealth() {
+  try {
+    state.health = await api('/api/health');
+  } catch (e) {
+    state.health = null;
+  }
+  renderHealthCards();
+}
+
+function renderHealthCards() {
+  const box = $('cards-health');
+  const warn = $('health-warn');
+  if (!box) return;
+  clear(box);
+  const h = state.health;
+  if (!h) { skeletonCards(box, 4); if (warn) { warn.classList.add('hidden'); } return; }
+  const bad = (h.failed || []).length;
+  const out = h.outbox || {};
+  box.append(
+    card('插件加载', String(h.plugins), bad ? bad + ' 个没起来' : '全部加载成功'),
+    card('发件箱', String(out.pending || 0), out.failed ? (out.failed + ' 条已放弃') : '没有放弃的通知'),
+    card('数据库', humanBytes((h.db || {}).bytes), 'WAL ' + humanBytes((h.db || {}).wal_bytes)),
+    card('保留策略', '2 万条', '运行记录与日志各留最近 2 万条'),
+  );
+  if (!warn) return;
+  const list = h.warnings || [];
+  if (!list.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
+  warn.classList.remove('hidden');
+  warn.textContent = '需要看一眼：' + list.join('；');
 }
 
 // ---------------------------------------------------------------- 表格
@@ -1906,6 +1940,7 @@ function render() {
   state.frame = requestAnimationFrame(() => {
     state.frame = 0;
     renderCards();
+    loadHealth();
     renderFirstRun();
     renderPlugins();
     renderFilterDropdowns();

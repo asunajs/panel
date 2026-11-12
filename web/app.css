@@ -222,6 +222,16 @@ button, input, select { font: inherit; color: inherit; }
 
 .view { display: flex; flex-direction: column; gap: 18px; }
 
+.health-warn {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .banner {
   margin: 14px 26px 0; padding: 10px 14px;
   border-radius: var(--radius-sm); font-size: 13px;
