@@ -72,6 +72,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
 | [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
+| [performance.md](performance.md) | 量过的时间分布：一次运行 0–4ms、启动 0.47s（慢的形状是顶层语句条数）、忙/排队怎么看 |
 | [pitfalls.md](pitfalls.md) | 踩过的 37 条坑（按踩到的顺序；每条带复现方式或守卫位置） |
 | [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |
 
