@@ -174,7 +174,7 @@ cd /Users/catlair/mobile/workspace/panel-llrt
 cargo build --offline && cargo test --offline   # 零 warning / 216 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
 bash scripts/check-docs.sh                      # ok: 19 篇文档，内链全通、都在 300 行内
-node scripts/ui-check.mjs                       # 界面 13 条断言（自起面板 + 无头 Edge）
+node scripts/ui-check.mjs                       # 界面 17 条断言（自起面板 + 无头 Edge）
 ```
 
 端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。

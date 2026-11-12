@@ -224,6 +224,29 @@ async function main() {
   const after = await js("document.documentElement.getAttribute('data-theme')");
   check('主题能切', before !== after, before + ' -> ' + after);
 
+  // 窄屏（手机）：表格要折成「标签 + 值」的卡片，且不许横向溢出
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await js("location.hash = '#runs'");
+  await sleep(1200);
+  const overflow = await js('document.documentElement.scrollWidth - window.innerWidth');
+  check('窄屏没有横向溢出', overflow <= 1, 'scrollWidth 比视口多 ' + overflow + 'px');
+  const theadH = await js("document.querySelector('#view-runs thead') ? document.querySelector('#view-runs thead').offsetHeight : -1");
+  check('窄屏表头隐藏（卡片模式）', theadH === 0, 'thead 高 ' + theadH);
+  const cells = JSON.parse(await js(
+    "JSON.stringify((()=>{const tr=document.querySelector('#runs-body tr'); if(!tr) return [];" +
+    " return [...tr.querySelectorAll('td')].map(td=>({l:td.dataset.label||'',d:getComputedStyle(td).display," +
+    " b:getComputedStyle(td,'::before').content}));})())"));
+  const labelled = cells.filter((c) => c.l);
+  check('卡片每格都带列名', cells.length > 0 && cells.every((c) => c.d === 'flex') &&
+    labelled.length > 0 && labelled.every((c) => c.b.includes(c.l)),
+    JSON.stringify(cells.slice(0, 3)));
+  // 仪表盘在窄屏也要能用（卡片单列）
+  await js("location.hash = '#dashboard'");
+  await sleep(1200);
+  const dashOverflow = await js('document.documentElement.scrollWidth - window.innerWidth');
+  check('窄屏仪表盘不溢出', dashOverflow <= 1, '多出 ' + dashOverflow + 'px');
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  await sleep(300);
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

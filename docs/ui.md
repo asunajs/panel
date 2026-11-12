@@ -236,7 +236,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 
 - 排序只做了任务表与运行记录表；插件表列太少，不值得加。
 - 运行记录的**排序**只作用在已加载的行上（筛选/搜索/分页都是服务端的）—— 按耗时排序看到的是「这 N 条里最慢的」，不是全部里最慢的。
-- 移动端只做到「能用」：表格靠横向滚动，没做卡片化重排。
+- 窄屏是「标签 + 值」的卡片（`@media (max-width: 720px)`，表头隐藏、每格用 `data-label` 当标签），但**一行偏高**：7 个字段加操作按钮 ≈ 230px，一屏只放得下 3 条。没做「次要字段折叠 / 只留关键列」。
 
 ## 11. 界面门禁：`scripts/ui-check.mjs`
 
@@ -244,7 +244,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 13 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 17 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
@@ -264,6 +264,10 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 | 设置页 5 个页签 / 通知页出渠道区 | 页签切换与懒渲染 |
 | 主题能切 | `data-theme` 真的变 |
 | 没有 JS 报错 | 收集 `Runtime.exceptionThrown` 与 `console.error` |
+| 窄屏没有横向溢出 | `Emulation.setDeviceMetricsOverride` 到 390×844 后 `scrollWidth - innerWidth <= 1` |
+| 窄屏表头隐藏（卡片模式） | `thead.offsetHeight === 0` |
+| 卡片每格都带列名 | 每个 `td` 是 `display:flex`，`::before` 的 content 就是 `data-label` |
+| 窄屏仪表盘不溢出 | 卡片单列时同样不许横向滚 |
 
 **反向例**（门禁自己也得被验）：把计数文案故意改坏再跑，退出码 1、红的正好是那 3 条依赖它的断言：
 
@@ -271,4 +275,14 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 失败 3 / 13：运行记录首屏 50 / 总数 > 50、点「加载更多」后变 100 条、搜索命中错误文本
 ```
 
-还原后 13/13 全过。这条反向例以后改断言时照着做一遍 —— 不然很容易写出「永远绿」的测试。
+还原后全过。这条反向例以后改断言时照着做一遍 —— 不然很容易写出「永远绿」的测试。
+
+窄屏读数（2026-11-12，390×844、DPR 2，真面板 8787 的 2040 条运行记录）：
+
+```text
+视口                390x844
+scrollWidth         390（不溢出）
+thead.offsetHeight  0（表头让位给卡片）
+首格                display=flex，::before 内容 = "#"（就是 data-label）
+一屏可见            3 条（每条约 230px）  ← 这就是 §10 剩下的那条短板
+```
