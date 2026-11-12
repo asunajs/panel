@@ -1640,3 +1640,61 @@ async fn writes_are_rate_limited_but_reads_are_not() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// 引擎试跑：console 输出回到响应里，抛错如实报，空代码 400。
+#[tokio::test]
+async fn engine_test_run_returns_console_output() {
+    let (app, _plugins, _data, _store) = setup_dirs("tjs").await;
+
+    // 缺 x-panel: 1 → 403
+    let req = Request::post("/api/test/js")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"code":"1"}"#))
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::FORBIDDEN);
+
+    // 空代码 → 400
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/test/js", Some(json!({"code": "   "}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // 正常跑：console.log 的输出按顺序回来
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/test/js",
+            Some(json!({"code": "console.log('a', 1 + 1); console.log({x: 1});"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["error"], Value::Null);
+    let lines: Vec<String> = body["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(lines, vec!["a 2".to_string(), "{\"x\":1}".to_string()]);
+    assert!(body["ms"].is_number());
+
+    // 抛错：error 有值、ok=false，而且抛之前打印的还在
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/test/js",
+            Some(json!({"code": "console.log('before'); throw new Error('boom');"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"], "boom");
+    assert_eq!(body["lines"][0], "before");
+}

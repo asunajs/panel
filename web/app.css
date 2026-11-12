@@ -806,3 +806,23 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   font-size: 13px;
   min-width: 240px;
 }
+
+/* 引擎试跑 */
+.editor-sm { min-height: 120px; }
+.test-out {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #12141a;
+  color: #d7dae0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
+}
+.test-out:empty { display: none; }
+.test-line { color: #d7dae0; }
+.test-err { color: #ff8b8b; }

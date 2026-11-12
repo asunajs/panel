@@ -137,6 +137,12 @@ pub fn router(st: AppState) -> Router {
                 .layer(middleware::from_fn_with_state(st.clone(), rate_limit_login)),
         )
         .route("/api/logout", post(api_logout))
+        // 引擎试跑：一次性上下文，独立配额（试跑一次能占住整个执行预算）
+        .merge(
+            Router::new()
+                .route("/api/test/js", post(api_test_js))
+                .layer(middleware::from_fn_with_state(st.clone(), rate_limit_test)),
+        )
         .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
@@ -235,6 +241,20 @@ async fn rate_limit_login(
     next.run(req).await
 }
 
+/// 试跑限流（比写接口严得多：一次试跑能占住整个执行预算）。
+async fn rate_limit_test(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Some(addr) = peer(&req) {
+        if let Err(r) = st.limits.test.check(addr.ip()) {
+            return too_many(r);
+        }
+    }
+    next.run(req).await
+}
+
 /// 写接口限流。读接口（含 SSE 轮询）**一律不挡** —— 界面每隔几秒就在读。
 async fn rate_limit_writes(
     State(st): State<AppState>,
@@ -287,6 +307,87 @@ fn session_cookie(value: &str, max_age: u64) -> String {
     )
 }
 
+#[derive(serde::Deserialize)]
+struct TestRunBody {
+    /// 要跑的源码。
+    code: String,
+    /// 执行预算（毫秒），默认 2000，钳在 [100, 10000]。
+    #[serde(default)]
+    budget_ms: Option<u64>,
+}
+
+/// 试跑源码的体积上限。面板跑在低配盒子上，别让一个请求把内存吃掉。
+const MAX_TEST_CODE: usize = 256 * 1024;
+
+/// 试跑用的假插件名：日志归到它名下，一眼能看出不是真插件。
+const TEST_PLUGIN: &str = "__test__";
+
+/// `POST /api/test/js` —— 在**一次性上下文**里跑一段源码，输出回到这个框。
+///
+/// 为什么值得有：想验证「这台机器上 fetch / 定时器 / host API 到底什么行为」，
+/// 以前只能建个脚本、跑一次、去运行记录里翻 —— 而脚本会留档、会排程、会进统计。
+/// 试跑跑完就扔，不碰任何插件的状态，也不写 runs 表。
+async fn api_test_js(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(b): Json<TestRunBody>,
+) -> Result<Response, ApiError> {
+    guard_write(&h)?;
+    if b.code.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "代码是空的\n".into()));
+    }
+    if b.code.len() > MAX_TEST_CODE {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "代码 {} 字节，超过 {} KB 上限\n",
+                b.code.len(),
+                MAX_TEST_CODE / 1024
+            ),
+        ));
+    }
+    let budget = b.budget_ms.unwrap_or(2000).clamp(100, 10_000);
+
+    // 在飞数量：同时只跑一个。速率限流挡「狂点」，这个挡「排队」——
+    // 排队的那几个即使 HTTP 已经超时，也照样占着执行预算。
+    let Ok(_permit) = st.limits.test_gate.try_acquire() else {
+        let mut resp =
+            (StatusCode::TOO_MANY_REQUESTS, "引擎正在跑另一个试跑，等它跑完再来\n").into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+        return Ok(resp);
+    };
+
+    let inv = Arc::new(crate::engine::Invocation::default());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = crate::hostapi::HostHandle {
+        plugin: TEST_PLUGIN.to_string(),
+        inv,
+        log: st.log.clone(),
+        db: st.db.clone(),
+        reg: tx,
+        config: st.config.clone(),
+        // 试跑没有任务表：set_job_* 会直接报错
+        sched: None,
+    };
+
+    let started = std::time::Instant::now();
+    let out = crate::engine::Plugin::run_test(&b.code, handle, budget).await;
+    let ms = started.elapsed().as_millis() as u64;
+    // 试跑不该注册任务/处理器：注册了就是写错了，要吵出来
+    let mut error = out.error;
+    if error.is_none() && rx.try_recv().is_ok() {
+        error = Some("试跑不能注册任务或处理器（register_cron / register_handler）".to_string());
+    }
+    Ok(Json(json!({
+        "ok": error.is_none(),
+        "lines": out.lines,
+        "error": error,
+        "ms": ms,
+        "budget_ms": budget,
+    }))
+    .into_response())
+}
 #[derive(serde::Deserialize)]
 struct SetupBody {
     /// 用户自己给的令牌。

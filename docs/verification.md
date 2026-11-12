@@ -262,3 +262,37 @@ panel-llrt listening on http://127.0.0.1:8787
 > 界面在 2026-11-11 晚**整体重写**（旧版被用户判为「30 年前的网页」）：布局、设计令牌、
 > 五个视图、指标口径、零构建约束与新的读数都在 [ui.md](ui.md)。本节上面那段 WebUI 描述
 > 属于重写前的版本，保留只为记录当时的读数（DOM 里有 `hello`/`long`/`tick`/`boom` 那条结论仍成立）。
+
+## 9. 引擎试跑（`POST /api/test/js`）
+
+想知道「这台机器上 `node:crypto` / 定时器 / `host.*` 到底什么行为」，以前只能建个脚本、
+跑一次、去运行记录里翻 —— 而脚本会留档、会排程、会进统计。试跑跑完就扔：
+
+```text
+POST /api/test/js  {"code": "console.log(1+1)", "budget_ms": 2000}
+  → {"ok":true,"lines":["2"],"error":null,"ms":3,"budget_ms":2000}
+```
+
+- **一次性上下文**：不碰任何插件的状态，不写 `runs` 表，日志挂 `__test__` 名下。
+- 源码上限 256 KB；预算默认 2000ms，钳在 [100, 10000]。
+- `console.*` 被**抢过来**接到响应里（llrt 自带的 console 直写进程 stdout，守护进程跑起来
+  就是 journal，试跑的人什么也看不见）。对象走 `JSON.stringify` 兜底。
+- 同时只跑**一个**（信号量）：速率限流挡「狂点」，这个挡「排队」—— 排队的那几个即使
+  HTTP 已经超时，也照样占着执行预算。
+- 试跑**不能**注册任务/处理器（`register_cron` / `register_handler` 会报错），和脚本同一条规矩。
+- `fetch` 在试跑里也是 `undefined` —— 和插件一样，出站只能走 `host.fetch`（见 [ssrf.md](ssrf.md)）。
+
+读数（2026-11-12，真面板 8796）：
+
+```text
+console.log(1+1)/{a:1}/顶层 await → ["2", "{\"a\":1}", "done"]，63ms     空代码 → 400
+throw new Error('boom')          → ok:false, error:"boom", lines:["before"]
+while(true){} 预算 300           → error:"interrupted"，用时 304ms
+register_handler                 → ok:false「试跑不能注册任务或处理器」
+能力探测                          → createHash: function / host.info: function / fetch: undefined
+并发两个慢试跑(1.5s)              → 第二个 429「引擎正在跑另一个试跑」+ Retry-After: 2
+连打 9 次                         → 第 7 次起 429（6 次突发，之后每 5 秒补一个）
+```
+
+界面上在**设置 → 常规 → 引擎试跑**：一个编辑框、一个预算输入、一个「运行」，输出贴在下面。
+

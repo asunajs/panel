@@ -247,6 +247,22 @@
               </section>
             </div>
 
+              <section class="panel" id="test-card">
+                <header class="panel-head"><h2>引擎试跑</h2></header>
+                <div class="panel-body">
+                  <p class="muted">在一次性上下文里跑一段源码：跑完就扔，不碰任何插件的状态，也不写运行记录。可以用 <code>console.log</code>、<code>host.*</code>、<code>import</code>，以及顶层 <code>await</code>。</p>
+                  <textarea class="editor editor-sm" id="test-code" spellcheck="false" aria-label="试跑源码">console.log('hello', 1 + 1);
+console.log(await import('node:crypto').then(m => typeof m.createHash));</textarea>
+                  <div class="actions">
+                    <button class="btn btn-primary btn-sm" id="test-run" type="button">运行</button>
+                    <label class="muted">预算
+                      <input id="test-budget" type="number" min="100" max="10000" step="100" value="2000" style="width:88px" /> ms
+                    </label>
+                    <span class="muted" id="test-meta">—</span>
+                  </div>
+                  <div class="test-out" id="test-out"></div>
+                </div>
+              </section>
             <div class="tab-pane hidden" id="tab-config">
               <section class="panel">
                 <header class="panel-head">

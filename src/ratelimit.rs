@@ -44,6 +44,14 @@ impl Quota {
 /// 的随机串）。
 pub const LOGIN: Quota = Quota::new(5, 12);
 
+/// 引擎试跑：一口气 6 次，之后每 5 秒补一次（≈12 次/分钟）。
+///
+/// 试跑是**唯一**一个「随手就能触发、且一次能占住执行预算」的接口（默认 2 秒）。
+/// 基线也是给它单独一套配额，理由一样。为什么不是更狠：这是给人**改代码→跑→再改**
+/// 用的框，突发 2 次会让第二次调试就得等 10 秒；真正防「排队拖垮面板」的是那个
+/// 同时只跑一个的信号量，不是速率。
+pub const TEST: Quota = Quota::new(6, 5);
+
 /// 写接口：一口气 30 次，之后每 2 秒补一次（≈30 次/分钟）。
 ///
 /// 界面上一次操作就是一个写请求，30 次突发够点一整屏按钮。
@@ -138,6 +146,10 @@ impl Limiter {
 pub struct Limits {
     pub login: Limiter,
     pub write: Limiter,
+    pub test: Limiter,
+    /// 同时只允许**一个**试跑。速率挡的是「狂点」，这个挡的是「排队」——
+    /// 排队的那几个即使 HTTP 已经超时，也照样占着执行预算。
+    pub test_gate: tokio::sync::Semaphore,
 }
 
 impl Limits {
@@ -145,6 +157,8 @@ impl Limits {
         Self {
             login: Limiter::new(LOGIN),
             write: Limiter::new(WRITE),
+            test: Limiter::new(TEST),
+            test_gate: tokio::sync::Semaphore::new(1),
         }
     }
 }

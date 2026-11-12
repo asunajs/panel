@@ -23,6 +23,7 @@ use llrt_core::{
         },
     },
     loader::{FileResolver, ImportAttributes, Resolver},
+    prelude::Func,
     modules::{
         embedded::{init as embedded_init, loader::EmbeddedLoader, resolver::EmbeddedResolver},
         https::{set_http_version, HttpVersion},
@@ -35,6 +36,37 @@ use llrt_core::{
 use tokio::sync::Notify;
 
 use crate::hostapi::{HostHandle, HostModule};
+
+/// 试跑时 console 输出的去处。
+pub type ConsoleCapture = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// 装进试跑上下文的 console 覆盖。
+///
+/// 为什么要在 Rust 侧抢：llrt 自带的 console 直写进程 stdout（守护进程跑起来就是
+/// journal / 日志文件），试跑的人在那个框里什么也看不见。字符串化用 JSON.stringify
+/// 兜底，`console.log({a:1})` 至少还能看懂。
+const TEST_CONSOLE: &str = r#"
+(() => {
+  const fmt = (v) => {
+    if (typeof v === 'string') return v;
+    if (v instanceof Error) return v.stack || String(v);
+    try { return JSON.stringify(v); } catch { return String(v); }
+  };
+  const make = (level) => (...a) => __test_console(level, a.map(fmt).join(' '));
+  globalThis.console = {
+    log: make('log'), info: make('info'), warn: make('warn'),
+    error: make('error'), debug: make('debug'), trace: make('trace'),
+  };
+})();
+"#;
+
+/// 一次试跑的结果。
+pub struct TestOutcome {
+    /// console 输出（按顺序）。
+    pub lines: Vec<String>,
+    /// 加载/执行期的错误。`None` = 跑完了。
+    pub error: Option<String>,
+}
 
 /// 一次 invocation 的停止位。**绑 invocation，不绑插件、不绑全局** ——
 /// 基线 R1 High 就是绑错了层（`src/engine.rs:815-834`）。
@@ -186,7 +218,7 @@ pub struct Plugin {
 
 impl Plugin {
     pub async fn load(source: &str, handle: HostHandle) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, None).await
+        Self::load_inner(source, handle, None, None).await
     }
 
     /// 跑「脚本」用：顶层代码带**墙钟死线**。
@@ -198,13 +230,14 @@ impl Plugin {
         handle: HostHandle,
         budget_ms: u64,
     ) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, Some(budget_ms)).await
+        Self::load_inner(source, handle, Some(budget_ms), None).await
     }
 
     async fn load_inner(
         source: &str,
         handle: HostHandle,
         budget_ms: Option<u64>,
+        capture: Option<ConsoleCapture>,
     ) -> std::result::Result<Self, String> {
         let inv = handle.inv.clone();
         let (module_resolver, module_loader, globals) =
@@ -236,6 +269,19 @@ impl Plugin {
                 // fetch 全局是 ModuleBuilder::default() 挂上的，它直连 HTTP_CLIENT，
                 // 不经过 hostapi 的 SSRF/限额。摘掉它，Request/Response 等纯数据类留着。
                 g.remove("fetch")?;
+                // 试跑：把 console 抢过来，输出回到调用方而不是进程 stdout。
+                if let Some(cap) = &capture {
+                    let sink = cap.clone();
+                    g.set(
+                        "__test_console",
+                        Func::from(move |level: String, text: String| {
+                            sink.lock().unwrap_or_else(|p| p.into_inner()).push(
+                                if level == "log" { text } else { format!("[{level}] {text}") },
+                            );
+                        }),
+                    )?;
+                    ctx.eval_with_options::<Value, _>(TEST_CONSOLE, EvalOptions::default())?;
+                }
                 g.set("global", g.clone())?;
                 g.set("self", g.clone())?;
                 let _ = ctx.store_userdata(inv.clone());
@@ -259,6 +305,18 @@ impl Plugin {
         let plugin = Self { rt, ctx, inv };
         plugin.eval_module(source).await?;
         Ok(plugin)
+    }
+
+    /// 在**一次性上下文**里跑一段源码：不碰任何插件的状态，跑完就扔。
+    pub async fn run_test(source: &str, handle: HostHandle, budget_ms: u64) -> TestOutcome {
+        let cap: ConsoleCapture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result =
+            Self::load_inner(source, handle, Some(budget_ms), Some(cap.clone())).await;
+        let lines = cap.lock().map(|g| g.clone()).unwrap_or_default();
+        TestOutcome {
+            lines,
+            error: result.err(),
+        }
     }
 
     /// 求值一段 ESM 并把它挂起的顶层 await 跑完。加载期的错误要报出来，

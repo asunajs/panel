@@ -1330,6 +1330,28 @@ function formatConfig() {
   }
 }
 
+/** 引擎试跑：把源码 POST 给面板，在一次性上下文里跑。 */
+async function runTest() {
+  const code = $('test-code').value;
+  const budget = Number($('test-budget').value) || 2000;
+  const out = $('test-out');
+  const meta = $('test-meta');
+  clear(out);
+  meta.textContent = '跑着…';
+  $('test-run').disabled = true;
+  try {
+    const r = await api('/api/test/js', { method: 'POST', body: { code, budget_ms: budget } });
+    for (const line of r.lines || []) out.append(el('div', 'test-line', line));
+    if (r.error) out.append(el('div', 'test-err', r.error));
+    if (!(r.lines || []).length && !r.error) out.append(el('div', 'muted', '（没有输出）'));
+    meta.textContent = (r.ok ? 'ok' : '出错') + ' · ' + r.ms + 'ms · 预算 ' + r.budget_ms + 'ms';
+  } catch (e) {
+    out.append(el('div', 'test-err', e.message || '试跑失败'));
+    meta.textContent = '失败';
+  } finally {
+    $('test-run').disabled = false;
+  }
+}
 /** 首次设置令牌的框（只在「还没凭据」时出现）。
  *
  *  写完 auth.json **不自动重启**：面板生成的令牌要让人先抄下来 ——
@@ -2093,6 +2115,7 @@ function bind() {
   $('plugin-new').addEventListener('click', openNewPlugin);
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
+  $('test-run').addEventListener('click', runTest);
   $('panel-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
