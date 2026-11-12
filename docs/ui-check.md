@@ -64,3 +64,39 @@ thead.offsetHeight  0（表头让位给卡片）
 首格                display=flex，::before 内容 = "#"（就是 data-label）
 一屏可见            3 条（每条约 230px）  ← 这就是 [ui.md §10](ui.md) 剩下的那条短板
 ```
+
+## 界面端到端（scripts/ui-e2e.mjs）：真点按钮
+
+`ui-check.mjs` 是**静态**断言：它证明按钮在、结构对、令牌对，证明不了「点下去发的是哪个请求、
+发完界面有没有跟着变」。那一条由 `scripts/ui-e2e.mjs` 补上 —— 真浏览器、真点击。
+
+它**不自带面板**（需要浏览器会话连着），所以不算默认四道门禁，要手动跑：
+
+```bash
+# 1) 起一个临时面板（不带令牌，脚本才有写权限）
+PANEL_DATA_DIR=/tmp/uie PANEL_PLUGINS_DIR=/tmp/uie/plugins \
+  PANEL_WEB_DIR=web PANEL_BIND=127.0.0.1:8797 ./target/debug/panel-llrt &
+
+# 2) 起无头 Edge，开调试端口
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --headless=new --remote-debugging-port=9333 --user-data-dir=/tmp/uie/edge \
+  --no-first-run --no-default-browser-check about:blank &
+
+# 3) 跑（会自己塞一个 ui-e2e 插件进来）
+UI_BASE=http://127.0.0.1:8797 CDP=http://127.0.0.1:9333 node scripts/ui-e2e.mjs
+```
+
+覆盖 15 条，都是「点了之后两边要对得上」：
+
+| 动作 | 断言 |
+|---|---|
+| 点「暂停」 | 后端 `enabled=false` **且**界面状态列显示「已暂停」 |
+| 点「恢复」 | 后端 `enabled=true` |
+| 点「改计划」→ 填 `@every 15m` → 保存 | 弹窗打开过、后端 `cron` 变了、弹窗关了 |
+| 点「执行」 | `/api/runs` 总数 +1 |
+| 插件页点「重载」 | 有按钮、点完 toast 出现「已重载」 |
+
+它抓到的真实问题（第 49 轮）：**点「暂停」后后端变了、界面状态列没变** ——
+纯 API 测试和静态断言都发现不了这一条。
+
+实测：`ok: 15 条界面端到端全过`（Edge 157，headless，调试端口 9333）。
