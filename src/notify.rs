@@ -634,7 +634,6 @@ async fn attempt(ch: &Channel, row: &Row) -> Result<(), String> {
 }
 
 /// 投递一行：成功置 done=1；失败按退避排下一次，超次数或渠道没了置 done=2。
-/// 投递一行：成功置 done=1；失败按退避排下一次，超次数或渠道没了置 done=2。
 async fn deliver(db: &Db, log: &LogHub, row: Row, ch: Option<&Channel>) {
     let (ok, errmsg) = match ch {
         None => (
