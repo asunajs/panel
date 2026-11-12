@@ -11,7 +11,7 @@
 | 仪表盘（运行时长/任务数/最近活动） | ✅ | ✅ | 指标分「引擎 / 任务与预算」两组，见 [ui.md](ui.md) §1 |
 | 任务：cron、预算、熔断、手动执行、暂停/恢复 | ✅ | ✅ | 调度器是插件表/任务表的唯一所有者 |
 | 运行记录 + 日志（SSE 实时 + 历史回填） | ✅ | ✅ | 日志 500 条环形缓冲，级别段控 + 搜索高亮 |
-| 插件启停 / 重载 / 停止 | ✅ | ✅ | 命令通道串行，Unload 一定先于 Load |
+| 插件启停 / 重载 / 停止 | ✅ | ✅ | 命令通道串行，Unload 一定先于 Load。三个动作不是一回事：`unload` 卸掉（文件留着）、`disable` 卸载 + 落库（重启不再加载）、`stop` 只中断**正在跑**的那次 invocation（没在跑就 400「当前没有在跑的任务」） |
 | 插件源码查看 + 编辑 + 保存并重载 | ✅（source / source/restore） | ✅ | 保存 = 写盘 → 重载；重载失败**自动回滚文件**并把旧版本装回去 |
 | 新建插件（模板起步） | ✅（upload） | ✅ | 界面填名字，后端写模板文件并加载 |
 | 删除插件 | ✅（delete 文件） | ✅ | 移进 `data/trash/`，不是直接删 —— 误点可捞 |
@@ -19,7 +19,7 @@
 | **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。新标签打开，不做 iframe。契约见 [plugin-webui.md](plugin-webui.md) |
 | 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = 独立 `.js`，排程在记录里（不在代码里）；每次运行新建 Context，日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
 | 配置 UI 化（读 + 写 + 校验） | ✅（settings/save，需重启） | ✅ | 4 MiB 上限、必须是 JSON 对象、0600 原子写；**保存即生效**（热快照），旧面板要重启 |
-| 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 数据 |
+| 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 通知 / 数据（通知页是第 13 轮加的） |
 | 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（webhook / SMTP，见 [notify.md](notify.md)） |
 | 备份 / 恢复 | ✅ `/api/restore*` | ✅ | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
 | 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel-llrt service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
@@ -79,7 +79,7 @@
 | 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
 | 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；我们没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
 | 时区（`tz.rs`） | 本地时（chrono `Local`） |
-| 面板版本 / 自更新（`panelversion.rs`） | 只有 `CARGO_PKG_VERSION` |
+| 面板版本 / 自更新（`panelversion.rs`） | 版本有了（`panel.version()` / `atLeast()`，见 §2.2）；**自更新没有**，也不打算做 |
 | 任务目录（`taskdir.rs`，`tasks/*.json`） | 任务在 DB |
 | 懒加载（`docs/lazy-plugins.md`） | 启动即全加载 |
 
@@ -87,8 +87,8 @@
 
 | 插件 | 还缺什么 |
 |---|---|
-| `mcloud` | 已跑（阶段 A/B 完成）；只差 `ws_*` + native TLS（直播那半） |
-| `cmread` / `mgmusic` / `yangshipin` | 只用 `node:fs` + `setTimeout` + `register_nav` —— 前两个我们有，nav 忽略；**纯 JS 插件，用 esbuild alias 换 host-api 就能打** |
+| `mcloud` | 阶段 A/B 跑过真读数；`ws_*` 与 native TLS **都已补上**（见 §2.2），直播那半剩下的只是**真跑一次**（要开播，得用户点头） |
+| `cmread` / `mgmusic` / `yangshipin` | ❓ **没验过**：从源码看只用 `node:fs` + `setTimeout` + `register_nav`（前两个我们有、nav 忽略），理论上换 host-api 就能打。真要迁就先打一个 `quark` 试水 |
 | `quark` | 只用 host-api 的 fetch/sqlite，最容易 |
 
 ## 3. 明确不做的
@@ -104,3 +104,54 @@
 2. **保存 = 先写盘再重载，失败回滚**：反过来会得到「内存跑新代码、磁盘是旧代码」，下次重启行为突变。
 3. **界面上能改的东西，后端必须先校验**：配置必须是对象、名字必须过 `safe_name`、源码有 512 KiB 上限 —— 前端校验只是体验，不是边界。
 4. **通知是旁路，不是依赖**：失败/熔断照发通知，但 webhook 挂了不能让任务失败，也不能拖慢插件。
+
+## 5. 复核记录（2026-11-12，第 14 轮）
+
+上一轮把最后一条「部分」补完（通知渠道）之后，这一轮反过来做一件事：**逐条查那些 ✅ 是不是
+真做到了「够用」**，而不是「有个接口」。方法是拿一个空数据目录起面板（8793），用 curl 打真接口
+读真返回，再对着旧面板的源码看语义。
+
+### 5.1 查出来的四件事（都已改掉）
+
+| 原来写的 | 实际 | 怎么发现的 |
+|---|---|---|
+| 设置页 tabs = 常规 / 配置 / 安全 / 数据 | 第 13 轮加了「通知」，现在是 **5 个** | `grep data-tab web/index.html` |
+| 工程层「面板版本：只有 `CARGO_PKG_VERSION`」 | `panel.version()` / `atLeast()` 早就有了（§2.2 自己也写着 ✅） | 同一篇里两处自相矛盾 |
+| 「`mcloud` 只差 `ws_*` + native TLS」 | 这两样 11-12 都补上了（§2.2 两行 ✅），剩下的是**真跑一次** | 同上，同一篇里对不上 |
+| 「cmread / mgmusic / yangshipin 换 host-api 就能打」 | 没验过，是**推测** | 措辞把推测写成了结论 |
+
+### 5.2 顺手补上精确语义（原来写得太粗）
+
+`unload` / `disable` / `stop` 三个动作不是一回事，原来只写「启停 / 重载 / 停止」：
+
+```text
+POST /api/plugins/{n}/unload   → 200  卸掉（文件留着）
+POST /api/plugins/{n}/disable  → 200  {"enabled":false} 卸载 + 落库，重启不再加载
+POST /api/plugins/{n}/stop     → 400  「scratch2 当前没有在跑的任务」（只中断正在跑的那次）
+```
+
+### 5.3 这一轮的真读数（空目录 + curl）
+
+```text
+POST /api/plugins {"name":"scratch1"}     200 {"bytes":378,"ok":true}，文件出现、loaded:true
+GET  /api/plugins/files                   列出 name/bytes/loaded/webui/modified_ms
+GET  /api/plugins/scratch1/source         378 字节原文 + has_backup:false
+PUT  源码 = "this is not js ((("           400「保存失败，已回滚：expecting ';'」
+                                          文件仍是 378 字节，旁边多一个 scratch1.js.bak
+PUT  合法源码                              200 {"reloaded":true}
+POST .../disable                          200，/api/state 里立刻消失，plugins 表留一行
+POST .../enable                           200，/api/state 里回来
+DELETE /api/plugins/scratch1              200，文件进 trash/scratch1-1794453885698.js
+panel-llrt service print                  打出 launchd plist（Label dev.panel-llrt）
+
+POST /api/scripts {"name":"s1",...}       200，返回 budget_ms/cron/enabled
+POST /api/scripts/s1/run                  200 {"run_id":1}
+GET  /api/scripts                         之后 last_run=1794453951804 / last_status="ok"
+GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
+```
+
+### 5.4 复核结论
+
+- §1 那 15 行「已经能用的」逐条对过，**没有虚报**：每条都能指到一个真接口或一段真代码。
+- 有虚报风险的是**措辞**（「就能打」这种），已经降级成 ❓ + 测法。
+- 仍然 ❌ 的两条（任务软删、市场/自更新）和 ❌ 的外部进程插件，都是**判断不该做**，理由各有记录。

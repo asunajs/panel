@@ -98,11 +98,11 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
 ### 兑换（mcloud-exchange）
 
 - 它能加载、注册任务、路由可用，**代码路径不依赖 WebSocket**；
-- 但它要的是**毫秒级时序**（`lead_ms`、`target_hour`、`schedule.until`），旧面板为此专门做过
-  `lead_ms` 提前触发与 `lateMs` 记录。新面板的调度器是秒级 tick，没有 `lead_ms`；
+- 但它要的是**毫秒级时序**（`lead_ms`、`target_hour`、`schedule.until`）。新面板已经有
+  `lead_ms`（注册期给，调度器提前唤醒，事件带 `early`；见 host-api.md §注册任务）；
 - 更关键的是：跑一次兑换是**真花钱**的动作，不该由我在没人看着的时候触发。
 
-⇒ 结论：**可以迁，但要么先补 `lead_ms`（调度器提前唤醒），要么接受精度退化**。要跑得你点头。
+⇒ 结论（2026-11-12 更新）：`lead_ms` 已补，**可以迁**；但跑一次兑换是真花钱的动作，要跑得用户点头。
 
 ### 直播（mcloud-live）—— 2026-11-12 解除阻塞
 
