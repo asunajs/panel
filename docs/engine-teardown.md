@@ -1,6 +1,6 @@
-# 插件退出时的定时器：一个还没修的坑
+# 插件退出时的定时器（已修：vendor 补丁 + 加载期闸门）
 
-这一篇记的是**已知未修**的问题，不是设计文档。2026-11-12 第 17 轮查出来的，
+这一篇记一个**查出来、也修掉了**的问题（第 17 轮发现，第 18/19 轮处理）。2026-11-12 查出来的，
 起因只是想给「运行记录」写一条带耗时的测试。
 
 ## 1. 现象（三组探针，都能复跑）
@@ -60,7 +60,7 @@ setTimeout(100)       200  {"ok":true}，出现在 /api/state 里
 | 做法 | 好处 | 代价 |
 |---|---|---|
 | (a) BOOTSTRAP 里包一层 setTimeout/clearTimeout 记账，卸载前全清 | 不动 vendor | **试过，不行**：定时器还在时 `ctx.with` 本身就进不去，清不掉 |
-| (b) 给 vendored `llrt_timers` 打补丁：`get_timer_state` 返回 `Option`（拿不到就让循环退出）+ 加 `pub fn forget_runtime(rt)`，卸载前调 | 治本，三个症状一起消 | 动 vendor 树，要记补丁 |
+| (b) 给 vendored `llrt_timers` 打补丁：`get_timer_state` 返回 `Option`（拿不到就让循环退出）+ 加 `forget_runtime`，卸载前调 | **已做（第 19 轮）**：`Plugin::drop` 里摘状态，析构不再等、不再 abort | 动 vendor 树，升级时要重打（§6） |
 | (c) 加载期拒掉 `setInterval` + 给 `setTimeout` 设上限 | **已做**（§3）：卡死变 400 | 不是治本；短定时器在卸载时的竞态还在 |
 | (d) 卸载丢到独立线程里析构，超时就放弃（泄漏） | 进程不死 | 泄漏，且只是把问题藏起来 |
 
@@ -74,3 +74,33 @@ setTimeout(100)       200  {"ok":true}，出现在 /api/state 里
 timeout 40 cargo test --offline probe_interval_only_load -- --ignored --nocapture
 timeout 90 cargo test --offline probe_long_timeout_load_and_drop -- --ignored --nocapture
 ```
+
+## 6. 对 vendor 的改动（升级 llrt 时要重打）
+
+只有一处，在 `vendor/llrt/modules/llrt_timers/src/lib.rs`：
+
+| 改动 | 为什么 |
+|---|---|
+| `get_timer_state()` 从 `&mut RuntimeTimerState` 改成 `Option<&mut _>`（原来 `unwrap_unchecked`） | 运行时被忘掉之后，循环任务不该再拿裸指针去查表（那是 UB） |
+| 四个调用点按 `Option` 处理：`set_timeout_interval` 报错、`clear_timeout_interval` 空转、`poll_timers` 两处 `return Ok(false)` | 状态没了 = 这个运行时没有定时器了，循环自己退出 |
+| 新增 `pub fn forget_runtime(rt)`：摘掉该 runtime 的整条状态（顺带释放 `Persistent<Function>`）并 `notify_one` 叫醒循环 | 卸载路径的唯一入口 |
+| 新增 `pub fn runtime_ptr(ctx)` / `pub fn forget_runtime_ptr(rt: usize)` | 宿主（`src/engine.rs`）不需要 `unsafe`，也不认识 qjs 类型 —— 我们的 unsafe 预算仍然是 0 处 |
+
+宿主侧接线（`src/engine.rs`）：`Plugin` 多存一个 `rt_raw: usize`（构造时 `runtime_ptr` 取），
+`impl Drop for Plugin` 第一句 `forget_runtime_ptr(self.rt_raw)`。Drop 体在字段析构**之前**跑，
+所以那时 rt 还活着，`Persistent` 能被正常释放。
+
+验收（第 19 轮读数）
+
+```text
+单元：handler await 30ms 定时器后 drop        0ms，不再 SIGABRT
+      handler 留一个 1500ms 未触发定时器后 drop  2ms（修前要等它烧完）
+面板：插件留未触发定时器，reload + run 连做 5 轮  全部 200，state 200，日志无 panic/assert
+cargo test 216 passed
+```
+
+**升级 llrt 时**：重打这四个改动，然后跑 `cargo test --offline dropping_a_plugin_with_live_timers`
+和 `timers_are_gated_at_load`；两条都过就说明补丁还在。
+
+注意：`setInterval` 的闸门（§3）**不撤**。它卡的是 `eval_module` 本身（模块顶层调用 setInterval，
+模块 promise 永不 settle），跟退出路径是两件事，补丁治不了。

@@ -242,7 +242,24 @@ pub struct Plugin {
     // 但它是正确顺序，留着。
     ctx: AsyncContext,
     rt: AsyncRuntime,
+    /// 运行时的裸指针（`usize`，不是引用）：Drop 里要拿它把定时器状态摘掉。
+    /// 存成整数是因为 `Plugin` 要 `Send`，而 `*mut` 裸指针不是。
+    rt_raw: usize,
     inv: Arc<Invocation>,
+}
+
+impl Drop for Plugin {
+    /// 释放前先把这个运行时的定时器状态摘掉（见 docs/engine-teardown.md）。
+    ///
+    /// 顺序很重要：Drop 体在字段析构**之前**跑，所以此时 rt 还活着，
+    /// 摘掉状态能把挂着的 `Persistent<Function>` 正常释放；等字段析构时，
+    /// 定时器循环任务已经拿到「状态没了」的结论，会自己退出。
+    ///
+    /// 不做这一步会连撞三件事：析构等循环任务（`setInterval` 永远等不到）、
+    /// `JS_FreeRuntime` 断言 abort、循环任务踩已释放的 rt 指针。
+    fn drop(&mut self) {
+        llrt_timers::forget_runtime_ptr(self.rt_raw);
+    }
 }
 
 impl Plugin {
@@ -331,7 +348,13 @@ impl Plugin {
             .await;
         }
 
-        let plugin = Self { rt, ctx, inv };
+        let rt_raw = ctx.with(|ctx| llrt_timers::runtime_ptr(&ctx)).await;
+        let plugin = Self {
+            rt,
+            ctx,
+            rt_raw,
+            inv,
+        };
         plugin.eval_module(source).await?;
         Ok(plugin)
     }

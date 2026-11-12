@@ -41,6 +41,9 @@ Rust 宿主（axum + rusqlite + tokio）**进程内嵌 `llrt_core`**。没有外
 ❓ 要不要自己补一个 —— 测法：先查真实插件里有没有用到，再决定是补 native 还是让插件用
 `JSON.parse(JSON.stringify())`。**不预先造垫片。**
 
+> ⚠ 我们对 `vendor/llrt` 有**一处**改动（`llrt_timers` 的定时器退出路径），升级 llrt 时要重打：
+> 见 [engine-teardown.md §6](engine-teardown.md)。
+
 ### 1.2 vendored 而非 git dep（已定，偏离原计划）
 
 原计划写的是 `git = "https://github.com/awslabs/llrt", tag = "v0.10.0-beta"`。

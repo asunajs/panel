@@ -20,6 +20,10 @@ llrt_core = { path = "vendor/llrt/llrt_core", default-features = false, features
 # 加为直接依赖不增加编译单元，但让 derive 宏能按名字找到它 —— 否则
 # JsLifetime / FromJs 的 derive 会报 "could not find rquickjs package"。
 # feature 必须与 llrt_core/Cargo.toml:62-66 一致，否则会被拆成两份。
+# 面板补丁要用（docs/engine-teardown.md）：卸载插件前摘掉定时器状态。
+# 同一个 path 依赖，和 llrt_core 内部用的是同一份。
+llrt_timers = { path = "vendor/llrt/modules/llrt_timers" }
+
 rquickjs = { version = "0.14", default-features = false, features = [
   "futures",
   "parallel",

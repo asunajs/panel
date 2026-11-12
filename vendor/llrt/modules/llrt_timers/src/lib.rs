@@ -136,7 +136,9 @@ pub fn set_timeout_interval<'js>(
     let rt_ptr = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
 
     let mut rt_timer = RT_TIMER_STATE.lock().unwrap();
-    let state = get_timer_state(&mut rt_timer, rt_ptr);
+    let Some(state) = get_timer_state(&mut rt_timer, rt_ptr) else {
+        return Err(Exception::throw_message(ctx, "定时器已停用（运行时正在退出）"));
+    };
     state.timers.push(timeout);
     let task_running = state.running;
     if task_running {
@@ -157,11 +159,11 @@ pub fn set_timeout_interval<'js>(
 fn get_timer_state<'a>(
     state_ref: &'a mut MutexGuard<Vec<RuntimeTimerState>>,
     rt: *mut qjs::JSRuntime,
-) -> &'a mut RuntimeTimerState {
-    let rt_timers = state_ref.iter_mut().find(|state| state.rt == rt);
-
-    //save a branch
-    unsafe { rt_timers.unwrap_unchecked() }
+) -> Option<&'a mut RuntimeTimerState> {
+    // 面板补丁（见 docs/engine-teardown.md）：原来是 unwrap_unchecked ——
+    // 运行时释放后状态还在表里时，循环任务会踩到一个已释放的 rt 指针。
+    // 改成 Option：状态没了就当这个运行时已经没有定时器，循环自己退出。
+    state_ref.iter_mut().find(|state| state.rt == rt)
 }
 
 fn clear_timeout_interval(ctx: Ctx<'_>, id: Opt<Value>) -> Result<()> {
@@ -170,7 +172,9 @@ fn clear_timeout_interval(ctx: Ctx<'_>, id: Opt<Value>) -> Result<()> {
         let rt = unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
         let mut rt_timers = RT_TIMER_STATE.lock().unwrap();
 
-        let state = get_timer_state(&mut rt_timers, rt);
+        let Some(state) = get_timer_state(&mut rt_timers, rt) else {
+            return Ok(());
+        };
         if let Some(timeout) = state.timers.iter_mut().find(|t| t.id == id) {
             let _ = timeout.callback.take();
             timeout.repeating = false;
@@ -225,6 +229,36 @@ impl From<TimersModule> for ModuleInfo<TimersModule> {
             name: "timers",
             module: val,
         }
+    }
+}
+
+/// 面板补丁：某个 runtime 要销毁之前调用。
+///
+/// 把它的定时器状态整条摘掉 —— `timers` 里的 `Persistent<Function>` 随之释放 ——
+/// 并唤醒循环任务：它下一次 `poll_timers` 发现状态没了就自己退出。
+///
+/// 不摘的话会连撞三件事（docs/engine-teardown.md 有探针）：
+/// 1. 析构 `AsyncContext` 要等循环任务结束，`setInterval` 永远等不到；
+/// 2. 等不到时 `Persistent` 还挂在静态表里，`JS_FreeRuntime` 断言 abort；
+/// 3. 等到了，循环任务下一次 poll 会碰一个已释放的 rt 指针。
+/// 面板补丁：拿运行时的裸指针（存成 usize，便于宿主在 Drop 里带着走）。
+/// 宿主侧不需要 unsafe，也不需要认识 qjs 的类型。
+pub fn runtime_ptr(ctx: &Ctx<'_>) -> usize {
+    unsafe { qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) as usize }
+}
+
+/// 面板补丁：按裸指针（usize 形式）摘掉定时器状态。
+pub fn forget_runtime_ptr(rt: usize) {
+    forget_runtime(rt as *mut qjs::JSRuntime)
+}
+
+pub fn forget_runtime(rt: *mut qjs::JSRuntime) {
+    let mut state = RT_TIMER_STATE.lock().unwrap();
+    if let Some(pos) = state.iter().position(|s| s.rt == rt) {
+        let gone = state.remove(pos);
+        // notify_one 而不是 notify_waiters：留一个 permit，循环哪怕正在两次 poll 之间也能被叫醒。
+        gone.notify.notify_one();
+        drop(gone);
     }
 }
 
@@ -312,7 +346,10 @@ pub fn poll_timers(
     static FAR_FUTURE: Duration = Duration::from_secs(84200 * 365 * 30);
 
     let mut rt_timers = RT_TIMER_STATE.lock().unwrap();
-    let state = get_timer_state(&mut rt_timers, rt);
+    let Some(state) = get_timer_state(&mut rt_timers, rt) else {
+        // 运行时已经忘掉了（卸载中）—— 循环任务到此结束。
+        return Ok(false);
+    };
     let now = Instant::now();
 
     let mut had_items = false;
@@ -388,7 +425,9 @@ pub fn poll_timers(
 
     if !has_items {
         let mut rt_timers = RT_TIMER_STATE.lock().unwrap();
-        let state = get_timer_state(&mut rt_timers, rt);
+        let Some(state) = get_timer_state(&mut rt_timers, rt) else {
+            return Ok(false);
+        };
         let is_empty = state.timers.is_empty();
         state.running = !is_empty;
 

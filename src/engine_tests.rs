@@ -276,3 +276,25 @@ async fn timers_are_gated_at_load() {
     let p = ok(src).await;
     assert!(p.dispatch("go", &json!({}), 5_000).await.is_ok(), "短定时器应当正常跑");
 }
+
+/// 卸载清理：handler 用过定时器、甚至留了个没触发的，析构也必须是干净且快的。
+///
+/// 修之前这两个场景一个会等定时器烧完、一个会在 `JS_FreeRuntime` 里 assert abort。
+/// 修法在 vendored `llrt_timers`：`Plugin::drop` 先 `forget_runtime` 把状态摘掉。
+#[tokio::test]
+async fn dropping_a_plugin_with_live_timers_is_clean() {
+    // 场景 1：handler 里 await 一个 30ms 的 setTimeout（这条以前会 SIGABRT）
+    let src = "import host from 'panel:host';\nawait host.register_handler('go', async () => { await new Promise(r => setTimeout(() => r(1), 30)); return 1; });";
+    let p = ok(src).await;
+    assert!(p.dispatch("go", &json!({}), 5_000).await.is_ok());
+    drop(p);
+
+    // 场景 2：handler 里留一个 3 秒没触发的定时器就退出（这条以前要等 3 秒）
+    let src = "import host from 'panel:host';\nawait host.register_handler('go', async () => { setTimeout(() => {}, 1500); return 1; });";
+    let p = ok(src).await;
+    assert!(p.dispatch("go", &json!({}), 5_000).await.is_ok());
+    let t0 = std::time::Instant::now();
+    drop(p);
+    let ms = t0.elapsed().as_millis();
+    assert!(ms < 500, "卸载等了 {ms}ms —— 定时器状态没摘掉");
+}
