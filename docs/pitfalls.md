@@ -143,3 +143,9 @@
     带库的备份走 `VACUUM INTO` 快照（**不能** `cp panel.db`：WAL 里缺的提交会丢），
     恢复时换库要**在打开 DB 之前**、并清掉旧 `-wal`/`-shm`；HTTP 恢复带库的备份直接 400。
     干净机器上恢复不带库的备份会建空库并明说。见 `docs/backup.md`。
+
+38. **任务到点却被跳过时不能静默**：`fire_due` 的筛选条件排除了 `in_flight` 和「插件忙」的任务，
+    于是那些拍被**无声**丢掉。实测 12 个 `@every 5s` 挤 8 个 JS 名额，4 个任务 26 秒只跑了 3 次
+    （本该 5 次），日志里一条 warn 都没有 —— 用户只看到「有的整点任务没跑」。
+    现在先扫一遍「已过点但派发不了」，按任务 60 秒节流报「任务 X 落后：N 拍该跑没跑（原因）」。
+    守卫：`scheduler_tests.rs::behind_is_noted_at_once_then_at_most_every_minute`。

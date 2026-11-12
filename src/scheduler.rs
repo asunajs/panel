@@ -86,6 +86,17 @@ fn saved_lead(lead_override: bool, lead_ms: u64) -> Option<u64> {
     lead_override.then_some(lead_ms)
 }
 
+/// 「落后」告警要不要现在说：第一次一定说，之后每个任务最多 60 秒一次。
+///
+/// 为什么要节流：调度循环每秒都在看，一个被拖住的任务会连续几十圈都「已过点但跑不了」，
+/// 不节流就变成刷屏，反而没人看。60 秒一行、行里带累计次数，够定位问题。
+fn should_note_behind(noted: Option<DateTime<Local>>, now: DateTime<Local>) -> bool {
+    match noted {
+        None => true,
+        Some(t) => (now - t).num_seconds() >= 60,
+    }
+}
+
 /// 实际触发时刻 = 计划时刻 - 提前量（lead_ms）。0 就是准点。
 fn trigger_at(t: &Task) -> DateTime<Local> {
     t.next_fire - ChronoDuration::milliseconds(t.lead_ms.min(LEAD_MAX_MS) as i64)
@@ -127,6 +138,14 @@ struct Task {
     tripped: bool,
     trips: u32,
     in_flight: bool,
+    /// 「计划已过点，但这一拍没能派发」累计了几次（上一拍还没跑完 / 插件还忙）。
+    ///
+    /// 以前这些拍是**静默**丢掉的：12 个 `@every 5s` 的任务挤 8 个 JS 名额时，
+    /// 实测有 4 个只跑了 3 次（本该 5 次），日志里一条 warn 都没有 —— 用户只会看到
+    /// 「有的整点任务没跑」。这两个字段负责把它说出来（按任务 60 秒节流，见 `note_behind`）。
+    behind: u32,
+    /// 上一次「落后」告警的时间（用来节流，别每个调度循环都刷一行）。
+    behind_noted: Option<DateTime<Local>>,
     runs: u64,
     last_run: Option<i64>,
     last_error: Option<String>,
@@ -172,6 +191,8 @@ impl Task {
             tripped: false,
             trips: 0,
             in_flight: false,
+            behind: 0,
+            behind_noted: None,
             runs: 0,
             last_run: None,
             last_error: None,
@@ -201,6 +222,8 @@ impl Task {
             tripped: false,
             trips: 0,
             in_flight: false,
+            behind: 0,
+            behind_noted: None,
             runs: 0,
             last_run: None,
             last_error: None,
@@ -1321,6 +1344,48 @@ impl Inner {
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {
+        // 先记「该跑却跑不了」：计划已过点，但上一拍还没收尾（`in_flight`）或插件还在忙。
+        // 这些拍会被跳过 —— 必须说出来，否则用户只会看到「有的整点任务没跑」，无从下手。
+        for i in 0..self.tasks.len() {
+            let t = &self.tasks[i];
+            if !t.enabled || t.schedule.is_none() || trigger_at(t) > now {
+                continue;
+            }
+            let busy = self
+                .plugins
+                .get(&t.plugin)
+                .map(|l| l.busy)
+                .unwrap_or(true);
+            if !t.in_flight && !busy {
+                continue; // 正常到点，下面按 due 处理
+            }
+            self.tasks[i].behind = self.tasks[i].behind.saturating_add(1);
+            let (p, n, cnt, inflight) = (
+                self.tasks[i].plugin.clone(),
+                self.tasks[i].name.clone(),
+                self.tasks[i].behind,
+                self.tasks[i].in_flight,
+            );
+            if should_note_behind(self.tasks[i].behind_noted, now) {
+                self.tasks[i].behind_noted = Some(now);
+                self.tasks[i].behind = 0;
+                let why = if inflight {
+                    "上一拍还没跑完"
+                } else {
+                    "插件还在处理别的调用"
+                };
+                self.log.emit(
+                    &p,
+                    None,
+                    Level::Warn,
+                    format!(
+                        "任务 {n} 落后：{cnt} 拍该跑没跑（{why}；同时最多 {} 段 JS，任务同时到点时就会排队）",
+                        crate::jsslots::limit()
+                    ),
+                );
+            }
+        }
+
         let due: Vec<usize> = self
             .tasks
             .iter()

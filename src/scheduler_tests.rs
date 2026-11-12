@@ -255,3 +255,38 @@ fn only_a_panel_set_lead_is_persisted() {
     assert_eq!(saved_lead(true, 2000), Some(2000));
     assert_eq!(saved_lead(true, 0), Some(0), "面板明确改成 0 也要留住");
 }
+
+// ---------------------------------------------------------------- 落后（该跑没跑）
+//
+// 12 个 `@every 5s` 挤 8 个 JS 名额：实测 4 个只跑了 3 次（本该 5 次），以前**一条 warn 都没有**。
+// 用户看到的是「有的整点任务没跑」，无从下手。现在按任务 60 秒节流地报出来。
+
+#[test]
+fn behind_is_noted_at_once_then_at_most_every_minute() {
+    let now = Local::now();
+    assert!(should_note_behind(None, now), "第一次一定说");
+    assert!(
+        !should_note_behind(Some(now - ChronoDuration::seconds(30)), now),
+        "30 秒内不重复刷屏"
+    );
+    assert!(should_note_behind(Some(now - ChronoDuration::seconds(61)), now));
+    assert!(should_note_behind(Some(now - ChronoDuration::seconds(600)), now));
+}
+
+/// 落后计数的含义：`behind` 是「这一轮里攒了几拍」，报完清零、到 60 秒再报。
+#[test]
+fn behind_counter_accumulates_until_reported() {
+    let now = Local::now();
+    let mut t = task("@every 5s");
+    t.next_fire = now - ChronoDuration::seconds(10); // 已经过点
+    t.in_flight = true;
+
+    assert_eq!(t.behind, 0);
+    t.behind += 1;
+    t.behind += 1;
+    assert_eq!(t.behind, 2, "两拍没跑成就是 2");
+    assert!(should_note_behind(t.behind_noted, now));
+    t.behind_noted = Some(now);
+    t.behind = 0;
+    assert!(!should_note_behind(t.behind_noted, now), "刚报过就不再报");
+}
