@@ -254,8 +254,9 @@
 console.log(await import('node:crypto').then(m => typeof m.createHash));</textarea>
                   <div class="actions">
                     <button class="btn btn-primary btn-sm" id="test-run" type="button">运行</button>
-                    <label class="muted">预算
-                      <input id="test-budget" type="number" min="100" max="10000" step="100" value="2000" style="width:88px" /> ms
+                    <label class="field-inline"><span>预算</span>
+                      <input id="test-budget" type="number" min="100" max="10000" step="100" value="2000" />
+                      <span class="unit">ms</span>
                     </label>
                     <span class="muted" id="test-meta">—</span>
                   </div>

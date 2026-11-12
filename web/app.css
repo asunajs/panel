@@ -639,6 +639,8 @@ button, input, select { font: inherit; color: inherit; }
 .field-inline input:focus { border-color: var(--accent); }
 .field-inline .unit { color: var(--dim); }
 .script-bar .btn { margin-left: auto; }
+/* 试跑那一排：预算框走同一套控件变量，别让它掉回 UA 样式（白底 2px 灰边） */
+#test-card .actions .field-inline input[type="number"] { width: 72px; }
 
 
 .settings-sub { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--fg); }

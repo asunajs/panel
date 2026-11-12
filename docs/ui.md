@@ -151,10 +151,17 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 | 清空按钮 | `.search-clear`，同时关掉 `::-webkit-search-cancel-button` | `type=search` 自带的 ✕ 各家长得不一样 |
 | 确认 / 弹窗 / 抽屉 | `.modal` / `.drawer` | `confirm()` / `alert()` 阻塞主线程、不能样式化、某些嵌入环境直接禁用 |
 | 段控 | `.seg` + `aria-pressed` | 少数几个选项时，下拉不如平铺一眼看全 |
+| 输入框 | `.field-inline` / `.field` 里的 `input`（高度取 `--h-control-sm`） | **裸 `input` 会掉回 UA 样式**：白底、2px 灰边、0 圆角，深色主题下像外来的 |
 
 尺寸只有一个来源：`--h-control: 32px`、`--h-control-sm: 28px`、`--r-control: 9px`、
 `--pad-control: 12px`。按钮 / 图标按钮 / 输入框 / 下拉 / 段控都从这几个变量取，
 **不许写死 px** —— 否则并排就会出现 1~2px 的高低差，看起来像没对齐。
+
+**页面里不许出现没有样式的裸 `input`**：漏一个容器 class 就会冒出一个白底 2px 灰边的系统控件。
+第 24 轮用户抓到的就是「引擎试跑」卡片那个预算框 —— 它当时是 `<label class="muted"><input ...>`，
+一个 class 都没挂，计算样式是 `25.375px` / `rgb(255,255,255)` / `0px` / `border 2px rgb(118,118,118)`，
+跟旁边 `#script-budget` 的 `28px` / 圆角 `8px` 完全两回事。修法是换成 `.field-inline` + `span.unit`。
+`ui-check.mjs` 有一条断言扫这件事（白底 + 0 圆角 / 2px 灰边即判红），另有一条断言防止它扫到 0 个控件还绿。
 
 下拉菜单必须挂到 `body` 再 `position: fixed` 定位：`.panel` 是 `overflow: hidden`，
 菜单留在原地会被裁掉；同一时刻只允许开一个（`openDropdown` 全局引用）。
@@ -244,7 +251,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 21 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 23 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
@@ -266,6 +273,8 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 | 任务表里有 seed/tick | 插件注册的 cron 任务真的出现在表里 |
 | 能点「暂停」→ 状态变已暂停 | 任务操作打的是真接口，回来后重渲染 |
 | 插件页有 seed 卡片 | 插件网格按 `/api/state` 渲染 |
+| 没有掉回系统样式的控件 | 五个设置页签里的每个 input/select/textarea：白底 + 0 圆角 / 2px 灰边即红 |
+| 扫到的控件够多（防假绿） | 扫到 0 个也绿就没意义，所以另加一条计数断言 |
 | 没有 JS 报错 | 收集 `Runtime.exceptionThrown` 与 `console.error` |
 | 窄屏没有横向溢出 | `Emulation.setDeviceMetricsOverride` 到 390×844 后 `scrollWidth - innerWidth <= 1` |
 | 窄屏表头隐藏（卡片模式） | `thead.offsetHeight === 0` |

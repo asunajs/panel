@@ -248,6 +248,29 @@ async function main() {
   await sleep(1200);
   const hasCard = await js("document.querySelector('#plugin-grid').innerText.includes('seed')");
   check('插件页有 seed 卡片', hasCard === true);
+  // 控件不许掉回系统样式（§7「一律自绘」）。UA 默认的三件套：白底 / 0 圆角 / 2px 灰边。
+  // 第 24 轮用户抓到的试跑「预算」框就是漏了 class —— 裸 input 在深色主题下白底刺眼。
+  // 先回到设置页：上面几段会跳到任务/插件页，视图隐藏时 input 的 rect 是 0，会被漏掉。
+  await js("location.hash = '#settings'");
+  await sleep(900);
+  const uaStyled = [];
+  let scanned = 0;
+  for (const tab of ['general', 'config', 'security', 'notify', 'data']) {
+    await js("document.querySelector('[data-tab=" + tab + "]').click()");
+    await sleep(500);
+    const found = JSON.parse(await js(
+      "JSON.stringify([...document.querySelectorAll('input, select, textarea')]" +
+      ".filter(e => { const r = e.getBoundingClientRect(); if (!r.width || !r.height) return false;" +
+      " const s = getComputedStyle(e);" +
+      " return (s.backgroundColor === 'rgb(255, 255, 255)' && s.borderRadius === '0px')" +
+      "   || s.borderTopColor === 'rgb(118, 118, 118)'; })" +
+      ".map(e => e.id || e.className || e.type))"));
+    const total = JSON.parse(await js("JSON.stringify([...document.querySelectorAll('input, select, textarea')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length)"));
+    scanned += total;
+    for (const f of found) uaStyled.push(tab + ':' + f);
+  }
+  check('设置页扫到的控件够多（防假绿）', scanned >= 3, '只扫到 ' + scanned + ' 个');
+  check('没有掉回系统样式的控件', uaStyled.length === 0, JSON.stringify(uaStyled));
   // 窄屏（手机）：表格要折成「标签 + 值」的卡片，且不许横向溢出
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await js("location.hash = '#runs'");
