@@ -149,6 +149,29 @@ globalThis.__dispatch = (name, evtJson) => {
   if (typeof fn !== 'function') throw new Error('没有这个 handler: ' + name);
   return fn(JSON.parse(evtJson));
 };
+// 定时器闸门：JS 定时器会踩「1 插件 1 runtime」的退出路径（docs/engine-teardown.md）。
+//
+// setInterval 直接禁掉：它的循环任务让 eval_module 永不返回（实测 load 卡死），
+// 而且我们没有任何办法在析构前把它清掉。
+// setTimeout 只放行 5 秒以内的：长等待会让卸载等它烧完，短定时器是插件里常见的
+// 防抖/延迟用途，代价可控。
+(() => {
+  const MAX_DELAY = 5000;
+  const st = globalThis.setTimeout;
+  if (typeof st !== 'function') return;
+  globalThis.setInterval = () => {
+    throw new Error('面板里不能用 setInterval：它的循环任务会让插件加载和卸载卡死。' +
+      '周期性的活请用 host.register_cron(名字, 表达式, 预算)，要等请用 await host.sleep(ms)');
+  };
+  globalThis.setTimeout = (fn, ms, ...a) => {
+    const d = Number(ms) || 0;
+    if (d > MAX_DELAY) {
+      throw new Error('面板里 setTimeout 最多 ' + MAX_DELAY + 'ms（这次是 ' + d + 'ms）：' +
+        '长等待会让插件卸载卡住。要等请用 await host.sleep(ms)');
+    }
+    return st(fn, d, ...a);
+  };
+})();
 "#;
 
 /// 把引擎错误变成人能读的一行。

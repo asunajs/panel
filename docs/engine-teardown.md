@@ -16,6 +16,9 @@
 第三组最凶：一个 handler 只要用过 `setTimeout`，插件被卸载/析构时就有机会**把整个进程 abort**。
 前两组是「卡住」，第三组是「崩」。
 
+⚠ 上面三组是**闸门装上之前**的读数，留着当证据；现在 `setInterval` 和超长 `setTimeout`
+在加载期就被拒（见 §3），第一组不再卡住，是立刻 400。
+
 ## 2. 为什么会这样
 
 LLRT 的定时器是**进程级单例**（`llrt_timers` 里 `static RT_TIMER_STATE`），按 `JSRuntime` 裸指针
@@ -30,12 +33,27 @@ LLRT 自己的模型是「一个进程一个 runtime，跑到进程结束」，�
 2. 等不到的时候，`Persistent<Function>` 还挂在静态表里 ⇒ `JS_FreeRuntime` 发现对象没释放完 ⇒ assert abort；
 3. 就算等到了，那个循环任务下一次 `poll_timers` 会碰一个**已经释放的 rt 指针**。
 
-## 3. 现在怎么办（现状：不修，但拦住）
+## 3. 现在怎么办：加载期装闸门（2026-11-12 第 18 轮）
 
-- 现有 7 个插件**没有一个用 `setTimeout` / `setInterval`**（`grep -c` 全 0），所以线上没踩到；
-- 两个探针留成 `#[ignore]`，`cargo test` 默认 214 passed / 2 ignored，CI 不被拖住；
-- 写插件时别用 JS 定时器：要等就用 `host.sleep(ms)`（面板的异步睡眠，不注册定时器），
-  要周期就跑任务（`register_cron`），那是调度器的活。这条要写进插件契约文档。
+治不了根，但把「卡死 / 崩溃」变成「加载期一句人话」。闸门在 `BOOTSTRAP` 里，模块求值**之前**生效：
+
+| 写法 | 现在的结果 |
+|---|---|
+| `setInterval(...)` | 加载失败：`面板里不能用 setInterval：它的循环任务会让插件加载和卸载卡死。周期性的活请用 host.register_cron(名字, 表达式, 预算)，要等请用 await host.sleep(ms)` |
+| `setTimeout(fn, >5000)` | 加载失败：`面板里 setTimeout 最多 5000ms（这次是 90000ms）：长等待会让插件卸载卡住。要等请用 await host.sleep(ms)` |
+| `setTimeout(fn, ≤5000)` | 放行（防抖/延迟是常见用法，代价可控） |
+
+读数（真面板 8792，直接往盘上放文件再 `POST /api/plugins/<n>/reload`）：
+
+```text
+setInterval 插件      400  0.073s  「不能用 setInterval…」（以前是**永不返回**）
+setTimeout(90000)     400         「最多 5000ms（这次是 90000ms）…」
+setTimeout(100)       200  {"ok":true}，出现在 /api/state 里
+面板                 state=200（拒绝之后照样活着）
+```
+
+另外：现有 7 个插件**没有一个**用 `setTimeout` / `setInterval`（`grep -c` 全 0），
+所以这个闸门没削掉任何在跑的能力。
 
 ## 4. 真要修的话，四条路
 
@@ -43,7 +61,7 @@ LLRT 自己的模型是「一个进程一个 runtime，跑到进程结束」，�
 |---|---|---|
 | (a) BOOTSTRAP 里包一层 setTimeout/clearTimeout 记账，卸载前全清 | 不动 vendor | **试过，不行**：定时器还在时 `ctx.with` 本身就进不去，清不掉 |
 | (b) 给 vendored `llrt_timers` 打补丁：`get_timer_state` 返回 `Option`（拿不到就让循环退出）+ 加 `pub fn forget_runtime(rt)`，卸载前调 | 治本，三个症状一起消 | 动 vendor 树，要记补丁 |
-| (c) 加载期直接拒掉 `setInterval`（保留 `setTimeout`） | 最省事 | 削插件能力；`setTimeout` 的卸载卡顿还在 |
+| (c) 加载期拒掉 `setInterval` + 给 `setTimeout` 设上限 | **已做**（§3）：卡死变 400 | 不是治本；短定时器在卸载时的竞态还在 |
 | (d) 卸载丢到独立线程里析构，超时就放弃（泄漏） | 进程不死 | 泄漏，且只是把问题藏起来 |
 
 倾向 (b)：补丁很小（一个 `Option` + 一个函数），而且能同时修掉「卡」和「崩」。

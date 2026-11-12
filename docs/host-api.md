@@ -196,7 +196,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | `fetch` 响应体 | **不设上限**（2026-11-12 起） | 插件是可信代码，正文要多少给多少；`truncated` 字段留着但恒为 false。实测 3 MB 响应 → `len=3000000, truncated=false`（rustls 与 native 两条路都验过） |
 | `fetch` `timeout_ms` | 默认 **10000**，钳到 `[100, 60000]` | 已实现 `clamp_timeout`；实测 500ms 打 4s 慢响应 → 502ms 报超时 |
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
-| 单插件定时器 | 基线 **256 条** | **未实现，而且现在建议根本别用**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完、handler 用过定时器再卸载还可能 assert abort。要等用 `host.sleep(ms)`，要周期用 `register_cron`。详见 [engine-teardown.md](engine-teardown.md) |
+| 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine-teardown.md](engine-teardown.md) |
 | `config` 体积 | **4 MiB**（`PANEL_CONFIG_MAX_BYTES` 可调，下限 4 KiB） | 已实现：`src/config.rs`。超限**拒绝启动**并报出真实字节数，不截断（截断 = 插件看到半个配置）。基线那个 64 KiB 是**任务参数**的上限，不是配置 |
 | 执行预算默认 | 基线 600000ms（10 分钟） | **新版改成 30000ms**（`scheduler.rs` `DEFAULT_BUDGET_MS`）。理由：默认值应当是「短任务够用、写错了早点暴露」，长任务显式声明 `budget_ms` |
 | **新版执行预算上限** | **5400000ms（90 分钟）** | 已实现 `MAX_BUDGET_MS`；单测钉着 20 分钟放行、90 分钟封顶、0 钳到 1 |

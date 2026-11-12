@@ -246,27 +246,33 @@ async fn an_unknown_handler_is_an_error_not_a_hang() {
     assert!(err.contains("没有这个 handler"), "应当报 handler 不存在: {err}");
 }
 
-/// 探针（默认 ignore）：只 setInterval，没有 setTimeout。
+/// 定时器闸门：`setInterval` 在加载期就该被拒（它会让 load 永不返回），
+/// 超长 `setTimeout` 也拒（卸载会等它烧完）。短的 `setTimeout` 放行。
+///
+/// 这三条以前是「会卡住/会崩」的探针，现在是**必须立刻返回**的判据：
+/// 加载期就报错，比事后崩溃好一百倍。
 #[tokio::test]
-#[ignore]
-async fn probe_interval_only_load() {
+async fn timers_are_gated_at_load() {
+    // setInterval：直接拒
     let src = "import host from 'panel:host';\nsetInterval(() => {}, 1000);\nawait host.register_handler('go', async () => 1);";
-    eprintln!("PROBE interval: before load");
+    let t0 = std::time::Instant::now();
     let (p, _rx) = load(src).await;
-    eprintln!("PROBE interval: load returned ok={}", p.is_ok());
-}
+    let err = p.err().expect("setInterval 应当被拒");
+    assert!(err.contains("不能用 setInterval"), "拒绝理由要说清怎么办: {err}");
+    assert!(
+        t0.elapsed().as_millis() < 5000,
+        "拒绝必须立刻发生，不能卡住（卡了 {}ms）",
+        t0.elapsed().as_millis()
+    );
 
-/// 探针（默认 ignore）：只一个 60 秒的 setTimeout。
-#[tokio::test]
-#[ignore]
-async fn probe_long_timeout_load_and_drop() {
+    // 超长 setTimeout：拒，并说明上限
     let src = "import host from 'panel:host';\nsetTimeout(() => {}, 60000);\nawait host.register_handler('go', async () => 1);";
-    eprintln!("PROBE timeout: before load");
     let (p, _rx) = load(src).await;
-    eprintln!("PROBE timeout: load returned ok={}", p.is_ok());
-    if let Ok(plugin) = p {
-        let t0 = std::time::Instant::now();
-        drop(plugin);
-        eprintln!("PROBE timeout: drop 用了 {}ms", t0.elapsed().as_millis());
-    }
+    let err = p.err().expect("超长 setTimeout 应当被拒");
+    assert!(err.contains("最多 5000"), "要说清上限: {err}");
+
+    // 短 setTimeout：放行，而且真能回调
+    let src = "import host from 'panel:host';\nawait host.register_handler('go', async () => { await new Promise(r => setTimeout(() => r(7), 10)); return 1; });";
+    let p = ok(src).await;
+    assert!(p.dispatch("go", &json!({}), 5_000).await.is_ok(), "短定时器应当正常跑");
 }
