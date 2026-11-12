@@ -1952,6 +1952,9 @@ function bind() {
 
   // 脚本
   $('script-new').addEventListener('click', openNewScript);
+  $('script-upload-btn').addEventListener('click', () => $('script-upload').click());
+  $('script-upload').addEventListener('change', () =>
+    uploadFile('script-upload', '/api/scripts/upload', '已上传脚本'));
   // 通知
   $('bell').addEventListener('click', (ev) => { ev.stopPropagation(); toggleNotify(); });
   $('notify-read').addEventListener('click', (ev) => { ev.stopPropagation(); markAllRead(); });
@@ -1990,6 +1993,9 @@ function bind() {
 
   // 新建插件
   $('plugin-new').addEventListener('click', openNewPlugin);
+  $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
+  $('plugin-upload').addEventListener('change', () =>
+    uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
   $('new-plugin-ok').addEventListener('click', createPlugin);
   $('new-plugin-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createPlugin(); }
@@ -2033,3 +2039,28 @@ async function main() {
 }
 
 main();
+
+/** 上传：单文件或 zip，body 是原始字节（服务端按 ?name= 决定落点）。 */
+async function uploadFile(inputId, url, okPrefix) {
+  const input = $(inputId);
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch(url + '?name=' + encodeURIComponent(file.name), {
+      method: 'POST',
+      headers: Object.assign({ 'x-panel': '1', 'content-type': 'application/octet-stream' },
+        state.token ? { 'x-panel-token': state.token } : {}),
+      body: buf,
+    });
+    if (!resp.ok) throw new Error((await resp.text().catch(() => '')).trim() || ('HTTP ' + resp.status));
+    const d = await resp.json();
+    toast(okPrefix + '：' + (d.files || []).join('、') + (d.zip ? '（zip）' : ''));
+    await refresh();
+    if (url.includes('scripts')) await loadScripts();
+  } catch (e) {
+    toast(e.message || '上传失败', true);
+  } finally {
+    input.value = '';
+  }
+}

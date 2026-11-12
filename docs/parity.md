@@ -39,7 +39,7 @@
 | `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
 | `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
-| `/api/plugins/upload`、`/api/tasks/upload`（单文件或 zip） | ❌ | 只能界面里新建/编辑，不能传包 |
+| `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
 | `/login` `/api/login` `/api/logout` | ❌ | 只有令牌（header / `?t=`），没有登录页与登出 |
 | `/setup` `/api/setup`（首次设令牌向导） | ❌ | 得手工 `PANEL_TOKEN` 或生成 `auth.json` |
 | `/api/restart` | ❌ | 改完配置只能自己重启进程 |

@@ -59,6 +59,9 @@ futures = "0.3"
 # 用 tokio-tungstenite 而不是自己写帧：握手/掩码/分片/ping-pong 都是细节坑。
 # ⚠ 不启用 rustls-tls-webpki-roots：那条路会拖进 webpki-roots 0.26（旧根证书），
 #   我们直接用项目已有的 rustls 0.23 + webpki-roots 1 手工搭 connector（与 http 同一份信任库）。
+# 上传 zip：只编 deflate，不把 bzip2/lzma/zstd 全拖进来。
+# 9 起会拒「实际解压量 > 声明值」的条目 —— 给 zip 炸弹又多一道，所以用 9。
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls", "native-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
 rustls-pki-types = "1"

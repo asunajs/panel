@@ -19,6 +19,7 @@ mod sync_bridge;
 mod service;
 mod ssrf;
 mod stats;
+mod upload;
 mod web;
 mod wsclient;
 

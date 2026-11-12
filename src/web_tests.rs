@@ -1055,3 +1055,68 @@ async fn a_plugin_can_be_disabled_and_enabled() {
     let (status, _) = send(&app, with_csrf("POST", "/api/plugins/nope/enable", None)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// 上传：单文件落盘 + 自动重载；脚本上传要把记录一起建出来（否则传上去看不见）。
+#[tokio::test]
+async fn upload_saves_a_plugin_and_a_script() {
+    let (app, plugins, _data, _store) = setup_dirs("up1").await;
+
+    let src = "import host from 'panel:host';\nawait host.register_handler('hi', async () => 7);\n";
+    let req = Request::post("/api/plugins/upload?name=up.js")
+        .header("x-panel", "1")
+        .body(Body::from(src))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"], json!(["up.js"]));
+    assert_eq!(body["zip"], false);
+    assert_eq!(body["reloaded"], json!(["up"]), "传完就该能用: {body}");
+    assert!(plugins.join("up.js").is_file());
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "up"),
+        "{state}"
+    );
+
+    // 脚本：.mjs 落成 .js，并且建出记录（cron 空 = 手动）
+    let req = Request::post("/api/scripts/upload?name=job.mjs")
+        .header("x-panel", "1")
+        .body(Body::from("// 上传的脚本\n"))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"], json!(["job.js"]));
+    assert_eq!(body["scripts"], json!(["job"]));
+    let (status, list) = get(&app, "/api/scripts").await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = list["scripts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(names.contains(&"job"), "脚本记录没建出来: {list}");
+
+    // 不覆盖：同名再传一次、overwrite=0 → 400
+    let req = Request::post("/api/plugins/upload?name=up.js&overwrite=0")
+        .header("x-panel", "1")
+        .body(Body::from(src))
+        .unwrap();
+    let (status, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 非 .js 单文件：拒
+    let req = Request::post("/api/plugins/upload?name=evil.sh")
+        .header("x-panel", "1")
+        .body(Body::from("rm -rf /"))
+        .unwrap();
+    let (status, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 没带 x-panel：403（写接口的老规矩）
+    let req = Request::post("/api/plugins/upload?name=x.js")
+        .body(Body::from("//"))
+        .unwrap();
+    let (status, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

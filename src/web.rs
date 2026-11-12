@@ -72,6 +72,20 @@ pub fn router(st: AppState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/config", get(api_config).put(api_config_save))
         .route("/api/plugins/files", get(plugin_files))
+        // 上传：单文件或 zip。body 是**原始字节**（不走 multipart：浏览器端
+        // `file.arrayBuffer()` 直接 POST 更简单，也不用自己解析边界）。
+        .route(
+            "/api/plugins/upload",
+            post(plugins_upload).layer(axum::extract::DefaultBodyLimit::max(
+                crate::upload::MAX_UPLOAD_BYTES as usize,
+            )),
+        )
+        .route(
+            "/api/scripts/upload",
+            post(scripts_upload).layer(axum::extract::DefaultBodyLimit::max(
+                crate::upload::MAX_UPLOAD_BYTES as usize,
+            )),
+        )
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
@@ -389,6 +403,123 @@ async fn plugin_reload(
 /// 禁用：从调度器卸下来，并在库里记一笔 —— **重启后不再加载**。
 ///
 /// 与「停止」的区别：停止只影响这次进程（下次启动照样加载），禁用是持久状态。
+#[derive(Deserialize)]
+struct UploadQuery {
+    /// 原始文件名（`mcloud.js` / `bundle.zip`）—— 落点由它决定。
+    name: String,
+    /// `0` = 不覆盖已存在的文件。默认覆盖（上传的本意就是更新）。
+    overwrite: Option<u8>,
+}
+
+/// `POST /api/plugins/upload?name=x.js|bundle.zip`，body 是原始字节。
+///
+/// 单文件只收 `.js`；zip 解压到 `plugins/`（保留内部路径），`mcloud.webui/…`
+/// 这种目录结构原样落盘。写完**自动重载**受影响的插件（禁用的跳过）。
+async fn plugins_upload(
+    State(st): State<AppState>,
+    Query(q): Query<UploadQuery>,
+    h: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let dir = st.plugins_dir.clone();
+    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(1) != 0);
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::upload::save(crate::upload::Kind::Plugins, &dir, &name, &data, overwrite)
+    })
+    .await
+    .map_err(|e| bad(format!("上传任务异常: {e}")))?
+    .map_err(bad)?;
+
+    // 写到的顶层 .js 直接重载：传完就能用，不用再点一次「重载」。
+    let disabled = crate::db::plugin_disabled_names(&st.db).await;
+    let mut reloaded = Vec::new();
+    for f in &saved.files {
+        let p = std::path::Path::new(f);
+        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        if disabled.iter().any(|d| d == stem) {
+            continue;
+        }
+        let Ok(source) = read_source(&st.plugins_dir, stem).await else { continue };
+        st.sched.unload(stem);
+        if st.sched.load(stem, source).await.is_ok() {
+            reloaded.push(stem.to_string());
+        }
+    }
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "上传了 {} 个文件（{}，{} 字节）",
+            saved.files.len(),
+            if saved.zip { "zip" } else { "单文件" },
+            saved.bytes
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "files": saved.files,
+        "bytes": saved.bytes,
+        "zip": saved.zip,
+        "reloaded": reloaded,
+    })))
+}
+
+/// `POST /api/scripts/upload?name=x.js`：写文件 + 建记录（cron 留空 = 手动跑）。
+async fn scripts_upload(
+    State(st): State<AppState>,
+    Query(q): Query<UploadQuery>,
+    h: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let dir = st.scripts_dir.clone();
+    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(1) != 0);
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::upload::save(crate::upload::Kind::Scripts, &dir, &name, &data, overwrite)
+    })
+    .await
+    .map_err(|e| bad(format!("上传任务异常: {e}")))?
+    .map_err(bad)?;
+
+    let mut added = Vec::new();
+    for f in &saved.files {
+        let p = std::path::Path::new(f);
+        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        let path = st.scripts_dir.join(format!("{stem}.js"));
+        let Ok(source) = tokio::fs::read_to_string(&path).await else { continue };
+        // 已有记录就保留它的 cron/预算，只把源码写进去。
+        let old = st.scripts.get(stem).await.ok();
+        let (cron, budget, enabled) = match &old {
+            Some(v) => (
+                v["cron"].as_str().map(|s| s.to_string()),
+                v["budget_ms"].as_u64().unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+                v["enabled"].as_bool().unwrap_or(true),
+            ),
+            None => (None, crate::scripts::DEFAULT_BUDGET_MS, true),
+        };
+        st.scripts
+            .save(stem, &source, cron, budget, enabled)
+            .await
+            .map_err(bad)?;
+        added.push(stem.to_string());
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "files": saved.files,
+        "bytes": saved.bytes,
+        "zip": saved.zip,
+        "scripts": added,
+    })))
+}
+
 async fn plugin_disable(
     State(st): State<AppState>,
     Path(name): Path<String>,
