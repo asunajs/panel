@@ -42,6 +42,9 @@ tokio = { version = "1", features = [
 ] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.8"
+# 静态资源压一下：app.js 112KB + app.css 41KB 是首屏大头（第 88 轮）。
+# 只在有 Accept-Encoding 时压，老浏览器拿到原文，不影响兼容。
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -966,3 +966,18 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   color: var(--fg);
 }
 .plugin-group-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* 「开始使用」顶部：现在缺什么（第 88 轮） */
+.ready-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.ready-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: 999px; font-size: 12.5px;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--fg);
+}
+.ready-chip.ok { color: var(--ok-fg, #157347); }
+.ready-dot {
+  width: 16px; height: 16px; border-radius: 50%; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
+  background: var(--warn-soft, rgba(255, 193, 7, .18)); color: var(--warn-fg, #8a6100);
+}
+.ready-chip.ok .ready-dot { background: var(--ok-soft, rgba(25, 135, 84, .16)); color: var(--ok-fg, #157347); }

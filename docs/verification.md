@@ -318,3 +318,28 @@ RSS         前 3 分钟 29 MB，之后 26 MB 并保持 17 分钟不变（没有
 
 复跑：`/tmp/long85.sh` 的形状（一个插件 + `host.sqlite_exec` + `host.sleep` + 每 60 秒采一次 RSS）。
 注意**独占端口**：另一次实测就是被别的脚本 `lsof -ti :8796 | xargs kill -9` 打断的。
+
+## 首屏：0.4.0 的读数（第 88 轮，debug 构建，本机 127.0.0.1）
+
+```text
+                      改之前        改之后
+首屏传输              214 KB        **53 KB**（-75%）
+  app.js              110 KB        35 KB（gzip）
+  app.css              41 KB        11 KB（gzip）
+  logs?limit=200       43 KB        —（首屏不再拉）
+FCP                    80 ms        60 ms
+DOMContentLoaded       24 ms        57 ms（多了压缩层的开销）
+可交互（卡片有内容）   131 ms        93 ms（首次；之后 6–11 ms）
+```
+
+两处改动：
+
+1. **首屏不再拉 200 条日志**。`streamLogs()` 原来为了拿「最新一条的 id 当游标」而取
+   `limit=200`（43 KB + 一次扫库），可用户多半停在仪表盘。现在取 `limit=1`，回填留给
+   `backfillLogs()`（进日志页才取）。
+2. **静态资源开 gzip**（`tower-http` 的 `CompressionLayer`，放在最外层）。只在请求带
+   `Accept-Encoding` 时压，老客户端拿原文 —— 兼容性不变；SSE（`/api/logs/stream`）由
+   tower-http 的默认谓词排除，实测响应头里没有 `content-encoding`，不会被缓冲。
+
+复跑：无头 Edge + CDP，清缓存后导航到 `#dashboard`，等 `#cards-engine .card` 出现，
+读 `performance.getEntriesByType('resource')` 的 `transferSize` 与 paint 时间。

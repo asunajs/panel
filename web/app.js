@@ -510,6 +510,37 @@ function renderFirstRun() {
   head.append(el('h2', '', '开始使用'));
   const body = el('div', 'panel-body');
 
+  // 「现在缺什么」摆最前面（第 88 轮）：新用户最想知道的是「下一步点哪里」，
+  // 而不是先读三步说明。口令这一项尤其重要 —— 没设的时候别人打开就能用。
+  const ready = el('div', 'ready-row');
+  const chip = (ok, label, action) => {
+    const box = el('span', 'ready-chip' + (ok ? ' ok' : ''));
+    box.append(el('span', 'ready-dot', ok ? '✓' : '!'));
+    box.append(el('span', '', label));
+    if (action) {
+      const b = el('button', 'btn btn-sm', action.label);
+      b.type = 'button';
+      b.addEventListener('click', action.fn);
+      box.append(b);
+    }
+    return box;
+  };
+  ready.append(
+    state.auth
+      ? chip(true, '口令已设（别的设备打开要输它）')
+      : chip(false, '还没设口令（本机专用；设了才挡得住别的设备）', {
+          label: '去设口令',
+          fn: () => showFirstRun(true),
+        }),
+  );
+  ready.append(
+    chip(state.plugins.length > 0, state.plugins.length + ' 个插件已加载', {
+      label: '去插件页',
+      fn: () => { location.hash = '#plugins'; },
+    }),
+  );
+  body.append(ready);
+
   const steps = el('ol', 'steps');
   steps.append(
     step(['把插件文件放进 ', code('plugins/'), ' 目录，例如 ', code('plugins/hello.js')]),
@@ -1029,15 +1060,11 @@ async function streamLogs() {
       // 不取的话第一次重连没有 since，断线那段就补不回来。
       if (!state.logLastId) {
         try {
-          const d = await api('/api/logs?limit=200');
-          const rows = (d.logs || []).slice().reverse();
-          if (rows.length) {
-            state.logLastId = rows[rows.length - 1].id;
-            if (!state.logs.length) {
-              state.logs = rows;
-              if (state.view === 'logs') renderLogs();
-            }
-          }
+          // 只要「最新一条的 id」当游标：以前这里取 200 行（首屏多传 43KB、多扫一遍库），
+          // 而用户多半停在仪表盘、根本不看日志页。回填交给 backfillLogs（进日志页才取）。
+          const d = await api('/api/logs?limit=1');
+          const rows = d.logs || [];
+          if (rows.length) state.logLastId = rows[0].id;
         } catch (_) { /* 取不到就这次先不补，下次再试 */ }
       }
       // 重连时带上「我最后看到的那条 id」：服务端先把断线期间的行补发过来，再走实时。

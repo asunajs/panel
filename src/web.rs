@@ -296,6 +296,10 @@ pub fn router(st: AppState) -> Router {
         .route("/readyz", get(readyz))
         .merge(api)
         .layer(middleware::from_fn(security_headers))
+        // 压缩放在最外层（最后 add = 最先执行）：app.js 112KB + app.css 41KB 是首屏大头，
+        // gzip 后约 1/4。只在请求带 Accept-Encoding 时压，不支持的老客户端拿原文，
+        // 兼容性没有变化。SSE（/api/logs/stream）由 tower-http 的默认谓词排除，不会被缓冲。
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(st)
 }
 
