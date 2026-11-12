@@ -1391,14 +1391,22 @@ function setupBox() {
   const box = el('div', 'setup-box');
   box.append(el('h3', '', '这个面板还没有令牌'));
   box.append(el('p', 'settings-note',
-    '没有令牌时只允许绑回环、只接受回环 Host 头（挡 DNS rebinding）。要给局域网用，先设一个令牌：'));
-  const row = el('div', 'actions');
-  const gen = el('button', 'btn btn-primary btn-sm', '生成一个');
+    '没有令牌时只允许绑回环、只接受回环 Host 头（挡 DNS rebinding）。要给局域网用，先设一个令牌。'));
+  // 主路径是「自己设一个」：随机生成的令牌没人记得住，一旦没抄下来就得删 auth.json 重来。
+  // 所以输入框直接摆在外面，随机生成退成次要选项（第 24 轮用户明确说「还是自己设置的好」）。
+  const row = el('div', 'actions setup-row');
+  const inp = el('input', 'setup-input');
+  inp.type = 'password';
+  inp.placeholder = '自己设一个（至少 8 个字符）';
+  inp.autocomplete = 'new-password';
+  const ok = el('button', 'btn btn-primary btn-sm', '就用这个');
+  ok.type = 'button';
+  const gen = el('button', 'btn btn-sm', '随机生成一个');
   gen.type = 'button';
-  const manual = el('button', 'btn btn-sm', '我自己输入…');
-  manual.type = 'button';
-  row.append(gen, manual);
+  row.append(inp, ok, gen);
   box.append(row);
+  box.append(el('p', 'settings-note',
+    '建议 12 位以上、别用你在别处用过的。面板只存哈希（PBKDF2），明文不落盘 —— 所以忘了就只能删 auth.json 重来。'));
   const out = el('div', 'setup-out');
   box.append(out);
 
@@ -1430,22 +1438,14 @@ function setupBox() {
     }
   };
 
+  const useTyped = () => {
+    const v = inp.value.trim();
+    if (v.length < 8) { toast('至少 8 个字符'); inp.focus(); return; }
+    submit({ token: v });
+  };
+  ok.addEventListener('click', useTyped);
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); useTyped(); } });
   gen.addEventListener('click', () => submit({ generate: true }));
-  manual.addEventListener('click', () => {
-    clear(out);
-    const inp = el('input', 'setup-input');
-    inp.type = 'password';
-    inp.placeholder = '至少 8 个字符';
-    const ok = el('button', 'btn btn-primary btn-sm', '就用这个');
-    ok.type = 'button';
-    ok.addEventListener('click', () => {
-      const v = inp.value.trim();
-      if (v.length < 8) { toast('至少 8 个字符'); return; }
-      submit({ token: v });
-    });
-    out.append(inp, ok);
-    inp.focus();
-  });
   return box;
 }
 

@@ -820,6 +820,11 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .setup-box h3 { margin: 0 0 6px; font-size: 14px; }
 .setup-out { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.setup-row { flex-wrap: wrap; }
+.setup-row .setup-input { flex: 1 1 220px; }
+/* 这一块内部的节奏：相邻块 10px（别让输入框贴着上一段说明） */
+.setup-box > * { margin: 0; }
+.setup-box > * + * { margin-top: 10px; }
 .setup-token {
   display: block;
   width: 100%;

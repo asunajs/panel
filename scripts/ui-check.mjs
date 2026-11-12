@@ -292,6 +292,10 @@ async function main() {
   await sleep(800);
   const dataTight = await tightGaps('#settings-data');
   check('设置·数据页的块间距 ≥ 8px', dataTight.length === 0, JSON.stringify(dataTight));
+  await js("document.querySelector('[data-tab=security]').click()");
+  await sleep(700);
+  const setupTight = await tightGaps('.setup-box');
+  check('设置·安全页设令牌那块间距 ≥ 8px', setupTight.length === 0, JSON.stringify(setupTight));
   // 深色主题下不许有大块近白背景：第 24 轮「还没有令牌」那张白卡片就是
   // var(--bg-soft, #fafafc) 静默回落来的。这里用面积 + 亮度兜一遍。
   const theme = await js("document.documentElement.getAttribute('data-theme')");
