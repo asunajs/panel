@@ -259,3 +259,7 @@
     人只会觉得面板变哑了。所以要有一个**纯内存**的告警环（`alerts.rs`，CAP 16，按 `scope+message`
     连续去重）走 `/api/state` 带出来，界面顶部黄条显示。
     守卫：`alerts::tests` 四条 + `runtime_alerts_show_up_in_state_and_can_be_cleared` + ui-check 四条。
+
+61. **去重键里别放每次都变的字段**：通知失败告警本来写成「第 {attempts} 次」，于是每次重试都是新消息，
+    去重完全失效（一次退避能刷 5 条）。文案里只留「渠道 + 原因」。
+    守卫：`a_failed_prune_is_announced_on_the_alert_bar`（同一句两次 → 一条、count=2）。

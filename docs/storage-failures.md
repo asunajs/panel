@@ -60,3 +60,25 @@ POST /api/alerts/clear   → {ok: true, cleared: N}
 
 守卫：`alerts::tests` 四条（连续去重 / 中间插别的不合并 / 超过 CAP 留最新 / 清空后 id 不回退）、
 `runtime_alerts_show_up_in_state_and_can_be_cleared`、ui-check 四条（隐藏 / 文案与 ×N / 按钮 / 清空后收起）。
+
+### 告警目前的三个来源（第 72 轮补齐）
+
+| 来源 | 什么时候说 | 文案 |
+|---|---|---|
+| `logs` | 日志批插失败（磁盘满 / 只读） | `日志没写进库（磁盘满了？）：<os 错误>` |
+| `notify` | 通知投递失败；放弃（`done=2`）时另有一条 | `通知发送失败（渠道 X）：<原因>` / `通知发不出去，已放弃渠道 X：<原因>` |
+| `retention` | 清理旧记录失败（库被锁 / 写不进去） | `清理旧记录失败：<原因>` |
+
+去重的口径是「同一个 `scope + message` **紧挨着**再来只累加 `count`」，所以：
+
+- 通知每 60 秒重试一次、每次都同一个错 → **一条 ×N**，不会把黄条刷满；
+- 文案里**不能**带「第几次」这种每次都变的内容（第一次写成了 `第 {attempts} 次`，等于去重失效，一次退避就 5 条）。
+
+实测（临时面板 8797，webhook 指向 `http://127.0.0.1:9/hook`）：
+
+```text
+两次失败任务 → outbox 2 行 → alerts 一条：
+  {count: 2, scope: notify, message: 通知发送失败（渠道 dead）：请求失败: client error (Connect）}
+```
+
+`retention` 那条用单测守（`a_failed_prune_is_announced_on_the_alert_bar`）：同一句两次 → 一条、`count=2`。

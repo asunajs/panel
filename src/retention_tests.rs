@@ -156,3 +156,21 @@ async fn the_newest_row_survives_even_if_keep_is_one() {
         .unwrap();
     assert_eq!(st, "running", "最新那条（正在跑的）必须留下");
 }
+
+/// 清理失败要推到顶部黄条（第 72 轮）：表会一直长下去，而没人会天天翻日志页。
+/// 同一次失败重复发生时只累加 count（`alerts` 的去重语义）。
+#[tokio::test]
+async fn a_failed_prune_is_announced_on_the_alert_bar() {
+    crate::alerts::global().clear();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+
+    note_prune_failure(&log, "database is locked");
+    note_prune_failure(&log, "database is locked");
+    let list = crate::alerts::global().list();
+    let mine: Vec<_> = list.iter().filter(|a| a.scope == "retention").collect();
+    assert_eq!(mine.len(), 1, "同一句只该有一条: {list:?}");
+    assert_eq!(mine[0].count, 2, "第二次是累加而不是新开一条");
+    assert!(mine[0].message.contains("database is locked"), "{}", mine[0].message);
+    crate::alerts::global().clear();
+}

@@ -686,6 +686,21 @@ async fn deliver(db: &Db, log: &LogHub, row: Row, ch: Option<&Channel>) {
             Level::Warn,
             format!("通知发不出去，放弃渠道 {cid}: {errmsg}"),
         );
+        // 只在日志里说不够：通知发不出去意味着「出事的时候你收不到消息」，
+        // 而人不会天天翻日志页。推到顶部黄条（纯内存，不落库）。
+        crate::alerts::global().push(
+            "warn",
+            "notify",
+            format!("通知发不出去，已放弃渠道 {cid}：{errmsg}"),
+        );
+    } else {
+        // 还没到放弃：也提一句（按渠道+错误去重，不会刷屏）。
+        crate::alerts::global().push(
+            "warn",
+            "notify",
+            // 别把「第几次」写进文案：那样每次都是新消息，去重就失效了，一次退避刷 5 条。
+            format!("通知发送失败（渠道 {cid}）：{errmsg}"),
+        );
     }
 }
 

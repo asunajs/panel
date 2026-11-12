@@ -37,6 +37,14 @@ impl Pruned {
 }
 
 /// 按默认保留条数剪一次。
+/// 清理失败要说两处：日志（带上下文、可回溯）+ 顶部黄条（没人翻日志页时也能看到）。
+///
+/// 为什么两处都要：清理失败通常意味着库被锁/写不进去，表会一直长下去；
+/// 只写在日志里，等于「谁也没看见」。
+fn note_prune_failure(log: &LogHub, err: &str) {
+    crate::alerts::global().push("warn", "retention", format!("清理旧记录失败：{err}"));
+    log.emit("panel", None, Level::Warn, format!("清理旧记录失败: {err}"));
+}
 pub async fn prune(db: &Db) -> Result<Pruned, String> {
     prune_with(db, RUNS_KEEP, LOGS_KEEP).await
 }
@@ -94,7 +102,7 @@ pub fn spawn_ticker(db: Db, log: LogHub) -> tokio::task::JoinHandle<()> {
                     ),
                 ),
                 Ok(_) => {}
-                Err(e) => log.emit("panel", None, Level::Warn, format!("清理旧记录失败: {e}")),
+                Err(e) => note_prune_failure(&log, &e),
             }
         }
     })
