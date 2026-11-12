@@ -2356,6 +2356,14 @@ async fn api_restore(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    // 带数据库的备份**不能**走 HTTP 恢复：现在这条请求就跑在被要替换的那个库上，
+    // 换文件等于把地基建在自己脚下（连接还开着、WAL 还挂着）。只能用 CLI 在面板停止时做。
+    if body.get("db_base64").is_some() {
+        return Err(bad(
+            "这份备份里带着数据库，只能在面板停止时用 CLI 恢复：panel-llrt restore --in <文件>"
+                .to_string(),
+        ));
+    }
     // 配置先校验再落任何文件：写到一半才发现配置坏了，等于留个半成品。
     let cfg_value = match body.get("config_text").and_then(Value::as_str) {
         Some(t) => {

@@ -107,3 +107,57 @@ HTTP 的 `POST /api/backup` 本来就在写文件前验配置；现在两边共�
 
 守卫：`backup.rs` 的 `validate_rejects_a_broken_payload_before_anything_is_written`
 （7 个反例：配置非 JSON / 配置非对象 / 名字越界 / 空源码 / 未知格式 / 空备份合法）。
+
+## 备份里有什么、没有什么
+
+| 内容 | 在备份里吗 | 说明 |
+|---|---|---|
+| 插件源码 `plugins/*.js` | ✅ | 每个插件一份源码 |
+| 脚本（源码 + cron + 预算 + 启用状态） | ✅ | 脚本表在 DB 里，但导出成了 JSON |
+| `config.json` 原文 | ✅ | 恢复时覆盖（先校验再写） |
+| `panel.db`（运行记录、日志、通知、**任务状态**） | ❌ 默认 | 加 `--with-db` 才带上 |
+
+为什么默认不带：库会随时间长大（保留期 2 万条运行/日志），而日常备份要的是「换台机器
+能把插件跑起来」。要连历史和**任务状态**一起搬，就显式 `--with-db`。
+
+`tasks` 表里是人的决定（暂停、摘要、blockers、调度覆盖、提前量）——**不带库就会丢**。
+所以两种模式都在 JSON 里写明边界，回显也直说：
+
+```text
+$ panel-llrt backup --out a.bk
+数据库**没有**打包（65536 字节的 panel.db 留在原地）；要带上它加 --with-db
+$ python3 -c "..."   →  db_included=False db_bytes=65536 有 db_base64 吗: False
+
+$ panel-llrt backup --out b.bk --with-db
+数据库已打包：65536 字节（VACUUM INTO 快照，在线安全）
+$ ls -l b.bk          →  87709 字节（base64 膨胀 1.33 倍）
+```
+
+快照用 `VACUUM INTO`，**不是 `cp panel.db`**：WAL 模式下文件里可能缺着最近的提交
+（它们在 `-wal` 里），复制出来打开会少一截甚至报损坏。`VACUUM INTO` 由 SQLite 写一份
+完整一致的文件，在线跑着也安全。
+
+### 恢复
+
+```bash
+panel-llrt restore --in b.bk --secret ppx1secret...   # 带库的备份只能用 CLI
+```
+
+- 带库的备份**只能在面板停止时用 CLI 恢复**：HTTP 那条 `POST /api/backup` 会 400
+  （`这份备份里带着数据库，只能在面板停止时用 CLI 恢复`）—— 请求本身跑在要被替换的那个
+  库上，换文件等于把地基建在自己脚下。
+- 恢复时**先整份校验**（含 `db_base64` 是不是真 SQLite），再换库、再写插件。
+- 旧库的 `-wal` / `-shm` 一起删掉：留着它们等于拿旧日志盖新数据。
+- 干净机器上恢复「不带库」的备份：会建一个空库并明说「数据库是新建的空库（这份备份没带库）」。
+
+实测（临时目录，塞了 5 行日志，然后 `rm -f panel.db*`）：
+
+```text
+restore nodb.bk    → 已恢复：1 个插件、0 个脚本、配置已覆盖、数据库是新建的空库（这份备份没带库）
+restore withdb.bk  → 已恢复：1 个插件、0 个脚本、配置已覆盖、数据库已替换（65536 字节）
+                     logs 5 行回来了、插件回来了
+POST /api/backup（带库） → 400 这份备份里带着数据库，只能在面板停止时用 CLI 恢复
+```
+
+守卫：`backup.rs` 的 `db_snapshot_is_a_consistent_copy`（WAL 里刚写的那行也要在快照里、
+`integrity_check` 为 ok）、`validate_checks_the_embedded_database`（非 base64 / 非 SQLite 都拒）。

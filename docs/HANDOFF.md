@@ -258,6 +258,12 @@
     脚本，之后才验 `config_text`」。一份「插件合法、配置坏掉」的备份会把插件全换掉再报错 ——
     半恢复状态，而那时人通常已经没有第二份备份。现在只有一个 `validate()`（不碰磁盘），
     HTTP 和 CLI 共用。守卫：`backup.rs::validate_rejects_a_broken_payload_before_anything_is_written`。
+37. **备份默认不含数据库，这件事必须写在备份文件里**：格式 v1 只有插件/脚本/配置，
+    `panel.db`（运行历史、日志、通知，以及 `tasks` 表里的暂停/摘要/blockers/调度覆盖/提前量）
+    全不在。现在 JSON 里带 `db_included`/`db_bytes`，CLI 回显也直说；要历史就 `--with-db`。
+    带库的备份走 `VACUUM INTO` 快照（**不能** `cp panel.db`：WAL 里缺的提交会丢），
+    恢复时换库要**在打开 DB 之前**、并清掉旧 `-wal`/`-shm`；HTTP 恢复带库的备份直接 400。
+    干净机器上恢复不带库的备份会建空库并明说。见 `docs/backup.md`。
 
 ## 8. 运行中的面板
 

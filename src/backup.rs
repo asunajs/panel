@@ -69,6 +69,24 @@ pub async fn collect(
     }))
 }
 
+/// 数据库快照：`VACUUM INTO` 出一份**一致的**副本（在线安全，不用停面板）。
+///
+/// 为什么不是 `cp panel.db`：WAL 模式下 `panel.db` 里可能缺着最近的提交（它们还在 -wal 里），
+/// 复制出来的文件打开后要么少一截、要么是「数据库损坏」—— 备份里最不能出的就是这种。
+/// `VACUUM INTO` 由 SQLite 自己写一份完整一致的文件。
+pub fn db_snapshot(db_path: &Path, dst: &Path) -> Result<u64, String> {
+    let _ = std::fs::remove_file(dst);
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("打开 {} 失败: {e}", db_path.display()))?;
+    conn.execute("VACUUM INTO ?1", [&dst.to_string_lossy().to_string()])
+        .map_err(|e| format!("快照数据库失败: {e}"))?;
+    drop(conn);
+    let n = std::fs::metadata(dst)
+        .map_err(|e| format!("读快照大小失败: {e}"))?
+        .len();
+    Ok(n)
+}
+
 /// 全量校验一份备份，**不碰磁盘**。
 ///
 /// 为什么单独一步：恢复是「覆盖现有插件和配置」，写之前必须知道整份文件是好的。
@@ -131,6 +149,18 @@ pub fn validate(data: &Value) -> Result<Option<(String, Value)>, String> {
             Some((text.to_string(), v))
         }
     };
+    if let Some(b64) = data.get("db_base64").and_then(Value::as_str) {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("备份里的数据库不是合法 base64: {e}"))?;
+        if !bytes.starts_with(b"SQLite format 3\0") {
+            return Err(format!(
+                "备份里的数据库不是 SQLite 文件（{} 字节，头部不对）",
+                bytes.len()
+            ));
+        }
+    }
     Ok(cfg)
 }
 
@@ -261,7 +291,35 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
         Ok(t) => t,
         Err(_) => c.config.snapshot().as_ref().to_string(),
     };
-    let data = collect(&c.plugins_dir, &c.scripts, cfg_text).await?;
+    let mut data = collect(&c.plugins_dir, &c.scripts, cfg_text).await?;
+
+    // 数据库到底在不在备份里：**明说**，不让人猜。
+    // 插件/脚本/配置之外的东西（运行历史、日志、通知、任务的暂停/摘要/blockers/
+    // 调度覆盖/提前量）全在 panel.db 里，不带它就是没有。
+    let db_path = c.data_dir.join("panel.db");
+    let db_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    if args.iter().any(|a| a == "--with-db") {
+        let snap = PathBuf::from(format!("{out}.db.tmp"));
+        let n = match db_snapshot(&db_path, &snap) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_file(&snap);
+                return Err(e);
+            }
+        };
+        use base64::Engine as _;
+        let raw = std::fs::read(&snap).map_err(|e| format!("读快照失败: {e}"))?;
+        let _ = std::fs::remove_file(&snap);
+        data["db_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(&raw));
+        data["db_bytes"] = json!(n);
+        data["db_included"] = json!(true);
+        println!("数据库已打包：{n} 字节（VACUUM INTO 快照，在线安全）");
+    } else {
+        data["db_included"] = json!(false);
+        data["db_bytes"] = json!(db_bytes);
+        println!("数据库**没有**打包（{db_bytes} 字节的 panel.db 留在原地）；要带上它加 --with-db");
+    }
+
     let bytes = serde_json::to_vec_pretty(&data).map_err(|e| format!("序列化失败: {e}"))?;
 
     // 先落一份明文临时文件：encrypt_to 是文件到文件的接口，它成功后会删掉这份明文。
@@ -292,10 +350,39 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
 pub async fn restore_cmd(args: &[String]) -> Result<(), String> {
     let input = arg_value(args, "--in").ok_or("缺 --in <文件>")?;
     let secret = arg_value(args, "--secret");
-    let c = ctx().await?;
     let (data, decrypted) = load_backup(Path::new(&input), secret.as_deref())?;
     // **先整份校验，再动磁盘**：配置坏了就别把插件换掉（否则留个半恢复状态）。
     let cfg = validate(&data)?;
+
+    // 数据库要在 `ctx()` 打开它**之前**换掉，否则连上的是旧库。
+    let data_dir = PathBuf::from(crate::env_or("PANEL_DATA_DIR", "data"));
+    let mut db_restored = None;
+    if let Some(b64) = data.get("db_base64").and_then(Value::as_str) {
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("备份里的数据库不是合法 base64: {e}"))?;
+        let dst = data_dir.join("panel.db");
+        let tmp = data_dir.join("panel.db.restore.tmp");
+        std::fs::write(&tmp, &raw).map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
+        // 旧库的 -wal/-shm 必须一起清掉：留着它们等于用旧日志覆盖新数据。
+        std::fs::rename(&tmp, &dst).map_err(|e| format!("换成新库失败: {e}"))?;
+        for suf in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(data_dir.join(format!("panel.db{suf}")));
+        }
+        db_restored = Some(raw.len());
+    }
+
+    // 换机器恢复：这里可能还没有 panel.db。ctx() 会因此拒绝（那是给 `backup` 的护栏：
+    // 指错目录时别导出个空备份），但恢复本身要能在空目录上跑 —— 建一个空库就是了，
+    // 面板启动时也会建。不建的话，「只含插件和配置」的备份在干净机器上根本恢复不了。
+    let mut created_db = false;
+    if db_restored.is_none() && !data_dir.join("panel.db").exists() {
+        crate::db::Db::open(&data_dir.join("panel.db"))?;
+        created_db = true;
+    }
+
+    let c = ctx().await?;
     let out = apply(&c.plugins_dir, &c.scripts, &data).await?;
 
     let mut config_applied = false;
@@ -313,11 +400,16 @@ pub async fn restore_cmd(args: &[String]) -> Result<(), String> {
     let np = out["plugins"].as_array().map(|a| a.len()).unwrap_or(0);
     let ns = out["scripts"].as_array().map(|a| a.len()).unwrap_or(0);
     println!(
-        "已恢复{}：{} 个插件、{} 个脚本、配置{}",
+        "已恢复{}：{} 个插件、{} 个脚本、配置{}{}",
         if decrypted { "（已解密）" } else { "" },
         np,
         ns,
-        if config_applied { "已覆盖" } else { "未包含" }
+        if config_applied { "已覆盖" } else { "未包含" },
+        match db_restored {
+            Some(n) => format!("、数据库已替换（{n} 字节）"),
+            None if created_db => "、数据库是新建的空库（这份备份没带库）".to_string(),
+            None => String::new(),
+        }
     );
     for s in out["scripts"].as_array().into_iter().flatten() {
         if s["ok"] == false {
@@ -411,6 +503,56 @@ mod tests {
 
         // 7) 什么都没有也合法（空备份 = 什么都不做，不是错误）
         assert!(validate(&json!({})).unwrap().is_none());
+    }
+
+    /// 数据库快照必须是**一致**的一份：`VACUUM INTO` 出的文件能独立打开、行数对得上。
+    /// （`cp panel.db` 在 WAL 模式下可能少掉最近的提交 —— 那种「备份」最坑人。）
+    #[test]
+    fn db_snapshot_is_a_consistent_copy() {
+        let dir = tmpdir("snap");
+        let src = dir.join("panel.db");
+        let dst = dir.join("snap.db");
+        {
+            let c = rusqlite::Connection::open(&src).unwrap();
+            c.execute_batch(
+                "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);\
+                 INSERT INTO t(b) VALUES('x'),('y'),('z');\
+                 PRAGMA journal_mode=WAL;\
+                 INSERT INTO t(b) VALUES('还留在 -wal 里的那一行');",
+            )
+            .unwrap();
+        }
+        let n = db_snapshot(&src, &dst).expect("快照要成功");
+        assert!(n > 0, "快照文件不能是空的");
+        let c = rusqlite::Connection::open(&dst).unwrap();
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 4, "连刚写进 WAL 的那行也要在快照里");
+        let ok: String = c
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok, "ok");
+    }
+
+    /// 带数据库的备份里，`db_base64` 必须是真 SQLite —— 免得恢复出个「打不开的库」。
+    #[test]
+    fn validate_checks_the_embedded_database() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        // 不是 base64
+        let bad = json!({ "db_base64": "!!!不是 base64!!!" });
+        let e = validate(&bad).unwrap_err();
+        assert!(e.contains("不是合法 base64"), "{e}");
+        // 是 base64，但不是 SQLite
+        let not_db = json!({ "db_base64": b64.encode(b"hello world") });
+        let e = validate(&not_db).unwrap_err();
+        assert!(e.contains("不是 SQLite 文件"), "{e}");
+        // 真的 SQLite 头就放行
+        let mut fake = b"SQLite format 3\0".to_vec();
+        fake.extend_from_slice(&[0u8; 64]);
+        let ok = json!({ "db_base64": b64.encode(&fake) });
+        assert!(validate(&ok).is_ok());
     }
     /// CLI 的读入口：密文要私钥、明文不要；两种都要能解析出同一份 JSON。
     #[test]
