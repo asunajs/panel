@@ -1330,6 +1330,72 @@ function formatConfig() {
   }
 }
 
+/** 首次设置令牌的框（只在「还没凭据」时出现）。
+ *
+ *  写完 auth.json **不自动重启**：面板生成的令牌要让人先抄下来 ——
+ *  自动重启会把人扔在「令牌已生效但没抄」的窗口里。 */
+function setupBox() {
+  const box = el('div', 'setup-box');
+  box.append(el('h3', '', '这个面板还没有令牌'));
+  box.append(el('p', 'settings-note',
+    '没有令牌时只允许绑回环、只接受回环 Host 头（挡 DNS rebinding）。要给局域网用，先设一个令牌：'));
+  const row = el('div', 'actions');
+  const gen = el('button', 'btn btn-primary btn-sm', '生成一个');
+  gen.type = 'button';
+  const manual = el('button', 'btn btn-sm', '我自己输入…');
+  manual.type = 'button';
+  row.append(gen, manual);
+  box.append(row);
+  const out = el('div', 'setup-out');
+  box.append(out);
+
+  const submit = async (body) => {
+    clear(out);
+    try {
+      const r = await api('/api/setup', { method: 'POST', body });
+      if (r.token) {
+        out.append(el('p', 'settings-note', '这是面板生成的令牌，只显示这一次，请先抄下来：'));
+        const code = el('code', 'setup-token', r.token);
+        out.append(code);
+        const copy = el('button', 'btn btn-sm', '复制');
+        copy.type = 'button';
+        copy.addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(r.token); toast('已复制'); }
+          catch { toast('复制失败，手动选一下吧'); }
+        });
+        out.append(copy);
+      } else {
+        out.append(el('p', 'settings-note', '令牌已写入 auth.json（明文没有落盘）。'));
+      }
+      const restart = el('button', 'btn btn-primary btn-sm', '重启生效');
+      restart.type = 'button';
+      restart.addEventListener('click', restartPanel);
+      out.append(restart);
+      out.append(el('p', 'settings-note', '重启后浏览器会要求输入令牌；登进去之后就不用再输了（30 天会话票）。'));
+    } catch (e) {
+      out.append(el('p', 'hint-err', e.message || '设置失败'));
+    }
+  };
+
+  gen.addEventListener('click', () => submit({ generate: true }));
+  manual.addEventListener('click', () => {
+    clear(out);
+    const inp = el('input', 'setup-input');
+    inp.type = 'password';
+    inp.placeholder = '至少 8 个字符';
+    const ok = el('button', 'btn btn-primary btn-sm', '就用这个');
+    ok.type = 'button';
+    ok.addEventListener('click', () => {
+      const v = inp.value.trim();
+      if (v.length < 8) { toast('至少 8 个字符'); return; }
+      submit({ token: v });
+    });
+    out.append(inp, ok);
+    inp.focus();
+  });
+  return box;
+}
+
 function renderSettings() {
   const cfg = state.config;
   const info = $("settings-info");
@@ -1370,6 +1436,7 @@ function renderSettings() {
     ["插件", "视为可信代码：能读写数据库、发 HTTP、读配置"],
   ]));
   sec.append(el("p", "settings-note", "插件不是沙箱里跑的：它和你本机的其它程序同权。只装自己看得懂的插件。"));
+  if (!state.auth) sec.append(setupBox());
 
   const dat = $("settings-data");
   clear(dat);

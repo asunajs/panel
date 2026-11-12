@@ -1506,3 +1506,42 @@ await host.register_handler('go', async () => {\n\
     assert!(msgs.iter().any(|m| m == "short=true"), "v0.1 要能解析: {msgs:?}");
     assert!(msgs.iter().any(|m| m == "bad=报错"), "{msgs:?}");
 }
+
+/// 首次设置：只在没凭据时可用；写入的是哈希不是明文；第二次必须 409。
+#[tokio::test]
+async fn setup_writes_auth_json_once_and_never_the_plaintext() {
+    let (app, _plugins, data, _store) = setup_dirs("setup").await;
+
+    // 缺 x-panel: 1（防 CSRF）→ 403
+    let req = Request::post("/api/setup")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"generate":true}"#))
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::FORBIDDEN);
+
+    // 太短的令牌 → 400
+    let (status, body) = send(&app, with_csrf("POST", "/api/setup", Some(json!({"token":"abc"})))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // 生成一个 → 200 + 令牌（43 字符的 base64url）
+    let (status, body) = send(&app, with_csrf("POST", "/api/setup", Some(json!({"generate":true})))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["token"].as_str().unwrap_or_default().to_string();
+    assert_eq!(token.len(), 43, "32 字节 base64url 应当是 43 字符: {token}");
+    assert_eq!(body["restart_required"], true);
+
+    // 文件写出来了，而且**没有明文**
+    let path = data.join("auth.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("\"hash\""), "{raw}");
+    assert!(!raw.contains(&token), "auth.json 里不能有明文令牌: {raw}");
+    // 生成的令牌能过校验（同一份派生逻辑）
+    let store: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(store["algo"], "pbkdf2-hmac-sha256");
+
+    // 再设一次 → 409（否则会把刚抄下来的令牌静默换掉）
+    let (status, body) = send(&app, with_csrf("POST", "/api/setup", Some(json!({"generate":true})))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // 而且文件没被改写
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+}

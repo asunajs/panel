@@ -275,6 +275,27 @@ impl Auth {
     }
 }
 
+/// 首次设置：把明文令牌派生成 `auth.json`（**明文不落盘**）。
+///
+/// 只该在「还没有任何凭据」时调用（web.rs 的 `POST /api/setup` 会先判）。
+pub fn write_new(data_dir: &Path, plaintext: &str) -> Result<PathBuf, String> {
+    let a = Auth::derive(plaintext);
+    let path = data_dir.join(FILE);
+    write_store(&path, &a)?;
+    Ok(path)
+}
+
+/// 生成一个高熵令牌：32 字节随机 → base64url（43 个字符，无填充）。
+///
+/// 为什么由面板生成：人手写的令牌几乎必然是短口令，而 PBKDF2 只是给那种情况留的余量。
+pub fn generate_token() -> String {
+    use base64::Engine as _;
+    let mut raw = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut raw)
+        .expect("系统随机源不可用");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
 /// 启动时的派生/恢复结果。
 pub struct Provisioned {
     pub auth: Option<Auth>,

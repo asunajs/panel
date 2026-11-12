@@ -127,6 +127,8 @@ pub fn router(st: AppState) -> Router {
         // 登录/登出挂在外层：它们**不能**被 require_token 挡住（login 就是用来换凭据的）
         .route("/api/login", post(api_login))
         .route("/api/logout", post(api_logout))
+        // 首次设置令牌（只在还没凭据时可用；写 auth.json，重启生效）
+        .route("/api/setup", post(api_setup))
         .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
@@ -214,6 +216,76 @@ fn session_cookie(value: &str, max_age: u64) -> String {
     )
 }
 
+#[derive(serde::Deserialize)]
+struct SetupBody {
+    /// 用户自己给的令牌。
+    token: Option<String>,
+    /// 让面板生成一个高熵令牌（返回给前端显示一次）。
+    #[serde(default)]
+    generate: bool,
+}
+
+/// `POST /api/setup` —— 首次设置令牌。
+///
+/// 只在「还没有任何凭据」时可用（`st.auth.is_none()`），而那种部署本来就只绑回环、
+/// 只认回环 Host（见 require_token 的降级分支），所以这个口子的暴露面和面板首页一样。
+///
+/// 写完 `auth.json` **不自己重启**：把令牌回给前端显示一次，由人抄下来再点「重启生效」。
+/// 自动重启会让人在「令牌已经生效、但没抄下来」的窗口里丢掉面板。
+async fn api_setup(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(b): Json<SetupBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
+    // 但再写一次会把用户刚抄下来的令牌**静默换掉**。
+    if st.auth.is_some() || st.data_dir.join(crate::auth::FILE).exists() {
+        return Err((
+            StatusCode::CONFLICT,
+            "这个面板已经设置过令牌了。要换令牌：停掉面板，设 PANEL_TOKEN 后启动（或删掉 data/auth.json 再来一次）\n"
+                .into(),
+        ));
+    }
+    let (token, generated) = if b.generate {
+        (crate::auth::generate_token(), true)
+    } else {
+        match b.token.as_deref().map(str::trim) {
+            Some(t) if !t.is_empty() => (t.to_string(), false),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "要么给 token，要么 generate: true\n".into(),
+                ))
+            }
+        }
+    };
+    // 短口令能过，但 PBKDF2 只是余量，不是许可 —— 明确要求 8 个字符起。
+    if token.chars().count() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "令牌至少 8 个字符（建议直接让面板生成一个）\n".into(),
+        ));
+    }
+    let path = crate::auth::write_new(&st.data_dir, &token).map_err(|e| {
+        internal(format!("写 auth.json 失败: {e}"))
+    })?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Warn,
+        format!(
+            "已写入 {}：**重启面板后**开始要求令牌（明文只在内存里过了一次，没有落盘）",
+            path.display()
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        // 只有面板生成的才回显：人给的那份他自己知道，别在响应里留痕
+        "token": if generated { Value::String(token) } else { Value::Null },
+        "restart_required": true,
+    })))
+}
 #[derive(serde::Deserialize)]
 struct LoginBody {
     token: String,
