@@ -198,3 +198,71 @@ async fn retry_resets_failed_rows_but_leaves_pending_alone() {
     assert_eq!((pd, pa), (0, 2));
     assert_eq!(pnext, 99999999999999);
 }
+
+// ---------------------------------------------------------------- 一次写全（第 40 轮）
+//
+// 一条通知配 N 个渠道，以前是 N 次 DB 往返。中途进程被杀 → 前面几个渠道有发件箱行、
+// 后面的没有，而铃铛里已经有这条通知了 —— 界面上「通知有了」，外部渠道却永远收不到，
+// 也没人知道少了哪几个。现在整批一个事务。
+
+/// 两个渠道都指向死端口：一次 `record` 之后，发件箱里必须**每个渠道各一行**。
+#[tokio::test]
+async fn one_notice_writes_one_row_per_channel_in_one_go() {
+    let db = mkdb();
+    let log = LogHub::new(db.clone());
+    let chans = [
+        hook("a", "http://127.0.0.1:9/x"),
+        hook("b", "http://127.0.0.1:9/y"),
+        hook("c", "http://127.0.0.1:9/z"),
+    ];
+    let ids = enqueue_all(
+        &db,
+        &log,
+        &chans,
+        "标题",
+        "正文",
+        "{}",
+        1_700_000_000_000,
+    )
+    .await;
+    assert_eq!(ids.len(), 3, "三个渠道三条行，id 都要拿到");
+
+    let rows: Vec<(String, i64)> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT channel,done FROM notify_outbox ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("a".to_string(), 0),
+            ("b".to_string(), 0),
+            ("c".to_string(), 0)
+        ],
+        "顺序就是渠道顺序，而且三个都在（打不通就是 done=0 等重试）"
+    );
+}
+
+/// 一个渠道都没有时不该写空事务、也不该报错。
+#[tokio::test]
+async fn no_channel_means_no_write() {
+    let db = mkdb();
+    let log = LogHub::new(db.clone());
+    assert!(enqueue_all(&db, &log, &[], "t", "b", "{}", 0).await.is_empty());
+    let n: i64 = db
+        .call(|c| {
+            c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

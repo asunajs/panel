@@ -458,13 +458,13 @@ pub async fn record(
         "body": body,
     })
     .to_string();
-    for ch in cfg
+    let picked: Vec<Channel> = cfg
         .channels
         .iter()
         .filter(|c| Config::channel_wants(c, n.level))
-    {
-        enqueue(db, log, ch, &title, &body, &payload, ts).await;
-    }
+        .cloned()
+        .collect();
+    enqueue_all(db, log, &picked, &title, &body, &payload, ts).await;
 }
 
 /// 不阻塞调用方地记一条。调度器在 finish 里用它。
@@ -489,53 +489,80 @@ pub struct Row {
     pub attempts: i64,
 }
 
-/// 落一行发件箱并**立刻试一次**。
-async fn enqueue(
+/// 落发件箱（**一次 DB 往返写完所有渠道**）并立刻各试一次。
+///
+/// 以前是「一个渠道一次 DB 往返」，一条通知配 3 个渠道就是 3 次写入。这不是性能问题，
+/// 是**丢消息**的问题：中途进程被杀，前面几个渠道有发件箱行、后面的没有，而通知本身已经
+/// 进了面板 —— 界面上看着「通知有了」，可外部渠道永远收不到，也没人知道少了哪几个。
+/// 现在整批一个事务：要么全有，要么全没有。
+async fn enqueue_all(
     db: &Db,
     log: &LogHub,
-    ch: &Channel,
+    chans: &[Channel],
     title: &str,
     body: &str,
     payload: &str,
     ts: i64,
-) {
-    let (cid, kind) = (ch.id.clone(), ch.kind.as_str().to_string());
+) -> Vec<i64> {
+    if chans.is_empty() {
+        return Vec::new();
+    }
+    let metas: Vec<(String, String)> = chans
+        .iter()
+        .map(|c| (c.id.clone(), c.kind.as_str().to_string()))
+        .collect();
     let (t, b, p) = (title.to_string(), body.to_string(), payload.to_string());
-    let id = db
+    let ids = db
         .call(move |c| {
-            c.execute(
-                "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done) \
-                 VALUES(?1,?2,?3,?4,?5,?6,0,0,0)",
-                rusqlite::params![ts, cid, kind, t, b, p],
-            )
-            .map_err(|e| e.to_string())?;
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let mut ids = Vec::with_capacity(metas.len());
+            {
+                let mut st = tx
+                    .prepare(
+                        "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done)                          VALUES(?1,?2,?3,?4,?5,?6,0,0,0)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for (cid, kind) in &metas {
+                    st.execute(rusqlite::params![ts, cid, kind, t, b, p])
+                        .map_err(|e| e.to_string())?;
+                    ids.push(tx.last_insert_rowid());
+                }
+            }
             // 裁掉超量的成功行（放弃的留着给人看）
-            c.execute(
-                "DELETE FROM notify_outbox WHERE done=1 AND id NOT IN \
-                 (SELECT id FROM notify_outbox WHERE done=1 ORDER BY id DESC LIMIT ?1)",
+            tx.execute(
+                "DELETE FROM notify_outbox WHERE done=1 AND id NOT IN                  (SELECT id FROM notify_outbox WHERE done=1 ORDER BY id DESC LIMIT ?1)",
                 rusqlite::params![OUTBOX_KEEP],
             )
             .map_err(|e| e.to_string())?;
-            Ok(c.last_insert_rowid())
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(ids)
         })
         .await;
-    let id = match id {
-        Ok(id) => id,
+    let ids = match ids {
+        Ok(ids) => ids,
         Err(e) => {
-            log.emit("panel", None, Level::Warn, format!("通知发件箱写入失败: {e}"));
-            return;
+            log.emit(
+                "panel",
+                None,
+                Level::Warn,
+                format!("通知发件箱写入失败（{} 个渠道都没排上）: {e}", chans.len()),
+            );
+            return Vec::new();
         }
     };
-    let row = Row {
-        id,
-        channel: ch.id.clone(),
-        kind: ch.kind.as_str().to_string(),
-        title: title.to_string(),
-        body: body.to_string(),
-        payload: payload.to_string(),
-        attempts: 0,
-    };
-    deliver(db, log, row, Some(ch)).await;
+    for (id, ch) in ids.iter().zip(chans.iter()) {
+        let row = Row {
+            id: *id,
+            channel: ch.id.clone(),
+            kind: ch.kind.as_str().to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            payload: payload.to_string(),
+            attempts: 0,
+        };
+        deliver(db, log, row, Some(ch)).await;
+    }
+    ids
 }
 
 /// webhook：URL 是**运维填的**，不是插件给的，所以不套插件的 SSRF 门。
@@ -606,6 +633,7 @@ async fn attempt(ch: &Channel, row: &Row) -> Result<(), String> {
     }
 }
 
+/// 投递一行：成功置 done=1；失败按退避排下一次，超次数或渠道没了置 done=2。
 /// 投递一行：成功置 done=1；失败按退避排下一次，超次数或渠道没了置 done=2。
 async fn deliver(db: &Db, log: &LogHub, row: Row, ch: Option<&Channel>) {
     let (ok, errmsg) = match ch {
@@ -719,8 +747,22 @@ pub fn spawn_ticker(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            if let Err(e) = sweep(&db, &log, &store).await {
-                log.emit("panel", None, Level::Warn, format!("通知发件箱扫描失败: {e}"));
+            // 一轮**排空**，不是一轮只发 10 条：sweep 一次最多取 10 行，风暴过去之后
+            // 积压 50 条就要等 5 个 tick（2.5 分钟）才发完。这里连着扫，直到某批不足 10 条。
+            // 上限 50 批（500 行）：剩下的留给下一个 tick，别把这一轮卡死。
+            for _ in 0..50 {
+                match sweep(&db, &log, &store).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if n < 10 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log.emit("panel", None, Level::Warn, format!("通知发件箱扫描失败: {e}"));
+                        break;
+                    }
+                }
             }
         }
     })
@@ -831,7 +873,7 @@ pub async fn test_send(
             "body": body,
         })
         .to_string();
-        enqueue(db, log, &ch, &title, &body, &payload, ts).await;
+        enqueue_all(db, log, std::slice::from_ref(&ch), &title, &body, &payload, ts).await;
         // 立刻把这一行的结果读回来（enqueue 已经试过一次）
         let cid = ch.id.clone();
         let row = db
