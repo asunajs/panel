@@ -444,7 +444,8 @@ function renderPlugins() {
     emptyState(grid, '还没有加载任何插件', '把 .js 放进 plugins/ 目录后刷新页面');
     return;
   }
-  if (!rows.length) { emptyState(grid, '没有匹配的插件'); return; }
+  const off = (state.disabled || []).filter((n) => matches(n, q));
+  if (!rows.length && !off.length) { emptyState(grid, '没有匹配的插件'); return; }
   for (const p of rows) {
     const mine = state.tasks.filter((t) => t.plugin === p.name);
     const lastRun = mine.reduce((m, t) => Math.max(m, t.last_run || 0), 0);
@@ -483,24 +484,27 @@ function renderPlugins() {
       mk('删除', () => deletePlugin(p.name), true),
     );
     cardEl.append(acts);
-    cardEl.addEventListener('click', () => showPlugin(p.name));
-    cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
-    grid.append(cardEl);
+    {
+      cardEl.addEventListener('click', () => showPlugin(p.name));
+      cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
+      grid.append(cardEl);
+    }
   }
-
   // 目录里有、但没加载成功的文件：语法错/启动失败的插件只能从这里进去修。
   const loadedNames = new Set(state.plugins.map((p) => p.name));
   const orphans = state.files.filter((f) => !loadedNames.has(f.name) && matches(f.name, q));
   for (const f of orphans) {
-    const cardEl = el('article', 'plugin-card plugin-card-bad');
+    // 禁用是**用户明确关掉的**，和「加载失败」不是一回事：分开显示，按钮也不同。
+    const offNow = (state.disabled || []).includes(f.name);
+    const cardEl = el('article', 'plugin-card ' + (offNow ? 'plugin-card-off' : 'plugin-card-bad'));
     const head = el('div', 'plugin-head');
     head.append(el('div', 'plugin-name', f.name));
-    head.append(pill('pill-err', '未加载'));
+    head.append(offNow ? pill('pill-warn', '已禁用') : pill('pill-err', '未加载'));
     cardEl.append(head);
     const meta = el('div', 'plugin-meta');
     meta.append(el('span', '', humanBytes(f.bytes)));
     meta.append(el('span', '', '·'));
-    meta.append(el('span', '', '加载失败或还没加载'));
+    meta.append(el('span', '', offNow ? '禁用了，不加载（重启也不加载）' : '加载失败或还没加载'));
     cardEl.append(meta);
     const acts = el('div', 'plugin-actions');
     const mk = (label, fn, danger) => {
@@ -509,11 +513,12 @@ function renderPlugins() {
       b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
       return b;
     };
-    acts.append(
-      mk('编辑源码', () => { state.drawerPlugin = f.name; openDrawer('插件 ' + f.name, true); openPluginSource(f.name); }),
-      mk('尝试加载', () => act('/api/plugins/' + encodeURIComponent(f.name) + '/reload', '已尝试加载 ' + f.name)),
-      mk('删除', () => deletePlugin(f.name), true),
-    );
+    const btns = [];
+    if (offNow) btns.push(mk('启用', () => act('/api/plugins/' + encodeURIComponent(f.name) + '/enable', '已启用 ' + f.name)));
+    btns.push(mk('编辑源码', () => { state.drawerPlugin = f.name; openDrawer('插件 ' + f.name, true); openPluginSource(f.name); }));
+    if (!offNow) btns.push(mk('尝试加载', () => act('/api/plugins/' + encodeURIComponent(f.name) + '/reload', '已尝试加载 ' + f.name)));
+    btns.push(mk('删除', () => deletePlugin(f.name), true));
+    acts.append(...btns);
     cardEl.append(acts);
     grid.append(cardEl);
   }
@@ -1540,6 +1545,7 @@ async function refresh() {
   try {
     const data = await api('/api/state');
     state.plugins = data.plugins || [];
+    state.disabled = data.disabled || [];
     await loadPluginFiles();
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;

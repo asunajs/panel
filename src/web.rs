@@ -91,6 +91,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
+        .route("/api/plugins/{name}/disable", post(plugin_disable))
+        .route("/api/plugins/{name}/enable", post(plugin_enable))
         .route("/api/tasks/{plugin}/{name}/run", post(task_run))
         .route("/api/tasks/{plugin}/{name}/pause", post(task_pause))
         .route("/api/tasks/{plugin}/{name}/resume", post(task_resume))
@@ -341,6 +343,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         "version": env!("CARGO_PKG_VERSION"),
         "auth": st.auth.is_some(),
         "plugins": plugins,
+        // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
+        "disabled": crate::db::plugin_disabled_names(&st.db).await,
         "tasks": tasks,
         "stats": stats,
     })))
@@ -380,6 +384,45 @@ async fn plugin_reload(
     st.sched.unload(&name);
     st.sched.load(&name, source).await.map_err(bad)?;
     Ok(Json(json!({ "ok": true, "name": name })))
+}
+
+/// 禁用：从调度器卸下来，并在库里记一笔 —— **重启后不再加载**。
+///
+/// 与「停止」的区别：停止只影响这次进程（下次启动照样加载），禁用是持久状态。
+async fn plugin_disable(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    safe_name(&name)?;
+    st.sched.unload(&name);
+    crate::db::set_plugin_enabled(&st.db, &name, false)
+        .await
+        .map_err(bad)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("插件 {name} 已禁用：下次启动不再加载"),
+    );
+    Ok(Json(json!({ "ok": true, "name": name, "enabled": false })))
+}
+
+/// 启用：清掉库里的禁用标记，然后从磁盘读源码加载。
+async fn plugin_enable(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let source = read_source(&st.plugins_dir, &name).await?;
+    crate::db::set_plugin_enabled(&st.db, &name, true)
+        .await
+        .map_err(bad)?;
+    st.sched.unload(&name);
+    st.sched.load(&name, source).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "name": name, "enabled": true })))
 }
 
 async fn plugin_unload(

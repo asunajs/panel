@@ -1016,3 +1016,42 @@ async fn a_task_schedule_can_be_overridden_and_restored() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// 禁用是**持久状态**：卸载 + 落库，重启后不再加载；启用把它读回来。
+#[tokio::test]
+async fn a_plugin_can_be_disabled_and_enabled() {
+    let (app, _plugins, _data, _store) = setup_dirs("off1").await;
+    load_plugin(
+        &app,
+        "p1",
+        "import host from 'panel:host';\nawait host.register_handler('hi', async () => 1);\n",
+    )
+    .await;
+
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "p1"), "{state}");
+    assert_eq!(state["disabled"], json!([]));
+
+    // 禁用
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/p1/disable", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], false);
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        !state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "p1"),
+        "禁用后不该还在已加载列表里: {state}"
+    );
+    assert_eq!(state["disabled"], json!(["p1"]), "{state}");
+
+    // 启用
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/p1/enable", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], true);
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "p1"), "{state}");
+    assert_eq!(state["disabled"], json!([]));
+
+    // 启用一个不存在的插件：文件读不到 → 400，且不会留下禁用标记
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/nope/enable", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

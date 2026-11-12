@@ -102,7 +102,7 @@ async fn main() -> Result<(), String> {
         );
     }
 
-    load_all(&plugins_dir, &sched, &log).await;
+    load_all(&plugins_dir, &sched, &log, &db).await;
 
     let auth_on = provisioned.auth.is_some();
     if !auth_on {
@@ -151,7 +151,7 @@ async fn main() -> Result<(), String> {
 
 /// 扫 `plugins/*.js` 逐个加载。**一个插件失败不影响其它插件** ——
 /// 这正是不用 `Vm::from_options` 的理由。
-async fn load_all(dir: &PathBuf, sched: &scheduler::Scheduler, log: &LogHub) {
+async fn load_all(dir: &PathBuf, sched: &scheduler::Scheduler, log: &LogHub, db: &db::Db) {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
         Err(e) => {
@@ -175,7 +175,18 @@ async fn load_all(dir: &PathBuf, sched: &scheduler::Scheduler, log: &LogHub) {
         }
     }
     names.sort();
+    // 界面上禁用过的插件不再加载（持久状态，不是这次进程的临时决定）。
+    let disabled = db::plugin_disabled_names(db).await;
     for name in names {
+        if disabled.contains(&name) {
+            log.emit(
+                "panel",
+                None,
+                Level::Info,
+                format!("插件 {name} 已禁用，跳过（界面上可以启用）"),
+            );
+            continue;
+        }
         let path = dir.join(format!("{name}.js"));
         let source = match tokio::fs::read_to_string(&path).await {
             Ok(s) => s,

@@ -601,6 +601,9 @@ button, input, select { font: inherit; color: inherit; }
   background: color-mix(in srgb, var(--err) 10%, transparent);
 }
 .plugin-card-bad { border-style: dashed; }
+/* 被用户禁用的：虚线 + 压暗一点，和「加载失败」（红）区分开。 */
+.plugin-card-off { border-style: dashed; opacity: 0.72; }
+.plugin-card-off:hover { opacity: 1; }
 
 .modal-input {
   width: 100%; height: var(--h-control); margin: 4px 0 10px; padding: 0 11px;

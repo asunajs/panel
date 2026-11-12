@@ -133,3 +133,38 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     }
     Ok(())
 }
+/// 库里的「已禁用」插件名单（`plugins.enabled = 0`）。
+///
+/// 启动加载和 `/api/state` 都用这一份判据 —— 两处不一致就会出现
+/// 「界面说禁用了，重启又活了」。
+pub async fn plugin_disabled_names(db: &Db) -> Vec<String> {
+    let rows = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT name FROM plugins WHERE enabled=0 ORDER BY name")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<String> = st
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await;
+    rows.unwrap_or_default()
+}
+
+/// 置插件启用/禁用（**持久**：重启后仍然生效）。
+pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<(), String> {
+    let name = name.to_string();
+    db.call(move |c| {
+        c.execute(
+            "INSERT INTO plugins(name,path,enabled) VALUES(?1,'',?2)
+             ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled",
+            rusqlite::params![name, enabled as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+}
