@@ -66,6 +66,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：根因、修法（vendor 补丁 + 加载期闸门）、升级时怎么重打 |
 | [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
 | [health.md](health.md) | 健康摘要：`/readyz`（无鉴权探针）与 `/api/health`（带名字的明细）、warnings 阈值、读数 |
+| [logs.md](logs.md) | 日志流水线：脱敏 → SSE + 单消费者队列落库；`run_id` 归属表；顺序不能乱 |
 | [task-state.md](task-state.md) | 任务状态谁说了算：九个字段在热重载 / 重启后的归属、三个坑、实测 |
 | [js-slots.md](js-slots.md) | JS 执行通道：插件与脚本共用的并发上限、满了的行为、派发顺序、读数 |
 | [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
