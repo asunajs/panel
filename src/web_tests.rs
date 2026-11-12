@@ -2532,3 +2532,50 @@ async fn creating_a_script_can_carry_its_schedule() {
     assert!(names.contains(&"manual".to_string()));
     assert!(!names.contains(&"bad".to_string()), "写错计划的不该建出来: {names:?}");
 }
+
+/// 删插件要**保住运行历史**：`runs` 是历史，`tasks` 是配置。前者留，后者删。
+///
+/// 这条以前只有「文件进了 trash」的断言（`plugin_delete_moves_the_file_into_trash`），
+/// 没验过「历史还在」—— 而那正是用户删完想回看「它上次为什么失败」的时候。
+#[tokio::test]
+async fn deleting_a_plugin_keeps_its_run_history() {
+    let (app, plugins, _data, _store) = setup_dirs("pdelruns").await;
+    let src = [
+        "import host from 'panel:host';",
+        "await host.register_handler('t', async () => { await host.info('bye'); });",
+        "await host.register_cron('t', '@every 1h', 5000, {});",
+    ]
+    .join("\n");
+    std::fs::write(plugins.join("gone.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/gone/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/gone/t/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (status, _) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let (_, runs) = get(&app, "/api/runs?plugin=gone").await;
+    let n = runs["runs"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(n, 1, "删插件不该删历史: {runs}");
+
+    let (_, pl) = get(&app, "/api/runs/plugins").await;
+    let names: Vec<String> = pl
+        .as_array()
+        .cloned()
+        .or_else(|| pl["plugins"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.iter().any(|x| x == "gone"), "历史下拉里要有它: {pl}");
+
+    let (_, state) = get(&app, "/api/state").await;
+    let tasks = state["tasks"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !tasks.iter().any(|t| t["plugin"] == "gone"),
+        "插件没了，它的任务不该还挂在任务表里: {state}"
+    );
+}
