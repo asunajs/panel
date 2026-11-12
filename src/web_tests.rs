@@ -2012,3 +2012,37 @@ async fn a_string_body_without_content_type_is_415() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// `host.notify` 的可选参数：正文可以不传、也可以显式 undefined。
+///
+/// 这条和 `optional_args_accept_omitted_undefined_and_null` 是一对：那条盯注册期，
+/// 这条盯运行期的 op（`notify` 走 `body === undefined ? undefined : String(body)`）。
+#[tokio::test]
+async fn notify_accepts_a_missing_body() {
+    let (app, _plugins, _data, _store) = setup_dirs("ntf2").await;
+    load_plugin(
+        &app,
+        "n",
+        "import host from 'panel:host';\n\
+await host.register_handler('go', async () => {\n\
+  await host.notify('只有标题');\n\
+  await host.notify('显式 undefined', undefined);\n\
+  await host.notify('有正文', '正文在');\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/n/go/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, b) = get(&app, "/api/notifications").await;
+    let items = b["items"].as_array().expect("要有通知");
+    assert_eq!(items.len(), 3, "{b}");
+    // 顺序是新的在前：第三条（有正文）最先
+    assert_eq!(items[0]["title"], "有正文");
+    assert_eq!(items[0]["body"], "正文在");
+    // 不传正文的两条：body 是空串，不是 null、也不是把 'undefined' 写进去
+    for it in &items[1..] {
+        assert_eq!(it["body"], "", "不传正文应当是空串: {it}");
+    }
+}

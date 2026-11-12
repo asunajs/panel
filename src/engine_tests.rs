@@ -298,3 +298,37 @@ async fn dropping_a_plugin_with_live_timers_is_clean() {
     let ms = t0.elapsed().as_millis();
     assert!(ms < 500, "卸载等了 {ms}ms —— 定时器状态没摘掉");
 }
+
+/// §7.2 可选参数的 arity：`WRAP` 里每个带可选参的 op 都写成**显式形参填满**再转调 raw。
+///
+/// 三种写法必须都能用：少传、显式 `undefined`、`null`。漏填一个形参的话，JS 侧少传一个
+/// 参数就会被 LLRT 的 `Undefined<T>` 判成 arity 错误 —— 这是加新 op 时最容易踩的地方。
+#[tokio::test]
+async fn optional_args_accept_omitted_undefined_and_null() {
+    let src = r#"
+import host from 'panel:host';
+await host.register_cron('a', '@every 1h');                 // 只给必填
+await host.register_cron('b', '@every 1h', undefined);      // 显式 undefined
+await host.register_cron('c', '@every 1h', null, null);     // null 当没给
+await host.register_cron('d', '@every 1h', 1234, { params: { x: 1 }, lead_ms: 0 });
+await host.register_handler('go', async () => 1);
+"#;
+    let (p, mut rx) = load(src).await;
+    let _plugin = p.expect("三种写法都该能加载");
+
+    let mut crons: Vec<(String, u64, bool)> = Vec::new();
+    while let Ok(reg) = rx.try_recv() {
+        if let Registration::Cron { name, budget_ms, params, .. } = reg {
+            crons.push((name, budget_ms, params.is_some()));
+        }
+    }
+    crons.sort();
+    assert_eq!(crons.len(), 4, "四条注册都要到：{crons:?}");
+    // 不给预算 = 调度器的默认预算（不是 0，也不是报错）
+    let def = crate::scheduler::DEFAULT_BUDGET_MS;
+    assert_eq!(crons[0], ("a".into(), def, false), "少传 = 默认预算: {crons:?}");
+    assert_eq!(crons[1], ("b".into(), def, false), "显式 undefined = 默认预算: {crons:?}");
+    assert_eq!(crons[2], ("c".into(), def, false), "null = 默认预算: {crons:?}");
+    assert_eq!(crons[3], ("d".into(), 1234, true), "给了就照给: {crons:?}");
+}
+
