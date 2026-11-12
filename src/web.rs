@@ -1246,6 +1246,8 @@ struct Page {
     /// 为什么用 id 而不是 offset：运行记录一直在新增，offset 分页会漏行/重行 ——
     /// 翻到第二页时第一页的行可能已经被新行挤下去了。
     before: Option<i64>,
+    /// 日志等级过滤（精确匹配：`warn` 只看 warn，不看 error）。
+    level: Option<String>,
 }
 
 fn limit_of(p: &Page, default: i64, cap: i64) -> i64 {
@@ -1486,37 +1488,61 @@ async fn api_logs(
 ) -> Result<Json<Value>, ApiError> {
     let limit = limit_of(&p, 200, 2000);
     let (plugin, run_id) = (p.plugin.clone(), p.run_id);
-    let rows = st
+    // 等级是**精确匹配**（和界面上那排 seg 按钮的语义一致：点 warn 就只看 warn）。
+    let level = p
+        .level
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let q = like_pat(&p.q);
+    // 往前翻的游标：id 单调，比时间戳可靠（同一毫秒里可能有多条）。
+    let before = p.before;
+    let (rows, total) = st
         .db
         .call(move |c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT ts,plugin,run_id,level,message FROM logs
-                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2)
-                     ORDER BY id DESC LIMIT ?3",
+                    "SELECT id,ts,plugin,run_id,level,message FROM logs \
+                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
+                       AND (?3 IS NULL OR level=?3) \
+                       AND (?4 IS NULL OR plugin LIKE ?4 OR message LIKE ?4) \
+                       AND (?5 IS NULL OR id < ?5) \
+                     ORDER BY id DESC LIMIT ?6",
                 )
                 .map_err(|e| e.to_string())?;
             let out: Vec<Value> = stmt
-                .query(rusqlite::params![plugin, run_id, limit])
+                .query(rusqlite::params![plugin, run_id, level, q, before, limit])
                 .map_err(|e| e.to_string())?
                 .mapped(|r| {
                     Ok(json!({
-                        "ts": r.get::<_, i64>(0)?,
-                        "plugin": r.get::<_, String>(1)?,
-                        "run_id": r.get::<_, Option<i64>>(2)?,
-                        "level": r.get::<_, String>(3)?,
-                        "message": r.get::<_, String>(4)?,
+                        "id": r.get::<_, i64>(0)?,
+                        "ts": r.get::<_, i64>(1)?,
+                        "plugin": r.get::<_, String>(2)?,
+                        "run_id": r.get::<_, Option<i64>>(3)?,
+                        "level": r.get::<_, String>(4)?,
+                        "message": r.get::<_, String>(5)?,
                     }))
                 })
                 .collect::<rusqlite::Result<_>>()
                 .map_err(|e| e.to_string())?;
-            Ok(out)
+            // 总数：同一个筛选，但**不带游标** —— 回答「这套条件一共多少条」。
+            let total: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM logs \
+                     WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
+                       AND (?3 IS NULL OR level=?3) \
+                       AND (?4 IS NULL OR plugin LIKE ?4 OR message LIKE ?4)",
+                    rusqlite::params![plugin, run_id, level, q],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            Ok((out, total))
         })
         .await
         .map_err(internal)?;
-    Ok(Json(json!({ "logs": rows })))
+    Ok(Json(json!({ "logs": rows, "total": total })))
 }
-
 /// SSE 日志流。广播里已经是脱敏+截断后的文本（LogHub::emit 在入队前做完）。
 ///
 /// 慢消费者会被 broadcast 落下（`Lagged`）—— 这里显式告诉前端丢了多少条，
@@ -1624,11 +1650,11 @@ mod tests {
 
     #[test]
     fn limit_is_clamped() {
-        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
+        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
         assert_eq!(limit_of(&p, 50, 500), 500);
-        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
+        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
         assert_eq!(limit_of(&p, 50, 500), 1);
-        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
+        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
         assert_eq!(limit_of(&p, 50, 500), 50);
     }
 }

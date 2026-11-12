@@ -2319,3 +2319,67 @@ async fn readyz_reports_counts_but_not_names() {
         "探针不该吐插件名: {text}"
     );
 }
+
+/// 日志查询：等级精确匹配、子串搜索、id 游标往前翻、total 跟着筛选走。
+#[tokio::test]
+async fn logs_can_be_filtered_searched_and_paged() {
+    let (app, _plugins, _data, _store, db) = setup_core("plogs").await;
+    // 造 300 条：plugin=a 的 info 与 plugin=b 的 error 各一半
+    db.call(|c| {
+        for i in 0..300 {
+            let (pl, lv, msg) = if i % 2 == 0 {
+                ("alpha", "info", format!("hello {i}"))
+            } else {
+                ("beta", "error", format!("boom {i}"))
+            };
+            c.execute(
+                "INSERT INTO logs(plugin,level,ts,message) VALUES(?1,?2,?3,?4)",
+                rusqlite::params![pl, lv, i as i64, msg],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // 1) 不带条件：最新的 200 条 + 总数 300
+    let (status, v) = get(&app, "/api/logs?limit=200").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["total"], 300);
+    let rows = v["logs"].as_array().unwrap();
+    assert_eq!(rows.len(), 200);
+    assert!(rows[0]["id"].is_i64(), "要有 id 才能做游标");
+    assert_eq!(rows[0]["message"], "boom 299", "倒序：最新在前");
+
+    // 2) 往前翻：before = 最后一行的 id，不能重也不能漏
+    let last_id = rows[199]["id"].as_i64().unwrap();
+    let (_, v2) = get(&app, &format!("/api/logs?limit=200&before={last_id}")).await;
+    let rows2 = v2["logs"].as_array().unwrap();
+    assert_eq!(rows2.len(), 100, "剩下 100 条");
+    assert_eq!(v2["total"], 300, "total 不跟着游标变");
+    let first_prev = rows[199]["id"].as_i64().unwrap();
+    let newest_older = rows2[0]["id"].as_i64().unwrap();
+    assert!(newest_older < first_prev, "翻页要接着往旧的方向走");
+
+    // 3) 等级精确匹配
+    let (_, v3) = get(&app, "/api/logs?level=error&limit=500").await;
+    assert_eq!(v3["total"], 150);
+    assert!(v3["logs"].as_array().unwrap().iter().all(|r| r["level"] == "error"));
+
+    // 4) 子串搜索（消息）
+    let (_, v4) = get(&app, "/api/logs?q=hello%201&limit=500").await;
+    assert!(v4["total"].as_i64().unwrap() > 0, "{v4}");
+    assert!(v4["logs"].as_array().unwrap().iter().all(|r| r["message"].as_str().unwrap().contains("hello 1")));
+
+    // 5) 按插件 + 等级组合
+    let (_, v5) = get(&app, "/api/logs?plugin=beta&level=error&limit=500").await;
+    assert_eq!(v5["total"], 150);
+    assert!(v5["logs"].as_array().unwrap().iter().all(|r| r["plugin"] == "beta"));
+
+    // 6) 搜不到就是空，不是 500
+    let (status, v6) = get(&app, "/api/logs?q=zzzznotfound").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v6["total"], 0);
+    assert!(v6["logs"].as_array().unwrap().is_empty());
+}

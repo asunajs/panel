@@ -116,9 +116,18 @@ async function main() {
     rows.push('(' + ["'ghost'", "'old'", now - 500000 - i * 1000, now - 500000 - i * 1000 + 200,
       "'ok'", 'NULL'].join(',') + ')');
   }
+  // 日志：600 条（hello 一半、error 三分之一），用来验服务端搜索 / 翻页 / 等级过滤。
+  const logRows = [];
+  for (let i = 0; i < 600; i++) {
+    const pl = i % 2 === 0 ? "'alpha'" : "'beta'";
+    const lv = i % 3 === 0 ? "'error'" : "'info'";
+    const msg = i % 2 === 0 ? "'hello " + i + "'" : "'boom " + i + "'";
+    logRows.push('(' + [pl, lv, now - i * 100, msg].join(',') + ')');
+  }
   // 面板开着库（WAL），从外面写要带 busy_timeout，否则一句 database is locked 就退出。
   const seedSql = 'PRAGMA busy_timeout=5000;\n' +
-    'INSERT INTO runs(plugin,task,started_at,ended_at,status,error) VALUES ' + rows.join(',') + ';\n';
+    'INSERT INTO runs(plugin,task,started_at,ended_at,status,error) VALUES ' + rows.join(',') + ';\n' +
+    'INSERT INTO logs(plugin,level,ts,message) VALUES ' + logRows.join(',') + ';\n';
   await new Promise((res, rej) => {
     const p = spawn('sqlite3', [path.join(dir, 'panel.db')], { stdio: ['pipe', 'ignore', 'pipe'] });
     let err = '';
@@ -208,6 +217,29 @@ async function main() {
   const ghostCount = await js("document.getElementById('runs-count').textContent");
   check('筛选后计数跟着变', /共 40/.test(ghostCount || ''), ghostCount);
 
+  // ---------------------------------------------------------------- 日志页
+  // 搜索/等级一律走服务端：屏幕外的历史也要能搜到、能往前翻。
+  await js("location.hash = '#logs'");
+  await sleep(1200);
+  await js("(()=>{const i=document.getElementById('log-search'); i.value='hello'; i.dispatchEvent(new Event('input',{bubbles:true}));})()");
+  await sleep(1500);
+  const foot1 = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
+  check('日志搜索切到服务端并给出总数', /已显示 200 \/ 共 300 条/.test(foot1), foot1);
+  await js("document.querySelector('.log-foot button')?.click()");
+  await sleep(1500);
+  const foot2 = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
+  check('日志能往前翻到 300 条', /已显示 300 \/ 共 300 条/.test(foot2), foot2);
+  const dupLogs = await js("(()=>{const s=new Set();let d=0;for(const e of document.querySelectorAll('#logs-view .log-msg')){const k=e.textContent; if(s.has(k))d++; s.add(k);} return d;})()");
+  check('日志翻页不重复', dupLogs === 0, String(dupLogs));
+  await js("(()=>{const i=document.getElementById('log-search'); i.value=''; i.dispatchEvent(new Event('input',{bubbles:true}));})()");
+  await sleep(800);
+  await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='error').click()");
+  await sleep(1500);
+  const onlyErr = await js("[...document.querySelectorAll('#logs-view .level')].every(e=>e.textContent==='error')");
+  const foot3 = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
+  check('日志等级过滤只看 error', onlyErr === true && /已显示 \d+ \/ 共 200 条/.test(foot3), foot3);
+  await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='').click()");
+  await sleep(600);
   // 设置：5 个页签 + 通知页能出渠道表
   await js("location.hash = '#settings'");
   await sleep(1000);

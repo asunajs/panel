@@ -30,6 +30,10 @@ const state = {
   /** 运行记录里出现过的插件名（服务端去重）：筛选下拉要用，含已卸载插件的历史行。 */
   runPlugins: [],
   health: null,
+  logMode: false,
+  logRows: [],
+  logTotal: 0,
+  logBefore: null,
   /** 服务端算的总条数（按当前插件筛选），用来显示「已加载 N / 共 M」。 */
   runsTotal: null,
   runsLoading: false,
@@ -780,6 +784,7 @@ function logMatches(l) {
 function renderLogs() {
   const box = $('logs-view');
   clear(box);
+  if (state.logMode) { renderLogSearch(box); return; }
   const rows = state.logs.filter(logMatches);
   if (!rows.length) {
     emptyState(box, state.logs.length ? '当前过滤条件下没有日志' : '还没有日志', state.logs.length ? '' : '插件第一次打日志就会出现在这里');
@@ -789,10 +794,60 @@ function renderLogs() {
   box.scrollTop = box.scrollHeight;
 }
 
+// ---- 服务端搜索：日志一多，前端那点环形缓冲就不够用了 ----
+//
+// 默认是「实时流 + 客户端过滤」，只看得见内存里那几百条。一旦有搜索词或等级，
+// 就切成**服务端查询**：查的是全部历史（现在保留 2 万条），并带 id 游标往前翻。
+async function searchLogs(reset) {
+  const q = (state.logQuery || '').trim();
+  const lv = state.logLevel || '';
+  if (!q && !lv) {
+    state.logMode = false;
+    state.logRows = [];
+    renderLogs();
+    return;
+  }
+  state.logMode = true;
+  if (reset) { state.logRows = []; state.logBefore = null; }
+  const ps = new URLSearchParams({ limit: '200' });
+  if (q) ps.set('q', q);
+  if (lv) ps.set('level', lv);
+  if (!reset && state.logBefore) ps.set('before', String(state.logBefore));
+  try {
+    const d = await api('/api/logs?' + ps.toString());
+    const rows = d.logs || [];
+    state.logRows = state.logRows.concat(rows);
+    state.logTotal = d.total || 0;
+    if (rows.length) state.logBefore = rows[rows.length - 1].id;
+  } catch (e) {
+    toast(e.message || '搜索失败', true);
+  }
+  renderLogs();
+}
+
+/** 服务端搜索结果：按时间正序显示（和实时流一致），底部给「再往前」和总数。 */
+function renderLogSearch(box) {
+  if (!state.logRows.length) {
+    emptyState(box, '没有匹配的日志', '换个词试试；搜索的是全部历史，不只是屏幕上这些');
+    return;
+  }
+  const rows = state.logRows.slice().reverse();
+  for (const l of rows) box.append(logLine(l));
+  const foot = el('div', 'log-foot');
+  foot.append(el('span', '', '已显示 ' + state.logRows.length + ' / 共 ' + state.logTotal + ' 条'));
+  if (state.logRows.length < state.logTotal) {
+    const more = el('button', 'btn btn-sm', '再往前 200 条');
+    more.type = 'button';
+    more.addEventListener('click', () => searchLogs(false));
+    foot.append(more);
+  }
+  box.append(foot);
+}
+
 function appendLog(l) {
   state.logs.push(l);
   if (state.logs.length > LOG_RING) state.logs.splice(0, state.logs.length - LOG_RING);
-  if (state.logsPaused || state.view !== 'logs' || !logMatches(l)) return;
+  if (state.logMode || state.logsPaused || state.view !== 'logs' || !logMatches(l)) return;
   const box = $('logs-view');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   if (box.querySelector('.empty')) clear(box);
@@ -2291,16 +2346,16 @@ function bind() {
       for (const other of document.querySelectorAll('.seg-item')) {
         other.setAttribute('aria-pressed', String(other === btn));
       }
-      renderLogs();
+      searchLogs(true);
     });
   }
-  wireSearch('log-search', (v) => { state.logQuery = v; }, renderLogs);
+  wireSearch('log-search', (v) => { state.logQuery = v; }, () => searchLogs(true));
   $('log-pause').addEventListener('click', (ev) => {
     state.logsPaused = !state.logsPaused;
     ev.target.textContent = state.logsPaused ? '继续' : '暂停';
     if (!state.logsPaused) renderLogs();
   });
-  $('log-clear').addEventListener('click', () => { state.logs = []; renderLogs(); });
+  $('log-clear').addEventListener('click', () => { state.logs = []; state.logRows = []; state.logMode = false; renderLogs(); });
 
   // 设置页签
   for (const b of document.querySelectorAll('[data-tab]')) {
