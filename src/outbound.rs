@@ -14,8 +14,6 @@ use serde_json::{json, Map, Value as Json};
 use crate::engine::Invocation;
 use crate::ssrf;
 
-/// 响应正文上限：1 MiB。
-pub const BODY_CAP: usize = 1024 * 1024;
 /// 最多跟几跳重定向。
 pub const MAX_HOPS: usize = 3;
 
@@ -51,7 +49,9 @@ fn get_str(o: &Json, k: &str) -> Option<String> {
     o.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-/// 发一次请求（含重定向）。返回 `{status, headers, body, truncated, url, redirected}`。
+/// 发一次请求（含重定向）。返回 `{status, headers, body, url, redirected}`。
+///
+/// 正文**不设上限**（插件是可信代码）：`truncated` 字段留着但恒为 false。
 pub async fn fetch_json(
     url: String,
     o: &Json,
@@ -138,7 +138,6 @@ pub async fn fetch_json(
 
         let headers = headers_to_json(resp.headers());
         let mut buf: Vec<u8> = Vec::new();
-        let mut truncated = false;
         let mut body_error: Option<String> = None;
         let mut incoming = resp.into_body();
         loop {
@@ -146,12 +145,7 @@ pub async fn fetch_json(
             match frame {
                 Ok(Some(Ok(f))) => {
                     if let Some(data) = f.data_ref() {
-                        let room = BODY_CAP.saturating_sub(buf.len());
-                        if data.len() > room {
-                            buf.extend_from_slice(&data[..room]);
-                            truncated = true;
-                            break;
-                        }
+                        // 不设上限：插件是可信代码，正文要多少给多少。
                         buf.extend_from_slice(data);
                     }
                 }
@@ -173,7 +167,7 @@ pub async fn fetch_json(
             "redirected": redirected,
             "headers": headers,
             "body": String::from_utf8_lossy(&buf),
-            "truncated": truncated,
+            "truncated": false,
             "body_error": body_error,
         }));
     }
@@ -246,19 +240,13 @@ async fn fetch_native_json(
 
         let headers = headers_to_json(resp.headers());
         let mut buf: Vec<u8> = Vec::new();
-        let mut truncated = false;
         let mut body_error: Option<String> = None;
         let mut stream = resp;
         loop {
             let step = tokio::time::timeout(Duration::from_millis(timeout), stream.chunk()).await;
             match step {
                 Ok(Ok(Some(chunk))) => {
-                    let room = BODY_CAP.saturating_sub(buf.len());
-                    if chunk.len() > room {
-                        buf.extend_from_slice(&chunk[..room]);
-                        truncated = true;
-                        break;
-                    }
+                    // 同上：不设上限
                     buf.extend_from_slice(&chunk);
                 }
                 Ok(Ok(None)) => break,
@@ -279,7 +267,7 @@ async fn fetch_native_json(
             "redirected": redirected,
             "headers": headers,
             "body": String::from_utf8_lossy(&buf),
-            "truncated": truncated,
+            "truncated": false,
             "body_error": body_error,
             "tls": "native",
         }));

@@ -51,7 +51,7 @@ OK register_cron 3arg: undefined
 | redirect follow | `200`，`url …/json`，`redirected:true` | 自动跟随 |
 | redirect manual | `302`，`redirected:false`，`location:/json` | `redirect:'manual'` |
 | redirect loop | `重定向超过 3 跳，已中止` | `MAX_HOPS`，每跳重判 |
-| body cap | `len=1048576, truncated=true`（靶子发 2 MiB） | `BODY_CAP` 1 MiB |
+| body cap | ~~`len=1048576, truncated=true`（靶子发 2 MiB）~~ | ~~`BODY_CAP` 1 MiB~~ —— **2026-11-12 已取消**：正文不设上限，实测 3 MB → `len=3000000, truncated=false` |
 | timeout | `ms=502, err=请求超时（500ms）`（靶子慢响应 4s） | `clamp_timeout` |
 | POST echo | `{echo:你好,method:POST}` | 请求体回显 |
 | latin1 body | `body="caf ??", len=7`（靶子发 windows-1252 `café 中文`） | ⚠ lossy UTF-8，见 §9 |

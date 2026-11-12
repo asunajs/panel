@@ -209,7 +209,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 |---|---|
 | `main.rs` | 启动装配：**派生令牌凭据** → DB actor → LogHub → scheduler → 加载插件 → axum。**没有凭据（既无 `PANEL_TOKEN` 也无 `auth.json`）就只准绑回环**；`HOST_API_ALLOW_PRIVATE=1` 会发警告日志 |
 | `engine.rs` | 1 插件 = 1 `AsyncRuntime`+`AsyncContext`；绕过 `Vm` 自己组装；`GatedResolver` + 摘 `fetch` 全局；`dispatch`（墙钟死线 interrupt + `idle`） |
-| `hostapi.rs` | `panel:host` native module，全 async op；`WRAP` JSON 文本边界；限额 `ROW_CAP`/`BODY_CAP`/`clamp_timeout`/`MAX_HOPS` |
+| `hostapi.rs` | `panel:host` native module，全 async op；`WRAP` JSON 文本边界；限额 `ROW_CAP`/`clamp_timeout`/`MAX_HOPS`（正文不设上限） |
 | `ssrf.rs` | 出站判定表（字面量 + 内网别名，**不读环境**，开关作参数）；重定向每跳重判 |
 | `scheduler.rs` | 插件表/任务表的**唯一所有者**（actor）；cron 派发 + 预算 + 熔断 + run 记录；`catch_engine_panic` 引擎边界 |
 | `cron.rs` | 5/6 字段 + `@every` + jitter + DST（移植基线，1112 行） |

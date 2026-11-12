@@ -149,7 +149,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | 项 | 值 | 现状 / enforcement |
 |---|---|---|
 | `sqlite_query` 结果行数 | **1000 行**，超了 `truncated: true` | 已实现 `src/hostapi.rs` `ROW_CAP` |
-| `fetch` 响应体 | **1 MiB**，超了 `truncated: true`（不是完整响应） | 已实现 `BODY_CAP`；实测 2 MiB 响应 → `len=1048576, truncated=true` |
+| `fetch` 响应体 | **不设上限**（2026-11-12 起） | 插件是可信代码，正文要多少给多少；`truncated` 字段留着但恒为 false。实测 3 MB 响应 → `len=3000000, truncated=false`（rustls 与 native 两条路都验过） |
 | `fetch` `timeout_ms` | 默认 **10000**，钳到 `[100, 60000]` | 已实现 `clamp_timeout`；实测 500ms 打 4s 慢响应 → 502ms 报超时 |
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
 | 单插件定时器 | 基线 **256 条** | **未实现**：定时器改用 LLRT 原生（抛弃 `timers.rs`），宿主没有定时器注册表可数。❓ 要不要在 host 侧补一层计数 |
