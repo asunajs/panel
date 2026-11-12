@@ -1,7 +1,7 @@
 // 由 src/entries/exchange.ts 打包生成（panel-llrt 版）—— **不要手改这个文件**。
 //
 //   改代码：编辑 src/，然后 `npm run build:panelllrt`
-//   mcloud-plugin 0.2.24 · 插件 `mcloud-exchange`
+//   mcloud-plugin 0.2.25 · 插件 `mcloud-exchange`
 
 // src/panelllrt/hostApi.ts
 import panelHost from "panel:host";

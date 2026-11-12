@@ -35,6 +35,62 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 推送、备份/恢复、脚本任务、上传、完整鉴权面（先单令牌）、Bun/Node 外部运行时。
 **仍然不做**：市场、自更新、插件 UI 的 iframe 隔离源。
 
+### 同步 op（给「同步步骤机」风格的插件）
+
+| op | 说明 |
+|---|---|
+| `http_fetch(url, opts?)` | 和 `fetch` 同一份实现（SSRF 门、重定向、1 MiB 上限），但**阻塞** |
+| `sqlite_query_sync(sql, params?)` | 和 `sqlite_query` 同形，**阻塞** |
+| `sqlite_exec_sync(sql, params?)` | 和 `sqlite_exec` 同形，**阻塞** |
+
+插件生态里有一族是同步步骤机写的（`const r = http_fetch(...)` 用了几百处，mcloud 就是），
+把工厂改 async 会连锁改到底。实现见 `src/sync_bridge.rs`：JS 线程阻塞等，实际工作在
+**独立线程**的 current-thread runtime 上跑（不在 tokio worker 里 `block_on`，也不占着 worker）。
+代价写清楚：同步 op 会占住这个插件的引擎线程，一次慢请求会推迟它自己的其它工作。
+
+### WebSocket（长连接）
+
+| op | 说明 |
+|---|---|
+| `ws_open(url, opts?)` | 开一条连接，返回句柄（数字）。握手失败**抛错**，不留半死句柄 |
+| `ws_send(id, text)` | 发一帧文本，入队即返回 |
+| `ws_recv(id, timeout_ms?)` | 收一帧，**带超时**。默认 1500ms，最多 1800ms |
+| `ws_close(id)` | 关掉，**幂等** |
+
+`ws_recv` 返回**五种形状**（不是异常）：`{type:'text',data}` / `{type:'binary',hex}` /
+`{type:'timeout'}` / `{type:'close',reason}` / `{type:'error',message}`。
+**超时是结果不是错误** —— 插件按「一次调用推进一步」写：`recv(1500)` 超时等于
+「这一步没收到东西」，状态落库、下次接着收，插件里不需要事件循环。
+
+约束：同时最多 **8 条**连接；单帧 **256 KiB**（超了回 `error` 并关连接，不静默截断）；
+**不自动重连**（重连策略是插件的业务判断）；句柄活在进程内存里，**面板重启后失效**，
+插件拿到「句柄不存在」就应当重新 `ws_open`。
+
+实现见 `src/wsclient.rs`（tokio-tungstenite）。同步语义由 `sync_bridge::run_on` 桥到
+**进程级 runtime** 上 —— 长连接不能建在一次性 runtime 上：那个 runtime 一 drop，
+socket 的 reactor 就没了，后续 send 会报「context is being shutdown」。
+
+### TLS 后端：`tls: 'rustls' | 'native'`
+
+`fetch` 与 `ws_open` 都认这个选项（同一个判据，见 `wsclient::tls_choice`）：
+
+| 值 | 传输 | 什么时候用 |
+|---|---|---|
+| `'rustls'`（默认） | LLRT 的 HTTP 客户端 / tungstenite + rustls | 绝大多数主机 |
+| `'native'` | reqwest + 平台 TLS（macOS Security.framework / Linux OpenSSL） | **只给 CBC 套件的主机** |
+
+rustls **不实现任何 CBC 套件**（设计选择，不是配置问题），所以只给 CBC 的主机在默认路径上
+必然握手失败。`tls:'native'` 走另一条传输，**每跳仍然过 SSRF 门**、仍然不自动跟重定向、
+正文仍然 1 MiB 上限。
+
+实测（2026-11-12，mcloud 直播那两个主机）：
+
+```text
+GET https://v.cmcc-cs.cn/             rustls → 失败(Connect)      native → 200
+GET https://videoim.cmcc-cs.cn:20102  rustls → 失败(Connect)      native → 200
+WSS wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → 过了 TLS（HTTP 200，不是 101）
+```
+
 ### 通知
 
 notify(title, body?)：插件主动喊话。落到面板的通知表（铃铛上的未读数），

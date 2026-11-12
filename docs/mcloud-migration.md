@@ -104,17 +104,25 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
 
 ⇒ 结论：**可以迁，但要么先补 `lead_ms`（调度器提前唤醒），要么接受精度退化**。要跑得你点头。
 
-### 直播（mcloud-live）
+### 直播（mcloud-live）—— 2026-11-12 解除阻塞
 
-- 硬阻塞 1：**WebSocket**。LLRT 没有 ws 模块（`llrt_fetch` / `llrt_http` 里都没有），
-  `vendor/llrt` 也没有 `tokio-tungstenite`。听播、小红花、抽奖都要它；
-- 硬阻塞 2：**legacy TLS**。直播主机只给 CBC 套件，LLRT 走 rustls 连不上
-  （`tls: 'native'` 在旧面板要专门编译特性，见 [llrt-spike.md](llrt-spike.md) §7）；
-- 适配层对 `ws_*` 的处理是**明确抛错**（不装作有），所以这个插件加载正常、
-  但一走到听播就会得到一句清楚的失败，而不是莫名其妙的超时。
+原来两条硬阻塞，现在都补上了：
 
-⇒ 结论：**要让它跑，得先给面板加 WebSocket 客户端（新依赖 + 同步桥）+ legacy TLS 后端**。
-这两件都不是迁移，是新能力，等你决定。
+| 阻塞 | 现状 |
+|---|---|
+| WebSocket | ✅ 面板新增 ws_open/send/recv/close（tokio-tungstenite，同步语义 + 句柄） |
+| legacy TLS（CBC） | ✅ tls:'native' 走 reqwest + 平台 TLS |
+
+实测（同一个主机，两条路对比）：
+
+```text
+GET  https://v.cmcc-cs.cn/             rustls → 失败(Connect)      native → 200
+GET  https://videoim.cmcc-cs.cn:20102  rustls → 失败(Connect)      native → 200
+WSS  wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → 过了 TLS
+```
+
+插件侧不需要改协议层：它本来就用 tls:'native' 写，适配层把选项原样透传。
+剩下的只是**真跑一次**（听播/抽奖都是对上游的真实动作，要你点头）。
 
 ## 8. 怎么重新构建插件
 

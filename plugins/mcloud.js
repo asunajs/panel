@@ -1,7 +1,7 @@
 // 由 src/entries/mcloud.ts 打包生成（panel-llrt 版）—— **不要手改这个文件**。
 //
 //   改代码：编辑 src/，然后 `npm run build:panelllrt`
-//   mcloud-plugin 0.2.24 · 插件 `mcloud`
+//   mcloud-plugin 0.2.25 · 插件 `mcloud`
 
 // src/panelllrt/hostApi.ts
 import panelHost from "panel:host";
@@ -103,24 +103,24 @@ function worker_hint(_hint) {
 function missing(what) {
   throw new Error("panel-llrt 还没有 " + what + "：这个功能在这台面板上不可用");
 }
-function ws_open(_url, _options) {
-  return missing("WebSocket 客户端");
+function ws_open(url, options) {
+  return host.ws_open(url, options ?? {});
 }
-function ws_send(_id, _text2) {
-  return missing("WebSocket 客户端");
+function ws_send(id, text2) {
+  return host.ws_send(id, text2);
 }
-function ws_recv(_id, _timeoutMs) {
-  return missing("WebSocket 客户端");
+function ws_recv(id, timeout_ms) {
+  return host.ws_recv(id, timeout_ms);
 }
-function ws_close(_id) {
-  return missing("WebSocket 客户端");
+function ws_close(id) {
+  return host.ws_close(id);
 }
 function smtp_send(_opts) {
   return missing("SMTP 发送");
 }
 
 // src/version.ts
-var PLUGIN_VERSION = "0.2.24";
+var PLUGIN_VERSION = "0.2.25";
 
 // src/store/keys.ts
 var DEFAULT_ACCT = "default";

@@ -57,6 +57,11 @@ pub async fn fetch_json(
     o: &Json,
     inv: Option<Arc<Invocation>>,
 ) -> Result<Json, String> {
+    // tls:"native" 是**另一条传输**：rustls 不实现任何 CBC 套件，只给 CBC 的主机
+    // 在 rustls 那条路上永远握手失败，所以这里直接换 reqwest + 平台 TLS。
+    if crate::wsclient::tls_choice(o)? == "native" {
+        return fetch_native_json(url, o, inv).await;
+    }
     let timeout = clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64));
     let method = get_str(o, "method").unwrap_or_else(|| "GET".into());
     let body = get_str(o, "body").unwrap_or_default();
@@ -170,6 +175,113 @@ pub async fn fetch_json(
             "body": String::from_utf8_lossy(&buf),
             "truncated": truncated,
             "body_error": body_error,
+        }));
+    }
+}
+
+/// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、
+/// 不自动跟重定向（我们自己在循环里跟，这样每跳都能过 SSRF 门）、正文 1 MiB 上限。
+async fn fetch_native_json(
+    url: String,
+    o: &Json,
+    inv: Option<Arc<Invocation>>,
+) -> Result<Json, String> {
+    let timeout = clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64));
+    let method = get_str(o, "method").unwrap_or_else(|| "GET".into());
+    let body = get_str(o, "body").unwrap_or_default();
+    let redirect = get_str(o, "redirect").unwrap_or_else(|| "follow".into());
+    let extra_headers: Vec<(String, String)> = o
+        .get("headers")
+        .and_then(Json::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("构造 native-tls 客户端失败: {e}"))?;
+
+    let mut current = url;
+    let mut hops = 0usize;
+    let mut redirected = false;
+    loop {
+        if inv.as_ref().map(|i| i.is_stopped()).unwrap_or(false) {
+            return Err("AbortError: invocation 已停止".into());
+        }
+        ssrf::ensure_outbound_url_allowed(&current)?;
+
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| format!("method 不合法 {method}: {e}"))?;
+        let mut rb = client.request(m, &current);
+        for (k, v) in &extra_headers {
+            rb = rb.header(k.as_str(), v.as_str());
+        }
+        if !body.is_empty() {
+            rb = rb.body(body.clone());
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| format!("请求失败（native-tls）: {e}"))?;
+
+        let status = resp.status().as_u16();
+        if redirect == "follow" && (300..400).contains(&status) {
+            if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+                if hops >= MAX_HOPS {
+                    return Err(format!("重定向超过 {MAX_HOPS} 跳，已中止"));
+                }
+                let loc = loc.to_str().unwrap_or_default().to_string();
+                current = ssrf::resolve_location(&current, &loc)?;
+                hops += 1;
+                redirected = true;
+                continue;
+            }
+        }
+
+        let headers = headers_to_json(resp.headers());
+        let mut buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        let mut body_error: Option<String> = None;
+        let mut stream = resp;
+        loop {
+            let step = tokio::time::timeout(Duration::from_millis(timeout), stream.chunk()).await;
+            match step {
+                Ok(Ok(Some(chunk))) => {
+                    let room = BODY_CAP.saturating_sub(buf.len());
+                    if chunk.len() > room {
+                        buf.extend_from_slice(&chunk[..room]);
+                        truncated = true;
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
+                    body_error = Some(e.to_string());
+                    break;
+                }
+                Err(_) => {
+                    body_error = Some(format!("读正文超时（{timeout}ms）"));
+                    break;
+                }
+            }
+        }
+
+        return Ok(json!({
+            "status": status,
+            "url": current,
+            "redirected": redirected,
+            "headers": headers,
+            "body": String::from_utf8_lossy(&buf),
+            "truncated": truncated,
+            "body_error": body_error,
+            "tls": "native",
         }));
     }
 }

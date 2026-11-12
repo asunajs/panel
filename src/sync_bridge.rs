@@ -48,3 +48,38 @@ where
         }
     }
 }
+
+/// 在**已有的** runtime 上跑（不新建线程/runtime），阻塞当前线程等结果。
+///
+/// 为什么 ws 必须用它：`run` 每次新建一个 current-thread runtime，跑完就 drop ——
+/// 而 WebSocket 的 socket 是在那个 runtime 的 reactor 上注册的，runtime 一关，
+/// 后续 send/recv 就报「A Tokio 1.x context was found, but it is being shutdown」。
+/// 长连接必须活在**进程级**的那个 runtime 上。
+///
+/// 阻塞前用 `block_in_place` 把剩下的任务交还给别的 worker（多线程 runtime 才有意义），
+/// 免得一次 `ws_recv(1800)` 把同一条 worker 上的别的插件一起按住。
+pub fn run_on<T, F>(handle: tokio::runtime::Handle, fut: F, timeout: Duration) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    F::Output: Send,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<Result<T, String>>();
+    handle.spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    let wait = || match rx.recv_timeout(timeout) {
+        Ok(r) => r,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("同步调用超时（{}ms）", timeout.as_millis()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("同步调用异常退出".to_string())
+        }
+    };
+    if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+        tokio::task::block_in_place(wait)
+    } else {
+        wait()
+    }
+}

@@ -20,6 +20,7 @@ mod service;
 mod ssrf;
 mod stats;
 mod web;
+mod wsclient;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

@@ -55,6 +55,22 @@ ring = "0.17"
 # 引擎边界的 catch_unwind 用 FutureExt。futures 已在依赖树里（rquickjs 的 futures feature）。
 futures = "0.3"
 
+# ── WebSocket（插件的长连接能力）──────────────────────────────────────
+# 用 tokio-tungstenite 而不是自己写帧：握手/掩码/分片/ping-pong 都是细节坑。
+# ⚠ 不启用 rustls-tls-webpki-roots：那条路会拖进 webpki-roots 0.26（旧根证书），
+#   我们直接用项目已有的 rustls 0.23 + webpki-roots 1 手工搭 connector（与 http 同一份信任库）。
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls", "native-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+webpki-roots = "1"
+
+# ── legacy TLS（只给 CBC 套件的主机）────────────────────────────────
+# rustls **不实现任何 CBC 套件**（设计选择），所以 tls:"native" 必须走平台 TLS。
+# native-tls：macOS = Security.framework，Linux = OpenSSL。
+native-tls = "0.2"
+# 这条路的 HTTP 客户端。只用到 blocking 语义里的“能谈 CBC”这一点。
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
 [dev-dependencies]
 # cron.rs 的夏令时回归用例要真实时区表（America/New_York 的跳变日）。
 chrono-tz = "0.10"

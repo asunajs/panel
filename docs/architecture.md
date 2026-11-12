@@ -218,10 +218,13 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `notify.rs` | 通知：失败/熔断/插件喊话 → `notifications` 表（留最近 500 条）+ 可选 webhook（后台投递，5 秒超时，失败只进日志） |
 | `service.rs` | 开机自启动：`panel-llrt service print\|install\|uninstall\|status`，生成 launchd plist / systemd --user unit（绝对路径、RunAtLoad+KeepAlive / Restart=always），日志落 `data/` |
 | `scripts.rs` | 脚本：独立 `.js` + 记录里的 cron；每次运行新建 Context、带墙钟死线（`Plugin::load_with_budget`）；注册任务会直接报错；15 秒粒度排程循环 |
+| `outbound.rs` | 出站 HTTP 的**纯 Rust** 实现（async 与同步两条路共用一份 SSRF 门 / 重定向 / 1 MiB 上限）；`tls:'native'` 走 reqwest + 平台 TLS（rustls 不实现 CBC 套件） |
+| `sync_bridge.rs` | 阻塞桥：给同步步骤机风格的插件把 async 能力变成同步调用。`run` 起独立线程 + 一次性 runtime（sqlite/http）；`run_on` 挂到**进程级 runtime** 上（WebSocket 这种长连接必须这样，否则 runtime 一 drop 连接就废） |
+| `wsclient.rs` | WebSocket 客户端（tokio-tungstenite）：`ws_open/send/recv/close` 四件套 + 句柄；超时是结果不是错误；最多 8 条、单帧 256 KiB；不自动重连 |
 | `db.rs` | DB actor（channel + 专用连接，无 `Mutex` 可 poison） |
 | `log/` | `LogHub`（SSE 广播）+ `redact`（6 道有序幂等脱敏） |
 | `auth.rs` | 令牌凭据：随机盐 + PBKDF2-HMAC-SHA256 落 `auth.json`（0600）；派生完擦掉 `PANEL_TOKEN`；校验走阻塞线程池 + 成功后的内存 memo + 失败限速（见 §10） |
-| `stats.rs` | 进程级只读计数（运行时长 / 调度圈数 / 心跳 / 预算打断），只给仪表盘读；**JS 内存恒 null**，理由见 [ui.md](ui.md) §5 |
+| `stats.rs` | 进程级只读计数（运行时长 / 调度圈数 / 心跳 / 预算打断），只给仪表盘读。JS 内存**不在这里**：由 `Scheduler::memory()` 逐 runtime 量（2ms 耐心，拿不到锁就跳过），在 `/api/state` 里盖上去 |
 | `web.rs` | axum 路由 + 单令牌鉴权（**令牌只走 header**，校验的是派生值）+ `x-panel` CSRF 头 + 零构建静态资源（`include_str!` 嵌入，`PANEL_WEB_DIR` 可改成读盘）。插件文件增删改查（读/写/新建/删除到 trash）、配置保存都在这层。界面见 [ui.md](ui.md)，功能对照见 [parity.md](parity.md) |
 
 两条设计约束在 Stage 1 落到了实处：

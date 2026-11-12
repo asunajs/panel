@@ -94,6 +94,10 @@ const WRAP: &str = r#"(raw) => {
     register_cron: async (name, cron, budget_ms) => raw.register_cron(name, cron, budget_ms),
     register_handler: raw.register_handler,
     register_web: raw.register_web,
+    ws_open: (url, opts) => Number(raw.ws_open(url, j(opts))),
+    ws_send: (id, text) => raw.ws_send(id, String(text)),
+    ws_recv: (id, ms) => JSON.parse(raw.ws_recv(id, ms === undefined ? undefined : Number(ms))),
+    ws_close: (id) => raw.ws_close(id),
     config: async () => JSON.parse(await raw.config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
@@ -105,7 +109,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 16] = [
+const OP_NAMES: [&str; 20] = [
     "log",
     "info",
     "warn",
@@ -122,6 +126,10 @@ const OP_NAMES: [&str; 16] = [
     "register_cron",
     "register_handler",
     "register_web",
+    "ws_open",
+    "ws_send",
+    "ws_recv",
+    "ws_close",
 ];
 
 impl ModuleDef for HostModule {
@@ -179,6 +187,11 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
             Func::from(Async(op_register_handler)).into_js(ctx)?,
         ),
         ("register_web", Func::from(Async(op_register_web)).into_js(ctx)?),
+        // 长连接：同步语义（JS 线程等），实际收发在独立线程的 runtime 上跑
+        ("ws_open", Func::from(op_ws_open).into_js(ctx)?),
+        ("ws_send", Func::from(op_ws_send).into_js(ctx)?),
+        ("ws_recv", Func::from(op_ws_recv).into_js(ctx)?),
+        ("ws_close", Func::from(op_ws_close).into_js(ctx)?),
     ])
 }
 
@@ -394,6 +407,57 @@ fn op_http_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<S
     )
     .map_err(|e| err(&ctx, e))?;
     Ok(out.to_string())
+}
+
+/// ws_open(url, opts?) -> id。**同步**：握手失败就抛。
+fn op_ws_open(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<String> {
+    let o: Json = match opts.0 {
+        Some(text) => serde_json::from_str(&text)
+            .map_err(|e| err(&ctx, format!("opts 不是合法 JSON: {e}")))?,
+        None => Json::Null,
+    };
+    let wait = o
+        .get("timeout_ms")
+        .and_then(Json::as_i64)
+        .unwrap_or(8_000)
+        .clamp(500, 30_000) + 5_000;
+    let id = crate::sync_bridge::run_on(
+        tokio::runtime::Handle::current(),
+        async move { crate::wsclient::open(&url, &o).await },
+        std::time::Duration::from_millis(wait as u64),
+    )
+    .map_err(|e| err(&ctx, e))?;
+    Ok(id.to_string())
+}
+
+fn op_ws_send(ctx: Ctx<'_>, id: i64, text: String) -> Result<()> {
+    crate::sync_bridge::run_on(
+        tokio::runtime::Handle::current(),
+        async move { crate::wsclient::send(id, text).await },
+        std::time::Duration::from_secs(10),
+    )
+    .map_err(|e| err(&ctx, e))
+}
+
+fn op_ws_recv(ctx: Ctx<'_>, id: i64, timeout_ms: Undefined<u64>) -> Result<String> {
+    let want = timeout_ms.0.unwrap_or(crate::wsclient::RECV_DEFAULT_MS);
+    let wait = want.min(crate::wsclient::RECV_MAX_MS) + 2_000;
+    let frame = crate::sync_bridge::run_on(
+        tokio::runtime::Handle::current(),
+        async move { crate::wsclient::recv(id, Some(want)).await },
+        std::time::Duration::from_millis(wait),
+    )
+    .map_err(|e| err(&ctx, e))?;
+    Ok(frame.to_string())
+}
+
+fn op_ws_close(ctx: Ctx<'_>, id: i64) -> Result<()> {
+    crate::sync_bridge::run_on(
+        tokio::runtime::Handle::current(),
+        async move { crate::wsclient::close(id).await },
+        std::time::Duration::from_secs(10),
+    )
+    .map_err(|e| err(&ctx, e))
 }
 
 async fn op_register_cron(
