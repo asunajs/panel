@@ -87,3 +87,72 @@ async fn keep_zero_does_not_wipe_the_table() {
     assert_eq!(count(&db, "runs").await, 5);
     assert_eq!(count(&db, "logs").await, 5);
 }
+
+/// 清理只碰 `runs` 和 `logs`。**通知发件箱、任务状态、令牌都不能被它顺手带走**。
+///
+/// 第 63 轮补的守卫：以前只数 runs/logs 的条数，没人验过「别的表还在」。
+#[tokio::test]
+async fn pruning_leaves_every_other_table_alone() {
+    let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+    seed(&db, 40, 40).await;
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done) \
+             VALUES (0,'dead','webhook','t','b','{}',3,0,0)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled) VALUES ('p','t','@every 1h',5000,0)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let p = crate::retention::prune_with(&db, 10, 10).await.unwrap();
+    assert_eq!(p.runs, 30, "{p:?}");
+    assert_eq!(p.logs, 30, "{p:?}");
+    assert_eq!(count(&db, "notify_outbox").await, 1, "发件箱不能被清理带走");
+    assert_eq!(count(&db, "tasks").await, 1, "任务状态（暂停等）不能被清理带走");
+    // 暂停标记也得原样留着（enabled=0 是我们插进去的值）
+    let enabled: i64 = db
+        .call(|c| {
+            c.query_row("SELECT enabled FROM tasks WHERE plugin='p'", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(enabled, 0);
+}
+
+/// 按 id 剪、不看状态：卡住的『running』行如果老到被剪掉，也会被剪 —— 但要能说清楚
+/// 「真在跑的那次永远是最新的，剪不到它」。这里把这条语义钉住。
+#[tokio::test]
+async fn the_newest_row_survives_even_if_keep_is_one() {
+    let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+    seed(&db, 5, 5).await;
+    // 最新那条标成 running
+    db.call(|c| {
+        c.execute(
+            "UPDATE runs SET status='running', ended_at=NULL WHERE id=(SELECT max(id) FROM runs)",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap();
+    crate::retention::prune_with(&db, 1, 1).await.unwrap();
+    assert_eq!(count(&db, "runs").await, 1);
+    let st: String = db
+        .call(|c| {
+            c.query_row("SELECT status FROM runs", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(st, "running", "最新那条（正在跑的）必须留下");
+}

@@ -31,9 +31,34 @@ runs id 区间     101..20100        ← 留的是最新的，不是最早的
 WAL              4.1 MB → 16 KB    ← checkpoint(TRUNCATE) 生效
 ```
 
-单测（`retention_tests.rs`）四条：留最新 N 条 / 不足上限一条不删 / 空表不炸 / `keep=0` 不清库。
+单测（`retention_tests.rs`）六条：留最新 N 条 / 不足上限一条不删 / 空表不炸 / `keep=0` 不清库 /
+**别的表不受影响** / **keep=1 时最新那条（哪怕 running）必须留下**。
 最后一条是刻意的：`keep=0` 的子查询是 NULL，按 SQL 语义一条都删不掉 —— 把这条语义钉住，
 免得以后有人「优化」成静默清库。
+
+## 第 63 轮实测：大表 + 边界（临时面板 8797）
+
+```text
+灌入            runs 25000 / logs 25000 / notify_outbox 1 行
+               其中 id=1 那条被标成 status='running'（模拟卡住的运行）
+启动 3 秒后     runs 20000（min id 5001）/ logs 20003
+清理日志        清理旧记录：运行记录 -5000 条、日志 -5005 条（各保留最近 20000 条）
+发件箱         1 行，没被清理带走
+卡住的那条     被剪掉了（id=1 太老）—— 见下面「按 id 剪、不看状态」
+游标边界       before=1 → 0 条；before=5000 → 0 条（现存最老 5001），都不报错、total 仍是 20000
+```
+
+### 按 id 剪，不看状态
+
+`trim` 只认 id。真正**正在跑**的那次永远是最新的（id 最大），所以剪不到它；
+能剪到的「running」只可能是残留（进程崩过、重启时会先 reap 成失败）。
+守卫：`the_newest_row_survives_even_if_keep_is_one`（keep=1 时留下的必须是最新那条，哪怕它 running）。
+
+### 只碰这两张表
+
+`prune` 只删 `runs` / `logs`。`notify_outbox`（待发通知）、`tasks`（暂停/摘要/调度覆盖）、
+`auth.json` 都不在它的范围内 —— 第 63 轮补了守卫 `pruning_leaves_every_other_table_alone`
+（发件箱 1 行、任务 1 行且 `enabled=0` 原样保留）。
 
 ## 取舍
 
@@ -41,4 +66,5 @@ WAL              4.1 MB → 16 KB    ← checkpoint(TRUNCATE) 生效
   想真正缩小得停机 `VACUUM`，那是手工操作。
 - **不做按天保留**：`keep N 条` 比 `keep 30 天` 更可预测（不会因为某天任务暴增而清掉别的）。
   真要按时间，改 `trim` 里的条件即可。
-- 备份里不含这两张表（`backup.rs` 只导配置 + 源码 + 脚本），所以清理不影响备份体积。
+- 默认备份（不带 `--with-db`）不含这两张表，所以清理不影响备份体积；
+  带了 `--with-db` 就是整库快照（含 runs/logs），备份会跟着变大 —— 清理反而能把它压住。
