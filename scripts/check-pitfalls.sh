@@ -66,6 +66,13 @@ else
   bad 'api() 收到字符串 body 不会带 content-type，后端会 415 —— 传对象'
 fi
 
+# scripts.md：脚本并发上限必须还接着（删了它，一堆死循环能把 HTTP 饿死）
+if grep -q 'max_concurrent()' src/scripts.rs; then
+  ok '脚本有全局并发上限（max_concurrent）'
+else
+  bad 'scripts.rs 里没有 max_concurrent —— 并发死循环脚本会把面板 HTTP 饿死'
+fi
+
 # HANDOFF §7.16：启动时要收尾僵尸 running 行
 if grep -q 'reap_stale_runs' src/main.rs; then
   ok '启动时会收尾上次没跑完的运行记录（reap_stale_runs）'
@@ -90,7 +97,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 10 条坑的守卫全过"
+  echo "ok: 11 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

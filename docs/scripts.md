@@ -1,0 +1,70 @@
+# 脚本（`scripts/*.js`）
+
+脚本是「一个 .js 文件 + 一条记录」：**内容在文件里，排程在库里**。它和插件的区别只有三点：
+
+1. 每次运行新建一个 Context，跑完就扔（插件是常驻的）；
+2. `plugin` 列固定是 `@script`，运行记录/日志复用 `runs`/`logs`；
+3. 不能注册任务 —— 排程写在记录的「计划」字段里，`register_cron` 会被当场拒。
+
+## 运行 = 加载
+
+`Scripts::execute` 走的正是 `Plugin::load_with_budget(source, handle, budget_ms)`：
+脚本的顶层代码就是它干的事，`await` 完就结束。没有「handler」这一层。
+
+所以**预算管的是加载期**（`engine::load_inner` 里那个 interrupt handler），
+和一插件一次 dispatch 用的是同一套墙钟死线。
+
+## 三条护栏
+
+| 护栏 | 行为 |
+|---|---|
+| 同一脚本不并发 | `in_flight` 集合；第二次点直接回「正在运行，等这次跑完」 |
+| 全局并发上限 | `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 |
+| 预算死线 | 到点 interrupt，运行记录 `status=error` + 「CPU 预算耗尽（Nms 墙钟死线）」 |
+
+### 为什么要有全局并发上限
+
+没有「把 JS 停掉」的办法 —— interrupt handler 只有引擎**回到**解释器循环时才会被检查，
+所以一个 `while(true){}` 会结结实实占满一个 tokio worker 直到预算打卡。
+点一堆死循环脚本，就能把 HTTP 也一起饿死：
+
+```text
+10 核机器，12 个 while(true){}，预算 3s
+
+没有上限：
+  风暴中 /api/state   1963 ms（平时 4 ms）
+  12 条照样全被打断，面板没死但界面卡住近 2 秒
+
+加上限（8 = 10 - 2）：
+  风暴中 /api/state   5 ms / 2 ms / 3 ms / 3 ms
+  12 条照样全部被打断（排队的多花一轮，耗时 3016~6027ms）
+  日志 4 行「脚本 spinN 排队中（同时最多 8 个，等前一个跑完）」
+```
+
+留 2 个 worker 给服务本身是经验值：HTTP 处理、调度循环、DB actor 都要地方跑。
+
+## 失败原因要说人话
+
+被 interrupt 打断时 rquickjs 只给一个 `interrupted`。这个字符串直接写进运行记录等于没说 ——
+用户看不出是「预算太短」还是「点了停止」。`load_inner` 现在自己留一份死线，打断后按墙钟判断：
+
+- 过了死线 → `CPU 预算耗尽（Nms 墙钟死线）`，并记一次 `budget_kills`；
+- invocation 被 stop → `已停止（加载期被中断）：…`；
+- 都不沾 → 原样返回（真的语法错 / 抛异常）。
+
+## 排查表
+
+| 运行记录里的 status/error | 意思 |
+|---|---|
+| `ok` | 跑完了 |
+| `error` + `CPU 预算耗尽（Nms 墙钟死线）` | 超预算：改小脚本，或把预算调大 |
+| `error` + `interrupted` | 旧版本的文案，同上但没说明原因（已修） |
+| `error` + 其他 | 脚本自己抛的（含语法错） |
+| 没有新记录 | 没启动：看日志里的「正在运行」/「排队中」/「未能启动」 |
+
+## 测试
+
+- `the_concurrency_cap_leaves_room_for_the_server`
+- `a_script_cannot_run_twice_at_once`（含「跑完能再跑」）
+- `a_spinning_script_is_interrupted_with_a_readable_reason`（死循环 + 预算 1s，断言文案带预算值）
+- `reconcile_*` 两条（启动时收编目录里没登记的 .js）

@@ -64,3 +64,76 @@ async fn reconcile_does_not_touch_an_existing_schedule() {
     assert_eq!(v["cron"], "@every 1h", "排程不能被对账改掉");
     assert_eq!(v["budget_ms"], 5000);
 }
+
+/// 并发上限必须真的留出余量：脚本死循环会占满 tokio worker，
+/// 上限取「核数 - 2」—— 全部占满时 HTTP 与调度还有地方跑。
+#[test]
+fn the_concurrency_cap_leaves_room_for_the_server() {
+    let n = max_concurrent();
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(0);
+    assert!(n >= 1, "上限不能是 0，否则脚本一个都跑不了");
+    if cores > 2 {
+        assert_eq!(n, cores - 2, "要留 2 个 worker 给 HTTP/调度");
+    }
+}
+
+/// 同一个脚本不能并发跑：手动点两次，第二次应当直接报「正在运行」。
+#[tokio::test]
+async fn a_script_cannot_run_twice_at_once() {
+    let dir = tmpdir("twice");
+    // 跑得久一点，好让第二次撞上第一次
+    std::fs::write(dir.join("slow.js"), "await new Promise(r => setTimeout(r, 800));").unwrap();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let s = mk(db, &dir);
+    s.save("slow", "await new Promise(r => setTimeout(r, 800));", None, 5000, true)
+        .await
+        .unwrap();
+
+    let first = s.run("slow", true).await.unwrap();
+    assert!(first > 0);
+    let second = s.run("slow", true).await;
+    assert!(second.is_err(), "第二次不该进来");
+    assert!(
+        second.unwrap_err().contains("正在运行"),
+        "要说清是「正在运行」"
+    );
+    // 等第一次跑完，再跑就该成功了
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let third = s.run("slow", true).await;
+    assert!(third.is_ok(), "跑完之后应当能再跑: {third:?}");
+}
+
+/// 死循环脚本必须被预算打断，且失败原因要能看懂（不是一句 `interrupted`）。
+#[tokio::test]
+async fn a_spinning_script_is_interrupted_with_a_readable_reason() {
+    let dir = tmpdir("spin");
+    let src = "while (true) {}";
+    std::fs::write(dir.join("spin.js"), src).unwrap();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let s = mk(db.clone(), &dir);
+    // 预算 300ms：不能等 30 秒
+    s.save("spin", src, None, 1_000, true).await.unwrap();
+    let id = s.run("spin", true).await.unwrap();
+
+    // 等它被打断（预算 1s，留足余量）
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let (status, error) = db
+        .call(move |c| {
+            c.query_row(
+                "SELECT status,ifnull(error,'') FROM runs WHERE id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(status, "error");
+    assert!(
+        error.contains("预算耗尽"),
+        "失败原因要能看懂，实际: {error}"
+    );
+    assert!(error.contains("1000ms"), "带上配置的预算值: {error}");
+}

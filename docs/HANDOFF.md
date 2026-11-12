@@ -196,6 +196,15 @@
     的用例，实际测的是普通文件，永远绿。要造真的得按 central directory 布局改 external attr
     （条目头偏移 38，4 字节小端，`0o120777 << 16`），并先断言 `unix_mode() & 0o170000 == 0o120000`。
     见 `upload::extra_tests::forge_symlink*`。
+23. **脚本是「加载=执行」，预算死线只盖加载期，而且 interrupt 只在引擎回到解释器循环时才生效**：
+    一个 `while(true){}` 会**占满一个 tokio worker** 直到预算打卡。10 核机器上 12 个并发死循环，
+    `/api/state` 从 4ms 涨到 **1963ms**（第 34 轮实测）。现在 `Scripts` 有全局并发上限
+    `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 —— 同样 12 个死循环，
+    HTTP 稳定在 2~5ms。有测试/守卫：`the_concurrency_cap_leaves_room_for_the_server`、
+    `check-pitfalls` 第 11 条。
+24. **rquickjs 被 interrupt 打断时错误信息只有 `interrupted`**：光看这五个字母分不出
+    「预算耗尽」还是「被 stop」，直接写进运行记录等于让用户看天书，也没记进 `budget_kills`。
+    `load_inner` 自己留一份死线，打断后按墙钟判断并给出「CPU 预算耗尽（Nms 墙钟死线）」。
 
 ## 8. 运行中的面板
 

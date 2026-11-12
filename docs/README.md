@@ -66,6 +66,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [engine-teardown.md](engine-teardown.md) | 插件退出时的定时器：根因、修法（vendor 补丁 + 加载期闸门）、升级时怎么重打 |
 | [notify.md](notify.md) | 通知：铃铛、外部渠道（webhook / SMTP）、发件箱与重试、读数 |
 | [health.md](health.md) | 健康摘要：`/readyz`（无鉴权探针）与 `/api/health`（带名字的明细）、warnings 阈值、读数 |
+| [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
 | [retention.md](retention.md) | 运行记录/日志的保留策略：留最近 N 条、时机、读数与取舍 |
 | [extproc.md](extproc.md) | 外部进程插件（基线 `extproc.rs`）**为什么不做**、改判条件、真要做的形状 |
 | [parity.md](parity.md) | 与旧面板的功能对照：已经能用的 / 还没做的（附下一轮做法）/ 明确不做的 |

@@ -339,11 +339,15 @@ impl Plugin {
         })
         .await?;
 
+        // 死线自己留一份：eval 被 interrupt 打断时 rquickjs 只给一个 `interrupted`，
+        // 光看那个字符串分不出「预算耗尽」和「被 stop」——判断得靠这里的墙钟。
+        let mut deadline: Option<Instant> = None;
         if let Some(ms) = budget_ms {
-            let deadline = Instant::now() + Duration::from_millis(ms);
+            let dl = Instant::now() + Duration::from_millis(ms);
+            deadline = Some(dl);
             let stopped = inv.clone();
             rt.set_interrupt_handler(Some(Box::new(move || {
-                stopped.is_stopped() || Instant::now() >= deadline
+                stopped.is_stopped() || Instant::now() >= dl
             })))
             .await;
         }
@@ -355,7 +359,20 @@ impl Plugin {
             rt_raw,
             inv,
         };
-        plugin.eval_module(source).await?;
+        if let Err(e) = plugin.eval_module(source).await {
+            // 加载期也可能被预算打断（脚本就是「加载=执行」）。这里的原始错误只有
+            // 一个 `interrupted`，直接冒出去等于让用户看天书，也没记进预算打断的计数。
+            let budget_hit = deadline.is_some_and(|dl| Instant::now() >= dl);
+            if budget_hit {
+                crate::stats::stats().record_budget_kill();
+                let ms = budget_ms.unwrap_or(0);
+                return Err(format!("CPU 预算耗尽（{ms}ms 墙钟死线）"));
+            }
+            if plugin.invocation().is_stopped() {
+                return Err(format!("已停止（加载期被中断）：{e}"));
+            }
+            return Err(e);
+        }
         Ok(plugin)
     }
 

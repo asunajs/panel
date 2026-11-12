@@ -68,6 +68,17 @@ pub struct Scripts {
     config: Arc<crate::config_store::ConfigStore>,
     /// 同一个脚本不允许并发跑：手动点两次不该同时进来两份。
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// 全局并发上限：脚本跑在 tokio worker 上，一个 `while(true){}` 会**占满一个 worker**
+    /// 直到预算打卡。点一堆死循环就能把 HTTP 也一起饿死（第 34 轮实测：12 个并发死循环，
+    /// 10 核机器上 `/api/state` 从 4ms 涨到 1963ms）。所以留出两个 worker 给服务本身。
+    sem: Arc<tokio::sync::Semaphore>,
+}
+
+/// 同时能跑几个脚本。留 2 个 worker 给 HTTP / 调度，最少 1。
+pub fn max_concurrent() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2).max(1))
+        .unwrap_or(2)
 }
 
 impl Scripts {
@@ -85,6 +96,7 @@ impl Scripts {
             trash,
             config,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            sem: Arc::new(tokio::sync::Semaphore::new(max_concurrent())),
         }
     }
 
@@ -389,6 +401,38 @@ impl Scripts {
     }
 
     async fn execute(&self, name: String, source: String, budget_ms: u64, run_id: i64) {
+        // 先抢一个并发位。抢不到就在这里排队 —— 排队时间算进这次运行的耗时，
+        // 但比「把面板一起拖死」好得多。
+        let _permit = match self.sem.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                self.log.emit(
+                    PLUGIN,
+                    Some(run_id),
+                    Level::Info,
+                    format!(
+                        "脚本 {name} 排队中（同时最多 {} 个，等前一个跑完）",
+                        max_concurrent()
+                    ),
+                );
+                match self.sem.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.log.emit(
+                            PLUGIN,
+                            Some(run_id),
+                            Level::Error,
+                            format!("脚本 {name} 拿不到并发位: {e}"),
+                        );
+                        self.in_flight
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .remove(&name);
+                        return;
+                    }
+                }
+            }
+        };
         let started = now_ms();
         let inv = Arc::new(crate::engine::Invocation::default());
         // 日志归属：不设就是 -1，脚本里 host.info 的日志会挂不到这次运行上。
