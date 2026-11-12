@@ -61,6 +61,7 @@ writeFileSync(path.join(plugins, 'seed.js'), [
   "import host from 'panel:host';",
   "await host.register_handler('ok', async () => { await host.sleep(5); return 1; });",
   "await host.register_handler('boom', async () => { throw new Error('boom-marker'); });",
+  "await host.register_cron('tick', '@every 30s');",
 ].join('\n'));
 
 let panel;
@@ -224,6 +225,29 @@ async function main() {
   const after = await js("document.documentElement.getAttribute('data-theme')");
   check('主题能切', before !== after, before + ' -> ' + after);
 
+  // 任务页：种子插件的 cron 任务要在表里，点「暂停」后状态真的变
+  await js("location.hash = '#tasks'");
+  await sleep(1200);
+  const taskRows = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('#tasks-body tr')].map(tr=>tr.innerText.replace(/\\s+/g,' ')))"));
+  check('任务表里有 seed/tick', taskRows.some((t) => t.includes('seed') && t.includes('tick')),
+    JSON.stringify(taskRows.slice(0, 2)));
+  const pauseClicked = await js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
+    " if(!tr) return false; const b=[...tr.querySelectorAll('button')].find(x=>x.textContent.trim()==='暂停');" +
+    " if(!b) return false; b.click(); return true;})()");
+  check('能点到「暂停」', pauseClicked === true);
+  await sleep(1500);
+  const paused = await js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
+    " return tr ? tr.innerText.replace(/\\s+/g,' ') : '';})()");
+  check('暂停后状态变成已暂停', /已暂停|恢复/.test(paused || ''), paused);
+
+  // 插件页：种子插件的卡片在，重载不报错
+  await js("location.hash = '#plugins'");
+  await sleep(1200);
+  const hasCard = await js("document.querySelector('#plugin-grid').innerText.includes('seed')");
+  check('插件页有 seed 卡片', hasCard === true);
   // 窄屏（手机）：表格要折成「标签 + 值」的卡片，且不许横向溢出
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await js("location.hash = '#runs'");

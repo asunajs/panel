@@ -244,7 +244,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 17 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 21 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
@@ -263,6 +263,9 @@ node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 | 筛 ghost 后每行都是 ghost + 计数变 40 | 服务端筛选与总数联动 |
 | 设置页 5 个页签 / 通知页出渠道区 | 页签切换与懒渲染 |
 | 主题能切 | `data-theme` 真的变 |
+| 任务表里有 seed/tick | 插件注册的 cron 任务真的出现在表里 |
+| 能点「暂停」→ 状态变已暂停 | 任务操作打的是真接口，回来后重渲染 |
+| 插件页有 seed 卡片 | 插件网格按 `/api/state` 渲染 |
 | 没有 JS 报错 | 收集 `Runtime.exceptionThrown` 与 `console.error` |
 | 窄屏没有横向溢出 | `Emulation.setDeviceMetricsOverride` 到 390×844 后 `scrollWidth - innerWidth <= 1` |
 | 窄屏表头隐藏（卡片模式） | `thead.offsetHeight === 0` |
