@@ -328,6 +328,7 @@ async fn ctx() -> Result<Ctx, String> {
         log,
         scripts_dir,
         data_dir.join("trash"),
+        data_dir.clone(),
         config.clone(),
     );
     Ok(Ctx {

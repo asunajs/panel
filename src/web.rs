@@ -224,6 +224,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
+        .route(
+            "/api/plugins/{name}/config",
+            get(plugin_config_get).put(plugin_config_put),
+        )
         .route("/api/notifications", get(api_notifications))
         .route("/api/notifications/read", post(api_notifications_read))
         // 通知渠道与发件箱（渠道配置本身在 config.json 的 notify 键里）
@@ -515,6 +519,7 @@ async fn api_test_js(
         config: st.config.clone(),
         // 试跑没有任务表：set_job_* 会直接报错
         sched: None,
+        data_dir: st.data_dir.clone(),
     };
 
     let started = std::time::Instant::now();
@@ -2162,6 +2167,94 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
     })))
 }
 
+/// `GET /api/plugins/{name}/config` —— 读插件自己的配置。
+///
+/// 位置：`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（见 config::plugin_config_path）。
+/// 插件里用 `host.self_config()` 读同一份 —— 面板改完立刻生效，不用重启面板。
+async fn plugin_config_get(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    safe_name(&name)?;
+    if !plugin_path(&st.plugins_dir, &name)?.exists() {
+        return Err((StatusCode::NOT_FOUND, format!("没有这个插件: {name}\n")));
+    }
+    let cfg = crate::config::load_plugin(&st.data_dir, &name).map_err(bad)?;
+    Ok(Json(json!({
+        "config": cfg,
+        "path": crate::config::plugin_config_path(&st.data_dir, &name).display().to_string(),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginConfigBody {
+    text: String,
+}
+
+/// `PUT /api/plugins/{name}/config` —— 写插件自己的配置（body 是 `{text: "<json>"}`，和面板配置一致）。
+///
+/// 写完**重载这个插件**：配置是插件在加载期读的（`host.self_config()`），不重载就得等下次。
+/// 重载失败不影响配置已经写进去 —— 要如实回 `reloaded:false` 和原因。
+async fn plugin_config_put(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+    JsonBody(body): JsonBody<PluginConfigBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    safe_name(&name)?;
+    if !plugin_path(&st.plugins_dir, &name)?.exists() {
+        return Err((StatusCode::NOT_FOUND, format!("没有这个插件: {name}\n")));
+    }
+    let cap = crate::config::max_bytes();
+    let bytes = body.text.len() as u64;
+    if bytes > cap {
+        return Err(bad(format!(
+            "配置有 {bytes} 字节，超过上限 {cap} 字节（PANEL_CONFIG_MAX_BYTES 可调）"
+        )));
+    }
+    let value: Value =
+        serde_json::from_str(&body.text).map_err(|e| bad(format!("JSON 解析失败：{e}")))?;
+    if !value.is_object() {
+        return Err(bad("插件配置必须是 JSON 对象".to_string()));
+    }
+    let path = crate::config::plugin_config_path(&st.data_dir, &name);
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| internal(format!("建目录失败 {}: {e}", dir.display())))?;
+    }
+    write_atomic(&path, body.text.as_bytes(), Some(0o600))
+        .await
+        .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
+    // 重载：配置是加载期读的，不重载就要等下次。失败要说出来，不能吞。
+    // 重载 = 先卸载再按磁盘上的源码装回去（和 /reload 同一条路）。
+    let source = read_source(&st.plugins_dir, &name).await?;
+    st.sched.unload(&name);
+    let reloaded = match st.sched.load(&name, source).await {
+        Ok(()) => None,
+        Err(e) => Some(e),
+    };
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "插件 {name} 的配置已更新（{bytes} 字节，{}）",
+            match &reloaded {
+                None => "已重载".to_string(),
+                Some(e) => format!("但重载失败: {e}"),
+            }
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "reloaded": reloaded.is_none(),
+        "error": reloaded,
+        "path": path.display().to_string(),
+    })))
+}
 async fn plugin_source(
     State(st): State<AppState>,
     Path(name): Path<String>,

@@ -37,6 +37,7 @@ async fn load_cfg(
         reg,
         config: crate::config_store::ConfigStore::new(&serde_json::from_str(cfg).unwrap_or(serde_json::json!({}))),
         sched: None,
+        data_dir: std::path::PathBuf::from("data"),
     };
     (Plugin::load(source, handle).await, rx)
 }

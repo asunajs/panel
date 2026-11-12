@@ -123,7 +123,7 @@ async fn main() -> Result<(), String> {
         Ok(_) => {}
         Err(e) => log.emit("panel", None, Level::Warn, format!("收尾未完成的运行记录失败: {e}")),
     }
-    let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone());
+    let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone(), data_dir.clone());
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
     let scripts_dir = PathBuf::from(env_or("PANEL_SCRIPTS_DIR", "scripts"));
@@ -134,6 +134,7 @@ async fn main() -> Result<(), String> {
         log.clone(),
         scripts_dir.clone(),
         data_dir.join("trash"),
+        data_dir.clone(),
         config.clone(),
     );
     // 目录里有、库里没有的 .js 收编成「只手动跑」的脚本（不然手写的脚本面板里看不见）。

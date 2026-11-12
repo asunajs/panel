@@ -10,6 +10,7 @@ fn mk(db: Db, dir: &std::path::Path) -> Scripts {
         LogHub::new(Db::open(std::path::Path::new(":memory:")).unwrap()),
         dir.to_path_buf(),
         dir.join("trash"),
+        dir.to_path_buf(),
         crate::config_store::ConfigStore::new(&serde_json::json!({})),
     )
 }

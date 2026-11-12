@@ -31,7 +31,21 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 时间 | `sleep` |
 | 注册 | `register_cron` / `register_handler` |
 | 通知 | `notify(title, body?)` —— 进面板通知列表；配了 `PANEL_NOTIFY_WEBHOOK` 也 POST 出去（见 [notify 一节](#通知)） |
-| 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`） |
+| 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`）；`self_config`（**这个插件自己的**配置，见下） |
+
+
+#### 两份配置（第 89 轮）
+
+| | `host.config()` | `host.self_config()` |
+|---|---|---|
+| 是什么 | **面板级**配置，所有插件拿到的快照一样 | **这个插件自己的**配置 |
+| 文件 | `<PANEL_DATA_DIR>/config.json` | `<PANEL_DATA_DIR>/plugin-data/<name>/config.json` |
+| 谁改 | 设置 → 配置（整份编辑） | 插件卡片 → 配置（界面里改，保存后自动重载该插件） |
+| 没有时 | `{}` | `{}` |
+
+为什么分两份：面板级配置是**全局面**（日志等级、通知渠道），插件自己的是**它的事**
+（账号、映射表）。混在一份里，插件越多越没法看，而且改一处容易把别人的段落冲掉。
+插件的数据目录不会随插件文件更新被覆盖，也不会被 `/plugins/` 静态服务暴露。
 
 **第一版明确不做的**（现在多半已经补上了，逐个看 [plugins.md](plugins.md)）：
 推送、备份/恢复、脚本任务、上传、完整鉴权面（先单令牌）、Bun/Node 外部运行时。

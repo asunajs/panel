@@ -63,6 +63,8 @@ pub struct HostHandle {
     /// 调度器句柄（只有插件加载时给）。脚本没有任务表，所以是 None ——
     /// `set_job_*` 在脚本里会直接报错，而不是静默无事发生。
     pub sched: Option<crate::scheduler::Scheduler>,
+    /// 数据目录：插件自己的配置在 `<data_dir>/plugin-data/<name>/config.json`（第 89 轮）。
+    pub data_dir: std::path::PathBuf,
 }
 
 fn host(ctx: &Ctx<'_>) -> Result<HostHandle> {
@@ -115,6 +117,7 @@ const WRAP: &str = r#"(raw) => {
     panel_version: () => raw.panel_version(),
     panel_at_least: (v) => raw.panel_at_least(String(v)),
     config: async () => JSON.parse(await raw.config()),
+    self_config: async () => JSON.parse(await raw.self_config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
     fetch: async (url, opts) => JSON.parse(await raw.fetch(url, j(opts))),
@@ -125,7 +128,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 27] = [
+const OP_NAMES: [&str; 28] = [
     "log",
     "info",
     "warn",
@@ -133,6 +136,7 @@ const OP_NAMES: [&str; 27] = [
     "notify",
     "sleep",
     "config",
+    "self_config",
     "sqlite_query",
     "sqlite_exec",
     "fetch",
@@ -188,6 +192,10 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("notify", Func::from(Async(op_notify)).into_js(ctx)?),
         ("sleep", Func::from(Async(op_sleep)).into_js(ctx)?),
         ("config", Func::from(Async(op_config)).into_js(ctx)?),
+        (
+            "self_config",
+            Func::from(Async(op_self_config)).into_js(ctx)?,
+        ),
         (
             "sqlite_query",
             Func::from(Async(op_sqlite_query)).into_js(ctx)?,
@@ -261,6 +269,22 @@ async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Resu
         },
     );
     Ok(())
+}
+
+/// `host.self_config()` —— 这个插件**自己**的配置（第 89 轮）。
+///
+/// 和 `host.config()` 的区别：那是面板级配置（每个插件拿到的都一样），这是
+/// `<PANEL_DATA_DIR>/plugin-data/<name>/config.json` —— 界面「插件 → 配置」改的就是它。
+/// 没配过就是空对象，不是错误。
+async fn op_self_config(ctx: Ctx<'_>) -> Result<String> {
+    let h = host(&ctx)?;
+    let dir = h.data_dir.clone();
+    let name = h.plugin.clone();
+    let v = tokio::task::spawn_blocking(move || crate::config::load_plugin(&dir, &name))
+        .await
+        .map_err(|e| err(&ctx, format!("self_config 读失败: {e}")))?
+        .map_err(|e| err(&ctx, e))?;
+    Ok(v.to_string())
 }
 
 async fn op_config(ctx: Ctx<'_>) -> Result<String> {

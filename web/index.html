@@ -391,8 +391,10 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
           <div class="tabs tabs-sm" role="tablist" aria-label="插件详情" id="drawer-tabs">
             <button class="tab" type="button" role="tab" data-drawer-tab="overview" aria-selected="true">概览</button>
             <button class="tab" type="button" role="tab" data-drawer-tab="source" aria-selected="false">源码</button>
+            <button class="tab" type="button" role="tab" data-drawer-tab="config" aria-selected="false">配置</button>
           </div>
           <div class="tab-pane" id="drawer-overview"></div>
+          <div class="tab-pane hidden" id="drawer-config"></div>
           <div class="tab-pane hidden" id="drawer-source">
             <div class="script-bar hidden" id="script-bar">
               <label class="field-inline"><span>计划</span>

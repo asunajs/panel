@@ -719,6 +719,8 @@ struct Loaded {
 }
 
 struct Inner {
+    /// 数据目录：插件自己的配置在 <data_dir>/plugin-data/<name>/config.json（第 89 轮）。
+    data_dir: std::path::PathBuf,
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
     web: std::collections::HashSet<String>,
@@ -766,11 +768,13 @@ pub fn start(
     db: Db,
     log: LogHub,
     config: std::sync::Arc<crate::config_store::ConfigStore>,
+    data_dir: std::path::PathBuf,
 ) -> (Scheduler, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     let (reg_tx, mut reg_rx) = mpsc::unbounded_channel::<Registration>();
     let (persist_tx, mut persist_rx) = mpsc::unbounded_channel::<PersistJob>();
     let mut inner = Inner {
+        data_dir,
         web: std::collections::HashSet::new(),
         saved: HashMap::new(),
         db,
@@ -1275,6 +1279,7 @@ impl Inner {
             sched: Some(Scheduler {
                 tx: self.tx.clone(),
             }),
+            data_dir: self.data_dir.clone(),
         };
         let tx = self.tx.clone();
         // 加载期可能有很长的顶层 await，不能占着调度循环

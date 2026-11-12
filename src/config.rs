@@ -61,6 +61,40 @@ pub fn load(dir: &Path) -> Result<Value, String> {
     serde_json::from_str(&s).map_err(|e| format!("{} 不是合法 JSON: {e}", path.display()))
 }
 
+
+/// 插件自己的配置放在哪：`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`。
+///
+/// 为什么**不放**在 `config.json` 里：那是面板级配置（每个插件各拿一份快照），
+/// 混进去之后「插件自己的设置」和「面板的设置」会互相覆盖，而且插件一多就变成一坨。
+/// 也不放在 `plugins/` 旁边：那个目录会被静态服务暴露，配置里通常有账号。
+pub fn plugin_config_path(data_dir: &Path, name: &str) -> std::path::PathBuf {
+    data_dir.join("plugin-data").join(name).join(FILE)
+}
+
+/// 读某个插件自己的配置。缺文件 = 空对象（还没配过很正常）。
+pub fn load_plugin(data_dir: &Path, name: &str) -> Result<Value, String> {
+    let path = plugin_config_path(data_dir, name);
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Value::Object(Default::default()))
+        }
+        Err(e) => return Err(format!("读 {} 失败: {e}", path.display())),
+    };
+    let cap = max_bytes();
+    if meta.len() > cap {
+        return Err(format!(
+            "{} 有 {} 字节，超过上限 {} 字节（{} 可调）",
+            path.display(),
+            meta.len(),
+            cap,
+            ENV_MAX
+        ));
+    }
+    let s = std::fs::read_to_string(&path).map_err(|e| format!("读 {} 失败: {e}", path.display()))?;
+    serde_json::from_str(&s).map_err(|e| format!("{} 不是合法 JSON: {e}", path.display()))
+}
+
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;

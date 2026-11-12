@@ -638,6 +638,7 @@ function renderPlugins() {
     if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
     acts.append(
       mk('编辑', () => { showPlugin(p.name); }),
+      mk('配置', () => showPluginConfig(p.name)),
       mk('重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)),
       mk('停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)),
       mk('删除', () => deletePlugin(p.name), true),
@@ -1110,12 +1111,68 @@ function setConn(ok) {
 
 // ---------------------------------------------------------------- 抽屉
 
+/** 插件自己的配置（第 89 轮）：`<data_dir>/plugin-data/<name>/config.json`。
+ *
+ * 为什么单独一个页签而不是塞进「设置 → 配置」：那份是**面板级**配置，所有插件拿到的是同一份快照；
+ * 插件自己的设置（账号、映射表）混进去会互相覆盖，而且插件一多就没法看。
+ * 插件里用 `host.self_config()` 读这份；保存后会自动重载这个插件，改完立刻生效。
+ */
+async function openPluginConfig(name) {
+  state.drawerKind = 'plugin';
+  state.drawerPlugin = name;
+  setDrawerTab('config');
+  const box = $('drawer-config');
+  clear(box);
+  box.append(el('div', 'skeleton'));
+  let data;
+  try {
+    data = await api('/api/plugins/' + encodeURIComponent(name) + '/config');
+  } catch (e) {
+    clear(box);
+    box.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '读配置失败')));
+    return;
+  }
+  clear(box);
+  const ta = el('textarea', 'editor');
+  ta.spellcheck = false;
+  ta.value = JSON.stringify(data.config || {}, null, 2);
+  ta.rows = 14;
+  box.append(ta);
+  const row = el('div', 'actions');
+  const save = el('button', 'btn btn-primary', '保存并重载插件');
+  save.type = 'button';
+  const reset = el('button', 'btn', '重新读');
+  reset.type = 'button';
+  reset.addEventListener('click', () => openPluginConfig(name));
+  row.append(save, reset);
+  box.append(row);
+  box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
+  box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try {
+      const r = await api('/api/plugins/' + encodeURIComponent(name) + '/config', {
+        method: 'PUT',
+        body: { text: ta.value },
+      });
+      toast(r.reloaded === false
+        ? '配置已保存，但插件重载失败：' + (r.error || '')
+        : '配置已保存，插件已重载', r.reloaded === false);
+      await refresh();
+    } catch (e) {
+      toast(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), true);
+    } finally {
+      save.disabled = false;
+    }
+  });
+}
 function setDrawerTab(name) {
   for (const b of document.querySelectorAll('[data-drawer-tab]')) {
     b.setAttribute('aria-selected', String(b.dataset.drawerTab === name));
   }
   $('drawer-overview').classList.toggle('hidden', name !== 'overview');
   $('drawer-source').classList.toggle('hidden', name !== 'source');
+  $('drawer-config').classList.toggle('hidden', name !== 'config');
 }
 
 function openDrawer(title, withTabs) {
@@ -1184,6 +1241,12 @@ function openWebui(name) {
   window.open(webuiUrl(name), '_blank', 'noopener');
 }
 
+/** 打开插件抽屉并直接停在「配置」页签（卡片上的「配置」按钮走这条）。 */
+async function showPluginConfig(name) {
+  openDrawer('插件 ' + name, true);
+  await openPluginConfig(name);
+}
+
 async function showPlugin(name) {
   state.drawerKind = 'plugin';
   state.drawerPlugin = name;
@@ -1212,6 +1275,7 @@ async function showPlugin(name) {
     }
     ops.append(
       mkOp('编辑源码', () => openPluginSource(name)),
+      mkOp('配置', () => openPluginConfig(name)),
       mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),
       mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
       mkOp('删除插件', () => deletePlugin(name), true),
@@ -2677,6 +2741,7 @@ function bind() {
       const tab = b.dataset.drawerTab;
       setDrawerTab(tab);
       if (tab === 'source' && state.drawerPlugin) openPluginSource(state.drawerPlugin);
+      if (tab === 'config' && state.drawerPlugin) openPluginConfig(state.drawerPlugin);
     });
   }
   $('src-save').addEventListener('click', () => {

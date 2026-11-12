@@ -251,6 +251,11 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 `/api/plugins/{n}/source|reload|unload|delete`、`/api/config`（比旧的 `/api/settings/save` 强：热生效）、
 `/api/backup`、`/api/tasks/{p}/{n}/run|pause|resume|schedule`。
 
+**插件自己的配置**（第 89 轮补齐旧面板那条）：`GET/PUT /api/plugins/{n}/config`，文件在
+`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（旧面板也是 `PLUGIN_DATA_DIR/<plugin>/config.json`）。
+插件里读它用 `await host.self_config()`（和面板级的 `host.config()` 分开，理由见
+[host-api.md](host-api.md#两份配置第-89-轮)）。界面入口：插件卡片上的「配置」。
+
 #### 2.2 宿主 API（插件能力）
 
 | 旧 | 我们 | 影响 |

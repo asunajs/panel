@@ -12,12 +12,13 @@ use tower::ServiceExt;
 async fn setup() -> (Router, Db) {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), crate::config_store::ConfigStore::new(&json!({})), PathBuf::from("data"));
     let scripts = crate::scripts::Scripts::new(
         db.clone(),
         log.clone(),
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
+        PathBuf::from("data"),
         crate::config_store::ConfigStore::new(&json!({})),
     );
     let st = AppState {
@@ -68,12 +69,13 @@ async fn setup_authed() -> Router {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
     let store = crate::config_store::ConfigStore::new(&json!({}));
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), PathBuf::from("data"));
     let scripts = crate::scripts::Scripts::new(
         db.clone(),
         log.clone(),
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
+        PathBuf::from("data"),
         store.clone(),
     );
     router(AppState {
@@ -277,12 +279,13 @@ async fn token_gates_the_api_but_not_the_assets() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
     let store = crate::config_store::ConfigStore::new(&json!({}));
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), PathBuf::from("data"));
     let scripts = crate::scripts::Scripts::new(
         db.clone(),
         log.clone(),
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
+        PathBuf::from("data"),
         store.clone(),
     );
     let app = router(AppState {
@@ -342,12 +345,13 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
     let store = crate::config_store::ConfigStore::new(&json!({}));
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), PathBuf::from("data"));
     let scripts = crate::scripts::Scripts::new(
         db.clone(),
         log.clone(),
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
+        PathBuf::from("data"),
         store.clone(),
     );
     let app = router(AppState {
@@ -425,7 +429,7 @@ async fn setup_core(
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
     let store = crate::config_store::ConfigStore::new(&json!({}));
-    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone());
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), PathBuf::from("data"));
     let scripts_dir = data.join("scripts");
     std::fs::create_dir_all(&scripts_dir).unwrap();
     let scripts = crate::scripts::Scripts::new(
@@ -433,6 +437,7 @@ async fn setup_core(
         log.clone(),
         scripts_dir.clone(),
         data.join("trash"),
+        data.clone(),
         store.clone(),
     );
     let st = AppState {
@@ -3155,4 +3160,100 @@ async fn setup_takes_effect_immediately_and_logs_this_browser_in() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "会话票要能直接进");
+}
+
+/// 插件自己的配置（第 89 轮）：`plugin-data/<name>/config.json`。
+///
+/// 这条链路是「点卡片上的配置就能改」的底座，护栏要和面板配置一致：
+/// 未知插件 404、缺 x-panel 403、坏 JSON / 非对象 400。
+#[tokio::test]
+async fn plugin_config_roundtrip_and_guards() {
+    let (app, plugins, data, _store) = setup_dirs("plugin-cfg").await;
+    std::fs::write(
+        plugins.join("p1.js"),
+        "import host from 'panel:host';\nawait host.info('p1 起来了');\n",
+    )
+    .unwrap();
+
+    // 未知插件：404（不能凭 name 到处写文件）
+    let (status, _) = send(
+        &app,
+        Request::get("/api/plugins/nope/config").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 没配过 = 空对象（不是错误）
+    let (status, body) = send(
+        &app,
+        Request::get("/api/plugins/p1/config")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["config"], json!({}), "没配过应当是 {{}}");
+
+    // 缺 x-panel（防 CSRF）→ 403
+    let req = Request::put("/api/plugins/p1/config")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"text":"{\"a\":1}"}"#))
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::FORBIDDEN);
+
+    // 坏 JSON / 非对象 → 400，且不落盘
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/plugins/p1/config",
+            Some(json!({ "text": "{oops" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/plugins/p1/config",
+            Some(json!({ "text": "[1,2]" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !data.join("plugin-data/p1/config.json").exists(),
+        "校验失败不能先把文件建出来"
+    );
+
+    // 正常写：文件落在 plugin-data 下，0600，回读一致
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/plugins/p1/config",
+            Some(json!({ "text": "{\n  \"account\": \"me\"\n}" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let path = data.join("plugin-data/p1/config.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("me"), "{raw}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "配置里可能有账号，落盘就是 0600");
+    }
+    let (status, body) = send(
+        &app,
+        Request::get("/api/plugins/p1/config")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["config"]["account"], json!("me"));
 }

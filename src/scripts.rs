@@ -80,6 +80,8 @@ pub struct Scripts {
     log: LogHub,
     dir: PathBuf,
     trash: PathBuf,
+    /// 数据目录（插件/脚本自己的配置放在 <data_dir>/plugin-data/<name>/ 下）。
+    data_dir: PathBuf,
     config: Arc<crate::config_store::ConfigStore>,
     /// 同一个脚本不允许并发跑：手动点两次不该同时进来两份。
     in_flight: Arc<Mutex<HashSet<String>>>,
@@ -99,6 +101,7 @@ impl Scripts {
         log: LogHub,
         dir: PathBuf,
         trash: PathBuf,
+        data_dir: PathBuf,
         config: Arc<crate::config_store::ConfigStore>,
     ) -> Self {
         Self {
@@ -106,6 +109,7 @@ impl Scripts {
             log,
             dir,
             trash,
+            data_dir,
             config,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -444,6 +448,8 @@ impl Scripts {
             config: self.config.clone(),
             // 脚本没有任务表：set_job_* 在脚本里会直接报错
             sched: None,
+            // 脚本也有自己的配置（plugin-data/@script/config.json）
+            data_dir: self.data_dir.clone(),
         };
         let result = crate::engine::catch_panic(async move {
             match crate::engine::Plugin::load_with_budget(&source, handle, budget_ms).await {

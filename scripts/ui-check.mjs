@@ -296,6 +296,42 @@ async function main() {
     " n:s.querySelectorAll('.plugin-card').length," +
     " b:[...s.querySelectorAll('.plugin-group-actions button')].map(x=>x.textContent)})))"
   ));
+  // 插件自己的配置（第 89 轮）：卡片上的「配置」→ 抽屉「配置」页签 → 改 → 保存
+  // → 文件落在 plugin-data 下 + 插件被重载。旧面板里这是「点卡片改 config.json」。
+  await js("document.querySelector('#plugin-grid .plugin-card .card-actions button:last-child')");
+  const cfgOpened = await js(`JSON.stringify((()=>{
+    // 找到 seed 那张卡上的「配置」按钮（按文本找，别依赖位置）
+    const card = [...document.querySelectorAll('#plugin-grid .plugin-card')].find((c) => c.innerText.includes('seed'));
+    if (!card) return { err: 'no card' };
+    const b = [...card.querySelectorAll('button')].find((x) => x.textContent.trim() === '配置');
+    if (!b) return { err: 'no 配置 button', btns: [...card.querySelectorAll('button')].map((x) => x.textContent.trim()) };
+    b.click();
+    return { clicked: true };
+  })())`);
+  await sleep(1500);
+  const cfgState = JSON.parse(await js(`JSON.stringify({
+    drawer: !document.getElementById('drawer').classList.contains('hidden'),
+    tabSelected: document.querySelector('[data-drawer-tab=config]').getAttribute('aria-selected'),
+    paneShown: !document.getElementById('drawer-config').classList.contains('hidden'),
+    hasEditor: !!document.querySelector('#drawer-config textarea.editor'),
+    path: (document.querySelector('#drawer-config .hint') || {}).textContent || '',
+  })`));
+  check(
+    '点卡片「配置」打开配置页签（有编辑器、显示落盘路径）',
+    cfgState.drawer && cfgState.tabSelected === 'true' && cfgState.paneShown && cfgState.hasEditor &&
+      /plugin-data/.test(cfgState.path),
+    JSON.stringify(cfgState) + ' ' + cfgOpened,
+  );
+  await js(`(()=>{
+    const ta = document.querySelector('#drawer-config textarea.editor');
+    ta.value = JSON.stringify({ hello: 1 }, null, 2);
+    [...document.querySelectorAll('#drawer-config .actions button')].find((b) => b.textContent.includes('保存')).click();
+  })()`);
+  await sleep(1800);
+  const cfgToast = await js("document.getElementById('toast').textContent");
+  check('保存插件配置后提示已保存并重载', /配置已保存/.test(cfgToast || ''), cfgToast);
+  await js("document.querySelector('#drawer [data-close]').click()");
+  await sleep(400);
   const allCards = await js("document.querySelectorAll('#plugin-grid .plugin-card').length");
   check('插件按系列分组了', groups.length >= 1, JSON.stringify(groups));
   check(

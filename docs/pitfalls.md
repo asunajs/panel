@@ -318,3 +318,14 @@
     现在每一条都能点：先 `POST /api/notifications/read {ids:[id]}` 标已读（本地状态同步改，
     红点立刻消失），有 run_id 再跳到那次运行。「全部已读」复用同一个 `markRead(null)`。
     实测：1 条未读 → 点一下 → 服务端 unread=0、红点消失；2 条未读 → 全部已读 → 0。
+
+71. **给 host API 加一个 op，要改三处，漏了第三处插件会拿到 `not a function`**：`OP_NAMES`（模块导出名）、
+    `ops()`（Rust 侧的 Func 注册）、还有 `WRAP` 里那个 JS 工厂 —— 它对每个 op 手写一行包装（可选参数、
+    JSON 解析都在那儿）。第 89 轮加 `self_config` 时只改了前两处，插件加载直接失败：`{"error":"not a function"}`，
+    而 `/api/state` 里只看到一个 failed 的插件、没有堆栈。三处都改了才算加完；`OP_NAMES` 的数组长度也要跟着改
+    （`[&str; 28]`，漏了编译期就报）。守卫：`plugin_config_roundtrip_and_guards` 会在 PUT 后断言插件重载成功。
+
+72. **`plugin_path()` 返回的是 `Result`，不是 `PathBuf`**：`plugin_path(..).exists()` 编译不过（会提示
+    `no method named exists found for Result<PathBuf, ApiError>`），要 `plugin_path(..)?.exists()`。
+    这一处只是编译期的事，记下来是因为它同时提醒：`safe_name()` 的校验就在这个函数里，
+    任何「按插件名拼路径」的地方都必须过它，不能自己 `dir.join(format!("{name}.js"))`。
