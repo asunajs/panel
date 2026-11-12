@@ -1321,3 +1321,42 @@ await host.register_handler('bad', async () => {\n\
         "{state}"
     );
 }
+
+/// smtp_send 的参数校验：这几条都在**连网之前**就该拒，不用真服务器。
+#[tokio::test]
+async fn smtp_send_validates_options_before_connecting() {
+    let (app, _plugins, _data, _store) = setup_dirs("smtp1").await;
+    load_plugin(
+        &app,
+        "s",
+        "import host from 'panel:host';\n\
+function probe(tag, opts) {\n\
+  try { host.smtp_send(opts); return tag + ' → 没报错'; }\n\
+  catch (e) { return tag + ' → ' + String(e); }\n\
+}\n\
+await host.register_handler('go', async () => {\n\
+  await host.info(probe('host 空', { from: 'a@b.c', to: 'd@e.f', text: 'x' }));\n\
+  await host.info(probe('tls 拼错', { host: 'example.com', tls: 'starltls', from: 'a@b.c', to: 'd@e.f', text: 'x' }));\n\
+  await host.info(probe('端口越界', { host: 'example.com', port: 70000, from: 'a@b.c', to: 'd@e.f', text: 'x' }));\n\
+  await host.info(probe('回环', { host: '127.0.0.1', from: 'a@b.c', to: 'd@e.f', text: 'x' }));\n\
+  await host.info(probe('没正文', { host: 'example.com', from: 'a@b.c', to: 'd@e.f' }));\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+    let (_, body) = send(&app, with_csrf("POST", "/api/tasks/s/go/run", None)).await;
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    let msgs: Vec<String> = done["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
+        .collect();
+    let has = |needle: &str| msgs.iter().any(|m| m.contains(needle));
+    assert!(has("host 不能为空"), "{msgs:?}");
+    assert!(has("tls 只认"), "{msgs:?}");
+    assert!(has("端口越界"), "{msgs:?}");
+    assert!(has("出站目标被 SSRF 防护拒绝"), "{msgs:?}");
+    // 正文至少给一个（这条也在连网前就判）
+    assert!(has("正文"), "{msgs:?}");
+}

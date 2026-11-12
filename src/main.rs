@@ -19,6 +19,7 @@ mod outbound;
 mod scripts;
 mod sync_bridge;
 mod service;
+mod smtp;
 mod ssrf;
 mod stats;
 mod upload;

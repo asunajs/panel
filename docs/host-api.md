@@ -93,48 +93,11 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 * 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
 * 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
 
-### WebSocket（长连接）
+### 出站：邮件 / WebSocket / TLS 后端
 
-| op | 说明 |
-|---|---|
-| `ws_open(url, opts?)` | 开一条连接，返回句柄（数字）。握手失败**抛错**，不留半死句柄 |
-| `ws_send(id, text)` | 发一帧文本，入队即返回 |
-| `ws_recv(id, timeout_ms?)` | 收一帧，**带超时**。默认 1500ms，最多 1800ms |
-| `ws_close(id)` | 关掉，**幂等** |
-
-`ws_recv` 返回**五种形状**（不是异常）：`{type:'text',data}` / `{type:'binary',hex}` /
-`{type:'timeout'}` / `{type:'close',reason}` / `{type:'error',message}`。
-**超时是结果不是错误** —— 插件按「一次调用推进一步」写：`recv(1500)` 超时等于
-「这一步没收到东西」，状态落库、下次接着收，插件里不需要事件循环。
-
-约束：同时最多 **8 条**连接；单帧 **256 KiB**（超了回 `error` 并关连接，不静默截断）；
-**不自动重连**（重连策略是插件的业务判断）；句柄活在进程内存里，**面板重启后失效**，
-插件拿到「句柄不存在」就应当重新 `ws_open`。
-
-实现见 `src/wsclient.rs`（tokio-tungstenite）。同步语义由 `sync_bridge::run_on` 桥到
-**进程级 runtime** 上 —— 长连接不能建在一次性 runtime 上：那个 runtime 一 drop，
-socket 的 reactor 就没了，后续 send 会报「context is being shutdown」。
-
-### TLS 后端：`tls: 'rustls' | 'native'`
-
-`fetch` 与 `ws_open` 都认这个选项（同一个判据，见 `wsclient::tls_choice`）：
-
-| 值 | 传输 | 什么时候用 |
-|---|---|---|
-| `'rustls'`（默认） | LLRT 的 HTTP 客户端 / tungstenite + rustls | 绝大多数主机 |
-| `'native'` | reqwest + 平台 TLS（macOS Security.framework / Linux OpenSSL） | **只给 CBC 套件的主机** |
-
-rustls **不实现任何 CBC 套件**（设计选择，不是配置问题），所以只给 CBC 的主机在默认路径上
-必然握手失败。`tls:'native'` 走另一条传输，**每跳仍然过 SSRF 门**、仍然不自动跟重定向、
-正文仍然 1 MiB 上限。
-
-实测（2026-11-12，mcloud 直播那两个主机）：
-
-```text
-GET https://v.cmcc-cs.cn/             rustls → 失败(Connect)      native → 200
-GET https://videoim.cmcc-cs.cn:20102  rustls → 失败(Connect)      native → 200
-WSS wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → 过了 TLS（HTTP 200，不是 101）
-```
+挪到单独一篇了：[host-api-net.md](host-api-net.md)。
+一句话：`smtp_send(opts)` 发邮件、`ws_open/send/recv/close` 长连接、
+`fetch` 的 `tls: 'rustls' | 'native'` 选 TLS 后端；三者共用一道 SSRF 门与一份信任库。
 
 ### 通知
 

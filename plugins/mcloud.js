@@ -100,9 +100,6 @@ function register_nav(_opts) {
 }
 function worker_hint(_hint) {
 }
-function missing(what) {
-  throw new Error("panel-llrt 还没有 " + what + "：这个功能在这台面板上不可用");
-}
 function ws_open(url, options) {
   return host.ws_open(url, options ?? {});
 }
@@ -115,8 +112,9 @@ function ws_recv(id, timeout_ms) {
 function ws_close(id) {
   return host.ws_close(id);
 }
-function smtp_send(_opts) {
-  return missing("SMTP 发送");
+function smtp_send(opts) {
+  const res = host.smtp_send(opts);
+  return { ok: res?.ok === true, response: String(res?.response ?? "") };
 }
 
 // src/version.ts

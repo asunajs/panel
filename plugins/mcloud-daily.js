@@ -102,11 +102,9 @@ function http_fetch(url, options) {
     return { error: text(e) };
   }
 }
-function missing(what) {
-  throw new Error("panel-llrt 还没有 " + what + "：这个功能在这台面板上不可用");
-}
-function smtp_send(_opts) {
-  return missing("SMTP 发送");
+function smtp_send(opts) {
+  const res = host.smtp_send(opts);
+  return { ok: res?.ok === true, response: String(res?.response ?? "") };
 }
 
 // src/mcloud/envelope.ts

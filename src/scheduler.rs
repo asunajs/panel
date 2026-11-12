@@ -116,6 +116,7 @@ struct Task {
 }
 
 impl Task {
+    #[cfg(test)]
     fn new(plugin: String, name: String, cron: String, budget_ms: u64) -> Result<Self, String> {
         Self::with_opts(plugin, name, cron, budget_ms, None, 0)
     }

@@ -58,7 +58,7 @@
 | 旧 | 我们 | 影响 |
 |---|---|---|
 | `ws_open/ws_send/ws_recv/ws_close` | ✅ 11-12 | tokio-tungstenite；同步语义 + 句柄，超时是结果不是错误 |
-| `smtp_send` | ❌ | 插件发不了邮件 |
+| `smtp_send` | ✅ 11-12 | 移植基线的 SMTP 客户端（starttls / implicit / none、AUTH、RFC2047、ca_file）；**过 SSRF 门**；明文连接上默认不发凭据。见 [host-api.md](host-api.md#发邮件smtp_sendopts) |
 | `tls: 'native'`（legacy CBC 套件） | ✅ 11-12 | reqwest + 平台 TLS；`v.cmcc-cs.cn` 实测 rustls 失败、native 200 |
 | `register_nav({label,icon,path})` | ❌（记一行日志） | 插件不会出现在侧栏；走「插件页 → 界面」 |
 | `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |

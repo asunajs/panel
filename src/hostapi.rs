@@ -111,6 +111,7 @@ const WRAP: &str = r#"(raw) => {
     set_job_summary: async (name, text) => raw.set_job_summary(String(name), String(text ?? '')),
     set_job_blockers: async (name, list) => raw.set_job_blockers(String(name), JSON.stringify(list ?? [])),
     set_job_schedule: async (name, opts) => raw.set_job_schedule(String(name), j(opts)),
+    smtp_send: (opts) => raw.smtp_send(j(opts)),
     config: async () => JSON.parse(await raw.config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
@@ -122,7 +123,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 24] = [
+const OP_NAMES: [&str; 25] = [
     "log",
     "info",
     "warn",
@@ -147,6 +148,7 @@ const OP_NAMES: [&str; 24] = [
     "set_job_summary",
     "set_job_blockers",
     "set_job_schedule",
+    "smtp_send",
 ];
 
 impl ModuleDef for HostModule {
@@ -214,6 +216,8 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("set_job_summary", Func::from(Async(op_set_job_summary)).into_js(ctx)?),
         ("set_job_blockers", Func::from(Async(op_set_job_blockers)).into_js(ctx)?),
         ("set_job_schedule", Func::from(Async(op_set_job_schedule)).into_js(ctx)?),
+        // 发邮件：同步（插件那边是阻塞调用）
+        ("smtp_send", Func::from(op_smtp_send).into_js(ctx)?),
     ])
 }
 
@@ -432,6 +436,133 @@ fn op_http_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<S
 }
 
 
+
+/// smtp_send(opts) —— 发一封邮件。**同步**（插件那边是阻塞调用，和 http_fetch 同构）。
+///
+/// 失败是**抛错**，错误文本是服务器那句原话（535 / 550 …），直接贴进日志就能排查。
+/// 策略（明文连接上不发凭据）只从宿主来，不从 opts 读 —— 插件自己不能打开它。
+fn op_smtp_send(ctx: Ctx<'_>, opts: String) -> Result<String> {
+    let h = host(&ctx)?;
+    let o: Json = if opts.trim().is_empty() {
+        Json::Object(Default::default())
+    } else {
+        serde_json::from_str(&opts).map_err(|e| err(&ctx, format!("参数不是 JSON 对象: {e}")))?
+    };
+    let get_str = |k: &str| -> String {
+        o.get(k)
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+
+    let host_name = get_str("host");
+    if host_name.is_empty() {
+        return Err(err(&ctx, "smtp_send: host 不能为空".into()));
+    }
+    // SMTP 也必须过出站判定：否则插件能用 smtp_send 连 127.0.0.1:25 或云元数据地址，
+    // 判定表形同虚设。和 fetch 是同一套（见 ssrf.rs）。
+    crate::ssrf::ensure_outbound_url_allowed(&format!("https://{host_name}/"))
+        .map_err(|e| err(&ctx, format!("smtp_send: {e}")))?;
+
+    let tls = crate::smtp::TlsMode::parse(&get_str("tls")).map_err(|e| err(&ctx, e))?;
+    let default_port = match tls {
+        crate::smtp::TlsMode::Implicit => 465,
+        _ => 587,
+    };
+    // 不能直接 as u16：70000 会静默截断成 4464，用户看到的是「连不上」而不是「端口写错了」。
+    let port = match o.get("port").and_then(Json::as_u64) {
+        None => default_port,
+        Some(p) if (1..=65535).contains(&p) => p as u16,
+        Some(p) => {
+            return Err(err(
+                &ctx,
+                format!("smtp_send: 端口越界（{p}），必须是 1..=65535"),
+            ))
+        }
+    };
+
+    // to 收字符串或字符串数组 —— 只写一个收件人是最常见的情况
+    let to: Vec<String> = match o.get("to") {
+        Some(Json::String(s)) => vec![s.trim().to_string()],
+        Some(Json::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect();
+
+    let timeout_ms = o
+        .get("timeout_ms")
+        .and_then(Json::as_u64)
+        .unwrap_or(15_000)
+        .clamp(1_000, 60_000);
+
+    let cfg = crate::smtp::Config {
+        host: host_name,
+        port,
+        tls,
+        user: get_str("user"),
+        pass: o
+            .get("pass")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string(),
+        from: get_str("from"),
+        to,
+        subject: o
+            .get("subject")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string(),
+        text: o
+            .get("text")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string(),
+        html: o
+            .get("html")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string(),
+        timeout: std::time::Duration::from_millis(timeout_ms),
+        ehlo_name: get_str("ehlo"),
+        // 自建 SMTP / 内网中继用私有 CA 签证书，公共根里没有
+        ca_file: {
+            let p = get_str("ca_file");
+            if p.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(p))
+            }
+        },
+    };
+
+    let log = h.log.clone();
+    let who = h.plugin.clone();
+    let note = move |m: &str| {
+        log.emit(&who, None, crate::log::Level::Warn, m.to_string());
+    };
+    // 阻塞的协议实现放到 blocking 池：占住 sync_bridge 那条线程的话，
+    // 外面那层超时就没机会触发了。
+    let out = crate::sync_bridge::run(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::smtp::send_with_options(&cfg, crate::smtp::SendOptions::default(), &note)
+            })
+            .await
+            .map_err(|e| format!("smtp 线程失败: {e}"))?
+        },
+        std::time::Duration::from_millis(timeout_ms + 10_000),
+    )
+    .map_err(|e| err(&ctx, e))?;
+
+    Ok(serde_json::json!({ "ok": true, "response": out }).to_string())
+}
 /// 解析 set_job_* 的目标：'任务名'（自己的）或 '插件名/任务名'（同组的）。
 fn job_target(h: &HostHandle, name: &str) -> std::result::Result<(String, String), String> {
     match name.split_once('/') {
