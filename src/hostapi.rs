@@ -33,6 +33,10 @@ pub enum Registration {
         name: String,
         cron: String,
         budget_ms: u64,
+        /// 交给 handler 的 payload.params（形状由插件定，面板只原样存/交回）。
+        params: Option<Json>,
+        /// 在 cron 目标前多久唤醒（毫秒）。
+        lead_ms: u64,
     },
     Handler {
         plugin: String,
@@ -94,7 +98,9 @@ const WRAP: &str = r#"(raw) => {
     // 通知：标题/正文都是纯文本，别走 JSON.stringify（那会多一对引号）。
     notify: async (title, body) => raw.notify(String(title), body === undefined ? undefined : String(body)),
     sleep: raw.sleep,
-    register_cron: async (name, cron, budget_ms) => raw.register_cron(name, cron, budget_ms),
+    register_cron: async (name, cron, budget_ms, opts) =>
+      raw.register_cron(String(name), String(cron), budget_ms == null ? undefined : Number(budget_ms),
+        opts == null ? undefined : JSON.stringify(opts)),
     register_handler: raw.register_handler,
     register_web: raw.register_web,
     ws_open: (url, opts) => Number(raw.ws_open(url, j(opts))),
@@ -576,10 +582,31 @@ async fn op_register_cron(
     name: String,
     cron: String,
     budget_ms: Undefined<u64>,
+    opts: Undefined<String>,
 ) -> Result<()> {
     let h = host(&ctx)?;
     // 表达式在这里就校验，别等到调度时才发现写错了
     crate::cron::Schedule::parse(&cron).map_err(|e| err(&ctx, e))?;
+    // opts 是 JSON 文本：{ params, lead_ms }。坏 JSON 直接报错，别静默吞掉。
+    let o: Json = match opts.0.as_deref() {
+        None | Some("") => Json::Null,
+        Some(t) => serde_json::from_str(t)
+            .map_err(|e| err(&ctx, format!("register_cron 的 opts 不是合法 JSON: {e}")))?,
+    };
+    let params = match o.get("params") {
+        None | Some(Json::Null) => None,
+        Some(v) => Some(v.clone()),
+    };
+    let lead = o.get("lead_ms").and_then(Json::as_u64).unwrap_or(0);
+    if lead > crate::scheduler::LEAD_MAX_MS {
+        return Err(err(
+            &ctx,
+            format!(
+                "lead_ms 最大 {} 毫秒（一小时），给的是 {lead}",
+                crate::scheduler::LEAD_MAX_MS
+            ),
+        ));
+    }
     let budget = budget_ms.0.unwrap_or(crate::scheduler::DEFAULT_BUDGET_MS);
     h.reg
         .send(Registration::Cron {
@@ -587,6 +614,8 @@ async fn op_register_cron(
             name,
             cron,
             budget_ms: budget,
+            params,
+            lead_ms: lead,
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
 }

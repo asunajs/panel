@@ -62,7 +62,7 @@
 | `tls: 'native'`（legacy CBC 套件） | ✅ 11-12 | reqwest + 平台 TLS；`v.cmcc-cs.cn` 实测 rustls 失败、native 200 |
 | `register_nav({label,icon,path})` | ❌（记一行日志） | 插件不会出现在侧栏；走「插件页 → 界面」 |
 | `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |
-| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 部分 | `lead_ms` / `summary` / `blockers` / `paused` 都有了（走 `set_job_*`）；`params`（派发时带的参数）和 `surface` / `manage_url` 还没有 |
+| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 大部分 | `params`（注册期给、派发原样交回，没给是 `null`）、`lead_ms`、`summary`、`blockers`、`paused` 都有了；`surface` / `manage_url` 还没有（我们没做侧栏注册与外部管理页） |
 | `set_job_paused/blockers/summary/schedule` | ✅ 11-12 | 落库（重启/重载都不丢）；blockers 只挡定时、不补触发；`lead_ms` 提前唤醒且事件带 `early`；只认自己/同组 |
 | `panel.version()` / `panel.atLeast()` | ❌ | 插件判断不了宿主版本 |
 

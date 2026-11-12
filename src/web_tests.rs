@@ -1223,3 +1223,101 @@ async fn scripts_cannot_steer_task_state() {
     let err = done["run"]["error"].as_str().unwrap_or_default();
     assert!(err.contains("脚本里没有任务表"), "{err}");
 }
+
+/// register_cron 的 opts：params 原样交给 handler（没给是 null），lead_ms 提前唤醒。
+#[tokio::test]
+async fn register_cron_takes_params_and_lead() {
+    let (app, _plugins, _data, _store) = setup_dirs("par1").await;
+    load_plugin(
+        &app,
+        "p",
+        "import host from 'panel:host';\n\
+await host.register_cron('p', '@every 1h', 5000, { params: { accounts: [1, 2], mode: 'x' }, lead_ms: 5000 });\n\
+await host.register_cron('n', '@every 1h', 5000);\n\
+await host.register_handler('p', async (evt) => {\n\
+  await host.info('p params=' + JSON.stringify(evt.params) + ' lead=' + evt.lead_ms);\n\
+  return 1;\n\
+});\n\
+await host.register_handler('n', async (evt) => {\n\
+  await host.info('n params=' + JSON.stringify(evt.params) + ' isNull=' + (evt.params === null));\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+
+    // 状态里能看到
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "p", "p");
+    assert_eq!(t["params"], json!({"accounts": [1, 2], "mode": "x"}), "{t}");
+    assert_eq!(t["lead_ms"], 5000, "{t}");
+    assert_eq!(task_of(&state, "p", "n")["params"], Value::Null);
+
+    // 派发时原样交回
+    let (_, body) = send(&app, with_csrf("POST", "/api/tasks/p/p/run", None)).await;
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    let msgs: Vec<String> = done["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m == r#"p params={"accounts":[1,2],"mode":"x"} lead=5000"#),
+        "{msgs:?}"
+    );
+
+    // 没给 params 就是 null（JSON 里没有 undefined）
+    let (_, body) = send(&app, with_csrf("POST", "/api/tasks/p/n/run", None)).await;
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    let msgs: Vec<String> = done["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(msgs.iter().any(|m| m == "n params=null isNull=true"), "{msgs:?}");
+}
+
+/// lead_ms 有上限（一小时）：越界报错，不静默截断。
+#[tokio::test]
+async fn register_cron_rejects_oversized_lead() {
+    let (app, _plugins, _data, _store) = setup_dirs("par2").await;
+    load_plugin(
+        &app,
+        "p",
+        "import host from 'panel:host';\n\
+await host.register_handler('bad', async () => {\n\
+  try {\n\
+    await host.register_cron('x', '@every 1h', 5000, { lead_ms: 7200000 });\n\
+    await host.info('没报错');\n\
+  } catch (e) {\n\
+    await host.info('拒绝: ' + String(e));\n\
+  }\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+    let (_, body) = send(&app, with_csrf("POST", "/api/tasks/p/bad/run", None)).await;
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    let msgs: Vec<String> = done["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("lead_ms 最大 3600000")),
+        "{msgs:?}"
+    );
+    // 任务没被建出来
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(
+        state["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != "x"),
+        "{state}"
+    );
+}

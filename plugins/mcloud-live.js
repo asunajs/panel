@@ -71,8 +71,12 @@ function registry() {
 function register_cron(name, expr, handler, opts) {
   registry()[name] = wrapJob(name, handler);
   const budget = typeof opts?.budget_ms === "number" ? opts.budget_ms : 3e4;
+  const extra = {};
+  if (opts != null && "params" in opts) extra.params = opts.params ?? null;
+  if (typeof opts?.lead_ms === "number") extra.lead_ms = opts.lead_ms;
+  const extraArg = Object.keys(extra).length ? extra : void 0;
   try {
-    void Promise.resolve(host.register_cron(name, expr, budget)).catch((e) => {
+    void Promise.resolve(host.register_cron(name, expr, budget, extraArg)).catch((e) => {
       emit("error", "注册任务 " + name + "（" + expr + "）失败: " + text(e));
     });
   } catch (e) {

@@ -31,6 +31,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Local};
 use futures::FutureExt;
 use serde::Serialize;
+use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cron::{apply_jitter, Schedule};
@@ -96,6 +97,8 @@ struct Task {
     blockers: Vec<String>,
     /// 提前多少毫秒唤醒（set_job_schedule 里的 lead_ms）。0 = 准点。
     lead_ms: u64,
+    /// 注册时给的参数，派发时原样交给 handler 的 payload.params。
+    params: Option<Json>,
     /// None = 手动任务，永远不自动到期。
     schedule: Option<Schedule>,
     budget_ms: u64,
@@ -114,6 +117,17 @@ struct Task {
 
 impl Task {
     fn new(plugin: String, name: String, cron: String, budget_ms: u64) -> Result<Self, String> {
+        Self::with_opts(plugin, name, cron, budget_ms, None, 0)
+    }
+
+    fn with_opts(
+        plugin: String,
+        name: String,
+        cron: String,
+        budget_ms: u64,
+        params: Option<Json>,
+        lead_ms: u64,
+    ) -> Result<Self, String> {
         let schedule = Schedule::parse(&cron)?;
         let now = Local::now();
         let base = schedule
@@ -128,7 +142,8 @@ impl Task {
             override_expr: None,
             summary: None,
             blockers: Vec::new(),
-            lead_ms: 0,
+            lead_ms: lead_ms.min(LEAD_MAX_MS),
+            params,
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
             enabled: true,
@@ -156,6 +171,7 @@ impl Task {
             summary: None,
             blockers: Vec::new(),
             lead_ms: 0,
+            params: None,
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
             enabled: true,
@@ -251,6 +267,8 @@ pub struct TaskView {
     pub blockers: Vec<String>,
     /// 提前多少毫秒唤醒（set_job_schedule 的 lead_ms）。
     pub lead_ms: u64,
+    /// 注册时给的参数（派发时原样交给 handler）。
+    pub params: Option<Json>,
     /// 只有 handler、没有 cron：只能手动触发。
     pub manual: bool,
     pub budget_ms: u64,
@@ -946,6 +964,7 @@ impl Inner {
                 summary: t.summary.clone(),
                 blockers: t.blockers.clone(),
                 lead_ms: t.lead_ms,
+                params: t.params.clone(),
                 manual: t.schedule.is_none(),
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
@@ -1055,8 +1074,17 @@ impl Inner {
                 name,
                 cron,
                 budget_ms,
+                params,
+                lead_ms,
             } => {
-                let t = match Task::new(plugin.clone(), name.clone(), cron, budget_ms) {
+                let t = match Task::with_opts(
+                    plugin.clone(),
+                    name.clone(),
+                    cron,
+                    budget_ms,
+                    params,
+                    lead_ms,
+                ) {
                     Ok(t) => t,
                     Err(e) => {
                         self.log.emit(
@@ -1186,7 +1214,7 @@ impl Inner {
         manual: bool,
         reply: Option<oneshot::Sender<Result<i64, String>>>,
     ) {
-        let (plugin_name, task_name, budget, early, lead_ms) = {
+        let (plugin_name, task_name, budget, early, lead_ms, params) = {
             let t = &self.tasks[idx];
             (
                 t.plugin.clone(),
@@ -1194,6 +1222,7 @@ impl Inner {
                 t.budget_ms,
                 Local::now() < t.next_fire,
                 t.lead_ms,
+                t.params.clone().unwrap_or(Json::Null),
             )
         };
         let blocked = match self.plugins.get(&plugin_name) {
@@ -1263,6 +1292,8 @@ impl Inner {
                 "plugin": plugin_name,
                 "manual": manual,
                 "run_id": run_id,
+                // 注册时给的参数原样交回；没给是 null（JSON 里没有 undefined）。
+                "params": params,
                 // 提前唤醒（lead_ms）时为 true：插件据此知道「还没到点，是让我先准备」。
                 "early": early,
                 "lead_ms": lead_ms
