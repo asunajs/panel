@@ -102,6 +102,13 @@ async fn send_cookie(app: &Router, req: Request<Body>) -> (StatusCode, String) {
         .to_string();
     (status, cookie)
 }
+/// 只要响应正文的版本（错误体是纯文本，`send()` 会解析成 Null）。
+async fn send_text(app: &Router, req: Request<Body>) -> (StatusCode, String) {
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
 async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
     send(app, Request::get(uri).body(Body::empty()).unwrap()).await
 }
@@ -2953,7 +2960,7 @@ async fn query_params_that_are_typoed_are_rejected() {
         ("/api/logs?lvl=warn", "lvl"),
         ("/api/runs?limit=abc", "limit"),
     ];
-    for (path, needle) in bad {
+    for (path, _needle) in bad {
         let (status, out) = get(&app, path).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path} 应当 400，实际 {status} {out}");
     }
@@ -2966,4 +2973,33 @@ async fn query_params_that_are_typoed_are_rejected() {
     let (status, out) = get(&app, "/api/runs?sort=bogus").await;
     assert_eq!(status, StatusCode::OK, "{out}");
     assert_eq!(out["sort"], "id", "{out}");
+}
+
+/// 同一插件同时只允许一个在途调用：第二个请求要 **409 Conflict**（不是 400），
+/// 因为它不是「请求写错了」，而是「现在忙，等会儿再来」。
+///
+/// 第 69 轮实测：三个并发请求 → 1 个 200 + 2 个 400；改成 409 后客户端能区分
+/// 「重试」和「改参数」两条路。
+#[tokio::test]
+async fn a_second_run_on_a_busy_plugin_is_a_conflict_not_a_bad_request() {
+    let (app, plugins, _data, _store) = setup_dirs("busy409").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('slow', async () => { await host.sleep(1500); });
+"#;
+    std::fs::write(plugins.join("busy.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/busy/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (status, text) = send_text(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "忙的时候应当是 409: {text}");
+    assert!(text.contains("还有任务在跑"), "要说清为什么: {text}");
+
+    // 跑完之后又能派发（不是永久锁死）
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "跑完要能再派: {body}");
 }

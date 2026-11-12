@@ -243,3 +243,8 @@
 56. **`@every` 后面不是数字时报「`` 不是合法数字」**：空引号，等于没说。
     现在「@every 后面要跟『数字 + 单位』（例如 30s、5m、1h、1d），收到 `不是时间`」。
     守卫：`every_with_a_non_numeric_part_says_what_it_wants`。
+
+57. **「忙」应当回 409 而不是 400**：同一插件并发派发时第二个请求以前回 400（和「没有这个任务」同一个码），
+    客户端没法区分「等会儿重试」和「参数错了别重试」。现在 `scheduler::is_busy_error()` 判定后回 409。
+    顺带实测确认：同插件严格串行（并发 3 个只有 1 个跑），跨插件才是真并行（三个 2s 任务同在 +1306ms 开始、+3308ms 结束）。
+    守卫：`a_second_run_on_a_busy_plugin_is_a_conflict_not_a_bad_request`。

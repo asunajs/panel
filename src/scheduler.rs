@@ -95,6 +95,14 @@ fn cancelled(error: &str) -> bool {
     error.contains("invocation 已停止")
 }
 
+/// 这次调用被**「现在不行，等会儿再来」**挡回去了（插件还在忙 / JS 通道满了）。
+///
+/// 为什么要在 web 层分出来：这是**冲突**不是**请求写错了**，状态码该是 409 而不是 400。
+/// 客户端（或脚本）能靠状态码判断「过两秒重试」还是「我参数错了别重试」。
+pub fn is_busy_error(msg: &str) -> bool {
+    msg.contains("还有任务在跑") || msg.contains("JS 执行通道已满")
+}
+
 /// 给人看的说法（原来是 `Error: AbortError: invocation 已停止`）。
 fn cancel_text() -> String {
     "已停止（插件被重载或卸载）".to_string()

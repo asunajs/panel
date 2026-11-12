@@ -1250,7 +1250,14 @@ async fn task_run(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let run_id = st.sched.run_now(&plugin, &name).await.map_err(bad)?;
+    // 「插件还在跑」「JS 通道满了」是**冲突**（等会儿重试就行），不是请求写错了 —— 409。
+    let run_id = st.sched.run_now(&plugin, &name).await.map_err(|e| {
+        if crate::scheduler::is_busy_error(&e) {
+            (StatusCode::CONFLICT, e)
+        } else {
+            bad(e)
+        }
+    })?;
     Ok(Json(json!({ "ok": true, "run_id": run_id })))
 }
 
