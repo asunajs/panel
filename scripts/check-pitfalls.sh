@@ -66,6 +66,13 @@ else
   bad 'api() 收到字符串 body 不会带 content-type，后端会 415 —— 传对象'
 fi
 
+# js-slots.md：插件 dispatch 必须也走同一个闸（否则一堆死循环插件能搞假死面板）
+if grep -q 'jsslots::try_acquire' src/scheduler.rs; then
+  ok '插件 dispatch 走 JS 执行通道（jsslots）'
+else
+  bad 'scheduler.rs 里没有 jsslots::try_acquire —— 死循环插件能把面板 HTTP 饿死'
+fi
+
 # scripts.md：脚本并发上限必须还接着（删了它，一堆死循环能把 HTTP 饿死）
 if grep -q 'max_concurrent()' src/scripts.rs; then
   ok '脚本有全局并发上限（max_concurrent）'
@@ -97,7 +104,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 11 条坑的守卫全过"
+  echo "ok: 12 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

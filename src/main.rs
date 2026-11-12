@@ -16,6 +16,7 @@ mod log;
 mod scheduler;
 mod notify;
 mod outbound;
+mod jsslots;
 mod ratelimit;
 mod retention;
 mod panelversion;

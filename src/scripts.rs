@@ -68,17 +68,14 @@ pub struct Scripts {
     config: Arc<crate::config_store::ConfigStore>,
     /// 同一个脚本不允许并发跑：手动点两次不该同时进来两份。
     in_flight: Arc<Mutex<HashSet<String>>>,
-    /// 全局并发上限：脚本跑在 tokio worker 上，一个 `while(true){}` 会**占满一个 worker**
-    /// 直到预算打卡。点一堆死循环就能把 HTTP 也一起饿死（第 34 轮实测：12 个并发死循环，
-    /// 10 核机器上 `/api/state` 从 4ms 涨到 1963ms）。所以留出两个 worker 给服务本身。
-    sem: Arc<tokio::sync::Semaphore>,
 }
 
-/// 同时能跑几个脚本。留 2 个 worker 给 HTTP / 调度，最少 1。
+/// 同时能跑几段 JS。
+///
+/// **和插件 dispatch 共用同一套名额**（`crate::jsslots`）：两边各占一半的话，
+/// 10 核机器上 8 个插件 + 8 个脚本照样能把 worker 全占满。
 pub fn max_concurrent() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2).max(1))
-        .unwrap_or(2)
+    crate::jsslots::limit()
 }
 
 impl Scripts {
@@ -96,7 +93,6 @@ impl Scripts {
             trash,
             config,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
-            sem: Arc::new(tokio::sync::Semaphore::new(max_concurrent())),
         }
     }
 
@@ -403,9 +399,9 @@ impl Scripts {
     async fn execute(&self, name: String, source: String, budget_ms: u64, run_id: i64) {
         // 先抢一个并发位。抢不到就在这里排队 —— 排队时间算进这次运行的耗时，
         // 但比「把面板一起拖死」好得多。
-        let _permit = match self.sem.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
+        let _permit = match crate::jsslots::try_acquire() {
+            Some(p) => p,
+            None => {
                 self.log.emit(
                     PLUGIN,
                     Some(run_id),
@@ -415,14 +411,14 @@ impl Scripts {
                         max_concurrent()
                     ),
                 );
-                match self.sem.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(e) => {
+                match crate::jsslots::acquire().await {
+                    Some(p) => p,
+                    None => {
                         self.log.emit(
                             PLUGIN,
                             Some(run_id),
                             Level::Error,
-                            format!("脚本 {name} 拿不到并发位: {e}"),
+                            format!("脚本 {name} 拿不到 JS 执行名额"),
                         );
                         self.in_flight
                             .lock()

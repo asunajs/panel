@@ -19,7 +19,7 @@
 | 护栏 | 行为 |
 |---|---|
 | 同一脚本不并发 | `in_flight` 集合；第二次点直接回「正在运行，等这次跑完」 |
-| 全局并发上限 | `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 |
+| 全局并发上限 | `max_concurrent() = max(1, 核数 - 2)`，**和插件 dispatch 共用**（见 [js-slots.md](js-slots.md)）；抢不到就排队并记一行日志 |
 | 预算死线 | 到点 interrupt，运行记录 `status=error` + 「CPU 预算耗尽（Nms 墙钟死线）」 |
 
 ### 为什么要有全局并发上限

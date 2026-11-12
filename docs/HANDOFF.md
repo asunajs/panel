@@ -196,16 +196,28 @@
     的用例，实际测的是普通文件，永远绿。要造真的得按 central directory 布局改 external attr
     （条目头偏移 38，4 字节小端，`0o120777 << 16`），并先断言 `unix_mode() & 0o170000 == 0o120000`。
     见 `upload::extra_tests::forge_symlink*`。
-23. **脚本是「加载=执行」，预算死线只盖加载期，而且 interrupt 只在引擎回到解释器循环时才生效**：
+23. **插件 dispatch 原来没有并发闸，能把整个面板搞假死**：10 核机器 12 个死循环 handler，
+    10 个 worker 全被占满 30 秒，`/api/state` 连不上（curl 000）。现在插件和脚本**共用**
+    `crate::jsslots` 的名额（`max(1, 核数 - 2)`），满了：手动回 400、定时排队。
+    见 `docs/js-slots.md`。
+24. **建 run 记录 + 回包必须在 actor 里做，不能塞进 spawned 任务**：回包会唤醒 HTTP handler，
+    tokio 会把它放进**当前 worker 的 LIFO 槽位**；如果这个 worker 紧接着被 `while(true){}` 占住，
+    handler 也跟着卡住 —— 实测手动点「运行」，响应要等 JS 跑完（30 秒）才到。
+    现在 `dispatch` 是 async：actor 里建记录 + 回包，JS 才 spawn 出去（9 个并发死循环下
+    8 个请求 2~8ms 拿到 run_id）。
+    顺带修掉「spawn 的任务没被调度就永远没有 run 记录」—— 记录现在一定先落库。
+
+25. **rquickjs 被 interrupt 打断时错误信息只有 `interrupted`**：光看这五个字母分不出
+    「预算耗尽」还是「被 stop」，直接写进运行记录等于让用户看天书，也没记进 `budget_kills`。
+    `load_inner` 自己留一份死线，打断后按墙钟判断并给出「CPU 预算耗尽（Nms 墙钟死线）」。
+
+
+26. **脚本是「加载=执行」，预算死线只盖加载期，而且 interrupt 只在引擎回到解释器循环时才生效**：
     一个 `while(true){}` 会**占满一个 tokio worker** 直到预算打卡。10 核机器上 12 个并发死循环，
     `/api/state` 从 4ms 涨到 **1963ms**（第 34 轮实测）。现在 `Scripts` 有全局并发上限
     `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 —— 同样 12 个死循环，
     HTTP 稳定在 2~5ms。有测试/守卫：`the_concurrency_cap_leaves_room_for_the_server`、
     `check-pitfalls` 第 11 条。
-24. **rquickjs 被 interrupt 打断时错误信息只有 `interrupted`**：光看这五个字母分不出
-    「预算耗尽」还是「被 stop」，直接写进运行记录等于让用户看天书，也没记进 `budget_kills`。
-    `load_inner` 自己留一份死线，打断后按墙钟判断并给出「CPU 预算耗尽（Nms 墙钟死线）」。
-
 ## 8. 运行中的面板
 
 - **8787** = 常用面板（`PANEL_WEB_DIR=web ./target/debug/panel-llrt`，无令牌、只绑回环，数据在 `data/`）。

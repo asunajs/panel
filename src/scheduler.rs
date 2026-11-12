@@ -630,14 +630,14 @@ pub fn start(
             let sleep = inner.sleep_hint(Local::now());
             tokio::select! {
                 cmd = rx.recv() => match cmd {
-                    Some(cmd) => inner.handle(cmd),
+                    Some(cmd) => inner.handle(cmd).await,
                     None => break,
                 },
                 reg = reg_rx.recv() => match reg {
                     Some(r) => inner.register(r),
                     None => break,
                 },
-                _ = tokio::time::sleep(sleep) => inner.fire_due(Local::now()),
+                _ = tokio::time::sleep(sleep) => inner.fire_due(Local::now()).await,
             }
             // 心跳 = 这一圈本身花了多久（不含 select 的等待）。
             crate::stats::stats().record_loop(loop_start.elapsed());
@@ -745,7 +745,7 @@ impl Inner {
         }
     }
 
-    fn handle(&mut self, cmd: Cmd) {
+    async fn handle(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Load {
                 name,
@@ -942,7 +942,7 @@ impl Inner {
                 None => {
                     let _ = reply.send(Err(format!("没有这个任务: {plugin}/{task}")));
                 }
-                Some(i) => self.dispatch(i, true, Some(reply)),
+                Some(i) => self.dispatch(i, true, Some(reply)).await,
             },
             Cmd::Stop { plugin, reply } => {
                 // 只停这个插件自己的在途 invocation。基线 R1 High 就是停 A 打断了 B。
@@ -1205,7 +1205,7 @@ impl Inner {
         });
     }
 
-    fn fire_due(&mut self, now: DateTime<Local>) {
+    async fn fire_due(&mut self, now: DateTime<Local>) {
         let due: Vec<usize> = self
             .tasks
             .iter()
@@ -1235,14 +1235,21 @@ impl Inner {
                 self.persist_task(i);
                 continue;
             }
-            self.dispatch(i, false, None);
+            self.dispatch(i, false, None).await;
         }
     }
 
     /// 建 run 记录 → 置 run_id（日志归属）→ 派发。整段在 spawned task 里跑，
     /// 因为一次 invocation 可能长达 20 分钟，不能占着调度循环。
     /// `reply` 在 run_id 落地后才回，所以手动触发拿到的是真的 run id。
-    fn dispatch(
+    /// 派发一次任务。
+    ///
+    /// **建 run 记录 + 回包都在这里（actor 里）做完，JS 只在 spawn 出去的任务里跑**。
+    /// 为什么不是「全塞进 spawn」：建记录要 await 数据库，回包要唤醒 HTTP handler；
+    /// 如果这些都在 spawned 任务里做，回包会把 handler 唤醒到**当前 worker 的 LIFO 槽位**，
+    /// 而这个 worker 紧接着被 `while(true){}` 占住 —— handler 也跟着卡住。
+    /// 第 35 轮实测：手动点「运行」在 JS 跑完（30s）之后才收到响应，界面看起来像卡死。
+    async fn dispatch(
         &mut self,
         idx: usize,
         manual: bool,
@@ -1273,9 +1280,59 @@ impl Inner {
             }
             return;
         }
-        let plugin = self.plugins[&plugin_name].plugin.clone();
+
+        // 手动点「运行」时先看一眼 JS 通道有没有空位：没有就立刻回绝。
+        // 排队的话 HTTP 请求要一直挂着（实测 9 个并发死循环时 8 个请求挂到 20s 超时），
+        // 界面上看起来就是「点了没反应」。定时派发（reply 为 None）没人在等，照旧排队。
+        let mut reply = reply;
+        let manual_slot = match reply.as_ref() {
+            None => None,
+            Some(_) => match crate::jsslots::try_acquire() {
+                Some(p) => Some(p),
+                None => {
+                    if let Some(r) = reply.take() {
+                        let _ = r.send(Err(format!(
+                            "JS 执行通道已满（同时最多 {} 段），等前面的跑完再点",
+                            crate::jsslots::limit()
+                        )));
+                    }
+                    return;
+                }
+            },
+        };
+
         let started = Local::now().timestamp_millis();
-        let db = self.db.clone();
+        // 建 run 记录：失败就别派发（没有记录的成功等于没发生过）。
+        let run_id = self
+            .db
+            .call({
+                let (p, n) = (plugin_name.clone(), task_name.clone());
+                move |c| {
+                    c.execute(
+                        "INSERT INTO runs(plugin,task,started_at,status) VALUES(?1,?2,?3,'running')",
+                        rusqlite::params![p, n, started],
+                    )
+                    .map_err(|e| format!("建 run 记录失败: {e}"))?;
+                    Ok(c.last_insert_rowid())
+                }
+            })
+            .await;
+        let run_id = match run_id {
+            Ok(id) => id,
+            Err(e) => {
+                self.log.emit(&plugin_name, None, Level::Error, e.clone());
+                if let Some(r) = reply {
+                    let _ = r.send(Err(e));
+                }
+                return;
+            }
+        };
+        // 回包在**这里**发：调用方拿到 run_id 就能去轮询，不用等 JS 跑完。
+        if let Some(r) = reply {
+            let _ = r.send(Ok(run_id));
+        }
+
+        let plugin = self.plugins[&plugin_name].plugin.clone();
         let log = self.log.clone();
         let tx = self.tx.clone();
         let inv = plugin.invocation();
@@ -1284,40 +1341,41 @@ impl Inner {
         self.plugins.get_mut(&plugin_name).unwrap().busy = true;
 
         tokio::spawn(async move {
-            let run_id = db
-                .call({
-                    let (p, n) = (plugin_name.clone(), task_name.clone());
-                    move |c| {
-                        c.execute(
-                            "INSERT INTO runs(plugin,task,started_at,status) VALUES(?1,?2,?3,'running')",
-                            rusqlite::params![p, n, started],
-                        )
-                        .map_err(|e| format!("建 run 记录失败: {e}"))?;
-                        Ok(c.last_insert_rowid())
+            // 抢一个 JS 执行名额。手动的已经在上面抢到了；定时派发的在这里排队 ——
+            // 排队时 run 记录已经存在，界面上看得出「这条在等」，不是一片空白。
+            //
+            // 没有这道闸会怎样：10 核机器 12 个死循环 handler 能把 10 个 worker 全占满
+            // 30 秒，`/api/state` 直接连不上（第 35 轮实测）。
+            let slot = match manual_slot {
+                Some(p) => p,
+                None => match crate::jsslots::try_acquire() {
+                    Some(p) => p,
+                    None => {
+                        log.emit(
+                            &plugin_name,
+                            Some(run_id),
+                            Level::Info,
+                            format!(
+                                "任务 {task_name} 排队中（同时最多 {} 段 JS，等前面的跑完）",
+                                crate::jsslots::limit()
+                            ),
+                        );
+                        match crate::jsslots::acquire().await {
+                            Some(p) => p,
+                            None => {
+                                let _ = tx.send(Cmd::Finished {
+                                    plugin: plugin_name,
+                                    task: task_name,
+                                    run_id,
+                                    error: Some("拿不到 JS 执行名额".to_string()),
+                                });
+                                return;
+                            }
+                        }
                     }
-                })
-                .await;
-            let run_id = match run_id {
-                Ok(id) => {
-                    if let Some(r) = reply {
-                        let _ = r.send(Ok(id));
-                    }
-                    id
-                }
-                Err(e) => {
-                    log.emit(&plugin_name, None, Level::Error, e.clone());
-                    if let Some(r) = reply {
-                        let _ = r.send(Err(e));
-                    }
-                    let _ = tx.send(Cmd::Finished {
-                        plugin: plugin_name,
-                        task: task_name,
-                        run_id: -1,
-                        error: Some("建 run 记录失败".into()),
-                    });
-                    return;
-                }
+                },
             };
+
             // run_id 必须在派发**之前**置好：日志在 op 边界上读它做归属。
             inv.run_id
                 .store(run_id, std::sync::atomic::Ordering::SeqCst);
@@ -1335,6 +1393,8 @@ impl Inner {
             let error = catch_engine_panic(plugin.dispatch(&task_name, &evt, budget))
                 .await
                 .err();
+            // 先还名额再收尾：收尾要写库/发通知，不该占着 JS 通道。
+            drop(slot);
             inv.run_id
                 .store(-1, std::sync::atomic::Ordering::SeqCst);
             let _ = tx.send(Cmd::Finished {
