@@ -627,7 +627,6 @@ function renderRuns() {
     .filter((r) => !state.fp.runs || r.plugin === state.fp.runs)
     .filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
   if (state.onlyFailed) rows = rows.filter((r) => r.status !== 'ok');
-  rows = sortBy(rows, state.sort.runs, { dur: (r) => (r.ended_at ? r.ended_at - r.started_at : null) });
   const total = typeof state.runsTotal === 'number' ? state.runsTotal : state.runs.length;
   $('runs-count').textContent = '已加载 ' + state.runs.length + ' / 共 ' + total;
   clear(body);
@@ -1827,11 +1826,21 @@ async function loadRuns(reset = true) {
   if (state.runsLoading) return;
   state.runsLoading = true;
   try {
-    const qs = ['limit=50'];
+    const sort = state.sort.runs;
+    const qs = ['limit=50', 'sort=' + sort.key, 'dir=' + (sort.dir > 0 ? 'asc' : 'desc')];
     if (state.fp.runs) qs.push('plugin=' + encodeURIComponent(state.fp.runs));
     // 搜索也走服务端：在已加载的行里搜，「搜不到」和「没有」分不清 —— 和插件筛选同一个病。
     if (state.q.runs) qs.push('q=' + encodeURIComponent(state.q.runs));
-    if (!reset && state.runs.length) qs.push('before=' + state.runs[state.runs.length - 1].id);
+    if (!reset && state.runs.length) {
+      const last = state.runs[state.runs.length - 1];
+      // 按 id 排序时游标就是 id；按别的列排序要用 (值, id) 复合游标，
+      // 否则「同一秒里的两条」「同样 500ms 的两条」会重复或漏掉。
+      if (sort.key === 'id') qs.push('before=' + last.id);
+      else {
+        const v = sort.key === 'dur' ? (last.ended_at ? last.ended_at - last.started_at : -1) : last[sort.key];
+        qs.push('after_v=' + encodeURIComponent(String(v)) + '&after_id=' + last.id);
+      }
+    }
     const data = await api('/api/runs?' + qs.join('&'));
     const got = data.runs || [];
     state.runs = reset ? got : state.runs.concat(got);
@@ -2176,9 +2185,12 @@ function bind() {
       th.addEventListener('click', () => {
         const key = th.dataset.sort;
         const cur = state.sort[view];
-        state.sort[view] = { key, dir: cur.key === key ? -cur.dir : 1 };
+        // 换列时的默认方向：数值列（#/开始/耗时/预算/下次运行）先给大的 —— 点「耗时」
+        // 想看的通常是「最慢的是哪次」，不是「最快的那 50 条」；文本列先给 A→Z。
+        const numeric = ['id', 'started_at', 'dur', 'budget_ms', 'next_at', 'runs'].includes(key);
+        state.sort[view] = { key, dir: cur.key === key ? -cur.dir : (numeric ? -1 : 1) };
         if (view === 'tasks') renderTasks();
-        else renderRuns();
+        else loadRuns(true);
       });
     }
   }

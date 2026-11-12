@@ -1068,6 +1068,12 @@ struct Page {
     run_id: Option<i64>,
     /// 全文搜索（插件/任务/状态/错误四个字段，LIKE 子串）。空串等于没搜。
     q: Option<String>,
+    /// 排序键（白名单见 sort_expr）与方向 asc/desc。默认 id desc。
+    sort: Option<String>,
+    dir: Option<String>,
+    /// 复合游标：按非 id 列排序时用 (值, id)，翻页才不会漏/重。
+    after_v: Option<String>,
+    after_id: Option<i64>,
     /// 游标分页：只要 id **小于** 它的行（列表按 id 倒序）。
     ///
     /// 为什么用 id 而不是 offset：运行记录一直在新增，offset 分页会漏行/重行 ——
@@ -1149,6 +1155,27 @@ fn like_pat(q: &Option<String>) -> Option<String> {
     Some(out)
 }
 
+/// 排序白名单：列名**不进 SQL 字符串**（注入面），只在这张表里选。
+///
+/// dur 用 ifnull(...,-1)：正在跑的那次没有 ended_at，算出来是 NULL，
+/// 而 NULL 在比较里既不大于也不小于任何东西 —— 游标会卡住。给它一个 -1，
+/// 语义也说得通（还没跑完 = 目前耗时未知，排最前）。
+fn sort_expr(key: &str) -> &'static str {
+    match key {
+        "plugin" => "plugin",
+        "task" => "task",
+        "status" => "status",
+        "started_at" => "started_at",
+        "dur" => "ifnull(ended_at-started_at,-1)",
+        _ => "id",
+    }
+}
+
+/// 这一列是不是数值列：决定游标值怎么解析、以及比较时用不用 CAST。
+fn sort_is_num(key: &str) -> bool {
+    matches!(key, "id" | "started_at" | "dur")
+}
+
 async fn api_runs(
     State(st): State<AppState>,
     Query(p): Query<Page>,
@@ -1157,16 +1184,39 @@ async fn api_runs(
     let plugin = p.plugin.clone();
     let before = p.before;
     let q = like_pat(&p.q);
+    // 白名单外的值一律落回 id（也顺手把响应里回显的键改成**实际生效**的那个：
+    // 回显用户原样输入会让人以为「sort=id;DROP TABLE runs」被接受了）。
+    let key = match p.sort.as_deref() {
+        Some(k @ ("id" | "plugin" | "task" | "status" | "started_at" | "dur")) => k.to_string(),
+        _ => "id".to_string(),
+    };
+    let expr = sort_expr(&key);
+    let dir = if p.dir.as_deref() == Some("asc") { "ASC" } else { "DESC" };
+    let cmp = if dir == "ASC" { ">" } else { "<" };
+    // 游标值：数值列按整数解析（解析不了就当没给），文本列原样。
+    let after_v: Option<rusqlite::types::Value> = match p.after_v.as_deref() {
+        None => None,
+        Some(v) => {
+            if sort_is_num(&key) {
+                v.trim().parse::<i64>().ok().map(rusqlite::types::Value::Integer)
+            } else {
+                Some(rusqlite::types::Value::Text(v.to_string()))
+            }
+        }
+    };
+    let after_id = p.after_id;
+    let order = format!("{expr} {dir}, id {dir}");
     let (rows, total) = st
         .db
         .call(move |c| {
             let sql = format!(
                 "SELECT id,plugin,task,started_at,ended_at,status,error FROM runs{RUNS_WHERE} \
-                 ORDER BY id DESC LIMIT ?4"
+                 AND (?4 IS NULL OR ({expr} {cmp} ?4 OR ({expr} = ?4 AND id {cmp} ?5))) \
+                 ORDER BY {order} LIMIT ?6"
             );
             let mut stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
             let out: Vec<Value> = stmt
-                .query(rusqlite::params![plugin, before, q, limit])
+                .query(rusqlite::params![plugin, before, q, after_v, after_id, limit])
                 .map_err(|e| e.to_string())?
                 .mapped(|r| {
                     Ok(json!({
@@ -1181,21 +1231,17 @@ async fn api_runs(
                 })
                 .collect::<rusqlite::Result<_>>()
                 .map_err(|e| e.to_string())?;
-            // 总数：同一个 WHERE，但**不带游标**（?2 传 NULL）—— 它回答的是
+            // 总数：同一个 WHERE，但**不带任何游标**（?2/?4 传 NULL）—— 它回答的是
             // 「这个筛选/搜索一共有多少条」，不是「还剩多少」。
             let csql = format!("SELECT COUNT(*) FROM runs{RUNS_WHERE}");
             let total: i64 = c
-                .query_row(
-                    &csql,
-                    rusqlite::params![plugin, None::<i64>, q],
-                    |r| r.get(0),
-                )
+                .query_row(&csql, rusqlite::params![plugin, None::<i64>, q], |r| r.get(0))
                 .unwrap_or(0);
             Ok((out, total))
         })
         .await
         .map_err(internal)?;
-    Ok(Json(json!({ "runs": rows, "total": total })))
+    Ok(Json(json!({ "runs": rows, "total": total, "sort": key, "dir": dir.to_lowercase() })))
 }
 
 async fn api_run_one(
@@ -1388,11 +1434,11 @@ mod tests {
 
     #[test]
     fn limit_is_clamped() {
-        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None };
+        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
         assert_eq!(limit_of(&p, 50, 500), 500);
-        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None };
+        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
         assert_eq!(limit_of(&p, 50, 500), 1);
-        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None };
+        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None };
         assert_eq!(limit_of(&p, 50, 500), 50);
     }
 }

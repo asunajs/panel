@@ -1888,3 +1888,68 @@ fn like_pattern_escapes_wildcards() {
     // 反斜杠自己也要转义（它是 ESCAPE 字符）
     assert_eq!(like_pat(&Some("a\\b".into())), Some("%a\\\\b%".into()));
 }
+
+/// 运行记录的排序：白名单、方向、以及非 id 列排序时的 (值, id) 复合游标。
+#[tokio::test]
+async fn runs_sort_by_duration_and_page_by_composite_cursor() {
+    let (app, plugins, _data, _store) = setup_dirs("srt").await;
+    std::fs::write(
+        plugins.join("s.js"),
+        "import host from 'panel:host';\n\
+         await host.register_handler('slow', async () => { const t = Date.now(); while (Date.now() - t < 30) {} });\n\
+         await host.register_handler('fast', async () => 1);\n",
+    )
+    .unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/s/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        assert_eq!(
+            send(&app, with_csrf("POST", "/api/tasks/s/slow/run", None)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&app, with_csrf("POST", "/api/tasks/s/fast/run", None)).await.0,
+            StatusCode::OK
+        );
+    }
+
+    let dur = |r: &Value| -> i64 {
+        r["ended_at"].as_i64().unwrap_or(0) - r["started_at"].as_i64().unwrap_or(0)
+    };
+
+    // 耗时降序：最慢的在前
+    let (_, b) = get(&app, "/api/runs?limit=10&sort=dur&dir=desc").await;
+    let rows = b["runs"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{b}");
+    assert_eq!(b["sort"], "dur");
+    assert_eq!(b["dir"], "desc");
+    assert_eq!(rows[0]["task"], "slow", "最慢的排第一：{b}");
+    assert!(dur(&rows[0]) >= dur(&rows[3]), "{b}");
+    // 升序：最快的在前
+    let (_, b) = get(&app, "/api/runs?limit=10&sort=dur&dir=asc").await;
+    assert_eq!(b["runs"][0]["task"], "fast", "{b}");
+
+    // 复合游标翻页：limit=2 翻两页，四条各不相同
+    let (_, p1) = get(&app, "/api/runs?limit=2&sort=dur&dir=desc").await;
+    let r1 = p1["runs"].as_array().unwrap();
+    let last = &r1[r1.len() - 1];
+    let cursor = format!(
+        "/api/runs?limit=2&sort=dur&dir=desc&after_v={}&after_id={}",
+        dur(last),
+        last["id"]
+    );
+    let (_, p2) = get(&app, &cursor).await;
+    let r2 = p2["runs"].as_array().unwrap();
+    assert_eq!(r2.len(), 2, "{p2}");
+    let mut ids: Vec<i64> = r1.iter().chain(r2.iter()).map(|r| r["id"].as_i64().unwrap()).collect();
+    let n = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "两页不能重行");
+    assert_eq!(p2["total"], 4, "total 不随游标变");
+
+    // 白名单：乱传的 sort 落回 id，响应里回显实际生效的键
+    let (_, b) = get(&app, "/api/runs?limit=1&sort=id;DROP%20TABLE%20runs").await;
+    assert_eq!(b["sort"], "id", "白名单外的值必须落回 id：{b}");
+    assert_eq!(b["runs"].as_array().unwrap().len(), 1, "表还在");
+}
