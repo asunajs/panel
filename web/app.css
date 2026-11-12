@@ -155,9 +155,12 @@ button, input, select { font: inherit; color: inherit; }
 .titles { min-width: 0; }
 .page-sub { margin: 2px 0 0; font-size: 12.5px; color: var(--dim); }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
-.nav-toggle { display: none; }
+/* 选择器要写成 `.icon-btn.xxx`（0,2,0）：`.icon-btn` 本身是 `display: inline-flex`，
+   而且写在下面 —— 只用 `.nav-toggle`（0,1,0）会被它压掉，于是这两个只在窄屏该出现的按钮
+   在**所有**宽度都显示（第 86 轮用户截图报的就是这个：宽屏上多出 ✕ 和汉堡）。 */
+.icon-btn.nav-toggle { display: none; }
 /* 侧栏收起按钮只在窄屏（浮层模式）出现 */
-.sidebar-close { display: none; }
+.icon-btn.sidebar-close { display: none; }
 .sidebar-backdrop { display: none; }
 
 /* ---------- 通用控件 ---------- */
@@ -471,6 +474,19 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 @media (max-width: 860px) {
+  .content { padding: 16px 14px 32px; }
+  .topbar { padding: 12px 14px; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-value { font-size: 22px; }
+  .log-line { grid-template-columns: 64px 52px 1fr; }
+  .log-plugin { display: none; }
+}
+
+/* 侧栏收成浮层只要到 720 为止，不是 860。
+   为什么要改（第 86 轮）：媒体查询用的是 **CSS px**，2 倍屏上「1720 设备像素的窗口」= 860 CSS px，
+   于是那台看着很宽的屏幕被当成手机：侧栏变浮层、右上角多出 ✕、内容区左上多出汉堡（还压住页标题）。
+   版面真正需要多少：侧栏 236 + 内容最小约 480 ≈ 716 —— 所以 720 才是该收的那条线。 */
+@media (max-width: 720px) {
   .app { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
     position: fixed; inset: 0 auto 0 0; z-index: 40; width: 244px;
@@ -480,23 +496,18 @@ button, input, select { font: inherit; color: inherit; }
   .sidebar.open { transform: none; }
   /* 汉堡必须压在侧栏（40）和遮罩（35）之上：否则侧栏一开，按钮被盖住，
      点上去是侧栏本身 —— 用户看到的就是「点了没反应」（第 24 轮）。 */
-  .nav-toggle { display: inline-flex; position: relative; z-index: 45; }
+  .icon-btn.nav-toggle { display: inline-flex; position: relative; z-index: 45; }
   /* 浮层侧栏的遮罩：点一下就收起。z-index 在侧栏（40）与顶栏（20）之间。 */
   .sidebar-backdrop:not([hidden]) {
     position: fixed; inset: 0; z-index: 35; display: block;
     background: var(--scrim); backdrop-filter: blur(1px);
   }
-  .sidebar-close { display: inline-flex; margin-left: auto; }
+  .icon-btn.sidebar-close { display: inline-flex; margin-left: auto; }
   .brand { align-items: center; }
-  .content { padding: 16px 14px 32px; }
-  .topbar { padding: 12px 14px; }
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .card-value { font-size: 22px; }
-  .log-line { grid-template-columns: 64px 52px 1fr; }
-  .log-plugin { display: none; }
 }
 
 /* ---------- 仪表盘分组 / 插件卡片 / 同步提示 ---------- */
+
 
 .group { display: flex; flex-direction: column; gap: 10px; }
 .group-title {

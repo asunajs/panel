@@ -361,6 +361,26 @@ async function main() {
   check('卡片每格都带列名', cells.length > 0 && cells.every((c) => c.d === 'flex') &&
     labelled.length > 0 && labelled.every((c) => c.b.includes(c.l)),
     JSON.stringify(cells.slice(0, 3)));
+  // 断点回归（第 86 轮）：侧栏收成浮层只在 ≤720 发生。2 倍屏上「860 CSS px」看着像宽屏，
+  // 那时多出来的 ✕ 和汉堡是纯噪音，汉堡还会压住页标题。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 900, deviceScaleFactor: 2, mobile: false });
+  await js("location.hash = '#tasks'");
+  await sleep(600);
+  const wideIcons = JSON.parse(await js(
+    "JSON.stringify({ toggle: getComputedStyle(document.getElementById('nav-toggle')).display," +
+    " close: getComputedStyle(document.getElementById('sidebar-close')).display," +
+    " grid: getComputedStyle(document.querySelector('.app')).gridTemplateColumns })"
+  ));
+  check('宽屏（820px）没有汉堡按钮', wideIcons.toggle === 'none', JSON.stringify(wideIcons));
+  check('宽屏（820px）侧栏里没有 ✕', wideIcons.close === 'none', JSON.stringify(wideIcons));
+  check('宽屏（820px）侧栏是常驻列不是浮层', wideIcons.grid.split(' ').length >= 2, wideIcons.grid);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 700, height: 900, deviceScaleFactor: 2, mobile: false });
+  await sleep(600);
+  const narrowIcons = JSON.parse(await js(
+    "JSON.stringify({ toggle: getComputedStyle(document.getElementById('nav-toggle')).display," +
+    " close: getComputedStyle(document.getElementById('sidebar-close')).display })"
+  ));
+  check('窄屏（700px）汉堡和 ✕ 都在', narrowIcons.toggle !== 'none' && narrowIcons.close !== 'none', JSON.stringify(narrowIcons));
   // 仪表盘在窄屏也要能用（卡片单列）
   await js("location.hash = '#dashboard'");
   await sleep(1200);

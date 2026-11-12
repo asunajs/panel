@@ -292,3 +292,9 @@
     最该说出来的情况反而最安静（第 84 轮的保留策略剪掉正在跑的行就是它的成因）。
     现在两处共用 `runs::open` / `runs::close`，close 命中 0 行会写一条 warn 并返回 false。
     守卫：`open_then_close_round_trips`、`closing_a_missing_run_says_so_instead_of_swallowing_it`。
+
+67. **`.icon-btn` 把「只在窄屏显示」的两个按钮压回了可见**：`.nav-toggle { display: none }` 与
+    `.icon-btn { display: inline-flex }` 特异性相同（都是 0,1,0），而 `.icon-btn` 写在后面 ——
+    于是侧栏的 ✕ 和内容区的汉堡在**所有**宽度都显示（宽屏上纯噪音，汉堡还压住页标题）。
+    改成 `.icon-btn.nav-toggle` / `.icon-btn.sidebar-close`（0,2,0）。
+    守卫：ui-check 的三条断点检查（820px 没有这两个按钮、侧栏是常驻列；700px 两个都在）。
