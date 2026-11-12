@@ -279,3 +279,10 @@
     然后按现在的节拍继续 —— 丢掉的 6 拍不会重放（重放会让抓取类任务醒来连发 6 个请求）。
     但「少了 5 拍」要写一行 warn，否则用户只看到「日志里少了几次」。
     守卫：`a_suspended_process_reports_how_many_beats_it_missed`。
+
+65. **CSV 导出的四个坑**：①字段必须整体加引号（逗号、换行、引号都能装进去）②内部引号双写
+    ③以 `= + - @` 开头的单元格要垫一个 `'`（Excel 当公式执行，日志内容来自插件）
+    ④整份正文前面要加 BOM，否则 Excel 打开中文乱码。
+    另：导出接口只认筛选参数，`limit/sort/dir/after_*` 传了要 400（不然又是静默忽略）。
+    守卫：`csv_fields_are_quoted_escaped_and_guarded_against_formulas`、
+    `exporting_csv_has_the_right_headers_bom_and_rejects_paging_args`。

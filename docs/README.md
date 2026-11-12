@@ -72,6 +72,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [task-state.md](task-state.md) | 任务状态谁说了算：九个字段在热重载 / 重启后的归属、三个坑、实测 |
 | [js-slots.md](js-slots.md) | JS 执行通道：插件与脚本共用的并发上限、满了的行为、派发顺序、读数 |
 | [plugin-lifecycle.md](plugin-lifecycle.md) | 加载/重载/停用/卸载/删除各保住什么：tasks 是配置、runs 是历史；trash 找回的边界 |
+| [export.md](export.md) | 导出 CSV：BOM / 引号 / 公式注入 / 只认筛选参数；20000 行读数 |
 | [upload.md](upload.md) | 上传：单文件/zip 的落点与限制、同名覆盖、挡 zip bomb 与路径逃逸（带读数） |
 | [scripts.md](scripts.md) | 脚本：运行=加载、三条护栏（不并发/全局上限/预算死线）、失败文案、排查表 |
 | [storage-failures.md](storage-failures.md) | 只读目录 / 磁盘满时的行为与错误文案；日志写库失败只报一次 |

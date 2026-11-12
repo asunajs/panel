@@ -401,6 +401,18 @@ async function main() {
   check('黄条带「知道了」按钮', alertBody.hasBtn === true, JSON.stringify(alertBody));
   await js("renderAlerts([])");
   check('告警清空后黄条自己收起', (await js("document.getElementById('alerts-bar').classList.contains('hidden')")) === true, 'still visible');
+
+  // ---------------------------------------------------------------- 导出 CSV（第 80 轮）
+  const hasRunsExport = await js("!!document.getElementById('runs-export')");
+  const hasLogsExport = await js("!!document.getElementById('log-export')");
+  check('运行记录页有「导出 CSV」按钮', hasRunsExport === true, String(hasRunsExport));
+  check('日志页有「导出 CSV」按钮', hasLogsExport === true, String(hasLogsExport));
+  const csvProbe = await js("fetch('/api/runs/export.csv', { method: 'GET' }).then(async (r) => ({ status: r.status, ct: r.headers.get('content-type'), head: (await r.text()).slice(0, 40) }))");
+  check(
+    '导出接口回 text/csv 且带表头',
+    csvProbe && csvProbe.status === 200 && /text\/csv/.test(csvProbe.ct || '') && /插件/.test(csvProbe.head || ''),
+    JSON.stringify(csvProbe),
+  );
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

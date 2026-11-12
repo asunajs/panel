@@ -187,6 +187,8 @@
                   <span class="check-box" aria-hidden="true"></span>
                   <span class="check-label">只看失败</span>
                 </label>
+                <!-- 导出：按当前筛选（插件 / 搜索）导 CSV，见 app.js exportCsv() -->
+                <button class="btn btn-ghost" id="runs-export" type="button">导出 CSV</button>
               </header>
               <div class="panel-body table-wrap table-scroll">
                 <table class="table">
@@ -224,6 +226,7 @@
                   </label>
                   <button class="btn btn-ghost" id="log-pause" type="button">暂停</button>
                   <button class="btn btn-ghost" id="log-clear" type="button">清空视图</button>
+                  <button class="btn btn-ghost" id="log-export" type="button">导出 CSV</button>
                 </div>
               </header>
               <div class="console" id="logs-view" aria-live="polite"></div>

@@ -2079,6 +2079,24 @@ async function act(path, okMsg) {
 }
 
 
+
+/** 按当前筛选导出 CSV：直接让浏览器去下（GET，带 cookie 就能过鉴权）。
+ *
+ * 导出接口**不接受** sort/dir/limit/before 之外的翻页参数（会 400），所以这里只传筛选。
+ */
+function exportCsv(which) {
+  const qs = [];
+  if (which === 'runs') {
+    if (state.fp.runs) qs.push('plugin=' + encodeURIComponent(state.fp.runs));
+    if (state.q.runs) qs.push('q=' + encodeURIComponent(state.q.runs));
+    window.location = '/api/runs/export.csv' + (qs.length ? '?' + qs.join('&') : '');
+    return;
+  }
+  if (state.fp.logs) qs.push('plugin=' + encodeURIComponent(state.fp.logs));
+  if (state.q.logs) qs.push('q=' + encodeURIComponent(state.q.logs));
+  if (state.logLevel) qs.push('level=' + encodeURIComponent(state.logLevel));
+  window.location = '/api/logs/export.csv' + (qs.length ? '?' + qs.join('&') : '');
+}
 // ---------------------------------------------------------------- 运行告警（第 71 轮）
 
 /** 画顶部那条黄条。数据来自 state.alerts（进程内、不落库）。
@@ -2419,6 +2437,8 @@ function bind() {
     clearTimeout(runsSearchTimer);
     runsSearchTimer = setTimeout(() => loadRuns(true), 250);
   }, renderRuns);
+  $('runs-export').addEventListener('click', () => exportCsv('runs'));
+  $('log-export').addEventListener('click', () => exportCsv('logs'));
   $('runs-only-failed').addEventListener('change', (ev) => {
     state.onlyFailed = ev.target.checked;
     renderRuns();
