@@ -1732,7 +1732,9 @@ function renderSettings() {
     el(
       "p",
       "settings-note backup-note",
-      "备份 = 配置 + 插件源码 + 脚本（含排程），不含运行记录和日志。恢复只增/覆盖，不删除。",
+      "备份 = 配置 + 插件源码 + 脚本（含排程）。不含运行记录、日志，也不含任务状态" +
+        "（暂停、摘要、改过的计划、提前量）—— 那些在数据库里，要连库一起备份用终端：" +
+        "panel-llrt backup --out 备份.bk --with-db。恢复只增/覆盖，不删除。",
     ),
   );
   // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**（第 24 轮用户抓到）。
@@ -1750,6 +1752,10 @@ function renderSettings() {
   steps.append(
     li([el("code", "", "panel-llrt keygen"), " 生成一对密钥（私钥自己收着）"]),
     li([el("code", "", "panel-llrt backup --out 备份.bk --encrypt-to <公钥>"), " 加密导出"]),
+    li([
+      el("code", "", "panel-llrt backup --out 备份.bk --with-db"),
+      " 连数据库一起（运行历史 + 任务状态；恢复要在面板停止时做）",
+    ]),
     li([el("code", "", "panel-llrt restore --in 备份.bk --secret <私钥>"), " 恢复"]),
   );
   plain.append(steps, "私钥故意不进 HTTP。");
