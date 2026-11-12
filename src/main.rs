@@ -16,6 +16,7 @@ mod log;
 mod scheduler;
 mod notify;
 mod outbound;
+mod ratelimit;
 mod panelversion;
 mod scripts;
 mod sync_bridge;
@@ -129,6 +130,7 @@ async fn main() -> Result<(), String> {
         log.emit("panel", None, Level::Warn, msg);
     }
     let st = web::AppState {
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         db,
         log: log.clone(),
         sched: sched.clone(),
@@ -154,7 +156,11 @@ async fn main() -> Result<(), String> {
     );
     println!("panel-llrt listening on http://{addr}");
 
-    axum::serve(listener, app)
+    // `with_connect_info` 是限流的前提：没有对端地址就只能全体共用一个桶。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| format!("HTTP 服务退出: {e}"))

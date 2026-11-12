@@ -29,6 +29,7 @@ async fn setup() -> (Router, Db) {
         scripts,
         data_dir: PathBuf::from("data"),
         config: crate::config_store::ConfigStore::new(&json!({})),
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         auth: None,
     };
     (router(st), db)
@@ -83,6 +84,7 @@ async fn setup_authed() -> Router {
         scripts,
         data_dir: PathBuf::from("data"),
         config: store,
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     })
 }
@@ -284,6 +286,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         data_dir: PathBuf::from("data"),
         config: store,
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
 
@@ -346,6 +349,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         scripts,
         data_dir: PathBuf::from("data"),
         config: store,
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
     let req = Request::get("/api/state")
@@ -415,6 +419,7 @@ async fn setup_dirs(
         scripts,
         data_dir: data.clone(),
         config: store.clone(),
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         auth: None,
     };
     (router(st), plugins, data, store)
@@ -1544,4 +1549,94 @@ async fn setup_writes_auth_json_once_and_never_the_plaintext() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     // 而且文件没被改写
     assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+}
+
+/// 给请求塞一个「对端地址」，模拟真部署里的 ConnectInfo。
+fn with_peer(mut req: Request<Body>, ip: [u8; 4], port: u16) -> Request<Body> {
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            ip, port,
+        ))));
+    req
+}
+
+/// 限流：登录连打 5 次后被 429（带 Retry-After），读接口不受影响。
+#[tokio::test]
+async fn login_is_rate_limited_per_client_ip() {
+    let app = setup_authed().await;
+    let login = |port: u16| {
+        with_peer(
+            Request::post("/api/login")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"wrong"}"#))
+                .unwrap(),
+            [10, 1, 2, 3],
+            port,
+        )
+    };
+    // 突发 5 次：都是 401（令牌错），不是 429。源端口每次不同 —— 桶要按 IP 而不是 IP:端口
+    for i in 0..5 {
+        let (status, _) = send(&app, login(40000 + i)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "第 {i} 次不该被限流");
+    }
+    // 第 6 次：429，且带 Retry-After
+    let resp = app.clone().oneshot(login(40010)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        resp.headers().contains_key("retry-after"),
+        "429 要带 Retry-After"
+    );
+
+    // 换个 IP 不受影响
+    let other = with_peer(
+        Request::post("/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"token":"wrong"}"#))
+            .unwrap(),
+        [10, 9, 9, 9],
+        40000,
+    );
+    assert_eq!(send(&app, other).await.0, StatusCode::UNAUTHORIZED);
+
+    // 读接口（同一个 IP）照旧 —— 界面每隔几秒就在读
+    let read = with_peer(
+        Request::get("/api/state")
+            .header("x-panel-token", "s3cret")
+            .body(Body::empty())
+            .unwrap(),
+        [10, 1, 2, 3],
+        40020,
+    );
+    assert_eq!(send(&app, read).await.0, StatusCode::OK);
+}
+
+/// 写接口限流：30 次之后 429，而读照旧。
+#[tokio::test]
+async fn writes_are_rate_limited_but_reads_are_not() {
+    let (app, _plugins, _data, _store) = setup_dirs("rl").await;
+    let mut last = StatusCode::OK;
+    for i in 0..32 {
+        let req = with_peer(
+            with_csrf("POST", "/api/notifications/read", Some(json!({}))),
+            [10, 5, 5, 5],
+            20000 + i as u16,
+        );
+        let (status, _) = send(&app, req).await;
+        if i < 30 {
+            assert_eq!(status, StatusCode::OK, "第 {i} 次写不该被限流");
+        }
+        last = status;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS, "第 31 次之后要限流");
+    // 读不受影响
+    let (status, _) = send(
+        &app,
+        with_peer(
+            Request::get("/api/state").body(Body::empty()).unwrap(),
+            [10, 5, 5, 5],
+            30000,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }

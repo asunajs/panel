@@ -52,6 +52,8 @@ pub struct AppState {
     pub scripts: crate::scripts::Scripts,
     /// 面板级配置的热快照：`PUT /api/config` 换掉它，插件立刻读到新值。
     pub config: Arc<crate::config_store::ConfigStore>,
+    /// 限流配额（登录 / 写接口）。按**连接的对端地址**分桶。
+    pub limits: Arc<crate::ratelimit::Limits>,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
     pub auth: Option<Arc<crate::auth::Auth>>,
@@ -121,14 +123,20 @@ pub fn router(st: AppState) -> Router {
 
         // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
         .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
-        .layer(middleware::from_fn_with_state(st.clone(), require_token));
+        .layer(middleware::from_fn_with_state(st.clone(), require_token))
+        // 写接口限流（读接口不挡：界面每隔几秒就在读）
+        .layer(middleware::from_fn_with_state(st.clone(), rate_limit_writes));
 
     Router::new()
-        // 登录/登出挂在外层：它们**不能**被 require_token 挡住（login 就是用来换凭据的）
-        .route("/api/login", post(api_login))
+        // 登录/登出挂在外层：它们**不能**被 require_token 挡住（login 就是用来换凭据的）。
+        // login / setup 各自带一道**更严的**限流（PBKDF2 放大），登出不需要。
+        .merge(
+            Router::new()
+                .route("/api/login", post(api_login))
+                .route("/api/setup", post(api_setup))
+                .layer(middleware::from_fn_with_state(st.clone(), rate_limit_login)),
+        )
         .route("/api/logout", post(api_logout))
-        // 首次设置令牌（只在还没凭据时可用；写 auth.json，重启生效）
-        .route("/api/setup", post(api_setup))
         .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
@@ -185,6 +193,69 @@ async fn panel_css(Path(rel): Path<String>) -> Response {
 
 /// 单令牌鉴权。没配令牌时不拦 —— 那种部署必须只绑回环（main.rs 负责强制）。
 ///
+/// 429 的统一形状：告诉对方等多久（秒）。
+fn too_many(r: crate::ratelimit::Rejected) -> Response {
+    let secs = r.retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("请求太频繁了，{secs} 秒后再试\n"),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    resp
+}
+
+/// 从请求扩展里取对端地址。
+///
+/// **取不到就不限流**：单测直接 `oneshot` 打 Router，没有连接信息；
+/// 真部署走 `into_make_service_with_connect_info`，一定取得到。
+fn peer(req: &Request<Body>) -> Option<std::net::SocketAddr> {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0)
+}
+
+/// 登录 / 首次设置的限流。
+///
+/// 放在中间件而不是 handler 里：`ConnectInfo` 做不成可选提取器（axum 0.8 只给它
+/// `FromRequestParts`），而中间件直接读 `req.extensions()` —— 没有连接信息就放行，
+/// 单测里正好是这个形态。
+async fn rate_limit_login(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Some(addr) = peer(&req) {
+        if let Err(r) = st.limits.login.check(addr.ip()) {
+            return too_many(r);
+        }
+    }
+    next.run(req).await
+}
+
+/// 写接口限流。读接口（含 SSE 轮询）**一律不挡** —— 界面每隔几秒就在读。
+async fn rate_limit_writes(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let m = req.method();
+    if m == axum::http::Method::GET
+        || m == axum::http::Method::HEAD
+        || m == axum::http::Method::OPTIONS
+    {
+        return next.run(req).await;
+    }
+    if let Some(addr) = peer(&req) {
+        if let Err(r) = st.limits.write.check(addr.ip()) {
+            return too_many(r);
+        }
+    }
+    next.run(req).await
+}
+
 /// 从 Cookie 头里取会话票。只认一个名字，别的 cookie 一律不管。
 fn presented_session(h: &HeaderMap) -> Option<String> {
     let raw = h.get(header::COOKIE)?.to_str().ok()?;
@@ -236,7 +307,7 @@ async fn api_setup(
     State(st): State<AppState>,
     h: HeaderMap,
     Json(b): Json<SetupBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     guard_write(&h)?;
     // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
     // 但再写一次会把用户刚抄下来的令牌**静默换掉**。
@@ -284,7 +355,8 @@ async fn api_setup(
         // 只有面板生成的才回显：人给的那份他自己知道，别在响应里留痕
         "token": if generated { Value::String(token) } else { Value::Null },
         "restart_required": true,
-    })))
+    }))
+    .into_response())
 }
 #[derive(serde::Deserialize)]
 struct LoginBody {

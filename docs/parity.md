@@ -77,7 +77,7 @@
 | 多运行时（`runtimes.rs`：Node / Bun；内嵌 QuickJS 已在他们那版移除） | 内嵌 LLRT（QuickJS-ng），单运行时 |
 | 外部进程插件（`extproc.rs`，native 逃生口） | ❌ |
 | 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
-| 限流（`ratelimit.rs`） | ❌ |
+| 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；我们没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
 | 时区（`tz.rs`） | 本地时（chrono `Local`） |
 | 面板版本 / 自更新（`panelversion.rs`） | 只有 `CARGO_PKG_VERSION` |
 | 任务目录（`taskdir.rs`，`tasks/*.json`） | 任务在 DB |
