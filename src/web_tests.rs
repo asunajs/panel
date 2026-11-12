@@ -1471,3 +1471,38 @@ async fn readyz_reports_live_counts() {
     assert!(body["tasks"].is_number(), "{body}");
     assert!(body["plugins"].is_number(), "{body}");
 }
+
+/// 面板版本：version() 给当前版本，atLeast() 做 semver 比较，非法串抛错。
+#[tokio::test]
+async fn panel_version_and_at_least_answer() {
+    let (app, _plugins, _data, _store) = setup_dirs("pv").await;
+    load_plugin(
+        &app,
+        "p",
+        "import host from 'panel:host';\n\
+await host.register_handler('go', async () => {\n\
+  await host.info('v=' + host.panel_version());\n\
+  await host.info('old=' + host.panel_at_least('0.0.1'));\n\
+  await host.info('future=' + host.panel_at_least('999.0.0'));\n\
+  await host.info('short=' + host.panel_at_least('v0.1'));\n\
+  try { host.panel_at_least('nope'); await host.info('bad=没报错'); }\n\
+  catch (e) { await host.info('bad=报错'); }\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+    let (_, body) = send(&app, with_csrf("POST", "/api/tasks/p/go/run", None)).await;
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    let msgs: Vec<String> = done["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
+        .collect();
+    let want = format!("v={}", crate::panelversion::current());
+    assert!(msgs.iter().any(|m| *m == want), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m == "old=true"), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m == "future=false"), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m == "short=true"), "v0.1 要能解析: {msgs:?}");
+    assert!(msgs.iter().any(|m| m == "bad=报错"), "{msgs:?}");
+}

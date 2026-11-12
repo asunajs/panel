@@ -104,6 +104,11 @@ function http_fetch(url, options) {
 }
 function worker_hint(_hint) {
 }
+var panel = {
+  version: () => String(host.panel_version()),
+  atLeast: (v) => host.panel_at_least(String(v)) === true
+};
+globals.panel = panel;
 
 // src/crypto/bytes.ts
 function utf8(s) {

@@ -112,6 +112,8 @@ const WRAP: &str = r#"(raw) => {
     set_job_blockers: async (name, list) => raw.set_job_blockers(String(name), JSON.stringify(list ?? [])),
     set_job_schedule: async (name, opts) => raw.set_job_schedule(String(name), j(opts)),
     smtp_send: (opts) => raw.smtp_send(j(opts)),
+    panel_version: () => raw.panel_version(),
+    panel_at_least: (v) => raw.panel_at_least(String(v)),
     config: async () => JSON.parse(await raw.config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
@@ -123,7 +125,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 25] = [
+const OP_NAMES: [&str; 27] = [
     "log",
     "info",
     "warn",
@@ -149,6 +151,8 @@ const OP_NAMES: [&str; 25] = [
     "set_job_blockers",
     "set_job_schedule",
     "smtp_send",
+    "panel_version",
+    "panel_at_least",
 ];
 
 impl ModuleDef for HostModule {
@@ -218,6 +222,9 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("set_job_schedule", Func::from(Async(op_set_job_schedule)).into_js(ctx)?),
         // 发邮件：同步（插件那边是阻塞调用）
         ("smtp_send", Func::from(op_smtp_send).into_js(ctx)?),
+        // 面板版本（能力降级用）
+        ("panel_version", Func::from(op_panel_version).into_js(ctx)?),
+        ("panel_at_least", Func::from(op_panel_at_least).into_js(ctx)?),
     ])
 }
 
@@ -437,6 +444,16 @@ fn op_http_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<S
 
 
 
+
+/// panel.version() —— 正在跑的面板版本。
+fn op_panel_version(_ctx: Ctx<'_>) -> Result<String> {
+    Ok(crate::panelversion::current().to_string())
+}
+
+/// panel.atLeast(v) —— 够不够这个版本。非法版本串**抛错**，不静默返回 false。
+fn op_panel_at_least(ctx: Ctx<'_>, v: String) -> Result<bool> {
+    crate::panelversion::at_least(&v).map_err(|e| err(&ctx, e))
+}
 /// smtp_send(opts) —— 发一封邮件。**同步**（插件那边是阻塞调用，和 http_fetch 同构）。
 ///
 /// 失败是**抛错**，错误文本是服务器那句原话（535 / 550 …），直接贴进日志就能排查。

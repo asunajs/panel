@@ -102,6 +102,11 @@ function http_fetch(url, options) {
     return { error: text(e) };
   }
 }
+var panel = {
+  version: () => String(host.panel_version()),
+  atLeast: (v) => host.panel_at_least(String(v)) === true
+};
+globals.panel = panel;
 function smtp_send(opts) {
   const res = host.smtp_send(opts);
   return { ok: res?.ok === true, response: String(res?.response ?? "") };

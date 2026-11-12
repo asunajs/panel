@@ -93,6 +93,42 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 * 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
 * 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
 
+### 面板版本：panel.version() / panel.atLeast()
+
+```js
+import { panel } from 'panel:host';
+
+panel.version();          // "0.1.0" —— 正在跑的面板版本
+panel.atLeast('0.3.0');   // true / false —— 够不够这个版本
+```
+
+`panel` 同时是**全局**（裸名 `panel.version()` 也能用），两处是同一个对象。
+
+用途是**能力降级**，不是硬拒：
+
+```js
+if (panel.atLeast('0.3.0')) {
+  // 走新路径
+} else {
+  log('面板版本较旧，走兼容路径；建议升级');
+}
+```
+
+- 版本比较是 **semver**：`0.3` ≡ `0.3.0`、`v` 前缀忽略、`0.3.0-rc.1 < 0.3.0`；
+- 非法版本串**抛错**，不静默返回 `false` ——「版本写错了」和「版本不够」是两件事。
+
+⚠ 这个实现**没有**搬基线的 `/* @panel {"min":"0.3.0"} */` 加载期闸门：
+面板-llrt 是重写，版本线（0.1.x）与基线（0.3.x）不是同一条，照基线的 min 硬拦会把
+「明明能跑」的插件挡在门外。所以 `atLeast('0.3.0')` 在这里返回 `false` 是**正常的**
+——它表示「别假设 0.3 的能力都在」，而不是「面板坏了」。
+
+```text
+读数（2026-11-12，真面板）
+  version=0.1.0
+  atLeast 0.0.1 = true    atLeast 0.3.0 = false    atLeast v0.1 = true
+  非法 → "nope" 不是合法版本号（要 semver，例如 "0.3.0"）: unexpected character 'n'
+```
+
 ### 出站：邮件 / WebSocket / TLS 后端
 
 挪到单独一篇了：[host-api-net.md](host-api-net.md)。

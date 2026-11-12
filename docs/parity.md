@@ -64,7 +64,7 @@
 | `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |
 | `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 大部分 | `params`（注册期给、派发原样交回，没给是 `null`）、`lead_ms`、`summary`、`blockers`、`paused` 都有了；`surface` / `manage_url` 还没有（我们没做侧栏注册与外部管理页） |
 | `set_job_paused/blockers/summary/schedule` | ✅ 11-12 | 落库（重启/重载都不丢）；blockers 只挡定时、不补触发；`lead_ms` 提前唤醒且事件带 `early`；只认自己/同组 |
-| `panel.version()` / `panel.atLeast()` | ❌ | 插件判断不了宿主版本 |
+| `panel.version()` / `panel.atLeast()` | ✅ 11-12 | semver 比较（0.3≡0.3.0、v 前缀、预发布），非法串抛错；`panel` 同时是全局。**刻意没做**基线的 `@panel min` 加载期闸门（版本线不同，硬拦会挡住能跑的插件） |
 
 实测**已经有的**（2026-11-12 用脚本探过）：`setTimeout` / `setInterval` / `queueMicrotask` /
 `TextEncoder` / `crypto` / `performance` / `node:fs`（可 import，且我们**没有**旧面板那种

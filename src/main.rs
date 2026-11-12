@@ -16,6 +16,7 @@ mod log;
 mod scheduler;
 mod notify;
 mod outbound;
+mod panelversion;
 mod scripts;
 mod sync_bridge;
 mod service;

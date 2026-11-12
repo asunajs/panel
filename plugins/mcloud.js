@@ -6,6 +6,7 @@
 // src/panelllrt/hostApi.ts
 import panelHost from "panel:host";
 var host = panelHost;
+var globals = globalThis;
 function text(msg) {
   if (typeof msg === "string") return msg;
   try {
@@ -100,6 +101,11 @@ function register_nav(_opts) {
 }
 function worker_hint(_hint) {
 }
+var panel = {
+  version: () => String(host.panel_version()),
+  atLeast: (v) => host.panel_at_least(String(v)) === true
+};
+globals.panel = panel;
 function ws_open(url, options) {
   return host.ws_open(url, options ?? {});
 }
