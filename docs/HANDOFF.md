@@ -187,6 +187,15 @@
     界面和现实对不上，下次启动还会再试一次、再失败一次。
     有测试：`web::router_tests::enable_of_a_broken_file_fails_and_does_not_persist_enabled`
     （直接查库断言 `enabled=1` 的行数为 0）。
+21. **「先全量校验再落盘」要包括语义检查，不只是路径检查**：`save_zip` 原来只在校验遍里查路径，
+    「zip 里至少有一个 .js」放到第二遍末尾 —— 于是一个只有 `readme.md` 的 zip 会先把 readme.md
+    写进 `plugins/` 再报错。现在 `has_script` 在校验遍里判定，落盘前就返回。
+    有测试：`upload::extra_tests::a_zip_without_any_js_is_rejected_and_writes_nothing`。
+22. **用 zip crate 造不出符号链接条目，测试会假绿**：`SimpleFileOptions::unix_permissions(0o120777)`
+    只取权限位，文件类型位被强制成 `S_IFREG`（实测拿回 `0o100777`）—— 拿它写「拒绝符号链接」
+    的用例，实际测的是普通文件，永远绿。要造真的得按 central directory 布局改 external attr
+    （条目头偏移 38，4 字节小端，`0o120777 << 16`），并先断言 `unix_mode() & 0o170000 == 0o120000`。
+    见 `upload::extra_tests::forge_symlink*`。
 
 ## 8. 运行中的面板
 

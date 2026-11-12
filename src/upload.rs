@@ -159,6 +159,9 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     // 所以这里的上限判断只当「便宜的早退」：真正的把关在第二遍，按**实际解压量**做。
     let mut names: Vec<PathBuf> = Vec::new();
     let mut total: u64 = 0;
+    // 「zip 里至少有一个能跑的文件」必须在**落盘之前**判定：放在第二遍的末尾的话，
+    // 一个只有 readme.md 的 zip 会先把 readme.md 写进 plugins/ 再报错（第 30 轮测试抓到）。
+    let mut has_script = false;
     for i in 0..archive.len() {
         let f = archive
             .by_index(i)
@@ -195,6 +198,9 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
                 rel.display()
             ));
         }
+        if is_script(kind, &rel) {
+            has_script = true;
+        }
         total = total
             .checked_add(f.size())
             .ok_or_else(|| "zip 解压后大小溢出".to_string())?;
@@ -205,6 +211,13 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
             return Err(format!("zip 里单个文件太大: {}", rel.display()));
         }
         names.push(rel);
+    }
+
+    if !has_script {
+        return Err(match kind {
+            Kind::Plugins => "zip 里没有 .js 插件文件".into(),
+            Kind::Scripts => "zip 里没有 .js / .mjs 脚本".to_string(),
+        });
     }
 
     let strip = common_wrapper(root, &names);
@@ -274,12 +287,6 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         files.push(rel.to_string_lossy().replace('\\', "/"));
     }
 
-    if !files.iter().any(|f| is_script(kind, Path::new(f))) {
-        return Err(match kind {
-            Kind::Plugins => "zip 里没有 .js 插件文件".into(),
-            Kind::Scripts => "zip 里没有 .js / .mjs / .py / .sh 脚本".to_string(),
-        });
-    }
     files.sort();
     Ok(Saved {
         files,
@@ -728,3 +735,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// 补充边界（不与 tests 重复）。
+#[cfg(test)]
+#[path = "upload_tests.rs"]
+mod extra_tests;

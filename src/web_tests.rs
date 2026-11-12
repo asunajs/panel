@@ -2202,3 +2202,41 @@ async fn a_successful_enable_clears_the_failure_record() {
     assert!(state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "fix"));
     assert!(!state["failed"].as_array().unwrap().iter().any(|v| v["name"] == "fix"));
 }
+
+/// 上传接口的覆盖语义：**默认覆盖**（界面上「上传」就是来更新文件的），
+/// 传 `overwrite=0` 才当冲突。这条钉住默认值，免得以后有人顺手改成默认不覆盖。
+#[tokio::test]
+async fn upload_overwrites_by_default_and_can_be_made_a_conflict() {
+    let (app, plugins, _data, _store) = setup_dirs("pupload").await;
+    let src = "import host from 'panel:host';\nawait host.register_handler('x', async () => 1);\n";
+
+    // body 是原始字节，不能用 with_csrf（那是 JSON），直接构造请求。
+    let mk = |uri: &str, text: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-panel", "1")
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(text.to_string()))
+            .unwrap()
+    };
+
+    let (status, _) = send(&app, mk("/api/plugins/upload?name=up.js", src)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), src);
+
+    // 再传一次（不带 overwrite）：默认覆盖
+    let newer = "import host from 'panel:host';\nawait host.register_handler('x', async () => 2);\n";
+    let (status, _) = send(&app, mk("/api/plugins/upload?name=up.js", newer)).await;
+    assert_eq!(status, StatusCode::OK, "默认应当覆盖");
+    assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), newer);
+
+    // 显式 overwrite=0：冲突，文件不动
+    let (status, _) = send(
+        &app,
+        mk("/api/plugins/upload?name=up.js&overwrite=0", "console.log(0)"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "overwrite=0 应当冲突");
+    assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), newer);
+}
