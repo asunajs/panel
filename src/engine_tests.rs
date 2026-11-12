@@ -36,6 +36,7 @@ async fn load_cfg(
         db,
         reg,
         config: crate::config_store::ConfigStore::new(&serde_json::from_str(cfg).unwrap_or(serde_json::json!({}))),
+        sched: None,
     };
     (Plugin::load(source, handle).await, rx)
 }

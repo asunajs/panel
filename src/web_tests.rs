@@ -1120,3 +1120,106 @@ async fn upload_saves_a_plugin_and_a_script() {
     let (status, _) = send(&app, req).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+/// 插件能改自己任务的状态：摘要 / blockers / 调度+提前量 / 暂停。
+/// 这四条都是旧面板 host-api 有的（set_job_*），mcloud 在用。
+#[tokio::test]
+async fn a_plugin_can_steer_its_own_task_state() {
+    let (app, _plugins, _data, _store) = setup_dirs("job1").await;
+    load_plugin(
+        &app,
+        "j",
+        "import host from 'panel:host';\n\
+await host.register_cron('t', '@every 1h', 5000);\n\
+await host.register_cron('o', '@every 2h', 5000);\n\
+await host.register_handler('go', async () => {\n\
+  await host.set_job_summary('t', '2 个账号 · 目标：100 元');\n\
+  await host.set_job_blockers('t', ['没登录', '令牌过期']);\n\
+  await host.set_job_schedule('t', { expr: '@every 30m', lead_ms: 120000 });\n\
+  await host.set_job_paused('o', true);\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/j/go/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let run_id = body["run_id"].as_i64().unwrap();
+    let done = wait_run_done(&app, run_id).await;
+    assert_eq!(done["run"]["status"], "ok", "{done}");
+
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "j", "t");
+    assert_eq!(t["summary"], "2 个账号 · 目标：100 元", "{t}");
+    assert_eq!(t["blockers"], json!(["没登录", "令牌过期"]), "{t}");
+    assert_eq!(t["cron"], "@every 30m", "{t}");
+    assert_eq!(t["cron_override"], "@every 30m", "写的是覆盖，界面上能恢复: {t}");
+    assert_eq!(t["cron_base"], "@every 1h", "{t}");
+    assert_eq!(t["lead_ms"], 120000, "{t}");
+    // 暂停自己另一条任务
+    assert_eq!(task_of(&state, "j", "o")["enabled"], false, "{state}");
+
+    // 重启进程也不该丢（saved 从库里读回来）：这里用重新加载插件模拟「注册时套用」
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/j/reload", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "j", "t");
+    assert_eq!(t["summary"], "2 个账号 · 目标：100 元", "重新注册要保留: {t}");
+    assert_eq!(t["blockers"], json!(["没登录", "令牌过期"]), "{t}");
+    assert_eq!(t["lead_ms"], 120000, "{t}");
+    assert_eq!(t["cron"], "@every 30m", "{t}");
+}
+
+/// 只认自己名下 / 同组的任务：别的插件的任务要**报错**，不能静默改了。
+#[tokio::test]
+async fn a_plugin_cannot_steer_another_groups_task() {
+    let (app, _plugins, _data, _store) = setup_dirs("job2").await;
+    load_plugin(
+        &app,
+        "a",
+        "import host from 'panel:host';\nawait host.register_cron('t', '@every 1h', 5000);\n",
+    )
+    .await;
+    load_plugin(
+        &app,
+        "b",
+        "import host from 'panel:host';\n\
+await host.register_handler('steal', async () => {\n\
+  await host.set_job_summary('a/t', '我改了别人的任务');\n\
+  return 1;\n\
+});\n",
+    )
+    .await;
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/b/steal/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done = wait_run_done(&app, body["run_id"].as_i64().unwrap()).await;
+    assert_eq!(done["run"]["status"], "error", "{done}");
+    let err = done["run"]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("不能改别的插件的任务"), "{err}");
+    // 目标任务没被动
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(task_of(&state, "a", "t")["summary"], Value::Null);
+}
+
+/// 脚本没有任务表：set_job_* 要明确报错，而不是静默无事发生。
+#[tokio::test]
+async fn scripts_cannot_steer_task_state() {
+    let (app, _plugins, _data, _store) = setup_dirs("job3").await;
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/scripts/s1",
+            Some(json!({ "source": "import host from 'panel:host';\nawait host.set_job_paused('t', true);\n" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, out) = send(&app, with_csrf("POST", "/api/scripts/s1/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let done = wait_run_done(&app, out["run_id"].as_i64().unwrap()).await;
+    assert_eq!(done["run"]["status"], "error", "{done}");
+    let err = done["run"]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("脚本里没有任务表"), "{err}");
+}

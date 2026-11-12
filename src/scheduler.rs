@@ -75,6 +75,11 @@ fn cooldown_for(cfg: &TripConfig, trips: u32) -> ChronoDuration {
     ChronoDuration::milliseconds(ms as i64)
 }
 
+/// 实际触发时刻 = 计划时刻 - 提前量（lead_ms）。0 就是准点。
+fn trigger_at(t: &Task) -> DateTime<Local> {
+    t.next_fire - ChronoDuration::milliseconds(t.lead_ms.min(LEAD_MAX_MS) as i64)
+}
+
 #[derive(Debug)]
 struct Task {
     plugin: String,
@@ -85,6 +90,12 @@ struct Task {
     base_cron: String,
     /// 用户在界面上改的调度；Some 时 `cron` 是它的副本。
     override_expr: Option<String>,
+    /// 插件自己写的一行摘要（卡片上显示），set_job_summary。
+    summary: Option<String>,
+    /// 插件说「现在还不能跑」的原因；非空只挡**定时**触发，手动运行照旧。
+    blockers: Vec<String>,
+    /// 提前多少毫秒唤醒（set_job_schedule 里的 lead_ms）。0 = 准点。
+    lead_ms: u64,
     /// None = 手动任务，永远不自动到期。
     schedule: Option<Schedule>,
     budget_ms: u64,
@@ -115,6 +126,9 @@ impl Task {
             base_cron: cron.clone(),
             cron,
             override_expr: None,
+            summary: None,
+            blockers: Vec::new(),
+            lead_ms: 0,
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
             enabled: true,
@@ -139,6 +153,9 @@ impl Task {
             cron: String::new(),
             base_cron: String::new(),
             override_expr: None,
+            summary: None,
+            blockers: Vec::new(),
+            lead_ms: 0,
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
             enabled: true,
@@ -228,6 +245,12 @@ pub struct TaskView {
     pub cron_override: Option<String>,
     /// 插件注册时给的那条，用来「恢复默认」。
     pub cron_base: String,
+    /// 插件写的一行摘要（set_job_summary）。
+    pub summary: Option<String>,
+    /// 插件说「还不能跑」的原因（set_job_blockers）；非空只挡定时触发。
+    pub blockers: Vec<String>,
+    /// 提前多少毫秒唤醒（set_job_schedule 的 lead_ms）。
+    pub lead_ms: u64,
     /// 只有 handler、没有 cron：只能手动触发。
     pub manual: bool,
     pub budget_ms: u64,
@@ -248,6 +271,25 @@ pub struct PluginView {
     pub tasks: usize,
     /// 这个插件自己处理 `/plugins/<name>/*` 的路由（`register_web`）。
     pub has_web: bool,
+}
+
+/// 提前唤醒量的上限：一小时。再多就是「任务一直在跑」了。
+pub const LEAD_MAX_MS: u64 = 60 * 60 * 1000;
+
+/// 插件能改自己任务的那几样。
+#[derive(Debug, Clone)]
+pub enum JobOp {
+    /// 暂停/启用（等价于界面上的暂停，落 `enabled`）。
+    Paused(bool),
+    /// 一行摘要（`None` = 清掉）。
+    Summary(Option<String>),
+    /// 现在还不能跑的原因；空 = 就绪。
+    Blockers(Vec<String>),
+    /// 换调度（`None` = 恢复插件注册那条）并设提前唤醒量。
+    Schedule {
+        expr: Option<String>,
+        lead_ms: Option<u64>,
+    },
 }
 
 pub enum Cmd {
@@ -279,6 +321,13 @@ pub enum Cmd {
     HasWeb {
         plugin: String,
         reply: oneshot::Sender<bool>,
+    },
+    /// 插件在运行期改自己任务的状态（暂停/摘要/blockers/调度+提前量）。
+    SetJobState {
+        plugin: String,
+        name: String,
+        op: JobOp,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// 改一条任务的调度。`expr = None` 表示恢复插件注册的那条。
     SetSchedule {
@@ -440,6 +489,18 @@ impl Scheduler {
         .await?
     }
 
+
+    /// 插件在运行期改自己任务的状态（暂停/摘要/blockers/调度+提前量）。
+    pub async fn set_job_state(&self, plugin: &str, name: &str, op: JobOp) -> Result<(), String> {
+        let (plugin, name) = (plugin.to_string(), name.to_string());
+        self.call(|reply| Cmd::SetJobState {
+            plugin,
+            name,
+            op,
+            reply,
+        })
+        .await?
+    }
     /// 改一条任务的调度。`expr = None` 恢复插件注册的那条。
     ///
     /// 只换表达式：`runs` / 熔断计数 / 暂停状态全部保留。
@@ -476,9 +537,12 @@ struct Inner {
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
     web: std::collections::HashSet<String>,
-    /// 用户改过的调度：`(plugin, task) -> expr`。启动时从库里读一次，
-    /// 注册任务时同步套用 —— 插件重新注册/面板重启都不会把用户的改动冲掉。
-    overrides: HashMap<(String, String), String>,
+    /// 库里记着的任务状态（暂停/摘要/blockers/提前量/调度覆盖）。
+    ///
+    /// 启动时读一次，**注册任务时同步套用**：插件重新注册、面板重启都不会把
+    /// 用户（或插件自己）写下的状态冲掉。注册发生在 actor 循环里（同步），
+    /// 那里没法 await DB，所以只能提前备好。
+    saved: HashMap<(String, String), SavedTask>,
     db: Db,
     log: LogHub,
     cfg: TripConfig,
@@ -501,7 +565,7 @@ pub fn start(
     let (reg_tx, mut reg_rx) = mpsc::unbounded_channel::<Registration>();
     let mut inner = Inner {
         web: std::collections::HashSet::new(),
-        overrides: HashMap::new(),
+        saved: HashMap::new(),
         db,
         log,
         cfg: TripConfig::default(),
@@ -514,7 +578,7 @@ pub fn start(
     let handle = tokio::spawn(async move {
         // 先把用户改过的调度读进内存：注册发生在 actor 循环里（同步），
         // 那里没法 await DB，所以只能提前备好。
-        inner.overrides = load_overrides(&inner.db).await;
+        inner.saved = load_saved(&inner.db).await;
         loop {
             let loop_start = std::time::Instant::now();
             let sleep = inner.sleep_hint(Local::now());
@@ -556,15 +620,36 @@ impl Task {
     }
 }
 
-/// 从库里读「用户改过的调度」。读失败就当没有 —— 不能让一条坏行拦住启动。
-async fn load_overrides(db: &Db) -> HashMap<(String, String), String> {
+/// 库里记着的任务状态。读失败就当没有 —— 不能让一条坏行拦住启动。
+#[derive(Debug, Clone, Default)]
+struct SavedTask {
+    override_expr: Option<String>,
+    enabled: bool,
+    summary: Option<String>,
+    blockers: Vec<String>,
+    lead_ms: u64,
+}
+
+async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
     let rows = db
         .call(|c| {
             let mut st = c
-                .prepare("SELECT plugin,name,override_expr FROM tasks WHERE override_expr IS NOT NULL")
+                .prepare(
+                    "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms FROM tasks",
+                )
                 .map_err(|e| e.to_string())?;
-            let out: Vec<(String, String, String)> = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            let out: Vec<(String, String, Option<String>, i64, Option<String>, String, i64)> = st
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5).unwrap_or_else(|_| "[]".to_string()),
+                        r.get(6).unwrap_or(0),
+                    ))
+                })
                 .map_err(|e| e.to_string())?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?;
@@ -574,7 +659,18 @@ async fn load_overrides(db: &Db) -> HashMap<(String, String), String> {
     match rows {
         Ok(list) => list
             .into_iter()
-            .map(|(p, n, e)| ((p, n), e))
+            .map(|(p, n, ov, en, sum, bl, lead)| {
+                (
+                    (p, n),
+                    SavedTask {
+                        override_expr: ov,
+                        enabled: en != 0,
+                        summary: sum,
+                        blockers: serde_json::from_str(&bl).unwrap_or_default(),
+                        lead_ms: lead.max(0) as u64,
+                    },
+                )
+            })
             .collect(),
         Err(_) => HashMap::new(),
     }
@@ -591,8 +687,10 @@ impl Inner {
             {
                 continue;
             }
-            if best.is_none_or(|b| t.next_fire < b) {
-                best = Some(t.next_fire);
+            // 提前唤醒量要算进来，否则循环会睡到准点才醒。
+            let at = trigger_at(t);
+            if best.is_none_or(|b| at < b) {
+                best = Some(at);
             }
         }
         match best {
@@ -692,6 +790,44 @@ impl Inner {
                     let _ = tx.send(Cmd::WebDone { plugin });
                 });
             }
+            Cmd::SetJobState {
+                plugin,
+                name,
+                op,
+                reply,
+            } => {
+                let out = (|| -> Result<(), String> {
+                    let i = self
+                        .find(&plugin, &name)
+                        .ok_or_else(|| format!("没有这个任务: {plugin}/{name}"))?;
+                    match op {
+                        JobOp::Paused(p) => self.tasks[i].enabled = !p,
+                        JobOp::Summary(s) => self.tasks[i].summary = s,
+                        JobOp::Blockers(b) => self.tasks[i].blockers = b,
+                        JobOp::Schedule { expr, lead_ms } => {
+                            match expr {
+                                Some(e) => {
+                                    self.tasks[i].set_schedule(&e)?;
+                                    self.tasks[i].override_expr = Some(e);
+                                }
+                                None => {
+                                    let base = self.tasks[i].base_cron.clone();
+                                    if !base.is_empty() {
+                                        self.tasks[i].set_schedule(&base)?;
+                                    }
+                                    self.tasks[i].override_expr = None;
+                                }
+                            }
+                            if let Some(l) = lead_ms {
+                                self.tasks[i].lead_ms = l.min(LEAD_MAX_MS);
+                            }
+                        }
+                    }
+                    self.persist_task(i);
+                    Ok(())
+                })();
+                let _ = reply.send(out);
+            }
             Cmd::SetSchedule {
                 plugin,
                 name,
@@ -709,12 +845,10 @@ impl Inner {
                                 self.tasks[i].set_schedule(&base)?;
                             }
                             self.tasks[i].override_expr = None;
-                            self.overrides.remove(&(plugin.clone(), name.clone()));
                         }
                         Some(e) => {
                             self.tasks[i].set_schedule(&e)?;
-                            self.tasks[i].override_expr = Some(e.clone());
-                            self.overrides.insert((plugin.clone(), name.clone()), e);
+                            self.tasks[i].override_expr = Some(e);
                         }
                     }
                     self.persist_task(i);
@@ -809,6 +943,9 @@ impl Inner {
                 cron: t.cron.clone(),
                 cron_override: t.override_expr.clone(),
                 cron_base: t.base_cron.clone(),
+                summary: t.summary.clone(),
+                blockers: t.blockers.clone(),
+                lead_ms: t.lead_ms,
                 manual: t.schedule.is_none(),
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
@@ -847,6 +984,9 @@ impl Inner {
             db: self.db.clone(),
             reg: self.reg_sender(),
             config: self.config.clone(),
+            sched: Some(Scheduler {
+                tx: self.tx.clone(),
+            }),
         };
         let tx = self.tx.clone();
         // 加载期可能有很长的顶层 await，不能占着调度循环
@@ -858,6 +998,50 @@ impl Inner {
                 reply,
             });
         });
+    }
+
+    /// 把内存里的任务状态写回 saved（下次注册/重启要按它恢复）。
+    fn remember(&mut self, i: usize) {
+        let t = &self.tasks[i];
+        self.saved.insert(
+            (t.plugin.clone(), t.name.clone()),
+            SavedTask {
+                override_expr: t.override_expr.clone(),
+                enabled: t.enabled,
+                summary: t.summary.clone(),
+                blockers: t.blockers.clone(),
+                lead_ms: t.lead_ms,
+            },
+        );
+    }
+
+    /// 注册完把库里记着的状态套上去（暂停/摘要/blockers/提前量/调度覆盖）。
+    fn apply_saved(&mut self, i: usize) {
+        let key = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+        let Some(s) = self.saved.get(&key).cloned() else {
+            return;
+        };
+        self.tasks[i].enabled = s.enabled;
+        self.tasks[i].summary = s.summary;
+        self.tasks[i].blockers = s.blockers;
+        self.tasks[i].lead_ms = s.lead_ms.min(LEAD_MAX_MS);
+        if let Some(expr) = s.override_expr {
+            let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+            match self.tasks[i].set_schedule(&expr) {
+                Ok(()) => self.tasks[i].override_expr = Some(expr),
+                Err(e) => {
+                    self.tasks[i].override_expr = None;
+                    self.log.emit(
+                        &p,
+                        None,
+                        Level::Warn,
+                        format!(
+                            "库里记着的调度 {expr} 现在不合法了（{e}），先用插件注册的那条（任务 {n}）"
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     fn reg_sender(&self) -> mpsc::UnboundedSender<Registration> {
@@ -885,12 +1069,11 @@ impl Inner {
                     }
                 };
                 match self.find(&plugin, &name) {
-                    // 同名重新注册（热重载）：保留 enabled 与熔断计数
+                    // 同名重新注册（热重载）：熔断计数接着算，其余状态由 apply_saved 恢复。
                     Some(i) => {
                         let old = &self.tasks[i];
-                        let (enabled, trips, tripped) = (old.enabled, old.trips, old.tripped);
+                        let (trips, tripped) = (old.trips, old.tripped);
                         self.tasks[i] = Task {
-                            enabled,
                             trips,
                             tripped,
                             ..t
@@ -899,22 +1082,10 @@ impl Inner {
                     None => self.tasks.push(t),
                 }
                 if let Some(i) = self.find(&plugin, &name) {
-                    // 用户改过的调度优先：插件重新注册（热重载）不能把人的改动冲掉。
-                    if let Some(expr) = self
-                        .overrides
-                        .get(&(plugin.clone(), name.clone()))
-                        .cloned()
-                    {
-                        match self.tasks[i].set_schedule(&expr) {
-                            Ok(()) => self.tasks[i].override_expr = Some(expr),
-                            Err(e) => self.log.emit(
-                                &plugin,
-                                None,
-                                Level::Warn,
-                                format!("库里的调度覆盖 `{expr}` 现在不合法了（{e}），先用插件注册的那条"),
-                            ),
-                        }
-                    }
+                    // 库里记着的状态（暂停/摘要/blockers/提前量/调度覆盖）优先：
+                    // 插件重新注册（热重载）不能把人的改动冲掉。
+                    self.apply_saved(i);
+                    self.remember(i);
                     self.persist_task(i);
                 }
             }
@@ -935,7 +1106,9 @@ impl Inner {
         }
     }
 
-    fn persist_task(&self, idx: usize) {
+    fn persist_task(&mut self, idx: usize) {
+        // 先同步内存里的 saved（下次注册/重启按它恢复），再落库。
+        self.remember(idx);
         let t = &self.tasks[idx];
         let (plugin, name, cron, budget, enabled, next, ov) = (
             t.plugin.clone(),
@@ -946,17 +1119,23 @@ impl Inner {
             t.next_fire.timestamp_millis(),
             t.override_expr.clone(),
         );
+        let (summary, blockers, lead) = (
+            t.summary.clone(),
+            serde_json::to_string(&t.blockers).unwrap_or_else(|_| "[]".into()),
+            t.lead_ms as i64,
+        );
         let db = self.db.clone();
         tokio::spawn(async move {
             let _ = db.call(move |c| {
                 c.execute(
-                    "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7)
+                    "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                      ON CONFLICT(plugin,name) DO UPDATE SET
                        cron=excluded.cron, budget_ms=excluded.budget_ms,
                        enabled=excluded.enabled, next_at=excluded.next_at,
-                       override_expr=excluded.override_expr",
-                    rusqlite::params![plugin, name, cron, budget, enabled, next, ov],
+                       override_expr=excluded.override_expr, summary=excluded.summary,
+                       blockers=excluded.blockers, lead_ms=excluded.lead_ms",
+                    rusqlite::params![plugin, name, cron, budget, enabled, next, ov, summary, blockers, lead],
                 )
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -973,12 +1152,27 @@ impl Inner {
                 t.enabled
                     && !t.in_flight
                     && t.schedule.is_some()
-                    && t.next_fire <= now
+                    && trigger_at(t) <= now
                     && self.plugins.get(&t.plugin).is_some_and(|l| !l.busy)
             })
             .map(|(i, _)| i)
             .collect();
         for i in due {
+            // blockers 非空只挡**定时**触发（手动运行是显式动作，照旧）。
+            // 而且不能「攒着等就绪再补触发」：把计划直接对齐到下一次。
+            if !self.tasks[i].blockers.is_empty() {
+                let reasons = self.tasks[i].blockers.join("；");
+                let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+                self.log.emit(
+                    &p,
+                    None,
+                    Level::Warn,
+                    format!("任务 {n} 这次不跑：{reasons}"),
+                );
+                self.tasks[i].realign(now);
+                self.persist_task(i);
+                continue;
+            }
             self.dispatch(i, false, None);
         }
     }
@@ -992,9 +1186,15 @@ impl Inner {
         manual: bool,
         reply: Option<oneshot::Sender<Result<i64, String>>>,
     ) {
-        let (plugin_name, task_name, budget) = {
+        let (plugin_name, task_name, budget, early, lead_ms) = {
             let t = &self.tasks[idx];
-            (t.plugin.clone(), t.name.clone(), t.budget_ms)
+            (
+                t.plugin.clone(),
+                t.name.clone(),
+                t.budget_ms,
+                Local::now() < t.next_fire,
+                t.lead_ms,
+            )
         };
         let blocked = match self.plugins.get(&plugin_name) {
             None => Some(format!("插件未加载: {plugin_name}")),
@@ -1062,7 +1262,10 @@ impl Inner {
                 "task": task_name,
                 "plugin": plugin_name,
                 "manual": manual,
-                "run_id": run_id
+                "run_id": run_id,
+                // 提前唤醒（lead_ms）时为 true：插件据此知道「还没到点，是让我先准备」。
+                "early": early,
+                "lead_ms": lead_ms
             });
             let error = catch_engine_panic(plugin.dispatch(&task_name, &evt, budget))
                 .await
@@ -1184,3 +1387,13 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 #[path = "scheduler_tests.rs"]
 mod tests;
+/// 插件能不能动这条任务：自己的，或者**同组**（插件名第一个 -/_ 之前那段相同）。
+///
+/// 这是便利边界，不是安全边界 —— 插件本身是可信代码（见 docs/host-api.md）。
+pub fn may_touch(caller: &str, target_plugin: &str) -> bool {
+    caller == target_plugin || group(caller) == group(target_plugin)
+}
+
+fn group(p: &str) -> &str {
+    p.split(['-', '_']).next().unwrap_or(p)
+}

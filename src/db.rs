@@ -116,23 +116,34 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("建表失败: {e}"))?;
 
-    // 后加的列：SQLite 没有 ADD COLUMN IF NOT EXISTS，重复加会报错，所以按 pragma 判。
-    // override_expr = 用户在界面上改的调度；NULL 表示跟着插件注册的那条走。
-    let has_override: bool = conn
-        .prepare("PRAGMA table_info(tasks)")
-        .and_then(|mut st| {
-            let names: Vec<String> = st
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(names.iter().any(|n| n == "override_expr"))
-        })
-        .map_err(|e| format!("读表结构失败: {e}"))?;
-    if !has_override {
-        conn.execute("ALTER TABLE tasks ADD COLUMN override_expr TEXT", [])
-            .map_err(|e| format!("加 override_expr 失败: {e}"))?;
+    // 后加的列都走这条：SQLite 没有 ADD COLUMN IF NOT EXISTS。
+    for (col, ddl) in [
+        ("override_expr", "ALTER TABLE tasks ADD COLUMN override_expr TEXT"),
+        ("summary", "ALTER TABLE tasks ADD COLUMN summary TEXT"),
+        ("blockers", "ALTER TABLE tasks ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]'"),
+        ("lead_ms", "ALTER TABLE tasks ADD COLUMN lead_ms INTEGER"),
+    ] {
+        if !has_column(conn, "tasks", col)? {
+            conn.execute(ddl, [])
+                .map_err(|e| format!("加 {col} 失败: {e}"))?;
+        }
     }
     Ok(())
 }
+
+/// 表里有没有这一列（pragma table_info）。
+fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool, String> {
+    let mut st = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("读表结构失败: {e}"))?;
+    let names: Vec<String> = st
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(names.iter().any(|n| n == col))
+}
+
 /// 库里的「已禁用」插件名单（`plugins.enabled = 0`）。
 ///
 /// 启动加载和 `/api/state` 都用这一份判据 —— 两处不一致就会出现

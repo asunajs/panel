@@ -62,8 +62,8 @@
 | `tls: 'native'`（legacy CBC 套件） | ✅ 11-12 | reqwest + 平台 TLS；`v.cmcc-cs.cn` 实测 rustls 失败、native 200 |
 | `register_nav({label,icon,path})` | ❌（记一行日志） | 插件不会出现在侧栏；走「插件页 → 界面」 |
 | `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |
-| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 只认 `budget_ms` | 任务参数、提前量、卡片摘要/未就绪原因都没有 |
-| `set_job_paused/blockers/summary/schedule` | ❌ | 插件运行期改不了自己任务的状态 |
+| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 部分 | `lead_ms` / `summary` / `blockers` / `paused` 都有了（走 `set_job_*`）；`params`（派发时带的参数）和 `surface` / `manage_url` 还没有 |
+| `set_job_paused/blockers/summary/schedule` | ✅ 11-12 | 落库（重启/重载都不丢）；blockers 只挡定时、不补触发；`lead_ms` 提前唤醒且事件带 `early`；只认自己/同组 |
 | `panel.version()` / `panel.atLeast()` | ❌ | 插件判断不了宿主版本 |
 
 实测**已经有的**（2026-11-12 用脚本探过）：`setTimeout` / `setInterval` / `queueMicrotask` /

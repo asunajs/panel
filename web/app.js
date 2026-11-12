@@ -579,7 +579,10 @@ function renderTasks() {
   for (const t of rows) {
     const tr = el('tr');
     tr.append(td('插件', 'dim', t.plugin));
-    tr.append(td('任务', 'strong', t.name));
+    const nameCell = td('任务', 'strong', t.name);
+    // 插件自己写的一行摘要（set_job_summary）：放在任务名下面，不占新列。
+    if (t.summary) nameCell.append(el('div', 'mini-sub', t.summary));
+    tr.append(nameCell);
     const cronCell = td('计划', 'mono', t.cron);
     if (t.cron_override) {
       cronCell.append(el('span', 'mini-sub', '已改'));
@@ -591,6 +594,12 @@ function renderTasks() {
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
     st.append(taskPill(t));
+    // blockers：插件说「现在还不能跑」的原因（只挡定时触发，手动跑照旧）。
+    if (t.blockers && t.blockers.length) {
+      const b = pill('pill-warn', '未就绪 ' + t.blockers.length);
+      b.title = t.blockers.join('；');
+      st.append(b);
+    }
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
     const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];

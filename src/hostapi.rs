@@ -56,6 +56,9 @@ pub struct HostHandle {
     /// 面板级配置的**热快照**。取一次只 clone 一个 `Arc`，
     /// 所以 `config()` 既是热路径便宜的，又能读到界面刚保存的新值（见 `crate::config_store`）。
     pub config: Arc<crate::config_store::ConfigStore>,
+    /// 调度器句柄（只有插件加载时给）。脚本没有任务表，所以是 None ——
+    /// `set_job_*` 在脚本里会直接报错，而不是静默无事发生。
+    pub sched: Option<crate::scheduler::Scheduler>,
 }
 
 fn host(ctx: &Ctx<'_>) -> Result<HostHandle> {
@@ -98,6 +101,10 @@ const WRAP: &str = r#"(raw) => {
     ws_send: (id, text) => raw.ws_send(id, String(text)),
     ws_recv: (id, ms) => JSON.parse(raw.ws_recv(id, ms === undefined ? undefined : Number(ms))),
     ws_close: (id) => raw.ws_close(id),
+    set_job_paused: async (name, paused) => raw.set_job_paused(String(name), !!paused),
+    set_job_summary: async (name, text) => raw.set_job_summary(String(name), String(text ?? '')),
+    set_job_blockers: async (name, list) => raw.set_job_blockers(String(name), JSON.stringify(list ?? [])),
+    set_job_schedule: async (name, opts) => raw.set_job_schedule(String(name), j(opts)),
     config: async () => JSON.parse(await raw.config()),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
@@ -109,7 +116,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 20] = [
+const OP_NAMES: [&str; 24] = [
     "log",
     "info",
     "warn",
@@ -130,6 +137,10 @@ const OP_NAMES: [&str; 20] = [
     "ws_send",
     "ws_recv",
     "ws_close",
+    "set_job_paused",
+    "set_job_summary",
+    "set_job_blockers",
+    "set_job_schedule",
 ];
 
 impl ModuleDef for HostModule {
@@ -192,6 +203,11 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("ws_send", Func::from(op_ws_send).into_js(ctx)?),
         ("ws_recv", Func::from(op_ws_recv).into_js(ctx)?),
         ("ws_close", Func::from(op_ws_close).into_js(ctx)?),
+        // 插件在运行期改自己任务的状态
+        ("set_job_paused", Func::from(Async(op_set_job_paused)).into_js(ctx)?),
+        ("set_job_summary", Func::from(Async(op_set_job_summary)).into_js(ctx)?),
+        ("set_job_blockers", Func::from(Async(op_set_job_blockers)).into_js(ctx)?),
+        ("set_job_schedule", Func::from(Async(op_set_job_schedule)).into_js(ctx)?),
     ])
 }
 
@@ -409,6 +425,101 @@ fn op_http_fetch(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<S
     Ok(out.to_string())
 }
 
+
+/// 解析 set_job_* 的目标：'任务名'（自己的）或 '插件名/任务名'（同组的）。
+fn job_target(h: &HostHandle, name: &str) -> std::result::Result<(String, String), String> {
+    match name.split_once('/') {
+        Some((p, t)) if !p.is_empty() && !t.is_empty() => {
+            if !crate::scheduler::may_touch(&h.plugin, p) {
+                return Err(format!(
+                    "不能改别的插件的任务：{p}/{t}（只允许自己的，或同组 mcloud-* 这种）"
+                ));
+            }
+            Ok((p.to_string(), t.to_string()))
+        }
+        _ => Ok((h.plugin.clone(), name.to_string())),
+    }
+}
+
+/// 调度器句柄：脚本里没有任务表，所以这里要给出明确错误而不是静默无事发生。
+fn sched_of(ctx: &Ctx<'_>, h: &HostHandle) -> Result<crate::scheduler::Scheduler> {
+    h.sched.clone().ok_or_else(|| {
+        err(
+            ctx,
+            "脚本里没有任务表：set_job_* 只能在插件里用（脚本请用「计划」字段排程）".to_string(),
+        )
+    })
+}
+
+async fn op_set_job_paused(ctx: Ctx<'_>, name: String, paused: bool) -> Result<()> {
+    let h = host(&ctx)?;
+    let sched = sched_of(&ctx, &h)?;
+    let (p, t) = job_target(&h, &name).map_err(|e| err(&ctx, e))?;
+    sched
+        .set_job_state(&p, &t, crate::scheduler::JobOp::Paused(paused))
+        .await
+        .map_err(|e| err(&ctx, e))
+}
+
+async fn op_set_job_summary(ctx: Ctx<'_>, name: String, text: String) -> Result<()> {
+    let h = host(&ctx)?;
+    let sched = sched_of(&ctx, &h)?;
+    let (p, t) = job_target(&h, &name).map_err(|e| err(&ctx, e))?;
+    let s = if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.trim().to_string())
+    };
+    sched
+        .set_job_state(&p, &t, crate::scheduler::JobOp::Summary(s))
+        .await
+        .map_err(|e| err(&ctx, e))
+}
+
+async fn op_set_job_blockers(ctx: Ctx<'_>, name: String, blockers: String) -> Result<()> {
+    let h = host(&ctx)?;
+    let sched = sched_of(&ctx, &h)?;
+    let (p, t) = job_target(&h, &name).map_err(|e| err(&ctx, e))?;
+    let v: Json = serde_json::from_str(&blockers).unwrap_or(Json::Null);
+    let list: Vec<String> = match v {
+        Json::Array(a) => a
+            .into_iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+        Json::String(s) => vec![s],
+        _ => Vec::new(),
+    };
+    sched
+        .set_job_state(&p, &t, crate::scheduler::JobOp::Blockers(list))
+        .await
+        .map_err(|e| err(&ctx, e))
+}
+
+/// set_job_schedule(name, { expr, lead_ms }) —— 写的是面板的 override_expr，
+/// 所以插件更新不会丢、界面上还能「恢复默认」。
+async fn op_set_job_schedule(ctx: Ctx<'_>, name: String, opts: String) -> Result<()> {
+    let h = host(&ctx)?;
+    let sched = sched_of(&ctx, &h)?;
+    let (p, t) = job_target(&h, &name).map_err(|e| err(&ctx, e))?;
+    let o: Json =
+        serde_json::from_str(&opts).map_err(|e| err(&ctx, format!("参数不是合法 JSON: {e}")))?;
+    let expr = o
+        .get("expr")
+        .and_then(Json::as_str)
+        .map(|s| s.trim().to_string());
+    let lead = o.get("lead_ms").and_then(Json::as_u64);
+    sched
+        .set_job_state(
+            &p,
+            &t,
+            crate::scheduler::JobOp::Schedule {
+                expr,
+                lead_ms: lead,
+            },
+        )
+        .await
+        .map_err(|e| err(&ctx, e))
+}
 /// ws_open(url, opts?) -> id。**同步**：握手失败就抛。
 fn op_ws_open(ctx: Ctx<'_>, url: String, opts: Undefined<String>) -> Result<String> {
     let o: Json = match opts.0 {

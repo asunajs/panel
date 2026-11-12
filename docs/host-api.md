@@ -48,6 +48,27 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 **独立线程**的 current-thread runtime 上跑（不在 tokio worker 里 `block_on`，也不占着 worker）。
 代价写清楚：同步 op 会占住这个插件的引擎线程，一次慢请求会推迟它自己的其它工作。
 
+### 任务状态（set_job_*）
+
+| op | 说明 |
+|---|---|
+| `set_job_paused(name, paused)` | 暂停/启用一条任务的定时（等价于界面上的暂停，落 `enabled`） |
+| `set_job_summary(name, text)` | 卡片上的一行摘要（空串 = 清掉） |
+| `set_job_blockers(name, list)` | 现在还不能跑的原因；**空数组 = 就绪**。非空只挡**定时**触发，手动运行照旧 |
+| `set_job_schedule(name, {expr, lead_ms})` | 换调度（写的是面板的 `override_expr`，界面上能「恢复默认」）+ 提前唤醒量 |
+
+`name` 两种写法：`'任务名'`（自己的），或 `'插件名/任务名'`（**同组** —— 插件名第一个
+`-`/`_` 之前那段相同，例如 `mcloud-daily` 可以改 `mcloud-exchange` 的）。别的组直接报错，
+不静默。这是便利边界，不是安全边界（插件本身是可信代码）。
+
+语义细节：
+
+* blockers 非空时，定时那拍**不补触发**：计划直接对齐到下一次（只记一行 warn 日志）；
+* `lead_ms` = 提前多少毫秒唤醒（上限 1 小时）。提前那一拍派发时事件里 `early: true`、
+  带上 `lead_ms`，插件据此知道「还没到点，是让我先准备」；
+* 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
+* 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
+
 ### WebSocket（长连接）
 
 | op | 说明 |

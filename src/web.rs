@@ -1244,6 +1244,18 @@ async fn plugin_delete(
         .unwrap_or(0);
     let dest = trash.join(format!("{name}-{stamp}.js"));
     st.sched.unload(&name);
+    // 任务行跟着删：插件没了，这些行只会在库里堆垃圾（运行记录保留，那是历史）。
+    {
+        let n = name.clone();
+        let _ = st
+            .db
+            .call(move |c| {
+                c.execute("DELETE FROM tasks WHERE plugin=?1", [&n])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+    }
     match tokio::fs::rename(&path, &dest).await {
         Ok(()) => {
             st.log.emit(

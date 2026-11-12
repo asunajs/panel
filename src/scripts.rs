@@ -344,6 +344,8 @@ impl Scripts {
             db: self.db.clone(),
             reg: tx,
             config: self.config.clone(),
+            // 脚本没有任务表：set_job_* 在脚本里会直接报错
+            sched: None,
         };
         let result = match crate::engine::Plugin::load_with_budget(&source, handle, budget_ms).await {
             Ok(_plugin) => {
