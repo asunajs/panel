@@ -442,6 +442,29 @@ async function connect(wsUrl) {
   };
 }
 
+/// 收尾删临时目录：**删不掉不算失败**。
+///
+/// 第 69 轮实测踩到：36 条全过，但 `rmSync(dir, {recursive:true, force:true})` 偶尔抛
+/// `ENOTEMPTY`（浏览器刚被 kill、还有句柄在写这个目录），于是整条命令以 2 退出 ——
+/// 门禁看上去「挂了」，其实检查全过。删不掉就重试几次，再不行留个提示走人。
+function cleanup() {
+  if (KEEP) {
+    console.log('临时目录留着：' + dir);
+    return;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (i === 4) {
+        console.log('（临时目录没删干净，不影响结论：' + dir + '）');
+        return;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120);
+    }
+  }
+}
 // ---------------------------------------------------------------- 收尾
 
 main()
@@ -452,14 +475,12 @@ main()
     console.log(bad.length === 0
       ? 'ok: ' + results.length + ' 条界面检查全过'
       : '失败 ' + bad.length + ' / ' + results.length + '：' + bad.map((b) => b.name).join('、'));
-    if (KEEP) console.log('临时目录留着：' + dir);
-    else rmSync(dir, { recursive: true, force: true });
+    cleanup();
     process.exit(bad.length === 0 ? 0 : 1);
   })
   .catch((e) => {
     stop();
     console.error('挂了：' + (e && e.message));
-    if (KEEP) console.log('临时目录留着：' + dir);
-    else rmSync(dir, { recursive: true, force: true });
+    cleanup();
     process.exit(2);
   });
