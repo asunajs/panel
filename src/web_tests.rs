@@ -30,6 +30,7 @@ async fn setup() -> (Router, Db) {
         data_dir: PathBuf::from("data"),
         config: crate::config_store::ConfigStore::new(&json!({})),
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
         auth: None,
     };
     (router(st), db)
@@ -85,6 +86,7 @@ async fn setup_authed() -> Router {
         data_dir: PathBuf::from("data"),
         config: store,
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     })
 }
@@ -287,6 +289,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         config: store,
         // 真实部署里这里是 auth.json 派生出来的凭据；测试里直接派生一份同样的。
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
 
@@ -350,6 +353,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         data_dir: PathBuf::from("data"),
         config: store,
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
         auth: Some(Arc::new(crate::auth::Auth::derive("s3cret"))),
     });
     let req = Request::get("/api/state")
@@ -395,6 +399,20 @@ fn temp_dirs(tag: &str) -> (PathBuf, PathBuf) {
 async fn setup_dirs(
     tag: &str,
 ) -> (Router, PathBuf, PathBuf, Arc<crate::config_store::ConfigStore>) {
+    let (app, plugins, data, store, _db) = setup_core(tag).await;
+    (app, plugins, data, store)
+}
+
+/// 同 `setup_dirs`，但把 `Db` 也交出来 —— 有些断言要直接查库（比如「失败时不该落库」）。
+async fn setup_core(
+    tag: &str,
+) -> (
+    Router,
+    PathBuf,
+    PathBuf,
+    Arc<crate::config_store::ConfigStore>,
+    Db,
+) {
     crate::engine::global_inits();
     let (plugins, data) = temp_dirs(tag);
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
@@ -411,7 +429,7 @@ async fn setup_dirs(
         store.clone(),
     );
     let st = AppState {
-        db,
+        db: db.clone(),
         log,
         sched,
         plugins_dir: plugins.clone(),
@@ -420,9 +438,10 @@ async fn setup_dirs(
         data_dir: data.clone(),
         config: store.clone(),
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
         auth: None,
     };
-    (router(st), plugins, data, store)
+    (router(st), plugins, data, store, db)
 }
 
 fn with_csrf(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
@@ -2104,4 +2123,82 @@ async fn saving_a_broken_source_for_a_new_plugin_leaves_no_file() {
     assert!(!plugins.join("ghost.js").exists(), "新建失败不该留文件");
     let (_, state) = get(&app, "/api/state").await;
     assert!(!state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "ghost"));
+}
+
+/// 启用一个装不上的插件：不能把「已启用」写进库（否则界面和现实对不上）。
+#[tokio::test]
+async fn enable_of_a_broken_file_fails_and_does_not_persist_enabled() {
+    let (app, plugins, _data, _store, db) = setup_core("penable").await;
+    std::fs::write(
+        plugins.join("bad.js"),
+        "import host from 'panel:host';\nawait host.register_handler('x', async () => {",
+    )
+    .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(with_csrf("POST", "/api/plugins/bad/enable", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let msg = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(msg.contains("启用失败"), "{msg}");
+
+    // 库里不能留下「启用」的痕迹：加载失败就不该改持久状态
+    let enabled_rows = db
+        .call(|c| {
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM plugins WHERE name='bad' AND enabled=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(n)
+        })
+        .await
+        .unwrap();
+    assert_eq!(enabled_rows, 0, "启用失败还写了库");
+
+    // 界面上要能看见「为什么没起来」
+    let (_, state) = get(&app, "/api/state").await;
+    let failed = state["failed"].as_array().unwrap();
+    let item = failed
+        .iter()
+        .find(|v| v["name"] == "bad")
+        .unwrap_or_else(|| panic!("failed 里没有 bad: {state}"));
+    assert!(
+        item["error"].as_str().unwrap_or("").len() > 3,
+        "要带原因: {item}"
+    );
+    assert!(!state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "bad"));
+}
+
+/// 修好文件之后再启用：失败记录要被清掉。
+#[tokio::test]
+async fn a_successful_enable_clears_the_failure_record() {
+    let (app, plugins, _data, _store, _db) = setup_core("penable2").await;
+    std::fs::write(
+        plugins.join("fix.js"),
+        "import host from 'panel:host';\nawait host.register_handler('x', async () => 1);\n",
+    )
+    .unwrap();
+    // 先禁用（库里记 enabled=0），再启用
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/fix/disable", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(state["disabled"].as_array().unwrap().iter().any(|v| v == "fix"));
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/fix/enable", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    assert!(!state["disabled"].as_array().unwrap().iter().any(|v| v == "fix"));
+    assert!(state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "fix"));
+    assert!(!state["failed"].as_array().unwrap().iter().any(|v| v["name"] == "fix"));
 }

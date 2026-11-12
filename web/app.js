@@ -513,7 +513,12 @@ function renderPlugins() {
     const meta = el('div', 'plugin-meta');
     meta.append(el('span', '', humanBytes(f.bytes)));
     meta.append(el('span', '', '·'));
-    meta.append(el('span', '', offNow ? '禁用了，不加载（重启也不加载）' : '加载失败或还没加载'));
+    // 没加载起来的时候要能说出**为什么** —— 只有「未加载」三个字等于让人去翻日志。
+    const why = (state.failed || []).find((x) => x.name === f.name);
+    meta.append(el('span', '', offNow ? '禁用了，不加载（重启也不加载）' : (why ? '没加载起来' : '还没加载')));
+    if (!offNow && why) {
+      cardEl.append(el('p', 'plugin-error', why.error));
+    }
     cardEl.append(meta);
     const acts = el('div', 'plugin-actions');
     const mk = (label, fn, danger) => {
@@ -1816,6 +1821,8 @@ async function refresh() {
     const data = await api('/api/state');
     state.plugins = data.plugins || [];
     state.disabled = data.disabled || [];
+    // 有文件、没禁用、也没加载起来的插件（带原因）：界面上要能说清为什么。
+    state.failed = data.failed || [];
     await loadPluginFiles();
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;

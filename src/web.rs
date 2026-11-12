@@ -54,9 +54,31 @@ pub struct AppState {
     pub config: Arc<crate::config_store::ConfigStore>,
     /// 限流配额（登录 / 写接口）。按**连接的对端地址**分桶。
     pub limits: Arc<crate::ratelimit::Limits>,
+    /// 加载失败的插件：`名字 -> 原因`。
+    ///
+    /// 为什么要有：加载失败既不在 `plugins`（没跑起来）也不在 `disabled`（库里没禁用），
+    /// 界面就会**静默少一个插件**，只有翻日志才知道。启动加载和「启用」失败都写这里。
+    pub load_errors: LoadErrors,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
     pub auth: Option<Arc<crate::auth::Auth>>,
+}
+
+/// 加载失败的插件（`名字 -> 原因`）。启动加载和「启用」失败都往里写，成功就删掉。
+pub type LoadErrors = Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
+/// 把 `load_errors` 摊成按名字排好序的数组（界面直接渲染）。
+fn failed_plugins(errors: &LoadErrors) -> Vec<Value> {
+    let guard = match errors.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let mut out: Vec<Value> = guard
+        .iter()
+        .map(|(n, e)| json!({ "name": n, "error": e }))
+        .collect();
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    out
 }
 
 type ApiError = (StatusCode, String);
@@ -735,6 +757,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
         "disabled": crate::db::plugin_disabled_names(&st.db).await,
+        // 有文件、没禁用、但没加载起来：界面要能说清为什么，并给「重试」。
+        "failed": failed_plugins(&st.load_errors),
         "tasks": tasks,
         "stats": stats,
         // 保留策略：界面上「数据」页要能说清「记录会留多久」（见 retention.rs）。
@@ -781,19 +805,37 @@ async fn plugin_reload(
     // 命令通道是串行的：Unload 一定先于 Load 被处理
     st.sched.unload(&name);
     match st.sched.load(&name, source).await {
-        Ok(()) => Ok(Json(json!({ "ok": true, "name": name }))),
+        Ok(()) => {
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.remove(&name);
+            }
+            Ok(Json(json!({ "ok": true, "name": name })))
+        }
         Err(e) => {
             if let Some(prev) = prev {
                 st.sched.unload(&name);
                 match st.sched.load(&name, prev).await {
-                    Ok(()) => Err(bad(format!(
-                        "重载失败，已装回上一个能跑的版本：{e}"
-                    ))),
-                    Err(e2) => Err(bad(format!(
-                        "重载失败，连上一个版本也装不回去了：{e} / {e2}"
-                    ))),
+                    Ok(()) => {
+                        // 旧版本跑起来了：这不是「没加载」，不该挂在失败列表上。
+                        if let Ok(mut g) = st.load_errors.lock() {
+                            g.remove(&name);
+                        }
+                        Err(bad(format!("重载失败，已装回上一个能跑的版本：{e}")))
+                    }
+                    Err(e2) => {
+                        if let Ok(mut g) = st.load_errors.lock() {
+                            g.insert(name.clone(), format!("{e} / 回滚也失败: {e2}"));
+                        }
+                        Err(bad(format!(
+                            "重载失败，连上一个版本也装不回去了：{e} / {e2}"
+                        )))
+                    }
                 }
             } else {
+                // 本来就没在跑（比如启动时就没起来）：记下来，界面能显示原因。
+                if let Ok(mut g) = st.load_errors.lock() {
+                    g.insert(name.clone(), e.clone());
+                }
                 Err(bad(e))
             }
         }
@@ -972,6 +1014,10 @@ async fn plugin_disable(
     crate::db::set_plugin_enabled(&st.db, &name, false)
         .await
         .map_err(bad)?;
+    // 用户明确关掉的，不该再挂在「加载失败」列表上（那是另一回事）。
+    if let Ok(mut g) = st.load_errors.lock() {
+        g.remove(&name);
+    }
     st.log.emit(
         "panel",
         None,
@@ -989,12 +1035,26 @@ async fn plugin_enable(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let source = read_source(&st.plugins_dir, &name).await?;
-    crate::db::set_plugin_enabled(&st.db, &name, true)
-        .await
-        .map_err(bad)?;
+    // 顺序：**先加载成功再落库**。反过来的话加载失败时库里已经写着「启用」，
+    // 界面和现实就对不上（下次启动还会再试一次、再失败一次）。
     st.sched.unload(&name);
-    st.sched.load(&name, source).await.map_err(bad)?;
-    Ok(Json(json!({ "ok": true, "name": name, "enabled": true })))
+    match st.sched.load(&name, source).await {
+        Ok(()) => {
+            crate::db::set_plugin_enabled(&st.db, &name, true)
+                .await
+                .map_err(bad)?;
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.remove(&name);
+            }
+            Ok(Json(json!({ "ok": true, "name": name, "enabled": true })))
+        }
+        Err(e) => {
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.insert(name.clone(), e.clone());
+            }
+            Err(bad(format!("启用失败：{e}")))
+        }
+    }
 }
 
 async fn plugin_unload(
@@ -1650,6 +1710,10 @@ async fn plugin_save(
     st.sched.unload(&name);
     match st.sched.load(&name, body.source.clone()).await {
         Ok(()) => {
+            // 改好了就说明它起来了，失败记录要清掉。
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.remove(&name);
+            }
             st.log.emit(
                 "panel",
                 None,

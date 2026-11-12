@@ -142,7 +142,11 @@ async fn main() -> Result<(), String> {
         );
     }
 
-    load_all(&plugins_dir, &sched, &log, &db).await;
+    // 加载失败的插件要能在界面上看见（否则只是「静默少一个」）。
+    let load_errors: web::LoadErrors = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    ));
+    load_all(&plugins_dir, &sched, &log, &db, &load_errors).await;
 
     let auth_on = provisioned.auth.is_some();
     if !auth_on {
@@ -166,6 +170,7 @@ async fn main() -> Result<(), String> {
         scripts,
         data_dir,
         config,
+        load_errors: load_errors.clone(),
         auth: provisioned.auth.map(Arc::new),
     };
     let app = web::router(st);
@@ -196,7 +201,13 @@ async fn main() -> Result<(), String> {
 
 /// 扫 `plugins/*.js` 逐个加载。**一个插件失败不影响其它插件** ——
 /// 这正是不用 `Vm::from_options` 的理由。
-async fn load_all(dir: &PathBuf, sched: &scheduler::Scheduler, log: &LogHub, db: &db::Db) {
+async fn load_all(
+    dir: &PathBuf,
+    sched: &scheduler::Scheduler,
+    log: &LogHub,
+    db: &db::Db,
+    errors: &web::LoadErrors,
+) {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
         Err(e) => {
@@ -241,13 +252,23 @@ async fn load_all(dir: &PathBuf, sched: &scheduler::Scheduler, log: &LogHub, db:
             }
         };
         match sched.load(&name, source).await {
-            Ok(()) => log.emit("panel", None, Level::Info, format!("插件 {name} 已加载")),
-            Err(e) => log.emit(
-                "panel",
-                None,
-                Level::Error,
-                format!("插件 {name} 加载失败: {e}"),
-            ),
+            Ok(()) => {
+                if let Ok(mut g) = errors.lock() {
+                    g.remove(&name);
+                }
+                log.emit("panel", None, Level::Info, format!("插件 {name} 已加载"));
+            }
+            Err(e) => {
+                if let Ok(mut g) = errors.lock() {
+                    g.insert(name.clone(), e.clone());
+                }
+                log.emit(
+                    "panel",
+                    None,
+                    Level::Error,
+                    format!("插件 {name} 加载失败: {e}"),
+                );
+            }
         }
     }
 }

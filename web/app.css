@@ -496,6 +496,14 @@ button, input, select { font: inherit; color: inherit; }
 .plugin-name { font-size: 14px; font-weight: 650; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-meta { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.plugin-error {
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--err);
+  word-break: break-word;
+}
+
 .plugin-actions { display: flex; gap: 6px; margin-top: 2px; }
 
 .sync { font-size: 12px; color: var(--dim); white-space: nowrap; }

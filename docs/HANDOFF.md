@@ -177,6 +177,16 @@
     重载失败时把它装回去并回 400「重载失败，已装回上一个能跑的版本」。
     有测试：`web::router_tests::reload_of_a_broken_file_keeps_the_previous_version_running`。
     「保存」那条路不靠这个 —— 它写盘前自己留了 old，见 `plugin_save`。
+19. **加载失败既不在 `plugins` 也不在 `disabled`，界面会「静默少一个插件」**：启动加载失败的插件
+    没跑起来（不在 `plugins`）、库里也没禁用（不在 `disabled`），只有翻日志才知道。
+    现在 `AppState.load_errors`（`名字 -> 原因`）在启动加载/启用/重载失败时写入、成功时清掉，
+    `/api/state` 的 `failed` 字段带出去，插件卡片上直接显示原因。
+    ⚠ 前端 `refresh()` 是**逐字段拷贝**（不是整体赋值），新加的字段必须在 `state.xxx = data.xxx`
+    那里补一行 —— 这轮就漏了一次：服务端有 `failed`，页面上 `state.failed` 是 undefined。
+20. **「启用」要先加载成功再落库**：反过来的话，加载失败时库里已经写着「启用」，
+    界面和现实对不上，下次启动还会再试一次、再失败一次。
+    有测试：`web::router_tests::enable_of_a_broken_file_fails_and_does_not_persist_enabled`
+    （直接查库断言 `enabled=1` 的行数为 0）。
 
 ## 8. 运行中的面板
 
