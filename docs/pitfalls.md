@@ -173,3 +173,9 @@
     实测（60 行、每 5 行并列、limit=7）：去掉 `id` 那一段后只翻到 42/60 行 —— 少了 18 行，
     而且不报错、不重复，用户只会觉得「记录怎么少了一段」。守卫：
     `web_tests.rs::paging_by_started_at_keeps_ties_in_order`（做过反向例确认会红）。
+
+43. **`LIKE` 少了 `ESCAPE`，搜 `50%` 会一条都搜不到**：`like_pat()` 把 `%`/`_`/`\` 转义成 `\%` 之类，
+    但 SQL 里不写 `ESCAPE '\'` 时反斜杠只是普通字符，模式变成「50 后面跟一个反斜杠」。
+    `/api/runs` 写了、`/api/logs` 漏了两年（第 57 轮才发现）：界面上看到的是「没有匹配的日志」，
+    用户只会以为没这类日志。凡是给 `LIKE ?` 传转义过的模式，就一定要带 `ESCAPE`。
+    守卫：`web_tests.rs::searching_percent_and_underscore_matches_them_literally`（做过反向例）。

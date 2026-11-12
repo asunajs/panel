@@ -1522,7 +1522,7 @@ async fn api_logs(
                     "SELECT id,ts,plugin,run_id,level,message FROM logs \
                      WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
                        AND (?3 IS NULL OR level=?3) \
-                       AND (?4 IS NULL OR plugin LIKE ?4 OR message LIKE ?4) \
+                       AND (?4 IS NULL OR plugin LIKE ?4 ESCAPE '\\' \n                         OR message LIKE ?4 ESCAPE '\\') \
                        AND (?5 IS NULL OR id < ?5) \
                      ORDER BY id DESC LIMIT ?6",
                 )
@@ -1548,7 +1548,7 @@ async fn api_logs(
                     "SELECT COUNT(*) FROM logs \
                      WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
                        AND (?3 IS NULL OR level=?3) \
-                       AND (?4 IS NULL OR plugin LIKE ?4 OR message LIKE ?4)",
+                       AND (?4 IS NULL OR plugin LIKE ?4 ESCAPE '\\' \n                         OR message LIKE ?4 ESCAPE '\\')",
                     rusqlite::params![plugin, run_id, level, q],
                     |r| r.get(0),
                 )

@@ -2659,3 +2659,66 @@ async fn paging_by_started_at_keeps_ties_in_order() {
         "只有 60 行，夹到 500 后也还是 60: {b}"
     );
 }
+
+/// LIKE 的通配符必须当**字面量**处理：搜 `50%` 不能变成「50 + 任意串」，搜 `a_c` 不能匹配 `abc`。
+///
+/// 第 57 轮实测抓到的真问题：`/api/logs` 的两条 LIKE **没写 `ESCAPE`**（`/api/runs` 写了），
+/// 于是 `like_pat()` 加进去的反斜杠被当普通字符：搜 `50%` 一条都搜不到，界面上就是「没有匹配」。
+#[tokio::test]
+async fn searching_percent_and_underscore_matches_them_literally() {
+    let (app, _plugins, _data, _store, db) = setup_core("like").await;
+    db.call(|c| {
+        for (msg, level) in [
+            ("命中率 50% 以上", "warn"),
+            ("命中率 5020 以上", "info"),
+            ("任务 a_c 失败", "error"),
+            ("任务 abc 失败", "error"),
+            ("50 次", "info"),
+        ] {
+            c.execute(
+                "INSERT INTO logs(ts,plugin,run_id,level,message) VALUES (?1,'p',NULL,?2,?3)",
+                rusqlite::params![1i64, level, msg],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    async fn total_of(app: &Router, path: &str) -> i64 {
+        let (_, b) = get(app, path).await;
+        b["total"].as_i64().unwrap_or(-1)
+    }
+
+    // 50% 只该命中那条真的含「50%」的
+    assert_eq!(total_of(&app, "/api/logs?limit=1&q=50%25").await, 1);
+    // a_c 只该命中 a_c，不该命中 abc
+    assert_eq!(total_of(&app, "/api/logs?limit=1&q=a_c").await, 1);
+    // 不含通配符的普通词照常
+    assert_eq!(total_of(&app, "/api/logs?limit=1&q=50").await, 3);
+    assert_eq!(total_of(&app, "/api/logs?limit=1&q=abc").await, 1);
+    // 一个纯反斜杠不能把整条 SQL 弄崩
+    assert_eq!(total_of(&app, "/api/logs?limit=1&q=%5C").await, 0);
+
+    // 运行记录的搜索（RUNS_WHERE）一直是对的，钉住别退化
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO runs(plugin,task,started_at,ended_at,status,error) \
+             VALUES ('p','t',1,2,'error','限流 50% 触发')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT INTO runs(plugin,task,started_at,ended_at,status,error) \
+             VALUES ('p','t',1,2,'error','限流 5020 触发')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(total_of(&app, "/api/runs?limit=1&q=50%25").await, 1);
+    assert_eq!(total_of(&app, "/api/runs?limit=1&q=50").await, 2);
+}
