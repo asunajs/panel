@@ -1621,162 +1621,72 @@ async fn plugin_webui_any(
 
 /// 备份 = 配置 + 插件源码 + 脚本（含排程）。**不含数据库**：运行记录/日志是历史，
 /// 搬过去会让新机器的 run id 对不上，不如不要。
+/// GET /api/backup —— 明文 JSON 备份（界面上的「导出」）。
+///
+/// 加密导出走 CLI（panel-llrt backup --encrypt-to）：私钥不该过 HTTP。
 async fn api_backup(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let mut plugins = Vec::new();
-    let mut rd = tokio::fs::read_dir(&st.plugins_dir)
-        .await
-        .map_err(|e| internal(format!("读插件目录失败: {e}")))?;
-    while let Ok(Some(ent)) = rd.next_entry().await {
-        let p = ent.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("js") {
-            continue;
-        }
-        let Some(name) = p.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Ok(src) = tokio::fs::read_to_string(&p).await {
-            plugins.push(json!({ "name": name, "source": src }));
-        }
-    }
-    plugins.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-
-    let mut scripts = Vec::new();
-    for s in st.scripts.list().await.map_err(internal)? {
-        let name = s["name"].as_str().unwrap_or_default().to_string();
-        if let Ok(d) = st.scripts.get(&name).await {
-            scripts.push(json!({
-                "name": name,
-                "source": d["source"],
-                "cron": d["cron"],
-                "budget_ms": d["budget_ms"],
-                "enabled": d["enabled"],
-            }));
-        }
-    }
-
-    // 配置优先给**磁盘原文**（保住用户的键顺序和缩进）；文件不在就给内存快照。
     let cfg_path = st.data_dir.join("config.json");
     let config_text = match tokio::fs::read_to_string(&cfg_path).await {
         Ok(t) => t,
         Err(_) => st.config.snapshot().as_ref().to_string(),
     };
-
-    Ok(Json(json!({
-        "format": "panel-llrt-backup",
-        "version": 1,
-        "exported_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0),
-        "config_text": config_text,
-        "plugins": plugins,
-        "scripts": scripts,
-    })))
+    let v = crate::backup::collect(&st.plugins_dir, &st.scripts, config_text)
+        .await
+        .map_err(internal)?;
+    Ok(Json(v))
 }
 
-#[derive(Deserialize)]
-struct BackupIn {
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    config_text: Option<String>,
-    #[serde(default)]
-    plugins: Vec<BackupPlugin>,
-    #[serde(default)]
-    scripts: Vec<BackupScript>,
-}
-
-#[derive(Deserialize)]
-struct BackupPlugin {
-    name: String,
-    source: String,
-}
-
-#[derive(Deserialize)]
-struct BackupScript {
-    name: String,
-    source: String,
-    #[serde(default)]
-    cron: Option<String>,
-    #[serde(default)]
-    budget_ms: Option<u64>,
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-/// 恢复的语义：**只增/覆盖，绝不删**。备份里没有的东西保持原样 ——
-/// 「恢复」变成「删除」是最容易让人丢数据的实现方式。
+/// POST /api/backup —— 从备份恢复（只增/覆盖，绝不删）。
 async fn api_restore(
     State(st): State<AppState>,
     h: HeaderMap,
-    Json(body): Json<BackupIn>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    if let Some(f) = &body.format {
-        if f != "panel-llrt-backup" {
-            return Err(bad(format!("不认识的备份格式: {f}")));
-        }
-    }
-    // 先全量校验，再落盘：不能写到一半才发现第 5 个名字非法。
-    for p in &body.plugins {
-        crate::scripts::safe_name(&p.name).map_err(bad)?;
-        if p.source.len() > SOURCE_MAX {
-            return Err(bad(format!("插件 {} 有 {} 字节，超过上限 {SOURCE_MAX}", p.name, p.source.len())));
-        }
-        if p.source.trim().is_empty() {
-            return Err(bad(format!("插件 {} 的源码是空的", p.name)));
-        }
-    }
-    for s in &body.scripts {
-        crate::scripts::safe_name(&s.name).map_err(bad)?;
-        if s.source.len() > crate::scripts::FILE_MAX {
-            return Err(bad(format!("脚本 {} 太大", s.name)));
-        }
-    }
-    let cfg_value = match &body.config_text {
+    // 配置先校验再落任何文件：写到一半才发现配置坏了，等于留个半成品。
+    let cfg_value = match body.get("config_text").and_then(Value::as_str) {
         Some(t) => {
             let cap = crate::config::max_bytes();
             if t.len() as u64 > cap {
                 return Err(bad(format!("配置有 {} 字节，超过上限 {cap}", t.len())));
             }
-            let v: Value = serde_json::from_str(t).map_err(|e| bad(format!("配置不是合法 JSON: {e}")))?;
+            let v: Value =
+                serde_json::from_str(t).map_err(|e| bad(format!("配置不是合法 JSON: {e}")))?;
             if !v.is_object() {
                 return Err(bad("配置必须是 JSON 对象"));
             }
-            Some(v)
+            Some((t.to_string(), v))
         }
         None => None,
     };
 
-    let mut restored_plugins = Vec::new();
-    for p in body.plugins {
-        let path = st.plugins_dir.join(format!("{}.js", p.name));
-        write_atomic(&path, p.source.as_bytes(), None)
-            .await
-            .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
-        // 覆盖的是已加载插件就热重载；没加载的按新插件装进去。
-        st.sched.unload(&p.name);
-        match st.sched.load(&p.name, p.source).await {
-            Ok(()) => restored_plugins.push(json!({ "name": p.name, "loaded": true })),
-            Err(e) => restored_plugins.push(json!({ "name": p.name, "loaded": false, "error": e })),
+    let mut out = crate::backup::apply(&st.plugins_dir, &st.scripts, &body)
+        .await
+        .map_err(bad)?;
+
+    // 插件写完要装进去：覆盖的是已加载的就热重载，没加载的按新插件装上。
+    if let Some(list) = out["plugins"].as_array_mut() {
+        for p in list.iter_mut() {
+            let Some(name) = p["name"].as_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            let source = match read_source(&st.plugins_dir, &name).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            st.sched.unload(&name);
+            match st.sched.load(&name, source).await {
+                Ok(()) => p["loaded"] = json!(true),
+                Err(e) => {
+                    p["loaded"] = json!(false);
+                    p["error"] = json!(e);
+                }
+            }
         }
     }
 
-    let mut restored_scripts = Vec::new();
-    for s in body.scripts {
-        let budget = s.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS);
-        match st
-            .scripts
-            .save(&s.name, &s.source, s.cron, budget, s.enabled.unwrap_or(true))
-            .await
-        {
-            Ok(_) => restored_scripts.push(json!({ "name": s.name, "ok": true })),
-            Err(e) => restored_scripts.push(json!({ "name": s.name, "ok": false, "error": e })),
-        }
-    }
-
-    let config_applied = match (&body.config_text, cfg_value) {
-        (Some(text), Some(v)) => {
+    let config_applied = match cfg_value {
+        Some((text, v)) => {
             let path = st.data_dir.join("config.json");
             write_atomic(&path, text.as_bytes(), Some(0o600))
                 .await
@@ -1784,25 +1694,25 @@ async fn api_restore(
             st.config.set(&v);
             true
         }
-        _ => false,
+        None => false,
     };
 
+    let np = out["plugins"].as_array().map(|a| a.len()).unwrap_or(0);
+    let ns = out["scripts"].as_array().map(|a| a.len()).unwrap_or(0);
     st.log.emit(
         "panel",
         None,
         crate::log::Level::Warn,
         format!(
-            "从备份恢复：{} 个插件、{} 个脚本、配置{}",
-            restored_plugins.len(),
-            restored_scripts.len(),
+            "从备份恢复：{np} 个插件、{ns} 个脚本、配置{}",
             if config_applied { "已覆盖" } else { "未包含" }
         ),
     );
 
     Ok(Json(json!({
         "ok": true,
-        "plugins": restored_plugins,
-        "scripts": restored_scripts,
+        "plugins": out["plugins"],
+        "scripts": out["scripts"],
         "config_applied": config_applied,
     })))
 }

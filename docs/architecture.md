@@ -218,6 +218,8 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `notify.rs` | 通知：失败/熔断/插件喊话 → `notifications` 表（留最近 500 条）+ 可选 webhook（后台投递，5 秒超时，失败只进日志） |
 | `service.rs` | 开机自启动：`panel-llrt service print\|install\|uninstall\|status`，生成 launchd plist / systemd --user unit（绝对路径、RunAtLoad+KeepAlive / Restart=always），日志落 `data/` |
 | `scripts.rs` | 脚本：独立 `.js` + 记录里的 cron；每次运行新建 Context、带墙钟死线（`Plugin::load_with_budget`）；注册任务会直接报错；15 秒粒度排程循环 |
+| `backup.rs` | 备份/恢复的**一份实现两个入口**：HTTP（明文 JSON，界面按钮）与 CLI（`keygen` / `backup --encrypt-to` / `restore --secret`）。恢复只增/覆盖不删；配置先校验再落盘 |
+| `backup_crypto.rs` | 备份加密格式 v1（移植自基线）：X25519 协商 → HKDF-SHA256 派生 → ChaCha20-Poly1305 分块（64 KiB，头里带明文总长，所以截断/篡改都报错）。服务进程只碰公钥 |
 | `upload.rs` | 插件/脚本上传（单文件或 zip）。移植自基线：`enclosed_name()` 挡穿越、拒符号链接与 `.` 开头的路径段、逐级 `symlink_metadata` 建目录、按**实际解压量**记账挡 zip bomb（不信 central directory 的声明值）、先写 `.tmp` 再 rename |
 | `outbound.rs` | 出站 HTTP 的**纯 Rust** 实现（async 与同步两条路共用一份 SSRF 门 / 重定向 / 1 MiB 上限）；`tls:'native'` 走 reqwest + 平台 TLS（rustls 不实现 CBC 套件） |
 | `sync_bridge.rs` | 阻塞桥：给同步步骤机风格的插件把 async 能力变成同步调用。`run` 起独立线程 + 一次性 runtime（sqlite/http）；`run_on` 挂到**进程级 runtime** 上（WebSocket 这种长连接必须这样，否则 runtime 一 drop 连接就废） |

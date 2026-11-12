@@ -45,7 +45,7 @@
 | `/api/restart` | ✅ 11-12 | `exec` 自身：**PID 不变**、参数/环境/工作目录都在；设置页有按钮（带确认） |
 | `/api/test/{lang}`（引擎自测页） | ❌ | 想验证引擎得建脚本 |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/config|task|test|outbox|retry` | 部分 | 只有「通知 + 一个 webhook」，没有渠道管理、发件箱、重试、按任务开关 |
-| 备份加密（`backup_crypto.rs`）+ `/api/restore/activate` | 部分 | 备份是明文 JSON，恢复只增/覆盖、无原子切换 |
+| 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [backup.md](backup.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
 | `/api/market*`、`/api/update*` | ❌ | 已声明不做（见 §3） |
 | `/readyz` | ❌ | 只有 `/healthz` |
 

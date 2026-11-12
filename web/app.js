@@ -1387,6 +1387,16 @@ function renderSettings() {
       "备份 = 配置 + 插件源码 + 脚本（含排程），不含运行记录和日志。恢复只增/覆盖，不删除。",
     ),
   );
+  dat.append(
+    el(
+      "p",
+      "settings-note",
+      "这里的导出是**明文**（插件源码 + 配置原样在 JSON 里）。要加密导出得在终端跑：" +
+        "panel-llrt keygen 生成一对密钥（私钥自己收着），然后 " +
+        "panel-llrt backup --out 备份.bk --encrypt-to <公钥>；恢复用 " +
+        "panel-llrt restore --in 备份.bk --secret <私钥>。私钥故意不进 HTTP。",
+    ),
+  );
 }
 
 

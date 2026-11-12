@@ -4,6 +4,8 @@
 //! 插件加载放在 HTTP 之前，这样首个请求看到的任务表已经是全的。
 
 mod auth;
+mod backup;
+mod backup_crypto;
 mod config;
 mod config_store;
 mod cron;
@@ -40,6 +42,13 @@ async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("service") {
         return service::run(&args[1..]);
+    }
+    // 备份相关是**离线**动作（私钥不过 HTTP），同样放在起服务之前。
+    match args.first().map(|s| s.as_str()) {
+        Some("keygen") => return backup::keygen(),
+        Some("backup") => return backup::backup_cmd(&args[1..]).await,
+        Some("restore") => return backup::restore_cmd(&args[1..]).await,
+        _ => {}
     }
 
     // 先起计时器：仪表盘的「运行时长」从这里开始算。

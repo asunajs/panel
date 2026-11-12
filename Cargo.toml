@@ -61,6 +61,13 @@ futures = "0.3"
 #   我们直接用项目已有的 rustls 0.23 + webpki-roots 1 手工搭 connector（与 http 同一份信任库）。
 # 上传 zip：只编 deflate，不把 bzip2/lzma/zstd 全拖进来。
 # 9 起会拒「实际解压量 > 声明值」的条目 —— 给 zip 炸弹又多一道，所以用 9。
+# 备份加密（移植自基线 unpanel 2.10）：服务端只留公钥，私钥归人保管。
+# 三个原语都是标准件：X25519 协商 + HKDF 派生 + ChaCha20-Poly1305 分块加密。
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+base64 = "0.23"
+sha2 = "0.10"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls", "native-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
