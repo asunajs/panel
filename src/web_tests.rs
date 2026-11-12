@@ -931,3 +931,88 @@ async fn marking_read_clears_the_badge() {
     assert_eq!(after["unread"], 0);
     assert_eq!(after["items"][0]["read"], true);
 }
+/// 任务的「改计划」：改完立刻生效、落库、插件热重载不冲掉、可以恢复默认。
+fn task_of<'a>(state: &'a Value, plugin: &str, name: &str) -> &'a Value {
+    state["tasks"]
+        .as_array()
+        .expect("tasks 应当是数组")
+        .iter()
+        .find(|t| t["plugin"] == plugin && t["name"] == name)
+        .unwrap_or_else(|| panic!("找不到任务 {plugin}/{name}: {state}"))
+}
+
+#[tokio::test]
+async fn a_task_schedule_can_be_overridden_and_restored() {
+    let (app, _plugins, _data, _store) = setup_dirs("sched1").await;
+    load_plugin(
+        &app,
+        "s",
+        "import host from 'panel:host';\nawait host.register_cron('job', '0 8 * * *', 5000);\n",
+    )
+    .await;
+
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "s", "job");
+    assert_eq!(t["cron"], "0 8 * * *");
+    assert_eq!(t["cron_override"], Value::Null, "默认不该有覆盖: {t}");
+    assert_eq!(t["cron_base"], "0 8 * * *");
+
+    // 改
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/tasks/s/job/schedule", Some(json!({ "expr": "@every 45s" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "s", "job");
+    assert_eq!(t["cron"], "@every 45s", "改完要立刻生效: {t}");
+    assert_eq!(t["cron_override"], "@every 45s");
+    assert_eq!(t["cron_base"], "0 8 * * *", "插件注册的那条要留着: {t}");
+
+    // 插件热重载：覆盖不能被冲掉
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/s/reload", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "s", "job");
+    assert_eq!(t["cron"], "@every 45s", "热重载后覆盖要还在: {t}");
+    assert_eq!(t["cron_override"], "@every 45s");
+
+    // 非法表达式：拒绝，且不改原来的
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/tasks/s/job/schedule", Some(json!({ "expr": "乱写" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(task_of(&state, "s", "job")["cron"], "@every 45s");
+
+    // 空串：拒绝（要说清楚「要恢复默认请传 null」）
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/tasks/s/job/schedule", Some(json!({ "expr": "  " }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // 恢复默认
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/tasks/s/job/schedule", Some(json!({ "expr": null }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    let t = task_of(&state, "s", "job");
+    assert_eq!(t["cron"], "0 8 * * *", "恢复默认要回到插件那条: {t}");
+    assert_eq!(t["cron_override"], Value::Null);
+
+    // 不存在的任务
+    let (status, _) = send(
+        &app,
+        with_csrf("POST", "/api/tasks/s/nope/schedule", Some(json!({ "expr": "@every 1m" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

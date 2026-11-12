@@ -334,6 +334,21 @@
       </div>
     </div>
 
+    <div class="modal hidden" id="task-schedule" role="dialog" aria-modal="true" aria-labelledby="task-schedule-title">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card">
+        <h2 id="task-schedule-title">改计划</h2>
+        <p class="muted" id="task-schedule-what"></p>
+        <input id="task-schedule-expr" class="modal-input mono" type="text" placeholder="0 9 * * *" autocomplete="off" />
+        <p class="hint" id="task-schedule-hint">5 段（分 时 日 月 周）、6 段（秒 分 时 日 月 周）或 <code>@every 30s</code>。</p>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-close="1">取消</button>
+          <button class="btn hidden" type="button" id="task-schedule-reset">恢复默认</button>
+          <button class="btn btn-primary" type="button" id="task-schedule-ok">保存</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal hidden" id="new-plugin" role="dialog" aria-modal="true" aria-labelledby="new-plugin-title">
       <div class="modal-backdrop" data-close="1"></div>
       <div class="modal-card">

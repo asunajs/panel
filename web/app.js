@@ -519,6 +519,41 @@ function renderPlugins() {
   }
 }
 
+/** 正在改哪条任务（弹窗共用一份）。 */
+let scheduleTarget = null;
+
+function openTaskSchedule(t) {
+  scheduleTarget = t;
+  $('task-schedule-what').textContent =
+    t.plugin + ' / ' + t.name + '　插件注册的是「' + (t.cron_base || '（无）') + '」';
+  $('task-schedule-expr').value = t.cron;
+  $('task-schedule-hint').classList.remove('err-text');
+  $('task-schedule-hint').innerHTML =
+    '5 段（分 时 日 月 周）、6 段（秒 分 时 日 月 周）或 <code>@every 30s</code>。只换计划，运行历史和暂停状态都保留。';
+  $('task-schedule-reset').classList.toggle('hidden', !t.cron_override);
+  $('task-schedule').classList.remove('hidden');
+  setTimeout(() => $('task-schedule-expr').select(), 30);
+}
+
+async function saveTaskSchedule(expr) {
+  if (!scheduleTarget) return;
+  const btn = $('task-schedule-ok');
+  btn.disabled = true;
+  try {
+    await api(taskPath(scheduleTarget, 'schedule'), { method: 'POST', body: { expr } });
+    $('task-schedule').classList.add('hidden');
+    toast(expr === null ? '已恢复插件注册的计划' : '计划已改成 ' + expr);
+    await refresh();
+  } catch (e) {
+    if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+    const hint = $('task-schedule-hint');
+    hint.textContent = e.message || '保存失败';
+    hint.classList.add('err-text');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
@@ -540,7 +575,12 @@ function renderTasks() {
     const tr = el('tr');
     tr.append(td('插件', 'dim', t.plugin));
     tr.append(td('任务', 'strong', t.name));
-    tr.append(td('计划', 'mono', t.cron));
+    const cronCell = td('计划', 'mono', t.cron);
+    if (t.cron_override) {
+      cronCell.append(el('span', 'mini-sub', '已改'));
+      cronCell.title = '插件注册的是 ' + (t.cron_base || '（无）') + '；点「改计划」可以恢复';
+    }
+    tr.append(cronCell);
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
     tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : fmtDateTime(t.next_at)));
     tr.append(td('跑过', 'num', String(t.runs)));
@@ -549,6 +589,7 @@ function renderTasks() {
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
     const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
+    if (!t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
     ops.push(t.enabled
       ? ['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]
       : ['恢复', () => act(taskPath(t, 'resume'), '已恢复 ' + t.name)]);
@@ -1916,6 +1957,20 @@ function bind() {
     if (f) await importBackup(f);
   });
   $('new-script-ok').addEventListener('click', createScript);
+  $('task-schedule-ok').addEventListener('click', () => {
+    const expr = $('task-schedule-expr').value.trim();
+    if (!expr) {
+      const hint = $('task-schedule-hint');
+      hint.textContent = '表达式不能为空；要回到插件注册的那条请点「恢复默认」。';
+      hint.classList.add('err-text');
+      return;
+    }
+    saveTaskSchedule(expr);
+  });
+  $('task-schedule-reset').addEventListener('click', () => saveTaskSchedule(null));
+  $('task-schedule-expr').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') $('task-schedule-ok').click();
+  });
   $('new-script-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createScript(); }
   });

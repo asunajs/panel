@@ -79,8 +79,12 @@ fn cooldown_for(cfg: &TripConfig, trips: u32) -> ChronoDuration {
 struct Task {
     plugin: String,
     name: String,
-    /// 空串 = 只有 handler、没有 cron，只能手动触发。
+    /// **生效的**调度表达式。空串 = 只有 handler、没有 cron，只能手动触发。
     cron: String,
+    /// 插件注册时给的那条（用户改了计划也不动它，用来「恢复默认」）。
+    base_cron: String,
+    /// 用户在界面上改的调度；Some 时 `cron` 是它的副本。
+    override_expr: Option<String>,
     /// None = 手动任务，永远不自动到期。
     schedule: Option<Schedule>,
     budget_ms: u64,
@@ -108,7 +112,9 @@ impl Task {
         Ok(Self {
             plugin,
             name,
+            base_cron: cron.clone(),
             cron,
+            override_expr: None,
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
             enabled: true,
@@ -131,6 +137,8 @@ impl Task {
             plugin,
             name,
             cron: String::new(),
+            base_cron: String::new(),
+            override_expr: None,
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
             enabled: true,
@@ -216,6 +224,10 @@ pub struct TaskView {
     pub plugin: String,
     pub name: String,
     pub cron: String,
+    /// 用户改过的调度（None = 跟着插件注册的那条走）。
+    pub cron_override: Option<String>,
+    /// 插件注册时给的那条，用来「恢复默认」。
+    pub cron_base: String,
     /// 只有 handler、没有 cron：只能手动触发。
     pub manual: bool,
     pub budget_ms: u64,
@@ -267,6 +279,13 @@ pub enum Cmd {
     HasWeb {
         plugin: String,
         reply: oneshot::Sender<bool>,
+    },
+    /// 改一条任务的调度。`expr = None` 表示恢复插件注册的那条。
+    SetSchedule {
+        plugin: String,
+        name: String,
+        expr: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// 各 runtime 的 JS 堆占用。回 (字节合计, 取到的个数, 插件总数)。
     Memory {
@@ -421,6 +440,25 @@ impl Scheduler {
         .await?
     }
 
+    /// 改一条任务的调度。`expr = None` 恢复插件注册的那条。
+    ///
+    /// 只换表达式：`runs` / 熔断计数 / 暂停状态全部保留。
+    pub async fn set_schedule(
+        &self,
+        plugin: &str,
+        task: &str,
+        expr: Option<String>,
+    ) -> Result<(), String> {
+        let (plugin, task) = (plugin.to_string(), task.to_string());
+        self.call(|reply| Cmd::SetSchedule {
+            plugin,
+            name: task,
+            expr,
+            reply,
+        })
+        .await?
+    }
+
     pub fn unload(&self, name: &str) {
         let _ = self.tx.send(Cmd::Unload {
             name: name.to_string(),
@@ -438,6 +476,9 @@ struct Inner {
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
     web: std::collections::HashSet<String>,
+    /// 用户改过的调度：`(plugin, task) -> expr`。启动时从库里读一次，
+    /// 注册任务时同步套用 —— 插件重新注册/面板重启都不会把用户的改动冲掉。
+    overrides: HashMap<(String, String), String>,
     db: Db,
     log: LogHub,
     cfg: TripConfig,
@@ -460,6 +501,7 @@ pub fn start(
     let (reg_tx, mut reg_rx) = mpsc::unbounded_channel::<Registration>();
     let mut inner = Inner {
         web: std::collections::HashSet::new(),
+        overrides: HashMap::new(),
         db,
         log,
         cfg: TripConfig::default(),
@@ -470,6 +512,9 @@ pub fn start(
         config,
     };
     let handle = tokio::spawn(async move {
+        // 先把用户改过的调度读进内存：注册发生在 actor 循环里（同步），
+        // 那里没法 await DB，所以只能提前备好。
+        inner.overrides = load_overrides(&inner.db).await;
         loop {
             let loop_start = std::time::Instant::now();
             let sleep = inner.sleep_hint(Local::now());
@@ -489,6 +534,50 @@ pub fn start(
         }
     });
     (Scheduler { tx }, handle)
+}
+
+impl Task {
+    /// 换一条调度（用户的 override 或「恢复默认」）。
+    ///
+    /// 只动调度：`runs` / 熔断计数 / enabled 全部保留 —— 这正是「编辑」相对
+    /// 「删了重建」的意义（删了重建会把运行历史清零）。
+    fn set_schedule(&mut self, expr: &str) -> Result<(), String> {
+        let schedule = Schedule::parse(expr)?;
+        let now = Local::now();
+        let base = schedule
+            .next_base(now)
+            .unwrap_or_else(|| now + ChronoDuration::days(FALLBACK_DAYS));
+        let (next, _) = apply_jitter(&schedule, base, None);
+        self.cron = expr.to_string();
+        self.schedule = Some(schedule);
+        self.base_fire = base;
+        self.next_fire = next;
+        Ok(())
+    }
+}
+
+/// 从库里读「用户改过的调度」。读失败就当没有 —— 不能让一条坏行拦住启动。
+async fn load_overrides(db: &Db) -> HashMap<(String, String), String> {
+    let rows = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT plugin,name,override_expr FROM tasks WHERE override_expr IS NOT NULL")
+                .map_err(|e| e.to_string())?;
+            let out: Vec<(String, String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            Ok(out)
+        })
+        .await;
+    match rows {
+        Ok(list) => list
+            .into_iter()
+            .map(|(p, n, e)| ((p, n), e))
+            .collect(),
+        Err(_) => HashMap::new(),
+    }
 }
 
 impl Inner {
@@ -603,6 +692,36 @@ impl Inner {
                     let _ = tx.send(Cmd::WebDone { plugin });
                 });
             }
+            Cmd::SetSchedule {
+                plugin,
+                name,
+                expr,
+                reply,
+            } => {
+                let out = (|| -> Result<(), String> {
+                    let i = self
+                        .find(&plugin, &name)
+                        .ok_or_else(|| format!("没有这个任务: {plugin}/{name}"))?;
+                    match expr {
+                        None => {
+                            let base = self.tasks[i].base_cron.clone();
+                            if !base.is_empty() {
+                                self.tasks[i].set_schedule(&base)?;
+                            }
+                            self.tasks[i].override_expr = None;
+                            self.overrides.remove(&(plugin.clone(), name.clone()));
+                        }
+                        Some(e) => {
+                            self.tasks[i].set_schedule(&e)?;
+                            self.tasks[i].override_expr = Some(e.clone());
+                            self.overrides.insert((plugin.clone(), name.clone()), e);
+                        }
+                    }
+                    self.persist_task(i);
+                    Ok(())
+                })();
+                let _ = reply.send(out);
+            }
             Cmd::Memory { wait_ms, reply } => {
                 // 每个插件量一次要拿它的 runtime 锁；放在 actor 循环里 await 会把这个
                 // 循环钉住（最坏 N × wait）。所以克隆 Arc 出去量，量完再回信。
@@ -688,6 +807,8 @@ impl Inner {
                 plugin: t.plugin.clone(),
                 name: t.name.clone(),
                 cron: t.cron.clone(),
+                cron_override: t.override_expr.clone(),
+                cron_base: t.base_cron.clone(),
                 manual: t.schedule.is_none(),
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
@@ -778,6 +899,22 @@ impl Inner {
                     None => self.tasks.push(t),
                 }
                 if let Some(i) = self.find(&plugin, &name) {
+                    // 用户改过的调度优先：插件重新注册（热重载）不能把人的改动冲掉。
+                    if let Some(expr) = self
+                        .overrides
+                        .get(&(plugin.clone(), name.clone()))
+                        .cloned()
+                    {
+                        match self.tasks[i].set_schedule(&expr) {
+                            Ok(()) => self.tasks[i].override_expr = Some(expr),
+                            Err(e) => self.log.emit(
+                                &plugin,
+                                None,
+                                Level::Warn,
+                                format!("库里的调度覆盖 `{expr}` 现在不合法了（{e}），先用插件注册的那条"),
+                            ),
+                        }
+                    }
                     self.persist_task(i);
                 }
             }
@@ -800,24 +937,26 @@ impl Inner {
 
     fn persist_task(&self, idx: usize) {
         let t = &self.tasks[idx];
-        let (plugin, name, cron, budget, enabled, next) = (
+        let (plugin, name, cron, budget, enabled, next, ov) = (
             t.plugin.clone(),
             t.name.clone(),
             t.cron.clone(),
             t.budget_ms as i64,
             t.enabled,
             t.next_fire.timestamp_millis(),
+            t.override_expr.clone(),
         );
         let db = self.db.clone();
         tokio::spawn(async move {
             let _ = db.call(move |c| {
                 c.execute(
-                    "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at)
-                     VALUES(?1,?2,?3,?4,?5,?6)
+                    "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7)
                      ON CONFLICT(plugin,name) DO UPDATE SET
                        cron=excluded.cron, budget_ms=excluded.budget_ms,
-                       enabled=excluded.enabled, next_at=excluded.next_at",
-                    rusqlite::params![plugin, name, cron, budget, enabled, next],
+                       enabled=excluded.enabled, next_at=excluded.next_at,
+                       override_expr=excluded.override_expr",
+                    rusqlite::params![plugin, name, cron, budget, enabled, next, ov],
                 )
                 .map(|_| ())
                 .map_err(|e| e.to_string())

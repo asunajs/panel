@@ -114,5 +114,22 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS logs_run ON logs(run_id);
         ",
     )
-    .map_err(|e| format!("建表失败: {e}"))
+    .map_err(|e| format!("建表失败: {e}"))?;
+
+    // 后加的列：SQLite 没有 ADD COLUMN IF NOT EXISTS，重复加会报错，所以按 pragma 判。
+    // override_expr = 用户在界面上改的调度；NULL 表示跟着插件注册的那条走。
+    let has_override: bool = conn
+        .prepare("PRAGMA table_info(tasks)")
+        .and_then(|mut st| {
+            let names: Vec<String> = st
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(names.iter().any(|n| n == "override_expr"))
+        })
+        .map_err(|e| format!("读表结构失败: {e}"))?;
+    if !has_override {
+        conn.execute("ALTER TABLE tasks ADD COLUMN override_expr TEXT", [])
+            .map_err(|e| format!("加 override_expr 失败: {e}"))?;
+    }
+    Ok(())
 }

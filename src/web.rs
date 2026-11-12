@@ -94,6 +94,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/run", post(task_run))
         .route("/api/tasks/{plugin}/{name}/pause", post(task_pause))
         .route("/api/tasks/{plugin}/{name}/resume", post(task_resume))
+        // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
+        .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
         .route("/api/runs", get(api_runs))
         .route("/api/runs/{id}", get(api_run_one))
         .route("/api/logs", get(api_logs))
@@ -422,6 +424,38 @@ async fn task_pause(
         .await
         .map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/tasks/{plugin}/{name}/schedule` —— 改一条任务的调度。
+///
+/// 请求体 `{"expr": "0 9 * * *"}`，或 `{"expr": null}` 撤销覆盖、回到插件注册的那条。
+///
+/// 只换表达式：`runs` / 熔断计数 / 暂停状态全部保留 —— 这正是「编辑」相对
+/// 「删了重建」的意义（删了重建会把运行历史清零）。改完落库，插件热重载和面板
+/// 重启都不会把人的改动冲掉。
+async fn task_schedule(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    h: HeaderMap,
+    body: Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let expr = match body.get("expr") {
+        Some(Value::Null) | None => None,
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Err(bad("expr 不能是空串；要恢复默认请传 null".to_string()));
+            }
+            Some(s.to_string())
+        }
+        Some(_) => return Err(bad("expr 只认字符串或 null".to_string())),
+    };
+    st.sched
+        .set_schedule(&plugin, &name, expr.clone())
+        .await
+        .map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "expr": expr })))
 }
 
 async fn task_resume(

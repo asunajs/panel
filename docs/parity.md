@@ -36,8 +36,8 @@
 
 | 旧面板 | 我们 | 差在哪 / 影响 |
 |---|---|---|
-| `POST /api/jobs/{p}/{n}/edit`（只换表达式，`override_expr` 可撤销，runs/trips 全保留） | ❌ | **任务调度改不了**：cron 写死在插件里，用户只能跑/暂停 |
-| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复 |
+| `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
+| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
 | `plugin_state.disabled` / `keep_warm` / `engine` / `command` + `/api/plugins/{n}/enable|disable|keep-warm|runtime` | ❌（只有 reload/unload/stop） | 插件启停不持久化、不能选引擎、没有常驻预热 |
 | `/api/plugins/upload`、`/api/tasks/upload`（单文件或 zip） | ❌ | 只能界面里新建/编辑，不能传包 |
 | `/login` `/api/login` `/api/logout` | ❌ | 只有令牌（header / `?t=`），没有登录页与登出 |
@@ -51,7 +51,7 @@
 
 已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
 `/api/plugins/{n}/source|reload|unload|delete`、`/api/config`（比旧的 `/api/settings/save` 强：热生效）、
-`/api/backup`、`/api/tasks/{p}/{n}/run|pause|resume`。
+`/api/backup`、`/api/tasks/{p}/{n}/run|pause|resume|schedule`。
 
 ### 2.2 宿主 API（插件能力）
 
