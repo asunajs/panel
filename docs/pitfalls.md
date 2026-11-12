@@ -185,3 +185,12 @@
     服务端**先订阅再查库**补发（重复由前端按 id 去掉；反过来先查库再订阅会真丢行）。
     注意实时行没有 `id`（落库是异步的），所以游标只能由补发/回填的行推进。
     守卫：`the_log_stream_can_replay_what_was_missed`。
+
+45. **「保存成功」不等于「配置能用」**：`PUT /api/config` 以前只校验 JSON 合法性，
+    `min_level` 拼成 `infoo` 也照收；之后通知**全停**，还要每 30 秒刷一条扫描失败日志才被发现。
+    已知段落（目前是 `notify`）要在**进门时**过语义校验，报错就不落盘、不动内存。
+    启动仍然不校验语义 —— 文件坏了也要让面板起来，否则人只能 ssh 进去改。
+    守卫：`saving_a_config_with_broken_notify_semantics_is_rejected`。
+46. **「重新读取」按钮只刷新了编辑器**：手改 `config.json` 后必须重启才生效，而按钮名字和
+    实际行为不符（它只是重新 GET 了一遍文本）。现在它真的 `POST /api/config/reload`（读盘→校验→换快照）。
+    守卫：`config_reload_reads_the_file_and_keeps_the_old_one_when_it_is_broken`。

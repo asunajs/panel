@@ -2779,3 +2779,64 @@ async fn the_log_stream_can_replay_what_was_missed() {
     let got = frames(&app, "/api/logs/stream", 1).await;
     assert!(got.is_empty(), "不给 since 就不补发: {got}");
 }
+
+/// 配置的「语义」错要在**进门时**挡住，而不是等通知静默停掉才有人发现。
+///
+/// 第 60 轮之前 `PUT /api/config` 只校验 JSON 合法性：`min_level` 拼成 `infoo` 也能保存，
+/// 之后通知**全停**、每 30 秒往日志刷一条扫描失败，界面上只有「通知」页那条红条会告诉你。
+#[tokio::test]
+async fn saving_a_config_with_broken_notify_semantics_is_rejected() {
+    let (app, _plugins, data, _store) = setup_dirs("cfgbad").await;
+    let path = data.join("config.json");
+    std::fs::write(&path, r#"{"notify":{"min_level":"info"}}"#).unwrap();
+
+    // 语义错：min_level 拼错
+    let body = json!({ "text": r#"{"notify":{"min_level":"infoo"}}"# });
+    let (status, out) = send(&app, with_csrf("PUT", "/api/config", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    // 文件没被动过
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        r#"{"notify":{"min_level":"info"}}"#,
+        "被拒绝的配置不该落盘"
+    );
+
+    // 语义错：webhook 没写 url
+    let body = json!({ "text": r#"{"notify":{"channels":[{"id":"x","kind":"webhook"}]}}"# });
+    let (status, out) = send(&app, with_csrf("PUT", "/api/config", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+
+    // 合法：200，并且真的落盘
+    let good = r#"{"notify":{"min_level":"warn"}}"#;
+    let body = json!({ "text": good });
+    let (status, out) = send(&app, with_csrf("PUT", "/api/config", Some(body))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), good);
+}
+
+/// `POST /api/config/reload`：手改文件后不用重启；文件坏了就 400 并且**内存里还是老的**。
+#[tokio::test]
+async fn config_reload_reads_the_file_and_keeps_the_old_one_when_it_is_broken() {
+    let (app, _plugins, data, _store) = setup_dirs("cfgrel").await;
+    let path = data.join("config.json");
+    std::fs::write(&path, r#"{"notify":{"min_level":"info"}}"#).unwrap();
+    let (status, out) = send(&app, with_csrf("POST", "/api/config/reload", None)).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let (_, n) = get(&app, "/api/notify").await;
+    assert_eq!(n["min_level"], "info", "重新载入要生效: {n}");
+
+    // 手改成坏的
+    std::fs::write(&path, r#"{"notify":{"min_level":"infoo"}}"#).unwrap();
+    let (status, out) = send(&app, with_csrf("POST", "/api/config/reload", None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
+    let (_, n) = get(&app, "/api/notify").await;
+    assert_eq!(n["min_level"], "info", "坏的载不进来，旧配置要还在: {n}");
+    assert_eq!(n["ok"], true, "{n}");
+
+    // 改回好的：能载进来
+    std::fs::write(&path, r#"{"notify":{"min_level":"error"}}"#).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/config/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, n) = get(&app, "/api/notify").await;
+    assert_eq!(n["min_level"], "error", "{n}");
+}

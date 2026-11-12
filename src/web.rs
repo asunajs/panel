@@ -96,6 +96,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/health", get(api_health))
         .route("/api/config", get(api_config).put(api_config_save))
+        .route("/api/config/reload", post(api_config_reload))
         .route("/api/plugins/files", get(plugin_files))
         // 重启进程：改了环境变量（PANEL_TOKEN / PANEL_BIND）才需要。
         .route("/api/restart", post(api_restart))
@@ -2059,6 +2060,12 @@ async fn api_config_save(
             "配置必须是 JSON 对象：host.config() 返回的就是对象".to_string(),
         ));
     }
+    // 已知段落要做**语义**校验：JSON 合法但内容写错（min_level 拼错、webhook 没写 url）如果
+    // 放进去，通知会**静默全停**，而且每 30 秒往日志里刷一条「扫描失败」，直到有人打开通知页。
+    // 报错就不落盘，旧配置继续生效 —— 这比「保存成功 + 什么都不发」好查得多。
+    if let Err(e) = crate::notify::parse(value.get("notify")) {
+        return Err(bad(format!("配置有问题：{e}")));
+    }
     let path = st.data_dir.join(crate::config::FILE);
     // 配置里可能有账号/令牌，落盘就是 0600。
     write_atomic(&path, body.text.as_bytes(), Some(0o600))
@@ -2076,6 +2083,36 @@ async fn api_config_save(
         format!("配置已更新（{bytes} 字节，{} 个顶层键），插件即刻生效", keys.len()),
     );
     Ok(Json(json!({ "ok": true, "bytes": bytes, "keys": keys, "hot": true })))
+}
+
+/// `POST /api/config/reload`：把磁盘上的 config.json 重新读进内存。
+///
+/// 以前只有启动时读一次：手改文件（ssh 上去改两行）必须重启面板才生效，而界面上那个
+/// 「重新读取」只刷新了编辑器里的文本 —— 名字和实际行为不一致。现在它有真的后端动作：
+/// 读盘 → 校验 → 换掉热快照（插件下一句 `config()` 就拿到新值）。
+///
+/// 校验和 `PUT /api/config` 一样：JSON 要合法、要是对象、`notify` 段要能解析。
+/// 文件坏了就 400 并且**不动内存里的旧配置** —— 面板不会因为一个手滑的编辑停摆。
+async fn api_config_reload(State(st): State<AppState>, h: HeaderMap) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let value = crate::config::load(&st.data_dir).map_err(bad)?;
+    if !value.is_object() {
+        return Err(bad("配置必须是 JSON 对象".to_string()));
+    }
+    if let Err(e) = crate::notify::parse(value.get("notify")) {
+        return Err(bad(format!("配置有问题：{e}")));
+    }
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+    let bytes = text.len() as u64;
+    st.config.set(&value);
+    let keys: usize = value.as_object().map(|o| o.len()).unwrap_or(0);
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("配置已从磁盘重新载入（{bytes} 字节，{keys} 个顶层键）"),
+    );
+    Ok(Json(json!({ "ok": true, "bytes": bytes, "keys": keys })))
 }
 
 // ---------------------------------------------------------------- 脚本（增删改查 + 跑）

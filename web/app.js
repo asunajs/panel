@@ -2417,7 +2417,18 @@ function bind() {
   }
   $('config-save').addEventListener('click', saveConfig);
   $('config-format').addEventListener('click', formatConfig);
-  $('config-reload').addEventListener('click', () => loadConfigEditor());
+  // 「重新读取」以前只刷新编辑器里的文本，名字和实际行为不一致（手改文件必须重启才生效）。
+  // 现在它真的会让后端把盘上的文件重新读进内存：插件下一句 config() 就能看到。
+  $('config-reload').addEventListener('click', async () => {
+    try {
+      const d = await api('/api/config/reload', { method: 'POST' });
+      toast('配置已从磁盘重新载入（' + humanBytes(d.bytes) + '）');
+    } catch (e) {
+      // 文件坏了：内存里的旧配置不动，编辑器里仍显示出问题的文本，方便就地改
+      configError(e instanceof Unauthorized ? '需要令牌' : (e.message || '重新读取失败'));
+    }
+    await loadConfigEditor();
+  });
   $('config-copy').addEventListener('click', async () => {
     const text = $('config-editor').value;
     if (!text) return toast('没有可复制的内容', true);

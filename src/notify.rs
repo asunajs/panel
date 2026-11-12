@@ -744,6 +744,9 @@ pub fn spawn_ticker(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 配置写坏时每一轮（30 秒）都会失败。同一条错误只记一次，配好之后再重置 ——
+        // 否则日志里会 30 秒刷一条一模一样的 warn，把真问题埋掉。
+        let mut last_err: Option<String> = None;
         loop {
             tick.tick().await;
             // 一轮**排空**，不是一轮只发 10 条：sweep 一次最多取 10 行，风暴过去之后
@@ -751,14 +754,26 @@ pub fn spawn_ticker(
             // 上限 50 批（500 行）：剩下的留给下一个 tick，别把这一轮卡死。
             for _ in 0..50 {
                 match sweep(&db, &log, &store).await {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        last_err = None;
+                        break;
+                    }
                     Ok(n) => {
+                        last_err = None;
                         if n < 10 {
                             break;
                         }
                     }
                     Err(e) => {
-                        log.emit("panel", None, Level::Warn, format!("通知发件箱扫描失败: {e}"));
+                        if last_err.as_deref() != Some(e.as_str()) {
+                            log.emit(
+                                "panel",
+                                None,
+                                Level::Warn,
+                                format!("通知发件箱扫描失败: {e}"),
+                            );
+                            last_err = Some(e);
+                        }
                         break;
                     }
                 }
