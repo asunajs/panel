@@ -567,3 +567,34 @@ zip 没法在客户端预判里面有哪些同名文件，所以照旧带 `overw
 原来是「普通 toast = 反色黑条、错误 = 整块红底」，用户的原话是「老土不够简约」。
 改成中性卡片后，文字是 `--fg` on `--surface`，对比度比彩色底配反色字更高，
 两套主题也不用各调一次 —— `ui-check` 的「提示条对比度 ≥4.5」在亮/暗各有一条。
+
+## 源码编辑器：高亮 + 行号（第 173 轮）
+
+插件源码 / 脚本编辑框现在是「透明字 textarea + 底下 pre 上色」：
+
+```text
+.code-editor
+├── pre.code-gutter      行号（跟着 textarea.scrollTop 走）
+└── .code-scroll
+    ├── pre.code-hl > code   高亮层（pointer-events: none）
+    └── textarea.editor      真正的输入层（-webkit-text-fill-color: transparent）
+```
+
+对齐靠三个变量，改一处两边一起动：`--code-line: 20px» / `--code-pad: 10px 12px» /
+`--code-font: 12.5px»。**差 1px 就会看到重影**，所以 ui-check 里有一条断言直接比两层的
+computed lineHeight / fontSize / padding。
+
+分词器是仓库里的 `web/highlight.js»（约 170 行，零依赖、零构建，随面板一起发）：
+
+| 语言 | 认什么 |
+|---|---|
+| JS | 关键字、三种引号的字符串、// 与 /* */ 注释、数字、**函数名**（标识符后跟 `(»）、标点 |
+| JSON | 键（字符串后跟 `:»）与值分开、数字、true/false/null、标点 |
+
+颜色只走 token：`.tok-kw» 用 `--accent»、`.tok-str» 用 `--ok»、`.tok-num» 用 `--warn»、
+`.tok-com» 用 `--dim»，**不写死任何颜色**（两套主题自动跟着变，check-pitfalls 也管这个）。
+
+两条护栏：
+
+- 输出必须**转义 HTML**（源码里写 `<img onerror=...>» 不能变成标签）；
+- 超过 20 万字符就不再上色（一次换 20 万个 span 会把标签页卡死），退化成纯文本。

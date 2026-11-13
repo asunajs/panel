@@ -35,6 +35,7 @@ const ERROR_HTML: &str = include_str!("../web/error.html");
 const THEME_BOOT_JS: &str = include_str!("../web/theme-boot.js");
 /// 面板 UI 套件（第 139 轮）：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
 const UI_JS: &str = include_str!("../web/ui.js");
+const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
 
 /// 旧面板（rust-plugin-panel）那套组件样式。插件的界面 HTML 里写的是绝对路径
 /// /css/reset.css 之类 —— 它们和旧面板共享同一套 token 与组件类（.btn、.dialog…），
@@ -577,6 +578,11 @@ pub fn router(st: AppState) -> Router {
             asset(THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js")
         }))
         .route("/ui.js", get(|| async { asset(UI_JS, "text/javascript; charset=utf-8", "ui.js") }))
+        // 编辑器高亮（第 173 轮）：自己写的极简 tokenizer，为零构建服务
+        .route(
+            "/highlight.js",
+            get(|| async { asset(HIGHLIGHT_JS, "text/javascript; charset=utf-8", "highlight.js") }),
+        )
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
         .route("/healthz", get(|| async { "ok\n" }))

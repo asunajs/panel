@@ -1446,3 +1446,88 @@ select option { background: var(--surface); color: var(--fg); }
 
 /* 清单给了 title 时，卡片上补一行真实文件名（第 172 轮） */
 .plugin-file { font-size: 11px; color: var(--dim); font-family: var(--mono); }
+
+/* ── 编辑器：高亮层 + 行号（第 173 轮）─────────────────────────────────────
+   做法是「textarea 透明字 + 底下 pre 上色」：两边字体、行高、padding 必须一模一样，
+   差 1px 就会看到重影。所有数值都用变量，改一处两边一起动。 */
+:root {
+  --code-line: 20px;
+  --code-pad: 10px 12px;
+  --code-font: 12.5px;
+}
+.code-editor {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow: hidden;
+  min-height: 220px;
+}
+.code-gutter {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: var(--code-pad);
+  margin: 0;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: var(--code-font);
+  line-height: var(--code-line);
+  color: var(--dim);
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  white-space: pre;
+  user-select: none;
+}
+.code-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.code-hl {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: var(--code-pad);
+  overflow: hidden;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: var(--code-font);
+  line-height: var(--code-line);
+  white-space: pre;
+  color: var(--fg);
+}
+.code-hl > code { font: inherit; }
+.code-editor textarea.editor {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  margin: 0;
+  padding: var(--code-pad);
+  border: 0;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--code-font);
+  line-height: var(--code-line);
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+  tab-size: 2;
+}
+.code-editor textarea.editor::selection { background: var(--accent-soft); }
+
+/* 颜色只走 token：两套主题自动跟着变 */
+.tok-kw { color: var(--accent); }
+.tok-str { color: var(--ok); }
+.tok-num { color: var(--warn); }
+.tok-com { color: var(--dim); font-style: italic; }
+.tok-fn { color: var(--fg); font-weight: 600; }
+.tok-key { color: var(--accent); }
+.tok-punc { color: var(--fg-2); }
+[data-theme="dark"] .tok-str { color: var(--ok); }
