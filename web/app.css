@@ -2,39 +2,42 @@
 /* panel-llrt 控制台样式。零构建：一个文件、无外部依赖、无 @import。 */
 
 :root {
-  /* 亮色 = 粉色系，但要**不刺眼**：底色偏暖灰粉、卡片是米白不是纯白、
-     主色降饱和（`#ec4899` 那种荧光粉在浅底上会晃眼）。 */
-  --scrim: rgba(20, 12, 18, .34);
-  --bg: #f4eef1;
-  --bg-grad: radial-gradient(1200px 600px at 100% -14%, #ecdfe6 0%, transparent 70%);
-  --surface: #fbf9fa;
-  --surface-2: #f6f0f3;
-  --line: #e7dde2;
-  --line-strong: #d6c8d0;
-  --fg: #3a2f35;
-  --fg-2: #5f5158;
-  --dim: #8c7c84;
-  --accent: #c25f88;
-  --accent-fg: #fffafc;
-  --accent-soft: #f2e2ea;
-  --ok: #3f7f5f;
-  --ok-soft: #e6f0ea;
-  --warn: #96702c;
-  --warn-soft: #f4ece0;
-  --err: #a8495d;
-  --err-soft: #f6e6ea;
-  --shadow-sm: 0 1px 2px rgba(70, 40, 55, .04), 0 1px 3px rgba(70, 40, 55, .05);
-  --shadow-md: 0 8px 24px -12px rgba(16, 24, 40, .18), 0 2px 6px rgba(16, 24, 40, .06);
-  --radius: 14px;
-  --radius-sm: 10px;
-  /* 控件尺寸只从这里取：按钮/输入/下拉/段控必须一样高，否则并排就歪 */
+  /* 亮色：TDesign 那套中性灰 + 单一品牌蓝（第 137 轮换掉原来的粉色系）。
+     原则就三条：底色和卡片都接近无色、只有主色带颜色、阴影和圆角都收小。 */
+  --scrim: rgba(0, 0, 0, .45);
+  --bg: #f3f3f3;
+  --bg-grad: none;
+  --surface: #ffffff;
+  --surface-2: #f7f7f7;
+  --line: #e7e7e7;
+  --line-strong: #dcdcdc;
+  --fg: #1f1f1f;
+  --fg-2: #666666;
+  --dim: #999999;
+  /* TDesign 主色 #0052D9 */
+  --accent: #0052d9;
+  --accent-fg: #ffffff;
+  --accent-soft: #ecf2fe;
+  --ok: #2ba471;
+  --ok-soft: #e8f7f1;
+  --warn: #c26b12;
+  --warn-soft: #fdf2e7;
+  /* 错误比 TDesign 的 #D54941 深一档：白字压上去才够 AA */
+  --err: #c9353f;
+  --on-err: #ffffff;
+  --toast-bg: #ffffff;
+  --toast-fg: #1f1f1f;
+  --err-soft: #fdeceb;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .04);
+  --shadow-md: 0 6px 16px -8px rgba(0, 0, 0, .16), 0 2px 4px rgba(0, 0, 0, .04);
+  --radius: 8px;
+  --radius-sm: 6px;
   --h-control: 32px;
   --h-control-sm: 30px;
-  --r-control: 9px;
+  --r-control: 6px;
   --pad-control: 12px;
   --pad-control-sm: 11px;
   --sidebar-w: 236px;
-  /* 提示条距顶部：桌面让开 80px 的 sticky 顶栏 */
   --toast-top: 90px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
@@ -44,27 +47,31 @@
 /* 深色 = 紫罗兰，同样降刺眼：底不压到纯黑、字不顶到纯白、主色降饱和。
    纯黑底 + 纯白字的高对比是「刺眼」的主要来源，比主色本身更影响观感。 */
 [data-theme="dark"] {
-  --scrim: rgba(0, 0, 0, .5);
-  --bg: #14161c;
-  --bg-grad: radial-gradient(1200px 600px at 100% -14%, #1b1930 0%, transparent 66%);
-  --surface: #191c23;
-  --surface-2: #1e222a;
-  --line: #272b35;
-  --line-strong: #333845;
-  --fg: #ccd2dd;
-  --fg-2: #a7aebc;
-  --dim: #7b8393;
-  --accent: #8b82e0;
-  --accent-fg: #101218;
-  --accent-soft: #232044;
-  --ok: #5cb98a;
-  --ok-soft: #16261d;
-  --warn: #cfa257;
-  --warn-soft: #26200f;
-  --err: #d97a78;
-  --err-soft: #2a191b;
+  /* 暗色：TDesign Dark 的中性阶（页面 #181818 / 卡片 #242424），主色抬亮一档 */
+  --scrim: rgba(0, 0, 0, .6);
+  --bg: #181818;
+  --bg-grad: none;
+  --surface: #242424;
+  --surface-2: #2b2b2b;
+  --line: #333333;
+  --line-strong: #3f3f3f;
+  --fg: #e7e7e7;
+  --fg-2: #a6a6a6;
+  --dim: #757575;
+  --accent: #3f7ae0;
+  --accent-fg: #ffffff;
+  --accent-soft: #1d2b45;
+  --ok: #42a675;
+  --ok-soft: #1c2a23;
+  --warn: #c07c2b;
+  --warn-soft: #2b2318;
+  --err: #e86961;
+  --on-err: #171717;
+  --toast-bg: #2b2b2b;
+  --toast-fg: #e7e7e7;
+  --err-soft: #2e1a19;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
-  --shadow-md: 0 10px 30px -12px rgba(0, 0, 0, .7);
+  --shadow-md: 0 8px 24px -12px rgba(0, 0, 0, .7);
 }
 
 * { box-sizing: border-box; }
@@ -110,13 +117,9 @@ button, input, select { font: inherit; color: inherit; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 6px 2px; }
 .brand-mark {
   width: 26px; height: 26px; border-radius: 9px; flex: none;
-  background: linear-gradient(140deg, #f9a8d4, #ec4899 52%, #d6336c);
-  box-shadow: 0 4px 10px -3px rgba(236, 72, 153, .5);
+  background: var(--accent);
 }
-[data-theme="dark"] .brand-mark {
-  background: linear-gradient(140deg, #a99ef0, #8b82e0 52%, #6f68c4);
-  box-shadow: 0 4px 10px -3px rgba(139, 130, 224, .35);
-}
+[data-theme="dark"] .brand-mark { background: var(--accent); }
 
 .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
 .brand-text strong { font-size: 14px; }
@@ -436,7 +439,8 @@ button, input, select { font: inherit; color: inherit; }
      位置避开 sticky 顶栏（桌面 80px / 手机两行 115px），所以用变量按断点给。 */
   position: fixed; left: 50%; top: var(--toast-top); bottom: auto; transform: translateX(-50%);
   z-index: 70; padding: 9px 14px; border-radius: 10px;
-  background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: var(--shadow-md);
+  background: var(--toast-bg); color: var(--toast-fg); font-size: 13px;
+  border: 1px solid var(--line-strong); box-shadow: var(--shadow-md);
   animation: toast-in .18s ease-out;
   /* 接口的错误文案可能很长（serde 的原话、带字段名的中文提示）。
      不限宽 + 不换行的话，这种 toast 会横着撑出视口、两头都被切掉 ——
@@ -449,7 +453,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 /* 错误提示原来是「浅红底 + 白字」：暗色主题下 --err 是 #d97a78，白字压上去几乎看不清
    （用户报「这个配色难以看清字」）。改成用主题的反色字（--bg），两套主题都够对比。 */
-.toast-err { background: var(--err); color: var(--bg); border: 1px solid var(--fg); }
+.toast-err { background: var(--err); color: var(--on-err); border: 1px solid var(--err); }
 @keyframes toast-in { from { transform: translate(-50%, -10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
 
 /* ---------- 焦点 / 动效 / 响应式 ---------- */
@@ -912,8 +916,8 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   margin-top: 10px;
   padding: 10px 12px;
   border-radius: 8px;
-  background: #12141a;
-  color: #d7dae0;
+  background: var(--surface-2);
+  color: var(--fg);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.55;
@@ -1045,7 +1049,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .notice-x:hover { opacity: 1; background: rgba(127, 127, 127, .18); }
 /* 错误：最强的一档（和 toast-err 同一套反色，两套主题对比度都够） */
-.notice-err { background: var(--err); color: var(--bg); border-color: var(--fg); }
+.notice-err { background: var(--err); color: var(--on-err); border-color: var(--err); }
 /* 成功 / 警告：柔和底 + 彩色描边，不抢注意力但要能看清 */
 .notice-ok { background: var(--ok-soft); border-color: var(--ok); }
 .notice-warn { background: var(--warn-soft); border-color: var(--warn); }
