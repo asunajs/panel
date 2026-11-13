@@ -497,3 +497,18 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
 
 外观取自 TDesign 的 Select：触发器同 `.input`（同高、同圆角、同边框）、选中项打勾 + 主色、
 没值时是灰色的 placeholder。想只用类：`.select-trigger` / `.select-panel` / `.select-option`。
+
+### 勾选框
+
+原生 `<input type="checkbox">` 已经被面板拉齐（去掉系统外观、16px、5px 圆角、勾选态主色 +
+SVG 勾），插件里直接写就行，不需要额外 class。面板自己的 `.check`（带文字的整行可点）内部是
+同一个 `.check-box`，勾也是同一张 SVG —— 早先那个勾是「两条边框转 40 度」拼出来的，
+几何靠手调，看着总有点歪（用户报过），别再用那种写法。
+
+```html
+<label class="check">
+  <input type="checkbox" />
+  <span class="check-box" aria-hidden="true"></span>
+  <span class="check-label">只看失败</span>
+</label>
+```

@@ -697,6 +697,18 @@ async function main() {
   await js("document.querySelector('#new-script .modal-actions .btn').click()");
   await sleep(250);
   check('新建脚本的「取消」也能关掉', await modalHidden('new-script'));
+  // 勾选框的勾必须是一张居中的 SVG（以前是「两条边框转 40 度」拼的，用户报「勾是歪的」）
+  const tickInfo = JSON.parse(await js(
+    "(()=>{const i=document.getElementById('runs-only-failed');i.checked=true;i.dispatchEvent(new Event('change',{bubbles:true}));" +
+    "const b=i.nextElementSibling;const cs=getComputedStyle(b);const af=getComputedStyle(b,'::after');" +
+    "const out=JSON.stringify({img:cs.backgroundImage.includes('svg'),after:af.content,size:cs.width+'x'+cs.height});" +
+    "i.checked=false;i.dispatchEvent(new Event('change',{bubbles:true}));return out;})()"
+  ));
+  check(
+    '勾选框的勾是 SVG（不是边框拼的，不会再歪）',
+    tickInfo.img === true && (tickInfo.after === 'none' || tickInfo.after === 'normal'),
+    JSON.stringify(tickInfo),
+  );
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

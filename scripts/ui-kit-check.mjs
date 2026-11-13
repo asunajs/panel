@@ -177,6 +177,17 @@ async function main() {
   const ns = JSON.parse(nativeSel);
   check('原生 select 去掉系统外观（appearance: none）', ns.appearance === 'none', nativeSel);
 
+  // 勾选框：勾必须是一张居中的 SVG（以前是两条边框转 40 度拼的，看着总有点歪）
+  const rawCheck = await js(
+    "JSON.stringify((()=>{const c=document.getElementById('d-native');const cs=getComputedStyle(c);" +
+    "const off=document.getElementById('d-native2');" +
+    "return {appearance:cs.appearance,w:cs.width,r:cs.borderRadius," +
+    "checkedImg:cs.backgroundImage.includes('svg'),offImg:getComputedStyle(off).backgroundImage};})())"
+  );
+  const rc = JSON.parse(rawCheck);
+  check('原生 checkbox 去掉系统外观（appearance: none）', rc.appearance === 'none' && rc.w === '16px', rawCheck);
+  check('勾选态的画的是 SVG 勾', rc.checkedImg === true, rawCheck);
+  check('未勾选态没有勾（只剩空框）', rc.offImg === 'none', rc.offImg);
   check('页面加载了套件（PanelUI 在）', (await js('typeof window.PanelUI')) === 'object');
   const shape = JSON.parse(await js(
     "JSON.stringify((()=>{const n=document.getElementById('d-seconds');" +

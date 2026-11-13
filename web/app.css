@@ -582,21 +582,46 @@ button, input, select { font: inherit; color: inherit; }
   font-size: 12.5px; color: var(--dim); cursor: pointer; user-select: none;
 }
 .check input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; }
+/* ---------- 勾选框：面板自绘的 + 原生 checkbox 拉齐（第 145 轮） ---------- */
+/*
+   为什么改：以前那个勾是「两条边框转 40 度」拼出来的（`left:5 top:2 w:5 h:9` + `rotate(40deg)`），
+   几何上是手调出来的 —— 看着总是有点歪，换个字号/缩放更明显（用户报「选择的勾是歪的」）。
+   现在勾是**一张 SVG**：居中、等比、跟控件一起缩放，不用再拿像素凑。
+   `background-image` 而不是 `::after`：原生 `<input>` 是替换元素，部分浏览器不渲染它的伪元素，
+   同一套写法用在原生 checkbox 上才不会有浏览器差异。
+*/
+
 .check-box {
   position: relative; width: 16px; height: 16px; flex: none;
   border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface);
-  transition: background .12s ease, border-color .12s ease;
+  background-repeat: no-repeat; background-position: center; background-size: 12px 12px;
+  transition: background-color .12s ease, border-color .12s ease;
 }
-.check-box::after {
-  content: ""; position: absolute; left: 5px; top: 2px; width: 5px; height: 9px;
-  border-right: 2px solid var(--accent-fg); border-bottom: 2px solid var(--accent-fg);
-  transform: rotate(40deg) scale(0); transform-origin: center;
-  transition: transform .12s ease;
+.check input:checked + .check-box {
+  background-color: var(--accent); border-color: var(--accent);
+  background-image: url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6L9 17l-5-5'/></svg>");
 }
-.check input:checked + .check-box { background: var(--accent); border-color: var(--accent); }
-.check input:checked + .check-box::after { transform: rotate(40deg) scale(1); }
 .check input:focus-visible + .check-box { outline: 2px solid var(--accent); outline-offset: 2px; }
 .check input:checked ~ .check-label { color: var(--fg-2); }
+
+/* 原生 checkbox（插件的 <input type=checkbox>，比如 mcloud 的「跟随 / 清空」）：
+   系统给的那块方角蓝底在深色主题下很扎眼，统一换成面板的勾选框。 */
+input[type="checkbox"]:not(.check-raw) {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; margin: 0; flex: none;
+  border: 1px solid var(--line-strong); border-radius: 5px; background-color: var(--surface);
+  background-repeat: no-repeat; background-position: center; background-size: 12px 12px;
+  cursor: pointer; vertical-align: -3px;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+input[type="checkbox"]:not(.check-raw):checked {
+  background-color: var(--accent); border-color: var(--accent);
+  background-image: url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6L9 17l-5-5'/></svg>");
+}
+input[type="checkbox"]:not(.check-raw):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input[type="checkbox"]:not(.check-raw):disabled {
+  background-color: var(--surface-2); border-color: var(--line); cursor: not-allowed;
+}
 
 .tip {
   position: fixed; z-index: 90; max-width: 280px; padding: 5px 9px;
