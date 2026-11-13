@@ -15,6 +15,7 @@ mod engine;
 mod fsx;
 mod hostapi;
 mod log;
+mod manifest;
 mod migrate;
 mod scheduler;
 mod notify;
@@ -321,6 +322,33 @@ async fn load_all(
             continue;
         }
         let path = dir.join(format!("{name}.js"));
+        // 清单里的 min_panel 是**硬挡**：面板版本不够就不加载，并说清为什么。
+        // 软警告在这里没用 —— 插件跑在不匹配的宿主上，坏起来是随机崩。
+        match crate::manifest::load(dir, &name) {
+            Ok(Some(m)) => {
+                if !crate::manifest::version_ok(&m.min_panel, env!("CARGO_PKG_VERSION")) {
+                    let why = format!(
+                        "需要面板 >= {}（当前 {}），跳过加载",
+                        m.min_panel,
+                        env!("CARGO_PKG_VERSION")
+                    );
+                    log.emit("panel", None, Level::Error, format!("插件 {name} {why}"));
+                    if let Ok(mut g) = errors.lock() {
+                        g.insert(name.clone(), why);
+                    }
+                    continue;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log.emit(
+                    "panel",
+                    None,
+                    Level::Warn,
+                    format!("插件 {name} 的清单有问题（照常加载，只是界面没有标题/表单）: {e}"),
+                );
+            }
+        }
         let source = match tokio::fs::read_to_string(&path).await {
             Ok(s) => s,
             Err(e) => {
@@ -356,6 +384,8 @@ async fn load_all(
                 if let Ok(mut g) = errors.lock() {
                     g.remove(&name);
                 }
+                // 记下这一刻的文件指纹：下次「扫描目录」才知道哪些文件改过。
+                crate::manifest::note_loaded(&name, &path);
                 log.emit("panel", None, Level::Info, format!("插件 {name} 已加载"));
             }
             Err(e) => {

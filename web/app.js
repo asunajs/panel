@@ -637,6 +637,66 @@ function renderFirstRun() {
   box.append(panel);
 }
 
+/**
+ * 扫描插件目录（第 172 轮）。**只报告，不自动加载** —— 加载是人的决定。
+ * 监听文件在服务化机器上坑太多（句柄、编辑器的临时文件+rename、网络盘不发事件），
+ * 所以这里是「你说一声我才看」。
+ */
+async function scanPlugins() {
+  const box = $('scan-report');
+  if (!box) return;
+  box.classList.remove('hidden');
+  clear(box);
+  box.append(el('p', 'settings-note', '扫描中…'));
+  let d;
+  try {
+    d = await api('/api/plugins/scan');
+  } catch (e) {
+    clear(box);
+    box.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '扫描失败')));
+    return;
+  }
+  clear(box);
+  const names = (arr) => (arr || []).map((x) => x.name).join('、');
+  const line = (label, arr, cls) => {
+    if (!arr || !arr.length) return;
+    const p = el('p', 'scan-line' + (cls ? ' ' + cls : ''));
+    p.append(el('strong', '', label + ' ' + arr.length + ' 个：'), names(arr));
+    box.append(p);
+  };
+  line('新增', d.new);
+  line('改过', d.changed);
+  line('目录里没了（还记着）', d.removed);
+  const bad = d.manifests || [];
+  for (const m of bad) {
+    box.append(el('p', 'scan-line hint-err', m.name + '：' + m.problem));
+  }
+  const total = (d.new || []).length + (d.changed || []).length + (d.removed || []).length + bad.length;
+  if (!total) {
+    box.append(el('p', 'settings-note', '目录和已加载的一致（' + (d.present || []).length + ' 个 .js）。'));
+    return;
+  }
+  const bar = el('div', 'actions');
+  const reload = el('button', 'btn btn-sm', '重载改过的插件');
+  reload.type = 'button';
+  reload.addEventListener('click', async () => {
+    const todo = (d.changed || []).map((x) => x.name);
+    for (const n of todo) {
+      try {
+        await api('/api/plugins/' + encodeURIComponent(n) + '/reload', { method: 'POST' });
+      } catch (e) {
+        notify(n + ' 重载失败：' + (e.message || ''), 'err');
+      }
+    }
+    if (todo.length) notify('已重载 ' + todo.length + ' 个插件', 'ok');
+    scanPlugins();
+  });
+  bar.append(reload);
+  box.append(bar);
+  box.append(el('p', 'settings-note',
+    '新增的插件要「上传」或放进目录后重启面板才会加载；这里不会替你加载。'));
+}
+
 function renderPlugins() {
   const grid = $('plugin-grid');
   const q = state.q.plugins;
@@ -1206,11 +1266,66 @@ async function openPluginConfig(name) {
     return;
   }
   clear(box);
-  const ta = el('textarea', 'editor');
+  const fields = ((data.manifest && data.manifest.config && data.manifest.config.fields) || []);
+  const cfg = Object.assign({}, data.config || {});
+  if (data.manifest_error) {
+    box.append(el('p', 'hint-err', '清单有问题（照常按 JSON 编辑）：' + data.manifest_error));
+  }
+  if (data.manifest && data.manifest.title) {
+    const head = el('p', 'settings-note schema-head');
+    head.append(el('strong', '', data.manifest.title));
+    if (data.manifest.description) head.append(' · ' + data.manifest.description);
+    box.append(head);
+  }
+
+  // 有 config.fields 就出表单；没有就还是裸 JSON（第 172 轮）。
+  // 表单只覆盖「清单里声明过的字段」，其它键原样保留 —— 插件自己写进去的东西不该被界面吃掉。
+  let ta = null;
+  const form = el('div', 'schema-form hidden');
+  const readFrom = (src) => {
+    for (const f of fields) {
+      const node = form.querySelector('[data-f="' + f.name + '"]');
+      if (!node) continue;
+      const cur = src[f.name] !== undefined ? src[f.name] : (f.default === undefined ? '' : f.default);
+      if (f.type === 'bool') node.checked = cur === true || cur === 'true';
+      else node.value = cur === null || cur === undefined ? '' : String(cur);
+    }
+  };
+  if (fields.length) {
+    for (const f of fields) {
+      const line = el('label', 'chan-line' + (f.type === 'textarea' ? ' chan-line-block' : ''));
+      line.append(el('span', 'chan-label', f.label || f.name));
+      let node;
+      if (f.type === 'textarea') {
+        node = el('textarea', 'editor chan-tpl');
+        node.rows = 4;
+      } else if (f.type === 'select') {
+        node = el('select', 'input');
+        for (const o of f.options || []) {
+          const op = el('option', '', o.label || o.value);
+          op.value = o.value;
+          node.append(op);
+        }
+      } else {
+        node = el('input', 'input');
+        node.type = f.type === 'password' ? 'password' : (f.type === 'number' ? 'number' : (f.type === 'bool' ? 'checkbox' : 'text'));
+        if (f.placeholder) node.placeholder = f.placeholder;
+      }
+      node.dataset.f = f.name;
+      line.append(node);
+      if (f.help) line.append(el('span', 'chan-hint', f.help));
+      form.append(line);
+    }
+    readFrom(cfg);
+    box.append(form);
+  }
+
+  ta = el('textarea', 'editor' + (fields.length ? ' hidden' : ''));
   ta.spellcheck = false;
-  ta.value = JSON.stringify(data.config || {}, null, 2);
+  ta.value = JSON.stringify(cfg, null, 2);
   ta.rows = 14;
   box.append(ta);
+
   const row = el('div', 'actions');
   const save = el('button', 'btn btn-primary', '保存并重载插件');
   save.type = 'button';
@@ -1218,19 +1333,66 @@ async function openPluginConfig(name) {
   reset.type = 'button';
   reset.addEventListener('click', () => openPluginConfig(name));
   row.append(save, reset);
+  if (fields.length) {
+    const toggle = el('button', 'btn', '按 JSON 编辑');
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => {
+      // 切到 JSON：先把表单当前值合进 JSON，免得手上填的东西白填
+      if (form.classList.contains('hidden')) {
+        form.classList.remove('hidden');
+        ta.classList.add('hidden');
+        toggle.textContent = '按 JSON 编辑';
+        try { readFrom(JSON.parse(ta.value || '{}')); } catch (e) { /* JSON 坏了就保持表单原值 */ }
+      } else {
+        form.classList.add('hidden');
+        ta.classList.remove('hidden');
+        toggle.textContent = '用表单填';
+        ta.value = JSON.stringify(collect(), null, 2);
+      }
+    });
+    row.append(toggle);
+  }
   box.append(row);
   box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
   box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
+
+  /// 把表单值合回配置对象：只动清单声明过的字段。
+  function collect() {
+    const out = Object.assign({}, cfg);
+    for (const f of fields) {
+      const node = form.querySelector('[data-f="' + f.name + '"]');
+      if (!node) continue;
+      if (f.type === 'bool') {
+        out[f.name] = !!node.checked;
+      } else if (f.type === 'number') {
+        const s = node.value.trim();
+        if (s === '') delete out[f.name];
+        else if (Number.isFinite(Number(s))) out[f.name] = Number(s);
+      } else if (f.type === 'password') {
+        // 空 = 不改（清单没说这个字段是必填就保持原值）
+        if (node.value.trim() !== '') out[f.name] = node.value;
+      } else {
+        const s = node.value;
+        if (s === '' && !f.required) delete out[f.name];
+        else out[f.name] = s;
+      }
+    }
+    return out;
+  }
+
   save.addEventListener('click', async () => {
     save.disabled = true;
+    const text = fields.length && !form.classList.contains('hidden')
+      ? JSON.stringify(collect(), null, 2)
+      : ta.value;
     try {
       const r = await api('/api/plugins/' + encodeURIComponent(name) + '/config', {
         method: 'PUT',
-        body: { text: ta.value },
+        body: { text },
       });
       notify(r.reloaded === false
         ? '配置已保存，但插件重载失败：' + (r.error || '')
-        : '配置已保存，插件已重载', r.reloaded === false);
+        : '配置已保存，插件已重载', r.reloaded === false ? 'err' : 'ok');
       await refresh();
     } catch (e) {
       notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');
@@ -1239,6 +1401,7 @@ async function openPluginConfig(name) {
     }
   });
 }
+
 function setDrawerTab(name) {
   for (const b of document.querySelectorAll('[data-drawer-tab]')) {
     b.setAttribute('aria-selected', String(b.dataset.drawerTab === name));
@@ -3386,6 +3549,7 @@ function bind() {
 
   // 新建插件
   $('plugin-new').addEventListener('click', openNewPlugin);
+  $('plugin-scan').addEventListener('click', () => scanPlugins());
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
   $('test-run').addEventListener('click', runTest);

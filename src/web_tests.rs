@@ -3551,3 +3551,60 @@ async fn channel_crud_lands_in_config_and_never_echoes_the_secret() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// 清单（第 172 轮）：配置文件接口带上 config.fields，清单接口能读，扫描能看见新文件。
+#[tokio::test]
+async fn plugin_manifest_feeds_the_config_form_and_the_scan() {
+    let (app, plugins, _data, _store) = setup_dirs("man172").await;
+    std::fs::write(plugins.join("demo.js"), "import host from 'panel:host';\n").unwrap();
+    std::fs::write(
+        plugins.join("demo.panel.json"),
+        json!({
+            "title": "演示插件",
+            "order": 7,
+            "config": { "fields": [
+                { "name": "cookie", "type": "password", "label": "Cookie" },
+                { "name": "limit", "type": "number", "default": 3 }
+            ] }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (status, body) = get(&app, "/api/plugins/demo/config").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["manifest"]["title"], "演示插件");
+    assert_eq!(body["manifest"]["config"]["fields"][0]["name"], "cookie");
+    assert_eq!(body["manifest"]["config"]["fields"][0]["type"], "password");
+
+    let (status, body) = get(&app, "/api/plugins/demo/manifest").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["found"], true);
+    assert_eq!(body["manifest"]["order"], 7);
+
+    // 扫描：demo 从没加载过 → 出现在 new 里；present 里也有它
+    let (status, body) = get(&app, "/api/plugins/scan").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    let present: Vec<&str> = body["present"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x.as_str())
+        .collect();
+    assert!(present.contains(&"demo"), "{body}");
+    let new: Vec<&str> = body["new"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["name"].as_str())
+        .collect();
+    assert!(new.contains(&"demo"), "{body}");
+
+    // 清单坏了：接口说「有问题」而不是 500，界面能指到文件
+    std::fs::write(plugins.join("demo.panel.json"), "{ broken").unwrap();
+    let (status, body) = get(&app, "/api/plugins/demo/manifest").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().contains("JSON"), "{body}");
+}
