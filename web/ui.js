@@ -26,9 +26,14 @@
   // 之后还要跟着变：父页面切主题会 postMessage({type:'panel-theme', theme})。
   const THEME_KEY = 'panel-llrt-theme';
 
+  // ⚠ `?theme=` 只在**第一帧**说得上话：用户之后在面板里切主题时，
+  // 它是过期信息（URL 不会变）。原来一直优先读它，于是「切了深色又被 storage 事件拉回浅色」
+  // —— 消息确实到了，界面纹丝不动（第 140 轮实测）。收到过父窗口的消息就把它作废。
+  const urlTheme = new URLSearchParams(location.search).get('theme');
+  let urlWins = urlTheme === 'light' || urlTheme === 'dark';
+
   const readTheme = () => {
-    const q = new URLSearchParams(location.search).get('theme');
-    if (q === 'light' || q === 'dark') return q;
+    if (urlWins && (urlTheme === 'light' || urlTheme === 'dark')) return urlTheme;
     try {
       const v = localStorage.getItem(THEME_KEY);
       if (v === 'light' || v === 'dark') return v;
@@ -46,11 +51,16 @@
 
   addEventListener('message', (e) => {
     const d = e.data;
-    if (d && d.type === 'panel-theme' && (d.theme === 'light' || d.theme === 'dark')) setTheme(d.theme);
+    if (!d || d.type !== 'panel-theme') return;
+    if (d.theme !== 'light' && d.theme !== 'dark') return;
+    urlWins = false; // 父窗口说了算，URL 里那个作废
+    setTheme(d.theme);
   });
 
   addEventListener('storage', (e) => {
-    if (!e.key || e.key === THEME_KEY) setTheme(readTheme());
+    if (e.key && e.key !== THEME_KEY) return;
+    urlWins = false;
+    setTheme(readTheme());
   });
 
   if (new URLSearchParams(location.search).get('embed') === '1') {

@@ -31,9 +31,13 @@
     return t === 'light' || t === 'dark' ? t : null;
   };
 
+  // `?theme=` 只在第一帧算数：之后用户在面板里切主题，URL 是过期信息
+  // （原来一直优先读它，于是「切了深色又被 storage 事件拉回浅色」—— 消息到了界面不动）。
+  const initial = fromQuery();
+  let urlWins = !!initial;
+
   const readTheme = () => {
-    const q = fromQuery();
-    if (q) return q;
+    if (urlWins && initial) return initial;
     try {
       const v = localStorage.getItem(THEME_KEY);
       if (v === 'light' || v === 'dark') return v;
@@ -54,12 +58,16 @@
   addEventListener('message', (e) => {
     const d = e.data;
     if (!d || d.type !== 'panel-theme') return;
-    if (d.theme === 'light' || d.theme === 'dark') apply(d.theme);
+    if (d.theme !== 'light' && d.theme !== 'dark') return;
+    urlWins = false;
+    apply(d.theme);
   });
 
   // 同一源下别的文档改了存储（`key === null` 是整片被清空）
   addEventListener('storage', (e) => {
-    if (!e.key || e.key === THEME_KEY) apply(readTheme());
+    if (e.key && e.key !== THEME_KEY) return;
+    urlWins = false;
+    apply(readTheme());
   });
 
   if (new URLSearchParams(location.search).get('embed') === '1') {

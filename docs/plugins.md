@@ -422,3 +422,15 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
 
 面板侧栏就会出现「云盘」，点进去是内嵌 iframe（`/plugins/<name>/?embed=1&theme=…`）。
 不注册也能用 —— 插件页 → 详情 → 开界面，只是多两层点击。
+
+### 两个会让人怀疑人生的细节
+
+1. **内联 `<style>` / `<script>` 会被 CSP 拦掉。** 面板的 CSP 是 `style-src 'self'; script-src 'self'`，
+   页面里写 `<style>…</style>` 或 `<script>…</script>`（哪怕是文档里常见的那种写法）会被浏览器直接丢弃，
+   表现是「没样式、主题也不跟随」，控制台只有一条 CSP 报告。样式和脚本都要放成独立文件
+   （`demo.css` / `demo.js`），参考 `examples/demo-plugin.webui/` 里那三个文件。
+
+2. **`?theme=` 只在第一帧说得上话。** 用户在面板里切主题时 URL 不会变，
+   所以后续切换靠父窗口 `postMessage({type:'panel-theme', theme})` —— `/ui.js` 已经处理好了，
+   插件不用管。**但如果你自己写主题逻辑**，别再一直优先读 `?theme=`：那会让「切了深色又被
+   拉回浅色」（消息收到了、界面不动，第 140 轮实测踩过）。

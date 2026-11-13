@@ -1083,6 +1083,15 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
    颜色全走 token，所以两套主题自动跟随。改这里等于同时改面板和所有插件的外观 ——
    这正是「同质化」想要的效果，别在插件里再抄一份。 */
 
+/* 旧插件写的是「空格修饰符」形式（`.btn primary` / `.btn ghost` / `.btn sm`），
+   0.4.0 是连字符（`.btn-primary`）—— 两边都认，迁移就不用一次改完。 */
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--fg-2); }
+.btn.ghost:hover { background: var(--surface-2); color: var(--fg); }
+.btn.sm { min-height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px; }
+.btn.danger { color: var(--err); }
+
 .field-label { color: var(--fg-2); font-size: 12px; }
 
 .input {

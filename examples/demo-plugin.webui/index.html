@@ -1,6 +1,92 @@
 <!doctype html>
-<meta charset="utf-8" />
-<title>demo 插件</title>
-<h1>demo 插件</h1>
-<p>这个页面来自 <code>plugins/demo.webui/index.html</code>（静态文件优先于插件路由）。</p>
-<p><a href="/plugins/demo/api/ping?from=static">试一下插件接口</a></p>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>面板 UI 套件演示</title>
+    <!--
+      面板 UI 套件的**活文档**（第 140 轮）。插件界面照这个抄就行：
+
+        1. 引面板的 /app.css（token + 组件样式）和 /ui.js（自定义元素 + 主题桥）
+        2. 用 <p-card> / <p-button> / <p-field> / <p-badge> / <p-empty> / <p-dialog>
+        3. 颜色一个都不要写死 —— 全部走 token，面板切主题这里自动跟着变
+
+      ⚠ 样式和脚本必须放成**独立文件**（demo.css / demo.js），不能写内联：
+        面板的 CSP 是 `style-src 'self'; script-src 'self'`，内联的 <style>/<script>
+        会被浏览器直接拦掉（页面上就是「没样式、主题不跟随」，控制台里一条 CSP 报告）。
+
+      ⚠ 不要引旧面板的 /css/reset|theme|components.css：那三份还在（给没迁移的插件用），
+        但它们是**旧配色**，和现在的面板对不上。
+
+      ⚠ 也**不要**再写 prefers-color-scheme：主题由面板决定，系统偏好是另一件事。
+    -->
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="demo.css" />
+    <script src="/ui.js" defer></script>
+    <script src="demo.js" defer></script>
+  </head>
+  <body>
+    <div class="demo-grid">
+      <div>
+        <h2 class="demo-title">面板 UI 套件演示</h2>
+        <div class="demo-note">
+          这一页除了 <code>/app.css</code> + <code>/ui.js</code>，没有任何自己的控件样式。
+          当前主题：<strong id="theme-now">—</strong>（在面板右上角切一下试试）。
+        </div>
+      </div>
+
+      <p-card title="按钮" desc="variant: primary / ghost / danger，size: sm">
+        <div class="demo-row">
+          <p-button variant="primary">保存</p-button>
+          <p-button>默认</p-button>
+          <p-button variant="ghost">取消</p-button>
+          <p-button variant="danger">删除</p-button>
+          <p-button variant="primary" size="sm">小号</p-button>
+          <p-button disabled>禁用</p-button>
+        </div>
+      </p-card>
+
+      <p-card title="徽章" desc="tone: ok / warn / err / accent / idle">
+        <div class="demo-row">
+          <p-badge tone="ok">已登录</p-badge>
+          <p-badge tone="warn">待验证</p-badge>
+          <p-badge tone="err">失败</p-badge>
+          <p-badge tone="accent">进行中</p-badge>
+          <p-badge>空闲</p-badge>
+        </div>
+      </p-card>
+
+      <p-card title="表单" desc="p-field + .input">
+        <p-field label="听窗口长度（秒）" hint="10 – 3600">
+          <input class="input" id="d-seconds" type="number" min="10" max="3600" value="30" />
+        </p-field>
+        <p-field label="备注">
+          <input class="input" id="d-note" type="text" placeholder="随便写点什么" />
+        </p-field>
+        <div class="demo-row">
+          <p-button variant="primary" id="d-save">保存</p-button>
+          <p-button variant="ghost" id="d-dialog">打开弹窗</p-button>
+        </div>
+      </p-card>
+
+      <p-card title="调自己的接口" desc="GET /plugins/webui-demo/api/ping —— 静态文件之外的另一半">
+        <div class="demo-row"><p-button size="sm" id="d-ping">请求一次</p-button></div>
+        <div class="demo-out" id="d-out">（还没请求）</div>
+      </p-card>
+
+      <p-card title="空态">
+        <p-empty text="还没有账号，点上面的「保存」也不会有什么发生，这只是演示"></p-empty>
+      </p-card>
+    </div>
+
+    <p-dialog id="d-dlg" title="这是一个弹窗">
+      <p class="demo-note">
+        弹窗也是套件的一部分（<code>&lt;p-dialog open&gt;</code>）。上面那条色条、圆角、阴影
+        和面板自己的弹窗是同一套 token。
+      </p>
+      <div class="dialog-actions">
+        <p-button variant="ghost" id="d-dlg-close">知道了</p-button>
+      </div>
+    </p-dialog>
+  </body>
+</html>

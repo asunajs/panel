@@ -447,3 +447,15 @@
     「不许任何站点嵌我」写的；插件界面改成嵌在面板自己的 iframe 里之后，这条把**自家页面**也挡了，
     用户看到的是一个白板加「损坏文档」图标（第 139 轮第一次跑插件界面就撞上）。
     改成 `SAMEORIGIN` / `frame-ancestors 'self'`：同源可嵌，外站照旧嵌不了。
+
+87. **CSP 把插件页的内联 `<style>`/`<script>` 拦了，表现是「没样式、主题不跟随」**：
+    面板的 CSP 是 `style-src 'self'; script-src 'self'`（这是对的，别为了省事加 'unsafe-inline'）。
+    插件页里写内联样式/脚本会被浏览器**静默丢弃**，`curl` 页面是 200、DOM 也在，就是没样式；
+    控制台里只有一条 `violates the following Content Security Policy directive`。
+    规矩：插件页的样式与脚本一律独立文件（`examples/demo-plugin.webui/{index.html,demo.css,demo.js}` 是范本）。
+
+88. **`?theme=` 一直优先读，导致「切了深色又被拉回浅色」**：
+    插件页 URL 带 `?theme=light`。用户切到深色时，面板确实 `postMessage` 了（实测收到了），
+    但紧接着 `localStorage` 变化触发 `storage` 事件，处理器重新 `readTheme()` —— 而那个函数
+    仍然优先读 URL 里的 `light`，于是刚切好的深色被自己拉回去。消息到了、界面纹丝不动，很难查。
+    `?theme=` 只该用于**第一帧**：收到父窗口消息后立刻把它作废（`web/ui.js` 与插件 `boot.js` 都是这么改的）。

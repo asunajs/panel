@@ -1,0 +1,18 @@
+/* 这个演示页**特有**的排版。控件样式一律来自面板的 /app.css —— 这里不重画一遍。
+   颜色全走 token，两套主题自动跟着面板。 */
+
+body { margin: 0; padding: 18px 20px 40px; }
+
+.demo-grid { display: flex; flex-direction: column; gap: 14px; max-width: 720px; }
+.demo-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.demo-title { margin: 0 0 4px; font-size: 16px; }
+.demo-note { color: var(--fg-2); font-size: 12px; line-height: 1.7; }
+.demo-out {
+  font-family: var(--mono); font-size: 12px; color: var(--fg-2);
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 8px 10px; white-space: pre-wrap;
+}
+
+/* 面板把插件页嵌进 iframe 时带 ?embed=1（/ui.js 会挂到 <html data-embed="1">），
+   这时页面自己那层大标题就收掉 —— 否则和面板顶栏是两层标题。 */
+html[data-embed="1"] .demo-title { display: none; }
