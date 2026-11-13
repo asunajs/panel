@@ -3197,10 +3197,11 @@ function syncTerms(blockName) {
 }
 
 function showBlock(name) {
-  for (const b of document.querySelectorAll('.menu-item')) {
+  for (const b of document.querySelectorAll('.seg-item[data-block]')) {
     const on = b.dataset.block === name;
-    b.classList.toggle('is-on', on);
-    // 下划线对屏幕阅读器不可见；补 aria-current 让它知道"现在在哪一块"。
+    // 面板的分段控件用 `aria-pressed` 表达选中态（不是自定义的 `is-on` 类）
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // 屏幕阅读器：再给一个 aria-current 说"现在在哪一块"
     if (on) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   }
@@ -3218,7 +3219,7 @@ function showBlock(name) {
 }
 
 $('menu').addEventListener('click', (ev) => {
-  const btn = ev.target.closest('.menu-item');
+  const btn = ev.target.closest('.seg-item[data-block]');
   if (!btn) return;
   showBlock(btn.dataset.block);
 });

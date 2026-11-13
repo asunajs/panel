@@ -96,27 +96,7 @@ function register_route(path, method, handler, opts) {
     }
   }
 }
-/**
- * 侧栏入口（面板 0.4.0：`host.sidebar({title, order})`）。
- *
- * 旧面板叫 `register_nav({label, icon, path})`，0.3 那一版没有对应的宿主能力，
- * 这里只打一条降级日志。0.4.0 补上了，于是这条日志变成真的注册。
- */
-function register_nav(opts) {
-  const o = opts || {};
-  const title = String(o.title || o.label || "云盘");
-  const order = Number.isFinite(o.order) ? Number(o.order) : 20;
-  if (host && typeof host.sidebar === 'function') {
-    try {
-      void Promise.resolve(host.sidebar({ title, order })).catch(
-        (e) => emit("error", "登记侧栏失败: " + text(e))
-      );
-      return;
-    } catch (e) {
-      emit("error", "登记侧栏失败: " + text(e));
-      return;
-    }
-  }
+function register_nav(_opts) {
   emit("info", "[nav] 这个面板没有侧栏注册，插件页面走 插件页 → 界面");
 }
 function worker_hint(_hint) {

@@ -59,7 +59,7 @@
   --font-mono: var(--mono);
   /* 样式表版本号：页面上的「样式自检」读它，用来判断浏览器用的是哪一份 style.css。
      改了本文件就把它加一（一个数字，别指望它自动同步）。 */
-  --style-ver: 155;
+  --style-ver: 156;
 }
 
 /* 为什么还留着这几个短名字：界面上还有 6 个区块这轮不重写
@@ -117,51 +117,8 @@ body {
 
 /* ── 菜单栏 ── */
 
-.menu {
-  display: flex;
-  gap: var(--sp-1);
-  padding: 0 var(--sp-2);
-  border-bottom: 1px solid var(--line);
-  /* 窄屏时横向滚动而不是换行 —— 换行会让菜单占掉半屏 */
-  overflow-x: auto;
-  scrollbar-width: none;
-  /* 顶栏实测高 59.8px；菜单贴在它下面，别用 58 造成 1~2px 重叠。 */
-  position: sticky;
-  top: 60px;
-  z-index: 19;
-  background: var(--bg);
-}
-
-.menu::-webkit-scrollbar {
-  display: none;
-}
-
-.menu-item {
-  appearance: none;
-  background: none;
-  border: none;
-  /* 选中态靠这条下划线：它比"变个颜色"更能在横排里指认"现在在哪一块" */
-  border-bottom: 2px solid transparent;
-  color: var(--dim);
-  font: inherit;
-  padding: var(--sp-2) var(--sp-3);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color var(--t-fast), border-color var(--t-fast);
-}
-
-.menu-item:hover {
-  color: var(--fg);
-}
-
-.menu-item.is-on {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-  font-weight: 600;
-}
-
-/* ── 区块 ── */
-
+/* 区块切换：**面板的分段控件**（`.seg` / `.seg-item`）。
+   这里只留布局（贴顶栏、窄屏横向滚动），外观/选中态一律交给 `/app.css`。 */
 .main {
   padding: var(--sp-4) var(--sp-4) var(--sp-6);
   /* 外壳放到 1000px，具体区块再各自收窄：兑换清单是 6 列数据表，
@@ -169,6 +126,17 @@ body {
   max-width: 1000px;
   margin-inline: auto;
 }
+
+.mcloud-nav {
+  margin: 0 var(--sp-2) var(--sp-4);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.mcloud-nav::-webkit-scrollbar {
+  display: none;
+}
+
 
 .block {
   display: none;
@@ -301,10 +269,6 @@ body {
 /* 禁用态。面板的 `.btn` 没写这一条，而"还不能点"在这里是**有信息**的
    （号码不满 11 位 / 码不满 6 位 / 重发倒计时里）—— 不给样子的话，
    用户只会觉得按钮坏了，而"点了没反应"是最糟的反馈。 */
-.btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
 
 /* 一行的三个位置：名字（左边、可伸展）、状态（中间）、说明（右边）。
    固定成这三段之后，一列行看上去是**对齐的表格**，而不是一堆散字。 */
@@ -399,10 +363,6 @@ textarea:focus {
 /* 尺寸档。面板的 `.btn` 只有一种大小，而这一页的小按钮多（顶栏、行内动作、选择器）。
    ⚠ **只留尺寸** —— 颜色 / 边框 / 圆角一律走面板的 `.btn`：两处都写就会各说各话，
      面板改一次观感、这里没跟上，看起来就是"这个按钮和别的不是一套的"。 */
-.btn-sm {
-  padding: var(--sp-1) var(--sp-2);
-  font-size: 12px;
-}
 
 /* 二选一的按钮组（添加账号弹窗里的「客户端形态：Windows / macOS」）。
    面板没有「切换按钮」这个组件，所以自己写一条 —— 但只写**选中态**，
