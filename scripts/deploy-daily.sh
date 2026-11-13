@@ -30,6 +30,36 @@ cp target/release/panel "$DEST/panel.new"
 # 而 launchd 里的后台进程问不了（会卡住）。第 134 轮实测：不重签照样能起。
 mv "$DEST/panel.new" "$DEST/panel"
 
+# ── 插件与脚本：跟着一起搬（第 153 轮补） ──
+# 为什么：这里原来只换二进制。二进制里的 /app.css 是新的，plugins/ 里却是**几天前的拷贝**，
+# 于是同一个页面上"面板新 CSS + 插件旧 CSS"混着跑 —— 人看到的是半新半旧的界面
+# （账号多选没有勾选框、兑换页组行发灰），而两边代码看着都对。
+# 用覆盖式 cp 而不是 rsync --delete：日常实例里可能有人手放的插件文件，删掉是破坏性的。
+if [ -d "$ROOT/plugins" ]; then
+  mkdir -p "$DEST/plugins"
+  cp -R "$ROOT/plugins/." "$DEST/plugins/"
+fi
+if [ -d "$ROOT/scripts" ]; then
+  mkdir -p "$DEST/scripts"
+  cp -R "$ROOT/scripts/." "$DEST/scripts/"
+fi
+
+# 搬完逐个核对：宁可这里红一次，也别让人对着半新半旧的界面找 bug。
+MISMATCH=0
+COUNT=0
+while IFS= read -r -d "" f; do
+  rel="${f#"$ROOT/plugins/"}"
+  COUNT=$((COUNT + 1))
+  if ! cmp -s "$f" "$DEST/plugins/$rel"; then
+    echo "插件文件没同步：$rel" >&2
+    MISMATCH=$((MISMATCH + 1))
+  fi
+done < <(find "$ROOT/plugins" -type f -print0)
+if [ "$MISMATCH" -ne 0 ]; then
+  echo "有 $MISMATCH 个插件文件没同步成功，先别信这个实例" >&2
+  exit 1
+fi
+echo "插件已同步：$COUNT 个文件（已逐个核对）"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 for _ in $(seq 1 60); do
