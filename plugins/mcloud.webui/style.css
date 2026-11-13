@@ -57,6 +57,9 @@
   --shadow: var(--shadow-md);
   --t-fast: 120ms ease;
   --font-mono: var(--mono);
+  /* 样式表版本号：页面上的「样式自检」读它，用来判断浏览器用的是哪一份 style.css。
+     改了本文件就把它加一（一个数字，别指望它自动同步）。 */
+  --style-ver: 154;
 }
 
 /* 为什么还留着这几个短名字：界面上还有 6 个区块这轮不重写
@@ -1182,9 +1185,16 @@ button.picker-row {
 }
 
 .ex-group-row td {
-  background: var(--soft);
-  padding-top: var(--sp-2);
-  padding-bottom: var(--sp-2);
+  /* 组头是一"条"，要能和页面底色分开、又不能抢数据行的戏。
+     用 --surface（浅色 #fff / 深色 #242424）而不是 --surface-2：浅色下 --surface-2 是
+     #f7f7f7，和页面底色 #f3f3f3 只差 4 级 —— 看起来就是"一片白、还挤"（第 154 轮用户原话）。
+     再压一条上下细线，两行组头挨着时也有边界。 */
+  background: var(--surface);
+  color: var(--fg);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-3);
 }
 
 /* 组头整行都是展开/折叠按钮：组名是主信息，件数/可兑数/时间窗退到 hint。 */

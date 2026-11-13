@@ -54,6 +54,35 @@
 
   apply(readTheme());
 
+  // ── 样式自检（?diag=1）──
+  // 为什么要有：插件页的配色只出问题在「别人的浏览器」里时，靠来回猜太贵。
+  // 这个块把真正生效的值打出来：样式表版本号、几个 token、组行的 computed 底色。
+  if (new URLSearchParams(location.search).get('diag') === '1') {
+    addEventListener('DOMContentLoaded', () => {
+      const cs = getComputedStyle(document.documentElement);
+      const td = document.querySelector('#ex-tbl tr.ex-group-row td');
+      const ver = cs.getPropertyValue('--style-ver').trim();
+      const rows = [
+        'style.css 版本 = ' + (ver || '（读不到：不是我们的 CSS？）'),
+        'data-theme     = ' + (document.documentElement.dataset.theme || '（没有）'),
+        '--surface-2    = ' + cs.getPropertyValue('--surface-2').trim(),
+        '--soft         = ' + cs.getPropertyValue('--soft').trim(),
+        '--fg           = ' + cs.getPropertyValue('--fg').trim(),
+        'body 底色      = ' + getComputedStyle(document.body).backgroundColor,
+        '组行 td 底色   = ' + (td ? getComputedStyle(td).backgroundColor : '（这页没有兑换表）'),
+        'userAgent      = ' + navigator.userAgent,
+      ];
+      const box = document.createElement('pre');
+      box.id = 'diag-box';
+      box.textContent = rows.join('\n');
+      box.style.cssText =
+        'position:fixed;right:8px;bottom:8px;z-index:9999;max-width:92vw;margin:0;' +
+        'padding:10px 12px;border-radius:8px;border:1px solid #555;background:#111;color:#eee;' +
+        'font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;';
+      document.body.append(box);
+    });
+  }
+
   // 父窗口（面板）切主题
   addEventListener('message', (e) => {
     const d = e.data;
