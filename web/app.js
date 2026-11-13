@@ -700,7 +700,7 @@ async function scanPlugins() {
 function renderPlugins() {
   const grid = $('plugin-grid');
   const q = state.q.plugins;
-  const rows = state.plugins.filter((p) => matches(p.name, q));
+  const rows = state.plugins.filter((p) => matches(p.name, q) || matches(p.title || '', q));
   $('plugins-count').textContent = state.plugins.length;
   clear(grid);
   if (!state.plugins.length) {
@@ -744,7 +744,8 @@ function renderPlugins() {
     const cardEl = el('article', 'plugin-card');
     cardEl.tabIndex = 0;
     const head = el('div', 'plugin-head');
-    head.append(el('div', 'plugin-name', p.name));
+    head.append(el('div', 'plugin-name', p.title || p.name));
+    if (p.title && p.title !== p.name) head.append(el('div', 'plugin-file', p.name));
     head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
     // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
     if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
@@ -1317,6 +1318,8 @@ async function openPluginConfig(name) {
       form.append(line);
     }
     readFrom(cfg);
+    // 初始是 hidden（切 JSON 时要用这个类），有字段就得先亮出来
+    form.classList.remove('hidden');
     box.append(form);
   }
 

@@ -1443,3 +1443,6 @@ select option { background: var(--surface); color: var(--fg); }
 
 /* 表单里的小节标题（第 171 轮） */
 .chan-sub { margin: 6px 0 0; font-size: 12px; font-weight: 600; color: var(--fg-2); }
+
+/* 清单给了 title 时，卡片上补一行真实文件名（第 172 轮） */
+.plugin-file { font-size: 11px; color: var(--dim); font-family: var(--mono); }
