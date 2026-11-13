@@ -53,6 +53,18 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 | 落盘后 `codesign --force -s -` | 换过 inode 的新二进制 launchd 可能拒绝启动（手工在终端跑却是好的） |
 | `kickstart -k` 之后等 `/readyz` | 只换文件不重启，跑的还是旧进程，界面上看不到任何变化 |
 
+
+**插件与脚本也会一起搬（第 153 轮补的，以前漏了）**：只换二进制的话，`~/panel-3030/plugins/` 里
+还是几天前的拷贝，而 `/app.css` 已经是新的 —— 同一个页面上"新面板 CSS + 旧插件 CSS"混着跑，
+表现是半新半旧的界面（账号多选没有勾选框、兑换页组行发灰），两边代码看着却都对。
+现在脚本会 `cp -R` 过去并**逐个 `cmp` 核对**，不一致直接红：
+
+```text
+插件已同步：13 个文件（已逐个核对）
+已就绪（等 0s）：{"ok":true,"plugins":5,"tasks":4}
+```
+
+用覆盖式 `cp` 而不是 `rsync --delete`：日常实例里可能有人手放的插件文件，删掉是破坏性的。
 起不来时先看 `~/panel-3030/data/panel.err.log`，再看 `launchctl print gui/$(id -u)/dev.panel` 里的
 `state` 与 `last exit reason`。
 
