@@ -541,6 +541,7 @@ textarea:focus {
   width: fit-content;
   padding: var(--sp-3);
   margin: var(--sp-2) auto;
+  /* style-lint: allow-color 二维码必须是白底，否则相机扫不出来（与主题无关） */
   background: #fff;
   border-radius: var(--r-md);
   border: 1px solid var(--line);
