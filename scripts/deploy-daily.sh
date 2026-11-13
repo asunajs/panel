@@ -38,13 +38,20 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 
-for _ in $(seq 1 240); do
+# 插件加载慢是常态（mcloud 那几个加载期打网络），实测见过 100 秒以上，
+# 所以给 300 秒，并且每 15 秒报一次「还在加载」，别让人以为卡死了。
+WAITED=0
+while [ "$WAITED" -lt 300 ]; do
   BODY="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/readyz" 2>/dev/null || true)"
   if [ -n "$BODY" ]; then
-    echo "已就绪：$BODY"
+    echo "已就绪（等 ${WAITED}s）：$BODY"
     exit 0
   fi
-  sleep 0.5
+  sleep 1
+  WAITED=$((WAITED + 1))
+  if [ $((WAITED % 15)) -eq 0 ]; then
+    echo "  …还在等 /readyz（已 ${WAITED}s；加载中会回 503「调度器在忙」，这是正常的）"
+  fi
 done
-echo "进程起来了，但 120 秒内 /readyz 没 200：看 $DEST/data/panel.err.log 与日志页" >&2
+echo "进程起来了，但 300 秒内 /readyz 没 200：看 $DEST/data/panel.err.log 与日志页" >&2
 exit 1
