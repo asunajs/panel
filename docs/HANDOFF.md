@@ -72,7 +72,7 @@
 
 测试在同名 `*_tests.rs`（`#[path]` 挂进模块），路由级测试直接打真 `Router`，不起监听。
 
-### 4.2 文档（`docs/`，12 篇）
+### 4.2 文档（`docs/`，13 篇）
 
 第 82 轮合并过：原来是 35 篇「一个读数一篇」，现在是 11 篇「一章一篇」（上限也从 300 行抬到 1000 行）。
 
@@ -153,7 +153,7 @@
 cd /Users/catlair/mobile/workspace/panel-llrt
 cargo build --offline && cargo test --offline   # 323 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
-bash scripts/check-docs.sh                      # ok: 12 篇文档，内链全通、都在 1000 行内
+bash scripts/check-docs.sh                      # ok: 13 篇文档，内链全通、都在 1000 行内
 bash scripts/check-pitfalls.sh                  # 坑的守卫 12 条（静态检查，含 CSS token）
 node scripts/ui-check.mjs                       # 界面 59 条断言（自起面板 + 无头 Edge）
 node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）
