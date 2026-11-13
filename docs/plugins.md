@@ -512,3 +512,31 @@ SVG 勾），插件里直接写就行，不需要额外 class。面板自己的 
   <span class="check-label">只看失败</span>
 </label>
 ```
+
+## 从 CLI 那套数据迁移（`scripts/migrate-mcloud-data.mjs`）
+
+mcloud 的账号原先存在命令行那套里（`~/mobile/workspace/mcloud/data/*.json`），面板插件把它放在
+面板库的 `state` 表（键 `mcloud.accounts` + 每号一个 JSON 袋）。两边字段名不一样，**直接拷文件没用**，
+这个脚本做的是逐字段对拍：
+
+```bash
+node scripts/migrate-mcloud-data.mjs --db ~/panel-3030/data/panel.db            # 只打印计划
+node scripts/migrate-mcloud-data.mjs --db ~/panel-3030/data/panel.db --apply    # 真写
+```
+
+| CLI 字段 | 插件字段 | 说明 |
+|---|---|---|
+| `auth.raw` | `auth` | 一整串 `Basic base64(pc:手机号:token…)` |
+| `auth.phone` | `id` | 插件用手机号当账号键 |
+| `nickname` | `label` | |
+| `user_domain_id` | `userDomainId` | |
+| `enabled` | `disabled` | 取反 |
+| `auth.platform` | `platform` / `pcPlatform` | 只认 `pc` / `mobile` |
+| `exchange-subscriptions.json`（按 owner） | 袋里的 `mcloud.exchange.subs` | `{prize_id,name}` → `{id,name}` |
+
+**不迁**的：口令池（`kouling-pool.json` 是「本轮」临时池，5 小时过期，搬过去也会被 `isStale()` 重置）、
+`history.json` / `pipelines.json`（CLI 独有的概念，插件里没有对应结构）、推送规则（CLI 自己发推送）。
+命令行那份数据**不动**。
+
+迁移完要重启面板（插件在加载时读这些键）：`launchctl kickstart -k gui/$(id -u)/dev.panel`。
+⚠ 凭据多半已经过期（CLI 那份是旧的），进去之后每个号点一次「刷新」续 token。
