@@ -672,6 +672,31 @@ async function main() {
   check('通知弹层整个在视口里', popRect.top >= 0 && popRect.bottom <= popRect.vh + 1, JSON.stringify(popRect));
   await js("document.getElementById('bell').click()");
   await sleep(200);
+  // 弹窗的「取消 / 点遮罩 / Esc」（第 143 轮）：用户报「改计划不支持取消，点击无效」。
+  // 那时候只有 #drawer / #confirm / #clash 各自绑了处理器，改计划 / 新建插件 / 新建脚本
+  // 这三个弹窗的「取消」是死按钮。这里把它钉成回归检查。
+  const openModal = (id) => js("document.getElementById('" + id + "').classList.remove('hidden')");
+  const modalHidden = async (id) => (await js("document.getElementById('" + id + "').classList.contains('hidden')")) === true;
+  await openModal('task-schedule');
+  await js("document.querySelector('#task-schedule .modal-actions .btn').click()");
+  await sleep(250);
+  check('改计划的「取消」能关掉弹窗', await modalHidden('task-schedule'), '点了没关 = 死按钮');
+  await openModal('task-schedule');
+  await js("document.querySelector('#task-schedule .modal-backdrop').click()");
+  await sleep(250);
+  check('点遮罩也能关掉改计划弹窗', await modalHidden('task-schedule'));
+  await openModal('task-schedule');
+  await js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+  await sleep(250);
+  check('Esc 也能关掉改计划弹窗', await modalHidden('task-schedule'));
+  await openModal('new-plugin');
+  await js("document.querySelector('#new-plugin .modal-actions .btn').click()");
+  await sleep(250);
+  check('新建插件的「取消」也能关掉', await modalHidden('new-plugin'));
+  await openModal('new-script');
+  await js("document.querySelector('#new-script .modal-actions .btn').click()");
+  await sleep(250);
+  check('新建脚本的「取消」也能关掉', await modalHidden('new-script'));
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

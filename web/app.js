@@ -2974,12 +2974,34 @@ function bind() {
   $('drawer').addEventListener('click', (ev) => { if (ev.target.dataset.close) closeDrawer(); });
   $('confirm').addEventListener('click', (ev) => { if (ev.target.dataset.close) settleConfirm(false); });
   $('confirm-ok').addEventListener('click', () => settleConfirm(true));
+
+  // 其余弹窗的「取消 / 点遮罩」统一在这里收（第 143 轮）。
+  // 之前只有 #drawer / #confirm / #clash 各自绑了一份 —— 改计划、新建插件、新建脚本
+  // 这三个弹窗的「取消」**根本没人管**，点了毫无反应（用户报「不支持取消，点击无效」），
+  // 只能按回去保存或者刷新页面。现在按 `data-close` 委托，新增弹窗也不用再记得绑。
+  // #confirm / #clash 要 resolve 一个 promise，收尾归它们自己，这里跳过。
+  const SELF_MANAGED_MODALS = new Set(['confirm', 'clash']);
+  const closeTopModal = () => {
+    const open = [...document.querySelectorAll('.modal:not(.hidden)')]
+      .filter((m) => !SELF_MANAGED_MODALS.has(m.id));
+    const m = open[open.length - 1];
+    if (!m) return false;
+    m.classList.add('hidden');
+    return true;
+  };
+  document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.dataset || !t.dataset.close) return;
+    const m = t.closest && t.closest('.modal');
+    if (!m || SELF_MANAGED_MODALS.has(m.id)) return;
+    m.classList.add('hidden');
+  });
+
   document.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape') return;
     closeDrawer();
     settleConfirm(false);
-    $('new-plugin').classList.add('hidden');
-    $('new-script').classList.add('hidden');
+    closeTopModal();
     toggleNotify(false);
     setSidebar(false);
   });
