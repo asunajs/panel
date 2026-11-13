@@ -698,3 +698,65 @@ panel migrate                # 扫描 + 预览，不写任何东西
 | `--adopt-token» | `<旧数据目录>/auth.json» | 换令牌是大事：目标已有凭据时不覆盖，且要显式点名 |
 
 `jobs» 表**不搬**：0.4.x 的任务是插件注册出来的，搬过来的会被下次加载覆盖 —— 只会造成「看着有、其实没有」。
+
+## 插件清单 panel.json（第 172 轮）
+
+一个 .js 能干活，但界面上三件事它说不清：**叫什么、排第几、要填什么配置**。
+侧车文件把这些说出来，和代码并列放：
+
+```text
+plugins/mcloud.js            ← 代码
+plugins/mcloud.panel.json    ← 清单（可选；没有就用文件名 / 字典序 / 裸 JSON）
+```
+
+```json
+{
+  "title": "移动云盘",
+  "icon": "cloud",
+  "order": 5,
+  "description": "签到、抽奖、抢兑",
+  "min_panel": "0.4.0",
+  "capabilities": ["notify", "sqlite"],
+  "config": {
+    "fields": [
+      { "name": "cookie", "label": "Cookie", "type": "password", "required": true,
+        "help": "抓包里整行 Cookie" },
+      { "name": "concurrency", "label": "并发", "type": "number", "default": 2 },
+      { "name": "mode", "label": "模式", "type": "select",
+        "options": ["fast", { "value": "safe", "label": "稳妥" }] }
+    ]
+  }
+}
+```
+
+| 字段 | 作用 |
+|---|---|
+| title / icon / order | 界面上的名字、图标、排序（没有就按文件名与字典序） |
+| min_panel | **硬挡**：面板版本不够就不加载，并在「加载失败」里说明要哪个版本 |
+| capabilities | 声明用到的能力（现在的面板不据此限权，只是给人看） |
+| config.fields | 配置表单：type 属于 text / password / number / bool / select / textarea |
+
+约定：
+
+- **清单是可选的**。没有它插件照常跑，只是界面回退到「文件名 + 裸 JSON 编辑器」；
+- 清单坏了不静默：加载照常（只 warn），但 GET /api/plugins/{name}/manifest 会回
+  {ok:false, error}，界面上把具体文件路径摆出来；
+- 表单只写**清单声明过的字段**，配置里插件自己塞的其它键原样保留；
+- type 为 password 的字段留空 = 不改（和通知渠道的密钥一个约定）。
+
+## 扫描目录（不是文件监听）
+
+服务化机器上监听文件是一堆隐形坑：inotify 句柄数、编辑器「写临时文件再 rename」
+一次保存触发三个事件、iCloud / 网络盘根本不发事件。所以这里是**主动扫描**：
+
+```text
+GET /api/plugins/scan        ← 界面「插件 → 扫描目录」按钮
+{ "present": [...], "loaded": [...],
+  "new":     [{name,size,loaded}],     // 目录里有、从没加载过
+  "changed": [{name,size,was}],        // 加载过之后文件变了（大小/时间）
+  "removed": [{name}],                 // 记着加载过，但文件没了
+  "manifests": [{name,problem}] }      // 清单坏了，或 min_panel 不满足
+```
+
+它**只报告不加载**：加载这个动作始终是人喊的（按钮/重载/重启）。
+「加载过」的指纹是加载成功那一刻的文件大小 + mtime，所以「改过」= 与那次不同。

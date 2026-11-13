@@ -466,6 +466,9 @@ pub fn router(st: AppState) -> Router {
         .route("/api/config", get(api_config).put(api_config_save))
         .route("/api/config/reload", post(api_config_reload))
         .route("/api/plugins/files", get(plugin_files))
+        // 清单与扫描（第 172 轮）
+        .route("/api/plugins/scan", get(api_plugins_scan))
+        .route("/api/plugins/{name}/manifest", get(api_plugin_manifest))
         // 迁移（第 168 轮）：scan → preview → apply，与 CLI 同一份实现
         .route("/api/migrate/scan", get(api_migrate_scan))
         .route("/api/migrate/preview", post(api_migrate_preview))
@@ -1302,7 +1305,39 @@ fn human_size(n: u64) -> String {
 }
 
 async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let plugins = st.sched.plugins().await.map_err(internal)?;
+    // 插件清单（第 172 轮）：标题/图标/顺序来自 plugins/<name>.panel.json。
+    // 没有清单就维持原样（界面回退到文件名 + 字典序），不 pretend。
+    let mut plugins = serde_json::to_value(st.sched.plugins().await.map_err(internal)?)
+        .unwrap_or_else(|_| json!([]));
+    if let Some(arr) = plugins.as_array_mut() {
+        for p in arr.iter_mut() {
+            let Some(name) = p
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(|x| x.to_string())
+            else {
+                continue;
+            };
+            match crate::manifest::load(&st.plugins_dir, &name) {
+                Ok(Some(m)) => {
+                    if !m.title.is_empty() {
+                        p["title"] = json!(m.title);
+                    }
+                    if !m.icon.is_empty() {
+                        p["icon"] = json!(m.icon);
+                    }
+                    p["order"] = json!(m.order);
+                    p["manifest"] = m.to_json();
+                }
+                Ok(None) => {
+                    p["order"] = json!(100);
+                }
+                Err(e) => {
+                    p["manifest_error"] = json!(e);
+                }
+            }
+        }
+    }
     let tasks = st.sched.tasks().await.map_err(internal)?;
     // JS 内存要拿各 runtime 的锁：给 2ms 的耐心，插件正忙就跳过它。
     // 7 个插件最坏 14ms，而且测量在独立任务里跑（见 scheduler 的 Cmd::Memory）。
@@ -2682,6 +2717,58 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
 ///
 /// 位置：`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（见 config::plugin_config_path）。
 /// 插件里用 `host.self_config()` 读同一份 —— 面板改完立刻生效，不用重启面板。
+// ── 插件清单与目录扫描（第 172 轮）──
+//
+// 三个问题合成一组接口：插件叫什么（清单）、要填什么（config.schema）、
+// 目录里现在有什么（scan）。扫描只报告差异，不自动加载 —— 加载始终是人喊的。
+
+/// GET /api/plugins/scan —— 目录里有什么、和上次加载比哪些变了。
+async fn api_plugins_scan(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let loaded: Vec<String> = st
+        .sched
+        .plugins()
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    let disabled = crate::db::plugin_disabled_names(&st.db).await;
+    let out = crate::manifest::scan(
+        &st.plugins_dir,
+        &loaded,
+        &disabled,
+        env!("CARGO_PKG_VERSION"),
+    );
+    Ok(Json(out))
+}
+
+/// GET /api/plugins/{name}/manifest —— 清单原文（界面用来排顺序、取标题）。
+async fn api_plugin_manifest(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    safe_name(&name)?;
+    if !plugin_path(&st.plugins_dir, &name)?.exists() {
+        return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
+    }
+    match crate::manifest::load(&st.plugins_dir, &name) {
+        Ok(Some(m)) => Ok(Json(json!({
+            "ok": true,
+            "found": true,
+            "manifest": m.to_json(),
+            "path": crate::manifest::path_for(&st.plugins_dir, &name).display().to_string(),
+        }))),
+        Ok(None) => Ok(Json(json!({
+            "ok": true,
+            "found": false,
+            "manifest": Value::Null,
+            "path": crate::manifest::path_for(&st.plugins_dir, &name).display().to_string(),
+        }))),
+        // 清单坏了不 404 也不 500：界面要能显示「文件在、但写错了」并指到具体文件。
+        Err(e) => Ok(Json(json!({ "ok": false, "found": true, "error": e }))),
+    }
+}
+
 async fn plugin_config_get(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -2691,9 +2778,17 @@ async fn plugin_config_get(
         return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
     }
     let cfg = crate::config::load_plugin(&st.data_dir, &name).map_err(bad)?;
+    // 清单里写了 config.fields 就给界面一份表单；没写就是空（界面回退到裸 JSON）。
+    let (schema, manifest_err) = match crate::manifest::load(&st.plugins_dir, &name) {
+        Ok(Some(m)) => (m.to_json(), Value::Null),
+        Ok(None) => (Value::Null, Value::Null),
+        Err(e) => (Value::Null, json!(e)),
+    };
     Ok(Json(json!({
         "config": cfg,
         "path": crate::config::plugin_config_path(&st.data_dir, &name).display().to_string(),
+        "manifest": schema,
+        "manifest_error": manifest_err,
     })))
 }
 
