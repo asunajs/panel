@@ -36,6 +36,9 @@ const THEME_BOOT_JS: &str = include_str!("../web/theme-boot.js");
 /// 面板 UI 套件（第 139 轮）：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
 const UI_JS: &str = include_str!("../web/ui.js");
 const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
+const UI_KIT_HTML: &str = include_str!("../web/ui-kit.html");
+const UI_KIT_CSS: &str = include_str!("../web/ui-kit.css");
+const UI_KIT_JS: &str = include_str!("../web/ui-kit.js");
 
 /// 旧面板（rust-plugin-panel）那套组件样式。插件的界面 HTML 里写的是绝对路径
 /// /css/reset.css 之类 —— 它们和旧面板共享同一套 token 与组件类（.btn、.dialog…），
@@ -582,6 +585,19 @@ pub fn router(st: AppState) -> Router {
         .route(
             "/highlight.js",
             get(|| async { asset(HIGHLIGHT_JS, "text/javascript; charset=utf-8", "highlight.js") }),
+        )
+        // 套件样板页（第 175 轮）：插件作者照着这一页抄，比读文档快
+        .route(
+            "/ui-kit",
+            get(|| async { asset(UI_KIT_HTML, "text/html; charset=utf-8", "ui-kit.html") }),
+        )
+        .route(
+            "/ui-kit.css",
+            get(|| async { asset(UI_KIT_CSS, "text/css; charset=utf-8", "ui-kit.css") }),
+        )
+        .route(
+            "/ui-kit.js",
+            get(|| async { asset(UI_KIT_JS, "text/javascript; charset=utf-8", "ui-kit.js") }),
         )
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测

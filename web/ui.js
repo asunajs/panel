@@ -547,6 +547,358 @@
     _sync() { if (this._back) this._back.hidden = !this.hasAttribute('open'); }
   }
 
+
+  /** <p-switch checked label="启用"> —— 开关。值读 .value，改它派发 change。 */
+  class PSwitch extends HTMLElement {
+    static get observedAttributes() { return ['checked', 'disabled']; }
+    connectedCallback() {
+      if (this._i) return;
+      const wrap = build(this, 'switch');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.className = 'switch-input';
+      const knob = document.createElement('span');
+      knob.className = 'switch-knob';
+      wrap.append(input, knob);
+      input.checked = this.hasAttribute('checked');
+      input.disabled = this.hasAttribute('disabled');
+      input.addEventListener('change', () => {
+        this.toggleAttribute('checked', input.checked);
+        this.dispatchEvent(new CustomEvent('change', { detail: { value: input.checked }, bubbles: true }));
+      });
+      this._i = input;
+      const text = this.getAttribute('label');
+      if (text) {
+        const s = document.createElement('span');
+        s.className = 'switch-text';
+        s.textContent = text;
+        wrap.append(s);
+      }
+    }
+    get value() { return !!(this._i && this._i.checked); }
+    set value(v) {
+      if (!this._i) return;
+      this._i.checked = !!v;
+      this.toggleAttribute('checked', !!v);
+    }
+    attributeChangedCallback(name) {
+      if (name === 'checked' && this._i) this._i.checked = this.hasAttribute('checked');
+      if (name === 'disabled' && this._i) this._i.disabled = this.hasAttribute('disabled');
+    }
+  }
+
+  /** <p-multiselect options='["a","b"]' value="a"> —— 多选（点外面的空处收起）。 */
+  class PMultiselect extends HTMLElement {
+    connectedCallback() {
+      if (this._wrap) return;
+      const wrap = build(this, 'msel');
+      const trig = document.createElement('button');
+      trig.type = 'button';
+      trig.className = 'msel-trigger';
+      const chips = document.createElement('span');
+      chips.className = 'msel-chips';
+      const caret = document.createElement('span');
+      caret.className = 'msel-caret';
+      caret.textContent = '▾';
+      trig.append(chips, caret);
+      const panel = document.createElement('div');
+      panel.className = 'msel-panel';
+      panel.hidden = true;
+      wrap.append(trig, panel);
+
+      // 选项来源：子元素 <option> 或 options 属性（字符串数组 / {value,label} 数组）
+      let opts = [...this.querySelectorAll('option')].map((o) => ({
+        value: o.value || o.textContent,
+        label: o.textContent,
+        disabled: o.disabled,
+      }));
+      const raw = this.getAttribute('options');
+      if (raw) {
+        try {
+          opts = JSON.parse(raw).map((x) => (typeof x === 'string' ? { value: x, label: x } : x));
+        } catch (e) { /* 写坏了就当没有 */ }
+      }
+      const sel = new Set(
+        (this.getAttribute('value') || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+
+      const renderChips = () => {
+        chips.textContent = '';
+        if (!sel.size) {
+          const ph = document.createElement('span');
+          ph.className = 'msel-ph';
+          ph.textContent = this.getAttribute('placeholder') || '未选择';
+          chips.append(ph);
+          return;
+        }
+        for (const v of sel) {
+          const o = opts.find((x) => x.value === v);
+          const chip = document.createElement('span');
+          chip.className = 'msel-chip';
+          chip.append(document.createTextNode(o ? o.label : v));
+          const x = document.createElement('span');
+          x.className = 'msel-x';
+          x.textContent = '×';
+          x.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            sel.delete(v);
+            sync();
+          });
+          chip.append(x);
+          chips.append(chip);
+        }
+      };
+
+      const sync = () => {
+        renderChips();
+        for (const row of panel.children) {
+          row.classList.toggle('is-on', sel.has(row.dataset.v));
+        }
+        this.dispatchEvent(new CustomEvent('change', { detail: { value: [...sel] }, bubbles: true }));
+      };
+
+      for (const o of opts) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'msel-option' + (o.disabled ? ' is-disabled' : '');
+        row.dataset.v = o.value;
+        const tick = document.createElement('span');
+        tick.className = 'msel-tick';
+        tick.textContent = '✓';
+        const label = document.createElement('span');
+        label.textContent = o.label;
+        row.append(tick, label);
+        row.addEventListener('click', () => {
+          if (o.disabled) return;
+          if (sel.has(o.value)) sel.delete(o.value);
+          else sel.add(o.value);
+          sync();
+        });
+        panel.append(row);
+      }
+      trig.addEventListener('click', () => {
+        panel.hidden = !panel.hidden;
+        wrap.classList.toggle('is-open', !panel.hidden);
+      });
+      this._onDoc = (ev) => {
+        if (!this.contains(ev.target)) {
+          panel.hidden = true;
+          wrap.classList.remove('is-open');
+        }
+      };
+      document.addEventListener('click', this._onDoc);
+      renderChips();
+      this._wrap = wrap;
+      this._panel = panel;
+      this._sel = sel;
+    }
+    disconnectedCallback() {
+      if (this._onDoc) document.removeEventListener('click', this._onDoc);
+    }
+    get value() { return this._sel ? [...this._sel] : []; }
+    set value(list) {
+      if (!this._sel) return;
+      this._sel.clear();
+      for (const v of list || []) this._sel.add(v);
+      this.dispatchEvent(new CustomEvent('change', { detail: { value: this.value }, bubbles: true }));
+    }
+  }
+
+  /** <p-tab label="名字">内容</p-tab> 放在 <p-tabs> 里。 */
+  class PTab extends HTMLElement {}
+
+  /** <p-tabs><p-tab label="甲">…</p-tab><p-tab label="乙">…</p-tab></p-tabs> */
+  class PTabs extends HTMLElement {
+    connectedCallback() {
+      if (this._bar) return;
+      const bar = document.createElement('div');
+      bar.className = 'tabs-bar';
+      bar.setAttribute('role', 'tablist');
+      const body = document.createElement('div');
+      body.className = 'tabs-body';
+      const tabs = [...this.querySelectorAll('p-tab')];
+      const panes = tabs.map((t, i) => {
+        const pane = document.createElement('div');
+        pane.className = 'tab-pane';
+        pane.hidden = i !== 0;
+        while (t.firstChild) pane.append(t.firstChild);
+        return pane;
+      });
+      tabs.forEach((t, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'tab' + (i === 0 ? ' active' : '');
+        b.textContent = t.getAttribute('label') || '标签' + (i + 1);
+        b.addEventListener('click', () => this.select(i));
+        bar.append(b);
+        t.remove();
+      });
+      body.append(...panes);
+      this.append(bar, body);
+      this._bar = bar;
+      this._panes = panes;
+      this._idx = 0;
+    }
+    select(i) {
+      if (!this._panes || i < 0 || i >= this._panes.length) return;
+      this._idx = i;
+      [...this._bar.children].forEach((b, k) => b.classList.toggle('active', k === i));
+      this._panes.forEach((p, k) => {
+        p.hidden = k !== i;
+      });
+      this.dispatchEvent(new CustomEvent('change', { detail: { index: i }, bubbles: true }));
+    }
+    get index() { return this._idx || 0; }
+  }
+
+  /**
+   * <p-table head="名字,状态" rows='[["a","ok"]]'></p-table>
+   *
+   * 为什么用 rows 属性而不是 <tr> 子元素：HTML 解析器**只允许 tr 出现在 table 里**，
+   * 写在自定义元素里的 <tr> 会被直接丢掉（实测 tbody 里 0 行）。单元格可以是字符串，
+   * 也可以是 {text, tone} —— tone 会变成 p-badge 的那种 badge 样式。
+   */
+  class PTable extends HTMLElement {
+    connectedCallback() {
+      if (this._t) return;
+      const head = (this.getAttribute('head') || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const fromAttr = (() => {
+        const raw = this.getAttribute('rows');
+        if (!raw) return [];
+        try {
+          return JSON.parse(raw).map((row) =>
+            (row || []).map((cell) => {
+              const tr = document.createElement('tr');
+              return { tr, cell };
+            }),
+          );
+        } catch (e) {
+          return [];
+        }
+      })();
+      // 兼容用 JS 直接塞进去的 <tr>
+      const rows = [...this.querySelectorAll('tr')];
+      const table = build(this, 'table', 'table');
+      if (head.length) {
+        const thead = document.createElement('thead');
+        const tr = document.createElement('tr');
+        for (const h of head) {
+          const th = document.createElement('th');
+          th.textContent = h;
+          tr.append(th);
+        }
+        thead.append(tr);
+        table.append(thead);
+      }
+      const tbody = document.createElement('tbody');
+      for (const r of rows) tbody.append(r);
+      for (const row of fromAttr) {
+        const tr = document.createElement('tr');
+        for (const item of row) {
+          const td = document.createElement('td');
+          const c = item.cell;
+          if (c && typeof c === 'object') {
+            const b = document.createElement('span');
+            b.className = 'badge ' + (c.tone || '');
+            b.textContent = c.text == null ? '' : String(c.text);
+            td.append(b);
+          } else {
+            td.textContent = c == null ? '' : String(c);
+          }
+          tr.append(td);
+        }
+        tbody.append(tr);
+      }
+      table.append(tbody);
+      this._t = table;
+    }
+  }
+
+  /** <p-code lang="js">const a = 1;</p-code> —— 只读代码块（有 /highlight.js 就上色） */
+  class PCode extends HTMLElement {
+    connectedCallback() {
+      if (this._pre) return;
+      const lang = this.getAttribute('lang') || 'js';
+      const raw = (this.textContent || '').trim();
+      // 先把原始文本节点清掉：不清的话页面上一份纯文本 + 一份高亮块（第一次就露了）
+      this.textContent = '';
+      const wrap = build(this, 'code-block');
+      const bar = document.createElement('div');
+      bar.className = 'code-block-bar';
+      const tag = document.createElement('span');
+      tag.className = 'code-lang';
+      tag.textContent = lang;
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'btn btn-sm btn-ghost';
+      copy.textContent = '复制';
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(raw);
+          copy.textContent = '已复制';
+          setTimeout(() => {
+            copy.textContent = '复制';
+          }, 1200);
+        } catch (e) {
+          copy.textContent = '复制失败';
+        }
+      });
+      bar.append(tag, copy);
+      const pre = document.createElement('pre');
+      pre.className = 'code-hl';
+      const code = document.createElement('code');
+      if (window.PanelHL) code.innerHTML = window.PanelHL.render(raw, lang);
+      else code.textContent = raw;
+      pre.append(code);
+      wrap.append(pre);
+      this.prepend(bar);
+      this._pre = pre;
+    }
+  }
+
+  /** <p-form submit-label="保存">…<input name="a">…</p-form> */
+  class PForm extends HTMLElement {
+    connectedCallback() {
+      if (this._box) return;
+      const box = build(this, 'pform');
+      const label = this.getAttribute('submit-label');
+      if (label) {
+        const actions = document.createElement('div');
+        actions.className = 'pform-actions';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-primary';
+        b.textContent = label;
+        b.addEventListener('click', () => {
+          this.dispatchEvent(new CustomEvent('submit', { detail: { values: this.values() }, bubbles: true }));
+        });
+        actions.append(b);
+        this.append(actions);
+      }
+      this._box = box;
+    }
+    /** 把 name 上有值的元素收集成一个对象（p-select / p-switch / p-multiselect 都认）。 */
+    values() {
+      const out = {};
+      for (const el of this.querySelectorAll('[name]')) {
+        const n = el.getAttribute('name');
+        if (!n) continue;
+        if (el.tagName === 'P-SWITCH') out[n] = el.value;
+        else if (el.tagName === 'P-MULTISELECT' || el.tagName === 'P-SELECT') out[n] = el.value;
+        else if (el.type === 'checkbox') out[n] = el.checked;
+        else if (el.type === 'number') out[n] = el.value === '' ? null : Number(el.value);
+        else out[n] = el.value;
+      }
+      return out;
+    }
+  }
+
   const define = (name, cls) => {
     if (!customElements.get(name)) customElements.define(name, cls);
   };
@@ -558,6 +910,13 @@
   define('p-badge', PBadge);
   define('p-empty', PEmpty);
   define('p-dialog', PDialog);
+  define('p-switch', PSwitch);
+  define('p-multiselect', PMultiselect);
+  define('p-tab', PTab);
+  define('p-tabs', PTabs);
+  define('p-table', PTable);
+  define('p-code', PCode);
+  define('p-form', PForm);
 
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
