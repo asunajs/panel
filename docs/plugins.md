@@ -513,61 +513,58 @@ SVG 勾），插件里直接写就行，不需要额外 class。面板自己的 
 </label>
 ```
 
-## 从 CLI 那套数据迁移（`scripts/migrate-mcloud-data.mjs`）
+## 从 0.3.x 面板迁移插件状态（`panel migrate`，第 150 轮）
 
-mcloud 的账号原先存在命令行那套里（`~/mobile/workspace/mcloud/data/*.json`），面板插件把它放在
-面板库的 `state` 表（键 `mcloud.accounts` + 每号一个 JSON 袋）。两边字段名不一样，**直接拷文件没用**，
-这个脚本做的是逐字段对拍：
-
-```bash
-node scripts/migrate-mcloud-data.mjs --db ~/panel-3030/data/panel.db            # 只打印计划
-node scripts/migrate-mcloud-data.mjs --db ~/panel-3030/data/panel.db --apply    # 真写
-```
-
-| CLI 字段 | 插件字段 | 说明 |
-|---|---|---|
-| `auth.raw` | `auth` | 一整串 `Basic base64(pc:手机号:token…)` |
-| `auth.phone` | `id` | 插件用手机号当账号键 |
-| `nickname` | `label` | |
-| `user_domain_id` | `userDomainId` | |
-| `enabled` | `disabled` | 取反 |
-| `auth.platform` | `platform` / `pcPlatform` | 只认 `pc` / `mobile` |
-| `exchange-subscriptions.json`（按 owner） | 袋里的 `mcloud.exchange.subs` | `{prize_id,name}` → `{id,name}` |
-
-**不迁**的：口令池（`kouling-pool.json` 是「本轮」临时池，5 小时过期，搬过去也会被 `isStale()` 重置）、
-`history.json` / `pipelines.json`（CLI 独有的概念，插件里没有对应结构）、推送规则（CLI 自己发推送）。
-命令行那份数据**不动**。
-
-迁移完要重启面板（插件在加载时读这些键）：`launchctl kickstart -k gui/$(id -u)/dev.panel`。
-⚠ 凭据多半已经过期（CLI 那份是旧的），进去之后每个号点一次「刷新」续 token。
-
-## 从老面板迁移插件状态（`scripts/migrate-mcloud-state.mjs`）
-
-老项目（`mcloud-plugin` / `mcloud-sign`）跑在**旧面板**里，插件状态在那个库的 `state` 表
-（键 `mcloud.*`，每个号另有一个 JSON 袋 `mcloud.acct.<id>`）。新面板是另一个库，schema 一样，
-所以迁移就是把这些键搬过去 —— **不要整库拷**（新库还有自己的 runs / logs / tasks）。
+0.3.x 把插件状态放在它自己 `panel.db` 的 `state` 表里（mcloud 那族是 `mcloud.accounts` +
+每号一个 JSON 袋）。0.4.x 是**另一个库**，用户手上只有旧目录 —— 这条路让他们不用手工 sqlite3 抄键。
 
 ```bash
-node scripts/migrate-mcloud-state.mjs \
-  --from ~/mobile/workspace/mcloud-plugin/data/panel.db \
-  --db   ~/panel-3030/data/panel.db            # 只打印计划
+# 1) 先看：不写任何东西
+panel migrate from "$HOME/Library/Application Support/plugin-panel/data"
 
-# 真写；--prune-orphan-bags 顺手删掉账号表里没有的袋子
-node scripts/migrate-mcloud-state.mjs --from <老panel.db> --db <新panel.db> --apply --prune-orphan-bags
+# 2) 真写（写之前自动做快照 panel.db.premigrate-<时间戳>）
+panel migrate from <旧数据目录> --apply
+
+# 3) 重启面板，让插件重新读状态
+launchctl kickstart -k gui/$(id -u)/dev.panel
 ```
 
-| 搬 | 不搬 |
+来源参数既可以是**数据目录**（里面找 `panel.db`），也可以直接指到 `panel.db`。
+目标库默认 `$PANEL_DATA_DIR/panel.db`（没设就是 `data/panel.db`），可用 `--data-dir` 改。
+
+预览长这样（数字都是实测，不是估算）：
+
+```text
+来源  …/mcloud-plugin/data/panel.db（532 KB）
+目标  …/panel-3030/data/panel.db（0 B）
+
+state 里 36 个键，按命名空间：
+  命名空间                     键         字节        会覆盖
+  mcloud                  35     179 KB          0
+  plugin                   1       24 B          0
+
+运行历史 mcloud_runs：来源 128 行，目标已有 0 行
+账号：3 个 —— 15909397542, 19142492716, anon-aohk08
+孤儿袋：13800000000, 13911112222（账号表里没有这些号；默认不搬，要搬加 --with-orphan-bags）
+```
+
+| 开关 | 作用 |
 |---|---|
-| `state` 里所有 `mcloud.*` 键：账号表、每号的状态袋（会话 / 兑换订单 / 计划 / 领奖）、口令池、日志环、任务-账号对照 | `plugin.loaded_at` 这类面板自己的键；别的插件的键 |
-| `mcloud_runs` 的运行历史（id 重新分配，避免撞） | |
+| 不带 `--apply` | 只预览，一个字节都不写 |
+| `--only <命名空间>` | 只搬这一个命名空间（例如 `--only mcloud`） |
+| `--data-dir <目录>` | 目标数据目录（默认 `$PANEL_DATA_DIR` 或 `data`） |
+| `--with-orphan-bags` | 把账号表里已经没有的 `mcloud.acct.<id>` 袋子也搬过来 |
 
-⚠ 两点：
-1. **写之前先备份**：`tar -czf ~/panel-3030/data-premigrate-$(date +%Y%m%d-%H%M%S).tar.gz -C ~/panel-3030 data`
-2. 写完要重启面板（插件加载时读这些键）：`launchctl kickstart -k gui/$(id -u)/dev.panel`
+三条纪律，都写进了测试（`src/migrate_tests.rs`，7 条）：
 
-### 另一个脚本：从命令行那套（CLI）迁账号
+1. **默认只预览**：不带 `--apply` 不写。
+2. **写之前先快照**：`VACUUM INTO panel.db.premigrate-<时间戳>` —— 直接 `cp` 会漏掉 WAL 里的内容。
+   目标库本来不存在/是空的就不拍（拍出来是空文件，只添乱）。
+3. **可重复跑**：键是 upsert；运行历史按 `(task, 计划时刻, 实际时刻)` 去重，重复跑不会翻倍
+   （mcloud 那份 128 行里有 73 行是完全重复的，迁完剩 55 行 —— 会明说合并了多少）。
 
-`scripts/migrate-mcloud-data.mjs` 走的是另一条路：把 `~/mobile/workspace/mcloud/data/*.json`
-（Bun CLI 那套）里的**账号**逐字段翻成插件的账号表（`auth.raw`→`auth`、`auth.phone`→`id`、
-`nickname`→`label`…）。只有「手上只有 CLI 数据」时才用它 —— 有老面板库就用上面那个，
-**后者带着每个号的完整状态和运行历史**。
+只搬 `state`（插件键值）和 `mcloud_runs`（插件自己的运行历史）。面板自己的
+`runs` / `logs` / `tasks` **不搬** —— 那是面板的，不是插件的；旧库的任务表结构也未必一样。
+
+⚠ 迁移期间最好把面板停掉（同一个库两个写者容易撞）。命令本身开 10s busy timeout，但那是兜底，
+不是并发方案。

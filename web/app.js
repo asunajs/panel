@@ -2051,6 +2051,15 @@ function renderSettings() {
         "panel-llrt backup --out 备份.bk --with-db。恢复只增/覆盖，不删除。",
     ),
   );
+  // 0.3.x → 0.4.x：插件状态在旧库的 state 表里，界面上搬不了（要停面板、要写库）。
+  // 所以这里**只指路不给按钮** —— 一个点了只会失败的按钮比没有更糟。
+  const mig = el("p", "settings-note migrate-note");
+  mig.append(
+    "从 0.3.x 面板搬插件状态（账号、计划、运行历史）：停面板后在终端跑 ",
+    el("code", "", "panel migrate from <旧数据目录>"),
+    "（不加参数只预览，加 --apply 才写，写前自动快照）。迁完重启面板。",
+  );
+  dat.append(mig);
   // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**（第 24 轮用户抓到）。
   // 这里改成 strong，长句里的命令也用 code 包起来，别让它糊成一片。
   const plain = el("p", "settings-note backup-note");
