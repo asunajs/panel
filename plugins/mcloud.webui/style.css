@@ -33,14 +33,33 @@
    接到那些 token 上。⚠ 不要重定义 --bg / --accent / --radius：
    它们是主面板的名字，重定义会把面板的值盖掉（本文件在面板的 CSS 之后加载）。 */
 :root {
-  --fg: var(--text);
-  --dim: var(--text-dim);
-  --line: var(--border-soft);
+  /* 面板 0.4.0 的 token 名和旧面板不一样（--fg / --fg-2 / --line / --err / --warn …）。
+     这里把*旧名字*接到 0.4.0 的 token 上：本文件里几千行 `var(--text)` / `var(--border-soft)`
+     一个字都不用改。注意：只读面板的 token，不重定义它们。 */
+  --text: var(--fg);
+  --text-dim: var(--fg-2);
+  --text-mute: var(--dim);
+  --border-soft: var(--line);
+  --border: var(--line-strong);
+  --border-control: var(--line-strong);
+  --bg-deep: var(--bg);
   --soft: var(--surface-2);
-  --ok: var(--success);
-  --bad: var(--error);
-  --ok-soft: var(--success-soft);
-  --bad-soft: var(--error-soft);
+  --success: var(--ok);
+  --success-soft: var(--ok-soft);
+  --error: var(--err);
+  --error-soft: var(--err-soft);
+  --warning: var(--warn);
+  --bad: var(--err);
+  --bad-soft: var(--err-soft);
+  /* 间距/圆角/动效这些刻度 0.4.0 没有（它只给控件高度），插件自己定 */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --r-sm: var(--radius-sm); --r-md: var(--radius);
+  --shadow: var(--shadow-md);
+  --t-fast: 120ms ease;
+  --font-mono: var(--mono);
+  /* 样式表版本号：页面上的「样式自检」读它，用来判断浏览器用的是哪一份 style.css。
+     改了本文件就把它加一（一个数字，别指望它自动同步）。 */
+  --style-ver: 155;
 }
 
 /* 为什么还留着这几个短名字：界面上还有 6 个区块这轮不重写
@@ -827,11 +846,53 @@ textarea:focus {
 }
 
 /* 按钮本体是面板的 `.btn`（+ 本页的 `.btn-sm`）；这里只定它在这个位置上的尺寸 */
+/* 触发按钮上放的是**标签**（TDesign 多选的形态）：一个号一格，多了折成 +N。
+   所以这个按钮不再是"一行字"，要能折行、按内容撑开。 */
 .picker-btn {
-  min-width: 140px;
-  /* 按钮里是"标签 + ▾"，两端对齐，箭头不会随标签长短乱跑 */
-  justify-content: space-between;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  height: auto;
+  min-height: var(--h-control);
+  padding: 3px var(--sp-2);
+  text-align: left;
 }
+
+.ms-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  max-width: 9em;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 不是号本身的那些标签（跟随 / 没选 / 新号也算）：虚线边 + 弱一档 */
+.ms-tag.is-polar { border-style: dashed; color: var(--fg-2); }
+.ms-tag.is-more { background: none; border-color: transparent; color: var(--fg-2); }
+
+/* 面板底部那行（清空）——与名单之间有一条线，像 TDesign 的浮层页脚 */
+.picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+}
+
+/* 里面是"标签 + ▾"，两端对齐，箭头不会随标签长短乱跑 */
+.picker-btn { justify-content: space-between; min-width: 140px; }
 
 /* 浮层。底色用 `--surface` 而不是 `--bg`：面板的 `.dialog` 就是这么定的 ——
    浮在卡片（--surface-2 底）上面的一层要比页面底色亮一档，不然它看起来像"凹进去"。
@@ -865,17 +926,15 @@ textarea:focus {
   background: var(--soft);
 }
 
-/* ⚠ 复选框要把全局那条 `input { width: 100% }` **抵掉** ——
-   不然它会被撑满整行，文字被推到很远的地方（看起来像"文字居中"）。
-   全局那条还给了边框和内边距，复选框上也要撤掉（浏览器自己的样式才对）。 */
+/* 复选框在这里只调**位置**，不碰长相。
+   ⚠ 这里原来写着 `width:auto; border:0; background:none` —— 那是给旧面板写的：
+   旧面板没有复选框样式，得把全局的 `input { width:100% }` 和边框撤掉才能露出浏览器
+   原生那个方块。0.4.0 的勾选框是**我们自己画的**（app.css 里 `input[type=checkbox]`
+   给 16px 方块 + SVG 勾），再"撤掉"就等于把控件擦没 —— 任务页的账号多选就变成了
+   一串光秃秃的名字（第 153 轮用户报「多选没实现」）。 */
 .picker-row input[type='checkbox'] {
   flex: 0 0 auto;
-  width: auto;
-  min-width: 0;
   margin: 3px 0 0;
-  padding: 0;
-  border: 0;
-  background: none;
 }
 
 /* 「全部」那一行与下面的名单之间画一条线 —— 它是**开关**，不是名单里的一项。 */
@@ -1126,9 +1185,16 @@ button.picker-row {
 }
 
 .ex-group-row td {
-  background: var(--soft);
-  padding-top: var(--sp-2);
-  padding-bottom: var(--sp-2);
+  /* 组头是一"条"，要能和页面底色分开、又不能抢数据行的戏。
+     用 --surface（浅色 #fff / 深色 #242424）而不是 --surface-2：浅色下 --surface-2 是
+     #f7f7f7，和页面底色 #f3f3f3 只差 4 级 —— 看起来就是"一片白、还挤"（第 154 轮用户原话）。
+     再压一条上下细线，两行组头挨着时也有边界。 */
+  background: var(--surface);
+  color: var(--fg);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-3);
 }
 
 /* 组头整行都是展开/折叠按钮：组名是主信息，件数/可兑数/时间窗退到 hint。 */
@@ -1356,3 +1422,6 @@ button.picker-row {
 #plugin-ver:empty {
   display: none;
 }
+
+/* 兼容层已删（第 140 轮）：0.4.0 的 /app.css 里已经有 .dialog* / .badge / .input /
+   .field-label，以及 .btn.ghost|sm|primary 这些旧式修饰符 —— 同一套控件不留两份定义。 */

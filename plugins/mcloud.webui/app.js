@@ -23,6 +23,11 @@
 
 'use strict';
 
+// 页面版本号：和 style.css 里的 --style-ver 一起人工递增。
+// 「样式自检」（boot.js 的 ?diag=1）会读它 —— 用来区分「CSS 是新的、JS 还是旧的」这种
+// 半新半旧状态（第 155 轮：样式表是 v155，但 DOM 里根本没有 .ex-group-row 这种行）。
+document.documentElement.dataset.appVer = '155';
+
 /** 插件自己的接口。 */
 const API = '/plugins/mcloud/api';
 
@@ -205,6 +210,11 @@ function runTask(key) {
 
 function toast(msg, bad) {
   const el = $('toast');
+  // 没有字就别画：一个空的白卡片比不提示更让人困惑（它看起来像「加载中」）。
+  if (!msg) {
+    el.hidden = true;
+    return;
+  }
   el.textContent = msg;
   // 用主面板的提示条组件（`.toast` / `.toast.bad`），不是自己画一个：
   // 同一种"出事了"的提示在全站应该长一样。
@@ -233,7 +243,11 @@ async function act(btn, fn, okMsg) {
   if (!owned) btn.textContent = '…';
   try {
     const r = await fn();
-    toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
+    // ⚠ 空串 = 「这次别提示」（比如切到「数据」页时那次自动取豆）。
+    // 以前这里无条件 toast，于是 `act(..., () => '')` 会在页面顶上一个**没有字的空卡片**
+    // —— 用户看到的就是「啥也没写的提示条」（第 145 轮实测：切 tab 就冒一下）。
+    const msg = typeof okMsg === 'function' ? okMsg(r) : okMsg;
+    if (msg) toast(msg);
     await load();
   } catch (e) {
     toast(String(e && e.message ? e.message : e), true);
@@ -2841,8 +2855,11 @@ function render(r) {
 
 async function load() {
   try {
-    // 排期与读数一起拉：第二行那句「它自己什么时候跑」要真值（见 `scheduleText`）
-    const [r] = await Promise.all([api('/readings'), loadJobs()]);
+    // 排期与读数**串行**拉（第 141 轮）：面板里一个插件只有**一个** JS 执行位，
+    // 同时发两个请求时第二个会立刻拿到 502「正忙」—— 这不是任务在跑，是自己撞自己。
+    // 代价是这两个请求不再并行（各几十毫秒，界面感知不到）。
+    const r = await api('/readings');
+    await loadJobs();
     last = r;
     render(last);
   } catch (e) {
@@ -2930,15 +2947,21 @@ function makeTerm(plugin, el) {
   const { body, meta, follow, level, clear } = el;
   let es = null;
   let lines = 0;
-  /** 新面板的日志自增 id：重连时用 `?since=` 把断线那段补回来（面板原生支持）。 */
-  let lastId = 0;
-  let retryMs = 1000;
   /** **屏上摆着几行**（只数 `.term-line`，不含分界线与空态那句）。
    *  页头那个数报的是它 —— 跟着级别筛选、也跟着 400 行上限。 */
   let shown = 0;
 
   /** 把一行日志画上去。⚠ 一律走 `textContent`（日志里有用户可控的字符串）。 */
-  function appendLine(lv, tsRaw, text) {
+  function paint(ev) {
+    let d;
+    try {
+      d = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    // SSE 的 `type` 才是语义类型（start/success/fail）；`level` 只是过滤档位。
+    // 历史（/log/tail）没有 `type`，它把类型放在 `level` 里。
+    const lv = d.type || d.level || 'info';
     if (!levelPasses(lv)) return;
     const empty = body.querySelector('.term-empty');
     if (empty) empty.remove();
@@ -2948,14 +2971,14 @@ function makeTerm(plugin, el) {
     ts.className = 'term-ts';
     // 面板给的是 `2026-10-17 10:50:42.498`；我们铺历史时给的是已经切好的 `10:50:42.498`。
     // 两种都要能吃（`slice(11)` 对后者会把时分秒切掉）。
-    const raw = String(tsRaw || '');
+    const raw = String(d.ts || '');
     ts.textContent = (/^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(11) : raw) + ' ';
     const lvEl = document.createElement('span');
     lvEl.className = `term-lv term-lv-${lv}`;
     lvEl.textContent = lv.padEnd(7);
     const msg = document.createElement('span');
     msg.className = 'term-msg';
-    msg.textContent = String(text || '');
+    msg.textContent = String(d.msg || d.line || '');
     el.append(ts, lvEl, msg);
     body.appendChild(el);
     lines += 1;
@@ -2969,50 +2992,6 @@ function makeTerm(plugin, el) {
     }
     setMeta('');
     if (follow.checked) body.scrollTop = body.scrollHeight;
-  }
-
-  /** 旧面板（rust-plugin-panel）：具名事件 `log`，帧是 `{type,level,ts,msg}`。 */
-  function paint(ev) {
-    let d;
-    try {
-      d = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    // SSE 的 `type` 才是语义类型（start/success/fail）；`level` 只是过滤档位。
-    // 历史（/log/tail）没有 `type`，它把类型放在 `level` 里。
-    const lv = d.type || d.level || 'info';
-    appendLine(lv, d.ts, d.msg || d.line || '');
-  }
-
-  /** 新面板（panel-llrt）：**没有事件名**，一律走默认 `message`，
-   *  帧是 `{id, ts, plugin, run_id, level, message}`。
-   *
-   *  ⚠ 之前只挂了 `addEventListener('log', …)` ⇒ 新面板一帧都收不到，
-   *  界面上就是「跑着呢 12s / 显示 0 行 /（已清空）」—— 2026-11-13 现场。
-   *  另外新面板**不会**按插件过滤（`?plugin=` 它不认），所有插件的日志都会推过来，
-   *  所以这里必须自己按 `plugin` 筛。 */
-  function paintPanel(ev) {
-    let d;
-    try {
-      d = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    if (d === null || typeof d !== 'object') return;
-    if (typeof d.plugin === 'string' && d.plugin !== '' && plugin !== '' && d.plugin !== plugin) return;
-    if (typeof d.id === 'number' && d.id > lastId) lastId = d.id;
-    // 面板只有 info/warn/error 三档：我们发出去的 debug/start/success/fail 在适配层
-    // 都被折成 `info` + 文本前缀（`[debug] ` 等）。要还原着色就从前缀认回来。
-    let lv = typeof d.level === 'string' && d.level !== '' ? d.level : 'info';
-    let text = String(d.message ?? '');
-    const m = /^\[(debug|start|ok|fail|fatal|success)\]\s*/.exec(text);
-    if (m !== null) {
-      const tag = m[1] === 'ok' ? 'success' : m[1] === 'fatal' ? 'error' : m[1];
-      lv = tag;
-      text = text.slice(m[0].length);
-    }
-    appendLine(lv, d.ts, text);
   }
 
   /** 页头那句：`插件名 · 显示 N 行 · （状态） · 只显示「筛选」`。
@@ -3118,8 +3097,6 @@ function makeTerm(plugin, el) {
   }
 
   function connect(q) {
-    // 新面板支持 `?since=<id>`：断线重连时把空档补回来（旧面板会忽略这个参数）。
-    if (lastId > 0) q.set('since', String(lastId));
     es = new EventSource('/api/logs/stream?' + q.toString());
     es.addEventListener('notice', (ev) => {
       // 面板会先发一条概况（环里多少行 / 淘汰了多少）。⚠ 这里**只取"淘汰"那一格**：
@@ -3133,26 +3110,8 @@ function makeTerm(plugin, el) {
       }
     });
     es.addEventListener('log', paint);
-    // 新面板（panel-llrt）没有事件名，帧全在默认的 `message` 上
-    es.onmessage = paintPanel;
-    // ⚠ 别只写一句"浏览器会自己接"：EventSource 自动重连**不会**带 `since`，
-    //   断线那段就永久丢了。这里自己关掉、带着游标重开（退避 1s→15s）。
-    es.onerror = () => {
-      setMeta('断了 —— 正在重连');
-      if (es !== null) {
-        es.close();
-        es = null;
-      }
-      const wait = retryMs;
-      retryMs = Math.min(retryMs * 2, 15_000);
-      setTimeout(() => {
-        if (es === null && body.isConnected) connect(q);
-      }, wait);
-    };
-    es.onopen = () => {
-      retryMs = 1000;
-      setMeta('已连上');
-    };
+    es.onerror = () => setMeta('断了 —— 正在重连（浏览器会自己接）');
+    es.onopen = () => setMeta('已连上');
   }
 
   function close() {
@@ -3437,6 +3396,28 @@ function pickerLabel(v, follow) {
   return `${n} 个账号`;
 }
 
+/** 触发按钮上的「选中了什么」——用**标签**说（TDesign 多选的样式），不用一句话。
+ *
+ *  ⚠ 原来按钮上只印一行字（「全部账号」/「2 个账号」）：用户点开面板才知道具体是谁，
+ *  收起来又忘了。标签能一眼看出「这趟跑哪几个号」，多了折成 +N。
+ */
+function pickerTags(v, follow, accounts) {
+  const tag = (text, cls) =>
+    '<span class="ms-tag' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>';
+  if (follow === true) return tag('跟随自动', 'is-polar');
+  if (!v) return tag('…', 'is-polar');
+  if (v.all === true) return tag('全部账号') + tag('新号也算', 'is-polar');
+  const ids = v.ids || v.picked || [];
+  if (ids.length === 0) return tag('没选账号', 'is-polar');
+  const labels = ids.map((id) => {
+    const a = (accounts || []).find((x) => x.id === id);
+    return (a && a.label) || id;
+  });
+  const head = labels.slice(0, 2).map((t) => tag(t)).join('');
+  const more = labels.length > 2 ? tag('+' + (labels.length - 2), 'is-more') : '';
+  return head + more;
+}
+
 function renderPicker(cfg) {
   const all = (last && last.taskAccounts && last.taskAccounts[cfg.task]) || null;
   const v = cfg.mode === 'manual'
@@ -3449,7 +3430,12 @@ function renderPicker(cfg) {
   //   （`legacyAuto` = 这一版还没单独设过、读的是旧键），用户看到它只会猜
   //   "这设置过期了？"或"还有一份新版设置我没找到"。所以按钮保持干净，
   //   "这份是从你以前的设置沿用的"挪进展开面板，那儿有地方说清楚。
-  setText(cfg.label, pickerLabel({ ...v, accounts }, follow));
+  // 触发按钮：标签（TDesign 多选的样子）；收起来也能看出跑哪几个号
+  const labelEl = $(cfg.label);
+  if (labelEl) {
+    labelEl.innerHTML = pickerTags({ ...v, accounts }, follow, accounts);
+    labelEl.title = pickerLabel({ ...v, accounts }, follow);
+  }
   // ⚠ 同理：`${cfg.key}-acct-legacy` 拼出来的是 `daily-manual-acct-legacy`，
   //   HTML 里根本没有这个 id（只有 `daily-acct-legacy`）⇒ 拼出来的写法在 manual
   //   那两条上永远写不到（评审 2026-11-01）。改成表里写死。
@@ -3520,24 +3506,35 @@ function pickerPick(cfg, ev) {
   void savePicker(cfg, false, ids, false).catch((e) => toast(e.message || '没存上', true));
 }
 
+/** 「清空」：一个号都不勾（= 这趟不跑），并把「全部 / 跟随」一起取消。
+ *  这是 TDesign 多选浮层页脚那个「清空」的等价物 —— 手点三个框才回到空，太啰嗦。 */
+function pickerClear(cfg) {
+  void savePicker(cfg, false, [], false).catch((e) => toast(e.message || '没存上', true));
+}
+
 // ── 绑定：每个任务两份，字面 id（静态检查能看出有没有绑）──
 $('daily-acct-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[0], ev));
 $('daily-acct-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[0], ev.currentTarget.checked));
 $('daily-acct-list').addEventListener('change', (ev) => pickerPick(PICKERS[0], ev));
 
+$('daily-acct-clear').addEventListener('click', () => pickerClear(PICKERS[0]));
 $('daily-manual-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[1], ev));
 $('daily-manual-follow').addEventListener('change', (ev) => pickerFollow(PICKERS[1], ev.currentTarget.checked));
 $('daily-manual-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[1], ev.currentTarget.checked));
 $('daily-manual-list').addEventListener('change', (ev) => pickerPick(PICKERS[1], ev));
 
+$('daily-manual-clear').addEventListener('click', () => pickerClear(PICKERS[1]));
 $('live-acct-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[2], ev));
 $('live-acct-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[2], ev.currentTarget.checked));
 $('live-acct-list').addEventListener('change', (ev) => pickerPick(PICKERS[2], ev));
 
+$('live-acct-clear').addEventListener('click', () => pickerClear(PICKERS[2]));
 $('live-manual-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[3], ev));
 $('live-manual-follow').addEventListener('change', (ev) => pickerFollow(PICKERS[3], ev.currentTarget.checked));
 $('live-manual-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[3], ev.currentTarget.checked));
 $('live-manual-list').addEventListener('change', (ev) => pickerPick(PICKERS[3], ev));
+
+$('live-manual-clear').addEventListener('click', () => pickerClear(PICKERS[3]));
 
 document.addEventListener('click', (ev) => {
   if (ev.target.closest('.picker')) return;

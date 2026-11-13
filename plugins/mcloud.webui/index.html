@@ -13,13 +13,13 @@
            的第三方组件（`/vendor/puredashboard/*`）这里**引不到**：
            弹窗用的是面板自己那套 `.dialog*`（在 `components.css` 里），
            与面板的「运行记录」弹窗**是同一个组件**，不是另画一个。 -->
-    <link rel="stylesheet" href="/css/reset.css" />
-    <link rel="stylesheet" href="/css/theme.css" />
-    <link rel="stylesheet" href="/css/components.css" />
-    <link rel="stylesheet" href="style.css" />
+    <!-- 面板 0.4.0 只有一份 /app.css：token（含 [data-theme=dark]）+ 组件（.btn/.card/.field/.pill…）
+         都在里面。旧面板的 /css/reset|theme|components.css 已经不存在了（第 139 轮）。 -->
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="style.css?v=20261113-1945" />
 
     <!-- 主题跟随 + embed 标记，必须赶在第一帧之前（见 boot.js 的文件头） -->
-    <script src="boot.js"></script>
+    <script src="boot.js?v=20261113-1945"></script>
   </head>
   <body>
     <!--
@@ -493,6 +493,10 @@
               <span><b>全部账号</b><br /><span class="hint">定时触发用这一份；以后新登录的账号也一起跑</span></span>
             </label>
             <div class="picker-list" id="daily-acct-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="daily-acct-clear">清空</button>
+            </div>
           </div>
         </div>
         <div class="picker" data-picker="日常-本次">
@@ -509,6 +513,10 @@
               <span><b>全部账号</b><br /><span class="hint">只影响这一次手动运行</span></span>
             </label>
             <div class="picker-list" id="daily-manual-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="daily-manual-clear">清空</button>
+            </div>
           </div>
         </div>
         <!-- 上一次**每个号**的结果：多账号时"哪个号成了"一眼看到，不用翻日志。
@@ -669,6 +677,10 @@
               <span><b>全部账号</b><br /><span class="hint">定时触发用这一份；以后新登录的账号也一起跑</span></span>
             </label>
             <div class="picker-list" id="live-acct-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="live-acct-clear">清空</button>
+            </div>
           </div>
         </div>
         <div class="picker" data-picker="直播-本次">
@@ -685,6 +697,10 @@
               <span><b>全部账号</b><br /><span class="hint">只影响这一次手动运行</span></span>
             </label>
             <div class="picker-list" id="live-manual-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="live-manual-clear">清空</button>
+            </div>
           </div>
         </div>
         <!-- 听弹幕时长：照 mcloud Rust 的「听弹幕时长」参数（5–1800 秒）。
@@ -797,6 +813,6 @@
     </main>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="app.js?v=20261031-2130"></script>
+    <script src="app.js?v=20261113-1945"></script>
   </body>
 </html>
