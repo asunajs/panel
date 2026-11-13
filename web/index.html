@@ -27,6 +27,9 @@
         <div class="sidebar-foot">
           <div class="engine" id="engine-state"><span class="dot dot-idle"></span><span id="engine-text">连接中…</span></div>
           <div class="meta-row"><span id="version">v—</span><span class="sep">·</span><span id="auth-state">未启用令牌</span></div>
+          <!-- 登出（第 92 轮，用户报「没有退出登录」）：原来只在 设置 → 安全 最底下，
+               翻三层才找得到。侧栏底部一直在眼前，放这儿；没启用令牌时（无可登出）隐藏。 -->
+          <button class="btn btn-sm btn-ghost sidebar-logout hidden" id="sidebar-logout" type="button">退出登录</button>
         </div>
       </aside>
       <!-- 窄屏侧栏是浮层：点遮罩 / 按 Esc 都要能收起（第 24 轮用户报「无法收起」——

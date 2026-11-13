@@ -987,3 +987,10 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 @media (max-width: 720px) {
   .icon-btn { width: 40px; height: 40px; }
 }
+
+/* 侧栏底部的「退出登录」（第 92 轮）：要像一条链接/次要按钮，别和上面的版本号抢视线。 */
+.sidebar-logout {
+  width: 100%; justify-content: flex-start; margin-top: 6px;
+  padding: 0 8px; color: var(--dim);
+}
+.sidebar-logout:hover { color: var(--fg); }

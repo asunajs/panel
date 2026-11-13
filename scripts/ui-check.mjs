@@ -278,11 +278,14 @@ async function main() {
     " if(!tr) return false; const b=[...tr.querySelectorAll('button')].find(x=>x.textContent.trim()==='暂停');" +
     " if(!b) return false; b.click(); return true;})()");
   check('能点到「暂停」', pauseClicked === true);
-  await sleep(1500);
-  const paused = await js(
-    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
-    " return tr ? tr.innerText.replace(/\\s+/g,' ') : '';})()");
-  check('暂停后状态变成已暂停', /已暂停|恢复/.test(paused || ''), paused);
+  // 点完要**等状态真的变**：刷新是轮询的（1.5s 只是猜），猜早了就会偶发红（第 92 轮实测撞到一次）。
+  const paused = await waitFor(async () => {
+    const row = await js(
+      "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
+      " return tr ? tr.innerText.replace(/\\s+/g,' ') : '';})()");
+    return /已暂停|恢复/.test(row || '') ? row : null;
+  }, 6000, '任务行变成已暂停').catch(() => null);
+  check('暂停后状态变成已暂停', !!paused, paused || '等了 6 秒还是没变');
 
   // 插件页：种子插件的卡片在，重载不报错
   await js("location.hash = '#plugins'");
@@ -303,12 +306,17 @@ async function main() {
     // 找到 seed 那张卡上的「配置」按钮（按文本找，别依赖位置）
     const card = [...document.querySelectorAll('#plugin-grid .plugin-card')].find((c) => c.innerText.includes('seed'));
     if (!card) return { err: 'no card' };
-    const b = [...card.querySelectorAll('button')].find((x) => x.textContent.trim() === '配置');
-    if (!b) return { err: 'no 配置 button', btns: [...card.querySelectorAll('button')].map((x) => x.textContent.trim()) };
+    // 第 92 轮起卡片上只有「界面 / 详情」：配置和源码都在详情抽屉里。
+    const btns = [...card.querySelectorAll('button')].map((x) => x.textContent.trim());
+    if (btns.length > 2) return { err: '卡片按钮太多了', btns };
+    const b = [...card.querySelectorAll('button')].find((x) => x.textContent.trim() === '详情');
+    if (!b) return { err: 'no 详情 button', btns };
     b.click();
     return { clicked: true };
   })())`);
-  await sleep(1500);
+  await sleep(900);
+  await js("document.querySelector('[data-drawer-tab=config]').click()");
+  await sleep(1200);
   const cfgState = JSON.parse(await js(`JSON.stringify({
     drawer: !document.getElementById('drawer').classList.contains('hidden'),
     tabSelected: document.querySelector('[data-drawer-tab=config]').getAttribute('aria-selected'),
@@ -317,7 +325,7 @@ async function main() {
     path: (document.querySelector('#drawer-config .hint') || {}).textContent || '',
   })`));
   check(
-    '点卡片「配置」打开配置页签（有编辑器、显示落盘路径）',
+    '点卡片「详情」→「配置」页签（有编辑器、显示落盘路径）',
     cfgState.drawer && cfgState.tabSelected === 'true' && cfgState.paneShown && cfgState.hasEditor &&
       /plugin-data/.test(cfgState.path),
     JSON.stringify(cfgState) + ' ' + cfgOpened,

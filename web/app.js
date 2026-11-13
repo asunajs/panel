@@ -634,15 +634,12 @@ function renderPlugins() {
       b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
       return b;
     };
+    // 卡片上只留两个：插件自己的界面（有才有）和「详情」。
+    // 重载/停止/删除/配置/源码都放进详情抽屉 —— 卡片排了 6 个按钮之后，一屏全是按钮，
+    // 反而看不出这个插件是干嘛的（第 92 轮用户的意见）。危险操作也不该就摆在明面上。
     const hasWebui = state.files.some((f) => f.name === p.name && f.webui);
     if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
-    acts.append(
-      mk('编辑', () => { showPlugin(p.name); }),
-      mk('配置', () => showPluginConfig(p.name)),
-      mk('重载', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/reload', '已重载 ' + p.name)),
-      mk('停止', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/stop', '已停止 ' + p.name)),
-      mk('删除', () => deletePlugin(p.name), true),
-    );
+    acts.append(mk('详情', () => showPlugin(p.name)));
     cardEl.append(acts);
     cardEl.addEventListener('click', () => showPlugin(p.name));
     cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
@@ -2200,6 +2197,8 @@ async function refresh() {
     // 进程内告警（磁盘满 / 日志写不进库）：每次刷新都重画，数据没了条就自己消失。
     renderAlerts(data.alerts || []);
     state.auth = !!data.auth;
+    // 有口令才有「登出」可言；无凭据降级态下按了也没意义，索性不显示。
+    $('sidebar-logout').classList.toggle('hidden', !state.auth);
     state.loaded = true;
     $('version').textContent = 'v' + (state.version || '—');
     $('auth-state').textContent = state.auth ? '令牌已启用' : '未启用令牌';
@@ -2803,6 +2802,7 @@ function bind() {
   $('notify-retry').addEventListener('click', retryNotify);
   $('notify-reload').addEventListener('click', renderNotifyTab);
   $('panel-logout').addEventListener('click', logoutPanel);
+  $('sidebar-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
   $('new-plugin-ok').addEventListener('click', createPlugin);

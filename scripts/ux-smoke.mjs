@@ -222,7 +222,9 @@ async function main() {
 
   // ---- 4. 插件自己的配置：卡片「配置」→ 改 → 保存并重载
   await js("(()=>{const c=[...document.querySelectorAll('#plugin-grid .plugin-card')].find(x=>x.innerText.includes('hello'));" +
-    "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='配置').click();})()");
+    "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='详情').click();})()");
+  await sleep(900);
+  await js("document.querySelector('[data-drawer-tab=config]').click()");
   await sleep(1200);
   const cfgPane = await js("!!document.querySelector('#drawer-config textarea.editor')");
   check('④ 卡片「配置」打开编辑器（第三个页签）',
@@ -242,7 +244,7 @@ async function main() {
 
   // ---- 5. 改插件源码
   await js("(()=>{const c=[...document.querySelectorAll('#plugin-grid .plugin-card')].find(x=>x.innerText.includes('hello'));" +
-    "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='编辑').click();})()");
+    "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='详情').click();})()");
   await sleep(1200);
   await js("document.querySelector('[data-drawer-tab=source]').click()");
   await sleep(1200);
@@ -339,6 +341,16 @@ async function main() {
   check('⑫ 设完浮层收起、面板能用',
     (await visible('setup-gate')) === false && (await js("document.querySelectorAll('#cards-engine .card').length")) > 0);
 
+  // ---- 13. 登出（用户报「没有退出登录」）：设置口令之后，侧栏底部要能退出
+  const logoutShown = await js("!document.getElementById('sidebar-logout').classList.contains('hidden')");
+  check('⑬ 有口令时侧栏显示「退出登录」', logoutShown === true, String(logoutShown));
+  await js("document.getElementById('sidebar-logout').click()");
+  await sleep(500);
+  await js("document.getElementById('confirm-ok').click()");
+  await sleep(1200);
+  check('⑬ 点登出后回到令牌门（且服务端确实不认了）',
+    (await visible('gate')) === true && (await fetch(base(PORT_B) + '/api/state')).status === 401,
+    'gate ' + (await visible('gate')));
   // ---- 收尾
   check('整轮没有页面 JS 报错', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 

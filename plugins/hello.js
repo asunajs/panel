@@ -24,7 +24,7 @@ await host.register_handler('tick', async (evt) => {
 });
 
 await host.register_handler('boom', async () => {
-  throw new Error('故意失败，用来看熔断与运行记录');
+  throw new Error('故意失败112，用来看熔断与运行记录');
 });
 
 await host.register_cron('tick', '@every 30s');
