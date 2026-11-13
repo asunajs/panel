@@ -996,3 +996,18 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 删掉 `~/panel-3030/data/auth.json` 再 `launchctl kickstart -k gui/$(id -u)/dev.panel`。
 
 启动到可访问实测 **0.4 秒**（readyz 立刻 200，7 个插件 / 7 个任务全部加载成功）。
+
+### 升级日常实例：`bash scripts/deploy-daily.sh`
+
+一条命令：编 release → 写 `panel.new` → **重新 ad-hoc 签名** → `mv` 换掉 → `kickstart -k` → 等 `/readyz`。
+
+这三步都不是仪式感，各有各的坑（第 131 轮连着踩了两个）：
+
+| 做法 | 不这么做会怎样 |
+|---|---|
+| 先写 `panel.new` 再 `mv` | 直接 `cp` 到正在运行的二进制 = 截断它映射的页面，进程被内核按 code signing 杀掉；launchd 记 `OS_REASON_CODESIGNING`，而 `codesign --verify` 又说文件没问题，很难查 |
+| 落盘后 `codesign --force -s -` | 换过 inode 的新二进制 launchd 可能拒绝启动（手工在终端跑却是好的） |
+| `kickstart -k` 之后等 `/readyz` | 只换文件不重启，跑的还是旧进程，界面上看不到任何变化 |
+
+起不来时先看 `~/panel-3030/data/panel.err.log`，再看 `launchctl print gui/$(id -u)/dev.panel` 里的
+`state` 与 `last exit reason`。

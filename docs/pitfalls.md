@@ -371,3 +371,13 @@
     现在：`top: var(--toast-top)`（桌面 90px、≤620px 124px，让开 sticky 顶栏），动画改成从上落下；
     错误提示的底色从 `--err` + `#fff` 改成 `--err` + `--bg`（主题反色），两套主题对比度都 ≥ 4.5。
     守卫：`ui-check.mjs` 三条（提示条在视口上部 / 暗色对比度 ≥4.5 / 亮色对比度 ≥4.5，都是现算亮度比）。
+
+78. **替换正在运行的二进制 + launchd：`cp` 会把它玩坏，而且报错指向代码签名**：
+    升级 3030 时按老习惯 `cp target/release/panel ~/panel-3030/panel && launchctl kickstart -k`，
+    结果服务再也起不来：`launchctl print` 说 `last exit reason = OS_REASON_CODESIGNING`，
+    可是 `codesign --verify` 又说文件「valid on disk」、手工在终端跑也正常。
+    根因是 `cp` 的语义：打开目标、**截断**、再写。目标正被进程映射，页面被挖掉 → 内核按签名失效杀掉它；
+    之后 launchd 用同一 inode 反复拒绝。
+    正确姿势（已固化成 `scripts/deploy-daily.sh`）：写 `panel.new` → `codesign --force -s -`（重新 ad-hoc 签名）
+    → `mv` 换（换 inode）→ `launchctl kickstart -k` → 轮询 `/readyz` 确认。
+    自查：`launchctl print gui/$(id -u)/dev.panel | grep -E 'state|last exit'` 应是 `running` / `(never exited)`。
