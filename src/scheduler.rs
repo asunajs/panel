@@ -1060,7 +1060,7 @@ impl Inner {
             } => {
                 let blocked = match self.plugins.get(&plugin) {
                     None => Some(format!("插件未加载: {plugin}")),
-                    Some(l) if l.busy => Some(format!("{plugin} 正忙（有任务在跑），稍后再试")),
+                    Some(l) if l.busy => Some(format!("{plugin} 正忙（上一个请求或任务还没跑完），稍后再试")),
                     Some(_) => None,
                 };
                 if let Some(e) = blocked {

@@ -2841,8 +2841,11 @@ function render(r) {
 
 async function load() {
   try {
-    // 排期与读数一起拉：第二行那句「它自己什么时候跑」要真值（见 `scheduleText`）
-    const [r] = await Promise.all([api('/readings'), loadJobs()]);
+    // 排期与读数**串行**拉（第 141 轮）：面板里一个插件只有**一个** JS 执行位，
+    // 同时发两个请求时第二个会立刻拿到 502「正忙」—— 这不是任务在跑，是自己撞自己。
+    // 代价是这两个请求不再并行（各几十毫秒，界面感知不到）。
+    const r = await api('/readings');
+    await loadJobs();
     last = r;
     render(last);
   } catch (e) {
