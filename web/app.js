@@ -1504,6 +1504,27 @@ async function showPlugin(name) {
       ['任务数', tasks.length],
       ['最近运行', (data.runs || []).length + ' 条'],
     ]));
+    // 指标（第 177 轮）：卡片上只有「N 个任务」，看不出最近一周挂了几次。
+    // 拿不到不影响其它操作 —— 统计是附加信息，不是打开抽屉的前提。
+    try {
+      const s = await api('/api/plugins/' + encodeURIComponent(name) + '/stats');
+      const st = (s && s.stats) || {};
+      const win = (w, label) => {
+        const x = st[w] || { total: 0, failed: 0, avg_ms: null };
+        let text = x.total + ' 次';
+        if (x.failed) text += '（失败 ' + x.failed + '）';
+        if (x.avg_ms) text += ' · 平均 ' + x.avg_ms + 'ms';
+        return [label, text];
+      };
+      body.append(el('h3', 'drawer-sub', '指标'));
+      body.append(kvList([win('day', '最近 24 小时'), win('week', '最近 7 天'), win('all', '全部')]));
+      if (st.last_run) {
+        body.append(el('p', 'settings-note', '最近一次运行：' + fmtDateTime(st.last_run)));
+      }
+    } catch (e) {
+      body.append(el('p', 'settings-note', '指标暂时拿不到：' + (e.message || '')));
+    }
+
     const ops = el('div', 'actions');
     const mkOp = (label, fn, danger) => {
       const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
@@ -1684,7 +1705,11 @@ async function openScriptSource(name) {
   $("src-error").classList.add("hidden");
   try {
     const d = await api("/api/scripts/" + encodeURIComponent(name));
-    $("src-text").value = d.source;
+    // 和插件源码共用同一个 #src-text：高亮层必须走 setValue，否则它不会重画
+    // （第 177 轮发现：直接赋值 value 时，行号与高亮还停在上一个插件的内容上）
+    const hl = window.PanelHL ? window.PanelHL.attach($("src-text"), { lang: "js" }) : null;
+    if (hl) hl.setValue(d.source);
+    else $("src-text").value = d.source;
     $("script-cron").value = d.cron || "";
     $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
     $("script-enabled").checked = !!d.enabled;

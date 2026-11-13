@@ -1619,3 +1619,6 @@ select option { background: var(--surface); color: var(--fg); }
 /* 表单 */
 .pform { display: flex; flex-direction: column; gap: 10px; }
 .pform-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+/* 抽屉里的小节标题（第 177 轮） */
+.drawer-sub { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-2); }
