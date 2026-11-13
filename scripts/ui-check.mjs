@@ -709,6 +709,12 @@ async function main() {
     tickInfo.img === true && (tickInfo.after === 'none' || tickInfo.after === 'normal'),
     JSON.stringify(tickInfo),
   );
+  // 空的提示条：插件常把「不提示」写成 toast('')，空卡片会被当成「加载中」
+  const emptyToast = await js(
+    "(()=>{const d=document.createElement('div');d.className='toast';document.body.append(d);" +
+    "const v=getComputedStyle(d).display;d.remove();return v;})()"
+  );
+  check('空的提示条不画出来（.toast:empty）', emptyToast === 'none', String(emptyToast));
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

@@ -205,6 +205,11 @@ function runTask(key) {
 
 function toast(msg, bad) {
   const el = $('toast');
+  // 没有字就别画：一个空的白卡片比不提示更让人困惑（它看起来像「加载中」）。
+  if (!msg) {
+    el.hidden = true;
+    return;
+  }
   el.textContent = msg;
   // 用主面板的提示条组件（`.toast` / `.toast.bad`），不是自己画一个：
   // 同一种"出事了"的提示在全站应该长一样。
@@ -233,7 +238,11 @@ async function act(btn, fn, okMsg) {
   if (!owned) btn.textContent = '…';
   try {
     const r = await fn();
-    toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
+    // ⚠ 空串 = 「这次别提示」（比如切到「数据」页时那次自动取豆）。
+    // 以前这里无条件 toast，于是 `act(..., () => '')` 会在页面顶上一个**没有字的空卡片**
+    // —— 用户看到的就是「啥也没写的提示条」（第 145 轮实测：切 tab 就冒一下）。
+    const msg = typeof okMsg === 'function' ? okMsg(r) : okMsg;
+    if (msg) toast(msg);
     await load();
   } catch (e) {
     toast(String(e && e.message ? e.message : e), true);

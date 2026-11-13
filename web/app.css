@@ -1122,6 +1122,8 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
    而 iframe 引了面板的 /app.css —— 面板的 `.toast` 写了 `display: flex`，
    于是那个本该隐藏的元素变成「一个空白的小圆角卡片」挂在页面上（第 142 轮）。 */
 [hidden] { display: none !important; }
+/* 插件自己画提示条时常把「不提示」写成 `toast('')`：空内容的卡片会被当成「加载中」，别画。 */
+.toast:empty { display: none; }
 
 
 /* ---------- 数字输入：收掉原生步进器，给一个自己的（对齐 TDesign 的 InputNumber） ---------- */
