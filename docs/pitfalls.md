@@ -347,3 +347,10 @@
     顺带把 `--h-control-sm` 28→30px、内边距 9→11px（28px 高 + 12.5px 字在抽屉里显得局促）。
     守卫：`ux-smoke.mjs` ④ 会打开配置页签并点保存（布局塌了按钮点不到就红）；
     实测尺寸：抽屉动作行按钮 74×30、间距 10px；配置页 保存并重载插件 117×32、重新读 65×32。
+
+75. **`service install` 只把 `PANEL_BIND` 写进单元，数据/插件/脚本目录不在里面**：
+    于是「换个数据目录装服务」会静默跑 `./data`（相对 WorkingDirectory）—— 两个实例撞同一个库，
+    或者你以为服务在用独立数据，实际写进了仓库里的 `data/`。第 130 轮装 3030 日常实例时发现。
+    现在 `PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR` 四个都写进 plist 的
+    `EnvironmentVariables`（systemd 那边是 `Environment=`），安装时是什么就是什么，不再靠 cwd 猜。
+    自查：`panel service print` 一眼就能看到四个目录对不对；改目录要重新 install。
