@@ -435,3 +435,15 @@
     判据改回**只看长度**：超过 20 字或带换行 → 常驻；其余 → 居中闪一下（错误用红底）。
     错误里真正需要细看的（路径 / 字节数 / os error）本来就很长，自然落到右边，不用特判。
     守卫：`ui-check.mjs` 加「短错误也只闪一下（红底居中，不进右上角）」，现在 70 条。
+
+85. **插件页 URL 少一个尾斜杠：`style.css` 飞到 `/plugins/style.css`，主题也不跟随**：
+    面板用 iframe 打开 `/plugins/mcloud?embed=1&theme=dark`，插件页里 `<link href="style.css">`、
+    `<script src="boot.js">` 都是**相对路径**，没有尾斜杠时浏览器把 `mcloud` 当成最后一段文件名，
+    于是去请求 `/plugins/style.css`（404）—— 界面上就是「有结构、没样式、主题也不变」，
+    而 `curl` 那一下明明是 200，很误导。
+    现在：`/plugins/<name>` 308 跳到 `/plugins/<name>/`（保留 query），前端也直接带斜杠。
+
+86. **自己的 CSP 把自己的 iframe 挡了**：`x-frame-options: DENY` + `frame-ancestors 'none'` 是给
+    「不许任何站点嵌我」写的；插件界面改成嵌在面板自己的 iframe 里之后，这条把**自家页面**也挡了，
+    用户看到的是一个白板加「损坏文档」图标（第 139 轮第一次跑插件界面就撞上）。
+    改成 `SAMEORIGIN` / `frame-ancestors 'self'`：同源可嵌，外站照旧嵌不了。
