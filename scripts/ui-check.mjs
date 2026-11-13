@@ -715,6 +715,42 @@ async function main() {
     "const v=getComputedStyle(d).display;d.remove();return v;})()"
   );
   check('空的提示条不画出来（.toast:empty）', emptyToast === 'none', String(emptyToast));
+  // 引擎试跑的输出去色：原来写死 #d7dae0（深色控制台的颜色），浅色主题下几乎看不见
+  // 真跑一次（不是塞假节点）：顺便验证试跑本身还是好的
+  await js("location.hash = '#settings'");
+  await sleep(700);
+  await js("document.querySelector('[data-tab=\"general\"]').click()");
+  await sleep(500);
+  await js("document.getElementById('test-run').click()");
+  await sleep(1800);
+  const ran = JSON.parse(await js(
+    "JSON.stringify((()=>{const o=document.getElementById('test-out');" +
+    "return {lines:o.querySelectorAll('.test-line').length,text:(o.textContent||'').trim().slice(0,30)};})())"
+  ));
+  check('设置页的「引擎试跑」能跑出输出', ran.lines >= 1, JSON.stringify(ran));
+  for (const theme of ['light', 'dark']) {
+    await js("document.documentElement.setAttribute('data-theme','" + theme + "')");
+    await sleep(200);
+    const c = JSON.parse(await js(
+      "JSON.stringify((()=>{const o=document.getElementById('test-out');" +
+      "const d=o.querySelector('.test-line');const cs=getComputedStyle(d);" +
+      "const bg=getComputedStyle(o).backgroundColor;" +
+      "const lum=(s)=>{const m=s.match(/[\\d.]+/g);if(!m)return null;" +
+      "const v=m.slice(0,3).map(Number).map(x=>{x/=255;return x<=0.03928?x/12.92:Math.pow((x+0.055)/1.055,2.4);});" +
+      "return 0.2126*v[0]+0.7152*v[1]+0.0722*v[2];};" +
+      "const a=lum(cs.color), b=lum(bg);" +
+      "if(a===null||b===null)return {fg:cs.color,bg:bg,ratio:0};" +
+      "return {fg:cs.color,bg:bg,ratio:Math.round(((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05))*10)/10};})())"
+    ));
+    check('试跑输出对比度 ≥ 4.5（' + (theme === 'dark' ? '暗色' : '亮色') + '主题）', c.ratio >= 4.5, c.fg + ' on ' + c.bg + ' = ' + c.ratio);
+  }
+  await js("document.documentElement.setAttribute('data-theme','light')");
+  // 预算输入框里的原生上下箭头（截图里那个深色小方块）
+  const budgetAppearance = await js(
+    "(()=>{const i=document.getElementById('test-budget');const cs=getComputedStyle(i);" +
+    "return cs.appearance;})()"
+  );
+  check('预算输入框没有原生步进器（appearance: textfield）', budgetAppearance === 'textfield', String(budgetAppearance));
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 
@@ -753,7 +789,10 @@ async function connect(wsUrl) {
     });
   const evaluate = async (expr) => {
     const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error('页面里报错：' + (r.exceptionDetails.text || ''));
+    if (r.exceptionDetails) {
+      const d = r.exceptionDetails.exception || {};
+      throw new Error('页面里报错：' + (d.description || r.exceptionDetails.text || ''));
+    }
     return r.result && r.result.value;
   };
   return {

@@ -951,8 +951,11 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   overflow: auto;
 }
 .test-out:empty { display: none; }
-.test-line { color: #d7dae0; }
-.test-err { color: #ff8b8b; }
+/* ⚠ 这里原来写死 `#d7dae0` / `#ff8b8b` —— 那是给**深色**控制台配的颜色。
+   面板切成浅色之后，这两行就是「浅灰底上的浅灰字」，用户看到的是「啥也没写」（第 146 轮报的）。
+   一律走 token：正常输出用正文色，错误用 --err（两个主题都过 AA）。 */
+.test-line { color: var(--fg); }
+.test-err { color: var(--err); }
 
 /* 通知渠道页 */
 .snippet {
@@ -1130,9 +1133,9 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 
 /* 浏览器自带的上下小箭头：和面板的控件不是一个语言，还窄到几乎点不中。
    一律收掉，要加减就用下面的 .stepper（或插件里的 <p-number>）。 */
-.input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
-.input[type="number"]::-webkit-outer-spin-button,
-.input[type="number"]::-webkit-inner-spin-button {
+input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none; appearance: none; margin: 0;
 }
 
