@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UI 套件 · 插件面板</title>
+<link rel="stylesheet" href="/app.css" />
+<link rel="stylesheet" href="/ui-kit.css" />
+<script src="/theme-boot.js"></script>
+<script src="/highlight.js"></script>
+<script src="/ui.js" defer></script>
+<script src="/ui-kit.js" defer></script>
+</head>
+<body class="kit">
+  <div class="kit-head">
+    <h2 class="kit-title">UI 套件</h2>
+    <span class="chip" id="kit-theme-chip">light</span>
+    <button class="btn btn-sm" id="kit-theme" type="button">切主题</button>
+    <span class="muted">插件页引 /app.css + /highlight.js + /ui.js 就有这些控件；颜色全走 token。</span>
+  </div>
+
+  <div class="kit-grid">
+    <div class="kit-box">
+      <h3>开关</h3>
+      <div class="tag">&lt;p-switch&gt;</div>
+      <div class="row">
+        <p-switch id="k-switch" label="启用定时"></p-switch>
+        <p-switch checked label="默认打开"></p-switch>
+        <p-switch disabled label="禁用"></p-switch>
+      </div>
+    </div>
+
+    <div class="kit-box">
+      <h3>多选</h3>
+      <div class="tag">&lt;p-multiselect&gt;</div>
+      <div class="row">
+        <p-multiselect id="k-msel" placeholder="选几个账号"
+          options='["账号 A","账号 B","账号 C","账号 D"]' value="账号 A"></p-multiselect>
+      </div>
+    </div>
+
+    <div class="kit-box">
+      <h3>页签</h3>
+      <div class="tag">&lt;p-tabs&gt; / &lt;p-tab&gt;</div>
+      <p-tabs id="k-tabs">
+        <p-tab label="概览"><p class="muted">概览这一页的内容</p></p-tab>
+        <p-tab label="账号"><p class="muted">账号这一页的内容</p></p-tab>
+        <p-tab label="日志"><p class="muted">日志这一页的内容</p></p-tab>
+      </p-tabs>
+    </div>
+
+    <div class="kit-box">
+      <h3>表格</h3>
+      <div class="tag">&lt;p-table&gt;</div>
+      <p-table id="k-table" head="名字,状态,最近"
+        rows='[["账号 A","已登录","2 分钟前"],["账号 B","要重登","1 小时前"]]'></p-table>
+    </div>
+
+    <div class="kit-box">
+      <h3>代码块</h3>
+      <div class="tag">&lt;p-code lang="js"&gt;</div>
+      <p-code id="k-code" lang="js">const a = 1; // 高亮
+function f(x) { return "s" + x; }</p-code>
+    </div>
+
+    <div class="kit-box">
+      <h3>表单</h3>
+      <div class="tag">&lt;p-form&gt;</div>
+      <p-form id="k-form" submit-label="提交">
+        <p-field label="名字"><input class="input" name="name" value="demo" /></p-field>
+        <p-field label="并发"><input class="input" type="number" name="n" value="3" /></p-field>
+        <p-field label="开关"><p-switch name="on" checked></p-switch></p-field>
+      </p-form>
+    </div>
+
+    <div class="kit-box">
+      <h3>既有控件（对照）</h3>
+      <div class="tag">&lt;p-select&gt; &lt;p-number&gt; &lt;p-badge&gt; &lt;p-button&gt;</div>
+      <div class="row">
+        <p-select placeholder="选一个"><option value="a">甲</option><option value="b">乙</option></p-select>
+        <p-number value="7"></p-number>
+        <p-badge tone="ok">正常</p-badge>
+        <p-button variant="primary">按钮</p-button>
+      </div>
+    </div>
+  </div>
+
+  <pre id="kit-out" class="muted"></pre>
+</body>
+</html>

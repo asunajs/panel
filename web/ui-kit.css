@@ -1,0 +1,10 @@
+/* UI 套件样板页（第 175 轮）。只排自己的版，不定义任何控件样式 —— 那些在 /app.css。 */
+body.kit { padding: 24px; }
+.kit-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.kit-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.kit-box { padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.kit-box h3 { margin: 0 0 4px; font-size: 14px; }
+.kit-box .tag { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.kit-box .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.kit-box p-tabs, .kit-box p-table, .kit-box p-code, .kit-box p-form { display: block; margin-top: 10px; }
+#kit-out { margin-top: 16px; }

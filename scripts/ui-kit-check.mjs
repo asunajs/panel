@@ -251,8 +251,79 @@ async function main() {
   const tones = JSON.parse(await js(
     "JSON.stringify([...document.querySelectorAll('.stepper')].map(s=>s.className).filter(c=>c.includes('is-')))"
   ));
-  check('三种反馈态都在（ok / warn / err）', 
-    ['is-ok', 'is-warn', 'is-err'].every((c) => tones.some((t) => t.includes(c))), JSON.stringify(tones));
+  check('三种反馈态都在（ok / warn / err）',  ['is-ok', 'is-warn', 'is-err'].every((c) => tones.some((t) => t.includes(c))), JSON.stringify(tones));
+
+  // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
+  await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
+  await sleep(1600);
+  await js("document.getElementById('kit-theme').click()"); // 先切到暗色，顺便验 token 两套都活
+  await sleep(200);
+  check('样例页在', (await js("document.title")).includes('UI 套件'), await js("document.title"));
+  check(
+    '切主题后 data-theme 变了（token 两套都活）',
+    (await js("document.documentElement.getAttribute('data-theme')")) === 'dark',
+  );
+  await js("document.getElementById('kit-theme').click()");
+  await sleep(150);
+
+  // p-switch
+  const sw = JSON.parse(await js(
+    "new Promise((res)=>{const s=document.getElementById('k-switch');" +
+    "const before=s.value;s.addEventListener('change',(e)=>res(JSON.stringify({before,after:s.value,detail:e.detail.value})),{once:true});" +
+    "s.querySelector('.switch-input').click();})"
+  ));
+  check('p-switch 点一下值变了 + 派发 change', sw.before === false && sw.after === true && sw.detail === true, JSON.stringify(sw));
+
+  // p-multiselect
+  const ms = JSON.parse(await js(
+    "(()=>{const m=document.getElementById('k-msel');m.querySelector('.msel-trigger').click();" +
+    "const opts=m.querySelectorAll('.msel-option');opts[1].click();opts[2].click();" +
+    "return JSON.stringify({open:m.querySelector('.msel-panel').hidden===false," +
+    "n:opts.length,chips:m.querySelectorAll('.msel-chip').length,value:m.value});})()"
+  ));
+  check('p-multiselect 能展开、能多选', ms.open && ms.n === 4 && ms.value.length === 3, JSON.stringify(ms));
+  check('p-multiselect 选中项变成 chip', ms.chips === 3, JSON.stringify(ms));
+  // 点外面收起
+  const closed = await js(
+    "(()=>{document.body.click();return document.querySelector('#k-msel .msel-panel').hidden;})()"
+  );
+  check('p-multiselect 点空处收起', closed === true, String(closed));
+
+  // p-tabs
+  const tabs = JSON.parse(await js(
+    "(()=>{const t=document.getElementById('k-tabs');const panes=[...t.querySelectorAll('.tab-pane')];" +
+    "const first=a=>a.map(p=>!p.hidden);const before=first(panes);" +
+    "t.select(2);const after=first(panes);" +
+    "return JSON.stringify({labels:[...t.querySelectorAll('.tabs-bar .tab')].map(b=>b.textContent)," +
+    "before,after,active:t.querySelector('.tabs-bar .tab.active').textContent});})()"
+  ));
+  check('p-tabs 有三个页签', tabs.labels.length === 3, JSON.stringify(tabs.labels));
+  check('p-tabs 切换只显示当前页', tabs.before[0] === true && tabs.after[2] === true && tabs.after[0] === false, JSON.stringify(tabs));
+
+  // p-table
+  const tb = JSON.parse(await js(
+    "(()=>{const t=document.getElementById('k-table');" +
+    "return JSON.stringify({th:t.querySelectorAll('thead th').length,rows:t.querySelectorAll('tbody tr').length," +
+    "cls:t.querySelector('table').className});})()"
+  ));
+  check('p-table 出表头和数据行', tb.th === 3 && tb.rows === 2, JSON.stringify(tb));
+  check('p-table 复用面板的 .table 样式', String(tb.cls).includes('table'), tb.cls);
+
+  // p-code
+  const code = JSON.parse(await js(
+    "(()=>{const c=document.getElementById('k-code');" +
+    "return JSON.stringify({spans:c.querySelectorAll('.code-hl span').length," +
+    "kw:c.querySelector('.tok-kw')!==null,copy:!!c.querySelector('.code-block-bar .btn')," +
+    "lang:c.querySelector('.code-lang').textContent});})()"
+  ));
+  check('p-code 上色了（有 token）', code.spans > 0 && code.kw === true, JSON.stringify(code));
+  check('p-code 有语言标记与复制按钮', code.lang === 'js' && code.copy === true, JSON.stringify(code));
+
+  // p-form
+  const form = await js(
+    "(()=>{const f=document.getElementById('k-form');return JSON.stringify(f.values());})()"
+  );
+  check('p-form 收集到字段值（含 number 与开关）', JSON.parse(form).name === 'demo' && JSON.parse(form).n === 3 && JSON.parse(form).on === true, form);
 }
 
 main()

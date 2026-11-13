@@ -94,6 +94,16 @@ else
   bad 'main.rs 里没有 retention::spawn_ticker —— 运行记录/日志会无限增长'
 fi
 
+# ui.md §7（第 175 轮）：页面响应带 CSP（script-src 'self'），**内联 script/style 不会执行**。
+# 第一次写 /ui-kit 时用了内联，结果「点按钮没反应、localStorage 也是空」，查了半天才想到 CSP。
+INLINE_S=$(grep -rn '<script' web/*.html 2>/dev/null | grep -v 'src=' | wc -l | tr -d ' ')
+INLINE_C=$(grep -rn '<style' web/*.html 2>/dev/null | wc -l | tr -d ' ')
+if [ "$INLINE_S" = "0" ] && [ "$INLINE_C" = "0" ]; then
+  ok '页面里没有内联 script/style（CSP 会静默挡掉，不是「没生效」而是「没执行」）'
+else
+  bad "web/*.html 里有内联 script($INLINE_S) / style($INLINE_C)：CSP 是 script-src 'self'，这些不会执行"
+fi
+
 # ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
 # 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
 if python3 scripts/check-css-tokens.py; then
@@ -104,7 +114,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 12 条坑的守卫全过"
+  echo "ok: 13 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

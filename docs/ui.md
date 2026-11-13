@@ -598,3 +598,28 @@ computed lineHeight / fontSize / padding。
 
 - 输出必须**转义 HTML**（源码里写 `<img onerror=...>» 不能变成标签）；
 - 超过 20 万字符就不再上色（一次换 20 万个 span 会把标签页卡死），退化成纯文本。
+
+## 套件补充控件（第 175 轮）+ /ui-kit 样板页
+
+/ui-kit 是给插件作者看的样板页：每个控件都有活的例子，右上角能切主题。
+（面板自己不用这些控件，所以它不进主导航，直接访问 URL。）
+
+| 元素 | 用法 | 说明 |
+|---|---|---|
+| `p-switch` | `<p-switch checked label="启用">` | 读 `.value`，改它派发 change（detail.value） |
+| `p-multiselect` | `<p-multiselect options='["a","b"]' value="a">` | 多选；选中项变 chip，点空处收起；`.value` 是数组 |
+| `p-tabs` / `p-tab` | `<p-tabs><p-tab label="甲">…</p-tab></p-tabs>` | `.index` / `.select(i)`，切换派发 change |
+| `p-table` | `<p-table head="名字,状态" rows='[["a","ok"]]'>` | 复用面板的 ``.tab`le`；单元格可以是 {text,tone} 变 badge |
+| `p-code` | `<p-code lang="js">`…</`p-code`> | 只读代码块，有 /highlight.js 就上色，带复制按钮 |
+| `p-form` | `<p-form submit-label="保存">`… | `.value`s() 收集带 name 的控件；提交派发 submit |
+
+两个设计约束没变：颜色只走 token；元素内部只包面板已有的 class（`.btn` / ``.tab`le` / `.badge` / `.tab`）。
+
+### 两个踩出来的约束
+
+1. **面板有 CSP（script-src 'self'），内联 `<script>` / `<style>` 不会执行**。
+   样板页第一版就是内联写的：点「切主题」没反应、`localStorage` 空着、控制台也不报错 ——
+   看起来像「代码没跑对」，其实是**根本没跑**。所以它拆成了 `/ui-kit.js` + `/ui-kit.css`，
+   并在 check-pitfalls 里加了守卫：`web/*.html` 里出现内联 script/style 就红。
+2. **`<tr>` 写在自定义元素里会被 HTML 解析器丢掉**（tr 只允许出现在 table 里），
+   所以 `p-table` 用 rows 属性传数据，不再指望子元素。第一次实测是「表头 3 列、数据行 0 行」。

@@ -1531,3 +1531,91 @@ select option { background: var(--surface); color: var(--fg); }
 .tok-key { color: var(--accent); }
 .tok-punc { color: var(--fg-2); }
 [data-theme="dark"] .tok-str { color: var(--ok); }
+
+/* ── UI 套件补充控件（第 175 轮）────────────────────────────────────────────
+   p-switch / p-multiselect / p-tabs / p-table / p-code / p-form。
+   老规矩：颜色只走 token，尺寸只用变量，两套主题自动跟着变。 */
+
+/* 开关 */
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; position: relative; }
+.switch-input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-knob {
+  position: relative; flex: 0 0 auto;
+  width: 34px; height: 20px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  transition: background .15s ease, border-color .15s ease;
+}
+.switch-knob::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--fg-2);
+  transition: transform .15s ease, background .15s ease;
+}
+.switch-input:checked + .switch-knob { background: var(--accent); border-color: var(--accent); }
+.switch-input:checked + .switch-knob::after { transform: translateX(14px); background: var(--accent-fg); }
+.switch-input:focus-visible + .switch-knob { box-shadow: 0 0 0 3px var(--accent-soft); }
+.switch-input:disabled + .switch-knob { opacity: .45; }
+.switch-text { font-size: 13px; color: var(--fg); }
+
+/* 多选 */
+.msel { position: relative; display: inline-block; min-width: 200px; }
+.msel-trigger {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  min-height: var(--h-control-sm); padding: 4px 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); color: var(--fg); font: inherit;
+  cursor: pointer; text-align: left;
+}
+.msel-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.msel-chips { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.msel-ph { color: var(--dim); font-size: 13px; }
+.msel-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px;
+}
+.msel-x { cursor: pointer; opacity: .7; }
+.msel-x:hover { opacity: 1; }
+.msel-caret { color: var(--dim); font-size: 11px; }
+.msel-panel {
+  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0;
+  padding: 4px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); box-shadow: var(--shadow-md);
+  max-height: 220px; overflow: auto;
+}
+.msel-option {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer;
+}
+.msel-option:hover { background: var(--surface-2); }
+.msel-option.is-on { color: var(--accent); }
+.msel-option.is-disabled { opacity: .45; cursor: not-allowed; }
+.msel-tick { width: 12px; visibility: hidden; }
+.msel-option.is-on .msel-tick { visibility: visible; }
+
+/* 页签 */
+.tabs-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.tabs-bar .tab {
+  padding: 6px 10px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--fg-2); font: inherit; cursor: pointer;
+}
+.tabs-bar .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+.tabs-body .tab-pane[hidden] { display: none; }
+
+/* 代码块 */
+.code-block {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2); overflow: hidden;
+}
+.code-block-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 4px 2px 10px;
+  border-bottom: 1px solid var(--line); background: var(--surface);
+}
+.code-lang { font-size: 11px; color: var(--dim); font-family: var(--mono); text-transform: uppercase; }
+.code-block .code-hl { position: static; margin: 0; padding: 10px 12px; overflow: auto; max-height: 340px; }
+
+/* 表单 */
+.pform { display: flex; flex-direction: column; gap: 10px; }
+.pform-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
