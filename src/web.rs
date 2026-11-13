@@ -540,6 +540,9 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/reset", post(task_reset))
         // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
+        // 第 178 轮：删任务（打墓碑）
+        .route("/api/tasks/{plugin}/{name}", axum::routing::delete(task_delete))
+        .route("/api/tasks/{plugin}/{name}/restore", post(task_restore))
         .route("/api/alerts", get(api_alerts))
         .route("/api/alerts/clear", post(api_alerts_clear))
         .route("/api/export.csv", get(api_export_csv))
@@ -1031,7 +1034,12 @@ async fn readyz(State(st): State<AppState>) -> Response {
     let mark = busy.clone();
     let (plugins, tasks) = match tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let p = st.sched.plugins().await.map(|v| v.len()).unwrap_or(0);
-        let t = st.sched.tasks().await.map(|v| v.len()).unwrap_or(0);
+        let t = st
+            .sched
+            .tasks()
+            .await
+            .map(|v| v.iter().filter(|x| !x.deleted).count())
+            .unwrap_or(0);
         (p, t)
     })
     .await
@@ -1267,7 +1275,12 @@ async fn api_health(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
     let outbox_failed = outbox["failed"].as_i64().unwrap_or(0);
     let (db_bytes, wal_bytes) = db_sizes(&st.data_dir);
     let plugins = st.sched.plugins().await.map(|p| p.len()).unwrap_or(0);
-    let tasks = st.sched.tasks().await.map(|t| t.len()).unwrap_or(0);
+    let tasks = st
+        .sched
+        .tasks()
+        .await
+        .map(|t| t.iter().filter(|x| !x.deleted).count())
+        .unwrap_or(0);
 
     let mut warnings: Vec<String> = Vec::new();
     if !failed.is_empty() {
@@ -1915,6 +1928,32 @@ async fn task_reset(
 /// 只换表达式：`runs` / 熔断计数 / 暂停状态全部保留 —— 这正是「编辑」相对
 /// 「删了重建」的意义（删了重建会把运行历史清零）。改完落库，插件热重载和面板
 /// 重启都不会把人的改动冲掉。
+/// DELETE /api/tasks/{plugin}/{name} —— 删掉一条任务（第 178 轮）。
+///
+/// **不抹库**：插件下次注册还会带上这条，抹了就会被「重新注册」复活。所以打墓碑
+/// （tasks.deleted_at），调度器立刻不再触发它，界面归到「已删除」。
+/// 运行记录 / 日志全部保留 —— 删的是任务，不是历史。
+async fn task_delete(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    st.sched.delete_task(&plugin, &name).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "plugin": plugin, "name": name, "deleted": true })))
+}
+
+/// POST /api/tasks/{plugin}/{name}/restore —— 把删掉的任务恢复回来。
+async fn task_restore(
+    State(st): State<AppState>,
+    Path((plugin, name)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    st.sched.restore_task(&plugin, &name).await.map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "plugin": plugin, "name": name, "deleted": false })))
+}
+
 async fn task_schedule(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,

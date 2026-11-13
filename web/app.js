@@ -49,6 +49,8 @@ const state = {
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
   fp: { tasks: '', runs: '' },
   onlyFailed: false,
+  // 任务页是否显示「已删除」（墓碑）的行（第 178 轮）
+  showDeleted: false,
   /** 抽屉当前打开的插件（源码页签保存要用）。 */
   drawerPlugin: null,
   /** 抽屉里放的是插件还是脚本：保存按钮要分流。 */
@@ -900,14 +902,24 @@ async function saveTaskSchedule(expr) {
 function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
+  // 已删除的任务默认不出现（第 178 轮）：它们还在库里（墓碑），只是不调度。
+  const visible = state.tasks.filter((t) => state.showDeleted || !t.deleted);
+  const deletedCount = state.tasks.filter((t) => t.deleted).length;
   const rows = sortBy(
-    state.tasks
+    visible
       .filter((t) => !state.fp.tasks || t.plugin === state.fp.tasks)
       .filter((t) => matches(t.plugin, q) || matches(t.name, q) || matches(t.cron, q)),
     state.sort.tasks,
-    { status: (t) => (t.tripped ? 2 : !t.enabled ? 1 : 0) },
+    { status: (t) => (t.deleted ? 3 : t.tripped ? 2 : !t.enabled ? 1 : 0) },
   );
-  $('tasks-count').textContent = state.tasks.length;
+  $('tasks-count').textContent = visible.length;
+  const toggle = $('tasks-show-deleted');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', state.showDeleted ? 'true' : 'false');
+    toggle.textContent = state.showDeleted
+      ? '隐藏已删除' + (deletedCount ? '（' + deletedCount + '）' : '')
+      : '显示已删除' + (deletedCount ? '（' + deletedCount + '）' : '');
+  }
   clear(body);
   if (!state.tasks.length) {
     body.append(rowMessage('还没有注册任何定时任务', 8, '插件里调 host.register_cron 就会出现在这里'));
@@ -933,6 +945,11 @@ function renderTasks() {
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
     st.append(taskPill(t));
+    if (t.deleted) {
+      const d = pill('pill', '已删除');
+      d.title = '用户删的（插件重新注册也不会复活）。恢复后会从当前时间重算下一拍。';
+      st.append(d);
+    }
     // blockers：插件说「现在还不能跑」的原因（只挡定时触发，手动跑照旧）。
     if (t.blockers && t.blockers.length) {
       const b = pill('pill-warn', '未就绪 ' + t.blockers.length);
@@ -941,6 +958,13 @@ function renderTasks() {
     }
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
+    if (t.deleted) {
+      // 已删除：只剩「恢复」。运行记录、日志都还在，恢复后接着算。
+      const ops = [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]];
+      tr.append(actionsCell(ops));
+      body.append(tr);
+      continue;
+    }
     const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
     if (!t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
     ops.push(t.enabled
@@ -949,10 +973,29 @@ function renderTasks() {
     // 熔断了才给这个按钮：冷却是指数退避，人修好原因之后得有个立刻能恢复的出口
     // （通知里那句「检查完可以手动恢复」指的就是它）。
     if (t.tripped) ops.push(['重置熔断', () => act(taskPath(t, 'reset'), '已重置熔断 ' + t.name)]);
+    ops.push(['删除', () => deleteTask(t)]);
     tr.append(actionsCell(ops));
     body.append(tr);
   }
   sortHeaders('tasks');
+}
+
+/**
+ * 删任务（第 178 轮）。
+ *
+ * 为什么不直接 DELETE 完事：插件下次注册还会带上这条，抹了库就会「复活」。
+ * 服务端打墓碑（deleted_at），这里只需要说清「删了还能恢复」。
+ */
+async function deleteTask(t) {
+  if (!window.confirm('删掉任务 ' + t.plugin + '/' + t.name + '？\n它不会再自动跑；插件重新加载也不会把它带回来。\n运行记录和日志都留着，任务页「显示已删除」里可以恢复。')) return;
+  try {
+    await api('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name), { method: 'DELETE' });
+    notify('已删除 ' + t.name, 'ok');
+    await refresh();
+  } catch (e) {
+    if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+    notify(e.message || '删除失败', 'err');
+  }
 }
 
 function taskPath(t, verb) {
@@ -3376,6 +3419,12 @@ function bind() {
   // Esc 收起浮层侧栏：手机上最常见的「退出去」手势
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && $('sidebar').classList.contains('open')) setSidebar(false);
+  });
+
+  // 任务页「显示已删除」（第 178 轮）：墓碑行默认藏着，点了才列出来
+  $('tasks-show-deleted').addEventListener('click', () => {
+    state.showDeleted = !state.showDeleted;
+    renderTasks();
   });
 
   $('theme-toggle').addEventListener('click', () => {

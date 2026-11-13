@@ -810,6 +810,32 @@ async function main() {
   await js("document.querySelector('#drawer-close') && document.querySelector('#drawer-close').click()");
   await sleep(300);
 
+  // 任务删除 / 恢复（第 178 轮）
+  const delStatus = await js(
+    "fetch('/api/tasks/seed/zz', {method:'DELETE', headers:{'x-panel':'1'}, credentials:'same-origin'}).then(r=>r.status)"
+  );
+  await js("(async () => { await refresh(); return 1; })()");
+  await sleep(400);
+  const hiddenDeleted = await js(
+    "(()=>{const rows=[...document.querySelectorAll('#tasks-body tr')].map(r=>r.textContent);" +
+    "return JSON.stringify({n:rows.length,hasDeleted:rows.some(x=>x.includes('已删除'))," +
+    "toggle:(document.getElementById('tasks-show-deleted')||{}).textContent||''});})()"
+  );
+  const hd = JSON.parse(hiddenDeleted);
+  check('删掉的任务默认不出现（但按钮上标了数量）', delStatus === 200 && !hd.hasDeleted && hd.toggle.includes('显示已删除'), hiddenDeleted);
+  await js("document.getElementById('tasks-show-deleted').click()");
+  await sleep(300);
+  const shownDeleted = await js(
+    "(()=>{const rows=[...document.querySelectorAll('#tasks-body tr')].map(r=>r.textContent);" +
+    "return JSON.stringify({n:rows.length,hasDeleted:rows.some(x=>x.includes('已删除'))," +
+    "hasRestore:rows.some(x=>x.includes('恢复'))});})()"
+  );
+  const sd = JSON.parse(shownDeleted);
+  check('点「显示已删除」能列出它，并且只给「恢复」', sd.hasDeleted && sd.hasRestore, shownDeleted);
+  // 收尾：恢复回去，免得影响后面的检查
+  await js("fetch('/api/tasks/seed/zz/restore', {method:'POST', headers:{'x-panel':'1'}, credentials:'same-origin'}).then(r=>r.status)");
+  await js("(async () => { await refresh(); return 1; })()");
+
   // 插件抽屉的「指标」段（第 177 轮）：卡片给不出「最近一周挂几次」
   await js("(async () => { if (typeof showPlugin === 'function') await showPlugin('seed'); return 1; })()");
   await sleep(900);
