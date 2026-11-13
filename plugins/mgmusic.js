@@ -33,10 +33,9 @@
 //      + 同名的 `register_handler('daily', …)`（新面板的 cron 只登记调度、不绑函数）。
 //      老版的 sign / comment / report 三个 handler **不注册成任务**了 —— 它们在任务页会变成
 //      三行多余的手动任务；现在只走 HTTP 路由（界面按钮打 /plugins/mgmusic/api/{sign,comment,report}）。
-//      摘要不再走 opts（新 opts 只认 params/lead_ms，塞 summary 会被拒），改用
-//      `host.set_job_summary('daily', …)`；⚠ 这个 op **不能在加载期 await**（那时任务还没进
-//      调度器，会抛「没有这个任务: mgmusic/daily」并把整个加载搞挂），所以在 runDaily 进来的
-//      第一件事设（cron 自动跑和手动跑都走这条路）。
+//      **不写任务摘要**（不调 `host.set_job_summary`）：任务行只该有名字/计划/预算/状态，
+//      每次跑出来的一串数字属于「运行记录」和日志 —— 写进任务行看着就像漏出来的日志
+//      （用户 2026-11-13 指出）。老版塞在 `register_cron` opts 里的 summary 也就此丢掉。
 //   6. **nav**：`register_nav` → `await host.sidebar({ title: '咪咕音乐', order: 80 })`；
 //      `worker_hint('exclusive')` 删掉（新面板一插件一 runtime）。
 //   7. **定时器**：新面板 `setInterval` 直接抛错、`setTimeout` 上限 5000ms。老代码只用
@@ -68,9 +67,6 @@ import host from 'panel:host';
 
 const VERSION = '0.4.0';
 const PLUGIN = 'mgmusic';
-// 卡片上的描述型摘要（老面板写在 register_cron 的 opts.summary 里；0.4.x 没有这个字段，
-// 改由 set_job_summary 在首次运行时设，见注册段与 runDaily 的注释）。
-const DAILY_SUMMARY = '每日 00:05/12:05/22:05 签到 + 听歌补报';
 const API = '/plugins/mgmusic/api'; // 老面板用它拼 register_route；0.4.x 由 evt.rel 分发，这里只作说明
 const RUN_BUDGET_MS = 100000; // 面板 cron 预算 120s，内部留 20s 收尾
 
@@ -1624,25 +1620,12 @@ function logLines(lines) {
     }
 }
 
-/** 任务摘要：新面板是 async op，而且不再走 register_cron 的 opts.summary。 */
-async function updateJobSummary(text) {
-    try {
-        await host.set_job_summary('daily', text);
-    } catch (e) {
-        warn('[mgmusic] 更新任务摘要失败: ' + (e && e.message ? e.message : e));
-    }
-}
-
 async function runDaily() {
     const started = Date.now();
-    // 装载描述型摘要（老面板由 register_cron 的 opts.summary 完成）。放在这里是因为
-    // 加载期调用 set_job_summary 会因「任务还没注册进调度器」而抛错；这里任务一定在。
-    await updateJobSummary(DAILY_SUMMARY);
     const cfg = loadConfig();
     if (!cfg.devices.length) {
         const line = '[mgmusic] 未配置 devices，跳过';
         warn(line);
-        await updateJobSummary('未配置账号');
         return { ok: true, skipped: true, lines: [line] };
     }
 
@@ -1694,7 +1677,8 @@ async function runDaily() {
         + ' · 完成 ' + done + '/' + total
         + ' · 领取 +' + claimed
         + (failedDevices > 0 ? (' · 失败 ' + failedDevices) : '');
-    await updateJobSummary(short);
+    // ⚠ 这一行**不**回写任务摘要（见文件头第 5 条的说明）：任务表只放名字/计划/预算/状态，
+    // 每次跑的数字在「运行记录」和日志里，混进任务行会被当成日志。
 
     if (failedDevices > 0) {
         const err = new Error(failedDevices + '/' + cfg.devices.length + ' 个账号失败');
@@ -2112,11 +2096,10 @@ await host.register_handler('daily', function () {
     return runDaily();
 });
 //
-// ⚠ 摘要不能用 `await host.set_job_summary('daily', …)` 在**加载期**设：新面板在
-// Cmd::Load 里同步 await 插件加载，register_cron 的消息要等加载返回才被调度器消费，
-// 此刻调用会抛「没有这个任务: mgmusic/daily」，整个插件加载失败（实测踩到）。
-// 所以描述型摘要放到 daily 跑起来的第一秒设（见 runDaily 里的 DAILY_SUMMARY），
-// 之后由每次运行结束时的结果摘要覆盖 —— 落库，重载/重启都留住。
+// 摘要一律不写（连描述型也不写）：任务表保持和 mcloud 那几条一样干净。
+// 顺带记一条坑：`set_job_summary` **不能在加载期 await** —— `Cmd::Load` 同步 await 插件加载，
+// register_cron 的消息要等加载返回才被调度器消费，此刻调用会抛「没有这个任务: mgmusic/daily」
+// 并把整个插件加载搞挂（实测踩到过）。真要用它也请等第一次运行。
 
 // ⚠ **只登记一条任务**（用户 2026-11-13 指出：「咪咕音乐应该只有一个每日任务才对」）。
 //
