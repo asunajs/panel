@@ -177,6 +177,12 @@ struct Task {
     schedule: Option<Schedule>,
     budget_ms: u64,
     enabled: bool,
+    /// 用户删掉的时刻（第 178 轮）。None = 没删。
+    ///
+    /// 删掉不等于从库里抹掉：插件下次注册还会带上这条，没有墓碑的话它就会
+    /// 「自己复活」—— 用户删三次复活三次。删除的任务仍在 self.tasks 里
+    /// （内存结构完整），只是不调度、界面归到「已删除」。
+    deleted_at: Option<i64>,
     /// 理论线自己走，抖动只加在实际那一份上 —— 否则抖动会累积成随机游走。
     base_fire: DateTime<Local>,
     next_fire: DateTime<Local>,
@@ -254,6 +260,7 @@ impl Task {
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
             enabled: true,
+            deleted_at: None,
             base_fire: base,
             next_fire: next,
             consecutive_failures: 0,
@@ -285,6 +292,7 @@ impl Task {
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
             enabled: true,
+            deleted_at: None,
             base_fire: far,
             next_fire: far,
             consecutive_failures: 0,
@@ -385,6 +393,8 @@ pub struct TaskView {
     pub manual: bool,
     pub budget_ms: u64,
     pub enabled: bool,
+    /// 用户删过（墓碑）。界面默认不显示，带 deleted=1 才列出来。
+    pub deleted: bool,
     pub next_at: i64,
     pub tripped: bool,
     pub trips: u32,
@@ -515,6 +525,18 @@ pub enum Cmd {
         plugin: String,
         task: String,
         enabled: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 用户删任务（第 178 轮）：打墓碑，不抹库。
+    DeleteTask {
+        plugin: String,
+        task: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 用户恢复删掉的任务：清墓碑 + 重算下一拍。
+    RestoreTask {
+        plugin: String,
+        task: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Tasks {
@@ -723,6 +745,28 @@ impl Scheduler {
     }
 
 
+    /// 删掉一条任务（打墓碑，不抹库）。见 Task::deleted_at。
+    pub async fn delete_task(&self, plugin: &str, task: &str) -> Result<(), String> {
+        let (plugin, task) = (plugin.to_string(), task.to_string());
+        self.call(|reply| Cmd::DeleteTask {
+            plugin,
+            task,
+            reply,
+        })
+        .await?
+    }
+
+    /// 恢复一条删掉的任务。
+    pub async fn restore_task(&self, plugin: &str, task: &str) -> Result<(), String> {
+        let (plugin, task) = (plugin.to_string(), task.to_string());
+        self.call(|reply| Cmd::RestoreTask {
+            plugin,
+            task,
+            reply,
+        })
+        .await?
+    }
+
     /// 插件在运行期改自己任务的状态（暂停/摘要/blockers/调度+提前量）。
     pub async fn set_job_state(&self, plugin: &str, name: &str, op: JobOp) -> Result<(), String> {
         let (plugin, name) = (plugin.to_string(), name.to_string());
@@ -886,6 +930,8 @@ struct PersistJob {
     summary: Option<String>,
     blockers: String,
     lead: Option<i64>,
+    /// NULL = 没删；有值 = 删除时刻（毫秒）。
+    deleted_at: Option<i64>,
 }
 
 /// 起调度器。`config` 是所有插件共享的只读配置（`host.config()`）。
@@ -942,14 +988,15 @@ pub fn start(
             let _ = pdb
                 .call(move |c| {
                     c.execute(
-                        "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                        "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms,deleted_at)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
                          ON CONFLICT(plugin,name) DO UPDATE SET
                            cron=excluded.cron, budget_ms=excluded.budget_ms,
                            enabled=excluded.enabled, next_at=excluded.next_at,
                            override_expr=excluded.override_expr, summary=excluded.summary,
-                           blockers=excluded.blockers, lead_ms=excluded.lead_ms",
-                        rusqlite::params![j.plugin, j.name, j.cron, j.budget, j.enabled, j.next, j.ov, j.summary, j.blockers, j.lead],
+                           blockers=excluded.blockers, lead_ms=excluded.lead_ms,
+                           deleted_at=excluded.deleted_at",
+                        rusqlite::params![j.plugin, j.name, j.cron, j.budget, j.enabled, j.next, j.ov, j.summary, j.blockers, j.lead, j.deleted_at],
                     )
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -1018,6 +1065,8 @@ struct SavedTask {
     blockers: Vec<String>,
     /// `None` = 面板没改过提前量（库里存 NULL），注册时用插件的默认值。
     lead_ms: Option<u64>,
+    /// 用户删过这条（毫秒时间戳）。注册时必须尊重它，否则插件一注册就「复活」。
+    deleted_at: Option<i64>,
 }
 
 async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
@@ -1025,10 +1074,19 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
         .call(|c| {
             let mut st = c
                 .prepare(
-                    "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms FROM tasks",
+                    "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms,deleted_at FROM tasks",
                 )
                 .map_err(|e| e.to_string())?;
-            let out: Vec<(String, String, Option<String>, i64, Option<String>, String, Option<i64>)> = st
+            let out: Vec<(
+                String,
+                String,
+                Option<String>,
+                i64,
+                Option<String>,
+                String,
+                Option<i64>,
+                Option<i64>,
+            )> = st
                 .query_map([], |r| {
                     Ok((
                         r.get(0)?,
@@ -1038,6 +1096,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         r.get(4)?,
                         r.get(5).unwrap_or_else(|_| "[]".to_string()),
                         r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<i64>>(7)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
@@ -1049,7 +1108,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
     match rows {
         Ok(list) => list
             .into_iter()
-            .map(|(p, n, ov, en, sum, bl, lead)| {
+            .map(|(p, n, ov, en, sum, bl, lead, del)| {
                 (
                     (p, n),
                     SavedTask {
@@ -1058,6 +1117,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         summary: sum,
                         blockers: serde_json::from_str(&bl).unwrap_or_default(),
                         lead_ms: lead.map(|v| v.max(0) as u64),
+                        deleted_at: del,
                     },
                 )
             })
@@ -1070,7 +1130,8 @@ impl Inner {
     fn sleep_hint(&self, now: DateTime<Local>) -> Duration {
         let mut best: Option<DateTime<Local>> = None;
         for t in &self.tasks {
-            if !t.enabled
+            if t.deleted_at.is_some()
+                || !t.enabled
                 || t.in_flight
                 || t.schedule.is_none()
                 || !self.plugins.contains_key(&t.plugin)
@@ -1227,7 +1288,11 @@ impl Inner {
                         name: name.clone(),
                         group: crate::plugin_group(name),
                         busy: l.busy,
-                        tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
+                        tasks: self
+                            .tasks
+                            .iter()
+                            .filter(|t| &t.plugin == name && t.deleted_at.is_none())
+                            .count(),
                         has_web: self.web.contains(name),
                         nav: self.sidebar.get(name).cloned(),
                         unloaded: false,
@@ -1239,7 +1304,11 @@ impl Inner {
                         name: name.clone(),
                         group: crate::plugin_group(name),
                         busy: false,
-                        tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
+                        tasks: self
+                            .tasks
+                            .iter()
+                            .filter(|t| &t.plugin == name && t.deleted_at.is_none())
+                            .count(),
                         has_web: self.web.contains(name),
                         nav: self.sidebar.get(name).cloned(),
                         unloaded: true,
@@ -1452,6 +1521,72 @@ impl Inner {
                 };
                 let _ = reply.send(out);
             }
+            Cmd::DeleteTask {
+                plugin,
+                task,
+                reply,
+            } => {
+                let out = match self.find(&plugin, &task) {
+                    None => Err(format!("没有这个任务: {plugin}/{task}")),
+                    Some(i) => {
+                        self.tasks[i].deleted_at = Some(Local::now().timestamp_millis());
+                        // 计划线推到很远：即便有哪条路径漏了 deleted_at 判断，也不会真跑
+                        self.tasks[i].next_fire =
+                            Local::now() + ChronoDuration::days(FALLBACK_DAYS);
+                        self.persist_task(i);
+                        self.log.emit(
+                            &plugin,
+                            None,
+                            Level::Info,
+                            format!(
+                                "任务 {task} 已删除（插件再注册也不会自动复活；在任务页「已删除」里可以恢复）"
+                            ),
+                        );
+                        Ok(())
+                    }
+                };
+                let _ = reply.send(out);
+            }
+            Cmd::RestoreTask {
+                plugin,
+                task,
+                reply,
+            } => {
+                let out = match self.find(&plugin, &task) {
+                    None => Err(format!("没有这个任务: {plugin}/{task}")),
+                    Some(i) => {
+                        self.tasks[i].deleted_at = None;
+                        // 删除期间计划线没走，恢复时按当前调度重算，别补跑积压
+                        let expr = self.tasks[i]
+                            .override_expr
+                            .clone()
+                            .unwrap_or_else(|| self.tasks[i].base_cron.clone());
+                        if !expr.is_empty() {
+                            match self.tasks[i].set_schedule(&expr) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    self.log.emit(
+                                        &plugin,
+                                        None,
+                                        Level::Warn,
+                                        format!("任务 {task} 恢复时调度算不出来（{e}），先按手动任务放着"),
+                                    );
+                                    self.tasks[i].schedule = None;
+                                }
+                            }
+                        }
+                        self.persist_task(i);
+                        self.log.emit(
+                            &plugin,
+                            None,
+                            Level::Info,
+                            format!("任务 {task} 已恢复"),
+                        );
+                        Ok(())
+                    }
+                };
+                let _ = reply.send(out);
+            }
             Cmd::SetEnabled {
                 plugin,
                 task,
@@ -1497,8 +1632,9 @@ impl Inner {
                 manual: t.schedule.is_none(),
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
+                deleted: t.deleted_at.is_some(),
                 // 暂停的任务不报「下次运行」：界面上「已暂停」旁边挂一个未来时间只会让人以为它要跑。
-                next_at: if t.enabled {
+                next_at: if t.enabled && t.deleted_at.is_none() {
                     t.next_fire.timestamp_millis()
                 } else {
                     0
@@ -1566,6 +1702,7 @@ impl Inner {
                 summary: t.summary.clone(),
                 blockers: t.blockers.clone(),
                 lead_ms: saved_lead(t.lead_override, t.lead_ms),
+                deleted_at: t.deleted_at,
             },
         );
     }
@@ -1577,6 +1714,8 @@ impl Inner {
             return;
         };
         self.tasks[i].enabled = s.enabled;
+        // 墓碑优先于插件注册：用户删过的任务，插件再注册也不复活（第 178 轮）
+        self.tasks[i].deleted_at = s.deleted_at;
         self.tasks[i].summary = s.summary;
         self.tasks[i].blockers = s.blockers;
         if let Some(l) = s.lead_ms {
@@ -1699,6 +1838,8 @@ impl Inner {
             // 只有面板改过的提前量才落库：插件注册给的是默认值，重启时应当以插件
             // 当时的注册为准（插件可能在两次启动之间改了 lead_ms）。
             lead: saved_lead(t.lead_override, t.lead_ms).map(|v| v as i64),
+            // 墓碑时刻落库：重启、插件重载之后都要认它
+            deleted_at: t.deleted_at,
         };
         let (p, n) = (job.plugin.clone(), job.name.clone());
         if self.persist.send(job).is_err() {
@@ -1777,7 +1918,7 @@ impl Inner {
             let next_due = self
                 .tasks
                 .iter()
-                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some())
+                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some() && t.deleted_at.is_none())
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
             if !should_idle_unload(now, last, idle, busy, next_due, IDLE_WAKE_WINDOW_MS) {
@@ -1816,7 +1957,7 @@ impl Inner {
             let next = self
                 .tasks
                 .iter()
-                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some())
+                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some() && t.deleted_at.is_none())
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
             let Some(next) = next else { continue };
@@ -1871,7 +2012,7 @@ impl Inner {
         // 这些拍会被跳过 —— 必须说出来，否则用户只会看到「有的整点任务没跑」，无从下手。
         for i in 0..self.tasks.len() {
             let t = &self.tasks[i];
-            if !t.enabled || t.schedule.is_none() || trigger_at(t) > now {
+            if t.deleted_at.is_some() || !t.enabled || t.schedule.is_none() || trigger_at(t) > now {
                 continue;
             }
             let busy = self

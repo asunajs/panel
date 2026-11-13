@@ -157,6 +157,8 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         ("summary", "ALTER TABLE tasks ADD COLUMN summary TEXT"),
         ("blockers", "ALTER TABLE tasks ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]'"),
         ("lead_ms", "ALTER TABLE tasks ADD COLUMN lead_ms INTEGER"),
+        // 第 178 轮：任务删除的墓碑（NULL = 没删）。插件重载时靠它判断「这条是用户删的」
+        ("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at INTEGER"),
     ] {
         if !has_column(conn, "tasks", col)? {
             conn.execute(ddl, [])
