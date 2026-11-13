@@ -34,7 +34,10 @@ if [ -n "$DIRTY" ]; then
   echo "去 ~/mobile/workspace/mcloud-plugin 改源，npm run build:panelllrt 之后再部署。" >&2
   exit 1
 fi
-UNTRACKED="$(git status --porcelain -- plugins/ 2>/dev/null | grep ^?? | sed 's/^?? *//')"
+# ⚠ `grep` 没匹配时退出码 1，`set -euo pipefail` 会把这一行**赋值**判成失败 ——
+# 表现是「没有任何输出 + exit 1」，像被谁杀了（2026-11-13 撞到）。没有未跟踪文件是正常情况，
+# 所以末尾必须 `|| true`。
+UNTRACKED="$(git status --porcelain -- plugins/ 2>/dev/null | grep ^?? | sed "s/^?? *//" || true)"
 if [ -n "$UNTRACKED" ]; then
   echo "注意：plugins/ 里有未跟踪的文件，会一起同步到实例：" >&2
   echo "$UNTRACKED" | sed "s/^/  · /" >&2
