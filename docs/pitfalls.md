@@ -407,3 +407,16 @@
     守卫：`ui-check.mjs` 四条（走常驻通道 / 贴右上角 / 5 秒后还在 / 能手动关掉）。
     顺带修了 ui-check 自己的两处脆弱：`js` 是 `main()` 里的局部量（助手函数必须放在同一作用域）；
     日志筛选断言把「共 200 条」写死了（error 少于 200 时必红）。
+
+82. **launchd 的后台进程读不到「挂在 home 里的另一个卷」，而且是**静默**失败**：
+    3030 的插件目录指向仓库 `/Users/catlair/mobile/workspace/panel-llrt/plugins`（独立 APFS 卷）。
+    服务化运行后：`/healthz` 200、界面能打开、`/readyz` 说 `plugins: 0`，日志一个字都没有。
+    同一个二进制、同样的环境变量在终端里跑就正常加载 4 个插件 —— 差别只在「谁来启动它」。
+    这是 macOS 的卷访问保护（TCC）挡后台代理：`open()`/遍历直接卡住等授权，
+    而旧代码的 `while let Ok(Some(entry)) = next_entry().await` 把**遍历中途的错误当成结束**，
+    于是「读不到 == 空目录」→ 一个插件都不加载，也不留话。
+    修法三条：①遍历改成 `loop { match next_entry() }`，`Err` 要写日志（已读到几个、路径、错误）；
+    ②一个 `.js` 都没找到也写一条 Warn（「目录为空，或这个进程读不到它」）；
+    ③日常实例的插件搬到系统盘 `~/panel-3030/plugins`（同步命令见 daily.md）。
+    顺带：`scripts/deploy-daily.sh` 里**去掉** `codesign --force`！换签名 = 换代码身份，
+    会让 macOS 重新问一次卷授权（后台进程问不了就会卡住）—— 不重签照样能起。

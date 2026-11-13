@@ -81,3 +81,20 @@ readyz   ~100 秒才回（挂在 actor 后面）→ 反代看到的是「超时�
 现在最多等 2 秒，超时就明确回 **503** + `error: "调度器在忙（多半在加载插件），稍后再试"`。
 语义回到「现在别把流量给我」，而不是把探测请求吊死。部署脚本也据此分两段等：
 先等 `healthz`，再等 `readyz`（最多 120 秒）。
+
+### 3030 的插件目录：`~/panel-3030/plugins`（不是仓库里的 plugins/）
+
+**为什么要拷一份**：仓库在 `/Users/catlair/mobile/...`，那是一个独立 APFS 卷。launchd 里的用户级
+后台进程读这个卷**会被 macOS 的卷访问保护挡住**（表现是 open/遍历直接卡住，不是报错）——
+于是「服务起来了、界面能开，但一个插件都没加载」，日志里连一行都没有（旧代码把遍历中途的
+错误当成了「目录结束」，见 pitfalls 第 82 条）。把插件放到系统盘就完全没这问题。
+
+**插件改了怎么同步**（仓库是源，3030 用快照）：
+
+```bash
+cp /Users/catlair/mobile/workspace/panel-llrt/plugins/*.js ~/panel-3030/plugins/
+cp -R /Users/catlair/mobile/workspace/panel-llrt/plugins/mcloud.webui ~/panel-3030/plugins/
+launchctl kickstart -k gui/$(id -u)/dev.panel     # 或者在上界面里点「重载」
+```
+
+数据目录（`~/panel-3030/data`）、脚本目录（`~/panel-3030/scripts`）本来就在系统盘，不受影响。

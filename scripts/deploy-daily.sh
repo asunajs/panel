@@ -6,8 +6,9 @@
 #      页面挖掉，内核会按 code signing 失效把进程杀掉（launchd 记 last exit reason =
 #      OS_REASON_CODESIGNING，而 codesign --verify 又显示文件是好的，很迷惑）。
 #      所以先写 panel.new，再用 mv 换（换 inode）。
-#   2) 每次重新落盘后要**重新 ad-hoc 签名**（codesign --force -s -）：
-#      launchd 起进程对签名比手工在终端跑严格，重新签名这一步让它能过。
+#   2) **不要**重新签名（codesign --force）：签名一换，macOS 就把这个二进制当成另一个程序，
+#      受保护路径（外部卷等）会重新走一次授权询问；launchd 里的后台进程问不了人，于是卡住
+#      —— 表现成「服务起来了但插件一个都不加载」（第 134 轮踩了两次才发现）。
 #   3) 换完必须 kickstart 一次；只改文件不重启，跑的还是旧进程。
 #
 # 等待分两段（第 132 轮）：
@@ -25,7 +26,8 @@ cd "$ROOT"
 cargo build --release --offline
 
 cp target/release/panel "$DEST/panel.new"
-codesign --force --sign - "$DEST/panel.new" 2>/dev/null || true
+# **不要**顺手 codesign --force：换签名 = 换代码身份，macOS 会重新问一次「能不能访问那个卷」，
+# 而 launchd 里的后台进程问不了（会卡住）。第 134 轮实测：不重签照样能起。
 mv "$DEST/panel.new" "$DEST/panel"
 
 launchctl kickstart -k "gui/$(id -u)/$LABEL"

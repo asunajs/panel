@@ -169,7 +169,23 @@ async fn main() -> Result<(), String> {
     let load_errors: web::LoadErrors = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::HashMap::new(),
     ));
-    load_all(&plugins_dir, &sched, &log, &db, &load_errors).await;
+    // ⚠ 插件加载**不能挡在监听之前**（第 134 轮实测）：插件在加载期求值顶层代码，
+    // mcloud 那几个会打网络；网络卡住时整个进程连端口都不绑 —— 面板在用户眼里是「死了」，
+    // 而真相只是某个插件还在等 TCP。现在先把监听起来，插件在后台加载，
+    // 加载进度照旧写日志，界面能立刻打开（这时插件列表会短暂显示「未加载」）。
+
+
+    // 插件在后台加载：监听先起来，界面立刻能打开。
+    let plugins_dir_for_load = plugins_dir.clone();
+    let _load_task = {
+        let sched = sched.clone();
+        let log = log.clone();
+        let db = db.clone();
+        let errs = load_errors.clone();
+        tokio::spawn(async move {
+            load_all(&plugins_dir_for_load, &sched, &log, &db, &errs).await;
+        })
+    };
 
     let auth_on = provisioned.auth.is_some();
     if !auth_on {
@@ -245,16 +261,45 @@ async fn load_all(
         }
     };
     let mut names = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("js") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            names.push(stem.to_string());
+    // ⚠ 不能用 `while let Ok(Some(entry)) = next_entry()`：遍历中途出错会被**静默当成结束**。
+    // 第 134 轮就是栽在这里 —— 服务化跑（launchd）时插件目录遍历报了错（外部卷权限/TCC 一类），
+    // 结果「一个插件都没加载」且日志里一个字都没有，看着像面板坏了，实际是读目录失败。
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("js") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                log.emit(
+                    "panel",
+                    None,
+                    Level::Warn,
+                    format!(
+                        "遍历插件目录 {} 出错（已读到 {} 个 .js，后面不再尝试）: {e}",
+                        dir.display(),
+                        names.len()
+                    ),
+                );
+                break;
+            }
         }
     }
     names.sort();
+    if names.is_empty() {
+        log.emit(
+            "panel",
+            None,
+            Level::Warn,
+            format!("插件目录 {} 里没有 .js 文件（目录为空，或这个进程读不到它）", dir.display()),
+        );
+    }
     // 界面上禁用过的插件不再加载（持久状态，不是这次进程的临时决定）。
     let disabled = db::plugin_disabled_names(db).await;
     for name in names {
@@ -275,7 +320,30 @@ async fn load_all(
                 continue;
             }
         };
-        match sched.load(&name, source).await {
+        // 单个插件的加载也要有上限：插件在加载期跑顶层代码，可能 await 一个没有超时的网络调用。
+        // 没有这一层，一个插件卡住 = 后面的插件永远不加载 + 启动永远不结束（第 134 轮实测）。
+        // 60 秒对「读配置 + 建路由 + 打一次 API」足够宽；超时算加载失败，界面能看到原因。
+        let loaded = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            sched.load(&name, source),
+        )
+        .await;
+        let loaded = match loaded {
+            Ok(r) => r,
+            Err(_) => {
+                log.emit(
+                    "panel",
+                    None,
+                    Level::Error,
+                    format!("插件 {name} 加载超过 60 秒没结束，已跳过（多半卡在顶层 await 的网络调用上）"),
+                );
+                if let Ok(mut g) = errors.lock() {
+                    g.insert(name.clone(), "加载超时（60s）".to_string());
+                }
+                continue;
+            }
+        };
+        match loaded {
             Ok(()) => {
                 if let Ok(mut g) = errors.lock() {
                     g.remove(&name);
