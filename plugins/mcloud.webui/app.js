@@ -26,7 +26,7 @@
 // 页面版本号：和 style.css 里的 --style-ver 一起人工递增。
 // 「样式自检」（boot.js 的 ?diag=1）会读它 —— 用来区分「CSS 是新的、JS 还是旧的」这种
 // 半新半旧状态（第 155 轮：样式表是 v155，但 DOM 里根本没有 .ex-group-row 这种行）。
-document.documentElement.dataset.appVer = '155';
+document.documentElement.dataset.appVer = '158';
 
 /** 插件自己的接口。 */
 const API = '/plugins/mcloud/api';
@@ -2947,21 +2947,15 @@ function makeTerm(plugin, el) {
   const { body, meta, follow, level, clear } = el;
   let es = null;
   let lines = 0;
+  /** 新面板的日志自增 id：重连时 `?since=` 把断线那段补回来（面板原生支持）。 */
+  let lastId = 0;
+  let retryMs = 1000;
   /** **屏上摆着几行**（只数 `.term-line`，不含分界线与空态那句）。
    *  页头那个数报的是它 —— 跟着级别筛选、也跟着 400 行上限。 */
   let shown = 0;
 
   /** 把一行日志画上去。⚠ 一律走 `textContent`（日志里有用户可控的字符串）。 */
-  function paint(ev) {
-    let d;
-    try {
-      d = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    // SSE 的 `type` 才是语义类型（start/success/fail）；`level` 只是过滤档位。
-    // 历史（/log/tail）没有 `type`，它把类型放在 `level` 里。
-    const lv = d.type || d.level || 'info';
+  function appendLine(lv, tsRaw, text) {
     if (!levelPasses(lv)) return;
     const empty = body.querySelector('.term-empty');
     if (empty) empty.remove();
@@ -2971,14 +2965,25 @@ function makeTerm(plugin, el) {
     ts.className = 'term-ts';
     // 面板给的是 `2026-10-17 10:50:42.498`；我们铺历史时给的是已经切好的 `10:50:42.498`。
     // 两种都要能吃（`slice(11)` 对后者会把时分秒切掉）。
-    const raw = String(d.ts || '');
-    ts.textContent = (/^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(11) : raw) + ' ';
+    // 三种来路都要吃得下：
+    //   ① 旧面板 SSE：`2026-10-17 10:50:42.498`
+    //   ② 我们铺的历史（/log/tail）：已经切好的 `10:50:42.498`
+    //   ③ **新面板**：`ts` 是 **epoch 毫秒数**（如 1794578027097）—— 直接 slice 会显示成一串数字
+    const raw = String(tsRaw ?? '');
+    let stamp = raw;
+    if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+      stamp = raw.slice(11);
+    } else if (/^\d{13}$/.test(raw)) {
+      const d = new Date(Number(raw));
+      stamp = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+    }
+    ts.textContent = stamp + ' ';
     const lvEl = document.createElement('span');
     lvEl.className = `term-lv term-lv-${lv}`;
     lvEl.textContent = lv.padEnd(7);
     const msg = document.createElement('span');
     msg.className = 'term-msg';
-    msg.textContent = String(d.msg || d.line || '');
+    msg.textContent = String(text || '');
     el.append(ts, lvEl, msg);
     body.appendChild(el);
     lines += 1;
@@ -2992,6 +2997,50 @@ function makeTerm(plugin, el) {
     }
     setMeta('');
     if (follow.checked) body.scrollTop = body.scrollHeight;
+  }
+
+  /** 旧面板（rust-plugin-panel）的帧：具名事件 `log`，形状 `{type,level,ts,msg}`。
+   *  ⚠ 保留它是"便宜的历史兼容"——但**新面板才是正路**，见下面的 `paintPanel`。 */
+  function paint(ev) {
+    let d;
+    try {
+      d = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    // `type` 是语义类型（start/success/fail）；`level` 只是过滤档位。
+    appendLine(d.type || d.level || 'info', d.ts, d.msg || d.line || '');
+  }
+
+  /** 新面板（panel-llrt）的帧：**没有事件名**，一律走默认 `message`，
+   *  形状 `{id, ts, plugin, run_id, level, message}`。
+   *
+   *  ⚠ 之前只挂了 `addEventListener('log', …)` ⇒ 新面板一帧都收不到，
+   *  界面上就是「跑着呢 12s / 显示 0 行 /（已清空）」（2026-11-13 现场）。
+   *  另外新面板**不按插件过滤**（`?plugin=` 它不认），所有插件的日志都会推过来，
+   *  所以这里必须自己按 `plugin` 筛。
+   *
+   *  面板只有 info/warn/error 三档：我们发出去的 debug/start/success/fail
+   *  在适配层被折成 `info` + 文本前缀（`[debug] ` 等）⇒ 从**前缀**还原级别与着色。 */
+  function paintPanel(ev) {
+    let d;
+    try {
+      d = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (d === null || typeof d !== 'object') return;
+    if (typeof d.plugin === 'string' && d.plugin !== '' && plugin !== '' && d.plugin !== plugin) return;
+    if (typeof d.id === 'number' && d.id > lastId) lastId = d.id;
+    let lv = typeof d.level === 'string' && d.level !== '' ? d.level : 'info';
+    let text = String(d.message ?? '');
+    const m = /^\[(debug|start|ok|fail|fatal|success)\]\s*/.exec(text);
+    if (m !== null) {
+      // `ok`/`fatal` 是旧契约的名字，映射到面板那三档 + 我们自己的着色档
+      lv = m[1] === 'ok' ? 'success' : m[1] === 'fatal' ? 'error' : m[1];
+      text = text.slice(m[0].length);
+    }
+    appendLine(lv, d.ts, text);
   }
 
   /** 页头那句：`插件名 · 显示 N 行 · （状态） · 只显示「筛选」`。
@@ -3097,6 +3146,8 @@ function makeTerm(plugin, el) {
   }
 
   function connect(q) {
+    // 新面板支持 `?since=<id>`：断线重连时补回空档（旧面板会忽略这个参数）。
+    if (lastId > 0) q.set('since', String(lastId));
     es = new EventSource('/api/logs/stream?' + q.toString());
     es.addEventListener('notice', (ev) => {
       // 面板会先发一条概况（环里多少行 / 淘汰了多少）。⚠ 这里**只取"淘汰"那一格**：
@@ -3110,8 +3161,26 @@ function makeTerm(plugin, el) {
       }
     });
     es.addEventListener('log', paint);
-    es.onerror = () => setMeta('断了 —— 正在重连（浏览器会自己接）');
-    es.onopen = () => setMeta('已连上');
+    // 新面板（panel-llrt）：没有事件名，帧全在默认的 `message` 上
+    es.onmessage = paintPanel;
+    // ⚠ 不能只写"浏览器会自己接"：EventSource 的自动重连**不带** `since`，
+    //   断线那段就永久丢了。这里自己关掉、带着游标重开（退避 1s → 15s）。
+    es.onerror = () => {
+      setMeta('断了 —— 正在重连');
+      if (es !== null) {
+        es.close();
+        es = null;
+      }
+      const wait = retryMs;
+      retryMs = Math.min(retryMs * 2, 15_000);
+      setTimeout(() => {
+        if (es === null && body.isConnected) connect(q);
+      }, wait);
+    };
+    es.onopen = () => {
+      retryMs = 1000;
+      setMeta('已连上');
+    };
   }
 
   function close() {
