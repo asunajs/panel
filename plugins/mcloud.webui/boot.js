@@ -66,6 +66,7 @@
       const out = [];
       const ver = cs.getPropertyValue('--style-ver').trim();
       out.push('style.css 版本 = ' + (ver || '（读不到：不是我们的 CSS？）'));
+      out.push('app.js 版本    = ' + (document.documentElement.dataset.appVer || '（没标记：旧 app.js）'));
       out.push('data-theme     = ' + (document.documentElement.dataset.theme || '（没有）'));
       out.push('--surface-2    = ' + cs.getPropertyValue('--surface-2').trim());
       out.push('--surface      = ' + cs.getPropertyValue('--surface').trim());
@@ -98,9 +99,15 @@
       out.push(...hits.slice(0, 10));
 
       // 真的那一行
+      const table = document.getElementById('ex-tbl');
+      const trs = table ? table.querySelectorAll('tr') : [];
+      out.push('表格 = ' + (table ? '有 #ex-tbl，tr 共 ' + trs.length + ' 行' : '没有 #ex-tbl'));
+      const sample = [...trs].slice(0, 3).map((t, i) => '  第' + (i + 1) + '行 class="' + t.className + '" ' +
+        t.outerHTML.replace(/\s+/g, ' ').slice(0, 90));
+      out.push(...sample);
       const row = document.querySelector('tr.ex-group-row, .ex-group-row');
       if (!row) {
-        out.push('行元素 = 没找到（表还没渲染？）');
+        out.push('行元素 = 没找到 .ex-group-row（看上面几行的 class）');
       } else {
         const st = getComputedStyle(row);
         const td = row.querySelector('td') || row;

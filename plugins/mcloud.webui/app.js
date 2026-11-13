@@ -23,6 +23,11 @@
 
 'use strict';
 
+// 页面版本号：和 style.css 里的 --style-ver 一起人工递增。
+// 「样式自检」（boot.js 的 ?diag=1）会读它 —— 用来区分「CSS 是新的、JS 还是旧的」这种
+// 半新半旧状态（第 155 轮：样式表是 v155，但 DOM 里根本没有 .ex-group-row 这种行）。
+document.documentElement.dataset.appVer = '155';
+
 /** 插件自己的接口。 */
 const API = '/plugins/mcloud/api';
 
