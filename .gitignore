@@ -4,4 +4,5 @@
 /data
 node_modules
 *.log
-.DS_Storeplugins-wip/
+.DS_Store
+plugins-wip/
