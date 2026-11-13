@@ -96,8 +96,19 @@ function register_route(path, method, handler, opts) {
     }
   }
 }
-function register_nav(_opts) {
-  emit("info", "[nav] 这个面板没有侧栏注册，插件页面走 插件页 → 界面");
+function register_nav(opts) {
+  const o = opts ?? {};
+  const title = typeof o.title === "string" ? o.title : typeof o.label === "string" ? o.label : void 0;
+  const payload = {};
+  if (title !== void 0 && title.trim() !== "") payload.title = title.trim();
+  if (typeof o.order === "number" && Number.isFinite(o.order)) payload.order = o.order;
+  try {
+    void Promise.resolve(host.sidebar(payload)).catch((e) => {
+      emit("error", "侧栏注册失败: " + text(e));
+    });
+  } catch (e) {
+    emit("error", "侧栏注册失败: " + text(e));
+  }
 }
 function worker_hint(_hint) {
 }
