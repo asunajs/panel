@@ -28,6 +28,13 @@
     }
   });
 
+  // 下拉框：选完在输出区回显，证明 change 事件带得出来值
+  const account = $('d-account');
+  if (account) {
+    account.addEventListener('change', (e) => {
+      $('d-select-out').textContent = '选中了：' + e.detail.value + '（触发器上显示「' + account.querySelector('.select-value').textContent + '」）';
+    });
+  }
   $('d-save').addEventListener('click', () => {
     $('d-out').textContent =
       '保存按钮被点了（演示而已，真的保存要走插件自己的接口）：' +

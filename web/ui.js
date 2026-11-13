@@ -81,6 +81,222 @@
   };
 
   /**
+   * <p-select label="账号" placeholder="还没有账号" value="a" hint="…" disabled>
+   *   <option value="a">账号 A</option>
+   *   <option value="b">账号 B</option>
+ </p-select>
+   *
+   * 也可以不写 <option>，用 `options='[{"value":"a","label":"账号 A"}]'`。
+   * 外观照 TDesign 的 Select：一个触发器（底色/边框和 .input 一致）+ 浮层列表 +
+   * 选中项打勾。原生 <select> 那张脸由 /app.css 拉齐，但列表没法自定义 —— 要完全一致就用这个。
+   *
+   * 读值：`el.value`；改值会冒 `change`（`detail.value` 也带着）和 `input`。
+   */
+  /**
+   * 所有 p-select 共用的「点外面收起」。
+   *
+   * 为什么共享而不是每实例一个：一个页面上可能有七八个下拉，每个都在 document 上挂一个捕获
+   * 监听，既浪费又互相踩（第 144 轮实测：点 body 收不起来，但手动调实例自己的处理函数就正常）。
+   * 共享版只挂一次，按「现在开着哪些面板」扫，动态加进来的实例自动算数。
+   */
+  let outsideCloseInstalled = false;
+  function installOutsideClose() {
+    if (outsideCloseInstalled) return;
+    outsideCloseInstalled = true;
+    document.addEventListener('click', (ev) => {
+      for (const panel of document.querySelectorAll('.select-panel:not([hidden])')) {
+        const wrap = panel.parentElement;
+        if (wrap && wrap.contains(ev.target)) continue;
+        panel.hidden = true;
+        const t = wrap && wrap.querySelector('.select-trigger');
+        if (t) t.setAttribute('aria-expanded', 'false');
+      }
+    }, true);
+  }
+
+  const CARET =
+    '<svg class="select-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+  const TICK =
+    '<svg class="select-tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
+
+  class PSelect extends HTMLElement {
+    connectedCallback() {
+      if (this._trigger) return;
+      const self = this;
+      const fromKids = [...this.querySelectorAll('option')].map((o) => ({
+        value: o.value !== undefined && o.value !== null ? String(o.value) : (o.textContent || '').trim(),
+        label: (o.textContent || '').trim(),
+        disabled: o.disabled,
+      }));
+      let opts = fromKids;
+      if (!opts.length) {
+        try {
+          opts = JSON.parse(this.getAttribute('options') || '[]').map((o) => ({
+            value: String(o.value),
+            label: String(o.label === undefined ? o.value : o.label),
+            disabled: !!o.disabled,
+          }));
+        } catch {
+          opts = [];
+        }
+      }
+      this._opts = opts;
+      // 原生的 <option> 只是给人写起来顺手的：读完之后清掉，免得留一堆看不见的节点
+      fromKids.length && this.querySelectorAll('option').forEach((o) => o.remove());
+
+      const wrap = document.createElement('div');
+      wrap.className = 'p-select';
+      const label = this.getAttribute('label');
+      if (label) {
+        const l = document.createElement('span');
+        l.className = 'field-label';
+        l.textContent = label;
+        wrap.append(l);
+      }
+
+      const trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'select-trigger';
+      trigger.setAttribute('aria-haspopup', 'listbox');
+      trigger.setAttribute('aria-expanded', 'false');
+      const valueEl = document.createElement('span');
+      valueEl.className = 'select-value';
+      trigger.append(valueEl);
+      trigger.insertAdjacentHTML('beforeend', CARET);
+      if (this.hasAttribute('disabled')) trigger.disabled = true;
+
+      const panel = document.createElement('div');
+      panel.className = 'select-panel';
+      panel.setAttribute('role', 'listbox');
+      panel.hidden = true;
+
+      wrap.append(trigger, panel);
+      const hint = this.getAttribute('hint');
+      if (hint) {
+        const h = document.createElement('span');
+        h.className = 'hint';
+        h.textContent = hint;
+        wrap.append(h);
+      }
+      this.append(wrap);
+      this._wrap = wrap;
+      this._trigger = trigger;
+      this._panel = panel;
+      this._valueEl = valueEl;
+      this._value = this.getAttribute('value') ?? '';
+      this._active = -1;
+
+      trigger.addEventListener('click', () => this._toggle());
+      // 点外面收起：交给**一个共享的**捕获监听（见 installOutsideClose）。
+      // 每实例各挂一个的那版实测点 body 收不起来 —— 一个 document 上七八个监听互相干扰，
+      // 出问题还难查；共享版按 DOM 现状扫一遍「开着的面板」，新加的实例自动算数。
+      installOutsideClose();
+      this.addEventListener('keydown', (ev) => this._key(ev));
+      this._render();
+    }
+
+    _render() {
+      const cur = this._opts.find((o) => o.value === this._value);
+      const placeholder = this.getAttribute('placeholder') || '请选择';
+      this._valueEl.textContent = cur ? cur.label : placeholder;
+      this._valueEl.classList.toggle('is-placeholder', !cur);
+      this._panel.textContent = '';
+      if (!this._opts.length) {
+        const e = document.createElement('div');
+        e.className = 'select-empty';
+        e.textContent = this.getAttribute('empty') || '暂无数据';
+        this._panel.append(e);
+      }
+      this._opts.forEach((o, i) => {
+        const row = document.createElement('div');
+        row.className = 'select-option';
+        row.setAttribute('role', 'option');
+        row.dataset.value = o.value;
+        row.dataset.idx = String(i);
+        if (o.value === this._value) row.classList.add('is-on');
+        if (o.disabled) row.classList.add('is-disabled');
+        if (i === this._active) row.classList.add('is-active');
+        row.innerHTML = '<span>' + o.label + '</span>' + TICK;
+        row.addEventListener('click', () => {
+          if (o.disabled) return;
+          this._pick(o.value);
+        });
+        this._panel.append(row);
+      });
+    }
+
+    _toggle() {
+      if (this._trigger.disabled) return;
+      if (this._panel.hidden) this._open();
+      else this._close();
+    }
+
+    _open() {
+      if (this._trigger.disabled) return;
+      this._panel.hidden = false;
+      this._trigger.setAttribute('aria-expanded', 'true');
+      this._active = this._opts.findIndex((o) => o.value === this._value);
+      this._render();
+      this._panel.scrollTop = 0;
+    }
+
+    _close() {
+      this._panel.hidden = true;
+      this._trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    _pick(v) {
+      const changed = v !== this._value;
+      this._value = v;
+      this._close();
+      this._render();
+      if (changed) {
+        this.dispatchEvent(new CustomEvent('change', { bubbles: true, detail: { value: v } }));
+        this.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { value: v } }));
+      }
+    }
+
+    _key(ev) {
+      const open = !this._panel.hidden;
+      const n = this._opts.length;
+      if (ev.key === 'Escape') { if (open) { this._close(); ev.stopPropagation(); } return; }
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        if (!open) { this._open(); return; }
+        if (!n) return;
+        const dir = ev.key === 'ArrowDown' ? 1 : -1;
+        let i = this._active;
+        for (let k = 0; k < n; k += 1) {
+          i = (i + dir + n) % n;
+          if (!this._opts[i].disabled) break;
+        }
+        this._active = i;
+        this._render();
+        return;
+      }
+      if ((ev.key === 'Enter' || ev.key === ' ') && open) {
+        ev.preventDefault();
+        const o = this._opts[this._active];
+        if (o && !o.disabled) this._pick(o.value);
+        return;
+      }
+      if (ev.key === 'Enter' && !open) { ev.preventDefault(); this._open(); }
+    }
+
+    get value() { return this._value; }
+
+    set value(v) {
+      const s = v === null || v === undefined ? '' : String(v);
+      if (s === this._value) return;
+      this._value = s;
+      if (this._trigger) this._render();
+      this.dispatchEvent(new CustomEvent('change', { bubbles: true, detail: { value: s } }));
+    }
+  }
+
+  /**
    * <p-number label="听窗口长度（秒）" min="10" max="3600" step="10" value="30"
    *           hint="10 – 3600" tone="ok|warn|err" disabled>
    *
@@ -334,6 +550,7 @@
   const define = (name, cls) => {
     if (!customElements.get(name)) customElements.define(name, cls);
   };
+  define('p-select', PSelect);
   define('p-number', PNumber);
   define('p-button', PButton);
   define('p-card', PCard);

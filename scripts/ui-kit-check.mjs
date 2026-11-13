@@ -109,6 +109,74 @@ async function main() {
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/plugins/webui-demo/?embed=1&theme=light' });
   await sleep(2500);
 
+  // ---------- 下拉框（p-select）----------
+  const selRect = async () => js("document.querySelector('#d-account .select-panel').hidden");
+  await js("document.querySelector('#d-account .select-trigger').click()");
+  await sleep(200);
+  const selOpen = await js(
+    "JSON.stringify((()=>{const s=document.getElementById('d-account');" +
+    "return {hidden:s.querySelector('.select-panel').hidden," +
+    "opts:s.querySelectorAll('.select-option').length," +
+    "text:s.querySelector('.select-value').textContent," +
+    "placeholder:s.querySelector('.select-value').classList.contains('is-placeholder')};})())"
+  );
+  const so = JSON.parse(selOpen);
+  check('p-select 点开有浮层 + 选项', so.hidden === false && so.opts === 3, selOpen);
+  check('没值时显示灰色 placeholder', so.text === '还没有账号' && so.placeholder, so.text);
+
+  const picked = await js(
+    "new Promise((res)=>{const s=document.getElementById('d-account');" +
+    "s.addEventListener('change',(e)=>res(JSON.stringify({v:e.detail.value," +
+    "shown:s.querySelector('.select-value').textContent,hidden:s.querySelector('.select-panel').hidden})),{once:true});" +
+    "s.querySelectorAll('.select-option')[1].click();})"
+  );
+  const pk = JSON.parse(picked);
+  check('点选项就选中 + 收起 + change 带值', pk.v === 'b' && pk.hidden === true && pk.shown === '账号 B', picked);
+
+  // 禁用项点不动
+  const disabledPick = await js(
+    "(()=>{const s=document.getElementById('d-account');s.querySelector('.select-trigger').click();" +
+    "const d=[...s.querySelectorAll('.select-option')].find(o=>o.classList.contains('is-disabled'));" +
+    "d.click();return JSON.stringify({value:s.value,cls:d.className});})()"
+  );
+  const dp = JSON.parse(disabledPick);
+  check('禁用的选项点了不生效', dp.value === 'b' && dp.cls.includes('is-disabled'), disabledPick);
+
+  // 键盘：↓ 再 Enter
+  const byKey = await js(
+    "new Promise((res)=>{const s=document.getElementById('d-account');s._close();" +
+    "s.focus();s.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));" +
+    "s.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));" +
+    "s.addEventListener('change',(e)=>res(e.detail.value),{once:true});" +
+    "s.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));})"
+  );
+  check('键盘 ↓↑ + Enter 也能选（无障碍）', typeof byKey === 'string' && byKey.length > 0, String(byKey));
+
+  // 点外面收起
+  const closedOutside = await js(
+    "(()=>{const s=document.getElementById('d-account');s.querySelector('.select-trigger').click();" +
+    "const openBefore=!s.querySelector('.select-panel').hidden;" +
+    "document.body.click();" +
+    "return JSON.stringify({openBefore,hidden:s.querySelector('.select-panel').hidden});})()"
+  );
+  const co = JSON.parse(closedOutside);
+  check('点外面就收起', co.openBefore === true && co.hidden === true, closedOutside);
+
+  // 禁用的整个控件点不开
+  const disabledSelect = await js(
+    "(()=>{const s=[...document.querySelectorAll('p-select')].find(x=>x.hasAttribute('disabled'));" +
+    "s.querySelector('.select-trigger').click();return s.querySelector('.select-panel').hidden;})()"
+  );
+  check('禁用的 p-select 点不开', disabledSelect === true, String(disabledSelect));
+
+  // 原生 select 也被拉齐了（否则深色主题下是一块浅灰方角）
+  const nativeSel = await js(
+    "(()=>{const s=document.querySelector('select.input');const cs=getComputedStyle(s);" +
+    "return JSON.stringify({appearance:cs.appearance,radius:cs.borderRadius});})()"
+  );
+  const ns = JSON.parse(nativeSel);
+  check('原生 select 去掉系统外观（appearance: none）', ns.appearance === 'none', nativeSel);
+
   check('页面加载了套件（PanelUI 在）', (await js('typeof window.PanelUI')) === 'object');
   const shape = JSON.parse(await js(
     "JSON.stringify((()=>{const n=document.getElementById('d-seconds');" +

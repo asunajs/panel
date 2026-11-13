@@ -85,6 +85,35 @@
         </div>
       </p-card>
 
+
+      <p-card title="下拉框" desc="p-select（照 TDesign 的 Select）+ 原生 select 对照">
+        <div class="demo-row">
+          <p-select
+            id="d-account"
+            label="账号"
+            placeholder="还没有账号"
+            options='[{"value":"a","label":"账号 A"},{"value":"b","label":"账号 B"},{"value":"c","label":"账号 C（禁用）","disabled":true}]'
+          ></p-select>
+          <p-select
+            label="用 &lt;option&gt; 写也行"
+            value="b"
+          >
+            <option value="a">选项 A</option>
+            <option value="b">选项 B</option>
+            <option value="c">选项 C</option>
+          </p-select>
+          <p-select label="禁用" disabled placeholder="不可选"></p-select>
+        </div>
+        <div class="demo-row">
+          <p-field label="原生 select（只靠 CSS 拉齐）">
+            <select class="input">
+              <option>跟随自动</option>
+              <option>全部账号</option>
+            </select>
+          </p-field>
+        </div>
+        <div class="demo-out" id="d-select-out">（选一个账号试试）</div>
+      </p-card>
       <p-card title="调自己的接口" desc="GET /plugins/webui-demo/api/ping —— 静态文件之外的另一半">
         <div class="demo-row"><p-button size="sm" id="d-ping">请求一次</p-button></div>
         <div class="demo-out" id="d-out">（还没请求）</div>

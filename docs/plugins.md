@@ -470,3 +470,30 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
 门禁：`node scripts/ui-kit-check.mjs`（10 条：结构 / 步进 / 边界收敛 / 按钮禁用 /
 事件 detail / 原生箭头已收掉 / 三种反馈态）。**这些是给插件用的控件，面板自己的页面
 不用它们，ui-check 那 75 条盯不到**，所以单开一个脚本。
+
+### 下拉框（`p-select`）
+
+原生 `<select>` 的**触发器**由面板拉齐了（去掉系统外观、自己画 chevron、颜色走 token），
+但**展开的列表是系统画的**，改不动。要跟面板完全一致（尤其是深色主题下那张白底列表）就用：
+
+```html
+<p-select label="账号" placeholder="还没有账号" value="a" hint="…">
+  <option value="a">账号 A</option>
+  <option value="b">账号 B</option>
+  <option value="c" disabled>账号 C（禁用）</option>
+</p-select>
+
+<!-- 也可以不写 <option>，直接给 JSON： -->
+<p-select options='[{"value":"a","label":"账号 A"}]'></p-select>
+```
+
+| 行为 | 说明 |
+|---|---|
+| 点触发器 / 点外面 / Esc | 开、关（点外面收起是**一个共享监听**，页面上几十个下拉也不互相踩） |
+| 键盘 | ↑ / ↓ 移动高亮（跳过禁用项）、Enter 选中、Esc 收起 —— 触发器可 Tab 聚焦 |
+| 读值 | `el.value`；改动冒 `change` / `input`，`detail.value` 给值 |
+| 空列表 | 显示 `empty` 属性（缺省「暂无数据」） |
+| 禁用 | `disabled` 在控件上：触发器点不开，选项 `disabled` 是单条不可选 |
+
+外观取自 TDesign 的 Select：触发器同 `.input`（同高、同圆角、同边框）、选中项打勾 + 主色、
+没值时是灰色的 placeholder。想只用类：`.select-trigger` / `.select-panel` / `.select-option`。
