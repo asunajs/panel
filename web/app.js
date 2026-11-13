@@ -1888,6 +1888,219 @@ function setupBox() {
 const NOTIFY_STATE = { pending: [], failed: [], ok: [] };
 
 /** 拉一次渠道 + 发件箱，重画这一页。 */
+// 每种渠道要填哪些字段（第 170 轮）。界面上只显示相关的，避免「12 种渠道一屏 20 个框」。
+const CHANNEL_FIELDS = {
+  webhook: ['url', 'headers'],
+  wecom: ['url'],
+  dingtalk: ['url', 'secret'],
+  feishu: ['url', 'secret'],
+  slack: ['url'],
+  discord: ['url'],
+  telegram: ['url', 'secret', 'chat_id'],
+  bark: ['url', 'secret'],
+  ntfy: ['url', 'topic'],
+  gotify: ['url', 'secret', 'priority'],
+  custom: ['url', 'template', 'headers'],
+  smtp: ['host', 'port', 'tls', 'user', 'pass', 'from', 'to'],
+};
+
+const CHANNEL_LABELS = {
+  webhook: 'webhook（通用 JSON）',
+  wecom: 'wecom 企业微信',
+  dingtalk: 'dingtalk 钉钉（可加签）',
+  feishu: 'feishu 飞书（可加签）',
+  slack: 'slack',
+  discord: 'discord',
+  telegram: 'telegram（bot）',
+  bark: 'bark（iOS 推送）',
+  ntfy: 'ntfy',
+  gotify: 'gotify',
+  custom: 'custom（自定义模板）',
+  smtp: 'smtp（邮件）',
+};
+
+/**
+ * 渠道表单。新建与编辑共用：existing 为空就是新建。
+ * 编辑时密钥不回显（后端只给 ***），留空表示「不改」。
+ */
+function openChannelForm(box, existing, after) {
+  clear(box);
+  const cur = existing || {};
+  const kind = cur.kind || 'webhook';
+  const form = el('div', 'chan-form');
+
+  const line = (label, node, hint) => {
+    const row = el('label', 'chan-line');
+    row.append(el('span', 'chan-label', label));
+    row.append(node);
+    if (hint) row.append(el('span', 'chan-hint', hint));
+    return row;
+  };
+  const input = (name, placeholder, value) => {
+    const i = el('input', 'input');
+    i.type = name === 'pass' || name === 'secret' ? 'password' : 'text';
+    i.dataset.f = name;
+    i.placeholder = placeholder || '';
+    i.value = value === undefined || value === null ? '' : String(value);
+    return i;
+  };
+
+  // 头两行：id 与类型
+  const idIn = input('id', '留空自动生成', cur.id || '');
+  if (existing) idIn.disabled = true;
+  form.append(line('名字', idIn));
+
+  const kindSel = el('select', 'input');
+  for (const [k, label] of Object.entries(CHANNEL_LABELS)) {
+    const o = el('option', '', label);
+    o.value = k;
+    if (k === kind) o.selected = true;
+    kindSel.append(o);
+  }
+  kindSel.dataset.f = 'kind';
+  if (existing) kindSel.disabled = true;
+  form.append(line('类型', kindSel));
+
+  const lvlSel = el('select', 'input');
+  for (const [v, label] of [['', '跟随全局'], ['info', 'info 及以上'], ['warn', 'warn 及以上'], ['error', '只 error']]) {
+    const o = el('option', '', label);
+    o.value = v;
+    if ((cur.min_level || '') === v) o.selected = true;
+    lvlSel.append(o);
+  }
+  lvlSel.dataset.f = 'min_level';
+  form.append(line('门槛', lvlSel, '低于它的通知不进这个渠道（铃铛里照旧有）'));
+
+  // 一把把所有可能出现的字段都建出来，按类型显示/隐藏
+  const url = input('url', 'https://…', cur.url || '');
+  const secret = input('secret', existing && cur.has_secret ? '已设置，留空不改' : '密钥 / token', '');
+  const chatId = input('chat_id', 'telegram 的 chat_id', cur.chat_id || '');
+  const topic = input('topic', 'ntfy 的 topic', cur.topic || '');
+  const priority = input('priority', '5', cur.priority === undefined ? '' : cur.priority);
+  const template = el('textarea', 'editor chan-tpl');
+  template.rows = 3;
+  template.dataset.f = 'template';
+  template.value = cur.template || '';
+  const headers = el('textarea', 'editor chan-tpl');
+  headers.rows = 2;
+  headers.dataset.f = 'headers';
+  headers.value = cur.headers && cur.headers.length ? JSON.stringify(Object.fromEntries(cur.headers.map((h) => [h, ''])) , null, 2) : '';
+  headers.placeholder = '{"Authorization": "Bearer …"}';
+  const host = input('host', 'smtp.example.com', cur.host || '');
+  const port = input('port', '465', cur.port || '');
+  const tls = input('tls', 'implicit / starttls / none', cur.tls || 'implicit');
+  const user = input('user', 'me@example.com', cur.user || '');
+  const pass = input('pass', existing && cur.pass === '***' ? '已设置，留空不改' : '', '');
+  const from = input('from', '默认同 user', cur.from || '');
+  const to = input('to', 'a@b.c, d@e.f', (cur.to || []).join(', '));
+
+  const fields = { url, secret, chat_id: chatId, topic, priority, template, headers,
+    host, port, tls, user, pass, from, to };
+  const rows = {
+    url: line('地址', url, kind === 'telegram' ? '可留空（默认 api.telegram.org）' : ''),
+    secret: line('密钥', secret),
+    chat_id: line('chat_id', chatId),
+    topic: line('主题', topic),
+    priority: line('优先级', priority, 'gotify 用，默认 5'),
+    template: line('模板', template, '变量：{{title}} {{body}} {{level}} {{plugin}} {{task}} {{payload}}'),
+    headers: line('请求头', headers, 'JSON 对象，可留空'),
+    host: line('服务器', host),
+    port: line('端口', port),
+    tls: line('TLS', tls, 'implicit / starttls / none'),
+    user: line('账号', user),
+    pass: line('密码', pass),
+    from: line('发件人', from),
+    to: line('收件人', to, '多个用逗号分开'),
+  };
+
+  const applyKind = () => {
+    const k = kindSel.value;
+    const want = new Set(CHANNEL_FIELDS[k] || []);
+    for (const [name, node] of Object.entries(rows)) {
+      node.classList.toggle('hidden', !want.has(name));
+    }
+  };
+  for (const node of Object.values(rows)) form.append(node);
+  kindSel.addEventListener('change', applyKind);
+  applyKind();
+
+  const bar = el('div', 'actions');
+  const save = el('button', 'btn btn-primary', existing ? '保存' : '添加');
+  save.type = 'button';
+  const cancel = el('button', 'btn', '取消');
+  cancel.type = 'button';
+  cancel.addEventListener('click', () => clear(box));
+  bar.append(save, cancel);
+  form.append(bar);
+  const err = el('p', 'hint-err hidden');
+  form.append(err);
+
+  save.addEventListener('click', async () => {
+    const k = kindSel.value;
+    const body = { kind: k };
+    const want = CHANNEL_FIELDS[k] || [];
+    for (const name of want) {
+      const node = fields[name];
+      if (!node) continue;
+      const v = (node.value || '').trim();
+      // 密钥留空 = 不改（编辑时后端只回 ***，不能拿 *** 覆盖真值）
+      if (name === 'secret' || name === 'pass') {
+        if (v) body[name] = v;
+        continue;
+      }
+      if (!v) continue;
+      if (name === 'priority' || name === 'port') {
+        const n = Number(v);
+        if (!Number.isFinite(n)) {
+          err.textContent = name + ' 得是数字';
+          err.classList.remove('hidden');
+          return;
+        }
+        body[name] = n;
+      } else if (name === 'to') {
+        body.to = v.split(/[,，\s]+/).filter(Boolean);
+      } else if (name === 'headers') {
+        try {
+          body.headers = JSON.parse(node.value);
+        } catch (e) {
+          err.textContent = '请求头不是合法 JSON：' + e.message;
+          err.classList.remove('hidden');
+          return;
+        }
+      } else {
+        body[name] = v;
+      }
+    }
+    if (!existing) {
+      const id = (idIn.value || '').trim();
+      if (id) body.id = id;
+    }
+    const lvl = lvlSel.value;
+    if (lvl) body.min_level = lvl;
+    save.disabled = true;
+    try {
+      if (existing) {
+        await api('/api/notify/channels/' + encodeURIComponent(existing.id), { method: 'PATCH', body });
+        notify('渠道 ' + existing.id + ' 已保存', 'ok');
+      } else {
+        await api('/api/notify/channels', { method: 'POST', body });
+        notify('渠道已添加', 'ok');
+      }
+      clear(box);
+      if (after) after();
+    } catch (e) {
+      err.textContent = e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败');
+      err.classList.remove('hidden');
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  // 忘了这一步的话表单就建在内存里没人挂上去（第一次就踩了：点按钮页面没反应）
+  box.append(form);
+  return form;
+}
+
 async function renderNotifyTab() {
   const box = $('notify-channels');
   const errBox = $('notify-error');
@@ -1922,6 +2135,18 @@ async function renderNotifyTab() {
         user: 'me@example.com', pass: '***', to: ['me@example.com'] },
     ] } }, null, 2);
     box.append(pre);
+    const addBar2 = el('div', 'actions chan-addbar');
+    const add2 = el('button', 'btn btn-sm btn-primary', '+ 添加渠道');
+    add2.type = 'button';
+    add2.addEventListener('click', () => {
+      const host = $('notify-form2');
+      if (host) openChannelForm(host, null, () => renderNotifyTab());
+    });
+    addBar2.append(add2);
+    box.append(addBar2);
+    const fbox = el('div', 'chan-form-box', '');
+    fbox.id = 'notify-form2';
+    box.append(fbox);
   } else {
     const t = el('table', 'table');
     const thead = el('thead');
@@ -1944,15 +2169,55 @@ async function renderNotifyTab() {
         el('td', '', c.min_level || d.min_level || 'warn'),
         el('td', '', c.enabled ? '启用' : '停用'),
       );
-      const td = el('td');
+      const td = el('td', 'row-acts');
       const b = el('button', 'btn btn-sm', '试发');
       b.type = 'button';
       b.addEventListener('click', () => testNotify(c.id));
-      td.append(b);
+      const edit = el('button', 'btn btn-sm', '编辑');
+      edit.type = 'button';
+      edit.addEventListener('click', () => {
+        const host = $('notify-form');
+        if (host) openChannelForm(host, c, () => renderNotifyTab());
+      });
+      const toggle = el('button', 'btn btn-sm', c.enabled ? '停用' : '启用');
+      toggle.type = 'button';
+      toggle.addEventListener('click', async () => {
+        try {
+          await api('/api/notify/channels/' + encodeURIComponent(c.id) + '/toggle', { method: 'POST' });
+          renderNotifyTab();
+        } catch (e) {
+          notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '开关失败'), 'err');
+        }
+      });
+      const del = el('button', 'btn btn-sm btn-danger', '删除');
+      del.type = 'button';
+      del.addEventListener('click', async () => {
+        if (!window.confirm('删掉渠道 ' + c.id + '？发件箱里已排队的行会变成「渠道已不存在」。')) return;
+        try {
+          await api('/api/notify/channels/' + encodeURIComponent(c.id), { method: 'DELETE' });
+          notify('渠道 ' + c.id + ' 已删除', 'ok');
+          renderNotifyTab();
+        } catch (e) {
+          notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '删除失败'), 'err');
+        }
+      });
+      td.append(b, edit, toggle, del);
       tr.append(td);
       tbody.append(tr);
     }
     box.append(t);
+    const addBar = el('div', 'actions chan-addbar');
+    const add = el('button', 'btn btn-sm btn-primary', '+ 添加渠道');
+    add.type = 'button';
+    add.addEventListener('click', () => {
+      const host = $('notify-form');
+      if (host) openChannelForm(host, null, () => renderNotifyTab());
+    });
+    addBar.append(add);
+    box.append(addBar);
+    const fbox = el('div', 'chan-form-box', '');
+    fbox.id = 'notify-form';
+    box.append(fbox);
     box.append(el('p', 'settings-note', '全局门槛 ' + (d.min_level || 'warn') + '；静音名单 ' + ((d.mute || []).join('、') || '（空）')));
     box.append(el('p', 'settings-note',
       '支持的类型：webhook / wecom（企业微信）/ dingtalk（钉钉，可加签）/ feishu（飞书，可加签）/ ' +
