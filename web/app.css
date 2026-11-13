@@ -1098,6 +1098,57 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
    于是那个本该隐藏的元素变成「一个空白的小圆角卡片」挂在页面上（第 142 轮）。 */
 [hidden] { display: none !important; }
 
+
+/* ---------- 数字输入：收掉原生步进器，给一个自己的（对齐 TDesign 的 InputNumber） ---------- */
+
+/* 浏览器自带的上下小箭头：和面板的控件不是一个语言，还窄到几乎点不中。
+   一律收掉，要加减就用下面的 .stepper（或插件里的 <p-number>）。 */
+.input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.input[type="number"]::-webkit-outer-spin-button,
+.input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none; appearance: none; margin: 0;
+}
+
+/* 步进输入：− ／ 数字 ／ ＋ 合成一个控件，边框在容器上，输入框本身无边框。
+   为什么不是「输入框 + 外面两个按钮」：那样一排控件会有三个不同的圆角和三条边框，
+   看起来像三个东西。TDesign 也是这么做的（一个外框，里面三段）。 */
+.stepper {
+  display: inline-flex; align-items: stretch; min-height: var(--h-control);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); overflow: hidden;
+}
+.stepper:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.stepper-btn {
+  width: 34px; flex: none; padding: 0; border: 0; background: transparent;
+  color: var(--fg-2); font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+}
+.stepper-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+.stepper-btn:disabled { color: var(--dim); cursor: not-allowed; }
+.stepper-btn:first-child { border-right: 1px solid var(--line); }
+.stepper-btn:last-child { border-left: 1px solid var(--line); }
+.stepper-input {
+  width: 100%; min-width: 64px; padding: 0 6px; border: 0; background: transparent;
+  color: var(--fg); font: inherit; font-size: 13px; text-align: center;
+  appearance: textfield; -moz-appearance: textfield;
+}
+.stepper-input:focus { outline: none; }
+.stepper-input::-webkit-outer-spin-button,
+.stepper-input::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
+
+/* 三种反馈态（就是 TDesign 的成功 / 警告 / 错误） */
+.stepper.is-ok { border-color: var(--ok); }
+.stepper.is-warn { border-color: var(--warn); }
+.stepper.is-err { border-color: var(--err); }
+
+/* <p-number> 的外壳：标签 / 控件 / 提示 竖着排，控件吃满宽度 */
+.p-number { display: inline-flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.p-number .stepper { width: 100%; }
+.p-number .hint.is-err { color: var(--err); }
+.p-number .hint.is-warn { color: var(--warn); }
+.p-number .hint.is-ok { color: var(--ok); }
 .field-label { color: var(--fg-2); font-size: 12px; }
 
 .input {

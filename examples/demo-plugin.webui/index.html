@@ -56,16 +56,32 @@
         </div>
       </p-card>
 
-      <p-card title="表单" desc="p-field + .input">
-        <p-field label="听窗口长度（秒）" hint="10 – 3600">
-          <input class="input" id="d-seconds" type="number" min="10" max="3600" value="30" />
-        </p-field>
+      <p-card title="表单" desc="p-number（步进）+ p-field">
+        <!-- 数字用 <p-number>：− ／ 数字 ／ ＋ 一个外框（对齐 TDesign 的 InputNumber）。
+             裸 <input type="number"> 上那个原生上下箭头已经被 /app.css 收掉了。 -->
+        <p-number
+          id="d-seconds"
+          label="听窗口长度（秒）"
+          hint="10 – 3600，步长 10"
+          min="10"
+          max="3600"
+          step="10"
+          value="30"
+        ></p-number>
         <p-field label="备注">
           <input class="input" id="d-note" type="text" placeholder="随便写点什么" />
         </p-field>
         <div class="demo-row">
           <p-button variant="primary" id="d-save">保存</p-button>
           <p-button variant="ghost" id="d-dialog">打开弹窗</p-button>
+        </div>
+      </p-card>
+
+      <p-card title="数字输入的三种状态" desc="tone: ok / warn / err">
+        <div class="demo-row">
+          <p-number label="成功" hint="校验通过" tone="ok" value="30" min="0" max="100" step="5"></p-number>
+          <p-number label="警告" hint="接近上限" tone="warn" value="90" min="0" max="100" step="5"></p-number>
+          <p-number label="错误" hint="超出范围" tone="err" value="500" min="0" max="100" step="5"></p-number>
         </div>
       </p-card>
 

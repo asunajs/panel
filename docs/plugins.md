@@ -434,3 +434,39 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
    所以后续切换靠父窗口 `postMessage({type:'panel-theme', theme})` —— `/ui.js` 已经处理好了，
    插件不用管。**但如果你自己写主题逻辑**，别再一直优先读 `?theme=`：那会让「切了深色又被
    拉回浅色」（消息收到了、界面不动，第 140 轮实测踩过）。
+
+### 数字输入（`p-number`）
+
+面板收掉了 `<input type="number">` 上那个原生上下小箭头（它和面板的控件不是一个语言，
+还窄到几乎点不中）。要加减就用 `<p-number>`：− ／ 数字 ／ ＋ 在**一个外框**里，
+和 TDesign 的 InputNumber 一个意思。
+
+```html
+<p-number
+  id="seconds"
+  label="听窗口长度（秒）"
+  hint="10 – 3600，步长 10"
+  min="10" max="3600" step="10" value="30"
+  tone="ok"          <!-- ok / warn / err：边框和提示变绿 / 黄 / 红 -->
+  disabled            <!-- 可选 -->
+></p-number>
+
+<script>
+  // 读值：number（空则 null）；改动会冒 input / change，detail.value 也给你
+  seconds.addEventListener('change', (e) => console.log(e.detail.value));
+</script>
+```
+
+| 行为 | 说明 |
+|---|---|
+| 点 − / ＋ | 按 `step` 加减，到 `min` / `max` 时那个按钮自己禁用 |
+| 手打越界 | 失焦时收进范围（打 9999 → 变 3600），插件拿不到脏值 |
+| 键盘 | 方向键照常（原生 number 输入），`Enter` 不提交表单 |
+| 无障碍 | 两个按钮有 `aria-label`（增加 / 减少）；外壳可用 `.field-label` 关联 |
+
+不想用元素也行：`.stepper` + `.stepper-btn` + `.stepper-input` 三个类就是它内部的结构，
+`mcloud.webui` 早就自己写了一份一样的（第 144 轮把它收进面板成为控件）。
+
+门禁：`node scripts/ui-kit-check.mjs`（10 条：结构 / 步进 / 边界收敛 / 按钮禁用 /
+事件 detail / 原生箭头已收掉 / 三种反馈态）。**这些是给插件用的控件，面板自己的页面
+不用它们，ui-check 那 75 条盯不到**，所以单开一个脚本。

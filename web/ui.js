@@ -80,6 +80,143 @@
     return box;
   };
 
+  /**
+   * <p-number label="听窗口长度（秒）" min="10" max="3600" step="10" value="30"
+   *           hint="10 – 3600" tone="ok|warn|err" disabled>
+   *
+   * 数字输入 + 步进（对齐 TDesign 的 InputNumber）：− ／ 数字 ／ ＋ 一个外框，
+   * 原生那个上下小箭头已经由 /app.css 收掉了。
+   *
+   * 读值：`el.value`（number，空则 null）；监听：host 上会冒 `input` / `change`
+   * （`detail.value` 也带着，方便直接取）。
+   */
+  class PNumber extends HTMLElement {
+    connectedCallback() {
+      if (this._input) return;
+      const self = this;
+      const num = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const min = num(this.getAttribute('min'));
+      const max = num(this.getAttribute('max'));
+      const step = num(this.getAttribute('step')) || 1;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'p-number';
+      const label = this.getAttribute('label');
+      if (label) {
+        const l = document.createElement('span');
+        l.className = 'field-label';
+        l.textContent = label;
+        wrap.append(l);
+      }
+      const group = document.createElement('div');
+      group.className = 'stepper';
+      const tone = this.getAttribute('tone');
+      if (tone === 'ok' || tone === 'warn' || tone === 'err') group.classList.add('is-' + tone);
+
+      const btn = (text, aria, dir) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'stepper-btn';
+        b.textContent = text;
+        b.setAttribute('aria-label', aria);
+        b.addEventListener('click', () => bump(dir));
+        return b;
+      };
+      const minus = btn('−', '减少', -1);
+      const plus = btn('＋', '增加', 1);
+
+      const input = document.createElement('input');
+      input.className = 'stepper-input';
+      input.type = 'number';
+      input.inputMode = 'numeric';
+      if (min !== null) input.min = String(min);
+      if (max !== null) input.max = String(max);
+      input.step = String(step);
+      const initial = num(this.getAttribute('value'));
+      input.value = initial === null ? '' : String(initial);
+      if (this.hasAttribute('disabled')) {
+        input.disabled = true;
+        minus.disabled = true;
+        plus.disabled = true;
+      }
+
+      group.append(minus, input, plus);
+      wrap.append(group);
+      const hint = this.getAttribute('hint');
+      let hintEl = null;
+      if (hint) {
+        hintEl = document.createElement('span');
+        hintEl.className = 'hint' + (tone === 'ok' || tone === 'warn' || tone === 'err' ? ' is-' + tone : '');
+        hintEl.textContent = hint;
+        wrap.append(hintEl);
+      }
+      this.append(wrap);
+      this._input = input;
+      this._minus = minus;
+      this._plus = plus;
+      this._min = min;
+      this._max = max;
+      this._step = step;
+
+      const clamp = (v) => {
+        if (v === null) return null;
+        if (min !== null && v < min) return min;
+        if (max !== null && v > max) return max;
+        return v;
+      };
+      const fire = (kind) => {
+        self.dispatchEvent(new CustomEvent(kind, { bubbles: true, detail: { value: self.value } }));
+      };
+      const apply = (v, kind) => {
+        const c = clamp(v);
+        input.value = c === null ? '' : String(c);
+        syncBounds();
+        fire(kind);
+      };
+      const syncBounds = () => {
+        const cur = num(input.value);
+        minus.disabled = self.hasAttribute('disabled') || (cur !== null && min !== null && cur <= min);
+        plus.disabled = self.hasAttribute('disabled') || (cur !== null && max !== null && cur >= max);
+      };
+      function bump(dir) {
+        if (self.hasAttribute('disabled')) return;
+        const cur = num(input.value);
+        apply((cur === null ? (min !== null ? min : 0) : cur) + dir * step, 'input');
+        fire('change');
+      }
+
+      input.addEventListener('input', () => { syncBounds(); fire('input'); });
+      // 手打的值可能越界（比如 9999）：失焦时收进范围，别让插件拿到脏值。
+      input.addEventListener('blur', () => {
+        const cur = num(input.value);
+        if (cur === null) { syncBounds(); fire('change'); return; }
+        if (cur !== clamp(cur)) apply(cur, 'change');
+        else { syncBounds(); fire('change'); }
+      });
+      syncBounds();
+    }
+
+    get value() {
+      const v = this._input ? Number(this._input.value) : NaN;
+      return Number.isFinite(v) ? v : null;
+    }
+
+    set value(v) {
+      if (!this._input) return;
+      const n = Number(v);
+      let out = Number.isFinite(n) ? n : null;
+      if (out !== null && this._min !== null && out < this._min) out = this._min;
+      if (out !== null && this._max !== null && out > this._max) out = this._max;
+      this._input.value = out === null ? '' : String(out);
+      this.dispatchEvent(new CustomEvent('input', { bubbles: true, detail: { value: out } }));
+    }
+  }
+
+  /** <p-button variant="primary|ghost|danger" size="sm" disabled>文字</p-button> */
+
   /** <p-button variant="primary|ghost|danger" size="sm" disabled>文字</p-button> */
   class PButton extends HTMLElement {
     connectedCallback() {
@@ -197,6 +334,7 @@
   const define = (name, cls) => {
     if (!customElements.get(name)) customElements.define(name, cls);
   };
+  define('p-number', PNumber);
   define('p-button', PButton);
   define('p-card', PCard);
   define('p-field', PField);
