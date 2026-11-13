@@ -503,6 +503,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
 
     <div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
     <div class="toast hidden" id="toast" role="status"></div>
+    <!-- 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就消失，用户自己关。 -->
+    <div class="notices" id="notices" aria-live="polite"></div>
     <script src="/app.js"></script>
   
 </body>

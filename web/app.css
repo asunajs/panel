@@ -1013,3 +1013,43 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .drawer .actions, .tab-pane .actions { margin-top: 14px; margin-bottom: 14px; }
 /* 表格里的动作列是行内小按钮，间距保持紧凑、但不要被上面的规则带上纵向 margin。 */
 .table .actions { margin: 0; gap: 6px; }
+
+/* ---------- 右上角常驻提示（第 134 轮）---------- */
+/* toast（居中、2.6 秒消失）留给「已复制 / 已刷新」这类一眼就懂的；
+   要读的信息走这里：一直在，直到用户点 ×。 */
+.notices {
+  position: fixed; right: 16px; top: var(--toast-top); z-index: 71;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: min(380px, calc(100vw - 24px));
+  pointer-events: none;
+}
+.notice {
+  pointer-events: auto;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-strong); box-shadow: var(--shadow-md);
+  font-size: 13px; line-height: 1.45; text-align: left;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  animation: notice-in .18s ease-out;
+}
+.notice-body { flex: 1 1 auto; min-width: 0; }
+.notice-count {
+  flex: 0 0 auto; font-variant-numeric: tabular-nums;
+  font-size: 12px; opacity: .75; align-self: center;
+}
+.notice-x {
+  flex: 0 0 auto; width: 22px; height: 22px; line-height: 1; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: inherit;
+  font-size: 16px; cursor: pointer; opacity: .7;
+}
+.notice-x:hover { opacity: 1; background: rgba(127, 127, 127, .18); }
+/* 错误：最强的一档（和 toast-err 同一套反色，两套主题对比度都够） */
+.notice-err { background: var(--err); color: var(--bg); border-color: var(--fg); }
+/* 成功 / 警告：柔和底 + 彩色描边，不抢注意力但要能看清 */
+.notice-ok { background: var(--ok-soft); border-color: var(--ok); }
+.notice-warn { background: var(--warn-soft); border-color: var(--warn); }
+@keyframes notice-in { from { transform: translateX(12px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@media (max-width: 620px) {
+  .notices { left: 12px; right: 12px; max-width: none; }
+}

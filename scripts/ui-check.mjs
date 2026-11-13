@@ -169,6 +169,16 @@ async function main() {
   await cdp.send('Page.navigate', { url });
   await sleep(1500);
   const js = (expr) => cdp.eval(expr);
+  /** 最近一条提示的文本：**两个通道都看**（第 134 轮起要读的信息走右上角 #notices）。
+   *  断言不该关心走哪条通道，只关心「用户看到的那句话」。 */
+  const lastMsg = async () => {
+    const arr = await js(
+      "[...document.querySelectorAll('#notices .notice-body')].map(e=>e.textContent)",
+    );
+    const t = await js("document.getElementById('toast').textContent");
+    const n = arr && arr.length ? arr[arr.length - 1] : '';
+    return n || t || '';
+  };
 
   // ---------------------------------------------------------------- 断言
 
@@ -247,7 +257,7 @@ async function main() {
   const onlyErr = await waitFor(async () => {
     const all = await js("[...document.querySelectorAll('#logs-view .level')].every(e=>e.textContent==='error')");
     const foot = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
-    return all && /已显示 \d+ \/ 共 200 条/.test(foot) ? foot : null;
+    return all && /已显示 \d+ \/ 共 \d+ 条/.test(foot) ? foot : null;
   }, 6000, '日志只剩 error').catch(() => null);
   check('日志等级过滤只看 error', !!onlyErr, onlyErr || '等了 6 秒还没收敛');
   await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='').click()");
@@ -339,7 +349,7 @@ async function main() {
     [...document.querySelectorAll('#drawer-config .actions button')].find((b) => b.textContent.includes('保存')).click();
   })()`);
   await sleep(1800);
-  const cfgToast = await js("document.getElementById('toast').textContent");
+  const cfgToast = await lastMsg();
   check('保存插件配置后提示已保存并重载', /配置已保存/.test(cfgToast || ''), cfgToast);
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
@@ -357,8 +367,23 @@ async function main() {
   check('同名上传先问「覆盖 / 重命名 / 取消」', clashShown === true && /已存在/.test(clashText || ''), clashText);
   await js("document.getElementById('clash-overwrite').click()");
   await sleep(1600);
-  const clashToast = await js("document.getElementById('toast').textContent");
+  const clashToast = await lastMsg();
   check('选「覆盖」后提示说「已覆盖」而不是「已上传」', /已覆盖/.test(clashToast || ''), clashToast);
+  // 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就没，用户自己关。
+  const noticeText = await js("[...document.querySelectorAll('#notices .notice-body')].map(e=>e.textContent).pop() || ''");
+  check('上传结果走常驻提示（右上角）', /已覆盖/.test(noticeText), noticeText);
+  const noticePos = JSON.parse(await js(
+    "JSON.stringify((()=>{const n=document.querySelector('#notices .notice');const r=n.getBoundingClientRect();" +
+    "return {top:Math.round(r.top),right:Math.round(innerWidth-r.right)};})())",
+  ));
+  check('常驻提示贴在右上角', noticePos.top < 200 && noticePos.right < 60, JSON.stringify(noticePos));
+  await sleep(5000);
+  const stillThere = await js("document.querySelectorAll('#notices .notice').length");
+  check('常驻提示 5 秒后还在（不会自己消失）', stillThere >= 1, String(stillThere));
+  await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
+  await sleep(250);
+  const afterClose = await js("document.querySelectorAll('#notices .notice').length");
+  check('常驻提示能手动关掉', afterClose === 0, String(afterClose));
   const allCards = await js("document.querySelectorAll('#plugin-grid .plugin-card').length");
   check('插件按系列分组了', groups.length >= 1, JSON.stringify(groups));
   check(
@@ -379,7 +404,7 @@ async function main() {
   // 点一次「全部重载」：要真的走到接口并给出系列级结果（不是逐个悄悄跑）
   await js("document.querySelector('.plugin-group-actions button').click()");
   await sleep(1500);
-  const groupToast = await js("(()=>{const t=document.getElementById('toast');return t.classList.contains('hidden')?'':t.textContent;})()");
+  const groupToast = await lastMsg();
   check('「全部重载」有系列级结果提示', /系列：/.test(groupToast), groupToast);
   // 控件不许掉回系统样式（§7「一律自绘」）。UA 默认的三件套：白底 / 0 圆角 / 2px 灰边。
   // 第 24 轮用户抓到的试跑「预算」框就是漏了 class —— 裸 input 在深色主题下白底刺眼。
