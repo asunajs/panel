@@ -305,7 +305,6 @@ function fillSettings() {
   const comment = cfg.comment || {};
 
   $('set-topup').value = cfg.topup_min === undefined ? 30 : cfg.topup_min;
-  $('set-app-import').checked = !!(cfg.app_import && cfg.app_import.enabled);
   $('set-timeout').value = cfg.timeout_ms === undefined ? 15000 : cfg.timeout_ms;
   $('set-report-ms').value = cfg.report_ms === undefined ? 60000 : cfg.report_ms;
   $('set-interval-min').value = ti.min_ms === undefined ? 1000 : ti.min_ms;
@@ -542,7 +541,6 @@ async function removeAccount(index) {
 async function saveSettings() {
   const cfg = clone(S.config || {});
   cfg.topup_min = clampInt($('set-topup').value, 0, 1440, 30);
-  cfg.app_import = Object.assign({}, cfg.app_import, { enabled: !!$('set-app-import').checked });
   cfg.timeout_ms = clampInt($('set-timeout').value, 1000, 60000, 15000);
   cfg.report_ms = clampInt($('set-report-ms').value, 1000, 21600000, 60000);
   const tiMin = clampInt($('set-interval-min').value, 0, 15000, 1000);
@@ -788,7 +786,7 @@ function diag() {
     const runBtn = $('run');
     out.push('「立即跑一次」= ' + (runBtn ? runBtn.tagName.toLowerCase()
       + (runBtn._btn ? '（内层 button.btn 已就绪）' : '（内层还没建：/ui.js 没加载？）') : '找不到'));
-    const cb = $('set-app-import');
+    const cb = $('set-comment-enabled'); // 页面上剩下的那个勾选框（面板自绘）
     if (cb) {
       const cbs = getComputedStyle(cb);
       out.push('勾选框 = ' + cbs.width + ' × ' + cbs.height + '  bg=' + cbs.backgroundColor

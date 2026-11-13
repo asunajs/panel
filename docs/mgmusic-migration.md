@@ -15,7 +15,7 @@ cmusic-others/mgmusic-plugin/          ← 插件项目（源）
   mgmusic.js + index.html + app.js …   0.3.x 那一版（仍在，老面板用）
 
 panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**）
-  mgmusic.js                           2352 行（2348 行源 + 4 行 banner），首行标着「复制生成」
+  mgmusic.js                           2146 行（2142 行源 + 4 行 banner），首行标着「复制生成」
   mgmusic.webui/                       四个文件
 ```
 
@@ -29,7 +29,7 @@ panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**
 
 | 契约点 | 老（0.3.x / QuickJS） | 新（0.4.x / LLRT） | 依据 |
 |---|---|---|---|
-| 宿主 | `import { config, info, success, fail, warn, error, register_cron, register_handler, register_route, register_nav, set_job_summary, worker_hint, http_fetch } from 'host-api'` | `import host from 'panel:host'`（+ `import fs from 'node:fs'` 一处） | [host-api.md](host-api.md) §2 |
+| 宿主 | `import { config, info, success, fail, warn, error, register_cron, register_handler, register_route, register_nav, set_job_summary, worker_hint, http_fetch } from 'host-api'` + `node:fs` | `import host from 'panel:host'`，**零其它 node 依赖**（`node:fs` 也删了，见 §8） | [host-api.md](host-api.md) §2 |
 | 日志 | 五级（含 success/fail） | 四级；垫片 `success→info`、`fail→error` | 同上 |
 | 配置 | `config()`（同步，读 `plugin-data/mgmusic/config.json`） | 加载期 `await host.self_config()` 播种（可补播一次，有标记防复活），之后只读写 state（见 §2） | [host-api.md](host-api.md) §「两份配置」 |
 | 路由 | 10 条路径 / 11 个 `register_route(path, method, fn, opts)` | 一个 `host.register_web(evt)` 分发器，键 = `METHOD + ' ' + evt.rel` | [plugins.md](plugins.md) §「插件 WebUI」 |
@@ -38,7 +38,7 @@ panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**
 | 并发 | `worker_hint('exclusive')` | 删除（一插件一 runtime） | [engine.md](engine.md) |
 | 出站 | `http_fetch(url, opts)` | `host.http_fetch(url, opts)`（**同步**，opts 键同：method/headers/body/timeout_ms/tls） | [host-api.md](host-api.md) §2 |
 
-**URL 与 JSON 载荷一字未改**：界面照旧打 `/plugins/mgmusic/api/{config,status,login/send,login/verify,app-import,run,sign,comment,report,selftest}`，
+**URL 与 JSON 载荷一字未改**：界面照旧打 `/plugins/mgmusic/api/{config,status,login/send,login/verify,run,sign,comment,report,selftest}`，
 插件侧按 `rel` 分发；未知路由回 `404 {"ok":false,"error":"没有这条路由: GET api/nope"}`（老面板是 404 纯文本，唯一形状差异）。
 
 ## 2. 存储：三个 state 键（为什么不再写文件）
@@ -50,8 +50,8 @@ panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**
 | 老文件（cwd 相对） | 新键 |
 |---|---|
 | `config.json` | `mgmusic.config` |
-| `app-account.json` | `mgmusic.app_account` |
 | `login-pending.json` | `mgmusic.login_pending` |
+| （老版的 `app-account.json`） | — 已随「macOS App 导入」整段删除，见 §8 |
 
 读写用同步 op（`sqlite_query_sync` / `sqlite_exec_sync`）——老代码是「同步步骤机」，这样 `loadConfig()`
 保持同步、几百处调用一行不用改。
@@ -106,7 +106,7 @@ warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugi
 
 ## 4. 验收读数（2026-11-13，临时面板 8801 / 8802）
 
-被测：`plugins/mgmusic.js`（产物，2352 行）+ `mgmusic.webui/`（index 287 / style 294 / app 841 / boot 85 行）。
+被测：`plugins/mgmusic.js`（产物，2146 行）+ `mgmusic.webui/`（index 280 / style 294 / app 839 / boot 85 行）。
 下表是 verify 在 8801 的独立验证，加上 Lead 在 8802 对「补播种 / 整份提交 / 删光账号」三条的回归。
 
 | 项 | 期望 | 实测 |
@@ -119,7 +119,7 @@ warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugi
 | state | 两个键 | `mgmusic.config`（1383 B，与源 JSON 深比较相等）、`mgmusic.seed_marker` |
 | 写回路 | 改配置落库、不碰文件 | topup_min 30→45：state 值变、`updated_at` 变、`config.json` **md5 不变**、重启后仍 45 |
 | 整份提交守卫 | 漏 devices 必须报错 | `{"ok":false,"error":"config.devices 必须给：这个接口是整份替换…"}`（`{topup_min:33}` 实测） |
-| 路由 | 与老面板同集合 | **12/12 完全相同**；未知路由 `404 {"ok":false,"error":"没有这条路由: GET api/nope"}`；非 JSON / devices 非数组 / cert 太短各自报得出 |
+| 路由 | 比老面板少一条 | 老版 12 条里 **`POST api/app-import` 已删**（现回 404），其余 11 条形状不变；未知路由 `404 {"ok":false,"error":"没有这条路由: GET api/nope"}`；非 JSON / devices 非数组 / cert 太短各自报得出 |
 | daily 绑定 | 走到业务层 | 合成账号跑一次 → run 记录 `status:error  "1/1 个账号失败" 3.4s`（不再是「没有这个 handler: daily」） |
 | 界面资源 | 200 + 类型对 | `/plugins/mgmusic/` 200 text/html；style.css / app.js / boot.js 200 且 content-type 对；无尾斜杠 → 308 |
 | CSP 干净 | 无内联 | 内联 `<style>` / 无 src 的 `<script>` / `style=` / `on*` 全 0 |
@@ -127,6 +127,8 @@ warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugi
 | 两主题 | 跟着面板 | light `bg #f3f3f3 / surface #fff / fg #1f1f1f / accent #0052d9`；dark `#181818 / #242424 / #e7e7e7 / #3f7ae0`；pageErrors 0 |
 | `?diag=1` | 两项版本号 | style-ver=1、appVer=1、样式表 2 份、勾选框 16×16 且 `appearance:none`（面板自绘未被撤） |
 | 门禁 | 四格绿 | `check-plugin-style` ok · `check-docs` 14 篇 ok · `check-pitfalls` 12 条 ok · `cargo test` **337 passed** |
+| 删掉 App 导入后 | 零残留、零异常 | 插件里 `IS_NODE / importMacAppAccount / readMacAppAccount / MAC_APP_PREFS / node:fs` **0 命中**、路由表 11 条、HTML 里 `set-app-import` 0 次；四段操作（加载 / 填设置 / 保存 / `?diag=1`）控制台 **exception 0** |
+| 保存往返 | 200 + 旧字段被清 | 页面改 topup 30→31 → 保存 → 回读 31、devices 仍是 2；state 顶层键 8 个、`app_import` **没了**（历史值被 `delete`，不再复活） |
 
 **反面例（都实测过，口径写清楚免得误判）**
 
@@ -197,5 +199,32 @@ await host.register_handler('daily', function () { return runDaily(); });
 |---|---|---|
 | 真实账号的写链路（login-access / 签到 / 评论 / 补报 / 领奖） | ❓ 未跑（迁移只做环境层，协议同 v0.3.4） | 用真 ce 在 3030 上手动跑一次 `daily`，看 run 记录与金币变化 |
 | 短信登录（`login/send` + `login/verify`） | ❓ 未跑 | 插件页「添加账号」走一遍；注意会真发短信 |
-| macOS App 账号导入（`app-import`） | ❓ 分支活着但没读到 | LLRT 里 `process.versions.node='0.0.0'`，走的是 Node 分支；本机实测回 `{"ok":false,"runtime":"node","error":"没读到 macOS App 的 kMGLoginSDKUserInfo（App 是否已登录？）"}` |
+| macOS App 账号导入（`app-import`） | **已删除**（用户否掉，见 §8） | — |
 | 评论区（`comment`） | ❓ 老版本也是实验性 | 老面板默认 `comment.enabled=true` 但没人验过；本次未动 |
+## 8. 用户否掉的东西：macOS App 账号导入（2026-11-13）
+
+原话：**「毫无意义的配置，用户又不一定是 macOS，就算是也不一定安装了咪咕音乐」**。
+
+老版（0.3.x）里这一套是给开发者自己用的：读咪咕 Mac App 的
+`~/Library/Containers/com.migu.migumobilemusic/…/com.migu.migumobilemusic.plist` 里的
+`kMGLoginSDKUserInfo`，或读插件数据根里 `scripts/sync-macos-account.mjs` 生成的那份 json，
+把 uid/msisdn 直接灌进 devices。它对别人是**两条都不会命中**的死配置。
+
+0.4.x 变体里整段删除，连带的东西一起清掉：
+
+| 删掉的 | 位置 |
+|---|---|
+| 配置项 `app_import` | DEFAULTS / `loadConfig` / `validateConfig`（旧配置带来的字段一律 `delete`，不留在 state 里） |
+| 导入实现 | `readAccountFile` / `readMacAppAccount` / `importMacAppAccount` / `balancedJsonAt` / `MAC_APP_PREFS` / `IS_NODE` |
+| 路由 `POST api/app-import` | `register_web` 分发表（现在回 404「没有这条路由」） |
+| state 键 `mgmusic.app_account` | 不再读写（历史行留着也无害，没人读） |
+| 界面复选框 `#set-app-import` | 设置卡；`?diag=1` 的勾选框读数改用 `#set-comment-enabled` |
+| `import fs from 'node:fs'` | 删完没有第二处用处 ⇒ 插件现在零 node 依赖，只有 `panel:host` |
+
+**短信登录少了一条 uid 来源**：老代码在「passport 不回 uid」时会去 App plist 里捞。
+现在只剩两条：响应里带的 → 手机号走 H5 身份页解析；都拿不到就**不保存设备**（不写 uid=0）。
+deviceid 改成「同一手机号沿用旧值，没有才新生成」——效果与原来从 App 导入时一致，
+避免每次登录都换设备（ce 里含 deviceid，换了服务端就当新设备）。
+
+留了一个兼容：`sourceLabel()` 仍认 `macos-app` / `app-account.json` 这两个历史 source 值
+（老配置里可能带着），只是不会再产生新值。
