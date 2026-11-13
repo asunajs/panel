@@ -56,31 +56,76 @@
 
   // ── 样式自检（?diag=1）──
   // 为什么要有：插件页的配色只出问题在「别人的浏览器」里时，靠来回猜太贵。
-  // 这个块把真正生效的值打出来：样式表版本号、几个 token、组行的 computed 底色。
+  // 打的是**真正生效的东西**：样式表和规则清单、命中的 ex-group 规则、行元素的 computed
+  // 底色/透明度/滤镜、几个 token、UA。每 2 秒重算一次 —— 兑换表是异步渲染的，
+  // 只在 DOMContentLoaded 打一次会得到「这页没有兑换表」（第 154 轮就这么骗过自己一次）。
   if (new URLSearchParams(location.search).get('diag') === '1') {
-    addEventListener('DOMContentLoaded', () => {
+    const short = (h) => (h ? h.split('/').pop() : '内联');
+    const collect = () => {
       const cs = getComputedStyle(document.documentElement);
-      const td = document.querySelector('#ex-tbl tr.ex-group-row td');
+      const out = [];
       const ver = cs.getPropertyValue('--style-ver').trim();
-      const rows = [
-        'style.css 版本 = ' + (ver || '（读不到：不是我们的 CSS？）'),
-        'data-theme     = ' + (document.documentElement.dataset.theme || '（没有）'),
-        '--surface-2    = ' + cs.getPropertyValue('--surface-2').trim(),
-        '--soft         = ' + cs.getPropertyValue('--soft').trim(),
-        '--fg           = ' + cs.getPropertyValue('--fg').trim(),
-        'body 底色      = ' + getComputedStyle(document.body).backgroundColor,
-        '组行 td 底色   = ' + (td ? getComputedStyle(td).backgroundColor : '（这页没有兑换表）'),
-        'userAgent      = ' + navigator.userAgent,
-      ];
-      const box = document.createElement('pre');
-      box.id = 'diag-box';
-      box.textContent = rows.join('\n');
-      box.style.cssText =
-        'position:fixed;right:8px;bottom:8px;z-index:9999;max-width:92vw;margin:0;' +
-        'padding:10px 12px;border-radius:8px;border:1px solid #555;background:#111;color:#eee;' +
-        'font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;';
-      document.body.append(box);
-    });
+      out.push('style.css 版本 = ' + (ver || '（读不到：不是我们的 CSS？）'));
+      out.push('data-theme     = ' + (document.documentElement.dataset.theme || '（没有）'));
+      out.push('--surface-2    = ' + cs.getPropertyValue('--surface-2').trim());
+      out.push('--surface      = ' + cs.getPropertyValue('--surface').trim());
+      out.push('--soft         = ' + cs.getPropertyValue('--soft').trim());
+      out.push('--fg           = ' + cs.getPropertyValue('--fg').trim());
+      out.push('body 底色      = ' + getComputedStyle(document.body).backgroundColor);
+
+      // 样式表清单：扩展注入的样式表 href 会以 chrome-extension:// 开头，一眼看出
+      const sheets = [...document.styleSheets];
+      out.push('样式表 ' + sheets.length + ' 份：');
+      for (const sh of sheets) {
+        let n = -1;
+        try { n = sh.cssRules.length; } catch (e) { n = -2; }
+        out.push('  · ' + (sh.href || (sh.ownerNode && sh.ownerNode.id) || '内联') + '（规则 ' + n + '）');
+      }
+
+      // 所有提到 ex-group 的规则 + 它们给的背景色（谁在画那条灰底，看这里）
+      const hits = [];
+      for (const sh of sheets) {
+        let rules = null;
+        try { rules = sh.cssRules; } catch (e) { continue; }
+        for (const r of rules) {
+          const sel = r.selectorText || (r.cssRules ? '(嵌套)' : '');
+          if (!sel || sel.indexOf('ex-group') < 0) continue;
+          hits.push('  · ' + short(sh.href) + ' :: ' + sel + ' → bg=' +
+            (r.style && r.style.background ? r.style.background : (r.style && r.style.backgroundColor) || '-'));
+        }
+      }
+      out.push('ex-group 规则 ' + hits.length + ' 条：');
+      out.push(...hits.slice(0, 10));
+
+      // 真的那一行
+      const row = document.querySelector('tr.ex-group-row, .ex-group-row');
+      if (!row) {
+        out.push('行元素 = 没找到（表还没渲染？）');
+      } else {
+        const st = getComputedStyle(row);
+        const td = row.querySelector('td') || row;
+        const tcs = getComputedStyle(td);
+        out.push('行元素 = ' + row.tagName + '.' + row.className);
+        out.push('tr 底色 = ' + st.backgroundColor + '  opacity=' + st.opacity + '  filter=' + st.filter);
+        out.push('td 底色 = ' + tcs.backgroundColor + '  opacity=' + tcs.opacity);
+      }
+      out.push('userAgent      = ' + navigator.userAgent);
+
+      let box = document.getElementById('diag-box');
+      if (!box) {
+        box = document.createElement('pre');
+        box.id = 'diag-box';
+        box.style.cssText =
+          'position:fixed;left:8px;bottom:8px;z-index:9999;max-width:60vw;max-height:70vh;' +
+          'overflow:auto;margin:0;padding:10px 12px;border-radius:8px;border:1px solid #555;' +
+          'background:#111;color:#eee;font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;';
+        document.body.append(box);
+      }
+      box.textContent = out.join('\n');
+    };
+    addEventListener('DOMContentLoaded', collect);
+    collect();
+    setInterval(collect, 2000);
   }
 
   // 父窗口（面板）切主题
