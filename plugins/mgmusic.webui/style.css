@@ -1,0 +1,294 @@
+/*
+  咪咕音乐插件页的**布局**。规矩只有一条：颜色与控件都来自面板的 /app.css。
+
+  这里**不**做的事（每一条都是踩过的坑，见 ~/.dsh/skills/panel-plugin-ui）：
+    · 不定义面板 token（--bg/--surface/--fg/--line/--accent/--ok/--err/--radius…），只 var() 读；
+    · 不写颜色字面量（#fff / rgb() / white），两个主题才能跟着面板走；
+    · 不写 !important（要压面板就提高特异度，压不住就是面板该补组件）；
+    · 不写 @media (prefers-color-scheme)：主题只认 [data-theme]，由 boot.js 定；
+    · 不碰 input[type=checkbox] 的 border / background / appearance ——
+      面板已经画好了勾选框（app.css 的 html input[type=checkbox]:not(.check-raw)），
+      这里再说一遍「撤掉」就会把它擦成空白（第 153 轮的事故）。
+    · 不重画 .btn / .panel / .input / .badge / .empty / .pre / .dialog*：那些是面板的组件。
+*/
+
+/* 样式表版本号：?diag=1 的自检块读它，用来分辨「CSS 换没换、JS 换没换」这种半新半旧状态。
+   改了本文件就 +1（一个数字，别指望它自动跟着 app.js 走）。 */
+:root {
+  --style-ver: 1;
+}
+
+/* ── 页面骨架 ── */
+
+.page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px 18px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.head-text {
+  min-width: 0;
+}
+
+.title {
+  font-size: 17px;
+}
+
+.sub {
+  margin: 2px 0 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.top-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* 嵌在面板 iframe 里时（boot.js 给 <html> 挂 data-embed="1"），面板顶栏已经写着插件名，
+   本页再画一次就是**两层标题**、还白占一行。只收标题：右边的状态和「刷新」得留着。 */
+[data-embed='1'] .head-text {
+  display: none;
+}
+
+/* ── 通用行 / 网格 ──
+   .row 是「一排按钮」的那种行；.grid2 是两列表单（窄屏一列）。 */
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 8px 0;
+  align-items: start;
+}
+
+/* 勾选行带两行说明，独占一整行（挤在右半边会把说明折成三行） */
+.grid2 > .check-row {
+  grid-column: 1 / -1;
+}
+
+/* 自定义元素的宿主默认是 inline：放进网格后要让盒子撑满一格，里面的控件再撑满它。
+   ⚠ 只给宽度，不给颜色/边框 —— 控件长相是面板的。 */
+.grid2 > p-number,
+.grid2 > p-field,
+.grid2 > p-select {
+  display: block;
+  min-width: 0;
+}
+
+.grid2 p-number > .p-number,
+.grid2 p-select > .p-select {
+  width: 100%;
+}
+
+/* ── 表单 ──
+   面板的 .field 只画了里面的 select/input，没有画「标签在上、控件在下」这一层，
+   这里补它的布局（<p-field> 内部也是这个 class）。 */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field > .input {
+  width: 100%;
+}
+
+/* 勾选行：只排布局。⚠ 不要在这里碰 input[type=checkbox] 的 border/background。 */
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.check-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.check-text b {
+  font-weight: 600;
+}
+
+.check-text small {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* ── 账号卡片 ── */
+
+.acct {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 底色用 --surface-2 + 一条 --line 细线：卡片本体是 --surface，这样刚好差一档。
+   （浅色主题下 --surface-2 与 --bg 只差 4 级，所以这张卡不叠在页面底上、而是叠在卡片里。） */
+.acct-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.acct-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.acct-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.acct-title strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.acct-meta {
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.acct-sub {
+  margin-top: 2px;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.acct-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* ── 设置里的折叠区 ── */
+
+.advanced {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.advanced > summary {
+  cursor: pointer;
+  color: var(--fg-2);
+  font-size: 12.5px;
+  user-select: none;
+}
+
+.advanced[open] > summary {
+  margin-bottom: 6px;
+}
+
+/* ── 输出区 ──
+   块本身用面板的 .pre（底色/字色/等宽/换行都是面板给的），这里只调「占多高」。 */
+
+.out {
+  margin: 10px 0 0;
+  max-height: 420px;
+}
+
+.footer-note {
+  margin-top: 2px;
+}
+
+/* ── 样式自检块（?diag=1）──
+   浮在右下角，不参与布局。颜色走 token —— 自检块自己写死颜色就等于「自检不了自己」。 */
+
+#diag-box {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 9999;
+  max-width: min(520px, 48vw);
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-md);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* ── 窄屏 ──
+   面板的 iframe 可能只有手机那么宽：两列表单变一列、账号卡的动作换到下面一行。 */
+
+@media (max-width: 640px) {
+  .page {
+    padding: 12px 12px 32px;
+  }
+
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+
+  .acct-item {
+    flex-direction: column;
+  }
+
+  .acct-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  #diag-box {
+    max-width: 90vw;
+  }
+}
+
+/* hidden 属性在「作者给它写过 display」的元素上会被压掉（.row / .top 都是 display:flex）。
+   这条兜底放在文件最后：同特异度下后写的赢，hidden 说了算。
+   ⚠ 只影响本插件页 —— 插件页是独立 document，跑不到面板里去。 */
+[hidden] {
+  display: none;
+}

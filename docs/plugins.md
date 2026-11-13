@@ -291,7 +291,8 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 插件 | 还缺什么 |
 |---|---|
 | `mcloud` | 阶段 A/B 跑过真读数；`ws_*` 与 native TLS **都已补上**（见 §2.2），直播那半剩下的只是**真跑一次**（要开播，得用户点头） |
-| `cmread` / `mgmusic` / `yangshipin` | ❓ **没验过**：从源码看只用 `node:fs` + `setTimeout` + `register_nav`（前两个我们有、nav 忽略），理论上换 host-api 就能打。真要迁就先打一个 `quark` 试水 |
+| `mgmusic` | ✅ **已经迁完**（2026-11-13）：契约换完、账号配置从老 `config.json` 播种到 `state` 表、界面换成 `/app.css` + 套件。读数是「路由/界面/播种」这一层，**真账号的写链路还没跑**。详见 [mgmusic-migration.md](mgmusic-migration.md) |
+| `cmread` / `yangshipin` | ❓ **没验过**：从源码看只用 `node:fs` + `setTimeout` + `register_nav`（前两个我们有、nav 忽略），理论上换 host-api 就能打。mgmusic 这一趟证明这条路走得通（多看两条坑：[mgmusic-migration.md §5](mgmusic-migration.md)），下一个照它的形状打即可 |
 | `quark` | 只用 host-api 的 fetch/sqlite，最容易 |
 
 ### 3. 明确不做的
