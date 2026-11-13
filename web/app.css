@@ -29,10 +29,10 @@
   --radius-sm: 10px;
   /* 控件尺寸只从这里取：按钮/输入/下拉/段控必须一样高，否则并排就歪 */
   --h-control: 32px;
-  --h-control-sm: 28px;
+  --h-control-sm: 30px;
   --r-control: 9px;
   --pad-control: 12px;
-  --pad-control-sm: 9px;
+  --pad-control-sm: 11px;
   --sidebar-w: 236px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
@@ -182,7 +182,7 @@ button, input, select { font: inherit; color: inherit; }
 .btn-ghost:hover { background: var(--surface-2); color: var(--fg); border-color: transparent; }
 .btn-danger { color: var(--err); }
 .btn-danger:hover { background: var(--err-soft); border-color: transparent; color: var(--err); }
-.btn-sm { height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px; border-radius: 8px; }
+.btn-sm { height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px; border-radius: 8px; gap: 6px; }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
 
 .icon-btn {
@@ -994,3 +994,15 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   padding: 0 8px; color: var(--dim);
 }
 .sidebar-logout:hover { color: var(--fg); }
+
+/* 动作按钮行（第 93 轮，用户反馈「这种按钮太紧凑」）：
+   .actions 原来没有布局声明 —— 一串 inline-flex 的按钮**直接相邻**（中间连空格都没有），
+   看起来像挤在一起的一条。这里统一成 flex + 10px 间距，允许换行（窄屏不至于溢出）。 */
+.actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+}
+.actions:not(:last-child) { margin-bottom: 14px; }
+/* 抽屉里的那一排（编辑源码/配置/重载/停止/删除）上下也给点气。 */
+.drawer .actions, .tab-pane .actions { margin-top: 14px; margin-bottom: 14px; }
+/* 表格里的动作列是行内小按钮，间距保持紧凑、但不要被上面的规则带上纵向 margin。 */
+.table .actions { margin: 0; gap: 6px; }
