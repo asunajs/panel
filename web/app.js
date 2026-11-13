@@ -212,9 +212,12 @@ const NOTICE_MIN_LEN = 20;
 function notify(msg, kind) {
   const text = msg == null ? '' : String(msg);
   const k = kind || 'info';
-  const needsReading = k === 'err' || text.length > NOTICE_MIN_LEN || text.includes('\n');
-  if (!needsReading) {
-    toast(text);
+  // 只看**长度**，不看是不是错误（第 136 轮）：
+  // 「mcloud 当前没有在跑的任务」这种一句话的错误结果，用户一眼就懂，不需要一直摆在右上角让他去关；
+  // 真正需要细看的错误（带路径、带字节数、带 os error）本来就很长，自然会去右边。
+  const long = text.length > NOTICE_MIN_LEN || text.includes('\n');
+  if (!long) {
+    toast(text, k === 'err'); // 短的错误照样红底，只是闪一下
     return null;
   }
   return notice(text, k);

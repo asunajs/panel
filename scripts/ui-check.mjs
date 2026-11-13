@@ -402,6 +402,23 @@ async function main() {
     refreshInfo.notices === 0 && refreshInfo.toastShown === true && /已刷新/.test(refreshInfo.toast),
     JSON.stringify(refreshInfo),
   );
+  // 短错误也不该常驻（第 136 轮）：用户拿「mcloud 当前没有在跑的任务」举过例，它连 20 字都不到。
+  await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
+  await js("document.getElementById('toast').className = 'toast hidden'");
+  await sleep(200);
+  await js("notify('mcloud 当前没有在跑的任务', 'err')");
+  await sleep(300);
+  const shortErr = JSON.parse(await js(
+    "JSON.stringify({toastShown:!document.getElementById('toast').classList.contains('hidden')," +
+    "toast:document.getElementById('toast').textContent," +
+    "isErr:document.getElementById('toast').classList.contains('toast-err')," +
+    "notices:document.querySelectorAll('#notices .notice').length})",
+  ));
+  check(
+    '短错误也只闪一下（红底居中，不进右上角）',
+    shortErr.notices === 0 && shortErr.toastShown === true && shortErr.isErr === true,
+    JSON.stringify(shortErr),
+  );
   // 长错误必须常驻：要看完、要截图、要拿去分析
   const longErr = '脚本有 1580716 字节，超过上限 524288 字节（PANEL_SCRIPT_MAX_BYTES 可调）';
   await js("notify(" + JSON.stringify(longErr) + ", 'err')");
