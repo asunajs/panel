@@ -3608,3 +3608,56 @@ async fn plugin_manifest_feeds_the_config_form_and_the_scan() {
     assert_eq!(body["ok"], false);
     assert!(body["error"].as_str().unwrap().contains("JSON"), "{body}");
 }
+
+/// 插件指标（第 176 轮）：三个时间窗各一次聚合，数字要能对得上。
+#[tokio::test]
+async fn plugin_stats_aggregate_runs_by_window() {
+    let (app, plugins, _data, _store, db) = setup_core("stats176").await;
+    std::fs::write(plugins.join("demo.js"), "import host from 'panel:host';\n").unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000i64;
+    let rows: Vec<(i64, i64, &str)> = vec![
+        (now - 1_000, now - 900, "ok"),
+        (now - 2_000, now - 1_700, "ok"),
+        (now - 3_000, now - 2_800, "error"),
+        // 八天前那次只该进「全部」
+        (now - 8 * day, now - 8 * day + 500, "ok"),
+    ];
+    db.call(move |c| {
+        for (started, ended, status) in rows {
+            c.execute(
+                "INSERT INTO runs(plugin, task, started_at, ended_at, status, error)
+                 VALUES('demo', 'tick', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    started,
+                    ended,
+                    status,
+                    if status == "error" { Some("boom") } else { None }
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let (status, body) = get(&app, "/api/plugins/demo/stats").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d = &body["stats"];
+    assert_eq!(d["day"]["total"], 3, "{body}");
+    assert_eq!(d["day"]["failed"], 1, "{body}");
+    assert_eq!(d["day"]["ok"], 2, "{body}");
+    assert_eq!(d["week"]["total"], 3, "{body}");
+    assert_eq!(d["all"]["total"], 4, "八天前那次只在「全部」里: {body}");
+    assert!(d["day"]["avg_ms"].as_i64().unwrap() > 0, "平均耗时该算出来：{body}");
+    assert!(d["last_run"].as_i64().unwrap() > 0, "{body}");
+
+    // 不存在的插件：404（而不是空统计）
+    let (status, _) = get(&app, "/api/plugins/nope/stats").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

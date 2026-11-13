@@ -473,6 +473,7 @@ pub fn router(st: AppState) -> Router {
         // 清单与扫描（第 172 轮）
         .route("/api/plugins/scan", get(api_plugins_scan))
         .route("/api/plugins/{name}/manifest", get(api_plugin_manifest))
+        .route("/api/plugins/{name}/stats", get(api_plugin_stats))
         // 迁移（第 168 轮）：scan → preview → apply，与 CLI 同一份实现
         .route("/api/migrate/scan", get(api_migrate_scan))
         .route("/api/migrate/preview", post(api_migrate_preview))
@@ -2765,6 +2766,64 @@ async fn api_plugins_scan(State(st): State<AppState>) -> Result<Json<Value>, Api
 }
 
 /// GET /api/plugins/{name}/manifest —— 清单原文（界面用来排顺序、取标题）。
+/// GET /api/plugins/{name}/stats —— 这个插件最近跑得怎么样（第 176 轮）。
+///
+/// 卡片上原本只有「N 个任务 / 本次启动后未运行」两个数字，看不出「最近一周挂了几次」。
+/// 这里把 runs 表按 24h / 7d / 全部 三个窗口各聚合一次（一次 DB 往返，三个数字同一刻）。
+async fn api_plugin_stats(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    safe_name(&name)?;
+    if !plugin_path(&st.plugins_dir, &name)?.exists() {
+        return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let want = name.clone();
+    let stats = st
+        .db
+        .call(move |c| {
+            let win = |since: i64| -> Result<Value, String> {
+                let (total, failed, avg_ms): (i64, i64, Option<f64>) = c
+                    .query_row(
+                        "SELECT COUNT(*),
+                                COALESCE(SUM(CASE WHEN status='error' THEN 1 ELSE 0 END), 0),
+                                AVG(CASE WHEN ended_at IS NOT NULL THEN ended_at - started_at END)
+                           FROM runs WHERE plugin = ?1 AND started_at >= ?2",
+                        rusqlite::params![&want, since],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({
+                    "total": total,
+                    "failed": failed,
+                    "ok": total - failed,
+                    "avg_ms": avg_ms.map(|v| v.round() as i64),
+                }))
+            };
+            let day = 86_400_000i64;
+            let last: Option<i64> = c
+                .query_row(
+                    "SELECT MAX(started_at) FROM runs WHERE plugin = ?1",
+                    rusqlite::params![&want],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            Ok(json!({
+                "day": win(now - day)?,
+                "week": win(now - 7 * day)?,
+                "all": win(0)?,
+                "last_run": last,
+            }))
+        })
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({ "ok": true, "name": name, "stats": stats })))
+}
+
 async fn api_plugin_manifest(
     State(st): State<AppState>,
     Path(name): Path<String>,

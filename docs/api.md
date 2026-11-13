@@ -460,3 +460,20 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
    测试 `unknown_page_renders_the_error_page` 钉住。
 
 未定义路径：`/api/*` 由 api router 的 fallback 出 JSON 404；其余路径由根 router 的 fallback 出错误页。
+
+## 按插件指标：GET /api/plugins/{name}/stats（第 176 轮）
+
+卡片上只有「N 个任务 / 本次启动后未运行」，看不出「最近一周挂了几次」。这个接口把
+runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一刻的）：
+
+```json
+{ "ok": true, "name": "mcloud",
+  "stats": {
+    "day":  { "total": 12, "ok": 11, "failed": 1, "avg_ms": 842 },
+    "week": { "total": 84, "ok": 80, "failed": 4, "avg_ms": 910 },
+    "all":  { "total": 512, "ok": 500, "failed": 12, "avg_ms": 1024 },
+    "last_run": 1763111111000 } }
+```
+
+- `avg_ms» 只算 `ended_at» 有值的行（还在跑的、被杀的不算进平均）；
+- 插件不存在 → 404，而不是一份空统计（空数字会被当成「真的没跑过」）。
