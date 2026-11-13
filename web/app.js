@@ -2876,30 +2876,134 @@ async function main() {
 main();
 
 /** 上传：单文件或 zip，body 是原始字节（服务端按 ?name= 决定落点）。 */
+/** 上传：单文件或 zip，body 是原始字节（服务端按 ?name= 决定落点）。
+ *
+ * 第 133 轮：单文件且**同名已存在**时先问（覆盖 / 重命名 / 取消），并如实说结果：
+ *   「已上传：x.js」（新建） / 「已覆盖：x.js」（替换了旧的）
+ * zip 没法在客户端预判里面有哪些同名文件，所以照旧带 overwrite=1 —— 但会在提示里
+ * 说出「覆盖了 N 个已有文件」，不再含糊。
+ */
+/** 同名文件的三种选择（第 133 轮）。
+ *
+ * 为什么不是「默认覆盖」：上传的本意可能是更新，也可能是手滑。原来默认覆盖，界面只回一句
+ * 「已上传」，用户根本不知道内容到底换没换。这里把选择权交回去，三种结果都说清楚：
+ * 覆盖（并告诉覆盖了哪个）/ 改名上传（新名字打出来）/ 取消。
+ *
+ * 返回 `{name, overwrite}`；取消返回 null。
+ */
+function askClash(info) {
+  $('clash-text').textContent =
+    info.kind === 'script'
+      ? 'scripts/' + info.name + ' 已存在（' + humanBytes(info.existingSize || 0) + '）。要覆盖它、还是换个名字上传？'
+      : 'plugins/' + info.name + ' 已存在（' + humanBytes(info.existingSize || 0) + '）。要覆盖它、还是换个名字上传？';
+  const field = $('clash-rename-field');
+  const input = $('clash-name');
+  field.classList.add('hidden');
+  input.value = suggestName(info.name);
+  $('clash').classList.remove('hidden');
+  return new Promise((resolve) => {
+    const done = (v) => {
+      $('clash').classList.add('hidden');
+      $('clash-overwrite').removeEventListener('click', onOverwrite);
+      $('clash-rename').removeEventListener('click', onRename);
+      $('clash').querySelectorAll('[data-close]').forEach((b) => b.removeEventListener('click', onCancel));
+      resolve(v);
+    };
+    const onOverwrite = () => done({ name: info.name, overwrite: true });
+    const onRename = () => {
+      if (!field.classList.contains('hidden')) {
+        const v = input.value.trim();
+        if (!/\.js$/i.test(v)) { toast('名字要以 .js 结尾'); return; }
+        done({ name: v, overwrite: false });
+        return;
+      }
+      field.classList.remove('hidden');
+      input.focus();
+      input.select();
+    };
+    const onCancel = () => done(null);
+    $('clash-overwrite').addEventListener('click', onOverwrite);
+    $('clash-rename').addEventListener('click', onRename);
+    $('clash').querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', onCancel));
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); onRename(); }
+    });
+  });
+}
+
+/** 重命名建议：`x.js` → `x-2.js`（再撞就 -3、-4…；只看当前列表，够用）。 */
+function suggestName(name) {
+  const m = /^(.*?)(\.js)$/i.exec(name);
+  const base = m ? m[1] : name;
+  const ext = m ? m[2] : '.js';
+  for (let i = 2; i < 100; i++) {
+    const cand = base + '-' + i + ext;
+    const taken =
+      state.files.some((f) => f.name === cand.replace(/\.js$/i, '')) ||
+      state.scripts.some((s) => s.name === cand.replace(/\.js$/i, ''));
+    if (!taken) return cand;
+  }
+  return base + '-new' + ext;
+}
 async function uploadFile(inputId, url, okPrefix) {
   const input = $(inputId);
   const file = input.files && input.files[0];
   if (!file) return;
+  const kind = url.includes('scripts') ? 'script' : 'plugin';
   try {
+    let name = file.name;
+    let overwrite = 1; // zip 用；单文件若同名会被下面的询问改成 0 或 1
+    const isZip = /\.zip$/i.test(name);
+    if (!isZip) {
+      const stem = name.replace(/\.js$/i, '');
+      const hit =
+        kind === 'script'
+          ? state.scripts.find((s) => s.name === stem)
+          : state.files.find((f) => f.name === stem);
+      if (hit) {
+        const choice = await askClash({
+          kind,
+          name: name,
+          existingSize: hit.bytes || 0,
+        });
+        if (!choice) { toast('已取消上传'); return; }
+        name = choice.name;
+        overwrite = choice.overwrite ? 1 : 0;
+      } else {
+        overwrite = 0; // 新文件：服务端默认不覆盖，明确带上
+      }
+    }
     const buf = await file.arrayBuffer();
-    const resp = await fetch(url + '?name=' + encodeURIComponent(file.name), {
-      method: 'POST',
-      headers: Object.assign({ 'x-panel': '1', 'content-type': 'application/octet-stream' },
-        state.token ? { 'x-panel-token': state.token } : {}),
-      body: buf,
-    });
+    const resp = await fetch(
+      url + '?name=' + encodeURIComponent(name) + (overwrite ? '&overwrite=1' : ''),
+      {
+        method: 'POST',
+        headers: Object.assign({ 'x-panel': '1', 'content-type': 'application/octet-stream' },
+          state.token ? { 'x-panel-token': state.token } : {}),
+        body: buf,
+      },
+    );
     if (!resp.ok) throw new Error((await resp.text().catch(() => '')).trim() || ('HTTP ' + resp.status));
     const d = await resp.json();
-    toast(okPrefix + '：' + (d.files || []).join('、') + (d.zip ? '（zip）' : ''));
+    const list = (d.files || []).join('、');
+    const replaced = d.replaced || [];
+    let msg;
+    if (replaced.length && replaced.length === (d.files || []).length) {
+      msg = '已覆盖：' + list;
+    } else if (replaced.length) {
+      msg = okPrefix + '：' + list + '（其中覆盖了 ' + replaced.join('、') + '）';
+    } else {
+      msg = okPrefix + '：' + list;
+    }
+    toast(msg + (d.zip ? '（zip）' : ''));
     await refresh();
-    if (url.includes('scripts')) await loadScripts();
+    if (kind === 'script') await loadScripts();
   } catch (e) {
     toast(e.message || '上传失败', true);
   } finally {
     input.value = '';
   }
 }
-
 /** 登出：清掉服务端 cookie，回到「需要令牌」那一步。
  *  无状态会话票没有服务端表要删，所以这里只是让浏览器把 cookie 扔掉。 */
 async function logoutPanel() {

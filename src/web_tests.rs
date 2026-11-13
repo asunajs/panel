@@ -2228,10 +2228,14 @@ async fn a_successful_enable_clears_the_failure_record() {
     assert!(!state["failed"].as_array().unwrap().iter().any(|v| v["name"] == "fix"));
 }
 
-/// 上传接口的覆盖语义：**默认覆盖**（界面上「上传」就是来更新文件的），
-/// 传 `overwrite=0` 才当冲突。这条钉住默认值，免得以后有人顺手改成默认不覆盖。
+/// 上传接口的覆盖语义（第 133 轮改）：**默认不覆盖** —— 同名就报冲突，
+/// 要覆盖必须显式带 `overwrite=1`。
+///
+/// 原来是默认覆盖：用户传同名文件只看到一句「已上传」，内容到底换没换心里没底。
+/// 现在界面会先问「覆盖 / 重命名 / 取消」，用户点覆盖才带 overwrite=1 过来；
+/// 响应里还会回 `replaced`，让界面说清楚是「已上传」还是「已覆盖」。
 #[tokio::test]
-async fn upload_overwrites_by_default_and_can_be_made_a_conflict() {
+async fn upload_defaults_to_a_conflict_and_reports_what_it_replaced() {
     let (app, plugins, _data, _store) = setup_dirs("pupload").await;
     let src = "import host from 'panel:host';\nawait host.register_handler('x', async () => 1);\n";
 
@@ -2246,26 +2250,31 @@ async fn upload_overwrites_by_default_and_can_be_made_a_conflict() {
             .unwrap()
     };
 
-    let (status, _) = send(&app, mk("/api/plugins/upload?name=up.js", src)).await;
-    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&app, mk("/api/plugins/upload?name=up.js", src)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["replaced"], json!([]), "第一次是新建，不是覆盖: {body}");
     assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), src);
 
-    // 再传一次（不带 overwrite）：默认覆盖
+    // 再传一次（不带 overwrite）：**冲突**，文件不动
     let newer = "import host from 'panel:host';\nawait host.register_handler('x', async () => 2);\n";
-    let (status, _) = send(&app, mk("/api/plugins/upload?name=up.js", newer)).await;
-    assert_eq!(status, StatusCode::OK, "默认应当覆盖");
-    assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), newer);
+    let (status, body) = send(&app, mk("/api/plugins/upload?name=up.js", newer)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "同名默认应当冲突: {body}");
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("up.js")).unwrap(),
+        src,
+        "冲突时绝不能静默改文件"
+    );
 
-    // 显式 overwrite=0：冲突，文件不动
-    let (status, _) = send(
+    // 显式 overwrite=1：覆盖，并在响应里标出 replaced
+    let (status, body) = send(
         &app,
-        mk("/api/plugins/upload?name=up.js&overwrite=0", "console.log(0)"),
+        mk("/api/plugins/upload?name=up.js&overwrite=1", newer),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "overwrite=0 应当冲突");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["replaced"], json!(["up.js"]), "要能说出覆盖了哪个: {body}");
     assert_eq!(std::fs::read_to_string(plugins.join("up.js")).unwrap(), newer);
 }
-
 /// 健康摘要：插件没起来、通知发不出去，都要能在这一屏看见。
 #[tokio::test]
 async fn health_reports_failed_plugins_and_abandoned_notices() {

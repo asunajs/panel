@@ -1102,7 +1102,11 @@ async fn plugin_reload(
 struct UploadQuery {
     /// 原始文件名（`mcloud.js` / `bundle.zip`）—— 落点由它决定。
     name: String,
-    /// `0` = 不覆盖已存在的文件。默认覆盖（上传的本意就是更新）。
+    /// `1` = 覆盖已存在的文件；缺省（或不传）= **不覆盖**，同名就报冲突。
+    ///
+    /// 默认原来是「覆盖」—— 用户传了同名文件只看到一句「已上传」，内容到底换没换不知道
+    /// （第 133 轮报的就是这个）。现在不传就是冲突，界面会先问「覆盖 / 重命名 / 取消」，
+    /// 用户点了覆盖才带 `overwrite=1` 过来。
     overwrite: Option<u8>,
 }
 
@@ -1159,7 +1163,7 @@ async fn plugins_upload(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let dir = st.plugins_dir.clone();
-    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(1) != 0);
+    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(0) != 0);
     let saved = tokio::task::spawn_blocking(move || {
         crate::upload::save(crate::upload::Kind::Plugins, &dir, &name, &data, overwrite)
     })
@@ -1199,6 +1203,8 @@ async fn plugins_upload(
     Ok(Json(json!({
         "ok": true,
         "files": saved.files,
+        // 覆盖了哪些已有文件：界面据此说「已覆盖」而不是「已上传」
+        "replaced": saved.replaced,
         "bytes": saved.bytes,
         "zip": saved.zip,
         "reloaded": reloaded,
@@ -1214,7 +1220,7 @@ async fn scripts_upload(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let dir = st.scripts_dir.clone();
-    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(1) != 0);
+    let (name, data, overwrite) = (q.name.clone(), body.to_vec(), q.overwrite.unwrap_or(0) != 0);
     let saved = tokio::task::spawn_blocking(move || {
         crate::upload::save(crate::upload::Kind::Scripts, &dir, &name, &data, overwrite)
     })
@@ -1250,6 +1256,7 @@ async fn scripts_upload(
     Ok(Json(json!({
         "ok": true,
         "files": saved.files,
+        "replaced": saved.replaced,
         "bytes": saved.bytes,
         "zip": saved.zip,
         "scripts": added,

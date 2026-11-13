@@ -343,6 +343,22 @@ async function main() {
   check('保存插件配置后提示已保存并重载', /配置已保存/.test(cfgToast || ''), cfgToast);
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
+  // 同名上传要问（第 133 轮）：覆盖 / 重命名 / 取消，而不是闷头覆盖再回一句「已上传」。
+  await js(
+    '(()=>{const nl=String.fromCharCode(10),q=String.fromCharCode(39);' +
+    'const dt=new DataTransfer();' +
+    "dt.items.add(new File(['import host from '+q+'panel:host'+q+';'+nl+'await host.register_handler('+q+'zz'+q+', async () => 2);'+nl], 'seed.js', {type:'text/javascript'}));" +
+    "const i=document.getElementById('plugin-upload'); i.files=dt.files; i.dispatchEvent(new Event('change'));" +
+    '})()',
+  );
+  await sleep(800);
+  const clashShown = await js("!document.getElementById('clash').classList.contains('hidden')");
+  const clashText = await js("document.getElementById('clash-text').textContent");
+  check('同名上传先问「覆盖 / 重命名 / 取消」', clashShown === true && /已存在/.test(clashText || ''), clashText);
+  await js("document.getElementById('clash-overwrite').click()");
+  await sleep(1600);
+  const clashToast = await js("document.getElementById('toast').textContent");
+  check('选「覆盖」后提示说「已覆盖」而不是「已上传」', /已覆盖/.test(clashToast || ''), clashToast);
   const allCards = await js("document.querySelectorAll('#plugin-grid .plugin-card').length");
   check('插件按系列分组了', groups.length >= 1, JSON.stringify(groups));
   check(

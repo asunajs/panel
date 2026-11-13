@@ -482,8 +482,28 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       </div>
     </div>
 
+    <!-- 同名冲突（第 133 轮）：原来是「默认覆盖 + 只说一句已上传」，用户没法判断内容换没换。
+         现在把选择权交回来：覆盖 / 重命名 / 取消。 -->
+    <div class="modal hidden" id="clash" role="dialog" aria-modal="true" aria-labelledby="clash-title">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card">
+        <h2 id="clash-title">已存在同名文件</h2>
+        <p class="muted" id="clash-text"></p>
+        <label class="field hidden" id="clash-rename-field">
+          <span>新名字</span>
+          <input id="clash-name" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-close="1">取消</button>
+          <button class="btn" type="button" id="clash-rename">重命名</button>
+          <button class="btn btn-primary" type="button" id="clash-overwrite">覆盖</button>
+        </div>
+      </div>
+    </div>
+
     <div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
     <div class="toast hidden" id="toast" role="status"></div>
     <script src="/app.js"></script>
-  </body>
+  
+</body>
 </html>

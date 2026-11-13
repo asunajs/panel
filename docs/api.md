@@ -394,3 +394,21 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 随机生成是次要选项：它给的 43 字符没人记得住，没抄下来就只能删 `auth.json` 重来（第 24 轮踩过）
         → 重启生效（确认弹窗）→ 页面刷新 → 令牌门 → 粘贴 → 解锁，侧栏变「令牌已启用」
 ```
+
+## 上传接口的覆盖语义（第 133 轮改了默认值）
+
+`POST /api/plugins/upload?name=x.js|bundle.zip`、`POST /api/scripts/upload?name=…`
+
+| 参数 | 行为 |
+|---|---|
+| 不带 `overwrite` | **不覆盖**：同名文件返回 `400 文件已存在: x.js（要覆盖请显式勾选覆盖）`，磁盘不动 |
+| `overwrite=1` | 覆盖；响应里带 `replaced: ["x.js"]` |
+
+响应形状（两个上传接口一致）：
+
+```json
+{ "ok": true, "files": ["x.js"], "replaced": ["x.js"], "bytes": 1234, "zip": false }
+```
+
+`replaced` 是**这次覆盖掉的已有文件**（zip 里可能有好几个）；界面用它区分「已上传」和「已覆盖」。
+默认值原来就是覆盖 —— 那会让「手滑传错名」静默毁掉旧文件，也让用户分不清到底换没换。

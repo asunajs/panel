@@ -31,6 +31,9 @@ pub enum Kind {
 #[derive(Debug)]
 pub struct Saved {
     pub files: Vec<String>,
+    /// 其中**覆盖了已有文件**的那些（相对上传根）。界面据此说实话：
+    /// 「已上传」和「已覆盖」是两件事，用户要能立刻分辨（第 133 轮）。
+    pub replaced: Vec<String>,
     pub bytes: u64,
     pub zip: bool,
 }
@@ -134,9 +137,11 @@ fn save_single(
     let rel = single_dest(kind, base)?;
     let parent = ensure_dir(root, rel.parent().unwrap_or(Path::new("")))?;
     let dest = parent.join(rel.file_name().unwrap());
-    write_file(&dest, &rel, data, overwrite)?;
+    let was_there = write_file(&dest, &rel, data, overwrite)?;
+    let shown = rel.to_string_lossy().replace('\\', "/");
     Ok(Saved {
-        files: vec![rel.to_string_lossy().replace('\\', "/")],
+        files: vec![shown.clone()],
+        replaced: if was_there { vec![shown] } else { Vec::new() },
         bytes: data.len() as u64,
         zip: false,
     })
@@ -222,6 +227,8 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
 
     let strip = common_wrapper(root, &names);
     let mut files = Vec::new();
+    // 覆盖了哪些已有文件（界面据此说「已覆盖」而不是「已上传」）
+    let mut replaced: Vec<String> = Vec::new();
     let mut bytes = 0u64;
     for i in 0..archive.len() {
         let mut f = archive
@@ -283,13 +290,17 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         if bytes > MAX_UNCOMPRESSED_BYTES {
             return Err("zip 解压后太大（上限 64 MiB）".into());
         }
-        write_file(&dest, &rel, &buf, overwrite)?;
+        if write_file(&dest, &rel, &buf, overwrite)? {
+            replaced.push(rel.to_string_lossy().replace('\\', "/"));
+        }
         files.push(rel.to_string_lossy().replace('\\', "/"));
     }
 
     files.sort();
+    replaced.sort();
     Ok(Saved {
         files,
+        replaced,
         bytes,
         zip: true,
     })
@@ -398,8 +409,10 @@ fn ensure_dir(root: &Path, rel: &Path) -> Result<PathBuf, String> {
 }
 
 /// 写文件。`rel` 只用于报错（相对上传根，见审计 L10）。
-fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<(), String> {
+/// 返回 `true` 表示**覆盖了已存在的文件**（界面要据此说「已覆盖」而不是「已上传」）。
+fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<bool, String> {
     let shown = rel_display(rel);
+    let mut existed = false;
     match std::fs::symlink_metadata(dest) {
         Ok(md) => {
             if md.file_type().is_symlink() {
@@ -408,6 +421,7 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<(
             if md.is_dir() {
                 return Err(format!("目标是目录，不能当文件写: {shown}"));
             }
+            existed = true;
             if !overwrite {
                 // 审计 L14：默认 `overwrite=true` 是**既有语义**（面板上传会显式
                 // 传 overwrite=0 才走到这里），不在这里改默认值；这里只保证
@@ -433,7 +447,7 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("落盘 {shown} 失败: {e}"));
     }
-    Ok(())
+    Ok(existed)
 }
 
 #[cfg(test)]
