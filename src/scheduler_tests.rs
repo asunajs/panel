@@ -369,3 +369,42 @@ fn cancel_text_is_human() {
         // 睡很久也不会数到爆：上限 1000
         assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::days(30)), 1000);
     }
+
+// ── 空闲卸载的判定（第 174 轮）────────────────────────────────────────────
+//
+// 这个判定错了的代价很直接：卸掉一个马上要跑定时任务的插件 = 那次任务漏跑。
+
+#[test]
+fn idle_unload_is_off_by_default() {
+    let now = 1_000_000_000_000;
+    assert!(!should_idle_unload(now, now - 999_000, 0, false, None, 120_000), "0 = 关");
+    assert!(!should_idle_unload(now, now - 999_000, -5, false, None, 120_000));
+}
+
+#[test]
+fn idle_unload_needs_real_idle_time() {
+    let now = 1_000_000_000_000;
+    // 刚有动静（10 秒前），阈值 300 秒 → 不卸
+    assert!(!should_idle_unload(now, now - 10_000, 300, false, None, 120_000));
+    // 空闲 400 秒 → 卸
+    assert!(should_idle_unload(now, now - 400_000, 300, false, None, 120_000));
+    // 正好到阈值也算（不留半拍空档）
+    assert!(should_idle_unload(now, now - 300_000, 300, false, None, 120_000));
+}
+
+#[test]
+fn a_busy_plugin_is_never_unloaded() {
+    let now = 1_000_000_000_000;
+    assert!(!should_idle_unload(now, now - 10_000_000, 60, true, None, 120_000), "在途任务不能卸");
+}
+
+#[test]
+fn a_task_coming_soon_pins_the_plugin_in_memory() {
+    let now = 1_000_000_000_000;
+    // 30 秒后要到点，唤醒窗口 2 分钟 → 不卸（留给它，别卸了又装）
+    assert!(!should_idle_unload(now, now - 10_000_000, 60, false, Some(now + 30_000), 120_000));
+    // 3 分钟后才到点 → 可以卸
+    assert!(should_idle_unload(now, now - 10_000_000, 60, false, Some(now + 180_000), 120_000));
+    // 没有定时任务（纯 handler 插件）→ 随便卸
+    assert!(should_idle_unload(now, now - 10_000_000, 60, false, None, 120_000));
+}

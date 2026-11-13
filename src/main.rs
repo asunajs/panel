@@ -129,6 +129,8 @@ async fn main() -> Result<(), String> {
         Err(e) => log.emit("panel", None, Level::Warn, format!("收尾未完成的运行记录失败: {e}")),
     }
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone(), data_dir.clone());
+    // 空闲卸载后要能从磁盘读回源码（第 174 轮）。
+    sched.set_plugins_dir(plugins_dir.clone());
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
     let scripts_dir = PathBuf::from(env_or("PANEL_SCRIPTS_DIR", "scripts"));

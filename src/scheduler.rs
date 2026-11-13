@@ -409,6 +409,8 @@ pub struct PluginView {
     pub has_web: bool,
     /// 侧栏入口（`host.sidebar({title, order})`）。`None` = 这个插件不要在侧栏出现。
     pub nav: Option<NavEntry>,
+    /// 因为空闲被卸载了（第 174 轮）：任务还在、界面还能开，但 JS 运行时不在内存里。
+    pub unloaded: bool,
 }
 
 /// 侧栏入口：面板左侧栏里的一格。
@@ -446,6 +448,12 @@ pub enum Cmd {
     Unload {
         name: String,
     },
+    /// 告诉调度器插件目录在哪（空闲卸载后要能读回来）。
+    SetPluginsDir {
+        dir: std::path::PathBuf,
+    },
+    /// 空闲卸载的一拍（第 174 轮）：看一圈谁闲着，把它的 JS 运行时收掉。
+    IdleTick { reply: oneshot::Sender<usize> },
     /// 插件级「暂停 / 恢复」（第 167 轮）：不卸载，只是不再触发它的定时任务。
     /// 落库（plugins.suspended），所以重启后仍记得。
     SetSuspended {
@@ -580,6 +588,20 @@ impl Scheduler {
             reply,
         })
         .await
+    }
+
+    /// 告诉调度器插件目录（空闲卸载后要从这里把源码读回来）。
+    pub fn set_plugins_dir(&self, dir: std::path::PathBuf) {
+        let _ = self.tx.send(Cmd::SetPluginsDir { dir });
+    }
+
+    /// 跑一拍空闲检查，返回这一拍卸掉几个（后台每 30s 调一次）。
+    pub async fn idle_tick(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(Cmd::IdleTick { reply: tx }).is_err() {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     pub async fn load(&self, name: &str, source: String) -> Result<(), String> {
@@ -738,6 +760,39 @@ impl Scheduler {
     }
 }
 
+/// 空闲卸载的判定。**纯函数**，因为这里错了的代价很大：
+/// 卸掉一个马上要跑定时任务的插件 = 那次任务直接漏跑。
+///
+/// 规则：
+///   · idle_secs <= 0 → 关掉（默认就是关的）
+///   · 忙（有在途 invocation）→ 不卸
+///   · 距上次活动不到 idle_secs → 不卸
+///   · 有任何任务在 wake_window 内要到点 → 不卸（留给下一轮）
+pub fn should_idle_unload(
+    now: i64,
+    last_active: i64,
+    idle_secs: i64,
+    busy: bool,
+    next_due: Option<i64>,
+    wake_window_ms: i64,
+) -> bool {
+    if idle_secs <= 0 || busy {
+        return false;
+    }
+    if now.saturating_sub(last_active) < idle_secs.saturating_mul(1000) {
+        return false;
+    }
+    if let Some(due) = next_due {
+        if due <= now.saturating_add(wake_window_ms) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 空闲卸载的唤醒窗口：任务在这个窗口内要到点就不卸。
+pub const IDLE_WAKE_WINDOW_MS: i64 = 120_000;
+
 /// 一个插件同时只有一个 JS 执行位（`Loaded::busy`）。忙的时候来的 HTTP 请求先**排队**：
 /// 插件界面里两个请求挨着发（`Promise.all`）是极常见的写法，直接 502 会让人以为
 /// 「有任务在跑」—— 其实是自己撞自己（第 142 轮，pitfalls 89）。
@@ -767,6 +822,9 @@ struct Loaded {
     /// 新的又装不回来 —— 插件直接消失。有了这份就能把上一个能跑的版本装回去。
     /// 代价是每插件多存一份源码（几 KB）。
     source: String,
+    /// 最后一次「有事发生」的时刻（ms）：加载、跑任务、被 web 调用（第 174 轮）。
+    /// 空闲卸载只看它 —— 用运行记录去猜太贵，也不准。
+    last_active: i64,
 }
 
 struct Inner {
@@ -794,6 +852,13 @@ struct Inner {
     log: LogHub,
     cfg: TripConfig,
     plugins: HashMap<String, Loaded>,
+    /// 因为**空闲**被卸载的插件（第 174 轮）：名字 → 卸载时刻。
+    /// 与「接口坏了的卸载」不同：这里的任务、侧栏、web 路由都留着，随时能装回来。
+    unloaded: HashMap<String, i64>,
+    /// 插件目录：空闲卸载后要能从磁盘把源码读回来。
+    plugins_dir: Option<std::path::PathBuf>,
+    /// 正在异步唤醒的插件（避免同一拍发两次 load）。
+    waking: std::collections::HashSet<String>,
     tasks: Vec<Task>,
     tx: mpsc::UnboundedSender<Cmd>,
     reg: mpsc::UnboundedSender<Registration>,
@@ -845,12 +910,31 @@ pub fn start(
         log,
         cfg: TripConfig::default(),
         plugins: HashMap::new(),
+        unloaded: HashMap::new(),
+        plugins_dir: None,
+        waking: std::collections::HashSet::new(),
         tasks: Vec::new(),
         tx: tx.clone(),
         reg: reg_tx.clone(),
         config,
         persist: persist_tx,
     };
+    // 空闲卸载的一拍（第 174 轮）：每 30 秒看一圈谁闲着。
+    // 配置关着（idle_unload_secs = 0，默认）时这一拍什么都不做，对现有部署零影响。
+    {
+        let itx = tx.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                iv.tick().await;
+                let (t, _r) = oneshot::channel();
+                if itx.send(Cmd::IdleTick { reply: t }).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     // 串行落库：一条一条来，顺序就是调用顺序（见 `Inner::persist` 的注释）。
     let pdb = inner.db.clone();
     tokio::spawn(async move {
@@ -1014,6 +1098,13 @@ impl Inner {
                 source,
                 reply,
             } => self.spawn_load(name, source, reply),
+            Cmd::SetPluginsDir { dir } => {
+                self.plugins_dir = Some(dir);
+            }
+            Cmd::IdleTick { reply } => {
+                let n = self.idle_tick();
+                let _ = reply.send(n);
+            }
             Cmd::Loaded {
                 name,
                 result,
@@ -1028,8 +1119,11 @@ impl Inner {
                                 plugin: p,
                                 busy: false,
                                 source,
+                                last_active: Local::now().timestamp_millis(),
                             },
                         );
+                        self.unloaded.remove(&name);
+                        self.waking.remove(&name);
                         Ok(())
                     }
                     Err(e) => {
@@ -1136,8 +1230,21 @@ impl Inner {
                         tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
                         has_web: self.web.contains(name),
                         nav: self.sidebar.get(name).cloned(),
+                        unloaded: false,
                     })
                     .collect();
+                // 空闲卸载的也要列出来：不然界面上「插件没了」，其实只是省内存。
+                for name in self.unloaded.keys() {
+                    v.push(PluginView {
+                        name: name.clone(),
+                        group: crate::plugin_group(name),
+                        busy: false,
+                        tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
+                        has_web: self.web.contains(name),
+                        nav: self.sidebar.get(name).cloned(),
+                        unloaded: true,
+                    });
+                }
                 v.sort_by(|a, b| a.name.cmp(&b.name));
                 let _ = reply.send(v);
             }
@@ -1148,6 +1255,9 @@ impl Inner {
                 budget_ms,
                 reply,
             } => {
+                if let Some(l) = self.plugins.get_mut(&plugin) {
+                    l.last_active = Local::now().timestamp_millis();
+                }
                 if !self.plugins.contains_key(&plugin) {
                     let _ = reply.send(Err(format!("插件未加载: {plugin}")));
                     return;
@@ -1632,7 +1742,118 @@ impl Inner {
             format!("系统时间往回跳了 {back} 秒，任务已重新对齐（否则会静默停摆）"),
         );
     }
+    /// 读配置里的空闲卸载秒数（0 = 关）。热生效：每一拍都重读，改配置不用重启。
+    fn idle_unload_secs(&self) -> i64 {
+        let text = self.config.snapshot();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        v.get("plugins")
+            .and_then(|p| p.get("idle_unload_secs"))
+            .and_then(|x| x.as_i64())
+            .unwrap_or(0)
+    }
+
+    /// 一拍空闲检查（第 174 轮）。返回这一拍卸掉了几个。
+    fn idle_tick(&mut self) -> usize {
+        let idle = self.idle_unload_secs();
+        if idle <= 0 {
+            return 0;
+        }
+        let now = Local::now().timestamp_millis();
+        let names: Vec<String> = self.plugins.keys().cloned().collect();
+        let mut n = 0;
+        for name in names {
+            // 用户看得见的插件不卸：有 web 路由或侧栏入口的，卸掉之后界面一点就报错。
+            if self.web.contains(&name) || self.sidebar.contains_key(&name) {
+                continue;
+            }
+            // 暂停的也不卸：它本来就不跑定时，界面又可能随时要开。
+            if self.suspended.contains(&name) {
+                continue;
+            }
+            let (busy, last) = match self.plugins.get(&name) {
+                Some(l) => (l.busy, l.last_active),
+                None => continue,
+            };
+            let next_due = self
+                .tasks
+                .iter()
+                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some())
+                .map(|t| t.next_fire.timestamp_millis())
+                .min();
+            if !should_idle_unload(now, last, idle, busy, next_due, IDLE_WAKE_WINDOW_MS) {
+                continue;
+            }
+            if let Some(l) = self.plugins.get(&name) {
+                l.plugin.invocation().stop();
+            }
+            self.plugins.remove(&name);
+            self.unloaded.insert(name.clone(), now);
+            n += 1;
+            self.log.emit(
+                &name,
+                None,
+                Level::Info,
+                format!("插件 {name} 空闲已卸载（省内存；到点前会自动装回来）"),
+            );
+        }
+        n
+    }
+
+    /// 把快到点的、已卸载的插件提前装回来（唤醒窗口 IDLE_WAKE_WINDOW_MS）。
+    fn wake_unloaded(&mut self, now: DateTime<Local>) {
+        if self.unloaded.is_empty() {
+            return;
+        }
+        let Some(dir) = self.plugins_dir.clone() else {
+            return;
+        };
+        let now_ms = now.timestamp_millis();
+        let names: Vec<String> = self.unloaded.keys().cloned().collect();
+        for name in names {
+            if self.waking.contains(&name) {
+                continue;
+            }
+            let next = self
+                .tasks
+                .iter()
+                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some())
+                .map(|t| t.next_fire.timestamp_millis())
+                .min();
+            let Some(next) = next else { continue };
+            if next > now_ms + IDLE_WAKE_WINDOW_MS {
+                continue;
+            }
+            let path = dir.join(format!("{name}.js"));
+            match std::fs::read_to_string(&path) {
+                Ok(src) => {
+                    self.waking.insert(name.clone());
+                    let (tx, _rx) = oneshot::channel();
+                    self.spawn_load(name.clone(), src, tx);
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Info,
+                        format!("插件 {name} 空转结束：下次到点前提前唤醒"),
+                    );
+                }
+                Err(e) => {
+                    // 源码没了（用户删了？）：别一直挂在「唤醒中」，说清楚
+                    self.unloaded.remove(&name);
+                    self.waking.remove(&name);
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Warn,
+                        format!("插件 {name} 想唤醒但读不到源码（{e}），已移出空闲卸载名单"),
+                    );
+                }
+            }
+        }
+    }
+
     async fn fire_due(&mut self, now: DateTime<Local>) {
+        // 先把快到点的、已卸载的插件装回来（第 174 轮）。提前 2 分钟，够它读文件 + 跑顶层代码。
+        self.wake_unloaded(now);
         // 插件被暂停：到点也不跑，而且**不攒落后**（否则暂停一小时会攒出几十条「该跑没跑」）。
         // 直接把计划对齐到下一拍 —— 恢复后从下一拍开始，不补跑。
         if !self.suspended.is_empty() {
