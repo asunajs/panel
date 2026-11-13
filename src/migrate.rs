@@ -89,6 +89,21 @@ pub struct Preview {
     pub accounts: Vec<String>,
     /// 账号表里没有的袋子：默认不搬（它们属于已经删掉的号）。
     pub orphan_bags: Vec<String>,
+    /// 定时抢兑计划：**会真的按 cron 去跑**，所以预览必须把它们摆出来，
+    /// 不然用户迁完一脸莫名其妙（实测：迁完多出一条"不是我设的"计划）。
+    pub plans: Vec<PlanBrief>,
+}
+
+/// 一条计划里给人看的几格。
+#[derive(Debug, Default, Clone)]
+pub struct PlanBrief {
+    pub name: String,
+    pub account: String,
+    pub cron: String,
+    pub enabled: bool,
+    pub runs: i64,
+    pub max_runs: i64,
+    pub until: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -184,7 +199,61 @@ pub fn preview(from: &str, target_db: &Path) -> Result<Preview, String> {
         .collect();
     orphan_bags.sort();
 
+    // 计划：从 mcloud.exchange.plans 读；已跑次数在 mcloud.exchange.plan.runs 里
+    let mut plan_runs: std::collections::HashMap<String, i64> = Default::default();
+    if let Ok(raw) = src.query_row(
+        "SELECT value FROM state WHERE key = 'mcloud.exchange.plan.runs'",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&raw) {
+            for (id, v) in m {
+                if let Some(n) = v.as_i64() {
+                    plan_runs.insert(id, n);
+                }
+            }
+        }
+    }
+    let mut plans: Vec<PlanBrief> = Vec::new();
+    if let Ok(raw) = src.query_row(
+        "SELECT value FROM state WHERE key = 'mcloud.exchange.plans'",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        if let Ok(serde_json::Value::Array(list)) = serde_json::from_str::<serde_json::Value>(&raw) {
+            for it in list {
+                let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                plans.push(PlanBrief {
+                    name: it
+                        .get("prizeName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("（没名字）")
+                        .to_string(),
+                    account: it
+                        .get("accountId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    cron: it
+                        .get("cron")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    enabled: it.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                    runs: plan_runs.get(id).copied().unwrap_or(0),
+                    max_runs: it.get("maxRuns").and_then(|v| v.as_i64()).unwrap_or(0),
+                    until: it
+                        .get("until")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+        }
+    }
+
     Ok(Preview {
+        plans,
         source_kb: kb(&source_path),
         source: source_path,
         target_kb: kb(target_db),
@@ -201,6 +270,17 @@ pub fn preview(from: &str, target_db: &Path) -> Result<Preview, String> {
     })
 }
 
+/// apply 的开关。做成结构体：再来两个布尔参数就没人记得住顺序了。
+#[derive(Debug, Default, Clone)]
+pub struct Opts {
+    /// 只搬这一个命名空间
+    pub only: Option<String>,
+    /// 连账号表里已经没有的袋子也搬
+    pub with_orphan_bags: bool,
+    /// 不搬定时抢兑计划（plans / plan.runs / schedule.*）—— 迁完不会自己开抢
+    pub skip_schedules: bool,
+}
+
 /// 一次 apply 的结果。
 #[derive(Debug, Default)]
 pub struct Applied {
@@ -211,6 +291,13 @@ pub struct Applied {
     /// 来源里读到的运行历史行数（与上者之差 = 完全重复的行，已合并）
     pub runs_seen: usize,
     pub skipped_orphans: usize,
+}
+
+/// 算不算「定时抢兑」那套键：计划表、每计划的已跑次数、以及老的单条计划配置。
+fn is_schedule_key(key: &str) -> bool {
+    key == "mcloud.exchange.plans"
+        || key == "mcloud.exchange.plan.runs"
+        || key.starts_with("mcloud.exchange.schedule.")
 }
 
 fn snapshot(conn: &Connection, target_db: &Path) -> Result<PathBuf, String> {
@@ -224,12 +311,7 @@ fn snapshot(conn: &Connection, target_db: &Path) -> Result<PathBuf, String> {
 }
 
 /// 真写。先 preview 拿到名单，再做快照，最后一笔事务里搬完。
-pub fn apply(
-    from: &str,
-    target_db: &Path,
-    only: Option<&str>,
-    with_orphans: bool,
-) -> Result<Applied, String> {
+pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, String> {
     let p = preview(from, target_db)?;
     if let Some(parent) = target_db.parent() {
         if !parent.as_os_str().is_empty() {
@@ -255,8 +337,16 @@ pub fn apply(
         None
     };
 
-    let only_ns = only.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let only_ns = opts
+        .only
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let skip_sched = opts.skip_schedules;
     let keep = |key: &str| -> bool {
+        if skip_sched && is_schedule_key(key) {
+            return false;
+        }
         match &only_ns {
             Some(ns) => key.split('.').next() == Some(ns.as_str()),
             None => true,
@@ -296,7 +386,7 @@ pub fn apply(
                 if !keep(&key) {
                     continue;
                 }
-                if !with_orphans {
+                if !opts.with_orphan_bags {
                     if let Some(id) = key.strip_prefix(BAG_PREFIX) {
                         if orphan.contains(id) {
                             skipped_orphans += 1;
@@ -367,7 +457,7 @@ pub fn apply(
 
 fn usage() -> String {
     "用法：panel migrate from <0.3.x 的数据目录或 panel.db> [--apply] [--only <命名空间>] \
-     [--data-dir <0.4.x 数据目录>] [--with-orphan-bags]"
+     [--data-dir <0.4.x 数据目录>] [--with-orphan-bags] [--skip-schedules]"
         .to_string()
 }
 
@@ -391,11 +481,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut only: Option<String> = None;
     let mut data_dir: Option<String> = None;
     let mut with_orphans = false;
+    let mut skip_schedules = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--apply" => do_apply = true,
             "--with-orphan-bags" => with_orphans = true,
+            "--skip-schedules" => skip_schedules = true,
             "--only" => {
                 only = Some(args.get(i + 1).cloned().ok_or("--only 缺一个值（例如 --only mcloud）")?);
                 i += 1;
@@ -453,6 +545,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
             p.orphan_bags.join(", ")
         );
     }
+    // 计划必须摆出来：迁完它们是**会真跑的**，第一次见到就是"莫名其妙的定时"
+    // （用户实测过：迁完多出一条自己没印象的抢兑计划）。
+    if !p.plans.is_empty() {
+        let on = p.plans.iter().filter(|x| x.enabled).count();
+        println!();
+        println!("定时抢兑计划 {} 条（启用 {} 条）：", p.plans.len(), on);
+        for x in &p.plans {
+            println!(
+                "  · {} · {} · {} · 已跑 {}/{} · 到 {} 停{}",
+                x.name,
+                x.account,
+                x.cron,
+                x.runs,
+                x.max_runs,
+                x.until,
+                if x.enabled { "（启用）" } else { "（未启用）" }
+            );
+        }
+        if on > 0 {
+            println!("⚠ 启用的计划会在面板起来后按 cron 真的去抢兑；不想带着它们迁就加 --skip-schedules");
+        }
+    }
 
     if !do_apply {
         println!();
@@ -461,7 +575,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let a = apply(&from, &target, only.as_deref(), with_orphans)?;
+    let opts = Opts {
+        only: only.clone(),
+        with_orphan_bags: with_orphans,
+        skip_schedules,
+    };
+    let a = apply(&from, &target, &opts)?;
     println!();
     if let Some(s) = &a.snapshot {
         println!("快照  {}", s.display());
