@@ -386,6 +386,22 @@ async function main() {
     shortInfo.toastShown === true && shortInfo.notices === 0 && /没有在跑的任务/.test(shortInfo.toast),
     JSON.stringify(shortInfo),
   );
+  // 「刷新」这种纯确认不能赖在右上角（第 135 轮用户拿它举例）：点一下只该闪一条居中提示。
+  await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
+  await js("document.getElementById('toast').className = 'toast hidden'");
+  await sleep(200);
+  await js("document.getElementById('refresh-btn').click()");
+  await sleep(1800);
+  const refreshInfo = JSON.parse(await js(
+    "JSON.stringify({toastShown:!document.getElementById('toast').classList.contains('hidden')," +
+    "toast:document.getElementById('toast').textContent," +
+    "notices:document.querySelectorAll('#notices .notice').length})",
+  ));
+  check(
+    '点「刷新」只在顶部居中闪一下（不产生常驻提示）',
+    refreshInfo.notices === 0 && refreshInfo.toastShown === true && /已刷新/.test(refreshInfo.toast),
+    JSON.stringify(refreshInfo),
+  );
   // 长错误必须常驻：要看完、要截图、要拿去分析
   const longErr = '脚本有 1580716 字节，超过上限 524288 字节（PANEL_SCRIPT_MAX_BYTES 可调）';
   await js("notify(" + JSON.stringify(longErr) + ", 'err')");
