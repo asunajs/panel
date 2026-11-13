@@ -57,6 +57,12 @@ mkdirSync(scripts, { recursive: true });
 
 // 种子插件：一个能手动跑的 handler（真跑出来的运行记录比塞库更可信），
 // 外加一个会失败的，用来验「只看失败」和搜索错误文本。
+// 一个脚本（第 177 轮）：脚本源码复用插件那个编辑器，高亮要跟着走
+writeFileSync(
+  path.join(scripts, 'seed-script.js'),
+  ['const a = 1;', 'console.log("hi", a);', 'return a;', ''].join('\n'),
+);
+
 writeFileSync(path.join(plugins, 'seed.js'), [
   "import host from 'panel:host';",
   "await host.register_handler('ok', async () => { await host.sleep(5); return 1; });",
@@ -803,6 +809,30 @@ async function main() {
   );
   await js("document.querySelector('#drawer-close') && document.querySelector('#drawer-close').click()");
   await sleep(300);
+
+  // 插件抽屉的「指标」段（第 177 轮）：卡片给不出「最近一周挂几次」
+  await js("(async () => { if (typeof showPlugin === 'function') await showPlugin('seed'); return 1; })()");
+  await sleep(900);
+  const ov = JSON.parse(await js(
+    "(()=>{const b=document.getElementById('drawer-overview');" +
+    "const heads=[...b.querySelectorAll('.drawer-sub')].map(h=>h.textContent);" +
+    "const text=(b.textContent||'');" +
+    "return JSON.stringify({heads,has24h:text.includes('最近 24 小时'),has7d:text.includes('最近 7 天'),note:(text||'').slice(0,160)});})()"
+  ));
+  check('插件抽屉概览有指标段（24 小时 / 7 天）', ov.heads.includes('指标') && ov.has24h && ov.has7d, JSON.stringify(ov));
+
+  // 脚本源码也走同一条高亮路径（之前直接赋 value，高亮层不重画）
+  const scriptHl = await js(
+    "(async () => { if (typeof openScriptSource !== 'function') return 'no-fn';" +
+    " await openScriptSource('seed-script'); return 'ok'; })()"
+  );
+  await sleep(900);
+  const sh = JSON.parse(await js(
+    "(()=>{const g=document.querySelector('#src-gutter');const hl=document.querySelector('#src-hl');" +
+    "return JSON.stringify({gutter:(g&&g.textContent||'').trim().split(String.fromCharCode(10)).length," +
+    "spans:(hl&&hl.querySelectorAll('span').length)||0,err:(document.getElementById('src-error')||{}).textContent||''});})()"
+  ));
+  check('脚本源码同样有行号与高亮（共用同一条编辑器路径）', scriptHl === 'ok' && sh.gutter >= 3 && sh.spans > 0, JSON.stringify(sh));
 
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
