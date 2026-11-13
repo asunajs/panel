@@ -749,6 +749,8 @@ function renderPlugins() {
     head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
     // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
     if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
+    // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
+    if (p.unloaded) head.append(pill('pill', '空闲已卸载'));
     cardEl.append(head);
     const meta = el('div', 'plugin-meta');
     meta.append(el('span', '', mine.length + ' 个任务'));
