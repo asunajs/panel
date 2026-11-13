@@ -540,3 +540,34 @@ node scripts/migrate-mcloud-data.mjs --db ~/panel-3030/data/panel.db --apply    
 
 迁移完要重启面板（插件在加载时读这些键）：`launchctl kickstart -k gui/$(id -u)/dev.panel`。
 ⚠ 凭据多半已经过期（CLI 那份是旧的），进去之后每个号点一次「刷新」续 token。
+
+## 从老面板迁移插件状态（`scripts/migrate-mcloud-state.mjs`）
+
+老项目（`mcloud-plugin` / `mcloud-sign`）跑在**旧面板**里，插件状态在那个库的 `state` 表
+（键 `mcloud.*`，每个号另有一个 JSON 袋 `mcloud.acct.<id>`）。新面板是另一个库，schema 一样，
+所以迁移就是把这些键搬过去 —— **不要整库拷**（新库还有自己的 runs / logs / tasks）。
+
+```bash
+node scripts/migrate-mcloud-state.mjs \
+  --from ~/mobile/workspace/mcloud-plugin/data/panel.db \
+  --db   ~/panel-3030/data/panel.db            # 只打印计划
+
+# 真写；--prune-orphan-bags 顺手删掉账号表里没有的袋子
+node scripts/migrate-mcloud-state.mjs --from <老panel.db> --db <新panel.db> --apply --prune-orphan-bags
+```
+
+| 搬 | 不搬 |
+|---|---|
+| `state` 里所有 `mcloud.*` 键：账号表、每号的状态袋（会话 / 兑换订单 / 计划 / 领奖）、口令池、日志环、任务-账号对照 | `plugin.loaded_at` 这类面板自己的键；别的插件的键 |
+| `mcloud_runs` 的运行历史（id 重新分配，避免撞） | |
+
+⚠ 两点：
+1. **写之前先备份**：`tar -czf ~/panel-3030/data-premigrate-$(date +%Y%m%d-%H%M%S).tar.gz -C ~/panel-3030 data`
+2. 写完要重启面板（插件加载时读这些键）：`launchctl kickstart -k gui/$(id -u)/dev.panel`
+
+### 另一个脚本：从命令行那套（CLI）迁账号
+
+`scripts/migrate-mcloud-data.mjs` 走的是另一条路：把 `~/mobile/workspace/mcloud/data/*.json`
+（Bun CLI 那套）里的**账号**逐字段翻成插件的账号表（`auth.raw`→`auth`、`auth.phone`→`id`、
+`nickname`→`label`…）。只有「手上只有 CLI 数据」时才用它 —— 有老面板库就用上面那个，
+**后者带着每个号的完整状态和运行历史**。
