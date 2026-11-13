@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-pub const LABEL: &str = "dev.panel-llrt";
+pub const LABEL: &str = "dev.panel";
 
 fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
@@ -36,6 +36,14 @@ fn data_dir() -> PathBuf {
     PathBuf::from(std::env::var("PANEL_DATA_DIR").unwrap_or_else(|_| "data".to_string()))
 }
 
+fn plugins_dir() -> String {
+    std::env::var("PANEL_PLUGINS_DIR").unwrap_or_else(|_| "plugins".to_string())
+}
+
+fn scripts_dir() -> String {
+    std::env::var("PANEL_SCRIPTS_DIR").unwrap_or_else(|_| "scripts".to_string())
+}
+
 /// macOS：`~/Library/LaunchAgents/<label>.plist`
 pub fn macos_plist() -> Result<(PathBuf, String), String> {
     let exe = exe_path()?;
@@ -59,6 +67,12 @@ pub fn macos_plist() -> Result<(PathBuf, String), String> {
     <dict>
         <key>PANEL_BIND</key>
         <string>{bind}</string>
+        <key>PANEL_DATA_DIR</key>
+        <string>{data}</string>
+        <key>PANEL_PLUGINS_DIR</key>
+        <string>{plugins}</string>
+        <key>PANEL_SCRIPTS_DIR</key>
+        <string>{scripts}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -75,6 +89,9 @@ pub fn macos_plist() -> Result<(PathBuf, String), String> {
         exe = exe.display(),
         cwd = cwd.display(),
         bind = bind(),
+        data = logs.display(),
+        plugins = plugins_dir(),
+        scripts = scripts_dir(),
         out = logs.join("panel.out.log").display(),
         err = logs.join("panel.err.log").display(),
     );
@@ -90,13 +107,16 @@ pub fn linux_unit() -> Result<(PathBuf, String), String> {
         .join(format!("{LABEL}.service"));
     let unit = format!(
         "[Unit]\n\
-         Description=panel-llrt（LLRT 插件面板）\n\
+         Description=panel（LLRT 插件面板）\n\
          After=network-online.target\n\n\
          [Service]\n\
          Type=simple\n\
          WorkingDirectory={cwd}\n\
          ExecStart={exe}\n\
          Environment=PANEL_BIND={bind}\n\
+         Environment=PANEL_DATA_DIR={data}\n\
+         Environment=PANEL_PLUGINS_DIR={plugins}\n\
+         Environment=PANEL_SCRIPTS_DIR={scripts}\n\
          Restart=always\n\
          RestartSec=3\n\n\
          [Install]\n\
@@ -104,6 +124,9 @@ pub fn linux_unit() -> Result<(PathBuf, String), String> {
         cwd = cwd.display(),
         exe = exe.display(),
         bind = bind(),
+        data = data_dir().display(),
+        plugins = plugins_dir(),
+        scripts = scripts_dir(),
     );
     Ok((path, unit))
 }
@@ -158,7 +181,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             };
             println!("已写入 {ps}");
             println!("{msg}");
-            println!("面板会随登录自动启动。卸载：panel-llrt service uninstall");
+            println!("面板会随登录自动启动。卸载：panel service uninstall");
             Ok(())
         }
         Some("uninstall") => {
@@ -188,12 +211,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let on = listed.contains(LABEL);
             println!("系统登记: {}", if on { "是" } else { "否" });
             if !on && path.exists() {
-                println!("文件在但没登记 —— 试试 panel-llrt service install 重新装一次");
+                println!("文件在但没登记 —— 试试 panel service install 重新装一次");
             }
             Ok(())
         }
         Some(other) => Err(format!(
-            "未知子命令: service {other}\n用法: panel-llrt service [print|install|uninstall|status]"
+            "未知子命令: service {other}\n用法: panel service [print|install|uninstall|status]"
         )),
     }
 }
@@ -205,7 +228,7 @@ mod tests {
     #[test]
     fn plist_contains_the_absolute_exe_and_the_bind_address() {
         let (path, text) = macos_plist().unwrap();
-        assert!(path.to_string_lossy().ends_with("dev.panel-llrt.plist"));
+        assert!(path.to_string_lossy().ends_with("dev.panel.plist"));
         assert!(text.contains("<key>Label</key>"));
         assert!(text.contains(LABEL));
         assert!(text.contains("<key>RunAtLoad</key>"));
@@ -218,7 +241,7 @@ mod tests {
     #[test]
     fn systemd_unit_has_restart_and_install_section() {
         let (path, text) = linux_unit().unwrap();
-        assert!(path.to_string_lossy().ends_with("dev.panel-llrt.service"));
+        assert!(path.to_string_lossy().ends_with("dev.panel.service"));
         assert!(text.contains("Restart=always"));
         assert!(text.contains("WantedBy=default.target"));
         assert!(text.contains("ExecStart=/"));

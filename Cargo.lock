@@ -2968,44 +2968,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "panel-llrt"
-version = "0.4.0"
-dependencies = [
- "axum",
- "base64 0.23.1",
- "bytes",
- "chacha20poly1305 0.10.1",
- "chrono",
- "chrono-tz",
- "futures",
- "getrandom 0.2.17",
- "hkdf 0.12.4",
- "http",
- "http-body-util",
- "llrt_core",
- "llrt_timers",
- "native-tls",
- "reqwest",
- "ring",
- "rquickjs",
- "rusqlite",
- "rustls",
- "rustls-pki-types",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tower",
- "tower-http",
- "webpki-roots",
- "x25519-dalek 2.0.1",
- "zip",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3195,6 +3157,44 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "plugin-panel"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "chacha20poly1305 0.10.1",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "getrandom 0.2.17",
+ "hkdf 0.12.4",
+ "http",
+ "http-body-util",
+ "llrt_core",
+ "llrt_timers",
+ "native-tls",
+ "reqwest",
+ "ring",
+ "rquickjs",
+ "rusqlite",
+ "rustls",
+ "rustls-pki-types",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
+ "webpki-roots",
+ "x25519-dalek 2.0.1",
+ "zip",
+]
 
 [[package]]
 name = "poly1305"

@@ -6,7 +6,7 @@
 本文是 Stage 1 最小垂直切片的端到端读数；引擎层判据在 [engine.md](engine.md)，
 契约与限额在 [host-api.md](host-api.md)，设计在 [engine.md](engine.md)。
 
-**读数环境**：本机 macOS（arm64），`./target/debug/panel-llrt`，多个面板各占一个端口、
+**读数环境**：本机 macOS（arm64），`./target/debug/panel`，多个面板各占一个端口、
 各自的 `PANEL_DATA_DIR`。出站靶子是**本机合成服务** `127.0.0.1:8798`（`/tmp/llrt-smoke/target.py`），
 SSRF 靶子是**面板自己的回环** `/healthz`。**不碰任何真实账号、不碰外部服务。**
 探针产物在 `/tmp/llrt-smoke/`，不污染旧仓库。
@@ -229,7 +229,7 @@ PY
 
 ### 14. 本地实跑（已定，2026-11-11 晚，默认配置）
 
-`./target/debug/panel-llrt`，全用默认值：`PANEL_BIND=127.0.0.1:8787`、
+`./target/debug/panel`，全用默认值：`PANEL_BIND=127.0.0.1:8787`、
 `PANEL_DATA_DIR=data`、`PANEL_PLUGINS_DIR=plugins`、**不设令牌**（回环 + Host 闸）。
 
 启动输出（无凭据态是**吵**的，这是 §5 S3 的修法）：

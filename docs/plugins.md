@@ -220,7 +220,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 通知 / 数据（通知页是第 13 轮加的） |
 | 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（webhook / SMTP，见 [ops.md](ops.md)） |
 | 备份 / 恢复 | ✅ `/api/restore*` | ✅ | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
-| 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel-llrt service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
+| 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
 
 **用户点名的六项**（插件增删改查、脚本增删改查、插件 webui、配置 ui 化、设置 tabs、自启动）
 **全部落地**，另外补了备份/恢复和通知两块，以及一轮「双主题 × 窄屏」的界面一致性核查。
@@ -345,7 +345,7 @@ PUT  合法源码                              200 {"reloaded":true}
 POST .../disable                          200，/api/state 里立刻消失，plugins 表留一行
 POST .../enable                           200，/api/state 里回来
 DELETE /api/plugins/scratch1              200，文件进 trash/scratch1-1794453885698.js
-panel-llrt service print                  打出 launchd plist（Label dev.panel-llrt）
+panel service print                  打出 launchd plist（Label dev.panel）
 
 POST /api/scripts {"name":"s1",...}       200，返回 budget_ms/cron/enabled
 POST /api/scripts/s1/run                  200 {"run_id":1}

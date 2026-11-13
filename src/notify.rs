@@ -298,7 +298,7 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
                 let subject = {
                     let s = str_field(c, "subject");
                     if s.is_empty() {
-                        "[panel-llrt] 通知".to_string()
+                        "[panel] 通知".to_string()
                     } else {
                         s
                     }

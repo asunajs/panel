@@ -19,7 +19,7 @@
 （保存 = 写盘 → 重载，失败自动回滚），配置可以在设置页直接改并**热生效**（不用重启），
 设置页拆成常规 / 配置 / 安全 / 数据四个 tabs。
 **同一天还补了两块**：脚本（独立 `.js`，手动跑或按 `cron` 跑，运行记录/日志复用现有两张表）
-和开机自启动（`panel-llrt service print|install|uninstall|status`）。
+和开机自启动（`panel service print|install|uninstall|status`）。
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
 契约见 [plugins.md](plugins.md)。
 任务失败、熔断和插件主动喊话都会进顶栏铃铛，配 `PANEL_NOTIFY_WEBHOOK` 还能推到外部。

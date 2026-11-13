@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const BIN = path.join(ROOT, 'target/debug/panel-llrt');
+const BIN = path.join(ROOT, 'target/debug/panel');
 const KEEP = process.env.KEEP === '1';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'selftest-'));
 const results = [];

@@ -128,7 +128,7 @@ WSS  wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → �
 
 ```bash
 cd workspace/mcloud-plugin
-npm run build:panelllrt     # host-api → 适配层，产物落 ../panel-llrt/plugins/
+npm run build:panelllrt     # host-api → 适配层，产物落 ../panel/plugins/
 ```
 
 产物是**构建出来的**（`plugins/mcloud*.js` + `plugins/mcloud.webui/`），别手改 ——

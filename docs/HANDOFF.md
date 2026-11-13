@@ -135,7 +135,7 @@
 
 ## 8. 运行中的面板
 
-- **8787** = 常用面板（`PANEL_WEB_DIR=web ./target/debug/panel-llrt`，无令牌、只绑回环，数据在 `data/`）。
+- **8787** = 常用面板（`PANEL_WEB_DIR=web ./target/debug/panel`，无令牌、只绑回环，数据在 `data/`）。
   这是用户会看的那一个；改动 UI 后要 `cargo build` + 重启才生效（`web/*` 是 `include_str!` **编译期**嵌入）。
 - 临时面板（验证用）随时可起可杀：`PANEL_DATA_DIR=/tmp/xxx PANEL_TOKEN=... PANEL_BIND=127.0.0.1:879x`。
   杀之前确认不是用户要的。

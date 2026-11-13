@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const ROOT = process.cwd();
-const BIN = path.join(ROOT, 'target', 'debug', 'panel-llrt');
+const BIN = path.join(ROOT, 'target', 'debug', 'panel');
 const KEEP = process.argv.includes('--keep');
 const PORT_A = Number(process.env.UX_PORT || 8791);   // 有插件、无口令
 const PORT_B = Number(process.env.UX_PORT_B || 8792); // 全新、无口令（首次运行）

@@ -254,15 +254,15 @@ kill -9 之后 sqlite3 PRAGMA integrity_check → ok（WAL 自动恢复，没写
 
 ```bash
 ## 1. 生成一对密钥（只做一次；私钥丢了备份就解不开）
-panel-llrt keygen
+panel keygen
 ##   私钥 ppx1secret...  ← 自己收好
 ##   公钥 ppx1...        ← 可以公开
 
 ## 2. 加密导出
-panel-llrt backup --out backup.bk --encrypt-to ppx1<公钥>
+panel backup --out backup.bk --encrypt-to ppx1<公钥>
 
 ## 3. 恢复（面板停着的时候跑；跑着的话恢复完要重启或重载）
-panel-llrt restore --in backup.bk --secret ppx1secret<私钥>
+panel restore --in backup.bk --secret ppx1secret<私钥>
 ```
 
 目录口径与主程序一致：`PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR`。
@@ -364,11 +364,11 @@ HTTP 的 `POST /api/backup` 本来就在写文件前验配置；现在两边共�
 所以两种模式都在 JSON 里写明边界，回显也直说：
 
 ```text
-$ panel-llrt backup --out a.bk
+$ panel backup --out a.bk
 数据库**没有**打包（65536 字节的 panel.db 留在原地）；要带上它加 --with-db
 $ python3 -c "..."   →  db_included=False db_bytes=65536 有 db_base64 吗: False
 
-$ panel-llrt backup --out b.bk --with-db
+$ panel backup --out b.bk --with-db
 数据库已打包：65536 字节（VACUUM INTO 快照，在线安全）
 $ ls -l b.bk          →  87709 字节（base64 膨胀 1.33 倍）
 ```
@@ -380,7 +380,7 @@ $ ls -l b.bk          →  87709 字节（base64 膨胀 1.33 倍）
 #### 恢复
 
 ```bash
-panel-llrt restore --in b.bk --secret ppx1secret...   # 带库的备份只能用 CLI
+panel restore --in b.bk --secret ppx1secret...   # 带库的备份只能用 CLI
 ```
 
 - 带库的备份**只能在面板停止时用 CLI 恢复**：HTTP 那条 `POST /api/backup` 会 400
@@ -442,8 +442,8 @@ POST /api/backup（带库） → 400 这份备份里带着数据库，只能在�
 为什么强调：以前多传的参数被**静默忽略**，于是
 
 ```text
-./panel-llrt backup  --out /tmp/x.bk --data-dir /tmp/scratch   # --data-dir 被忽略
-./panel-llrt restore --in  /tmp/x.bk --data-dir /tmp/scratch   # 也一样
+./panel backup  --out /tmp/x.bk --data-dir /tmp/scratch   # --data-dir 被忽略
+./panel restore --in  /tmp/x.bk --data-dir /tmp/scratch   # 也一样
 ```
 实际备份的是**真面板**、恢复也写进了**真面板的 plugins/ 和 panel.db**。因为备份是刚做的、
 内容是同一堆东西，才没造成数据丢失 —— 换个时序就是事故。现在两条命令都会直接报错：
@@ -489,7 +489,7 @@ restore 到空目录                 → 1 个插件、配置已覆盖、数据�
 
 ### 加密导出（`--encrypt-to <公钥>` / `restore --secret <私钥>`）
 
-非对称的：面板只认识**公钥**，私钥在你自己手上（`panel-llrt keygen` 生成一份，面板不存）。
+非对称的：面板只认识**公钥**，私钥在你自己手上（`panel keygen` 生成一份，面板不存）。
 拿到面板不等于拿到解密能力 —— 否则「加密备份」只是把明文换成另一份明文。
 
 格式 v1：`magic 8B "PANELBK1" | eph_pub 32B | nonce_prefix 8B | plaintext_len 8B | 若干 64KiB 块`，
@@ -505,7 +505,7 @@ restore 到空目录                 → 1 个插件、配置已覆盖、数据�
 | 明文临时文件 | `backup` 会先写 `<out>.plain.tmp` 再加密并删掉；实测事后 0 个残留 |
 | 正确私钥恢复 | `已恢复（已解密）：1 个插件…`；插件里标记 1 处、配置里标记 1 处 |
 | 错误私钥 | `第 0 块解密失败：私钥不对，或者密文被改过/截断了`；目标目录**一个文件都没写** |
-| 不给私钥 | `这是加密备份，要给 --secret <私钥>（panel-llrt keygen 生成的那份）` |
+| 不给私钥 | `这是加密备份，要给 --secret <私钥>（panel keygen 生成的那份）` |
 | 密文被截断 | 同上「第 0 块解密失败」，不 panic |
 | 拿**私钥**当公钥去加密 | `这是**私钥**，不能用来加密 —— 加密只收公钥`，且不留下明文残留 |
 
@@ -958,3 +958,41 @@ status=error  error=脚本不能注册任务：请用「计划」字段排程，
 `POST /api/scripts` 以前 handler 里写死 `cron: None`：调用方传了 `cron` 会被**静默忽略**
 （建出来是手动脚本，用户以为排上了）。现在 `NewScript` 接住 `cron` 和 `budget_ms` 并原样交给 `save`。
 守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`（带计划 / 不带计划 / 计划写错三条）。
+
+## 日常面板：二进制叫 `panel`，跑在 3030（第 130 轮）
+
+面板是旧面板的延续，最终要合回原来的主分支，所以**名字不乱改**：
+
+| | 值 | 为什么 |
+|---|---|---|
+| 二进制 | `panel` | 日常敲的就是它，和仓库名 asunajs/panel 一致 |
+| 包名（crate） | `plugin-panel` | 与上游一致，合并回去时不用改依赖/CI；用户看不到 |
+| 服务 label | `dev.panel` | launchd / systemd 用 |
+| 备份文件里的 `"format"` | `panel-llrt-backup` | **对外格式标识，不跟着改名** —— 改了读不了历史备份 |
+
+### 已经装好的日常实例
+
+```text
+地址     http://127.0.0.1:3030
+二进制   ~/panel-3030/panel（release，32 MB，自包含）
+数据     ~/panel-3030/data（panel.db / auth.json / config.json）
+脚本     ~/panel-3030/scripts
+插件     仓库的 plugins/（真实插件，不是测试桩）
+托管     launchd 用户级服务 dev.panel，RunAtLoad + KeepAlive
+```
+
+```bash
+panel service status          # 装了没、系统认不认
+panel service print           # 干跑：看将要写入的单元文件
+panel service uninstall       # 卸载
+launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
+```
+
+**服务单元里会写死安装时的目录**（第 130 轮补的）：`PANEL_BIND` / `PANEL_DATA_DIR` /
+`PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR` 四个都进 plist（systemd 那边是 `Environment=`）。
+原来只写 `PANEL_BIND`，换个数据目录装服务会静默跑 `./data` —— 用独立数据目录时这是数据事故。
+
+口令沿用原实例那份（`auth.json` 只有盐和哈希，直接复制）：想让它对本机完全开放，
+删掉 `~/panel-3030/data/auth.json` 再 `launchctl kickstart -k gui/$(id -u)/dev.panel`。
+
+启动到可访问实测 **0.4 秒**（readyz 立刻 200，7 个插件 / 7 个任务全部加载成功）。

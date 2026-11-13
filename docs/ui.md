@@ -234,7 +234,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 | 页头排版 | 脚本 / 插件 / 任务 / 运行记录四张页头原来把「计数 + 主按钮」顶在正中间：`h2` 有 `margin-right:auto`，`.search` 又有 `margin-left:auto`，**两个 auto 平分空白**。改成标题贴左、操作靠右（`.head-actions`），读数：脚本页 `脚本 [1] ……… [新建脚本] [搜索]`。 |
 | 通知（真面板 8787） | 跑 `hello/boom` → 铃铛红点 + 列表「失败 · 任务 boom 失败 · Error: 故意失败…」，带 run id；设 `PANEL_NOTIFY_WEBHOOK=http://127.0.0.1:8899/hook` 时本机监听器收到同样的 JSON；全部已读后 unread=0 |
 | 插件 WebUI（真面板 8787） | `/plugins/webui-demo/` 返回 html/css/js（MIME 正确、`no-store`）；`POST .../api/hello` 拿到 handler 返回值；穿目录 400；缺文件 404；未加载插件 502 |
-| 自启动干跑 | `panel-llrt service print` 出来的 plist 过 `plutil -lint`（OK）；`status`/`uninstall` 在空 HOME 下正确报「不存在 / 没装过」，没有副作用 |
+| 自启动干跑 | `panel service print` 出来的 plist 过 `plutil -lint`（OK）；`status`/`uninstall` 在空 HOME 下正确报「不存在 / 没装过」，没有副作用 |
 | 脚本 CRUD（真面板 8787） | 新建 376 字节模板 → 保存带 `0 9 * * *` → `next_at` 算出 11-12 09:00；坏表达式 400 且不落文件；删除进 `data/trash/script-<name>-<ts>.js` |
 | 脚本手动运行 | `POST /api/scripts/demo-script/run` → run 237：`status=ok plugin=@script`，日志三条（开始 / 脚本跑起来了 / 完成 5ms） |
 | 脚本定时运行 | `@every 5s` 的脚本，20 秒内自己跑了一次：run 239，日志「脚本 tick-test 开始（定时）」 |
@@ -362,7 +362,7 @@ thead.offsetHeight  0（表头让位给卡片）
 ```bash
 ## 1) 起一个临时面板（不带令牌，脚本才有写权限）
 PANEL_DATA_DIR=/tmp/uie PANEL_PLUGINS_DIR=/tmp/uie/plugins \
-  PANEL_WEB_DIR=web PANEL_BIND=127.0.0.1:8797 ./target/debug/panel-llrt &
+  PANEL_WEB_DIR=web PANEL_BIND=127.0.0.1:8797 ./target/debug/panel &
 
 ## 2) 起无头 Edge，开调试端口
 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \

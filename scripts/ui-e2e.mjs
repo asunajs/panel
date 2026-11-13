@@ -7,7 +7,7 @@
 // 需要一个**已经跑起来的面板**和一个 **CDP 端点**（Edge/Chrome 的 --remote-debugging-port）：
 //
 //   PANEL_DATA_DIR=/tmp/ui PANEL_PLUGINS_DIR=/tmp/ui/plugins PANEL_WEB_DIR=web \
-//     PANEL_BIND=127.0.0.1:8797 ./target/debug/panel-llrt &
+//     PANEL_BIND=127.0.0.1:8797 ./target/debug/panel &
 //   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
 //     --headless=new --remote-debugging-port=9333 --user-data-dir=/tmp/ui/edge \
 //     --no-first-run --no-default-browser-check about:blank &

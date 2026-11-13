@@ -20,7 +20,7 @@ const PORT = Number(process.env.UI_CHECK_PORT || 8790);
 const CDP_PORT = Number(process.env.UI_CHECK_CDP_PORT || 9334);
 const KEEP = process.argv.includes('--keep');
 const ROOT = process.cwd();
-const BIN = path.join(ROOT, 'target', 'debug', 'panel-llrt');
+const BIN = path.join(ROOT, 'target', 'debug', 'panel');
 
 const BROWSERS = [
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',

@@ -1,4 +1,4 @@
-//! panel-llrt：Rust 宿主 + 进程内嵌 LLRT。
+//! panel：Rust 宿主 + 进程内嵌 LLRT（二进制叫 panel，包名沿用上游 plugin-panel）。
 //!
 //! 启动顺序有依赖：DB actor → LogHub → 调度器 → 加载插件 → HTTP。
 //! 插件加载放在 HTTP 之前，这样首个请求看到的任务表已经是全的。
@@ -209,7 +209,7 @@ async fn main() -> Result<(), String> {
             if auth_on { "开" } else { "关，仅回环" }
         ),
     );
-    println!("panel-llrt listening on http://{addr}");
+    println!("panel listening on http://{addr}");
 
     // `with_connect_info` 是限流的前提：没有对端地址就只能全体共用一个桶。
     axum::serve(

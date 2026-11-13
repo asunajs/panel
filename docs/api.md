@@ -187,7 +187,7 @@ cargo test auth::tests -- --nocapture        # 看 PBKDF2 单次耗时读数
 ## 端到端：空数据目录，验「明文不在文件里 / 哈希不能当令牌」
 mkdir -p /tmp/auth-x/data /tmp/auth-x/plugins
 PANEL_BIND=127.0.0.1:8802 PANEL_DATA_DIR=/tmp/auth-x/data \
-  PANEL_PLUGINS_DIR=/tmp/auth-x/plugins PANEL_TOKEN=secret123 ./target/debug/panel-llrt &
+  PANEL_PLUGINS_DIR=/tmp/auth-x/plugins PANEL_TOKEN=secret123 ./target/debug/panel &
 curl -s -o /dev/null -w '%{http_code}\n' -H 'x-panel-token: secret123' http://127.0.0.1:8802/api/state  # 200
 H=$(python3 -c "import json;print(json.load(open('/tmp/auth-x/data/auth.json'))['hash'])")
 curl -s -o /dev/null -w '%{http_code}\n' -H "x-panel-token: $H" http://127.0.0.1:8802/api/state        # 401
@@ -273,7 +273,7 @@ let mut args: Vec<String> = env::args_os()
 PROBE plugin loaded
 PROBE FOO 的值（lossy）: "\ufffd\ufffd"
 PROBE PANEL* keys = ["PANEL_PLUGINS_DIR","PANEL_BIND","PANEL_DATA_DIR"]
-PROBE argv = ["./target/debug/panel-llrt","bad--arg"]
+PROBE argv = ["./target/debug/panel","bad--arg"]
 ```
 
 DB 里 `插件 p 已加载`，没有失败记录。

@@ -1931,10 +1931,10 @@ function renderSettings() {
       "pre",
       "settings-code",
       [
-        "panel-llrt service print      # 干跑：打印将要写入的单元文件",
-        "panel-llrt service install    # 写入并启用",
-        "panel-llrt service status     # 装没装、系统认不认",
-        "panel-llrt service uninstall  # 卸载",
+        "panel service print      # 干跑：打印将要写入的单元文件",
+        "panel service install    # 写入并启用",
+        "panel service status     # 装没装、系统认不认",
+        "panel service uninstall  # 卸载",
       ].join("\n"),
     ),
   );

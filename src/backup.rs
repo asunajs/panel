@@ -57,6 +57,8 @@ pub async fn collect(
     }
 
     Ok(json!({
+        // 这是**对外格式标识**（备份文件里的 magic），面板改名了它也不改：
+        // 改了就读不了历史备份，等于把用户的旧档废掉。
         "format": "panel-llrt-backup",
         "version": 1,
         "exported_at": std::time::SystemTime::now()
@@ -297,8 +299,8 @@ pub fn keygen() -> Result<(), String> {
     println!("公钥（加密导出时用，可以公开）:");
     println!("{public}");
     println!();
-    println!("加密导出: panel-llrt backup --out backup.bk --encrypt-to {public}");
-    println!("恢复导入: panel-llrt restore --in backup.bk --secret <私钥>");
+    println!("加密导出: panel backup --out backup.bk --encrypt-to {public}");
+    println!("恢复导入: panel restore --in backup.bk --secret <私钥>");
     Ok(())
 }
 
@@ -534,7 +536,7 @@ pub fn load_backup(path: &Path, secret: Option<&str>) -> Result<(Value, bool), S
     let mut decrypted = false;
     let text = if crate::backup_crypto::looks_encrypted(path) {
         let secret = secret.ok_or_else(|| {
-            "这是加密备份，要给 --secret <私钥>（panel-llrt keygen 生成的那份）".to_string()
+            "这是加密备份，要给 --secret <私钥>（panel keygen 生成的那份）".to_string()
         })?;
         let tmp = PathBuf::from(format!("{}.plain.tmp", path.display()));
         crate::backup_crypto::decrypt_to(path, &tmp, secret)?;

@@ -1111,7 +1111,7 @@ async fn api_restart(
 
 /// 用当前可执行文件替换自己。**只有失败才返回**。
 fn restart_now() -> ! {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("panel-llrt"));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("panel"));
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     #[cfg(unix)]
     {
@@ -2870,7 +2870,7 @@ async fn plugin_webui_any(
 /// 搬过去会让新机器的 run id 对不上，不如不要。
 /// GET /api/backup —— 明文 JSON 备份（界面上的「导出」）。
 ///
-/// 加密导出走 CLI（panel-llrt backup --encrypt-to）：私钥不该过 HTTP。
+/// 加密导出走 CLI（panel backup --encrypt-to）：私钥不该过 HTTP。
 async fn api_backup(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let cfg_path = st.data_dir.join("config.json");
     let config_text = match tokio::fs::read_to_string(&cfg_path).await {
@@ -2881,7 +2881,7 @@ async fn api_backup(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
         .await
         .map_err(internal)?;
     // 界面导出的永远是「不带数据库」那份，那就明说 —— 让人知道运行历史和任务状态没在里面。
-    // 要带库就走 CLI：`panel-llrt backup --out x --with-db`（库不能在线被自己换掉）。
+    // 要带库就走 CLI：`panel backup --out x --with-db`（库不能在线被自己换掉）。
     v["db_included"] = json!(false);
     v["db_bytes"] = json!(std::fs::metadata(st.data_dir.join("panel.db"))
         .map(|m| m.len())
@@ -2900,7 +2900,7 @@ async fn api_restore(
     // 换文件等于把地基建在自己脚下（连接还开着、WAL 还挂着）。只能用 CLI 在面板停止时做。
     if body.get("db_base64").is_some() {
         return Err(bad(
-            "这份备份里带着数据库，只能在面板停止时用 CLI 恢复：panel-llrt restore --in <文件>"
+            "这份备份里带着数据库，只能在面板停止时用 CLI 恢复：panel restore --in <文件>"
                 .to_string(),
         ));
     }

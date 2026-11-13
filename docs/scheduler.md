@@ -342,7 +342,7 @@ curl -s -X POST localhost:8797/api/tasks/small/t/run -H 'x-panel: 1'
 sqlite3 data/panel.db "SELECT avg(ended_at-started_at) FROM runs WHERE plugin='small'"
 
 ## 启动耗时
-time (PANEL_DATA_DIR=/tmp/x PANEL_PLUGINS_DIR=/tmp/x/plugins ./target/debug/panel-llrt & \
+time (PANEL_DATA_DIR=/tmp/x PANEL_PLUGINS_DIR=/tmp/x/plugins ./target/debug/panel & \
       until curl -s -o /dev/null localhost:8797/api/state; do sleep 0.05; done)
 ```
 
