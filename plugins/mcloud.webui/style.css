@@ -33,14 +33,30 @@
    接到那些 token 上。⚠ 不要重定义 --bg / --accent / --radius：
    它们是主面板的名字，重定义会把面板的值盖掉（本文件在面板的 CSS 之后加载）。 */
 :root {
-  --fg: var(--text);
-  --dim: var(--text-dim);
-  --line: var(--border-soft);
+  /* 面板 0.4.0 的 token 名和旧面板不一样（--fg / --fg-2 / --line / --err / --warn …）。
+     这里把*旧名字*接到 0.4.0 的 token 上：本文件里几千行 `var(--text)` / `var(--border-soft)`
+     一个字都不用改。注意：只读面板的 token，不重定义它们。 */
+  --text: var(--fg);
+  --text-dim: var(--fg-2);
+  --text-mute: var(--dim);
+  --border-soft: var(--line);
+  --border: var(--line-strong);
+  --border-control: var(--line-strong);
+  --bg-deep: var(--bg);
   --soft: var(--surface-2);
-  --ok: var(--success);
-  --bad: var(--error);
-  --ok-soft: var(--success-soft);
-  --bad-soft: var(--error-soft);
+  --success: var(--ok);
+  --success-soft: var(--ok-soft);
+  --error: var(--err);
+  --error-soft: var(--err-soft);
+  --warning: var(--warn);
+  --bad: var(--err);
+  --bad-soft: var(--err-soft);
+  /* 间距/圆角/动效这些刻度 0.4.0 没有（它只给控件高度），插件自己定 */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --r-sm: var(--radius-sm); --r-md: var(--radius);
+  --shadow: var(--shadow-md);
+  --t-fast: 120ms ease;
+  --font-mono: var(--mono);
 }
 
 /* 为什么还留着这几个短名字：界面上还有 6 个区块这轮不重写
@@ -1356,3 +1372,71 @@ button.picker-row {
 #plugin-ver:empty {
   display: none;
 }
+
+/* ═══ 面板 0.4.0 兼容层（第 139 轮）═══
+
+   这一页的 DOM 是照着**旧面板**的 components.css 写的（`.dialog*` / `.badge` /
+   `.input` / `.field-label` / `.btn.ghost|sm|primary`）。0.4.0 的 `/app.css` 里对应的是
+   `.modal*` / `.pill` / `.field input` / `.btn-ghost|btn-sm|btn-primary`。
+
+   与其去改这几百处 class，不如在这里补一层薄薄的适配 —— 形状照 0.4.0 的组件写，
+   颜色一律走 token，两套主题自动跟着面板。
+*/
+
+/* 按钮的「空格修饰符」写法（旧面板是 .btn ghost，0.4.0 是 .btn-ghost） */
+.btn.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+}
+.btn.primary:hover { filter: brightness(1.05); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
+.btn.ghost:hover { background: var(--surface-2); color: var(--fg); }
+.btn.sm {
+  min-height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px;
+}
+
+/* 表单：面板只给 `.field input` 定了样式，没有独立的 `.input` 和 `.field-label` */
+.field-label { color: var(--text-dim); font-size: 12px; }
+.input {
+  min-height: var(--h-control); padding: 0 var(--pad-control);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); color: var(--fg);
+  font: inherit; font-size: 13px; min-width: 0;
+}
+.input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* 徽章：0.4.0 里对应的是 `.pill` */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px; border-radius: 999px; font-size: 11.5px; line-height: 1.6;
+  border: 1px solid var(--border-soft); background: var(--surface-2); color: var(--text-dim);
+  white-space: nowrap;
+}
+.badge.success { color: var(--success); border-color: var(--success); background: var(--success-soft); }
+.badge.warning { color: var(--warning); border-color: var(--warning); background: var(--warn-soft); }
+.badge.bad { color: var(--error); border-color: var(--error); background: var(--error-soft); }
+.badge.idle { color: var(--text-mute); }
+.badge.lang { font-family: var(--font-mono); font-size: 11px; }
+
+/* 弹窗：0.4.0 用 `.modal` + `.modal-card`；这里按同一套形状补 `.dialog*` */
+.dialog-back {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--scrim);
+}
+.dialog-back[hidden] { display: none; }
+.dialog {
+  width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  display: flex; flex-direction: column; gap: 12px; padding: 18px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-md);
+  color: var(--fg);
+}
+.dialog-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 14px; font-weight: 600;
+}
+.dialog-body { overflow: auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.dialog-body .actions { display: flex; gap: 8px; justify-content: flex-end; }

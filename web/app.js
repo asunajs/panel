@@ -279,6 +279,8 @@ function applyTheme(name) {
   document.documentElement.setAttribute('data-theme', name);
   $('theme-toggle').setAttribute('aria-label', name === 'dark' ? '切换到浅色' : '切换到深色');
   localStorage.setItem(THEME_KEY, name);
+  // 内嵌的插件页是另一个 document，收不到 data-theme 的变化：直接告诉它（第 139 轮）。
+  pushThemeToFrame();
 }
 
 function initTheme() {
@@ -2206,6 +2208,82 @@ async function importBackup(file) {
   }
 }
 
+// ---------------------------------------------------------------- 插件界面（第 139 轮）
+//
+// 插件用 `host.sidebar({title, order})` 在侧栏注册一格（面板一侧的数据在
+// `/api/state` 的 `plugins[].nav` 上）。点进去是**内嵌 iframe**，不是新标签页：
+// 侧栏和顶栏还在，用户不会有「跳出面板」的割裂感。
+//
+// 主题：iframe 是另一个 document，`data-theme` 不会继承。所以两头都做 ——
+// ① 打开时带 `?theme=`；② 切主题时 `postMessage` 过去（插件页那边监听）。
+
+function pluginEntries() {
+  return (state.plugins || [])
+    .filter((p) => p && p.nav && p.nav.title)
+    .slice()
+    .sort((a, b) => (a.nav.order - b.nav.order) || String(a.nav.title).localeCompare(String(b.nav.title), 'zh'));
+}
+
+const PLUGIN_ICON =
+  '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/>' +
+  '<path d="M3 9h18M8 4v5"/></svg>';
+
+function renderPluginNav() {
+  const box = $('nav-plugins');
+  const list = $('nav-plugin-list');
+  if (!box || !list) return;
+  const items = pluginEntries();
+  box.classList.toggle('hidden', items.length === 0);
+  list.textContent = '';
+  for (const p of items) {
+    const a = document.createElement('a');
+    a.className = 'nav-item';
+    a.href = '#plugin/' + p.name;
+    a.dataset.pluginView = p.name;
+    a.innerHTML = PLUGIN_ICON;
+    const span = document.createElement('span');
+    span.textContent = p.nav.title;
+    a.append(span);
+    if (state.view === 'plugin:' + p.name) a.setAttribute('aria-current', 'page');
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      setView('plugin:' + p.name);
+    });
+    list.append(a);
+  }
+}
+
+/** 当前主题（iframe 里要跟它一致）。 */
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+
+/** 切主题时通知内嵌的插件页（没有监听也无害）。 */
+function pushThemeToFrame() {
+  const f = $('plugin-frame');
+  if (!f || !f.contentWindow) return;
+  try {
+    f.contentWindow.postMessage({ type: 'panel-theme', theme: currentTheme() }, location.origin);
+  } catch {
+    /* 跨源/还没加载好：它自己会用 ?theme= 那次的值，忽略 */
+  }
+}
+
+/** 打开某个插件的界面：同一个 iframe 复用，避免来回切时反复重建文档。 */
+function openPluginView(name) {
+  const f = $('plugin-frame');
+  if (!f) return;
+  // 尾斜杠别漏：插件页的 style.css / boot.js 是相对路径（见 src/web.rs 的 plugin_webui_redirect）
+  const want = '/plugins/' + encodeURIComponent(name) + '/?embed=1&theme=' + currentTheme();
+  const cur = f.getAttribute('src') || '';
+  // 主题变了但插件没变：只补一个 postMessage，不重新加载（省一次首屏）
+  if (cur.split('&theme=')[0] === want.split('&theme=')[0]) {
+    pushThemeToFrame();
+  } else {
+    f.setAttribute('src', want);
+  }
+}
 // ---------------------------------------------------------------- 视图
 
 const VIEWS = {
@@ -2219,14 +2297,28 @@ const VIEWS = {
 };
 
 function setView(name) {
-  if (!VIEWS[name]) name = 'dashboard';
+  // `plugin:<name>` 是插件自己的界面（第 139 轮）：一个 iframe，标题用插件注册的那个。
+  const isPlugin = typeof name === 'string' && name.startsWith('plugin:');
+  if (!isPlugin && !VIEWS[name]) name = 'dashboard';
   state.view = name;
+  const viewKey = isPlugin ? 'plugin' : name;
   for (const node of document.querySelectorAll('.view')) {
-    node.classList.toggle('hidden', node.dataset.view !== name);
+    node.classList.toggle('hidden', node.dataset.view !== viewKey);
   }
   for (const a of document.querySelectorAll('.nav-item')) {
-    if (a.dataset.view === name) a.setAttribute('aria-current', 'page');
+    const mine = isPlugin ? a.dataset.pluginView === name.slice(7) : a.dataset.view === name;
+    if (mine) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
+  }
+  if (isPlugin) {
+    const plugin = name.slice(7);
+    const entry = pluginEntries().find((p) => p.name === plugin);
+    openPluginView(plugin);
+    $('page-title').textContent = entry ? entry.nav.title : plugin;
+    $('page-sub').textContent = '插件界面 · ' + plugin;
+    document.title = (entry ? entry.nav.title : plugin) + ' · 插件面板';
+    setSidebar(false);
+    return;
   }
   // 换页就收起通知弹层：它挂在顶栏上，留着会挡住新页面的内容。
   const pop = $('notify-pop');
@@ -2272,6 +2364,8 @@ async function refresh() {
     banner('');
     setSync(true);
     render();
+    // 侧栏的插件入口跟着这一轮状态重画（插件可能刚注册/刚卸载）
+    renderPluginNav();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, state.token ? '令牌无效' : '需要令牌'); return; }
     banner('读取面板状态失败：' + (e.message || e) + '（自动重试中）');

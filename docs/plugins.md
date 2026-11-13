@@ -358,3 +358,67 @@ GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
 - §1 那 15 行「已经能用的」逐条对过，**没有虚报**：每条都能指到一个真接口或一段真代码。
 - 有虚报风险的是**措辞**（「就能打」这种），已经降级成 ❓ + 测法。
 - 仍然 ❌ 的两条（任务软删、市场/自更新）和 ❌ 的外部进程插件，都是**判断不该做**，理由各有记录。
+
+## 界面：面板 UI 套件（第 139 轮）
+
+插件带界面时**别自己画一套外观**。面板给了两层东西，引进去就自动和面板同观感、
+并且跟着面板的主题切换（用户切浅色/深色，插件页当场变）：
+
+```html
+<link rel="stylesheet" href="/app.css">   <!-- token（含 [data-theme=dark]）+ 组件样式 -->
+<script src="/ui.js" defer></script>       <!-- 自定义元素 + 主题桥 -->
+```
+
+页面地址是 `/plugins/<name>/`（**尾斜杠不能少**：`style.css` 这些相对路径要靠它解析）。
+面板用 iframe 嵌它，并带上 `?embed=1&theme=light|dark`；切主题时会 `postMessage({type:'panel-theme', theme})`。
+`/ui.js` 已经处理了这些，插件不用自己写 boot 脚本。
+
+### 自定义元素
+
+| 元素 | 说明 |
+|---|---|
+| `<p-button variant="primary|ghost|danger" size="sm" disabled>` | 按钮，等价于 `.btn.btn-primary` 等 |
+| `<p-card title="账号" desc="…">` | 卡片（内部是 `.panel` + `.panel-head`） |
+| `<p-field label="听窗口（秒）" hint="10–3600">控件</p-field>` | 表单行（`.field` + `.field-label`） |
+| `<p-badge tone="ok|warn|err|accent|idle">空闲</p-badge>` | 徽章（`.badge`） |
+| `<p-empty text="还没有账号">` | 空态（`.empty`） |
+| `<p-dialog open title="设置">…</p-dialog>` | 弹窗；`open` 属性控制显隐，关闭按钮自动有 |
+
+```html
+<p-card title="账号">
+  <p-field label="听窗口长度（秒）"><input class="input" type="number" min="10"></p-field>
+  <div class="actions">
+    <p-button variant="primary">保存</p-button>
+    <p-button variant="ghost">取消</p-button>
+  </div>
+  <p-badge tone="ok">已登录</p-badge>
+</p-card>
+```
+
+### 也可以只用 class
+
+不想用元素就用类名（元素内部包的就是这些）：`.btn / .btn-primary / .btn-ghost / .btn-danger / .btn-sm`、
+`.card`、`.panel / .panel-head`、`.field / .field-label / .input`、`.badge(.ok|.warn|.err|.accent|.idle)`、
+`.empty`、`.hint / .hint-err`、`.table-wrap`、`.dialog-back / .dialog / .dialog-head / .dialog-body`、`.actions`。
+
+旧面板的 `/css/reset.css`、`/css/theme.css`、`/css/components.css` 仍然在（白名单三份），
+那是给**还没迁移**的插件用的；但它只带旧配色，和现在面板的观感对不上 —— 新写的一律用 `/app.css`。
+
+### 两条规矩
+
+1. **不要重定义面板的 token**（`--bg/--fg/--line/--accent/--ok/--warn/--err/--radius/--shadow-*`）。
+   要接自己的短名字就 `--text: var(--fg)` 这样映射，别反过来。插件 CSS 在 `/app.css` 之后加载，
+   重定义会把面板的值盖掉（历史上踩过：浅色主题下插件还是黑底）。
+2. **不要写 `prefers-color-scheme`**。主题由面板决定（`data-theme`），系统偏好是另一件事；
+   写媒体查询会在「面板浅色 + 系统深色」时把页面拽回深色。
+
+### 侧栏入口
+
+插件在加载时调一次：
+
+```js
+await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上，缺省 100
+```
+
+面板侧栏就会出现「云盘」，点进去是内嵌 iframe（`/plugins/<name>/?embed=1&theme=…`）。
+不注册也能用 —— 插件页 → 详情 → 开界面，只是多两层点击。

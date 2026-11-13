@@ -24,6 +24,11 @@
         <a class="nav-item" href="#logs" data-view="logs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h10"/></svg><span>日志</span></a>
         <a class="nav-item" href="#settings" data-view="settings"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span></a>
         </nav>
+        <!-- 插件注册的侧栏入口（host.sidebar，第 139 轮）：没有插件注册时整块隐藏 -->
+        <div class="nav-group hidden" id="nav-plugins">
+          <div class="nav-group-title">插件界面</div>
+          <div class="nav" id="nav-plugin-list"></div>
+        </div>
         <div class="sidebar-foot">
           <div class="engine" id="engine-state"><span class="dot dot-idle"></span><span id="engine-text">连接中…</span></div>
           <div class="meta-row"><span id="version">v—</span><span class="sep">·</span><span id="auth-state">未启用令牌</span></div>
@@ -238,6 +243,10 @@
             </section>
           </section>
 
+          <!-- 插件自己的界面（iframe 嵌进来）：主题由 ?theme= 和 postMessage 同步 -->
+          <section class="view hidden" id="view-plugin" data-view="plugin">
+            <iframe class="plugin-frame" id="plugin-frame" title="插件界面"></iframe>
+          </section>
           <section class="view hidden" id="view-settings" data-view="settings">
             <div class="tabs" role="tablist" aria-label="设置分类">
               <button class="tab" type="button" role="tab" data-tab="general" aria-selected="true">常规</button>

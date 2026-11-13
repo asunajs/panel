@@ -47,6 +47,16 @@ pub enum Registration {
     Web {
         plugin: String,
     },
+    /// 侧边栏入口（`host.sidebar({title, order})`，第 139 轮）：
+    /// 插件带界面的，要在面板左侧栏里有一格 —— 否则用户只能去「插件 → 详情 → 开界面」
+    /// 找它（旧面板用 `register_nav` 干这件事，插件里那句 `[nav] 这个面板没有侧栏注册`
+    /// 就是当年留下的坑）。
+    Sidebar {
+        plugin: String,
+        title: String,
+        /// 越小越靠上；同值按插件名排。
+        order: i64,
+    },
 }
 
 /// 挂在 Ctx userdata 上的宿主句柄。全是 'static 字段，没有 JS 值。
@@ -105,6 +115,8 @@ const WRAP: &str = r#"(raw) => {
         opts == null ? undefined : JSON.stringify(opts)),
     register_handler: raw.register_handler,
     register_web: raw.register_web,
+    // 侧栏入口：{title, order}；传字符串当标题也收（插件作者凭直觉写过 register_nav('云盘')）
+    sidebar: async (v) => JSON.parse(await raw.sidebar(typeof v === 'string' ? JSON.stringify({ title: v }) : j(v ?? {}))),
     ws_open: (url, opts) => Number(raw.ws_open(url, j(opts))),
     ws_send: (id, text) => raw.ws_send(id, String(text)),
     ws_recv: (id, ms) => JSON.parse(raw.ws_recv(id, ms === undefined ? undefined : Number(ms))),
@@ -128,7 +140,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 28] = [
+const OP_NAMES: [&str; 29] = [
     "log",
     "info",
     "warn",
@@ -146,6 +158,7 @@ const OP_NAMES: [&str; 28] = [
     "register_cron",
     "register_handler",
     "register_web",
+    "sidebar",
     "ws_open",
     "ws_send",
     "ws_recv",
@@ -218,6 +231,7 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
             Func::from(Async(op_register_handler)).into_js(ctx)?,
         ),
         ("register_web", Func::from(Async(op_register_web)).into_js(ctx)?),
+        ("sidebar", Func::from(Async(op_sidebar)).into_js(ctx)?),
         // 长连接：同步语义（JS 线程等），实际收发在独立线程的 runtime 上跑
         ("ws_open", Func::from(op_ws_open).into_js(ctx)?),
         ("ws_send", Func::from(op_ws_send).into_js(ctx)?),
@@ -818,6 +832,37 @@ async fn op_register_cron(
 ///
 /// 和 `register_handler` 分开是为了**不建任务**：路由是服务，不是定时任务，
 /// 让它出现在任务列表里只是噪音。
+/// `host.sidebar({title, order})` —— 在面板左侧栏给我一格（第 139 轮）。
+///
+/// 为什么需要：插件带界面时，用户不该只能从「插件 → 详情 → 开界面」里找它。
+/// 旧面板用 `register_nav` 做这件事，mcloud 那族插件里还留着那个调用（在 0.3 的面板上
+/// 是一句 `[nav] 这个面板没有侧栏注册` 的降级日志）。
+///
+/// 参数：`{ title?, order? }`；`title` 缺省用插件名，`order` 缺省 100（越小越靠上）。
+/// 返回 `{ok:true}`，形状和其他注册类 op 一致（插件侧不用分支）。
+async fn op_sidebar<'js>(ctx: Ctx<'js>, arg: String) -> Result<String> {
+    let h = host(&ctx)?;
+    let v: Json = serde_json::from_str(&arg).map_err(|e| err(&ctx, format!("sidebar 的参数不是 JSON: {e}")))?;
+    let title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| h.plugin.clone());
+    if title.chars().count() > 24 {
+        return Err(err(&ctx, "sidebar 的 title 最多 24 个字".into()));
+    }
+    let order = v.get("order").and_then(|o| o.as_i64()).unwrap_or(100);
+    h.reg
+        .send(Registration::Sidebar {
+            plugin: h.plugin.clone(),
+            title,
+            order,
+        })
+        .map_err(|_| err(&ctx, "调度器已经不在了".into()))?;
+    Ok("{\"ok\":true}".to_string())
+}
+
 async fn op_register_web<'js>(ctx: Ctx<'js>, func: Value<'js>) -> Result<()> {
     let h = host(&ctx)?;
     if !func.is_function() {

@@ -593,3 +593,22 @@ config / sqlite 异步与同步 / `sleep` 真挂起 / `fetch` 与 `http_fetch`�
 
 对端必须绑 `0.0.0.0` 并用本机**局域网地址**去连：回环被 SSRF 门挡（那是面板自己）。
 机器上没有局域网地址时脚本会跳过（exit 0）而不是假装通过。
+
+### `host.sidebar({ title, order })` —— 侧栏入口（第 139 轮）
+
+在面板左侧栏给这个插件开一格，点进去就是它自己的界面（内嵌 iframe）。
+
+```js
+await host.sidebar({ title: '云盘', order: 20 });
+```
+
+| 字段 | 说明 |
+|---|---|
+| `title` | 侧栏上显示的名字，最多 24 字；缺省用插件名 |
+| `order` | 越小越靠上；同值按插件名排。缺省 100 |
+
+返回值 `{ok:true}`。插件卸载/删除时这一格自动消失（不用反注册）。
+面板通过 `/api/state` 的 `plugins[].nav` 把它交给前端。
+
+旧面板的 `register_nav({label, icon})` 现在映射到它（mcloud 那族插件里的 `register_nav` 已经从
+「打一条降级日志」改成真注册）。

@@ -29,6 +29,8 @@ use crate::scheduler::Scheduler;
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const APP_CSS: &str = include_str!("../web/app.css");
+/// 面板 UI 套件（第 139 轮）：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
+const UI_JS: &str = include_str!("../web/ui.js");
 
 /// 旧面板（rust-plugin-panel）那套组件样式。插件的界面 HTML 里写的是绝对路径
 /// /css/reset.css 之类 —— 它们和旧面板共享同一套 token 与组件类（.btn、.dialog…），
@@ -243,7 +245,7 @@ pub fn router(st: AppState) -> Router {
         )
         .route("/api/scripts/{name}/run", post(script_run))
         // 插件 WebUI：静态文件 + 动态 handler（同一个令牌门，见 require_token）
-        .route("/plugins/{name}", get(plugin_webui_index))
+        .route("/plugins/{name}", get(plugin_webui_redirect))
         .route("/plugins/{name}/", get(plugin_webui_index))
         .route("/plugins/{name}/{*rel}", axum::routing::any(plugin_webui_any))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
@@ -293,6 +295,7 @@ pub fn router(st: AppState) -> Router {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
+        .route("/ui.js", get(|| async { asset(UI_JS, "text/javascript; charset=utf-8", "ui.js") }))
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
         .route("/healthz", get(|| async { "ok\n" }))
@@ -901,17 +904,20 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // 插件界面现在**嵌在面板自己的 iframe 里**（第 139 轮，`#view-plugin`）。
+    // DENY 会把自家页面也挡掉 —— 用户看到的是一个白板 + 损坏文档图标。
+    // 改成 SAMEORIGIN（CSP 同步改成 frame-ancestors 'self'）：同源可嵌，外站照旧不行。
+    h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
     h.insert(
         "referrer-policy",
         HeaderValue::from_static("no-referrer"),
     );
-    // 第一版没有插件 UI iframe，所以 frame-src 就是 'self'，不留口
+    // 插件界面嵌在面板自己的 iframe 里（同源），所以是 frame-ancestors 'self'；外站仍然嵌不了。
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; img-src 'self' data:; style-src 'self'; \
-             script-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
+             script-src 'self'; connect-src 'self'; frame-ancestors 'self'; \
              base-uri 'none'; object-src 'none'; form-action 'self'",
         ),
     );
@@ -2828,6 +2834,29 @@ async fn serve_webui_file(
         bytes,
     )
         .into_response())
+}
+
+/// `/plugins/<name>` → `/plugins/<name>/`（308，保留 query）。
+///
+/// 为什么必须带尾斜杠：插件页的 `style.css` / `boot.js` 是**相对路径**，没有尾斜杠时
+/// 浏览器按「/plugins/mcloud 是一段目录名」去解析，请求就飞到 `/plugins/style.css` ——
+/// 面板里那次插件界面是「有结构没样式、主题也不跟随」的样子（第 139 轮实测）。
+async fn plugin_webui_redirect(
+    Path(name): Path<String>,
+    uri: axum::http::Uri,
+) -> Result<Response, ApiError> {
+    crate::scripts::safe_name(&name).map_err(bad)?;
+    let q = uri
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let to = format!("/plugins/{name}/{q}");
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::PERMANENT_REDIRECT;
+    if let Ok(v) = axum::http::HeaderValue::from_str(&to) {
+        resp.headers_mut().insert(axum::http::header::LOCATION, v);
+    }
+    Ok(resp)
 }
 
 async fn plugin_webui_index(

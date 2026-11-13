@@ -407,6 +407,15 @@ pub struct PluginView {
     pub tasks: usize,
     /// 这个插件自己处理 `/plugins/<name>/*` 的路由（`register_web`）。
     pub has_web: bool,
+    /// 侧栏入口（`host.sidebar({title, order})`）。`None` = 这个插件不要在侧栏出现。
+    pub nav: Option<NavEntry>,
+}
+
+/// 侧栏入口：面板左侧栏里的一格。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NavEntry {
+    pub title: String,
+    pub order: i64,
 }
 
 /// 提前唤醒量的上限：一小时。再多就是「任务一直在跑」了。
@@ -724,6 +733,8 @@ struct Inner {
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
     web: std::collections::HashSet<String>,
+    /// 侧栏入口：插件名 → 入口（第 139 轮）
+    sidebar: std::collections::HashMap<String, NavEntry>,
     /// 库里记着的任务状态（暂停/摘要/blockers/提前量/调度覆盖）。
     ///
     /// 启动时读一次，**注册任务时同步套用**：插件重新注册、面板重启都不会把
@@ -776,6 +787,7 @@ pub fn start(
     let mut inner = Inner {
         data_dir,
         web: std::collections::HashSet::new(),
+        sidebar: std::collections::HashMap::new(),
         saved: HashMap::new(),
         db,
         log,
@@ -1013,6 +1025,7 @@ impl Inner {
                 }
                 self.plugins.remove(&name);
                 self.web.remove(&name);
+                self.sidebar.remove(&name);
                 self.tasks.retain(|t| t.plugin != name);
                 // **不删** tasks 里的行：那是「人的改动」（暂停/摘要/blockers/调度覆盖/提前量），
                 // 卸下插件不该把它抹掉 —— 重载/再启用之后还要靠它恢复。
@@ -1032,6 +1045,7 @@ impl Inner {
                         busy: l.busy,
                         tasks: self.tasks.iter().filter(|t| &t.plugin == name).count(),
                         has_web: self.web.contains(name),
+                        nav: self.sidebar.get(name).cloned(),
                     })
                     .collect();
                 v.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1400,6 +1414,13 @@ impl Inner {
             // 随后同名 register_cron 会把它升级成定时任务。
             Registration::Web { plugin } => {
                 self.web.insert(plugin);
+            }
+            Registration::Sidebar {
+                plugin,
+                title,
+                order,
+            } => {
+                self.sidebar.insert(plugin, NavEntry { title, order });
             }
             Registration::Handler { plugin, name } => {
                 if self.find(&plugin, &name).is_none() {

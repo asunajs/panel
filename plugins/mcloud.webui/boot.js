@@ -1,56 +1,65 @@
 // 页面启动前的两件事。放在 <head> 里**同步**执行 —— 两件都必须赶在第一帧之前。
 //
-// # ① 主题跟随主面板
+// # ① 主题跟随主面板（面板 0.4.0）
 //
-// 这个页面跑在面板的 iframe 里，是**另一个 document**：面板挂在
-// `documentElement` 上的 `data-theme` 传不进来，而面板的 `theme.css` 是按
-// `:root[data-theme='light']` 选浅色那一套的。不自己设的话，页面永远停在深色 ——
-// 用户把面板切成浅色，插件页还是黑的。
+// 这个页面跑在面板的 iframe 里，是**另一个 document**：面板挂在 `documentElement` 上的
+// `data-theme` 传不进来，而 `/app.css` 的 token 是按 `[data-theme='dark']` 取深色那套的。
+// 不自己设的话页面不会跟着面板换主题。三条来路，按优先级：
 //
-// 为什么不用接口问面板：面板把主题存在 localStorage 的 `panel-theme-v2` 里
-// （见面板 `web/js/app.js` 的 `applyTheme`），而 iframe 与面板**同源** ——
-// localStorage 是共享的。所以这里不用请求、面板那边也不用改一个字。
+//   1. 面板打开时带的 `?theme=light|dark` —— 最准，第一帧就对
+//   2. localStorage 的 `panel-llrt-theme`（面板 web/app.js 的 THEME_KEY；同源所以读得到）
+//   3. 系统的 prefers-color-scheme（独立打开这个页面时才用得到）
 //
-// 为什么能实时跟随：别的文档（面板自己）改了 localStorage，本文档会收到
-// `storage` 事件 —— 用户在面板上切主题，这张页面立刻跟着变。
+// 之后还要**跟着变**：别的文档改了 localStorage 会触发 `storage` 事件；面板切主题时
+// 还会直接 `postMessage({type:'panel-theme', theme})` 过来（见面板 web/app.js 的 applyTheme）。
 //
 // # ② `?embed=1` 标记
 //
-// 面板用 iframe 嵌插件页时会带上这个参数，而它上面已经有一行
-// 「mcloud · 插件配置页」的标题（见面板 `web/js/views/plugin-list.js`）。
-// 这里把标记挂到 `<html>` 上（`data-embed="1"`），样式表据此收掉插件自己的
-// 标题 —— 否则是**两层标题**，还白占一行高度。
+// 面板把插件页嵌在侧栏右侧的 iframe 里（`#view-plugin`），这里挂个标记方便样式收掉
+// 插件自己的大标题 —— 否则是两层标题。
 //
-// ⚠ 挂 `<html>` 而不是 `<body>`：这个脚本在 `<head>` 里跑，此刻还没有 body。
-//   等 body 出来再挂（DOMContentLoaded）会先闪一帧标题才消失。
+// 注意：挂 <html> 而不是 <body> —— 这个脚本在 <head> 里跑，此刻还没有 body。
 
 (() => {
   'use strict';
 
-  /** 面板存主题的键。改名的话这里要跟着改（面板那边在 `web/js/app.js`）。 */
-  const THEME_KEY = 'panel-theme-v2';
+  /** 面板存主题的键（面板 web/app.js 的 THEME_KEY，改一边要改另一边）。 */
+  const THEME_KEY = 'panel-llrt-theme';
+
+  const fromQuery = () => {
+    const t = new URLSearchParams(location.search).get('theme');
+    return t === 'light' || t === 'dark' ? t : null;
+  };
 
   const readTheme = () => {
+    const q = fromQuery();
+    if (q) return q;
     try {
-      // 面板存的就是 'light' / 'dark' 两个值，没存过时它用 'dark'
-      // （面板 `applyTheme(saved || 'dark')`）。读不到就照它的默认值来，
-      // 而不是猜一个 —— 猜错就是"面板深色、插件页浅色"。
-      return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark';
+      const v = localStorage.getItem(THEME_KEY);
+      if (v === 'light' || v === 'dark') return v;
     } catch {
-      // 隐私模式 / 禁用了存储。退回面板的默认值，不要让它把整个页面拖崩。
-      return 'dark';
+      /* 隐私模式 / 禁用了存储：往下走，别让整页崩掉 */
     }
+    const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    return dark ? 'dark' : 'light';
   };
 
-  const applyTheme = () => {
-    document.documentElement.dataset.theme = readTheme();
+  const apply = (t) => {
+    document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light';
   };
 
-  applyTheme();
+  apply(readTheme());
 
-  // `key === null` 是"整个存储被清空/换了一套"，那种情况也要重读。
+  // 父窗口（面板）切主题
+  addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || d.type !== 'panel-theme') return;
+    if (d.theme === 'light' || d.theme === 'dark') apply(d.theme);
+  });
+
+  // 同一源下别的文档改了存储（`key === null` 是整片被清空）
   addEventListener('storage', (e) => {
-    if (!e.key || e.key === THEME_KEY) applyTheme();
+    if (!e.key || e.key === THEME_KEY) apply(readTheme());
   });
 
   if (new URLSearchParams(location.search).get('embed') === '1') {

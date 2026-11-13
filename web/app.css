@@ -1056,3 +1056,77 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 @media (max-width: 620px) {
   .notices { left: 12px; right: 12px; max-width: none; }
 }
+
+/* ---------- 插件侧栏入口 + 内嵌界面（第 139 轮） ---------- */
+.nav-group { display: flex; flex-direction: column; gap: 4px; }
+.nav-group-title {
+  padding: 0 10px 2px; font-size: 11.5px; letter-spacing: .04em;
+  color: var(--dim); text-transform: uppercase;
+}
+.nav-group .nav-item { color: var(--fg-2); }
+.nav-group .nav-item[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+/* 插件页要让出侧栏和顶栏，自己吃掉剩下的高度：它内部有自己的滚动区 */
+#view-plugin { flex: 1 1 auto; min-height: 0; }
+.plugin-frame {
+  display: block; width: 100%;
+  height: calc(100vh - 128px); min-height: 420px;
+  border: 0; border-radius: var(--radius);
+  background: var(--surface);
+}
+@media (max-width: 620px) {
+  .plugin-frame { height: calc(100vh - 168px); }
+}
+
+/* ---------- 供插件复用的组件补全（第 139 轮：面板自己的 UI 套件） ---------- */
+/* 这一段是「**插件也能直接用**」的部分：`.input` / `.field-label` / `.badge` / `.dialog*` /
+   `.table-wrap`。插件页把 `/app.css` 和 `/ui.js` 引进去，就得到和面板一模一样的控件；
+   颜色全走 token，所以两套主题自动跟随。改这里等于同时改面板和所有插件的外观 ——
+   这正是「同质化」想要的效果，别在插件里再抄一份。 */
+
+.field-label { color: var(--fg-2); font-size: 12px; }
+
+.input {
+  min-height: var(--h-control); padding: 0 var(--pad-control);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); color: var(--fg);
+  font: inherit; font-size: 13px; min-width: 0;
+}
+.input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px; border-radius: 999px; font-size: 11.5px; line-height: 1.6;
+  border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--fg-2);
+  white-space: nowrap;
+}
+.badge.ok, .badge.success { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.badge.warn, .badge.warning { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.badge.err, .badge.bad { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+.badge.accent { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.badge.idle { color: var(--dim); }
+
+.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+
+/* 弹窗：面板自己用 `.modal*`，这里把 `.dialog*` 定义成同一套形状 ——
+   旧插件（mcloud.webui 等）本来就是这么写的，插件作者也不必学两套名字。 */
+.dialog-back {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--scrim);
+}
+.dialog-back[hidden] { display: none; }
+.dialog {
+  width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  display: flex; flex-direction: column; gap: 12px; padding: 18px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-md); color: var(--fg);
+}
+.dialog-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 14px; font-weight: 600;
+}
+.dialog-body { overflow: auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
