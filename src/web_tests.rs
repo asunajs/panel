@@ -3397,3 +3397,52 @@ async fn internal_errors_hide_the_detail_but_keep_a_ref() {
     assert!(!text.contains("secret"), "{text}");
 }
 
+/// 暂停 ≠ 停用（第 167 轮）：暂停**不卸载**，插件还在已加载列表里、任务也还在，
+/// 只是调度器不再触发它的定时任务；库里有标记（重启后仍暂停）。
+#[tokio::test]
+async fn a_plugin_can_be_suspended_without_unloading_it() {
+    let (app, _plugins, _data, _store) = setup_dirs("sp1").await;
+    load_plugin(
+        &app,
+        "p1",
+        "import host from 'panel:host';\n\
+         await host.register_handler('hi', async () => 1);\n\
+         await host.register_cron('t1', '*/5 * * * *', 1000, { run: async () => 1 });\n",
+    )
+    .await;
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/p1/suspend", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["suspended"], true);
+
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(state["suspended"], json!(["p1"]), "{state}");
+    // 关键区别：停用会把插件从 plugins 里拿掉，暂停不会。
+    assert!(
+        state["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "p1"),
+        "暂停不该卸载插件：{state}"
+    );
+    // 任务也还在（暂停只是「不触发」，不是「删掉」）。
+    assert!(
+        state["tasks"].as_array().unwrap().iter().any(|t| t["plugin"] == "p1"),
+        "暂停不该让任务消失：{state}"
+    );
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/plugins/p1/resume", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, state) = get(&app, "/api/state").await;
+    assert_eq!(state["suspended"], json!([]), "{state}");
+}
+
+/// 暂停名单要能扛过重启：库里 `plugins.suspended» 是唯一真相。
+#[tokio::test]
+async fn suspended_is_persisted_in_the_db() {
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    assert!(crate::db::plugin_suspended_names(&db).await.is_empty());
+    crate::db::set_plugin_suspended(&db, "p1", true).await.unwrap();
+    assert_eq!(crate::db::plugin_suspended_names(&db).await, vec!["p1".to_string()]);
+    // 暂停不影响「已启用」：两者是独立的列。
+    assert!(crate::db::plugin_disabled_names(&db).await.is_empty());
+    crate::db::set_plugin_suspended(&db, "p1", false).await.unwrap();
+    assert!(crate::db::plugin_suspended_names(&db).await.is_empty());
+}
