@@ -65,6 +65,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [pitfalls.md](pitfalls.md) | 踩过的坑（按顺序，每条带复现方式或守卫位置） |
 | [HANDOFF.md](HANDOFF.md) | 交接：现状、复跑命令、协作规则 |
 | [mcloud-migration.md](mcloud-migration.md) | mcloud 那一族的插件迁移进度 |
+| [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐插件从 0.3.x（QuickJS）迁到 0.4.x：契约对照、state 三键、三步迁移、踩到的坑 |
 
 ## 三态约定
 
