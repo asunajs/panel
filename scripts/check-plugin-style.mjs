@@ -113,18 +113,15 @@ for (const file of files) {
     }
   }
 
-  // R6 版本标记（用来识别「CSS 换了、JS 没换」的半新半旧状态）
-  if (isCss && file.endsWith(path.join('mcloud.webui', 'style.css'))) {
-    if (!/--style-ver\s*:/.test(raw)) {
-      add(file, 0, 'R6 缺 --style-ver', '自检要靠它分辨浏览器用的是哪一份样式表。', '在 :root 里加 --style-ver: <n>;');
-    }
-  }
+  // ⚠ 这里原来还有一条 R6「必须有 --style-ver」—— 那是插件项目产物上的一个自检标记，
+  // 不属于面板的准则（而且 plugins/ 是产物，产物形态由插件项目决定）。删掉，
+  // 免得它拦住正常部署。
 }
 
 if (!problems.length) {
   const n = files.filter((f) => f.endsWith('.css')).length;
   if (verbose) console.log('扫了 ' + files.length + ' 个文件（其中 ' + n + ' 个 CSS）');
-  console.log('ok: 插件样式检查全过（token / 颜色 / !important / 主题 / 控件 / 版本号）');
+  console.log('ok: 插件样式检查全过（token / 颜色 / !important / 主题 / 控件）');
   process.exit(0);
 }
 
