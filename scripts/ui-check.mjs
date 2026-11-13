@@ -243,10 +243,13 @@ async function main() {
   await js("(()=>{const i=document.getElementById('log-search'); i.value=''; i.dispatchEvent(new Event('input',{bubbles:true}));})()");
   await sleep(800);
   await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='error').click()");
-  await sleep(1500);
-  const onlyErr = await js("[...document.querySelectorAll('#logs-view .level')].every(e=>e.textContent==='error')");
-  const foot3 = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
-  check('日志等级过滤只看 error', onlyErr === true && /已显示 \d+ \/ 共 200 条/.test(foot3), foot3);
+  // 等筛选真的生效（服务端往返 + 重画）：睡死固定时间会偶发红（第 131 轮撞到一次）。
+  const onlyErr = await waitFor(async () => {
+    const all = await js("[...document.querySelectorAll('#logs-view .level')].every(e=>e.textContent==='error')");
+    const foot = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
+    return all && /已显示 \d+ \/ 共 200 条/.test(foot) ? foot : null;
+  }, 6000, '日志只剩 error').catch(() => null);
+  check('日志等级过滤只看 error', !!onlyErr, onlyErr || '等了 6 秒还没收敛');
   await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='').click()");
   await sleep(600);
   // 设置：5 个页签 + 通知页能出渠道表
