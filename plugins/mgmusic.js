@@ -8,17 +8,16 @@
 // 业务逻辑（协议、签名 mgSign、ce、证书、评论、窗口任务、幂等）**一行都没动**，
 // 只做运行环境适配 —— 字节级协议是上一轮实测出来的，改它没有意义。
 //   · 老文件：cmusic-others/mgmusic-plugin/mgmusic.js（v0.3.4，2131 行）
-//   · 现在只依赖 ECMAScript + `panel:host`（不再有 `host-api` 那个包）
+//   · 现在只依赖 ECMAScript + `panel:host`（既没有 `host-api`，也没有 `node:fs`）
 //
 // 从 v0.3.4 迁过来改了哪些**契约**（只列环境层）：
 //   1. `import {...} from 'host-api'` → `import host from 'panel:host'`。新的注册类 op
 //      全是 async（要 await）；同步步骤机那几处用 `*_sync` 同步版，代码结构没变。
 //      日志级别：success → info、fail → error（0.4.x 只有 log/info/warn/error）。
-//   2. **存储**：老版把 config.json / app-account.json / login-pending.json 写在 cwd 相对
-//      路径上；新面板**不给插件设 cwd**（相对路径会落到面板进程的工作目录），所以改用宿主
-//      sqlite 的 `state` 表（和 mcloud 同一张表，键自带命名空间）：
+//   2. **存储**：老版把 config.json / login-pending.json 写在 cwd 相对路径上；新面板
+//      **不给插件设 cwd**（相对路径会落到面板进程的工作目录），所以改用宿主 sqlite 的
+//      `state` 表（和 mcloud 同一张表，键自带命名空间）：
 //        config.json        → `mgmusic.config`
-//        app-account.json   → `mgmusic.app_account`
 //        login-pending.json → `mgmusic.login_pending`
 //      表在模块加载期自己建（新面板不预建，CREATE TABLE IF NOT EXISTS 幂等）。
 //   3. **播种**（只在 `mgmusic.config` 不存在时跑一次）：`await host.self_config()` 非空 →
@@ -44,7 +43,6 @@
 // ── 存储（接手的人看这两句就够）
 //   · 配置与临时数据全在**宿主 sqlite 的 `state` 表**里，三个键：
 //       `mgmusic.config`         ← 老 config.json（账号 devices / topup_min / cert / tls / comment …）
-//       `mgmusic.app_account`    ← 老 app-account.json（macOS App 导入的账号缓存）
 //       `mgmusic.login_pending`  ← 老 login-pending.json（短信登录中间态；只在成功后删一次）
 //     表由本文件在**加载期**自己建（`CREATE TABLE IF NOT EXISTS state`，幂等；mcloud 也是插件建的）。
 //   · **播种**用 `await host.self_config()`：state 里没有 `mgmusic.config` 时读一次 ——
@@ -64,7 +62,6 @@
 //   · 所有接口幂等；重复 report 无副作用
 //   · 咪咕接口对 Accept-Encoding 敏感，统一 identity，避免 gzip 无法解
 import host from 'panel:host';
-import fs from 'node:fs';
 
 const VERSION = '0.4.0';
 const PLUGIN = 'mgmusic';
@@ -98,7 +95,6 @@ function fail(msg) { emitLog('error', msg); }
 // 参数是 JS 数组，返回 {rows, truncated?}。同步版占住本插件的引擎线程 —— 正是老代码要的
 // 「同步步骤机」语义，所以 loadConfig / saveConfig 保持同步、返回形状不变。
 const ST_CONFIG = 'mgmusic.config';
-const ST_APP_ACCOUNT = 'mgmusic.app_account';
 const ST_LOGIN_PENDING = 'mgmusic.login_pending';
 // 「播种做过没有」的标记：值 'file'（从 config.json 导入过）或 'state'（本来就有账号）。
 // 有它就不再从导入源覆盖 state —— 否则用户在界面上删光账号会被文件偷偷复活。
@@ -168,9 +164,6 @@ const COMMENT_TASK_ID = 'c840d039adfd4c04920d92c04120baa8';
 const DEFAULTS = {
     devices: [],
     topup_min: 30,
-    app_import: {
-        enabled: true, // 仅 Node 运行时生效；QuickJS 读不到 App 容器
-    },
     report_ms: 60000,
     timeout_ms: 15000,
     task_interval: {
@@ -197,8 +190,6 @@ const DEFAULTS = {
 };
 
 const HEX = '0123456789abcdef';
-const IS_NODE = typeof process !== 'undefined' && !!(process.versions && process.versions.node);
-const MAC_APP_PREFS = 'Library/Containers/com.migu.migumobilemusic/Data/Library/Preferences/com.migu.migumobilemusic.plist';
 
 // ──────────────────────────────────────────────────────────── 字节 / 编码
 
@@ -442,147 +433,6 @@ function uuidV4() {
     }
     return s;
 }
-
-
-// ──────────────────────────────────────────────────────────── macOS App 账号导入
-//
-// 咪咕 macOS/iPad App 的 kMGLoginSDKUserInfo 里存着当前登录账号的
-// userId / msisdn（二进制 plist 内是 UTF-8 JSON）。这是“真实 uid”的可靠来源，
-// 比网页 passport 登录（不返回 uid）和 uid=0 兜底安全得多。
-//
-// 注意：QuickJS 的 node:fs 被限制在插件数据根，读不到 App 容器；
-// 只有面板把插件运行时切成 Node 时这段才会生效。QuickJS 下静默跳过。
-
-function balancedJsonAt(text, start) {
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < text.length; i += 1) {
-        const ch = text.charAt(i);
-        if (inStr) {
-            if (esc) esc = false;
-            else if (ch === '\\') esc = true;
-            else if (ch === '"') inStr = false;
-            continue;
-        }
-        if (ch === '"') inStr = true;
-        else if (ch === '{') depth += 1;
-        else if (ch === '}') {
-            depth -= 1;
-            if (depth === 0) return text.slice(start, i + 1);
-        }
-    }
-    return '';
-}
-
-/** state 键 `mgmusic.app_account`：老面板里那份 app-account.json，
- *  由 scripts/sync-macos-account.mjs 生成后写进 state。0.4.x 没有插件 cwd，
- *  所以这里只认 state（不再出现任何相对路径文件读写）。 */
-function readAccountFile() {
-    try {
-        const raw = stateGet(ST_APP_ACCOUNT);
-        if (!raw) return null;
-        const j = JSON.parse(raw);
-        const uid = String((j && j.uid) || '').trim();
-        const msisdn = String((j && j.msisdn) || '').trim();
-        if (!uid || uid === '0' || !/^1[3-9]\d{9}$/.test(msisdn)) return null;
-        return {
-            uid: uid,
-            msisdn: msisdn,
-            deviceid: String((j && j.deviceid) || '').trim(),
-            source: 'app-account.json',
-        };
-    } catch (e) {
-        return null;
-    }
-}
-
-function readMacAppAccount() {
-    const fromFile = readAccountFile();
-    if (fromFile) return fromFile;
-    if (!IS_NODE) return null;
-    const home = String(process.env.HOME || '');
-    if (!home) return null;
-    const p = home + '/' + MAC_APP_PREFS;
-    let text;
-    try {
-        if (!fs.existsSync(p)) return null;
-        text = fs.readFileSync(p).toString('utf8');
-    } catch (e) {
-        return null;
-    }
-    let obj = null;
-    const start = text.indexOf('{"videoUserItem"');
-    if (start >= 0) {
-        const raw = balancedJsonAt(text, start);
-        if (raw) {
-            try { obj = JSON.parse(raw); } catch (e) { obj = null; }
-        }
-    }
-    let uid = '';
-    let msisdn = '';
-    if (obj) {
-        uid = String(obj.userId || '').trim();
-        msisdn = String(obj.msisdn || obj.accountName || '').trim();
-    }
-    if (!uid) {
-        const um = text.match(/"userId"\s*:\s*"([^"]+)"/);
-        if (um) uid = String(um[1]).trim();
-    }
-    if (!msisdn) {
-        const mm = text.match(/"msisdn"\s*:\s*"(\d{11})"/);
-        if (mm) msisdn = String(mm[1]).trim();
-    }
-    if (!uid || uid === '0' || !/^1[3-9]\d{9}$/.test(msisdn)) return null;
-    // 设备 id 不在这里猜：二进制 plist 的 key/value 不在同一段，
-    // 优先沿用配置里已有的 deviceid；没有才生成新的 UUID。
-    return { uid: uid, msisdn: msisdn, deviceid: '', source: 'macos-app' };
-}
-
-/** 把 App 当前登录账号同步进配置；只写 uid/msisdn/deviceid/ce，不保存 passId/token。 */
-function importMacAppAccount() {
-    const cfg = loadConfig();
-    if (!cfg.app_import || !cfg.app_import.enabled) return null;
-    const acc = readMacAppAccount();
-    if (!acc) return null;
-    let idx = -1;
-    for (let i = 0; i < cfg.devices.length; i += 1) {
-        if (String(cfg.devices[i].msisdn || '') === acc.msisdn) { idx = i; break; }
-    }
-    const existing = idx >= 0 ? cfg.devices[idx] : null;
-    if (!acc.deviceid) {
-        acc.deviceid = (existing && existing.deviceid) ? String(existing.deviceid) : uuidV4();
-    }
-    const ce = makeCe(acc.uid, acc.msisdn, acc.deviceid);
-    let changed = false;
-    if (idx < 0) {
-        cfg.devices.push({
-            label: 'migu-' + acc.msisdn.slice(-4),
-            msisdn: acc.msisdn,
-            uid: acc.uid,
-            deviceid: acc.deviceid,
-            ce: ce,
-            cookie: '',
-            topup_min: cfg.topup_min,
-            source: 'macos-app',
-        });
-        idx = cfg.devices.length - 1;
-        changed = true;
-    } else {
-        const d = cfg.devices[idx];
-        const pairs = [['uid', acc.uid], ['msisdn', acc.msisdn], ['deviceid', acc.deviceid], ['ce', ce]];
-        for (let j = 0; j < pairs.length; j += 1) {
-            if (String(d[pairs[j][0]] || '') !== String(pairs[j][1])) {
-                d[pairs[j][0]] = pairs[j][1];
-                changed = true;
-            }
-        }
-        if (!d.source) { d.source = 'macos-app'; changed = true; }
-    }
-    if (changed) saveConfig(cfg);
-    return { account: acc, device: cfg.devices[idx], changed: changed };
-}
-
 
 
 // ──────────────────────────────────────────────────────────── 短信登录（passport 网页版）
@@ -976,20 +826,22 @@ function loginWithCode(msisdn, code) {
         throw new Error('登录失败: ' + (d.message || ('status=' + d.status)));
     }
 
-    // 网页 passport 只回 LTToken/USessionID，不回 uid；真实 uid 从 macOS App
-    // 的 kMGLoginSDKUserInfo 取（Node 运行时）。拿不到就绝不写 uid=0。
+    // 网页 passport 只回 LTToken/USessionID，不回 uid：先看响应里有没有，
+    // 没有就用手机号走 H5 身份页解析（见下）。**拿不到真实 uid 就不保存设备** ——
+    // 写错账号比这次失败更糟（老版就是这么定的，保留）。
     let uid = '';
-    let imported = null;
     const cfgNow = loadConfig();
-    try {
-        imported = importMacAppAccount();
-        if (imported && String(imported.account.msisdn) === phone) {
-            uid = String(imported.account.uid || '');
+    // 同一手机号之前登录过就沿用它的 deviceid（ce 是 uid+msisdn+deviceid 的哈希，
+    // 换 deviceid 等于换设备，服务端会当成新登录）。
+    let deviceid = '';
+    for (let i = 0; i < cfgNow.devices.length; i += 1) {
+        const dv = cfgNow.devices[i];
+        if (String(dv.msisdn || '') === phone && dv.deviceid) {
+            deviceid = String(dv.deviceid);
+            break;
         }
-    } catch (e) { /* App 导入失败不影响短信路径 */ }
-    const deviceid = (imported && String(imported.account.msisdn) === phone
-        && imported.device && imported.device.deviceid)
-        ? String(imported.device.deviceid) : uuidV4();
+    }
+    if (!deviceid) deviceid = uuidV4();
     if (!uid) uid = findUid(d);
     if (!uid || String(uid) === '0') {
         // 网页 passport 只回 LTToken/USessionID，不回 uid；用手机号走 H5 身份页解析。
@@ -1072,9 +924,7 @@ function loadConfig() {
     }
     const cfg = Object.assign({}, DEFAULTS, raw);
     if (!Array.isArray(cfg.devices)) cfg.devices = [];
-    cfg.app_import = Object.assign({}, DEFAULTS.app_import,
-        (raw && typeof raw.app_import === 'object' && !Array.isArray(raw.app_import)) ? raw.app_import : {});
-    cfg.app_import.enabled = !!cfg.app_import.enabled;
+    delete cfg.app_import; // 老版本的「macOS App 账号导入」已整段删除（2026-11-13），旧字段直接忽略
     cfg.comment = Object.assign({}, DEFAULTS.comment,
         (raw && typeof raw.comment === 'object' && !Array.isArray(raw.comment)) ? raw.comment : {});
     cfg.topup_min = clampInt(cfg.topup_min, 0, 1440, DEFAULTS.topup_min);
@@ -1785,20 +1635,7 @@ async function runDaily() {
     // 装载描述型摘要（老面板由 register_cron 的 opts.summary 完成）。放在这里是因为
     // 加载期调用 set_job_summary 会因「任务还没注册进调度器」而抛错；这里任务一定在。
     await updateJobSummary(DAILY_SUMMARY);
-    let cfg = loadConfig();
-    try {
-        const imported = importMacAppAccount();
-        if (imported) {
-            cfg = loadConfig();
-            if (imported.changed) {
-                info('[mgmusic] 已从 macOS App 同步账号 uid='
-                    + mask(imported.account.uid, 6, 4) + '（msisdn='
-                    + mask(imported.account.msisdn, 3, 4) + '）');
-            }
-        }
-    } catch (e) {
-        warn('[mgmusic] macOS App 账号同步失败：' + (e && e.message ? e.message : e));
-    }
+    const cfg = loadConfig();
     if (!cfg.devices.length) {
         const line = '[mgmusic] 未配置 devices，跳过';
         warn(line);
@@ -1865,19 +1702,7 @@ async function runDaily() {
 }
 
 function statusAll(uid) {
-    let cfg = loadConfig();
-    try {
-        const imported = importMacAppAccount();
-        if (imported) {
-            cfg = loadConfig();
-            if (imported.changed) {
-                info('[' + PLUGIN + '] 已从 macOS App 同步账号 uid='
-                    + mask(imported.account.uid, 6, 4));
-            }
-        }
-    } catch (e) {
-        warn('[' + PLUGIN + '] macOS App 账号同步失败：' + (e && e.message ? e.message : e));
-    }
+    const cfg = loadConfig();
     const targets = pickDevices(cfg, uid);
     if (uid && !targets.length) throw new Error('没有匹配 uid 的账号');
     const lines = [];
@@ -2029,11 +1854,7 @@ function validateConfig(input) {
     if (input.comment !== undefined && (typeof input.comment !== 'object' || Array.isArray(input.comment))) {
         throw new Error('comment 必须是对象');
     }
-    if (input.app_import !== undefined && (typeof input.app_import !== 'object' || Array.isArray(input.app_import))) {
-        throw new Error('app_import 必须是对象');
-    }
-    cfg.app_import = Object.assign({}, DEFAULTS.app_import, input.app_import || {});
-    cfg.app_import.enabled = !!cfg.app_import.enabled;
+    delete cfg.app_import; // 已删除的功能：老配置/老界面带上来的字段一律丢掉，别留在 state 里
     cfg.comment = Object.assign({}, DEFAULTS.comment, input.comment || {});
     cfg.comment.enabled = cfg.comment.enabled === undefined ? true : !!cfg.comment.enabled;
     cfg.comment.song_id = String(cfg.comment.song_id || '').trim();
@@ -2242,26 +2063,6 @@ const WEB_ROUTES = {
         const body = parseBody(req);
         return json(200, statusAll(body.uid || body.label || ''));
     },
-    'POST api/app-import': function () {
-        const r = importMacAppAccount();
-        if (!r) {
-            return json(200, {
-                ok: false,
-                runtime: IS_NODE ? 'node' : 'quickjs',
-                error: IS_NODE
-                    ? '没读到 macOS App 的 kMGLoginSDKUserInfo（App 是否已登录？）'
-                    : 'QuickJS 读不到 App 容器；请把本插件运行时切到 Node 后再导入',
-            });
-        }
-        return json(200, {
-            ok: true,
-            runtime: IS_NODE ? 'node' : 'quickjs',
-            changed: r.changed,
-            uid: mask(String(r.account.uid), 6, 4),
-            msisdn: mask(String(r.account.msisdn), 3, 4),
-            deviceid: mask(String(r.account.deviceid), 8, 4),
-        });
-    },
     // 兼容保留。⚠ 新面板 WebUI 请求的预算是 30s，120s 的 daily 打这里会被砍在半路
     // （任务本身幂等，被砍不会写坏，但看不到结果）。界面上的「立即跑一次」请打
     // 面板任务接口 POST /api/tasks/mgmusic/daily/run —— 那条走调度器，预算 120s。
@@ -2336,16 +2137,9 @@ await host.register_handler('report', function () {
 
 // ── 加载日志（老版的启动自述；config() 换成 state，其余不变）。
 try {
-    let cfg = loadConfig();
-    let imported = null;
-    try { imported = importMacAppAccount(); } catch (e) {
-        warn('[' + PLUGIN + '] macOS App 账号同步失败：' + (e && e.message ? e.message : e));
-    }
-    if (imported) cfg = loadConfig();
+    const cfg = loadConfig();
     info(PLUGIN + ' v' + VERSION + ' 已加载：' + cfg.devices.length
-        + ' 个设备，topup_min=' + cfg.topup_min
-        + '，runtime=' + (IS_NODE ? 'node' : 'quickjs')
-        + (imported ? '，已从 macOS App 同步 uid=' + mask(imported.account.uid, 6, 4) : ''));
+        + ' 个设备，topup_min=' + cfg.topup_min);
 } catch (e) {
     warn(PLUGIN + ' v' + VERSION + ' 已加载，但配置读取失败：'
         + (e && e.message ? e.message : e));
