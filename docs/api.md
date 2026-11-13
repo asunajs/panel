@@ -436,3 +436,27 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 
 所以插件界面**可以**并发发请求了（以前必有一个 502）。但仍然建议串行：
 队列只是「不让正常并发炸掉」，任务一跑几十秒时（直播监听那种）排队照样会超时。
+
+## 错误格式与错误页（第 166 轮）
+
+以前错误响应是 `(状态码, String)`，那个 String **原样**发给客户端：`没有这个文件: /Users/…`、
+`(os error 13)`、`需要令牌：请求头 x-panel-token` 都进过响应体。现在分三样：
+
+| 字段 | 出现位置 | 内容 |
+|---|---|---|
+| `code` | JSON 响应体 | 机器可判的短标识：`unauthorized` `forbidden` `not_found` `bad_request` `conflict` `too_large` `rate_limited` `plugin_busy` `internal` |
+| `error` | JSON 响应体 + 错误页 | 一句人话，**不含**路径、SQL、堆栈、OS 错误串 |
+| `ref` | JSON 响应体 + 错误页 | 500 时生成的短编号（`e-7f3a`），页面显示、日志也打 |
+| `detail` | **只进日志** | 完整原因（路径、底层错误），日志行形如 `GET /api/x → 500 code=internal detail=… ref=e-7f3a` |
+
+**页面还是 JSON，看 `Accept`**：浏览器导航带 `text/html` ⇒ 渲染 `web/error.html`（面板样式、状态码、
+一句人话、回首页/重试、编号）。`curl` 默认 `*/*` ⇒ JSON。**脚本永远拿到 JSON**，不会被 HTML 噎住。
+
+三条硬规矩（改错误相关代码前先读）：
+
+1. **detail 只进日志**：任何把 `detail` 拼进响应体的改动都是回退。
+2. **错误页也要给插件页用**：`/plugins/<name>/缺文件` 现在也是页面/JSON，不再回绝对路径。
+3. **错误页必须带状态码**：`(header, body).into_response()` 默认 **200** —— 交过学费（页面 404、状态 200）。
+   测试 `unknown_page_renders_the_error_page` 钉住。
+
+未定义路径：`/api/*` 由 api router 的 fallback 出 JSON 404；其余路径由根 router 的 fallback 出错误页。

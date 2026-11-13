@@ -3312,3 +3312,88 @@ async fn big_script_saves_and_reports_an_eight_mib_limit() {
     let (_s, files) = get(&app, "/api/plugins/files").await;
     assert_eq!(files["max_bytes"], json!(8 * 1024 * 1024), "{files}");
 }
+
+// ── 错误页（第 166 轮）──────────────────────────────────────────────────────
+//
+// 判据只有一条：**用户不该看到后端内部信息**。所以除了断言状态码和页面文案，
+// 还要断言响应体里没有路径、os error、堆栈痕迹 —— 这几样以前都真的出现过。
+
+fn req_get(path: &str, accept: &str) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::get(path)
+        .header("accept", accept)
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+async fn body_text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), 256 * 1024)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn assert_no_leak(text: &str) {
+    for bad in ["os error", "/Users/", "panicked", "SELECT ", "src/web.rs"] {
+        assert!(!text.contains(bad), "响应里泄露了 {bad}：{text}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_page_renders_the_error_page() {
+    let (app, _db) = setup().await;
+    let res = app.oneshot(req_get("/definitely/not/here", "text/html")).await.unwrap();
+    let status = res.status();
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let text = body_text(res).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body={text}");
+    assert!(ct.starts_with("text/html"), "浏览器要拿到页面，实际 {ct}；body={text}");
+    assert!(text.contains("404"), "页面上要有状态码：{text}");
+    assert!(text.contains("没有这个页面"), "{text}");
+    // 页面自带出口，不能是死路。
+    assert!(text.contains("回面板首页"), "{text}");
+    assert_no_leak(&text);
+}
+
+#[tokio::test]
+async fn unknown_api_path_stays_json_for_scripts() {
+    let (app, _db) = setup().await;
+    // curl 的默认 Accept 是 */*，拿到的必须是 JSON —— 脚本解析 HTML 是最难查的一类问题。
+    let res = app.oneshot(req_get("/api/nope", "*/*")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let text = body_text(res).await;
+    let v: Value = serde_json::from_str(&text).expect("脚本要能解析");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["code"], "not_found");
+    assert_no_leak(&text);
+}
+
+#[tokio::test]
+async fn same_404_becomes_a_page_for_browsers() {
+    let (app, _db) = setup().await;
+    let res = app.oneshot(req_get("/api/nope", "text/html,*/*")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let text = body_text(res).await;
+    assert!(text.contains("没有这个页面") || text.contains("不存在"), "{text}");
+    assert!(!text.trim_start().starts_with('{'), "不该把 JSON 甩给浏览器：{text}");
+    assert_no_leak(&text);
+}
+
+#[tokio::test]
+async fn internal_errors_hide_the_detail_but_keep_a_ref() {
+    // 直接构造一个 500，验证「对外只有人话 + 编号，内部原因不外泄」。
+    let err = internal("读 /Users/someone/secret 失败: os error 13");
+    let res = err.into_response();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let text = body_text(res).await;
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["code"], "internal");
+    assert!(v["ref"].as_str().unwrap_or("").starts_with("e-"), "{text}");
+    assert_no_leak(&text);
+    assert!(!text.contains("secret"), "{text}");
+}
+

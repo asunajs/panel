@@ -29,6 +29,10 @@ use crate::scheduler::Scheduler;
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
 const APP_CSS: &str = include_str!("../web/app.css");
+/// 错误页模板（第 166 轮）：404/401/500 都渲染它，用的是面板自己的样式。
+const ERROR_HTML: &str = include_str!("../web/error.html");
+/// 错误页的主题兜底脚本（8 行）：错误页没有 app.js，CSP 又不许内联脚本。
+const THEME_BOOT_JS: &str = include_str!("../web/theme-boot.js");
 /// 面板 UI 套件（第 139 轮）：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
 const UI_JS: &str = include_str!("../web/ui.js");
 
@@ -119,7 +123,7 @@ where
     ) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(v)) => Ok(JsonBody(v)),
-            Err(rej) => Err((body_status(&rej), format!("请求体有问题：{rej}"))),
+            Err(rej) => Err(ApiError::new(body_status(&rej), "bad_request", format!("请求体有问题：{rej}"))),
         }
     }
 }
@@ -149,7 +153,7 @@ where
         match <axum::Json<T> as axum::extract::OptionalFromRequest<S>>::from_request(req, state).await {
             Ok(Some(axum::Json(v))) => Ok(Some(JsonBody(v))),
             Ok(None) => Ok(None),
-            Err(rej) => Err((body_status(&rej), format!("请求体有问题：{rej}"))),
+            Err(rej) => Err(ApiError::new(body_status(&rej), "bad_request", format!("请求体有问题：{rej}"))),
         }
     }
 }
@@ -171,33 +175,288 @@ where
     ) -> Result<Self, Self::Rejection> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(v)) => Ok(QueryArgs(v)),
-            Err(rej) => Err((
-                StatusCode::BAD_REQUEST,
-                format!("查询参数有问题：{rej}"),
-            )),
+            Err(rej) => Err(bad(format!("查询参数有问题：{rej}"))),
         }
     }
 }
-type ApiError = (StatusCode, String);
+/// 统一的错误结构（第 166 轮）。
+///
+/// 为什么换掉 (`StatusCode, String`)：那个形状把 String **原样**发给客户端 ——
+/// 「没有这个文件: /Users/xxx/plugins/y」「(os error 13)」全进了响应体。用户看到的
+/// 是一屏报错信息，看不出该怎么办，还顺带泄露了本机路径。
+///
+/// 现在的分工：
+/// - public_msg：给页面/JSON 看的**人话**，不含路径、SQL、堆栈；
+/// - detail：给日志看的完整原因，**只**在 error_pages 中间件里落到日志；
+/// - ref：500 时生成的短编号（e-7f3a），页面显示、日志也打，靠它对上。
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub public_msg: String,
+    pub detail: Option<String>,
+    pub ref_id: Option<String>,
+    /// 429 用：告诉客户端等多久。
+    pub retry_after: Option<u64>,
+}
+
+/// 挂在响应扩展上：error_pages 中间件取出来写日志（不进响应体）。
+#[derive(Debug, Clone)]
+pub struct ErrorDetail(pub String);
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str, public_msg: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            public_msg: public_msg.into(),
+            detail: None,
+            ref_id: None,
+            retry_after: None,
+        }
+    }
+
+    fn with_detail(mut self, d: impl Into<String>) -> Self {
+        self.detail = Some(d.into());
+        self
+    }
+
+    fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", msg)
+    }
+
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", msg)
+    }
+
+    fn rate_limited(msg: impl Into<String>, retry_after: u64) -> Self {
+        let mut e = Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", msg);
+        e.retry_after = Some(retry_after);
+        e
+    }
+
+    /// 502：插件没响应 / 通道满了。上游的错在 detail 里，对外只说「没响应」。
+    fn bad_gateway(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "plugin_busy", "插件没有响应。").with_detail(msg)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        // 500 一定有编号：用户报「出错」时，一个编号能把日志精确到一行。
+        let ref_id = if self.status.is_server_error() {
+            Some(self.ref_id.clone().unwrap_or_else(new_ref_id))
+        } else {
+            self.ref_id.clone()
+        };
+        let body = json!({
+            "ok": false,
+            "code": self.code,
+            "error": self.public_msg,
+            "ref": ref_id.clone().unwrap_or_default(),
+        });
+        let mut resp = (self.status, Json(body)).into_response();
+        if let Some(secs) = self.retry_after {
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                resp.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+        }
+        // detail（和编号）只交给中间件写日志，绝不进响应体。
+        let d = format!(
+            "code={} detail={}{}",
+            self.code,
+            self.detail.unwrap_or_default(),
+            ref_id.map(|r| format!(" ref={r}")).unwrap_or_default()
+        );
+        resp.extensions_mut().insert(ErrorDetail(d));
+        resp
+    }
+}
+
+/// 短编号：进程内序号 + 时间戳低位，够用来对日志，不需要密码学随机。
+fn new_ref_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("e-{:04x}{:03x}", (t & 0xffff) as u16, (n & 0xfff) as u16)
+}
 
 fn bad(msg: impl Into<String>) -> ApiError {
-    (StatusCode::BAD_REQUEST, msg.into())
+    // 只表达「你的请求有问题」。写盘/权限那类底层失败走 write_err / internal ——
+    // 别在这里嗅 os error：有个用例要求「停用一个不存在的插件」是 400，
+    // 而底层错误文案里带 (os error 2)，嗅一下就把语义改成了 500。
+    ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg)
 }
 
 /// 存储/权限类失败是**服务端**问题（500），不是「你的请求写错了」（400）。
 ///
-/// 为什么按文本判：脚本层的错误全都是 `String`，OS 失败一定带 `(os error N)`，
+/// 为什么按文本判：脚本层的错误全都是 String，OS 失败一定带 (os error N)，
 /// 而校验类错误（名字不合法、表达式不合法）不会。第 70 轮实测：脚本目录只读时
 /// 新建脚本回的是 400 —— 用户会以为是自己填错了。
 fn write_err(e: String) -> ApiError {
     if e.contains("os error") || e.contains("No space left") {
-        (StatusCode::INTERNAL_SERVER_ERROR, e)
+        internal(e)
     } else {
         bad(e)
     }
 }
+
+/// 500：对外只说「面板内部出错了」，真实原因进日志。
 fn internal(msg: impl Into<String>) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, msg.into())
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "面板内部出错了，细节已经写进日志（编号见下方）。",
+    )
+    .with_detail(msg.into())
+}
+
+/// 状态码 → 页面标题（错误页与兜底都用这一份，别各写一套文案）。
+fn status_title(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "请求有问题",
+        StatusCode::UNAUTHORIZED => "需要令牌",
+        StatusCode::FORBIDDEN => "这个操作不允许",
+        StatusCode::NOT_FOUND => "没有这个页面",
+        StatusCode::METHOD_NOT_ALLOWED => "这个地址不支持该操作",
+        StatusCode::PAYLOAD_TOO_LARGE => "文件太大",
+        StatusCode::TOO_MANY_REQUESTS => "请求太频繁",
+        StatusCode::BAD_GATEWAY => "插件没有响应",
+        s if s.is_server_error() => "面板内部出错了",
+        _ => "出错了",
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// 渲染错误页（web/error.html）。retry 是「重试」按钮回跳的地址。
+fn error_page(status: StatusCode, message: &str, ref_id: &str, retry: &str) -> Response {
+    let ref_line = if ref_id.is_empty() {
+        String::new()
+    } else {
+        format!("错误编号 {ref_id} —— 把它和最近的日志一起看就能定位")
+    };
+    let body = ERROR_HTML
+        .replace("{{STATUS}}", &status.as_u16().to_string())
+        .replace("{{TITLE}}", &html_escape(status_title(status)))
+        .replace("{{MESSAGE}}", &html_escape(message))
+        .replace("{{REF}}", &html_escape(&ref_line))
+        .replace("{{RETRY}}", &html_escape(retry));
+    // ⚠ 别忘了把状态码带上：只有 header+body 的元组默认是 200，
+    // 那会变成「404 的页面配 200 的状态」—— 浏览器不认，测试也会抓（第 166 轮抓到一次）。
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// 浏览器要 HTML、接口要 JSON —— 一个中间件同时管住「日志」和「页面」两件事。
+///
+/// 判据只用 Accept：浏览器导航一定带 text/html；curl 默认 */*，拿到 JSON 不会被 HTML
+/// 噎住（脚本解析错误页是最难查的那类问题）。
+async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next) -> Response {
+    let wants_html = req
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/html"))
+        .unwrap_or(false);
+    let retry = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    let res = next.run(req).await;
+    let status = res.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return res;
+    }
+
+    // ① 日志：detail 只在这里落地（响应体里没有）。
+    let mut ref_id = String::new();
+    if let Some(d) = res.extensions().get::<ErrorDetail>() {
+        let level = if status.is_server_error() {
+            crate::log::Level::Error
+        } else {
+            crate::log::Level::Warn
+        };
+        st.log.emit(
+            "panel",
+            None,
+            level,
+            format!("{method} {path} → {} {}", status.as_u16(), d.0),
+        );
+        for part in d.0.split_whitespace() {
+            if let Some(r) = part.strip_prefix("ref=") {
+                ref_id = r.to_string();
+                break;
+            }
+        }
+    }
+
+    if !wants_html {
+        return res;
+    }
+
+    // ② 页面：只换「自己产出的」那两种内容类型，别把图片/SSE/压缩流搅了。
+    let ct = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !(ct.starts_with("application/json") || ct.starts_with("text/plain")) {
+        return res;
+    }
+
+    let (parts, body) = res.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    // 从我们自己的 JSON 里取人话；取不到就用状态码兜底。
+    let mut message = status_title(parts.status).to_string();
+    let mut code_ref = ref_id.clone();
+    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+        if let Some(m) = v.get("error").and_then(|m| m.as_str()) {
+            if !m.trim().is_empty() {
+                message = m.to_string();
+            }
+        }
+        if code_ref.is_empty() {
+            if let Some(r) = v.get("ref").and_then(|r| r.as_str()) {
+                code_ref = r.to_string();
+            }
+        }
+    } else if !text.trim().is_empty() && text.trim().len() <= 200 {
+        message = text.trim().to_string();
+    }
+    error_page(parts.status, &message, &code_ref, &retry)
 }
 
 pub fn router(st: AppState) -> Router {
@@ -269,6 +528,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/logs/stream", get(api_logs_stream))
 
         // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
+        // 未定义的 /api 路径：JSON 404（错误页中间件会按 Accept 换成页面）。
+        .fallback(api_not_found)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(st.clone(), require_token))
         // 写接口限流（读接口不挡：界面每隔几秒就在读）
@@ -295,6 +556,9 @@ pub fn router(st: AppState) -> Router {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
+        .route("/theme-boot.js", get(|| async {
+            asset(THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js")
+        }))
         .route("/ui.js", get(|| async { asset(UI_JS, "text/javascript; charset=utf-8", "ui.js") }))
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
@@ -302,7 +566,11 @@ pub fn router(st: AppState) -> Router {
         // 就绪探针：库能读 + 调度器活着才算就绪（不就绪给 503）
         .route("/readyz", get(readyz))
         .merge(api)
+        // 根上未定义的路径：给页面（浏览器）或 JSON（脚本）。
+        .fallback(root_not_found)
         .layer(middleware::from_fn(security_headers))
+        // 错误页 + 错误日志：换的是 body，所以要看到已经定型的 状态码 与 内容类型。
+        .layer(middleware::from_fn_with_state(st.clone(), error_pages))
         // 压缩放在最外层（最后 add = 最先执行）：app.js 112KB + app.css 41KB 是首屏大头，
         // gzip 后约 1/4。只在请求带 Accept-Encoding 时压，不支持的老客户端拿原文，
         // 兼容性没有变化。SSE（/api/logs/stream）由 tower-http 的默认谓词排除，不会被缓冲。
@@ -363,6 +631,30 @@ fn too_many(r: crate::ratelimit::Rejected) -> Response {
         resp.headers_mut().insert(header::RETRY_AFTER, v);
     }
     resp
+}
+
+/// /api 下没有的路径：一律 JSON 404（脚本能解析，浏览器会被中间件换成页面）。
+async fn api_not_found(uri: axum::http::Uri) -> ApiError {
+    ApiError::not_found("这个接口不存在。").with_detail(uri.path().to_string())
+}
+
+/// 根 router 的兜底：/api 走 JSON，其余给错误页。
+///
+/// 为什么不用 SPA 兜底：面板是 hash 路由（#plugins），未知路径本来就该是 404 ——
+/// 把所有路径都塞回首页，会让人以为「这个功能存在但白屏」。
+async fn root_not_found(uri: axum::http::Uri) -> Response {
+    let path = uri.path().to_string();
+    if path.starts_with("/api") {
+        return ApiError::not_found("这个接口不存在。")
+            .with_detail(path)
+            .into_response();
+    }
+    error_page(
+        StatusCode::NOT_FOUND,
+        "这个页面不存在。地址可能打错了，或者这个功能还没做。",
+        "",
+        "/",
+    )
 }
 
 /// 从请求扩展里取对端地址。
@@ -487,13 +779,14 @@ async fn api_test_js(
 ) -> Result<Response, ApiError> {
     guard_write(&h)?;
     if b.code.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "代码是空的\n".into()));
+        return Err(bad("代码是空的"));
     }
     if b.code.len() > MAX_TEST_CODE {
-        return Err((
+        return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
             format!(
-                "代码 {} 字节，超过 {} KB 上限\n",
+                "代码 {} 字节，超过 {} KB 上限。",
                 b.code.len(),
                 MAX_TEST_CODE / 1024
             ),
@@ -568,10 +861,10 @@ async fn api_setup(
     // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
     // 但再写一次会把用户刚抄下来的令牌**静默换掉**。
     if st.auth().is_some() || st.data_dir.join(crate::auth::FILE).exists() {
-        return Err((
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "这个面板已经设置过令牌了。要换令牌：停掉面板，设 PANEL_TOKEN 后启动（或删掉 data/auth.json 再来一次）\n"
-                .into(),
+            "conflict",
+            "这个面板已经设置过令牌了。要换令牌：停掉面板，设 PANEL_TOKEN 后启动（或删掉 data/auth.json 再来一次）。",
         ));
     }
     let (token, generated) = if b.generate {
@@ -580,19 +873,13 @@ async fn api_setup(
         match b.token.as_deref().map(str::trim) {
             Some(t) if !t.is_empty() => (t.to_string(), false),
             _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "要么给 token，要么 generate: true\n".into(),
-                ))
+                return Err(bad("要么给 token，要么 generate: true"))
             }
         }
     };
     // 短口令能过，但 PBKDF2 只是余量，不是许可 —— 明确要求 8 个字符起。
     if token.chars().count() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "令牌至少 8 个字符（建议直接让面板生成一个）\n".into(),
-        ));
+        return Err(bad("令牌至少 8 个字符（建议直接让面板生成一个）"));
     }
     let path = crate::auth::write_new(&st.data_dir, &token).map_err(|e| {
         internal(format!("写 auth.json 失败: {e}"))
@@ -656,7 +943,7 @@ async fn api_login(
         .await
         .unwrap_or(false);
     if !ok {
-        return Err((StatusCode::UNAUTHORIZED, "令牌不对\n".into()));
+        return Err(ApiError::unauthorized("令牌不对，重新登录一次。"));
     }
     let cookie = session_cookie(
         &auth.issue_session(now_secs()),
@@ -801,7 +1088,10 @@ async fn require_token(
     if ok {
         return next.run(req).await;
     }
-    (StatusCode::UNAUTHORIZED, "需要令牌：请求头 x-panel-token\n").into_response()
+    ApiError::unauthorized(
+        "需要令牌：用 ?t=… 进一次页面，或到 设置 → 安全 抄下令牌后带上 x-panel-token 请求头。",
+    )
+    .into_response()
 }
 
 /// 从请求头取令牌。**`x-panel-token` 优先** —— `Authorization` 存在但不是 Bearer
@@ -891,9 +1181,10 @@ fn guard_write(h: &HeaderMap) -> Result<(), ApiError> {
     if h.get("x-panel").and_then(|v| v.to_str().ok()) == Some("1") {
         return Ok(());
     }
-    Err((
+    Err(ApiError::new(
         StatusCode::FORBIDDEN,
-        "写接口要求请求头 `x-panel: 1`（防跨站请求伪造；面板页面自己会带上）\n".into(),
+        "forbidden",
+        "写接口要求请求头 `x-panel: 1`（防跨站请求伪造；面板页面自己会带上）。",
     ))
 }
 
@@ -1353,7 +1644,7 @@ async fn task_run(
     // 「插件还在跑」「JS 通道满了」是**冲突**（等会儿重试就行），不是请求写错了 —— 409。
     let run_id = st.sched.run_now(&plugin, &name).await.map_err(|e| {
         if crate::scheduler::is_busy_error(&e) {
-            (StatusCode::CONFLICT, e)
+            ApiError::new(StatusCode::CONFLICT, "conflict", e)
         } else {
             bad(e)
         }
@@ -2227,7 +2518,7 @@ async fn plugin_config_get(
 ) -> Result<Json<Value>, ApiError> {
     safe_name(&name)?;
     if !plugin_path(&st.plugins_dir, &name)?.exists() {
-        return Err((StatusCode::NOT_FOUND, format!("没有这个插件: {name}\n")));
+        return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
     }
     let cfg = crate::config::load_plugin(&st.data_dir, &name).map_err(bad)?;
     Ok(Json(json!({
@@ -2255,7 +2546,7 @@ async fn plugin_config_put(
     guard_write(&h)?;
     safe_name(&name)?;
     if !plugin_path(&st.plugins_dir, &name)?.exists() {
-        return Err((StatusCode::NOT_FOUND, format!("没有这个插件: {name}\n")));
+        return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
     }
     let cap = crate::config::max_bytes();
     let bytes = body.text.len() as u64;
@@ -2817,10 +3108,8 @@ async fn serve_webui_file(
     let bytes = match tokio::fs::read(&path).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("没有这个文件: {}", path.display()),
-            ))
+            return Err(ApiError::not_found("这个文件不在插件里。")
+                .with_detail(path.display().to_string()))
         }
         Err(e) => return Err(internal(format!("读 {} 失败: {e}", path.display()))),
     };
@@ -2905,7 +3194,7 @@ async fn plugin_webui_any(
             .sched
             .web_call(&name, &handler, evt, WEBUI_BUDGET_MS)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            .map_err(ApiError::bad_gateway)?;
         return Ok(Json(json!({ "ok": true, "value": out.unwrap_or(Value::Null) })).into_response());
     }
 
@@ -2930,7 +3219,7 @@ async fn plugin_webui_any(
             .sched
             .web_call(&name, "__route", evt, WEBUI_BUDGET_MS)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+            .map_err(ApiError::bad_gateway)?
             .unwrap_or(Value::Null);
 
         // 插件返回 {status, headers, body} 就照着发；否则当 JSON 值发。
@@ -2958,7 +3247,7 @@ async fn plugin_webui_any(
             .map_err(|e| internal(format!("构造响应失败: {e}")));
     }
 
-    Err((StatusCode::NOT_FOUND, format!("没有这个文件: {rel}")))
+    Err(ApiError::not_found("这个文件不在插件里。").with_detail(format!("rel={rel}")))
 }
 
 // ---------------------------------------------------------------- 备份 / 恢复
@@ -3141,7 +3430,7 @@ async fn api_notify_test(
     let only = body.and_then(|JsonBody(b)| b.channel);
     let out = crate::notify::test_send(&st.db, &st.log, &st.config, only.as_deref())
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}\n")))?;
+        .map_err(|e| bad(e.to_string()))?;
     Ok(Json(out))
 }
 

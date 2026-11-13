@@ -502,3 +502,14 @@
 93. **原生步进器只管了 `.input`，别的输入框照旧露出来**：预算那个框是 `.field-inline input`，
     不在 `.input` 里，于是 `::-webkit-inner-spin-button` 的规则没命中 —— 截图里它就带着一个
     深色的小方块（系统步进器）。选择器要落到 `input[type="number"]` 本身，而不是某个 class。
+
+94. **错误响应把内部字符串原样发给客户端（顺带把错误页的状态码写成 200）**：
+    以前是 `type ApiError = (StatusCode, String)`，那个 String 直接进响应体 ——
+    用户看到 `没有这个文件: /Users/xxx/plugins/y`、`(os error 13)`，既看不懂也把本机路径泄了。
+    现在 `ApiError { status, code, public_msg, detail, ref_id }`：**detail 只进日志**，
+    500 有编号（`e-7f3a`）供对日志；浏览器（`Accept: text/html`）拿错误页，`curl` 拿 JSON。
+    第二条教训是写这一版时踩的：`(headers, body).into_response()` 默认 **200**，于是
+    「404 的页面配 200 的状态」—— 浏览器与探针都当它成功。守卫：
+    `web_tests::unknown_page_renders_the_error_page`（状态码 + 页面文案 + 不泄露）、
+    `unknown_api_path_stays_json_for_scripts`（脚本必须拿到 JSON）、
+    `internal_errors_hide_the_detail_but_keep_a_ref`（500 只有人话 + 编号）。
