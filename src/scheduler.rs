@@ -446,6 +446,13 @@ pub enum Cmd {
     Unload {
         name: String,
     },
+    /// 插件级「暂停 / 恢复」（第 167 轮）：不卸载，只是不再触发它的定时任务。
+    /// 落库（plugins.suspended），所以重启后仍记得。
+    SetSuspended {
+        name: String,
+        suspended: bool,
+        reply: oneshot::Sender<()>,
+    },
     RunNow {
         plugin: String,
         task: String,
@@ -562,6 +569,17 @@ impl Scheduler {
 
     pub async fn plugins(&self) -> Result<Vec<PluginView>, String> {
         self.call(|reply| Cmd::Plugins { reply }).await
+    }
+
+    /// 暂停 / 恢复一个插件的定时任务（不碰它的加载状态）。
+    pub async fn set_suspended(&self, name: &str, suspended: bool) -> Result<(), String> {
+        let name = name.to_string();
+        self.call(|reply| Cmd::SetSuspended {
+            name,
+            suspended,
+            reply,
+        })
+        .await
     }
 
     pub async fn load(&self, name: &str, source: String) -> Result<(), String> {
@@ -756,6 +774,9 @@ struct Inner {
     data_dir: std::path::PathBuf,
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
+    /// 被「暂停」的插件（第 167 轮）：定时任务一律不触发，但插件照样在、界面照样能开。
+    /// 与 plugins / tasks 无关 —— 暂停是调度层的事，不动任务自己的 enabled。
+    suspended: std::collections::HashSet<String>,
     web: std::collections::HashSet<String>,
     /// 侧栏入口：插件名 → 入口（第 139 轮）
     sidebar: std::collections::HashMap<String, NavEntry>,
@@ -815,6 +836,7 @@ pub fn start(
     let mut inner = Inner {
         data_dir,
         web: std::collections::HashSet::new(),
+        suspended: std::collections::HashSet::new(),
         sidebar: std::collections::HashMap::new(),
         web_q: std::collections::HashMap::new(),
         next_qid: 0,
@@ -1048,6 +1070,38 @@ impl Inner {
             }
             Cmd::SourceOf { name, reply } => {
                 let _ = reply.send(self.plugins.get(&name).map(|l| l.source.clone()));
+            }
+            Cmd::SetSuspended {
+                name,
+                suspended,
+                reply,
+            } => {
+                if suspended {
+                    self.suspended.insert(name.clone());
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Info,
+                        "已暂停：这个插件的定时任务不再触发（手动运行照旧）".to_string(),
+                    );
+                } else {
+                    self.suspended.remove(&name);
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Info,
+                        "已恢复：定时任务重新开始触发".to_string(),
+                    );
+                }
+                // 立刻把到点的任务对齐到下一拍：恢复后不会「补跑」暂停期间漏的那些。
+                let now = Local::now();
+                for i in 0..self.tasks.len() {
+                    if self.tasks[i].plugin == name && self.tasks[i].schedule.is_some() {
+                        self.tasks[i].realign(now);
+                        self.persist_task(i);
+                    }
+                }
+                let _ = reply.send(());
             }
             Cmd::Unload { name } => {
                 if let Some(l) = self.plugins.get(&name) {
@@ -1579,6 +1633,19 @@ impl Inner {
         );
     }
     async fn fire_due(&mut self, now: DateTime<Local>) {
+        // 插件被暂停：到点也不跑，而且**不攒落后**（否则暂停一小时会攒出几十条「该跑没跑」）。
+        // 直接把计划对齐到下一拍 —— 恢复后从下一拍开始，不补跑。
+        if !self.suspended.is_empty() {
+            for i in 0..self.tasks.len() {
+                if !self.suspended.contains(&self.tasks[i].plugin) {
+                    continue;
+                }
+                if self.tasks[i].schedule.is_some() && trigger_at(&self.tasks[i]) <= now {
+                    self.tasks[i].realign(now);
+                    self.persist_task(i);
+                }
+            }
+        }
         // 先记「该跑却跑不了」：计划已过点，但上一拍还没收尾（`in_flight`）或插件还在忙。
         // 这些拍会被跳过 —— 必须说出来，否则用户只会看到「有的整点任务没跑」，无从下手。
         for i in 0..self.tasks.len() {

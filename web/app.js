@@ -677,6 +677,8 @@ function renderPlugins() {
     const head = el('div', 'plugin-head');
     head.append(el('div', 'plugin-name', p.name));
     head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
+    // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
+    if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
     cardEl.append(head);
     const meta = el('div', 'plugin-meta');
     meta.append(el('span', '', mine.length + ' 个任务'));
@@ -1346,6 +1348,10 @@ async function showPlugin(name) {
             if (!window.confirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）')) return;
             act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
           })]),
+      // 暂停（第 167 轮）：不卸载，只是不再触发它的定时任务 —— 和上面的「停用」不是一回事。
+      ...((state.suspended || []).includes(name)
+        ? [mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))]
+        : [mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name))]),
       mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),
       mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
       mkOp('删除插件', () => deletePlugin(name), true),
@@ -2360,6 +2366,7 @@ async function refresh() {
     const data = await api('/api/state');
     state.plugins = data.plugins || [];
     state.disabled = data.disabled || [];
+  state.suspended = data.suspended || [];
     // 有文件、没禁用、也没加载起来的插件（带原因）：界面上要能说清为什么。
     state.failed = data.failed || [];
     await loadPluginFiles();

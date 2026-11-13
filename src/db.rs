@@ -135,6 +135,14 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     .map_err(|e| format!("建表失败: {e}"))?;
 
     // 后加的列都走这条：SQLite 没有 ADD COLUMN IF NOT EXISTS。
+    // 插件级「暂停」（第 167 轮）：不卸载，只是不再触发它的定时任务。
+    if !has_column(conn, "plugins", "suspended")? {
+        conn.execute(
+            "ALTER TABLE plugins ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("加 suspended 失败: {e}"))?;
+    }
     for (col, ddl) in [
         ("override_expr", "ALTER TABLE tasks ADD COLUMN override_expr TEXT"),
         ("summary", "ALTER TABLE tasks ADD COLUMN summary TEXT"),
@@ -160,6 +168,42 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool, String>
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     Ok(names.iter().any(|n| n == col))
+}
+
+/// 库里的「已暂停」插件名单（`plugins.suspended = 1»）。
+///
+/// 暂停 ≠ 停用：停用会卸载（`disable»），暂停只是**不触发它的定时任务**，
+/// 插件仍在、界面仍能打开、手动运行照旧能跑。重启后仍记得。
+pub async fn plugin_suspended_names(db: &Db) -> Vec<String> {
+    let rows = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT name FROM plugins WHERE suspended=1 ORDER BY name")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<String> = st
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await;
+    rows.unwrap_or_default()
+}
+
+/// 写「暂停」标记。用 upsert：这个插件可能还没在 `plugins» 表里留过行。
+pub async fn set_plugin_suspended(db: &Db, name: &str, suspended: bool) -> Result<(), String> {
+    let name = name.to_string();
+    db.call(move |c| {
+        c.execute(
+            "INSERT INTO plugins(name,path,enabled,suspended) VALUES(?1,'',1,?2)
+             ON CONFLICT(name) DO UPDATE SET suspended=excluded.suspended",
+            rusqlite::params![name, suspended as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// 库里的「已禁用」插件名单（`plugins.enabled = 0`）。

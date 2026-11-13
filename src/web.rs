@@ -512,6 +512,9 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/{name}/stop", post(plugin_stop))
         .route("/api/plugins/{name}/disable", post(plugin_disable))
         .route("/api/plugins/{name}/enable", post(plugin_enable))
+        // 暂停 / 恢复（第 167 轮）：不卸载，只是不再触发它的定时任务。
+        .route("/api/plugins/{name}/suspend", post(plugin_suspend))
+        .route("/api/plugins/{name}/resume", post(plugin_resume))
         .route("/api/tasks/{plugin}/{name}/run", post(task_run))
         .route("/api/tasks/{plugin}/{name}/pause", post(task_pause))
         .route("/api/tasks/{plugin}/{name}/resume", post(task_resume))
@@ -1304,6 +1307,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
         "disabled": crate::db::plugin_disabled_names(&st.db).await,
+        // 暂停（不卸载）：定时任务不触发，但插件在、界面能开、手动能跑。
+        "suspended": crate::db::plugin_suspended_names(&st.db).await,
         // 有文件、没禁用、但没加载起来：界面要能说清为什么，并给「重试」。
         "failed": failed_plugins(&st.load_errors),
         "tasks": tasks,
@@ -1558,6 +1563,51 @@ async fn scripts_upload(
         "zip": saved.zip,
         "scripts": added,
     })))
+}
+
+/// 暂停一个插件（第 167 轮）：**不卸载**，只是让调度器不再触发它的定时任务。
+///
+/// 与「停用」的区别（用户问过）：停用 = 卸载 + 重启后不加载（任务列表会消失）；
+/// 暂停 = 插件还在，任务照旧列在界面上、标「已暂停」，手动运行也照旧能跑。
+async fn plugin_suspend(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    safe_name(&name)?;
+    st.sched.set_suspended(&name, true).await.map_err(bad)?;
+    crate::db::set_plugin_suspended(&st.db, &name, true)
+        .await
+        .map_err(write_err)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("插件 {name} 已暂停：定时任务不再触发（重启后仍暂停）"),
+    );
+    Ok(Json(json!({ "ok": true, "name": name, "suspended": true })))
+}
+
+/// 恢复：把到点的任务对齐到下一拍，**不补跑**暂停期间漏掉的。
+async fn plugin_resume(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    safe_name(&name)?;
+    st.sched.set_suspended(&name, false).await.map_err(bad)?;
+    crate::db::set_plugin_suspended(&st.db, &name, false)
+        .await
+        .map_err(write_err)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("插件 {name} 已恢复：定时任务重新开始触发"),
+    );
+    Ok(Json(json!({ "ok": true, "name": name, "suspended": false })))
 }
 
 async fn plugin_disable(

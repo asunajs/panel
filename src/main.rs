@@ -186,6 +186,11 @@ async fn main() -> Result<(), String> {
         let db = db.clone();
         let errs = load_errors.clone();
         tokio::spawn(async move {
+            // 先把「暂停」名单装回调度器，**再**加载插件：反过来的话，插件注册完的
+            // 第一拍就能把「暂停中的任务」跑掉（第 167 轮的顺序坑）。
+            for name in crate::db::plugin_suspended_names(&db).await {
+                let _ = sched.set_suspended(&name, true).await;
+            }
             load_all(&plugins_dir_for_load, &sched, &log, &db, &errs).await;
         })
     };
