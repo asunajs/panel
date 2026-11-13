@@ -354,3 +354,20 @@
     现在 `PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR` 四个都写进 plist 的
     `EnvironmentVariables`（systemd 那边是 `Environment=`），安装时是什么就是什么，不再靠 cwd 猜。
     自查：`panel service print` 一眼就能看到四个目录对不对；改目录要重新 install。
+
+76. **跨设备 `rename` 一定失败（EXDEV 18）——「删除插件」于是必然报错，重启后插件又回来**：
+    3030 日常实例的插件目录在另一个卷上（`/Users/catlair/mobile` 是独立 APFS 卷），
+    数据目录在系统盘，`rename(plugins/x.js → data/trash/x.js)` 直接 `Cross-device link (os error 18)`。
+    更糟的是原代码**先**删库里的任务行、**再**搬文件：搬失败时文件还在、内存里的插件已卸、
+    重启后文件又被加载 —— 用户看到的是「删不掉」+「重启后又回去了」两个症状，其实同一个根因。
+    现在：①新增 `src/fsx.rs`（`move_path`：先试 rename，EXDEV 就复制成功后删源；目录递归复制，
+    符号链接按链接本身复制，不跟进去）；②删除的顺序改成**先搬文件，成功后再卸插件、删任务行**；
+    ③插件的 `<name>.webui/` 目录一起进回收站（只删 .js 会留孤儿文件）。
+    负例验过：把那条岔路关掉，同一个请求立刻回到 `Cross-device link (os error 18)` 且文件还在。
+    实测（插件在卷 A、数据在卷 B）：删除后两个条目都在 `data/trash/` 里，重启 readyz plugins=0。
+
+77. **提示条（toast）两个毛病一起犯：放屏幕底下、暗色下浅红底配白字看不清**：
+    用户原话「这个配色难以看清字」+「弹出内容应该放 top，人的习惯是看上而不是看下的」。
+    现在：`top: var(--toast-top)`（桌面 90px、≤620px 124px，让开 sticky 顶栏），动画改成从上落下；
+    错误提示的底色从 `--err` + `#fff` 改成 `--err` + `--bg`（主题反色），两套主题对比度都 ≥ 4.5。
+    守卫：`ui-check.mjs` 三条（提示条在视口上部 / 暗色对比度 ≥4.5 / 亮色对比度 ≥4.5，都是现算亮度比）。

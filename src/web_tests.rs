@@ -570,6 +570,9 @@ async fn plugin_create_refuses_an_existing_name_and_writes_a_template() {
 async fn plugin_delete_moves_the_file_into_trash() {
     let (app, plugins, data, _store) = setup_dirs("pdel").await;
     std::fs::write(plugins.join("gone.js"), "import host from 'panel:host';\n").unwrap();
+    // 界面目录也要跟着走：只删 .js 会留一堆孤儿文件（第 131 轮补）。
+    std::fs::create_dir_all(plugins.join("gone.webui")).unwrap();
+    std::fs::write(plugins.join("gone.webui/index.html"), "<h1>x</h1>").unwrap();
     let (status, body) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!plugins.join("gone.js").exists(), "原文件应当被移走");
@@ -578,8 +581,16 @@ async fn plugin_delete_moves_the_file_into_trash() {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].starts_with("gone-") && names[0].ends_with(".js"), "{names:?}");
+    assert!(!plugins.join("gone.webui").exists(), "界面目录也要跟着搬走");
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(
+        names.iter().any(|n| n.starts_with("gone-") && n.ends_with(".js")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("gone-") && n.ends_with(".webui")),
+        "{names:?}"
+    );
 
     // 再删一次：文件已经不在，仍然 200（幂等，别让界面卡在「删除失败」）
     let (status, _) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;

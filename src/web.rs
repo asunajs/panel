@@ -2422,6 +2422,8 @@ async fn plugin_delete(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let path = plugin_path(&st.plugins_dir, &name)?;
+    // 插件的界面目录（`<name>.webui/`）也跟着进回收站：只删 .js 会留一堆孤儿文件。
+    let webui = st.plugins_dir.join(format!("{name}.webui"));
     let trash = st.data_dir.join("trash");
     tokio::fs::create_dir_all(&trash)
         .await
@@ -2431,6 +2433,30 @@ async fn plugin_delete(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let dest = trash.join(format!("{name}-{stamp}.js"));
+    // **先把文件搬走**，再动内存和库。顺序反了就会出现「提示删除失败 / 重启后插件又回来」：
+    // 文件还在，下次启动自然又被加载（第 131 轮用户报的两个症状是同一个根因）。
+    // 另外 `rename` 跨设备会 EXDEV（插件目录在别的卷、数据目录在系统盘就是这种情况），
+    // 交给 fsx::move_path 走「复制 + 删除」。
+    let mut moved: Vec<String> = Vec::new();
+    match crate::fsx::move_path(&path, &dest).await {
+        Ok(()) => moved.push(dest.display().to_string()),
+        // 文件本来就没有：内存和库照旧要清，别让界面卡在「删除失败」。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(internal(format!("移走 {} 失败: {e}", path.display()))),
+    }
+    if tokio::fs::try_exists(&webui).await.unwrap_or(false) {
+        let wdest = trash.join(format!("{name}-{stamp}.webui"));
+        match crate::fsx::move_path(&webui, &wdest).await {
+            Ok(()) => moved.push(wdest.display().to_string()),
+            // 界面目录搬不动不该让整个删除失败：插件本体已经没了，留一条日志就够。
+            Err(e) => st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Warn,
+                format!("插件 {name} 已删除，但界面目录 {} 没搬进回收站: {e}", webui.display()),
+            ),
+        }
+    }
     st.sched.unload(&name);
     // 任务行跟着删：插件没了，这些行只会在库里堆垃圾（运行记录保留，那是历史）。
     {
@@ -2444,28 +2470,25 @@ async fn plugin_delete(
             })
             .await;
     }
-    match tokio::fs::rename(&path, &dest).await {
-        Ok(()) => {
-            st.log.emit(
-                "panel",
-                None,
-                crate::log::Level::Warn,
-                format!("插件 {name} 已删除（副本在 {}）", dest.display()),
-            );
-            Ok(Json(json!({
-                "ok": true,
-                "name": name,
-                "moved_to": dest.display().to_string(),
-            })))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // 文件本来就没有：卸载掉了也算成功，别让界面卡在「删除失败」。
-            Ok(Json(json!({ "ok": true, "name": name, "moved_to": null })))
-        }
-        Err(e) => Err(internal(format!("移走 {} 失败: {e}", path.display()))),
-    }
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Warn,
+        format!(
+            "插件 {name} 已删除（副本在 {}）",
+            if moved.is_empty() {
+                "（文件本来就不在）".to_string()
+            } else {
+                moved.join("、")
+            }
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "name": name,
+        "moved_to": moved.first().cloned(),
+    })))
 }
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigBody {

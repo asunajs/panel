@@ -532,6 +532,38 @@ async function main() {
   // position:absolute 找不到已定位的祖先 → 按文档顶部定位，页面一滚就滚出视口。
   // 判据用 offsetParent（= 定位祖先）而不是「滚动后还在不在」—— 数据集小时页面根本滚不动，
   // 那种断言会因为「没滚」而假通过/假失败。
+  // 提示条（第 131 轮，用户报「配色难以看清」+「应该放顶部」）：
+  // 位置要在视口上部（避开 sticky 顶栏），文字对比度要够 —— 两套主题都验。
+  await js("location.hash='#dashboard'");
+  await sleep(800);
+  await js("toast('对比度检查用的一条错误提示，顺便看看长文本换行', true)");
+  await sleep(300);
+  const toastInfo = JSON.parse(await js(
+    "JSON.stringify((()=>{const t=document.getElementById('toast');const r=t.getBoundingClientRect();" +
+    "const cs=getComputedStyle(t);" +
+    "const lum=(c)=>{const m=c.match(/[\\d.]+/g).map(Number).slice(0,3).map(v=>{v/=255;" +
+    "return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);});return 0.2126*m[0]+0.7152*m[1]+0.0722*m[2];};" +
+    "const a=lum(cs.color), b=lum(cs.backgroundColor);" +
+    "const ratio=(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);" +
+    "return {top:Math.round(r.top),vh:innerHeight,ratio:Math.round(ratio*10)/10," +
+    "fg:cs.color,bg:cs.backgroundColor};})())",
+  ));
+  check('提示条在视口上部（不在底部）', toastInfo.top >= 0 && toastInfo.top < toastInfo.vh / 3, JSON.stringify(toastInfo));
+  check('提示条文字对比度 ≥ 4.5（暗色主题）', toastInfo.ratio >= 4.5, 'ratio ' + toastInfo.ratio + ' ' + toastInfo.fg + ' on ' + toastInfo.bg);
+  await js("document.documentElement.setAttribute('data-theme','light')");
+  await sleep(250);
+  await js("toast('对比度检查用的一条错误提示，顺便看看长文本换行', true)");
+  await sleep(250);
+  const toastLight = JSON.parse(await js(
+    "JSON.stringify((()=>{const t=document.getElementById('toast');const cs=getComputedStyle(t);" +
+    "const lum=(c)=>{const m=c.match(/[\\d.]+/g).map(Number).slice(0,3).map(v=>{v/=255;" +
+    "return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);});return 0.2126*m[0]+0.7152*m[1]+0.0722*m[2];};" +
+    "const a=lum(cs.color), b=lum(cs.backgroundColor);" +
+    "return {ratio:Math.round(((Math.max(a,b)+0.05)/(Math.min(a,b)+0.05))*10)/10};})())",
+  ));
+  check('提示条文字对比度 ≥ 4.5（亮色主题）', toastLight.ratio >= 4.5, 'ratio ' + toastLight.ratio);
+  await js("document.documentElement.setAttribute('data-theme','dark')");
+  await sleep(200);
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
   await sleep(600);
   await js("document.getElementById('bell').click()");

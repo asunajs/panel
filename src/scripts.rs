@@ -336,7 +336,8 @@ impl Scripts {
             .await
             .map_err(|e| format!("建 trash 目录失败: {e}"))?;
         let dest = self.trash.join(format!("script-{name}-{}.js", now_ms()));
-        let moved = match tokio::fs::rename(&p, &dest).await {
+        // 跨设备时 rename 会 EXDEV：交给 fsx::move_path（复制 + 删除）。
+        let moved = match crate::fsx::move_path(&p, &dest).await {
             Ok(()) => Some(dest.display().to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("移走 {} 失败: {e}", p.display())),

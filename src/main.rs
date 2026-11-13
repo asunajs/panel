@@ -12,6 +12,7 @@ mod config_store;
 mod cron;
 mod db;
 mod engine;
+mod fsx;
 mod hostapi;
 mod log;
 mod scheduler;

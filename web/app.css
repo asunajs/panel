@@ -34,6 +34,8 @@
   --pad-control: 12px;
   --pad-control-sm: 11px;
   --sidebar-w: 236px;
+  /* 提示条距顶部：桌面让开 80px 的 sticky 顶栏 */
+  --toast-top: 90px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
           "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -430,10 +432,12 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- Toast ---------- */
 
 .toast {
-  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  /* 提示放**顶部**（第 131 轮）：人的习惯是往上找，放屏幕底下经常整场没被看见。
+     位置避开 sticky 顶栏（桌面 80px / 手机两行 115px），所以用变量按断点给。 */
+  position: fixed; left: 50%; top: var(--toast-top); bottom: auto; transform: translateX(-50%);
   z-index: 70; padding: 9px 14px; border-radius: 10px;
   background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: var(--shadow-md);
-  animation: rise .16s ease-out;
+  animation: toast-in .18s ease-out;
   /* 接口的错误文案可能很长（serde 的原话、带字段名的中文提示）。
      不限宽 + 不换行的话，这种 toast 会横着撑出视口、两头都被切掉 ——
      用户只看到中间半句，还不如不显示。 */
@@ -443,8 +447,10 @@ button, input, select { font: inherit; color: inherit; }
   text-align: left;
   line-height: 1.45;
 }
-.toast-err { background: var(--err); color: #fff; }
-@keyframes rise { from { transform: translate(-50%, 8px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+/* 错误提示原来是「浅红底 + 白字」：暗色主题下 --err 是 #d97a78，白字压上去几乎看不清
+   （用户报「这个配色难以看清字」）。改成用主题的反色字（--bg），两套主题都够对比。 */
+.toast-err { background: var(--err); color: var(--bg); border: 1px solid var(--fg); }
+@keyframes toast-in { from { transform: translate(-50%, -10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
 
 /* ---------- 焦点 / 动效 / 响应式 ---------- */
 
@@ -464,6 +470,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 @media (max-width: 620px) {
+  :root { --toast-top: 124px; } /* 手机顶栏折两行，115px */
   /* 窄屏顶栏折成两行：标题一行、操作一行，避免整页横向溢出 */
   .topbar { flex-wrap: wrap; row-gap: 10px; }
   .topbar-right { width: 100%; justify-content: flex-end; }
