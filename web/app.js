@@ -312,7 +312,16 @@ async function api(path, opt = {}) {
   if (resp.status === 401) throw new Unauthorized('需要令牌');
   if (!resp.ok) {
     const text = (await resp.text().catch(() => '')).trim();
-    throw new Error(text || ('HTTP ' + resp.status));
+    // 后端的错误体是 JSON（第 166 轮：code/error/ref）。直接显示整串 JSON
+    // 用户看到的是 {"code":"not_found",...} —— 取 error，并把 ref 带上。
+    let msg = text;
+    try {
+      const j = JSON.parse(text);
+      if (j && j.error) msg = j.error + (j.ref ? '（编号 ' + j.ref + '）' : '');
+    } catch (e) {
+      /* 不是 JSON 就用原文 */
+    }
+    throw new Error(msg || ('HTTP ' + resp.status));
   }
   const ct = resp.headers.get('content-type') || '';
   return ct.includes('json') ? resp.json() : resp.text();
@@ -1987,6 +1996,112 @@ async function retryNotify() {
   }
   renderNotifyTab();
 }
+/** 从 0.3.x 面板迁移：扫描 → 预览 → 一键（第 168 轮）。
+ *
+ * 判据都在后端（crate::migrate），这里只负责把三个数字摆出来让人看清再点。
+ * 界面上**不猜路径**：扫描扫不到就让用户自己填，填错也是后端报错。
+ */
+function migrateBox() {
+  const box = el('div', 'migrate-card');
+  box.append(el('h3', 'card-label', '从 0.3.x 面板迁移'));
+  box.append(el('p', 'settings-note',
+    '搬的是旧库 state 表里的插件状态（账号、定时计划、运行历史），可选连插件配置与脚本。' +
+    '写入前自动做一份快照；重复执行不会重复写。迁完**重启面板**才生效。'));
+
+  const row = el('div', 'actions migrate-row');
+  const input = el('input', 'input migrate-path');
+  input.type = 'text';
+  input.placeholder = '旧数据目录或 panel.db（留空＝自动扫描）';
+  const scanBtn = el('button', 'btn btn-sm', '扫描');
+  scanBtn.type = 'button';
+  row.append(input, scanBtn);
+  box.append(row);
+
+  const list = el('div', 'migrate-list');
+  box.append(list);
+
+  const line = (c) => {
+    const item = el('div', 'migrate-item');
+    const main = el('div', 'migrate-main');
+    main.append(el('div', 'migrate-path', c.path));
+    // 后端给的是 KB，humanBytes 吃字节 —— 直接传会把 532 KB 显示成「532 B」（第一次就错了）。
+    main.append(el('div', 'migrate-sub',
+      humanBytes((c.kb || 0) * 1024) + ' · ' + c.keys + ' 个键 · ' + c.accounts + ' 个号 · ' +
+      c.plans + ' 条计划 · ' + c.runs + ' 行运行记录'));
+    const acts = el('div', 'migrate-acts');
+    const pv = el('button', 'btn btn-sm', '预览');
+    pv.type = 'button';
+    pv.addEventListener('click', () => doPreview(c.path, item));
+    const go = el('button', 'btn btn-sm btn-primary', '迁移');
+    go.type = 'button';
+    go.addEventListener('click', () => doApply(c.path));
+    acts.append(pv, go);
+    item.append(main, acts);
+    return item;
+  };
+
+  scanBtn.addEventListener('click', async () => {
+    clear(list);
+    scanBtn.disabled = true;
+    try {
+      const q = input.value.trim() ? '?source=' + encodeURIComponent(input.value.trim()) : '';
+      const d = await api('/api/migrate/scan' + q);
+      const cs = d.candidates || [];
+      if (!cs.length) {
+        list.append(el('p', 'settings-note',
+          '没扫到。把旧面板的数据目录（里面有 panel.db）填到上面的框里再点扫描。'));
+        return;
+      }
+      for (const c of cs) list.append(line(c));
+    } catch (e) {
+      notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '扫描失败'), 'err');
+    } finally {
+      scanBtn.disabled = false;
+    }
+  });
+
+  async function doPreview(path, item) {
+    try {
+      const d = await api('/api/migrate/preview', { method: 'POST', body: { source: path } });
+      const p = d.preview || {};
+      const box2 = el('div', 'migrate-preview');
+      const ns = (p.namespaces || []).map((n) => n.name + ' ' + n.keys + ' 键').join('、');
+      box2.append(el('p', 'settings-note',
+        '会搬：state ' + (p.namespaces || []).reduce((a, n) => a + n.keys, 0) + ' 个键（' + (ns || '空') + '）· ' +
+        '运行记录 ' + p.runs_rows + ' 行（目标已有 ' + p.target_runs + '）· 账号 ' +
+        ((p.accounts || []).length) + ' 个' + ((p.orphan_bags || []).length ? '（另有 ' + p.orphan_bags.length + ' 个孤儿袋子默认不搬）' : '')));
+      if ((p.plans || []).length) {
+        const on = p.plans.filter((x) => x.enabled).length;
+        box2.append(el('p', 'settings-note warn-note',
+          '定时计划 ' + p.plans.length + ' 条（启用 ' + on + ' 条）—— 迁移后它们会按 cron 真的跑。' +
+          '不想带着就跑 CLI 加 --skip-schedules。'));
+      }
+      item.append(box2);
+    } catch (e) {
+      notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '预览失败'), 'err');
+    }
+  }
+
+  async function doApply(path) {
+    if (!window.confirm('把这个旧面板的状态搬进当前面板？\n写入前会自动快照；重复执行不会重复写。\n迁完要重启面板才生效。')) return;
+    try {
+      const d = await api('/api/migrate/apply', { method: 'POST', body: { source: path } });
+      const parts = [
+        'state ' + d.state_keys + ' 个键',
+        '运行记录 ' + d.runs_rows + ' 行',
+      ];
+      if (d.plugin_data_files) parts.push('插件配置 ' + d.plugin_data_files + ' 个文件');
+      if (d.scripts_files) parts.push('脚本 ' + d.scripts_files + ' 个文件');
+      if (d.adopted_token) parts.push('旧令牌已接过');
+      notify('迁移完成：' + parts.join('、') + (d.snapshot ? '（快照 ' + d.snapshot.split('/').pop() + '）' : '') + '。重启面板后生效', 'ok');
+    } catch (e) {
+      notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '迁移失败'), 'err');
+    }
+  }
+
+  return box;
+}
+
 function renderSettings() {
   const cfg = state.config;
   const info = $("settings-info");
@@ -2065,15 +2180,10 @@ function renderSettings() {
         "panel-llrt backup --out 备份.bk --with-db。恢复只增/覆盖，不删除。",
     ),
   );
-  // 0.3.x → 0.4.x：插件状态在旧库的 state 表里，界面上搬不了（要停面板、要写库）。
-  // 所以这里**只指路不给按钮** —— 一个点了只会失败的按钮比没有更糟。
-  const mig = el("p", "settings-note migrate-note");
-  mig.append(
-    "从 0.3.x 面板搬插件状态（账号、计划、运行历史）：停面板后在终端跑 ",
-    el("code", "", "panel migrate from <旧数据目录>"),
-    "（不加参数只预览，加 --apply 才写，写前自动快照）。迁完重启面板。",
-  );
-  dat.append(mig);
+  // 从 0.3.x 迁移（第 168 轮）：以前这里只指路不给按钮，理由是「要停面板、要写库」。
+  // 现在后端有了 scan / preview / apply，界面上就能真做，而且写前自动快照。
+  dat.append(migrateBox());
+
   // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**（第 24 轮用户抓到）。
   // 这里改成 strong，长句里的命令也用 code 包起来，别让它糊成一片。
   const plain = el("p", "settings-note backup-note");

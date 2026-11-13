@@ -466,6 +466,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/config", get(api_config).put(api_config_save))
         .route("/api/config/reload", post(api_config_reload))
         .route("/api/plugins/files", get(plugin_files))
+        // 迁移（第 168 轮）：scan → preview → apply，与 CLI 同一份实现
+        .route("/api/migrate/scan", get(api_migrate_scan))
+        .route("/api/migrate/preview", post(api_migrate_preview))
+        .route("/api/migrate/apply", post(api_migrate_apply))
         // 重启进程：改了环境变量（PANEL_TOKEN / PANEL_BIND）才需要。
         .route("/api/restart", post(api_restart))
         // 上传：单文件或 zip。body 是**原始字节**（不走 multipart：浏览器端
@@ -1608,6 +1612,115 @@ async fn plugin_resume(
         format!("插件 {name} 已恢复：定时任务重新开始触发"),
     );
     Ok(Json(json!({ "ok": true, "name": name, "suspended": false })))
+}
+
+
+// ── 迁移（第 168 轮）──
+//
+// 与 CLI 同一份实现（crate::migrate），界面只负责「发现 → 预览 → 一键」。
+// 只有 apply 会写库，且写完要重启面板才生效（插件加载时读 state 表）。
+
+#[derive(serde::Deserialize)]
+struct MigrateScanQ {
+    source: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct MigratePreviewB {
+    source: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MigrateApplyB {
+    source: String,
+    only: Option<String>,
+    #[serde(default)]
+    skip_schedules: bool,
+    #[serde(default)]
+    with_orphan_bags: bool,
+    #[serde(default)]
+    with_plugin_data: bool,
+    #[serde(default)]
+    with_scripts: bool,
+    #[serde(default)]
+    adopt_token: bool,
+}
+
+fn migrate_target(st: &AppState) -> std::path::PathBuf {
+    st.data_dir.join("panel.db")
+}
+
+/// `GET /api/migrate/scan» —— 扫候选旧数据目录（只读，不写任何东西）。
+async fn api_migrate_scan(
+    State(_st): State<AppState>,
+    QueryArgs(q): QueryArgs<MigrateScanQ>,
+) -> Result<Json<Value>, ApiError> {
+    let hint = q.source.as_deref().map(std::path::Path::new);
+    let list = crate::migrate::discover(hint);
+    Ok(Json(json!({ "ok": true, "candidates": list })))
+}
+
+/// `POST /api/migrate/preview» —— 读一遍来源库，把「会搬什么」摊出来（不写）。
+async fn api_migrate_preview(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(b): JsonBody<MigratePreviewB>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let target = migrate_target(&st);
+    let p = tokio::task::spawn_blocking(move || crate::migrate::preview(&b.source, &target))
+        .await
+        .map_err(|e| internal(format!("预览线程挂了: {e}")))?
+        .map_err(bad)?;
+    Ok(Json(json!({ "ok": true, "preview": p })))
+}
+
+/// `POST /api/migrate/apply» —— 真写。写完提示重启。
+async fn api_migrate_apply(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(b): JsonBody<MigrateApplyB>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let target = migrate_target(&st);
+    let opts = crate::migrate::Opts {
+        only: b.only.clone(),
+        with_orphan_bags: b.with_orphan_bags,
+        skip_schedules: b.skip_schedules,
+        with_plugin_data: b.with_plugin_data,
+        with_scripts: b.with_scripts,
+        adopt_token: b.adopt_token,
+    };
+    let source = b.source.clone();
+    let applied = tokio::task::spawn_blocking(move || crate::migrate::apply(&source, &target, &opts))
+        .await
+        .map_err(|e| internal(format!("迁移线程挂了: {e}")))?
+        .map_err(write_err)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "迁移完成：state {} 键、运行记录 {} 行、插件配置 {} 个文件、脚本 {} 个文件{}。重启面板后生效",
+            applied.state_keys,
+            applied.runs_rows,
+            applied.plugin_data_files,
+            applied.scripts_files,
+            if applied.adopted_token { "、已接过旧令牌" } else { "" }
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "state_keys": applied.state_keys,
+        "runs_rows": applied.runs_rows,
+        "runs_seen": applied.runs_seen,
+        "skipped_orphans": applied.skipped_orphans,
+        "plugin_data_files": applied.plugin_data_files,
+        "scripts_files": applied.scripts_files,
+        "adopted_token": applied.adopted_token,
+        "snapshot": applied.snapshot.map(|p| p.display().to_string()),
+        "restart_required": true,
+    })))
 }
 
 async fn plugin_disable(

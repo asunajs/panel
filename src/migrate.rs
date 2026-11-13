@@ -60,6 +60,146 @@ pub fn resolve_source(from: &str) -> Result<PathBuf, String> {
     Err(format!("路径不存在: {}", p.display()))
 }
 
+
+// ── 自动发现（第 168 轮）────────────────────────────────────────────────────
+//
+// 用户的真实痛点不是「迁移算法不对」，而是**得自己知道旧库在哪**。所以这里扫一圈
+// 常见位置，按「有 state 表 + 有 mcloud 账号」打分，把候选按可信度排出来，
+// 命令行零参数与界面「扫描」按钮都吃这一份。
+
+/// 一个「可能是旧面板数据目录」的候选。字段都是给人看的读数，不含任何键值内容。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Candidate {
+    /// 数据目录（给人看的绝对路径）
+    pub path: String,
+    /// 库文件
+    pub db: String,
+    pub kb: u64,
+    /// state 表里的键数
+    pub keys: usize,
+    /// 账号表里的号数
+    pub accounts: usize,
+    /// 定时计划数
+    pub plans: usize,
+    /// 运行历史行数
+    pub runs: usize,
+    /// 打分（越大越像「真的旧面板数据」）
+    pub score: i64,
+}
+
+fn json_len(raw: Option<String>) -> usize {
+    let Some(s) = raw else { return 0 };
+    match serde_json::from_str::<serde_json::Value>(&s) {
+        Ok(serde_json::Value::Array(a)) => a.len(),
+        Ok(serde_json::Value::Object(o)) => o.len(),
+        _ => 0,
+    }
+}
+
+/// 一个目录「像不像旧面板数据」——认不出就给 None。
+///
+/// 判据：有 state 表（0.3 面板把插件状态写在里面）。panel.db / panel.sqlite / mc.sqlite
+/// 三种名字都认，因为历史版本换过。
+fn probe(dir: &Path) -> Option<Candidate> {
+    let (data_dir, db) = if dir.is_file() {
+        (dir.parent()?.to_path_buf(), dir.to_path_buf())
+    } else {
+        let found = ["panel.db", "panel.sqlite", "mc.sqlite"]
+            .iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.is_file())?;
+        (dir.to_path_buf(), found)
+    };
+    let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    if !has_table(&conn, "state") {
+        return None;
+    }
+    let keys = count_rows(&conn, "state");
+    let runs = if has_table(&conn, "mcloud_runs") {
+        count_rows(&conn, "mcloud_runs")
+    } else {
+        0
+    };
+    let get = |k: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM state WHERE key=?1", [k], |r| r.get(0))
+            .ok()
+    };
+    let accounts = json_len(get("mcloud.accounts"));
+    let plans = json_len(get("mcloud.exchange.plans"));
+    // 打分：有账号 > 有键 > 有计划 > 有运行历史，再加「键数」一档，
+    // 免得空库/半成品排在真库前面。
+    let score = (if accounts > 0 { 100 } else { 0 })
+        + (if keys > 0 { 50 } else { 0 })
+        + (if plans > 0 { 20 } else { 0 })
+        + (if runs > 0 { 10 } else { 0 })
+        + (keys.min(40) as i64);
+    Some(Candidate {
+        path: data_dir.display().to_string(),
+        db: db.display().to_string(),
+        kb: kb(&db),
+        keys,
+        accounts,
+        plans,
+        runs,
+        score,
+    })
+}
+
+/// 扫候选目录。给了 extra 就**只**验它一个（那是用户点名的路径，不该混进别的）；
+/// 不给才去扫常见位置。
+pub fn discover(extra: Option<&Path>) -> Vec<Candidate> {
+    if let Some(p) = extra {
+        return probe(p).into_iter().collect();
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(v) = std::env::var("PANEL_LEGACY_DIR") {
+        if !v.trim().is_empty() {
+            dirs.push(PathBuf::from(v));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.clone());
+        dirs.push(cwd.join("data"));
+        if let Some(up) = cwd.parent() {
+            dirs.push(up.join("data"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        for name in [".panel", "panel", "panel-data", ".config/panel"] {
+            dirs.push(home.join(name));
+        }
+        // ~/* 与 ~/*/data：旧面板常见布局是 <项目>/data/panel.db
+        if let Ok(rd) = std::fs::read_dir(&home) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    dirs.push(p.clone());
+                    dirs.push(p.join("data"));
+                }
+            }
+        }
+        if let Ok(rd) = std::fs::read_dir(home.join("mobile/workspace")) {
+            for e in rd.flatten() {
+                dirs.push(e.path().join("data"));
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Candidate> = Vec::new();
+    for dir in dirs {
+        if let Some(c) = probe(&dir) {
+            if seen.insert(c.db.clone()) {
+                out.push(c);
+            }
+        }
+    }
+    out.sort_by(|a, b| b.score.cmp(&a.score).then(b.keys.cmp(&a.keys)));
+    out.truncate(8);
+    out
+}
+
 fn kb(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len() / 1024).unwrap_or(0)
 }
@@ -75,7 +215,7 @@ fn has_table(conn: &Connection, name: &str) -> bool {
 }
 
 /// 一次预览的读数。字段都是给人看的数字，不含任何键值内容。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct Preview {
     pub source: PathBuf,
     pub source_kb: u64,
@@ -95,7 +235,7 @@ pub struct Preview {
 }
 
 /// 一条计划里给人看的几格。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct PlanBrief {
     pub name: String,
     pub account: String,
@@ -106,7 +246,7 @@ pub struct PlanBrief {
     pub until: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct NsStat {
     pub name: String,
     pub keys: usize,
@@ -279,6 +419,12 @@ pub struct Opts {
     pub with_orphan_bags: bool,
     /// 不搬定时抢兑计划（plans / plan.runs / schedule.*）—— 迁完不会自己开抢
     pub skip_schedules: bool,
+    /// 连 plugin-data/<插件>/config.json 一起搬（第 168 轮）
+    pub with_plugin_data: bool,
+    /// 连 scripts/ 目录一起搬
+    pub with_scripts: bool,
+    /// 连旧 auth.json 一起接过来（默认不导：换令牌是大事，得显式要）
+    pub adopt_token: bool,
 }
 
 /// 一次 apply 的结果。
@@ -291,6 +437,12 @@ pub struct Applied {
     /// 来源里读到的运行历史行数（与上者之差 = 完全重复的行，已合并）
     pub runs_seen: usize,
     pub skipped_orphans: usize,
+    /// 搬过去的 plugin-data 文件数
+    pub plugin_data_files: usize,
+    /// 搬过去的 scripts 文件数
+    pub scripts_files: usize,
+    /// 是否接过了旧令牌
+    pub adopted_token: bool,
 }
 
 /// 算不算「定时抢兑」那套键：计划表、每计划的已跑次数、以及老的单条计划配置。
@@ -298,6 +450,66 @@ fn is_schedule_key(key: &str) -> bool {
     key == "mcloud.exchange.plans"
         || key == "mcloud.exchange.plan.runs"
         || key.starts_with("mcloud.exchange.schedule.")
+}
+
+
+/// 递归拷目录：只走普通目录，符号链接跳过（旧数据目录里可能有）。
+fn copy_tree(src: &Path, dst: &Path) -> Result<usize, String> {
+    if !src.is_dir() {
+        return Ok(0);
+    }
+    let mut n = 0usize;
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        std::fs::create_dir_all(&to).map_err(|e| format!("建 {} 失败: {e}", to.display()))?;
+        let rd = std::fs::read_dir(&from).map_err(|e| format!("读 {} 失败: {e}", from.display()))?;
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let target = to.join(e.file_name());
+            if ft.is_dir() {
+                stack.push((p, target));
+            } else if ft.is_file() {
+                std::fs::copy(&p, &target)
+                    .map_err(|e| format!("拷 {} 失败: {e}", p.display()))?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+/// 把库里之外的东西一起搬：plugin-data / scripts / auth.json。**只增不删**。
+fn copy_extras(source_dir: &Path, target_dir: &Path, opts: &Opts) -> Result<(usize, usize, bool), String> {
+    let mut files = 0usize;
+    let mut scripts = 0usize;
+    let mut token = false;
+    if opts.with_plugin_data {
+        files = copy_tree(&source_dir.join("plugin-data"), &target_dir.join("plugin-data"))?;
+    }
+    if opts.with_scripts {
+        scripts = copy_tree(&source_dir.join("scripts"), &target_dir.join("scripts"))?;
+    }
+    if opts.adopt_token {
+        let from = source_dir.join("auth.json");
+        let to = target_dir.join("auth.json");
+        // 目标已经有凭据就不覆盖：那条会把用户刚设的令牌静默换掉。
+        if from.is_file() && !to.is_file() {
+            std::fs::create_dir_all(target_dir)
+                .map_err(|e| format!("建 {} 失败: {e}", target_dir.display()))?;
+            std::fs::copy(&from, &to).map_err(|e| format!("拷 auth.json 失败: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600));
+            }
+            token = true;
+        }
+    }
+    Ok((files, scripts, token))
 }
 
 fn snapshot(conn: &Connection, target_db: &Path) -> Result<PathBuf, String> {
@@ -446,18 +658,30 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
         tx.commit().map_err(|e| format!("提交失败: {e}"))?;
     }
 
+    // 库里之外的东西（plugin-data / scripts / auth.json）在事务之后搬：
+    // 它们是文件，跟 SQLite 事务没关系，失败了也不该回滚已经写好的状态。
+    let source_dir = p.source.parent().unwrap_or_else(|| Path::new(""));
+    let target_dir = target_db.parent().unwrap_or_else(|| Path::new(""));
+    let (plugin_data_files, scripts_files, adopted_token) =
+        copy_extras(source_dir, target_dir, opts)?;
+
     Ok(Applied {
         snapshot: snapshot_path,
         state_keys,
         runs_rows,
         runs_seen,
         skipped_orphans,
+        plugin_data_files,
+        scripts_files,
+        adopted_token,
     })
 }
 
 fn usage() -> String {
-    "用法：panel migrate from <0.3.x 的数据目录或 panel.db> [--apply] [--only <命名空间>] \
-     [--data-dir <0.4.x 数据目录>] [--with-orphan-bags] [--skip-schedules]"
+    "用法：panel migrate [<0.3.x 的数据目录或 panel.db>] [--apply] [--only <命名空间>] \
+     [--data-dir <0.4.x 数据目录>] [--with-orphan-bags] [--skip-schedules] \
+     [--with-plugin-data] [--with-scripts] [--adopt-token]\n\
+     不给来源路径时会**自动扫描**常见位置（也可以设 PANEL_LEGACY_DIR）。"
         .to_string()
 }
 
@@ -471,25 +695,33 @@ fn human(n: usize) -> String {
     }
 }
 
-/// CLI 入口：panel migrate from ...
+/// CLI 入口：`panel migrate [<来源>]»。不给来源就自动扫描。
 pub fn run(args: &[String]) -> Result<(), String> {
-    if args.first().map(|s| s.as_str()) != Some("from") {
-        return Err(usage());
-    }
     let mut from: Option<String> = None;
     let mut do_apply = false;
     let mut only: Option<String> = None;
     let mut data_dir: Option<String> = None;
     let mut with_orphans = false;
     let mut skip_schedules = false;
-    let mut i = 1;
+    let mut with_plugin_data = false;
+    let mut with_scripts = false;
+    let mut adopt_token = false;
+    // 兼容旧写法 `panel migrate from <路径>»
+    let mut i = usize::from(args.first().map(|s| s.as_str()) == Some("from"));
     while i < args.len() {
         match args[i].as_str() {
             "--apply" => do_apply = true,
             "--with-orphan-bags" => with_orphans = true,
             "--skip-schedules" => skip_schedules = true,
+            "--with-plugin-data" => with_plugin_data = true,
+            "--with-scripts" => with_scripts = true,
+            "--adopt-token" => adopt_token = true,
             "--only" => {
                 only = Some(args.get(i + 1).cloned().ok_or("--only 缺一个值（例如 --only mcloud）")?);
+                i += 1;
+            }
+            "--source" | "--from" => {
+                from = Some(args.get(i + 1).cloned().ok_or("--source 缺一个值")?);
                 i += 1;
             }
             "--data-dir" => {
@@ -508,11 +740,44 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         i += 1;
     }
-    let from = from.ok_or_else(usage)?;
     let data_dir = data_dir
         .or_else(|| std::env::var("PANEL_DATA_DIR").ok())
         .unwrap_or_else(|| "data".to_string());
     let target = PathBuf::from(&data_dir).join("panel.db");
+
+    // 不给来源就扫一圈：用户的痛点是「我哪知道旧库在哪」，不是「迁移算法不对」。
+    let from = match from {
+        Some(f) => f,
+        None => {
+            let cands = discover(None);
+            if cands.is_empty() {
+                return Err(format!(
+                    "没找到旧面板的数据目录。把路径直接传进来：panel migrate <目录>\n{}",
+                    usage()
+                ));
+            }
+            println!("扫描到 {} 个候选（按可信度排）：", cands.len());
+            for (n, c) in cands.iter().enumerate() {
+                println!(
+                    "  {}. {}  {} · {} 个键 · {} 个号 · {} 条计划 · {} 行运行记录",
+                    n + 1,
+                    c.path,
+                    human(c.kb as usize * 1024),
+                    c.keys,
+                    c.accounts,
+                    c.plans,
+                    c.runs
+                );
+            }
+            println!();
+            println!("先用最像的那个：{}", cands[0].path);
+            if cands.len() > 1 {
+                println!("（不是它就把路径直接传给 panel migrate <目录>）");
+            }
+            println!();
+            cands[0].path.clone()
+        }
+    };
 
     let p = preview(&from, &target)?;
     println!("来源  {}（{}）", p.source.display(), human(p.source_kb as usize * 1024));
@@ -579,6 +844,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         only: only.clone(),
         with_orphan_bags: with_orphans,
         skip_schedules,
+        with_plugin_data,
+        with_scripts,
+        adopt_token,
     };
     let a = apply(&from, &target, &opts)?;
     println!();

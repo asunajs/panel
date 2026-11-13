@@ -289,3 +289,51 @@ fn refuses_a_source_without_state_table() {
     let err = preview(d.to_str().unwrap(), &d.join("t.db")).unwrap_err();
     assert!(err.contains("state"), "错误里要说清是缺 state 表: {err}");
 }
+
+/// 自动发现：给定一个「旧面板数据目录」，discover 要认出它并给出读数（第 168 轮）。
+#[test]
+fn discover_finds_a_legacy_data_dir() {
+    let d = std::env::temp_dir().join(format!("panel-mig-discover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let db = d.join("panel.db");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch(
+        "CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO state VALUES ('mcloud.accounts', ?1, '2026-01-01')",
+        [r#"["a","b"]"#],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO state VALUES ('mcloud.exchange.plans', ?1, '2026-01-01')",
+        [r#"[{"name":"x"}]"#],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO state VALUES ('mcloud.acct.a', '{}', '2026-01-01')",
+        [],
+    )
+    .unwrap();
+    drop(c);
+
+    let list = discover(Some(&d));
+    assert_eq!(list.len(), 1, "给了明确目录就该只出一个候选: {list:?}");
+    let c0 = &list[0];
+    assert_eq!(c0.keys, 3);
+    assert_eq!(c0.accounts, 2);
+    assert_eq!(c0.plans, 1);
+    assert!(c0.score >= 150, "有账号有键的计划库该排在前面: {}", c0.score);
+
+    // 没有 state 表的库不该被认成候选（空目录也不会 panic）
+    let empty = std::env::temp_dir().join(format!("panel-mig-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&empty);
+    std::fs::create_dir_all(&empty).unwrap();
+    Connection::open(empty.join("panel.db")).unwrap();
+    assert!(discover(Some(&empty)).is_empty());
+
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&empty);
+}

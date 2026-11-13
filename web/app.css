@@ -1397,3 +1397,26 @@ select option { background: var(--surface); color: var(--fg); }
   flex-wrap: wrap;
 }
 
+/* ── 迁移卡片（第 168 轮）── */
+.migrate-card {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.migrate-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.migrate-path { flex: 1 1 260px; min-width: 200px; font-family: var(--mono); font-size: 12px; }
+.migrate-list { display: flex; flex-direction: column; gap: 8px; }
+.migrate-item {
+  display: flex; gap: 10px; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.migrate-main { min-width: 0; flex: 1 1 320px; }
+.migrate-path { font-family: var(--mono); font-size: 12px; color: var(--fg); word-break: break-all; }
+.migrate-sub { margin-top: 2px; font-size: 12px; color: var(--fg-2); }
+.migrate-acts { display: flex; gap: 6px; }
+.migrate-preview { flex: 1 1 100%; }
+.warn-note { color: var(--warn); }
