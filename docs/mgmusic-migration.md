@@ -111,8 +111,8 @@ warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugi
 
 | 项 | 期望 | 实测 |
 |---|---|---|
-| 加载 | 有插件、有界面、4 条任务 | `has_web:true, tasks:4, nav:{title:"咪咕音乐",order:80}`，`failed:[]` |
-| 任务形状 | daily 定时、其余手动 | daily `manual:false cron:"0 5 0,12,22 * * *" budget:120000`；sign/comment/report `manual:true` |
+| 加载 | 有插件、有界面、1 条任务 | `has_web:true, tasks:1, nav:{title:"咪咕音乐",order:80}`，`failed:[]` |
+| 任务条数 | **只有一条** | `[(daily, '0 5 0,12,22 * * *', manual:false)]`，budget 120000（老版会多出 sign/comment/report 三行手动任务，已去掉，见 §9） |
 | 播种（先放文件） | 账号逐字段搬过来 | 老 `config.json`（1387 B）→ `devices=2`；两个 device 的 `ce/uid/deviceid` 与源文件**逐字段相同**（sha256 前 12 位 `a333509f547e` / `ff19f6a731f6`）；日志「已从 plugin-data/mgmusic/config.json 播种配置：2 个设备」 |
 | 补播种（次序错） | 自动补救 + 告警 | 先启动（0 设备）、后放文件、重启 → `devices=2` + 上面那条 warn |
 | 删光账号不复活 | 重启后仍 0 | `POST config {devices:[]}` → 重启 → `devices=0`（`mgmusic.seed_marker` 挡住） |
@@ -228,3 +228,17 @@ deviceid 改成「同一手机号沿用旧值，没有才新生成」——效�
 
 留了一个兼容：`sourceLabel()` 仍认 `macos-app` / `app-account.json` 这两个历史 source 值
 （老配置里可能带着），只是不会再产生新值。
+## 9. 任务只有一条（2026-11-13 用户指出）
+
+原话：**「咪咕音乐应该只有一个每日任务才对啊」**。
+
+老版 v0.3.4 里除了 `register_cron('daily', …)` 还有 `register_handler('sign'/'comment'/'report')`。
+0.4.x 把每个 handler 都变成任务页上的一行「手动任务」⇒ 插件出现 4 行，而其中三行本来只是按钮。
+
+现在只注册 `daily`（cron + 同名 handler）。签到 / 评论 / 补报这三个动作**只走 HTTP 路由**
+（插件页的按钮打 `POST /plugins/mgmusic/api/{sign,comment,report}`）——入口没少，任务表干净了。
+
+代价写在这儿：不能在面板「任务」页手动派发这三件事，要手动就去插件页点按钮。
+
+读数（8805，真配置）：`/api/state` 里 mgmusic 的 `tasks` = `[('daily','0 5 0,12,22 * * *',manual=false)]`；
+三个路由仍 200（当天已做过的会回「今日已签/今日已完成，跳过」）。

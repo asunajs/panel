@@ -29,11 +29,14 @@
 //      URL（`/plugins/mgmusic/api/*`）与 JSON 载荷形状**保持老面板原样**，前端不用改。
 //      注意 WebUI 请求和 cron 共用同一个 busy 锁、插件侧预算是 30s：界面上的「立即跑一次」
 //      该打面板任务接口 `POST /api/tasks/mgmusic/daily/run`，别打本插件的 `/run`（只作兼容保留）。
-//   5. **cron/handler**：`register_cron('daily', '0 5 0,12,22 * * *', 120000)`（6 段带秒）。
+//   5. **任务只有一条**：`register_cron('daily', '0 5 0,12,22 * * *', 120000)`（6 段带秒）
+//      + 同名的 `register_handler('daily', …)`（新面板的 cron 只登记调度、不绑函数）。
+//      老版的 sign / comment / report 三个 handler **不注册成任务**了 —— 它们在任务页会变成
+//      三行多余的手动任务；现在只走 HTTP 路由（界面按钮打 /plugins/mgmusic/api/{sign,comment,report}）。
 //      摘要不再走 opts（新 opts 只认 params/lead_ms，塞 summary 会被拒），改用
 //      `host.set_job_summary('daily', …)`；⚠ 这个 op **不能在加载期 await**（那时任务还没进
 //      调度器，会抛「没有这个任务: mgmusic/daily」并把整个加载搞挂），所以在 runDaily 进来的
-//      第一件事设（cron 自动跑和手动跑都走这条路）。handler 名（sign / comment / report）不变。
+//      第一件事设（cron 自动跑和手动跑都走这条路）。
 //   6. **nav**：`register_nav` → `await host.sidebar({ title: '咪咕音乐', order: 80 })`；
 //      `worker_hint('exclusive')` 删掉（新面板一插件一 runtime）。
 //   7. **定时器**：新面板 `setInterval` 直接抛错、`setTimeout` 上限 5000ms。老代码只用
@@ -2115,25 +2118,13 @@ await host.register_handler('daily', function () {
 // 所以描述型摘要放到 daily 跑起来的第一秒设（见 runDaily 里的 DAILY_SUMMARY），
 // 之后由每次运行结束时的结果摘要覆盖 —— 落库，重载/重启都留住。
 
-// 三个手动 handler，名字与 v0.3.4 一致（面板任务接口按名字派发）。
-await host.register_handler('sign', function () {
-    const r = signAll();
-    if (!r.ok) throw new Error('签到有失败，详见插件日志');
-    return r;
-});
-
-await host.register_handler('comment', function () {
-    const r = commentAll();
-    if (!r.ok) throw new Error('评论有失败，详见插件日志');
-    return r;
-});
-
-await host.register_handler('report', function () {
-    const cfg = loadConfig();
-    const r = reportAll(cfg.report_ms);
-    if (!r.ok) throw new Error('补报有失败，详见插件日志');
-    return r;
-});
+// ⚠ **只登记一条任务**（用户 2026-11-13 指出：「咪咕音乐应该只有一个每日任务才对」）。
+//
+// 老版（v0.3.4）除了 daily 还 register_handler('sign'/'comment'/'report')，那在新面板里会
+// 各变成任务页上的一行「手动任务」—— 于是插件有 4 行，而其中三行本来只是按钮。
+// 现在这三个动作只走插件自己的 HTTP 路由（界面的「签到 / 评论 / 补报」就是打
+// POST /plugins/mgmusic/api/{sign,comment,report}），任务表里保持**只有 daily 一条**。
+// 代价：不能在面板「任务」页手动派发这三件事 —— 要手动就去插件页点按钮（那本来就是入口）。
 
 // ── 加载日志（老版的启动自述；config() 换成 state，其余不变）。
 try {
