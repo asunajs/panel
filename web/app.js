@@ -1804,7 +1804,10 @@ async function openPluginSource(name) {
   $("src-meta").textContent = "读取中…";
   try {
     const d = await api("/api/plugins/" + encodeURIComponent(name) + "/source");
-    ta.value = d.source;
+    // 高亮 + 行号（第 173 轮）：textarea 管编辑，下面的 pre 管上色，滚动同步。
+    const hl = window.PanelHL ? window.PanelHL.attach(ta, { lang: 'js' }) : null;
+    if (hl) hl.setValue(d.source);
+    else ta.value = d.source;
     $("src-meta").textContent =
       d.path + " · " + humanBytes(d.bytes) + (d.has_backup ? " · 有上一版备份" : "");
   } catch (e) {

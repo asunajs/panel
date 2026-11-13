@@ -751,6 +751,59 @@ async function main() {
     "return cs.appearance;})()"
   );
   check('预算输入框没有原生步进器（appearance: textfield）', budgetAppearance === 'textfield', String(budgetAppearance));
+  // 源码编辑器：行号 + 高亮 + 两层对齐（第 173 轮）
+  await js("location.hash = '#plugins'");
+  await sleep(600);
+  // 种子插件就叫 seed（不要去猜 state.plugins[0]：前面的检查会把它弄空）
+  const srcName = await js(
+    "(async () => { if (typeof openPluginSource !== 'function') return 'no-fn';" +
+    " await openPluginSource('seed'); return 'seed'; })()"
+  );
+  // 等源码真的读回来并上色（种子插件可能只有一行，但一定会有 token）
+  try {
+    await waitFor(async () => (await js("document.querySelectorAll('#src-hl span').length")) > 0, 4000, '源码高亮');
+  } catch (e) {
+    /* 下面的断言会把它报出来 */
+  }
+  const ed = JSON.parse(await js(
+    "JSON.stringify((() => { const ta = document.querySelector('#src-text');" +
+    " const g = document.querySelector('#src-gutter'); const hl = document.querySelector('#src-hl');" +
+    " if (!ta || !g || !hl) return { missing: true };" +
+    " const a = getComputedStyle(ta); const b = getComputedStyle(document.querySelector('.code-hl'));" +
+    " const kinds = [...new Set([...hl.querySelectorAll('span')].map((s) => s.className))];" +
+    " return { name: (window.state && state.drawerPlugin) || '', err: (document.querySelector('#src-error') || {}).textContent || ''," +
+    "   lines: (ta.value || '').split('\\n').length," +
+    "   gutter: (g.textContent || '').trim().split('\\n').length," +
+    "   spans: hl.querySelectorAll('span').length, kinds: kinds.length," +
+    "   lh: a.lineHeight === b.lineHeight, fs: a.fontSize === b.fontSize, pad: a.padding === b.padding };" +
+    "})())"
+  ));
+  check('源码编辑器有行号（行数和内容一致）', ed.gutter === ed.lines && ed.lines > 1, JSON.stringify(ed));
+  check('源码高亮层有 token', ed.kinds >= 2 && ed.spans > 0, JSON.stringify(ed));
+  // 分词器本身单独验一遍：不依赖抽屉里有没有读到文件（抽屉那步会被别的检查影响）
+  const tok = JSON.parse(await js(
+    "JSON.stringify((() => { const h = window.PanelHL.render(" +
+    "'const a = 1; // 注释\\nfunction f() { return \"s\"; }', 'js');" +
+    "const j = window.PanelHL.render('{\"k\": 1, \"b\": true}', 'json');" +
+    "const esc = window.PanelHL.render('<img src=x onerror=alert(1)>', 'js');" +
+    "return { kw: h.includes('tok-kw'), str: h.includes('tok-str'), com: h.includes('tok-com')," +
+    " num: h.includes('tok-num'), fnn: h.includes('tok-fn'), key: j.includes('tok-key')," +
+    " esc: !esc.includes('<img'), json: j.includes('tok-num') }; })())"
+  ));
+  check(
+    '分词器认关键字/字符串/注释/数字/函数名，且转义了 HTML',
+    tok.kw && tok.str && tok.com && tok.num && tok.fnn && tok.esc,
+    JSON.stringify(tok),
+  );
+  check('JSON 模式区分键与值', tok.key && tok.json, JSON.stringify(tok));
+  check(
+    '高亮层与输入层对齐（行高/字号/padding 一致，不会重影）',
+    ed.lh === true && ed.fs === true && ed.pad === true,
+    JSON.stringify(ed),
+  );
+  await js("document.querySelector('#drawer-close') && document.querySelector('#drawer-close').click()");
+  await sleep(300);
+
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 

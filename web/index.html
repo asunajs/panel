@@ -431,7 +431,13 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
               <button class="btn btn-sm btn-primary" id="src-save" type="button">保存并重载</button>
             </div>
             <div class="src-error hidden" id="src-error"></div>
-            <textarea class="editor" id="src-text" spellcheck="false" aria-label="插件源码"></textarea>
+            <div class="code-editor" id="src-editor">
+              <pre class="code-gutter" id="src-gutter" aria-hidden="true"></pre>
+              <div class="code-scroll">
+                <pre class="code-hl" aria-hidden="true"><code id="src-hl"></code></pre>
+                <textarea class="editor" id="src-text" spellcheck="false" aria-label="插件源码"></textarea>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -516,6 +522,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
     <div class="toast hidden" id="toast" role="status"></div>
     <!-- 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就消失，用户自己关。 -->
     <div class="notices" id="notices" aria-live="polite"></div>
+    <script src="/highlight.js"></script>
     <script src="/app.js"></script>
   
 </body>
