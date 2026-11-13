@@ -2004,6 +2004,7 @@ impl Inner {
                 self.log.clone(),
                 self.config.clone(),
                 crate::notify::Notice {
+                    event: "task_fail",
                     level: "error",
                     plugin: plugin.to_string(),
                     task: Some(task.to_string()),
@@ -2023,6 +2024,7 @@ impl Inner {
                 self.log.clone(),
                 self.config.clone(),
                 crate::notify::Notice {
+                    event: "circuit",
                     level: "error",
                     plugin: plugin.to_string(),
                     task: Some(task.to_string()),

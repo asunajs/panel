@@ -1440,3 +1440,6 @@ select option { background: var(--surface); color: var(--fg); }
 .chan-hint { flex: 1 1 100%; font-size: 12px; color: var(--dim); padding-left: 98px; }
 .chan-tpl { flex: 1 1 240px; font-family: var(--mono); font-size: 12px; }
 .row-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* 表单里的小节标题（第 171 轮） */
+.chan-sub { margin: 6px 0 0; font-size: 12px; font-weight: 600; color: var(--fg-2); }

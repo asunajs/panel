@@ -45,6 +45,9 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct Notice {
     /// info / warn / error
     pub level: &'static str,
+    /// 事件类型：task_fail / circuit / plugin / system。
+    /// 渠道可以按它过滤（第 171 轮）—— 「我不想收每条任务失败，但熔断必须告诉我」。
+    pub event: &'static str,
     pub plugin: String,
     pub task: Option<String>,
     pub run_id: Option<i64>,
@@ -75,6 +78,74 @@ fn rank(level: &str) -> u8 {
         "warn" => 2,
         "error" => 3,
         _ => 2,
+    }
+}
+
+/// 「23:00-08:00」→ (1380, 480)。写错了要报出来：静默写错等于通知永远不发。
+fn parse_quiet(s: &str) -> Result<Option<(u16, u16)>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let (a, b) = s
+        .split_once('-')
+        .ok_or_else(|| format!("静默时段要写成 HH:MM-HH:MM，收到 {s:?}"))?;
+    let to_min = |x: &str| -> Result<u16, String> {
+        let (h, m) = x
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| format!("静默时段的时间要写成 HH:MM，收到 {x:?}"))?;
+        let h: u16 = h.trim().parse().map_err(|_| format!("小时不对: {x:?}"))?;
+        let m: u16 = m.trim().parse().map_err(|_| format!("分钟不对: {x:?}"))?;
+        if h > 23 || m > 59 {
+            return Err(format!("时间越界: {x:?}"));
+        }
+        Ok(h * 60 + m)
+    };
+    let (a, b) = (to_min(a)?, to_min(b)?);
+    if a == b {
+        return Err("静默时段的起止相同（等于没有静默）".to_string());
+    }
+    Ok(Some((a, b)))
+}
+
+/// 给界面看的形式："23:00-08:00"（None → 空串）。
+pub fn quiet_str(q: Option<(u16, u16)>) -> String {
+    match q {
+        None => String::new(),
+        Some((a, b)) => format!("{:02}:{:02}-{:02}:{:02}", a / 60, a % 60, b / 60, b % 60),
+    }
+}
+
+/// 本地时间「现在是第几分钟」。
+fn now_min() -> u16 {
+    use chrono::Timelike;
+    let n = chrono::Local::now();
+    (n.hour() as u16) * 60 + (n.minute() as u16)
+}
+
+/// 现在是不是落在静默区间里（支持跨零点，如 23:00-08:00）。
+fn in_quiet(now: u16, q: (u16, u16)) -> bool {
+    let (a, b) = q;
+    if a <= b {
+        now >= a && now < b
+    } else {
+        now >= a || now < b
+    }
+}
+
+/// 静默结束还有多少毫秒（用于把发件箱推迟到那时候）。
+fn quiet_left_ms(now: u16, q: (u16, u16)) -> i64 {
+    let (_, b) = q;
+    let mins = if now < b { b - now } else { 1440 - now + b };
+    (mins as i64) * 60_000
+}
+
+/// 插件名匹配：支持 mcloud* 这种后缀通配（前缀够用，也够简单）。
+fn plugin_match(pattern: &str, plugin: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(pre) => plugin.starts_with(pre),
+        None => pattern == plugin,
     }
 }
 
@@ -187,6 +258,14 @@ pub struct Channel {
     pub headers: Vec<(String, String)>,
     /// gotify 的优先级（默认 5）。
     pub priority: i64,
+    /// 只收这些事件（空 = 全收）：task_fail / circuit / plugin / system。
+    pub events: Vec<String>,
+    /// 只收这些插件的通知（空 = 全收；支持 mcloud* 这种后缀通配）。
+    pub include_plugins: Vec<String>,
+    /// 这些插件的不收。
+    pub exclude_plugins: Vec<String>,
+    /// 这个渠道自己的静默时段（HH:MM-HH:MM），None = 跟随全局。
+    pub quiet: Option<(u16, u16)>,
     /// smtp 的目标与凭据。
     pub smtp: Option<SmtpConf>,
 }
@@ -198,6 +277,10 @@ pub struct Config {
     pub min_level: String,
     /// 静音名单："plugin" 或 "plugin/task"。
     pub mute: Vec<String>,
+    /// 全局静默时段（分钟区间）。铃铛照旧记，外部渠道推迟到静默结束。
+    pub quiet: Option<(u16, u16)>,
+    /// 去重窗口（秒）：同一渠道 + 同一标题在这个窗口内只发一条，重复的累加次数。
+    pub dedupe_secs: i64,
     pub channels: Vec<Channel>,
 }
 
@@ -222,15 +305,28 @@ impl Config {
         !self.mute.iter().any(|m| m == plugin || m == &full)
     }
 
-    /// 这个渠道要不要收这条。
-    fn channel_wants(ch: &Channel, level: &str) -> bool {
+    /// 这个渠道要不要收这条（等级 + 事件 + 插件三道）。
+    fn channel_wants(ch: &Channel, level: &str, event: &str, plugin: &str) -> bool {
         if !ch.enabled {
             return false;
         }
-        match ch.min_level.as_deref() {
-            Some(m) if !m.is_empty() => rank(level) >= rank(m),
-            _ => true,
+        if let Some(m) = ch.min_level.as_deref() {
+            if !m.is_empty() && rank(level) < rank(m) {
+                return false;
+            }
         }
+        if !ch.events.is_empty() && !ch.events.iter().any(|e| e == event) {
+            return false;
+        }
+        if ch.exclude_plugins.iter().any(|p| plugin_match(p, plugin)) {
+            return false;
+        }
+        if !ch.include_plugins.is_empty()
+            && !ch.include_plugins.iter().any(|p| plugin_match(p, plugin))
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -285,6 +381,11 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
     let mut cfg = Config {
         min_level: str_field(v, "min_level"),
         mute: str_list(v, "mute"),
+        quiet: parse_quiet(&str_field(v, "quiet_hours"))?,
+        dedupe_secs: match v.get("dedupe_secs").and_then(|x| x.as_i64()) {
+            Some(n) if n >= 0 => n,
+            _ => 600,
+        },
         channels: Vec::new(),
     };
     if !cfg.min_level.is_empty() && !matches!(cfg.min_level.as_str(), "info" | "warn" | "error") {
@@ -427,6 +528,10 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
             secret,
             chat_id,
             topic: str_field(c, "topic"),
+            events: str_list(c, "events"),
+            include_plugins: str_list(c, "include_plugins"),
+            exclude_plugins: str_list(c, "exclude_plugins"),
+            quiet: parse_quiet(&str_field(c, "quiet_hours"))?,
             template: c
                 .get("template")
                 .and_then(|x| x.as_str())
@@ -465,6 +570,10 @@ pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, St
                 template: String::new(),
                 headers: Vec::new(),
                 priority: 5,
+                events: Vec::new(),
+                include_plugins: Vec::new(),
+                exclude_plugins: Vec::new(),
+                quiet: None,
                 smtp: None,
             });
         }
@@ -512,6 +621,11 @@ pub fn channel_view(c: &Channel) -> Value {
             if c.kind == Kind::Gotify {
                 out["priority"] = json!(c.priority);
             }
+            // 过滤与静默（第 171 轮）：界面编辑时要能看见当前值
+            out["events"] = json!(c.events);
+            out["include_plugins"] = json!(c.include_plugins);
+            out["exclude_plugins"] = json!(c.exclude_plugins);
+            out["quiet_hours"] = json!(quiet_str(c.quiet));
         }
     }
     out
@@ -592,13 +706,33 @@ pub async fn record(
         "body": body,
     })
     .to_string();
-    let picked: Vec<Channel> = cfg
+    // 静默时段：铃铛照旧记，外部渠道推到静默结束（不是丢掉 —— 半夜的故障早上也得知道）。
+    let minute = now_min();
+    let mut deferred = 0usize;
+    let items: Vec<(Channel, i64)> = cfg
         .channels
         .iter()
-        .filter(|c| Config::channel_wants(c, n.level))
-        .cloned()
+        .filter(|c| Config::channel_wants(c, n.level, n.event, &n.plugin))
+        .map(|c| {
+            let q = c.quiet.or(cfg.quiet);
+            match q {
+                Some(q) if in_quiet(minute, q) => {
+                    deferred += 1;
+                    (c.clone(), ts + quiet_left_ms(minute, q))
+                }
+                _ => (c.clone(), ts),
+            }
+        })
         .collect();
-    enqueue_all(db, log, &picked, &title, &body, &payload, ts).await;
+    if deferred > 0 {
+        log.emit(
+            "panel",
+            None,
+            Level::Info,
+            format!("静默时段中：{deferred} 个渠道推迟到静默结束再发"),
+        );
+    }
+    enqueue_all(db, log, &items, &title, &body, &payload, ts, cfg.dedupe_secs).await;
 }
 
 /// 不阻塞调用方地记一条。调度器在 finish 里用它。
@@ -629,62 +763,89 @@ pub struct Row {
 /// 是**丢消息**的问题：中途进程被杀，前面几个渠道有发件箱行、后面的没有，而通知本身已经
 /// 进了面板 —— 界面上看着「通知有了」，可外部渠道永远收不到，也没人知道少了哪几个。
 /// 现在整批一个事务：要么全有，要么全没有。
+/// 把一条通知排进发件箱。items 是（渠道，最早可发时间）：静默时段里会大于 now。
+///
+/// 去重（第 171 轮）：同一渠道 + 同一标题，在 dedupe 窗口内已经有一条**待发**的，
+/// 就不再新开一行，只把它的 repeat +1 并且刷新内容 —— 一个任务每 5 分钟失败一次，
+/// 不该给你 12 条一样的推送，而应该是一条「×12」。
 async fn enqueue_all(
     db: &Db,
     log: &LogHub,
-    chans: &[Channel],
+    items: &[(Channel, i64)],
     title: &str,
     body: &str,
     payload: &str,
     ts: i64,
+    dedupe_secs: i64,
 ) -> Vec<i64> {
-    if chans.is_empty() {
+    if items.is_empty() {
         return Vec::new();
     }
-    let metas: Vec<(String, String)> = chans
+    let metas: Vec<(String, String, i64)> = items
         .iter()
-        .map(|c| (c.id.clone(), c.kind.as_str().to_string()))
+        .map(|(c, at)| (c.id.clone(), c.kind.as_str().to_string(), *at))
         .collect();
     let (t, b, p) = (title.to_string(), body.to_string(), payload.to_string());
-    let ids = db
+    let since = ts - dedupe_secs.max(0) * 1000;
+    let out = db
         .call(move |c| {
             let tx = c.transaction().map_err(|e| e.to_string())?;
-            let mut ids = Vec::with_capacity(metas.len());
+            let mut fresh: Vec<(usize, i64)> = Vec::new();
             {
-                let mut st = tx
+                let mut bump = tx
                     .prepare(
-                        "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done)                          VALUES(?1,?2,?3,?4,?5,?6,0,0,0)",
+                        "UPDATE notify_outbox SET repeat = repeat + 1, ts = ?1, body = ?2, payload = ?3
+                         WHERE done = 0 AND channel = ?4 AND title = ?5 AND ts >= ?6",
                     )
                     .map_err(|e| e.to_string())?;
-                for (cid, kind) in &metas {
-                    st.execute(rusqlite::params![ts, cid, kind, t, b, p])
+                let mut ins = tx
+                    .prepare(
+                        "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done,repeat)
+                         VALUES(?1,?2,?3,?4,?5,?6,0,?7,0,1)",
+                    )
+                    .map_err(|e| e.to_string())?;
+                for (idx, (cid, kind, at)) in metas.iter().enumerate() {
+                    let n = bump
+                        .execute(rusqlite::params![ts, b, p, cid, t, since])
                         .map_err(|e| e.to_string())?;
-                    ids.push(tx.last_insert_rowid());
+                    if n > 0 {
+                        continue;
+                    }
+                    ins.execute(rusqlite::params![ts, cid, kind, t, b, p, at])
+                        .map_err(|e| e.to_string())?;
+                    fresh.push((idx, tx.last_insert_rowid()));
                 }
             }
-            // 裁掉超量的成功行（放弃的留着给人看）
             tx.execute(
-                "DELETE FROM notify_outbox WHERE done=1 AND id NOT IN                  (SELECT id FROM notify_outbox WHERE done=1 ORDER BY id DESC LIMIT ?1)",
+                "DELETE FROM notify_outbox WHERE done=1 AND id NOT IN
+                 (SELECT id FROM notify_outbox WHERE done=1 ORDER BY id DESC LIMIT ?1)",
                 rusqlite::params![OUTBOX_KEEP],
             )
             .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
-            Ok(ids)
+            Ok(fresh)
         })
         .await;
-    let ids = match ids {
-        Ok(ids) => ids,
+    let fresh = match out {
+        Ok(f) => f,
         Err(e) => {
             log.emit(
                 "panel",
                 None,
                 Level::Warn,
-                format!("通知发件箱写入失败（{} 个渠道都没排上）: {e}", chans.len()),
+                format!("通知发件箱写入失败（{} 个渠道都没排上）: {e}", items.len()),
             );
             return Vec::new();
         }
     };
-    for (id, ch) in ids.iter().zip(chans.iter()) {
+    // 只立刻试「现在就该发」的；静默期排到后面的等 30s 扫描。
+    let mut ids = Vec::with_capacity(fresh.len());
+    for (idx, id) in &fresh {
+        let (ch, at) = &items[*idx];
+        ids.push(*id);
+        if *at > ts {
+            continue;
+        }
         let row = Row {
             id: *id,
             channel: ch.id.clone(),
@@ -699,8 +860,6 @@ async fn enqueue_all(
     ids
 }
 
-/// webhook：URL 是**运维填的**，不是插件给的，所以不套插件的 SSRF 门。
-/// 插件只能决定标题和正文，决定不了往哪发。
 // ---------------------------------------------------------------- 各渠道的请求长什么样
 //
 // 12 种渠道里只 smtp 不是 HTTP。其余差别只有三件：URL 怎么拼、body 长什么样、
@@ -1004,6 +1163,7 @@ async fn send_mail(ch: &Channel, title: &str, body: &str) -> Result<(), String> 
     out.map(|_| ())
 }
 
+/// 真发一次（smtp 走阻塞池，其余拼 HTTP）。
 async fn attempt(ch: &Channel, row: &Row) -> Result<(), String> {
     if ch.kind == Kind::Smtp {
         return send_mail(ch, &row.title, &row.body).await;
@@ -1188,7 +1348,7 @@ pub async fn outbox(db: &Db, status: &str, limit: i64) -> Result<Vec<Value>, Str
         _ => "1=1",
     };
     let sql = format!(
-        "SELECT id,ts,channel,kind,title,attempts,next_try,last_error,done FROM notify_outbox \
+        "SELECT id,ts,channel,kind,title,attempts,next_try,last_error,done,repeat FROM notify_outbox \
          WHERE {cond} ORDER BY id DESC LIMIT ?1"
     );
     db.call(move |c| {
@@ -1205,6 +1365,7 @@ pub async fn outbox(db: &Db, status: &str, limit: i64) -> Result<Vec<Value>, Str
                     "next_try": r.get::<_, i64>(6)?,
                     "last_error": r.get::<_, String>(7)?,
                     "done": r.get::<_, i64>(8)?,
+                    "repeat": r.get::<_, i64>(9)?,
                 }))
             })
             .map_err(|e| e.to_string())?
@@ -1281,7 +1442,7 @@ pub async fn test_send(
             "body": body,
         })
         .to_string();
-        enqueue_all(db, log, std::slice::from_ref(&ch), &title, &body, &payload, ts).await;
+        enqueue_all(db, log, &[(ch.clone(), ts)], &title, &body, &payload, ts, 0).await;
         // 立刻把这一行的结果读回来（enqueue 已经试过一次）
         let cid = ch.id.clone();
         let row = db

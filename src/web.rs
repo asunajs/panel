@@ -3538,7 +3538,7 @@ async fn api_restore(
 /// 通知渠道 + 发件箱的读数。
 async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let parsed = crate::notify::from_store(&st.config);
-    let (channels, error, min_level, mute) = match parsed {
+    let (channels, error, min_level, mute, quiet, dedupe) = match parsed {
         Ok(c) => (
             c.channels
                 .iter()
@@ -3547,9 +3547,18 @@ async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, Api
             Value::Null,
             c.level().to_string(),
             json!(c.mute),
+            json!(crate::notify::quiet_str(c.quiet)),
+            json!(c.dedupe_secs),
         ),
         // 配置写错了要**看见**：静默当成「没配渠道」是最难查的一种
-        Err(e) => (Vec::new(), json!(e), String::new(), json!([])),
+        Err(e) => (
+            Vec::new(),
+            json!(e),
+            String::new(),
+            json!([]),
+            json!(""),
+            json!(600),
+        ),
     };
     let counts = crate::notify::counts(&st.db).await.map_err(internal)?;
     let outbox = crate::notify::outbox(&st.db, "all", 30).await.map_err(internal)?;
@@ -3558,6 +3567,8 @@ async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, Api
         "error": error,
         "min_level": min_level,
         "mute": mute,
+        "quiet_hours": quiet,
+        "dedupe_secs": dedupe,
         "channels": channels,
         "counts": counts,
         "outbox": outbox,
