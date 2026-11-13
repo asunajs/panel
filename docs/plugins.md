@@ -513,6 +513,27 @@ SVG 勾），插件里直接写就行，不需要额外 class。面板自己的 
 </label>
 ```
 
+### 勾选框（插件里那条「撤掉全局 input 样式」的补丁）
+
+0.4.0 的勾选框是**面板画的**，选择器带 `html` 前缀：
+
+```css
+html input[type=\"checkbox\"]:not(.check-raw) { /* 16px 方块 + SVG 勾 */ }
+```
+
+前缀不是装饰：旧插件普遍写着
+
+```css
+.picker-row input[type='checkbox'] { width: auto; border: 0; background: none; }
+```
+
+那是给「没有勾选框样式」的旧面板写的 —— 在这里它会把控件整个擦掉（任务页的账号多选只剩
+一串光秃秃的名字，第 153 轮用户报「多选没实现」）。带 `html` 之后特异度 `(0,2,2)` 压过
+插件那条 `(0,2,1)`。真想用系统原生那个，加 `.check-raw` 类。
+
+另外：插件里一条笼统的 `input { padding: 7px 10px }` 也会把勾选框撑到 22px，所以面板那条
+规则自己钉死了 `box-sizing` 与 `padding`。
+
 ## 从 0.3.x 面板迁移插件状态（`panel migrate`，第 150 轮）
 
 0.3.x 把插件状态放在它自己 `panel.db` 的 `state` 表里（mcloud 那族是 `mcloud.accounts` +

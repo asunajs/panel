@@ -3391,6 +3391,28 @@ function pickerLabel(v, follow) {
   return `${n} 个账号`;
 }
 
+/** 触发按钮上的「选中了什么」——用**标签**说（TDesign 多选的样式），不用一句话。
+ *
+ *  ⚠ 原来按钮上只印一行字（「全部账号」/「2 个账号」）：用户点开面板才知道具体是谁，
+ *  收起来又忘了。标签能一眼看出「这趟跑哪几个号」，多了折成 +N。
+ */
+function pickerTags(v, follow, accounts) {
+  const tag = (text, cls) =>
+    '<span class="ms-tag' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>';
+  if (follow === true) return tag('跟随自动', 'is-polar');
+  if (!v) return tag('…', 'is-polar');
+  if (v.all === true) return tag('全部账号') + tag('新号也算', 'is-polar');
+  const ids = v.ids || v.picked || [];
+  if (ids.length === 0) return tag('没选账号', 'is-polar');
+  const labels = ids.map((id) => {
+    const a = (accounts || []).find((x) => x.id === id);
+    return (a && a.label) || id;
+  });
+  const head = labels.slice(0, 2).map((t) => tag(t)).join('');
+  const more = labels.length > 2 ? tag('+' + (labels.length - 2), 'is-more') : '';
+  return head + more;
+}
+
 function renderPicker(cfg) {
   const all = (last && last.taskAccounts && last.taskAccounts[cfg.task]) || null;
   const v = cfg.mode === 'manual'
@@ -3403,7 +3425,12 @@ function renderPicker(cfg) {
   //   （`legacyAuto` = 这一版还没单独设过、读的是旧键），用户看到它只会猜
   //   "这设置过期了？"或"还有一份新版设置我没找到"。所以按钮保持干净，
   //   "这份是从你以前的设置沿用的"挪进展开面板，那儿有地方说清楚。
-  setText(cfg.label, pickerLabel({ ...v, accounts }, follow));
+  // 触发按钮：标签（TDesign 多选的样子）；收起来也能看出跑哪几个号
+  const labelEl = $(cfg.label);
+  if (labelEl) {
+    labelEl.innerHTML = pickerTags({ ...v, accounts }, follow, accounts);
+    labelEl.title = pickerLabel({ ...v, accounts }, follow);
+  }
   // ⚠ 同理：`${cfg.key}-acct-legacy` 拼出来的是 `daily-manual-acct-legacy`，
   //   HTML 里根本没有这个 id（只有 `daily-acct-legacy`）⇒ 拼出来的写法在 manual
   //   那两条上永远写不到（评审 2026-11-01）。改成表里写死。
@@ -3474,24 +3501,35 @@ function pickerPick(cfg, ev) {
   void savePicker(cfg, false, ids, false).catch((e) => toast(e.message || '没存上', true));
 }
 
+/** 「清空」：一个号都不勾（= 这趟不跑），并把「全部 / 跟随」一起取消。
+ *  这是 TDesign 多选浮层页脚那个「清空」的等价物 —— 手点三个框才回到空，太啰嗦。 */
+function pickerClear(cfg) {
+  void savePicker(cfg, false, [], false).catch((e) => toast(e.message || '没存上', true));
+}
+
 // ── 绑定：每个任务两份，字面 id（静态检查能看出有没有绑）──
 $('daily-acct-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[0], ev));
 $('daily-acct-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[0], ev.currentTarget.checked));
 $('daily-acct-list').addEventListener('change', (ev) => pickerPick(PICKERS[0], ev));
 
+$('daily-acct-clear').addEventListener('click', () => pickerClear(PICKERS[0]));
 $('daily-manual-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[1], ev));
 $('daily-manual-follow').addEventListener('change', (ev) => pickerFollow(PICKERS[1], ev.currentTarget.checked));
 $('daily-manual-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[1], ev.currentTarget.checked));
 $('daily-manual-list').addEventListener('change', (ev) => pickerPick(PICKERS[1], ev));
 
+$('daily-manual-clear').addEventListener('click', () => pickerClear(PICKERS[1]));
 $('live-acct-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[2], ev));
 $('live-acct-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[2], ev.currentTarget.checked));
 $('live-acct-list').addEventListener('change', (ev) => pickerPick(PICKERS[2], ev));
 
+$('live-acct-clear').addEventListener('click', () => pickerClear(PICKERS[2]));
 $('live-manual-btn').addEventListener('click', (ev) => pickerToggle(PICKERS[3], ev));
 $('live-manual-follow').addEventListener('change', (ev) => pickerFollow(PICKERS[3], ev.currentTarget.checked));
 $('live-manual-all').addEventListener('change', (ev) => pickerToggleAll(PICKERS[3], ev.currentTarget.checked));
 $('live-manual-list').addEventListener('change', (ev) => pickerPick(PICKERS[3], ev));
+
+$('live-manual-clear').addEventListener('click', () => pickerClear(PICKERS[3]));
 
 document.addEventListener('click', (ev) => {
   if (ev.target.closest('.picker')) return;

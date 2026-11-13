@@ -493,6 +493,10 @@
               <span><b>全部账号</b><br /><span class="hint">定时触发用这一份；以后新登录的账号也一起跑</span></span>
             </label>
             <div class="picker-list" id="daily-acct-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="daily-acct-clear">清空</button>
+            </div>
           </div>
         </div>
         <div class="picker" data-picker="日常-本次">
@@ -509,6 +513,10 @@
               <span><b>全部账号</b><br /><span class="hint">只影响这一次手动运行</span></span>
             </label>
             <div class="picker-list" id="daily-manual-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="daily-manual-clear">清空</button>
+            </div>
           </div>
         </div>
         <!-- 上一次**每个号**的结果：多账号时"哪个号成了"一眼看到，不用翻日志。
@@ -669,6 +677,10 @@
               <span><b>全部账号</b><br /><span class="hint">定时触发用这一份；以后新登录的账号也一起跑</span></span>
             </label>
             <div class="picker-list" id="live-acct-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="live-acct-clear">清空</button>
+            </div>
           </div>
         </div>
         <div class="picker" data-picker="直播-本次">
@@ -685,6 +697,10 @@
               <span><b>全部账号</b><br /><span class="hint">只影响这一次手动运行</span></span>
             </label>
             <div class="picker-list" id="live-manual-list"></div>
+            <div class="picker-foot">
+              <span class="hint">勾了的号才会跑</span>
+              <button type="button" class="btn ghost sm" id="live-manual-clear">清空</button>
+            </div>
           </div>
         </div>
         <!-- 听弹幕时长：照 mcloud Rust 的「听弹幕时长」参数（5–1800 秒）。

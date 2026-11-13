@@ -843,11 +843,53 @@ textarea:focus {
 }
 
 /* 按钮本体是面板的 `.btn`（+ 本页的 `.btn-sm`）；这里只定它在这个位置上的尺寸 */
+/* 触发按钮上放的是**标签**（TDesign 多选的形态）：一个号一格，多了折成 +N。
+   所以这个按钮不再是"一行字"，要能折行、按内容撑开。 */
 .picker-btn {
-  min-width: 140px;
-  /* 按钮里是"标签 + ▾"，两端对齐，箭头不会随标签长短乱跑 */
-  justify-content: space-between;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  height: auto;
+  min-height: var(--h-control);
+  padding: 3px var(--sp-2);
+  text-align: left;
 }
+
+.ms-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  max-width: 9em;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 不是号本身的那些标签（跟随 / 没选 / 新号也算）：虚线边 + 弱一档 */
+.ms-tag.is-polar { border-style: dashed; color: var(--fg-2); }
+.ms-tag.is-more { background: none; border-color: transparent; color: var(--fg-2); }
+
+/* 面板底部那行（清空）——与名单之间有一条线，像 TDesign 的浮层页脚 */
+.picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+}
+
+/* 里面是"标签 + ▾"，两端对齐，箭头不会随标签长短乱跑 */
+.picker-btn { justify-content: space-between; min-width: 140px; }
 
 /* 浮层。底色用 `--surface` 而不是 `--bg`：面板的 `.dialog` 就是这么定的 ——
    浮在卡片（--surface-2 底）上面的一层要比页面底色亮一档，不然它看起来像"凹进去"。
@@ -881,17 +923,15 @@ textarea:focus {
   background: var(--soft);
 }
 
-/* ⚠ 复选框要把全局那条 `input { width: 100% }` **抵掉** ——
-   不然它会被撑满整行，文字被推到很远的地方（看起来像"文字居中"）。
-   全局那条还给了边框和内边距，复选框上也要撤掉（浏览器自己的样式才对）。 */
+/* 复选框在这里只调**位置**，不碰长相。
+   ⚠ 这里原来写着 `width:auto; border:0; background:none` —— 那是给旧面板写的：
+   旧面板没有复选框样式，得把全局的 `input { width:100% }` 和边框撤掉才能露出浏览器
+   原生那个方块。0.4.0 的勾选框是**我们自己画的**（app.css 里 `input[type=checkbox]`
+   给 16px 方块 + SVG 勾），再"撤掉"就等于把控件擦没 —— 任务页的账号多选就变成了
+   一串光秃秃的名字（第 153 轮用户报「多选没实现」）。 */
 .picker-row input[type='checkbox'] {
   flex: 0 0 auto;
-  width: auto;
-  min-width: 0;
   margin: 3px 0 0;
-  padding: 0;
-  border: 0;
-  background: none;
 }
 
 /* 「全部」那一行与下面的名单之间画一条线 —— 它是**开关**，不是名单里的一项。 */
