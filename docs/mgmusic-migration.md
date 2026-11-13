@@ -33,7 +33,7 @@ panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**
 | 日志 | 五级（含 success/fail） | 四级；垫片 `success→info`、`fail→error` | 同上 |
 | 配置 | `config()`（同步，读 `plugin-data/mgmusic/config.json`） | 加载期 `await host.self_config()` 播种（可补播一次，有标记防复活），之后只读写 state（见 §2） | [host-api.md](host-api.md) §「两份配置」 |
 | 路由 | 10 条路径 / 11 个 `register_route(path, method, fn, opts)` | 一个 `host.register_web(evt)` 分发器，键 = `METHOD + ' ' + evt.rel` | [plugins.md](plugins.md) §「插件 WebUI」 |
-| cron | `register_cron(name, cron, {budget_ms, summary})` | `register_cron(name, cron, 120000)` + `set_job_summary`（**不能加载期调**，见 §5） | [host-api.md](host-api.md) §「注册任务」 |
+| cron | `register_cron(name, cron, {budget_ms, summary})` | `register_cron(name, cron, 120000)` + 同名 `register_handler`；**不写 `set_job_summary`**（见 §10） | [host-api.md](host-api.md) §「注册任务」 |
 | 侧栏 | `register_nav({label, icon})` | `host.sidebar({ title: '咪咕音乐', order: 80 })`（无 icon） | [plugins.md](plugins.md) §2.2 |
 | 并发 | `worker_hint('exclusive')` | 删除（一插件一 runtime） | [engine.md](engine.md) |
 | 出站 | `http_fetch(url, opts)` | `host.http_fetch(url, opts)`（**同步**，opts 键同：method/headers/body/timeout_ms/tls） | [host-api.md](host-api.md) §2 |
@@ -175,7 +175,7 @@ await host.register_handler('daily', function () { return runDaily(); });
 `Cmd::SetJobState` 的 `find()` 落空（`src/scheduler.rs:1148-1150`，调用链 `src/hostapi.rs:657`）。
 
 处置：**加载期的注册 op 只能是 `register_cron` / `register_handler` / `register_web` / `sidebar`**，
-凡是「按名字改任务状态」的（`set_job_*`）都得等第一次运行。本插件把描述摘要放在 `runDaily` 第一行。
+凡是「按名字改任务状态」的（`set_job_*`）都得等第一次运行。本插件后来连摘要都不写了（见 §10）。
 
 ### 5.3 定时器上限带来的唯一行为收敛
 
@@ -189,7 +189,7 @@ await host.register_handler('daily', function () { return runDaily(); });
 |---|---|---|---|
 | 侧栏图标 | `register_nav({icon})` | 只有 `title`/`order` | 界面用文字标题，无 emoji |
 | `/run` 路由预算 | 120s（`register_route` 自带） | WebUI 统一 30s | 兼容保留，但界面的「立即跑一次」改打 `POST /api/tasks/mgmusic/daily/run`（走调度器，120s） |
-| 任务**描述**摘要 | 注册期就有 | 第一次 daily 跑完前是 `null` | 卡片摘要初始为空；一周内三次 cron 会补上 |
+| 任务**描述**摘要 | 注册期就有 | **不写**（永远是 `null`） | 任务行只留名字/计划/预算/状态，理由见 §10 |
 | `worker_hint` | 独占 worker | 忽略（本来就一插件一 runtime） | 无 |
 | 配置的「面板 UI 入口」 | 插件自己写的 `config.json` | 同一份文件变成**只读导入源**；改配置走插件界面或 `POST /plugins/mgmusic/api/config`（整份提交，漏 `devices` 直接报错） | 别用「插件 → 配置」编辑器改：那份文件只在 state 空时被读一次，要重新导入得同时删 `mgmusic.config` 与 `mgmusic.seed_marker` |
 
@@ -242,3 +242,20 @@ deviceid 改成「同一手机号沿用旧值，没有才新生成」——效�
 
 读数（8805，真配置）：`/api/state` 里 mgmusic 的 `tasks` = `[('daily','0 5 0,12,22 * * *',manual=false)]`；
 三个路由仍 200（当天已做过的会回「今日已签/今日已完成，跳过」）。
+## 10. 任务行不写摘要（2026-11-13 用户指出）
+
+原话：**「这是啥，这里不应该有日志吧」**（截的是任务页那一行：`mgmusic / daily` 下面挂着
+「2 个账号 · 音符 431→547 · 完成 8/18 · 领取 +80」）。
+
+那行是宿主的 `tasks.summary`（`host.set_job_summary`，面板渲染成任务名下的 `.mini-sub`）。
+上一版把**每次跑的结果**写进去，于是：
+- 任务行看起来像漏出来的日志；
+- 数字是那一刻的快照，过一小时就假了；
+- 同页 mcloud 那三条的摘要都是空的 —— 只有这一行有，更显得不对。
+
+现在**一次都不写**（描述型也不写）：任务行只剩 名字 / 计划 / 预算 / 下次运行 / 跑过 / 状态；
+跑的结果去「运行记录」和日志看。已经写进库的旧摘要也清掉了
+（`update tasks set summary='' where plugin='mgmusic'`，重启后内存按空值加载）。
+
+读数（8806，假账号）：加载后 `[(daily, '0 5 0,12,22 * * *', summary=None)]`；手动跑一次
+（`status=error "1/1 个账号失败"`，假 ce 被上游拒）后 summary **仍是 None**、`tasks.summary` 是空串。
