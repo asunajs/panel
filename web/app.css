@@ -1245,6 +1245,38 @@ select option { background: var(--surface); color: var(--fg); }
 .select-option .select-tick { width: 12px; height: 12px; flex: none; opacity: 0; }
 .select-option.is-on .select-tick { opacity: 1; }
 .select-empty { padding: 10px 8px; color: var(--dim); font-size: 12.5px; text-align: center; }
+
+/* ---------- 卡片 / 分区：旧插件在用的这套名字（第 149 轮） ---------- */
+/*
+   为什么要有：0.4.0 把卡片的头部改叫 `.panel-head`，而既有插件（mcloud.webui）写的是
+   旧面板那套 `.card-head` / `.card-title` / `.card-actions` / `.card-sub`，还有块级的
+   `.section` / `.section-head` / `.section-title`。这些名字在新 CSS 里**一个都没有**，
+   于是卡片里的标题、徽章和五个按钮全挤成一坨（用户报「过于紧凑」）。
+   这里把它们补回来 —— 缺的不是间距，是**布局本身**。
+*/
+
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.card-head-main {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;
+}
+.card-title { font-size: 14px; font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
+.card-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.card-sub { margin-top: 8px; color: var(--dim); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* 块级分区：标题一行 + 内容（与 .panel 的观感一致，但不带卡片边框） */
+.section { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.section:first-child { margin-top: 0; }
+.section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.section-title { font-size: 13px; font-weight: 600; color: var(--fg-2); }
+
+/* 徽章的语言/平台变体：等宽、不带状态圆点（`.badge` 本身不带点，这里是窄一点的排版） */
+.badge.lang { font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
 .field-label { color: var(--fg-2); font-size: 12px; }
 
 .input {

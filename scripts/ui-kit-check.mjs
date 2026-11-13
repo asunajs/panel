@@ -188,6 +188,18 @@ async function main() {
   check('原生 checkbox 去掉系统外观（appearance: none）', rc.appearance === 'none' && rc.w === '16px', rawCheck);
   check('勾选态的画的是 SVG 勾', rc.checkedImg === true, rawCheck);
   check('未勾选态没有勾（只剩空框）', rc.offImg === 'none', rc.offImg);
+  // 旧面板那套卡片/分区类名（.card-head / .card-actions / .section-head）：
+  // 0.4.0 一度**一个都没定义**，插件里标题、徽章和五个按钮挤成一坨（用户报「过于紧凑」）。
+  const oldClasses = JSON.parse(await js(
+    "(()=>{const d=document.createElement('div');d.innerHTML='<div class=\"card-head\"><div class=\"card-head-main\"></div><div class=\"card-actions\"></div></div><div class=\"section\"><div class=\"section-head\"></div></div>';" +
+    "document.body.append(d);const head=getComputedStyle(d.querySelector('.card-head'));" +
+    "const acts=getComputedStyle(d.querySelector('.card-actions'));" +
+    "const sec=getComputedStyle(d.querySelector('.section-head'));" +
+    "const out={head:head.display,headGap:head.gap,acts:acts.display,actsGap:acts.gap,sec:sec.display,secGap:sec.gap};" +
+    "d.remove();return JSON.stringify(out);})()"
+  ));
+  check('旧写法 .card-head 是 flex 且有间距', oldClasses.head === 'flex' && parseFloat(oldClasses.headGap) >= 8, JSON.stringify(oldClasses));
+  check('旧写法 .card-actions / .section-head 也是 flex', oldClasses.acts === 'flex' && oldClasses.sec === 'flex', JSON.stringify(oldClasses));
   check('页面加载了套件（PanelUI 在）', (await js('typeof window.PanelUI')) === 'object');
   const shape = JSON.parse(await js(
     "JSON.stringify((()=>{const n=document.getElementById('d-seconds');" +
