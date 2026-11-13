@@ -463,6 +463,11 @@ pub enum Cmd {
     WebDone {
         plugin: String,
     },
+    /// 排队的请求超时了（到点还没轮到）：还在队列里就回失败，派出去了就当没这条。
+    WebExpire {
+        plugin: String,
+        id: u64,
+    },
     HasWeb {
         plugin: String,
         reply: oneshot::Sender<bool>,
@@ -715,6 +720,25 @@ impl Scheduler {
     }
 }
 
+/// 一个插件同时只有一个 JS 执行位（`Loaded::busy`）。忙的时候来的 HTTP 请求先**排队**：
+/// 插件界面里两个请求挨着发（`Promise.all`）是极常见的写法，直接 502 会让人以为
+/// 「有任务在跑」—— 其实是自己撞自己（第 142 轮，pitfalls 89）。
+const WEB_QUEUE_MS: u64 = 8_000;
+/// 排队上限：超过就不排了，直接失败。队列是给「并发两三个」用的，不是无限缓冲。
+const WEB_QUEUE_MAX: usize = 16;
+
+/// 排队等执行位的一次 web 调用。
+struct QueuedWeb {
+    /// 排队编号：超时定时器回来时按它找，找到了才回失败（可能已经被派出去了）。
+    id: u64,
+    handler: String,
+    evt: serde_json::Value,
+    budget_ms: u64,
+    reply: oneshot::Sender<Result<Option<serde_json::Value>, String>>,
+    /// 到点还没轮到就失败（`WEB_QUEUE_MS`）。
+    deadline: std::time::Instant,
+}
+
 struct Loaded {
     plugin: Arc<Plugin>,
     /// 同一 Context 同时只允许一个在途 invocation。
@@ -735,6 +759,10 @@ struct Inner {
     web: std::collections::HashSet<String>,
     /// 侧栏入口：插件名 → 入口（第 139 轮）
     sidebar: std::collections::HashMap<String, NavEntry>,
+    /// 等执行位的 web 调用（插件名 → 队列，第 142 轮）
+    web_q: std::collections::HashMap<String, std::collections::VecDeque<QueuedWeb>>,
+    /// 排队编号（单调递增，只用来认领超时）
+    next_qid: u64,
     /// 库里记着的任务状态（暂停/摘要/blockers/提前量/调度覆盖）。
     ///
     /// 启动时读一次，**注册任务时同步套用**：插件重新注册、面板重启都不会把
@@ -788,6 +816,8 @@ pub fn start(
         data_dir,
         web: std::collections::HashSet::new(),
         sidebar: std::collections::HashMap::new(),
+        web_q: std::collections::HashMap::new(),
+        next_qid: 0,
         saved: HashMap::new(),
         db,
         log,
@@ -1026,6 +1056,12 @@ impl Inner {
                 self.plugins.remove(&name);
                 self.web.remove(&name);
                 self.sidebar.remove(&name);
+                // 排队等这个插件的请求：插件没了，直接告诉它们失败（不然前端要干等到超时）
+                if let Some(q) = self.web_q.remove(&name) {
+                    for item in q {
+                        let _ = item.reply.send(Err(format!("插件已卸载: {name}")));
+                    }
+                }
                 self.tasks.retain(|t| t.plugin != name);
                 // **不删** tasks 里的行：那是「人的改动」（暂停/摘要/blockers/调度覆盖/提前量），
                 // 卸下插件不该把它抹掉 —— 重载/再启用之后还要靠它恢复。
@@ -1058,22 +1094,48 @@ impl Inner {
                 budget_ms,
                 reply,
             } => {
-                let blocked = match self.plugins.get(&plugin) {
-                    None => Some(format!("插件未加载: {plugin}")),
-                    Some(l) if l.busy => Some(format!("{plugin} 正忙（上一个请求或任务还没跑完），稍后再试")),
-                    Some(_) => None,
-                };
-                if let Some(e) = blocked {
-                    let _ = reply.send(Err(e));
+                if !self.plugins.contains_key(&plugin) {
+                    let _ = reply.send(Err(format!("插件未加载: {plugin}")));
                     return;
                 }
-                let p = self.plugins[&plugin].plugin.clone();
-                self.plugins.get_mut(&plugin).unwrap().busy = true;
+                if !self.plugins[&plugin].busy {
+                    self.start_web(plugin, handler, evt, budget_ms, reply);
+                    return;
+                }
+                // 忙：**短排队**（第 142 轮）。原来这里直接 502，于是插件界面把两个请求
+                // 并发发出来（`Promise.all`）必有一个失败 —— 用户看到的是「正忙」，
+                // 而占着执行位的可能只是它自己的上一个请求。
+                let full = self
+                    .web_q
+                    .get(&plugin)
+                    .map(|q| q.len() >= WEB_QUEUE_MAX)
+                    .unwrap_or(false);
+                if full {
+                    let _ = reply.send(Err(format!(
+                        "{plugin} 正忙，排队的已经有 {WEB_QUEUE_MAX} 个，稍后再试"
+                    )));
+                    return;
+                }
+                let id = self.next_qid;
+                self.next_qid += 1;
+                self.web_q
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push_back(QueuedWeb {
+                        id,
+                        handler,
+                        evt,
+                        budget_ms,
+                        reply,
+                        deadline: std::time::Instant::now()
+                            + std::time::Duration::from_millis(WEB_QUEUE_MS),
+                    });
+                // 到点没轮到就回失败：不能让前端一直挂着（HTTP 那边也在等）。
                 let tx = self.tx.clone();
+                let who = plugin.clone();
                 tokio::spawn(async move {
-                    let out = crate::engine::catch_panic(p.call_json(&handler, &evt, budget_ms)).await;
-                    let _ = reply.send(out);
-                    let _ = tx.send(Cmd::WebDone { plugin });
+                    tokio::time::sleep(std::time::Duration::from_millis(WEB_QUEUE_MS)).await;
+                    let _ = tx.send(Cmd::WebExpire { plugin: who, id });
                 });
             }
             Cmd::SetJobState {
@@ -1180,6 +1242,27 @@ impl Inner {
             Cmd::WebDone { plugin } => {
                 if let Some(l) = self.plugins.get_mut(&plugin) {
                     l.busy = false;
+                }
+                // 执行位空出来了：把排队的那个派出去（第 142 轮）
+                self.pump_web(&plugin);
+            }
+            Cmd::WebExpire { plugin, id } => {
+                let mut expired = None;
+                let mut empty = false;
+                if let Some(q) = self.web_q.get_mut(&plugin) {
+                    if let Some(pos) = q.iter().position(|x| x.id == id) {
+                        expired = q.remove(pos);
+                    }
+                    empty = q.is_empty();
+                }
+                if empty {
+                    self.web_q.remove(&plugin);
+                }
+                if let Some(item) = expired {
+                    let _ = item.reply.send(Err(format!(
+                        "{plugin} 正忙（排队 {}s 没轮到），稍后再试",
+                        WEB_QUEUE_MS / 1000
+                    )));
                 }
             }
             Cmd::RunNow {
@@ -1742,10 +1825,67 @@ impl Inner {
         });
     }
 
+    /// 派发一次 web 调用：占住执行位，跑完发 `WebDone`。
+    fn start_web(
+        &mut self,
+        plugin: String,
+        handler: String,
+        evt: serde_json::Value,
+        budget_ms: u64,
+        reply: oneshot::Sender<Result<Option<serde_json::Value>, String>>,
+    ) {
+        let Some(l) = self.plugins.get_mut(&plugin) else {
+            let _ = reply.send(Err(format!("插件未加载: {plugin}")));
+            return;
+        };
+        let p = l.plugin.clone();
+        l.busy = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let out = crate::engine::catch_panic(p.call_json(&handler, &evt, budget_ms)).await;
+            let _ = reply.send(out);
+            let _ = tx.send(Cmd::WebDone { plugin });
+        });
+    }
+
+    /// 执行位空出来之后，把队列里第一个（没过期的）派出去。
+    fn pump_web(&mut self, plugin: &str) {
+        loop {
+            // 还占着（比如刚派出去的那次自己又排队了）：等下一次 WebDone。
+            if self.plugins.get(plugin).map(|l| l.busy).unwrap_or(true) {
+                return;
+            }
+            let item = match self.web_q.get_mut(plugin) {
+                Some(q) => q.pop_front(),
+                None => return,
+            };
+            let Some(item) = item else { return };
+            if self.web_q.get(plugin).map(|q| q.is_empty()).unwrap_or(false) {
+                self.web_q.remove(plugin);
+            }
+            if item.deadline < std::time::Instant::now() {
+                let _ = item.reply.send(Err(format!(
+                    "{plugin} 正忙（排队 {}s 没轮到），稍后再试",
+                    WEB_QUEUE_MS / 1000
+                )));
+                continue;
+            }
+            self.start_web(
+                plugin.to_string(),
+                item.handler,
+                item.evt,
+                item.budget_ms,
+                item.reply,
+            );
+            return;
+        }
+    }
     fn finish(&mut self, plugin: &str, task: &str, run_id: i64, error: Option<String>) {
         if let Some(l) = self.plugins.get_mut(plugin) {
             l.busy = false;
         }
+        // 任务跑完，执行位空出来了：界面那边排着的请求可以走了（第 142 轮）
+        self.pump_web(plugin);
         let now = Local::now();
         let was_tripped = self
             .find(plugin, task)

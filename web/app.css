@@ -1092,6 +1092,12 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .btn.sm { min-height: var(--h-control-sm); padding: 0 var(--pad-control-sm); font-size: 12.5px; }
 .btn.danger { color: var(--err); }
 
+/* `hidden` 属性必须赢过组件类里的 `display`。
+   真实踩到：插件页里 `<div class="toast" hidden>`（插件自己的提示条）跑在 iframe 里，
+   而 iframe 引了面板的 /app.css —— 面板的 `.toast` 写了 `display: flex`，
+   于是那个本该隐藏的元素变成「一个空白的小圆角卡片」挂在页面上（第 142 轮）。 */
+[hidden] { display: none !important; }
+
 .field-label { color: var(--fg-2); font-size: 12px; }
 
 .input {

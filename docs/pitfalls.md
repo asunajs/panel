@@ -469,3 +469,14 @@
     规矩：**插件界面不要对同一个插件并发发请求**（串行 await，几十毫秒的差别看不出来）。
     真要并发（比如任务跑着时界面还要能用），那是宿主侧的事：得在 scheduler 里给 web 调用做排队，
     而不是让插件各自猜。
+
+89（续，第 142 轮）. **宿主侧已排队**：`Cmd::WebCall` 在执行位被占时不立刻失败，而是进插件队列，
+    最多等 8s（`WEB_QUEUE_MS`），队列上限 16（`WEB_QUEUE_MAX`），卸载插件时队列就地失败。
+    执行位空出来的两个点都要 `pump_web()`：`Cmd::WebDone`（HTTP 跑完）和 `finish()`（任务跑完）——
+    只补一个就会出现「任务结束后排队的请求还卡着」。
+
+90. **`hidden` 属性被组件类的 `display` 盖掉 —— 页面上多出一个空白小卡片**：
+    mcloud 页里有个 `<div class="toast" id="toast" hidden>`（它自己的提示条）。iframe 引了面板的
+    `/app.css`，而面板的 `.toast` 写了 `display: flex` —— 类选择器赢过 UA 的 `[hidden]{display:none}`，
+    于是那个本该隐藏的空元素变成「一个白色小圆角块」挂在页面上（用户报「这个错误是啥字都没有」）。
+    修法在面板侧：`[hidden] { display: none !important; }`。插件页也吃这一条，因为引的是同一份 CSS。
