@@ -1338,6 +1338,14 @@ async function showPlugin(name) {
     ops.append(
       mkOp('编辑源码', () => openPluginSource(name)),
       mkOp('配置', () => openPluginConfig(name)),
+      // 停用 / 启用（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上
+      // 给过「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
+      ...(state.disabled.includes(name)
+        ? [mkOp('启用', () => act('/api/plugins/' + encodeURIComponent(name) + '/enable', '已启用 ' + name))]
+        : [mkOp('停用', () => {
+            if (!window.confirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）')) return;
+            act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
+          })]),
       mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),
       mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
       mkOp('删除插件', () => deletePlugin(name), true),
