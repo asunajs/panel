@@ -80,10 +80,34 @@ fn rank(level: &str) -> u8 {
 
 // ---------------------------------------------------------------- 渠道配置
 
+/// 渠道类型（第 169 轮从 2 种扩到 12 种）。
+///
+/// 除 smtp 外全是「一次 HTTP 请求」，差别只在**请求长什么样**：
+/// 拼 URL、拼 body、要不要加签。所以投递仍是同一条发件箱路径（退避/放弃/重试共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Webhook,
     Smtp,
+    /// 企业微信机器人
+    Wecom,
+    /// 钉钉自定义机器人（secret 非空时加签）
+    Dingtalk,
+    /// 飞书/Lark 自定义机器人（secret 非空时加签）
+    Feishu,
+    /// Slack incoming webhook
+    Slack,
+    /// Discord webhook
+    Discord,
+    /// Telegram Bot API（secret = bot token）
+    Telegram,
+    /// Bark（iOS 推送）
+    Bark,
+    /// ntfy（自建或 ntfy.sh）
+    Ntfy,
+    /// Gotify
+    Gotify,
+    /// 自定义：url + 模板 + 额外请求头
+    Custom,
 }
 
 impl Kind {
@@ -91,15 +115,40 @@ impl Kind {
         match self {
             Kind::Webhook => "webhook",
             Kind::Smtp => "smtp",
+            Kind::Wecom => "wecom",
+            Kind::Dingtalk => "dingtalk",
+            Kind::Feishu => "feishu",
+            Kind::Slack => "slack",
+            Kind::Discord => "discord",
+            Kind::Telegram => "telegram",
+            Kind::Bark => "bark",
+            Kind::Ntfy => "ntfy",
+            Kind::Gotify => "gotify",
+            Kind::Custom => "custom",
         }
     }
 
     fn parse(s: &str) -> Option<Self> {
-        match s {
-            "webhook" => Some(Kind::Webhook),
-            "smtp" => Some(Kind::Smtp),
-            _ => None,
-        }
+        Some(match s {
+            "webhook" => Kind::Webhook,
+            "smtp" => Kind::Smtp,
+            "wecom" | "qyweixin" => Kind::Wecom,
+            "dingtalk" | "dingding" => Kind::Dingtalk,
+            "feishu" | "lark" => Kind::Feishu,
+            "slack" => Kind::Slack,
+            "discord" => Kind::Discord,
+            "telegram" | "tg" => Kind::Telegram,
+            "bark" => Kind::Bark,
+            "ntfy" => Kind::Ntfy,
+            "gotify" => Kind::Gotify,
+            "custom" => Kind::Custom,
+            _ => return None,
+        })
+    }
+
+    /// 拼 HTTP 请求的那几种（smtp 之外都算）。
+    pub fn is_http(self) -> bool {
+        !matches!(self, Kind::Smtp)
     }
 }
 
@@ -124,8 +173,20 @@ pub struct Channel {
     pub enabled: bool,
     /// 只看这个等级及以上。None = 跟随全局 min_level。
     pub min_level: Option<String>,
-    /// webhook 的地址。
+    /// HTTP 类渠道的地址（telegram 可省，默认 api.telegram.org）。
     pub url: String,
+    /// 密钥：钉钉/飞书的加签 secret、gotify 的 app token、telegram 的 bot token、bark 的 device key。
+    pub secret: String,
+    /// telegram 的 chat_id / bark 的设备键。
+    pub chat_id: String,
+    /// ntfy 的 topic（拼在 url 后面）。
+    pub topic: String,
+    /// custom 渠道的 body 模板（支持 {{title}} {{body}} {{level}} {{plugin}} {{task}}）。
+    pub template: String,
+    /// custom 渠道的额外请求头。
+    pub headers: Vec<(String, String)>,
+    /// gotify 的优先级（默认 5）。
+    pub priority: i64,
     /// smtp 的目标与凭据。
     pub smtp: Option<SmtpConf>,
 }
@@ -171,6 +232,22 @@ impl Config {
             _ => true,
         }
     }
+}
+
+/// 读自定义请求头（headers 对象：名字 → 值）。
+fn header_pairs(v: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(obj) = v.get("headers").and_then(|h| h.as_object()) {
+        for (k, val) in obj {
+            if let Some(s) = val.as_str() {
+                let k = k.trim();
+                if !k.is_empty() {
+                    out.push((k.to_string(), s.to_string()));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -317,13 +394,46 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
                     }),
                 )
             }
+            // 其余全是「一次 HTTP 请求」：只要 url（telegram 例外，它要 token）。
+            other => {
+                let url = str_field(c, "url");
+                if url.is_empty() && other != Kind::Telegram {
+                    return Err(format!("渠道 {id} 是 {}，但没写 url", other.as_str()));
+                }
+                (url, None)
+            }
         };
+        let secret = str_field(c, "secret");
+        let chat_id = str_field(c, "chat_id");
+        if kind == Kind::Telegram {
+            if secret.is_empty() {
+                return Err(format!("渠道 {id} 是 telegram，但没写 secret（bot token）"));
+            }
+            if chat_id.is_empty() {
+                return Err(format!("渠道 {id} 是 telegram，但没写 chat_id"));
+            }
+        }
+        if kind == Kind::Ntfy && str_field(c, "topic").is_empty() && !url.contains('/') {
+            return Err(format!(
+                "渠道 {id} 是 ntfy，要么在 topic 里写主题，要么把主题拼进 url"
+            ));
+        }
         cfg.channels.push(Channel {
             id,
             kind,
             enabled,
             min_level,
             url,
+            secret,
+            chat_id,
+            topic: str_field(c, "topic"),
+            template: c
+                .get("template")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            headers: header_pairs(c),
+            priority: c.get("priority").and_then(|x| x.as_i64()).unwrap_or(5),
             smtp,
         });
     }
@@ -349,6 +459,12 @@ pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, St
                 enabled: true,
                 min_level: None,
                 url,
+                secret: String::new(),
+                chat_id: String::new(),
+                topic: String::new(),
+                template: String::new(),
+                headers: Vec::new(),
+                priority: 5,
                 smtp: None,
             });
         }
@@ -365,9 +481,6 @@ pub fn channel_view(c: &Channel) -> Value {
         "min_level": c.min_level,
     });
     match c.kind {
-        Kind::Webhook => {
-            out["url"] = json!(c.url);
-        }
         Kind::Smtp => {
             if let Some(s) = &c.smtp {
                 out["host"] = json!(s.host);
@@ -377,6 +490,27 @@ pub fn channel_view(c: &Channel) -> Value {
                 out["pass"] = json!(if s.pass.is_empty() { "" } else { "***" });
                 out["from"] = json!(s.from);
                 out["to"] = json!(s.to);
+            }
+        }
+        // 其余是 HTTP 类：url 照实给（要能看/能改），密钥一律打码。
+        _ => {
+            out["url"] = json!(c.url);
+            out["secret"] = json!(if c.secret.is_empty() { "" } else { "***" });
+            out["has_secret"] = json!(!c.secret.is_empty());
+            if !c.chat_id.is_empty() {
+                out["chat_id"] = json!(c.chat_id);
+            }
+            if !c.topic.is_empty() {
+                out["topic"] = json!(c.topic);
+            }
+            if !c.template.is_empty() {
+                out["template"] = json!(c.template);
+            }
+            if !c.headers.is_empty() {
+                out["headers"] = json!(c.headers.iter().map(|(k, _)| k).collect::<Vec<_>>());
+            }
+            if c.kind == Kind::Gotify {
+                out["priority"] = json!(c.priority);
             }
         }
     }
@@ -567,27 +701,271 @@ async fn enqueue_all(
 
 /// webhook：URL 是**运维填的**，不是插件给的，所以不套插件的 SSRF 门。
 /// 插件只能决定标题和正文，决定不了往哪发。
-async fn post_webhook(url: &str, payload: &str) -> Result<(), String> {
+// ---------------------------------------------------------------- 各渠道的请求长什么样
+//
+// 12 种渠道里只 smtp 不是 HTTP。其余差别只有三件：URL 怎么拼、body 长什么样、
+// 要不要加签。投递路径（发件箱 / 退避 / 放弃 / 手动重试）全部共用，不为渠道分叉。
+
+/// 一次要发出去的 HTTP 请求。
+#[derive(Debug, Clone)]
+struct HttpReq {
+    url: String,
+    body: String,
+    content_type: String,
+    headers: Vec<(String, String)>,
+}
+
+impl HttpReq {
+    fn json(url: impl Into<String>, body: String) -> Self {
+        Self {
+            url: url.into(),
+            body,
+            content_type: "application/json".to_string(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// URL 百分号编码：钉钉的 sign 是 base64，含 + / = ，不编码会被对端当成分隔符。
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// HMAC-SHA256（钉钉/飞书加签要用）。仓库里没有 hmac crate，20 行自己拼，比引依赖划算。
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        let d = Sha256::digest(key);
+        k[..32].copy_from_slice(&d);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(&inner);
+    outer.finalize().to_vec()
+}
+
+/// 请求头里不能有换行（ntfy 的 Title 就是请求头）。
+fn header_safe(s: &str) -> String {
+    s.replace(['\r', '\n'], " ")
+}
+
+/// 从发件箱那行的 payload 里取 level / plugin / task（记录时就在里面）。
+fn payload_meta(row: &Row) -> (String, String, String) {
+    let v: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
+    let g = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let level = g("level");
+    let level = if level.is_empty() {
+        "warn".to_string()
+    } else {
+        level
+    };
+    (level, g("plugin"), g("task"))
+}
+
+/// 模板里插入的字符串必须是**转义后的**内容，否则标题里一个引号就能把 JSON 拆坏。
+fn json_inner(s: &str) -> String {
+    let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+const DEFAULT_CUSTOM_TEMPLATE: &str = r#"{"title":"{{title}}","body":"{{body}}","level":"{{level}}","plugin":"{{plugin}}","task":"{{task}}"}"#;
+
+/// 把一条通知变成一个 HTTP 请求。now_ms 由调用方给，测试里才能对加签做断言。
+fn build_http(ch: &Channel, row: &Row, now_ms: i64) -> Result<HttpReq, String> {
+    let (level, plugin, task) = payload_meta(row);
+    let text = format!("[{level}] {}\n{}", row.title, row.body);
+    match ch.kind {
+        Kind::Smtp => Err("smtp 不走 HTTP".to_string()),
+        // 老 webhook：body 用记录时生成的那份 payload，保持向后兼容。
+        Kind::Webhook => Ok(HttpReq {
+            headers: ch.headers.clone(),
+            ..HttpReq::json(ch.url.clone(), row.payload.clone())
+        }),
+        Kind::Wecom => Ok(HttpReq::json(
+            ch.url.clone(),
+            json!({"msgtype": "text", "text": {"content": text}}).to_string(),
+        )),
+        Kind::Dingtalk => {
+            let mut url = ch.url.clone();
+            if !ch.secret.is_empty() {
+                // 钉钉：sign = base64(HMAC-SHA256(secret, "{timestamp}\n{secret}"))
+                let sign = b64(&hmac_sha256(
+                    ch.secret.as_bytes(),
+                    format!("{now_ms}\n{}", ch.secret).as_bytes(),
+                ));
+                let sep = if url.contains('?') { '&' } else { '?' };
+                url.push(sep);
+                url.push_str(&format!("timestamp={now_ms}&sign={}", url_encode(&sign)));
+            }
+            Ok(HttpReq::json(
+                url,
+                json!({"msgtype": "text", "text": {"content": text}}).to_string(),
+            ))
+        }
+        Kind::Feishu => {
+            let mut v = json!({"msg_type": "text", "content": {"text": text}});
+            if !ch.secret.is_empty() {
+                // 飞书：sign = base64(HMAC-SHA256("{timestamp}\n{secret}", ""))，timestamp 是**秒**
+                let ts = now_ms / 1000;
+                let sign = b64(&hmac_sha256(
+                    format!("{ts}\n{}", ch.secret).as_bytes(),
+                    b"",
+                ));
+                v["timestamp"] = json!(ts.to_string());
+                v["sign"] = json!(sign);
+            }
+            Ok(HttpReq::json(ch.url.clone(), v.to_string()))
+        }
+        Kind::Slack => Ok(HttpReq::json(
+            ch.url.clone(),
+            json!({"text": text}).to_string(),
+        )),
+        Kind::Discord => Ok(HttpReq::json(
+            ch.url.clone(),
+            json!({"content": text}).to_string(),
+        )),
+        Kind::Telegram => {
+            let base = if ch.url.trim().is_empty() {
+                "https://api.telegram.org"
+            } else {
+                ch.url.trim_end_matches('/')
+            };
+            Ok(HttpReq::json(
+                format!("{base}/bot{}/sendMessage", ch.secret),
+                json!({"chat_id": ch.chat_id, "text": text, "disable_web_page_preview": true})
+                    .to_string(),
+            ))
+        }
+        Kind::Bark => {
+            let base = ch.url.trim_end_matches('/');
+            Ok(HttpReq::json(
+                format!("{base}/push"),
+                json!({
+                    "title": row.title,
+                    "body": row.body,
+                    "device_key": ch.secret,
+                    "group": "panel",
+                })
+                .to_string(),
+            ))
+        }
+        Kind::Ntfy => {
+            let base = ch.url.trim_end_matches('/');
+            let url = if ch.topic.is_empty() {
+                base.to_string()
+            } else {
+                format!("{base}/{}", ch.topic.trim_start_matches('/'))
+            };
+            Ok(HttpReq {
+                url,
+                body: format!("{}\n{}", row.title, row.body),
+                content_type: "text/plain; charset=utf-8".to_string(),
+                headers: vec![
+                    ("Title".to_string(), header_safe(&row.title)),
+                    ("Priority".to_string(), priority_word(&level).to_string()),
+                ],
+            })
+        }
+        Kind::Gotify => {
+            let base = ch.url.trim_end_matches('/');
+            let mut url = format!("{base}/message");
+            if !ch.secret.is_empty() {
+                url.push_str(&format!("?token={}", url_encode(&ch.secret)));
+            }
+            Ok(HttpReq::json(
+                url,
+                json!({"title": row.title, "message": row.body, "priority": ch.priority})
+                    .to_string(),
+            ))
+        }
+        Kind::Custom => {
+            let tpl = if ch.template.trim().is_empty() {
+                DEFAULT_CUSTOM_TEMPLATE
+            } else {
+                ch.template.as_str()
+            };
+            let body = tpl
+                .replace("{{title}}", &json_inner(&row.title))
+                .replace("{{body}}", &json_inner(&row.body))
+                .replace("{{level}}", &json_inner(&level))
+                .replace("{{plugin}}", &json_inner(&plugin))
+                .replace("{{task}}", &json_inner(&task))
+                .replace("{{payload}}", &row.payload);
+            Ok(HttpReq {
+                headers: ch.headers.clone(),
+                ..HttpReq::json(ch.url.clone(), body)
+            })
+        }
+    }
+}
+
+/// ntfy 的 priority 用 1..5 的数字词。
+fn priority_word(level: &str) -> &'static str {
+    match level {
+        "error" => "5",
+        "warn" => "4",
+        _ => "3",
+    }
+}
+
+/// 真正发出去。超时 5s（和原来的 webhook 一致），非 2xx 算失败。
+async fn post_http(req: &HttpReq) -> Result<(), String> {
     use http_body_util::{BodyExt, Full};
     let client = llrt_core::modules::https::HTTP_CLIENT
         .as_ref()
         .map_err(|e| format!("HTTP 客户端不可用: {e}"))?
         .clone();
-    let req = http::Request::builder()
+    let mut b = http::Request::builder()
         .method("POST")
-        .uri(url)
-        .header("content-type", "application/json")
-        .body(Full::new(bytes::Bytes::from(payload.to_string())).boxed())
+        .uri(&req.url)
+        .header("content-type", &req.content_type);
+    for (k, v) in &req.headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    let request = b
+        .body(Full::new(bytes::Bytes::from(req.body.clone())).boxed())
         .map_err(|e| format!("请求构造失败: {e}"))?;
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(req))
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(request))
         .await
-        .map_err(|_| "webhook 超时（5s）".to_string())?
+        .map_err(|_| "通知超时（5s）".to_string())?
         .map_err(|e| format!("请求失败: {e}"))?;
     let status = resp.status();
     if status.is_success() {
         Ok(())
     } else {
-        Err(format!("webhook 返回 {status}"))
+        Err(format!("对端返回 {status}"))
     }
 }
 
@@ -627,10 +1005,11 @@ async fn send_mail(ch: &Channel, title: &str, body: &str) -> Result<(), String> 
 }
 
 async fn attempt(ch: &Channel, row: &Row) -> Result<(), String> {
-    match ch.kind {
-        Kind::Webhook => post_webhook(&ch.url, &row.payload).await,
-        Kind::Smtp => send_mail(ch, &row.title, &row.body).await,
+    if ch.kind == Kind::Smtp {
+        return send_mail(ch, &row.title, &row.body).await;
     }
+    let req = build_http(ch, row, now_ms())?;
+    post_http(&req).await
 }
 
 /// 投递一行：成功置 done=1；失败按退避排下一次，超次数或渠道没了置 done=2。

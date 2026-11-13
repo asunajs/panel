@@ -1912,6 +1912,12 @@ async function renderNotifyTab() {
     const pre = el('pre', 'snippet');
     pre.textContent = JSON.stringify({ notify: { min_level: 'warn', channels: [
       { id: 'ops', kind: 'webhook', url: 'https://example.com/hook' },
+      { id: 'wecom', kind: 'wecom', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…' },
+      { id: 'dd', kind: 'dingtalk', url: 'https://oapi.dingtalk.com/robot/send?access_token=…', secret: 'SEC…' },
+      { id: 'fs', kind: 'feishu', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/…', secret: '…' },
+      { id: 'tg', kind: 'telegram', secret: '123456:ABC-DEF', chat_id: '123456789' },
+      { id: 'push', kind: 'bark', url: 'https://api.day.app', secret: '设备键' },
+      { id: 'topic', kind: 'ntfy', url: 'https://ntfy.sh', topic: 'panel' },
       { id: 'mail', kind: 'smtp', host: 'smtp.example.com', port: 465, tls: 'implicit',
         user: 'me@example.com', pass: '***', to: ['me@example.com'] },
     ] } }, null, 2);
@@ -1927,7 +1933,10 @@ async function renderNotifyTab() {
     t.append(tbody);
     for (const c of d.channels) {
       const tr = el('tr');
-      const target = c.kind === 'webhook' ? c.url : (c.to || []).join(', ') + ' @ ' + c.host + ':' + c.port;
+      // 12 种渠道里只有 smtp 是「邮件目标」，其余都是 URL（telegram 的目标是 chat_id）。
+      const target = c.kind === 'smtp'
+        ? ((c.to || []).join(', ') + ' @ ' + (c.host || '') + ':' + (c.port || ''))
+        : (c.url || (c.kind === 'telegram' ? ('chat ' + (c.chat_id || '?')) : ''));
       tr.append(
         el('td', '', c.id),
         el('td', '', c.kind),
@@ -1945,6 +1954,10 @@ async function renderNotifyTab() {
     }
     box.append(t);
     box.append(el('p', 'settings-note', '全局门槛 ' + (d.min_level || 'warn') + '；静音名单 ' + ((d.mute || []).join('、') || '（空）')));
+    box.append(el('p', 'settings-note',
+      '支持的类型：webhook / wecom（企业微信）/ dingtalk（钉钉，可加签）/ feishu（飞书，可加签）/ ' +
+      'slack / discord / telegram / bark / ntfy / gotify / custom（自定义模板）/ smtp。' +
+      '渠道配置在 config.json 的 notify.channels 里；密钥在接口响应里一律显示为 ***。'));
   }
 
   clear(out);

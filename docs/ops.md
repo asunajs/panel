@@ -960,3 +960,5 @@ status=error  error=脚本不能注册任务：请用「计划」字段排程，
 守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`（带计划 / 不带计划 / 计划写错三条）。
 
 日常实例（3030）的安装、升级、口令：见 [daily.md](daily.md)。
+
+渠道类型与配置见 [notify.md](notify.md)。
