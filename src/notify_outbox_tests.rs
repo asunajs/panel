@@ -46,6 +46,12 @@ fn hook(id: &str, url: &str) -> Channel {
         enabled: true,
         min_level: None,
         url: url.to_string(),
+        secret: String::new(),
+        chat_id: String::new(),
+        topic: String::new(),
+        template: String::new(),
+        headers: Vec::new(),
+        priority: 5,
         smtp: None,
     }
 }
