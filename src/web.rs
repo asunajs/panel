@@ -682,17 +682,38 @@ async fn api_logout() -> Response {
 async fn readyz(State(st): State<AppState>) -> Response {
     // 库能不能读（`plugins` 表只是个探针，别拿它的行数当插件数 ——
     // 那张表只记「被禁用的」，行数跟实际加载数无关）。
-    let db = st
-        .db
-        .call(|c| {
+    let db = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        st.db.call(|c| {
             c.query_row("SELECT count(*) FROM plugins", [], |r| r.get::<_, i64>(0))
                 .map_err(|e| e.to_string())
-        })
-        .await;
-    // 调度器还活着吗：能应答就说明 actor 循环没卡死
-    let plugins = st.sched.plugins().await.map(|p| p.len()).unwrap_or(0);
-    let tasks = st.sched.tasks().await.map(|t| t.len()).unwrap_or(0);
-    let ok = db.is_ok();
+        }),
+    )
+    .await
+    .map_err(|_| "库 2 秒没应答".to_string())
+    .and_then(|r| r);
+    // 调度器还活着吗：能应答就说明 actor 循环没卡死。
+    // **但不能无限等**：插件加载是在这个 actor 里串行做的，而真实插件（mcloud 那些）
+    // 加载期会打网络，一次能拖几十秒。没有超时的话 `/readyz` 会被挂住 ——
+    // 反代/launchd 看到的不是「还没好」，而是「请求超时」（第 132 轮实测：100 秒后才回）。
+    // 现在最多等 2 秒，超时就明确回 503「调度器在忙」，语义是「现在别把流量给我」。
+    let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mark = busy.clone();
+    let (plugins, tasks) = match tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let p = st.sched.plugins().await.map(|v| v.len()).unwrap_or(0);
+        let t = st.sched.tasks().await.map(|v| v.len()).unwrap_or(0);
+        (p, t)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            mark.store(true, std::sync::atomic::Ordering::Relaxed);
+            (0, 0)
+        }
+    };
+    let sched_busy = busy.load(std::sync::atomic::Ordering::Relaxed);
+    let ok = db.is_ok() && !sched_busy;
     // 探针是**无鉴权**的（反代要能打）：只给计数，不给插件名、不给库体积。
     let failed_plugins = st.load_errors.lock().map(|g| g.len()).unwrap_or(0);
     let outbox_failed = crate::notify::counts(&st.db)
@@ -700,13 +721,18 @@ async fn readyz(State(st): State<AppState>) -> Response {
         .ok()
         .and_then(|v| v["failed"].as_i64())
         .unwrap_or(0);
+    let err = match (db.err(), sched_busy) {
+        (Some(e), _) => Some(e),
+        (None, true) => Some("调度器在忙（多半在加载插件），稍后再试".to_string()),
+        _ => None,
+    };
     let body = json!({
         "ok": ok,
         "plugins": plugins,
         "tasks": tasks,
         "failed_plugins": failed_plugins,
         "outbox_failed": outbox_failed,
-        "error": db.err(),
+        "error": err,
     });
     let code = if ok {
         StatusCode::OK

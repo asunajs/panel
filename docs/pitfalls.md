@@ -381,3 +381,11 @@
     正确姿势（已固化成 `scripts/deploy-daily.sh`）：写 `panel.new` → `codesign --force -s -`（重新 ad-hoc 签名）
     → `mv` 换（换 inode）→ `launchctl kickstart -k` → 轮询 `/readyz` 确认。
     自查：`launchctl print gui/$(id -u)/dev.panel | grep -E 'state|last exit'` 应是 `running` / `(never exited)`。
+
+79. **`/readyz` 无限等调度器 → 插件加载期间探测直接超时（不是 503）**：
+    装载真实插件时 mcloud 会打网络，加载是在调度器 actor 里串行做的；readyz 里
+    `sched.plugins().await` / `tasks().await` 排在加载后面，于是**请求被吊住**：
+    第 132 轮实测部署后 100 秒才回第一次响应，而 `/healthz` 一直是 200 / 0.8 ms。
+    反代和 launchd 看到的不是「还没就绪」，是「探测超时」，行为完全不一样。
+    现在两处都加 2 秒超时：超过就 503 + `error: "调度器在忙（多半在加载插件），稍后再试"`。
+    部署脚本也改成两段等：`healthz` 起来 → 再等 `readyz`（最多 120 秒）。

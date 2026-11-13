@@ -9,11 +9,17 @@
 #   2) 每次重新落盘后要**重新 ad-hoc 签名**（codesign --force -s -）：
 #      launchd 起进程对签名比手工在终端跑严格，重新签名这一步让它能过。
 #   3) 换完必须 kickstart 一次；只改文件不重启，跑的还是旧进程。
+#
+# 等待分两段（第 132 轮）：
+#   /healthz 起来 = 进程活着（毫秒级）
+#   /readyz  200 = 插件都加载完 —— 真实插件（mcloud 那些）加载期会打网络，几十秒才收敛，
+#                 所以这里等 120 秒；期间 readyz 会明确回 503「调度器在忙」而不是挂着。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${PANEL_DEST:-$HOME/panel-3030}"
 LABEL="${PANEL_LABEL:-dev.panel}"
+PORT="${PANEL_PORT:-3030}"
 
 cd "$ROOT"
 cargo build --release --offline
@@ -23,12 +29,22 @@ codesign --force --sign - "$DEST/panel.new" 2>/dev/null || true
 mv "$DEST/panel.new" "$DEST/panel"
 
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
+
 for _ in $(seq 1 60); do
-  if curl -sf --max-time 1 "http://127.0.0.1:3030/readyz" > /dev/null 2>&1; then
-    echo "已部署并重启：$(curl -s --max-time 3 http://127.0.0.1:3030/readyz)"
+  if curl -sf --max-time 1 "http://127.0.0.1:$PORT/healthz" > /dev/null 2>&1; then
+    echo "进程已起（healthz 200），等插件加载完…"
+    break
+  fi
+  sleep 0.5
+done
+
+for _ in $(seq 1 240); do
+  BODY="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/readyz" 2>/dev/null || true)"
+  if [ -n "$BODY" ]; then
+    echo "已就绪：$BODY"
     exit 0
   fi
   sleep 0.5
 done
-echo "部署完成，但 20 秒内 /readyz 没起来：看 $DEST/data/panel.err.log" >&2
+echo "进程起来了，但 120 秒内 /readyz 没 200：看 $DEST/data/panel.err.log 与日志页" >&2
 exit 1
