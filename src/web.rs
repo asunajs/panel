@@ -267,7 +267,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/logs/stream", get(api_logs_stream))
 
         // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
-        .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(st.clone(), require_token))
         // 写接口限流（读接口不挡：界面每隔几秒就在读）
         .layer(middleware::from_fn_with_state(st.clone(), rate_limit_writes));
@@ -2079,7 +2079,18 @@ mod router_tests;
 /// 上限在这里是**保护面板**（读进内存、发给浏览器），不是限制功能。
 /// 插件源码上限。原来是 512 KiB，mcloud 的主插件 531 KB 就撞线了 ——
 /// 插件是可信代码，这个上限只防手滑（把整个仓库粘进来），不防恶意。
-const SOURCE_MAX: usize = 2 * 1024 * 1024;
+/// 插件源码上限。默认 **8 MiB**（和脚本同一个量级：打包出来的插件也就 0.5–2 MB）。
+const SOURCE_MAX: usize = 8 * 1024 * 1024;
+const SOURCE_MIN: usize = 64 * 1024;
+const ENV_SOURCE_MAX: &str = "PANEL_PLUGIN_MAX_BYTES";
+
+fn source_max() -> usize {
+    std::env::var(ENV_SOURCE_MAX)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n >= SOURCE_MIN)
+        .unwrap_or(SOURCE_MAX)
+}
 
 fn plugin_path(dir: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {
     safe_name(name)?;
@@ -2162,7 +2173,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
     files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(Json(json!({
         "dir": st.plugins_dir.display().to_string(),
-        "max_bytes": SOURCE_MAX,
+        "max_bytes": source_max(),
         "files": files,
     })))
 }
@@ -2263,10 +2274,11 @@ async fn plugin_source(
     let meta = tokio::fs::metadata(&path)
         .await
         .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))?;
-    if meta.len() > SOURCE_MAX as u64 {
+    if meta.len() > source_max() as u64 {
         return Err(bad(format!(
-            "插件源码有 {} 字节，超过上限 {SOURCE_MAX} 字节",
-            meta.len()
+            "插件源码有 {} 字节，超过上限 {} 字节（{ENV_SOURCE_MAX} 可调）",
+            meta.len(),
+            source_max()
         )));
     }
     let source = tokio::fs::read_to_string(&path)
@@ -2300,7 +2312,7 @@ async fn plugin_save(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     let path = plugin_path(&st.plugins_dir, &name)?;
-    if body.source.len() > SOURCE_MAX {
+    if body.source.len() > source_max() {
         return Err(bad(format!(
             "源码有 {} 字节，超过上限 {SOURCE_MAX} 字节",
             body.source.len()

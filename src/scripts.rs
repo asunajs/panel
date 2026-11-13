@@ -34,7 +34,23 @@ impl Drop for Flight {
 }
 /// `runs` / `logs` 里脚本的 plugin 字段。
 pub const PLUGIN: &str = "@script";
-pub const FILE_MAX: usize = 512 * 1024;
+/// 单个脚本源码的上限。默认 **8 MiB**。
+///
+/// 原来是 512 KiB —— 一个照实打包的脚本（mcloud v2.2.3）就有 1.5 MB，直接被挡在门外。
+/// 上限的意义是「别把内存吃穿」，不是「猜用户写多少」，所以给足；真要收紧用环境变量。
+pub const FILE_MAX: usize = 8 * 1024 * 1024;
+/// 下限：再小就放不下正常脚本了，误配成 0 会表现成「什么都存不进去」。
+const FILE_MIN: usize = 64 * 1024;
+pub const ENV_FILE_MAX: &str = "PANEL_SCRIPT_MAX_BYTES";
+
+/// 本次启动生效的上限（环境变量非法就退回默认，不因为一个笔误拒绝启动）。
+pub fn file_max() -> usize {
+    std::env::var(ENV_FILE_MAX)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n >= FILE_MIN)
+        .unwrap_or(FILE_MAX)
+}
 pub const DEFAULT_BUDGET_MS: u64 = 30_000;
 pub const MAX_BUDGET_MS: u64 = 5_400_000;
 /// 排程检查间隔：脚本不是秒级任务，15 秒粒度足够，也不吵。
@@ -229,8 +245,9 @@ impl Scripts {
         let source = tokio::fs::read_to_string(&p)
             .await
             .map_err(|e| format!("读脚本失败 {}: {e}", p.display()))?;
-        if source.len() > FILE_MAX {
-            return Err(format!("脚本有 {} 字节，超过上限 {FILE_MAX} 字节", source.len()));
+        if source.len() > file_max() {
+            let cap = file_max();
+            return Err(format!("脚本有 {} 字节，超过上限 {cap} 字节（{ENV_FILE_MAX} 可调）", source.len()));
         }
         let row = self
             .db
@@ -285,8 +302,9 @@ impl Scripts {
         enabled: bool,
     ) -> Result<Value, String> {
         let p = path_of(&self.dir, name)?;
-        if source.len() > FILE_MAX {
-            return Err(format!("脚本有 {} 字节，超过上限 {FILE_MAX} 字节", source.len()));
+        if source.len() > file_max() {
+            let cap = file_max();
+            return Err(format!("脚本有 {} 字节，超过上限 {cap} 字节（{ENV_FILE_MAX} 可调）", source.len()));
         }
         if source.trim().is_empty() {
             return Err("脚本内容不能为空".to_string());

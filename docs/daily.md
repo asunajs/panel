@@ -55,3 +55,15 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 
 起不来时先看 `~/panel-3030/data/panel.err.log`，再看 `launchctl print gui/$(id -u)/dev.panel` 里的
 `state` 与 `last exit reason`。
+
+### 源码体积上限（第 132 轮抬过）
+
+| 对象 | 默认上限 | 环境变量 |
+|---|---|---|
+| 脚本源码 | **8 MiB** | `PANEL_SCRIPT_MAX_BYTES`（下限 64 KiB） |
+| 插件源码 | **8 MiB** | `PANEL_PLUGIN_MAX_BYTES`（下限 64 KiB） |
+| HTTP 请求体 | 16 MiB | 代码里定死（`DefaultBodyLimit`） |
+
+原来是脚本 512 KiB / 插件 2 MiB —— 一个照实打包的单文件脚本（mcloud v2.2.3）1.58 MB，
+直接被挡在门外（界面上弹「脚本有 1580716 字节，超过上限 524288 字节」）。
+上限的作用是「别把内存吃穿」，不是「猜用户写多少」，所以给足；要收紧用环境变量。

@@ -3268,3 +3268,38 @@ async fn plugin_config_roundtrip_and_guards() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["config"]["account"], json!("me"));
 }
+
+/// 第 132 轮：脚本源码上限从 512 KiB 抬到 8 MiB。
+///
+/// 起因是用户保存一个 1.5 MB 的打包脚本被挡在门外（`脚本有 1580716 字节，超过上限 524288 字节`）。
+/// 这条用例钉住两件事：**1.6 MB 能存进去**、**报出来的上限是 8 MiB**。
+#[tokio::test]
+async fn big_script_saves_and_reports_an_eight_mib_limit() {
+    let (app, _plugins, data, _store) = setup_dirs("bigscript").await;
+    // 1.6 MB 的源码（真实场景：打包出来的单文件脚本）
+    let mut src = String::with_capacity(1_700_000);
+    src.push_str("export default 1;\n");
+    while src.len() < 1_600_000 {
+        src.push_str("// ");
+        src.push_str(&"x".repeat(120));
+        src.push('\n');
+    }
+    assert!(src.len() > 1_500_000, "样本要够大：{}", src.len());
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/scripts/big",
+            Some(json!({ "source": src })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "1.6 MB 的脚本应当能存: {body}");
+    let n = std::fs::metadata(data.join("scripts/big.js"))
+        .expect("脚本应当落盘")
+        .len();
+    assert!(n > 1_500_000, "落盘大小 {n}");
+    // 文件列表里报出来的上限要是 8 MiB（不是老的 512 KiB）
+    let (_s, files) = get(&app, "/api/plugins/files").await;
+    assert_eq!(files["max_bytes"], json!(8 * 1024 * 1024), "{files}");
+}

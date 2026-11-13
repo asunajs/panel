@@ -131,7 +131,7 @@ pub fn validate(data: &Value) -> Result<Option<(String, Value)>, String> {
         let name = s.get("name").and_then(Value::as_str).unwrap_or_default();
         crate::scripts::safe_name(name)?;
         let source = s.get("source").and_then(Value::as_str).unwrap_or_default();
-        if source.len() > crate::scripts::FILE_MAX {
+        if source.len() > crate::scripts::file_max() {
             return Err(format!("脚本 {name} 太大"));
         }
     }
