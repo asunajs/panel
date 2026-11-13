@@ -534,6 +534,19 @@ userAgent      = …
 分不出来。把 `computed` 值和样式表版本摆出来，一眼就知道该怪哪头。
 
 `--style-ver` 写在插件自己的 `:root` 里，改样式表就加一 —— 它只是个人工标记，别指望自动同步。
+
+### 插件样式的硬准则（技能 `panel-plugin-ui` + 静态闸门）
+
+改插件界面前先读技能 **`panel-plugin-ui`**（`~/.dsh/skills/panel-plugin-ui/SKILL.md`）：九条硬准则、
+四道门禁、`?diag=1`、多 agent 的文件归属纪律都在里面。三条最容易犯的：
+
+1. **只读 token，不定义 token**；旧面板的短名字只能「旧名 → 0.4.0 token」单向映射（写反 = 整页崩）。
+2. **不写颜色字面量、不用 `!important`、不写 `prefers-color-scheme`**（必须写死色值就加 `/* style-lint: allow-color 理由 */`）。
+3. **不撤面板画的控件样式**（`width:auto;border:0;background:none` 会把勾选框擦成空白）。
+
+这些由 `node scripts/check-plugin-style.mjs` 静态检查，并且**挂在 `deploy-daily.sh` 里** ——
+违规就部署不出去。第 156 轮的教训：有人把 `--text: var(--fg)` 改成 `--fg: var(--text)`，
+0.4.0 没有 `--text` ⇒ `--fg` 变无效值，整页配色塌掉，而编译与 337 条单测全过。
 ### 勾选框（插件里那条「撤掉全局 input 样式」的补丁）
 
 0.4.0 的勾选框是**面板画的**，选择器带 `html` 前缀：

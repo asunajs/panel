@@ -23,6 +23,9 @@ LABEL="${PANEL_LABEL:-dev.panel}"
 PORT="${PANEL_PORT:-3030}"
 
 cd "$ROOT"
+# 样式闸门：token 被重定义 / 颜色写死 / !important / prefers-color-scheme / 撤掉控件样式
+# 这几类改动编译不报错、单测照过，只有人眼看得出（第 156 轮有人把整段 token 映射换掉了）。
+node scripts/check-plugin-style.mjs
 cargo build --release --offline
 
 cp target/release/panel "$DEST/panel.new"
