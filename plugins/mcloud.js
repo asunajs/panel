@@ -14684,7 +14684,8 @@ syncTaskReadiness(store);
 var transport = makeTransport();
 var host2 = makeHost();
 register_nav({
-  label: "云盘",
+  // 侧栏/页面上显示的产品名：用户口径「移动云盘」（2026-11-13）
+  label: "移动云盘",
   icon: "☁"
   // 不写 path：面板默认 `plugins/mcloud/index.html`，正是我们放页面的地方
 });
