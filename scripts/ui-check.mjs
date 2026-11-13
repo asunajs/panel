@@ -172,12 +172,15 @@ async function main() {
   /** 最近一条提示的文本：**两个通道都看**（第 134 轮起要读的信息走右上角 #notices）。
    *  断言不该关心走哪条通道，只关心「用户看到的那句话」。 */
   const lastMsg = async () => {
+    // 短结果走 toast（正在显示就是最新的），长提示/错误在 #notices 里
+    const t = await js(
+      "(()=>{const e=document.getElementById('toast');return e.classList.contains('hidden')?'':e.textContent;})()",
+    );
+    if (t) return t;
     const arr = await js(
       "[...document.querySelectorAll('#notices .notice-body')].map(e=>e.textContent)",
     );
-    const t = await js("document.getElementById('toast').textContent");
-    const n = arr && arr.length ? arr[arr.length - 1] : '';
-    return n || t || '';
+    return arr && arr.length ? arr[arr.length - 1] : '';
   };
 
   // ---------------------------------------------------------------- 断言
@@ -369,21 +372,36 @@ async function main() {
   await sleep(1600);
   const clashToast = await lastMsg();
   check('选「覆盖」后提示说「已覆盖」而不是「已上传」', /已覆盖/.test(clashToast || ''), clashToast);
-  // 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就没，用户自己关。
-  const noticeText = await js("[...document.querySelectorAll('#notices .notice-body')].map(e=>e.textContent).pop() || ''");
-  check('上传结果走常驻提示（右上角）', /已覆盖/.test(noticeText), noticeText);
-  const noticePos = JSON.parse(await js(
-    "JSON.stringify((()=>{const n=document.querySelector('#notices .notice');const r=n.getBoundingClientRect();" +
-    "return {top:Math.round(r.top),right:Math.round(innerWidth-r.right)};})())",
+  // 第 135 轮：**短结果**走顶部居中（闪一下就走），**长提示/错误**走右上角常驻。
+  await js("document.getElementById('toast').className = 'toast hidden'");
+  await js("notify('mcloud 当前没有在跑的任务', 'ok')");
+  await sleep(300);
+  const shortInfo = JSON.parse(await js(
+    "JSON.stringify({toast:document.getElementById('toast').textContent," +
+    "toastShown:!document.getElementById('toast').classList.contains('hidden')," +
+    "notices:document.querySelectorAll('#notices .notice').length})",
   ));
-  check('常驻提示贴在右上角', noticePos.top < 200 && noticePos.right < 60, JSON.stringify(noticePos));
+  check(
+    '短结果走顶部居中（不进右上角）',
+    shortInfo.toastShown === true && shortInfo.notices === 0 && /没有在跑的任务/.test(shortInfo.toast),
+    JSON.stringify(shortInfo),
+  );
+  // 长错误必须常驻：要看完、要截图、要拿去分析
+  const longErr = '脚本有 1580716 字节，超过上限 524288 字节（PANEL_SCRIPT_MAX_BYTES 可调）';
+  await js("notify(" + JSON.stringify(longErr) + ", 'err')");
+  await sleep(300);
+  const longInfo = JSON.parse(await js(
+    "JSON.stringify({notices:document.querySelectorAll('#notices .notice').length," +
+    "text:document.querySelector('#notices .notice-body')?.textContent||''})",
+  ));
+  check('长提示/错误走右上角常驻', longInfo.notices === 1 && longInfo.text === longErr, JSON.stringify(longInfo).slice(0, 120));
   await sleep(5000);
-  const stillThere = await js("document.querySelectorAll('#notices .notice').length");
-  check('常驻提示 5 秒后还在（不会自己消失）', stillThere >= 1, String(stillThere));
+  const stillThere2 = await js("document.querySelectorAll('#notices .notice').length");
+  check('常驻提示 5 秒后还在（不会自己消失）', stillThere2 >= 1, String(stillThere2));
   await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
   await sleep(250);
-  const afterClose = await js("document.querySelectorAll('#notices .notice').length");
-  check('常驻提示能手动关掉', afterClose === 0, String(afterClose));
+  const afterClose2 = await js("document.querySelectorAll('#notices .notice').length");
+  check('常驻提示能手动关掉', afterClose2 === 0, String(afterClose2));
   const allCards = await js("document.querySelectorAll('#plugin-grid .plugin-card').length");
   check('插件按系列分组了', groups.length >= 1, JSON.stringify(groups));
   check(

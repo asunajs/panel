@@ -201,6 +201,24 @@ function notice(msg, kind) {
   while (box.children.length > 4) box.firstElementChild.remove();
   return el;
 }
+/** 什么时候「顶部居中闪一下」、什么时候「右上角常驻」——由**内容**决定，不靠调用点记得（第 135 轮）。
+ *
+ * 用户的判据很干脆：
+ *   短结果（「mcloud 当前没有在跑的任务」）→ 顶部居中闪一下就行，用户只要知道结果；
+ *   长提示 / 错误（要看完、要截图、要拿去分析）→ 右上角常驻，用户自己关。
+ * 所以规则写成：错误 或 超过 20 字 或 带换行 → notice()；其余 → toast()。
+ */
+const NOTICE_MIN_LEN = 20;
+function notify(msg, kind) {
+  const text = msg == null ? '' : String(msg);
+  const k = kind || 'info';
+  const needsReading = k === 'err' || text.length > NOTICE_MIN_LEN || text.includes('\n');
+  if (!needsReading) {
+    toast(text);
+    return null;
+  }
+  return notice(text, k);
+}
 function toast(msg, isErr) {
   const t = $('toast');
   t.textContent = msg;
@@ -335,7 +353,7 @@ async function submitFirstRun(body) {
     showFirstRun(false);
     state.auth = true;
     state.loaded = true;
-    notice('口令已生效，浏览器这边已经登录', 'ok');
+    notify('口令已生效，浏览器这边已经登录', 'ok');
     await refresh();
     await loadDashboard();
   } catch (e) {
@@ -741,7 +759,7 @@ async function groupAct(group, kind) {
     .map((f) => f.name);
   const names = kind === 'reload' ? loaded : disabled;
   if (!names.length) {
-    notice(kind === 'reload' ? '这个系列没有已加载的插件' : '这个系列没有已停用的插件');
+    notify(kind === 'reload' ? '这个系列没有已加载的插件' : '这个系列没有已停用的插件');
     return;
   }
   const fails = [];
@@ -757,7 +775,7 @@ async function groupAct(group, kind) {
   }
   const ok = names.length - fails.length;
   // 批量操作的结果必须常驻：失败清单是要一条条看的
-  notice(
+  notify(
     fails.length
       ? group + ' 系列：' + ok + ' 个成功，失败 ' + fails.join('、')
       : group + ' 系列：' + names.length + ' 个' + (kind === 'reload' ? '已重载' : '已启用'),
@@ -788,7 +806,7 @@ async function saveTaskSchedule(expr) {
   try {
     await api(taskPath(scheduleTarget, 'schedule'), { method: 'POST', body: { expr } });
     $('task-schedule').classList.add('hidden');
-    notice(expr === null ? '已恢复插件注册的计划' : '计划已改成 ' + expr, 'ok');
+    notify(expr === null ? '已恢复插件注册的计划' : '计划已改成 ' + expr, 'ok');
     await refresh();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
@@ -1014,7 +1032,7 @@ async function searchLogs(reset) {
     state.logTotal = d.total || 0;
     if (rows.length) state.logBefore = rows[rows.length - 1].id;
   } catch (e) {
-    notice(e.message || '搜索失败', 'err');
+    notify(e.message || '搜索失败', 'err');
   }
   renderLogs();
 }
@@ -1194,12 +1212,12 @@ async function openPluginConfig(name) {
         method: 'PUT',
         body: { text: ta.value },
       });
-      notice(r.reloaded === false
+      notify(r.reloaded === false
         ? '配置已保存，但插件重载失败：' + (r.error || '')
         : '配置已保存，插件已重载', r.reloaded === false);
       await refresh();
     } catch (e) {
-      notice(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');
+      notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');
     } finally {
       save.disabled = false;
     }
@@ -1498,7 +1516,7 @@ async function saveScriptSource() {
     });
     $("src-error").classList.add("hidden");
     $("src-meta").textContent = "已保存 · " + humanBytes(d.bytes);
-    notice("已保存 " + name);
+    notify("已保存 " + name);
     await loadScripts();
     renderScripts();
   } catch (e) {
@@ -1511,11 +1529,11 @@ async function saveScriptSource() {
 async function runScript(name) {
   try {
     const d = await api("/api/scripts/" + encodeURIComponent(name) + "/run", { method: "POST" });
-    notice("已触发 " + name + "（run #" + d.run_id + "）", "ok");
+    notify("已触发 " + name + "（run #" + d.run_id + "）", "ok");
     await loadScripts();
     renderScripts();
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "运行失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "运行失败"), 'err');
   }
 }
 
@@ -1527,12 +1545,12 @@ async function deleteScript(name) {
   if (!ok) return;
   try {
     await api("/api/scripts/" + encodeURIComponent(name), { method: "DELETE" });
-    notice("已删除 " + name);
+    notify("已删除 " + name);
     closeDrawer();
     await loadScripts();
     renderScripts();
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), 'err');
   }
 }
 
@@ -1556,7 +1574,7 @@ async function createScript() {
   try {
     await api("/api/scripts", { method: "POST", body: { name } });
     $("new-script").classList.add("hidden");
-    notice("已创建 " + name);
+    notify("已创建 " + name);
     await loadScripts();
     renderScripts();
     await openScript(name);
@@ -1621,7 +1639,7 @@ async function savePluginSource() {
     // 只更新元信息，不把编辑器里的内容读回来覆盖 —— 用户刚写完的东西不该被抢走，
     // 而且「保存 → 重新读取」这两个异步动作叠在一起会把随后出现的错误提示吞掉。
     $("src-meta").textContent = "已保存并重载 · " + humanBytes(d.bytes);
-    notice("已保存并重载 " + name + "（" + humanBytes(d.bytes) + "）", "ok");
+    notify("已保存并重载 " + name + "（" + humanBytes(d.bytes) + "）", "ok");
     await refresh();
   } catch (e) {
     srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "保存失败"));
@@ -1638,11 +1656,11 @@ async function deletePlugin(name) {
   if (!ok) return;
   try {
     const d = await api("/api/plugins/" + encodeURIComponent(name), { method: "DELETE" });
-    notice("已删除 " + name + (d.moved_to ? "（副本在 trash）" : ""), "ok");
+    notify("已删除 " + name + (d.moved_to ? "（副本在 trash）" : ""), "ok");
     closeDrawer();
     await refresh();
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), 'err');
   }
 }
 
@@ -1666,7 +1684,7 @@ async function createPlugin() {
   try {
     await api("/api/plugins", { method: "POST", body: { name } });
     $("new-plugin").classList.add("hidden");
-    notice("已创建 " + name);
+    notify("已创建 " + name);
     await refresh();
     showPlugin(name);
     openPluginSource(name);
@@ -1731,7 +1749,7 @@ async function saveConfig() {
       body: { text: $("config-editor").value },
     });
     $("config-error").classList.add("hidden");
-    notice("配置已保存，插件即刻生效（" + humanBytes(d.bytes) + "）", "ok");
+    notify("配置已保存，插件即刻生效（" + humanBytes(d.bytes) + "）", "ok");
     await loadConfigEditor();
   } catch (e) {
     configError(e instanceof Unauthorized ? "需要令牌" : (e.message || "保存失败"));
@@ -1934,9 +1952,9 @@ async function testNotify(id) {
   try {
     const r = await api('/api/notify/test', { method: 'POST', body: id ? { channel: id } : {} });
     const bad = (r.results || []).filter(x => !x.ok);
-    notice(bad.length ? (bad[0].channel + ' 失败：' + bad[0].error) : '试发成功', bad.length ? 'err' : 'ok');
+    notify(bad.length ? (bad[0].channel + ' 失败：' + bad[0].error) : '试发成功', bad.length ? 'err' : 'ok');
   } catch (e) {
-    notice(e.message || '试发失败', 'err');
+    notify(e.message || '试发失败', 'err');
   }
   renderNotifyTab();
 }
@@ -1944,9 +1962,9 @@ async function testNotify(id) {
 async function retryNotify() {
   try {
     const r = await api('/api/notify/outbox/retry', { method: 'POST', body: {} });
-    notice(r.retried ? ('已打回 ' + r.retried + ' 条，等下一次扫描') : '没有要重试的', 'ok');
+    notify(r.retried ? ('已打回 ' + r.retried + ' 条，等下一次扫描') : '没有要重试的', 'ok');
   } catch (e) {
-    notice(e.message || '重试失败', 'err');
+    notify(e.message || '重试失败', 'err');
   }
   renderNotifyTab();
 }
@@ -2128,13 +2146,13 @@ async function markRead(ids) {
     renderNotify();
     return true;
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "标记已读失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "标记已读失败"), 'err');
     return false;
   }
 }
 
 async function markAllRead() {
-  if (await markRead(null)) notice("已全部标记已读");
+  if (await markRead(null)) notify("已全部标记已读");
 }
 
 // ---------------------------------------------------------------- 备份 / 恢复
@@ -2152,9 +2170,9 @@ async function exportBackup() {
     a.remove();
     // 立刻 revoke 会让部分浏览器取消下载，等一会儿。
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    notice("已导出备份（" + (d.plugins || []).length + " 插件 / " + (d.scripts || []).length + " 脚本）", "ok");
+    notify("已导出备份（" + (d.plugins || []).length + " 插件 / " + (d.scripts || []).length + " 脚本）", "ok");
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "导出失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "导出失败"), 'err');
   }
 }
 
@@ -2164,7 +2182,7 @@ async function importBackup(file) {
   try {
     data = JSON.parse(text);
   } catch (e) {
-    notice("这个文件不是合法 JSON", 'err');
+    notify("这个文件不是合法 JSON", 'err');
     return;
   }
   const ok = await askConfirm(
@@ -2175,13 +2193,13 @@ async function importBackup(file) {
   try {
     const r = await api("/api/backup", { method: "POST", body: data });
     const bad = [...(r.plugins || []), ...(r.scripts || [])].filter((x) => x.loaded === false || x.ok === false);
-    notice(
+    notify(
       "已恢复 " + (r.plugins || []).length + " 个插件、" + (r.scripts || []).length + " 个脚本" +
         (bad.length ? "（" + bad.length + " 个有问题，看日志）" : ""),
     );
     await refresh();
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "恢复失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "恢复失败"), 'err');
   }
 }
 
@@ -2298,7 +2316,7 @@ async function loadRuns(reset = true) {
     state.runs = reset ? got : state.runs.concat(got);
     state.runsTotal = typeof data.total === 'number' ? data.total : state.runs.length;
     if (state.view === 'runs') renderRuns();
-  } catch (e) { if (!(e instanceof Unauthorized)) notice('读取运行记录失败', 'err'); }
+  } catch (e) { if (!(e instanceof Unauthorized)) notify('读取运行记录失败', 'err'); }
   finally { state.runsLoading = false; }
 }
 
@@ -2311,7 +2329,7 @@ async function loadDashboard() {
     state.dashRuns = runs.runs || [];
     state.dashLogs = (logs.logs || []).slice().reverse();
     if (state.view === 'dashboard') { renderDashRuns(); renderDashLogs(); }
-  } catch (e) { if (!(e instanceof Unauthorized)) notice('读取最近活动失败', 'err'); }
+  } catch (e) { if (!(e instanceof Unauthorized)) notify('读取最近活动失败', 'err'); }
 }
 
 function render() {
@@ -2333,12 +2351,12 @@ function render() {
 async function act(path, okMsg) {
   try {
     await api(path, { method: 'POST' });
-    notice(okMsg);
+    notify(okMsg);
     await refresh();
     if (state.view === 'runs') await loadRuns();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
-    notice(e.message || '操作失败', 'err');
+    notify(e.message || '操作失败', 'err');
   }
 }
 
@@ -2646,7 +2664,7 @@ function bind() {
       if (state.view === 'dashboard') await loadDashboard();
       if (state.view === 'runs') await loadRuns();
       if (state.view === 'settings') await loadConfig();
-      notice('已刷新');
+      notify('已刷新');
     } finally {
       btn.classList.remove('spinning');
       btn.disabled = false;
@@ -2758,7 +2776,7 @@ function bind() {
   $('config-reload').addEventListener('click', async () => {
     try {
       const d = await api('/api/config/reload', { method: 'POST' });
-      notice('配置已从磁盘重新载入（' + humanBytes(d.bytes) + '）', 'ok');
+      notify('配置已从磁盘重新载入（' + humanBytes(d.bytes) + '）', 'ok');
     } catch (e) {
       // 文件坏了：内存里的旧配置不动，编辑器里仍显示出问题的文本，方便就地改
       configError(e instanceof Unauthorized ? '需要令牌' : (e.message || '重新读取失败'));
@@ -2767,12 +2785,12 @@ function bind() {
   });
   $('config-copy').addEventListener('click', async () => {
     const text = $('config-editor').value;
-    if (!text) return notice('没有可复制的内容', 'err');
+    if (!text) return notify('没有可复制的内容', 'err');
     try {
       await navigator.clipboard.writeText(text);
-      notice('已复制配置内容');
+      notify('已复制配置内容');
     } catch (_) {
-      notice('浏览器不允许写剪贴板', 'err');
+      notify('浏览器不允许写剪贴板', 'err');
     }
   });
 
@@ -2955,7 +2973,7 @@ function askClash(info) {
     const onRename = () => {
       if (!field.classList.contains('hidden')) {
         const v = input.value.trim();
-        if (!/\.js$/i.test(v)) { notice('名字要以 .js 结尾'); return; }
+        if (!/\.js$/i.test(v)) { notify('名字要以 .js 结尾'); return; }
         done({ name: v, overwrite: false });
         return;
       }
@@ -3037,11 +3055,11 @@ async function uploadFile(inputId, url, okPrefix) {
     } else {
       msg = okPrefix + '：' + list;
     }
-    notice(msg + (d.zip ? '（zip）' : ''), 'ok');
+    notify(msg + (d.zip ? '（zip）' : ''), 'ok');
     await refresh();
     if (kind === 'script') await loadScripts();
   } catch (e) {
-    notice(e.message || '上传失败', 'err');
+    notify(e.message || '上传失败', 'err');
   } finally {
     input.value = '';
   }
@@ -3069,9 +3087,9 @@ async function restartPanel() {
   if (!ok) return;
   try {
     await api("/api/restart", { method: "POST" });
-    notice("正在重启，3 秒后自动刷新…");
+    notify("正在重启，3 秒后自动刷新…");
     setTimeout(() => location.reload(), 3000);
   } catch (e) {
-    notice(e instanceof Unauthorized ? "需要令牌" : (e.message || "重启失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "重启失败"), 'err');
   }
 }
