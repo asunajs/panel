@@ -71,7 +71,7 @@ fn level_and_mute_gate_the_channels() {
     assert!(c.wants("error", "hello", Some("tick")));
     // 按渠道的门槛
     let ch = &c.channels[0];
-    assert!(Config::channel_wants(ch, "error"));
+    assert!(Config::channel_wants(ch, "error", "task_fail", "mcloud"));
 }
 
 #[test]
@@ -80,9 +80,9 @@ fn a_disabled_or_narrow_channel_is_skipped() {
         { "id": "off", "kind": "webhook", "url": "https://x", "enabled": false },
         { "id": "hi", "kind": "webhook", "url": "https://y", "min_level": "error" }
     ]));
-    assert!(!Config::channel_wants(&c.channels[0], "error"));
-    assert!(!Config::channel_wants(&c.channels[1], "warn"));
-    assert!(Config::channel_wants(&c.channels[1], "error"));
+    assert!(!Config::channel_wants(&c.channels[0], "error", "task_fail", "mcloud"));
+    assert!(!Config::channel_wants(&c.channels[1], "warn", "task_fail", "mcloud"));
+    assert!(Config::channel_wants(&c.channels[1], "error", "task_fail", "mcloud"));
 }
 
 // ── 12 种渠道的「请求长什么样」（第 169 轮）─────────────────────────────────
@@ -103,6 +103,10 @@ fn base_channel(kind: Kind) -> notify::Channel {
         template: String::new(),
         headers: Vec::new(),
         priority: 5,
+        events: Vec::new(),
+        include_plugins: Vec::new(),
+        exclude_plugins: Vec::new(),
+        quiet: None,
         smtp: None,
     }
 }
@@ -244,4 +248,74 @@ fn custom_template_escapes_what_it_inserts() {
     let req = notify::build_http(&ch, &row, TS).unwrap();
     let v: serde_json::Value = serde_json::from_str(&req.body).unwrap();
     assert_eq!(v["level"], "error");
+}
+
+// ── 静默时段 / 过滤 / 去重（第 171 轮）─────────────────────────────────────
+
+#[test]
+fn quiet_hours_parse_and_match_across_midnight() {
+    let q = notify::parse_quiet("23:00-08:00").unwrap().unwrap();
+    assert_eq!(q, (23 * 60, 8 * 60));
+    assert!(notify::in_quiet(23 * 60, q), "23:00 该静默");
+    assert!(notify::in_quiet(0, q), "00:00 该静默");
+    assert!(notify::in_quiet(8 * 60 - 1, q), "07:59 该静默");
+    assert!(!notify::in_quiet(8 * 60, q), "08:00 结束");
+    assert!(!notify::in_quiet(12 * 60, q));
+
+    let d = notify::parse_quiet("01:00-06:00").unwrap().unwrap();
+    assert!(notify::in_quiet(60, d), "01:00 是起点，算在静默里");
+    assert!(notify::in_quiet(120, d));
+    assert!(!notify::in_quiet(30, d), "00:30 还没开始");
+    assert!(!notify::in_quiet(6 * 60, d), "06:00 结束");
+
+    // 写错了必须报错：静默写错 = 通知永远不发，这比崩掉更难查
+    assert!(notify::parse_quiet("25:00-08:00").is_err());
+    assert!(notify::parse_quiet("08:00").is_err());
+    assert!(notify::parse_quiet("08:00-08:00").is_err());
+    assert!(notify::parse_quiet("   ").unwrap().is_none());
+
+    // 剩多久：23:00 起手，到 08:00 还有 9 小时
+    assert_eq!(notify::quiet_left_ms(23 * 60, q), 9 * 60 * 60_000);
+    assert_eq!(notify::quiet_str(Some(q)), "23:00-08:00");
+    assert_eq!(notify::quiet_str(None), "");
+}
+
+#[test]
+fn channels_filter_by_event_and_plugin() {
+    let c = cfg_with(json!([
+        { "id": "only-circuit", "kind": "slack", "url": "https://x", "events": ["circuit"] },
+        { "id": "no-mcloud", "kind": "slack", "url": "https://x", "exclude_plugins": ["mcloud*"] },
+        { "id": "only-mcloud", "kind": "slack", "url": "https://x", "include_plugins": ["mcloud*"] },
+        { "id": "all", "kind": "slack", "url": "https://x" }
+    ]));
+    let want = |i: usize, ev: &str, plugin: &str| {
+        Config::channel_wants(&c.channels[i], "error", ev, plugin)
+    };
+    // 只收熔断的渠道：任务失败不惊动它
+    assert!(want(0, "circuit", "mcloud"));
+    assert!(!want(0, "task_fail", "mcloud"));
+    // 排除 mcloud*：别的插件照收
+    assert!(!want(1, "task_fail", "mcloud"));
+    assert!(want(1, "task_fail", "other"));
+    // 只要 mcloud* 的
+    assert!(want(2, "task_fail", "mcloud"));
+    assert!(!want(2, "task_fail", "other"));
+    // 什么都不写的：全收
+    assert!(want(3, "task_fail", "other"));
+}
+
+#[test]
+fn quiet_and_dedupe_come_from_config_with_defaults() {
+    let c = notify::parse(Some(&json!({ "quiet_hours": "23:30-07:15" }))).unwrap();
+    assert_eq!(c.quiet, Some((23 * 60 + 30, 7 * 60 + 15)));
+    assert_eq!(c.dedupe_secs, 600, "没写就是 10 分钟");
+    let c = notify::parse(Some(&json!({ "dedupe_secs": 0 }))).unwrap();
+    assert_eq!(c.dedupe_secs, 0, "0 = 不聚合");
+    // 渠道级静默覆盖全局
+    let c = cfg_with(json!([
+        { "id": "a", "kind": "slack", "url": "https://x", "quiet_hours": "12:00-13:00" }
+    ]));
+    assert_eq!(c.channels[0].quiet, Some((12 * 60, 13 * 60)));
+    // 写错就报错
+    assert!(notify::parse(Some(&json!({ "quiet_hours": "23-8" }))).is_err());
 }

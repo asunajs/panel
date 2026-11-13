@@ -97,7 +97,8 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             attempts   INTEGER NOT NULL DEFAULT 0,
             next_try   INTEGER NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',
-            done       INTEGER NOT NULL DEFAULT 0
+            done       INTEGER NOT NULL DEFAULT 0,
+            repeat     INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS notify_outbox_due ON notify_outbox(done, next_try);
 
@@ -142,6 +143,14 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("加 suspended 失败: {e}"))?;
+    }
+    // 发件箱的「重复次数」（第 171 轮）：同一个失败连着来 5 次，不该发 5 条。
+    if !has_column(conn, "notify_outbox", "repeat")? {
+        conn.execute(
+            "ALTER TABLE notify_outbox ADD COLUMN repeat INTEGER NOT NULL DEFAULT 1",
+            [],
+        )
+        .map_err(|e| format!("加 repeat 失败: {e}"))?;
     }
     for (col, ddl) in [
         ("override_expr", "ALTER TABLE tasks ADD COLUMN override_expr TEXT"),
@@ -253,6 +262,7 @@ pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<()
 /// 正是最该让人知道的事 —— 只写进日志等于默认有人会去翻。
 pub fn stale_notice(n: usize) -> crate::notify::Notice {
     crate::notify::Notice {
+        event: "system",
         level: "warn",
         plugin: "panel".to_string(),
         task: None,

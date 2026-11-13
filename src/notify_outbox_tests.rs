@@ -52,6 +52,10 @@ fn hook(id: &str, url: &str) -> Channel {
         template: String::new(),
         headers: Vec::new(),
         priority: 5,
+        events: Vec::new(),
+        include_plugins: Vec::new(),
+        exclude_plugins: Vec::new(),
+        quiet: None,
         smtp: None,
     }
 }
@@ -221,14 +225,16 @@ async fn one_notice_writes_one_row_per_channel_in_one_go() {
         hook("b", "http://127.0.0.1:9/y"),
         hook("c", "http://127.0.0.1:9/z"),
     ];
+    let items: Vec<(Channel, i64)> = chans.iter().map(|c| (c.clone(), 1_700_000_000_000)).collect();
     let ids = enqueue_all(
         &db,
         &log,
-        &chans,
+        &items,
         "标题",
         "正文",
         "{}",
         1_700_000_000_000,
+        600,
     )
     .await;
     assert_eq!(ids.len(), 3, "三个渠道三条行，id 都要拿到");
@@ -262,7 +268,7 @@ async fn one_notice_writes_one_row_per_channel_in_one_go() {
 async fn no_channel_means_no_write() {
     let db = mkdb();
     let log = LogHub::new(db.clone());
-    assert!(enqueue_all(&db, &log, &[], "t", "b", "{}", 0).await.is_empty());
+    assert!(enqueue_all(&db, &log, &[], "t", "b", "{}", 0, 600).await.is_empty());
     let n: i64 = db
         .call(|c| {
             c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
@@ -271,4 +277,71 @@ async fn no_channel_means_no_write() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+}
+
+/// 同一个失败在去重窗口内连来三次 → 只有一行，repeat=3，内容是最后一次的。
+#[tokio::test]
+async fn repeated_failures_in_the_window_collapse_into_one_row() {
+    let db = mkdb();
+    let log = LogHub::new(db.clone());
+    let ch = hook("a", "http://127.0.0.1:9/x");
+    let ts = 1_700_000_000_000;
+
+    for (i, body) in ["第一次", "第二次", "第三次"].iter().enumerate() {
+        let at = ts + (i as i64) * 60_000;
+        enqueue_all(&db, &log, &[(ch.clone(), at)], "任务 daily 失败", body, "{}", at, 600).await;
+    }
+
+    let rows: Vec<(String, i64)> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT body,repeat FROM notify_outbox ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let it = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?;
+            it.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "窗口内三次失败只该有一行: {rows:?}");
+    assert_eq!(rows[0].1, 3, "次数要累加给人看");
+    assert_eq!(rows[0].0, "第三次", "内容取最新的");
+
+    // 出了窗口（> 10 分钟）就是新的一条
+    let far = ts + 3600_000;
+    enqueue_all(&db, &log, &[(ch.clone(), far)], "任务 daily 失败", "很久以后", "{}", far, 600).await;
+    let n: i64 = db
+        .call(|c| {
+            c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+/// 静默时段排的行：next_try 在未来，不会立刻发。
+#[tokio::test]
+async fn deferred_rows_wait_until_the_quiet_hours_end() {
+    let db = mkdb();
+    let log = LogHub::new(db.clone());
+    let ch = hook("a", "http://127.0.0.1:9/x");
+    let ts = 1_700_000_000_000i64;
+    let later = ts + 9 * 60 * 60_000;
+    enqueue_all(&db, &log, &[(ch, later)], "静默里的失败", "b", "{}", ts, 600).await;
+    let (next_try, attempts): (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT next_try,attempts FROM notify_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(next_try, later, "推迟到静默结束");
+    assert_eq!(attempts, 0, "静默期不该已经试过一次");
 }

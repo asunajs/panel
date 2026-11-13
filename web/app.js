@@ -1994,8 +1994,14 @@ function openChannelForm(box, existing, after) {
   const from = input('from', '默认同 user', cur.from || '');
   const to = input('to', 'a@b.c, d@e.f', (cur.to || []).join(', '));
 
+  const events = input('events', 'task_fail,circuit,plugin,system（留空=全收）', (cur.events || []).join(','));
+  const includeP = input('include_plugins', 'mcloud*,other（留空=全部插件）', (cur.include_plugins || []).join(','));
+  const excludeP = input('exclude_plugins', 'noisy-plugin（这些插件不收）', (cur.exclude_plugins || []).join(','));
+  const quiet = input('quiet_hours', '23:00-08:00（留空=跟随全局）', cur.quiet_hours || '');
+
   const fields = { url, secret, chat_id: chatId, topic, priority, template, headers,
-    host, port, tls, user, pass, from, to };
+    host, port, tls, user, pass, from, to, events, include_plugins: includeP,
+    exclude_plugins: excludeP, quiet_hours: quiet };
   const rows = {
     url: line('地址', url, kind === 'telegram' ? '可留空（默认 api.telegram.org）' : ''),
     secret: line('密钥', secret),
@@ -2021,6 +2027,12 @@ function openChannelForm(box, existing, after) {
     }
   };
   for (const node of Object.values(rows)) form.append(node);
+  // 过滤与静默：所有类型都适用，单独一截
+  form.append(el('p', 'chan-sub', '这条渠道收什么'));
+  form.append(line('事件', events, 'task_fail 任务失败 / circuit 熔断 / plugin 插件喊话 / system 面板'));
+  form.append(line('只收插件', includeP, '支持 mcloud* 这种前缀通配'));
+  form.append(line('不收插件', excludeP));
+  form.append(line('静默', quiet, '这段时间只在面板留铃铛，外部渠道推到结束后再发'));
   kindSel.addEventListener('change', applyKind);
   applyKind();
 
@@ -2077,6 +2089,12 @@ function openChannelForm(box, existing, after) {
     }
     const lvl = lvlSel.value;
     if (lvl) body.min_level = lvl;
+    // 过滤与静默：空就是「清掉这一项」，所以总是显式写
+    const listOf = (v) => v.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+    body.events = listOf(events.value);
+    body.include_plugins = listOf(includeP.value);
+    body.exclude_plugins = listOf(excludeP.value);
+    body.quiet_hours = quiet.value.trim();
     save.disabled = true;
     try {
       if (existing) {
@@ -2218,7 +2236,11 @@ async function renderNotifyTab() {
     const fbox = el('div', 'chan-form-box', '');
     fbox.id = 'notify-form';
     box.append(fbox);
-    box.append(el('p', 'settings-note', '全局门槛 ' + (d.min_level || 'warn') + '；静音名单 ' + ((d.mute || []).join('、') || '（空）')));
+    box.append(el('p', 'settings-note',
+      '全局门槛 ' + (d.min_level || 'warn') +
+      '；静音名单 ' + ((d.mute || []).join('、') || '（空）') +
+      '；静默时段 ' + (d.quiet_hours || '（无）') +
+      '；同一渠道同一标题 ' + Math.round((d.dedupe_secs || 0) / 60) + ' 分钟内的重复只发一条（次数累加）'));
     box.append(el('p', 'settings-note',
       '支持的类型：webhook / wecom（企业微信）/ dingtalk（钉钉，可加签）/ feishu（飞书，可加签）/ ' +
       'slack / discord / telegram / bark / ntfy / gotify / custom（自定义模板）/ smtp。' +
@@ -2244,7 +2266,7 @@ async function renderNotifyTab() {
     tr.append(
       el('td', '', new Date(r.ts).toLocaleString()),
       el('td', '', r.channel),
-      el('td', '', r.title),
+      el('td', '', r.repeat > 1 ? r.title + '（×' + r.repeat + '）' : r.title),
       el('td', '', String(r.attempts)),
       el('td', r.done === 2 ? 'hint-err' : '', status),
       el('td', 'mono', r.last_error || ''),

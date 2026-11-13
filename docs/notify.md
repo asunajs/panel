@@ -65,3 +65,47 @@
 - 落盘时是**明文**（插件是可信代码，fs 没 jail —— 见 [plugins.md](plugins.md)）；
 - GET /api/notify 与所有增删改的响应里一律 ***，另给 has_secret: true；
 - 编辑表单里密钥留空 = 不改（这是 PATCH 只覆盖给定键的直接结果）。
+
+## 过滤、静默、去重（第 171 轮）
+
+三条都是「别让通知变成噪音」的机制，配置都在 config.json，界面上也能改。
+
+### 按事件 / 插件过滤（每个渠道各自配）
+
+```json
+{ "id": "ops", "kind": "slack", "url": "…",
+  "events": ["task_fail", "circuit"],
+  "include_plugins": ["mcloud*"],
+  "exclude_plugins": ["noisy-plugin"] }
+```
+
+| 字段 | 语义 |
+|---|---|
+| events | 只收这些事件；空 = 全收。取值：task_fail（任务失败）/ circuit（熔断）/ plugin（插件 host.notify）/ system（面板自身的，比如重启收尾） |
+| include_plugins | 只收这些插件；空 = 全部。支持 mcloud* 这种**前缀**通配 |
+| exclude_plugins | 这些插件的不收（先判排除，再判包含） |
+
+典型用法：运维群收 circuit 就够（失败细节留面板），业务群只要 mcloud* 的。
+
+### 静默时段
+
+```json
+{ "notify": { "quiet_hours": "23:00-08:00", "channels": [
+  { "id": "dd", "kind": "dingtalk", "url": "…", "quiet_hours": "12:00-13:00" } ] } }
+```
+
+- 支持**跨零点**（23:00-08:00 就是跨的），起止相同会被拒；
+- 静默期间：铃铛照旧记（面板里看得到），**外部渠道不丢**，发件箱那行的 next_try 直接排到静默结束；
+- 渠道级 quiet_hours 覆盖全局；写错格式直接报错 —— 静默写错等于通知永远不发，这比崩掉更难查。
+
+### 去重（重复失败聚合成一条）
+
+```json
+{ "notify": { "dedupe_secs": 600 } }
+```
+
+同一渠道 + 同一标题，在窗口内（默认 600 秒）如果已经有一条**待发**的行，就不再新开一行，
+而是把它的 repeat +1、内容换成最新的。发件箱里显示成「任务 daily 失败（×12）」。
+
+这样「每 5 分钟失败一次」不会变成 12 条推送，而是一条带次数的；窗口外还是新的一条。
+设 dedupe_secs = 0 就是关掉聚合。
