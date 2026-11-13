@@ -610,21 +610,31 @@ button, input, select { font: inherit; color: inherit; }
 .check input:checked ~ .check-label { color: var(--fg-2); }
 
 /* 原生 checkbox（插件的 <input type=checkbox>，比如 mcloud 的「跟随 / 清空」）：
-   系统给的那块方角蓝底在深色主题下很扎眼，统一换成面板的勾选框。 */
-input[type="checkbox"]:not(.check-raw) {
+   系统给的那块方角蓝底在深色主题下很扎眼，统一换成面板的勾选框。
+
+   ⚠ 选择器为什么带 `html` 前缀：旧插件普遍写着「把全局 input 样式撤掉」的补丁
+   （`.picker-row input[type=checkbox] { width:auto; border:0; background:none }`），
+   那是给没有复选框样式的旧面板写的；在这里它会把我们画的方块整个擦掉
+   （第 153 轮：任务页账号多选只剩一串名字）。带上 html 之后特异度 (0,2,2) >
+   插件那条 (0,2,1)，插件再"撤"也撤不掉控件的形状；真想用系统原生那个就加
+   `.check-raw` 类，那条路留着的。 */
+html input[type="checkbox"]:not(.check-raw) {
   appearance: none; -webkit-appearance: none;
+  /* padding / box-sizing 必须自己钉死：插件里一条笼统的 `input { padding: 7px 10px; width: 100% }`
+     会把勾选框撑成 22px 的一坨（第 153 轮实测，勾选框比旁边的字还高）。 */
+  box-sizing: border-box; padding: 0;
   width: 16px; height: 16px; margin: 0; flex: none;
   border: 1px solid var(--line-strong); border-radius: 5px; background-color: var(--surface);
   background-repeat: no-repeat; background-position: center; background-size: 12px 12px;
   cursor: pointer; vertical-align: -3px;
   transition: background-color .12s ease, border-color .12s ease;
 }
-input[type="checkbox"]:not(.check-raw):checked {
+html input[type="checkbox"]:not(.check-raw):checked {
   background-color: var(--accent); border-color: var(--accent);
   background-image: url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6L9 17l-5-5'/></svg>");
 }
-input[type="checkbox"]:not(.check-raw):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-input[type="checkbox"]:not(.check-raw):disabled {
+html input[type="checkbox"]:not(.check-raw):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html input[type="checkbox"]:not(.check-raw):disabled {
   background-color: var(--surface-2); border-color: var(--line); cursor: not-allowed;
 }
 
