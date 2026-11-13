@@ -1420,3 +1420,23 @@ select option { background: var(--surface); color: var(--fg); }
 .migrate-acts { display: flex; gap: 6px; }
 .migrate-preview { flex: 1 1 100%; }
 .warn-note { color: var(--warn); }
+
+/* ── 渠道表单（第 170 轮）── */
+.chan-addbar { margin: 8px 0 4px; }
+.chan-form-box:empty { display: none; }
+.chan-form {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chan-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chan-label { flex: 0 0 88px; font-size: 12px; color: var(--fg-2); }
+.chan-line .input { flex: 1 1 240px; min-width: 180px; }
+.chan-hint { flex: 1 1 100%; font-size: 12px; color: var(--dim); padding-left: 98px; }
+.chan-tpl { flex: 1 1 240px; font-family: var(--mono); font-size: 12px; }
+.row-acts { display: flex; gap: 6px; flex-wrap: wrap; }

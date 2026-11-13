@@ -500,6 +500,13 @@ pub fn router(st: AppState) -> Router {
         .route("/api/notify/outbox", get(api_notify_outbox))
         .route("/api/notify/test", post(api_notify_test))
         .route("/api/notify/outbox/retry", post(api_notify_retry))
+        // 渠道增删改（第 170 轮）：写回 config.json 的 notify.channels，热生效
+        .route("/api/notify/channels", post(api_notify_channel_create))
+        .route(
+            "/api/notify/channels/{id}",
+            axum::routing::patch(api_notify_channel_update).delete(api_notify_channel_delete),
+        )
+        .route("/api/notify/channels/{id}/toggle", post(api_notify_channel_toggle))
         .route("/api/backup", get(api_backup).post(api_restore))
         .route("/api/scripts", get(scripts_list).post(script_create))
         .route(
@@ -3582,6 +3589,177 @@ struct NotifyTestBody {
     /// 只试这一个渠道。不给就是全部。
     #[serde(default)]
     channel: Option<String>,
+}
+
+// ── 通知渠道的增删改（第 170 轮）──
+//
+// 以前只能在 config.json 里手写 JSON：用户得知道 kind 有哪些、每个 kind 要哪些字段、
+// 密钥字段叫什么。这一组接口把「改一个渠道」变成一次点击，写盘与热更新
+// 与 PUT /api/config 走同一条路径（同一个语义校验、同一份 0600 原子写）。
+
+/// 当前 channels 数组（没有就是空）。
+fn channels_of(value: &Value) -> Vec<Value> {
+    value
+        .get("notify")
+        .and_then(|n| n.get("channels"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 改 notify.channels → 语义校验 → 落盘 → 换热快照。返回新的 channels。
+async fn save_channels(st: &AppState, chans: Vec<Value>) -> Result<Value, ApiError> {
+    let text = st.config.snapshot().to_string();
+    let mut value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
+    if !value.is_object() {
+        value = json!({});
+    }
+    if !value.get("notify").map(|n| n.is_object()).unwrap_or(false) {
+        value["notify"] = json!({});
+    }
+    value["notify"]["channels"] = Value::Array(chans);
+    // 与配置页同一道校验：写错了就不落盘，旧配置继续生效。
+    crate::notify::parse(value.get("notify")).map_err(|e| bad(format!("配置有问题：{e}")))?;
+    let path = st.data_dir.join(crate::config::FILE);
+    let body = serde_json::to_vec_pretty(&value)
+        .map_err(|e| internal(format!("序列化配置失败: {e}")))?;
+    write_atomic(&path, &body, Some(0o600))
+        .await
+        .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
+    st.config.set(&value);
+    Ok(value["notify"]["channels"].clone())
+}
+
+async fn api_notify_channel_create(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("渠道必须是一个 JSON 对象"));
+    }
+    let mut chans = channels_of(&serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null));
+    let mut obj = v.as_object().cloned().unwrap_or_default();
+    // id 没给就按 ch0.. 补一个不撞的
+    let id = obj
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let id = match id {
+        Some(s) => s,
+        None => {
+            let mut n = chans.len();
+            loop {
+                let cand = format!("ch{n}");
+                if !chans
+                    .iter()
+                    .any(|c| c.get("id").and_then(|x| x.as_str()) == Some(cand.as_str()))
+                {
+                    break cand;
+                }
+                n += 1;
+            }
+        }
+    };
+    if chans
+        .iter()
+        .any(|c| c.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    {
+        return Err(bad(format!("已经有一个叫 {id} 的渠道了")));
+    }
+    obj.insert("id".to_string(), json!(id));
+    chans.push(Value::Object(obj));
+    let out = save_channels(&st, chans).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知渠道 {id} 已添加"),
+    );
+    Ok(Json(json!({ "ok": true, "channels": out })))
+}
+
+async fn api_notify_channel_update(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("渠道必须是一个 JSON 对象"));
+    }
+    let mut chans = channels_of(&serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null));
+    let Some(pos) = chans
+        .iter()
+        .position(|c| c.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    else {
+        return Err(ApiError::not_found(format!("没有这个渠道：{id}")));
+    };
+    // 合并：只覆盖这次给过来的键（没给的保持原样，密钥不回传所以也不会被清空）。
+    let target = chans[pos].as_object().cloned().unwrap_or_default();
+    let mut merged = target.clone();
+    for (k, val) in v.as_object().cloned().unwrap_or_default() {
+        merged.insert(k, val);
+    }
+    merged.insert("id".to_string(), json!(id));
+    chans[pos] = Value::Object(merged);
+    let out = save_channels(&st, chans).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知渠道 {id} 已更新"),
+    );
+    Ok(Json(json!({ "ok": true, "channels": out })))
+}
+
+async fn api_notify_channel_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let chans = channels_of(&serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null));
+    let before = chans.len();
+    let kept: Vec<Value> = chans
+        .into_iter()
+        .filter(|c| c.get("id").and_then(|x| x.as_str()) != Some(id.as_str()))
+        .collect();
+    if kept.len() == before {
+        return Err(ApiError::not_found(format!("没有这个渠道：{id}")));
+    }
+    let out = save_channels(&st, kept).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知渠道 {id} 已删除"),
+    );
+    Ok(Json(json!({ "ok": true, "channels": out })))
+}
+
+async fn api_notify_channel_toggle(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let mut chans = channels_of(&serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null));
+    let Some(pos) = chans
+        .iter()
+        .position(|c| c.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    else {
+        return Err(ApiError::not_found(format!("没有这个渠道：{id}")));
+    };
+    let mut obj = chans[pos].as_object().cloned().unwrap_or_default();
+    let now = obj.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    obj.insert("enabled".to_string(), json!(!now));
+    chans[pos] = Value::Object(obj);
+    let out = save_channels(&st, chans).await?;
+    Ok(Json(json!({ "ok": true, "enabled": !now, "channels": out })))
 }
 
 async fn api_notify_test(

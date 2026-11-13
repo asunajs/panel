@@ -3446,3 +3446,108 @@ async fn suspended_is_persisted_in_the_db() {
     crate::db::set_plugin_suspended(&db, "p1", false).await.unwrap();
     assert!(crate::db::plugin_suspended_names(&db).await.is_empty());
 }
+
+/// 渠道增删改（第 170 轮）：改动要真落进 config.json，密钥不许从接口回显，
+/// 不传 secret 的编辑不许把它清掉，写错的配置不许落盘。
+#[tokio::test]
+async fn channel_crud_lands_in_config_and_never_echoes_the_secret() {
+    let (app, _plugins, data, _store) = setup_dirs("chcrud").await;
+    let cfg_path = data.join("config.json");
+    let read_cfg = || std::fs::read_to_string(&cfg_path).unwrap_or_default();
+
+    // 建一个钉钉渠道
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/notify/channels",
+            Some(json!({
+                "id": "dd",
+                "kind": "dingtalk",
+                "url": "https://oapi.dingtalk.com/robot/send?access_token=x",
+                "secret": "SEC1"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = read_cfg();
+    assert!(text.contains("SEC1"), "密钥要落盘（插件读配置，人也要能改）：{text}");
+    assert!(text.contains("dingtalk"), "{text}");
+
+    // 接口里必须是 ***，另外给 has_secret 让人知道「配过了」
+    let (_, nb) = get(&app, "/api/notify").await;
+    assert_eq!(nb["channels"][0]["id"], "dd");
+    assert_eq!(nb["channels"][0]["secret"], "***");
+    assert_eq!(nb["channels"][0]["has_secret"], true);
+    assert!(!nb.to_string().contains("SEC1"), "响应里不许出现真密钥：{nb}");
+
+    // 改门槛，故意不带 secret：不能把它清掉（界面编辑时不回显密钥）
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PATCH",
+            "/api/notify/channels/dd",
+            Some(json!({ "min_level": "error" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = read_cfg();
+    assert!(text.contains("\"error\""), "{text}");
+    assert!(text.contains("SEC1"), "不带 secret 的编辑不许清掉密钥：{text}");
+
+    // 开关
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/notify/channels/dd/toggle", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], false);
+    assert!(read_cfg().contains("\"enabled\": false"), "{}", read_cfg());
+
+    // 重名：拒，且配置不变
+    let before = read_cfg();
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/notify/channels",
+            Some(json!({ "id": "dd", "kind": "slack", "url": "https://x" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(read_cfg(), before, "被拒的请求不该改文件");
+
+    // 写错的 kind：拒，且不落盘（否则通知会静默全停）
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/notify/channels",
+            Some(json!({ "id": "bad", "kind": "smoke-signal", "url": "https://x" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!read_cfg().contains("smoke-signal"), "写错的配置不许落盘");
+
+    // 删
+    let (status, body) = send(
+        &app,
+        with_csrf("DELETE", "/api/notify/channels/dd", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, nb) = get(&app, "/api/notify").await;
+    assert_eq!(nb["channels"].as_array().unwrap().len(), 0, "{nb}");
+    // 删不存在的：404
+    let (status, _) = send(
+        &app,
+        with_csrf("DELETE", "/api/notify/channels/dd", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
