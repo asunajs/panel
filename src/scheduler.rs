@@ -1112,6 +1112,13 @@ pub fn start(
         inner.saved = load_saved(&inner.db).await;
         // 上一圈看到的「现在」：用来发现系统时钟往回跳（见 clock_went_back）。
         let mut last_now = Local::now();
+        // 到点时刻是**绝对**的，而且只缩不涨（第 180 轮修）。
+        //
+        // 原来每圈都新建一个定时器（sleep(sleep_hint(now))）：只要 30 秒里来一批命令
+        // （空闲卸载的 ticker 就是每 30 秒一次），定时器就被重置；而「没有已加载任务」时
+        // sleep_hint 恒为 60 秒 —— 于是 fire_due 永远等不到。实测 90 秒一次没跑，
+        // 连带「按需加载的插件到点前自动装回来」整条路成了摆设。
+        let mut deadline = tokio::time::Instant::now();
         loop {
             let loop_start = std::time::Instant::now();
             let now = Local::now();
@@ -1119,7 +1126,11 @@ pub fn start(
                 inner.on_clock_rolled_back(last_now, now);
             }
             last_now = now;
-            let sleep = inner.sleep_hint(now);
+            let cand = tokio::time::Instant::now() + inner.sleep_hint(now);
+            if cand < deadline {
+                deadline = cand;
+            }
+            let mut fired = false;
             tokio::select! {
                 cmd = rx.recv() => match cmd {
                     Some(cmd) => inner.handle(cmd).await,
@@ -1129,7 +1140,14 @@ pub fn start(
                     Some(r) => inner.register(r),
                     None => break,
                 },
-                _ = tokio::time::sleep(sleep) => inner.fire_due(Local::now()).await,
+                _ = tokio::time::sleep_until(deadline) => {
+                    inner.fire_due(Local::now()).await;
+                    fired = true;
+                },
+            }
+            if fired {
+                // 重算，否则 deadline 停在过去，select 会立刻又进这条分支（空转）
+                deadline = tokio::time::Instant::now() + inner.sleep_hint(Local::now());
             }
             // 心跳 = 这一圈本身花了多久（不含 select 的等待）。
             crate::stats::stats().record_loop(loop_start.elapsed());
@@ -1193,6 +1211,8 @@ struct SavedTask {
     lead_ms: Option<u64>,
     /// 用户删过这条（毫秒时间戳）。注册时必须尊重它，否则插件一注册就「复活」。
     deleted_at: Option<i64>,
+    /// 库里记着的下一次到点（毫秒）。占位任务被重建时用它，别重算（第 180 轮）。
+    next_at: Option<i64>,
     /// 插件上一次的建议（第 180 轮）。
     suggest_cron: String,
     suggest_budget_ms: u64,
@@ -1206,7 +1226,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
             let mut st = c
                 .prepare(
                     "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms,deleted_at,
-                        suggest_cron,suggest_budget_ms,suggest_lead_ms,pending_adopt FROM tasks",
+                        suggest_cron,suggest_budget_ms,suggest_lead_ms,pending_adopt,next_at FROM tasks",
                 )
                 .map_err(|e| e.to_string())?;
             let out: Vec<(
@@ -1222,6 +1242,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                 Option<i64>,
                 Option<i64>,
                 i64,
+                Option<i64>,
             )> = st
                 .query_map([], |r| {
                     Ok((
@@ -1237,6 +1258,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         r.get::<_, Option<i64>>(9)?,
                         r.get::<_, Option<i64>>(10)?,
                         r.get::<_, i64>(11)?,
+                        r.get::<_, Option<i64>>(12)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
@@ -1248,7 +1270,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
     match rows {
         Ok(list) => list
             .into_iter()
-            .map(|(p, n, ov, en, sum, bl, lead, del, sg, sgb, sgl, pend)| {
+            .map(|(p, n, ov, en, sum, bl, lead, del, sg, sgb, sgl, pend, nx)| {
                 (
                     (p, n),
                     SavedTask {
@@ -1258,6 +1280,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         blockers: serde_json::from_str(&bl).unwrap_or_default(),
                         lead_ms: lead.map(|v| v.max(0) as u64),
                         deleted_at: del,
+                        next_at: nx,
                         suggest_cron: sg.unwrap_or_default(),
                         suggest_budget_ms: sgb.map(|v| v.max(0) as u64).unwrap_or(0),
                         suggest_lead_ms: sgl.map(|v| v.max(0) as u64).unwrap_or(0),
@@ -1943,6 +1966,7 @@ impl Inner {
                 summary: t.summary.clone(),
                 blockers: t.blockers.clone(),
                 lead_ms: saved_lead(t.lead_override, t.lead_ms),
+                next_at: Some(t.next_fire.timestamp_millis()),
                 deleted_at: t.deleted_at,
                 suggest_cron: t.base_cron.clone(),
                 suggest_budget_ms: t.suggest_budget_ms,
@@ -2072,13 +2096,39 @@ impl Inner {
                         // 再记这次的建议 —— 顺序反了的话，apply_saved 会把刚记的建议盖回旧值。
                         self.apply_saved(i);
                         let before = self.tasks[i].cron.clone();
+                        // 这条之前是「手动任务」占位吗（有 handler、没有 cron）：
+                        // 要在 apply_saved 之后判断 —— 库里可能存着用户改的调度。
+                        let was_manual = self.tasks[i].schedule.is_none();
                         self.tasks[i].base_cron = cron.clone();
                         self.tasks[i].suggest_budget_ms = budget;
                         self.tasks[i].suggest_lead_ms = lead_ms;
                         // 参数只能由插件给（是运行时 payload，不是配置）
                         self.tasks[i].params = params;
-                        if adopt {
+                        // 真家伙来了：占位标记必须清掉，否则 Loaded 会把这条当「没被注册的
+                        // 占位任务」删掉，任务就凭空消失了（第 180 轮实测：唤醒后任务不见）。
+                        // 注意这里**不重算 next_fire**：库里的下一次到点是准的，
+                        // @every 这种按间隔算的表达式重算会把它推到下一个周期（漏跑一次）。
+                        self.tasks[i].lazy = false;
+                        // 「手动任务」的占位（同名的 register_handler 在同一次加载里先到，
+                        // 或者占位任务被 Loaded 清掉后 handler 重建了一个）没有调度，
+                        // next_fire 是指向 365 天后的假值 —— 这种必须由这条注册把调度装上，
+                        // 否则任务永远不会跑（第 180 轮实测：唤醒后任务挂在 2027 年）。
+                        if adopt || was_manual {
                             self.adopt_suggestion(i);
+                            // 占位/手动任务：库里的下一次到点还是准的，别重算掉那一拍
+                            if was_manual {
+                                if let Some(ms) = self
+                                    .saved
+                                    .get(&(plugin.clone(), name.clone()))
+                                    .and_then(|s| s.next_at)
+                                {
+                                    if ms > Local::now().timestamp_millis() {
+                                        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+                                            self.tasks[i].next_fire = dt.with_timezone(&Local);
+                                        }
+                                    }
+                                }
+                            }
                         } else if before != cron && !self.tasks[i].pending_adopt {
                             self.log.emit(
                                 &plugin,
@@ -2113,6 +2163,17 @@ impl Inner {
                                 return;
                             }
                         };
+                        // 库里记着的下一次到点优先：占位任务在 Loaded 里被清掉、
+                        // 注册又晚到时会走到这儿，这时重算会把 @every 推到下一个周期 → 漏跑一拍。
+                        if let Some(saved) = self.saved.get(&(plugin.clone(), name.clone())) {
+                            if let Some(ms) = saved.next_at {
+                                if ms > Local::now().timestamp_millis() {
+                                    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+                                        t.next_fire = dt.with_timezone(&Local);
+                                    }
+                                }
+                            }
+                        }
                         // 不是安装/重装：先记成「待采纳」，不调度
                         t.pending_adopt = !adopt;
                         self.tasks.push(t);

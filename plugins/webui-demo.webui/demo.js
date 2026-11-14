@@ -40,4 +40,21 @@
       '保存按钮被点了（演示而已，真的保存要走插件自己的接口）：' +
       JSON.stringify({ seconds: $('d-seconds').value });
   });
+
+  // 发码格：控件只管界面 —— 点「获取验证码」冒 `send`，这里假装发了一下（真的请求
+  // 归插件），成功后 startResend() 起倒计时；倒计时走完按钮自己回到「获取验证码」。
+  const sms = $('d-sms');
+  if (sms) {
+    sms.addEventListener('send', async (e) => {
+      $('d-sms-out').textContent = 'send: ' + e.detail.value;
+      sms.busy = true;
+      await new Promise((r) => setTimeout(r, 600)); // 演示请求在途的那一小段
+      sms.busy = false;
+      sms.startResend();
+    });
+    sms.addEventListener('input', () => {
+      if (sms.busy) return;
+      $('d-sms-out').textContent = '手机号：' + (sms.value || '（还没填）');
+    });
+  }
 })();

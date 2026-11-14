@@ -253,6 +253,48 @@ async function main() {
   ));
   check('三种反馈态都在（ok / warn / err）',  ['is-ok', 'is-warn', 'is-err'].every((c) => tones.some((t) => t.includes(c))), JSON.stringify(tones));
 
+  // ---------- 发码格（p-sms-code）----------
+  // 这一格是「手机号 + 行内获取验证码」合成一个控件（从 mcloud 的登录页提上来的）。
+  const smsShape = JSON.parse(await js(
+    "(()=>{const s=document.getElementById('d-sms');" +
+    "return JSON.stringify({group:!!s.querySelector('.input-group'),type:s.querySelector('input').type," +
+    "btn:s.querySelector('.btn').textContent,dis:s.querySelector('.btn').disabled});})()"
+  ));
+  check('p-sms-code 长成「输入框 | 行内按钮」一格', smsShape.group && smsShape.type === 'tel' && smsShape.btn === '获取验证码', JSON.stringify(smsShape));
+  check('没满 11 位时行内按钮是禁用的', smsShape.dis === true, String(smsShape.dis));
+
+  // 门禁只按位数（提前告知，不是点了才报错）；字母混进来会被滤掉
+  const gated = JSON.parse(await js(
+    "new Promise((res)=>{const s=document.getElementById('d-sms');const i=s.querySelector('input');" +
+    "i.value='138a';i.dispatchEvent(new Event('input',{bubbles:true}));" +
+    "const half={v:s.value,dis:s.querySelector('.btn').disabled};" +
+    "i.value='13800000000';i.dispatchEvent(new Event('input',{bubbles:true}));" +
+    "res(JSON.stringify({half,full:s.value,dis:s.querySelector('.btn').disabled}));})"
+  ));
+  check('输入滤成数字 + 满 11 位才放开', gated.half.v === '138' && gated.half.dis === true && gated.full === '13800000000' && gated.dis === false, JSON.stringify(gated));
+
+  // 点按钮派 send（请求归插件，demo.js 里假装发了 600ms）+ 在途时禁住防连点
+  const sent = JSON.parse(await js(
+    "new Promise((res)=>{const s=document.getElementById('d-sms');let got=null;" +
+    "s.addEventListener('send',(e)=>{got=e.detail.value;},{once:true});" +
+    "s.querySelector('.btn').click();" +
+    "setTimeout(()=>res(JSON.stringify({got,dis:s.querySelector('.btn').disabled})),120);})"
+  ));
+  check('点行内按钮派 send + 请求在途时禁住防连点', sent.got === '13800000000' && sent.dis === true, JSON.stringify(sent));
+
+  await sleep(800); // 等 demo.js 的假发码（600ms）走完、startResend 起来
+  const cd = JSON.parse(await js(
+    "(()=>{const s=document.getElementById('d-sms');const b=s.querySelector('.btn');" +
+    "return JSON.stringify({text:b.textContent,dis:b.disabled});})()"
+  ));
+  check('发码成功后进重发倒计时（重新获取（N 秒）+ 禁用）', cd.text.startsWith('重新获取（') && cd.dis === true, JSON.stringify(cd));
+
+  const restored = JSON.parse(await js(
+    "(()=>{const s=document.getElementById('d-sms');s.stopResend();const b=s.querySelector('.btn');" +
+    "return JSON.stringify({text:b.textContent,dis:b.disabled});})()"
+  ));
+  check('stopResend 后回到「获取验证码」且按位数重新放开', restored.text === '获取验证码' && restored.dis === false, JSON.stringify(restored));
+
   // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
   await sleep(1600);
