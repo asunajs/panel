@@ -1,18 +1,29 @@
 # plugins/ 目录归属
 
+**面板仓不放插件代码。** 分工是：面板提供面板，插件（源码、构建、部署）归各自的插件项目；
+**部署也是分开的** —— 面板上二进制与面板自己的东西，插件由插件项目自己装进实例的 `plugins/`。
+
 | 内容 | 归属 | 手改 |
 |---|---|---|
 | `webui-demo.js` + `webui-demo.webui/` | **面板项目**（UI 套件的活文档，`scripts/ui-kit-check.mjs` 用它对拍） | ✅ 可以 |
-| `mcloud*.js`、`mcloud.webui/` | 插件项目 **`~/mobile/workspace/mcloud-plugin`** 的构建产物（`npm run build:panelllrt`） | ❌ 不行 |
-| `mgmusic*.js`、`mgmusic.webui/` | 插件项目 **`~/mobile/workspace/cmusic-others/mgmusic-plugin`** 的构建产物（`llrt/` → `npm run build:panelllrt`） | ❌ 不行 |
+| `mcloud*.js`、`mcloud.webui/` | 插件项目 `~/mobile/workspace/mcloud-plugin` 的构建产物 —— ⚠ **同一个违规还没撤**（见下） | ❌ 不行 |
 
-> **面板仓不含插件源码**：`git ls-files | grep mgmusic` 只看得到上面那 5 个产物文件，
-> 加一篇迁移记录 `docs/mgmusic-migration.md`；源码（2350 行那份 + webui）在插件项目里。
-> 每个产物文件的第一行都写着「由 <插件项目路径> 复制生成」，认来源看那一行就够。
+### 已经按这个分工搬走的：`mgmusic`
 
-插件产物由插件项目的 `npm run build:panelllrt` 写进来（那边是 `rmSync + cpSync`），
-**手改会在下一次构建被冲掉**。0.4.x 与 0.3.x 的差异清单见
-[`../docs/handoff/mcloud-webui-0.4.md`](../docs/handoff/mcloud-webui-0.4.md)。
+`mgmusic` 的源码、构建、部署全在插件项目 `~/mobile/workspace/cmusic-others/mgmusic-plugin`：
+
+```bash
+cd ~/mobile/workspace/cmusic-others/mgmusic-plugin
+npm run build:panelllrt     # llrt/ → dist/panel-llrt/{mgmusic.js, mgmusic.webui/}
+npm run deploy:panel        # 拷进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins）并逐个 cmp
+```
+
+面板仓里只剩一篇迁移记录 [`../docs/mgmusic-migration.md`](../docs/mgmusic-migration.md)：
+`git ls-files | grep mgmusic` 只会命中它，**没有插件代码**。
+
+> ⚠ **待办（不属于本轮）**：`mcloud*.js` / `mcloud.webui/` 还躺在面板仓里，
+> 而且 `deploy-daily.sh` 仍在同步 `plugins/` —— 那套是 mcloud 会话在做，
+> 按同一分工应当由 `mcloud-plugin` 自己构建部署、面板仓撤掉这 5 个产物。
 
 ## 部署对产物做了什么（`scripts/deploy-daily.sh`）
 

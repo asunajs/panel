@@ -3,24 +3,33 @@
 老面板（`rust-plugin-panel` 0.3.x）的 `mgmusic` 插件迁到本仓（`panel-llrt` 0.4.x）的记录：
 **协议一行未动**，只换宿主契约与存储。
 
-## 0. 代码归属（先看这条，别改错文件）
+## 0. 代码归属：面板仓里**没有**这个插件的代码
 
-按 [../plugins/README.md](../plugins/README.md) 的归属表：**插件源码归插件项目，本仓 `plugins/` 里是产物**。
+分工：[../plugins/README.md](../plugins/README.md) 写着"面板提供面板、插件归插件项目、部署分开"。
+所以 `mgmusic` 的源码、构建、部署**全在插件项目**，本仓只留这篇迁移记录
+（`git ls-files | grep mgmusic` 只会命中 `docs/mgmusic-migration.md`）。
 
 ```text
-cmusic-others/mgmusic-plugin/          ← 插件项目（源）
-  llrt/mgmusic.js                      0.4.x 源（本仓 plugins/mgmusic.js 由它生成）
+cmusic-others/mgmusic-plugin/          ← 插件项目（asunajs/mgmusic-plugin）
+  llrt/mgmusic.js                      0.4.x 源（2142 行）
   llrt/webui/{index.html,style.css,app.js,boot.js}
-  scripts/build-panelllrt.mjs          rmSync + cpSync → panel-llrt/plugins/
+  scripts/build-panelllrt.mjs          llrt/ → dist/panel-llrt/{mgmusic.js, mgmusic.webui/}
+  scripts/deploy-panel.sh              dist/ → <实例>/plugins/（逐个 cmp）
   mgmusic.js + index.html + app.js …   0.3.x 那一版（仍在，老面板用）
 
-panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**）
-  mgmusic.js                           2146 行（2142 行源 + 4 行 banner），首行标着「复制生成」
-  mgmusic.webui/                       四个文件
+panel-llrt/                            ← 面板仓（只放面板）
+  docs/mgmusic-migration.md            本文：契约差异 + 读数
 ```
 
-改动流程：编辑 `llrt/` → `npm run build:panelllrt`（插件项目）→ 面板仓跑门禁并提交产物。
-本仓的 `scripts/deploy-daily.sh` 会把 `plugins/` 整个同步到日常实例并逐个 `cmp`。
+改动 / 上线流程（全在插件项目里敲）：
+
+```bash
+cd ~/mobile/workspace/cmusic-others/mgmusic-plugin
+npm run build:panelllrt    # 出 dist/panel-llrt/mgmusic.js + mgmusic.webui/
+npm run deploy:panel       # 拷进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins），逐个 cmp
+```
+
+面板那边的 `deploy-daily.sh` 只管二进制和面板自己的东西（它同步的 `plugins/` 里已经没有 mgmusic）。
 
 老版本（唯一权威副本，v0.3.4，2131 行）：
 `cmusic-others/mgmusic-plugin/mgmusic.js`，界面同目录四件；老面板里装的那份与仓库 md5 相同。
@@ -67,9 +76,10 @@ panel-llrt/plugins/                    ← 面板仓（产物，**不要手改**
 ## 3. 迁一台面板要做的三步
 
 ```bash
-# 1) 插件与界面（本仓 plugins/ 是**产物**，源在插件项目；日常实例用快照，deploy-daily.sh 会整目录同步并逐个 cmp）
-cp plugins/mgmusic.js ~/panel-3030/plugins/
-cp -R plugins/mgmusic.webui ~/panel-3030/plugins/
+# 1) 插件与界面 —— **在插件项目里装**（面板仓没有这份代码，它也不负责装插件）
+cd ~/mobile/workspace/cmusic-others/mgmusic-plugin
+npm run build:panelllrt     # llrt/ → dist/panel-llrt/
+npm run deploy:panel        # dist/panel-llrt/ → $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins），逐个 cmp
 
 # 2) 老账号（老面板的插件数据 → 新面板的 plugin-data；文件里是 ce/uid/msisdn，别贴到聊天里）
 mkdir -p ~/panel-3030/data/plugin-data/mgmusic
@@ -106,7 +116,7 @@ warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugi
 
 ## 4. 验收读数（2026-11-13，临时面板 8801 / 8802）
 
-被测：`plugins/mgmusic.js`（产物，2146 行）+ `mgmusic.webui/`（index 280 / style 294 / app 839 / boot 85 行）。
+被测：插件项目 `dist/panel-llrt/mgmusic.js`（2146 行）+ `mgmusic.webui/`（index 280 / style 294 / app 839 / boot 85 行）。
 下表是 verify 在 8801 的独立验证，加上 Lead 在 8802 对「补播种 / 整份提交 / 删光账号」三条的回归。
 
 | 项 | 期望 | 实测 |
