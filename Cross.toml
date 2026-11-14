@@ -3,8 +3,11 @@
 # 为什么需要：rquickjs-sys 没给 armv7-unknown-linux-musleabihf 预生成绑定，
 # 走它的 `bindgen` feature 现场生成，而 bindgen 要 **libclang**。
 # cross 的镜像里没有，所以在这个目标上先装一层。
+#
+# ⚠ pre-build 跑在 **docker build** 阶段：那时源码还没挂进来（/project 不存在）。
+#   所以这里只能装工具，**不能**做「读源码 / 试写 vendor」这类自检 —— 试过一次，
+#   直接把镜像构建搞挂（ls: cannot access '/project'）。
 [target.armv7-unknown-linux-musleabihf]
 pre-build = [
   "apt-get update && apt-get install -y --no-install-recommends libclang-dev clang",
-  "echo '--- 诊断：源码挂载与可写性 ---' && ls -ld /project /project/vendor /project/vendor/llrt && ( touch /project/vendor/llrt/.wtest && rm /project/vendor/llrt/.wtest && echo 'VENDOR-WRITABLE' || echo 'VENDOR-READONLY' ) && ( test -f /project/vendor/llrt/sdk.cfg && echo 'SDKCFG-OK' || echo 'SDKCFG-MISSING' ) && ( ls /project/vendor/llrt/bundle/js | head -3 ) && which rustc && rustc -vV | head -3",
 ]
