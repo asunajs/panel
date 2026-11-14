@@ -124,7 +124,8 @@
 | 场景 | 行为 |
 |---|---|
 | 目录 404 / 不是 JSON / 一条能用的都没有 | 页面横幅报原文，不写盘 |
-| GitHub 限速（403/429） | 明说「未登录每小时 60 次，等一会儿或填 token」 |
+| GitHub 限速（`x-ratelimit-remaining: 0` 或 429） | 明说「未登录每小时 60 次，等一会儿或填 token」 |
+| GitHub 403 但不是限速 | 报原文（`GitHub 拒绝了这次请求（HTTP 403：…）`）。**实测坑**：GitHub API 强制要 `User-Agent`，不带就一律 403 —— 商店曾经没带，于是「配了 token 也装不上，还被告知是限速」。`ghHeaders()` 现在固定带 `user-agent`，并靠 `x-ratelimit-remaining` 区分真限速与别的 403 |
 | 仓库没有 release（404） | 这条报错，别的条目照常可用 |
 | release 里没有 `.zip`/`.js` 资产 | 报错并列出实际资产名 |
 | 单文件是 `.ts` | 面板用内置 OXC 擦类型、落成 `<name>.js`（老面板 `market.rs` 同一份实现，0.154.0）；语法错报 `TypeScript 解析失败`，不落盘 |
