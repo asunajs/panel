@@ -85,6 +85,15 @@ base64 = "0.23"
 # panel.version()/atLeast() 的版本比较。1.x 已在树里（cargo 依赖链），不增加编译单元。
 semver = "1"
 sha2 = "0.10"
+# 装 .ts 插件时做类型擦除（第 108 轮）。0.154.0 全套已在离线缓存里 —— 老面板
+# src/market.rs 用的就是这一版，不引 Bun/Node 这种外部运行时。约 +0.9 MiB（release）。
+# 只做 TypeScript transform：不 bundle、不解析 panel:host、不生成 sourcemap。
+oxc_allocator = "0.154.0"
+oxc_codegen = "0.154.0"
+oxc_parser = "0.154.0"
+oxc_semantic = "0.154.0"
+oxc_span = "0.154.0"
+oxc_transformer = "0.154.0"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls", "native-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }

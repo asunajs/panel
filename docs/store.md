@@ -41,7 +41,8 @@
 
     ① 只收 http(s)
     ② SSRF 门：每跳都判（重定向最多 3 跳，和 outbound 同一套规则）
-    ③ 名字：`name` 或 URL 末段，必须是 .js / .zip（否则「安装」就成了往插件目录写任意文件的洞）
+    ③ 名字：`name` 或 URL 末段，必须是 .js / .ts / .zip（否则「安装」就成了往插件目录写任意文件的洞）
+       `.ts` 会在落盘前由 OXC 擦类型、改成同名 `.js`；sha256 校验对的是**原始 .ts 字节**
     ④ 按**实际读到的字节**挡上限（64 MiB；不信 Content-Length）
     ⑤ sha256 校验 —— **在落盘之前**：写一半才发现不对，等于留个半成品
     ⑥ upload::save：单文件直接落盘，zip 解包（拒穿越 / 符号链接 / 隐藏段 / zip bomb）
@@ -103,7 +104,7 @@
 | `type` | 否 | `release`（默认）/ `file` / `url` |
 | `repo` | `release`/`file` 要 | `owner/repo` |
 | `asset` | 否 | release 里指定资产名；不写就选第一个 `.zip`，再退 `.js` |
-| `path` + `ref` | `file` 要 | 仓库里的单文件（`ref` 缺省 `main`）。**只认 `.js`**：面板不带 TypeScript 转译 |
+| `path` + `ref` | `file` 要 | 仓库里的单文件（`ref` 缺省 `main`）。`.js` 直接落盘；`.ts` 由面板用内置 OXC 擦类型后落成同名 `.js`（第 108 轮，见下） |
 | `url` | `url` 要 | 直接给下载地址 |
 | `file` | 否 | 落成什么文件名（`type:url` 常常看不出该叫啥；名字和 `provides` 对不上就会「装了还显示未装」）。zip **不能用它改名**，否则面板会当单文件落盘 |
 | `sha256` | 否 | 给了就**必须**对上，否则一个字节都不写 |
@@ -126,7 +127,7 @@
 | GitHub 限速（403/429） | 明说「未登录每小时 60 次，等一会儿或填 token」 |
 | 仓库没有 release（404） | 这条报错，别的条目照常可用 |
 | release 里没有 `.zip`/`.js` 资产 | 报错并列出实际资产名 |
-| 单文件是 `.ts` | 报错：面板不带 TypeScript 转译（老面板内置 OXC，0.4 明确不做） |
+| 单文件是 `.ts` | 面板用内置 OXC 擦类型、落成 `<name>.js`（老面板 `market.rs` 同一份实现，0.154.0）；语法错报 `TypeScript 解析失败`，不落盘 |
 | sha 不匹配 | `400 校验失败：目录里写的是 …，实际下载到 …`，**不落盘** |
 | 同名已存在 | `400 文件已存在: x.js（要覆盖请显式勾选覆盖）` |
 | 超过 64 MiB / 解压后超限 | 拒绝（各自的上限报各自的字节数） |
@@ -150,8 +151,21 @@
 | 面板内置商店 | 就是这一轮要避免的事：商店该是插件，面板只留通用能力 |
 | 后台自动升级 | 等于让远端 JSON 决定你机器上跑什么代码。第一版只有手动「刷新目录 → 点覆盖安装」 |
 | GitHub 之外的托管 | `type:url` 已经覆盖任意 http(s) 源（含内网），不再为每家写适配 |
-| TypeScript 转译 | 老面板内置 OXC；0.4 只吃 `.js`，要 TS 就在插件仓里构建成 `.js` 再发 |
 | 私有仓库凭证 | v1 的 install 不带自定义请求头（那等于「把 token 发给任意 URL」）。目录与 release 元数据可以用 `github_token`，下载走公开直链 |
+
+### `.ts` 能转译，但转译 ≠ 契约迁移
+
+`src/install.rs::ts_to_js` 只做**类型擦除**（OXC 的 TypeScript transform）：不 bundle、
+不改 import、不生成 sourcemap。所以：
+
+- 语法层：type / interface / enum / `: string` 都能擦掉，输出仍是 ESM，能被 LLRT 编译；
+- 契约层：**改不了** `from "host-api"`（0.3）→ `from "panel:host"`（0.4）。
+
+实测（2026-11-14，真实 `quark/quark.ts` 6868 字节）：CLI 装完得到 `quark.js` 6211 字节、
+类型残留 0，但加载期报 `Error resolving module 'host-api'` —— 因为那份源码还是 0.3 契约。
+所以**官方目录里 quark 那条仍然没收**：转译能过，装完却加载不了。要让 `.ts` 进目录，
+上游插件仓得先把 `host-api` 迁到 `panel:host`（[plugin-contract.md](plugin-contract.md) R5/R6），
+OXC 不管这件事。
 
 ## 9. 上线与自测
 

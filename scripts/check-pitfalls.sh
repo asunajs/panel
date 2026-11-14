@@ -192,10 +192,16 @@ if grep -q 'ensure_outbound_url_allowed_with' src/install.rs; then
 else
   bad 'src/install.rs 的下载没过 SSRF 门 —— 商店能把内网地址塞进插件目录'
 fi
-if grep -q 'lower.ends_with(\".js\") || lower.ends_with(\".zip\")' src/install.rs; then
-  ok '安装的名字白名单只有 .js / .zip'
+if grep -q 'lower.ends_with(".js") || lower.ends_with(".ts") || lower.ends_with(".zip")' src/install.rs; then
+  ok '安装的名字白名单只有 .js / .ts / .zip（.ts 由 OXC 转成 .js）'
 else
   bad 'src/install.rs 少了扩展名白名单（否则安装 = 往插件目录写任意文件）'
+fi
+# 第 108 轮：.ts 必须落成 .js（加载器只扫 plugins/*.js），别把 .ts 原样留在插件目录
+if grep -q 'format!("{stem}.js")' src/install.rs; then
+  ok '.ts 安装时转成同名 .js（不把 .ts 原样留在插件目录）'
+else
+  bad 'src/install.rs 的 .ts 分支没有改名成 .js —— 装了但加载器看不见'
 fi
 
 # pitfalls §102：脚本 = 第三方程序，不进引擎 —— scripts.rs 里出现 crate::engine /
