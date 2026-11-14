@@ -1023,6 +1023,8 @@ let scheduleTarget = null;
 //   · 用户默认不写表达式；表达式只是「频率类型」里的一档，原样交给调度器。
 // 表单值就是 JSON 本身，这里没有额外的转换层。
 let schedJson = null;
+/** 高级选项是否展开：重画表单时要把这个状态带过去，否则一勾选就自己收起来。 */
+let schedAdvOpen = false;
 
 /** 表单里可用的类型（顺序即下拉顺序）。 */
 function schedTypes() {
@@ -1067,6 +1069,7 @@ function openTaskSchedule(t) {
     const back = PanelSchedule.fromCron(cur);
     schedJson = back.ok ? back.json : { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
   }
+  schedAdvOpen = false;
   $('task-schedule-hint').classList.remove('err-text');
   $('task-schedule-hint').textContent = '只换计划，运行历史和暂停状态都保留。';
   $('task-schedule-reset').classList.toggle('hidden', !t.cron_override);
@@ -1183,47 +1186,62 @@ function renderScheduleForm() {
   }
 
   // 高级选项（折叠，默认收起）：抖动 + 随机选择
+  //
+  // ⚠ 这里的控件**不重画整张表单**，只改 JSON + 重算短句/预览。
+  //   早先每个勾选都调 renderScheduleForm()，而 <details> 是新建的、不带 open，
+  //   于是「点一下勾选，折叠自己收起来了」，顺带把焦点也丢了。
   const adv = el('details', 'sched-adv');
+  adv.open = schedAdvOpen; // 整表重画时（切类型、点星期）保住展开状态
+  adv.addEventListener('toggle', () => { schedAdvOpen = adv.open; });
   adv.append(el('summary', '', '高级选项'));
   const body = el('div');
   if (j.type !== 'window') {
-    const jm = PanelSchedule.parseDur(j.jitter);
-    const on = !!jm;
+    const kOf = (u) => ({ m: 60e3, s: 1000, h: 3600e3 }[u]);
+    let jMs = PanelSchedule.parseDur(j.jitter) || 600e3; // 勾上时用 10 分钟起步
+    let unit = jMs % 3600e3 === 0 ? 'h' : jMs % 60e3 === 0 ? 'm' : 's';
+
     const cb = el('input');
     cb.type = 'checkbox';
-    cb.checked = on;
-    cb.addEventListener('change', () => {
-      schedJson.jitter = cb.checked ? '10m' : null;
-      renderScheduleForm();
-    });
+    cb.checked = !!j.jitter;
     const lab = el('label', 'field-inline');
     lab.append(cb, el('span', '', '抖动（±）'));
     body.append(lab);
-    if (on) {
-      const num = el('input', 'modal-input');
-      num.type = 'number';
-      num.min = '1';
-      num.value = String(jm % 60e3 === 0 ? jm / 60e3 : jm / 1000);
-      num.addEventListener('change', () => {
-        const unit = jm % 60e3 === 0 ? 60e3 : 1000;
-        schedJson.jitter = PanelSchedule.durToStr(Math.max(1, Number(num.value)) * unit) || '1m';
-        renderScheduleForm();
-      });
-      const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']],
-        jm % 3600e3 === 0 ? 'h' : jm % 60e3 === 0 ? 'm' : 's',
-        (u) => {
-          const k = { m: 60e3, s: 1000, h: 3600e3 }[u];
-          schedJson.jitter = PanelSchedule.durToStr(Math.max(1, Math.round(jm / k)) * k) || '1m';
-          renderScheduleForm();
-        });
-      body.append(schedRow('幅度', num, unitSel));
-    }
+
+    // 幅度行一直建好，靠 hidden 显隐 —— 重画会导致折叠，所以不能按需重建
+    const num = el('input', 'modal-input');
+    num.type = 'number';
+    num.min = '1';
+    num.value = String(Math.max(1, Math.round(jMs / kOf(unit))));
+    num.addEventListener('change', () => {
+      jMs = Math.max(1, Number(num.value)) * kOf(unit);
+      schedJson.jitter = PanelSchedule.durToStr(jMs) || '1m';
+      refreshSchedDerived();
+    });
+    const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']], unit, (u) => {
+      unit = u;
+      num.value = String(Math.max(1, Math.round(jMs / kOf(u))));
+      jMs = Math.max(1, Number(num.value)) * kOf(u);
+      schedJson.jitter = PanelSchedule.durToStr(jMs) || '1m';
+      refreshSchedDerived();
+    });
+    const mag = schedRow('幅度', num, unitSel);
+    mag.classList.toggle('hidden', !cb.checked);
+    body.append(mag);
+
+    cb.addEventListener('change', () => {
+      schedJson.jitter = cb.checked ? (PanelSchedule.durToStr(jMs) || '10m') : null;
+      mag.classList.toggle('hidden', !cb.checked);
+      refreshSchedDerived();
+    });
   }
   if (j.type === 'weekly' || j.type === 'monthly') {
     const cb = el('input');
     cb.type = 'checkbox';
     cb.checked = !!j.randomPick;
-    cb.addEventListener('change', () => { schedJson.randomPick = cb.checked; renderScheduleForm(); });
+    cb.addEventListener('change', () => {
+      schedJson.randomPick = cb.checked;
+      refreshSchedDerived();
+    });
     const lab = el('label', 'field-inline');
     lab.append(cb, el('span', '', j.type === 'weekly' ? '每周从所选星期里随机挑一天' : '每月随机挑一天'));
     body.append(lab);
