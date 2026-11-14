@@ -515,6 +515,22 @@ pub fn router(st: AppState) -> Router {
             axum::routing::patch(api_notify_channel_update).delete(api_notify_channel_delete),
         )
         .route("/api/notify/channels/{id}/toggle", post(api_notify_channel_toggle))
+        // 推送规则（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁
+        .route("/api/notify/routes", post(api_notify_route_create))
+        .route(
+            "/api/notify/routes/{id}",
+            axum::routing::patch(api_notify_route_update).delete(api_notify_route_delete),
+        )
+        .route("/api/notify/routes/{id}/toggle", post(api_notify_route_toggle))
+        .route("/api/notify/routes/{id}/test", post(api_notify_route_test))
+        // 复制渠道（含密钥）：多条同类型渠道各用各的 token
+        .route(
+            "/api/notify/channels/{id}/duplicate",
+            post(api_notify_channel_duplicate),
+        )
+        // 全局四项 / 整段替换（高级 JSON）
+        .route("/api/notify/settings", axum::routing::patch(api_notify_settings))
+        .route("/api/notify", axum::routing::put(api_notify_put))
         .route("/api/backup", get(api_backup).post(api_restore))
         .route("/api/scripts", get(scripts_list).post(script_create))
         .route(
@@ -3876,6 +3892,17 @@ async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, Api
             json!(600),
         ),
     };
+    // 推送规则（第 186 轮）：老配置没写 routes 时，这里给出「每条渠道一条」的合成视图，
+    // 界面永远按两层显示，不用为兼容分支写两套 UI。
+    let routes = match crate::notify::from_store(&st.config) {
+        Ok(c) => c
+            .effective_routes()
+            .iter()
+            .map(|r| crate::notify::route_view(r, &c))
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    let health = crate::notify::route_health(&st.db).await;
     let counts = crate::notify::counts(&st.db).await.map_err(internal)?;
     let outbox = crate::notify::outbox(&st.db, "all", 30).await.map_err(internal)?;
     Ok(Json(json!({
@@ -3886,6 +3913,8 @@ async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, Api
         "quiet_hours": quiet,
         "dedupe_secs": dedupe,
         "channels": channels,
+        "routes": routes,
+        "health": health,
         "counts": counts,
         "outbox": outbox,
     })))
@@ -3934,8 +3963,14 @@ fn channels_of(value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// 改 notify.channels → 语义校验 → 落盘 → 换热快照。返回新的 channels。
-async fn save_channels(st: &AppState, chans: Vec<Value>) -> Result<Value, ApiError> {
+/// 改 notify 段（渠道 / 推送 / 全局都走这一条）：合并 → 语义校验 → 0600 原子写 → 换热快照。
+///
+/// 第 186 轮把渠道、推送、全局三项的写盘合成一条路径：以前每加一种写操作就复制一遍
+/// 「读配置 + 校验 + 写盘 + 换快照」，校验漏一处就会写出一个能落盘但跑不起来的配置。
+async fn save_notify(
+    st: &AppState,
+    f: impl FnOnce(&mut Value) -> Result<(), ApiError>,
+) -> Result<Value, ApiError> {
     let text = st.config.snapshot().to_string();
     let mut value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
     if !value.is_object() {
@@ -3944,7 +3979,7 @@ async fn save_channels(st: &AppState, chans: Vec<Value>) -> Result<Value, ApiErr
     if !value.get("notify").map(|n| n.is_object()).unwrap_or(false) {
         value["notify"] = json!({});
     }
-    value["notify"]["channels"] = Value::Array(chans);
+    f(&mut value)?;
     // 与配置页同一道校验：写错了就不落盘，旧配置继续生效。
     crate::notify::parse(value.get("notify")).map_err(|e| bad(format!("配置有问题：{e}")))?;
     let path = st.data_dir.join(crate::config::FILE);
@@ -3954,9 +3989,398 @@ async fn save_channels(st: &AppState, chans: Vec<Value>) -> Result<Value, ApiErr
         .await
         .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
     st.config.set(&value);
-    Ok(value["notify"]["channels"].clone())
+    Ok(value["notify"].clone())
 }
 
+/// 只改 channels 的薄封装（现有渠道 CRUD 都用它）。
+///
+/// 回给前端的是**打码视图**（channel_view），不是配置里的原文 —— 原文里有明文密钥，
+/// 写接口的响应同样不该把它带出去。
+async fn save_channels(st: &AppState, chans: Vec<Value>) -> Result<Value, ApiError> {
+    save_notify(st, |v| {
+        v["notify"]["channels"] = Value::Array(chans);
+        Ok(())
+    })
+    .await?;
+    let cfg = crate::notify::from_store(&st.config)
+        .map_err(|e| internal(format!("刚写进去的配置读不回来: {e}")))?;
+    Ok(Value::Array(
+        cfg.channels.iter().map(crate::notify::channel_view).collect(),
+    ))
+}
+
+/// 只改 routes 的薄封装（同样回视图）。
+async fn save_routes(st: &AppState, routes: Vec<Value>) -> Result<Value, ApiError> {
+    save_notify(st, |v| {
+        v["notify"]["routes"] = Value::Array(routes);
+        Ok(())
+    })
+    .await?;
+    let cfg = crate::notify::from_store(&st.config)
+        .map_err(|e| internal(format!("刚写进去的配置读不回来: {e}")))?;
+    Ok(Value::Array(
+        cfg.effective_routes()
+            .iter()
+            .map(|r| crate::notify::route_view(r, &cfg))
+            .collect(),
+    ))
+}
+
+/// 把「老配置」（只有 channels，没有 routes）物化成真正的 routes 数组。
+///
+/// 为什么需要：界面上老配置也会显示成「每条渠道一条推送」（合成视图），用户点「停用」时
+/// 改的是那条合成出来的推送 —— 但它不在文件里，直接 PATCH 会 404。所以任何写操作之前先落一份。
+fn materialize_routes(value: &mut Value) {
+    let has = value
+        .get("notify")
+        .and_then(|n| n.get("routes"))
+        .and_then(|r| r.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if has {
+        return;
+    }
+    let Some(chans) = value
+        .get("notify")
+        .and_then(|n| n.get("channels"))
+        .and_then(|c| c.as_array())
+        .cloned()
+    else {
+        return;
+    };
+    let mut routes = Vec::new();
+    for c in chans {
+        let id = c.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let mut r = json!({
+            "id": format!("{id}-default"),
+            "name": c.get("name").and_then(|x| x.as_str()).unwrap_or(&id),
+            "channel": id,
+            "enabled": true,
+        });
+        for k in [
+            "events",
+            "include_plugins",
+            "exclude_plugins",
+            "min_level",
+            "quiet_hours",
+        ] {
+            if let Some(v) = c.get(k) {
+                r[k] = v.clone();
+            }
+        }
+        routes.push(r);
+    }
+    if !routes.is_empty() {
+        value["notify"]["routes"] = Value::Array(routes);
+    }
+}
+
+/// 当前 routes 数组（没有就是空）。
+fn routes_of(value: &Value) -> Vec<Value> {
+    value
+        .get("notify")
+        .and_then(|n| n.get("routes"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn snapshot_value(st: &AppState) -> Value {
+    serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null)
+}
+
+// ---------------------------------------------------------------- 推送规则（第 186 轮）
+//
+// 渠道 = 怎么发；推送 = 什么时候发给谁。CRUD 的形状和渠道一致（同样的合并语义、
+// 同样的 0600 原子写），只是删推送**不动渠道** —— 这正是要的「删掉推送但渠道还在」。
+
+async fn api_notify_route_create(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("推送必须是一个 JSON 对象"));
+    }
+    let mut snap = snapshot_value(&st);
+    materialize_routes(&mut snap);
+    let mut routes = routes_of(&snap);
+    let mut obj = v.as_object().cloned().unwrap_or_default();
+    let id = obj
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let id = match id {
+        Some(s) => s,
+        None => {
+            let mut n = routes.len() + 1;
+            loop {
+                let cand = format!("push{n}");
+                if !routes
+                    .iter()
+                    .any(|r| r.get("id").and_then(|x| x.as_str()) == Some(cand.as_str()))
+                {
+                    break cand;
+                }
+                n += 1;
+            }
+        }
+    };
+    if routes
+        .iter()
+        .any(|r| r.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    {
+        return Err(bad(format!("已经有一条叫 {id} 的推送了")));
+    }
+    obj.insert("id".to_string(), json!(id));
+    let timed = obj.get("at").map(|a| !a.is_null()).unwrap_or(false);
+    routes.push(Value::Object(obj));
+    let out = save_routes(&st, routes).await?;
+    // 定时推送：游标从「现在」起，第一次到点不用多等一轮扫描
+    if timed {
+        crate::notify::seed_route_state(&st.db, &id, chrono::Local::now().timestamp_millis()).await;
+    }
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知推送 {id} 已添加"),
+    );
+    Ok(Json(json!({ "ok": true, "routes": out })))
+}
+
+async fn api_notify_route_update(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("推送必须是一个 JSON 对象"));
+    }
+    let mut snap = snapshot_value(&st);
+    materialize_routes(&mut snap);
+    let mut routes = routes_of(&snap);
+    let Some(pos) = routes
+        .iter()
+        .position(|r| r.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    else {
+        return Err(ApiError::not_found(format!("没有这条推送：{id}")));
+    };
+    // 合并：只覆盖给了的键。at = null 是**显式关掉定时**（缺键表示不动），两者不能混。
+    let mut merged = routes[pos].as_object().cloned().unwrap_or_default();
+    for (k, val) in v.as_object().cloned().unwrap_or_default() {
+        merged.insert(k, val);
+    }
+    merged.insert("id".to_string(), json!(id));
+    routes[pos] = Value::Object(merged);
+    let out = save_routes(&st, routes).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知推送 {id} 已更新"),
+    );
+    Ok(Json(json!({ "ok": true, "routes": out })))
+}
+
+/// 删推送：**只删规则，渠道保留**。
+async fn api_notify_route_delete(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let mut snap = snapshot_value(&st);
+    materialize_routes(&mut snap);
+    let routes = routes_of(&snap);
+    let before = routes.len();
+    let kept: Vec<Value> = routes
+        .into_iter()
+        .filter(|r| r.get("id").and_then(|x| x.as_str()) != Some(id.as_str()))
+        .collect();
+    if kept.len() == before {
+        return Err(ApiError::not_found(format!("没有这条推送：{id}")));
+    }
+    let out = save_routes(&st, kept).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知推送 {id} 已删除（渠道保留）"),
+    );
+    Ok(Json(json!({ "ok": true, "routes": out })))
+}
+
+/// 启停推送：停用只是这条哑了，配置全留着。
+async fn api_notify_route_toggle(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let mut snap = snapshot_value(&st);
+    materialize_routes(&mut snap);
+    let mut routes = routes_of(&snap);
+    let Some(pos) = routes
+        .iter()
+        .position(|r| r.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+    else {
+        return Err(ApiError::not_found(format!("没有这条推送：{id}")));
+    };
+    let mut obj = routes[pos].as_object().cloned().unwrap_or_default();
+    let now = obj.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    obj.insert("enabled".to_string(), json!(!now));
+    routes[pos] = Value::Object(obj);
+    let out = save_routes(&st, routes).await?;
+    Ok(Json(json!({ "ok": true, "enabled": !now, "routes": out })))
+}
+/// 试发一条推送：走它自己的渠道（不是所有渠道）。
+async fn api_notify_route_test(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let cfg = crate::notify::from_store(&st.config)
+        .map_err(|e| bad(format!("配置有问题：{e}")))?;
+    let Some(r) = cfg.effective_routes().into_iter().find(|r| r.id == id) else {
+        return Err(ApiError::not_found(format!("没有这条推送：{id}")));
+    };
+    let out = crate::notify::test_send(&st.db, &st.log, &st.config, Some(&r.channel))
+        .await
+        .map_err(internal)?;
+    // 形状和 /api/notify/test 一致（results 数组），前端不用记两套
+    Ok(Json(json!({
+        "ok": true,
+        "route": id,
+        "results": out.get("results").cloned().unwrap_or(Value::Null),
+    })))
+}
+
+/// 复制渠道（含密钥）：同类型、不同 token 的第二条从这里开始。
+async fn api_notify_channel_duplicate(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let mut chans = channels_of(&snapshot_value(&st));
+    let Some(src) = chans
+        .iter()
+        .find(|c| c.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+        .cloned()
+    else {
+        return Err(ApiError::not_found(format!("没有这个渠道：{id}")));
+    };
+    let mut obj = src.as_object().cloned().unwrap_or_default();
+    // 新 id：id-2 / id-3 …（撞了就往后找）
+    let mut new_id = String::new();
+    for n in 2..100 {
+        let cand = format!("{id}-{n}");
+        if !chans
+            .iter()
+            .any(|c| c.get("id").and_then(|x| x.as_str()) == Some(cand.as_str()))
+        {
+            new_id = cand;
+            break;
+        }
+    }
+    if new_id.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "id_exhausted",
+            format!("{id} 的副本太多了，换个名字手工建一个吧"),
+        ));
+    }
+    obj.insert("id".to_string(), json!(new_id));
+    // 名字用「原渠道名字（副本）」，不是 id（id 可能是 ch1 这种看不出含义的）
+    let src_name = src
+        .get("name")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&id)
+        .to_string();
+    obj.insert("name".to_string(), json!(format!("{src_name}（副本）")));
+    chans.push(Value::Object(obj));
+    let out = save_channels(&st, chans).await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("通知渠道 {id} 已复制为 {new_id}（含密钥）"),
+    );
+    Ok(Json(json!({ "ok": true, "id": new_id, "channels": out })))
+}
+
+/// 改全局四项：只覆盖给了的键。
+async fn api_notify_settings(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("设置必须是一个 JSON 对象"));
+    }
+    let obj = v.as_object().cloned().unwrap_or_default();
+    let out = save_notify(&st, move |value| {
+        let n = value["notify"]
+            .as_object_mut()
+            .ok_or_else(|| internal("配置里的 notify 不是对象".to_string()))?;
+        for (k, val) in obj {
+            match k.as_str() {
+                "min_level" | "mute" | "quiet_hours" | "dedupe_secs" => {
+                    n.insert(k, val);
+                }
+                other => {
+                    return Err(bad(format!(
+                        "设置里不认这个键：{other}（只有 min_level / mute / quiet_hours / dedupe_secs）"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "min_level": out.get("min_level").cloned().unwrap_or(Value::Null),
+        "mute": out.get("mute").cloned().unwrap_or(Value::Null),
+        "quiet_hours": out.get("quiet_hours").cloned().unwrap_or(Value::Null),
+        "dedupe_secs": out.get("dedupe_secs").cloned().unwrap_or(Value::Null),
+    })))
+}
+
+/// 整段替换 notify（高级 JSON 模式）：坏 JSON / 坏语义一律 400 且不落盘。
+async fn api_notify_put(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(v): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    if !v.is_object() {
+        return Err(bad("notify 必须是一个 JSON 对象"));
+    }
+    let out = save_notify(&st, move |value| {
+        value["notify"] = v.clone();
+        Ok(())
+    })
+    .await?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        "通知配置已整段替换（高级模式）".to_string(),
+    );
+    Ok(Json(json!({ "ok": true, "notify": out })))
+}
 async fn api_notify_channel_create(
     State(st): State<AppState>,
     h: HeaderMap,
@@ -4049,7 +4473,26 @@ async fn api_notify_channel_delete(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let chans = channels_of(&serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null));
+    let snap = snapshot_value(&st);
+    let chans = channels_of(&snap);
+    // 被推送引用着就不许删（第 186 轮）：删掉它，那些推送会静默变成「渠道缺失」，
+    // 而用户以为自己只是删了一个没用的渠道。要说清是谁在引用。
+    let refs: Vec<String> = routes_of(&snap)
+        .iter()
+        .filter(|r| r.get("channel").and_then(|x| x.as_str()) == Some(id.as_str()))
+        .filter_map(|r| r.get("id").and_then(|x| x.as_str()).map(str::to_string))
+        .collect();
+    if !refs.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "channel_in_use",
+            format!(
+                "还有 {} 条推送在用它（{}），先改掉或删掉这些推送再删渠道",
+                refs.len(),
+                refs.join("、")
+            ),
+        ));
+    }
     let before = chans.len();
     let kept: Vec<Value> = chans
         .into_iter()

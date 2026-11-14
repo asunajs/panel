@@ -291,14 +291,14 @@ impl Task {
     }
 
     /// 只注册了 handler、没注册 cron 的任务：出现在界面上、能手动执行，但不自动跑。
-    fn manual(plugin: String, name: String) -> Self {
+    fn manual(plugin: String, name: String, budget_ms: u64) -> Self {
         let far = Local::now() + ChronoDuration::days(FALLBACK_DAYS);
         Self {
             plugin,
             name,
             cron: String::new(),
             base_cron: String::new(),
-            suggest_budget_ms: DEFAULT_BUDGET_MS,
+            suggest_budget_ms: budget_ms,
             suggest_lead_ms: 0,
             pending_adopt: false,
             override_expr: None,
@@ -308,7 +308,7 @@ impl Task {
             lead_override: false,
             params: None,
             schedule: None,
-            budget_ms: DEFAULT_BUDGET_MS,
+            budget_ms: budget_ms.max(1),
             enabled: true,
             lazy: false,
             deleted_at: None,
@@ -1343,7 +1343,13 @@ impl Inner {
                         continue; // 插件已经注册过同名任务：真家伙优先
                     }
                     let mut t = if row.cron.is_empty() {
-                        Task::manual(row.plugin.clone(), row.name.clone())
+                        // 库里那行记得上次的预算（插件注册时声明的），占位也按它来，
+                        // 别回退成默认 30 秒 —— 真注册晚到之前这段是「按这个列」的形状。
+                        Task::manual(
+                            row.plugin.clone(),
+                            row.name.clone(),
+                            (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS),
+                        )
                     } else {
                         match Task::with_opts(
                             row.plugin.clone(),
@@ -1361,7 +1367,11 @@ impl Inner {
                                     Level::Warn,
                                     format!("库里的任务 {} 调度不合法（{e}），按手动任务列出", row.name),
                                 );
-                                Task::manual(row.plugin.clone(), row.name.clone())
+                                Task::manual(
+                                    row.plugin.clone(),
+                                    row.name.clone(),
+                                    (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS),
+                                )
                             }
                         }
                     };
@@ -2215,9 +2225,15 @@ impl Inner {
                 self.sidebar.insert(plugin.clone(), NavEntry { title, order });
                 self.note_surface_async(&plugin);
             }
-            Registration::Handler { plugin, name } => {
+            Registration::Handler { plugin, name, budget_ms } => {
                 if self.find(&plugin, &name).is_none() {
-                    self.tasks.push(Task::manual(plugin.clone(), name.clone()));
+                    // 预算来自插件注册时的声明（0.4.1 起 register_handler 的第三个参数），
+                    // 与 register_cron 同一钳法：长链路的手动任务在注册时就要说清楚。
+                    self.tasks.push(Task::manual(
+                        plugin.clone(),
+                        name.clone(),
+                        budget_ms.clamp(1, MAX_BUDGET_MS),
+                    ));
                     // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
                     // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
                     // 随后同名 register_cron 的 apply_saved 就读不回来了 ——

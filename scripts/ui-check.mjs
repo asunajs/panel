@@ -65,6 +65,9 @@ writeFileSync(
 
 writeFileSync(path.join(plugins, 'seed.js'), [
   "import host from 'panel:host';",
+  // 侧栏一格（第 182 轮）：插件导航 ⇄ 主导航的切换要有真插件可点（回归那个
+  // 「从插件页点仪表盘没反应」的坑），iframe 里是 404 无所谓 —— 断言只看视图切换。
+  "await host.sidebar({ title: '种子', order: 99 });",
   "await host.register_handler('ok', async () => { await host.sleep(5); return 1; });",
   "await host.register_handler('boom', async () => { throw new Error('boom-marker'); });",
   "await host.register_cron('tick', '@every 30s');",
@@ -205,6 +208,38 @@ async function main() {
   const setupHidden = await js("document.getElementById('setup-gate').classList.contains('hidden')");
   check('点「先不设」后收起，且记住了选择',
     setupHidden === true && (await js("localStorage.getItem('panel.skipSetup')")) === '1', String(setupHidden));
+
+  // 插件导航 ⇄ 主导航（第 182 轮修的坑：插件导航原来 preventDefault + 直接 setView，
+  // hash 不动 —— 从插件页点「仪表盘」（href="#dashboard"）时 hash 没变、没有 hashchange，
+  // 界面就赖在插件页，先切到别的页再点才好）。走**真点击**（锚链接默认行为），跟用户的路径一样。
+  const plugNav = await js(
+    "(()=>{const a=document.querySelector('#nav-plugin-list .nav-item');" +
+    "if(!a) return '';a.click();return a.dataset.pluginView;})()"
+  );
+  await sleep(600);
+  check(
+    '点插件导航能进插件页',
+    plugNav === 'seed' && (await js("document.getElementById('view-plugin').classList.contains('hidden')")) === false,
+    'nav=' + plugNav + ' hash=' + (await js('location.hash')),
+  );
+  await js("[...document.querySelectorAll('.nav-item')].find((a)=>a.dataset.view==='dashboard').click()");
+  await sleep(400);
+  check(
+    '从插件页直接点「仪表盘」能切回去（hash 落到 #dashboard）',
+    (await js("document.getElementById('view-dashboard').classList.contains('hidden')")) === false &&
+      (await js('location.hash')) === '#dashboard',
+    'hash=' + (await js('location.hash')),
+  );
+  // 顺带验深链：旧版 href 的斜杠形式也要能落到插件页（setView 统一成冒号形式）
+  await js("location.hash = '#plugin/seed'");
+  await sleep(400);
+  check(
+    '深链 #plugin/seed 也能进插件页',
+    (await js("document.getElementById('view-plugin').classList.contains('hidden')")) === false &&
+      (await js('location.hash')) === '#plugin/seed',
+    'hash=' + (await js('location.hash')),
+  );
+
   // 运行记录：首屏 / 分页 / 筛选 / 搜索 / 排序
   await js("location.hash = '#runs'");
   await sleep(1200);
@@ -278,8 +313,90 @@ async function main() {
   check('设置页 5 个页签', JSON.parse(tabs || '[]').length === 5, tabs);
   await js("document.querySelector('#view-settings [data-tab=notify]').click()");
   await sleep(1000);
-  const notifyVisible = await js("(()=>{const e=document.getElementById('notify-channels'); if(!e) return 'missing'; return e.getBoundingClientRect().height>0?'visible':'hidden';})()");
-  check('通知页签显示渠道区', notifyVisible === 'visible', notifyVisible);
+  const notifyVisible = await js("(()=>{const e=document.getElementById('notify-work'); if(!e) return 'missing'; return e.getBoundingClientRect().height>0?'visible':'hidden';})()");
+  check('通知页签显示两栏工作台', notifyVisible === 'visible', notifyVisible);
+
+  // ── 通知：左推送 / 右配置（第 186 轮）────────────────────────────────
+  // 空态：不许再把一段死 JSON 当主内容（上一版就是这里被打回的）
+  const emptyMain = await js("document.getElementById('notify-main').innerText.replace(/\\s+/g,' ')");
+  check('通知空态是引导不是 JSON', emptyMain.includes('还没有推送规则') && !emptyMain.includes('{'), emptyMain.slice(0, 80));
+  const hasJsonBtn = await js("!!document.getElementById('notify-json')");
+  check('空态给「高级：编辑 JSON」入口', hasJsonBtn === true);
+
+  // 切到「渠道」→ 添加渠道 → 类型选 Server酱 → 填名字和密钥 → 保存
+  await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='channels').click();return 1;})()");
+  await sleep(300);
+  await js("document.getElementById('notify-add').click()");
+  await sleep(400);
+  const kindSet = await js("(()=>{const s=document.querySelector('#notify-main .chan-group select');s.value='serverchan';s.dispatchEvent(new Event('change'));return s.value;})()");
+  check('渠道表单能选类型', kindSet === 'serverchan', kindSet);
+  await sleep(400);
+  const secretFresh = await js("(()=>{const s=document.querySelector('#notify-main .chan-secret');return s?s.innerText.trim():'none';})()");
+  check('新渠道密钥控件是「未设置」', secretFresh === '' || secretFresh === 'none', JSON.stringify(secretFresh));
+  await js("(()=>{document.querySelector('#notify-main .chan-group input.input').value='UI 检查 · Server酱';document.querySelector('#notify-main .chan-secret input').value='SCT_UI_CHECK_1';return 1;})()");
+  await js("(()=>{[...document.querySelectorAll('#notify-main button')].find(b=>b.textContent==='保存').click();return 1;})()");
+  await sleep(1300);
+  const chanRows = await js("document.querySelectorAll('#notify-rows .nrow').length");
+  check('保存后左栏出现渠道', chanRows === 1, String(chanRows));
+  const secretMasked = await js("(()=>{const s=document.querySelector('#notify-main .chan-secret');return s?s.innerText.replace(/\\s+/g,' '):'none';})()");
+  check('已设置的密钥显示 *** 且给替换/清除', secretMasked.includes('已设置') && secretMasked.includes('替换') && secretMasked.includes('清除'), secretMasked);
+  const leaks = await js("document.body.innerText.includes('SCT_UI_CHECK_1')");
+  check('页面任何地方不出现明文密钥', leaks === false);
+
+  // 新建推送：事件触发 + 标题模板（预览要跟着变）
+  await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='routes').click();return 1;})()");
+  await sleep(300);
+  await js("document.getElementById('notify-add').click()");
+  await sleep(400);
+  await js("(()=>{document.querySelector('#notify-main .chan-group input.input').value='任务失败 → 手机';return 1;})()");
+  await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];g.querySelectorAll('.chan-check input')[0].click();return 1;})()");
+  await js("(()=>{const g=[...document.querySelectorAll('#notify-main .chan-group')].find(x=>x.querySelector('h4').textContent==='推送标题');const i=g.querySelector('input.input');i.value='[告警] {{title}}';i.dispatchEvent(new Event('input'));return 1;})()");
+  await sleep(200);
+  const pv = await js("document.querySelector('#notify-main .chan-preview').textContent");
+  check('标题模板有实时预览', pv.includes('[告警]') && pv.includes('任务失败'), pv);
+  await js("(()=>{[...document.querySelectorAll('#notify-main button')].find(b=>b.textContent==='保存').click();return 1;})()");
+  await sleep(1300);
+  const routeRows = JSON.parse(await js("JSON.stringify([...document.querySelectorAll('#notify-rows .nrow')].map(r=>r.innerText.replace(/\\s+/g,' ')))"));
+  check('推送行显示条件与渠道', routeRows.some((r) => r.includes('任务失败 → 手机') && r.includes('任务失败')), JSON.stringify(routeRows.slice(0, 3)));
+
+  // 停用：只哑这一条，配置保留
+  await js("(()=>{const b=[...document.querySelectorAll('#notify-main button')].find(x=>x.textContent.indexOf('停用')===0);if(!b)return 0;b.click();return 1;})()");
+  await sleep(1200);
+  const offRow = JSON.parse(await js("JSON.stringify([...document.querySelectorAll('#notify-rows .nrow')].map(r=>r.className))"));
+  check('停用后行变灰（配置还在）', offRow.some((c) => c.includes('is-off')), JSON.stringify(offRow));
+  const stillThere = await js("document.querySelectorAll('#notify-main .chan-group').length");
+  check('停用后右栏配置仍完整', stillThere >= 4, String(stillThere));
+
+  // 复制渠道 → 两条，密钥一起带过来
+  await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='channels').click();return 1;})()");
+  await sleep(400);
+  await js("(()=>{[...document.querySelectorAll('#notify-main button')].find(b=>b.textContent==='复制').click();return 1;})()");
+  await sleep(1300);
+  const dupRows = await js("document.querySelectorAll('#notify-rows .nrow').length");
+  check('复制渠道得到第二条', dupRows === 2, String(dupRows));
+
+  // 高级 JSON：可编辑 + 写坏能报错
+  await js("document.getElementById('notify-json').click()");
+  await sleep(900);
+  const jsonLen = await js("(document.querySelector('.json-editor')||{}).value ? document.querySelector('.json-editor').value.length : 0");
+  check('高级 JSON 可编辑且带内容', jsonLen > 40, String(jsonLen));
+  await js("(()=>{document.querySelector('.json-editor').value='{ bad';[...document.querySelectorAll('#notify-json-box button')].find(b=>b.textContent==='校验').click();return 1;})()");
+  await sleep(400);
+  const jsonErr = await js("(document.querySelector('#notify-json-box .src-error')||{}).innerText||''");
+  check('JSON 写坏会当场报错', jsonErr.includes('写坏了'), jsonErr.slice(0, 60));
+  await js("document.getElementById('notify-json').click()");
+  await sleep(600);
+
+  // 收尾：把检查用的渠道/推送删干净（不然它们会跟着后面的事件发真请求、冒黄条），
+  // 顺手清掉提示条与告警，后面的用例才不受影响。
+  await js(
+    "(async()=>{const d=await api('/api/notify');" +
+    "for(const r of d.routes){await api('/api/notify/routes/'+encodeURIComponent(r.id),{method:'DELETE'}).catch(()=>{});}" +
+    "for(const c of d.channels){await api('/api/notify/channels/'+encodeURIComponent(c.id),{method:'DELETE'}).catch(()=>{});}" +
+    "await api('/api/alerts/clear',{method:'POST',body:{}}).catch(()=>{});" +
+    "document.getElementById('toast').className='toast hidden';" +
+    "document.querySelectorAll('#notices .notice').forEach(n=>n.remove());return 1;})()");
+  await sleep(700);
 
   // 主题切换
   const before = await js("document.documentElement.getAttribute('data-theme')");

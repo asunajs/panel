@@ -136,15 +136,26 @@
     const gutter = wrap.querySelector('.code-gutter');
     const lang = (opts && opts.lang) || (textarea.dataset.lang || 'js');
 
+    let lastLines = -1;
     const paint = () => {
       const code = textarea.value;
-      if (pre) pre.innerHTML = render(code, lang);
+      // 太长的文件退成**纯文本模式**（第 182 轮）：mcloud.js 48.7 万字符全量分词 ≈
+      // 6 万个 span，超限的文件每敲一键整棵重建一次 —— 输入法直接被打断（带中文
+      // 注释的插件源码根本没法编辑，用户报障「源码太多导致功能失效」的就是它）。
+      // 这时藏掉高亮层，让 textarea 自己显示自己的文字：原生编辑器的性能，行号照画。
+      // 行数落回 MAX 以内会自动切回上色（下次 paint 重画 pre）。
+      const plain = code.length > MAX;
+      wrap.classList.toggle('plain', plain);
+      if (!plain && pre) pre.innerHTML = render(code, lang);
       if (gutter) {
         const lines = code.split('\n').length;
-        // 只重画数字：行数变化比内容变化少得多，但这里跟着一起画最省事
-        let g = '';
-        for (let i = 1; i <= lines; i++) g += i + '\n';
-        gutter.textContent = g;
+        // 行数没变就不重画：光在一行里打字是大多数，别每次都重建几千行的号码串
+        if (lines !== lastLines) {
+          let g = '';
+          for (let i = 1; i <= lines; i++) g += i + '\n';
+          gutter.textContent = g;
+          lastLines = lines;
+        }
       }
     };
     const sync = () => {

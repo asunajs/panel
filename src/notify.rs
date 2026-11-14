@@ -177,6 +177,8 @@ pub enum Kind {
     Ntfy,
     /// Gotify
     Gotify,
+    /// Server酱（SendKey 就是密钥；GET https://sctapi.ftqq.com/<key>.send?title=&desp=）
+    ServerChan,
     /// 自定义：url + 模板 + 额外请求头
     Custom,
 }
@@ -196,6 +198,7 @@ impl Kind {
             Kind::Ntfy => "ntfy",
             Kind::Gotify => "gotify",
             Kind::Custom => "custom",
+            Kind::ServerChan => "serverchan",
         }
     }
 
@@ -213,6 +216,7 @@ impl Kind {
             "ntfy" => Kind::Ntfy,
             "gotify" => Kind::Gotify,
             "custom" => Kind::Custom,
+            "serverchan" | "serverchan-turbo" | "sct" => Kind::ServerChan,
             _ => return None,
         })
     }
@@ -240,6 +244,8 @@ pub struct SmtpConf {
 #[derive(Debug, Clone)]
 pub struct Channel {
     pub id: String,
+    /// 给人看的名字（留空 = 用 id）。界面左栏显示它。
+    pub name: String,
     pub kind: Kind,
     pub enabled: bool,
     /// 只看这个等级及以上。None = 跟随全局 min_level。
@@ -256,6 +262,10 @@ pub struct Channel {
     pub template: String,
     /// custom 渠道的额外请求头。
     pub headers: Vec<(String, String)>,
+    /// custom 渠道的方法（POST / GET，默认 POST）。Server酱 之类的老 API 要 GET。
+    pub method: String,
+    /// custom 渠道的 body 编码：json（默认）/ form（a=1&b=2，做 url-encode）/ text。
+    pub content_type: String,
     /// gotify 的优先级（默认 5）。
     pub priority: i64,
     /// 只收这些事件（空 = 全收）：task_fail / circuit / plugin / system。
@@ -270,6 +280,39 @@ pub struct Channel {
     pub smtp: Option<SmtpConf>,
 }
 
+/// 一条**推送规则**（第 186 轮）：引用某个渠道 + 什么时候推 + 推什么。
+///
+/// 和 Channel 的分工：Channel 是「怎么发」（类型 / 地址 / 密钥），Route 是「发给谁、什么时候发」。
+/// 一条渠道可以被多条推送引用；停用一条推送只是这条哑了，停用渠道则引用它的全哑。
+#[derive(Debug, Clone, Default)]
+pub struct Route {
+    pub id: String,
+    pub name: String,
+    /// 引用哪个渠道（Channel.id）
+    pub channel: String,
+    pub enabled: bool,
+    /// 收哪些事件（空 = 全收）：task_fail / circuit / plugin / system
+    pub events: Vec<String>,
+    pub include_plugins: Vec<String>,
+    pub exclude_plugins: Vec<String>,
+    pub min_level: Option<String>,
+    pub quiet: Option<(u16, u16)>,
+    /// 标题模板（变量 {{title}} {{level}} {{plugin}} {{task}} {{time}} {{date}}），空 = 用原样标题
+    pub title_template: String,
+    /// 定时推送：到点主动发（不是等事件）
+    pub at: Option<At>,
+}
+
+/// 定时推送的触发：一个 cron 表达式 + 到点发什么内容。
+#[derive(Debug, Clone)]
+pub struct At {
+    pub cron: String,
+    /// fixed（固定文本，用 body_template）/ summary（最近 24 小时运行摘要）
+    pub content: String,
+    /// 固定文本模式的正文模板
+    pub body_template: String,
+}
+
 /// config.json 里 notify 键解析出来的东西。
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -282,6 +325,8 @@ pub struct Config {
     /// 去重窗口（秒）：同一渠道 + 同一标题在这个窗口内只发一条，重复的累加次数。
     pub dedupe_secs: i64,
     pub channels: Vec<Channel>,
+    /// 推送规则。空 = 老配置：每条渠道自己就是一条推送（保持 0.4 之前的行为）。
+    pub routes: Vec<Route>,
 }
 
 impl Config {
@@ -303,6 +348,30 @@ impl Config {
             None => plugin.to_string(),
         };
         !self.mute.iter().any(|m| m == plugin || m == &full)
+    }
+
+    /// 生效的推送规则。配置里没写 routes（老配置）= 每条渠道自己就是一条推送，
+    /// 过滤字段从渠道上搬过来 —— 这样 0.4 之前配的东西行为一点不变。
+    pub fn effective_routes(&self) -> Vec<Route> {
+        if !self.routes.is_empty() {
+            return self.routes.clone();
+        }
+        self.channels
+            .iter()
+            .map(|c| Route {
+                id: format!("{}-default", c.id),
+                name: if c.name.is_empty() { c.id.clone() } else { c.name.clone() },
+                channel: c.id.clone(),
+                enabled: true,
+                events: c.events.clone(),
+                include_plugins: c.include_plugins.clone(),
+                exclude_plugins: c.exclude_plugins.clone(),
+                min_level: c.min_level.clone(),
+                quiet: c.quiet,
+                title_template: String::new(),
+                at: None,
+            })
+            .collect()
     }
 
     /// 这个渠道要不要收这条（等级 + 事件 + 插件三道）。
@@ -368,6 +437,156 @@ fn str_list(v: &Value, key: &str) -> Vec<String> {
 
 /// 从 config.json 的 notify 键解析。**严格**：写错了就报错，不静默跳过渠道 ——
 /// 「渠道没生效」比「配置报错」难查得多。
+/// 解析 routes 数组；坏一处就报错（别静默丢一条推送 —— 那是最难查的）。
+fn parse_routes(v: Option<&Value>, channels: &[Channel]) -> Result<Vec<Route>, String> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let list = v
+        .as_array()
+        .ok_or_else(|| "config.notify.routes 必须是数组".to_string())?;
+    let mut out: Vec<Route> = Vec::new();
+    for (i, r) in list.iter().enumerate() {
+        let id = {
+            let raw = str_field(r, "id");
+            if raw.is_empty() {
+                format!("route{i}")
+            } else {
+                raw
+            }
+        };
+        if out.iter().any(|x| x.id == id) {
+            return Err(format!("config.notify.routes 里 id 重复：{id}"));
+        }
+        let channel = str_field(r, "channel");
+        if channel.is_empty() {
+            return Err(format!("推送 {id} 没写 channel（要指向一个渠道）"));
+        }
+        if !channels.iter().any(|c| c.id == channel) {
+            return Err(format!("推送 {id} 引用的渠道 {channel} 不存在"));
+        }
+        let min_level = {
+            let m = str_field(r, "min_level");
+            if m.is_empty() {
+                None
+            } else if matches!(m.as_str(), "info" | "warn" | "error") {
+                Some(m)
+            } else {
+                return Err(format!(
+                    "推送 {id} 的 min_level 只能是 info/warn/error，收到 {m:?}"
+                ));
+            }
+        };
+        let events = str_list(r, "events");
+        for e in &events {
+            if !matches!(e.as_str(), "task_fail" | "circuit" | "plugin" | "system") {
+                return Err(format!(
+                    "推送 {id} 的事件 {e:?} 不认识（只能是 task_fail/circuit/plugin/system）"
+                ));
+            }
+        }
+        let at = match r.get("at") {
+            None => None,
+            Some(Value::Null) => None,
+            Some(a) => {
+                let cron = str_field(a, "cron");
+                if cron.is_empty() {
+                    return Err(format!("推送 {id} 的 at 没写 cron"));
+                }
+                crate::cron::Schedule::parse(&cron)
+                    .map_err(|e| format!("推送 {id} 的 cron {cron:?} 不合法：{e}"))?;
+                let content = {
+                    let c = str_field(a, "content");
+                    if c.is_empty() {
+                        "fixed".to_string()
+                    } else {
+                        c
+                    }
+                };
+                if !matches!(content.as_str(), "fixed" | "summary") {
+                    return Err(format!(
+                        "推送 {id} 的 at.content 只能是 fixed / summary，收到 {content:?}"
+                    ));
+                }
+                Some(At {
+                    cron,
+                    content,
+                    body_template: str_field(a, "body_template"),
+                })
+            }
+        };
+        let title_template = str_field(r, "title_template");
+        if title_template.chars().count() > TITLE_MAX {
+            return Err(format!("推送 {id} 的标题模板太长（上限 {TITLE_MAX} 字符）"));
+        }
+        out.push(Route {
+            id,
+            name: str_field(r, "name"),
+            channel,
+            enabled: r.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+            events,
+            include_plugins: str_list(r, "include_plugins"),
+            exclude_plugins: str_list(r, "exclude_plugins"),
+            min_level,
+            quiet: parse_quiet(&str_field(r, "quiet_hours"))?,
+            title_template,
+            at,
+        });
+    }
+    Ok(out)
+}
+
+/// 标题模板渲染。认不出的变量原样留着（不猜、不吞），空模板回原样标题。
+pub fn render_title(tpl: &str, title: &str, level: &str, plugin: &str, task: Option<&str>) -> String {
+    if tpl.trim().is_empty() {
+        return title.to_string();
+    }
+    let now = chrono::Local::now();
+    let out = tpl
+        .replace("{{title}}", title)
+        .replace("{{level}}", level)
+        .replace("{{plugin}}", plugin)
+        .replace("{{task}}", task.unwrap_or(""))
+        .replace("{{time}}", &now.format("%H:%M").to_string())
+        .replace("{{date}}", &now.format("%Y-%m-%d").to_string());
+    clamp(&out, TITLE_MAX)
+}
+
+/// 插件名是否命中名单（支持 mcloud* 这种前缀通配）。
+fn name_hit(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|p| {
+        let p = p.trim();
+        if p.is_empty() {
+            return false;
+        }
+        match p.strip_suffix('*') {
+            Some(head) => name.starts_with(head),
+            None => p == name,
+        }
+    })
+}
+
+impl Route {
+    /// 这条推送收不收这条通知（渠道与全局门槛另外判）。
+    pub fn accepts(&self, n: &Notice, minute: u16) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if !self.events.is_empty() && !self.events.iter().any(|e| e == n.event) {
+            return false;
+        }
+        if !self.include_plugins.is_empty() && !name_hit(&self.include_plugins, &n.plugin) {
+            return false;
+        }
+        if name_hit(&self.exclude_plugins, &n.plugin) {
+            return false;
+        }
+        let _ = minute;
+        true
+    }
+}
+
 pub fn parse(v: Option<&Value>) -> Result<Config, String> {
     let Some(v) = v else {
         return Ok(Config::default());
@@ -387,6 +606,7 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
             _ => 600,
         },
         channels: Vec::new(),
+        routes: Vec::new(),
     };
     if !cfg.min_level.is_empty() && !matches!(cfg.min_level.as_str(), "info" | "warn" | "error") {
         return Err(format!(
@@ -498,7 +718,13 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
             // 其余全是「一次 HTTP 请求」：只要 url（telegram 例外，它要 token）。
             other => {
                 let url = str_field(c, "url");
-                if url.is_empty() && other != Kind::Telegram {
+                // 这几种有官方默认地址（telegram 的 api.telegram.org、bark 的 api.day.app、
+                // ntfy.sh、Server酱 的 sctapi.ftqq.com），url 可以留空。
+                let has_default = matches!(
+                    other,
+                    Kind::Telegram | Kind::Bark | Kind::Ntfy | Kind::ServerChan
+                );
+                if url.is_empty() && !has_default {
                     return Err(format!("渠道 {id} 是 {}，但没写 url", other.as_str()));
                 }
                 (url, None)
@@ -520,7 +746,11 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
             ));
         }
         cfg.channels.push(Channel {
-            id,
+            id: id.clone(),
+            name: {
+                let n = str_field(c, "name");
+                if n.is_empty() { id.clone() } else { n }
+            },
             kind,
             enabled,
             min_level,
@@ -538,10 +768,20 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
                 .unwrap_or("")
                 .to_string(),
             headers: header_pairs(c),
+            method: {
+                let m = str_field(c, "method").to_uppercase();
+                if m.is_empty() { "POST".to_string() } else { m }
+            },
+            content_type: {
+                let t = str_field(c, "content_type");
+                if t.is_empty() { "json".to_string() } else { t }
+            },
             priority: c.get("priority").and_then(|x| x.as_i64()).unwrap_or(5),
             smtp,
         });
     }
+    // routes 必须在渠道之后解析：它要检查「引用的渠道存不存在」。
+    cfg.routes = parse_routes(obj.get("routes"), &cfg.channels)?;
     Ok(cfg)
 }
 
@@ -560,6 +800,7 @@ pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, St
         {
             cfg.channels.push(Channel {
                 id: "env".to_string(),
+                name: "env".to_string(),
                 kind: Kind::Webhook,
                 enabled: true,
                 min_level: None,
@@ -569,6 +810,8 @@ pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, St
                 topic: String::new(),
                 template: String::new(),
                 headers: Vec::new(),
+                method: "POST".to_string(),
+                content_type: "json".to_string(),
                 priority: 5,
                 events: Vec::new(),
                 include_plugins: Vec::new(),
@@ -585,6 +828,7 @@ pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, St
 pub fn channel_view(c: &Channel) -> Value {
     let mut out = json!({
         "id": c.id,
+        "name": c.name,
         "kind": c.kind.as_str(),
         "enabled": c.enabled,
         "min_level": c.min_level,
@@ -621,6 +865,11 @@ pub fn channel_view(c: &Channel) -> Value {
             if c.kind == Kind::Gotify {
                 out["priority"] = json!(c.priority);
             }
+            // 自定义渠道：方法 / 编码（界面按它决定表单长什么样）
+            if c.kind == Kind::Custom {
+                out["method"] = json!(c.method);
+                out["content_type"] = json!(c.content_type);
+            }
             // 过滤与静默（第 171 轮）：界面编辑时要能看见当前值
             out["events"] = json!(c.events);
             out["include_plugins"] = json!(c.include_plugins);
@@ -628,6 +877,83 @@ pub fn channel_view(c: &Channel) -> Value {
             out["quiet_hours"] = json!(quiet_str(c.quiet));
         }
     }
+    out
+}
+
+/// 一条推送的界面视图。
+pub fn route_view(r: &Route, cfg: &Config) -> Value {
+    let ch = cfg.channels.iter().find(|c| c.id == r.channel);
+    let mut out = json!({
+        "id": r.id,
+        "name": r.name,
+        "channel": r.channel,
+        "enabled": r.enabled,
+        "events": r.events,
+        "include_plugins": r.include_plugins,
+        "exclude_plugins": r.exclude_plugins,
+        "min_level": r.min_level,
+        "quiet_hours": quiet_str(r.quiet),
+        "title_template": r.title_template,
+        // 渠道还在吗 / 它自己开着吗 —— 界面据此标「渠道缺失」「渠道已停用」
+        "channel_ok": ch.is_some(),
+        "channel_enabled": ch.map(|c| c.enabled).unwrap_or(false),
+        "channel_name": ch.map(|c| c.name.clone()).unwrap_or_default(),
+        "channel_kind": ch.map(|c| c.kind.as_str()).unwrap_or(""),
+    });
+    out["at"] = match &r.at {
+        None => Value::Null,
+        Some(a) => json!({
+            "cron": a.cron,
+            "content": a.content,
+            "body_template": a.body_template,
+            // 下一次什么时候发（界面上直接显示，不用心算）
+            "next": crate::cron::Schedule::parse(&a.cron)
+                .ok()
+                .and_then(|sc| sc.next_base(chrono::Local::now()))
+                .map(|d| d.timestamp_millis()),
+        }),
+    };
+    out
+}
+
+/// 每个推送最近一次投递的结果（发件箱里按 route 取最新一条）。
+///
+/// 只读、有界：只取「最近 500 条里有记录的推送」，不会因为历史很长而变慢。
+pub async fn route_health(db: &Db) -> Value {
+    let out = db
+        .call(|c| {
+            let mut stmt = c
+                .prepare(
+                    "SELECT o.route, o.done, o.ts, o.last_error FROM notify_outbox o
+                     JOIN (SELECT route, MAX(ts) AS mts FROM notify_outbox
+                           WHERE route <> '' GROUP BY route) x
+                       ON o.route = x.route AND o.ts = x.mts
+                     ORDER BY o.ts DESC LIMIT 200",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            let mut map = serde_json::Map::new();
+            for (route, done, ts, err) in rows {
+                map.insert(
+                    route,
+                    json!({ "done": done, "ts": ts, "error": err }),
+                );
+            }
+            Ok(Value::Object(map))
+        })
+        .await
+        .unwrap_or_else(|_| json!({}));
     out
 }
 
@@ -707,32 +1033,56 @@ pub async fn record(
     })
     .to_string();
     // 静默时段：铃铛照旧记，外部渠道推到静默结束（不是丢掉 —— 半夜的故障早上也得知道）。
+    //
+    // 第 186 轮：从「按渠道」改成「按推送规则」。一条渠道可以被多条推送引用，
+    // 每条推送有自己的过滤、门槛、静默和标题模板 —— 标题在这一步逐条渲染。
     let minute = now_min();
     let mut deferred = 0usize;
-    let items: Vec<(Channel, i64)> = cfg
-        .channels
-        .iter()
-        .filter(|c| Config::channel_wants(c, n.level, n.event, &n.plugin))
-        .map(|c| {
-            let q = c.quiet.or(cfg.quiet);
-            match q {
-                Some(q) if in_quiet(minute, q) => {
-                    deferred += 1;
-                    (c.clone(), ts + quiet_left_ms(minute, q))
-                }
-                _ => (c.clone(), ts),
+    let mut queued: Vec<Queued> = Vec::new();
+    for r in cfg.effective_routes() {
+        let Some(ch) = cfg.channels.iter().find(|c| c.id == r.channel) else {
+            // 引用的渠道没了：不投递，但要说一句（配置坏了要能查）
+            log.emit(
+                "panel",
+                None,
+                Level::Warn,
+                format!("推送 {} 引用的渠道 {} 不存在，这条不投递", r.id, r.channel),
+            );
+            continue;
+        };
+        if !ch.enabled || !r.accepts(&n, minute) {
+            continue;
+        }
+        if let Some(m) = r.min_level.as_deref() {
+            if !m.is_empty() && rank(n.level) < rank(m) {
+                continue;
             }
-        })
-        .collect();
+        }
+        let q = r.quiet.or(cfg.quiet);
+        let at = match q {
+            Some(q) if in_quiet(minute, q) => {
+                deferred += 1;
+                ts + quiet_left_ms(minute, q)
+            }
+            _ => ts,
+        };
+        let t = render_title(&r.title_template, &title, n.level, &n.plugin, n.task.as_deref());
+        queued.push(Queued {
+            channel: ch.clone(),
+            route: r.id.clone(),
+            at,
+            title: t,
+        });
+    }
     if deferred > 0 {
         log.emit(
             "panel",
             None,
             Level::Info,
-            format!("静默时段中：{deferred} 个渠道推迟到静默结束再发"),
+            format!("静默时段中：{deferred} 条推送推迟到静默结束再发"),
         );
     }
-    enqueue_all(db, log, &items, &title, &body, &payload, ts, cfg.dedupe_secs).await;
+    enqueue_all(db, log, &queued, &body, &payload, ts, cfg.dedupe_secs).await;
 }
 
 /// 不阻塞调用方地记一条。调度器在 finish 里用它。
@@ -757,6 +1107,18 @@ pub struct Row {
     pub attempts: i64,
 }
 
+/// 一条待入队的投递：渠道 + 是哪个推送触发的 + 最早可发时间 + 渲染后的标题。
+///
+/// 标题逐条渲染（第 186 轮）：每条推送可以有「[告警] {{title}}」这种模板，
+/// 所以入队时不能再共用一个 title。
+#[derive(Debug, Clone)]
+pub struct Queued {
+    pub channel: Channel,
+    pub route: String,
+    pub at: i64,
+    pub title: String,
+}
+
 /// 落发件箱（**一次 DB 往返写完所有渠道**）并立刻各试一次。
 ///
 /// 以前是「一个渠道一次 DB 往返」，一条通知配 3 个渠道就是 3 次写入。这不是性能问题，
@@ -771,8 +1133,7 @@ pub struct Row {
 async fn enqueue_all(
     db: &Db,
     log: &LogHub,
-    items: &[(Channel, i64)],
-    title: &str,
+    items: &[Queued],
     body: &str,
     payload: &str,
     ts: i64,
@@ -781,37 +1142,47 @@ async fn enqueue_all(
     if items.is_empty() {
         return Vec::new();
     }
-    let metas: Vec<(String, String, i64)> = items
+    // (渠道 id, 类型, 最早可发时间, 推送 id, 渲染后的标题)
+    let metas: Vec<(String, String, i64, String, String)> = items
         .iter()
-        .map(|(c, at)| (c.id.clone(), c.kind.as_str().to_string(), *at))
+        .map(|q| {
+            (
+                q.channel.id.clone(),
+                q.channel.kind.as_str().to_string(),
+                q.at,
+                q.route.clone(),
+                q.title.clone(),
+            )
+        })
         .collect();
-    let (t, b, p) = (title.to_string(), body.to_string(), payload.to_string());
+    let (b, p) = (body.to_string(), payload.to_string());
     let since = ts - dedupe_secs.max(0) * 1000;
     let out = db
         .call(move |c| {
             let tx = c.transaction().map_err(|e| e.to_string())?;
             let mut fresh: Vec<(usize, i64)> = Vec::new();
             {
+                // 去重键 =（渠道 + 推送 + 渲染后的标题）。两个推送标题不同就不该互相吞。
                 let mut bump = tx
                     .prepare(
                         "UPDATE notify_outbox SET repeat = repeat + 1, ts = ?1, body = ?2, payload = ?3
-                         WHERE done = 0 AND channel = ?4 AND title = ?5 AND ts >= ?6",
+                         WHERE done = 0 AND channel = ?4 AND route = ?5 AND title = ?6 AND ts >= ?7",
                     )
                     .map_err(|e| e.to_string())?;
                 let mut ins = tx
                     .prepare(
-                        "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done,repeat)
-                         VALUES(?1,?2,?3,?4,?5,?6,0,?7,0,1)",
+                        "INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,next_try,done,repeat,route)
+                         VALUES(?1,?2,?3,?4,?5,?6,0,?7,0,1,?8)",
                     )
                     .map_err(|e| e.to_string())?;
-                for (idx, (cid, kind, at)) in metas.iter().enumerate() {
+                for (idx, (cid, kind, at, route, t)) in metas.iter().enumerate() {
                     let n = bump
-                        .execute(rusqlite::params![ts, b, p, cid, t, since])
+                        .execute(rusqlite::params![ts, b, p, cid, route, t, since])
                         .map_err(|e| e.to_string())?;
                     if n > 0 {
                         continue;
                     }
-                    ins.execute(rusqlite::params![ts, cid, kind, t, b, p, at])
+                    ins.execute(rusqlite::params![ts, cid, kind, t, b, p, at, route])
                         .map_err(|e| e.to_string())?;
                     fresh.push((idx, tx.last_insert_rowid()));
                 }
@@ -841,16 +1212,18 @@ async fn enqueue_all(
     // 只立刻试「现在就该发」的；静默期排到后面的等 30s 扫描。
     let mut ids = Vec::with_capacity(fresh.len());
     for (idx, id) in &fresh {
-        let (ch, at) = &items[*idx];
+        let q = &items[*idx];
+        let ch = &q.channel;
         ids.push(*id);
-        if *at > ts {
+        if q.at > ts {
             continue;
         }
         let row = Row {
             id: *id,
             channel: ch.id.clone(),
             kind: ch.kind.as_str().to_string(),
-            title: title.to_string(),
+            // 用这条推送自己渲染出来的标题（不是共用的那个）
+            title: q.title.clone(),
             body: body.to_string(),
             payload: payload.to_string(),
             attempts: 0,
@@ -872,6 +1245,8 @@ struct HttpReq {
     body: String,
     content_type: String,
     headers: Vec<(String, String)>,
+    /// POST（默认）/ GET。GET 时 body 拼进 query（自定义渠道用）。
+    method: String,
 }
 
 impl HttpReq {
@@ -881,6 +1256,7 @@ impl HttpReq {
             body,
             content_type: "application/json".to_string(),
             headers: Vec::new(),
+            method: "POST".to_string(),
         }
     }
 }
@@ -1055,6 +1431,7 @@ fn build_http(ch: &Channel, row: &Row, now_ms: i64) -> Result<HttpReq, String> {
                     ("Title".to_string(), header_safe(&row.title)),
                     ("Priority".to_string(), priority_word(&level).to_string()),
                 ],
+                method: "POST".to_string(),
             })
         }
         Kind::Gotify => {
@@ -1069,22 +1446,67 @@ fn build_http(ch: &Channel, row: &Row, now_ms: i64) -> Result<HttpReq, String> {
                     .to_string(),
             ))
         }
+        // Server酱：SendKey 拼在路径里，参数走 query（它只认 GET）。
+        // 成功判定在 post_http 之后（HTTP 200 + body 里 code/errno = 0），见 check_ok。
+        Kind::ServerChan => {
+            let base = if ch.url.trim().is_empty() {
+                "https://sctapi.ftqq.com".to_string()
+            } else {
+                ch.url.trim_end_matches('/').to_string()
+            };
+            let url = format!(
+                "{base}/{}.send?title={}&desp={}",
+                url_encode(&ch.secret),
+                url_encode(&row.title),
+                url_encode(&row.body)
+            );
+            Ok(HttpReq {
+                url,
+                body: String::new(),
+                content_type: "text/plain; charset=utf-8".to_string(),
+                headers: Vec::new(),
+                method: "GET".to_string(),
+            })
+        }
         Kind::Custom => {
             let tpl = if ch.template.trim().is_empty() {
                 DEFAULT_CUSTOM_TEMPLATE
             } else {
                 ch.template.as_str()
             };
+            // form 模式要 url-encode（不然标题里的空格和 & 会把参数切断），
+            // json / text 模式用 JSON 字符串转义（去掉外层引号）。
+            let esc = |v: &str| -> String {
+                if ch.content_type == "form" {
+                    url_encode(v)
+                } else {
+                    json_inner(v)
+                }
+            };
             let body = tpl
-                .replace("{{title}}", &json_inner(&row.title))
-                .replace("{{body}}", &json_inner(&row.body))
-                .replace("{{level}}", &json_inner(&level))
-                .replace("{{plugin}}", &json_inner(&plugin))
-                .replace("{{task}}", &json_inner(&task))
+                .replace("{{title}}", &esc(&row.title))
+                .replace("{{body}}", &esc(&row.body))
+                .replace("{{level}}", &esc(&level))
+                .replace("{{plugin}}", &esc(&plugin))
+                .replace("{{task}}", &esc(&task))
                 .replace("{{payload}}", &row.payload);
+            // 自定义渠道（第 186 轮）：预设之外的东西都走这里 ——
+            // method 可以是 GET（老式 API 只认 query），content_type 可以是 form / text。
+            let ct = match ch.content_type.as_str() {
+                "form" => "application/x-www-form-urlencoded; charset=utf-8",
+                "text" => "text/plain; charset=utf-8",
+                _ => "application/json; charset=utf-8",
+            };
             Ok(HttpReq {
                 headers: ch.headers.clone(),
-                ..HttpReq::json(ch.url.clone(), body)
+                url: ch.url.clone(),
+                body,
+                content_type: ct.to_string(),
+                method: if ch.method.eq_ignore_ascii_case("GET") {
+                    "GET".to_string()
+                } else {
+                    "POST".to_string()
+                },
             })
         }
     }
@@ -1106,9 +1528,20 @@ async fn post_http(req: &HttpReq) -> Result<(), String> {
         .as_ref()
         .map_err(|e| format!("HTTP 客户端不可用: {e}"))?
         .clone();
+    // GET：把 body 拼进 query（自定义渠道用；老 API 只认 query）
+    let (method, uri) = if req.method.eq_ignore_ascii_case("GET") {
+        if req.body.trim().is_empty() {
+            ("GET", req.url.clone())
+        } else {
+            let sep = if req.url.contains('?') { '&' } else { '?' };
+            ("GET", format!("{}{sep}{}", req.url, req.body))
+        }
+    } else {
+        ("POST", req.url.clone())
+    };
     let mut b = http::Request::builder()
-        .method("POST")
-        .uri(&req.url)
+        .method(method)
+        .uri(&uri)
         .header("content-type", &req.content_type);
     for (k, v) in &req.headers {
         b = b.header(k.as_str(), v.as_str());
@@ -1290,6 +1723,203 @@ pub async fn sweep(
 }
 
 /// 发件箱扫描循环。
+/// 记下这条推送的「上次发车时间」。
+///
+/// 新建推送时就 seed 一下，第一次到点不用多等一个 tick（30 秒）；配置里手写的推送
+/// 没有 seed 也没关系 —— fire_scheduled 第一次见到它时会自己补一行。
+pub async fn seed_route_state(db: &Db, id: &str, ts: i64) {
+    let rid = id.to_string();
+    db.call(move |c| {
+        c.execute(
+            "INSERT OR REPLACE INTO notify_route_state(route, last_fire) VALUES(?1, ?2)",
+            rusqlite::params![rid, ts],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .ok();
+}
+
+/// 定时推送：到点主动发一条（第 186 轮）。
+///
+/// 和事件推送共用同一条投递路径（入队 → 发件箱 → 退避重试），区别只是「谁触发」。
+/// 状态只存 last_fire：停机期间错过的多次**只补最近一次**（补一串没意义，
+/// 早上打开面板看到 20 条「每天 9 点」只会想关掉通知）。
+pub async fn fire_scheduled(
+    db: &Db,
+    log: &LogHub,
+    store: &std::sync::Arc<crate::config_store::ConfigStore>,
+) -> Result<usize, String> {
+    let cfg = from_store(store)?;
+    let now = chrono::Local::now();
+    let now_ms = now.timestamp_millis();
+    let mut fired = 0usize;
+    for r in cfg.effective_routes() {
+        let Some(at) = &r.at else { continue };
+        if !r.enabled {
+            continue;
+        }
+        let Some(ch) = cfg.channels.iter().find(|c| c.id == r.channel) else {
+            continue;
+        };
+        if !ch.enabled {
+            continue;
+        }
+        let Ok(sched) = crate::cron::Schedule::parse(&at.cron) else {
+            continue;
+        };
+        // 上次发的时刻。**第一次见到这条推送时先记一个「现在」**，这一轮不查点：
+        // 否则「没有记录 → 用 now 当游标」会让每个 tick 都从 now 起算，永远等不到到点。
+        let rid = r.id.clone();
+        let existing: Option<i64> = db
+            .call(move |c| {
+                Ok(c.query_row(
+                    "SELECT last_fire FROM notify_route_state WHERE route = ?1",
+                    [rid],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok())
+            })
+            .await
+            .unwrap_or(None);
+        let last = match existing {
+            Some(v) => v,
+            None => {
+                // 第一次见到这条推送：游标从「现在」起，这一轮不会到点（next > now），
+                // 落一行是为了下一轮有得算。新建推送时 web 层也会顺手 seed，省一轮。
+                seed_route_state(db, &r.id, now_ms).await;
+                now_ms
+            }
+        };
+        let mut cursor = chrono::TimeZone::timestamp_millis_opt(&chrono::Local, last)
+            .single()
+            .unwrap_or(now);
+        let mut due: Option<chrono::DateTime<chrono::Local>> = None;
+        // 最多往前找 8 个点，够覆盖「停机一天」；再多的只取最后一个
+        for _ in 0..8 {
+            let Some(next) = sched.next_base(cursor) else { break };
+            if next.timestamp_millis() > now_ms {
+                break;
+            }
+            cursor = next;
+            due = Some(next);
+        }
+        let Some(when) = due else { continue };
+        let (title, body) = scheduled_content(db, &r, at, when).await;
+        let payload = json!({
+            "ts": now_ms,
+            "level": "info",
+            "plugin": "panel",
+            "task": null,
+            "run_id": null,
+            "title": title,
+            "body": body,
+        })
+        .to_string();
+        let item = Queued {
+            channel: ch.clone(),
+            route: r.id.clone(),
+            at: now_ms,
+            title: title.clone(),
+        };
+        enqueue_all(db, log, &[item], &body, &payload, now_ms, cfg.dedupe_secs).await;
+        let rid = r.id.clone();
+        let ts = when.timestamp_millis();
+        db.call(move |c| {
+            c.execute(
+                "INSERT INTO notify_route_state(route, last_fire) VALUES(?1, ?2)
+                 ON CONFLICT(route) DO UPDATE SET last_fire = excluded.last_fire",
+                rusqlite::params![rid, ts],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await?;
+        log.emit(
+            "panel",
+            None,
+            Level::Info,
+            format!("定时推送 {} 到点发出（{}）", r.id, when.format("%m-%d %H:%M")),
+        );
+        fired += 1;
+    }
+    Ok(fired)
+}
+
+/// 定时推送发什么：固定文本（渲染 {{date}} {{time}}）或最近 24 小时运行摘要。
+async fn scheduled_content(
+    db: &Db,
+    r: &Route,
+    at: &At,
+    when: chrono::DateTime<chrono::Local>,
+) -> (String, String) {
+    let name = if r.name.is_empty() {
+        r.id.clone()
+    } else {
+        r.name.clone()
+    };
+    let title = render_title(
+        &r.title_template,
+        &format!("{name} {}", when.format("%m-%d %H:%M")),
+        "info",
+        "panel",
+        None,
+    );
+    if at.content == "fixed" {
+        let body = at
+            .body_template
+            .replace("{{date}}", &when.format("%Y-%m-%d").to_string())
+            .replace("{{time}}", &when.format("%H:%M").to_string())
+            .replace("{{title}}", &title);
+        let body = if body.trim().is_empty() {
+            title.clone()
+        } else {
+            body
+        };
+        return (title, clamp(&body, BODY_MAX));
+    }
+    // 摘要：最近 24 小时的运行情况（总数 / 失败 / 失败最多的任务）
+    let since = when.timestamp_millis() - 24 * 3600 * 1000;
+    let stats = db
+        .call(move |c| {
+            let total: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE started_at >= ?1",
+                    [since],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let failed: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE started_at >= ?1 AND status <> 'ok'",
+                    [since],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let worst: Option<(String, String, i64)> = c
+                .query_row(
+                    "SELECT plugin, task, COUNT(*) AS n FROM runs
+                     WHERE started_at >= ?1 AND status <> 'ok'
+                     GROUP BY plugin, task ORDER BY n DESC LIMIT 1",
+                    [since],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .ok();
+            Ok((total, failed, worst))
+        })
+        .await
+        .unwrap_or((0, 0, None));
+    let mut body = format!(
+        "最近 24 小时：{} 次运行，失败 {} 次。",
+        stats.0, stats.1
+    );
+    if let Some((plugin, task, n)) = stats.2 {
+        body.push_str(&format!("\n失败最多：{plugin}/{task}（{n} 次）。"));
+    }
+    (title, clamp(&body, BODY_MAX))
+}
+
 pub fn spawn_ticker(
     db: Db,
     log: LogHub,
@@ -1303,6 +1933,18 @@ pub fn spawn_ticker(
         let mut last_err: Option<String> = None;
         loop {
             tick.tick().await;
+            // 定时推送（第 186 轮）：先看有没有到点的，再排空发件箱
+            if let Err(e) = fire_scheduled(&db, &log, &store).await {
+                if last_err.as_deref() != Some(e.as_str()) {
+                    log.emit(
+                        "panel",
+                        None,
+                        Level::Warn,
+                        format!("定时推送扫描失败: {e}"),
+                    );
+                    last_err = Some(e);
+                }
+            }
             // 一轮**排空**，不是一轮只发 10 条：sweep 一次最多取 10 行，风暴过去之后
             // 积压 50 条就要等 5 个 tick（2.5 分钟）才发完。这里连着扫，直到某批不足 10 条。
             // 上限 50 批（500 行）：剩下的留给下一个 tick，别把这一轮卡死。
@@ -1348,7 +1990,7 @@ pub async fn outbox(db: &Db, status: &str, limit: i64) -> Result<Vec<Value>, Str
         _ => "1=1",
     };
     let sql = format!(
-        "SELECT id,ts,channel,kind,title,attempts,next_try,last_error,done,repeat FROM notify_outbox \
+        "SELECT id,ts,channel,kind,title,attempts,next_try,last_error,done,repeat,route FROM notify_outbox \
          WHERE {cond} ORDER BY id DESC LIMIT ?1"
     );
     db.call(move |c| {
@@ -1366,6 +2008,7 @@ pub async fn outbox(db: &Db, status: &str, limit: i64) -> Result<Vec<Value>, Str
                     "last_error": r.get::<_, String>(7)?,
                     "done": r.get::<_, i64>(8)?,
                     "repeat": r.get::<_, i64>(9)?,
+                    "route": r.get::<_, String>(10)?,
                 }))
             })
             .map_err(|e| e.to_string())?
@@ -1442,7 +2085,13 @@ pub async fn test_send(
             "body": body,
         })
         .to_string();
-        enqueue_all(db, log, &[(ch.clone(), ts)], &title, &body, &payload, ts, 0).await;
+        let q = Queued {
+            channel: ch.clone(),
+            route: String::new(),
+            at: ts,
+            title: title.clone(),
+        };
+        enqueue_all(db, log, &[q], &body, &payload, ts, 0).await;
         // 立刻把这一行的结果读回来（enqueue 已经试过一次）
         let cid = ch.id.clone();
         let row = db

@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// 测试里造一条待入队的投递（第 186 轮：enqueue_all 收 Queued，不再收 (Channel, at)）。
+fn queued(ch: Channel, at: i64, title: &str) -> Queued {
+    Queued {
+        channel: ch,
+        route: "r".to_string(),
+        at,
+        title: title.to_string(),
+    }
+}
+
 fn mkdb() -> Db {
     Db::open(std::path::Path::new(":memory:")).unwrap()
 }
@@ -42,6 +52,7 @@ async fn row(db: &Db, id: i64) -> (i64, i64, String, i64) {
 fn hook(id: &str, url: &str) -> Channel {
     Channel {
         id: id.to_string(),
+        name: id.to_string(),
         kind: Kind::Webhook,
         enabled: true,
         min_level: None,
@@ -51,6 +62,8 @@ fn hook(id: &str, url: &str) -> Channel {
         topic: String::new(),
         template: String::new(),
         headers: Vec::new(),
+        method: "POST".to_string(),
+        content_type: "json".to_string(),
         priority: 5,
         events: Vec::new(),
         include_plugins: Vec::new(),
@@ -225,18 +238,11 @@ async fn one_notice_writes_one_row_per_channel_in_one_go() {
         hook("b", "http://127.0.0.1:9/y"),
         hook("c", "http://127.0.0.1:9/z"),
     ];
-    let items: Vec<(Channel, i64)> = chans.iter().map(|c| (c.clone(), 1_700_000_000_000)).collect();
-    let ids = enqueue_all(
-        &db,
-        &log,
-        &items,
-        "标题",
-        "正文",
-        "{}",
-        1_700_000_000_000,
-        600,
-    )
-    .await;
+    let items: Vec<Queued> = chans
+        .iter()
+        .map(|c| queued(c.clone(), 1_700_000_000_000, "标题"))
+        .collect();
+    let ids = enqueue_all(&db, &log, &items, "正文", "{}", 1_700_000_000_000, 600).await;
     assert_eq!(ids.len(), 3, "三个渠道三条行，id 都要拿到");
 
     let rows: Vec<(String, i64)> = db
@@ -268,7 +274,7 @@ async fn one_notice_writes_one_row_per_channel_in_one_go() {
 async fn no_channel_means_no_write() {
     let db = mkdb();
     let log = LogHub::new(db.clone());
-    assert!(enqueue_all(&db, &log, &[], "t", "b", "{}", 0, 600).await.is_empty());
+    assert!(enqueue_all(&db, &log, &[], "b", "{}", 0, 600).await.is_empty());
     let n: i64 = db
         .call(|c| {
             c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
@@ -289,7 +295,16 @@ async fn repeated_failures_in_the_window_collapse_into_one_row() {
 
     for (i, body) in ["第一次", "第二次", "第三次"].iter().enumerate() {
         let at = ts + (i as i64) * 60_000;
-        enqueue_all(&db, &log, &[(ch.clone(), at)], "任务 daily 失败", body, "{}", at, 600).await;
+        enqueue_all(
+            &db,
+            &log,
+            &[queued(ch.clone(), at, "任务 daily 失败")],
+            body,
+            "{}",
+            at,
+            600,
+        )
+        .await;
     }
 
     let rows: Vec<(String, i64)> = db
@@ -311,7 +326,16 @@ async fn repeated_failures_in_the_window_collapse_into_one_row() {
 
     // 出了窗口（> 10 分钟）就是新的一条
     let far = ts + 3600_000;
-    enqueue_all(&db, &log, &[(ch.clone(), far)], "任务 daily 失败", "很久以后", "{}", far, 600).await;
+    enqueue_all(
+        &db,
+        &log,
+        &[queued(ch.clone(), far, "任务 daily 失败")],
+        "很久以后",
+        "{}",
+        far,
+        600,
+    )
+    .await;
     let n: i64 = db
         .call(|c| {
             c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
@@ -330,7 +354,7 @@ async fn deferred_rows_wait_until_the_quiet_hours_end() {
     let ch = hook("a", "http://127.0.0.1:9/x");
     let ts = 1_700_000_000_000i64;
     let later = ts + 9 * 60 * 60_000;
-    enqueue_all(&db, &log, &[(ch, later)], "静默里的失败", "b", "{}", ts, 600).await;
+    enqueue_all(&db, &log, &[queued(ch, later, "静默里的失败")], "b", "{}", ts, 600).await;
     let (next_try, attempts): (i64, i64) = db
         .call(|c| {
             c.query_row(
@@ -344,4 +368,55 @@ async fn deferred_rows_wait_until_the_quiet_hours_end() {
         .unwrap();
     assert_eq!(next_try, later, "推迟到静默结束");
     assert_eq!(attempts, 0, "静默期不该已经试过一次");
+}
+
+/// 两条推送标题不同 → 发件箱两行，不互相吞掉（去重键是 渠道 + 推送 + 渲染后的标题）。
+#[tokio::test]
+async fn two_routes_with_different_titles_do_not_dedupe() {
+    let db = mkdb();
+    let log = LogHub::new(db.clone());
+    let ch = hook("c", "http://127.0.0.1:9/x");
+    let ts = 1_700_000_000_000i64;
+    let items = vec![
+        Queued {
+            channel: ch.clone(),
+            route: "a".to_string(),
+            at: ts,
+            title: "[告警] 任务失败".to_string(),
+        },
+        Queued {
+            channel: ch.clone(),
+            route: "b".to_string(),
+            at: ts,
+            title: "[日报] 任务失败".to_string(),
+        },
+    ];
+    let ids = enqueue_all(&db, &log, &items, "b", "{}", ts, 600).await;
+    assert_eq!(ids.len(), 2, "两条推送各自一行");
+
+    // 同一个推送、同一个标题再来一次 → 只累加 repeat，不开新行
+    let again = vec![Queued {
+        channel: ch,
+        route: "a".to_string(),
+        at: ts + 60_000,
+        title: "[告警] 任务失败".to_string(),
+    }];
+    enqueue_all(&db, &log, &again, "b2", "{}", ts + 60_000, 600).await;
+    let (n, repeat): (i64, i64) = db
+        .call(|c| {
+            Ok((
+                c.query_row("SELECT COUNT(*) FROM notify_outbox", [], |r| r.get(0))
+                    .map_err(|e| e.to_string())?,
+                c.query_row(
+                    "SELECT repeat FROM notify_outbox WHERE route='a' ORDER BY id LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(n, 2, "还是两行（去重不开新行）");
+    assert_eq!(repeat, 2, "重复的那次累加到 repeat");
 }
