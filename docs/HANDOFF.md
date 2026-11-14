@@ -158,7 +158,9 @@ bash scripts/check-pitfalls.sh                  # 坑的守卫 12 条（静态�
 node scripts/ui-check.mjs                       # 界面 59 条断言（自起面板 + 无头 Edge）
 node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）
 node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）
-node scripts/dom-probe.mjs --quick              # WebUI 的 DOM 增长探针（挂载/总节点两个口径 + 强制 GC）
+node scripts/dom-probe.mjs --quick              # WebUI 的 DOM 增长探针（自起实例；只判 GC 后净增）
+node scripts/dom-growth.mjs http://127.0.0.1:8787/ 30   # 对**在跑的实例**量（含每秒净增 + DOM 变动分类；
+                                                        # 文本节点那一层只有它量得出来，见 pitfalls §98）
 ```
 
 要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui.md](ui.md)。

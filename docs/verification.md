@@ -496,9 +496,15 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 | 插件 | 0.00 /s | 784→784 | 1,816→1,816 |
 | 设置 | 0.00 /s | 856→856 | 1,968→1,968 |
 
-**守卫**：`dom-probe.mjs` 现在**也判原始斜率**（`DOM_PROBE_RAW_SLOPE_FAIL`，默认 3/s）——
-只看 GC 后净增只能证明「没钉住」，证明不了「没造垃圾」，而用户看的就是造垃圾那条斜率。
-`check-pitfalls.sh` 加一条：`setCard`/`paintSync` 里再出现 `textContent =` 就红
-（负向例：把那一行改回 `v.textContent = want`，守卫立刻报 1 处）。
+**守卫**（以及这轮踩的坑：为什么不是往 dom-probe 里加断言）：
+
+| 手段 | 能证明什么 |
+|---|---|
+| `scripts/dom-growth.mjs <url> <秒>`（新） | 对一个**在跑的实例**量：挂载 / 总节点 / GC 后 / 每秒净增 / DOM 变动分类。修前 `9.96 节点/秒`（byTag 里 96 个 `#text`）→ 修后 `GC 后 +0`、`characterData 24`（原地改） |
+| `scripts/check-pitfalls.sh`（新增一条） | 静态拦回退：`setCard()` / `paintSync()` 里再出现 `textContent =` 就红（负向例验过：改回去立刻报 1 处） |
+| `dom-probe.mjs` | **判不了这一层**：同一份修前代码它在无头 Edge 里也是 0.00/s —— 探针页面上 `textContent =` 走原地 `setData`（MutationObserver 只看到 characterData、`addedNodes: 0`）。它这轮只修了「别量到后台标签页」（从 `about:blank` 转会变后台 → rAF 停摆 → `render()` 不跑 → 假零增长），原始斜率只报不判 |
+
+**复跑**：`node scripts/dom-growth.mjs http://127.0.0.1:8787/ 30`（要一个**免令牌**的回环实例；
+带口令的会停在 `#gate`，脚本会直接说清楚）。带视图：`--tab=logs`。
 
 坑与来历见 [pitfalls.md](pitfalls.md) §98。
