@@ -477,3 +477,15 @@ runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一�
 
 - `avg_ms» 只算 `ended_at» 有值的行（还在跑的、被杀的不算进平均）；
 - 插件不存在 → 404，而不是一份空统计（空数字会被当成「真的没跑过」）。
+
+## 重装插件：POST /api/plugins/{name}/reinstall（第 180 轮）
+
+和 /reload 只差一件事：**这次加载采纳插件的 cron 建议**。
+
+    curl -X POST -H 'x-panel: 1' http://127.0.0.1:3030/api/plugins/mcloud/reinstall
+
+- reload / 重启 / 自动唤醒：只更新建议，不动用户改过的计划；
+- reinstall：把建议**复制**成生效计划（cron / 预算 / 提前量），
+  运行历史、熔断计数、暂停状态、摘要、blockers 全部保留；
+- 安装（POST /api/plugins 新建、POST /api/plugins/upload 上传一个**没装过**的名字）
+  自动走采纳，不需要额外调 reinstall。
