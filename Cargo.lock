@@ -3672,6 +3672,7 @@ dependencies = [
  "llrt_core",
  "llrt_timers",
  "native-tls",
+ "openssl-sys",
  "oxc_allocator",
  "oxc_codegen",
  "oxc_parser",
