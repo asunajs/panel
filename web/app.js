@@ -4005,13 +4005,44 @@ function openPluginView(name) {
   if (!f) return;
   // 尾斜杠别漏：插件页的 style.css / boot.js 是相对路径（见 src/web.rs 的 plugin_webui_redirect）
   const want = '/plugins/' + encodeURIComponent(name) + '/?embed=1&theme=' + currentTheme();
-  const cur = f.getAttribute('src') || '';
+  // 判据看 iframe **当前真正所在的地址**，不看 src 属性：插件页（或错误页）自己导航过之后，
+  // src 属性还停在老值上 —— 只看 src 就永远不重新加载，用户再点这个插件还是眼前那个错页面
+  // （第 190 轮：错误页「回面板首页」把 iframe 导航到 /，于是面板套面板）。
+  let cur = '';
+  try {
+    const w = f.contentWindow;
+    cur = w.location.pathname + w.location.search;
+  } catch {
+    cur = f.getAttribute('src') || ''; // about:blank / 还没加载：退回看属性
+  }
+  const onPlugin = cur.indexOf('/plugins/') === 0;
   // 主题变了但插件没变：只补一个 postMessage，不重新加载（省一次首屏）
-  if (cur.split('&theme=')[0] === want.split('&theme=')[0]) {
+  if (onPlugin && cur.split('&theme=')[0] === want.split('&theme=')[0]) {
     pushThemeToFrame();
   } else {
     f.setAttribute('src', want);
   }
+}
+
+/** 插件界面把**自己的 iframe** 导航到面板的页面时（错误页的「回面板首页」、
+ *  插件里写的「回面板」链接），把这次导航提到最外层 —— 「面板套面板」永远不是用户要的。
+ *  错误页那边已经加了 target="_top"；这里兜住其它路子。 */
+function guardPluginFrame() {
+  const f = $('plugin-frame');
+  if (!f) return;
+  f.addEventListener('load', () => {
+    try {
+      const w = f.contentWindow;
+      const u = w.location;
+      if (u.origin !== location.origin) return;
+      if (u.pathname.indexOf('/plugins/') === 0 || u.pathname === 'blank') return;
+      const to = u.pathname + u.search + u.hash;
+      // 用 replace 而不是 assign：别在历史里留一条「面板里的面板」
+      location.replace(to);
+    } catch {
+      /* 跨源或还没加载好：什么都不做 */
+    }
+  });
 }
 // ---------------------------------------------------------------- 视图
 
@@ -4514,6 +4545,8 @@ function bind() {
   });
 
   setInterval(paintSync, 1000);
+  // 插件 iframe 自己导航到面板页面时把它提到最外层（见 guardPluginFrame）
+  guardPluginFrame();
 
   $('gate-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();

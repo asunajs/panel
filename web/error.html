@@ -17,7 +17,10 @@
       <p class="error-message">{{MESSAGE}}</p>
       <p class="error-ref">{{REF}}</p>
       <div class="error-actions">
-        <a class="btn btn-primary" href="/">回面板首页</a>
+        <!-- target="_top"：错误页也会被**装进插件 iframe**（/plugins/<不存在>/ 就是这个 404）。
+             不带 target 时这个链接导航的是 iframe 自己 —— 于是面板套面板（用户 2026-11-14
+             报的「错误路由页面的套娃」）。跳到最外层才是「回面板首页」的本意。 -->
+        <a class="btn btn-primary" href="/" target="_top">回面板首页</a>
         <a class="btn" href="{{RETRY}}">重试</a>
       </div>
     </main>
