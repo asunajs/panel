@@ -600,10 +600,15 @@ export async function render(root, ctx, opts = {}) {
       return;
     }
     // “去插件页配置”：地址由插件声明（manage_url），面板不猜。
+    // 后端只放行三种形状（hostapi.rs 的 manage_url 校验）：`#/...` 站内哈希路由、
+    // `/...` 站内绝对路径、`http(s)://...` 外链。分别走 SPA 导航 / 同源整页 / 新标签页 ——
+    // 外链若塞进 location.hash 会变成 `#https://...`，地址栏动了页面却不动。
     if (act === 'configure') {
       const url = btn.dataset.url || '';
+      if (!url) return;
       if (url.startsWith('#')) ctx.navigate(url);
-      else if (url) location.hash = url;
+      else if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener');
+      else location.href = url;
       return;
     }
     // 「记录」是本地动作：拉面板的 runs 表，不动任务本身 —— 所以**不走**

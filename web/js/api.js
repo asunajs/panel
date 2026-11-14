@@ -292,16 +292,17 @@ export function setPluginKeepWarm(name, keep) {
   });
 }
 
-/// 换一个插件的执行引擎（`quickjs` / `node` / `bun`）。
+/// 换一个插件的执行引擎（`node` / `bun`）。
 ///
+/// 内嵌 QuickJS 已移除：传 `quickjs` 会被服务端拒绝。
 /// `command` 可选：Node/Bun 的自定义解释器路径（留空就用 PATH 里那个）。
 /// 换引擎会重新加载插件 —— 已经排着的任务不受影响。
 export function setPluginRuntime(name, engine, command) {
   const body = { engine };
   if (command) {
     body.command = command;
-  } else if (engine !== 'quickjs') {
-    // Node/Bun 留空 = 用 PATH 里的默认命令。**显式发空串**，
+  } else {
+    // 留空 = 用 PATH 里的默认命令。**显式发空串**，
     // 否则之前设过的自定义路径会被保留下来 —— 用户清空输入框后行为没变。
     body.command = '';
   }

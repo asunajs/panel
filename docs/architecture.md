@@ -1,6 +1,6 @@
 # 架构与目录结构
 
-> 系统怎么拼起来：进程/线程模型、三个 JS 引擎、目录布局，以及影响后续扩展的设计决策。
+> 系统怎么拼起来：进程/线程模型、外部 Node/Bun 运行时、目录布局，以及影响后续扩展的设计决策。
 >
 > 章节号沿用原 `README.md` 的编号（作为稳定 ID，便于对照 git 历史与旧讨论）。
 > 文档索引：[docs/README.md](README.md)
@@ -12,47 +12,43 @@
 ```
             tokio 多线程 runtime                        引擎线程池（默认 2 条，std::thread）
   ┌────────────────────────────────┐   ┌──────────────────────────────────────────────────┐
-  │  Axum (axum::serve)            │   │  worker 0                          worker 1       │
-  │    公开: GET  /login 登录页      │   │  ┌──────────────────────┐          ┌───────────┐ │
-  │          POST /api/login        │   │  │ QuickJS Runtime      │          │ QuickJS   │ │
-  │    其余全过 require_auth 中间件  │   │  │  ├ Context hello.js  │          │ Context … │ │
-  │    GET  /          服务端渲染   │   │  │  └ Context counter.js│          └───────────┘ │
-  │    GET  /api/state JSON 快照    │   │  └──────────────────────┘                          │
-  │    GET /api/scripts 脚本任务    │   │  外部插件（Node / Bun）: 每个插件一个长驻子进程       │
-  │    fallback: 插件注册的 HTTP 路由│   │  ┌──────────────────────┐  fd0/1/2/3/4            │
-  │         │                      │   │  │ node runner.mjs      │<── RPC ──> HostState      │
-  │         └── EngineCmd::HttpRequest ─>│  └──────────────────────┘                        │
-  │                                │   │                                                    │
-  │  tokio::time::interval(1s) ───Tick──>│  ┌── Scheduler (deadline 驱动) ──┐              │
-  │                                │   │  │  next_fire = 最近到期时刻      │              │
-  │  rusqlite (Arc<Mutex<Conn>>)   │   │  │  recv_timeout(next_fire - now) │              │
-  │    tasks 表  —— 运行记录        │   │  │  到期 → dispatch(plugin, task) │              │
-  │    jobs  表  —— 调度任务        │<──┼──┤  熔断 / 抖动 / 覆盖层          │              │
-  │    runs  表  —— 每次执行        │   │  └────────────────────────────────┘              │
-  │    plugin_state —— 运行时/暖机  │   │  host-api.* ──> HostState::do_* ──> 日志/SQLite   │
-  └────────────────────────────────┘   │  插件文件 mtime 变了 ──> 重建运行时 + 重登记任务    │
-                                       │  taskdir 扫描 ──> script-dir 任务 ──> script worker│
-                                       └──────────────────────────────────────────────────┘
+  │  Axum (axum::serve)            │   │  worker 0 / worker 1（调度与派发，不跑插件代码） │
+  │    公开: GET  /login 登录页      │   │  ┌──────────────────────┐                        │
+  │          POST /api/login        │   │  │ Scheduler            │                        │
+  │    其余全过 require_auth 中间件  │   │  │  next_fire = 最近到期 │                        │
+  │    GET  /          服务端渲染   │   │  │  recv_timeout(…)     │                        │
+  │    GET  /api/state JSON 快照    │   │  │  到期 → invoke/tick  │                        │
+  │    GET /api/scripts 脚本任务    │   │  └──────────┬───────────┘                        │
+  │    fallback: 插件注册的 HTTP 路由│   │             │ fd0/1/2 + 回环 TCP RPC             │
+  │         │                      │   │  ┌──────────▼───────────┐                        │
+  │         └── EngineCmd::HttpRequest ─>│  │ 插件子进程 Node/Bun  │── host-api ──> HostState│
+  │                                │   │  └──────────────────────┘                        │
+  │  tokio::time::interval(1s) ───Tick──>│  host-api.* ──> HostState::do_* ──> 日志/SQLite   │
+  │                                │   │  插件文件 mtime 变了 ──> 重建子进程 + 重登记任务    │
+  │  rusqlite (Arc<Mutex<Conn>>)   │   │  taskdir 扫描 ──> script-dir 任务 ──> script worker│
+  │    tasks / jobs / runs 表       │   │                                                  │
+  │    plugin_state —— 运行时/暖机  │   │                                                  │
+  └────────────────────────────────┘   └──────────────────────────────────────────────────┘
 ```
 
-**三个 JS 引擎共用一套宿主 API 与一个调度器**（`src/hostapi.rs` 是唯一实现）：
+**Node / Bun 插件共用一套宿主 API 与一个调度器**（`src/hostapi.rs` 是唯一实现）：
 
-| 链路 | QuickJS 插件 | 外部 Node / Bun 插件 |
-|---|---|---|
-| 注册任务 | `register_cron` → 闭包存进 `pending` | 同上，经 fd3 `register_task` RPC |
-| 触发任务 | `__dispatch_task(name, payloadJson)` | fd0 `invoke(kind=task)`，等 fd1 `result` |
-| 每秒心跳 | 全局 `on_tick(payload)` | fd0 `tick`，等 fd1 `tick` |
-| 执行预算 | QuickJS interrupt handler（墙钟） | **`SIGKILL` 进程组**（预算 + 250ms 宽限） |
-| 隔离粒度 | 一个插件一个 `Context`（同一进程） | 一个插件一个**子进程**（RSS 独立记账） |
-| HTTP 路由 | 挂在 Axum 同一端口，进程内派发 | fd0 `invoke(kind=route)`，返回 JSON 字符串 |
-| 热更新 | 重建 `Context` | **杀子进程**，下次触发重新 spawn |
-| 原生能力 | 只有受限的 `node:fs` / `node:path` | 真 `fs` / `child_process` / npm（Node/Bun-only） |
+| 链路 | 外部 Node / Bun 插件 |
+|---|---|
+| 注册任务 | RPC `register_task`（加载期收集声明） |
+| 触发任务 | fd0 `invoke(kind=task)`，等 fd1 `result` |
+| 每秒心跳 | fd0 `tick`，等 fd1 `tick` |
+| 执行预算 | **杀进程树**（预算 + 250ms 宽限） |
+| 隔离粒度 | 一个插件一个**子进程**（RSS 独立记账） |
+| HTTP 路由 | fd0 `invoke(kind=route)`，返回 JSON 字符串 |
+| 热更新 | **杀子进程**，下次触发重新 spawn |
+| 原生能力 | 真 `fs` / `child_process` / npm（无沙箱） |
 
 三条链路：
 
 - **Rust → 插件**：每秒 `Tick`（`on_tick`）；调度器到点派发任务/路由
 - **插件 → Rust**：`log / register_* / sqlite_* / http_fetch / ws_* / smtp_send`，
-  一律 String 进 String 出（JSON 语义）；外部引擎走 fd3/fd4
+  一律 String 进 String 出（JSON 语义）；外部引擎走回环 TCP RPC
 - **Rust → SQLite**：`tasks` 心跳、`jobs` 任务状态、`runs` 运行记录、`plugin_state` 运行时选择
 
 鉴权在 HTTP 层，**对插件完全不可见**：中间件挂在路由之外，插件注册的 `fallback` 路由同样受保护
@@ -77,21 +73,15 @@ rust-plugin-panel/
 ├── install.sh          一键安装：架构检测 → 下载 → SHA256 校验 → 装进 PATH
 ├── src/
 │   ├── main.rs         启动顺序：SQLite → 宿主状态 → 运行时探测 → 引擎线程 → tick 循环 → Axum
-│   ├── engine.rs       ★ 引擎线程：QuickJS + 外部插件 + 调度器 + 热更新 + 路由分发
+│   ├── engine.rs       ★ 引擎线程：外部 Node/Bun 插件 + 调度器 + 热更新 + 路由分发
 │   ├── hostapi.rs     ★ 宿主 API 的**唯一实现**（HostState::do_*）
-│   ├── jshost.rs      ★ QuickJS 侧适配：内置 `host-api`/`node:*` 源码 + `__host_*`
-│   ├── jscompat/      ★ Node/Web 兼容层：fetch / URL / TextEncoder / crypto + node:crypto / node:url
-│   │   ├── mod.rs       注入顺序与 install()：text → url → crypto → fetch
-│   │   ├── host.rs      宿主原语：系统随机数 / 摘要 / HMAC
-│   │   └── vectors/     Node 生成的期望值（text / url / crypto / buffer.json）
-│   ├── extproc.rs     ★ 外部运行时：子进程 spawn、fd0/1/2/3/4、超时杀进程组、RPC 分发
-│   ├── runtimes.rs    ★ 运行时探测与选择：QuickJS / Node / Bun / Python(脚本)
+│   ├── extproc.rs     ★ 外部运行时：子进程 spawn、fd0/1/2 + TCP RPC、超时杀进程树、RPC 分发
+│   ├── runtimes.rs    ★ 运行时探测与选择：Node / Bun / Python(脚本)
 │   ├── runtimefs.rs   ★ 把 runtime/js shim 从二进制落到数据目录（内容哈希目录）
 │   ├── taskdir.rs     ★ TASKS_DIR 扫描 + 文件头解析（@cron/@name/@runtime/@timeout/@params/@disabled）
 │   ├── upload.rs      上传：单文件 / zip 解压（拒绝 ..、符号链接、zip bomb）
 │   ├── watcher.rs     半被动刷新：inotify/FSEvents/ReadDirectoryChangesW → 去抖 Wake
 │   ├── scriptjob.rs   ★ 脚本任务执行：一次性进程、输出捕获、超时、runs 落库
-│   ├── pluginfs.rs    ★ QuickJS 的数据根 + 围栏（物理层复核，软链接也拦）
 │   ├── log/           ★ 日志内核 + 可插拔出口（插件 / 面板两条独立通道）
 │   │   ├── mod.rs       8 个语义 Type × 5 个过滤 Level、LogEntry、脱敏、run_id
 │   │   ├── console.rs   终端出口（彩色；只给插件通道）
@@ -101,7 +91,6 @@ rust-plugin-panel/
 │   │   └── hub.rs       多路分发 + SSE 订阅
 │   ├── cron.rs        Cron 表达式解析 + next_after
 │   ├── scheduler.rs   调度器：deadline 驱动、熔断退避、按插件/按任务摘除
-│   ├── timers.rs      插件内的毫秒级定时器（setTimeout / setInterval 的宿主侧表）
 │   ├── workers.rs     worker 池（`worker_hint` 把毫秒级任务与长任务分线程）
 │   ├── auth.rs        ★ 第十轮：令牌 + 内存会话 + 登录退避（不依赖 axum）
 │   ├── ratelimit.rs   第二十轮：令牌桶（登录退避、测试运行限流）
@@ -116,14 +105,14 @@ rust-plugin-panel/
 │       ├── runner.mjs    子进程入口：--plugin / --script、fd0/1/2/3/4
 │       ├── register.mjs  Node module.register hook（解析 'host-api'）
 │       ├── resolve.mjs   'host-api' 的解析规则（Node / Bun 共用）
-│       ├── bus.mjs       fd3/fd4 同步 RPC 客户端
+│       ├── bus.mjs       host-api 同步 RPC 客户端（TCP 或 fd3/fd4）
 │       ├── host-api/     对外门面（日志 / SQLite / HTTP / WS / SMTP / 注册）
 │       ├── node_modules/host-api/  Bun 的 NODE_PATH 解析入口
 │       └── test/         node --test 用例（run-tests.mjs 是 CI 入口）
 ├── plugins/
 │   ├── js/
 │   │   ├── hello.js            on_tick + host.log 示例
-│   │   ├── counter.js          验证「每个插件独立 Context」
+│   │   ├── counter.js          验证「每个插件独立运行时」
 │   │   ├── scheduler-demo.js   cron / 毫秒级任务示例
 │   │   ├── host-api-demo.js    ★ 跨运行时写法：import 'host-api' + 注册 HTTP 路由
 │   │   ├── panel-jobs.js       ★ 第九轮：register_handler 登记处理函数，调度交给面板
@@ -176,7 +165,6 @@ rust-plugin-panel/
 │   ├── ci.yml              三平台单测 + 冒烟（含真 ARM64 硬件）+ Node 适配器 + runtime/js
 │   └── release.yml         打 tag 发多架构静态产物 + 发布后自测安装
 └── examples/
-    ├── probe.rs            分层探针：逐项验证 tokio/sqlite/rquickjs 可用
     ├── broken-plugins/     容错测试：坏插件不影响好插件
     ├── hostile-plugins/    执行预算 / 熔断测试：JS 死循环插件
     └── recovery-plugins/   熔断恢复测试：先失败几次再正常
@@ -186,24 +174,23 @@ rust-plugin-panel/
 
 ## 11. 影响后续扩展的设计决策
 
-第六/七轮落地了这里的 1、2、3 三条；第六十轮把运行时从「两个嵌入式解释器」改成
-「一个语言、三个引擎」。
+第六/七轮落地了这里的 1、2、3 三条；第六十轮把运行时改成「一个语言、外部 Node/Bun」；
+2026-11-10 的 P2 又删掉了内嵌 QuickJS。
 
 1. ~~**跨运行时抽象层。**~~ ✅ **已实现并改形**：`engine.rs` 里 `LoadedPlugin.runtime` 现在是
-   `enum PluginRuntime { Js(Context), Ext(ExtPlugin) }`，`dispatch_task` 按变体分发；
-   Axum / SQLite / 调度器一行没改。第六十轮删掉了 `Py(PyVm)` 变体。
+   `enum PluginRuntime { Ext(ExtPlugin) }`，`dispatch_task` 走同一条外部子进程路径；
+   Axum / SQLite / 调度器一行没改。
 2. ~~**`host.*` 的模式可以直接复制。**~~ ✅ **已实现**：`hostapi.rs` 仍是唯一实现，
-   `jshost.rs` / `extproc.rs` 是两层薄适配，宿主侧不碰 JS 值类型。
+   `extproc.rs` 是唯一的适配层，宿主侧不碰 JS 值类型。
    额外收获：底层只传 String，所以 `adapters/node` 能把同一套语义再实现一遍 ——
-   同一个 `.js` 文件在 QuickJS、Node、Bun 与适配器里都跑通。
-3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，QuickJS 重建 `Context`、
-   外部引擎杀子进程后下次触发重启，先摘旧任务再装新任务（[§4](plugin-api.md#48-热更新)）。
+   同一个 `.js` 文件在面板内 Node、Bun 与适配器里都跑通。
+3. ~~**热更新入口已留好。**~~ ✅ **已实现**：mtime 驱动，外部引擎杀子进程后下次触发重启，
+   先摘旧任务再装新任务（[§4](plugin-api.md#48-热更新)）。
 4. ~~**任务定义目前是「代码即配置」**（插件代码里声明，启动时同步进 `jobs` 表，保留 runs 历史）。~~
    ✅ **已实现（第九轮）**：`jobs.source` 区分 `plugin` / `panel` 两种来源，
    `sync_jobs` 只收敛 `plugin` 行，面板可以新增 / 删除 `panel` 行。
    第六十轮又加了 `script-dir` / `script-panel` 两种来源（见 [script-jobs.md](script-jobs.md)）。
-5. **调度器与解释器同线程、串行执行。** 执行预算能打断 QuickJS 死循环；
-   外部引擎虽然把计算放进独立进程，但**一次 `invoke` 仍占住一条 worker 直到返回**
+5. **调度器与解释器同线程、串行执行。** 外部引擎虽然把计算放进独立进程，但**一次 `invoke` 仍占住一条 worker 直到返回**
    —— 慢任务会推迟同一条 worker 上的其它任务（别的 worker 不受影响）。
    要彻底隔离得让调度与执行解耦（每条任务一个进程/线程），代价是状态与生命周期管理复杂度上一个台阶。
 6. **`db` 是 `Arc<Mutex<Connection>>`**；并发读上来后换 `r2d2_sqlite`，`db.rs` 签名不变。
@@ -214,9 +201,9 @@ rust-plugin-panel/
    剩下的坑：会话表在内存里（重启失效、多实例不共享），退避只按 `ConnectInfo` 的 IP 算。
 8. ~~**Python VM 上限 15 个**~~ 🗑 **已删除**：PocketPy 不再嵌入。现在没有「VM 数量上限」，
    取而代之的是**每个外部插件一个子进程** —— 上限由内存与 fd 决定，面板不设硬上限。
-9. ~~**Python 侧的模块系统只有一个内置模块**~~ 🗑 **已删除**。QuickJS 仍然只内置
-   `host-api` / `node:fs` / `node:path`；Node/Bun 则能 `import` 任意包 ——
-   这是「原生逃生口」，代价是那个插件不再承诺跨引擎（[§10.7](runtimes.md#107-原生逃生口以及它的代价)）。
+9. ~~**Python 侧的模块系统只有一个内置模块**~~ 🗑 **已删除**。QuickJS 的内置模块
+   也随 P2 删除；Node/Bun 能 `import` 任意包 —— 这是「原生逃生口」，
+   代价是插件不再承诺跨宿主（[§10.7](runtimes.md#107-原生逃生口以及它的代价)）。
 10. **脚本任务与插件是两类东西，不合并。** 脚本是一次性进程（可以理解成「带文件头的 cron 行」），
     插件是常驻服务。合并会让脚本继承调度表、路由、热更新这些它不需要的语义，
     也会让「脚本跑完就退」这个最简单的保证消失。见 [script-jobs.md](script-jobs.md)。

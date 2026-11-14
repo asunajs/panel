@@ -14,6 +14,10 @@
 //   fd3  child -> panel   host-api RPC requests   {"id","fn","args":[...]}
 //   fd4  panel -> child   host-api RPC responses  {"id","ok","result"|"error"}
 //
+// The two RPC channels above are the legacy/test transport. The panel now sets
+// PANEL_RPC_PORT/PANEL_RPC_TOKEN and bus.mjs uses a loopback TCP socket instead
+// (see rpc-tcp.mjs), because Windows cannot inherit extra file descriptors.
+//
 // The protocol implementation lives in ./bus.mjs, which is also what the
 // `host-api` module re-exports. runner.mjs only owns process wiring, loading,
 // and dispatch.
@@ -27,6 +31,7 @@ import { pathToFileURL } from 'node:url';
 import {
   configure,
   installGlobals,
+  installTimerTracking,
   emitEvent,
   emitLog,
   errText,
@@ -53,7 +58,7 @@ async function loadPluginModule(file) {
     return typeof ns.on_tick === 'function' ? ns.on_tick : null;
   }
 
-  // Classic / QuickJS-style plugin: execute as a global script. Appending the
+  // Classic (global-script style) plugin: execute as a global script. Appending the
   // assignment captures a top-level `function on_tick(...)` (function
   // declarations are scoped to the new Function body).
   const factory = new Function(
@@ -248,6 +253,11 @@ async function runScript(file) {
   emitEvent({ ev: 'ready', ok: true, on_tick: false });
 
   try {
+    // 面板的「试跑」用 PANEL_SCRIPT_INPUT 把编辑器里的输入递给脚本；
+    // 普通脚本任务不会设这个变量，全局 `input` 也不存在。
+    if (process.env.PANEL_SCRIPT_INPUT !== undefined) {
+      globalThis.input = process.env.PANEL_SCRIPT_INPUT;
+    }
     if (looksLikeEsm(source)) {
       await importEsm(file);
     } else {
@@ -331,6 +341,8 @@ async function main() {
 
   // Host API globals must exist before the plugin/script is evaluated.
   installGlobals();
+  // 插件模式：追踪活跃定时器，面板据此判断「还靠定时器活着」而不惰性回收。
+  if (!scriptMode) installTimerTracking();
 
   if (scriptMode) await runScript(absolute);
   else await runPlugin(absolute);

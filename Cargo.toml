@@ -1,33 +1,24 @@
 [package]
 name = "plugin-panel"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
-description = "Rust + QuickJS + Node/Bun 动态插件任务面板"
+description = "Rust + Node/Bun 动态插件任务面板"
 
 # unsafe 是**要申报的**，不是随手能用的。
 #
-# 用 deny 而不是 forbid：forbid 不允许被 #[allow] 覆盖，而这里确实有 7 处
-# 必须直接调 libc / Mach 的系统调用（进程组、rusage、fd 传递）。
+# 用 deny 而不是 forbid：forbid 不允许被 #[allow] 覆盖，而这里确实有 6 处
+# 必须直接调 libc / Mach 的系统调用（进程组、rusage、内存用量）。
 # 例外一律**函数级** #[allow(unsafe_code)]，并且必须带一句 SAFETY 说明 ——
 # scripts/check-unsafe-budget.sh 会断言"例外正好是这几个函数"，多一个少一个都红，
 # 免得某天有人顺手又开一个。
 [lints.rust]
 unsafe_code = "deny"
 
-# 32 位 ARM 没有随 rquickjs-sys 发布的 musl bindings（只有 gnueabihf）。
-# 只对 arm 目标打开 bindgen，其他架构继续用 crate 自带的预生成 bindings。
-[target.'cfg(target_arch = "arm")'.dependencies]
-rquickjs = { version = "0.14", features = ["loader", "bindgen"] }
-
 [dependencies]
 # HTTP 服务器
 axum = { version = "0.8", features = ["multipart"] }
 # 异步运行时（rt-multi-thread: 多线程调度；signal: Ctrl-C 优雅退出）
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "fs"] }
-# 嵌入式 JS 引擎：rquickjs 绑定 QuickJS-ng，静态编译进二进制，无外部 .so 依赖。
-# loader 特性是给「插件里 import { ... } from 'host-api'」用的：自定义 Resolver/Loader
-# 把 host-api 解析成内置模块，插件脚本与 Node 下的一字不差。
-rquickjs = { version = "0.14", features = ["loader"] }
 # SQLite。bundled = 把 SQLite C 源码一起编译进来，目标机不需要装 libsqlite3。
 # hooks = authorizer + progress_handler（插件 SQL 的权限白名单与执行超时，
 # 见 src/hostapi.rs 的 `install_plugin_sql_guard`）；不开它这两个 API 根本不存在。
@@ -95,10 +86,6 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pki-types = "1"
 webpki-roots = "1"
 base64 = "0.23"
-# gzip / gunzip（QuickJS 的 node:zlib 兼容层）。**本来就在依赖树里**
-# （ureq 3 → flate2 1.1.10），加为直接依赖不增加任何编译单元 —— 与上面几个同一条理由。
-# 只用默认后端（miniz_oxide，纯 Rust）：不引 zlib-ng/C，静态二进制不受影响。
-flate2 = "1.1"
 # 版本门禁（src/panelversion.rs）的 semver 比较。**本来就在依赖树里**
 # （rustc_version → semver 1.0.28），加为直接依赖不增加编译单元。
 semver = "1"
@@ -134,11 +121,6 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 # `legacy-tls-vendored` 用的那份 OpenSSL（静态编进二进制）。只在那个 feature 下才编。
 openssl = { version = "0.10", optional = true }
 sha2 = "0.10"
-# Node 兼容层的 crypto：SHA-1 来自 tungstenite 的 handshake（依赖树里本来就有
-# `sha1 0.11`），加为直接依赖**不增加任何编译单元** —— 和上面 getrandom / blake2 同一条理由。
-# ⚠ 版本必须是 0.11：0.10 那条是 digest 0.10，而 tungstenite 用的是 digest 0.11；
-# 改成 0.10 会**多编一份 digest**（离线缓存里也不一定有）。
-sha1 = "0.11"
 # 备份加密（unpanel 2.10）。原来用 `age`，但上游已归档，且它带进来的
 # `crypto-bigint 0.5.5`（RUSTSEC-2026-0387，定时攻击）和 `basic-toml`
 # （RUSTSEC-2026-0374，无人维护）都没有升级路径。所以改成直接用三个标准原语：

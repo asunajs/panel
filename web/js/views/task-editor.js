@@ -116,7 +116,7 @@ export async function render(root, ctx, params = {}) {
   const usable = plugins.filter((p) => !p.error);
   const sel = $('#f-plugin');
   sel.innerHTML = usable.length
-    ? usable.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} · ${esc(p.engine || 'quickjs')}</option>`).join('')
+    ? usable.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} · ${esc(p.engine || 'node')}</option>`).join('')
     : '<option value="">（没有可用的插件）</option>';
   if (plugin) sel.value = plugin;
 

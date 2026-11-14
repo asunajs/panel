@@ -1,6 +1,6 @@
-# host-api 规范 v2（JS / QuickJS / Node / Bun）
+# host-api 规范 v2（JS / Node / Bun）
 
-> 一份 JS 插件要能跑在三个引擎里（内嵌 QuickJS、外部 Node、外部 Bun）和 Node 适配器里，
+> 一份 JS 插件要能跑在两个引擎里（外部 Node、外部 Bun）和 Node 适配器里，
 > 这份文档是它们之间**唯一**的公共契约：函数名、参数、返回值、错误约定。
 >
 > 文档索引：[docs/README.md](README.md) · 相关：[插件 API](plugin-api.md) · [运行时选型](runtimes.md) · [外部运行时协议](ext-runtime-protocol.md)
@@ -14,7 +14,7 @@
 | [2](#2-handler-的调用约定) | `handler(payload)` 的字段、成功/失败约定、`on_tick` |
 | [3](#3-各运行时的差异明确边界) | 各宿主与脚本模式的能力矩阵 |
 | [4](#4-插件工程) | [插件分组](#41-插件分组按系列) · [多文件](#42-插件多文件相对-import-与-require) · [内置模块 node:fs](#43-内置模块文件系统nodefs--nodepath) |
-| [5](#5-写插件的硬约束) | [QuickJS 与 Node/Bun 的差异](#51-quickjs-与-nodebun-的差异) · [绑定名](#52-绑定名host-api-模块host_api-全局host-别名) · [脚本模式](#53-脚本模式一次性进程) · [原生逃生口](#54-原生逃生口node--bun-only) · [测试运行](#55-测试运行面板侧接口) |
+| [5](#5-写插件的硬约束) | [Node/Bun 的通用约束](#51-nodebun-下的通用约束) · [绑定名](#52-绑定名host-api-模块host_api-全局host-别名) · [脚本模式](#53-脚本模式一次性进程) · [原生逃生口](#54-原生逃生口) · [测试运行](#55-测试运行面板侧接口) |
 | [6](#6-参考实现) | 宿主侧与适配器的源码位置 |
 
 > 章节号沿用本文件的编号；主 README 里的「§N」是另一套编号，见 [文档索引](README.md)。
@@ -25,25 +25,24 @@
 ### 0.1 这一版的需求
 
 - **插件语言只有 JavaScript**：同一份 `.js` 应能跑在
-  Rust + QuickJS-ng（内嵌，默认）、Node.js、Bun。
+  Node.js（默认）与 Bun 里。
 - **能力由抽象宿主 API 提供**：插件只 `import 'host-api'`，不直接依赖宿主原生全局对象；
-  同一份源码在三个引擎里语义一致。
+  同一份源码在两个引擎里语义一致。
 - **Python 不是插件语言**：`.py` 只作为任务目录里的 cron 脚本（一次性进程，无 `host-api`）。
 - **宿主 API 的数据面走面板**（A 数据面）：日志、SQLite、HTTP、WS、SMTP、任务注册、路由、
-  侧边栏入口，外部引擎一律经 fd3/fd4 RPC 调回面板。
-- **原生 API 是逃生口**：Node/Bun 插件可以 `import` npm 包 / `node:fs` / `node:child_process`，
-  但那样的插件是 Node/Bun-only，不承诺 QuickJS。
+  侧边栏入口，外部引擎一律经回环 TCP RPC 调回面板。
+- **原生 API 是逃生口**：Node/Bun 插件可以 `import` npm 包 / `node:fs` / `node:child_process`；
+  用了它们就不再保证能搬到别的宿主。
 
 ### 0.2 逐条对照实现
 
 | 需求 | 实现 | 证据 |
 |---|---|---|
-| 同一份 `.js` 跑 QuickJS / Node / Bun | ✅ | `plugins/js/host-api-demo.js`；冒烟 + `runtime/js/test/run-tests.mjs` |
+| 同一份 `.js` 跑 Node / Bun | ✅ | `plugins/js/host-api-demo.js`；冒烟 + `runtime/js/test/run-tests.mjs` |
 | 共享抽象宿主 API | ✅ | §1–§3；函数名 / payload / 错误约定一致 |
-| QuickJS：内置 `host-api` 模块 | ✅ | `src/jshost.rs` 的 Resolver/Loader |
 | Node：`host-api` 由 loader hook 解析 | ✅ | `runtime/js/register.mjs`（`module.register`）+ `runtime/js/host-api/` |
 | Bun：`host-api` 由 `NODE_PATH` 解析 | ✅ | `runtime/js/node_modules/host-api` |
-| 外部引擎的数据面走面板 | ✅ | `src/extproc.rs` 的 fd3/fd4 RPC（§6.3） |
+| 外部引擎的数据面走面板 | ✅ | `src/extproc.rs` 的回环 TCP RPC（[ext-runtime-protocol.md](ext-runtime-protocol.md)） |
 | Node 适配器（面板外） | ✅ | `adapters/node`（`node test/run-tests.mjs`） |
 | Python 插件 / CPython 适配器 | 🗑 **已删除** | 见 [changelog/60](changelog/60-third-party-runtimes.md) |
 
@@ -51,7 +50,7 @@
 
 - **分发名**随便改：npm 包可以叫 `@plugin-panel/host-api`，pip 包曾经叫 `plugin-panel-host-api`。
 - **模块名必须所有宿主一致**：插件里写的是 `import … from 'host-api'`，
-  三个引擎 + Node 适配器都解析到同一个名字。它不跟着分发名走。
+  两个引擎 + Node 适配器都解析到同一个名字。它不跟着分发名走。
 
 对 Node 来说，这意味着「裸说明符 `host-api`」必须由某处解析：
 
@@ -87,9 +86,9 @@ log/info(msg...) / debug / start / success / fail / warn / error / fatal -> None
 非字符串参数按 JSON / 标量字面量转成字符串；**多参按空格拼接**
 （`log('账号', 13712345678, '失败')`）。容器走 JSON（`{"a":1}`），不是各语言自己的 `repr`。
 
-行格式（三个引擎一致）：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`。
-面板内嵌宿主走面板日志出口（终端 + 环形缓冲 + JSONL），外部引擎经 fd1 `log` 事件
-回到同一条出口 —— **脱敏、按天切、留 7 天都由面板统一做**。
+行格式（两个引擎一致）：`YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`。
+外部引擎经 fd1 `log` 事件回到面板日志出口（终端 + 环形缓冲 + JSONL）——
+**脱敏、按天切、留 7 天都由面板统一做**。
 Node 适配器（面板外）写 **stderr**，同时落 JSONL。
 
 完整规格（脱敏规则、JSONL 字段、环境变量、彩色行为什么把 `[type]` 提到最前）见
@@ -146,8 +145,8 @@ worker_hint('exclusive');   // 要独占一条线程
 worker_hint('precision');   // 要落在精度线程上（毫秒级任务）
 ```
 
-QuickJS 的解释器不是 `Send`，每个插件跑在**一条**引擎线程上（`src/workers.rs`）；
-外部插件虽然有自己的进程，但 `tick` / `invoke` 的派发仍在引擎线程上串行发生。
+每个插件有自己的子进程，但 `tick` / `invoke` 的派发仍在引擎线程上串行发生
+（`src/workers.rs`）。
 面板默认按「最细调度间隔 < 1s ⇒ 要精度」的启发式分配，但有一类任务**光看间隔看不出来**：
 
 > 抢兑的表达式是 `0 10 * * *`（一天一次，粗粒度），可它到点那一刻差几十毫秒就没了。
@@ -440,13 +439,13 @@ import { sleep } from 'host-api';   // 裸名 sleep(...) 也一样（同一个�
 await sleep(ms);                    // 等 ms 毫秒；非法或负数按 0 处理
 ```
 
-**三个引擎都有、语义一致**（QuickJS / Node / Bun）。这一条不是可有可无的糖：插件
-按引擎分叉写 `await sleep` 与 `new Promise(...)` 是最没意义的一种差异 —— 同一份代码
-在 QuickJS 能跑、切到 Node 就 `ReferenceError`，而报错点和真正的原因（少个全局）离得很远。
+**Node / Bun 都有、语义一致**：`setTimeout` / `setInterval` / `clearTimeout` / `clearInterval`
+就是平台原生的那一套（Node 事件驱动），面板只在外面包了一层**计数**（见下面第 2 条），
+不改它们的调度语义。`sleep` 是面板扩展（Node 没有这个全局），由 `runtime/js/bus.mjs` 注入。
 
 `sleep` 是这套引擎**需要**的东西：任务 handler 已经是 async 的了，没有它想「等 10 秒再查
 一次」就只能写成 `setTimeout` 套回调。实现就是 `new Promise(r => setTimeout(r, ms))`，
-所以它同样受单插件 256 条定时器上限约束 —— 循环里 `await sleep` 不会累积（每条都会结算掉）。
+循环里 `await sleep` 不会累积定时器（每条 setTimeout 触发后即结算掉）。
 
 **什么时候用它，什么时候用 `every`**：
 
@@ -455,26 +454,29 @@ await sleep(ms);                    // 等 ms 毫秒；非法或负数按 0 处�
 | 粒度 | 毫秒（1ms 起） | 毫秒也行，但**每次触发都写一条运行记录** |
 | 账本 | **不进** `runs`，面板上看不到 | 进 `runs`，有历史、有熔断、有推送 |
 | 归属 | 插件内部状态 | 面板调度器（可在面板上暂停/改参数） |
-| 生命周期 | 跟着插件走：卸载 / 惰性回收即清空 | 跟着排班走，插件卸了任务还在 |
+| 生命周期 | 跟着插件进程走：进程被杀 / 重载即清空 | 跟着排班走，插件卸了任务还在 |
 
 判断标准很简单：**要人看见、要能失败告警的，用 `every`；纯内部的（攒批、防抖、
 轮询一个内存队列）用 `setInterval`**。50ms 级任务如果用 `every`，24h 就是 180 万行
 运行记录 / 几百 MB 的库 —— 那正是这条 API 要解决的问题。
 
-**四条边界**（都不是 bug，是这一版的形状）：
+**四条边界**（Node-only 之后的真实形状）：
 
-1. **回调的返回值被忽略**：调用是同步的，但它**可以是 `async`** —— 续体由微任务泵在
-   之后的一轮跑掉。代价是**定时器不等它**：`setInterval(500)` 里一个 700ms 的 async 回调
-   会重叠（和 Node 一样），`await` 之后抛的错进"未捕获的 Promise 拒绝"而不是这条定时器
-   的失败计数。要"上一次跑完再下一次"，用 `every` + async handler（它不重入）。
-2. **有活着的定时器时插件不会被惰性回收**（和 `on_tick` / 活着的 WebSocket 同一条判据），
-   手动「卸载」也会被拒绝并说明原因 —— 先 `clearInterval` 再卸。
-3. **单插件上限 256 条**，超了抛错。在循环里反复 `setTimeout` 而不 clear 是唯一会撞到它的写法。
-4. **回调抛错不算任务失败**（它没有运行记录，也就不参与熔断）：只记一条 `warn`；
-   连续 5 次仍失败就自动停掉那条定时器 —— 否则一个 50ms 的坏 interval 一天能刷 170 万行日志。
+1. **回调可以是 `async`，但定时器不等它**：`setInterval(500)` 里一个 700ms 的 async 回调
+   会重叠（原生 Node 行为）。要"上一次跑完再下一次"，用 `every` + async handler（它不重入）。
+2. **有活着的定时器时插件不会被惰性回收**（和 `on_tick` / 活着的 WebSocket 同一条判据）：
+   子进程把活跃定时器数上报给面板（`timers` 事件），`should_evict` 据此跳过它；
+   手动「卸载」也会被拒绝并说明原因 —— 先 `clearInterval` 再卸。否则一个只靠
+   `setInterval` 干活的插件会在闲置窗口后被卸掉、且没有任务把它装回来（定时器静默停止）。
+3. **没有条数上限**：原生定时器不设单插件上限（旧内嵌引擎的 256 条限制已随 QuickJS 删除）。
+   但失控地反复 `setTimeout` 而不 clear 仍会吃光内存 —— 这是插件自己的责任。
+4. **回调里抛错会掀翻插件进程**：定时器回调没有运行记录、不参与熔断，但同步 `throw`
+   是 Node 的未捕获异常、async 回调的拒绝是未处理的 Promise 拒绝 —— 两者默认都让子进程退出。
+   面板下一次用到它时自动重启（重跑模块、重建定时器），但进程内的定时器状态全丢。
+   要容错就在回调里 `try/catch`，别指望面板替你兜。
 
-> `setInterval` 的节奏按**理论时刻**推进；如果某一拍因为别的任务被拖过了整整一个周期，
-> 下一拍从"现在"重新起算，**不补跑**（和调度器跳拍不补是同一条规矩）。
+> 节奏就是原生 `setInterval` 的节奏（按墙钟推进、会漂移），**不是**面板调度器那种
+> "按理论时刻推进、跳拍不补"。要可解释的触发时刻与补跑语义，用 `every`。
 
 #### 1.2.12 面板版本：`panel.version()` / `panel.atLeast()`
 
@@ -527,56 +529,31 @@ http_fetch(url, options) -> { "status": int, "headers": {k: v}, "body": str, "bo
 `options`（全部可选）：`method`（默认 `GET`）、`headers`、`body`、`timeout_ms`
 （默认 10000，钳制到 `[100, 60000]`）。
 
-- `body` 是**文本**；要发原始字节，用内部字段 `body_b64`（标准 base64，padding 可省）。
-  两者**互斥**，同时给会报错 `body 与 body_b64 只能给一个`。⚠ `body_b64` 是
-  compat 层与宿主之间的**内部约定**，插件不该直接写它 —— 插件面请用 Web 形状的
-  `fetch(url, { body: new Uint8Array(...) })`（§1.4.2），由 `src/jscompat/fetch.js`
-  负责编码。写成面板专属参数会让「同一份插件在 Node 里跑不通」，那是本仓明确不要的。
+- `body` 是**文本**。要发原始字节，推荐用平台原生 `fetch(url, { body: new Uint8Array(...) })`；
+  `http_fetch` 也接受 `body_b64`（原始字节的 base64，与 `body` **互斥**，同时给会报错）——
+  它是 RPC 层的字节信封，插件面一般用不到。
 - 响应**总是**同时给 `body`（文本，UTF-8 宽松解码）与 `body_b64`（服务器原始字节的
   base64）。文本场景多一个字段没人用；二进制场景（图片 / protobuf / 自定义信封）只有它是对的。
 - `truncated`：响应体超过 **1 MiB** 时为 `true`（内容已截断，不是完整响应）。
-- 两个 compat 层的**内部字段**（插件不该读，`docs/plugin-api.md` 也不提）：
-  - `body_utf8`：`body` 是否**恰好等于** WHATWG 的 UTF-8 解码结果（合法 UTF-8 且不以 BOM 开头）。
-    为真时 `Response#text()/#json()` 直接用 `body`，一个字节都不用再解 —— 60 KB 的 JSON
-    在 aarch64 上纯 JS 解码要 100 ms+，这一步是 0。为假（BOM / 非法字节 / 截断）走精确解码器。
+- `body_b64` / `body_utf8` / `body_error` 是宿主内部字段（历史兼容）：插件面用 `body`
+  文本或原生 `fetch`，不需要读它们。
   - `body_error`：传输层读正文失败时非空（比如超过 1 MiB 的传输上限）。`fetch` 见到它就
     **reject**（`TypeError('fetch failed', { cause })`）—— 0.3.2 之前这里会漏成
     「status=200 + 一句错误文本」，插件会把它当正文去 `JSON.parse`。
 
-#### 1.4.1 `fetch_async`：不阻塞引擎的版本
+#### 1.4.1 `fetch_async` / `http_fetch_async`：已移除
 
-```js
-const r = await fetch_async(url, options);   // 同一个返回值形状
-```
+旧内嵌引擎时代有一个走面板数据面的异步版本 `fetch_async`。**Node-only 之后它已删除**，
+`host-api` 不再导出这两个名字 —— 老插件 `import { fetch_async } from 'host-api'` 会在加载期
+直接失败，用裸全局的到调用时才 `undefined`。迁移办法：
 
-`http_fetch` 是**同步**的：它在引擎线程上阻塞，一次 10 秒的请求会把同一 worker 上
-所有毫秒级任务一起堵住（实测：60 秒的请求能吃掉 ~119 拍）。`fetch_async` 把它扔到
-后台线程，`await` 期间引擎线程照常跑定时器和别的任务。
+- **要不阻塞**（请求期间插件自己的定时器照常跑）：用平台原生 `fetch`（§1.4.2，本来就是 async）。
+  代价是它**不走面板**：没有 SSRF 判定、没有 1 MiB 上限、没有统一脱敏。
+- **要面板那条通路**（信任库 / 超时 / 体积上限 / 审计）：用同步 `http_fetch`。它在 RPC 上
+  阻塞：调用期间卡住**这个插件自己的**事件循环（它的定时器也停），同步派发也占住所在
+  worker 线程（同 worker 的别的插件这一拍的任务会被推迟）。要不阻塞就用原生 `fetch`。
 
-实测（同一个 worker，1 秒的请求 + 50ms 的 `setInterval`）：
-
-| | 请求期间 interval 的速度 |
-|---|---|
-| `http_fetch`（同步） | 掉到 ~10 次/秒 |
-| `fetch_async` | **20 次/秒**，不受影响 |
-
-三条边界：
-
-1. **只在 `async` handler 里有意义**。同步 handler 里调它只会得到一个悬着的 Promise
-   —— 没人 `await`，请求白跑（但它确实不会阻塞）。
-2. **并发上限 32 条/worker**。到顶直接 reject（「并发请求太多」），不排队 ——
-   一条线程一个请求，排队等于把内存换成假象。
-3. **超时与 SSRF 判定和 `http_fetch` 完全同一套**（同一个 `do_http_fetch`，
-   没有第二份实现）。请求在途时插件不会被惰性回收。
-4. **结果没人认领时会过期**：如果请求在途时插件被删/改名，那条结果 60 秒后自动丢弃 ——
-   否则一个几 MB 的响应体会一直躺在队列里（「常驻低内存」就是这么破的）。
-5. **一定有回音**：除了 `timeout_ms` 那道（服务器超时会**返回错误**），还有一道看门狗 ——
-   `timeout_ms + 5 秒` 内连错误都没回来（后台线程卡住），Promise 会自己失败：
-   `后台请求超过 15000ms 没有回音，已放弃`。没有这道兜底，一条丢失的结果会让那个任务
-   一直占着"在途"，直到 60 秒的墙钟预算把它判失败 —— 期间这个任务就是**丢拍**。
-
-> 为什么另起一个名字而不是把 `http_fetch` 改成异步：`var r = http_fetch(url)`
-> 这种写法已经有大量插件依赖，改签名等于把所有插件打回重写。两个并存。
+「异步 + 面板保护」这个组合现在没有现成出口；需要时自己在原生 `fetch` 外面补超时 / 体积判断。
 
 #### 1.4.2 `fetch`：Web 形状，通路还是这一条
 
@@ -585,24 +562,10 @@ const r = await fetch(url, { headers: { accept: 'application/json' }, timeout_ms
 const data = await r.json();          // { ok, status, headers.get(...), text()/json()/bytes() }
 ```
 
-`fetch` 是**形状**，不是第二条网络路径：QuickJS 侧它内部只调 `fetch_async`（§1.4.1），
-SSRF 判定、超时钳位、响应体上限（1 MiB）、日志脱敏一条都没绕。名字在三个引擎里相同，
-但**只有 QuickJS 侧会过面板** —— Node/Bun 的 `fetch` 是平台原生的，走它们自己的网络栈
-（这条差别写在 [runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc)）。
-
-三条和本页其它函数不一样的地方：
-
-- **请求体可以是文本或字节**（0.3.0 起）。`string` / `URLSearchParams` 走文本；
-  `Uint8Array` / `ArrayBuffer` / `Buffer` / `DataView` 走字节，**逐字节原样发出**
-  （compat 层编码成 `body_b64`，插件看不到这个名字）。`ReadableStream` 仍会抛
-  `TypeError` —— 面板没有流。
-- **响应体是真字节**：`arrayBuffer()` / `bytes()` 取宿主给的原始字节（`body_b64`），
-  `text()` / `json()` 是同一份字节的 UTF-8 宽松解码。**没有流式**：`response.body`
-  不存在，全都从**已读完**的整段里切（上限 1 MiB）。
-- `abort()` **不是真取消**：宿主请求跑完，结果丢弃（[plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
-
-完整形状、`Headers` / `Request` / `Response` 的方法表与已知差异见
-[plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)。
+Node / Bun 里的 `fetch` 就是**平台原生**的 `fetch`（undici / Bun 自己的实现），
+不经过面板：没有 SSRF 判定、没有面板的 1 MiB 上限、也没有统一日志脱敏。
+需要面板那条通路（信任库 / 超时 / 体积上限 / 审计）时，用同步的 `http_fetch`。这条差别也写在
+[runtimes.md §10.6](runtimes.md#106-a-数据面能力全部走-rpc)。
 
 ### 出站目标的限制（SSRF 防护）
 
@@ -661,8 +624,8 @@ Linux 走 OpenSSL（发布产物静态链进去，目标机仍然什么都不用
 register_route(path, method, handler) -> None
 ```
 
-- 三个引擎都支持：路由挂在 **Axum 的同一个端口**上，由 Rust 统一分发
-  （QuickJS 进程内派发；Node/Bun 经 fd3/4 把请求交给子进程）。
+- 两个引擎都支持：路由挂在 **Axum 的同一个端口**上，由 Rust 统一分发
+  （面板把请求经 stdin 命令交给 Node/Bun 子进程处理）。
 - `handler(request)` 收到 `{method, path, query, headers, body}`，
   返回 `{status, headers, body}`（缺省 `200 / {} / ''`）。
 - ⚠⚠ **`query` 是原始查询串（字符串），不是解析好的对象。** 实测：
@@ -715,7 +678,7 @@ ws_close(id)            -> true
 - `ws_send` 的出站队列是 **256 帧**：满了会返回错误（以前是无界堆积，看着能跑、其实在吃内存）。
 - TLS 与 `http_fetch` 用同一个信任库。
 - ⚠ **必须从引擎线程调**（插件代码天然满足）；`ws_recv` 会阻塞。
-- 三个引擎都支持这一族（外部引擎经 RPC；句柄活在面板进程里）。
+- 两个引擎都支持这一族（外部引擎经 RPC；句柄活在面板进程里）。
 
 
 ## 2. handler 的调用约定
@@ -748,38 +711,35 @@ handler(payload) -> None
 并交给熔断器（连续失败 N 次后指数退避冷却）。
 
 `on_tick(payload)`（可选）：宿主每秒调一次，`payload = {seq, ts}`。
-三个引擎里它都只是「定义了就会被调用」，不影响任务调度。
+两个引擎里它都只是「定义了就会被调用」，不影响任务调度。
 
 ---
 
 ## 3. 各运行时的差异（明确边界）
 
-| 能力 | QuickJS（面板内嵌） | Node / Bun（面板外部） | Node 适配器（面板外） | 脚本模式（JS） |
-|---|---|---|---|---|
-| 日志八档 + 多参 + 脱敏 + JSONL | ✅ | ✅（RPC） | ✅ | ✅ |
-| `register_cron` / `every` | ✅ | ✅（RPC） | ✅ | ❌ 抛错 |
-| `register_handler` | ✅ | ✅（RPC） | ✅（配 `--job`） | ❌ 抛错 |
-| `worker_hint` | ✅ 源码扫描 | ✅（RPC，只校验） | ✅（只校验） | ❌ 抛错 |
-| `opts.params` | ✅ | ✅ | ✅ | —（脚本无调度） |
-| `opts.lead_ms` | ✅ | ✅（RPC） | ❌ | —（脚本无调度） |
-| 随机表达式（抖动） | ✅ 面板调度器 | ✅ 面板调度器 | ❌ 未实现 | ✅ 由面板调度 |
-| `register_nav` | ✅ | ✅（RPC） | ❌ | ❌ 抛错 |
-| `config()` | ✅ | ✅（RPC） | ❌ | ❌ |
-| `register_route` | ✅ | ✅（RPC） | ✅（内置 http server） | ❌ 抛错 |
-| `ws_*` | ✅ | ✅（RPC） | ❌ | ✅ |
-| `smtp_send` | ✅ | ✅（RPC） | ❌ | ✅ |
-| `opts.budget_ms` | ✅ | ✅（面板执行） | ❌ | —（用 `@timeout`） |
-| `sqlite_query` / `sqlite_exec` | ✅ | ✅（RPC） | ✅（`node:sqlite`） | ✅ |
-| `http_fetch`（同步） | ✅ | ✅（RPC） | ✅（worker + Atomics） | ✅ |
-| `fetch_async`（不阻塞） | ✅ **后台线程** | ✅（RPC，本来就是异步） | ✅ | ✅ |
-| `fetch`（Web 形状，[§4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)） | ✅ 复用 `fetch_async` | ✅ 平台原生（不走面板） | ✅ 原生 | ✅ |
-| `node:fs` / `node:path` | ✅ **限定在数据根** | ✅ **原生、无围栏** | ✅ 原生 | ✅ 原生（脚本跑在 Node/Bun 里） |
-| `fs.rootDir()`（面板扩展） | ✅ | ❌（原生 fs 不需要） | ❌ | ✅ |
-| 执行预算（死循环防护） | ✅ interrupt handler | ✅ **杀进程组** | ❌ | ✅ 超时杀进程组 |
-| 任务熔断 | ✅ | ✅ | ❌ | ✅ |
-| 插件热更新 | ✅ mtime | ✅ mtime（重启子进程） | ❌ | —（一次性） |
-| 原生 npm / `child_process` | ❌ | ✅ **Node/Bun-only** | ✅ | ✅（JS 脚本） |
-| 扩展：`http_fetch_async` | ✅（第六十二轮，`fetch_async`） | ❌ | ✅（Node 专有） | — |
+| 能力 | Node / Bun（面板外部） | Node 适配器（面板外） | 脚本模式（JS） |
+|---|---|---|---|
+| 日志八档 + 多参 + 脱敏 + JSONL | ✅（RPC） | ✅ | ✅ |
+| `register_cron` / `every` | ✅（RPC） | ✅ | ❌ 抛错 |
+| `register_handler` | ✅（RPC） | ✅（配 `--job`） | ❌ 抛错 |
+| `worker_hint` | ✅（RPC，只校验） | ✅（只校验） | ❌ 抛错 |
+| `opts.params` | ✅ | ✅ | —（脚本无调度） |
+| `opts.lead_ms` | ✅（RPC） | ❌ | —（脚本无调度） |
+| 随机表达式（抖动） | ✅ 面板调度器 | ❌ 未实现 | ✅ 由面板调度 |
+| `register_nav` | ✅（RPC） | ❌ | ❌ 抛错 |
+| `config()` | ✅（RPC） | ❌ | ❌ |
+| `register_route` | ✅（RPC） | ✅（内置 http server） | ❌ 抛错 |
+| `ws_*` | ✅（RPC） | ❌ | ✅ |
+| `smtp_send` | ✅（RPC） | ❌ | ✅ |
+| `opts.budget_ms` | ✅（面板执行） | ❌ | —（用 `@timeout`） |
+| `sqlite_query` / `sqlite_exec` | ✅（RPC） | ✅（`node:sqlite`） | ✅ |
+| `http_fetch`（同步） | ✅（RPC） | ✅（worker + Atomics） | ✅ |
+| `fetch`（平台原生） | ✅ 原生（不走面板） | ✅ 原生 | ✅ |
+| `node:fs` / `node:path` | ✅ **原生、无围栏** | ✅ 原生 | ✅ 原生（脚本跑在 Node/Bun 里） |
+| 执行预算（死循环防护） | ✅ **杀进程组** | ❌ | ✅ 超时杀进程组 |
+| 任务熔断 | ✅ | ❌ | ✅ |
+| 插件热更新 | ✅ mtime（重启子进程） | ❌ | —（一次性） |
+| 原生 npm / `child_process` | ✅ | ✅ | ✅（JS 脚本） |
 
 「执行预算 / 熔断 / 热更新 / 运行记录」是**宿主策略**，不是插件 API：
 Node 适配器不实现它们，插件也不应该依赖 —— 同一份脚本在面板里受保护，
@@ -820,16 +780,11 @@ plugins/mcloud/index.html     插件自带的页面（不是插件）
 **收集规则**：只收 `plugins/` 根目录与 `plugins/js/` 这一层，再往下不收。
 放在 `plugins/js/` 根下的 `.js` 会被当成插件加载（会多出一个没有任务的插件）。
 
-**QuickJS**：相对 `import` 按 URL 语义解析（可省扩展名、找目录入口），
-另有够用的 CJS `require`（`module.exports` / `exports`、按 URL 缓存、每个模块自己的相对基准）。
-`require('host-api')` 与 `import 'host-api'` 是同一批函数。
-
 **Node / Bun**：用 Node/Bun 自己的 ESM 加载器 —— 相对路径、npm 包、`import.meta` 都按原生语义；
 `host-api` 由 loader hook / `NODE_PATH` 解析。**不提供** CJS 的 `require` / `module.exports`
 （插件入口不是 CJS 模块；要拆模块请写 ESM）。
 
-> 同一个模块文件被多个插件 `import` 时，QuickJS 按 URL 缓存只加载一次；
-> 外部引擎每个插件是独立进程，天然不共享模块实例。
+> 每个插件是独立进程，天然不共享模块实例。
 
 ### 4.3 内置模块：文件系统（`node:fs` / `node:path`）
 
@@ -843,85 +798,30 @@ fs.mkdirSync(path.dirname(STATE), { recursive: true });
 fs.writeFileSync(STATE, JSON.stringify({ n: 1 }));
 ```
 
-| | 面板内（QuickJS） | 面板外（Node / Bun） |
-|---|---|---|
-| 来源 | 宿主内置（`src/jshost.rs`） | 原生模块 |
-| 边界 | **只在自己数据目录内**：`<PLUGIN_DATA_DIR>/<插件名>/` 就是它眼里的 `/` | 无限制 |
-| 越界 | `EACCES`（**拒绝**，不是夹回根目录） | — |
-| 相对路径的基准 | 那个数据根 | 进程 CWD（面板把 CWD 设成插件数据目录；脚本是脚本所在目录） |
-| `path.resolve()` | 绝对结果是 `/a/b` 形状（根 = 数据根） | 真实绝对路径 |
-| `Buffer` | 有（`Uint8Array` 子类）；不给 encoding 返回 `Buffer` | 有 |
-| 异步 API（`fs.promises`） | 没有 | 有 |
-| 单次读写上限 | 8 MiB | 无 |
-
-**可移植的写法是只用相对路径**，并把 `path` 的结果原样交回 `fs` —— 两边都对。
-完整的 QuickJS fs 函数清单（与 `src/jshost.rs` 导出表由测试双向钉着）见
-[plugin-fs.md §22.4](plugin-fs.md#224-与-node-原生-fs-的差异quickjs-侧)。
-
-> 面板内置的 `node:*` 模块一共**五个**：`node:path` 与 `node:fs`（本节）、`node:crypto` /
-> `node:url` / `node:buffer`（见 [plugin-api.md §4.10.5](plugin-api.md#410-nodeweb-兼容层全局与内置模块)）。
-> 清单在 `src/jshost.rs` 的 `BUILTIN_NODE_MODULES` 里只定义一次，`import` 与 `require` 共用它。
-
-### 4.3.0 能用哪些函数（QuickJS）
-
-**这是 QuickJS 侧的全部导出**（多一个没有，少一个也不行 —— 这张表和 `src/jshost.rs` 的导出表
-由测试 `documented_fs_surface_matches_the_code` **双向**钉着：代码里有而表格没写会红，
-表格里写了而代码没有也会红）。
-
-| `node:fs` | 说明 |
-| --- | --- |
-| `readFileSync(path[, encoding])` | 不给 encoding 返回 `Buffer`（`Uint8Array` 子类） |
-| `writeFileSync(path, data)` | 不会自动建父目录（与 Node 一致：报 `ENOENT`） |
-| `appendFileSync(path, data)` | 追加而不是覆盖 |
-| `existsSync(path)` | → `bool` |
-| `mkdirSync(path[, { recursive }])` | |
-| `readdirSync(path)` | → 名字数组（不递归、不含 `.` / `..`） |
-| `statSync(path)` | → `{ size, isDirectory(), isFile(), mtimeMs }` |
-| `unlinkSync(path)` | 删文件 |
-| `rmSync(path[, { recursive, force }])` | 删文件或目录 |
-| `renameSync(from, to)` | |
-| `rootDir()` | **面板扩展**：返回数据根的真实路径（排查用，别依赖 —— Node 里没有它） |
-| `constants` | 只给了 `F_OK` 这类常用值 |
-
-| `node:path` | 说明 |
-| --- | --- |
-| `join` `normalize` `resolve` `relative` | `resolve` 的「当前目录」是数据根，结果是 `/a/b` 形状 |
-| `dirname` `basename` `extname` | |
-| `isAbsolute` `sep` `delimiter` | `sep` 恒为 `/` |
-| `parse` `format` `posix` `win32` | `posix` / `win32` 都指向同一份实现（面板只有一种路径风格） |
-
-> 为什么这里要列全：这些函数是**跨运行时的承诺** —— 面板内 QuickJS 与面板外 Node 同名同义
-> （除了 `rootDir`）。文档只提其中几个的话，插件作者要么去读源码，要么写出只能在一边跑的代码。
-> 外部 Node / Bun 的 `fs` 是**原生**的，函数远多于这张表；那张表只约束 QuickJS 的内置模块。
-
-### 4.3.1 外部 Node / Bun：原生 fs
-
-**外部 Node/Bun 的 `fs` 是原生的、没有围栏**：它能读写当前用户能读写的任何文件。
+Node / Bun 的 `fs` / `path` 是**原生模块**，没有围栏：它能读写当前用户能读写的任何文件。
 面板只做两件事：把 CWD 设成插件数据目录、在环境变量里给出 `PANEL_PLUGIN_DATA_DIR`。
 这是「可信代码」边界的一部分（[security.md §28](security.md#28-外部运行时与脚本可信代码不是沙箱)）。
+
+可移植写法：尽量用 **CWD 下的相对路径**，并把 `path` 的结果原样交回 `fs` ——
+Node / Bun / 面板外的 `adapters/node` 都成立。要绝对路径时用
+`path.join(process.env.PANEL_PLUGIN_DATA_DIR || '.', ...)`，不要写死宿主目录。
 
 ---
 
 ## 5. 写插件的硬约束
 
-### 5.1 QuickJS 与 Node/Bun 的差异
+### 5.1 Node/Bun 下的通用约束
 
-| 构造 | QuickJS（内嵌） | Node / Bun | 替代写法 |
-|---|---|---|---|
-| `process` / `__dirname` | 无 | 有 | 走 `host-api`；宿主平台判断用 `typeof process !== 'undefined'` |
-| `Buffer` | **有**（`Uint8Array` 子类，兼容层） | 有 | 直接用；`node:crypto` 的 `digest()` / `randomBytes()` 也返回它 |
-| `setTimeout` / `setInterval` | **有**（插件内部定时器，回调同步） | 有（原生） | 要**账本可见**的周期任务仍用调度器：`every(name, '500ms', fn)` / `register_cron` |
-| `fetch` | **有**（兼容层；走面板数据面） | 有（平台原生） | 同步写法仍是 `http_fetch(url, opts)`；要并发用 `await fetch` / `fetch_async` |
-| `node:fs` / `node:path` | **受限**（数据根围栏） | 原生 | `host-api` 或只用相对路径 |
-| `node:child_process` / 其它 Node 内置 / npm 包 | 加载期报错 | 有 | 用了就是 Node/Bun-only，见 §5.4 |
-| `URL` / `URLSearchParams` / `TextEncoder` / `TextDecoder` / `crypto` / `Buffer` / `atob` / `btoa` | **有**（兼容层，形状按 Node；编解码 utf-8 与 latin1） | 有（平台原生） | 见 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)，不必再手搓 |
-| `console` / `performance` | 有 | 有 | `atob` / `btoa` 在上一行（兼容层提供） |
-| ECMAScript 语言本身（`Promise` / `Symbol` / `BigInt` / `Proxy` / `Reflect` / `eval`） | 有（microtask 在每轮引擎调度结束时清空） | 有 | — |
-| 模块形态 | 经典脚本 + ESM（`import`/`export`） | 经典全局脚本 + ESM；**没有 CJS 模块语义** | 拆模块用 ESM |
+两个引擎都是完整的 Node 兼容运行时，`process` / `Buffer` / 任意 npm 包 / `node:child_process`
+都可以用。写插件时只需要记住：
 
-一句话：**只用 ECMAScript 语言本身 + `host-api` + `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`
-（§4.10），三个引擎都跑得通。**
-`setTimeout` 这类计时器两边不能通用，延时一律交给调度器。
+- **延时交给调度器**：`every(name, '500ms', fn)` / `register_cron` 比一轮轮 `setTimeout`
+  可观测（次数、失败、熔断、运行记录都在面板里）。`sleep(ms)` 用于 handler 内部等待。
+- **模块形态**：经典全局脚本 + ESM；**没有 CJS 模块语义**（入口不是 CJS 模块，
+  要拆模块请写 ESM）。
+- **用了原生 `http` / `fetch` / npm 网络库**：不走面板的 SSRF 判定、TLS 信任库、
+  体积上限与日志脱敏；需要这些保护时用 `http_fetch`。
+- **用了原生 `fs` / `child_process`**：没有沙箱，见 §5.4。
 
 ### 5.2 绑定名：`host-api` 模块、`host_api` 全局、`host` 别名
 
@@ -955,7 +855,7 @@ JS 脚本（`.js` / `.mjs`）跑在**同一个 runner** 里，但**没有调度�
 > **Python / Shell 脚本没有 `host-api`**：它们是原生的普通进程。这种非对称是故意的 ——
 > 给它们 `host-api` 那套能力等于把两套语义硬凑在一起。需要面板能力请写 JS 脚本或插件。
 
-### 5.4 原生逃生口（Node / Bun only）
+### 5.4 原生逃生口
 
 ```js
 import fs from 'node:fs';                 // 真实文件系统，没有围栏
@@ -963,13 +863,11 @@ import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';    // 任何 npm 包
 ```
 
-- 用了原生 API 的插件是 **Node/Bun-only**，**不承诺**能跑在 QuickJS 里
-  （QuickJS 没有 `process` / `child_process` / 任意 npm 包）。
 - 原生 API **绕过面板的统一审计**：不走日志脱敏、不走 `http_fetch` 的信任库、
-  不经过 SQLite 的那把锁、不受「可中断」的执行预算保护（只有杀进程这一层）。
+  不经过 SQLite 的那把锁、执行预算只剩「杀进程组」这一层。
 - 文件系统没有沙箱；面板只保证不透传 `PANEL_TOKEN*` 环境变量。
-- 跨引擎插件请只用 `host-api` + [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)
-  的 Web/Node 全局（以及 QuickJS 也提供的受限 `node:fs` / `node:path` / `node:crypto` / `node:url` / `node:buffer`）。
+- 想在 Node / Bun / 面板外 `adapters/node` 之间搬的插件，请只用 `host-api` +
+  标准 Web/Node 全局（[plugin-api.md §4.10](plugin-api.md#410-nodeweb-全局与内置模块)）。
 
 ### 5.5 测试运行（面板侧接口）
 
@@ -978,14 +876,14 @@ POST /api/test/js    { "code": "...", "input": "...", "plugin"?, "task"?, "engin
                      → { ok, stdout, stderr, error, ms }
 ```
 
-- 代码跑在**一次性解释器**里（新建 `Context`，或临时起一次外部引擎），跑完立刻析构：
+- 代码跑在**一次性 Node 运行环境**里（临时起一次外部引擎），跑完立刻析构：
   不碰任何已加载插件的状态，也不注册任务。
-- 可选 `engine`（`quickjs` / `node` / `bun`）决定这次试跑用哪个引擎；不传用后端默认。
+- `engine` 只认 `node` / `bun`；不传用后端默认。
   传 `plugin` / `task` 时这次试跑会记进那条任务的 `runs`（`kind='test'`）。
 - 输入以全局 `input` 提供。
 - 输出约定：`log`/`console.log` → `stdout`；`warn`/`error` → `stderr`；
   代码自己报的错（语法错、异常、超预算）→ `error`。传输层失败是 HTTP 错误码。
-- 受执行预算保护：死循环被 interrupt handler 打断（默认预算 600 秒；试跑 10 秒）。
+- 受执行预算保护：超时杀进程树（默认预算 600 秒；试跑 10 秒）。
 - 输出**不进**面板的实时日志（用捕获缓冲收走），否则跑几次就把日志刷满了。
 - `POST /api/test/py` **已删除**（Python 插件退场）。
 
@@ -994,7 +892,6 @@ POST /api/test/js    { "code": "...", "input": "...", "plugin"?, "task"?, "engin
 ## 6. 参考实现
 
 - 宿主侧唯一实现：`src/hostapi.rs`（`HostState::do_*`）
-- QuickJS 适配 + 内置模块源码：`src/jshost.rs`
 - 外部进程协议：`src/extproc.rs` + [ext-runtime-protocol.md](ext-runtime-protocol.md)
 - 外部 shim 落盘：`src/runtimefs.rs`；JS runner / host-api：`runtime/js/`
 - 运行时探测：`src/runtimes.rs`

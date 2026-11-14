@@ -6,7 +6,7 @@
 //
 // 入站端口取环境变量 PANEL_PORT，默认 8787；PANEL_PORT=0 用随机空闲端口（测试用）。
 //
-// 路由语义对齐 Rust 宿主（src/jshost.rs 的 __dispatch_route + src/hostapi.rs 的校验）：
+// 路由语义对齐 Rust 宿主（src/hostapi.rs 的校验）：
 //   - method 只允许 GET/POST/PUT/DELETE/PATCH/HEAD，且同一 (method, path) 不能重复注册
 //   - handler 收到 {method, path, query, headers, body}
 //   - handler 返回 {status, headers, body}（缺省 200 / {} / ''，body 会被 String() 化）

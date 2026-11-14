@@ -9,8 +9,6 @@
     ① 文件清单：该有的文件都在（防止「加了新模块忘了在 assets.rs 登记」）
     ② 语法：每个 .js 都能按 ES Module 解析（用 node --check，.mjs 副本）
     ③ 结构：index.html 没有内联 CSS/JS；插件页面只引用允许的路径
-    ④ 运行时约束：`plugins/js/*.js` 跑在嵌入式 QuickJS 里，
-       不能用 process / require / fetch / setTimeout 这些浏览器或 Node 才有的东西
 
   用法：node scripts/test-web-assets.mjs
 */
@@ -332,8 +330,8 @@ check(
   check(pluginListSrc.includes('data-engine'), 'plugin-list.js 有引擎下拉框（data-engine）');
   check(pluginListSrc.includes('data-runtime-apply'), 'plugin-list.js 有「应用引擎」按钮');
   check(
-    /ENGINE_KINDS\s*=\s*\[\s*'quickjs'\s*,\s*'node'\s*,\s*'bun'\s*\]/.test(pluginListSrc),
-    '插件引擎只列 quickjs / node / bun（python / sh 是脚本运行时）',
+    /ENGINE_KINDS\s*=\s*\[\s*'node'\s*,\s*'bun'\s*\]/.test(pluginListSrc),
+    '插件引擎只列 node / bun（python / sh 是脚本运行时）',
   );
   check(pluginListSrc.includes('runtimes'), 'plugin-list.js 读 /api/state 的 runtimes 做可用性');
   check(pluginListSrc.includes('unavailable'), '不可用的引擎选项会被禁用并带原因');
@@ -710,53 +708,9 @@ check(
   '主面板没有内联脚本（全部走外置 ES Module）',
 );
 
-// ---------------------------------------------------------------- ⑥ QuickJS 约束
+// ---------------------------------------------------------------- ⑥ 配色对比度
 
-console.log('\n⑥ 嵌入式 QuickJS 的约束（plugins/js/*.js）');
-// 这些名字在嵌入式 QuickJS 里**不存在**（实测见 docs/host-api.md §4.1）。
-// 插件里写了它们，加载期就抛 ReferenceError —— 而同一份文件在 Node 里
-// 调试时是好的，于是变成「本地能跑、上机就炸」。
-// 用**标识符边界**匹配，不是 substring：
-//   - `http_fetch(` 里含有 `fetch(`，用 substring 查会把正确的 host-api 调用报成违规
-//   - `typeof process !== 'undefined'` 是合法的特性探测（host-api-demo.js 就这么写），
-//     只有真正**使用**这个全局才算违规
-const FORBIDDEN = [
-  ['process', /(?<![.\w$])process\b/],
-  ['require', /(?<![.\w$])require\s*\(/],
-  ['module.exports', /(?<![.\w$])module\.exports/],
-  ['__dirname', /(?<![.\w$])__dirname\b/],
-  ['setTimeout', /(?<![.\w$])setTimeout\s*\(/],
-  ['setInterval', /(?<![.\w$])setInterval\s*\(/],
-  ['setImmediate', /(?<![.\w$])setImmediate\s*\(/],
-  // fetch / URL / TextEncoder / TextDecoder / crypto / atob / btoa **已经从这张表里删掉**：
-  // 它们由 src/jscompat 注入到每个插件 Context（见 docs/plugin-api.md §4.10），
-  // 插件里写 `await fetch(url)` / `new URL(u)` 在默认引擎里是**合法**的。
-  // 这张表只留"内嵌宿主真的没有、写了就 ReferenceError"的名字。
-  ['structuredClone', /(?<![.\w$])structuredClone\b/],
-  ['localStorage', /(?<![.\w$])localStorage\b/],
-  ['document', /(?<![.\w$])document\b/],
-  ['window', /(?<![.\w$])window\b/],
-];
-
-for (const f of readdirSync(join(PLUGINS, 'js'))) {
-  if (!f.endsWith('.js')) continue;
-  const src = readFileSync(join(PLUGINS, 'js', f), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/[^\n]*/g, '');
-
-  const hits = FORBIDDEN.filter(([name, re]) => {
-    if (!re.test(src)) return false;
-    // 特性探测（typeof X）是允许的：插件本来就要能同时跑在 Node 和嵌入式宿主里
-    const ident = name.split(/[.\s(]/)[0];
-    return !new RegExp(`typeof\\s+${ident}\\b`).test(src);
-  }).map(([name]) => name);
-
-  check(hits.length === 0, `plugins/js/${f} 没用嵌入式宿主没有的全局`, hits.join(', '));
-}
-
-// ---------------------------------------------------------------- ⑥b 配色对比度
-
-console.log('\n⑥b 配色对比度');
+console.log('\n⑥ 配色对比度');
 
 // 为什么要有这条：换配色是"看着好看"就能改的事，而对比度是**能不能读**的事。
 // 第二十七轮把 accent 从蓝换成粉时就踩到了 —— Latte 官方的粉 #ea76cb 在它自己的

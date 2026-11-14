@@ -45,8 +45,8 @@ test('panel.version reads PANEL_VERSION and falls back', () => {
     else process.env.PANEL_VERSION = saved;
   }
 });
-// sleep 是面板扩展（Node 没有），但三个引擎必须同义 —— 否则同一份插件
-// 在 QuickJS 里能跑、切到 Node 就 ReferenceError。
+// sleep 是面板扩展（Node 没有）；Node / Bun 两个引擎必须同义，否则同一份插件
+// 换个引擎就 ReferenceError。
 test('sleep resolves after roughly the requested delay', async () => {
   const t0 = Date.now();
   await sleep(60);

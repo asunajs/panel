@@ -11,8 +11,8 @@
 
 | | 插件 | 脚本任务 |
 |---|---|---|
-| 生命周期 | 长驻（QuickJS 一个 `Context` / 外部 Node/Bun 一个子进程） | **一次性进程**，跑完就退 |
-| 语言 | JavaScript（QuickJS / Node / Bun） | `.js` / `.mjs`（Node / Bun）、`.py`（CPython）、`.sh`（`/bin/sh`） |
+| 生命周期 | 长驻（Node/Bun 一个子进程） | **一次性进程**，跑完就退 |
+| 语言 | JavaScript（Node / Bun） | `.js` / `.mjs`（Node / Bun）、`.py`（CPython）、`.sh`（`/bin/sh`） |
 | 能力来源 | `host-api`（日志 / SQLite / HTTP / WS / SMTP / 路由 / 调度） | JS：可以用 `host-api`（**调度注册函数除外**）；Python / Shell：**原生**能力，没有 `host-api` |
 | 调度 | 插件代码声明（`source=plugin`）或面板建（`source=panel`） | 文件头 `@cron`（`source=script-dir`）或面板建（`source=script-panel`） |
 | 跨重启状态 | 插件自己的数据目录 / SQLite | 默认没有；要状态就自己写文件或进 SQLite |
@@ -75,7 +75,7 @@ JS 用 `//`，Python / Shell 用 `#`；块注释里的 `* @key …` 也认。键
 |---|---|---|
 | `@cron` | **调度必填** | 5 段 / 6 段 cron 或 `@every 500ms`。**没有这一行 = 被发现但不调度**（不会报错，面板上标「未调度」） |
 | `@name` | | 任务名（默认文件名去扩展名）。同名时**目录任务优先于面板任务** |
-| `@runtime` | | `.js/.mjs`：`node`（默认）或 `bun`。**`quickjs` 对脚本无效**（QuickJS 只跑插件）→ 头部非法。`.py`：`python3`（默认/auto）；`.sh`：`sh`（默认）。**与扩展名不匹配 = 非法头部**，文件会在列表里标错且**不自动调度**，不是静默忽略 |
+| `@runtime` | | `.js/.mjs`：`node`（所有平台默认）或 `bun`。`.py`：`python3`（默认/auto）；`.sh`：`sh`（默认）。**与扩展名不匹配 = 非法头部**，文件会在列表里标错且**不自动调度**，不是静默忽略；`quickjs` 会明确报「已移除」 |
 | `@timeout` | | 本次执行超时（毫秒）。默认 `SCRIPT_TIMEOUT_MS`（60000）。超时杀掉**整个进程组** |
 | `@params` | | 任意 JSON（对象/数组/字符串都行）。执行时以 `PANEL_PARAMS` 原样传给脚本；同时进任务的 `params` 列 |
 | `@disabled` | | 有这一行 = 不调度。文件仍在列表里，面板上可以手动执行 |
@@ -87,24 +87,23 @@ JS 用 `//`，Python / Shell 用 `#`；块注释里的 `* @key …` 也认。键
 
 ### 3.1 平台矩阵：哪些脚本在哪个系统上真能跑
 
-`.js`/`.mjs` 脚本走的是**外部** Node/Bun，而外部运行时依赖 fd 传递（fd3/fd4）与进程组
-kill —— **这些只有 Unix 有**（见 [运行时](runtimes.md)）。所以：
+`.js`/`.mjs` 脚本在所有平台默认走**外部** Node/Bun；RPC 是回环 TCP，Windows 也已支持
+（**未实机验证**）。内嵌 QuickJS 已删除，`@runtime quickjs` 会报错。所以：
 
 脚本任务的本质是「**定时启动一个程序**」。那个程序可以是解释器 + 源码，也可以是
 一个二进制；Windows 上没有 `sh`，但有 `cmd` 与 PowerShell。所以矩阵是这样的：
 
 | 扩展名 | 运行时 | Linux / macOS | Windows |
 |---|---|---|---|
-| `.js` / `.mjs` | `quickjs`（内嵌） | ✅ 不用装任何东西 | ✅ **不用装任何东西** |
-| `.js` / `.mjs` | `node` / `bun`（外部） | ✅ 需要装 `node` 或 `bun` | ❌ 外部运行时依赖 fd 传递与进程组，只有 Unix 有 |
+| `.js` / `.mjs` | `node` / `bun`（外部，默认） | ✅ 需要装 `node` 或 `bun` | ✅ 需要装 `node` 或 `bun`（❓ 未实机验证） |
 | `.py` | `python3` | ✅ 需要 `python3` | ✅ 需要装 Python（`python` / `python3` 都认） |
 | `.sh` | `sh` | ✅ 需要 `sh` | ❌ 没有 POSIX shell —— 用 `.cmd` / `.ps1` 代替 |
 | `.cmd` / `.bat` | `exe` | —（一般不存在） | ✅ 走 `cmd /c` |
 | `.ps1` | `exe` | —（一般不存在） | ✅ 走 `powershell -NoProfile -ExecutionPolicy Bypass -File` |
 | `.exe` / `.com` | `exe` | ✅（任何带执行位的二进制） | ✅ 直接执行 |
 
-**`.js` 在非 Unix 上默认就是 `quickjs`**：不写 `@runtime` 也不会掉进死路。想用外部 Node
-（比如需要 `node_modules`）就在 Unix 上显式写 `@runtime node`。
+**`.js` 所有平台默认 `node`**：不写 `@runtime` 也不会掉进死路。
+想用外部 Bun 就在 Unix/Windows 上写 `@runtime bun`。
 
 ### 3.2 二进制任务没有文件头：用边车
 

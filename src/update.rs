@@ -683,7 +683,12 @@ fn hint_for_status(status: u16) -> &'static str {
 
 fn env_flag(key: &str) -> bool {
     std::env::var(key)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -740,12 +745,8 @@ fn replace_binary(exe: &Path, bytes: &[u8]) -> Result<(), String> {
     if std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) != bytes.len() as u64 {
         return Err(cleanup("临时文件大小不对，已中止".into()));
     }
-    std::fs::rename(&tmp, exe).map_err(|e| {
-        cleanup(format!(
-            "替换 {} 失败（目录只读？）：{e}",
-            exe.display()
-        ))
-    })?;
+    std::fs::rename(&tmp, exe)
+        .map_err(|e| cleanup(format!("替换 {} 失败（目录只读？）：{e}", exe.display())))?;
     Ok(())
 }
 

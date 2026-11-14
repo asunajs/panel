@@ -153,10 +153,9 @@ export async function render(root, ctx, params) {
 
 ## 10. 测试与验证
 
-- `node scripts/test-web-assets.mjs`（270 项，分八段）：
+- `node scripts/test-web-assets.mjs`（286 项，分八段）：
   ① 文件清单与 `assets.rs` 对账 ② ES Module 语法 ③ `index.html` / 插件页结构
   ④ CSS 约束（只用变量、徽章 / 卡片头 / 箭头、主题持久化）⑤ 安全约束（`x-panel`、登录页摘要与蜜罐、无内联脚本）
-  ⑥ 嵌入式 QuickJS 约束（`plugins/js/*.js` 不能用 `process` / `require` / `fetch` / `setTimeout` …）
   ⑥b 配色对比度（按 WCAG 公式算 `theme.css`）⑦ 第三方组件子集与 `FORK.md` ⑧ 界面文案
   ⑨ 界面状态与无障碍（表头 scope、标题层级、弹窗契约、跳过链接、触控尺寸、禁用/焦点/错误/长文本样式）
   另有一段插件 iframe `sandbox` 专项。

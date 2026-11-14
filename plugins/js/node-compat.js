@@ -1,12 +1,11 @@
-// plugins/js/node-compat.js —— 同一个文件在 QuickJS / Node / Bun 里跑出同一个结果。
+// plugins/js/node-compat.js —— 同一个文件在 Node / Bun 里跑出同一个结果。
 //
-// 这个示例只证明一件事：**照着 Node 写的那几个全局，在默认引擎里也真的在。**
-// `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer` 五样由面板的兼容层注入每个插件 Context
-// （`src/jscompat/`）；在 Node/Bun 里用的是平台原生实现，名字与形状一致。
-// 细节与已知差异见 docs/plugin-api.md §4.10。
+// 这个示例只证明一件事：**照着 Node 写的那几个全局，在面板里也真的在。**
+// `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer` 都是平台原生实现，
+// 名字与形状以目标 Node 版本为准（见 docs/plugin-api.md §4.10）。
 //
-// 刻意只用了 host-api + ECMAScript + 这五个全局 —— **没有** process / require / npm，
-// 所以它在三个引擎里的行为是同一份，而这份文件本身就是「跨引擎插件长什么样」的答案。
+// 刻意只用了 host-api + ECMAScript + 这五个全局 —— **没有** npm 包，
+// 所以它在 Node / Bun / adapters/node 里的行为是同一份。
 //
 // 默认**不联网**：fetch 只在手动打开路由时才发一次，且固定打 example.com。
 // 看得到三件事：
@@ -39,7 +38,7 @@ function utf8(text) {
     return new TextEncoder().encode(text);
 }
 
-// ── 字节 → hex / base64：Node 的写法直接可用（Buffer 在三个引擎里都有）
+// ── 字节 → hex / base64：Node 的写法直接可用（Buffer 是平台原生）
 function hexOf(bytes) {
     return Buffer.from(bytes).toString('hex');
 }
@@ -48,7 +47,7 @@ function b64Of(bytes) {
     return Buffer.from(bytes).toString('base64');
 }
 
-// ── crypto：随机数 / UUID / 摘要。QuickJS 侧只有这三样，没有 RSA/ECDSA（见 §4.10）
+// ── crypto：随机数 / UUID / 摘要（WebCrypto，平台原生）
 function nonce() {
     const b = crypto.getRandomValues(new Uint8Array(8));
     return hexOf(b);

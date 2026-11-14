@@ -36,8 +36,8 @@
 | [插件 API](plugin-api.md) | 插件入口、注册任务、注册路由、热更新、Node/Web 兼容层、面板写操作 |
 | [Node.js 兼容表](node-compat.md) | 默认引擎里哪些 Node/Web API 有、哪些是子集、哪些没有（导出级对账） |
 | [host-api 规范](host-api.md) | `register_cron`、日志、SQLite、HTTP、WebSocket、SMTP、任务参数、提前量 |
-| [插件数据目录](plugin-fs.md) | QuickJS 的文件围栏、Node/Bun 的原生文件系统 |
-| [运行时选型](runtimes.md) | QuickJS、Node、Bun 的区别和选择建议 |
+| [插件数据目录](plugin-fs.md) | 插件数据目录、Node/Bun 的原生文件系统 |
+| [运行时选型](runtimes.md) | Node、Bun 的区别和选择建议 |
 | [外部运行时协议](ext-runtime-protocol.md) | 外部 JS 子进程的 fd、消息、超时和重启规则 |
 | [惰性加载](lazy-plugins.md) | 插件什么时候在内存里、什么时候被卸出去 |
 
@@ -61,6 +61,9 @@
 | [架构](architecture.md) | 进程和线程模型、目录结构、运行时、调度器 |
 | [文件管理（设计）](file-management.md) | 插件/脚本的删除、回收站、版本快照与回滚：缺口证据、目录布局、路由、判据、分三期 |
 | [引擎迁移路线](engine-migration.md) | async/await 与「向 Node 看齐」：目标形态、还没拍板的两个岔路口、分阶段验收 |
+| [换掉自研 JS 运行时](js-runtime-replacement.md) | deno_core + deno_web 的实测记录（已被 Node-only 取代） |
+| [迁移注意事项](js-runtime-migration.md) | 从 rquickjs 换到 panel-js-runtime 的调研（已被 Node-only 取代） |
+| [切到 Node-only](node-only-migration.md) | 2026-11-10 定的方向：删内嵌 QuickJS，Node 为唯一默认运行时；范围、顺序、Windows 分叉（P0–P2 已落地） |
 | [前端（WebUI）规范](webui.md) | 零构建、路由与视图契约、样式变量、交互与无障碍、新增页面清单 |
 | [UI 设计规范](ui-spec.md) | 视觉基础、Token、组件状态矩阵、异常态模式、响应式、验收清单 |
 | [旧章节号对照](legacy-sections.md) | 代码注释里 `README §N` 对应的当前文档 |
@@ -89,6 +92,8 @@
 | 文档 | 内容 |
 |---|---|
 | [qoder 审查](review-qoder-261025.md) | 2026-10-25 的代码审查：High / Medium / Low 三档 + 处理记录 |
+| [qoder 复查](review-qoder-261110.md) | 2026-11-10 的复查：旧 H3 未真正落地 + 5 条改进项 |
+| [qoder 迁移复审](review-qoder-261110-2.md) | 同日晚间：Node-only 迁移后的全项目复审，含 /stop、定时器回收与文档旧语义 |
 | [unpanel 审查](from-unpanel.md) | 另一份对照审查：13 条，含两条被复核推翻的前提 |
 
 ## 版本

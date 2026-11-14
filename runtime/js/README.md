@@ -4,8 +4,8 @@ This directory is the child-process shim for **external JS plugins** and **one-s
 scripts**. The panel embeds these files with `include_str!` (see `src/runtimefs.rs`),
 writes them under a content-hashed runtime directory, and spawns Node or Bun.
 
-The built-in QuickJS path (`src/jshost.rs`) is unaffected: a plugin can run embedded
-(default) or external per plugin. Python is not a plugin language in this design.
+Every JS plugin and JS script runs through this child-process runtime; the embedded
+QuickJS path was removed in the Node-only migration. Python is not a plugin language.
 
 ## Files
 
@@ -14,7 +14,7 @@ The built-in QuickJS path (`src/jshost.rs`) is unaffected: a plugin can run embe
 | `runner.mjs` | Child entrypoint. Parses `--plugin <file>` / `--script <file>`, installs globals, loads the file, handles fd0 commands and emits fd1 events. |
 | `register.mjs` | Node `--import` hook: calls `module.register(resolve.mjs)`. Required because a plugin outside this directory cannot resolve the bare specifier `host-api` by itself. |
 | `resolve.mjs` | Node module hooks: `resolve` maps exactly `host-api` to `./host-api/index.mjs` with `shortCircuit: true` (everything else goes to `nextResolve`); `load` upgrades `.js` files with top-level ESM syntax to `format: "module"` when Node would otherwise treat them as CommonJS (needed on Node 20.6–20.18; harmless on newer Node). |
-| `bus.mjs` | The shared implementation: protocol writers, synchronous fd3/fd4 RPC, registration maps, dispatch, log/console helpers, global installation. |
+| `bus.mjs` | The shared implementation: protocol writers, synchronous host RPC (loopback TCP for the panel, fd3/fd4 for tests/adapters), registration maps, dispatch, log/console helpers, global installation, timer tracking. |
 | `host-api/index.mjs` | ESM entrypoint re-exporting `../bus.mjs`, so imports and the runner share one module instance. |
 | `host-api/package.json` | Package metadata for the shim (`name: "host-api"`, `type: "module"`). |
 | `node_modules/host-api/*` | Tiny wrapper package. Bun has no `module.register`, so the panel sets `NODE_PATH=<runtime>/js/node_modules`; the wrapper re-exports the canonical `../../host-api/index.mjs`, preserving the single-module-instance property. |
@@ -69,6 +69,14 @@ plugin calls a function and uses its return value immediately. Writing a request
 to fd3 and blocking on one line from fd4 is exactly that. All RPC `result` values
 are strings; JSON-returning functions parse them (`sqlite_query`, `sqlite_exec`,
 `http_fetch`, `smtp_send`, `ws_*`). An RPC envelope with `ok:false` is thrown.
+
+> **The panel does not use fd3/fd4.** Windows cannot inherit extra file
+> descriptors, so the panel sets `PANEL_RPC_PORT` / `PANEL_RPC_TOKEN` and the
+> child talks to a loopback TCP socket (127.0.0.1) instead — see `rpc-tcp.mjs`
+> and `rpc-worker.mjs` (a Worker + `SharedArrayBuffer` + `Atomics.wait` keeps the
+> call synchronous on the child's main thread). fd3/fd4 remain the transport for
+> the test suite's fake panel parent and the out-of-panel Node adapter. The
+> request/response shapes are identical on both transports.
 
 ### fd0 commands
 
@@ -133,7 +141,7 @@ camelCase aliases (`sqliteQuery`, `sqliteExec`, `httpFetch`, `smtpSend`,
 `registerRoute`, `registerNav`, `wsOpen`, `wsSend`, `wsRecv`, `wsClose`,
 `registerCron`, `registerHandler`). Bare names (`log`, `sqlite_query`, …) are also
 installed when not already defined, matching the repo's Node adapter. `globalThis.host_api`
-is an alias of `host`, matching the embedded QuickJS host.
+is an alias of `host`.
 
 `console.log/info/debug` map to `info/debug` events and `console.warn/error` to
 `warn/error`. Non-logging console methods are delegated to the host console (they
@@ -144,7 +152,7 @@ may write raw stdout/stderr; the panel treats those lines as logs).
 - A file with top-level `import` / `export` (or `import.meta`, or top-level `await`)
   is loaded with dynamic `import(pathToFileURL(file))`. `on_tick` comes from the
   module namespace (`export function on_tick`).
-- A file with no such syntax is a **classic** (QuickJS-style) plugin: its source is
+- A file with no such syntax is a **classic** (global-script style) plugin: its source is
   executed with `new Function(source + capture-on_tick)()`. Top-level
   `function on_tick(payload) {}` is captured; `globalThis.host` and the patched
   `console` are available. This is not CommonJS: `module.exports`, `exports`, and

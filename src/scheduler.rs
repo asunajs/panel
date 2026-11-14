@@ -138,9 +138,9 @@ pub struct TaskMeta {
 
 /// 运行期改任务状态的补丁。
 ///
-/// 宿主 API 可能在引擎线程（QuickJS）也可能在 RPC 线程（外部 Node/Bun）上被调用，
-/// 而调度器归引擎线程独占 —— 直接借 `&mut Scheduler` 要么拿不到，要么在引擎线程
-/// 上自锁。所以这里只投递补丁，由引擎线程在下一次循环开头统一应用。
+/// 宿主 API 在 RPC 线程上被调用，而调度器归引擎线程独占 —— 直接借
+/// `&mut Scheduler` 要么拿不到，要么在引擎线程上自锁。所以这里只投递补丁，
+/// 由引擎线程在下一次循环开头统一应用。
 #[derive(Debug, Clone)]
 pub enum JobPatch {
     Paused {
@@ -297,16 +297,6 @@ pub struct ScheduledTask {
     /// `scripts/jitter_check.py` 的同种子可复现性断言会随机红，
     /// 因为三个实例里有一个被负载拖得落后了。
     pub realigned: bool,
-    /// 这条任务有一拍还在跑（async handler 已启动、Promise 还没结算）。
-    ///
-    /// 为什么要这一格：async 的收尾发生在**之后**的一轮循环里，而 `next_fire`
-    /// 只有收尾时才推进 —— 中间这段时间 `due()` 会认为它一直到期，于是一条
-    /// `@every 1s` 的 async 任务会在 1 秒里被触发几百次（实测撞上过：定时器
-    /// 直接顶到单插件 256 条上限）。
-    ///
-    /// 顺带把「同一条任务不会有两拍同时在跑」变成不变量 —— 和 Node 里
-    /// `setInterval` 不重入是同一个意思。
-    pub in_flight: bool,
     pub runs: u64,
     pub last_run: Option<String>,
     pub last_error: Option<String>,
@@ -601,7 +591,6 @@ impl Scheduler {
             jitter_ms,
             // 装进来那一次是"从 now 对齐"，同样不是按理论线走到的
             realigned: true,
-            in_flight: false,
             runs: 0,
             last_run: None,
             last_error: None,
@@ -883,20 +872,6 @@ impl Scheduler {
         Ok(())
     }
 
-    /// 标记「这一拍在跑」（async handler 已启动）。
-    pub fn mark_in_flight(&mut self, idx: usize) {
-        if let Some(t) = self.tasks.get_mut(idx) {
-            t.in_flight = true;
-        }
-    }
-
-    /// 标记「这一拍跑完了」—— 收尾（`advance` / `record_manual_run`）之前调用。
-    pub fn clear_in_flight(&mut self, idx: usize) {
-        if let Some(t) = self.tasks.get_mut(idx) {
-            t.in_flight = false;
-        }
-    }
-
     /// 记录一次**手动触发**的结果：只更新 `runs / last_run / last_error`。
     ///
     /// 故意不动 `next_fire`（手动执行不该打乱调度节奏），也故意不碰熔断状态：
@@ -934,8 +909,7 @@ impl Scheduler {
     /// 距离最近一个到期任务还有多久 —— 直接当作 `recv_timeout` 的时长。
     pub fn sleep_hint(&self, now: DateTime<Local>) -> Duration {
         let mut best: Option<i64> = None;
-        // `!in_flight`：在途的那一拍还没推进 next_fire，算进来会让 sleep 恒为 0（忙转）。
-        for t in self.tasks.iter().filter(|t| t.is_runnable() && !t.in_flight) {
+        for t in self.tasks.iter().filter(|t| t.is_runnable()) {
             let ms = (t.next_fire - now).num_milliseconds();
             best = Some(match best {
                 Some(b) => b.min(ms),
@@ -960,7 +934,7 @@ impl Scheduler {
         self.tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.is_runnable() && !t.in_flight && t.next_fire <= now)
+            .filter(|(_, t)| t.is_runnable() && t.next_fire <= now)
             .map(|(i, _)| i)
             .collect()
     }
@@ -1131,38 +1105,6 @@ mod tests {
             .unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s.sleep_hint(now), Duration::from_millis(500));
-    }
-
-    #[test]
-    fn in_flight_task_is_not_due_and_does_not_pin_the_sleep() {
-        // async handler 的收尾在之后的一轮循环里。这期间 next_fire 还停在过去：
-        // 不把「在途」当回事的话，due() 会把它当成一直到期 —— 实测把一条 @every 1s
-        // 的任务在 1 秒里触发了 200+ 次，定时器直接顶到单插件上限。
-        let mut s = Scheduler::new(TripConfig::default());
-        let now = at(0);
-        s.add("p", "slow", "@every 1s", every_1s(), now, None, None)
-            .unwrap();
-        let idx = s.find("p", "slow").unwrap();
-
-        // 到点：正常应当被 due() 选中
-        let later = at(2);
-        assert_eq!(s.due(later), vec![idx]);
-
-        // 标记在途之后：不该再被选中，也不该把 sleep 钉成 0（否则循环空转）
-        s.mark_in_flight(idx);
-        assert!(s.due(later).is_empty(), "在途的一拍不能再被触发");
-        // 只剩在途任务 ⇒ 没有"到点"要等，给 IDLE_SLEEP（唤醒改由定时器 /
-        // 在途 invocation 的墙钟兜底 / 命令通道负责）。**关键是别是 0**：
-        // 0 会让循环空转。
-        assert!(
-            s.sleep_hint(later) >= Duration::from_secs(1),
-            "在途任务不该把 sleep 钉成 0，实际 {:?}",
-            s.sleep_hint(later)
-        );
-
-        // 收尾之后恢复正常
-        s.clear_in_flight(idx);
-        assert_eq!(s.due(later), vec![idx]);
     }
 
     #[test]

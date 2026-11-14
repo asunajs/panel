@@ -1,5 +1,26 @@
 # 更新记录
 
+## 0.3.3 — 2026-11-08
+
+> 主题：**把 MD5 / AES-128-CBC / RSA 公钥加密搬进 Rust，并与 Node 逐字节对齐。**
+
+- **`node:crypto` 新增三条能力**（此前一律"不支持"，插件只能自带纯 JS 实现）：
+  - `createHash('md5')` / `createHmac('md5', …)` —— 老网关的签名还在用 MD5；
+  - `createCipheriv` / `createDecipheriv`，**只做 `aes-128-cbc`**（PKCS#7 自动填充）；
+  - `publicEncrypt`，**只做 `RSA_PKCS1_PADDING`**；顺带导出 `constants.RSA_PKCS1_PADDING`。
+- **为什么在宿主侧而不是 JS 侧**（本机实测，Node/V8 下已是这个差距，QuickJS 是解释器、只会更大）：
+  AES-128-CBC 1 KB **0.983 ms → 0.109 ms（9.0×）**、MD5 1 KB **0.144 → 0.040 ms（3.6×）**、
+  RSA-1024 加密 **0.370 → 0.050 ms（8.2×）**。而一次签到链要打十几到几十个请求、
+  每个都带 MD5 + AES。预算（默认 600 秒）不是瓶颈，瓶颈是 QuickJS 上纯 JS 的 AES
+  比原生慢一个量级，而面板的卖点是每插件 ~0.6 MB、空闲不烧 CPU。
+- **与 Node 对齐是测出来的，不是看出来的**：`aes128_cbc_matches_node` 用真 Node 算出的密文
+  逐字节比对；`rsa_pkcs1_v15_roundtrip_with_generated_key` 现生成一对 1024 位密钥，
+  把面板产出的密文用标准 `rsa` crate 解开（仓库里不留任何密钥材料）。
+- 新增依赖 `aes` / `cbc` / `md-5` / `rsa`，**全部在离线缓存里**，且刻意选 digest 0.10 这一族
+  （与已有的 `sha2 0.10` 一致），不引入第二份 digest。二进制约 +0.2 MiB。
+- 已知差异（写进 `docs/node-compat.md` §6.1）：`Cipher.update()` 返回**空 Buffer**、
+  密文在 `final()` 一次给出（宿主原语是"一次算完"）；`setAutoPadding(false)` 明确报错。
+- 明确**不做**：AES-GCM/CTR/192/256、私钥运算、签名、KDF —— 报错而不是"猜一个最接近的"。
 ## 0.3.2 — 2026-11-08
 
 > 主题：**该原生的地方原生，不该做的活儿一次都别做。**
@@ -130,7 +151,7 @@
 - **明确不做（都写进文档，不假装是完整 Node）**：`process`、`structuredClone`、
   流式响应（`response.body` 不存在，1 MiB 封顶、宿主一次读完）、二进制请求体、
   `redirect: 'manual'/'error'`、非 utf-8 的 `TextDecoder`、IDNA / punycode、RSA/ECDSA。
-  逐条差异见 [docs/plugin-api.md §4.10](docs/plugin-api.md#410-nodeweb-兼容层全局与内置模块)。
+  逐条差异见 [docs/plugin-api.md §4.10](docs/plugin-api.md#410-nodeweb-全局与内置模块)。
 - **期望值来自真的 Node，不是手抄。** `scripts/gen-vectors-{text,url,crypto,buffer}.mjs` 生成
   `src/jscompat/vectors/*.json`（`"note"` 里记着生成时的 Node 版本），Rust 测试在
   QuickJS 里跑同一批输入逐字段对拍。手写期望值等于把「我以为 Node 会这样」固化进测试。

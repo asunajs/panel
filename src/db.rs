@@ -323,7 +323,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
     ensure_column(&conn, "runs", "output", "TEXT")?;
     // 「这次是被**停下**的，不是失败」。
     //
-    // 手动「停止」（或超出执行预算）时，QuickJS 抛的是 `InternalError: interrupted`，
+    // 用户按「停止」后，外部进程会一直跑到预算到点才被杀，返回的错误
     // 和真正的报错走同一条路 —— 于是它会被记成失败、计入熔断、发失败推送、
     // 把任务状态标成「执行出错」。用户看到的是一条红色堆栈，而事实是他自己按了停止。
     //
@@ -339,7 +339,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Db> {
         "keep_warm",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
-    // 第六十轮：外部 JS 运行时覆盖。`engine` 为空 = 用 PANEL_JS_ENGINE/QuickJS。
+    // 第六十轮：外部 JS 运行时覆盖。`engine` 为空 = 用运行时的默认引擎。
     ensure_column(&conn, "plugin_state", "engine", "TEXT")?;
     ensure_column(&conn, "plugin_state", "command", "TEXT")?;
     // 第六十轮：任务目录脚本。`kind` 区分插件任务与脚本任务；`script` 是

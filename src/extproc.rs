@@ -1,63 +1,124 @@
 //! 外部 JS 插件运行时（Node / Bun）。
 //!
-//! ## 为什么是子进程 + 五条通道
+//! ## 为什么是子进程 + 命令/事件通道
 //!
 //! 插件要拿到面板的能力（SQLite、HTTP、WS、SMTP、日志、任务表、路由），但外部解释器
-//! 不能像 QuickJS 那样直接调 Rust 函数。所以：
+//! 不能直接调 Rust 函数。所以：
 //!
 //! ```text
 //! fd0  面板 → 子进程   load/invoke/tick/shutdown（JSON Lines）
 //! fd1  子进程 → 面板   ready/log/result/tick_done/done
 //! fd2  子进程 → 面板   stderr（逐行当 error 日志）
-//! fd3  子进程 → 面板   host-api RPC 请求
-//! fd4  面板 → 子进程   host-api RPC 响应
+//! TCP  子进程 ↔ 面板   host-api RPC（127.0.0.1 临时端口 + 一次性令牌）
 //! ```
 //!
-//! 为什么把 RPC 单独放在 fd3/fd4：插件里的 `sqlite_query` / `http_fetch` 是**同步**的，
-//! 子进程必须在同一个系统调用里写完请求、读到响应；如果和命令通道混在 stdin/stdout，
-//! 就会和「面板正在等 result」互相阻塞。fd3/fd4 是两条单向管道，天然没有这个问题。
+//! 为什么 RPC 不混在 stdin/stdout：插件里的 `sqlite_query` / `http_fetch` 是**同步**的，
+//! 子进程必须在同一个系统调用里写完请求、读到响应；如果和命令通道混在一起，
+//! 就会和「面板正在等 result」互相阻塞。单独的 RPC 通道没有这个问题。
+//!
+//! ## 跨平台传输
+//!
+//! fd3/fd4 的 `dup2` 与进程组 kill 是 Unix 语义。为了 Windows 也能用 Node/Bun，
+//! RPC 改走 **127.0.0.1 的临时 TCP 端口**：面板先监听、把端口和一次性令牌放进
+//! 子进程环境变量，子进程连上来先报令牌，再开始一问一答的 JSON Lines。
+//! 命令/事件仍走 stdin/stdout，stderr 仍是日志。TCP 只绑回环，令牌由系统随机源生成，
+//! 防止同机其他进程误连；子进程侧的同步等待见 `runtime/js/rpc-tcp.mjs`。
 //!
 //! ## 预算 = 杀进程
 //!
-//! QuickJS 可以用 interrupt handler 打断死循环；外部进程没有安全的"暂停"手段。
-//! 超预算/关闭/卸载一律 `SIGKILL` 整个进程组（`process_group(0)` + `kill(-pid)`），
-//! 插件状态随之丢失 —— 这是外部运行时的明确代价，文档里写清楚。
-//!
-//! ## 只支持 Unix
-//!
-//! fd3/fd4 的 `dup2` 与进程组 kill 都是 Unix 语义。首版只支持 Linux/macOS/Android；
-//! Windows 上外部运行时不可用，QuickJS 照常。非 Unix 平台由
-//! `extproc_stub.rs` 提供同形状的占位实现（见 `main.rs` 的 cfg）。
-
-#![cfg(unix)]
+//! 外部进程没有安全的"暂停"手段。超预算/关闭/卸载一律杀**整个进程树**：Unix 用 `process_group(0)` + `kill(-pid)`，
+//! Windows 用 `taskkill /T /F`。插件状态随之丢失 —— 这是外部运行时的明确代价，
+//! 文档里写清楚。
 
 use crate::hostapi::{self, HostState, NavDef, RawTaskDef, RouteDef, SharedLogs};
 use crate::runtimes::EngineKind;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
 /// 事件队列上限（安全审计 M4）。
 ///
 /// 队列满时**丢事件**而不是阻塞读线程：读线程一阻塞，子进程的管道写满，
 /// 脚本就会被自己的 print 卡死 —— 那比丢几条日志糟得多。
 const EVENT_QUEUE_MAX: usize = 1024;
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 /// 事件/结果里最长的单行；防止子进程一个坏 write 把面板内存吃光。
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// 单个插件同时允许的 RPC 连接数上限。子进程正常只用一条持久连接
+/// （rpc-tcp.mjs 的单 worker）；给一点余量，但失控循环开任意多条连接时
+/// 不再无上限起线程。超出的连接直接关掉。
+const MAX_RPC_CONNS: usize = 8;
 
 /// 调用超时时额外给 IPC 的宽限（预算 2s 的插件不该因为 3ms 的调度抖动被杀）。
 const GRACE: Duration = Duration::from_millis(250);
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 在途子进程注册表：run_id → pid。
+///
+/// `/stop` 与面板退出路径靠它找到要杀的进程组。只在一次执行期间登记
+/// （`invoke_task` / `run_js_file`），收尾即注销 —— 所以按它杀不会误伤同插件的
+/// 下一次执行（那时 run_id 已经换了，旧 id 查不到）。
+static LIVE_CHILDREN: Mutex<Option<std::collections::HashMap<String, u32>>> = Mutex::new(None);
+
+/// 面板正在关闭：置位后不再启动新的子进程（关机路径先杀在册的，再 join worker）。
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+fn register_child(run_id: &str, pid: u32) {
+    if let Ok(mut g) = LIVE_CHILDREN.lock() {
+        g.get_or_insert_with(std::collections::HashMap::new)
+            .insert(run_id.to_string(), pid);
+    }
+}
+
+fn unregister_child(run_id: &str) {
+    if let Ok(mut g) = LIVE_CHILDREN.lock() {
+        if let Some(m) = g.as_mut() {
+            m.remove(run_id);
+        }
+    }
+}
+
+/// 杀掉这次执行对应的进程组。`true` = 找到在途子进程并发出了 kill；
+/// `false` = 已经收尾（查不到）。web 层据此区分「真停了」和「来晚了」。
+pub fn kill_run(run_id: &str) -> bool {
+    let pid = LIVE_CHILDREN
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(run_id).copied()));
+    match pid {
+        Some(pid) => {
+            kill_child_tree(pid);
+            true
+        }
+        None => false,
+    }
+}
+
+/// 面板退出：杀掉所有在册子进程，并挡住后续 spawn。
+///
+/// worker 可能正卡在 `wait_result`，不先杀的话 `join` 要等到任务预算（最长 600s）；
+/// 进程被 systemd 的 `TimeoutStopSec` 杀掉后，独立进程组的子进程会成为孤儿。
+pub fn kill_all_children() {
+    SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    let pids: Vec<u32> = LIVE_CHILDREN
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .map(|m| m.into_values().collect())
+        .unwrap_or_default();
+    for pid in pids {
+        kill_child_tree(pid);
+    }
+}
 
 /// 一次外部插件实例的规格（重启用）。
 #[derive(Debug, Clone)]
@@ -109,6 +170,10 @@ enum ChildEvent {
         ok: bool,
         error: Option<String>,
     },
+    /// 子进程上报的活跃定时器数（读线程直接写进 ExtShared，不进事件队列）。
+    Timers {
+        count: u64,
+    },
     Eof,
 }
 
@@ -121,18 +186,35 @@ struct PendingReg {
     nav: Option<NavDef>,
 }
 
+/// 脚本模式收上来的两路输出。分开存，合并时永远 stdout 在前、stderr 在后，
+/// 用 `--- stderr ---` 一行分隔 —— 这样「warn 之后又 info」不会被误算进 stderr。
+#[derive(Default)]
+struct Captured {
+    stdout: String,
+    stderr: String,
+}
+
 struct ExtShared {
     host: Arc<HostState>,
     logs: SharedLogs,
     name: String,
     pending: Mutex<PendingReg>,
     active_run_id: Mutex<Option<String>>,
-    /// 脚本模式的组合输出（stdout+stderr）；插件模式为 None。
-    capture: Option<Mutex<String>>,
+    /// 子进程上报的活跃定时器数（setTimeout/setInterval）。读线程更新，
+    /// 惰性回收据此判断「这个插件还靠定时器活着」，不能卸。
+    timers: AtomicU64,
+    /// 脚本模式的组合输出；插件模式为 None。
+    capture: Option<Mutex<Captured>>,
+    /// 只收进 `capture`，不写面板日志。试跑用：它的输出属于一次临时运行，
+    /// 不该混进实时日志。
+    quiet: bool,
 }
 
 impl ExtShared {
     fn log(&self, level: &str, msg: &str) {
+        if self.quiet {
+            return;
+        }
         let run = self.active_run_id.lock().ok().and_then(|g| g.clone());
         match run {
             Some(id) => crate::log::with_run_id(&id, || {
@@ -149,25 +231,30 @@ impl ExtShared {
     fn record_output(&self, line: &str, stderr: bool) {
         let Some(cap) = &self.capture else { return };
         let mut g = cap.lock().unwrap();
+        let dst = if stderr { &mut g.stderr } else { &mut g.stdout };
         // 1MB 的硬上限只防意外；真正的 SCRIPT_MAX_OUTPUT_KB 截断在 scriptjob 里做。
-        if g.len() >= MAX_LINE_BYTES {
+        if dst.len() >= MAX_LINE_BYTES {
             return;
         }
-        if stderr && !g.contains("--- stderr ---") {
-            if !g.is_empty() && !g.ends_with('\n') {
-                g.push('\n');
-            }
-            g.push_str("--- stderr ---\n");
-        }
-        g.push_str(line);
-        g.push('\n');
+        dst.push_str(line);
+        dst.push('\n');
     }
 
     fn captured(&self) -> String {
-        self.capture
-            .as_ref()
-            .map(|c| c.lock().unwrap().clone())
-            .unwrap_or_default()
+        let Some(cap) = &self.capture else {
+            return String::new();
+        };
+        let g = cap.lock().unwrap();
+        if g.stderr.is_empty() {
+            return g.stdout.clone();
+        }
+        let mut out = g.stdout.clone();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("--- stderr ---\n");
+        out.push_str(&g.stderr);
+        out
     }
 }
 
@@ -204,16 +291,7 @@ impl ExtPlugin {
         }
         // 每次重新加载前清掉上一轮的声明，避免把失败加载的半套东西带进来
         let _ = self.shared.take_pending();
-        let mut child = spawn_child(&self.spec, &self.shared)?;
-        let (ok, error, on_tick) = match child.wait_ready(load_budget()) {
-            Ok(v) => v,
-            Err(e) => {
-                // 启动成功但没 ready（卡住 / 协议坏 / 子进程提前退出）：必须收尸，
-                // 否则 `?` 直接返回会把整个子进程和读线程留成孤儿。
-                child.kill();
-                return Err(e);
-            }
-        };
+        let (mut child, ok, error, on_tick) = spawn_ready(&self.spec, &self.shared, load_budget())?;
         if !ok {
             child.kill();
             let _ = self.shared.take_pending();
@@ -277,7 +355,18 @@ impl ExtPlugin {
             "payload": payload,
             "run_id": run_id,
         });
+        // 登记在途子进程：/stop 与关机路径按 run_id 找到 pid 杀进程组。
+        // 先确保子进程在，才能拿到 pid；收尾（无论成败）都注销。
+        self.ensure_child()?;
+        if let Some(run) = run_id {
+            if let Some(pid) = self.child_pid() {
+                register_child(run, pid);
+            }
+        }
         let res = self.invoke_cmd(cmd, id, budget);
+        if let Some(run) = run_id {
+            unregister_child(run);
+        }
         if let Ok(mut g) = self.shared.active_run_id.lock() {
             *g = None;
         }
@@ -334,6 +423,19 @@ impl ExtPlugin {
         }
     }
 
+    /// 当前子进程的 pid（没有在跑的子进程时返回 None）。
+    fn child_pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.pid))
+    }
+
+    /// 子进程上报的活跃定时器数。惰性回收用它判断「插件还靠定时器活着」。
+    pub fn active_timers(&self) -> u64 {
+        self.shared.timers.load(Ordering::Relaxed)
+    }
+
     pub fn spec(&self) -> &ExtSpec {
         &self.spec
     }
@@ -345,18 +447,73 @@ impl Drop for ExtPlugin {
     }
 }
 
+/// 杀整个进程树。子进程可能自己起 Node/Bun 子进程，只杀根会留下孤儿。
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn kill_child_tree(pid: u32) {
+    // SAFETY: 只给已知进程组发信号；负 pid 表示进程组，没有内存前置条件。
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_child_tree(pid: u32) {
+    // `taskkill /T` 是 Windows 上等价于 `kill(-pid)` 的做法；没有它，
+    // 插件自己起的子进程会在 stop/unload 后继续跑。
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_child_tree(_pid: u32) {}
+
+/// RPC 的一次性令牌：只绑回环还不够，同机别的进程也可能连上来。
+fn rpc_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("生成 RPC 令牌失败: {e}"))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    Ok(out)
+}
+
 /// 子进程句柄：命令 stdin、事件接收端、读线程。
 struct ChildHandle {
     child: Child,
     pid: u32,
     stdin: ChildStdin,
     events: Receiver<ChildEvent>,
+    /// 让 RPC 监听线程退出（非阻塞 accept 循环每 20ms 看一次）。
+    rpc_stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
 
 impl ChildHandle {
     fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// 子进程死亡时的信号（Unix）。还活着或正常退出时返回 `None`。
+    #[cfg(unix)]
+    fn exit_signal(&mut self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        match self.child.try_wait() {
+            Ok(Some(st)) => st.signal(),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn exit_signal(&mut self) -> Option<i32> {
+        let _ = self.child.try_wait();
+        None
     }
 
     fn send(&mut self, value: &Value) -> std::io::Result<()> {
@@ -381,7 +538,6 @@ impl ChildHandle {
                 (deadline - now).as_millis()
             )),
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = self.child.try_wait();
                 Err("外部插件进程已退出（没有收到事件）".to_string())
             }
         }
@@ -422,7 +578,10 @@ impl ChildHandle {
                     return Err(error.unwrap_or_else(|| "任务执行失败（插件没有给出原因）".into()));
                 }
                 ChildEvent::Eof => return Err("外部插件进程已退出".into()),
-                ChildEvent::Log { .. } | ChildEvent::Ready { .. } | ChildEvent::Tick { .. } => {}
+                ChildEvent::Log { .. }
+                | ChildEvent::Ready { .. }
+                | ChildEvent::Tick { .. }
+                | ChildEvent::Timers { .. } => {}
                 ChildEvent::Done { ok, error } => {
                     if ok {
                         return Ok(None);
@@ -443,16 +602,18 @@ impl ChildHandle {
                     return Err(error.unwrap_or_else(|| "on_tick 失败".into()));
                 }
                 ChildEvent::Eof => return Err("外部插件进程已退出".into()),
-                ChildEvent::Log { .. } | ChildEvent::Ready { .. } | ChildEvent::Result { .. } => {}
+                ChildEvent::Log { .. }
+                | ChildEvent::Ready { .. }
+                | ChildEvent::Result { .. }
+                | ChildEvent::Timers { .. } => {}
                 ChildEvent::Done { .. } => return Err("外部插件提前结束".into()),
             }
         }
     }
 
-    // SAFETY: 只是给子进程发信号，参数是它自己的 pid，没有内存前置条件。
-    #[allow(unsafe_code)]
     fn kill(&mut self) {
-        // 只在还活着时杀进程组：已经退出的 pid 可能被系统复用，对着旧 pid 发
+        self.rpc_stop.store(true, Ordering::Relaxed);
+        // 只在还活着时杀进程树：已经退出的 pid 可能被系统复用，对着旧 pid 发
         // SIGKILL 会误杀无关进程组。`try_wait` 会把已退出的收尸。
         let alive = matches!(self.child.try_wait(), Ok(None));
         // ⚠ 即使**组长已经退出**，也要对着进程组发一次（安全审计 M5）。
@@ -461,9 +622,7 @@ impl ChildHandle {
         // 的、可能还在跑的东西）就一个都杀不掉 —— 而它们正是最需要清掉的那批。
         // pid 复用在这里不是问题：只要组里还有成员，这个 pgid 就不会被分配给
         // 别的进程组；组空了才可能复用，那时发过去也只是 ESRCH。
-        unsafe {
-            libc::kill(-(self.pid as i32), libc::SIGKILL);
-        }
+        kill_child_tree(self.pid);
         if alive {
             let _ = self.child.kill();
         }
@@ -533,7 +692,9 @@ pub fn load(
         name: name.to_string(),
         pending: Mutex::new(PendingReg::default()),
         active_run_id: Mutex::new(None),
+        timers: AtomicU64::new(0),
         capture: None,
+        quiet: false,
     });
     let plugin = ExtPlugin {
         spec,
@@ -541,14 +702,7 @@ pub fn load(
         child: Mutex::new(None),
     };
 
-    let mut child = spawn_child(plugin.spec(), &shared)?;
-    let (ok, error, on_tick) = match child.wait_ready(load_budget) {
-        Ok(v) => v,
-        Err(e) => {
-            child.kill();
-            return Err(e);
-        }
-    };
+    let (mut child, ok, error, on_tick) = spawn_ready(plugin.spec(), &shared, load_budget)?;
     if !ok {
         child.kill();
         return Err(error.unwrap_or_else(|| "外部插件加载失败".to_string()));
@@ -577,13 +731,21 @@ fn load_budget() -> Duration {
     )
 }
 
+/// 试跑 / 脚本一次执行的最坏墙钟：加载预算（`spawn_ready`）+ 执行预算 + GRACE + 收尸 2s。
+/// 这几段是**串行**的，HTTP 层等结果要按它们的和算 —— 只给「执行预算 + 几秒」的话，
+/// 冷启动慢时 HTTP 先回 504，试跑却还在后台跑。不含 macOS exec 前 SIGKILL 的重试
+///（那是罕见病理路径，真撞上时加载本身就会报错，不会静默拖到 4 倍）。
+pub fn script_run_wall_budget(exec: Duration) -> Duration {
+    load_budget() + exec + GRACE + Duration::from_secs(2)
+}
+
 /* ============================== spawn ============================== */
 
-/// 启动子进程。fd3/fd4 在 `pre_exec` 里 dup2 到固定号。
-// SAFETY: pre_exec 里只做 dup2/close 这类 async-signal-safe 的系统调用，
-// 不分配、不打印、不碰任何可能加锁的状态。
-#[allow(unsafe_code)]
+/// 启动子进程。fd0/1/2 是命令/事件/stderr 通道；host-api RPC 走回环 TCP（见下）。
 fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, String> {
+    if SHUTTING_DOWN.load(Ordering::Relaxed) {
+        return Err("面板正在关闭，不再启动新的子进程".to_string());
+    }
     let host = &shared.host;
     let runtime = &host.runtime_paths;
     let (mut cmd, script_arg) = match spec.engine {
@@ -605,7 +767,6 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
             c.arg(&runtime.runner);
             (c, false)
         }
-        EngineKind::QuickJs => return Err("QuickJS 不是外部运行时".to_string()),
     };
     cmd.arg(if spec.script { "--script" } else { "--plugin" })
         .arg(&spec.file);
@@ -674,40 +835,28 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 独立进程组：kill(-pid) 能杀掉插件自己起的子进程
-    cmd.process_group(0);
 
-    let (child_req, parent_req) =
-        UnixStream::pair().map_err(|e| format!("建 RPC 请求管道失败: {e}"))?;
-    let (parent_resp, child_resp) =
-        UnixStream::pair().map_err(|e| format!("建 RPC 响应管道失败: {e}"))?;
-    let c_req = child_req.as_raw_fd();
-    let c_resp = child_resp.as_raw_fd();
-    let p_req = parent_req.as_raw_fd();
-    let p_resp = parent_resp.as_raw_fd();
-
-    unsafe {
-        cmd.pre_exec(move || {
-            // dup2 到固定 3/4；注意 dup2(3,3) 是 no-op，不会清 CLOEXEC，
-            // 所以必须显式 fcntl(F_SETFD, 0)，否则 exec 后 fd 被关掉（实测 ENXIO）。
-            if libc::dup2(c_req, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::dup2(c_resp, 4) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            libc::fcntl(3, libc::F_SETFD, 0);
-            libc::fcntl(4, libc::F_SETFD, 0);
-            for fd in [c_req, c_resp] {
-                if fd > 4 {
-                    libc::close(fd);
-                }
-            }
-            // 父端是 CLOEXEC（Rust 默认），exec 时自动关闭；这里不手动 close 3/4。
-            let _ = (p_req, p_resp);
-            Ok(())
-        });
+    // 独立进程组：kill(-pid) 能杀掉插件自己起的子进程（Windows 用 taskkill /T）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
+
+    // RPC 走回环 TCP：Windows 没有 dup2/继承额外 fd 的可移植写法，
+    // 而 TCP 在三个平台语义一致。先 bind 再 spawn，端口不会被子进程抢先。
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("建 RPC 监听失败: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("设置 RPC 监听非阻塞失败: {e}"))?;
+    let rpc_port = listener
+        .local_addr()
+        .map_err(|e| format!("读 RPC 端口失败: {e}"))?
+        .port();
+    let rpc_token = rpc_token()?;
+    cmd.env("PANEL_RPC_PORT", rpc_port.to_string())
+        .env("PANEL_RPC_TOKEN", &rpc_token);
 
     let mut child = cmd.spawn().map_err(|e| {
         format!(
@@ -716,22 +865,33 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
             spec.command.display()
         )
     })?;
-    // 父端保留；子端在父进程里必须关掉
-    drop(child_req);
-    drop(child_resp);
     let pid = child.id();
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "拿不到子进程 stdin".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "拿不到子进程 stdout".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "拿不到子进程 stderr".to_string())?;
+    // spawn 已成功：三个句柄必须都取到。任一失败时子进程已经起来，
+    // 直接 `?` 返回会把它丢在局部变量里（Drop 不 kill）⇒ 成孤儿，所以先杀。
+    let stdio = (|| {
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "拿不到子进程 stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "拿不到子进程 stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "拿不到子进程 stderr".to_string())?;
+        Ok::<_, String>((stdin, stdout, stderr))
+    })();
+    let (stdin, stdout, stderr) = match stdio {
+        Ok(t) => t,
+        Err(e) => {
+            kill_child_tree(pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
 
     // ⚠ 有界通道（安全审计 M4）。
     //
@@ -761,14 +921,16 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
                 .expect("启动 stderr 读线程失败"),
         );
     }
-    // fd3/fd4：host-api RPC
+    // RPC：回环 TCP 监听；每个连接握手一次令牌。
+    let rpc_stop = Arc::new(AtomicBool::new(false));
     {
         let shared = shared.clone();
+        let stop = rpc_stop.clone();
         threads.push(
             thread::Builder::new()
                 .name(format!("ext-rpc-{pid}"))
-                .spawn(move || rpc_loop(parent_req, parent_resp, shared))
-                .expect("启动 RPC 线程失败"),
+                .spawn(move || rpc_accept_loop(listener, rpc_token, shared, stop))
+                .expect("启动 RPC 监听线程失败"),
         );
     }
 
@@ -777,8 +939,50 @@ fn spawn_child(spec: &ExtSpec, shared: &Arc<ExtShared>) -> Result<ChildHandle, S
         pid,
         stdin,
         events: rx,
+        rpc_stop,
         threads,
     })
+}
+
+/// 一次启动最多尝试的次数。
+const SPAWN_ATTEMPTS: usize = 4;
+
+/// 启动子进程并等 `ready`。
+///
+/// macOS 上 `posix_spawn` 出来的子进程偶尔会在 **exec 之前**被内核 abort：
+/// crash report 里是 `os_once_t is corrupt` + `crashed on child side of fork pre-exec`，
+/// 内核按 `SIGKILL` 收尸。这时插件代码一行都没跑、也没有任何事件，重试是安全的。
+/// 只对「启动阶段就 SIGKILL」重试；超时或插件自己报的错都原样返回。
+fn spawn_ready(
+    spec: &ExtSpec,
+    shared: &Arc<ExtShared>,
+    budget: Duration,
+) -> Result<(ChildHandle, bool, Option<String>, bool), String> {
+    let mut attempt = 1;
+    loop {
+        let mut child = spawn_child(spec, shared)?;
+        match child.wait_ready(budget) {
+            Ok((ok, error, on_tick)) => return Ok((child, ok, error, on_tick)),
+            Err(e) => {
+                let killed = child.exit_signal() == Some(9);
+                child.kill();
+                if killed && attempt < SPAWN_ATTEMPTS {
+                    shared.log(
+                        "warn",
+                        &format!(
+                            "子进程在 exec 前被 SIGKILL（macOS fork 竞态），重试 {}/{}",
+                            attempt + 1,
+                            SPAWN_ATTEMPTS
+                        ),
+                    );
+                    let _ = shared.take_pending();
+                    attempt += 1;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 fn read_events(
@@ -810,7 +1014,17 @@ fn read_events(
                             match ev {
                                 ChildEvent::Log { level, msg } => {
                                     shared.log(&level, &msg);
-                                    shared.record_output(&msg, false);
+                                    // 试跑/脚本要像 Node 一样区分两路输出：warn 及以上进 stderr。
+                                    let to_stderr = matches!(
+                                        level.as_str(),
+                                        "warn" | "error" | "fail" | "fatal"
+                                    );
+                                    shared.record_output(&msg, to_stderr);
+                                }
+                                ChildEvent::Timers { count } => {
+                                    // 闲置插件没人排空事件队列，定时器计数必须在读线程
+                                    // 直接落地，否则惰性回收读到的是陈旧值。
+                                    shared.timers.store(count, Ordering::Relaxed);
                                 }
                                 other => {
                                     if tx.try_send(other).is_err() {
@@ -900,16 +1114,87 @@ fn event_from_json(v: &Value) -> Option<ChildEvent> {
             ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
             error: v.get("error").and_then(Value::as_str).map(str::to_string),
         }),
+        "timers" => Some(ChildEvent::Timers {
+            count: v.get("count").and_then(Value::as_u64).unwrap_or(0),
+        }),
         _ => None,
     }
 }
 
 /* ============================== RPC ============================== */
 
-fn rpc_loop(req: UnixStream, resp: UnixStream, shared: Arc<ExtShared>) {
-    let mut reader = BufReader::new(req);
-    let mut writer = resp;
+fn rpc_accept_loop(
+    listener: TcpListener,
+    token: String,
+    shared: Arc<ExtShared>,
+    stop: Arc<AtomicBool>,
+) {
+    let conns = Arc::new(AtomicUsize::new(0));
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // 连接数到顶：直接关掉，不再起线程（防失控循环抬高宿主线程数）。
+                if conns.fetch_add(1, Ordering::Relaxed) >= MAX_RPC_CONNS {
+                    conns.fetch_sub(1, Ordering::Relaxed);
+                    drop(stream);
+                    continue;
+                }
+                let token = token.clone();
+                let shared = shared.clone();
+                let conns_worker = conns.clone();
+                let spawned = thread::Builder::new()
+                    .name("ext-rpc-conn".to_string())
+                    .spawn(move || {
+                        if let Err(e) = rpc_conn(stream, &token, shared) {
+                            crate::log::plog!("ext", debug, "RPC 连接结束: {e}");
+                        }
+                        conns_worker.fetch_sub(1, Ordering::Relaxed);
+                    });
+                // 起线程失败时没人替我们减计数，否则名额会被永久占用。
+                if spawned.is_err() {
+                    conns.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// 一次 RPC 连接：先报令牌（5 秒内），面板回 `ok`，之后是一问一答。
+fn rpc_conn(mut stream: TcpStream, token: &str, shared: Arc<ExtShared>) -> Result<(), String> {
+    // 监听 socket 是 nonblocking；macOS 上 accepted fd 会继承这个标志，
+    // 不显式清掉的话第一次 read_line 直接 WouldBlock。
+    stream
+        .set_nonblocking(false)
+        .map_err(|e| format!("设置 RPC 阻塞模式失败: {e}"))?;
+    let _ = stream.set_nodelay(true);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("设置 RPC 超时失败: {e}"))?;
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| format!("复制 RPC 连接失败: {e}"))?,
+    );
     let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("读 RPC 令牌失败: {e}"))?;
+    if line.trim() != token {
+        return Err("RPC 令牌不匹配".to_string());
+    }
+    stream
+        .set_read_timeout(None)
+        .map_err(|e| format!("取消 RPC 超时失败: {e}"))?;
+    stream
+        .write_all(b"ok\n")
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("写 RPC 握手失败: {e}"))?;
+
+    let mut writer = stream;
     loop {
         line.clear();
         match reader
@@ -947,6 +1232,7 @@ fn rpc_loop(req: UnixStream, resp: UnixStream, shared: Arc<ExtShared>) {
             Err(_) => break,
         }
     }
+    Ok(())
 }
 
 fn arg_str(args: &[Value], i: usize) -> String {
@@ -1002,7 +1288,13 @@ fn handle_rpc(v: &Value, shared: &Arc<ExtShared>) -> Result<String, String> {
                     def.name
                 ));
             }
+            let name = def.name.clone();
             p.tasks.push(def);
+            // 任务名也是可派发的处理函数名（bus 的 `__has_task` 查的就是同一张表）。
+            // 少了这一条，面板改/删/恢复「插件代码声明的任务」会以「没有该处理函数」拒绝。
+            if !p.handlers.iter().any(|h| h == &name) {
+                p.handlers.push(name);
+            }
             Ok(String::new())
         }
         "set_job_paused" => host
@@ -1112,6 +1404,61 @@ pub fn run_js_script(
     run_id: Option<&str>,
     env: Vec<(String, String)>,
 ) -> Result<ScriptRunOut, String> {
+    run_js_file(
+        engine, command, file, name, host, logs, timeout, run_id, env, false,
+    )
+}
+
+/// 试跑一段代码：写进临时文件、用 Node 跑完、收集输出，然后删掉文件。
+///
+/// 与脚本任务共用同一条 extproc 通道；区别只有两点：输出不写面板日志（`quiet`），
+/// 输入通过 `PANEL_SCRIPT_INPUT` 提供给脚本的全局 `input`。
+pub fn run_js_snippet(
+    host: &Arc<HostState>,
+    logs: &SharedLogs,
+    command: PathBuf,
+    code: &str,
+    input: &str,
+    timeout: Duration,
+) -> Result<ScriptRunOut, String> {
+    let dir = host.plugin_data_dir.join("__test__");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("创建试跑目录 {} 失败: {e}", dir.display()))?;
+    let file = dir.join(format!(
+        "snippet-{}-{}.js",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&file, code).map_err(|e| format!("写试跑文件 {} 失败: {e}", file.display()))?;
+    let out = run_js_file(
+        EngineKind::Node,
+        command,
+        &file,
+        "__test__",
+        host,
+        logs,
+        timeout,
+        None,
+        vec![("PANEL_SCRIPT_INPUT".to_string(), input.to_string())],
+        true,
+    );
+    let _ = std::fs::remove_file(&file);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_js_file(
+    engine: EngineKind,
+    command: PathBuf,
+    file: &Path,
+    name: &str,
+    host: &Arc<HostState>,
+    logs: &SharedLogs,
+    timeout: Duration,
+    run_id: Option<&str>,
+    env: Vec<(String, String)>,
+    quiet: bool,
+) -> Result<ScriptRunOut, String> {
     let data_dir = host.plugin_data_dir.join("__script__").join(sanitize(name));
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("创建脚本数据目录 {} 失败: {e}", data_dir.display()))?;
@@ -1134,20 +1481,19 @@ pub fn run_js_script(
         name: crate::db::SCRIPT_PLUGIN.to_string(),
         pending: Mutex::new(PendingReg::default()),
         active_run_id: Mutex::new(run_id.map(str::to_string)),
-        capture: Some(Mutex::new(String::new())),
+        timers: AtomicU64::new(0),
+        capture: Some(Mutex::new(Captured::default())),
+        quiet,
     });
-    let mut child = spawn_child(&spec, &shared)?;
     // 脚本模式也先等 ready：加载期语法错/import 失败要能明确报出来。
-    let (ok, error, _) = match child.wait_ready(load_budget()) {
-        Ok(v) => v,
-        Err(e) => {
-            child.kill();
-            return Err(e);
-        }
-    };
+    let (mut child, ok, error, _) = spawn_ready(&spec, &shared, load_budget())?;
     if !ok {
         child.kill();
         return Err(error.unwrap_or_else(|| "脚本加载失败".to_string()));
+    }
+    // 登记在途子进程：脚本任务也能被 /stop 杀进程组（试跑 run_id=None 不登记）。
+    if let Some(run) = run_id {
+        register_child(run, child.pid);
     }
 
     // 收集输出：reader 线程只在 stdout 裸行上写日志；runner 的 log 事件走 stdout 事件，
@@ -1162,6 +1508,9 @@ pub fn run_js_script(
     // 对着旧 pid 发 SIGKILL 是真实事故（会误杀无关进程组）。
     if code.is_none() {
         child.kill();
+    }
+    if let Some(run) = run_id {
+        unregister_child(run);
     }
     match res {
         Ok(_) => Ok(ScriptRunOut {

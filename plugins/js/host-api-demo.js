@@ -1,8 +1,8 @@
 // plugins/js/host-api-demo.js —— 跨运行时写法的 JS 插件。
 //
-// 这个文件**不是**在 QuickJS 里"就地"写出来的，它用的是抽象宿主 API：
-//   - 在 QuickJS 宿主里：`host-api` 由 engine.rs 的自定义 Resolver/Loader 提供（内置模块）
-//   - 在 Node.js 里：`host-api` 由 adapters/node 提供同名 npm 包
+// 这个文件用的是抽象宿主 API：
+//   - 面板内：`host-api` 由 runtime/js 的 loader hook / NODE_PATH 提供
+//   - 面板外：`host-api` 由 adapters/node 提供同名 npm 包
 // 两边导出同一套函数、同一套语义，脚本一字不改。
 //
 // 老的 `host.log` / `host.cron` 写法继续可用（见 hello.js），
@@ -19,11 +19,10 @@ import {
 
 const PLUGIN = 'host-api-demo';
 
-// 打**真实宿主**而不是写死名字：Node 有 process，嵌入式 QuickJS 没有。
-// 同一个文件在两处跑，日志会分别显示 "Node v22.x" 和 "QuickJS（嵌入式宿主）"。
-const HOST = typeof process !== 'undefined'
-    ? `Node ${process.version}`
-    : 'QuickJS（嵌入式宿主）';
+// 打**真实宿主**而不是写死名字：同一个文件在 Node 与 Bun 下跑都能说清自己是谁。
+const HOST = typeof Bun !== 'undefined'
+    ? `Bun ${Bun.version}`
+    : `Node ${process.version}`;
 log(`${PLUGIN}: 已加载（ES 模块写法，import 'host-api'，宿主 ${HOST}）`);
 
 // ---- 建一张自己的表，验证 sqlite_exec / sqlite_query 往返 ----

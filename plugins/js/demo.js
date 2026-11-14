@@ -110,9 +110,9 @@ function fetchSamples(target, threshold) {
 /**
  * 本地时间戳。
  *
- * 不用 `toISOString()`：它给的是 UTC，面板上显示出来会差 8 小时，而
- * 嵌入式 QuickJS 没有 ICU，`toLocaleString` 也拿不到时区 —— 只能自己拼。
- * 这类「本地运行时的缺口」是写插件时最容易踩的坑之一。
+ * 不用 `toISOString()`：它给的是 UTC，面板上显示出来会差 8 小时。
+ * 也不用 `toLocaleString()`：输出依赖宿主的 locale / ICU 数据，跨 Node/Bun
+ * 不稳定 —— 自己拼最省事。
  */
 function localStamp() {
     const d = new Date();

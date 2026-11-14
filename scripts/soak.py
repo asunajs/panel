@@ -178,7 +178,7 @@ def main() -> int:
     seconds = float(opts.get("seconds", 90))
     # reload-every 0 = 关掉热更新（对照实验用：区分「稳态分配」和「每次热更新的增量」）
     reload_every = float(opts.get("reload-every", 5))
-    # Python 插件已移除：soak 只压 JS（QuickJS / Node / Bun）。
+    # Python 插件已移除：soak 只压 JS（Node / Bun）。
     only = opts.get("only", "js")
     if only not in ("js", "both"):
         print("❌ Python 插件已移除，--only 只支持 js（both 也只会跑 JS）", file=sys.stderr)
@@ -333,14 +333,7 @@ def report(pts, js, reloads: int, max_mb_per_day: float, source=None) -> int:
     print(f"  外推          {mb_per_day:+.1f} MB/天（仅当判定为漂移时才有意义）")
     print(f"  本窗口分辨率  ±{resolvable:.1f} MB/天（低于这个量的漂移看不出来）")
     print(f"  热更新        {reloads} 次")
-    if len(js) >= 4:
-        # 注意：js 的值单位是**字节**（/api/state 的 engine.js_memory_bytes），
-        # 所以斜率已经是 B/s，不能再乘 1024（第一版就错了，把 87 KB/s 报成了 87 MB/s）
-        jslope, jsigma = slope_kb_per_s([t for t, _ in js], [h for _, h in js])
-        print(
-            f"  QuickJS 堆    起 {js[0][1] / 1024:.0f}KB → 终 {js[-1][1] / 1024:.0f}KB，"
-            f"斜率 {jslope:+.0f} B/s（σ={jsigma:.0f}B）"
-        )
+    # js_memory_bytes 在 Node-only 之后恒为 0（堆在子进程里），不再打印。
     print("─" * 72)
 
     growth2 = slope2 * (ts[-1] - ts[mid]) if len(ts) > mid else 0.0

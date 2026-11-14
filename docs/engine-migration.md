@@ -1,5 +1,9 @@
 # 引擎迁移路线：async/await 与「向 Node 看齐」
 
+> **已被取代（2026-11-10）**：方向改为 Node-only，内嵌 QuickJS 已删除。
+> 本文保留为当时的设计与实测记录，不再作为实施依据；现状见
+> [node-only-migration.md](node-only-migration.md) 与 [runtimes.md §10.10](runtimes.md#1010-只保留-node已定2026-11-10p0p2-已落地)。
+
 > 这份文档只回答两个问题：**目标形态是什么**、**从现在的引擎怎么走过去**。
 > 论证尽量指回原文出处，不在这里重复；**没定的集中在 §11 标成 ❓，不假装定了**。
 >
@@ -94,9 +98,10 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 
 建议的具体形状：
 
-- QuickJS 也走 [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--五条通道) 那套五条通道，
-  **只把 fd3/fd4 的 host RPC 从同步改成异步多路复用**（允许一个 worker 同时挂多个在途 op）。
-  现有的 [§6](ext-runtime-protocol.md#6-fd3--fd4host-api-rpc) 是「一问一答」，`bus.mjs` 那边靠 `fs.readSync` + `Atomics.wait` 阻塞等回话。
+- QuickJS 也走 [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--独立-rpc-通道) 那套命令/事件通道，
+  **只把 host RPC 从同步改成异步多路复用**（允许一个 worker 同时挂多个在途 op）。
+  现有的 [§6](ext-runtime-protocol.md#6-host-api-rpc回环-tcp) 是「一问一答」，子进程主线程靠
+  `Atomics.wait` 阻塞等回话。
 - **形态 A**：一 worker = 一 Runtime + N 个插件 Context + 一个事件循环（就是现在的进程内结构搬进子进程）。
 - **形态 B**：一插件 = 一 worker。隔离彻底但内存贵，低配机上插件一多就顶不住。
 - 建议 **A 为默认，声明 `exclusive` 的插件升级为 B**（`worker_hint('exclusive')` 现在已经有自动加 worker 的机制，`src/engine.rs` 的 `JsEngine::spawn`）。
@@ -145,7 +150,7 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 | run 历史与日志归属 | `src/engine.rs:3823`、[run-history.md §24](run-history.md#24-运行记录从那次执行点进日志第二十六轮) | §4 的不变量；`runs` 表结构不动 |
 | 惰性加载与回收 | [lazy-plugins.md](lazy-plugins.md) | 回收前必须 drain 在途 op、清定时器，否则「卸载」会变成「工作静默消失」 |
 | 优雅退出 | [engine-safety.md §7.4](engine-safety.md#74-惰性回收外部子进程是真的会退出) | 同上，加一条 shutdown 消息语义 |
-| 三引擎同名同义 | [host-api.md §5.1](host-api.md#51-quickjs-与-nodebun-的差异) | 靠 §9 的同源 API 表机检保证，不靠人守 |
+| 三引擎同名同义 | [host-api.md §5.1](host-api.md#51-nodebun-下的通用约束) | 靠 §9 的同源 API 表机检保证，不靠人守 |
 | 声明预算的上下限 | `src/hostapi.rs:1030/1033`（100ms ~ 10min） | 不动 |
 
 明确放弃：**「QuickJS 档默认最省内存」这条卖点会打折**（§5）。如果这条不能打折，就只能选进程内那一列。
@@ -189,7 +194,7 @@ Rust 侧仍然是唯一的宿主（能力、预算、出网、日志一条都不
 | 4b ✅ | **已完成（2026-10-24）**：`on_tick` async（`__run_tick_async` 两段式；上一拍没回来就跳过这一拍，不排队补跑） | 实测：500ms 的 async tick 跑着时同 worker 的 50ms interval 仍 20 次/秒；1.5 秒的 tick 让 seq 走 1→3→5 | 同 7a |
 | 4c ✅ | **收尾补丁**：① `fetch_async` 的结果 60 秒无人认领就丢弃（插件被删时否则会一直占内存）；② 给 `LoadedPlugin` 加**装载代次**，热更新期间在途的执行当场作废（以前要挂到墙钟超时 60 秒，还记成"超时"） | 实测：reload 后 1 秒内收尾，运行记录写的是"插件被热更新/重载了" | — |
 | 4d ✅ | **P0：结算队列改成每线程一份**。两段式执行的完成通知原来是进程级静态，而默认 2 条执行线程 —— A 线程推的结算被 B 线程排空、B 在自己的 `pending` 里找不到就扔掉，A 只能干等 60 秒墙钟（任务占着"在途"= 丢拍）。`ENGINE_WORKERS=1` 复现不了，所以单线程冒烟全绿 | 同一负载（600s + 后台压满 CPU）：孤儿结算 2→**0**、60 秒超时 2→**0**、`perf-fetch` 达成率 93.48%→**99.98%**、`lateMs` 最大 55008ms→正常。回归测试 `settlement_queue_is_per_thread…` | 见 [engine-safety.md §7.8b](engine-safety.md) |
-| 4 ✅ | **已完成（2026-11-05）**：`fetch` + `Headers` / `Request` / `Response` + `AbortController` / `AbortSignal`（`src/jscompat/fetch.js`）。同一批还补了 L0.5 的 `URL` / `TextEncoder` / `crypto` / `Buffer`，以及 `node:crypto` / `node:url` / `node:buffer` 三个内置模块 | QuickJS 侧与**真的 Node** 生成的向量逐条对拍（`cargo test --bin plugin-panel jscompat`）；SSRF / 超时 / 脱敏沿用 `fetch_async` 同一条通路（没有第二份网络实现）；`signal` 的结论写进 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-兼容层全局与内置模块)：**不能真取消**，只是不再等它 | 保留同步 `http_fetch` 不删；删掉 `src/jscompat/fetch.js` 即回退（`fetch_async` 一直没动） |
+| 4 ✅ | **已完成（2026-11-05）**：`fetch` + `Headers` / `Request` / `Response` + `AbortController` / `AbortSignal`（`src/jscompat/fetch.js`）。同一批还补了 L0.5 的 `URL` / `TextEncoder` / `crypto` / `Buffer`，以及 `node:crypto` / `node:url` / `node:buffer` 三个内置模块 | QuickJS 侧与**真的 Node** 生成的向量逐条对拍（`cargo test --bin plugin-panel jscompat`）；SSRF / 超时 / 脱敏沿用 `fetch_async` 同一条通路（没有第二份网络实现）；`signal` 的结论写进 [plugin-api.md §4.10](plugin-api.md#410-nodeweb-全局与内置模块)：**不能真取消**，只是不再等它 | 保留同步 `http_fetch` 不删；删掉 `src/jscompat/fetch.js` 即回退（`fetch_async` 一直没动） |
 | 5 | L3 `node:fs/promises` 子集 | 围栏用例（越界必拒）全绿；同步版行为不变 | — |
 | 6 | source map + `.d.ts` 生成 + `panel dev` | 一条 `.ts` 插件报错能指回源码行；类型声明与 docs 同一张表产出 | 独立子命令，不动主链路 |
 | 7a ✅ | **已完成（2026-10-24）**：摘掉守卫。删 `__async_audit` / `__async_call_msg` / `__async_route_resp` / `__is_async_fn`（只剩 `__is_thenable`）、删加载期审计、删 `jslint` 模块与编辑期警告、`fire_tick` 接受 Promise（`__run_tick_async` 两段式，结算记 `ticks/last_tick`，上一拍没回来就**跳过**这一拍） | 实测：500ms 的 async tick 跑着时同 worker 的 50ms interval 仍 20 次/秒；1.5 秒的 tick 会让 seq 1→3→5（**跳过**而不是补跑）；`await` 永不 settle ⇒ 每拍 2 秒判失败并说清原因；`cargo test` 全绿 | 守卫全删了，回退等于重写那三处两段式 |

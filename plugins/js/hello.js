@@ -4,7 +4,7 @@
 //   host.log(msg) / host.warn(msg) / host.error(msg)   → Rust 侧 __host_log_raw → 控制台 + 面板
 //   console.log / warn / error / info                   → 同样进宿主日志
 //
-// 每个插件跑在**自己的 QuickJS Context** 里，所以这里的顶层 const/let
+// 每个插件跑在**自己的 Node/Bun 子进程**里，所以这里的顶层 const/let
 // 不会和其他插件重名冲突（counter.js 里也有同名的 PLUGIN_NAME）。
 
 const PLUGIN_NAME = 'hello'; // 顶层 const 只存在于本插件 Context

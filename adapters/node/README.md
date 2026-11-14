@@ -1,6 +1,6 @@
 # host-api —— Node.js 版宿主 API 适配器（面板外）
 
-同一份 JS 插件脚本，既能在面板的 QuickJS / 外部 Node / Bun 引擎里跑，也能**脱离面板**在
+同一份 JS 插件脚本，既能在面板的外部 Node / Bun 引擎里跑，也能**脱离面板**在
 Node.js 里跑。这个适配器就是「没有面板时」的那份宿主实现。
 
 > ⚠ 它**不是**面板里切到 Node 时用的那个运行时。面板的外部运行时是 `runtime/js/`
@@ -54,8 +54,9 @@ adapters/node/
 
 - `http_fetch_async(url, options)` —— Node 专有扩展，不阻塞事件循环（可以自调用本进程注册的路由）。
 - `loggerFactory({scope, plugin, run})` —— 造一个带自定义 scope 的 logger（运行器自己就用它）。
-  **Node 专有扩展**：面板的 QuickJS 宿主没有对应物，插件里用了就不跨运行时了。
-- 全局 `host` 命名空间：`host.log / host.warn / host.error / host.cron / host.every / host.sqlite_query / host.http_fetch / host.register_route`，另有 camelCase 别名（`host.sqliteQuery`、`host.httpFetch`、`host.httpFetchAsync`、`host.registerRoute`、`host.serverUrl()`）。仓库 QuickJS 宿主的 `host.*` 老写法可直接跑。
+  面板宿主的 `host-api` 现在也导出 `loggerFactory`（`runtime/js/bus.mjs`，返回同样的八档 logger），
+  所以它不再是 Node 专有扩展，插件里用了也不破坏跨运行时。
+- 全局 `host` 命名空间：`host.log / host.warn / host.error / host.cron / host.every / host.sqlite_query / host.http_fetch / host.register_route`，另有 camelCase 别名（`host.sqliteQuery`、`host.httpFetch`、`host.httpFetchAsync`、`host.registerRoute`、`host.serverUrl()`）。面板宿主的 `host.*` 老写法可直接跑。
 - `__host`：运行器内部接口（任务快照、tick、启动/停止 server、关库等），插件不该依赖。
 
 handler 载荷（本适配器当前是这 7 格）：
@@ -137,7 +138,7 @@ scope 下，换宿主不该换掉这条；v1 时它是第三种格式 `[HH:MM:SS
 | 落盘 | `plugin-YYYY-MM-DD.jsonl`（按天切、保留 7 天），字段 `{ts,type,level,scope,msg}`（有值才带 `plugin`/`run`）；**逐行同步写**，`tail -f` 立刻能看到 |
 | 脱敏 | 在**构造条目时**做（唯一入口）：请求头 → JSON 字段 → 裸 `key=value` → `Bearer` → 手机号（`136****6001`）。两条跨实现契约：**词边界用 ASCII 判定**（`用token=abc123` 要脱 —— 汉字不能算「字母」而让整条漏脱）、**全角括号算占位符**（`（Cookie: xxx）`） |
 | 输出流 | **stderr**（面板内的 console transport 走 stdout）。这样 `node plugin.js > data.txt` 里的 `data.txt` 只有插件自己的业务输出 |
-| `console.*` | 接到同一套日志上（`log/info/debug/warn/error`），与面板的 QuickJS 宿主一致；`table/time/dir` 等保留原生 |
+| `console.*` | 接到同一套日志上（`log/info/debug/warn/error`），与面板宿主一致；`table/time/dir` 等保留原生 |
 
 环境变量：
 
@@ -172,9 +173,9 @@ testdata/log-format-cases.json  八档 → 过滤级别、行格式、JSONL 字�
 `test/log-vectors.mjs` 覆盖，并被 `test/run-tests.mjs` **import 进来**
 （不是让调用方多敲一条命令 —— 少跑一项就等于没有这项）。
 
-## 与面板宿主（QuickJS / 外部 Node / Bun）的语义对齐
+## 与面板宿主（外部 Node / Bun）的语义对齐
 
-对齐 `src/cron.rs` / `src/scheduler.rs` / `src/hostapi.rs` / `src/jshost.rs`：
+对齐 `src/cron.rs` / `src/scheduler.rs` / `src/hostapi.rs`：
 
 - cron：`*`、`a`、`a-b`、`a-b/n`、`*/n`、`a,b,c`，`JAN..DEC`、`SUN..SAT`，5/6 段，`7`=`0`=周日，日/周同时受限取 **OR**，解析期就拒绝「永远不会触发」的表达式。
 - `@every`：`ms/s/m/h/d`，纯数字按毫秒，**不 truncate 到秒**（500ms 任务不会原地踏步）。

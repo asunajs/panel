@@ -47,12 +47,12 @@ export function statusBadge(status) {
  * 这里说的是**某一次执行**的结果（成功 / 失败 / 已停止）。两套词混在一起，用户会
  * 以为"任务出错了"，其实只是上一次跑得不顺。
  *
- * 三种情况里最容易做错的是「已停止」：手动停止（或超出执行预算）时，QuickJS 抛的是
+ * 三种情况里最容易做错的是「已停止」：新记录带 `stopped` 标记；老记录里是
  * `InternalError: interrupted` **加一整段 JS 堆栈**。原样显示出来就是一屏红字，看着
  * 像面板炸了 —— 而事实是用户自己按了停止。所以这里把它单独归一类：中性灰徽章 +
  * 一句人话，不展示堆栈（堆栈去日志里看，那才是排查的地方）。
  */
-const INTERRUPTED = /interrupt/i;
+const INTERRUPTED = /InternalError:\s*interrupted/i;
 
 export function runOutcome(run) {
   const r = run || {};
@@ -61,16 +61,18 @@ export function runOutcome(run) {
   }
   if (r.ok) return { cls: 'ok', text: '成功', note: '' };
   const err = String(r.error || '');
-  // 后端从「停止不算失败」那一版起直接给 stopped 标记；老记录只有那句 interrupted，
-  // 所以两个都认 —— 升级后不该让昨天那条记录突然变回红色的失败。
+  // 后端从「停止不算失败」那一版起直接给 stopped 标记；老记录只有那句
+  // `InternalError: interrupted`（内嵌引擎时代的固定格式），所以两个都认 ——
+  // 升级后不该让昨天那条记录突然变回红色的失败。文本兜底**锚定整句**，
+  // 不然插件自己抛 `Error('interrupted')` 会被误归成中性的「已停止」。
   if (r.stopped === true || INTERRUPTED.test(err)) {
     return {
       cls: 'stopped',
       text: '已停止',
-      // 引擎层「手动停止」和「超出执行预算」是同一个中断，前端分不出来 ——
-      // 所以两种原因都写上。只说"手动停止"会在超预算时骗人。
+      // 新记录只会在用户按「停止」时带 stopped；老记录里那句 interrupted 也可能
+      // 来自执行预算中断 —— 两种都按中性显示。
       note:
-        '这次执行被中途停下：手动「停止」，或者超出执行预算。' +
+        '这次执行被中途停下：手动「停止」（升级前的老记录也可能是执行预算中断）。' +
         '这不是任务本身报错 —— 它跑到哪一步，去「看日志」里翻。',
     };
   }

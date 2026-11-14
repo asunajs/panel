@@ -13,7 +13,7 @@
     1. 二进制存在且能启动
     2. GET /            → 200，返回 HTML 面板
     3. GET /api/state   → 合法 JSON，含 status / plugins / jobs / engine
-    3b. 插件只剩 JS（QuickJS/Node/Bun），且没有加载失败的插件
+    3b. 插件只剩 JS（Node/Bun），且没有加载失败的插件
     3c. JS 插件注册的 HTTP 路由挂在同一个端口上；未注册路径仍返回 404
     3d. 面板写接口：缺护栏头 403 / 任务不存在 404 / 手动触发 / 暂停冻结 / 恢复不补跑
     3e. 任务定义（第九轮）：插件/面板两种来源标注；新建的四条校验路径；
@@ -24,7 +24,7 @@
     4. 等 3 秒后 ticks 增长 —— 证明调度循环真的在转
     4b. 插件的调度任务真的被触发过（不是只加载不干活）
     5. jobs 表有记录 —— 证明 SQLite 落库链路通
-    6. QuickJS 堆用量可观测
+    6. 宿主不再统计 JS 堆（读数恒为 0）
     6b. 常驻内存（只在 Linux 上给数字）
     7. SIGTERM → 15 秒内退出，且日志出现「引擎线程已退出」
 
@@ -236,7 +236,7 @@ def wait_ready(base, proc, headers=None, timeout=20.0):
 
 # ---------------------------------------------------------------- 跨运行时日志一致性
 
-# 同一份插件，面板的 QuickJS 与 Node 适配器各跑一遍，插件自己发出的日志必须**逐条相同**。
+# 同一份插件，面板的 Node 引擎与面板外的 Node 适配器各跑一遍，插件自己发出的日志必须**逐条相同**。
 #
 # 为什么值得一条常驻检查：日志的格式 / 字段 / 脱敏规则被三份实现（Rust / JS / Python）
 # 各写了一遍，靠人眼对齐撑不过第三次改动。共享向量（testdata/*.json）钉住了
@@ -295,25 +295,23 @@ def _plugin_log_rows(path: Path) -> list[tuple]:
     return rows
 
 
-# ---------------------------------------------------------------- node:fs / node:path（面板内）
+# ---------------------------------------------------------------- node:fs / node:path（外部 Node）
 
-# 插件在面板里拿到的文件系统是**限定范围**的：它眼里的 `/` 就是
-# `<PLUGIN_DATA_DIR>/<插件名>/`。这一组验四件事：
-#   ① 常规读写真能落盘（不是在内存里假装）；
-#   ② 越界被拒（`../`、别的插件的目录、系统文件）；
-#   ③ 插件之间互相看不见；
-#   ④ 删光自己的根，不会碰到插件源码目录（那是面板的静态目录）。
+# 外部 Node 插件拿到的是**原生** `node:fs` / `node:path`：没有数据根围栏
+# （见 [docs/plugin-fs.md](../docs/plugin-fs.md)）。这一组验两件事：
+#   ① 常规读写真能落盘（相对路径以插件数据目录为 CWD）；
+#   ② QuickJS 专属的 `fs.rootDir()` 不存在了 —— 那是被删引擎的 API，不能假装还在。
 #
-# 为什么值得常驻：围栏是"默认信任"和"默认不信任"的分界线，而这类代码
-# 一旦写歪（比如只做字符串规整、漏掉软链接），功能测试**全会通过** ——
-# 只有专门打边界的用例才拦得住。
+# 旧版这里测的是 QuickJS 的「越界被拒 / 插件互不可见」；Node 是可信代码，
+# 那套围栏不存在，硬按旧判据测只会得到假红。
 FS_PROBE_A = """
 import fs from 'node:fs';
 import path from 'node:path';
 import { log, start, register_handler } from 'host-api';
 
 start('fs 探针 A');
-log('ROOT=' + fs.rootDir());
+log('ROOT=' + process.env.PANEL_PLUGIN_DATA_DIR);
+log('HAS-ROOTDIR=' + (typeof fs.rootDir === 'function'));
 fs.mkdirSync('data', { recursive: true });
 fs.writeFileSync(path.join('data', 'x.json'), JSON.stringify({ n: 1 }));
 log('READ=' + fs.readFileSync('data/x.json', 'utf8'));
@@ -330,19 +328,6 @@ log('RENAMED=' + JSON.stringify(fs.readdirSync('data')));
 fs.unlinkSync('data/y.json');
 fs.rmSync('data/b.bin');
 log('CLEARED=' + JSON.stringify(fs.readdirSync('data')));
-const cjs = require('node:fs');
-log('SAME=' + (cjs === fs));
-// 越界：每一条都必须被拒。写清「没被拒会打 LEAK=…」，这样断言能直接找它。
-for (const [why, fn] of [
-  ['parent-write', () => fs.writeFileSync('../escape.txt', 'x')],
-  ['system', () => fs.readFileSync('../../../../../etc/passwd', 'utf8')],
-  ['sibling-read', () => fs.readFileSync('../fs_probe_b/secret.txt', 'utf8')],
-  ['parent-list', () => fs.readdirSync('..')],
-  ['escape-write', () => fs.appendFileSync('../../escape.txt', 'x')],
-]) {
-  try { fn(); log('LEAK=' + why); }
-  catch (e) { log('DENY=' + why + ':' + e.code); }
-}
 fs.writeFileSync('secret.txt', 'A的机密');
 log('SECRET=' + fs.readFileSync('secret.txt', 'utf8'));
 register_handler('noop', () => {});
@@ -354,11 +339,7 @@ import { log, start, register_handler } from 'host-api';
 
 start('fs 探针 B');
 fs.writeFileSync('secret.txt', 'B的机密');
-log('B-ROOT=' + fs.rootDir());
-try { fs.readFileSync('../fs_probe_a/secret.txt', 'utf8'); log('LEAK=sibling-B'); }
-catch (e) { log('DENY=sibling-B:' + e.code); }
-try { fs.readdirSync('..'); log('LEAK=parent-list-B'); }
-catch (e) { log('DENY=parent-list-B:' + e.code); }
+log('B-ROOT=' + process.env.PANEL_PLUGIN_DATA_DIR);
 register_handler('noop', () => {});
 """
 
@@ -580,7 +561,7 @@ def run_record_checks(tmp: Path) -> None:
         proc.wait(timeout=10)
 
 def plugin_fs_checks(tmp: Path) -> None:
-    """面板内的 node:fs / node:path：能落盘、越界被拒、插件之间互相看不见。"""
+    """外部 Node 插件的 node:fs / node:path：原生 fs 能落盘，QuickJS 专属 API 已消失。"""
     pdir = tmp / "fs-plugins"
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "fs_probe_a.js").write_text(FS_PROBE_A, encoding="utf-8")
@@ -628,29 +609,23 @@ def plugin_fs_checks(tmp: Path) -> None:
     check(a.get("BYTES") == "true,1,2,3", "不给 encoding 时读写 Uint8Array", str(a.get("BYTES")))
     check(a.get("RENAMED") == '["b.bin","y.json"]', "renameSync", str(a.get("RENAMED")))
     check(a.get("CLEARED") == "[]", "unlinkSync / rmSync 删掉了", str(a.get("CLEARED")))
-    check(a.get("SAME") == "true", "require('node:fs') 与 import fs 是同一个对象")
 
-    # ② 越界被拒（注意：以 `/` 开头的路径**不是**越界 —— 那是插件根里的路径，
-    #    见 src/pluginfs.rs 的 resolve_in_root）
-    def denied(row, why, code="EACCES"):
-        return row.get("DENY={}:{}".format(why, code)) is True
+    # ② Node 给的是原生 fs：QuickJS 的 `fs.rootDir()` 不存在（被删引擎的 API）
+    check(a.get("HAS-ROOTDIR") == "false", "Node 引擎里没有 QuickJS 专属的 fs.rootDir()", str(a.get("HAS-ROOTDIR")))
 
-    check(denied(a, "parent-write"), "写 `../` 被拒（EACCES）")
-    check(denied(a, "system"), "读系统文件被拒（EACCES）")
-    check(denied(a, "parent-list"), "列上级目录被拒")
-    check(denied(a, "escape-write"), "`../../` 追加同样被拒")
-    leaked = [k for k in a if k.startswith("LEAK=")]
-    check(not leaked, "没有任何越界操作成功过", str(leaked))
-
-    # ③ 插件之间互相看不见
-    check(denied(a, "sibling-read"), "读**另一个插件**的数据被拒")
-    check(denied(b, "sibling-B"), "反过来读也一样被拒")
-    check(denied(b, "parent-list-B"), "列上级目录被拒（不然能靠列目录摸出别人的名字）")
-    check("LEAK=sibling-read" not in a and "LEAK=sibling-B" not in b, "两个探针都没读到对方")
-
-    # ④ 落盘位置：数据根在 PLUGIN_DATA_DIR 下，**插件源码目录里什么都没多出来**
+    # ③ 落盘位置：数据根在 PLUGIN_DATA_DIR 下，**插件源码目录里什么都没多出来**
     root_a = data_dir / "fs_probe_a"
-    check(a.get("ROOT", "").endswith("/fs_probe_a"), "插件看到的根是数据根下的同名子目录", str(a.get("ROOT")))
+    root_b = data_dir / "fs_probe_b"
+    check(
+        os.path.realpath(a.get("ROOT", "")) == os.path.realpath(root_a),
+        "插件的数据目录就是 PLUGIN_DATA_DIR/<插件名>",
+        str(a.get("ROOT")),
+    )
+    check(
+        os.path.realpath(b.get("B-ROOT", "")) == os.path.realpath(root_b),
+        "第二个插件也在自己的数据目录里",
+        str(b.get("B-ROOT")),
+    )
     check(
         (root_a / "secret.txt").exists(),
         "插件写的东西真在数据根里（不是在内存里假装）",
@@ -690,7 +665,7 @@ def _probe_log_rows_scope(rows: list[str], scope: str) -> dict:
     return out
 
 def cross_runtime_log_parity(tmp: Path) -> None:
-    """同一份插件 → 面板（QuickJS）与 Node 适配器 → 日志逐条相同。"""
+    """同一份插件 → 面板（Node runner）与 Node 适配器 → 日志逐条相同。"""
     node = shutil.which("node")
     runner = REPO / "adapters" / "node" / "bin" / "run.mjs"
     if not node or not runner.exists():
@@ -759,9 +734,10 @@ def cross_runtime_log_parity(tmp: Path) -> None:
         return
 
     panel_rows = _plugin_log_rows(pf[0])
-    # 面板会在插件日志后面补一条宿主自己的收尾行（quickjs / 任务数…），
-    # 那是宿主差异，不是漂移 —— 只比插件自己发出的 10 行。
-    panel_rows = panel_rows[:PARITY_PROBE_LINES]
+    # 面板会在插件日志前后补宿主自己的行（启动重试、「插件已加载」收尾…），
+    # 那是宿主差异，不是漂移 —— 只比插件自己发出的那些行。
+    host_noise = ("子进程在 exec 前被 SIGKILL", "外部运行时已重新拉起", "插件已加载")
+    panel_rows = [r for r in panel_rows if not r[4].startswith(host_noise)][:PARITY_PROBE_LINES]
     node_rows = _plugin_log_rows(nf[0])[:PARITY_PROBE_LINES]
 
     if not check(
@@ -1812,6 +1788,9 @@ def plugin_lifecycle_checks(tmp: Path) -> None:
             return
 
         # ---- ① 热更新「无任务插件」不该动别人的 jobs 行 ----
+        # wait_ready 只等到「有插件卡片」，外部 Node 的 ready 与任务落库之间还有
+        # 一个很短的窗口；这里要等 keeper 的任务真的登记完再取基线。
+        wait_for(lambda j, p: j == {"keeper-task"})
         jobs0, plugs0 = snap()
         check(
             jobs0 == {"keeper-task"},
@@ -3492,7 +3471,7 @@ def external_runtime_checks(tmp: Path) -> None:
     (pdir / "extprobe.js").write_text(
         "import { log, register_cron, register_route, panel as apiPanel } from 'host-api';\n"
         "log('extprobe loaded');\n"
-        # sleep 在三个引擎同义：这里验 Node/Bun 也有（内嵌引擎那份在 QuickJS 侧验）
+        # sleep 在 Node/Bun 里同义：这里验两个引擎都有
         "const __t0 = Date.now();\n"
         "await sleep(120);\n"
         "log('extprobe sleep=' + (Date.now() - __t0));\n"
@@ -3572,19 +3551,203 @@ def external_runtime_checks(tmp: Path) -> None:
         else:
             print("  ⏭ 跳过 Bun 切换（PATH 里没有 bun）")
 
-        # 再切回 QuickJS：显式选择必须落库，不能因为 PANEL_JS_ENGINE=node 回落到 node
+        # QuickJS 已移除：显式选择 quickjs 必须被拒绝，且不能把插件弄坏。
+        before = None
+        _, st = fetch_json(f"{base}/api/state")
+        before = next((x.get("engine") for x in st.get("plugins", []) if x.get("name") == "extprobe"), None)
         code, body = post_json(f"{base}/api/plugins/extprobe/runtime", payload={"engine": "quickjs", "command": ""})
-        check(code == 200 and body.get("ok") is True, "切换插件引擎回 QuickJS", f"{code} {body}")
-        deadline = time.time() + 15
-        got = ""
+        check(
+            code == 400 and "已移除" in str(body.get("error", "")),
+            "显式选择已移除的 quickjs 会被拒绝并说明原因",
+            f"{code} {body}",
+        )
+        _, st = fetch_json(f"{base}/api/state")
+        after = next((x.get("engine") for x in st.get("plugins", []) if x.get("name") == "extprobe"), None)
+        check(after == before and after in {"node", "bun"}, "被拒绝的切换没有改掉当前引擎", f"{before} -> {after}")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        logf.close()
+
+
+def stop_kills_child_checks(tmp: Path) -> None:
+    """R1：/stop 真的杀掉在跑的子进程，并把这次归类成「已停止」（不是失败）。
+
+    Node-only 之前 /stop 只置一个全局位、任务照跑到预算 —— 这条端到端就是钉死
+    「按停止 ⇒ 进程组被杀 ⇒ 很快收尾 ⇒ 记录 stopped=true、不写错误、不发失败」。
+    预算调到 30s、任务 sleep 20s：确保杀它的是 /stop，不是执行预算。
+    """
+    use_token(SMOKE_TOKEN)
+    print("\n== /stop 杀子进程（Node-only，R1）==")
+    if not shutil.which(os.environ.get("PANEL_NODE") or "node"):
+        print("  ⏭ 跳过：PATH 里没有 node")
+        return
+    pdir = tmp / "stop-plugins" / "js"
+    pdir.mkdir(parents=True)
+    (pdir / "stopprobe.js").write_text(
+        "import { register_handler, log } from 'host-api';\n"
+        "register_handler('slow', async () => { log('slow 开始'); await sleep(20000); log('slow 结束'); });\n",
+        encoding="utf-8",
+    )
+    port = free_port()
+    env = dict(os.environ)
+    env.update({
+        "BIND_ADDR": f"127.0.0.1:{port}",
+        "DB_PATH": str(tmp / "stop.db"),
+        "PLUGINS_DIR": str(tmp / "stop-plugins"),
+        "PANEL_JS_ENGINE": "node",
+        "PANEL_LOG_DIR": str(tmp / "stop-logs"),
+        "PANEL_TOKEN": SMOKE_TOKEN,
+        "EXEC_BUDGET_MS": "30000",
+    })
+    logpath = tmp / "stop.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen([str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    base = f"http://127.0.0.1:{port}"
+    hdrs = {"X-Panel-Token": SMOKE_TOKEN}
+    try:
+        if not check(wait_ready(base, proc, hdrs), "/stop 检查用的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+        code, body = post_json(
+            f"{base}/api/jobs",
+            payload={"plugin": "stopprobe", "name": "slow", "expr": "@every 1h"},
+        )
+        if not check(code == 200 and body.get("ok") is True, "建一条慢任务（手动触发）", f"{code} {body}"):
+            return
+
+        # /run 会一直等到任务收尾，放后台线程，主线程才能趁它在跑时按 /stop。
+        run_result = {}
+
+        def trigger():
+            c, _, b = http(
+                f"{base}/api/tasks/stopprobe/slow/run",
+                method="POST", headers={**hdrs, "x-panel": "1"}, body=b"{}", timeout=40.0,
+            )
+            run_result["code"] = c
+            run_result["body"] = b
+
+        t = threading.Thread(target=trigger, daemon=True)
+        t.start()
+
+        # 等这次真的跑起来：有未收尾的记录，且子进程已经在执行（日志有 'slow 开始'）。
+        deadline = time.time() + 12
+        run_id = None
         while time.time() < deadline:
-            _, st = fetch_json(f"{base}/api/state")
-            p = next((x for x in st.get("plugins", []) if x.get("name") == "extprobe"), {})
-            got = p.get("engine") or ""
-            if got == "quickjs" and not p.get("error"):
+            runs = wait_for_runs(base, hdrs, "stopprobe", "slow", timeout=2.0)
+            live = next((r for r in runs if r.get("finished_at") is None), None)
+            if live and "slow 开始" in logpath.read_text(errors="replace"):
+                run_id = live["id"]
                 break
-            time.sleep(0.3)
-        check(got == "quickjs", "显式 QuickJS 覆盖了全局 PANEL_JS_ENGINE=node", got)
+            time.sleep(0.2)
+        if not check(run_id is not None, "慢任务真的跑起来了（未收尾记录 + 子进程在执行）"):
+            return
+
+        code, body = post_json(f"{base}/api/tasks/stopprobe/slow/stop")
+        check(code == 200 and body.get("ok") is True, "/stop 返回 200", f"{code} {body}")
+        check(body.get("killed") is True, "/stop 报告杀到了在跑的子进程（killed=true）", str(body))
+
+        # 被杀的话收尾远快于 20s sleep / 30s 预算。
+        deadline = time.time() + 8
+        final = None
+        while time.time() < deadline:
+            _, _, b = http(f"{base}/api/runs/{run_id}", headers=hdrs)
+            try:
+                final = json.loads(b).get("run")
+            except json.JSONDecodeError:
+                final = None
+            if final and final.get("finished_at") is not None:
+                break
+            time.sleep(0.2)
+        if check(final is not None and final.get("finished_at") is not None, "被停的运行很快收尾了"):
+            check(final.get("ok") is False, "记录里 ok=false（进程被杀）")
+            check(final.get("stopped") is True, "记录里 stopped=true（「已停止」，不是失败）")
+            check(final.get("error") in (None, ""), "停止不写错误原因", str(final.get("error")))
+            dur = final.get("duration_ms")
+            check(isinstance(dur, int) and dur < 10000, "耗时远小于 20s（是被杀，不是跑完）", str(dur))
+        t.join(timeout=10)
+        check(not t.is_alive(), "手动触发的 /run 随子进程被杀而返回（没挂到预算超时）")
+        check(
+            "已停止（用户停止）" in logpath.read_text(errors="replace"),
+            "日志里是「已停止（用户停止）」，不是执行失败",
+        )
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        logf.close()
+
+
+def timer_evict_checks(tmp: Path) -> None:
+    """R2：只靠 setInterval 干活的插件，闲置过了回收窗口也不被卸；没有定时器的对照插件照常被卸。
+
+    回收窗口下限是 2×加载预算（20s），所以这条要等 ~24s。判据是 /api/state 的 evicted：
+    定时器插件 false（且还在打 tick），对照插件 true。
+    """
+    use_token(SMOKE_TOKEN)
+    print("\n== 定时器插件不被惰性回收（R2）==")
+    if not shutil.which(os.environ.get("PANEL_NODE") or "node"):
+        print("  ⏭ 跳过：PATH 里没有 node")
+        return
+    pdir = tmp / "timer-plugins" / "js"
+    pdir.mkdir(parents=True)
+    # 只有一个 setInterval：没有 on_tick / 排班任务 / WS —— 最容易被误卸的那种。
+    (pdir / "timerprobe.js").write_text(
+        "import { log } from 'host-api';\n"
+        "let n = 0;\n"
+        "setInterval(() => { n += 1; log('timer-tick ' + n); }, 1000);\n",
+        encoding="utf-8",
+    )
+    # 对照：加载完什么都不挂，闲置到点就该被卸。
+    (pdir / "idleprobe.js").write_text(
+        "import { log } from 'host-api';\n"
+        "log('idleprobe loaded');\n",
+        encoding="utf-8",
+    )
+    port = free_port()
+    env = dict(os.environ)
+    env.update({
+        "BIND_ADDR": f"127.0.0.1:{port}",
+        "DB_PATH": str(tmp / "timer.db"),
+        "PLUGINS_DIR": str(tmp / "timer-plugins"),
+        "PANEL_JS_ENGINE": "node",
+        "PANEL_LOG_DIR": str(tmp / "timer-logs"),
+        "PANEL_TOKEN": SMOKE_TOKEN,
+        "PLUGIN_LAZY": "1",
+        "PLUGIN_IDLE_EVICT_MS": "20000",
+        "PLUGIN_PRELOAD_MS": "10000",
+    })
+    logpath = tmp / "timer.log"
+    logf = open(logpath, "w")
+    proc = subprocess.Popen([str(BIN)], stdout=logf, stderr=subprocess.STDOUT, env=env, cwd=REPO)
+    base = f"http://127.0.0.1:{port}"
+    hdrs = {"X-Panel-Token": SMOKE_TOKEN}
+    try:
+        if not check(wait_ready(base, proc, hdrs), "定时器回收检查用的实例就绪"):
+            print(logpath.read_text(errors="replace"))
+            return
+
+        def evicted(name):
+            _, st = fetch_json(f"{base}/api/state")
+            p = next((x for x in st.get("plugins", []) if x.get("name") == name), {})
+            return p.get("evicted")
+
+        # 等对照插件被卸（只有过了 20s 闲置窗口才会发生），最多 30s。
+        deadline = time.time() + 30
+        idle_gone = False
+        while time.time() < deadline:
+            if evicted("idleprobe") is True:
+                idle_gone = True
+                break
+            time.sleep(0.5)
+        check(idle_gone, "对照插件（无定时器）闲置到点被卸了 —— 回收机制本身在工作")
+        # 同一时刻，定时器插件必须还在内存里。
+        check(evicted("timerprobe") is False, "只靠 setInterval 的插件过了闲置窗口也没被卸（R2）")
+        ticks = re.findall(r"timer-tick (\d+)", logpath.read_text(errors="replace"))
+        check(
+            bool(ticks) and int(ticks[-1]) >= 15,
+            "定时器插件的 interval 一直在跑（卸载会把它整个丢掉）",
+            f"最后 tick={ticks[-1] if ticks else '无'}",
+        )
     finally:
         proc.terminate()
         proc.wait(timeout=10)
@@ -4364,7 +4527,7 @@ def delete_file_checks(tmp: Path) -> None:
             proc.kill()
 
 def binary_fetch_checks(tmp: Path) -> None:
-    """功能 A 端到端：QuickJS 的 fetch 发**原始字节**，echo 逐字节收回来。
+    """功能 A 端到端：插件（Node）的 fetch 发**原始字节**，echo 逐字节收回来。
 
     这是「489 字节信封经文本层变成 703 字节」那个 bug 的看门狗。0.3.0 之前这条路
     直接 reject（TypeError）；现在插件代码与 Node 分支逐字相同：
@@ -4399,7 +4562,7 @@ def binary_fetch_checks(tmp: Path) -> None:
                 self.wfile.write(body)
                 return
             if self.path == "/huge.bin":
-                # 1.5 MB：超过面板 1 MiB 的传输上限 —— fetch 必须 reject
+                # 1.5 MB：Node 原生 fetch 没有面板的 1 MiB 传输上限，应完整拿回
                 body = b"B" * (1536 * 1024)
                 self.send_response(200)
                 self.send_header("content-type", "application/octet-stream")
@@ -4455,7 +4618,7 @@ def binary_fetch_checks(tmp: Path) -> None:
         "        headers: { 'content-type': 'application/octet-stream' },\n"
         "    });\n"
         "    const back = new Uint8Array(await res.arrayBuffer());\n"
-        # sleep 是面板扩展（Node 没有），三个引擎都得有 —— 这里验 QuickJS 真的等够了
+        # sleep 是面板 host-api 扩展（不是 Node 原生 API），仍要验证真的等了
         "    const t0 = Date.now();\n"
         "    await sleep(120);\n"
         "    const slept = Date.now() - t0;\n"
@@ -4463,20 +4626,21 @@ def binary_fetch_checks(tmp: Path) -> None:
         "    if (same) for (let i = 0; i < sent.length; i++) {\n"
         "        if (back[i] !== sent[i]) { same = false; break; }\n"
         "    }\n"
-        # issue #1 回归：大响应体走 await res.json()（纯 JS 解码 >1ms 切片）
+        # issue #1 回归：大响应体走 await res.json()
         "    const jr = await fetch(config().json_url);\n"
         "    const j = await jr.json();\n"
         "    const jsonItems = j.items.length;\n"
-        # 1.5 MB 文本：原生解码之前这里会 OOM（QuickJS 抛 null）
+        # 1.5 MB 文本（1 MiB 是旧 QuickJS 通道的上限；Node 原生 fetch 没有）
         "    const tr = await fetch(config().text_url);\n"
         "    const ttext = await tr.text();\n"
         "    const textLen = ttext.length;\n"
-        # 超过传输上限（1 MiB）必须是 reject，不能是 200 + 一句错误文本
+        # 超过 1 MiB：Node 原生 fetch 没有面板传输上限，1.5 MB 应完整拿回
         "    let bigReject = '';\n"
-        "    try { const br = await fetch(config().huge_url); await br.text(); bigReject = 'no-throw'; }\n"
+        "    let hugeLen = 0;\n"
+        "    try { const br = await fetch(config().huge_url); hugeLen = (await br.arrayBuffer()).byteLength; }\n"
         "    catch (e) { bigReject = e.name + ':' + (e.cause ? 'cause' : 'nocause'); }\n"
         "    return { status: 200, headers: { 'content-type': 'application/json' },\n"
-        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept, jsonItems, textLen, bigReject }) };\n"
+        "        body: JSON.stringify({ status: res.status, sent: sent.length, back: back.length, same, slept, jsonItems, textLen, bigReject, hugeLen }) };\n"
         "});\n",
         encoding="utf-8",
     )
@@ -4494,9 +4658,6 @@ def binary_fetch_checks(tmp: Path) -> None:
             "PANEL_ALLOW_PLAIN_TOKEN": "1",
             # echo 服务器在回环上：默认会被 SSRF 闸挡掉，这里显式放行。
             "HOST_API_ALLOW_PRIVATE": "1",
-            # 把让出切片压到 1ms：修复前这条请求必被 interrupt 打断（issue #1），
-            # 修复后切片只决定「这一轮泵还取不取下一个 job」，不再打断正在跑的那个。
-            "JOB_SLICE_MS": "1",
         }
     )
     log = d / "binfetch.log"
@@ -4542,22 +4703,22 @@ def binary_fetch_checks(tmp: Path) -> None:
         check(got.get("same") is True, "往返逐字节相等", str(got))
         check(
             isinstance(got.get("slept"), int) and got["slept"] >= 110,
-            "QuickJS 的 await sleep(120) 真的等了（面板扩展，Node 没有）",
+            "Node 的 await sleep(120) 也真的等了（面板 host-api 扩展）",
             str(got),
         )
         check(
             got.get("textLen") == 1000 * 1024,
-            "1000 KB 文本的 await res.text() 不再 OOM（原生解码）",
+            "1000 KB 文本的 await res.text() 完整拿回",
             str(got),
         )
         check(
-            got.get("bigReject") == "TypeError:cause",
-            "超过传输上限的响应是 fetch reject（不是 200 + 一句错误文本）",
+            got.get("bigReject") == "" and got.get("hugeLen") == 1536 * 1024,
+            "Node 原生 fetch 没有 1 MiB 传输上限（1.5 MB 响应完整拿回）",
             str(got),
         )
         check(
             got.get("jsonItems") == 600,
-            "60 KB JSON 的 await res.json() 没被微任务泵切片打断（JOB_SLICE_MS=1，issue #1）",
+            "60 KB JSON 的 await res.json() 完整解析（issue #1 的回归）",
             str(got),
         )
         check(
@@ -4649,13 +4810,19 @@ def version_gate_checks(tmp: Path) -> None:
             f"http://127.0.0.1:{port}/api/state", headers={"X-Panel-Token": SMOKE_TOKEN}
         )
         st = {}
-        for _ in range(30):
+        # 引擎在独立线程里加载：Node 插件要拉起子进程，`/healthz` 先就绪是正常的。
+        # 必须等到三个插件都出现在 state 里，不能拿第一份成功响应就断言。
+        deadline = time.time() + 25
+        while time.time() < deadline:
             try:
                 with urllib.request.urlopen(req, timeout=5) as r:
                     st = json.loads(r.read().decode())
-                break
+                names = {p.get("name") for p in st.get("plugins", [])}
+                if {"fine", "noheader", "needs-newer"} <= names:
+                    break
             except Exception:
-                time.sleep(0.5)
+                pass
+            time.sleep(0.3)
 
         plugins = {p.get("name"): p for p in st.get("plugins", [])}
         bad = plugins.get("needs-newer", {})
@@ -4757,7 +4924,7 @@ def main() -> int:
         # ---- 1. 等待就绪 ----
         #
         # 判据是「HTTP 通了**并且**引擎已经加载完插件」，不是只等 HTTP 通。
-        # 引擎在独立线程里加载插件（QuickJS / 外部子进程都要拉起），Axum 完全可能先答上来，
+        # 引擎在独立线程里加载插件（外部子进程要拉起），Axum 完全可能先答上来，
         # 那一刻 /api/state 里 plugins 还是空的 —— 实测踩到过（面板 15 KB、plugins 0 个，
         # 而紧接着 jobs 表里已经有 14 条任务）。只等 HTTP 会随机输掉这个竞态。
         state = None
@@ -4792,7 +4959,7 @@ def main() -> int:
         check(ok_shape, "/api/state 结构完整", f"status={state.get('status')}")
         check(len(state.get("plugins", [])) > 0, "插件已加载", f"{len(state.get('plugins', []))} 个")
 
-        # ---- 3b. 插件只剩 JS：语言字段恒为 js，引擎是 quickjs/node/bun ----
+        # ---- 3b. 插件只剩 JS：语言字段恒为 js，引擎是 node/bun ----
         plugins = state.get("plugins", [])
         runtimes = {p.get("runtime") for p in plugins}
         engines = {p.get("engine") for p in plugins}
@@ -4810,13 +4977,14 @@ def main() -> int:
             f"runtime={sorted(runtimes)}, " + ", ".join(f"{p['name']}:{p['runtime']}" for p in plugins),
         )
         check(
-            engines and engines <= {"quickjs", "node", "bun"},
+            engines and engines <= {"node", "bun"},
             "每个插件都报出了 JS 引擎",
             f"engine={sorted(engines)}",
         )
+        kinds = {r.get("kind") for r in state.get("runtimes", [])}
         check(
-            any(r.get("kind") == "quickjs" for r in state.get("runtimes", [])),
-            "/api/state 报出了运行时目录",
+            {"node", "bun"} <= kinds and "quickjs" not in kinds,
+            "/api/state 报出了 Node/Bun，且不再有 quickjs",
             str([(r.get("kind"), r.get("available")) for r in state.get("runtimes", [])]),
         )
         failed = [p for p in plugins if p.get("error")]
@@ -5050,11 +5218,15 @@ def main() -> int:
         jobs = state2.get("jobs", [])
         check(len(jobs) > 0, "jobs 表已落库", f"{len(jobs)} 条任务")
 
-        # ---- 6. 引擎健康与 JS 堆 ----
+        # ---- 6. 引擎健康 ----
         eng = state2.get("engine", {})
         check(eng.get("healthy") is True, "引擎健康上报正常", f"beat_ago={eng.get('beat_ago_ms')}ms")
-        check(eng.get("js_memory_bytes", 0) > 0, "QuickJS 堆用量可观测",
-              f"{eng.get('js_memory_bytes', 0) / 1024:.0f} KB")
+        # 宿主的 JS 堆读数应该恒为 0（Node 的堆在子进程里，面板不统计）
+        check(
+            eng.get("js_memory_bytes", 0) == 0,
+            "宿主不再统计 JS 堆用量（Node 的堆在子进程里）",
+            f"{eng.get('js_memory_bytes')} B",
+        )
 
         # ---- 6b. 真实常驻内存（只有 Linux 能拿到可信数字）----
         rss = proc_mem_kb(proc.pid)
@@ -5151,6 +5323,8 @@ def main() -> int:
     plugin_manage_checks(tmp)
     plugin_source_edit_checks(tmp)
     external_runtime_checks(tmp)
+    stop_kills_child_checks(tmp)
+    timer_evict_checks(tmp)
     script_task_checks(tmp)
     binary_fetch_checks(tmp)
     version_gate_checks(tmp)

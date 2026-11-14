@@ -1,6 +1,6 @@
 # 引擎自我保护：执行预算、熔断与外部进程
 
-> 宿主怎么保证「一个坏插件不会把整台设备带走」——QuickJS 用中断，外部 Node/Bun 用杀进程组。
+> 宿主怎么保证「一个坏插件不会把整台设备带走」——Node / Bun 插件用杀进程组。
 >
 > 章节号沿用原 `README.md` 的编号（作为稳定 ID，便于对照 git 历史与旧讨论）。
 > 文档索引：[docs/README.md](README.md)
@@ -11,46 +11,15 @@
 
 插件是不可信代码。这一节讲宿主怎么保证「一个坏插件不会把整台设备带走」。
 
-### 7.1 QuickJS：一个死循环插件能拖垮整个引擎（修复前的 P0）
+### 7.1 历史：内嵌 QuickJS 的 interrupt handler（已删除）
 
-`examples/hostile-plugins/` 专门用来复现这个问题（不在默认 `plugins/` 里，需显式 `PLUGINS_DIR`）。
+第二十五轮曾给内嵌 QuickJS 注册 Runtime 级 interrupt handler：每次调 JS 前 `arm(budget)`、
+调用后 `disarm()`，超时抛异常打断。它覆盖了插件顶层 `eval`、`on_tick` 与 cron handler，
+并顺带修掉了「死循环拖死整条引擎线程、面板却报 running」的 P0。
 
-修复前实测：
-
-| 观测项 | 现象 |
-|---|---|
-| 任务触发 | 全部停摆（`runaway` 的 runs 永远停在 0） |
-| CPU | 烧满一个核（99.3%） |
-| HTTP 面板 | **仍然返回 200**，`/api/state` 还报 `"status":"running"` |
-| `SIGINT` / `SIGTERM` 优雅退出 | **无效**，`engine.shutdown()` 里的 `join()` 永久阻塞，只能 `kill -9` |
-
-根因：调度器、所有 QuickJS 插件、所有任务跑在**同一个引擎线程**上，而 QuickJS 侧没有设
-interrupt handler，`while(true){}` 会永久占住该线程。附带后果比卡死本身更糟 ——
-**监控会撒谎**：面板显示「运行中」，实际引擎已经死了。
-
-**修法**：
-
-1. **执行预算**：注册 Runtime 级的 interrupt handler（`rt.set_interrupt_handler`）。
-   每次调 JS 前 `arm(budget)`、调用后 `disarm()`，超时由 QuickJS 抛异常打断。
-   覆盖三个入口：插件顶层 `eval`、`on_tick`、cron handler。
-   默认 **600 秒**，环境变量 `EXEC_BUDGET_MS` 可覆盖（想收紧就 `EXEC_BUDGET_MS=2000`）。
-   试跑（`POST /api/test/js`）另有自己的预算：默认 **10 秒**（`TEST_RUN_BUDGET_MS`），
-   因为那是人在等结果的动作，且试跑占着引擎线程。
-2. **关闭优先**：`EngineHealth.request_stop()` 置位后 handler 无条件打断。
-3. **健康上报**：`EngineHealth` 同时跟踪「最近心跳」和「预期唤醒时刻」，**两者都过期**
-   才判 `degraded`；「过期」的阈值是 **单次预算 + 3 秒**（默认 603 秒），
-   否则一次合法的 600 秒调用会被报成停摆。代价：真卡死也要 603 秒才认出来。只看心跳会把「调度器睡 1 小时等下一个任务」误判成卡死；
-   只看预期唤醒则判不出「卡在 JS 里」。
-4. **SIGTERM 支持**：`systemctl stop` / `docker stop` 发的是 SIGTERM，只监听 SIGINT 不够。
-
-修复后实测：
-
-| 观测项 | 修复前 | 修复后 |
-|---|---|---|
-| 同目录对照组 `alive` 任务 | 停摆 | **runs 持续增长**（7 → 10） |
-| `runaway` 任务 | 永久卡死 | 每轮被中断，`last_error` = `执行超过预算 60s，被强制中断（疑似死循环）` |
-| 面板状态 | 撒谎报 `running` | 卡死时诚实报 **`degraded`**（`beat_ago=8027ms`） |
-| 优雅退出（SIGTERM） | 卡死，只能 `kill -9` | **1 秒内退出** |
+内嵌引擎在 2026-11-10 的 P2 删除，`runtime/js` 里**没有**等价的「中断一个正在跑的 JS 调用」
+手段：V8/JSC 不提供从外部中断循环的钩子。现在的保护是 §7.2 的**杀进程组**，
+语义差别（进程内状态是否保留）也随之消失 —— 被杀之后状态一律清零。
 
 ### 7.2 外部 Node / Bun：预算 = 杀进程组
 
@@ -77,9 +46,8 @@ dispatch → 写 fd0 invoke → 等 fd1 result
 | 重启 | 下一次 `invoke` / `tick` 自动拉起；注册声明还在调度器里，不重复安装 |
 | 卸载 / 热更新 / 惰性回收 | 主动 kill；下次触发再拉起 |
 
-**和 QuickJS 的语义差别必须认**：QuickJS 超预算时插件状态还在（异常打断后下一个任务继续用
-同一个 `Context`）；外部插件被杀之后状态清零。所以外部插件要把跨调用状态落到数据目录 /
-SQLite，不能只放模块变量。见 [ext-runtime-protocol.md §8](ext-runtime-protocol.md#8-超时杀进程重启)。
+**被杀之后状态清零**：插件要把跨调用状态落到数据目录 / SQLite，不能只放模块变量。
+见 [ext-runtime-protocol.md §8](ext-runtime-protocol.md#8-超时杀进程重启)。
 
 ### 7.3 执行预算还不够：任务熔断
 
@@ -97,7 +65,7 @@ SQLite，不能只放模块变量。见 [ext-runtime-protocol.md §8](ext-runtim
 
 熔断期间把 `next_fire` 直接钉在「冷却结束时刻」，所以既不会漏掉重试，也不会在冷却期内空转。
 
-**实测（预算 500ms / 阈值 3 / 首次冷却 5s，QuickJS 死循环）**：
+**实测（预算 500ms / 阈值 3 / 首次冷却 5s；当时的 QuickJS 死循环插件）**：
 
 ```
 19:15:25/26/27  连续失败 3 次
@@ -129,9 +97,7 @@ CPU 占用（进程 CPU 时间差值法）：
 `PLUGIN_LAZY=1`（默认）时，没有 `on_tick`、没有开着的 WS、且下次触发还在
 `PLUGIN_IDLE_EVICT_MS` 之外的插件会被卸出内存（有路由的也一样，请求来了冷启动）：
 
-- **QuickJS**：释放 `Context` / `Runtime`。省的是 JS 堆，**RSS 基本不动**
-  （实测见 [lazy-plugins.md](lazy-plugins.md)）。
-- **外部 Node/Bun**：直接杀子进程。**RSS 是真的会掉**（Node 40–80 MB 量级），
+- **Node/Bun**：直接杀子进程。**RSS 是真的会掉**（Node 40–80 MB 量级），
   代价是下次触发要重新启动解释器 + 重新加载插件。
 
 触发前 `PLUGIN_PRELOAD_MS`（默认 20s）会把它装回来；面板上点「立即执行」会先装回。
@@ -157,40 +123,6 @@ worker 的其他任务。外部插件虽然把计算放进独立进程，**一�
 
 脚本任务另有一条 script worker（默认最后一条）：一个长脚本会占住它整个运行期，
 推迟同一条 worker 上的后续脚本 —— v1 没有独立脚本池，见 [script-jobs.md §10](script-jobs.md#10-已知限制v1)。
-
-### 7.8b async 结算队列必须是**每线程**一份（第六十四轮修的 P0）
-
-异步执行是两段式：handler 返回 Promise ⇒ 宿主挂起这次执行；JS 侧结算时调
-`__host_inv_done(id, ok, msg)`，把结果塞进队列，worker 循环排空后收尾。
-
-这条队列**不能是进程级静态**。默认 `ENGINE_WORKERS = min(2, 核数)`，两条线程都在
-排空同一个队列 —— 于是：
-
-```
-A 线程推入结算 ──► 全局队列 ──► B 线程先跑到，把它排空
-                                  B 在自己的 pending 里找不到这个 id
-                                  → 记一条"迟到的异步结算"扔掉
-A 的那条执行永远等不到通知 ──► 干等 60 秒墙钟 ──► 判失败（任务占着"在途"，丢拍）
-```
-
-现在的实现是 `thread_local!`：谁推的谁排空。这和"这条 invocation 归哪个 worker"
-本来就是同一件事，线程局部天然正确。
-
-**怎么发现的**（留个方法，下次遇到类似现象能照做）：
-
-| 现象 | 说明 |
-|---|---|
-| 长跑报告里单个任务达成率 93%，`lateMs` 最大 55008ms | 正好一个 `EXEC_BUDGET_MS` |
-| 超时报错里"插件侧未结算的 invocation = 0" | JS 早就结算完了，通知确实发出来了 |
-| 同一 id 还有一条"迟到的异步结算"，由**另一个** worker 打出 | 时间差正好一个墙钟预算 |
-| `ENGINE_WORKERS=1` 时完全复现不了 | 单线程没有"抢" |
-
-回归测试：`settlement_queue_is_per_thread_so_workers_cannot_steal_each_other`
-（两条线程各推一条，各自只能拿到自己那条）。
-
-顺带把其余全局队列过了一遍，它们**不存在**这个坑：`REJECTIONS` 和 `FETCH_DONE`
-都是按**插件名**投递的（`FETCH_DONE` 排空时还按"本 worker 拥有的插件"过滤），
-谁排空都能投到对的地方；只有 `INV_DONE` 是按**id** 匹配的，所以只有它必须每线程一份。
 
 ### 7.8 🟢 P2：其余
 

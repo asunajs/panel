@@ -1,13 +1,13 @@
-//! Rust + QuickJS + Node/Bun 动态插件任务面板。
+//! Rust + Node/Bun 动态插件任务面板。
 //!
 //! 十轮累计的能力：
 //!   1. Axum 起 HTTP 服务 + 服务端渲染面板
-//!   2. rquickjs 把 QuickJS-ng 嵌进同一个二进制，启动时加载 `plugins/**/*.js`
+//!   2. 启动时加载 `plugins/**/*.js`，每个插件一个外部 Node/Bun 子进程
 //!   3. 向 JS 暴露宿主能力：`host.log` / `host.cron` / `host.every`
 //!   4. rusqlite（bundled）持久化：`tasks` 运行记录 + `jobs` 调度任务
 //!   5. 毫秒级调度（deadline 驱动）+ 执行预算 + 任务熔断 + 引擎健康上报
 //!   6. 单二进制、可交叉编译到 aarch64-linux-musl
-//!   7. **外部 JS 运行时**：插件默认内嵌 QuickJS，可切到 Node/Bun（`src/extproc.rs`）；
+//!   7. **外部 JS 运行时**：所有平台插件默认交给 Node（Windows 用回环 TCP RPC，`src/extproc.rs`）；
 //!      Python 只作为任务目录里的 cron 脚本（`src/scriptjob.rs`），不再是插件
 //!   8. JS 插件可注册 HTTP 路由（挂在同一个 Axum 端口上）+ 插件 mtime 热更新
 //!   9. `jobs` 表是任务定义的权威来源（`source` 区分插件声明 / 面板创建）
@@ -47,18 +47,11 @@ mod backup_crypto;
 mod cron;
 mod db;
 mod engine;
-#[cfg(unix)]
-mod extproc;
-#[cfg(not(unix))]
-#[path = "extproc_stub.rs"]
 mod extproc;
 mod hostapi;
-mod jscompat;
-mod jshost;
 mod log;
 mod market;
 mod panelversion;
-mod pluginfs;
 mod push;
 mod ratelimit;
 mod restore;
@@ -66,14 +59,13 @@ mod runtimefs;
 mod runtimes;
 mod scheduler;
 mod scriptjob;
+mod settings;
 mod setup;
 mod sha256;
-mod settings;
 mod smtp;
+mod taskdir;
 mod tz;
 mod update;
-mod taskdir;
-mod timers;
 mod upload;
 mod watcher;
 mod web;
@@ -548,17 +540,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|s| log::Level::parse(&s))
             .unwrap_or(log::Level::Debug),
     );
-    log::plog!(
-        "boot",
-        debug,
-        "网络线程池就绪（{workers} 个线程）"
-    );
+    log::plog!("boot", debug, "网络线程池就绪（{workers} 个线程）");
 
     // 周期把分配器里**空闲**的页还给系统（macOS: malloc_zone_pressure_relief；
-    // glibc: malloc_trim）。为什么需要：QuickJS 每次热更新/装回都是"建一个 Context
-    // 再销毁"，每次 http_fetch 也是"建一个客户端再销毁" —— libmalloc 会把释放的页
-    // 留在自己的空闲链表里，从不主动还给系统。实测 24h 常驻从 5.6MB 爬到 11MB，
-    // 而 JS 堆只有 0.9MB，涨的全是这些"高水位"。
+    // glibc: malloc_trim）。为什么需要：热更新/装回、每次 http_fetch 都会在面板进程里
+    // 分配又释放临时对象 —— libmalloc 会把释放的页留在自己的空闲链表里，从不主动还给
+    // 系统。内嵌引擎时代实测 24h 常驻从 5.6MB 爬到 11MB，而 JS 堆只有 0.9MB，
+    // 涨的全是这些"高水位"。
     //
     // 每分钟一次、每次几十微秒；真归还了才打日志。PLUGIN_MEM_TRIM_MS=0 关闭。
     spawn_mem_trim();
@@ -835,7 +823,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::create_dir_all(&plugin_data_dir)?;
     let plugin_data_dir = plugin_data_dir.canonicalize()?;
-    // 插件数据目录里放的是插件自己落的 token/状态（见 pluginfs.rs），收紧到 0700。
+    // 插件数据目录里放的是插件自己落的 token/状态，收紧到 0700。
     ensure_private_dir(&plugin_data_dir)?;
     // 外部运行时 shim 的落盘目录（Node runner / host-api；不含 Python）。
     let runtime_dir = env_path(
@@ -1238,7 +1226,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// 只监听 SIGINT 是不够的：`systemctl stop` 发的是 SIGTERM，
 /// 那样进程会被直接杀掉，`engine.shutdown()` 里的 `join()` 就没机会跑，
-/// QuickJS 的 Context 也就不会按正确顺序析构。
+/// 插件子进程也就不会被按序杀掉（可能留下孤儿）。
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -2118,9 +2106,10 @@ fn resident_kb() -> u64 {
 /// 代价是一次重启：DB 是 WAL、插件在启动时重载，实测中断 1 秒左右。
 /// 检查间隔 PLUGIN_MAX_RSS_MS（默认 30 秒）。
 fn spawn_max_rss_watchdog() {
-    // 默认 96MB：一台加载 5 个 QuickJS 插件的机器实测峰值 ~43MB，24MB 会在启动
-    // 5 分钟后触发自愈重启，把插件重新装一遍 —— 正好抵消惰性加载。96MB 给正常
-    // 插件留余量，只在插件真泄漏时兜底。0 才表示关掉。
+    // 默认 96MB：只量面板进程本身（插件子进程另算）。内嵌引擎时代一台加载 5 个
+    // 插件的机器实测峰值 ~43MB，24MB 会在启动 5 分钟后触发自愈重启，把插件重新装
+    // 一遍 —— 正好抵消惰性加载。96MB 给面板自身留余量，只在真泄漏时兜底。
+    // 0 才表示关掉。
     let kb = std::env::var("PLUGIN_MAX_RSS_KB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

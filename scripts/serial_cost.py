@@ -216,7 +216,7 @@ def main() -> int:
     )
     print(
         "  原理：慢任务的插件和快任务的插件被分到不同的执行线程（`workers::plan`），"
-        "各自有独立的 QuickJS Runtime 和调度器 —— 慢的那条卡住时，快的那条照常在跑。"
+        "各自派发到独立的 Node/Bun 子进程 —— 慢的那条卡住时，快的那条照常在跑。"
     )
     return 0 if ok else 1
 

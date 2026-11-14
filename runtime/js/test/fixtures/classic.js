@@ -1,4 +1,4 @@
-// Classic (QuickJS-style) plugin: no top-level import/export.
+// Classic (global-script) plugin: no top-level import/export.
 // The runner must capture this top-level function declaration as on_tick.
 
 const PLUGIN = 'classic';

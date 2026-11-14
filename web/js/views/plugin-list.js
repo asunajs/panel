@@ -42,16 +42,16 @@ function esc(s) {
 /// 插件能用的执行引擎。与 `/api/state.runtimes` 里的 `kind` 对齐。
 ///
 /// ⚠ 后端那份清单还包含 `python` / `sh` —— 那是**脚本任务**的运行时，
-///   不是插件能选的引擎。这里刻意只列这三个，别把清单整个铺进下拉框。
-const ENGINE_KINDS = ['quickjs', 'node', 'bun'];
-const ENGINE_LABEL = { quickjs: 'QuickJS', node: 'Node', bun: 'Bun' };
+///   不是插件能选的引擎。这里刻意只列这两个，别把清单整个铺进下拉框。
+const ENGINE_KINDS = ['node', 'bun'];
+const ENGINE_LABEL = { node: 'Node', bun: 'Bun' };
 
 function engineBadge(p, runtimeByKind) {
-  const engine = p.engine || 'quickjs';
+  const engine = p.engine || 'node';
   const info = runtimeByKind.get(engine);
   const label = ENGINE_LABEL[engine] || engine;
-  // 换色而不是换词：引擎名本身已经是标识，颜色只是让三种一眼分得开
-  const cls = engine === 'quickjs' ? 'success' : engine === 'node' ? 'running' : 'warning';
+  // 换色而不是换词：引擎名本身已经是标识，颜色只是让两种一眼分得开
+  const cls = engine === 'node' ? 'running' : 'warning';
   const reason = info && info.available === false ? `（不可用：${info.reason || '原因未知'}）` : '';
   return `<span class="badge ${cls}" title="执行引擎：${esc(label)}${esc(reason)}">${esc(label)}</span>`;
 }
@@ -502,10 +502,10 @@ export async function render(root, ctx, opts = {}) {
         复杂插件仍可自带页面（位于 <span class="mono">/plugins/{name}/</span>）。<br>
         ${
           showEngine
-            ? `执行引擎默认 <b>QuickJS</b>（内置），
-        也可以按插件换成 Node / Bun（装好之后才可选，不可用的选项会写明原因）。`
-            : `默认跑在面板内置的 <b>QuickJS</b> 里。
-        需要按插件切换 Node / Bun 时，去「设置 → 插件」里开启执行引擎设置。`
+            ? `执行引擎默认 <b>Node</b>，
+        也可以按插件切换（装好之后才可选，不可用的选项会写明原因）。`
+            : `默认跑在 <b>Node</b> 里。
+        需要按插件切换运行时，去「设置 → 插件」里开启执行引擎设置。`
         }
       </p>
 
@@ -528,12 +528,11 @@ export async function render(root, ctx, opts = {}) {
                 .map((p, pi) => {
                   const hasUi = p.has_ui === true;
                   const off = p.disabled === true;
-                  const engine = p.engine || 'quickjs';
+                  const engine = p.engine || 'node';
                   // `label for` / `id` 必须全页唯一：每个系列的分组下标从 0 重来，
                   // 只用 pi 会让两个系列各有一个 `plugin-engine-0`，点标签会聚焦错行。
                   const uid = `${gi}-${pi}`;
-                  // 自定义解释器路径只对 Node/Bun 有意义（QuickJS 是内置的）。
-                  // 切换下拉框时由下面的 change 委托同步禁用状态。
+                  // 自定义解释器路径只对 Node/Bun 有意义。
                   //
                   // 整块默认不渲染（见 prefs.js）：它是个高级开关，关着的时候
                   // 连 DOM 都不给 —— 用 CSS 藏起来的话，Tab 键仍会聚焦到看不见的
@@ -551,9 +550,8 @@ export async function render(root, ctx, opts = {}) {
                       <div class="field">
                         <label class="field-label" for="plugin-command-${uid}">自定义解释器路径</label>
                         <input class="input mono" id="plugin-command-${uid}" data-command="${esc(p.name)}"
-                               spellcheck="false" placeholder="${
-                                 engine === 'quickjs' ? '内置引擎，不需要路径' : '留空则用 PATH 里的命令'
-                               }" value="${esc(p.command || '')}" ${engine === 'quickjs' || off ? 'disabled' : ''}>
+                               spellcheck="false" placeholder="留空则用 PATH 里的命令"
+                               value="${esc(p.command || '')}" ${off ? 'disabled' : ''}>
                       </div>
                       <button class="btn" data-runtime-apply="${esc(p.name)}" ${
                         off ? 'disabled title="先启用插件"' : ''
@@ -694,21 +692,6 @@ export async function render(root, ctx, opts = {}) {
   // 插件页面若需要整个窗口（比如它自己的移动端布局），iframe 里会显得挤。
   clearRootListeners(root);
 
-  // 换引擎下拉框：QuickJS 不需要解释器路径，Node/Bun 才需要。
-  // 只切换输入框的可用状态，**不**自动提交 —— 换引擎会重载插件，
-  // 让用户看清自己选的是什么、填完路径再点「应用引擎」。
-  addRootListener(root, 'change', (ev) => {
-    const sel = ev.target.closest('select[data-engine]');
-    if (!sel) return;
-    const card = sel.closest('[data-plugin]');
-    const cmd = card?.querySelector('input[data-command]');
-    if (!cmd) return;
-    const needsPath = sel.value !== 'quickjs';
-    cmd.disabled = !needsPath;
-    if (!needsPath) cmd.value = '';
-    cmd.placeholder = needsPath ? '留空则用 PATH 里的命令' : '内置引擎，不需要路径';
-  });
-
   addRootListener(root, 'click', (ev) => {
     const btn = ev.target.closest('button[data-open]');
     if (!btn) return;
@@ -759,7 +742,7 @@ export async function render(root, ctx, opts = {}) {
       const cmdInput = card?.querySelector('input[data-command]');
       if (!sel) return;
       const engine = sel.value;
-      const command = engine === 'quickjs' ? '' : (cmdInput?.value || '').trim();
+      const command = (cmdInput?.value || '').trim();
       rtBtn.disabled = true;
       const res = await setPluginRuntime(name, engine, command);
       rtBtn.disabled = false;

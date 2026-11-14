@@ -1,7 +1,7 @@
 # 实测踩坑清单
 
-> rquickjs / SQLite / 调度器 / 安装脚本 / 外部运行时 fd3-fd4 / 脚本目录发现 ——
-> 实测踩出来的清单。PocketPy 那一段是**历史**，已经随运行时删除。
+> SQLite / 调度器 / 安装脚本 / 外部运行时 fd3-fd4 / 脚本目录发现 ——
+> 实测踩出来的清单。rquickjs 与 PocketPy 那两段是**历史**，已经随运行时删除。
 >
 > 章节号沿用原 `README.md` 的编号（作为稳定 ID，便于对照 git 历史与旧讨论）。
 > 文档索引：[docs/README.md](README.md)
@@ -10,7 +10,7 @@
 
 ## 6. 踩坑记录
 
-### rquickjs 0.14（QuickJS 插件仍适用）
+### rquickjs 0.14（历史；内嵌引擎已删除）
 
 1. **`Runtime` / `Context` 不是 `Send`。** 不能放进 `tokio::spawn`。必须专用线程独占，跨线程只传纯数据。
 2. **`Context::with` 闭包参数是 `Ctx` 值，不是 `&Ctx`。** 传给 `fn f(ctx: &Ctx)` 要写 `&ctx`。
@@ -45,22 +45,28 @@
 
 ### 外部运行时（第六十轮，Node / Bun）
 
-16. **`dup2(3, 3)` 是 no-op，不会清 `FD_CLOEXEC`。** 子进程 exec 之后 fd3/fd4 会被内核关掉，
-    表现为 RPC 第一次调用就 `ENXIO` / 读到 EOF。必须在 `pre_exec` 里 `dup2` 之后显式
-    `fcntl(3, F_SETFD, 0)` 和 `fcntl(4, F_SETFD, 0)`，再把除 3/4 之外的临时 fd 关掉。
-    `src/extproc.rs` 的注释写了这条。
+16. **监听 socket 设了 nonblocking，accepted fd 在 macOS 上会继承它。** 不显式
+    `set_nonblocking(false)`，第一次 `read_line` 立刻 `WouldBlock`，表现成「握手后马上断」。
+    `src/extproc.rs` 的 `rpc_conn` 开头写了这条。（fd3/fd4 + `dup2` 那套已随 TCP 改造删除。）
 17. **RPC 不能和命令通道共用 stdin/stdout。** 插件的 `sqlite_query` 是同步的：它写请求后
     必须立刻读响应；如果请求写在 stdin、面板又在同一对管道上等 `result`，两边互锁。
-    所以 RPC 单独走 fd3/fd4（两条单向管道）。
+    所以 RPC 单独走一条通道（现在是回环 TCP）。
 18. **Node `module.register` 是 20.6 才有的。** 低版本上 `host-api` 解析不出来，
     报错是 `Cannot find module 'host-api'` —— 看起来像插件写错了。`src/runtimes.rs` 在探测阶段
     就卡版本并给出明确原因。
 19. **Bun 没有 `module.register`。** 不要拿 Node 的 `register.mjs` 去喂 Bun；
     Bun 走 `NODE_PATH=<runtime>/js/node_modules`（`package.json` 的 `exports` 指到同一文件）。
     两条路径解析到的必须是**同一个模块实例**，否则插件里 `host === host_api` 这类判断会变 false。
-20. **子进程必须 `process_group(0)`。** 否则超时 `kill(pid)` 只杀解释器本身，插件用
-    `child_process` 起的子进程会变成孤儿继续跑。杀的时候用 `kill(-pid)`；`setsid` / `nohup`
-    出去的进程换了进程组，管不到 —— 这是文档里写明的边界。
+20. **子进程必须能杀整棵树。** Unix 用 `process_group(0)` + `kill(-pid)`；Windows 用
+    `taskkill /T /F`。否则超时只杀解释器本身，插件用 `child_process` 起的子进程会变成孤儿
+    继续跑。`setsid` / `nohup` 出去的进程换了进程组，管不到 —— 这是文档里写明的边界。
+    **同一段代码里还有 macOS 独有的启动竞态：** `posix_spawn` 出来的子进程偶尔在
+    **exec 之前**就被内核 abort，`waitpid` 看到的是 `SIGKILL`，插件代码一行都没跑
+    （crash report 写的是 `os_once_t is corrupt` + `crashed on child side of fork pre-exec`，
+    2026-11-10 在 macOS 26.6.2 / 25G83 上测得，同一构建 10 次里约 1–4 次）。
+    表现是「第一次加载就报『外部插件进程已退出（没有收到事件）』，重开一次就好」。
+    `src/extproc.rs` 的 `spawn_ready` 对「还没收到任何事件就 SIGKILL」最多重试 4 次；
+    插件自己报的加载失败和超时都**不**重试。这是绕内核竞态，不是插件的问题。
 21. **fd1 上非 JSON 的行不能丢。** 插件自己的 `console.log` / 原生 `print` 都会落在 stdout，
     它们是**正常输出**。判据是 `"__pp":1` + 已知 `ev`：不是协议事件就当 info 日志。
     早期版本想「解析失败就报错」，结果把插件的正常输出变成了错误。
@@ -71,12 +77,11 @@
     用单次调用的 `EXEC_BUDGET_MS` 去卡加载，会把正常插件判成死循环。加载用
     `LOAD_BUDGET_MS`（默认 10s），单次调用才用任务预算。
 24. **外部插件的「状态」不是免费的。** 超时 / 崩溃 / 卸载都会 `SIGKILL` 进程组，
-    模块变量里的东西全丢。跨调用状态必须落数据目录 / SQLite —— 这是与 QuickJS
-    最容易被忽略的语义差别。
+    模块变量里的东西全丢。跨调用状态必须落数据目录 / SQLite。
 25. **别把面板和子进程的 RSS 相加当「面板占用」。** `ps` 里会同时出现
     `plugin-panel` 和 `node … runner.mjs` 两个进程；一个 80 MB 的 Node 子进程不等于面板涨了 80 MB，
     但机器总内存确实少了一截。测内存先 `pkill` 清干净，只认单进程读数（
-    [lazy-plugins.md §实测](lazy-plugins.md#实测js-堆省下来了rss-不动) 里踩过一次「两个进程叠加」的假数据）。
+    [lazy-plugins.md §卸载](lazy-plugins.md#卸载--杀子进程) 里踩过一次「两个进程叠加」的假数据）。
 
 ### 脚本任务（第六十轮）
 
@@ -86,8 +91,8 @@
 27. **没有 `@cron` = 被发现但不调度，不是错误。** 面板上「未调度」是正常状态；
     写错了 `@cron` 才是 error（解析失败并带原因），两者不能混。
 28. **文件头只扫前 50 行。** 注解写到第 51 行等于没写；`@cron` 写在 `def main()` 里也不会被看到。
-29. **`@runtime` 与扩展名必须匹配。** `.js` 只接受 `node|bun`（**`quickjs` 不是合法的脚本运行时**
-    —— QuickJS 只跑插件）；`.py` 接受 `python3`；`.sh` 接受 `sh`。不匹配 = 非法头部，
+29. **`@runtime` 与扩展名必须匹配。** `.js` 只接受 `node|bun`（`quickjs` 已移除，
+    会明确报错）；`.py` 接受 `python3`；`.sh` 接受 `sh`。不匹配 = 非法头部，
     文件在列表里标错且**不自动调度**，不会静默退回默认值。
 30. **`script-dir` 的删除 = 彻底删文件（不进 `.trash`），`script-panel` 的删除 = 删行（文件保留）。**
     目录脚本**没有墓碑**：文件就是任务，不存在「删了任务但文件还在」的中间态。

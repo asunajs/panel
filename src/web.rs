@@ -107,7 +107,7 @@ const MAX_PLUGIN_CONFIG_BODY: usize = 1024 * 1024 + 4096;
 /// 于是只要有人开着日志页，`Ctrl-C` / `systemctl stop` / `docker stop` 就卡住，
 /// 直到 systemd 的 `TimeoutStopSec` 到了发 SIGKILL。那正是 `main.rs` 里
 /// 注册 SIGTERM 想避免的事：`engine.shutdown()` 的 `join()` 没机会跑，
-/// QuickJS 的 Context 就不会按正确顺序析构。
+/// 插件子进程可能变成孤儿。
 ///
 /// 实测（修之前）：没有客户端时 SIGTERM → **55ms** 退出；
 /// 挂着一个 SSE 日志流时 → **10 秒都退不出**，只能 kill -9。
@@ -335,7 +335,7 @@ pub fn router(state: AppState) -> Router {
 /// 为什么要有第二个 origin：`/plugins/{name}/...` 由面板同源提供时，插件页面
 /// 与面板共享 `document` 的 origin —— 同源 iframe 不是安全边界，插件页的 JS
 /// 可以直接 `parent.fetch('/api/plugins/upload', {headers:{'x-panel':'1'}})`，
-/// 于是 QuickJS 插件的"文件围栏"被绕过，一次点击就能升级成宿主 RCE。
+/// 于是插件页面能借面板会话调用高权限接口，一次点击就能升级成宿主 RCE。
 /// 需要隔离时，可把插件页面挪到 `127.0.0.1:<port+1>`（或显式
 /// `PLUGIN_UI_ADDR` / `PLUGIN_UI_ORIGIN`）；默认不隔离，插件页与面板同源。
 ///
@@ -1165,10 +1165,15 @@ async fn run_task(
     }
 }
 
-/// `POST /api/tasks/{plugin}/{name}/stop` —— 请求停止当前正在跑的 JS。
+/// `POST /api/tasks/{plugin}/{name}/stop` —— 停止**当前正在跑的这一次**。
 ///
-/// 说明：这里停的是**当前任务**，不是关面板。打断靠 QuickJS 的 interrupt；
-/// 如果任务正卡在 `http_fetch` 这种宿主调用里，只能等它返回后的下一个 JS 边界。
+/// Node-only 之后子进程是可以安全终止的：这里按 run_id 找到那一次的子进程，
+/// 直接杀掉它的整个进程组（`extproc::kill_run`），执行立刻结束。收尾时这次失败
+/// 归类成「已停止」（不推失败、不撞熔断）。
+///
+/// 停止是**按调用**记账的（`engine::request_task_stop`）：停 A 不会碰 B，
+/// 也不会影响这条任务下一次到点的运行。若这次还没派发（排队中），标记为待停，
+/// 下一次派发时直接跳过。
 async fn stop_task(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
@@ -1177,8 +1182,7 @@ async fn stop_task(
     if let Err(r) = guard_write(&headers) {
         return r;
     }
-    // 先确认这条任务真的存在（安全审计 H3）：停止位是全局单比特，
-    // 对不存在的任务反复调停止，等于持续打断全机 JS。
+    // 先确认这条任务真的存在（安全审计 H3）：对不存在的任务反复调停止不该有任何副作用。
     match crate::db::job_exists(&st.db, &plugin, &name) {
         Ok(true) => {}
         Ok(false) => {
@@ -1188,39 +1192,10 @@ async fn stop_task(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("查任务失败: {e}"));
         }
     }
-    // 只停**正在跑的那一次**（安全审计 H3）：以前置的是全局单比特，停 A 会打断 B。
-    match crate::engine::in_flight_of(&plugin, &name) {
-        Some(inv) => st.health.request_task_stop_inv(inv),
-        None => {
-            // 没有在跑的：可能是排队中（还没派发）。退到老语义，但只对这条任务
-            // 生效——它会在下一次派发时被 Watchdog 的 cur_inv 匹配上。
-            st.health.request_task_stop();
-        }
-    }
-    let health = st.health.clone();
-    let db = st.db.clone();
-    // 等这条任务真的收尾（`runs.finished_at` 有值），再把停止位复位。
-    // 不复位会让下一次任务也被打断；只延时固定秒数又可能在长时间宿主调用里提前复位。
-    tokio::spawn(async move {
-        for _ in 0..120 {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            // ⚠ 没有 run 记录时**不能**当成"已经收尾"（安全审计 H3）。
-            //
-            // 以前这里是 unwrap_or(true)：任务还在排队（没有 run 行）时，
-            // 第一个 250ms 就把停止位复位了 —— /stop 对排队中的任务等于空操作。
-            // 现在没有记录就继续等，等到窗口结束（30 秒）再复位。
-            let done = crate::db::list_runs(&db, Some(&plugin), Some(&name), 1)
-                .ok()
-                .and_then(|v| v.into_iter().next())
-                .map(|r| r.finished_at.is_some())
-                .unwrap_or(false);
-            if done {
-                break;
-            }
-        }
-        health.clear_task_stop();
-    });
-    Json(json!({ "ok": true })).into_response()
+    // 只停**这一次**（安全审计 H3）：run_id 记账，停 A 不会打断 B，也不会误伤下一次运行。
+    // 返回是否真的杀到了一个在跑的子进程；排队中的会标记待停，killed=false。
+    let killed = crate::engine::request_task_stop(&plugin, &name);
+    Json(json!({ "ok": true, "killed": killed })).into_response()
 }
 
 /// `POST /api/jobs` —— 新建一条**面板任务**（任务定义写进 `jobs` 表，`source = 'panel'`）。
@@ -2132,7 +2107,8 @@ struct PluginRuntimeReq {
     command: Option<String>,
 }
 
-/// `POST /api/plugins/{name}/runtime` —— 切 QuickJS / Node / Bun（按插件覆盖）。
+/// `POST /api/plugins/{name}/runtime` —— 切 Node / Bun（按插件覆盖）。
+/// 内嵌 QuickJS 已移除，`quickjs` 请求会得到 400 并提示改用 node / bun。
 async fn set_plugin_runtime(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -2145,7 +2121,14 @@ async fn set_plugin_runtime(
     let Some(engine) = EngineKind::parse(&req.engine) else {
         return json_error(
             StatusCode::BAD_REQUEST,
-            format!("engine 只认 quickjs / node / bun，收到 `{}`", req.engine),
+            if taskdir::is_retired_runtime(&req.engine) {
+                format!(
+                    "engine `{}` 已移除（内嵌 QuickJS 不再提供），请用 node / bun",
+                    req.engine
+                )
+            } else {
+                format!("engine 只认 node / bun，收到 `{}`", req.engine)
+            },
         );
     };
     // 插件存在性：已加载 / 已停用 / 磁盘上有文件都算
@@ -2163,14 +2146,6 @@ async fn set_plugin_runtime(
         .command
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if engine == EngineKind::QuickJs {
-        if command.is_some() {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "QuickJS 是内嵌的，不能指定解释器路径".into(),
-            );
-        }
-    } else {
         if let Err(e) = st.host.catalog.require(engine) {
             return json_error(StatusCode::BAD_REQUEST, e);
         }
@@ -2183,14 +2158,12 @@ async fn set_plugin_runtime(
                 );
             }
         }
-    }
 
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     if let Err(e) = db::set_plugin_runtime(
         &st.db,
         &name,
-        // 显式选 QuickJS 要落库：否则在 `PANEL_JS_ENGINE=node` 的部署里，
-        // “改回 QuickJS”会被当成“没设置”而回落到全局 node。
+        // 落库的是解析后的引擎名：quickjs 已在上面被 400 拒绝，库里只会出现 node/bun。
         Some(engine.as_str()),
         command.as_deref(),
         &now,
@@ -2503,10 +2476,16 @@ async fn create_script_job(
                     ),
                 )
             }
+            None if taskdir::is_retired_runtime(raw) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("运行时 `{raw}` 已停用（内嵌 QuickJS 已移除），请改用 node / bun"),
+                )
+            }
             None => {
                 return json_error(
                     StatusCode::BAD_REQUEST,
-                    format!("未知运行时 `{raw}`（node|bun|python3|sh）"),
+                    format!("未知运行时 `{raw}`（node|bun|python3|sh|exe）"),
                 )
             }
         },
@@ -2746,6 +2725,12 @@ async fn edit_script_job(
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     format!("运行时 `{}` 与 `{}` 不匹配", r.as_str(), file.path),
+                )
+            }
+            None if taskdir::is_retired_runtime(raw) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("运行时 `{raw}` 已停用（内嵌 QuickJS 已移除），请改用 node / bun"),
                 )
             }
             None => return json_error(StatusCode::BAD_REQUEST, format!("未知运行时 `{raw}`")),
@@ -3295,10 +3280,11 @@ async fn test_run(
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "引擎线程已退出".into());
     }
 
-    // 给得比执行预算宽：临时解释器要先建起来（QuickJS Context）
-    // 试跑有自己的预算（见 `engine::test_run_budget_ms`），等待也要按它算 ——
-    // 否则单次预算放宽到 60 秒后，这里会陪等 65 秒。
-    let wait = Duration::from_millis(test_run_budget_ms() + 5_000);
+    // 等待要盖住试跑的**整条**墙钟：一次性 Node 进程先起来（加载预算），再跑执行预算，
+    // 最后收尸 —— 这几段串行（见 `extproc::script_run_wall_budget`）。只给执行预算 + 几秒
+    // 的话，冷启动慢时 HTTP 先 504、试跑还在后台跑。再留 5s 余量给调度 / IPC。
+    let wait = crate::extproc::script_run_wall_budget(Duration::from_millis(test_run_budget_ms()))
+        + Duration::from_millis(5_000);
     match tokio::time::timeout(wait, rx).await {
         Ok(Ok(Ok(out))) => Json(json!({
             "ok": true,
@@ -4582,6 +4568,9 @@ async fn api_state(State(st): State<AppState>) -> Json<serde_json::Value> {
         "engine": {
             "healthy": healthy,
             "beat_ago_ms": st.health.beat_ago_ms(),
+            // ⚠ 已废弃：Node-only 之后 `interrupts` 与 `js_memory_bytes` 恒为 0
+            //（超预算杀进程组、堆在子进程里，宿主都不再统计）。仅为兼容老消费方保留，
+            // 新代码别拿它们当健康判据 —— 看 `healthy` / `beat_ago_ms` / `workers`。
             "interrupts": st.health.interrupts(),
             "budget_ms": st.health.budget_ms,
             "js_memory_bytes": st.health.js_memory_bytes(),

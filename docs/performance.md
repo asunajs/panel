@@ -14,10 +14,10 @@
 | 项 | 优化前 | 优化后 |
 |---|---|---|
 | tokio worker 线程 | 10（= CPU 核数） | **2** |
-| 进程线程总数 | 12 | **4**（纯 QuickJS 部署；每个外部插件 +4 条管道线程） |
+| 进程线程总数 | 12 | **4**（内嵌引擎时代的读数；每个外部插件另加管道线程） |
 | RSS | 9968 KB | **8928 KB** |
-| QuickJS 堆 | 不可见 | 225 KB（面板可见） |
-| 二进制（macOS release） | 2.2 MB | 2.2 MB |
+| JS 堆 | 不可见 | 225 KB（内嵌引擎时代；Node 的堆在子进程里，宿主不再统计） |
+| 二进制（macOS release，内嵌引擎时代） | 2.2 MB | 2.2 MB |
 
 做法：
 
@@ -25,7 +25,7 @@
    低配盒子通常 1-2 核，默认改成 2（`TOKIO_WORKER_THREADS` 可覆盖）。
 2. `max_blocking_threads(8)` 给阻塞池一个上限。
 3. worker 栈 2MB → 512KB。
-4. 面板暴露 `rt.memory_usage()`，能直接看到 JS 侧真实堆用量。
+4. 面板曾暴露 `rt.memory_usage()`；内嵌引擎删除后该读数恒为 0。
 
 **怎么读这些数字**：
 
@@ -62,10 +62,9 @@
 
 | 项 | 量级 | 状态 |
 |---|---|---|
-| 纯宿主（QuickJS + SQLite + HTTP + 引擎线程） | ~2–3 MB 独占（macOS `footprint`） | 沿用 8.1 的实测，待复核 |
-| QuickJS 插件堆 | **~0.6 MB / 插件** | 实测见 [lazy-plugins.md](lazy-plugins.md)；待复核 |
-| Node 子进程（每个启用 Node 的插件） | **40–80 MB RSS** | **待 Lead 实测** |
-| Bun 子进程 | **30–60 MB RSS** | **待 Lead 实测** |
+| 纯宿主（SQLite + HTTP + 引擎线程） | ~2–3 MB 独占（macOS `footprint`） | 沿用内嵌引擎时代的实测，待复核 |
+| Node 子进程（每个启用 Node 的插件） | **26.7 MiB phys_footprint / 63.1 MiB `process.rss`**（macOS arm64，空插件；2026-11-10 实测） | 插件再占 20 MiB 缓存 → **51.7 / 89.8 MiB**；Linux/ARM 待测 |
+| Bun 子进程 | **30–60 MB RSS** | **仍未实测**（本机未跑） |
 | Python 脚本 | 一次性进程，跑完即退 | 不计入常驻 |
 | Shell 脚本 | 一次性进程 | 同上 |
 | RPC 单次往返 | **几十 µs** | **待实测** |
@@ -73,19 +72,21 @@
 
 > 本地 macOS arm64 快速核对（2026-10-17，**不是目标 Linux**）：同一个路由处理函数里
 > 连续 500 次 `sqlite_query('SELECT 1')`，Node 子进程耗时 20 ms（≈40 µs/次），
-> Bun 22 ms（≈44 µs/次），QuickJS 8 ms（≈16 µs/次）。这只证明 RPC 是几十 µs 量级，
+> Bun 22 ms（≈44 µs/次）。这只证明 RPC 是几十 µs 量级，
 > 不能替代目标机器上的 p50/p99。
 >
-> 上表的 40–80 / 30–60 MB 是**量级**，不是本仓库的实测值。为什么先写量级：
-> 它足以支撑「默认 QuickJS、外部运行时按插件 opt-in」这个决定；精确值等 Lead 用
+> 上表 Node 的读数（2026-11-10，macOS arm64，Node 24.16 + `runtime/js/runner.mjs`）
+> 用 `process.memoryUsage()` + `footprint` 交叉核对；Bun 仍只有量级。两者在 Linux/ARM
+> 目标机上的值还没量，**不要把 macOS 的 RSS 直接套到盒子/手机上**。
+> 它足以支撑「Unix 上 Node 作默认、Bun 按插件 opt-in」这个取舍；精确值等 Lead 用
 > 本仓库的 shim 在目标机器上量完再填。**不要把量级当实测引用。**
 
 测量方法（Lead 用）：
 
 ```bash
 # 同一台机器、同一个二进制，只换「某个插件的运行时」
-PANEL_JS_ENGINE=quickjs ./plugin-panel &   # 基线
-# 面板上把插件 A 切到 node，比较单进程 RSS（ps -o rss）与子进程 RSS
+# 基线 = 不加载该插件（或把该插件切到 bun），再比较单进程 RSS（ps -o rss）
+./plugin-panel &
 # 注意：ps 里会有面板 + node 两个进程，别把两者相加当"面板占用"
 ```
 
@@ -215,10 +216,10 @@ python3 scripts/endurance.py --hours 8             # 目标：musl 真机跑一�
 |---|---|---|---|
 | tokio(2 worker) + Axum（当前） | 558 KB | 1728 KB | **1040 KB** |
 | tiny_http（纯阻塞 accept 循环，无 tokio/hyper/tower） | 395 KB | 1616 KB | **1088 KB** |
-| 真实面板（0 插件，= HTTP 层 + QuickJS + SQLite + 引擎线程） | 3.7 MB | 8224 KB | 2128 KB |
+| 真实面板（0 插件，内嵌引擎时代的 HTTP + SQLite + 引擎线程） | 3.7 MB | 8224 KB | 2128 KB |
 
 结论：**换掉 Axum 省不出内存**。省下的是 163 KB 二进制，内存差异在噪声内。
-真实面板 2128 KB 里，HTTP 层只占约 1.0 MB，另外 1.1 MB 是 QuickJS runtime + SQLite + 调度器 ——
+真实面板 2128 KB 里，HTTP 层只占约 1.0 MB，另外 1.1 MB 是内嵌 runtime + SQLite + 调度器 ——
 要压内存得动引擎，动 HTTP 框架是白费力气。所以**保留 Axum**。
 
 真要继续压内存，优先级是：① 减少**外部** Node/Bun 插件的数量（每个几十 MB，见 8.1c）
@@ -234,7 +235,7 @@ python3 scripts/endurance.py --hours 8             # 目标：musl 真机跑一�
 | `linux-x86_64` | `ubuntu-latest` | 单元测试 + install.sh 用例 + 前端静态检查 + 冒烟 + 产物 |
 | `linux-aarch64` | `ubuntu-24.04-arm` | **真 ARM64 硬件**上跑单元测试 + 冒烟 |
 | `linux-aarch64-musl` | `ubuntu-24.04-arm` | 静态链接产物 + 冒烟 |
-| `windows-x86_64` | `windows-latest` | `cargo check --all-targets` + release 链接（外部运行时 Unix-only，QuickJS 必须可编译） |
+| `windows-x86_64` | `windows-latest` | `cargo check --all-targets` + release 链接（外部运行时已跨平台，但 Windows 上的 TCP RPC/插件运行还没进 CI） |
 | `adapters` | `ubuntu-latest` | Node 适配器用例 + 仓库真插件在 Node 下跑通 |
 | `runtime-js` | `ubuntu-latest` | `runtime/js` 的协议 / host-api 用例（Node 22） |
 
@@ -248,19 +249,18 @@ python3 scripts/endurance.py --hours 8             # 目标：musl 真机跑一�
 ✅ 服务在 20 秒内就绪
 ✅ 面板页返回 HTML — http 200
 ✅ /api/state 结构完整 — status=running
-✅ 插件已加载 — N 个（QuickJS；有 Node 时外部引擎也测）
+✅ 插件已加载 — N 个（Node / Bun）
 ✅ 调度循环在转（ticks 增长）
 ✅ jobs 表已落库
 ✅ 脚本任务真的跑过（TASKS_DIR 里的 js/py/sh 各一条）
 ✅ 引擎健康上报正常
-✅ QuickJS 堆用量可观测
+✅ 宿主 JS 堆读数恒为 0（Node 的堆在子进程里）
 ·  常驻内存 — 非 Linux，跳过（macOS 的 RSS 含共享库，不可信）
 ✅ SIGTERM 后进程退出 — exit=0
 ```
 
 上面那行「常驻内存」在 Linux 上会变成实测值（`✅ 常驻内存 — RSS x.x MB / 峰值 y.y MB`），
-阈值 32 MB，超了就说明有人往引擎里塞了不该塞的东西。**注意：这个阈值只覆盖 QuickJS 部署
-（冒烟默认不启用外部 Node 插件）；启用外部插件后进程树的总 RSS 另算。**
+阈值 32 MB。它只量面板进程本身；插件子进程的 RSS 另算（见 8.1c）。
 
 本地跑同一个脚本：
 
@@ -273,14 +273,15 @@ python3 scripts/smoke.py ./target/release/plugin-panel
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-cargo install --locked cargo-zigbuild   # 借 zig 编译 QuickJS / SQLite 的 C 代码
+cargo install --locked cargo-zigbuild   # 借 zig 编译 SQLite 等 C 代码
 # 发布用：静态链 OpenSSL（直播 + 静态）
 cargo zigbuild --release --target aarch64-unknown-linux-musl --features legacy-tls-vendored
 # 不直播的瘦身版
 cargo zigbuild --release --target aarch64-unknown-linux-musl --no-default-features
 ```
 
-产物（本地 zigbuild，含 QuickJS + SQLite；第五轮旧数字 4.4 MB 含 PocketPy。
+产物（内嵌引擎时代的本地 zigbuild，含 QuickJS + SQLite；第五轮旧数字 4.4 MB 含 PocketPy。
+P2 删除 `rquickjs` 后体积需要重测，下面数字仅作历史对照。
 **第六十四轮复测**：`legacy-tls-vendored` **11.5 MiB**（12,039,272 字节，发布用）/
 `--no-default-features` **7.0 MiB**（7,317,640 字节）。）：
 
@@ -314,14 +315,14 @@ PT_INTERP: 无 → 完全静态
 > `legacy-tls-vendored`**（把 OpenSSL 静态编进去，约 10 分钟），否则 `openssl-sys`
 > 会以"找不到 OpenSSL 安装目录"失败。
 
-**两套 C 代码要交叉编译**：
+**还剩一套 C 代码要交叉编译**：
 
 | C 代码 | 谁编 | 需要的工具链 |
 |---|---|---|
-| QuickJS-ng | `rquickjs-sys` 的 build script | 交叉 `cc`（zig 提供） |
-| SQLite | `rusqlite` 的 `bundled` 特性 | 同上 |
+| SQLite | `rusqlite` 的 `bundled` 特性 | 交叉 `cc`（zig 提供） |
 
-（PocketPy 已经不再编 —— `build.rs` 与 `vendor/pocketpy/` 一起删除了。）
+QuickJS-ng（`rquickjs-sys` 的 bindgen）随 P2 删除，不再需要 libclang。
+PocketPy 也已经不再编 —— `build.rs` 与 `vendor/pocketpy/` 一起删除了。
 
 CI 的 musl job 里显式设了 `CC_aarch64_unknown_linux_musl=musl-gcc`；
 本地用 `cargo zigbuild` 时 zig 会自动接管 `CC_*`。

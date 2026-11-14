@@ -13,7 +13,7 @@
 #    也算进去（unpanel 那边踩过，数出来是 5 而不是 3）。
 set -euo pipefail
 
-EXPECTED=6
+EXPECTED=5
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"

@@ -185,7 +185,7 @@ Dashboard 原来是每 3 秒整包拉一次 `/api/state`，只为看那 40 行�
 - **八档 + 多参数**，行格式与面板逐字符相同（终端流走 **stderr**：
   `node plugin.js > data.txt` 时那个文件只装插件自己的业务输出）
 - **JSONL 逐行同步写**（同一个「文件得立刻可见」的理由）
-- **`console.*` 接到同一套日志**上 —— 面板的 QuickJS 里 `console.log` 就是宿主日志，
+- **`console.*` 接到同一套日志**上 —— 面板的 Node 宿主里 `console.log` 就是宿主日志，
   适配器不接的话，同一份插件在两边对 `console.debug` 的处理会分叉
 - **运行器自己的行也走同一套**：面板里「任务触发/失败」本来就挂在该插件的 scope 下
 
@@ -216,7 +216,7 @@ JS `runtime/js/test/`、`adapters/node/test/log-vectors.mjs`。谁改歪了谁�
 
 向量钉住了*规则*，钉不住*接线*（插件调 `console.log` 到底进没进日志、
 `plugin`/`scope` 字段有没有填）。那一段由冒烟里的一条检查补上：**同一份插件文件，
-面板的 QuickJS 与 Node 各跑一遍，插件自己发出的 10 行逐条比对**。
+面板的 Node 引擎与面板外的 Node 适配器各跑一遍，插件自己发出的 10 行逐条比对**。
 
 ### 21.8 这一轮抓到的 bug
 
@@ -241,11 +241,11 @@ JS `runtime/js/test/`、`adapters/node/test/log-vectors.mjs`。谁改歪了谁�
 - ✅ **运行记录反查日志** —— 第二十六轮做完（[§24](run-history.md#24-运行记录从那次执行点进日志第二十六轮)）。面板自己维护一张 `runs` 表
   （面板层次），引擎执行时用 `with_run_id` 圈住整段，那次运行的日志都带上
   `runs.id`；日志过期后界面说的是「已过期（日志保留 7 天、记录保留 30 天）」
-- ✅ **面板内的 `node:fs` / `node:path`** —— 第二十五轮做完（[§22](plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮)）。
-  QuickJS 侧限定在插件自己的数据根里，越界 `EACCES`；外部 Node/Bun 是原生 fs（无围栏），见 [plugin-fs.md §23](plugin-fs.md#23-外部-node--bun原生-fs没有围栏)
+- ✅ **`node:fs` / `node:path`** —— 第二十五轮做过 QuickJS 数据根围栏，P2 删内嵌引擎后
+  统一为原生 fs（无围栏），见 [plugin-fs.md §22](plugin-fs.md#22-插件的文件系统原生-fs)
 - ✅ **`/classic` 旧页面删除** —— 第十三轮就删了（[§16.13](changelog/13-webui.md#1613-classic-退休删掉旧页面--把它的用例搬到浏览器里)），冒烟里有
   「`/classic` 必须 404」的断言
-- 🗑 **Python 适配器的日志落盘**：随 Python 插件删除。现在所有面板内插件（QuickJS / Node / Bun）
+- 🗑 **Python 适配器的日志落盘**：随 Python 插件删除。现在所有面板内插件（Node / Bun）
   的日志都由面板统一脱敏、落盘、SSE；外部引擎经 fd1 `log` 事件回到同一条出口。
 - ✅ **脚本任务的日志**：stdout 按 info、stderr 按 error 收进同一条通道，带 `run_id`；
   `runs.output` 另存一份合并文本（见 [script-jobs.md §6](script-jobs.md#62-一次执行的生命周期)）

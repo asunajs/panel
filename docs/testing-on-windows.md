@@ -1,5 +1,11 @@
 # 在 Windows / WSL2 上验证内存行为
 
+> **历史文档（2026-11-10）**：本文的 Q1/Q2 判据针对内嵌 QuickJS（卸出后 JS 堆释放、
+> Runtime 回收后 RSS 才降）。P2 删除内嵌引擎后，卸载 = **杀 Node/Bun 子进程**，
+> 面板 RSS 基本不变、子进程 RSS 直接消失；`rss_evict_check.py` 的「Runtime 已回收」
+> 标记也不再出现。本文保留为当时的验证记录，Node-only 的 Windows 验收见
+> [node-only-migration.md](node-only-migration.md) §4。
+
 这份文档写给**接手测试的人或 AI**：把两个包拿到 Windows 机器上跑，回答三个问题。
 
 背景先说清楚，不然容易测错：
@@ -101,7 +107,9 @@ git rev-parse --short=12 'v0.2.0^{commit}'   # 注解 tag 必须加 ^{commit}，
 
 - Linux 包是**静态链接**：不依赖 glibc、不依赖任何 .so，拷进 WSL 就能跑。
 - Windows 包是 MSVC 原生构建，只依赖系统自带 DLL，**不需要装任何运行时**。
-  外部 Node/Bun 档在 Windows 上不可用（QuickJS 正常）。
+  插件默认走外部 Node（需要 Node >= 20.6）；RPC 已改成回环 TCP，但**本轮没有实机验证**。
+  先跑 `node runtime/js/test/run-tests.mjs`（含 TCP 用例）和一个真实插件的加载/任务，
+  再把它当成「Windows 上 Node 可用」的证据。
 
 两个都是 `--no-default-features` 构建：**不带 legacy-tls**。
 直播那条链需要 TLS，这里测内存用不上；要测直播得用带 TLS 的包，见文末。

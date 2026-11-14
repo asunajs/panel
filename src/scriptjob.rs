@@ -102,22 +102,6 @@ pub fn run(
     let env = script_env(
         host, &abs, &data_dir, task_name, schedule, params, manual, run_id,
     );
-    // issue #11：非 Unix 平台上 `.js` 脚本任务是**死路**（外部 Node/Bun 只支持 Unix，
-    // 而 quickjs 对脚本无效），但原来这里复用的是插件那套提示「当前平台请用内嵌
-    // QuickJS」—— 照做会得到「@runtime quickjs 认不出来」。提示必须指向真能走的路。
-    #[cfg(not(unix))]
-    if matches!(rt, ScriptRuntime::Node | ScriptRuntime::Bun) {
-        return ScriptRun {
-            ok: false,
-            error: Some(format!(
-                "外部 {} 运行时只支持 Unix（需要 fd 传递与进程组）。当前平台改用内嵌\
-                 QuickJS 即可跑同一个脚本：把头部改成 `@runtime quickjs`，或者删掉\
-                 `@runtime` 这一行（非 Unix 上 .js 的默认运行时就是 quickjs）。",
-                if rt == ScriptRuntime::Bun { "Bun" } else { "Node" }
-            )),
-            output: String::new(),
-        };
-    }
 
     match rt {
         ScriptRuntime::Node | ScriptRuntime::Bun => {
@@ -201,29 +185,6 @@ pub fn run(
             cmd.arg(launch_path(&abs));
             run_native(cmd, &abs, &env, logs, run_id, timeout)
         }
-        // 内嵌 QuickJS（issue #11）：不需要任何外部解释器，Windows 上也能跑 `.js`。
-        ScriptRuntime::QuickJs => {
-            let out = crate::engine::run_script_in_quickjs(
-                host,
-                logs,
-                tasks_dir,
-                &abs,
-                timeout,
-                params,
-            );
-            match out {
-                Ok(o) => ScriptRun {
-                    ok: true,
-                    error: None,
-                    output: o,
-                },
-                Err(e) => ScriptRun {
-                    ok: false,
-                    error: Some(e),
-                    output: String::new(),
-                },
-            }
-        }
         // 直接执行文件本身（issue #11）：脚本任务就是「定时启动一个程序」，
         // 那个程序可以是个二进制，也可以是 `.cmd` / `.bat` / `.ps1`。
         ScriptRuntime::Exe => {
@@ -290,11 +251,24 @@ mod launch_path_tests {
 /// 而 `cmd.exe` 不认识 verbatim 路径 —— 直接给它会以退出码 1 结束且**一个字都不输出**
 /// （实测 40298596317：手动 `cmd /c <同一个文件>` 退出码 0，面板跑退出码 1）。
 ///
-/// ⚠ `engine::strip_verbatim` 的入参是**已经统一成 `/`** 的路径，所以这里先换斜杠、
+/// ⚠ `strip_verbatim` 的入参是**已经统一成 `/`** 的路径，所以这里先换斜杠、
 /// 剥完再换回 `\` —— 少了这一步，剥前缀会静默失败（第一版就是这么错的）。
+/// 剥掉 Windows verbatim 路径前缀（`//?/C:/...` → `C:/...`）。
+///
+/// `cmd.exe` 不认 `\\?\` 形状；启动器要拿到普通路径。
+pub(crate) fn strip_verbatim(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 fn launch_path(abs: &Path) -> String {
     let s = abs.to_string_lossy().replace('\\', "/");
-    let s = crate::engine::strip_verbatim(&s);
+    let s = strip_verbatim(&s);
     if cfg!(windows) {
         s.replace('/', "\\")
     } else {
@@ -603,9 +577,9 @@ fn run_native(
             (None, false) => {
                 format!("执行超过 {ms}ms，已发出终止信号但 5 秒内没退出，面板已放弃等待")
             }
-            (Some(e), _) => format!(
-                "执行超过 {ms}ms，但**没能终止**它（{e}）；面板已放弃等待，进程可能还在跑"
-            ),
+            (Some(e), _) => {
+                format!("执行超过 {ms}ms，但**没能终止**它（{e}）；面板已放弃等待，进程可能还在跑")
+            }
         })
     } else {
         match code {

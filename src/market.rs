@@ -9,7 +9,7 @@
 //!    `objects.githubusercontent.com` 的签名地址；ureq 默认
 //!    `RedirectAuthHeaders::Never`，这里显式保持，签名地址收不到 Token。
 //! 2. **单文件 `.ts` 不在运行时解释**。安装时转成 `.js`，插件扫描器、
-//!    QuickJS / Node / Bun 都不需要知道 TypeScript 的存在。默认用内置 OXC
+//!    Node / Bun 都不需要知道 TypeScript 的存在。默认用内置 OXC
 //!    做类型擦除，不再依赖外部运行时；Bun / Node 仅作为显式选项保留。
 //!
 //! 网络与文件写入都在 web handler 的 `spawn_blocking` 里执行，本模块自身

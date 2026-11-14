@@ -3,39 +3,32 @@
 // 这个文件同时是**文档**和**加载期回归**：它 import 了 fs-demo 需要的所有名字，
 // 任何一处接线断了，插件在加载期就炸 —— 不需要另写一个脚本去验。
 //
-// ## 两份运行时，同一个写法
+// ## 同一个写法，两个宿主
 //
 // ```js
 // import fs from 'node:fs';
 // import path from 'node:path';
 // ```
 //
-// - **面板外**（`node fs-demo.js`）：用 Node 原生的 `fs` / `path`，不经过本面板。
-// - **面板内**：由宿主提供同名模块（`src/jshost.rs` 的 NODE_FS_BODY / NODE_PATH_BODY），
-//   **限定在插件自己的数据目录里**。
+// - **面板外**（`node fs-demo.js`）：Node 原生的 `fs` / `path`。
+// - **面板内**：同样是原生模块 —— 面板把子进程的 CWD 设成插件数据目录，不做路径围栏。
 //
 // ## 「插件自己的数据目录」是什么
 //
-// 面板给每个插件一个数据根：`<PLUGIN_DATA_DIR>/<插件名>/`，而它在插件眼里就是 `/`。
-// 也就是说 `fs.writeFileSync('state.json', …)` 落到的真实位置是
+// 面板给每个插件一个数据根：`<PLUGIN_DATA_DIR>/<插件名>/`，插件进程的 CWD 就是它。
+// 所以 `fs.writeFileSync('state.json', …)` 落到的真实位置是
 // `<PLUGIN_DATA_DIR>/fs-demo/state.json`：
 //
-// - 拿 `fs.rootDir()` 能问出来（排查「我到底写哪去了」时很省事）
+// - 用 `process.cwd()` 能问出来（排查「我到底写哪去了」时很省事）
 // - **不是**插件源码所在的目录 —— 那个目录会被面板当静态目录服务出去，
 //   往里写的东西（比如 token）会出现在网页上
-// - 越界（`../`、别人的目录、系统文件）一律 `EACCES`，不是"夹回根目录"：
-//   静默改写会让同一份代码在面板内外表现不同，那种差异最难查
+// - 没有围栏：插件能读写当前用户能读写的一切。只用相对路径是**可移植**建议，
+//   不是安全边界（见 docs/plugin-fs.md §23）
 //
-// ## 与 Node 的差异（就这几条，别踩）
+// ## 跨宿主的写法
 //
-// | | Node 原生 | 面板内 |
-// | --- | --- | --- |
-// | `Buffer` | 有 | **没有**；不给 encoding 时给你 `Uint8Array` |
-// | 异步 API | `fs.promises` | **没有**（宿主是"一次调用推进一步"，没有真事件循环） |
-// | 单次读写上限 | 无 | 8 MiB（返回值要穿过 JSON 桥） |
-// | `path.resolve()` 的当前目录 | 进程 cwd | 数据根（结果形如 `/a/b`） |
-//
-// 只要把 `path` 的结果**原样交回 `fs`**（正常写法都是这样），两边行为一致。
+// 只用相对路径、把 `path` 的结果原样交回 `fs` —— 面板内、面板外、adapters/node
+// 都落在各自的当前目录下。不要依赖已删除的 `fs.rootDir()`。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,19 +37,11 @@ import { log, register_handler, register_cron } from 'host-api';
 const PLUGIN = 'fs-demo';
 const STATE = path.join('data', 'state.json');
 
-// 数据根在哪？
+// 数据目录在哪？
 //
-// ⚠ `fs.rootDir()` 是**面板侧的扩展**，Node 的原生 fs 没有这个函数 ——
-//   直接调它会让这个文件在 `node plugin.js` 下**加载期就炸**（实测踩到）。
-//   所以跨运行时的插件不要依赖它，只把它当排查用的额外信息：
-//     · 面板里 → 那个数据根的真实路径（形如 …/plugin-data/fs-demo）
-//     · Node 里 → 相对路径的基准是进程的 cwd，用 process.cwd() 问
-//   真正可移植的写法是**只用相对路径**（下面的 STATE 就是这样）：两边都落在
-//   自己的"当前目录"下，谁也不用知道对方的规矩。
-const DATA_ROOT =
-    typeof fs.rootDir === 'function'
-        ? fs.rootDir()
-        : (typeof process !== 'undefined' ? process.cwd() : '(未知)');
+// 跨宿主可移植的写法是**只用相对路径**（下面的 STATE 就是这样）：两边都落在
+// 自己的"当前目录"下，谁也不用知道对方的规矩。这里把 cwd 打出来只为排查。
+const DATA_ROOT = typeof process !== 'undefined' ? process.cwd() : '(未知)';
 
 log(`${PLUGIN}: 已加载，数据根 = ${DATA_ROOT}`);
 

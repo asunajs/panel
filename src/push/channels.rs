@@ -1003,9 +1003,7 @@ pub fn merge(c: &mut PushChannels, set: &Value, remove: &[String]) -> Result<(),
             "pushplus" => c.pushplus = Some(merge_typed(&c.pushplus, v, &["token"])?),
             "serverChan" => c.server_chan = Some(merge_typed(&c.server_chan, v, &["token"])?),
             "workWeixin" => c.work_weixin = Some(merge_typed(&c.work_weixin, v, &["corpsecret"])?),
-            "workWeixinBot" => {
-                c.work_weixin_bot = Some(merge_typed(&c.work_weixin_bot, v, &[])?)
-            }
+            "workWeixinBot" => c.work_weixin_bot = Some(merge_typed(&c.work_weixin_bot, v, &[])?),
             "tgBot" => c.tg_bot = Some(merge_typed(&c.tg_bot, v, &["token"])?),
             "bark" => c.bark = Some(merge_typed(&c.bark, v, &["key"])?),
             "twoIm" => c.two_im = Some(merge_typed(&c.two_im, v, &["key", "sid"])?),

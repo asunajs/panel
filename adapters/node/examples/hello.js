@@ -1,5 +1,5 @@
 // adapters/node/examples/hello.js —— 最小插件：只用宿主全局函数（不 import）。
-// 与仓库 plugins/hello.js 的写法一致，用来验证「QuickJS 宿主里的脚本原样跑在 Node 上」。
+// 与仓库 plugins/hello.js 的写法一致，用来验证「面板宿主里的脚本原样跑在 Node 上」。
 
 host.log('hello from a global-style plugin');
 

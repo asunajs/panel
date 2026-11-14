@@ -1,7 +1,7 @@
-//! 宿主 API 层：**一份实现，三个 JS 宿主**。
+//! 宿主 API 层：**一份实现，两个 JS 运行时**。
 //!
-//! JS 插件可以跑在三种宿主里：内嵌 QuickJS（默认）、外部 Node、外部 Bun。
-//! 平台能力收敛成本文件里的 `HostState::do_*`，各宿主只做一层薄适配：
+//! JS 插件跑在外部 Node（默认）或外部 Bun 里。平台能力收敛成本文件里的
+//! `HostState::do_*`，两个运行时共用同一层 RPC 适配：
 //!
 //! ```text
 //!                          ┌──────────────────────────────┐
@@ -9,10 +9,9 @@
 //!                          │  log / register_cron /        │
 //!                          │  sqlite_query / http_fetch    │
 //!                          └───────────┬──────────────────┘
-//!             ┌────────────────────────┴────────────────────────┐
-//!             │                                                 │
-//!      QuickJS 闭包适配 (src/jshost.rs)                 外部 JS 运行时 RPC (src/extproc.rs)
-//!      host-api / host 全局                          runtime/js 的 host-api / host 全局
+//!                                      │
+//!                        外部 JS 运行时 RPC (src/extproc.rs)
+//!                        runtime/js 的 host-api / host 全局
 //! ```
 //!
 //! Python 已退出插件范畴：`.py` 只作为任务目录里的 cron 脚本，不接 host-api。
@@ -37,8 +36,7 @@
 //! ## 为什么 Rust 侧只认 String
 //!
 //! 底层函数一律 `String` 进 `String` 出（JSON 或纯文本），类型分支全部留在各自的适配层里。
-//! 这样宿主代码永远不需要碰 `rquickjs::Value`，加运行时就是加一个 RPC 适配层，
-//! 不动业务逻辑。
+//! 这样宿主代码永远只处理 `String`，运行时差异全部留在 `runtime/js` 一侧。
 
 use crate::cron::Schedule;
 use crate::db::Db;
@@ -73,14 +71,6 @@ pub fn push_log(logs: &SharedLogs, plugin: &str, level: &str, msg: &str) {
 /// 难查得多 —— 前者是静默的，后者一眼能看见。
 pub fn parse_level(level: &str) -> crate::log::Type {
     crate::log::Type::parse(level).unwrap_or(crate::log::Type::Info)
-}
-
-/// 在捕获作用域里跑一段代码，返回 `(结果, 捕获到的日志)`。
-///
-/// 实现在 [`crate::log::capture_scope`]（那边用 transport 而不是布尔开关）。
-/// 这里留一个薄转发，让 `engine.rs` 的调用点不必跟着改名字。
-pub fn capture_scope<R>(f: impl FnOnce() -> R) -> (R, Vec<crate::log::LogEntry>) {
-    crate::log::capture_scope(f)
 }
 
 /// 插件在**加载期**声明的一个任务（还没进调度器）。
@@ -127,7 +117,7 @@ pub struct NavDef {
     pub path: String,
 }
 
-/// 宿主侧共享状态：QuickJS 与外部 JS 运行时都往这里调。
+/// 宿主侧共享状态：插件与脚本的 RPC 都往这里调。
 pub struct HostState {
     pub logs: SharedLogs,
     pub db: Db,
@@ -239,7 +229,8 @@ fn is_read_only_action(action: &rusqlite::hooks::AuthAction<'_>) -> bool {
 /// SQLite 是在执行期由 `sqlite3RunVacuum` 内部去 `ATTACH` 一个临时库完成整库
 /// 重写的（见 bundled 的 `sqlite3.c`）。也就是说只靠 authorizer 挡住 ATTACH，
 /// 拦不拦得住 VACUUM 取决于内部实现细节；而 `VACUUM INTO '<绝对路径>'` 正是
-/// 审计里那条「绕过 `src/pluginfs.rs` 文件围栏往任意路径落文件」的通道。
+/// 审计里那条「`VACUUM INTO '<绝对路径>'` 能绕开数据库目录、往任意路径落文件」
+/// 的通道，靠的就是它。
 /// 所以在进 prepare 之前按语句头显式挡掉，不依赖内部实现。
 fn first_sql_keyword(sql: &str) -> String {
     // trim_start 只认 Unicode 空白；BOM（U+FEFF）不是空白，但 SQLite 会跳过它。
@@ -628,8 +619,7 @@ impl HostState {
         push_log(&self.logs, plugin, level, msg);
     }
 
-    /// 校验调度表达式并登记任务（QuickJS 侧仍走闭包里的 pending；这里保留一个
-    /// 单任务校验入口给单测/兼容代码用）。
+    /// 校验调度表达式并登记任务（单任务校验入口，供单测/兼容代码用）。
     ///
     /// `params_json`：任务参数，一段 JSON 文本；空串 = 没有参数。
     /// **在这里就把非法 JSON 挡掉**，和表达式同一个理由：让错误在加载期暴露，
@@ -808,10 +798,10 @@ impl HostState {
             .to_uppercase();
         // 请求体：`body`（文本）与 `body_b64`（原始字节的 base64）二选一。
         //
-        // `body_b64` 是 **compat 层与宿主之间的内部约定**，不是插件可见的 API：
-        // 插件面只写 Node 形状的 `body: Uint8Array`，由 src/jscompat/fetch.js 负责
-        // 编码（见 docs/plugin-api.md §4.10.4）。放在这里而不是给插件加一个
-        // 「面板专属参数」，是因为插件代码不该知道自己跑在哪个引擎上。
+        // `body_b64` 是 **RPC 层与宿主之间的内部约定**：插件面用 `body` 发文本，
+        // 需要原始字节时走 `fetch(url, { body: Uint8Array })` 的原生实现。
+        // 放在这里而不是给插件加一个「面板专属参数」，是因为 `host-api.http_fetch`
+        // 只是 RPC 门面，字节信封由 runtime/js 负责。
         let body = request_body_bytes(&opts)?;
         let timeout_ms = opts
             .get("timeout_ms")
@@ -1007,8 +997,10 @@ impl HostState {
         //
         // 以前只有 http_fetch 查这一道：插件可以用 smtp_send 连 127.0.0.1:25
         // 或者云厂商的元数据地址，判定表形同虚设。
-        // 内网中继（192.168/10.x）默认会被拒 —— 和 http_fetch 是同一套规则，
-        // 真要连内网就设 PLUGIN_ALLOW_PRIVATE_OUTBOUND=1（见 allow_private_outbound_targets）。
+        // 出站判定和 http_fetch 是同一套（ensure_outbound_url_allowed）：默认放行公网与
+        // 局域网（RFC1918 刻意不拦 —— 主力场景就是家里的 NAS / 打印机 / Home Assistant），
+        // 挡的是面板自身（回环）与云元数据（链路本地）。HOST_API_ALLOW_PRIVATE=1 会关掉
+        // 整层判定（连回环/元数据也放行，见 allow_private_outbound_targets）。
         ensure_outbound_url_allowed(&format!("https://{host}/"))?;
         // 端口默认跟着 tls 走：465 是 implicit、其它是 starttls。
         // 显式给了就用显式的 —— 内网中继经常跑在奇怪端口上。
@@ -1157,7 +1149,7 @@ pub const MAX_DECLARED_BUDGET_MS: u64 = 10 * 60 * 1000;
 /// 能声明的最短预算。低于这个数连一次网络往返都跑不完，声明它没有意义。
 pub const MIN_DECLARED_BUDGET_MS: u64 = 100;
 
-/// 校验并构造一条任务声明。QuickJS / 外部 JS 共用这一份判据。
+/// 校验并构造一条任务声明。插件与脚本共用这一份判据。
 /// 解析 register_cron(..., { surface, summary, blockers, paused }) 的元数据。
 ///
 /// 空串 = 老插件/老运行时，全部取默认值（panel / 无摘要 / 就绪 / 不暂停）。
@@ -1589,8 +1581,9 @@ fn build_agent_uncached(timeout_ms: u64) -> ureq::Agent {
 ///
 /// 缓存还顺带复用了连接池。表最多 8 个条目（插件通常只用一两种 timeout），
 /// 不会无界增长。
-static AGENT_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, ureq::Agent>>> =
-    std::sync::OnceLock::new();
+static AGENT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, ureq::Agent>>,
+> = std::sync::OnceLock::new();
 
 pub fn build_agent_cached(timeout_ms: u64) -> ureq::Agent {
     let cache = AGENT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1727,9 +1720,9 @@ fn request_body_bytes(opts: &Value) -> Result<Vec<u8>, String> {
     let text = opts.get("body").and_then(|v| v.as_str());
     let b64 = opts.get("body_b64").and_then(|v| v.as_str());
     match (text, b64) {
-        (Some(_), Some(_)) => Err(
-            "body 与 body_b64 只能给一个（前者是文本，后者是原始字节的 base64）".to_string(),
-        ),
+        (Some(_), Some(_)) => {
+            Err("body 与 body_b64 只能给一个（前者是文本，后者是原始字节的 base64）".to_string())
+        }
         (Some(t), None) => Ok(t.as_bytes().to_vec()),
         (None, Some(s)) => {
             // Indifferent：带不带 padding 都收（见上面的说明）。
@@ -2061,7 +2054,7 @@ mod tests {
             crate::db::open(&tmp.join("panel.db")).unwrap(),
             tmp.join("panel.db"),
             crate::runtimefs::RuntimePaths::ensure(&tmp.join("runtime")).unwrap(),
-            std::sync::Arc::new(crate::runtimes::RuntimeCatalog::quickjs_only()),
+            std::sync::Arc::new(crate::runtimes::RuntimeCatalog::for_tests()),
             tmp.join("plugins"),
             tmp.join("plugin-data"),
             tmp.join("tasks"),
@@ -2352,7 +2345,7 @@ mod tests {
         (dir, conn)
     }
 
-    /// `VACUUM INTO '<绝对路径>'` 会绕过 pluginfs 的文件围栏往任意路径落文件，
+    /// `VACUUM INTO '<绝对路径>'` 会绕过数据库目录往任意路径落文件，
     /// 必须在 prepare 之前就被拒；带注释前缀也不能漏。
     #[test]
     fn plugin_vacuum_into_is_denied() {

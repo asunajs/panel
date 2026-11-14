@@ -24,12 +24,14 @@ import tempfile
 import time
 from pathlib import Path
 
-# 两个不同的时刻，别混：
+# ⚠ 历史脚本（内嵌 QuickJS 时代）：它等「Runtime 已回收」标记来判断 RSS 下降。
+# P2 删除内嵌引擎后，卸载 = 杀 Node/Bun 子进程，这个标记不再出现；本脚本只作为
+# 旧版本的验证记录保留，不适用于当前构建。
+#
+# 两个不同的时刻（当时）：
 #   EVICT_MARK   插件被卸出（JS 上下文没了，但**页还在分配器手里**）
 #   RECLAIM_MARK worker 发现"我名下没插件了"，把整条 QuickJS Runtime 销毁
 #                —— Linux 上真正 munmap 还给内核发生在这一刻
-# 实测（WSL2 / v0.1.11）：卸出后 21 秒才回收，回收那一刻 RSS 才掉。
-# 只等 EVICT_MARK 的话会稳定误判成"没降"。
 EVICT_MARK = "卸下内存"
 RECLAIM_MARK = "Runtime 已回收"
 # 等不到回收标记时的兜底窗口（秒）：够长，宁可多等也别误判

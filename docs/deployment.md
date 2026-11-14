@@ -70,8 +70,8 @@ git tag v0.1.0 && git push origin v0.1.0
 
 三个都是**静态链接**（实测 `PT_INTERP: 无`），不依赖目标机的 libc，丢过去就能跑。
 
-⚠ **外部运行时不在二进制里**：QuickJS 插件开箱即用；要切 Node / Bun 插件得在目标机
-装 Node >= 20.6 / Bun >= 1.0（或用 `PANEL_NODE` / `PANEL_BUN` 指路径）。`.py` 脚本需要
+⚠ **运行时不在二进制里**：插件需要目标机装 Node >= 20.6，或在插件卡片上切到 Bun
+（>= 1.0），或用 `PANEL_NODE` / `PANEL_BUN` 指路径。`.py` 脚本需要
 `PANEL_PYTHON`（默认 `python3`，>= 3.8）；没装不影响插件与 JS 脚本。
 Termux 上可用 `pkg install nodejs python`，ARM 盒子上用发行版的包。
 
@@ -239,7 +239,7 @@ ReadWritePaths=/opt/plugin-panel/data /opt/plugin-panel/logs /opt/plugin-panel/t
 WantedBy=multi-user.target
 ```
 
-面板处理 SIGTERM，`systemctl stop` 能优雅退出（QuickJS 会按序析构，见 [§7](engine-safety.md#7-执行预算与熔断引擎自我保护)）。
+面板处理 SIGTERM，`systemctl stop` 能优雅退出（外部子进程按序回收，见 [§7](engine-safety.md#7-执行预算与熔断引擎自我保护)）。
 
 ⚠️ 这句话在第二十八轮之前**只在没人开着日志页的时候成立**：SSE 日志流不会自己结束，
 而 axum 的优雅退会无限等所有连接关掉 —— 于是 `systemctl stop` 卡到 `TimeoutStopSec`
@@ -252,12 +252,10 @@ WantedBy=multi-user.target
 | 项 | 值 |
 |---|---|
 | RSS | 8.1 MB（纯宿主，macOS `ps`，含共享库页；`footprint` 实测独占 **2.1 MB**） |
-| RSS（+4 个 QuickJS 插件） | 9.2 MB（独占 2.9 MB） |
 | 外部 Node/Bun 插件 | **单独子进程**，不计入上表；量级 30–80 MB/插件（待实测，见 [performance.md](performance.md#81c-第六十轮的内存账待-lead-实测)） |
 | 线程数 | 4 |
 | CPU（空闲） | 0.0–0.1% |
-| 二进制 | aarch64 静态 musl：`legacy-tls-vendored` **11.5 MiB**（发布用，静态链入 OpenSSL）；`--no-default-features` **7.0 MiB**（第六十四轮实测。体积拆解见 [performance.md §8.3](performance.md)） |
-| QuickJS 堆 | 225 KB |
+| 二进制 | aarch64 静态 musl：内嵌引擎时代 `legacy-tls-vendored` **11.5 MiB** / `--no-default-features` **7.0 MiB**；P2 删 `rquickjs` 后需重测（见 [performance.md §8.3](performance.md)） |
 
 空闲时调度器一次都不唤醒（deadline 驱动），所以手机放口袋里不会持续耗电。
 
@@ -285,7 +283,7 @@ python3 scripts/endurance.py --bin ./plugin-panel --hours 8
 
 几个已知的"看起来像问题、其实不是"：
 
-- **前几分钟涨得快**：插件加载、QuickJS 建 Context、SQLite 建 WAL 都在这一段。
+- **前几分钟涨得快**：插件加载、Node 子进程拉起、SQLite 建 WAL 都在这一段。
   报告会自动跳过前 10% 的采样，但 30 分钟窗口里它仍然影响斜率 —— 这就是为什么要 8 小时。
 - **`perf-fail` 每 30 秒故意失败一次**：`logs` 里的 error 计数会涨，那是压测负载本身。
 - **报告里 `HOST_API_ALLOW_PRIVATE=1`**：脚本为了让 `fetch_async` 有目标才开的，

@@ -1,15 +1,15 @@
 // host-api —— Node.js 版宿主 API 适配器（规范 v1 最小公共子集）。
 //
-// 同一份 JS 插件脚本既能跑在 QuickJS 宿主里，也能跑在 Node 里：
+// 同一份 JS 插件脚本既能在面板里跑，也能脱离面板在 Node 里跑：
 //
 //   import { log, register_cron, sqlite_query, http_fetch, register_route } from 'host-api';
 //
-// 或者直接用宿主注入的全局函数（QuickJS 宿主里就是全局/`host.*`）：
+// 或者直接用宿主注入的全局函数（面板宿主里就是全局/`host.*`）：
 //
 //   log('hello'); register_cron('t', '*/5 * * * * *', (p) => {});
 //
 // 导入本模块会顺手把规范里的 9 个函数装到 globalThis 上，并挂一个 `host` 命名空间
-// （同时提供 snake_case 与仓库 QuickJS 宿主用的 camelCase 别名：host.log / host.cron / host.every）。
+// （同时提供 snake_case 与面板宿主用的 camelCase 别名：host.log / host.cron / host.every）。
 //
 // 语义要点（与 Rust 宿主逐条对齐）：
 //   - 日志八档，写 stderr，格式 `YYYY-MM-DD HH:MM:SS.mmm [type] [scope] msg`，
@@ -256,10 +256,9 @@ for (const [key, fn] of Object.entries(PUBLIC)) {
 
 // `console.*` 也要接到同一套日志上。
 //
-// 为什么必须做：面板的 QuickJS 宿主里 `console.log` 就是宿主日志（见 src/jshost.rs
-// 的 console 映射）。适配器不接的话，同一份插件 `console.debug('x')` 在面板里
-// 进日志、在 Node 里进 stdout —— 两边行为分叉，而「同一份源码两边都能跑」正是
-// 这个适配器存在的理由。
+// 为什么必须做：面板宿主（runtime/js/bus.mjs）把 `console.*` 接到宿主日志上。
+// 适配器不接的话，同一份插件 `console.debug('x')` 在面板里进日志、在 Node 里进
+// stdout —— 两边行为分叉，而「同一份源码两边都能跑」正是这个适配器存在的理由。
 //
 // 其余方法（table / time / dir …）保留原生：只换日志出口，不砍功能。
 {
@@ -277,7 +276,7 @@ for (const [key, fn] of Object.entries(PUBLIC)) {
   globalThis.console = mapped;
 }
 
-// 仓库 QuickJS 宿主的门面：host.log / host.warn / host.info / host.start / host.cron …
+// 面板宿主的门面：host.log / host.warn / host.info / host.start / host.cron …
 // 这里同时暴露规范名与 camelCase 别名，让两种写法的插件都能直接跑。
 globalThis.host = {
   ...PUBLIC,

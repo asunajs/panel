@@ -1,7 +1,7 @@
 {
   "name": "@plugin-panel/host-api",
   "version": "1.0.0",
-  "description": "Node.js host API adapter: the same JS plugin runs under the QuickJS host and under Node.",
+  "description": "Node.js host API adapter: the same JS plugin runs inside the panel and standalone under Node.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {

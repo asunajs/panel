@@ -1,30 +1,28 @@
-//! 引擎线程：**一个 OS 线程里跑 QuickJS / 外部 JS 子进程 + 调度器**。
+//! 引擎线程：**一个 OS 线程里跑外部 JS 子进程 + 调度器**。
 //!
 //! ## 为什么必须是「专用线程 + 消息通道」
 //!
-//! `rquickjs::Runtime` / `Context` **不是 `Send`**（GC 和值栈绑死在创建它的线程上）。
-//! 外部 Node/Bun 插件虽然是子进程，但它的句柄、事件与调度状态也只在引擎线程上碰，
-//! 这样「插件 → worker」的亲和性只有一条规则。所以运行时都不能塞进 `tokio::spawn`：
+//! 插件的句柄、事件与调度状态只在这一个线程上碰，这样「插件 → worker」
+//! 的亲和性只有一条规则。外部子进程本身虽然可以跨线程，但调度与派发状态不是
+//! 线程安全的，所以运行时不能塞进 `tokio::spawn`：
 //!
 //! ```text
 //!   tokio 多线程 runtime                       专用 OS 线程 (std::thread)
 //!   ┌──────────────────────┐                  ┌──────────────────────────────────┐
-//!   │ tokio::time::interval│   EngineCmd      │ QuickJS Runtime (独占)            │
-//!   │   每秒 Tick ─────────┼─────────────────>│   ├─ Context  a.js                │
-//!   │                      │  std::mpsc       │   └─ Context  b.js                │
-//!   │ Axum /api/state ─────┼──Arc<Mutex>─────>│ 外部 Node/Bun 子进程（按需拉起）    │
-//!   │ Axum 插件路由 ───────┼──oneshot reply──>│ Scheduler（deadline 驱动）         │
+//!   │ tokio::time::interval│   EngineCmd      │ 插件表 / 调度器（独占）            │
+//!   │   每秒 Tick ─────────┼─────────────────>│   ├─ 外部 Node/Bun 子进程 a.js     │
+//!   │                      │  std::mpsc       │   └─ 外部 Node/Bun 子进程 b.js     │
+//!   │ Axum /api/state ─────┼──Arc<Mutex>─────>│ Scheduler（deadline 驱动）         │
+//!   │ Axum 插件路由 ───────┼──oneshot reply──>│                                  │
 //!   └──────────────────────┘                  └──────────────────────────────────┘
 //! ```
 //!
-//! ## 为什么每个插件一个 Context / 一个子进程
+//! ## 为什么每个插件一个子进程
 //!
-//! 同一个 Context 里 eval 两份插件代码，顶层 `const` 会 redeclaration 报错；
-//! 外部运行时则必须一个插件一个进程，才能隔离 globals 与崩溃。
+//! 外部运行时必须一个插件一个进程，才能隔离 globals 与崩溃。
 //!
 //! ## 执行预算
 //!
-//! - QuickJS：Runtime 级 interrupt handler，调用前 arm、调用后 disarm。
 //! - Node/Bun：没有安全的"暂停"手段，超预算直接杀整个进程组；下一次触发重启。
 //! - 脚本任务：一次性进程，超时同样杀进程组。
 
@@ -32,14 +30,10 @@ use crate::cron::Schedule;
 use crate::db::{self, Db};
 use crate::extproc::{self, ExtPlugin};
 use crate::hostapi::{self, HostState, RawTaskDef, SharedLogs};
-use crate::jshost;
 use crate::runtimes::EngineKind;
 use crate::scheduler::{self, Scheduler, TripConfig};
 use crate::workers;
 use chrono::{DateTime, Local};
-use rquickjs::loader::{ImportAttributes, Loader, Resolver};
-use rquickjs::module::Declared;
-use rquickjs::{Context, Ctx, Function, Module, Runtime, Value};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -176,9 +170,9 @@ const HEALTHY_LAG_FLOOR_MS: u64 = 3_000;
 ///
 /// # 为什么要有这件事
 ///
-/// 插件在启动时**全部**加载进内存，然后一直待着 —— 哪怕它一天只跑两次。
-/// 一个插件常驻约 1.5 MB（QuickJS 运行时 + 顶层初始化留下的东西），
-/// 二十个插件就是三十多 MB 白占着。
+/// 插件在启动时**全部**加载，然后一直待着 —— 哪怕它一天只跑两次。
+/// 每个活跃插件是一个独立 Node/Bun 子进程（macOS 空插件实测约 26.7 MB
+/// `phys_footprint`，见 docs/runtimes.md §10.5），二十个插件就是几百 MB 白占着。
 ///
 /// 但"用完就卸"会引入另一个毛病：**下次触发要多付一次加载**（读文件 + 解析 +
 /// 顶层初始化，上限 [`DEFAULT_LOAD_BUDGET_MS`]）。所以卸载的同时留了个"提前量"：
@@ -193,10 +187,9 @@ const HEALTHY_LAG_FLOOR_MS: u64 = 3_000;
 ///
 /// # 关于 WebSocket 那条，说准确一点
 ///
-/// 真实原因**不是**"句柄指向 JS 回调、卸了会悬空"（实测：`jshost` 里根本没有
-/// `Persistent<Function>`，`wsclient::Conn` 只持有通道）。真实原因是：
-/// 卸掉运行时之后，那条连接的**插件侧进度就丢了** —— 再装回来是一个新的运行时，
-/// 它不知道自己开过那条连接，要么重复开、要么永远等不到消息。
+/// 真实原因**不是**"句柄指向 JS 回调、卸了会悬空"（`wsclient::Conn` 只持有通道）。
+/// 真实原因是：卸掉运行时之后（外部进程被杀），那条连接的**插件侧进度就丢了**
+/// —— 再装回来是一个新的运行时，它不知道自己开过那条连接，要么重复开、要么永远等不到消息。
 ///
 /// 判的是**按插件**的连接数（`wsclient::Registry::open_count_for`）。
 /// 早先是全局计数：一条泄漏的句柄就能把整个惰性加载**静默关掉**
@@ -284,10 +277,12 @@ impl LazyCfg {
 ///
 /// `next_fire_in_ms`：它名下**最近**的一次触发还有多久（`None` = 没有排班任务）。
 /// `idle_for_ms`：距离上次活动（加载，或最近一次 HTTP 请求）多久。
+/// `has_timers`：子进程里还挂着活跃的 setTimeout/setInterval（由 `timers` 事件上报）。
 fn should_evict(
     has_on_tick: bool,
     keep_warm: bool,
     has_ws: bool,
+    has_timers: bool,
     next_fire_in_ms: Option<i64>,
     idle_for_ms: u64,
     idle_ms: u64,
@@ -295,7 +290,11 @@ fn should_evict(
 ) -> bool {
     // 路由**不**再阻止卸载：路由声明留在全局表里，请求来了再把运行时装回来
     // （冷启动）。纯 WebUI 插件（比如 mcloud）闲置时也能真正把内存还回去。
-    if has_on_tick || keep_warm || has_ws {
+    //
+    // ⚠ 活跃定时器**必须**阻止卸载（安全审计 R2）：一个只靠 setInterval 干活、
+    //   没有 on_tick / 排班任务 / WS 的插件，卸掉子进程就等于把它的定时器全丢了，
+    //   而且没有任何东西会把它装回来 —— 表现为「插件悄悄不工作了」。
+    if has_on_tick || keep_warm || has_ws || has_timers {
         return false;
     }
     // ⚠ 刚装进来就卸是最没意义的一种：启动时刚付过一次加载的钱。
@@ -362,79 +361,11 @@ fn file_hash(path: &Path) -> Option<u64> {
     Some(h.finish())
 }
 
-/// 建一条 worker 用的 QuickJS Runtime（启动时、以及"回收之后又需要"时）。
-fn make_runtime(plugins_dir: &Path, wd: &Watchdog) -> Option<Runtime> {
-    let rt = Runtime::new().ok()?;
-    rt.set_memory_limit(64 * 1024 * 1024);
-    rt.set_max_stack_size(1024 * 1024);
-    rt.set_loader(
-        HostApiResolver::new(plugins_dir.to_path_buf()),
-        HostApiLoader,
-    );
-    rt.set_interrupt_handler(Some(wd.handler()));
-    // 未捕获的 Promise 拒绝：**必须有人接**。
-    //
-    // 没有它的时候，插件里 `Promise.resolve().then(() => { throw x })` 或者
-    // `someAsync().then(...)` 里漏了 `.catch` 都是完全静默的 —— 工作没做完，
-    // 面板上却一片绿。这条和「开发机上跑通、进面板才炸」是同一个问题，只是方向反了。
-    //
-    // 注意 `is_handled`：QuickJS 会调两次（先"未处理"，后来被 catch 了再调一次
-    // 带 is_handled=true）。只记前者，否则正常的 `catch` 也会报错。
-    rt.set_host_promise_rejection_tracker(Some(Box::new(
-        |ctx: Ctx<'_>, _promise: Value<'_>, reason: Value<'_>, is_handled: bool| {
-            if is_handled {
-                return;
-            }
-            let plugin = ctx
-                .globals()
-                .get::<_, String>("__plugin_name")
-                .unwrap_or_default();
-            let text = ctx
-                .globals()
-                .get::<_, Function>("__fmt_err")
-                .ok()
-                .and_then(|f| f.call::<_, String>((reason,)).ok())
-                .unwrap_or_else(|| "（拒绝原因无法渲染）".to_string());
-            if let Ok(mut q) = REJECTIONS.lock() {
-                // 上限 64：一个每 50ms 拒绝一次的插件不该把内存吃掉。
-                if q.len() < 64 {
-                    q.push((plugin, text));
-                }
-            }
-        },
-    )));
-    Some(rt)
-}
-
-/// 未捕获的 Promise 拒绝：Runtime 级 tracker 写、worker 循环读。
-///
-/// 为什么不在 tracker 里直接打日志：它是在**建 Runtime 时**装的闭包，手里没有
-/// `SharedLogs`；而插件日志必须带插件名走 `hostapi::push_log`（面板按插件过滤）。
-/// 用一个进程级队列中转，循环每轮排空一次 —— 和 `BUSY` 用全局是同一个理由。
-static REJECTIONS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-
-/// 拿到 Runtime：没有就**就地建**（`None` = 建不起来）。
-///
-/// 与 `make_runtime` 的区别只有一句：它接受"现在可能没有"这件事，
-/// 让调用点不必自己判断"要不要建"。
-fn rt_ref<'a>(slot: &'a mut Option<Runtime>, dir: &Path, wd: &Watchdog) -> Option<&'a Runtime> {
-    if slot.is_none() {
-        *slot = make_runtime(dir, wd);
-    }
-    slot.as_ref()
-}
-
 /// 把一个插件的运行时**丢出内存**（排班不动，任务还在）。
 ///
-/// 外部 JS 插件在这里杀子进程；QuickJS 在这里 drop Context。
+/// 外部 JS 插件在这里杀子进程。
 fn evict_runtime(p: &mut LoadedPlugin, _host: &Arc<HostState>) {
     drop(p.runtime.take());
-    // 定时器随 Context 一起没了：必须显式清表，否则重新装回来时这些 id 还在，
-    // 到点会往一个新建的 Context 上打 —— 那边 __timers 里没有对应函数，
-    // 表现为「定时器静默消失」，比报错更难查。
-    if let Ok(mut t) = p.timers.lock() {
-        t.clear_all();
-    }
     p.evicted = true;
 }
 
@@ -443,14 +374,12 @@ fn evict_runtime(p: &mut LoadedPlugin, _host: &Arc<HostState>) {
 /// ⚠ 声明的任务**丢掉**：排班里那几条还在，重装一遍会撞名
 /// （`Scheduler::insert` 对同名任务直接报错）。文件没变 ⇒ 声明也一模一样。
 fn rehydrate_plugin(
-    rt: &mut Option<Runtime>,
     p: &mut LoadedPlugin,
     sched_tasks: usize,
     logs: &SharedLogs,
     host: &Arc<HostState>,
-    wd: &Watchdog,
 ) -> bool {
-    let (mut lp, declared) = load_one(rt, &p.file, logs, host, wd, load_budget());
+    let (mut lp, declared) = load_one(&p.file, logs, host);
     if lp.error.is_some() {
         p.error = lp.error.take();
         // ⚠ 失败是**可重试**的：一次加载超预算 / 文件一时读不到 / VM 索引紧张，
@@ -571,18 +500,12 @@ pub fn request_runtime_recycle() {
 }
 
 fn maintain_plugins(
-    rt: &mut Option<Runtime>,
-    plugins_dir: &Path,
     plugins: &mut [LoadedPlugin],
     sched: &Scheduler,
     logs: &SharedLogs,
     host: &Arc<HostState>,
-    wd: &Watchdog,
     cfg: &LazyCfg,
     now: chrono::DateTime<Local>,
-    pending: &Pending,
-    pending_routes: &PendingRoutes,
-    pending_ticks: &PendingTicks,
 ) -> bool {
     // 空闲点自愈重启：真的到点了才换进程（见 RESTART_WHEN_IDLE 的说明）。
     if RESTART_WHEN_IDLE.load(std::sync::atomic::Ordering::Relaxed) && !busy() {
@@ -595,11 +518,7 @@ fn maintain_plugins(
     if RECYCLE_RUNTIMES.swap(false, std::sync::atomic::Ordering::Relaxed) {
         let mut n = 0;
         for p in plugins.iter_mut() {
-            // 有 async invocation 在途的**不卸**：把 Context 丢掉，那条 Promise 的
-            // 续体就再也没人跑了 —— 运行记录会挂到下次启动才被 close_dangling_runs 收掉。
-            if p.runtime.is_some()
-                && !has_in_flight(pending, pending_routes, pending_ticks, &p.name)
-            {
+            if p.runtime.is_some() {
                 evict_runtime(p, host);
                 n += 1;
             }
@@ -662,32 +581,23 @@ fn maintain_plugins(
             }
             // 装回来。⚠ 声明的任务**丢掉**：排班里那几条还在，重装一遍会撞名
             //   （`Scheduler::insert` 对同名任务直接报错）。文件没变 ⇒ 声明也一模一样。
-            // 只有真要装回来的时候才碰 Runtime（否则它会刚被回收就被重建）
-            if rt_ref(rt, plugins_dir, wd).is_some() {
-                let _ = rehydrate_plugin(rt, p, p.tasks, logs, host, wd);
-            }
+            let _ = rehydrate_plugin(p, p.tasks, logs, host);
             continue;
         }
 
         if p.runtime.is_none() {
             continue; // 加载失败的，没东西可卸
         }
-        // 有活着的定时器就不卸：卸掉等于把它们静默清空。
-        // （Node 里 setInterval 也不会因为闲着就消失 —— 要停就自己 clearInterval。）
-        // 和 on_tick / WebSocket 同一个判据位置，理由不同：那两个是卸了就没法叫，
-        // 这个是卸了就悄悄没了。
-        if p.timers.lock().map(|t| !t.is_empty()).unwrap_or(false) {
-            continue;
-        }
-        // 有 async handler 在途（`await` 还没回来）同样不能卸：卸掉等于把那条
-        // Promise 的续体连同 Context 一起扔了。
-        if has_in_flight(pending, pending_routes, pending_ticks, &p.name) {
-            continue;
-        }
+        // 子进程上报的活跃定时器数（`timers` 事件）：>0 就不能卸，否则定时器全丢。
+        let has_timers = match p.runtime.as_ref() {
+            Some(PluginRuntime::Ext(e)) => e.active_timers() > 0,
+            None => false,
+        };
         if !should_evict(
             p.has_on_tick,
             p.keep_warm,
             host.ws.open_count_for(&p.name) > 0,
+            has_timers,
             next_in,
             idle_for,
             cfg.idle_ms,
@@ -721,119 +631,6 @@ pub fn now_ms() -> u64 {
     BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-/// JS 侧的执行预算看门狗（QuickJS interrupt handler 的宿主侧状态）。
-#[derive(Clone, Default)]
-struct Watchdog {
-    armed: Arc<AtomicBool>,
-    deadline_ms: Arc<AtomicU64>,
-    /// 自上次 `take_fired()` 以来的打断次数
-    fired: Arc<AtomicU64>,
-    /// 累计打断次数（永不清零），与 `EngineHealth.interrupts` 共享
-    total: Arc<AtomicU64>,
-    /// 关闭请求：置位后 handler 无条件返回 true，让正在执行的 JS 立刻被打断
-    stop: Arc<AtomicBool>,
-    /// 「停止当前任务」请求：和关闭分开，任务结束后要能复位
-    task_stop: Arc<AtomicBool>,
-    /// 这次执行是不是被**引擎自己**打断的（预算到点 / 墙钟超时）。
-    ///
-    /// 收尾处要靠它把「预算中断」也算成「已停止」，而不是失败 ——
-    /// 以前只看 task_stop，于是预算打断的任务被记成红色失败、熔断 +1、
-    /// 还发一条失败推送，和 docs/run-history.md 写的正好相反（安全审计 H4）。
-    interrupted: Arc<AtomicBool>,
-    /// 这次 Watchdog 正在跑的是哪次 invocation（派发时写入，0 = 没有）。
-    ///
-    /// 安全审计 H3：停止位以前是全局单比特，停 A 会打断 B。现在把「停谁」也记下来
-    /// （stop_inv），handler 只在两者相等时返回 true。
-    cur_inv: Arc<AtomicU64>,
-    /// 要停的是哪次 invocation（0 = 不按 inv 停，走 task_stop 的「停全部」）。
-    stop_inv: Arc<AtomicU64>,
-}
-
-impl Watchdog {
-    fn arm(&self, budget: Duration) {
-        // 每次派发都是一次新的执行：上一轮的中断标记不能带过来。
-        self.interrupted.store(false, Ordering::Relaxed);
-        self.deadline_ms.store(
-            now_ms().saturating_add(budget.as_millis() as u64),
-            Ordering::Relaxed,
-        );
-        self.armed.store(true, Ordering::Relaxed);
-    }
-
-    fn disarm(&self) {
-        self.armed.store(false, Ordering::Relaxed);
-    }
-
-    fn take_fired(&self) -> bool {
-        let n = self.fired.swap(0, Ordering::Relaxed);
-        if n > 0 {
-            // 被打断过 ⇒ 这次的错误是「我们自己叫停的」，收尾要按已停止处理。
-            self.interrupted.store(true, Ordering::Relaxed);
-        }
-        n > 0
-    }
-
-    /// 标记「这次执行被引擎中断了」。
-    ///
-    /// 给**墙钟超时**那条路用：它不是 JS 层的中断（没有 fired 计数），
-    /// 但对外同样是「已停止」，不该记成失败。
-    fn mark_interrupted(&self) {
-        self.interrupted.store(true, Ordering::Relaxed);
-    }
-
-    /// 取走「这次执行被引擎中断过」的标记（取走即清零）。
-    fn take_interrupted(&self) -> bool {
-        self.interrupted.swap(false, Ordering::Relaxed)
-    }
-
-    /// 这次执行是不是被「停止」打断的。
-    ///
-    /// 停止和「超出执行预算」在引擎里是同一个中断（QuickJS 抛的都是
-    /// `InternalError: interrupted`），所以这个标记只回答「是不是被我们叫停的」，
-    /// 不区分是用户按了停止还是预算到点 —— 对外两者都算「已停止」。
-    fn task_stop_requested(&self) -> bool {
-        self.stop_matches()
-    }
-
-    /// 这次执行该不该停？
-    ///
-    /// stop_inv != 0 ⇒ 只停那一次 invocation（安全审计 H3：停 A 不该打断 B）；
-    /// stop_inv == 0 ⇒ 老语义「停全部」，给关闭进程用。
-    fn stop_matches(&self) -> bool {
-        let target = self.stop_inv.load(Ordering::Relaxed);
-        if target != 0 {
-            return target == self.cur_inv.load(Ordering::Relaxed);
-        }
-        self.task_stop.load(Ordering::Relaxed)
-    }
-
-    /// 派发时告诉 Watchdog「这次是哪个 invocation」。
-    fn set_inv(&self, inv_id: u64) {
-        self.cur_inv.store(inv_id, Ordering::Relaxed);
-    }
-
-    fn handler(&self) -> Box<dyn FnMut() -> bool + 'static> {
-        let armed = self.armed.clone();
-        let deadline = self.deadline_ms.clone();
-        let fired = self.fired.clone();
-        let total = self.total.clone();
-        let stop = self.stop.clone();
-        let task_stop = self.task_stop.clone();
-        Box::new(move || {
-            if stop.load(Ordering::Relaxed) || task_stop.load(Ordering::Relaxed) {
-                return true;
-            }
-            if armed.load(Ordering::Relaxed) && now_ms() >= deadline.load(Ordering::Relaxed) {
-                fired.fetch_add(1, Ordering::Relaxed);
-                total.fetch_add(1, Ordering::Relaxed);
-                true
-            } else {
-                false
-            }
-        })
-    }
-}
-
 /// 引擎健康状态。存在的意义：**让面板别说谎**。
 ///
 /// 判定要同时看「最近心跳」和「预期唤醒时刻」：只看心跳的话，调度器睡 1 小时等下一个任务
@@ -860,9 +657,6 @@ pub struct WorkerSlot {
 pub struct EngineHealth {
     slots: Arc<Vec<WorkerSlot>>,
     stop: Arc<AtomicBool>,
-    task_stop: Arc<AtomicBool>,
-    /// 要停的是哪一次 invocation（0 = 停全部）。安全审计 H3。
-    stop_inv: Arc<AtomicU64>,
     pub budget_ms: u64,
 }
 
@@ -927,7 +721,8 @@ impl EngineHealth {
         })
     }
 
-    /// 所有 worker 被打断的次数之和（执行预算保护）。
+    /// 打断次数之和。Node-only 之后没有「打断」机制（超预算直接杀进程组），
+    /// 这里恒为 0（字段保留给 `/api/state` 的老消费方，已废弃）。
     pub fn interrupts(&self) -> u64 {
         self.slots
             .iter()
@@ -935,7 +730,8 @@ impl EngineHealth {
             .sum()
     }
 
-    /// 所有 worker 的 JS 堆之和 —— 每条 worker 有自己的 QuickJS Runtime。
+    /// JS 堆之和。Node-only 之后堆在子进程里，宿主不再统计，这里恒为 0
+    /// （字段保留给 `/api/state` 的老消费方）。
     pub fn js_memory_bytes(&self) -> u64 {
         self.slots
             .iter()
@@ -943,34 +739,13 @@ impl EngineHealth {
             .sum()
     }
 
-    /// 请求引擎停下来：置位后正在执行的 JS 会被立刻打断，不用等它跑满预算。
-    /// `Arc` 形式的停止位（`Watchdog` 要在 interrupt handler 里持有它）。
+    /// 请求引擎停下来：置位后引擎循环会尽快退出。
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
     }
 
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-
-    /// 请求停止当前正在跑的任务（不是关闭面板）。
-    ///
-    /// 打断的是 QuickJS 的 interrupt；如果正卡在 `http_fetch` 这种宿主调用里，
-    /// 要等它返回后下一次 JS 边界才会生效。
-    pub fn request_task_stop(&self) {
-        self.task_stop.store(true, Ordering::Relaxed);
-    }
-
-    /// 只停某一次 invocation（安全审计 H3：停 A 不该打断 B）。
-    pub fn request_task_stop_inv(&self, inv_id: u64) {
-        self.stop_inv.store(inv_id, Ordering::Relaxed);
-        self.task_stop.store(true, Ordering::Relaxed);
-    }
-
-    pub fn clear_task_stop(&self) {
-        self.task_stop.store(false, Ordering::Relaxed);
-        // 必须一起复位：留着 stop_inv 会让「停全部」的老语义永远失效。
-        self.stop_inv.store(0, Ordering::Relaxed);
     }
 }
 
@@ -981,9 +756,9 @@ pub struct PluginInfo {
     pub file: String,
     /// 插件语言。Python 已退出插件范畴，这里永远是 `"js"`（保留字段给前端兼容）。
     pub runtime: String,
-    /// 实际选中的 JS 引擎：`"quickjs"` / `"node"` / `"bun"`。
+    /// 实际选中的 JS 引擎：`"node"` / `"bun"`。
     pub engine: String,
-    /// 插件级自定义解释器路径（Node/Bun；QuickJS 为 None）。
+    /// 插件级自定义解释器路径（`None` = 用运行时目录里的默认命令）。
     pub command: Option<String>,
     pub has_on_tick: bool,
     pub ticks: u64,
@@ -1339,8 +1114,6 @@ impl JsEngine {
         let health = EngineHealth {
             slots: Arc::new((0..workers_n).map(|_| WorkerSlot::default()).collect()),
             stop: Arc::new(AtomicBool::new(false)),
-            task_stop: Arc::new(AtomicBool::new(false)),
-            stop_inv: Arc::new(AtomicU64::new(0)),
             budget_ms,
         };
 
@@ -1361,12 +1134,8 @@ impl JsEngine {
             receivers.push(rx);
         }
         let senders = Arc::new(senders);
-        // 后台 HTTP 请求完成时要叫醒引擎线程 —— 那条线程手里没有 receiver，
-        // 只能走这条全局通道。
-        install_wake_senders(senders.as_ref().clone());
-        // 插件运行期改任务状态（set_job_*）走“补丁 + Wake”：宿主 API 可能在
-        // 引擎线程（QuickJS）或 RPC 线程（外部 Node/Bun）上被调用，直接借
-        // &mut Scheduler 拿不到，在引擎线程上还会自锁。
+        // 插件运行期改任务状态（set_job_*）走“补丁 + Wake”：宿主 API 在
+        // RPC 线程上被调用，直接借 &mut Scheduler 拿不到，在引擎线程上还会自锁。
         {
             let wake = senders.clone();
             host.jobs.set_wake(Arc::new(move || {
@@ -1421,11 +1190,14 @@ impl JsEngine {
 
     /// 发关闭指令并 join 所有线程，保证解释器按序析构。
     ///
-    /// 外部 JS 插件的子进程在 `ExtPlugin::drop` 里被杀；QuickJS Context 随
-    /// `LoadedPlugin` 一起 drop。
+    /// 先杀所有在册子进程：worker 可能正卡在 `wait_result`，不先杀的话 join 要等到
+    /// 任务预算（最长 600s）；面板被 systemd 的 `TimeoutStopSec` 杀掉后，独立进程组
+    /// 的子进程会成为孤儿。杀掉后 worker 立刻收到 Eof 收尾，再读到 Shutdown 退出。
+    /// 空闲插件的子进程不在册，由 `ExtPlugin::drop` 在 worker 退出时杀。
     pub fn shutdown(&mut self) {
         self.health.request_stop();
         self.handle.broadcast(EngineCmd::Shutdown);
+        crate::extproc::kill_all_children();
         for h in self.threads.drain(..) {
             let _ = h.join();
         }
@@ -1449,11 +1221,8 @@ fn parse_pin(raw: &str) -> HashMap<String, usize> {
     out
 }
 
-/// 插件用哪个运行时。
+/// 插件运行时：只有外部 Node/Bun 子进程。
 enum PluginRuntime {
-    /// 内嵌 QuickJS
-    Js(Context),
-    /// 外部 Node/Bun 子进程（Box：子进程句柄远大于 Context，避免枚举整体变大）
     Ext(Box<ExtPlugin>),
 }
 
@@ -1471,11 +1240,11 @@ struct LoadedPlugin {
     tasks: usize,
     /// 热更新用的文件修改时间
     mtime: Option<SystemTime>,
-    /// 本插件选中的 JS 引擎（QuickJS / Node / Bun）。
+    /// 本插件选中的 JS 引擎（Node / Bun）。
     engine: EngineKind,
-    /// 插件级自定义解释器路径（Node/Bun；QuickJS 为 None）。
+    /// 插件级自定义解释器路径（`None` = 用运行时目录里的默认命令）。
     command: Option<String>,
-    /// 外部 JS 插件用 `register_handler` 登记的处理函数名（QuickJS 走运行时查询）。
+    /// 插件用 `register_handler` 登记的处理函数名。
     handlers: Vec<String>,
     /// 装进内存的时刻（惰性加载的"宽限期"从这里算）。
     loaded_at: Instant,
@@ -1502,24 +1271,6 @@ struct LoadedPlugin {
     /// 面板据此在左侧多出一项。**只有插件自己知道该叫什么** —— 面板推导得出
     /// 「有没有配置页」，推导不出「该显示成日常任务还是 mcloud-daily」。
     nav: Option<hostapi::NavDef>,
-    /// 插件内部的毫秒级定时器（`setTimeout` / `setInterval`）。
-    ///
-    /// 挂在插件上而不是 worker 上：卸载/回收时随插件一起消失，不会在别的 Context
-    /// 上"接着烧"；也不需要判断"哪个 worker 拥有它"。
-    timers: Arc<Mutex<crate::timers::Timers>>,
-    /// 这个 `LoadedPlugin` 是第几次装载（进程内单调递增）。
-    ///
-    /// 为什么要有：热更新会**换掉整个 Context**，而这时可能正有一个 async handler
-    /// 在 `await` —— 那个 Promise 的续体再也没人跑了。在途记录里存一份代次，
-    /// 循环就能立刻认出"它属于上一代"，当场判失败，而不是让那条运行记录挂到
-    /// 墙钟超时（默认 600 秒）才收尾。
-    generation: u64,
-}
-
-/// 装载代次的分配器。
-fn next_generation() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl LoadedPlugin {
@@ -1530,524 +1281,7 @@ impl LoadedPlugin {
 
 enum TickOutcome {
     Ok,
-    Gone,
     Failed(String),
-    /// `on_tick` 是 async：这一拍已经交给 Promise，收尾等 `__host_inv_done`。
-    Pending,
-}
-
-/// 单个模块文件的大小上限。
-///
-/// why：插件是操作者自己装的，但"手滑把一个巨型文件 import 进来"是很现实的错
-/// （误引了打包产物、日志之类）。QuickJS 那边有 64MB 堆上限，真撞上去的现场是一条
-/// 难懂的 OOM；这里提前给一句人话。
-const MAX_MODULE_BYTES: u64 = 1024 * 1024;
-
-// ══════════════════════ 模块名 = URL（严格 ESM）══════════════════════
-//
-// 标准里 ES 模块由 **URL** 标识：`import.meta.url` 拿到的就是它，相对说明符
-// 也按 URL 规则解析。所以这里模块名一律是 `file:///…/x.js`，而不是裸路径。
-//
-// 上一版我用裸路径当模块名，两个后果：`import.meta.url` 不是一个合法 URL
-// （插件里任何按 URL 处理它的代码都会错），以及解析只能靠 `Path::join`
-// 而不是 URL 语义。既然要"符合 ESM"，这两处都得改。
-
-/// 一个字符是否需要百分号编码（URL path 段里不安全的那些）。
-fn needs_pct(b: u8) -> bool {
-    !(b.is_ascii_alphanumeric()
-        || matches!(
-            b,
-            b'-' | b'.'
-                | b'_'
-                | b'~'
-                | b'/'
-                | b':'
-                | b'@'
-                | b'!'
-                | b'$'
-                | b'&'
-                | b'\''
-                | b'('
-                | b')'
-                | b'*'
-                | b'+'
-                | b','
-                | b'='
-        ))
-}
-
-/// 路径 → `file://` URL（百分号编码）。
-fn file_url(path: &Path) -> String {
-    // ⚠ Windows 上有两层坑，缺一层都还是坏（issue #1，真机验证抓到的）：
-    //
-    // 1. 路径是 `C:\a\b.js`。直接百分号编码会变成 `file://C:%5Ca%5Cb.js`，
-    //    而 `url_join` 只认 `/` → 相对 import 全线失效。
-    // 2. **`std::fs::canonicalize()` 在 Windows 上返回的是 verbatim 路径**
-    //    `\\?\C:\a\b.js`（UNC 是 `\\?\UNC\srv\share\a`）。只做第 1 步会得到
-    //    `//?/C:/a/b.js`，`url_to_path` 的盘符判定看到第三个字符是 `?` 就失效了 ——
-    //    结果还是「找不到模块」，只是错误里的 `%5C` 变成了 `%3F`。
-    //
-    // 所以顺序是：统一分隔符 → 剥 verbatim 前缀 → 补根斜杠。
-    let raw = path.to_string_lossy().replace('\\', "/");
-    let raw = strip_verbatim(&raw);
-    let raw = if raw.starts_with('/') { raw } else { format!("/{raw}") };
-    let mut out = String::from("file://");
-    for &b in raw.as_bytes() {
-        if needs_pct(b) {
-            out.push_str(&format!("%{b:02X}"));
-        } else {
-            out.push(b as char);
-        }
-    }
-    out
-}
-
-/// 剥掉 Windows 的 verbatim 前缀（`\\?\` / `\\?\UNC\`）。
-///
-/// 入参是**已经统一成 `/`** 的路径。`canonicalize()` 在 Windows 上总是返回 verbatim
-/// 形状，不剥掉它，`file_url` 与 `url_to_path` 就不是一对可逆的映射。
-pub(crate) fn strip_verbatim(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix("//?/UNC/") {
-        format!("//{rest}")
-    } else if let Some(rest) = s.strip_prefix("//?/") {
-        rest.to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// `file://` URL 的 path 部分 → 文件系统路径。
-///
-/// Windows 上 `file:///C:/a/b.js` 去掉前缀后是 `/C:/a/b.js`，那个根斜杠是 URL 的，
-/// 不是路径的 —— 不去掉的话 `PathBuf` 会指向当前盘的根，永远打不开。
-fn url_to_path(s: &str) -> Result<PathBuf, String> {
-    let decoded = pct_decode(s)?;
-    if cfg!(windows) {
-        let b = decoded.as_bytes();
-        if b.len() >= 3 && b[0] == b'/' && b[2] == b':' {
-            return Ok(PathBuf::from(&decoded[1..]));
-        }
-    }
-    Ok(PathBuf::from(decoded))
-}
-
-/// 百分号解码（`file://` URL 的 path 部分 → 文件系统路径）。
-fn pct_decode(s: &str) -> Result<String, String> {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return Err(format!("URL 里的百分号编码不完整：`{s}`"));
-            }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-            let v = u8::from_str_radix(hex, 16)
-                .map_err(|_| format!("URL 里的百分号编码非法：`{s}`"))?;
-            out.push(v);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|e| format!("URL 解码后不是合法 UTF-8：{e}"))
-}
-
-/// 按 URL 规则把 `file://` 基址与相对说明符合并（RFC 3986 §5.3 merge + 去点段）。
-///
-/// 只处理 path-only 的 `file://` URL（没有 query / fragment），够插件用；
-/// 不做的事写清楚：不认识 `?` / `#`（按普通字符处理），不解析 import maps。
-fn url_join(base: &str, spec: &str) -> Result<String, String> {
-    let base_path = base.strip_prefix("file://").ok_or_else(|| {
-        format!("导入方模块名不是 file:// URL：`{base}`（相对 import 需要有文件作基准）")
-    })?;
-    // 去点段要在**合并之后**做：先丢掉基址最后一段（文件名），再接上说明符。
-    // `spec` 以 `/` 开头时按 URL 语义是"以根为基准"，直接替掉整条 path。
-    let joined = if spec.starts_with('/') {
-        spec.to_string()
-    } else {
-        let dir = match base_path.rfind('/') {
-            Some(i) => &base_path[..=i],
-            None => "/",
-        };
-        format!("{dir}{spec}")
-    };
-
-    // 去掉 `?` / `#` 之后的部分（ESM 里它们不算路径），并切成段做规范化
-    let cut = joined.find(['?', '#']).unwrap_or(joined.len());
-    let path = &joined[..cut];
-    let mut segs: Vec<&str> = Vec::new();
-    let absolute = path.starts_with('/');
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                // 越到根之上就停在根（URL 规范如此），**但**越过插件目录会在下一步被挡
-                if segs.pop().is_none() && !absolute {
-                    return Err(format!("`{spec}` 越过了模块根（`..` 太多）"));
-                }
-            }
-            other => segs.push(other),
-        }
-    }
-    let trailing = path.ends_with('/');
-    let mut out = String::from("file://");
-    if absolute {
-        out.push('/');
-    }
-    out.push_str(&segs.join("/"));
-    if trailing && !out.ends_with('/') {
-        out.push('/');
-    }
-    Ok(out)
-}
-
-/// 解析一个相对说明符：URL 语义合并 → 转路径 → **自动找** → 检查边界 → 返回 `file://` URL。
-///
-/// 自动找的候选链：`原样` → `+.js` → `+.mjs` → `/index.js` → `/index.mjs`。
-///
-/// ⚠️ 说明白一件事：**这不是浏览器 / Node 的 ESM 行为**（那两边都要求写全扩展名、
-/// 也不会自动找 index）。这里放宽是为了少写几个字。代价要认：
-/// `./x` 与 `./x.js` 指向同一个文件，也就是说**写错时不会立刻发现** ——
-/// 一个被误删的 `./x.js` 可能悄悄落到 `./x.mjs` 或 `./x/index.js` 上。
-/// 所以解析结果一律以 `file://` URL 为准（`import.meta.url` 里能看到最终是哪个文件）。
-fn resolve_relative(base: &str, spec: &str, root: &Path) -> Result<String, String> {
-    let url = url_join(base, spec)?;
-    let path_part = url.strip_prefix("file://").unwrap_or(&url);
-    let path = url_to_path(path_part)?;
-
-    let mut tried: Vec<PathBuf> = vec![path.clone()];
-    let mut cand = path.clone();
-    if !cand.is_file() {
-        for suffix in [".js", ".mjs"] {
-            let p2 = PathBuf::from(format!("{}{suffix}", path.display()));
-            tried.push(p2.clone());
-            if p2.is_file() {
-                cand = p2;
-                break;
-            }
-        }
-        if !cand.is_file() {
-            for name in ["index.js", "index.mjs"] {
-                let p2 = path.join(name);
-                tried.push(p2.clone());
-                if p2.is_file() {
-                    cand = p2;
-                    break;
-                }
-            }
-        }
-    }
-
-    let canon = cand.canonicalize().map_err(|_| {
-        let list = tried
-            .iter()
-            .map(|p| format!("`{}`", p.display()))
-            .collect::<Vec<_>>()
-            .join("、");
-        format!("找不到模块 `{spec}`（从 `{base}` 试过：{list}）")
-    })?;
-
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| format!("插件目录 `{}` 不可用：{e}", root.display()))?;
-    if !canon.starts_with(&root_canon) {
-        return Err(format!(
-            "只能 import 插件目录内的文件：`{spec}` 解析成 `{}`，不在 `{}` 之内",
-            canon.display(),
-            root_canon.display()
-        ));
-    }
-
-    // 只能 import **共享库目录**里的文件（安全审计 中12）。
-    //
-    // 原来的边界是整个插件目录：`plugins/js/a.js` 里 `import('../b.js')` 能通过，
-    // 而 b.js 是**另一个插件的源码** —— 插件里常硬编码上游站点的 token / 账号 /
-    // UA，这等于 A 可以读 B。HTTP 静态服务只覆盖 `/plugins/<name>/`，不服务
-    // `plugins/js/*.js`，所以这是一条净增量的越界读。
-    //
-    // 现在相对 import 只允许落在 `<plugins>/js/lib/` 或 `<plugins>/lib/`。
-    // lib/ 本身不是插件（没有同名 .js 就是普通目录），放公共代码是安全的。
-    let lib_dirs: Vec<PathBuf> = [root.join("js").join("lib"), root.join("lib")]
-        .into_iter()
-        .filter_map(|p| p.canonicalize().ok())
-        .collect();
-    if !lib_dirs.iter().any(|d| canon.starts_with(d)) {
-        let allowed = if lib_dirs.is_empty() {
-            "（当前没有 lib/ 目录）".to_string()
-        } else {
-            lib_dirs
-                .iter()
-                .map(|d| format!("`{}`", d.display()))
-                .collect::<Vec<_>>()
-                .join("、")
-        };
-        return Err(format!(
-            "相对 import 只允许共享库目录 {allowed}：`{spec}` 解析成 `{}`。\
-             插件之间不能互相 import 源码 —— 公共代码请放到 lib/ 下，或走 `host-api`",
-            canon.display()
-        ));
-    }
-    Ok(file_url(&canon))
-}
-
-/// 哪些 Node 内置模块在面板里有等价实现。
-///
-/// 名单刻意很短：每加一个就要在 `src/jshost.rs` 里真实现一遍，**假实现比不实现更坏**
-/// ——插件在里面跑得通、出去跑不通（或者反过来）都难查。
-///
-/// 现在五组：路径 / 文件系统（把状态写下来）+ crypto / url / zlib（Node/Web 兼容层，
-/// 见 `src/jscompat/`）。裸名与 `node:` 前缀都认 —— Node 两种都收，
-/// 而内置模块在 Node 的解析里**优先于**同名 npm 包，所以 `import 'url'` 也是内置那个。
-pub(crate) fn builtin_node_module(name: &str) -> Option<&'static str> {
-    // **名单只有一份**：jshost::BUILTIN_NODE_MODULES。以前这里是手抄的第二份，
-    // 加 node:zlib 时只加了一处 —— 于是 require('node:zlib') 能用、
-    // import { gzipSync } from 'node:zlib' 报 "Error resolving module"。
-    // 现在按 Node 的规则从同一份名单推：裸名等价于加 node: 前缀。
-    let want = if name.starts_with("node:") {
-        std::borrow::Cow::Borrowed(name)
-    } else {
-        std::borrow::Cow::Owned(format!("node:{name}"))
-    };
-    crate::jshost::BUILTIN_NODE_MODULES
-        .iter()
-        .copied()
-        .find(|m| *m == want)
-}
-
-/// 裸标识符解析失败时的提示。`path` / `fs` 单独说，因为它们是**有**等价实现的，
-/// 只是写法不对（比如 `require('fs/promises')`）—— 那种情况要指路，不是给一句
-/// 「没有 node_modules」让人去翻半天。
-pub(crate) const BUILTIN_HINT: &str =
-    "面板里只内置了 `host-api`（宿主 API）、`node:path` / `node:fs`（限定在插件自己\
-的目录内）与 `node:crypto` / `node:url` / `node:buffer` / `node:zlib`（Node 兼容层）。`fs/promises` /\
-`node:os` / 第三方包都没有；要引自己的文件请用相对说明符（如 './lib/core.js'）";
-
-/// 模块解析器：`host-api` 内置；相对说明符按 URL 语义解析成 `file://` URL。
-struct HostApiResolver {
-    root: PathBuf,
-}
-
-impl HostApiResolver {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-}
-
-impl Resolver for HostApiResolver {
-    fn resolve<'js>(
-        &mut self,
-        _ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
-        _attrs: Option<ImportAttributes<'js>>,
-    ) -> rquickjs::Result<String> {
-        if name == "host-api" {
-            return Ok(name.to_string());
-        }
-        // Node 的内置模块：名单在 builtin_node_module 里维护（path/fs/crypto/url）。
-        // 裸名与 `node:` 前缀都收：Node 两种都认，插件里两种写法都有。
-        if let Some(builtin) = builtin_node_module(name) {
-            return Ok(builtin.to_string());
-        }
-        if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
-            // 裸标识符（`lodash` 之类）没有 node_modules 可找 —— 说清楚，
-            // 别让插件作者以为是拼写问题。
-            return Err(rquickjs::Error::new_resolving_message(
-                base,
-                name,
-                BUILTIN_HINT,
-            ));
-        }
-        resolve_relative(base, name, &self.root)
-            .map_err(|e| rquickjs::Error::new_resolving_message(base, name, e))
-    }
-}
-
-/// `require()` 的宿主侧：解析 + 读文件，**一个调用干完**。
-///
-/// 返回值一律是带 `ok` 的 JSON（`{"ok":true,"url":…,"text":…}` / `{"ok":false,"error":…}`）。
-/// 为什么不学 `http_fetch` 那样"成功一种形状、失败另一种"：那种设计让调用方
-/// 必须先猜形状，插件里任何一处漏判就是 TypeError（见 `docs/findings.md` F-006，
-/// 那是本项目在面板侧踩过的坑）。带 `ok` 的单一形状没有这个问题。
-pub(crate) fn do_require_load(root: &Path, base: &str, spec: &str) -> String {
-    if spec == "host-api" {
-        // 交给 JS 侧直接返回 globalThis.host_api —— 这里给个标记即可
-        return "{\"ok\":true,\"builtin\":true}".to_string();
-    }
-    if let Some(m) = builtin_node_module(spec) {
-        // 标记里带上模块名，JS 侧据此选择返回哪个门面对象（见 BOOTSTRAP 的 require）
-        return format!("{{\"ok\":true,\"builtin\":true,\"module\":\"{m}\"}}");
-    }
-    if spec.starts_with("node:")
-        || spec.starts_with("fs") && !spec.starts_with("./") && !spec.starts_with("../")
-    {
-        // 裸标识符 / node: 内置 —— 没有 node_modules 可找
-        return format!(
-            "{{\"ok\":false,\"error\":{}}}",
-            serde_json::to_string(&format!(
-                "只支持 `host-api` / `node:path` / `node:fs` / `node:crypto` / `node:url` / `node:buffer` 与插件目录内的相对路径；`{spec}` 是别的 Node 内置或第三方包，这里没有"
-            ))
-            .unwrap_or_else(|_| "\"?\"".into())
-        );
-    }
-    match resolve_relative(base, spec, root) {
-        Ok(url) => {
-            let path_part = url.strip_prefix("file://").unwrap_or(&url).to_string();
-            match url_to_path(&path_part) {
-                Ok(p) => match std::fs::read_to_string(&p) {
-                    Ok(text) => format!(
-                        "{{\"ok\":true,\"url\":{},\"text\":{}}}",
-                        serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into()),
-                        serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into())
-                    ),
-                    Err(e) => format!(
-                        "{{\"ok\":false,\"error\":{}}}",
-                        serde_json::to_string(&format!("读不到 `{}`：{e}", p.display()))
-                            .unwrap_or_else(|_| "\"?\"".into())
-                    ),
-                },
-                Err(e) => format!(
-                    "{{\"ok\":false,\"error\":{}}}",
-                    serde_json::to_string(&e).unwrap_or_else(|_| "\"?\"".into())
-                ),
-            }
-        }
-        Err(e) => format!(
-            "{{\"ok\":false,\"error\":{}}}",
-            serde_json::to_string(&e).unwrap_or_else(|_| "\"?\"".into())
-        ),
-    }
-}
-
-/// 这个文件看起来是 **CJS 写法**吗（用了 `module.exports` / `exports.` 而没有 ESM 语法）？
-///
-/// 为什么要判它：`import` 一个 CJS 文件时，QuickJS 的链接器只会丢一句
-/// `Could not find export 'default' in module …` —— 那句话说不到点子上，
-/// 人会去查自己的 import 语法，而真正的问题是"这个文件不是 ES 模块"。
-/// （反方向同理：`require` 读 ES 模块会丢 `unsupported keyword: export`，
-/// 那条我已经在 require 那侧拦下了。）
-fn looks_like_cjs(source: &str) -> bool {
-    let has_esm = source.lines().any(|l| {
-        let t = l.trim_start();
-        t.starts_with("import ")
-            || t.starts_with("import{")
-            || t.starts_with("export ")
-            || t.starts_with("export{")
-            || t.starts_with("export(")
-    });
-    if has_esm {
-        return false;
-    }
-    source.contains("module.exports") || source.contains("exports.")
-}
-
-/// 需要给模块注入 `require` 吗？
-///
-/// 只在源码里真的出现 `require(` 时才注入一行 —— 注入会**让模块的行号整体 +1**
-/// （错误堆栈里的行号就对不上了）。纯 ESM 的模块（我们期望的常态）因此完全不受影响；
-/// 只有用 require 的文件承担这一点代价，而且这件事写在文档里了。
-fn needs_require_shim(source: &str) -> bool {
-    source.contains("require(")
-}
-
-/// 给模块源码前面加一行，把 `require` 绑到**这个模块自己的 URL** 上。
-///
-/// 为什么不是"给全局塞一个 require"：那样 `require('./x.js')` 的基准就变成了
-/// 最后被设置的那个模块，`lib/` 里的模块 require 兄弟文件会解析错地方 —— 而且是
-/// 那种"有时候对"的错。模块作用域的一行 const 没有这个问题，而且仍然是合法 ESM。
-fn with_require_shim(source: &str) -> String {
-    format!("const require = globalThis.__make_require(import.meta.url);\n{source}")
-}
-
-/// 模块加载器：`host-api` 返回内置源码，其余按解析出的 `file://` URL 读文件。
-///
-/// 模块名就是 URL，所以同一个文件被多个插件 import 时只会被声明一次
-/// （rquickjs 按名字缓存）—— 这正是"一份 core、多个插件共用"省内存的地方。
-struct HostApiLoader;
-
-impl Loader for HostApiLoader {
-    fn load<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        name: &str,
-        _attrs: Option<ImportAttributes<'js>>,
-    ) -> rquickjs::Result<Module<'js, Declared>> {
-        if name == "host-api" {
-            return Module::declare(ctx.clone(), name, jshost::HOST_API_MODULE);
-        }
-        // 内置模块的源码**每次现生成**（体 + 导出清单），不在别处再存一份 ——
-        // 两份清单迟早会不一致，而那种不一致只在「用了那个名字」时才炸。
-        if let Some(src) = jshost::node_module_for_import(name) {
-            return Module::declare(ctx.clone(), name, src.as_str());
-        }
-
-        let path_part = name.strip_prefix("file://").ok_or_else(|| {
-            rquickjs::Error::new_loading_message(
-                name,
-                "只有 `host-api` 与插件目录内的文件可以被 import（解析阶段应当给出 file:// URL）",
-            )
-        })?;
-        let path =
-            url_to_path(path_part).map_err(|e| rquickjs::Error::new_loading_message(name, e))?;
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if ext != "js" && ext != "mjs" {
-            return Err(rquickjs::Error::new_loading_message(
-                name,
-                format!("只支持 .js / .mjs 模块（这个文件后缀是 `.{ext}`）"),
-            ));
-        }
-        let meta = std::fs::metadata(&path).map_err(|e| {
-            rquickjs::Error::new_loading_message(name, format!("读不到模块文件：{e}"))
-        })?;
-        if meta.len() > MAX_MODULE_BYTES {
-            return Err(rquickjs::Error::new_loading_message(
-                name,
-                format!(
-                    "模块文件 {} 太大（{} 字节，上限 {}）—— 确认一下是不是引错了文件",
-                    path.display(),
-                    meta.len(),
-                    MAX_MODULE_BYTES
-                ),
-            ));
-        }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| rquickjs::Error::new_loading_message(name, format!("读模块失败：{e}")))?;
-        // `import` 只能读 ES 模块。读 CJS 文件时给出**能照着做**的提示，
-        // 而不是让链接器丢一句 "Could not find export 'default'"。
-        if looks_like_cjs(&raw) {
-            return Err(rquickjs::Error::new_loading_message(
-                name,
-                format!(
-                    "`{}` 是 CommonJS 写法（用了 module.exports / exports），`import` 读不了它 —— \
-                     请用 `require()` 引入这个文件，或者把它改成 ES 模块（export）。",
-                    path.display()
-                ),
-            ));
-        }
-        let src = if needs_require_shim(&raw) {
-            with_require_shim(&raw)
-        } else {
-            raw
-        };
-        let module = Module::declare(ctx.clone(), name, src)?;
-        // 被 import 的模块同样要有 `import.meta.url` —— 模块最常见的用法就是
-        // 靠它定位自己旁边的文件（这也是 ESM 语义的一部分，不是可选项）
-        fill_meta(&module, name);
-        Ok(module)
-    }
-}
-
-/// 给一个（已声明的）模块填 `import.meta`。
-///
-/// 目前填两样：`url`（ESM 规范里的那一个，模块自己的 `file://` URL）与
-/// `main`（是不是入口 —— Node 近年的约定，判"我是不是被直接跑的那个"很有用）。
-fn fill_meta<'js>(module: &Module<'js, Declared>, module_name: &str) {
-    if let Ok(meta) = module.meta() {
-        let _ = meta.set("url", module_name.to_string());
-        let _ = meta.set("main", true);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2066,56 +1300,7 @@ fn worker_main(
     tick_mask: Arc<Vec<AtomicBool>>,
     rx: Receiver<EngineCmd>,
 ) {
-    // 打断计数先在本线程累加，再回写自己的健康槽位。
-    // 不能直接用 `health.slot(idx)` 里的原子 —— `Watchdog` 需要在 interrupt handler
-    // 里持有一个 `Arc<AtomicU64>`，而槽位是 `Arc<Vec<..>>` 内部的一个字段，借不出来。
-    let interrupts = Arc::new(AtomicU64::new(0));
-    let wd = Watchdog {
-        total: interrupts.clone(),
-        stop: health.stop_flag(),
-        task_stop: health.task_stop.clone(),
-        ..Default::default()
-    };
     let budget = Duration::from_millis(health.budget_ms);
-
-    // 声明顺序很重要：`rt` 先声明 → 最后析构，保证所有 Context 都先于 Runtime 释放。
-    //
-    // ⚠ 它是 `Option`：一条 Runtime 就是几 MB（arena + 各种运行时结构），
-    //   如果这条 worker 上一个插件都没装在内存里，那它整个是白占的 ——
-    //   所以闲下来会**整套收掉**（见下面的 `rt_idle_at` 那段），需要时再建。
-    // 先不建：没有 QuickJS 插件的 worker（典型是 worker 0 / 纯 Node 插件的 worker）
-    // 启动时一个 Runtime 都不该占。第一次真正加载 QuickJS 插件时由 `rt_ref` 建。
-    let mut rt: Option<Runtime> = None;
-
-    // 拿 Runtime 的统一入口：被回收过就**就地重建**。
-    // 用它而不是直接 `rt.as_ref()`，是为了让"回收"这件事对调用点是透明的。
-    macro_rules! qjs {
-        () => {{
-            if rt.is_none() {
-                rt = make_runtime(&plugins_dir, &wd);
-                if rt.is_some() {
-                    crate::log::plog!(
-                        &format!("engine:{idx}"),
-                        info,
-                        "QuickJS Runtime 重建（这条 worker 闲过，Runtime 被回收了；需要时再建）"
-                    );
-                } else {
-                    crate::log::plog!(
-                        &format!("engine:{idx}"),
-                        error,
-                        "重建 QuickJS Runtime 失败"
-                    );
-                }
-            }
-            match rt.as_ref() {
-                Some(r) => r,
-                // ⚠ 用 `continue` 而不是 `return`：这个宏只在主循环体里用，
-                //   `return` 会把**整条引擎线程**结束掉（心跳停、命令全部超时），
-                //   而调用点看起来只是个普通表达式 —— 读代码的人根本看不出来。
-                None => continue, // 建不起来：这一轮什么都不做，下一轮再试
-            }
-        }};
-    }
 
     let files = my_files;
 
@@ -2173,24 +1358,9 @@ fn worker_main(
             continue;
         }
         // ⚠ 加载用**加载预算**，不是单次调用的 2 秒（见 `DEFAULT_LOAD_BUDGET_MS`）
-        let (lp, mut declared) = load_one(&mut rt, file, &logs, &host, &wd, load_budget());
+        let (lp, mut declared) = load_one(file, &logs, &host);
         pending.append(&mut declared);
         plugins.push(lp);
-    }
-
-    if rt.is_some() {
-        crate::log::plog!(
-            &format!("engine:{idx}"),
-            debug,
-            "QuickJS Runtime 就绪（内存上限 64 MiB，单次执行预算 {}ms）",
-            health.budget_ms
-        );
-    } else {
-        crate::log::plog!(
-            &format!("engine:{idx}"),
-            debug,
-            "没有 QuickJS 插件：Runtime 按需创建（当前 0 占用）"
-        );
     }
 
     // 「我负责的插件」—— 从共享归属表取（而不是从已加载的 plugins），
@@ -2251,7 +1421,7 @@ fn worker_main(
 
     // 面板创建的任务不在插件代码里，`install_tasks` 装不到它们，得单独从库里读回来。
     reinstall_panel_jobs(
-        &mut sched, &plugins, &logs, &db, &wd, budget, boot_at, &owned,
+        &mut sched, &plugins, &logs, &db, budget, boot_at, &owned,
     );
 
     // 把累计计数灌回去（否则重启后「触发次数」归零、熔断退避从头开始）
@@ -2308,19 +1478,12 @@ fn worker_main(
     let _ = workers_n;
 
     // ---------- 事件循环：deadline 驱动 ----------
-    // 在途的 async invocation（id → 收尾所需的一切）。只在本线程读写。
-    let mut pending: Pending = std::collections::HashMap::new();
-    // 在途的异步路由请求 / on_tick（同一个 id 空间，靠 id 区分是哪一类）。
-    let mut pending_routes: PendingRoutes = std::collections::HashMap::new();
-    let mut pending_ticks: PendingTicks = std::collections::HashMap::new();
     let mut last_scan = Instant::now();
     // 半被动：watcher 事件会 Wake 并强制扫描；这个周期只是兜底（默认 30 秒）。
     let scan_interval = Duration::from_millis(env_u64("PLUGIN_SCAN_MS", 30_000).max(1_000));
     let mut force_scan = false;
     let mut last_script_sync = Instant::now();
     let script_worker = script_worker_index(workers_n);
-    // 这条 worker「上一个插件都没装在内存里」是从什么时候开始的（Runtime 回收用它计时）
-    let mut rt_idle_at = Instant::now();
     let mut last_dir_sig: Option<u64> = None;
     let mut last_patch: u64 = 0;
     loop {
@@ -2346,14 +1509,9 @@ fn worker_main(
         {
             let slot = health.slot(idx);
             slot.beat_ms.store(now_ms(), Ordering::Relaxed);
-            slot.mem_bytes.store(
-                rt.as_ref()
-                    .map(|r| r.memory_usage().memory_used_size as u64)
-                    .unwrap_or(0),
-                Ordering::Relaxed,
-            );
-            slot.interrupts
-                .store(interrupts.load(Ordering::Relaxed), Ordering::Relaxed);
+            // 内嵌 QuickJS 已移除：面板不再统计 JS 堆（Node 的堆在子进程里）。
+            slot.mem_bytes.store(0, Ordering::Relaxed);
+            slot.interrupts.store(0, Ordering::Relaxed);
         }
         let now = Local::now();
         let mut sleep = sched.sleep_hint(now);
@@ -2375,45 +1533,6 @@ fn worker_main(
                     sleep = sleep.min(d);
                 }
             }
-            // 插件都卸了，但 Runtime 还在等 idle 阈值回收：到点必须醒一次，
-            // 否则会一直睡到 preload，Runtime 就白占着。
-            if rt.is_some() && plugins.iter().all(|p| p.evicted || p.error.is_some()) {
-                let due = rt_idle_at + Duration::from_millis(lazy_cfg.idle_ms);
-                let d = due.saturating_duration_since(Instant::now());
-                sleep = sleep.min(if d.is_zero() {
-                    Duration::from_millis(1)
-                } else {
-                    d
-                });
-            }
-        }
-        // 在途 invocation 的墙钟兜底也要参与"睡多久"：否则一条挂死的 await
-        // 要等到别的活把它叫醒才被发现。
-        {
-            let now_i = Instant::now();
-            for p in pending.values() {
-                sleep = sleep.min(p.deadline.saturating_duration_since(now_i));
-            }
-            for r in pending_routes.values() {
-                sleep = sleep.min(r.deadline.saturating_duration_since(now_i));
-            }
-            for t in pending_ticks.values() {
-                sleep = sleep.min(t.deadline.saturating_duration_since(now_i));
-            }
-        }
-
-        // 定时器也要参与"睡多久"：漏了它就会睡过头，毫秒级定时器直接失真。
-        // （一条 50ms 的 setInterval 意味着这条 worker 每 50ms 醒一次 —— 这是
-        //   插件自己选的代价，面板不替它兜。）
-        {
-            let now_i = Instant::now();
-            for p in plugins.iter() {
-                if let Ok(t) = p.timers.lock() {
-                    if let Some(d) = t.next_deadline() {
-                        sleep = sleep.min(d.saturating_duration_since(now_i));
-                    }
-                }
-            }
         }
 
         health.slot(idx).expect_ms.store(
@@ -2421,30 +1540,24 @@ fn worker_main(
             Ordering::Relaxed,
         );
 
+        // 卡死取证：一条 await 挂住时，唯一的硬证据就是「这一觉睡了多久」。
+        // 只有当引擎打算睡 >1s 时才记，避免刷屏；把它和当时的定时器条数放一起，
+        // 就能区分「定时器没注册」和「注册了但没算进 sleep」。
+        if sleep >= std::time::Duration::from_secs(1) {
+            let lazy = plugins.iter().filter(|p| p.evicted).count();
+            crate::log::plog!(
+                "engine",
+                debug,
+                "engine {} 将睡 {}ms（已卸出插件 {} 个）",
+                idx,
+                sleep.as_millis(),
+                lazy
+            );
+        }
         match rx.recv_timeout(sleep) {
             Ok(EngineCmd::Tick { seq, ts }) => {
                 for p in plugins.iter_mut() {
-                    // 上一拍还在 await 里：**跳过**这一拍，不排队。
-                    // 和 Node 的 interval 不重入是同一条规矩 —— 排队只会在恢复时
-                    // 一次性灌进来几百拍，把"每秒一次"变成"补跑风暴"。
-                    if pending_ticks.values().any(|t| t.plugin == p.name) {
-                        continue;
-                    }
-                    if let Some(id) = p.fire_tick(seq, &ts, &logs, &wd, budget) {
-                        pending_ticks.insert(
-                            id,
-                            PendingTick {
-                                plugin: p.name.clone(),
-                                generation: p.generation,
-                                ts: ts.clone(),
-                                deadline: Instant::now() + budget,
-                                _busy: BusyGuard::new(),
-                            },
-                        );
-                        if let Some((ok, msg)) = take_orphan(id) {
-                            push_inv_done(id, ok, msg);
-                        }
-                    }
+                    p.fire_tick(seq, &ts, &logs, budget);
                 }
                 sync_registry(&registry, &plugins, &owned_now(), &host.routes);
             }
@@ -2472,7 +1585,7 @@ fn worker_main(
                 if let Some(owner) = owner {
                     if let Some(one) = plugins.iter_mut().find(|p| p.name == owner) {
                         if one.evicted {
-                            let _ = rehydrate_plugin(&mut rt, one, one.tasks, &logs, &host, &wd);
+                            let _ = rehydrate_plugin(one, one.tasks, &logs, &host);
                         }
                         // 有请求 = 还在用：闲置计时从这里重新开始。
                         one.last_request = Some(Instant::now());
@@ -2480,42 +1593,10 @@ fn worker_main(
                 }
                 // 冷启动后立刻刷新面板看到的 loaded/evicted 状态，别等下一次 Tick。
                 sync_registry(&registry, &plugins, &owned_now(), &host.routes);
-                // 路由也是两段式：async handler 先回 pending，结算（或墙钟超时）
-                // 之后才把响应交给 HTTP 那边。Web 层本来就按「预算 + 1 秒」在等。
-                let inv_id = next_inv_id();
-                match dispatch_route(&plugins, &host, &key, &request_json, &wd, budget, inv_id) {
-                    RouteDispatch::Done(s) => {
+                // 外部运行时的路由是同步的：子进程跑完才回话，直接转发响应。
+                let s = dispatch_route(&plugins, &host, &key, &request_json, budget);
                         let _ = reply.send(s);
                     }
-                    RouteDispatch::Pending => {
-                        let owner = host
-                            .routes
-                            .lock()
-                            .ok()
-                            .and_then(|g| {
-                                g.iter()
-                                    .find(|r| format!("{} {}", r.method, r.path) == key)
-                                    .map(|r| r.plugin.clone())
-                            })
-                            .unwrap_or_default();
-                        pending_routes.insert(
-                            inv_id,
-                            PendingRoute {
-                                generation: find_plugin(&plugins, &owner)
-                                    .map(|p| p.generation)
-                                    .unwrap_or(0),
-                                plugin: owner,
-                                reply,
-                                deadline: Instant::now() + budget,
-                                _busy: BusyGuard::new(),
-                            },
-                        );
-                        if let Some((ok, msg)) = take_orphan(inv_id) {
-                            push_inv_done(inv_id, ok, msg);
-                        }
-                    }
-                }
-            }
             Ok(EngineCmd::ManualRun {
                 plugin,
                 name,
@@ -2526,33 +1607,28 @@ fn worker_main(
                 //   "没有运行时"。
                 if let Some(one) = plugins.iter_mut().find(|p| p.name == plugin) {
                     if one.evicted {
-                        let _ = rehydrate_plugin(&mut rt, one, one.tasks, &logs, &host, &wd);
+                        let _ = rehydrate_plugin(one, one.tasks, &logs, &host);
                     }
                     // 手动触发也算“还在用”，别刚跑完就被闲置卸掉。
                     one.last_request = Some(Instant::now());
                 }
                 match sched.find(&plugin, &name) {
                     Some(idx) => {
-                        // reply 交给 run_one：同步 handler 当场回，async handler 结算时回
-                        // （HTTP 那边本来就按「预算 + 1 秒」在等，语义没变）。
-                        let _ = run_one(
+                        run_one(
                             &mut sched,
                             &plugins,
                             &logs,
                             &db,
                             &host,
-                            &wd,
                             budget,
                             true,
-                            &mut pending,
                             Some(reply),
-                            RunPhase::Start { idx },
+                            idx,
                         );
                     }
                     None => {
-                        let _ = reply.send(Err(format!(
-                            "插件 `{plugin}` 里没有名为 `{name}` 的任务"
-                        )));
+                        let _ =
+                            reply.send(Err(format!("插件 `{plugin}` 里没有名为 `{name}` 的任务")));
                     }
                 }
                 sync_registry(&registry, &plugins, &owned_now(), &host.routes);
@@ -2596,7 +1672,7 @@ fn worker_main(
                 reply,
             }) => {
                 let out = add_job(
-                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name, &expr, params,
+                    &mut sched, &plugins, &logs, &db, budget, &plugin, &name, &expr, params,
                     budget_ms, lead_ms,
                 );
                 let _ = reply.send(out);
@@ -2632,9 +1708,7 @@ fn worker_main(
                         if !p.evicted {
                             return Ok(()); // 已经装着了
                         }
-                        rt_ref(&mut rt, &plugins_dir, &wd)
-                            .ok_or_else(|| "建 QuickJS Runtime 失败".to_string())?;
-                        if rehydrate_plugin(&mut rt, p, p.tasks, &logs, &host, &wd) {
+                        if rehydrate_plugin(p, p.tasks, &logs, &host) {
                             Ok(())
                         } else {
                             Err("装回失败（原因见日志）".to_string())
@@ -2653,23 +1727,19 @@ fn worker_main(
                         if p.has_on_tick {
                             return Err("它注册了 `on_tick`（每秒都要跑），卸不了".to_string());
                         }
-                        let live_timers = p.timers.lock().map(|t| t.len()).unwrap_or(0);
-                        if live_timers > 0 {
-                            return Err(format!(
-                                "它还有 {live_timers} 条活着的 setTimeout/setInterval，先 clear 掉再卸"
-                            ));
-                        }
                         let n = host.ws.open_count_for(&name);
                         if n > 0 {
                             return Err(format!("它自己还连着 {n} 条 WebSocket，先等它断开再卸"));
                         }
-                        // 第四条：async handler 还在途（`await` 没回来）。
-                        // 卸掉等于把那条 Promise 的续体连 Context 一起扔了 ——
-                        // 运行记录会一直挂到下次启动才被收掉。
-                        if has_in_flight(&pending, &pending_routes, &pending_ticks, &name) {
-                            return Err(
-                                "它有任务还在 await 里没回来，等这一拍跑完再卸".to_string()
-                            );
+                        // 活定时器也算一条（与惰性回收同一判据，R2）：卸了子进程，
+                        // 它靠 setInterval 干的活就全丢了，而且没有任务会把它装回来。
+                        if let Some(PluginRuntime::Ext(e)) = p.runtime.as_ref() {
+                            let t = e.active_timers();
+                            if t > 0 {
+                                return Err(format!(
+                                    "它还有 {t} 条活着的定时器（setTimeout/setInterval），先 clearInterval 再卸"
+                                ));
+                            }
                         }
                         evict_runtime(p, &host);
                         hostapi::push_log(
@@ -2730,7 +1800,7 @@ fn worker_main(
                 reply,
             }) => {
                 let out = restore_job(
-                    &mut sched, &plugins, &logs, &db, &wd, budget, &plugin, &name,
+                    &mut sched, &plugins, &logs, &db, budget, &plugin, &name,
                 );
                 let _ = reply.send(out);
             }
@@ -2746,7 +1816,6 @@ fn worker_main(
                     &plugins,
                     &logs,
                     &db,
-                    &wd,
                     budget,
                     &plugin,
                     &name,
@@ -2761,7 +1830,6 @@ fn worker_main(
                     &plugins,
                     &logs,
                     &db,
-                    &wd,
                     budget,
                     dry_run,
                     &owned_now(),
@@ -2772,7 +1840,7 @@ fn worker_main(
                 let _ = reply.try_send(out);
             }
             Ok(EngineCmd::TestRun {
-                lang,
+                lang: _,
                 code,
                 input,
                 plugin,
@@ -2782,13 +1850,10 @@ fn worker_main(
                 let run_id = new_run_id();
                 let started = Local::now();
                 // 试跑用自己的预算（默认 10 秒）：人在等结果，不该跟着 600 秒的单次预算走
-                let out = test_run(
-                    qjs!(),
+                let out = test_run_node(
                     &host,
                     &logs,
-                    &wd,
                     Duration::from_millis(test_run_budget_ms()),
-                    &lang,
                     &code,
                     &input,
                 );
@@ -2865,45 +1930,13 @@ fn worker_main(
         }
 
         if lazy_cfg.on {
-            let flipped = maintain_plugins(
-                &mut rt,
-                &plugins_dir,
-                &mut plugins,
-                &sched,
-                &logs,
-                &host,
-                &wd,
-                &lazy_cfg,
-                Local::now(),
-                &pending,
-                &pending_routes,
-                &pending_ticks,
-            );
+            let flipped =
+                maintain_plugins(&mut plugins, &sched, &logs, &host, &lazy_cfg, Local::now());
             dirty |= flipped;
         }
         // 卸 / 装 / 长期加载 勾选都会改状态 ⇒ 立刻刷新快照（面板 1 秒内能看到）
         if dirty {
             sync_registry(&registry, &plugins, &owned_now(), &host.routes);
-        }
-
-        // 整条 worker 都空着 ⇒ 连它的 QuickJS Runtime 一起收掉。
-        //
-        // ⚠ 这一步才是**真省钱**的那步：一条 Runtime 是几 MB（arena + 运行时结构），
-        //   而一个插件的 Context 只有几百 KB。所以"卸插件"几乎不动 RSS，
-        //   "收 Runtime" 才动（实测见 docs/lazy-plugins.md）。
-        if lazy_cfg.on && rt.is_some() {
-            let all_out = plugins.iter().all(|p| p.evicted || p.error.is_some());
-            if !all_out {
-                rt_idle_at = Instant::now();
-            } else if rt_idle_at.elapsed() >= Duration::from_millis(lazy_cfg.idle_ms) {
-                rt = None;
-                rt_idle_at = Instant::now();
-                crate::log::plog!(
-                    &format!("engine:{idx}"),
-                    info,
-                    "空闲：这条 worker 的 QuickJS Runtime 已回收（插件都不在内存里，需要时再建）"
-                );
-            }
         }
 
         // 脚本任务同步：**不能**放在 `!sched.is_empty()` 里 —— 脚本 worker 上
@@ -2916,381 +1949,10 @@ fn worker_main(
         //
         // 放在 fire_due **之前**：定时器的粒度是毫秒，一条 50ms 的 interval 不该
         // 排在一条 30s 的排班任务后面等它跑完。
-        fire_timers(&mut plugins, &logs, &wd, budget);
 
         // 触发所有到期任务
         if !sched.is_empty() {
-            fire_due(&mut sched, &plugins, &logs, &db, &host, &wd, budget, &mut pending);
-        }
-
-        // ---- 后台 HTTP 请求的投递（`fetch_async`）----
-        //
-        // 结果是在**另一条线程**上拿到的，但 QuickJS 的 Context 绑在本线程 ——
-        // 只能在这里回到那个 Context 上 resolve。resolve 会把 `.then` 排进 job 队列，
-        // 紧接着的微任务泵就会把 await 后面的代码跑掉。
-        {
-            let owned: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
-            let batch: Vec<(u64, String, bool, String)> = FETCH_DONE
-                .lock()
-                .map(|mut q| claim_fetch_results(&mut q, &owned, Instant::now()))
-                .unwrap_or_default();
-            for (id, plugin, ok, text) in batch {
-                // 投不出去要**说出来**：那个 Promise 永远不会 settle，宿主这边只会看到
-                // "墙钟超时"，看不出真正的原因。以前这三条 `continue` 是静默的。
-                let Some(p) = plugins.iter().find(|p| p.name == plugin) else {
-                    hostapi::push_log(
-                        &logs,
-                        &plugin,
-                        "warn",
-                        &format!("异步请求结果无处投递（id={id}）：插件已经不在列表里了"),
-                    );
-                    continue;
-                };
-                let Some(PluginRuntime::Js(ctx)) = p.runtime.as_ref() else {
-                    hostapi::push_log(
-                        &logs,
-                        &plugin,
-                        "warn",
-                        &format!("异步请求结果无处投递（id={id}）：插件当前没有 JS 运行时（已卸出？）"),
-                    );
-                    continue;
-                };
-                let hit = ctx
-                    .with(|ctx| -> rquickjs::Result<bool> {
-                        let f: Function = ctx.globals().get("__deliver_fetch")?;
-                        Ok(f.call::<_, bool>((id as f64, ok, text)).unwrap_or(false))
-                    })
-                    .unwrap_or(false);
-                if !hit {
-                    // 插件被热更新 / 卸过：那个 Promise 已经不在了。
-                    // 用 warn 而不是 debug：这条一旦出现，就意味着某个 `await fetch_async`
-                    // 会一直挂着直到墙钟超时 —— 那是"毫秒级任务被堵住"的直接来源，
-                    // 不能只在 debug 里躺着。
-                    hostapi::push_log(
-                        &logs,
-                        &plugin,
-                        "warn",
-                        &format!(
-                            "异步请求结果没人接（id={id}）：那个 Promise 已经不在了（插件被热更新？）"
-                        ),
-                    );
-                }
-            }
-        }
-
-        // 微任务：把这一轮 JS 排下的 Promise 续体跑掉。
-        //
-        // 放在定时器与排班任务**之后**：这一轮所有同步入口都跑完了，microtask
-        // 按 Node 的规矩在"当前任务结束"时清空。异常在这里被认领成
-        // 「未捕获的异步错误」，记到对应插件的日志里 —— 而不是静默消失。
-        if let Some(qjs) = rt.as_ref() {
-            let slice = job_slice();
-            let guard = pump_guard(&pending, &pending_routes, &pending_ticks, budget, slice);
-            if let Some((plugin, msg)) = pump_jobs(qjs, &wd, slice, guard) {
-                hostapi::push_log(&logs, &plugin, "error", &format!("未捕获的异步错误: {msg}"));
-            }
-        }
-        // ---- 代次检查：插件被热更新/重载过 ⇒ 在途的那些属于上一代 ----
-        //
-        // 热更新会换掉整个 Context，那条 Promise 的续体再也没人跑了。不在这里当场
-        // 收掉的话，运行记录要挂到墙钟超时（默认 600 秒）才收尾，而且会被记成"超时"
-        // —— 真实原因是"插件被重载了"。
-        {
-            let stale = |plugin: &str, gen: u64| match plugins.iter().find(|p| p.name == plugin) {
-                Some(p) => p.generation != gen,
-                None => true,
-            };
-            // 先把三类都挑出来（只读借用），再统一收尾（要可变借用）。
-            let task_ids: Vec<u64> = pending
-                .iter()
-                .filter(|(_, inv)| stale(&inv.tail.plugin, inv.tail.generation))
-                .map(|(id, _)| *id)
-                .collect();
-            let route_ids: Vec<u64> = pending_routes
-                .iter()
-                .filter(|(_, r)| stale(&r.plugin, r.generation))
-                .map(|(id, _)| *id)
-                .collect();
-            let tick_ids: Vec<u64> = pending_ticks
-                .iter()
-                .filter(|(_, t)| stale(&t.plugin, t.generation))
-                .map(|(id, _)| *id)
-                .collect();
-
-            for id in task_ids {
-                if let Some(inv) = pending.remove(&id) {
-                    // 标记"作废"：运行记录照写，但别把上一代的失败记到新一代的熔断上。
-                    let mut tail = inv.tail;
-                    tail.voided = true;
-                    let _ = run_one(
-                        &mut sched,
-                        &plugins,
-                        &logs,
-                        &db,
-                        &host,
-                        &wd,
-                        budget,
-                        tail.manual,
-                        &mut pending,
-                        inv.reply,
-                        RunPhase::Resume {
-                            tail,
-                            result: Err("插件在这条执行期间被热更新/重载了，这次执行作废（Promise 的续体随旧 Context 一起丢了）"
-                                .to_string()),
-                        },
-                    );
-                }
-            }
-            for id in route_ids {
-                if let Some(r) = pending_routes.remove(&id) {
-                    let _ = r.reply.send(
-                        serde_json::json!({
-                            "status": 503,
-                            "headers": { "content-type": "text/plain; charset=utf-8" },
-                            "body": "插件在处理这个请求期间被热更新/重载了，请重试",
-                        })
-                        .to_string(),
-                    );
-                }
-            }
-            for id in tick_ids {
-                if let Some(t) = pending_ticks.remove(&id) {
-                    apply_tick_result(
-                        &mut plugins,
-                        &t.plugin,
-                        &t.ts,
-                        false,
-                        "插件被热更新/重载了，这一拍作废",
-                        &logs,
-                    );
-                }
-            }
-        }
-
-        // ---- async invocation 的结算 ----
-        //
-        // ① 收「谁完成了」：JS 侧的 `.then` 在泵里跑，回调 `__host_inv_done` 把
-        //    (id, ok, msg) 塞进 INV_DONE。
-        // ② 收「谁超时了」：墙钟到点还没结算 ⇒ 判失败并放弃这条 invocation。
-        //    这是 §3 说的「挂起预算」的第一版：CPU 预算（interrupt）管不到
-        //    `await` 一个永远不 settle 的 Promise —— 那种情况下没有 JS 在执行。
-        {
-            let done: Vec<(u64, bool, String)> = take_inv_done();
-            for (id, ok, msg) in done {
-                inv_trace(&format!("settle inv={id} ok={ok}"));
-                // on_tick：结算只影响记账（ticks / last_tick）与日志。
-                if let Some(t) = pending_ticks.remove(&id) {
-                    apply_tick_result(&mut plugins, &t.plugin, &t.ts, ok, &msg, &logs);
-                    continue;
-                }
-                // 路由：结算结果已经是序列化好的响应体，宿主只管转发。
-                if let Some(r) = pending_routes.remove(&id) {
-                    let body = if ok {
-                        msg
-                    } else {
-                        serde_json::json!({
-                            "status": 500,
-                            "headers": { "content-type": "text/plain; charset=utf-8" },
-                            "body": msg,
-                        })
-                        .to_string()
-                    };
-                    let _ = r.reply.send(body);
-                    continue;
-                }
-                let Some(inv) = pending.remove(&id) else {
-                    // 已经因为超时被放弃了：迟到的结果不覆盖失败记录，但要留痕 ——
-                    // 这条和「墙钟超时」同时出现，就说明**结算通知来晚了**，不是没来。
-                    let known = REAPED
-                        .lock()
-                        .ok()
-                        .and_then(|q| q.iter().find(|(i, _, _)| *i == id).copied())
-                        .map(|(_, w, at)| format!("，{w}，收尾于 {:.1}s 前", at.elapsed().as_secs_f64()));
-                    let why = match known {
-                        Some(w) => w,
-                        None => {
-                            if let Ok(mut q) = ORPHANS.lock() {
-                                if q.len() < 256 {
-                                    q.push((id, ok, msg.clone()));
-                                }
-                            }
-                            "，**还没有登记过**（结算比登记先到，已暂存待认领）".to_string()
-                        }
-                    };
-                    crate::log::plog!(
-                        "engine",
-                        debug,
-                        "异步结算没对上 invocation {id}{why}；已忽略"
-                    );
-                    continue;
-                };
-                note_reaped(id, "正常结算");
-                let result = if ok { Ok(()) } else { Err(msg) };
-                let _ = run_one(
-                    &mut sched,
-                    &plugins,
-                    &logs,
-                    &db,
-                    &host,
-                    &wd,
-                    budget,
-                    inv.tail.manual,
-                    &mut pending,
-                    inv.reply,
-                    RunPhase::Resume {
-                        tail: inv.tail,
-                        result,
-                    },
-                );
-            }
-
-            let now_i = Instant::now();
-            // 路由的超时：回 504，而不是让 HTTP 那边干等到它自己的超时
-            // （那一层的文案是"引擎没有回话"，会把原因指错地方）。
-            let expired_routes: Vec<u64> = pending_routes
-                .iter()
-                .filter(|(_, r)| r.deadline <= now_i)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in expired_routes {
-                if let Some(r) = pending_routes.remove(&id) {
-                    let _ = r.reply.send(
-                        serde_json::json!({
-                            "status": 504,
-                            "headers": { "content-type": "text/plain; charset=utf-8" },
-                            "body": format!(
-                                "插件 `{}` 的路由超过墙钟预算仍未返回（invocation {id}）：\
-                                 可能 await 了一个永远不会 settle 的 Promise",
-                                r.plugin
-                            ),
-                        })
-                        .to_string(),
-                    );
-                }
-            }
-            // on_tick 的墙钟兜底：到点还没回来就记一次失败，并让下一拍重新开始。
-            let expired_ticks: Vec<u64> = pending_ticks
-                .iter()
-                .filter(|(_, t)| t.deadline <= now_i)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in expired_ticks {
-                if let Some(t) = pending_ticks.remove(&id) {
-                    apply_tick_result(
-                        &mut plugins,
-                        &t.plugin,
-                        &t.ts,
-                        false,
-                        &format!(
-                            "这一拍超过墙钟预算仍未返回（invocation {id}）：\
-                             可能 await 了一个永远不会 settle 的 Promise"
-                        ),
-                        &logs,
-                    );
-                }
-            }
-            let expired: Vec<u64> = pending
-                .iter()
-                .filter(|(_, p)| p.deadline <= now_i)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in expired {
-                if let Some(inv) = pending.remove(&id) {
-                    inv_trace(&format!("timeout inv={id} name={}", inv.tail.name));
-                    // 墙钟超时也是「已停止」：不打这个标记，它会被记成失败、
-                    // 熔断 +1、还发失败推送（安全审计 H4）。
-                    wd.mark_interrupted();
-                    note_reaped(id, "墙钟超时");
-                    // 诊断：这条执行是不是卡在 fetch 上？把"还有几条请求在等结果"写进
-                    // 错误里 —— 否则现场只剩一句"可能 await 了一个永远不会 settle 的
-                    // Promise"，根本分不清是 fetch 丢了还是插件自己写了死循环。
-                    let waiting = plugins
-                        .iter()
-                        .find(|p| p.name == inv.tail.plugin)
-                        .and_then(|p| match p.runtime.as_ref() {
-                            Some(PluginRuntime::Js(ctx)) => ctx
-                                .with(|ctx| -> rquickjs::Result<f64> {
-                                    let f: Function = ctx.globals().get("__diag_pending_fetch")?;
-                                    Ok(f.call::<_, f64>(()).unwrap_or(-1.0))
-                                })
-                                .ok(),
-                            _ => None,
-                        })
-                        .unwrap_or(-1.0);
-                    let live = plugins
-                        .iter()
-                        .find(|p| p.name == inv.tail.plugin)
-                        .and_then(|p| match p.runtime.as_ref() {
-                            Some(PluginRuntime::Js(ctx)) => ctx
-                                .with(|ctx| -> rquickjs::Result<f64> {
-                                    let f: Function = ctx.globals().get("__diag_live_inv")?;
-                                    Ok(f.call::<_, f64>(()).unwrap_or(-1.0))
-                                })
-                                .ok(),
-                            _ => None,
-                        })
-                        .unwrap_or(-1.0);
-                    // 这条 invocation 在插件侧还活着吗？1 = 续体压根没跑（泵的问题），
-                    // 0 = 续体跑过、通知在宿主这边丢了。
-                    let has_inv = plugins
-                        .iter()
-                        .find(|p| p.name == inv.tail.plugin)
-                        .and_then(|p| match p.runtime.as_ref() {
-                            Some(PluginRuntime::Js(ctx)) => ctx
-                                .with(|ctx| -> rquickjs::Result<f64> {
-                                    let f: Function = ctx.globals().get("__diag_has_inv")?;
-                                    Ok(f.call::<_, f64>((id as f64,)).unwrap_or(-1.0))
-                                })
-                                .ok(),
-                            _ => None,
-                        })
-                        .unwrap_or(-1.0);
-                    let extra = if waiting >= 0.0 {
-                        format!(
-                            "（该插件还有 {waiting:.0} 条 fetch_async 在等结果，插件侧未结算的 invocation {live:.0} 条，本条是否仍挂在插件侧：{has_inv:.0}）"
-                        )
-                    } else {
-                        String::new()
-                    };
-                    // 给用户看的是这句；{extra} 那串 invocation / fetch 计数是给排查用的，
-                    // 走 debug 日志（小白看到 "invocation 2944 ... settle 的 Promise" 只会懵）。
-                    crate::log::plog!(
-                        "engine",
-                        debug,
-                        "异步执行超时：invocation {id}{extra}"
-                    );
-                    let msg = "运行太久，已经强制停止。\
-                               最常见的原因：代码里有个等待永远不会结束 ——\
-                               比如 await 了一个不会返回的网络请求。".to_string();
-                    let _ = run_one(
-                        &mut sched,
-                        &plugins,
-                        &logs,
-                        &db,
-                        &host,
-                        &wd,
-                        budget,
-                        inv.tail.manual,
-                        &mut pending,
-                        inv.reply,
-                        RunPhase::Resume {
-                            tail: inv.tail,
-                            result: Err(msg),
-                        },
-                    );
-                }
-            }
-        }
-
-        // 排空「未捕获的 Promise 拒绝」。它们是在泵里产生的（tracker 由引擎回调）。
-        {
-            let batch: Vec<(String, String)> = REJECTIONS
-                .lock()
-                .map(|mut q| std::mem::take(&mut *q))
-                .unwrap_or_default();
-            for (plugin, msg) in batch {
-                hostapi::push_log(&logs, &plugin, "error", &format!("未捕获的 Promise 拒绝: {msg}"));
-            }
+            fire_due(&mut sched, &plugins, &logs, &db, &host, budget);
         }
 
         // 插件目录同步：新增 / 修改 / 删除。watcher 事件会 force_scan；
@@ -3370,19 +2032,16 @@ fn worker_main(
             let disabled_now = db::list_disabled_plugins(&db).unwrap_or_default();
             let disabled_changed = disabled_now != disabled_seen;
             disabled_seen = disabled_now;
-            let relax = rt.is_none()
-                && !disabled_changed
+            let relax = !disabled_changed
                 && !sync_needed(&plugins, &my_files, &disabled_seen)
                 && forced.lock().map(|g| g.is_empty()).unwrap_or(true);
             if !relax {
                 sync_plugins(
-                    &mut rt,
                     &mut plugins,
                     &mut sched,
                     &logs,
                     &db,
                     &host,
-                    &wd,
                     budget,
                     &registry,
                     &my_files,
@@ -3393,15 +2052,9 @@ fn worker_main(
         }
     }
 
-    // ---------- 收尾：外部子进程先杀掉，再释放解释器 ----------
+    // ---------- 收尾：外部子进程随 ExtPlugin 的 Drop 一起杀掉 ----------
     crate::log::plog!(&format!("engine:{idx}"), debug, "正在释放插件解释器...");
     drop(plugins);
-    crate::log::plog!(
-        &format!("engine:{idx}"),
-        info,
-        "正在释放 QuickJS Runtime..."
-    );
-    drop(rt);
     crate::log::plog!(&format!("engine:{idx}"), debug, "执行线程已退出");
 }
 
@@ -3645,7 +2298,6 @@ fn reinstall_panel_jobs(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     now: chrono::DateTime<Local>,
     // 本条 worker 负责的插件名。多 worker 时**必须**按它过滤：
@@ -3687,7 +2339,7 @@ fn reinstall_panel_jobs(
         let has_handler = plugins
             .iter()
             .find(|p| p.name == job.plugin && p.runtime.is_some())
-            .map(|p| plugin_has_handler(p, &job.name, wd, budget))
+            .map(|p| plugin_has_handler(p, &job.name, budget))
             .unwrap_or(false);
         if !has_handler {
             let msg = format!(
@@ -3727,26 +2379,20 @@ fn reinstall_panel_jobs(
     }
 }
 
-/// 插件里有没有名为 `name` 的处理函数（`register_cron` / `register_handler` 注册的）。
+/// 插件里有没有名为 `name` 的处理函数（`register_task` / `register_handler` 注册的）。
 ///
-/// 面板新建任务时用它做校验：名字写错的任务会一路失败到熔断，
-/// 不如在创建的那一刻就说清楚。两个运行时的引导脚本都提供了 `__has_task`，
-/// 约定一致：只传 String，返回 `"1"`（有）/ `""`（没有）。
-fn plugin_has_handler(plugin: &LoadedPlugin, name: &str, wd: &Watchdog, budget: Duration) -> bool {
-    match plugin.runtime.as_ref() {
-        None => false,
-        Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
-            let f: Function = match ctx.globals().get("__has_task") {
-                Ok(f) => f,
-                Err(_) => return false,
-            };
-            wd.arm(budget);
-            let r = f.call::<_, String>((name.to_string(),));
-            wd.disarm();
-            r.map(|s| !s.is_empty()).unwrap_or(false)
-        }),
-        Some(PluginRuntime::Ext(_)) => plugin.handlers.iter().any(|h| h == name),
-    }
+/// 面板新建/改/恢复任务时用它做校验：名字写错的任务会一路失败到熔断，
+/// 不如在操作的那一刻就说清楚。外部运行时的处理函数名在加载期收集
+/// （任务名也算，见 `extproc` 的 `register_task`）。
+fn plugin_has_handler(
+    plugin: &LoadedPlugin,
+    name: &str,
+    _budget: Duration,
+) -> bool {
+    plugin
+        .runtime
+        .as_ref()
+        .is_some_and(|_| plugin.handlers.iter().any(|h| h == name))
 }
 
 /// 面板新建任务：校验 → 装进调度器 → 落库。
@@ -3759,7 +2405,6 @@ fn add_job(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     plugin: &str,
     name: &str,
@@ -3796,7 +2441,7 @@ fn add_job(
         return Err(format!("插件 `{plugin}` 里已经有名为 `{name}` 的任务"));
     }
     let schedule = Schedule::parse(expr).map_err(|e| format!("调度表达式 `{expr}` 无效: {e}"))?;
-    if !plugin_has_handler(p, name, wd, budget) {
+    if !plugin_has_handler(p, name, budget) {
         return Err(format!(
             "插件 `{plugin}` 里没有名为 `{name}` 的处理函数。\
              面板任务调用的处理函数要由插件用 `register_handler(name, fn)` 注册（JS）\
@@ -3894,7 +2539,6 @@ fn restore_job(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     plugin: &str,
     name: &str,
@@ -3956,7 +2600,7 @@ fn restore_job(
     if p.error.is_some() {
         return Err(format!("插件 `{plugin}` 加载失败，不能恢复它的任务"));
     }
-    if !plugin_has_handler(p, name, wd, budget) {
+    if !plugin_has_handler(p, name, budget) {
         return Err(format!(
             "插件 `{plugin}` 里没有名为 `{name}` 的处理函数，恢复出来也跑不了"
         ));
@@ -4050,7 +2694,6 @@ fn edit_job(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     plugin: &str,
     name: &str,
@@ -4178,7 +2821,7 @@ fn edit_job(
     if p.error.is_some() {
         return Err(format!("插件 `{plugin}` 加载失败，不能改它的任务"));
     }
-    if !plugin_has_handler(p, name, wd, budget) {
+    if !plugin_has_handler(p, name, budget) {
         return Err(format!(
             "插件 `{plugin}` 里没有名为 `{name}` 的处理函数，不能改它的任务"
         ));
@@ -4299,7 +2942,6 @@ fn cleanup_jobs(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     dry_run: bool,
     // 本条 worker 负责的插件名
@@ -4326,7 +2968,7 @@ fn cleanup_jobs(
                 "插件已不存在（文件被删除或改名）".to_string()
             }
             Some(p) if p.error.is_some() => "插件加载失败".to_string(),
-            Some(p) if !plugin_has_handler(p, &row.name, wd, budget) => {
+            Some(p) if !plugin_has_handler(p, &row.name, budget) => {
                 "处理函数在新版本里没有了".to_string()
             }
             Some(_) => continue,
@@ -4379,230 +3021,23 @@ fn script_timeout() -> Duration {
     )
 }
 
-/// 触发所有到期任务，并把结果写回调度器与 SQLite。
-/// 把所有插件**到点**的定时器跑掉。
-///
-/// 表挂在插件上（`LoadedPlugin::timers`），所以这里不需要判断"哪个 worker 拥有它"——
-/// 只有拥有这个插件的线程会碰它。
-fn fire_timers(plugins: &mut [LoadedPlugin], logs: &SharedLogs, wd: &Watchdog, budget: Duration) {
-    let now = Instant::now();
-    for p in plugins.iter_mut() {
-        let due = match p.timers.lock() {
-            Ok(mut t) => t.take_due(now),
-            Err(_) => continue, // 锁中毒：这一轮跳过，下一轮还会试
-        };
-        if due.is_empty() {
-            continue;
-        }
-        // 表里有、运行时不在了 —— 理论上不该发生（卸载会 clear_all）。
-        // 与其静默丢，不如清掉；日志留给卸载那一步打。
-        if p.runtime.is_none() || p.evicted {
-            if let Ok(mut t) = p.timers.lock() {
-                t.clear_all();
-            }
-            continue;
-        }
-        for (id, repeat) in due {
-            p.fire_timer(id, repeat, logs, wd, budget);
-        }
-    }
-}
-
-/// 微任务泵一次最多跑多久。
-///
-/// 为什么要有上限：一个 `Promise.resolve().then(loop)` 的插件可以让队列永远非空。
-/// 50ms 是"让出"和"别把 worker 让光"之间的取舍 —— 到点就停，剩下的下一轮继续
-/// （job 队列是 Runtime 级的，不会丢）。
-const JOB_SLICE: Duration = Duration::from_millis(50);
-
-/// 微任务泵的单轮上限（毫秒）。默认 50；`JOB_SLICE_MS` 可覆盖（压测/排查用）。
-fn job_slice() -> Duration {
-    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let ms = std::env::var("JOB_SLICE_MS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(JOB_SLICE.as_millis() as u64)
-            .clamp(1, 5_000);
-        Duration::from_millis(ms)
-    })
-}
-
-/// 跑掉 Runtime 的微任务队列（Promise 的 `.then` / `await` 续体）。
-///
-/// # 为什么必须显式跑
-///
-/// QuickJS 的 job 队列**不会自动执行**：`Function::call` 只跑同步那一段，之后排队的
-/// microtask 要宿主调 `JS_ExecutePendingJob` 才会动。以前面板从不调它（只有模块加载时
-/// 的 `promise.finish()` 顺带跑一次），所以插件里 `Promise.resolve().then(fn)` 的
-/// `fn` 实际上**永远不执行** —— 这是一条真 bug，不是缺功能。
-///
-/// # 为什么在 Runtime 级而不是在 `ctx.with` 里
-///
-/// `Ctx::execute_pending_job` 会**吞掉** job 抛的异常（rquickjs 内部 `ctx.catch()`
-/// 之后仍然返回 true，见 rquickjs-core 的 `context/ctx.rs`）；`Runtime::execute_pending_job`
-/// 会把异常作为 `JobException` 还回来。job 队列本来就是 Runtime 级的，在这里跑也不必
-/// 多持一次锁。
-///
-/// 返回 `Some((插件名, 错误文本))` = 有一条 job 抛了没人接的异常。
-/// 微任务泵的看门狗预算（**不是**让出切片）。
-///
-/// 泵里跑的是 await 之后的续体，它仍然属于产生它的那次执行 —— 所以上限该取那次
-/// 执行的墙钟死线，而不是「这一轮泵跑多久」。取在途执行里**最晚**的那个死线：
-/// 宁可晚一点打断，也不要误杀另一个插件的正常续体。
-/// 一条在途都没有时退回单次执行预算 —— 悬空的 Promise 链也不该把引擎线程永远占住。
-fn pump_guard(
-    pending: &Pending,
-    routes: &PendingRoutes,
-    ticks: &PendingTicks,
-    budget: Duration,
-    slice: Duration,
-) -> Duration {
-    let now = Instant::now();
-    pending
-        .values()
-        .map(|i| i.deadline)
-        .chain(routes.values().map(|r| r.deadline))
-        .chain(ticks.values().map(|t| t.deadline))
-        .max()
-        .map(|d| d.saturating_duration_since(now))
-        .unwrap_or(budget)
-        .max(slice)
-}
-
-fn pump_jobs(
-    rt: &Runtime,
-    wd: &Watchdog,
-    slice: Duration,
-    guard: Duration,
-) -> Option<(String, String)> {
-    let started = Instant::now();
-    // ⚠ 这里装的**不是** slice，是 guard（见 pump_guard）。
-    //
-    // QuickJS 的 interrupt handler 只能**抛异常**，不能暂停正在执行的同步代码 ——
-    // 所以「跑满 50ms 就让出」如果靠 wd.arm(slice) 实现，实际效果是「把正在跑的
-    // 那条 job 直接打死」，而不是让它下一轮继续。一个 job 内部的同步解码（几十 KB
-    // JSON 走纯 JS 的 UTF-8 状态机）在 aarch64 上本来就 >50ms，一 arm 必炸：
-    // InternalError: interrupted（issue #1）。
-    //
-    // 让出的正确做法是**不再取下一个 job** —— job 队列是 Runtime 级的，不会丢。
-    wd.arm(guard);
-    let mut out = None;
-    loop {
-        match rt.execute_pending_job() {
-            Ok(true) => {
-                if started.elapsed() >= slice {
-                    break;
-                }
-            }
-            Ok(false) => break,
-            Err(ex) => {
-                out = Some(ex.0.with(|ctx| {
-                    // 微任务是 Runtime 级的，异常落在哪个 Context 上就是哪个插件。
-                    let plugin = ctx
-                        .globals()
-                        .get::<_, String>("__plugin_name")
-                        .unwrap_or_default();
-                    let v = ctx.catch();
-                    let text = ctx
-                        .globals()
-                        .get::<_, Function>("__fmt_err")
-                        .ok()
-                        .and_then(|f| f.call::<_, String>((v,)).ok())
-                        .unwrap_or_else(|| "（异常无法渲染）".to_string());
-                    (plugin, text)
-                }));
-                break;
-            }
-        }
-    }
-    wd.disarm();
-    out
-}
-
 fn fire_due(
     sched: &mut Scheduler,
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
     host: &Arc<HostState>,
-    wd: &Watchdog,
     budget: Duration,
-    pending: &mut Pending,
 ) {
     let now = Local::now();
     for idx in sched.due(now) {
         // 调度触发不带 reply：结果进运行记录与日志，没有人在等一个返回值。
-        let _ = run_one(
-            sched,
-            plugins,
-            logs,
-            db,
-            host,
-            wd,
-            budget,
-            false,
-            pending,
-            None,
-            RunPhase::Start { idx },
-        );
+        run_one(sched, plugins, logs, db, host, budget, false, None, idx);
     }
 }
 
 /// 手动触发时把结果送回 HTTP 请求的那条通道。
 type Reply = tokio::sync::oneshot::Sender<Result<(), String>>;
-
-/// 一次执行的两种结局。
-enum RunOutcome {
-    /// 跑完了（同步 handler / 脚本 / 外部运行时）。
-    /// 结果已经通过 `reply` 送回（手动触发）或写进运行记录，这里不需要再带一份。
-    Done,
-    /// 已交给 Promise：收尾要等 `__host_inv_done`（或墙钟超时）。
-    Pending,
-}
-
-/// 分发一次的两种结局。
-enum Dispatch {
-    Done(Result<(), String>),
-    Pending,
-}
-
-/// 一次路由分发的两种结局。
-enum RouteDispatch {
-    /// 已经有响应体（同步 handler、外部运行时、或者 404/503 这类宿主响应）。
-    Done(String),
-    /// 已交给 Promise：响应要等 `__host_inv_done`。
-    Pending,
-}
-
-/// 在途的异步 `on_tick`。
-struct PendingTick {
-    plugin: String,
-    generation: u64,
-    /// 这一拍的 `ts`：结算时按它写 `last_tick`（不是"现在"）。
-    ts: String,
-    deadline: Instant,
-    _busy: BusyGuard,
-}
-
-/// 在途的异步路由请求。
-struct PendingRoute {
-    plugin: String,
-    generation: u64,
-    reply: tokio::sync::oneshot::Sender<String>,
-    /// 墙钟兜底：到点还没结算就回 504，别让 HTTP 那边一直挂着。
-    deadline: Instant,
-    /// 在途期间保持 `BUSY > 0`（内存看门狗不该把正在处理的请求换掉）。
-    _busy: BusyGuard,
-}
-
-/// `run_one` 的两个入口阶段。
-enum RunPhase {
-    /// 正常触发：建运行记录 → 执行。
-    Start { idx: usize },
-    /// async handler 结算之后回来收尾。
-    Resume { tail: RunTail, result: Result<(), String> },
-}
 
 /// async handler 收尾需要的全部上下文。
 ///
@@ -4610,8 +3045,6 @@ enum RunPhase {
 /// 的借用早就结束了。
 struct RunTail {
     plugin: String,
-    /// 产生这次执行的那个 `LoadedPlugin` 的代次（热更新会让它对不上）。
-    generation: u64,
     name: String,
     expr: String,
     manual: bool,
@@ -4621,359 +3054,89 @@ struct RunTail {
     runs_before: u64,
     /// 这一拍的**触发时刻**（不是收尾时刻）：`advance` 按它算下一次触发。
     triggered_at: chrono::DateTime<Local>,
-    /// 这次执行**作废**了（插件在它跑的时候被热更新/重载）。
-    ///
-    /// 运行记录照写（"跑过、没跑完"是真的），但**不碰调度与熔断**：那条任务已经是
-    /// 新一代的实例了，拿上一代的失败去给它记一次熔断，是凭空造出来的故障。
-    voided: bool,
 }
 
-/// 在途的异步 invocation。
-struct PendingInv {
-    tail: RunTail,
-    /// 手动触发才有：结果要在结算时才能回给 HTTP 那边。
-    reply: Option<Reply>,
-    /// 墙钟兜底。到点还没结算 ⇒ 判失败并放弃。
-    deadline: Instant,
-    /// 在途期间保持 `BUSY > 0`：内存看门狗不该把正在跑的任务换掉。
-    _busy: BusyGuard,
-}
-
-type Pending = std::collections::HashMap<u64, PendingInv>;
-type PendingRoutes = std::collections::HashMap<u64, PendingRoute>;
-type PendingTicks = std::collections::HashMap<u64, PendingTick>;
-
-/// 这个插件有没有 async handler 还挂着（`await` 没回来）。
-fn has_in_flight(
-    pending: &Pending,
-    routes: &PendingRoutes,
-    ticks: &PendingTicks,
-    plugin: &str,
-) -> bool {
-    pending.values().any(|inv| inv.tail.plugin == plugin)
-        || routes.values().any(|r| r.plugin == plugin)
-        || ticks.values().any(|t| t.plugin == plugin)
-}
-
-/// 把一拍 `on_tick` 的结算结果记到插件上（成功也记账，失败另记一条 error）。
-fn apply_tick_result(
-    plugins: &mut [LoadedPlugin],
-    plugin: &str,
-    ts: &str,
-    ok: bool,
-    msg: &str,
-    logs: &SharedLogs,
-) {
-    let Some(p) = plugins.iter_mut().find(|p| p.name == plugin) else {
-        return;
-    };
-    p.ticks += 1;
-    p.last_tick = Some(ts.to_string());
-    if !ok {
-        hostapi::push_log(logs, plugin, "error", &format!("on_tick 抛出异常: {msg}"));
-    }
-}
-
-// ---- 在途 invocation 注册表（安全审计 H3 第一步）----
+// ---- 停止状态（按 run_id，跨线程）----
 //
-// 为什么要它：/stop 现在只知道「要停哪条任务」，但引擎里真正被中断的是**某一次
-// invocation**。停止位是全局单比特，任何一次置位都会打断所有在跑的东西。
-// 要按 invocation 停，先得有一张「谁现在在跑」的表 —— 而且必须是**跨线程**的，
-// 因为 worker 私有的 pending 表 web 层读不到。
+// /stop 在 web 线程上调用，引擎在 worker 线程上收尾，两边靠这张表交接。
+// 用 run_id 而不是全局单比特：停 A 不会波及 B；收尾时取走即清，不需要
+// 「30 秒后无条件复位」那种会把长任务的「已停止」归类丢掉的延时轮询。
 //
-// 这一步只做登记/注销，**不改变任何判定逻辑** —— 先让数据存在，下一步再让
-// Watchdog 用它判停。
-static IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashMap<(String, String), u64>>> =
-    std::sync::Mutex::new(None);
+// 三格放在**同一把锁**下，让「查在途 / 记 pending」与「登记 / 取 pending」互斥：
+// /stop 要么看到在途（杀进程组），要么赶在登记前记下 pending，不会两头落空。
+#[derive(Default)]
+struct StopState {
+    /// 在途执行：(plugin, task) → run_id。
+    in_flight: std::collections::HashMap<(String, String), String>,
+    /// 用户叫停的在途执行（run_id）。收尾时取走即清。
+    requested: std::collections::HashSet<String>,
+    /// 叫停时还没开始跑的任务。下一次派发取走：不执行，直接记「已停止」。
+    pending: std::collections::HashSet<(String, String)>,
+}
 
-/// 登记一次在途执行（plugin, task) -> inv_id。
-fn register_in_flight(plugin: &str, task: &str, inv_id: u64) {
-    if let Ok(mut g) = IN_FLIGHT.lock() {
-        g.get_or_insert_with(std::collections::HashMap::new)
-            .insert((plugin.to_string(), task.to_string()), inv_id);
+static STOP_STATE: std::sync::Mutex<Option<StopState>> = std::sync::Mutex::new(None);
+
+/// 登记在途执行。返回 `true` = 这条任务在开始前就被用户叫停过（这次不该执行）。
+fn begin_run(plugin: &str, task: &str, run_id: &str) -> bool {
+    let mut g = STOP_STATE.lock().unwrap();
+    let s = g.get_or_insert_with(StopState::default);
+    let key = (plugin.to_string(), task.to_string());
+    if s.pending.remove(&key) {
+        return true;
     }
+    s.in_flight.insert(key, run_id.to_string());
+    false
 }
 
-/// 注销（收尾时调）。只删自己的那条：同一个任务可能已经被下一次派发覆盖了。
-fn clear_in_flight(plugin: &str, task: &str) {
-    if let Ok(mut g) = IN_FLIGHT.lock() {
-        if let Some(m) = g.as_mut() {
-            m.remove(&(plugin.to_string(), task.to_string()));
-        }
+/// 收尾：注销在途 + 取走停止标记。返回 `true` = 这次是被用户叫停的。
+/// 无论成败都要调（否则在途表泄漏）；只删自己的那条，下一次派发可能已覆盖。
+fn end_run(plugin: &str, task: &str, run_id: &str) -> bool {
+    let mut g = STOP_STATE.lock().unwrap();
+    let s = g.get_or_insert_with(StopState::default);
+    let key = (plugin.to_string(), task.to_string());
+    if s.in_flight.get(&key).map(String::as_str) == Some(run_id) {
+        s.in_flight.remove(&key);
     }
+    s.requested.remove(run_id)
 }
 
-/// 这条任务现在有没有在跑的 invocation？有就返回它的 id。
-#[allow(dead_code)] // 下一步 /stop 才会用它；先让数据存在
-pub fn in_flight_of(plugin: &str, task: &str) -> Option<u64> {
-    IN_FLIGHT
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(&(plugin.to_string(), task.to_string())).copied()))
-}
-
-/// invocation id 的分配器（进程级唯一，跨 worker 不冲突）。
-fn next_inv_id() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-// 异步 invocation 的完成通知队列 —— **每个 worker 线程一份**。
-//
-// ⚠ 这里必须是 thread-local，不能是进程级静态。踩过的坑（第六十四轮）：
-// `__host_inv_done` 在 worker 线程上执行，但当时队列是全局的，**两个 worker 会互相
-// 抢对方的结算** —— A 线程推的结算被 B 线程排空，B 找不到对应的 invocation 就记一条
-// "迟到的异步结算"扔掉，A 那条执行只能干等到 60 秒墙钟超时。表现是"毫秒级任务偶尔
-// 卡死 60 秒"，而且只在 `ENGINE_WORKERS>1`（默认 2）时出现 —— 单线程复现不了。
-//
-// 线程局部天然正确：谁推的谁排空，和"这条 invocation 归哪个 worker"是同一件事。
-thread_local! {
-    static INV_DONE_TL: std::cell::RefCell<Vec<(u64, bool, String)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// 往**本线程**的结算队列里塞一条。满了就**说出来**：静默丢弃的结果是
-/// "这条 invocation 永远不结算，直到墙钟超时"，现场只看到一句超时。
-pub fn push_inv_done(id: u64, ok: bool, msg: String) {
-    INV_DONE_TL.with(|q| {
-        let mut q = q.borrow_mut();
-        if q.len() < 256 {
-            q.push((id, ok, msg));
-        } else {
-            crate::log::plog!(
-                "engine",
-                warn,
-                "异步结算队列已满（256 条），丢弃 invocation {id}"
-            );
-        }
-    });
-}
-
-/// 取走本线程的结算队列。
-fn take_inv_done() -> Vec<(u64, bool, String)> {
-    INV_DONE_TL.with(|q| std::mem::take(&mut *q.borrow_mut()))
-}
-
-/// 在途的异步 HTTP 请求上限。
+/// `/stop`：在跑 ⇒ 标记 + 杀进程组（返回 `true`）；没在跑 ⇒ 记 pending（返回 `false`）。
 ///
-/// 为什么要有：`fetch_async` 是**一条线程一个请求**（`do_http_fetch` 是阻塞实现，
-/// 只能扔到线程里）。插件里一个 `for` 循环发 1000 个请求就能把线程数打爆 ——
-/// 那不是"并发能力强"，是 OOM。到顶就明确报错，别默默排队。
-const MAX_FETCH_THREADS: usize = 32;
-static FETCH_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// 异步请求的完成通知：(id, 插件名, ok, 结果文本)。
-///
-/// 为什么是**进程级**队列而不是每 worker 一份：`install_host` 是建 Context 时调的，
-/// 那时手里只有插件名，没有"我在哪个 worker"这个概念。而插件在任一时刻只归一个
-/// worker —— 所以每条结果只可能被它的归属 worker 认领，别的 worker 原样留着就行
-/// （见循环里的 `owned` 过滤）。这样既不用给 `load_js` 加参数，也不会重复投递。
-/// 最近收尾过的 invocation：id → (原因, 收尾时刻)。
-///
-/// 只为排查"结算来晚了"用：迟到的那条结算会带着"它当初为什么被收掉"一起写进日志，
-/// 否则现场只剩一句「迟到的异步结算（invocation N 已收尾）」，等于没说。
-static REAPED: std::sync::Mutex<std::collections::VecDeque<(u64, &'static str, Instant)>> =
-    std::sync::Mutex::new(std::collections::VecDeque::new());
-
-/// 记一条"这个 invocation 被收掉了，原因是……"。环形缓冲，上限 256 条。
-fn note_reaped(id: u64, why: &'static str) {
-    if let Ok(mut q) = REAPED.lock() {
-        if q.len() >= 256 {
-            q.pop_front();
-        }
-        q.push_back((id, why, Instant::now()));
-    }
-}
-
-/// 结算**早于**登记的 invocation：id -> (ok, msg)。
-///
-/// 实测（长跑压测）撞到过：某条结算先到、`pending` 里还没有它（于是被当成"迟到"丢掉），
-/// 紧接着那条 invocation 才登记进来 —— 于是一个永远不会再结算的任务挂满 60 秒预算。
-/// 这里把"早到的结算"存下来，登记的时候认领走，谁先谁后都不会丢。
-static ORPHANS: std::sync::Mutex<Vec<(u64, bool, String)>> = std::sync::Mutex::new(Vec::new());
-
-
-/// invocation 追踪开关（`INV_TRACE=1`）。
-///
-/// 只在排查"某条 async 执行收不到结算"时打开：它会把分发 / 登记 / 结算 / 超时
-/// 四个时刻都打进日志，顺序一看就明白。默认关，别在正常部署里开（日志会翻几倍）。
-fn inv_trace_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("INV_TRACE").is_ok_and(|v| v != "0"))
-}
-
-fn inv_trace(msg: &str) {
-    if inv_trace_on() {
-        crate::log::plog!("engine", info, "inv-trace: {msg}");
-    }
-}
-
-/// 认领一条"早到的结算"。登记完 invocation 之后必须调一次。
-fn take_orphan(id: u64) -> Option<(bool, String)> {
-    let mut q = ORPHANS.lock().ok()?;
-    let pos = q.iter().position(|(i, _, _)| *i == id)?;
-    let (_, ok, msg) = q.remove(pos);
-    Some((ok, msg))
-}
-
-/// 一条待投递的后台请求结果：(id, 插件名, ok, 结果文本, 到达时刻)。
-type FetchResult = (u64, String, bool, String, std::time::Instant);
-
-pub static FETCH_DONE: std::sync::Mutex<Vec<FetchResult>> = std::sync::Mutex::new(Vec::new());
-
-/// 没被认领的结果最多留这么久。
-///
-/// 为什么需要：插件可能在请求在途时被**删掉/改名**，那个 worker 就再也不会来认领
-/// 这条结果 —— 它会一直躺在队列里。单条不大，但响应体可能有几 MB，256 条就是
-/// 几百 MB（"常驻低内存"直接破功）。`do_http_fetch` 最长 60 秒超时，所以 60 秒后
-/// 还躺着的结果一定没人要了。
-const FETCH_DONE_TTL: Duration = Duration::from_secs(60);
-
-fn next_fetch_id() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// 全 worker 的唤醒通道（`fetch_async` 完成时要叫醒**正在睡的**引擎线程）。
-///
-/// 为什么要全局：请求是在**另一条线程**上完成的，那条线程手里只有 `Arc<HostState>`，
-/// 拿不到 worker 自己的 receiver。唤醒所有 worker 是够用的 —— `Wake` 是幂等的，
-/// 谁先看到谁处理。
-static WAKE_SENDERS: std::sync::Mutex<Vec<Sender<EngineCmd>>> = std::sync::Mutex::new(Vec::new());
-
-/// 登记唤醒通道（`spawn_engine` 建好 senders 之后调一次）。
-pub fn install_wake_senders(v: Vec<Sender<EngineCmd>>) {
-    if let Ok(mut g) = WAKE_SENDERS.lock() {
-        *g = v;
-    }
-}
-
-/// 叫醒所有引擎线程（只做一次 `Wake`，不排队任何工作）。
-pub fn wake_all() {
-    if let Ok(g) = WAKE_SENDERS.lock() {
-        for tx in g.iter() {
-            let _ = tx.send(EngineCmd::Wake);
-        }
-    }
-}
-
-/// 从结果队列里取出**属于本 worker** 的那些，顺手丢掉超过 TTL 没人认领的。
-///
-/// 抽成函数是为了能单测：这段逻辑一旦写错，表现是"请求永远不回来"或者
-/// "内存慢慢涨"，两种都极难从日志里看出来。
-fn claim_fetch_results(
-    q: &mut Vec<FetchResult>,
-    owned: &[&str],
-    now: Instant,
-) -> Vec<(u64, String, bool, String)> {
-    let mut mine = Vec::new();
-    let mut i = 0;
-    while i < q.len() {
-        if now.saturating_duration_since(q[i].4) >= FETCH_DONE_TTL {
-            // 走到这里说明**没有任何 worker 认领它**：要么插件名对不上，要么那个
-            // worker 已经不在了。以前这里是静默丢弃 —— 于是插件侧只看到"墙钟超时"。
-            crate::log::plog!(
-                "engine",
-                warn,
-                "异步请求结果过期丢弃（id={}，插件 {}）：没有任何 worker 认领它",
-                q[i].0,
-                q[i].1
-            );
-            q.remove(i);
-        } else if owned.contains(&q[i].1.as_str()) {
-            let (id, plugin, ok, text, _) = q.remove(i);
-            mine.push((id, plugin, ok, text));
-        } else {
-            i += 1;
-        }
-    }
-    mine
-}
-
-/// 抢一个并发槽位。返回 false = 到顶了。
-fn take_fetch_slot() -> bool {
-    let n = FETCH_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n >= MAX_FETCH_THREADS {
-        FETCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return false;
-    }
-    true
-}
-
-/// 发起一次**后台** HTTP 请求：立刻返回 id，完成时把结果塞进 `done` 并唤醒引擎。
-///
-/// 返回 `0` = 并发到顶，没发出去。
-pub fn start_background_fetch(
-    state: std::sync::Arc<crate::hostapi::HostState>,
-    plugin: String,
-    url: String,
-    opts: String,
-) -> u64 {
-    if !take_fetch_slot() {
-        return 0;
-    }
-    let id = next_fetch_id();
-    let spawned = std::thread::Builder::new()
-        .name(format!("fetch-{id}"))
-        .stack_size(256 * 1024)
-        .spawn(move || {
-            let out = state.do_http_fetch(&url, &opts);
-            if let Ok(mut q) = FETCH_DONE.lock() {
-                // 上限 256：和 INV_DONE 一样，堵住"一个插件刷爆队列"。
-                if q.len() < 256 {
-                    match out {
-                        Ok(s) => q.push((id, plugin, true, s, std::time::Instant::now())),
-                        Err(e) => q.push((id, plugin, false, e, std::time::Instant::now())),
-                    }
-                } else {
-                    // 队列满 = 没有 worker 在排空它。那条 Promise 会一直挂到墙钟超时，
-                    // 所以这里必须留一条 warn —— 静默丢弃是最难查的一种。
-                    crate::log::plog!(
-                        "engine",
-                        warn,
-                        "异步请求结果队列已满（256 条），丢弃 id={id}（插件 {plugin}）"
-                    );
-                }
+/// 杀的是**这次执行**的子进程（按 run_id 查 pid），下一次触发 `ensure_child` 自动重启。
+pub fn request_task_stop(plugin: &str, task: &str) -> bool {
+    let run_id = {
+        let mut g = STOP_STATE.lock().unwrap();
+        let s = g.get_or_insert_with(StopState::default);
+        let key = (plugin.to_string(), task.to_string());
+        match s.in_flight.get(&key) {
+            Some(id) => {
+                s.requested.insert(id.clone());
+                Some(id.clone())
             }
-            FETCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            wake_all();
-        });
-    if spawned.is_err() {
-        FETCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return 0;
+            None => {
+                s.pending.insert(key);
+                None
+            }
+        }
+    };
+    match run_id {
+        Some(id) => crate::extproc::kill_run(&id),
+        None => false,
     }
-    id
 }
 
-/// 执行一个任务 —— 调度到点触发（`manual = false`）和面板手动触发（`manual = true`）
-/// 走的是**同一条路径**，区别只在两处：
-///
-/// | | 调度触发 | 手动触发 |
-/// |---|---|---|
-/// | 推进 `next_fire` | 按 cron 节奏推进 | **不动**（手动执行不打乱节奏） |
-/// | 熔断状态 | 失败累计、达标熔断 | **不动**（既不计失败，也不解除熔断） |
-/// | 日志 | 只在首次/失败时记 | 每次都记（用户正等着看结果） |
-///
-/// 插件侧完全感知不到区别：payload 字段一模一样，handler 也是同一个。
 fn run_one(
     sched: &mut Scheduler,
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
     host: &Arc<HostState>,
-    wd: &Watchdog,
     budget: Duration,
     manual: bool,
-    pending: &mut Pending,
     reply: Option<Reply>,
-    phase: RunPhase,
-) -> RunOutcome {
+    idx: usize,
+) {
     let _busy = BusyGuard::new();
-    // 两段式：Start 跑「建记录 → 执行」，Resume 是 async handler 结算之后回来收尾。
-    // 同步 handler 走 Start 到底，和以前完全一样。
-    let (tail, result, script_output) = match phase {
-        RunPhase::Resume { tail, result } => (tail, result, None),
-        RunPhase::Start { idx } => {
     let now = Local::now();
     let (plugin, name, expr, scheduled, runs_before, params_json, jitter_ms, realigned) = {
         let t = &sched.tasks()[idx];
@@ -5095,15 +3258,8 @@ fn run_one(
     }
 
     let mut script_output: Option<String> = None;
-
-    // 收尾要用的东西先打包 —— async handler 的续体在 Promise 里，收尾发生在**之后**
-    // 的一轮循环里，那时 sched / plugins 的借用早就结束了，所以这些值必须自己拥有。
-    let generation = find_plugin(plugins, &plugin)
-        .map(|p| p.generation)
-        .unwrap_or(0);
     let tail = RunTail {
         plugin,
-        generation,
         name,
         expr,
         manual,
@@ -5112,77 +3268,46 @@ fn run_one(
         late_ms,
         runs_before,
         triggered_at: now,
-        voided: false,
     };
-    let inv_id = next_inv_id();
+    // 登记在途；若这条任务在开始前就被用户叫停过（pending），这次不执行。
+    let pre_stopped = begin_run(&tail.plugin, &tail.name, &run_id);
 
-    let dispatched = crate::log::with_run_id(&run_id, || match script_meta {
-        Some((script, runtime)) => {
-            let out = crate::scriptjob::run(
-                host,
-                logs,
-                &host.tasks_dir,
-                &script,
-                &runtime,
-                &tail.name,
-                &tail.expr,
-                params_json.as_deref(),
-                tail.manual,
-                &run_id,
-                task_budget,
-            );
-            script_output = Some(out.output);
-            if out.ok {
-                Dispatch::Done(Ok(()))
-            } else {
-                Dispatch::Done(Err(out
-                    .error
-                    .unwrap_or_else(|| "脚本执行失败（没有给出原因）".into())))
+    let result = if pre_stopped {
+        Err("用户停止（任务开始前被叫停）".to_string())
+    } else {
+        crate::log::with_run_id(&run_id, || match script_meta {
+            Some((script, runtime)) => {
+                let out = crate::scriptjob::run(
+                    host,
+                    logs,
+                    &host.tasks_dir,
+                    &script,
+                    &runtime,
+                    &tail.name,
+                    &tail.expr,
+                    params_json.as_deref(),
+                    tail.manual,
+                    &run_id,
+                    task_budget,
+                );
+                script_output = Some(out.output);
+                if out.ok {
+                    Ok(())
+                } else {
+                    Err(out
+                        .error
+                        .unwrap_or_else(|| "脚本执行失败（没有给出原因）".into()))
+                }
             }
-        }
-        None => match find_plugin(plugins, &tail.plugin) {
-            Some(p) => dispatch_task(p, &tail.name, &payload, wd, task_budget, logs, inv_id),
-            None => Dispatch::Done(Err(format!("任务所属插件 `{}` 不存在", tail.plugin))),
-        },
-    });
-
-    match dispatched {
-        Dispatch::Done(r) => (tail, r, script_output),
-        Dispatch::Pending => {
-            // 已交给 Promise：记录、熔断、reply 全部推迟到结算那一轮。
-            // 墙钟兜底用同一个预算值 —— 「budget_ms」从此是**墙钟上限**，
-            // 以前它只管 CPU 切片（见 docs/engine-safety.md）。
-            // 这一拍还没收尾：别让 `due()` 认为它还到期（否则 async 任务会被连触发）。
-            // 手动触发不动 next_fire，所以不需要这层保护。
-            if !tail.manual {
-                sched.mark_in_flight(idx);
-            }
-            inv_trace(&format!("insert task inv={inv_id} name={}", tail.name));
-            pending.insert(
-                inv_id,
-                PendingInv {
-                    tail,
-                    reply,
-                    deadline: Instant::now() + task_budget,
-                    // 在途期间保持「忙」：内存看门狗不该在 await 中间把进程换掉。
-                    _busy: BusyGuard::new(),
-                },
-            );
-            // 结算有可能比登记先到（压测里真撞到过）：认领回来，塞回结算队列，
-            // 下一轮循环照常收尾。没有这一步，那条 invocation 会一直挂到墙钟超时。
-            if let Some((ok, msg)) = take_orphan(inv_id) {
-                inv_trace(&format!("orphan claimed inv={inv_id}"));
-                push_inv_done(inv_id, ok, msg);
-            }
-            return RunOutcome::Pending;
-        }
-    }
-        }
+            None => match find_plugin(plugins, &tail.plugin) {
+                Some(p) => dispatch_task(p, &tail.name, &payload, task_budget, Some(&run_id)),
+                None => Err(format!("任务所属插件 `{}` 不存在", tail.plugin)),
+            },
+        })
     };
 
     let RunTail {
         plugin,
-        generation: _,
         name,
         expr,
         manual,
@@ -5191,7 +3316,6 @@ fn run_one(
         late_ms,
         runs_before,
         triggered_at: now,
-        voided,
     } = tail;
 
     let finished_at = Local::now();
@@ -5200,23 +3324,20 @@ fn run_one(
 
     // 「停止」不是失败。
     //
-    // 请求停止（或预算到点）时引擎打断 JS，抛出来的还是 `InternalError: interrupted`，
-    // 和真正的报错走同一条路。照旧按失败处理的话，四处都错：运行记录一屏红色堆栈、
-    // 熔断计数 +1、任务状态变「执行出错」、还给用户发一条失败推送 —— 而他只是按了停止。
+    // 用户按停止时面板杀掉这次执行的子进程组，执行以失败收尾（进程被杀）；
+    // 开始前被叫停的（pending）根本不执行。照旧按失败处理的话，四处都错：
+    // 运行记录一屏红色、熔断计数 +1、任务状态变「执行出错」、还发一条失败推送 ——
+    // 而他只是按了停止。所以这里先判定一次，下面每一处都按它分流。
     //
-    // 所以这里先判定一次，下面每一处（记录 / 推送 / 调度计数 / 日志）都按它分流。
-    // 收尾：从在途表里注销（安全审计 H3 第一步）。
-    clear_in_flight(&plugin, &name);
-
-    // 「停止」和「预算/墙钟到点」在引擎里都是**我们**叫停的，对外都算已停止。
-    // 只看 task_stop 的话，预算打断会被记成失败（安全审计 H4）。
-    let stopped = result.is_err() && (wd.task_stop_requested() || wd.take_interrupted());
+    // 收尾注销在途 + 取走停止标记（无论成败都要注销，否则在途表泄漏）。
+    let stop_requested = end_run(&plugin, &name, &run_id);
+    let stopped = result.is_err() && (pre_stopped || stop_requested);
 
     if let Err(e) = db::finish_run(
         db,
         &run_id,
         result.is_ok(),
-        // 停止不写错误原因：QuickJS 那句 interrupted 不是「原因」，写进去只会让人
+        // 停止不写错误原因：杀进程留下的那句不是「原因」，写进去只会让人
         // 以为任务坏了（记录里另有 stopped 标记，界面按「已停止」显示）
         if stopped {
             None
@@ -5269,7 +3390,7 @@ fn run_one(
             &plugin,
             "info",
             &format!(
-                "任务 `{name}`{} 已停止（手动停止或超出执行预算），耗时 {duration_ms}ms",
+                "任务 `{name}`{} 已停止（用户停止），耗时 {duration_ms}ms",
                 if manual { "（手动触发）" } else { "" }
             ),
         ),
@@ -5297,30 +3418,15 @@ fn run_one(
         Ok(()) => {}
     });
 
-    // 作废的执行（插件被热更新）只收运行记录，不碰调度与熔断 —— 见 `RunTail::voided`。
-    if voided {
-        if let Some(tx) = reply {
-            let _ = tx.send(result.clone());
-        }
-        return RunOutcome::Done;
-    }
-
-    // 任务可能在异步执行期间被删掉 / 改名（面板删任务、插件重载）。那时排班表里
-    // 已经没有它：运行记录照收尾（"跑过"这件事是真的），但调度与熔断不再更新。
+    // 任务可能在执行期间被删掉 / 改名（插件重载是在引擎线程之外改排班表的）。
+    // 那时排班表里已经没有它：运行记录照收尾（"跑过"这件事是真的），
+    // 但调度与熔断不再更新。
     let Some(idx) = sched.find(&plugin, &name) else {
         if let Some(tx) = reply {
             let _ = tx.send(result.clone());
         }
-        return RunOutcome::Done;
+        return;
     };
-    // 在途标记在这里消掉：下面 `advance` 会推进 next_fire，之后它就该重新参与调度。
-    //
-    // ⚠ 手动触发**不置**这个标记（见上面 Dispatch::Pending 那段的 `if !tail.manual`），
-    // 所以这里也不能清：手动跑一次就清掉的话，正在跑的**排班**那次 invocation 的
-    // 标记会一起没了，调度器以为它空闲，下一拍就重复触发（安全审计 M13）。
-    if !manual {
-        sched.clear_in_flight(idx);
-    }
 
     // 停止不算失败：传 None 给调度器，连续失败计数不 +1、任务状态也不变「执行出错」。
     // 否则停几次就把任务熔断了 —— 用户越是用「停止」，任务越容易被判成坏掉。
@@ -5383,79 +3489,24 @@ fn run_one(
     if let Some(tx) = reply {
         let _ = tx.send(result.clone());
     }
-    RunOutcome::Done
 }
 
 /// 在任务所属插件的解释器里调用它的 handler。
 ///
-/// 两个运行时各有各的执行预算机制，但对外语义完全一致：
-/// 返回 `Ok` = 成功，`Err(msg)` = 失败（引擎据此熔断）。
+/// 外部运行时自己就是异步的（Node/Bun 有事件循环），这里同步拿结果即可。
 fn dispatch_task(
     plugin: &LoadedPlugin,
     name: &str,
     payload_json: &str,
-    wd: &Watchdog,
     budget: Duration,
-    logs: &SharedLogs,
-    inv_id: u64,
-) -> Dispatch {
-    // 登记「这条任务现在跑的是哪次 invocation」（安全审计 H3 第一步）。
-    // 只记账，不改任何判定 —— 下一步才让 Watchdog 用它判停。
-    register_in_flight(&plugin.name, name, inv_id);
-    // 告诉 Watchdog「这次是哪个 invocation」，/stop 才能只打断这一次。
-    wd.set_inv(inv_id);
-    match plugin.runtime.as_ref() {
-        None => Dispatch::Done(Err("插件加载失败，没有可用的解释器实例".to_string())),
-        Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
-            let f: Function = match ctx.globals().get("__dispatch_task_async") {
-                Ok(f) => f,
-                Err(e) => {
-                    return Dispatch::Done(Err(format!("取不到 __dispatch_task_async: {e}")))
-                }
+    run_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(PluginRuntime::Ext(p)) = plugin.runtime.as_ref() else {
+        return Err("插件加载失败，没有可用的解释器实例".to_string());
             };
-            wd.arm(budget);
-            let r = f.call::<_, String>((
-                name.to_string(),
-                payload_json.to_string(),
-                inv_id as f64,
-            ));
-            wd.disarm();
-            match r {
-                Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
-                    Ok(v) => {
-                        if v.get("pending").and_then(|b| b.as_bool()) == Some(true) {
-                            Dispatch::Pending
-                        } else if v.get("done").and_then(|b| b.as_bool()) == Some(true) {
-                            Dispatch::Done(Ok(()))
-                        } else {
-                            Dispatch::Done(Err(v
-                                .get("error")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("（没有给出原因）")
-                                .to_string()))
-                        }
-                    }
-                    Err(e) => Dispatch::Done(Err(format!(
-                        "分发结果不是合法 JSON（{e}）: {json}"
-                    ))),
-                },
-                Err(e) => {
-                    if wd.take_fired() {
-                        Dispatch::Done(Err(format!(
-                            "执行超过预算 {budget:?}，被强制中断（疑似死循环）"
-                        )))
-                    } else {
-                        Dispatch::Done(Err(render_exception_guarded(&ctx, &e, wd)))
-                    }
-                }
-            }
-        }),
-        // 外部运行时自己就是异步的（Node/Bun 有事件循环），这里同步拿结果即可。
-        Some(PluginRuntime::Ext(p)) => {
-            let _ = logs;
-            Dispatch::Done(p.invoke_task(name, payload_json, None, budget))
-        }
-    }
+    // ⚠ `run_id` 必须传下去：子进程的日志事件在**读线程**里落盘，
+    // 引擎线程的 `with_run_id` 圈不到它；extproc 用这个 id 给它们补标签。
+    p.invoke_task(name, payload_json, run_id, budget)
 }
 
 /// 分发一条 JS 插件注册的路由请求。
@@ -5464,10 +3515,8 @@ fn dispatch_route(
     host: &HostState,
     key: &str,
     request_json: &str,
-    wd: &Watchdog,
     budget: Duration,
-    inv_id: u64,
-) -> RouteDispatch {
+) -> String {
     let _busy = BusyGuard::new();
     // 路由也能声明自己的预算（`register_route(…, { budget_ms })`）。
     // 为什么路由也要：兑换那条链的手动触发走的是 HTTP 路由，同样会超过 2 秒。
@@ -5486,223 +3535,58 @@ fn dispatch_route(
     };
 
     let Some(plugin) = plugin else {
-        return RouteDispatch::Done(
-            serde_json::json!({
+        return serde_json::json!({
                 "status": 404,
                 "headers": { "content-type": "text/plain; charset=utf-8" },
                 "body": format!("没有插件注册路由 {key}"),
             })
-            .to_string(),
-        );
+        .to_string();
     };
 
     let Some(p) = find_plugin(plugins, &plugin) else {
-        return RouteDispatch::Done(
-            serde_json::json!({
+        return serde_json::json!({
                 "status": 503,
                 "headers": {},
                 "body": format!("路由所属插件 `{plugin}` 不在运行"),
             })
-            .to_string(),
-        );
+        .to_string();
     };
 
     match p.runtime.as_ref() {
-        Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
-            let f: Function = match ctx.globals().get("__dispatch_route_async") {
-                Ok(f) => f,
-                Err(e) => {
-                    return RouteDispatch::Done(format!("取不到 __dispatch_route_async: {e}"))
-                }
-            };
-            wd.arm(budget);
-            let r = f.call::<_, String>((
-                key.to_string(),
-                request_json.to_string(),
-                inv_id as f64,
-            ));
-            wd.disarm();
-            match r {
-                Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
-                    Ok(v) => {
-                        if v.get("pending").and_then(|b| b.as_bool()) == Some(true) {
-                            RouteDispatch::Pending
-                        } else {
-                            let resp = v.get("resp").cloned().unwrap_or_else(|| {
-                                serde_json::json!({ "status": 500, "headers": {}, "body": "路由返回了空结果" })
-                            });
-                            RouteDispatch::Done(resp.to_string())
-                        }
-                    }
-                    Err(e) => RouteDispatch::Done(
-                        serde_json::json!({
-                            "status": 500,
-                            "headers": {},
-                            "body": format!("路由结果不是合法 JSON（{e}）: {json}"),
-                        })
-                        .to_string(),
-                    ),
-                },
-                Err(e) => {
-                    let msg = if wd.take_fired() {
-                        format!("路由处理超过预算 {budget:?}，被强制中断")
-                    } else {
-                        render_exception_guarded(&ctx, &e, wd)
-                    };
-                    RouteDispatch::Done(
-                        serde_json::json!({ "status": 500, "headers": {}, "body": msg }).to_string(),
-                    )
-                }
-            }
-        }),
         Some(PluginRuntime::Ext(p)) => match p.invoke_route(key, request_json, budget) {
-            Ok(s) => RouteDispatch::Done(s),
-            Err(e) => RouteDispatch::Done(
-                serde_json::json!({
+            Ok(s) => s,
+            Err(e) => serde_json::json!({
                     "status": 500,
                     "headers": { "content-type": "text/plain; charset=utf-8" },
                     "body": e,
                 })
                 .to_string(),
-            ),
         },
-        None => RouteDispatch::Done(
-            serde_json::json!({
+        None => serde_json::json!({
                 "status": 503,
                 "headers": {},
                 "body": format!("插件 `{plugin}` 没有可用的运行时"),
             })
             .to_string(),
-        ),
     }
 }
 
 impl LoadedPlugin {
-    /// 跑一条到点的定时器。
+    /// Rust → 插件的 tick 链路：插件定义了 `on_tick(payload)` 就每秒跑一拍。
     ///
-    /// 回调在 JS 侧（`__timers`），宿主只递 id —— 所以这里**不持有**任何 JS 函数，
-    /// 也就不存在 Persistent 的释放问题。
-    ///
-    /// 失败处理：回调抛错**不**当作插件失败（它没有 run 记录，也没有熔断），
-    /// 只记一条 warn；连续 5 次仍失败就把这条定时器停掉（见 `Timers::record_failure`）
-    /// —— 否则一个 50ms 的坏 interval 一天能刷 170 万行日志，把真正的原因埋掉。
-    fn fire_timer(&mut self, id: u64, repeat: bool, logs: &SharedLogs, wd: &Watchdog, budget: Duration) {
-        let name = self.name.clone();
-        let out: Result<bool, String> = match self.runtime.as_ref() {
-            Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
-                let f: Function = ctx
-                    .globals()
-                    .get("__fire_timer")
-                    .map_err(|e| format!("找不到 __fire_timer: {e}"))?;
-                wd.arm(budget);
-                let r = f.call::<_, bool>((id, repeat));
-                wd.disarm();
-                match r {
-                    Ok(alive) => Ok(alive),
-                    Err(e) => Err(render_exception_guarded(&ctx, &e, wd)),
-                }
-            }),
-            // 外部运行时自己有 setTimeout（Node/Bun 原生），宿主不再重复实现。
-            _ => Ok(false),
-        };
-
-        let Ok(alive) = out else {
-            let msg = out.unwrap_err();
-            hostapi::push_log(
-                logs,
-                &name,
-                "warn",
-                &format!("定时器回调出错（id={id}）: {msg}"),
-            );
-            if let Ok(mut t) = self.timers.lock() {
-                if t.record_failure(id) {
-                    hostapi::push_log(
-                        logs,
-                        &name,
-                        "error",
-                        &format!("定时器 id={id} 连续失败 5 次，已停掉（检查回调里的异常）"),
-                    );
-                }
-            }
-            return;
-        };
-
-        // JS 侧已经没有了（插件自己 clear 过 / 那条是一次性的）⇒ 宿主表也清掉。
-        if let Ok(mut t) = self.timers.lock() {
-            if alive {
-                t.record_success(id);
-            } else {
-                t.clear(id);
-            }
-        }
-    }
-
-    /// Rust → 插件的 tick 链路。Python 侧对应 `__pp_tick`（插件里定义 `on_tick(payload)`）。
-    /// 跑一拍 `on_tick`。
-    ///
-    /// 返回 `Some(inv_id)` = 这一拍交给了 Promise（async 的 `on_tick`），
-    /// 收尾要等 `__host_inv_done`；调用点负责登记在途与墙钟兜底。
-    fn fire_tick(
-        &mut self,
-        seq: u64,
-        ts: &str,
-        logs: &SharedLogs,
-        wd: &Watchdog,
-        budget: Duration,
-    ) -> Option<u64> {
+    /// 外部运行时在子进程里跑完再回话；超预算由 extproc 杀进程组。
+    fn fire_tick(&mut self, seq: u64, ts: &str, logs: &SharedLogs, budget: Duration) {
         if self.runtime.is_none() || !self.has_on_tick {
-            return None;
+            return;
         }
         let _busy = BusyGuard::new();
         let name = self.name.clone();
-        let inv_id = next_inv_id();
-
         let outcome = match self.runtime.as_ref() {
-            Some(PluginRuntime::Js(ctx)) => ctx.with(|ctx| {
-                // 参数在 JS 侧组（`__run_tick_async`）：那里同时管着"是不是 Promise"，
-                // 两边各建一次对象只会让 tick 的载荷出现两种形状。
-                let f: Function = match ctx.globals().get("__run_tick_async") {
-                    Ok(f) => f,
-                    Err(_) => return TickOutcome::Gone,
-                };
-                wd.arm(budget);
-                let r = f.call::<_, String>((seq as f64, ts.to_string(), inv_id as f64));
-                wd.disarm();
-                match r {
-                    Ok(json) => match serde_json::from_str::<serde_json::Value>(&json) {
-                        Ok(v) if v.get("gone").and_then(|b| b.as_bool()) == Some(true) => {
-                            TickOutcome::Gone
-                        }
-                        Ok(v) if v.get("pending").and_then(|b| b.as_bool()) == Some(true) => {
-                            TickOutcome::Pending
-                        }
-                        Ok(v) if v.get("done").and_then(|b| b.as_bool()) == Some(true) => {
-                            TickOutcome::Ok
-                        }
-                        Ok(v) => TickOutcome::Failed(
-                            v.get("error")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("（没有给出原因）")
-                                .to_string(),
-                        ),
-                        Err(e) => {
-                            TickOutcome::Failed(format!("tick 结果不是合法 JSON（{e}）: {json}"))
-                        }
-                    },
-                    Err(e) => {
-                        if wd.take_fired() {
-                            TickOutcome::Failed(format!("执行超过预算 {budget:?}，被强制中断"))
-                        } else {
-                            TickOutcome::Failed(render_exception_guarded(&ctx, &e, wd))
-                        }
-                    }
-                }
-            }),
             Some(PluginRuntime::Ext(p)) => match p.tick(seq, ts, budget) {
                 Ok(()) => TickOutcome::Ok,
                 Err(e) => TickOutcome::Failed(e),
             },
-            None => return None,
+            None => return,
         };
 
         match outcome {
@@ -5710,75 +3594,19 @@ impl LoadedPlugin {
                 self.ticks += 1;
                 self.last_tick = Some(ts.to_string());
             }
-            TickOutcome::Gone => {
-                self.has_on_tick = false;
-                hostapi::push_log(logs, &name, "warn", "on_tick 已不存在，停止调度该插件");
-            }
             TickOutcome::Failed(msg) => {
                 self.ticks += 1;
                 self.last_tick = Some(ts.to_string());
                 hostapi::push_log(logs, &name, "error", &format!("on_tick 抛出异常: {msg}"));
             }
-            // 交给 Promise 了：成功/失败等结算（或墙钟超时）时再记。
-            TickOutcome::Pending => return Some(inv_id),
-        }
-        None
+    }
     }
 }
 
-/// 把 `rquickjs::Error` 渲染成人能读的一行。
-///
-/// 坑：`Error::Exception` 只表示「JS 侧抛了」，真正的值还挂在 Context 上，
-/// 必须调 `ctx.catch()` 取出来，否则异常会一直残留、污染下一次调用。
-fn render_exception(ctx: &Ctx, e: &rquickjs::Error) -> String {
-    if matches!(e, rquickjs::Error::Exception) {
-        let value = ctx.catch();
-        if let Ok(f) = ctx.globals().get::<_, Function>("__fmt_err") {
-            if let Ok(s) = f.call::<_, String>((value,)) {
-                return s;
-            }
-        }
-        return "未捕获的 JS 异常".to_string();
-    }
-    e.to_string()
-}
-
-/// 异常渲染本身也要在**执行预算之内**。
-///
-/// 为什么：三个调用点（`dispatch_task` / `dispatch_route` / `fire_tick`）都是
-/// 先 `wd.disarm()` 再渲染。而渲染会回调 JS 全局 `__fmt_err` —— 只要那条回调
-/// 不返回，`armed == false` 就意味着 `Watchdog` 的中断处理器永远返回 false，
-/// 这条 worker 会被永久占死（安全审计 H6）。
-///
-/// 现在 `__fmt_err` 已经在 `jshost.rs` 里用 `Object.defineProperty` 钉成不可写，
-/// 但这里仍然要重新 arm：不变量要落在**调用点**上，而不是依赖「那个全局没被换掉」。
-/// 500ms 足够渲染任何正常异常（它只是一次字符串拼接），又不至于把故障拖成卡死。
-const RENDER_BUDGET: Duration = Duration::from_millis(500);
-
-fn render_exception_guarded(ctx: &Ctx, e: &rquickjs::Error, wd: &Watchdog) -> String {
-    wd.arm(RENDER_BUDGET);
-    let out = render_exception(ctx, e);
-    let fired = wd.take_fired();
-    wd.disarm();
-    if fired {
-        "（异常渲染超过 500ms 被强制中断；插件是否覆盖了全局函数？）".to_string()
-    } else {
-        out
-    }
-}
-
-/// 加载单个插件文件：按 DB/全局设置选 QuickJS / Node / Bun。
-///
-/// 返回 `(插件实例, 加载期声明的任务)`。声明位置因运行时不同（QuickJS 在闭包捕获的
-/// pending 里，外部运行时在 fd3 RPC 的 pending 里），在这里统一收口。
-#[allow(clippy::too_many_arguments)]
 fn load_one(
-    rt: &mut Option<Runtime>,
     file: &Path,
     logs: &SharedLogs,
     host: &Arc<HostState>,
-    wd: &Watchdog,
-    budget: Duration,
 ) -> (LoadedPlugin, Vec<RawTaskDef>) {
     let name = file
         .file_stem()
@@ -5788,11 +3616,9 @@ fn load_one(
     // 绝对值化：`PLUGINS_DIR` 可以是相对路径（`./plugins`），而模块名必须是
     // `file://` **绝对** URL（否则 import.meta.url 与相对解析都没有意义）。
     let file_abs = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    let file_str = file_abs.display().to_string();
     let mtime = std::fs::metadata(file).and_then(|m| m.modified()).ok();
 
     let mut lp = LoadedPlugin {
-        generation: next_generation(),
         name: name.clone(),
         file: file.to_path_buf(),
         runtime: None,
@@ -5802,7 +3628,7 @@ fn load_one(
         error: None,
         tasks: 0,
         mtime,
-        engine: EngineKind::QuickJs,
+        engine: host.catalog.js_default,
         command: None,
         handlers: Vec::new(),
         loaded_at: Instant::now(),
@@ -5811,7 +3637,6 @@ fn load_one(
         evicted: false,
         keep_warm: false,
         content_hash: 0,
-        timers: Arc::new(Mutex::new(crate::timers::Timers::new())),
         nav: None,
     };
     lp.content_hash = file_hash(file).unwrap_or(0);
@@ -5836,8 +3661,8 @@ fn load_one(
 
     // ---- 版本门禁（0.3.0）----
     //
-    // **在任何引擎启动之前**判：QuickJS 的 Context 还没建、Node/Bun 的子进程还没
-    // spawn。三个引擎都经过 load_one，所以这里是唯一的一处。
+    // **在任何引擎启动之前**判：Node/Bun 的子进程还没 spawn。所有插件都经过
+    // load_one，所以这里是唯一的一处。
     //
     // 为什么错误文案要原样进 lp.error：面板的插件卡片直接显示它。用户看到的应该是
     // 「需要面板 ≥ 0.3.0（当前 0.2.3），去这里升级」，而不是「插件坏了」。
@@ -5850,7 +3675,8 @@ fn load_one(
     // ---- 选引擎 ----
     let (engine, command) = match choose_engine(host, &name) {
         Ok(e) => e,
-        Err(e) => {
+        Err((engine, e)) => {
+            lp.engine = engine;
             lp.error = Some(e.clone());
             hostapi::push_log(logs, &name, "error", &format!("插件加载失败: {e}"));
             return (lp, Vec::new());
@@ -5859,42 +3685,7 @@ fn load_one(
     lp.engine = engine;
     lp.command = command.as_ref().map(|p| p.display().to_string());
 
-    let pending: Arc<Mutex<Vec<RawTaskDef>>> = Arc::new(Mutex::new(Vec::new()));
-    let nav: Arc<Mutex<Option<hostapi::NavDef>>> = Arc::new(Mutex::new(None));
-
-    let (runtime, has_on_tick, declared, handlers, routes, nav_def, err) =
-        if engine == EngineKind::QuickJs {
-            let Some(qjs) = rt_ref(rt, &host.plugins_dir, wd) else {
-                let e = "创建 QuickJS Runtime 失败".to_string();
-                lp.error = Some(e.clone());
-                hostapi::push_log(logs, &name, "error", &format!("插件加载失败: {e}"));
-                return (lp, Vec::new());
-            };
-            let (runtime, has_on_tick, err) = load_js(
-                qjs,
-                &source,
-                &file_str,
-                &name,
-                logs,
-                host,
-                pending.clone(),
-                nav.clone(),
-                lp.timers.clone(),
-                wd,
-                budget,
-            );
-            let declared = std::mem::take(&mut *pending.lock().unwrap());
-            let nav_def = nav.lock().unwrap().take();
-            (
-                runtime,
-                has_on_tick,
-                declared,
-                Vec::new(),
-                Vec::new(),
-                nav_def,
-                err,
-            )
-        } else {
+    let (runtime, has_on_tick, declared, handlers, routes, nav_def, err) = {
             let command = command.expect("外部引擎必然有命令");
             match extproc::load(engine, command, &file_abs, &name, host, logs, load_budget()) {
                 Ok(load) => (
@@ -6011,156 +3802,55 @@ fn load_one(
     (lp, declared)
 }
 
-/// 选一个插件用的 JS 引擎：DB 覆盖 > `PANEL_JS_ENGINE` > QuickJS。
+/// 选一个插件用的 JS 引擎：DB 覆盖 > `PANEL_JS_ENGINE` > 平台默认（Node）。
+///
+/// 旧库里的 `quickjs` 覆盖按默认引擎处理：内嵌引擎已移除，不能让一条旧设置
+/// 把它重新拉起来。
 ///
 /// 返回值里的命令只对 Node/Bun 有意义：插件级 `command` 覆盖优先，否则用探测到的路径。
+///
+/// 失败时把**本来要用的引擎**一起带回去：加载失败也要在卡片上显示引擎名，
+/// 否则用户看到「Node 不可用」的错误、旁边却是另一行字。
 fn choose_engine(
     host: &Arc<HostState>,
     name: &str,
-) -> Result<(EngineKind, Option<PathBuf>), String> {
-    let (stored_engine, stored_command) =
-        db::get_plugin_runtime(&host.db, name).map_err(|e| format!("读插件运行时设置失败: {e}"))?;
+) -> Result<(EngineKind, Option<PathBuf>), (EngineKind, String)> {
+    let (stored_engine, stored_command) = db::get_plugin_runtime(&host.db, name).map_err(|e| {
+        (
+            host.catalog.js_default,
+            format!("读插件运行时设置失败: {e}"),
+        )
+    })?;
     let engine = stored_engine
         .as_deref()
         .and_then(EngineKind::parse)
         .unwrap_or(host.catalog.js_default);
-    if engine == EngineKind::QuickJs {
-        return Ok((engine, None));
+    if let Some(raw) = stored_engine.as_deref() {
+        if crate::taskdir::is_retired_runtime(raw) {
+            crate::log::plog!(
+                "engine",
+                info,
+                "插件 `{name}` 的旧运行时设置 `{raw}` 已移除，按 {} 处理",
+                engine.as_str()
+            );
+        }
     }
     host.catalog
         .require(engine)
-        .map_err(|e| format!("插件设置为 {}，但 {e}", engine.as_str()))?;
+        .map_err(|e| (engine, format!("插件设置为 {}，但 {e}", engine.as_str())))?;
     if let Some(cmd) = stored_command.filter(|s| !s.trim().is_empty()) {
         let p = PathBuf::from(&cmd);
         if p.is_file() {
             return Ok((engine, Some(p)));
         }
-        return Err(format!("插件指定的解释器 `{cmd}` 不存在"));
+        return Err((engine, format!("插件指定的解释器 `{cmd}` 不存在")));
     }
     let command = match engine {
-        EngineKind::Node => host.catalog.node_path()?,
-        EngineKind::Bun => host.catalog.bun_path()?,
-        EngineKind::QuickJs => unreachable!(),
-    };
+        EngineKind::Node => host.catalog.node_path(),
+        EngineKind::Bun => host.catalog.bun_path(),
+    }
+    .map_err(|e| (engine, e))?;
     Ok((engine, Some(command)))
-}
-
-/// QuickJS 插件加载：独立 Context + 注入 host + 执行源码 + 探测 on_tick。
-#[allow(clippy::too_many_arguments)]
-fn load_js(
-    rt: &Runtime,
-    source: &str,
-    file_str: &str,
-    name: &str,
-    logs: &SharedLogs,
-    host: &Arc<HostState>,
-    pending: Arc<Mutex<Vec<RawTaskDef>>>,
-    nav: Arc<Mutex<Option<hostapi::NavDef>>>,
-    timers: Arc<Mutex<crate::timers::Timers>>,
-    wd: &Watchdog,
-    budget: Duration,
-) -> (Option<PluginRuntime>, bool, Option<String>) {
-    let ctx = match Context::full(rt) {
-        Ok(c) => c,
-        Err(e) => return (None, false, Some(format!("创建 Context 失败: {e}"))),
-    };
-
-    let result: Result<bool, String> = ctx.with(|ctx| {
-        jshost::install_host(
-            &ctx,
-            name.to_string(),
-            host.clone(),
-            pending,
-            nav,
-            timers,
-            logs.clone(),
-        )
-        .map_err(|e| format!("注入 host 失败: {e}"))?;
-
-        wd.arm(budget);
-        let eval = if looks_like_module(source) {
-            eval_as_module(&ctx, source, file_str)
-        } else {
-            ctx.eval::<(), _>(source)
-                .map_err(|e| render_exception(&ctx, &e))
-        };
-        wd.disarm();
-        if let Err(e) = eval {
-            return Err(if wd.take_fired() {
-                format!("插件顶层代码执行超过预算 {budget:?}，被强制中断")
-            } else {
-                e
-            });
-        }
-
-        Ok(ctx.globals().get::<_, Function>("on_tick").is_ok())
-    });
-
-    match result {
-        Ok(has_on_tick) => (Some(PluginRuntime::Js(ctx)), has_on_tick, None),
-        // ctx 在此 drop：加载失败的插件不留 Context，省内存
-        Err(err) => (None, false, Some(err)),
-    }
-}
-
-/// 判断插件是不是 ES 模块写法（有顶层 `import` / `export`）。
-///
-/// 为什么不靠「先当脚本 eval，失败了再当模块试」：那样要靠错误信息区分
-/// 「语法错」和「本来该走模块」，还要记得 `ctx.catch()` 清异常，容易出错。
-/// 直接看首字符更简单，而且行为对用户是可预期的（docs/plugin-api.md §4 里写清楚了）。
-fn looks_like_module(source: &str) -> bool {
-    source.lines().any(|l| {
-        let l = l.trim_start();
-        l.starts_with("import ") || l.starts_with("import{") || l.starts_with("export ")
-    })
-}
-
-/// 以 ES 模块方式执行源码，并把命名空间里的 `on_tick` 提升到全局。
-///
-/// 为什么要把 `on_tick` 拷到全局：模块顶层声明是模块作用域，不是 `globalThis`。
-/// 引擎的 tick 分发统一从 globals 取 `on_tick`，拷一次就统一了两条路径。
-fn eval_as_module(ctx: &Ctx, source: &str, file_str: &str) -> Result<(), String> {
-    // 模块名（= `import.meta.url`）= 该文件的 `file://` URL（严格 ESM 的标识方式）；
-    // 不是文件路径时（例如 /api/test/js 跑临时代码，名字是 `<test-run>`）原样用，
-    // 那种情况下相对 import 没有基准，解析器会明确报错。
-    let module_name = if Path::new(file_str).is_absolute() {
-        file_url(Path::new(file_str))
-    } else {
-        file_str.to_string()
-    };
-    let src = if needs_require_shim(source) {
-        with_require_shim(source)
-    } else {
-        source.to_string()
-    };
-    let module = Module::declare(ctx.clone(), module_name.clone(), src)
-        .map_err(|e| render_exception(ctx, &e))?;
-    // 填 `import.meta`：ESM 的模块要能问"我在哪"。QuickJS 不自动给，得宿主填
-    // （rquickjs 的 `Module::meta()` 就是这个口子）。不填的话 `import.meta.url`
-    // 是 `undefined` —— 实测探针里就是这样，而任何按 URL 处理它的插件代码都会错。
-    fill_meta(&module, &module_name);
-    let (module, promise) = module.eval().map_err(|e| render_exception(ctx, &e))?;
-    // 用 render_exception 而不是 `{e}`：后者对 promise 拒绝只会打出
-    // 「Exception generated by QuickJS」——那是包装类型名，插件作者拿它什么都查不出来。
-    // 实测就是被这条信息卡住过：真正的错误（某个 JS API 不存在）完全看不到。
-    promise.finish::<()>().map_err(|e| match e {
-        // 顶层 await 只能等「微任务内能 settle」的 Promise（await 1 / await Promise.resolve()）。
-        // 等定时器 / 网络 / 任何外部事件 ⇒ 队列里再没有 job 可跑 ⇒ WouldBlock。
-        // 原始信息是 "Error blocking on a promise resulted in a dead lock"，
-        // 对着这句话猜不到「因为模块加载期间宿主不推进时钟」。
-        rquickjs::Error::WouldBlock => "模块顶层 `await` 的 Promise 永远不会完成：模块加载期间\
-             宿主**不推进时钟**（定时器还没开始跑、也没有 IO），所以 `await` 一个需要外部\
-             事件的 Promise 会永久挂起。只有能在微任务里 settle 的 `await` 可用（`await 1`、\
-             `await Promise.resolve()`）；要等时间或网络，放到 handler 里（那里支持 async）。"
-            .to_string(),
-        e => format!("模块执行失败: {}", render_exception(ctx, &e)),
-    })?;
-    if let Ok(ns) = module.namespace() {
-        if let Ok(f) = ns.get::<_, Function>("on_tick") {
-            let _ = ctx.globals().set("on_tick", f);
-        }
-    }
-    Ok(())
 }
 
 /// 扫描插件目录（根 + `js/` 一层），只收 `.js`，按路径排序保证顺序稳定。
@@ -6252,7 +3942,6 @@ fn settle_plugin(
     plugins: &[LoadedPlugin],
     logs: &SharedLogs,
     db: &Db,
-    wd: &Watchdog,
     budget: Duration,
     name: &str,
 ) {
@@ -6263,7 +3952,6 @@ fn settle_plugin(
         plugins,
         logs,
         db,
-        wd,
         budget,
         Local::now(),
         &[name.to_string()],
@@ -6285,7 +3973,7 @@ fn settle_plugin(
 fn find_plugin<'a>(plugins: &'a [LoadedPlugin], name: &str) -> Option<&'a LoadedPlugin> {
     plugins
         .iter()
-        .find(|p| p.name == name && p.runtime.is_some())
+        .find(|p| p.name == name && p.error.is_none())
         .or_else(|| plugins.iter().find(|p| p.name == name))
 }
 
@@ -6325,7 +4013,6 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
     LoadedPlugin {
         name: plugin_name_of(file),
         file: file.to_path_buf(),
-        generation: next_generation(),
         runtime: None,
         has_on_tick: false,
         ticks: 0,
@@ -6333,7 +4020,7 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
         error: Some(reason),
         tasks: 0,
         mtime: std::fs::metadata(file).and_then(|m| m.modified()).ok(),
-        engine: EngineKind::QuickJs,
+        engine: EngineKind::Node,
         command: None,
         handlers: Vec::new(),
         loaded_at: Instant::now(),
@@ -6342,7 +4029,6 @@ fn rejected_plugin(file: &Path, reason: String) -> LoadedPlugin {
         evicted: false,
         keep_warm: false,
         content_hash: 0,
-        timers: Arc::new(Mutex::new(crate::timers::Timers::new())),
         nav: None,
     }
 }
@@ -6757,13 +4443,11 @@ fn sync_script_tasks(sched: &mut Scheduler, logs: &SharedLogs, db: &Db, host: &A
 }
 
 fn sync_plugins(
-    rt: &mut Option<Runtime>,
     plugins: &mut Vec<LoadedPlugin>,
     sched: &mut Scheduler,
     logs: &SharedLogs,
     db: &Db,
     host: &Arc<HostState>,
-    wd: &Watchdog,
     budget: Duration,
     registry: &Registry,
     // 本次要同步的文件（只包含**本 worker 负责的**）
@@ -6851,13 +4535,13 @@ fn sync_plugins(
             continue;
         }
 
-        let (mut lp, pending) = load_one(rt, file, logs, host, wd, load_budget());
+        let (mut lp, pending) = load_one(file, logs, host);
         lp.content_hash = file_hash(file).unwrap_or(0);
         let failed = lp.error.is_some();
         install_tasks(sched, &pending, logs, Local::now(), db);
         plugins.push(lp);
         plugins.sort_by(|a, b| a.file.cmp(&b.file));
-        settle_plugin(sched, plugins, logs, db, wd, budget, &name);
+        settle_plugin(sched, plugins, logs, db, budget, &name);
         touched = true;
         if !failed {
             hostapi::push_log(
@@ -6915,7 +4599,7 @@ fn sync_plugins(
     }
     for file in modified {
         reload_plugin(
-            rt, plugins, sched, &file, logs, db, host, wd, budget, registry, owned,
+            plugins, sched, &file, logs, db, host, budget, registry, owned,
         );
         touched = true;
     }
@@ -6943,14 +4627,12 @@ fn sync_plugins(
 /// 顺序上「先摘掉旧任务再装新任务」，这样即使新版本加载失败，也不会留下幽灵任务。
 #[allow(clippy::too_many_arguments)]
 fn reload_plugin(
-    rt: &mut Option<Runtime>,
     plugins: &mut Vec<LoadedPlugin>,
     sched: &mut Scheduler,
     file: &Path,
     logs: &SharedLogs,
     db: &Db,
     host: &Arc<HostState>,
-    wd: &Watchdog,
     budget: Duration,
     registry: &Registry,
     owned: &[String],
@@ -6979,7 +4661,7 @@ fn reload_plugin(
     } else {
         0
     };
-    // 旧的解释器实例在这里 drop（QuickJS Context / 外部子进程）
+    // 旧的解释器子进程在这里 drop（`ExtPlugin::drop` 杀进程）
     let mut old = plugins.remove(pos);
     drop(old.runtime.take());
     // 旧记录已经移出列表，这时候查冲突才是准的：如果还有另一个同名插件，
@@ -6994,7 +4676,7 @@ fn reload_plugin(
         return;
     }
 
-    let (mut lp, pending) = load_one(rt, file, logs, host, wd, load_budget());
+    let (mut lp, pending) = load_one(file, logs, host);
     lp.content_hash = file_hash(file).unwrap_or(0);
     let load_failed = lp.error.is_some();
 
@@ -7008,7 +4690,7 @@ fn reload_plugin(
     plugins.push(lp);
     plugins.sort_by(|a, b| a.file.cmp(&b.file));
 
-    settle_plugin(sched, plugins, logs, db, wd, budget, &name);
+    settle_plugin(sched, plugins, logs, db, budget, &name);
 
     if !load_failed {
         hostapi::push_log(
@@ -7071,7 +4753,7 @@ fn fmt_secs(t: chrono::DateTime<Local>) -> String {
 /// 2 是刻意的：串行的代价是实测出来的（`scripts/serial_cost.py`）—— 一个每 1 秒
 /// 忙等 300ms 的任务会把 20ms 任务的间隔 p99 从 29ms 推到 311ms。2 条就够把
 /// 「要精度的插件」和「粗粒度的大块任务」分开（见 `workers::plan`）。
-/// 低配盒子上多一条 QuickJS Runtime 的常驻开销需要实测，所以它是可配置的：
+/// 低配盒子上多一条引擎线程的常驻开销需要实测，所以它是可配置的：
 /// `ENGINE_WORKERS=1` 退回单线程。
 ///
 /// 默认取 `min(2, 可用核数)`：1 核老机器不再默认开 2 条；独占声明仍会自动抬。
@@ -7112,692 +4794,108 @@ fn env_u32(key: &str, default: u32) -> u32 {
 //
 // 为什么必须是一次性的：如果复用插件的解释器，用户在编辑器里写错一行就会污染
 // 那个插件的全局状态（甚至改掉它的任务表），而面板上没有任何提示 —— 这类问题
-// 极难排查。新建一个 Context / 借一个空闲 VM，跑完立刻析构，代价是每次几十微秒，
+// 极难排查。每次起一个一次性的 Node 进程，跑完立刻退出，代价是几十毫秒，
 // 换来的确定性很划算。
 
-/// 把 `console.*` 接到宿主日志通道上。
+/// 试跑的输出收集。
 ///
-/// QuickJS 自带的 `console` 直接写宿主 stdout：那样测试运行的输出既捕获不到，
-/// 又会混进面板自己的输出里。接到 `__host_log_raw` 之后，`console.log` 和
-/// `host-api` 的 `log()` 走同一条路，面板能把两者一起收走。
-const CONSOLE_SHIM: &str = r#"
-(function () {
-  function fmt(args) {
-    return Array.prototype.map.call(args, function (v) { return String(v); }).join(' ');
-  }
-  globalThis.console = {
-    log:   function () { __host_log_raw('info',  fmt(arguments)); },
-    info:  function () { __host_log_raw('info',  fmt(arguments)); },
-    debug: function () { __host_log_raw('info',  fmt(arguments)); },
-    warn:  function () { __host_log_raw('warn',  fmt(arguments)); },
-    error: function () { __host_log_raw('error', fmt(arguments)); }
-  };
-})();
-"#;
-
-/// 在一次性 `Context` 里跑一段 JS。成功返回 `Ok(())`，失败返回给面板看的错误文本。
-fn run_scratch_js(
-    rt: &Runtime,
+/// 插件代码里的 `console.*` 由 runtime/js 接到协议事件上（不是裸 stdout），
+/// 这样测试运行的输出能被单独收走，不会混进面板自己的日志。
+/// 「测试运行」的落地：写临时文件、用 Node 跑一次、把输出收回来。
+///
+/// 与正式脚本任务共用 extproc 通道（预算到点杀进程组），但不写面板实时日志。
+fn test_run_node(
     host: &Arc<HostState>,
     logs: &SharedLogs,
-    wd: &Watchdog,
     budget: Duration,
-    code: &str,
-    input: &str,
-    module_name: Option<&str>,
-) -> Result<(), String> {
-    let ctx = Context::full(rt).map_err(|e| format!("创建临时 Context 失败: {e}"))?;
-
-    ctx.with(|ctx| {
-        // pending 是加载期收集任务声明用的。测试运行不注册任务，但 host_api 的
-        // register_cron 仍然可以调用 —— 声明会进这个临时 vec，随 Context 一起丢掉。
-        let pending = Arc::new(Mutex::new(Vec::new()));
-        // 测试运行同样不给侧边栏入口：它是个一次性的临时 Context，
-        // 声明了也没有面板去显示，收下反而是个假的成功信号。
-        let nav = Arc::new(Mutex::new(None));
-        // 试跑是一次性的临时 Context：给它一张独立的定时器表，
-        // `setTimeout` 不会因为"没有表"而抛错；但试跑是同步跑完就丢，
-        // 定时器**不会触发**（要在面板里真跑才会）。
-        let timers = Arc::new(Mutex::new(crate::timers::Timers::new()));
-        jshost::install_host(
-            &ctx,
-            TEST_RUN_PLUGIN.to_string(),
-            host.clone(),
-            pending,
-            nav,
-            timers,
-            logs.clone(),
-        )
-        .map_err(|e| format!("注入 host 失败: {e}"))?;
-
-        ctx.eval::<(), _>(CONSOLE_SHIM)
-            .map_err(|e| render_exception(&ctx, &e))?;
-
-        // 输入以全局 `input` 提供：测试运行要能模拟参数
-        ctx.globals()
-            .set("input", input.to_string())
-            .map_err(|e| format!("设置 input 失败: {e}"))?;
-
-        wd.arm(budget);
-        let eval = if looks_like_module(code) {
-            eval_as_module(&ctx, code, module_name.unwrap_or("<test-run>"))
-        } else {
-            ctx.eval::<(), _>(code)
-                .map_err(|e| render_exception(&ctx, &e))
-        };
-        wd.disarm();
-        let fired = wd.take_fired();
-
-        match eval {
-            Ok(()) => Ok(()),
-            // 预算打断要说清楚是**超时**而不是语法错，否则用户会去改一行没错的代码
-            Err(_) if fired => Err(format!(
-                "执行超过预算 {budget:?} 被强制中断（死循环或阻塞调用？）"
-            )),
-            Err(e) => Err(e),
-        }
-    })
-}
-
-/// 脚本任务用的全局垫片：与外部 Node 运行时暴露的那组同名函数对齐。
-///
-/// 脚本不是插件：插件用 `import { log } from 'host-api'`，而脚本（经典脚本，
-/// 没有 import）在 Node 宿主里拿到的是全局 `log`。内嵌引擎必须给一样的，
-/// 否则「同一份脚本两个宿主」这个承诺就是假的。
-const SCRIPT_GLOBALS: &str = r#"
-(function () {
-  function emit(level) {
-    return function () {
-      var parts = [];
-      for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
-      __host_log_raw(level, parts.join(' '));
-    };
-  }
-  globalThis.log = emit('info');
-  globalThis.info = emit('info');
-  globalThis.debug = emit('info');
-  globalThis.warn = emit('warn');
-  globalThis.error = emit('error');
-  globalThis.host = globalThis.host || {};
-  globalThis.host.log = globalThis.log;
-  globalThis.host.warn = globalThis.warn;
-  globalThis.host.error = globalThis.error;
-})();
-"#;
-
-/// 在一次性 Context 里跑一个**脚本任务**文件（`@runtime quickjs`）。
-///
-/// 为什么要有它（issue #11）：外部 Node/Bun 依赖 fd 传递与进程组，只有 Unix 有；
-/// 而 `.js` 脚本在 Windows 上因此变成死路。内嵌 QuickJS 是**同一份 JS 引擎**，
-/// 没有任何 Unix 依赖，所以脚本也能在里面跑 —— 只是没有外部进程那一套。
-///
-/// 返回 `Ok(输出行)` / `Err(错误文本)`，与外部运行时那条路径的语义对齐。
-pub fn run_script_in_quickjs(
-    host: &Arc<HostState>,
-    logs: &SharedLogs,
-    tasks_dir: &Path,
-    script: &Path,
-    budget: Duration,
-    params: Option<&str>,
-) -> Result<String, String> {
-    let code = std::fs::read_to_string(script)
-        .map_err(|e| format!("读脚本 {} 失败: {e}", script.display()))?;
-    let wd = Watchdog::default();
-    // 解析根用 TASKS_DIR：脚本里 `./lib/x.js` 这类相对 import 落在脚本自己的目录树里。
-    let rt = make_runtime(tasks_dir, &wd).ok_or_else(|| "创建 QuickJS Runtime 失败".to_string())?;
-    // 模块名用脚本自己的 file:// URL：相对 import 才有基准。
-    let url = file_url(script);
-    let input = params.unwrap_or("").to_string();
-
-    // 脚本任务在外部 Node 那条路径里拿到的是一组**全局函数**（`log` / `host.*`），
-    // 所以同一份脚本搬到内嵌引擎里也必须能直接用它们 —— 否则就变成
-    // 「能跑，但一行 log 就 ReferenceError」。这里补的是那层全局垫片。
-    let code = format!("{SCRIPT_GLOBALS}\n{code}");
-
-    let (result, lines) = hostapi::capture_scope(|| {
-        run_scratch_js(&rt, host, logs, &wd, budget, &code, &input, Some(&url))
-    });
-
-    let mut out = String::new();
-    for l in &lines {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&l.msg);
-        out.push('\n');
-        // ⚠ `capture_scope` 只是**收集**，不会落到面板日志。外部运行时那条路径
-        // 的 stdout/stderr 是会进日志的，这里必须对齐 —— 否则脚本跑成功了，
-        // 用户在界面上一个字都看不到，只能去翻 runs 表。
-        match l.level() {
-            crate::log::Level::Warn => crate::log::plog!("__script__", warn, "{}", l.msg),
-            crate::log::Level::Error => crate::log::plog!("__script__", error, "{}", l.msg),
-            _ => crate::log::plog!("__script__", info, "{}", l.msg),
-        }
-    }
-    match result {
-        Ok(()) => Ok(out),
-        Err(e) => Err(if out.is_empty() { e } else { format!("{e}\n{out}") }),
-    }
-}
-/// 「测试运行」的落地：跑一段代码，把输出收回来。
-#[allow(clippy::too_many_arguments)]
-fn test_run(
-    rt: &Runtime,
-    host: &Arc<HostState>,
-    logs: &SharedLogs,
-    wd: &Watchdog,
-    budget: Duration,
-    lang: &str,
     code: &str,
     input: &str,
 ) -> Result<TestRunOut, String> {
     let started = Instant::now();
-    let _ = lang; // py 试跑已移除；只接受 js
-
-    let (result, lines) =
-        hostapi::capture_scope(|| run_scratch_js(rt, host, logs, wd, budget, code, input, None));
-
-    // info 档（含 start/success/fail 这三个语义 type）→ stdout，
-    // warn 及以上 → stderr。跟 Node 的 console 语义对齐，
-    // 面板就能用同一套配色显示两种宿主的输出。
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    for l in &lines {
-        let dst = if l.level() == crate::log::Level::Info {
-            &mut stdout
-        } else {
-            &mut stderr
+    // 试跑**固定走 Node**（P1 收口），不跟随面板默认引擎：试跑要的是确定性。
+    // 机器上只有 Bun（或默认设成 Bun）时，这里明确报「试跑需要 Node」，而不是悄悄换引擎。
+    let command = host
+        .catalog
+        .node_path()
+        .map_err(|e| format!("试跑固定用 Node（不跟随默认引擎）：{e}"))?;
+    let out = crate::extproc::run_js_snippet(host, logs, command, code, input, budget)?;
+    let (stdout, stderr) = split_captured_output(&out.stdout);
+    let error = match out.error {
+        // 超时是**预算打断**，不是语法/运行错误；文案保持旧样式，
+        // 否则用户会去改一行没错的代码。
+        Some(e) if e.contains("没有回话") => Some(format!(
+            "执行超过预算 {budget:?} 被强制中断（死循环或阻塞调用？）"
+        )),
+        other => other,
         };
-        if !dst.is_empty() && !dst.ends_with('\n') {
-            dst.push('\n');
-        }
-        dst.push_str(&l.msg);
-        dst.push('\n');
-    }
-
     Ok(TestRunOut {
         stdout,
         stderr,
-        error: result.err(),
+        error,
         ms: started.elapsed().as_millis() as u64,
     })
 }
 
-#[cfg(test)]
-mod pump_tests {
-    use super::*;
-
-    #[test]
-    fn microtasks_left_in_the_queue_are_run() {
-        let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__n = 0; globalThis.__plugin_name = 'p'; \
-                 Promise.resolve().then(function () { globalThis.__n = 1; });",
-            )
-            .unwrap();
-        });
-        let n0: i32 = ctx.with(|ctx| ctx.globals().get("__n").unwrap());
-        assert_eq!(n0, 0, "同步段结束时 microtask 还没跑 —— 这正是必须显式泵的原因");
-        let wd = Watchdog::default();
-        assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
-        let n1: i32 = ctx.with(|ctx| ctx.globals().get("__n").unwrap());
-        assert_eq!(n1, 1);
-    }
-
-
-    /// 回归（issue #1）：一个 job 内部的**同步**长任务不能被泵的切片打死。
+/// 把 `run_js_snippet` 的组合输出拆回 stdout / stderr。
     ///
-    /// 线上表现：QuickJS 下 `await res.json()` 读几十 KB 的 JSON，纯 JS 的 UTF-8
-    /// 解码 >50ms，被 50ms 的 interrupt 打断成 `InternalError: interrupted` ——
-    /// 而且是**未捕获拒绝**，插件 try/catch 接不住。
-    ///
-    /// 根因不在解码，在泵：QuickJS 的 interrupt 只能抛异常，不能暂停同步代码，
-    /// 所以「跑满 50ms 就让出」不能靠 arm 实现。
-    #[test]
-    fn a_long_microtask_is_not_killed_by_the_slice() {
-        let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__plugin_name = 'slow'; \
-                 globalThis.__done = 0; \
-                 globalThis.__spin = function (ms) { var t = Date.now(); while (Date.now() - t < ms) {} }; \
-                 Promise.resolve().then(function () { __spin(120); __done = 1; });",
-            )
-            .unwrap();
-        });
-        let wd = Watchdog::default();
-        let r = pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5));
-        assert!(r.is_none(), "50ms 切片不该打断正在跑的 job：{r:?}");
-        let done: i32 = ctx.with(|ctx| ctx.globals().get("__done").unwrap());
-        assert_eq!(done, 1, "job 必须真的跑完（120ms > 50ms 切片）");
-    }
-
-    /// 切片的**正确**语义：到点就不再取下一个 job，但已经在队列里的一个都不丢。
-    #[test]
-    fn the_slice_stops_taking_new_jobs_but_keeps_the_queue() {
-        let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__plugin_name = 'q'; \
-                 globalThis.__n = 0; \
-                 globalThis.__spin = function (ms) { var t = Date.now(); while (Date.now() - t < ms) {} }; \
-                 for (var i = 0; i < 6; i++) { \
-                   Promise.resolve().then(function () { __spin(40); __n++; }); \
-                 }",
-            )
-            .unwrap();
-        });
-        let wd = Watchdog::default();
-        let count = |ctx: &Context| -> i32 { ctx.with(|ctx| ctx.globals().get("__n").unwrap()) };
-        assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
-        let first = count(&ctx);
-        assert!(first >= 1, "至少跑完一个（实际 {first}）");
-        assert!(first < 6, "6 个 40ms 的 job 不可能在 50ms 切片里全跑完（实际 {first}）");
-        // 剩下的还在 Runtime 级的 job 队列里：接着泵，一个都不能丢
-        let mut guard = 0;
-        while count(&ctx) < 6 && guard < 10 {
-            assert!(pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none());
-            guard += 1;
+/// `ExtShared::record_output` 用 `--- stderr ---` 这一行分隔两路输出；行首没有
+/// stdout 时标记会出现在最前面，所以两种位置都要认。
+fn split_captured_output(raw: &str) -> (String, String) {
+    const MARK: &str = "--- stderr ---\n";
+    match raw.find(MARK) {
+        None => (raw.to_string(), String::new()),
+        Some(i) => {
+            let stdout = raw[..i].trim_end_matches('\n');
+            let stdout = if stdout.is_empty() {
+                String::new()
+            } else {
+                format!("{stdout}\n")
+            };
+            (stdout, raw[i + MARK.len()..].to_string())
         }
-        assert_eq!(count(&ctx), 6, "切片只该推迟剩下的 job，不该丢");
-    }
-
-    /// 去掉切片 interrupt 之后，**看门狗本身还得管用**：死循环必须到点被打断。
-    /// 否则「不误杀」就换成了「一条 while(true) 把引擎线程永久占住」。
-    #[test]
-    fn the_guard_still_interrupts_a_runaway_job() {
-        let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__plugin_name = 'hang'; \
-                 globalThis.__fmt_err = function (e) { return 'E:' + e; }; \
-                 queueMicrotask(function () { while (true) {} });",
-            )
-            .unwrap();
-        });
-        let wd = Watchdog::default();
-        // ⚠ 必须真的把 handler 挂到 Runtime 上：只 `arm` 改的是原子量，没挂 handler
-        //   的 Runtime 根本不会被打断（第一版这条测试就是这么挂住的）。
-        rt.set_interrupt_handler(Some(wd.handler()));
-        let started = Instant::now();
-        let r = pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_millis(120));
-        assert!(r.is_some(), "死循环必须被看门狗打断");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "打断要按时，实际 {:?}",
-            started.elapsed()
-        );
-    }
-    #[test]
-    fn a_throwing_job_is_reported_not_swallowed() {
-        // `queueMicrotask` 的 job 直接抛错 ⇒ JS_ExecutePendingJob 返回 -1。
-        // 这条必须被认领：以前只有 `ctx.with` 里的 `execute_pending_job`（会吞掉），
-        // 结果就是"插件里抛了、面板上什么都没有"。
-        let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__plugin_name = 'boom'; \
-                 globalThis.__fmt_err = function (e) { return 'E:' + e; }; \
-                 queueMicrotask(function () { throw 'kaput'; });",
-            )
-            .unwrap();
-        });
-        let wd = Watchdog::default();
-        let (plugin, msg) =
-            pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).expect("job 抛错必须被报出来");
-        assert_eq!(plugin, "boom");
-        assert!(msg.contains("kaput"), "错误文本要带原始信息，实际是 {msg}");
-    }
-
-    /// 回归：结算队列必须是**每线程一份**。
-    ///
-    /// 之前它是进程级静态，于是两个 worker 会互相抢对方的结算：A 推的结算被 B 排空，
-    /// B 在自己的 `pending` 里找不到这个 id 就扔掉，A 那条执行只能干等 60 秒墙钟超时。
-    /// 这个测试用两条线程互相"偷"来锁死行为 —— 单线程版本永远测不出这个 bug。
-    #[test]
-    fn settlement_queue_is_per_thread_so_workers_cannot_steal_each_other() {
-        let a = std::thread::spawn(|| {
-            push_inv_done(11, true, "a".to_string());
-            // 等对方也推一条：如果队列是全局的，下面 take 就会把两条都拿走
-            std::thread::sleep(Duration::from_millis(50));
-            take_inv_done()
-        });
-        let b = std::thread::spawn(|| {
-            push_inv_done(22, false, "b".to_string());
-            std::thread::sleep(Duration::from_millis(50));
-            take_inv_done()
-        });
-        let a = a.join().unwrap();
-        let b = b.join().unwrap();
-        assert_eq!(a.len(), 1, "A 只该看到自己那条，实际 {a:?}");
-        assert_eq!(a[0].0, 11);
-        assert_eq!(b.len(), 1, "B 只该看到自己那条，实际 {b:?}");
-        assert_eq!(b[0].0, 22);
-        // 取空之后必须是空的（不能残留，否则下一轮会重复处理）
-        assert!(take_inv_done().is_empty());
-    }
-
-    #[test]
-    fn fetch_results_are_claimed_by_owner_and_stale_ones_are_dropped() {
-        let now = Instant::now();
-        let old = now - FETCH_DONE_TTL - Duration::from_secs(1);
-        let mut q = vec![
-            (1u64, "mine".to_string(), true, "a".to_string(), now),
-            (2u64, "other".to_string(), true, "b".to_string(), now),
-            // 插件被删了，没人会来认领：必须被丢掉，否则几 MB 的响应体会一直躺着
-            (3u64, "gone".to_string(), true, "c".to_string(), old),
-        ];
-        let got = claim_fetch_results(&mut q, &["mine"], now);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, 1);
-        assert_eq!(q.len(), 1, "别人的留着、过期的丢掉");
-        assert_eq!(q[0].0, 2);
-
-        // 下一次：别的 worker 来认领自己的
-        let got = claim_fetch_results(&mut q, &["other"], now);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, 2);
-        assert!(q.is_empty());
-    }
-
-    #[test]
-    fn background_fetch_cap_fails_loudly_instead_of_queueing() {
-        // 一个 for 循环发 1000 个 fetch_async 不该变成 1000 条线程 ——
-        // 到顶就明确失败（JS 侧 reject 一句"并发太多"），而不是默默排队。
-        FETCH_THREADS.store(MAX_FETCH_THREADS, std::sync::atomic::Ordering::Relaxed);
-        assert!(!take_fetch_slot(), "到顶必须拒绝");
-        assert_eq!(
-            FETCH_THREADS.load(std::sync::atomic::Ordering::Relaxed),
-            MAX_FETCH_THREADS,
-            "被拒绝时不能把计数漏掉"
-        );
-        FETCH_THREADS.store(0, std::sync::atomic::Ordering::Relaxed);
-        assert!(take_fetch_slot(), "有位置就该发");
-        FETCH_THREADS.store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    #[test]
-    fn unhandled_rejection_is_queued_with_the_plugin_name() {
-        // 走 make_runtime：要验的是"tracker 真的装上了"，不是测试里自己模拟一个。
-        let wd = Watchdog::default();
-        let rt = make_runtime(std::path::Path::new("."), &wd).expect("建 Runtime 失败");
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
-            ctx.eval::<(), _>(
-                "globalThis.__plugin_name = 'rej'; \
-                 globalThis.__fmt_err = function (e) { return 'R:' + e; }; \
-                 Promise.resolve().then(function () { throw 'nobody-catches'; });",
-            )
-            .unwrap();
-        });
-        if let Ok(mut q) = REJECTIONS.lock() {
-            q.clear(); // 测试并行，先清掉别的用例可能留下的
-        }
-        // 拒绝不是 job 异常 ⇒ 泵本身返回 None，真正的信息在 tracker 的队列里
-        assert!(
-            pump_jobs(&rt, &wd, Duration::from_millis(50), Duration::from_secs(5)).is_none(),
-            "Promise 拒绝不该被当成 job 异常"
-        );
-        let q = REJECTIONS.lock().unwrap();
-        assert!(
-            q.iter()
-                .any(|(p, m)| p == "rej" && m.contains("nobody-catches")),
-            "未捕获的拒绝必须带上插件名进队列，实际: {q:?}"
-        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn builtin_node_modules_cover_crypto_and_url() {
-        // 面板内置的 node:* 模块名单：裸名与 node: 前缀都必须解析到同一份实现。
-        // 少一个的后果是加载期 "Cannot find module 'url'"，而插件作者会以为是自己
-        // 写错了 —— 这条测试钉住名单本身（模块体的实现由 jscompat 的单测覆盖）。
-        for (spec, want) in [
-            ("node:path", "node:path"),
-            ("path", "node:path"),
-            ("node:fs", "node:fs"),
-            ("fs", "node:fs"),
-            ("node:crypto", "node:crypto"),
-            ("crypto", "node:crypto"),
-            ("node:url", "node:url"),
-            ("url", "node:url"),
-            ("node:buffer", "node:buffer"),
-            ("buffer", "node:buffer"),
-        ] {
-            assert_eq!(super::builtin_node_module(spec), Some(want), "{spec}");
-        }
-        for absent in ["node:os", "node:child_process", "fs/promises", "lodash"] {
-            assert_eq!(super::builtin_node_module(absent), None, "{absent}");
-        }
-    }
-
-    #[test]
-    fn stop_only_hits_the_targeted_invocation() {
-        // 安全审计 H3 的本体：停 A 不该打断 B。
-        let wd = Watchdog::default();
-        wd.set_inv(7);
-        wd.stop_inv.store(7, Ordering::Relaxed);
-        assert!(wd.task_stop_requested(), "目标 invocation 应该被打断");
-        wd.set_inv(8);
-        assert!(!wd.task_stop_requested(), "别的 invocation 不该被打断");
-        // stop_inv == 0 ⇒ 退回「停全部」的老语义（关闭进程用）
-        wd.stop_inv.store(0, Ordering::Relaxed);
-        wd.task_stop.store(true, Ordering::Relaxed);
-        assert!(wd.task_stop_requested(), "stop_inv=0 时应停全部");
+    fn stop_classification_is_per_run_and_self_clearing() {
+        // 停 A 不该波及 B；收尾取走即清，不需要「30 秒后无条件复位」。
+        let a = ("stop-a", "task");
+        let b = ("stop-b", "task");
+        assert!(!begin_run(a.0, a.1, "run-a"));
+        assert!(!begin_run(b.0, b.1, "run-b"));
+        // 叫停 A：标记的是 A 的 run_id（单测里没有真子进程，kill_run 查不到 pid）
+        request_task_stop(a.0, a.1);
+        // B 收尾不受影响
+        assert!(!end_run(b.0, b.1, "run-b"));
+        // A 收尾归为已停止，且标记取走即清
+        assert!(end_run(a.0, a.1, "run-a"));
+        assert!(!end_run(a.0, a.1, "run-a"));
     }
     #[test]
-    fn in_flight_registry_tracks_and_clears() {
-        // 安全审计 H3 第一步：先让「谁现在在跑」这个数据存在。
-        register_in_flight("demo", "tick", 42);
-        assert_eq!(in_flight_of("demo", "tick"), Some(42));
-        // 同名不同插件互不影响
-        assert_eq!(in_flight_of("other", "tick"), None);
-        // 注销后查不到
-        clear_in_flight("demo", "tick");
-        assert_eq!(in_flight_of("demo", "tick"), None);
-        // 重复注销不 panic
-        clear_in_flight("demo", "tick");
-        // 覆盖：同一条任务再次派发，登记的是新的 inv_id
-        register_in_flight("demo", "tick", 7);
-        register_in_flight("demo", "tick", 8);
-        assert_eq!(in_flight_of("demo", "tick"), Some(8));
-        clear_in_flight("demo", "tick");
+    fn stop_before_dispatch_skips_next_run() {
+        // 叫停时还没开始跑：记 pending，下一次派发取走、不执行。
+        let p = ("stop-pending", "task");
+        // 没在跑 ⇒ 返回 false（记了 pending）
+        assert!(!request_task_stop(p.0, p.1));
+        // 下一次派发：begin_run 返回 true（这次不该执行）
+        assert!(begin_run(p.0, p.1, "run-p"));
+        // pending 已取走：再下一次正常执行
+        assert!(!begin_run(p.0, p.1, "run-p2"));
+        end_run(p.0, p.1, "run-p2");
     }
     #[test]
-    fn budget_interrupt_is_recorded_as_stopped() {
-        // 回归测试（安全审计 H4）：预算到点以前不算「已停止」，于是被记成红色失败、
-        // 熔断 +1、还发失败推送 —— 和 docs/run-history.md 写的正好相反。
-        let wd = Watchdog::default();
-        wd.arm(Duration::from_millis(10));
-        // 模拟一次「预算到点」：fired 计数 +1
-        wd.fired.store(1, Ordering::Relaxed);
-        assert!(wd.take_fired(), "fired 计数应被取走");
-        assert!(wd.take_interrupted(), "预算中断必须被记成已停止");
-        assert!(!wd.take_interrupted(), "取走即清零，不能重复计入下一次");
-        // 下一次 arm 必须复位，否则上一轮的中断会污染下一轮
-        wd.fired.store(1, Ordering::Relaxed);
-        let _ = wd.take_fired();
-        wd.arm(Duration::from_millis(10));
-        assert!(!wd.take_interrupted(), "arm() 应复位中断标记");
+    fn end_run_only_clears_its_own_invocation() {
+        // 同一条任务的新一次派发覆盖旧 run_id；旧收尾不该把新的在途删掉。
+        let p = ("stop-overwrite", "task");
+        assert!(!begin_run(p.0, p.1, "old"));
+        assert!(!begin_run(p.0, p.1, "new"));
+        end_run(p.0, p.1, "old");
+        // 仍能定位到 new 并叫停
+        request_task_stop(p.0, p.1);
+        assert!(end_run(p.0, p.1, "new"));
     }
-    /// 相对说明符的解析：URL 语义 + **自动找** + 边界。
-    ///
-    /// 自动找（省扩展名、找 index）是**放宽**，不是 ESM 规范行为 —— 所以更要钉住：
-    /// ① 候选链的顺序与结果；② 找不到时把"试过哪些路径"说出来；
-    /// ③ 越界仍然被挡住（边界不能因为放宽而松掉）。
-    /// `file_url` 必须把 Windows 分隔符规范化成 `/`（CI 在 Windows 上抓到的真 bug）。
-    ///
-    /// 这个断言在 Linux 上也能跑：`file_url` 做的是**字符串层面**的规范化，
-    /// 不依赖宿主平台。所以以后有人改坏了，本地就会红，不用等 CI。
-    #[test]
-    fn file_url_normalizes_windows_separators() {
-        let u = file_url(std::path::Path::new("C:\\a\\b.js"));
-        assert_eq!(u, "file:///C:/a/b.js");
-        // 反斜杠一旦被百分号编码（%5C），`url_join` 就找不到 `/`，
-        // 相对 import 会全线失效 —— 这正是修之前的行为。
-        assert!(!u.contains("%5C"), "反斜杠不能被编码: {u}");
-        // Unix 形状不受影响
-        assert_eq!(file_url(std::path::Path::new("/a/b.js")), "file:///a/b.js");
-    }
-    /// verbatim 前缀必须被剥掉 —— 这是 issue #1 的直接根因。
-    ///
-    /// 这条在**任何平台**都能跑：`strip_verbatim` 是纯字符串处理。
-    /// UNC 路径（`\\?\UNC\srv\share\a`）也要走通 —— issue #12 里点名的那条。
-    ///
-    /// 剥前缀后是 `//srv/share/a`，在 Windows 上就是标准 UNC 形状；
-    /// `url_to_path` 不该把开头的 `//` 当成「URL 的根斜杠」剥掉（那不是盘符）。
-    #[test]
-    fn unc_verbatim_path_round_trips() {
-        let u = file_url(std::path::Path::new("\\\\?\\UNC\\srv\\share\\a.js"));
-        assert_eq!(u, "file:////srv/share/a.js");
-        assert!(!u.contains("%5C"), "{u}");
-        assert!(!u.contains("%3F"), "verbatim 前缀没剥干净: {u}");
-        // 解回来必须还是 UNC 形状（不能变成 `/srv/share/a.js`）
-        let back = url_to_path(u.strip_prefix("file://").unwrap()).unwrap();
-        assert_eq!(back.to_string_lossy().replace('\\', "/"), "//srv/share/a.js");
-    }
-    #[test]
-    fn verbatim_prefix_is_stripped() {
-        assert_eq!(strip_verbatim("//?/C:/a/b.js"), "C:/a/b.js");
-        assert_eq!(strip_verbatim("//?/UNC/srv/share/a.js"), "//srv/share/a.js");
-        assert_eq!(strip_verbatim("/a/b.js"), "/a/b.js", "Unix 形状不动");
-        assert_eq!(strip_verbatim("C:/a/b.js"), "C:/a/b.js", "没前缀不动");
-    }
-
-    /// verbatim 路径走完 `file_url` 后必须是 `file:///C:/...`，且不能残留 `%5C` / `%3F`。
-    #[test]
-    fn verbatim_path_becomes_a_clean_file_url() {
-        let u = file_url(std::path::Path::new("\\\\?\\C:\\a\\b.js"));
-        assert_eq!(u, "file:///C:/a/b.js");
-        assert!(!u.contains("%5C"), "反斜杠不能被编码: {u}");
-        assert!(!u.contains("%3F"), "`?` 不能被编码（说明 verbatim 没剥干净）: {u}");
-        assert!(!u.contains("//?/"), "verbatim 前缀还在: {u}");
-    }
-
-    /// Windows 上 `canonicalize()` 给的就是 verbatim 路径 —— 直接拿真路径做往返。
-    ///
-    /// 前面两条是手工构造的字符串，这一条走的是**真实文件系统**，
-    /// 所以能证明「真机上那条链路」是通的（issue #1 的回归）。
-    #[cfg(windows)]
-    #[test]
-    fn real_canonicalize_round_trips_through_file_url() {
-        let dir = std::env::temp_dir().join(format!("panel-url-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("lib")).unwrap();
-        let f = dir.join("lib/math.js");
-        std::fs::write(&f, "export const x = 1;").unwrap();
-
-        let canon = f.canonicalize().unwrap();
-        assert!(
-            canon.to_string_lossy().starts_with("\\\\?\\"),
-            "Windows 上 canonicalize 就是 verbatim：{}",
-            canon.display()
-        );
-        let url = file_url(&canon);
-        let back = url_to_path(url.strip_prefix("file://").unwrap()).unwrap();
-        // 往返**不要求 PathBuf 逐字节相等**：`canonicalize()` 给的是 verbatim 形状
-        // （`\\?\C:\…`），而 `url_to_path` 解出来是普通形状（`C:/…`）。两者指向
-        // 同一个文件就算对 —— 真正要保证的是「解得开」。所以再 canonicalize 一次比。
-        assert_eq!(
-            back.canonicalize().unwrap(),
-            canon,
-            "解出来的路径必须指向同一个文件（解出来是 {}）",
-            back.display()
-        );
-        assert_eq!(std::fs::read_to_string(&back).unwrap(), "export const x = 1;");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[test]
-    fn relative_specifier_resolution() {
-        let tmp = std::env::temp_dir().join(format!("pp-resolve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("lib/pkg")).unwrap();
-        std::fs::write(tmp.join("lib/math.js"), "export const x = 1;").unwrap();
-        std::fs::write(tmp.join("lib/only_mjs.mjs"), "export const y = 2;").unwrap();
-        std::fs::write(tmp.join("lib/pkg/index.js"), "export const z = 3;").unwrap();
-        std::fs::write(tmp.join("lib/pkg/index.mjs"), "export const z2 = 4;").unwrap();
-
-        let root = tmp.clone();
-        let base = crate::engine::file_url(&tmp.join("lib/entry.js"));
-
-        // Windows 上解析结果是 `...\lib\math.js`。断言只关心「落在哪个文件」，
-        // 所以先把分隔符统一成 `/` —— 这不是在迁就平台，而是断言本来就不该关心分隔符。
-
-        let ok = |spec: &str| {
-            resolve_relative(&base, spec, &root)
-                .expect(spec)
-                .replace('\\', "/")
-        };
-        // 原样命中
-        assert!(ok("./math.js").ends_with("/lib/math.js"));
-        // 省扩展名 → +.js
-        assert!(ok("./math").ends_with("/lib/math.js"));
-        // 省扩展名 → +.mjs
-        assert!(ok("./only_mjs").ends_with("/lib/only_mjs.mjs"));
-        // 目录 → index.js（且优先于 index.mjs）
-        assert!(ok("./pkg").ends_with("/lib/pkg/index.js"));
-        // `..` 在 URL 语义下先规范化，再去找
-        assert!(ok("../lib/math").ends_with("/lib/math.js"));
-
-        // 找不到：错误里要把试过的候选列出来（只说"找不到"最难查）
-        let err = resolve_relative(&base, "./nope", &root).unwrap_err();
-        assert!(err.contains("找不到模块 `./nope`"), "{err}");
-        assert!(
-            err.contains("math") || err.contains("nope.js"),
-            "应当列出试过的路径: {err}"
-        );
-
-        // 边界：解析到插件目录之外 → 挡（放宽自动找不能让边界松掉）
-        let outside = resolve_relative(&base, "../../../../../../etc/hosts", &root).unwrap_err();
-        assert!(
-            outside.contains("只能 import 插件目录内的文件") || outside.contains("找不到模块"),
-            "{outside}"
-        );
-
-        // 非 file:// 基准（例如 /api/test/js 的临时代码）要说清楚，别静默错
-        let bad_base = resolve_relative("<test-run>", "./math", &root).unwrap_err();
-        assert!(bad_base.contains("file://"), "{bad_base}");
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// 安全审计 中12：相对 import 只能落在共享库目录，不能读别的插件的源码。
-    #[test]
-    fn relative_imports_cannot_reach_another_plugin() {
-        let tmp = std::env::temp_dir().join(format!("pp-fence-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("js/lib")).unwrap();
-        // 两个插件源码（同一个 js/ 目录里 —— 这就是原来能互相读的原因）
-        std::fs::write(tmp.join("js/a.js"), "export const a = 1;").unwrap();
-        std::fs::write(tmp.join("js/b.js"), "export const secret = 'token';").unwrap();
-        // 共享库
-        std::fs::write(tmp.join("js/lib/shared.js"), "export const s = 1;").unwrap();
-
-        let root = tmp.clone();
-        let base = crate::engine::file_url(&tmp.join("js/a.js"));
-
-        // 读 b.js（另一个插件）→ 必须被拒
-        let err = resolve_relative(&base, "./b.js", &root).unwrap_err();
-        assert!(err.contains("共享库目录"), "{err}");
-        assert!(err.contains("不能互相 import"), "{err}");
-
-        // 共享库里的文件 → 允许（分隔符统一成 `/` 再比，见上一条测试的说明）
-        assert!(resolve_relative(&base, "./lib/shared.js", &root)
-            .expect("lib/shared.js 应当允许")
-            .replace('\\', "/")
-            .ends_with("/js/lib/shared.js"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
     /// 配置页目录与模块目录都不能被当成插件。
     ///
     /// 两种"不是插件但放在 plugins/ 下面"的东西：
@@ -7861,39 +4959,24 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn module_detection() {
-        assert!(looks_like_module(
-            "import { log } from 'host-api';\nlog('x')"
-        ));
-        assert!(looks_like_module("export function on_tick(p) {}"));
-        assert!(!looks_like_module(
-            "// import 只是注释\nfunction on_tick(p) {}"
-        ));
-        assert!(!looks_like_module("const host = 1;\nhost;"));
-    }
-
-    /// 造一条插件记录。`live = true` 会真的建一个 QuickJS Context
-    /// （「活着的插件」这个判断就是看有没有解释器实例，所以只能建真的）。
-    fn fake_plugin(rt: &Runtime, name: &str, file: &str, live: bool) -> LoadedPlugin {
+    /// 造一条插件记录。`healthy = false` 表示因同名被拒绝的占位记录
+    /// （没有解释器实例，`error` 有值）。
+    fn fake_plugin(name: &str, file: &str, healthy: bool) -> LoadedPlugin {
         LoadedPlugin {
             name: name.to_string(),
             file: PathBuf::from(file),
-            runtime: if live {
-                Some(PluginRuntime::Js(
-                    Context::full(rt).expect("建 Context 失败"),
-                ))
-            } else {
-                None
-            },
-            generation: next_generation(),
+            runtime: None,
             has_on_tick: false,
             ticks: 0,
             last_tick: None,
-            error: if live { None } else { Some("被拒绝".into()) },
+            error: if healthy {
+                None
+            } else {
+                Some("被拒绝".into())
+            },
             tasks: 0,
             mtime: None,
-            engine: EngineKind::QuickJs,
+            engine: EngineKind::Node,
             command: None,
             handlers: Vec::new(),
             loaded_at: Instant::now(),
@@ -7902,7 +4985,6 @@ mod tests {
             evicted: false,
             keep_warm: false,
             content_hash: 0,
-            timers: Arc::new(Mutex::new(crate::timers::Timers::new())),
             nav: None,
         }
     }
@@ -7920,10 +5002,9 @@ mod tests {
 
     #[test]
     fn name_conflict_is_detected_by_file_not_by_name() {
-        let rt = Runtime::new().expect("建 Runtime 失败");
         let a = PathBuf::from("plugins/js/foo.js");
         let b = PathBuf::from("plugins/py/foo.py");
-        let plugins = vec![fake_plugin(&rt, "foo", a.to_str().unwrap(), false)];
+        let plugins = vec![fake_plugin("foo", a.to_str().unwrap(), false)];
 
         // 同一个文件不算冲突（热更新时它就是自己）
         assert!(name_taken(&plugins, "foo", &a).is_none());
@@ -7938,15 +5019,14 @@ mod tests {
 
     #[test]
     fn find_plugin_prefers_a_live_instance() {
-        // 同名两条记录：被拒绝的排在前面，也必须找到活的那条
-        let rt = Runtime::new().expect("建 Runtime 失败");
+        // 同名两条记录：被拒绝的排在前面，也必须找到健康的那条
         let plugins = vec![
-            fake_plugin(&rt, "foo", "plugins/a/foo.js", false),
-            fake_plugin(&rt, "foo", "plugins/b/foo.js", true),
+            fake_plugin("foo", "plugins/a/foo.js", false),
+            fake_plugin("foo", "plugins/b/foo.js", true),
         ];
         let found = find_plugin(&plugins, "foo").expect("应该能找到");
         assert!(
-            found.runtime.is_some(),
+            found.error.is_none(),
             "找到的是被拒绝的那条，会导致派发失败"
         );
         assert_eq!(found.file, PathBuf::from("plugins/b/foo.js"));
@@ -8009,124 +5089,6 @@ mod tests {
         assert_eq!(sched.tasks()[panel_idx].source, TaskSource::Panel);
         let code_idx = sched.find("demo", "from-code").unwrap();
         assert_eq!(sched.tasks()[code_idx].source, TaskSource::Code);
-    }
-
-    /// **插件侧（JS）用 `ws_*` 的整条链**：JS 门面 → 宿主 → 真的 socket。
-    ///
-    /// 为什么要写成"真的连一条本地 WS 服务端"：这一层要验的正是
-    /// 「JS 那个门面把参数传对了、宿主真的连上了、帧真的收回来了」——
-    /// 只测 Rust 那一层（wsclient.rs 的单测）证明不了门面与 `host_api` 的接线。
-    ///
-    /// ⚠ 这里**故意**不用 `run_scratch_js`：那个要 Watchdog/预算一整套。
-    /// 直接 `install_host` + `ctx.eval` 更贴近"插件加载时发生了什么"，
-    /// 而且失败信息更短。
-    #[test]
-    fn plugin_uses_websocket_through_host_api() {
-        use crate::hostapi::HostState;
-        use crate::jshost;
-        use futures_util::{SinkExt, StreamExt};
-        use std::sync::{Arc, Mutex};
-        use tokio_tungstenite::tungstenite::Message;
-
-        // 这个用例连的是 127.0.0.1 上的本地回声服务，而 SSRF 防护默认拒绝私网目标
-        // （安全审计 L16）。环境变量是进程级的，但 `hostapi` 里对判定函数本身有
-        // 独立单测，这里放开不会掩盖那组断言。
-        std::env::set_var("HOST_API_ALLOW_PRIVATE", "1");
-
-        // ① 一个**真的** WS 服务端（回声 + 回一条 SockJS 形态的 `o` 帧）
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let addr = rt.block_on(async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                while let Some(Ok(msg)) = ws.next().await {
-                    if let Message::Text(t) = msg {
-                        let _ = ws.send(Message::text(format!("echo:{}", t.as_str()))).await;
-                        let _ = ws.send(Message::text("o")).await;
-                    }
-                }
-            });
-            addr
-        });
-
-        // ② 一套真的宿主状态（临时库 + 临时插件目录 + 挂在上面那个 runtime 上的 WS 注册表）
-        let tmp = std::env::temp_dir().join(format!("pp-ws-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
-        let db = crate::db::open(&tmp.join("ws-test.db")).unwrap();
-        // 不落盘的日志中枢：单测不写文件（`None`），只留终端 + 内存环
-        let logs: crate::hostapi::SharedLogs = crate::log::Hub::new(None);
-        let runtime_paths =
-            crate::runtimefs::RuntimePaths::ensure(&tmp.join("runtime")).expect("落盘 shim");
-        let host = HostState::new(
-            logs.clone(),
-            db,
-            tmp.join("panel.db"),
-            runtime_paths,
-            std::sync::Arc::new(crate::runtimes::RuntimeCatalog::quickjs_only()),
-            tmp.clone(),
-            tmp.join("plugin-data"),
-            tmp.join("tasks"),
-            crate::wsclient::Registry::new(rt.handle().clone()),
-            None,
-        );
-
-        // ③ 一段插件代码：开 → 发 → 收 → 超时 → 关 → 再收（必须抛"句柄不存在"）
-        let code = format!(
-            r#"
-            var id = host_api.ws_open('ws://{addr}', {{ headers: {{ 'user-agent': 'MCloudApp/12.6.0' }} }});
-            host_api.ws_send(id, 'hi');
-            var a = host_api.ws_recv(id, 1000);
-            var b = host_api.ws_recv(id, 1000);
-            var idle = host_api.ws_recv(id, 30);
-            host_api.ws_close(id);
-            var after = 'no-throw';
-            try {{ host_api.ws_recv(id, 10); }} catch (e) {{ after = e.message; }}
-            globalThis.__ws = JSON.stringify([
-                typeof id, a.type, a.data, b.type, b.data, idle.type, after
-            ]);
-            "#
-        );
-        let rq = rquickjs::Runtime::new().unwrap();
-        let ctx = rquickjs::Context::full(&rq).unwrap();
-        ctx.with(|ctx| {
-            jshost::install_host(
-                &ctx,
-                "ws-test".to_string(),
-                host.clone(),
-                Arc::new(Mutex::new(Vec::new())),
-                Arc::new(Mutex::new(None)),
-                Arc::new(Mutex::new(crate::timers::Timers::new())),
-                logs.clone(),
-            )
-            .unwrap();
-            ctx.eval::<(), _>(code.as_str()).unwrap_or_else(|e| {
-                panic!("插件代码执行失败: {}", super::render_exception(&ctx, &e))
-            });
-        });
-        let got: String = ctx.with(|ctx| ctx.globals().get("__ws").unwrap());
-        let v: serde_json::Value = serde_json::from_str(&got).unwrap();
-        let v = v.as_array().unwrap();
-        assert_eq!(v[0], "number", "ws_open 要返回一个数字句柄：{got}");
-        assert_eq!(v[1], "text");
-        assert_eq!(v[2], "echo:hi", "收到的第一帧该是回声：{got}");
-        assert_eq!(v[3], "text");
-        assert_eq!(v[4], "o", "第二帧是服务端补的那条 SockJS `o`：{got}");
-        assert_eq!(
-            v[5], "timeout",
-            "没东西可读要回 timeout，**不是**异常：{got}"
-        );
-        assert!(
-            v[6].as_str().unwrap().contains("不存在"),
-            "关掉之后再收必须抛「句柄不存在」：{got}"
-        );
-        // 句柄表也空了（没有泄漏）
-        assert_eq!(host.ws.open_count(), 0);
     }
 
     /// 加载预算有**自己的**下限，且与单次预算**解耦**。
@@ -8202,6 +5164,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(8 * 3_600_000),
             old,
             idle as u64,
@@ -8209,6 +5172,7 @@ mod tests {
         ));
         // 快到点了 ⇒ 留着（提前量那一侧负责装回来，这里不重复卸装）
         assert!(!should_evict(
+            false,
             false,
             false,
             false,
@@ -8222,6 +5186,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(8 * 3_600_000),
             old,
             idle as u64,
@@ -8230,6 +5195,7 @@ mod tests {
         // 注册了 on_tick ⇒ 不卸
         assert!(!should_evict(
             true,
+            false,
             false,
             false,
             Some(8 * 3_600_000),
@@ -8242,6 +5208,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             Some(8 * 3_600_000),
             old,
             idle as u64,
@@ -8252,13 +5219,38 @@ mod tests {
             false,
             false,
             true,
+            false,
             Some(8 * 3_600_000),
+            old,
+            idle as u64,
+            keepalive as u64,
+        ));
+        // 子进程里还挂着活跃定时器 ⇒ 不卸（安全审计 R2）：一个只靠 setInterval
+        // 干活、没有 on_tick / 排班 / WS 的插件，卸了就再没人把它装回来。
+        assert!(!should_evict(
+            false,
+            false,
+            false,
+            true,
+            Some(8 * 3_600_000),
+            old,
+            idle as u64,
+            keepalive as u64,
+        ));
+        // 连排班任务都没有、只有定时器 ⇒ 同样不卸（最容易踩的那种插件）
+        assert!(!should_evict(
+            false,
+            false,
+            false,
+            true,
+            None,
             old,
             idle as u64,
             keepalive as u64,
         ));
         // 名下一条任务都没有 ⇒ 更该卸
         assert!(should_evict(
+            false,
             false,
             false,
             false,
@@ -8272,6 +5264,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(10 * 60_000),
             old,
             idle as u64,
@@ -8282,6 +5275,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(8 * 3_600_000),
             old,
             idle as u64,
@@ -8289,6 +5283,7 @@ mod tests {
         ));
         // **刚装进来**（还没满一个 idle 窗口）⇒ 先留着：启动时刚付过加载的钱
         assert!(!should_evict(
+            false,
             false,
             false,
             false,
@@ -8329,9 +5324,8 @@ mod tests {
         std::fs::write(&g, "// b").unwrap();
         let real = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
 
-        let rt = Runtime::new().expect("建 Runtime 失败");
         let mk = |mtime: Option<SystemTime>| {
-            let mut p = fake_plugin(&rt, "a", f.to_str().unwrap(), true);
+            let mut p = fake_plugin("a", f.to_str().unwrap(), true);
             p.mtime = mtime;
             p
         };

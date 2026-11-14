@@ -44,11 +44,6 @@ pub enum ScriptRuntime {
     Bun,
     Python,
     Sh,
-    /// 内嵌 QuickJS（面板自带，不需要外部解释器）。
-    ///
-    /// issue #11：外部 Node/Bun 需要 fd 传递与进程组，只有 Unix 有 —— 于是 `.js`
-    /// 脚本在 Windows 上是死路。内嵌 QuickJS 没有这个依赖，所以脚本也能在里面跑。
-    QuickJs,
     /// 直接执行文件本身（`.exe` / `.cmd` / `.bat` / `.ps1` / 任何带执行位的二进制）。
     ///
     /// 脚本任务的本质就是「定时启动一个程序」，那个程序不一定是解释器 + 源码，
@@ -63,7 +58,6 @@ impl ScriptRuntime {
             ScriptRuntime::Bun => "bun",
             ScriptRuntime::Python => "python3",
             ScriptRuntime::Sh => "sh",
-            ScriptRuntime::QuickJs => "quickjs",
             ScriptRuntime::Exe => "exe",
         }
     }
@@ -74,7 +68,6 @@ impl ScriptRuntime {
             "bun" => Some(ScriptRuntime::Bun),
             "python" | "python3" | "py" => Some(ScriptRuntime::Python),
             "sh" | "shell" | "bash" => Some(ScriptRuntime::Sh),
-            "quickjs" | "qjs" | "embedded" => Some(ScriptRuntime::QuickJs),
             "exe" | "binary" | "direct" => Some(ScriptRuntime::Exe),
             _ => None,
         }
@@ -112,16 +105,8 @@ impl ScriptKind {
 
     pub fn default_runtime(self) -> ScriptRuntime {
         match self {
-            // `.js` 的默认运行时**按平台分**（issue #11）：Unix 上外部 Node 是既有
-            // 主路径；非 Unix 上没有外部 Node，默认走内嵌 QuickJS，否则 `.js`
-            // 脚本在 Windows 上就是个死路。
-            ScriptKind::Js => {
-                if cfg!(unix) {
-                    ScriptRuntime::Node
-                } else {
-                    ScriptRuntime::QuickJs
-                }
-            }
+            // `.js` 所有平台默认外部 Node。
+            ScriptKind::Js => ScriptRuntime::Node,
             ScriptKind::Py => ScriptRuntime::Python,
             ScriptKind::Sh => ScriptRuntime::Sh,
             ScriptKind::Exe => ScriptRuntime::Exe,
@@ -364,6 +349,14 @@ fn header_line(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
+/// 已移除的运行时名（旧脚本 / 旧界面可能还在发）。内嵌 QuickJS 已删除。
+pub fn is_retired_runtime(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "quickjs" | "qjs" | "embedded"
+    )
+}
+
 fn resolve_runtime(kind: ScriptKind, raw: Option<&str>) -> Result<ScriptRuntime, String> {
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(kind.default_runtime());
@@ -371,19 +364,22 @@ fn resolve_runtime(kind: ScriptKind, raw: Option<&str>) -> Result<ScriptRuntime,
     if raw.eq_ignore_ascii_case("auto") {
         return Ok(kind.default_runtime());
     }
+    // 旧脚本可能还写着 `@runtime quickjs`。内嵌引擎已移除，给出可照做的提示，
+    // 而不是「认不出来」那种让人猜的报错。
+    if is_retired_runtime(raw) {
+        return Err(format!(
+            "@runtime `{raw}` 已停用：内嵌 QuickJS 已移除，.js 请改用 node / bun"
+        ));
+    }
     let rt = ScriptRuntime::parse(raw)
-        .ok_or_else(|| {
-            format!("@runtime `{raw}` 认不出来（node|bun|python3|sh|quickjs|exe）")
-        })?;
+        .ok_or_else(|| format!("@runtime `{raw}` 认不出来（node|bun|python3|sh|exe）"))?;
     match (kind, rt) {
-        (ScriptKind::Js, ScriptRuntime::Node | ScriptRuntime::Bun | ScriptRuntime::QuickJs) => {
-            Ok(rt)
-        }
+        (ScriptKind::Js, ScriptRuntime::Node | ScriptRuntime::Bun) => Ok(rt),
         (ScriptKind::Py, ScriptRuntime::Python) => Ok(rt),
         (ScriptKind::Sh, ScriptRuntime::Sh) => Ok(rt),
         (ScriptKind::Exe, ScriptRuntime::Exe) => Ok(rt),
         (ScriptKind::Js, _) => Err(format!(
-            ".js/.mjs 的 @runtime 只能是 node / bun / quickjs，收到 `{raw}`"
+            ".js/.mjs 的 @runtime 只能是 node / bun，收到 `{raw}`"
         )),
         (ScriptKind::Py, _) => Err(format!(".py 的 @runtime 只能是 python3，收到 `{raw}`")),
         (ScriptKind::Sh, _) => Err(format!(".sh 的 @runtime 只能是 sh，收到 `{raw}`")),
@@ -482,25 +478,27 @@ mod tests {
         assert_eq!(f.runtime, ScriptRuntime::Exe);
         let _ = std::fs::remove_dir_all(&dir);
     }
-    /// issue #11：`.js` 现在允许 `@runtime quickjs`（内嵌引擎，任何平台都能跑）。
+    /// 内嵌 QuickJS 已移除：`@runtime quickjs` 必须给出可照做的错误，
+    /// 而不是静默退回 node（旧脚本值得知道它选的东西没了）。
     #[test]
-    fn js_accepts_the_embedded_quickjs_runtime() {
-        let (_, rt) = parse_header("// @runtime quickjs\nlog('x')\n", ScriptKind::Js).unwrap();
-        assert_eq!(rt, ScriptRuntime::QuickJs);
-        // 别名也认
-        let (_, rt) = parse_header("// @runtime embedded\n", ScriptKind::Js).unwrap();
-        assert_eq!(rt, ScriptRuntime::QuickJs);
+    fn embedded_quickjs_runtime_is_rejected_with_a_clear_hint() {
+        for src in [
+            "// @runtime quickjs\n",
+            "// @runtime embedded\n",
+            "// @runtime qjs\n",
+        ] {
+            let e = parse_header(src, ScriptKind::Js).unwrap_err();
+            assert!(e.contains("node / bun"), "{e}");
+        }
+        assert_eq!(ScriptRuntime::parse("quickjs"), None);
+        assert_eq!(ScriptRuntime::parse("qjs"), None);
     }
 
-    /// `.js` 的**默认**运行时按平台分：Unix 走外部 Node，非 Unix 走内嵌 QuickJS。
+    /// `.js` 的**默认**运行时：所有平台都是外部 Node。
     #[test]
-    fn js_default_runtime_depends_on_the_platform() {
+    fn js_default_runtime_is_node_everywhere() {
         let (_, rt) = parse_header("// @cron * * * * *\nlog('x')\n", ScriptKind::Js).unwrap();
-        if cfg!(unix) {
-            assert_eq!(rt, ScriptRuntime::Node, "Unix 上外部 Node 是既有主路径");
-        } else {
-            assert_eq!(rt, ScriptRuntime::QuickJs, "非 Unix 上没有外部 Node");
-        }
+        assert_eq!(rt, ScriptRuntime::Node);
     }
 
     /// `.cmd` / `.bat` / `.ps1` / `.exe` 是一等公民（issue #11）：
@@ -526,9 +524,9 @@ mod tests {
     #[test]
     fn wrong_runtime_lists_the_real_choices() {
         let e = parse_header("// @runtime python3\n", ScriptKind::Js).unwrap_err();
-        assert!(e.contains("quickjs"), "错误里要提 quickjs: {e}");
+        assert!(e.contains("node / bun"), "错误里要提 node / bun: {e}");
         let e = parse_header("// @runtime nonsense\n", ScriptKind::Js).unwrap_err();
-        assert!(e.contains("quickjs") && e.contains("exe"), "{e}");
+        assert!(e.contains("node") && e.contains("exe"), "{e}");
     }
     #[test]
     fn parses_js_header() {
@@ -562,8 +560,6 @@ console.log('x');
 
     #[test]
     fn rejects_runtime_mismatch_and_bad_json() {
-        // `quickjs` 现在**是合法的**（issue #11：它让 .js 在 Windows 上能跑），
-        // 所以这里换一个真正不匹配的运行时。
         assert!(parse_header("// @runtime exe\n", ScriptKind::Js).is_err());
         assert!(parse_header("// @runtime python3\n", ScriptKind::Js).is_err());
         assert!(parse_header("// @params {bad\n", ScriptKind::Js).is_err());

@@ -76,7 +76,9 @@ pub fn at_least(v: &str) -> Result<bool, String> {
 /// 那种误伤比「不检查」更糟。
 pub fn parse_min(source: &str) -> Result<Option<String>, String> {
     for line in source.lines().take(HEADER_LINES) {
-        let Some(idx) = line.find(HEADER) else { continue };
+        let Some(idx) = line.find(HEADER) else {
+            continue;
+        };
         let prefix = &line[..idx];
         if !prefix.contains("//") && !prefix.contains("/*") {
             continue;

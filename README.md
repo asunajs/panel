@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / JavaScript，不想为它写完整插件
 
-当前版本：**0.3.2**。设置页可以直接看到正在运行的面板版本和构建 commit。
+当前版本：**0.3.3**。设置页可以直接看到正在运行的面板版本和构建 commit。
 
 ![面板首页](docs/screenshots/web-dashboard.png)
 
@@ -299,7 +299,7 @@ Python 和 Shell 脚本是普通进程，没有 `host-api`。这是有意的：�
 
 ## 安装插件
 
-插件适合放更复杂的功能，比如带配置页的工具、需要保持状态的签到程序。插件用 JavaScript 写，默认跑在面板内置的 QuickJS 里，不占一个 Node 进程。
+插件适合放更复杂的功能，比如带配置页的工具、需要保持状态的签到程序。插件用 JavaScript 写，默认交给系统里的 Node 跑（每个插件一个子进程，Windows 同样）。
 
 写法上**尽量贴近 Node**：`async` / `await` 在任务、路由、`on_tick` 里都能用，
 配 `setTimeout` / `setInterval` / `sleep(ms)` / `await fetch_async(url)`。
@@ -363,17 +363,17 @@ curl -X PUT \
 
 ### 切换运行时
 
-执行引擎设置默认隐藏（大多数插件用内置 QuickJS 就够了）。先在「设置 → 插件」里勾上「显示执行引擎设置」，插件卡片上才会出现运行时的下拉框和自定义解释器路径。
+执行引擎设置默认隐藏（默认 Node，大多数插件不用改）。先在「设置 → 插件」里勾上「显示执行引擎设置」，插件卡片上才会出现运行时的下拉框和自定义解释器路径。
 
-- **QuickJS**：默认，内存占用小，适合大多数插件
-- **Node**：需要机器上有 Node.js 20.6+
+- **Node**：默认，需要机器上有 Node.js 20.6+
 - **Bun**：需要 Bun 1.0+
+
+内嵌 QuickJS 已移除：旧设置里的 `quickjs` 会按默认引擎处理，面板上再选它会被拒绝。
 
 切换后插件会重新加载。某个插件用了 npm 包或原生 `fs`，通常就需要 Node/Bun。
 
-反过来不必因为「它用了 `fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer`」就切到 Node：这些 Web/Node 全局
-由面板补进内嵌 QuickJS（[§4.10](docs/plugin-api.md#410-nodeweb-兼容层全局与内置模块)），
-照着 Node 写的插件在默认引擎里能直接跑。
+插件默认就是原生 Node：`fetch` / `URL` / `TextEncoder` / `crypto` / `Buffer` 都是平台自带的，
+面板不再自带兼容层。
 
 ---
 
@@ -526,7 +526,7 @@ plugin-panel
 - [上传插件与脚本](docs/upload.md)：单文件和 zip 的路径规则
 - [插件 API](docs/plugin-api.md)：写插件时看这份
 - [host-api 规范](docs/host-api.md)：日志、SQLite、HTTP、WebSocket、SMTP、任务注册
-- [运行时选型](docs/runtimes.md)：QuickJS、Node、Bun 怎么选
+- [运行时选型](docs/runtimes.md)：Node、Bun 怎么选
 - [安全](docs/security.md)：鉴权、令牌存储、外部代码边界
 - [开发日志](docs/changelog/)：每次改动的原因和踩过的坑
 

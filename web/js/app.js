@@ -233,7 +233,8 @@ async function renderDashboard(root) {
         ${/*
           标签一律用中文。原来这里混着 UPTIME / TICKS / QuickJS 堆 —— 一格里三种语言，
           而且大写那套排版对中文毫无作用（.stat-label 原来还挂着 uppercase）。
-          `Ticks` 是引擎循环跑了几轮，`QuickJS 堆` 里的 QuickJS 是实现名（用户不需要知道）。
+          `Ticks` 是引擎循环跑了几轮。JS 堆与预算打断两格已移除：Node-only 之后
+          堆在子进程里、打断也不再有计数，两格恒为 0。
         */ ''}
         ${stat('运行时长', Math.floor((res.uptime_secs || 0) / 60) + ' 分')}
         ${stat('循环次数', res.ticks ?? '—')}
@@ -241,9 +242,7 @@ async function renderDashboard(root) {
         ${stat('插件任务', pluginJobs.length)}
         ${stat('脚本任务', scriptJobs.length)}
         ${stat('心跳', (engine.beat_ago_ms ?? '—') + ' ms')}
-        ${stat('预算打断', engine.interrupts ?? '—')}
         ${stat('单次预算', (engine.budget_ms ?? '—') + ' ms')}
-        ${stat('JS 内存', Math.round((engine.js_memory_bytes || 0) / 1024) + ' KB')}
       </div>
       ${
         healthy

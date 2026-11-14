@@ -23,7 +23,7 @@ export function fmtClock(ms) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/// 异常渲染：`Name: message` + stack（QuickJS 宿主的 __fmt_err 同款策略）
+/// 异常渲染：`Name: message` + stack
 export function fmtError(e) {
   if (e && typeof e === 'object') {
     let head = '';

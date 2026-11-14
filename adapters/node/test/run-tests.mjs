@@ -145,7 +145,7 @@ test('八档日志都写 stderr，格式 YYYY-MM-DD HH:MM:SS.mmm [type] [scope] 
   });
 });
 
-test('console.* 接到同一套日志上（与面板的 QuickJS 宿主一致）', () => {
+test('console.* 接到同一套日志上（与面板宿主一致）', () => {
   const out = captureStderr(() => {
     console.log('console 一条');
     console.debug('console debug');
@@ -179,7 +179,7 @@ test('规范里的 10 个函数都挂在全局，并带 host 命名空间别名'
     assert.equal(typeof globalThis[name], 'function', `globalThis.${name}`);
     assert.equal(typeof globalThis.host[name], 'function', `host.${name}`);
   }
-  // 仓库 QuickJS 宿主的写法：host.cron / host.every
+  // 面板宿主的写法：host.cron / host.every
   assert.equal(typeof globalThis.host.cron, 'function');
   assert.equal(globalThis.host.cron, globalThis.register_cron);
 });
@@ -700,7 +700,7 @@ test('运行器：examples/hello.js（纯 host.* 写法）也能跑', () => {
   assert.match(out, /cron 第 1 次，expr=\*\/3 \* \* \* \* \*，plugin=hello/);
 });
 
-test('运行器：仓库里 QuickJS 宿主的插件原样能跑（host.* 老写法）', { skip: !REPO_PLUGIN && '仓库插件不存在' }, () => {
+test('运行器：仓库里面板宿主的插件原样能跑（host.* 老写法）', { skip: !REPO_PLUGIN && '仓库插件不存在' }, () => {
   const r = runNode(['bin/run.mjs', REPO_PLUGIN, '--once'], {
     cwd: PKG,
     env: { ...process.env, PANEL_PORT: '0' },
@@ -721,7 +721,7 @@ test('运行器：仓库里跨运行时写法的插件（plugins/js/host-api-dem
   });
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 0, out);
-  // 插件自己会报出真实宿主（Node 有 process，嵌入式 QuickJS 没有）——
+  // 插件自己会报出真实宿主（Node 有 process）——
   // 断言宿主名，比只断言「加载了」更能证明「同一份文件真的在 Node 里跑」
   assert.match(out, /已加载（ES 模块写法，import 'host-api'，宿主 Node v\d+/);
   assert.match(out, /内置 http server 监听 http:\/\/127\.0\.0\.1:\d+，路由: GET \/hits, POST \/hits/);

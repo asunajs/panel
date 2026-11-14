@@ -7,13 +7,12 @@
 
 | 项 | 说明 | 出处 |
 |---|---|---|
-| 外部运行时首版只支持 Unix | fd3/fd4 的 `dup2`、`process_group(0)`、`kill(-pid)` 都是 Unix 语义；Windows 上 Node/Bun 档不可用，QuickJS 照常。**脚本任务**有 Windows 路径（内嵌 QuickJS / `@runtime exe`），受限的只有**插件**的外部运行时 | [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--五条通道) |
+| Windows 外部运行时未实机验证 | RPC 已从 fd3/fd4 改成回环 TCP + 一次性令牌，杀进程树用 `taskkill /T /F`；macOS 上 Node/Bun 都验证过，**Windows 没有机器实测** | [ext-runtime-protocol.md §1](ext-runtime-protocol.md#1-为什么是子进程--独立-rpc-通道) |
 | 外部插件启动开销 | 每次「装回 / 崩溃重启」都要 spawn 解释器 + 等 `ready`（Node 几十到几百 ms）；`PLUGIN_PRELOAD_MS` 对它们更重要 | [engine-safety.md §7.4](engine-safety.md#74-惰性回收外部子进程是真的会退出) |
 | 超预算 = 杀进程 | 外部插件没有「中断但保留状态」的手段；跨调用状态必须落盘 | [ext-runtime-protocol.md §8](ext-runtime-protocol.md#8-超时杀进程重启) |
-| Node / Bun 的精确内存未测 | 目前只有量级（Node 40–80 MB、Bun 30–60 MB）；RPC 单次延迟也未测 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
-| 外部插件没有独立 fd 上限 | 每个插件一个子进程 + 4 条管道 + 线程；插件很多时会撞 `ulimit -n`，面板不设硬上限也不告警 | [architecture.md §11](architecture.md#11-影响后续扩展的设计决策) |
+| Node / Bun 的精确内存未测 | Node 空插件已测 26.7 MiB `phys_footprint` / 63.1 MiB `process.rss`（macOS arm64）；Linux/ARM、Bun、RPC 单次延迟仍未测 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
+| 外部插件没有独立 fd 上限 | 每个插件一个子进程 + 3 条管道 + TCP 连接 + 线程；插件很多时会撞 `ulimit -n`，面板不设硬上限也不告警 | [architecture.md §11](architecture.md#11-影响后续扩展的设计决策) |
 | Bun 的兼容面未测全 | 只验证了 `host-api` 解析 + 基本任务；Bun 对 `node:*` 的兼容差异没有矩阵 | [runtimes.md §10.9](runtimes.md#109-跨运行时验证) |
-| ~~QuickJS 不支持 `async` / `await`~~ → **已支持**（仅 7b 顶层 await 模块加载未做） | 语言层与宿主事件循环都已落地；原判断已过时，只剩模块加载那一层没做。 | [runtimes.md §10.1](runtimes.md#101-为什么删掉-pocketpy-与-python-插件)、[引擎迁移路线](engine-migration.md) |
 
 ## 2. 脚本任务
 
@@ -26,8 +25,6 @@
 | 脚本 UI 首版只做「列表 + 编辑 + 操作」 | 没有脚本专用的日志聚合页；日志仍从 `/api/logs` 看 | [script-jobs.md §5](script-jobs.md#5-面板上能做什么) |
 | 脚本目录只扫两层 | `tasks/lib/foo.js` 不会被当任务（好），但也不支持更深的组织方式 | [script-jobs.md §2](script-jobs.md#2-目录布局) |
 | 脚本没有「输出结果」契约 | `runs.output` 是合并文本；结构化结果要自己写 JSON 文件 / 表 |
-| `.js` 脚本在非 Unix 上默认走内嵌 QuickJS | 想用外部 Node（比如需要 `node_modules`）在 Windows 上没有路径；`@runtime node` 会明确报错并指向 `quickjs` | [script-jobs.md §3.1](script-jobs.md#31-平台矩阵哪些脚本在哪个系统上真能跑) |
-| 内嵌 QuickJS 跑脚本时只有 `log` / `host.log` 垫片 | 插件那套 `register_cron` / `http_fetch` / `node:fs` 在脚本里**没有**；要这些能力请写成插件 | [script-jobs.md §3](script-jobs.md#3-文件头前-50-行里的注解) |
 | 二进制任务必须有边车才有排班 | `foo.exe` 没有 `foo.exe.task` 时只能手动触发（不算错，但不会自动跑） | [script-jobs.md §3.2](script-jobs.md#32-二进制任务没有文件头用边车) |
 | `.sh` 在 Windows 上不支持 | 没有 POSIX shell；用 `.cmd` / `.bat` / `.ps1`（`@runtime exe`）代替 | [script-jobs.md §3.1](script-jobs.md#31-平台矩阵哪些脚本在哪个系统上真能跑) |
 | 边车只认 `<文件名>.task` 一种形状 | 不支持把多个任务的头部集中写在一个清单文件里 | [script-jobs.md §3.2](script-jobs.md#32-二进制任务没有文件头用边车) | [script-jobs.md §6](script-jobs.md#62-一次执行的生命周期) |
@@ -58,8 +55,7 @@
 |---|---|---|
 | 无 ARM 真机实测 | 开发机是 arm64 macOS，Linux 二进制只能由 CI（`ubuntu-24.04-arm`）回答；本机交叉编译的产物**跑不起来**（`Exec format error`） | [performance.md §8.3](performance.md#83-本地交叉编译产物能产出但跑不起来) |
 | 没有小时级/天级长跑 | 8 分钟窗口的分辨率是 ±15 MB/天，只够证明「不是线性无界增长」 | [changelog/11-live-plugin-dir.md §14.9](changelog/11-live-plugin-dir.md#149-这一轮没有解决的) |
-| JS 侧热更新的水位线未测 | QuickJS `Runtime` 上限 64 MiB，长跑最终停在哪里没测到 | [changelog/11-live-plugin-dir.md §14.9](changelog/11-live-plugin-dir.md#149-这一轮没有解决的) |
-| 第六十轮的数字待补 | 静态 musl 新体积、Node/Bun RSS、RPC 延迟、Node 崩溃重启的成功率 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
+| Node-only 后的数字待补 | 删掉 `rquickjs` 后的静态 musl 体积、Linux/ARM 的 Node RSS、RPC 延迟、Node 崩溃重启成功率 | [performance.md §8.1c](performance.md#81c-第六十轮的内存账待-lead-实测) |
 
 ## 6. 安全边界
 
@@ -97,7 +93,7 @@
 | 任务定义不能编辑 | 第十二轮（面板对插件任务用**覆盖层**） | [changelog/12-editable-jobs.md §15](changelog/12-editable-jobs.md#15-第十二轮任务定义可编辑--失效任务清理) |
 | `/api/test/*` 没有限流 | 第十四轮（令牌桶 + 排队深度上限） | [security.md §18.1](security.md#181-还没做的) |
 | 测试运行没有历史 | 第二十六轮（试跑也进 `runs` 表） | [run-history.md §26](run-history.md#26-试跑也进运行记录第二十六轮续) |
-| 面板内没有文件系统 | 第二十五轮（给 QuickJS 插件一个数据根 + 物理层围栏） | [plugin-fs.md §22](plugin-fs.md#22-面板内的文件系统给插件一个自己的根第二十五轮) |
+| 面板内没有文件系统 | 第二十五轮（数据根）；P2 后为原生 fs，见 [plugin-fs.md §22](plugin-fs.md#22-插件的文件系统原生-fs) |
 | 运行记录反查日志 | 第二十六轮（`runs.id` == 日志的 `run_id`） | [run-history.md §24](run-history.md#24-运行记录从那次执行点进日志第二十六轮) |
 | `/classic` 旧页面 | 第十三轮删除，冒烟里留了「必须 404」的断言 | [changelog/13-webui.md §16.13](changelog/13-webui.md#1613-classic-退休删掉旧页面--把它的用例搬到浏览器里) |
 | 没有 git remote | 已发布到 `asunajs/panel` | [changelog/17-release.md §17](changelog/17-release.md#17-发布到-githubasunajspanel这一轮踩到的三个坑) |

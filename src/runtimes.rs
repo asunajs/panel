@@ -1,10 +1,13 @@
 //! 第三方运行时的**探测与选择**。
 //!
-//! 插件语言只剩 JS：默认内嵌 QuickJS，用户可以把单个插件切到外部 `node` / `bun`。
+//! 插件语言只剩 JS：**所有平台默认外部 Node**（Windows 的 RPC 走回环 TCP），
+//! 用户可以把单个插件切到 `node` / `bun`。内嵌 QuickJS 已移除；旧库里的
+//! `quickjs` 值按默认引擎处理。
 //! `.py` 不再是插件语言，只作为任务目录里的 cron 脚本；因此 Python 只在这里提供
 //! 「命令 + 版本」给 `scriptjob` 用，不参与插件运行时选择。
 //!
-//! 探测刻意**不阻止启动**：低配盒子上可能根本没有 Node，QuickJS 插件必须照常跑。
+//! 探测刻意**不阻止启动**：低配盒子上可能根本没有 Node，面板照常起来；
+//! 但 JS 插件加载会明确报「Node 不可用」。
 //! 探测失败的信息会进 `/api/state.runtimes`，面板上置灰并显示原因。
 
 use serde::Serialize;
@@ -16,8 +19,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineKind {
-    /// 内嵌 QuickJS（默认）
-    QuickJs,
     /// 外部 Node.js（>= 20.6，`module.register` 是解析 `host-api` 的硬要求）
     Node,
     /// 外部 Bun（>= 1.0；用 `NODE_PATH` 解析 `host-api`）
@@ -27,23 +28,18 @@ pub enum EngineKind {
 impl EngineKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            EngineKind::QuickJs => "quickjs",
             EngineKind::Node => "node",
             EngineKind::Bun => "bun",
         }
     }
 
+    /// 认不出来的（含已移除的 `quickjs`/`qjs`）返回 `None`，由调用方决定怎么提示。
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "quickjs" | "qjs" | "builtin" => Some(EngineKind::QuickJs),
             "node" | "nodejs" => Some(EngineKind::Node),
             "bun" => Some(EngineKind::Bun),
             _ => None,
         }
-    }
-
-    pub fn is_external(self) -> bool {
-        !matches!(self, EngineKind::QuickJs)
     }
 }
 
@@ -94,8 +90,13 @@ pub struct RuntimeCatalog {
     pub node: RuntimeInfo,
     pub bun: RuntimeInfo,
     pub python: RuntimeInfo,
-    /// JS 插件的全局默认引擎（`PANEL_JS_ENGINE`；坏值回落 QuickJS）
+    /// JS 插件的全局默认引擎（`PANEL_JS_ENGINE`；缺省/坏值用 Node）
     pub js_default: EngineKind,
+}
+
+/// 全局默认引擎：Node。内嵌 QuickJS 已移除；显式写 `quickjs` 会回落到它。
+fn default_js_engine() -> EngineKind {
+    EngineKind::Node
 }
 
 impl RuntimeCatalog {
@@ -105,45 +106,43 @@ impl RuntimeCatalog {
     }
 
     pub fn detect() -> Self {
-        #[cfg(unix)]
         let (node, bun) = (probe_node(), probe_bun());
-        #[cfg(not(unix))]
-        let (node, bun) = (
-            RuntimeInfo::missing(
-                "node",
-                "外部 Node 运行时只支持 Unix；当前平台请用内嵌 QuickJS",
-            ),
-            RuntimeInfo::missing(
-                "bun",
-                "外部 Bun 运行时只支持 Unix；当前平台请用内嵌 QuickJS",
-            ),
-        );
         let python = probe_python();
 
+        let fallback = default_js_engine();
         let js_default = match std::env::var("PANEL_JS_ENGINE") {
             Ok(raw) if !raw.trim().is_empty() => match EngineKind::parse(&raw) {
                 Some(k) => {
-                    if k.is_external() && !Self::available_in(&node, &bun, k) {
+                    if !Self::available_in(&node, &bun, k) {
                         crate::log::plog!(
                             "boot",
                             warn,
-                            "PANEL_JS_ENGINE={raw} 但对应的解释器不可用 ⇒ JS 插件默认回落到 quickjs"
+                            "PANEL_JS_ENGINE={raw}，但 {} 不可用 ⇒ JS 插件加载时会明确报错",
+                            k.as_str()
                         );
-                        EngineKind::QuickJs
-                    } else {
+                    }
                         k
                     }
+                None if crate::taskdir::is_retired_runtime(&raw) => {
+                    crate::log::plog!(
+                        "boot",
+                        warn,
+                        "PANEL_JS_ENGINE={raw}：内嵌 QuickJS 已移除，改用 {}",
+                        fallback.as_str()
+                    );
+                    fallback
                 }
                 None => {
                     crate::log::plog!(
                         "boot",
                         warn,
-                        "PANEL_JS_ENGINE={raw} 认不出来（quickjs|node|bun）⇒ 用 quickjs"
+                        "PANEL_JS_ENGINE={raw} 认不出来（node|bun）⇒ 用 {}",
+                        fallback.as_str()
                     );
-                    EngineKind::QuickJs
+                    fallback
                 }
             },
-            _ => EngineKind::QuickJs,
+            _ => fallback,
         };
 
         Self {
@@ -154,19 +153,19 @@ impl RuntimeCatalog {
         }
     }
 
-    /// 测试/无外部运行时的最小目录：只有 QuickJS。
-    pub fn quickjs_only() -> Self {
+    /// 测试用：不探测系统，只给一个形态合法的目录（默认引擎 Node）。
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
         Self {
             node: RuntimeInfo::missing("node", "test: 未探测"),
             bun: RuntimeInfo::missing("bun", "test: 未探测"),
             python: RuntimeInfo::missing("python", "test: 未探测"),
-            js_default: EngineKind::QuickJs,
+            js_default: EngineKind::Node,
         }
     }
 
     fn available_in(node: &RuntimeInfo, bun: &RuntimeInfo, kind: EngineKind) -> bool {
         match kind {
-            EngineKind::QuickJs => true,
             EngineKind::Node => node.available,
             EngineKind::Bun => bun.available,
         }
@@ -175,11 +174,6 @@ impl RuntimeCatalog {
     /// 插件级覆盖是否可用。`Err` 是给人看的原因。
     pub fn require(&self, kind: EngineKind) -> Result<&RuntimeInfo, String> {
         let info = match kind {
-            // QuickJS 是内嵌的，没有“外部解释器路径”可返回。调用方应先用
-            // `engine.is_external()` 分支；这里明确报错，避免误拿 node 的 path。
-            EngineKind::QuickJs => {
-                return Err("QuickJS 是内嵌运行时，没有外部解释器路径".to_string())
-            }
             EngineKind::Node => &self.node,
             EngineKind::Bun => &self.bun,
         };
@@ -208,11 +202,6 @@ impl RuntimeCatalog {
     /// `/api/state.runtimes`：给面板显示「装没装、什么版本、为什么不能用」。
     pub fn snapshot(&self) -> Vec<serde_json::Value> {
         let mut out = vec![
-            serde_json::json!({
-                "kind": "quickjs",
-                "available": true,
-                "version": "QuickJS-ng（内嵌）",
-            }),
             serde_json::to_value(&self.node).unwrap_or_default(),
             serde_json::to_value(&self.bun).unwrap_or_default(),
             serde_json::to_value(&self.python).unwrap_or_default(),
@@ -254,14 +243,20 @@ impl RuntimeCatalog {
                 );
             }
         }
-        // 只说"插件怎么跑"，不说引擎名 —— 对使用者来说，quickjs / node / bun
+        // 只说"插件怎么跑"，不说引擎名 —— 对使用者来说，node / bun
         // 的区别只有一句：要不要额外装东西。
         let how = match self.js_default {
-            EngineKind::QuickJs => "插件跑在面板内置引擎里（不用另外装 Node）",
             EngineKind::Node => "插件默认交给系统里的 Node 跑",
             EngineKind::Bun => "插件默认交给系统里的 Bun 跑",
         };
         crate::log::plog!("boot", info, "{how}");
+        if self.js_default == EngineKind::Node && !self.node.available {
+            crate::log::plog!(
+                "boot",
+                warn,
+                "JS 插件默认用 Node，但 node 不可用：插件加载会明确失败"
+            );
+        }
     }
 }
 
@@ -325,7 +320,6 @@ fn run_version(cmd: &PathBuf, args: &[&str], timeout: Duration) -> Result<String
     }
 }
 
-#[cfg(unix)]
 fn probe_cmd(env_key: &str, default: &str, args: &[&str], kind: &str) -> RuntimeInfo {
     let raw = std::env::var(env_key).ok().filter(|s| !s.trim().is_empty());
     let path = raw
@@ -342,10 +336,13 @@ fn probe_cmd(env_key: &str, default: &str, args: &[&str], kind: &str) -> Runtime
     }
 }
 
-#[cfg(unix)]
 fn probe_node() -> RuntimeInfo {
     let mut info = probe_cmd("PANEL_NODE", "node", &["--version"], "node");
     if !info.available {
+        let reason = info.reason.take().unwrap_or_else(|| "node 不可用".into());
+        info.reason = Some(format!(
+            "{reason}。JS 插件需要 Node >= 20.6：装好后重启面板，或用 PANEL_NODE 指向它"
+        ));
         return info;
     }
     match node_major(info.version.as_deref().unwrap_or("")) {
@@ -369,7 +366,6 @@ fn probe_node() -> RuntimeInfo {
 /// 为什么用探测而不是版本判断：22.5 引入了 `node:sqlite`，但"哪个补丁版本开始
 /// 不用显式开标志"说法不一（用户实测 22.11 仍要、24.x 不用）。写死版本号会把
 /// 中间的版本判错，探测不会。
-#[cfg(unix)]
 fn detect_sqlite_flag(path: Option<&str>) -> Option<String> {
     let p = PathBuf::from(path.unwrap_or("node"));
     let probe = |extra: &[&str]| -> bool {
@@ -387,7 +383,6 @@ fn detect_sqlite_flag(path: Option<&str>) -> Option<String> {
     None
 }
 
-#[cfg(any(unix, test))]
 fn node_major(raw: &str) -> Option<(u32, u32)> {
     // "v24.16.0" / "24.16.0"
     let s = raw.trim().trim_start_matches('v');
@@ -397,7 +392,6 @@ fn node_major(raw: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-#[cfg(unix)]
 fn probe_bun() -> RuntimeInfo {
     let info = probe_cmd("PANEL_BUN", "bun", &["--version"], "bun");
     if !info.available {
@@ -456,10 +450,11 @@ mod tests {
 
     #[test]
     fn parses_engine_names() {
-        assert_eq!(EngineKind::parse(" quickjs "), Some(EngineKind::QuickJs));
         assert_eq!(EngineKind::parse("NODE"), Some(EngineKind::Node));
         assert_eq!(EngineKind::parse("bun"), Some(EngineKind::Bun));
         assert_eq!(EngineKind::parse("nodejs"), Some(EngineKind::Node));
+        // 内嵌引擎已删除：quickjs 不再是一个可选项
+        assert_eq!(EngineKind::parse("quickjs"), None);
         assert_eq!(EngineKind::parse("cpython"), None);
     }
 
@@ -475,5 +470,10 @@ mod tests {
         let info = RuntimeInfo::missing("node", "not found");
         assert!(!info.available);
         assert!(info.reason.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn default_engine_is_node() {
+        assert_eq!(default_js_engine(), EngineKind::Node);
     }
 }

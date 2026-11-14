@@ -71,7 +71,7 @@ register_route('/hello', 'GET', (ctx) => ({
 }));
 register_route('/echo', 'POST', (ctx) => ({ status: 200, body: `echo(${ctx.body.length} bytes): ${ctx.body}` }));
 
-// ---- 出站请求（同步，与 QuickJS 宿主同语义）----
+// ---- 出站请求（同步，与面板宿主同语义）----
 //
 // 同步调用会阻塞事件循环，所以目标必须是**别的进程**：
 // 默认打本机面板（Rust 侧，8787）。同进程自调用会一直等到超时 —— 见 docs/host-api.md §1.4 的已知限制。
@@ -83,7 +83,7 @@ register_cron('fetch-panel', '*/2 * * * * *', () => {
 });
 
 // ---- Node 专有扩展：异步 fetch（不阻塞事件循环，所以能自调用自己的路由）----
-// 用 globalThis 取，保证这份脚本在 QuickJS 宿主里也能原样加载（那里没有这个函数）。
+// 用 globalThis 取，保证这份脚本在面板宿主里也能原样加载（那里没有这个函数）。
 if (typeof globalThis.http_fetch_async === 'function') {
   register_cron('self-route', '*/2 * * * * *', async () => {
     const base = globalThis.host.serverUrl();

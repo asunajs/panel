@@ -1,19 +1,19 @@
 # 外部运行时协议（Node / Bun）
 
-> 长驻 JS 子进程怎么和面板说话：五条 fd、消息形状、RPC 方法、超时/杀进程组/重启、环境白名单。
+> 长驻 JS 子进程怎么和面板说话：命令/事件通道、RPC（回环 TCP）、消息形状、超时/杀进程树/重启、环境白名单。
 > 实现：`src/extproc.rs`（面板侧）+ `runtime/js/`（子进程侧）。这份文档与那两处代码是同一份契约。
 >
 > 文档索引：[docs/README.md](README.md) · 相关：[运行时选型](runtimes.md) · [host-api](host-api.md) · [脚本任务](script-jobs.md)
 
 ---
 
-## 1. 为什么是子进程 + 五条通道
+## 1. 为什么是子进程 + 独立 RPC 通道
 
-外部解释器（Node / Bun）不能像 QuickJS 那样在同一个线程里直接调 Rust 函数。要让插件仍然
+外部解释器（Node / Bun）不能像进程内解释器那样直接调 Rust 函数。要让插件仍然
 拿到面板的能力（日志、SQLite、HTTP、WS、SMTP、任务表、路由），只有两条路：
 
 - 让插件自己 `import` 这些库 —— 那就变成第二套语义（不同的 TLS、不同的超时、不同的脱敏、不同的错误文本）；
-- **把能力留在面板，子进程通过管道调用** —— 就是这里做的，叫「A 数据面」。
+- **把能力留在面板，子进程通过 RPC 调用** —— 就是这里做的，叫「A 数据面」。
 
 ```
 面板进程                                        插件子进程（node / bun）
@@ -23,17 +23,20 @@
 │                              │  fd1 事件     │                              │
 │  reader 线程（stdout）        │ <──────────── │   ready/log/result/tick/done │
 │  reader 线程（stderr）        │ <──────────── │   fd2：插件自己的 stderr      │
-│  rpc 线程（fd3/fd4）          │ <── fd3 请求  │   sqlite_query(...)           │
-│                              │ ── fd4 响应 > │   {id, ok, result}            │
+│  rpc 监听线程                 │  TCP 回环     │   rpc-worker 线程持有 socket │
+│  rpc_conn（每连接一线程）     │ <───────────> │   主线程用 SAB + Atomics 等  │
 └──────────────────────────────┘               └──────────────────────────────┘
 ```
 
-**为什么 RPC 单独占 fd3/fd4**：插件里的 `sqlite_query` / `http_fetch` 是**同步**的 ——
+**为什么 RPC 单独走一条通道**：插件里的 `sqlite_query` / `http_fetch` 是**同步**的 ——
 子进程必须在同一个系统调用里写完请求、读到响应。如果和命令通道混在 stdin/stdout，
-就会和「面板正在等 `result`」互相阻塞。fd3/fd4 是两条单向管道，天然没有这个问题。
+就会和「面板正在等 `result`」互相阻塞。
 
-**只支持 Unix**：`dup2`、`process_group(0)`、`kill(-pid)` 都是 Unix 语义。
-Windows 上外部运行时不可用，QuickJS 照常（`src/extproc.rs` 是 `#![cfg(unix)]`）。
+**为什么是 TCP 而不是 fd3/fd4**：Windows 没有可移植的「继承额外 fd」写法。
+面板在 `127.0.0.1` 上开一个临时端口，把端口和一次性令牌放进环境变量；子进程连上来先报令牌。
+RPC 线程把 socket 的异步读事件写进 `SharedArrayBuffer`，插件主线程用 `Atomics.wait`
+阻塞等待 —— 对插件代码仍是同步调用。Unix 上测试/适配器仍可直接用 fd3/fd4（不设
+`PANEL_RPC_PORT` 时 `bus.mjs` 走旧通道）。
 
 ## 2. 启动命令行
 
@@ -75,7 +78,7 @@ NODE_PATH=<runtime>/js/node_modules \
 ```
 
 - `id`：面板侧的递增 id；子进程必须在 `result` 里原样带回。
-- `payload`：与 QuickJS 插件**逐字段相同**（见 [host-api §2](host-api.md#2-handler-的调用约定)）。
+- `payload`：字段与 [host-api §2](host-api.md#2-handler-的调用约定) 一致。
 - `run_id`：这次运行的 id（写日志 / `runs` 表用）；手动触发也有。
 
 ### 3.2 派发路由
@@ -140,9 +143,12 @@ stdout 的内容**，按 `info` 日志收走（不破坏协议，也不会把插
 插件自己的 `console.error` / 未捕获异常 / Python 的 traceback 都从这里出来。
 **不要**在 fd2 上写协议 —— 它只有「一行一条 error 日志」这一种语义。
 
-## 6. fd3 / fd4：host-api RPC
+## 6. host-api RPC（回环 TCP）
 
-### 6.1 请求（子进程 → 面板，fd3）
+### 6.1 握手与请求
+
+子进程启动后连 `PANEL_RPC_PORT`，先写一行 `PANEL_RPC_TOKEN`；面板校验后回 `ok\n`，
+之后每行一个请求：
 
 ```json
 {"id":17,"fn":"sqlite_query","args":["SELECT * FROM jobs", "[]"]}
@@ -151,9 +157,10 @@ stdout 的内容**，按 `info` 日志收走（不破坏协议，也不会把插
 - `id`：子进程侧的递增 id；面板在响应里原样带回。
 - `args`：数组。**除 WS 句柄 / `timeout_ms` 是数字外，其余参数一律按字符串传**
   （JSON 文本由子进程自己序列化）。这样面板侧只有「String 进、String 出」一条路径
-  （与 QuickJS 的 `__host_*` 同一约定）。
+  （与宿主 RPC 的同一约定）。
+- 令牌与端口只绑 `127.0.0.1`；令牌不对时面板关闭连接，子进程加载失败而不是挂住。
 
-### 6.2 响应（面板 → 子进程，fd4）
+### 6.2 响应
 
 ```json
 {"id":17,"ok":true,"result":"[{\"n\":3}]"}
@@ -216,6 +223,7 @@ HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
 | `PANEL_PLUGIN_DATA_DIR` | `<PLUGIN_DATA_DIR>/<插件名>` | `<PLUGIN_DATA_DIR>/__script__/<任务名>` |
 | `PANEL_DATA_DIR` | 插件数据根 | 插件数据根 |
 | `PANEL_DB` | 面板 SQLite 路径 | 同左 |
+| `PANEL_RPC_PORT` / `PANEL_RPC_TOKEN` | 自动生成的回环端口与一次性令牌 | 同左 |
 | `PYTHONDONTWRITEBYTECODE` / `NO_COLOR` | `1` / `1` | 同左 |
 | `NODE_PATH`（Bun） | `<runtime>/js/node_modules` | 同左 |
 | `PANEL_TASK` / `PANEL_SCHEDULE` / `PANEL_MANUAL` / `PANEL_RUN_ID` / `PANEL_PARAMS` / `PANEL_SCRIPT_PATH` | — | 见 [script-jobs §6](script-jobs.md#6-执行环境) |
@@ -228,16 +236,16 @@ HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
 
 | 事件 | 行为 |
 |---|---|
-| 加载 | 等 `ready`，预算默认 **10s**（`LOAD_BUDGET_MS`，上限 = 任务预算上限）；超时杀进程组 |
+| 加载 | 等 `ready`，预算默认 **10s**（`LOAD_BUDGET_MS`，上限 = 任务预算上限）；超时杀进程树 |
+| 启动即被杀（macOS） | `posix_spawn` 的子进程偶尔在 exec 前被内核 abort（`SIGKILL`，没有任何事件）；`spawn_ready` **只对这一种情况**最多重试 4 次，见 [pitfalls.md 20](pitfalls.md#外部运行时第六十轮node--bun) |
 | 一次 `invoke` | 预算 = 任务/路由的 `budget_ms` 或全局 `EXEC_BUDGET_MS`，**外加 250ms 宽限**给 IPC |
-| 超时 | `SIGKILL` **整个进程组**（`kill(-pid)`）；返回错误「外部插件超过 N ms 没有回话」 |
+| 超时 | Unix：`SIGKILL` **整个进程组**（`kill(-pid)`）；Windows：`taskkill /PID <pid> /T /F`；返回错误「外部插件超过 N ms 没有回话」 |
 | 崩溃 / EOF | 下一次 `invoke` / `tick` 发现子进程不在 ⇒ **自动重新拉起**、等 `ready`、重放声明（不重复安装调度） |
-| 卸载 / 热更新 / 惰性回收 | 主动 `kill` 进程组；下次触发再拉起 |
+| 卸载 / 热更新 / 惰性回收 | 主动杀进程树；下次触发再拉起 |
 | 面板退出 | 所有 `ExtPlugin` 的 `Drop` 都 kill；不留下孤儿（脚本自己 `setsid` 出去的除外） |
 
-**QuickJS 与外部引擎的语义差别**：QuickJS 的预算用 interrupt handler **打断当前调用**，
-插件状态保留；外部进程没有安全的「暂停」手段，只能杀掉 —— **插件内存状态丢失**。
-所以外部插件要把跨调用状态落到数据目录 / SQLite，不能只放在模块变量里。
+**语义**：外部进程没有安全的「暂停一个正在跑的 JS 调用」的手段，预算到点只能杀掉 ——
+**插件内存状态丢失**。所以插件要把跨调用状态落到数据目录 / SQLite，不能只放在模块变量里。
 这是选择 Node/Bun 时必须接受的代价，不是 bug。
 
 ## 9. Node / Bun 的解析与版本
@@ -249,6 +257,7 @@ HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
 | 解析 `host-api` | `--import <runtime>/js/register.mjs`（`module.register` hook） | `NODE_PATH=<runtime>/js/node_modules` |
 | 额外参数 | `--no-warnings` | — |
 | 不可用时 | 面板照常启动；选 Node 的插件加载失败并给出原因 | 同左 |
+| Windows | ✅ 回环 TCP + `taskkill /T`（**未实机验证**，见 [node-only-migration.md](node-only-migration.md)） | 同左 |
 
 探测在**启动时**做一次（2s 超时），结果进 `/api/state.runtimes`；运行期不重探，
 装完 Node 重启面板即可。
@@ -262,18 +271,19 @@ HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
 | 任务超时 | 死循环 / 慢 IO | 任务失败、杀进程；下一次触发重新拉起 |
 | 进程 EOF | 插件自己 `process.exit()` / 崩溃 | 当前调用失败；下一次触发重启 |
 | `Cannot find module 'host-api'` | Node < 20.6 或 `register.mjs` 没加载 | 加载失败，提示版本要求 |
-| `EACCES` 写文件 | QuickJS 数据根围栏 | 仅 QuickJS；外部 Node 是原生 fs |
+| `EACCES` 写文件 | 系统权限 / 只读挂载 | 插件用原生 fs，没有面板围栏 |
 | 插件日志跑到 stderr | 插件自己 `console.error` / 未捕获异常 | 按 `error` 收走（预期行为） |
 
 ## 11. 最小交互示例（插件模式）
 
 ```
 面板 → fd0: {"v":1,"cmd":"invoke","id":1,"kind":"task","name":"t","payload":{...},"run_id":"r1"}
-子进程 → fd3: {"id":1,"fn":"sqlite_exec","args":["INSERT INTO t (at) VALUES (?1)","[\"2026-10-17 20:00:00.000\"]"]}
-面板 → fd4: {"id":1,"ok":true,"result":"{\"changes\":1,\"lastInsertRowid\":9}"}
+子进程 → TCP: {"id":1,"fn":"sqlite_exec","args":["INSERT INTO t (at) VALUES (?1)","[\"2026-10-17 20:00:00.000\"]"]}
+面板 → TCP: {"id":1,"ok":true,"result":"{\"changes\":1,\"lastInsertRowid\":9}"}
 子进程 → fd1: {"__pp":1,"ev":"log","level":"info","msg":"写入 1 条"}
 子进程 → fd1: {"__pp":1,"ev":"result","id":1,"ok":true}
 ```
 
-`runtime/js/test/run-tests.mjs` 里有一个**假面板**（fake parent）用真实 fd3/fd4 跑这条链路，
-CI 跑它；这比「读代码确认」可靠。
+`runtime/js/test/` 里有一个**假面板**：旧协议用例仍用真实 fd3/fd4 跑，
+`tcp.test.mjs` 用回环 TCP + 令牌跑同一条同步 RPC 链路（含错误令牌用例）。
+面板自己的真实路径由 `scripts/smoke.py` 与插件加载覆盖。

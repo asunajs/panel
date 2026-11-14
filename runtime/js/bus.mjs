@@ -18,6 +18,8 @@
 import fs from 'node:fs';
 import process from 'node:process';
 
+import { createTcpRpc } from './rpc-tcp.mjs';
+
 const LOG_LEVELS = new Set([
   'info',
   'debug',
@@ -39,6 +41,8 @@ const state = {
   rpcSeq: 0,
   /** bytes read from fd4 that did not form a complete line yet */
   rpcBuf: Buffer.alloc(0),
+  /** TCP transport (panel sets PANEL_RPC_PORT); null = fd3/fd4 (tests/adapters) */
+  rpcTcp: null,
   stdoutBroken: false,
 };
 
@@ -61,6 +65,7 @@ export function configure(opts = {}) {
   state.runId = String(opts.runId || process.env.PANEL_RUN_ID || '');
   state.rpcSeq = 0;
   state.rpcBuf = Buffer.alloc(0);
+  state.rpcTcp = createTcpRpc();
   state.stdoutBroken = false;
   handlers.clear();
   routes.clear();
@@ -454,7 +459,8 @@ function readRpcLine() {
 }
 
 /**
- * One synchronous host call: fd3 request line -> fd4 response line.
+ * One synchronous host call. Panel transport is TCP when it gave us a port
+ * (all real panels), otherwise the legacy fd3/fd4 pipes (tests / adapters).
  * Errors (both transport and panel `ok:false`) are thrown to the caller.
  */
 export function rpcCall(fn, args = []) {
@@ -465,18 +471,28 @@ export function rpcCall(fn, args = []) {
   } catch (e) {
     throw new Error(`host RPC \`${fn}\`: 参数无法序列化成 JSON（${errText(e)}）`);
   }
-  try {
-    writeAll(3, line);
-  } catch (e) {
-    throw new Error(`host RPC \`${fn}\`: 写 fd3 失败（${errText(e)}）`);
+
+  let raw;
+  if (state.rpcTcp) {
+    try {
+      raw = state.rpcTcp.call(line);
+    } catch (e) {
+      throw new Error(`host RPC \`${fn}\`: ${errText(e)}`);
+    }
+  } else {
+    try {
+      writeAll(3, line);
+    } catch (e) {
+      throw new Error(`host RPC \`${fn}\`: 写 fd3 失败（${errText(e)}）`);
+    }
+    raw = readRpcLine();
   }
 
-  const raw = readRpcLine();
   let resp;
   try {
     resp = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`host RPC \`${fn}\`: fd4 响应不是合法 JSON（${errText(e)}）`);
+    throw new Error(`host RPC \`${fn}\`: 响应不是合法 JSON（${errText(e)}）`);
   }
   if (!resp || typeof resp !== 'object') {
     throw new Error(`host RPC \`${fn}\`: fd4 响应不是对象`);
@@ -735,7 +751,7 @@ export function ws_open(url, opts) {
     String(url),
     JSON.stringify(opts === undefined || opts === null ? {} : opts),
   ]);
-  // 与 QuickJS / docs/host-api.md 对齐：返回句柄数字，不是 {id}。
+  // 与 docs/host-api.md 对齐：返回句柄数字，不是 {id}。
   const v = resultOrThrow('ws_open', raw);
   if (!v || typeof v !== 'object' || !Number.isFinite(Number(v.id))) {
     throw new Error('host RPC `ws_open`: 面板没有返回有效句柄');
@@ -865,7 +881,7 @@ function makeConsole() {
  * `await sleep(ms)` —— **面板扩展**（Node 没有这个全局；要等就用 `timers/promises`，
  * 但插件里最常见的一句是 `await sleep(1000)`，所以三个引擎都提供它）。
  *
- * 语义与内嵌 QuickJS 那份**逐字对齐**（src/jshost.rs 的 globalThis.sleep）：
+ * 语义与 docs/host-api.md 里的 `sleep` 一致：
  * 非法/负数按 0；返回 Promise；实现就是 setTimeout。
  */
 export function sleep(ms) {
@@ -877,6 +893,69 @@ export function sleep(ms) {
 export { panel } from './panel.mjs';
 
 import { panel as panelNs } from './panel.mjs';
+
+/**
+ * 追踪活跃定时器并把数量报给面板（`timers` 事件）。
+ *
+ * 外部运行时里 setTimeout/setInterval 是 Node 原生的，面板本来看不见；
+ * 惰性回收若不知道「这个插件还靠定时器活着」，就会把只靠 setInterval 干活的
+ * 插件在闲置 120 秒后杀掉、且不再装回。这里包一层全局定时器，数量变化时上报，
+ * 面板的 should_evict 据此跳过有活跃定时器的插件。
+ *
+ * 只在插件模式装：脚本一次性跑完就退出，不存在回收问题。
+ */
+let timerTrackingInstalled = false;
+export function installTimerTracking() {
+  if (timerTrackingInstalled) return;
+  timerTrackingInstalled = true;
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeSetInterval = globalThis.setInterval;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  const nativeClearInterval = globalThis.clearInterval;
+  const timeouts = new Set();
+  const intervals = new Set();
+  let count = 0;
+  const report = () => emitEvent({ ev: 'timers', count });
+
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const id = nativeSetTimeout(
+      (...a) => {
+        if (timeouts.delete(id)) {
+          count = Math.max(0, count - 1);
+          report();
+        }
+        if (typeof fn === 'function') fn(...a);
+      },
+      ms,
+      ...args,
+    );
+    timeouts.add(id);
+    count += 1;
+    report();
+    return id;
+  };
+  globalThis.setInterval = (fn, ms, ...args) => {
+    const id = nativeSetInterval(fn, ms, ...args);
+    intervals.add(id);
+    count += 1;
+    report();
+    return id;
+  };
+  globalThis.clearTimeout = (id) => {
+    if (timeouts.delete(id)) {
+      count = Math.max(0, count - 1);
+      report();
+    }
+    return nativeClearTimeout(id);
+  };
+  globalThis.clearInterval = (id) => {
+    if (intervals.delete(id)) {
+      count = Math.max(0, count - 1);
+      report();
+    }
+    return nativeClearInterval(id);
+  };
+}
 
 export function installGlobals() {
   const api = {
@@ -914,7 +993,7 @@ export function installGlobals() {
     ws_close,
     // misc
     serverUrl,
-    // panel version (0.3.0) -- same name and meaning as the embedded QuickJS host
+    // panel version (0.3.0)
     panel: panelNs,
     // 面板扩展：await sleep(ms)。下面那段「裸名补齐」只拷函数，sleep 正好是函数。
     sleep,
@@ -944,7 +1023,7 @@ export function installGlobals() {
   };
 
   globalThis.host = host;
-  // The embedded QuickJS host exposes this name too; keeping it helps plugins
+  // This name is part of the public host-api surface; keeping it helps plugins
   // that were written against it.
   globalThis.host_api = host;
   // Bare `panel` (same object as host.panel and host-api's named export): the

@@ -16,7 +16,7 @@ tasks/
 
 | 扩展名 | 默认 | 可选 `@runtime` |
 |---|---|---|
-| `.js` / `.mjs` | `node` | `node` / `bun`（QuickJS 不跑脚本任务） |
+| `.js` / `.mjs` | `node` | `node` / `bun` |
 | `.py` | `python3` | `python3` |
 | `.sh` | `sh` | `sh` |
 
