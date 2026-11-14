@@ -159,7 +159,7 @@
     panel plugin install ~/mobile/workspace/panel-store/dist --overwrite
     #    或者界面：插件 → 上传 → 选 shop.js + shop.webui/ 打包的 zip
 
-    # 2) 目录：默认就是本仓的 marketplace/catalog.json；要换货架就去
+    # 2) 目录：默认就是 asunajs/panel-single-plugins 的 catalog.json；要换货架就去
     #    插件 → 插件商店 → 配置 → catalog_url
     # 3) 打开侧栏「插件商店」→ 刷新目录 → 安装
 

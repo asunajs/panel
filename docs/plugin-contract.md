@@ -15,7 +15,8 @@
 面板仓是开发目录，不是插件的构建目标，也不是插件的安装位置。
 
 注意这里禁的是**别人的插件产物**进面板仓：面板**支持插件**这件事本身（`src/install.rs`、
-`/api/plugins/install`、官方货架 `marketplace/catalog.json`）当然在面板仓里。
+`/api/plugins/install`、`panel plugin install`）当然在面板仓里。官方货架不在这儿 ——
+它在单文件插件仓 `asunajs/panel-single-plugins` 的 `catalog.json`（目录归插件生态，不归面板）。
 
 ## 2. 十条铁律
 
