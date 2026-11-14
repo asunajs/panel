@@ -14,6 +14,7 @@ mod db;
 mod engine;
 mod fsx;
 mod hostapi;
+mod install;
 mod log;
 mod manifest;
 mod migrate;
@@ -66,7 +67,7 @@ async fn main() -> Result<(), String> {
     // 备份相关是**离线**动作（私钥不过 HTTP），同样放在起服务之前。
     match args.first().map(|s| s.as_str()) {
         // 从 0.3.x 面板搬插件状态：离线动作，不启动服务（第 150 轮）
-        Some("plugin") => return plugin_cli::run(&args[1..]),
+        Some("plugin") => return plugin_cli::run(&args[1..]).await,
         // 口令重置是离线动作（要直接写 auth.json），同样放在起服务之前
         Some("token") => return token_cli::run(&args[1..]),
         Some("migrate") => return migrate::run(&args[1..]),

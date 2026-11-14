@@ -177,6 +177,31 @@ else
   ok '编辑器选中背景半透明，高亮层的字透得出来'
 fi
 
+# pitfalls §107：按 URL 装插件 —— 写权限、先校验后落盘、名字白名单、SSRF 门
+inst_body=$(awk '/async fn plugins_install/,/^}/' src/web.rs)
+if echo "$inst_body" | grep -q 'guard_write(&h)?'; then
+  ok '安装接口要写权限（guard_write）'
+else
+  bad 'src/web.rs 的 plugins_install 少了 guard_write —— 装插件是写盘动作'
+fi
+sha_line=$(echo "$inst_body" | grep -n 'verify_sha256' | head -1 | cut -d: -f1)
+save_line=$(echo "$inst_body" | grep -n 'save_bytes' | head -1 | cut -d: -f1)
+if [ -n "$sha_line" ] && [ -n "$save_line" ] && [ "$sha_line" -lt "$save_line" ]; then
+  ok 'sha256 校验在落盘之前（不对就一个字节都不写）'
+else
+  bad 'plugins_install 里 verify_sha256 必须排在 save_bytes 之前（写一半才发现不等 = 留半成品）'
+fi
+if grep -q 'ensure_outbound_url_allowed_with' src/install.rs; then
+  ok '下载走 SSRF 门（每跳重判）'
+else
+  bad 'src/install.rs 的下载没过 SSRF 门 —— 商店能把内网地址塞进插件目录'
+fi
+if grep -q 'lower.ends_with(\".js\") || lower.ends_with(\".zip\")' src/install.rs; then
+  ok '安装的名字白名单只有 .js / .zip'
+else
+  bad 'src/install.rs 少了扩展名白名单（否则安装 = 往插件目录写任意文件）'
+fi
+
 echo ''
 if [ "$FAIL" = "0" ]; then
   echo "ok: 19 条坑的守卫全过"

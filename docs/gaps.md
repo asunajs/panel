@@ -26,6 +26,7 @@
 | 17 | 通知拆成「渠道 + 推送」两层（停用留配置、删推送留渠道、一条渠道多份 token） | [notify.md](notify.md) |
 | 18 | 定时推送（cron 到点发摘要 / 固定文本，停机只补最近一次） | [notify.md](notify.md) |
 | 19 | 通知界面化：两栏工作台、密钥三态、复制渠道、标题模板 + 预览、高级 JSON 可编辑 | [notify.md](notify.md)、[ui.md](ui.md) |
+| 20 | 插件商店（**不内置**：面板只给 `POST /api/plugins/install` + `panel plugin install`，商店本身是侧载插件） | [store.md](store.md) |
 
 ## 还没做（认账）
 

@@ -494,6 +494,9 @@ pub fn router(st: AppState) -> Router {
                 crate::upload::MAX_UPLOAD_BYTES as usize,
             )),
         )
+        // 按 URL 装插件（第 107 轮）：商店是侧载插件，它下载不了二进制（fetch 的正文是
+        // lossy UTF-8），落盘也不许它自己写 —— 这两步归面板。
+        .route("/api/plugins/install", post(plugins_install))
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
@@ -1609,6 +1612,106 @@ struct UploadQuery {
 ///
 /// 单文件只收 `.js`；zip 解压到 `plugins/`（保留内部路径），`mcloud.webui/…`
 /// 这种目录结构原样落盘。写完**自动重载**受影响的插件（禁用的跳过）。
+/// 上传/安装之后「让新文件立刻生效」：只重载**顶层 `.js`**，禁用的跳过。
+///
+/// 两个入口（上传、按 URL 安装）共用一份，别各写一套 —— 谁漏了「禁用名单」或
+/// 「覆盖时不采纳 cron」，症状都是「装了但行为不对」，很难查。
+async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> Vec<String> {
+    let disabled = crate::db::plugin_disabled_names(&st.db).await;
+    let mut reloaded = Vec::new();
+    for f in &saved.files {
+        let p = std::path::Path::new(f);
+        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        if disabled.iter().any(|d| d == stem) {
+            continue;
+        }
+        let Ok(source) = read_source(&st.plugins_dir, stem).await else { continue };
+        st.sched.unload(stem);
+        // 没装过的名字 = 静默安装（API 直接上传，不走界面）：采纳它的 cron 建议。
+        // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划（第 180 轮）。
+        let fresh = !crate::db::plugin_surfaces(&st.db)
+            .await
+            .contains_key(stem);
+        if st.sched.load_adopt(stem, source, fresh).await.is_ok() {
+            reloaded.push(stem.to_string());
+        }
+    }
+    reloaded
+}
+
+/// `POST /api/plugins/install` —— 按 URL 装插件（第 107 轮，商店侧载的后半截）。
+///
+/// body: `{ url, name?, sha256?, overwrite? }`
+/// - `name` 不给就从 URL 末段猜（只认 `.js` / `.zip`）；
+/// - `sha256` 给了就**必须**对上，否则一个字节都不写；
+/// - `overwrite` 缺省 = 冲突（和上传同一个语义：同名不覆盖，升级要显式说）。
+#[derive(Debug, serde::Deserialize)]
+struct InstallReq {
+    url: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+async fn plugins_install(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(req): Json<InstallReq>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let url = req.url.trim().to_string();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(bad(format!("只接受 http(s) 地址，收到：{url}")));
+    }
+    let name = match req.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) => n.to_string(),
+        None => crate::install::name_from_url(&url).map_err(bad)?,
+    };
+    let data = crate::install::download(&url).await.map_err(bad)?;
+    // 先校验再落盘：写一半才发现 sha 不对，等于留个半成品
+    let sha = crate::install::verify_sha256(&data, req.sha256.as_deref()).map_err(bad)?;
+    let bytes = data.len() as u64;
+
+    let dir = st.plugins_dir.clone();
+    let overwrite = req.overwrite;
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::install::save_bytes(&dir, &name, &data, overwrite)
+    })
+    .await
+    .map_err(|e| bad(format!("安装任务异常: {e}")))?
+    .map_err(bad)?;
+
+    let reloaded = reload_saved(&st, &saved).await;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "从 {} 装了 {} 个文件（{}，{} 字节，sha256 {}…）",
+            url,
+            saved.files.len(),
+            if saved.zip { "zip" } else { "单文件" },
+            saved.bytes,
+            &sha[..12.min(sha.len())]
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "files": saved.files,
+        "replaced": saved.replaced,
+        "bytes": bytes,
+        "zip": saved.zip,
+        "sha256": sha,
+        "reloaded": reloaded,
+    })))
+}
+
 /// `POST /api/restart` —— 重启面板进程（`exec` 自身，**PID 不变**）。
 ///
 /// 为什么是 exec 而不是 exit：手动跑起来的面板没有守护进程，exit 就是「关掉」；
@@ -1666,29 +1769,7 @@ async fn plugins_upload(
     .map_err(|e| bad(format!("上传任务异常: {e}")))?
     .map_err(bad)?;
 
-    // 写到的顶层 .js 直接重载：传完就能用，不用再点一次「重载」。
-    let disabled = crate::db::plugin_disabled_names(&st.db).await;
-    let mut reloaded = Vec::new();
-    for f in &saved.files {
-        let p = std::path::Path::new(f);
-        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
-            continue;
-        }
-        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-        if disabled.iter().any(|d| d == stem) {
-            continue;
-        }
-        let Ok(source) = read_source(&st.plugins_dir, stem).await else { continue };
-        st.sched.unload(stem);
-        // 没装过的名字 = 静默安装（API 直接上传，不走界面）：采纳它的 cron 建议。
-        // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划（第 180 轮）。
-        let fresh = !crate::db::plugin_surfaces(&st.db)
-            .await
-            .contains_key(stem);
-        if st.sched.load_adopt(stem, source, fresh).await.is_ok() {
-            reloaded.push(stem.to_string());
-        }
-    }
+    let reloaded = reload_saved(&st, &saved).await;
     st.log.emit(
         "panel",
         None,

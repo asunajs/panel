@@ -761,3 +761,37 @@
     守卫：`ui-check` 另写一个 23 万字符的 `big-script.js` 当探子，断言
     「plain 类 + `pre-wrap` + 行号层 display:none + 无横向溢出 + 行号层文本为空」，
     再断言「跳到第 2500 行：光标落对、scrollTop > 0、工具条报位置」。
+
+107. **商店想「整个搬进插件」，但插件的两条手都够不到**（2026-11-14，做侧载商店时撞出来）。
+
+    一开始的想法很自然：商店是插件，那它自己下载、自己落盘、自己重载，面板什么都不用改。
+    真写下去才撞到三堵墙，全是**实测的**：
+
+    1. **二进制拿不全**：`host.fetch` 的正文是 `String::from_utf8_lossy` 出来的字符串
+       （[host-api.md](host-api.md) 的限额表），`.js` 这种文本还能凑合，zip 包会被拆坏 ——
+       而带 `<name>.webui/` 的插件包恰好**都是 zip**。要拿二进制就得加 `body_base64`，
+       那是给「插件自己装插件」开的一条新缝，比在面板里加一条通用安装能力贵得多。
+    2. **写不进插件目录**：插件不许往代码目录写文件（[plugin-contract.md](plugin-contract.md) R8），
+       否则它能改自己和别人的代码，备份/卸载/回滚全都漏。
+    3. **页面出不了网**：插件页的 CSP 是 `connect-src 'self'`，商店页面根本不能直连 GitHub。
+       所以「取目录 / 解析资产」只能由插件的 JS 代劳（同源 `/plugins/shop/api/…`）。
+
+    分工因此是硬的：**取目录与解析 → 插件；下载字节、校验、落盘、重载 → 面板**。
+    面板只多一条通用能力（`POST /api/plugins/install` + `panel plugin install`），
+    它不知道什么是商店 —— 同样这条链也能装你自己打的包、从内网地址装、CLI 离线装。
+
+    三个实现上的决定（都有守卫钉着）：
+
+    - **先校验再落盘**：sha256 对不上时一个字节都不写。反过来写一半再发现，等于留个半成品；
+    - **名字白名单**：只认 `.js` / `.zip`。不挡的话「安装」就成了「往插件目录写任意文件」的洞；
+    - **上限按实际读到的字节**：不信 `Content-Length`（那是别人说了算的），并复用
+      `upload::save` 那道 zip bomb 墙（解压总量/条目数/单文件都还有上限），新入口不能绕过去。
+
+    另外顺手修了两处**文档骗人**（代码一直是对的）：`docs/plugins.md` 写「`overwrite` 默认 1（覆盖）」
+    与「zip 解出来扁平落盘」—— 实际默认**冲突**（第 133 轮改的），zip **保留内部路径**
+    （`bundle.webui/index.html` 原样落盘，插件包就是靠这个带界面的）。
+
+    读数（本地 http 当货架，`HOST_API_ALLOW_PRIVATE=1`）：`api/catalog` 3 条 → `api/resolve`
+    给出 `{url,name,sha256}` → `POST /api/plugins/install` 回 `{files:["shop-fake.js"],reloaded:["shop-fake"]}`；
+    sha 故意错 → `400 校验失败：…，实际下载到 …`（未落盘）；zip → `{files:["bundle.js","bundle.webui/index.html"],zip:true}`；
+    CLI 装目录 → 第二次冲突、`--overwrite` 才覆盖。

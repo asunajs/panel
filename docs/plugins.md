@@ -158,18 +158,29 @@ body 是**原始字节**（不走 multipart：浏览器端 `file.arrayBuffer()` 
 |---|---|---|
 | `x.js` | `plugins/x.js` / `scripts/x.js` | 单文件 |
 | `x.mjs` | 同上，扩展名规范成 `.js` | 实测：传 `job.mjs` 写出来是 `job.js` |
-| `x.zip` | 解出来的每个 `.js` 落到根目录（扁平，不保留子目录） | 实测两个文件 → `z1.js`、`z2.js`，都自动重载 |
+| `x.zip` | 解出来的文件**保留内部路径**（`x.webui/…` 原样落盘，插件包靠它带界面） | 实测一个包 → `bundle.js` + `bundle.webui/index.html`，顶层 `.js` 自动重载 |
 
 传完**顶层 `.js` 直接重载**：不用再点一次「重载」（响应里 `reloaded: [...]`）。
 
 ### 同名怎么办
 
-`overwrite` 默认 1（覆盖）。要拒绝就传 `overwrite=0`：
+`overwrite` **默认不覆盖**（第 133 轮改的默认值：手滑传错名不该静默毁掉旧文件）。
+要覆盖就显式传 `overwrite=1`：
 
 ```text
-$ curl -X POST '.../api/plugins/upload?name=up1.js&overwrite=0' --data-binary @one.js
+$ curl -X POST '.../api/plugins/upload?name=up1.js' --data-binary @one.js      # 第二次
 文件已存在: up1.js（要覆盖请显式勾选覆盖）      [400]
+
+$ curl -X POST '.../api/plugins/upload?name=up1.js&overwrite=1' --data-binary @one.js
+{"ok":true,"files":["up1.js"],"replaced":["up1.js"],…}                          [200]
 ```
+
+### 从 URL 装（第 107 轮）
+
+同一个落盘链路多一个入口：`POST /api/plugins/install {url, name?, sha256?, overwrite?}`
+（面板下载 → 校验 sha256 → 落盘 → 重载），以及 CLI `panel plugin install <url|文件|目录> [--overwrite]`。
+商店就是这条链的一个调用方 —— 目录格式、失败矩阵见 [store.md](store.md)，接口细节见 [api.md](api.md)。
+CLI 不加载插件：装完要到界面点「重载」或重启面板才生效。
 
 ### 挡什么（每条都有读数）
 
@@ -241,6 +252,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
 | `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
+| `POST /api/plugins/install`（按 URL 装 + sha256 校验）、`panel plugin install`（CLI，含目录） | ✅ 11-14 | 面板下载 → 校验 → 落盘 → 重载；商店做成侧载插件，见 [store.md](store.md) |
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
 | `/login` `/api/login` `/api/logout` | ✅ 11-12（换了形状） | 没做独立登录页，做的是**会话 cookie**：`POST /api/login` 用令牌换一张 30 天 HttpOnly 票，`/api/logout` 清掉。好处是插件界面不再需要 `?t=`（令牌不进 URL）。见 [api.md §1](api.md) |
 | `/setup` `/api/setup`（首次设令牌） | ✅ 11-12（形状不同） | 没做独立向导页：设置 → 安全 里一个框，能「生成一个」或自己输入；写入 PBKDF2 哈希（明文不落盘），**不自动重启**（生成的令牌要让人先抄下来）。已存在凭据 → 409。见 [api.md §2](api.md) |
