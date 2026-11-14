@@ -717,6 +717,17 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 #drawer-source .editor { min-height: 0; }
 
 .src-toolbar { margin-bottom: 8px; }
+.src-goto { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; font-size: 11.5px; color: var(--dim); }
+.src-goto input {
+  /* min-width:0 + border-box：文本框的 min-content 是默认 size（约 20 字符），不压住
+     就会把工具条顶出抽屉右边缘（第一版就顶出去了）。 */
+  width: 6ch; min-width: 0; box-sizing: border-box;
+  padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface-2); color: var(--fg);
+  font-family: var(--mono); font-size: 11.5px; text-align: right;
+}
+.src-pos { flex: 0 0 auto; font-family: var(--mono); font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+@media (max-width: 620px) { .src-pos { display: none; } }
 .src-toolbar .src-meta { margin-right: auto; }
 .src-meta { font-family: var(--mono); font-size: 11.5px; color: var(--dim); overflow-wrap: anywhere; }
 .src-error {
@@ -1597,7 +1608,21 @@ select option { background: var(--surface); color: var(--fg); }
   resize: none;
   tab-size: 2;
 }
-.code-editor textarea.editor::selection { background: var(--accent-soft); }
+/* 选中背景必须**半透明**：这块 bg 画在高亮层（.code-hl）**上面**（textarea z-index:1、
+   自己的字是透明的，看得见的字全来自垫底的高亮层）。实底色（比如 --accent-soft 的
+   #ecf2fe）会把选区里的语法配色整个盖没 —— 用户看到的就是一排「没有字」的浅蓝块
+   （2026-11-14 用户截图报的）。30% 的 accent 盖上去，字还看得清、选区也够显眼；
+   plain 模式（大文件退路，textarea 自己显示文字）同样适用。 */
+.code-editor textarea.editor::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.code-editor textarea.editor::-webkit-scrollbar { width: 12px; height: 12px; }
+.code-editor textarea.editor::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.code-editor textarea.editor::-webkit-scrollbar-thumb:hover { background: var(--dim); background-clip: content-box; }
+.code-editor textarea.editor::-webkit-scrollbar-track { background: transparent; }
 
 /* 大文件的纯文本模式（highlight.js 加的 .plain）：高亮层藏起来，textarea 自己
    显示自己的文字 —— 原生输入性能。超限文件每键重建整棵 span 树会把输入法打断，
@@ -1606,7 +1631,13 @@ select option { background: var(--surface); color: var(--fg); }
 .code-editor.plain textarea.editor {
   color: var(--fg);
   -webkit-text-fill-color: currentColor;
+  /* 折行：打包产物里到处是两三百字符的行，不给折行右边永远看不全（用户两次截图都
+     指着被切掉的行尾）。折行之后**视觉行 ≠ 逻辑行**，行号层必然错位 —— 所以纯文本
+     模式把行号层收起来，位置改成工具条上的「第 N 行 / 共 M 行」+ 跳到行。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+.code-editor.plain .code-gutter { display: none; }
 
 /* 颜色只走 token：两套主题自动跟着变 */
 .tok-kw { color: var(--accent); }

@@ -2057,9 +2057,62 @@ async function openPluginSource(name) {
     else ta.value = d.source;
     $("src-meta").textContent =
       d.path + " · " + humanBytes(d.bytes) + (d.has_backup ? " · 有上一版备份" : "");
+    const goto = $("src-goto");
+    if (goto) goto.value = "";
+    srcPosRefresh();
   } catch (e) {
     srcError(e instanceof Unauthorized ? "需要令牌" : (e.message || "读取失败"));
   }
+}
+
+/// 光标在第几行：用 indexOf 数换行，不做 slice+split —— 52 万字符的文件每敲一键
+/// 都 split 一次会分配一万多个小字符串。
+function srcCaretLine(ta) {
+  const v = ta.value;
+  const upto = Math.min(ta.selectionStart, v.length);
+  let line = 1;
+  let i = v.indexOf("\n");
+  while (i !== -1 && i < upto) {
+    line += 1;
+    i = v.indexOf("\n", i + 1);
+  }
+  return line;
+}
+
+/// 工具条上的「第 N 行 / 共 M 行」。纯文本模式没有行号层，这个就是唯一的位置感。
+function srcPosRefresh() {
+  const ta = $("src-text");
+  const out = $("src-pos");
+  if (!ta || !out) return;
+  if (!ta.value) {
+    out.textContent = "—";
+    return;
+  }
+  const total = ta.value.split("\n").length;
+  out.textContent = "第 " + srcCaretLine(ta) + " 行 / 共 " + total + " 行";
+}
+
+/// 跳到第 n 行：把光标放过去并滚到视野里（一万多行的文件靠拖滚动条是没法用的）。
+function srcGotoLine() {
+  const ta = $("src-text");
+  const box = $("src-goto");
+  if (!ta || !box || !ta.value) return;
+  const n = parseInt(box.value, 10);
+  if (!Number.isFinite(n) || n < 1) return;
+  const lines = ta.value.split("\n");
+  const target = Math.min(n, lines.length);
+  let pos = 0;
+  for (let i = 0; i < target - 1; i += 1) pos += lines[i].length + 1;
+  box.value = String(target);
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
+  // textarea 改选区**不保证**把它滚进视野：先按比例粗滚一次（正文是连续的，
+  // 按字符位置的比例估行位置足够准），再把光标行居中收进来。
+  const span = Math.max(1, ta.scrollHeight - ta.clientHeight);
+  ta.scrollTop = Math.round((pos / Math.max(1, ta.value.length)) * span);
+  const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+  ta.scrollTop = Math.max(0, ta.scrollTop - Math.round(ta.clientHeight / 2) + lineH);
+  srcPosRefresh();
 }
 
 function srcError(msg) {
@@ -4545,6 +4598,21 @@ function bind() {
   });
 
   setInterval(paintSync, 1000);
+  // 源码编辑器的位置提示 / 跳到行（第 106 轮）
+  const srcText = $("src-text");
+  if (srcText) {
+    for (const ev of ["input", "click", "keyup", "select"]) srcText.addEventListener(ev, srcPosRefresh);
+  }
+  const srcGoto = $("src-goto");
+  if (srcGoto) {
+    srcGoto.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        srcGotoLine();
+      }
+    });
+    srcGoto.addEventListener("change", srcGotoLine);
+  }
   // 插件 iframe 自己导航到面板页面时把它提到最外层（见 guardPluginFrame）
   guardPluginFrame();
 
