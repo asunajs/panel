@@ -67,6 +67,11 @@ async fn main() -> Result<(), String> {
     }
     // 备份相关是**离线**动作（私钥不过 HTTP），同样放在起服务之前。
     match args.first().map(|s| s.as_str()) {
+        // 安装脚本的自检入口：二进制能跑、能报版本，就说明这台机器没问题。
+        Some("version") => {
+            println!("panel {}（panel-llrt）", crate::panelversion::current());
+            return Ok(());
+        }
         // 从 0.3.x 面板搬插件状态：离线动作，不启动服务（第 150 轮）
         Some("plugin") => return plugin_cli::run(&args[1..]).await,
         // 口令重置是离线动作（要直接写 auth.json），同样放在起服务之前
@@ -188,6 +193,36 @@ async fn main() -> Result<(), String> {
         Err(e) => log.emit("panel", None, Level::Warn, format!("脚本目录对账失败: {e}")),
     }
     let _scripts_task = scripts.clone().spawn_ticker();
+    // 安装（首次启动）自动检查：扫一圈常见位置有没有 0.3.x 的旧面板数据，
+    // 有就**醒目提示一次**（告警 + 日志），迁移或忽略后不再唠叨（记 marker 文件）。
+    {
+        let data_dir = data_dir.clone();
+        let log = log.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let cands = crate::migrate::unseen_candidates(&data_dir);
+            for c in &cands {
+                log.emit(
+                    "panel",
+                    None,
+                    Level::Warn,
+                    format!(
+                        "发现 0.3.x 旧面板数据（{}）：插件任务 {} 条、账号 {} 个、运行历史 {} 行 —— 设置 → 从 0.3.x 面板迁移",
+                        c.path, c.tasks, c.accounts, c.runs
+                    ),
+                );
+                crate::alerts::global().push(
+                    "warn",
+                    "migrate",
+                    format!(
+                        "发现 0.3.x 旧面板数据（{}）：插件任务 {} 条、账号 {} 个待迁移 —— 去 设置 → 从 0.3.x 面板迁移",
+                        c.path, c.tasks, c.accounts
+                    ),
+                );
+                crate::migrate::marker_add(&data_dir, "seen", &c.db);
+            }
+        });
+    }
     // 通知发件箱：外部渠道失败要重试，不能发一次就丢。
     let _notify_task = crate::notify::spawn_ticker(db.clone(), log.clone(), config.clone());
     // 运行记录/日志只增不减：后台定期剪到最近 N 条（见 retention.rs）。

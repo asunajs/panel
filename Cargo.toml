@@ -110,10 +110,23 @@ native-tls = "0.2"
 # 这条路的 HTTP 客户端。只用到 blocking 语义里的“能谈 CBC”这一点。
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 
+# musl 静态发布（.github/workflows/release.yml）要 vendored OpenSSL —— feature 语法
+# 要求 openssl-sys 是本 manifest 直接声明的依赖（它本来就在 Linux 的依赖图里：
+# native-tls → openssl）。只在 Linux 声明，别把 macOS 的构建卷进 OpenSSL。
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl-sys = "0.9"
+
 [dev-dependencies]
 # 路由级测试用 oneshot 直接打 Router，不起真监听。axum 自己就依赖
 # tower/util（axum-0.8 Cargo.toml:268-271），所以不增加编译单元。
 tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[features]
+# musl 静态发布用（.github/workflows/release.yml）：把 OpenSSL 静态编进二进制，
+# 否则产物带 NEEDED 段、丢到别的设备跑不了。只在 Linux 目标上启用
+# （macOS 的依赖图里没有 openssl-sys，启用这个 feature 会解析失败 —— 我们从不在
+# macOS 上开它）。原生开发与测试都不带这个 feature。
+vendored-openssl = ["openssl-sys/vendored"]
 
 [lints.rust]
 unsafe_code = "deny"

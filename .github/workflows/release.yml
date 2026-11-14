@@ -1,0 +1,315 @@
+name: Release
+
+# 目标与 0.3 时代一致：打 tag 就自动发布 Release，产物任何人都能直接下。
+#   git tag v0.4.0 && git push origin v0.4.0
+#
+# 与 0.3 工作流的差异（panel-llrt = LLRT 引擎）：
+#   · 构建前必须先跑 `node tools/bundle/build.mjs` —— llrt_core 的 build.rs
+#     要读 vendor/llrt/bundle/js（不在 git 里，见 Cargo.toml 顶注）。
+#   · TLS 是硬依赖（native-tls，Linux = OpenSSL）：musl 静态链接必须带
+#     `--features vendored-openssl`，否则产物带 NEEDED 段、丢到别的设备跑不了。
+#     0.3 的 slim 档（--no-default-features 不带 TLS）在 0.4 不存在——
+#     fetch/通知都依赖 TLS，没有「功能残了但能跑」的中间态可发。
+#   · 没有 Windows 档：LLRT 不支持 Windows。
+#   · 产物名 / SHA256SUMS 与 install.sh 的契约一致：panel-<name> + SHA256SUMS-<name>。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# 权限按 job 最小化（安全审计 中13）：编译 job 只读；只有真正 gh release create
+# 的那个 job 能写。
+jobs:
+  # ------------------------------------------------------------------
+  # 每个平台各自原生编译（不是交叉编译），编完跑一遍自检
+  # ------------------------------------------------------------------
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 旧手机（Termux）、ARM 盒子、树莓派 3/4/5
+          - name: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          # PC / VPS / 开发机
+          - name: x86_64-linux-musl
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 不把 GITHUB_TOKEN 写进 .git/config：这个 job 里会跑依赖的 build script
+          # 与仓库脚本，它们不该有机会读到推送凭据（安全审计 中13）。
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 生成引擎的内置 JS（vendor/llrt/bundle/js，build.rs 要读）
+        run: |
+          npm ci --prefix tools/bundle
+          node tools/bundle/build.mjs
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 musl 工具链
+        run: |
+          sudo apt-get update
+          # musl-gcc + perl/make（后者是 `openssl-src` 编 OpenSSL 要的）
+          sudo apt-get install -y musl-tools perl make
+          which musl-gcc
+
+      - name: 构建静态二进制
+        run: |
+          # musl target 的默认 linker 不是 musl-gcc，得显式指定，
+          # 否则链接出来的是动态依赖 glibc 的二进制，丢到别的设备上就跑不了。
+          TARGET_UPPER="$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          TARGET_LOWER="$(echo '${{ matrix.target }}' | tr '-' '_')"
+          export "CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc"
+          export "CC_${TARGET_LOWER}=musl-gcc"
+          # Termux（Android 10+ / targetSdk ≥ 29）不再直接 exec，而是让 termux-exec
+          # 去 exec `/system/bin/linker64 <你的程序>`，把 LD_PRELOAD 注进去。
+          # bionic 的 linker 只接受 ET_DYN（PIE），**静态 ET_EXEC 会被当场拒绝**：
+          #     error: "…/panel" has unexpected e_type: 2
+          # 所以 ARM 产物必须编成 **static PIE**：ET_DYN + 没有 PT_INTERP ——
+          # 「内核直接 exec」和「经 linker」两条路都能走。
+          # ARM 的 target spec 没开 static PIE，而 rustc 会**显式**传
+          #   self-contained/crt1.o + -nostartfiles + -static
+          # 光加 `-C link-arg=-static-pie` 没用：crt1.o 不会被换成 rcrt1.o，链接出来是
+          # 「ET_DYN 但没有自搬运启动代码」，一跑就 segfault（0.3 工作流里实测过两次）。
+          # 所以用 linker 包装脚本（scripts/linker-static-pie.sh）把
+          #   -static → -static-pie、crt1.o → rcrt1.o、crtbegin/end.o → crtbegin/endS.o
+          # 换完和 rustc 给 x86_64-unknown-linux-musl 传的那套**完全一致**；
+          # 再配 -C relocation-model=pie 与 CFLAGS=-fPIC 保证全是 PIC。
+          case "${{ matrix.name }}" in
+          aarch64-*)
+            # 注意：这里**不能**再写 `-C linker=rust-lld`。cargo 会把 LINKER 环境变量
+            # 变成 `-C linker=<包装脚本>`，而 RUSTFLAGS 里那条排在后面会把它盖掉 ——
+            # 包装脚本就没被调用过，产物当然还是 ET_EXEC（0.3 工作流里踩过这个坑）。
+            export "CARGO_TARGET_${TARGET_UPPER}_RUSTFLAGS=-C link-self-contained=yes -C relocation-model=pie"
+            export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$GITHUB_WORKSPACE/scripts/linker-static-pie.sh"
+            export REAL_LINKER=musl-gcc
+            export "CFLAGS_${TARGET_LOWER}=-fPIC"
+            export CFLAGS="-fPIC"
+            export CXXFLAGS="-fPIC"
+            ;;
+          esac
+          # OpenSSL 必须**静态编进**二进制（vendored）：「目标机不用装任何东西」与
+          # 「tls:'native' 能谈 CBC 套件」同时成立。不带这个 feature 的话产物带
+          # NEEDED 段，下面的断言会红 —— 也就是说这个组合跑不了。
+          cargo build --release --target ${{ matrix.target }} --features vendored-openssl
+
+      - name: 校验产物（架构 + 静态链接）
+        run: |
+          BIN=target/${{ matrix.target }}/release/panel
+          file "$BIN"
+          # 注意 "static-pie linked" 和 "statically linked" 是两种写法：
+          # 现代 Rust 在 x86_64-unknown-linux-musl 上默认产出 **static PIE**，
+          # `file` 报的是 "static-pie linked"，不含 "statically linked"。
+          # 只匹配后者会误判失败。
+          file "$BIN" | grep -qiE "statically linked|static-pie linked"
+          # 更硬的一条：静态的**真正含义**是没有动态库依赖 —— 直接看 ELF 的 NEEDED 段。
+          # file 的措辞会随工具链版本变，NEEDED 段不会骗人。
+          if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "::error::$BIN 有动态库依赖，不是真静态："
+            readelf -d "$BIN" | grep "NEEDED"
+            exit 1
+          fi
+          case "${{ matrix.name }}" in
+            aarch64-*) file "$BIN" | grep -q "aarch64" ;;
+            x86_64-*)  file "$BIN" | grep -q "x86-64"  ;;
+          esac
+          # ARM 必须是 static PIE（ET_DYN、无 PT_INTERP）。这不是洁癖：
+          # 新版 Termux 的 termux-exec 会把程序交给 /system/bin/linker64 执行，
+          # 而它只认 ET_DYN；ET_EXEC 会报 has unexpected e_type: 2。
+          case "${{ matrix.name }}" in
+            aarch64-*)
+              if ! readelf -h "$BIN" | grep -q "DYN"; then
+                echo "::error::aarch64 产物不是 PIE（ET_DYN）：新版 Termux 上会被 linker 拒绝（has unexpected e_type: 2）"
+                readelf -h "$BIN" | head -20
+                exit 1
+              fi
+              if readelf -l "$BIN" | grep -q "INTERP"; then
+                echo "::error::static PIE 不该带 PT_INTERP（那是动态链接）"
+                exit 1
+              fi
+              ;;
+          esac
+
+      # 发出去的产物至少要能在这台机器上跑起来、报出版本。
+      # （0.4 没有 build-info；`version` 是给 install.sh 的自检留的最小入口。）
+      - name: 自检（version）
+        run: |
+          BIN=target/${{ matrix.target }}/release/panel
+          "$BIN" version
+          "$BIN" version | grep -q "panel-llrt"
+
+      - name: 打包
+        run: |
+          cd target/${{ matrix.target }}/release
+          cp panel panel-${{ matrix.name }}
+          sha256sum panel-${{ matrix.name }} > SHA256SUMS-${{ matrix.name }}
+          ls -lh panel-${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target }}/release/panel-${{ matrix.name }}
+            target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.name }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 32 位 ARM：老树莓派 / 电视盒子 / 部分 Termux 设备
+  #
+  # GitHub 没有 armv7 原生 runner，所以用 cross + Docker 里的 musl 交叉工具链。
+  # 产物仍是静态链接；qemu 只用来跑一次 `version`，证明这个二进制能启动。
+  # ------------------------------------------------------------------
+  armv7:
+    name: armv7-linux-musleabihf
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 生成引擎的内置 JS
+        run: |
+          npm ci --prefix tools/bundle
+          node tools/bundle/build.mjs
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 cross
+        run: cargo install cross --locked
+
+      - name: 构建 armv7 静态二进制
+        # 32 位 ARM 暂时还是 ET_EXEC（不是 static PIE）：
+        #   - 换 rust-lld：rustup 自带的 armv7 musl 缺 libatomic，链接直接失败；
+        #   - 换 musl-gcc + -static-pie：被 musl-gcc 的 specs 拉回 -static，出来还是 ET_EXEC。
+        # 影响面小：跑 armv7 的 Termux 都是老设备（termux-exec 走直接 exec，ET_EXEC 照样能跑）。
+        # 有设备验证时再补这一档。OpenSSL 同样要 vendored（静态编进去）。
+        run: |
+          cross build --release --target armv7-unknown-linux-musleabihf \
+            --features vendored-openssl
+
+      - name: 安装 qemu（只用来跑一次 version）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: 校验产物（架构 + 静态链接）
+        run: |
+          BIN=target/armv7-unknown-linux-musleabihf/release/panel
+          file "$BIN"
+          file "$BIN" | grep -qiE "ARM|armv7"
+          file "$BIN" | grep -qiE "statically linked|static-pie linked"
+          if readelf -d "$BIN" 2>/dev/null | grep -q "NEEDED"; then
+            echo "::error::$BIN 有动态库依赖，不是真静态："
+            readelf -d "$BIN" | grep "NEEDED"
+            exit 1
+          fi
+          qemu-arm-static "$BIN" version | grep -q "panel-llrt"
+
+      - name: 打包
+        run: |
+          cd target/armv7-unknown-linux-musleabihf/release
+          cp panel panel-armv7-linux-musleabihf
+          sha256sum panel-armv7-linux-musleabihf > SHA256SUMS-armv7-linux-musleabihf
+          ls -lh panel-armv7-linux-musleabihf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-armv7-linux-musleabihf
+          path: |
+            target/armv7-unknown-linux-musleabihf/release/panel-armv7-linux-musleabihf
+            target/armv7-unknown-linux-musleabihf/release/SHA256SUMS-armv7-linux-musleabihf
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 汇总成一个 Release
+  # ------------------------------------------------------------------
+  release:
+    name: 发布
+    needs: [build, armv7]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 合并校验和
+        run: |
+          cd dist
+          ls -lh
+          cat SHA256SUMS-* | sort -k2 > SHA256SUMS
+          rm -f SHA256SUMS-*
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
+
+      # 发布完自测一遍：不用本地文件，走真实的 Release 下载 + SHA256 校验 + 真的跑起来。
+      # 这一步挂了就说明「用户拿到的安装方式」是坏的 —— 比 CI 里的构建更接近真实。
+      - name: 用刚发布的产物验证 install.sh（真下载 / 真校验 / 真启动）
+        env:
+          PANEL_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
+        run: |
+          PANEL_PREFIX="$RUNNER_TEMP/panel" bash install.sh
+          ls -lh "$RUNNER_TEMP/panel/panel"
+
+          # 令牌是登录凭据：用 PANEL_TOKEN 启动，浏览器/请求头带的是这串明文
+          # （面板里只存它的盐 + 哈希）。/readyz 不需要令牌，起来就算自检通过。
+          #
+          # ⚠ 监听地址的变量名是 **PANEL_BIND**（main.rs:103 的 env_or），不是 BIND_ADDR。
+          #   写错过一次：面板按默认 127.0.0.1:8787 起来，而这里 curl 8899，
+          #   60 次都连不上 → 发布 job 在「Release 已创建」之后红掉。
+          #   数据目录也显式给一个，别写进 runner 的 HOME。
+          BIN="$RUNNER_TEMP/panel/panel"
+          PANEL_TOKEN="release-verify" PANEL_BIND=127.0.0.1:8899 \
+            PANEL_DATA_DIR="$RUNNER_TEMP/panel-data" \
+            "$BIN" > "$RUNNER_TEMP/panel.log" 2>&1 &
+          PID=$!
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8899/readyz >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:8899/readyz | head -c 200
+          echo
+          kill -TERM "$PID"
+          wait "$PID" || true
