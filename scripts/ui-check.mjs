@@ -683,6 +683,17 @@ async function main() {
   check('卡片每格都带列名', cells.length > 0 && cells.every((c) => c.d === 'flex') &&
     labelled.length > 0 && labelled.every((c) => c.b.includes(c.l)),
     JSON.stringify(cells.slice(0, 3)));
+  // 第 188 轮：窄屏的表格是**两列网格**，不是「一格一行」。
+  // 一格一行时运行记录每条 191px 高（7 个字面行），一屏只看得到两条，右边还空一半。
+  const rowBox = JSON.parse(await js(
+    "JSON.stringify((()=>{const tr=document.querySelector('#runs-body tr'); if(!tr) return null;" +
+    " const cs=getComputedStyle(tr); const r=tr.getBoundingClientRect();" +
+    " return { display: cs.display, cols: cs.gridTemplateColumns.split(' ').filter(Boolean).length," +
+    " h: Math.round(r.height) };})())",
+  ));
+  check('窄屏表格是两列网格（不是一格一行）', !!rowBox && rowBox.display === 'grid' &&
+    rowBox.cols === 2 && rowBox.h <= 170, JSON.stringify(rowBox));
+
   // 断点回归（第 86 轮）：侧栏收成浮层只在 ≤720 发生。2 倍屏上「860 CSS px」看着像宽屏，
   // 那时多出来的 ✕ 和汉堡是纯噪音，汉堡还会压住页标题。
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 900, deviceScaleFactor: 2, mobile: false });

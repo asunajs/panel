@@ -305,6 +305,13 @@ button, input, select { font: inherit; color: inherit; }
 .table tbody tr:last-child { border-bottom: 0; }
 .table tbody tr:hover { background: var(--surface-2); }
 .table td.num, .table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* 「24.25 s」「1 分 49 秒」这类带空格的数字不许折行：列一挤就变成「24.25 / s」两行，
+   行高跟着翻倍（1052 宽那档实测）。数字列本来就该一行到底。
+   **只在 ≥1024 生效**：再窄一点七列本来就挤不下，nowrap 会把表顶出容器、多一根横向滚动条
+   （721 宽实测 755 > 455）—— 与其让状态列被裁掉，不如让数字折行。 */
+@media (min-width: 1024px) {
+  .table td.num { white-space: nowrap; }
+}
 .table td.right, .table th.right { text-align: right; }
 .table td.mono, .table .mono { font-family: var(--mono); font-size: 12.5px; }
 .table .strong { font-weight: 600; }
@@ -866,6 +873,12 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 .console::-webkit-scrollbar-track, .table-wrap::-webkit-scrollbar-track { background: transparent; }
 
 .table th, .table td { padding: 8px 16px; }
+/* 七列的运行记录在 721~1100 这一档最容易挤出横向滚动条（1024 宽实测：表 755 / 容器 734）：
+   左右内边距各收 4px，14 个格子省出 56px 就够。必须放在上面那行**之后**，
+   否则同优先级被它覆盖（第 188 轮先踩了一次：改了没生效）。 */
+@media (max-width: 1100px) {
+  .table th, .table td { padding-left: 12px; padding-right: 12px; }
+}
 
 /* ---------- 搜索 / 勾选 / 排序 / 弹窗 / 命中高亮 ---------- */
 

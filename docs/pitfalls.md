@@ -637,3 +637,30 @@
     「少传预算」的调用会直接 arity 炸（`2 argument(s) while 3 where expected` 一族）。
 
     守卫：`scripts/check-pitfalls.sh` 里 WRAP 的 `register_handler` 出现透传就红。
+
+99. **窄屏「一格一行」把行高乘起来；修的时候又踩了三个 CSS 坑**（用户 2026-11-14 手机截图报
+    「布局问题」：运行记录 11 条，每条 7 个字面行、191px 高，一屏只看得到两条，右边空着一半）。
+    这条在 ui.md §10 里本来就挂着「已知短板：一行偏高，没做次要字段折叠」—— 短板不是不知道，
+    是没人算过它有多贵：7 个字段 × 一行 = 行高被字段数乘起来。
+
+    修法（`web/app.css`，只改 `@media (max-width: 720px)` 那段）：`.table tbody tr` 从
+    「block，一格一行」改成 `grid-template-columns: repeat(2, 1fr)` —— 两个字段并排。
+    同一份数据 191px → 131px，一屏 2 条 → 4 条，且**右边不再空着**。
+    配套三处：`td.right`（操作按钮）与 `td[colspan]`（空态 / 「加载更多」）要 `grid-column: 1 / -1`，
+    否则它们只占左半边，看着像被裁掉；`.panel-body.table-scroll` 在窄屏放开 `max-height`
+    （否则表格自己滚 + 页面再滚，两根滚动条）；`.panel-head .search` 从写死的 `200px`
+    改成可伸缩，否则「只看失败 / 导出 CSV」被挤到下一行、孤零零一行像没做完。
+
+    修的时候踩的三个坑，都记在这儿：
+    1. **CSS 顺序**：`@media (max-width: 1100px) { .table td { padding-left: 12px } }` 写在
+       `.table th, .table td { padding: 8px 16px }` **之前**，同优先级被后者覆盖 —— 改了没生效，
+       表现是「1024 宽还是差 21px 横向滚动」（1024 宽实测：表 755 / 容器 734）。规则要放到它后面。
+    2. **`white-space: nowrap` 会把表顶出容器**：为了修「24.25 s 折成 24.25 / s」给数字列加 nowrap，
+       结果 721~1045 这档七列放不下、多出一根横向滚动条（755 > 455），状态列被裁掉 —— 比折行更糟。
+       现在 nowrap 只在 **≥1024** 生效，并且 721~1100 把左右内边距各收 4px（14 个格子省 56px）。
+    3. **别把判据只放在「没有横向溢出」上**：`document.documentElement.scrollWidth` 量的是页面，
+       表格是内部 `.table-wrap` 在滚 —— 页面不溢出、表却早被裁了。要量
+       `wrap.scrollWidth` 与 `table.getBoundingClientRect().width` 两个数。
+
+    守卫：`ui-check` 加了一条「窄屏表格是两列网格（不是一格一行）」——断言 `tr` 的
+    `display: grid`、`gridTemplateColumns` 两列、行高 ≤170（修前 191 会红）。111 条全过。
