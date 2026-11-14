@@ -215,7 +215,9 @@ jobs:
         # 影响面小：跑 armv7 的 Termux 都是老设备（termux-exec 走直接 exec，ET_EXEC 照样能跑）。
         # 有设备验证时再补这一档。OpenSSL 同样要 vendored（静态编进去）。
         run: |
-          cross build --release --target armv7-unknown-linux-musleabihf \
+          # -v：armv7 这一档挂在 llrt_core 的 build script（`Error: Os { code: 2, NotFound }`），
+          # 只有 verbose 才会把 build script 的 stderr 与执行目录打出来。
+          cross build -v --release --target armv7-unknown-linux-musleabihf \
             --features vendored-openssl
 
       - name: 安装 qemu（只用来跑一次 version）
