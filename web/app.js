@@ -131,6 +131,26 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/** 重建去抖：按「这次渲染真正读到的字段」算签名，没变就不重建。
+ *
+ *  为什么要有它：面板每 5s 轮询一次 /api/state，渲染函数都是「清空 + 重造」。
+ *  数据一点没变的那几轮，等于每 5s 造几百个节点再扔掉 —— DevTools 的
+ *  「DOM 节点」把还没被 GC 收走的游离节点也算进去，页面上就长成一条只涨不跌的曲线
+ *  （实测每轮 ~870 个：插件卡 + 任务表 + 通知列表 + 运行表）。
+ *  注意：入参必须覆盖渲染函数读到的**全部** state 字段，漏一个就会出现「改了不刷新」。 */
+const renderSig = new Map();
+function sameAsLast(key, parts) {
+  let sig;
+  try {
+    sig = JSON.stringify(parts);
+  } catch (_) {
+    return false; // 算不出签名就当变了，宁可多画一遍
+  }
+  if (renderSig.get(key) === sig) return true;
+  renderSig.set(key, sig);
+  return false;
+}
+
 function emptyState(node, text, hint) {
   clear(node);
   const wrap = el('div', 'empty');
@@ -406,12 +426,28 @@ function settleConfirm(ok) {
 
 function card(label, value, note, small) {
   const c = el('div', 'card');
+  // 记下这张卡是哪一项：5s 轮询时靠它原地改数字（见 setCard）。
+  c.dataset.k = label;
   c.append(el('div', 'card-label', label));
   const v = el('div', 'card-value', value);
   if (small) v.append(el('small', '', small));
   c.append(v);
   c.append(el('div', 'card-note', note || ''));
   return c;
+}
+
+/** 卡片已经在场时只改数字：这些值每 5s 都在变，但没必要每轮把整棵卡片树重造一遍。 */
+function setCard(box, label, value, note, small) {
+  const c = box.querySelector('.card[data-k="' + label + '"]');
+  if (!c) return false;
+  const v = c.querySelector('.card-value');
+  if (v) {
+    v.textContent = value;
+    if (small) v.append(el('small', '', small));
+  }
+  const n = c.querySelector('.card-note');
+  if (n) n.textContent = note || '';
+  return true;
 }
 
 function skeletonCards(box, n) {
@@ -427,9 +463,9 @@ function skeletonCards(box, n) {
 function renderCards() {
   const engine = $('cards-engine');
   const taskBox = $('cards-tasks');
-  clear(engine);
-  clear(taskBox);
   if (!state.loaded) {
+    clear(engine);
+    clear(taskBox);
     skeletonCards(engine, 4);
     skeletonCards(taskBox, 4);
     return;
@@ -437,27 +473,44 @@ function renderCards() {
   const s = state.stats || {};
   const busy = state.plugins.filter((p) => p.busy).length;
   const tripped = state.tasks.filter((t) => t.tripped).length;
-  engine.append(
-    card('运行时长', humanMs(s.uptime_ms), '自进程启动'),
-    card('调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描'),
-    card('心跳', s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1), '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms'),
-    card(
-      'JS 内存',
-      humanBytes(s.js_memory_bytes),
-      s.js_memory_bytes === null
-        ? (s.js_memory_total ? '这次没取到：插件正忙，runtime 锁在它手里' : '还没有已加载的插件')
-        : s.js_memory_measured < s.js_memory_total
-          ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
-          : '各 runtime 合计',
-    ),
-  );
+  const jsNote = s.js_memory_bytes === null
+    ? (s.js_memory_total ? '这次没取到：插件正忙，runtime 锁在它手里' : '还没有已加载的插件')
+    : s.js_memory_measured < s.js_memory_total
+      ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
+      : '各 runtime 合计';
+  const heartbeat = s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1);
+  // 只有「卡片数量」变了才重建；数字（运行时长/圈数/心跳/库大小）每轮都在变，
+  // 走 setCard 原地改 —— 每 5s 重造 12 张卡是这页「DOM 节点只涨不跌」的主犯。
+  const built =
+    engine.querySelectorAll('.card').length === 4 &&
+    taskBox.querySelectorAll('.card').length === 4 &&
+    sameAsLast('cards', [state.plugins.length, state.tasks.length, s.js_memory_bytes === null]);
+  if (built) {
+    setCard(engine, '运行时长', humanMs(s.uptime_ms), '自进程启动');
+    setCard(engine, '调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描');
+    setCard(engine, '心跳', heartbeat, '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms');
+    setCard(engine, 'JS 内存', humanBytes(s.js_memory_bytes), jsNote);
+    setCard(taskBox, '插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲');
+    setCard(taskBox, '任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常');
+    setCard(taskBox, '单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖');
+    setCard(taskBox, '预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数');
+  } else {
+    clear(engine);
+    clear(taskBox);
+    engine.append(
+      card('运行时长', humanMs(s.uptime_ms), '自进程启动'),
+      card('调度循环', String(s.ticks === undefined ? '—' : s.ticks), '每圈一次任务扫描'),
+      card('心跳', heartbeat, '最近一圈调度耗时', s.heartbeat_ms === undefined ? '' : 'ms'),
+      card('JS 内存', humanBytes(s.js_memory_bytes), jsNote),
+    );
+    taskBox.append(
+      card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
+      card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
+      card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
+      card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
+    );
+  }
   renderHealthCards();
-  taskBox.append(
-    card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
-    card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
-    card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
-    card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
-  );
 }
 
 /** 面板自己的健康摘要：插件有没有全起来、通知发得出去吗、库涨到多大了。 */
@@ -474,17 +527,27 @@ function renderHealthCards() {
   const box = $('cards-health');
   const warn = $('health-warn');
   if (!box) return;
-  clear(box);
   const h = state.health;
-  if (!h) { skeletonCards(box, 4); if (warn) { warn.classList.add('hidden'); } return; }
+  if (!h) { clear(box); skeletonCards(box, 4); if (warn) { warn.classList.add('hidden'); } return; }
   const bad = (h.failed || []).length;
   const out = h.outbox || {};
-  box.append(
-    card('插件加载', String(h.plugins), bad ? bad + ' 个没起来' : '全部加载成功'),
-    card('发件箱', String(out.pending || 0), out.failed ? (out.failed + ' 条已放弃') : '没有放弃的通知'),
-    card('数据库', humanBytes((h.db || {}).bytes), 'WAL ' + humanBytes((h.db || {}).wal_bytes)),
-    card('保留策略', '2 万条', '运行记录与日志各留最近 2 万条'),
-  );
+  const db = h.db || {};
+  // 同 renderCards：结构没变就只改数字（库大小、发件箱积压每轮都在动）。
+  const built = box.querySelectorAll('.card').length === 4 && sameAsLast('health-cards', [bad]);
+  if (built) {
+    setCard(box, '插件加载', String(h.plugins), bad ? bad + ' 个没起来' : '全部加载成功');
+    setCard(box, '发件箱', String(out.pending || 0), out.failed ? (out.failed + ' 条已放弃') : '没有放弃的通知');
+    setCard(box, '数据库', humanBytes(db.bytes), 'WAL ' + humanBytes(db.wal_bytes));
+    setCard(box, '保留策略', '2 万条', '运行记录与日志各留最近 2 万条');
+  } else {
+    clear(box);
+    box.append(
+      card('插件加载', String(h.plugins), bad ? bad + ' 个没起来' : '全部加载成功'),
+      card('发件箱', String(out.pending || 0), out.failed ? (out.failed + ' 条已放弃') : '没有放弃的通知'),
+      card('数据库', humanBytes(db.bytes), 'WAL ' + humanBytes(db.wal_bytes)),
+      card('保留策略', '2 万条', '运行记录与日志各留最近 2 万条'),
+    );
+  }
   if (!warn) return;
   const list = h.warnings || [];
   if (!list.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
@@ -702,6 +765,8 @@ async function scanPlugins() {
 function renderPlugins() {
   const grid = $('plugin-grid');
   const q = state.q.plugins;
+  // 数据没变就别重建（见 sameAsLast）：插件卡是一整棵子树，每 5s 扔了重造纯属给 GC 添活。
+  if (sameAsLast('plugins', [state.plugins, state.disabled, state.suspended, state.failed, state.files, q])) return;
   const rows = state.plugins.filter((p) => matches(p.name, q) || matches(p.title || '', q));
   $('plugins-count').textContent = state.plugins.length;
   clear(grid);
@@ -910,6 +975,8 @@ async function saveTaskSchedule(expr) {
 function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
+  // 同上：数据没变的那几轮不该重建任务表（每轮 ~8 行 × 十几个节点）。
+  if (sameAsLast('tasks', [state.tasks, state.showDeleted, q, state.fp.tasks, state.sort.tasks])) return;
   // 已删除的任务默认不出现（第 178 轮）：它们还在库里（墓碑），只是不调度。
   const visible = state.tasks.filter((t) => state.showDeleted || !t.deleted);
   const deletedCount = state.tasks.filter((t) => t.deleted).length;
@@ -1050,6 +1117,9 @@ function taskPath(t, verb) {
 function renderRuns() {
   const body = $('runs-body');
   const q = state.q.runs;
+  // 运行记录是最能暴露这个问题的页面：50 行 × ~20 节点，每 5s 重建一次，
+  // 一页什么都不干也能把「DOM 节点」顶到六位数（用户 2026-11-14 的截图）。
+  if (sameAsLast('runs', [state.runs, state.runsTotal, q, state.fp.runs, state.onlyFailed, state.sort.runs])) return;
   let rows = state.runs
     .filter((r) => !state.fp.runs || r.plugin === state.fp.runs)
     .filter((r) => matches(r.plugin, q) || matches(r.task, q) || matches(r.error, q) || matches(r.status, q));
@@ -1104,6 +1174,7 @@ function renderRuns() {
 
 function renderDashRuns() {
   const box = $('dash-runs');
+  if (sameAsLast('dash-runs', state.dashRuns)) return;
   clear(box);
   if (!state.dashRuns.length) { emptyState(box, '还没有运行记录'); return; }
   const list = el('div', 'mini');
@@ -1125,6 +1196,7 @@ function renderDashRuns() {
 
 function renderDashLogs() {
   const box = $('dash-logs');
+  if (sameAsLast('dash-logs', state.dashLogs)) return;
   clear(box);
   if (!state.dashLogs.length) { emptyState(box, '还没有日志'); return; }
   const list = el('div', 'mini');
@@ -1255,6 +1327,9 @@ function appendLog(l) {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   if (box.querySelector('.empty')) clear(box);
   box.append(logLine(l));
+  // DOM 侧也要封顶：内存环有上限（LOG_RING），DOM 以前只加不减 ——
+  // 日志页开着的那段时间，节点数就完全交给日志速率了（一行 = 9 个节点）。
+  while (box.childElementCount > LOG_RING) box.firstElementChild.remove();
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -1275,9 +1350,13 @@ let streamAbort = null;
 
 async function streamLogs() {
   if (streamAbort) streamAbort.abort();
-  streamAbort = new AbortController();
   let backoff = 1000;
   for (;;) {
+    // 每个循环用**自己的** AbortController。以前判据看的是全局 streamAbort，
+    // 而重入（登录成功又调一次）会先把全局换成新的 —— 旧循环醒来读到的是新 controller，
+    // abort 判据永远为假，于是两条 SSE 同时在读同一份日志流。
+    const ac = new AbortController();
+    streamAbort = ac;
     try {
       const headers = {};
       if (state.token) headers['x-panel-token'] = state.token;
@@ -1294,7 +1373,7 @@ async function streamLogs() {
       }
       // 重连时带上「我最后看到的那条 id」：服务端先把断线期间的行补发过来，再走实时。
       const since = state.logLastId ? ('?since=' + state.logLastId) : '';
-      const resp = await fetch('/api/logs/stream' + since, { headers, signal: streamAbort.signal });
+      const resp = await fetch('/api/logs/stream' + since, { headers, signal: ac.signal });
       if (resp.status === 401) { showGate(true, '需要令牌才能读日志'); return; }
       if (!resp.ok || !resp.body) throw new Error('SSE 握手失败');
       setConn(true);
@@ -1309,16 +1388,22 @@ async function streamLogs() {
         const parts = buf.split('\n\n');
         buf = parts.pop() || '';
         for (const chunk of parts) {
+          // `event: lagged` 是「广播跟不上、中间丢了一段」的提示，payload 是 {"skipped":…}，
+          // 不是日志行。以前一律当 data 塞进 appendLog，日志页会多出一条空行，id 还是 undefined。
+          const ev = chunk.split('\n').find((s) => s.startsWith('event: '));
+          if (ev && ev.slice(7).trim() === 'lagged') continue;
           const line = chunk.split('\n').find((s) => s.startsWith('data: '));
           if (!line) continue;
           try { appendLog(JSON.parse(line.slice(6))); } catch (_) { /* 半截帧丢掉 */ }
         }
       }
     } catch (e) {
-      if (streamAbort.signal.aborted) return;
+      if (ac.signal.aborted) return;
     }
+    if (ac.signal.aborted) return;
     setConn(false);
     await new Promise((r) => setTimeout(r, backoff));
+    if (ac.signal.aborted) return;
     backoff = Math.min(backoff * 1.6, 15000);
   }
 }
@@ -1517,7 +1602,14 @@ function openDrawer(title, withTabs) {
 
 function closeDrawer() {
   $('drawer').classList.add('hidden');
+  // 源码高亮层是一整棵 span 树（70KB 的 JS ≈ 2 万个节点）：抽屉关掉就没用了，
+  // 别让它一直挂在隐藏的 DOM 上白白占着节点数。下次打开会重新从磁盘取源码再画。
+  const hl = $('src-hl');
+  if (hl) clear(hl);
+  const ta = $('src-text');
+  if (ta) ta.value = '';
   state.drawerPlugin = null;
+  state.drawerScript = null;
 }
 
 function kvList(pairs) {
@@ -2819,6 +2911,11 @@ function renderNotify() {
   if (dot) dot.classList.toggle("hidden", !d.unread);
   const list = $("notify-list");
   if (!list) return;
+  // 弹层关着就不画列表：服务端一次给 50 条，每条 ≈9 个节点，每 5s 重造一遍
+  // 而用户根本看不到 —— 这是 5s 那轮里最贵的一笔（~450 节点/轮）。
+  const pop = $("notify-pop");
+  if (pop && pop.classList.contains("hidden")) return;
+  if (sameAsLast("notify", [d, true])) return;
   clear(list);
   if (!d.items || !d.items.length) {
     list.append(el("div", "notify-empty", "还没有通知。任务失败、熔断、插件主动喊话都会出现在这里。"));
@@ -2957,6 +3054,7 @@ function renderPluginNav() {
   const list = $('nav-plugin-list');
   if (!box || !list) return;
   const items = pluginEntries();
+  if (sameAsLast('plugin-nav', [items, state.view])) return;
   box.classList.toggle('hidden', items.length === 0);
   list.textContent = '';
   for (const p of items) {
@@ -3025,6 +3123,12 @@ function setView(name) {
   if (!isPlugin && !VIEWS[name]) name = 'dashboard';
   state.view = name;
   const viewKey = isPlugin ? 'plugin' : name;
+  // 切走日志页就把它的 DOM 倒掉：那几百行只在它可见时才有用，
+  // 留着就是让隐藏视图替整个页面背一份节点（回来时 renderLogs() 会按 state.logs 重建）。
+  if (viewKey !== 'logs') {
+    const lv = $('logs-view');
+    if (lv) clear(lv);
+  }
   for (const node of document.querySelectorAll('.view')) {
     node.classList.toggle('hidden', node.dataset.view !== viewKey);
   }
@@ -3818,6 +3922,8 @@ function askClash(info) {
       $('clash-overwrite').removeEventListener('click', onOverwrite);
       $('clash-rename').removeEventListener('click', onRename);
       $('clash').querySelectorAll('[data-close]').forEach((b) => b.removeEventListener('click', onCancel));
+      // 每回同名冲突都会挂一个新的 keydown；以前从不摘，冲突几次就积几个闭包。
+      input.removeEventListener('keydown', onInputKey);
       resolve(v);
     };
     const onOverwrite = () => done({ name: info.name, overwrite: true });
@@ -3836,9 +3942,10 @@ function askClash(info) {
     $('clash-overwrite').addEventListener('click', onOverwrite);
     $('clash-rename').addEventListener('click', onRename);
     $('clash').querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', onCancel));
-    input.addEventListener('keydown', (ev) => {
+    const onInputKey = (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); onRename(); }
-    });
+    };
+    input.addEventListener('keydown', onInputKey);
   });
 }
 

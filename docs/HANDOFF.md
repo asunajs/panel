@@ -147,7 +147,7 @@
 `vendor/llrt/bundle/js`（168K，生成物）**刻意 force-add 入库** —— 本机 github 不通，离线构建需要它。
 旧仓库 `rust-plugin-panel` 全程只读未碰。
 
-## 10. 复跑（六条命令）
+## 10. 复跑（八条命令）
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
@@ -158,6 +158,7 @@ bash scripts/check-pitfalls.sh                  # 坑的守卫 12 条（静态�
 node scripts/ui-check.mjs                       # 界面 59 条断言（自起面板 + 无头 Edge）
 node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）
 node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）
+node scripts/dom-probe.mjs --quick              # WebUI 的 DOM 增长探针（挂载/总节点两个口径 + 强制 GC）
 ```
 
 要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui.md](ui.md)。
