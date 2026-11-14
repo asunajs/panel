@@ -110,20 +110,25 @@ async fn create_writes_a_template_and_the_record() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db, &dir);
 
-    s.create("daily.sh", "sh", "").await.unwrap();
+    s.create("daily.sh", "sh", "", Some("@every 2h".into())).await.unwrap();
+    let v = s.get("daily.sh").await.unwrap();
+    assert_eq!(v["cron"], "@every 2h", "创建时带的计划要收下，不能静默丢成手动");
+    assert!(v["next_at"].is_i64(), "有 cron 就该算出下次触发");
+    // 坏表达式在创建时就报
+    assert!(s.create("bad.sh", "sh", "", Some("不是表达式".into())).await.is_err());
     assert!(dir.join("daily.sh").is_file());
     let src = std::fs::read_to_string(dir.join("daily.sh")).unwrap();
     assert!(src.starts_with("#!/bin/sh"), "sh 模板要带 shebang");
 
     // 名字不带扩展名：按运行时补（python3 → .py）
-    s.create("report", "python3", "").await.unwrap();
+    s.create("report", "python3", "", None).await.unwrap();
     assert!(dir.join("report.py").is_file());
     let list = s.list().await.unwrap();
     assert!(list.iter().any(|v| v["name"] == "report.py" && v["runtime"] == "python3"));
 
     // bin / 自定义命令不给新建：那两类是「上传现成的文件」
-    assert!(s.create("tool", "bin", "").await.is_err());
-    assert!(s.create("x", "deno run -A", "").await.is_err());
+    assert!(s.create("tool", "bin", "", None).await.is_err());
+    assert!(s.create("x", "deno run -A", "", None).await.is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -630,7 +630,13 @@ impl Scripts {
 
     /// 新建：写一个最小模板 + 建记录。`bin` / 自定义命令不给建 —— 那两类是
     /// 「上传现成的文件」，不是「写一个」。
-    pub async fn create(&self, name: &str, runtime: &str, title: &str) -> Result<Value, String> {
+    pub async fn create(
+        &self,
+        name: &str,
+        runtime: &str,
+        title: &str,
+        cron: Option<String>,
+    ) -> Result<Value, String> {
         safe_name(name)?;
         let runtime = runtime.trim();
         let default_ext = match runtime {
@@ -670,7 +676,13 @@ impl Scripts {
             ensure_exec(&p).await;
         }
         let title = sanitize_title(title)?;
-        self.insert_record(&fname, runtime, title, None, DEFAULT_BUDGET_MS, true)
+        // cron 在创建时就收下（第 19 轮的老坑回归过一次：传了 cron 被静默丢成
+        // 「只手动跑」，用户在弹窗里填的计划凭空消失）。校验+算 next_at 归 insert_record。
+        let cron = cron.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+        if let Some(expr) = &cron {
+            crate::cron::Schedule::parse(expr).map_err(|e| format!("调度表达式无效: {e}"))?;
+        }
+        self.insert_record(&fname, runtime, title, cron, DEFAULT_BUDGET_MS, true)
             .await?;
         self.log.emit(
             PLUGIN,
