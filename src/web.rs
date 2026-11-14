@@ -3666,7 +3666,12 @@ async fn script_create(
                 .clone()
                 .unwrap_or_else(|| crate::scripts::infer_runtime(&body.name));
             st.scripts
-                .create(&body.name, &runtime, body.title.as_deref().unwrap_or(""))
+                .create(
+                    &body.name,
+                    &runtime,
+                    body.title.as_deref().unwrap_or(""),
+                    body.cron.clone(),
+                )
                 .await
                 .map_err(bad)?
         }
