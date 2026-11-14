@@ -278,7 +278,7 @@ async function connect(wsUrl) {
       ws.send(JSON.stringify({ id: i, method, params: params || {} }));
       setTimeout(() => {
         if (pending.has(i)) { pending.delete(i); reject(new Error('CDP 超时：' + method)); }
-      }, 20000);
+      }, 45000); // 灌几千行日志时主线程在忙，20s 会把正常等待误判成超时
     });
   const evaluate = async (expr) => {
     const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
@@ -649,8 +649,9 @@ async function main() {
     let last = -1;
     let stable = 0;
     while (Date.now() - t0 < 240000) {
-      await sleep(1000);
-      const c = await counters();
+      await sleep(2500);
+      let c = null;
+      try { c = await counters(); } catch (_) { continue; } // 主线程在忙：这一拍读不到很正常
       if (c.logsRows === last) { stable += 1; if (stable >= 4) break; } else { stable = 0; last = c.logsRows; }
     }
     const onLogs = await counters();
@@ -669,7 +670,7 @@ async function main() {
         ? (onLogs.nodes - onLogs0.nodes) / (onLogs.logsRows - onLogs0.logsRows) : 0,
     };
     report.stages.push(reproStage);
-    console.log('    灌了 ' + reproStage.rowsAdded + ' 行（' + reproStage.seconds.toFixed(0) + 's，' + fired + '）' +
+    console.log('    DOM 新增 ' + reproStage.rowsAdded + ' 行（灌 ' + N + ' 条 / ' + reproStage.seconds.toFixed(0) + 's，' + fired + '）' +
       '  日志页：挂载 ' + onLogs.elems + ' · 总节点 ' + fmt(onLogs.nodes) + '  (约 ' + reproStage.perRow.toFixed(1) + ' 节点/行)');
     console.log('    切到运行记录页（可见行 ' + onRuns.runsRows + '）：挂载 ' + onRuns.elems +
       ' · 总节点 ' + fmt(onRuns.nodes) + '（GC 后 ' + fmt(onRunsGc.nodes) + '）');
