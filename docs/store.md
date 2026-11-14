@@ -12,8 +12,10 @@
 0.4 的口径是**面板只提供通用能力，业务做成插件**（[plugin-contract.md](plugin-contract.md) R6）：
 商店 = 一个普通插件（`shop.js` + `shop.webui/`），你**侧载**进来才有；不装就没有商店，
 面板一个字节都不多。它有自己的仓（`asunajs/panel-store`，**私有**）：那只是「怎么装」的壳。
-**官方货架（目录 JSON）在面板仓**：[`marketplace/catalog.json`](../marketplace/catalog.json)，
-维护约定见 [`marketplace/README.md`](../marketplace/README.md)。
+**官方货架（目录 JSON）在单文件插件仓**：
+`asunajs/panel-single-plugins` 的根目录 [`catalog.json`](https://github.com/asunajs/panel-single-plugins/blob/main/catalog.json)
+（默认 `catalog_url` 就指它）。放那里而不是面板仓：目录回答「有哪些插件」，
+跟插件源码同一个仓才改得动；面板仓只管「怎么装」这条能力。
 
 面板只补了一条**通用**能力：
 

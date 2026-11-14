@@ -7,8 +7,8 @@
 
 | 地方 | 本机路径 | 归谁 | 里面是什么 | 谁可以写 |
 |---|---|---|---|---|
-| **面板仓** | `~/mobile/workspace/panel-llrt` | 面板项目 | `src/ web/ docs/ scripts/ vendor/ marketplace/`（官方货架 JSON）；`plugins/` 只有面板自己的 `webui-demo` | 面板会话 |
-| **插件仓** | `~/mobile/workspace/mcloud-plugin`、`~/mobile/workspace/cmusic-others/mgmusic-plugin`、`~/mobile/workspace/panel-store`（`asunajs/panel-store`，**私有**） | 各自的插件项目 | 源码 `src/`、产物 `dist/`、`scripts/ mock/ test/`；商店仓只有 `dist/`（`shop.js` + `shop.panel.json` + `shop.webui/`） | 该插件的会话 |
+| **面板仓** | `~/mobile/workspace/panel-llrt` | 面板项目 | `src/ web/ docs/ scripts/ vendor/`；`plugins/` 只有面板自己的 `webui-demo` | 面板会话 |
+| **插件仓** | `~/mobile/workspace/mcloud-plugin`、`~/mobile/workspace/cmusic-others/mgmusic-plugin`、`~/mobile/workspace/panel-store`（`asunajs/panel-store`，**私有**）、`~/mobile/workspace/panel-single-plugins`（**官方货架** `catalog.json` 在这里） | 各自的插件项目 | 源码 `src/`、产物 `dist/`、`scripts/ mock/ test/`；商店仓只有 `dist/`（`shop.js` + `shop.panel.json` + `shop.webui/`） | 该插件的会话 |
 | **实例目录** | `~/panel-3030`（二进制 `panel`、`data/`、`plugins/`） | 部署物，**不是开发目录** | 跑起来的东西 | 部署脚本 |
 
 一句话：**面板项目开发面板，插件项目开发插件，部署到实例目录，从实例目录加载。**
