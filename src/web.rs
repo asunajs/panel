@@ -481,6 +481,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/migrate/scan", get(api_migrate_scan))
         .route("/api/migrate/preview", post(api_migrate_preview))
         .route("/api/migrate/apply", post(api_migrate_apply))
+        .route("/api/migrate/dismiss", post(api_migrate_dismiss))
         // 重启进程：改了环境变量（PANEL_TOKEN / PANEL_BIND）才需要。
         .route("/api/restart", post(api_restart))
         // 上传：单文件或 zip。body 是**原始字节**（不走 multipart：浏览器端
@@ -1912,6 +1913,15 @@ struct MigrateApplyB {
     with_plugin_data: bool,
     #[serde(default)]
     with_scripts: bool,
+    /// 老插件任务（含用户改过的计划/暂停）→ 0.4 任务；__script__ → 0.4 脚本
+    #[serde(default)]
+    with_tasks: bool,
+    /// 老面板运行历史 → 0.4 运行记录
+    #[serde(default)]
+    with_runs_history: bool,
+    /// 老通知渠道 → config.json notify（默认停用）
+    #[serde(default)]
+    with_notify: bool,
     #[serde(default)]
     adopt_token: bool,
 }
@@ -1920,7 +1930,7 @@ fn migrate_target(st: &AppState) -> std::path::PathBuf {
     st.data_dir.join("panel.db")
 }
 
-/// `GET /api/migrate/scan» —— 扫候选旧数据目录（只读，不写任何东西）。
+/// `GET /api/migrate/scan` —— 扫候选旧数据目录（只读，不写任何东西）。
 async fn api_migrate_scan(
     State(_st): State<AppState>,
     QueryArgs(q): QueryArgs<MigrateScanQ>,
@@ -1930,7 +1940,7 @@ async fn api_migrate_scan(
     Ok(Json(json!({ "ok": true, "candidates": list })))
 }
 
-/// `POST /api/migrate/preview» —— 读一遍来源库，把「会搬什么」摊出来（不写）。
+/// `POST /api/migrate/preview` —— 读一遍来源库，把「会搬什么」摊出来（不写）。
 async fn api_migrate_preview(
     State(st): State<AppState>,
     h: HeaderMap,
@@ -1945,7 +1955,31 @@ async fn api_migrate_preview(
     Ok(Json(json!({ "ok": true, "preview": p })))
 }
 
-/// `POST /api/migrate/apply» —— 真写。写完提示重启。
+/// `POST /api/migrate/dismiss` —— 「不再提醒」这个旧数据目录（记进 marker）。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrateDismissB {
+    source: String,
+}
+
+async fn api_migrate_dismiss(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(b): JsonBody<MigrateDismissB>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    crate::migrate::marker_add(&st.data_dir, "seen", &b.source);
+    crate::migrate::marker_add(&st.data_dir, "dismissed", &b.source);
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("已忽略旧面板数据 {} 的迁移提醒", b.source),
+    );
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/migrate/apply` —— 真写。写完提示重启。
 async fn api_migrate_apply(
     State(st): State<AppState>,
     h: HeaderMap,
@@ -1959,6 +1993,9 @@ async fn api_migrate_apply(
         skip_schedules: b.skip_schedules,
         with_plugin_data: b.with_plugin_data,
         with_scripts: b.with_scripts,
+        with_tasks: b.with_tasks,
+        with_runs_history: b.with_runs_history,
+        with_notify: b.with_notify,
         adopt_token: b.adopt_token,
     };
     let source = b.source.clone();
@@ -1987,6 +2024,15 @@ async fn api_migrate_apply(
         "skipped_orphans": applied.skipped_orphans,
         "plugin_data_files": applied.plugin_data_files,
         "scripts_files": applied.scripts_files,
+        "tasks_rows": applied.tasks_rows,
+        "runs_history_rows": applied.runs_history_rows,
+        "script_jobs_files": applied.script_jobs_files,
+        "script_jobs_records": applied.script_jobs_records,
+        "script_jobs_missing": applied.script_jobs_missing,
+        "script_jobs_bad_name": applied.script_jobs_bad_name,
+        "script_jobs_kept": applied.script_jobs_kept,
+        "tasks_kept": applied.tasks_kept,
+        "notify_channels": applied.notify_channels,
         "adopted_token": applied.adopted_token,
         "snapshot": applied.snapshot.map(|p| p.display().to_string()),
         "restart_required": true,

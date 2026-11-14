@@ -66,6 +66,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [host-api.md](host-api.md) | async host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
 | [plugins.md](plugins.md) | 插件生命周期（加载/重载/停用/卸载/删除各保住什么）、自带界面与三条路由、上传（zip 与路径逃逸）、与旧面板的对照 |
 | [scripts.md](scripts.md) | 脚本 = 第三方程序：运行时表（sh/node/bun/python3/bin/自定义命令）、面板只保管+定时+收输出、护栏与迁移 |
+| [migrate.md](migrate.md) | 从 0.3.x 面板迁移：矩阵、任务平滑接管、步骤与坑 |
 | [scheduler.md](scheduler.md) | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
 | [api.md](api.md) | 请求体/查询参数（多余或写错一律 400）、CSV 导出、令牌与会话 |
 | [ui.md](ui.md) | 控制台形态与设计令牌、零构建约束、界面门禁（`scripts/ui-check.mjs` / `ui-e2e.mjs`） |
