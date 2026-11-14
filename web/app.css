@@ -876,7 +876,9 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 /* 七列的运行记录在 721~1100 这一档最容易挤出横向滚动条（1024 宽实测：表 755 / 容器 734）：
    左右内边距各收 4px，14 个格子省出 56px 就够。必须放在上面那行**之后**，
    否则同优先级被它覆盖（第 188 轮先踩了一次：改了没生效）。 */
-@media (max-width: 1100px) {
+@media (max-width: 1100px) and (min-width: 721px) {
+  /* 下限写 721：≤720 那套「两列网格」自己定了 td 的 padding，别在这儿偷偷再加一次
+     （否则手机上每个格子左右多 12px，虽然不至于坏，但不是设计意图）。 */
   .table th, .table td { padding-left: 12px; padding-right: 12px; }
 }
 
