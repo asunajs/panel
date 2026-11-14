@@ -49,6 +49,9 @@ const IDLE_SLEEP: Duration = Duration::from_secs(3600);
 const MIN_SLEEP: Duration = Duration::from_millis(1);
 /// `next_base` 返回 None 的兜底（parse 阶段已挡过，理论上走不到）。
 const FALLBACK_DAYS: i64 = 365;
+/// 「只执行一次」跑完之后把下次执行钉多远。取一个明显不会到的年份，
+/// 界面上看到这个日期就知道「它不会再跑了」（而不是以为漏排了）。
+const ONCE_SPENT_DAYS: i64 = 36_500;
 
 /// 一圈最多睡这么久。为什么要有上限：`next_fire` 是绝对时刻，机器休眠/被改时钟之后
 /// 那个「还有 3 小时」可能已经不对了。睡一小段就醒来看一眼（一次醒来就是一次 select，
@@ -251,7 +254,9 @@ impl Task {
         params: Option<Json>,
         lead_ms: u64,
     ) -> Result<Self, String> {
-        let schedule = Schedule::parse(&cron)?;
+        // 任务 ID 参与 JSON 计划的哈希（抖动/随机选择）。必须和前端
+        // `plugin + "/" + name` 完全一致，否则预览和实际执行对不上。
+        let schedule = Schedule::parse_for(&cron, &format!("{plugin}/{name}"))?;
         let now = Local::now();
         let base = schedule
             .next_base(now)
@@ -342,6 +347,13 @@ impl Task {
             self.consecutive_failures += 1;
         } else {
             self.consecutive_failures = 0;
+        }
+        // 「只执行一次」的计划跑完就到此为止。不特判的话，下面 next_base 返回 None
+        // 会走到 FALLBACK_DAYS 兜底 —— 变成「7 天后再跑一次」，等于把 once 变成了周期任务。
+        if schedule.one_shot_spent(now) {
+            self.base_fire = now + ChronoDuration::days(ONCE_SPENT_DAYS);
+            self.next_fire = self.base_fire;
+            return;
         }
 
         // ① 半开重试成功 → 完全恢复，重新对齐正常节奏（重试不抖）
@@ -1162,7 +1174,7 @@ impl Task {
     /// 只动调度：`runs` / 熔断计数 / enabled 全部保留 —— 这正是「编辑」相对
     /// 「删了重建」的意义（删了重建会把运行历史清零）。
     fn set_schedule(&mut self, expr: &str) -> Result<(), String> {
-        let schedule = Schedule::parse(expr)?;
+        let schedule = Schedule::parse_for(expr, &format!("{}/{}", self.plugin, self.name))?;
         let now = Local::now();
         let base = schedule
             .next_base(now)

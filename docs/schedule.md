@@ -5,6 +5,7 @@
 
 - `web/schedule.js` —— 纯函数（`normalize` / `toSentence` / `nextRuns` / `validate` / `exportCron` / `fromCron`）
 - `web/app.js` 里的 `renderScheduleForm` —— 表单，值**直接等于** JSON，没有额外转换层
+- `src/plan.rs` —— 同一套语义的 Rust 实现（调度器真正执行的那条路）
 - `scripts/schedule-check.mjs` —— 21 条门禁，覆盖规格里点名的五组用例
 
 ## 1. 五条不可违背的口径
@@ -119,23 +120,54 @@
 `fromCron(expr)` 是可选便利：认得出来就填表单，认不出来就建议保持「表达式」模式，
 **不提示用户去改表单**。
 
-## 8. 与面板调度器的现状
+## 8. 面板调度器怎么执行这些计划
 
-保存时表单把 JSON 经 `exportCron` 落成调度表达式：
+计划以 `json:{...}` 的形式存在任务的调度字段里 —— **不新增数据库列**，
+「调度就是一个字符串」的既有形状不变，`Schedule::parse` 认这个前缀。
 
-- `expr` → 原样直通（`@every 2h` 存的还是 `@every 2h`）；
-- 能无损对应的（daily / weekly / monthly 1–28 / 整除的 interval，含抖动）→ 存 cron；
-- **对应不上的（window / randomPick / monthly last / once / 带锚点的 interval）→
-  明确拒绝并说明原因**，不塞近似值。
+`src/plan.rs` 把同一套语义在 Rust 里实现了一遍。两边必须逐毫秒一致，
+否则预览就是在骗人：
 
-也就是说：这几种类型的**表单、短句、预览都能用**，但面板调度器还执行不了 ——
-要真正跑起来，得让调度器认识 JSON 计划（`src/plan.rs`，见 [gaps.md](gaps.md)）。
+| | JS（预览） | Rust（执行） |
+|---|---|---|
+| 随机源 | `hash32(task_id + period_key)` | 同（FNV-1a 32 位，逐字节等价） |
+| 周期键 | `dYYYY-MM-DD` / `wYYYY-Www` / `mYYYY-MM` | 同 |
+| 抖动 | `hash mod (2·j+1) − j`，钳在本周期内 | 同 |
+| 窗口 | 均分 count 段，每段取一点 | 同 |
+| 任务 ID | `plugin + "/" + name` | 同（`Schedule::parse_for` 传进去） |
+
+对齐靠 `src/plan.rs` 里那组 `parity_with_js_preview_*` 用例：它们断言的是
+**绝对时刻**（精确到秒），期望值就是 `web/schedule.js` 算出来的那 5 个。
+两边任何一侧改坏了，这些用例立刻红。
+
+改任何一条语义都要同时改 `web/schedule.js` 和 `src/plan.rs`，并跑两边的门禁：
+
+```bash
+node scripts/schedule-check.mjs   # 前端 21 条
+cargo test --offline plan::       # 后端 14 条（含 5 条 parity）
+```
+
+保存时前端只做一件事：
+
+- `expr` → 原样存表达式（`@every 2h` 存进去还是 `@every 2h`，实测）；
+- 其余 → 存 `json:{...}`，**预览用的就是这份数据**，所以「接下来 5 次」就是实际会跑的时刻。
+
+`exportCron` 不再参与保存流程，它现在只是「对接只认 cron 的外部程序」用的可选适配器。
+
+### 一次性任务跑完之后
+
+`once` 到点跑完，`next_base` 返回 `None`。调度器不按 `FALLBACK_DAYS` 兜底
+（那会变成「7 天后再跑一次」，等于把 once 悄悄改成周期任务），而是把下次执行
+钉到很远的将来（`ONCE_SPENT_DAYS`），界面上看到那个日期就知道它不会再跑了。
 
 ## 9. 自测
 
 ```bash
 node scripts/schedule-check.mjs      # 21 条：短句模板、五组点名用例、校验、时区、导出
+cargo test --offline plan::          # 14 条：7 种类型的下一次计算 + 5 条与前端对齐
+cargo test --offline plan_bridge     # 5 条：`json:` 前缀、expr 直通、报错可读、once 过期
 ```
 
 其中钉住的关键行为：抖动可复现（同周期重复算结果一致、换任务 ID 结果不同）、
-跨天窗口、跨午夜窗口、`expr` 不被改写、`exportCron` 对不可表达类型显式失败。
+跨天窗口、跨午夜窗口、`expr` 不被改写、`exportCron` 对不可表达类型显式失败、
+**Rust 算出的触发时刻与前端预览逐毫秒相同**。

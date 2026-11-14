@@ -352,6 +352,10 @@ pub enum Schedule {
         base: Box<Schedule>,
         jitter: Jitter,
     },
+    /// 结构化 JSON 计划（第 110 轮）：cron 表达不了的那些形状
+    /// （窗口内随机 / 每周随机挑一天 / 只跑一次 / 每月最后一天）。
+    /// 抖动已经算在 `Plan` 内部（哈希可复现），所以它**没有** `Jitter` 字段。
+    Plan(crate::plan::Plan),
 }
 
 /// `@every` 的抖动上限：周期的 20%。
@@ -377,9 +381,32 @@ impl Schedule {
     /// 0 0 * * * ~30m
     /// ```
     pub fn parse(s: &str) -> Result<Schedule, String> {
+        Self::parse_for(s, "")
+    }
+
+    /// 同 [`Schedule::parse`]，但带上任务 ID。
+    ///
+    /// JSON 计划的抖动/随机选择用 `hash(任务ID + 周期键)` 做种子 —— 不带 ID 也能解析，
+    /// 只是算出来的偏移和浏览器预览对不上。所以**真正排期的那条路必须传 ID**，
+    /// 校验阶段可以传空串。
+    pub fn parse_for(s: &str, task_id: &str) -> Result<Schedule, String> {
         let s = s.trim();
         if s.is_empty() {
             return Err("调度表达式为空".to_string());
+        }
+        // 结构化计划：`json:{...}`。必须在 split_jitter 之前拦下 ——
+        // JSON 里的 `~` 或空格会被当成抖动后缀/多 token 报错。
+        if s.starts_with("json:") || s.starts_with('{') {
+            let body = s.strip_prefix("json:").unwrap_or(s);
+            // `{"type":"expr",...}` 是**直通**语义：不归一化、不改写，
+            // 把里面的表达式原样交给 cron 解析器。
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                if v.get("type").and_then(|x| x.as_str()) == Some("expr") {
+                    let inner = v.get("expr").and_then(|x| x.as_str()).unwrap_or("");
+                    return Schedule::parse_for(inner, task_id);
+                }
+            }
+            return Ok(Schedule::Plan(crate::plan::Plan::parse(s, task_id)?));
         }
         let (body, jitter) = split_jitter(s)?;
         // 主体末尾还留着记号开头的 token ⇒ 抖动写了不止一个。
@@ -418,6 +445,11 @@ impl Schedule {
         match self {
             Schedule::Jittered { base, .. } => base.next_base(from),
             Schedule::Cron(c) => c.next_after_in(from),
+            Schedule::Plan(p) => {
+                // 计划自己带时区，换到 UTC 算完再换回调用方的时区
+                let f = from.with_timezone(&chrono::Utc);
+                p.next_after(f).map(|u| u.with_timezone(&from.timezone()))
+            }
             // 注意：这里**绝对不能** truncate 到秒。
             // cron 的粒度是秒，但 @every 可以细到毫秒；一旦把 from 的毫秒抹掉再 +500ms，
             // 算出来的时刻会等于 from 本身 —— next_fire 原地踏步，任务会被无限重触发。
@@ -431,7 +463,22 @@ impl Schedule {
     pub fn jitter(&self) -> Option<Jitter> {
         match self {
             Schedule::Jittered { jitter, .. } => Some(*jitter),
+            // Plan 的抖动是哈希算的、已经算进 next_after 里了。
+            // 这里再返回 Some 会被 apply_jitter 叠一层**真随机**，预览就对不上了。
             _ => None,
+        }
+    }
+
+    /// 这条调度是不是「只跑一次」且已经过期。
+    ///
+    /// 调度器靠它决定：跑完就把 next_fire 钉到很远的将来，而不是按
+    /// FALLBACK_DAYS 兜底成「7 天后再跑一次」。
+    pub fn one_shot_spent(&self, now: DateTime<Local>) -> bool {
+        match self {
+            Schedule::Plan(p) if p.is_one_shot() => {
+                p.next_after(now.with_timezone(&chrono::Utc)).is_none()
+            }
+            _ => false,
         }
     }
 
@@ -552,6 +599,11 @@ fn validate_jitter(base: &Schedule, j: &Jitter) -> Result<(), String> {
         }
         Schedule::Jittered { .. } => {
             return Err("抖动只能写一个".to_string());
+        }
+        Schedule::Plan(_) => {
+            // 结构化计划自带抖动（哈希可复现，算在 next_after 里），
+            // 再叠 cron 的 `~` 会变成「哈希抖动 + 真随机抖动」两层，预览就对不上了。
+            return Err("结构化计划已经把抖动写在 jitter 字段里，不能再加 `~` 后缀".to_string());
         }
     }
     Ok(())
@@ -1128,5 +1180,59 @@ mod dst_tests {
         let from = New_York.with_ymd_and_hms(2026, 6, 1, 4, 0, 0).unwrap();
         let next = s.next_base(from).expect("普通跨天不该出问题");
         assert_eq!(next.format("%Y-%m-%d %H:%M").to_string(), "2026-06-02 03:00");
+    }
+}
+
+#[cfg(test)]
+mod plan_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn json_plan_is_recognised() {
+        let s = Schedule::parse_for(
+            r#"json:{"type":"window","every":"day","between":["09:00","18:00"],"count":1,"timezone":"Asia/Shanghai"}"#,
+            "demo/daily",
+        )
+        .unwrap();
+        assert!(matches!(s, Schedule::Plan(_)));
+        assert!(s.next_base(Local::now()).is_some());
+        // 计划自带抖动，不能再叠 `~`
+        assert!(s.jitter().is_none());
+    }
+
+    #[test]
+    fn bare_json_object_also_works() {
+        let s = Schedule::parse(r#"{"type":"daily","at":"09:00","jitter":null,"timezone":"Asia/Shanghai"}"#)
+            .unwrap();
+        assert!(matches!(s, Schedule::Plan(_)));
+    }
+
+    #[test]
+    fn expr_wrapped_in_json_passes_through_untouched() {
+        // 直通：`@every 2h` 不能被当成 interval 归一化掉
+        let s = Schedule::parse(r#"json:{"type":"expr","expr":"@every 2h","timezone":"Asia/Shanghai"}"#)
+            .unwrap();
+        assert!(matches!(s, Schedule::Every(_)), "应原样是 @every 2h，实际 {s:?}");
+    }
+
+    #[test]
+    fn bad_json_plan_says_why() {
+        let e = Schedule::parse(r#"json:{"type":"window","every":"day","between":["09:00","09:00"],"count":1,"timezone":"Asia/Shanghai"}"#)
+            .unwrap_err();
+        assert!(e.contains("不能相同"), "报错是「{e}」");
+        let e2 = Schedule::parse(r#"json:{"type":"daily","at":"09:00"}"#).unwrap_err();
+        assert!(e2.contains("timezone"), "报错是「{e2}」");
+    }
+
+    #[test]
+    fn once_plan_reports_spent() {
+        let s = Schedule::parse_for(
+            r#"json:{"type":"once","at":"2020-01-01T09:00:00","jitter":null,"timezone":"Asia/Shanghai"}"#,
+            "demo/once",
+        )
+        .unwrap();
+        // 过去的一次性任务：next_base 为 None，且被认成「已过期」
+        assert!(s.next_base(Local::now()).is_none());
+        assert!(s.one_shot_spent(Local::now()));
     }
 }
