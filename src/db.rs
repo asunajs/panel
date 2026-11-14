@@ -252,6 +252,11 @@ pub async fn set_plugin_suspended(db: &Db, name: &str, suspended: bool) -> Resul
 ///
 /// 懒加载的判据靠它：有界面的插件不能省（用户可能正打开着），
 /// 没有的才能等下一次到点前再装。首次加载时会补上这一行。
+///
+/// **只增不减**（MAX）：一次加载里 register_web / sidebar 的注册消息可能比 Loaded 晚到，
+/// 那样 Loaded 会先写下 0 —— 之后那条注册没来得及写就重启，库里就停在 0，下次启动
+/// 会把有界面的插件省掉（第 180 轮实测：mcloud 被跳过，界面打不开）。
+/// 单调的代价是「插件自己把界面删了」也会被当成有界面 —— 比界面打不开好。
 pub async fn note_surface(db: &Db, name: &str, has_web: bool, has_nav: bool) {
     let name = name.to_string();
     let _ = db
@@ -259,7 +264,9 @@ pub async fn note_surface(db: &Db, name: &str, has_web: bool, has_nav: bool) {
             c.execute(
                 "INSERT INTO plugins(name, path, enabled, has_web, has_nav)
                  VALUES(?1, '', 1, ?2, ?3)
-                 ON CONFLICT(name) DO UPDATE SET has_web=excluded.has_web, has_nav=excluded.has_nav",
+                 ON CONFLICT(name) DO UPDATE SET
+                   has_web = MAX(has_web, excluded.has_web),
+                   has_nav = MAX(has_nav, excluded.has_nav)",
                 rusqlite::params![name, has_web as i64, has_nav as i64],
             )
             .map(|_| ())
