@@ -113,6 +113,11 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 # musl 静态发布（.github/workflows/release.yml）要 vendored OpenSSL —— feature 语法
 # 要求 openssl-sys 是本 manifest 直接声明的依赖（它本来就在 Linux 的依赖图里：
 # native-tls → openssl）。只在 Linux 声明，别把 macOS 的构建卷进 OpenSSL。
+#
+# ⚠ 别为了瘦身把 native-tls 换成 rustls：插件 fetch 的 `tls: "native"` 是**逃生口**
+#   —— rustls 不实现任何 CBC 套件，只有 CBC 的主机（见 outbound.rs 的 fetch_native_json）
+#   在 rustls 那条路上永远握手失败。代价是 Linux 静态产物多 ~6MB OpenSSL，
+#   这是功能的价钱，不是浪费。macOS 那边 native-tls = Security.framework，所以小一截。
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl-sys = "0.9"
 
