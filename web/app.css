@@ -1673,10 +1673,6 @@ select option { background: var(--surface); color: var(--fg); }
   background: var(--surface-2); padding: 10px;
 }
 .notify-side .notify-list { display: flex; flex-direction: column; gap: 3px; max-height: 460px; overflow: auto; }
-.notify-side .notify-list:empty::after {
-  content: "还没有"; display: block; padding: 14px 6px; text-align: center;
-  font-size: 12px; color: var(--dim);
-}
 .nrow {
   display: flex; flex-direction: column; gap: 2px; width: 100%;
   padding: 7px 9px; border: 1px solid transparent; border-radius: 8px;
