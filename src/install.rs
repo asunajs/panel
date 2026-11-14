@@ -36,7 +36,8 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// 从 URL 末段猜插件文件名（`…/mcloud.zip` → `mcloud.zip`）。
 ///
-/// 只认 `.js` / `.zip`：和上传同一套规矩，别让「安装」变成「往插件目录写任意文件」的洞。
+/// 只认 `.js` / `.ts` / `.zip`：和上传同一套规矩，别让「安装」变成「往插件目录写
+/// 任意文件」的洞。`.ts` 会在落盘前用 OXC 擦掉类型、写成同名 `.js`（第 108 轮）。
 pub fn name_from_url(url: &str) -> Result<String, String> {
     let bare = url.split(['?', '#']).next().unwrap_or("");
     let last = bare
@@ -46,18 +47,18 @@ pub fn name_from_url(url: &str) -> Result<String, String> {
         .trim()
         .to_string();
     if last.is_empty() {
-        return Err("这个地址里看不出文件名，请显式给 name（x.js / x.zip）".to_string());
+        return Err("这个地址里看不出文件名，请显式给 name（x.js / x.ts / x.zip）".to_string());
     }
     check_name(&last)?;
     Ok(last)
 }
 
-/// 名字白名单：`.js` 或 `.zip`，且必须过 `upload` 那套文件名检查。
+/// 名字白名单：`.js` / `.ts` / `.zip`，且必须过 `upload` 那套文件名检查。
 fn check_name(name: &str) -> Result<(), String> {
     let lower = name.to_ascii_lowercase();
-    if !(lower.ends_with(".js") || lower.ends_with(".zip")) {
+    if !(lower.ends_with(".js") || lower.ends_with(".ts") || lower.ends_with(".zip")) {
         return Err(format!(
-            "只认 .js / .zip（这个是 {name}）—— 商店目录里的资产要么是单文件，要么打成 zip"
+            "只认 .js / .ts / .zip（这个是 {name}）—— 商店目录里的资产要么是单文件，要么打成 zip"
         ));
     }
     Ok(())
@@ -162,6 +163,10 @@ pub fn verify_sha256(data: &[u8], want: Option<&str>) -> Result<String, String> 
 
 /// 落盘：单文件 / zip 都交给 `upload::save`（那条路已经把穿越、符号链接、
 /// 隐藏段、zip bomb 全挡过了，这里不另写一份）。
+///
+/// `.ts` 是唯一需要先过一道 OXC 的：擦掉类型后**改名成 `.js` 再交给 upload** ——
+/// 面板的加载器只扫 `plugins/*.js`，留着 `.ts` 就是「装了但看不见」。
+/// sha256 校验在调用方对**原始 .ts 字节**做（和目录里写的值对得上），转译在落盘前。
 pub fn save_bytes(
     dir: &Path,
     name: &str,
@@ -169,7 +174,80 @@ pub fn save_bytes(
     overwrite: bool,
 ) -> Result<crate::upload::Saved, String> {
     check_name(name)?;
+    if name.to_ascii_lowercase().ends_with(".ts") {
+        let js = ts_to_js(data)?;
+        let stem = &name[..name.len() - 3];
+        let js_name = format!("{stem}.js");
+        return crate::upload::save(crate::upload::Kind::Plugins, dir, &js_name, &js, overwrite);
+    }
     crate::upload::save(crate::upload::Kind::Plugins, dir, name, data, overwrite)
+}
+
+/// 进程内 TypeScript → JavaScript：只做类型擦除（OXC 的 TypeScript transform）。
+/// 不 bundle、不解析 `panel:host`、不生成 sourcemap；输出仍是 ESM。
+///
+/// 实现和老面板 `src/market.rs::oxc_transpile` 同源（0.154.0）—— 那边验证过：
+/// import 原样保留、type/interface/enum 都能擦、语法错会报「TypeScript 解析失败」。
+pub fn ts_to_js(source: &[u8]) -> Result<Vec<u8>, String> {
+    use oxc_allocator::Allocator;
+    use oxc_codegen::Codegen;
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+    use oxc_transformer::{TransformOptions, Transformer};
+
+    let text = std::str::from_utf8(source)
+        .map_err(|_| "TypeScript 源文件不是 UTF-8，无法转译".to_string())?;
+    let allocator = Allocator::default();
+    let path = Path::new("plugin.ts");
+    let source_type =
+        SourceType::from_path(path).map_err(|e| format!("无法识别 .ts 源类型：{e}"))?;
+    let parsed = Parser::new(&allocator, text, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        let brief = parsed
+            .diagnostics
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!("TypeScript 解析失败：{brief}"));
+    }
+    let mut program = parsed.program;
+
+    // enum 的值需要 semantic 阶段求值（`enum { A = 1 << 2 }` 这类常量初始化）
+    let semantic = SemanticBuilder::new().with_enum_eval(true).build(&program);
+    if !semantic.diagnostics.is_empty() {
+        let brief = semantic
+            .diagnostics
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!("TypeScript 语义分析失败：{brief}"));
+    }
+    let scoping = semantic.semantic.into_scoping();
+
+    let options = TransformOptions::default();
+    let transformed =
+        Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
+    if !transformed.diagnostics.is_empty() {
+        let brief = transformed
+            .diagnostics
+            .iter()
+            .take(3)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!("TypeScript 转换失败：{brief}"));
+    }
+
+    let code = Codegen::new().build(&program).code;
+    if code.trim().is_empty() {
+        return Err("TypeScript 转译结果为空".to_string());
+    }
+    Ok(code.into_bytes())
 }
 
 /// 把本地**目录**装成一个插件包（`shop.js` + `shop.webui/` 这种形状）。
@@ -262,9 +340,11 @@ mod tests {
             name_from_url("https://x/y/mcloud.js?a=1#b").unwrap(),
             "mcloud.js"
         );
-        // 只认 .js / .zip：别的扩展名一律拒绝，别把安装变成往插件目录写任意文件
+        // 只认 .js / .ts / .zip：别的扩展名一律拒绝，别把安装变成往插件目录写任意文件
         assert!(name_from_url("https://x/y/run.sh").is_err());
         assert!(name_from_url("https://x/y/").is_err());
+        // .ts 现在也认（第 108 轮：落盘前转译成 .js）
+        assert_eq!(name_from_url("https://x/y/quark.ts").unwrap(), "quark.ts");
     }
 
     #[test]
@@ -348,9 +428,58 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("panel-inst-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let err = save_bytes(&dir, "x.sh", b"#!/bin/sh", true).unwrap_err();
-        assert!(err.contains("只认 .js / .zip"), "{err}");
+        assert!(err.contains("只认 .js / .ts / .zip"), "{err}");
         let ok = save_bytes(&dir, "x.js", b"export default 1", true).unwrap();
         assert_eq!(ok.files, vec!["x.js".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 老面板 `market.rs` 那条用例的 0.4 版本：擦类型、保 import、留 enum/async。
+    #[test]
+    fn ts_to_js_strips_types_and_keeps_imports() {
+        let source = br#"
+import host from 'panel:host';
+type Cfg = { url: string };
+interface Extra { ok: boolean }
+enum Color { Red = 1, Blue = 4 }
+const cfg: Cfg = { url: 'x' };
+export async function run(v: string): Promise<number> {
+  const extra: Extra = { ok: true };
+  await host.info(String(Color.Blue));
+  return v.length + (extra.ok ? Color.Blue : 0);
+}
+"#;
+        let js = String::from_utf8(ts_to_js(source).unwrap()).unwrap();
+        assert!(js.contains("panel:host"), "{js}");
+        assert!(!js.contains("type Cfg"), "{js}");
+        assert!(!js.contains("interface Extra"), "{js}");
+        assert!(!js.contains(": string"), "{js}");
+        assert!(js.contains("async function run"), "{js}");
+        assert!(js.contains("Color"), "{js}");
+        // 输出本身要能被 LLRT 编译（转译结果不是一堆 diagnostics 文本）
+        crate::engine::check_syntax(&js, "ts-probe").expect("转译后的 .js 该能编译");
+    }
+
+    #[test]
+    fn ts_to_js_rejects_invalid_typescript() {
+        let err = ts_to_js(b"const x: = 1;").unwrap_err();
+        assert!(err.contains("TypeScript 解析失败"), "{err}");
+        let err = ts_to_js(&[0xff, 0xfe]).unwrap_err();
+        assert!(err.contains("不是 UTF-8"), "{err}");
+    }
+
+    /// 关键形状：`.ts` 装完**落成 `.js`**（加载器只扫 plugins/*.js），且没有 .ts 残留。
+    #[test]
+    fn save_bytes_turns_ts_into_js() {
+        let dir = std::env::temp_dir().join(format!("panel-inst-ts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_bytes(&dir, "quark.ts", b"const x: number = 1;\nconsole.log(x);\n", true).unwrap();
+        assert_eq!(saved.files, vec!["quark.js".to_string()]);
+        let written = std::fs::read_to_string(dir.join("quark.js")).unwrap();
+        assert!(written.contains("console.log(x)"), "{written}");
+        assert!(!written.contains(": number"), "{written}");
+        assert!(!dir.join("quark.ts").exists(), "不该留 .ts 在插件目录里");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
