@@ -145,7 +145,7 @@ test('③ {type:expr, expr:"30 8 * * 1,3,5"} 能预览，且 JSON 一个字节�
   assert.equal(n.expr, '30 8 * * 1,3,5');
   assert.equal(n.type, 'expr');
   assert.equal(JSON.stringify(json), before, '调用过程中不能改入参');
-  assert.equal(S.toSentence(json), '30 8 * * 1,3,5 (expression)');
+  assert.equal(S.toSentence(json), '30 8 * * 1,3,5', '表达式原样显示，不加后缀');
 });
 
 test('③ 解析不了的表达式只报「无法预览」，不抛、不当配置错误', () => {
@@ -199,11 +199,35 @@ test('④ 秒级 @every 不归一化（没有对应单位），但照样能预�
   assert.equal(r.runs[1] - r.runs[0], 30e3);
 });
 
+test('④+ 表达式 + 抖动：抖动真的生效，且表达式本身一个字不改', () => {
+  const j = { type: 'expr', expr: '0 9 * * *', jitter: '5m', timezone: TZ };
+  assert.equal(S.toSentence(j), '0 9 * * * ± 5m', '短句要挂上 ± 尾巴');
+
+  const r = S.nextRuns(j, 5, { from: AT, taskId: 'demo/daily' });
+  assert.equal(r.ok, true, r.reason);
+  // 不能全都正好落在 09:00:00 —— 那就是没生效
+  const exact = r.runs.filter((ms) => {
+    const p = S.tzParts(ms, TZ);
+    return p.h === 9 && p.mi === 0 && p.s === 0;
+  });
+  assert.ok(exact.length <= 1, '抖动没生效，5 次里 ' + exact.length + ' 次是整点');
+  // 每次都在 09:00 ± 5m 内
+  for (const ms of r.runs) {
+    const p = S.tzParts(ms, TZ);
+    assert.ok(Math.abs(p.h * 60 + p.mi - 540) <= 5, '出了 ±5m：' + fmt(ms));
+  }
+  // 可复现：同一任务、同一拍，算几次都一样
+  assert.deepEqual(S.nextRuns(j, 5, { from: AT, taskId: 'demo/daily' }).runs, r.runs);
+  // 表达式本身没有被改写（既没拼 ~5m，也没被归一化）
+  assert.equal(j.expr, '0 9 * * *');
+  assert.equal(S.exportCron(j).cron, '0 9 * * *', '导出的是表达式本身，抖动在结构外');
+});
+
 test('④+ 表达式不被渲染/预览/导出改写（归一化必须是显式动作）', () => {
   // 这是真实踩到的坑：exportCron 内部先 normalize，把 `@every 2h` 变成 interval，
   // 再导出成 `0 *\/2 * * *` —— 「从现在起每 2 小时」被悄悄改成了「偶数整点」。
   const json = { type: 'expr', expr: '@every 2h', timezone: TZ };
-  assert.equal(S.toSentence(json), '@every 2h (expression)', '短句要原样显示');
+  assert.equal(S.toSentence(json), '@every 2h', '短句要原样显示');
   assert.equal(S.exportCron(json).cron, '@every 2h', '导出要原样，不许归一化');
 
   // 预览也按表达式算：从现在起每 2 小时，间隔恒为 2h（不是对齐到整点）
@@ -283,7 +307,7 @@ test('短句：六种类型的模板逐条对齐', () => {
   assert.equal(S.toSentence({ type: 'monthly', day: 'last', randomPick: false, at: '23:00', jitter: null, timezone: TZ }), 'every month on last day at 23:00');
   assert.equal(S.toSentence({ type: 'window', every: 'week', between: ['09:00', '18:00'], count: 2, timezone: TZ }), 'every week between 09:00 and 18:00, 2 times');
   assert.equal(S.toSentence({ type: 'once', at: '2026-12-01T09:00:00', jitter: null, timezone: TZ }), 'once at 2026-12-01T09:00:00');
-  assert.equal(S.toSentence({ type: 'expr', expr: '@daily', timezone: TZ }), '@daily (expression)');
+  assert.equal(S.toSentence({ type: 'expr', expr: '@daily', timezone: TZ }), '@daily');
 });
 
 // ---------------------------------------------------------------- 字段级校验

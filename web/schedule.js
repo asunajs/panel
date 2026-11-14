@@ -288,7 +288,9 @@
       case 'once':
         return 'once at ' + j.at + jt;
       case 'expr':
-        return (j.expr || '') + ' (expression)';
+        // 表达式原样显示（不加 (expression) 那种后缀，会跟表达式粘在一起被当成规则的一部分）；
+        // 抖动是单独的修饰符，照常挂 ± 尾巴。
+        return (j.expr || '（空表达式）') + jt;
       default:
         return '（未识别的规则）';
     }
@@ -658,9 +660,28 @@
     const out = [];
 
     if (j.type === 'expr') {
-      const runs = nextRunsCron(j.expr, count, fromMs, tz);
-      if (!runs) return { ok: false, runs: [], jitterNote: '', reason: '无法预览' };
-      return { ok: true, runs, jitterNote: '' };
+      // 多算一些基准时刻：抖动可能把某次推到 from 之前，那一次就跳过。
+      const bases = nextRunsCron(j.expr, count + 16, fromMs, tz);
+      if (!bases) return { ok: false, runs: [], jitterNote: '', reason: '无法预览' };
+      const jm = parseDur(j.jitter) || 0;
+      const runs = [];
+      for (let i = 0; i < bases.length && runs.length < count; i++) {
+        let t = bases[i];
+        if (jm) {
+          // 种子用「这一次的基准时刻」：同一次触发永远同一个偏移，与 from 无关。
+          // 上界钳到下一拍之前，保证不会盖住后一次、也不会把两次挤到一起。
+          const hi = i + 1 < bases.length ? bases[i + 1] - 1 : Infinity;
+          const delta = pick(jm * 2 + 1, taskId + '|' + bases[i]) - jm;
+          t = Math.min(bases[i] + delta, hi);
+        }
+        if (t > fromMs) runs.push(t);
+      }
+      return {
+        ok: runs.length > 0,
+        runs,
+        jitterNote: jm ? '抖动按 任务ID+这次触发的基准时刻 哈希算出，可复现：实际执行时间与此一致' : '',
+        reason: runs.length ? undefined : '无法预览',
+      };
     }
 
     const jMs = parseDur(j.jitter) || 0;

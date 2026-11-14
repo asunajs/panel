@@ -1225,6 +1225,7 @@ function renderScheduleForm() {
       refreshSchedDerived();
     });
     const mag = schedRow('幅度', num, unitSel);
+    mag.classList.add('sched-narrow');
     mag.classList.toggle('hidden', !cb.checked);
     body.append(mag);
 
@@ -1247,6 +1248,10 @@ function renderScheduleForm() {
     body.append(lab);
   }
   if (j.type === 'window') body.append(el('p', 'hint', '窗口内随机本身就是随机，不再叠加抖动。'));
+  if (j.type === 'expr') {
+    body.append(el('p', 'hint',
+      '表达式本身原样交给调度器、一个字都不改；抖动是单独的修饰符，由调度器按任务 ID 算。'));
+  }
   adv.append(body);
   box.append(adv);
 
@@ -1328,7 +1333,7 @@ async function submitTaskSchedule() {
   }
   // 落库：表达式原样交出去；结构化计划存成 `json:{...}` —— 调度器认得，
   // 而且**和预览同一份数据**，所以「接下来 5 次」就是实际会跑的时刻。
-  const expr = schedJson.type === 'expr'
+  const expr = schedJson.type === 'expr' && !schedJson.jitter
     ? String(schedJson.expr || '').trim()
     : 'json:' + JSON.stringify(schedJson);
   await saveTaskSchedule(expr);

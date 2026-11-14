@@ -57,7 +57,7 @@
 | monthly | `every month on day {day} at {at}`；`last` → `on last day`；`randomPick` → `on a random day` |
 | window | `every {every} between {start} and {end}, {count} time(s)` |
 | once | `once at {at}` |
-| expr | 原样 `{expr}` + ` (expression)` |
+| expr | 原样 `{expr}` + `[± {jitter}]`（不加 `(expression)` 那种后缀——会跟表达式粘在一起被当成规则的一部分） |
 
 ## 4. 随机语义（可复现）
 
@@ -84,6 +84,10 @@
   `{ok:false, reason:"无法预览"}` —— **不视为配置错误**。
 - 预览为空是**最终兜底校验**（优先级高于字段级校验），会阻止保存 —— `expr` 除外。
 - 表单里改任何一个控件都会重画短句 + 预览 + 字段提示。
+- **表达式的抖动是「修饰符」，不是往表达式里拼东西**：表达式原样交给调度器、一个字不改，
+  抖动由调度器按 `hash(任务ID + 这次触发的基准时刻)` 单独算，钳在相邻两拍之间。
+  所以短句是 `0 9 * * * ± 5m`，存的是 `json:{"type":"expr","expr":"0 9 * * *","jitter":"5m"}`。
+  ⚠ 别用面板原生的 `~5m` 后缀来做这件事——那是**每次重新掷骰子**，预览说不了「下次是哪一刻」。
 - **但「高级选项」里的控件不重画整张表单**，只更新 JSON 和派生区。早先每个勾选都走
   整表重画，而 `<details>` 是新建的、不带 `open`，于是「点一下勾选，折叠自己收起来了」，
   焦点也一起丢。现在展开状态记在 `schedAdvOpen` 里，切类型/点星期这类**必须**重画的动作
