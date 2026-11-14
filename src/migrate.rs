@@ -274,11 +274,6 @@ pub fn discover(extra: Option<&Path>) -> Vec<Candidate> {
                 }
             }
         }
-        if let Ok(rd) = std::fs::read_dir(home.join("mobile/workspace")) {
-            for e in rd.flatten() {
-                dirs.push(e.path().join("data"));
-            }
-        }
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -752,6 +747,12 @@ pub struct Opts {
     pub with_runs_history: bool,
     /// 旧 push_config 里的通知渠道合并进 config.json 的 notify 键（渠道默认停用）
     pub with_notify: bool,
+    /// 脚本落到哪个目录。
+    ///
+    /// 0.4 的脚本目录可以由 `PANEL_SCRIPTS_DIR` 改（不是固定 `<data>/scripts`）。
+    /// 迁移如果照旧写死 `<data>/scripts`，在设了这个变量的实例上就是
+    /// 「文件搬过去了、面板看不见」—— 所以调用方要把真实目录传进来。
+    pub scripts_dir: Option<PathBuf>,
 }
 
 /// 一次 apply 的结果。
@@ -828,7 +829,12 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<usize, String> {
 }
 
 /// 把库里之外的东西一起搬：plugin-data / scripts / auth.json。**只增不删**。
-fn copy_extras(source_dir: &Path, target_dir: &Path, opts: &Opts) -> Result<(usize, usize, bool), String> {
+fn copy_extras(
+    source_dir: &Path,
+    target_dir: &Path,
+    scripts_dir: &Path,
+    opts: &Opts,
+) -> Result<(usize, usize, bool), String> {
     let mut files = 0usize;
     let mut scripts = 0usize;
     let mut token = false;
@@ -836,7 +842,7 @@ fn copy_extras(source_dir: &Path, target_dir: &Path, opts: &Opts) -> Result<(usi
         files = copy_tree(&source_dir.join("plugin-data"), &target_dir.join("plugin-data"))?;
     }
     if opts.with_scripts {
-        scripts = copy_tree(&source_dir.join("scripts"), &target_dir.join("scripts"))?;
+        scripts = copy_tree(&source_dir.join("scripts"), scripts_dir)?;
     }
     if opts.adopt_token {
         let from = source_dir.join("auth.json");
@@ -1160,8 +1166,13 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
     // 它们是文件，跟 SQLite 事务没关系，失败了也不该回滚已经写好的状态。
     let source_dir = p.source.parent().unwrap_or_else(|| Path::new(""));
     let target_dir = target_db.parent().unwrap_or_else(|| Path::new(""));
+    // 脚本目录：优先用调用方给的（面板配的 PANEL_SCRIPTS_DIR），否则退回 <data>/scripts
+    let scripts_dir = opts
+        .scripts_dir
+        .clone()
+        .unwrap_or_else(|| target_dir.join("scripts"));
     let (plugin_data_files, scripts_files, adopted_token) =
-        copy_extras(source_dir, target_dir, opts)?;
+        copy_extras(source_dir, target_dir, &scripts_dir, opts)?;
 
     // ── __script__ 脚本任务 → 0.4 脚本（文件拷进 data/scripts + 记录）────────
     let mut script_jobs_files = 0usize;
@@ -1171,7 +1182,6 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
     let mut script_jobs_kept = 0usize;
     if opts.with_tasks && has_table(&src, "jobs") {
         let tasks_dir = source_dir.join("tasks");
-        let scripts_dir = target_dir.join("scripts");
         std::fs::create_dir_all(&scripts_dir)
             .map_err(|e| format!("建脚本目录失败 {}: {e}", scripts_dir.display()))?;
         dst
@@ -1725,6 +1735,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         with_runs_history,
         with_notify,
         adopt_token,
+        // 设了 PANEL_SCRIPTS_DIR 就跟着它走，否则 <data>/scripts（和面板的默认一致）
+        scripts_dir: std::env::var_os("PANEL_SCRIPTS_DIR").map(PathBuf::from),
     };
     let a = apply(&from, &target, &opts)?;
     println!();

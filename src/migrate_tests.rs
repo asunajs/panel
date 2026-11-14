@@ -714,3 +714,37 @@ fn script_name_that_04_cannot_hold_is_reported_not_imported() {
 fn tasks_dir_of(src: &Path) -> PathBuf {
     src.join("tasks/py")
 }
+
+/// 脚本要落到**面板真正在用的**脚本目录里。
+///
+/// 0.4 的脚本目录可以被 `PANEL_SCRIPTS_DIR` 改掉，不是固定 `<data>/scripts`。
+/// 迁移如果把文件写死到 `<data>/scripts`，在设了这个变量的实例上就是
+/// 「搬完了、面板看不见」—— 实测线上日常实例就是这么配的。
+#[test]
+fn scripts_follow_the_configured_scripts_dir() {
+    let dir = tmp("scriptsdir");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    make_source_03(&src);
+
+    let data = dir.join("dst");
+    std::fs::create_dir_all(&data).unwrap();
+    let elsewhere = dir.join("elsewhere/scripts");
+    let target = data.join("panel.db");
+    let a = apply(
+        src.to_str().unwrap(),
+        &target,
+        &Opts {
+            with_tasks: true,
+            scripts_dir: Some(elsewhere.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(a.script_jobs_files, 1);
+    assert!(elsewhere.join("hello.py").is_file(), "脚本要落到指定的目录");
+    assert!(
+        !data.join("scripts/hello.py").is_file(),
+        "不能同时往 <data>/scripts 凑一份"
+    );
+}
