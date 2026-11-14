@@ -57,6 +57,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
+# 结构化调度计划（src/plan.rs）要按 JSON 里的 IANA 时区算「下一次」。
+# 从 dev-dependencies 提到正式依赖：cron.rs 的夏令时回归用例本来就依赖它。
+chrono-tz = "0.10"
 # 本来就在依赖树里（llrt_core → hyper → http），加为直接依赖不增加编译单元。
 # ssrf.rs 用 http::Uri 取 host；hostapi.rs 用 Full/BodyExt 造请求体、读响应帧。
 http = "1"
@@ -108,8 +111,6 @@ native-tls = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 
 [dev-dependencies]
-# cron.rs 的夏令时回归用例要真实时区表（America/New_York 的跳变日）。
-chrono-tz = "0.10"
 # 路由级测试用 oneshot 直接打 Router，不起真监听。axum 自己就依赖
 # tower/util（axum-0.8 Cargo.toml:268-271），所以不增加编译单元。
 tower = { version = "0.5", default-features = false, features = ["util"] }
