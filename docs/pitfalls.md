@@ -538,7 +538,8 @@
       重入后旧循环永远不退出 → 两条 SSE 同时读）；`closeDrawer()` 清掉 `#src-hl`
       （源码高亮层按 0.165 span/字节算，70 KB 的 JS ≈ 2 万节点，抽屉关了还挂着）。
 
-    修后（同一副本、同一探针 `scripts/dom-probe.mjs`，20s/视图）：
+    修后（同一副本、同一探针 `scripts/dom-probe.mjs`，20s/视图；60s 窗口与「运行记录连停 300s」
+    的读数见 [verification.md](verification.md)）：
 
     | 视图 | 挂载 | GC 后总节点 | 原始斜率 |
     |---|---|---|---|
