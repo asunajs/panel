@@ -69,6 +69,10 @@ const WEB_SRC = process.env.DOM_PROBE_WEB_SRC || path.join(ROOT, 'web');
 // 重建抖动也会让它变正，那不是泄漏（DevTools 截图看到的正是这个数）。
 const NET_ELEMS_FAIL = Number(process.env.DOM_PROBE_NET_ELEMS_FAIL || 50);
 const NET_NODES_FAIL = Number(process.env.DOM_PROBE_NET_NODES_FAIL || 300);
+// 原始斜率（含游离节点，不靠 GC 兜）也从第 187 轮起判：修掉「文本节点一换一扔」之后
+// 静置时它该是 0/s（实测 0.00）；再涨回来就说明有人又把「每轮重建 / 每轮 textContent=」加回来了。
+// 「每秒净增」的参考值（只进 report，不做判定）：把它当成读数，别当门禁 ——
+// 无头 Edge 上这一层量不出来（见下方判定段里的说明）。
 
 const BROWSERS = [
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
@@ -402,19 +406,41 @@ async function main() {
     '--no-default-browser-check',
     '--disable-gpu',
     '--disable-extensions',
-    'about:blank',
+    // 后台/被遮挡的页面 Chrome 会停掉 rAF、降频 setInterval —— 而 render() 挂在 rAF 上，
+    // 一停摆就量出「零增长」的假读数。这三条把节流关掉。
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    'http://127.0.0.1:' + PORT + '/', // 直接把面板当**第一个标签**打开，别从 about:blank 转
   ], { stdio: 'ignore' });
 
+  // Edge 会自己开一个 `edge://sync-confirmation-dialog` 的 page 并且**抢前台**。
+  // 于是我们这一页成了后台标签：`setInterval` 被降频、`requestAnimationFrame` 直接停摆，
+  // 而 `render()` 正是挂在 rAF 上 —— API 照调、一个节点都不重画，探针量出一条假的零增长
+  // （第 187 轮踩到：同一份修前代码，探针 0.00/s，手动起实例 7.97/s）。把它关掉。
   const target = await waitFor(async () => {
     const list = await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).json();
-    // Edge 会自己开一个 edge://sync-confirmation-dialog 的 page，别抓错目标
-    return list.find((t) => t.type === 'page' && (t.url || '').includes('127.0.0.1:' + PORT)) ||
-      list.find((t) => t.type === 'page');
-  }, 25000, '浏览器页面');
+    return list.find((t) => t.type === 'page' && (t.url || '').includes('127.0.0.1:' + PORT));
+  }, 30000, '浏览器页面');
+  // 认准自己那一页之后再收拾别的 page：关早了（这时只有 Edge 自己的页面）会把浏览器直接收掉。
+  try {
+    const listNow = await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).json();
+    for (const t of listNow) {
+      if (t.type === 'page' && t.id !== target.id && /^(edge|chrome|devtools):/.test(t.url || '')) {
+        await fetch('http://127.0.0.1:' + CDP_PORT + '/json/close/' + t.id).catch(() => {});
+      }
+    }
+  } catch (_) {}
 
   cdp = await connect(target.webSocketDebuggerUrl);
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
+  // 无头浏览器里目标页可能是**后台标签页**：rAF 直接被暂停，而 `render()` 正是挂在
+  // requestAnimationFrame 上 —— 页面的 5s 轮询照跑、API 照调，但一个节点都不重画，
+  // 探针就会量出一条假的「零增长」（第 187 轮踩到：同一份修前代码，探针 0.00/s，
+  // 手动起实例 7.97/s）。强制让页面「一直被聚焦 + 前台」。
+  try { await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }); } catch (_) {}
+  try { await cdp.send('Page.bringToFront'); } catch (_) {}
   await cdp.send('Network.enable');
   await cdp.send('HeapProfiler.enable');
   if (DOM_AGENT) {
@@ -487,6 +513,17 @@ async function main() {
       netElems: end.elems - start.elems,
       netNodes: start.nodes == null ? null : end.nodes - start.nodes,
       slopeElems: sE, slopeNodes: sN, changedSamples: moved, samples: samples.length,
+      // 「每秒净增」：丢掉开头两拍（切视图那一下的异步还在落定），按两端差值算速率。
+      // 为什么不判斜率：插件刚好在窗口里注册完这类**一次性**抖动会把斜率拉起来（实测 3.6/s），
+      // 而它只贡献一次、不是每轮都造；为什么不判中位数：每 5s 造一批的话，
+      // 10 拍里只有 2 拍在涨，中位数是 0 —— 正好把要找的东西漏掉。
+      rawRate: (() => {
+        const raw = samples.filter((x) => !x.afterGc && x.nodes != null);
+        if (raw.length < 4) return 0;
+        const tail = raw.slice(2);
+        const dt = (tail[tail.length - 1].at - tail[0].at) / 1000;
+        return dt > 0 ? (tail[tail.length - 1].nodes - tail[0].nodes) / dt : 0;
+      })(),
       apiCalls,
       elemsSeries: samples.map((s) => s.elems),
       nodeSeries: samples.map((s) => s.nodes),
@@ -689,6 +726,19 @@ async function main() {
     check(s.label + ' GC 后净增在阈值内', ok,
       '挂载 ' + dd(s.elems0, s.elems1) + '（阈值 +' + NET_ELEMS_FAIL + '），' +
       '总节点 ' + dd(s.nodes0, s.nodes1) + '（阈值 +' + NET_NODES_FAIL + '），GC 前峰值 ' + fmt(s.rawNodes1));
+  }
+  // 原始斜率/每秒净增**只报不判**（第 187 轮的结论，别再加回来当门禁）：
+  // 无头 Edge 里同一份「修前」代码也量出 0.00/s —— 探针页面上 `textContent =` 走的是
+  // 原地 setData（MutationObserver 看到 characterData，addedNodes 是 0），所以「文本节点
+  // 一换一扔」这一层在这个环境里根本构造不出来。真实浏览器（以及 scripts/dom-growth.mjs
+  // 起的前台页）能构造：同一份代码 8.2/s。这一层的守卫只能是静态的（check-pitfalls.sh）。
+  if (stays.length) {
+    console.log('  （原始斜率只报不判：无头 Edge 上 textContent 走原地 setData，' +
+      '这一层要用 scripts/dom-growth.mjs 对真实实例量）');
+    for (const s of stays) {
+      console.log('    ' + s.label + '：每秒净增 ' + s.rawRate.toFixed(2) + '，斜率 ' +
+        s.slopeNodes.toFixed(2) + '/s，GC 前峰值 ' + fmt(s.rawNodes1));
+    }
   }
   if (stages.runsLong) {
     const s = stages.runsLong;

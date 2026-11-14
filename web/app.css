@@ -1551,6 +1551,15 @@ select option { background: var(--surface); color: var(--fg); }
 }
 .code-editor textarea.editor::selection { background: var(--accent-soft); }
 
+/* 大文件的纯文本模式（highlight.js 加的 .plain）：高亮层藏起来，textarea 自己
+   显示自己的文字 —— 原生输入性能。超限文件每键重建整棵 span 树会把输入法打断，
+   这条是它的退路；行号还在，只是不上色。 */
+.code-editor.plain .code-hl { display: none; }
+.code-editor.plain textarea.editor {
+  color: var(--fg);
+  -webkit-text-fill-color: currentColor;
+}
+
 /* 颜色只走 token：两套主题自动跟着变 */
 .tok-kw { color: var(--accent); }
 .tok-str { color: var(--ok); }
@@ -1651,3 +1660,88 @@ select option { background: var(--surface); color: var(--fg); }
 
 /* 抽屉里的小节标题（第 177 轮） */
 .drawer-sub { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-2); }
+
+/* ---------- 通知工作台：左列表 / 右配置（第 186 轮） ---------- */
+
+.notify-work {
+  display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 14px;
+  align-items: start; margin-top: 12px;
+}
+.notify-side {
+  display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--surface-2); padding: 10px;
+}
+.notify-side .notify-list { display: flex; flex-direction: column; gap: 3px; max-height: 460px; overflow: auto; }
+.notify-side .notify-list:empty::after {
+  content: "还没有"; display: block; padding: 14px 6px; text-align: center;
+  font-size: 12px; color: var(--dim);
+}
+.nrow {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 7px 9px; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; text-align: left; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.nrow:hover { background: var(--surface); }
+.nrow.is-on { background: var(--surface); border-color: var(--accent); box-shadow: var(--shadow-sm); }
+.nrow-name { font-size: 13px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 6px; }
+.nrow-sub { font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nrow.is-off .nrow-name { color: var(--dim); font-weight: 500; }
+.nrow-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none;
+}
+.nrow.is-off .nrow-dot { background: var(--line-strong); }
+.nrow.is-bad .nrow-dot { background: var(--err); }
+.notify-side-foot { display: flex; gap: 6px; padding-top: 4px; border-top: 1px solid var(--line); }
+.notify-main { min-height: 300px; }
+
+.chan-group {
+  border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px;
+  margin-bottom: 12px; background: var(--surface-2);
+}
+.chan-group > h4 {
+  margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--dim);
+  letter-spacing: .02em;
+}
+.chan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.chan-grid .wide, .chan-line.wide { grid-column: 1 / -1; }
+.chan-line { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; align-items: center; }
+.chan-label { font-size: 12.5px; color: var(--dim); }
+.chan-hint { grid-column: 2; font-size: 11.5px; color: var(--dim); margin-top: -4px; }
+.chan-secret { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.chan-secret .input { flex: 1 1 auto; min-width: 0; }
+.chan-secret-set { font-size: 12.5px; color: var(--fg-2); flex: 1 1 auto; }
+.chan-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.chan-preview {
+  font-size: 12.5px; color: var(--fg-2); background: var(--surface);
+  border: 1px dashed var(--line); border-radius: 8px; padding: 7px 10px;
+  word-break: break-all;
+}
+.chan-refs { font-size: 12px; color: var(--dim); margin: 6px 0 0; }
+.json-editor {
+  width: 100%; min-height: 320px; resize: vertical;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--fg);
+}
+.notify-json { margin-top: 12px; }
+.notify-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 40px 12px; color: var(--dim); text-align: center;
+}
+.notify-empty h3 { margin: 0; font-size: 14px; color: var(--fg-2); font-weight: 600; }
+.notify-empty p { margin: 0; font-size: 12.5px; max-width: 44ch; line-height: 1.6; }
+.notify-empty .chan-actions { justify-content: center; }
+
+@media (max-width: 900px) {
+  .notify-work { grid-template-columns: minmax(0, 1fr); }
+  .notify-list { max-height: 220px; }
+  .chan-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.chan-checks { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+.chan-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--fg-2); cursor: pointer;
+}
+.chan-check input { accent-color: var(--accent); }

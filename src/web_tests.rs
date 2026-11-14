@@ -3775,3 +3775,204 @@ async fn plugin_stats_aggregate_runs_by_window() {
     let (status, _) = get(&app, "/api/plugins/nope/stats").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ── 通知：渠道 / 推送两层（第 186 轮）────────────────────────────────────
+
+fn two_layer_config() -> Value {
+    json!({
+        "notify": {
+            "min_level": "warn",
+            "channels": [
+                { "id": "ops", "name": "运维群", "kind": "wecom", "url": "https://qyapi.weixin.qq.com/x?key=k1" },
+                { "id": "mail", "kind": "smtp", "host": "h", "to": ["a@b.c"], "pass": "p" }
+            ]
+        }
+    })
+}
+
+/// 推送的增删改 + 删渠道被引用时 409（删推送不动渠道）。
+#[tokio::test]
+async fn routes_crud_and_a_referenced_channel_cannot_be_deleted() {
+    let (app, _plugins, _data, store) = setup_dirs("routes").await;
+    store.set(&two_layer_config());
+
+    // 老配置：GET 会合成「每条渠道一条推送」
+    let (_, body) = get(&app, "/api/notify").await;
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2, "{body}");
+    assert_eq!(body["routes"][0]["id"], "ops-default");
+    assert_eq!(body["routes"][0]["name"], "运维群");
+
+    // 新建推送
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/notify/routes",
+            Some(json!({ "name": "只收熔断", "channel": "ops", "events": ["circuit"],
+                          "title_template": "[告警] {{title}}" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let routes = body["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), 3, "两条合成的 + 新建的一条");
+    let id = routes.last().unwrap()["id"].as_str().unwrap().to_string();
+
+    // 改它
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PATCH",
+            &format!("/api/notify/routes/{id}"),
+            Some(json!({ "enabled": false })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let r = body["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(id))
+        .unwrap();
+    assert_eq!(r["enabled"], false, "停用后配置还在");
+
+    // 删被推送引用的渠道 → 409，话说清是谁在用
+    let (status, body) = send(&app, with_csrf("DELETE", "/api/notify/channels/ops", None)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("推送"), "{body}");
+
+    // 删推送 → 渠道保留
+    let (status, body) = send(&app, with_csrf("DELETE", &format!("/api/notify/routes/{id}"), None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = get(&app, "/api/notify").await;
+    assert!(
+        body["channels"].as_array().unwrap().iter().any(|c| c["id"] == "ops"),
+        "删推送不该动渠道"
+    );
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2);
+}
+
+/// 复制渠道：新 id、密钥一起带过来（再清空后磁盘上是空的）。
+#[tokio::test]
+async fn duplicating_a_channel_copies_the_secret() {
+    let (app, _plugins, _data, store) = setup_dirs("dup").await;
+    store.set(&json!({
+        "notify": { "channels": [
+            { "id": "sct", "name": "Server酱", "kind": "serverchan", "secret": "SCTxxx" }
+        ]}
+    }));
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/notify/channels/sct/duplicate", Some(json!({})))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "sct-2");
+    let copy = body["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "sct-2")
+        .unwrap();
+    assert_eq!(copy["has_secret"], true, "密钥要跟着复制");
+    assert_eq!(copy["name"], "Server酱（副本）");
+
+    // 显式清空：PATCH 传空串（界面「清除」按钮走的就是这条）
+    let (status, body) = send(
+        &app,
+        with_csrf("PATCH", "/api/notify/channels/sct-2", Some(json!({ "secret": "" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let copy = body["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "sct-2")
+        .unwrap();
+    assert_eq!(copy["has_secret"], false, "清除之后就是没有");
+}
+
+/// 全局四项：只改给了的键，别碰渠道和推送。
+#[tokio::test]
+async fn settings_patch_only_touches_what_it_was_given() {
+    let (app, _plugins, _data, store) = setup_dirs("set").await;
+    store.set(&two_layer_config());
+
+    let (status, body) = send(
+        &app,
+        with_csrf("PATCH", "/api/notify/settings", Some(json!({ "min_level": "error" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["min_level"], "error");
+
+    let (_, body) = get(&app, "/api/notify").await;
+    assert_eq!(body["min_level"], "error");
+    assert_eq!(body["channels"].as_array().unwrap().len(), 2, "渠道不能被顺手清掉");
+
+    // 不认识的键 → 400
+    let (status, _) = send(
+        &app,
+        with_csrf("PATCH", "/api/notify/settings", Some(json!({ "whatever": 1 }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// 整段替换（高级 JSON）：好的生效，坏的 400 且不落盘。
+#[tokio::test]
+async fn putting_the_whole_section_replaces_it_or_rejects_it() {
+    let (app, _plugins, data, store) = setup_dirs("put").await;
+    store.set(&two_layer_config());
+
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/notify",
+            Some(json!({
+                "min_level": "info",
+                "channels": [{ "id": "only", "kind": "webhook", "url": "https://e.com/h" }],
+                "routes": [{ "id": "r1", "channel": "only" }]
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = get(&app, "/api/notify").await;
+    assert_eq!(body["channels"].as_array().unwrap().len(), 1, "整段替换掉了");
+    assert_eq!(body["routes"][0]["id"], "r1");
+
+    // 写坏：引用不存在的渠道 → 400，磁盘上的东西不能变
+    let path = data.join("config.json");
+    let before = std::fs::read_to_string(&path).unwrap();
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/notify",
+            Some(json!({ "channels": [{ "id": "a", "kind": "webhook", "url": "https://e.com/h" }],
+                          "routes": [{ "id": "r", "channel": "nope" }] })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "坏配置不许落盘");
+}
+
+/// 老配置（只有渠道）上点「停用」：先把合成视图物化成真 routes，再改那一条。
+#[tokio::test]
+async fn toggling_a_synthesized_route_materializes_it() {
+    let (app, _plugins, _data, store) = setup_dirs("mat").await;
+    store.set(&two_layer_config());
+
+    let (status, body) = send(
+        &app,
+        with_csrf("POST", "/api/notify/routes/ops-default/toggle", Some(json!({}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let routes = body["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), 2, "物化之后两条都在");
+    let ops = routes.iter().find(|r| r["id"] == "ops-default").unwrap();
+    assert_eq!(ops["enabled"], false);
+}

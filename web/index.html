@@ -328,28 +328,48 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
             <div class="tab-pane hidden" id="tab-notify">
               <section class="panel">
                 <header class="panel-head">
-                  <h2>通知渠道</h2>
+                  <h2>通知</h2>
+                  <span class="chip" id="notify-counts">—</span>
                   <div class="toolbar">
                     <button class="btn btn-sm" id="notify-test-all" type="button">全部试发</button>
+                    <button class="btn btn-sm" id="notify-json" type="button">高级：编辑 JSON</button>
                     <button class="btn btn-sm" id="notify-reload" type="button">刷新</button>
                   </div>
                 </header>
                 <div class="panel-body">
-                  <p class="settings-note">渠道写在 <code>config.json</code> 的 <code>notify</code> 键里（含 SMTP 凭据，文件是 0600）。这里的「试发」会真的发一条，并在下面的发件箱里留痕。</p>
+                  <p class="settings-note">左边是推送规则、右边是它的配置。
+                    渠道（怎么发：类型 + 地址 + token）和推送（什么时候发给谁）分开管 ——
+                    停用推送只哑这一条，删推送不动渠道。渠道与全局设置落在 <code>config.json</code>
+                    的 <code>notify</code> 段（文件 0600，密钥只显示 ***）。</p>
                   <div class="src-error hidden" id="notify-error"></div>
-                  <div id="notify-channels"></div>
+                  <div class="notify-work" id="notify-work">
+                    <aside class="notify-side">
+                      <div class="seg" id="notify-seg" role="group" aria-label="推送 / 渠道">
+                        <button class="seg-item" type="button" data-seg="routes" aria-pressed="true">推送</button>
+                        <button class="seg-item" type="button" data-seg="channels" aria-pressed="false">渠道</button>
+                        <button class="seg-item" type="button" data-seg="settings" aria-pressed="false">全局</button>
+                      </div>
+                      <div class="notify-list" id="notify-rows"></div>
+                      <div class="notify-side-foot">
+                        <button class="btn btn-sm btn-primary" id="notify-add" type="button">+ 新建推送</button>
+                      </div>
+                    </aside>
+                    <div class="notify-main" id="notify-main"></div>
+                  </div>
+                  <div class="notify-json hidden" id="notify-json-box"></div>
                 </div>
               </section>
               <section class="panel">
                 <header class="panel-head">
                   <h2>发件箱</h2>
-                  <span class="chip" id="notify-counts">—</span>
+                  <span class="chip" id="notify-outbox-counts">—</span>
                   <div class="toolbar">
                     <button class="btn btn-sm" id="notify-retry" type="button">重试失败的</button>
                   </div>
                 </header>
                 <div class="panel-body">
-                  <p class="settings-note">外部渠道失败是常态（对端重启、网络抖）。每条通知先落发件箱再投递，失败按 1m / 5m / 15m / 1h / 6h 退避重试，5 次后放弃；放弃的行留在这里，可以手动重试。</p>
+                  <p class="settings-note">外部渠道失败是常态（对端重启、网络抖）。每条通知先落发件箱再投递，
+                    失败按 1m / 5m / 15m / 1h / 6h 退避重试，5 次后放弃；放弃的行留在这里，可以手动重试。</p>
                   <div id="notify-outbox"></div>
                 </div>
               </section>

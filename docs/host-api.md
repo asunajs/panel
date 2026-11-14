@@ -67,9 +67,15 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 #### 注册任务
 
 ```js
-register_cron(name, cron, budget_ms?, opts?)   // 定时任务
-register_handler(name, handler)                // 只手动/被派发的任务
+register_cron(name, cron, budget_ms?, opts?)    // 定时任务
+register_handler(name, handler, budget_ms?)     // 只手动/被派发的任务
 ```
+
+`register_handler` 的 `budget_ms`（**0.4.1 起**）：这条手动任务的执行预算，缺省 30000。
+多请求的长链路（十几个请求带间隔的那种）在注册时就要声明，否则跑到一半被预算掐死 ——
+表现是任务失败、error 里一句「预算耗尽」。钳法与 `register_cron` 相同（`[1, 5400000]`）。
+同名 cron 任务来注册时（`register_cron` + 同名 handler 的标准配法），预算以 `register_cron`
+给的为准 —— 那条建议里本来就有它。
 
 `cron` 认五段式（`0 8,20 * * *`）和 `@every <n><s|m|h|d>`。`opts`（可选）：
 

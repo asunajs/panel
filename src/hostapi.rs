@@ -41,6 +41,9 @@ pub enum Registration {
     Handler {
         plugin: String,
         name: String,
+        /// 手动任务的执行预算（毫秒）。0.4.1 起 `register_handler` 的第三个参数，
+        /// 不给就是默认 30 秒 —— 长链路任务要在注册时显式声明。
+        budget_ms: u64,
     },
     /// 插件自己带 HTTP 路由（`register_web`）：宿主把 `/plugins/<name>/*` 里
     /// 没命中静态文件的请求交给它，handler 名固定 `__route`。
@@ -113,7 +116,9 @@ const WRAP: &str = r#"(raw) => {
     register_cron: async (name, cron, budget_ms, opts) =>
       raw.register_cron(String(name), String(cron), budget_ms == null ? undefined : Number(budget_ms),
         opts == null ? undefined : JSON.stringify(opts)),
-    register_handler: raw.register_handler,
+    register_handler: async (name, func, budget_ms) =>
+      raw.register_handler(String(name), func,
+        budget_ms == null ? undefined : Number(budget_ms)),
     register_web: raw.register_web,
     // 侧栏入口：{title, order}；传字符串当标题也收（插件作者凭直觉写过 register_nav('云盘')）
     sidebar: async (v) => JSON.parse(await raw.sidebar(typeof v === 'string' ? JSON.stringify({ title: v }) : j(v ?? {}))),
@@ -883,6 +888,7 @@ async fn op_register_handler<'js>(
     ctx: Ctx<'js>,
     name: String,
     func: Value<'js>,
+    budget_ms: Undefined<u64>,
 ) -> Result<()> {
     let h = host(&ctx)?;
     if !func.is_function() {
@@ -892,10 +898,13 @@ async fn op_register_handler<'js>(
     // 不跨 idle() 持有 JS 引用（idle 全程持锁，见 docs/architecture.md §2.1）。
     let handlers: Object<'js> = ctx.globals().get("__handlers")?;
     handlers.set(name.as_str(), func)?;
+    // 手动任务的预算：不给就是默认 30 秒；和 register_cron 同一个语义（0.4.1 起）。
+    let budget = budget_ms.0.unwrap_or(crate::scheduler::DEFAULT_BUDGET_MS);
     h.reg
         .send(Registration::Handler {
             plugin: h.plugin.clone(),
             name,
+            budget_ms: budget,
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
 }

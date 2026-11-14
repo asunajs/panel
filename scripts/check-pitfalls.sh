@@ -129,6 +129,20 @@ else
   bad "sameAsLast 只有 $SIG_N 处 —— 每 5s 全量重建会把「DOM 节点」顶成上升曲线"
 fi
 
+# pitfalls §98（第 187 轮）：就地改文本必须用 setText（改 nodeValue），不能用 textContent =。
+# `node.textContent = x` 每次都扔掉旧 Text 节点、造一个新的：12 张卡 + 每秒的「N 秒前更新」
+# 就是 8.4 节点/秒，性能监视器上看着像泄漏（实测强制 GC 后回到基线，纯垃圾）。
+if [ "$(grep -c '^function setText(' web/app.js)" = "1" ]; then
+  HOT_TC=$(( $(awk '/^function setCard\(/,/^}/' web/app.js | grep -c 'textContent =') + $(awk '/^function paintSync\(/,/^}/' web/app.js | grep -c 'textContent =') ))
+  if [ "$HOT_TC" = "0" ]; then
+    ok '每轮刷新的文本走 setText（改 nodeValue，不换节点）'
+  else
+    bad "setCard/paintSync 里还有 $HOT_TC 处 textContent = —— 每 5s 会造一批垃圾节点"
+  fi
+else
+  bad 'web/app.js 里没有 setText() —— 就地改文本会退回到 textContent =（节点一换一扔）'
+fi
+
 # ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
 # 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
 if python3 scripts/check-css-tokens.py; then
@@ -137,9 +151,18 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# pitfalls §99（0.4.1，cmcc 适配）：register_handler 的 WRAP 必须显式填参再转调。
+# op 是 4 参（含 Undefined<u64> 预算）；图省事写回透传 `register_handler: raw.register_handler`
+# 的话，「少传预算」的调用会直接 arity 炸（§2.3 的老规则换了张脸）。
+if grep -q 'register_handler: raw.register_handler' src/hostapi.rs 2>/dev/null; then
+  bad 'WRAP 里 register_handler 退回了透传 —— 少传预算的调用会 arity 炸（pitfalls §99）'
+else
+  ok 'register_handler 的 WRAP 是显式形参包装（手动任务预算 0.4.1 靠它传进去）'
+fi
+
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 16 条坑的守卫全过"
+  echo "ok: 17 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

@@ -514,3 +514,31 @@ runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一�
 
 它还和登录共用那道**很严**的限流（PBKDF2 放大）：5 次突发、之后每 12 秒补一次 ——
 所以脚本里狂刷改口令会拿到 **429**，那不是功能坏了。
+
+## 通知（渠道与推送）
+
+完整的字段语义、渠道类型表、定时推送见 [notify.md](notify.md)。这里只钉**形状**。
+
+```
+GET  /api/notify                       → { ok, error, min_level, mute, quiet_hours, dedupe_secs,
+                                            channels[], routes[], health{}, counts{}, outbox[] }
+POST /api/notify/channels              ← 渠道对象（id 可省）        → { ok, channels[] }
+PATCH/DELETE /api/notify/channels/{id}                            → { ok, channels[] }
+POST /api/notify/channels/{id}/toggle                             → { ok, enabled, channels[] }
+POST /api/notify/channels/{id}/duplicate                          → { ok, id, channels[] }
+POST /api/notify/channels/{id}/test                               → { ok, results[] }
+POST /api/notify/routes                ← 推送对象（id 可省）        → { ok, routes[] }
+PATCH/DELETE /api/notify/routes/{id}                              → { ok, routes[] }
+POST /api/notify/routes/{id}/toggle                               → { ok, enabled, routes[] }
+POST /api/notify/routes/{id}/test                                 → { ok, route, results[] }
+PATCH /api/notify/settings             ← 全局四项                  → { ok, min_level, mute, quiet_hours, dedupe_secs }
+PUT   /api/notify                      ← 整段 notify               → { ok, notify }
+```
+
+几条容易踩的：
+
+- **响应里没有明文密钥**：`secret` / `pass` 一律 `***`，另给 `has_secret`；写接口的响应也是视图。
+- **PATCH 只覆盖给了的键**：所以「留空 = 不改」；要**清空**密钥就显式发 `"secret": ""`。
+- **删渠道被引用 → 409**，`error` 里列出引用它的推送；删推送永远不碰渠道。
+- **老配置**（只有 `channels`）读出来会合成 `<id>-default` 推送；任何写操作会先物化再改。
+- `PUT /api/notify` 与 `PATCH /api/notify/settings` 都做语义校验，**坏配置不落盘**（400）。

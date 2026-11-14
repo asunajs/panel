@@ -131,6 +131,26 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/** 原地改文本：一个节点都不新建、也不扔。
+ *
+ *  为什么不用 `node.textContent = x`：它每次都**丢掉旧的 Text 节点、造一个新的**。
+ *  于是「数字每 5s 刷一遍」的卡片、每秒刷一次的「N 秒前」，就成了 DevTools
+ *  「DOM 节点」里一条只涨不跌的锯齿 —— 第 187 轮实测仪表盘 **8.8 节点/秒**，
+ *  而挂载元素（`getElementsByTagName('*').length`）**零变化**：涨的全是这种
+ *  「一换一扔」的文本节点，等 GC 才回落。只改 `nodeValue` 不换节点，
+ *  值变了也照样不产生垃圾。 */
+function setText(node, value) {
+  if (!node) return;
+  const v = value == null ? '' : String(value);
+  const only = node.childNodes.length === 1 ? node.firstChild : null;
+  if (only && only.nodeType === 3) {
+    if (only.nodeValue !== v) only.nodeValue = v; // 原地改，不造新节点
+    return;
+  }
+  if (!v && !node.firstChild) return;
+  node.textContent = v;
+}
+
 /** 重建去抖：按「这次渲染真正读到的字段」算签名，没变就不重建。
  *
  *  为什么要有它：面板每 5s 轮询一次 /api/state，渲染函数都是「清空 + 重造」。
@@ -262,10 +282,10 @@ function setSync(ok) {
 function paintSync() {
   const t = $('sync-text');
   if (!t) return;
-  if (state.syncFailed) { t.textContent = '连接中断，重试中'; return; }
-  if (!state.lastSync) { t.textContent = '正在读取…'; return; }
+  if (state.syncFailed) { setText(t, '连接中断，重试中'); return; }
+  if (!state.lastSync) { setText(t, '正在读取…'); return; }
   const s = Math.round((Date.now() - state.lastSync) / 1000);
-  t.textContent = s < 3 ? '刚刚更新' : s + ' 秒前更新';
+  setText(t, s < 3 ? '刚刚更新' : s + ' 秒前更新');
 }
 
 function banner(msg, isOk) {
@@ -442,11 +462,25 @@ function setCard(box, label, value, note, small) {
   if (!c) return false;
   const v = c.querySelector('.card-value');
   if (v) {
-    v.textContent = value;
-    if (small) v.append(el('small', '', small));
+    // 数字这一格可能是「文本 + <small> 单位」两段：只改文本节点的 nodeValue，
+    // 单位那截没变就复用 —— 每 5s 重造这两段就是那条 8.8 节点/秒的锯齿（第 187 轮）。
+    const head = v.firstChild;
+    const want = value == null ? '' : String(value);
+    if (head && head.nodeType === 3) {
+      if (head.nodeValue !== want) head.nodeValue = want;
+    } else {
+      v.insertBefore(document.createTextNode(want), v.firstChild);
+    }
+    const unit = v.querySelector('small');
+    if (small) {
+      if (unit) setText(unit, small);
+      else v.append(el('small', '', small));
+    } else if (unit) {
+      unit.remove();
+    }
   }
   const n = c.querySelector('.card-note');
-  if (n) n.textContent = note || '';
+  if (n) setText(n, note || '');
   return true;
 }
 
@@ -552,7 +586,7 @@ function renderHealthCards() {
   const list = h.warnings || [];
   if (!list.length) { warn.classList.add('hidden'); warn.textContent = ''; return; }
   warn.classList.remove('hidden');
-  warn.textContent = '需要看一眼：' + list.join('；');
+  setText(warn, '需要看一眼：' + list.join('；'));
 }
 
 // ---------------------------------------------------------------- 表格
@@ -1412,10 +1446,10 @@ function setConn(ok) {
   const box = $('engine-state');
   const dot = box.querySelector('.dot');
   dot.className = 'dot ' + (ok ? 'dot-ok' : 'dot-err');
-  $('engine-text').textContent = ok ? '引擎正常' : '日志流断开，重连中…';
+  setText($('engine-text'), ok ? '引擎正常' : '日志流断开，重连中…');
   const p = $('health-pill');
   p.className = 'pill ' + (ok ? 'pill-ok' : 'pill-warn');
-  p.lastChild.textContent = ok ? '引擎健康' : '连接异常';
+  if (p.lastChild) setText(p.lastChild, ok ? '引擎健康' : '连接异常');
 }
 
 // ---------------------------------------------------------------- 抽屉
@@ -2337,7 +2371,26 @@ const NOTIFY_STATE = { pending: [], failed: [], ok: [] };
 
 /** 拉一次渠道 + 发件箱，重画这一页。 */
 // 每种渠道要填哪些字段（第 170 轮）。界面上只显示相关的，避免「12 种渠道一屏 20 个框」。
-const CHANNEL_FIELDS = {
+/* ---------- 通知工作台（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁 ---------- */
+
+const NOTIFY_KINDS = {
+  webhook: 'webhook（通用 JSON）',
+  wecom: '企业微信机器人',
+  dingtalk: '钉钉（可加签）',
+  feishu: '飞书（可加签）',
+  slack: 'Slack',
+  discord: 'Discord',
+  telegram: 'Telegram Bot',
+  bark: 'Bark（iOS 推送）',
+  ntfy: 'ntfy',
+  gotify: 'Gotify',
+  serverchan: 'Server酱',
+  custom: '自定义（预设之外）',
+  smtp: 'SMTP 邮件',
+};
+
+// 每种类型在「连接」组里显示哪些字段
+const KIND_FIELDS = {
   webhook: ['url', 'headers'],
   wecom: ['url'],
   dingtalk: ['url', 'secret'],
@@ -2348,380 +2401,1158 @@ const CHANNEL_FIELDS = {
   bark: ['url', 'secret'],
   ntfy: ['url', 'topic'],
   gotify: ['url', 'secret', 'priority'],
-  custom: ['url', 'template', 'headers'],
+  serverchan: ['secret'],
+  custom: ['url', 'method', 'content_type', 'headers', 'template'],
   smtp: ['host', 'port', 'tls', 'user', 'pass', 'from', 'to'],
 };
 
-const CHANNEL_LABELS = {
-  webhook: 'webhook（通用 JSON）',
-  wecom: 'wecom 企业微信',
-  dingtalk: 'dingtalk 钉钉（可加签）',
-  feishu: 'feishu 飞书（可加签）',
-  slack: 'slack',
-  discord: 'discord',
-  telegram: 'telegram（bot）',
-  bark: 'bark（iOS 推送）',
-  ntfy: 'ntfy',
-  gotify: 'gotify',
-  custom: 'custom（自定义模板）',
-  smtp: 'smtp（邮件）',
+const KIND_HINT = {
+  serverchan: 'SendKey 在 Server酱 后台取（SCT 开头）。地址留空 = 官方 sctapi.ftqq.com。',
+  wecom: '这条 URL 里的 key= 那段就是凭据 —— 换 token 就是换这一段。',
+  slack: 'Slack incoming webhook 的整条 URL 就是凭据。',
+  discord: 'Discord webhook 的整条 URL 就是凭据。',
+  dingtalk: 'URL 里带 access_token；加签机器人再填 secret（SEC 开头）。',
+  feishu: 'URL 里带 hook id；开了签名校验再填 secret。',
+  telegram: 'secret 填 bot token（123456:ABC…），chat_id 填会话 id。',
+  bark: 'secret 填设备 key；地址留空 = api.day.app。',
+  gotify: 'secret 填 app token，地址填服务器根地址。',
+  custom: '预设之外用它：自己写 method / 编码 / 模板，变量 {{title}} {{body}} {{level}} {{plugin}} {{task}}。',
 };
 
-/**
- * 渠道表单。新建与编辑共用：existing 为空就是新建。
- * 编辑时密钥不回显（后端只给 ***），留空表示「不改」。
- */
-function openChannelForm(box, existing, after) {
-  clear(box);
-  const cur = existing || {};
-  const kind = cur.kind || 'webhook';
-  const form = el('div', 'chan-form');
+// 工作台状态（不落盘；切走再回来尽量保住选中项）
+const NOTIFY = { seg: 'routes', route: null, channel: null, data: null, json: false };
 
-  const line = (label, node, hint) => {
-    const row = el('label', 'chan-line');
-    row.append(el('span', 'chan-label', label));
-    row.append(node);
-    if (hint) row.append(el('span', 'chan-hint', hint));
-    return row;
-  };
-  const input = (name, placeholder, value) => {
-    const i = el('input', 'input');
-    i.type = name === 'pass' || name === 'secret' ? 'password' : 'text';
-    i.dataset.f = name;
-    i.placeholder = placeholder || '';
-    i.value = value === undefined || value === null ? '' : String(value);
-    return i;
-  };
-
-  // 头两行：id 与类型
-  const idIn = input('id', '留空自动生成', cur.id || '');
-  if (existing) idIn.disabled = true;
-  form.append(line('名字', idIn));
-
-  const kindSel = el('select', 'input');
-  for (const [k, label] of Object.entries(CHANNEL_LABELS)) {
-    const o = el('option', '', label);
-    o.value = k;
-    if (k === kind) o.selected = true;
-    kindSel.append(o);
+function splitList(text) {
+  const out = [];
+  for (const part of String(text || '').split(',')) {
+    const v = part.trim();
+    if (v && out.indexOf(v) < 0) out.push(v);
   }
-  kindSel.dataset.f = 'kind';
-  if (existing) kindSel.disabled = true;
-  form.append(line('类型', kindSel));
+  return out;
+}
 
-  const lvlSel = el('select', 'input');
-  for (const [v, label] of [['', '跟随全局'], ['info', 'info 及以上'], ['warn', 'warn 及以上'], ['error', '只 error']]) {
-    const o = el('option', '', label);
-    o.value = v;
-    if ((cur.min_level || '') === v) o.selected = true;
-    lvlSel.append(o);
+function notifyKindLabel(k) {
+  return NOTIFY_KINDS[k] || k;
+}
+
+// URL 里的凭据打码：key / token / access_token / sign 的值换成 ***，其余照旧（方便核对域名）。
+// 表格和预览都走它 —— 截图发出去不该带着别人的 SendKey。
+function notifyMask(u) {
+  if (!u) return '';
+  return String(u).replace(/([?&](?:key|token|access_token|sign|secret|sendkey|device_key)=)[^&]*/gi, '$1***');
+}
+
+function notifyEventLabel(e) {
+  const m = { task_fail: '任务失败', circuit: '熔断', plugin: '插件喊话', system: '面板' };
+  return m[e] || e;
+}
+
+function notifyRouteSummary(r) {
+  let when;
+  if (r.at && r.at.cron) {
+    when = '定时 ' + r.at.cron;
+  } else if (r.events && r.events.length) {
+    when = r.events.map(notifyEventLabel).join(' / ');
+  } else {
+    when = '全部事件';
   }
-  lvlSel.dataset.f = 'min_level';
-  form.append(line('门槛', lvlSel, '低于它的通知不进这个渠道（铃铛里照旧有）'));
+  return when + ' → ' + (r.channel_name || r.channel);
+}
 
-  // 一把把所有可能出现的字段都建出来，按类型显示/隐藏
-  const url = input('url', 'https://…', cur.url || '');
-  const secret = input('secret', existing && cur.has_secret ? '已设置，留空不改' : '密钥 / token', '');
-  const chatId = input('chat_id', 'telegram 的 chat_id', cur.chat_id || '');
-  const topic = input('topic', 'ntfy 的 topic', cur.topic || '');
-  const priority = input('priority', '5', cur.priority === undefined ? '' : cur.priority);
-  const template = el('textarea', 'editor chan-tpl');
-  template.rows = 3;
-  template.dataset.f = 'template';
-  template.value = cur.template || '';
-  const headers = el('textarea', 'editor chan-tpl');
-  headers.rows = 2;
-  headers.dataset.f = 'headers';
-  headers.value = cur.headers && cur.headers.length ? JSON.stringify(Object.fromEntries(cur.headers.map((h) => [h, ''])) , null, 2) : '';
-  headers.placeholder = '{"Authorization": "Bearer …"}';
-  const host = input('host', 'smtp.example.com', cur.host || '');
-  const port = input('port', '465', cur.port || '');
-  const tls = input('tls', 'implicit / starttls / none', cur.tls || 'implicit');
-  const user = input('user', 'me@example.com', cur.user || '');
-  const pass = input('pass', existing && cur.pass === '***' ? '已设置，留空不改' : '', '');
-  const from = input('from', '默认同 user', cur.from || '');
-  const to = input('to', 'a@b.c, d@e.f', (cur.to || []).join(', '));
-
-  const events = input('events', 'task_fail,circuit,plugin,system（留空=全收）', (cur.events || []).join(','));
-  const includeP = input('include_plugins', 'mcloud*,other（留空=全部插件）', (cur.include_plugins || []).join(','));
-  const excludeP = input('exclude_plugins', 'noisy-plugin（这些插件不收）', (cur.exclude_plugins || []).join(','));
-  const quiet = input('quiet_hours', '23:00-08:00（留空=跟随全局）', cur.quiet_hours || '');
-
-  const fields = { url, secret, chat_id: chatId, topic, priority, template, headers,
-    host, port, tls, user, pass, from, to, events, include_plugins: includeP,
-    exclude_plugins: excludeP, quiet_hours: quiet };
-  const rows = {
-    url: line('地址', url, kind === 'telegram' ? '可留空（默认 api.telegram.org）' : ''),
-    secret: line('密钥', secret),
-    chat_id: line('chat_id', chatId),
-    topic: line('主题', topic),
-    priority: line('优先级', priority, 'gotify 用，默认 5'),
-    template: line('模板', template, '变量：{{title}} {{body}} {{level}} {{plugin}} {{task}} {{payload}}'),
-    headers: line('请求头', headers, 'JSON 对象，可留空'),
-    host: line('服务器', host),
-    port: line('端口', port),
-    tls: line('TLS', tls, 'implicit / starttls / none'),
-    user: line('账号', user),
-    pass: line('密码', pass),
-    from: line('发件人', from),
-    to: line('收件人', to, '多个用逗号分开'),
-  };
-
-  const applyKind = () => {
-    const k = kindSel.value;
-    const want = new Set(CHANNEL_FIELDS[k] || []);
-    for (const [name, node] of Object.entries(rows)) {
-      node.classList.toggle('hidden', !want.has(name));
-    }
-  };
-  for (const node of Object.values(rows)) form.append(node);
-  // 过滤与静默：所有类型都适用，单独一截
-  form.append(el('p', 'chan-sub', '这条渠道收什么'));
-  form.append(line('事件', events, 'task_fail 任务失败 / circuit 熔断 / plugin 插件喊话 / system 面板'));
-  form.append(line('只收插件', includeP, '支持 mcloud* 这种前缀通配'));
-  form.append(line('不收插件', excludeP));
-  form.append(line('静默', quiet, '这段时间只在面板留铃铛，外部渠道推到结束后再发'));
-  kindSel.addEventListener('change', applyKind);
-  applyKind();
-
-  const bar = el('div', 'actions');
-  const save = el('button', 'btn btn-primary', existing ? '保存' : '添加');
-  save.type = 'button';
-  const cancel = el('button', 'btn', '取消');
-  cancel.type = 'button';
-  cancel.addEventListener('click', () => clear(box));
-  bar.append(save, cancel);
-  form.append(bar);
-  const err = el('p', 'hint-err hidden');
-  form.append(err);
-
-  save.addEventListener('click', async () => {
-    const k = kindSel.value;
-    const body = { kind: k };
-    const want = CHANNEL_FIELDS[k] || [];
-    for (const name of want) {
-      const node = fields[name];
-      if (!node) continue;
-      const v = (node.value || '').trim();
-      // 密钥留空 = 不改（编辑时后端只回 ***，不能拿 *** 覆盖真值）
-      if (name === 'secret' || name === 'pass') {
-        if (v) body[name] = v;
-        continue;
-      }
-      if (!v) continue;
-      if (name === 'priority' || name === 'port') {
-        const n = Number(v);
-        if (!Number.isFinite(n)) {
-          err.textContent = name + ' 得是数字';
-          err.classList.remove('hidden');
-          return;
-        }
-        body[name] = n;
-      } else if (name === 'to') {
-        body.to = v.split(/[,，\s]+/).filter(Boolean);
-      } else if (name === 'headers') {
-        try {
-          body.headers = JSON.parse(node.value);
-        } catch (e) {
-          err.textContent = '请求头不是合法 JSON：' + e.message;
-          err.classList.remove('hidden');
-          return;
-        }
-      } else {
-        body[name] = v;
-      }
-    }
-    if (!existing) {
-      const id = (idIn.value || '').trim();
-      if (id) body.id = id;
-    }
-    const lvl = lvlSel.value;
-    if (lvl) body.min_level = lvl;
-    // 过滤与静默：空就是「清掉这一项」，所以总是显式写
-    const listOf = (v) => v.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
-    body.events = listOf(events.value);
-    body.include_plugins = listOf(includeP.value);
-    body.exclude_plugins = listOf(excludeP.value);
-    body.quiet_hours = quiet.value.trim();
-    save.disabled = true;
-    try {
-      if (existing) {
-        await api('/api/notify/channels/' + encodeURIComponent(existing.id), { method: 'PATCH', body });
-        notify('渠道 ' + existing.id + ' 已保存', 'ok');
-      } else {
-        await api('/api/notify/channels', { method: 'POST', body });
-        notify('渠道已添加', 'ok');
-      }
-      clear(box);
-      if (after) after();
-    } catch (e) {
-      err.textContent = e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败');
-      err.classList.remove('hidden');
-    } finally {
-      save.disabled = false;
-    }
-  });
-
-  // 忘了这一步的话表单就建在内存里没人挂上去（第一次就踩了：点按钮页面没反应）
-  box.append(form);
-  return form;
+function notifyChannelTarget(c) {
+  if (c.kind === 'smtp') {
+    return ((c.to || []).join(', ') + ' @ ' + (c.host || '') + ':' + (c.port || '')).trim();
+  }
+  if (c.kind === 'telegram') return 'chat ' + (c.chat_id || '?');
+  if (c.kind === 'serverchan') return c.has_secret ? 'SendKey ***' : '（没填 SendKey）';
+  if (c.kind === 'ntfy') return (notifyMask(c.url || '') + '/' + (c.topic || '')).replace(/\/+$/, '');
+  return notifyMask(c.url || '') || '（没填地址）';
 }
 
 async function renderNotifyTab() {
-  const box = $('notify-channels');
   const errBox = $('notify-error');
-  const out = $('notify-outbox');
-  const counts = $('notify-counts');
-  if (!box) return;
+  const list = $('notify-rows');
+  if (!list) return;
   let d;
   try {
     d = await api('/api/notify');
   } catch (e) {
-    clear(box);
-    box.append(el('p', 'hint-err', e.message || '读不到通知配置'));
+    clear(list);
+    list.append(el('div', 'nrow-sub', e.message || '读不到通知配置'));
+    return;
+  }
+  NOTIFY.data = d;
+  errBox.classList.toggle('hidden', d.ok !== false);
+  errBox.textContent = d.ok === false ? ('配置有问题：' + d.error) : '';
+  $('notify-counts').textContent =
+    '待发 ' + d.counts.pending + ' · 成功 ' + d.counts.ok + ' · 放弃 ' + d.counts.failed;
+  const routes = d.routes || [];
+  const chans = d.channels || [];
+  if (NOTIFY.seg === 'routes') {
+    if (!routes.some((r) => r.id === NOTIFY.route)) NOTIFY.route = routes.length ? routes[0].id : null;
+  } else if (!chans.some((c) => c.id === NOTIFY.channel)) {
+    NOTIFY.channel = chans.length ? chans[0].id : null;
+  }
+  renderNotifySide();
+  renderNotifyMain();
+  renderNotifyOutbox();
+}
+
+function renderNotifySide() {
+  const d = NOTIFY.data;
+  if (!d) return;
+  const list = $('notify-rows');
+  clear(list);
+  for (const btn of document.querySelectorAll('#notify-seg .seg-item')) {
+    btn.setAttribute('aria-pressed', btn.dataset.seg === NOTIFY.seg ? 'true' : 'false');
+  }
+  const addBtn = $('notify-add');
+  addBtn.textContent = NOTIFY.seg === 'routes' ? '+ 新建推送' : '+ 添加渠道';
+  addBtn.classList.toggle('hidden', NOTIFY.seg === 'settings');
+  if (NOTIFY.seg === 'routes') {
+    for (const r of d.routes || []) {
+      const row = el('button', 'nrow');
+      row.type = 'button';
+      if (r.id === NOTIFY.route) row.classList.add('is-on');
+      if (!r.enabled || !r.channel_enabled) row.classList.add('is-off');
+      if (!r.channel_ok) row.classList.add('is-bad');
+      const name = el('span', 'nrow-name');
+      name.append(el('span', 'nrow-dot'));
+      name.append(document.createTextNode(r.name || r.id));
+      row.append(name);
+      row.append(el('div', 'nrow-sub', notifyRouteSummary(r)));
+      row.addEventListener('click', () => {
+        NOTIFY.route = r.id;
+        renderNotifySide();
+        renderNotifyMain();
+      });
+      list.append(row);
+    }
+  } else {
+    for (const c of d.channels || []) {
+      const row = el('button', 'nrow');
+      row.type = 'button';
+      if (c.id === NOTIFY.channel) row.classList.add('is-on');
+      if (!c.enabled) row.classList.add('is-off');
+      const name = el('span', 'nrow-name');
+      name.append(el('span', 'nrow-dot'));
+      name.append(document.createTextNode(c.name || c.id));
+      row.append(name);
+      row.append(el('div', 'nrow-sub', notifyKindLabel(c.kind) + ' · ' + notifyChannelTarget(c)));
+      row.addEventListener('click', () => {
+        NOTIFY.channel = c.id;
+        renderNotifySide();
+        renderNotifyMain();
+      });
+      list.append(row);
+    }
+  }
+}
+
+// 小工具：一行「标签 + 控件 +（可选）提示」
+function notifyLine(label, node, hint, wide) {
+  const line = el('div', 'chan-line' + (wide ? ' wide' : ''));
+  line.append(el('span', 'chan-label', label));
+  line.append(node);
+  if (hint) line.append(el('span', 'chan-hint', hint));
+  return line;
+}
+
+function notifyInput(value, placeholder, type) {
+  const i = el('input', 'input');
+  i.type = type || 'text';
+  i.placeholder = placeholder || '';
+  i.value = value === undefined || value === null ? '' : String(value);
+  return i;
+}
+
+function notifySelect(pairs, cur) {
+  const s = el('select', 'input');
+  for (const pair of pairs) {
+    const o = el('option', '', pair[1]);
+    o.value = pair[0];
+    if ((cur || '') === pair[0]) o.selected = true;
+    s.append(o);
+  }
+  return s;
+}
+
+function notifyGroup(title) {
+  const g = el('div', 'chan-group');
+  g.append(el('h4', '', title));
+  return g;
+}
+
+function notifyEmpty(box, title, text, buttons) {
+  const wrap = el('div', 'notify-empty');
+  wrap.append(el('h3', '', title));
+  wrap.append(el('p', '', text));
+  const acts = el('div', 'chan-actions');
+  for (const b of buttons) acts.append(b);
+  wrap.append(acts);
+  box.append(wrap);
+  return wrap;
+}
+
+
+function renderNotifyMain() {
+  const box = $('notify-main');
+  if (!box) return;
+  clear(box);
+  const d = NOTIFY.data;
+  if (!d) return;
+  if (NOTIFY.seg === 'settings') {
+    renderNotifySettings(box);
+    return;
+  }
+  if (NOTIFY.draft && ((NOTIFY.seg === 'routes' && !NOTIFY.draft.id) || (NOTIFY.seg === 'channels' && !NOTIFY.draft.id))) {
+    if (NOTIFY.seg === 'routes') renderRouteEditor(box, NOTIFY.draft);
+    else renderChannelEditor(box, NOTIFY.draft);
+    return;
+  }
+  if (NOTIFY.seg === 'routes') {
+    const r = (d.routes || []).find((x) => x.id === NOTIFY.route);
+    if (!r) {
+      const add = el('button', 'btn btn-primary', '新建推送');
+      add.type = 'button';
+      add.addEventListener('click', () => notifyAdd());
+      const toChan = el('button', 'btn', '去加渠道');
+      toChan.type = 'button';
+      toChan.addEventListener('click', () => {
+        NOTIFY.seg = 'channels';
+        renderNotifySide();
+        renderNotifyMain();
+      });
+      notifyEmpty(
+        box,
+        '还没有推送规则',
+        '推送 = 什么时候、把什么内容、发到哪个渠道。先有一个渠道（怎么发），再建推送（发给谁）。',
+        [add, toChan],
+      );
+      return;
+    }
+    renderRouteEditor(box, r);
+  } else {
+    const c = (d.channels || []).find((x) => x.id === NOTIFY.channel);
+    if (!c) {
+      const add = el('button', 'btn btn-primary', '添加渠道');
+      add.type = 'button';
+      add.addEventListener('click', () => notifyAdd());
+      notifyEmpty(
+        box,
+        '还没有渠道',
+        '渠道是投递端：企业微信机器人、Server酱、SMTP 邮件、自定义 webhook 都算。一个渠道可以被多条推送引用。',
+        [add],
+      );
+      return;
+    }
+    renderChannelEditor(box, c);
+  }
+}
+
+function notifyCheck(label, checked) {
+  const wrap = el('label', 'chan-check');
+  const i = el('input');
+  i.type = 'checkbox';
+  i.checked = !!checked;
+  wrap.append(i);
+  wrap.append(document.createTextNode(label));
+  return { node: wrap, input: i };
+}
+
+function notifyFoot(box, buttons) {
+  const foot = el('div', 'chan-actions');
+  for (const b of buttons) foot.append(b);
+  box.append(foot);
+  return foot;
+}
+
+function notifyBtn(text, kind, onClick) {
+  const b = el('button', 'btn' + (kind ? ' ' + kind : ''), text);
+  b.type = 'button';
+  if (onClick) b.addEventListener('click', onClick);
+  return b;
+}
+
+// ---------------------------------------------------------------- 推送编辑器
+
+function renderRouteEditor(box, r) {
+  const d = NOTIFY.data;
+  const chans = d.channels || [];
+
+  // ---- 基本 ----
+  const g1 = notifyGroup('基本');
+  const grid1 = el('div', 'chan-grid');
+  const name = notifyInput(r.name || r.id, '比如 任务失败 → 手机');
+  const chanPairs = chans.map((c) => [c.id, (c.name || c.id) + ' · ' + notifyKindLabel(c.kind)]);
+  if (!r.channel_ok) chanPairs.unshift([r.channel, r.channel + '（渠道缺失！）']);
+  const chan = notifySelect(chanPairs, r.channel);
+  const en = notifyCheck('启用', r.enabled);
+  grid1.append(notifyLine('名字', name));
+  grid1.append(notifyLine('渠道', chan));
+  const enLine = el('div', 'chan-line');
+  enLine.append(el('span', 'chan-label', '状态'));
+  enLine.append(en.node);
+  grid1.append(enLine);
+  if (!r.channel_ok) {
+    grid1.append(
+      notifyLine('', el('span', 'chan-hint', '这条推送引用的渠道已经不在了，不会投递。选一个现有渠道再保存。'), ''),
+    );
+  }
+  g1.append(grid1);
+  box.append(g1);
+
+  // ---- 什么时候推 ----
+  const g2 = notifyGroup('什么时候推');
+  const mode = r.at && r.at.cron ? 'at' : 'events';
+  const seg = el('div', 'seg');
+  const segEvents = el('button', 'seg-item', '事件触发');
+  const segAt = el('button', 'seg-item', '定时推送');
+  segEvents.type = 'button';
+  segAt.type = 'button';
+  segEvents.setAttribute('aria-pressed', mode === 'events' ? 'true' : 'false');
+  segAt.setAttribute('aria-pressed', mode === 'at' ? 'true' : 'false');
+  seg.append(segEvents);
+  seg.append(segAt);
+  g2.append(seg);
+
+  const eventsBox = el('div');
+  const atBox = el('div');
+  atBox.classList.toggle('hidden', mode !== 'at');
+  eventsBox.classList.toggle('hidden', mode === 'at');
+
+  // 事件触发
+  const evWrap = el('div', 'chan-checks');
+  const EVENTS = [
+    ['task_fail', '任务失败'],
+    ['circuit', '熔断'],
+    ['plugin', '插件喊话'],
+    ['system', '面板自身'],
+  ];
+  const evInputs = {};
+  for (const pair of EVENTS) {
+    const c = notifyCheck(pair[1], (r.events || []).indexOf(pair[0]) >= 0);
+    evInputs[pair[0]] = c.input;
+    evWrap.append(c.node);
+  }
+  eventsBox.append(evWrap);
+  eventsBox.append(
+    el('p', 'chan-hint', '一个都不勾 = 全部事件都收。插件名支持前缀通配，比如 mcloud*。'),
+  );
+  const eg = el('div', 'chan-grid');
+  const inc = notifyInput((r.include_plugins || []).join(','), '只收这些插件，逗号分隔（空 = 全收）');
+  const exc = notifyInput((r.exclude_plugins || []).join(','), '这些插件不收，逗号分隔');
+  eg.append(notifyLine('只收', inc));
+  eg.append(notifyLine('不收', exc));
+  eventsBox.append(eg);
+
+  // 定时推送
+  const ag = el('div', 'chan-grid');
+  const cron = notifyInput((r.at && r.at.cron) || '', '0 9 * * *（分 时 日 月 周）');
+  ag.append(notifyLine('cron', cron));
+  const content = notifySelect(
+    [
+      ['summary', '最近 24 小时运行摘要'],
+      ['fixed', '固定文本（自己写）'],
+    ],
+    (r.at && r.at.content) || 'summary',
+  );
+  ag.append(notifyLine('内容', content));
+  const bodyTpl = el('textarea', 'input');
+  bodyTpl.rows = 3;
+  bodyTpl.placeholder = '固定文本模式下的正文，可用 {{date}} {{time}}';
+  bodyTpl.value = (r.at && r.at.body_template) || '';
+  ag.append(notifyLine('正文', bodyTpl, '', true));
+  const nextHint = el(
+    'p',
+    'chan-hint',
+    r.at && r.at.next
+      ? '下一次：' + new Date(r.at.next).toLocaleString()
+      : '保存后会算出下一次触发时间。',
+  );
+  ag.append(nextHint);
+  atBox.append(ag);
+  g2.append(eventsBox);
+  g2.append(atBox);
+  box.append(g2);
+
+  const syncMode = (m) => {
+    segEvents.setAttribute('aria-pressed', m === 'events' ? 'true' : 'false');
+    segAt.setAttribute('aria-pressed', m === 'at' ? 'true' : 'false');
+    eventsBox.classList.toggle('hidden', m === 'at');
+    atBox.classList.toggle('hidden', m !== 'at');
+    seg.dataset.mode = m;
+  };
+  seg.dataset.mode = mode;
+  segEvents.addEventListener('click', () => syncMode('events'));
+  segAt.addEventListener('click', () => syncMode('at'));
+
+  // ---- 标题 ----
+  const g3 = notifyGroup('推送标题');
+  const titleTpl = notifyInput(
+    r.title_template || '',
+    '[告警] {{title}}（{{plugin}}）',
+  );
+  const preview = el('div', 'chan-preview', '');
+  const renderPreview = () => {
+    const tpl = titleTpl.value.trim();
+    const sample = tpl
+      ? tpl
+          .replace(/\{\{title\}\}/g, '任务失败')
+          .replace(/\{\{level\}\}/g, 'warn')
+          .replace(/\{\{plugin\}\}/g, 'mcloud')
+          .replace(/\{\{task\}\}/g, 'sign')
+          .replace(/\{\{time\}\}/g, '09:12')
+          .replace(/\{\{date\}\}/g, '2026-11-14')
+      : '任务失败';
+    preview.textContent = '预览：' + sample;
+  };
+  titleTpl.addEventListener('input', renderPreview);
+  renderPreview();
+  g3.append(notifyLine('模板', titleTpl, '留空 = 用通知自己的标题。可用 {{title}} {{level}} {{plugin}} {{task}} {{time}} {{date}}'));
+  g3.append(preview);
+  box.append(g3);
+
+  // ---- 门槛与静默 ----
+  const g4 = notifyGroup('门槛与静默');
+  const grid4 = el('div', 'chan-grid');
+  const lvl = notifySelect(
+    [
+      ['', '跟随全局'],
+      ['info', 'info 及以上'],
+      ['warn', 'warn 及以上'],
+      ['error', '只收 error'],
+    ],
+    r.min_level || '',
+  );
+  const quiet = notifyInput(r.quiet_hours || '', '比如 23:00-07:00（空 = 跟随全局）');
+  grid4.append(notifyLine('等级', lvl));
+  grid4.append(notifyLine('静默', quiet));
+  g4.append(grid4);
+  box.append(g4);
+
+  // ---- 底部动作 ----
+  const save = notifyBtn('保存', 'btn-primary', () =>
+    notifySaveRoute(r, {
+      name: name.value.trim(),
+      channel: chan.value,
+      enabled: en.input.checked,
+      mode: seg.dataset.mode,
+      events: Object.keys(evInputs).filter((k) => evInputs[k].checked),
+      include: inc.value,
+      exclude: exc.value,
+      cron: cron.value.trim(),
+      content: content.value,
+      bodyTpl: bodyTpl.value,
+      titleTpl: titleTpl.value,
+      minLevel: lvl.value,
+      quiet: quiet.value.trim(),
+    }),
+  );
+  const test = notifyBtn('试发', '', () => notifyTestRoute(r.id));
+  const toggle = notifyBtn(r.enabled ? '停用（配置保留）' : '启用', '', () => notifyToggleRoute(r));
+  const del = notifyBtn('删除推送', 'btn-danger', () => notifyDeleteRoute(r));
+  notifyFoot(box, [save, test, toggle, del]);
+  box.append(
+    el('p', 'chan-hint', '停用只是这一条不再投递，配置全保留；删除只删这条规则，渠道还在。'),
+  );
+}
+
+async function notifySaveRoute(r, f) {
+  const body = {
+    name: f.name || r.id,
+    channel: f.channel,
+    enabled: f.enabled,
+    events: f.events,
+    include_plugins: splitList(f.include),
+    exclude_plugins: splitList(f.exclude),
+    min_level: f.minLevel || '',
+    quiet_hours: f.quiet,
+    title_template: f.titleTpl.trim(),
+    at:
+      f.mode === 'at'
+        ? { cron: f.cron, content: f.content, body_template: f.bodyTpl }
+        : null,
+  };
+  if (f.mode === 'at' && !f.cron) {
+    notify('定时推送要填 cron，比如 0 9 * * *', 'err');
+    return;
+  }
+  try {
+    if (r.id) {
+      await api('/api/notify/routes/' + encodeURIComponent(r.id), {
+        method: 'PATCH',
+        body,
+      });
+    } else {
+      // 新建：POST 之后服务端给 id，选中它
+      const d = await api('/api/notify/routes', { method: 'POST', body });
+      const last = (d.routes || []).slice(-1)[0];
+      NOTIFY.route = last ? last.id : null;
+      NOTIFY.draft = null;
+    }
+    notify('推送已保存', 'ok');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '保存失败', 'err');
+  }
+}
+
+async function notifyTestRoute(id) {
+  try {
+    const d = await api('/api/notify/routes/' + encodeURIComponent(id) + '/test', {
+      method: 'POST',
+      body: {},
+    });
+    const one = (d.results && d.results[0]) || {};
+    notify(one.ok ? '试发成功' : '试发失败：' + (one.error || '未知原因'), one.ok ? 'ok' : 'err');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '试发失败', 'err');
+  }
+}
+
+async function notifyToggleRoute(r) {
+  try {
+    await api('/api/notify/routes/' + encodeURIComponent(r.id) + '/toggle', {
+      method: 'POST',
+      body: {},
+    });
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '操作失败', 'err');
+  }
+}
+
+async function notifyDeleteRoute(r) {
+  if (!confirm('删除推送「' + (r.name || r.id) + '」？渠道 ' + r.channel + ' 会保留。')) return;
+  try {
+    await api('/api/notify/routes/' + encodeURIComponent(r.id), { method: 'DELETE' });
+    NOTIFY.route = null;
+    notify('推送已删除（渠道保留）', 'ok');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '删除失败', 'err');
+  }
+}
+
+
+// ---------------------------------------------------------------- 渠道编辑器
+
+// 密钥控件：三态 —— 未设置（明文输入）/ 已设置 *** + [替换][清除] / 清除待保存。
+// 「留空 = 不改」和「清除」必须分开：前者是没动，后者是显式发空串。
+function notifySecretBox(has, placeholder) {
+  const wrap = el('div', 'chan-secret');
+  const st = { mode: has ? 'keep' : 'edit' };
+  const input = notifyInput('', placeholder || '填上凭据', 'password');
+  const setText = el('span', 'chan-secret-set', '');
+  const btnReplace = notifyBtn('替换', 'btn-sm');
+  const btnClear = notifyBtn('清除', 'btn-sm');
+  const btnUndo = notifyBtn('撤销', 'btn-sm');
+  const render = () => {
+    clear(wrap);
+    if (st.mode === 'edit') {
+      wrap.append(input);
+      if (has) wrap.append(btnUndo);
+      return;
+    }
+    if (st.mode === 'clear') {
+      setText.textContent = '保存后清空';
+      wrap.append(setText, btnUndo);
+      return;
+    }
+    setText.textContent = '已设置 ***';
+    wrap.append(setText, btnReplace, btnClear);
+  };
+  btnReplace.addEventListener('click', () => {
+    st.mode = 'edit';
+    input.value = '';
+    render();
+    input.focus();
+  });
+  btnClear.addEventListener('click', () => {
+    st.mode = 'clear';
+    render();
+  });
+  btnUndo.addEventListener('click', () => {
+    st.mode = has ? 'keep' : 'edit';
+    render();
+  });
+  render();
+  return {
+    node: wrap,
+    // undefined = 不改；'' = 清除；其它 = 新值
+    value: () => (st.mode === 'clear' ? '' : st.mode === 'edit' ? input.value.trim() : undefined),
+  };
+}
+
+function notifyHeaderPairs(text) {
+  const out = {};
+  for (const line of String(text || '').split('\n')) {
+    const i = line.indexOf(':');
+    if (i <= 0) continue;
+    const k = line.slice(0, i).trim();
+    const v = line.slice(i + 1).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+function renderChannelEditor(box, c) {
+  const isNew = !c.id;
+  const kind = c.kind || 'wecom';
+  const fields = KIND_FIELDS[kind] || ['url'];
+  const vals = {};
+
+  // ---- 基本 ----
+  const g1 = notifyGroup('基本');
+  const grid1 = el('div', 'chan-grid');
+  const name = notifyInput(c.name || c.id || '', '比如 Server酱 · 手机');
+  grid1.append(notifyLine('名字', name));
+  const kindPairs = Object.keys(NOTIFY_KINDS).map((k) => [k, NOTIFY_KINDS[k]]);
+  const kindSel = notifySelect(kindPairs, kind);
+  kindSel.disabled = !isNew;
+  grid1.append(
+    notifyLine('类型', kindSel, isNew ? '' : '类型建好就不改（换类型请新建一个渠道）'),
+  );
+  const en = notifyCheck('启用', c.enabled !== false);
+  const enLine = el('div', 'chan-line');
+  enLine.append(el('span', 'chan-label', '状态'));
+  enLine.append(en.node);
+  grid1.append(enLine);
+  if (isNew) {
+    kindSel.addEventListener('change', () => {
+      // 换类型要换字段集合：存草稿再重画（已填的值留着）
+      const keep = { id: null, name: name.value, kind: kindSel.value, enabled: en.input.checked };
+      for (const k of Object.keys(vals)) {
+        const v = vals[k];
+        keep[k] = v && typeof v.value === 'function' ? v.value() : undefined;
+      }
+      NOTIFY.draft = Object.assign({}, c, keep);
+      renderNotifyMain();
+    });
+  }
+  g1.append(grid1);
+  box.append(g1);
+
+  // ---- 连接 ----
+  const g2 = notifyGroup('连接');
+  const grid2 = el('div', 'chan-grid');
+  const hasSecret = !!c.has_secret || (kind === 'smtp' && !!c.has_pass);
+
+  const addField = (key) => {
+    if (key === 'url') {
+      const i = notifyInput(c.url || '', 'https://…');
+      vals.url = i;
+      grid2.append(
+        notifyLine('地址', i, kind === 'serverchan' ? '留空 = 官方 sctapi.ftqq.com' : '', true),
+      );
+      return;
+    }
+    if (key === 'secret' || key === 'pass') {
+      const s = notifySecretBox(hasSecret, key === 'pass' ? 'SMTP 密码 / 授权码' : '凭据');
+      vals[key] = s;
+      grid2.append(notifyLine(key === 'pass' ? '密码' : '密钥', s.node));
+      return;
+    }
+    if (key === 'chat_id') {
+      const i = notifyInput(c.chat_id || '', '比如 123456789');
+      vals.chat_id = i;
+      grid2.append(notifyLine('chat_id', i));
+      return;
+    }
+    if (key === 'topic') {
+      const i = notifyInput(c.topic || '', '比如 panel');
+      vals.topic = i;
+      grid2.append(notifyLine('topic', i));
+      return;
+    }
+    if (key === 'priority') {
+      const i = notifyInput(c.priority || 5, '1-10，默认 5', 'number');
+      vals.priority = i;
+      grid2.append(notifyLine('优先级', i));
+      return;
+    }
+    if (key === 'method') {
+      const s = notifySelect([['POST', 'POST'], ['GET', 'GET']], c.method || 'POST');
+      vals.method = s;
+      grid2.append(notifyLine('方法', s));
+      return;
+    }
+    if (key === 'content_type') {
+      const s = notifySelect(
+        [
+          ['json', 'JSON'],
+          ['form', 'form（a=1&b=2，自动 url-encode）'],
+          ['text', '纯文本'],
+        ],
+        c.content_type || 'json',
+      );
+      vals.content_type = s;
+      grid2.append(notifyLine('编码', s));
+      return;
+    }
+    if (key === 'headers') {
+      const t = el('textarea', 'input');
+      t.rows = 2;
+      t.placeholder = '一行一个：X-Token: 值（留空 = 不改；填了就整组替换）';
+      if ((c.headers || []).length) t.placeholder = '已设置：' + c.headers.join('、') + '（值不回显）';
+      vals.headers = t;
+      grid2.append(notifyLine('请求头', t, '', true));
+      return;
+    }
+    if (key === 'template') {
+      const t = el('textarea', 'input');
+      t.rows = 4;
+      t.placeholder = '{"msg":"{{title}}\\n{{body}}"}';
+      t.value = c.template || '';
+      vals.template = t;
+      grid2.append(
+        notifyLine('body', t, '变量：{{title}} {{body}} {{level}} {{plugin}} {{task}} {{payload}}', true),
+      );
+      return;
+    }
+    if (key === 'host') {
+      const i = notifyInput(c.host || '', 'smtp.example.com');
+      vals.host = i;
+      grid2.append(notifyLine('服务器', i));
+      return;
+    }
+    if (key === 'port') {
+      const i = notifyInput(c.port || 465, '465', 'number');
+      vals.port = i;
+      grid2.append(notifyLine('端口', i));
+      return;
+    }
+    if (key === 'tls') {
+      const s = notifySelect(
+        [
+          ['implicit', 'implicit（465）'],
+          ['starttls', 'starttls（587）'],
+          ['none', '不加密'],
+        ],
+        c.tls || 'implicit',
+      );
+      vals.tls = s;
+      grid2.append(notifyLine('加密', s));
+      return;
+    }
+    if (key === 'user') {
+      const i = notifyInput(c.user || '', '登录名');
+      vals.user = i;
+      grid2.append(notifyLine('账号', i));
+      return;
+    }
+    if (key === 'from') {
+      const i = notifyInput(c.from || '', '发件人，如 panel@example.com');
+      vals.from = i;
+      grid2.append(notifyLine('发件人', i));
+      return;
+    }
+    if (key === 'to') {
+      const i = notifyInput((c.to || []).join(','), '收件人，逗号分隔');
+      vals.to = i;
+      grid2.append(notifyLine('收件人', i));
+      return;
+    }
+  };
+  for (const k of fields) addField(k);
+  g2.append(grid2);
+  if (KIND_HINT[kind]) g2.append(el('p', 'chan-hint', KIND_HINT[kind]));
+  box.append(g2);
+
+  // 请求预览（只对 HTTP 类有意义）
+  if (kind !== 'smtp') {
+    const g3 = notifyGroup('请求预览');
+    const pv = el('div', 'chan-preview', '');
+    const renderPv = () => {
+      const url = notifyMask(vals.url ? vals.url.value : c.url || '');
+      const m = vals.method ? vals.method.value : c.method || 'POST';
+      if (kind === 'custom') {
+        pv.textContent = m + ' ' + (url || '（还没填地址）') + ' · ' + (vals.content_type ? vals.content_type.value : c.content_type || 'json');
+      } else if (kind === 'serverchan') {
+        pv.textContent = 'GET https://sctapi.ftqq.com/***.send?title=…&desp=…';
+      } else {
+        pv.textContent = 'POST ' + (url || '（还没填地址）');
+      }
+    };
+    renderPv();
+    if (vals.url) vals.url.addEventListener('input', renderPv);
+    if (vals.method) vals.method.addEventListener('change', renderPv);
+    if (vals.content_type) vals.content_type.addEventListener('change', renderPv);
+    g3.append(pv);
+    box.append(g3);
+  }
+
+  // 被哪些推送引用
+  if (!isNew) {
+    const refs = (NOTIFY.data.routes || []).filter((r) => r.channel === c.id);
+    if (refs.length) {
+      box.append(
+        el(
+          'p',
+          'chan-refs',
+          '被 ' + refs.length + ' 条推送引用：' + refs.map((r) => r.name || r.id).join('、') + '（删之前先改它们）',
+        ),
+      );
+    }
+  }
+
+  // ---- 底部动作 ----
+  const collect = () => {
+    const out = {
+      name: name.value.trim() || c.id || '',
+      enabled: en.input.checked,
+      kind,
+    };
+    const grab = (k) => {
+      const v = vals[k];
+      if (!v) return;
+      if (k === 'secret' || k === 'pass') {
+        const s = v.value();
+        if (s !== undefined) out[k] = s;
+        return;
+      }
+      if (k === 'headers') {
+        const pairs = notifyHeaderPairs(v.value);
+        if (Object.keys(pairs).length) out.headers = pairs;
+        return;
+      }
+      if (k === 'to') {
+        out.to = splitList(v.value);
+        return;
+      }
+      if (k === 'port' || k === 'priority') {
+        out[k] = Number(v.value) || (k === 'port' ? 465 : 5);
+        return;
+      }
+      out[k] = v.value.trim ? v.value.trim() : v.value;
+    };
+    for (const k of fields) grab(k);
+    return out;
+  };
+
+  const save = notifyBtn('保存', 'btn-primary', () => notifySaveChannel(c, collect()));
+  const test = notifyBtn('试发', '', () => notifyTestChannel(c));
+  const dup = notifyBtn('复制', '', () => notifyDuplicateChannel(c));
+  const del = notifyBtn('删除渠道', 'btn-danger', () => notifyDeleteChannel(c));
+  const acts = [save, test];
+  if (!isNew) acts.push(dup, del);
+  if (isNew) {
+    acts.push(
+      notifyBtn('取消', '', () => {
+        NOTIFY.draft = null;
+        renderNotifyMain();
+      }),
+    );
+  }
+  notifyFoot(box, acts);
+  if (!isNew) {
+    box.append(
+      el('p', 'chan-hint', '复制 = 同类型再来一条（密钥一起带过来），用来做「同一类型、不同 token」。'),
+    );
+  }
+}
+
+
+// ---------------------------------------------------------------- 渠道动作
+
+async function notifySaveChannel(c, body) {
+  try {
+    if (c.id) {
+      await api('/api/notify/channels/' + encodeURIComponent(c.id), {
+        method: 'PATCH',
+        body,
+      });
+      notify('渠道已保存', 'ok');
+    } else {
+      const d = await api('/api/notify/channels', { method: 'POST', body });
+      const created = (d.channels || []).slice(-1)[0];
+      NOTIFY.channel = created ? created.id : null;
+      NOTIFY.draft = null;
+      notify('渠道已添加', 'ok');
+    }
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '保存失败', 'err');
+  }
+}
+
+async function notifyTestChannel(c) {
+  if (!c.id) {
+    notify('先保存再试发', 'err');
+    return;
+  }
+  try {
+    const d = await api('/api/notify/channels/' + encodeURIComponent(c.id) + '/test', {
+      method: 'POST',
+      body: {},
+    });
+    const one = (d.results && d.results[0]) || {};
+    notify(one.ok ? '试发成功' : '试发失败：' + (one.error || '未知原因'), one.ok ? 'ok' : 'err');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '试发失败', 'err');
+  }
+}
+
+async function notifyDuplicateChannel(c) {
+  if (!c.id) return;
+  try {
+    const d = await api('/api/notify/channels/' + encodeURIComponent(c.id) + '/duplicate', {
+      method: 'POST',
+      body: {},
+    });
+    NOTIFY.channel = d.id;
+    notify('已复制为 ' + d.id + '，密钥一起带过来了 —— 改它的地址/密钥就得到另一条同类型渠道', 'ok');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '复制失败', 'err');
+  }
+}
+
+async function notifyDeleteChannel(c) {
+  if (!c.id) return;
+  if (!confirm('删除渠道「' + (c.name || c.id) + '」？被推送引用着的话会拒绝删除。')) return;
+  try {
+    await api('/api/notify/channels/' + encodeURIComponent(c.id), { method: 'DELETE' });
+    NOTIFY.channel = null;
+    notify('渠道已删除', 'ok');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '删除失败', 'err');
+  }
+}
+
+// ---------------------------------------------------------------- 全局设置
+
+function renderNotifySettings(box) {
+  const d = NOTIFY.data;
+  const g = notifyGroup('全局设置');
+  const grid = el('div', 'chan-grid');
+  const lvl = notifySelect(
+    [
+      ['info', 'info 及以上'],
+      ['warn', 'warn 及以上（默认）'],
+      ['error', '只收 error'],
+    ],
+    d.min_level || 'warn',
+  );
+  grid.append(notifyLine('等级门槛', lvl, '低于它的不进任何外部渠道（面板铃铛照旧记）'));
+  const mute = notifyInput((d.mute || []).join(','), '插件或 插件/任务，逗号分隔');
+  grid.append(notifyLine('静音', mute, '这些来源不往外部渠道发'));
+  const quiet = notifyInput(d.quiet_hours || '', '23:00-07:00（空 = 不静默）');
+  grid.append(notifyLine('静默时段', quiet, '静默期不是丢弃：推到静默结束再发'));
+  const dedupe = notifyInput(Math.round((d.dedupe_secs || 600) / 60), '分钟', 'number');
+  grid.append(notifyLine('去重窗口', dedupe, '同一推送 + 同一标题在窗口内只发一条，重复的累加次数'));
+  g.append(grid);
+  box.append(g);
+  const save = notifyBtn('保存全局设置', 'btn-primary', async () => {
+    try {
+      await api('/api/notify/settings', {
+        method: 'PATCH',
+        body: {
+          min_level: lvl.value,
+          mute: splitList(mute.value),
+          quiet_hours: quiet.value.trim(),
+          dedupe_secs: Math.max(0, Number(dedupe.value) || 0) * 60,
+        },
+      });
+      notify('全局设置已保存', 'ok');
+      await renderNotifyTab();
+    } catch (e) {
+      notify(e.message || '保存失败', 'err');
+    }
+  });
+  notifyFoot(box, [save]);
+  box.append(
+    el('p', 'chan-hint', '渠道与推送都存在 config.json 的 notify 段。要直接改 JSON 就点右上角「高级：编辑 JSON」。'),
+  );
+}
+
+// ---------------------------------------------------------------- 新建 / JSON / 发件箱
+
+function notifyAdd() {
+  if (NOTIFY.seg === 'routes') {
+    const chans = (NOTIFY.data.channels || []).filter((c) => c.enabled);
+    if (!chans.length) {
+      notify('先添加一个渠道（推送要有投递端）', 'err');
+      NOTIFY.seg = 'channels';
+      NOTIFY.channel = null;
+      NOTIFY.draft = { id: null, kind: 'wecom', enabled: true };
+      renderNotifySide();
+      renderNotifyMain();
+      return;
+    }
+    NOTIFY.draft = {
+      id: null,
+      name: '新推送',
+      channel: chans[0].id,
+      enabled: true,
+      events: [],
+      include_plugins: [],
+      exclude_plugins: [],
+      min_level: '',
+      quiet_hours: '',
+      title_template: '',
+      channel_ok: true,
+      channel_enabled: true,
+    };
+    NOTIFY.route = null;
+  } else {
+    NOTIFY.draft = { id: null, kind: 'wecom', enabled: true };
+    NOTIFY.channel = null;
+  }
+  renderNotifySide();
+  renderNotifyMain();
+}
+
+async function notifyToggleJson() {
+  NOTIFY.json = !NOTIFY.json;
+  const box = $('notify-json-box');
+  box.classList.toggle('hidden', !NOTIFY.json);
+  $('notify-work').classList.toggle('hidden', NOTIFY.json);
+  $('notify-json').textContent = NOTIFY.json ? '收起 JSON' : '高级：编辑 JSON';
+  if (!NOTIFY.json) {
+    renderNotifyTab();
     return;
   }
   clear(box);
-  errBox.classList.toggle('hidden', d.ok !== false);
-  errBox.textContent = d.ok === false ? ('配置有问题：' + d.error) : '';
-  counts.textContent = '待发 ' + d.counts.pending + ' · 成功 ' + d.counts.ok + ' · 放弃 ' + d.counts.failed;
-
-  if (!d.channels.length) {
-    box.append(el('p', 'muted', '还没有配任何渠道。在「配置」页给 config.json 加一个 notify.channels 数组就行，例如：'));
-    const pre = el('pre', 'snippet');
-    pre.textContent = JSON.stringify({ notify: { min_level: 'warn', channels: [
-      { id: 'ops', kind: 'webhook', url: 'https://example.com/hook' },
-      { id: 'wecom', kind: 'wecom', url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…' },
-      { id: 'dd', kind: 'dingtalk', url: 'https://oapi.dingtalk.com/robot/send?access_token=…', secret: 'SEC…' },
-      { id: 'fs', kind: 'feishu', url: 'https://open.feishu.cn/open-apis/bot/v2/hook/…', secret: '…' },
-      { id: 'tg', kind: 'telegram', secret: '123456:ABC-DEF', chat_id: '123456789' },
-      { id: 'push', kind: 'bark', url: 'https://api.day.app', secret: '设备键' },
-      { id: 'topic', kind: 'ntfy', url: 'https://ntfy.sh', topic: 'panel' },
-      { id: 'mail', kind: 'smtp', host: 'smtp.example.com', port: 465, tls: 'implicit',
-        user: 'me@example.com', pass: '***', to: ['me@example.com'] },
-    ] } }, null, 2);
-    box.append(pre);
-    const addBar2 = el('div', 'actions chan-addbar');
-    const add2 = el('button', 'btn btn-sm btn-primary', '+ 添加渠道');
-    add2.type = 'button';
-    add2.addEventListener('click', () => {
-      const host = $('notify-form2');
-      if (host) openChannelForm(host, null, () => renderNotifyTab());
-    });
-    addBar2.append(add2);
-    box.append(addBar2);
-    const fbox = el('div', 'chan-form-box', '');
-    fbox.id = 'notify-form2';
-    box.append(fbox);
-  } else {
-    const t = el('table', 'table');
-    const thead = el('thead');
-    const head = el('tr');
-    for (const h of ['渠道', '类型', '目标', '门槛', '状态', '']) head.append(el('th', '', h));
-    thead.append(head);
-    t.append(thead);
-    const tbody = el('tbody');
-    t.append(tbody);
-    for (const c of d.channels) {
-      const tr = el('tr');
-      // 12 种渠道里只有 smtp 是「邮件目标」，其余都是 URL（telegram 的目标是 chat_id）。
-      const target = c.kind === 'smtp'
-        ? ((c.to || []).join(', ') + ' @ ' + (c.host || '') + ':' + (c.port || ''))
-        : (c.url || (c.kind === 'telegram' ? ('chat ' + (c.chat_id || '?')) : ''));
-      tr.append(
-        el('td', '', c.id),
-        el('td', '', c.kind),
-        el('td', 'mono', target),
-        el('td', '', c.min_level || d.min_level || 'warn'),
-        el('td', '', c.enabled ? '启用' : '停用'),
-      );
-      const td = el('td', 'row-acts');
-      const b = el('button', 'btn btn-sm', '试发');
-      b.type = 'button';
-      b.addEventListener('click', () => testNotify(c.id));
-      const edit = el('button', 'btn btn-sm', '编辑');
-      edit.type = 'button';
-      edit.addEventListener('click', () => {
-        const host = $('notify-form');
-        if (host) openChannelForm(host, c, () => renderNotifyTab());
-      });
-      const toggle = el('button', 'btn btn-sm', c.enabled ? '停用' : '启用');
-      toggle.type = 'button';
-      toggle.addEventListener('click', async () => {
-        try {
-          await api('/api/notify/channels/' + encodeURIComponent(c.id) + '/toggle', { method: 'POST' });
-          renderNotifyTab();
-        } catch (e) {
-          notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '开关失败'), 'err');
-        }
-      });
-      const del = el('button', 'btn btn-sm btn-danger', '删除');
-      del.type = 'button';
-      del.addEventListener('click', async () => {
-        if (!window.confirm('删掉渠道 ' + c.id + '？发件箱里已排队的行会变成「渠道已不存在」。')) return;
-        try {
-          await api('/api/notify/channels/' + encodeURIComponent(c.id), { method: 'DELETE' });
-          notify('渠道 ' + c.id + ' 已删除', 'ok');
-          renderNotifyTab();
-        } catch (e) {
-          notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '删除失败'), 'err');
-        }
-      });
-      td.append(b, edit, toggle, del);
-      tr.append(td);
-      tbody.append(tr);
-    }
-    box.append(t);
-    const addBar = el('div', 'actions chan-addbar');
-    const add = el('button', 'btn btn-sm btn-primary', '+ 添加渠道');
-    add.type = 'button';
-    add.addEventListener('click', () => {
-      const host = $('notify-form');
-      if (host) openChannelForm(host, null, () => renderNotifyTab());
-    });
-    addBar.append(add);
-    box.append(addBar);
-    const fbox = el('div', 'chan-form-box', '');
-    fbox.id = 'notify-form';
-    box.append(fbox);
-    box.append(el('p', 'settings-note',
-      '全局门槛 ' + (d.min_level || 'warn') +
-      '；静音名单 ' + ((d.mute || []).join('、') || '（空）') +
-      '；静默时段 ' + (d.quiet_hours || '（无）') +
-      '；同一渠道同一标题 ' + Math.round((d.dedupe_secs || 0) / 60) + ' 分钟内的重复只发一条（次数累加）'));
-    box.append(el('p', 'settings-note',
-      '支持的类型：webhook / wecom（企业微信）/ dingtalk（钉钉，可加签）/ feishu（飞书，可加签）/ ' +
-      'slack / discord / telegram / bark / ntfy / gotify / custom（自定义模板）/ smtp。' +
-      '渠道配置在 config.json 的 notify.channels 里；密钥在接口响应里一律显示为 ***。'));
+  box.append(el('p', 'chan-hint', '整段 notify 配置。保存走 PUT /api/notify：写坏了报错且不落盘，旧配置继续生效。'));
+  const ta = el('textarea', 'json-editor');
+  const err = el('div', 'src-error hidden', '');
+  try {
+    const cfg = await api('/api/config');
+    const raw = cfg.raw || cfg.text || '{}';
+    const obj = JSON.parse(raw);
+    ta.value = JSON.stringify(obj.notify || {}, null, 2);
+  } catch (e) {
+    ta.value = '{}';
   }
+  box.append(ta);
+  box.append(err);
+  const check = notifyBtn('校验', '', () => {
+    try {
+      JSON.parse(ta.value);
+      err.classList.add('hidden');
+      notify('JSON 语法没问题（保存时还会做语义校验）', 'ok');
+    } catch (e) {
+      err.classList.remove('hidden');
+      err.textContent = 'JSON 写坏了：' + e.message;
+    }
+  });
+  const save = notifyBtn('保存', 'btn-primary', async () => {
+    let obj;
+    try {
+      obj = JSON.parse(ta.value);
+    } catch (e) {
+      err.classList.remove('hidden');
+      err.textContent = 'JSON 写坏了：' + e.message;
+      return;
+    }
+    try {
+      await api('/api/notify', { method: 'PUT', body: obj });
+      err.classList.add('hidden');
+      notify('通知配置已保存', 'ok');
+      NOTIFY.json = false;
+      $('notify-json-box').classList.add('hidden');
+      $('notify-work').classList.remove('hidden');
+      $('notify-json').textContent = '高级：编辑 JSON';
+      await renderNotifyTab();
+    } catch (e) {
+      err.classList.remove('hidden');
+      err.textContent = e.message || '保存失败';
+    }
+  });
+  notifyFoot(box, [check, save]);
+}
 
-  clear(out);
-  if (!d.outbox.length) {
-    out.append(el('p', 'muted', '（发件箱是空的）'));
+function renderNotifyOutbox() {
+  const d = NOTIFY.data;
+  const box = $('notify-outbox');
+  if (!box || !d) return;
+  clear(box);
+  const rows = d.outbox || [];
+  const st = { pending: 0, ok: 0, failed: 0 };
+  for (const r of rows) {
+    if (r.done === 1) st.ok += 1;
+    else if (r.done === 2) st.failed += 1;
+    else st.pending += 1;
+  }
+  $('notify-outbox-counts').textContent = '共 ' + rows.length + ' 条';
+  if (!rows.length) {
+    box.append(el('p', 'chan-hint', '还没有投递记录。点上面的「试发」就会有一条。'));
     return;
   }
-  const t = el('table', 'table');
+  const wrap = el('div', 'table-wrap');
+  const table = el('table', 'table');
   const thead = el('thead');
-  const head = el('tr');
-  for (const h of ['时间', '渠道', '标题', '次数', '状态', '错误']) head.append(el('th', '', h));
-  thead.append(head);
-  t.append(thead);
-  const tbody = el('tbody');
-  t.append(tbody);
-  for (const r of d.outbox) {
-    const tr = el('tr');
-    const status = r.done === 1 ? '已送达' : (r.done === 2 ? '放弃' : '待重试');
-    tr.append(
-      el('td', '', new Date(r.ts).toLocaleString()),
-      el('td', '', r.channel),
-      el('td', '', r.repeat > 1 ? r.title + '（×' + r.repeat + '）' : r.title),
-      el('td', '', String(r.attempts)),
-      el('td', r.done === 2 ? 'hint-err' : '', status),
-      el('td', 'mono', r.last_error || ''),
-    );
-    tbody.append(tr);
+  const tr = el('tr');
+  for (const h of ['时间', '推送', '渠道', '标题', '状态', '次数', '错误']) tr.append(el('th', '', h));
+  thead.append(tr);
+  table.append(thead);
+  const tb = el('tbody');
+  for (const r of rows) {
+    const t = el('tr');
+    t.append(el('td', '', new Date(r.ts).toLocaleString()));
+    t.append(el('td', '', r.route || '—'));
+    t.append(el('td', '', r.channel));
+    t.append(el('td', '', r.title + (r.repeat > 1 ? ' ×' + r.repeat : '')));
+    const state = r.done === 1 ? '成功' : r.done === 2 ? '放弃' : '待发';
+    const pill = el('span', 'pill ' + (r.done === 1 ? 'pill-ok' : r.done === 2 ? 'pill-err' : 'pill-warn'), state);
+    const cell = el('td');
+    cell.append(pill);
+    t.append(cell);
+    t.append(el('td', '', String(r.attempts)));
+    t.append(el('td', '', r.last_error || ''));
+    tb.append(t);
   }
-  out.append(t);
+  table.append(tb);
+  wrap.append(table);
+  box.append(wrap);
+}
+
+async function notifyTestAll() {
+  try {
+    const d = await api('/api/notify/test', { method: 'POST', body: {} });
+    const ok = (d.results || []).filter((x) => x.ok).length;
+    const bad = (d.results || []).length - ok;
+    notify('试发：' + ok + ' 个成功' + (bad ? '，' + bad + ' 个失败' : ''), bad ? 'err' : 'ok');
+    await renderNotifyTab();
+  } catch (e) {
+    notify(e.message || '试发失败', 'err');
+  }
+}
+
+function wireNotify() {
+  for (const btn of document.querySelectorAll('#notify-seg .seg-item')) {
+    btn.addEventListener('click', () => {
+      NOTIFY.seg = btn.dataset.seg;
+      NOTIFY.draft = null;
+      renderNotifySide();
+      renderNotifyMain();
+    });
+  }
+  const add = $('notify-add');
+  if (add) add.addEventListener('click', () => notifyAdd());
+  const all = $('notify-test-all');
+  if (all) all.addEventListener('click', () => notifyTestAll());
+  const json = $('notify-json');
+  if (json) json.addEventListener('click', () => notifyToggleJson());
+  const reload = $('notify-reload');
+  if (reload) reload.addEventListener('click', () => renderNotifyTab());
+  const retry = $('notify-retry');
+  if (retry) {
+    retry.addEventListener('click', async () => {
+      try {
+        const d = await api('/api/notify/outbox/retry', { method: 'POST', body: {} });
+        notify('重试了 ' + (d.retried || 0) + ' 条', 'ok');
+        await renderNotifyTab();
+      } catch (e) {
+        notify(e.message || '重试失败', 'err');
+      }
+    });
+  }
 }
 
 async function testNotify(id) {
@@ -3257,8 +4088,8 @@ async function refresh() {
     // 有口令才有「登出」可言；无凭据降级态下按了也没意义，索性不显示。
     $('sidebar-logout').classList.toggle('hidden', !state.auth);
     state.loaded = true;
-    $('version').textContent = 'v' + (state.version || '—');
-    $('auth-state').textContent = state.auth ? '令牌已启用' : '未启用令牌';
+    setText($('version'), 'v' + (state.version || '—'));
+    setText($('auth-state'), state.auth ? '令牌已启用' : '未启用令牌');
     // 能读到 /api/state 就说明凭据是通的（请求头或会话 cookie），不用再看 state.token
     showGate(false);
     // 没配令牌就没有「登出」这回事（会话卡是给启用令牌的部署看的）
@@ -3754,10 +4585,10 @@ function bind() {
   }
 
   // 日志
-  for (const btn of document.querySelectorAll('.seg-item')) {
+  for (const btn of document.querySelectorAll('.seg-item[data-level]')) {
     btn.addEventListener('click', () => {
       state.logLevel = btn.dataset.level || '';
-      for (const other of document.querySelectorAll('.seg-item')) {
+      for (const other of document.querySelectorAll('.seg-item[data-level]')) {
         other.setAttribute('aria-pressed', String(other === btn));
       }
       searchLogs(true);
@@ -3865,9 +4696,9 @@ function bind() {
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
   $('test-run').addEventListener('click', runTest);
-  $('notify-test-all').addEventListener('click', () => testNotify(null));
+  wireNotify();
   $('notify-retry').addEventListener('click', retryNotify);
-  $('notify-reload').addEventListener('click', renderNotifyTab);
+
   $('panel-logout').addEventListener('click', logoutPanel);
   $('sidebar-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>

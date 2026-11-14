@@ -161,9 +161,10 @@ fn jitter_does_not_accumulate_on_the_theoretical_line() {
 #[test]
 fn manual_tasks_never_become_due_and_never_trip() {
     let c = cfg();
-    let mut t = Task::manual("p".into(), "only_handler".into());
+    let mut t = Task::manual("p".into(), "only_handler".into(), 30_000);
     assert!(t.schedule.is_none());
     assert!(t.cron.is_empty());
+    assert_eq!(t.budget_ms, 30_000);
     let now = Local::now();
     for _ in 0..10 {
         fail(&mut t, &c, now);
@@ -171,6 +172,25 @@ fn manual_tasks_never_become_due_and_never_trip() {
     assert!(!t.tripped, "手动任务由人触发，不该被熔断锁住");
     assert_eq!(t.runs, 10);
     assert!(t.next_fire > now + ChronoDuration::days(300), "手动任务不该有到期时刻");
+}
+
+/// 0.4.1：`register_handler(name, fn, budget_ms)` 的第三个参数。
+/// 手动任务的预算来自插件注册时的声明：不给是默认 30 秒，越界钳到 [1, 90 分钟]。
+#[test]
+fn manual_task_budget_comes_from_the_registration_and_is_clamped() {
+    let declared = Task::manual("p".into(), "gold".into(), 300_000);
+    assert_eq!(declared.budget_ms, 300_000, "声明多少就是多少");
+    assert_eq!(declared.suggest_budget_ms, 300_000, "建议值同步");
+
+    let default = Task::manual("p".into(), "quick".into(), crate::scheduler::DEFAULT_BUDGET_MS);
+    assert_eq!(default.budget_ms, 30_000, "不给（默认值）还是 30 秒");
+
+    let raw_kept = Task::manual("p".into(), "huge".into(), u64::MAX);
+    // 注意：Task::manual 只抬下限（0 → 1ms），上限钳在 Registration::Handler 的接收端
+    // （与 register_cron 的钳法一致）。
+    let zero = Task::manual("p".into(), "zero".into(), 0);
+    assert_eq!(zero.budget_ms, 1, "0 预算至少抬到 1ms");
+    assert_eq!(raw_kept.budget_ms, u64::MAX, "manual 不做上限钳");
 }
 
 #[tokio::test]

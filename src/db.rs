@@ -152,6 +152,23 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("加 repeat 失败: {e}"))?;
     }
+    // 第 186 轮：定时推送要记住「上次什么时候发的」，不然每次 tick 都会重发。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notify_route_state (
+            route     TEXT PRIMARY KEY,
+            last_fire INTEGER NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| format!("建 notify_route_state 失败: {e}"))?;
+    // 第 186 轮：发件箱要知道「这条是哪个推送触发的」（渠道与推送分开了）。
+    if !has_column(conn, "notify_outbox", "route")? {
+        conn.execute(
+            "ALTER TABLE notify_outbox ADD COLUMN route TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("加 route 失败: {e}"))?;
+    }
     // 第 179 轮：懒加载要知道「这个插件上次加载时有没有界面」——
     // 有界面的必须立刻加载（用户可能正打开着它），没有的可以等下一次到点前再装。
     for (col, ddl) in [

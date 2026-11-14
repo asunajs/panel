@@ -93,6 +93,7 @@ fn a_disabled_or_narrow_channel_is_skipped() {
 fn base_channel(kind: Kind) -> notify::Channel {
     notify::Channel {
         id: "c".to_string(),
+        name: "c".to_string(),
         kind,
         enabled: true,
         min_level: None,
@@ -102,6 +103,8 @@ fn base_channel(kind: Kind) -> notify::Channel {
         topic: String::new(),
         template: String::new(),
         headers: Vec::new(),
+        method: "POST".to_string(),
+        content_type: "json".to_string(),
         priority: 5,
         events: Vec::new(),
         include_plugins: Vec::new(),
@@ -318,4 +321,125 @@ fn quiet_and_dedupe_come_from_config_with_defaults() {
     assert_eq!(c.channels[0].quiet, Some((12 * 60, 13 * 60)));
     // 写错就报错
     assert!(notify::parse(Some(&json!({ "quiet_hours": "23-8" }))).is_err());
+}
+
+// ── 推送规则（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁 ──────────────
+
+/// 老配置（只有 channels）要能自动看成「每条渠道一条推送」，字段从渠道上搬过来。
+#[test]
+fn legacy_config_turns_every_channel_into_a_route() {
+    let cfg = notify::parse(Some(&json!({
+        "channels": [
+            { "id": "ops", "name": "运维", "kind": "webhook", "url": "https://e.com/h",
+              "events": ["task_fail"], "exclude_plugins": ["mgmusic"] },
+            { "id": "mail", "kind": "smtp", "host": "h", "to": ["a@b.c"] }
+        ]
+    })))
+    .unwrap();
+    let rs = cfg.effective_routes();
+    assert_eq!(rs.len(), 2, "每条渠道一条合成推送");
+    assert_eq!(rs[0].id, "ops-default");
+    assert_eq!(rs[0].name, "运维", "名字用渠道名字，不是 id");
+    assert_eq!(rs[0].events, vec!["task_fail".to_string()]);
+    assert_eq!(rs[0].exclude_plugins, vec!["mgmusic".to_string()]);
+    assert!(rs[0].enabled);
+    assert_eq!(rs[1].channel, "mail");
+}
+
+/// 写了 routes 就用 routes，不再合成。
+#[test]
+fn explicit_routes_win_over_synthesis() {
+    let cfg = notify::parse(Some(&json!({
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "p1", "name": "只收熔断", "channel": "ops", "events": ["circuit"] }]
+    })))
+    .unwrap();
+    let rs = cfg.effective_routes();
+    assert_eq!(rs.len(), 1);
+    assert_eq!(rs[0].id, "p1");
+    assert_eq!(rs[0].events, vec!["circuit".to_string()]);
+}
+
+/// 坏配置要在保存时就报错，而不是运行时静默不投递。
+#[test]
+fn bad_routes_are_rejected_with_the_field_path() {
+    let ch = json!({ "id": "ops", "kind": "webhook", "url": "https://e.com/h" });
+
+    let e = notify::parse(Some(&json!({
+        "channels": [ch],
+        "routes": [{ "id": "p1", "channel": "nope" }]
+    })))
+    .unwrap_err();
+    assert!(e.contains("nope") && e.contains("不存在"), "{e}");
+
+    let e = notify::parse(Some(&json!({
+        "channels": [ch],
+        "routes": [{ "id": "p1", "channel": "ops", "events": ["whatever"] }]
+    })))
+    .unwrap_err();
+    assert!(e.contains("whatever"), "{e}");
+
+    let e = notify::parse(Some(&json!({
+        "channels": [ch],
+        "routes": [{ "id": "p1", "channel": "ops", "at": { "cron": "不是 cron" } }]
+    })))
+    .unwrap_err();
+    assert!(e.contains("cron"), "{e}");
+
+    let e = notify::parse(Some(&json!({
+        "channels": [ch],
+        "routes": [{ "id": "p1", "channel": "ops" }, { "id": "p1", "channel": "ops" }]
+    })))
+    .unwrap_err();
+    assert!(e.contains("重复"), "{e}");
+}
+
+/// 标题模板：认得的变量替换，认不得的原样留着，空模板回原样标题。
+#[test]
+fn render_title_substitutes_known_vars_and_keeps_unknown_ones() {
+    let t = notify::render_title("[告警] {{title}}（{{plugin}}/{{task}}）", "任务失败", "warn", "mcloud", Some("sign"));
+    assert_eq!(t, "[告警] 任务失败（mcloud/sign）");
+
+    let t = notify::render_title("{{title}} {{nope}}", "标题", "info", "p", None);
+    assert_eq!(t, "标题 {{nope}}", "认不得的变量原样保留");
+
+    assert_eq!(notify::render_title("", "原标题", "info", "p", None), "原标题");
+    assert_eq!(notify::render_title("   ", "原标题", "info", "p", None), "原标题");
+}
+
+/// 推送的过滤：事件、插件名单（含通配）、停用。
+#[test]
+fn a_route_filters_by_event_and_plugin_patterns() {
+    let mk = |events: Vec<&str>, inc: Vec<&str>, exc: Vec<&str>, enabled: bool| notify::Route {
+        id: "p".to_string(),
+        name: "p".to_string(),
+        channel: "c".to_string(),
+        enabled,
+        events: events.into_iter().map(str::to_string).collect(),
+        include_plugins: inc.into_iter().map(str::to_string).collect(),
+        exclude_plugins: exc.into_iter().map(str::to_string).collect(),
+        ..Default::default()
+    };
+    let n = |event: &'static str, plugin: &str| notify::Notice {
+        level: "warn",
+        event,
+        plugin: plugin.to_string(),
+        task: None,
+        run_id: None,
+        title: "t".to_string(),
+        body: "b".to_string(),
+    };
+
+    // 空 events = 全收
+    assert!(mk(vec![], vec![], vec![], true).accepts(&n("task_fail", "mcloud"), 600));
+    // 指定事件只收那个
+    assert!(mk(vec!["circuit"], vec![], vec![], true).accepts(&n("circuit", "x"), 600));
+    assert!(!mk(vec!["circuit"], vec![], vec![], true).accepts(&n("task_fail", "x"), 600));
+    // include 通配
+    assert!(mk(vec![], vec!["mcloud*"], vec![], true).accepts(&n("plugin", "mcloud-daily"), 600));
+    assert!(!mk(vec![], vec!["mcloud*"], vec![], true).accepts(&n("plugin", "mgmusic"), 600));
+    // exclude 优先
+    assert!(!mk(vec![], vec![], vec!["mgmusic"], true).accepts(&n("plugin", "mgmusic"), 600));
+    // 停用全哑
+    assert!(!mk(vec![], vec![], vec![], false).accepts(&n("task_fail", "x"), 600));
 }
