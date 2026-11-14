@@ -6,4 +6,5 @@
 [target.armv7-unknown-linux-musleabihf]
 pre-build = [
   "apt-get update && apt-get install -y --no-install-recommends libclang-dev clang",
+  "echo '--- 诊断：源码挂载与可写性 ---' && ls -ld /project /project/vendor /project/vendor/llrt && ( touch /project/vendor/llrt/.wtest && rm /project/vendor/llrt/.wtest && echo 'VENDOR-WRITABLE' || echo 'VENDOR-READONLY' ) && ( test -f /project/vendor/llrt/sdk.cfg && echo 'SDKCFG-OK' || echo 'SDKCFG-MISSING' ) && ( ls /project/vendor/llrt/bundle/js | head -3 ) && which rustc && rustc -vV | head -3",
 ]
