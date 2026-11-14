@@ -939,6 +939,10 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   display: flex; flex-direction: column; gap: 10px; padding: 20px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
   box-shadow: var(--shadow-md);
+  /* 限高：.modal 是 place-items:center，卡片一旦比视口高就会**上下同时顶出去**，
+     顶部的标题和底部的按钮都够不着。限高之后内容再长也能滚。 */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 .modal-card h2 { font-size: 15px; }
 /* 确认弹窗的正文带 \n 换行（删任务/重装这类要把后果说三层），按换行折行渲染 */
@@ -1899,4 +1903,14 @@ select option { background: var(--surface); color: var(--fg); }
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* 「改计划」比一个输入框长得多（类型 + 条件字段 + 高级选项 + 短句 + 5 次预览）。
+   卡片限高之后，让**中间那块表单自己滚**：标题和「取消/保存」始终停在原地，
+   不用滚到底才能点保存。 */
+#task-schedule #sched-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px; /* 给滚动条让位，别压住右边框 */
 }
