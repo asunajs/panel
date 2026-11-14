@@ -609,11 +609,19 @@
     六个视图一起量（仪表盘 / 任务 / 运行记录 / 日志 / 插件 / 设置）**全部 0.00 /s**，
     GC 前峰值也从「基线的 1.1~1.3 倍」压成 = 基线。
 
-    守卫（这轮补的）：
-    - `scripts/dom-probe.mjs` 以前**只判 GC 后净增**。那只能证明「没把节点钉住」，
-      证明不了「没在造垃圾」，而用户看的就是造垃圾的斜率。现在**也判原始斜率**：
-      `stays` 每个视图都要 ≤ `DOM_PROBE_RAW_SLOPE_FAIL`（默认 3/s）—— 修前那条 8.76 会红。
-    - `scripts/check-pitfalls.sh`：`setCard()` / `paintSync()` 里再出现 `textContent =` 就红。
+    守卫（这轮补的，**踩了一个坑才定下来**）：
+    - 新 `scripts/dom-growth.mjs`：对一个**已经在跑的实例**量两个口径 + 强制 GC +
+      DOM 变动分类（`added / removed / characterData / byTag`）。修前它打红
+      （`每秒净增 9.96`，byTag 里 96 个 `#text`），修后绿（`GC 后 +0`，`characterData 24`
+      —— 全是在原地改，没造节点）。复跑：`node scripts/dom-growth.mjs http://127.0.0.1:8787/ 30`。
+    - `scripts/check-pitfalls.sh`：`setCard()` / `paintSync()` 里再出现 `textContent =` 就红
+      （负向例验过：改回去立刻报 1 处）。
+    - **`dom-probe.mjs` 判不了这一层，别再往它身上加这个门禁**：同一份修前代码在它那里也是
+      0.00/s —— 无头 Edge 的探针页面上 `el.textContent = x` 走的是原地 `setData`
+      （MutationObserver 只看到 `characterData`，`addedNodes: 0`），「一换一扔」构造不出来。
+      它这轮只补了「别量到后台标签页」：页面从 `about:blank` 转会变后台（rAF 停摆 →
+      `render()` 不跑 → 假零增长），现在直接把实例当第一个标签打开 + 关掉 Edge 自己的
+      `edge://sync-confirmation-dialog` + 关后台节流开关。原始斜率只进 report，不当判据。
 
 99. **手动任务的默认预算是 30 秒，长链路要在注册时声明**（2026-11-14，cmcc 适配时发现）。
     `register_handler(name, fn)` 建出来的手动任务，`budget_ms` 一直是 `DEFAULT_BUDGET_MS`
