@@ -407,6 +407,9 @@ impl Plugin {
                 g.set("self", g.clone())?;
                 let _ = ctx.store_userdata(inv.clone());
                 let _ = ctx.store_userdata(handle);
+                // 裸名 fetch：上面 g.remove 摘掉的是 LLRT 自带那个（直连 HTTP_CLIENT、
+                // 不经门）；这里装回面板的实现，与 host.fetch 同一 WRAP 同一契约。
+                crate::hostapi::install_global_fetch(&ctx)?;
                 ctx.eval_with_options::<Value, _>(BOOTSTRAP, EvalOptions::default())?;
                 Ok(())
             };

@@ -158,7 +158,7 @@ if (panel.atLeast('0.3.0')) {
 
 挪到单独一篇了：[host-api.md](host-api.md)。
 一句话：`smtp_send(opts)` 发邮件、`ws_open/send/recv/close` 长连接、
-`fetch` 的 `tls: 'rustls' | 'native'` 选 TLS 后端；三者共用一道 SSRF 门与一份信任库。
+`fetch` 的 `tls: 'rustls' | 'native'` 选 TLS 后端、`binary: true` 把响应字节装进 `body_base64`；三者共用一道 SSRF 门与一份信任库。
 
 #### 通知
 
@@ -228,11 +228,31 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 
 `fetch` 的 `body_error`（传输层读正文失败）如实透传给插件，不吞。
 
-⚠ **`fetch` 的 `body` 是 lossy UTF-8 字符串**（`String::from_utf8_lossy`）。
+⚠ **`fetch` 的 `body` 默认是 lossy UTF-8 字符串**（`String::from_utf8_lossy`）。
 实测 windows-1252 响应 `café 中文` → `caf ??`：**非 UTF-8 字节在到插件手里之前就丢了**，
 插件无法再按 latin1/GBK 解。基线央视频修补链里的「latin1 解码」在这一层做不到。
-❓ 要不要加 `body_base64`（或按 charset 解）—— 测法：先确认改写后的央视频插件是否真的
-需要非 UTF-8 正文，再决定加字段还是让插件走别的 op。**不预先造。**
+
+**fetch 同时在 globalThis 上**（裸名 `fetch(input, init?)`，不用 import），而且是
+**标准 Web 契约**：返回真正的 `Response`（LLRT 自己的类）——`.text()`（utf-8 + 剥 BOM）、
+`.json()`、`.arrayBuffer()`、`.bytes()`、`.ok/.status/.statusText/.url/.headers.get()`
+全套原生方法；`init` 认 `method / headers（对象或 Headers 实例）/ body / redirect`。
+`body` 可以是字符串，也可以是 **ArrayBuffer/Uint8Array**（二进制请求体走 `body_base64`
+给出站门）。SSRF 门、预算、TLS 后端与 `host.fetch` 完全同一份实现（全局那个是
+包装层：内部以 `binary: true` 调 `host.fetch` 拿原始字节，装进 Response）；LLRT 自带的
+原生 fetch 被面板摘掉（直连 HTTP_CLIENT，绕过一切门），Request/Response 纯数据类保留。
+
+两处已知偏差（诚实记录）：① 不支持流式读（`.body` 流存在，`.text()` 一次拿全）；②
+`Response.redirected` 恒为 `false`（LLRT 的构造器不认这个 init 键），重定向本身照常发生。
+
+`host.fetch` / `host.http_fetch`（模块导入那两个）**保持 JSON 契约不变**——mcloud 那族
+靠它；要二进制响应就在模块入口用 `binary: true` 拿 `body_base64`（见上）。
+
+**要二进制，opts 传 `binary: true`**（2026-11-14 落地，上面的 ❓ 就此销账）：
+出参里 `body` 变空串、数据在 **`body_base64`**（原始字节的 base64，逐字节保真），
+`fetch` / `http_fetch` 两条路（rustls / native TLS）同语义。为什么是 opt-in 而不是
+永远都带：base64 会让每个响应多 33% 的体积，文本响应占绝大多数，让需要二进制的
+调用方自己付这个成本。不按 charset 自动解（latin1/GBK 各是各的坑）—— 插件拿到
+完整字节想怎么解都行，面板不做猜编码这种一定会错的事。
 
 ### 4. 两条预算怎么落到 op 上（已定，已实现）
 
@@ -404,7 +424,7 @@ socket 的 reactor 就没了，后续 send 会报「context is being shutdown」
 
 rustls **不实现任何 CBC 套件**（设计选择，不是配置问题），所以只给 CBC 的主机在默认路径上
 必然握手失败。`tls:'native'` 走另一条传输，**每跳仍然过 SSRF 门**、仍然不自动跟重定向、
-正文仍然 1 MiB 上限。
+正文上限与默认路径相同（2026-11-12 起不设上限；`binary: true` 同样给 `body_base64`）。
 
 实测（2026-11-12，mcloud 直播那两个主机）：
 

@@ -57,14 +57,39 @@ pub async fn fetch_json(
     o: &Json,
     inv: Option<Arc<Invocation>>,
 ) -> Result<Json, String> {
+    fetch_json_with(url, o, inv, crate::ssrf::allow_private_outbound_targets()).await
+}
+
+/// `allow_private` 抽出来只为**测试**能打本地的假服务器（生产走上面的默认，
+/// 开关由 HOST_API_ALLOW_PRIVATE 环境变量决定 —— 见 ssrf.rs 的判定表）。
+pub async fn fetch_json_with(
+    url: String,
+    o: &Json,
+    inv: Option<Arc<Invocation>>,
+    allow_private: bool,
+) -> Result<Json, String> {
     // tls:"native" 是**另一条传输**：rustls 不实现任何 CBC 套件，只给 CBC 的主机
     // 在 rustls 那条路上永远握手失败，所以这里直接换 reqwest + 平台 TLS。
     if crate::wsclient::tls_choice(o)? == "native" {
-        return fetch_native_json(url, o, inv).await;
+        return fetch_native_json(url, o, inv, allow_private).await;
     }
+    // binary: true → 出参里给 `body_base64`（原始字节的 base64），`body` 留空 ——
+    // 默认路径的 body 是 lossy UTF-8，二进制字节到插件手里就已经没了。
+    let want_binary = o.get("binary").and_then(Json::as_bool).unwrap_or(false);
     let timeout = clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64));
     let method = get_str(o, "method").unwrap_or_else(|| "GET".into());
     let body = get_str(o, "body").unwrap_or_default();
+    // body_base64：二进制请求体走这里（Web fetch 的 init.body 是 ArrayBuffer/Uint8Array 时
+    // 由全局包装层编码）。与 body 文本互斥，给了 base64 就用它。
+    let body_bytes: Bytes = match o.get("body_base64").and_then(Json::as_str) {
+        Some(b64) if !b64.is_empty() => {
+            use base64::Engine as _;
+            Bytes::from(base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("body_base64 不是合法 base64: {e}"))?)
+        }
+        _ => Bytes::from(body),
+    };
     let redirect = get_str(o, "redirect").unwrap_or_else(|| "follow".into());
     let extra_headers: Vec<(String, String)> = o
         .get("headers")
@@ -90,7 +115,7 @@ pub async fn fetch_json(
         if cancelled(&inv) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed(&current)?;
+        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
 
         let mut builder = http::Request::builder()
             .method(method.as_str())
@@ -99,7 +124,7 @@ pub async fn fetch_json(
             builder = builder.header(k.as_str(), v.as_str());
         }
         let req = builder
-            .body(Full::new(Bytes::from(body.clone())).boxed())
+            .body(Full::new(body_bytes.clone()).boxed())
             .map_err(|e| format!("请求构造失败: {e}"))?;
 
         let resp = match &inv {
@@ -161,15 +186,24 @@ pub async fn fetch_json(
             }
         }
 
-        return Ok(json!({
+        let mut out = json!({
             "status": status,
             "url": current,
             "redirected": redirected,
             "headers": headers,
-            "body": String::from_utf8_lossy(&buf),
+            "body": if want_binary {
+                Json::String(String::new())
+            } else {
+                Json::String(String::from_utf8_lossy(&buf).into_owned())
+            },
             "truncated": false,
             "body_error": body_error,
-        }));
+        });
+        if want_binary {
+            use base64::Engine as _;
+            out["body_base64"] = Json::String(base64::engine::general_purpose::STANDARD.encode(&buf));
+        }
+        return Ok(out);
     }
 }
 
@@ -179,10 +213,25 @@ async fn fetch_native_json(
     url: String,
     o: &Json,
     inv: Option<Arc<Invocation>>,
+    allow_private: bool,
 ) -> Result<Json, String> {
+    // binary: true → 出参里给 `body_base64`（原始字节的 base64），`body` 留空 ——
+    // 默认路径的 body 是 lossy UTF-8，二进制字节到插件手里就已经没了。
+    let want_binary = o.get("binary").and_then(Json::as_bool).unwrap_or(false);
     let timeout = clamp_timeout(o.get("timeout_ms").and_then(Json::as_i64));
     let method = get_str(o, "method").unwrap_or_else(|| "GET".into());
     let body = get_str(o, "body").unwrap_or_default();
+    // body_base64：二进制请求体走这里（Web fetch 的 init.body 是 ArrayBuffer/Uint8Array 时
+    // 由全局包装层编码）。与 body 文本互斥，给了 base64 就用它。
+    let body_bytes: Bytes = match o.get("body_base64").and_then(Json::as_str) {
+        Some(b64) if !b64.is_empty() => {
+            use base64::Engine as _;
+            Bytes::from(base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("body_base64 不是合法 base64: {e}"))?)
+        }
+        _ => Bytes::from(body),
+    };
     let redirect = get_str(o, "redirect").unwrap_or_else(|| "follow".into());
     let extra_headers: Vec<(String, String)> = o
         .get("headers")
@@ -208,7 +257,7 @@ async fn fetch_native_json(
         if inv.as_ref().map(|i| i.is_stopped()).unwrap_or(false) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed(&current)?;
+        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
 
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("method 不合法 {method}: {e}"))?;
@@ -216,8 +265,8 @@ async fn fetch_native_json(
         for (k, v) in &extra_headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
-        if !body.is_empty() {
-            rb = rb.body(body.clone());
+        if !body_bytes.is_empty() {
+            rb = rb.body(body_bytes.clone());
         }
         let resp = rb
             .send()
@@ -261,15 +310,28 @@ async fn fetch_native_json(
             }
         }
 
-        return Ok(json!({
+        let mut out = json!({
             "status": status,
             "url": current,
             "redirected": redirected,
             "headers": headers,
-            "body": String::from_utf8_lossy(&buf),
+            "body": if want_binary {
+                Json::String(String::new())
+            } else {
+                Json::String(String::from_utf8_lossy(&buf).into_owned())
+            },
             "truncated": false,
             "body_error": body_error,
             "tls": "native",
-        }));
+        });
+        if want_binary {
+            use base64::Engine as _;
+            out["body_base64"] = Json::String(base64::engine::general_purpose::STANDARD.encode(&buf));
+        }
+        return Ok(out);
     }
 }
+
+#[cfg(test)]
+#[path = "outbound_tests.rs"]
+mod tests;
