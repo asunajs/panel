@@ -513,3 +513,43 @@
     `web_tests::unknown_page_renders_the_error_page`（状态码 + 页面文案 + 不泄露）、
     `unknown_api_path_stays_json_for_scripts`（脚本必须拿到 JSON）、
     `internal_errors_hide_the_detail_but_keep_a_ref`（500 只有人话 + 编号）。
+
+95. **「DOM 节点只涨不跌」不是一处泄漏，是三处叠出来的**（用户 2026-11-14 拿 DevTools
+    性能监视器截图报障：22,839 → 25,761 → 33,883，随后在运行记录页看到 **112,681**，JS 堆 14 MB）。
+    量出来的口径先说清：DevTools 那个「DOM 节点」= `Memory.getDOMCounters().nodes`，
+    **含还没被 GC 收走的游离节点**；同一段时间里 `document.getElementsByTagName('*').length`
+    （只数挂载的）**逐秒一个数都没变**（896→896、910→910、日志页 1910→1910）。
+    所以「页面上的表越堆越长」这个直觉是错的，涨的全是垃圾。三处来源，按贡献排：
+
+    | 来源 | 形状 | 修前（60s/视图，3030 数据副本） |
+    |---|---|---|
+    | ① 每 5s 轮询**全量重建** | 卡片 12 张 + 插件卡 + 任务表 + 运行表 + 通知列表 50 条 + 仪表盘两个 mini 列表，数据没变也照扔照造（≈870 节点/轮） | 原始斜率 **25.8 / 16.5 / 47.2 / 101.1 / 98.3**（仪表盘/任务/插件/脚本/日志，节点每秒），强制 GC 后只剩 +484/窗口 |
+    | ② 日志页 DOM **无界追加** | `appendLog()` 只 `box.append(logLine(l))`；`state.logs` 有 `LOG_RING=500`，DOM 没有 | 1000 条日志 → `#logs-view` 200→1200 行、挂载 1910→6910；切走**一点不掉**（6909 挂着），只有回到日志页 `renderLogs()` 才重建回 500 |
+    | ③ SSE `event: lagged` 被当日志行 | 广播跟不上时服务端发 `event: lagged` + `{"skipped":…}`，前端只找 `data: ` 行 → 一条空白日志行（`id` 是 undefined），还躲过按 id 去重 | 风暴时跟着涨；肉眼看是「空行 + 计数对不上」 |
+
+    修法（都只动 `web/app.js`）：
+    - ① 新 `sameAsLast(key, parts)`（渲染签名）：插件卡 / 任务表 / 运行表 / 通知列表 / 仪表盘两个
+      mini 列表 / 侧栏插件入口，**数据没变就直接 return**；卡片这类「数字每轮都在变」的改成
+      `setCard()` **原地改 `textContent`**，不再重建整棵树；通知弹层关着时连列表都不画。
+    - ② `appendLog()` 追加后 `while (box.childElementCount > LOG_RING) box.firstElementChild.remove()`；
+      切走日志页时 `clear(#logs-view)`（回来 `renderLogs()` 会按 `state.logs` 重建，没有信息损失）。
+    - ③ 解析 SSE 帧时先看 `event: lagged`，命中就跳过。
+    - 顺手两处：`streamLogs()` 的每个循环用**自己的** `AbortController`（以前判据看全局，
+      重入后旧循环永远不退出 → 两条 SSE 同时读）；`closeDrawer()` 清掉 `#src-hl`
+      （源码高亮层按 0.165 span/字节算，70 KB 的 JS ≈ 2 万节点，抽屉关了还挂着）。
+
+    修后（同一副本、同一探针 `scripts/dom-probe.mjs`，20s/视图）：
+
+    | 视图 | 挂载 | GC 后总节点 | 原始斜率 |
+    |---|---|---|---|
+    | 仪表盘 | 892→892 | 1967→1966（−1） | 25.8 → **6.95**/s |
+    | 任务 | 892→892 | 1966→2003（+37） | 16.5 → **0.97**/s |
+    | 插件 | 892→892 | 1966→1967（+1） | 47.2 → **1.77**/s |
+    | 脚本 | 898→898 | 1977→1976（−1） | 101.1 → **1.52**/s |
+    | 日志空转 | 902→902 | 1983→1983（+0） | 98.3 → **1.46**/s |
+
+    复跑：`node scripts/dom-probe.mjs --quick`（自起临时面板 + 无头 Edge，两个口径都打；
+    `--keep` 留现场、`--no-flood` 跳过洪水段）。**别只看 DevTools 那个数**：它就是「含游离」
+    的粗口径，必须配 `getElementsByTagName('*').length` 和一次强制 GC 才能分清
+    「垃圾没回收」与「被引用钉住」。
+

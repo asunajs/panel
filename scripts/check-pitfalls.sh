@@ -104,6 +104,31 @@ else
   bad "web/*.html 里有内联 script($INLINE_S) / style($INLINE_C)：CSP 是 script-src 'self'，这些不会执行"
 fi
 
+# ui.md §4.1 + pitfalls §95（第 181 轮）：日志页的 DOM 必须跟内存环一样封顶。
+# 只限 state.logs 不限 DOM 时，日志页开着几分钟就是上万个节点（用户 2026-11-14 的截图）。
+if grep -q 'childElementCount > LOG_RING' web/app.js; then
+  ok '日志页的 DOM 也按 LOG_RING 封顶（不只内存环）'
+else
+  bad 'web/app.js 里没有 DOM 行数封顶 —— 日志页开着会无界追加节点'
+fi
+
+# 同一轮：SSE 的 event: lagged 是「广播掉帧」的提示，payload 不是日志行。
+# 以前一律当 data: 塞进 appendLog，日志页会多出空白行且躲过按 id 去重。
+if grep -q "=== 'lagged'" web/app.js; then
+  ok 'SSE 的 event: lagged 帧没被当日志行'
+else
+  bad 'web/app.js 没识别 event: lagged —— 会往日志页插空白行'
+fi
+
+# 同一轮：5s 轮询的重渲染必须带签名去抖。没有它，数据没变也每轮重造几百个节点，
+# DevTools 的「DOM 节点」就长成一条只涨不跌的曲线（游离节点没被 GC 收走也算）。
+SIG_N=$(grep -c 'sameAsLast(' web/app.js)
+if [ "$SIG_N" -ge 6 ]; then
+  ok "轮询重渲染有签名去抖（sameAsLast ×$SIG_N）"
+else
+  bad "sameAsLast 只有 $SIG_N 处 —— 每 5s 全量重建会把「DOM 节点」顶成上升曲线"
+fi
+
 # ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
 # 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
 if python3 scripts/check-css-tokens.py; then
@@ -114,7 +139,7 @@ fi
 
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 13 条坑的守卫全过"
+  echo "ok: 16 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi
