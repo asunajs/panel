@@ -101,12 +101,16 @@ readyz   ~100 秒才回（挂在 actor 后面）→ 反代看到的是「超时�
 于是「服务起来了、界面能开，但一个插件都没加载」，日志里连一行都没有（旧代码把遍历中途的
 错误当成了「目录结束」，见 pitfalls 第 82 条）。把插件放到系统盘就完全没这问题。
 
-**插件改了怎么同步**（仓库是源，3030 用快照）：
+**插件改了怎么同步**：不在面板仓里拷 —— 插件归插件项目，由它自己装（详见
+[`../plugins/README.md`](../plugins/README.md)）。面板仓 `plugins/` 只剩面板自己的 webui-demo。
 
 ```bash
-cp /Users/catlair/mobile/workspace/panel-llrt/plugins/*.js ~/panel-3030/plugins/
-cp -R /Users/catlair/mobile/workspace/panel-llrt/plugins/mcloud.webui ~/panel-3030/plugins/
-launchctl kickstart -k gui/$(id -u)/dev.panel     # 或者在上界面里点「重载」
+# mcloud 那一族
+cd ~/mobile/workspace/mcloud-plugin && npm run deploy:panel      # 装完按提示重载/重启
+# 咪咕音乐
+cd ~/mobile/workspace/cmusic-others/mgmusic-plugin && npm run deploy:panel
+# 想连服务一起重启（停掉所有插件的运行）：
+#   bash scripts/deploy-panel.sh --restart
 ```
 
 数据目录（`~/panel-3030/data`）、脚本目录（`~/panel-3030/scripts`）本来就在系统盘，不受影响。
