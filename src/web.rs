@@ -1997,6 +1997,8 @@ async fn api_migrate_apply(
         with_runs_history: b.with_runs_history,
         with_notify: b.with_notify,
         adopt_token: b.adopt_token,
+        // 面板自己的脚本目录（可能被 PANEL_SCRIPTS_DIR 改过）——迁移要落到同一个地方
+        scripts_dir: Some(st.scripts_dir.clone()),
     };
     let source = b.source.clone();
     let applied = tokio::task::spawn_blocking(move || crate::migrate::apply(&source, &target, &opts))
