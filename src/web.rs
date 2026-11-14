@@ -527,6 +527,8 @@ pub fn router(st: AppState) -> Router {
         .route("/plugins/{name}/", get(plugin_webui_index))
         .route("/plugins/{name}/{*rel}", axum::routing::any(plugin_webui_any))
         .route("/api/plugins/{name}/reload", post(plugin_reload))
+        // 第 180 轮：重装 = 重新采纳插件给的 cron 建议（改计划、保留历史）
+        .route("/api/plugins/{name}/reinstall", post(plugin_reinstall))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
         .route("/api/plugins/{name}/disable", post(plugin_disable))
@@ -1429,6 +1431,29 @@ async fn read_source(dir: &PathBuf, name: &str) -> Result<String, ApiError> {
         .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))
 }
 
+/// POST /api/plugins/{name}/reinstall —— 重装：这次加载**采纳**插件的 cron 建议。
+///
+/// 和 reload 的差别只有一句话：reload 忽略建议，reinstall 采纳建议。
+/// 运行历史、熔断、暂停状态、摘要都保留 —— 采纳只改计划 / 预算 / 提前量。
+async fn plugin_reinstall(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let source = read_source(&st.plugins_dir, &name).await?;
+    st.sched.unload(&name);
+    match st.sched.load_adopt(&name, source, true).await {
+        Ok(()) => {
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.remove(&name);
+            }
+            Ok(Json(json!({ "ok": true, "name": name, "adopted": true })))
+        }
+        Err(e) => Err(bad(format!("重装失败: {e}"))),
+    }
+}
+
 async fn plugin_reload(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -1441,7 +1466,10 @@ async fn plugin_reload(
     let prev = st.sched.last_good_source(&name).await;
     // 命令通道是串行的：Unload 一定先于 Load 被处理
     st.sched.unload(&name);
-    match st.sched.load(&name, source).await {
+    // 「重载」一般不采纳插件的 cron 建议（用户的计划说了算）。但**从没装过的插件**例外：
+    // 那一下等于安装，不采纳的话它注册的任务永远停在「待采纳」，刚上传的插件等于不跑。
+    let fresh = !crate::db::plugin_surfaces(&st.db).await.contains_key(&name);
+    match st.sched.load_adopt(&name, source, fresh).await {
         Ok(()) => {
             if let Ok(mut g) = st.load_errors.lock() {
                 g.remove(&name);
@@ -1569,7 +1597,12 @@ async fn plugins_upload(
         }
         let Ok(source) = read_source(&st.plugins_dir, stem).await else { continue };
         st.sched.unload(stem);
-        if st.sched.load(stem, source).await.is_ok() {
+        // 没装过的名字 = 静默安装（API 直接上传，不走界面）：采纳它的 cron 建议。
+        // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划（第 180 轮）。
+        let fresh = !crate::db::plugin_surfaces(&st.db)
+            .await
+            .contains_key(stem);
+        if st.sched.load_adopt(stem, source, fresh).await.is_ok() {
             reloaded.push(stem.to_string());
         }
     }
@@ -3122,7 +3155,8 @@ async fn plugin_create(
     write_atomic(&path, source.as_bytes(), None)
         .await
         .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
-    match st.sched.load(&body.name, source.clone()).await {
+    // 新建 = 安装：这次注册的 cron 建议直接采纳（复制成生效计划，第 180 轮）
+    match st.sched.load_adopt(&body.name, source.clone(), true).await {
         Ok(()) => {
             st.log.emit(
                 "panel",

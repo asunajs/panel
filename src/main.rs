@@ -333,10 +333,13 @@ async fn load_all(
             .and_then(|x| x.as_bool())
             .unwrap_or(true)
     };
+    // 「这个插件装过没有」永远要查：安装（第一次见到它）时要采纳它的 cron 建议。
+    // 懒加载的判据也用它，但即便 lazy_load 关着，安装判定仍然需要这份数据。
+    let known = db::plugin_surfaces(db).await;
     let surfaces = if lazy_on {
-        db::plugin_surfaces(db).await
+        known.clone()
     } else {
-        Default::default()
+        std::collections::HashMap::new()
     };
     let saved_rows = if lazy_on {
         db::saved_task_rows(db).await
@@ -428,9 +431,12 @@ async fn load_all(
         // 单个插件的加载也要有上限：插件在加载期跑顶层代码，可能 await 一个没有超时的网络调用。
         // 没有这一层，一个插件卡住 = 后面的插件永远不加载 + 启动永远不结束（第 134 轮实测）。
         // 60 秒对「读配置 + 建路由 + 打一次 API」足够宽；超时算加载失败，界面能看到原因。
+        // 第一次见到这个插件 = 装它：这次注册的 cron 建议直接采纳（复制成生效计划）。
+        // 之后重载 / 重启都只更新建议，不动生效计划 —— 用户说了算（第 180 轮）。
+        let adopt = !known.contains_key(&name);
         let loaded = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            sched.load(&name, source),
+            sched.load_adopt(&name, source, adopt),
         )
         .await;
         let loaded = match loaded {

@@ -941,10 +941,18 @@ function renderTasks() {
     // 插件自己写的一行摘要（set_job_summary）：放在任务名下面，不占新列。
     if (t.summary) nameCell.append(el('div', 'mini-sub', t.summary));
     tr.append(nameCell);
-    const cronCell = td('计划', 'mono', t.cron);
-    if (t.cron_override) {
-      cronCell.append(el('span', 'mini-sub', '已改'));
-      cronCell.title = '插件注册的是 ' + (t.cron_base || '（无）') + '；点「改计划」可以恢复';
+    const cronCell = td('计划', 'mono', t.pending_adopt ? '（待采纳）' : t.cron);
+    // 第 180 轮：cron 是面板的，插件只给建议。两者不一样时说清楚，并给「采纳」的出口。
+    // 第 180 轮：cron 归面板，插件只给建议。两者不一样时**把建议写出来**，
+    // 光挂一个 tooltip 等于没提示（截图里看到的就是这样）。
+    if (t.cron_base && t.cron_base !== t.cron && !t.pending_adopt) {
+      cronCell.append(el('div', 'mini-sub', '插件建议 ' + t.cron_base));
+      if (t.cron_override) cronCell.append(el('span', 'mini-sub', '已改'));
+      cronCell.title = '插件建议 ' + t.cron_base + '；当前按 ' + t.cron + ' 跑。重载不会自动采纳。';
+    }
+    if (t.suggest_budget_ms && t.suggest_budget_ms !== t.budget_ms) {
+      cronCell.title = (cronCell.title ? cronCell.title + '；' : '') +
+        '插件建议预算 ' + humanMs(t.suggest_budget_ms) + '，当前 ' + humanMs(t.budget_ms);
     }
     tr.append(cronCell);
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
@@ -989,6 +997,16 @@ function renderTasks() {
       body.append(tr);
       continue;
     }
+    if (t.pending_adopt) {
+      // 只是插件的建议（插件更新引入的新任务名）：不调度，采纳后才跑
+      const ops = [
+        ['采纳', () => act(taskPath(t, 'schedule'), '已采纳建议 ' + t.name, { expr: null })],
+        ['删除', () => deleteTask(t)],
+      ];
+      tr.append(actionsCell(ops));
+      body.append(tr);
+      continue;
+    }
     const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
     if (!t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
     ops.push(t.enabled
@@ -997,6 +1015,9 @@ function renderTasks() {
     // 熔断了才给这个按钮：冷却是指数退避，人修好原因之后得有个立刻能恢复的出口
     // （通知里那句「检查完可以手动恢复」指的就是它）。
     if (t.tripped) ops.push(['重置熔断', () => act(taskPath(t, 'reset'), '已重置熔断 ' + t.name)]);
+    if (t.cron_base && t.cron_base !== t.cron) {
+      ops.push(['采纳建议', () => act(taskPath(t, 'schedule'), '已采纳建议 ' + t.name, { expr: null })]);
+    }
     ops.push(['删除', () => deleteTask(t)]);
     tr.append(actionsCell(ops));
     body.append(tr);
@@ -1605,6 +1626,11 @@ async function showPlugin(name) {
     ops.append(
       mkOp('编辑源码', () => openPluginSource(name)),
       mkOp('配置', () => openPluginConfig(name)),
+      // 重装 = 重新采纳插件这次的 cron 建议。和「重载」的区别就这一条，文案要写清楚。
+      mkOp('重装（采纳计划建议）', () => {
+        if (!window.confirm('重装 ' + name + '？\n会用插件这次的建议覆盖任务计划、预算、提前量；\n运行历史、暂停状态、摘要都保留。')) return;
+        act('/api/plugins/' + encodeURIComponent(name) + '/reinstall', '已重装 ' + name);
+      }),
       // 停用 / 启用（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上
       // 给过「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
       ...(state.disabled.includes(name)
@@ -3143,9 +3169,10 @@ function render() {
   });
 }
 
-async function act(path, okMsg) {
+async function act(path, okMsg, body) {
   try {
-    await api(path, { method: 'POST' });
+    // body 可选：采纳建议要 POST {"expr": null}，而大多数动作不带 body
+    await api(path, body === undefined ? { method: 'POST' } : { method: 'POST', body });
     notify(okMsg);
     await refresh();
     if (state.view === 'runs') await loadRuns();

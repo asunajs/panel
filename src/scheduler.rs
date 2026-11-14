@@ -156,6 +156,12 @@ struct Task {
     cron: String,
     /// 插件注册时给的那条（用户改了计划也不动它，用来「恢复默认」）。
     base_cron: String,
+    /// 插件建议的预算（毫秒）。生效的是 budget_ms（第 180 轮）。
+    suggest_budget_ms: u64,
+    /// 插件建议的提前量（毫秒）。
+    suggest_lead_ms: u64,
+    /// 这条任务只是建议、还没被采纳（插件更新引入的新任务名）→ 不调度、界面标「待采纳」。
+    pending_adopt: bool,
     /// 用户在界面上改的调度；Some 时 `cron` 是它的副本。
     override_expr: Option<String>,
     /// 插件自己写的一行摘要（卡片上显示），set_job_summary。
@@ -255,6 +261,9 @@ impl Task {
             plugin,
             name,
             base_cron: cron.clone(),
+            suggest_budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
+            suggest_lead_ms: lead_ms,
+            pending_adopt: false,
             cron,
             override_expr: None,
             summary: None,
@@ -289,6 +298,9 @@ impl Task {
             name,
             cron: String::new(),
             base_cron: String::new(),
+            suggest_budget_ms: DEFAULT_BUDGET_MS,
+            suggest_lead_ms: 0,
+            pending_adopt: false,
             override_expr: None,
             summary: None,
             blockers: Vec::new(),
@@ -386,8 +398,12 @@ pub struct TaskView {
     pub cron: String,
     /// 用户改过的调度（None = 跟着插件注册的那条走）。
     pub cron_override: Option<String>,
-    /// 插件注册时给的那条，用来「恢复默认」。
+    /// 插件注册时给的那条，用来「恢复默认」（第 180 轮起 = 插件的建议）。
     pub cron_base: String,
+    /// 插件建议的预算；和 budget_ms 不一样时可以提示「采纳建议」。
+    pub suggest_budget_ms: u64,
+    /// 只有建议、还没采纳（插件更新引入的新任务名）：不调度，界面标「待采纳」。
+    pub pending_adopt: bool,
     /// 插件写的一行摘要（set_job_summary）。
     pub summary: Option<String>,
     /// 插件说「还不能跑」的原因（set_job_blockers）；非空只挡定时触发。
@@ -479,6 +495,8 @@ pub enum Cmd {
     Load {
         name: String,
         source: String,
+        /// 这次加载要不要采纳插件的 cron 建议（安装 / 重装 = true）
+        adopt: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Unload {
@@ -659,14 +677,23 @@ impl Scheduler {
         rx.await.unwrap_or(0)
     }
 
-    pub async fn load(&self, name: &str, source: String) -> Result<(), String> {
+    /// 安装 / 重装：这次加载要**采纳**插件给的 cron 建议（第 180 轮）。
+    ///
+    /// 和普通 load 的区别只有一个：adopt_mode 置上。注册消息和 Loaded 走同一个
+    /// 串行通道，注册一定先到，所以采纳一定生效；Loaded（成功或失败）会把它清掉。
+    pub async fn load_adopt(&self, name: &str, source: String, adopt: bool) -> Result<(), String> {
         let name = name.to_string();
         self.call(|reply| Cmd::Load {
             name,
             source,
+            adopt,
             reply,
         })
         .await?
+    }
+
+    pub async fn load(&self, name: &str, source: String) -> Result<(), String> {
+        self.load_adopt(name, source, false).await
     }
 
     /// 清掉一条任务的熔断状态，并把下一拍对齐到现在（立刻可以再跑）。
@@ -958,6 +985,9 @@ struct Inner {
     plugins_dir: Option<std::path::PathBuf>,
     /// 正在异步唤醒的插件（避免同一拍发两次 load）。
     waking: std::collections::HashSet<String>,
+    /// 本次 load 是「安装 / 重装」吗（第 180 轮）：是的话插件给的 cron 建议会被采纳。
+    /// Loaded（无论成败）后就清掉，避免之后动态 register_cron 也去采纳。
+    adopt_mode: std::collections::HashSet<String>,
     tasks: Vec<Task>,
     tx: mpsc::UnboundedSender<Cmd>,
     reg: mpsc::UnboundedSender<Registration>,
@@ -987,6 +1017,11 @@ struct PersistJob {
     lead: Option<i64>,
     /// NULL = 没删；有值 = 删除时刻（毫秒）。
     deleted_at: Option<i64>,
+    /// 插件最近一次的建议（第 180 轮）：重载/重启靠它判断「建议变没变」。
+    suggest_cron: String,
+    suggest_budget_ms: i64,
+    suggest_lead_ms: i64,
+    pending_adopt: bool,
 }
 
 /// 起调度器。`config` 是所有插件共享的只读配置（`host.config()`）。
@@ -1015,6 +1050,7 @@ pub fn start(
         lazy: std::collections::HashSet::new(),
         plugins_dir: None,
         waking: std::collections::HashSet::new(),
+        adopt_mode: std::collections::HashSet::new(),
         tasks: Vec::new(),
         tx: tx.clone(),
         reg: reg_tx.clone(),
@@ -1044,15 +1080,25 @@ pub fn start(
             let _ = pdb
                 .call(move |c| {
                     c.execute(
-                        "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms,deleted_at)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                        "INSERT INTO tasks(plugin,name,cron,budget_ms,enabled,next_at,override_expr,summary,blockers,lead_ms,deleted_at,
+                                           suggest_cron,suggest_budget_ms,suggest_lead_ms,pending_adopt)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                          ON CONFLICT(plugin,name) DO UPDATE SET
                            cron=excluded.cron, budget_ms=excluded.budget_ms,
                            enabled=excluded.enabled, next_at=excluded.next_at,
                            override_expr=excluded.override_expr, summary=excluded.summary,
                            blockers=excluded.blockers, lead_ms=excluded.lead_ms,
-                           deleted_at=excluded.deleted_at",
-                        rusqlite::params![j.plugin, j.name, j.cron, j.budget, j.enabled, j.next, j.ov, j.summary, j.blockers, j.lead, j.deleted_at],
+                           deleted_at=excluded.deleted_at,
+                           suggest_cron=excluded.suggest_cron,
+                           suggest_budget_ms=excluded.suggest_budget_ms,
+                           suggest_lead_ms=excluded.suggest_lead_ms,
+                           pending_adopt=excluded.pending_adopt",
+                        rusqlite::params![
+                            j.plugin, j.name, j.cron, j.budget, j.enabled, j.next, j.ov,
+                            j.summary, j.blockers, j.lead, j.deleted_at,
+                            j.suggest_cron, j.suggest_budget_ms, j.suggest_lead_ms,
+                            j.pending_adopt as i64
+                        ],
                     )
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -1147,6 +1193,11 @@ struct SavedTask {
     lead_ms: Option<u64>,
     /// 用户删过这条（毫秒时间戳）。注册时必须尊重它，否则插件一注册就「复活」。
     deleted_at: Option<i64>,
+    /// 插件上一次的建议（第 180 轮）。
+    suggest_cron: String,
+    suggest_budget_ms: u64,
+    suggest_lead_ms: u64,
+    pending_adopt: bool,
 }
 
 async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
@@ -1154,7 +1205,8 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
         .call(|c| {
             let mut st = c
                 .prepare(
-                    "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms,deleted_at FROM tasks",
+                    "SELECT plugin,name,override_expr,enabled,summary,blockers,lead_ms,deleted_at,
+                        suggest_cron,suggest_budget_ms,suggest_lead_ms,pending_adopt FROM tasks",
                 )
                 .map_err(|e| e.to_string())?;
             let out: Vec<(
@@ -1166,6 +1218,10 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                 String,
                 Option<i64>,
                 Option<i64>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+                i64,
             )> = st
                 .query_map([], |r| {
                     Ok((
@@ -1177,6 +1233,10 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         r.get(5).unwrap_or_else(|_| "[]".to_string()),
                         r.get::<_, Option<i64>>(6)?,
                         r.get::<_, Option<i64>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<i64>>(9)?,
+                        r.get::<_, Option<i64>>(10)?,
+                        r.get::<_, i64>(11)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
@@ -1188,7 +1248,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
     match rows {
         Ok(list) => list
             .into_iter()
-            .map(|(p, n, ov, en, sum, bl, lead, del)| {
+            .map(|(p, n, ov, en, sum, bl, lead, del, sg, sgb, sgl, pend)| {
                 (
                     (p, n),
                     SavedTask {
@@ -1198,6 +1258,10 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         blockers: serde_json::from_str(&bl).unwrap_or_default(),
                         lead_ms: lead.map(|v| v.max(0) as u64),
                         deleted_at: del,
+                        suggest_cron: sg.unwrap_or_default(),
+                        suggest_budget_ms: sgb.map(|v| v.max(0) as u64).unwrap_or(0),
+                        suggest_lead_ms: sgl.map(|v| v.max(0) as u64).unwrap_or(0),
+                        pending_adopt: pend != 0,
                     },
                 )
             })
@@ -1211,6 +1275,7 @@ impl Inner {
         let mut best: Option<DateTime<Local>> = None;
         for t in &self.tasks {
             if t.deleted_at.is_some()
+                || t.pending_adopt
                 || !t.enabled
                 || t.in_flight
                 || t.schedule.is_none()
@@ -1237,8 +1302,9 @@ impl Inner {
             Cmd::Load {
                 name,
                 source,
+                adopt,
                 reply,
-            } => self.spawn_load(name, source, reply),
+            } => self.spawn_load(name, source, adopt, reply),
             Cmd::SetPluginsDir { dir } => {
                 self.plugins_dir = Some(dir);
             }
@@ -1575,16 +1641,21 @@ impl Inner {
                         .find(&plugin, &name)
                         .ok_or_else(|| format!("没有这个任务: {plugin}/{name}"))?;
                     match expr {
+                        // expr = null = 采纳插件的建议（把建议**复制**成生效计划）
                         None => {
-                            let base = self.tasks[i].base_cron.clone();
-                            if !base.is_empty() {
-                                self.tasks[i].set_schedule(&base)?;
+                            if self.tasks[i].base_cron.is_empty() {
+                                return Err(format!(
+                                    "任务 {name} 没有可采纳的建议（插件没给它 register_cron 过）"
+                                ));
                             }
-                            self.tasks[i].override_expr = None;
+                            self.adopt_suggestion(i);
                         }
                         Some(e) => {
+                            // 用户改计划：改的是「生效的副本」，插件建议不受影响
                             self.tasks[i].set_schedule(&e)?;
+                            self.tasks[i].cron = e.clone();
                             self.tasks[i].override_expr = Some(e);
+                            self.tasks[i].pending_adopt = false;
                         }
                     }
                     self.persist_task(i);
@@ -1775,8 +1846,16 @@ impl Inner {
                 plugin: t.plugin.clone(),
                 name: t.name.clone(),
                 cron: t.cron.clone(),
-                cron_override: t.override_expr.clone(),
+                // 第 180 轮：cron 是面板的，override 由「和插件的建议不一样」推导，
+                // 不再单独存一份（存两份迟早对不上）。
+                cron_override: if t.cron != t.base_cron && !t.base_cron.is_empty() {
+                    Some(t.cron.clone())
+                } else {
+                    None
+                },
                 cron_base: t.base_cron.clone(),
+                suggest_budget_ms: t.suggest_budget_ms,
+                pending_adopt: t.pending_adopt,
                 summary: t.summary.clone(),
                 blockers: t.blockers.clone(),
                 lead_ms: t.lead_ms,
@@ -1787,7 +1866,8 @@ impl Inner {
                 deleted: t.deleted_at.is_some(),
                 lazy: t.lazy,
                 // 暂停的任务不报「下次运行」：界面上「已暂停」旁边挂一个未来时间只会让人以为它要跑。
-                next_at: if t.enabled && t.deleted_at.is_none() {
+                // 待采纳的任务不报「下次运行」：它还没被采纳，压根不会跑
+                next_at: if t.enabled && t.deleted_at.is_none() && !t.pending_adopt {
                     t.next_fire.timestamp_millis()
                 } else {
                     0
@@ -1812,8 +1892,16 @@ impl Inner {
         &mut self,
         name: String,
         source: String,
+        adopt: bool,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
+        // 采纳模式在**加载开始时**定死：注册消息和 Loaded 是两条通道，谁先被处理不确定，
+        // 在 Loaded 里清会让「后到的注册」看不到采纳标记（第 180 轮踩到：安装后任务成了待采纳）。
+        if adopt {
+            self.adopt_mode.insert(name.clone());
+        } else {
+            self.adopt_mode.remove(&name);
+        }
         if self.plugins.contains_key(&name) {
             let _ = reply.send(Err(format!("插件已加载: {name}")));
             return;
@@ -1856,8 +1944,40 @@ impl Inner {
                 blockers: t.blockers.clone(),
                 lead_ms: saved_lead(t.lead_override, t.lead_ms),
                 deleted_at: t.deleted_at,
+                suggest_cron: t.base_cron.clone(),
+                suggest_budget_ms: t.suggest_budget_ms,
+                suggest_lead_ms: t.suggest_lead_ms,
+                pending_adopt: t.pending_adopt,
             },
         );
+    }
+
+    /// 采纳插件当前的建议（安装 / 重装 / 用户点「采纳建议」都走这里）。
+    ///
+    /// 只动计划、预算、提前量：运行历史、熔断、暂停状态、摘要、blockers 全部保留 ——
+    /// 这正是「重装」相对「删了重建」的意义。
+    fn adopt_suggestion(&mut self, i: usize) {
+        let expr = self.tasks[i].base_cron.clone();
+        if !expr.is_empty() {
+            match self.tasks[i].set_schedule(&expr) {
+                Ok(()) => {
+                    self.tasks[i].cron = expr.clone();
+                }
+                Err(e) => self.log.emit(
+                    &self.tasks[i].plugin.clone(),
+                    None,
+                    Level::Warn,
+                    format!("采纳建议 {expr} 失败（{e}），先按原来的计划跑"),
+                ),
+            }
+        }
+        self.tasks[i].budget_ms = self.tasks[i].suggest_budget_ms.clamp(1, MAX_BUDGET_MS);
+        if self.tasks[i].suggest_lead_ms > 0 {
+            self.tasks[i].lead_ms = self.tasks[i].suggest_lead_ms.min(LEAD_MAX_MS);
+            self.tasks[i].lead_override = true;
+        }
+        self.tasks[i].pending_adopt = false;
+        self.tasks[i].override_expr = None;
     }
 
     /// 注册完把库里记着的状态套上去（暂停/摘要/blockers/提前量/调度覆盖）。
@@ -1869,6 +1989,15 @@ impl Inner {
         self.tasks[i].enabled = s.enabled;
         // 墓碑优先于插件注册：用户删过的任务，插件再注册也不复活（第 178 轮）
         self.tasks[i].deleted_at = s.deleted_at;
+        // 第 180 轮：库里的「建议」和「待采纳」也认 —— 重启后没加载插件时靠它们显示
+        if !s.suggest_cron.is_empty() {
+            self.tasks[i].base_cron = s.suggest_cron.clone();
+        }
+        if s.suggest_budget_ms > 0 {
+            self.tasks[i].suggest_budget_ms = s.suggest_budget_ms;
+        }
+        self.tasks[i].suggest_lead_ms = s.suggest_lead_ms;
+        self.tasks[i].pending_adopt = s.pending_adopt;
         self.tasks[i].summary = s.summary;
         self.tasks[i].blockers = s.blockers;
         if let Some(l) = s.lead_ms {
@@ -1922,44 +2051,92 @@ impl Inner {
                 params,
                 lead_ms,
             } => {
-                let t = match Task::with_opts(
-                    plugin.clone(),
-                    name.clone(),
-                    cron,
-                    budget_ms,
-                    params,
-                    lead_ms,
-                ) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.log.emit(
-                            &plugin,
-                            None,
-                            Level::Error,
-                            format!("任务 {name} 的调度表达式无效: {e}"),
-                        );
-                        return;
-                    }
-                };
-                match self.find(&plugin, &name) {
-                    // 同名重新注册（热重载）：熔断计数接着算，其余状态由 apply_saved 恢复。
-                    Some(i) => {
-                        let old = &self.tasks[i];
-                        let (trips, tripped) = (old.trips, old.tripped);
-                        self.tasks[i] = Task {
-                            trips,
-                            tripped,
-                            ..t
-                        };
-                    }
-                    None => self.tasks.push(t),
+                // 第 180 轮：cron 归面板所有，插件这里只是**建议**。
+                //
+                // 采纳只发生在「安装 / 重装」（adopt_mode），重载与重启一律只更新建议 ——
+                // 否则用户改过的计划会在每次重启后被插件改回去。
+                let budget = budget_ms.clamp(1, MAX_BUDGET_MS);
+                if let Err(e) = Schedule::parse(&cron) {
+                    self.log.emit(
+                        &plugin,
+                        None,
+                        Level::Error,
+                        format!("任务 {name} 的调度建议无效（{e}），这条建议不记"),
+                    );
+                    return;
                 }
-                if let Some(i) = self.find(&plugin, &name) {
-                    // 库里记着的状态（暂停/摘要/blockers/提前量/调度覆盖）优先：
-                    // 插件重新注册（热重载）不能把人的改动冲掉。
-                    self.apply_saved(i);
-                    self.remember(i);
-                    self.persist_task(i);
+                let adopt = self.adopt_mode.contains(&plugin);
+                match self.find(&plugin, &name) {
+                    Some(i) => {
+                        // 先把库里的状态套上（暂停/摘要/blockers/墓碑/上一次的建议），
+                        // 再记这次的建议 —— 顺序反了的话，apply_saved 会把刚记的建议盖回旧值。
+                        self.apply_saved(i);
+                        let before = self.tasks[i].cron.clone();
+                        self.tasks[i].base_cron = cron.clone();
+                        self.tasks[i].suggest_budget_ms = budget;
+                        self.tasks[i].suggest_lead_ms = lead_ms;
+                        // 参数只能由插件给（是运行时 payload，不是配置）
+                        self.tasks[i].params = params;
+                        if adopt {
+                            self.adopt_suggestion(i);
+                        } else if before != cron && !self.tasks[i].pending_adopt {
+                            self.log.emit(
+                                &plugin,
+                                None,
+                                Level::Info,
+                                format!(
+                                    "任务 {name} 的建议改成了 {cron}；当前仍按 {before} 跑（重载不自动采纳，要采纳请点「采纳建议」或重装插件）"
+                                ),
+                            );
+                        }
+                        self.remember(i);
+                        self.persist_task(i);
+                    }
+                    None => {
+                        // 内存里没有这条：插件更新引入的新任务名，或全新安装。
+                        let mut t = match Task::with_opts(
+                            plugin.clone(),
+                            name.clone(),
+                            cron.clone(),
+                            budget,
+                            params,
+                            lead_ms,
+                        ) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                self.log.emit(
+                                    &plugin,
+                                    None,
+                                    Level::Error,
+                                    format!("任务 {name} 的调度表达式无效: {e}"),
+                                );
+                                return;
+                            }
+                        };
+                        // 不是安装/重装：先记成「待采纳」，不调度
+                        t.pending_adopt = !adopt;
+                        self.tasks.push(t);
+                        let i = self.tasks.len() - 1;
+                        self.apply_saved(i);
+                        // apply_saved 会把「库里记着的待采纳」套上；这次带 adopt 的话以采纳为准
+                        self.tasks[i].base_cron = cron.clone();
+                        self.tasks[i].suggest_budget_ms = budget;
+                        self.tasks[i].suggest_lead_ms = lead_ms;
+                        if adopt {
+                            self.adopt_suggestion(i);
+                        } else if self.tasks[i].pending_adopt {
+                            self.log.emit(
+                                &plugin,
+                                None,
+                                Level::Info,
+                                format!(
+                                    "插件建议了任务 {name}（{cron}），先列入「待采纳」、不调度；采纳后才会跑"
+                                ),
+                            );
+                        }
+                        self.remember(i);
+                        self.persist_task(i);
+                    }
                 }
             }
             // handler 的名字已经在 JS 侧注册表里。这里建一条**手动任务**，
@@ -2009,6 +2186,10 @@ impl Inner {
             lead: saved_lead(t.lead_override, t.lead_ms).map(|v| v as i64),
             // 墓碑时刻落库：重启、插件重载之后都要认它
             deleted_at: t.deleted_at,
+            suggest_cron: t.base_cron.clone(),
+            suggest_budget_ms: t.suggest_budget_ms as i64,
+            suggest_lead_ms: t.suggest_lead_ms as i64,
+            pending_adopt: t.pending_adopt,
         };
         let (p, n) = (job.plugin.clone(), job.name.clone());
         if self.persist.send(job).is_err() {
@@ -2087,7 +2268,13 @@ impl Inner {
             let next_due = self
                 .tasks
                 .iter()
-                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some() && t.deleted_at.is_none())
+                .filter(|t| {
+                    t.plugin == name
+                        && t.enabled
+                        && !t.pending_adopt
+                        && t.schedule.is_some()
+                        && t.deleted_at.is_none()
+                })
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
             if !should_idle_unload(now, last, idle, busy, next_due, IDLE_WAKE_WINDOW_MS) {
@@ -2126,7 +2313,13 @@ impl Inner {
             let next = self
                 .tasks
                 .iter()
-                .filter(|t| t.plugin == name && t.enabled && t.schedule.is_some() && t.deleted_at.is_none())
+                .filter(|t| {
+                    t.plugin == name
+                        && t.enabled
+                        && !t.pending_adopt
+                        && t.schedule.is_some()
+                        && t.deleted_at.is_none()
+                })
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
             let Some(next) = next else { continue };
@@ -2138,7 +2331,7 @@ impl Inner {
                 Ok(src) => {
                     self.waking.insert(name.clone());
                     let (tx, _rx) = oneshot::channel();
-                    self.spawn_load(name.clone(), src, tx);
+                    self.spawn_load(name.clone(), src, false, tx);
                     self.log.emit(
                         &name,
                         None,
@@ -2183,6 +2376,7 @@ impl Inner {
             let t = &self.tasks[i];
             if t.deleted_at.is_some()
                 || t.lazy
+                || t.pending_adopt
                 || !t.enabled
                 || t.schedule.is_none()
                 || trigger_at(t) > now
@@ -2230,6 +2424,7 @@ impl Inner {
             .enumerate()
             .filter(|(_, t)| {
                 t.enabled
+                    && !t.pending_adopt
                     && !t.in_flight
                     && t.schedule.is_some()
                     && trigger_at(t) <= now

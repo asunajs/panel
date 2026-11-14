@@ -170,6 +170,22 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         ("lead_ms", "ALTER TABLE tasks ADD COLUMN lead_ms INTEGER"),
         // 第 178 轮：任务删除的墓碑（NULL = 没删）。插件重载时靠它判断「这条是用户删的」
         ("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at INTEGER"),
+        // 第 180 轮：cron 改成「面板所有、插件只给建议」——
+        //   生效的是 cron / budget_ms（用户说了算），下面这四个存插件最近一次的建议。
+        ("suggest_cron", "ALTER TABLE tasks ADD COLUMN suggest_cron TEXT"),
+        (
+            "suggest_budget_ms",
+            "ALTER TABLE tasks ADD COLUMN suggest_budget_ms INTEGER",
+        ),
+        (
+            "suggest_lead_ms",
+            "ALTER TABLE tasks ADD COLUMN suggest_lead_ms INTEGER",
+        ),
+        // 1 = 这条任务只是插件建议（插件更新引入的新任务名），还没被用户采纳 → 不调度
+        (
+            "pending_adopt",
+            "ALTER TABLE tasks ADD COLUMN pending_adopt INTEGER NOT NULL DEFAULT 0",
+        ),
     ] {
         if !has_column(conn, "tasks", col)? {
             conn.execute(ddl, [])
