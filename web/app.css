@@ -711,7 +711,10 @@ html input[type="checkbox"]:not(.check-raw):disabled {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
-#drawer-source .editor { min-height: 55vh; }
+/* 原来这里靠 `min-height: 55vh` 给编辑器撑高度 —— 但那只撑得住 textarea，撑不住
+   `.code-editor`（行号层会把容器撑到全文高度）。现在高度由 `.code-editor` 的
+   clamp(240px, 62vh, 820px) 定，这条不用再补。 */
+#drawer-source .editor { min-height: 0; }
 
 .src-toolbar { margin-bottom: 8px; }
 .src-toolbar .src-meta { margin-right: auto; }
@@ -1526,6 +1529,12 @@ select option { background: var(--surface); color: var(--fg); }
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   overflow: hidden;
+  /* **定高**（第 189 轮）：行号层 `.code-gutter` 是一个 `pre`，14,726 行就是 29 万像素高，
+     而 flex 容器的 auto 高度由内容撑开 —— 于是 `.code-editor` 被撑成 29 万像素，
+     抽屉变成一条 29 万像素的滚动条，textarea 只有 55vh 那一截，往下全是空行号
+     （用户截图报「编辑源码不能使用」，箭头指的就是那根细得看不见的滚动条）。
+     定高之后：两层各自在内部滚，sync() 负责对齐 scrollTop/scrollLeft。 */
+  height: clamp(240px, 62vh, 820px);
   min-height: 220px;
 }
 .code-gutter {
@@ -1581,7 +1590,11 @@ select option { background: var(--surface); color: var(--fg); }
   line-height: var(--code-line);
   white-space: pre;
   overflow: auto;
-  resize: vertical;
+  /* 撑满定高的容器自己滚；不再用 resize: vertical —— 容器已经定高，往下拖只会让
+     输入层和行号/高亮层错位。 */
+  height: 100%;
+  min-height: 0;
+  resize: none;
   tab-size: 2;
 }
 .code-editor textarea.editor::selection { background: var(--accent-soft); }
@@ -1735,11 +1748,16 @@ select option { background: var(--surface); color: var(--fg); }
   margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--dim);
   letter-spacing: .02em;
 }
-.chan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+/* 列宽按容器自己算：容器窄就自动变一列，别把标签和提示挤成竖排字 */
+.chan-grid {
+  display: grid; gap: 10px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
 .chan-grid .wide, .chan-line.wide { grid-column: 1 / -1; }
-.chan-line { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; align-items: center; }
+.chan-line { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 6px 10px; align-items: center; }
 .chan-label { font-size: 12.5px; color: var(--dim); }
-.chan-hint { grid-column: 2; font-size: 11.5px; color: var(--dim); margin-top: -4px; }
+/* 提示占整行（含标签那一列）：塞在控件那一列里，容器一窄就变成一列一个字 */
+.chan-hint { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); line-height: 1.5; }
 .chan-secret { display: flex; gap: 6px; align-items: center; min-width: 0; }
 .chan-secret .input { flex: 1 1 auto; min-width: 0; }
 .chan-secret-set { font-size: 12.5px; color: var(--fg-2); flex: 1 1 auto; }
@@ -1765,10 +1783,10 @@ select option { background: var(--surface); color: var(--fg); }
 .notify-empty p { margin: 0; font-size: 12.5px; max-width: 44ch; line-height: 1.6; }
 .notify-empty .chan-actions { justify-content: center; }
 
-@media (max-width: 900px) {
+@media (max-width: 1180px) {
+  /* 左侧导航 + 面板内边距吃掉 560px 左右，两栏到这儿就没法看了：折成上下 */
   .notify-work { grid-template-columns: minmax(0, 1fr); }
-  .notify-list { max-height: 220px; }
-  .chan-grid { grid-template-columns: minmax(0, 1fr); }
+  .notify-side .notify-list { max-height: 200px; }
 }
 .chan-checks { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .chan-check {
@@ -1776,3 +1794,8 @@ select option { background: var(--surface); color: var(--fg); }
   font-size: 12.5px; color: var(--fg-2); cursor: pointer;
 }
 .chan-check input { accent-color: var(--accent); }
+
+/* 堆叠布局下「全局」那一栏只剩段控，别留个空卡片占高度 */
+@media (max-width: 1180px) {
+  .notify-side { gap: 8px; }
+}
