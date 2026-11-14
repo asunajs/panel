@@ -163,8 +163,13 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 - **通知在顶栏铃铛里**：未读红点 + 点开就是列表（失败/提醒/信息三档），每条带
   插件·任务·时间和正文；有 run id 的点一下直接开那次运行的抽屉。任务失败和熔断
   由调度器自己发，插件也可以用 `host.notify()` 喊话。
-- **插件界面在新标签打开**：卡片/抽屉上的「界面」按钮只在 `plugins/<name>.webui/index.html` 存在时出现。
-  不内嵌 iframe：`x-frame-options: DENY` 对所有响应生效，放宽它只省一个标签页，不值。契约见 [plugins.md](plugins.md)。
+- **插件界面内嵌在 iframe 里**：`#plugin:<名字>` 把 `/plugins/<名字>/` 装进 `#plugin-frame`
+  （同源、`x-frame-options: SAMEORIGIN`），复用一个 iframe，避免来回切时反复建文档；
+  主题靠 `?theme=` + `postMessage` 同步（第 139 轮）。两张卡片上的「界面」按钮另开新标签。
+  两条护栏（第 190 轮）：`openPluginView()` 用 **iframe 当前真实地址**判断要不要重载
+  （src 属性在 iframe 自己导航过之后会骗人）；`guardPluginFrame()` 在 iframe 每次 load 时
+  把「落到面板自己页面」的导航提到最外层 —— 否则会面板套面板（错误页的「回面板首页」就是这个坑，
+  它的链接已带 `target="_top"`）。契约见 [plugins.md](plugins.md)。
 - **自启动不在界面里点**：设置页只给四条命令（`print` / `install` / `status` / `uninstall`）。
   安装自启动要动 launchd / systemd，属于「出了事得能自己修」的操作，留在命令行。
 - **脚本的排程在抽屉里**（计划 / 预算 / 启用定时 + 立即运行），不在代码里：

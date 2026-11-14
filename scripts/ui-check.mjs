@@ -58,9 +58,15 @@ mkdirSync(scripts, { recursive: true });
 // 种子插件：一个能手动跑的 handler（真跑出来的运行记录比塞库更可信），
 // 外加一个会失败的，用来验「只看失败」和搜索错误文本。
 // 一个脚本（第 177 轮）：脚本源码复用插件那个编辑器，高亮要跟着走
+// 第 189 轮：脚本源码故意写长（1200 行）。行号层是一个 `pre`，它会按全文行数把
+// `.code-editor` 撑高 —— 500 行时只是抽屉长得难看，14,726 行（mcloud.js）时抽屉变成
+// 29 万像素高，textarea 只占 55vh、往下全是空行号，用户报「编辑源码不能使用」。
+// 这里用 1200 行当探子，编辑器高度必须有界。
 writeFileSync(
   path.join(scripts, 'seed-script.js'),
-  ['const a = 1;', 'console.log("hi", a);', 'return a;', ''].join('\n'),
+  ['const a = 1;', 'console.log("hi", a);']
+    .concat(Array.from({ length: 1200 }, (_, i) => '// pad ' + i))
+    .concat(['return a;', '']).join('\n'),
 );
 
 writeFileSync(path.join(plugins, 'seed.js'), [
@@ -239,6 +245,16 @@ async function main() {
       (await js('location.hash')) === '#plugin/seed',
     'hash=' + (await js('location.hash')),
   );
+
+  // 第 190 轮：错误页会被装进**插件 iframe**（`/plugins/<不存在>/` 就是那个 404）。
+  // 它的「回面板首页」必须 target="_top"，否则导航的是 iframe 自己 → 面板套面板
+  // （用户截图：地址栏 #plugin:mgmusic1，里面又套了一个完整的面板）。
+  const errPage = await js("fetch('/plugins/__no_such_plugin__/', { headers: { accept: 'text/html' } }).then((r) => r.text())");
+  // 注意：标签文字在 <a ...> 和 </a> **之间**，不在标签属性里 —— 第一版正则写成
+  // `<a[^>]*回面板首页[^>]*>` 永远不匹配（自己踩的），这里把整段连同文字一起取。
+  const homeLink = (String(errPage || '').match(/<a\b[^>]*>[^<]*回面板首页/) || [''])[0];
+  check('错误页的「回面板首页」跳最外层（不会把面板套进 iframe）',
+    /target="_top"/.test(homeLink), homeLink || '（没拿到错误页）');
 
   // 运行记录：首屏 / 分页 / 筛选 / 搜索 / 排序
   await js("location.hash = '#runs'");
@@ -1017,6 +1033,17 @@ async function main() {
     "spans:(hl&&hl.querySelectorAll('span').length)||0,err:(document.getElementById('src-error')||{}).textContent||''});})()"
   ));
   check('脚本源码同样有行号与高亮（共用同一条编辑器路径）', scriptHl === 'ok' && sh.gutter >= 3 && sh.spans > 0, JSON.stringify(sh));
+
+  // 第 189 轮：编辑器高度必须被容器兜住（1200 行的行号层不能把抽屉撑成 2.4 万像素），
+  // 而且行号层与输入层要一样高（差 1px 就会看到重影/错位）。
+  const edBox = JSON.parse(await js(
+    "(()=>{const w=document.getElementById('src-editor');const ta=document.getElementById('src-text');" +
+    "const g=document.getElementById('src-gutter');" +
+    "return JSON.stringify({h:Math.round(w.getBoundingClientRect().height)," +
+    "taH:Math.round(ta.getBoundingClientRect().height),gH:Math.round(g.getBoundingClientRect().height)});})()",
+  ));
+  check('源码编辑器高度有界（不被全文行号撑成全文高）',
+    edBox.h <= 900 && Math.abs(edBox.taH - edBox.gH) <= 2, JSON.stringify(edBox));
 
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

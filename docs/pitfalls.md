@@ -638,7 +638,7 @@
 
     守卫：`scripts/check-pitfalls.sh` 里 WRAP 的 `register_handler` 出现透传就红。
 
-99. **窄屏「一格一行」把行高乘起来；修的时候又踩了三个 CSS 坑**（用户 2026-11-14 手机截图报
+103. **窄屏「一格一行」把行高乘起来；修的时候又踩了三个 CSS 坑**（用户 2026-11-14 手机截图报
     「布局问题」：运行记录 11 条，每条 7 个字面行、191px 高，一屏只看得到两条，右边空着一半）。
     这条在 ui.md §10 里本来就挂着「已知短板：一行偏高，没做次要字段折叠」—— 短板不是不知道，
     是没人算过它有多贵：7 个字段 × 一行 = 行高被字段数乘起来。
@@ -664,3 +664,66 @@
 
     守卫：`ui-check` 加了一条「窄屏表格是两列网格（不是一格一行）」——断言 `tr` 的
     `display: grid`、`gridTemplateColumns` 两列、行高 ≤170（修前 191 会红）。111 条全过。
+
+104. **「编辑源码不能使用」不是性能问题，是行号层把抽屉撑成 29 万像素**（用户 2026-11-14 截图：
+    插件抽屉「源码」页打开 mcloud.js —— 522.6 KB / 14,726 行，箭头指着右上那根细得快看不见的
+    滚动条和被右边缘切掉的长行）。
+
+    机制：编辑器是「行号 `pre` + 高亮层 + textarea」三层。行号层里放的是**全文**的行号，
+    而 `.code-editor` 是 flex 容器、高度 `auto` —— 由内容撑开，于是容器高度 = 行号层高度
+    = 14,726 × 20px ≈ **29 万像素**。textarea 只有 `min-height: 55vh`（一屏），所以：
+    抽屉变成一条 29 万像素的滚动条（拇指不到 1px，基本拖不动），滚过第一屏之后下面是
+    **一片空行号、没有文字** —— 看着就是「编辑器坏了」。500 行的脚本就已经把抽屉撑成 1 万像素，
+    只是没到「不能用」的程度，所以这个坑一直没人报。
+
+    修法（`web/app.css`）：
+    - `.code-editor { height: clamp(240px, 62vh, 820px) }`：容器**定高**，行号层 `overflow:hidden`
+      裁掉，`sync()` 本来就把 textarea 的 scrollTop 同步给行号层，于是三层一起滚。
+    - `.code-editor textarea.editor { height: 100%; min-height: 0; resize: none }`：填满定高容器、
+      自己滚。去掉 `resize: vertical` —— 容器定高之后再往上拖输入层，输入层与行号/高亮层就错位。
+    - 撤掉 `#drawer-source .editor { min-height: 55vh }`（高度改由容器定）。
+
+    读数（无头 Edge，2080×900，mcloud.js 14,726 行）：
+
+    | | `.code-editor` 高 | textarea 高 | 行号层高 | 抽屉内容高 |
+    |---|---|---|---|---|
+    | 修前 | **294,542** | 495 | 294,540 | ≈294,700 |
+    | 修后 | **558** | 556 | 556 | 693 |
+
+    打字验过（`Input.insertText` 打到第 20 行末尾）：value 487,020 → 487,021，光标处 `;X`。
+    守卫：`ui-check` 把种子脚本写成 1200 行当探子，断言「编辑器高度 ≤900 且行号层与输入层等高」——
+    修前那条会量到 24,080（1200 行 × 20px）。
+
+105. **错误页装进插件 iframe → 点「回面板首页」把面板套进面板**（用户 2026-11-14 截图：
+    地址栏 `#plugin:mgmusic1`，页面里又套了一个完整的面板 —— 左侧栏、顶栏、运行记录页都齐了）。
+
+    链路：`#plugin:<名字>` 是把 `/plugins/<名字>/` 装进 iframe（round 139）。名字不存在时那个
+    URL 回 **404 错误页**，错误页里有个 `<a href="/">回面板首页</a>` —— **没有 target**，
+    于是导航的是 iframe 自己：iframe 里加载整个面板，外层 URL 还是 `#plugin:mgmusic1`。
+    用户在里层再点「运行记录」，就得到用户那张截图。实测复现（点一下那个链接）：
+    iframe 的 `location.href` 变成 `http://127.0.0.1:8814/`、`title` 变「仪表盘 · 插件面板」、
+    iframe 文档里能查到 `#sidebar`（= 面板套面板）。
+
+    修法两处：
+    - `web/error.html`：「回面板首页」加 `target="_top"` —— 跳到最外层才是它的本意。
+      （「重试」保持原地重载，那本来就该留在 iframe 里。）
+    - `web/app.js`：`openPluginView()` 的判据从 **src 属性**改成 **iframe 当前真正所在的地址**
+      （`contentWindow.location.pathname + search`）。src 属性在 iframe 自己导航过之后还是老值，
+      只看它就会「点了没反应、眼前还是错的页」。另外新增 `guardPluginFrame()`：iframe 每次
+      `load` 都看一眼，发现它落在**非 `/plugins/` 的同源路径**上，就把这次导航提到最外层
+      （`location.replace`，不留「面板里的面板」这条历史）。
+
+    验证（同一份数据、无头 Edge）：点错误页的「回面板首页」→ 外层变成 `/`（仪表盘）、iframe 清空；
+    直接让 iframe 自己 `location.href='/'` → 外层同样被提到 `/`；正常插件页（mgmusic）仍是
+    「咪咕音乐」，`#sidebar` 查不到。守卫：`ui-check` 取一次错误页 HTML，断言那个链接带 `target="_top"`。
+
+100. **系统 `confirm()` 又回来了**（2026-11-14，用户截图报障：删除通知渠道弹的是
+     `localhost:3030 显示` 的系统框）。`docs/ui.md` 的控件表写得明白：确认/弹窗一律
+     `.modal` 自绘 —— `confirm()` / `alert()` 阻塞主线程、不能样式化、深浅主题跟不住、
+     某些嵌入环境直接禁用。面板早就有自绘的 `askConfirm(text, okLabel)`（`#confirm`
+     弹窗，Esc / 点遮罩 = 取消），新增代码图省事写了裸 `confirm()`，那一句就掉回系统框。
+     这次一并清掉全部 6 处（删任务 / 重装 / 停用 / 删推送 / 删渠道 / 迁移），多行文案
+     依赖 `#confirm-text { white-space: pre-line }` 正常折行。
+
+     守卫：`scripts/check-pitfalls.sh` 里 grep `web/app.js`，裸 `confirm(` / `window.confirm` /
+     `alert(` / `prompt(` 出现即红（`askConfirm` / `settleConfirm` 是驼峰，不命中）。
