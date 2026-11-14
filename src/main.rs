@@ -190,13 +190,14 @@ async fn main() -> Result<(), String> {
         let log = log.clone();
         let db = db.clone();
         let errs = load_errors.clone();
+        let cfg = config.clone();
         tokio::spawn(async move {
             // 先把「暂停」名单装回调度器，**再**加载插件：反过来的话，插件注册完的
             // 第一拍就能把「暂停中的任务」跑掉（第 167 轮的顺序坑）。
             for name in crate::db::plugin_suspended_names(&db).await {
                 let _ = sched.set_suspended(&name, true).await;
             }
-            load_all(&plugins_dir_for_load, &sched, &log, &db, &errs).await;
+            load_all(&plugins_dir_for_load, &sched, &log, &db, &errs, &cfg).await;
         })
     };
 
@@ -260,6 +261,7 @@ async fn load_all(
     log: &LogHub,
     db: &db::Db,
     errors: &web::LoadErrors,
+    cfg: &std::sync::Arc<config_store::ConfigStore>,
 ) {
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
@@ -314,7 +316,35 @@ async fn load_all(
         );
     }
     // 界面上禁用过的插件不再加载（持久状态，不是这次进程的临时决定）。
+    // （懒加载的判据在下面每个插件加载前现算，见 lazy_on / surfaces）
     let disabled = db::plugin_disabled_names(db).await;
+    let suspended = db::plugin_suspended_names(db).await;
+    // 按需加载（第 179 轮）：启动时能不装的就不装。
+    //
+    // 判据只有一条能成立才省：**这个插件没有界面**（上次加载时没 register_web / sidebar），
+    // 且它库里那些任务下一次到点都还在窗口之外。有界面的必须装 —— 用户可能正打开着它。
+    // 从没加载过的插件（库里没有 surface 记录）也照装一次，否则永远发现不了它的任务。
+    let lazy_on = {
+        let cfg_text = cfg.snapshot();
+        let v: serde_json::Value =
+            serde_json::from_str(&cfg_text).unwrap_or(serde_json::Value::Null);
+        v.get("plugins")
+            .and_then(|p| p.get("lazy_load"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true)
+    };
+    let surfaces = if lazy_on {
+        db::plugin_surfaces(db).await
+    } else {
+        Default::default()
+    };
+    let saved_rows = if lazy_on {
+        db::saved_task_rows(db).await
+    } else {
+        Vec::new()
+    };
+    let mut lazy_tasks: Vec<scheduler::LazyTask> = Vec::new();
+    let mut lazy_names: Vec<String> = Vec::new();
     for name in names {
         if disabled.contains(&name) {
             log.emit(
@@ -351,6 +381,41 @@ async fn load_all(
                     Level::Warn,
                     format!("插件 {name} 的清单有问题（照常加载，只是界面没有标题/表单）: {e}"),
                 );
+            }
+        }
+        if lazy_on && !suspended.contains(&name) {
+            if let Some((has_web, has_nav)) = surfaces.get(&name).copied() {
+                if !has_web && !has_nav {
+                    let now_ms = chrono::Local::now().timestamp_millis();
+                    let mine: Vec<&(String, String, String, i64, bool, Option<i64>, Option<i64>)> =
+                        saved_rows.iter().filter(|r| r.0 == name).collect();
+                    let live_next: Vec<Option<i64>> = mine
+                        .iter()
+                        .filter(|r| r.6.is_none())
+                        .map(|r| r.5)
+                        .collect();
+                    if scheduler::should_start_unloaded(
+                        has_web,
+                        has_nav,
+                        &live_next,
+                        now_ms,
+                        scheduler::IDLE_WAKE_WINDOW_MS,
+                    ) {
+                        for r in mine {
+                            lazy_tasks.push(scheduler::LazyTask {
+                                plugin: r.0.clone(),
+                                name: r.1.clone(),
+                                cron: r.2.clone(),
+                                budget_ms: r.3,
+                                enabled: r.4,
+                                next_at: r.5,
+                                deleted_at: r.6,
+                            });
+                        }
+                        lazy_names.push(name.clone());
+                        continue;
+                    }
+                }
             }
         }
         let source = match tokio::fs::read_to_string(&path).await {
@@ -404,6 +469,22 @@ async fn load_all(
                 );
             }
         }
+    }
+
+    // 按需加载：没加载的插件的任务行照样进任务表 —— 用户能在任务页看到计划、
+    // 暂停、改计划，只是不能立刻执行（没有运行时）。到点前两分钟会自动装回来。
+    if !lazy_tasks.is_empty() {
+        let n = sched.seed_lazy(lazy_tasks, lazy_names.clone()).await;
+        log.emit(
+            "panel",
+            None,
+            Level::Info,
+            format!(
+                "按需加载：{} 个插件这次启动没有加载（{} 条任务照常列出），到点前 2 分钟或点「加载」才装",
+                lazy_names.len(),
+                n
+            ),
+        );
     }
 }
 

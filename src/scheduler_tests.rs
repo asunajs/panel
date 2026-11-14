@@ -408,3 +408,50 @@ fn a_task_coming_soon_pins_the_plugin_in_memory() {
     // 没有定时任务（纯 handler 插件）→ 随便卸
     assert!(should_idle_unload(now, now - 10_000_000, 60, false, None, 120_000));
 }
+
+// ── 按需加载的判定（第 179 轮）──────────────────────────────────────────
+//
+// 判错的代价：把有界面的插件省掉 = 用户一点就报错；把马上要到点的插件省掉 =
+// 那一次任务可能晚跑（要靠唤醒窗口兜）。
+
+const NOW: i64 = 1_000_000_000_000;
+const WIN: i64 = 120_000; // 2 分钟
+
+#[test]
+fn a_plugin_with_ui_is_never_skipped() {
+    assert!(!should_start_unloaded(true, false, &[Some(NOW + 999_999)], NOW, WIN));
+    assert!(!should_start_unloaded(false, true, &[Some(NOW + 999_999)], NOW, WIN));
+    // 有界面 + 当下就要跑，也不省
+    assert!(!should_start_unloaded(true, true, &[], NOW, WIN));
+}
+
+#[test]
+fn a_quiet_plugin_without_ui_is_skipped() {
+    assert!(should_start_unloaded(false, false, &[Some(NOW + 3_600_000)], NOW, WIN));
+    // 一点任务都没有（只有 handler）：谁也碰不到它，也可以省
+    assert!(should_start_unloaded(false, false, &[], NOW, WIN));
+}
+
+#[test]
+fn a_task_inside_the_wake_window_is_not_skipped() {
+    // 1 分钟后到点，窗口 2 分钟 → 现在就装
+    assert!(!should_start_unloaded(false, false, &[Some(NOW + 60_000)], NOW, WIN));
+    // 刚好在窗口边界上也算「要装」（不留半拍空档）
+    assert!(!should_start_unloaded(false, false, &[Some(NOW + WIN)], NOW, WIN));
+    // 已经过点（上一拍没跑成）：当然要装
+    assert!(!should_start_unloaded(false, false, &[Some(NOW - 1)], NOW, WIN));
+}
+
+#[test]
+fn a_task_without_a_next_time_pins_the_plugin() {
+    // next_at 是 NULL：算不出来就别省，按老样子装上
+    assert!(!should_start_unloaded(false, false, &[None], NOW, WIN));
+    // 一条算得出、一条算不出 → 仍然要装
+    assert!(!should_start_unloaded(
+        false,
+        false,
+        &[Some(NOW + 10_000_000), None],
+        NOW,
+        WIN
+    ));
+}
