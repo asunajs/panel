@@ -1,42 +1,37 @@
 # plugins/ 目录归属
 
-**面板仓不放插件代码。** 分工是：面板提供面板，插件（源码、构建、部署）归各自的插件项目；
-**部署也是分开的** —— 面板上二进制与面板自己的东西，插件由插件项目自己装进实例的 `plugins/`。
+**面板仓不放插件代码，也不部署插件。**
+
+分工：面板提供面板，插件（源码 / 构建 / 上线）归各自的插件项目；**部署也是分开的** ——
+`scripts/deploy-daily.sh` 只上二进制 + 面板自己的东西，插件由插件项目自己装进实例的 `plugins/`。
 
 | 内容 | 归属 | 手改 |
 |---|---|---|
 | `webui-demo.js` + `webui-demo.webui/` | **面板项目**（UI 套件的活文档，`scripts/ui-kit-check.mjs` 用它对拍） | ✅ 可以 |
-| `mcloud*.js`、`mcloud.webui/` | 插件项目 `~/mobile/workspace/mcloud-plugin` 的构建产物 —— ⚠ **同一个违规还没撤**（见下） | ❌ 不行 |
+| `hello.js.bak` | 历史遗留的示例（不加载，只作参考） | — |
 
-### 已经按这个分工搬走的：`mgmusic`
+## 插件放哪儿、怎么上线
 
-`mgmusic` 的源码、构建、部署全在插件项目 `~/mobile/workspace/cmusic-others/mgmusic-plugin`：
+| 插件 | 插件项目 | 安装命令 |
+|---|---|---|
+| `mcloud` / `mcloud-daily` / `mcloud-exchange` / `mcloud-live` | `~/mobile/workspace/mcloud-plugin` | `npm run deploy:panel`（那边加） |
+| `mgmusic` | `~/mobile/workspace/cmusic-others/mgmusic-plugin` | `npm run deploy:panel` |
+
+插件项目那侧的形状（以 mgmusic 为样板）：
 
 ```bash
 cd ~/mobile/workspace/cmusic-others/mgmusic-plugin
-npm run build:panelllrt     # llrt/ → dist/panel-llrt/{mgmusic.js, mgmusic.webui/}
-npm run deploy:panel        # 拷进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins）并逐个 cmp
+npm run build:panelllrt     # 源 → dist/panel-llrt/{<name>.js, <name>.webui/}
+npm run deploy:panel        # 构建 → 样式门禁 → 拷进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins）→ 逐个 cmp
 ```
 
-面板仓里只剩一篇迁移记录 [`../docs/mgmusic-migration.md`](../docs/mgmusic-migration.md)：
-`git ls-files | grep mgmusic` 只会命中它，**没有插件代码**。
+样式门禁没丢：插件项目的 `deploy:panel` 会把产物在临时目录里摆成 `plugins/`，再跑本仓的
+`scripts/check-plugin-style.mjs`（它就按 `cwd/plugins` 扫）。
 
-> ⚠ **待办（不属于本轮）**：`mcloud*.js` / `mcloud.webui/` 还躺在面板仓里，
-> 而且 `deploy-daily.sh` 仍在同步 `plugins/` —— 那套是 mcloud 会话在做，
-> 按同一分工应当由 `mcloud-plugin` 自己构建部署、面板仓撤掉这 5 个产物。
+## 部署顺序
 
-## 部署对产物做了什么（`scripts/deploy-daily.sh`）
+1. **面板先上**：`bash scripts/deploy-daily.sh`（二进制 + `scripts/`，不顺插件）；
+2. **插件后装**：各插件项目 `npm run deploy:panel`（可加 `--restart`，或界面里点插件卡「重载」）。
 
-1. **有本地改动就拒绝部署**：`git status --porcelain -- plugins/` 里出现 `M` 就 exit 1，
-   并把你该去的地方说清楚（插件项目改源 → 构建 → 再部署）。未跟踪的 WIP 只提示、不拦。
-2. **只部署已提交的内容**：用 `git archive HEAD plugins` 展开再拷，未提交的 WIP 不会被带上实例
-   （曾经带上过一个加载失败的插件，实例照跑但少一个插件，很难注意到）。
-3. **逐个核对**：拿 `git show HEAD:plugins/<rel>` 与实例里的文件 `cmp`，不一致就 exit 1。
-4. **就绪判定看插件数**：`/readyz` 在加载中也会回 200（插件是后台加载的），所以还要
-   「实例 `plugins/` 里有几个 .js 就该有几个」且 `failed_plugins:0` 才算成功。
-
-## 样式静态闸门
-
-部署前会跑 `node scripts/check-plugin-style.mjs`：token 被重定义 / 颜色字面量 / `!important` /
-`prefers-color-scheme` / 撤掉面板画的控件样式 —— 违规就部署不出去。
-（`--style-ver` 那条已删：那是插件产物自己的标记，不归面板准则管。）
+以前是面板仓 `plugins/` 一起同步（`git archive HEAD plugins`），撤掉产物后那条路没了：
+面板与插件互不阻塞，插件版本也不再钉在面板仓的提交上。

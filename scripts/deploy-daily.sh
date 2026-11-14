@@ -23,26 +23,13 @@ LABEL="${PANEL_LABEL:-dev.panel}"
 PORT="${PANEL_PORT:-3030}"
 
 cd "$ROOT"
-# ── 产物守卫（第 158 轮）──
-# plugins/ 里 mcloud*/mgmusic* 是**插件项目的构建产物**（build:panelllrt 会 rmSync + cpSync）。
-# 手改在这边，下一次构建就冲掉 —— 而且"面板新 CSS + 产物旧标记"这种半新半旧最难查。
-# 所以：跟踪文件有本地改动就拒绝部署，让改动去插件项目里落。
-DIRTY="$(git status --porcelain -- plugins/ 2>/dev/null | awk '$1 ~ /^M/ {print $2}')"
-if [ -n "$DIRTY" ]; then
-  echo "plugins/ 里有本地改动 —— 那是插件项目的产物，手改会被下一次构建冲掉：" >&2
-  echo "$DIRTY" | sed "s/^/  · /" >&2
-  echo "去 ~/mobile/workspace/mcloud-plugin 改源，npm run build:panelllrt 之后再部署。" >&2
-  exit 1
-fi
-# ⚠ `grep` 没匹配时退出码 1，`set -euo pipefail` 会把这一行**赋值**判成失败 ——
-# 表现是「没有任何输出 + exit 1」，像被谁杀了（2026-11-13 撞到）。没有未跟踪文件是正常情况，
-# 所以末尾必须 `|| true`。
-UNTRACKED="$(git status --porcelain -- plugins/ 2>/dev/null | grep ^?? | sed "s/^?? *//" || true)"
-if [ -n "$UNTRACKED" ]; then
-  echo "注意：plugins/ 里有未跟踪的文件，会一起同步到实例：" >&2
-  echo "$UNTRACKED" | sed "s/^/  · /" >&2
-fi
-# 样式闸门：token 被重定义 / 颜色写死 / !important / prefers-color-scheme / 撤掉控件样式
+# ── 面板仓不碰插件（第 159 轮）──
+# 分工：面板提供面板，插件（源码 / 构建 / 上线）归各自的插件项目，部署分开。
+# 所以这里**不再**同步 plugins/、也不再核对插件文件 —— 实例的 plugins/ 由
+# mcloud-plugin / cmusic-others-mgmusic-plugin 的 `npm run deploy:panel` 自己装。
+# （插件项目自己的样式门禁就在它们的 deploy 脚本里：拿产物摆成 plugins/ 再跑
+#  本仓的 scripts/check-plugin-style.mjs，闸门一条没丢。）
+# 样式闸门（现在只覆盖面板自己的 plugins/webui-demo*）：token 被重定义 / 颜色写死 / !important / prefers-color-scheme / 撤掉控件样式
 # 这几类改动编译不报错、单测照过，只有人眼看得出（第 156 轮有人把整段 token 映射换掉了）。
 node scripts/check-plugin-style.mjs
 cargo build --release --offline
@@ -52,46 +39,17 @@ cp target/release/panel "$DEST/panel.new"
 # 而 launchd 里的后台进程问不了（会卡住）。第 134 轮实测：不重签照样能起。
 mv "$DEST/panel.new" "$DEST/panel"
 
-# ── 插件与脚本：跟着一起搬（第 153 轮补；第 158 轮改成只搬已提交的）──
-# 为什么以前会半新半旧：这里原来只换二进制。二进制里的 /app.css 是新的，plugins/ 里却是几天前
-# 的拷贝 —— 同一个页面上「面板新 CSS + 插件旧文件」混着跑，两边代码看着都对。
-#
-# 为什么用 git archive 而不是 cp -R：plugins/ 里常有别人没提交的 WIP（新建的插件文件），
-# 一起搬过去会让实例加载失败（failed_plugins:1：界面照跑但少一个插件，很难注意到）。
-# 部署应该等于「提交过的那棵树」。覆盖式，不删实例里的额外文件（可能是人手放的）。
-if [ -d "$ROOT/plugins" ]; then
-  PLUGIN_TMP="$(mktemp -d)"
-  if git -C "$ROOT" archive HEAD plugins 2>/dev/null | tar -x -C "$PLUGIN_TMP" 2>/dev/null; then
-    mkdir -p "$DEST/plugins"
-    cp -R "$PLUGIN_TMP/plugins/." "$DEST/plugins/"
-  else
-    echo "git archive 失败，退回直接拷工作树（未提交的 WIP 会一起过去）" >&2
-    mkdir -p "$DEST/plugins"
-    cp -R "$ROOT/plugins/." "$DEST/plugins/"
-  fi
-  rm -rf "$PLUGIN_TMP"
-fi
+# ── 脚本：面板自己的东西跟着一起搬 ──
+# plugins/ **不在这里搬**：面板仓的 plugins/ 只剩面板自己的 webui-demo（UI 套件样板），
+# 真插件由各自的插件项目部署（它们各有 deploy:panel，装完自己 cmp）。
+# 为什么以前要搬：二进制里的 /app.css 换了，plugins/ 里却是几天前的拷贝，同一个页面上
+# 「面板新 CSS + 插件旧文件」混着跑。现在这件事由插件项目的部署负责，顺序也清楚了：
+# 面板先上（二进制 + webui-demo），插件项目再各自 deploy:panel。
 if [ -d "$ROOT/scripts" ]; then
   mkdir -p "$DEST/scripts"
   cp -R "$ROOT/scripts/." "$DEST/scripts/"
 fi
 
-# 搬完逐个核对（对着提交过的那棵树）：宁可这里红一次，也别让人对着半新半旧的界面找 bug。
-MISMATCH=0
-COUNT=0
-while IFS= read -r rel; do
-  [ -n "$rel" ] || continue
-  COUNT=$((COUNT + 1))
-  if ! git -C "$ROOT" show "HEAD:plugins/$rel" | cmp -s - "$DEST/plugins/$rel"; then
-    echo "插件文件没同步：$rel" >&2
-    MISMATCH=$((MISMATCH + 1))
-  fi
-done < <(git -C "$ROOT" ls-tree -r --name-only HEAD plugins | sed 's|^plugins/||')
-if [ "$MISMATCH" -ne 0 ]; then
-  echo "有 $MISMATCH 个插件文件没同步成功，先别信这个实例" >&2
-  exit 1
-fi
-echo "插件已同步：$COUNT 个文件（已逐个核对）"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 for _ in $(seq 1 60); do
@@ -104,6 +62,8 @@ done
 
 # 插件加载慢是常态（mcloud 那几个加载期打网络），实测见过 100 秒以上，
 # 所以给 300 秒，并且每 15 秒报一次「还在加载」，别让人以为卡死了。
+# 数的是**实例** plugins/ 里的 .js（不是仓里的、更不是 HEAD 里的）：插件是插件项目装的，
+# 拿仓里的数目对账永远对不上（撤掉产物之后）。
 EXPECT="$(ls "$DEST"/plugins/*.js 2>/dev/null | wc -l | tr -d ' ')"
 WAITED=0
 while [ "$WAITED" -lt 300 ]; do
