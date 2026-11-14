@@ -87,6 +87,17 @@ writeFileSync(path.join(plugins, 'seed.js'), [
   "await host.register_cron('tick', '@every 30s');",
 ].join('\n'));
 
+// 第 109 轮的分组断言要两种分支都有样本：
+//   seed + seed-extra 同前缀 → 「seed 系列（2）」，带组级批量按钮
+//   lonely              单独 → 并进「独立插件」，不带批量按钮
+for (const [name, extra] of [['seed-extra', '同前缀第二个'], ['lonely', '单个']]) {
+  writeFileSync(path.join(plugins, name + '.js'), [
+    "import host from 'panel:host';",
+    '// 只为分组断言存在：不注册任务、不挂界面（' + extra + '）',
+    'void host;',
+  ].join('\n'));
+}
+
 let panel;
 let browser;
 let cdp;
@@ -559,8 +570,9 @@ async function main() {
     inst.noGuard.status === 403 && /x-panel/.test(inst.noGuard.body), JSON.stringify(inst.noGuard));
   check('装插件只收 http(s)（ftp:// 直接拒）',
     inst.badScheme.status === 400 && /只接受 http\(s\)/.test(inst.badScheme.body), JSON.stringify(inst.badScheme));
-  check('装插件只认 .js / .zip（.sh 直接拒，一个字节都不下）',
-    inst.badExt.status === 400 && /只认 \.js \/ \.zip/.test(inst.badExt.body), JSON.stringify(inst.badExt));
+  // 第 108 轮加了 .ts（面板用内置 OXC 擦类型后落成 .js），文案随之变成三件套
+  check('装插件只认 .js / .ts / .zip（.sh 直接拒，一个字节都不下）',
+    inst.badExt.status === 400 && /只认 \.js \/ \.ts \/ \.zip/.test(inst.badExt.body), JSON.stringify(inst.badExt));
 
   // 第 135 轮：**短结果**走顶部居中（闪一下就走），**长提示/错误**走右上角常驻。
   await js("document.getElementById('toast').className = 'toast hidden'");
@@ -632,15 +644,40 @@ async function main() {
     groups.reduce((a, g) => a + g.n, 0) === allCards,
     JSON.stringify({ groups: groups.map((g) => g.n), allCards }),
   );
+  // 第 109 轮用户口径「两个及以上才是系列，一个的放一起」：
+  //   · 成员 ≥2 的组叫「X 系列（n）」，带组级批量按钮；
+  //   · 只有 1 个成员的组**不叫系列**，全部并进末尾一组「独立插件（n）」，没有批量按钮。
+  const isSolo = (g) => g.t.startsWith('独立插件');
+  const series = groups.filter((g) => !isSolo(g));
+  const solos = groups.filter(isSolo);
   check(
-    '系列标题带数量',
-    groups.every((g) => /系列（\d+）/.test(g.t) && Number(g.t.match(/（(\d+)）/)[1]) === g.n),
+    '每个组标题都带数量（系列或独立插件）',
+    groups.every((g) => {
+      const m = g.t.match(/^(.*)（(\d+)）$/);
+      return !!m && Number(m[2]) === g.n;
+    }),
     JSON.stringify(groups.map((g) => g.t)),
   );
   check(
-    '每个系列都有「全部重载 / 全部启用」',
-    groups.every((g) => g.b.join(',') === '全部重载,全部启用'),
-    JSON.stringify(groups.map((g) => g.b)),
+    '两个及以上的组叫「X 系列」',
+    series.length >= 1 && series.every((g) => g.n >= 2 && / 系列（\d+）$/.test(g.t)),
+    JSON.stringify(series.map((g) => g.t)),
+  );
+  check(
+    '单个插件不单独成系列，并进「独立插件」',
+    solos.length === 1 && solos[0].n >= 1 && solos[0].t === '独立插件（' + solos[0].n + '）',
+    JSON.stringify(groups.map((g) => g.t)),
+  );
+  check(
+    '「独立插件」排在最后',
+    groups.length > 0 && isSolo(groups[groups.length - 1]),
+    JSON.stringify(groups.map((g) => g.t)),
+  );
+  check(
+    '真系列有「全部重载 / 全部启用」，独立插件那组没有',
+    series.every((g) => g.b.join(',') === '全部重载,全部启用') &&
+      solos.every((g) => g.b.length === 0),
+    JSON.stringify(groups.map((g) => ({ t: g.t, b: g.b }))),
   );
   // 点一次「全部重载」：要真的走到接口并给出系列级结果（不是逐个悄悄跑）
   await js("document.querySelector('.plugin-group-actions button').click()");

@@ -814,28 +814,52 @@ function renderPlugins() {
   // 按「系列」分组（第 88 轮，从旧面板搬过来）：插件现实里成系列（mcloud-* / bilibili-*），
   // 摆在一起才看得清「这一系列有哪几个、哪个挂了」。组名由服务端推导（名字里第一个
   // `-`/`_` 之前那段，见 plugin_group），前端只负责摆。
+  //
+  // 第 109 轮（用户口径「两个及以上才是系列，一个的放一起」）：只有一个成员的组**不叫系列**
+  // —— 每来一个独立插件就多一个「xx 系列（1）」的标题，标题比卡片还多。单个的并进末尾
+  // 一组「独立插件」，那组没有组级批量按钮（成员不同源，一起动没有意义）。
+  const loadedNames = new Set(state.plugins.map((p) => p.name));
+  const groupOf = (name, group) => group || name;
+  const groupCount = new Map();
+  for (const p of rows) {
+    const g = groupOf(p.name, p.group);
+    groupCount.set(g, (groupCount.get(g) || 0) + 1);
+  }
+  for (const f of state.files) {
+    if (loadedNames.has(f.name) || !matches(f.name, q)) continue;
+    const g = groupOf(f.name, f.group);
+    groupCount.set(g, (groupCount.get(g) || 0) + 1);
+  }
+  const SOLO = '\u0000solo';
+  /** 真实组名 → 分组键：成员 ≥2 用组名，否则并进 SOLO。 */
+  const keyOf = (name, group) => {
+    const g = groupOf(name, group);
+    return (groupCount.get(g) || 0) >= 2 ? g : SOLO;
+  };
   const sections = new Map();
-  const slot = (g) => {
-    let s = sections.get(g);
+  const slot = (key) => {
+    let s = sections.get(key);
     if (s) return s;
     const sec = el('section', 'plugin-group');
     const head = el('div', 'plugin-group-head');
     const title = el('h3', 'group-title', '');
     head.append(title);
-    const gacts = el('div', 'plugin-group-actions');
-    for (const [label, kind] of [['全部重载', 'reload'], ['全部启用', 'enable']]) {
-      const b = el('button', 'btn btn-sm', label);
-      b.type = 'button';
-      b.addEventListener('click', () => groupAct(g, kind));
-      gacts.append(b);
+    if (key !== SOLO) {
+      const gacts = el('div', 'plugin-group-actions');
+      for (const [label, kind] of [['全部重载', 'reload'], ['全部启用', 'enable']]) {
+        const b = el('button', 'btn btn-sm', label);
+        b.type = 'button';
+        b.addEventListener('click', () => groupAct(key, kind));
+        gacts.append(b);
+      }
+      head.append(gacts);
     }
-    head.append(gacts);
     sec.append(head);
     const inner = el('div', 'plugin-grid');
     sec.append(inner);
     grid.append(sec);
-    s = { inner, title };
-    sections.set(g, s);
+    s = { sec, inner, title };
+    sections.set(key, s);
     return s;
   };
 
@@ -890,10 +914,9 @@ function renderPlugins() {
     cardEl.append(acts);
     cardEl.addEventListener('click', () => showPlugin(p.name));
     cardEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') showPlugin(p.name); });
-    slot(p.group || p.name).inner.append(cardEl);
+    slot(keyOf(p.name, p.group)).inner.append(cardEl);
   }
   // 目录里有、但没加载成功的文件：语法错/启动失败的插件只能从这里进去修。
-  const loadedNames = new Set(state.plugins.map((p) => p.name));
   const orphans = state.files.filter((f) => !loadedNames.has(f.name) && matches(f.name, q));
   for (const f of orphans) {
     // 禁用是**用户明确关掉的**，和「加载失败」不是一回事：分开显示，按钮也不同。
@@ -927,12 +950,16 @@ function renderPlugins() {
     btns.push(mk('删除', () => deletePlugin(f.name), true));
     acts.append(...btns);
     cardEl.append(acts);
-    slot(f.group || f.name).inner.append(cardEl);
+    slot(keyOf(f.name, f.group)).inner.append(cardEl);
   }
   // 组头的数量最后补：卡片是边建边塞进各组的，这时才数得准。
-  for (const [g, s] of sections) {
-    s.title.textContent = g + ' 系列（' + s.inner.children.length + '）';
+  for (const [key, s] of sections) {
+    const n = s.inner.children.length;
+    s.title.textContent = (key === SOLO ? '独立插件' : key + ' 系列') + '（' + n + '）';
   }
+  // 「独立插件」固定排最后：它是兜底的一组，不该插在真系列中间。
+  const solo = sections.get(SOLO);
+  if (solo && solo.sec !== grid.lastElementChild) grid.append(solo.sec);
 }
 
 /** 整个系列一起动：重载已加载的 / 启用被停用的。
@@ -2041,19 +2068,51 @@ async function deleteScript(name) {
   }
 }
 
+// 名字里的扩展名 → 运行时推断（与面板 infer_runtime 同一张表）。
+function inferScriptRuntime(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["js", "mjs", "cjs", "ts", "mts", "cts"].includes(ext)) return "node";
+  if (ext === "py") return "python3";
+  if (ext === "sh" || ext === "bash") return "sh";
+  if (ext === "php") return "php";
+  return null;
+}
+
+let newScriptTouched = false;
+let newScriptDropdownPicker = null;
+
 function openNewScript() {
   $("new-script").classList.remove("hidden");
   $("new-script-hint").classList.add("hidden");
   $("new-script-name").value = "";
   newScriptRuntime = "sh";
+  newScriptTouched = false;
   $("new-script-custom").classList.add("hidden");
   $("new-script-custom").value = "";
   $("new-script-title").value = "";
-  makeDropdown($("new-script-runtime-box"), SCRIPT_RUNTIMES, newScriptRuntime, (v) => {
-    newScriptRuntime = v;
-    $("new-script-custom").classList.toggle("hidden", v !== "@custom");
-  });
+  $("new-script-cron").value = "";
+  newScriptDropdownPicker = (rt) => {
+    makeDropdown($("new-script-runtime-box"), SCRIPT_RUNTIMES, rt, (v) => {
+      newScriptRuntime = v;
+      newScriptTouched = true;
+      $("new-script-custom").classList.toggle("hidden", v !== "@custom");
+    });
+  };
+  newScriptDropdownPicker(newScriptRuntime);
+  // 名字带了扩展名、用户又没手动选过运行时 → 自动跟着扩展名走（避免 .py 配 sh）
+  $("new-script-name").addEventListener('input', syncRuntimeWithName);
   setTimeout(() => $("new-script-name").focus(), 30);
+}
+
+function syncRuntimeWithName() {
+  if (newScriptTouched) return;
+  const name = $("new-script-name").value.trim();
+  const inferred = inferScriptRuntime(name);
+  if (inferred && inferred !== newScriptRuntime) {
+    newScriptRuntime = inferred;
+    if (newScriptDropdownPicker) newScriptDropdownPicker(inferred);
+    $("new-script-custom").classList.add("hidden");
+  }
 }
 
 async function createScript() {
@@ -2072,7 +2131,15 @@ async function createScript() {
   const btn = $("new-script-ok");
   btn.disabled = true;
   try {
-    await api("/api/scripts", { method: "POST", body: { name, runtime, title: $("new-script-title").value.trim() } });
+    await api("/api/scripts", {
+      method: "POST",
+      body: {
+        name,
+        runtime,
+        title: $("new-script-title").value.trim(),
+        cron: $("new-script-cron").value.trim(),
+      },
+    });
     $("new-script").classList.add("hidden");
     notify("已创建 " + name);
     await loadScripts();
