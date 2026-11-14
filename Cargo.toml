@@ -116,6 +116,15 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl-sys = "0.9"
 
+# 32 位 ARM 的 musl 目标：rquickjs-sys 0.14 **没有** armv7-unknown-linux-musleabihf
+# 的预生成绑定（只有 gnueabihf），直接编会报
+#   couldn't find file `…/bindings/armv7-unknown-linux-musleabihf.rs`
+# 它自带的 `bindgen` feature 就是为这种情况准备的：现场从同包内的 quickjs 头文件生成。
+# 只在这个 cfg 下打开 —— bindgen 要 libclang，不能让它污染常规构建（CI 里靠
+# Cross.toml 的 pre-build 在那个容器里装 clang）。
+[target.'cfg(all(target_arch = "arm", target_env = "musl"))'.dependencies]
+rquickjs-sys = { version = "0.14", features = ["bindgen"] }
+
 [dev-dependencies]
 # 路由级测试用 oneshot 直接打 Router，不起真监听。axum 自己就依赖
 # tower/util（axum-0.8 Cargo.toml:268-271），所以不增加编译单元。

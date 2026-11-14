@@ -143,15 +143,31 @@ fetch() {
 }
 
 info "下载 $ASSET …"
-fetch "$BASE/$ASSET" "$TMP/$BIN_NAME" || die "下载失败。检查仓库名/网络，或该版本是否已发布产物。
+if ! fetch "$BASE/$ASSET" "$TMP/$BIN_NAME"; then
+    if [ "$ARCH" = armv7 ]; then
+        die "下载失败：这个版本没有 $ASSET（32 位 ARM 产物）。
+  预期地址: $BASE/$ASSET
+
+  0.4.0 起 aarch64 / x86_64 是主力产出；armv7 依赖 rquickjs 的 bindgen，
+  这条链更脆，暂时按「有则发、无则跳过」处理 —— 也就是说某些版本可能没有它。
+  换到 64 位设备，或按 README 的说明本地编译：
+      node tools/bundle/build.mjs && cargo build --release"
+    fi
+    die "下载失败。检查仓库名/网络，或该版本是否已发布产物。
   预期地址: $BASE/$ASSET"
+fi
 
 # ---------- 4. 校验 SHA256（强制） ----------
 if fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null; then
     EXPECT="$(grep " $ASSET\$" "$TMP/SHA256SUMS" | awk '{print $1}' || true)"
     # 清单在、但没有本资产条目 ⇒ 多半是拉到了别的版本的清单/被裁过的清单，不能当「校验通过」
-    [ -n "$EXPECT" ] || die "SHA256SUMS 里没有 $ASSET 的条目，拒绝安装。
-  清单里可能只有别的架构/别的版本。换对版本，或用官方 GitHub 地址重试。"
+    if [ -z "$EXPECT" ]; then
+        echo "清单里现有的条目：" >&2
+        sed 's/^/  /' "$TMP/SHA256SUMS" >&2
+        die "SHA256SUMS 里没有 $ASSET 的条目，拒绝安装。
+  说明这个版本没有出 $ARCH 的产物（清单里只有上面那些架构）。
+  换对版本，或用官方 GitHub 地址重试。"
+    fi
 
     if command -v sha256sum >/dev/null 2>&1; then
         ACTUAL="$(sha256sum "$TMP/$BIN_NAME" | awk '{print $1}')"
