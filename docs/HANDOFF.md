@@ -94,9 +94,9 @@
 ### 4.3 其它
 
 `vendor/llrt/`（v0.10.0-beta 源码，含**一处本仓补丁**）、`tools/bundle/build.mjs`（生成 `vendor/llrt/bundle/js`）、
-`tools/parity/`、`spike/`（Stage 0 探针，非产品）、`plugins/`（7 个）、`web/`（零构建三件）、
+`tools/parity/`、`spike/`（Stage 0 探针，非产品）、`plugins/`（只剩面板自己的 webui-demo —— 插件产物与部署都归插件项目）、`web/`（零构建三件）、
 `scripts/check-unsafe-budget.sh`、`scripts/check-docs.sh`、`../mcloud-plugin/`（插件的 TS 源码与打包脚本，
-`node scripts/build-panelllrt.mjs` 产出 `plugins/mcloud*.js`）。
+`npm run deploy:panel` 自己装进实例的 `plugins/`；面板仓不留产物）。
 
 ## 5. 已经能用的（按子系统，读数在 parity.md 与各篇 docs）
 
