@@ -1842,7 +1842,9 @@ select option { background: var(--surface); color: var(--fg); }
    这里只补「短句」「预览」「高级选项」三块的结构性样式。 */
 #sched-form { display: flex; flex-direction: column; gap: 10px; }
 #sched-form .field-inline { align-items: center; gap: 8px; flex-wrap: wrap; }
-#sched-form .field-inline > span.muted { min-width: 5.5em; }
+/* 只给**行首那个标签**留固定宽度；行内的「到」这种分隔符不能跟着被撑开
+   （否则「09:00 到 18:00」里那个「到」会占掉 69px，把两个时间框挤窄） */
+#sched-form .field-inline > span.muted:first-child { min-width: 5.5em; }
 #sched-form .modal-input { flex: 1 1 8em; min-width: 6em; }
 #sched-form textarea.modal-input { min-height: 3.2em; resize: vertical; }
 
@@ -1913,4 +1915,34 @@ select option { background: var(--surface); color: var(--fg); }
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px; /* 给滚动条让位，别压住右边框 */
+}
+
+/* 多计划：每条子计划一个带边框的小块，条与条之间分得开 */
+.sched-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.sched-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sched-item-head > span.muted { flex: 0 0 auto; font-size: 12px; }
+.sched-item-head > select.modal-input { flex: 1 1 auto; min-width: 0; }
+.sched-item-head > button { flex: 0 0 auto; }
+.sched-item .field-inline > span.muted:first-child { min-width: 5.5em; }
+.sched-item .modal-input { background: var(--surface); }
+#sched-form > button.btn { align-self: flex-start; }
+
+/* 时间框按内容宽度收窄：默认 flex:1 1 8em 太贪，「起 到 止」两个并排时会换行，
+   把「18:00」挤到下一行还丢了标签对齐。 */
+#sched-form input[type="time"] {
+  /* 平分剩余宽度（flex-basis:0），但给个下限 —— 太窄会把 08:00 裁成 08:0( */
+  flex: 1 1 0;
+  min-width: 6.8em;
 }

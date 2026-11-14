@@ -28,7 +28,19 @@
 { "type": "window",  "every": "day|week", "between": ["09:00","18:00"], "count": 1, "timezone": "..." }
 { "type": "once",    "at": "2026-12-01T09:00:00", "jitter": null, "timezone": "..." }
 { "type": "expr",    "expr": "30 8 * * 1,3,5", "timezone": "..." }
+{ "type": "multi",   "items": [ {...}, {...} ], "timezone": "..." }
 ```
+
+### 多计划：几条规则取并集
+
+一个任务可以挂**多条**计划，触发时刻是各条的并集 —— 这是让「定时更灵活」最直接的办法，
+比如「工作日 08:00」+「每天 09:00–18:00 之间随机 2 次」。
+
+- 每条子计划是一个完整的计划对象（除 `multi` 外的任何类型）；
+- 子计划**不许嵌套** `multi`（组合的组合没有意义，只会让预览更难读）；
+- 子计划没写 `timezone` 就继承外层的；
+- 同一个时刻被两条同时命中**只触发一次**（`next_after` 严格大于 `from`）；
+- 空列表是错误（「至少需要一条计划」）。
 
 `timezone` 在顶层统一，默认取浏览器时区。`monthly.day` 允许 `1..28` 或 `"last"`；
 `29..31` 在短月里**跳过**（不挪到月末），表单会提前给警告。
@@ -57,6 +69,7 @@
 | monthly | `every month on day {day} at {at}`；`last` → `on last day`；`randomPick` → `on a random day` |
 | window | `every {every} between {start} and {end}, {count} time(s)` |
 | once | `once at {at}` |
+| multi | 各条短句用 `；` 连起来 |
 | expr | 原样 `{expr}` + `[± {jitter}]`（不加 `(expression)` 那种后缀——会跟表达式粘在一起被当成规则的一部分） |
 
 ## 4. 随机语义（可复现）
@@ -120,6 +133,7 @@
 | `randomPick` | ❌ 没有 cron 表达 |
 | `monthly day:"last"` | ❌ 多数 cron 不支持 `L` |
 | `once` | ❌ 不是周期语义 |
+| `multi` | ❌ 是几条规则的并集，cron 只能表达一条 |
 | `interval` + `anchor` | ❌ cron 是日历规则，不是「从某点起每 N 小时」 |
 | 每 7 分钟 | ❌ 不能整除 60，`*/7` 会漂移 |
 

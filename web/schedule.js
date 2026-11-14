@@ -28,7 +28,9 @@
   // ---------------------------------------------------------------- 常量
 
   /** 支持的频率类型。表单下拉的顺序就是这里的顺序。 */
-  const TYPES = ['interval', 'daily', 'weekly', 'monthly', 'window', 'once', 'expr'];
+  const TYPES = ['interval', 'daily', 'weekly', 'monthly', 'window', 'once', 'expr', 'multi'];
+  /** 可以作为「多计划」里一条子计划的类型（不许嵌套）。 */
+  const SUB_TYPES = ['interval', 'daily', 'weekly', 'monthly', 'window', 'once', 'expr'];
 
   /** interval 的单位 → 毫秒。 */
   const UNIT_MS = { minute: 60e3, hour: 3600e3, day: 864e5, week: 6048e5 };
@@ -224,6 +226,18 @@
       return Object.assign({}, json, { expr: json.expr });
     }
 
+    // 多计划：每条子计划各自规整；子计划没写 timezone 就继承外层的
+    if (json.type === 'multi') {
+      const items = Array.isArray(json.items) ? json.items : [];
+      return Object.assign({}, json, {
+        timezone: tz,
+        items: items
+          .filter(isObj)
+          .filter((it) => it.type !== 'multi') // 不许嵌套：组合的组合没有意义，只会让预览更难读
+          .map((it) => normalize(Object.assign({ timezone: tz }, it), opts)),
+      });
+    }
+
     // 其余类型：只补 timezone、规整字段类型，不改语义
     const out = Object.assign({}, json);
     out.timezone = tz;
@@ -291,6 +305,12 @@
         // 表达式原样显示（不加 (expression) 那种后缀，会跟表达式粘在一起被当成规则的一部分）；
         // 抖动是单独的修饰符，照常挂 ± 尾巴。
         return (j.expr || '（空表达式）') + jt;
+      case 'multi': {
+        const items = j.items || [];
+        if (!items.length) return '（还没有任何计划）';
+        // 多条之间用「；」断开，一眼能看出是「或」的关系
+        return items.map((it) => toSentence(it)).join('；');
+      }
       default:
         return '（未识别的规则）';
     }
@@ -659,6 +679,33 @@
     const tz = j.timezone || defaultTimezone();
     const out = [];
 
+    if (j.type === 'multi') {
+      // 各条各自算，取并集。同一条时刻被两条同时命中只算一次（否则会连触两次）。
+      const items = j.items || [];
+      if (!items.length) {
+        return { ok: false, runs: [], jitterNote: '', reason: '还没有任何计划' };
+      }
+      const all = [];
+      let anyJitter = false;
+      for (const it of items) {
+        const r = nextRuns(it, count, o);
+        if (r.ok) all.push(...r.runs);
+        if (r.jitterNote) anyJitter = true;
+      }
+      all.sort((x, y) => x - y);
+      const runs = [];
+      for (const t of all) {
+        if (runs.length >= count) break;
+        if (!runs.length || t !== runs[runs.length - 1]) runs.push(t);
+      }
+      return {
+        ok: runs.length > 0,
+        runs,
+        jitterNote: anyJitter ? '含抖动的条目可复现：实际执行时间与此一致' : '',
+        reason: runs.length ? undefined : '这些计划都不会触发，请检查',
+      };
+    }
+
     if (j.type === 'expr') {
       // 多算一些基准时刻：抖动可能把某次推到 from 之前，那一次就跳过。
       const bases = nextRunsCron(j.expr, count + 16, fromMs, tz);
@@ -743,6 +790,20 @@
       return out;
     }
 
+    if (j.type === 'multi') {
+      const items = j.items || [];
+      if (!items.length) err('items', '至少需要一条计划');
+      items.forEach((it, i) => {
+        if (it.type === 'multi') {
+          err('items', '多计划不能再嵌套');
+          return;
+        }
+        for (const v of validate(it)) {
+          out.push({ level: v.level, field: v.field, message: '第 ' + (i + 1) + ' 条：' + v.message });
+        }
+      });
+      return out;
+    }
     if (j.type === 'weekly' && (!j.days || !j.days.length)) {
       err('days', '请至少选择一天');
     }
@@ -799,6 +860,9 @@
     if (j.type === 'expr') {
       // 直通类型本来就是表达式：原样交出去（不做任何改写）
       return { ok: true, cron: j.expr, timezone: tz, exact: true };
+    }
+    if (j.type === 'multi') {
+      return no('多计划是几条规则的并集，cron 只能表达一条');
     }
     if (j.type === 'window') {
       return no('「窗口内随机」没有 cron 表达：cron 只能表达固定时刻，表达不了「一段区间里取 count 个点」');
@@ -902,7 +966,7 @@
   // ---------------------------------------------------------------- 导出
 
   global.PanelSchedule = {
-    TYPES, DAYS, DAY_LABEL, UNIT_LABEL,
+    TYPES, SUB_TYPES, DAYS, DAY_LABEL, UNIT_LABEL,
     defaultTimezone,
     normalize, toSentence, nextRuns, validate,
     exportCron, fromCron, parseCron,
