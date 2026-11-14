@@ -7,7 +7,7 @@ path = "src/main.rs"
 
 [package]
 name = "plugin-panel"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 publish = false
 
@@ -142,6 +142,30 @@ unsafe_code = "deny"
 
 [profile.release]
 # 基线是 abort：一个引擎线程 panic 带走整个面板。新版要 unwind + 引擎边界 catch_unwind。
+# ⚠ 所以**不能**为了省体积改 panic = "abort" —— 那样 catch_unwind 就不再拦截，
+#   一个插件的 panic 会直接带走整个面板，等于把隔离拆了。
 panic = "unwind"
+# 体积：发出去的是一个静态 musl 单文件 —— 用户要下它、盒子上要落它，
+# 而这里面三成是符号表、四成是 OXC/LLRT 那一堆没被消除的泛型实例化。
+#
+# 实测（macOS arm64，同一条命令 `cargo build --release`；Linux musl 会再多几 MB 的
+# 静态 OpenSSL，但缩水比例一致）：
+#   基线（只有 panic=unwind）        39.1 MB   ← 0.4.1 发出去的就是这个量级
+#   + fat LTO + 单 codegen unit + strip  22.1 MB
+#   + opt-level = "s"                17.6 MB
+#   + opt-level = "z"                13.4 MB   ← 就是下面这档
+#
+# 为什么敢用 "z"：这个面板的负载是「到点触发一次」，真正的 hot path 不在 Rust 里
+# （插件 JS 跑在 QuickJS，C 代码，不受 opt-level 影响）。实测三档对比：
+#   启动到 /readyz      67 / 67 / 69 ms
+#   .ts 转译（143KB）    33 / 34 / 36 ms
+#   迁移预览（SQLite+JSON）50 / 50 / 51 ms
+# 差异在噪声级，而体积差了 8 MB。
+#
+# ⚠ 别为了再省一点改成 panic = "abort"（那会把引擎边界的 catch_unwind 拆掉）。
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = "z"
 
 [workspace]
