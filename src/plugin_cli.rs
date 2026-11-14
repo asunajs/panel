@@ -142,6 +142,52 @@ fn new_plugin(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// 取 atLeast( 后面引号里的那段（"0.3.0" / '0.3.0'），取不到就返回到右括号为止。
+fn quoted_arg(rest: &str) -> String {
+    let t = rest.trim_start();
+    let mut chars = t.chars();
+    match chars.next() {
+        Some(q @ ('\'' | '"')) => t[1..].split(q).next().unwrap_or("").to_string(),
+        _ => t.split(')').next().unwrap_or("").trim().to_string(),
+    }
+}
+
+/// 面向 0.4 的插件不该带 0.3 的兼容分支（docs/plugin-contract.md 的 R5）。
+///
+/// 只认确定性写法：atLeast 里写 0.3 / 0.2 / 0.1，以及把版本串当字符串比
+/// （version 上的 startsWith / indexOf 带 0.3）。不做语义分析 -- 宁可漏，不要误报。
+fn compat_smells(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let n = i + 1;
+        // 注释行跳过：文档里提到 0.3 是正常的
+        let code = match line.find("//") {
+            Some(cut) => &line[..cut],
+            None => line,
+        };
+        if let Some(rest) = code.split("atLeast(").nth(1) {
+            let arg = quoted_arg(rest);
+            if arg.starts_with("0.3") || arg.starts_with("0.2") || arg.starts_with("0.1") {
+                let shown = arg;
+                out.push(format!(
+                    "第 {n} 行：atLeast({shown}) 是 0.3 时代的兼容分支 -- 插件只面向 0.4，删掉分支，下限写进清单 min_panel"
+                ));
+            }
+        }
+        let version_compared = code.contains("version")
+            && (code.contains("startsWith('0.3")
+                || code.contains("startsWith(\"0.3")
+                || code.contains("indexOf('0.3")
+                || code.contains("indexOf(\"0.3"));
+        if version_compared {
+            out.push(format!(
+                "第 {n} 行：拿版本串去比 0.3 -- 插件只面向 0.4，别在运行时猜宿主版本，用清单 min_panel 表态"
+            ));
+        }
+    }
+    out
+}
+
 fn check(args: &[String]) -> Result<(), String> {
     let path = args.iter().find(|a| !a.starts_with("--")).ok_or_else(usage)?;
     let path = Path::new(path);
@@ -157,6 +203,8 @@ fn check(args: &[String]) -> Result<(), String> {
     if let Err(e) = crate::engine::check_syntax(&src, stem) {
         problems.push(e);
     }
+    // 2) 面向 0.4：不许留 0.3 兼容分支（docs/plugin-contract.md 的 R5）
+    problems.extend(compat_smells(&src));
     // 2) 清单（旁边有就一起看）
     if let Some(dir) = path.parent() {
         match crate::manifest::load(dir, stem) {
@@ -167,6 +215,20 @@ fn check(args: &[String]) -> Result<(), String> {
                         m.min_panel,
                         env!("CARGO_PKG_VERSION")
                     ));
+                }
+                if !m.min_panel.trim().is_empty()
+                    && !crate::manifest::version_ok("0.4.0", &m.min_panel)
+                {
+                    problems.push(format!(
+                            "清单下限写的是 {}：插件面向 0.4，写 \"min_panel\": \"0.4.0\"（低于 0.4 的老面板不该装它）",
+                            m.min_panel
+                        ));
+                }
+                if m.min_panel.trim().is_empty() {
+                    problems.push(
+                            "清单没写 min_panel：面向 0.4 就写 min_panel = 0.4.0（不写等于不设下限）"
+                                .to_string(),
+                    );
                 }
                 if m.fields.is_empty() {
                     println!("提示：清单里没有 config.fields，配置页会退化成裸 JSON 编辑器");
@@ -203,6 +265,26 @@ mod tests {
     }
 
     /// 只编译不执行：好代码过、坏代码报「人话」，而且不该栽在 import 解析上。
+    /// 0.3 兼容分支要被点名（R5）；只用 0.4 的写法不该误报。
+    #[test]
+    fn compat_branches_against_0_3_are_reported() {
+        let bad = [
+            "if (panel.atLeast('0.3.0')) { a(); } else { b(); }",
+            "const v = panel.version(); if (v.startsWith('0.3')) { old(); }",
+        ];
+        for src in bad {
+            assert!(!compat_smells(src).is_empty(), "该报：{src}");
+        }
+        let good = [
+            "if (panel.atLeast('0.4.1')) { fresh(); }",
+            "// 0.3 时代这里是另一套写法，现在没有了",
+            "import host from 'panel:host';",
+        ];
+        for src in good {
+            assert!(compat_smells(src).is_empty(), "不该报：{src}");
+        }
+    }
+
     #[test]
     fn check_syntax_reports_real_problems() {
         let good = "import host from 'panel:host';\nawait host.register_cron('t', '@every 1h');\n";

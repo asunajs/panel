@@ -6,6 +6,12 @@
 
 核心动机：**不再自己拥有 JS 运行时语义**。能用 LLRT 的就不手写。
 
+## 怎么把面板和插件分开（谁来写哪一层）
+
+**插件契约**在 [plugin-contract.md](plugin-contract.md)：两个仓库、两条部署路径、
+十条铁律、面向 0.4 不保留 0.3 兼容。所有会话（面板 / 各插件）都按这一页做，
+机器能查的部分由 `scripts/check-plugin-boundary.sh§ 守着。
+
 ## 当前状态
 
 **Stage 0（spike 退风险）六条判据全部通过**，读数见 [engine.md](engine.md)。
