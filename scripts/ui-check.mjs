@@ -541,6 +541,27 @@ async function main() {
   await sleep(1600);
   const clashToast = await lastMsg();
   check('选「覆盖」后提示说「已覆盖」而不是「已上传」', /已覆盖/.test(clashToast || ''), clashToast);
+  // 第 107 轮：按 URL 装插件（POST /api/plugins/install）的三条**离线**校验。
+  // 真下载不在这里测（测试机不出网）：落到别处的守卫在 src/install.rs 的单测里。
+  const inst = JSON.parse(await js(
+    "(async () => {" +
+    " const call = async (opts) => { const r = await fetch('/api/plugins/install', opts);" +
+    "   const t = await r.text(); return { status: r.status, body: t.slice(0, 120) }; };" +
+    " const noGuard = await call({ method: 'POST', headers: { 'content-type': 'application/json' }," +
+    "   body: JSON.stringify({ url: 'https://example.com/x.js' }) });" +
+    " const badScheme = await call({ method: 'POST', headers: { 'content-type': 'application/json', 'x-panel': '1' }," +
+    "   body: JSON.stringify({ url: 'ftp://example.com/x.js' }) });" +
+    " const badExt = await call({ method: 'POST', headers: { 'content-type': 'application/json', 'x-panel': '1' }," +
+    "   body: JSON.stringify({ url: 'https://example.com/run.sh' }) });" +
+    " return JSON.stringify({ noGuard, badScheme, badExt }); })()",
+  ));
+  check('装插件接口要写权限（没 x-panel 头就是 403）',
+    inst.noGuard.status === 403 && /x-panel/.test(inst.noGuard.body), JSON.stringify(inst.noGuard));
+  check('装插件只收 http(s)（ftp:// 直接拒）',
+    inst.badScheme.status === 400 && /只接受 http\(s\)/.test(inst.badScheme.body), JSON.stringify(inst.badScheme));
+  check('装插件只认 .js / .zip（.sh 直接拒，一个字节都不下）',
+    inst.badExt.status === 400 && /只认 \.js \/ \.zip/.test(inst.badExt.body), JSON.stringify(inst.badExt));
+
   // 第 135 轮：**短结果**走顶部居中（闪一下就走），**长提示/错误**走右上角常驻。
   await js("document.getElementById('toast').className = 'toast hidden'");
   await js("notify('mcloud 当前没有在跑的任务', 'ok')");

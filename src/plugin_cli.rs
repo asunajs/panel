@@ -5,6 +5,7 @@
 //!
 //!     panel plugin new mcloud-signin      # 出 .js + .panel.json 两个文件
 //!     panel plugin check plugins/x.js     # 只编译不执行（不连网、不写文件）
+//!     panel plugin install <url|路径>      # 装（第 107 轮）：商店就是靠这条侧载进来的
 
 use std::path::{Path, PathBuf};
 
@@ -19,14 +20,23 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 fn usage() -> String {
-    "用法：\n  panel plugin new <名字> [--dir <插件目录>] [--force]\n  panel plugin check <文件.js>"
-        .to_string()
+    [
+        "用法：",
+        "  panel plugin new <名字> [--dir <插件目录>] [--force]",
+        "  panel plugin check <文件.js>",
+        "  panel plugin install <url|文件.js|文件.zip|目录> [--overwrite] [--sha256 <64位十六进制>]",
+        "",
+        "install 从 URL 或本地路径装插件；落点 = $PANEL_PLUGINS_DIR（缺省 ./plugins）。",
+        "CLI 不加载插件：装完到界面点「重载」或重启面板才生效。",
+    ]
+    .join("\n")
 }
 
-pub fn run(args: &[String]) -> Result<(), String> {
+pub async fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         Some("new") => new_plugin(&args[1..]),
         Some("check") => check(&args[1..]),
+        Some("install") => install(&args[1..]).await,
         _ => Err(usage()),
     }
 }
@@ -248,6 +258,97 @@ fn check(args: &[String]) -> Result<(), String> {
         }
         Err(format!("{} 有 {} 个问题", path.display(), problems.len()))
     }
+}
+
+/// `panel plugin install <url|文件.js|文件.zip|目录>`（第 107 轮）。
+///
+/// 和界面上的 `POST /api/plugins/install` 是同一条链（`crate::install`），区别只有一个：
+/// **CLI 不加载插件** —— 它跑在「面板还没起来」的时候，只能把文件放到位，
+/// 生效要等下一次启动或界面上点「重载」。这一点必须打印出来，别让人以为装完就在跑。
+async fn install(args: &[String]) -> Result<(), String> {
+    let mut target: Option<&str> = None;
+    let mut overwrite = false;
+    let mut sha: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--overwrite" => overwrite = true,
+            "--sha256" => {
+                i += 1;
+                sha = Some(
+                    args.get(i)
+                        .ok_or("--sha256 后面要跟 64 位十六进制")?
+                        .clone(),
+                );
+            }
+            other if other.starts_with("--") => return Err(usage()),
+            other => {
+                if target.is_some() {
+                    return Err(usage());
+                }
+                target = Some(other);
+            }
+        }
+        i += 1;
+    }
+    let target = target.ok_or_else(usage)?.to_string();
+    let dir = plugins_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建 {} 失败: {e}", dir.display()))?;
+
+    let saved = if target.starts_with("http://") || target.starts_with("https://") {
+        let data = crate::install::download(&target).await?;
+        let got = crate::install::verify_sha256(&data, sha.as_deref())?;
+        println!("下载 {}（{} 字节，sha256 {}）", target, data.len(), got);
+        let name = crate::install::name_from_url(&target)?;
+        crate::install::save_bytes(&dir, &name, &data, overwrite)?
+    } else {
+        let path = Path::new(&target);
+        if path.is_dir() {
+            if sha.is_some() {
+                return Err("装目录时没法校验 sha256（一整个目录没有单一哈希）".to_string());
+            }
+            crate::install::save_dir(&dir, path, overwrite)?
+        } else if path.is_file() {
+            let data = std::fs::read(path).map_err(|e| format!("读 {} 失败: {e}", path.display()))?;
+            let got = crate::install::verify_sha256(&data, sha.as_deref())?;
+            println!("读取 {}（{} 字节，sha256 {}）", path.display(), data.len(), got);
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| format!("文件名看不懂: {}", path.display()))?
+                .to_string();
+            crate::install::save_bytes(&dir, &name, &data, overwrite)?
+        } else {
+            return Err(format!("找不到：{target}"));
+        }
+    };
+
+    println!(
+        "已装到 {}（{} 个文件，{} 字节{}{}）",
+        dir.display(),
+        saved.files.len(),
+        saved.bytes,
+        if saved.zip { "，zip" } else { "" },
+        if saved.replaced.is_empty() {
+            String::new()
+        } else {
+            format!("，覆盖了 {} 个已有文件", saved.replaced.len())
+        }
+    );
+    // 文件多的时候别刷屏：列前 12 个就够确认形状了
+    for f in saved.files.iter().take(12) {
+        println!("  {f}");
+    }
+    if saved.files.len() > 12 {
+        println!("  …还有 {} 个", saved.files.len() - 12);
+    }
+    println!("CLI 不加载插件：到界面点「重载」，或重启面板后生效。");
+    Ok(())
+}
+
+/// 落点规则和面板本体一致：`$PANEL_PLUGINS_DIR`，缺省 `./plugins`。
+fn plugins_dir() -> PathBuf {
+    PathBuf::from(std::env::var("PANEL_PLUGINS_DIR").unwrap_or_else(|_| "plugins".to_string()))
 }
 
 #[cfg(test)]
