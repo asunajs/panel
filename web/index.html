@@ -448,6 +448,13 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
             </div>
             <div class="toolbar src-toolbar">
               <span class="src-meta" id="src-meta">—</span>
+              <!-- 跳到行 + 当前行（第 106 轮）：插件打包产物动辄一万多行，纯文本模式又收起了
+                   行号层，没有这两个就等于没有导航 —— 用户「编辑源码不能使用」里有这一半。 -->
+              <label class="src-goto">
+                <span>行</span>
+                <input id="src-goto" type="text" inputmode="numeric" autocomplete="off" aria-label="跳到行" placeholder="—" />
+              </label>
+              <span class="src-pos" id="src-pos">—</span>
               <button class="btn btn-sm" id="src-reload" type="button">重新读取</button>
               <button class="btn btn-sm btn-primary" id="src-save" type="button">保存并重载</button>
             </div>

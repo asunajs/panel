@@ -68,6 +68,14 @@ writeFileSync(
     .concat(Array.from({ length: 1200 }, (_, i) => '// pad ' + i))
     .concat(['return a;', '']).join('\n'),
 );
+// 第 106 轮：再放一个**超 20 万字符**的脚本，用来钉「纯文本模式」（折行、行号层收起、跳到行）。
+// 20 万是 highlight.js 的 MAX：超过就不上色、不画行号树。
+writeFileSync(
+  path.join(scripts, 'big-script.js'),
+  ['const pad = [];']
+    .concat(Array.from({ length: 3000 }, (_, i) => '// pad ' + String(i).padStart(4, '0') + ' ' + 'a'.repeat(64)))
+    .concat(['return pad.length;', '']).join('\n'),
+);
 
 writeFileSync(path.join(plugins, 'seed.js'), [
   "import host from 'panel:host';",
@@ -1044,6 +1052,31 @@ async function main() {
   ));
   check('源码编辑器高度有界（不被全文行号撑成全文高）',
     edBox.h <= 900 && Math.abs(edBox.taH - edBox.gH) <= 2, JSON.stringify(edBox));
+
+  // 第 106 轮：大文件退成纯文本模式 —— 长行必须折行（否则右边永远看不全，用户两次截图
+  // 都指着被切掉的行尾），行号层收起（折行后视觉行 ≠ 逻辑行，留着必然错位），
+  // 并且能跳到指定行（一万多行的文件靠拖滚动条等于没有导航）。
+  await js("(async () => { await openScriptSource('big-script'); return 'ok'; })()");
+  await sleep(1200);
+  const big = JSON.parse(await js(
+    "(()=>{const w=document.getElementById('src-editor');const ta=document.getElementById('src-text');" +
+    "const cs=getComputedStyle(ta);const g=document.getElementById('src-gutter');" +
+    "return JSON.stringify({plain:w.classList.contains('plain'),ws:cs.whiteSpace,wrap:cs.overflowWrap," +
+    "gutter:getComputedStyle(g).display,sw:ta.scrollWidth,cw:ta.clientWidth,gutterLen:(g.textContent||'').length});})()",
+  ));
+  check('大文件源码退成纯文本模式：折行、行号层收起、不留横向溢出',
+    big.plain && big.ws === 'pre-wrap' && big.gutter === 'none' &&
+      big.sw <= big.cw + 1 && big.gutterLen === 0, JSON.stringify(big));
+
+  const jump = JSON.parse(await js(
+    "(()=>{const NL=String.fromCharCode(10);const g=document.getElementById('src-goto');" +
+    "g.value='2500';g.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));" +
+    "const ta=document.getElementById('src-text');const line=ta.value.slice(0,ta.selectionStart).split(NL).length;" +
+    "return JSON.stringify({line:line,scrollTop:Math.round(ta.scrollTop)," +
+    "pos:document.getElementById('src-pos').textContent});})()",
+  ));
+  check('源码编辑器能跳到指定行（第 2500 行 + 滚到位 + 工具条报位置）',
+    jump.line === 2500 && jump.scrollTop > 0 && /第 2500 行/.test(jump.pos), JSON.stringify(jump));
 
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

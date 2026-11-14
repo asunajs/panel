@@ -727,3 +727,37 @@
 
      守卫：`scripts/check-pitfalls.sh` 里 grep `web/app.js`，裸 `confirm(` / `window.confirm` /
      `alert(` / `prompt(` 出现即红（`askConfirm` / `settleConfirm` 是驼峰，不命中）。
+
+101. **代码编辑器的选中背景不能是实底**（2026-11-14，用户截图报障：选中几行代码，
+     看到的是一排「没有任何字」的浅蓝块）。编辑器是双层结构：textarea 在上（z-index:1、
+     `color: transparent`，看得见的字全来自垫底的 `.code-hl` 高亮层），选中背景
+     `::selection` 画在**高亮层上面** —— 实底色（当时的 `--accent-soft`，#ecf2fe）
+     一盖上，语法配色整个没了。修法：`color-mix(in srgb, var(--accent) 30%,
+     transparent)` 半透明，字透得出来、选区也够显眼；plain 模式（textarea 自己显示
+     文字）同样适用。
+
+     守卫：`scripts/check-pitfalls.sh` 里编辑器 `::selection` 那行必须带 `transparent`
+     （半透明），换成任何实底 token 就红。
+
+106. **纯文本模式剩下的一半：长行被切、一万多行没法导航**（用户 2026-11-14 第二次报
+    「编辑源码不能使用」，截图箭头指着被右边缘切掉的行尾 + 右上那根细得快看不见的滚动条）。
+
+    §104 定住的是高度（29 万像素 → 558），但两件事没解决：
+    1. `white-space: pre` ⇒ 打包产物里两三百字符的行**右边永远看不全**；
+    2. 14,726 行的文件，滚动条拇指不到 1px，**等于没有导航**。
+
+    折行之后「视觉行 ≠ 逻辑行」，行号层必然错位 —— 所以纯文本模式**收起行号层**
+    （`.code-editor.plain .code-gutter { display: none }`，`highlight.js` 也就不再为
+    看不见的东西建一万多个数字），位置改成工具条上的 `第 N 行 / 共 M 行` + 一个
+    「行 [____]」跳转框（`srcGotoLine()`：按字符位置算出偏移，设选区，再按比例粗滚 +
+    居中收进视野）。打开小文件仍然是有行号、有高亮、不折行的老样子。
+
+    读数（真文件 mcloud.js 14,726 行 / 无头 Edge 1440×900）：
+    `whiteSpace=pre-wrap`、`overflowWrap=anywhere`、`gutterDisplay=none`、
+    `scrollWidth 473 = clientWidth 473`（没有横向溢出了）；
+    跳到第 12000 行 → `selectionStart` 落在第 12000 行、`scrollTop 271074`、
+    工具条报「第 12000 行 / 共 14726 行」。
+
+    守卫：`ui-check` 另写一个 23 万字符的 `big-script.js` 当探子，断言
+    「plain 类 + `pre-wrap` + 行号层 display:none + 无横向溢出 + 行号层文本为空」，
+    再断言「跳到第 2500 行：光标落对、scrollTop > 0、工具条报位置」。

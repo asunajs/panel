@@ -148,13 +148,23 @@
       wrap.classList.toggle('plain', plain);
       if (!plain && pre) pre.innerHTML = render(code, lang);
       if (gutter) {
-        const lines = code.split('\n').length;
-        // 行数没变就不重画：光在一行里打字是大多数，别每次都重建几千行的号码串
-        if (lines !== lastLines) {
-          let g = '';
-          for (let i = 1; i <= lines; i++) g += i + '\n';
-          gutter.textContent = g;
-          lastLines = lines;
+        // 纯文本模式行号层是 `display:none` 的（折行之后视觉行 ≠ 逻辑行，留着必然错位），
+        // 别为看不见的东西建一万多个数字；顺手把上一次的清掉。
+        if (plain) {
+          if (gutter.textContent) gutter.textContent = '';
+          lastLines = -1;
+        } else {
+          // 数行数用 indexOf 走一遍，不 slice+split：52 万字符每敲一键 split 一次
+          // 会分配一万多个小字符串，纯属喂 GC。
+          let lines = 1;
+          for (let i = code.indexOf('\n'); i !== -1; i = code.indexOf('\n', i + 1)) lines += 1;
+          // 行数没变就不重画：光在一行里打字是大多数，别每次都重建几千行的号码串
+          if (lines !== lastLines) {
+            let g = '';
+            for (let i = 1; i <= lines; i++) g += i + '\n';
+            gutter.textContent = g;
+            lastLines = lines;
+          }
         }
       }
     };
