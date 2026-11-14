@@ -938,3 +938,9 @@ provider，不换握手实现），**只有 `tls-openssl` 是真 OpenSSL**
    不登记就会从界面「凭空消失」。所以 seed_lazy 除了任务行还收一份名字。
 
 端到端检查：bash scripts/check-lazy-load.sh（10 条，真起面板 + 两次重启 + 手动加载 + 关开关）。
+
+**唤醒是这条路的命门**，所以单独有 bash scripts/check-wake.sh（5 条，真等两分钟）：
+到点在窗口外 → 不加载；窗口一开（约 60 秒内）→ 自动装回来；到点那一拍真的跑。
+第 180 轮修之前这条链路整个是死的 —— actor 每圈重建 sleep 定时器，被 30 秒一次的
+空闲卸载 ticker 反复重置，而「没有已加载任务」时 sleep_hint 恒为 60 秒，
+fire_due 永远等不到（实测 90 秒一次没跑）。现在到点时刻是绝对 deadline、只缩不涨。
