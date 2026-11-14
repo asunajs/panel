@@ -11,7 +11,9 @@
 
 0.4 的口径是**面板只提供通用能力，业务做成插件**（[plugin-contract.md](plugin-contract.md) R6）：
 商店 = 一个普通插件（`shop.js` + `shop.webui/`），你**侧载**进来才有；不装就没有商店，
-面板一个字节都不多。它的源码不在面板仓（R1/R2），在插件自己的仓里。
+面板一个字节都不多。它有自己的仓（`asunajs/panel-store`，**私有**）：那只是「怎么装」的壳。
+**官方货架（目录 JSON）在面板仓**：[`marketplace/catalog.json`](../marketplace/catalog.json)，
+维护约定见 [`marketplace/README.md`](../marketplace/README.md)。
 
 面板只补了一条**通用**能力：
 
@@ -151,11 +153,12 @@
 
 ## 9. 上线与自测
 
-    # 1) 商店（侧载）：把它放进实例的插件目录
+    # 1) 商店（侧载）：把它装进实例的插件目录
     panel plugin install ~/mobile/workspace/panel-store/dist --overwrite
     #    或者界面：插件 → 上传 → 选 shop.js + shop.webui/ 打包的 zip
 
-    # 2) 配目录：插件 → 插件商店 → 配置 → catalog_url
+    # 2) 目录：默认就是本仓的 marketplace/catalog.json；要换货架就去
+    #    插件 → 插件商店 → 配置 → catalog_url
     # 3) 打开侧栏「插件商店」→ 刷新目录 → 安装
 
 无网环境下端到端跑过的读数（本地 http 服务当货架，`HOST_API_ALLOW_PRIVATE=1`）：
