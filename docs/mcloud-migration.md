@@ -127,9 +127,15 @@ WSS  wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → �
 ## 8. 怎么重新构建插件
 
 ```bash
-cd workspace/mcloud-plugin
-npm run build:panelllrt     # host-api → 适配层，产物落 ../panel/plugins/
+cd ~/mobile/workspace/mcloud-plugin
+npm run deploy:panel        # 构建 → 样式门禁 → 装进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins）→ 逐个 cmp
 ```
 
-产物是**构建出来的**（`plugins/mcloud*.js` + `plugins/mcloud.webui/`），别手改 ——
+产物是**构建出来的**（`dist/panel-llrt/mcloud*.js` + `mcloud.webui/`），别手改；
+**面板仓不留它、也不负责装它**（分工见 [`../plugins/README.md`](../plugins/README.md)）——
 改代码改 `src/`，界面改 `plugins/mcloud/`。
+
+> ⚠ 截至 2026-11-14，`mcloud-plugin` 的 `build:panelllrt` 还是写到 `../panel-llrt/plugins/`、
+> 也还没有 `deploy:panel` —— 面板仓这边已经把产物撤了，所以它现在**只能构建、没法上线**。
+> 照 `cmusic-others/mgmusic-plugin` 那份改（`scripts/build-panelllrt.mjs` 输出 `dist/panel-llrt/`、
+> 加 `scripts/deploy-panel.sh` + `package.json` 里的 `deploy:panel`）即可，样式门禁那段可以直接抄。

@@ -2,8 +2,10 @@
 
 ## 我错在哪
 
-面板仓 `panel-llrt/plugins/mcloud.webui/` 是插件项目 `npm run build:panelllrt` 的**产物**：
-`mcloud-plugin/scripts/build-panelllrt.mjs` 里就一句 `cpSync(plugins/mcloud → plugins/mcloud.webui)`。
+面板仓 `panel-llrt/plugins/mcloud.webui/` 曾经是插件项目 `npm run build:panelllrt` 的**产物**
+（`mcloud-plugin/scripts/build-panelllrt.mjs` 里就一句 `cpSync(plugins/mcloud → plugins/mcloud.webui)`）。
+**2026-11-14 起这个目录已经从面板仓撤掉**：面板仓不放插件代码、也不部署插件，
+插件由插件项目 `npm run deploy:panel` 自己装进实例的 `plugins/`。
 
 我一直在**产物上改**（token 映射、`/app.css` 引入、`boot.js` 的主题跟随、`?diag=1`、TDesign 标签…）。
 这是错的位置：插件项目下次 `npm run build:panelllrt`，`rmSync + cpSync` 会把我的改动整段冲掉 ——
@@ -11,7 +13,8 @@
 一构建就盖掉了 0.4.x 的映射（`--text: var(--fg)`）。
 
 **边界**：插件代码归插件项目（`~/mobile/workspace/mcloud-plugin`）；面板仓只放面板，
-`plugins/` 里除 `webui-demo*`（面板自带示例）之外都是产物，不许手改。
+`plugins/` 里除 `webui-demo*`（面板自带示例）之外**不该有插件文件**——产物也不放，
+毕竟产物会诱人上手改。
 
 ## 现在要做的选择（插件项目侧，二选一）
 
