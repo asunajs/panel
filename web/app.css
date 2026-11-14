@@ -1832,3 +1832,54 @@ select option { background: var(--surface); color: var(--fg); }
 @media (max-width: 1180px) {
   .notify-side { gap: 8px; }
 }
+
+/* ── 计划表单（第 110 轮）────────────────────────────────────────────
+   全部复用已有 token，不新增颜色字面量。表单本身用 .field-inline 排，
+   这里只补「短句」「预览」「高级选项」三块的结构性样式。 */
+#sched-form { display: flex; flex-direction: column; gap: 10px; }
+#sched-form .field-inline { align-items: center; gap: 8px; flex-wrap: wrap; }
+#sched-form .field-inline > span.muted { min-width: 5.5em; }
+#sched-form .modal-input { flex: 1 1 8em; min-width: 6em; }
+#sched-form textarea.modal-input { min-height: 3.2em; resize: vertical; }
+
+/* 星期：按钮别被 flex 拉成等宽满行，选中的用 accent 实底（浅底+白字读不出来） */
+#sched-form .chips { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+#sched-form .chips .chip {
+  flex: 0 0 auto; height: 28px; padding: 0 12px;
+  cursor: pointer; font-family: inherit;
+}
+.chip.chip-on {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+/* 短句：只读渲染结果，别让人以为能点进去改 */
+.sched-sentence {
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.sched-preview > p { margin: 0 0 4px; }
+.sched-runs {
+  margin: 0;
+  padding-left: 1.6em;
+  font-size: 13px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.sched-runs li { line-height: 1.7; }
+
+/* 高级选项：默认收起，展开后和内层控件留一点缝 */
+.sched-adv > summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 13px;
+  user-select: none;
+}
+.sched-adv > div { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }

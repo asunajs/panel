@@ -497,8 +497,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       <div class="modal-card">
         <h2 id="task-schedule-title">改计划</h2>
         <p class="muted" id="task-schedule-what"></p>
-        <input id="task-schedule-expr" class="modal-input mono" type="text" placeholder="0 9 * * *" autocomplete="off" />
-        <p class="hint" id="task-schedule-hint">5 段（分 时 日 月 周）、6 段（秒 分 时 日 月 周）或 <code>@every 30s</code>。</p>
+        <div id="sched-form"></div>
+        <p class="hint" id="task-schedule-hint"></p>
         <div class="modal-actions">
           <button class="btn" type="button" data-close="1">取消</button>
           <button class="btn hidden" type="button" id="task-schedule-reset">采纳插件建议</button>
@@ -557,6 +557,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
     <!-- 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就消失，用户自己关。 -->
     <div class="notices" id="notices" aria-live="polite"></div>
     <script src="/highlight.js"></script>
+    <script src="/schedule.js"></script>
     <script src="/app.js"></script>
   
 </body>

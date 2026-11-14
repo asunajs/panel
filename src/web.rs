@@ -28,6 +28,9 @@ use crate::scheduler::Scheduler;
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
+// 任务调度配置模块（第 110 轮）：纯函数 + 表单逻辑，和 app.js 一起内嵌。
+// 单独一个文件是为了能脱离浏览器直接跑测试（scripts/schedule-check.mjs）。
+const SCHEDULE_JS: &str = include_str!("../web/schedule.js");
 const APP_CSS: &str = include_str!("../web/app.css");
 /// 错误页模板（第 166 轮）：404/401/500 都渲染它，用的是面板自己的样式。
 const ERROR_HTML: &str = include_str!("../web/error.html");
@@ -605,6 +608,10 @@ pub fn router(st: AppState) -> Router {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
+        .route(
+            "/schedule.js",
+            get(|| async { asset(SCHEDULE_JS, "text/javascript; charset=utf-8", "schedule.js") }),
+        )
         .route("/theme-boot.js", get(|| async {
             asset(THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js")
         }))
