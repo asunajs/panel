@@ -805,22 +805,42 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 .notify-item.notify-clickable { cursor: pointer; }
 .notify-item.notify-clickable:hover { background: var(--surface-2); }
 
+/* 窄屏的表格：**两列网格**，不是「一格一行」。
+   为什么改（第 188 轮，用户手机截图：运行记录 11 条，每条 7 个字面行、191px 高，
+   一屏只看得到两条，右边还空着一半）：一格一行把「标签」当成新的一行用，
+   行高被字段数乘起来；两列之后同样的字段只占一半高度，右边不再空着。
+   横向仍按 label:value 读，语义没变（::before 拿 data-label）。 */
 @media (max-width: 720px) {
   .table thead { display: none; }
-  .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
-  .table tbody tr { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .table, .table tbody { display: block; width: 100%; }
+  .table tbody tr {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px; row-gap: 2px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+  }
   .table tbody tr:hover { background: transparent; }
   .table tbody td {
-    display: flex; align-items: baseline; gap: 8px;
+    display: flex; align-items: baseline; gap: 6px; min-width: 0;
     padding: 1px 0; border: 0; text-align: left !important;
+    overflow-wrap: anywhere; /* cron 表达式、插件名这种长串不许把格子顶出去 */
   }
   .table tbody td::before {
-    content: attr(data-label); flex: none; min-width: 62px;
+    content: attr(data-label); flex: none; min-width: 46px;
     color: var(--dim); font-size: 11.5px;
   }
   .table tbody td:empty { display: none; }
+  /* 整行类的格子：空态/「加载更多」（colspan）和操作按钮（.right）要横跨两列，
+     否则它们只会占左半边，看着像被裁掉。 */
+  .table tbody td[colspan], .table tbody td.right { grid-column: 1 / -1; }
   .table .actions { justify-content: flex-start; margin-top: 6px; }
   .table tbody td.right::before { content: none; }
+  /* 窄屏别再造第二根滚动条：表格自己滚 + 页面再滚，手机上两个手指也分不清滚的是谁。
+     把高度放开，交给页面那一根。 */
+  .panel-body.table-scroll { max-height: none; overflow-y: visible; }
+  /* 搜索框写死 200px，于是「只看失败 / 导出 CSV」被挤到下一行、孤零零一行像没做完。
+     让它可伸缩，三个控件挤回同一行。 */
+  .panel-head .search { flex: 1 1 150px; min-width: 0; }
+  .panel-head .search input { width: 100%; }
 }
 
 /* ---------- 段控 / 滚动条 / 密度微调 ---------- */

@@ -389,14 +389,15 @@ async function main() {
 
   // 收尾：把检查用的渠道/推送删干净（不然它们会跟着后面的事件发真请求、冒黄条），
   // 顺手清掉提示条与告警，后面的用例才不受影响。
+  // 不 awaitPromise：清理是后台动作，等它会拖住 CDP（一次 evaluate 里串了几次写请求）
   await js(
-    "(async()=>{const d=await api('/api/notify');" +
+    "(async()=>{try{const d=await api('/api/notify');" +
     "for(const r of d.routes){await api('/api/notify/routes/'+encodeURIComponent(r.id),{method:'DELETE'}).catch(()=>{});}" +
     "for(const c of d.channels){await api('/api/notify/channels/'+encodeURIComponent(c.id),{method:'DELETE'}).catch(()=>{});}" +
-    "await api('/api/alerts/clear',{method:'POST',body:{}}).catch(()=>{});" +
+    "await api('/api/alerts/clear',{method:'POST',body:{}}).catch(()=>{});}catch(e){}" +
     "document.getElementById('toast').className='toast hidden';" +
-    "document.querySelectorAll('#notices .notice').forEach(n=>n.remove());return 1;})()");
-  await sleep(700);
+    "document.querySelectorAll('#notices .notice').forEach(n=>n.remove());})(); 1");
+  await sleep(2500);
 
   // 主题切换
   const before = await js("document.documentElement.getAttribute('data-theme')");
