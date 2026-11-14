@@ -18,7 +18,7 @@ const state = {
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
   files: [],
-  /** 脚本列表（独立 JS 文件 + 可选 cron）。 */
+  /** 脚本列表（第三方程序 + 可选 cron）。 */
   scripts: [],
   scriptMeta: null,
   /** 通知：铃铛上的未读数 + 列表。 */
@@ -998,6 +998,20 @@ async function groupAct(group, kind) {
   );
   await refresh();
 }
+/** 计划列显示什么：结构化计划渲染成短句，cron 原样显示。 */
+function cronLabel(cron) {
+  if (!cron) return '';
+  const s = String(cron);
+  if (s.startsWith('json:') || s.startsWith('{')) {
+    try {
+      return PanelSchedule.toSentence(JSON.parse(s.replace(/^json:/, '')));
+    } catch {
+      return s;
+    }
+  }
+  return s;
+}
+
 /** 正在改哪条任务（弹窗共用一份）。 */
 let scheduleTarget = null;
 
@@ -1042,8 +1056,17 @@ function openTaskSchedule(t) {
     t.plugin + ' / ' + t.name + '　插件注册的是「' + (t.cron_base || '（无）') + '」';
   // 当前计划 → JSON：认得出来就填表单，认不出来就原样进「表达式」模式
   const cur = t.cron_override || t.cron || '';
-  const back = PanelSchedule.fromCron(cur);
-  schedJson = back.ok ? back.json : { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
+  if (cur.startsWith('json:') || cur.startsWith('{')) {
+    // 结构化计划：直接读 JSON（这是真源，不需要从 cron 反推）
+    try {
+      schedJson = PanelSchedule.normalize(JSON.parse(cur.replace(/^json:/, '')), { convertExpr: false });
+    } catch {
+      schedJson = { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
+    }
+  } else {
+    const back = PanelSchedule.fromCron(cur);
+    schedJson = back.ok ? back.json : { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
+  }
   $('task-schedule-hint').classList.remove('err-text');
   $('task-schedule-hint').textContent = '只换计划，运行历史和暂停状态都保留。';
   $('task-schedule-reset').classList.toggle('hidden', !t.cron_override);
@@ -1285,14 +1308,12 @@ async function submitTaskSchedule() {
     hint.classList.add('err-text');
     return;
   }
-  const ex = PanelSchedule.exportCron(schedJson);
-  if (!ex.ok) {
-    const hint = $('task-schedule-hint');
-    hint.textContent = '面板调度器现在还执行不了这条规则：' + ex.reason;
-    hint.classList.add('err-text');
-    return;
-  }
-  await saveTaskSchedule(ex.cron);
+  // 落库：表达式原样交出去；结构化计划存成 `json:{...}` —— 调度器认得，
+  // 而且**和预览同一份数据**，所以「接下来 5 次」就是实际会跑的时刻。
+  const expr = schedJson.type === 'expr'
+    ? String(schedJson.expr || '').trim()
+    : 'json:' + JSON.stringify(schedJson);
+  await saveTaskSchedule(expr);
 }
 
 async function saveTaskSchedule(expr) {
@@ -1302,7 +1323,9 @@ async function saveTaskSchedule(expr) {
   try {
     await api(taskPath(scheduleTarget, 'schedule'), { method: 'POST', body: { expr } });
     $('task-schedule').classList.add('hidden');
-    notify(expr === null ? '已恢复插件注册的计划' : '计划已改成 ' + expr, 'ok');
+    notify(
+      expr === null ? '已恢复插件注册的计划' : '计划已改成「' + cronLabel(expr) + '」',
+      'ok');
     await refresh();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
@@ -1350,7 +1373,7 @@ function renderTasks() {
     // 插件自己写的一行摘要（set_job_summary）：放在任务名下面，不占新列。
     if (t.summary) nameCell.append(el('div', 'mini-sub', t.summary));
     tr.append(nameCell);
-    const cronCell = td('计划', 'mono', t.pending_adopt ? '（待采纳）' : t.cron);
+    const cronCell = td('计划', 'mono', t.pending_adopt ? '（待采纳）' : cronLabel(t.cron));
     // 第 180 轮：cron 是面板的，插件只给建议。两者不一样时说清楚，并给「采纳」的出口。
     // 第 180 轮：cron 归面板，插件只给建议。两者不一样时**把建议写出来**，
     // 光挂一个 tooltip 等于没提示（截图里看到的就是这样）。
@@ -2094,7 +2117,7 @@ async function showPlugin(name) {
         const main = el('div', 'mini-main');
         const title = el('div', 'mini-title');
         title.append(el('span', '', t.name), taskPill(t));
-        main.append(title, el('div', 'mini-sub', t.cron + ' · 预算 ' + humanMs(t.budget_ms)));
+        main.append(title, el('div', 'mini-sub', cronLabel(t.cron) + ' · 预算 ' + humanMs(t.budget_ms)));
         row.append(main, el('div', 'mini-right', '跑过 ' + t.runs));
         list.append(row);
       }
@@ -2171,7 +2194,7 @@ function renderScripts() {
     tr.append(td("任务名", "strong", s.task || s.name));
     tr.append(td("文件", "mono dim", s.name));
     tr.append(td("运行时", "mono", s.runtime || "node"));
-    tr.append(td("计划", "mono", s.cron || "手动"));
+    tr.append(td("计划", "mono", cronLabel(s.cron) || "手动"));
     tr.append(td("预算", "num", humanMs(s.budget_ms)));
     const lastCell = td("上次运行");
     if (!s.last_run) {
@@ -2216,7 +2239,7 @@ async function openScript(name) {
       ["文件", d.path, true],
       ["运行时", d.runtime || "node"],
       ["大小", humanBytes(d.bytes)],
-      ["计划", d.cron || "手动（只在你点运行时跑）", true],
+      ["计划", cronLabel(d.cron) || "手动（只在你点运行时跑）", true],
       ["预算", humanMs(d.budget_ms)],
       ["下次运行", d.cron && d.enabled ? fmtDateTime(d.next_at) : "—"],
       ["状态", d.cron ? (d.enabled ? "定时中" : "已暂停") : "手动"],
@@ -2370,7 +2393,7 @@ function openNewScript() {
   newScriptTouched = false;
   $("new-script-custom").classList.add("hidden");
   $("new-script-custom").value = "";
-  $("new-script-title").value = "";
+  $("new-script-task-title").value = "";
   $("new-script-cron").value = "";
   newScriptDropdownPicker = (rt) => {
     makeDropdown($("new-script-runtime-box"), SCRIPT_RUNTIMES, rt, (v) => {
@@ -2417,7 +2440,7 @@ async function createScript() {
       body: {
         name,
         runtime,
-        title: $("new-script-title").value.trim(),
+        title: $("new-script-task-title").value.trim(),
         cron: $("new-script-cron").value.trim(),
       },
     });
@@ -4509,7 +4532,7 @@ function guardPluginFrame() {
 const VIEWS = {
   dashboard: ['仪表盘', '引擎运行状态与最近活动'],
   plugins: ['插件', '已加载的插件与启停操作'],
-  scripts: ['脚本', '独立 JS 文件：手动跑或按计划跑'],
+  scripts: ['脚本', '第三方脚本：sh / node / bun / python3 / php / 二进制…，手动跑或按计划跑'],
   tasks: ['任务', '定时计划、预算与熔断状态'],
   runs: ['运行记录', '每次派发的耗时与结果，点开看这一次的日志'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],

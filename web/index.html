@@ -432,7 +432,9 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
           <div class="tab-pane hidden" id="drawer-config"></div>
           <div class="tab-pane hidden" id="drawer-source">
             <div class="script-bar hidden" id="script-bar">
-                <input id="script-title" type="text" placeholder="任务名（选填，运行记录里显示它）" autocomplete="off" />
+                <label class="field-inline"><span>任务名</span>
+                  <input id="script-title" type="text" placeholder="选填，运行记录里显示它" autocomplete="off" />
+                </label>
                 <div id="script-runtime-box" class="dropdown" title="运行时"></div>
               <label class="field-inline"><span>计划</span>
                 <input id="script-cron" type="text" placeholder="留空 = 只手动跑；例：@every 1h / 0 9 * * *" autocomplete="off" />
@@ -480,7 +482,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
         <h2 id="new-script-title">新建脚本</h2>
         <p class="muted">名字就是文件名（带扩展名，如 <code>daily.sh</code>、<code>report.py</code>；不带就按运行时补）。脚本是一次外部进程，面板只管保管与定时，计划现在就能填（选填），之后在编辑抽屉里随时改。</p>
         <input id="new-script-name" class="modal-input" type="text" placeholder="例如 daily.sh" autocomplete="off" />
-        <input id="new-script-title" class="modal-input" type="text" placeholder="任务名（选填；运行记录/日志里显示它）" autocomplete="off" />
+        <input id="new-script-task-title" class="modal-input" type="text" placeholder="任务名（选填；运行记录/日志里显示它）" autocomplete="off" />
         <div class="field-inline" id="new-script-runtime-box"></div>
         <input id="new-script-custom" class="modal-input hidden" type="text" placeholder="自定义命令，如：php（文件路径会拼在最后）" autocomplete="off" />
         <input id="new-script-cron" class="modal-input" type="text" placeholder="计划（选填）：@every 1h / 0 9 * * *；留空 = 只手动跑" autocomplete="off" />
