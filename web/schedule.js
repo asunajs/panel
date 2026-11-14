@@ -679,15 +679,13 @@
       return {
         ok: runs.length > 0,
         runs,
-        jitterNote: jm ? '抖动按 任务ID+这次触发的基准时刻 哈希算出，可复现：实际执行时间与此一致' : '',
+        jitterNote: jm ? '抖动由 任务ID+基准时刻 哈希算出，可复现' : '',
         reason: runs.length ? undefined : '无法预览',
       };
     }
 
     const jMs = parseDur(j.jitter) || 0;
-    const note = jMs
-      ? '抖动按 任务ID+周期 哈希算出，可复现：实际执行时间与此一致'
-      : '';
+    const note = jMs ? '抖动由 任务ID+周期 哈希算出，可复现' : '';
 
     try {
       switch (j.type) {

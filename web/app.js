@@ -1250,7 +1250,7 @@ function renderScheduleForm() {
   if (j.type === 'window') body.append(el('p', 'hint', '窗口内随机本身就是随机，不再叠加抖动。'));
   if (j.type === 'expr') {
     body.append(el('p', 'hint',
-      '表达式本身原样交给调度器、一个字都不改；抖动是单独的修饰符，由调度器按任务 ID 算。'));
+      '表达式原样执行，一个字都不改；抖动是单独的修饰符。'));
   }
   adv.append(body);
   box.append(adv);
