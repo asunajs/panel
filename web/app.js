@@ -4158,8 +4158,33 @@ function migrateBox() {
   const box = el('div', 'migrate-card');
   box.append(el('h3', 'card-label', '从 0.3.x 面板迁移'));
   box.append(el('p', 'settings-note',
-    '搬的是旧库 state 表里的插件状态（账号、定时计划、运行历史），可选连插件配置与脚本。' +
-    '写入前自动做一份快照；重复执行不会重复写。迁完**重启面板**才生效。'));
+    '搬旧库的插件状态（账号、定时抢兑计划）、插件任务（含你改过的计划/暂停/预算）、' +
+    '脚本任务、运行历史、通知渠道，可选连插件配置与脚本文件。' +
+    '写入前自动做一份快照；重复执行不会重复写。迁完**重启面板**才生效。' +
+    '没装 0.4 版的插件，它们的任务会先以占位形式列着，装上后自动接管。'));
+
+  // 迁移内容勾选框（对应后端 Opts 的各项开关）
+  const MIGRATE_OPTS = [
+    ['with_tasks', '任务与脚本任务', true],
+    ['with_runs_history', '运行历史', true],
+    ['with_notify', '通知渠道（迁完默认停用）', true],
+    ['with_plugin_data', '插件配置文件', true],
+    ['with_scripts', '脚本文件目录', true],
+    ['adopt_token', '接过旧令牌（仅当面板还没设口令；有口令则不覆盖）', false],
+  ];
+  const optState = {};
+  const optsRow = el('div', 'actions migrate-opts');
+  for (const [key, label, def] of MIGRATE_OPTS) {
+    optState[key] = def;
+    const lab = el('label', 'check');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = def;
+    cb.addEventListener('change', () => { optState[key] = cb.checked; });
+    lab.append(cb, el('span', '', label));
+    optsRow.append(lab);
+  }
+  box.append(optsRow);
 
   const row = el('div', 'actions migrate-row');
   const input = el('input', 'input migrate-path');
@@ -4188,21 +4213,33 @@ function migrateBox() {
     const go = el('button', 'btn btn-sm btn-primary', '迁移');
     go.type = 'button';
     go.addEventListener('click', () => doApply(c.path));
-    acts.append(pv, go);
+    const ignore = el('button', 'btn btn-sm', '不再提醒');
+    ignore.type = 'button';
+    ignore.title = '这条旧数据的迁移提醒不再出现（要迁移还是可以手动填路径）';
+    ignore.addEventListener('click', async () => {
+      try {
+        await api('/api/migrate/dismiss', { method: 'POST', body: { source: c.db } });
+        item.remove();
+        notify('已忽略：' + c.path);
+      } catch (e) {
+        notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '操作失败'), 'err');
+      }
+    });
+    acts.append(pv, go, ignore);
     item.append(main, acts);
     return item;
   };
 
-  scanBtn.addEventListener('click', async () => {
+  async function runScan(path) {
     clear(list);
     scanBtn.disabled = true;
     try {
-      const q = input.value.trim() ? '?source=' + encodeURIComponent(input.value.trim()) : '';
+      const q = path ? '?source=' + encodeURIComponent(path) : '';
       const d = await api('/api/migrate/scan' + q);
       const cs = d.candidates || [];
       if (!cs.length) {
         list.append(el('p', 'settings-note',
-          '没扫到。把旧面板的数据目录（里面有 panel.db）填到上面的框里再点扫描。'));
+          '没扫到 0.3.x 的旧面板数据。手动装过的话，把旧数据目录（里面有 panel.db）填到上面的框里再点扫描。'));
         return;
       }
       for (const c of cs) list.append(line(c));
@@ -4211,7 +4248,10 @@ function migrateBox() {
     } finally {
       scanBtn.disabled = false;
     }
-  });
+  }
+  scanBtn.addEventListener('click', () => runScan(input.value.trim()));
+  // 卡片一渲染就自动扫（安装时后端会自动检查并提示一次；这里让用户随时能看到候选）
+  runScan('');
 
   async function doPreview(path, item) {
     try {
@@ -4223,11 +4263,25 @@ function migrateBox() {
         '会搬：state ' + (p.namespaces || []).reduce((a, n) => a + n.keys, 0) + ' 个键（' + (ns || '空') + '）· ' +
         '运行记录 ' + p.runs_rows + ' 行（目标已有 ' + p.target_runs + '）· 账号 ' +
         ((p.accounts || []).length) + ' 个' + ((p.orphan_bags || []).length ? '（另有 ' + p.orphan_bags.length + ' 个孤儿袋子默认不搬）' : '')));
+      if ((p.tasks || []).length) {
+        const takeover = p.tasks.filter((x) => x.has_0_4).length;
+        box2.append(el('p', 'settings-note',
+          '插件任务 ' + p.tasks.length + ' 条（0.4 已有同名插件、迁完即接管的 ' + takeover +
+          ' 条；其余是占位，装上 0.4 版后自动接管）· 脚本任务 ' + (p.script_jobs || []).length +
+          ' 条 · 运行历史 ' + (p.runs_history || 0) + ' 条 · 通知渠道 ' + (p.push_channels || []).length + ' 条（迁完默认停用）'));
+      }
+      if ((p.plugins || []).length) {
+        const missing = p.plugins.filter((x) => !x.has_0_4).map((x) => x.name);
+        box2.append(el('p', 'settings-note' + (missing.length ? ' warn-note' : ''),
+          missing.length
+            ? '这些插件还没有 0.4 版，任务先以占位形式列着：' + missing.join('、')
+            : '所有老插件都有 0.4 版，迁移后任务全部接管。'));
+      }
       if ((p.plans || []).length) {
         const on = p.plans.filter((x) => x.enabled).length;
         box2.append(el('p', 'settings-note warn-note',
-          '定时计划 ' + p.plans.length + ' 条（启用 ' + on + ' 条）—— 迁移后它们会按 cron 真的跑。' +
-          '不想带着就跑 CLI 加 --skip-schedules。'));
+          '定时抢兑计划 ' + p.plans.length + ' 条（启用 ' + on + ' 条）—— 迁移后它们会按 cron 真的跑。' +
+          '不想带着就不勾「任务与脚本任务」，或跑 CLI 加 --skip-schedules。'));
       }
       item.append(box2);
     } catch (e) {
@@ -4238,13 +4292,23 @@ function migrateBox() {
   async function doApply(path) {
     if (!(await askConfirm('把这个旧面板的状态搬进当前面板？\n写入前会自动快照；重复执行不会重复写。\n迁完要重启面板才生效。', '迁移'))) return;
     try {
-      const d = await api('/api/migrate/apply', { method: 'POST', body: { source: path } });
+      const d = await api('/api/migrate/apply', {
+        method: 'POST',
+        body: Object.assign({ source: path }, optState),
+      });
       const parts = [
         'state ' + d.state_keys + ' 个键',
         '运行记录 ' + d.runs_rows + ' 行',
       ];
+      if (d.tasks_rows) parts.push('任务 ' + d.tasks_rows + ' 条');
+      if (d.script_jobs_records) parts.push('脚本任务 ' + d.script_jobs_records + ' 个' + (d.script_jobs_missing ? '（' + d.script_jobs_missing + ' 个文件缺失没搬）' : ''));
+      if (d.runs_history_rows) parts.push('历史运行 ' + d.runs_history_rows + ' 条');
+      if (d.notify_channels) parts.push('通知渠道 ' + d.notify_channels + ' 条（默认停用）');
+      if (d.tasks_kept) parts.push(d.tasks_kept + ' 条任务目标里已有、保留了你现在的设置');
+      if (d.script_jobs_kept) parts.push(d.script_jobs_kept + ' 个脚本文件已有、没覆盖');
+      if (d.script_jobs_bad_name) parts.push(d.script_jobs_bad_name + ' 个脚本文件名不合 0.4 规则没搬');
       if (d.plugin_data_files) parts.push('插件配置 ' + d.plugin_data_files + ' 个文件');
-      if (d.scripts_files) parts.push('脚本 ' + d.scripts_files + ' 个文件');
+      if (d.scripts_files) parts.push('脚本文件 ' + d.scripts_files + ' 个');
       if (d.adopted_token) parts.push('旧令牌已接过');
       notify('迁移完成：' + parts.join('、') + (d.snapshot ? '（快照 ' + d.snapshot.split('/').pop() + '）' : '') + '。重启面板后生效', 'ok');
     } catch (e) {
