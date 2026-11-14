@@ -73,3 +73,21 @@ fn stale_notice_says_how_many_and_where_to_look() {
     assert!(n.title.contains("没有跑完"), "{}", n.title);
     assert!(n.body.contains("status=error"), "正文要说去哪看: {}", n.body);
 }
+
+/// 「有没有界面」只增不减：一条注册比 Loaded 晚到，也不能把已记下的 1 抹成 0。
+///
+/// 第 180 轮实测：mcloud 的 sidebar 注册被重启打断，库里停在 0|0，
+/// 下次启动就把有界面的插件按需省掉了 —— 界面直接打不开。
+#[tokio::test]
+async fn plugin_surface_flags_never_go_back_to_zero() {
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    note_surface(&db, "uiface", true, true).await;
+    note_surface(&db, "uiface", false, false).await;
+    let got = plugin_surfaces(&db).await;
+    assert_eq!(got.get("uiface"), Some(&(true, true)), "记下的 1 不能被后到的 0 抹掉");
+
+    // 从没有过界面：照旧记 0（懒加载判据要用）
+    note_surface(&db, "crononly", false, false).await;
+    let got = plugin_surfaces(&db).await;
+    assert_eq!(got.get("crononly"), Some(&(false, false)));
+}
