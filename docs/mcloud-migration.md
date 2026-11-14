@@ -63,8 +63,9 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
 ## 5. 迁移的形态（已定）
 
 - 插件源码继续留在 `workspace/mcloud-plugin`（它是 TS 工程，有测试和构建）。
-- 新增 `src/panelllrt/hostApi.ts`（适配层）+ 构建脚本开关，产物直接落到
-  `panel-llrt/plugins/` 与 `panel-llrt/plugins/mcloud.webui/`。
+- 新增 `src/panelllrt/hostApi.ts`（适配层）+ 构建脚本开关，产物落到插件项目自己的
+  `dist/panel-llrt/`（`mcloud*.js` + `mcloud.webui/`），再由 `npm run deploy:panel` 装进实例 ——
+  **面板仓不接产物**（2026-11-14 起；原先那 5 个文件已从 `panel-llrt/plugins/` 撤掉）。
 - **不在面板里写旧契约垫片**：面板只多「同步 op」这一种能力，适配全在插件侧。
 
 ## 6. 现状（2026-11-12 凌晨）
