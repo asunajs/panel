@@ -1888,3 +1888,15 @@ select option { background: var(--surface); color: var(--fg); }
    撑满会紧贴卡片右缘，窄窗口下看着像被裁掉一半。 */
 #sched-form .sched-narrow > input.modal-input { flex: 0 0 6.5em; }
 #sched-form .sched-narrow > select.modal-input { flex: 0 0 6.5em; }
+
+/* 计划表单里所有文本块都不许越过卡片内容区：
+   长句（提示/短句）在窄窗口下容易顶到右缘，看起来像溢出去一截。
+   min-width:0 是因为它们是 flex item，默认 min-width:auto 会撑破容器。 */
+#sched-form > * { min-width: 0; }
+#sched-form p.hint,
+#sched-form .sched-sentence,
+#sched-form .sched-preview > p {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
