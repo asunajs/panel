@@ -160,9 +160,26 @@ else
   ok 'register_handler 的 WRAP 是显式形参包装（手动任务预算 0.4.1 靠它传进去）'
 fi
 
+# pitfalls §100：系统 confirm()/alert()/prompt() 不许回来 —— 确认/弹窗一律自绘
+# （docs/ui.md 控件表；面板有 askConfirm，#confirm 弹窗，Esc/遮罩=取消）。
+# askConfirm / settleConfirm 是驼峰，不会被下面的小写匹配误伤。
+if [ "$(grep -cE '(^|[^a-zA-Z_."])confirm\(|window\.confirm\(|(^|[^a-zA-Z_.])alert\(|(^|[^a-zA-Z_.])prompt\(' web/app.js)" != "0" ]; then
+  bad 'web/app.js 里出现了系统 confirm()/alert()/prompt() —— 换 askConfirm（pitfalls §100）'
+else
+  ok '确认/弹窗全部自绘（askConfirm），没有系统对话框'
+fi
+
+# pitfalls §101：代码编辑器的选中背景必须半透明 —— 它画在高亮层上面，实底会把语法
+# 配色盖没（用户看到「没有字的浅蓝块」）。
+if ! grep -F 'textarea.editor::selection' web/app.css | grep -q 'transparent'; then
+  bad '编辑器 ::selection 不是半透明 —— 实底会盖没高亮层的字（pitfalls §101）'
+else
+  ok '编辑器选中背景半透明，高亮层的字透得出来'
+fi
+
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 17 条坑的守卫全过"
+  echo "ok: 19 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi
