@@ -1001,17 +1001,298 @@ async function groupAct(group, kind) {
 /** 正在改哪条任务（弹窗共用一份）。 */
 let scheduleTarget = null;
 
+// ---------------------------------------------------------------- 计划表单（第 110 轮）
+//
+// 口径（见 web/schedule.js 头注与 docs/schedule.md）：
+//   · **JSON 是唯一真源**：表单写 JSON，短句/预览都从 JSON 派生；
+//   · 短句是渲染结果，不提供编辑入口；
+//   · 用户默认不写表达式；表达式只是「频率类型」里的一档，原样交给调度器。
+// 表单值就是 JSON 本身，这里没有额外的转换层。
+let schedJson = null;
+
+/** 表单里可用的类型（顺序即下拉顺序）。 */
+function schedTypes() {
+  return [
+    ['interval', '每隔一段时间'],
+    ['daily', '每天'],
+    ['weekly', '每周'],
+    ['monthly', '每月'],
+    ['window', '每天窗口内随机'],
+    ['once', '仅执行一次'],
+    ['expr', '表达式（cron / @every）'],
+  ];
+}
+
+function schedDefault(type) {
+  const tz = PanelSchedule.defaultTimezone();
+  switch (type) {
+    case 'interval': return { type, every: 1, unit: 'hour', anchor: null, jitter: null, timezone: tz };
+    case 'daily': return { type, at: '09:00', jitter: null, timezone: tz };
+    case 'weekly': return { type, days: ['mon'], randomPick: false, at: '09:00', jitter: null, timezone: tz };
+    case 'monthly': return { type, day: 1, randomPick: false, at: '09:00', jitter: null, timezone: tz };
+    case 'window': return { type, every: 'day', between: ['09:00', '18:00'], count: 1, timezone: tz };
+    case 'once': return { type, at: new Date(Date.now() + 3600e3).toISOString().slice(0, 16), jitter: null, timezone: tz };
+    default: return { type: 'expr', expr: '', timezone: tz };
+  }
+}
+
 function openTaskSchedule(t) {
   scheduleTarget = t;
   $('task-schedule-what').textContent =
     t.plugin + ' / ' + t.name + '　插件注册的是「' + (t.cron_base || '（无）') + '」';
-  $('task-schedule-expr').value = t.cron;
+  // 当前计划 → JSON：认得出来就填表单，认不出来就原样进「表达式」模式
+  const cur = t.cron_override || t.cron || '';
+  const back = PanelSchedule.fromCron(cur);
+  schedJson = back.ok ? back.json : { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
   $('task-schedule-hint').classList.remove('err-text');
-  $('task-schedule-hint').innerHTML =
-    '5 段（分 时 日 月 周）、6 段（秒 分 时 日 月 周）或 <code>@every 30s</code>。只换计划，运行历史和暂停状态都保留。';
+  $('task-schedule-hint').textContent = '只换计划，运行历史和暂停状态都保留。';
   $('task-schedule-reset').classList.toggle('hidden', !t.cron_override);
+  renderScheduleForm();
   $('task-schedule').classList.remove('hidden');
-  setTimeout(() => $('task-schedule-expr').select(), 30);
+}
+
+/** 一行「标签 + 控件」。 */
+function schedRow(label, ...ctl) {
+  const row = el('label', 'field-inline');
+  row.append(el('span', 'muted', label));
+  for (const c of ctl) row.append(c);
+  return row;
+}
+
+function schedSelect(opts, value, onPick) {
+  const s = el('select', 'modal-input');
+  for (const [v, t] of opts) {
+    const o = el('option', '', t);
+    o.value = v;
+    if (String(v) === String(value)) o.selected = true;
+    s.append(o);
+  }
+  s.addEventListener('change', () => onPick(s.value));
+  return s;
+}
+
+function schedTime(value, onPick, allowEmpty) {
+  const i = el('input', 'modal-input');
+  i.type = 'time';
+  i.value = value || '';
+  if (allowEmpty) i.dataset.allowEmpty = '1';
+  i.addEventListener('change', () => onPick(i.value || null));
+  return i;
+}
+
+function schedNumber(value, min, onPick) {
+  const i = el('input', 'modal-input');
+  i.type = 'number';
+  i.min = String(min);
+  i.step = '1';
+  i.value = String(value);
+  i.addEventListener('change', () => onPick(Number(i.value)));
+  return i;
+}
+
+/** 重建整个表单（改动后重画，代价很小：十几个节点）。 */
+function renderScheduleForm() {
+  const box = $('sched-form');
+  clear(box);
+  const j = schedJson;
+
+  // 顶层：频率类型（唯一的必选项）
+  box.append(schedRow('执行频率',
+    schedSelect(schedTypes(), j.type, (v) => { schedJson = schedDefault(v); renderScheduleForm(); })));
+
+  const set = (patch) => { Object.assign(schedJson, patch); refreshSchedDerived(); };
+
+  if (j.type === 'interval') {
+    box.append(schedRow('每隔',
+      schedNumber(j.every, 1, (v) => set({ every: v })),
+      schedSelect([['minute', '分钟'], ['hour', '小时'], ['day', '天'], ['week', '周']], j.unit, (v) => set({ unit: v }))));
+    box.append(schedRow('锚点（可空）', schedTime(j.anchor, (v) => set({ anchor: v }), true)));
+  } else if (j.type === 'daily') {
+    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
+  } else if (j.type === 'weekly') {
+    const wrap = el('div', 'chips');
+    for (const d of PanelSchedule.DAYS) {
+      const on = (j.days || []).includes(d);
+      const b = el('button', 'chip' + (on ? ' chip-on' : ''), PanelSchedule.DAY_LABEL[d]);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        const cur = new Set(j.days || []);
+        if (cur.has(d)) cur.delete(d); else cur.add(d);
+        schedJson.days = PanelSchedule.DAYS.filter((x) => cur.has(x));
+        renderScheduleForm();
+      });
+      wrap.append(b);
+    }
+    box.append(schedRow('星期', wrap));
+    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
+  } else if (j.type === 'monthly') {
+    const opts = [];
+    for (let d = 1; d <= 31; d++) opts.push([d, d + ' 号']);
+    opts.push(['last', '最后一天']);
+    box.append(schedRow('日期', schedSelect(opts, j.day, (v) => set({ day: v === 'last' ? 'last' : Number(v) }))));
+    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
+  } else if (j.type === 'window') {
+    const b = j.between || ['09:00', '18:00'];
+    box.append(schedRow('周期',
+      schedSelect([['day', '每天'], ['week', '每周']], j.every, (v) => set({ every: v }))));
+    box.append(schedRow('窗口',
+      schedTime(b[0], (v) => set({ between: [v || '09:00', b[1]] })),
+      el('span', 'muted', '到'),
+      schedTime(b[1], (v) => set({ between: [b[0], v || '18:00'] }))));
+    box.append(schedRow('次数', schedNumber(j.count, 1, (v) => set({ count: v }))));
+  } else if (j.type === 'once') {
+    const i = el('input', 'modal-input');
+    i.type = 'datetime-local';
+    i.value = String(j.at || '').slice(0, 16);
+    i.addEventListener('change', () => set({ at: i.value }));
+    box.append(schedRow('时刻', i));
+  } else {
+    // 表达式：多行文本框 + 识别状态；未识别**不阻断保存**
+    const ta = el('textarea', 'modal-input mono');
+    ta.rows = 2;
+    ta.value = j.expr || '';
+    ta.placeholder = '0 9 * * * ／ 30 8 * * 1,3,5 ／ @every 3d ／ @daily';
+    ta.addEventListener('input', () => { schedJson.expr = ta.value; refreshSchedDerived(); });
+    box.append(schedRow('表达式', ta));
+    const st = el('p', 'hint');
+    st.id = 'sched-expr-state';
+    box.append(st);
+  }
+
+  // 高级选项（折叠，默认收起）：抖动 + 随机选择
+  const adv = el('details', 'sched-adv');
+  adv.append(el('summary', '', '高级选项'));
+  const body = el('div');
+  if (j.type !== 'window') {
+    const jm = PanelSchedule.parseDur(j.jitter);
+    const on = !!jm;
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = on;
+    cb.addEventListener('change', () => {
+      schedJson.jitter = cb.checked ? '10m' : null;
+      renderScheduleForm();
+    });
+    const lab = el('label', 'field-inline');
+    lab.append(cb, el('span', '', '抖动（±）'));
+    body.append(lab);
+    if (on) {
+      const num = el('input', 'modal-input');
+      num.type = 'number';
+      num.min = '1';
+      num.value = String(jm % 60e3 === 0 ? jm / 60e3 : jm / 1000);
+      num.addEventListener('change', () => {
+        const unit = jm % 60e3 === 0 ? 60e3 : 1000;
+        schedJson.jitter = PanelSchedule.durToStr(Math.max(1, Number(num.value)) * unit) || '1m';
+        renderScheduleForm();
+      });
+      const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']],
+        jm % 3600e3 === 0 ? 'h' : jm % 60e3 === 0 ? 'm' : 's',
+        (u) => {
+          const k = { m: 60e3, s: 1000, h: 3600e3 }[u];
+          schedJson.jitter = PanelSchedule.durToStr(Math.max(1, Math.round(jm / k)) * k) || '1m';
+          renderScheduleForm();
+        });
+      body.append(schedRow('幅度', num, unitSel));
+    }
+  }
+  if (j.type === 'weekly' || j.type === 'monthly') {
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !!j.randomPick;
+    cb.addEventListener('change', () => { schedJson.randomPick = cb.checked; renderScheduleForm(); });
+    const lab = el('label', 'field-inline');
+    lab.append(cb, el('span', '', j.type === 'weekly' ? '每周从所选星期里随机挑一天' : '每月随机挑一天'));
+    body.append(lab);
+  }
+  if (j.type === 'window') body.append(el('p', 'hint', '窗口内随机本身就是随机，不再叠加抖动。'));
+  adv.append(body);
+  box.append(adv);
+
+  // 短句（只读渲染）
+  const sent = el('p', 'sched-sentence');
+  sent.id = 'sched-sentence';
+  box.append(sent);
+
+  // 预览（接下来 5 次）
+  const pv = el('div', 'sched-preview');
+  pv.id = 'sched-preview';
+  box.append(pv);
+
+  refreshSchedDerived();
+}
+
+/** 短句 + 预览 + 字段级提示：改一个控件就重画这三块。 */
+function refreshSchedDerived() {
+  const sent = $('sched-sentence');
+  if (sent) sent.textContent = PanelSchedule.toSentence(schedJson);
+
+  const box = $('sched-preview');
+  if (box) {
+    clear(box);
+    const tid = scheduleTarget ? scheduleTarget.plugin + '/' + scheduleTarget.name : 'preview';
+    const r = PanelSchedule.nextRuns(schedJson, 5, { taskId: tid });
+    box.append(el('p', 'muted', '接下来 5 次执行'));
+    if (r.ok) {
+      const ul = el('ol', 'sched-runs');
+      for (const ms of r.runs) {
+        const li = el('li', '', new Date(ms).toLocaleString('zh-CN', { hour12: false }));
+        ul.append(li);
+      }
+      box.append(ul);
+      if (r.jitterNote) box.append(el('p', 'hint', r.jitterNote));
+    } else {
+      box.append(el('p', 'hint', r.reason || '无法预览'));
+    }
+  }
+
+  // 表达式模式：识别状态
+  const st = $('sched-expr-state');
+  if (st) {
+    const ok = PanelSchedule.parseCron(schedJson.expr);
+    st.textContent = ok ? '已识别' : '未识别（将原样交给调度器，不阻断保存）';
+    st.classList.toggle('err-text', !ok);
+  }
+
+  // 字段级提示
+  const hint = $('task-schedule-hint');
+  if (hint) {
+    const vs = PanelSchedule.validate(schedJson);
+    const bad = vs.filter((v) => v.level === 'error');
+    const warn = vs.filter((v) => v.level === 'warn');
+    if (bad.length) {
+      hint.textContent = bad.map((v) => v.message).join('；');
+      hint.classList.add('err-text');
+    } else if (warn.length) {
+      hint.textContent = warn.map((v) => v.message).join('；');
+      hint.classList.remove('err-text');
+    } else {
+      hint.textContent = '只换计划，运行历史和暂停状态都保留。';
+      hint.classList.remove('err-text');
+    }
+  }
+}
+
+/** 保存：把 JSON 落成调度表达式。对不上就明说，绝不塞一个近似值。 */
+async function submitTaskSchedule() {
+  const vs = PanelSchedule.validate(schedJson).filter((v) => v.level === 'error');
+  if (vs.length) { refreshSchedDerived(); return; }
+  const tid = scheduleTarget ? scheduleTarget.plugin + '/' + scheduleTarget.name : 'preview';
+  const pv = PanelSchedule.nextRuns(schedJson, 5, { taskId: tid });
+  if (!pv.ok && schedJson.type !== 'expr') {
+    const hint = $('task-schedule-hint');
+    hint.textContent = pv.reason || '该规则不会触发，请检查';
+    hint.classList.add('err-text');
+    return;
+  }
+  const ex = PanelSchedule.exportCron(schedJson);
+  if (!ex.ok) {
+    const hint = $('task-schedule-hint');
+    hint.textContent = '面板调度器现在还执行不了这条规则：' + ex.reason;
+    hint.classList.add('err-text');
+    return;
+  }
+  await saveTaskSchedule(ex.cron);
 }
 
 async function saveTaskSchedule(expr) {
@@ -4897,20 +5178,9 @@ function bind() {
     if (f) await importBackup(f);
   });
   $('new-script-ok').addEventListener('click', createScript);
-  $('task-schedule-ok').addEventListener('click', () => {
-    const expr = $('task-schedule-expr').value.trim();
-    if (!expr) {
-      const hint = $('task-schedule-hint');
-      hint.textContent = '表达式不能为空；要回到插件注册的那条请点「恢复默认」。';
-      hint.classList.add('err-text');
-      return;
-    }
-    saveTaskSchedule(expr);
-  });
+  // 第 110 轮：表单负责写 JSON，这里只负责把 JSON 落成调度表达式（见 submitTaskSchedule）
+  $('task-schedule-ok').addEventListener('click', submitTaskSchedule);
   $('task-schedule-reset').addEventListener('click', () => saveTaskSchedule(null));
-  $('task-schedule-expr').addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') $('task-schedule-ok').click();
-  });
   $('new-script-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createScript(); }
   });
