@@ -1829,15 +1829,29 @@ async function loadScripts() {
   }
 }
 
+// 脚本运行时（2026-11-14）：脚本 = 第三方程序，面板只保管 + 定时 + 收输出。
+// 预设之外的值（php / deno run -A…）是自定义命令串，文件路径拼在最后。
+const SCRIPT_RUNTIMES = [
+  { value: "sh", label: "sh（shell 脚本）" },
+  { value: "node", label: "node（js/ts；ts 走 --experimental-strip-types）" },
+  { value: "bun", label: "bun（js/ts 原生）" },
+  { value: "python3", label: "python3" },
+  { value: "php", label: "php" },
+  { value: "bin", label: "直接执行（二进制，请上传）" },
+  { value: "@custom", label: "自定义命令…" },
+];
+let newScriptRuntime = "sh";
+let drawerScriptRuntime = "node";
+
 function renderScripts() {
   const body = $("scripts-body");
   if (!body) return;
   const q = state.q.scripts || "";
-  const rows = state.scripts.filter((s) => matches(s.name, q) || matches(s.cron, q));
+  const rows = state.scripts.filter((s) => matches(s.name, q) || matches(s.task || s.name, q) || matches(s.cron, q));
   $("scripts-count").textContent = state.scripts.length;
   clear(body);
   if (!state.scripts.length) {
-    body.append(rowMessage("还没有脚本", 6, "点「新建脚本」写一个：跑一次就结束，也可以填计划定时跑"));
+    body.append(rowMessage("还没有脚本", 6, "点「上传」放一个第三方脚本（js/ts/py/sh/php/二进制…），或「新建脚本」写一个；排程在「计划」里填"));
     return;
   }
   if (!rows.length) {
@@ -1846,7 +1860,9 @@ function renderScripts() {
   }
   for (const s of rows) {
     const tr = el("tr");
-    tr.append(td("名字", "strong", s.name));
+    tr.append(td("任务名", "strong", s.task || s.name));
+    tr.append(td("文件", "mono dim", s.name));
+    tr.append(td("运行时", "mono", s.runtime || "node"));
     tr.append(td("计划", "mono", s.cron || "手动"));
     tr.append(td("预算", "num", humanMs(s.budget_ms)));
     const lastCell = td("上次运行");
@@ -1888,14 +1904,16 @@ async function openScript(name) {
     const d = await api("/api/scripts/" + encodeURIComponent(name));
     clear(body);
     body.append(kvList([
+      ["任务名", d.task || d.name],
       ["文件", d.path, true],
+      ["运行时", d.runtime || "node"],
       ["大小", humanBytes(d.bytes)],
       ["计划", d.cron || "手动（只在你点运行时跑）", true],
       ["预算", humanMs(d.budget_ms)],
       ["下次运行", d.cron && d.enabled ? fmtDateTime(d.next_at) : "—"],
       ["状态", d.cron ? (d.enabled ? "定时中" : "已暂停") : "手动"],
     ]));
-    body.append(el("p", "settings-note", "脚本每次运行都是新的 Context：没有常驻状态，跑完就扔。运行记录在「运行记录」页（插件列显示 @script）。"));
+    body.append(el("p", "settings-note", "脚本是一次外部进程（runtime 见上）：面板只保管、定时、收 stdout/stderr 和退出码，没有 host-api。stdout 进日志 info，stderr 标 error，都带这次 run；退出码非 0 = 失败。"));
     const ops = el("div", "actions");
     const mk = (label, fn, danger) => {
       const b = el("button", "btn btn-sm" + (danger ? " btn-danger" : ""), label);
@@ -1925,11 +1943,37 @@ async function openScriptSource(name) {
   $("src-error").classList.add("hidden");
   try {
     const d = await api("/api/scripts/" + encodeURIComponent(name));
+    drawerScriptRuntime = d.runtime || "node";
+    // script-bar 上的运行时下拉：预设 + 当前值（自定义命令原样展示，可改回预设）
+    const opts = SCRIPT_RUNTIMES.filter((r) => r.value !== "@custom" && r.value !== "bin");
+    if (!opts.some((o) => o.value === drawerScriptRuntime)) {
+      opts.unshift({ value: drawerScriptRuntime, label: "自定义: " + drawerScriptRuntime });
+    }
+    makeDropdown($("script-runtime-box"), opts, drawerScriptRuntime, (v) => { drawerScriptRuntime = v; });
     // 和插件源码共用同一个 #src-text：高亮层必须走 setValue，否则它不会重画
     // （第 177 轮发现：直接赋值 value 时，行号与高亮还停在上一个插件的内容上）
-    const hl = window.PanelHL ? window.PanelHL.attach($("src-text"), { lang: "js" }) : null;
+    const lang = { js: "js", mjs: "js", cjs: "js", ts: "js", mts: "js", cts: "js", py: "python", sh: "bash", bash: "bash", php: "php" }[
+      (name.split(".").pop() || "").toLowerCase()
+    ] || "js";
+    const hl = window.PanelHL ? window.PanelHL.attach($("src-text"), { lang }) : null;
+    $("src-save").disabled = false;
+    $("src-text").disabled = false;
+    if (d.binary) {
+      // 二进制：编辑器里显示不了也不该显示（乱码无意义）—— 给一句「重新上传替换」
+      if (hl) hl.setValue("");
+      $("src-text").value = "";
+      $("src-text").disabled = true;
+      $("src-save").disabled = true;
+      $("script-cron").value = d.cron || "";
+      $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
+      $("script-enabled").checked = !!d.enabled;
+      $("src-meta").textContent = d.path + " · " + humanBytes(d.bytes) + " · 二进制文件";
+      srcError("这是二进制文件，不能在编辑器里改文本 —— 重新上传同名文件替换（cron / 运行时照常可改）");
+      return;
+    }
     if (hl) hl.setValue(d.source);
     else $("src-text").value = d.source;
+    $("script-title").value = d.title || "";
     $("script-cron").value = d.cron || "";
     $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
     $("script-enabled").checked = !!d.enabled;
@@ -1950,6 +1994,8 @@ async function saveScriptSource() {
       method: "PUT",
       body: {
         source: $("src-text").value,
+        runtime: drawerScriptRuntime,
+        title: $("script-title").value.trim(),
         cron: $("script-cron").value.trim(),
         budget_ms: Math.max(1, Math.round(seconds)) * 1000,
         enabled: $("script-enabled").checked,
@@ -1999,6 +2045,14 @@ function openNewScript() {
   $("new-script").classList.remove("hidden");
   $("new-script-hint").classList.add("hidden");
   $("new-script-name").value = "";
+  newScriptRuntime = "sh";
+  $("new-script-custom").classList.add("hidden");
+  $("new-script-custom").value = "";
+  $("new-script-title").value = "";
+  makeDropdown($("new-script-runtime-box"), SCRIPT_RUNTIMES, newScriptRuntime, (v) => {
+    newScriptRuntime = v;
+    $("new-script-custom").classList.toggle("hidden", v !== "@custom");
+  });
   setTimeout(() => $("new-script-name").focus(), 30);
 }
 
@@ -2010,10 +2064,15 @@ async function createScript() {
     showHint("名字只允许字母、数字、- _ .，且不能含 ..");
     return;
   }
+  let runtime = newScriptRuntime;
+  if (runtime === "@custom") {
+    runtime = $("new-script-custom").value.trim();
+    if (!runtime) { showHint("自定义命令不能为空（例：php；文件路径会拼在最后）"); return; }
+  }
   const btn = $("new-script-ok");
   btn.disabled = true;
   try {
-    await api("/api/scripts", { method: "POST", body: { name } });
+    await api("/api/scripts", { method: "POST", body: { name, runtime, title: $("new-script-title").value.trim() } });
     $("new-script").classList.add("hidden");
     notify("已创建 " + name);
     await loadScripts();
@@ -4987,7 +5046,7 @@ async function uploadFile(inputId, url, okPrefix) {
       const stem = name.replace(/\.js$/i, '');
       const hit =
         kind === 'script'
-          ? state.scripts.find((s) => s.name === stem)
+          ? state.scripts.find((s) => s.name === name)
           : state.files.find((f) => f.name === stem);
       if (hit) {
         const choice = await askClash({

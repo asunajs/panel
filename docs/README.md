@@ -24,7 +24,7 @@
 **2026-11-12：面板开始「自己管自己」** —— 插件源码可以在界面里读/写/新建/删除
 （保存 = 写盘 → 重载，失败自动回滚），配置可以在设置页直接改并**热生效**（不用重启），
 设置页拆成常规 / 配置 / 安全 / 数据四个 tabs。
-**同一天还补了两块**：脚本（独立 `.js`，手动跑或按 `cron` 跑，运行记录/日志复用现有两张表）
+**同一天还补了两块**：脚本（2026-11-14 起是**第三方程序**：sh/node/bun/python3/二进制/自定义命令，面板只保管+定时+收输出，见 [scripts.md](scripts.md)）
 和开机自启动（`panel service print|install|uninstall|status`）。
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
 契约见 [plugins.md](plugins.md)。
@@ -65,6 +65,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [engine.md](engine.md) | LLRT 嵌入形态、隔离模型、两条预算、取消归属、JS 通道、定时器坑、外部进程插件为什么不做的清单 |
 | [host-api.md](host-api.md) | async host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
 | [plugins.md](plugins.md) | 插件生命周期（加载/重载/停用/卸载/删除各保住什么）、自带界面与三条路由、上传（zip 与路径逃逸）、与旧面板的对照 |
+| [scripts.md](scripts.md) | 脚本 = 第三方程序：运行时表（sh/node/bun/python3/bin/自定义命令）、面板只保管+定时+收输出、护栏与迁移 |
 | [scheduler.md](scheduler.md) | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
 | [api.md](api.md) | 请求体/查询参数（多余或写错一律 400）、CSV 导出、令牌与会话 |
 | [ui.md](ui.md) | 控制台形态与设计令牌、零构建约束、界面门禁（`scripts/ui-check.mjs` / `ui-e2e.mjs`） |

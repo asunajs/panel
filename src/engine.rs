@@ -354,14 +354,6 @@ impl Plugin {
     ///
     /// 脚本是一次性的（跑完就扔），没有 dispatch 那层预算保护，
     /// 所以死线必须在这里装 —— 否则一个死循环脚本能把面板拖死。
-    pub async fn load_with_budget(
-        source: &str,
-        handle: HostHandle,
-        budget_ms: u64,
-    ) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, Some(budget_ms), None).await
-    }
-
     async fn load_inner(
         source: &str,
         handle: HostHandle,

@@ -222,7 +222,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `config_store.rs` | 配置的**热快照**（`RwLock<Arc<str>>`）：写入侧序列化一次，`host.config()` 只 clone 一个 `Arc`。界面保存后插件立刻读到新值，不用重启 |
 | `notify.rs` | 通知：铃铛表 + 外部渠道（webhook / SMTP）。先落 `notify_outbox` 再投递，失败按 1m/5m/15m/1h/6h 退避、5 次放弃且留在表里可手动重试。渠道配置在 config.json 的 `notify` 键（见 [ops.md](ops.md)） |
 | `service.rs` | 开机自启动：`panel service print\|install\|uninstall\|status`，生成 launchd plist / systemd --user unit（绝对路径、RunAtLoad+KeepAlive / Restart=always），日志落 `data/` |
-| `scripts.rs` | 脚本：独立 `.js` + 记录里的 cron；每次运行新建 Context、带墙钟死线（`Plugin::load_with_budget`）；注册任务会直接报错；15 秒粒度排程循环 |
+| `scripts.rs` | 脚本：**第三方程序**（sh/node/bun/python3/bin/自定义命令，2026-11-14 起不进引擎）——起子进程、收 stdout/stderr 与退出码；记录里的 cron + 15 秒粒度排程循环；详见 [scripts.md](scripts.md) |
 | `smtp.rs` | SMTP 客户端（移植自基线）：EHLO / STARTTLS / AUTH / MAIL / RCPT / DATA，RFC 2047 头编码、base64 正文、`ca_file` 追加信任锚。阻塞实现，跑在 blocking 池上（占住 sync_bridge 那条线程的话外层超时就触发不了） |
 | `ratelimit.rs` | 令牌桶限流，**只挡两类**：登录（PBKDF2 放大）与写接口。按**客户端 IP** 分桶（不是 IP:端口 —— 每次请求源端口都不同，带上端口等于每个请求一个新桶，限流器变纯装饰，这个坑第一版真踩了）。桶数量有上界，超了清掉补满的 |
 | `backup.rs` | 备份/恢复的**一份实现两个入口**：HTTP（明文 JSON，界面按钮）与 CLI（`keygen` / `backup --encrypt-to` / `restore --secret`）。恢复只增/覆盖不删；配置先校验再落盘 |
@@ -400,7 +400,8 @@ cargo test 216 passed
 
 ## JS 执行通道（`src/jsslots.rs`）
 
-插件 dispatch 和脚本**共用**一套并发名额。这一篇说清为什么需要它、上限怎么定、满了会怎样。
+**插件 dispatch 专用**（脚本 2026-11-14 起改外部进程，不再占 JS 名额 —— 见 [scripts.md](scripts.md)）。
+这一篇说清为什么需要它、上限怎么定、满了会怎样。
 
 ### 为什么需要
 

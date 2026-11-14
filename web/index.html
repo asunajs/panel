@@ -131,8 +131,8 @@
               <header class="panel-head">
                 <h2>脚本</h2><span class="chip" id="scripts-count">0</span>
                 <div class="head-actions">
-                  <button class="btn" id="script-upload-btn" type="button" title="上传 .js / .mjs 或 .zip">上传</button>
-                  <input id="script-upload" type="file" accept=".js,.mjs,.zip" hidden />
+                  <button class="btn" id="script-upload-btn" type="button" title="上传脚本：js / ts / py / sh / php / 二进制…或 .zip">上传</button>
+                  <input id="script-upload" type="file" accept=".js,.mjs,.cjs,.ts,.mts,.py,.sh,.bash,.php,.zip" hidden />
                   <button class="btn btn-primary" id="script-new" type="button">新建脚本</button>
                   <label class="search"><span class="sr-only">搜索脚本</span>
                     <span class="search-box">
@@ -432,6 +432,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
           <div class="tab-pane hidden" id="drawer-config"></div>
           <div class="tab-pane hidden" id="drawer-source">
             <div class="script-bar hidden" id="script-bar">
+                <input id="script-title" type="text" placeholder="任务名（选填，运行记录里显示它）" autocomplete="off" />
+                <div id="script-runtime-box" class="dropdown" title="运行时"></div>
               <label class="field-inline"><span>计划</span>
                 <input id="script-cron" type="text" placeholder="留空 = 只手动跑；例：@every 1h / 0 9 * * *" autocomplete="off" />
               </label>
@@ -476,8 +478,11 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       <div class="modal-backdrop" data-close="1"></div>
       <div class="modal-card">
         <h2 id="new-script-title">新建脚本</h2>
-        <p class="muted">名字就是文件名：<code>scripts/&lt;名字&gt;.js</code>。脚本跑一次就结束，排程在「计划」里填。</p>
-        <input id="new-script-name" class="modal-input" type="text" placeholder="例如 daily-report" autocomplete="off" />
+        <p class="muted">名字就是文件名（带扩展名，如 <code>daily.sh</code>、<code>report.py</code>；不带就按运行时补）。脚本是一次外部进程，面板只管保管与定时，排程在「计划」里填。</p>
+        <input id="new-script-name" class="modal-input" type="text" placeholder="例如 daily.sh" autocomplete="off" />
+        <input id="new-script-title" class="modal-input" type="text" placeholder="任务名（选填；运行记录/日志里显示它）" autocomplete="off" />
+        <div class="field-inline" id="new-script-runtime-box"></div>
+        <input id="new-script-custom" class="modal-input hidden" type="text" placeholder="自定义命令，如：php（文件路径会拼在最后）" autocomplete="off" />
         <p class="hint hidden" id="new-script-hint"></p>
         <div class="modal-actions">
           <button class="btn" type="button" data-close="1">取消</button>

@@ -83,8 +83,10 @@ fn ext_lower(path: &Path) -> String {
 fn is_script(kind: Kind, path: &Path) -> bool {
     match kind {
         Kind::Plugins => ext_lower(path) == "js",
-        // 面板只跑 JS（见 src/scripts.rs）：收下 .py/.sh 只会变成「传上去了但跑不了」。
-        Kind::Scripts => matches!(ext_lower(path).as_str(), "js" | "mjs"),
+        // 脚本 = 第三方程序（2026-11-14）：扩展名不设限 —— js/py/ts/php/sh/无扩展名的
+        // 二进制都收，zip 里「至少有一个文件」的门槛自然恒成立。运行时按扩展名推断
+        // （scripts::infer_runtime），面板只保管 + 定时，跑不跑得起来是解释器的事。
+        Kind::Scripts => true,
     }
 }
 
@@ -105,7 +107,11 @@ fn single_dest(kind: Kind, base: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("名字 `{stem}` 只能用字母、数字、`-` `_` `.`"));
     }
-    let name = format!("{stem}.{ext}");
+    let name = if ext.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{stem}.{ext}")
+    };
     match kind {
         Kind::Plugins => {
             if ext != "js" {
@@ -114,11 +120,8 @@ fn single_dest(kind: Kind, base: &str) -> Result<PathBuf, String> {
             Ok(PathBuf::from(name))
         }
         Kind::Scripts => {
-            if !matches!(ext.as_str(), "js" | "mjs") {
-                return Err("脚本只支持 .js / .mjs（或 .zip）".into());
-            }
-            // .mjs 落成 .js：面板的脚本扫描只认 .js
-            let name = format!("{stem}.js");
+            // 脚本落盘文件名 = 用户给的名字（扩展名不重写）：runtime 按扩展名推断、
+            // 界面可改，别替用户把 .mjs 改成 .js 之类 —— 第三方脚本的内容归用户。
             Ok(PathBuf::from(name))
         }
     }
@@ -221,7 +224,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     if !has_script {
         return Err(match kind {
             Kind::Plugins => "zip 里没有 .js 插件文件".into(),
-            Kind::Scripts => "zip 里没有 .js / .mjs 脚本".to_string(),
+            Kind::Scripts => "zip 里没有可登记的脚本文件".to_string(),
         });
     }
 
@@ -626,14 +629,17 @@ mod tests {
     }
 
     #[test]
-    fn script_single_lands_flat_and_mjs_becomes_js() {
+    fn script_single_keeps_the_given_filename_any_extension() {
+        // 脚本 = 第三方程序：扩展名不重写、不设限，.py / .mjs / 裸二进制名都原样落盘。
         let root = tmpdir("single-script");
         let r = save(Kind::Scripts, &root, "hello.mjs", b"export {}", true).unwrap();
-        assert_eq!(r.files, vec!["hello.js"]);
-        assert!(root.join("hello.js").is_file());
-        // 面板只跑 JS：.py 直接拒，不制造「传上去了但跑不了」
-        let err = save(Kind::Scripts, &root, "x.py", b"print(1)", true).unwrap_err();
-        assert!(err.contains(".js"), "{err}");
+        assert_eq!(r.files, vec!["hello.mjs"]);
+        assert!(root.join("hello.mjs").is_file());
+        let r = save(Kind::Scripts, &root, "x.py", b"print(1)", true).unwrap();
+        assert_eq!(r.files, vec!["x.py"]);
+        // 无扩展名的二进制：名字不带点，原样落盘（不追加假扩展名）
+        let r = save(Kind::Scripts, &root, "toolbin", b"\x7fELF", true).unwrap();
+        assert_eq!(r.files, vec!["toolbin"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
