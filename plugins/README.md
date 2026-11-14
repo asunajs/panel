@@ -3,7 +3,12 @@
 | 内容 | 归属 | 手改 |
 |---|---|---|
 | `webui-demo.js` + `webui-demo.webui/` | **面板项目**（UI 套件的活文档，`scripts/ui-kit-check.mjs` 用它对拍） | ✅ 可以 |
-| `mcloud*.js`、`mcloud.webui/`、`mgmusic*.js`、`mgmusic.webui/` | **插件项目**（`~/mobile/workspace/mcloud-plugin`）的构建产物 | ❌ 不行 |
+| `mcloud*.js`、`mcloud.webui/` | 插件项目 **`~/mobile/workspace/mcloud-plugin`** 的构建产物（`npm run build:panelllrt`） | ❌ 不行 |
+| `mgmusic*.js`、`mgmusic.webui/` | 插件项目 **`~/mobile/workspace/cmusic-others/mgmusic-plugin`** 的构建产物（`llrt/` → `npm run build:panelllrt`） | ❌ 不行 |
+
+> **面板仓不含插件源码**：`git ls-files | grep mgmusic` 只看得到上面那 5 个产物文件，
+> 加一篇迁移记录 `docs/mgmusic-migration.md`；源码（2350 行那份 + webui）在插件项目里。
+> 每个产物文件的第一行都写着「由 <插件项目路径> 复制生成」，认来源看那一行就够。
 
 插件产物由插件项目的 `npm run build:panelllrt` 写进来（那边是 `rmSync + cpSync`），
 **手改会在下一次构建被冲掉**。0.4.x 与 0.3.x 的差异清单见
