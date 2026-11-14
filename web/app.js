@@ -1036,7 +1036,13 @@ function schedTypes() {
     ['window', '每天窗口内随机'],
     ['once', '仅执行一次'],
     ['expr', '表达式（cron / @every）'],
+    ['multi', '多计划（几条规则取并集）'],
   ];
+}
+
+/** 「多计划」里每条子计划的类型（不许嵌套）。 */
+function schedSubTypes() {
+  return schedTypes().filter(([v]) => v !== 'multi');
 }
 
 function schedDefault(type) {
@@ -1048,6 +1054,7 @@ function schedDefault(type) {
     case 'monthly': return { type, day: 1, randomPick: false, at: '09:00', jitter: null, timezone: tz };
     case 'window': return { type, every: 'day', between: ['09:00', '18:00'], count: 1, timezone: tz };
     case 'once': return { type, at: new Date(Date.now() + 3600e3).toISOString().slice(0, 16), jitter: null, timezone: tz };
+    case 'multi': return { type, timezone: tz, items: [schedDefault('daily')] };
     default: return { type: 'expr', expr: '', timezone: tz };
   }
 }
@@ -1117,6 +1124,164 @@ function schedNumber(value, min, onPick) {
 }
 
 /** 重建整个表单（改动后重画，代价很小：十几个节点）。 */
+/** 按类型渲染「基础字段」。plan 是被编辑的那条计划，set 改它，rebuild 重画整表。 */
+function planRows(plan, set, rebuild) {
+  const rows = [];
+  if (plan.type === 'interval') {
+    rows.push(schedRow('每隔',
+      schedNumber(plan.every, 1, (v) => set({ every: v })),
+      schedSelect([['minute', '分钟'], ['hour', '小时'], ['day', '天'], ['week', '周']], plan.unit, (v) => set({ unit: v }))));
+    rows.push(schedRow('锚点（可空）', schedTime(plan.anchor, (v) => set({ anchor: v }), true)));
+  } else if (plan.type === 'daily') {
+    rows.push(schedRow('时间', schedTime(plan.at, (v) => set({ at: v || '09:00' }))));
+  } else if (plan.type === 'weekly') {
+    const wrap = el('div', 'chips');
+    for (const d of PanelSchedule.DAYS) {
+      const on = (plan.days || []).includes(d);
+      const b = el('button', 'chip' + (on ? ' chip-on' : ''), PanelSchedule.DAY_LABEL[d]);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        const cur = new Set(plan.days || []);
+        if (cur.has(d)) cur.delete(d); else cur.add(d);
+        plan.days = PanelSchedule.DAYS.filter((x) => cur.has(x));
+        rebuild();
+      });
+      wrap.append(b);
+    }
+    rows.push(schedRow('星期', wrap));
+    rows.push(schedRow('时间', schedTime(plan.at, (v) => set({ at: v || '09:00' }))));
+  } else if (plan.type === 'monthly') {
+    const opts = [];
+    for (let d = 1; d <= 31; d++) opts.push([d, d + ' 号']);
+    opts.push(['last', '最后一天']);
+    rows.push(schedRow('日期', schedSelect(opts, plan.day, (v) => set({ day: v === 'last' ? 'last' : Number(v) }))));
+    rows.push(schedRow('时间', schedTime(plan.at, (v) => set({ at: v || '09:00' }))));
+  } else if (plan.type === 'window') {
+    const b = plan.between || ['09:00', '18:00'];
+    rows.push(schedRow('周期',
+      schedSelect([['day', '每天'], ['week', '每周']], plan.every, (v) => set({ every: v }))));
+    rows.push(schedRow('窗口',
+      schedTime(b[0], (v) => set({ between: [v || '09:00', b[1]] })),
+      el('span', 'muted', '到'),
+      schedTime(b[1], (v) => set({ between: [b[0], v || '18:00'] }))));
+    rows.push(schedRow('次数', schedNumber(plan.count, 1, (v) => set({ count: v }))));
+  } else if (plan.type === 'once') {
+    const i = el('input', 'modal-input');
+    i.type = 'datetime-local';
+    i.value = String(plan.at || '').slice(0, 16);
+    i.addEventListener('change', () => set({ at: i.value }));
+    rows.push(schedRow('时刻', i));
+  } else {
+    // 表达式：多行文本框 + 识别状态；未识别**不阻断保存**
+    const ta = el('textarea', 'modal-input mono');
+    ta.rows = 2;
+    ta.value = plan.expr || '';
+    ta.placeholder = '0 9 * * * ／ 30 8 * * 1,3,5 ／ @every 3d ／ @daily';
+    ta.addEventListener('input', () => { plan.expr = ta.value; refreshSchedDerived(); });
+    rows.push(schedRow('表达式', ta));
+    const st = el('p', 'hint sched-expr-state');
+    st.__plan = plan;
+    rows.push(st);
+  }
+  return rows;
+}
+
+/** 抖动 / 随机选择。多计划里每条都要能看见，所以不折叠。 */
+function planAdvancedRows(plan, refresh) {
+  const rows = [];
+  if (plan.type !== 'window') {
+    const kOf = (u) => ({ m: 60e3, s: 1000, h: 3600e3 }[u]);
+    let jMs = PanelSchedule.parseDur(plan.jitter) || 600e3;
+    let unit = jMs % 3600e3 === 0 ? 'h' : jMs % 60e3 === 0 ? 'm' : 's';
+
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !!plan.jitter;
+    const lab = el('label', 'field-inline');
+    lab.append(cb, el('span', '', '抖动（±）'));
+    rows.push(lab);
+
+    // 幅度行一直建好，靠 hidden 显隐 —— 重画会丢焦点，也会把折叠状态弄乱
+    const num = el('input', 'modal-input');
+    num.type = 'number';
+    num.min = '1';
+    num.value = String(Math.max(1, Math.round(jMs / kOf(unit))));
+    num.addEventListener('change', () => {
+      jMs = Math.max(1, Number(num.value)) * kOf(unit);
+      plan.jitter = PanelSchedule.durToStr(jMs) || '1m';
+      refresh();
+    });
+    const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']], unit, (u) => {
+      unit = u;
+      num.value = String(Math.max(1, Math.round(jMs / kOf(u))));
+      jMs = Math.max(1, Number(num.value)) * kOf(u);
+      plan.jitter = PanelSchedule.durToStr(jMs) || '1m';
+      refresh();
+    });
+    const mag = schedRow('幅度', num, unitSel);
+    mag.classList.add('sched-narrow');
+    mag.classList.toggle('hidden', !cb.checked);
+    rows.push(mag);
+
+    cb.addEventListener('change', () => {
+      plan.jitter = cb.checked ? (PanelSchedule.durToStr(jMs) || '10m') : null;
+      mag.classList.toggle('hidden', !cb.checked);
+      refresh();
+    });
+  }
+  if (plan.type === 'weekly' || plan.type === 'monthly') {
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = !!plan.randomPick;
+    cb.addEventListener('change', () => { plan.randomPick = cb.checked; refresh(); });
+    const lab = el('label', 'field-inline');
+    lab.append(cb, el('span', '', plan.type === 'weekly' ? '每周从所选星期里随机挑一天' : '每月随机挑一天'));
+    rows.push(lab);
+  }
+  if (plan.type === 'window') rows.push(el('p', 'hint', '窗口内随机本身就是随机，不再叠加抖动。'));
+  if (plan.type === 'expr') rows.push(el('p', 'hint', '表达式原样执行，一个字都不改；抖动是单独的修饰符。'));
+  return rows;
+}
+
+/** 多计划：可增删的列表，触发时刻取各条的并集。 */
+function renderMultiEditor(box) {
+  const j = schedJson;
+  if (!Array.isArray(j.items)) j.items = [];
+
+  j.items.forEach((it, i) => {
+    const block = el('div', 'sched-item');
+    const head = el('div', 'sched-item-head');
+    head.append(el('span', 'muted', '第 ' + (i + 1) + ' 条'));
+    head.append(schedSelect(schedSubTypes(), it.type, (v) => {
+      const fresh = schedDefault(v);
+      fresh.timezone = it.timezone || j.timezone;
+      j.items[i] = fresh;
+      renderScheduleForm();
+    }));
+    const del = el('button', 'btn btn-sm', '删除');
+    del.type = 'button';
+    del.title = '删掉这一条';
+    del.addEventListener('click', () => { j.items.splice(i, 1); renderScheduleForm(); });
+    head.append(del);
+    block.append(head);
+
+    const set = (patch) => { Object.assign(j.items[i], patch); refreshSchedDerived(); };
+    for (const r of planRows(j.items[i], set, renderScheduleForm)) block.append(r);
+    for (const r of planAdvancedRows(j.items[i], refreshSchedDerived)) block.append(r);
+    box.append(block);
+  });
+
+  const add = el('button', 'btn btn-sm', '＋ 添加一条计划');
+  add.type = 'button';
+  add.addEventListener('click', () => {
+    const fresh = schedDefault('daily');
+    fresh.timezone = j.timezone;
+    j.items.push(fresh);
+    renderScheduleForm();
+  });
+  box.append(add);
+}
+
 function renderScheduleForm() {
   const box = $('sched-form');
   clear(box);
@@ -1124,136 +1289,33 @@ function renderScheduleForm() {
 
   // 顶层：频率类型（唯一的必选项）
   box.append(schedRow('执行频率',
-    schedSelect(schedTypes(), j.type, (v) => { schedJson = schedDefault(v); renderScheduleForm(); })));
+    schedSelect(schedTypes(), j.type, (v) => {
+      // 从单条切到「多计划」时，把当前这条直接变成第 1 条 —— 不让人重填一遍
+      if (v === 'multi' && j.type !== 'multi') {
+        schedJson = { type: 'multi', timezone: j.timezone, items: [Object.assign({}, j)] };
+      } else {
+        schedJson = schedDefault(v);
+      }
+      renderScheduleForm();
+    })));
 
-  const set = (patch) => { Object.assign(schedJson, patch); refreshSchedDerived(); };
-
-  if (j.type === 'interval') {
-    box.append(schedRow('每隔',
-      schedNumber(j.every, 1, (v) => set({ every: v })),
-      schedSelect([['minute', '分钟'], ['hour', '小时'], ['day', '天'], ['week', '周']], j.unit, (v) => set({ unit: v }))));
-    box.append(schedRow('锚点（可空）', schedTime(j.anchor, (v) => set({ anchor: v }), true)));
-  } else if (j.type === 'daily') {
-    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
-  } else if (j.type === 'weekly') {
-    const wrap = el('div', 'chips');
-    for (const d of PanelSchedule.DAYS) {
-      const on = (j.days || []).includes(d);
-      const b = el('button', 'chip' + (on ? ' chip-on' : ''), PanelSchedule.DAY_LABEL[d]);
-      b.type = 'button';
-      b.addEventListener('click', () => {
-        const cur = new Set(j.days || []);
-        if (cur.has(d)) cur.delete(d); else cur.add(d);
-        schedJson.days = PanelSchedule.DAYS.filter((x) => cur.has(x));
-        renderScheduleForm();
-      });
-      wrap.append(b);
-    }
-    box.append(schedRow('星期', wrap));
-    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
-  } else if (j.type === 'monthly') {
-    const opts = [];
-    for (let d = 1; d <= 31; d++) opts.push([d, d + ' 号']);
-    opts.push(['last', '最后一天']);
-    box.append(schedRow('日期', schedSelect(opts, j.day, (v) => set({ day: v === 'last' ? 'last' : Number(v) }))));
-    box.append(schedRow('时间', schedTime(j.at, (v) => set({ at: v || '09:00' }))));
-  } else if (j.type === 'window') {
-    const b = j.between || ['09:00', '18:00'];
-    box.append(schedRow('周期',
-      schedSelect([['day', '每天'], ['week', '每周']], j.every, (v) => set({ every: v }))));
-    box.append(schedRow('窗口',
-      schedTime(b[0], (v) => set({ between: [v || '09:00', b[1]] })),
-      el('span', 'muted', '到'),
-      schedTime(b[1], (v) => set({ between: [b[0], v || '18:00'] }))));
-    box.append(schedRow('次数', schedNumber(j.count, 1, (v) => set({ count: v }))));
-  } else if (j.type === 'once') {
-    const i = el('input', 'modal-input');
-    i.type = 'datetime-local';
-    i.value = String(j.at || '').slice(0, 16);
-    i.addEventListener('change', () => set({ at: i.value }));
-    box.append(schedRow('时刻', i));
+  if (j.type === 'multi') {
+    renderMultiEditor(box);
   } else {
-    // 表达式：多行文本框 + 识别状态；未识别**不阻断保存**
-    const ta = el('textarea', 'modal-input mono');
-    ta.rows = 2;
-    ta.value = j.expr || '';
-    ta.placeholder = '0 9 * * * ／ 30 8 * * 1,3,5 ／ @every 3d ／ @daily';
-    ta.addEventListener('input', () => { schedJson.expr = ta.value; refreshSchedDerived(); });
-    box.append(schedRow('表达式', ta));
-    const st = el('p', 'hint');
-    st.id = 'sched-expr-state';
-    box.append(st);
-  }
+    const set = (patch) => { Object.assign(schedJson, patch); refreshSchedDerived(); };
+    for (const r of planRows(j, set, renderScheduleForm)) box.append(r);
 
-  // 高级选项（折叠，默认收起）：抖动 + 随机选择
-  //
-  // ⚠ 这里的控件**不重画整张表单**，只改 JSON + 重算短句/预览。
-  //   早先每个勾选都调 renderScheduleForm()，而 <details> 是新建的、不带 open，
-  //   于是「点一下勾选，折叠自己收起来了」，顺带把焦点也丢了。
-  const adv = el('details', 'sched-adv');
-  adv.open = schedAdvOpen; // 整表重画时（切类型、点星期）保住展开状态
-  adv.addEventListener('toggle', () => { schedAdvOpen = adv.open; });
-  adv.append(el('summary', '', '高级选项'));
-  const body = el('div');
-  if (j.type !== 'window') {
-    const kOf = (u) => ({ m: 60e3, s: 1000, h: 3600e3 }[u]);
-    let jMs = PanelSchedule.parseDur(j.jitter) || 600e3; // 勾上时用 10 分钟起步
-    let unit = jMs % 3600e3 === 0 ? 'h' : jMs % 60e3 === 0 ? 'm' : 's';
-
-    const cb = el('input');
-    cb.type = 'checkbox';
-    cb.checked = !!j.jitter;
-    const lab = el('label', 'field-inline');
-    lab.append(cb, el('span', '', '抖动（±）'));
-    body.append(lab);
-
-    // 幅度行一直建好，靠 hidden 显隐 —— 重画会导致折叠，所以不能按需重建
-    const num = el('input', 'modal-input');
-    num.type = 'number';
-    num.min = '1';
-    num.value = String(Math.max(1, Math.round(jMs / kOf(unit))));
-    num.addEventListener('change', () => {
-      jMs = Math.max(1, Number(num.value)) * kOf(unit);
-      schedJson.jitter = PanelSchedule.durToStr(jMs) || '1m';
-      refreshSchedDerived();
-    });
-    const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']], unit, (u) => {
-      unit = u;
-      num.value = String(Math.max(1, Math.round(jMs / kOf(u))));
-      jMs = Math.max(1, Number(num.value)) * kOf(u);
-      schedJson.jitter = PanelSchedule.durToStr(jMs) || '1m';
-      refreshSchedDerived();
-    });
-    const mag = schedRow('幅度', num, unitSel);
-    mag.classList.add('sched-narrow');
-    mag.classList.toggle('hidden', !cb.checked);
-    body.append(mag);
-
-    cb.addEventListener('change', () => {
-      schedJson.jitter = cb.checked ? (PanelSchedule.durToStr(jMs) || '10m') : null;
-      mag.classList.toggle('hidden', !cb.checked);
-      refreshSchedDerived();
-    });
+    // 高级选项（折叠，默认收起）。展开状态记在 schedAdvOpen —— 重画时带过去，
+    // 否则一勾选折叠就自己收起来。里面的控件不重画整表，只更新派生区。
+    const adv = el('details', 'sched-adv');
+    adv.open = schedAdvOpen;
+    adv.addEventListener('toggle', () => { schedAdvOpen = adv.open; });
+    adv.append(el('summary', '', '高级选项'));
+    const body = el('div');
+    for (const r of planAdvancedRows(j, refreshSchedDerived)) body.append(r);
+    adv.append(body);
+    box.append(adv);
   }
-  if (j.type === 'weekly' || j.type === 'monthly') {
-    const cb = el('input');
-    cb.type = 'checkbox';
-    cb.checked = !!j.randomPick;
-    cb.addEventListener('change', () => {
-      schedJson.randomPick = cb.checked;
-      refreshSchedDerived();
-    });
-    const lab = el('label', 'field-inline');
-    lab.append(cb, el('span', '', j.type === 'weekly' ? '每周从所选星期里随机挑一天' : '每月随机挑一天'));
-    body.append(lab);
-  }
-  if (j.type === 'window') body.append(el('p', 'hint', '窗口内随机本身就是随机，不再叠加抖动。'));
-  if (j.type === 'expr') {
-    body.append(el('p', 'hint',
-      '表达式原样执行，一个字都不改；抖动是单独的修饰符。'));
-  }
-  adv.append(body);
-  box.append(adv);
 
   // 短句（只读渲染）
   const sent = el('p', 'sched-sentence');
@@ -1292,10 +1354,11 @@ function refreshSchedDerived() {
     }
   }
 
-  // 表达式模式：识别状态
-  const st = $('sched-expr-state');
-  if (st) {
-    const ok = PanelSchedule.parseCron(schedJson.expr);
+  // 表达式模式：识别状态（多计划里可能有好几条表达式）
+  for (const st of document.querySelectorAll('.sched-expr-state')) {
+    const plan = st.__plan;
+    if (!plan) continue;
+    const ok = PanelSchedule.parseCron(plan.expr);
     st.textContent = ok ? '已识别' : '未识别（将原样交给调度器，不阻断保存）';
     st.classList.toggle('err-text', !ok);
   }

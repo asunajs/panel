@@ -293,6 +293,76 @@ test('⑤ exportCron：不能整除的间隔不许输出会漂移的 */N', () =>
   assert.equal(ok.cron, '*/15 * * * *');
 });
 
+// ---------------------------------------------------------------- 多计划
+
+test('多计划：短句是各条用「；」连起来', () => {
+  const m = {
+    type: 'multi', timezone: TZ, items: [
+      { type: 'weekly', days: ['mon', 'tue', 'wed', 'thu', 'fri'], at: '08:00', jitter: null },
+      { type: 'window', every: 'day', between: ['09:00', '18:00'], count: 2 },
+    ],
+  };
+  assert.equal(
+    S.toSentence(m),
+    'every mon,tue,wed,thu,fri at 08:00；every day between 09:00 and 18:00, 2 times');
+});
+
+test('多计划：预览取并集，按时间排序，同一时刻只出现一次', () => {
+  const m = {
+    type: 'multi', timezone: TZ, items: [
+      { type: 'daily', at: '09:00', jitter: null },
+      { type: 'daily', at: '09:00', jitter: null },   // 与上一条完全重合
+      { type: 'daily', at: '21:00', jitter: null },
+    ],
+  };
+  const r = S.nextRuns(m, 4, { from: AT, taskId: 'demo/daily' });
+  assert.equal(r.ok, true, r.reason);
+  // 09:00 只能出现一次（两条重合计一次），然后 21:00，再下一天 09:00…
+  const got = r.runs.map((ms) => fmt(ms).slice(0, 16));
+  assert.deepEqual(got, [
+    '2026-11-14 09:00', '2026-11-14 21:00',
+    '2026-11-15 09:00', '2026-11-15 21:00',
+  ]);
+});
+
+test('多计划：工作日 + 窗口的组合，结果是两条并集', () => {
+  const m = {
+    type: 'multi', timezone: TZ, items: [
+      { type: 'weekly', days: ['mon', 'tue', 'wed', 'thu', 'fri'], at: '08:00', jitter: null },
+      { type: 'window', every: 'day', between: ['09:00', '18:00'], count: 2 },
+    ],
+  };
+  const r = S.nextRuns(m, 6, { from: AT, taskId: 'demo/daily' });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.runs.length, 6);
+  for (let i = 1; i < r.runs.length; i++) assert.ok(r.runs[i] > r.runs[i - 1], '必须递增');
+  // 11-14 是周六：没有 08:00，只有窗口的两条
+  const first = S.tzParts(r.runs[0], TZ);
+  assert.equal(first.d, 14);
+  assert.ok(first.h >= 9 && first.h <= 18);
+});
+
+test('多计划：空列表报错、不许嵌套、导出必然失败', () => {
+  const empty = { type: 'multi', timezone: TZ, items: [] };
+  const v = S.validate(empty);
+  assert.ok(v.some((x) => x.level === 'error' && /至少需要一条/.test(x.message)), JSON.stringify(v));
+  assert.equal(S.nextRuns(empty, 3, { from: AT, taskId: 'x' }).ok, false);
+
+  const nested = { type: 'multi', timezone: TZ, items: [{ type: 'multi', items: [] }] };
+  assert.equal(S.normalize(nested).items.length, 0, '嵌套的会被剔掉');
+
+  const m = { type: 'multi', timezone: TZ, items: [{ type: 'daily', at: '09:00' }] };
+  const ex = S.exportCron(m);
+  assert.equal(ex.ok, false);
+  assert.ok(/并集/.test(ex.reason), ex.reason);
+});
+
+test('多计划：子计划没写时区就继承外层的', () => {
+  const m = { type: 'multi', timezone: 'America/New_York', items: [{ type: 'daily', at: '09:00' }] };
+  const n = S.normalize(m);
+  assert.equal(n.items[0].timezone, 'America/New_York');
+});
+
 // ---------------------------------------------------------------- 短句模板
 
 test('短句：六种类型的模板逐条对齐', () => {

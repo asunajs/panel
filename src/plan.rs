@@ -110,6 +110,12 @@ pub enum Kind {
         at: DateTime<Utc>,
         jitter: Option<Duration>,
     },
+    /// 多计划：几条规则的并集，哪条先到就按哪条触发。
+    ///
+    /// 每条子计划保留自己的时区/形状，外层只负责取最早的那个。
+    /// 同一个时刻被两条同时命中只会触发一次（`next_after` 是严格大于 `from`）。
+    Multi(Vec<Plan>),
+
     /// 表达式直通：表达式本身**一个字都不改**，抖动作为独立修饰符另算。
     ///
     /// 为什么不把抖动拼进表达式（`0 9 * * * ~5m`）：面板的 `~` 是**每次重新掷骰子**，
@@ -251,6 +257,35 @@ impl Plan {
                     jitter: jitter_of(obj.get("jitter"))?,
                 }
             }
+            "multi" => {
+                let arr = obj
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .ok_or("多计划缺少 items")?;
+                if arr.is_empty() {
+                    return Err("至少需要一条计划".into());
+                }
+                let mut items = Vec::with_capacity(arr.len());
+                for (i, it) in arr.iter().enumerate() {
+                    if it.get("type").and_then(Value::as_str) == Some("multi") {
+                        return Err("多计划不能再嵌套".into());
+                    }
+                    // 子计划没写时区就继承外层的
+                    let mut v = it.clone();
+                    if v.get("timezone").and_then(Value::as_str).unwrap_or("").is_empty() {
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("timezone".into(), Value::String(tz_name.to_string()));
+                        }
+                    }
+                    let text = serde_json::to_string(&v)
+                        .map_err(|e| format!("第 {} 条计划序列化失败：{e}", i + 1))?;
+                    items.push(
+                        Plan::parse(&text, task_id)
+                            .map_err(|e| format!("第 {} 条计划：{e}", i + 1))?,
+                    );
+                }
+                Kind::Multi(items)
+            }
             "expr" => {
                 let expr = obj.get("expr").and_then(Value::as_str).unwrap_or("");
                 if expr.trim().is_empty() {
@@ -277,7 +312,12 @@ impl Plan {
 
     /// 是不是「只跑一次」的计划（调度器据此决定跑完就别再排下一次）。
     pub fn is_one_shot(&self) -> bool {
-        matches!(self.kind, Kind::Once { .. })
+        match &self.kind {
+            Kind::Once { .. } => true,
+            // 组合里只要还有周期规则，就不能整体当成一次性任务
+            Kind::Multi(items) => !items.is_empty() && items.iter().all(Plan::is_one_shot),
+            _ => false,
+        }
     }
 
     /// 严格晚于 `from` 的下一个触发时刻。
@@ -308,6 +348,10 @@ impl Plan {
                 end,
                 count,
             } => self.next_window(from, *weekly, *start, *end, *count),
+            Kind::Multi(items) => items
+                .iter()
+                .filter_map(|p| p.next_after(from))
+                .min(),
             Kind::Expr { base, jitter } => {
                 let jm = jitter.map(|j| j.num_milliseconds()).unwrap_or(0);
                 let mut cur = from;
@@ -820,6 +864,69 @@ mod tests {
                 "2026-11-14 21:00:00",
             ]
         );
+    }
+
+    #[test]
+    fn parity_with_js_preview_multi() {
+        // 工作日 08:00 + 每天窗口内随机 2 次 —— 取并集
+        let p = plan(
+            r#"{"type":"multi","timezone":"Asia/Shanghai","items":[
+                 {"type":"weekly","days":["mon","tue","wed","thu","fri"],"at":"08:00","jitter":null},
+                 {"type":"window","every":"day","between":["09:00","18:00"],"count":2}]}"#,
+        );
+        assert_eq!(
+            runs(&p, 6),
+            vec![
+                "2026-11-14 11:58:31",
+                "2026-11-14 16:18:53",
+                "2026-11-15 10:09:36",
+                "2026-11-15 14:49:13",
+                "2026-11-16 08:00:00",
+                "2026-11-16 11:33:31",
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_never_fires_twice_at_the_same_instant() {
+        // 两条都在 09:00：并集里只该出现一次
+        let p = plan(
+            r#"{"type":"multi","timezone":"Asia/Shanghai","items":[
+                 {"type":"daily","at":"09:00","jitter":null},
+                 {"type":"daily","at":"09:00","jitter":null}]}"#,
+        );
+        let v = runs(&p, 3);
+        assert_eq!(v.len(), 3);
+        let uniq: std::collections::BTreeSet<_> = v.iter().collect();
+        assert_eq!(uniq.len(), 3, "同一时刻不能出现两次：{v:?}");
+        assert_eq!(v[0], "2026-11-14 09:00:00");
+    }
+
+    #[test]
+    fn multi_rejects_empty_and_nested() {
+        let e = Plan::parse(r#"{"type":"multi","timezone":"Asia/Shanghai","items":[]}"#, "x")
+            .unwrap_err();
+        assert!(e.contains("至少需要一条计划"), "{e}");
+        let e2 = Plan::parse(
+            r#"{"type":"multi","timezone":"Asia/Shanghai","items":[{"type":"multi","items":[]}]}"#,
+            "x",
+        )
+        .unwrap_err();
+        assert!(e2.contains("不能再嵌套"), "{e2}");
+    }
+
+    #[test]
+    fn multi_is_one_shot_only_if_every_item_is() {
+        let all_once = plan(
+            r#"{"type":"multi","timezone":"Asia/Shanghai","items":[
+                 {"type":"once","at":"2020-01-01T09:00:00"},{"type":"once","at":"2020-01-02T09:00:00"}]}"#,
+        );
+        assert!(all_once.is_one_shot());
+        let mixed = plan(
+            r#"{"type":"multi","timezone":"Asia/Shanghai","items":[
+                 {"type":"once","at":"2020-01-01T09:00:00"},{"type":"daily","at":"09:00"}]}"#,
+        );
+        assert!(!mixed.is_one_shot());
     }
 
     #[test]
