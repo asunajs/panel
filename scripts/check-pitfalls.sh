@@ -73,12 +73,8 @@ else
   bad 'scheduler.rs 里没有 jsslots::try_acquire —— 死循环插件能把面板 HTTP 饿死'
 fi
 
-# scripts.md：脚本并发上限必须还接着（删了它，一堆死循环能把 HTTP 饿死）
-if grep -q 'max_concurrent()' src/scripts.rs; then
-  ok '脚本有全局并发上限（max_concurrent）'
-else
-  bad 'scripts.rs 里没有 max_concurrent —— 并发死循环脚本会把面板 HTTP 饿死'
-fi
+# scripts.md（2026-11-14 起失效）：脚本改第三方子进程模型，不再占 JS 名额 ——
+# max_concurrent 的守卫随之退役；「不碰引擎」由下面 §102 的守卫接手。
 
 # HANDOFF §7.16：启动时要收尾僵尸 running 行
 if grep -q 'reap_stale_runs' src/main.rs; then
@@ -202,9 +198,17 @@ else
   bad 'src/install.rs 少了扩展名白名单（否则安装 = 往插件目录写任意文件）'
 fi
 
+# pitfalls §102：脚本 = 第三方程序，不进引擎 —— scripts.rs 里出现 crate::engine /
+# jsslots 就是「引擎内脚本」回来了（host-api、假 handler 生命周期全是跟着进来的）。
+if [ "$(grep -cE 'crate::engine|jsslots' src/scripts.rs)" != "0" ]; then
+  bad 'src/scripts.rs 又碰引擎/JS 名额了 —— 脚本只许子进程（pitfalls §102）'
+else
+  ok '脚本走子进程，不碰引擎与 JS 名额'
+fi
+
 echo ''
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 19 条坑的守卫全过"
+  echo "ok: 20 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

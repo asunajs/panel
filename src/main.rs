@@ -139,7 +139,12 @@ async fn main() -> Result<(), String> {
     sched.set_plugins_dir(plugins_dir.clone());
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
-    let scripts_dir = PathBuf::from(env_or("PANEL_SCRIPTS_DIR", "scripts"));
+    // 默认放 data/scripts（用户内容归 data，与 plugin-data 同理）—— 实例根下的
+    // scripts/ 是 deploy-daily 同步仓里门禁脚本的地方，两边不该混。
+    let scripts_dir = match std::env::var_os("PANEL_SCRIPTS_DIR") {
+        Some(v) => PathBuf::from(v),
+        None => data_dir.join("scripts"),
+    };
     std::fs::create_dir_all(&scripts_dir)
         .map_err(|e| format!("建脚本目录失败 {}: {e}", scripts_dir.display()))?;
     let scripts = scripts::Scripts::new(
@@ -148,15 +153,35 @@ async fn main() -> Result<(), String> {
         scripts_dir.clone(),
         data_dir.join("trash"),
         data_dir.clone(),
-        config.clone(),
     );
-    // 目录里有、库里没有的 .js 收编成「只手动跑」的脚本（不然手写的脚本面板里看不见）。
+    // 存量迁移第一步（与目录无关）：旧记录 name 不带扩展名，补上 .js（文件本来就
+    // 叫这个；新模型里 name 就是文件名，不再靠回退规则）。
+    match scripts.migrate_legacy_names().await {
+        Ok(n) if n > 0 => log.emit("panel", None, Level::Info, format!("已把 {n} 条脚本记录改成「名字=文件名」的新形状")),
+        Ok(_) => {}
+        Err(e) => log.emit("panel", None, Level::Warn, format!("脚本记录改名失败: {e}")),
+    }
+    // 存量迁移第二步：旧默认目录（相对 cwd 的 scripts/，2026-11-14 前）里登记过的脚本搬进新家。
+    // 显式设了 PANEL_SCRIPTS_DIR 的人自己负责路径，不做隐式搬迁。
+    if std::env::var_os("PANEL_SCRIPTS_DIR").is_none() {
+        match scripts.migrate_from_legacy(&PathBuf::from("scripts")).await {
+            Ok(n) if n > 0 => log.emit(
+                "panel",
+                None,
+                Level::Info,
+                format!("已把 {n} 个脚本从旧的 scripts/ 搬进 {}", scripts_dir.display()),
+            ),
+            Ok(_) => {}
+            Err(e) => log.emit("panel", None, Level::Warn, format!("脚本目录迁移失败: {e}")),
+        }
+    }
+    // 目录里有、库里没有的文件收编成「只手动跑」的脚本（不然手写的脚本面板里看不见）。
     match scripts.reconcile().await {
         Ok(n) if n > 0 => log.emit(
             "panel",
             None,
             Level::Info,
-            format!("脚本目录里发现 {n} 个没登记过的 .js，已按「只手动跑」收编"),
+            format!("脚本目录里发现 {n} 个没登记过的文件，已按扩展名推断运行时收编"),
         ),
         Ok(_) => {}
         Err(e) => log.emit("panel", None, Level::Warn, format!("脚本目录对账失败: {e}")),

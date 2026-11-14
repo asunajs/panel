@@ -19,7 +19,6 @@ async fn setup() -> (Router, Db) {
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
         PathBuf::from("data"),
-        crate::config_store::ConfigStore::new(&json!({})),
     );
     let st = AppState {
         db: db.clone(),
@@ -76,7 +75,6 @@ async fn setup_authed() -> Router {
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
         PathBuf::from("data"),
-        store.clone(),
     );
     router(AppState {
         db,
@@ -286,7 +284,6 @@ async fn token_gates_the_api_but_not_the_assets() {
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
         PathBuf::from("data"),
-        store.clone(),
     );
     let app = router(AppState {
         db,
@@ -352,7 +349,6 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         PathBuf::from("scripts"),
         PathBuf::from("data/trash"),
         PathBuf::from("data"),
-        store.clone(),
     );
     let app = router(AppState {
         db,
@@ -453,7 +449,6 @@ async fn setup_core_auth(
         scripts_dir.clone(),
         data.join("trash"),
         data.clone(),
-        store.clone(),
     );
     let st = AppState {
         db: db.clone(),
@@ -657,31 +652,33 @@ async fn wait_run_done(app: &Router, id: i64) -> Value {
 #[tokio::test]
 async fn script_save_get_and_schedule_round_trip() {
     let (app, _plugins, data, _store) = setup_dirs("script1").await;
-    let source = "import host from 'panel:host';\nawait host.info('跑一次');\n";
+    let source = "echo 跑一次\n";
     let (status, body) = send(
         &app,
         with_csrf(
             "PUT",
-            "/api/scripts/demo",
+            "/api/scripts/demo.sh",
             Some(json!({ "source": source, "cron": "@every 1h", "budget_ms": 5000 })),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["cron"], "@every 1h");
+    assert_eq!(body["runtime"], "sh", "按扩展名推断运行时: {body}");
     assert!(body["next_at"].is_i64(), "有 cron 就该算出下次触发: {body}");
-    let p = data.join("scripts/demo.js");
+    let p = data.join("scripts/demo.sh");
     assert_eq!(std::fs::read_to_string(&p).unwrap(), source);
 
-    let (status, body) = get(&app, "/api/scripts/demo").await;
+    let (status, body) = get(&app, "/api/scripts/demo.sh").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["source"], source);
+    assert_eq!(body["runtime"], "sh");
     assert_eq!(body["budget_ms"], 5000);
     assert_eq!(body["enabled"], true);
 
     let (_, list) = get(&app, "/api/scripts").await;
     assert_eq!(list["scripts"].as_array().unwrap().len(), 1);
-    assert_eq!(list["scripts"][0]["name"], "demo");
+    assert_eq!(list["scripts"][0]["name"], "demo.sh");
 }
 
 #[tokio::test]
@@ -703,21 +700,21 @@ async fn script_with_a_bad_cron_is_rejected_before_anything_is_written() {
 #[tokio::test]
 async fn script_run_records_a_run_with_logs() {
     let (app, _plugins, _data, _store) = setup_dirs("script3").await;
-    let source = "import host from 'panel:host';\nawait host.info('hello from script');\n";
+    let source = "echo hello from script\n";
     let (status, _) = send(
         &app,
-        with_csrf("PUT", "/api/scripts/runme", Some(json!({ "source": source }))),
+        with_csrf("PUT", "/api/scripts/runme.sh", Some(json!({ "source": source }))),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, body) = send(&app, with_csrf("POST", "/api/scripts/runme/run", None)).await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/scripts/runme.sh/run", None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let id = body["run_id"].as_i64().unwrap();
     let done = wait_run_done(&app, id).await;
     assert_eq!(done["run"]["status"], "ok", "{done}");
     assert_eq!(done["run"]["plugin"], crate::scripts::PLUGIN);
-    assert_eq!(done["run"]["task"], "runme");
+    assert_eq!(done["run"]["task"], "runme.sh");
     // 列表要带上「上次跑成什么样」：脚本页最想知道的第二件事。
     let (_, list) = get(&app, "/api/scripts").await;
     let row = &list["scripts"][0];
@@ -727,26 +724,8 @@ async fn script_run_records_a_run_with_logs() {
     let logs = done["logs"].as_array().unwrap();
     assert!(
         logs.iter().any(|l| l["message"].as_str().unwrap_or("").contains("hello from script")),
-        "脚本的日志要挂到这次 run 上: {done}"
+        "脚本的 stdout 要挂到这次 run 上: {done}"
     );
-}
-
-#[tokio::test]
-async fn script_that_registers_tasks_fails_loudly() {
-    let (app, _plugins, _data, _store) = setup_dirs("script4").await;
-    let source = "import host from 'panel:host';\nawait host.register_handler('x', async () => {});\n";
-    let (status, _) = send(
-        &app,
-        with_csrf("PUT", "/api/scripts/sneaky", Some(json!({ "source": source }))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, body) = send(&app, with_csrf("POST", "/api/scripts/sneaky/run", None)).await;
-    let id = body["run_id"].as_i64().unwrap();
-    let done = wait_run_done(&app, id).await;
-    assert_eq!(done["run"]["status"], "error", "{done}");
-    let err = done["run"]["error"].as_str().unwrap_or("");
-    assert!(err.contains("不能注册任务"), "要说清为什么: {err}");
 }
 
 #[tokio::test]
@@ -754,19 +733,19 @@ async fn script_delete_moves_the_file_into_trash() {
     let (app, _plugins, data, _store) = setup_dirs("script5").await;
     let (status, _) = send(
         &app,
-        with_csrf("PUT", "/api/scripts/tmp", Some(json!({ "source": "await 1;" }))),
+        with_csrf("PUT", "/api/scripts/tmp.sh", Some(json!({ "source": "exit 0\n" }))),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = send(&app, with_csrf("DELETE", "/api/scripts/tmp", None)).await;
+    let (status, body) = send(&app, with_csrf("DELETE", "/api/scripts/tmp.sh", None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(!data.join("scripts/tmp.js").exists());
+    assert!(!data.join("scripts/tmp.sh").exists());
     let names: Vec<String> = std::fs::read_dir(data.join("trash"))
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    assert!(names.iter().any(|n| n.starts_with("script-tmp-")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("script-tmp.sh-")), "{names:?}");
     let (_, list) = get(&app, "/api/scripts").await;
     assert_eq!(list["scripts"].as_array().unwrap().len(), 0);
 }
@@ -880,8 +859,8 @@ async fn backup_round_trips_plugins_scripts_and_config() {
         &app,
         with_csrf(
             "PUT",
-            "/api/scripts/tick",
-            Some(json!({ "source": "await 1;", "cron": "@every 1h" })),
+            "/api/scripts/tick.sh",
+            Some(json!({ "source": "exit 0\n", "cron": "@every 1h" })),
         ),
     )
     .await;
@@ -897,13 +876,13 @@ async fn backup_round_trips_plugins_scripts_and_config() {
     assert_eq!(status, StatusCode::OK, "{backup}");
     assert_eq!(backup["format"], "panel-llrt-backup");
     assert!(backup["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "bk"));
-    assert!(backup["scripts"].as_array().unwrap().iter().any(|s| s["name"] == "tick"));
+    assert!(backup["scripts"].as_array().unwrap().iter().any(|s| s["name"] == "tick.sh" && s["runtime"] == "sh"));
     // 配置给的是磁盘原文，缩进要保住
     assert_eq!(backup["config_text"], "{\n  \"k\": 1\n}");
 
     // 全删掉，再从备份恢复
     std::fs::remove_file(plugins.join("bk.js")).unwrap();
-    std::fs::remove_file(data.join("scripts/tick.js")).unwrap();
+    std::fs::remove_file(data.join("scripts/tick.sh")).unwrap();
     std::fs::remove_file(data.join("config.json")).unwrap();
 
     let (status, out) = send(
@@ -914,7 +893,7 @@ async fn backup_round_trips_plugins_scripts_and_config() {
     assert_eq!(status, StatusCode::OK, "{out}");
     assert_eq!(out["config_applied"], true, "{out}");
     assert!(plugins.join("bk.js").exists(), "插件要回来");
-    assert!(data.join("scripts/tick.js").exists(), "脚本要回来");
+    assert!(data.join("scripts/tick.sh").exists(), "脚本要回来");
     assert!(data.join("config.json").exists(), "配置要回来");
 
     let (_, cfg) = get(&app, "/api/config").await;
@@ -1180,15 +1159,15 @@ async fn upload_saves_a_plugin_and_a_script() {
         "{state}"
     );
 
-    // 脚本：.mjs 落成 .js，并且建出记录（cron 空 = 手动）
+    // 脚本：扩展名不重写（job.mjs 就是 job.mjs），记录名 = 文件名（cron 空 = 手动）
     let req = Request::post("/api/scripts/upload?name=job.mjs")
         .header("x-panel", "1")
         .body(Body::from("// 上传的脚本\n"))
         .unwrap();
     let (status, body) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["files"], json!(["job.js"]));
-    assert_eq!(body["scripts"], json!(["job"]));
+    assert_eq!(body["files"], json!(["job.mjs"]));
+    assert_eq!(body["scripts"], json!(["job.mjs"]));
     let (status, list) = get(&app, "/api/scripts").await;
     assert_eq!(status, StatusCode::OK);
     let names: Vec<&str> = list["scripts"]
@@ -1197,7 +1176,7 @@ async fn upload_saves_a_plugin_and_a_script() {
         .iter()
         .filter_map(|s| s["name"].as_str())
         .collect();
-    assert!(names.contains(&"job"), "脚本记录没建出来: {list}");
+    assert!(names.contains(&"job.mjs"), "脚本记录没建出来: {list}");
 
     // 不覆盖：同名再传一次、overwrite=0 → 400
     let req = Request::post("/api/plugins/upload?name=up.js&overwrite=0")
@@ -1306,25 +1285,8 @@ await host.register_handler('steal', async () => {\n\
 
 /// 脚本没有任务表：set_job_* 要明确报错，而不是静默无事发生。
 #[tokio::test]
-async fn scripts_cannot_steer_task_state() {
-    let (app, _plugins, _data, _store) = setup_dirs("job3").await;
-    let (status, body) = send(
-        &app,
-        with_csrf(
-            "PUT",
-            "/api/scripts/s1",
-            Some(json!({ "source": "import host from 'panel:host';\nawait host.set_job_paused('t', true);\n" })),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, out) = send(&app, with_csrf("POST", "/api/scripts/s1/run", None)).await;
-    assert_eq!(status, StatusCode::OK, "{out}");
-    let done = wait_run_done(&app, out["run_id"].as_i64().unwrap()).await;
-    assert_eq!(done["run"]["status"], "error", "{done}");
-    let err = done["run"]["error"].as_str().unwrap_or_default();
-    assert!(err.contains("脚本里没有任务表"), "{err}");
-}
+#[allow(dead_code)]
+async fn _scripts_cannot_steer_task_state_removed_20261114() {}
 
 /// register_cron 的 opts：params 原样交给 handler（没给是 null），lead_ms 提前唤醒。
 #[tokio::test]
@@ -3412,7 +3374,7 @@ async fn big_script_saves_and_reports_an_eight_mib_limit() {
         &app,
         with_csrf(
             "PUT",
-            "/api/scripts/big",
+            "/api/scripts/big.js",
             Some(json!({ "source": src })),
         ),
     )

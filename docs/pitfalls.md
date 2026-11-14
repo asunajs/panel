@@ -795,3 +795,15 @@
     给出 `{url,name,sha256}` → `POST /api/plugins/install` 回 `{files:["shop-fake.js"],reloaded:["shop-fake"]}`；
     sha 故意错 → `400 校验失败：…，实际下载到 …`（未落盘）；zip → `{files:["bundle.js","bundle.webui/index.html"],zip:true}`；
     CLI 装目录 → 第二次冲突、`--overwrite` 才覆盖。
+
+102. **脚本不是插件：引擎内执行 + host-api 是给错东西**（2026-11-14，用户口径拍板）。
+     脚本 = 第三方程序（sh/node/bun/python3/php/二进制…一切能当命令跑的），面板只做
+     保管、cron、收 stdout/stderr + 退出码。0.4 早期把脚本做成了「引擎内 JS + host-api」
+     —— 那是给插件的能力，给了脚本之后：脚本作者要学一套假 handler 生命周期、
+     `.py/.sh/二进制` 根本进不来、第三方脚本还欠面板一个 `import host` 的约定格式。
+     重构（见 [scripts.md](scripts.md)）：全部走子进程，文件名=记录名（含扩展名），
+     `scripts` 表加 `runtime` 列；文件头 `@cron` 也砍了（cron 归面板，第三方脚本不欠
+     面板一个约定格式）。旧的多语言实现（文件头扫描 + 子进程执行）在
+     `history/node-only` 分支的 `src/scriptjob.rs`，这次的直接底本。
+
+     守卫：`scripts.rs` 里不许再出现 `crate::engine` / `jsslots`（进了引擎就回去了）。

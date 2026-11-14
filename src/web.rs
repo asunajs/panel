@@ -1811,28 +1811,16 @@ async fn scripts_upload(
 
     let mut added = Vec::new();
     for f in &saved.files {
+        // 只登记顶层单文件；zip 里的子目录文件是脚本自己的资源，不算脚本。
         let p = std::path::Path::new(f);
-        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
+        if p.components().count() != 1 {
             continue;
         }
-        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-        let path = st.scripts_dir.join(format!("{stem}.js"));
-        let Ok(source) = tokio::fs::read_to_string(&path).await else { continue };
-        // 已有记录就保留它的 cron/预算，只把源码写进去。
-        let old = st.scripts.get(stem).await.ok();
-        let (cron, budget, enabled) = match &old {
-            Some(v) => (
-                v["cron"].as_str().map(|s| s.to_string()),
-                v["budget_ms"].as_u64().unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
-                v["enabled"].as_bool().unwrap_or(true),
-            ),
-            None => (None, crate::scripts::DEFAULT_BUDGET_MS, true),
-        };
-        st.scripts
-            .save(stem, &source, cron, budget, enabled)
-            .await
-            .map_err(bad)?;
-        added.push(stem.to_string());
+        // 运行时按扩展名推断（js/ts→node、py→python3、sh→sh、php→php、其它→bin），
+        // 界面上随时可改；记录只补缺失的 —— 重传不改人排好的 cron / 预算。
+        if st.scripts.adopt_record(f, &crate::scripts::infer_runtime(f)).await.unwrap_or(false) {
+            added.push(f.clone());
+        }
     }
     Ok(Json(json!({
         "ok": true,
@@ -3519,7 +3507,15 @@ async fn script_get(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScriptBody {
-    source: String,
+    /// 缺省 = 不改源码，只改 runtime 等元数据（二进制脚本就是这条路）。
+    #[serde(default)]
+    source: Option<String>,
+    /// 运行时：sh / node / bun / python3 / bin / 自定义命令串。缺省 = 保持原值。
+    #[serde(default)]
+    runtime: Option<String>,
+    /// 任务名（用户设置的显示名，运行记录/日志按它记账）。缺省 = 保持原值。
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     cron: Option<String>,
     #[serde(default)]
@@ -3535,17 +3531,76 @@ async fn script_save(
     JsonBody(body): JsonBody<ScriptBody>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let out = st
-        .scripts
-        .save(
-            &name,
-            &body.source,
-            body.cron,
-            body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
-            body.enabled.unwrap_or(true),
-        )
-        .await
-        .map_err(write_err)?;
+    let runtime = match &body.runtime {
+        Some(rt) => rt.clone(),
+        None => st.scripts.runtime_of(&name).await.map_err(bad)?,
+    };
+    let out = match body.source {
+        Some(source) => {
+            // 二进制文件不能当文本改：让用户重新上传替换，而不是默默把字节写花。
+            // get() 对「新建」（文件还没有）会报错 —— 用 ok() 收，没有文件就不是二进制。
+            let cur = st.scripts.get(&name).await.ok();
+            if cur.as_ref().and_then(|v| v["binary"].as_bool()).unwrap_or(false) {
+                return Err(bad("这是二进制文件，不能在编辑器里改文本 —— 请重新上传替换"));
+            }
+            let title = match &body.title {
+                Some(t) => t.clone(),
+                None => cur
+                    .as_ref()
+                    .and_then(|v| v["title"].as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            st.scripts
+                .save(
+                    &name,
+                    &runtime,
+                    &source,
+                    &title,
+                    body.cron,
+                    body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+                    body.enabled.unwrap_or(true),
+                )
+                .await
+                .map_err(write_err)?
+        }
+        None => {
+            // 只改元数据（runtime / 任务名）：cron / 预算没给就保持原值。
+            let cur = st.scripts.get(&name).await.map_err(bad)?;
+            if cur["binary"].as_bool().unwrap_or(false) {
+                // 二进制没有可保存的文本：只允许改运行时 / 任务名。
+                if body.cron.is_some() || body.budget_ms.is_some() || body.enabled.is_some() {
+                    return Err(bad(
+                        "二进制文件没有可保存的文本 —— cron/预算在重新上传后的文本脚本上改，或只传 runtime/title",
+                    ));
+                }
+                let mut out = st.scripts.set_runtime(&name, &runtime).await.map_err(bad)?;
+                if let Some(t) = &body.title {
+                    out = st.scripts.set_title(&name, t).await.map_err(bad)?;
+                }
+                return Ok(Json(out));
+            }
+            let title = match &body.title {
+                Some(t) => t.clone(),
+                None => cur["title"].as_str().unwrap_or("").to_string(),
+            };
+            st.scripts
+                .save(
+                    &name,
+                    &runtime,
+                    cur["source"].as_str().unwrap_or(""),
+                    &title,
+                    body.cron.or_else(|| {
+                        cur["cron"].as_str().filter(|s| !s.is_empty()).map(String::from)
+                    }),
+                    body.budget_ms
+                        .unwrap_or(cur["budget_ms"].as_u64().unwrap_or(crate::scripts::DEFAULT_BUDGET_MS)),
+                    body.enabled.unwrap_or(cur["enabled"].as_bool().unwrap_or(true)),
+                )
+                .await
+                .map_err(write_err)?
+        }
+    };
     st.log.emit(
         crate::scripts::PLUGIN,
         None,
@@ -3559,6 +3614,12 @@ async fn script_save(
 #[serde(deny_unknown_fields)]
 struct NewScript {
     name: String,
+    /// 运行时：sh / node / bun / python3 / php / 自定义命令。缺省按扩展名推断。
+    #[serde(default)]
+    runtime: Option<String>,
+    /// 任务名（用户设置的显示名）。缺省 = 用文件名。
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     source: Option<String>,
     /// 可选：创建时就带上计划（省得「先建再改」两趟）。
@@ -3569,21 +3630,6 @@ struct NewScript {
     budget_ms: Option<u64>,
 }
 
-fn script_template(name: &str) -> String {
-    let q = char::from(39);
-    [
-        format!("// {name}：手动跑，或者填「计划」后定时跑。"),
-        "// host-api 全 async —— 每个 op 都要 await。".to_string(),
-        format!("import host from {q}panel:host{q};"),
-        String::new(),
-        format!("await host.info({q}{name} 跑了一次{q});"),
-        String::new(),
-        "// 能用到的：host.fetch / host.sqlite_query / host.sqlite_exec / host.config".to_string(),
-        "// 注意：脚本不能注册任务（不要调 register_cron），排程请填「计划」。".to_string(),
-    ]
-    .join("\n")
-}
-
 async fn script_create(
     State(st): State<AppState>,
     h: HeaderMap,
@@ -3591,24 +3637,40 @@ async fn script_create(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     crate::scripts::safe_name(&body.name).map_err(bad)?;
-    let path = st.scripts_dir.join(format!("{}.js", body.name));
-    if path.exists() {
-        return Err(bad(format!("脚本 {} 已存在", body.name)));
-    }
-    let source = body.source.unwrap_or_else(|| script_template(&body.name));
     // 以前这里写死 `cron: None`：调用方传了 `cron` 会被**静默忽略**（建出来是手动脚本）。
     // 静默忽略参数是最难查的一类问题（第 36 轮 lead_ms 也是这个毛病），所以现在接住它。
-    let out = st
-        .scripts
-        .save(
-            &body.name,
-            &source,
-            body.cron.clone(),
-            body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
-            true,
-        )
-        .await
-        .map_err(write_err)?;
+    let out = match body.source {
+        // 显式给了源码：按扩展名推断运行时（可被 runtime 字段覆盖）直接落盘。
+        Some(source) => {
+            let runtime = body
+                .runtime
+                .clone()
+                .unwrap_or_else(|| crate::scripts::infer_runtime(&body.name));
+            st.scripts
+                .save(
+                    &body.name,
+                    &runtime,
+                    &source,
+                    body.title.as_deref().unwrap_or(""),
+                    body.cron.clone(),
+                    body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+                    true,
+                )
+                .await
+                .map_err(write_err)?
+        }
+        // 没给源码：写最小模板（模板归 scripts.create，按运行时给语言正确的骨架）。
+        None => {
+            let runtime = body
+                .runtime
+                .clone()
+                .unwrap_or_else(|| crate::scripts::infer_runtime(&body.name));
+            st.scripts
+                .create(&body.name, &runtime, body.title.as_deref().unwrap_or(""))
+                .await
+                .map_err(bad)?
+        }
+    };
     st.log.emit(
         crate::scripts::PLUGIN,
         None,

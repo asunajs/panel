@@ -108,7 +108,9 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             budget_ms   INTEGER NOT NULL,
             enabled     INTEGER NOT NULL DEFAULT 1,
             next_at     INTEGER,
-            updated_at  INTEGER NOT NULL
+            updated_at  INTEGER NOT NULL,
+            runtime     TEXT NOT NULL DEFAULT 'node',
+            title       TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS runs (
@@ -151,6 +153,24 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("加 repeat 失败: {e}"))?;
+    }
+    // 脚本的「运行时」（2026-11-14，脚本改第三方程序模型）：sh / node / bun / python3 /
+    // bin（直接执行文件本身）/ 自定义命令串。旧库没有这一列，存量脚本默认 'node'。
+    if !has_column(conn, "scripts", "runtime")? {
+        conn.execute(
+            "ALTER TABLE scripts ADD COLUMN runtime TEXT NOT NULL DEFAULT 'node'",
+            [],
+        )
+        .map_err(|e| format!("加 scripts.runtime 失败: {e}"))?;
+    }
+    // 脚本的「任务名」（2026-11-14）：用户设置的显示名，运行记录/日志按它记账；
+    // 空 = 用文件名。文件名是存储键，任务名是给人看的。
+    if !has_column(conn, "scripts", "title")? {
+        conn.execute(
+            "ALTER TABLE scripts ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("加 scripts.title 失败: {e}"))?;
     }
     // 第 186 轮：定时推送要记住「上次什么时候发的」，不然每次 tick 都会重发。
     conn.execute(

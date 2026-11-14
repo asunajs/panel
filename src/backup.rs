@@ -48,7 +48,9 @@ pub async fn collect(
         if let Ok(d) = scripts.get(&name).await {
             out_scripts.push(json!({
                 "name": name,
+                "title": d["title"],
                 "source": d["source"],
+                "runtime": d["runtime"],
                 "cron": d["cron"],
                 "budget_ms": d["budget_ms"],
                 "enabled": d["enabled"],
@@ -213,7 +215,12 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
             .unwrap_or(crate::scripts::DEFAULT_BUDGET_MS);
         let cron = s["cron"].as_str().map(|c| c.to_string());
         let enabled = s["enabled"].as_bool().unwrap_or(true);
-        match scripts.save(name, source, cron, budget, enabled).await {
+        let runtime = match s["runtime"].as_str() {
+            Some(rt) => rt.to_string(),
+            None => scripts.runtime_of(name).await.unwrap_or_else(|_| "node".into()),
+        };
+        let title = s["title"].as_str().unwrap_or("");
+        match scripts.save(name, &runtime, source, title, cron, budget, enabled).await {
             Ok(_) => out_scripts.push(json!({ "name": name, "ok": true })),
             Err(e) => out_scripts.push(json!({ "name": name, "ok": false, "error": e })),
         }
@@ -331,7 +338,6 @@ async fn ctx() -> Result<Ctx, String> {
         scripts_dir,
         data_dir.join("trash"),
         data_dir.clone(),
-        config.clone(),
     );
     Ok(Ctx {
         data_dir,
