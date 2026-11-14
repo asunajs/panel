@@ -77,6 +77,16 @@
         </div>
       </p-card>
 
+      <p-card title="发码格" desc="p-sms-code —— 手机号 + 行内「获取验证码」">
+        <!-- 手机号 + 行内按钮合成一格（.input-group），满 length 位才放开按钮。
+             控件只管界面、不发请求：点按钮派 `send`，插件去调自己的发码接口，
+             成功后 startResend() 起重发倒计时（倒计时是界面节奏，能不能发服务端说了算）。 -->
+        <p-field label="手机号">
+          <p-sms-code id="d-sms" length="11" seconds="60"></p-sms-code>
+        </p-field>
+        <div class="demo-out" id="d-sms-out">（填满 11 位数字，点「获取验证码」）</div>
+      </p-card>
+
       <p-card title="数字输入的三种状态" desc="tone: ok / warn / err">
         <div class="demo-row">
           <p-number label="成功" hint="校验通过" tone="ok" value="30" min="0" max="100" step="5"></p-number>

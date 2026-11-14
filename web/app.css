@@ -1143,6 +1143,35 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 /* 插件自己画提示条时常把「不提示」写成 `toast('')`：空内容的卡片会被当成「加载中」，别画。 */
 .toast:empty { display: none; }
 
+/* 「输入框 + 行内按钮」合成一格（发码页的 `请输入手机号 | 获取验证码`，<p-sms-code> 也用它）。
+   为什么要合成一格而不是并排两个方块：这样按钮的**从属关系**一眼可见 ——
+   它是"给这个输入框"用的，不是旁边另一个独立动作（mcloud 第一版并排时看不出来）。
+   行内按钮有意没有底色、没有自己的圆角，只有一条左边线：要长得像输入框的一部分，
+   而不是一颗按钮。规格照 .input（--line-strong / --r-control / --surface）。 */
+.input-group {
+  display: flex; align-items: stretch; min-height: var(--h-control);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); overflow: hidden;
+}
+.input-group:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.input-group input {
+  flex: 1 1 auto; min-width: 0; padding: 0 var(--pad-control);
+  border: none; border-radius: 0; background: transparent;
+  color: var(--fg); font: inherit; font-size: 13px; outline: none;
+}
+.input-group .btn {
+  flex: 0 0 auto; border: none; border-left: 1px solid var(--line-strong);
+  border-radius: 0; background: transparent;
+  color: var(--accent); white-space: nowrap;
+}
+/* 禁用态。通用 `.btn` 没写这一条，而"还不能点"在这里是**有信息**的
+   （号码不满 11 位 / 重发倒计时里）—— 不给样子的话，用户只会觉得按钮坏了，
+   而"点了没反应"是最糟的反馈。 */
+.input-group .btn:disabled { color: var(--dim); cursor: not-allowed; }
+
 
 /* ---------- 数字输入：收掉原生步进器，给一个自己的（对齐 TDesign 的 InputNumber） ---------- */
 

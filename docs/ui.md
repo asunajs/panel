@@ -633,8 +633,17 @@ computed lineHeight / fontSize / padding。
 | `p-table` | `<p-table head="名字,状态" rows='[["a","ok"]]'>` | 复用面板的 ``.tab`le`；单元格可以是 {text,tone} 变 badge |
 | `p-code` | `<p-code lang="js">`…</`p-code`> | 只读代码块，有 /highlight.js 就上色，带复制按钮 |
 | `p-form` | `<p-form submit-label="保存">`… | `.value`s() 收集带 name 的控件；提交派发 submit |
+| `p-sms-code` | `<p-sms-code length="11" seconds="60">` | 发码格（手机号 + 行内「获取验证码」）；点按钮派 `send`，`.value` 只剩数字 |
 
 两个设计约束没变：颜色只走 token；元素内部只包面板已有的 class（`.btn` / ``.tab`le` / `.badge` / `.tab`）。
+
+`p-sms-code`（第 182 轮）是从 mcloud 登录页提上来的发码格：手机号 + 行内「获取验证码」
+合成一格（`.input-group`，样式在 /app.css 的「供插件复用的组件补全」段）。分工的边界：
+**控件只管界面，不发请求** —— 门禁只按位数（满 `length` 位才放开，提前告知而不是点了才报错）、
+点按钮派 `send`（`detail.value` 带手机号，插件去调自己的发码接口）、请求在途设 `.busy`
+（禁住防连点）、发完 `.startResend()` 起重发倒计时（倒计时是**界面节奏，不是权威**，
+能不能发、还剩几次服务端说了算）。活例子在套件演示页的「发码格」卡，
+`ui-kit-check.mjs` 在真浏览器里点过一遍。
 
 ### 两个踩出来的约束
 

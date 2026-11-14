@@ -7,6 +7,7 @@
  *
  *   <p-card title="账号">
  *     <p-field label="听窗口长度（秒）"><input class="input" type="number"></p-field>
+ *     <p-field label="手机号"><p-sms-code id="sms-send"></p-sms-code></p-field>
  *     <p-button variant="primary">保存</p-button>
  *     <p-badge tone="ok">已登录</p-badge>
  *   </p-card>
@@ -899,6 +900,137 @@
     }
   }
 
+  /** <p-sms-code length="11" seconds="60" placeholder="请输入手机号" button="获取验证码">
+   *
+   *  手机号 + 行内「获取验证码」合成一格（.input-group）—— 发码页（登录 / 绑定 / 领奖）
+   *  共用的那格。从 mcloud 的登录页提上来：它最早照参考实现画的，别的插件要发码
+   *  就得再抄一遍这一格和倒计时。
+   *
+   *  分工的边界：**控件只管界面，不发请求**。
+   *    · 门禁：只按"还差几个字符"（满 `length` 位才放开按钮）—— 提前告知，不是替
+   *      用户判断；点了才报错的写法要先失败一次才知道规则。
+   *    · 点按钮派 `send`（`detail.value` 带手机号），插件去调自己的发码接口；
+   *      请求期间设 `el.busy = true`（按钮禁住防连点），成功后 `el.startResend()`。
+   *    · `startResend(seconds)` 是**界面节奏，不是权威** —— 能不能发、还剩几次，
+   *      最终是服务端说了算。它的用处只是别让用户连点：连点只会喂限流。
+   *      倒计时接管后按钮写「重新获取（N 秒）」并禁用，`stopResend()` / 倒计时走完
+   *      回到「获取验证码」，是否可点重新按位数算。
+   *  读值：`el.value`（只剩数字）；手机号变化冒 `input` / `change`。
+   *  输入框上回车 = 点行内按钮（手机上少一次瞄准），不可点时 disabled 自然挡住。
+   */
+  class PSmsCode extends HTMLElement {
+    static get observedAttributes() { return ['disabled']; }
+    connectedCallback() {
+      if (this._in) return;
+      const self = this;
+      this._len = Math.max(1, Math.round(Number(this.getAttribute('length')) || 11));
+      this._timer = null;
+      this._busy = false;
+      const group = build(this, 'input-group');
+      const input = document.createElement('input');
+      input.type = 'tel';
+      input.inputMode = 'numeric';
+      input.autocomplete = 'tel';
+      input.maxLength = this._len;
+      input.placeholder = this.getAttribute('placeholder') || '请输入手机号';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn';
+      btn.textContent = this.getAttribute('button') || '获取验证码';
+      group.append(input, btn);
+      this._in = input;
+      this._btn = btn;
+
+      input.addEventListener('input', () => {
+        // 只留数字；`maxlength` 管不住粘贴，这里再截一遍
+        const digits = input.value.replace(/\D/g, '').slice(0, self._len);
+        if (digits !== input.value) input.value = digits;
+        self._gate();
+        self.dispatchEvent(new CustomEvent('input', { detail: { value: digits }, bubbles: true }));
+      });
+      input.addEventListener('change', () => {
+        self.dispatchEvent(new CustomEvent('change', { detail: { value: self.value }, bubbles: true }));
+      });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !btn.disabled) {
+          ev.preventDefault();
+          btn.click();
+        }
+      });
+      btn.addEventListener('click', () => {
+        if (btn.disabled) return;
+        self.dispatchEvent(new CustomEvent('send', { detail: { value: self.value }, bubbles: true }));
+      });
+      this._gate();
+    }
+    disconnectedCallback() {
+      // 元素被摘掉（弹窗销毁）还留着定时器的话，它会在后台一直跑
+      if (this._timer) {
+        clearInterval(this._timer);
+        this._timer = null;
+      }
+    }
+    attributeChangedCallback(name) {
+      if (name === 'disabled' && this._in) {
+        this._in.disabled = this.hasAttribute('disabled');
+        this._gate();
+      }
+    }
+    /** 按钮可不可点：整体禁用 / 发码请求中 / 倒计时里 / 位数不满，任一都不行。
+     *  ⚠ 倒计时自己每秒都会写一次 disabled，这里不排它的话「重新获取（N 秒）」
+     *    会被重画重新点亮（mcloud 第 145 轮踩过：每次 load() 重画都走到这）。 */
+    _gate() {
+      if (!this._btn) return;
+      const ok =
+        !this.hasAttribute('disabled') &&
+        !this._busy &&
+        this._timer === null &&
+        this.value.length === this._len;
+      this._btn.disabled = !ok;
+    }
+    get value() { return this._in ? this._in.value : ''; }
+    set value(v) {
+      if (!this._in) return;
+      this._in.value = String(v === undefined || v === null ? '' : v).replace(/\D/g, '').slice(0, this._len);
+      this._gate();
+    }
+    get disabled() { return this.hasAttribute('disabled'); }
+    set disabled(v) { this.toggleAttribute('disabled', !!v); }
+    /** 发码请求进行中（按钮禁住防连点）。控件不改按钮文字 —— 那一两秒很短，
+     *  成败的话由插件的 toast 说，别在这里闪一下「…」。 */
+    get busy() { return !!this._busy; }
+    set busy(v) {
+      this._busy = !!v;
+      this._gate();
+    }
+    startResend(seconds) {
+      if (!this._btn) return;
+      let left = Math.max(1, Math.round(Number(seconds) || 60));
+      if (this._timer) clearInterval(this._timer);
+      const tick = () => {
+        if (left <= 0) {
+          this.stopResend();
+          return;
+        }
+        this._btn.textContent = `重新获取（${left} 秒）`;
+        this._btn.disabled = true;
+        left -= 1;
+      };
+      tick();
+      this._timer = setInterval(tick, 1000);
+    }
+    /** 停掉倒计时，按钮回到「获取验证码」，可不可点重新按位数算。 */
+    stopResend() {
+      if (this._timer) {
+        clearInterval(this._timer);
+        this._timer = null;
+      }
+      if (!this._btn) return;
+      this._btn.textContent = this.getAttribute('button') || '获取验证码';
+      this._gate();
+    }
+  }
+
   const define = (name, cls) => {
     if (!customElements.get(name)) customElements.define(name, cls);
   };
@@ -917,6 +1049,7 @@
   define('p-table', PTable);
   define('p-code', PCode);
   define('p-form', PForm);
+  define('p-sms-code', PSmsCode);
 
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
