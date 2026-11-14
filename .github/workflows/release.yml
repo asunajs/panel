@@ -181,6 +181,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # 32 位 ARM 是**加分档**，不能让它把 aarch64 / x86_64 的发版拖死。
+    # 它依赖 rquickjs-sys 的 bindgen（该 crate 没给 armv7-musl 预生成绑定），
+    # 这条链更脆：失败时照发前两档，install.sh 在 armv7 上会明确说「本期没这个架构的产物」。
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -254,7 +258,9 @@ jobs:
     name: 发布
     needs: [build, armv7]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # armv7 是 continue-on-error，所以这里恒为「非取消就发」：
+    # 它成功就把第三个资产一起发，失败也不拦前两档。
+    if: startsWith(github.ref, 'refs/tags/') && !cancelled()
     permissions:
       contents: write
     steps:
@@ -271,8 +277,13 @@ jobs:
         run: |
           cd dist
           ls -lh
-          cat SHA256SUMS-* | sort -k2 > SHA256SUMS
-          rm -f SHA256SUMS-*
+          # armv7 那一档被 continue-on-error 放行时它没有产物，这里不能因为
+          # 通配没匹配上而整步失败（sh 默认会把裸通配原样传给 cat）。
+          shopt -s nullglob
+          SUMS=(SHA256SUMS-*)
+          echo "收到的架构数: ${#SUMS[@]}"
+          cat "${SUMS[@]}" | sort -k2 > SHA256SUMS
+          rm -f "${SUMS[@]}"
           echo "--- SHA256SUMS ---"
           cat SHA256SUMS
 

@@ -3682,6 +3682,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rquickjs",
+ "rquickjs-sys",
  "rusqlite",
  "rustls",
  "rustls-pki-types",

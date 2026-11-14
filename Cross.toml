@@ -1,0 +1,9 @@
+# 交叉编译的容器准备（.github/workflows/release.yml 的 armv7 那一档）。
+#
+# 为什么需要：rquickjs-sys 没给 armv7-unknown-linux-musleabihf 预生成绑定，
+# 走它的 `bindgen` feature 现场生成，而 bindgen 要 **libclang**。
+# cross 的镜像里没有，所以在这个目标上先装一层。
+[target.armv7-unknown-linux-musleabihf]
+pre-build = [
+  "apt-get update && apt-get install -y --no-install-recommends libclang-dev clang",
+]
