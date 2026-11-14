@@ -254,10 +254,13 @@ esac
 echo
 ok "装好了。三步跑起来："
 echo
-echo "  1) 设个令牌并启动："
-echo "       PANEL_TOKEN=你的令牌 $INSTALL_DIR/$BIN_NAME"
+echo "  1) 启动："
+echo "       $INSTALL_DIR/$BIN_NAME"
 echo
-echo "  2) 浏览器打开 http://127.0.0.1:8787 ，输入令牌解锁。"
+echo "  2) 浏览器打开 http://127.0.0.1:8787 —— 首次打开会引导你设一个口令"
+echo "     （自己填，或点「随机生成一个」；设完立即生效，不用重启）。"
+echo
+echo "     不想走引导（服务化 / 无头部署）：PANEL_TOKEN=你的令牌 $INSTALL_DIR/$BIN_NAME"
 echo
 echo "  3) 有 0.3.x 的旧面板？一条命令整体迁移（插件账号、任务计划、脚本、运行历史）："
 echo "       $INSTALL_DIR/$BIN_NAME migrate <旧数据目录> --apply \\"
@@ -265,11 +268,12 @@ echo "         --with-tasks --with-runs-history --with-notify --with-plugin-data
 echo "     （面板启动时也会自动检测旧数据并提醒一次；详情见 docs/migrate.md）"
 echo
 echo "  常用环境变量："
+echo "    PANEL_TOKEN=你的令牌         跳过口令引导（服务化 / 无头部署用）"
 echo "    PANEL_BIND=0.0.0.0:8787      让别的设备访问（默认只听 127.0.0.1:8787）"
 echo "    PANEL_DATA_DIR=./data        数据目录（panel.db / plugin-data / scripts）"
 echo "    PANEL_PLUGINS_DIR=./plugins  插件目录"
 echo
-echo "  服务化部署（launchd / systemd）：把上面第 1 步注册成服务即可；"
-echo "  令牌想离线写入（进程环境里不留明文）用 \`panel token\`。"
+echo "  服务化部署（launchd / systemd）：把启动命令注册成服务；这类场景没有浏览器可点，"
+echo "  用 PANEL_TOKEN 给令牌（或先跑一次面板在界面里设好口令，之后服务直接复用凭据）。"
 echo
 echo "  ⚠️  不要把没有令牌的面板直接暴露到公网；公网访问走 HTTPS 反向代理。"
