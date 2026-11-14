@@ -748,11 +748,19 @@ function renderPlugins() {
     const head = el('div', 'plugin-head');
     head.append(el('div', 'plugin-name', p.title || p.name));
     if (p.title && p.title !== p.name) head.append(el('div', 'plugin-file', p.name));
-    head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
+    // 按需加载的插件没装进内存，说「空闲」会让人以为它随时能跑 —— 干脆不挂这个 pill
+    if (!p.lazy) head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
     // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
     if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
-    // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
-    if (p.unloaded) head.append(pill('pill', '空闲已卸载'));
+    // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
+    if (p.lazy) {
+      const pl = pill('pill', '按需加载');
+      pl.title = '启动时没有加载它（没有界面、任务都还没到点）。到点前 2 分钟会自动装回来，也可以点「加载」。';
+      head.append(pl);
+    } else if (p.unloaded) {
+      // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
+      head.append(pill('pill', '空闲已卸载'));
+    }
     cardEl.append(head);
     const meta = el('div', 'plugin-meta');
     meta.append(el('span', '', mine.length + ' 个任务'));
@@ -945,6 +953,11 @@ function renderTasks() {
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
     st.append(taskPill(t));
+    if (t.lazy && !t.deleted) {
+      const lz = pill('pill', '待加载');
+      lz.title = '插件这次启动没加载（按需加载）。任务计划是真的，到点前 2 分钟会自动装回来。';
+      st.append(lz);
+    }
     if (t.deleted) {
       const d = pill('pill', '已删除');
       d.title = '用户删的（插件重新注册也不会复活）。恢复后会从当前时间重算下一拍。';
@@ -958,6 +971,17 @@ function renderTasks() {
     }
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
+    if (t.lazy) {
+      // 按需加载的占位任务（第 179 轮）：计划、下次运行都真，只是插件还没装进内存，
+      // 现在点「执行」只会报错 —— 直接给一个「加载插件」更省事。
+      const ops = t.deleted
+        ? [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]]
+        : [['加载插件', () => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)]];
+      if (!t.deleted && !t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
+      tr.append(actionsCell(ops));
+      body.append(tr);
+      continue;
+    }
     if (t.deleted) {
       // 已删除：只剩「恢复」。运行记录、日志都还在，恢复后接着算。
       const ops = [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]];
@@ -1543,7 +1567,7 @@ async function showPlugin(name) {
     const data = await api('/api/runs?limit=8&plugin=' + encodeURIComponent(name));
     clear(body);
     body.append(kvList([
-      ['状态', p ? (p.busy ? '运行中' : '空闲') : '—'],
+      ['状态', p ? (p.lazy ? '按需加载（还没装进内存）' : p.busy ? '运行中' : '空闲') : '—'],
       ['任务数', tasks.length],
       ['最近运行', (data.runs || []).length + ' 条'],
     ]));
@@ -1593,7 +1617,8 @@ async function showPlugin(name) {
       ...((state.suspended || []).includes(name)
         ? [mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))]
         : [mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name))]),
-      mkOp('重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', '已重载 ' + name)),
+      // 按需加载的插件，「重载」就是「加载」—— 文案跟着实际情况走，别让人猜
+      mkOp(p && p.lazy ? '加载' : '重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', (p && p.lazy ? '已加载 ' : '已重载 ') + name)),
       mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
       mkOp('删除插件', () => deletePlugin(name), true),
     );

@@ -177,6 +177,11 @@ struct Task {
     schedule: Option<Schedule>,
     budget_ms: u64,
     enabled: bool,
+    /// 按需加载的**占位**任务（第 179 轮）：插件这次启动没加载，任务行是从库里搬来的。
+    ///
+    /// 它照样出现在任务表里（用户能看见、能暂停、能改计划），但不派发 —— 没有 JS 运行时，
+    /// 派发只会炸。插件被唤醒/手动加载后，真正的 register_cron 会按同名替换掉它（lazy 归 false）。
+    lazy: bool,
     /// 用户删掉的时刻（第 178 轮）。None = 没删。
     ///
     /// 删掉不等于从库里抹掉：插件下次注册还会带上这条，没有墓碑的话它就会
@@ -260,6 +265,7 @@ impl Task {
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
             enabled: true,
+            lazy: false,
             deleted_at: None,
             base_fire: base,
             next_fire: next,
@@ -292,6 +298,7 @@ impl Task {
             schedule: None,
             budget_ms: DEFAULT_BUDGET_MS,
             enabled: true,
+            lazy: false,
             deleted_at: None,
             base_fire: far,
             next_fire: far,
@@ -395,6 +402,8 @@ pub struct TaskView {
     pub enabled: bool,
     /// 用户删过（墓碑）。界面默认不显示，带 deleted=1 才列出来。
     pub deleted: bool,
+    /// 插件这次没加载，任务行是从库里搬来的（按需加载）。界面上标「待加载」。
+    pub lazy: bool,
     pub next_at: i64,
     pub tripped: bool,
     pub trips: u32,
@@ -402,6 +411,21 @@ pub struct TaskView {
     pub runs: u64,
     pub last_run: Option<i64>,
     pub last_error: Option<String>,
+}
+
+/// 懒加载的起步数据（第 179 轮）：库里的任务行，插件这次启动不加载。
+///
+/// 有了它，任务表在「插件没装进内存」时也能列出正确的计划、下次运行时间，
+/// 用户照样能暂停/改计划 —— 只是不能立刻执行（没有 JS 运行时）。
+#[derive(Debug, Clone)]
+pub struct LazyTask {
+    pub plugin: String,
+    pub name: String,
+    pub cron: String,
+    pub budget_ms: i64,
+    pub enabled: bool,
+    pub next_at: Option<i64>,
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,6 +445,8 @@ pub struct PluginView {
     pub nav: Option<NavEntry>,
     /// 因为空闲被卸载了（第 174 轮）：任务还在、界面还能开，但 JS 运行时不在内存里。
     pub unloaded: bool,
+    /// 启动时就没加载（第 179 轮「按需加载」）：下次到点前两分钟、或用户点「加载」时才装。
+    pub lazy: bool,
 }
 
 /// 侧栏入口：面板左侧栏里的一格。
@@ -526,6 +552,13 @@ pub enum Cmd {
         task: String,
         enabled: bool,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 启动时按需加载：把没加载的插件的任务行塞进任务表（第 179 轮）。
+    SeedLazy {
+        tasks: Vec<LazyTask>,
+        /// 连任务行都没有的插件（只有 handler）：也要列在界面里，否则会「凭空消失」
+        names: Vec<String>,
+        reply: oneshot::Sender<usize>,
     },
     /// 用户删任务（第 178 轮）：打墓碑，不抹库。
     DeleteTask {
@@ -745,6 +778,25 @@ impl Scheduler {
     }
 
 
+    /// 启动时按需加载：把「这次没加载」的插件的任务行交给调度器（第 179 轮）。
+    ///
+    /// 返回塞进去多少条。插件本体不加载，等下次到点前两分钟或用户点「加载」。
+    pub async fn seed_lazy(&self, tasks: Vec<LazyTask>, names: Vec<String>) -> usize {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(Cmd::SeedLazy {
+                tasks,
+                names,
+                reply: tx,
+            })
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
+    }
+
     /// 删掉一条任务（打墓碑，不抹库）。见 Task::deleted_at。
     pub async fn delete_task(&self, plugin: &str, task: &str) -> Result<(), String> {
         let (plugin, task) = (plugin.to_string(), task.to_string());
@@ -899,6 +951,9 @@ struct Inner {
     /// 因为**空闲**被卸载的插件（第 174 轮）：名字 → 卸载时刻。
     /// 与「接口坏了的卸载」不同：这里的任务、侧栏、web 路由都留着，随时能装回来。
     unloaded: HashMap<String, i64>,
+    /// 启动时**没加载**的插件（第 179 轮「按需加载」）。它们也在 unloaded 里，
+    /// 这里单独记一份是为了让界面能区分「闲下来被卸了」和「一开始就没装」。
+    lazy: std::collections::HashSet<String>,
     /// 插件目录：空闲卸载后要能从磁盘把源码读回来。
     plugins_dir: Option<std::path::PathBuf>,
     /// 正在异步唤醒的插件（避免同一拍发两次 load）。
@@ -957,6 +1012,7 @@ pub fn start(
         cfg: TripConfig::default(),
         plugins: HashMap::new(),
         unloaded: HashMap::new(),
+        lazy: std::collections::HashSet::new(),
         plugins_dir: None,
         waking: std::collections::HashSet::new(),
         tasks: Vec::new(),
@@ -1054,6 +1110,30 @@ impl Task {
         self.next_fire = next;
         Ok(())
     }
+}
+
+/// 启动时能不能省掉这次加载（第 179 轮「按需加载」）。
+///
+/// 判据两条，缺一不可：
+///   ① 这个插件**没有界面**（上次加载时既没 register_web 也没 sidebar）——
+///      有界面的不能省：用户可能正打开着它，省了就是一点就报错。
+///   ② 它名下每条**没删**的任务，下次到点都还在唤醒窗口之外。
+///      next_at 缺失（从没跑过/算不出来）也算「不能省」—— 宁可按老样子装上。
+///
+/// 没有任何任务也算能省：只注册 handler、又没有界面的插件，谁也碰不到它。
+pub fn should_start_unloaded(
+    has_web: bool,
+    has_nav: bool,
+    next_ats: &[Option<i64>],
+    now_ms: i64,
+    window_ms: i64,
+) -> bool {
+    if has_web || has_nav {
+        return false;
+    }
+    next_ats
+        .iter()
+        .all(|v| v.map(|ms| ms > now_ms + window_ms).unwrap_or(false))
 }
 
 /// 库里记着的任务状态。读失败就当没有 —— 不能让一条坏行拦住启动。
@@ -1166,6 +1246,64 @@ impl Inner {
                 let n = self.idle_tick();
                 let _ = reply.send(n);
             }
+            Cmd::SeedLazy { tasks, names, reply } => {
+                let mut n = 0;
+                let mut names: Vec<String> = names;
+                for row in tasks {
+                    if self.find(&row.plugin, &row.name).is_some() {
+                        continue; // 插件已经注册过同名任务：真家伙优先
+                    }
+                    let mut t = if row.cron.is_empty() {
+                        Task::manual(row.plugin.clone(), row.name.clone())
+                    } else {
+                        match Task::with_opts(
+                            row.plugin.clone(),
+                            row.name.clone(),
+                            row.cron.clone(),
+                            row.budget_ms.max(1) as u64,
+                            None,
+                            0,
+                        ) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                self.log.emit(
+                                    &row.plugin,
+                                    None,
+                                    Level::Warn,
+                                    format!("库里的任务 {} 调度不合法（{e}），按手动任务列出", row.name),
+                                );
+                                Task::manual(row.plugin.clone(), row.name.clone())
+                            }
+                        }
+                    };
+                    t.lazy = true;
+                    t.enabled = row.enabled;
+                    t.deleted_at = row.deleted_at;
+                    if let Some(ms) = row.next_at {
+                        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+                            t.next_fire = dt.with_timezone(&Local);
+                        }
+                    }
+                    self.tasks.push(t);
+                    n += 1;
+                    if !names.contains(&row.plugin) {
+                        names.push(row.plugin.clone());
+                    }
+                }
+                // 这些插件也要进 unloaded：到点前两分钟由 wake_unloaded 装回来
+                let now = Local::now().timestamp_millis();
+                for name in names {
+                    self.unloaded.insert(name.clone(), now);
+                    self.lazy.insert(name.clone());
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Info,
+                        format!("插件 {name} 按需加载：这次启动没有加载它（下次到点前会自动装回来）"),
+                    );
+                }
+                let _ = reply.send(n);
+            }
             Cmd::Loaded {
                 name,
                 result,
@@ -1185,6 +1323,12 @@ impl Inner {
                         );
                         self.unloaded.remove(&name);
                         self.waking.remove(&name);
+                        self.lazy.remove(&name);
+                        // 占位任务里没有被真正 register_cron 顶掉的，说明插件已经不注册它了
+                        // （改了名字、删了任务）：留着会让任务表显示不存在的东西。
+                        self.tasks.retain(|t| !(t.plugin == name && t.lazy));
+                        // 记下「这个插件有没有界面」：下次启动据此决定要不要省这一次加载
+                        self.note_surface_async(&name);
                         Ok(())
                     }
                     Err(e) => {
@@ -1296,6 +1440,7 @@ impl Inner {
                         has_web: self.web.contains(name),
                         nav: self.sidebar.get(name).cloned(),
                         unloaded: false,
+                        lazy: false,
                     })
                     .collect();
                 // 空闲卸载的也要列出来：不然界面上「插件没了」，其实只是省内存。
@@ -1312,6 +1457,7 @@ impl Inner {
                         has_web: self.web.contains(name),
                         nav: self.sidebar.get(name).cloned(),
                         unloaded: true,
+                        lazy: self.lazy.contains(name),
                     });
                 }
                 v.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1506,6 +1652,12 @@ impl Inner {
                 None => {
                     let _ = reply.send(Err(format!("没有这个任务: {plugin}/{task}")));
                 }
+                Some(i) if self.tasks[i].lazy => {
+                    let (p0, n0) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+                    let _ = reply.send(Err(format!(
+                        "插件 {p0} 还没加载（按需加载），先点插件卡片上的「加载」再执行 {n0}"
+                    )));
+                }
                 Some(i) => self.dispatch(i, true, Some(reply)).await,
             },
             Cmd::Stop { plugin, reply } => {
@@ -1633,6 +1785,7 @@ impl Inner {
                 budget_ms: t.budget_ms,
                 enabled: t.enabled,
                 deleted: t.deleted_at.is_some(),
+                lazy: t.lazy,
                 // 暂停的任务不报「下次运行」：界面上「已暂停」旁边挂一个未来时间只会让人以为它要跑。
                 next_at: if t.enabled && t.deleted_at.is_none() {
                     t.next_fire.timestamp_millis()
@@ -1745,6 +1898,20 @@ impl Inner {
         self.reg.clone()
     }
 
+    /// 把「这个插件有没有界面」写进库（懒加载的判据，见 load_all）。
+    ///
+    /// 为什么注册时就要写：Loaded 和 Registration::Web/Sidebar 是两条独立的消息，
+    /// 谁先到不确定。只在 Loaded 时写，会记下 has_web=0 —— 下次启动就把有界面的插件
+    /// 也当成「可以省」的省掉了（第 179 轮实测：第二次启动 uiface 直接不见了）。
+    fn note_surface_async(&self, name: &str) {
+        let (hw, hn) = (self.web.contains(name), self.sidebar.contains_key(name));
+        let db = self.db.clone();
+        let n = name.to_string();
+        tokio::spawn(async move {
+            crate::db::note_surface(&db, &n, hw, hn).await;
+        });
+    }
+
     fn register(&mut self, r: Registration) {
         match r {
             Registration::Cron {
@@ -1799,14 +1966,16 @@ impl Inner {
             // 否则只注册 handler、没注册 cron 的插件在界面上根本点不到。
             // 随后同名 register_cron 会把它升级成定时任务。
             Registration::Web { plugin } => {
-                self.web.insert(plugin);
+                self.web.insert(plugin.clone());
+                self.note_surface_async(&plugin);
             }
             Registration::Sidebar {
                 plugin,
                 title,
                 order,
             } => {
-                self.sidebar.insert(plugin, NavEntry { title, order });
+                self.sidebar.insert(plugin.clone(), NavEntry { title, order });
+                self.note_surface_async(&plugin);
             }
             Registration::Handler { plugin, name } => {
                 if self.find(&plugin, &name).is_none() {
@@ -2012,7 +2181,12 @@ impl Inner {
         // 这些拍会被跳过 —— 必须说出来，否则用户只会看到「有的整点任务没跑」，无从下手。
         for i in 0..self.tasks.len() {
             let t = &self.tasks[i];
-            if t.deleted_at.is_some() || !t.enabled || t.schedule.is_none() || trigger_at(t) > now {
+            if t.deleted_at.is_some()
+                || t.lazy
+                || !t.enabled
+                || t.schedule.is_none()
+                || trigger_at(t) > now
+            {
                 continue;
             }
             let busy = self

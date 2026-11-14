@@ -152,6 +152,17 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("加 repeat 失败: {e}"))?;
     }
+    // 第 179 轮：懒加载要知道「这个插件上次加载时有没有界面」——
+    // 有界面的必须立刻加载（用户可能正打开着它），没有的可以等下一次到点前再装。
+    for (col, ddl) in [
+        ("has_web", "ALTER TABLE plugins ADD COLUMN has_web INTEGER NOT NULL DEFAULT 0"),
+        ("has_nav", "ALTER TABLE plugins ADD COLUMN has_nav INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !has_column(conn, "plugins", col)? {
+            conn.execute(ddl, [])
+                .map_err(|e| format!("加 {col} 失败: {e}"))?;
+        }
+    }
     for (col, ddl) in [
         ("override_expr", "ALTER TABLE tasks ADD COLUMN override_expr TEXT"),
         ("summary", "ALTER TABLE tasks ADD COLUMN summary TEXT"),
@@ -221,6 +232,93 @@ pub async fn set_plugin_suspended(db: &Db, name: &str, suspended: bool) -> Resul
 ///
 /// 启动加载和 `/api/state` 都用这一份判据 —— 两处不一致就会出现
 /// 「界面说禁用了，重启又活了」。
+/// 记下「这个插件有没有 web 路由 / 侧栏入口」。
+///
+/// 懒加载的判据靠它：有界面的插件不能省（用户可能正打开着），
+/// 没有的才能等下一次到点前再装。首次加载时会补上这一行。
+pub async fn note_surface(db: &Db, name: &str, has_web: bool, has_nav: bool) {
+    let name = name.to_string();
+    let _ = db
+        .call(move |c| {
+            c.execute(
+                "INSERT INTO plugins(name, path, enabled, has_web, has_nav)
+                 VALUES(?1, '', 1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET has_web=excluded.has_web, has_nav=excluded.has_nav",
+                rusqlite::params![name, has_web as i64, has_nav as i64],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await;
+}
+
+/// 每个插件「有没有界面」的上次记录。没有记录的插件 = 从没加载过（要加载一次去发现）。
+pub async fn plugin_surfaces(db: &Db) -> std::collections::HashMap<String, (bool, bool)> {
+    let rows = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT name, has_web, has_nav FROM plugins")
+                .map_err(|e| e.to_string())?;
+            let out: Vec<(String, i64, i64)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            Ok(out)
+        })
+        .await
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|(n, w, v)| (n, (w != 0, v != 0)))
+        .collect()
+}
+
+/// 库里记着的任务（还没删的），给懒加载起步用：不加载插件也能把它们列进任务表。
+///
+/// 返回 (plugin, name, cron, budget_ms, enabled, next_at, deleted_at)。
+#[allow(clippy::type_complexity)]
+pub async fn saved_task_rows(
+    db: &Db,
+) -> Vec<(
+    String,
+    String,
+    String,
+    i64,
+    bool,
+    Option<i64>,
+    Option<i64>,
+)> {
+    db.call(|c| {
+        let mut st = c
+            .prepare(
+                "SELECT plugin, name, cron, budget_ms, enabled, next_at, deleted_at
+                   FROM tasks ORDER BY plugin, name",
+            )
+            .map_err(|e| e.to_string())?;
+        let out: Vec<(String, String, String, i64, i64, Option<i64>, Option<i64>)> = st
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        Ok(out
+            .into_iter()
+            .map(|(p, n, c, b, e, nx, d)| (p, n, c, b, e != 0, nx, d))
+            .collect())
+    })
+    .await
+    .unwrap_or_default()
+}
+
 pub async fn plugin_disabled_names(db: &Db) -> Vec<String> {
     let rows = db
         .call(|c| {
