@@ -941,6 +941,8 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   box-shadow: var(--shadow-md);
 }
 .modal-card h2 { font-size: 15px; }
+/* 确认弹窗的正文带 \n 换行（删任务/重装这类要把后果说三层），按换行折行渲染 */
+#confirm-text { white-space: pre-line; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
 .settings-note { margin: 10px 0 0; font-size: 11.5px; color: var(--dim); }

@@ -1133,7 +1133,7 @@ function renderTasks() {
  * 服务端打墓碑（deleted_at），这里只需要说清「删了还能恢复」。
  */
 async function deleteTask(t) {
-  if (!window.confirm('删掉任务 ' + t.plugin + '/' + t.name + '？\n它不会再自动跑；插件重新加载也不会把它带回来。\n运行记录和日志都留着，任务页「显示已删除」里可以恢复。')) return;
+  if (!(await askConfirm('删掉任务 ' + t.plugin + '/' + t.name + '？\n它不会再自动跑；插件重新加载也不会把它带回来。\n运行记录和日志都留着，任务页「显示已删除」里可以恢复。', '删除'))) return;
   try {
     await api('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name), { method: 'DELETE' });
     notify('已删除 ' + t.name, 'ok');
@@ -1753,16 +1753,16 @@ async function showPlugin(name) {
       mkOp('编辑源码', () => openPluginSource(name)),
       mkOp('配置', () => openPluginConfig(name)),
       // 重装 = 重新采纳插件这次的 cron 建议。和「重载」的区别就这一条，文案要写清楚。
-      mkOp('重装（采纳计划建议）', () => {
-        if (!window.confirm('重装 ' + name + '？\n会用插件这次的建议覆盖任务计划、预算、提前量；\n运行历史、暂停状态、摘要都保留。')) return;
+      mkOp('重装（采纳计划建议）', async () => {
+        if (!(await askConfirm('重装 ' + name + '？\n会用插件这次的建议覆盖任务计划、预算、提前量；\n运行历史、暂停状态、摘要都保留。', '重装'))) return;
         act('/api/plugins/' + encodeURIComponent(name) + '/reinstall', '已重装 ' + name);
       }),
       // 停用 / 启用（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上
       // 给过「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
       ...(state.disabled.includes(name)
         ? [mkOp('启用', () => act('/api/plugins/' + encodeURIComponent(name) + '/enable', '已启用 ' + name))]
-        : [mkOp('停用', () => {
-            if (!window.confirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）')) return;
+        : [mkOp('停用', async () => {
+            if (!(await askConfirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）', '停用'))) return;
             act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
           })]),
       // 暂停（第 167 轮）：不卸载，只是不再触发它的定时任务 —— 和上面的「停用」不是一回事。
@@ -2983,7 +2983,7 @@ async function notifyToggleRoute(r) {
 }
 
 async function notifyDeleteRoute(r) {
-  if (!confirm('删除推送「' + (r.name || r.id) + '」？渠道 ' + r.channel + ' 会保留。')) return;
+  if (!(await askConfirm('删除推送「' + (r.name || r.id) + '」？渠道 ' + r.channel + ' 会保留。', '删除'))) return;
   try {
     await api('/api/notify/routes/' + encodeURIComponent(r.id), { method: 'DELETE' });
     NOTIFY.route = null;
@@ -3371,7 +3371,7 @@ async function notifyDuplicateChannel(c) {
 
 async function notifyDeleteChannel(c) {
   if (!c.id) return;
-  if (!confirm('删除渠道「' + (c.name || c.id) + '」？被推送引用着的话会拒绝删除。')) return;
+  if (!(await askConfirm('删除渠道「' + (c.name || c.id) + '」？被推送引用着的话会拒绝删除。', '删除'))) return;
   try {
     await api('/api/notify/channels/' + encodeURIComponent(c.id), { method: 'DELETE' });
     NOTIFY.channel = null;
@@ -3720,7 +3720,7 @@ function migrateBox() {
   }
 
   async function doApply(path) {
-    if (!window.confirm('把这个旧面板的状态搬进当前面板？\n写入前会自动快照；重复执行不会重复写。\n迁完要重启面板才生效。')) return;
+    if (!(await askConfirm('把这个旧面板的状态搬进当前面板？\n写入前会自动快照；重复执行不会重复写。\n迁完要重启面板才生效。', '迁移'))) return;
     try {
       const d = await api('/api/migrate/apply', { method: 'POST', body: { source: path } });
       const parts = [
