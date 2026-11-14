@@ -59,11 +59,16 @@ async fn outbound_modules_are_denied_at_resolution() {
     }
 }
 
+/// 裸名 `fetch` 的契约（2026-11-14 起）：**存在，但必须是面板的实现** ——
+/// LLRT 原生那个（直连 HTTP_CLIENT、不经 SSRF 门）在 engine.rs 被摘掉，
+/// 换装的是与 `host.fetch` 同一 WRAP 的函数。判据不是「没有 fetch」，
+/// 而是「有 fetch 且过门」（见 bare_fetch_on_globalthis_is_the_panel_fetch）。
 #[tokio::test]
-async fn the_fetch_global_is_gone() {
+async fn the_fetch_global_is_the_panel_implementation() {
     let p = ok(&format!(
         "{HANDLERS}await host.register_handler('h', async () => {{
-           if (typeof fetch !== 'undefined') throw new Error('fetch 全局还在');
+           if (typeof fetch !== 'function') throw new Error('裸 fetch 没装上');
+           if (fetch !== globalThis.fetch) throw new Error('fetch 不是全局那一个');
          }});"
     ))
     .await;
@@ -360,4 +365,199 @@ await host.register_handler('calm', async () => 1);\n";
     assert!(err.contains("预算"), "吞不掉，必须报预算耗尽: {err}");
     // runtime 还得能用
     p.dispatch("calm", &json!({}), 5_000).await.unwrap();
+}
+
+/// 裸名 `fetch`（globalThis 上）= 面板的实现，不是 LLRT 原生那个（直连 client、不经门）。
+/// 判据两条：存在；打回环被 SSRF 门拒（LLRT 原生那个是能拿到 200 的，见 spike 判据 7）。
+#[tokio::test]
+async fn bare_fetch_on_globalthis_is_the_panel_fetch() {
+    let (out, _rx) = load(
+        "if (typeof fetch !== 'function') throw new Error('globalThis 上没有 fetch');\n\
+         try { await fetch('http://127.0.0.1:9/nope'); throw new Error('绕过了出站门'); }\n\
+         catch (e) {\n\
+           const t = String(e);\n\
+           if (!t.includes('SSRF')) throw new Error('错误不像出站门: ' + t);\n\
+         }\n",
+    )
+    .await;
+    match &out {
+        Ok(_) => {}
+        Err(e) => panic!("裸 fetch 应当存在且打回环要被门拒住: {e}"),
+    }
+}
+
+// ── Web 版全局 fetch（标准 Response 契约）─────────────────────────────
+//
+// 打本机局域网 IP 的假服务器：SSRF 门放行局域网（禁的是回环/链路本地），
+// 所以不用动 HOST_API_ALLOW_PRIVATE —— 门的行为本身就是被测的一部分。
+// 选 IP 要避开 VPN 的 fake-IP 段（198.18.0.0/15 的 tun 会"接住"任何 TCP 连接
+// 但永远到不了本机监听），所以候选→过滤→TCP 探针验证三步走。
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn read_request_and_respond(sock: &mut tokio::net::TcpStream, body: &[u8], echo: bool) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let content_len: Option<usize> = loop {
+        // 探针连接：对端一个字节都不写就关 —— 直接当探针处理
+        match sock.read(&mut chunk).await {
+            Ok(0) | Err(_) => break None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+        let split = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => p,
+            None => continue,
+        };
+        let head = String::from_utf8_lossy(&buf[..split]).to_string();
+        let len = head
+            .split("\r\n")
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse::<usize>().ok());
+        let got = buf.len() - split - 4;
+        match len {
+            Some(l) if got >= l => {
+                if echo {
+                    break Some(l);
+                }
+                break None;
+            }
+            Some(_) => continue,
+            None => break None,
+        }
+    };
+    let (resp_body, head) = if echo && content_len.is_some() {
+        let split = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+        let echoed = &buf[split + 4..];
+        (
+            echoed.to_vec(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                echoed.len()
+            ),
+        )
+    } else {
+        (
+            body.to_vec(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-Marker: panel\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+        )
+    };
+    let _ = sock.write_all(head.as_bytes()).await;
+    let _ = sock.write_all(&resp_body).await;
+    let _ = sock.shutdown().await;
+}
+
+/// 起一个循环 accept 的假服务器：`echo=true` 回显请求体（测请求侧），
+/// 否则回固定字节（测响应侧）。
+async fn serve(body: &'static [u8], echo: bool) -> u16 {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let body = body;
+            tokio::spawn(async move {
+                let _ = read_request_and_respond(&mut sock, body, echo).await;
+            });
+        }
+    });
+    port
+}
+
+/// 从候选目标的 UDP connect 里选一个**真能到达本机监听**的局域网 IP。
+/// VPN 的 fake-IP 段（198.18.0.0/15）能"连上"但到不了，所以先过滤再 TCP 探针验证。
+async fn pick_ip(port: u16) -> String {
+    let candidates = [
+        "192.168.3.1",
+        "192.168.1.1",
+        "192.168.0.1",
+        "10.0.0.1",
+        "172.16.0.1",
+        "223.5.5.5",
+        "8.8.8.8",
+    ];
+    for t in candidates {
+        let s = match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => { eprintln!("[pick_ip] bind 失败 {t}: {e}"); continue; }
+        };
+        if let Err(e) = s.connect((t, 9)) {
+            eprintln!("[pick_ip] udp connect 失败 {t}: {e}");
+            continue;
+        }
+        let ip = s.local_addr().unwrap().ip().to_string();
+        eprintln!("[pick_ip] {t} → {ip}");
+        if ip.starts_with("127.")
+            || ip.starts_with("169.254.")
+            || ip.starts_with("198.18.")
+        {
+            eprintln!("[pick_ip] {ip} 被过滤");
+            continue;
+        }
+        // TCP 探针：连得上（服务器 accept 到）才算数
+        match std::net::TcpStream::connect((&ip[..], port)) {
+            Ok(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                eprintln!("[pick_ip] {ip} 探针通过");
+                return ip;
+            }
+            Err(e) => eprintln!("[pick_ip] {ip} TCP 探针失败: {e}"),
+        }
+    }
+    panic!("找不到一个能到达本机监听的局域网地址（VPN fake-IP 环境？）—— 加一个候选或换测法");
+}
+
+#[tokio::test]
+async fn web_fetch_returns_a_real_response_with_text_and_binary_bodies() {
+    let text_payload: &'static [u8] = "café 中文 ok".as_bytes();
+    let bin_payload: &'static [u8] = b"\x00\x01\xff\xfe-binary-\x80end";
+    let p1 = serve(text_payload, false).await;
+    let p2 = serve(bin_payload, false).await;
+    let base = format!("http://{}", pick_ip(p1).await);
+    let src = format!(
+        "const base = '{base}';\n\
+         const r1 = await fetch(base + ':{p1}/x');\n\
+         if (!(r1 instanceof Response)) throw new Error('返回的要是 Response: ' + (r1 && r1.constructor && r1.constructor.name));\n\
+         if (r1.status !== 200 || !r1.ok) throw new Error('status 不对: ' + r1.status);\n\
+         if (r1.headers.get('x-marker') !== 'panel') throw new Error('headers.get 不对: ' + r1.headers.get('x-marker'));\n\
+         const t = await r1.text();\n\
+         if (t !== 'café 中文 ok') throw new Error('text 不对: ' + JSON.stringify(t));\n\
+         const r2 = await fetch(base + ':{p2}/x');\n\
+         const ab = await r2.arrayBuffer();\n\
+         const u8 = new Uint8Array(ab);\n\
+         const want = [0, 1, 255, 254, 45, 98, 105, 110, 97, 114, 121, 45, 128, 101, 110, 100];\n\
+         if (u8.length !== want.length) throw new Error('二进制长度不对: ' + u8.length);\n\
+         for (let i = 0; i < want.length; i++) if (u8[i] !== want[i]) throw new Error('二进制第 ' + i + ' 字节不对: ' + u8[i]);\n"
+    );
+    let (out, _rx) = load(&src).await;
+    match &out {
+        Ok(_) => {}
+        Err(e) => panic!("web fetch 形状不对: {e}"),
+    }
+}
+
+#[tokio::test]
+async fn web_fetch_sends_string_and_binary_request_bodies() {
+    let port = serve(b"probe-target", true).await;
+    let base = format!("http://{}", pick_ip(port).await);
+    let src = format!(
+        "const url = '{base}:{p}/echo';\n\
+         const r1 = await fetch(url, {{ method: 'POST', body: '中文-body' }});\n\
+         if ((await r1.text()) !== '中文-body') throw new Error('字符串体回显不对: ' + (await r1.clone().text().catch(() => 'n/a')));\n\
+         const sent = new Uint8Array([1, 2, 254, 255, 0, 128]);\n\
+         const r2 = await fetch(url, {{ method: 'POST', body: sent }});\n\
+         const back = new Uint8Array(await r2.arrayBuffer());\n\
+         if (back.length !== sent.length) throw new Error('二进制体长度不对: ' + back.length);\n\
+         for (let i = 0; i < sent.length; i++) if (back[i] !== sent[i]) throw new Error('二进制体第 ' + i + ' 字节不对');\n",
+        base = base,
+        p = port,
+    );
+    let (out, _rx) = load(&src).await;
+    match &out {
+        Ok(_) => {}
+        Err(e) => panic!("请求体（字符串/二进制）没走通: {e}"),
+    }
 }

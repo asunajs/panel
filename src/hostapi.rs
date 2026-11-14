@@ -177,6 +177,102 @@ const OP_NAMES: [&str; 29] = [
     "panel_at_least",
 ];
 
+    /// 把 **Web 版 fetch** 装到全局（裸名 `fetch(input, init?)`）。
+///
+/// LLRT 自带的全局 fetch 在 engine.rs 被摘掉（它直连 HTTP_CLIENT，不经 SSRF 门/预算）；
+/// 这里装的是面板的实现，但**契约是标准 Web 的**：返回真正的
+/// [`Response`](llrt_fetch::response::Response)（LLRT 自己的类，`.text()/.json()/
+/// .arrayBuffer()/.bytes()/.ok/.status/.headers.get()` 全套原生方法），不是面板模块
+/// `host.fetch` 的 JSON 形状 —— `host.fetch` / `host.http_fetch` 保持 JSON 契约不变
+/// （mcloud 那族靠它），两套并存。
+///
+/// 传输强制走面板的门：内部以 `binary: true` 调 host.fetch 拿原始字节（base64），
+/// 解码后装进 Response。所以 `arrayBuffer()` 是逐字节保真的，`text()` 的 utf-8 解码
+/// 由 Response 原生完成（带 BOM 剥离）。请求体：字符串透传；ArrayBuffer/TypedArray
+/// 编码成 `body_base64`（outbound 出站侧认这个键）。
+const GLOBAL_FETCH_SETUP: &str = r#"
+(host) => {
+  const toB64 = (u8) => {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  };
+  async function fetch(input, init) {
+    let url = input;
+    let i = init;
+    if (input && typeof input === 'object' && typeof input.url === 'string') {
+      // Request-like：Request 的字段当默认值，init 覆盖
+      i = Object.assign(
+        { method: input.method, headers: input.headers, body: input.body === undefined ? null : input.body },
+        i || {},
+      );
+      url = input.url;
+    }
+    if (typeof url !== 'string') {
+      throw new TypeError('fetch: 第一个参数要是 URL 字符串或 Request');
+    }
+    i = i || {};
+    const o = {};
+    if (i.method !== undefined) o.method = String(i.method);
+    if (i.headers !== undefined) {
+      const h = i.headers;
+      // Headers 实例 / 任何带 entries 的 → 平面对象（outbound 认的就是这个）
+      if (h && typeof h.entries === 'function') {
+        o.headers = {};
+        for (const [k, v] of h.entries()) o.headers[k] = String(v);
+      } else {
+        o.headers = h;
+      }
+    }
+    if (i.body !== undefined && i.body !== null) {
+      if (typeof i.body === 'string') {
+        o.body = i.body;
+      } else if (i.body instanceof ArrayBuffer) {
+        o.body_base64 = toB64(new Uint8Array(i.body));
+      } else if (ArrayBuffer.isView(i.body)) {
+        o.body_base64 = toB64(
+          new Uint8Array(i.body.buffer, i.body.byteOffset, i.body.byteLength),
+        );
+      } else {
+        o.body = String(i.body);
+      }
+    }
+    if (i.redirect !== undefined) o.redirect = String(i.redirect);
+    // binary: true 固定带上 —— Response 要原始字节；文本/JSON 由 Response 原生方法解
+    const raw = await host.fetch(url, Object.assign(o, { binary: true }));
+    const bytes =
+      typeof raw.body_base64 === 'string'
+        ? Uint8Array.from(atob(raw.body_base64), (c) => c.charCodeAt(0))
+        : new Uint8Array(0);
+    return new Response(bytes, {
+      status: raw.status,
+      headers: raw.headers,
+      url: raw.url,
+      redirected: raw.redirected === true,
+    });
+  }
+  return fetch;
+}
+"#;
+
+/// 把 Web 版 fetch 装到全局：构建 host 对象（WRAP）→ 把 setup 闭包接上去。
+/// Response 类取自全局（LLRT 自带的那个，纯数据类不受摘除影响）。
+pub fn install_global_fetch(ctx: &Ctx<'_>) -> Result<()> {
+    let raw = Object::new(ctx.clone())?;
+    for (name, f) in ops(ctx)? {
+        raw.set(name, f)?;
+    }
+    let wrap: Function<'_> = ctx.eval(WRAP)?;
+    let host: Object<'_> = wrap.call((raw,))?;
+    let response: Value<'_> = ctx.globals().get("Response")?;
+    let setup: Function<'_> = ctx.eval(GLOBAL_FETCH_SETUP)?;
+    let fetch_fn: Value<'_> = setup.call((host, response))?;
+    ctx.globals().set("fetch", fetch_fn)?;
+    Ok(())
+}
+
 impl ModuleDef for HostModule {
     fn declare(declare: &Declarations) -> Result<()> {
         for name in OP_NAMES {
