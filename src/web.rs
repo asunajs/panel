@@ -568,6 +568,9 @@ pub fn router(st: AppState) -> Router {
         .merge(
             Router::new()
                 .route("/api/login", post(api_login))
+                // 改口令也走 PBKDF2（旧口令要再验一次），所以和登录共用那道更严的限流：
+                // 5 次突发、之后每 12 秒补一次（第 181 轮）
+                .route("/api/auth/token", post(api_change_token))
                 .route("/api/setup", post(api_setup))
                 .layer(middleware::from_fn_with_state(st.clone(), rate_limit_login)),
         )
@@ -968,6 +971,70 @@ async fn api_setup(
 #[serde(deny_unknown_fields)]
 struct LoginBody {
     token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChangeTokenBody {
+    /// 当前口令（明文只在这一次请求里出现，不落盘、不进日志）
+    old: String,
+    /// 想换成的新口令
+    new: String,
+}
+
+/// POST /api/auth/token —— 改口令：旧口令 + 新口令，写完**立即生效**。
+///
+/// 为什么要旧口令：会话票是无状态的，能打开界面就说明手里已经有一张有效票；
+/// 但「改口令」是凭据层面的动作，不能只凭一张可能被顺走的票 —— 要拿旧明文再验一次。
+/// 会话票的签名密钥就是令牌哈希，所以换口令 = **所有旧会话当场失效**；
+/// 这次请求自己拿一张新的，操作者不会被踢出去。
+async fn api_change_token(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(b): JsonBody<ChangeTokenBody>,
+) -> Result<Response, ApiError> {
+    guard_write(&h)?;
+    let Some(auth) = st.auth() else {
+        return Err(bad("这个面板还没设令牌，没有什么可改的（先在设置页设一个）"));
+    };
+    // 旧口令先验：慢路径（PBKDF2）丢到阻塞线程池，别占 reactor
+    let old = b.old.clone();
+    let a = auth.clone();
+    let ok = tokio::task::spawn_blocking(move || a.verify(&old))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return Err(ApiError::unauthorized("当前口令不对，没改任何东西。"));
+    }
+    let new = crate::auth::check_plaintext(&b.new).map_err(bad)?;
+    if new == b.old.trim() {
+        return Err(bad("新口令和当前的一样，没有变化"));
+    }
+    let path = crate::auth::write_new(&st.data_dir, &new)
+        .map_err(|e| internal(format!("写 auth.json 失败: {e}")))?;
+    // 从刚写的文件读回材料（盐要和磁盘一致），换掉内存里那一份
+    let applied = crate::auth::provision(&st.data_dir, None).map_err(internal)?;
+    let Some(fresh) = applied.auth.map(std::sync::Arc::new) else {
+        return Err(internal("刚写完 auth.json 却读不回来".to_string()));
+    };
+    *st.auth.write().unwrap_or_else(|p| p.into_inner()) = Some(fresh.clone());
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Warn,
+        format!(
+            "口令已更换（{}）：旧口令立刻失效，其它设备上的会话也一起失效了",
+            path.display()
+        ),
+    );
+    let mut resp = Json(json!({ "ok": true, "restart_required": false, "applied": true }))
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&session_cookie(
+        &fresh.issue_session(now_secs()),
+        crate::auth::SESSION_TTL_SECS,
+    )) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    Ok(resp)
 }
 
 /// `POST /api/login` —— 用令牌换一张会话票（HttpOnly cookie）。

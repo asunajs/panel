@@ -275,6 +275,24 @@ impl Auth {
     }
 }
 
+/// 令牌（口令）最短长度。PBKDF2 是余量，不是许可 —— 8 个字符起。
+pub const MIN_TOKEN_CHARS: usize = 8;
+
+/// 校验一份明文口令（首尾空白去掉）。设置 / 更换 / CLI 重置都走这一条，
+/// 免得三处各写一遍长度规则、报错还不一样。
+pub fn check_plaintext(p: &str) -> Result<String, String> {
+    let t = p.trim();
+    if t.is_empty() {
+        return Err("口令不能是空的".to_string());
+    }
+    if t.chars().count() < MIN_TOKEN_CHARS {
+        return Err(format!(
+            "口令至少 {MIN_TOKEN_CHARS} 个字符（建议直接让面板生成一个）"
+        ));
+    }
+    Ok(t.to_string())
+}
+
 /// 首次设置：把明文令牌派生成 `auth.json`（**明文不落盘**）。
 ///
 /// 只该在「还没有任何凭据」时调用（web.rs 的 `POST /api/setup` 会先判）。

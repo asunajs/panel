@@ -38,6 +38,7 @@ mod scripts;
 mod sync_bridge;
 mod service;
 mod smtp;
+mod token_cli;
 mod ssrf;
 mod stats;
 mod upload;
@@ -66,6 +67,8 @@ async fn main() -> Result<(), String> {
     match args.first().map(|s| s.as_str()) {
         // 从 0.3.x 面板搬插件状态：离线动作，不启动服务（第 150 轮）
         Some("plugin") => return plugin_cli::run(&args[1..]),
+        // 口令重置是离线动作（要直接写 auth.json），同样放在起服务之前
+        Some("token") => return token_cli::run(&args[1..]),
         Some("migrate") => return migrate::run(&args[1..]),
         Some("keygen") => return backup::keygen(),
         Some("backup") => return backup::backup_cmd(&args[1..]).await,

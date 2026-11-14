@@ -2205,6 +2205,72 @@ async function runTest() {
  *
  *  写完 auth.json **不自动重启**：面板生成的令牌要让人先抄下来 ——
  *  自动重启会把人扔在「令牌已生效但没抄」的窗口里。 */
+/** 修改口令：旧 + 新 + 确认。写完服务端立刻换凭据并给这个浏览器一张新会话票。
+ *
+ * 为什么还要旧口令：会话票是无状态的，手里有一张票只说明「登录过」；
+ * 改凭据是另一档事 —— 也顺手挡住「有人借用了没锁屏的浏览器」。
+ * 换完之后**所有**旧会话票失效（签名密钥就是口令哈希），其它设备的 30 天票会一起掉。
+ */
+function changeTokenBox() {
+  const box = el('div', 'setup-box');
+  box.append(el('h3', '', '修改口令'));
+  box.append(el('p', 'settings-note',
+    '要旧口令、再给新口令。改完之后其它设备上的会话会立刻失效，这个浏览器会拿到一张新的。'));
+  const row = el('div', 'actions setup-row');
+  const mk = (ph, ac) => {
+    const i = el('input', 'setup-input');
+    i.type = 'password';
+    i.placeholder = ph;
+    i.autocomplete = ac;
+    return i;
+  };
+  const oldInp = mk('当前口令', 'current-password');
+  oldInp.id = 'token-old';
+  const newInp = mk('新口令（至少 8 个字符）', 'new-password');
+  newInp.id = 'token-new';
+  const again = mk('再输一遍新口令', 'new-password');
+  again.id = 'token-confirm';
+  row.append(oldInp, newInp, again);
+  const ok = el('button', 'btn btn-primary btn-sm', '修改口令');
+  ok.type = 'button';
+  ok.id = 'token-change';
+  row.append(ok);
+  box.append(row);
+  const out = el('div', 'setup-out');
+  box.append(out);
+
+  const submit = async () => {
+    clear(out);
+    const oldV = oldInp.value;
+    const newV = newInp.value;
+    if (!oldV) return out.append(el('p', 'hint-err', '先填当前口令'));
+    if (newV !== again.value) return out.append(el('p', 'hint-err', '两次输入的新口令不一样'));
+    if (newV.trim().length < 8) return out.append(el('p', 'hint-err', '新口令至少 8 个字符'));
+    ok.disabled = true;
+    try {
+      await api('/api/auth/token', { method: 'POST', body: { old: oldV, new: newV } });
+      oldInp.value = newInp.value = again.value = '';
+      out.append(el('p', 'settings-note', '口令已换，已经生效、不用重启；其它设备的会话已经失效。'));
+      notify('口令已更换');
+    } catch (e) {
+      if (e instanceof Unauthorized) {
+        out.append(el('p', 'hint-err', '当前口令不对，什么都没改。'));
+      } else {
+        out.append(el('p', 'hint-err', e.message || '修改失败'));
+      }
+    } finally {
+      ok.disabled = false;
+    }
+  };
+  ok.addEventListener('click', submit);
+  for (const i of [oldInp, newInp, again]) {
+    i.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') submit();
+    });
+  }
+  return box;
+}
+
 function setupBox() {
   const box = el('div', 'setup-box');
   box.append(el('h3', '', '这个面板还没有令牌'));
@@ -2825,6 +2891,8 @@ function renderSettings() {
   ]));
   sec.append(el("p", "settings-note", "插件不是沙箱里跑的：它和你本机的其它程序同权。只装自己看得懂的插件。"));
   if (!state.auth) sec.append(setupBox());
+  // 有口令才能改口令（没口令时上面那个 setupBox 就是入口）
+  if (state.auth) sec.append(changeTokenBox());
 
   const dat = $("settings-data");
   clear(dat);
@@ -3060,16 +3128,20 @@ function renderPluginNav() {
   for (const p of items) {
     const a = document.createElement('a');
     a.className = 'nav-item';
-    a.href = '#plugin/' + p.name;
+    a.href = '#plugin:' + p.name;
     a.dataset.pluginView = p.name;
     a.innerHTML = PLUGIN_ICON;
     const span = document.createElement('span');
     span.textContent = p.nav.title;
     a.append(span);
     if (state.view === 'plugin:' + p.name) a.setAttribute('aria-current', 'page');
-    a.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      setView('plugin:' + p.name);
+    // ⚠ 只改 hash，**不许** preventDefault + 直接 setView（第 182 轮用户踩的坑）：
+    //   主导航全靠 hashchange 切换，而这里原来绕过它 —— hash 停在旧页面上，
+    //   从插件页点「仪表盘」（href="#dashboard"）时 hash 没变、没有事件，界面就赖着不动
+    //   （先切到别的页再点才好）。交给 hash：已经在这一格上时浏览器不发事件，正好 no-op；
+    //   顺带浏览器的前进/后退对插件页也算数了。
+    a.addEventListener('click', () => {
+      location.hash = 'plugin:' + p.name;
     });
     list.append(a);
   }
@@ -3119,6 +3191,8 @@ const VIEWS = {
 
 function setView(name) {
   // `plugin:<name>` 是插件自己的界面（第 139 轮）：一个 iframe，标题用插件注册的那个。
+  // `plugin/<name>` 也认（旧版 href 就是斜杠写的，深链进来不能扑空），统一成冒号形式。
+  if (typeof name === 'string' && name.startsWith('plugin/')) name = 'plugin:' + name.slice(7);
   const isPlugin = typeof name === 'string' && name.startsWith('plugin:');
   if (!isPlugin && !VIEWS[name]) name = 'dashboard';
   state.view = name;
