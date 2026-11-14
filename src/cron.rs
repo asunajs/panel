@@ -402,8 +402,17 @@ impl Schedule {
             // 把里面的表达式原样交给 cron 解析器。
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
                 if v.get("type").and_then(|x| x.as_str()) == Some("expr") {
-                    let inner = v.get("expr").and_then(|x| x.as_str()).unwrap_or("");
-                    return Schedule::parse_for(inner, task_id);
+                    let has_jitter = v
+                        .get("jitter")
+                        .and_then(|x| x.as_str())
+                        .map(|x| !x.trim().is_empty())
+                        .unwrap_or(false);
+                    // 没抖动：纯直通，表达式原样交给 cron（最干净）。
+                    // 有抖动：交给计划算 —— 表达式本身仍然不改，抖动是单独的修饰符。
+                    if !has_jitter {
+                        let inner = v.get("expr").and_then(|x| x.as_str()).unwrap_or("");
+                        return Schedule::parse_for(inner, task_id);
+                    }
                 }
             }
             return Ok(Schedule::Plan(crate::plan::Plan::parse(s, task_id)?));

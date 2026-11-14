@@ -1883,3 +1883,8 @@ select option { background: var(--surface); color: var(--fg); }
   user-select: none;
 }
 .sched-adv > div { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+
+/* 幅度这类「数值 + 单位」的窄行：两个控件都按内容宽度，别撑满。
+   撑满会紧贴卡片右缘，窄窗口下看着像被裁掉一半。 */
+#sched-form .sched-narrow > input.modal-input { flex: 0 0 6.5em; }
+#sched-form .sched-narrow > select.modal-input { flex: 0 0 6.5em; }

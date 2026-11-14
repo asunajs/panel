@@ -110,6 +110,15 @@ pub enum Kind {
         at: DateTime<Utc>,
         jitter: Option<Duration>,
     },
+    /// 表达式直通：表达式本身**一个字都不改**，抖动作为独立修饰符另算。
+    ///
+    /// 为什么不把抖动拼进表达式（`0 9 * * * ~5m`）：面板的 `~` 是**每次重新掷骰子**，
+    /// 预览说不了「下次是哪一刻」；这里的抖动由 `hash(任务ID + 基准时刻)` 决定，
+    /// 同一拍永远是同一个偏移，预览和实际执行才对得上。
+    Expr {
+        base: Box<crate::cron::Schedule>,
+        jitter: Option<Duration>,
+    },
 }
 
 /// 一份可执行的计划：`kind` 决定形状，`tz`/`id` 决定落地时刻。
@@ -242,7 +251,19 @@ impl Plan {
                     jitter: jitter_of(obj.get("jitter"))?,
                 }
             }
-            "expr" => return Err("expr 类型不走计划，直接交给 cron 解析".into()),
+            "expr" => {
+                let expr = obj.get("expr").and_then(Value::as_str).unwrap_or("");
+                if expr.trim().is_empty() {
+                    return Err("表达式不能为空".into());
+                }
+                if expr.trim_start().starts_with("json:") || expr.trim_start().starts_with('{') {
+                    return Err("表达式里不能再套一层 JSON 计划".into());
+                }
+                Kind::Expr {
+                    base: Box::new(crate::cron::Schedule::parse(expr)?),
+                    jitter: jitter_of(obj.get("jitter"))?,
+                }
+            }
             "" => return Err("调度计划缺少 type".into()),
             other => return Err(format!("未知的频率类型：`{other}`")),
         };
@@ -287,6 +308,29 @@ impl Plan {
                 end,
                 count,
             } => self.next_window(from, *weekly, *start, *end, *count),
+            Kind::Expr { base, jitter } => {
+                let jm = jitter.map(|j| j.num_milliseconds()).unwrap_or(0);
+                let mut cur = from;
+                for _ in 0..64 {
+                    let b = base.next_base(cur.with_timezone(&self.tz))?.with_timezone(&Utc);
+                    let mut t = b;
+                    if jm > 0 {
+                        // 种子用「这一次的基准时刻」：同一拍永远同一个偏移，与 from 无关。
+                        let seed = format!("{}|{}", self.id, b.timestamp_millis());
+                        let delta = pick((jm as u64) * 2 + 1, &seed) as i64 - jm;
+                        t = b + Duration::milliseconds(delta);
+                        // 上界钳到下一拍之前，别盖住后一次
+                        if let Some(next) = base.next_base(b.with_timezone(&self.tz)) {
+                            t = t.min(next.with_timezone(&Utc) - Duration::milliseconds(1));
+                        }
+                    }
+                    if t > from {
+                        return Some(t);
+                    }
+                    cur = b;
+                }
+                None
+            }
             Kind::Once { at, jitter } => {
                 let date = at.with_timezone(&self.tz).date_naive();
                 let (lo, hi) = day_bounds(self.tz, date);
@@ -775,6 +819,36 @@ mod tests {
                 "2026-11-14 18:00:00",
                 "2026-11-14 21:00:00",
             ]
+        );
+    }
+
+    #[test]
+    fn parity_with_js_preview_expr_jitter() {
+        // 表达式直通 + 抖动：表达式本身不改，抖动按 hash(任务ID|基准时刻) 算。
+        // 期望值取自 web/schedule.js，两边必须逐毫秒相同。
+        let p = plan(
+            r#"{"type":"expr","expr":"0 9 * * *","jitter":"5m","timezone":"Asia/Shanghai"}"#,
+        );
+        assert_eq!(
+            runs(&p, 5),
+            vec![
+                "2026-11-14 09:02:33",
+                "2026-11-15 08:56:05",
+                "2026-11-16 09:03:12",
+                "2026-11-17 09:00:00",
+                "2026-11-18 08:58:49",
+            ]
+        );
+        // 抖动确实生效了：不能全都正好是 09:00:00
+        assert!(runs(&p, 5).iter().filter(|x| !x.ends_with("09:00:00")).count() >= 4);
+    }
+
+    #[test]
+    fn expr_without_jitter_is_exact() {
+        let p = plan(r#"{"type":"expr","expr":"0 9 * * *","timezone":"Asia/Shanghai"}"#);
+        assert_eq!(
+            runs(&p, 3),
+            vec!["2026-11-14 09:00:00", "2026-11-15 09:00:00", "2026-11-16 09:00:00"]
         );
     }
 
