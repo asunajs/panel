@@ -349,7 +349,9 @@ async function main() {
   await js("document.getElementById('notify-add').click()");
   await sleep(400);
   await js("(()=>{document.querySelector('#notify-main .chan-group input.input').value='任务失败 → 手机';return 1;})()");
-  await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];g.querySelectorAll('.chan-check input')[0].click();return 1;})()");
+  // 勾「熔断」不勾「任务失败」：这轮检查后面会真的跑任务、会有失败通知，
+  // 挂上渠道就会真发请求（对端是假的），冒出一条「通知发不出去」的黄条，把后面的用例带崩。
+  await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];g.querySelectorAll('.chan-check input')[1].click();return 1;})()");
   await js("(()=>{const g=[...document.querySelectorAll('#notify-main .chan-group')].find(x=>x.querySelector('h4').textContent==='推送标题');const i=g.querySelector('input.input');i.value='[告警] {{title}}';i.dispatchEvent(new Event('input'));return 1;})()");
   await sleep(200);
   const pv = await js("document.querySelector('#notify-main .chan-preview').textContent");
@@ -357,7 +359,13 @@ async function main() {
   await js("(()=>{[...document.querySelectorAll('#notify-main button')].find(b=>b.textContent==='保存').click();return 1;})()");
   await sleep(1300);
   const routeRows = JSON.parse(await js("JSON.stringify([...document.querySelectorAll('#notify-rows .nrow')].map(r=>r.innerText.replace(/\\s+/g,' ')))"));
-  check('推送行显示条件与渠道', routeRows.some((r) => r.includes('任务失败 → 手机') && r.includes('任务失败')), JSON.stringify(routeRows.slice(0, 3)));
+  check('推送行显示条件与渠道', routeRows.some((r) => r.includes('任务失败 → 手机') && r.includes('熔断')), JSON.stringify(routeRows.slice(0, 3)));
+
+  // 老配置物化出来的那条「<渠道>-default」收所有事件，也停掉：不然任何一条通知都会去发。
+  await js(
+    "(async()=>{try{const d=await api('/api/notify');const ch=(d.channels[0]||{}).id;const rid=ch+'-default';" +
+    "const r=d.routes.find(x=>x.id===rid);if(r&&r.enabled){await api('/api/notify/routes/'+encodeURIComponent(rid)+'/toggle',{method:'POST',body:{}});}}catch(e){}return 1;})()");
+  await sleep(400);
 
   // 停用：只哑这一条，配置保留
   await js("(()=>{const b=[...document.querySelectorAll('#notify-main button')].find(x=>x.textContent.indexOf('停用')===0);if(!b)return 0;b.click();return 1;})()");
@@ -386,6 +394,19 @@ async function main() {
   check('JSON 写坏会当场报错', jsonErr.includes('写坏了'), jsonErr.slice(0, 60));
   await js("document.getElementById('notify-json').click()");
   await sleep(600);
+
+  // 窄屏（1048 宽，左边还有 232 的导航）是这条布局最容易崩的地方：
+  // 上一版 .chan-grid 固定两列 + 提示塞在控件那一列，提示会变成一列一个字。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1048, height: 800, deviceScaleFactor: 1, mobile: false });
+  await sleep(600);
+  await js("(()=>{NOTIFY.seg='settings';renderNotifySide();renderNotifyMain();return 1;})()");
+  await sleep(500);
+  const hintBox = JSON.parse(await js(
+    "JSON.stringify((()=>{const h=document.querySelector('#notify-main .chan-hint');if(!h)return null;" +
+    "const r=h.getBoundingClientRect();return {w:Math.round(r.width),h:Math.round(r.height)};})())"));
+  check('窄屏下提示文字不竖排（不挤成一列字）', !!hintBox && hintBox.w > 200 && hintBox.h < 60, JSON.stringify(hintBox));
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  await sleep(500);
 
   // 收尾：把检查用的渠道/推送删干净（不然它们会跟着后面的事件发真请求、冒黄条），
   // 顺手清掉提示条与告警，后面的用例才不受影响。

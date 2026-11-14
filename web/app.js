@@ -2508,7 +2508,12 @@ function renderNotifySide() {
   }
   const addBtn = $('notify-add');
   addBtn.textContent = NOTIFY.seg === 'routes' ? '+ 新建推送' : '+ 添加渠道';
-  addBtn.classList.toggle('hidden', NOTIFY.seg === 'settings');
+  // 「全局」不需要列表，也不需要新建按钮：左栏只留段控，别撑一个空盒子
+  const isSettings = NOTIFY.seg === 'settings';
+  addBtn.classList.toggle('hidden', isSettings);
+  list.classList.toggle('hidden', isSettings);
+  const foot = document.querySelector('.notify-side-foot');
+  if (foot) foot.classList.toggle('hidden', isSettings);
   if (NOTIFY.seg === 'routes') {
     for (const r of d.routes || []) {
       const row = el('button', 'nrow');
