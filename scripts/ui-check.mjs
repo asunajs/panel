@@ -511,6 +511,14 @@ async function main() {
   await sleep(700);
   const setupTight = await tightGaps('.setup-box');
   check('设置·安全页设令牌那块间距 ≥ 8px', setupTight.length === 0, JSON.stringify(setupTight));
+  // 第 181 轮：修改口令。这个场景里面板没有口令（走的是 setupBox），
+  // 所以这里只能验两件事：不该同时出现两个入口、以及表单确实接到了那个路由。
+  const hasChangeBox = await js("!!document.getElementById('token-old')");
+  check('没有口令时不显示「修改口令」（别出现两个入口）', hasChangeBox === false, String(hasChangeBox));
+  const changeFn = await js('typeof changeTokenBox');
+  check('修改口令的表单有实现（changeTokenBox）', changeFn === 'function', changeFn);
+  const appSrc = await js("fetch('/app.js').then(r => r.text())");
+  check('修改口令走 POST /api/auth/token', typeof appSrc === 'string' && appSrc.includes("'/api/auth/token'"), '');
   // 深色主题下不许有大块近白背景：第 24 轮「还没有令牌」那张白卡片就是
   // var(--bg-soft, #fafafc) 静默回落来的。这里用面积 + 亮度兜一遍。
   const theme = await js("document.documentElement.getAttribute('data-theme')");

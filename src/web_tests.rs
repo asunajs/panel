@@ -424,6 +424,21 @@ async fn setup_core(
     Arc<crate::config_store::ConfigStore>,
     Db,
 ) {
+    setup_core_auth(tag, None).await
+}
+
+/// 同 setup_core，但可以给一份令牌（Some = 需要鉴权的 app，数据目录是临时目录 ——
+/// 改口令会真的写 auth.json，绝不能让它落到仓库里的 ./data）。
+async fn setup_core_auth(
+    tag: &str,
+    token: Option<&str>,
+) -> (
+    Router,
+    PathBuf,
+    PathBuf,
+    Arc<crate::config_store::ConfigStore>,
+    Db,
+) {
     crate::engine::global_inits();
     let (plugins, data) = temp_dirs(tag);
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
@@ -451,7 +466,9 @@ async fn setup_core(
         config: store.clone(),
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
-        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(
+            token.map(|t| Arc::new(crate::auth::Auth::derive(t))),
+        )),
     };
     (router(st), plugins, data, store, db)
 }
@@ -1444,6 +1461,103 @@ await host.register_handler('go', async () => {\n\
     assert!(has("出站目标被 SSRF 防护拒绝"), "{msgs:?}");
     // 正文至少给一个（这条也在连网前就判）
     assert!(has("正文"), "{msgs:?}");
+}
+
+/// 改口令：要旧口令、新口令够长、写完旧会话立刻失效、磁盘上是新的。
+#[tokio::test]
+async fn changing_the_token_needs_the_old_one_and_kills_old_sessions() {
+    let (app, _plugins, data, _store, _db) = setup_core_auth("tokchange", Some("s3cret")).await;
+
+    // 先拿一张旧票
+    let req = Request::post("/api/login")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"token":"s3cret"}"#))
+        .unwrap();
+    let (status, cookie) = send_cookie(&app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let old_ticket = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("panel_session=")
+        .to_string();
+    let with_ticket = |mut req: Request<Body>| {
+        req.headers_mut().insert(
+            axum::http::header::COOKIE,
+            format!("panel_session={old_ticket}").parse().unwrap(),
+        );
+        req
+    };
+
+    // 1) 旧口令错：401，且什么都不改（旧票还能用）
+    let (status, _) = send(
+        &app,
+        with_ticket(with_csrf(
+            "POST",
+            "/api/auth/token",
+            Some(json!({"old": "wrong", "new": "another-token"})),
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let req = with_ticket(Request::get("/api/state").body(Body::empty()).unwrap());
+    assert_eq!(send(&app, req).await.0, StatusCode::OK);
+
+    // 2) 新口令太短：400，不改
+    let (status, body) = send(
+        &app,
+        with_ticket(with_csrf(
+            "POST",
+            "/api/auth/token",
+            Some(json!({"old": "s3cret", "new": "short"})),
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // 3) 合法：200 + 一张新票
+    let req = with_ticket(with_csrf(
+        "POST",
+        "/api/auth/token",
+        Some(json!({"old": "s3cret", "new": "new-token-123"})),
+    ));
+    let (status, new_cookie) = send_cookie(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{new_cookie}");
+    assert!(new_cookie.contains("panel_session="), "换完要当场给新票：{new_cookie}");
+    let new_ticket = new_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("panel_session=")
+        .to_string();
+    assert_ne!(new_ticket, old_ticket, "换了口令就该换票");
+
+    // 4) 旧票立刻失效（会话票的签名密钥就是令牌哈希）
+    let req = Request::get("/api/state")
+        .header("cookie", format!("panel_session={old_ticket}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::UNAUTHORIZED, "旧票必须失效");
+
+    // 5) 新票能用
+    let req = Request::get("/api/state")
+        .header("cookie", format!("panel_session={new_ticket}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::OK);
+
+    // 6) 旧口令登不进来，新口令能登
+    for (token, want) in [("s3cret", StatusCode::UNAUTHORIZED), ("new-token-123", StatusCode::OK)] {
+        let req = Request::post("/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        assert_eq!(send_cookie(&app, req).await.0, want, "口令 {token}");
+    }
+
+    // 7) 落盘落在数据目录里，且文件里没有明文
+    let written = std::fs::read_to_string(data.join(crate::auth::FILE)).unwrap();
+    assert!(!written.contains("new-token-123"), "auth.json 里不许有明文: {written}");
 }
 
 /// 登录换会话票 / 登出清票；票能顶替请求头，篡改的票不行。
