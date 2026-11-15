@@ -24,9 +24,18 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn exe_path() -> Result<PathBuf, String> {
-    std::env::current_exe()
-        .map_err(|e| format!("取当前可执行文件路径失败: {e}"))
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+    let p = std::env::current_exe().map_err(|e| format!("取当前可执行文件路径失败: {e}"))?;
+    // Windows：canonicalize 会返回 `\\?\D:\...` 这种扩展前缀。它对 Rust 自己无害，
+    // 但写进计划任务、被 cmd 转一手就容易出错（用户看到的也难看）。current_exe
+    // 本来就给绝对路径，那边不 canonicalize。
+    #[cfg(unix)]
+    {
+        Ok(std::fs::canonicalize(&p).unwrap_or(p))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(p)
+    }
 }
 
 fn workdir() -> PathBuf {
@@ -171,6 +180,11 @@ fn target() -> Result<(PathBuf, String, &'static str), String> {
 /// 这些是**纯字符串**，在哪个平台都能算出来，所以测试在 macOS 上也能跑。
 pub struct WinTaskSpec {
     pub name: String,
+    /// 启动器脚本（`panel-start.cmd`）的路径与内容。**任务指向它，而不是直接指向 exe**：
+    /// schtasks 的 `/TR` 里再嵌一层引号极其脆弱（cmd 与 PowerShell 对 `\"` 的解释不同），
+    /// 实测第一版打印出来的命令引号是断的、复制过去直接失败。一层引号就稳。
+    pub start_cmd_path: std::path::PathBuf,
+    pub start_cmd_body: String,
     /// `schtasks /Create …` 的参数（不含 prog 本身）
     pub create: Vec<String>,
     pub delete: Vec<String>,
@@ -180,13 +194,15 @@ pub struct WinTaskSpec {
 }
 
 pub fn windows_task_spec(label: &str, exe: &std::path::Path, dir: &std::path::Path) -> WinTaskSpec {
-    // schtasks 的 /TR 里嵌套引号很脆：外面一层给 /TR，里面一层给含空格的路径。
-    let inner = format!(
-        "cmd /c cd /d \"{dir}\" && \"{exe}\"",
+    let start_cmd_path = dir.join("panel-start.cmd");
+    // `@echo off` + `cd /d` 之后前台跑 exe：计划任务的「起始于」不由我们控制，
+    // 而面板的 data/plugins 是相对工作目录的，不切目录就是「服务起来后数据没了」。
+    let start_cmd_body = format!(
+        "@echo off\r\ncd /d \"{dir}\"\r\n\"{exe}\"\r\n",
         dir = dir.display(),
         exe = exe.display()
     );
-    let tr = format!("\"{inner}\"");
+    let tr = format!("\"{}\"", start_cmd_path.display());
     let create = vec![
         "/Create".to_string(),
         "/TN".to_string(),
@@ -212,13 +228,15 @@ pub fn windows_task_spec(label: &str, exe: &std::path::Path, dir: &std::path::Pa
         "/FO".to_string(),
         "LIST".to_string(),
     ];
-    let display = format!("schtasks {} {}", create.join(" "), "");
+    let display = format!("schtasks {}", create.join(" "));
     WinTaskSpec {
         name: label.to_string(),
+        start_cmd_path,
+        start_cmd_body,
         create,
         delete,
         query,
-        display: display.trim_end().to_string(),
+        display,
     }
 }
 
@@ -229,15 +247,28 @@ fn windows_run(args: &[String]) -> Result<(), String> {
     let spec = windows_task_spec(LABEL, &exe, &dir);
     match args.first().map(|s| s.as_str()) {
         Some("print") | None => {
-            println!("# Windows：登录时启动的计划任务（复制这行到 PowerShell / cmd 执行）");
+            println!("# Windows：登录时启动的计划任务");
+            println!("# ① 先把这个启动器写到 {}（install 会自动写）：", spec.start_cmd_path.display());
+            for line in spec.start_cmd_body.lines() {
+                println!("    {line}");
+            }
+            println!();
+            println!("# ② 再建任务（复制这行到 PowerShell 或 cmd 都能跑）：");
             println!("{}", spec.display);
             println!();
-            println!("# 起始目录由命令里的 `cd /d` 指定为 {}", dir.display());
-            println!("# 数据、插件、脚本都相对这个目录，和手动跑 `panel` 时一致。");
+            println!("# 为什么中间夹一个 .cmd：schtasks 的 /TR 里再嵌引号，cmd 与 PowerShell");
+            println!("# 的解释不一样，实测会打出引号断掉的命令。指向启动器只要一层引号。");
+            println!("# 起始目录由启动器里的 `cd /d` 钉成 {}，", dir.display());
+            println!("# 数据、插件、脚本都相对它，和手动跑 `panel` 时一致。");
             println!("# 卸载：schtasks {}", spec.delete.join(" "));
             Ok(())
         }
         Some("install") => {
+            // 启动器先落盘：任务指向它，缺了它任务起来就是秒退。
+            std::fs::write(&spec.start_cmd_path, &spec.start_cmd_body).map_err(|e| {
+                format!("写启动器 {} 失败: {e}", spec.start_cmd_path.display())
+            })?;
+            println!("已写入启动器: {}", spec.start_cmd_path.display());
             let out = run_cmd("schtasks", &spec.create.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
             println!("已创建计划任务 {}（登录时启动）", spec.name);
             println!("{out}");
@@ -383,15 +414,24 @@ mod tests {
         assert!(spec.create.contains(&"ONLOGON".to_string()), "要登录时启动");
         assert!(spec.create.contains(&"/F".to_string()), "已存在时要覆盖");
 
-        // /TR 后面那个参数就是命令行本体
+        // /TR 后面那个参数：**只有一层引号**（指向 .cmd 启动器）。
+        // 第一版直接把 `cmd /c cd /d "…" && "…exe"` 塞进去，cmd 与 PowerShell 对嵌套
+        // 引号的解释不同，实测打出来的命令引号是断的 —— 复制过去必然失败。
         let i = spec.create.iter().position(|a| a == "/TR").unwrap();
         let tr = &spec.create[i + 1];
-        assert!(tr.contains("cmd /c cd /d"), "要切工作目录: {tr}");
-        assert!(tr.contains("我的 面板"), "目录要原样带上: {tr}");
-        assert!(tr.contains("panel.exe"), "{tr}");
-        // 含空格的路径必须被引号包住，否则 schtasks 会在第一个空格处截断
-        assert!(tr.contains("\"D:"), "目录要被引号裹住: {tr}");
-        assert!(tr.contains("\"C:"), "exe 要被引号裹住: {tr}");
+        assert!(tr.starts_with('"') && tr.ends_with('"'), "整体要被引号裹住: {tr}");
+        let inner = &tr[1..tr.len() - 1];
+        assert!(
+            !inner.contains('"'),
+            "/TR 的值里不能再出现引号（schtasks 会被打乱）: {tr}"
+        );
+        assert!(inner.ends_with("panel-start.cmd"), "要指向启动器: {tr}");
+
+        // 启动器本体：切目录 + 跑 exe，两处路径都要带引号（含空格才不会截断）
+        let body = &spec.start_cmd_body;
+        assert!(body.contains("cd /d \""), "{body}");
+        assert!(body.contains("我的 面板"), "{body}");
+        assert!(body.contains("panel.exe"), "{body}");
 
         assert_eq!(spec.delete[0], "/Delete");
         assert!(spec.delete.contains(&"dev.panel".to_string()));
