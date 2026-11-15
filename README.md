@@ -70,17 +70,24 @@ http://127.0.0.1:8787
 设过口令之后，打开就是解锁页，输一次就进仪表盘。
 
 > **想把口令放进环境变量**（服务化 / 无头部署、不想每次手输）：
-> `PANEL_TOKEN=你的令牌 panel`。启动时派生成「盐 + 哈希」存进 `data/auth.json`，
-> 明文不落盘、也会立刻从进程环境里删掉。这条是「跳过引导」的旁路，不是必经之路。
+
+> - 临时：`PANEL_TOKEN=你的令牌 panel`
+> - 长期：`export PANEL_TOKEN=你的令牌`（写进 shell 配置），然后 `panel service
+>   install` —— 安装服务时会读取当前环境，把值写进服务配置；
+> - 启动时派生成「盐 + 哈希」存进 `data/auth.json`，明文不落盘、也会立刻从进程
+>   环境里删掉。这条是「跳过引导」的旁路，不是必经之路。
 
 **想让手机 / 局域网里别的设备打开面板**，三步：
 
-1. 让面板监听局域网（默认只听本机 127.0.0.1）：
+1. 让面板监听局域网（默认只听本机 127.0.0.1）—— 两种用法：
 
-   - Linux / macOS：启动命令前面加上环境变量 —— `PANEL_BIND=0.0.0.0:8787 panel`
+   - **临时跑一次**（只影响这一条命令）：`PANEL_BIND=0.0.0.0:8787 panel`
+   - **长期生效**：把 `export PANEL_BIND=0.0.0.0:8787` 写进 `~/.zshrc`（或
+     `~/.bashrc`）后重开终端 —— 之后任何方式启动的 panel 都会读到，包括
+     `panel service install`（安装服务时会读取当前环境，把值写进服务配置）；
    - Windows（计划任务自启的）：编辑 `%LOCALAPPDATA%\panel\panel-start.cmd`，
      在启动那行**前面**加一行 `set PANEL_BIND=0.0.0.0:8787`，重启电脑生效；
-   - 改完要重启面板才生效。
+   - 无论哪种，改完要重启面板才生效。
 
 2. 第一次这样启动时，系统防火墙会弹「是否允许访问网络」—— 点允许。
 
@@ -92,7 +99,9 @@ http://127.0.0.1:8787
 
    别的设备打开的是同一个面板，用**同一个口令**解锁。
 
-> 公网访问（不在局域网里）请走 HTTPS 反向代理，见下面的[安全提醒](#安全提醒)。
+> 公网访问（不在局域网里）请走 **HTTPS 反向代理**——nginx 版（certbot 上 TLS）
+> 见 [docs/user/nginx.md](docs/user/nginx.md)，Caddy 版（三行配置自动 HTTPS，适合没备案的
+> 场景）见 [docs/user/caddy.md](docs/user/caddy.md)；安全口径见下面的[安全提醒](#安全提醒)。
 
 <details>
 <summary>macOS / 从源码构建</summary>
@@ -147,7 +156,7 @@ cargo build --release
 
 脚本自己的数据目录在环境变量 `PANEL_SCRIPT_DATA` 里（每次执行都会建好），
 往里写文件不会撒到别处。脚本能用什么运行时、二进制怎么上传、超时和输出上限，
-详见 [docs/scripts.md](docs/scripts.md)。
+详见 [docs/user/scripts.md](docs/user/scripts.md)。
 
 ---
 
@@ -197,7 +206,7 @@ cargo build --release
 
 要发到手机 / IM，在 **设置 → 通知** 里配渠道：Server酱、ntfy、Gotify、自定义
 webhook、SMTP 邮件等，再配一条**推送规则**（什么等级、哪些事件、发给哪条渠道）。
-任务失败默认就会推。详见 [docs/notify.md](docs/notify.md)。
+任务失败默认就会推。详见 [docs/user/notify.md](docs/user/notify.md)。
 
 ---
 
@@ -247,7 +256,7 @@ PANEL_BIND=127.0.0.1:8790 ./target/release/panel
 
 老面板的插件账号、任务计划、脚本、运行历史、通知渠道可以整体搬进 0.4：
 任务页的暂停与改过的计划原样接管，没装 0.4 版的插件先以占位形式列着。
-步骤与矩阵见 [docs/migrate.md](docs/migrate.md)。
+步骤与矩阵见 [docs/user/migrate.md](docs/user/migrate.md)。
 
 ### 数据放在哪
 
@@ -268,13 +277,14 @@ PANEL_BIND=127.0.0.1:8790 ./target/release/panel
 
 macOS 用 launchd、Linux 用 systemd，把面板注册成服务（开机自启、崩了自动拉起）。
 本仓自带一个本机日常部署脚本 `scripts/deploy-daily.sh`（构建 + 换二进制 + 重启），
-示例服务文件见 [docs/ops.md](docs/ops.md)。
+示例服务文件见 [docs/user/ops.md](docs/user/ops.md)。
 
 ---
 
 ## 安全提醒
 
-- 不要把没有令牌的面板直接暴露到公网；公网访问走 HTTPS 反向代理。
+- 不要把没有令牌的面板直接暴露到公网；公网访问走 HTTPS 反向代理
+  （教程见 [docs/user/nginx.md](docs/user/nginx.md)）。
 - 插件和脚本都是**在你机器上执行的可信代码**——只安装来源明确的插件和脚本。
 - 插件的全部网络出站都过面板的 SSRF 门（默认禁回环与云元数据地址）。
 - 不要把 `PANEL_TOKEN` 提交到 Git。
@@ -287,13 +297,15 @@ macOS 用 launchd、Linux 用 systemd，把面板注册成服务（开机自启�
 | 文档 | 内容 |
 |---|---|
 | [docs/README.md](docs/README.md) | 全部文档的索引（按使用 / 开发 / 工程记录分组） |
-| [docs/scripts.md](docs/scripts.md) | 脚本：运行时、任务名、输出、护栏、迁移 |
+| [docs/user/scripts.md](docs/user/scripts.md) | 脚本：运行时、任务名、输出、护栏、迁移 |
 | [docs/plugins.md](docs/plugins.md) | 插件生命周期、自带界面、上传规则、与旧面板的对照 |
 | [docs/plugin-contract.md](docs/plugin-contract.md) | 插件契约：两个仓库、两条部署路径、十条铁律 |
 | [docs/host-api.md](docs/host-api.md) | host API：能力、限额、SSRF 门、日志脱敏 |
 | [docs/scheduler.md](docs/scheduler.md) | 调度：任务状态、熔断、时钟回拨、休眠补跑 |
-| [docs/notify.md](docs/notify.md) | 通知与推送渠道 |
-| [docs/ops.md](docs/ops.md) | 运维：配置、备份恢复、保留策略、健康摘要 |
+| [docs/user/notify.md](docs/user/notify.md) | 通知与推送渠道 |
+| [docs/user/nginx.md](docs/user/nginx.md) | nginx 反向代理教程（公网 HTTPS 访问） |
+| [docs/user/caddy.md](docs/user/caddy.md) | Caddy 反代教程（三行配置自动 HTTPS，更适合没备案的场景） |
+| [docs/user/ops.md](docs/user/ops.md) | 运维：配置、备份恢复、保留策略、健康摘要 |
 | [docs/api.md](docs/api.md) | HTTP API 参考（脚本 / curl 调用时看这份） |
 | [docs/pitfalls.md](docs/pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
 

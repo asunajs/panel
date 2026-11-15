@@ -265,7 +265,7 @@ echo
 echo "  3) 有 0.3.x 的旧面板？一条命令整体迁移（插件账号、任务计划、脚本、运行历史）："
 echo "       $INSTALL_DIR/$BIN_NAME migrate <旧数据目录> --apply \\"
 echo "         --with-tasks --with-runs-history --with-notify --with-plugin-data"
-echo "     （面板启动时也会自动检测旧数据并提醒一次；详情见 docs/migrate.md）"
+echo "     （面板启动时也会自动检测旧数据并提醒一次；详情见 docs/user/migrate.md）"
 echo
 echo "  常用环境变量："
 echo "    PANEL_TOKEN=你的令牌         跳过口令引导（服务化 / 无头部署用）"
