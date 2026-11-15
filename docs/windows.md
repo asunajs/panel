@@ -17,9 +17,26 @@
 | 真的链出产物 | **成**：`panel.exe` **16.30 MB**（`PE32+ console x86-64`，release profile） |
 | 它的依赖 | 只有系统 DLL（`KERNEL32` / `advapi32` / `bcrypt` / `crypt32` / `secur32` / `ws2_32` / `oleaut32` / `combase` / `ntdll` / `api-ms-win-crt-*`），**没有 mingw 运行时 DLL** |
 
-> 交叉用的是 `x86_64-pc-windows-gnu` + mingw（本机可得的最接近环境）。发布要走 **msvc**，
-> 两者的平台分支是同一套 `cfg(windows)`，但**链接器与 CRT 不同** —— 所以 P0 仍要有一个
-> 真实的 `windows-latest` 任务来确认 msvc 这一档，见 §4。
+> 交叉用的是 `x86_64-pc-windows-gnu` + mingw（本机可得的最接近环境）。发布走 **msvc**，
+> 两者的平台分支是同一套 `cfg(windows)`，但**链接器与 CRT 不同**。
+
+**msvc 这一档已由 CI 确认（2026-11-15，`.github/workflows/windows.yml`）**：
+
+| 项 | 读数 |
+|---|---|
+| 单测（`cargo test --release`，`--test-threads=1`） | **443 过 / 0 红**（比本机少的 13 条是 `cfg(unix)` 的构造型用例） |
+| 冒烟：`panel version` | `panel 0.4.3（panel-llrt）` |
+| 冒烟：起服务打 `/readyz` | `200 {"failed_plugins":0,"ok":true,...}` |
+| 冒烟：静态资产 | `/schedule.js` 200，42 KB |
+| 发版产物 | `panel-x86_64-pc-windows-msvc.exe` **23.8 MB**（PE32+ console x86-64），随 `v0.4.3` 发布，进 `SHA256SUMS` |
+
+这一轮 CI 还**抓出两个真 bug**（都不是「编不过」那类）：
+1. **脚本预算到点杀不掉进程**：Windows 上没有进程组，`Child::kill()` 只杀直接子进程，
+   孙子进程继续占着 stdout/stderr 管道 → 运行记录永远不结束（CI 挂了 25 分钟才暴露）。
+   改成到点 `taskkill /PID … /T /F` 杀整棵树。
+2. **`panel service print` 打出来的命令引号是断的**：`/TR` 里嵌套引号，cmd 与 PowerShell
+   解释不同。改成写一个 `panel-start.cmd` 启动器，任务指向它（只留一层引号），
+   顺带把起始目录钉死。
 
 ---
 
@@ -120,6 +137,8 @@ Windows 上新建脚本的默认运行时是 `node`（不是 `sh`），运行时
 | `panel service`（Windows） | **已写**：`schtasks` 建「登录时触发」任务，命令里 `cd /d` 钉住起始目录 |
 | CI 上的持续验证 | `.github/workflows/windows.yml`：动 `src/` 就跑 msvc 编译 + **全量单测（`--no-fail-fast`）** + 冒烟 |
 | 文档 | 本文 + README 的 Windows 一节 |
+| 已发布 | **v0.4.3** 的 Release 里已有 `panel-x86_64-pc-windows-msvc.exe` + `SHA256SUMS`（三档） |
+| 真机验收 | [#15](https://github.com/asunajs/panel/issues/15)：13 条验收表，等有 Windows 机器的人过 |
 
 
 1. `panel-x86_64-pc-windows-msvc.exe` —— 进 Release，并进 `SHA256SUMS`（与另外两档同格式）
