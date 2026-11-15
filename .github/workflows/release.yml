@@ -261,9 +261,9 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    # 新平台档：先不拦发布（和 armv7 同一个策略）。等 docs/windows.md 的验收表
-    # 在真机上跑过、`.github/workflows/windows.yml` 稳定绿了，再摘掉这一行。
-    continue-on-error: true
+    # 已经摘掉 continue-on-error：`.github/workflows/windows.yml` 在 msvc 上跑绿了
+    # （443 条单测 + 起服务打 /readyz），所以这一档的产物是**必须**有的。
+    # 真机验收表还挂在 issue #15 —— 那不拦发布，属于桌面细节（路径、占用、编码）。
     steps:
       - uses: actions/checkout@v4
         with:
