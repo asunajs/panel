@@ -56,6 +56,31 @@ async fn run_status(db: &Db, id: i64) -> (String, String) {
 
 // ── 运行时解析 ─────────────────────────────────────────────
 
+/// 解释器的**默认程序**必须按平台来：Windows 上没有 python3 / /bin/sh。
+///
+/// 这条以前在 Windows CI 上红过（断言写死 `/bin/sh`）—— 断言应该问平台，
+/// 不是把某一台机器的现实刻进测试。
+#[test]
+fn runtime_default_programs_follow_the_platform() {
+    let dir = tmpdir("runtime-defaults");
+    let py = dir.join("x.py");
+
+    let (prog, args) = resolve_runtime("python3", &py).unwrap();
+    assert_eq!(prog, crate::platform::default_python());
+    assert_eq!(args[0], "-u", "python 要 -u，否则日志不实时");
+
+    let (prog, _) = resolve_runtime("sh", &dir.join("x.sh")).unwrap();
+    assert_eq!(prog, crate::platform::default_sh());
+
+    if cfg!(windows) {
+        assert_eq!(prog, "sh", "Windows 上没有 /bin/sh");
+        assert_eq!(crate::platform::default_python(), "python", "Windows 上没有 python3");
+    } else {
+        assert_eq!(prog, "/bin/sh");
+        assert_eq!(crate::platform::default_python(), "python3");
+    }
+}
+
 #[test]
 fn infer_runtime_maps_extensions() {
     assert_eq!(infer_runtime("a.js"), "node");
@@ -74,9 +99,10 @@ fn resolve_runtime_builds_the_command_line() {
     let dir = tmpdir("resolve");
     let p = dir.join("x.sh");
 
-    // sh：解释器来自环境变量（可配置），文件拼最后
+    // sh：解释器来自环境变量（可配置），文件拼最后。
+    // 默认值**按平台不同**（Windows 上没有 /bin/sh，见 platform::default_sh）。
     let (prog, args) = resolve_runtime("sh", &p).unwrap();
-    assert_eq!(prog, "/bin/sh");
+    assert_eq!(prog, crate::platform::default_sh());
     assert_eq!(args, vec![p.display().to_string()]);
 
     // node + .ts：自动带 --experimental-strip-types（node ≥ 22.6；想用 bun 就改运行时）
