@@ -65,6 +65,16 @@ done
 # 数的是**实例** plugins/ 里的 .js（不是仓里的、更不是 HEAD 里的）：插件是插件项目装的，
 # 拿仓里的数目对账永远对不上（撤掉产物之后）。
 EXPECT="$(ls "$DEST"/plugins/*.js 2>/dev/null | wc -l | tr -d ' ')"
+# ⚠ 「目录里有几个 .js」≠「该加载几个」：用户停用的插件**永远不会**被加载，
+#   所以不减掉它们，下面的循环会一直等到超时（实测：9 个文件、2 个停用、
+#   readyz 一直是 7/9，脚本报「300 秒没就绪」，其实实例早就好了）。
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DEST/data/panel.db" ]; then
+  OFF="$(sqlite3 -readonly "$DEST/data/panel.db" \
+    "select count(*) from plugins where enabled=0;" 2>/dev/null || echo 0)"
+  case "$OFF" in ''|*[!0-9]*) OFF=0 ;; esac
+  EXPECT=$(( EXPECT - OFF ))
+  [ "$EXPECT" -lt 0 ] && EXPECT=0
+fi
 WAITED=0
 while [ "$WAITED" -lt 300 ]; do
   BODY="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/readyz" 2>/dev/null || true)"
@@ -90,5 +100,5 @@ while [ "$WAITED" -lt 300 ]; do
     echo "  …还在等 /readyz（已 ${WAITED}s；加载中会回 503「调度器在忙」，这是正常的）"
   fi
 done
-echo "进程起来了，但 300 秒内 /readyz 没 200：看 $DEST/data/panel.err.log 与日志页" >&2
+echo "进程起来了，但 300 秒内没就绪（期望插件 $EXPECT 个）：看 $DEST/data/panel.err.log 与日志页" >&2
 exit 1

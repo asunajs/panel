@@ -1041,6 +1041,50 @@ async function main() {
       console.log('  截图失败（不影响结论）：' + (e && e.message));
     }
   }
+  // 矮窗口（用户原话：「再加几个就直接后面的看都不能看了」）：窗口一压，固定部分
+  // （品牌 + 底部）先吃掉高度，中间段必须还能滚 —— 这是最容易露馅的场景。
+  for (const h of [420, 320]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: h, deviceScaleFactor: 1, mobile: false });
+    await sleep(300);
+    const tight = JSON.parse(await js(
+      "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+      "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
+      "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
+      "if(sc) sc.scrollTop=sc.scrollHeight;" +
+      "const last=items.length?items[items.length-1].getBoundingClientRect():null;" +
+      "return {vh:innerHeight,footBottom:Math.round(foot.bottom),footH:Math.round(foot.height)," +
+      "scrollH:sc?sc.scrollHeight:0,clientH:sc?sc.clientHeight:0," +
+      "lastBottom:last?Math.round(last.bottom):null};})())"
+    ));
+    check('矮窗口 ' + h + 'px：底部状态仍完整可见',
+      tight.footH > 0 && tight.footBottom <= tight.vh + 1, JSON.stringify(tight));
+    check('矮窗口 ' + h + 'px：中间段仍可滚（滚到底能看到最后一条）',
+      tight.scrollH > tight.clientH && tight.lastBottom !== null && tight.lastBottom <= tight.vh + 1,
+      JSON.stringify(tight));
+  }
+
+  // 窄屏抽屉（用户第二张截图就是这个形状）：≤720px 时侧栏变成 position:fixed 的浮层，
+  // 而浮层里是**同一个** flex 列 —— 中间段没得滚的话，插件入口会把抽屉内容推到屏幕外。
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 700, height: 600, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  await js("setSidebar(true)");
+  await sleep(400);
+  const drawerFit = JSON.parse(await js(
+    "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+    "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
+    "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
+    "if(sc) sc.scrollTop=sc.scrollHeight;" +
+    "const last=items.length?items[items.length-1].getBoundingClientRect():null;" +
+    "return {vh:innerHeight,footBottom:Math.round(foot.bottom),footH:Math.round(foot.height)," +
+    "scrollable:!!sc&&sc.scrollHeight>sc.clientHeight+1," +
+    "lastBottom:last?Math.round(last.bottom):null};})())"
+  ));
+  check('窄屏抽屉里，底部状态也在视口内',
+    drawerFit.footH > 0 && drawerFit.footBottom <= drawerFit.vh + 1, JSON.stringify(drawerFit));
+  check('窄屏抽屉里，中间段可滚', drawerFit.scrollable === true, JSON.stringify(drawerFit));
+  await js("setSidebar(false)");
+  await sleep(300);
+
   // 收尾：还原注入的假入口，后面的断言还得看真实数据
   await js(`(()=>{const box=document.getElementById('nav-plugin-list');
     [...box.querySelectorAll('[data-fill]')].forEach(e=>e.remove());
