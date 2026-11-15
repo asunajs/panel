@@ -28,9 +28,25 @@ curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bas
 （`PANEL_BASE_URL=https://你的镜像/panel bash install.sh`）；脚本其他行为不变。
 
 支持的产物：`aarch64-linux-musl`（64 位 ARM：手机、盒子、树莓派 3/4/5）、
-`x86_64-linux-musl`（PC / VPS）。**Windows 还没有发布产物**：源码已经能以
-`x86_64-pc-windows-gnu` 交叉编译出 `panel.exe`，但运行时（路径、文件占用、自启动）
-还没在真机上验收，状态与计划见 [docs/windows.md](docs/windows.md)。**0.4.0 暂时没有 32 位 ARM（armv7）产物**：
+`x86_64-linux-musl`（PC / VPS）、`x86_64-pc-windows-msvc.exe`（Windows，见下）。
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/asunajs/panel/main/install.ps1 | iex
+```
+
+和 `install.sh` 同一套契约：检测架构 → 下载 → **强制校验 SHA256** → PE 自检 →
+装进 `%LOCALAPPDATA%\Programs\panel`（`-Prefix` 可改）→ 跑一次 `panel version` 自检。
+ARM64 的 Windows 走 x64 产物（系统自带 x64 模拟）。
+
+自启动用**计划任务**（登录时触发）：`panel service print` 会打印要跑的那条 `schtasks` 命令，
+`panel service install` 直接建。
+
+坦白的边界：Windows 产物在 GitHub 的 `windows-latest` 上编译、跑单测、起服务打 `/readyz`
+都通过；但**桌面上的细节还没在真机验收**（中文/含空格路径、文件被占用时恢复备份、
+计划任务真的注册、控制台编码、SmartScreen）。状态、差异与验收表见
+[docs/windows.md](docs/windows.md)。**0.4.0 暂时没有 32 位 ARM（armv7）产物**：
 引擎依赖的 `rquickjs-sys` 没给 `armv7-unknown-linux-musleabihf` 预生成绑定，
 走 bindgen 那条路还要再通一层容器内的构建脚本问题；install.sh 在 armv7 上会明确
 告诉你「这个版本没有 32 位 ARM 产物」而不是含糊失败。要装在 32 位设备上，

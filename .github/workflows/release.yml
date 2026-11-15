@@ -256,9 +256,106 @@ jobs:
   # ------------------------------------------------------------------
   # 汇总成一个 Release
   # ------------------------------------------------------------------
+  windows:
+    name: windows-x86_64-msvc
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    # 新平台档：先不拦发布（和 armv7 同一个策略）。等 docs/windows.md 的验收表
+    # 在真机上跑过、`.github/workflows/windows.yml` 稳定绿了，再摘掉这一行。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 生成引擎的内置 JS（vendor/llrt/bundle/js，build.rs 要读）
+        run: |
+          npm ci --prefix tools/bundle
+          node tools/bundle/build.mjs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建
+        # Windows 上不需要 vendored-openssl：native-tls 走 schannel（系统自带），
+        # 依赖图里根本没有 openssl-sys（它只在 cfg(target_os="linux") 下声明）。
+        run: cargo build --release
+
+      - name: 校验产物（PE + 架构）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "target\release\panel.exe"
+          if (-not (Test-Path $bin)) { throw "没编出 $bin" }
+          $len = (Get-Item $bin).Length
+          $mb = [math]::Round($len/1MB, 2)
+          "产物: $bin $mb MB"
+          if ($len -lt 5MB) { throw "产物只有 $mb MB，不像一个完整的面板" }
+          $fs = [System.IO.File]::OpenRead($bin)
+          try {
+            $sig = New-Object byte[] 2
+            $fs.Read($sig, 0, 2) | Out-Null
+          } finally { $fs.Dispose() }
+          if ($sig[0] -ne 0x4D -or $sig[1] -ne 0x5A) { throw "不是 PE 文件（缺 MZ 头）" }
+          "PE 头正常"
+
+      - name: 自检：真的能起来并应答
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "target\release\panel.exe"
+          "== version =="
+          & $bin version
+          if ($LASTEXITCODE -ne 0) { throw "panel version 退出码 $LASTEXITCODE" }
+          "== 起服务打 /readyz =="
+          $env:PANEL_DATA_DIR = Join-Path $env:RUNNER_TEMP "panel-data"
+          $env:PANEL_PLUGINS_DIR = Join-Path $env:RUNNER_TEMP "panel-plugins"
+          $env:PANEL_BIND = "127.0.0.1:8899"
+          $out = Join-Path $env:RUNNER_TEMP "panel.out.log"
+          $p = Start-Process -FilePath $bin -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError (Join-Path $env:RUNNER_TEMP "panel.err.log")
+          $ready = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $ready = Invoke-WebRequest -Uri "http://127.0.0.1:8899/readyz" -UseBasicParsing -TimeoutSec 2
+              break
+            } catch { }
+          }
+          if ($null -eq $ready) {
+            Get-Content $out -ErrorAction SilentlyContinue
+            throw "30 秒内 /readyz 没通"
+          }
+          "/readyz => $($ready.StatusCode) $($ready.Content)"
+          Stop-Process -Id $p.Id -Force
+
+      - name: 产出资产 + 校验和
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $name = "panel-x86_64-pc-windows-msvc.exe"
+          Copy-Item "target\release\panel.exe" "dist\$name"
+          $hash = (Get-FileHash -Path "dist\$name" -Algorithm SHA256).Hash.ToLower()
+          # 格式与另外两档一致（两个空格分隔），install.sh / install.ps1 都按这个抓
+          "$hash  $name" | Out-File -FilePath "dist\SHA256SUMS-windows" -Encoding ascii -NoNewline
+          Add-Content -Path "dist\SHA256SUMS-windows" -Value ""
+          Get-Content "dist\SHA256SUMS-windows"
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-windows
+          path: dist/*
+
   release:
     name: 发布
-    needs: [build, armv7]
+    needs: [build, armv7, windows]
     runs-on: ubuntu-latest
     # armv7 是 continue-on-error，所以这里恒为「非取消就发」：
     # 它成功就把第三个资产一起发，失败也不拦前两档。

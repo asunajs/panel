@@ -111,7 +111,16 @@ Windows 上新建脚本的默认运行时是 `node`（不是 `sh`），运行时
 - 关窗口（`CTRL_CLOSE_EVENT`）不会走优雅关闭 → 可能留下未刷盘的日志批。需要的话加 handler
   （v1 可以只在文档里说明「用 `Ctrl+C` 或 `panel service stop` 停」）。
 
-## 3. 交付物
+## 3. 交付物（进度）
+
+| 交付物 | 状态 |
+|---|---|
+| `panel-x86_64-pc-windows-msvc.exe` | `release.yml` 加了 `windows` job：msvc 构建 → PE 校验 → 起服务打 `/readyz` → 产出 `SHA256SUMS-windows`（与另两档同格式，合并进 `SHA256SUMS`）。**新平台档先 `continue-on-error`**，不拦发布 |
+| `install.ps1` | **已写**：架构检测（ARM64 走 x64 并说明）、scheme 白名单（https；http/file 要显式）、强制 SHA256、PE+体积自检、`panel version` 自检、`-AddToPath` 才动 PATH |
+| `panel service`（Windows） | **已写**：`schtasks` 建「登录时触发」任务，命令里 `cd /d` 钉住起始目录 |
+| CI 上的持续验证 | `.github/workflows/windows.yml`：动 `src/` 就跑 msvc 编译 + **全量单测（`--no-fail-fast`）** + 冒烟 |
+| 文档 | 本文 + README 的 Windows 一节 |
+
 
 1. `panel-x86_64-pc-windows-msvc.exe` —— 进 Release，并进 `SHA256SUMS`（与另外两档同格式）
 2. `install.ps1` —— 对齐 `install.sh` 的契约：识别架构 → 下载 → **强制 SHA256** → 落盘
@@ -122,7 +131,7 @@ Windows 上新建脚本的默认运行时是 `node`（不是 `sh`），运行时
 
 ## 4. 分五步，每步都有可验收的判据
 
-### P0 摸底（半天）—— 只换信息，不写产品代码
+### P0 摸底 —— 已完成（结论见 §0；msvc 那一档由 CI 复核）
 
 在 CI 加一个 `windows-latest` 任务，**只跑** `cargo check` / `cargo test` / `panel version`，
 不参与发版。判据：拿到完整的错误清单，每条都归到某个 `文件:行`，写进本页 §2 的复查列表。
