@@ -207,6 +207,28 @@ pub async fn fetch_json_with(
     }
 }
 
+/// 进程内共享的 native-tls 客户端（连接池 + keep-alive）。
+///
+/// 为什么共享：见 `fetch_native_json` 里那段说明 —— 每次新建客户端等于每次都重新
+/// 握手。⚠ 这里**不设** timeout：各调用点的超时差着数量级（1500ms ~ 60s），
+/// 由调用处 `RequestBuilder::timeout()` 逐发指定。
+fn shared_client() -> Result<reqwest::Client, String> {
+    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(c) = SHARED.get() {
+        return Ok(c.clone());
+    }
+    let built = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        // 空闲连接留久一点：插件的批量只读链路是一串串发的
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| format!("构造 native-tls 客户端失败: {e}"))?;
+    // 并发首调时谁先塞进去都行，后续统一用那一份
+    let _ = SHARED.set(built.clone());
+    Ok(SHARED.get().cloned().unwrap_or(built))
+}
+
 /// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、
 /// 不自动跟重定向（我们自己在循环里跟，这样每跳都能过 SSRF 门）、正文 1 MiB 上限。
 async fn fetch_native_json(
@@ -243,12 +265,16 @@ async fn fetch_native_json(
         })
         .unwrap_or_default();
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .map_err(|e| format!("构造 native-tls 客户端失败: {e}"))?;
+    // ⚠ 客户端**复用**，不是每次新建。
+    //
+    //   以前这里是 `Client::builder()...build()` —— 连接池跟着这一次调用一起丢掉，
+    //   于是**每一发请求都要重做一次 TLS 握手**（2026-11-15 实测：到
+    //   `m.mcloud.139.com` 每发握手约 0.65 秒，三个账号读一遍 AI豆要 19 秒）。
+    //   复用之后同一主机走 keep-alive，握手只做第一次。
+    //
+    //   超时**不能**设在客户端上（各调用点要的时长不同：插件里 1500ms 与 12s 并存），
+    //   改成在**每一次请求**上设（`rb.timeout`）—— 语义与原来逐调用一致。
+    let client = shared_client()?;
 
     let mut current = url;
     let mut hops = 0usize;
@@ -261,7 +287,7 @@ async fn fetch_native_json(
 
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("method 不合法 {method}: {e}"))?;
-        let mut rb = client.request(m, &current);
+        let mut rb = client.request(m, &current).timeout(Duration::from_millis(timeout));
         for (k, v) in &extra_headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
