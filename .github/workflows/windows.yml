@@ -1,0 +1,135 @@
+name: Windows
+
+# =============================================================================
+# Windows 上的编译 + 单测 + 冒烟（**不发版**，发版仍由 release.yml 管）
+# =============================================================================
+#
+# 为什么单独一个工作流而不是塞进 release.yml：
+#   Windows 支持现在处于「能编译、没在真机验收过」的阶段，需要的是**每次改动都能跑**
+#   的快速反馈；发版那条链路只该在版本号确定时付一次成本。等这里稳定绿了，
+#   再把构建产物接进 release.yml（见 docs/windows.md 的 P3）。
+#
+# 为什么是 msvc 而不是 gnu：
+#   用户机器上不会装 mingw；msvc 链的是系统 UCRT，产物只依赖系统 DLL。
+#   本机开发时用 gnu 交叉编译能提前发现问题（docs/windows.md §0 的读数），
+#   但**发布档必须是 msvc**。
+#
+# ⚠ 这个工作流跑不出来的东西（要真人在真 Windows 上做，见 issue 里的验收表）：
+#   中文/含空格路径、文件被占用时的恢复备份、计划任务真的注册、控制台编码、
+#   SmartScreen/杀软。CI 只能证明「编得过、跑得起、单测绿」。
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tools/bundle/**'
+      - 'scripts/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同一个 PR/分支上只留最新一次，别让排队把 runner 占满。
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: windows-x86_64-msvc
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 这个 job 会跑依赖的 build script 与仓库脚本，不该读到推送凭据。
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 生成引擎的内置 JS（vendor/llrt/bundle/js，build.rs 要读）
+        run: |
+          npm ci --prefix tools/bundle
+          node tools/bundle/build.mjs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 编译（release）
+        run: cargo build --release
+
+      - name: 单测（全量，一次跑完不早退）
+        # --no-fail-fast：失败也把剩下的跑完。Windows 这一档要的是「一次拿到全部
+        # 失败清单」，一条一条修太慢。
+        run: cargo test --no-fail-fast
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: 冒烟：version / 起服务 / readyz
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "target\release\panel.exe"
+          if (-not (Test-Path $exe)) { throw "没找到 $exe" }
+          Get-Item $exe | ForEach-Object { "产物: $($_.Name) $([math]::Round($_.Length/1MB,2)) MB" }
+
+          "== panel version =="
+          & $exe version
+          if ($LASTEXITCODE -ne 0) { throw "panel version 退出码 $LASTEXITCODE" }
+
+          "== panel service print（Windows 应走计划任务）=="
+          & $exe service print
+
+          "== 起服务并打 /readyz =="
+          $env:PANEL_DATA_DIR = Join-Path $env:RUNNER_TEMP "panel-data"
+          $env:PANEL_PLUGINS_DIR = Join-Path $env:RUNNER_TEMP "panel-plugins"
+          $env:PANEL_BIND = "127.0.0.1:8899"
+          $out = Join-Path $env:RUNNER_TEMP "panel.out.log"
+          $err = Join-Path $env:RUNNER_TEMP "panel.err.log"
+          $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+
+          $ready = $null
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $ready = Invoke-WebRequest -Uri "http://127.0.0.1:8899/readyz" -UseBasicParsing -TimeoutSec 2
+              break
+            } catch { }
+          }
+          if ($null -eq $ready) {
+            "--- stdout ---"; Get-Content $out -ErrorAction SilentlyContinue
+            "--- stderr ---"; Get-Content $err -ErrorAction SilentlyContinue
+            throw "30 秒内 /readyz 没通"
+          }
+          "/readyz => $($ready.StatusCode) $($ready.Content)"
+
+          # 静态资源也要能出来（include_str! 的资产在 Windows 上同样要能服务）
+          $js = Invoke-WebRequest -Uri "http://127.0.0.1:8899/schedule.js" -UseBasicParsing -TimeoutSec 5
+          "/schedule.js => $($js.StatusCode) $($js.RawContentLength) bytes"
+
+          Stop-Process -Id $p.Id -Force
+          "冒烟通过"
+
+      - name: 留证据（失败也要看得到日志）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-logs
+          path: |
+            ${{ runner.temp }}/panel.out.log
+            ${{ runner.temp }}/panel.err.log
+          if-no-files-found: ignore
