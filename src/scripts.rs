@@ -1262,22 +1262,34 @@ fn validate_runtime(rt: &str) -> Result<String, String> {
 }
 
 /// bin 运行时要能直接 exec：没有执行位就补上（best effort，失败打 warn 不拦保存）。
+///
+/// Windows 没有「执行位」这个概念（能不能跑看扩展名与 ACL），那边是空操作。
+/// **判断留在函数里、不留到调用点** —— 三个调用点各写一遍 `cfg` 迟早漏一处，
+/// 第一次给 Windows 交叉编译时漏的就是这里。
 async fn ensure_exec(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    match tokio::fs::metadata(path).await {
-        Ok(m) => {
-            let mut perm = m.permissions();
-            if perm.mode() & 0o111 == 0 {
-                perm.set_mode(perm.mode() | 0o755);
-                if let Err(e) = tokio::fs::set_permissions(path, perm).await {
-                    log_warn_exec(path, &e.to_string());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match tokio::fs::metadata(path).await {
+            Ok(m) => {
+                let mut perm = m.permissions();
+                if perm.mode() & 0o111 == 0 {
+                    perm.set_mode(perm.mode() | 0o755);
+                    if let Err(e) = tokio::fs::set_permissions(path, perm).await {
+                        log_warn_exec(path, &e.to_string());
+                    }
                 }
             }
+            Err(e) => log_warn_exec(path, &e.to_string()),
         }
-        Err(e) => log_warn_exec(path, &e.to_string()),
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
+#[cfg(unix)]
 fn log_warn_exec(path: &Path, msg: &str) {
     // 没有宿主上下文（保存路径上拿不到 LogHub），warn 进 stderr 即可 ——
     // 真正的执行失败会在 run 时如实报。

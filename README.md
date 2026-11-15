@@ -28,7 +28,9 @@ curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bas
 （`PANEL_BASE_URL=https://你的镜像/panel bash install.sh`）；脚本其他行为不变。
 
 支持的产物：`aarch64-linux-musl`（64 位 ARM：手机、盒子、树莓派 3/4/5）、
-`x86_64-linux-musl`（PC / VPS）。**0.4.0 暂时没有 32 位 ARM（armv7）产物**：
+`x86_64-linux-musl`（PC / VPS）。**Windows 还没有发布产物**：源码已经能以
+`x86_64-pc-windows-gnu` 交叉编译出 `panel.exe`，但运行时（路径、文件占用、自启动）
+还没在真机上验收，状态与计划见 [docs/windows.md](docs/windows.md)。**0.4.0 暂时没有 32 位 ARM（armv7）产物**：
 引擎依赖的 `rquickjs-sys` 没给 `armv7-unknown-linux-musleabihf` 预生成绑定，
 走 bindgen 那条路还要再通一层容器内的构建脚本问题；install.sh 在 armv7 上会明确
 告诉你「这个版本没有 32 位 ARM 产物」而不是含糊失败。要装在 32 位设备上，

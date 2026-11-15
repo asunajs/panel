@@ -64,6 +64,13 @@ fn zip_symlink_entries_are_rejected() {
     assert!(std::fs::read_dir(&root).unwrap().next().is_none());
 }
 
+/// 「目标目录里已有一个指向外部的符号链接」必须被拒 —— 否则解包会写到根目录之外。
+///
+/// 只在 Unix 上做：Windows 建符号链接要么要管理员权限、要么要开开发者模式，
+/// 用 `symlink_dir` 还得区分文件/目录 —— 在 CI 里不稳定。**这不等于 Windows 上不做这个检查**：
+/// 检查本身（逐级 `symlink_metadata`，见 upload.rs 文件头第 4 条）是跨平台的，
+/// 只是这一条测试的**构造手段**是 Unix 的。
+#[cfg(unix)]
 #[test]
 fn a_symlinked_directory_in_the_target_is_refused() {
     let root = tmp("symdir");
