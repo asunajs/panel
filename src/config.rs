@@ -51,14 +51,27 @@ pub const ENV_BUDGET_MS: &str = "PANEL_BUDGET_MS";
 /// 本次启动生效的默认预算。环境变量非法就退回默认值（同 `max_bytes`：不因为一个笔误拒绝启动），
 /// 但会在 `[1s, 90min]` 之间夹一次 —— 0 或天文数字都是笔误，夹回可用范围比报错更有用。
 pub fn budget_ms() -> u64 {
-    let raw = match std::env::var(ENV_BUDGET_MS) {
-        Ok(s) => match s.trim().parse::<u64>() {
-            Ok(n) => n,
-            Err(_) => return DEFAULT_BUDGET_MS,
-        },
-        Err(_) => return DEFAULT_BUDGET_MS,
-    };
-    raw.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS)
+    // 优先级：环境变量 > config.json 的 `run.budget_ms` > 默认（第 207 轮加了中间这层，
+    // 界面上的「单次运行预算」就是它；环境变量留着给老部署/临时覆盖）。
+    if let Ok(s) = std::env::var(ENV_BUDGET_MS) {
+        return match s.trim().parse::<u64>() {
+            Ok(n) => n.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS),
+            Err(_) => DEFAULT_BUDGET_MS,
+        };
+    }
+    match RUN_BUDGET_MS.read().ok().and_then(|g| *g) {
+        Some(n) => n.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS),
+        None => DEFAULT_BUDGET_MS,
+    }
+}
+
+/// config.json 里的默认预算（毫秒）。设成 `None` = 回到内置默认。
+static RUN_BUDGET_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::new(None);
+
+pub fn set_run_budget(ms: Option<u64>) {
+    if let Ok(mut g) = RUN_BUDGET_MS.write() {
+        *g = ms;
+    }
 }
 
 /// 读配置。缺文件 = 空对象（不是错误：新装的面板没有 config.json 很正常）。
@@ -124,3 +137,84 @@ pub fn load_plugin(data_dir: &Path, name: &str) -> Result<Value, String> {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------- 服务段（第 207 轮）
+//
+// 以前监听地址只能靠环境变量 `PANEL_BIND`、反代只能靠 `PANEL_ALLOW_ANY_HOST` ——
+// 用户的原话是「优化配置，我需要更多配置，比如绑定端口，地址…以及 x-forwarded-for」。
+// 现在这些进 config.json 的 `server` 段，界面上是表单：
+//
+//   "server": { "bind": "127.0.0.1:3030", "trust_xff": false, "allow_any_host": false }
+//
+// 优先级：环境变量 > config.json > 内置默认（环境变量是老部署的兼容路径，不能丢）。
+// `bind` 只能启动时读一次（改端口必须重启）；另两个是**热**的，中间件每请求读缓存。
+
+/// `server` 段里那两个热开关。
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Server {
+    /// 信任 `X-Forwarded-For`（放在反代后面才该开）。开了以后 HTTP 错误日志会记真实来源 IP。
+    pub trust_xff: bool,
+    /// 没有令牌时也接受任意 Host（给同机反代留口子；等于 `PANEL_ALLOW_ANY_HOST=1`）。
+    pub allow_any_host: bool,
+}
+
+static SERVER: std::sync::RwLock<Option<Server>> = std::sync::RwLock::new(None);
+
+pub fn set_server(s: Server) {
+    if let Ok(mut g) = SERVER.write() {
+        *g = Some(s);
+    }
+}
+
+pub fn server() -> Server {
+    SERVER.read().ok().and_then(|g| *g).unwrap_or_default()
+}
+
+/// 从整份配置里取 `server` 段（不合法就退回默认，不让一个拼错的键把面板弄挂）。
+pub fn server_from_value(v: &Value) -> (Option<String>, Server) {
+    let seg = v.get("server");
+    let bind = seg
+        .and_then(|s| s.get("bind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let flag = |k: &str| {
+        seg.and_then(|s| s.get(k))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    (
+        bind,
+        Server {
+            trust_xff: flag("trust_xff"),
+            allow_any_host: flag("allow_any_host"),
+        },
+    )
+}
+
+/// 启动流程里调：把 config.json 的 `server` 段读进缓存（读不到就用默认）。
+pub fn init_server(dir: &Path) -> Option<String> {
+    let value = load(dir).unwrap_or_else(|_| Value::Object(Default::default()));
+    let (bind, s) = server_from_value(&value);
+    set_server(s);
+    set_run_budget(
+        value
+            .get("run")
+            .and_then(|r| r.get("budget_ms"))
+            .and_then(Value::as_u64),
+    );
+    bind
+}
+
+/// 配置保存/重读之后调：让热开关立刻跟上（不用重启）。
+/// `server.trust_xff` / `server.allow_any_host` / `run.budget_ms` 都在这里刷新。
+pub fn refresh_server(v: &Value) {
+    set_server(server_from_value(v).1);
+    set_run_budget(
+        v.get("run")
+            .and_then(|r| r.get("budget_ms"))
+            .and_then(Value::as_u64),
+    );
+}
+

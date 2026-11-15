@@ -403,6 +403,8 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         .unwrap_or_else(|| "/".to_string());
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // 错误日志要记「谁在打」：恶意扫描时 path 之外最有用的就是来源 IP。
+    let req_for_ip = (req.headers().clone(), req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().cloned());
 
     let res = next.run(req).await;
     let status = res.status();
@@ -425,7 +427,14 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
             "@http",
             None,
             level,
-            format!("{method} {path} → {} {}", status.as_u16(), d.0),
+            format!(
+                "{method} {path}{} → {} {}",
+                client_ip(&req_for_ip.0, req_for_ip.1.as_ref())
+                    .map(|ip| format!(" ← {ip}"))
+                    .unwrap_or_default(),
+                status.as_u16(),
+                d.0
+            ),
         );
         for part in d.0.split_whitespace() {
             if let Some(r) = part.strip_prefix("ref=") {
@@ -1323,15 +1332,37 @@ fn presented_token(h: &HeaderMap) -> Option<String> {
     }
 }
 
+/// 请求的来源 IP：**只有**配置开了 `server.trust_xff` 才信 `X-Forwarded-For`。
+///
+/// 默认不信 —— 谁都能伪造这个头，信了就等于让攻击者往日志里写假 IP。
+/// 放在自家反代后面时打开它，日志里才是真实客户端而不是 127.0.0.1。
+fn client_ip(
+    h: &HeaderMap,
+    peer: Option<&axum::extract::ConnectInfo<std::net::SocketAddr>>,
+) -> Option<std::net::IpAddr> {
+    if crate::config::server().trust_xff {
+        if let Some(xff) = h.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    peer.map(|c| c.0.ip())
+}
+
 /// 无鉴权部署的 Host 闸：只认回环字面量。
 ///
 /// 缺 Host 头时放行（HTTP/1.0 客户端不带；而浏览器发起的 rebinding **必然**带，
 /// 且带的是攻击者域名）。`PANEL_ALLOW_ANY_HOST=1` 是给同机反向代理留的口子。
 fn host_allowed(h: &HeaderMap) -> bool {
     static ALLOW_ANY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ALLOW_ANY.get_or_init(|| {
+    let env_on = *ALLOW_ANY.get_or_init(|| {
         std::env::var("PANEL_ALLOW_ANY_HOST").ok().as_deref() == Some("1")
-    }) {
+    });
+    // 配置里的 server.allow_any_host 是热开关（第 207 轮）：改完保存就生效，不用重启。
+    if env_on || crate::config::server().allow_any_host {
         return true;
     }
     let Some(raw) = h.get(header::HOST).and_then(|v| v.to_str().ok()) else {
@@ -3632,6 +3663,8 @@ async fn api_config_save(
         .await
         .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
     st.config.set(&value);
+    // server 段里那两个开关是热的：保存即生效（bind 不行，端口只能重启改）
+    crate::config::refresh_server(&value);
     let keys: Vec<String> = value
         .as_object()
         .map(|o| o.keys().cloned().collect())

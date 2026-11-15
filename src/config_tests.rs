@@ -4,6 +4,7 @@
 //! 否则一个把上限调到 4 KiB 的用例会把并行的另一个用例搞红。
 
 use super::*;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -135,4 +136,38 @@ fn budget_defaults_to_five_minutes_and_follows_the_env() {
     assert_eq!(budget_ms(), DEFAULT_BUDGET_MS);
 
     std::env::remove_var(ENV_BUDGET_MS);
+}
+
+/// `server` 段的解析（第 207 轮）：缺省全关，写错的类型不当真。
+#[test]
+fn server_section_parses_and_defaults_off() {
+    let _g = lock();
+    let empty = json!({});
+    let (bind, s) = crate::config::server_from_value(&empty);
+    assert!(bind.is_none(), "没写就返回 None（交给默认/环境变量）");
+    assert!(!s.trust_xff && !s.allow_any_host, "默认必须都不信任");
+
+    let v = json!({"server": {"bind": " 0.0.0.0:3030 ", "trust_xff": true, "allow_any_host": false}});
+    let (bind, s) = crate::config::server_from_value(&v);
+    assert_eq!(bind.as_deref(), Some("0.0.0.0:3030"), "bind 要去掉空白");
+    assert!(s.trust_xff && !s.allow_any_host);
+
+    // 类型写错（字符串 "true"、数字）不能当成开 —— 这类笔误最怕静默变严/变松
+    let bad = json!({"server": {"trust_xff": "true", "allow_any_host": 1}});
+    let (_, s) = crate::config::server_from_value(&bad);
+    assert!(!s.trust_xff && !s.allow_any_host, "非 bool 一律当关");
+}
+
+/// `run.budget_ms` 进默认预算，并且夹在 [1s, 90min] 里（第 207 轮）。
+#[test]
+fn run_budget_from_config_is_clamped() {
+    let _g = lock();
+    crate::config::set_run_budget(Some(600_000));
+    assert_eq!(crate::config::budget_ms(), 600_000);
+    crate::config::set_run_budget(Some(0));
+    assert_eq!(crate::config::budget_ms(), 1_000, "0 是笔误，夹到下限");
+    crate::config::set_run_budget(Some(99_999_999));
+    assert_eq!(crate::config::budget_ms(), 5_400_000, "天文数字夹到上限");
+    crate::config::set_run_budget(None);
+    assert_eq!(crate::config::budget_ms(), crate::config::DEFAULT_BUDGET_MS);
 }

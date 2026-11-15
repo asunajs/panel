@@ -109,7 +109,14 @@ async fn main() -> Result<(), String> {
     let env_token = auth::token_from_env()?;
     let provisioned = auth::provision(&data_dir, env_token)?;
 
-    let bind = env_or("PANEL_BIND", "127.0.0.1:8787");
+    // 监听地址：环境变量 > config.json 的 server.bind > 默认（第 207 轮起配置也能改，
+    // 但**只启动时读一次** —— 端口没法热切，改了得重启）。
+    let cfg_bind = crate::config::init_server(&data_dir);
+    let bind = std::env::var("PANEL_BIND")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or(cfg_bind)
+        .unwrap_or_else(|| "127.0.0.1:8787".to_string());
     let addr: SocketAddr = bind
         .parse()
         .map_err(|e| format!("PANEL_BIND 不是合法的地址: {bind} ({e})"))?;

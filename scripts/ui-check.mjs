@@ -425,85 +425,84 @@ async function main() {
   );
   check('「只收插件」的用法写在提示里（只推单个插件靠它）', /只收/.test(onlyHint) && /mcloud\*|通配/.test(onlyHint), onlyHint.slice(0, 80));
 
-  // 插件胶囊（第 201 轮）：用户报「只收/不收 没法对应上插件」—— 原来得手打插件名。
-  // 现在把已知插件列成可点的胶囊，点一下写进输入框（存储格式不变）。
-  const picker = JSON.parse(await js(
-    "JSON.stringify((()=>{const w=document.querySelector('#notify-main .chan-picker');" +
-    "if(!w) return {err:'no-picker'};" +
-    "const rows=[...w.querySelectorAll('.chan-picker-row')].map(r=>({label:r.querySelector('.chan-label').textContent," +
-    "chips:[...r.querySelectorAll('.chan-chip')].map(c=>c.textContent)}));" +
-    "const hid=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')];" +
-    "if(hid.length<2) return {err:'no-tag-fields',found:hid.length,bodies:document.querySelectorAll('#notify-main .chan-tags').length};" +
-    "const inc=hid[0], exc=hid[1];" +
-    
-    "return {rows:rows,inc:inc?inc.value:null,exc:exc?exc.value:null};})())"
+  // 多选下拉（第 206 轮）：只收/不收 换过三版 —— 逗号文本框 → 标签 + 两排胶囊 →
+  // 用户说「用多选select」，现在是一个下拉：收起显示已选项，点开是勾选清单。
+  const msInit = JSON.parse(await js(
+    "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "if(ms.length<2) return {err:'no-ms',n:ms.length};" +
+    "const c=ms[0].querySelector('.ms-control');" +
+    "return {n:ms.length,expanded:c.getAttribute('aria-expanded')," +
+    "popHidden:ms[0].querySelector('.ms-pop').classList.contains('hidden')," +
+    "placeholder:(ms[0].querySelector('.ms-placeholder')||{}).textContent||''," +
+    "width:Math.round(c.getBoundingClientRect().width)};})())"
   ));
-  check('只收/不收 下面有可点的插件胶囊', !picker.err && picker.rows.length === 2, JSON.stringify(picker));
-  const chipsIn = (picker.rows && picker.rows[0] && picker.rows[0].chips) || [];
-  check('胶囊列的是真实插件名（不是让用户背名字）', chipsIn.includes('seed'), JSON.stringify(chipsIn));
-  // 点第一行的 seed → 写进「只收」；再点一次 → 取消；点第二行 → 移到「不收」
-  const toggled = JSON.parse(await js(
-    "JSON.stringify((()=>{const w=document.querySelector('#notify-main .chan-picker');" +
-    "const rows=[...w.querySelectorAll('.chan-picker-row')];" +
-    "const find=(r)=>[...r.querySelectorAll('.chan-chip')].find(c=>c.textContent==='seed');" +
-    "const hid=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')];" +
-    "if(hid.length<2) return {err:'no-tag-fields',found:hid.length,bodies:document.querySelectorAll('#notify-main .chan-tags').length};" +
-    "const inc=hid[0], exc=hid[1];" +
-    
-    "find(rows[0]).click();const a={inc:inc.value,exc:exc.value,on:find(rows[0]).classList.contains('is-in')};" +
-    "find(rows[1]).click();const b={inc:inc.value,exc:exc.value,out:find(rows[1]).classList.contains('is-out')};" +
-    "find(rows[1]).click();const c={inc:inc.value,exc:exc.value};" +
+  check('只收/不收 是多选下拉（两个控件，初始收起）',
+    !msInit.err && msInit.n === 2 && msInit.expanded === 'false' && msInit.popHidden === true,
+    JSON.stringify(msInit));
+  check('下拉收起时给的是「不限制」而不是空白', /全部插件/ .test(msInit.placeholder || ''), JSON.stringify(msInit));
+  check('控件整行铺开（不再挤成小格子）', msInit.width > 300, JSON.stringify(msInit));
+
+  const msOpen = JSON.parse(await js(
+    "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "ms[0].querySelector('.ms-control').click();" +
+    "const pop=ms[0].querySelector('.ms-pop');" +
+    "const opts=[...pop.querySelectorAll('.ms-opt-name')].map(n=>n.textContent);" +
+    "return {open:!pop.classList.contains('hidden')," +
+    "expanded:ms[0].querySelector('.ms-control').getAttribute('aria-expanded')," +
+    "opts:opts,boxes:pop.querySelectorAll('input[type=checkbox]').length," +
+    "hasCustom:!!pop.querySelector('.ms-custom-input')};})())"
+  ));
+  check('点开是插件勾选清单（列真名，不用背）',
+    msOpen.open === true && msOpen.expanded === 'true' && msOpen.opts.includes('seed')
+      && msOpen.boxes === msOpen.opts.length, JSON.stringify(msOpen));
+  check('清单底部能手填前缀通配（mcloud*）', msOpen.hasCustom === true, JSON.stringify(msOpen));
+
+  const msPick = JSON.parse(await js(
+    "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "const pop=ms[0].querySelector('.ms-pop');" +
+    "const hid=[...document.querySelectorAll('#notify-main .ms input[type=hidden]')];" +
+    "const tick=(scope,name)=>{const row=[...scope.querySelectorAll('.ms-opt')].find(r=>r.textContent.includes(name));" +
+    "const cb=row.querySelector('input');cb.checked=true;cb.dispatchEvent(new Event('change',{bubbles:true}));};" +
+    "tick(pop,'seed');tick(pop,'lonely');" +
+    "const a={hidden:hid[0].value,chips:[...ms[0].querySelectorAll('.ms-chip')].map(c=>c.textContent.replace('×','').trim())};" +
+    "ms[1].querySelector('.ms-control').click();" +
+    "tick(ms[1].querySelector('.ms-pop'),'seed');" +
+    "const b={inc:hid[0].value,exc:hid[1].value};" +
+    "const x=[...ms[0].querySelectorAll('.ms-chip')].find(c=>c.textContent.includes('lonely')).querySelector('.ms-chip-x');" +
+    "x.click();" +
+    "const c={inc:hid[0].value};" +
     "return {a:a,b:b,c:c};})())"
   ));
-  check('点胶囊会写进「只收」', toggled.a && toggled.a.inc === 'seed' && toggled.a.on === true, JSON.stringify(toggled));
-  check('在「不收」里点同一个插件会移过去（互斥，不会两个都占）',
-    toggled.b && toggled.b.exc === 'seed' && toggled.b.inc === '' && toggled.b.out === true, JSON.stringify(toggled));
-  check('再点一次就取消', toggled.c && toggled.c.exc === '', JSON.stringify(toggled));
+  check('勾选两个插件 → 值进隐藏字段、控件里显示成 chip',
+    msPick.a && msPick.a.hidden === 'seed,lonely'
+      && JSON.stringify(msPick.a.chips) === JSON.stringify(['seed', 'lonely']), JSON.stringify(msPick));
+  check('在「不收」里勾同一个插件会从「只收」移走（互斥）',
+    msPick.b && msPick.b.inc === 'lonely' && msPick.b.exc === 'seed', JSON.stringify(msPick));
+  check('chip 上的 × 能单独取消一个', msPick.c && msPick.c.inc === '', JSON.stringify(msPick));
 
-  // 标签输入（第 202 轮）：用户报「输入框难以操作」—— 逗号串塞在小文本框里没法改。
-  // 现在：回车/逗号加标签、标签上的 × 删除、退格删最后一个，底层仍是逗号字符串。
-  const tags = JSON.parse(await js(
-    "JSON.stringify((()=>{const box=document.querySelector('#notify-main .chan-tags');" +
-    "if(!box) return {err:'no-tags'};" +
-    "const entry=box.querySelector('.chan-tag-entry');" +
-    "const hidden=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')][0];" +
-    "const w=box.getBoundingClientRect();" +
-    "const add=(v)=>{entry.value=v;" +
-    "entry.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));};" +
-    "add('mcloud*');add('quark');" +
-    "const after={tags:[...box.querySelectorAll('.chan-tag')].map(t=>t.textContent.replace('×','').trim())," +
-    "hidden:hidden.value,w:Math.round(w.width)};" +
-    "const x=box.querySelector('.chan-tag .chan-tag-x');if(x)x.click();" +
-    "const removed={tags:[...box.querySelectorAll('.chan-tag')].map(t=>t.textContent.replace('×','').trim())};" +
-    "entry.value='';entry.dispatchEvent(new KeyboardEvent('keydown',{key:'Backspace',bubbles:true}));" +
-    "const emptied={hidden:hidden.value,tags:[...box.querySelectorAll('.chan-tag')].length};" +
-    "return {after:after,removed:removed,emptied:emptied};})())"
+  const msClose = JSON.parse(await js(
+    "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));" +
+    "return {open:[...ms].filter(m=>!m.querySelector('.ms-pop').classList.contains('hidden')).length};})())"
   ));
-  check('只收/不收 是标签输入（不是一长串逗号文本框）', !tags.err && !!tags.after, JSON.stringify(tags));
-  check('回车能加标签，值同步进隐藏字段',
-    tags.after && JSON.stringify(tags.after.tags) === JSON.stringify(['mcloud*', 'quark'])
-      && tags.after.hidden === 'mcloud*,quark', JSON.stringify(tags.after));
-  check('标签整行铺开（够宽，不是被挤在小格子里）', tags.after && tags.after.w > 300, JSON.stringify(tags.after));
-  check('点标签上的 × 能删掉它', tags.removed && JSON.stringify(tags.removed.tags) === JSON.stringify(['quark']), JSON.stringify(tags.removed));
-  check('退格删最后一个', tags.emptied && tags.emptied.hidden === '' && tags.emptied.tags === 0, JSON.stringify(tags.emptied));
+  check('点外面会收起（不会一直挂在那儿）', msClose.open === 0, JSON.stringify(msClose));
+
   if (process.env.UI_SHOT) {
     try {
-      // 选中一个插件做成「只收」，让截图里有状态可看
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
-      await js("(()=>{const e=document.querySelector('#notify-main .chan-tag-entry');" +
-        "const add=(v)=>{e.value=v;e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));};" +
-        "add('mcloud*');add('quark');" +
-        "const w=document.querySelector('#notify-main .chan-tags');" +
-        // 编辑器在页面下方：滚到标签那儿再截，不然截到的是标题栏
-        "w.scrollIntoView({block:'center'});return 1;})()");
-      await sleep(500);
+      // 打开下拉并勾两个，截一张「展开状态」的现场图
+      await js("(()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+        "ms[0].querySelector('.ms-control').click();" +
+        "const pop=ms[0].querySelector('.ms-pop');" +
+        "for(const nm of ['mcloud','quark']){const row=[...pop.querySelectorAll('.ms-opt')].find(r=>r.textContent.includes(nm));" +
+        "if(row){const cb=row.querySelector('input');cb.checked=true;cb.dispatchEvent(new Event('change',{bubbles:true}));}}" +
+        "ms[0].scrollIntoView({block:'center'});return 1;})()");
+      await sleep(400);
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
       const out = process.env.UI_SHOT.replace(/\.png$/, '') + '-picker.png';
       writeFileSync(out, Buffer.from(shot.data, 'base64'));
       console.log('  现场截图：' + out);
-      await js("(()=>{const w=document.querySelector('#notify-main .chan-picker');" +
-        "const c=[...w.querySelectorAll('.chan-picker-row')][0].querySelector('.chan-chip.is-in');" +
-        "if(c) c.click();return 1;})()");
+      await js("(()=>{document.body.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));return 1;})()");
       await sleep(200);
     } catch (e) {
       console.log('  截图失败（不影响结论）：' + (e && e.message));
@@ -864,6 +863,77 @@ async function main() {
   await sleep(800);
   const dataTight = await tightGaps('#settings-data');
   check('设置·数据页的块间距 ≥ 8px', dataTight.length === 0, JSON.stringify(dataTight));
+  // 面板设置表单（第 207 轮）：用户要「绑定端口/地址、信任 XFF」这类能填的开关，
+  // 而不是手写 config.json。验：分组在、字段在、保存真的写进 config.json、
+  // 而且**不碰**表单不管的键（插件用的那些）。
+  await js("document.querySelector('[data-tab=config]').click()");
+  await sleep(900);
+  const cfgForm = JSON.parse(await js(
+    "JSON.stringify((()=>{const f=document.getElementById('cfg-form');" +
+    "if(!f) return {err:'no-form'};" +
+    "const groups=[...f.querySelectorAll('.cfg-group-title')].map(g=>g.textContent);" +
+    "const paths=[...f.querySelectorAll('[data-cfg]')].map(n=>n.dataset.cfg);" +
+    "const bind=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.bind');" +
+    "return {groups:groups,paths:paths,bindValue:bind?bind.value:null," +
+    "hasRestartPill:!!f.querySelector('.cfg-label .pill')};})())"
+  ));
+  check('设置·配置 是分组的表单（不是只有 JSON）',
+    !cfgForm.err && cfgForm.groups.includes('服务') && cfgForm.groups.includes('运行'),
+    JSON.stringify(cfgForm));
+  check('表单里有监听地址、信任 XFF、接受任意 Host、运行预算',
+    ['server.bind', 'server.trust_xff', 'server.allow_any_host', 'run.budget_ms']
+      .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  check('改了要重启的项有「重启生效」标记', cfgForm.hasRestartPill === true, JSON.stringify(cfgForm));
+  if (process.env.UI_SHOT) {
+    try {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+      // 填个真实点的样例值再截，不然看着像空表
+      await js("(()=>{const f=document.getElementById('cfg-form');" +
+        "const bind=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.bind');" +
+        "if(bind&&!bind.value) bind.value='127.0.0.1:3030';" +
+        "f.scrollIntoView({block:'start'});return 1;})()");
+      await sleep(400);
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(process.env.UI_SHOT.replace(/\.png$/, '') + '-cfg.png', Buffer.from(shot.data, 'base64'));
+      console.log('  现场截图：' + process.env.UI_SHOT.replace(/\.png$/, '') + '-cfg.png');
+    } catch (e) {
+      console.log('  截图失败（不影响结论）：' + (e && e.message));
+    }
+  }
+
+  const cfgSaved = JSON.parse(await js(
+    "(async()=>{const f=document.getElementById('cfg-form');" +
+    "const bind=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.bind');" +
+    "bind.value='0.0.0.0:3999';" +
+    "const tff=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.trust_xff');" +
+    "tff.checked=true;tff.dispatchEvent(new Event('change',{bubbles:true}));" +
+    "const bud=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='run.budget_ms');" +
+    "bud.value='420';" +
+    // 先塞一个「插件用的」自定义键，保存后它必须还在
+    "const ta=document.getElementById('config-editor');const obj=JSON.parse(ta.value||'{}');" +
+    "obj.mcloud={token:'keep-me'};ta.value=JSON.stringify(obj,null,2);" +
+    "document.getElementById('cfg-form-save').click();" +
+    "await new Promise(r=>setTimeout(r,900));" +
+    "const d=await fetch('/api/config',{credentials:'same-origin'}).then(r=>r.json());" +
+    "const now=JSON.parse(d.text||'{}');" +
+    "return JSON.stringify({bind:now.server&&now.server.bind,xff:now.server&&now.server.trust_xff," +
+    "budget:now.run&&now.run.budget_ms,custom:now.mcloud&&now.mcloud.token});})()"
+  ));
+  check('表单保存后写进了 config.json（server.bind / trust_xff / run.budget_ms）',
+    cfgSaved.bind === '0.0.0.0:3999' && cfgSaved.xff === true && cfgSaved.budget === 420000,
+    JSON.stringify(cfgSaved));
+  check('表单不管的键原样保留（插件用的 mcloud.token 还在）',
+    cfgSaved.custom === 'keep-me', JSON.stringify(cfgSaved));
+  // 收尾：把测试写进去的键撤掉 —— 否则后面「默认预算是 300 秒」那条会看到 420 秒
+  await js("(async()=>{const f=document.getElementById('cfg-form');" +
+    "const bind=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.bind');bind.value='';" +
+    "const tff=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='server.trust_xff');" +
+    "tff.checked=false;tff.dispatchEvent(new Event('change',{bubbles:true}));" +
+    "const bud=[...f.querySelectorAll('[data-cfg]')].find(n=>n.dataset.cfg==='run.budget_ms');bud.value='';" +
+    "document.getElementById('cfg-form-save').click();" +
+    "await new Promise(r=>setTimeout(r,900));return 1;})()");
+  await sleep(300);
+
   await js("document.querySelector('[data-tab=security]').click()");
   await sleep(700);
   const setupTight = await tightGaps('.setup-box');

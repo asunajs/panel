@@ -317,6 +317,20 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
             <div class="tab-pane hidden" id="tab-config">
               <section class="panel">
                 <header class="panel-head">
+                  <h2>面板设置</h2><span class="chip" id="cfg-form-chip">—</span>
+                  <div class="toolbar">
+                    <button class="btn btn-sm" id="cfg-form-reload" type="button">重新读取</button>
+                    <button class="btn btn-sm btn-primary" id="cfg-form-save" type="button">保存</button>
+                  </div>
+                </header>
+                <div class="panel-body">
+                  <p class="settings-note" id="cfg-form-note">按功能分组。改<b>监听地址</b>要重启才生效，另外两个开关保存即生效；其余键（插件用的）在下面的 config.json 里。</p>
+                  <div class="src-error hidden" id="cfg-form-error"></div>
+                  <div id="cfg-form"></div>
+                </div>
+              </section>
+              <section class="panel">
+                <header class="panel-head">
                   <h2>config.json</h2><span class="chip" id="config-chip">—</span>
                   <div class="toolbar">
                     <button class="btn btn-sm" id="config-format" type="button">格式化</button>

@@ -2802,6 +2802,191 @@ async function loadConfig() {
   await loadConfigEditor();
 }
 
+/// 面板设置表单（第 207 轮）：按功能分组，一行一个键。
+///
+/// 用户的诉求很直接：「我需要更多配置，比如绑定端口、地址…以及 x-forwarded-for…
+/// 配置记得按功能分组，直接表单，简洁明了」。以前只有一个 config.json 文本框，
+/// 想改端口得知道键名、记得它是 `server.bind` 还能不能缺省。
+///
+/// 这里只列**面板自己认得**的键；插件用的键一律留在下面的「高级：config.json」里，
+/// 保存时按「读原文 → 改表单管的键 → 写回原文」走，别人的键一个都不会丢。
+const CFG_GROUPS = [
+  {
+    title: '服务',
+    note: '改了端口要重启；下面两个开关保存即生效',
+    fields: [
+      {
+        path: 'server.bind',
+        label: '监听地址',
+        kind: 'text',
+        placeholder: '127.0.0.1:3030',
+        help: 'host:port。没有令牌时只准绑回环地址；要对局域网开放，得先设令牌再写 0.0.0.0:3030。',
+        restart: true,
+      },
+      {
+        path: 'server.trust_xff',
+        label: '信任 X-Forwarded-For',
+        kind: 'bool',
+        help: '放在反向代理后面才打开。开了以后 HTTP 错误日志记真实客户端 IP；默认关——这个头谁都能伪造，信了等于让攻击者往日志里写假 IP。',
+      },
+      {
+        path: 'server.allow_any_host',
+        label: '接受任意 Host',
+        kind: 'bool',
+        help: '只给「同机反代 + 没设令牌」的场景用（等同 PANEL_ALLOW_ANY_HOST=1）。平时别开，那会放开 DNS rebinding 防护。',
+      },
+    ],
+  },
+  {
+    title: '运行',
+    note: '',
+    fields: [
+      {
+        path: 'run.budget_ms',
+        label: '单次运行预算',
+        kind: 'seconds',
+        help: '默认 300 秒（允许 1 秒–90 分钟）。单个任务在任务里写 budget_ms 可以单独覆盖。',
+      },
+    ],
+  },
+];
+
+/// 从 JSON 里按 `a.b` 取（没有就 undefined）。
+function cfgGet(obj, path) {
+  return path.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj);
+}
+
+/// 按 `a.b` 写；`value === undefined` 表示删掉这个键（表单清空 = 回到默认）。
+function cfgSet(obj, path, value) {
+  const keys = path.split('.');
+  let cur = obj;
+  for (const k of keys.slice(0, -1)) {
+    if (!cur[k] || typeof cur[k] !== 'object') {
+      if (value === undefined) return; // 本来就没有，不用删
+      cur[k] = {};
+    }
+    cur = cur[k];
+  }
+  const last = keys[keys.length - 1];
+  if (value === undefined) delete cur[last];
+  else cur[last] = value;
+}
+
+/// 把 config.json 的文本解析成对象（坏了就给空对象 + 报错行）。
+function configObject() {
+  try {
+    return JSON.parse($('config-editor').value || '{}');
+  } catch (e) {
+    configError('现有 config.json 不是合法 JSON，先修好它：' + e.message);
+    return null;
+  }
+}
+
+function renderConfigForm() {
+  const box = $('cfg-form');
+  if (!box) return;
+  const obj = configObject();
+  box.textContent = '';
+  if (!obj) return;
+  for (const g of CFG_GROUPS) {
+    const sec = el('section', 'cfg-group');
+    const head = el('div', 'cfg-group-head');
+    head.append(el('h3', 'cfg-group-title', g.title));
+    if (g.note) head.append(el('span', 'cfg-group-note', g.note));
+    sec.append(head);
+    for (const f of g.fields) {
+      const row = el('div', 'cfg-row');
+      row.dataset.path = f.path;
+      const label = el('label', 'cfg-label', f.label);
+      if (f.restart) label.append(pill('pill-warn', '重启生效'));
+      row.append(label);
+      const cur = cfgGet(obj, f.path);
+      if (f.kind === 'bool') {
+        const wrap = el('div', 'cfg-inline');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.id = 'cfg-' + f.path.replace(/\./g, '-');
+        cb.checked = cur === true;
+        cb.dataset.cfg = f.path;
+        const txt = el('span', 'cfg-unit', cur === true ? '开' : '关');
+        cb.addEventListener('change', () => {
+          txt.textContent = cb.checked ? '开' : '关';
+        });
+        label.setAttribute('for', cb.id);
+        wrap.append(cb, txt);
+        row.append(wrap);
+      } else if (f.kind === 'seconds') {
+        const wrap = el('div', 'cfg-inline');
+        const inp = el('input', 'input');
+        inp.type = 'number';
+        inp.min = '1';
+        inp.max = '5400';
+        inp.step = '1';
+        inp.value = typeof cur === 'number' ? String(Math.round(cur / 1000)) : '';
+        inp.placeholder = '300';
+        inp.dataset.cfg = f.path;
+        inp.dataset.kind = 'seconds';
+        wrap.append(inp, el('span', 'cfg-unit', '秒'));
+        row.append(wrap);
+      } else {
+        const inp = el('input', 'input');
+        inp.type = 'text';
+        inp.value = typeof cur === 'string' ? cur : '';
+        inp.placeholder = f.placeholder || '';
+        inp.dataset.cfg = f.path;
+        row.append(inp);
+      }
+      if (f.help) row.append(el('div', 'cfg-help', f.help));
+      sec.append(row);
+    }
+    box.append(sec);
+  }
+  const chip = $('cfg-form-chip');
+  if (chip) chip.textContent = '热生效';
+}
+
+/// 读表单 → 写进 config.json 的对象（不动别人的键）。
+function collectConfigForm() {
+  const obj = configObject();
+  if (!obj) return null;
+  for (const g of CFG_GROUPS) {
+    for (const f of g.fields) {
+      const node = document.querySelector('[data-cfg="' + f.path + '"]');
+      if (!node) continue;
+      if (f.kind === 'bool') {
+        cfgSet(obj, f.path, node.checked ? true : undefined);
+      } else if (f.kind === 'seconds') {
+        const secs = Number(node.value);
+        cfgSet(obj, f.path, Number.isFinite(secs) && secs > 0 ? Math.round(secs * 1000) : undefined);
+      } else {
+        const v = String(node.value || '').trim();
+        cfgSet(obj, f.path, v || undefined);
+      }
+    }
+  }
+  return obj;
+}
+
+async function saveConfigForm() {
+  const btn = $('cfg-form-save');
+  btn.disabled = true;
+  try {
+    const obj = collectConfigForm();
+    if (!obj) return;
+    const text = JSON.stringify(obj, null, 2) + '\n';
+    const d = await api('/api/config', { method: 'PUT', body: { text } });
+    $('cfg-form-error').classList.add('hidden');
+    notify('设置已保存（' + humanBytes(d.bytes) + '）', 'ok');
+    await loadConfigEditor();
+  } catch (e) {
+    const box = $('cfg-form-error');
+    box.textContent = e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败');
+    box.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadConfigEditor() {
   const ta = $("config-editor");
   try {
@@ -2814,6 +2999,7 @@ async function loadConfigEditor() {
     // 编辑器里放磁盘原文：保留用户的键顺序和缩进，别拿 pretty 版本覆盖人家。
     ta.value = d.exists ? (d.text || "") : "{\n  \n}\n";
     $("config-error").classList.add("hidden");
+    renderConfigForm();
     renderSettings();
   } catch (e) {
     configError(e instanceof Unauthorized ? "需要令牌" : (e.message || "读取配置失败"));
@@ -3205,135 +3391,155 @@ function notifyLine(label, node, hint, wide) {
   return line;
 }
 
-/// 插件选择器（第 201 轮）：只收/不收原来只有两个文本框，得**手打插件名**才叫得出名字 ——
-/// 用户的原话是「这个还是没法对应上插件啊」。这里把当前已知的插件列成可点的胶囊，
-/// 点一下就写进对应的输入框（还是逗号分隔那一套，存储/后端完全不变），
-/// 想写前缀通配（mcloud*）就继续手填。
-function pluginPicker(inc, exc) {
-  const names = Array.from(new Set([
-    ...(state.plugins || []).map((p) => p && p.name),
-    ...(state.files || []).map((f) => f && f.name),
-  ].filter(Boolean))).sort();
-  const wrap = el('div', 'chan-picker');
-  if (!names.length) {
-    wrap.append(el('p', 'chan-hint', '还没有插件，先装一个再回来配'));
-    return wrap;
-  }
-  const list = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
-  const chips = {};
-  const paint = () => {
-    const inSet = new Set(list(inc.value));
-    const outSet = new Set(list(exc.value));
-    // key 是「行|插件名」：两行里同名插件是两个不同的按钮，只用名字当 key 会互相覆盖
-    //（第一版就这么错，结果只有「不收」那行会亮）。
-    for (const [key, btn] of Object.entries(chips)) {
-      const [which, name] = key.split('|');
-      btn.classList.toggle('is-in', which === 'in' && inSet.has(name));
-      btn.classList.toggle('is-out', which === 'out' && outSet.has(name));
-      btn.setAttribute('aria-pressed', String(inSet.has(name)));
-      btn.title = which === 'in' && inSet.has(name) ? '只收（再点一下取消）'
-        : which === 'out' && outSet.has(name) ? '不收（再点一下取消）'
-        : which === 'in' ? '点一下：只收它' : '点一下：不收它';
-    }
-  };
-  const commit = (which, name) => {
-    const cur = list(which === 'in' ? inc.value : exc.value);
-    const other = list(which === 'in' ? exc.value : inc.value);
-    const i = cur.indexOf(name);
-    if (i >= 0) cur.splice(i, 1);
-    else {
-      cur.push(name);
-      // 同一个插件不能既「只收」又「不收」：放进来的时候从对面拿掉
-      const j = other.indexOf(name);
-      if (j >= 0) other.splice(j, 1);
-    }
-    if (which === 'in') { inc.value = cur.join(','); exc.value = other.join(','); }
-    else { exc.value = cur.join(','); inc.value = other.join(','); }
-    paint();
-    // 让预览/校验跟着刷新（它们监听 input 事件）
-    inc.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-  const row = (label, which, hint) => {
-    const line = el('div', 'chan-picker-row');
-    line.append(el('span', 'chan-label', label));
-    const box = el('div', 'chan-chips');
-    for (const name of names) {
-      const b = el('button', 'chan-chip', name);
-      b.type = 'button';
-      b.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        // 已经在「只收」里再点 = 取消；在「不收」里点 = 移到只收
-        commit(which, name);
-      });
-      chips[which + '|' + name] = b;
-      box.append(b);
-    }
-    line.append(box);
-    if (hint) line.append(el('span', 'chan-hint', hint));
-    return line;
-  };
-  wrap.append(row('只收', 'in'), row('不收', 'out'));
-  paint();
-  return wrap;
-}
-
-/// 标签输入（第 202 轮）：逗号分隔的插件名塞在单行文本框里**很难操作** ——
-/// 选了三个之后就是一长串，看不清边界，改一个要数逗号，鼠标点进去还容易点到中间。
-/// 这里换成「标签 + 输入框」：回车/逗号添加，标签上的 × 删除，退格删最后一个。
-/// 底层仍然是那个逗号字符串（隐藏的 `.input.value` 语义不变），
-/// 所以保存、后端、迁移、胶囊选择器全都不用改。
-function notifyTagField(initial, placeholder) {
+function notifyMultiSelect(initial, emptyText) {
   const input = el('input');
   input.type = 'hidden';
   input.value = (initial || []).join(',');
-  const box = el('div', 'chan-tags');
-  const entry = el('input', 'chan-tag-entry');
-  entry.type = 'text';
-  entry.placeholder = placeholder || '';
-  const read = () =>
-    String(input.value || '').split(',').map((x) => x.trim()).filter(Boolean);
-  const write = (list) => {
-    input.value = list.join(',');
-    // 让预览/校验跟着刷新（它们监听 input 事件）
+  let other = null; // 另一侧的隐藏 input（互斥用）
+
+  const wrap = el('div', 'ms');
+  const control = el('button', 'ms-control');
+  control.type = 'button';
+  control.setAttribute('role', 'combobox');
+  control.setAttribute('aria-expanded', 'false');
+  const label = el('span', 'ms-label');
+  const caret = el('span', 'ms-caret', '▾');
+  control.append(label, caret);
+
+  const pop = el('div', 'ms-pop hidden');
+  pop.setAttribute('role', 'listbox');
+  const list = el('div', 'ms-list');
+  const custom = el('div', 'ms-custom');
+  const customIn = el('input', 'ms-custom-input');
+  customIn.type = 'text';
+  customIn.placeholder = '或手填前缀，如 mcloud*（回车添加）';
+  custom.append(customIn);
+  pop.append(list, custom);
+
+  const read = (node) =>
+    String((node || input).value || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const write = (list2) => {
+    input.value = list2.join(',');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   };
+
   const paint = () => {
-    for (const n of [...box.querySelectorAll('.chan-tag')]) n.remove();
-    for (const v of read()) {
-      const t = el('span', 'chan-tag');
-      t.append(el('span', '', v));
-      const x = el('button', 'chan-tag-x', '×');
-      x.type = 'button';
-      x.title = '删除 ' + v;
-      x.setAttribute('aria-label', '删除 ' + v);
-      x.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        write(read().filter((y) => y !== v));
-      });
-      t.append(x);
-      box.insertBefore(t, entry);
+    const cur = read();
+    // 收起时的显示：已选项直接摆出来（能一眼看到选了什么），空着就说「全部插件」
+    label.textContent = '';
+    if (!cur.length) {
+      label.append(el('span', 'ms-placeholder', emptyText));
+    } else {
+      for (const v of cur) {
+        const t = el('span', 'ms-chip');
+        t.append(el('span', '', v));
+        const x = el('button', 'ms-chip-x', '×');
+        x.type = 'button';
+        x.title = '取消 ' + v;
+        x.setAttribute('aria-label', '取消 ' + v);
+        x.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation(); // 别把下拉一起点开
+          write(read().filter((y) => y !== v));
+        });
+        t.append(x);
+        label.append(t);
+      }
+    }
+    // 勾选框状态跟着走（清单里可能有手填的值，那些不在清单里，用 chip 删）
+    for (const [name, box] of Object.entries(boxes)) {
+      box.checked = cur.includes(name);
     }
   };
-  entry.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
-      e.preventDefault();
-      const v = entry.value.trim().replace(/[,，]+$/, '');
-      if (!v) return;
-      const list = read();
-      if (!list.includes(v)) list.push(v);
-      entry.value = '';
-      write(list);
-    } else if (e.key === 'Backspace' && !entry.value) {
-      const list = read();
-      if (list.length) write(list.slice(0, -1));
+
+  const boxes = {};
+  const rebuild = () => {
+    const names = Array.from(new Set([
+      ...(state.plugins || []).map((p) => p && p.name),
+      ...(state.files || []).map((f) => f && f.name),
+    ].filter(Boolean))).sort();
+    list.textContent = '';
+    for (const k of Object.keys(boxes)) delete boxes[k];
+    if (!names.length) {
+      list.append(el('p', 'ms-empty', '还没有插件'));
+      return;
     }
+    for (const name of names) {
+      const row = el('label', 'ms-opt');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = name;
+      const txt = el('span', 'ms-opt-name', name);
+      row.append(cb, txt);
+      cb.addEventListener('change', () => {
+        const cur = read();
+        const i = cur.indexOf(name);
+        if (cb.checked && i < 0) {
+          cur.push(name);
+          // 互斥：从对面拿走
+          if (other) {
+            const oc = read(other).filter((y) => y !== name);
+            if (read(other).length !== oc.length) {
+              other.value = oc.join(',');
+              other.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          }
+          write(cur);
+        } else if (!cb.checked && i >= 0) {
+          cur.splice(i, 1);
+          write(cur);
+        }
+      });
+      boxes[name] = cb;
+      list.append(row);
+    }
+  };
+
+  const close = () => {
+    pop.classList.add('hidden');
+    control.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', onDoc, true);
+  };
+  const onDoc = (ev) => {
+    if (!wrap.contains(ev.target)) close();
+  };
+  const open = () => {
+    rebuild();
+    paint();
+    pop.classList.remove('hidden');
+    control.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', onDoc, true);
+    customIn.value = '';
+  };
+  control.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    if (pop.classList.contains('hidden')) open();
+    else close();
+  });
+  customIn.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ',') return;
+    ev.preventDefault();
+    const v = customIn.value.trim().replace(/[,，]+$/, '');
+    if (!v) return;
+    const cur = read();
+    if (!cur.includes(v)) cur.push(v);
+    customIn.value = '';
+    write(cur);
+    rebuild();
+    paint();
+  });
+  wrap.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') close();
   });
   input.addEventListener('input', paint);
-  // 隐藏字段也是 DOM 里的节点：它是数据的唯一来源，测试/调试要能按选择器拿到它
-  //（第一版只建了不插，界面上看不出问题，但选择器找不到 —— 排查起来很费劲）。
-  box.append(input, entry);
+
+  wrap.append(input, control, pop);
   paint();
-  return { node: box, input };
+  return {
+    node: wrap,
+    input,
+    setOther(node) { other = node; },
+  };
 }
 
 function notifyInput(value, placeholder, type) {
@@ -3523,13 +3729,13 @@ function renderRouteEditor(box, r) {
       + '只想推某个插件，把它填进下面的「只收」（支持前缀通配，比如 mcloud*）。'),
   );
   const eg = el('div', 'chan-grid');
-  // 标签输入 + 整行铺开：一长串逗号塞在小框里根本不好改（用户报「输入框难以操作」）
-  const inc = notifyTagField(r.include_plugins, '留空 = 全收；输入插件名后回车，支持 mcloud*');
-  const exc = notifyTagField(r.exclude_plugins, '留空 = 都不排除');
+  // 多选下拉（第 206 轮）：点开勾选，收起只看已选 —— 两排胶囊太占高度（用户说「用多选select」）
+  const inc = notifyMultiSelect(r.include_plugins, '全部插件（不限制）');
+  const exc = notifyMultiSelect(r.exclude_plugins, '都不排除');
+  inc.setOther(exc.input);
+  exc.setOther(inc.input);
   eg.append(notifyLine('只收插件', inc.node, null, true));
   eg.append(notifyLine('不收插件', exc.node, null, true));
-  // 点插件名就能选，不用背插件叫什么
-  eg.append(pluginPicker(inc.input, exc.input));
   eventsBox.append(eg);
 
   // 定时推送
@@ -5539,6 +5745,9 @@ function bind() {
     b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
   }
   $('config-save').addEventListener('click', saveConfig);
+  // 面板设置表单（第 207 轮）
+  if ($('cfg-form-save')) $('cfg-form-save').addEventListener('click', saveConfigForm);
+  if ($('cfg-form-reload')) $('cfg-form-reload').addEventListener('click', loadConfigEditor);
   $('config-format').addEventListener('click', formatConfig);
   // 「重新读取」以前只刷新编辑器里的文本，名字和实际行为不一致（手改文件必须重启才生效）。
   // 现在它真的会让后端把盘上的文件重新读进内存：插件下一句 config() 就能看到。
