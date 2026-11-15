@@ -73,11 +73,34 @@ jobs:
         run: cargo build --release
 
       - name: 单测（全量，一次跑完不早退）
-        # --no-fail-fast：失败也把剩下的跑完。Windows 这一档要的是「一次拿到全部
-        # 失败清单」，一条一条修太慢。
-        run: cargo test --no-fail-fast
+        # 三条一起才管用：
+        # · --no-fail-fast：失败也把剩下的跑完（要一次拿到全部失败清单）；
+        # · --test-threads=1：**串行**跑。并行跑挂了之后日志里看不出是谁挂的；
+        #   串行时输出顺序就是执行顺序，超时那一刻日志最后一行就是元凶。
+        # · 自己带超时：GitHub 的 job 超时是 60 分钟，等到那里什么都看不出来。
+        #   第一次跑就是这么挂住的（37 分钟没退出），所以这里直接 20 分钟封顶，
+        #   超时就把日志尾巴打出来再失败。
+        shell: pwsh
         env:
           RUST_BACKTRACE: 1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'cargo-test.log'
+          $p = Start-Process -FilePath 'cargo' `
+            -ArgumentList 'test','--no-fail-fast','--','--test-threads=1' `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput $log `
+            -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'cargo-test.err.log')
+          $limitMs = 20 * 60 * 1000
+          if (-not $p.WaitForExit($limitMs)) {
+            try { Stop-Process -Id $p.Id -Force } catch { }
+            "===== 超时 20 分钟，日志最后 60 行（挂住的那个测试就是它）====="
+            Get-Content $log -Tail 60 -ErrorAction SilentlyContinue
+            throw "单测超时：有测试在 Windows 上没退出"
+          }
+          Get-Content $log
+          Get-Content (Join-Path $env:RUNNER_TEMP 'cargo-test.err.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
+          if ($p.ExitCode -ne 0) { throw "单测失败（cargo test 退出码 $($p.ExitCode)）" }
 
       - name: 冒烟：version / 起服务 / readyz
         shell: pwsh
