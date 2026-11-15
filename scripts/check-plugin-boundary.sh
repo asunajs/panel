@@ -92,6 +92,23 @@ for pat in '.zcode/' 'plugins-wip/'; do
   fi
 done
 
+# ⑥ 面板部署脚本不许写 plugins/（第 204 轮）
+#
+# 这条是「分工」的守卫：面板部署只搬二进制 + scripts，插件（.js/.panel.json/.webui）
+# 归各自的插件项目（deploy:panel）。以前反复出过「插件页 404 / 新面板配旧插件」，
+# 根子都是有人顺手在部署里 cp/rsync 了 plugins/。运行时已有指纹守护（deploy-daily.sh
+# 会量前后指纹），这里再拦一道源码层面的：脚本里不许出现对 plugins 的写操作。
+if [ -f scripts/deploy-daily.sh ]; then
+  hits="$(grep -nE '(cp|rsync|mv|rm|install)[^#]*"\$?\{?DEST}?/plugins|(cp|rsync)[^#]*plugins/' scripts/deploy-daily.sh | grep -v 'plugins_fp\|plugins_list' || true)"
+  if [ -z "$hits" ]; then
+    ok "面板部署脚本不写 plugins/（插件归插件项目）"
+  else
+    bad "deploy-daily.sh 里有对 plugins/ 的写操作：$hits"
+  fi
+else
+  bad "scripts/deploy-daily.sh 不见了"
+fi
+
 echo ''
-if [ "$FAIL" = "0" ]; then echo "ok: 插件边界的 9 条检查全过"; else echo "红: $FAIL 条没过"; fi
+if [ "$FAIL" = "0" ]; then echo "ok: 插件边界的 10 条检查全过"; else echo "红: $FAIL 条没过"; fi
 exit "$FAIL"

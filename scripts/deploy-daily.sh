@@ -22,6 +22,29 @@ DEST="${PANEL_DEST:-$HOME/panel-3030}"
 LABEL="${PANEL_LABEL:-dev.panel}"
 PORT="${PANEL_PORT:-3030}"
 
+# ── 不变量：面板部署**不动插件**（第 204 轮）──
+#
+# 分工写在这里是为了以后别再走回头路：面板部署只搬**面板自己的东西**（二进制 + scripts），
+# 插件（.js / .panel.json / .webui/）归各自的插件项目（它们的 `deploy:panel`）装。
+# 以前反复出过「点插件页 404」「面板新 CSS 配插件旧文件」——根子都是有人顺手动了 plugins/。
+# 光写注释不够（注释拦不住 cp），所以这里量**指纹**：装完再量一次，变了就当场失败。
+#
+# 指纹 = 每项的**字节数** + 路径（`find` + `wc -c`，macOS/Linux 都是这套，不用 stat 的
+# -f/-c 分支）。为什么不用 `du -sk`：它按块取整，往里多写 5 个字节指纹不变 —— 试过，
+# 真漏。插件目录里只有 .js/.panel.json/.webui，数据都在 data/，所以这个指纹是稳定的。
+plugins_fp() {
+  if [ -d "$DEST/plugins" ]; then
+    ( cd "$DEST/plugins" || exit 1
+      find . -mindepth 1 ! -type d -exec wc -c {} + 2>/dev/null | sort | shasum | cut -d' ' -f1
+    )
+  else
+    echo none
+  fi
+}
+plugins_list() {
+  [ -d "$DEST/plugins" ] && ( cd "$DEST/plugins" && ls -1A ) | sort || echo none
+}
+
 cd "$ROOT"
 # ── 面板仓不碰插件（第 159 轮）──
 # 分工：面板提供面板，插件（源码 / 构建 / 上线）归各自的插件项目，部署分开。
@@ -33,6 +56,9 @@ cd "$ROOT"
 # 这几类改动编译不报错、单测照过，只有人眼看得出（第 156 轮有人把整段 token 映射换掉了）。
 node scripts/check-plugin-style.mjs
 cargo build --release --offline
+
+FP_BEFORE="$(plugins_fp)"
+LIST_BEFORE="$(plugins_list)"
 
 cp target/release/panel "$DEST/panel.new"
 # **不要**顺手 codesign --force：换签名 = 换代码身份，macOS 会重新问一次「能不能访问那个卷」，
@@ -90,7 +116,17 @@ while [ "$WAITED" -lt 300 ]; do
     if [ "${HAVE:-0}" -lt "$EXPECT" ]; then
       : # 还没加载完，接着等
     else
+      # 面板装好了，最后核一件事：插件目录必须一个字节都没动
+      FP_AFTER="$(plugins_fp)"
+      if [ "$FP_BEFORE" != "$FP_AFTER" ]; then
+        echo "" >&2
+        echo "❌ 部署动了插件目录（$DEST/plugins）——面板部署不该碰它：" >&2
+        diff <(printf '%s\n' "$LIST_BEFORE") <(plugins_list) >&2 || true
+        echo "   插件归各自的插件项目（deploy:panel），请用那个恢复" >&2
+        exit 1
+      fi
       echo "已就绪（等 ${WAITED}s，插件 $HAVE/$EXPECT）：$BODY"
+      echo "插件目录未改动：$(plugins_list | wc -l | tr -d ' ') 项，指纹 $FP_AFTER"
       exit 0
     fi
   fi
