@@ -521,5 +521,10 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 | Release | <https://github.com/asunajs/panel/releases/tag/v0.5.0>，说明用 `CHANGELOG.md` 的 0.5.0 段（不是 `--generate-notes` 的自动列表） |
 | 更新检查回归 | 新实例 `/api/update/check?force=1` → `{current:0.5.0, latest:v0.5.0, has_update:false, show:false}` —— 也就是「当前版本就是最新就不提示」这条路真的通了 |
 
+发版瑕疵（如实记）：`v0.5.0` 的 tag 少包含两处**界面文案/错误处理**的改动
+（`fix(ui)` 单独补提交 `1b6e711`：插件引导文案对齐扫描 UI、查更新遇 401 不报「查不到」）——
+提交时 `git add` 漏了 `web/` 目录。产物与 tag 仍然自洽（都缺这两行），这两处随下一个补丁版发出；
+日常实例已是最新源码，不受影响。
+
 坑一条：`~/panel-3030/panel --version` 不是有效参数，它会**当前台起一个 8787 的服务**（实测挂了 60 秒
 才被后台化）。查部署版本用 `strings <binary> | grep 版本号`，别拿 `--version` 试。
