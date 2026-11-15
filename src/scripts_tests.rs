@@ -390,7 +390,12 @@ async fn a_spinning_script_is_killed_at_the_budget_with_a_readable_reason() {
     s.save("spin.sh", "sh", "while true; do :; done\n", "", None, 1_000, true)
         .await
         .unwrap();
-    let id = s.run("spin.sh", true).await.unwrap();
+    // 30 秒封顶：到点杀不掉进程是**产品缺陷**，不该表现成 CI 挂 25 分钟没输出
+    // （Windows 上真发生过：kill 只杀了 sh，管道被孙子进程占着，收尾等不到 EOF）。
+    let id = tokio::time::timeout(std::time::Duration::from_secs(30), s.run("spin.sh", true))
+        .await
+        .expect("run() 30 秒没返回：预算到了却没把进程杀掉（见 kill_tree）")
+        .unwrap();
     let (status, error) = run_status(&db, id).await;
     assert_eq!(status, "error");
     assert!(

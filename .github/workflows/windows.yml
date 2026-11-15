@@ -36,6 +36,12 @@ on:
       - 'Cargo.toml'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
+    inputs:
+      filter:
+        description: '只跑匹配的测试（cargo test 的过滤串，留空 = 全量）'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -86,8 +92,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $log = Join-Path $env:RUNNER_TEMP 'cargo-test.log'
+          # 过滤串：手动触发时可以只跑某几条（排一个挂住的测试时省一整轮）。
+          $filter = "${{ inputs.filter }}"
+          $testArgs = @('test')
+          if ($filter) { $testArgs += $filter } else { $testArgs += '--no-fail-fast' }
+          $testArgs += @('--', '--test-threads=1')
+          "cargo $($testArgs -join ' ')"
           $p = Start-Process -FilePath 'cargo' `
-            -ArgumentList 'test','--no-fail-fast','--','--test-threads=1' `
+            -ArgumentList $testArgs `
             -PassThru -NoNewWindow `
             -RedirectStandardOutput $log `
             -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'cargo-test.err.log')

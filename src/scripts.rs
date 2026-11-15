@@ -1076,6 +1076,34 @@ impl Scripts {
             }
         };
 
+
+/// 到点杀进程：**Windows 上必须连子孙一起杀**。
+///
+/// Unix 那条路在 spawn 时开了 `process_group(0)`，但注意 `Child::kill()` 只杀直接子进程
+/// （进程组要 killpg 才会被一起带走，这里没做 —— 见下面的已知缺口）。
+/// Windows 连进程组都没有：`Child::kill()` 只 TerminateProcess 直接子进程，
+/// 脚本再起的孙子会活下来并**继续占着 stdout/stderr 管道** —— 收尾等 EOF 就永远等不到。
+///
+/// 这不是理论问题：Windows CI 第一次跑，`a_spinning_script_is_killed_at_the_budget`
+/// 挂了 25 分钟没退出。`taskkill /T /F` 是 Windows 上杀整棵树的既有工具。
+///
+/// 已知缺口：Unix 上孙子进程仍可能残留（要 killpg）。要修就得给 libc 做直接依赖，
+/// 单独一件事，记在 docs/scripts.md 的护栏里，别在这里悄悄改语义。
+async fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    {
+        if let Some(pid) = child.id() {
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+        }
+    }
+    let _ = child.kill().await;
+}
+
         // 输出双路收集：逐行进日志（stdout=info / stderr=error），合计进上限。
         let cap = output_max() * 1024;
         let collect = Arc::new(Mutex::new(Collect::new(cap)));
@@ -1107,7 +1135,7 @@ impl Scripts {
         .await;
         let (status, error) = match wait {
             Err(_) => {
-                let _ = child.kill().await;
+                kill_tree(&mut child).await;
                 (
                     "error",
                     Some(format!("预算 {budget_ms}ms 超时，进程已终止")),
