@@ -432,8 +432,10 @@ async function main() {
     "if(!w) return {err:'no-picker'};" +
     "const rows=[...w.querySelectorAll('.chan-picker-row')].map(r=>({label:r.querySelector('.chan-label').textContent," +
     "chips:[...r.querySelectorAll('.chan-chip')].map(c=>c.textContent)}));" +
-    "const inc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 全收/.test(i.placeholder||''));" +
-    "const exc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 都不排除/.test(i.placeholder||''));" +
+    "const hid=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')];" +
+    "if(hid.length<2) return {err:'no-tag-fields',found:hid.length,bodies:document.querySelectorAll('#notify-main .chan-tags').length};" +
+    "const inc=hid[0], exc=hid[1];" +
+    
     "return {rows:rows,inc:inc?inc.value:null,exc:exc?exc.value:null};})())"
   ));
   check('只收/不收 下面有可点的插件胶囊', !picker.err && picker.rows.length === 2, JSON.stringify(picker));
@@ -444,8 +446,10 @@ async function main() {
     "JSON.stringify((()=>{const w=document.querySelector('#notify-main .chan-picker');" +
     "const rows=[...w.querySelectorAll('.chan-picker-row')];" +
     "const find=(r)=>[...r.querySelectorAll('.chan-chip')].find(c=>c.textContent==='seed');" +
-    "const inc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 全收/.test(i.placeholder||''));" +
-    "const exc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 都不排除/.test(i.placeholder||''));" +
+    "const hid=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')];" +
+    "if(hid.length<2) return {err:'no-tag-fields',found:hid.length,bodies:document.querySelectorAll('#notify-main .chan-tags').length};" +
+    "const inc=hid[0], exc=hid[1];" +
+    
     "find(rows[0]).click();const a={inc:inc.value,exc:exc.value,on:find(rows[0]).classList.contains('is-in')};" +
     "find(rows[1]).click();const b={inc:inc.value,exc:exc.value,out:find(rows[1]).classList.contains('is-out')};" +
     "find(rows[1]).click();const c={inc:inc.value,exc:exc.value};" +
@@ -455,14 +459,42 @@ async function main() {
   check('在「不收」里点同一个插件会移过去（互斥，不会两个都占）',
     toggled.b && toggled.b.exc === 'seed' && toggled.b.inc === '' && toggled.b.out === true, JSON.stringify(toggled));
   check('再点一次就取消', toggled.c && toggled.c.exc === '', JSON.stringify(toggled));
+
+  // 标签输入（第 202 轮）：用户报「输入框难以操作」—— 逗号串塞在小文本框里没法改。
+  // 现在：回车/逗号加标签、标签上的 × 删除、退格删最后一个，底层仍是逗号字符串。
+  const tags = JSON.parse(await js(
+    "JSON.stringify((()=>{const box=document.querySelector('#notify-main .chan-tags');" +
+    "if(!box) return {err:'no-tags'};" +
+    "const entry=box.querySelector('.chan-tag-entry');" +
+    "const hidden=[...document.querySelectorAll('#notify-main .chan-tags input[type=hidden]')][0];" +
+    "const w=box.getBoundingClientRect();" +
+    "const add=(v)=>{entry.value=v;" +
+    "entry.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));};" +
+    "add('mcloud*');add('quark');" +
+    "const after={tags:[...box.querySelectorAll('.chan-tag')].map(t=>t.textContent.replace('×','').trim())," +
+    "hidden:hidden.value,w:Math.round(w.width)};" +
+    "const x=box.querySelector('.chan-tag .chan-tag-x');if(x)x.click();" +
+    "const removed={tags:[...box.querySelectorAll('.chan-tag')].map(t=>t.textContent.replace('×','').trim())};" +
+    "entry.value='';entry.dispatchEvent(new KeyboardEvent('keydown',{key:'Backspace',bubbles:true}));" +
+    "const emptied={hidden:hidden.value,tags:[...box.querySelectorAll('.chan-tag')].length};" +
+    "return {after:after,removed:removed,emptied:emptied};})())"
+  ));
+  check('只收/不收 是标签输入（不是一长串逗号文本框）', !tags.err && !!tags.after, JSON.stringify(tags));
+  check('回车能加标签，值同步进隐藏字段',
+    tags.after && JSON.stringify(tags.after.tags) === JSON.stringify(['mcloud*', 'quark'])
+      && tags.after.hidden === 'mcloud*,quark', JSON.stringify(tags.after));
+  check('标签整行铺开（够宽，不是被挤在小格子里）', tags.after && tags.after.w > 300, JSON.stringify(tags.after));
+  check('点标签上的 × 能删掉它', tags.removed && JSON.stringify(tags.removed.tags) === JSON.stringify(['quark']), JSON.stringify(tags.removed));
+  check('退格删最后一个', tags.emptied && tags.emptied.hidden === '' && tags.emptied.tags === 0, JSON.stringify(tags.emptied));
   if (process.env.UI_SHOT) {
     try {
       // 选中一个插件做成「只收」，让截图里有状态可看
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
-      await js("(()=>{const w=document.querySelector('#notify-main .chan-picker');" +
-        "const c=[...w.querySelectorAll('.chan-picker-row')][0].querySelector('.chan-chip');" +
-        "if(c) c.click();" +
-        // 编辑器在页面下方：滚到胶囊那儿再截，不然截到的是标题栏
+      await js("(()=>{const e=document.querySelector('#notify-main .chan-tag-entry');" +
+        "const add=(v)=>{e.value=v;e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));};" +
+        "add('mcloud*');add('quark');" +
+        "const w=document.querySelector('#notify-main .chan-tags');" +
+        // 编辑器在页面下方：滚到标签那儿再截，不然截到的是标题栏
         "w.scrollIntoView({block:'center'});return 1;})()");
       await sleep(500);
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });

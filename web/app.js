@@ -3287,6 +3287,65 @@ function pluginPicker(inc, exc) {
   return wrap;
 }
 
+/// 标签输入（第 202 轮）：逗号分隔的插件名塞在单行文本框里**很难操作** ——
+/// 选了三个之后就是一长串，看不清边界，改一个要数逗号，鼠标点进去还容易点到中间。
+/// 这里换成「标签 + 输入框」：回车/逗号添加，标签上的 × 删除，退格删最后一个。
+/// 底层仍然是那个逗号字符串（隐藏的 `.input.value` 语义不变），
+/// 所以保存、后端、迁移、胶囊选择器全都不用改。
+function notifyTagField(initial, placeholder) {
+  const input = el('input');
+  input.type = 'hidden';
+  input.value = (initial || []).join(',');
+  const box = el('div', 'chan-tags');
+  const entry = el('input', 'chan-tag-entry');
+  entry.type = 'text';
+  entry.placeholder = placeholder || '';
+  const read = () =>
+    String(input.value || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const write = (list) => {
+    input.value = list.join(',');
+    // 让预览/校验跟着刷新（它们监听 input 事件）
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const paint = () => {
+    for (const n of [...box.querySelectorAll('.chan-tag')]) n.remove();
+    for (const v of read()) {
+      const t = el('span', 'chan-tag');
+      t.append(el('span', '', v));
+      const x = el('button', 'chan-tag-x', '×');
+      x.type = 'button';
+      x.title = '删除 ' + v;
+      x.setAttribute('aria-label', '删除 ' + v);
+      x.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        write(read().filter((y) => y !== v));
+      });
+      t.append(x);
+      box.insertBefore(t, entry);
+    }
+  };
+  entry.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+      e.preventDefault();
+      const v = entry.value.trim().replace(/[,，]+$/, '');
+      if (!v) return;
+      const list = read();
+      if (!list.includes(v)) list.push(v);
+      entry.value = '';
+      write(list);
+    } else if (e.key === 'Backspace' && !entry.value) {
+      const list = read();
+      if (list.length) write(list.slice(0, -1));
+    }
+  });
+  input.addEventListener('input', paint);
+  // 隐藏字段也是 DOM 里的节点：它是数据的唯一来源，测试/调试要能按选择器拿到它
+  //（第一版只建了不插，界面上看不出问题，但选择器找不到 —— 排查起来很费劲）。
+  box.append(input, entry);
+  paint();
+  return { node: box, input };
+}
+
 function notifyInput(value, placeholder, type) {
   const i = el('input', 'input');
   i.type = type || 'text';
@@ -3474,13 +3533,13 @@ function renderRouteEditor(box, r) {
       + '只想推某个插件，把它填进下面的「只收」（支持前缀通配，比如 mcloud*）。'),
   );
   const eg = el('div', 'chan-grid');
-  // 提示语缩短（原来的长句在窄屏被截成「空 =」），怎么用交给下面的胶囊说
-  const inc = notifyInput((r.include_plugins || []).join(','), '留空 = 全收；也可手填前缀 mcloud*');
-  const exc = notifyInput((r.exclude_plugins || []).join(','), '留空 = 都不排除');
-  eg.append(notifyLine('只收', inc));
-  eg.append(notifyLine('不收', exc));
+  // 标签输入 + 整行铺开：一长串逗号塞在小框里根本不好改（用户报「输入框难以操作」）
+  const inc = notifyTagField(r.include_plugins, '留空 = 全收；输入插件名后回车，支持 mcloud*');
+  const exc = notifyTagField(r.exclude_plugins, '留空 = 都不排除');
+  eg.append(notifyLine('只收插件', inc.node, null, true));
+  eg.append(notifyLine('不收插件', exc.node, null, true));
   // 点插件名就能选，不用背插件叫什么
-  eg.append(pluginPicker(inc, exc));
+  eg.append(pluginPicker(inc.input, exc.input));
   eventsBox.append(eg);
 
   // 定时推送

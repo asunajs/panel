@@ -351,6 +351,38 @@ button, input, select { font: inherit; color: inherit; }
 .table .err-text { color: var(--err); }
 .table .nowrap { white-space: nowrap; }
 
+/* 标签输入（第 202 轮）：外观照 .input（同样的边框/焦点环），里面是标签 + 一个无边框输入。
+   为什么不用单行文本框：三个插件就是一长串逗号，看不清边界、改一个要数逗号。 */
+.chan-tags {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  width: 100%; min-height: var(--h-control);
+  padding: 3px 6px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  cursor: text;
+}
+.chan-tags:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.chan-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 24px; padding: 0 4px 0 9px;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 999px; font-size: 12.5px; line-height: 1;
+  font-variant-numeric: tabular-nums; max-width: 100%;
+}
+.chan-tag-x {
+  width: 18px; height: 18px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; border-radius: 50%;
+  color: inherit; opacity: .7; font-size: 13px; line-height: 1; cursor: pointer;
+}
+.chan-tag-x:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.chan-tag-entry {
+  flex: 1 1 120px; min-width: 120px;
+  height: 26px; padding: 0 4px;
+  background: transparent; border: 0; outline: none;
+  color: var(--fg); font-size: 13px;
+}
+.chan-tag-entry::placeholder { color: var(--dim); }
+
 /* 插件胶囊选择器（第 201 轮）：只收/不收不再靠手打插件名。
    两行胶囊，点一下 = 只收它，再点 = 取消；在另一行点 = 移到那一侧（互斥）。 */
 .chan-picker { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
