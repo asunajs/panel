@@ -418,6 +418,16 @@ mod tests {
         assert!(path.to_string_lossy().ends_with("dev.panel.service"));
         assert!(text.contains("Restart=always"));
         assert!(text.contains("WantedBy=default.target"));
-        assert!(text.contains("ExecStart=/"));
+        // 断言「是绝对路径」，不是「以 / 开头」：Windows 上 current_exe 是 D:\…，
+        // 这里验的是 unit 生成器，跟当前平台的路径写法无关。
+        let exec = text
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("unit 里必须有 ExecStart=");
+        let exe = exec.trim_start_matches("ExecStart=");
+        assert!(
+            std::path::Path::new(exe).is_absolute(),
+            "ExecStart 必须是绝对路径（systemd 不认相对路径）: {exec}"
+        );
     }
 }

@@ -46,6 +46,13 @@ fn forge_symlink(mut z: Vec<u8>, name: &str) -> Vec<u8> {
     panic!("没找到 {name} 的 central directory 记录");
 }
 
+/// `forge_symlink` 能不能在 zip 里造出符号链接条目 —— **取决于 zip crate 在哪个平台编**：
+/// Windows 上 `add_symlink` 不写 unix_mode 的 S_IFLNK 位（造出来是普通文件），
+/// 于是下面两条测试在 Windows 上必然红。
+///
+/// 这**不影响**产品行为：拒绝符号链接读的是压缩包里的 `unix_mode` 字段（跨平台一致），
+/// 只是「构造一个带符号链接条目的 zip」这个**测试手段**在 Windows 上不可用。
+#[cfg(unix)]
 #[test]
 fn forge_symlink_really_produces_a_symlink_entry() {
     // 先钉住锻造函数本身：不然下面的拒绝测试可能是假绿。
@@ -55,6 +62,7 @@ fn forge_symlink_really_produces_a_symlink_entry() {
     assert_eq!(f.unix_mode().unwrap() & 0o170000, 0o120000, "锻造出来的不是符号链接");
 }
 
+#[cfg(unix)]
 #[test]
 fn zip_symlink_entries_are_rejected() {
     let root = tmp("symlink-entry");
