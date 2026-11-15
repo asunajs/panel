@@ -41,7 +41,11 @@ use crate::hostapi::{HostHandle, Registration};
 use crate::log::{Level, LogHub};
 
 /// 默认 CPU/墙钟预算。
-pub const DEFAULT_BUDGET_MS: u64 = 30_000;
+/// 默认预算（毫秒）。跟配置走：`PANEL_BUDGET_MS`，不设就是 300 秒（见 `config::DEFAULT_BUDGET_MS`）。
+/// 做成函数不是常量，是因为它随环境变量变 —— 常量会把「读一次环境」钉死在编译期。
+pub fn default_budget_ms() -> u64 {
+    crate::config::budget_ms()
+}
 /// per-task 预算上限：90 分钟。20 分钟的任务要能跑，上限就不能卡在分钟级。
 pub const MAX_BUDGET_MS: u64 = 5_400_000;
 

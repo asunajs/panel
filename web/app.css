@@ -389,11 +389,12 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 .log-line {
-  display: grid; grid-template-columns: 78px 58px 96px 1fr; gap: 10px;
+  /* 时间列带日期（11-15 16:41:10，14 字符）：78px 装不下会折行 */
+  display: grid; grid-template-columns: 118px 58px 96px 1fr; gap: 10px;
   padding: 3px 16px; align-items: baseline;
 }
 .log-line:hover { background: var(--surface-2); }
-.log-time { color: var(--dim); font-variant-numeric: tabular-nums; }
+.log-time { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log-plugin { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-msg { white-space: pre-wrap; word-break: break-word; }
 .level {

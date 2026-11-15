@@ -604,7 +604,7 @@ pub fn router(st: AppState) -> Router {
                 .route("/api/test/js", post(api_test_js))
                 .layer(middleware::from_fn_with_state(st.clone(), rate_limit_test)),
         )
-        .route("/", get(|| async { asset(INDEX, "text/html; charset=utf-8", "index.html") }))
+        .route("/", get(index_page))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
@@ -677,6 +677,30 @@ fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
     // no-store：改完刷新就能看到，不会拿旧的对着新后端猜。
     (
         [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "no-store")],
+        body,
+    )
+        .into_response()
+}
+
+/// 面板首页：index 的资源引用（app.js / app.css）带上**版本查询串**。
+///
+/// 为什么要版本化：更早的版本发资源不带任何缓存头，浏览器把 app.js 缓进了磁盘，
+/// 启发式新鲜度会让它一直复用 —— 用户升级二进制后看到的还是旧界面，刷新都没用
+/// （实测：服务端 232KB 的新 app.js，页面里加载的是 196KB 的旧货）。URL 带上
+/// 面板版本之后，升级 = URL 变化 = 缓存自然失效。asset() 的 no-store 只保护
+/// 新条目，管不了旧条目。
+fn index_page() -> Response {
+    let v = crate::panelversion::current();
+    let body = match std::env::var_os("PANEL_WEB_DIR") {
+        Some(dir) => std::fs::read_to_string(std::path::PathBuf::from(dir).join("index.html"))
+            .unwrap_or_else(|e| format!("读 index.html 失败: {e}")),
+        None => INDEX.to_string(),
+    };
+    let body = body
+        .replace("/app.js\"", &format!("/app.js?v={v}\""))
+        .replace("/app.css\"", &format!("/app.css?v={v}\""));
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
         body,
     )
         .into_response()
@@ -3556,7 +3580,7 @@ async fn scripts_list(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
     Ok(Json(json!({
         "dir": st.scripts_dir.display().to_string(),
         "max_bytes": crate::scripts::FILE_MAX,
-        "default_budget_ms": crate::scripts::DEFAULT_BUDGET_MS,
+        "default_budget_ms": crate::scripts::default_budget_ms(),
         "max_budget_ms": crate::scripts::MAX_BUDGET_MS,
         "scripts": rows,
     })))
@@ -3623,7 +3647,7 @@ async fn script_save(
                     &source,
                     &title,
                     body.cron,
-                    body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+                    body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
                     body.enabled.unwrap_or(true),
                 )
                 .await
@@ -3659,7 +3683,7 @@ async fn script_save(
                         cur["cron"].as_str().filter(|s| !s.is_empty()).map(String::from)
                     }),
                     body.budget_ms
-                        .unwrap_or(cur["budget_ms"].as_u64().unwrap_or(crate::scripts::DEFAULT_BUDGET_MS)),
+                        .unwrap_or(cur["budget_ms"].as_u64().unwrap_or(crate::scripts::default_budget_ms())),
                     body.enabled.unwrap_or(cur["enabled"].as_bool().unwrap_or(true)),
                 )
                 .await
@@ -3718,7 +3742,7 @@ async fn script_create(
                     &source,
                     body.title.as_deref().unwrap_or(""),
                     body.cron.clone(),
-                    body.budget_ms.unwrap_or(crate::scripts::DEFAULT_BUDGET_MS),
+                    body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
                     true,
                 )
                 .await

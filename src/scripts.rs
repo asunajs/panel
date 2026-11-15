@@ -96,7 +96,11 @@ pub fn output_max() -> usize {
 /// 单行日志的上限。脚本可以打很长的行，不能让它一 行 吃光内存。
 const MAX_LINE_BYTES: usize = 64 * 1024;
 
-pub const DEFAULT_BUDGET_MS: u64 = 30_000;
+/// 默认预算（毫秒）。跟配置走：`PANEL_BUDGET_MS`，不设就是 300 秒（见 `config::DEFAULT_BUDGET_MS`）。
+/// 做成函数不是常量，是因为它随环境变量变 —— 常量会把「读一次环境」钉死在编译期。
+pub fn default_budget_ms() -> u64 {
+    crate::config::budget_ms()
+}
 pub const MAX_BUDGET_MS: u64 = 5_400_000;
 /// 排程检查间隔：脚本不是秒级任务，15 秒粒度足够，也不吵。
 const TICK_MS: u64 = 15_000;
@@ -423,7 +427,7 @@ impl Scripts {
                          ON CONFLICT(name) DO NOTHING",
                         rusqlite::params![
                             fname,
-                            DEFAULT_BUDGET_MS as i64,
+                            default_budget_ms() as i64,
                             now_ms(),
                             infer_runtime(&fname)
                         ],
@@ -587,7 +591,7 @@ impl Scripts {
                         // 文件在、记录没了：给一份默认值，保存时补上记录。
                         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(json!({
                             "cron": Value::Null,
-                            "budget_ms": DEFAULT_BUDGET_MS,
+                            "budget_ms": default_budget_ms(),
                             "enabled": true,
                             "next_at": Value::Null,
                             "runtime": infer_runtime(&name),
@@ -684,7 +688,7 @@ impl Scripts {
         if let Some(expr) = &cron {
             crate::cron::Schedule::parse(expr).map_err(|e| format!("调度表达式无效: {e}"))?;
         }
-        self.insert_record(&fname, runtime, title, cron, DEFAULT_BUDGET_MS, true)
+        self.insert_record(&fname, runtime, title, cron, default_budget_ms(), true)
             .await?;
         self.log.emit(
             PLUGIN,
@@ -872,7 +876,7 @@ impl Scripts {
                         "INSERT INTO scripts(name,cron,budget_ms,enabled,next_at,updated_at,runtime)
                          VALUES(?1,NULL,?2,1,NULL,?3,?4)
                          ON CONFLICT(name) DO NOTHING",
-                        rusqlite::params![filename, DEFAULT_BUDGET_MS as i64, updated, runtime],
+                        rusqlite::params![filename, default_budget_ms() as i64, updated, runtime],
                     )
                     .map(|n| n as usize)
                     .map_err(|e| e.to_string())
@@ -954,7 +958,7 @@ impl Scripts {
                     )
                     .or_else(|e| match e {
                         rusqlite::Error::QueryReturnedNoRows => Ok((
-                            DEFAULT_BUDGET_MS,
+                            default_budget_ms(),
                             infer_runtime(&name),
                             String::new(),
                         )),

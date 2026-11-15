@@ -1146,6 +1146,23 @@ async function main() {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
   await sleep(300);
 
+  // 默认预算（第 197 轮）：默认 300 秒，并且卡片上要写清「哪里能改」。
+  // 以前前端自己也写死一份 30000 —— 服务端一改默认值，脚本编辑器就显示成 30 秒。
+  await js("location.hash = '#dashboard'");
+  await sleep(900);
+  const budgetCard = JSON.parse(await js(
+    "JSON.stringify((()=>{const cards=[...document.querySelectorAll('#view-dashboard .card, #view-dashboard .stat, #view-dashboard div')];" +
+    "const hit=cards.find(c=>/单次预算/.test(c.textContent||'')&&c.querySelectorAll('*').length<12);" +
+    "if(!hit) return {err:'no-card'};return {text:(hit.textContent||'').replace(/\\s+/g,' ').trim()};})())"
+  ));
+  check('仪表盘有「单次预算」卡片', !budgetCard.err, JSON.stringify(budgetCard));
+  check('默认预算是 300 秒（不是 30 秒）',
+    // humanMs 把 300000 渲染成「5 分 0 秒」—— 断言认这个，别写死一种排版
+    !!budgetCard.text && /5 分|300 秒/.test(budgetCard.text) && !/30\.0 秒|30 秒/.test(budgetCard.text),
+    JSON.stringify(budgetCard));
+  check('卡片写清了改哪里（PANEL_BUDGET_MS）',
+    !!budgetCard.text && /PANEL_BUDGET_MS/.test(budgetCard.text), JSON.stringify(budgetCard));
+
   // 收尾：还原注入的假入口，后面的断言还得看真实数据
   await js(`(()=>{const box=document.getElementById('nav-plugin-list');
     [...box.querySelectorAll('[data-fill]')].forEach(e=>e.remove());

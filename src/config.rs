@@ -35,6 +35,32 @@ pub fn max_bytes() -> u64 {
     }
 }
 
+/// 单次运行的**默认预算**：300 秒（5 分钟）。
+///
+/// 原来是 30 秒。改的理由：面板上跑的多是「拉一次接口、下个文件、转存一下」这类
+/// 真实网络活，30 秒经常卡在边界上（用户实测：任务时不时被判超时，其实再给两分钟就完）；
+/// 默认值应该是「绝大多数任务不用改」，想收紧的人在任务上写 `budget_ms` 就行。
+pub const DEFAULT_BUDGET_MS: u64 = 300_000;
+/// 下限：再小连一次 HTTP 握手都跑不完，设成 100ms 只会让所有任务集体超时。
+const MIN_BUDGET_MS: u64 = 1_000;
+/// 上限跟 per-task 的上限对齐（90 分钟）：默认值不该比单任务允许的还大。
+const MAX_BUDGET_MS: u64 = 5_400_000;
+/// 覆盖默认预算的环境变量（毫秒）。
+pub const ENV_BUDGET_MS: &str = "PANEL_BUDGET_MS";
+
+/// 本次启动生效的默认预算。环境变量非法就退回默认值（同 `max_bytes`：不因为一个笔误拒绝启动），
+/// 但会在 `[1s, 90min]` 之间夹一次 —— 0 或天文数字都是笔误，夹回可用范围比报错更有用。
+pub fn budget_ms() -> u64 {
+    let raw = match std::env::var(ENV_BUDGET_MS) {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => return DEFAULT_BUDGET_MS,
+        },
+        Err(_) => return DEFAULT_BUDGET_MS,
+    };
+    raw.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS)
+}
+
 /// 读配置。缺文件 = 空对象（不是错误：新装的面板没有 config.json 很正常）。
 pub fn load(dir: &Path) -> Result<Value, String> {
     let path = dir.join(FILE);

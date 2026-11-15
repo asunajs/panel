@@ -70,8 +70,9 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 
 ### 源码体积上限（第 132 轮抬过）
 
-| 对象 | 默认上限 | 环境变量 |
+| 对象 | 默认值 | 环境变量 |
 |---|---|---|
+| 单次运行预算 | **300 秒** | `PANEL_BUDGET_MS`（毫秒，夹在 1s–90min；任务/脚本上写 `budget_ms` 可单独覆盖） |
 | 脚本源码 | **8 MiB** | `PANEL_SCRIPT_MAX_BYTES`（下限 64 KiB） |
 | 插件源码 | **8 MiB** | `PANEL_PLUGIN_MAX_BYTES`（下限 64 KiB） |
 | HTTP 请求体 | 16 MiB | 代码里定死（`DefaultBodyLimit`） |

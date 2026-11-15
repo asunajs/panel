@@ -77,6 +77,15 @@ function fmtTime(ms) {
   return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
+/** 日志 / 运行记录行的时间：带日期 —— 只显示时分秒的话，隔天翻日志根本
+ *  不知道是哪天的（2026-11-15 用户截图报障）。月-日 + 时分秒，等宽数字对齐。 */
+function fmtLogTime(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
 function fmtDateTime(ms) {
   if (!ms) return '—';
   const d = new Date(ms);
@@ -272,22 +281,6 @@ function toast(msg, isErr) {
   t.className = 'toast' + (isErr ? ' toast-err' : '');
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { t.className = 'toast hidden'; }, 2600);
-}
-
-/** 顶栏的「刚刚更新 / N 秒前」：轮询没有反馈，用户会怀疑面板是不是死的。 */
-function setSync(ok) {
-  state.lastSync = ok ? Date.now() : 0;
-  state.syncFailed = !ok;
-  paintSync();
-}
-
-function paintSync() {
-  const t = $('sync-text');
-  if (!t) return;
-  if (state.syncFailed) { setText(t, '连接中断，重试中'); return; }
-  if (!state.lastSync) { setText(t, '正在读取…'); return; }
-  const s = Math.round((Date.now() - state.lastSync) / 1000);
-  setText(t, s < 3 ? '刚刚更新' : s + ' 秒前更新');
 }
 
 function banner(msg, isOk) {
@@ -528,7 +521,7 @@ function renderCards() {
     setCard(engine, 'JS 内存', humanBytes(s.js_memory_bytes), jsNote);
     setCard(taskBox, '插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲');
     setCard(taskBox, '任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常');
-    setCard(taskBox, '单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖');
+    setCard(taskBox, '单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖');
     setCard(taskBox, '预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数');
   } else {
     clear(engine);
@@ -542,7 +535,7 @@ function renderCards() {
     taskBox.append(
       card('插件', String(state.plugins.length), busy ? busy + ' 个正在跑' : '全部空闲'),
       card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
-      card('单次预算', humanMs(s.default_budget_ms), '默认值，可按任务覆盖'),
+      card('单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖'),
       card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
     );
   }
@@ -617,6 +610,14 @@ function td(label, cls, text) {
   const cell = el('td', cls, text);
   cell.dataset.label = label;
   return cell;
+}
+
+// 默认预算（毫秒）：**服务端说了算**（PANEL_BUDGET_MS 可改），前端只是没拿到时兜底。
+// 以前这里写死 30000，服务端一改默认值，脚本编辑器就显示成 30 秒 —— 两处各写一份必然漂。
+function defaultBudgetMs() {
+  const s = state.stats || {};
+  const n = Number(s.default_budget_ms);
+  return Number.isFinite(n) && n > 0 ? n : 300000;
 }
 
 function actionsCell(ops) {
@@ -1634,7 +1635,7 @@ function renderRuns() {
     tr.append(td('插件', 'dim', r.plugin));
     tr.append(td('任务', 'strong', r.task));
     const started = td('开始', 'mono dim');
-    started.append(markText(fmtTime(r.started_at), ''));
+    started.append(markText(fmtLogTime(r.started_at), ''));
     started.dataset.tip = '开始于 ' + fmtDateTime(r.started_at);
     tr.append(started);
     tr.append(td('耗时', 'num', humanDur(r.ended_at ? r.ended_at - r.started_at : null)));
@@ -1708,7 +1709,7 @@ function renderDashLogs() {
 
 function logLine(l) {
   const row = el('div', 'log-line');
-  row.append(el('span', 'log-time', fmtTime(l.ts)));
+  row.append(el('span', 'log-time', fmtLogTime(l.ts)));
   row.append(el('span', 'level level-' + (l.level || 'info'), l.level || 'info'));
   row.append(el('span', 'log-plugin', l.plugin || ''));
   const msg = el('span', 'log-msg');
@@ -2440,7 +2441,7 @@ async function openScriptSource(name) {
       $("src-text").disabled = true;
       $("src-save").disabled = true;
       $("script-cron").value = d.cron || "";
-      $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
+      $("script-budget").value = String(Math.round((d.budget_ms || defaultBudgetMs()) / 1000));
       $("script-enabled").checked = !!d.enabled;
       $("src-meta").textContent = d.path + " · " + humanBytes(d.bytes) + " · 二进制文件";
       srcError("这是二进制文件，不能在编辑器里改文本 —— 重新上传同名文件替换（cron / 运行时照常可改）");
@@ -2450,7 +2451,7 @@ async function openScriptSource(name) {
     else $("src-text").value = d.source;
     $("script-title").value = d.title || "";
     $("script-cron").value = d.cron || "";
-    $("script-budget").value = String(Math.round((d.budget_ms || 30000) / 1000));
+    $("script-budget").value = String(Math.round((d.budget_ms || defaultBudgetMs()) / 1000));
     $("script-enabled").checked = !!d.enabled;
     $("src-meta").textContent = d.path + " · " + humanBytes(d.bytes);
   } catch (e) {
@@ -4824,7 +4825,7 @@ async function refresh() {
     renderAlerts(data.alerts || []);
     state.auth = !!data.auth;
     // 有口令才有「登出」可言；无凭据降级态下按了也没意义，索性不显示。
-    $('sidebar-logout').classList.toggle('hidden', !state.auth);
+    $('topbar-logout').classList.toggle('hidden', !state.auth);
     state.loaded = true;
     setText($('version'), 'v' + (state.version || '—'));
     setText($('auth-state'), state.auth ? '令牌已启用' : '未启用令牌');
@@ -4833,14 +4834,12 @@ async function refresh() {
     // 没配令牌就没有「登出」这回事（会话卡是给启用令牌的部署看的）
     $('session-card')?.classList.toggle('hidden', !state.auth);
     banner('');
-    setSync(true);
     render();
     // 侧栏的插件入口跟着这一轮状态重画（插件可能刚注册/刚卸载）
     renderPluginNav();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, state.token ? '令牌无效' : '需要令牌'); return; }
     banner('读取面板状态失败：' + (e.message || e) + '（自动重试中）');
-    setSync(false);
     setConn(false);
   }
 }
@@ -5246,7 +5245,6 @@ function bind() {
     }
   });
 
-  setInterval(paintSync, 1000);
   // 源码编辑器的位置提示 / 跳到行（第 106 轮）
   const srcText = $("src-text");
   if (srcText) {
@@ -5444,7 +5442,7 @@ function bind() {
   $('notify-retry').addEventListener('click', retryNotify);
 
   $('panel-logout').addEventListener('click', logoutPanel);
-  $('sidebar-logout').addEventListener('click', logoutPanel);
+  $('topbar-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
   $('new-plugin-ok').addEventListener('click', createPlugin);

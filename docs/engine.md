@@ -406,7 +406,7 @@ cargo test 216 passed
 ### 为什么需要
 
 interrupt handler 只有引擎**回到**解释器循环时才会被检查，所以一个 `while(true){}`
-会结结实实占满一个 tokio worker，直到预算打卡（插件默认 **30 秒**）。
+会结结实实占满一个 tokio worker，直到预算打卡（默认 **300 秒**，`PANEL_BUDGET_MS` 可改）。
 面板的 HTTP、调度 actor、DB actor 都跑在同一组 worker 上 —— 占满就等于整个面板失去响应。
 
 两轮实测（10 核机器）：

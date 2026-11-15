@@ -917,7 +917,7 @@ async fn op_register_cron(
             ),
         ));
     }
-    let budget = budget_ms.0.unwrap_or(crate::scheduler::DEFAULT_BUDGET_MS);
+    let budget = budget_ms.0.unwrap_or(crate::scheduler::default_budget_ms());
     h.reg
         .send(Registration::Cron {
             plugin: h.plugin.clone(),
@@ -995,7 +995,7 @@ async fn op_register_handler<'js>(
     let handlers: Object<'js> = ctx.globals().get("__handlers")?;
     handlers.set(name.as_str(), func)?;
     // 手动任务的预算：不给就是默认 30 秒；和 register_cron 同一个语义（0.4.1 起）。
-    let budget = budget_ms.0.unwrap_or(crate::scheduler::DEFAULT_BUDGET_MS);
+    let budget = budget_ms.0.unwrap_or(crate::scheduler::default_budget_ms());
     h.reg
         .send(Registration::Handler {
             plugin: h.plugin.clone(),

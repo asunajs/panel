@@ -71,7 +71,7 @@ register_cron(name, cron, budget_ms?, opts?)    // 定时任务
 register_handler(name, handler, budget_ms?)     // 只手动/被派发的任务
 ```
 
-`register_handler` 的 `budget_ms`（**0.4.1 起**）：这条手动任务的执行预算，缺省 30000。
+`register_handler` 的 `budget_ms`（**0.4.1 起**）：这条手动任务的执行预算，缺省 300000（5 分钟，`PANEL_BUDGET_MS` 可改）。
 多请求的长链路（十几个请求带间隔的那种）在注册时就要声明，否则跑到一半被预算掐死 ——
 表现是任务失败、error 里一句「预算耗尽」。钳法与 `register_cron` 相同（`[1, 5400000]`）。
 同名 cron 任务来注册时（`register_cron` + 同名 handler 的标准配法），预算以 `register_cron`
@@ -223,7 +223,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
 | 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine.md](engine.md) |
 | `config` 体积 | **4 MiB**（`PANEL_CONFIG_MAX_BYTES` 可调，下限 4 KiB） | 已实现：`src/config.rs`。超限**拒绝启动**并报出真实字节数，不截断（截断 = 插件看到半个配置）。基线那个 64 KiB 是**任务参数**的上限，不是配置 |
-| 执行预算默认 | 基线 600000ms（10 分钟） | **新版改成 30000ms**（`scheduler.rs` `DEFAULT_BUDGET_MS`）。理由：默认值应当是「短任务够用、写错了早点暴露」，长任务显式声明 `budget_ms` |
+| 执行预算默认 | 基线 600000ms（10 分钟） | **300000ms（5 分钟）**，`PANEL_BUDGET_MS` 可改（`config::budget_ms()`，夹在 1s–90min）。0.4.2 之前是 30000ms，实测太紧：拉一次接口/下个文件经常卡在边界上被判超时。想收紧就在任务上写 `budget_ms` |
 | **新版执行预算上限** | **5400000ms（90 分钟）** | 已实现 `MAX_BUDGET_MS`；单测钉着 20 分钟放行、90 分钟封顶、0 钳到 1 |
 
 `fetch` 的 `body_error`（传输层读正文失败）如实透传给插件，不吞。

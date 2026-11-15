@@ -331,7 +331,7 @@ await host.register_handler('go', async () => 1);
     crons.sort();
     assert_eq!(crons.len(), 4, "四条注册都要到：{crons:?}");
     // 不给预算 = 调度器的默认预算（不是 0，也不是报错）
-    let def = crate::scheduler::DEFAULT_BUDGET_MS;
+    let def = crate::scheduler::default_budget_ms();
     assert_eq!(crons[0], ("a".into(), def, false), "少传 = 默认预算: {crons:?}");
     assert_eq!(crons[1], ("b".into(), def, false), "显式 undefined = 默认预算: {crons:?}");
     assert_eq!(crons[2], ("c".into(), def, false), "null = 默认预算: {crons:?}");

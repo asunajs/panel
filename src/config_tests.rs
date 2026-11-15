@@ -112,3 +112,27 @@ fn a_file_exactly_at_the_cap_is_accepted() {
     std::env::remove_var(ENV_MAX);
     assert!(v.is_ok(), "正好等于上限应当放行：{:?}", v.err());
 }
+
+#[test]
+fn budget_defaults_to_five_minutes_and_follows_the_env() {
+    let _g = lock();
+    std::env::remove_var(ENV_BUDGET_MS);
+    assert_eq!(budget_ms(), DEFAULT_BUDGET_MS, "不设环境变量 = 300 秒");
+    assert_eq!(DEFAULT_BUDGET_MS, 300_000, "默认值就是 5 分钟（原来是 30 秒）");
+
+    // 运维想调：直接给毫秒
+    std::env::set_var(ENV_BUDGET_MS, "600000");
+    assert_eq!(budget_ms(), 600_000);
+
+    // 0 / 负数大小 / 天文数字 都当笔误：夹回可用范围，不拒绝启动
+    std::env::set_var(ENV_BUDGET_MS, "0");
+    assert_eq!(budget_ms(), MIN_BUDGET_MS, "0 会被夹到 1 秒");
+    std::env::set_var(ENV_BUDGET_MS, "999999999");
+    assert_eq!(budget_ms(), MAX_BUDGET_MS, "超过 90 分钟夹回上限");
+
+    // 根本不是数字：退回默认值（同 PANEL_CONFIG_MAX_BYTES 的处理）
+    std::env::set_var(ENV_BUDGET_MS, "五分钟");
+    assert_eq!(budget_ms(), DEFAULT_BUDGET_MS);
+
+    std::env::remove_var(ENV_BUDGET_MS);
+}

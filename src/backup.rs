@@ -212,7 +212,7 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
         let source = s["source"].as_str().unwrap_or_default();
         let budget = s["budget_ms"]
             .as_u64()
-            .unwrap_or(crate::scripts::DEFAULT_BUDGET_MS);
+            .unwrap_or(crate::scripts::default_budget_ms());
         let cron = s["cron"].as_str().map(|c| c.to_string());
         let enabled = s["enabled"].as_bool().unwrap_or(true);
         let runtime = match s["runtime"].as_str() {

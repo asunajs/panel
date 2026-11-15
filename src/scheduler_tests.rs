@@ -3,7 +3,7 @@
 use super::*;
 
 fn task(cron: &str) -> Task {
-    Task::new("p".into(), "t".into(), cron.into(), DEFAULT_BUDGET_MS).expect("parse")
+    Task::new("p".into(), "t".into(), cron.into(), default_budget_ms()).expect("parse")
 }
 
 fn cfg() -> TripConfig {
@@ -182,8 +182,12 @@ fn manual_task_budget_comes_from_the_registration_and_is_clamped() {
     assert_eq!(declared.budget_ms, 300_000, "声明多少就是多少");
     assert_eq!(declared.suggest_budget_ms, 300_000, "建议值同步");
 
-    let default = Task::manual("p".into(), "quick".into(), crate::scheduler::DEFAULT_BUDGET_MS);
-    assert_eq!(default.budget_ms, 30_000, "不给（默认值）还是 30 秒");
+    let default = Task::manual("p".into(), "quick".into(), crate::scheduler::default_budget_ms());
+    assert_eq!(
+        default.budget_ms,
+        crate::config::DEFAULT_BUDGET_MS,
+        "不给就吃默认预算（300 秒；环境变量能改，见 config::budget_ms）"
+    );
 
     let raw_kept = Task::manual("p".into(), "huge".into(), u64::MAX);
     // 注意：Task::manual 只抬下限（0 → 1ms），上限钳在 Registration::Handler 的接收端

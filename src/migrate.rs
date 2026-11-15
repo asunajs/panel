@@ -1082,7 +1082,7 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
                 };
                 let budget = budget_ms
                     .filter(|b| *b > 0)
-                    .unwrap_or(crate::scheduler::DEFAULT_BUDGET_MS as i64);
+                    .unwrap_or(crate::scheduler::default_budget_ms() as i64);
                 let changed = up.execute(rusqlite::params![
                     plugin,
                     name,
@@ -1275,7 +1275,7 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
                     rusqlite::params![
                         fname,
                         cron,
-                        crate::scripts::DEFAULT_BUDGET_MS as i64,
+                        crate::scripts::default_budget_ms() as i64,
                         paused == 0,
                         chrono::Local::now().timestamp_millis(),
                         rt,
