@@ -13,9 +13,14 @@ use std::path::PathBuf;
 pub const LABEL: &str = "dev.panel";
 
 fn home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "读不到 HOME，无法定位用户级服务目录".to_string())
+    crate::platform::home_dir().ok_or_else(|| {
+        let var = if crate::platform::is_windows() {
+            "USERPROFILE"
+        } else {
+            "HOME"
+        };
+        format!("读不到 {var}，无法定位用户级服务目录")
+    })
 }
 
 fn exe_path() -> Result<PathBuf, String> {
@@ -40,8 +45,15 @@ fn plugins_dir() -> String {
     std::env::var("PANEL_PLUGINS_DIR").unwrap_or_else(|_| "plugins".to_string())
 }
 
+/// 脚本目录：**必须和 main.rs 的默认值一致**（`<data>/scripts`）。
+///
+/// 这里原来写的是裸 `"scripts"`：单元文件里就变成 `PANEL_SCRIPTS_DIR=scripts`，
+/// 而相对路径在 launchd / systemd / 计划任务里的解析基准都不是用户的工作目录 ——
+/// 于是「手动跑」和「自启动跑」会看两个不同的脚本目录。顺手修掉。
 fn scripts_dir() -> String {
-    std::env::var("PANEL_SCRIPTS_DIR").unwrap_or_else(|_| "scripts".to_string())
+    std::env::var("PANEL_SCRIPTS_DIR").unwrap_or_else(|_| {
+        data_dir().join("scripts").display().to_string()
+    })
 }
 
 /// macOS：`~/Library/LaunchAgents/<label>.plist`
@@ -139,7 +151,120 @@ fn target() -> Result<(PathBuf, String, &'static str), String> {
         let (p, t) = linux_unit()?;
         Ok((p, t, "systemd"))
     } else {
-        Err("自启动只支持 macOS（launchd）和 Linux（systemd --user）".to_string())
+        Err(format!(
+            "这个平台（{}）没有实现自启动：只做了 macOS（launchd）、Linux（systemd --user）与 Windows（计划任务）",
+            crate::platform::os_name()
+        ))
+    }
+}
+
+/// Windows 上的「自启动」：计划任务（Task Scheduler）。
+///
+/// 为什么是计划任务：Windows 没有 launchd / systemd 那种用户级守护进程的对等物。
+/// 最贴近「开机/登录就起来」的是 `schtasks` 建一个 **登录时触发** 的任务；
+/// 真·Windows 服务（SCM 回调）是另一套生命周期，这一版不做（见 docs/windows.md §7）。
+///
+/// 为什么用 `cmd /c cd /d …` 包一层：计划任务的「起始于」由系统决定
+/// （通常是 `C:\Windows\System32`），而面板的 `data/` `plugins/` 是**相对工作目录**的。
+/// 不切目录的话，服务起来会在一片空白里建新库 —— 用户看到的就是「数据没了」。
+///
+/// 这些是**纯字符串**，在哪个平台都能算出来，所以测试在 macOS 上也能跑。
+pub struct WinTaskSpec {
+    pub name: String,
+    /// `schtasks /Create …` 的参数（不含 prog 本身）
+    pub create: Vec<String>,
+    pub delete: Vec<String>,
+    pub query: Vec<String>,
+    /// 给人复制的完整命令行
+    pub display: String,
+}
+
+pub fn windows_task_spec(label: &str, exe: &std::path::Path, dir: &std::path::Path) -> WinTaskSpec {
+    // schtasks 的 /TR 里嵌套引号很脆：外面一层给 /TR，里面一层给含空格的路径。
+    let inner = format!(
+        "cmd /c cd /d \"{dir}\" && \"{exe}\"",
+        dir = dir.display(),
+        exe = exe.display()
+    );
+    let tr = format!("\"{inner}\"");
+    let create = vec![
+        "/Create".to_string(),
+        "/TN".to_string(),
+        label.to_string(),
+        "/TR".to_string(),
+        tr.clone(),
+        "/SC".to_string(),
+        "ONLOGON".to_string(),
+        "/RL".to_string(),
+        "LIMITED".to_string(),
+        "/F".to_string(),
+    ];
+    let delete = vec![
+        "/Delete".to_string(),
+        "/TN".to_string(),
+        label.to_string(),
+        "/F".to_string(),
+    ];
+    let query = vec![
+        "/Query".to_string(),
+        "/TN".to_string(),
+        label.to_string(),
+        "/FO".to_string(),
+        "LIST".to_string(),
+    ];
+    let display = format!("schtasks {} {}", create.join(" "), "");
+    WinTaskSpec {
+        name: label.to_string(),
+        create,
+        delete,
+        query,
+        display: display.trim_end().to_string(),
+    }
+}
+
+/// Windows 的 service 子命令。**没有在真机 Windows 上验收过** —— 见 docs/windows.md。
+fn windows_run(args: &[String]) -> Result<(), String> {
+    let exe = exe_path()?;
+    let dir = workdir();
+    let spec = windows_task_spec(LABEL, &exe, &dir);
+    match args.first().map(|s| s.as_str()) {
+        Some("print") | None => {
+            println!("# Windows：登录时启动的计划任务（复制这行到 PowerShell / cmd 执行）");
+            println!("{}", spec.display);
+            println!();
+            println!("# 起始目录由命令里的 `cd /d` 指定为 {}", dir.display());
+            println!("# 数据、插件、脚本都相对这个目录，和手动跑 `panel` 时一致。");
+            println!("# 卸载：schtasks {}", spec.delete.join(" "));
+            Ok(())
+        }
+        Some("install") => {
+            let out = run_cmd("schtasks", &spec.create.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+            println!("已创建计划任务 {}（登录时启动）", spec.name);
+            println!("{out}");
+            println!("卸载：panel service uninstall");
+            Ok(())
+        }
+        Some("uninstall") => {
+            let out = run_cmd("schtasks", &spec.delete.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            match out {
+                Ok(o) => println!("已删除计划任务 {}，自启动已关闭\n{o}", spec.name),
+                Err(e) => println!("没有删掉（可能本来就没装）：{e}"),
+            }
+            Ok(())
+        }
+        Some("status") => {
+            let listed = run_cmd("schtasks", &spec.query.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let on = listed.contains(&spec.name);
+            println!("计划任务: {}", if on { "已登记" } else { "没有" });
+            if !on {
+                println!("装：panel service install（或先 panel service print 看要跑什么）");
+            }
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "未知子命令: service {other}\n用法: panel service [print|install|uninstall|status]"
+        )),
     }
 }
 
@@ -158,6 +283,9 @@ fn run_cmd(prog: &str, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    if crate::platform::is_windows() {
+        return windows_run(args);
+    }
     let (path, text, kind) = target()?;
     match args.first().map(|s| s.as_str()) {
         Some("print") | None => {
@@ -236,6 +364,52 @@ mod tests {
         // 必须是绝对路径：launchd 不认相对路径，工作目录也不一定是这里
         assert!(text.contains("/"), "{text}");
         assert!(!text.contains("<string>./"), "不能出现相对路径: {text}");
+    }
+
+    /// Windows 计划任务的命令形状（纯字符串，macOS 上也能验）。
+    ///
+    /// 三条硬要求：① 登录时触发（ONLOGON）② 带 `cd /d` 切到实例目录
+    /// ③ 含空格的路径要被引号裹住（`C:\Program Files\panel` 这种）。
+    #[test]
+    fn windows_task_command_is_well_formed() {
+        let exe = std::path::Path::new(r"C:\Program Files\panel\panel.exe");
+        let dir = std::path::Path::new(r"D:\我的 面板");
+        let spec = windows_task_spec("dev.panel", exe, dir);
+
+        assert_eq!(spec.name, "dev.panel");
+        assert_eq!(spec.create[0], "/Create");
+        assert!(spec.create.contains(&"/TN".to_string()));
+        assert!(spec.create.contains(&"dev.panel".to_string()));
+        assert!(spec.create.contains(&"ONLOGON".to_string()), "要登录时启动");
+        assert!(spec.create.contains(&"/F".to_string()), "已存在时要覆盖");
+
+        // /TR 后面那个参数就是命令行本体
+        let i = spec.create.iter().position(|a| a == "/TR").unwrap();
+        let tr = &spec.create[i + 1];
+        assert!(tr.contains("cmd /c cd /d"), "要切工作目录: {tr}");
+        assert!(tr.contains("我的 面板"), "目录要原样带上: {tr}");
+        assert!(tr.contains("panel.exe"), "{tr}");
+        // 含空格的路径必须被引号包住，否则 schtasks 会在第一个空格处截断
+        assert!(tr.contains("\"D:"), "目录要被引号裹住: {tr}");
+        assert!(tr.contains("\"C:"), "exe 要被引号裹住: {tr}");
+
+        assert_eq!(spec.delete[0], "/Delete");
+        assert!(spec.delete.contains(&"dev.panel".to_string()));
+        assert_eq!(spec.query[0], "/Query");
+        assert!(spec.display.starts_with("schtasks /Create"), "{}", spec.display);
+    }
+
+    /// 自启动单元里的脚本目录必须和 main.rs 的默认值一致（`<data>/scripts`）。
+    #[test]
+    fn service_unit_uses_the_same_scripts_dir_as_the_app() {
+        // 没设环境变量时，service 侧算出来的应当是 <data>/scripts，而不是裸 "scripts"
+        if std::env::var_os("PANEL_SCRIPTS_DIR").is_none() {
+            let got = scripts_dir();
+            assert!(
+                got.ends_with("scripts") && got.contains("data"),
+                "应当是 <data>/scripts，实际 {got}"
+            );
+        }
     }
 
     #[test]

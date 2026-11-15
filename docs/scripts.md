@@ -10,15 +10,15 @@
 
 | runtime | 命令 | 说明 |
 |---|---|---|
-| `sh` | `$PANEL_RUNTIME_SH <file>`（默认 `/bin/sh`） | 万能兜底：任何能当命令跑的东西 |
+| `sh` | `$PANEL_RUNTIME_SH <file>`（默认 `/bin/sh`；**Windows 上是 bare `sh`**，因为 `/bin/sh` 不存在，要 Git Bash / MSYS2 才有） | 万能兜底：任何能当命令跑的东西 |
 | `node` | `$PANEL_RUNTIME_NODE <file>`（默认 `node`） | `.ts/.mts/.cts` 自动加 `--experimental-strip-types`（node ≥ 22.6） |
 | `bun` | `bun <file>` | ts 原生；ts 想走 bun 就在界面把运行时改掉 |
-| `python3` | `$PANEL_RUNTIME_PYTHON -u <file>`（默认 `python3`） | `-u` 不缓冲，日志实时 |
+| `python3` | `$PANEL_RUNTIME_PYTHON -u <file>`（默认 `python3`；**Windows 上是 `python`** —— 那边没有 `python3` 这个名字） | `-u` 不缓冲，日志实时 |
 | `bin` | 直接执行文件本身 | 要执行位；保存/上传时自动补 `0755` |
 | 其它（`php`、`deno run -A`…） | 自定义命令串 | 按空白拆成 program + args，文件路径拼最后；要引号/管道就用 `sh` 包一层 |
 
 预设命令可用环境变量改（解释器不在 PATH 里时尤其有用）。
-扩展名只用于**推断默认值**（上传/收编时）：js/ts→node、py→python3、sh/bash→sh、
+扩展名只用于**推断默认值**（上传/收编时）：js/ts→node、py→python3（Windows 上跑 `python`）、sh/bash→sh、
 php→php、其它→bin；界面上随时可改。
 
 ## 任务名（显示名，由用户设置）

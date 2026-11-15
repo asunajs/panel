@@ -1481,6 +1481,9 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
     stats["js_memory_total"] = json!(total);
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // 平台名（windows / macos / linux）：界面据此换文案与脚本运行时的默认值。
+        // 不放进 env vars 让用户猜 —— 界面自己该知道自己在哪。
+        "os": crate::platform::os_name(),
         "auth": st.auth().is_some(),
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
@@ -2307,6 +2310,7 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
         "truncated": truncated,
         "text": raw_shown,
         "text_truncated": raw_truncated,
+        "os": crate::platform::os_name(),
         "plugins_dir": st.plugins_dir.display().to_string(),
         "trash_dir": st.data_dir.join("trash").display().to_string(),
     })))

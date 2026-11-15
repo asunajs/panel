@@ -254,7 +254,7 @@ pub fn discover(extra: Option<&Path>) -> Vec<Candidate> {
             dirs.push(up.join("data"));
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = crate::platform::home_dir().map(|p| p.display().to_string()) {
         let home = PathBuf::from(home);
         for name in [".panel", "panel", "panel-data", ".config/panel"] {
             dirs.push(home.join(name));

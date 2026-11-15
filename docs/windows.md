@@ -50,11 +50,18 @@ Linux musl 任务，没有任何 Windows 任务。所以现在**没有任何证�
 C 侧也链接通过了；**但「能编」不等于「能跑」**：路径分隔、文件占用、控制台编码、
 计划任务这些只有真 Windows 才能验。
 
-### 2.2 服务化：只有 launchd 与 systemd
+### 2.2 服务化：只有 launchd 与 systemd（**已补 Windows，待真机验**）
 
 `src/service.rs` 生成 `~/Library/LaunchAgents/*.plist`（macOS）与
 `~/.config/systemd/user/*.service`（Linux），`install/uninstall/status` 都走这两条。
 Windows 没有对应实现 —— 自启动要落到 **计划任务（Task Scheduler）**。
+
+**已实现（2026-11-15）**：`panel service print|install|uninstall|status` 在 Windows 上走
+`schtasks`，建的是 **登录时触发**（`/SC ONLOGON`）的任务；命令里用 `cmd /c cd /d <实例目录> && panel.exe`
+把起始目录钉住 —— 计划任务默认的起始目录是 `C:\Windows\System32`，而面板的
+`data/` `plugins/` 都是**相对工作目录**的，不钉住就会出现「服务起来后数据没了」。
+命令形状是纯字符串，`windows_task_command_is_well_formed` 这条测试在 macOS 上就能跑
+（验：ONLOGON、`cd /d`、含空格路径被引号裹住）；**真机上还没跑过**，见 §5 #10。
 
 ### 2.3 脚本任务的解释器默认值写死 Unix 名
 
@@ -67,6 +74,23 @@ Windows 没有对应实现 —— 自启动要落到 **计划任务（Task Sched
 
 `PANEL_RUNTIME_NODE` / `PANEL_RUNTIME_PYTHON` / `PANEL_RUNTIME_SH` 可以覆盖，
 说明**逃生口已经留好了**，缺的是「按平台给默认值」，以及文档里写清。
+
+**已改（2026-11-15）**：默认值统一由 `src/platform.rs` 给（`default_python()` = `python` /
+`python3`，`default_sh()` = `sh` / `/bin/sh`），别再在别处写死。界面那边同步：
+Windows 上新建脚本的默认运行时是 `node`（不是 `sh`），运行时列表里 `sh` 标成
+「需要 Git Bash / MSYS2」，`python3` 标成「Windows 上一般叫 python」。
+
+### 2.3b 平台判断散落（已收口）
+
+`cfg!(windows)` 散在十几个文件里，改一处忘一处是必然的 —— 第一次交叉编译漏的就是
+`scripts.rs` 里的 `PermissionsExt`。现在「这个平台该用什么默认值 / 该读哪个环境变量」
+一律问 `src/platform.rs`：`os_name()` / `is_windows()` / `home_dir()`（HOME 或 USERPROFILE）/
+`default_python()` / `default_sh()`。`/api/state` 与 `/api/config` 都带 `os` 字段，
+界面据此换文案，不再靠猜。
+
+顺手修掉一个**跨平台的 bug**：`service.rs` 生成的单元里 `PANEL_SCRIPTS_DIR` 写的是裸
+`scripts`，而 `main.rs` 的默认是 `<data>/scripts` —— 于是「手动跑」和「自启动跑」看的是
+两个不同的脚本目录。
 
 ### 2.4 文件替换语义不一样（最容易在真机上炸）
 

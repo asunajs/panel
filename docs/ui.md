@@ -174,7 +174,8 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
   把「落到面板自己页面」的导航提到最外层 —— 否则会面板套面板（错误页的「回面板首页」就是这个坑，
   它的链接已带 `target="_top"`）。契约见 [plugins.md](plugins.md)。
 - **自启动不在界面里点**：设置页只给四条命令（`print` / `install` / `status` / `uninstall`）。
-  安装自启动要动 launchd / systemd，属于「出了事得能自己修」的操作，留在命令行。
+  安装自启动要动 launchd / systemd / 计划任务，属于「出了事得能自己修」的操作，留在命令行
+  （Windows 上 `panel service install` 建的是**登录时触发的计划任务**，`print` 会打印出那条 schtasks 命令）。
 - **脚本的排程在抽屉里**（计划 / 预算 / 启用定时 + 立即运行），不在代码里：
   脚本里 `register_cron` 会直接报错，因为「跑一次」和「注册任务」是两件事，混在一起
   就变成插件了。保存按钮在脚本模式显示「保存」，在插件模式显示「保存并重载」。

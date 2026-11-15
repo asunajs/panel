@@ -14,6 +14,8 @@ const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   view: 'dashboard',
   version: '',
+  /** 平台名（windows / macos / linux），来自 /api/state。界面据此换文案与默认值。 */
+  os: '',
   auth: false,
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
@@ -2248,15 +2250,33 @@ async function loadScripts() {
 
 // 脚本运行时（2026-11-14）：脚本 = 第三方程序，面板只保管 + 定时 + 收输出。
 // 预设之外的值（php / deno run -A…）是自定义命令串，文件路径拼在最后。
-const SCRIPT_RUNTIMES = [
-  { value: "sh", label: "sh（shell 脚本）" },
-  { value: "node", label: "node（js/ts；ts 走 --experimental-strip-types）" },
-  { value: "bun", label: "bun（js/ts 原生）" },
-  { value: "python3", label: "python3" },
-  { value: "php", label: "php" },
-  { value: "bin", label: "直接执行（二进制，请上传）" },
-  { value: "@custom", label: "自定义命令…" },
-];
+// id 会存进库，所以**不按平台改 id**（改了老记录就对不上）；改的是标签与排序。
+// Windows 上 `sh` 默认不存在（要 Git Bash / MSYS2）、`python3` 一般叫 `python`，
+// 把这两个说清楚，别让用户配完才发现跑不起来。
+function scriptRuntimes() {
+  const win = state.os === "windows";
+  const list = [
+    { value: "sh", label: win ? "sh（需要 Git Bash / MSYS2，默认装没有）" : "sh（shell 脚本）" },
+    { value: "node", label: "node（js/ts；ts 走 --experimental-strip-types）" },
+    { value: "bun", label: "bun（js/ts 原生）" },
+    { value: "python3", label: win ? "python（Windows 上一般叫 python，不是 python3）" : "python3" },
+    { value: "php", label: "php" },
+    { value: "bin", label: win ? "直接执行（.exe，请上传）" : "直接执行（二进制，请上传）" },
+    { value: "@custom", label: "自定义命令…" },
+  ];
+  if (win) {
+    // 默认运行时在 Windows 上是 node（见 defaultScriptRuntime），把它放到第一位
+    const i = list.findIndex((r) => r.value === "node");
+    list.unshift(list.splice(i, 1)[0]);
+  }
+  return list;
+}
+
+/** 新建脚本的默认运行时：Windows 用 node（sh 通常没有），其它平台用 sh。 */
+function defaultScriptRuntime() {
+  return state.os === "windows" ? "node" : "sh";
+}
+
 let newScriptRuntime = "sh";
 let drawerScriptRuntime = "node";
 
@@ -2362,7 +2382,7 @@ async function openScriptSource(name) {
     const d = await api("/api/scripts/" + encodeURIComponent(name));
     drawerScriptRuntime = d.runtime || "node";
     // script-bar 上的运行时下拉：预设 + 当前值（自定义命令原样展示，可改回预设）
-    const opts = SCRIPT_RUNTIMES.filter((r) => r.value !== "@custom" && r.value !== "bin");
+    const opts = scriptRuntimes().filter((r) => r.value !== "@custom" && r.value !== "bin");
     if (!opts.some((o) => o.value === drawerScriptRuntime)) {
       opts.unshift({ value: drawerScriptRuntime, label: "自定义: " + drawerScriptRuntime });
     }
@@ -2475,14 +2495,14 @@ function openNewScript() {
   $("new-script").classList.remove("hidden");
   $("new-script-hint").classList.add("hidden");
   $("new-script-name").value = "";
-  newScriptRuntime = "sh";
+  newScriptRuntime = defaultScriptRuntime();
   newScriptTouched = false;
   $("new-script-custom").classList.add("hidden");
   $("new-script-custom").value = "";
   $("new-script-task-title").value = "";
   $("new-script-cron").value = "";
   newScriptDropdownPicker = (rt) => {
-    makeDropdown($("new-script-runtime-box"), SCRIPT_RUNTIMES, rt, (v) => {
+    makeDropdown($("new-script-runtime-box"), scriptRuntimes(), rt, (v) => {
       newScriptRuntime = v;
       newScriptTouched = true;
       $("new-script-custom").classList.toggle("hidden", v !== "@custom");
@@ -4333,10 +4353,19 @@ function renderSettings() {
     ["任务", state.tasks.length + " 个"],
   ]));
   info.append(el("p", "settings-note", "主题在右上角切换，记在本机浏览器；这一页的其它内容都来自引擎实时状态。"));
-  // 自启动：只给命令，不给按钮。装自启动要动 launchd / systemd，属于
+  // 自启动：只给命令，不给按钮。装自启动要动 launchd / systemd / 计划任务，属于
   // 「出了事得能自己修」的操作，留在命令行里才有原始输出可看。
+  const win = state.os === "windows";
   info.append(el("h3", "settings-sub", "开机自启动"));
-  info.append(el("p", "settings-note", "由命令行安装（macOS 用 launchd，Linux 用 systemd --user）："));
+  info.append(
+    el(
+      "p",
+      "settings-note",
+      win
+        ? "由命令行安装（Windows 用计划任务：登录时启动；`service print` 会打印出要跑的 schtasks 命令）："
+        : "由命令行安装（macOS 用 launchd，Linux 用 systemd --user）：",
+    ),
+  );
   info.append(
     el(
       "pre",
@@ -4751,6 +4780,8 @@ async function refresh() {
     state.tasks = data.tasks || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
+    // 平台：脚本运行时的默认值、自启动的做法、路径示例都要跟着它变。
+    state.os = data.os || '';
     // 进程内告警（磁盘满 / 日志写不进库）：每次刷新都重画，数据没了条就自己消失。
     renderAlerts(data.alerts || []);
     state.auth = !!data.auth;

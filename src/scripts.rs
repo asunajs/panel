@@ -183,7 +183,8 @@ fn env_or(key: &str, default: &str) -> String {
 pub fn resolve_runtime(rt: &str, path: &Path) -> Result<(String, Vec<String>), String> {
     let file = path.to_string_lossy().into_owned();
     match rt.trim() {
-        "sh" => Ok((env_or("PANEL_RUNTIME_SH", "/bin/sh"), vec![file])),
+        // Windows 上没有 /bin/sh（见 platform::default_sh 的注释）
+        "sh" => Ok((env_or("PANEL_RUNTIME_SH", crate::platform::default_sh()), vec![file])),
         "node" => {
             let ts = matches!(
                 path.extension().and_then(|e| e.to_str()),
@@ -197,8 +198,9 @@ pub fn resolve_runtime(rt: &str, path: &Path) -> Result<(String, Vec<String>), S
             Ok((env_or("PANEL_RUNTIME_NODE", "node"), args))
         }
         "bun" => Ok((env_or("PANEL_RUNTIME_BUN", "bun"), vec![file])),
+        // Windows 上没有 python3，默认是 python（见 platform::default_python）
         "python3" | "python" => Ok((
-            env_or("PANEL_RUNTIME_PYTHON", "python3"),
+            env_or("PANEL_RUNTIME_PYTHON", crate::platform::default_python()),
             vec!["-u".into(), file],
         )),
         "bin" | "binary" => Ok((file, vec![])),

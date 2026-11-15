@@ -35,6 +35,7 @@ pub fn plugin_group(name: &str) -> String {
 mod retention;
 mod runs;
 mod panelversion;
+mod platform;
 mod plugin_cli;
 mod scripts;
 mod sync_bridge;
