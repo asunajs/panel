@@ -508,3 +508,18 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 带口令的会停在 `#gate`，脚本会直接说清楚）。带视图：`--tab=logs`。
 
 坑与来历见 [pitfalls.md](pitfalls.md) §98。
+
+## 0.5.0 发版（2026-11-15，第 212 轮）
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.5.0`（Cargo.toml；`strings panel` 里能对上，日常实例 22:59:42 部署的就是它） |
+| 门禁 | cargo test **475**；ui-check **169**；check-docs 26 篇；坑 21 条；插件边界 10 条；unsafe 例外 **1**（期望 1） |
+| clippy --all-targets | **13 条警告**（review 时 54；剩下的都在 notify 会话未收尾的 cron/plan 那片） |
+| CI | Windows job 绿（`43727373254`）；Release job 绿（`43727378816`） |
+| 产物 | `panel-aarch64-linux-musl` / `panel-x86_64-linux-musl` / `panel-x86_64-pc-windows-msvc.exe` / `SHA256SUMS` |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.5.0>，说明用 `CHANGELOG.md` 的 0.5.0 段（不是 `--generate-notes` 的自动列表） |
+| 更新检查回归 | 新实例 `/api/update/check?force=1` → `{current:0.5.0, latest:v0.5.0, has_update:false, show:false}` —— 也就是「当前版本就是最新就不提示」这条路真的通了 |
+
+坑一条：`~/panel-3030/panel --version` 不是有效参数，它会**当前台起一个 8787 的服务**（实测挂了 60 秒
+才被后台化）。查部署版本用 `strings <binary> | grep 版本号`，别拿 `--version` 试。
