@@ -48,6 +48,8 @@ const state = {
   logLevel: '',
   // 日志来源过滤：panel / plugin / script / http（空 = 全部）
   logSource: '',
+  // 磁盘快照（/api/state 的 disk）：{ total, avail, data_bytes, data_files, partial }
+  disk: {},
   logQuery: '',
   q: { plugins: '', tasks: '', runs: '', scripts: '' },
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
@@ -510,11 +512,27 @@ function renderCards() {
       ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
       : '各 runtime 合计';
   const heartbeat = s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1);
+  // 磁盘（第 200 轮）：盘满是**静默**故障 —— 日志写不进库、备份失败、插件装不上，
+  // 而界面以前一点都看不出来。这里只说两件事：这块盘还剩多少、面板自己占了多少。
+  const dk = state.disk || {};
+  const diskValue = typeof dk.avail === 'number' ? humanBytes(dk.avail) : '❓ 量不到';
+  const diskNote = (() => {
+    if (typeof dk.avail !== 'number' || typeof dk.total !== 'number') {
+      return '这个平台没有实现（不编数字）';
+    }
+    const pct = dk.total ? Math.round(((dk.total - dk.avail) / dk.total) * 100) : 0;
+    const used = '共 ' + humanBytes(dk.total) + ' · 已用 ' + pct + '%';
+    const mine = typeof dk.data_bytes === 'number'
+      ? '面板占 ' + humanBytes(dk.data_bytes) + (dk.partial ? '（至少，文件太多没数完）' : '')
+      : '';
+    const low = dk.avail < 500 * 1024 * 1024 ? '⚠ 快满了 · ' : '';
+    return low + (mine ? mine + ' · ' + used : used);
+  })();
   // 只有「卡片数量」变了才重建；数字（运行时长/圈数/心跳/库大小）每轮都在变，
   // 走 setCard 原地改 —— 每 5s 重造 12 张卡是这页「DOM 节点只涨不跌」的主犯。
   const built =
     engine.querySelectorAll('.card').length === 4 &&
-    taskBox.querySelectorAll('.card').length === 4 &&
+    taskBox.querySelectorAll('.card').length === 5 &&
     sameAsLast('cards', [state.plugins.length, state.tasks.length, s.js_memory_bytes === null]);
   if (built) {
     setCard(engine, '运行时长', humanMs(s.uptime_ms), '自进程启动');
@@ -525,6 +543,7 @@ function renderCards() {
     setCard(taskBox, '任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常');
     setCard(taskBox, '单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖');
     setCard(taskBox, '预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数');
+    setCard(taskBox, '磁盘余量', diskValue, diskNote);
   } else {
     clear(engine);
     clear(taskBox);
@@ -539,6 +558,7 @@ function renderCards() {
       card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
       card('单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖'),
       card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
+      card('磁盘余量', diskValue, diskNote),
     );
   }
   renderHealthCards();
@@ -4830,6 +4850,8 @@ async function refresh() {
     state.version = data.version || '';
     // 平台：脚本运行时的默认值、自启动的做法、路径示例都要跟着它变。
     state.os = data.os || '';
+    // 磁盘余量 + 面板占用（服务端 30 秒缓存好的快照）
+    state.disk = data.disk || {};
     // 进程内告警（磁盘满 / 日志写不进库）：每次刷新都重画，数据没了条就自己消失。
     renderAlerts(data.alerts || []);
     state.auth = !!data.auth;

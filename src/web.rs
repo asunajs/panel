@@ -1463,6 +1463,63 @@ fn human_size(n: u64) -> String {
     }
 }
 
+
+// ---------------------------------------------------------------- 磁盘（第 200 轮）
+
+/// 磁盘读数缓存。遍历 `data/` 要 stat 几万个文件，而界面每 5 秒拉一次 `/api/state` ——
+/// 每请求都全量遍历会把磁盘 IO 顶满（那正好是盘快满时最不该发生的事）。30 秒一次足够。
+fn disk_cell() -> &'static std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>> {
+    static CELL: std::sync::OnceLock<
+        std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 低于这个余量就报警：SQLite 写日志、备份、装插件都还要空间。
+const DISK_LOW_BYTES: u64 = 500 * 1024 * 1024;
+
+fn disk_snapshot(data_dir: &std::path::Path) -> serde_json::Value {
+    let cell = disk_cell();
+    {
+        let g = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = g.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(30) {
+                return v.clone();
+            }
+        }
+    }
+    // 测量在锁外做：遍历可能要几百毫秒，别把并发请求堵在锁上。
+    let fs = crate::disk::usage(data_dir);
+    let dir = crate::disk::dir_size(data_dir, 200_000);
+    if let Some(f) = fs {
+        if f.avail < DISK_LOW_BYTES {
+            // 同一条消息连续推只会累加次数（alerts 自己合并），不会刷屏。
+            crate::alerts::global().push(
+                "error",
+                "disk",
+                format!(
+                    "磁盘余量只剩 {}（{}）：日志、备份、装插件都可能写不进去",
+                    crate::disk::human(f.avail),
+                    data_dir.display()
+                ),
+            );
+        }
+    }
+    let v = json!({
+        // 拿不到就是 null，不是 0 —— 0 会被界面读成"盘空了"
+        "total": fs.map(|f| f.total),
+        "avail": fs.map(|f| f.avail),
+        "data_bytes": dir.bytes,
+        "data_files": dir.files,
+        // 遍历撞了上限：bytes 是下界，界面要标"至少"
+        "partial": dir.partial,
+        "path": data_dir.display().to_string(),
+    });
+    let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
+    *g = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
 async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 插件清单（第 172 轮）：标题/图标/顺序来自 plugins/<name>.panel.json。
     // 没有清单就维持原样（界面回退到文件名 + 字典序），不 pretend。
@@ -1511,6 +1568,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         // 平台名（windows / macos / linux）：界面据此换文案与脚本运行时的默认值。
         // 不放进 env vars 让用户猜 —— 界面自己该知道自己在哪。
         "os": crate::platform::os_name(),
+        // 磁盘余量 + 面板自己占多少（30 秒缓存）。盘满是静默故障，界面上必须看得见。
+        "disk": disk_snapshot(&st.data_dir),
         "auth": st.auth().is_some(),
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。

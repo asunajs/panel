@@ -3672,6 +3672,7 @@ dependencies = [
  "llrt_core",
  "llrt_timers",
  "native-tls",
+ "nix",
  "openssl-sys",
  "oxc_allocator",
  "oxc_codegen",
@@ -3696,6 +3697,7 @@ dependencies = [
  "tower",
  "tower-http",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "zip",
 ]

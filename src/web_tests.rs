@@ -3991,3 +3991,27 @@ async fn logs_can_be_filtered_by_source() {
     let e = bad["error"].as_str().unwrap_or_default();
     assert!(e.contains("httpp") && e.contains("http"), "错误要能照着改：{e}");
 }
+
+/// `/api/state` 要带磁盘读数（第 200 轮）：盘满是静默故障，界面得有地方看。
+///
+/// 这里只钉「结构对 + 不编数字」：`total/avail` 要么是正数、要么是 null，
+/// 绝不允许是 0（0 会被界面读成「盘空了」）。
+#[tokio::test]
+async fn state_reports_disk_usage_honestly() {
+    let (app, _db) = setup().await;
+    let (status, v) = get(&app, "/api/state").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let disk = v.get("disk").expect("state 里要有 disk");
+    assert!(disk.get("path").is_some(), "{disk}");
+    assert!(disk.get("data_bytes").is_some(), "{disk}");
+    assert!(disk.get("data_files").is_some(), "{disk}");
+    assert!(disk.get("partial").is_some(), "{disk}");
+    match disk["total"].as_u64() {
+        Some(total) => {
+            assert!(total > 0, "总量不可能是 0：{disk}");
+            let avail = disk["avail"].as_u64().unwrap_or(0);
+            assert!(avail > 0 && avail <= total, "{disk}");
+        }
+        None => assert!(disk["total"].is_null(), "量不到就该是 null，不是别的：{disk}"),
+    }
+}

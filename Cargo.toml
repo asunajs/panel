@@ -118,6 +118,18 @@ reqwest = { version = "0.12", default-features = false, features = ["native-tls"
 #   —— rustls 不实现任何 CBC 套件，只有 CBC 的主机（见 outbound.rs 的 fetch_native_json）
 #   在 rustls 那条路上永远握手失败。代价是 Linux 静态产物多 ~6MB OpenSSL，
 #   这是功能的价钱，不是浪费。macOS 那边 native-tls = Security.framework，所以小一截。
+# 磁盘余量（第 200 轮）：面板得能说清「这块盘还剩多少」——盘满会让日志写不进去、
+# 备份失败、插件装不上，而界面上完全看不出来（这次开发机盘满最先崩的是 cargo 链接）。
+# 两个 crate 都已在 Cargo.lock 里（LLRT 间接依赖），加为直接依赖不新增下载。
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl-sys = "0.9"
 

@@ -11,6 +11,7 @@ mod config;
 mod config_store;
 mod cron;
 mod db;
+mod disk;
 mod engine;
 mod fsx;
 mod hostapi;

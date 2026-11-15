@@ -43,14 +43,8 @@ ARM64 的 Windows 走 x64 产物（系统自带 x64 模拟）。
 自启动用**计划任务**（登录时触发）：`panel service print` 会打印要跑的那条 `schtasks` 命令，
 `panel service install` 直接建。
 
-坦白的边界：Windows 产物在 GitHub 的 `windows-latest` 上编译、跑单测、起服务打 `/readyz`
-都通过；但**桌面上的细节还没在真机验收**（中文/含空格路径、文件被占用时恢复备份、
-计划任务真的注册、控制台编码、SmartScreen）。状态、差异与验收表见
-[docs/windows.md](docs/windows.md)。**0.4.0 暂时没有 32 位 ARM（armv7）产物**：
-引擎依赖的 `rquickjs-sys` 没给 `armv7-unknown-linux-musleabihf` 预生成绑定，
-走 bindgen 那条路还要再通一层容器内的构建脚本问题；install.sh 在 armv7 上会明确
-告诉你「这个版本没有 32 位 ARM 产物」而不是含糊失败。要装在 32 位设备上，
-按下面的「从源码构建」本地编（或先用 0.3.x）。
+> ⚠ Windows 版是较新的产物：装与启动的流程都验证过，但桌面细节（SmartScreen 提示、
+> 含空格路径等）还没在真机过一遍。遇到问题看 [docs/windows.md](docs/windows.md)。
 
 ### 2. 运行
 
@@ -79,9 +73,26 @@ http://127.0.0.1:8787
 > `PANEL_TOKEN=你的令牌 panel`。启动时派生成「盐 + 哈希」存进 `data/auth.json`，
 > 明文不落盘、也会立刻从进程环境里删掉。这条是「跳过引导」的旁路，不是必经之路。
 
-> 从**别的设备**访问：用 `PANEL_BIND=0.0.0.0:8787` 启动，
-> 然后用 `http://那台机器的局域网IP:8787` 打开。公网访问请走 HTTPS 反向代理，
-> 见下面的[安全提醒](#安全提醒)。
+**想让手机 / 局域网里别的设备打开面板**，三步：
+
+1. 让面板监听局域网（默认只听本机 127.0.0.1）：
+
+   - Linux / macOS：启动命令前面加上环境变量 —— `PANEL_BIND=0.0.0.0:8787 panel`
+   - Windows（计划任务自启的）：编辑 `%LOCALAPPDATA%\panel\panel-start.cmd`，
+     在启动那行**前面**加一行 `set PANEL_BIND=0.0.0.0:8787`，重启电脑生效；
+   - 改完要重启面板才生效。
+
+2. 第一次这样启动时，系统防火墙会弹「是否允许访问网络」—— 点允许。
+
+3. 查这台机器的局域网 IP，手机浏览器打开 `http://那个IP:8787`：
+
+   - macOS：终端 `ipconfig getifaddr en0`
+   - Windows：`ipconfig` 看 IPv4 地址
+   - Linux：`hostname -I`
+
+   别的设备打开的是同一个面板，用**同一个口令**解锁。
+
+> 公网访问（不在局域网里）请走 HTTPS 反向代理，见下面的[安全提醒](#安全提醒)。
 
 <details>
 <summary>macOS / 从源码构建</summary>
