@@ -1545,6 +1545,8 @@ async fn plugin_reinstall(
             if let Ok(mut g) = st.load_errors.lock() {
                 g.remove(&name);
             }
+            // 重装 = 热加载一次（对没加载过的插件就是「首次加载」）：记指纹
+            crate::manifest::note_loaded(&name, &st.plugins_dir.join(&name));
             Ok(Json(json!({ "ok": true, "name": name, "adopted": true })))
         }
         Err(e) => Err(bad(format!("重装失败: {e}"))),
@@ -1571,6 +1573,8 @@ async fn plugin_reload(
             if let Ok(mut g) = st.load_errors.lock() {
                 g.remove(&name);
             }
+            // 重装也是一次加载：记指纹，下次扫描不再报「改过/新增」
+            crate::manifest::note_loaded(&name, &st.plugins_dir.join(&name));
             Ok(Json(json!({ "ok": true, "name": name })))
         }
         Err(e) => {
@@ -3369,6 +3373,8 @@ async fn plugin_create(
     // 新建 = 安装：这次注册的 cron 建议直接采纳（复制成生效计划，第 180 轮）
     match st.sched.load_adopt(&body.name, source.clone(), true).await {
         Ok(()) => {
+            // 新建也是加载：记指纹（不然下次扫描一直把这条报成「新增」）
+            crate::manifest::note_loaded(&body.name, &path);
             st.log.emit(
                 "panel",
                 None,

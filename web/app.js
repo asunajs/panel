@@ -765,7 +765,10 @@ async function scanPlugins() {
     p.append(el('strong', '', label + ' ' + arr.length + ' 个：'), names(arr));
     box.append(p);
   };
-  line('新增', d.new);
+  // 新增里只有「还没加载」的才需要动作；已经加载的（loaded:true）只是没记指纹的历史遗留
+  const newToLoad = (d.new || []).filter((x) => !x.loaded);
+  line('新增（未加载）', newToLoad);
+  line('新增（已在运行，无需动作）', (d.new || []).filter((x) => x.loaded));
   line('改过', d.changed);
   line('目录里没了（还记着）', d.removed);
   const bad = d.manifests || [];
@@ -778,6 +781,25 @@ async function scanPlugins() {
     return;
   }
   const bar = el('div', 'actions');
+  // 新增（未加载）→ 热加载：/reinstall 对没加载过的插件就是「从文件首次加载」
+  if (newToLoad.length) {
+    const loadBtn = el('button', 'btn btn-sm btn-primary', '加载新增的 ' + newToLoad.length + ' 个插件');
+    loadBtn.type = 'button';
+    loadBtn.addEventListener('click', async () => {
+      let okN = 0;
+      for (const x of newToLoad) {
+        try {
+          await api('/api/plugins/' + encodeURIComponent(x.name) + '/reinstall', { method: 'POST' });
+          okN += 1;
+        } catch (e) {
+          notify(x.name + ' 加载失败：' + (e.message || ''), 'err');
+        }
+      }
+      if (okN) notify('已热加载 ' + okN + ' 个插件（不用重启）', 'ok');
+      scanPlugins();
+    });
+    bar.append(loadBtn);
+  }
   const reload = el('button', 'btn btn-sm', '重载改过的插件');
   reload.type = 'button';
   reload.addEventListener('click', async () => {
@@ -795,7 +817,7 @@ async function scanPlugins() {
   bar.append(reload);
   box.append(bar);
   box.append(el('p', 'settings-note',
-    '新增的插件要「上传」或放进目录后重启面板才会加载；这里不会替你加载。'));
+    '加载 / 重载都是热操作（不用重启面板）；改完源码在这里点一下就能生效。'));
 }
 
 function renderPlugins() {
@@ -806,7 +828,10 @@ function renderPlugins() {
   const rows = state.plugins.filter((p) => matches(p.name, q) || matches(p.title || '', q));
   $('plugins-count').textContent = state.plugins.length;
   clear(grid);
-  if (!state.plugins.length) {
+  // 空态判定不能只看已加载列表：停用的插件（files 里有、没加载）也要能显示出来，
+  // 否则「全部停用」之后页面只剩一句「还没有加载任何插件」，启用入口就没了
+  //（2026-11-15 用户实测：停用后卡片整个消失）。
+  if (!state.plugins.length && !(state.files || []).length) {
     emptyState(grid, '还没有加载任何插件', '把 .js 放进 plugins/ 目录后刷新页面');
     return;
   }
@@ -868,23 +893,34 @@ function renderPlugins() {
   for (const p of rows) {
     const mine = state.tasks.filter((t) => t.plugin === p.name);
     const lastRun = mine.reduce((m, t) => Math.max(m, t.last_run || 0), 0);
-    const cardEl = el('article', 'plugin-card');
+    const cardOff = (state.disabled || []).includes(p.name);
+    const cardEl = el('article', 'plugin-card' + (cardOff ? ' plugin-card-off' : ''));
     cardEl.tabIndex = 0;
     const head = el('div', 'plugin-head');
     head.append(el('div', 'plugin-name', p.title || p.name));
     if (p.title && p.title !== p.name) head.append(el('div', 'plugin-file', p.name));
-    // 按需加载的插件没装进内存，说「空闲」会让人以为它随时能跑 —— 干脆不挂这个 pill
-    if (!p.lazy) head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
-    // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
-    if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
-    // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
-    if (p.lazy) {
-      const pl = pill('pill', '按需加载');
-      pl.title = '启动时没有加载它（没有界面、任务都还没到点）。到点前 2 分钟会自动装回来，也可以点「加载」。';
+    // 停用（用户明确关掉的）：最高优先级的状态 —— 它盖住下面的按需加载/空闲，
+    // 不然停用后的插件还挂着「按需加载」，用户不知道它为什么一直 0 任务不运行
+    //（2026-11-15 用户截图报障：停用了中国移动/夸克，卡片只显示「按需加载 + 0 个任务」）。
+    const off = (state.disabled || []).includes(p.name);
+    if (off) {
+      const pl = pill('pill-warn', '已停用');
+      pl.title = '已停用：不加载（重启也不加载），任务全部不跑。源码和数据都在，点「启用」恢复。';
       head.append(pl);
-    } else if (p.unloaded) {
-      // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
-      head.append(pill('pill', '空闲已卸载'));
+    } else {
+      // 按需加载的插件没装进内存，说「空闲」会让人以为它随时能跑 —— 干脆不挂这个 pill
+      if (!p.lazy) head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
+      // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
+      if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
+      // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
+      if (p.lazy) {
+        const pl = pill('pill', '按需加载');
+        pl.title = '启动时没有加载它（没有界面、任务都还没到点）。到点前 2 分钟会自动装回来，也可以点「加载」。';
+        head.append(pl);
+      } else if (p.unloaded) {
+        // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
+        head.append(pill('pill', '空闲已卸载'));
+      }
     }
     cardEl.append(head);
     const meta = el('div', 'plugin-meta');
@@ -912,6 +948,8 @@ function renderPlugins() {
     // 反而看不出这个插件是干嘛的（第 92 轮用户的意见）。危险操作也不该就摆在明面上。
     const hasWebui = state.files.some((f) => f.name === p.name && f.webui);
     if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
+    // 停用的插件：卡片上直接给「启用」（详情抽屉里也有一份，但两步太深）
+    if (cardOff) acts.append(mk('启用', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/enable', '已启用 ' + p.name)));
     acts.append(mk('详情', () => showPlugin(p.name)));
     cardEl.append(acts);
     cardEl.addEventListener('click', () => showPlugin(p.name));
