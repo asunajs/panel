@@ -213,8 +213,24 @@ else
 fi
 
 echo ''
+# ⑳ cfg(windows) 里的 unsafe 必须有就地 allow（第 211 轮）
+#
+# 事故：Cargo.toml 的 lints 是 `unsafe_code = "deny"`，而 disk.rs 的 Windows 分支用了
+# `unsafe { GetDiskFreeSpaceExW(...) }` —— 这段在 macOS 上根本不编译，本地全绿、单测全过，
+# 但 CI 的 Windows 任务从那次提交起每次都红，每红一次就给作者发一封失败邮件。
+# 本地没法给 Windows 标准库做 cargo check（缺 rust-std），所以用静态守卫兜住这一类。
+for f in src/*.rs; do
+  if grep -q 'cfg(windows)' "$f" && grep -q 'unsafe' "$f"; then
+    if grep -q 'allow(unsafe_code)' "$f"; then
+      ok "cfg(windows) 里的 unsafe 有就地 allow（$(basename "$f")）"
+    else
+      bad "$(basename "$f")：cfg(windows) 分支里有 unsafe 却缺 #[allow(unsafe_code)]（Windows CI 会红）"
+    fi
+  fi
+done
+
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 20 条坑的守卫全过"
+  echo "ok: 21 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

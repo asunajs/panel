@@ -807,3 +807,13 @@
      `history/node-only` 分支的 `src/scriptjob.rs`，这次的直接底本。
 
      守卫：`scripts.rs` 里不许再出现 `crate::engine` / `jsslots`（进了引擎就回去了）。
+
+63. **只在 Windows 编译的分支，本地全绿也可能是红的**：`Cargo.toml` 的 lints 是
+    `unsafe_code = "deny"`，而 `src/disk.rs` 的 Windows 分支为了调 `GetDiskFreeSpaceExW`
+    写了 `unsafe`。这段在 macOS 上被 `cfg(windows)` 排除，编译不过这件事**本地一点提示都没有**：
+    `cargo test` 475 绿、ui-check 全绿、部署也正常，但 CI 的 Windows 任务从引入它的那次提交起
+    每次都红 —— 而且每红一次就给作者发一封失败邮件（用户：「每次提交都给我发 ci 错误的邮件」）。
+    处理：`#[allow(unsafe_code)]` **就地放行**（只这一处，理由写在 SAFETY 注释里）；
+    再加一条静态守卫（`check-pitfalls.sh` 第 21 条）扫 `cfg(windows)` + `unsafe` + 没有 allow 的文件。
+    教训：本地没有那个 target 的 `rust-std` 时，`cargo check --target` 是**假绿**（先报
+    「can't find crate for core」），别把它当成验证。

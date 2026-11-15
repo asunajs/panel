@@ -117,6 +117,15 @@ mod imp {
 
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
+    /// `unsafe` 只在这一处、只为了调一个 Win32 函数。
+    ///
+    /// 仓里的 lint 是 `unsafe_code = "deny"`（这是对的：面板跑插件 JS，能不用 unsafe 就别用）。
+    /// 但「这个磁盘还剩多少」在 Windows 上没有安全封装 —— `GetDiskFreeSpaceExW` 只能 unsafe 调。
+    /// 所以这里**就地点放行**，理由写在 SAFETY 注释里，别扩散到别处。
+    ///
+    /// 教训（第 211 轮）：这段是 cfg(windows) 分支，macOS 上根本不编译，我本地全绿，
+    /// CI 从「磁盘余量卡」那次提交起每次都红 —— 每红一次就给作者发一封邮件。
+    #[allow(unsafe_code)]
     pub fn usage(path: &Path) -> Option<Fs> {
         // 传目录本身就行：这个 API 报的是"该路径所在的卷"。
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
