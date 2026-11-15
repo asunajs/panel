@@ -494,6 +494,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/health", get(api_health))
         .route("/api/config", get(api_config).put(api_config_save))
+        // 检查更新（第 210 轮）：只查 + 下载 + 记「不再提示」，替换二进制那一步由人来
+        .route("/api/update/check", get(api_update_check))
+        .route("/api/update/skip", post(api_update_skip))
+        .route("/api/update/download", post(api_update_download))
         .route("/api/config/reload", post(api_config_reload))
         .route("/api/plugins/files", get(plugin_files))
         // 清单与扫描（第 172 轮）
@@ -3154,6 +3158,118 @@ async fn write_atomic(
 ///
 /// 为什么需要它：`/api/state` 里的插件是**已加载**的，语法错/启动失败的文件不在里面，
 /// 但用户恰恰要去界面里修那些文件。
+// ---------------------------------------------------------------- 检查更新（第 210 轮）
+
+/// `GET /api/update/check?force=1` —— 查最新 release，并把「该不该提示」算好。
+///
+/// 默认走 6 小时缓存：界面每 5 秒刷一次，谁也不想因为一个提示功能把 GitHub 的匿名限流
+/// （60 次/小时）打穿。`force=1` 是用户手点「检查更新」。
+async fn api_update_check(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let force = q.get("force").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let cfg = crate::config::load(&st.data_dir).unwrap_or_else(|_| json!({}));
+    match crate::update::check(force).await {
+        Ok(v) => Ok(Json(crate::update::verdict(&v, &cfg))),
+        // 查不到不是错误：断网/被墙/限流都只是「这次不知道」。回 200 + error 文案，
+        // 界面显示一句「查不到最新版本」就够了 —— 别让它变成一个红条。
+        Err(e) => Ok(Json(json!({
+            "current": crate::panelversion::current(),
+            "has_update": false,
+            "show": false,
+            "error": e,
+        }))),
+    }
+}
+
+/// `POST /api/update/skip {"version": "0.4.4"}` —— 记下「这个版本别再提示我」。
+///
+/// 传空版本号 = 清掉记录（以后照常提示）。写进 config.json 而不是单独的库：
+/// 它就是一条配置，跟着备份/迁移走才合理。
+async fn api_update_skip(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(body): JsonBody<SkipBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let mut value = crate::config::load(&st.data_dir).unwrap_or_else(|_| json!({}));
+    if !value.is_object() {
+        value = json!({});
+    }
+    let v = body.version.trim().to_string();
+    let obj = value.as_object_mut().expect("刚保证过是对象");
+    let upd = obj.entry("update".to_string()).or_insert_with(|| json!({}));
+    if !upd.is_object() {
+        *upd = json!({});
+    }
+    let upd = upd.as_object_mut().expect("刚保证过是对象");
+    if v.is_empty() {
+        upd.remove("skip_version");
+    } else {
+        upd.insert("skip_version".into(), json!(v));
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|e| internal(e.to_string()))?;
+    let path = st.data_dir.join(crate::config::FILE);
+    write_atomic(&path, text.as_bytes(), Some(0o600))
+        .await
+        .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
+    st.config.set(&value);
+    crate::config::refresh_server(&value);
+    Ok(Json(json!({
+        "ok": true,
+        "skip_version": if v.is_empty() { Value::Null } else { json!(v) }
+    })))
+}
+
+/// `POST /api/update/download {"name","url","sums"}` —— 下载到 `data/updates/`
+/// 并校验 sha256（有 SHA256SUMS 时）。**不替换运行中的二进制**，返回路径和一句命令。
+async fn api_update_download(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(body): JsonBody<DownloadBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let got = crate::update::download(&st.data_dir, &body.name, &body.url, body.sums.as_deref())
+        .await
+        .map_err(bad)?;
+    let path = got.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+    let verified = got.get("verified").and_then(Value::as_bool).unwrap_or(false);
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "新版本已下载到 {path}（{} 字节，sha256 校验{}）",
+            got.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+            if verified { "通过" } else { "未提供" },
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "path": path,
+        "bytes": got.get("bytes").cloned().unwrap_or(Value::Null),
+        "sha256": got.get("sha256").cloned().unwrap_or(Value::Null),
+        "verified": verified,
+        // 最后一步交给人：正在跑的服务不该自己覆盖自己的二进制（见 src/update.rs 文件头）
+        "hint": format!("chmod +x {path} && mv {path} <面板目录>/panel && 重启面板服务"),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct SkipBody {
+    #[serde(default)]
+    version: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DownloadBody {
+    name: String,
+    url: String,
+    #[serde(default)]
+    sums: Option<String>,
+}
+
 async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 目录不在 = 还没装过插件（或者这个实例的 PANEL_PLUGINS_DIR 指向了已删的路径）。
     // 这**不是**客户端请求的问题：以前回 400 bad_request，界面每几秒轮询一次就刷一屏

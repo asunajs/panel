@@ -951,6 +951,56 @@ async function main() {
     "await new Promise(r=>setTimeout(r,900));return 1;})()");
   await sleep(300);
 
+  // 检查更新（第 210 轮）：顶栏 pill 只在**有新版且没被「不再提示」**时出现，
+  // 设置页有「当前版本 + 检查更新 + 最新版本」。
+  const upd = JSON.parse(await js(
+    "JSON.stringify((()=>{const pill=document.getElementById('update-pill');" +
+    "const cur=document.getElementById('update-current');" +
+    "const chk=document.getElementById('update-check');" +
+    "return {hasPill:!!pill,pillHidden:pill?pill.classList.contains('hidden'):null," +
+    "current:cur?cur.textContent:'',hasCheck:!!chk," +
+    "stateUpdate:(window.state&&window.state.update)||null};})())"
+  ));
+  check('设置页有「当前版本 + 检查更新」入口',
+    upd.hasCheck === true && /^\d/.test(upd.current || ''), JSON.stringify(upd));
+  check('没有新版时顶栏不冒泡（当前版本就是最新就不提示）',
+    upd.hasPill === true && upd.pillHidden === true, JSON.stringify(upd));
+  // 手点「检查更新」：离线也必须有结论（查不到就说明查不到，不是转圈）
+  await js("document.getElementById('update-check').click()");
+  await sleep(1500);
+  const updAfter = JSON.parse(await js(
+    "JSON.stringify((()=>{const st=document.getElementById('update-status');" +
+    "const pill=document.getElementById('update-pill');" +
+    "return {status:st?st.textContent:'',pillHidden:pill?pill.classList.contains('hidden'):null," +
+    "update:(window.state&&window.state.update)||null};})())"
+  ));
+  check('点「检查更新」会给出结论（最新 / 有新版 / 查不到）',
+    /已是最新|有新版|查不到/.test(updAfter.status || ''), JSON.stringify(updAfter));
+  // 模拟「有新版」：直接把 state.update 换成有更新的样子，验证 pill 与「不再提示」
+  const updShow = JSON.parse(await js(
+    "JSON.stringify((()=>{state.update={current:'0.0.1',latest:'9.9.9',has_update:true,show:true,skipped:false," +
+    "url:'https://example.com'};renderUpdate();" +
+    "const pill=document.getElementById('update-pill');" +
+    "return {hidden:pill.classList.contains('hidden'),label:pill.textContent.trim()," +
+    "hasSkip:!!document.querySelector('#update-box button')};})())"
+  ));
+  check('有新版时顶栏出现提示（带版本号）',
+    updShow.hidden === false && /9\.9\.9/.test(updShow.label), JSON.stringify(updShow));
+  check('有新版时设置页给「下载 / 下载页 / 不再提示」三个动作', updShow.hasSkip === true, JSON.stringify(updShow));
+  const updSkip = JSON.parse(await js(
+    "(async()=>{state.update={current:'0.0.1',latest:'9.9.9',has_update:true,show:true,skipped:false};renderUpdate();" +
+    "await skipUpdate('9.9.9');" +
+    "const pill=document.getElementById('update-pill');" +
+    "const d=await fetch('/api/config',{credentials:'same-origin'}).then(r=>r.json());" +
+    "const cfg=JSON.parse(d.text||'{}');" +
+    "return JSON.stringify({hidden:pill.classList.contains('hidden'),skip:cfg.update&&cfg.update.skip_version});})()"
+  ));
+  check('点「不再提示」会记下版本并收起提示',
+    updSkip.hidden === true && updSkip.skip === '9.9.9', JSON.stringify(updSkip));
+  // 收尾：把这个假版本清掉，别让后面的断言看到「有新版」
+  await js("(async()=>{await skipUpdate('');state.update={};renderUpdate();return 1;})()");
+  await sleep(300);
+
   await js("document.querySelector('[data-tab=security]').click()");
   await sleep(700);
   const setupTight = await tightGaps('.setup-box');

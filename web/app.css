@@ -379,32 +379,27 @@ button, input, select { font: inherit; color: inherit; }
   .cfg-help { grid-column: 1; }
 }
 
-/* 面板设置表单（第 207 轮）：按功能分组，一行一个配置项。
-   为什么不做成纯 JSON 编辑器：用户要的是「绑定端口/地址、信任 XFF」这类**能填**的开关，
-   手写 JSON 还得记住键名和类型。JSON 编辑器保留在下面的「高级」里，给插件用的键留门。 */
-.cfg-group { margin: 0 0 18px; }
-.cfg-group:last-child { margin-bottom: 4px; }
-.cfg-group-head {
-  display: flex; align-items: baseline; gap: 8px;
-  margin: 0 0 8px; padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
+/* 高级 JSON 默认收起（第 209 轮，用户：「json 默认收起，这个一般不需要配置的」）。
+   直接写 JSON 的场景只剩「改插件用的键」，那就别占着页面高度：一行 summary，点开再编辑。 */
+.cfg-adv { margin-top: 14px; }
+.cfg-adv > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-radius: var(--r-control);
+  background: var(--surface); border: 1px solid var(--line);
+  color: var(--fg-2); font-size: 13px; cursor: pointer; list-style: none;
 }
-.cfg-group-title { font-size: 13.5px; font-weight: 600; color: var(--fg); }
-.cfg-group-note { font-size: 12px; color: var(--dim); }
-.cfg-row {
-  display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 6px 14px;
-  align-items: start; padding: 6px 0;
-}
-.cfg-row + .cfg-row { border-top: 1px dashed var(--line); }
-.cfg-label { font-size: 13px; color: var(--fg-2); padding-top: 6px; }
-.cfg-label .chip { margin-left: 6px; }
-.cfg-help { grid-column: 2; font-size: 12px; color: var(--dim); line-height: 1.5; margin-top: 2px; }
-.cfg-inline { display: flex; align-items: center; gap: 8px; }
-.cfg-unit { font-size: 12.5px; color: var(--dim); }
-.cfg-row .input { max-width: 380px; }
-@media (max-width: 720px) {
-  .cfg-row { grid-template-columns: 1fr; }
-  .cfg-help { grid-column: 1; }
+.cfg-adv > summary::-webkit-details-marker { display: none; }
+.cfg-adv > summary::before { content: '▸'; color: var(--dim); font-size: 11px; }
+.cfg-adv[open] > summary::before { content: '▾'; }
+.cfg-adv > summary:hover { background: var(--surface-2); color: var(--fg); }
+.cfg-adv > section.panel { margin-top: 10px; }
+
+/* 更新说明（第 210 轮）：release notes 可能很长，别把设置页撑爆 */
+.update-notes {
+  margin: 8px 0 0; padding: 10px 12px; max-height: 220px; overflow: auto;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
+  font-size: 12px; line-height: 1.6; color: var(--fg-2);
+  white-space: pre-wrap; word-break: break-word;
 }
 
 /* 多选下拉（第 206 轮）:只收/不收。前两版是「逗号文本框」和「标签 + 两排胶囊」,

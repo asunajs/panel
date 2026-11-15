@@ -43,6 +43,7 @@ mod sync_bridge;
 mod service;
 mod smtp;
 mod token_cli;
+mod update;
 mod ssrf;
 mod stats;
 mod upload;

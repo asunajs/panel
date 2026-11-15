@@ -54,6 +54,28 @@ pub fn at_least(v: &str) -> Result<bool, String> {
     Ok(now >= want)
 }
 
+/// 两个版本串是不是同一个版本（`v0.4.3` == `0.4.3`，`0.4` == `0.4.0`）。
+///
+/// 「不再提示」要拿它比：GitHub 的 tag 带 `v`、用户手填的不带，用字符串比会永远不等，
+/// 于是「点了几次不再提示还是弹」。
+pub fn same_version(a: &str, b: &str) -> bool {
+    match (parse(a), parse(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        // 有一边不是合法 semver 时退回字符串比较（至少行为可预测）
+        _ => a.trim().trim_start_matches('v') == b.trim().trim_start_matches('v'),
+    }
+}
+
+/// `candidate` 比当前版本新吗？（检查更新用，第 210 轮）
+///
+/// 和 `at_least` 一样：非法版本串是 **Err**，不是 false —— 「版本号写错」和「已是最新」
+/// 是两件事，静默当 false 会让用户以为没更新。
+pub fn is_newer(candidate: &str) -> Result<bool, String> {
+    let want = parse(candidate)?;
+    let now = parse(current())?;
+    Ok(want > now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

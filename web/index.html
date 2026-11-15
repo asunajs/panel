@@ -55,6 +55,10 @@
             </div>
           </div>
           <div class="topbar-right">
+            <!-- 有新版才出现（第 210 轮）：点开看说明、下载、或「不再提示」 -->
+            <button class="pill pill-accent hidden" id="update-pill" type="button" data-tip="有新版本">
+              <span class="label">有新版本</span>
+            </button>
             <span class="pill pill-ok" id="health-pill"><span class="dot"></span><span class="label">引擎健康</span></span>
             <button class="icon-btn bell" id="bell" type="button" aria-label="通知" aria-expanded="false" data-tip="通知">
               <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M13.7 19a2 2 0 0 1-3.4 0"/></svg>
@@ -279,6 +283,20 @@
               <section class="panel">
                 <header class="panel-head"><h2>面板信息</h2></header>
                 <div class="panel-body" id="settings-info"></div>
+              </section>
+              <section class="panel">
+                <header class="panel-head"><h2>版本与更新</h2></header>
+                <div class="panel-body">
+                  <div class="cfg-row">
+                    <span class="cfg-label">当前版本</span>
+                    <div class="cfg-inline">
+                      <code id="update-current">—</code>
+                      <button class="btn btn-sm" id="update-check" type="button">检查更新</button>
+                      <span class="cfg-unit" id="update-status"></span>
+                    </div>
+                  </div>
+                  <div id="update-box"></div>
+                </div>
               </section>
               <section class="panel">
                 <header class="panel-head"><h2>重启进程</h2></header>

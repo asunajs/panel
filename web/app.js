@@ -4807,6 +4807,142 @@ function migrateBox() {
   return box;
 }
 
+// ---------------------------------------------------------------- 检查更新（第 210 轮）
+//
+// 旧面板就有这个功能，用户要求照搬：**有更新时右上角提示**、可以**不再提示**、
+// 已经是最新就不出现。查的是 GitHub 的 latest release（后端 6 小时缓存），
+// 更新动作永远是手动点出来的。
+
+/// 查一次（`force` = 用户手点「检查更新」）。失败只记在 `state.update.error`，
+/// 不弹条也不打扰 —— 断网/被墙是常态，一个版本提示不值得红一片。
+async function checkUpdate(force) {
+  try {
+    const d = await api('/api/update/check' + (force ? '?force=1' : ''));
+    state.update = d || {};
+  } catch (e) {
+    state.update = { current: state.version, error: e.message || '查不到最新版本' };
+  }
+  renderUpdate();
+  return state.update;
+}
+
+/// 顶栏那个 pill + 设置页那块，都从这一处渲染。
+function renderUpdate() {
+  const u = state.update || {};
+  const pillBtn = $('update-pill');
+  if (pillBtn) {
+    // 「当前版本更新就不提示了」—— 后端把 skipped / has_update 都算好给前端
+    const show = !!u.show;
+    pillBtn.classList.toggle('hidden', !show);
+    if (show) {
+      pillBtn.querySelector('.label').textContent = '有新版本 ' + (u.latest || '');
+      pillBtn.dataset.tip = '当前 ' + (u.current || state.version) + ' → ' + u.latest;
+    }
+  }
+  const cur = $('update-current');
+  if (cur) cur.textContent = u.current || state.version || '—';
+  const st = $('update-status');
+  if (st) {
+    if (u.error) st.textContent = '查不到最新版本（' + u.error + '）';
+    else if (u.has_update) st.textContent = '有新版 ' + u.latest + '（当前 ' + (u.current || state.version) + '）' + (u.skipped ? ' · 已设为不再提示' : '');
+    else if (u.latest) st.textContent = '已是最新（' + u.latest + '）';
+    else st.textContent = '';
+  }
+  const box = $('update-box');
+  if (box) {
+    clear(box);
+    if (u.has_update && !u.skipped) {
+      const p = el('p', 'settings-note',
+        '新版 ' + u.latest + ' 已发布。面板不会自己替换运行中的二进制：先下载并校验，' +
+        '再按提示执行最后一步。');
+      const bar = el('div', 'cfg-inline');
+      const dl = el('button', 'btn btn-sm btn-primary', '下载到本机');
+      dl.type = 'button';
+      dl.addEventListener('click', () => downloadUpdate(dl));
+      const go = el('button', 'btn btn-sm', '打开下载页');
+      go.type = 'button';
+      if (u.url) go.addEventListener('click', () => window.open(u.url, '_blank', 'noopener'));
+      else go.disabled = true;
+      const skip = el('button', 'btn btn-sm', '不再提示这个版本');
+      skip.type = 'button';
+      skip.addEventListener('click', () => skipUpdate(u.latest));
+      bar.append(dl, go, skip);
+      box.append(p, bar);
+      if (u.notes) {
+        const pre = el('pre', 'update-notes', String(u.notes).slice(0, 4000));
+        box.append(pre);
+      }
+    }
+  }
+}
+
+/// 给当前平台挑一个能装的资产。挑不到就返回 null（macOS 走源码，不发二进制）。
+function updateAsset() {
+  const u = state.update || {};
+  const list = Array.isArray(u.assets) ? u.assets : [];
+  const pick = (test) => list.find((a) => test(String(a.name || '')));
+  const ua = navigator.userAgent;
+  const isWin = /Windows/i.test(ua);
+  const isMac = /Mac OS X|Macintosh/i.test(ua);
+  const isArm = /arm64|aarch64/i.test(ua);
+  if (isWin) return pick((n) => /windows/i.test(n));
+  if (isMac) return pick((n) => /macos|darwin/i.test(n));
+  return pick((n) => n.includes(isArm ? 'aarch64' : 'x86_64') && /linux/i.test(n));
+}
+
+async function downloadUpdate(btn) {
+  const a = updateAsset();
+  const u = state.update || {};
+  if (!a) {
+    toast('这个平台没有现成产物，按文档从源码更新');
+    if (u.url) window.open(u.url, '_blank', 'noopener');
+    return;
+  }
+  const sums = (u.assets || []).find((x) => /^SHA256SUMS/.test(String(x.name || '')));
+  btn.disabled = true;
+  try {
+    const d = await api('/api/update/download', {
+      method: 'POST',
+      body: { name: a.name, url: a.url, sums: sums ? sums.url : null },
+    });
+    notify('已下载到 ' + d.path + (d.verified ? '（sha256 校验通过）' : ''), 'ok');
+    const ta = document.createElement('textarea');
+    ta.className = 'input';
+    ta.readOnly = true;
+    ta.rows = 2;
+    ta.value = d.hint || '';
+    const box = $('update-box');
+    if (box) box.append(el('p', 'settings-note', '最后一步（在终端里执行）：'), ta);
+    ta.select();
+  } catch (e) {
+    notify(e.message || '下载失败', 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function skipUpdate(version) {
+  try {
+    await api('/api/update/skip', { method: 'POST', body: { version: version || '' } });
+    state.update = { ...(state.update || {}), skipped: true, show: false };
+    renderUpdate();
+    toast('这个版本不再提示（换版本会重新提示）');
+  } catch (e) {
+    notify(e.message || '记录失败', 'err');
+  }
+}
+
+/// 点顶栏那个 pill：直接滚到「设置 → 常规」的版本那块，省得用户找。
+function gotoUpdatePanel() {
+  location.hash = '#settings';
+  const tab = document.querySelector('#view-settings [data-tab=general]');
+  if (tab) tab.click();
+  setTimeout(() => {
+    const cur = $('update-current');
+    if (cur) cur.scrollIntoView({ block: 'center' });
+  }, 200);
+}
+
 function renderSettings() {
   const cfg = state.config;
   const info = $("settings-info");
@@ -5895,6 +6031,9 @@ function bind() {
   $('plugin-scan').addEventListener('click', () => scanPlugins());
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
+  // 检查更新（第 210 轮）：手点才 force 查，顶栏 pill 直接带用户去版本那块
+  if ($('update-check')) $('update-check').addEventListener('click', () => checkUpdate(true));
+  if ($('update-pill')) $('update-pill').addEventListener('click', gotoUpdatePanel);
   $('test-run').addEventListener('click', runTest);
   wireNotify();
   $('notify-retry').addEventListener('click', retryNotify);
@@ -5977,6 +6116,9 @@ async function main() {
   await migrateLegacyToken();
   setView(location.hash.slice(1) || 'dashboard');
   await refresh();
+  // 登录后查一次有没有新版：走 6 小时缓存，失败只记在 state.update.error（不弹条）。
+  // 不 await：查更新是锦上添花，绝不能拖住首屏。
+  checkUpdate(false);
   // 只在「确实读回了 state 且确实没有口令」时问。读不到 state（401 = 面板有口令但还没登录）
   // 必须走 #gate，否则两个浮层会同时出现（第 87 轮实测撞到）。
   if (state.loaded && state.auth === false && !localStorage.getItem('panel.skipSetup')) {
