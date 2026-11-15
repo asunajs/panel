@@ -997,6 +997,57 @@ async function main() {
     "return cs.appearance;})()"
   );
   check('预算输入框没有原生步进器（appearance: textfield）', budgetAppearance === 'textfield', String(budgetAppearance));
+
+  // 侧栏溢出（第 195 轮，用户截图报「插件界面加载太多后，菜单栏溢出了」）：
+  // 侧栏是 100vh 的 flex 列，插件入口一多就把底部的「引擎正常 / 版本 / 令牌」顶出视口 ——
+  // 那几样恰恰是一直要看的。修法是品牌与底部固定、中间段 `flex:1; min-height:0; overflow-y:auto`。
+  // 这里故意把插件入口塞到 14 条、再把视口压到 620 高，钉住三件事：
+  //   ① 底部状态完整在视口内 ② 中间段真的可滚 ③ 滚到底能看到最后一条入口
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 620, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  const beforeHidden = await js("document.getElementById('nav-plugins').classList.contains('hidden')");
+  await js(`(()=>{const box=document.getElementById('nav-plugin-list');
+    box.textContent='';
+    for(let i=0;i<14;i++){const a=document.createElement('a');a.className='nav-item';
+      a.href='#plugins';a.dataset.fill='1';
+      a.innerHTML='<svg class="ico" viewBox="0 0 24 24"></svg><span>入口 '+i+'</span>';box.append(a);}
+    document.getElementById('nav-plugins').classList.remove('hidden');return 1;})()`);
+  await sleep(300);
+  const navFit = JSON.parse(await js(
+    "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+    "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
+    "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
+    // 没有这个元素也要**报失败**，不能让整条检查抛异常挂掉（否则门禁只有「挂了」没有「哪条红」）
+    "if(sc) sc.scrollTop=sc.scrollHeight;" +
+    "const last=items.length?items[items.length-1].getBoundingClientRect():null;" +
+    "return {vh:innerHeight,footTop:Math.round(foot.top),footBottom:Math.round(foot.bottom)," +
+    "scrollable:!!sc&&sc.scrollHeight>sc.clientHeight+1,overflowY:sc?getComputedStyle(sc).overflowY:'none'," +
+    "lastBottom:last?Math.round(last.bottom):null,footH:Math.round(foot.height)};})())"
+  ));
+  check('插件入口塞到 14 条时，侧栏底部状态仍在视口里',
+    navFit.footBottom <= navFit.vh + 1 && navFit.footH > 0, JSON.stringify(navFit));
+  check('侧栏中间段可滚（不是把底部顶出去）',
+    navFit.scrollable === true && navFit.overflowY === 'auto', JSON.stringify(navFit));
+  check('滚到底能看到最后一条插件入口',
+    navFit.lastBottom !== null && navFit.lastBottom <= navFit.footTop + 1, JSON.stringify(navFit));
+  // 可选：把这一屏存成图（用户报的就是**看出来的**问题，有张图比读数字快）
+  //   UI_SHOT=/tmp/sidebar.png node scripts/ui-check.mjs
+  if (process.env.UI_SHOT) {
+    try {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(process.env.UI_SHOT, Buffer.from(shot.data, 'base64'));
+      console.log('  现场截图：' + process.env.UI_SHOT);
+    } catch (e) {
+      console.log('  截图失败（不影响结论）：' + (e && e.message));
+    }
+  }
+  // 收尾：还原注入的假入口，后面的断言还得看真实数据
+  await js(`(()=>{const box=document.getElementById('nav-plugin-list');
+    [...box.querySelectorAll('[data-fill]')].forEach(e=>e.remove());
+    if(${beforeHidden}) document.getElementById('nav-plugins').classList.add('hidden');
+    const sc=document.getElementById('sidebar-scroll'); if(sc) sc.scrollTop=0;return 1;})()`);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
+  await sleep(300);
   // 源码编辑器：行号 + 高亮 + 两层对齐（第 173 轮）
   await js("location.hash = '#plugins'");
   await sleep(600);
@@ -1090,7 +1141,7 @@ async function main() {
   // 脚本源码也走同一条高亮路径（之前直接赋 value，高亮层不重画）
   const scriptHl = await js(
     "(async () => { if (typeof openScriptSource !== 'function') return 'no-fn';" +
-    " await openScriptSource('seed-script'); return 'ok'; })()"
+    " await openScriptSource('seed-script.js'); return 'ok'; })()"
   );
   await sleep(900);
   const sh = JSON.parse(await js(
@@ -1098,7 +1149,10 @@ async function main() {
     "return JSON.stringify({gutter:(g&&g.textContent||'').trim().split(String.fromCharCode(10)).length," +
     "spans:(hl&&hl.querySelectorAll('span').length)||0,err:(document.getElementById('src-error')||{}).textContent||''});})()"
   ));
-  check('脚本源码同样有行号与高亮（共用同一条编辑器路径）', scriptHl === 'ok' && sh.gutter >= 3 && sh.spans > 0, JSON.stringify(sh));
+  // 行号数量要跟探子文件对得上（seed-script.js 是 1204 行）。原来写 `>= 3`，
+  // 错误文本也能满足 —— 这条因此一直假绿。
+  check('脚本源码同样有行号与高亮（共用同一条编辑器路径）',
+    scriptHl === 'ok' && sh.gutter >= 1200 && sh.spans > 0, JSON.stringify(sh));
 
   // 第 189 轮：编辑器高度必须被容器兜住（1200 行的行号层不能把抽屉撑成 2.4 万像素），
   // 而且行号层与输入层要一样高（差 1px 就会看到重影/错位）。
@@ -1114,7 +1168,10 @@ async function main() {
   // 第 106 轮：大文件退成纯文本模式 —— 长行必须折行（否则右边永远看不全，用户两次截图
   // 都指着被切掉的行尾），行号层收起（折行后视觉行 ≠ 逻辑行，留着必然错位），
   // 并且能跳到指定行（一万多行的文件靠拖滚动条等于没有导航）。
-  await js("(async () => { await openScriptSource('big-script'); return 'ok'; })()");
+  // 名字**必须带扩展名**：`/api/scripts/<name>` 是按文件名找文件的，不带 `.js` 就是
+  // 另一个不存在的文件 —— 接口回一条错误 JSON，编辑区把那条错误当源码显示，
+  // 于是「大文件」断言在一份 152 字节的错误文本上、在 3 行内容上，看着还挺像。
+  await js("(async () => { await openScriptSource('big-script.js'); return 'ok'; })()");
   await sleep(1200);
   const big = JSON.parse(await js(
     "(()=>{const w=document.getElementById('src-editor');const ta=document.getElementById('src-text');" +

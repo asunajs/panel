@@ -197,6 +197,26 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 
 两条的差别只在源码从哪来（内存里刚输入的 vs 磁盘上现有的），回滚的落点不同。
 
+#### 侧栏中间段单独滚（第 195 轮，用户截图报「插件界面加载太多后菜单栏溢出」）
+
+侧栏是 `height: 100vh` 的 flex 列：品牌 / 主导航 / 插件入口分组 / 底部状态。
+插件入口一多，整列内容超过一屏，**底部的「引擎正常 · 版本 · 令牌」被顶出视口** ——
+那几样恰恰是一直要看的（截图里底下只剩半行）。
+
+修法：品牌与底部固定，中间（主导航 + 插件入口）包进 `.sidebar-scroll`：
+
+```
+.sidebar-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+```
+
+`min-height: 0` 是这条的关键 —— flex 子项默认 `min-height: auto`，不压到 0 的话
+内容照样把父容器撑破，`overflow` 也就没有可滚的余地。窄屏浮层侧栏（`inset: 0 auto 0 0`）
+是同一个列，所以同一套规则一起管用。
+
+回归断言（`scripts/ui-check.mjs`，塞 14 条假插件入口 + 视口压到 620 高）：
+① 底部状态完整在视口内 ② 中间段 `scrollHeight > clientHeight` 且 `overflow-y: auto`
+③ 滚到底能看到最后一条入口。去掉 `min-height: 0` 这条会立刻红（实测过）。
+
 #### 窄屏侧栏是浮层：三条收起路径缺一不可
 
 ≤860px 时侧栏变成 `position: fixed` 的浮层（`translateX(-100%)` → `.open` 归位）。收起方式：

@@ -126,6 +126,23 @@ button, input, select { font: inherit; color: inherit; }
 .brand-text strong { font-size: 14px; }
 .brand-text span { font-size: 11px; color: var(--dim); letter-spacing: .02em; }
 
+/* 侧栏中间段（第 195 轮）：品牌与底部状态固定，只有这一块滚动。
+   `min-height: 0` 是关键 —— flex 子项的默认 min-height 是 auto，不加它，
+   内容一多就撑破父容器（表现就是底部状态被顶出视口，用户截图报的那个）。
+   左右留 6px 再负回来：既不让滚动条盖住圆角，也不让 focus 框被裁掉。 */
+.sidebar-scroll {
+  display: flex; flex-direction: column; gap: 18px;
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  margin: 0 -6px; padding: 0 6px 2px;
+  scrollbar-width: thin;
+}
+.sidebar-scroll::-webkit-scrollbar { width: 8px; }
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 4px;
+}
+.sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
