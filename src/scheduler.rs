@@ -23,13 +23,10 @@
 //! 拿不到 Runtime 锁，排队只会让停止命令看起来「串台」。
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Local};
-use futures::FutureExt;
 use serde::Serialize;
 use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
@@ -43,6 +40,24 @@ use crate::log::{Level, LogHub};
 /// 默认 CPU/墙钟预算。
 /// 默认预算（毫秒）。跟配置走：`PANEL_BUDGET_MS`，不设就是 300 秒（见 `config::DEFAULT_BUDGET_MS`）。
 /// 做成函数不是常量，是因为它随环境变量变 —— 常量会把「读一次环境」钉死在编译期。
+/// 任务列表的原始行（插件、任务名、cron、预算、运行时、标题、投递时间…共 13 列）。
+/// clippy: too complex（review A2）——起个名字，别让读者去数位置。
+type TaskRow = (
+    String,
+    String,
+    Option<String>,
+    i64,
+    Option<String>,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    Option<i64>,
+);
+
 pub fn default_budget_ms() -> u64 {
     crate::config::budget_ms()
 }
@@ -1245,21 +1260,7 @@ async fn load_saved(db: &Db) -> HashMap<(String, String), SavedTask> {
                         suggest_cron,suggest_budget_ms,suggest_lead_ms,pending_adopt,next_at FROM tasks",
                 )
                 .map_err(|e| e.to_string())?;
-            let out: Vec<(
-                String,
-                String,
-                Option<String>,
-                i64,
-                Option<String>,
-                String,
-                Option<i64>,
-                Option<i64>,
-                Option<String>,
-                Option<i64>,
-                Option<i64>,
-                i64,
-                Option<i64>,
-            )> = st
+            let out: Vec<TaskRow> = st
                 .query_map([], |r| {
                     Ok((
                         r.get(0)?,

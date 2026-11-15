@@ -1683,7 +1683,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         println!("运行历史（面板 runs 表）：{} 行（--with-runs-history 导入）", p.runs_history);
     }
     let no_04 = p.plugins.iter().filter(|x| !x.has_0_4).count();
-    if p.plugins.len() > 0 {
+    if !p.plugins.is_empty() {
         println!(
             "老插件 {} 个，其中 {} 个在 0.4 已有同名插件；{}",
             p.plugins.len(),

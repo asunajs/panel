@@ -236,12 +236,6 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", msg)
     }
 
-    fn rate_limited(msg: impl Into<String>, retry_after: u64) -> Self {
-        let mut e = Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", msg);
-        e.retry_after = Some(retry_after);
-        e
-    }
-
     /// 502：插件没响应 / 通道满了。上游的错在 detail 里，对外只说「没响应」。
     fn bad_gateway(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, "plugin_busy", "插件没有响应。").with_detail(msg)
@@ -1678,7 +1672,7 @@ fn safe_name(name: &str) -> Result<(), ApiError> {
     }
 }
 
-async fn read_source(dir: &PathBuf, name: &str) -> Result<String, ApiError> {
+async fn read_source(dir: &std::path::Path, name: &str) -> Result<String, ApiError> {
     safe_name(name)?;
     let path = dir.join(format!("{name}.js"));
     tokio::fs::read_to_string(&path)
@@ -3154,10 +3148,6 @@ async fn write_atomic(
     Ok(())
 }
 
-/// 插件目录里所有 `.js`（`.bak` / `.tmp` 不算）。
-///
-/// 为什么需要它：`/api/state` 里的插件是**已加载**的，语法错/启动失败的文件不在里面，
-/// 但用户恰恰要去界面里修那些文件。
 // ---------------------------------------------------------------- 检查更新（第 210 轮）
 
 /// `GET /api/update/check?force=1` —— 查最新 release，并把「该不该提示」算好。
@@ -3270,6 +3260,10 @@ struct DownloadBody {
     sums: Option<String>,
 }
 
+/// 插件目录里所有 `.js`（`.bak` / `.tmp` 不算）。
+///
+/// 为什么需要它：`/api/state` 里的插件是**已加载**的，语法错/启动失败的文件不在里面，
+/// 但用户恰恰要去界面里修那些文件。
 async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 目录不在 = 还没装过插件（或者这个实例的 PANEL_PLUGINS_DIR 指向了已删的路径）。
     // 这**不是**客户端请求的问题：以前回 400 bad_request，界面每几秒轮询一次就刷一屏
@@ -3336,10 +3330,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
     })))
 }
 
-/// `GET /api/plugins/{name}/config` —— 读插件自己的配置。
-///
-/// 位置：`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（见 config::plugin_config_path）。
-/// 插件里用 `host.self_config()` 读同一份 —— 面板改完立刻生效，不用重启面板。
+
 // ── 插件清单与目录扫描（第 172 轮）──
 //
 // 三个问题合成一组接口：插件叫什么（清单）、要填什么（config.schema）、
@@ -3450,6 +3441,11 @@ async fn api_plugin_manifest(
     }
 }
 
+/// `GET /api/plugins/{name}/config` —— 读插件自己的配置。
+///
+/// 位置：`<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（见 config::plugin_config_path）。
+/// 插件里用 `host.self_config()` 读同一份 —— 面板改完立刻生效，不用重启面板。
+//////
 async fn plugin_config_get(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -3519,10 +3515,7 @@ async fn plugin_config_put(
     // 重载 = 先卸载再按磁盘上的源码装回去（和 /reload 同一条路）。
     let source = read_source(&st.plugins_dir, &name).await?;
     st.sched.unload(&name);
-    let reloaded = match st.sched.load(&name, source).await {
-        Ok(()) => None,
-        Err(e) => Some(e),
-    };
+    let reloaded = st.sched.load(&name, source).await.err();
     st.log.emit(
         "panel",
         None,
@@ -3936,10 +3929,12 @@ async fn script_save(
                     &name,
                     &runtime,
                     &source,
-                    &title,
-                    body.cron,
-                    body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
-                    body.enabled.unwrap_or(true),
+                    crate::scripts::ScriptMeta {
+                        title: title.clone(),
+                        cron: body.cron.clone(),
+                        budget_ms: body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
+                        enabled: body.enabled.unwrap_or(true),
+                    },
                 )
                 .await
                 .map_err(write_err)?
@@ -3969,13 +3964,18 @@ async fn script_save(
                     &name,
                     &runtime,
                     cur["source"].as_str().unwrap_or(""),
-                    &title,
-                    body.cron.or_else(|| {
-                        cur["cron"].as_str().filter(|s| !s.is_empty()).map(String::from)
-                    }),
-                    body.budget_ms
-                        .unwrap_or(cur["budget_ms"].as_u64().unwrap_or(crate::scripts::default_budget_ms())),
-                    body.enabled.unwrap_or(cur["enabled"].as_bool().unwrap_or(true)),
+                    crate::scripts::ScriptMeta {
+                        title: title.clone(),
+                        cron: body.cron.clone().or_else(|| {
+                            cur["cron"].as_str().filter(|s| !s.is_empty()).map(String::from)
+                        }),
+                        budget_ms: body.budget_ms.unwrap_or(
+                            cur["budget_ms"]
+                                .as_u64()
+                                .unwrap_or(crate::scripts::default_budget_ms()),
+                        ),
+                        enabled: body.enabled.unwrap_or(cur["enabled"].as_bool().unwrap_or(true)),
+                    },
                 )
                 .await
                 .map_err(write_err)?
@@ -4031,10 +4031,12 @@ async fn script_create(
                     &body.name,
                     &runtime,
                     &source,
-                    body.title.as_deref().unwrap_or(""),
-                    body.cron.clone(),
-                    body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
-                    true,
+                    crate::scripts::ScriptMeta {
+                        title: body.title.clone().unwrap_or_default(),
+                        cron: body.cron.clone(),
+                        budget_ms: body.budget_ms.unwrap_or(crate::scripts::default_budget_ms()),
+                        enabled: true,
+                    },
                 )
                 .await
                 .map_err(write_err)?

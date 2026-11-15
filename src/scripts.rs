@@ -247,6 +247,34 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 列表查询的原始行（name, cron, budget, enabled, next_at, updated_at, runtime, title, 上次开始/状态）。
+/// clippy 说这 tuple 太复杂（review A2）：给它个名字，读代码时不用在心里数到第 10 位。
+type ScriptRow = (
+    String,
+    Option<String>,
+    i64,
+    i64,
+    Option<i64>,
+    i64,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+);
+
+/// 新建/覆盖脚本时的元数据（第 212 轮，review A2：`save()` 原来 8 个参数）。
+///
+/// 单独成结构体不只是为了过 clippy：调用方原来得数位置（第四个是 title、第五个是
+/// `Option<cron>`…），把它写成 `ScriptMeta { title, cron, ..manual(10_000) }`
+/// 之后，「我在改哪一项」在代码里是看得见的。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptMeta {
+    pub title: String,
+    pub cron: Option<String>,
+    pub budget_ms: u64,
+    pub enabled: bool,
+}
+
 #[derive(Clone)]
 pub struct Scripts {
     db: Db,
@@ -258,6 +286,14 @@ pub struct Scripts {
     data_dir: PathBuf,
     /// 同一个脚本不允许并发跑：手动点两次不该同时进来两份。
     in_flight: Arc<Mutex<HashSet<String>>>,
+}
+
+/// 脚本侧的错误日志都写这一处（review D2：同一个模式在文件里重复了 5+ 次）。
+///
+/// 收拢不仅是少打字：错误日志的 plugin/run_id/level 三元组一旦有人漏填，
+/// 运行记录页就再也对不上「这行是哪次跑的」——统一出口让这种漏填不可能发生。
+fn emit_err(log: &LogHub, run_id: Option<i64>, msg: impl Into<String>) {
+    log.emit(PLUGIN, run_id, Level::Error, msg.into());
 }
 
 impl Scripts {
@@ -284,18 +320,7 @@ impl Scripts {
                         "SELECT s.name,s.cron,s.budget_ms,s.enabled,s.next_at,s.updated_at,s.runtime,s.title,                         (SELECT started_at FROM runs r WHERE r.plugin=?1 AND r.task=(CASE WHEN ifnull(s.title,'')<>'' THEN s.title ELSE s.name END)                           ORDER BY r.id DESC LIMIT 1),                         (SELECT status FROM runs r WHERE r.plugin=?1 AND r.task=(CASE WHEN ifnull(s.title,'')<>'' THEN s.title ELSE s.name END)                           ORDER BY r.id DESC LIMIT 1)                          FROM scripts s ORDER BY s.name",
                     )
                     .map_err(|e| e.to_string())?;
-                let out: Vec<(
-                    String,
-                    Option<String>,
-                    i64,
-                    i64,
-                    Option<i64>,
-                    i64,
-                    String,
-                    String,
-                    Option<i64>,
-                    Option<String>,
-                )> = stmt
+                let out: Vec<ScriptRow> = stmt
                     .query_map([PLUGIN], |r| {
                         Ok((
                             r.get(0)?,
@@ -382,7 +407,7 @@ impl Scripts {
             // scp 了个二进制进来还想让它跑）。不然用户顺手放进来的 README.txt
             // 会变成一条永远跑不起来的「脚本」。
             let known = matches!(
-                infer_runtime(&fname).as_str(),
+                infer_runtime(fname).as_str(),
                 "node" | "python3" | "sh" | "php"
             );
             let exec = {
@@ -474,7 +499,6 @@ impl Scripts {
                              AND NOT EXISTS (SELECT 1 FROM scripts WHERE name=?1)",
                             rusqlite::params![new, old],
                         )
-                        .map(|n| n as usize)
                         .map_err(|e| e.to_string())
                     }
                 })
@@ -700,16 +724,18 @@ impl Scripts {
     }
 
     /// 保存文本内容 + 记录（含 runtime / cron / 预算 / 启停）。
+    ///
+    /// 原来是 8 个参数（clippy too_many_arguments，review A2），现在把「元数据」四项
+    /// 收进 [`ScriptMeta`]：调用方写 `ScriptMeta::manual(10_000)` 这类短句，
+    /// 也不再靠位置记 `Some(cron)` 在第几位。
     pub async fn save(
         &self,
         name: &str,
         runtime: &str,
         source: &str,
-        title: &str,
-        cron: Option<String>,
-        budget_ms: u64,
-        enabled: bool,
+        meta: ScriptMeta,
     ) -> Result<Value, String> {
+        let ScriptMeta { title, cron, budget_ms, enabled } = meta;
         let p = path_of(&self.dir, name)?;
         let runtime = validate_runtime(runtime)?;
         if source.len() > file_max() {
@@ -736,7 +762,7 @@ impl Scripts {
         if is_bin(&runtime) {
             ensure_exec(&p).await;
         }
-        let title = sanitize_title(title)?;
+        let title = sanitize_title(&title)?;
         let out = self
             .insert_record(name, &runtime, title, cron.clone(), budget_ms, enabled)
             .await?;
@@ -878,7 +904,6 @@ impl Scripts {
                          ON CONFLICT(name) DO NOTHING",
                         rusqlite::params![filename, default_budget_ms() as i64, updated, runtime],
                     )
-                    .map(|n| n as usize)
                     .map_err(|e| e.to_string())
                 }
             })
@@ -969,7 +994,7 @@ impl Scripts {
             })
             .await?;
         // 记账名：任务名优先（用户设置的显示名），没设退回文件名。
-        let task = display(&name, &task).to_string();
+        let task = display(name, &task).to_string();
 
         {
             let mut guard = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
@@ -1008,18 +1033,12 @@ impl Scripts {
             Ok(p) => {
                 self.finish_run(run_id, "error", Some("文件缺失".into()))
                     .await;
-                self.log.emit(
-                    PLUGIN,
-                    Some(run_id),
-                    Level::Error,
-                    format!("脚本 {task} 的文件不在（{}）", p.display()),
-                );
+                emit_err(&self.log, Some(run_id), format!("脚本 {task} 的文件不在（{}）", p.display()));
                 return;
             }
             Err(e) => {
                 self.finish_run(run_id, "error", Some(e.clone())).await;
-                self.log
-                    .emit(PLUGIN, Some(run_id), Level::Error, format!("脚本 {task}: {e}"));
+                emit_err(&self.log, Some(run_id), format!("脚本 {task}: {e}"));
                 return;
             }
         };
@@ -1027,8 +1046,7 @@ impl Scripts {
             Ok(v) => v,
             Err(e) => {
                 self.finish_run(run_id, "error", Some(e.clone())).await;
-                self.log
-                    .emit(PLUGIN, Some(run_id), Level::Error, format!("脚本 {task}: {e}"));
+                emit_err(&self.log, Some(run_id), format!("脚本 {task}: {e}"));
                 return;
             }
         };

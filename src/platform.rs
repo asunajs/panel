@@ -62,11 +62,6 @@ pub fn default_sh() -> &'static str {
     }
 }
 
-/// 页面/日志里给人看的路径分隔符提示（`data/panel.db` 还是 `data\panel.db`）。
-pub fn path_hint(p: &std::path::Path) -> String {
-    p.display().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

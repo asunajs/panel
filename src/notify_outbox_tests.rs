@@ -325,7 +325,7 @@ async fn repeated_failures_in_the_window_collapse_into_one_row() {
     assert_eq!(rows[0].0, "第三次", "内容取最新的");
 
     // 出了窗口（> 10 分钟）就是新的一条
-    let far = ts + 3600_000;
+    let far = ts + 3_600_000;
     enqueue_all(
         &db,
         &log,

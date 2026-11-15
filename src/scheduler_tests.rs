@@ -125,7 +125,7 @@ fn twenty_minute_budget_is_allowed_and_cap_is_ninety_minutes() {
     let twenty_min = 20 * 60 * 1000;
     let t = Task::new("p".into(), "t".into(), "@every 1h".into(), twenty_min).unwrap();
     assert_eq!(t.budget_ms, twenty_min, "20 分钟不能被钳掉");
-    assert!(MAX_BUDGET_MS >= 5_400_000, "上限至少 90 分钟");
+    assert_eq!(MAX_BUDGET_MS, 5_400_000, "上限就是 90 分钟");
     let over = Task::new("p".into(), "t".into(), "@every 1h".into(), u64::MAX).unwrap();
     assert_eq!(over.budget_ms, MAX_BUDGET_MS);
     let zero = Task::new("p".into(), "t".into(), "@every 1h".into(), 0).unwrap();

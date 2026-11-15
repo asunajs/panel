@@ -817,3 +817,8 @@
     再加一条静态守卫（`check-pitfalls.sh` 第 21 条）扫 `cfg(windows)` + `unsafe` + 没有 allow 的文件。
     教训：本地没有那个 target 的 `rust-std` 时，`cargo check --target` 是**假绿**（先报
     「can't find crate for core」），别把它当成验证。
+
+64. **`cargo clippy --all-targets` 报的 `never used` 会骗人**：`jsslots::available()` 被
+    （`#[path]` 引进来的）单元测试用着，clippy 在不编那个测试目标的那趟里把它报成 dead code。
+    照着删除 → `cargo test` 直接 E0425 编不过（第 212 轮真踩了，删了才在测试阶段炸）。
+    规矩：删死代码前先跑一遍 `cargo test`，别只看 clippy —— 它是建议，不是事实。

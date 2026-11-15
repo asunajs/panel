@@ -51,6 +51,8 @@ fn note_prune_failure(log: &LogHub, err: &str) {
     crate::alerts::global().push("warn", "retention", format!("清理旧记录失败：{err}"));
     log.emit("panel", None, Level::Warn, format!("清理旧记录失败: {err}"));
 }
+/// 按**内置常量**剪一次（ticker 用的是 `prune_configured`，这个留给测试与排查）。
+#[allow(dead_code)]
 pub async fn prune(db: &Db) -> Result<Pruned, String> {
     prune_with(db, RUNS_KEEP, LOGS_KEEP).await
 }

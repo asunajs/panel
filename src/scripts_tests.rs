@@ -130,6 +130,17 @@ fn resolve_runtime_builds_the_command_line() {
 
 // ── 存储 ───────────────────────────────────────────────────
 
+
+/// 测试用：`save()` 的元数据（review A2 之后从 7 个位置参数收成一个结构体）。
+fn meta(title: &str, cron: Option<&str>, budget_ms: u64, enabled: bool) -> ScriptMeta {
+    ScriptMeta {
+        title: title.to_string(),
+        cron: cron.map(str::to_string),
+        budget_ms,
+        enabled,
+    }
+}
+
 #[tokio::test]
 async fn create_writes_a_template_and_the_record() {
     let dir = tmpdir("create");
@@ -167,10 +178,7 @@ async fn save_roundtrips_runtime_title_and_cron() {
         "a.py",
         "python3",
         "print(1)",
-        "每日数据同步",
-        Some("@every 1h".into()),
-        5000,
-        true,
+        meta("每日数据同步", Some("@every 1h"), 5000, true),
     )
     .await
     .unwrap();
@@ -243,7 +251,7 @@ async fn adopt_record_keeps_existing_rows_untouched() {
     let dir = tmpdir("adopt2");
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db, &dir);
-    s.save("x.sh", "sh", "echo hi", "", Some("@every 2h".into()), 9999, true)
+    s.save("x.sh", "sh", "echo hi", meta("", Some("@every 2h"), 9999, true))
         .await
         .unwrap();
     assert!(!s.adopt_record("x.sh", "node").await.unwrap(), "已有记录不该算新收编");
@@ -325,10 +333,7 @@ async fn a_sh_script_runs_and_its_output_lands_in_the_run() {
         "ok.sh",
         "sh",
         "#!/bin/sh\necho hello-stdout\necho hello-stderr >&2\nexit 0\n",
-        "每日问候",
-        None,
-        10_000,
-        true,
+        meta("每日问候", None, 10_000, true),
     )
     .await
     .unwrap();
@@ -374,7 +379,7 @@ async fn a_nonzero_exit_is_a_failed_run_with_the_code() {
     let dir = tmpdir("run-fail");
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db.clone(), &dir);
-    s.save("fail.sh", "sh", "#!/bin/sh\necho bad >&2\nexit 3\n", "", None, 10_000, true)
+    s.save("fail.sh", "sh", "#!/bin/sh\necho bad >&2\nexit 3\n", meta("", None, 10_000, true))
         .await
         .unwrap();
     let id = s.run("fail.sh", true).await.unwrap();
@@ -389,7 +394,7 @@ async fn a_script_cannot_run_twice_at_once() {
     let dir = tmpdir("twice");
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db.clone(), &dir);
-    s.save("slow.sh", "sh", "sleep 1\n", "", None, 10_000, true)
+    s.save("slow.sh", "sh", "sleep 1\n", meta("", None, 10_000, true))
         .await
         .unwrap();
 
@@ -413,7 +418,7 @@ async fn a_spinning_script_is_killed_at_the_budget_with_a_readable_reason() {
     let dir = tmpdir("spin");
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db.clone(), &dir);
-    s.save("spin.sh", "sh", "while true; do :; done\n", "", None, 1_000, true)
+    s.save("spin.sh", "sh", "while true; do :; done\n", meta("", None, 1_000, true))
         .await
         .unwrap();
     // 30 秒封顶：到点杀不掉进程是**产品缺陷**，不该表现成 CI 挂 25 分钟没输出
@@ -437,7 +442,7 @@ async fn a_missing_interpreter_reports_the_command_not_a_wall_of_io_error() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db.clone(), &dir);
     // runtime 指到一个不存在的解释器：报错要指认命令，别让人以为是脚本写错了
-    s.save("x.sh", "/nonexistent-interpreter-xyz", "echo hi\n", "", None, 10_000, true)
+    s.save("x.sh", "/nonexistent-interpreter-xyz", "echo hi\n", meta("", None, 10_000, true))
         .await
         .unwrap();
     let id = s.run("x.sh", true).await.unwrap();
@@ -474,7 +479,7 @@ async fn oversized_output_is_truncated_with_a_note() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let s = mk(db.clone(), &dir);
     // 一次性打 ~2 MiB（默认上限 512 KiB 的 4 倍），日志条数不能跟着爆
-    s.save("flood.sh", "sh", "echo hello; head -c 2097152 /dev/zero | tr '\\0' 'x'; echo done >&2\n", "", None, 30_000, true)
+    s.save("flood.sh", "sh", "echo hello; head -c 2097152 /dev/zero | tr '\\0' 'x'; echo done >&2\n", meta("", None, 30_000, true))
         .await
         .unwrap();
     let id = s.run("flood.sh", true).await.unwrap();

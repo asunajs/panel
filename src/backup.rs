@@ -220,7 +220,13 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
             None => scripts.runtime_of(name).await.unwrap_or_else(|_| "node".into()),
         };
         let title = s["title"].as_str().unwrap_or("");
-        match scripts.save(name, &runtime, source, title, cron, budget, enabled).await {
+        let meta = crate::scripts::ScriptMeta {
+            title: title.to_string(),
+            cron,
+            budget_ms: budget,
+            enabled,
+        };
+        match scripts.save(name, &runtime, source, meta).await {
             Ok(_) => out_scripts.push(json!({ "name": name, "ok": true })),
             Err(e) => out_scripts.push(json!({ "name": name, "ok": false, "error": e })),
         }
@@ -248,7 +254,7 @@ fn reject_unknown_args(args: &[String], known: &[&str], cmd: &str) -> Result<(),
         let name = a.split('=').next().unwrap_or(a);
         if known.contains(&name) {
             // `--out x` 这种分开写的，把后面的值也跳过
-            if !a.contains('=') && known.iter().any(|k| *k == name) && takes_value(name) {
+            if !a.contains('=') && known.contains(&name) && takes_value(name) {
                 i += 2;
                 continue;
             }

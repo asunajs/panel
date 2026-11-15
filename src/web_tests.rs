@@ -1623,7 +1623,7 @@ await host.register_handler('go', async () => {\n\
         .filter_map(|l| l["message"].as_str().map(|s| s.to_string()))
         .collect();
     let want = format!("v={}", crate::panelversion::current());
-    assert!(msgs.iter().any(|m| *m == want), "{msgs:?}");
+    assert!(msgs.contains(&want), "{msgs:?}");
     assert!(msgs.iter().any(|m| m == "old=true"), "{msgs:?}");
     assert!(msgs.iter().any(|m| m == "future=false"), "{msgs:?}");
     assert!(msgs.iter().any(|m| m == "short=true"), "v0.1 要能解析: {msgs:?}");

@@ -61,7 +61,7 @@ fn manifest_fields_and_defaults() {
 fn a_broken_manifest_is_an_error_not_a_silent_skip() {
     let d = std::env::temp_dir().join(format!("m172-broken-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    write(&d, "b.panel.json", "{ not json");
+    let _ = write(&d, "b.panel.json", "{ not json");
     let e = manifest::load(&d, "b").unwrap_err();
     assert!(e.contains("JSON"), "{e}");
     let _ = std::fs::remove_dir_all(&d);
@@ -84,16 +84,16 @@ fn scan_reports_new_changed_and_removed() {
     let d = std::env::temp_dir().join(format!("m172-scan-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    write(&d, "one.js", "// v1");
-    write(&d, "two.js", "// v2");
-    write(&d, "three.js", "// v3");
+    let _ = write(&d, "one.js", "// v1");
+    let _ = write(&d, "two.js", "// v2");
+    let _ = write(&d, "three.js", "// v3");
 
     // 假装 one/two 已经加载过（记了指纹），three 从没加载过
     manifest::note_loaded("one", &d.join("one.js"));
     manifest::note_loaded("two", &d.join("two.js"));
     // two 之后被改过
     std::thread::sleep(std::time::Duration::from_millis(12));
-    write(&d, "two.js", "// v2 changed, longer body");
+    let _ = write(&d, "two.js", "// v2 changed, longer body");
     let removed_dir = d.join("gone.js");
     std::fs::write(&removed_dir, "// x").unwrap();
     manifest::note_loaded("gone", &removed_dir);
@@ -119,8 +119,8 @@ fn scan_reports_new_changed_and_removed() {
 fn scan_calls_out_a_manifest_that_wants_a_newer_panel() {
     let d = std::env::temp_dir().join(format!("m172-minpanel-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    write(&d, "future.js", "// x");
-    write(&d, "future.panel.json", &json!({ "min_panel": "9.9.9" }).to_string());
+    let _ = write(&d, "future.js", "// x");
+    let _ = write(&d, "future.panel.json", &json!({ "min_panel": "9.9.9" }).to_string());
     let out = manifest::scan(&d, &[], &[], "0.4.0");
     let ms = out["manifests"].as_array().unwrap();
     assert_eq!(ms.len(), 1, "{out}");

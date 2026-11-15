@@ -472,7 +472,7 @@ async fn load_all(
             if let Some((has_web, has_nav)) = surfaces.get(&name).copied() {
                 if !has_web && !has_nav {
                     let now_ms = chrono::Local::now().timestamp_millis();
-                    let mine: Vec<&(String, String, String, i64, bool, Option<i64>, Option<i64>)> =
+                    let mine: Vec<&crate::db::SavedTaskRow> =
                         saved_rows.iter().filter(|r| r.0 == name).collect();
                     let live_next: Vec<Option<i64>> = mine
                         .iter()

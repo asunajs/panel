@@ -13,7 +13,10 @@
 # ⚠ 只数 src/（产品 crate）。spike/ 里的探针有 FFI 例外，不属于产品预算。
 set -euo pipefail
 
-EXPECTED=0
+# 例外清单（每一条都要能说清「为什么躲不掉」）：
+#   1. src/disk.rs —— Windows 上量磁盘余量只能调 GetDiskFreeSpaceExW（Win32），
+#      std 没有安全封装。SAFETY 注释写在那一段，见 docs/pitfalls.md §63。
+EXPECTED=1
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -29,7 +32,7 @@ actual=$( { grep -rhoE '^[[:space:]]*#\[allow\(unsafe_code\)\]' src/ || true; } 
 if [ "$actual" -ne "$EXPECTED" ]; then
   echo "::error::unsafe 例外数是 $actual，期望 $EXPECTED。"
   echo "新增一处例外必须：① 带一句 SAFETY 说明；② 同步改本脚本的 EXPECTED；"
-  echo "③ 在 docs/architecture.md 里写清为什么它躲不掉。"
+  echo "③ 在 docs/pitfalls.md 里写清为什么它躲不掉（并把这个文件里的清单也补上一行）。"
   grep -rnE '^[[:space:]]*#\[allow\(unsafe_code\)\]' src/ || true
   exit 1
 fi

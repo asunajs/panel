@@ -357,9 +357,12 @@ pub async fn plugin_surfaces(db: &Db) -> std::collections::HashMap<String, (bool
 ///
 /// 返回 (plugin, name, cron, budget_ms, enabled, next_at, deleted_at)。
 #[allow(clippy::type_complexity)]
-pub async fn saved_task_rows(
-    db: &Db,
-) -> Vec<(
+/// 库里 `tasks` 表的原始行（enabled 还是 0/1）。
+type RawTaskRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
+
+/// 库里存着的任务行（插件、任务名、标题、预算、启用、下次时间、上次时间）。
+/// clippy: too complex（review A2）——起名字比数位置强。
+pub type SavedTaskRow = (
     String,
     String,
     String,
@@ -367,7 +370,9 @@ pub async fn saved_task_rows(
     bool,
     Option<i64>,
     Option<i64>,
-)> {
+);
+
+pub async fn saved_task_rows(db: &Db) -> Vec<SavedTaskRow> {
     db.call(|c| {
         let mut st = c
             .prepare(
@@ -375,7 +380,7 @@ pub async fn saved_task_rows(
                    FROM tasks ORDER BY plugin, name",
             )
             .map_err(|e| e.to_string())?;
-        let out: Vec<(String, String, String, i64, i64, Option<i64>, Option<i64>)> = st
+        let out: Vec<RawTaskRow> = st
             .query_map([], |r| {
                 Ok((
                     r.get(0)?,

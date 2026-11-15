@@ -38,7 +38,10 @@ pub async fn acquire() -> Option<OwnedSemaphorePermit> {
     cell().clone().acquire_owned().await.ok()
 }
 
-/// 当前还有几个空位（健康摘要/测试用）。
+/// 当前还有几个空位。
+///
+/// 只有 jsslots_tests 用得到（`cargo clippy --all-targets` 在**不编测试**的那趟里
+/// 会报 never used —— 别照着那个提示删，删了测试就编不过，第 212 轮踩过）。
 pub fn available() -> usize {
     cell().available_permits()
 }

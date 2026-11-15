@@ -4,8 +4,10 @@
 //! 一个插件写错语法就带走整个面板。组装路径与实测见 docs/verification.md 的组装路径判据（spike 时期实测）。
 //!
 //! ⚠ `idle()` 全程持有 runtime 锁，`ctx.with()` 要同一把锁。所以：
+//!
 //! - 取消必须在 idle **之前**把 token 拿到手，之后纯 Rust 触发；
 //! - 宿主不能在插件跑着的时候读它的 JS 状态。
+//!
 //! 详见 docs/engine.md 的「idle 全程持锁」节/§2.2。
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};

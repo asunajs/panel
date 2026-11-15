@@ -6,7 +6,6 @@
 
 use super::*;
 use serde_json::json;
-use std::sync::Arc;
 
 /// 起一个只回一发固定响应的 HTTP 假服务器，返回它的地址。
 async fn serve_once(body: &'static [u8]) -> String {
