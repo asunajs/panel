@@ -1085,6 +1085,67 @@ async function main() {
   await js("setSidebar(false)");
   await sleep(300);
 
+  // 操作列钉在右边（第 196 轮，用户截图问「操作固定位置？」）：
+  // 运行记录七列在窄窗口横向滚动时，「日志」按钮会跟着滑出视口 —— 而那正是每行要点的东西。
+  // 这里把表格人为撑宽造出横向溢出（数据不动），在「滚到最左 / 滚到最右」两个位置量按钮的 x：
+  // 位置必须不变，而且始终在容器可视范围内。
+  await js("location.hash = '#runs'");
+  await sleep(900);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 760, deviceScaleFactor: 1, mobile: false });
+  await sleep(500);
+  const sticky = JSON.parse(await js(
+    "JSON.stringify((()=>{" +
+    // 哪个视图有「带操作列的行」就测哪个 —— 规则是 .table .right，四张表共用；
+    // 直接写死 #runs-body 会踩到「那一刻运行记录正好是空的」而抛异常。
+    "const pick=()=>{for(const v of ['runs','tasks','plugins','scripts']){const root=document.getElementById('view-'+v);" +
+    "if(!root) continue;const cand=root.querySelector('table.table');if(!cand) continue;" +
+    "const c=cand.querySelector('tbody td.right');if(!c) continue;return cand;}return null;};" +
+    "const t=pick(); if(!t) return {err:'no-actions-cell'};" +
+    "const wrap=t.closest('.table-wrap'); if(!wrap) return {err:'no-wrap'};" +
+    "t.style.minWidth='1400px';" +
+    "const cell=()=>{const td=t.querySelector('tbody td.right');const th=t.querySelector('thead th.right');" +
+    "return {el:td,td:td?td.getBoundingClientRect():null,th:th?th.getBoundingClientRect():null};};" +
+    "wrap.scrollLeft=0;const a=cell();const wrapR=wrap.getBoundingClientRect().right;" +
+    "wrap.scrollLeft=wrap.scrollWidth;const b=cell();" +
+    "const out={scrollW:wrap.scrollWidth,clientW:wrap.clientWidth,wrapR:Math.round(wrapR)," +
+    "aLeft:Math.round(a.td.left),aRight:Math.round(a.td.right)," +
+    "bLeft:Math.round(b.td.left),bRight:Math.round(b.td.right)," +
+    "thRight:b.th?Math.round(b.th.right):null," +
+    "pos:getComputedStyle(a.el).position,bg:getComputedStyle(a.el).backgroundColor};" +
+    "wrap.scrollLeft=0;t.style.minWidth='';return out;})())"
+  ));
+  check('找到可测的表格（有操作列的行）', !sticky.err, JSON.stringify(sticky));
+  check('表格确实会横向溢出（这条断言的前提）',
+    sticky.scrollW > sticky.clientW + 1, JSON.stringify(sticky));
+  check('操作列是 sticky（不是普通单元格）', sticky.pos === 'sticky', JSON.stringify(sticky));
+  check('滚到最右时操作列没有跟着滑走（x 不变）',
+    Math.abs(sticky.bLeft - sticky.aLeft) <= 1, JSON.stringify(sticky));
+  check('操作列的按钮始终在容器里（滚左滚右都够得着）',
+    sticky.aRight <= sticky.wrapR + 1 && sticky.bRight <= sticky.wrapR + 1, JSON.stringify(sticky));
+  check('表头的「操作」和单元格对齐（不脱层）',
+    sticky.thRight !== null && Math.abs(sticky.thRight - sticky.bRight) <= 1, JSON.stringify(sticky));
+  check('操作列有底色（不然横向滚动时字会从按钮下面穿过去）',
+    !!sticky.bg && sticky.bg !== 'rgba(0, 0, 0, 0)', JSON.stringify(sticky));
+  // 给张图：横向滚到最右时，操作列应该还钉在右边
+  if (process.env.UI_SHOT) {
+    try {
+      await js("(()=>{const t=document.querySelector('#view-runs table.table')||document.querySelector('table.table');" +
+        "t.style.minWidth='1400px';const w=t.closest('.table-wrap');w.scrollLeft=w.scrollWidth;return 1;})()");
+      await sleep(400);
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      const out = process.env.UI_SHOT.replace(/\.png$/, '') + '-runs.png';
+      writeFileSync(out, Buffer.from(shot.data, 'base64'));
+      console.log('  现场截图：' + out);
+      await js("(()=>{const t=document.querySelector('#view-runs table.table')||document.querySelector('table.table');" +
+        "t.style.minWidth='';const w=t.closest('.table-wrap');w.scrollLeft=0;return 1;})()");
+      await sleep(200);
+    } catch (e) {
+      console.log('  截图失败（不影响结论）：' + (e && e.message));
+    }
+  }
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
+  await sleep(300);
+
   // 收尾：还原注入的假入口，后面的断言还得看真实数据
   await js(`(()=>{const box=document.getElementById('nav-plugin-list');
     [...box.querySelectorAll('[data-fill]')].forEach(e=>e.remove());

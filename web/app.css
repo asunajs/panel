@@ -330,6 +330,20 @@ button, input, select { font: inherit; color: inherit; }
   .table td.num { white-space: nowrap; }
 }
 .table td.right, .table th.right { text-align: right; }
+/* 操作列钉在右边（第 196 轮，用户截图问「操作固定位置？」）：
+   运行记录七列，窗口一窄就横向滚动，「日志」按钮跟着滑出视口 —— 而那是每行唯一要点的东西。
+   `.right` 这个类只用在操作列（`actionsCell()` 与三个表头），不会误伤别的列。
+   底色必须自己给：sticky 的格子浮在滚动内容上，不铺底就会看到字从按钮下面穿过。
+   窄屏（≤720）那边表格退化成两列网格、`.right` 横跨整行，sticky 没意义，所以只在这档以上生效。 */
+@media (min-width: 721px) {
+  .table td.right, .table th.right {
+    position: sticky; right: 0; z-index: 2;
+    background: var(--surface);
+    box-shadow: -10px 0 12px -12px rgba(0, 0, 0, .28);
+  }
+  .table thead th.right { background: var(--surface-2); z-index: 3; }
+  .table tbody tr:hover td.right { background: var(--surface-2); }
+}
 .table td.mono, .table .mono { font-family: var(--mono); font-size: 12.5px; }
 .table .strong { font-weight: 600; }
 .table .dim { color: var(--dim); }
@@ -583,13 +597,11 @@ button, input, select { font: inherit; color: inherit; }
 
 .plugin-actions { display: flex; gap: 6px; margin-top: 2px; }
 
-.sync { font-size: 12px; color: var(--dim); white-space: nowrap; }
 .btn.spinning .ico { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 620px) {
   .plugin-grid { grid-template-columns: minmax(0, 1fr); }
-  .sync { display: none; }
 }
 
 /* ---------- 首次使用引导 ---------- */
@@ -1113,12 +1125,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   .icon-btn { width: 40px; height: 40px; }
 }
 
-/* 侧栏底部的「退出登录」（第 92 轮）：要像一条链接/次要按钮，别和上面的版本号抢视线。 */
-.sidebar-logout {
-  width: 100%; justify-content: flex-start; margin-top: 6px;
-  padding: 0 8px; color: var(--dim);
-}
-.sidebar-logout:hover { color: var(--fg); }
+/* 退出登录在顶栏右上角（2026-11-15 用户口径：左下角太偏），用 icon-btn 同款。 */
 
 /* 动作按钮行（第 93 轮，用户反馈「这种按钮太紧凑」）：
    .actions 原来没有布局声明 —— 一串 inline-flex 的按钮**直接相邻**（中间连空格都没有），
