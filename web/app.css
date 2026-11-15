@@ -351,6 +351,22 @@ button, input, select { font: inherit; color: inherit; }
 .table .err-text { color: var(--err); }
 .table .nowrap { white-space: nowrap; }
 
+/* 插件胶囊选择器（第 201 轮）：只收/不收不再靠手打插件名。
+   两行胶囊，点一下 = 只收它，再点 = 取消；在另一行点 = 移到那一侧（互斥）。 */
+.chan-picker { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
+.chan-picker-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chan-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chan-chip {
+  height: 26px; padding: 0 10px;
+  background: var(--surface); color: var(--fg-2);
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  font-size: 12.5px; line-height: 1; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.chan-chip:hover { background: var(--surface-2); color: var(--fg); }
+.chan-chip.is-in { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.chan-chip.is-out { border-style: dashed; color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, var(--line-strong)); }
+
 /* 迷你列表（仪表盘用） */
 .mini { display: flex; flex-direction: column; }
 .mini-row {

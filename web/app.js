@@ -3215,6 +3215,78 @@ function notifyLine(label, node, hint, wide) {
   return line;
 }
 
+/// 插件选择器（第 201 轮）：只收/不收原来只有两个文本框，得**手打插件名**才叫得出名字 ——
+/// 用户的原话是「这个还是没法对应上插件啊」。这里把当前已知的插件列成可点的胶囊，
+/// 点一下就写进对应的输入框（还是逗号分隔那一套，存储/后端完全不变），
+/// 想写前缀通配（mcloud*）就继续手填。
+function pluginPicker(inc, exc) {
+  const names = Array.from(new Set([
+    ...(state.plugins || []).map((p) => p && p.name),
+    ...(state.files || []).map((f) => f && f.name),
+  ].filter(Boolean))).sort();
+  const wrap = el('div', 'chan-picker');
+  if (!names.length) {
+    wrap.append(el('p', 'chan-hint', '还没有插件，先装一个再回来配'));
+    return wrap;
+  }
+  const list = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const chips = {};
+  const paint = () => {
+    const inSet = new Set(list(inc.value));
+    const outSet = new Set(list(exc.value));
+    // key 是「行|插件名」：两行里同名插件是两个不同的按钮，只用名字当 key 会互相覆盖
+    //（第一版就这么错，结果只有「不收」那行会亮）。
+    for (const [key, btn] of Object.entries(chips)) {
+      const [which, name] = key.split('|');
+      btn.classList.toggle('is-in', which === 'in' && inSet.has(name));
+      btn.classList.toggle('is-out', which === 'out' && outSet.has(name));
+      btn.setAttribute('aria-pressed', String(inSet.has(name)));
+      btn.title = which === 'in' && inSet.has(name) ? '只收（再点一下取消）'
+        : which === 'out' && outSet.has(name) ? '不收（再点一下取消）'
+        : which === 'in' ? '点一下：只收它' : '点一下：不收它';
+    }
+  };
+  const commit = (which, name) => {
+    const cur = list(which === 'in' ? inc.value : exc.value);
+    const other = list(which === 'in' ? exc.value : inc.value);
+    const i = cur.indexOf(name);
+    if (i >= 0) cur.splice(i, 1);
+    else {
+      cur.push(name);
+      // 同一个插件不能既「只收」又「不收」：放进来的时候从对面拿掉
+      const j = other.indexOf(name);
+      if (j >= 0) other.splice(j, 1);
+    }
+    if (which === 'in') { inc.value = cur.join(','); exc.value = other.join(','); }
+    else { exc.value = cur.join(','); inc.value = other.join(','); }
+    paint();
+    // 让预览/校验跟着刷新（它们监听 input 事件）
+    inc.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const row = (label, which, hint) => {
+    const line = el('div', 'chan-picker-row');
+    line.append(el('span', 'chan-label', label));
+    const box = el('div', 'chan-chips');
+    for (const name of names) {
+      const b = el('button', 'chan-chip', name);
+      b.type = 'button';
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        // 已经在「只收」里再点 = 取消；在「不收」里点 = 移到只收
+        commit(which, name);
+      });
+      chips[which + '|' + name] = b;
+      box.append(b);
+    }
+    line.append(box);
+    if (hint) line.append(el('span', 'chan-hint', hint));
+    return line;
+  };
+  wrap.append(row('只收', 'in'), row('不收', 'out'));
+  paint();
+  return wrap;
+}
+
 function notifyInput(value, placeholder, type) {
   const i = el('input', 'input');
   i.type = type || 'text';
@@ -3402,10 +3474,13 @@ function renderRouteEditor(box, r) {
       + '只想推某个插件，把它填进下面的「只收」（支持前缀通配，比如 mcloud*）。'),
   );
   const eg = el('div', 'chan-grid');
-  const inc = notifyInput((r.include_plugins || []).join(','), '只收这些插件，逗号分隔（空 = 全收）');
-  const exc = notifyInput((r.exclude_plugins || []).join(','), '这些插件不收，逗号分隔');
+  // 提示语缩短（原来的长句在窄屏被截成「空 =」），怎么用交给下面的胶囊说
+  const inc = notifyInput((r.include_plugins || []).join(','), '留空 = 全收；也可手填前缀 mcloud*');
+  const exc = notifyInput((r.exclude_plugins || []).join(','), '留空 = 都不排除');
   eg.append(notifyLine('只收', inc));
   eg.append(notifyLine('不收', exc));
+  // 点插件名就能选，不用背插件叫什么
+  eg.append(pluginPicker(inc, exc));
   eventsBox.append(eg);
 
   // 定时推送

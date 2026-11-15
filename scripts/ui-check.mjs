@@ -425,6 +425,59 @@ async function main() {
   );
   check('「只收插件」的用法写在提示里（只推单个插件靠它）', /只收/.test(onlyHint) && /mcloud\*|通配/.test(onlyHint), onlyHint.slice(0, 80));
 
+  // 插件胶囊（第 201 轮）：用户报「只收/不收 没法对应上插件」—— 原来得手打插件名。
+  // 现在把已知插件列成可点的胶囊，点一下写进输入框（存储格式不变）。
+  const picker = JSON.parse(await js(
+    "JSON.stringify((()=>{const w=document.querySelector('#notify-main .chan-picker');" +
+    "if(!w) return {err:'no-picker'};" +
+    "const rows=[...w.querySelectorAll('.chan-picker-row')].map(r=>({label:r.querySelector('.chan-label').textContent," +
+    "chips:[...r.querySelectorAll('.chan-chip')].map(c=>c.textContent)}));" +
+    "const inc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 全收/.test(i.placeholder||''));" +
+    "const exc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 都不排除/.test(i.placeholder||''));" +
+    "return {rows:rows,inc:inc?inc.value:null,exc:exc?exc.value:null};})())"
+  ));
+  check('只收/不收 下面有可点的插件胶囊', !picker.err && picker.rows.length === 2, JSON.stringify(picker));
+  const chipsIn = (picker.rows && picker.rows[0] && picker.rows[0].chips) || [];
+  check('胶囊列的是真实插件名（不是让用户背名字）', chipsIn.includes('seed'), JSON.stringify(chipsIn));
+  // 点第一行的 seed → 写进「只收」；再点一次 → 取消；点第二行 → 移到「不收」
+  const toggled = JSON.parse(await js(
+    "JSON.stringify((()=>{const w=document.querySelector('#notify-main .chan-picker');" +
+    "const rows=[...w.querySelectorAll('.chan-picker-row')];" +
+    "const find=(r)=>[...r.querySelectorAll('.chan-chip')].find(c=>c.textContent==='seed');" +
+    "const inc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 全收/.test(i.placeholder||''));" +
+    "const exc=[...document.querySelectorAll('#notify-main input.input')].find(i=>/留空 = 都不排除/.test(i.placeholder||''));" +
+    "find(rows[0]).click();const a={inc:inc.value,exc:exc.value,on:find(rows[0]).classList.contains('is-in')};" +
+    "find(rows[1]).click();const b={inc:inc.value,exc:exc.value,out:find(rows[1]).classList.contains('is-out')};" +
+    "find(rows[1]).click();const c={inc:inc.value,exc:exc.value};" +
+    "return {a:a,b:b,c:c};})())"
+  ));
+  check('点胶囊会写进「只收」', toggled.a && toggled.a.inc === 'seed' && toggled.a.on === true, JSON.stringify(toggled));
+  check('在「不收」里点同一个插件会移过去（互斥，不会两个都占）',
+    toggled.b && toggled.b.exc === 'seed' && toggled.b.inc === '' && toggled.b.out === true, JSON.stringify(toggled));
+  check('再点一次就取消', toggled.c && toggled.c.exc === '', JSON.stringify(toggled));
+  if (process.env.UI_SHOT) {
+    try {
+      // 选中一个插件做成「只收」，让截图里有状态可看
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+      await js("(()=>{const w=document.querySelector('#notify-main .chan-picker');" +
+        "const c=[...w.querySelectorAll('.chan-picker-row')][0].querySelector('.chan-chip');" +
+        "if(c) c.click();" +
+        // 编辑器在页面下方：滚到胶囊那儿再截，不然截到的是标题栏
+        "w.scrollIntoView({block:'center'});return 1;})()");
+      await sleep(500);
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      const out = process.env.UI_SHOT.replace(/\.png$/, '') + '-picker.png';
+      writeFileSync(out, Buffer.from(shot.data, 'base64'));
+      console.log('  现场截图：' + out);
+      await js("(()=>{const w=document.querySelector('#notify-main .chan-picker');" +
+        "const c=[...w.querySelectorAll('.chan-picker-row')][0].querySelector('.chan-chip.is-in');" +
+        "if(c) c.click();return 1;})()");
+      await sleep(200);
+    } catch (e) {
+      console.log('  截图失败（不影响结论）：' + (e && e.message));
+    }
+  }
+
   // 新建推送：事件触发 + 标题模板（预览要跟着变）
   await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='routes').click();return 1;})()");
   await sleep(300);
