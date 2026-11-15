@@ -3938,3 +3938,56 @@ async fn toggling_a_synthesized_route_materializes_it() {
     let ops = routes.iter().find(|r| r["id"] == "ops-default").unwrap();
     assert_eq!(ops["enabled"], false);
 }
+
+/// 日志按来源分开（第 199 轮）：面板 / 插件 / 脚本 / HTTP 各看各的。
+///
+/// 用户报的是「有人恶意刷 40x/50x 会把面板日志淹没」—— 这些行必须留，
+/// 但不能和面板自己的日志混在一起看。所以接口要能按 source 精确过滤，
+/// 写错值要报错（静默回 0 条会让人以为「真没有」）。
+#[tokio::test]
+async fn logs_can_be_filtered_by_source() {
+    let (app, db) = setup().await;
+    db.call(|c| {
+        for (src, plugin, msg) in [
+            ("panel", "panel", "面板自己在说话"),
+            ("plugin", "mcloud", "插件里的日志"),
+            ("script", "@script", "脚本跑完了"),
+            ("http", "@http", "GET /nope → 404"),
+            ("http", "@http", "GET /api/x → 401"),
+        ] {
+            c.execute(
+                "INSERT INTO logs(plugin,level,ts,message,source) VALUES(?1,'info',1,?2,?3)",
+                rusqlite::params![plugin, msg, src],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    for (src, want) in [("panel", 1), ("plugin", 1), ("script", 1), ("http", 2)] {
+        let (status, v) = get(&app, &format!("/api/logs?source={src}&limit=500")).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["total"], want, "{src} 的条数不对：{v}");
+        let rows = v["logs"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["source"] == src),
+            "{src} 里混进了别的来源：{v}"
+        );
+    }
+
+    // 不带 source = 全都要
+    let (_, all) = get(&app, "/api/logs?limit=500").await;
+    assert_eq!(all["total"], 5);
+
+    // 和等级/插件组合也成立（筛选条件是 and）
+    let (_, combo) = get(&app, "/api/logs?source=http&plugin=%40http&limit=500").await;
+    assert_eq!(combo["total"], 2, "{combo}");
+
+    // 写错来源要报错，且错误里列出可用值
+    let (status, bad) = get(&app, "/api/logs?source=httpp").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    let e = bad["error"].as_str().unwrap_or_default();
+    assert!(e.contains("httpp") && e.contains("http"), "错误要能照着改：{e}");
+}

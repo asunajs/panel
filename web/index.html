@@ -237,6 +237,16 @@
                     <button class="seg-item" type="button" data-level="warn" aria-pressed="false">warn</button>
                     <button class="seg-item" type="button" data-level="error" aria-pressed="false">error</button>
                   </div>
+                  <!-- 来源（第 199 轮）：面板自己的 / 插件内部的 / 脚本的 / HTTP 请求失败的。
+                       最后一种必须能单独看：有人刷 404/401 时它会以每秒几十条涌进来，
+                       混在一起就把「面板自己在干嘛」冲没了（用户报的就是这个）。 -->
+                  <div class="seg" role="group" aria-label="日志来源">
+                    <button class="seg-item" type="button" data-source="" aria-pressed="true">全部来源</button>
+                    <button class="seg-item" type="button" data-source="panel" aria-pressed="false">面板</button>
+                    <button class="seg-item" type="button" data-source="plugin" aria-pressed="false">插件</button>
+                    <button class="seg-item" type="button" data-source="script" aria-pressed="false">脚本</button>
+                    <button class="seg-item" type="button" data-source="http" aria-pressed="false">HTTP</button>
+                  </div>
                   <label class="search"><span class="sr-only">搜索日志</span>
                     <span class="search-box">
                       <input id="log-search" type="search" placeholder="搜索插件 / 内容" autocomplete="off" />

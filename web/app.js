@@ -46,6 +46,8 @@ const state = {
   logLastId: null,
   logsPaused: false,
   logLevel: '',
+  // 日志来源过滤：panel / plugin / script / http（空 = 全部）
+  logSource: '',
   logQuery: '',
   q: { plugins: '', tasks: '', runs: '', scripts: '' },
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
@@ -1744,7 +1746,8 @@ function renderLogs() {
 async function searchLogs(reset) {
   const q = (state.logQuery || '').trim();
   const lv = state.logLevel || '';
-  if (!q && !lv) {
+  const src = state.logSource || '';
+  if (!q && !lv && !src) {
     state.logMode = false;
     state.logRows = [];
     renderLogs();
@@ -1755,6 +1758,7 @@ async function searchLogs(reset) {
   const ps = new URLSearchParams({ limit: '200' });
   if (q) ps.set('q', q);
   if (lv) ps.set('level', lv);
+  if (src) ps.set('source', src);
   if (!reset && state.logBefore) ps.set('before', String(state.logBefore));
   try {
     const d = await api('/api/logs?' + ps.toString());
@@ -5347,6 +5351,17 @@ function bind() {
     btn.addEventListener('click', () => {
       state.logLevel = btn.dataset.level || '';
       for (const other of document.querySelectorAll('.seg-item[data-level]')) {
+        other.setAttribute('aria-pressed', String(other === btn));
+      }
+      searchLogs(true);
+    });
+  }
+  // 来源（第 199 轮）：面板 / 插件 / 脚本 / HTTP。选了就走服务端查询（和等级一样），
+  // 否则只能筛到内存里那几百条，「HTTP 到底堆了多少」根本看不出来。
+  for (const btn of document.querySelectorAll('.seg-item[data-source]')) {
+    btn.addEventListener('click', () => {
+      state.logSource = btn.dataset.source || '';
+      for (const other of document.querySelectorAll('.seg-item[data-source]')) {
         other.setAttribute('aria-pressed', String(other === btn));
       }
       searchLogs(true);

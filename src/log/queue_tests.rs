@@ -76,3 +76,22 @@ async fn attribution_fields_survive_the_queue() {
     assert_eq!(rows[1].0, None, "没有 run 的就是 NULL");
     assert_eq!(rows[1].1, "error");
 }
+
+// ---- 来源分类（第 199 轮）----------------------------------------------
+//
+// 界面上「面板 / 插件 / 脚本 / HTTP」四栏靠这个分类。它错了不会报错，
+// 只会让人在「面板日志」里看到一堆 404 —— 所以单独钉住。
+#[test]
+fn source_is_derived_from_the_emitter() {
+    use crate::log::Source;
+    assert_eq!(Source::of("panel"), Source::Panel, "panel 就是面板自己");
+    assert_eq!(Source::of("@script"), Source::Script, "脚本走 @script");
+    assert_eq!(Source::of("@http"), Source::Http, "HTTP 由 emit_src 显式指定");
+    assert_eq!(Source::of("mcloud"), Source::Plugin, "插件名 = 插件内部日志");
+    assert_eq!(Source::of("@webui"), Source::Panel, "其它 @xxx 内部通道算面板");
+    // 四个来源的字符串就是 API/前端的取值，改名字会静默把界面那一排打空
+    assert_eq!(Source::Panel.as_str(), "panel");
+    assert_eq!(Source::Plugin.as_str(), "plugin");
+    assert_eq!(Source::Script.as_str(), "script");
+    assert_eq!(Source::Http.as_str(), "http");
+}

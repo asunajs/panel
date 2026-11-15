@@ -32,6 +32,47 @@ impl Level {
     }
 }
 
+/// 日志「来源」。界面按它分栏（第 199 轮）。
+///
+/// 为什么要分开：有人刷 404/401 时，HTTP 那类日志会以每秒几十条的速度把面板自己的
+/// 日志挤没 —— 但这些行本身是必须留的证据（谁在打、打了什么）。分开存、分开看，
+/// 「必须留」和「不污染」就同时成立了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// 面板自己：调度、迁移、通知、启动
+    Panel,
+    /// 插件代码里打的行
+    Plugin,
+    /// 脚本运行（`@script`）
+    Script,
+    /// HTTP 请求失败（4xx/5xx）
+    Http,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Panel => "panel",
+            Source::Plugin => "plugin",
+            Source::Script => "script",
+            Source::Http => "http",
+        }
+    }
+
+    /// 按调用方给的「插件名」猜来源。`panel` 是面板自己，`@xxx` 是内部通道
+    /// （`@script` 脚本、`@http` HTTP —— 后者由 `emit_src` 显式指定，猜也不用猜错）。
+    pub fn of(plugin: &str) -> Source {
+        match plugin {
+            "panel" => Source::Panel,
+            "@script" => Source::Script,
+            "@http" => Source::Http,
+            p if p.starts_with('@') => Source::Panel,
+            _ => Source::Plugin,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogLine {
     pub ts: i64,
@@ -39,6 +80,8 @@ pub struct LogLine {
     pub run_id: Option<i64>,
     pub level: &'static str,
     pub message: String,
+    /// 来源：panel / plugin / script / http
+    pub source: &'static str,
 }
 
 #[derive(Clone)]
@@ -85,7 +128,7 @@ impl LogHub {
                             let tx = conn.transaction().map_err(|e| e.to_string())?;
                             {
                                 let mut st = tx
-                                    .prepare("INSERT INTO logs(run_id,plugin,level,ts,message) VALUES(?1,?2,?3,?4,?5)")
+                                    .prepare("INSERT INTO logs(run_id,plugin,level,ts,message,source) VALUES(?1,?2,?3,?4,?5,?6)")
                                     .map_err(|e| e.to_string())?;
                                 for line in &batch {
                                     st.execute(rusqlite::params![
@@ -93,7 +136,8 @@ impl LogHub {
                                         line.plugin,
                                         line.level,
                                         line.ts,
-                                        line.message
+                                        line.message,
+                                        line.source
                                     ])
                                     .map_err(|e| e.to_string())?;
                                 }
@@ -129,12 +173,25 @@ impl LogHub {
 
     /// 脱敏与截断在**入队之前**做完，所以 SSE 与库里看到的是同一份已脱敏文本。
     pub fn emit(&self, plugin: &str, run_id: Option<i64>, level: Level, raw: String) {
+        self.emit_src(Source::of(plugin), plugin, run_id, level, raw);
+    }
+
+    /// 显式指定来源。目前只有 HTTP 用得上：它的插件名是 `@http`，但仍然想单独一栏。
+    pub fn emit_src(
+        &self,
+        source: Source,
+        plugin: &str,
+        run_id: Option<i64>,
+        level: Level,
+        raw: String,
+    ) {
         let line = LogLine {
             ts: chrono::Utc::now().timestamp_millis(),
             plugin: plugin.to_string(),
             run_id,
             level: level.as_str(),
             message: prepare_msg(raw),
+            source: source.as_str(),
         };
         let _ = self.tx.send(line.clone());
         // 入队由单消费者按 FIFO 落库；队列断了（反应堆已关）就当写过了，不阻塞调用方。

@@ -36,7 +36,10 @@ POST /api/plugins  {"name":"z2","src":"x"}
 
 ### 查询参数（第 67 轮收紧）
 
-`/api/runs`、`/api/logs` 共用 `Page` 结构：`limit / plugin / run_id / q / sort / dir / after_v / after_id / before / level`。
+`/api/runs`、`/api/logs` 共用 `Page` 结构：`limit / plugin / run_id / q / sort / dir / after_v / after_id / before / level / source`。
+
+`source` 只有日志用（第 199 轮）：`panel` / `plugin` / `script` / `http`，精确匹配，空 = 全部；
+写错返回 400 并在错误里列出可用值（静默回 0 条会让人以为「真没有这类日志」）。
 现在**认不出的键直接 400**，`level`、`dir` 有白名单，其余解析失败也翻成中文 400。
 
 | 传入 | 以前 | 现在 |

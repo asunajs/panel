@@ -412,8 +412,11 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         } else {
             crate::log::Level::Warn
         };
-        st.log.emit(
-            "panel",
+        // HTTP 失败单独一栏（第 199 轮）：这类行必须留证据，但它会被扫描器刷成
+        // 每秒几十条，混在面板日志里就把「面板自己在干嘛」冲没了。来源分开即可两全。
+        st.log.emit_src(
+            crate::log::Source::Http,
+            "@http",
             None,
             level,
             format!("{method} {path} → {} {}", status.as_u16(), d.0),
@@ -2295,6 +2298,8 @@ struct Page {
     before: Option<i64>,
     /// 日志等级过滤（精确匹配：`warn` 只看 warn，不看 error）。
     level: Option<String>,
+    /// 日志来源过滤（第 199 轮）：panel / plugin / script / http。空 = 全部。
+    source: Option<String>,
 }
 
 fn limit_of(p: &Page, default: i64, cap: i64) -> i64 {
@@ -2722,6 +2727,18 @@ async fn api_logs(
         }
     };
     let q = like_pat(&p.q);
+    // 来源也是**精确匹配**（点了「HTTP」就只看 HTTP）。写错要报错，理由同 level：
+    // 静默返回 0 条会让人以为「真的没这类日志」。
+    let source = match p.source.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        None => None,
+        Some(s) if s.is_empty() => None,
+        Some(s) if matches!(s.as_str(), "panel" | "plugin" | "script" | "http") => Some(s),
+        Some(other) => {
+            return Err(bad(format!(
+                "source 只认 panel / plugin / script / http，收到 {other:?}"
+            )))
+        }
+    };
     // 往前翻的游标：id 单调，比时间戳可靠（同一毫秒里可能有多条）。
     let before = p.before;
     let (rows, total) = st
@@ -2729,16 +2746,17 @@ async fn api_logs(
         .call(move |c| {
             let mut stmt = c
                 .prepare(
-                    "SELECT id,ts,plugin,run_id,level,message FROM logs \
+                    "SELECT id,ts,plugin,run_id,level,message,source FROM logs \
                      WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
                        AND (?3 IS NULL OR level=?3) \
+                       AND (?7 IS NULL OR source=?7) \
                        AND (?4 IS NULL OR plugin LIKE ?4 ESCAPE '\\' \n                         OR message LIKE ?4 ESCAPE '\\') \
                        AND (?5 IS NULL OR id < ?5) \
                      ORDER BY id DESC LIMIT ?6",
                 )
                 .map_err(|e| e.to_string())?;
             let out: Vec<Value> = stmt
-                .query(rusqlite::params![plugin, run_id, level, q, before, limit])
+                .query(rusqlite::params![plugin, run_id, level, q, before, limit, source])
                 .map_err(|e| e.to_string())?
                 .mapped(|r| {
                     Ok(json!({
@@ -2748,6 +2766,7 @@ async fn api_logs(
                         "run_id": r.get::<_, Option<i64>>(3)?,
                         "level": r.get::<_, String>(4)?,
                         "message": r.get::<_, String>(5)?,
+                        "source": r.get::<_, String>(6)?,
                     }))
                 })
                 .collect::<rusqlite::Result<_>>()
@@ -2758,8 +2777,9 @@ async fn api_logs(
                     "SELECT COUNT(*) FROM logs \
                      WHERE (?1 IS NULL OR plugin=?1) AND (?2 IS NULL OR run_id=?2) \
                        AND (?3 IS NULL OR level=?3) \
+                       AND (?5 IS NULL OR source=?5) \
                        AND (?4 IS NULL OR plugin LIKE ?4 ESCAPE '\\' \n                         OR message LIKE ?4 ESCAPE '\\')",
-                    rusqlite::params![plugin, run_id, level, q],
+                    rusqlite::params![plugin, run_id, level, q, source],
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
@@ -2930,11 +2950,11 @@ mod tests {
 
     #[test]
     fn limit_is_clamped() {
-        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
+        let p = Page { limit: Some(10_000), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None, source: None };
         assert_eq!(limit_of(&p, 50, 500), 500);
-        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
+        let p = Page { limit: Some(-1), plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None, source: None };
         assert_eq!(limit_of(&p, 50, 500), 1);
-        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None };
+        let p = Page { limit: None, plugin: None, run_id: None, before: None, q: None, sort: None, dir: None, after_v: None, after_id: None, level: None, source: None };
         assert_eq!(limit_of(&p, 50, 500), 50);
     }
 }

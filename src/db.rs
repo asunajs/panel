@@ -191,6 +191,26 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     }
     // 第 179 轮：懒加载要知道「这个插件上次加载时有没有界面」——
     // 有界面的必须立刻加载（用户可能正打开着它），没有的可以等下一次到点前再装。
+    // 第 199 轮：日志要能按「来源」分开看 —— 面板自己的、插件内部的、脚本的、
+    // 以及 **HTTP 请求错误**。最后一种最需要隔离：有人刷 404/401 的时候，
+    // 它会以每秒几十条的速度把面板自己的日志挤没（用户报的就是这个）。
+    if !has_column(conn, "logs", "source")? {
+        conn.execute(
+            "ALTER TABLE logs ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("加 logs.source 失败: {e}"))?;
+        // 存量行回填：面板 / @script（脚本）/ 其它（插件）。
+        conn.execute(
+            "UPDATE logs SET source = CASE \
+                WHEN plugin = 'panel' THEN 'panel' \
+                WHEN plugin LIKE '@%' THEN 'script' \
+                ELSE 'plugin' END \
+             WHERE source = ''",
+            [],
+        )
+        .map_err(|e| format!("回填 logs.source 失败: {e}"))?;
+    }
     for (col, ddl) in [
         ("has_web", "ALTER TABLE plugins ADD COLUMN has_web INTEGER NOT NULL DEFAULT 0"),
         ("has_nav", "ALTER TABLE plugins ADD COLUMN has_nav INTEGER NOT NULL DEFAULT 0"),

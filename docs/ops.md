@@ -794,7 +794,7 @@ SSE 是实时且有序的，一刷新顺序就变 —— 排查「这次运行�
 
 ### 读
 
-- `GET /api/logs?limit=&level=&q=&before=` —— 服务端筛选 + 分页（`total` 是全量匹配数）
+- `GET /api/logs?limit=&level=&q=&source=&before=` —— 服务端筛选 + 分页（`total` 是全量匹配数）
 - `GET /api/runs/{id}` —— 某次运行的日志，按 id 升序
 - SSE `/api/events` —— 实时行（先脱敏后广播）
 

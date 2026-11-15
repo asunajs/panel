@@ -378,6 +378,33 @@ async function main() {
   const leaks = await js("document.body.innerText.includes('SCT_UI_CHECK_1')");
   check('页面任何地方不出现明文密钥', leaks === false);
 
+  // 日志分来源（第 199 轮）：面板 / 插件 / 脚本 / HTTP。
+  // 用户的原话是「有人恶意攻击时一堆 40x/50x 会污染面板日志」——
+  // 所以 HTTP 必须能单独看，而且选了要走服务端查询（内存里那几百条说明不了问题）。
+  await js("location.hash = '#logs'");
+  await sleep(700);
+  const srcBtns = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('.seg-item[data-source]')].map(b=>b.dataset.source))"
+  ));
+  check('日志页有「来源」这一排（全部/面板/插件/脚本/HTTP）',
+    JSON.stringify(srcBtns) === JSON.stringify(['', 'panel', 'plugin', 'script', 'http']),
+    JSON.stringify(srcBtns));
+  await js("(()=>{const b=[...document.querySelectorAll('.seg-item[data-source]')].find(x=>x.dataset.source==='http');b.click();return 1;})()");
+  await sleep(1200);
+  const srcState = JSON.parse(await js(
+    "JSON.stringify({src:state.logSource,mode:state.logMode," +
+    "pressed:[...document.querySelectorAll('.seg-item[data-source]')].filter(b=>b.getAttribute('aria-pressed')==='true').map(b=>b.dataset.source)," +
+    "rows:[...document.querySelectorAll('#logs-view .log-line')].length})"
+  ));
+  check('点「HTTP」会切到服务端查询并按来源过滤',
+    srcState.src === 'http' && srcState.mode === true && JSON.stringify(srcState.pressed) === JSON.stringify(['http']),
+    JSON.stringify(srcState));
+  // 回「全部来源」**并把视图还回设置页**：后面的用例量的是设置页里的提示块，
+  // 停在 #logs 上它会是 0×0（我第一次就这么把「提示不竖排」那条搞红了）。
+  await js("(()=>{const b=[...document.querySelectorAll('.seg-item[data-source]')].find(x=>x.dataset.source==='');b.click();return 1;})()");
+  await js("location.hash = '#settings'");
+  await sleep(700);
+
   // 事件勾选里必须有「任务成功」（第 198 轮，用户报「缺少事件：某个插件运行成功」）。
   // 顺带钉住「只收」这条文案 —— 只推单个插件就是靠它，别哪天被删了还以为功能在。
   // 打开**已有**的那条推送看勾选项（新建一条会把下面「推送行显示条件」的条数断言搞乱）
