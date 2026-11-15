@@ -127,7 +127,7 @@
 33. **日志落库不能每行一个 spawn**：`LogHub::emit` 原来每条 `tokio::spawn` 一个写，谁先落库
     不确定。第 39 轮实测：一个 handler 连打 300 行，按 `id` 排序**有 16 处乱序**（还有 1 处 `ts`
     回退）；SSE 是实时有序的，一刷新顺序就变。现在单消费者队列 + 攒批事务（512 条一批），
-    2000 行 0.11s 落库、0 乱序。守卫在 `src/log/queue_tests.rs`。见 `docs/ops.md`。
+    2000 行 0.11s 落库、0 乱序。守卫在 `src/log/queue_tests.rs`。见 `docs/user/ops.md`。
 34. **一条通知的 N 个渠道要一个事务写完**：以前一个渠道一次 DB 往返，中途被杀就留下「铃铛有、
     发件箱缺几个渠道」的半截状态 —— 界面上通知有了，外部渠道永远收不到，也没人知道少了哪个。
     现在 `enqueue_all` 一次事务写完。守卫：`notify_outbox_tests.rs` 的 `one_notice_writes_one_row_per_channel_in_one_go`。
@@ -142,7 +142,7 @@
     全不在。现在 JSON 里带 `db_included`/`db_bytes`，CLI 回显也直说；要历史就 `--with-db`。
     带库的备份走 `VACUUM INTO` 快照（**不能** `cp panel.db`：WAL 里缺的提交会丢），
     恢复时换库要**在打开 DB 之前**、并清掉旧 `-wal`/`-shm`；HTTP 恢复带库的备份直接 400。
-    干净机器上恢复不带库的备份会建空库并明说。见 `docs/ops.md`。
+    干净机器上恢复不带库的备份会建空库并明说。见 `docs/user/ops.md`。
 
 38. **任务到点却被跳过时不能静默**：`fire_due` 的筛选条件排除了 `in_flight` 和「插件忙」的任务，
     于是那些拍被**无声**丢掉。实测 12 个 `@every 5s` 挤 8 个 JS 名额，4 个任务 26 秒只跑了 3 次
@@ -801,7 +801,7 @@
      保管、cron、收 stdout/stderr + 退出码。0.4 早期把脚本做成了「引擎内 JS + host-api」
      —— 那是给插件的能力，给了脚本之后：脚本作者要学一套假 handler 生命周期、
      `.py/.sh/二进制` 根本进不来、第三方脚本还欠面板一个 `import host` 的约定格式。
-     重构（见 [scripts.md](scripts.md)）：全部走子进程，文件名=记录名（含扩展名），
+     重构（见 [scripts.md](user/scripts.md)）：全部走子进程，文件名=记录名（含扩展名），
      `scripts` 表加 `runtime` 列；文件头 `@cron` 也砍了（cron 归面板，第三方脚本不欠
      面板一个约定格式）。旧的多语言实现（文件头扫描 + 子进程执行）在
      `history/node-only` 分支的 `src/scriptjob.rs`，这次的直接底本。

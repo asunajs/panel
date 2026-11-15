@@ -1,12 +1,12 @@
 //! 引擎层：1 插件 = 1 `AsyncRuntime` + 1 `AsyncContext`，跑在自己的 tokio task 上。
 //!
 //! 不用 `Vm::from_options` —— 它在 init/eval 失败时 `print_error_and_exit`，
-//! 一个插件写错语法就带走整个面板。组装路径与实测见 docs/llrt-spike.md 判据 2。
+//! 一个插件写错语法就带走整个面板。组装路径与实测见 docs/verification.md 的组装路径判据（spike 时期实测）。
 //!
 //! ⚠ `idle()` 全程持有 runtime 锁，`ctx.with()` 要同一把锁。所以：
 //! - 取消必须在 idle **之前**把 token 拿到手，之后纯 Rust 触发；
 //! - 宿主不能在插件跑着的时候读它的 JS 状态。
-//! 详见 docs/architecture.md §2.1/§2.2。
+//! 详见 docs/engine.md 的「idle 全程持锁」节/§2.2。
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -232,7 +232,7 @@ globalThis.__dispatch = (name, evtJson) => {
   if (typeof fn !== 'function') throw new Error('没有这个 handler: ' + name);
   return fn(JSON.parse(evtJson));
 };
-// 定时器闸门：JS 定时器会踩「1 插件 1 runtime」的退出路径（docs/engine-teardown.md）。
+// 定时器闸门：JS 定时器会踩「1 插件 1 runtime」的退出路径（docs/engine.md 的定时器与退出路径一节）。
 //
 // setInterval 直接禁掉：它的循环任务让 eval_module 永不返回（实测 load 卡死），
 // 而且我们没有任何办法在析构前把它清掉。
@@ -285,7 +285,7 @@ fn describe(ctx: &Ctx<'_>, e: Error) -> String {
     "未知异常（既没有 message 也没有 stack）".to_string()
 }
 
-/// LLRT 自带的出站出口**不经过**面板的 SSRF 门。实测（docs/llrt-spike.md 判据 7）：
+/// LLRT 自带的出站出口**不经过**面板的 SSRF 门。实测（docs/verification.md 的 SSRF 判据（spike 时期实测））：
 /// `host.fetch` 打回环被拒，但全局 `fetch` 拿到 200、`net.connect` 真连上了。
 /// 所以这些模块名在解析层就拒掉，插件发请求只剩 `panel:host` 的 fetch 一条路。
 ///
@@ -321,7 +321,7 @@ pub struct Plugin {
     // AsyncRuntime 先走、Context 后走，QuickJS 在 JS_FreeRuntime 里就有机会撞上
     // 还没释放的对象。
     //
-    // 注意：只调这个顺序**治不好**定时器那个坑（见 docs/engine-teardown.md），
+    // 注意：只调这个顺序**治不好**定时器那个坑（见 docs/engine.md 的定时器与退出路径一节），
     // 但它是正确顺序，留着。
     ctx: AsyncContext,
     rt: AsyncRuntime,
@@ -332,7 +332,7 @@ pub struct Plugin {
 }
 
 impl Drop for Plugin {
-    /// 释放前先把这个运行时的定时器状态摘掉（见 docs/engine-teardown.md）。
+    /// 释放前先把这个运行时的定时器状态摘掉（见 docs/engine.md 的定时器与退出路径一节）。
     ///
     /// 顺序很重要：Drop 体在字段析构**之前**跑，所以此时 rt 还活着，
     /// 摘掉状态能把挂着的 `Persistent<Function>` 正常释放；等字段析构时，

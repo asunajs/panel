@@ -415,6 +415,11 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
     // ① 日志：detail 只在这里落地（响应体里没有）。
     let mut ref_id = String::new();
     if let Some(d) = res.extensions().get::<ErrorDetail>() {
+        // 每分钟配额（`log.http_per_min`，0 = 不限）：扫描器一秒几十个 404 时，
+        // 这些行既是证据也是噪音 —— 前 N 条照记，超出的丢弃。
+        if !http_log_allowed() {
+            return res;
+        }
         let level = if status.is_server_error() {
             crate::log::Level::Error
         } else {
@@ -1330,6 +1335,32 @@ fn presented_token(h: &HeaderMap) -> Option<String> {
     } else {
         Some(t.to_string())
     }
+}
+
+/// HTTP 错误日志的每分钟配额。0（默认）= 不限。
+///
+/// 用「一分钟窗口 + 计数」而不是令牌桶：这里要的是「一屏之内不被刷爆」，
+/// 精确平滑没有意义，简单到不会出错更重要。
+fn http_log_allowed() -> bool {
+    let limit = crate::config::limits().http_per_min;
+    if limit == 0 {
+        return true;
+    }
+    static WIN: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let mut g = match WIN.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let now = std::time::Instant::now();
+    let slot = g.get_or_insert((now, 0));
+    if now.duration_since(slot.0) >= std::time::Duration::from_secs(60) {
+        *slot = (now, 0);
+    }
+    if slot.1 >= limit {
+        return false;
+    }
+    slot.1 += 1;
+    true
 }
 
 /// 请求的来源 IP：**只有**配置开了 `server.trust_xff` 才信 `X-Forwarded-For`。
@@ -3070,11 +3101,20 @@ const SOURCE_MIN: usize = 64 * 1024;
 const ENV_SOURCE_MAX: &str = "PANEL_PLUGIN_MAX_BYTES";
 
 fn source_max() -> usize {
-    std::env::var(ENV_SOURCE_MAX)
+    // 优先级：环境变量 > config.json 的 `plugins.max_bytes` > 内置默认（第 208 轮）
+    if let Some(n) = std::env::var(ENV_SOURCE_MAX)
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|n| *n >= SOURCE_MIN)
-        .unwrap_or(SOURCE_MAX)
+    {
+        return n;
+    }
+    let from_cfg = crate::config::limits().plugin_max_bytes as usize;
+    if from_cfg >= SOURCE_MIN {
+        from_cfg
+    } else {
+        SOURCE_MAX
+    }
 }
 
 fn plugin_path(dir: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {

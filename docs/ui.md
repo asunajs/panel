@@ -788,6 +788,20 @@ curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件�
 | 服务 | `server.trust_xff` | 信任 `X-Forwarded-For`（默认关） | 热 |
 | 服务 | `server.allow_any_host` | 无令牌时也接受任意 Host（等同 `PANEL_ALLOW_ANY_HOST=1`） | 热 |
 | 运行 | `run.budget_ms` | 单次运行预算，界面上按**秒**填，存毫秒 | 热 |
+| 日志 | `log.keep` | 日志保留条数（默认 2 万，夹在 100–200 万） | 热（清理每 5 分钟一轮） |
+| 日志 | `log.http_per_min` | HTTP 错误日志每分钟上限，0 = 不限 | 热 |
+| 数据 | `runs.keep` | 运行记录保留条数 | 热 |
+| 数据 | `plugins.max_bytes` | 单个插件源码上限（默认 8 MB，64 KB–64 MB） | 热 |
+
+`config.json` 编辑器**默认收起**（第 209 轮，用户：「json 默认收起，这个一般不需要配置的」）——
+直接写 JSON 的场景只剩「改插件用的键」，那就不该占页面高度：一行 summary，点开再编辑。
+
+两项**没做**，因为现在的设计里没有它们的位置（不是漏了）：
+
+- **备份保留份数**：备份是「导出成文件」（界面导出 JSON / CLI `panel backup --encrypt-to <文件>`），
+  面板不管理备份目录，也就没有轮转可配。要自动清旧备份，得先有「固定备份目录」这个设计。
+- **插件目录白名单**：插件目录只有一个（`PANEL_PLUGINS_DIR`），没有「多个目录择一」的概念；
+  真正想防的是「插件太大把界面拖死」，所以做成了 `plugins.max_bytes`。
 
 优先级一律是 **环境变量 > config.json > 内置默认** —— 老部署靠环境变量那一套不能因为加了配置就失效。
 

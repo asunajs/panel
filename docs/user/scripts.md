@@ -2,7 +2,7 @@
 
 > 2026-11-14 重构后的口径（用户定的）：**脚本 = 第三方程序**，面板只做三件事 ——
 > 保管文件、按时触发、收 stdout/stderr 和退出码。脚本**不进引擎**、没有 host-api；
-> 要 db/log/notify，请写成插件（见 [plugins.md](plugins.md)）。
+> 要 db/log/notify，请写成插件（见 [plugins.md](../plugins.md)）。
 
 ## 运行时
 
@@ -67,7 +67,7 @@ php→php、其它→bin；界面上随时可改。
 ## 历史
 
 引擎内 JS 脚本（`Plugin::load_with_budget` + host-api）是 0.4 早期的形态；
-第三方程序模型取代它，起因与边界见 [pitfalls.md](pitfalls.md) 第 102 条。
+第三方程序模型取代它，起因与边界见 [pitfalls.md](../pitfalls.md) 第 102 条。
 更早的多语言脚本任务（`.py`/`.sh` 子进程、文件头 `@cron`）在
 `history/node-only` 分支的 `src/scriptjob.rs` —— 本篇的执行模型是它的直接后裔，
 文件头 cron 按 2026-11-14 的口径砍掉（第三方脚本不欠面板一个约定格式）。

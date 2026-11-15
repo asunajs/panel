@@ -124,7 +124,7 @@ readyz   ~100 秒才回（挂在 actor 后面）→ 反代看到的是「超时�
 错误当成了「目录结束」，见 pitfalls 第 82 条）。把插件放到系统盘就完全没这问题。
 
 **插件改了怎么同步**：不在面板仓里拷 —— 插件归插件项目，由它自己装（详见
-[`../plugins/README.md`](../plugins/README.md)）。面板仓 `plugins/` 只剩面板自己的 webui-demo。
+[`../plugins/README.md`](../../plugins/README.md)）。面板仓 `plugins/` 只剩面板自己的 webui-demo。
 
 ```bash
 # mcloud 那一族

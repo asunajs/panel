@@ -1092,7 +1092,7 @@ impl Scripts {
 /// 挂了 25 分钟没退出。`taskkill /T /F` 是 Windows 上杀整棵树的既有工具。
 ///
 /// 已知缺口：Unix 上孙子进程仍可能残留（要 killpg）。要修就得给 libc 做直接依赖，
-/// 单独一件事，记在 docs/scripts.md 的护栏里，别在这里悄悄改语义。
+/// 单独一件事，记在 docs/user/scripts.md 的护栏里，别在这里悄悄改语义。
 async fn kill_tree(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     {

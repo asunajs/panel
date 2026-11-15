@@ -17,7 +17,7 @@
 //!
 //! ## 派发一律 spawn
 //!
-//! 一次 invocation 就是「一次 `idle()` 持续多久」（docs/architecture.md §2.2）。
+//! 一次 invocation 就是「一次 `idle()` 持续多久」（docs/engine.md 的 idle 节）。
 //! 20 分钟的任务不能占着调度循环，所以 `tokio::spawn` 出去，完成后回一条
 //! [`Cmd::Finished`]。同一插件同时只允许一个在途 invocation —— 第二个派发根本
 //! 拿不到 Runtime 锁，排队只会让停止命令看起来「串台」。

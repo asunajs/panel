@@ -329,7 +329,9 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
                   <div id="cfg-form"></div>
                 </div>
               </section>
-              <section class="panel">
+              <details class="cfg-adv">
+                <summary>高级：config.json（插件用的键在这里，一般不用改）</summary>
+                <section class="panel">
                 <header class="panel-head">
                   <h2>config.json</h2><span class="chip" id="config-chip">—</span>
                   <div class="toolbar">
@@ -345,7 +347,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
                   <textarea class="editor" id="config-editor" spellcheck="false" aria-label="config.json 内容"></textarea>
                   <div class="src-meta" id="config-meta">—</div>
                 </div>
-              </section>
+                </section>
+              </details>
             </div>
 
             <div class="tab-pane hidden" id="tab-security">

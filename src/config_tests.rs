@@ -171,3 +171,29 @@ fn run_budget_from_config_is_clamped() {
     crate::config::set_run_budget(None);
     assert_eq!(crate::config::budget_ms(), crate::config::DEFAULT_BUDGET_MS);
 }
+
+/// 保留与上限（第 208 轮）：缺省、夹紧、类型写错。
+#[test]
+fn limits_default_and_clamp() {
+    let _g = lock();
+    let d = crate::config::limits_from_value(&json!({}));
+    assert_eq!(d.logs_keep, 20_000);
+    assert_eq!(d.runs_keep, 20_000);
+    assert_eq!(d.http_per_min, 0, "默认不限流");
+    assert_eq!(d.plugin_max_bytes, 8 * 1024 * 1024);
+
+    // 0 条保留 = 把日志全删了，这不是「关闭功能」，是笔误 → 夹到下限
+    let v = json!({"log": {"keep": 0, "http_per_min": 999999}, "runs": {"keep": 5},
+                   "plugins": {"max_bytes": 1}});
+    let l = crate::config::limits_from_value(&v);
+    assert_eq!(l.logs_keep, 100, "保留下限 100");
+    assert_eq!(l.runs_keep, 100, "保留下限 100");
+    assert_eq!(l.http_per_min, 100_000, "限流上限 10 万");
+    assert_eq!(l.plugin_max_bytes, 64 * 1024, "插件上限下限 64 KB");
+
+    // 类型写错（字符串/负数）当没写
+    let bad = json!({"log": {"keep": "5000"}, "plugins": {"max_bytes": -1}});
+    let l = crate::config::limits_from_value(&bad);
+    assert_eq!(l.logs_keep, 20_000);
+    assert_eq!(l.plugin_max_bytes, 8 * 1024 * 1024);
+}

@@ -1,7 +1,7 @@
 //! 引擎层测试：出站门、预算、取消归属。
 //!
 //! 这些判据都来自基线踩过的坑，不是假想场景：
-//! - 出站门：LLRT 自带的 fetch/net 绕过 SSRF（实测见 docs/llrt-spike.md 判据 7）
+//! - 出站门：LLRT 自带的 fetch/net 绕过 SSRF（实测见 docs/verification.md 的 SSRF 判据（spike 时期实测））
 //! - 预算：0.3.1 的固定 50ms 切片把正常的长挂起打断成 `InternalError: interrupted`
 //! - 取消归属：R1 High 停 A 打断了 B，还把 B 记成失败
 
@@ -102,7 +102,7 @@ async fn load_errors_carry_the_real_message() {
 
 /// PANEL PATCH 的回归：上游 `llrt_process::init` 用 `env::vars()`，任意非 UTF-8 的
 /// 环境变量都会让它 panic，插件的 ctx 根本起不来（而面板 HTTP 还活着，看起来像
-/// 「插件加载失败」）。补丁改成 `vars_os()` + lossy，见 docs/auth.md §7。
+/// 「插件加载失败」）。补丁改成 `vars_os()` + lossy，见 src/auth.rs 的头注（派生与明文清理）。
 #[cfg(unix)]
 #[tokio::test]
 async fn a_non_utf8_env_var_does_not_kill_the_plugin() {

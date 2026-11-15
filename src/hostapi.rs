@@ -991,7 +991,7 @@ async fn op_register_handler<'js>(
         return Err(err(&ctx, "register_handler 的第二个参数必须是函数".into()));
     }
     // 函数存在 JS 侧的注册表里，宿主只记名字 —— 派发时按名字调，
-    // 不跨 idle() 持有 JS 引用（idle 全程持锁，见 docs/architecture.md §2.1）。
+    // 不跨 idle() 持有 JS 引用（idle 全程持锁，见 docs/engine.md 的「idle 全程持锁」节）。
     let handlers: Object<'js> = ctx.globals().get("__handlers")?;
     handlers.set(name.as_str(), func)?;
     // 手动任务的预算：不给就是默认 30 秒；和 register_cron 同一个语义（0.4.1 起）。

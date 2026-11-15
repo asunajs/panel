@@ -183,5 +183,5 @@
 写盘全部走同一条路径：合并 → `notify::parse` 语义校验 → 0600 原子写 → 换热快照。
 校验不过就**不落盘**，旧配置继续生效。
 
-密钥约定：落盘是明文（插件是可信代码，fs 没 jail —— 见 [plugins.md](plugins.md)）；
+密钥约定：落盘是明文（插件是可信代码，fs 没 jail —— 见 [plugins.md](../plugins.md)）；
 `GET /api/notify` 与所有写接口的响应一律 `***` + `has_secret: true`。

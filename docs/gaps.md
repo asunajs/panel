@@ -9,8 +9,8 @@
 |---|---|---|
 | 1 | 0.3 数据一键迁移（自动发现 + 预览 + 快照） | [plugins.md](plugins.md) 的「从 0.3.x 面板迁移」 |
 | 2 | 统一错误模型 + 前端错误页（detail 不进响应） | [api.md](api.md) 的「错误格式与错误页」 |
-| 3 | 通知渠道 12 种（企业微信 / 钉钉 / 飞书 / … / 自定义模板） | [notify.md](notify.md) |
-| 4 | 渠道增删改 / 事件与插件过滤 / 静默时段 / 重复聚合 | [notify.md](notify.md) |
+| 3 | 通知渠道 12 种（企业微信 / 钉钉 / 飞书 / … / 自定义模板） | [notify.md](user/notify.md) |
+| 4 | 渠道增删改 / 事件与插件过滤 / 静默时段 / 重复聚合 | [notify.md](user/notify.md) |
 | 5 | 插件清单 panel.json + 配置表单 + min_panel 硬挡 | [plugins.md](plugins.md) |
 | 6 | 扫描目录（替代文件监听） | [plugins.md](plugins.md) |
 | 7 | 源码编辑器高亮 + 行号 | [ui.md](ui.md) |
@@ -23,9 +23,9 @@
 | 14 | 任务删除（墓碑：插件重载不复活，可恢复） | [scheduler.md](scheduler.md) 的「删除任务」 |
 | 15 | 插件按需加载（启动时省掉没有界面、任务都还没到点的插件） | [engine.md](engine.md) 的「按需加载」 |
 | 16 | cron 归面板所有（插件只给建议；安装 / 重装才采纳） | [scheduler.md](scheduler.md) 的「cron 归谁」 |
-| 17 | 通知拆成「渠道 + 推送」两层（停用留配置、删推送留渠道、一条渠道多份 token） | [notify.md](notify.md) |
-| 18 | 定时推送（cron 到点发摘要 / 固定文本，停机只补最近一次） | [notify.md](notify.md) |
-| 19 | 通知界面化：两栏工作台、密钥三态、复制渠道、标题模板 + 预览、高级 JSON 可编辑 | [notify.md](notify.md)、[ui.md](ui.md) |
+| 17 | 通知拆成「渠道 + 推送」两层（停用留配置、删推送留渠道、一条渠道多份 token） | [notify.md](user/notify.md) |
+| 18 | 定时推送（cron 到点发摘要 / 固定文本，停机只补最近一次） | [notify.md](user/notify.md) |
+| 19 | 通知界面化：两栏工作台、密钥三态、复制渠道、标题模板 + 预览、高级 JSON 可编辑 | [notify.md](user/notify.md)、[ui.md](ui.md) |
 | 20 | 插件商店（**不内置**：面板只给 `POST /api/plugins/install` + `panel plugin install`，商店本身是侧载插件） | [store.md](store.md) |
 
 ## 还没做（认账）

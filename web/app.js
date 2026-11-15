@@ -2849,6 +2849,54 @@ const CFG_GROUPS = [
       },
     ],
   },
+  {
+    title: '日志',
+    note: '清理每 5 分钟跑一次，改了下轮生效',
+    fields: [
+      {
+        path: 'log.keep',
+        label: '日志保留',
+        kind: 'int',
+        unit: '条',
+        min: 100,
+        placeholder: '20000',
+        help: '默认 2 万条。面板日志、插件日志、脚本日志各算一条；HTTP 错误日志也在里面。',
+      },
+      {
+        path: 'log.http_per_min',
+        label: 'HTTP 错误日志上限',
+        kind: 'int',
+        unit: '条 / 分钟',
+        min: 0,
+        placeholder: '0',
+        help: '0 = 不限。有人扫端口时这些行是证据也是噪音：设一个数，前 N 条照记、超出的丢弃。',
+      },
+    ],
+  },
+  {
+    title: '数据',
+    note: '',
+    fields: [
+      {
+        path: 'runs.keep',
+        label: '运行记录保留',
+        kind: 'int',
+        unit: '条',
+        min: 100,
+        placeholder: '20000',
+        help: '默认 2 万条。按天算：一天跑 500 次能存 40 天。',
+      },
+      {
+        path: 'plugins.max_bytes',
+        label: '单个插件源码上限',
+        kind: 'mb',
+        unit: 'MB',
+        min: 1,
+        placeholder: '8',
+        help: '默认 8 MB（允许 64 KB–64 MB）。装插件时超过就直接拒绝，不截断。',
+      },
+    ],
+  },
 ];
 
 /// 从 JSON 里按 `a.b` 取（没有就 undefined）。
@@ -2928,6 +2976,22 @@ function renderConfigForm() {
         inp.dataset.kind = 'seconds';
         wrap.append(inp, el('span', 'cfg-unit', '秒'));
         row.append(wrap);
+      } else if (f.kind === 'int' || f.kind === 'mb') {
+        const wrap = el('div', 'cfg-inline');
+        const inp = el('input', 'input');
+        inp.type = 'number';
+        inp.min = String(f.min === undefined ? 0 : f.min);
+        inp.step = '1';
+        if (f.kind === 'mb') {
+          inp.value = typeof cur === 'number' ? String(Math.round(cur / (1024 * 1024))) : '';
+        } else {
+          inp.value = typeof cur === 'number' ? String(cur) : '';
+        }
+        inp.placeholder = f.placeholder || '';
+        inp.dataset.cfg = f.path;
+        inp.dataset.kind = f.kind;
+        wrap.append(inp, el('span', 'cfg-unit', f.unit || ''));
+        row.append(wrap);
       } else {
         const inp = el('input', 'input');
         inp.type = 'text';
@@ -2958,6 +3022,12 @@ function collectConfigForm() {
       } else if (f.kind === 'seconds') {
         const secs = Number(node.value);
         cfgSet(obj, f.path, Number.isFinite(secs) && secs > 0 ? Math.round(secs * 1000) : undefined);
+      } else if (f.kind === 'int') {
+        const n = Number(node.value);
+        cfgSet(obj, f.path, Number.isFinite(n) && node.value !== '' ? Math.round(n) : undefined);
+      } else if (f.kind === 'mb') {
+        const n = Number(node.value);
+        cfgSet(obj, f.path, Number.isFinite(n) && n > 0 ? Math.round(n * 1024 * 1024) : undefined);
       } else {
         const v = String(node.value || '').trim();
         cfgSet(obj, f.path, v || undefined);

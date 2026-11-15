@@ -204,6 +204,7 @@ pub fn init_server(dir: &Path) -> Option<String> {
             .and_then(|r| r.get("budget_ms"))
             .and_then(Value::as_u64),
     );
+    set_limits(limits_from_value(&value));
     bind
 }
 
@@ -216,5 +217,85 @@ pub fn refresh_server(v: &Value) {
             .and_then(|r| r.get("budget_ms"))
             .and_then(Value::as_u64),
     );
+    set_limits(limits_from_value(v));
+}
+
+// ---------------------------------------------------------------- 保留与上限（第 208 轮）
+//
+// 「设置 → 配置」里的第二组：保留多少条记录、HTTP 错误日志每分钟最多记几条、
+// 单个插件源码多大。都是**热**的：清理任务每 5 分钟读一次，中间件每条错误读一次，
+// 保存后下一轮就按新值走，不用重启。
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// 日志保留条数（`log.keep`）。
+    pub logs_keep: i64,
+    /// 运行记录保留条数（`runs.keep`）。
+    pub runs_keep: i64,
+    /// HTTP 错误日志每分钟最多几条（`log.http_per_min`）。0 = 不限。
+    ///
+    /// 为什么要有：扫描器一秒几十个 404 时，这些行是**证据**但也是噪音 ——
+    /// 用户报过「日志被刷满」。限流后前 N 条照记，超出的丢弃（不是不记，是先到先得）。
+    pub http_per_min: u32,
+    /// 单个插件源码上限（`plugins.max_bytes`）。
+    pub plugin_max_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            logs_keep: 20_000,
+            runs_keep: 20_000,
+            http_per_min: 0,
+            plugin_max_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+/// 下限/上限：这些值写错了会把面板弄成「什么都留不住」或「一个 1 GiB 的插件卡死界面」。
+const MIN_KEEP: i64 = 100;
+const MAX_KEEP: i64 = 2_000_000;
+const MIN_PLUGIN_BYTES: u64 = 64 * 1024;
+const MAX_PLUGIN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_HTTP_PER_MIN: u32 = 100_000;
+
+static LIMITS: std::sync::RwLock<Option<Limits>> = std::sync::RwLock::new(None);
+
+pub fn set_limits(l: Limits) {
+    if let Ok(mut g) = LIMITS.write() {
+        *g = Some(l);
+    }
+}
+
+pub fn limits() -> Limits {
+    LIMITS.read().ok().and_then(|g| *g).unwrap_or_default()
+}
+
+/// 从整份配置里取这几项（缺省/类型不对 → 默认；超范围夹回，不拒绝启动）。
+pub fn limits_from_value(v: &Value) -> Limits {
+    let d = Limits::default();
+    let num = |path: &[&str]| -> Option<u64> {
+        let mut cur = v;
+        for k in path {
+            cur = cur.get(k)?;
+        }
+        cur.as_u64()
+    };
+    let keep = |path: &[&str], fallback: i64| -> i64 {
+        match num(path) {
+            Some(n) => (n as i64).clamp(MIN_KEEP, MAX_KEEP),
+            None => fallback,
+        }
+    };
+    Limits {
+        logs_keep: keep(&["log", "keep"], d.logs_keep),
+        runs_keep: keep(&["runs", "keep"], d.runs_keep),
+        http_per_min: num(&["log", "http_per_min"])
+            .map(|n| (n as u32).min(MAX_HTTP_PER_MIN))
+            .unwrap_or(d.http_per_min),
+        plugin_max_bytes: num(&["plugins", "max_bytes"])
+            .map(|n| n.clamp(MIN_PLUGIN_BYTES, MAX_PLUGIN_BYTES))
+            .unwrap_or(d.plugin_max_bytes),
+    }
 }
 

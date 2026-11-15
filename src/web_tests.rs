@@ -4095,3 +4095,26 @@ async fn error_logs(db: &Db) -> Vec<String> {
     .await
     .unwrap()
 }
+
+/// HTTP 错误日志的每分钟上限（第 208 轮）：设 1 条，打三个 400，日志里只该有一条。
+///
+/// 这条是「证据 vs 噪音」的折中：扫描器刷满日志时，前 N 条照记、其余丢弃，
+/// 而不是干脆不记（那就什么都没有了）。
+#[tokio::test]
+async fn http_error_logs_respect_per_minute_cap() {
+    let (app, _plugins, _data, _store, db) = setup_core("httpcap").await;
+    crate::config::set_limits(crate::config::Limits {
+        http_per_min: 1,
+        ..crate::config::Limits::default()
+    });
+    let before = error_logs(&db).await.len();
+    for _ in 0..3 {
+        let (status, _v) = get(&app, "/api/logs?source=nope").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let after = error_logs(&db).await.len();
+    assert_eq!(after - before, 1, "配额 1 条/分钟：三条 400 只记一条（实际 {}）", after - before);
+    // 复原：别把这个全局态漏给后面的用例
+    crate::config::set_limits(crate::config::Limits::default());
+}

@@ -883,6 +883,23 @@ async function main() {
   check('表单里有监听地址、信任 XFF、接受任意 Host、运行预算',
     ['server.bind', 'server.trust_xff', 'server.allow_any_host', 'run.budget_ms']
       .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  check('日志 / 数据两组也在（保留条数、HTTP 上限、运行记录、插件大小）',
+    ['log.keep', 'log.http_per_min', 'runs.keep', 'plugins.max_bytes']
+      .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  const advClosed = JSON.parse(await js(
+    "JSON.stringify((()=>{const d=document.querySelector('.cfg-adv');" +
+    "if(!d) return {err:'no-details'};" +
+    "return {open:d.open,summary:d.querySelector('summary').textContent.slice(0,12)," +
+    // 收起时内容不可见：用 checkVisibility()（getBoundingClientRect 在 details 收起时仍会报高度）
+    "editorVisible:(()=>{const ta=d.querySelector('#config-editor');" +
+    "return ta.checkVisibility?ta.checkVisibility():ta.offsetParent!==null;})()};})())"
+  ));
+  check('高级 config.json 默认收起（表单就够了）',
+    advClosed.open === false && /高级/.test(advClosed.summary) && advClosed.editorVisible === false,
+    JSON.stringify(advClosed));
+  check('四个分组都渲染出来了（服务 / 运行 / 日志 / 数据）',
+    ['服务', '运行', '日志', '数据'].every((g) => (cfgForm.groups || []).includes(g)),
+    JSON.stringify(cfgForm.groups));
   check('改了要重启的项有「重启生效」标记', cfgForm.hasRestartPill === true, JSON.stringify(cfgForm));
   if (process.env.UI_SHOT) {
     try {
@@ -1210,19 +1227,24 @@ async function main() {
   // 这里故意把插件入口塞到 14 条、再把视口压到 620 高，钉住三件事：
   //   ① 底部状态完整在视口内 ② 中间段真的可滚 ③ 滚到底能看到最后一条入口
   // 面板每 5 秒重渲染一次侧栏，注入的节点会被冲掉 —— 所以**每次测量前重新注入**。
-  const fillFakeNav = () => js(`(()=>{const box=document.getElementById('nav-plugin-list');
+  // 注入器装成页内全局函数：面板每 5 秒重渲染侧栏会把节点冲掉，所以在**同一条表达式里**
+  // 先调它再测量 —— 否则「点开/等待」之间隔着一个 tick，量到的就是空的（实测偶发红）。
+  const fillFakeNav = () => js(`(()=>{window.__fillFakeNav=function(){const box=document.getElementById('nav-plugin-list');
     box.textContent='';
     for(let i=0;i<14;i++){const a=document.createElement('a');a.className='nav-item';
       a.href='#plugins';a.dataset.fill='1';
       a.innerHTML='<svg class="ico" viewBox="0 0 24 24"></svg><span>入口 '+i+'</span>';box.append(a);}
-    document.getElementById('nav-plugins').classList.remove('hidden');return 1;})()`);
+    document.getElementById('nav-plugins').classList.remove('hidden');return 1;};
+    return window.__fillFakeNav();})()`);
+  const REFILL = "if(window.__fillFakeNav)window.__fillFakeNav();";
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 620, deviceScaleFactor: 1, mobile: false });
   await sleep(400);
   const beforeHidden = await js("document.getElementById('nav-plugins').classList.contains('hidden')");
   await fillFakeNav();
   await sleep(300);
   const navFit = JSON.parse(await js(
-    "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+    "JSON.stringify((()=>{" + REFILL +
+    "const sc=document.getElementById('sidebar-scroll');" +
     "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
     "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
     // 没有这个元素也要**报失败**，不能让整条检查抛异常挂掉（否则门禁只有「挂了」没有「哪条红」）
@@ -1257,7 +1279,7 @@ async function main() {
     await fillFakeNav();
     await sleep(200);
     const tight = JSON.parse(await js(
-      "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+      "JSON.stringify((()=>{" + REFILL + "const sc=document.getElementById('sidebar-scroll');" +
       "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
       "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
       "if(sc) sc.scrollTop=sc.scrollHeight;" +
@@ -1281,7 +1303,7 @@ async function main() {
   await js("setSidebar(true)");
   await sleep(400);
   const drawerFit = JSON.parse(await js(
-    "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
+    "JSON.stringify((()=>{" + REFILL + "const sc=document.getElementById('sidebar-scroll');" +
     "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
     "const items=[...document.querySelectorAll('#nav-plugin-list .nav-item')];" +
     "if(sc) sc.scrollTop=sc.scrollHeight;" +

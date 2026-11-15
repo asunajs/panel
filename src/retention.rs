@@ -36,6 +36,12 @@ impl Pruned {
     }
 }
 
+/// 按**当前配置**（`log.keep` / `runs.keep`）剪一次；配置改了下轮就生效。
+pub async fn prune_configured(db: &Db) -> Result<Pruned, String> {
+    let l = crate::config::limits();
+    prune_with(db, l.runs_keep, l.logs_keep).await
+}
+
 /// 按默认保留条数剪一次。
 /// 清理失败要说两处：日志（带上下文、可回溯）+ 顶部黄条（没人翻日志页时也能看到）。
 ///
@@ -111,14 +117,17 @@ pub fn spawn_ticker(db: Db, log: LogHub) -> tokio::task::JoinHandle<()> {
         // 第一次 tick 立刻到，正好当「启动时剪一次」用。
         loop {
             tick.tick().await;
-            match prune(&db).await {
+            match prune_configured(&db).await {
                 Ok(p) if !p.is_empty() => log.emit(
                     "panel",
                     None,
                     Level::Info,
                     format!(
-                        "清理旧记录：运行记录 -{} 条、日志 -{} 条（各保留最近 {} 条）",
-                        p.runs, p.logs, RUNS_KEEP
+                        "清理旧记录：运行记录 -{} 条、日志 -{} 条（保留最近 {} / {} 条）",
+                        p.runs,
+                        p.logs,
+                        crate::config::limits().runs_keep,
+                        crate::config::limits().logs_keep
                     ),
                 ),
                 Ok(_) => {}

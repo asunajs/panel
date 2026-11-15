@@ -24,7 +24,7 @@
 **2026-11-12：面板开始「自己管自己」** —— 插件源码可以在界面里读/写/新建/删除
 （保存 = 写盘 → 重载，失败自动回滚），配置可以在设置页直接改并**热生效**（不用重启），
 设置页拆成常规 / 配置 / 安全 / 数据四个 tabs。
-**同一天还补了两块**：脚本（2026-11-14 起是**第三方程序**：sh/node/bun/python3/二进制/自定义命令，面板只保管+定时+收输出，见 [scripts.md](scripts.md)）
+**同一天还补了两块**：脚本（2026-11-14 起是**第三方程序**：sh/node/bun/python3/二进制/自定义命令，面板只保管+定时+收输出，见 [scripts.md](user/scripts.md)）
 和开机自启动（`panel service print|install|uninstall|status`）。
 插件也能带自己的界面了：`plugins/<name>.webui/` + `/plugins/<name>/api/<handler>`，
 契约见 [plugins.md](plugins.md)。
@@ -64,24 +64,43 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 
 ## 文档索引
 
+> **两区**：`user/` 是给**装面板、用面板的人**看的（装、配、排障，按步骤能照抄）；
+> 根目录这一区是给**开发者和 agent** 看的（契约、判据、轮次记录——承载「为什么这么写」）。
+> 从 README（用户入口）进来的，优先读 user/ 区。
+
+### 面向用户（docs/user/）
+
 | 文档 | 内容 |
 |---|---|
-| [engine.md](engine.md) | LLRT 嵌入形态、隔离模型、两条预算、取消归属、JS 通道、定时器坑、外部进程插件为什么不做的清单 |
-| [host-api.md](host-api.md) | async host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
-| [plugins.md](plugins.md) | 插件生命周期（加载/重载/停用/卸载/删除各保住什么）、自带界面与三条路由、上传（zip 与路径逃逸）、与旧面板的对照 |
-| [scripts.md](scripts.md) | 脚本 = 第三方程序：运行时表（sh/node/bun/python3/bin/自定义命令）、面板只保管+定时+收输出、护栏与迁移 |
-| [migrate.md](migrate.md) | 从 0.3.x 面板迁移：矩阵、任务平滑接管、步骤与坑 |
-| [nginx.md](nginx.md) | nginx 反向代理教程：SSE / 上传体积 / 限流语义，certbot 上 HTTPS |
-| [caddy.md](caddy.md) | Caddy 反代教程：三行配置自动 HTTPS，大陆备案场景的两条绕法 |
-| [scheduler.md](scheduler.md) | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
-| [api.md](api.md) | 请求体/查询参数（多余或写错一律 400）、CSV 导出、令牌与会话 |
-| [ui.md](ui.md) | 控制台形态与设计令牌、零构建约束、界面门禁（`scripts/ui-check.mjs` / `ui-e2e.mjs`） |
-| [ops.md](ops.md) | 配置、通知、备份恢复、保留策略、日志流水线、健康摘要、脚本、磁盘/权限故障 |
-| [verification.md](verification.md) | 端到端读数（历史记录，按轮次） |
-| [pitfalls.md](pitfalls.md) | 踩过的坑（按顺序，每条带复现方式或守卫位置） |
-| [HANDOFF.md](HANDOFF.md) | 交接：现状、复跑命令、协作规则 |
-| [mcloud-migration.md](mcloud-migration.md) | mcloud 那一族的插件迁移进度 |
-| [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐插件从 0.3.x（QuickJS）迁到 0.4.x：契约对照、state 三键、三步迁移、踩到的坑 |
+| [user/scripts.md](user/scripts.md) | 脚本 = 第三方程序：运行时表（sh/node/bun/python3/bin/自定义命令）、任务名、护栏 |
+| [user/migrate.md](user/migrate.md) | 从 0.3.x 面板迁移：矩阵、任务平滑接管、步骤与坑 |
+| [user/nginx.md](user/nginx.md) | nginx 反向代理教程：SSE / 上传体积 / 限流语义，certbot 上 HTTPS |
+| [user/caddy.md](user/caddy.md) | Caddy 反代教程：三行配置自动 HTTPS，大陆备案场景的两条绕法 |
+| [user/notify.md](user/notify.md) | 通知渠道与推送：13 种渠道、两层模型、配置形状 |
+| [user/ops.md](user/ops.md) | 运维手册：配置、备份恢复、保留策略、日志流水线、故障排查 |
+| [user/daily.md](user/daily.md) | 3030 日常实例：安装、升级、口令重置 |
+
+### 开发者与 agent（docs/ 根）
+
+| 文档 | 内容 |
+|---|---|
+| [HANDOFF.md](HANDOFF.md) | 接手说明：给下一个模型的自包含上下文 |
+| [plugin-contract.md](plugin-contract.md) | 插件契约：两个仓库、两条部署路径、十条铁律（唯一口径） |
+| [host-api.md](host-api.md) | host API：能力、限额、SSRF 门、日志脱敏 |
+| [plugins.md](plugins.md) | 插件生命周期、自带界面、上传规则、与旧面板的对照 |
+| [api.md](api.md) | HTTP API：请求体/查询参数（多余或写错一律 400）、鉴权与会话 |
+| [engine.md](engine.md) | LLRT 嵌入形态、隔离模型、两条预算、定时器坑 |
+| [scheduler.md](scheduler.md) | 调度：任务状态、熔断、时钟回拨、休眠补跑 |
+| [ui.md](ui.md) | 界面与界面门禁（scripts/ui-check.mjs / ui-e2e.mjs） |
+| [store.md](store.md) | 插件商店：侧载形态与为什么不内置 |
+| [windows.md](windows.md) | Windows：现状、缺口、分步计划、验收表 |
+| [pitfalls.md](pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
+| [verification.md](verification.md) | 端到端读数（历史验证记录） |
+| [gaps.md](gaps.md) | 0.3 → 0.4 重写的差距表（做完 / 没做 / 决定不做） |
+| [mcloud-migration.md](mcloud-migration.md) | mcloud 插件迁移记录 |
+| [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐迁移记录（0.3.x QuickJS → 0.4.x LLRT） |
+| [schedule.md](schedule.md) | 任务调度配置：JSON 真源与五条口径（notify 会话进行中） |
+| [handoff/mcloud-webui-0.4.md](handoff/mcloud-webui-0.4.md) | 交接记录：mcloud WebUI 的 0.4 变体归属 |
 
 ## 三态约定
 

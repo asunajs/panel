@@ -20,7 +20,7 @@
 //!
 //! config.json 的 notify 键（跟其它面板配置同一处，备份/恢复一起走）。
 //! 里面有 SMTP 密码，而**插件读得到 config.json** —— 这不是漏洞，是既定立场：
-//! 插件是可信代码，fs 本来就没 jail（见 docs/architecture.md 安全边界）。
+//! 插件是可信代码，fs 本来就没 jail（见 docs/engine.md 隔离模型一节）。
 //! 所以这里不搞「藏起来」，只在 API 响应里把密码换成 ***，免得截图带出去。
 
 use serde_json::{json, Value};

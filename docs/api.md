@@ -550,7 +550,7 @@ runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一�
 
 ## 通知（渠道与推送）
 
-完整的字段语义、渠道类型表、定时推送见 [notify.md](notify.md)。这里只钉**形状**。
+完整的字段语义、渠道类型表、定时推送见 [notify.md](user/notify.md)。这里只钉**形状**。
 
 ```
 GET  /api/notify                       → { ok, error, min_level, mute, quiet_hours, dedupe_secs,
