@@ -725,7 +725,8 @@ function renderFirstRun() {
   const steps = el('ol', 'steps');
   steps.append(
     step(['把插件文件放进 ', code('plugins/'), ' 目录，例如 ', code('plugins/hello.js')]),
-    step(['刷新页面。面板启动时会加载目录里所有 .js；之后改了文件用插件卡上的「重载」']),
+    step(['刷新页面。面板启动时会加载目录里所有 .js；之后改了文件，在「插件」页点「扫描」——',
+      '扫描报告里会给一个「重载改过的插件」按钮']),
     step(['插件里调 ', code("host.register_cron('名字', '@every 1m')"), ' 之后，任务就会出现在「任务」页']),
   );
   body.append(steps);
@@ -4820,7 +4821,10 @@ async function checkUpdate(force) {
     const d = await api('/api/update/check' + (force ? '?force=1' : ''));
     state.update = d || {};
   } catch (e) {
-    state.update = { current: state.version, error: e.message || '查不到最新版本' };
+    // 还没登录/没令牌时是 401：这不是「查不到」，别看人一眼就报错
+    state.update = e instanceof Unauthorized
+      ? { current: state.version }
+      : { current: state.version, error: e.message || '查不到最新版本' };
   }
   renderUpdate();
   return state.update;
