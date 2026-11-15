@@ -3914,6 +3914,16 @@ async fn serve_webui_file(
     rel: &str,
 ) -> Result<Response, ApiError> {
     let dir = webui_dir(st, name)?;
+    // 整个 `<name>.webui` 目录都不在 = 这个插件的界面文件没了（装的时候没带上，
+    // 或者被别的部署脚本先删后拷、拷失败了）。这时回「这个文件不在插件里」等于没说 ——
+    // 用户看到的是一张 404 页面，实际要做的是**重装这个插件**（第 203 轮就这么被卡住：
+    // 侧栏有「移动云盘」入口，点进去 404，而 JS 和配置都在）。
+    if !dir.is_dir() {
+        return Err(ApiError::not_found(format!(
+            "插件 {name} 的界面文件不在（缺 {name}.webui 目录）：重装这个插件即可恢复"
+        ))
+        .with_detail(format!("webui 目录缺失: {}", dir.display())));
+    }
     // 只允许普通路径段：`..`、绝对路径、盘符统统拒掉，再叠一层前缀校验。
     let rel_path = std::path::Path::new(rel);
     if rel_path
@@ -4065,6 +4075,16 @@ async fn plugin_webui_any(
             .map_err(|e| internal(format!("构造响应失败: {e}")));
     }
 
+    // 静态文件没找到、插件路由也不认：如果**界面目录整个不在**，那不是「少了个文件」，
+    // 是这次安装坏了（JS 和配置都在，只有 .webui 没装上/被删了）。
+    // 一句「这个文件不在插件里」会让用户以为是自己路径写错，实际要做的是重装插件。
+    let dir = st.plugins_dir.join(format!("{name}.webui"));
+    if !dir.is_dir() {
+        return Err(ApiError::not_found(format!(
+            "插件 {name} 的界面文件不在（缺 {name}.webui 目录）：重装这个插件即可恢复"
+        ))
+        .with_detail(format!("webui 目录缺失: {}（rel={rel}）", dir.display())));
+    }
     Err(ApiError::not_found("这个文件不在插件里。").with_detail(format!("rel={rel}")))
 }
 

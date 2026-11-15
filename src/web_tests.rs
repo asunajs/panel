@@ -4015,3 +4015,19 @@ async fn state_reports_disk_usage_honestly() {
         None => assert!(disk["total"].is_null(), "量不到就该是 null，不是别的：{disk}"),
     }
 }
+
+/// 插件的 `<name>.webui` 整个目录不在时，404 要说人话（第 203 轮）。
+///
+/// 真实事故：插件的 JS 和配置都在、侧栏入口也在，只有界面目录被删了 ——
+/// 界面上给的是「这个文件不在插件里」，没人能看出该做什么。这里钉住：
+/// 提示里必须出现插件名和「重装」。
+#[tokio::test]
+async fn a_missing_webui_dir_says_reinstall_not_just_404() {
+    let (app, _db) = setup().await;
+    let (status, v) = get(&app, "/plugins/nope/index.html").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+    let e = v["error"].as_str().unwrap_or_default();
+    assert!(e.contains("nope"), "要说出是哪个插件：{e}");
+    assert!(e.contains("重装"), "要告诉用户该干什么：{e}");
+    assert!(e.contains("webui"), "要点明缺的是界面目录：{e}");
+}

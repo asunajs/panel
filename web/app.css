@@ -1236,6 +1236,12 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .nav-group .nav-item { color: var(--fg-2); }
 .nav-group .nav-item[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+/* 界面文件缺失的插件入口（第 203 轮）：点进去必然 404，先在侧栏说清楚 */
+.nav-item-warn .nav-warn-dot {
+  margin-left: 6px; padding: 1px 6px;
+  font-size: 10.5px; line-height: 1.4; border-radius: 999px;
+  color: var(--err); border: 1px dashed color-mix(in srgb, var(--err) 50%, transparent);
+}
 /* 插件页要让出侧栏和顶栏，自己吃掉剩下的高度：它内部有自己的滚动区 */
 #view-plugin { flex: 1 1 auto; min-height: 0; }
 .plugin-frame {

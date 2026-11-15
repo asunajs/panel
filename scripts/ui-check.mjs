@@ -1304,29 +1304,6 @@ async function main() {
   check('卡片写清了改哪里（PANEL_BUDGET_MS）',
     !!budgetCard.text && /PANEL_BUDGET_MS/.test(budgetCard.text), JSON.stringify(budgetCard));
 
-  // 磁盘余量（第 200 轮）：盘满是静默故障，仪表盘上必须看得见。
-  const diskCard = JSON.parse(await js(
-    "JSON.stringify((()=>{const cards=[...document.querySelectorAll('#view-dashboard .card')];" +
-    "const hit=cards.find(c=>/磁盘余量/.test(c.textContent||''));" +
-    "if(!hit) return {err:'no-card',names:cards.map(c=>(c.textContent||'').slice(0,12))};" +
-    "return {text:(hit.textContent||'').replace(/\\s+/g,' ').trim()};})())"
-  ));
-  check('仪表盘有「磁盘余量」卡片', !diskCard.err, JSON.stringify(diskCard));
-  check('磁盘卡片给了余量/总量/面板占用',
-    !!diskCard.text && /(GB|MB|TB|B)/.test(diskCard.text) && /共 |量不到/.test(diskCard.text)
-      && (/面板占/.test(diskCard.text) || /量不到/.test(diskCard.text)),
-    JSON.stringify(diskCard));
-  if (process.env.UI_SHOT) {
-    try {
-      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
-      const out = process.env.UI_SHOT.replace(/\.png$/, '') + '-dash.png';
-      writeFileSync(out, Buffer.from(shot.data, 'base64'));
-      console.log('  现场截图：' + out);
-    } catch (e) {
-      console.log('  截图失败（不影响结论）：' + (e && e.message));
-    }
-  }
-
   // 收尾：还原注入的假入口，后面的断言还得看真实数据
   await js(`(()=>{const box=document.getElementById('nav-plugin-list');
     [...box.querySelectorAll('[data-fill]')].forEach(e=>e.remove());

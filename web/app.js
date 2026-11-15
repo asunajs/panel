@@ -512,27 +512,13 @@ function renderCards() {
       ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
       : '各 runtime 合计';
   const heartbeat = s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1);
-  // 磁盘（第 200 轮）：盘满是**静默**故障 —— 日志写不进库、备份失败、插件装不上，
-  // 而界面以前一点都看不出来。这里只说两件事：这块盘还剩多少、面板自己占了多少。
-  const dk = state.disk || {};
-  const diskValue = typeof dk.avail === 'number' ? humanBytes(dk.avail) : '❓ 量不到';
-  const diskNote = (() => {
-    if (typeof dk.avail !== 'number' || typeof dk.total !== 'number') {
-      return '这个平台没有实现（不编数字）';
-    }
-    const pct = dk.total ? Math.round(((dk.total - dk.avail) / dk.total) * 100) : 0;
-    const used = '共 ' + humanBytes(dk.total) + ' · 已用 ' + pct + '%';
-    const mine = typeof dk.data_bytes === 'number'
-      ? '面板占 ' + humanBytes(dk.data_bytes) + (dk.partial ? '（至少，文件太多没数完）' : '')
-      : '';
-    const low = dk.avail < 500 * 1024 * 1024 ? '⚠ 快满了 · ' : '';
-    return low + (mine ? mine + ' · ' + used : used);
-  })();
+  // 磁盘余量**不上仪表盘**（第 203 轮，用户说这张卡不需要）：读数留着走 /api/state，
+  // 余量低于 500 MiB 时由服务端推 alert —— 静默故障的兜底不需要占一张卡的位置。
   // 只有「卡片数量」变了才重建；数字（运行时长/圈数/心跳/库大小）每轮都在变，
   // 走 setCard 原地改 —— 每 5s 重造 12 张卡是这页「DOM 节点只涨不跌」的主犯。
   const built =
     engine.querySelectorAll('.card').length === 4 &&
-    taskBox.querySelectorAll('.card').length === 5 &&
+    taskBox.querySelectorAll('.card').length === 4 &&
     sameAsLast('cards', [state.plugins.length, state.tasks.length, s.js_memory_bytes === null]);
   if (built) {
     setCard(engine, '运行时长', humanMs(s.uptime_ms), '自进程启动');
@@ -543,7 +529,6 @@ function renderCards() {
     setCard(taskBox, '任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常');
     setCard(taskBox, '单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖');
     setCard(taskBox, '预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数');
-    setCard(taskBox, '磁盘余量', diskValue, diskNote);
   } else {
     clear(engine);
     clear(taskBox);
@@ -558,7 +543,6 @@ function renderCards() {
       card('任务', String(state.tasks.length), tripped ? tripped + ' 个熔断中' : '全部正常'),
       card('单次预算', humanMs(s.default_budget_ms), '默认值（PANEL_BUDGET_MS 可改），可按任务覆盖'),
       card('预算打断', String(s.budget_kills === undefined ? 0 : s.budget_kills), 'CPU 预算耗尽次数'),
-      card('磁盘余量', diskValue, diskNote),
     );
   }
   renderHealthCards();
@@ -973,6 +957,12 @@ function renderPlugins() {
     if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
     // 停用的插件：卡片上直接给「启用」（详情抽屉里也有一份，但两步太深）
     if (cardOff) acts.append(mk('启用', () => act('/api/plugins/' + encodeURIComponent(p.name) + '/enable', '已启用 ' + p.name)));
+    // 有界面入口但界面文件不在：卡片上直接说，别等人点进 404 才发现
+    if (!cardOff && pluginWebMissing(p.name) && p.nav) {
+      const pl = pill('pill-warn', '界面文件缺失');
+      pl.title = '缺 ' + p.name + '.webui：重装这个插件即可恢复';
+      head.append(pl);
+    }
     acts.append(mk('详情', () => showPlugin(p.name)));
     cardEl.append(acts);
     cardEl.addEventListener('click', () => showPlugin(p.name));
@@ -4805,6 +4795,14 @@ async function importBackup(file) {
 // 主题：iframe 是另一个 document，`data-theme` 不会继承。所以两头都做 ——
 // ① 打开时带 `?theme=`；② 切主题时 `postMessage` 过去（插件页那边监听）。
 
+/// 插件的界面文件（`<name>.webui/index.html`）在不在。
+/// 不在 = 侧栏入口点进去必然 404（JS 和配置都还在，只是界面被删了/没装上）——
+/// 所以侧栏和插件卡都要标出来，别让人以为「点了没反应」。第 203 轮用户就被这个卡住。
+function pluginWebMissing(name) {
+  const f = (state.files || []).find((x) => x && x.name === name);
+  return !!f && f.webui === false;
+}
+
 function pluginEntries() {
   return (state.plugins || [])
     .filter((p) => p && p.nav && p.nav.title)
@@ -4834,6 +4832,11 @@ function renderPluginNav() {
     const span = document.createElement('span');
     span.textContent = p.nav.title;
     a.append(span);
+    if (pluginWebMissing(p.name)) {
+      a.classList.add('nav-item-warn');
+      a.title = '界面文件缺失（缺 ' + p.name + '.webui）：重装这个插件即可恢复';
+      span.append(el('span', 'nav-warn-dot', '缺界面'));
+    }
     if (state.view === 'plugin:' + p.name) a.setAttribute('aria-current', 'page');
     // ⚠ 只改 hash，**不许** preventDefault + 直接 setView（第 182 轮用户踩的坑）：
     //   主导航全靠 hashchange 切换，而这里原来绕过它 —— hash 停在旧页面上，
