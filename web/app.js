@@ -3071,7 +3071,7 @@ function notifyMask(u) {
 }
 
 function notifyEventLabel(e) {
-  const m = { task_fail: '任务失败', circuit: '熔断', plugin: '插件喊话', system: '面板' };
+  const m = { task_ok: '任务成功', task_fail: '任务失败', circuit: '熔断', plugin: '插件喊话', system: '面板' };
   return m[e] || e;
 }
 
@@ -3356,7 +3356,10 @@ function renderRouteEditor(box, r) {
 
   // 事件触发
   const evWrap = el('div', 'chan-checks');
+  // 「成功」和「失败」是两类事件：都勾 = 每次运行都推（想「只看运行后推送」就这么选）。
+  // 只勾成功、配合下面的「只收」＝ 只推某个插件的每次运行。
   const EVENTS = [
+    ['task_ok', '任务成功'],
     ['task_fail', '任务失败'],
     ['circuit', '熔断'],
     ['plugin', '插件喊话'],
@@ -3370,7 +3373,9 @@ function renderRouteEditor(box, r) {
   }
   eventsBox.append(evWrap);
   eventsBox.append(
-    el('p', 'chan-hint', '一个都不勾 = 全部事件都收。插件名支持前缀通配，比如 mcloud*。'),
+    el('p', 'chan-hint',
+      '一个都不勾 = 全部事件都收。想「每次跑完都告诉我」就同时勾上任务成功 + 任务失败；'
+      + '只想推某个插件，把它填进下面的「只收」（支持前缀通配，比如 mcloud*）。'),
   );
   const eg = el('div', 'chan-grid');
   const inc = notifyInput((r.include_plugins || []).join(','), '只收这些插件，逗号分隔（空 = 全收）');

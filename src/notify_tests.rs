@@ -443,3 +443,76 @@ fn a_route_filters_by_event_and_plugin_patterns() {
     // 停用全哑
     assert!(!mk(vec![], vec![], vec![], false).accepts(&n("task_fail", "x"), 600));
 }
+
+/// 「任务成功」这个事件是新加的（第 198 轮，用户报「缺少事件：某个插件运行成功」）。
+/// 白名单要认它，并且**不能**顺手把所有未知事件都放过去。
+#[test]
+fn task_ok_is_a_known_event_and_unknown_ones_are_still_refused() {
+    let ok = notify::parse(Some(&json!({
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_ok", "task_fail"] }]
+    })));
+    let cfg = ok.expect("task_ok 应该被接受");
+    let rs = cfg.effective_routes();
+    assert_eq!(rs[0].events, vec!["task_ok".to_string(), "task_fail".to_string()]);
+
+    let bad = notify::parse(Some(&json!({
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_okay"] }]
+    })))
+    .unwrap_err();
+    assert!(bad.contains("task_okay"), "错误要报出是哪个事件: {bad}");
+    assert!(bad.contains("task_ok"), "错误里要列出可用事件: {bad}");
+}
+
+/// `wants_event`：给「高频成功事件」做前置判断 —— 没人订阅就别生成通知。
+#[test]
+fn wants_event_only_says_yes_when_some_route_asks_for_it() {
+    use crate::config_store::ConfigStore;
+
+    let none = ConfigStore::new(&json!({}));
+    assert!(!notify::wants_event(&none, "task_ok", "nk"), "没配任何渠道 = 没人要");
+
+    let only_err = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_fail"] }]
+    }}));
+    assert!(!notify::wants_event(&only_err, "task_ok", "nk"), "只订失败时不该收成功");
+    assert!(notify::wants_event(&only_err, "task_fail", "nk"));
+
+    let both = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_ok", "task_fail"] }]
+    }}));
+    assert!(notify::wants_event(&both, "task_ok", "nk"));
+
+    // 空 events = 全收（老配置就是这个形状），别把「没勾」当成「都不要」
+    let all = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops" }]
+    }}));
+    assert!(notify::wants_event(&all, "task_ok", "nk"));
+
+    // 停用的推送不该让它生成通知
+    let off = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_ok"], "enabled": false }]
+    }}));
+    assert!(!notify::wants_event(&off, "task_ok", "nk"), "停用的推送不算订阅");
+
+    // 只收某个插件：别的插件跑成功不该往铃铛里塞（铃铛不看等级，但看「有没有人要」）
+    let only_one = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_ok"], "include_plugins": ["mcloud*"] }]
+    }}));
+    assert!(notify::wants_event(&only_one, "task_ok", "mcloud"),
+        "只收 mcloud* 时，mcloud 的成功要算有人要");
+    assert!(!notify::wants_event(&only_one, "task_ok", "mgmusic"),
+        "只收 mcloud* 时，mgmusic 的成功不该生成通知");
+    let excluded = ConfigStore::new(&json!({ "notify": {
+        "channels": [{ "id": "ops", "kind": "webhook", "url": "https://e.com/h" }],
+        "routes": [{ "id": "r1", "channel": "ops", "events": ["task_ok"], "exclude_plugins": ["nk"] }]
+    }}));
+    assert!(!notify::wants_event(&excluded, "task_ok", "nk"), "「不收 nk」对 nk 就是不收");
+    assert!(notify::wants_event(&excluded, "task_ok", "other"), "别的插件照收");
+}

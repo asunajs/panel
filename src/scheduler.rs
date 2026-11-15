@@ -2838,6 +2838,37 @@ impl Inner {
                 },
             );
         }
+        // 成功也通知（第 198 轮）：有人只想「跑完告诉我一声」，或者只订某个插件的每次运行。
+        // 但成功是高频事件，**先问一句有没有人订阅**再记 —— 否则每次运行都往铃铛表塞一条，
+        // 500 条上限几天就滚完，真故障反而被挤掉。
+        if error.is_none()
+            && !cancelled
+            && crate::notify::wants_event(&self.config, "task_ok", plugin)
+        {
+            let took = self
+                .find(plugin, task)
+                .and_then(|i| self.tasks[i].last_run)
+                .map(|started| now.timestamp_millis() - started)
+                .filter(|d| *d >= 0);
+            let body = match took {
+                Some(ms) => format!("任务 {task} 用时 {:.1} 秒，正常结束", ms as f64 / 1000.0),
+                None => format!("任务 {task} 正常结束"),
+            };
+            crate::notify::record_bg(
+                self.db.clone(),
+                self.log.clone(),
+                self.config.clone(),
+                crate::notify::Notice {
+                    event: "task_ok",
+                    level: "info",
+                    plugin: plugin.to_string(),
+                    task: Some(task.to_string()),
+                    run_id: (run_id >= 0).then_some(run_id),
+                    title: format!("任务 {task} 成功"),
+                    body,
+                },
+            );
+        }
         let now_tripped = self
             .find(plugin, task)
             .map(|i| self.tasks[i].tripped)

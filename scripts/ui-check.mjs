@@ -378,6 +378,26 @@ async function main() {
   const leaks = await js("document.body.innerText.includes('SCT_UI_CHECK_1')");
   check('页面任何地方不出现明文密钥', leaks === false);
 
+  // 事件勾选里必须有「任务成功」（第 198 轮，用户报「缺少事件：某个插件运行成功」）。
+  // 顺带钉住「只收」这条文案 —— 只推单个插件就是靠它，别哪天被删了还以为功能在。
+  // 打开**已有**的那条推送看勾选项（新建一条会把下面「推送行显示条件」的条数断言搞乱）
+  await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='routes').click();return 1;})()");
+  await sleep(300);
+  await js("(()=>{const r=document.querySelector('#notify-rows .nrow');if(r)r.click();return 1;})()");
+  await sleep(500);
+  const evText = await js(
+    "(()=>{const w=document.querySelector('#notify-main .chan-checks');" +
+    "return w?[...w.querySelectorAll('label')].map(l=>l.textContent.trim()).join('|'):'none';})()"
+  );
+  check('推送事件里有「任务成功」', /任务成功/.test(evText), evText);
+  check('推送事件里仍有失败/熔断/喊话/面板',
+    /任务失败/.test(evText) && /熔断/.test(evText) && /插件喊话/.test(evText) && /面板/.test(evText), evText);
+  const onlyHint = await js(
+    "(()=>{const e=[...document.querySelectorAll('#notify-main .chan-hint')].map(x=>x.textContent).join(' ');" +
+    "return e;})()"
+  );
+  check('「只收插件」的用法写在提示里（只推单个插件靠它）', /只收/.test(onlyHint) && /mcloud\*|通配/.test(onlyHint), onlyHint.slice(0, 80));
+
   // 新建推送：事件触发 + 标题模板（预览要跟着变）
   await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='routes').click();return 1;})()");
   await sleep(300);
@@ -386,7 +406,11 @@ async function main() {
   await js("(()=>{document.querySelector('#notify-main .chan-group input.input').value='任务失败 → 手机';return 1;})()");
   // 勾「熔断」不勾「任务失败」：这轮检查后面会真的跑任务、会有失败通知，
   // 挂上渠道就会真发请求（对端是假的），冒出一条「通知发不出去」的黄条，把后面的用例带崩。
-  await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];g.querySelectorAll('.chan-check input')[1].click();return 1;})()");
+  // 按**文字**点「熔断」，别按下标：事件列表的位置会变（第 198 轮加了「任务成功」在最前，
+  // 原来按下标点第 2 个，正好点成了「任务失败」，这条断言就莫名其妙红了）。
+  await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];" +
+    "const c=[...g.querySelectorAll('.chan-check')].find(x=>x.textContent.includes('熔断'));" +
+    "if(c) c.querySelector('input').click();return 1;})()");
   await js("(()=>{const g=[...document.querySelectorAll('#notify-main .chan-group')].find(x=>x.querySelector('h4').textContent==='推送标题');const i=g.querySelector('input.input');i.value='[告警] {{title}}';i.dispatchEvent(new Event('input'));return 1;})()");
   await sleep(200);
   const pv = await js("document.querySelector('#notify-main .chan-preview').textContent");
@@ -1003,15 +1027,17 @@ async function main() {
   // 那几样恰恰是一直要看的。修法是品牌与底部固定、中间段 `flex:1; min-height:0; overflow-y:auto`。
   // 这里故意把插件入口塞到 14 条、再把视口压到 620 高，钉住三件事：
   //   ① 底部状态完整在视口内 ② 中间段真的可滚 ③ 滚到底能看到最后一条入口
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 620, deviceScaleFactor: 1, mobile: false });
-  await sleep(400);
-  const beforeHidden = await js("document.getElementById('nav-plugins').classList.contains('hidden')");
-  await js(`(()=>{const box=document.getElementById('nav-plugin-list');
+  // 面板每 5 秒重渲染一次侧栏，注入的节点会被冲掉 —— 所以**每次测量前重新注入**。
+  const fillFakeNav = () => js(`(()=>{const box=document.getElementById('nav-plugin-list');
     box.textContent='';
     for(let i=0;i<14;i++){const a=document.createElement('a');a.className='nav-item';
       a.href='#plugins';a.dataset.fill='1';
       a.innerHTML='<svg class="ico" viewBox="0 0 24 24"></svg><span>入口 '+i+'</span>';box.append(a);}
     document.getElementById('nav-plugins').classList.remove('hidden');return 1;})()`);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 620, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  const beforeHidden = await js("document.getElementById('nav-plugins').classList.contains('hidden')");
+  await fillFakeNav();
   await sleep(300);
   const navFit = JSON.parse(await js(
     "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
@@ -1046,6 +1072,8 @@ async function main() {
   for (const h of [420, 320]) {
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: h, deviceScaleFactor: 1, mobile: false });
     await sleep(300);
+    await fillFakeNav();
+    await sleep(200);
     const tight = JSON.parse(await js(
       "JSON.stringify((()=>{const sc=document.getElementById('sidebar-scroll');" +
       "const foot=document.querySelector('.sidebar-foot').getBoundingClientRect();" +
@@ -1067,6 +1095,7 @@ async function main() {
   // 而浮层里是**同一个** flex 列 —— 中间段没得滚的话，插件入口会把抽屉内容推到屏幕外。
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 700, height: 600, deviceScaleFactor: 1, mobile: false });
   await sleep(400);
+  await fillFakeNav();
   await js("setSidebar(true)");
   await sleep(400);
   const drawerFit = JSON.parse(await js(

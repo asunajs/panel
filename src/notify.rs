@@ -350,6 +350,22 @@ impl Config {
         !self.mute.iter().any(|m| m == plugin || m == &full)
     }
 
+    /// 有没有推送**显式点名**了这个事件（`events` 里就写着它）。
+    ///
+    /// 点名了就不再受「全局等级门槛」约束 —— 否则会出这种极难查的情况：
+    /// 用户在界面上勾了「任务成功」，而成功是 `info`、全局门槛默认 `warn`，
+    /// 于是通知永远发不出去，界面上却看不出任何异常（第 198 轮实测踩到：
+    /// 铃铛里有、发件箱里 0 条）。等级门槛管的是「默认想知道多严重的消息」，
+    /// 而「点名要这个事件」是更明确的意图，应当压过默认值。
+    pub fn explicitly_wants_event(&self, event: &str, plugin: &str) -> bool {
+        self.effective_routes().iter().any(|r| {
+            r.enabled
+                && r.events.iter().any(|e| e == event)
+                && (r.include_plugins.is_empty() || name_hit(&r.include_plugins, plugin))
+                && !name_hit(&r.exclude_plugins, plugin)
+        })
+    }
+
     /// 生效的推送规则。配置里没写 routes（老配置）= 每条渠道自己就是一条推送，
     /// 过滤字段从渠道上搬过来 —— 这样 0.4 之前配的东西行为一点不变。
     pub fn effective_routes(&self) -> Vec<Route> {
@@ -480,9 +496,14 @@ fn parse_routes(v: Option<&Value>, channels: &[Channel]) -> Result<Vec<Route>, S
         };
         let events = str_list(r, "events");
         for e in &events {
-            if !matches!(e.as_str(), "task_fail" | "circuit" | "plugin" | "system") {
+            // task_ok = 任务**跑成功**（第 198 轮）。原来只有失败可订，「跑完就告诉我一声」
+            // 或者「只订某个插件的每次运行」都做不到 —— 用户对着事件勾选那张图报的就是这个。
+            if !matches!(
+                e.as_str(),
+                "task_ok" | "task_fail" | "circuit" | "plugin" | "system"
+            ) {
                 return Err(format!(
-                    "推送 {id} 的事件 {e:?} 不认识（只能是 task_fail/circuit/plugin/system）"
+                    "推送 {id} 的事件 {e:?} 不认识（只能是 task_ok/task_fail/circuit/plugin/system）"
                 ));
             }
         }
@@ -785,6 +806,25 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
     Ok(cfg)
 }
 
+/// 有没有任何**启用的**推送规则会收这个事件。
+///
+/// 给「任务成功」这类高频事件用的：它每次跑完都发生，无条件生成一条通知会把铃铛表
+/// 刷满（`KEEP = 500`，一个每秒级的任务一天就冲平），而多半根本没人订阅它。
+/// 所以调用方先问一句再记 —— 没人要就不生成，不是生成了再丢。
+pub fn wants_event(store: &crate::config_store::ConfigStore, event: &str, plugin: &str) -> bool {
+    let Ok(cfg) = from_store(store) else {
+        return false;
+    };
+    cfg.effective_routes().iter().any(|r| {
+        // 事件要对上（空 = 全收）…
+        let hit_event = r.events.is_empty() || r.events.iter().any(|e| e == event);
+        // …而且插件过滤也要过：订了「只收 mcloud*」就不能因为别的插件跑成功也塞一条。
+        let hit_plugin = (r.include_plugins.is_empty() || name_hit(&r.include_plugins, plugin))
+            && !name_hit(&r.exclude_plugins, plugin);
+        r.enabled && hit_event && hit_plugin
+    })
+}
+
 /// 从热快照读配置。config.json 是热生效的，所以这里每次都读最新值。
 pub fn from_store(store: &crate::config_store::ConfigStore) -> Result<Config, String> {
     let text = store.snapshot();
@@ -1019,7 +1059,8 @@ pub async fn record(
             return;
         }
     };
-    if !cfg.wants(n.level, &n.plugin, n.task.as_deref()) {
+    let explicit = cfg.explicitly_wants_event(n.event, &n.plugin);
+    if !explicit && !cfg.wants(n.level, &n.plugin, n.task.as_deref()) {
         return;
     }
     let payload = json!({
@@ -1053,9 +1094,13 @@ pub async fn record(
         if !ch.enabled || !r.accepts(&n, minute) {
             continue;
         }
-        if let Some(m) = r.min_level.as_deref() {
-            if !m.is_empty() && rank(n.level) < rank(m) {
-                continue;
+        // 这条推送显式点名了这个事件（如 events 里写着 task_ok）：不再卡等级门槛。
+        let named = r.events.iter().any(|e| e == n.event);
+        if !named {
+            if let Some(m) = r.min_level.as_deref() {
+                if !m.is_empty() && rank(n.level) < rank(m) {
+                    continue;
+                }
             }
         }
         let q = r.quiet.or(cfg.quiet);

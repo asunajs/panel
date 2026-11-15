@@ -689,7 +689,7 @@ fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
 /// （实测：服务端 232KB 的新 app.js，页面里加载的是 196KB 的旧货）。URL 带上
 /// 面板版本之后，升级 = URL 变化 = 缓存自然失效。asset() 的 no-store 只保护
 /// 新条目，管不了旧条目。
-fn index_page() -> Response {
+async fn index_page() -> Response {
     let v = crate::panelversion::current();
     let body = match std::env::var_os("PANEL_WEB_DIR") {
         Some(dir) => std::fs::read_to_string(std::path::PathBuf::from(dir).join("index.html"))
