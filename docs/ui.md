@@ -737,6 +737,29 @@ computed lineHeight / fontSize / padding。
   其它 → 插件），HTTP 那类由错误中间件 `emit_src(Source::Http, "@http", …)` 显式标。
 - 旧库靠 `ALTER TABLE logs ADD COLUMN source` + `UPDATE` 回填，升级不用手动处理。
 
+### 一条 400 的 400 条：`detail=` 空着和「目录不在当成请求错」（第 205 轮）
+
+用户反馈：日志里连续刷 `GET /api/plugins/files → 400 code=bad_request detail=`。
+查下来是**两个残留实例**的 `PANEL_PLUGINS_DIR` 指向已被删掉的 `/tmp/...` 目录，
+界面每几秒轮询这个接口，于是每几秒刷一条。两个真问题：
+
+1. **目录不在被当成了「你的请求有问题」**。`read_dir` 的 ENOENT 是实例状态问题（还没装过
+   插件 / 路径配错），不是客户端错。现在：启动时 `create_dir_all` 把目录建出来；
+   接口里 ENOENT 一律回 `200 + files: []`，其它 IO 错（权限等）回 **500 并带路径**。
+2. **日志里 `detail=` 空着**，等于什么都没说 —— 因为 `bad()` 把原因写进了响应体的
+   `error` 字段，而日志行只取 `detail`。现在 detail 为空时**退回公开消息**：
+   `400 code=bad_request detail=读插件目录失败 /path: No such file or directory`。
+
+顺带清掉三个仓库目录里跑着的旧实例（8997 / 9021 / 18997）——它们和上面那两个一样，
+是压测/调试留下的，端口占着、日志刷着，人却早忘了。
+
+### 清残留实例（自查一条）
+
+```bash
+lsof -nP -iTCP -sTCP:LISTEN | grep panel          # 谁在监听
+curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件目录没了
+```
+
 ## 磁盘读数：只在 API 与告警里（第 200 轮加，第 203 轮撤掉卡片）
 
 `/api/state` 里一直有 `disk`：`total / avail / data_bytes / data_files / partial`。

@@ -269,10 +269,16 @@ impl IntoResponse for ApiError {
             }
         }
         // detail（和编号）只交给中间件写日志，绝不进响应体。
+        // detail 只给日志。它为空时**退回公开消息**：否则日志行是
+        // `400 code=bad_request detail=`，等于什么都没说（第 205 轮就是这么查了半天）。
+        let detail = match self.detail.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => self.public_msg.clone(),
+        };
         let d = format!(
             "code={} detail={}{}",
             self.code,
-            self.detail.unwrap_or_default(),
+            detail,
             ref_id.map(|r| format!(" ref={r}")).unwrap_or_default()
         );
         resp.extensions_mut().insert(ErrorDetail(d));
@@ -3078,9 +3084,26 @@ async fn write_atomic(
 /// 为什么需要它：`/api/state` 里的插件是**已加载**的，语法错/启动失败的文件不在里面，
 /// 但用户恰恰要去界面里修那些文件。
 async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let mut rd = tokio::fs::read_dir(&st.plugins_dir)
-        .await
-        .map_err(|e| bad(format!("读插件目录失败 {}: {e}", st.plugins_dir.display())))?;
+    // 目录不在 = 还没装过插件（或者这个实例的 PANEL_PLUGINS_DIR 指向了已删的路径）。
+    // 这**不是**客户端请求的问题：以前回 400 bad_request，界面每几秒轮询一次就刷一屏
+    // `GET /api/plugins/files → 400 code=bad_request detail=`（第 205 轮实测的噪音源）。
+    // 现在：ENOENT → 空列表；其它 IO 错（权限等）→ 500 并带上路径。
+    let mut rd = match tokio::fs::read_dir(&st.plugins_dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Json(json!({
+                "dir": st.plugins_dir.display().to_string(),
+                "max_bytes": source_max(),
+                "files": [],
+            })));
+        }
+        Err(e) => {
+            return Err(internal(format!(
+                "读插件目录失败 {}: {e}", st.plugins_dir.display()
+            ))
+            .with_detail(st.plugins_dir.display().to_string()))
+        }
+    };
     let loaded: std::collections::HashSet<String> = st
         .sched
         .plugins()

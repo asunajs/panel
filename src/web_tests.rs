@@ -4031,3 +4031,67 @@ async fn a_missing_webui_dir_says_reinstall_not_just_404() {
     assert!(e.contains("重装"), "要告诉用户该干什么：{e}");
     assert!(e.contains("webui"), "要点明缺的是界面目录：{e}");
 }
+
+/// 用户反馈 #2：日志里连续刷 `GET /api/plugins/files → 400 code=bad_request detail=`。
+///
+/// 根因不是浏览器乱请求，是**插件目录不存在**（实测：两个实例的 `PANEL_PLUGINS_DIR`
+/// 指向已被删掉的 /tmp 路径）。界面每几秒轮询一次这个接口，于是每几秒刷一条 400，把日志刷满。
+/// 目录不在 = 「还没装过插件」，不是「你的请求有问题」：必须 200 + 空列表，且不写错误日志。
+#[tokio::test]
+async fn plugin_files_on_missing_dir_is_empty_not_400() {
+    let (app, plugins, _data, _store, db) = setup_core("nlfile").await;
+    // 把插件目录删掉，模拟「实例的 PANEL_PLUGINS_DIR 指向已删目录」
+    std::fs::remove_dir_all(&plugins).unwrap();
+
+    let (status, v) = get(&app, "/api/plugins/files").await;
+    assert_eq!(status, StatusCode::OK, "目录不在要给空列表，不是 400：{v}");
+    assert_eq!(v["files"].as_array().map(|a| a.len()), Some(0), "{v}");
+    assert!(v["dir"].as_str().is_some(), "至少要说清是哪个目录：{v}");
+
+    // 落库是异步队列：等一会儿再看，否则「没有错误行」可能只是还没落盘
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let errs = error_logs(&db).await;
+    assert!(
+        !errs.iter().any(|m| m.contains("/api/plugins/files")),
+        "这不该在日志里留一条错误（用户就是被它刷屏的）：{errs:?}"
+    );
+}
+
+/// 错误日志的 detail 不许是空的：`400 code=bad_request detail=` 等于什么都没说。
+#[tokio::test]
+async fn error_log_detail_falls_back_to_message() {
+    let (app, _plugins, _data, _store, db) = setup_core("nlmsg").await;
+    // 真造一个 400：`source` 只认 panel|plugin|script|http（见 api_logs 的校验）
+    let (status, _v) = get(&app, "/api/logs?source=nope").await;
+    assert!(status.is_client_error(), "这是客户端错误：{status}");
+    let mut errs = Vec::new();
+    for _ in 0..50 {
+        errs = error_logs(&db).await;
+        if !errs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!errs.is_empty(), "错误要落一条日志");
+    for line in &errs {
+        assert!(!line.ends_with("detail="), "detail 不能空着：{line}");
+        assert!(!line.contains("detail= "), "detail 不能空着：{line}");
+    }
+}
+
+/// 库里的错误日志（warn + error，按 id 顺序）。
+async fn error_logs(db: &Db) -> Vec<String> {
+    db.call(|c| {
+        let mut st = c
+            // HTTP 错误日志是 **warn** 级（用户截图里就是 WARN panel），500 才升到 error
+            .prepare("SELECT message FROM logs WHERE level IN ('warn','error') ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap()
+}

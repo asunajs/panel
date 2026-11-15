@@ -89,6 +89,13 @@ async fn main() -> Result<(), String> {
     stats::stats();
     let data_dir = PathBuf::from(env_or("PANEL_DATA_DIR", "data"));
     let plugins_dir = PathBuf::from(env_or("PANEL_PLUGINS_DIR", "plugins"));
+    // 插件目录不存在不是错误（新实例、或者还没装过插件），但必须**建出来**：
+    // 否则 /api/plugins/files 每次读目录都 ENOENT，界面每几秒刷一次就刷一屏 400
+    // （第 205 轮：两个残留实例指向被删掉的 /tmp 目录，日志里全是
+    //  `GET /api/plugins/files → 400 code=bad_request detail=`）。
+    if let Err(e) = std::fs::create_dir_all(&plugins_dir) {
+        eprintln!("建插件目录失败 {}: {e}（继续启动，插件页会是空的）", plugins_dir.display());
+    }
     // 带上路径：机器上可能挂了多个盘，「Permission denied」不说清是哪一个的话，
     // 运维只能靠猜（第 70 轮：只读目录下启动，报的就是一句没有路径的 Permission denied）。
     std::fs::create_dir_all(&data_dir)
