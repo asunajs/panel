@@ -42,6 +42,7 @@ pub async fn acquire() -> Option<OwnedSemaphorePermit> {
 ///
 /// 只有 jsslots_tests 用得到（`cargo clippy --all-targets` 在**不编测试**的那趟里
 /// 会报 never used —— 别照着那个提示删，删了测试就编不过，第 212 轮踩过）。
+#[allow(dead_code)] // 只有 jsslots_tests 用；clippy 在不编测试的那趟里会误报（pitfalls §64）
 pub fn available() -> usize {
     cell().available_permits()
 }

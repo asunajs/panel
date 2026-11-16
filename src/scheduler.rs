@@ -700,6 +700,7 @@ impl Scheduler {
     }
 
     /// 跑一拍空闲检查，返回这一拍卸掉几个（后台每 30s 调一次）。
+    #[allow(dead_code)] // 暂留：review A3（cron/空闲卸载那条线还没接上）
     pub async fn idle_tick(&self) -> usize {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Cmd::IdleTick { reply: tx }).is_err() {

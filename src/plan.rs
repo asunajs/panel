@@ -30,7 +30,7 @@
 //! 重新掷骰子」还会让时间在周期内漂移。用 `(任务ID, 周期键)` 做种子，同一个周期
 //! 内算几次都一样，跨周期自动变化，且不需要持久化任何随机状态。
 
-use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, TimeZone, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::Value;
 
@@ -552,10 +552,7 @@ impl Plan {
             if let (Some(s), Some(e)) = (at_date(self.tz, date, start), at_date(self.tz, date, end)) {
                 // 跨午夜：止 ≤ 起 就把止挪到次日
                 let end_dt = if end <= start {
-                    match date.succ_opt().and_then(|d| at_date(self.tz, d, end)) {
-                        Some(x) => x,
-                        None => return None,
-                    }
+                    date.succ_opt().and_then(|d| at_date(self.tz, d, end))?
                 } else {
                     e
                 };
@@ -753,7 +750,11 @@ fn month_key(y: i32, m: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Timelike 只有测试用（.hour()/.minute()）：放模块里，别放在产品代码的 import 里
+    // 让 clippy 在为「不编测试」的那趟报未使用（pitfalls §64）。
+    use chrono::Timelike;
 
+    #[allow(dead_code)] // 暂留：review A3（测试辅助，当前用例没用到）
     fn tz() -> Tz {
         "Asia/Shanghai".parse().unwrap()
     }
@@ -1058,7 +1059,7 @@ mod tests {
             r#"{"type":"monthly","day":31,"randomPick":false,"at":"09:00","jitter":null,
                 "timezone":"Asia/Shanghai"}"#,
         );
-        let start = Utc.with_ymd_and_hms(2027, 0 + 1, 15, 0, 0, 0).unwrap();
+        let start = Utc.with_ymd_and_hms(2027, 1, 15, 0, 0, 0).unwrap();
         let a = p.next_after(start).unwrap();
         let b = p.next_after(a).unwrap();
         assert_eq!(local(&p, a), "2027-01-31 09:00:00");

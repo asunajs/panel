@@ -1,0 +1,70 @@
+{"level":"info","msg":"perf-js: 已加载","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:44:48.618+08:00","type":"info"}
+{"level":"info","msg":"usage-errors: 已加载（404 每 10 分钟 / DNS 失败每 15 分钟，均自捕获）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:44:48.618+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 3）","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:44:48.618+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:44:48.618+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `perf-fast`（@every 50ms），下次触发 2026-10-20 18:44:48.668","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:44:48.619+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `perf-write`（@every 1s），下次触发 2026-10-20 18:44:49.618","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:44:48.619+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `perf-fail`（@every 30s），下次触发 2026-10-20 18:45:18.618","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:44:48.619+08:00","type":"info"}
+{"level":"info","msg":"usage-github: 已加载（zen 每 3 分钟 / rate_limit 每 9 分钟）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:44:48.620+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:44:48.620+08:00","type":"info"}
+{"level":"info","msg":"usage-hitokoto: 已加载（每 2 分钟 GET https://v1.hitokoto.cn/?max_length=60&encode=json）","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:44:48.621+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:44:48.621+08:00","type":"info"}
+{"level":"info","msg":"usage-weather: 已加载（每 5 分钟 GET open-meteo）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `http-404`（@every 10m），下次触发 2026-10-20 18:54:48.623","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `dns-fail`（@every 15m），下次触发 2026-10-20 18:59:48.623","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `github-zen`（@every 3m），下次触发 2026-10-20 18:47:48.623","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `github-rate`（@every 9m），下次触发 2026-10-20 18:53:48.623","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `hitokoto`（@every 2m），下次触发 2026-10-20 18:46:48.623","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"已注册任务 `weather`（@every 5m），下次触发 2026-10-20 18:49:48.623","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:44:48.623+08:00","type":"info"}
+{"level":"info","msg":"任务 `perf-fast` 首次触发（@every 50ms），调度延迟 4ms","plugin":"perf-js","run":"20261020-184448-0000","scope":"perf-js","ts":"2026-10-20T18:44:48.674+08:00","type":"info"}
+{"level":"info","msg":"任务 `perf-write` 首次触发（@every 1s），调度延迟 2ms","plugin":"perf-js","run":"20261020-184449-0014","scope":"perf-js","ts":"2026-10-20T18:44:49.622+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184518-0276","scope":"perf-js","ts":"2026-10-20T18:45:18.622+08:00","type":"error"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184548-04ed","scope":"perf-js","ts":"2026-10-20T18:45:48.621+08:00","type":"error"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184618-0764","scope":"perf-js","ts":"2026-10-20T18:46:18.622+08:00","type":"error"}
+{"level":"info","msg":"惰性加载：卸下内存（下次触发/请求前 20 秒会装回来；勾了「长期加载」就不卸）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:46:48.624+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：卸下内存（下次触发/请求前 20 秒会装回来；勾了「长期加载」就不卸）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:46:48.624+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184648-09dc","scope":"perf-js","ts":"2026-10-20T18:46:48.624+08:00","type":"error"}
+{"level":"info","msg":"任务 `hitokoto` 首次触发（@every 2m），调度延迟 0ms","plugin":"usage-hitokoto","run":"20261020-184648-09db","scope":"usage-hitokoto","ts":"2026-10-20T18:46:49.279+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184718-0c53","scope":"perf-js","ts":"2026-10-20T18:47:18.622+08:00","type":"error"}
+{"level":"error","msg":"任务 `perf-fail` 连续失败达到阈值，已熔断（第 1 次），冷却至 2026-10-20 18:47:48.622","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:47:18.622+08:00","type":"error"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184748-0eca","scope":"perf-js","ts":"2026-10-20T18:47:48.622+08:00","type":"error"}
+{"level":"info","msg":"任务 `github-zen` 首次触发（@every 3m），调度延迟 0ms","plugin":"usage-github","run":"20261020-184748-0ecb","scope":"usage-github","ts":"2026-10-20T18:47:49.209+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：卸下内存（下次触发/请求前 20 秒会装回来；勾了「长期加载」就不卸）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:47:49.620+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-184848-13b8","scope":"perf-js","ts":"2026-10-20T18:48:48.624+08:00","type":"error"}
+{"level":"info","msg":"usage-weather: 已加载（每 5 分钟 GET open-meteo）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:49:29.622+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:49:29.622+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：装回内存（触发/请求时不用等）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:49:29.622+08:00","type":"info"}
+{"level":"info","msg":"任务 `weather` 首次触发（@every 5m），调度延迟 1ms","plugin":"usage-weather","run":"20261020-184948-18a6","scope":"usage-weather","ts":"2026-10-20T18:49:49.767+08:00","type":"info"}
+{"level":"info","msg":"usage-github: 已加载（zen 每 3 分钟 / rate_limit 每 9 分钟）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:50:29.623+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:50:29.623+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：装回内存（触发/请求时不用等）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:50:29.623+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-185048-1d94","scope":"perf-js","ts":"2026-10-20T18:50:48.624+08:00","type":"error"}
+{"level":"info","msg":"惰性加载：卸下内存（下次触发/请求前 20 秒会装回来；勾了「长期加载」就不卸）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:51:30.620+08:00","type":"info"}
+{"level":"info","msg":"任务 `github-rate` 首次触发（@every 9m），调度延迟 628ms","plugin":"usage-github","run":"20261020-185349-2c68","scope":"usage-github","ts":"2026-10-20T18:53:49.484+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：卸下内存（下次触发/请求前 20 秒会装回来；勾了「长期加载」就不卸）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:53:49.620+08:00","type":"info"}
+{"level":"info","msg":"usage-errors: 已加载（404 每 10 分钟 / DNS 失败每 15 分钟，均自捕获）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:54:29.624+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:54:29.624+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：装回内存（触发/请求时不用等）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:54:29.624+08:00","type":"info"}
+{"level":"info","msg":"usage-weather: 已加载（每 5 分钟 GET open-meteo）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:54:29.626+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:54:29.627+08:00","type":"info"}
+{"level":"info","msg":"惰性加载：装回内存（触发/请求时不用等）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:54:29.627+08:00","type":"info"}
+{"level":"error","msg":"任务 `perf-fail` 执行失败: Error: perf-fail：故意失败（长跑压测）\n    at <anonymous> (file:///Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/plugins-20261020-184448/perf-js.js:58:15)\n    at <anonymous> (eval_script:418:11)\n","plugin":"perf-js","run":"20261020-185448-314a","scope":"perf-js","ts":"2026-10-20T18:54:48.625+08:00","type":"error"}
+{"level":"info","msg":"usage-errors: 404 路径返回 status=undefined（预期 404）","plugin":"usage-errors","run":"20261020-185448-3149","scope":"usage-errors","ts":"2026-10-20T18:54:49.156+08:00","type":"info"}
+{"level":"info","msg":"任务 `http-404` 首次触发（@every 10m），调度延迟 0ms","plugin":"usage-errors","run":"20261020-185448-3149","scope":"usage-errors","ts":"2026-10-20T18:54:49.156+08:00","type":"info"}
+{"level":"info","msg":"usage-hitokoto: 第 5 次 status=200 591ms We don't (wanna let go).","plugin":"usage-hitokoto","run":"20261020-185449-3155","scope":"usage-hitokoto","ts":"2026-10-20T18:54:49.747+08:00","type":"info"}
+{"level":"info","msg":"perf-js: 已加载","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"usage-errors: 已加载（404 每 10 分钟 / DNS 失败每 15 分钟，均自捕获）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 3）","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"插件已热更新（摘掉 3 个旧任务，登记 3 个新任务）","plugin":"perf-js","scope":"perf-js","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"插件已热更新（摘掉 2 个旧任务，登记 2 个新任务）","plugin":"usage-errors","scope":"usage-errors","ts":"2026-10-20T18:55:20.866+08:00","type":"info"}
+{"level":"info","msg":"usage-github: 已加载（zen 每 3 分钟 / rate_limit 每 9 分钟）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:55:20.869+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 2）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:55:20.869+08:00","type":"info"}
+{"level":"info","msg":"插件已热更新（摘掉 2 个旧任务，登记 2 个新任务）","plugin":"usage-github","scope":"usage-github","ts":"2026-10-20T18:55:20.869+08:00","type":"info"}
+{"level":"info","msg":"usage-hitokoto: 已加载（每 2 分钟 GET https://v1.hitokoto.cn/?max_length=60&encode=json）","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:55:20.871+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:55:20.871+08:00","type":"info"}
+{"level":"info","msg":"插件已热更新（摘掉 1 个旧任务，登记 1 个新任务）","plugin":"usage-hitokoto","scope":"usage-hitokoto","ts":"2026-10-20T18:55:20.871+08:00","type":"info"}
+{"level":"info","msg":"usage-weather: 已加载（每 5 分钟 GET open-meteo）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:55:20.873+08:00","type":"info"}
+{"level":"info","msg":"插件已加载（quickjs，on_tick: 未注册，任务: 1）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:55:20.873+08:00","type":"info"}
+{"level":"info","msg":"插件已热更新（摘掉 1 个旧任务，登记 1 个新任务）","plugin":"usage-weather","scope":"usage-weather","ts":"2026-10-20T18:55:20.873+08:00","type":"info"}

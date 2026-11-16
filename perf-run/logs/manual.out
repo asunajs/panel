@@ -1,0 +1,1 @@
+perf-run/supervisor.sh: line 30:  4264 Terminated: 15          PERF_OUT_DIR="$SEG" PERF_PANEL_BIN="$BASE/plugin-panel" python3 -u "$BASE/extra_sampler.py" > "$SEG/extra.out" 2>&1

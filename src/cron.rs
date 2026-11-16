@@ -1111,8 +1111,12 @@ mod tests {
     }
 
 mod dst_tests {
-    use super::Schedule;
+    // 这两个 import 在 `cargo test` 里都用得到（Schedule::parse / Local::now）；
+    // clippy 在不编测试目标的那一趟里会报「未使用」—— 别照删（pitfalls §64）。
+    #[allow(unused_imports)]
     use chrono::Local;
+    #[allow(unused_imports)]
+    use super::Schedule;
 
     #[test]
     fn daily_schedule_never_returns_none_across_a_year() {

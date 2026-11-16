@@ -1,0 +1,62 @@
+输出目录: /Users/catlair/plugin-panel-perf-b/runs/run-20261022-102721
+二进制:   /Users/catlair/plugin-panel-perf-b/plugin-panel
+时长:     24.00 小时（86400s），每 30s 采样
+面板日志: /Users/catlair/plugin-panel-perf-b/runs/run-20261022-102721/panel-20261022-102722.log
+数据:     /Users/catlair/plugin-panel-perf-b/runs/run-20261022-102721/endurance-20261022-102722.jsonl
+
+[     0.6s] 常驻=5.7MB fd=19 线程=12 触发=10 错误日志=0 state=5.6ms perf=1.7ms
+[   301.6s] 常驻=7.1MB fd=22 线程=11 触发=6338 错误日志=8 state=3.5ms perf=2.1ms
+[   601.7s] 常驻=6.6MB fd=None 线程=11 触发=13278 错误日志=10 state=2.6ms perf=1.4ms  | 热更新（rev=1）
+[   903.1s] 常驻=7.2MB fd=22 线程=11 触发=18991 错误日志=16 state=5.7ms perf=2.3ms
+[  1203.2s] 常驻=7.5MB fd=22 线程=11 触发=25295 错误日志=16 state=1.8ms perf=0.6ms  | 热更新（rev=2）
+[  1503.2s] 常驻=7.1MB fd=22 线程=11 触发=31611 错误日志=22 state=7.0ms perf=2.2ms
+[  1803.3s] 常驻=7.6MB fd=22 线程=11 触发=37920 错误日志=22 state=3.5ms perf=2.0ms  | 热更新（rev=3）；手动触发 perf-write（http 200）
+[  2103.3s] 常驻=7.1MB fd=22 线程=11 触发=44227 错误日志=28 state=3.9ms perf=1.8ms
+[  2403.4s] 常驻=7.2MB fd=22 线程=11 触发=50534 错误日志=28 state=4.0ms perf=1.6ms  | 热更新（rev=4）
+[  2703.4s] 常驻=7.7MB fd=22 线程=11 触发=56846 错误日志=34 state=3.7ms perf=1.6ms
+[  3003.4s] 常驻=7.7MB fd=22 线程=11 触发=63154 错误日志=34 state=2.6ms perf=0.9ms  | 热更新（rev=5）
+[  3303.5s] 常驻=7.1MB fd=22 线程=11 触发=69462 错误日志=40 state=2.0ms perf=0.6ms
+[  3603.5s] 常驻=7.2MB fd=22 线程=11 触发=75774 错误日志=40 state=4.7ms perf=1.4ms  | 热更新（rev=6）；手动触发 perf-write（http 200）
+[  3933.5s] 常驻=7.2MB fd=22 线程=11 触发=82714 错误日志=46 state=4.2ms perf=2.6ms
+[  4233.5s] 常驻=7.8MB fd=22 线程=11 触发=89019 错误日志=46 state=3.4ms perf=3.4ms  | 热更新（rev=7）
+[  4533.5s] 常驻=7.8MB fd=22 线程=11 触发=95330 错误日志=52 state=4.2ms perf=1.8ms
+[  4834.3s] 常驻=7.6MB fd=22 线程=11 触发=101651 错误日志=52 state=2.3ms perf=1.1ms  | 热更新（rev=8）
+[  5134.4s] 常驻=7.9MB fd=22 线程=11 触发=107968 错误日志=58 state=8.1ms perf=1.7ms
+[  5404.4s] 常驻=7.3MB fd=22 线程=11 触发=113642 错误日志=58 state=1.9ms perf=0.7ms  | 手动触发 perf-write（http 200）
+[  5434.4s] 常驻=7.4MB fd=22 线程=11 触发=114272 错误日志=58 state=2.1ms perf=0.7ms  | 热更新（rev=9）
+[  5734.4s] 常驻=7.2MB fd=22 线程=11 触发=120582 错误日志=64 state=4.1ms perf=1.8ms
+[  6034.5s] 常驻=7.4MB fd=22 线程=11 触发=126892 错误日志=64 state=4.0ms perf=2.1ms  | 热更新（rev=10）
+[  6334.5s] 常驻=7.2MB fd=22 线程=11 触发=133204 错误日志=70 state=5.7ms perf=1.6ms
+[  6634.5s] 常驻=7.4MB fd=22 线程=11 触发=139512 错误日志=70 state=5.3ms perf=1.4ms  | 热更新（rev=11）
+[  6934.5s] 常驻=7.7MB fd=22 线程=11 触发=145822 错误日志=76 state=5.2ms perf=1.9ms
+[  7204.6s] 常驻=7.3MB fd=22 线程=11 触发=151501 错误日志=76 state=3.2ms perf=1.6ms  | 手动触发 perf-write（http 200）；暂停 perf-fail（http 200）
+[  7234.6s] 常驻=7.3MB fd=22 线程=11 触发=152133 错误日志=76 state=5.3ms perf=1.6ms  | 热更新（rev=12）
+[  7504.6s] 常驻=7.4MB fd=22 线程=11 触发=157805 错误日志=76 state=5.6ms perf=1.5ms  | 恢复 perf-fail（http 200）
+[  7804.6s] 常驻=7.8MB fd=22 线程=11 触发=164120 错误日志=82 state=4.6ms perf=1.6ms
+[  7834.6s] 常驻=7.9MB fd=22 线程=11 触发=164749 错误日志=82 state=4.9ms perf=1.4ms  | 热更新（rev=13）
+[  8134.7s] 常驻=7.2MB fd=22 线程=11 触发=171061 错误日志=88 state=4.3ms perf=1.5ms
+[  8434.7s] 常驻=7.3MB fd=22 线程=11 触发=177368 错误日志=88 state=5.0ms perf=1.9ms  | 热更新（rev=14）
+[  8734.7s] 常驻=7.4MB fd=22 线程=11 触发=183677 错误日志=94 state=5.5ms perf=2.0ms
+[  9004.8s] 常驻=7.4MB fd=22 线程=11 触发=189357 错误日志=94 state=4.8ms perf=1.6ms  | 手动触发 perf-write（http 200）
+[  9034.8s] 常驻=7.4MB fd=22 线程=11 触发=189988 错误日志=94 state=3.5ms perf=1.6ms  | 热更新（rev=15）
+[  9334.8s] 常驻=7.3MB fd=22 线程=11 触发=196298 错误日志=100 state=4.4ms perf=1.8ms
+[  9634.8s] 常驻=7.3MB fd=22 线程=11 触发=202607 错误日志=100 state=6.4ms perf=1.8ms  | 热更新（rev=16）
+[  9934.9s] 常驻=7.3MB fd=22 线程=11 触发=208918 错误日志=106 state=5.2ms perf=1.9ms
+[ 10234.9s] 常驻=7.3MB fd=22 线程=11 触发=215225 错误日志=106 state=5.2ms perf=2.1ms  | 热更新（rev=17）
+[ 10535.0s] 常驻=7.8MB fd=22 线程=11 触发=221535 错误日志=112 state=7.6ms perf=2.0ms
+[ 10805.0s] 常驻=7.4MB fd=22 线程=11 触发=227214 错误日志=112 state=4.1ms perf=1.5ms  | 手动触发 perf-write（http 200）
+[ 10835.0s] 常驻=7.4MB fd=22 线程=11 触发=227846 错误日志=112 state=6.4ms perf=1.6ms  | 热更新（rev=18）
+[ 11135.0s] 常驻=7.5MB fd=22 线程=11 触发=234156 错误日志=118 state=6.7ms perf=1.6ms
+[ 11435.8s] 常驻=7.5MB fd=22 线程=11 触发=240481 错误日志=118 state=5.9ms perf=1.6ms  | 热更新（rev=19）
+[ 11735.9s] 常驻=7.4MB fd=22 线程=11 触发=246792 错误日志=124 state=5.9ms perf=1.5ms
+[ 12035.9s] 常驻=7.4MB fd=22 线程=11 触发=253100 错误日志=124 state=6.3ms perf=2.5ms  | 热更新（rev=20）
+[ 12336.0s] 常驻=7.5MB fd=22 线程=11 触发=259410 错误日志=130 state=5.8ms perf=1.7ms
+[ 12606.0s] 常驻=7.4MB fd=22 线程=11 触发=265090 错误日志=130 state=4.8ms perf=2.8ms  | 手动触发 perf-write（http 200）
+[ 12636.0s] 常驻=7.8MB fd=22 线程=11 触发=265723 错误日志=130 state=6.1ms perf=2.1ms  | 热更新（rev=21）
+[ 12936.1s] 常驻=8.1MB fd=22 线程=11 触发=272028 错误日志=136 state=6.4ms perf=1.7ms
+[ 13236.1s] 常驻=8.4MB fd=22 线程=11 触发=278322 错误日志=136 state=6.7ms perf=2.0ms  | 热更新（rev=22）
+[ 13536.1s] 常驻=7.6MB fd=22 线程=11 触发=284630 错误日志=142 state=3.5ms perf=1.0ms
+[ 13836.2s] 常驻=7.9MB fd=22 线程=11 触发=290937 错误日志=142 state=2.5ms perf=0.6ms  | 热更新（rev=23）
+[ 14136.9s] 常驻=7.8MB fd=22 线程=11 触发=297259 错误日志=148 state=2.6ms perf=0.6ms
+[ 14406.9s] 常驻=7.6MB fd=22 线程=11 触发=302943 错误日志=148 state=8.4ms perf=3.5ms  | 手动触发 perf-write（http 200）；暂停 perf-fail（http 200）
+[ 14437.0s] 常驻=7.6MB fd=22 线程=11 触发=303569 错误日志=148 state=3.0ms perf=0.9ms  | 热更新（rev=24）

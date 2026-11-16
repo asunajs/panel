@@ -1,0 +1,101 @@
+/Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/libproc_metrics.py:2: SyntaxWarning: "\`" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\`"? A raw string is also an option.
+  """libproc 指标补丁：macOS 沙箱里 \`ps\`/\`top\` 被禁（"Operation not permitted"），
+输出目录: /Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448
+二进制:   /Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/plugin-panel
+时长:     24.00 小时（86400s），每 30s 采样
+面板日志: /Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/panel-20261020-184448.log
+数据:     /Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/endurance-20261020-184448.jsonl
+
+[     0.5s] 常驻=5.7MB fd=19 线程=10 触发=5 错误日志=0 state=2.1ms perf=0.8ms
+[   301.3s] 常驻=7.3MB fd=None 线程=9 触发=6962 错误日志=8 state=2.5ms perf=1.0ms
+[   602.1s] 常驻=7.3MB fd=None 线程=9 触发=13288 错误日志=10 state=3.0ms perf=1.2ms  | 热更新（rev=1）
+
+# 长跑性能检测报告
+
+- 采样点：**21** 个，覆盖 **0.17 小时**（计划 24.00 小时）
+- 面板重启次数：**0**
+- 热更新：1 次（每 600s） · 手动触发：0 次 · 暂停/恢复：0 轮
+- 插件路由失败：0 次
+- 内存口径：`phys_footprint`
+- 原始数据：`/Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/endurance-20261020-184448.jsonl` · 面板日志：`/Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/panel-20261020-184448.log`
+
+## 1. 常驻内存
+
+| 指标 | 值 |
+|---|---|
+| 起 / 终 / 峰值 | 5.73 MB / 7.34 MB / **7.34 MB** |
+| 稳态斜率 | +6.342 MB/小时（σ=0.28 MB） |
+| 前半段 / 后半段 / 末段斜率 | +18.874 / +1.102 / +0.562 MB/小时 |
+| 末段涨幅 | +0.01 MB（阈值 max(0.08MB, 2σ=0.01MB)） |
+| 外推 | +152.22 MB/天 |
+| 本窗口分辨率 | ±88.34 MB/天 |
+
+**判定：✅ 平台期** —— 末段涨幅 +0.01MB 落在噪声带内，常驻稳定在 ~7.3 MB。
+
+## 2. CPU
+
+| 指标 | 值 |
+|---|---|
+| 平均（占单核） | **1.33%** |
+| 区间峰值 | 1.6% |
+| 累计 CPU 时间 | 8.0s / 0.17h（占单核 1.33%） |
+
+## 3. 文件描述符与线程（泄漏检查）
+
+- 文件描述符：起 19 → 终 22，峰值 22 —— ✅ 无泄漏迹象
+- 线程数：起 10 → 终 9，峰值 10 —— ✅ 稳定
+
+## 4. 调度：触发次数 vs 理论值
+
+| 任务 | 理论间隔 | 实际触发 | 理论次数 | 达成率 |
+|---|---|---|---|---|
+| `perf-fast` | 50ms | 12631 | 12,032 | 104.98% |
+| `perf-write` | 1000ms | 631 | 602 | 104.89% |
+| `perf-fail` | 30000ms | 9 | 20 | 44.88% （熔断 5 次，冷却期内不触发，属预期） |
+
+**判定：✅ 所有任务达成率 ≥95%**（毫秒级任务在串行执行下会有小幅推迟，属预期）。
+
+## 5. 调度延迟（`payload.lateMs`）
+
+### JS（13,267 次触发）
+
+- 平均 2.79ms · 最小 0ms · **最大 22ms**
+- 分位（桶内上界）：p50 ≤5ms · p90 ≤5ms · p99 ≤20ms · 超过最大桶 0 次
+
+> 说明：`lateMs` 是「实际触发时刻 − 计划触发时刻」。毫秒级任务必然有少量延迟，关键看 p99 和最大值有没有随时间恶化。
+
+## 6. HTTP 延迟
+
+- `/api/state`：p50 2.0ms · p99 3.4ms · max 3.4ms
+- `/perf（插件路由）`：p50 0.8ms · p99 1.6ms · max 1.6ms
+- `/api/state` 状态码分布：{200: 21}
+- 插件路由失败：0 次
+
+## 7. 错误、熔断与恢复
+
+- 日志里的错误条数：起 0 → 终 10（环形缓冲上限内）
+- 熔断计数：{'perf-fail': 5, 'perf-fast': 0, 'perf-write': 0, 'dns-fail': 0, 'http-404': 0, 'github-rate': 0, 'github-zen': 0, 'hitokoto': 0, 'weather': 0}
+- 引擎不健康的采样点：0 个 ✅
+- 累计执行预算打断：起 0 → 终 0
+- 面板进程重启：0 次 ✅
+
+## 8. SQLite 文件增长
+
+- `db`：4 KB → 3588 KB
+- `wal`：338 KB → 1024 KB
+- `shm`：32 KB → 32 KB
+- WAL 高水位：**1.00 MB**（WAL 文件 checkpoint 后**不会缩回 0**，停在高水位上 —— 这是 SQLite 的行为，不是泄漏。面板在 `db::open` 里设了 `wal_autocheckpoint=256` + `journal_size_limit=1MB`，所以高水位应该 ≤1 MB；**明显高于 1 MB 说明是改动前的二进制跑的**）
+- 库里增长 3584 KB 是任务触发记录（每次触发一条 UPDATE + 插件自己的追加写）；面板不主动清自己的表，清理策略归插件作者
+
+## 9. 结论
+
+- ✅ 常驻内存
+- ✅ 调度达成率
+- ✅ fd 无泄漏
+- ✅ 无崩溃
+- ✅ 引擎始终健康
+- ✅ 插件路由可用
+
+_报告生成于 2026-10-20T18:55:21_
+
+报告已写入 /Users/catlair/mobile/workspace/rust-plugin-panel/perf-run/runs/run-20261020-184448/endurance-20261020-184448.md

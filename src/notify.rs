@@ -142,6 +142,7 @@ fn quiet_left_ms(now: u16, q: (u16, u16)) -> i64 {
 }
 
 /// 插件名匹配：支持 mcloud* 这种后缀通配（前缀够用，也够简单）。
+#[allow(dead_code)] // 暂留：review A3 说等 notify 会话收尾后统一清（先让 clippy 干净）
 fn plugin_match(pattern: &str, plugin: &str) -> bool {
     match pattern.strip_suffix('*') {
         Some(pre) => plugin.starts_with(pre),
@@ -222,6 +223,7 @@ impl Kind {
     }
 
     /// 拼 HTTP 请求的那几种（smtp 之外都算）。
+    #[allow(dead_code)] // 暂留：review A3
     pub fn is_http(self) -> bool {
         !matches!(self, Kind::Smtp)
     }
@@ -391,6 +393,7 @@ impl Config {
     }
 
     /// 这个渠道要不要收这条（等级 + 事件 + 插件三道）。
+    #[allow(dead_code)] // 暂留：review A3
     fn channel_wants(ch: &Channel, level: &str, event: &str, plugin: &str) -> bool {
         if !ch.enabled {
             return false;
@@ -1347,7 +1350,7 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
     let inner = inner.finalize();
     let mut outer = Sha256::new();
     outer.update(opad);
-    outer.update(&inner);
+    outer.update(inner);
     outer.finalize().to_vec()
 }
 
