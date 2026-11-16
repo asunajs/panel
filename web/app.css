@@ -706,6 +706,9 @@ button, input, select { font: inherit; color: inherit; }
 .plugin-actions { display: flex; gap: 6px; margin-top: 2px; }
 
 .btn.spinning .ico { animation: spin .9s linear infinite; }
+/* 顶栏刷新是同系列的纯图标按钮（用户要求「不要图标加字」），转圈规则也要跟过来 */
+.icon-btn.spinning .ico { animation: spin .9s linear infinite; }
+.icon-btn.spinning { color: var(--fg); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 620px) {

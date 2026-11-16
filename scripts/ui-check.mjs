@@ -629,6 +629,29 @@ async function main() {
   const after = await js("document.documentElement.getAttribute('data-theme')");
   check('主题能切', before !== after, before + ' -> ' + after);
 
+  // 顶栏右上一排是**同系列纯图标按钮**（第 221 轮，用户：「刷新换成同系列的简单图标而不是图标加字」）。
+  // 判据：与铃铛/主题/退出同款 .icon-btn；只有一枚 svg.ico（没有文字节点）；有 aria-label 与 data-tip。
+  const barIcons = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('.topbar-right > .icon-btn')]" +
+    ".filter(b=>getComputedStyle(b).display!=='none')" +
+    ".map(b=>({id:b.id||'(无 id)',txt:(b.textContent||'').replace(/\\s+/g,'')," +
+    "svg:b.querySelectorAll('svg.ico').length,label:b.getAttribute('aria-label')||''," +
+    "tip:b.getAttribute('data-tip')||'',w:Math.round(b.getBoundingClientRect().width),h:Math.round(b.getBoundingClientRect().height)})))",
+  ));
+  const refreshIcon = barIcons.find((b) => b.id === 'refresh-btn');
+  check(
+    '顶栏「刷新」是同系列纯图标按钮（无文字）',
+    !!refreshIcon && refreshIcon.txt === '' && refreshIcon.svg === 1
+      && refreshIcon.label === '刷新' && refreshIcon.tip === '刷新',
+    JSON.stringify(refreshIcon || barIcons),
+  );
+  check(
+    '顶栏图标按钮尺寸一致（刷新与邻居同款）',
+    // 退出登录在「没开口令」的实例里是隐藏的，所以只要求「看得见的那些」尺寸一致。
+    barIcons.length >= 2 && barIcons.every((b) => b.w === refreshIcon.w && b.h === refreshIcon.h),
+    JSON.stringify(barIcons.map((b) => b.id + ':' + b.w + 'x' + b.h)),
+  );
+
   // 任务页：种子插件的 cron 任务要在表里，点「暂停」后状态真的变
   await js("location.hash = '#tasks'");
   await sleep(1200);
