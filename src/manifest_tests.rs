@@ -29,7 +29,9 @@ fn manifest_fields_and_defaults() {
             "title": "移动云盘",
             "icon": "cloud",
             "order": 5,
+            "version": "0.4.2",
             "min_panel": "0.4.0",
+            "on_panel_open": "api/updates",
             "capabilities": ["notify", " "],
             "config": { "fields": [
                 { "name": "cookie", "type": "password", "label": "Cookie", "required": true },
@@ -44,6 +46,8 @@ fn manifest_fields_and_defaults() {
     let m = manifest::load(&d, "a").unwrap().unwrap();
     assert_eq!(m.title, "移动云盘");
     assert_eq!(m.order, 5);
+    assert_eq!(m.version, "0.4.2");
+    assert_eq!(m.on_panel_open, "api/updates");
     assert_eq!(m.capabilities, vec!["notify".to_string()], "空白项要清掉");
     assert_eq!(m.fields.len(), 3, "没有 name 的字段跳过");
     assert_eq!(m.fields[0].kind, "password");
@@ -126,4 +130,16 @@ fn scan_calls_out_a_manifest_that_wants_a_newer_panel() {
     assert_eq!(ms.len(), 1, "{out}");
     assert!(ms[0]["problem"].as_str().unwrap().contains("9.9.9"), "{out}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn manifest_json_carries_the_version_and_open_hook() {
+    let m = manifest::parse(&json!({
+        "title": "x",
+        "version": " 0.2.0 ",
+        "on_panel_open": " api/updates ",
+    }));
+    let out = m.to_json();
+    assert_eq!(out["version"], "0.2.0", "版本两头的空白要清掉: {out}");
+    assert_eq!(out["on_panel_open"], "api/updates", "{out}");
 }

@@ -4819,6 +4819,29 @@ function migrateBox() {
   return box;
 }
 
+// ---------------------------------------------------------------- 面板打开钩子（第 217 轮）
+
+/** 面板每次打开：按插件清单里的 `on_panel_open` 各 POST 一次。
+ *
+ * 为什么由面板前端发起，而不是插件页面自己跑：插件页面是 iframe，用户不点侧栏就不会加载；
+ * 「一打开面板就检查一次」只能由面板在**首次拿到状态之后**触发。钩子失败不打扰用户 ——
+ * 插件可能还在按需加载、清单是旧版、或者它自己选择不处理。
+ */
+async function runPanelOpenHooks() {
+  if (state.panelHooksRan) return;
+  state.panelHooksRan = true;
+  for (const p of state.plugins || []) {
+    const hook = p && p.manifest && p.manifest.on_panel_open;
+    if (!hook) continue;
+    const path = '/plugins/' + encodeURIComponent(p.name) + '/' + String(hook).replace(/^\/+/, '');
+    try {
+      await api(path, { method: 'POST' });
+    } catch (e) {
+      console.warn('panel-open hook failed:', p.name, e && e.message ? e.message : e);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- 检查更新（第 210 轮）
 //
 // 旧面板就有这个功能，用户要求照搬：**有更新时右上角提示**、可以**不再提示**、
@@ -5432,6 +5455,9 @@ async function refresh() {
     render();
     // 侧栏的插件入口跟着这一轮状态重画（插件可能刚注册/刚卸载）
     renderPluginNav();
+    // 首次成功读到状态后，跑一次「面板已打开」钩子（清单里声明了 on_panel_open 的插件）。
+    // 不 await：检查更新是旁路，不能拖住首屏。
+    runPanelOpenHooks();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, state.token ? '令牌无效' : '需要令牌'); return; }
     banner('读取面板状态失败：' + (e.message || e) + '（自动重试中）');

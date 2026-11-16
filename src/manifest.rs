@@ -46,9 +46,18 @@ pub struct Manifest {
     pub icon: String,
     pub order: i64,
     pub description: String,
+    /// 插件自己的版本（semver 文本，不解析）。商店据此判断「已装哪一版 / 有没有新版」。
+    ///
+    /// 之前清单里没有这一项，版本只活在源码注释或 package.json 里 —— 面板和商店都读不到。
+    pub version: String,
     /// 需要的最低面板版本；不满足就不加载（硬挡，不是警告）。
     pub min_panel: String,
     pub capabilities: Vec<String>,
+    /// 面板打开（前端每次加载）时要调用的插件路由，例如 `api/updates`。
+    ///
+    /// 它和 host 侧的定时任务不是一回事：这是一次「页面刚打开」的旁路调用，
+    /// 名目由插件自己定，面板只负责按清单里的路径 POST 一次（见 web/app.js）。
+    pub on_panel_open: String,
     pub fields: Vec<Field>,
 }
 
@@ -59,7 +68,9 @@ impl Manifest {
             "icon": self.icon,
             "order": self.order,
             "description": self.description,
+            "version": self.version,
             "min_panel": self.min_panel,
+            "on_panel_open": self.on_panel_open,
             "capabilities": self.capabilities,
             "config": { "fields": self.fields.iter().map(|f| json!({
                 "name": f.name,
@@ -107,7 +118,9 @@ pub fn parse(v: &Value) -> Manifest {
         icon: s(v, "icon"),
         order: v.get("order").and_then(|x| x.as_i64()).unwrap_or(100),
         description: s(v, "description"),
+        version: s(v, "version"),
         min_panel: s(v, "min_panel"),
+        on_panel_open: s(v, "on_panel_open"),
         capabilities: v
             .get("capabilities")
             .and_then(|x| x.as_array())

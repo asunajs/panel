@@ -1611,6 +1611,9 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
                         p["icon"] = json!(m.icon);
                     }
                     p["order"] = json!(m.order);
+                    // 版本单独提一层：商店（侧载插件）只需要 name → version，
+                    // 不该逼它去翻 manifest 里的每个字段。
+                    p["version"] = json!(m.version);
                     p["manifest"] = m.to_json();
                 }
                 Ok(None) => {
@@ -3351,10 +3354,18 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         // 目录式插件的「大小」是整个目录（日志/界面里看到的就是它占多少地方），
         // 但 modified 取入口文件 —— 那才是「这个插件上次什么时候改的」。
         let bytes = crate::pluginfs::total_bytes(&st.plugins_dir, &name);
+        // 清单里的版本（没有清单 / 没写版本就是空串）。商店判断「可更新」要用它，
+        // 停用/按需加载的插件不在 `/api/state` 的 plugins 里，所以这里也带一份。
+        let version = crate::manifest::load(&st.plugins_dir, &name)
+            .ok()
+            .flatten()
+            .map(|m| m.version)
+            .unwrap_or_default();
         files.push(json!({
             "name": name,
             // 界面按系列分组要用：禁用/未加载的插件也得能归到自己的系列里。
             "group": crate::plugin_group(&name),
+            "version": version,
             "bytes": bytes,
             "modified_ms": meta
                 .as_ref()

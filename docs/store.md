@@ -65,6 +65,7 @@
       "id": "mcloud",
       "name": "mcloud 系列",
       "summary": "移动云盘签到、兑换、直播",
+      "version": "0.4.0",
       "tags": ["云盘", "签到"],
       "provides": ["mcloud", "mcloud-daily", "mcloud-exchange", "mcloud-live"],
       "type": "release",
@@ -76,6 +77,7 @@
       "id": "quark",
       "name": "夸克网盘签到",
       "summary": "每日签到",
+      "version": "0.2.0",
       "provides": ["quark"],
       "type": "file",
       "repo": "asunajs/panel-single-plugins",
@@ -86,6 +88,7 @@
       "id": "internal",
       "name": "内网插件",
       "summary": "不走 GitHub",
+      "version": "1.2.3",
       "provides": ["internal"],
       "type": "url",
       "url": "http://10.0.0.5/plugins/internal.zip",
@@ -101,6 +104,7 @@
 | `id` | 是 | 同一条的唯一标识（商店用它区分条目） |
 | `name` / `summary` / `tags` | 否 | 只给界面用 |
 | `provides` | 建议 | 这条装成之后**会产生哪些插件名**；商店靠它判断「已装」。不写就按 `id` 判 |
+| `version` | 建议 | 这一条的**最新版本**。商店拿它和已装插件清单里的 `version` 比：大于 = 可更新。不写就显示「版本未标注」，不拿资产名去猜 |
 | `type` | 否 | `release`（默认）/ `file` / `url` |
 | `repo` | `release`/`file` 要 | `owner/repo` |
 | `asset` | 否 | release 里指定资产名；不写就选第一个 `.zip`，再退 `.js` |
@@ -113,11 +117,17 @@
 ## 5. 商店插件的行为
 
 - 侧栏一格「插件商店」（`host.sidebar`，order 80）；
-- 页面：搜索、只看未装、刷新目录、每张卡显示「已装/未装 · 来源类型 · 需面板 ≥X · sha 前 12 位 ·
-  提供哪些插件」，一个按钮（未装=安装，已装=覆盖安装，**点两下才装**，不弹系统确认框）；
+- 页面：搜索、只看未装、只看可更新、刷新并检查；每张卡显示「已装/未装 · 可更新 · 来源类型 ·
+  版本 / 已装版本 · 需面板 ≥X · sha 前 12 位 · 提供哪些插件」，一个按钮（未装=安装，
+  已装=覆盖安装，可更新=更新到 x，**点两下才装**，不弹系统确认框）；
 - 配置（面板 → 插件卡片 → 配置，落在 `plugin-data/shop/config.json`）：
   `catalog_url` / `github_token`（只发给 api.github.com，躲开未登录每小时 60 次限速）/ `proxy`（可选加速前缀，带 token 的请求永远直连）；
-- 目录缓存进程内一次，点「刷新目录」或跑一次手动任务「刷新目录」才重取。
+- 目录缓存进程内一次；**每次打开商店页都会重取一次**，点「刷新并检查」也会重取。
+  旧版这里还有一个手动任务「刷新目录」，因为只会在任务页多一行永远不跑的空任务，已经删掉。
+- **检查更新**：商店页启动时、以及**每次打开面板**（清单里的 `on_panel_open`）都会打一次
+  `/plugins/shop/api/updates`。有新版时进面板通知（铃铛），同一批更新 12 小时内只提示一次；
+  卡片上显示「版本 / 已装 / 可更新 x → y」，还能筛「只看可更新」。
+  版本来自两处：目录条目的 `version` 与插件清单 `<name>.panel.json` 的 `version`。
 
 ## 6. 失败矩阵（每条都有对应读数）
 
@@ -134,6 +144,8 @@
 | 超过 64 MiB / 解压后超限 | 拒绝（各自的上限报各自的字节数） |
 | 装完加载失败 | 文件留着、插件进「加载失败」列表 —— 和上传同一条路，不假装成功 |
 | 面板离线 | 已装的照旧跑；目录读不到就给横幅错误 |
+| 目录/插件没写 `version` | 卡片说「版本未标注」，不参与「可更新」判断（不猜） |
+| raw.githubusercontent 连不上 | 目录读取自动退到 GitHub API `contents?ref=…`（`Accept: raw`）；两条都失败才报错 |
 
 ## 7. 安全：侧载商店 = 用户自己选的信任源
 
@@ -176,7 +188,7 @@ OXC 不管这件事。
 
     # 2) 目录：默认就是 asunajs/panel-single-plugins 的 catalog.json；要换货架就去
     #    插件 → 插件商店 → 配置 → catalog_url
-    # 3) 打开侧栏「插件商店」→ 刷新目录 → 安装
+    # 3) 打开侧栏「插件商店」→ 刷新并检查 → 安装
 
 无网环境下端到端跑过的读数（本地 http 服务当货架，`HOST_API_ALLOW_PRIVATE=1`）：
 

@@ -224,7 +224,7 @@ const { ok, value } = await r.json();   // value 就是 handler 的返回值
 | `GET /plugins/webui-demo/../../data/config.json` | `400`（路径穿不出去） |
 | `GET /plugins/webui-demo/nope.js` | `404` |
 | `POST /plugins/nobody/api/hello` | `502 插件未加载: nobody` |
-| `GET /api/plugins/files` | 每个文件带 `webui: true/false` |
+| `GET /api/plugins/files` | 每个文件带 `webui: true/false`、`version`（清单里的插件版本，没有就是空串） |
 
 ### 7. 不做
 
@@ -440,7 +440,7 @@ POST /api/plugins/{n}/stop     → 400  「scratch2 当前没有在跑的任务�
 
 ```text
 POST /api/plugins {"name":"scratch1"}     200 {"bytes":378,"ok":true}，文件出现、loaded:true
-GET  /api/plugins/files                   列出 name/bytes/loaded/webui/modified_ms
+GET  /api/plugins/files                   列出 name/bytes/loaded/webui/version/modified_ms
 GET  /api/plugins/scratch1/source         378 字节原文 + has_backup:false
 PUT  源码 = "this is not js ((("           400「保存失败，已回滚：expecting ';'」
                                           文件仍是 378 字节，旁边多一个 scratch1.js.bak
@@ -814,10 +814,12 @@ plugins/mcloud.panel.json    ← 清单（可选；没有就用文件名 / 字�
 ```json
 {
   "title": "移动云盘",
+  "version": "0.4.2",
   "icon": "cloud",
   "order": 5,
   "description": "签到、抽奖、抢兑",
   "min_panel": "0.4.0",
+  "on_panel_open": "api/updates",
   "capabilities": ["notify", "sqlite"],
   "config": {
     "fields": [
@@ -834,7 +836,9 @@ plugins/mcloud.panel.json    ← 清单（可选；没有就用文件名 / 字�
 | 字段 | 作用 |
 |---|---|
 | title / icon / order | 界面上的名字、图标、排序（没有就按文件名与字典序） |
+| version | 插件自己的版本（semver 文本）。面板原样透传到 `/api/state`、`/api/plugins/files`，商店用它判断已装哪一版、有没有新版 |
 | min_panel | **硬挡**：面板版本不够就不加载，并在「加载失败」里说明要哪个版本 |
+| on_panel_open | 面板前端**每次打开**时 POST 一次的插件路由（例如 `api/updates`）。没写就不调；失败只记控制台，不影响首屏 |
 | capabilities | 声明用到的能力（现在的面板不据此限权，只是给人看） |
 | config.fields | 配置表单：type 属于 text / password / number / bool / select / textarea |
 
