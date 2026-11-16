@@ -859,3 +859,25 @@
     **别顺手给 import 加「只能读插件目录」的围栏**（第 216 轮我加了，用户当场指出）：
     `node:fs` 本来就没有沙箱，能读整台机器；再锁 import 既拦不住谁，又让面板与 Node/LLRT
     语义分叉（`import '../shared/x.js'` 在 Node 能跑、在面板报错）。文件不存在才是错误。
+
+67. **原地换二进制会被内核当场 SIGKILL（macOS 代码签名缓存）**（第 217 轮，真机踩到）：
+    `cp target/release/panel ~/panel-3030/panel` 之后，新进程一启动就死，
+    日志里**什么都没有**（连 `panel listening` 都不打），`timeout 5 ./panel` 报
+    `Killed: 9`（rc=137）。同一个文件拷到**别的路径**、或**换个文件名**放同一个目录，
+    都跑得好好的 —— 只有被替换掉的那个路径会死。
+
+    判据在 launchd 里：`launchctl print gui/$(id -u)/dev.panel` 的
+    `last exit reason = OS_REASON_CODESIGNING`，`runs` 一路涨（在崩溃循环）。
+    `codesign --verify` 还说 `valid on disk` —— **校验通过不代表内核肯执行**：
+    路径上的签名缓存还是旧 inode 的，替换之后没失效。
+
+    修法：换完**重新签一次**
+
+    ```bash
+    cp target/release/panel "$PANEL_DIR/panel"
+    codesign --force --sign - "$PANEL_DIR/panel"   # ← 少这一行就是 Killed: 9
+    launchctl kickstart -k gui/$(id -u)/dev.panel
+    ```
+
+    ⚠ 别把「进程起不来」当成本次改动的 bug 去回滚代码：先看 `last exit reason`。
+    这次的改动本身是对的，坏在部署那一步。
