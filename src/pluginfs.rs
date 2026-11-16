@@ -50,7 +50,7 @@ pub fn read_source(dir: &Path, name: &str) -> Result<(String, Option<PathBuf>), 
     };
     let src = std::fs::read_to_string(&path)
         .map_err(|e| format!("读不到 {}（{e}）", path.display()))?;
-    let root = if is_dir_plugin(&path) {
+    let root = if is_dir_plugin(dir, name) {
         path.parent().map(|p| p.to_path_buf())
     } else {
         None
@@ -58,10 +58,16 @@ pub fn read_source(dir: &Path, name: &str) -> Result<(String, Option<PathBuf>), 
     Ok((src, root))
 }
 
-/// 这个主文件是不是「目录式插件」的入口（`<name>/index.js`）。
-pub fn is_dir_plugin(entry: &Path) -> bool {
-    entry.file_name().and_then(|s| s.to_str()) == Some(ENTRY)
-        && entry.parent().is_some()
+/// 这个插件是不是目录式（`<name>/index.js`，且没有同名的 `<name>.js` 压在上面）。
+///
+/// ⚠ 参数是**插件根目录 + 插件名**，不是入口路径：只看文件名叫不叫 `index.js` 会把
+/// 单文件插件 `plugins/index.js` 误判成「名为 index 的目录插件」，进而让指纹/备份
+/// 去扫整个 plugins 目录（第 217 轮 review 实测：启动即栈溢出）。
+pub fn is_dir_plugin(dir: &Path, name: &str) -> bool {
+    if dir.join(format!("{name}.js")).is_file() {
+        return false;
+    }
+    dir_entry(dir, name).is_some()
 }
 
 /// 扫插件目录，列出插件名：`*.js` 文件名 + 含 `index.js` 的子目录名。
@@ -97,7 +103,7 @@ pub fn total_bytes(dir: &Path, name: &str) -> u64 {
     let Some(path) = entry(dir, name) else {
         return 0;
     };
-    if let Some(root) = path.parent().filter(|_| is_dir_plugin(&path)) {
+    if let Some(root) = path.parent().filter(|_| is_dir_plugin(dir, name)) {
         let mut sum = 0u64;
         let mut stack = vec![root.to_path_buf()];
         while let Some(d) = stack.pop() {

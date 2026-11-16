@@ -265,7 +265,7 @@ $ curl -X POST '.../api/plugins/upload?name=up1.js&overwrite=1' --data-binary @o
 
 同一个落盘链路多一个入口：`POST /api/plugins/install {url, name?, sha256?, overwrite?}`
 （面板下载 → 校验 sha256 → 落盘 → 重载），以及 CLI `panel plugin install <url|文件|目录> [--overwrite]`。
-商店就是这条链的一个调用方 —— 目录格式、失败矩阵见 [store.md](store.md)，接口细节见 [api.md](api.md)。
+这条链是通用的，面板不知道什么是商店 —— 任何按 URL 分发的插件包都能用；接口细节见 [api.md](api.md)。
 CLI 不加载插件：装完要到界面点「重载」或重启面板才生效。
 
 ### 挡什么（每条都有读数）
@@ -338,7 +338,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
 | `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
-| `POST /api/plugins/install`（按 URL 装 + sha256 校验）、`panel plugin install`（CLI，含目录） | ✅ 11-14 | 面板下载 → 校验 → 落盘 → 重载；商店做成侧载插件，见 [store.md](store.md) |
+| `POST /api/plugins/install`（按 URL 装 + sha256 校验）、`panel plugin install`（CLI，含目录） | ✅ 11-14 | 面板下载 → 校验 → 落盘 → 重载；货架 / 商店属于外部插件，不在本仓 |
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
 | `/login` `/api/login` `/api/logout` | ✅ 11-12（换了形状） | 没做独立登录页，做的是**会话 cookie**：`POST /api/login` 用令牌换一张 30 天 HttpOnly 票，`/api/logout` 清掉。好处是插件界面不再需要 `?t=`（令牌不进 URL）。见 [api.md §1](api.md) |
 | `/setup` `/api/setup`（首次设令牌） | ✅ 11-12（形状不同） | 没做独立向导页：设置 → 安全 里一个框，能「生成一个」或自己输入；写入 PBKDF2 哈希（明文不落盘），**不自动重启**（生成的令牌要让人先抄下来）。已存在凭据 → 409。见 [api.md §2](api.md) |
@@ -836,9 +836,9 @@ plugins/mcloud.panel.json    ← 清单（可选；没有就用文件名 / 字�
 | 字段 | 作用 |
 |---|---|
 | title / icon / order | 界面上的名字、图标、排序（没有就按文件名与字典序） |
-| version | 插件自己的版本（semver 文本）。面板原样透传到 `/api/state`、`/api/plugins/files`，商店用它判断已装哪一版、有没有新版 |
+| version | 插件自己的版本（semver 文本）。面板原样透传到 `/api/state`、`/api/plugins/files`，外部货架 / 商店据此判断已装哪一版、有没有新版 |
 | min_panel | **硬挡**：面板版本不够就不加载，并在「加载失败」里说明要哪个版本 |
-| on_panel_open | 面板前端**每次打开**时 POST 一次的插件路由（例如 `api/updates`）。没写就不调；失败只记控制台，不影响首屏 |
+| on_panel_open | 面板前端**每次打开**时 POST 一次的插件路由（例如 `api/updates`）。按「插件 + 路径」记账，等该插件首次出现在状态里才发（冷启动插件加载慢也不会漏）；失败最多重试 2 次，之后只记控制台。没有 webui 的按需加载插件也会被这次调用装回内存 |
 | capabilities | 声明用到的能力（现在的面板不据此限权，只是给人看） |
 | config.fields | 配置表单：type 属于 text / password / number / bool / select / textarea |
 

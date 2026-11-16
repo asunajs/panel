@@ -274,7 +274,7 @@ else
   bad "web/app.css 这些规则对 select 用了 background 简写，会把 chevron 变成平铺箭头：$css_bad"
 fi
 
-# 坑 69（第 219 轮，用户反馈 #6「dark 刷新闪白」）：首帧主题必须在 head 里就定下来。
+# 坑 112（第 219 轮，用户反馈 #6「dark 刷新闪白」）：首帧主题必须在 head 里就定下来。
 # 少了它，用户选的深色要等 body 末尾 255KB 的 app.js 跑完才挂上 —— 中间那段「CSS 已到、
 # 脚本还没跑」的窗口里，页面先按浅色画一帧再翻深，就是那一下白闪。
 # 动态版（真量 first-paint 与 data-theme 的先后）：node scripts/theme-flash-check.mjs
@@ -288,7 +288,7 @@ m = re.search(r'<script[^>]*src="/theme-boot\.js"[^>]*>', html)
 if not m:
     print('missing'); sys.exit(0)
 tag, off = m.group(0), m.start()
-if re.search(r'(^|[\s"\'])(defer|async)([\s"\']|$)', tag):
+if re.search(r'\b(defer|async)\b', tag) or re.search(r'type\s*=\s*["\']?module', tag):
     print('deferred'); sys.exit(0)
 c = re.search(r'<link[^>]*href="/app\.css"', html)
 if c and off > c.start():
@@ -305,7 +305,7 @@ case "$theme_boot" in
 esac
 
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 23 条坑的守卫全过"
+  echo "ok: 坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

@@ -40,7 +40,7 @@ pub async fn collect(
         let Ok(src) = tokio::fs::read_to_string(&entry).await else {
             continue;
         };
-        if crate::pluginfs::is_dir_plugin(&entry) {
+        if crate::pluginfs::is_dir_plugin(plugins_dir, &name) {
             // 目录式：把目录里每个文件都带上（相对路径），恢复时原样铺回去。
             let mut files = Vec::new();
             let root = entry.parent().map(|p| p.to_path_buf());
@@ -248,7 +248,13 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
             let mut put = 0usize;
             for f in p["files"].as_array().cloned().unwrap_or_default() {
                 let rel = f["path"].as_str().unwrap_or_default();
-                if rel.is_empty() || rel.contains("..") || rel.starts_with('/') {
+                // 只接受纯相对路径：`..`、绝对路径、Windows 盘符/前缀一律丢。
+                // 用 Component 判，不靠字符串 contains（`..\` 与 `C:\` 都要挡住）。
+                if rel.is_empty()
+                    || !std::path::Path::new(rel)
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                {
                     continue;
                 }
                 let dst = root.join(rel);

@@ -5,7 +5,7 @@
 配置短到只有三行。
 
 前置条件：面板能跑（`PANEL_BIND` 保持默认 `127.0.0.1:8787` 不动）、有一个域名、
-A 记录指到服务器公网 IP。
+A 记录指到服务器公网 IP；要用 IPv6 再补一条 AAAA（见 §5）。
 
 ## 1. 装 Caddy
 
@@ -34,7 +34,8 @@ panel.example.com {
 systemctl reload caddy
 ```
 
-完事。证书申请（ACME）、续期、HTTP→HTTPS 跳转全是自动的。
+完事。证书申请（ACME）、续期、HTTP→HTTPS 跳转全是自动的。Caddy 默认双栈监听
+（有可用 IPv6 时同时听 `[::]`），不需要为 IPv6 改这三行；细节见 §5。
 
 ## 3. 面板侧的几个事实（为什么只要这三行）
 
@@ -59,7 +60,60 @@ systemctl reload caddy
 - **没公网 IP**：出站隧道（Cloudflare Tunnel / frp / Tailscale），隧道指向
   `127.0.0.1:8787`，备案与端口都绕开。
 
-## 5. 常用操作
+## 5. IPv6（AAAA / 双栈监听）
+
+和 nginx 的结论一样：面板继续听 `127.0.0.1:8787`，IPv6 客户端到 Caddy，Caddy 再走 IPv4
+回环转给面板。**不要**为了 IPv6 把面板改成 `::` / `0.0.0.0`。
+
+### 5.1 DNS
+
+```bash
+dig +short AAAA panel.example.com
+curl -6 -I https://panel.example.com
+```
+
+只在 IPv6 真的可达时发布 AAAA。Caddy 的 ACME 会按 A/AAAA 去验证；AAAA 连不通会让
+签发变慢或失败（必要时改用 DNS 验证，或先删 AAAA）。
+
+### 5.2 Caddy 的双栈
+
+默认的 `panel.example.com { reverse_proxy … }` 会监听所有可用地址（含 IPv6）。
+**不要**在 site 块里写 `bind 127.0.0.1` —— 那会把 IPv6 也一起挡掉。
+
+检查：
+
+```bash
+sysctl net.ipv6.conf.all.disable_ipv6      # 必须是 0
+ss -lntp | grep -E ':(80|443)\b'           # 应能看到 [::]:443
+```
+
+如果只想听某一个地址：
+
+```caddyfile
+panel.example.com {
+    bind 203.0.113.10 [2001:db8::10]       # 显式列出 v4 + v6
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+### 5.3 防火墙与平台安全组
+
+IPv6 是另一套防火墙规则：云安全组要分别加 IPv4 `0.0.0.0/0` 与 IPv6 `::/0`（或固定前缀）；
+本机 `ufw` / `ip6tables` 也要放行 `443/tcp`。只放 IPv4 时，IPv6 客户端会连接超时。
+
+## 6. 平台侧：别忘了开放出口（egress）
+
+反代只管入站。这台机器 / 平台还要能出去：
+
+- Caddy 申请/续期证书要出站 TCP 80/443（DNS 验证则要 53/443）；
+- 面板检查更新、插件商店检查更新要出站到 `api.github.com`、`raw.githubusercontent.com`、
+  `github.com`；
+- 插件自己的目标站点也要出站；平台只给 IPv6 时，出口同样要有 IPv6。
+
+安全组 / 平台防火墙至少放行出站 TCP 80/443，IPv4 与 IPv6 分别检查。网页能开但更新/证书
+失败时，先查出口，不要只怀疑反代配置。
+
+## 7. 常用操作
 
 ```bash
 caddy validate --config /etc/caddy/Caddyfile   # 配置检查
@@ -67,11 +121,12 @@ systemctl reload caddy                         # 改完 Caddyfile 热重载
 journalctl -u caddy -f                         # 看证书申请 / 反代日志
 ```
 
-## 6. 验证清单
+## 8. 验证清单
 
 1. `https://域名` 打开登录页，令牌解锁进仪表盘；
 2. 日志页放着不动，新日志自动滚出来（SSE 通了）；
 3. 上传一个 >1 MiB 的插件文件成功；
 4. 插件卡片「详情」、自带界面能打开；
 5. 手机 / 局域网设备用 `http://IP:8787` 也能进（如果同时按 [nginx.md](nginx.md)
-   或面板设置开了局域网监听）——两套反代不冲突，选一套对外即可。
+   或面板设置开了局域网监听）——两套反代不冲突，选一套对外即可；
+6. 有 IPv6 时：`curl -6 -I https://域名` 能拿到响应，`ss -lntp` 能看到 `[::]:443`。

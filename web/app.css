@@ -215,6 +215,7 @@ button, input, select { font: inherit; color: inherit; }
   color: var(--dim); cursor: pointer;
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--fg); }
+.icon-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .icon-btn .ico { width: 17px; height: 17px; }
 
 .pill {

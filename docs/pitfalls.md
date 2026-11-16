@@ -832,7 +832,7 @@
     两条规矩：① 改底色只写 `background-color`；② 守卫 ㉒ 会扫 `web/app.css` 里所有可能命中
     `<select>` 的规则，用简写就红。回归断言在 `ui-check`（深浅两主题各一条）。
 
-66. **「按需加载」不能把装载责任推给用户**（第 188 轮，用户截图报障）：
+108. **「按需加载」不能把装载责任推给用户**（第 188 轮，用户截图报障）：
     第一版按需加载的实现是对的（启动不装、到点前 2 分钟装、点「加载」能装），但漏了
     **用到就装**：点任务的「执行」弹一句「插件还没加载，先点插件卡片上的加载」，
     插件界面里点一下按钮也弹同一句。用户的原话：「你这个还需要我去插件里点击才能使用？？？」
@@ -845,11 +845,11 @@
     ② 空闲卸载以前**跳过所有 web/sidebar 插件**，于是占内存最凶的恰好永远不卸；
        现在它们也在范围内（静态文件仍从磁盘发，首屏不受影响），默认 30 分钟。
 
-    守卫：`scripts/check-lazy-load.sh` 从 10 条扩到 18 条，其中四条盯这条路 ——
+    守卫：`scripts/check-lazy-load.sh` 从 10 条扩到 24 条，其中四条盯这条路 ——
     手动执行自动装、界面接口自动装（含 `waking` 排队）、有界面插件闲着会被卸且卸完还能用、
     停用的插件不许被自动装回来（409），别让停用变成摆设。
 
-66. **`FileResolver` 只解析不读**（第 216 轮）：rquickjs 的 `FileResolver` 会把 `./x.js`
+109. **`FileResolver` 只解析不读**（第 216 轮）：rquickjs 的 `FileResolver` 会把 `./x.js`
     归一化成一个路径字符串，但引擎里**没有对应的 loader** 去读它 —— 于是相对 import 的失败
     信息是 `Error resolving module …`，看着像「解析不出来」，其实是「没人读」。
     做多文件插件时必须成对补 resolver + loader（`PluginResolver` / `PluginLoader`），
@@ -860,7 +860,7 @@
     `node:fs` 本来就没有沙箱，能读整台机器；再锁 import 既拦不住谁，又让面板与 Node/LLRT
     语义分叉（`import '../shared/x.js'` 在 Node 能跑、在面板报错）。文件不存在才是错误。
 
-67. **原地换二进制会被内核当场 SIGKILL（macOS 代码签名缓存）**（第 217 轮，真机踩到）：
+110. **原地换二进制会被内核当场 SIGKILL（macOS 代码签名缓存）**（第 217 轮，真机踩到）：
     `cp target/release/panel ~/panel-3030/panel` 之后，新进程一启动就死，
     日志里**什么都没有**（连 `panel listening` 都不打），`timeout 5 ./panel` 报
     `Killed: 9`（rc=137）。同一个文件拷到**别的路径**、或**换个文件名**放同一个目录，
@@ -871,18 +871,31 @@
     `codesign --verify` 还说 `valid on disk` —— **校验通过不代表内核肯执行**：
     路径上的签名缓存还是旧 inode 的，替换之后没失效。
 
-    修法：换完**重新签一次**
+    修法有两条，**别混着用**：
+
+    1. **推荐：换 inode，不重签**（`scripts/deploy-daily.sh` 走的就是这条）——
+       先 `cp` 到同目录的新文件名，再 `mv` 覆盖。内核看到的是新 inode，
+       不会命中旧路径的签名缓存，也不会触发 TCC 重新询问（重签反而会让 macOS
+       把二进制当另一个程序，launchd 后台进程问不了人，卡住）：
+
+    ```bash
+    cp target/release/panel "$PANEL_DIR/panel.new"
+    mv "$PANEL_DIR/panel.new" "$PANEL_DIR/panel"
+    launchctl kickstart -k gui/$(id -u)/dev.panel
+    ```
+
+    2. **必须原地 `cp` 到同一个路径时：补一次重签**（否则就是 `Killed: 9`）：
 
     ```bash
     cp target/release/panel "$PANEL_DIR/panel"
-    codesign --force --sign - "$PANEL_DIR/panel"   # ← 少这一行就是 Killed: 9
+    codesign --force --sign - "$PANEL_DIR/panel"
     launchctl kickstart -k gui/$(id -u)/dev.panel
     ```
 
     ⚠ 别把「进程起不来」当成本次改动的 bug 去回滚代码：先看 `last exit reason`。
     这次的改动本身是对的，坏在部署那一步。
 
-68. **多选控件返回的是 `{node, input}`，不是 DOM 节点**（第 218 轮，用户反馈 #5）：
+111. **多选控件返回的是 `{node, input}`，不是 DOM 节点**（第 218 轮，用户反馈 #5）：
     推送的「只收 / 不收」在 0.5.1 换成多选下拉之后，保存读的是 `inc.value` —— 那个对象上
     没有 `value`，拿到 `undefined`，`splitList(undefined)` 回 `[]`。于是**界面上填了、
     存盘变空**：重新打开那条推送就是「全部插件（不限制）」，`config.json` 里也没有
@@ -895,7 +908,7 @@
     断言穿过 HTTP 再回来 —— 读错字段名这种错，界面自己永远看不出来（它读的是它自己写的 DOM）。
 
 
-69. **首帧主题：`data-theme` 必须在 paint 之前就定下来**（第 219 轮，用户反馈 #6「dark 刷新闪白」）：
+112. **首帧主题：`data-theme` 必须在 paint 之前就定下来**（第 219 轮，用户反馈 #6「dark 刷新闪白」）：
     `web/index.html` 的 `<html>` 上写死 `data-theme="light"`，用户选的深色是 `app.js`（255KB，
     在 body 末尾）跑起来才 `setAttribute` 上去的。于是「CSS 已到、脚本还没跑」的那段窗口里，
     浏览器先按浅色画一帧，再翻成深色 —— 用户看到的就是刷新闪白。
@@ -909,16 +922,16 @@
     `/app.css` 之前、**不带 defer/async** —— 这样 paint 会等它执行完。CSP 是 `script-src self`，
     内联脚本一律被拦，所以不能按「内联到 head」写（错误页早就在用这个外部文件了）。
 
-    守卫：`check-pitfalls.sh` 第 23 条（剥掉 HTML 注释后找标签，比字节偏移、查 defer/async）+
+    守卫：`check-pitfalls.sh` 的「首帧主题」那条（剥掉 HTML 注释后找标签，比字节偏移、查 defer/async）+
     动态探针 `node scripts/theme-flash-check.mjs`（三个反向例都验过会红）。
 
     教训：**「本机测不出来」不等于没问题** —— 这类首帧问题只在慢链路/冷缓存下出现，
     探针得把条件造出来（这次是 `Network.emulateNetworkConditions` + 关缓存）。
 
-67b. **别给「暂停」开卸载豁免**（第 189 轮）：第 188 轮放开「有界面插件闲时卸载」
+113. **别给「暂停」开卸载豁免**（第 189 轮）：第 188 轮放开「有界面插件闲时卸载」
     时，我保留了「暂停的插件不卸」，理由是「暂停 = 随时要用界面，只是别跑定时」。
     结果 3030 上其余插件都卸干净了，**只有被暂停的插件商店一直占着内存**。
     ensure_loaded 之后这条豁免已经过时：界面一调用就装回来，暂停不需要驻留；
     而且暂停插件不会到点跑任务，next_due 算它还会白唤醒一次。
-    守卫：check-lazy-load.sh 第 20 条真起面板把插件暂停、等一拍空闲检查，
-    断言它被卸掉；接口照常能把它装回来（第 19 条）。
+    守卫：`check-lazy-load.sh` 的「暂停的插件闲着也会被卸载」与「空闲卸载之后再点界面」
+    两条：真起面板把插件暂停、等一拍空闲检查，断言它被卸掉、接口照常能把它装回来。

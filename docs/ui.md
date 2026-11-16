@@ -358,7 +358,7 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
 `node --check` 只保证语法，靠人眼看不住。所以有一个可复跑的检查：
 
 ```bash
-node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 36 条断言，自己收尾
+node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 175 条断言，自己收尾
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 

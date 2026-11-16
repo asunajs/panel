@@ -356,7 +356,8 @@ impl Drop for Plugin {
 ///
 /// 边界（都是刻意的）：
 ///   · 只接 `./` `../` 开头的说明符，其余交给后面那几个（内置模块 / 包）；
-///   · 解析结果必须仍在插件根目录内，`..` 跑出去一律拒；
+///   · **不设目录围栏**：`..` 跑出插件目录也允许，与 Node / `node:fs` 的能力对齐
+///     （文件不存在才是错误；能读到什么由进程权限决定）；
 ///   · 单个文件 ≤ 2 MiB（插件整体上限另有 `plugins.max_bytes`）；
 ///   · llrt 的 CJS 前缀（`__cjs:` / `__cjsm:`）先剥掉再判断 —— 它把 require 的说明符
 ///     包了一层，不剥的话 `require('./x.cjs')` 永远匹配不上（见 llrt_modules/src/lib.rs:79）。
@@ -395,6 +396,11 @@ impl Resolver for PluginResolver {
             // 既不是相对路径也不是绝对路径：让后面的 resolver 去处理（内置模块 / 包）
             return Err(Error::new_resolving(base, name));
         }
+        // base 也可能是 CJS 前缀包过的（从 CJS 模块里 require 相对路径）：
+        // 不剥掉它就不是绝对路径，resolve_module 会退回插件根，相对 import 就解析错了。
+        let base = base
+            .trim_start_matches(CJS_LOADER_PREFIX)
+            .trim_start_matches(CJS_IMPORT_PREFIX);
         crate::pluginfs::resolve_module(root, base, raw)
             .map(|p| p.to_string_lossy().into_owned())
             .ok_or_else(|| {

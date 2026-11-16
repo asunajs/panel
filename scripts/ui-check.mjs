@@ -268,7 +268,16 @@ async function main() {
   // 第 190 轮：错误页会被装进**插件 iframe**（`/plugins/<不存在>/` 就是那个 404）。
   // 它的「回面板首页」必须 target="_top"，否则导航的是 iframe 自己 → 面板套面板
   // （用户截图：地址栏 #plugin:mgmusic1，里面又套了一个完整的面板）。
-  const errPage = await js("fetch('/plugins/__no_such_plugin__/', { headers: { accept: 'text/html' } }).then((r) => r.text())");
+  // fetch 偶尔会第一次就 Failed to fetch（面板刚起来 / devtools 通道抖）：重试几次，
+  // 别让一条既有抖动把整轮 175 条断言变成 exit 2。
+  const errPage = await waitFor(
+    async () => {
+      const t = await js("fetch('/plugins/__no_such_plugin__/', { headers: { accept: 'text/html' } }).then((r) => r.text())");
+      return String(t || '').includes('回面板首页') ? t : null;
+    },
+    5000,
+    '插件 404 错误页',
+  ).catch(() => '');
   // 注意：标签文字在 <a ...> 和 </a> **之间**，不在标签属性里 —— 第一版正则写成
   // `<a[^>]*回面板首页[^>]*>` 永远不匹配（自己踩的），这里把整段连同文字一起取。
   const homeLink = (String(errPage || '').match(/<a\b[^>]*>[^<]*回面板首页/) || [''])[0];
@@ -648,7 +657,8 @@ async function main() {
   check(
     '顶栏图标按钮尺寸一致（刷新与邻居同款）',
     // 退出登录在「没开口令」的实例里是隐藏的，所以只要求「看得见的那些」尺寸一致。
-    barIcons.length >= 2 && barIcons.every((b) => b.w === refreshIcon.w && b.h === refreshIcon.h),
+    barIcons.length >= 2 && !!refreshIcon
+      && barIcons.every((b) => b.w === refreshIcon.w && b.h === refreshIcon.h),
     JSON.stringify(barIcons.map((b) => b.id + ':' + b.w + 'x' + b.h)),
   );
 

@@ -17,6 +17,27 @@
 3. **面板侧没有「全局提速开关」。** 请求慢就是链路/对端慢，面板不会自己重试 ——
    重试是插件的事（很多插件会在下一趟任务里补）。
 
+## 先确认平台/安全组放行了出口（egress）
+
+很多「面板连不上」不是面板的问题，是机器/平台只开了入站、没开**出站**，或者只开了 IPv4、
+目标却是 IPv6（反过来也一样）。先量这三条：
+
+```bash
+curl -4 -m 10 -o /dev/null -w 'v4 %{http_code} %{time_total}s\n' https://api.github.com/
+curl -6 -m 10 -o /dev/null -w 'v6 %{http_code} %{time_total}s\n' https://api.github.com/
+getent ahosts api.github.com | head
+```
+
+- 两个都超时：平台安全组 / 防火墙没放行出站 80/443，或 DNS 出不去；
+- 只有 `-6` 超时：没有 IPv6 出口；只有 `-4` 超时：没有 IPv4 出口；
+- 面板要用的目的地至少包括 `api.github.com`、`raw.githubusercontent.com`、`github.com`
+  （检查更新 / 插件商店），以及各插件自己的目标站点；
+- 云厂商安全组要**分别**检查 IPv4 与 IPv6 的出站规则（`0.0.0.0/0` 与 `::/0`，或固定前缀）。
+
+反代只解决入站；证书续期、更新检查、插件装包都靠出口。详见
+[nginx.md §8](nginx.md#8-平台侧别忘了开放出口egress) 与
+[caddy.md §6](caddy.md#6-平台侧别忘了开放出口egress)。
+
 ## 三种错误文案分别是什么意思
 
 | 你看到的 | 含义 | 怎么办 |

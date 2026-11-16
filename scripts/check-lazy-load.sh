@@ -199,5 +199,5 @@ sleep 34
 stop
 
 echo ''
-if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的 20 条端到端检查全过"; else echo "红: $FAIL 条没过"; fi
+if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的端到端检查全过"; else echo "红: $FAIL 条没过"; fi
 exit "$FAIL"

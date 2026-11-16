@@ -418,9 +418,10 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 
 ## 按 URL 装插件（第 107 轮）
 
-`POST /api/plugins/install` —— 商店是**侧载**的插件，它下载不了二进制（`host.fetch`
-的正文是 lossy UTF-8，zip 会被拆坏），也不许自己往插件目录写文件（R8），所以字节这条路归面板。
-契约与目录格式见 [store.md](store.md)。
+`POST /api/plugins/install` —— 按 URL 分发的插件包（`.js` / `.ts` / `.zip`）走这条链。
+面板负责下载字节并落盘：插件自己的 `host.fetch` 正文是 lossy UTF-8（zip 会被拆坏），
+插件也不许往插件目录写文件（R8）。这是通用能力：面板不知道「商店 / 目录」是什么，只认 URL、
+文件名和 sha256；货架（目录 JSON）由调用方自己维护，不在面板仓。
 
 ```json
 { "url": "https://…/x.zip", "name": "x.zip", "sha256": "…64 位…", "overwrite": true }

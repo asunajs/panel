@@ -93,14 +93,14 @@ fn scan_reports_new_changed_and_removed() {
     let _ = write(&d, "three.js", "// v3");
 
     // 假装 one/two 已经加载过（记了指纹），three 从没加载过
-    manifest::note_loaded("one", &d.join("one.js"));
-    manifest::note_loaded("two", &d.join("two.js"));
+    manifest::note_loaded(&d, "one");
+    manifest::note_loaded(&d, "two");
     // two 之后被改过
     std::thread::sleep(std::time::Duration::from_millis(12));
     let _ = write(&d, "two.js", "// v2 changed, longer body");
     let removed_dir = d.join("gone.js");
     std::fs::write(&removed_dir, "// x").unwrap();
-    manifest::note_loaded("gone", &removed_dir);
+    manifest::note_loaded(&d, "gone");
     std::fs::remove_file(&removed_dir).unwrap();
 
     let out = manifest::scan(&d, &["one".into(), "two".into()], &[], "0.4.0");
@@ -142,4 +142,33 @@ fn manifest_json_carries_the_version_and_open_hook() {
     let out = m.to_json();
     assert_eq!(out["version"], "0.2.0", "版本两头的空白要清掉: {out}");
     assert_eq!(out["on_panel_open"], "api/updates", "{out}");
+}
+
+#[test]
+fn scan_of_a_directory_plugin_does_not_recurse_into_its_own_entry() {
+    // 回归（第 217 轮 review）：finger_of 遍历目录时把入口 index.js 又当目录插件，
+    // 会无限递归 → 栈溢出 abort。这里只要求它正常返回，且指纹记在正确的插件名下。
+    let d = std::env::temp_dir().join(format!("m217-dir-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("dp/lib")).unwrap();
+    std::fs::write(d.join("dp/index.js"), "// v1").unwrap();
+    std::fs::write(d.join("dp/lib/x.js"), "// x1").unwrap();
+
+    manifest::note_loaded(&d, "dp");
+    let out = manifest::scan(&d, &["dp".into()], &[], "0.6.0");
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(out["new"].as_array().unwrap().is_empty(), "刚记过指纹，不该是 new: {out}");
+    assert!(out["changed"].as_array().unwrap().is_empty(), "没改过，不该是 changed: {out}");
+
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    std::fs::write(d.join("dp/lib/x.js"), "// x2 changed, longer").unwrap();
+    let out = manifest::scan(&d, &["dp".into()], &[], "0.6.0");
+    let changed: Vec<&str> = out["changed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, vec!["dp"], "改 lib/ 也要报 changed: {out}");
+    let _ = std::fs::remove_dir_all(&d);
 }

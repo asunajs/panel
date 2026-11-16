@@ -1,11 +1,12 @@
 #!/bin/bash
 # 把 release 二进制部署到日常实例（~/panel-3030）并重启它。
 #
-# 为什么不是一句 cp：
+# 为什么不是一句 cp（配套 docs/pitfalls.md 第 110 条）：
 #   1) `cp` 是「打开目标文件、截断、再写」—— 如果那个二进制**正在运行**，等于把它映射的
 #      页面挖掉，内核会按 code signing 失效把进程杀掉（launchd 记 last exit reason =
 #      OS_REASON_CODESIGNING，而 codesign --verify 又显示文件是好的，很迷惑）。
-#      所以先写 panel.new，再用 mv 换（换 inode）。
+#      所以先写 panel.new，再用 mv 换（换 inode）。这条路**不需要**重签；
+#      只有「原地 cp 到同一个路径」才要 `codesign --force --sign -`（见坑 110）。
 #   2) **不要**重新签名（codesign --force）：签名一换，macOS 就把这个二进制当成另一个程序，
 #      受保护路径（外部卷等）会重新走一次授权询问；launchd 里的后台进程问不了人，于是卡住
 #      —— 表现成「服务起来了但插件一个都不加载」（第 134 轮踩了两次才发现）。
@@ -94,16 +95,36 @@ done
 #   · 单文件 `<name>.js`
 #   · 目录式 `<name>/index.js`（`.webui/` 目录没有 index.js，天然不会被算进来）
 # 只数 *.js 会把目录式插件漏掉，readyz 报 6 而这里算成 2（日志里出现「插件 6/2」）。
-EXPECT="$(ls "$DEST"/plugins/*.js 2>/dev/null | wc -l | tr -d ' ')"
-for d in "$DEST"/plugins/*/; do
-  [ -f "$d/index.js" ] && EXPECT=$(( EXPECT + 1 ))
-done
+# 两种形态**同名并存**时（升级期的安全垫）面板只算一个，这里也必须按名字去重，
+# 否则 EXPECT 多 1，会一直等到 300 秒超时（第 217 轮 review 实测）。
+EXPECT="$(
+  {
+    for f in "$DEST"/plugins/*.js; do
+      # `|| true`：最后一项不匹配时 `[ -f ]` 返回 1，pipefail 会让整个赋值失败
+      [ -f "$f" ] && basename "$f" .js || true
+    done
+    for d in "$DEST"/plugins/*/; do
+      [ -f "$d/index.js" ] && basename "$d" || true
+    done
+  } | sort -u | wc -l | tr -d ' '
+)"
 # ⚠ 「目录里有几个 .js」≠「该加载几个」：用户停用的插件**永远不会**被加载，
 #   所以不减掉它们，下面的循环会一直等到超时（实测：9 个文件、2 个停用、
 #   readyz 一直是 7/9，脚本报「300 秒没就绪」，其实实例早就好了）。
 if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DEST/data/panel.db" ]; then
-  OFF="$(sqlite3 -readonly "$DEST/data/panel.db" \
-    "select count(*) from plugins where enabled=0;" 2>/dev/null || echo 0)"
+  # 面板刚停/刚起时库可能还在 WAL 恢复或短暂锁着：读不到就重试，
+  # 别把 OFF 当成 0（那会把 3 个停用插件又算进来，EXPECT 永远等不到）。
+  OFF=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    # `.timeout` 只设忙等，不产生输出行（PRAGMA busy_timeout 会把 5000 当一行打出来，
+    # 拼进 OFF 就变成 "5000\n3"，校验直接判成非数字 → 永远等不到 EXPECT）。
+    OFF="$(sqlite3 -readonly -cmd '.timeout 5000' "$DEST/data/panel.db" \
+      "select count(*) from plugins where enabled=0;" 2>/dev/null || true)"
+    case "$OFF" in
+      ''|*[!0-9]*) OFF=""; sleep 0.5 ;;
+      *) break ;;
+    esac
+  done
   case "$OFF" in ''|*[!0-9]*) OFF=0 ;; esac
   EXPECT=$(( EXPECT - OFF ))
   [ "$EXPECT" -lt 0 ] && EXPECT=0

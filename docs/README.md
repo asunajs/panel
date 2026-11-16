@@ -38,8 +38,8 @@ Windows **已能交叉编译出 `.exe` 并通过依赖链接，但还没在真�
 
 **与旧面板的功能对照见 [plugins.md](plugins.md)**：用户点名的六项（插件增删改查、脚本增删改查、
 插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，另外补了备份/恢复和通知；
-市场那一项已经换了个形状落地：**商店是侧载的插件**，面板只加一条通用能力
-（`POST /api/plugins/install` + `panel plugin install`），见 [store.md](store.md)；
+市场那一项没有内置：面板只提供一条通用能力（`POST /api/plugins/install` +
+`panel plugin install`），货架 / 商店这类应用由外部插件自己实现（私有，不在本仓文档范围）；
 在线更新仍明确不做（不让远端 JSON 决定本机跑什么代码）。
 
 ## 从零构建
@@ -93,7 +93,6 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [engine.md](engine.md) | LLRT 嵌入形态、隔离模型、两条预算、定时器坑 |
 | [scheduler.md](scheduler.md) | 调度：任务状态、熔断、时钟回拨、休眠补跑 |
 | [ui.md](ui.md) | 界面与界面门禁（scripts/ui-check.mjs / ui-e2e.mjs） |
-| [store.md](store.md) | 插件商店：侧载形态与为什么不内置 |
 | [windows.md](windows.md) | Windows：现状、缺口、分步计划、验收表 |
 | [pitfalls.md](pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
 | [verification.md](verification.md) | 端到端读数（历史验证记录） |

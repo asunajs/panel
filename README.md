@@ -101,7 +101,8 @@ http://127.0.0.1:8787
 
 > 公网访问（不在局域网里）请走 **HTTPS 反向代理**——nginx 版（certbot 上 TLS）
 > 见 [docs/user/nginx.md](docs/user/nginx.md)，Caddy 版（三行配置自动 HTTPS，适合没备案的
-> 场景）见 [docs/user/caddy.md](docs/user/caddy.md)；安全口径见下面的[安全提醒](#安全提醒)。
+> 场景）见 [docs/user/caddy.md](docs/user/caddy.md)。两篇都写了 IPv6（AAAA / 双栈）和
+> 「平台要放行出口（egress）」的检查清单；安全口径见下面的[安全提醒](#安全提醒)。
 
 <details>
 <summary>macOS / 从源码构建</summary>

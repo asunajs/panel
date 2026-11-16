@@ -719,7 +719,9 @@ async fn index_page() -> Response {
     };
     let body = body
         .replace("/app.js\"", &format!("/app.js?v={v}\""))
-        .replace("/app.css\"", &format!("/app.css?v={v}\""));
+        .replace("/app.css\"", &format!("/app.css?v={v}\""))
+        // 首帧主题脚本也是阻塞资源：不跟版本的话，升级后仍可能吃旧缓存。
+        .replace("/theme-boot.js\"", &format!("/theme-boot.js?v={v}\""));
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
         body,
@@ -1706,7 +1708,7 @@ async fn plugin_reinstall(
                 g.remove(&name);
             }
             // 重装 = 热加载一次（对没加载过的插件就是「首次加载」）：记指纹
-            crate::manifest::note_loaded(&name, &st.plugins_dir.join(&name));
+            crate::manifest::note_loaded(&st.plugins_dir, &name);
             Ok(Json(json!({ "ok": true, "name": name, "adopted": true })))
         }
         Err(e) => Err(bad(format!("重装失败: {e}"))),
@@ -1734,7 +1736,7 @@ async fn plugin_reload(
                 g.remove(&name);
             }
             // 重装也是一次加载：记指纹，下次扫描不再报「改过/新增」
-            crate::manifest::note_loaded(&name, &st.plugins_dir.join(&name));
+            crate::manifest::note_loaded(&st.plugins_dir, &name);
             Ok(Json(json!({ "ok": true, "name": name })))
         }
         Err(e) => {
@@ -1793,25 +1795,37 @@ struct UploadQuery {
 /// 「覆盖时不采纳 cron」，症状都是「装了但行为不对」，很难查。
 async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> Vec<String> {
     let disabled = crate::db::plugin_disabled_names(&st.db).await;
-    let mut reloaded = Vec::new();
-    for f in &saved.files {
+    // 一条 zip 里可能同时有单文件（foo.js）和目录式（bar/index.js）。按**插件名**
+    // 去重后统一卸载/重装；以前只认顶层 `.js`，目录式插件上传完要用户再点一次
+    // 「尝试加载」，和上传接口「自动重载受影响的插件」的承诺不一致（第 217 轮 review）。
+    let mut names: Vec<String> = saved.files.iter().filter_map(|f| {
         let p = std::path::Path::new(f);
-        if p.components().count() != 1 || p.extension().and_then(|e| e.to_str()) != Some("js") {
+        let mut it = p.components();
+        let first = it.next()?.as_os_str().to_str()?.to_string();
+        match it.next() {
+            None if p.extension().and_then(|e| e.to_str()) == Some("js") => {
+                Some(first.trim_end_matches(".js").to_string())
+            }
+            Some(second) if second.as_os_str() == "index.js" => Some(first),
+            _ => None,
+        }
+    }).collect();
+    names.sort();
+    names.dedup();
+    let mut reloaded = Vec::new();
+    for stem in names {
+        if disabled.iter().any(|d| d == &stem) {
             continue;
         }
-        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
-        if disabled.iter().any(|d| d == stem) {
-            continue;
-        }
-        let Ok(source) = read_source(&st.plugins_dir, stem).await else { continue };
-        st.sched.unload(stem);
+        let Ok(source) = read_source(&st.plugins_dir, &stem).await else { continue };
+        st.sched.unload(&stem);
         // 没装过的名字 = 静默安装（API 直接上传，不走界面）：采纳它的 cron 建议。
         // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划（第 180 轮）。
         let fresh = !crate::db::plugin_surfaces(&st.db)
             .await
-            .contains_key(stem);
-        if st.sched.load_adopt(stem, source, fresh).await.is_ok() {
-            reloaded.push(stem.to_string());
+            .contains_key(&stem);
+        if st.sched.load_adopt(&stem, source, fresh).await.is_ok() {
+            reloaded.push(stem);
         }
     }
     reloaded
@@ -2287,6 +2301,7 @@ async fn plugin_stop(
 ///
 /// 停用的插件**不**自动装：停用是用户明确关掉的，静默装回来等于把停用变成了摆设。
 pub(crate) async fn sched_ready(st: &AppState, plugin: &str) -> Result<(), ApiError> {
+    safe_name(plugin)?;
     if crate::db::plugin_disabled_names(&st.db)
         .await
         .iter()
@@ -2300,16 +2315,22 @@ pub(crate) async fn sched_ready(st: &AppState, plugin: &str) -> Result<(), ApiEr
     }
     match st.sched.ensure_loaded(plugin).await {
         Ok(()) => Ok(()),
+        // 真实加载失败（语法错 / 启动报错）：照实返回，别再从磁盘装第二遍 ——
+        // 那既掩盖不了错误，又会让每个失败请求多一次重载。
+        Err(e) if !e.contains("插件目录未知") => {
+            Err(bad(format!("装不回插件 {plugin}：{e}")))
+        }
         Err(e) => {
             // 退一步：调度器可能还不知道插件目录（被单独构造出来的场景，比如测试）。
-            // 这一层自己读源码再装 —— 和 main 里 set_plugins_dir 之后走的是同一条加载路径。
-            let path = st.plugins_dir.join(format!("{plugin}.js"));
-            let src = std::fs::read_to_string(&path).map_err(|e2| {
-                bad(format!(
-                    "装不回插件 {plugin}：{e}；也读不到 {}（{e2}）",
-                    path.display()
-                ))
-            })?;
+            // 用 pluginfs 读，目录式插件才不会误报「<name>.js 不存在」。
+            let dir = st.plugins_dir.clone();
+            let n = plugin.to_string();
+            let src = tokio::task::spawn_blocking(move || {
+                crate::pluginfs::read_source(&dir, &n).map(|(src, _)| src)
+            })
+            .await
+            .map_err(|e| bad(format!("装不回插件 {plugin}：{e}")))?
+            .map_err(|e2| bad(format!("装不回插件 {plugin}：{e}；也读不到源码（{e2}）")))?;
             st.sched
                 .load(plugin, src)
                 .await
@@ -3375,11 +3396,11 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             "loaded": loaded.contains(&name),
             "webui": webui,
             // 目录式插件：界面要把「多个文件」这件事说清楚（编辑的是入口文件）
-            "multi": crate::pluginfs::is_dir_plugin(&entry),
+            "multi": crate::pluginfs::is_dir_plugin(&st.plugins_dir, &name),
             "entry": entry
                 .file_name()
                 .and_then(|s| s.to_str())
-                .map(|s| if crate::pluginfs::is_dir_plugin(&entry) {
+                .map(|s| if crate::pluginfs::is_dir_plugin(&st.plugins_dir, &name) {
                     format!("{name}/{s}")
                 } else {
                     s.to_string()
@@ -3744,7 +3765,7 @@ async fn plugin_create(
     match st.sched.load_adopt(&body.name, source.clone(), true).await {
         Ok(()) => {
             // 新建也是加载：记指纹（不然下次扫描一直把这条报成「新增」）
-            crate::manifest::note_loaded(&body.name, &path);
+            crate::manifest::note_loaded(&st.plugins_dir, &body.name);
             st.log.emit(
                 "panel",
                 None,
@@ -3769,7 +3790,7 @@ async fn plugin_delete(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let path = plugin_path(&st.plugins_dir, &name)?;
+    plugin_path(&st.plugins_dir, &name)?; // 只做名字/路径校验
     // 插件的界面目录（`<name>.webui/`）也跟着进回收站：只删 .js 会留一堆孤儿文件。
     let webui = st.plugins_dir.join(format!("{name}.webui"));
     let trash = st.data_dir.join("trash");
@@ -3781,27 +3802,32 @@ async fn plugin_delete(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     // 目录式插件（`<name>/index.js`）搬整个目录，回收站里也保留它是一整个插件的形状。
+    // 升级期可能 `<name>.js` 与 `<name>/` 同时存在（单文件优先）：两个都要搬走，
+    // 只搬目录的话重启后 `.js` 又把插件带回来了（第 131 轮同款症状）。
     let is_dir_plugin = crate::pluginfs::dir_entry(&st.plugins_dir, &name).is_some();
-    let dest = if is_dir_plugin {
-        trash.join(format!("{name}-{stamp}.plugin"))
-    } else {
-        trash.join(format!("{name}-{stamp}.js"))
-    };
+    let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    if is_dir_plugin {
+        moves.push((
+            st.plugins_dir.join(&name),
+            trash.join(format!("{name}-{stamp}.plugin")),
+        ));
+    }
+    let single = st.plugins_dir.join(format!("{name}.js"));
+    if single.is_file() {
+        moves.push((single, trash.join(format!("{name}-{stamp}.js"))));
+    }
     // **先把文件搬走**，再动内存和库。顺序反了就会出现「提示删除失败 / 重启后插件又回来」：
     // 文件还在，下次启动自然又被加载（第 131 轮用户报的两个症状是同一个根因）。
     // 另外 `rename` 跨设备会 EXDEV（插件目录在别的卷、数据目录在系统盘就是这种情况），
     // 交给 fsx::move_path 走「复制 + 删除」。
     let mut moved: Vec<String> = Vec::new();
-    let src_path = if is_dir_plugin {
-        st.plugins_dir.join(&name)
-    } else {
-        path.clone()
-    };
-    match crate::fsx::move_path(&src_path, &dest).await {
-        Ok(()) => moved.push(dest.display().to_string()),
-        // 文件本来就没有：内存和库照旧要清，别让界面卡在「删除失败」。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(internal(format!("移走 {} 失败: {e}", path.display()))),
+    for (src, dst) in moves {
+        match crate::fsx::move_path(&src, &dst).await {
+            Ok(()) => moved.push(dst.display().to_string()),
+            // 文件本来就没有：内存和库照旧要清，别让界面卡在「删除失败」。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(internal(format!("移走 {} 失败: {e}", src.display()))),
+        }
     }
     if tokio::fs::try_exists(&webui).await.unwrap_or(false) {
         let wdest = trash.join(format!("{name}-{stamp}.webui"));

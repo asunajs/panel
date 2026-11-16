@@ -229,37 +229,19 @@ pub struct Finger {
     pub mtime_ms: i64,
 }
 
-fn seen() -> &'static Mutex<HashMap<String, Finger>> {
-    static SEEN: OnceLock<Mutex<HashMap<String, Finger>>> = OnceLock::new();
+fn seen() -> &'static Mutex<HashMap<PathBuf, Finger>> {
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, Finger>>> = OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn finger_of(path: &Path) -> Option<Finger> {
-    // 目录式插件（`<name>/index.js`）：指纹算整个目录 —— 只盯入口文件的话，
-    // 改 `lib/x.js` 在扫描报告里会显示「没变」，热加载就漏了（第 216 轮）。
-    if crate::pluginfs::is_dir_plugin(path) {
-        if let Some(root) = path.parent() {
-            let mut size = 0u64;
-            let mut newest = 0i64;
-            let mut stack = vec![root.to_path_buf()];
-            while let Some(d) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&d) else { continue };
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                        continue;
-                    }
-                    if let Some(f) = finger_of(&p) {
-                        size = size.saturating_add(f.size);
-                        newest = newest.max(f.mtime_ms);
-                    }
-                }
-            }
-            return Some(Finger { size, mtime_ms: newest });
-        }
-    }
+/// 单个普通文件的指纹（只 stat，不再递归）。目录聚合必须用它，否则入口 `index.js`
+/// 会再次命中 `is_dir_plugin` 的判断、把同一个目录无限扫下去（第 217 轮 review 复现：
+/// `/api/plugins/scan` 一次请求就栈溢出 abort 整个进程）。
+fn file_finger(path: &Path) -> Option<Finger> {
     let md = std::fs::metadata(path).ok()?;
+    if !md.is_file() {
+        return None;
+    }
     let mtime = md
         .modified()
         .ok()
@@ -272,11 +254,47 @@ fn finger_of(path: &Path) -> Option<Finger> {
     })
 }
 
+fn finger_of(path: &Path, dir_plugin: bool) -> Option<Finger> {
+    // 目录式插件（`<name>/index.js`）：指纹算整个目录 —— 只盯入口文件的话，
+    // 改 `lib/x.js` 在扫描报告里会显示「没变」，热加载就漏了（第 216 轮）。
+    if dir_plugin {
+        if let Some(root) = path.parent() {
+            let mut size = 0u64;
+            let mut newest = 0i64;
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    if let Some(f) = file_finger(&p) {
+                        size = size.saturating_add(f.size);
+                        newest = newest.max(f.mtime_ms);
+                    }
+                }
+            }
+            return Some(Finger { size, mtime_ms: newest });
+        }
+    }
+    file_finger(path)
+}
+
 /// 加载成功后记一笔，下次扫描才知道「变没变」。
-pub fn note_loaded(name: &str, path: &Path) {
-    if let Some(f) = finger_of(path) {
+///
+/// 参数用插件根目录 + 名字（不是路径）：目录式插件的入口在 `<name>/index.js`，
+/// 调用方以前传 `<name>.js` 会 stat 不到，导致加载过的目录插件在扫描里永远算「新增」。
+pub fn note_loaded(dir: &Path, name: &str) {
+    let Some(entry) = crate::pluginfs::entry(dir, name) else {
+        return;
+    };
+    if let Some(f) = finger_of(&entry, crate::pluginfs::is_dir_plugin(dir, name)) {
         if let Ok(mut g) = seen().lock() {
-            g.insert(name.to_string(), f);
+            // 键用「插件根 + 名字」的路径，不用裸名字：测试里多个临时目录并行跑时，
+            // 裸名字会互相污染（scan 把别的测试的插件报成 removed）。
+            g.insert(dir.join(name), f);
         }
     }
 }
@@ -309,8 +327,8 @@ pub fn scan(dir: &Path, loaded: &[String], disabled: &[String], current: &str) -
     let mut present = Vec::new();
     for (name, path) in &files {
         present.push(name.clone());
-        let cur = finger_of(path);
-        match snapshot.get(name) {
+        let cur = finger_of(path, crate::pluginfs::is_dir_plugin(dir, name));
+        match snapshot.get(&dir.join(name)) {
             None => new.push(json!({
                 "name": name,
                 "size": cur.map(|f| f.size).unwrap_or(0),
@@ -341,7 +359,9 @@ pub fn scan(dir: &Path, loaded: &[String], disabled: &[String], current: &str) -
     }
     let removed: Vec<Value> = snapshot
         .keys()
-        .filter(|k| !present.contains(k) && !disabled.iter().any(|d| d == *k))
+        .filter(|k| k.parent() == Some(dir))
+        .filter_map(|k| k.file_name().and_then(|s| s.to_str()))
+        .filter(|k| !present.iter().any(|p| p == k) && !disabled.iter().any(|d| d == k))
         .map(|k| json!({ "name": k }))
         .collect();
 

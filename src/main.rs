@@ -412,7 +412,6 @@ async fn load_all(
             );
             continue;
         }
-        let path = dir.join(format!("{name}.js")); // 只为错误信息保底，实际读盘走 pluginfs
         // 清单里的 min_panel 是**硬挡**：面板版本不够就不加载，并说清为什么。
         // 软警告在这里没用 —— 插件跑在不匹配的宿主上，坏起来是随机崩。
         match crate::manifest::load(dir, &name) {
@@ -518,7 +517,7 @@ async fn load_all(
                     g.remove(&name);
                 }
                 // 记下这一刻的文件指纹：下次「扫描目录」才知道哪些文件改过。
-                crate::manifest::note_loaded(&name, &path);
+                crate::manifest::note_loaded(dir, &name);
                 log.emit("panel", None, Level::Info, format!("插件 {name} 已加载"));
             }
             Err(e) => {

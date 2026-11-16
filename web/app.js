@@ -4828,15 +4828,25 @@ function migrateBox() {
  * 插件可能还在按需加载、清单是旧版、或者它自己选择不处理。
  */
 async function runPanelOpenHooks() {
-  if (state.panelHooksRan) return;
-  state.panelHooksRan = true;
+  // 按「插件 + 钩子路径」记账，不是全页一次性：冷启动时 /api/state 常常先返回
+  // `plugins: []`（mcloud 那些加载 100s+），用一个全局 boolean 会把这一页的钩子永久吞掉。
+  if (!state.panelHooksDone) state.panelHooksDone = new Set();
+  if (!state.panelHookTries) state.panelHookTries = new Map();
   for (const p of state.plugins || []) {
     const hook = p && p.manifest && p.manifest.on_panel_open;
     if (!hook) continue;
+    const key = p.name + '\u0000' + hook;
+    if (state.panelHooksDone.has(key)) continue;
     const path = '/plugins/' + encodeURIComponent(p.name) + '/' + String(hook).replace(/^\/+/, '');
+    // 先占位：钩子可能跑几秒，期间 refresh 每 5s 一次，不能叠着发。
+    state.panelHooksDone.add(key);
     try {
       await api(path, { method: 'POST' });
     } catch (e) {
+      const n = (state.panelHookTries.get(key) || 0) + 1;
+      state.panelHookTries.set(key, n);
+      // 前两次失败允许下一次 refresh 重试（插件可能还在装）；之后就不再骚扰。
+      if (n < 3) state.panelHooksDone.delete(key);
       console.warn('panel-open hook failed:', p.name, e && e.message ? e.message : e);
     }
   }

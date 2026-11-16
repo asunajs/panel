@@ -3,17 +3,17 @@
 给下一个模型：本文自包含，读完即可继续。仓库 `/Users/catlair/mobile/workspace/panel-llrt`。
 细节与读数在各篇 docs（索引见 [README.md](README.md)），本文只给「冷启动需要的一切」。
 
-## 0. 一句话现状（2026-11-12）
+## 0. 一句话现状（2026-11-17，0.6.0）
 
 用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/plugins.md` **31 ✅ / 0 部分 / 2 ❌**，
 两条 ❌ 都是「明确不做」（任务软删、市场/自更新）。
 
-- `cargo build` 零 warning；`cargo test` **216 passed**；`bash scripts/check-unsafe-budget.sh` → 0 处；
-  `bash scripts/check-docs.sh` → 20 篇文档内链全通、都在 300 行内。
+- `cargo build` 零 warning；`cargo test` **496 passed**；`bash scripts/check-unsafe-budget.sh` → unsafe 例外 1 处（期望 1）；
+  `bash scripts/check-docs.sh` → 26 篇文档内链全通、都在 1000 行内。
 - `src/` 33 个文件 / 15309 行（含测试）；host-api **27 个 op**，全 async。
-- 40 个 commit，**无 remote、未 push**，工作树干净。
-- 面板跑在 **http://127.0.0.1:8787**（无令牌、只绑回环），7 个插件 / 7 个任务：
-  `hello`（含 tick/boom）、`long`、`mcloud`、`mcloud-daily`、`mcloud-exchange`、`mcloud-live`、`webui-demo`。
+- 远端 `origin = https://github.com/asunajs/panel.git`；发版按 tag 走 CI。
+- 开发实例 `http://127.0.0.1:8787`（无令牌、只绑回环）；日常实例 `~/panel-3030`（launchd
+  `dev.panel`，端口 3030）。当前插件/任务数以 `/readyz` 为准，不在本文写死。
 
 ## 1. 用户的原始订单（verbatim，不要改写意图）
 
@@ -151,11 +151,11 @@
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
-cargo build --offline && cargo test --offline   # 323 passed
-bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 0 处（期望 0）
-bash scripts/check-docs.sh                      # ok: 13 篇文档，内链全通、都在 1000 行内
-bash scripts/check-pitfalls.sh                  # 坑的守卫 23 条（静态检查，含 CSS token / 首帧主题）
-node scripts/ui-check.mjs                       # 界面 173 条断言（自起面板 + 无头 Edge）
+cargo build --offline && cargo test --offline   # 493 passed
+bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 1 处（期望 1，disk.rs 的 in-place allow）
+bash scripts/check-docs.sh                      # ok: 26 篇文档，内链全通、都在 1000 行内
+bash scripts/check-pitfalls.sh                  # 坑的守卫全过（静态检查，含 CSS token / 首帧主题）
+node scripts/ui-check.mjs                       # 界面 175 条断言（自起面板 + 无头 Edge）
 node scripts/theme-flash-check.mjs              # 首帧主题：压慢链路量 first-paint 与 data-theme 的先后
 node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）
 node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）

@@ -128,3 +128,25 @@ fn resolve_module_follows_node_semantics_not_a_fence() {
     assert!(resolve_module(&root, entry.as_str(), "../not-there.js").is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_single_file_named_index_is_not_a_dir_plugin() {
+    // `plugins/index.js` 是个合法单文件插件名，不能被当成 `index/index.js`：
+    // 误判会让 host.plugin_dir() 回 plugins/、指纹扫整个目录（第 217 轮 review）。
+    let d = tmp("index-single");
+    std::fs::write(d.join("index.js"), "export const x = 1;").unwrap();
+    assert!(!is_dir_plugin(&d, "index"));
+    let (_, root) = read_source(&d, "index").unwrap();
+    assert!(root.is_none(), "单文件 index.js 没有插件目录");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_directory_plugin_named_index_is_still_a_dir_plugin() {
+    let d = tmp("index-dir");
+    std::fs::create_dir_all(d.join("index")).unwrap();
+    std::fs::write(d.join("index/index.js"), "").unwrap();
+    assert!(is_dir_plugin(&d, "index"));
+    assert_eq!(read_source(&d, "index").unwrap().1.unwrap(), d.join("index"));
+    let _ = std::fs::remove_dir_all(&d);
+}

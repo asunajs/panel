@@ -1439,9 +1439,19 @@ impl Inner {
                 source,
                 adopt,
                 reply,
-            } => self.spawn_load(name, source, adopt, reply),
+            } => {
+                // 和 EnsureLoaded 共用一把「正在装」的锁：否则 reload 装到一半时
+                // 用户点开插件界面，会再 spawn 一份，两个 Loaded 互相覆盖。
+                if !self.plugins.contains_key(&name) {
+                    self.waking.insert(name.clone());
+                }
+                self.spawn_load(name, source, adopt, reply);
+            }
             Cmd::EnsureLoaded { name, reply } => {
-                if self.plugins.contains_key(&name) {
+                if let Some(l) = self.plugins.get_mut(&name) {
+                    // 刚被"用到"：刷新活跃时间，避免 ensure_loaded 返回 Ok 后紧接着
+                    // 被 idle_tick 当成"闲着"卸掉。
+                    l.last_active = Local::now().timestamp_millis();
                     let _ = reply.send(Ok(()));
                 } else if let Some(dir) = self.plugins_dir.clone() {
                     // 已经在装的（wake_unloaded 先动手了）：直接排进队列等它
@@ -1529,7 +1539,9 @@ impl Inner {
             } => {
                 let out = match result {
                     Ok(p) => {
-                        self.plugins.insert(
+                        // 并发装了两份时，后到的替换先到的；先把旧的 invocation 停掉，
+                        // 否则旧运行时会一直活着（不报错，只是白占内存/抢执行）。
+                        if let Some(old) = self.plugins.insert(
                             name.clone(),
                             Loaded {
                                 plugin: p,
@@ -1537,7 +1549,9 @@ impl Inner {
                                 source,
                                 last_active: Local::now().timestamp_millis(),
                             },
-                        );
+                        ) {
+                            old.plugin.invocation().stop();
+                        }
                         self.unloaded.remove(&name);
                         self.waking.remove(&name);
                         self.lazy.remove(&name);
@@ -2074,9 +2088,8 @@ impl Inner {
         let root = self
             .plugins_dir
             .as_ref()
-            .and_then(|d| crate::pluginfs::entry(d, &name))
-            .filter(|p| crate::pluginfs::is_dir_plugin(p))
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            .filter(|d| crate::pluginfs::is_dir_plugin(d, &name))
+            .map(|d| d.join(&name));
         let handle = HostHandle {
             plugin: name.clone(),
             inv,
