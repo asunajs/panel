@@ -547,3 +547,24 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
   （9100 端口、`/tmp/b8`），最可能是端口/时序撞车。教训：跑门禁前先 `lsof` 看一眼有没有自己留的进程。
 - `git push` 偶发 `SSL_ERROR_SYSCALL`（走 7897 的 socks 代理），重试即成功；**tag 先推成功、main 后推失败**
   会让远端出现「tag 指向 main 还没有的提交」——发现后立刻补推 main（本次 `95fcc3f..0a26e16`）。
+
+## 0.5.2 发版（2026-11-16，第 213 轮）
+
+用户截图报的界面 bug：任务编辑「多计划 → 第 1 条」的下拉框整块平铺箭头。
+
+| 项 | 读数 |
+|---|---|
+| 机理 | 下拉箭头是 `select:not([multiple])` 自绘的背景图；`.sched-item .modal-input` 用 `background` **简写**改底色，把 `repeat/position/size` 重置；深色主题那条只设 `background-image` 的高特异性规则把图补回来 → 图在 + repeat = 平铺 |
+| 顺带发现的隐性 bug | 浅色主题没有 dark 那条补丁 → 箭头被整个抹掉（一直没人报） |
+| 修法 | 三处改底色换 `background-color`：`.sched-item .modal-input`、`.field select`、`.modal-input` |
+| 反向例（先证断言会红） | 把 CSS 改回简写重跑 ui-check → 亮色 `{img:false,repeat:"repeat",size:"auto"}`、暗色 `{img:true,repeat:"repeat",size:"auto"}`，两条断言都红 |
+| 修后 | 深浅两主题都 `{img:true,repeat:"no-repeat",size:"12px 12px"}`；ui-check **171** 条全过 |
+| 守卫 | `check-pitfalls.sh` 新增第 ㉒ 条：扫 `web/app.css` 里所有可能命中 `<select>` 的规则，用 `background` 简写又没写 `background-repeat` 就红（`option` 豁免）——现在 22 条全过 |
+| 线上 | 日常实例 `/app.css` 200（97749B），里面是 `background-color` 那版；`readyz` 6 插件 0 失败 |
+| CI / 产物 | Windows 绿、Release 绿；四件产物同前；说明来自 `CHANGELOG.md` 的 0.5.2 段 |
+
+截图证据（复刻组件、真 CSS、无头 Edge）：
+
+| 修前（用户看到的） | 修后·暗色 | 修后·亮色 |
+|---|---|---|
+| ![平铺箭头](img/select-chevron-bug.png) | ![修好·暗色](img/select-chevron-fixed-dark.png) | ![修好·亮色](img/select-chevron-fixed-light.png) |
