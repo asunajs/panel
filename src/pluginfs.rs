@@ -116,24 +116,28 @@ pub fn total_bytes(dir: &Path, name: &str) -> u64 {
     std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// 把「插件目录内的相对说明符」归一化成绝对路径，越界就 `None`。
+/// 把相对说明符归一化成绝对路径（**按 Node 的语义**，不设围栏）。
 ///
-/// 规则（与 Node 的裸相对解析一致到够用为止）：
-///   · `./x.js`、`../x.js` 都是相对**引用方所在目录**；
-///   · 没写扩展名时补 `.js` / `.mjs`；
-///   · 指向目录时补 `index.js`；
-///   · 结果必须仍在插件根目录内（`..` 跑到外面一律拒）。
-pub fn resolve_inside(root: &Path, base: &str, name: &str) -> Option<PathBuf> {
+/// 规则：
+///   · `./x.js`、`../x.js` 相对**引用它的那个文件**所在目录；
+///   · 绝对路径直接用；
+///   · 入口模块的 base 是引擎给的名字（`eval_script`），这种情况落回插件目录；
+///   · 没写扩展名时补 `.js` / `.mjs`；指向目录时补 `index.js`；
+///   · **不限制跑出插件目录** —— `node:fs` 本来就能读整台机器（用户要求与 Node 对齐），
+///     再给 import 上一道「只能读插件自己的文件」的锁就是自欺欺人，而且会让面板与
+///     Node/LLRT 语义分叉。文件不存在才算失败。
+pub fn resolve_module(root: &Path, base: &str, name: &str) -> Option<PathBuf> {
     let base_dir = match Path::new(base) {
-        p if p.is_absolute() && p.starts_with(root) => p.parent()?.to_path_buf(),
-        // 入口模块的 base 是引擎给的名字（`eval_script` 一类），落回根目录
+        p if p.is_absolute() => p.parent()?.to_path_buf(),
+        // 入口模块的 base 是引擎给的名字（`eval_script` 一类），落回插件目录
         _ => root.to_path_buf(),
     };
-    let joined = base_dir.join(name);
+    let joined = if Path::new(name).is_absolute() {
+        PathBuf::from(name)
+    } else {
+        base_dir.join(name)
+    };
     let norm = normalize(&joined)?;
-    if !norm.starts_with(root) {
-        return None;
-    }
     candidates(&norm).into_iter().find(|c| c.is_file())
 }
 

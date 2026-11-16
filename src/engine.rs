@@ -390,18 +390,17 @@ impl Resolver for PluginResolver {
             return Err(Error::new_resolving(base, name));
         };
         let raw = name.trim_start_matches(CJS_IMPORT_PREFIX);
-        if !(raw.starts_with("./") || raw.starts_with("../")) {
-            // 不是相对路径：让后面的 resolver 去处理（内置模块 / 包）
+        let relative = raw.starts_with("./") || raw.starts_with("../");
+        if !relative && !std::path::Path::new(raw).is_absolute() {
+            // 既不是相对路径也不是绝对路径：让后面的 resolver 去处理（内置模块 / 包）
             return Err(Error::new_resolving(base, name));
         }
-        crate::pluginfs::resolve_inside(root, base, raw)
+        crate::pluginfs::resolve_module(root, base, raw)
             .map(|p| p.to_string_lossy().into_owned())
             .ok_or_else(|| {
-                Error::new_resolving_message(
-                    base,
-                    name,
-                    format!("插件目录内找不到 {name}（相对路径以插件目录为根，不能跑出去）"),
-                )
+                // 与 Node 一致：相对解析就是「相对引用它的那个文件」，不设围栏；
+                // 文件不在才是错误（能读到什么由进程权限决定，见 host-api 的 fs 说明）。
+                Error::new_resolving_message(base, name, format!("import 的文件不存在：{name}"))
             })
     }
 }
@@ -419,11 +418,14 @@ impl Loader for PluginLoader {
         let raw = name
             .trim_start_matches(CJS_LOADER_PREFIX)
             .trim_start_matches(CJS_IMPORT_PREFIX);
+        // 不设目录围栏（与 Node 一致，也和 node:fs 的能力对齐）：只要求文件存在。
+        // `root` 只在 resolver 那边用来给入口模块定基准目录。
+        let _ = root;
         let path = std::path::Path::new(raw);
-        if !path.starts_with(root) || !path.is_file() {
+        if !path.is_file() {
             return Err(Error::new_loading_message(
                 name,
-                "不在插件目录里（相对 import 只能引用插件自己的文件）",
+                format!("import 的文件不存在：{raw}"),
             ));
         }
         if let Ok(m) = std::fs::metadata(path) {

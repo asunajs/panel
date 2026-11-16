@@ -32,7 +32,23 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 注册 | `register_cron` / `register_handler` |
 | 通知 | `notify(title, body?)` —— 进面板通知列表；配了 `PANEL_NOTIFY_WEBHOOK` 也 POST 出去（见 [notify 一节](#通知)） |
 | 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`）；`self_config`（**这个插件自己的**配置，见下） |
+| 路径 | `plugin_dir()`（目录式插件自己的目录，单文件插件 `null`）；`plugin_data_dir()`（`plugin-data/<name>/`）—— 给 `node:fs` 拼绝对路径用，见下 |
 
+
+#### `fs` 与路径 API（第 216 轮）
+
+`node:fs` 是 LLRT 内置模块，**没有沙箱**：能读写面板进程有权限的任意路径（与 Node 一致）。
+面板不再给它加门 —— 唯一的约束是运行身份本身的权限。所以「装插件 = 把文件权限交给它」。
+
+`fs` 的相对路径按**面板进程 cwd** 解析（不是插件目录），因此读插件自己的资源要用绝对路径：
+`await host.plugin_dir()`（目录式插件 = `plugins/<name>/`；单文件插件 = `null`）与
+`await host.plugin_data_dir()`（`<data>/plugin-data/<name>/`，配置就在那）。
+
+导出的函数一共 15 个：`readFileSync` `writeFileSync` `readdirSync` `statSync` `lstatSync`
+`mkdirSync` `renameSync` `rmSync` `rmdirSync` `chmodSync` `accessSync` `mkdtempSync`
+`symlinkSync` `constants` `promises`。**没有 `existsSync`**（实测 `typeof === 'undefined'`），
+也没有 `copyFileSync` / `createReadStream` / `realpath`；`readdirSync('/')` 会报
+`IO Error: No such file or directory`（普通目录正常）。这些差异是 LLRT 侧的，面板不改。
 
 #### 两份配置（第 89 轮）
 

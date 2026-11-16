@@ -78,6 +78,11 @@ pub struct HostHandle {
     pub sched: Option<crate::scheduler::Scheduler>,
     /// 数据目录：插件自己的配置在 `<data_dir>/plugin-data/<name>/config.json`（第 89 轮）。
     pub data_dir: std::path::PathBuf,
+    /// 目录式插件自己的目录（`plugins/<name>/`）；单文件插件是 `None`。
+    ///
+    /// 为什么要有它（第 216 轮）：`node:fs` 的相对路径按**面板进程 cwd** 解析，
+    /// 插件想读自己目录里的非 JS 资源（模板、词表）时，没有可靠办法拿到那个路径。
+    pub plugin_root: Option<std::path::PathBuf>,
 }
 
 fn host(ctx: &Ctx<'_>) -> Result<HostHandle> {
@@ -135,6 +140,8 @@ const WRAP: &str = r#"(raw) => {
     panel_at_least: (v) => raw.panel_at_least(String(v)),
     config: async () => JSON.parse(await raw.config()),
     self_config: async () => JSON.parse(await raw.self_config()),
+    plugin_dir: async () => raw.plugin_dir(),
+    plugin_data_dir: async () => raw.plugin_data_dir(),
     sqlite_query: async (sql, params) => JSON.parse(await raw.sqlite_query(sql, j(params))),
     sqlite_exec: async (sql, params) => JSON.parse(await raw.sqlite_exec(sql, j(params))),
     fetch: async (url, opts) => JSON.parse(await raw.fetch(url, j(opts))),
@@ -145,7 +152,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 29] = [
+const OP_NAMES: [&str; 31] = [
     "log",
     "info",
     "warn",
@@ -154,6 +161,8 @@ const OP_NAMES: [&str; 29] = [
     "sleep",
     "config",
     "self_config",
+    "plugin_dir",
+    "plugin_data_dir",
     "sqlite_query",
     "sqlite_exec",
     "fetch",
@@ -310,6 +319,11 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
             "self_config",
             Func::from(Async(op_self_config)).into_js(ctx)?,
         ),
+        ("plugin_dir", Func::from(Async(op_plugin_dir)).into_js(ctx)?),
+        (
+            "plugin_data_dir",
+            Func::from(Async(op_plugin_data_dir)).into_js(ctx)?,
+        ),
         (
             "sqlite_query",
             Func::from(Async(op_sqlite_query)).into_js(ctx)?,
@@ -385,6 +399,26 @@ async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Resu
         },
     );
     Ok(())
+}
+
+/// `host.plugin_dir()` —— 目录式插件自己的目录（单文件插件回 `null`）。
+///
+/// 给 `node:fs` 用：相对路径按面板进程 cwd 解析，插件读自己目录里的资源必须有绝对路径。
+async fn op_plugin_dir(ctx: Ctx<'_>) -> Result<Option<String>> {
+    let h = host(&ctx)?;
+    Ok(h.plugin_root.as_ref().map(|p| p.display().to_string()))
+}
+
+/// `host.plugin_data_dir()` —— 这个插件的数据目录（`plugin-data/<name>/`，配置就在里面）。
+///
+/// 目录不一定存在：要写就先自己 `mkdirSync(…, {recursive:true})`。
+async fn op_plugin_data_dir(ctx: Ctx<'_>) -> Result<String> {
+    let h = host(&ctx)?;
+    Ok(h.data_dir
+        .join("plugin-data")
+        .join(&h.plugin)
+        .display()
+        .to_string())
 }
 
 /// `host.self_config()` —— 这个插件**自己**的配置（第 89 轮）。

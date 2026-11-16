@@ -31,13 +31,41 @@ plugins/
 | `import fs from 'node:fs'` / `node:path` / `node:crypto` … | ✅ LLRT 内置模块，静态与 `await import()` 都行 |
 | `import { x } from './lib/x.js'` | ✅ **相对路径以插件目录为根**（就是这轮加的能力） |
 | `import { d } from './lib/deep'` | ✅ 没写扩展名补 `.js` / `.mjs`；指向目录补 `index.js` |
-| `import x from '../outside.js'` | ❌ 拒绝：`插件目录内找不到 ../outside.js（相对路径以插件目录为根，不能跑出去）` |
+| `import x from '../outside.js'` | ✅ 跑出插件目录也行（**与 Node 一致**）；只有文件不存在才报「import 的文件不存在」 |
 | `require('./x.cjs')` | ⚠️ CJS 兼容层在，但它按**面板进程 cwd** 解析，指不到插件目录 —— 多文件请用 ESM `import` |
 | `import 'node:https' / net / dgram / child_process` | ❌ 面板拒：出站只能走 `host.fetch`（SSRF 门在解析层拦） |
 
 实现：`src/engine.rs` 的 `PluginResolver` / `PluginLoader`（配对：一个解析名字、一个读文件；
 rquickjs 只给了 `FileResolver` 却**没有配读文件的 loader**，所以以前相对 import 必然失败），
-路径归一化与越界判定在 `src/pluginfs.rs::resolve_inside`。
+路径归一化在 `src/pluginfs.rs::resolve_module`。
+
+**这里没有围栏**：相对 import 就是「相对引用它的那个文件」，`../` 指到哪都行，绝对路径也认。
+理由和用户点出的一致 —— `node:fs` 本来就能读整台机器（见下节），再给 import 上一把
+「只能读插件自己的文件」的锁既拦不住谁，又让面板和 Node/LLRT 的语义分叉。文件不存在才是错误。
+
+### 读自己的资源（`fs` 与两个路径 API）
+
+`node:fs` 是 LLRT 内置模块，**没有任何沙箱**：能读写面板进程有权限的任意路径
+（实测 `readFileSync('/etc/hosts')`、读面板自己的源码、写 `/tmp` 都行）。
+代价是「装插件 = 把文件权限交给它」，所以只装你看得懂的插件。
+
+但 `fs` 的相对路径是按**面板进程 cwd** 解析的（不是插件目录），所以要读插件自己目录里的
+非 JS 资源（模板、词表、证书）得用绝对路径 —— 面板给两个：
+
+```js
+import host from 'panel:host';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const dir = await host.plugin_dir();       // 目录式插件：/…/plugins/<name>；单文件插件：null
+const data = await host.plugin_data_dir(); // /…/data/plugin-data/<name>（配置就在里面）
+const tpl = fs.readFileSync(path.join(dir, 'tpl.txt'), 'utf8');
+```
+
+`fs` 是精简版（15 个导出）：有 `readFileSync/writeFileSync/readdirSync/statSync/lstatSync/
+mkdirSync/renameSync/rmSync/rmdirSync/chmodSync/accessSync/mkdtempSync/symlinkSync/constants/
+promises`；**没有 `existsSync`**（`typeof fs.existsSync === 'undefined'`），也没有
+`copyFileSync`/`createReadStream`/`realpath`。判断存在用 `accessSync` 或 `statSync` 包 try。
 
 ### 一条命令就能验
 

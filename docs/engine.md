@@ -993,5 +993,6 @@ fire_due 永远等不到（实测 90 秒一次没跑）。现在到点时刻是�
   读文件后 `Module::declare(name=绝对路径)` —— 模块名是绝对路径，嵌套文件的相对 import 才有根。
 - **入口 base 不是路径**：入口走 `ctx.eval_with_options`，base 是 `eval_script`，
   解析器要容忍（非绝对路径就落回插件根），否则入口那层 `./lib/x.js` 找不到。
-- **越界拒、前缀要剥**：归一化后必须仍在插件根内；llrt `require` 的 `__cjs:` / `__cjsm:` 前缀
-  先剥再判。单模块 ≤ 2 MiB。守卫：`engine::tests` 两条 + `pluginfs` 六条。
+- **没有围栏，前缀要剥**：相对说明符按 Node 语义解析（相对引用它的文件，`../` 与绝对路径都认，
+  只有文件不存在才报错）—— 与 `node:fs` 的能力对齐，别做「fs 全开、import 上锁」的分叉；
+  llrt `require` 的 `__cjs:` / `__cjsm:` 前缀先剥再判。单模块 ≤ 2 MiB。守卫：`engine::tests` 两条 + `pluginfs` 六条。

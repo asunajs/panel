@@ -856,3 +856,6 @@
     并且模块名要用**绝对路径**，否则嵌套文件的相对 import 没有根。
     还有一个坑：入口是 `ctx.eval_with_options` 求值的，base 是 `eval_script` 不是路径，
     解析器要能容忍这种 base（落回插件根）。
+    **别顺手给 import 加「只能读插件目录」的围栏**（第 216 轮我加了，用户当场指出）：
+    `node:fs` 本来就没有沙箱，能读整台机器；再锁 import 既拦不住谁，又让面板与 Node/LLRT
+    语义分叉（`import '../shared/x.js'` 在 Node 能跑、在面板报错）。文件不存在才是错误。

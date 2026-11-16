@@ -936,6 +936,8 @@ async fn api_test_js(
         // 试跑没有任务表：set_job_* 会直接报错
         sched: None,
         data_dir: st.data_dir.clone(),
+        // 试跑不是某个插件目录里的文件，plugin_dir() 回 null
+        plugin_root: None,
     };
 
     let started = std::time::Instant::now();

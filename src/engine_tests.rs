@@ -38,6 +38,7 @@ async fn load_cfg(
         config: crate::config_store::ConfigStore::new(&serde_json::from_str(cfg).unwrap_or(serde_json::json!({}))),
         sched: None,
         data_dir: std::path::PathBuf::from("data"),
+        plugin_root: None,
     };
     (Plugin::load(source, handle).await, rx)
 }
@@ -574,8 +575,16 @@ async fn dir_plugin_can_import_its_own_files() {
         format!(
             "{HANDLERS}import {{ greet }} from './lib/greet.js';\n\
              import {{ deep }} from './lib/deep';\n\
+             import fs from 'node:fs';\n\
+             import path from 'node:path';\n\
+             const dir = await host.plugin_dir();\n\
+             if (!dir) throw new Error('目录式插件应当拿到 plugin_dir');\n\
+             const asset = fs.readFileSync(path.join(dir, 'asset.txt'), 'utf8').trim();\n\
+             const dataDir = await host.plugin_data_dir();\n\
+             if (!dataDir.endsWith('t')) throw new Error('plugin_data_dir 不对: ' + dataDir);\n\
              await host.register_handler('hi', async () => {{\n\
                const a = greet('世界');\n\
+               if (asset !== '资源文件') throw new Error('读自己目录的资源失败: ' + asset);\n\
                if (a !== '你好，世界') throw new Error('greet 结果不对: ' + a);\n\
                if (deep !== '目录补 index.js') throw new Error('目录 import 结果不对: ' + deep);\n\
                return {{ ok: true }};\n\
@@ -585,6 +594,8 @@ async fn dir_plugin_can_import_its_own_files() {
     .unwrap();
     std::fs::write(root.join("lib/greet.js"), "export const greet = (w) => '你好，' + w;").unwrap();
     std::fs::write(root.join("lib/deep/index.js"), "export const deep = '目录补 index.js';").unwrap();
+    // 非 JS 资源（模板/词表一类）：只能靠 host.plugin_dir() + fs 读
+    std::fs::write(root.join("asset.txt"), "资源文件\n").unwrap();
 
     let src = std::fs::read_to_string(root.join("index.js")).unwrap();
     global_inits();
@@ -600,6 +611,7 @@ async fn dir_plugin_can_import_its_own_files() {
         config: crate::config_store::ConfigStore::new(&json!({})),
         sched: None,
         data_dir: root.clone(),
+        plugin_root: Some(root.clone()),
     };
     let p = Plugin::load_in_dir(&src, Some(root.clone()), handle)
         .await
@@ -612,12 +624,20 @@ async fn dir_plugin_can_import_its_own_files() {
 }
 
 #[tokio::test]
-async fn dir_plugin_cannot_import_outside_its_dir() {
+async fn dir_plugin_may_import_above_its_dir_like_node() {
+    // 与 Node 对齐：`import '../outside.js'` 是合法的（文件存在就行）。
+    // 之前这里拦着是错的 —— `node:fs` 本来就能读整台机器，import 设围栏是自欺欺人。
     let root = std::env::temp_dir().join(format!("panel-engesc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("p")).unwrap();
-    std::fs::write(root.join("outside.js"), "export const x = 1;").unwrap();
-    let src = format!("{HANDLERS}import {{ x }} from '../outside.js';\n");
+    std::fs::write(root.join("outside.js"), "export const x = '上级目录里的模块';").unwrap();
+    let src = format!(
+        "{HANDLERS}import {{ x }} from '../outside.js';\n\
+         await host.register_handler('hi', async () => {{\n\
+           if (x !== '上级目录里的模块') throw new Error('上级 import 结果不对: ' + x);\n\
+           return {{ ok: true }};\n\
+         }});\n"
+    );
     global_inits();
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
     let log = LogHub::new(db.clone());
@@ -631,11 +651,13 @@ async fn dir_plugin_cannot_import_outside_its_dir() {
         config: crate::config_store::ConfigStore::new(&json!({})),
         sched: None,
         data_dir: root.clone(),
+        plugin_root: Some(root.join("p")),
     };
-    let err = match Plugin::load_in_dir(&src, Some(root.join("p")), handle).await {
-        Ok(_) => panic!("越界 import 必须失败"),
-        Err(e) => e,
-    };
-    assert!(err.contains("找不到") || err.contains("不能跑出去"), "实际: {err}");
+    let p = Plugin::load_in_dir(&src, Some(root.join("p")), handle)
+        .await
+        .expect("上级目录的 import 应当成功（Node 语义）");
+    p.dispatch("hi", &json!({}), 5_000)
+        .await
+        .expect("handler 应当能跑，且拿到上级目录模块的值");
     let _ = std::fs::remove_dir_all(&root);
 }

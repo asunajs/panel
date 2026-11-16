@@ -2051,6 +2051,14 @@ impl Inner {
             return;
         }
         let inv = Arc::new(crate::engine::Invocation::default());
+        // 目录式插件（`plugins/<name>/index.js`）要把自己的目录同时告诉引擎（相对 import 的根）
+        // 和 host（`host.plugin_dir()`）；单文件插件这里是 None，行为与以前完全一样。
+        let root = self
+            .plugins_dir
+            .as_ref()
+            .and_then(|d| crate::pluginfs::entry(d, &name))
+            .filter(|p| crate::pluginfs::is_dir_plugin(p))
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let handle = HostHandle {
             plugin: name.clone(),
             inv,
@@ -2062,15 +2070,8 @@ impl Inner {
                 tx: self.tx.clone(),
             }),
             data_dir: self.data_dir.clone(),
+            plugin_root: root.clone(),
         };
-        // 目录式插件（`plugins/<name>/index.js`）要把自己的目录告诉引擎，
-        // 相对 import 才有根；单文件插件这里是 None，行为与以前完全一样。
-        let root = self
-            .plugins_dir
-            .as_ref()
-            .and_then(|d| crate::pluginfs::entry(d, &name))
-            .filter(|p| crate::pluginfs::is_dir_plugin(p))
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let tx = self.tx.clone();
         // 加载期可能有很长的顶层 await，不能占着调度循环
         tokio::spawn(async move {
