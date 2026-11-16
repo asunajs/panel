@@ -509,99 +509,83 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 
 坑与来历见 [pitfalls.md](pitfalls.md) §98。
 
-## 0.5.0 发版（2026-11-15，第 212 轮）
+## 0.5.1 发版（2026-11-16，第 212–215 轮）
+
+从 0.4.3 以来的一批变化合并成一个版本发布。**过程记录如实留档**：一开始拆成
+0.5.0 → 0.5.3 连发了四个，用户直接说「不要一直发版」，于是把四个版本合并成 0.5.1，
+删掉中间三个 release，`v0.5.1` 重新打到包含全部改动的那次提交上。
 
 | 项 | 读数 |
 |---|---|
-| 版本 | `0.5.0`（Cargo.toml；`strings panel` 里能对上，日常实例 22:59:42 部署的就是它） |
-| 门禁 | cargo test **475**；ui-check **169**；check-docs 26 篇；坑 21 条；插件边界 10 条；unsafe 例外 **1**（期望 1） |
-| clippy --all-targets | **13 条警告**（review 时 54；剩下的都在 notify 会话未收尾的 cron/plan 那片） |
-| CI | Windows job 绿（`43727373254`）；Release job 绿（`43727378816`） |
+| 版本 | `0.5.1`（Cargo.toml；`strings ~/panel-3030/panel \| grep -c 0.5.1` 能对上，日常实例已部署） |
+| 门禁 | cargo test **476**、ui-check **171**、check-docs **27** 篇、坑守卫 **22**、插件边界 10、unsafe 例外 1（期望 1） |
+| clippy --all-targets | **src/ 零警告**（review 时 54；剩 2 条在 `vendor/llrt` 上游代码里，不动） |
 | 产物 | `panel-aarch64-linux-musl` / `panel-x86_64-linux-musl` / `panel-x86_64-pc-windows-msvc.exe` / `SHA256SUMS` |
-| Release | <https://github.com/asunajs/panel/releases/tag/v0.5.0>，说明用 `CHANGELOG.md` 的 0.5.0 段（不是 `--generate-notes` 的自动列表） |
-| 更新检查回归 | 新实例 `/api/update/check?force=1` → `{current:0.5.0, latest:v0.5.0, has_update:false, show:false}` —— 也就是「当前版本就是最新就不提示」这条路真的通了 |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.5.1>，说明用 `CHANGELOG.md` 的 0.5.1 段（合并后的一份） |
+| 更新检查回归 | `/api/update/check?force=1` → `{current:0.5.1, latest:v0.5.1, has_update:false, show:false}`，`notes` 带回 Release 正文 |
 
-发版瑕疵（如实记）：`v0.5.0` 的 tag 少包含两处**界面文案/错误处理**的改动
-（`fix(ui)` 单独补提交 `1b6e711`：插件引导文案对齐扫描 UI、查更新遇 401 不报「查不到」）——
-提交时 `git add` 漏了 `web/` 目录。产物与 tag 仍然自洽（都缺这两行），这两处随下一个补丁版发出；
-日常实例已是最新源码，不受影响。
+### 被合并掉的四个版本（留档，便于追溯）
 
-坑一条：`~/panel-3030/panel --version` 不是有效参数，它会**当前台起一个 8787 的服务**（实测挂了 60 秒
-才被后台化）。查部署版本用 `strings <binary> | grep 版本号`，别拿 `--version` 试。
+| 原 tag | 当时的提交 | 内容 |
+|---|---|---|
+| `v0.5.0` | `738140e` | 检查更新、设置表单、日志分来源、多选下拉、预算 300s、一批用户报的修复 |
+| `v0.5.1`（旧） | `0a26e16` | 补 0.5.0 漏发的两处界面改动 + clippy 收拾 |
+| `v0.5.2` | `568942f` | 多计划下拉框平铺箭头（见下） |
+| `v0.5.3` | `ffcd741` | 超时错误带线路探测（见下） |
 
-## 0.5.1 发版（2026-11-16）
+三个中间 release 已删除；需要旧产物时按上表提交重新 tag 即可重建。
 
-| 项 | 读数 |
-|---|---|
-| 版本 | `0.5.1`（`strings ~/panel-3030/panel \| grep -c 0.5.1` = 14；日常实例已部署） |
-| 门禁 | cargo test **475**（连跑 8 次全绿）、ui-check 169、docs 26、坑 21、边界 10、unsafe 1 |
-| clippy --all-targets | **src/ 零警告**（54 → 0；剩 2 条在 `vendor/llrt` 的上游代码里，不动） |
-| CI | Windows `43782581639` 绿；Release `43782552141` 绿 |
-| 产物 | 与 0.5.0 同四件：aarch64/x86_64 linux-musl、windows-msvc、SHA256SUMS |
-| Release | <https://github.com/asunajs/panel/releases/tag/v0.5.1>，说明取自 `CHANGELOG.md` 的 0.5.1 段 |
-| 更新检查回归 | `{current:0.5.1, latest:v0.5.1, has_update:false, show:false}`，`notes` 带回 Release 正文（179ms 一次，直连 GitHub 成功那趟） |
-
-两条过程记录：
-
-- 一次 `cargo test` 报 474/1 失败，随后的 8 次连跑全绿 —— 当时同目录还残留着 B6 压测的临时实例
-  （9100 端口、`/tmp/b8`），最可能是端口/时序撞车。教训：跑门禁前先 `lsof` 看一眼有没有自己留的进程。
-- `git push` 偶发 `SSL_ERROR_SYSCALL`（走 7897 的 socks 代理），重试即成功；**tag 先推成功、main 后推失败**
-  会让远端出现「tag 指向 main 还没有的提交」——发现后立刻补推 main（本次 `95fcc3f..0a26e16`）。
-
-## 0.5.2 发版（2026-11-16，第 213 轮）
-
-用户截图报的界面 bug：任务编辑「多计划 → 第 1 条」的下拉框整块平铺箭头。
+### 多计划下拉框「平铺箭头」（第 213 轮，用户截图）
 
 | 项 | 读数 |
 |---|---|
 | 机理 | 下拉箭头是 `select:not([multiple])` 自绘的背景图；`.sched-item .modal-input` 用 `background` **简写**改底色，把 `repeat/position/size` 重置；深色主题那条只设 `background-image` 的高特异性规则把图补回来 → 图在 + repeat = 平铺 |
 | 顺带发现的隐性 bug | 浅色主题没有 dark 那条补丁 → 箭头被整个抹掉（一直没人报） |
 | 修法 | 三处改底色换 `background-color`：`.sched-item .modal-input`、`.field select`、`.modal-input` |
-| 反向例（先证断言会红） | 把 CSS 改回简写重跑 ui-check → 亮色 `{img:false,repeat:"repeat",size:"auto"}`、暗色 `{img:true,repeat:"repeat",size:"auto"}`，两条断言都红 |
-| 修后 | 深浅两主题都 `{img:true,repeat:"no-repeat",size:"12px 12px"}`；ui-check **171** 条全过 |
-| 守卫 | `check-pitfalls.sh` 新增第 ㉒ 条：扫 `web/app.css` 里所有可能命中 `<select>` 的规则，用 `background` 简写又没写 `background-repeat` 就红（`option` 豁免）——现在 22 条全过 |
-| 线上 | 日常实例 `/app.css` 200（97749B），里面是 `background-color` 那版；`readyz` 6 插件 0 失败 |
-| CI / 产物 | Windows 绿、Release 绿；四件产物同前；说明来自 `CHANGELOG.md` 的 0.5.2 段 |
-
-截图证据（复刻组件、真 CSS、无头 Edge）：
+| 反向例 | 把 CSS 改回简写重跑 ui-check → 亮色 `{img:false,repeat:"repeat"}`、暗色 `{img:true,repeat:"repeat"}`，两条断言都红 |
+| 修后 | 深浅两主题都 `{img:true,repeat:"no-repeat",size:"12px 12px"}` |
+| 守卫 | `check-pitfalls.sh` 第 ㉒ 条扫 `web/app.css` 里所有可能命中 `<select>` 的规则；`ui-check` 深浅各一条断言 |
+| 线上 | 日常实例 `/app.css` 里是 `background-color` 那版；`readyz` 6 插件 0 失败 |
 
 | 修前（用户看到的） | 修后·暗色 | 修后·亮色 |
 |---|---|---|
 | ![平铺箭头](img/select-chevron-bug.png) | ![修好·暗色](img/select-chevron-fixed-dark.png) | ![修好·亮色](img/select-chevron-fixed-light.png) |
 
-## 「为啥老是超时」的定位（2026-11-16，第 214 轮）
+### 「为啥老是超时」的定位（第 214 轮）
 
 用户拿截图问：`mcloud-daily` 08:05 那批 `请求超时（20000ms）` 是怎么回事。
 
 | 证据 | 读数 |
 |---|---|
 | 运行记录 | `runs` 表第 31 行：`mcloud-daily / 日常`，08:00:00 起，**343 秒**，状态 ok（部分子任务失败） |
-| 超时分布 | 全库 20 条 `请求超时`：11-13 一条、11-15 两条（都是 1500ms 短超时）、**11-16 08:00 那条运行 17 条**（20s） |
+| 超时分布 | 全库 20 条 `请求超时`：11-13 一条、11-15 两条（1500ms 短超时）、**11-16 08:00 那条运行 17 条**（20s） |
 | 算术 | 17 × 20s ≈ 340s ≈ 整趟 343s —— 这一趟基本全耗在超时上 |
-| 交叉验证 | 同一时段（08:0x）我自己的探针：四个 TLS 组合全部 `Connect` 失败；09:4x 复测同几个接口：`m.mcloud.139.com` 41ms / 445ms / 169ms 全通 |
-| 结论 | **一次网络抖动**（出网卡在「连不上也不报错」的状态），不是面板或插件逻辑问题 |
+| 交叉验证 | 同一时段（08:0x）我的探针四个 TLS 组合全部 `Connect` 失败；09:4x 复测同一批接口 41 / 169 / 445 ms 全通 |
+| 结论 | **一次网络抖动**（出网卡在「连不上也不报错」的状态），不是面板或插件逻辑 |
 
-### 顺带查清的另一件事：那页日志的时间戳为什么全一样
-
-08:00–08:06 那 193 行日志**时间戳全是 08:05:43**（= 运行结束那一刻）。三个探针排除面板侧：
+那 193 行日志时间戳全是 08:05:43（= 运行结束），三个探针排除了面板侧：
 
 | 探针写法 | 结果 |
 |---|---|
-| `await host.log()` + 4s 超时请求 + `await host.log()` | 两条时间戳相隔 4s（正常） |
+| `await host.log()` + 4s 超时请求 + `await host.log()` | 两条相隔 4s（正常） |
 | fire-and-forget `host.log()` + 顺序 4s 超时 ×3 | 三条相隔 4s（正常） |
-| `const p = host.fetch(慢)` 不 await，紧接着 `host.log()` | 立刻落库（同毫秒），**不会**排在 fetch 后面 |
+| `const p = host.fetch(慢)` 不 await，紧接着 `host.log()` | 立刻落库，**不会**排在 fetch 后面 |
 
-→ 面板是逐行即时落库的；那批输出是**插件侧攒着一次刷出来的**（它自己的运行汇报）。
-所以：这页的时间戳不能用来判断「每次请求发生在什么时候」，只能判断「这批输出什么时候被吐出来」。
+→ 面板逐行即时落库；那批输出是插件侧攒着刷的。改进（写进本版）：超时错误带 2 秒 TCP 探测，
+文案分「连得上/连不上」两种；release 实测三条（黑洞 / 正常主机+1ms 超时 / native 黑洞）都对。
 
-### 0.5.3 带来的改进
+### 代理环境变量（第 215 轮）
 
-超时错误现在带线路探测（2 秒内 TCP 一次），两条 TLS 路都带：
+用户问「是不是我的环境变量」→ 不是。两条出站链路都直连：默认那条是 hyper + `HttpConnector`
+（无代理层），`tls:"native"` 显式 `.no_proxy()`。实测把 `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY`
+指到死端口 `127.0.0.1:9`，往 `https://www.baidu.com/` 请求仍是 258ms / 255ms HTTP 200。
+用户向说明见 [user/troubleshooting.md](user/troubleshooting.md)。
 
-```
-请求超时（20000ms）：已探测：m.mcloud.139.com:443 连得上（38ms），是服务端没回响应或太慢
-请求超时（1500ms）：已探测：93.184.216.34:80 2 秒内连不上，先查网络/链路
-```
+### 过程教训（两条）
 
-release 二进制实测三条（黑洞 / 正常主机+1ms 超时 / native 黑洞）文案都对；单测钉住
-`host_port` 的解析（userinfo、IPv6、默认端口、非 URL）。
+- 一次 `cargo test` 报 474/1 失败、随后连跑 8 次全绿 —— 当时残留了 B6 压测的临时实例（9100 端口），
+  最可能是端口/时序撞车。跑门禁前先 `lsof` 看一眼有没有自己留的进程。
+- `git push` 偶发 `SSL_ERROR_SYSCALL`（socks 代理），重试即成功；**tag 先推成功、main 后推失败**
+  会让远端出现「tag 指向 main 还没有的提交」——发现后立刻补推 main。
+- `~/panel-3030/panel --version` 不是有效参数，它会**当前台起一个 8787 的服务**（挂了 60 秒才被后台化）。
+  查部署版本用 `strings <binary> | grep 版本号`。

@@ -79,7 +79,7 @@ async fn binary_true_on_the_native_tls_path_too() {
     assert_eq!(decoded.as_slice(), RAW);
 }
 
-/// 超时诊断里那个 `host:port` 解析器（0.5.3）：抽错的话错误文案会把责任指错方向。
+/// 超时诊断里那个 `host:port` 解析器（0.5.1）：抽错的话错误文案会把责任指错方向。
 #[test]
 fn host_port_handles_common_urls() {
     assert_eq!(
