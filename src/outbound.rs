@@ -134,7 +134,7 @@ pub async fn fetch_json_with(
                         match r {
                             Ok(Ok(resp)) => resp,
                             Ok(Err(e)) => return Err(format!("请求失败: {e}")),
-                            Err(_) => return Err(format!("请求超时（{timeout}ms）")),
+                            Err(_) => return Err(format!("请求超时（{timeout}ms）：{}", timeout_note(&current).await)),
                         }
                     }
                     _ = i.cancelled() => return Err("AbortError: invocation 已停止".into()),
@@ -143,7 +143,7 @@ pub async fn fetch_json_with(
             None => match tokio::time::timeout(Duration::from_millis(timeout), client.request(req)).await {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(e)) => return Err(format!("请求失败: {e}")),
-                Err(_) => return Err(format!("请求超时（{timeout}ms）")),
+                Err(_) => return Err(format!("请求超时（{timeout}ms）：{}", timeout_note(&current).await)),
             },
         };
 
@@ -204,6 +204,46 @@ pub async fn fetch_json_with(
             out["body_base64"] = Json::String(base64::engine::general_purpose::STANDARD.encode(&buf));
         }
         return Ok(out);
+    }
+}
+
+
+/// 超时的时候顺手探一下「线路通不通」，省得下次又只能看见一句「请求超时」。
+///
+/// 2026-11-16 08:00 那趟任务里 17 条请求全在 20 秒超时上打光（整趟 343 秒），
+/// 日志只有一句「请求超时（20000ms）」—— 分不清是**网不通**还是**服务端慢**，
+/// 只能靠人再手动 curl 一遍。这里在超时分支上补一次 2 秒内的 TCP 探测：
+///   · 连得上 → 服务端没回响应（或太慢），重试/调大 timeout 有意义
+///   · 连不上 → 网络/对端不通，重试也没用，先查链路
+/// 代价只在超时路径上多花最多 2 秒；正常请求一点不受影响。
+async fn timeout_note(url: &str) -> String {
+    let Some((host, port)) = host_port(url) else {
+        return "（地址解析不出来，没法探测线路）".to_string();
+    };
+    let t0 = std::time::Instant::now();
+    let probe = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await;
+    match probe {
+        Ok(Ok(_)) => format!("已探测：{host}:{port} 连得上（{}ms），是服务端没回响应或太慢", t0.elapsed().as_millis()),
+        Ok(Err(e)) => format!("已探测：{host}:{port} 连不上（{e}），先查网络/链路"),
+        Err(_) => format!("已探测：{host}:{port} 2 秒内连不上，先查网络/链路"),
+    }
+}
+
+/// 从绝对 URL 里抠 host:port（默认端口按 scheme 补）。
+fn host_port(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let auth = rest.split(['/', '?', '#']).next()?;
+    let auth = auth.rsplit('@').next()?;          // 去掉 userinfo
+    let default = if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 };
+    match auth.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            Some((h.trim_matches(['[', ']']).to_string(), p.parse().ok()?))
+        }
+        _ => Some((auth.trim_matches(['[', ']']).to_string(), default)),
     }
 }
 
@@ -294,10 +334,22 @@ async fn fetch_native_json(
         if !body_bytes.is_empty() {
             rb = rb.body(body_bytes.clone());
         }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| format!("请求失败（native-tls）: {e}"))?;
+        let resp = match rb.send().await {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => {
+                return Err(format!(
+                    "请求超时（{timeout}ms，native-tls）：{}",
+                    timeout_note(&current).await
+                ))
+            }
+            Err(e) if e.is_connect() => {
+                return Err(format!(
+                    "连接失败（native-tls）：{e} —— {}",
+                    timeout_note(&current).await
+                ))
+            }
+            Err(e) => return Err(format!("请求失败（native-tls）: {e}")),
+        };
 
         let status = resp.status().as_u16();
         if redirect == "follow" && (300..400).contains(&status) {

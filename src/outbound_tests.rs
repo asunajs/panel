@@ -78,3 +78,23 @@ async fn binary_true_on_the_native_tls_path_too() {
     let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
     assert_eq!(decoded.as_slice(), RAW);
 }
+
+/// 超时诊断里那个 `host:port` 解析器（0.5.3）：抽错的话错误文案会把责任指错方向。
+#[test]
+fn host_port_handles_common_urls() {
+    assert_eq!(
+        host_port("https://m.mcloud.139.com/ycloud/x").unwrap(),
+        ("m.mcloud.139.com".to_string(), 443)
+    );
+    assert_eq!(
+        host_port("http://127.0.0.1:8080/a").unwrap(),
+        ("127.0.0.1".to_string(), 8080)
+    );
+    assert_eq!(
+        host_port("https://u:p@h.example:8443/p?q=1").unwrap(),
+        ("h.example".to_string(), 8443)
+    );
+    assert_eq!(host_port("https://[::1]:9443/").unwrap(), ("::1".to_string(), 9443));
+    assert_eq!(host_port("http://example.com").unwrap(), ("example.com".to_string(), 80));
+    assert!(host_port("不是地址").is_none());
+}
