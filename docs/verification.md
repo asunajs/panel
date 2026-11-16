@@ -651,3 +651,47 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 ⚠ 过程教训：第一版探针只看「第一个 rAF 时的 data-theme」，本机回环下修前修后都是 dark ——
 **假绿**。改成「first-paint 时刻 vs 主题生效时刻」并把链路压到 100KB/s，问题才现形。
+
+## 0.6.0 发版（2026-11-17，第 216–219 轮 + 发版前 review）
+
+从 `v0.5.1` 以来的 15 个提交合并发布。发版前对 `v0.5.1..HEAD` 做了两份独立 review
+（Rust 后端 / UI+脚本+文档），修掉 2 个 blocker、4 个 major 后重跑门禁再发。
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.6.0`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` → `panel 0.6.0（panel-llrt）`） |
+| 提交 / tag | `daaf2d4` / `v0.6.0` |
+| 门禁 | cargo test **496**、ui-check **175**、check-lazy-load **24**、check-docs **26** 篇、坑守卫全过、插件边界 10、unsafe 例外 1（期望 1） |
+| 部署 | `scripts/deploy-daily.sh` exit 0：`readyz` 6/6、failed_plugins 0、tasks 4；插件目录指纹部署前后一致 |
+| 本机二进制 | `target/release/panel` 与 `~/panel-3030/panel` 同 sha256 `16df9eea…a08468` |
+| 产物 | `panel-aarch64-linux-musl`（`7bf70884…`）/ `panel-x86_64-linux-musl`（`181ad317…`）/ `panel-x86_64-pc-windows-msvc.exe`（`41f68a35…`）/ `SHA256SUMS` |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.6.0>，说明用 `CHANGELOG.md` 的 0.6.0 段 + review 阻塞项清单 |
+| CI | `release.yml` 成功；armv7 job 仍失败（非阻塞，和 0.5.1 一样，不产 armv7 资产） |
+| install.sh | CI 用刚发布的产物真下载 / 真校验 / 真启动，通过 |
+| 更新检查回归 | 临时 0.6.0 实例 `/api/update/check?force=1` → `{current:"0.6.0", latest:"v0.6.0", has_update:false, show:false}`，`assets` 四件齐、`notes` 带回完整 Release 正文 |
+| 线上 | 日常实例 `~/panel-3030` 已部署 0.6.0；插件 6 / 任务 4 / 失败 0 |
+
+### 发版前 review 修掉的阻塞项
+
+| # | 问题 | 后果 | 修法 / 守卫 |
+|---|---|---|---|
+| B1 | `manifest::finger_of` 对目录式插件递归：遍历目录时把入口 `index.js` 又当目录插件 | `GET /api/plugins/scan` 一次请求就栈溢出 **abort 整个面板进程**（review 用真实例复现） | 目录聚合只 `stat` 普通文件（`file_finger`），不再递归；回归测试 `scan_of_a_directory_plugin_does_not_recurse_into_its_own_entry` |
+| B2 | `pluginfs::is_dir_plugin` 只看文件名是不是 `index.js` | 单文件 `plugins/index.js` 被当成目录插件；启动即扫整个 `plugins/`，`host.plugin_dir()`、备份、`multi/entry` 全错 | 改成按「插件根 + 名字」判断，且同名 `.js` 优先；两条 `index` 单文件/目录回归测试 |
+| M1 | `note_loaded` 传的是 `<name>.js`，目录插件 stat 不到 | 加载过的目录插件在「扫描」里永远报新增/变更 | `note_loaded(dir, name)` 统一走 `pluginfs::entry` |
+| M2 | zip 上传只重载顶层 `.js` | 目录式插件上传完不自动加载，要用户再点「尝试加载」 | `reload_saved` 认 `<name>/index.js`，按插件名去重 |
+| M3 | `on_panel_open` 用全页一次性 boolean | 冷启动 `/api/state` 先回空（mcloud 加载 100s+）时钩子永久不跑 | 按「插件 + 路由」记账，插件晚到也补跑；失败最多重试 2 次；无头 Edge + 2.5s 慢插件实测触发 |
+| M4 | 部署脚本只数 `*.js` 且同名形态重复计数 | 升级期同名 `.js` + 目录并存时 EXPECT 多 1，300 秒假失败 | 按名字取并集去重；另修 `pipefail` 下 `[ -f ]` 返回 1 直接退出、`PRAGMA busy_timeout` 多打一行导致停用数读错 |
+| m1 | `sched_ready` 对真实加载失败再从磁盘装一遍，且拼 `<plugin>.js` | 每个失败请求多一次重载；目录插件提示「文件不存在」；路径未走 `safe_name` | 先 `safe_name`；只在「插件目录未知」时兜底，兜底用 `pluginfs::read_source` |
+| m2 | `Cmd::Load` 不进 `waking` | reload 与界面调用并发时同一插件装两份，旧的 invocation 不停 | `Cmd::Load` 也占 `waking`；`Loaded` 替换时先 `stop()` 旧实例 |
+| m3 | 备份恢复只 `contains("..")` / `starts_with('/')` | 漏 Windows `..\` / `C:\` | 改用 `Component::Normal` 逐段校验 |
+| m4 | `engine.rs` 注释还写「`..` 跑出去一律拒」 | 与实现（不设围栏）矛盾，安全评审易误判 | 注释改成「不设围栏」；CJS `base` 前缀也一并剥掉 |
+
+### 一条部署教训
+
+`deploy-daily.sh` 这轮连红三次，都不是二进制的问题，而是「期望插件数」算错：
+
+1. `EXPECT` 的 `for` 循环最后一项 `[ -f ]` 不匹配返回 1，`set -euo pipefail` 让整个赋值直接退出；
+2. `sqlite3 "PRAGMA busy_timeout=5000; select …"` 会把 `5000` 当一行输出，`OFF` 变成 `"5000\n3"`，校验判非数字后回退成 0；
+3. 修完后才真正验证 `readyz` 6/6、部署 exit 0。
+
+三次都靠 `bash -x` 才定位到 —— **门禁脚本自己的 shell 语义也要当代码 review**。
