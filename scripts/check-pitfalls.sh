@@ -274,8 +274,38 @@ else
   bad "web/app.css 这些规则对 select 用了 background 简写，会把 chevron 变成平铺箭头：$css_bad"
 fi
 
+# 坑 69（第 219 轮，用户反馈 #6「dark 刷新闪白」）：首帧主题必须在 head 里就定下来。
+# 少了它，用户选的深色要等 body 末尾 255KB 的 app.js 跑完才挂上 —— 中间那段「CSS 已到、
+# 脚本还没跑」的窗口里，页面先按浅色画一帧再翻深，就是那一下白闪。
+# 动态版（真量 first-paint 与 data-theme 的先后）：node scripts/theme-flash-check.mjs
+# 注意：先剥掉 HTML 注释再找标签 —— 说明文字里就写着这行标签，拿 grep 直接找会命中注释。
+theme_boot=$(python3 - "web/index.html" <<'PY'
+import re, sys
+path = sys.argv[1]
+html = open(path, encoding='utf-8').read()
+html = re.sub(r'<!--.*?-->', '', html, flags=re.S)
+m = re.search(r'<script[^>]*src="/theme-boot\.js"[^>]*>', html)
+if not m:
+    print('missing'); sys.exit(0)
+tag, off = m.group(0), m.start()
+if re.search(r'(^|[\s"\'])(defer|async)([\s"\']|$)', tag):
+    print('deferred'); sys.exit(0)
+c = re.search(r'<link[^>]*href="/app\.css"', html)
+if c and off > c.start():
+    print('after-css'); sys.exit(0)
+print('ok')
+PY
+)
+case "$theme_boot" in
+  ok) ok '首帧主题在 head 里就定了（/theme-boot.js 阻塞且在 /app.css 之前）' ;;
+  missing) bad 'web/index.html 的 head 里没有 /theme-boot.js —— 深色主题要等 app.js 跑完才生效（首帧闪白）' ;;
+  deferred) bad 'web/index.html 的 /theme-boot.js 带了 defer/async —— 它必须阻塞，否则 paint 不等它' ;;
+  after-css) bad 'web/index.html 里 /theme-boot.js 排在 /app.css 之后 —— 主题得在样式之前定下来' ;;
+  *) bad "主题守卫没跑出结论：$theme_boot" ;;
+esac
+
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 22 条坑的守卫全过"
+  echo "ok: 23 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

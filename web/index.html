@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>插件面板</title>
+    <!-- 主题必须在**第一帧之前**定下来（第 219 轮，用户反馈 #6「dark 模式刷新闪白」）。
+         首屏 HTML 里写的是 data-theme="light"，用户选的深色是 app.js（255KB，在 body 末尾）
+         执行时才挂上去的 —— 中间那段「CSS 已到、脚本还没跑」的窗口里，页面先按浅色画一遍
+         再翻成深色，就是那一下白闪。实测（scripts/theme-flash-check.mjs，慢链路）：
+         修之前 first-paint 832ms、data-theme 变成 dark 是 1436ms —— 首帧确实是浅色。
+         这里放一个**阻塞的** head 脚本：paint 会等它执行完，顺序就反过来了。
+         CSP 是 script-src 'self'，内联脚本一律被拦，所以用这个外部文件（错误页也用它）。 -->
+    <script src="/theme-boot.js"></script>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>

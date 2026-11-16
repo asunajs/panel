@@ -633,3 +633,21 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 教训写进 [pitfalls.md](pitfalls.md) 第 68 条：**「控件状态对了」不等于「存下去了」** ——
 只断言 DOM 的检查拦不住「保存时读错字段名」，得有一条穿过 HTTP 再回来的闭环。
+
+## dark 模式刷新闪白（第 219 轮）
+
+用户反馈 #6：开启 dark 后刷新页面先闪一下白，主题色在页面渲染后才应用。
+
+| 项 | 读数 |
+|---|---|
+| 机制 | `index.html` 的 `<html>` 写死 `data-theme="light"`；用户选的深色由 `app.js`（255KB，body 末尾）执行时才 `setAttribute` 上去 |
+| 量法 | `scripts/theme-flash-check.mjs`：localStorage 设 dark → 刷新 → `PerformanceObserver` 取 first-paint、`MutationObserver` 取 `data-theme` 变 dark 的时刻 |
+| 本机回环（不压链路） | first-paint 48ms / 主题 37ms —— **测不出差别**，所以探针默认压链路 |
+| 100KB/s 慢链路·修前 | first-paint **832ms** / 主题 **1436ms** → 首帧是浅色，闪白成立 |
+| 100KB/s 慢链路·修后 | first-paint **852ms** / 主题 **132ms** → 主题在首帧之前定好 |
+| 修法 | `<head>` 里放阻塞的 `<script src="/theme-boot.js"></script>`（在 `/app.css` 之前、不带 defer/async）。CSP 是 `script-src self`，内联脚本会被拦，所以走外部文件（错误页早在用） |
+| 反向例 | 换一份去掉这行的 web 目录：`--web /tmp/web-nofix` → 探针红（1439ms vs 828ms，exit=1） |
+| 静态守卫 | `check-pitfalls.sh` 第 23 条：剥掉 HTML 注释后找标签，比字节偏移、查 defer/async；三种改坏法（缺脚本 / 顺序反 / 带 defer）都验过会红 |
+
+⚠ 过程教训：第一版探针只看「第一个 rAF 时的 data-theme」，本机回环下修前修后都是 dark ——
+**假绿**。改成「first-paint 时刻 vs 主题生效时刻」并把链路压到 100KB/s，问题才现形。

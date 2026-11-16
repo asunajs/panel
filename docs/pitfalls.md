@@ -894,3 +894,23 @@
     教训：**「控件状态对了」不等于「存下去了」**。凡是「保存」按钮读表单的地方，至少要有一条
     断言穿过 HTTP 再回来 —— 读错字段名这种错，界面自己永远看不出来（它读的是它自己写的 DOM）。
 
+
+69. **首帧主题：`data-theme` 必须在 paint 之前就定下来**（第 219 轮，用户反馈 #6「dark 刷新闪白」）：
+    `web/index.html` 的 `<html>` 上写死 `data-theme="light"`，用户选的深色是 `app.js`（255KB，
+    在 body 末尾）跑起来才 `setAttribute` 上去的。于是「CSS 已到、脚本还没跑」的那段窗口里，
+    浏览器先按浅色画一帧，再翻成深色 —— 用户看到的就是刷新闪白。
+
+    量法（`scripts/theme-flash-check.mjs`）：把 localStorage 设成 dark → 刷新 →
+    `PerformanceObserver` 取 first-paint 的时刻、`MutationObserver` 取 `data-theme` 变成 dark
+    的时刻，比大小。**本机回环太快，修之前也测不出差别**（48ms vs 37ms）—— 必须压慢链路
+    （100KB/s）才现形：修之前 first-paint 832ms / 主题 1436ms，修之后 132ms / 852ms。
+
+    修法：`<head>` 里放一个**阻塞的** `<script src="/theme-boot.js"></script>`，放在
+    `/app.css` 之前、**不带 defer/async** —— 这样 paint 会等它执行完。CSP 是 `script-src self`，
+    内联脚本一律被拦，所以不能按「内联到 head」写（错误页早就在用这个外部文件了）。
+
+    守卫：`check-pitfalls.sh` 第 23 条（剥掉 HTML 注释后找标签，比字节偏移、查 defer/async）+
+    动态探针 `node scripts/theme-flash-check.mjs`（三个反向例都验过会红）。
+
+    教训：**「本机测不出来」不等于没问题** —— 这类首帧问题只在慢链路/冷缓存下出现，
+    探针得把条件造出来（这次是 `Network.emulateNetworkConditions` + 关缓存）。

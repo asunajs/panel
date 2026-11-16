@@ -362,6 +362,17 @@ node scripts/ui-check.mjs            # 起面板 + 无头 Edge，跑 36 条断�
 node scripts/ui-check.mjs --keep     # 保留临时目录，事后看现场
 ```
 
+另有一条**首帧主题**的专项探针（不塞进 ui-check：它要压慢链路才量得出来，而压链路会把别的断言搅乱）：
+
+```bash
+node scripts/theme-flash-check.mjs           # 100KB/s 慢链路下量 first-paint 与 data-theme 的先后
+node scripts/theme-flash-check.mjs --fast    # 不压链路（本机回环太快，只做冒烟）
+node scripts/theme-flash-check.mjs --web /tmp/web-nofix   # 换一份 web 目录（做反向例）
+```
+
+它先把自己 localStorage 的主题设成 dark，再刷新，断言 **`data-theme` 变成 dark 的时刻 ≤ first-paint**
+（第 219 轮：修之前 1436ms vs 832ms —— 首帧是浅色，就是用户报的「刷新闪白」；修之后 132ms vs 852ms）。
+
 **它自己起面板**（临时数据目录 + 一个种子插件 + 一批塞进库的历史行），不碰 8787，
 也不依赖你已经开着浏览器。依赖：本机有 Edge/Chrome、`sqlite3`、node ≥ 22（用全局 `WebSocket`）。
 
