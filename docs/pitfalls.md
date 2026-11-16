@@ -822,3 +822,12 @@
     （`#[path]` 引进来的）单元测试用着，clippy 在不编那个测试目标的那趟里把它报成 dead code。
     照着删除 → `cargo test` 直接 E0425 编不过（第 212 轮真踩了，删了才在测试阶段炸）。
     规矩：删死代码前先跑一遍 `cargo test`，别只看 clippy —— 它是建议，不是事实。
+
+65. **给 `<select>` 画 chevron 的那套背景，最怕别人用 `background` 简写**（第 213 轮，用户截图）：
+    面板的下拉箭头是自己画的（`select:not([multiple])` 里的 `background-image` + `no-repeat`
+    + `position: right 7px center` + `size: 12px 12px`）。谁再用一条**只改底色**的规则、
+    并且写成 `background: var(--surface)`，就会把后面三个 longhand 一起重置成初始值：
+    `repeat / 0 0 / auto`。深色主题里还有一条只设 `background-image` 的同族规则（特异性更高），
+    图会被补回来 → 于是变成**一整块平铺箭头**；浅色主题没有那条补丁 → 箭头直接消失。
+    两条规矩：① 改底色只写 `background-color`；② 守卫 ㉒ 会扫 `web/app.css` 里所有可能命中
+    `<select>` 的规则，用简写就红。回归断言在 `ui-check`（深浅两主题各一条）。

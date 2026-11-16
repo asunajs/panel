@@ -475,7 +475,7 @@ button, input, select { font: inherit; color: inherit; }
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .field select, .field input {
   height: 30px; padding: 0 9px;
-  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px;
+  background-color: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px;
   font-size: 12.5px; color: var(--fg-2); outline: none;
 }
 .field input { width: 190px; }
@@ -880,7 +880,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 
 .modal-input {
   width: 100%; height: var(--h-control); margin: 4px 0 10px; padding: 0 11px;
-  background: var(--surface-2); color: var(--fg);
+  background-color: var(--surface-2); color: var(--fg);
   border: 1px solid var(--line-strong); border-radius: var(--r-control);
   font-family: var(--mono); font-size: 13px; outline: none;
 }
@@ -2074,7 +2074,11 @@ select option { background: var(--surface); color: var(--fg); }
 .sched-item-head > select.modal-input { flex: 1 1 auto; min-width: 0; }
 .sched-item-head > button { flex: 0 0 auto; }
 .sched-item .field-inline > span.muted:first-child { min-width: 5.5em; }
-.sched-item .modal-input { background: var(--surface); }
+/* ⚠ 只能写 background-color：用 `background` 简写会把 select 那条规则画的 chevron
+   的 background-repeat/position/size 一起重置。深色主题另有一条只设 background-image 的
+   规则（特异性更高），图还会被加回来 → 于是整块输入框变成「平铺箭头」。
+   第 213 轮用户截图报的就是这个。 */
+.sched-item .modal-input { background-color: var(--surface); }
 #sched-form > button.btn { align-self: flex-start; }
 
 /* 时间框按内容宽度收窄：默认 flex:1 1 8em 太贪，「起 到 止」两个并排时会换行，

@@ -1264,6 +1264,33 @@ async function main() {
     check('试跑输出对比度 ≥ 4.5（' + (theme === 'dark' ? '暗色' : '亮色') + '主题）', c.ratio >= 4.5, c.fg + ' on ' + c.bg + ' = ' + c.ratio);
   }
   await js("document.documentElement.setAttribute('data-theme','light')");
+  // 下拉框的 chevron（第 213 轮用户截图：「第 1 条」那个框里整片平铺箭头）
+  //
+  // 根因是 `.sched-item .modal-input { background: ... }` 这个**简写**把 select 那条规则
+  // 画的 chevron 的 repeat/position/size 一起重置了；深色主题另一条规则又把图补回来
+  // → 图在、repeat 也是 repeat → 平铺。这条断言把「图上只有一枚、且 no-repeat」钉住，
+  // 深浅两套主题都查（浅色主题原来更惨：图被抹掉，箭头直接消失）。
+  for (const theme of ['light', 'dark']) {
+    await js("document.documentElement.setAttribute('data-theme','" + theme + "')");
+    await sleep(150);
+    const cv = JSON.parse(await js(
+      "JSON.stringify((()=>{" +
+      "document.getElementById('probe-sel')?.remove();" +
+      "const box=document.createElement('div');box.id='probe-sel';" +
+      "box.className='sched-item';box.style.position='absolute';box.style.left='-9999px';" +
+      'box.innerHTML=\'<div class="sched-item-head"><span class="muted">第 1 条</span>' +
+      '<select class="modal-input"><option>x</option></select></div>\';' +
+      "document.body.append(box);" +
+      "const s=box.querySelector('select');const cs=getComputedStyle(s);" +
+      "const r={img:/svg/.test(cs.backgroundImage),repeat:cs.backgroundRepeat," +
+      "size:cs.backgroundSize,pos:cs.backgroundPosition};box.remove();return r;})())"
+    ));
+    check('多计划里的下拉框只有一枚 chevron（' + (theme === 'dark' ? '暗色' : '亮色') + '主题）',
+      cv.img === true && cv.repeat === 'no-repeat' && cv.size === '12px 12px',
+      JSON.stringify(cv));
+  }
+  await js("document.documentElement.setAttribute('data-theme','light')");
+
   // 预算输入框里的原生上下箭头（截图里那个深色小方块）
   const budgetAppearance = await js(
     "(()=>{const i=document.getElementById('test-budget');const cs=getComputedStyle(i);" +

@@ -229,8 +229,53 @@ for f in src/*.rs; do
   fi
 done
 
+
+# ㉑ select 的 chevron 靠 background-image + no-repeat，别用 background 简写把它重置掉（第 213 轮）
+#
+# 事故：`.sched-item .modal-input { background: var(--surface) }` —— 简写把
+# background-repeat/position/size 一起重置成初始值。深色主题另有一条只设 background-image
+# 的规则（特异性更高），图被加回来、repeat 还是 repeat → 「多计划」第 1 条那个下拉变成
+# 一整块**平铺箭头**（用户截图报的）。浅色主题则相反：图直接被抹掉，箭头消失。
+# 判据：凡是可能命中 `<select>` 的规则（选择器含 select / .modal-input / .inp），
+# 都不许用 background 简写；要改底色就写 background-color。
+css_bad=$(python3 - <<'PY'
+import re
+css = open('web/app.css').read()
+bad = []
+def hits_select(head):
+    for part in head.split(','):
+        p = ' '.join(part.split())
+        if not p:
+            continue
+        # 去掉伪类/伪元素（注意 ::selection 里也有 "select" 字样，必须先剥）
+        p2 = re.sub(r'::[\w-]+(\([^)]*\))?', '', p)
+        p2 = re.sub(r':[\w-]+(\([^)]*\))?', '', p2)
+        if re.search(r'(^|[\s>+~])select(?![\w-])', p2):
+            # 展开那张下拉列表由系统画（option 没有 chevron），不算
+            if re.search(r'\boption\b', p2):
+                continue
+            return True
+        if re.search(r'\.modal-input(?![\w-])|\.inp(?![\w-])', p2):
+            return True
+    return False
+for sel, body in re.findall(r'([^{}]+)\{([^{}]*)\}', css):
+    head = ' '.join(sel.split())
+    head = re.sub(r'^/\*.*?\*/', '', head).strip()   # 注释块粘上来的前缀
+    if not hits_select(head):
+        continue
+    if re.search(r'(?<![-\w])background\s*:', body) and 'background-repeat' not in body:
+        bad.append(head[:60])
+print('\n'.join(bad))
+PY
+)
+if [ -z "$css_bad" ]; then
+  ok '下拉框样式没用 background 简写（chevron 的 repeat/position/size 不会被重置）'
+else
+  bad "web/app.css 这些规则对 select 用了 background 简写，会把 chevron 变成平铺箭头：$css_bad"
+fi
+
 if [ "$FAIL" = "0" ]; then
-  echo "ok: 21 条坑的守卫全过"
+  echo "ok: 22 条坑的守卫全过"
 else
   echo "红: $FAIL 条守卫没过"
 fi

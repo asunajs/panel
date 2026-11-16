@@ -862,3 +862,16 @@ curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件�
 ② 隐藏 input 建了必须插进 DOM，否则选择器拿不到（数据源成了游离节点）；
 ③ ui-check 里拼注入脚本时，**串内的 `//` 注释会把后面整行拼接吃掉** —— 症状是
 「SyntaxError: Unexpected end of input」，得用 `/* */` 或干脆不写注释。
+
+### 下拉框的 chevron 与 `background` 简写（第 213 轮）
+
+用户截图：任务编辑里「多计划 → 第 1 条」的下拉框整块变成**平铺的箭头**。
+
+- 根因：`.sched-item .modal-input { background: var(--surface); }` —— 简写把 chevron 的
+  `repeat/position/size` 重置了。深色主题另一条规则（`[data-theme="dark"] select:not([multiple])`，
+  只设 `background-image`、特异性更高）又把图补回来，于是「图在 + repeat」= 平铺。
+- 浅色主题的隐性 bug：那条规则没有 dark 版补丁，所以图被整个抹掉 —— 箭头根本看不见，
+  一直没人报（因为淡蓝色小箭头没了不显眼，平铺才刺眼）。
+- 修法：改底色一律用 `background-color`（`.sched-item .modal-input`、`.field select`、
+  `.modal-input` 三处）。守卫 `scripts/check-pitfalls.sh` 第 ㉒ 条静态扫 CSS；
+  `ui-check` 深浅两主题各一条断言（`img / no-repeat / 12px 12px`），造过反向例确认能红。
