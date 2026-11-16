@@ -4,6 +4,32 @@
 > 插件项目开发插件、部署到实例目录；面板仓 `plugins/` 不放插件产物。
 > 这一页讲「插件在面板里的行为」，那一页讲「谁能写哪里」。
 
+## 插件里能 import 什么（2026-11-16 实测，0.5.1）
+
+插件是**单文件**，但文件里可以用 ESM `import` 也可以用 CJS `require`。能拿到的东西只有
+「内置模块」，**解析不到插件自己目录里的文件**。
+
+| 写法 | 结果 | 说明 |
+|---|---|---|
+| `import host from 'panel:host'` | ✅ | 全部 host API（`as default` 也是它） |
+| `import fs from 'node:fs'` / `node:path` / `node:crypto` … | ✅ | LLRT 内置模块，静态与 `await import()` 都行 |
+| `require('node:path')` / `require('panel:host')` | ✅ | CJS 兼容层在，同样只认内置名 |
+| `import './helper.js'`（同目录的邻居文件） | ❌ | `Error resolving module './helper.js' from 'eval_script'` |
+| `await import('./helper.js')` | ❌ | 同上 —— 插件是从**字符串**求值的，模块基址是 `eval_script` |
+| `require('./helper.cjs')` | ❌ | 同上（`require` 的相对路径按面板进程 cwd 解析，指不到插件目录） |
+| `import 'node:https' / net / dgram / child_process` | ❌ | **面板拒**：出站只能走 `host.fetch`（SSRF 门在解析层拦，见 `src/engine.rs` 的 `DENIED_MODULES`） |
+
+为什么相对路径一定不行：`Plugin::load` 拿到的是源码字符串（`Module::declare(name, source)`），
+JS 侧没有「文件从哪来」的信息；引擎的 `FileResolver` 只加了 `.`（面板进程 cwd），
+**没有把插件目录加进解析路径**。这是刻意的 —— 契约 R7 要求一个插件 = 一个 `<name>.js`，
+多文件会让「上传一个插件」「停用/删除」「指纹记账」全都要跟着变。
+
+要拆模块就在**构建时打包成一个文件**：现有几个插件（mcloud / mgmusic …）都是
+TS 源码 + 打包，产物是单文件 `<name>.js`。自己写小插件时，需要复用就把代码放进同一个文件。
+
+顺带一条安全事实（同上实测）：插件里的**全局 `fetch` 是面板包过的那一层**，不是 LLRT 原生的
+—— 打 `http://127.0.0.1/` 会被 SSRF 门拒（「回环地址」），所以「用全局 fetch 绕门」这条路是堵死的。
+
 ## 插件的一生：加载 / 重载 / 停用 / 删除
 
 一个插件在面板里有五种「不在跑」的方式，各自保住什么、丢掉什么不一样。这张表是唯一口径。
