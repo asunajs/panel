@@ -223,6 +223,12 @@ struct Task {
     tripped: bool,
     trips: u32,
     in_flight: bool,
+    /// 本次运行**开始**的时刻（派发那一刻记下）。`last_run` 是"上次跑过的时间"，
+    /// 收尾时会被刷成本次完成时刻 —— 拿它算用时必然得 0.0 秒
+    ///（2026-11-16 现场：日志写着「任务 直播 用时 0.0 秒」，而这一趟明明是几十秒）。
+    run_started: Option<i64>,
+    /// 上一趟实际用了多久（毫秒）。收尾时算好，通知直接读 —— 不再回头去猜。
+    last_took_ms: Option<i64>,
     /// 「计划已过点，但这一拍没能派发」累计了几次（上一拍还没跑完 / 插件还忙）。
     ///
     /// 以前这些拍是**静默**丢掉的：12 个 `@every 5s` 的任务挤 8 个 JS 名额时，
@@ -306,6 +312,8 @@ impl Task {
             tripped: false,
             trips: 0,
             in_flight: false,
+            run_started: None,
+            last_took_ms: None,
             behind: 0,
             behind_noted: None,
             runs: 0,
@@ -342,6 +350,8 @@ impl Task {
             tripped: false,
             trips: 0,
             in_flight: false,
+            run_started: None,
+            last_took_ms: None,
             behind: 0,
             behind_noted: None,
             runs: 0,
@@ -356,6 +366,13 @@ impl Task {
     /// 会累积成漂移。只有算出来已经落在过去（积压了）才从 now 重对齐，即跳拍。
     fn advance(&mut self, cfg: &TripConfig, now: DateTime<Local>, error: Option<String>) {
         self.runs += 1;
+        // 用时必须在**覆盖 last_run 之前**用派发时记下的起点算出来。
+        // 以前通知里算的是 `now - last_run`，而 last_run 恰好在这行被刷成 now ⇒ 永远 0.0 秒。
+        self.last_took_ms = self
+            .run_started
+            .take()
+            .map(|started| now.timestamp_millis() - started)
+            .filter(|d| *d >= 0);
         self.last_run = Some(now.timestamp_millis());
         self.last_error = error.clone();
         // 手动任务没有节奏可维护，也不熔断 —— 它由人触发，失败了下一次还是人决定。
@@ -2650,6 +2667,7 @@ impl Inner {
         let inv = plugin.invocation();
 
         self.tasks[idx].in_flight = true;
+        self.tasks[idx].run_started = Some(Local::now().timestamp_millis());
         self.plugins.get_mut(&plugin_name).unwrap().busy = true;
 
         tokio::spawn(async move {
@@ -2847,11 +2865,11 @@ impl Inner {
             && !cancelled
             && crate::notify::wants_event(&self.config, "task_ok", plugin)
         {
+            // ⚠ 用收尾时算好的时长，不要用 `now - last_run`：后者在 advance 里刚被
+            //   刷成本次完成时刻，减出来永远是 0.0 秒（2026-11-16 现场）。
             let took = self
                 .find(plugin, task)
-                .and_then(|i| self.tasks[i].last_run)
-                .map(|started| now.timestamp_millis() - started)
-                .filter(|d| *d >= 0);
+                .and_then(|i| self.tasks[i].last_took_ms);
             let body = match took {
                 Some(ms) => format!("任务 {task} 用时 {:.1} 秒，正常结束", ms as f64 / 1000.0),
                 None => format!("任务 {task} 正常结束"),
