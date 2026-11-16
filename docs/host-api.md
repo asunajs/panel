@@ -245,6 +245,13 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 `连接失败（native-tls）：…`，不再混进「请求失败」。代价只在超时路径上多花最多 2 秒，
 正常请求一点不受影响。
 
+另外记一条常被误判的事实（2026-11-16 测过）：**出站不读任何代理环境变量**。
+`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 设了也没用 —— 默认链路是 hyper + `HttpConnector`
+（没有代理层），`tls:"native"` 那条显式 `.no_proxy()`。实测把三个变量指到死端口
+（`127.0.0.1:9`）后往 `https://www.baidu.com/` 发请求，两条路仍是 258ms / 255ms HTTP 200。
+用户问「是不是我的环境变量」时，答案是**不是**；要走代理得新增功能，不是配置项
+（用户向说明见 [user/troubleshooting.md](user/troubleshooting.md)）。
+
 ⚠ **`fetch` 的 `body` 默认是 lossy UTF-8 字符串**（`String::from_utf8_lossy`）。
 实测 windows-1252 响应 `café 中文` → `caf ??`：**非 UTF-8 字节在到插件手里之前就丢了**，
 插件无法再按 latin1/GBK 解。基线央视频修补链里的「latin1 解码」在这一层做不到。

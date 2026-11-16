@@ -306,6 +306,7 @@ macOS 用 launchd、Linux 用 systemd，把面板注册成服务（开机自启�
 | [docs/user/nginx.md](docs/user/nginx.md) | nginx 反向代理教程（公网 HTTPS 访问） |
 | [docs/user/caddy.md](docs/user/caddy.md) | Caddy 反代教程（三行配置自动 HTTPS，更适合没备案的场景） |
 | [docs/user/ops.md](docs/user/ops.md) | 运维：配置、备份恢复、保留策略、健康摘要 |
+| [docs/user/troubleshooting.md](docs/user/troubleshooting.md) | 排障：插件请求超时 / 连不上，怎么两步定位 |
 | [docs/api.md](docs/api.md) | HTTP API 参考（脚本 / curl 调用时看这份） |
 | [docs/pitfalls.md](docs/pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
 
