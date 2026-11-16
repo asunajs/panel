@@ -463,6 +463,7 @@ async fn load_all(
                                 plugin: r.0.clone(),
                                 name: r.1.clone(),
                                 cron: r.2.clone(),
+                                suggest_cron: r.7.clone(),
                                 budget_ms: r.3,
                                 enabled: r.4,
                                 next_at: r.5,

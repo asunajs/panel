@@ -479,3 +479,70 @@ fn a_task_without_a_next_time_pins_the_plugin() {
         WIN
     ));
 }
+
+// ── 按需加载的占位任务（第 181 轮）──────────────────────────────────────
+//
+// 实拍的病：用户在界面上把「日常」从 `0 8,20 * * *` 改成 `0 9 * * *`，重启面板之后
+// 面板把 mcloud 那三条按需加载 ⇒ 从库里的行造占位任务。占位任务如果拿**库里的生效 cron**
+// 当 `base_cron`，就变成「cron == base ⇒ 没有覆盖」：界面上的「恢复默认」消失，
+// 用户再也退不回插件给的那条。下面几条把这个判据钉住。
+
+fn lazy_row(cron: &str, suggest: Option<&str>) -> LazyTask {
+    LazyTask {
+        plugin: "mcloud-daily".into(),
+        name: "日常".into(),
+        cron: cron.into(),
+        suggest_cron: suggest.map(|s| s.to_string()),
+        budget_ms: 600_000,
+        enabled: true,
+        next_at: None,
+        deleted_at: None,
+    }
+}
+
+#[test]
+fn lazy_placeholder_treats_db_cron_as_override() {
+    let t = lazy_placeholder(&lazy_row("0 9 * * *", Some("0 8,20 * * *"))).expect("parse");
+    assert_eq!(t.cron, "0 9 * * *", "占位任务照库里生效的那条排");
+    assert_eq!(t.base_cron, "0 8,20 * * *", "base 必须是插件注册的建议");
+    assert_ne!(t.cron, t.base_cron, "有覆盖 ⇒ 界面上要出现「恢复默认」");
+    assert!(t.lazy, "按需加载：没有 JS 运行时");
+    assert!(t.enabled);
+}
+
+#[test]
+fn lazy_placeholder_without_suggestion_has_empty_base() {
+    // 老库 / 首次运行：suggest 列是 NULL ⇒ base 留空（cron_override 的推导要求 base 非空）
+    let t = lazy_placeholder(&lazy_row("0 9 * * *", None)).expect("parse");
+    assert_eq!(t.base_cron, "");
+    assert!(t.cron != t.base_cron && t.base_cron.is_empty());
+}
+
+#[test]
+fn lazy_placeholder_can_restore_default() {
+    let mut t = lazy_placeholder(&lazy_row("0 9 * * *", Some("0 8,20 * * *"))).expect("parse");
+    // 「恢复默认」= 拿 base_cron 重排一次（adopt_suggestion 就是这么做的）
+    let base = t.base_cron.clone();
+    t.set_schedule(&base).expect("parse base");
+    t.cron = base.clone();
+    assert_eq!(t.cron, "0 8,20 * * *", "恢复默认之后要回到插件给的那条");
+    assert_eq!(t.cron, t.base_cron);
+}
+
+#[test]
+fn lazy_placeholder_keeps_suggestion_for_manual_rows() {
+    // 库里 cron 是空串 = 只能手动跑的任务；建议列仍然要带过来
+    let t = lazy_placeholder(&lazy_row("", Some("0 8,20 * * *"))).expect("manual");
+    assert_eq!(t.cron, "");
+    assert!(t.schedule.is_none(), "空 cron ⇒ 手动任务");
+    assert_eq!(t.base_cron, "0 8,20 * * *");
+    assert!(t.lazy);
+}
+
+#[test]
+fn lazy_placeholder_fallback_still_carries_suggestion() {
+    let t = lazy_placeholder_fallback(&lazy_row("这不是 cron", Some("0 8,20 * * *")));
+    assert!(t.schedule.is_none());
+    assert_eq!(t.base_cron, "0 8,20 * * *", "兜底也要把建议带上，否则同样退不回去");
+    assert!(t.lazy);
+}

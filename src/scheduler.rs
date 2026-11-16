@@ -265,6 +265,50 @@ fn skipped_beats(
     }
     n
 }
+
+/// 按库里的行造一个「按需加载」的占位任务（第 179 轮的 lazy 行）。
+///
+/// 与真注册只差两件事：`lazy = true`（没有 JS 运行时，派发不了），以及
+/// **`base_cron` 来自插件建议**（`tasks.suggest_cron`）。
+///
+/// ⚠ 为什么 base 不能沿用 `with_opts` 给的那个：它等于库里**生效**的 cron，已经含了
+/// 用户的覆盖。拿它当 base 的话 `cron == base_cron` ⇒ 面板判定「没有覆盖」：
+///   · 界面不显示「恢复默认」，用户退不回去
+///   · 真点「恢复默认」也只是把覆盖再抄一遍
+/// 2026-11-16 实测就是这个：改计划 → 重启（mcloud 那三条是按需加载的）→ 覆盖值成了新默认。
+fn lazy_placeholder(row: &LazyTask) -> Result<Task, String> {
+    let budget = (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS);
+    let mut t = if row.cron.is_empty() {
+        // 库里那行记得上次的预算（插件注册时声明的），占位也按它来，
+        // 别回退成默认 30 秒 —— 真注册晚到之前这段是「按这个列」的形状。
+        Task::manual(row.plugin.clone(), row.name.clone(), budget)
+    } else {
+        Task::with_opts(row.plugin.clone(), row.name.clone(), row.cron.clone(), budget, None, 0)?
+    };
+    t.lazy = true;
+    t.base_cron = row.suggest_cron.clone().unwrap_or_default();
+    t.enabled = row.enabled;
+    t.deleted_at = row.deleted_at;
+    if let Some(ms) = row.next_at {
+        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+            t.next_fire = dt.with_timezone(&Local);
+        }
+    }
+    Ok(t)
+}
+
+/// 库里那行的调度解析不了（老库/手改）时的兜底：按**手动任务**列出来，别的字段照旧。
+/// 宁可让用户看见一条「只能手动跑」的任务，也别让它整行从界面上消失。
+fn lazy_placeholder_fallback(row: &LazyTask) -> Task {
+    let budget = (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS);
+    let mut t = Task::manual(row.plugin.clone(), row.name.clone(), budget);
+    t.lazy = true;
+    t.base_cron = row.suggest_cron.clone().unwrap_or_default();
+    t.enabled = row.enabled;
+    t.deleted_at = row.deleted_at;
+    t
+}
+
 impl Task {
     #[cfg(test)]
     fn new(plugin: String, name: String, cron: String, budget_ms: u64) -> Result<Self, String> {
@@ -485,7 +529,10 @@ pub struct TaskView {
 pub struct LazyTask {
     pub plugin: String,
     pub name: String,
+    /// **生效**的调度（含用户覆盖）。占位任务照它排、界面上也显示它。
     pub cron: String,
+    /// 插件注册时给的那条（`tasks.suggest_cron`）：用来判断「有没有覆盖」和「恢复默认」。
+    pub suggest_cron: Option<String>,
     pub budget_ms: i64,
     pub enabled: bool,
     pub next_at: Option<i64>,
@@ -1442,47 +1489,18 @@ impl Inner {
                     if self.find(&row.plugin, &row.name).is_some() {
                         continue; // 插件已经注册过同名任务：真家伙优先
                     }
-                    let mut t = if row.cron.is_empty() {
-                        // 库里那行记得上次的预算（插件注册时声明的），占位也按它来，
-                        // 别回退成默认 30 秒 —— 真注册晚到之前这段是「按这个列」的形状。
-                        Task::manual(
-                            row.plugin.clone(),
-                            row.name.clone(),
-                            (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS),
-                        )
-                    } else {
-                        match Task::with_opts(
-                            row.plugin.clone(),
-                            row.name.clone(),
-                            row.cron.clone(),
-                            row.budget_ms.max(1) as u64,
-                            None,
-                            0,
-                        ) {
-                            Ok(t) => t,
-                            Err(e) => {
-                                self.log.emit(
-                                    &row.plugin,
-                                    None,
-                                    Level::Warn,
-                                    format!("库里的任务 {} 调度不合法（{e}），按手动任务列出", row.name),
-                                );
-                                Task::manual(
-                                    row.plugin.clone(),
-                                    row.name.clone(),
-                                    (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS),
-                                )
-                            }
+                    let t = match lazy_placeholder(&row) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.log.emit(
+                                &row.plugin,
+                                None,
+                                Level::Warn,
+                                format!("库里的任务 {} 调度不合法（{e}），按手动任务列出", row.name),
+                            );
+                            lazy_placeholder_fallback(&row)
                         }
                     };
-                    t.lazy = true;
-                    t.enabled = row.enabled;
-                    t.deleted_at = row.deleted_at;
-                    if let Some(ms) = row.next_at {
-                        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
-                            t.next_fire = dt.with_timezone(&Local);
-                        }
-                    }
                     self.tasks.push(t);
                     n += 1;
                     if !names.contains(&row.plugin) {

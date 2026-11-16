@@ -355,13 +355,15 @@ pub async fn plugin_surfaces(db: &Db) -> std::collections::HashMap<String, (bool
 
 /// 库里记着的任务（还没删的），给懒加载起步用：不加载插件也能把它们列进任务表。
 ///
-/// 返回 (plugin, name, cron, budget_ms, enabled, next_at, deleted_at)。
+/// 返回 (plugin, name, cron, budget_ms, enabled, next_at, deleted_at, suggest_cron)。
 #[allow(clippy::type_complexity)]
 /// 库里 `tasks` 表的原始行（enabled 还是 0/1）。
-type RawTaskRow = (String, String, String, i64, i64, Option<i64>, Option<i64>);
+type RawTaskRow = (String, String, String, i64, i64, Option<i64>, Option<i64>, Option<String>);
 
 /// 库里存着的任务行（插件、任务名、标题、预算、启用、下次时间、上次时间）。
 /// clippy: too complex（review A2）——起名字比数位置强。
+/// 最后一项是插件注册时给的那条调度（`tasks.suggest_cron`）：
+/// 按需加载的占位任务要靠它算「有没有被用户覆盖」和「恢复默认」。
 pub type SavedTaskRow = (
     String,
     String,
@@ -370,13 +372,14 @@ pub type SavedTaskRow = (
     bool,
     Option<i64>,
     Option<i64>,
+    Option<String>,
 );
 
 pub async fn saved_task_rows(db: &Db) -> Vec<SavedTaskRow> {
     db.call(|c| {
         let mut st = c
             .prepare(
-                "SELECT plugin, name, cron, budget_ms, enabled, next_at, deleted_at
+                "SELECT plugin, name, cron, budget_ms, enabled, next_at, deleted_at, suggest_cron
                    FROM tasks ORDER BY plugin, name",
             )
             .map_err(|e| e.to_string())?;
@@ -390,6 +393,7 @@ pub async fn saved_task_rows(db: &Db) -> Vec<SavedTaskRow> {
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -397,7 +401,7 @@ pub async fn saved_task_rows(db: &Db) -> Vec<SavedTaskRow> {
             .map_err(|e| e.to_string())?;
         Ok(out
             .into_iter()
-            .map(|(p, n, c, b, e, nx, d)| (p, n, c, b, e != 0, nx, d))
+            .map(|(p, n, c, b, e, nx, d, sg)| (p, n, c, b, e != 0, nx, d, sg))
             .collect())
     })
     .await
