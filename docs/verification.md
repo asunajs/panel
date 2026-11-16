@@ -528,3 +528,22 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 
 坑一条：`~/panel-3030/panel --version` 不是有效参数，它会**当前台起一个 8787 的服务**（实测挂了 60 秒
 才被后台化）。查部署版本用 `strings <binary> | grep 版本号`，别拿 `--version` 试。
+
+## 0.5.1 发版（2026-11-16）
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.5.1`（`strings ~/panel-3030/panel \| grep -c 0.5.1` = 14；日常实例已部署） |
+| 门禁 | cargo test **475**（连跑 8 次全绿）、ui-check 169、docs 26、坑 21、边界 10、unsafe 1 |
+| clippy --all-targets | **src/ 零警告**（54 → 0；剩 2 条在 `vendor/llrt` 的上游代码里，不动） |
+| CI | Windows `43782581639` 绿；Release `43782552141` 绿 |
+| 产物 | 与 0.5.0 同四件：aarch64/x86_64 linux-musl、windows-msvc、SHA256SUMS |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.5.1>，说明取自 `CHANGELOG.md` 的 0.5.1 段 |
+| 更新检查回归 | `{current:0.5.1, latest:v0.5.1, has_update:false, show:false}`，`notes` 带回 Release 正文（179ms 一次，直连 GitHub 成功那趟） |
+
+两条过程记录：
+
+- 一次 `cargo test` 报 474/1 失败，随后的 8 次连跑全绿 —— 当时同目录还残留着 B6 压测的临时实例
+  （9100 端口、`/tmp/b8`），最可能是端口/时序撞车。教训：跑门禁前先 `lsof` 看一眼有没有自己留的进程。
+- `git push` 偶发 `SSL_ERROR_SYSCALL`（走 7897 的 socks 代理），重试即成功；**tag 先推成功、main 后推失败**
+  会让远端出现「tag 指向 main 还没有的提交」——发现后立刻补推 main（本次 `95fcc3f..0a26e16`）。
