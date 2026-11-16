@@ -4,31 +4,63 @@
 > 插件项目开发插件、部署到实例目录；面板仓 `plugins/` 不放插件产物。
 > 这一页讲「插件在面板里的行为」，那一页讲「谁能写哪里」。
 
-## 插件里能 import 什么（2026-11-16 实测，0.5.1）
+## 多文件插件：`<name>/index.js`（第 216 轮）
 
-插件是**单文件**，但文件里可以用 ESM `import` 也可以用 CJS `require`。能拿到的东西只有
-「内置模块」，**解析不到插件自己目录里的文件**。
+从一个 `<name>.js` 升级成「可以拆文件」的插件，**形态是加法，不是替换**：
 
-| 写法 | 结果 | 说明 |
-|---|---|---|
-| `import host from 'panel:host'` | ✅ | 全部 host API（`as default` 也是它） |
-| `import fs from 'node:fs'` / `node:path` / `node:crypto` … | ✅ | LLRT 内置模块，静态与 `await import()` 都行 |
-| `require('node:path')` / `require('panel:host')` | ✅ | CJS 兼容层在，同样只认内置名 |
-| `import './helper.js'`（同目录的邻居文件） | ❌ | `Error resolving module './helper.js' from 'eval_script'` |
-| `await import('./helper.js')` | ❌ | 同上 —— 插件是从**字符串**求值的，模块基址是 `eval_script` |
-| `require('./helper.cjs')` | ❌ | 同上（`require` 的相对路径按面板进程 cwd 解析，指不到插件目录） |
-| `import 'node:https' / net / dgram / child_process` | ❌ | **面板拒**：出站只能走 `host.fetch`（SSRF 门在解析层拦，见 `src/engine.rs` 的 `DENIED_MODULES`） |
+```
+plugins/
+  single.js                 ← 单文件插件（老形态，行为完全不变）
+  single.panel.json         ← 清单仍放在插件旁边
+  multi/                    ← 目录式插件
+    index.js                ←   入口（面板按它发现插件）
+    lib/greet.js            ←   想怎么拆都行
+    lib/deep/index.js       ←   目录补 index.js
+  multi.panel.json          ← 清单同样放在插件旁边（不在目录里）
+  multi.webui/index.html    ← 界面目录照旧并列
+```
 
-为什么相对路径一定不行：`Plugin::load` 拿到的是源码字符串（`Module::declare(name, source)`），
-JS 侧没有「文件从哪来」的信息；引擎的 `FileResolver` 只加了 `.`（面板进程 cwd），
-**没有把插件目录加进解析路径**。这是刻意的 —— 契约 R7 要求一个插件 = 一个 `<name>.js`，
-多文件会让「上传一个插件」「停用/删除」「指纹记账」全都要跟着变。
+发现规则：**先看 `<name>.js`，没有才看 `<name>/index.js`**（两个都有时以单文件为准，
+日志里不会报错 —— 这是升级期的安全垫）。名字仍然是 `^[a-z0-9][a-z0-9_-]*$`。
 
-要拆模块就在**构建时打包成一个文件**：现有几个插件（mcloud / mgmusic …）都是
-TS 源码 + 打包，产物是单文件 `<name>.js`。自己写小插件时，需要复用就把代码放进同一个文件。
+### 能 import 什么
 
-顺带一条安全事实（同上实测）：插件里的**全局 `fetch` 是面板包过的那一层**，不是 LLRT 原生的
-—— 打 `http://127.0.0.1/` 会被 SSRF 门拒（「回环地址」），所以「用全局 fetch 绕门」这条路是堵死的。
+| 写法 | 结果 |
+|---|---|
+| `import host from 'panel:host'` | ✅ 全部 host API |
+| `import fs from 'node:fs'` / `node:path` / `node:crypto` … | ✅ LLRT 内置模块，静态与 `await import()` 都行 |
+| `import { x } from './lib/x.js'` | ✅ **相对路径以插件目录为根**（就是这轮加的能力） |
+| `import { d } from './lib/deep'` | ✅ 没写扩展名补 `.js` / `.mjs`；指向目录补 `index.js` |
+| `import x from '../outside.js'` | ❌ 拒绝：`插件目录内找不到 ../outside.js（相对路径以插件目录为根，不能跑出去）` |
+| `require('./x.cjs')` | ⚠️ CJS 兼容层在，但它按**面板进程 cwd** 解析，指不到插件目录 —— 多文件请用 ESM `import` |
+| `import 'node:https' / net / dgram / child_process` | ❌ 面板拒：出站只能走 `host.fetch`（SSRF 门在解析层拦） |
+
+实现：`src/engine.rs` 的 `PluginResolver` / `PluginLoader`（配对：一个解析名字、一个读文件；
+rquickjs 只给了 `FileResolver` 却**没有配读文件的 loader**，所以以前相对 import 必然失败），
+路径归一化与越界判定在 `src/pluginfs.rs::resolve_inside`。
+
+### 一条命令就能验
+
+```bash
+mkdir -p /tmp/pf/lib && cd /tmp/pf
+printf "import { g } from './lib/g.js';\nimport host from 'panel:host';\nawait host.info(g);\n" > index.js
+printf "export const g = '多文件 OK';\n" > lib/g.js
+# 丢进实例的 plugins/<name>/ 再启动：日志里会出现「多文件 OK」
+```
+
+### 各条路怎么处理它（都有测试钉着）
+
+| 动作 | 目录式插件的行为 |
+|---|---|
+| 列表 `/api/plugins/files` | 一条记录，`multi: true`、`entry: "<name>/index.js"`、`bytes` 是**整个目录** |
+| 读/存源码 | 读写入口 `index.js`；**其它文件目前不能在界面里改**（用编辑器 / 上传 / 部署脚本） |
+| 扫描 / 热加载指纹 | 指纹算整个目录（改 `lib/x.js` 也会被认成「改过」） |
+| 删除 | 整个目录进回收站 `trash/<name>-<时间戳>.plugin`，界面目录另存 |
+| 备份 / 恢复 | 备份里带 `multi: true` + `files: [{path, source\|base64}]`；恢复时清空目录再原样铺回 |
+| 上传 / 安装 | `.zip` 包外层目录是插件名（`demo/index.js` + `demo/lib/…`）→ 保留外层目录落成 `plugins/demo/`；外层名不合规直接拒 |
+
+为什么不做「一个插件散着写多个 `<name>.part1.js`」：发现规则会歧义（谁属于谁），
+备份/删除/指纹也得各自重新定义一遍；一个插件一个目录，边界最清楚。
 
 ## 插件的一生：加载 / 重载 / 停用 / 删除
 

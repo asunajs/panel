@@ -848,3 +848,11 @@
     守卫：`scripts/check-lazy-load.sh` 从 10 条扩到 18 条，其中四条盯这条路 ——
     手动执行自动装、界面接口自动装（含 `waking` 排队）、有界面插件闲着会被卸且卸完还能用、
     停用的插件不许被自动装回来（409），别让停用变成摆设。
+
+66. **`FileResolver` 只解析不读**（第 216 轮）：rquickjs 的 `FileResolver` 会把 `./x.js`
+    归一化成一个路径字符串，但引擎里**没有对应的 loader** 去读它 —— 于是相对 import 的失败
+    信息是 `Error resolving module …`，看着像「解析不出来」，其实是「没人读」。
+    做多文件插件时必须成对补 resolver + loader（`PluginResolver` / `PluginLoader`），
+    并且模块名要用**绝对路径**，否则嵌套文件的相对 import 没有根。
+    还有一个坑：入口是 `ctx.eval_with_options` 求值的，base 是 `eval_script` 不是路径，
+    解析器要能容忍这种 base（落回插件根）。

@@ -447,6 +447,11 @@ impl Loader for PluginLoader {
 }
 
 impl Plugin {
+    /// 单文件插件的加载入口（没有插件目录，相对 import 一律拒）。
+    ///
+    /// 生产代码现在统一走 `load_in_dir`（根目录是 `Option`，单文件时传 `None`），
+    /// 这个薄封装留给测试与将来的调用点。
+    #[allow(dead_code)]
     pub async fn load(source: &str, handle: HostHandle) -> std::result::Result<Self, String> {
         Self::load_inner(source, handle, None, None, None).await
     }

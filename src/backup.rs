@@ -25,18 +25,56 @@ pub async fn collect(
     config_text: String,
 ) -> Result<Value, String> {
     let mut plugins = Vec::new();
-    let mut rd = tokio::fs::read_dir(plugins_dir)
-        .await
-        .map_err(|e| format!("读插件目录失败: {e}"))?;
-    while let Ok(Some(ent)) = rd.next_entry().await {
-        let p = ent.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("js") {
-            continue;
-        }
-        let Some(name) = p.file_stem().and_then(|s| s.to_str()) else {
+    // 两种形态都要收：单文件 `<name>.js`，和目录式 `<name>/index.js`（第 216 轮）。
+    let names = {
+        let d = plugins_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::pluginfs::names(&d))
+            .await
+            .map_err(|e| format!("扫插件目录失败: {e}"))?
+            .map_err(|e| format!("读插件目录失败: {e}"))?
+    };
+    for name in names {
+        let Some(entry) = crate::pluginfs::entry(plugins_dir, &name) else {
             continue;
         };
-        if let Ok(src) = tokio::fs::read_to_string(&p).await {
+        let Ok(src) = tokio::fs::read_to_string(&entry).await else {
+            continue;
+        };
+        if crate::pluginfs::is_dir_plugin(&entry) {
+            // 目录式：把目录里每个文件都带上（相对路径），恢复时原样铺回去。
+            let mut files = Vec::new();
+            let root = entry.parent().map(|p| p.to_path_buf());
+            if let Some(root) = root {
+                let mut stack = vec![root.clone()];
+                while let Some(d) = stack.pop() {
+                    let Ok(mut rd) = tokio::fs::read_dir(&d).await else {
+                        continue;
+                    };
+                    while let Ok(Some(e)) = rd.next_entry().await {
+                        let p = e.path();
+                        if p.is_dir() {
+                            stack.push(p);
+                            continue;
+                        }
+                        let Some(rel) = p.strip_prefix(&root).ok() else {
+                            continue;
+                        };
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        if let Ok(text) = tokio::fs::read_to_string(&p).await {
+                            files.push(json!({ "path": rel, "source": text }));
+                        } else if let Ok(bytes) = tokio::fs::read(&p).await {
+                            use base64::Engine as _;
+                            files.push(json!({
+                                "path": rel,
+                                "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                            }));
+                        }
+                    }
+                }
+            }
+            files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+            plugins.push(json!({ "name": name, "source": src, "multi": true, "files": files }));
+        } else {
             plugins.push(json!({ "name": name, "source": src }));
         }
     }
@@ -198,6 +236,51 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
     for p in plugins {
         let name = p["name"].as_str().unwrap_or_default();
         let source = p["source"].as_str().unwrap_or_default();
+        let multi = p["multi"].as_bool().unwrap_or(false)
+            || p.get("files").and_then(Value::as_array).is_some();
+        if multi {
+            // 目录式插件：清掉旧目录再按备份里的相对路径铺回去。
+            let root = plugins_dir.join(name);
+            let _ = tokio::fs::remove_dir_all(&root).await;
+            tokio::fs::create_dir_all(&root)
+                .await
+                .map_err(|e| format!("建 {} 失败: {e}", root.display()))?;
+            let mut put = 0usize;
+            for f in p["files"].as_array().cloned().unwrap_or_default() {
+                let rel = f["path"].as_str().unwrap_or_default();
+                if rel.is_empty() || rel.contains("..") || rel.starts_with('/') {
+                    continue;
+                }
+                let dst = root.join(rel);
+                if let Some(parent) = dst.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                if let Some(text) = f["source"].as_str() {
+                    crate::scripts::write_atomic(&dst, text.as_bytes())
+                        .await
+                        .map_err(|e| format!("写 {} 失败: {e}", dst.display()))?;
+                } else if let Some(b64) = f["base64"].as_str() {
+                    use base64::Engine as _;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map_err(|e| format!("{} 不是合法 base64: {e}", dst.display()))?;
+                    crate::scripts::write_atomic(&dst, &bytes)
+                        .await
+                        .map_err(|e| format!("写 {} 失败: {e}", dst.display()))?;
+                }
+                put += 1;
+            }
+            if put == 0 && !source.is_empty() {
+                // 老格式（只有 source）：至少把入口写回去
+                let dst = root.join("index.js");
+                crate::scripts::write_atomic(&dst, source.as_bytes())
+                    .await
+                    .map_err(|e| format!("写 {} 失败: {e}", dst.display()))?;
+            }
+            written.push(name.to_string());
+            out_plugins.push(json!({ "name": name, "ok": true, "files": put }));
+            continue;
+        }
         let path = plugins_dir.join(format!("{name}.js"));
         crate::scripts::write_atomic(&path, source.as_bytes())
             .await

@@ -561,3 +561,81 @@ async fn web_fetch_sends_string_and_binary_request_bodies() {
         Err(e) => panic!("请求体（字符串/二进制）没走通: {e}"),
     }
 }
+
+/// 目录式插件（第 216 轮）：`import './lib/x.js'` 要在插件自己的目录里解析，
+/// 且 `..` 跑出插件目录必须被拒。
+#[tokio::test]
+async fn dir_plugin_can_import_its_own_files() {
+    let root = std::env::temp_dir().join(format!("panel-engdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib/deep")).unwrap();
+    std::fs::write(
+        root.join("index.js"),
+        format!(
+            "{HANDLERS}import {{ greet }} from './lib/greet.js';\n\
+             import {{ deep }} from './lib/deep';\n\
+             await host.register_handler('hi', async () => {{\n\
+               const a = greet('世界');\n\
+               if (a !== '你好，世界') throw new Error('greet 结果不对: ' + a);\n\
+               if (deep !== '目录补 index.js') throw new Error('目录 import 结果不对: ' + deep);\n\
+               return {{ ok: true }};\n\
+             }});\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(root.join("lib/greet.js"), "export const greet = (w) => '你好，' + w;").unwrap();
+    std::fs::write(root.join("lib/deep/index.js"), "export const deep = '目录补 index.js';").unwrap();
+
+    let src = std::fs::read_to_string(root.join("index.js")).unwrap();
+    global_inits();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let (reg, _rx) = mpsc::unbounded_channel();
+    let handle = HostHandle {
+        plugin: "t".into(),
+        inv: Arc::new(Invocation::default()),
+        log,
+        db,
+        reg,
+        config: crate::config_store::ConfigStore::new(&json!({})),
+        sched: None,
+        data_dir: root.clone(),
+    };
+    let p = Plugin::load_in_dir(&src, Some(root.clone()), handle)
+        .await
+        .expect("目录式插件应当加载成功（相对 import 走 PluginResolver/PluginLoader）");
+    // handler 里自己断言（dispatch 不回值）：跑通 = 两个 import 的结果都对
+    p.dispatch("hi", &json!({}), 5_000)
+        .await
+        .expect("handler 应当能跑，且 import 进来的值都对");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn dir_plugin_cannot_import_outside_its_dir() {
+    let root = std::env::temp_dir().join(format!("panel-engesc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("p")).unwrap();
+    std::fs::write(root.join("outside.js"), "export const x = 1;").unwrap();
+    let src = format!("{HANDLERS}import {{ x }} from '../outside.js';\n");
+    global_inits();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let (reg, _rx) = mpsc::unbounded_channel();
+    let handle = HostHandle {
+        plugin: "t".into(),
+        inv: Arc::new(Invocation::default()),
+        log,
+        db,
+        reg,
+        config: crate::config_store::ConfigStore::new(&json!({})),
+        sched: None,
+        data_dir: root.clone(),
+    };
+    let err = match Plugin::load_in_dir(&src, Some(root.join("p")), handle).await {
+        Ok(_) => panic!("越界 import 必须失败"),
+        Err(e) => e,
+    };
+    assert!(err.contains("找不到") || err.contains("不能跑出去"), "实际: {err}");
+    let _ = std::fs::remove_dir_all(&root);
+}

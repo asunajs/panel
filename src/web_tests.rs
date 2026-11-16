@@ -4142,3 +4142,52 @@ async fn http_error_logs_respect_per_minute_cap() {
     // 复原：别把这个全局态漏给后面的用例
     crate::config::set_limits(crate::config::Limits::default());
 }
+
+/// 目录式插件（第 216 轮）：`/api/plugins/files` 要把它列出来（multi + entry），
+/// `/api/plugins/<name>/source` 读的是它的入口文件，删除时整目录进回收站。
+#[tokio::test]
+async fn dir_plugin_is_listed_read_and_deleted_as_a_whole() {
+    let (app, plugins, data, _store) = setup_dirs("pdir").await;
+    std::fs::create_dir_all(plugins.join("m/lib")).unwrap();
+    std::fs::write(
+        plugins.join("m/index.js"),
+        "import host from 'panel:host';\nimport { x } from './lib/x.js';\n",
+    )
+    .unwrap();
+    std::fs::write(plugins.join("m/lib/x.js"), "export const x = 1;\n").unwrap();
+
+    // ① 列表：一个插件、标了 multi、入口是 m/index.js，bytes 是整目录
+    let (status, body) = get(&app, "/api/plugins/files").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["name"], "m");
+    assert_eq!(files[0]["multi"], true, "{body}");
+    assert_eq!(files[0]["entry"], "m/index.js", "{body}");
+    let want = std::fs::metadata(plugins.join("m/index.js")).unwrap().len()
+        + std::fs::metadata(plugins.join("m/lib/x.js")).unwrap().len();
+    assert_eq!(files[0]["bytes"].as_u64().unwrap(), want, "bytes 要算整目录");
+
+    // ② 读源码：拿到的是入口文件内容
+    let (status, body) = get(&app, "/api/plugins/m/source").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["source"].as_str().unwrap_or("").contains("./lib/x.js"),
+        "{body}"
+    );
+
+    // ③ 删除：整个目录搬进回收站（不是只删入口文件）
+    let (status, body) = send(&app, with_csrf("DELETE", "/api/plugins/m", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!plugins.join("m").exists(), "插件目录应当被搬走");
+    let trash = data.join("trash");
+    let moved: Vec<String> = std::fs::read_dir(&trash)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        moved.iter().any(|n| n.starts_with("m-") && n.ends_with(".plugin")),
+        "回收站里应当有一整个插件目录: {moved:?}"
+    );
+}

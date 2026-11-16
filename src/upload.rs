@@ -228,7 +228,30 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         });
     }
 
-    let strip = common_wrapper(root, &names);
+    let mut strip = common_wrapper(root, &names);
+    // 目录式插件（第 216 轮）：`<name>/index.js` + `<name>/lib/…` 打成 zip 时，
+    // 把外层目录剥掉会把 index.js 摊到 plugins/ 根上 —— 面板按 `<name>/index.js`
+    // 找入口，摊平的结果是「装好了但看不见」。所以这种包**保留外层目录**。
+    if let Some(prefix) = strip.clone() {
+        let entry_after_strip = names
+            .iter()
+            .any(|n| n.strip_prefix(&prefix).map(|r| r == Path::new("index.js")).unwrap_or(false));
+        if entry_after_strip {
+            let dirname = prefix.to_string_lossy().to_string();
+            let ok = !dirname.is_empty()
+                && dirname
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+                && !dirname.starts_with('-')
+                && !dirname.starts_with('_');
+            if !ok {
+                return Err(format!(
+                    "压缩包外层目录名 `{dirname}` 不能当插件名（只能用 a-z、0-9、`-` `_`，且不以下划线/横线开头）"
+                ));
+            }
+            strip = None;
+        }
+    }
     let mut files = Vec::new();
     // 覆盖了哪些已有文件（界面据此说「已覆盖」而不是「已上传」）
     let mut replaced: Vec<String> = Vec::new();
@@ -754,6 +777,40 @@ mod tests {
         assert!(save(Kind::Plugins, &root, "a.js", b"x", true).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn dir_plugin_zip_keeps_its_wrapper_dir() {
+        // 目录式插件（第 216 轮）：`<name>/index.js` + `<name>/lib/x.js`。
+        // 剥掉外层目录会把 index.js 摊到 plugins/ 根上 → 面板「装好了但看不见」。
+        let root = tmpdir("dirzip");
+        let zip = make_zip(&[
+            ("demo/index.js", b"import './lib/x.js';"),
+            ("demo/lib/x.js", b"export const x = 1;"),
+        ]);
+        let saved = save(Kind::Plugins, &root, "demo.zip", &zip, true).unwrap();
+        assert!(
+            root.join("demo/index.js").is_file(),
+            "入口要在 <name>/index.js: {:?}",
+            saved.files
+        );
+        assert!(root.join("demo/lib/x.js").is_file(), "子文件要跟着进去");
+        assert!(!root.join("index.js").exists(), "不能摊到 plugins 根上");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zip_with_bad_wrapper_name_for_dir_plugin_is_rejected() {
+        let root = tmpdir("dirzip-bad");
+        let zip = make_zip(&[
+            ("Bad Name/index.js", b"export const x = 1;"),
+            ("Bad Name/lib/x.js", b"export const y = 1;"),
+        ]);
+        let err = save(Kind::Plugins, &root, "x.zip", &zip, true).unwrap_err();
+        assert!(err.contains("不能当插件名"), "实际: {err}");
+        assert!(!root.join("Bad Name").exists(), "拒绝了就不该落盘");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }
 
 /// 补充边界（不与 tests 重复）。

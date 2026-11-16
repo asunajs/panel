@@ -339,15 +339,15 @@ async fn main() -> Result<(), String> {
 /// 扫 `plugins/*.js` 逐个加载。**一个插件失败不影响其它插件** ——
 /// 这正是不用 `Vm::from_options` 的理由。
 async fn load_all(
-    dir: &PathBuf,
+    dir: &std::path::Path,
     sched: &scheduler::Scheduler,
     log: &LogHub,
     db: &db::Db,
     errors: &web::LoadErrors,
     cfg: &std::sync::Arc<config_store::ConfigStore>,
 ) {
-    let mut entries = match tokio::fs::read_dir(dir).await {
-        Ok(e) => e,
+    let names = match crate::pluginfs::names(dir) {
+        Ok(v) => v,
         Err(e) => {
             log.emit(
                 "panel",
@@ -358,44 +358,15 @@ async fn load_all(
             return;
         }
     };
-    let mut names = Vec::new();
-    // ⚠ 不能用 `while let Ok(Some(entry)) = next_entry()`：遍历中途出错会被**静默当成结束**。
-    // 第 134 轮就是栽在这里 —— 服务化跑（launchd）时插件目录遍历报了错（外部卷权限/TCC 一类），
-    // 结果「一个插件都没加载」且日志里一个字都没有，看着像面板坏了，实际是读目录失败。
-    loop {
-        match entries.next_entry().await {
-            Ok(Some(entry)) => {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("js") {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(stem.to_string());
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                log.emit(
-                    "panel",
-                    None,
-                    Level::Warn,
-                    format!(
-                        "遍历插件目录 {} 出错（已读到 {} 个 .js，后面不再尝试）: {e}",
-                        dir.display(),
-                        names.len()
-                    ),
-                );
-                break;
-            }
-        }
-    }
-    names.sort();
     if names.is_empty() {
         log.emit(
             "panel",
             None,
             Level::Warn,
-            format!("插件目录 {} 里没有 .js 文件（目录为空，或这个进程读不到它）", dir.display()),
+            format!(
+                "插件目录 {} 里没有插件（既没有 .js 文件，也没有带 index.js 的子目录）",
+                dir.display()
+            ),
         );
     }
     // 界面上禁用过的插件不再加载（持久状态，不是这次进程的临时决定）。
@@ -441,7 +412,7 @@ async fn load_all(
             );
             continue;
         }
-        let path = dir.join(format!("{name}.js"));
+        let path = dir.join(format!("{name}.js")); // 只为错误信息保底，实际读盘走 pluginfs
         // 清单里的 min_panel 是**硬挡**：面板版本不够就不加载，并说清为什么。
         // 软警告在这里没用 —— 插件跑在不匹配的宿主上，坏起来是随机崩。
         match crate::manifest::load(dir, &name) {
@@ -504,10 +475,13 @@ async fn load_all(
                 }
             }
         }
-        let source = match tokio::fs::read_to_string(&path).await {
+        let source = match crate::pluginfs::read_source(dir, &name).map(|(src, _)| src) {
             Ok(s) => s,
             Err(e) => {
                 log.emit("panel", None, Level::Error, format!("读 {name} 失败: {e}"));
+                if let Ok(mut g) = errors.lock() {
+                    g.insert(name.clone(), e);
+                }
                 continue;
             }
         };

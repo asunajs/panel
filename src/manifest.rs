@@ -222,6 +222,30 @@ fn seen() -> &'static Mutex<HashMap<String, Finger>> {
 }
 
 fn finger_of(path: &Path) -> Option<Finger> {
+    // 目录式插件（`<name>/index.js`）：指纹算整个目录 —— 只盯入口文件的话，
+    // 改 `lib/x.js` 在扫描报告里会显示「没变」，热加载就漏了（第 216 轮）。
+    if crate::pluginfs::is_dir_plugin(path) {
+        if let Some(root) = path.parent() {
+            let mut size = 0u64;
+            let mut newest = 0i64;
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(d) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    if let Some(f) = finger_of(&p) {
+                        size = size.saturating_add(f.size);
+                        newest = newest.max(f.mtime_ms);
+                    }
+                }
+            }
+            return Some(Finger { size, mtime_ms: newest });
+        }
+    }
     let md = std::fs::metadata(path).ok()?;
     let mtime = md
         .modified()
@@ -247,15 +271,11 @@ pub fn note_loaded(name: &str, path: &Path) {
 /// 扫描结果（只报告，不加载）。
 pub fn scan(dir: &Path, loaded: &[String], disabled: &[String], current: &str) -> Value {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    match std::fs::read_dir(dir) {
-        Ok(rd) => {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) != Some("js") {
-                    continue;
-                }
-                if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
-                    files.push((stem.to_string(), p));
+    match crate::pluginfs::names(dir) {
+        Ok(names) => {
+            for name in names {
+                if let Some(p) = crate::pluginfs::entry(dir, &name) {
+                    files.push((name, p));
                 }
             }
         }

@@ -53,10 +53,10 @@ fn names_lists_js_files_and_dir_plugins_only() {
 fn total_bytes_sums_directory_tree() {
     let d = tmp("bytes");
     std::fs::create_dir_all(d.join("c/sub")).unwrap();
-    std::fs::write(d.join("c/index.js"), &[b'a'; 100]).unwrap();
-    std::fs::write(d.join("c/sub/more.js"), &[b'b'; 50]).unwrap();
+    std::fs::write(d.join("c/index.js"), [b'a'; 100]).unwrap();
+    std::fs::write(d.join("c/sub/more.js"), [b'b'; 50]).unwrap();
     assert_eq!(total_bytes(&d, "c"), 150);
-    std::fs::write(d.join("single.js"), &[b'z'; 7]).unwrap();
+    std::fs::write(d.join("single.js"), [b'z'; 7]).unwrap();
     assert_eq!(total_bytes(&d, "single"), 7);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -72,23 +72,23 @@ fn resolve_inside_handles_relative_ext_and_index() {
     let entry = root.join("index.js").to_string_lossy().to_string();
 
     assert_eq!(
-        resolve_inside(&root, &entry, "./lib/a.js").unwrap(),
+        resolve_inside(&root, entry.as_str(), "./lib/a.js").unwrap(),
         root.join("lib/a.js")
     );
     assert_eq!(
-        resolve_inside(&root, &entry, "./lib/a").unwrap(),
+        resolve_inside(&root, entry.as_str(), "./lib/a").unwrap(),
         root.join("lib/a.js"),
         "没写扩展名补 .js"
     );
     assert_eq!(
-        resolve_inside(&root, &entry, "./lib/deep").unwrap(),
+        resolve_inside(&root, entry.as_str(), "./lib/deep").unwrap(),
         root.join("lib/deep/index.js"),
         "指向目录补 index.js"
     );
     // 嵌套模块里的相对引用：base 是那个文件本身
     let nested = root.join("lib/a.js").to_string_lossy().to_string();
     assert_eq!(
-        resolve_inside(&root, &nested, "./deep").unwrap(),
+        resolve_inside(&root, nested.as_str(), "./deep").unwrap(),
         root.join("lib/deep/index.js")
     );
     // 引擎给的入口名（不是路径）：落回根目录
@@ -107,8 +107,8 @@ fn resolve_inside_refuses_to_escape() {
     std::fs::write(d.join("outside.js"), "").unwrap();
     let root = d.join("p");
     let entry = root.join("index.js").to_string_lossy().to_string();
-    assert!(resolve_inside(&root, &entry, "../outside.js").is_none(), "越界必须拒");
-    assert!(resolve_inside(&root, &entry, "./../../outside.js").is_none());
-    assert!(resolve_inside(&root, &entry, "./not-there.js").is_none());
+    assert!(resolve_inside(&root, entry.as_str(), "../outside.js").is_none(), "越界必须拒");
+    assert!(resolve_inside(&root, entry.as_str(), "./../../outside.js").is_none());
+    assert!(resolve_inside(&root, entry.as_str(), "./not-there.js").is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

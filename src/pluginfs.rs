@@ -134,12 +134,7 @@ pub fn resolve_inside(root: &Path, base: &str, name: &str) -> Option<PathBuf> {
     if !norm.starts_with(root) {
         return None;
     }
-    for cand in candidates(&norm) {
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
+    candidates(&norm).into_iter().find(|c| c.is_file())
 }
 
 /// 补扩展名 / 补 `index.js` 的候选顺序。

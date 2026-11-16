@@ -980,3 +980,18 @@ provider，不换握手实现），**只有 `tls-openssl` 是真 OpenSSL**
 第 180 轮修之前这条链路整个是死的 —— actor 每圈重建 sleep 定时器，被 30 秒一次的
 空闲卸载 ticker 反复重置，而「没有已加载任务」时 sleep_hint 恒为 60 秒，
 fire_due 永远等不到（实测 90 秒一次没跑）。现在到点时刻是绝对 deadline、只缩不涨。
+
+## 多文件插件：模块解析与读取（第 216 轮）
+
+解析链 **(PluginResolver, GatedResolver, EmbeddedResolver, PackageResolver, FileResolver)**，
+读取链 **(PluginLoader, ModuleLoader, EmbeddedLoader, PackageLoader)**；前两项只在目录式插件
+（`plugins/<name>/index.js`）时生效，单文件插件时是空壳、立刻让位（老插件行为不变）。
+插件侧写法见 [plugins.md](plugins.md)「多文件插件」，引擎侧只有三条约束：
+
+- **rquickjs 只有 `FileResolver`、没配读文件的 loader**：路径解析出来没人读，以前相对 import
+  必然 `Error resolving module`。现在成对补：`pluginfs::resolve_inside` 归一化 + `PluginLoader`
+  读文件后 `Module::declare(name=绝对路径)` —— 模块名是绝对路径，嵌套文件的相对 import 才有根。
+- **入口 base 不是路径**：入口走 `ctx.eval_with_options`，base 是 `eval_script`，
+  解析器要容忍（非绝对路径就落回插件根），否则入口那层 `./lib/x.js` 找不到。
+- **越界拒、前缀要剥**：归一化后必须仍在插件根内；llrt `require` 的 `__cjs:` / `__cjsm:` 前缀
+  先剥再判。单模块 ≤ 2 MiB。守卫：`engine::tests` 两条 + `pluginfs` 六条。

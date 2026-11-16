@@ -1674,10 +1674,13 @@ fn safe_name(name: &str) -> Result<(), ApiError> {
 
 async fn read_source(dir: &std::path::Path, name: &str) -> Result<String, ApiError> {
     safe_name(name)?;
-    let path = dir.join(format!("{name}.js"));
-    tokio::fs::read_to_string(&path)
+    // 两种形态都认：`<name>.js` 或 `<name>/index.js`（第 216 轮）。
+    let d = dir.to_path_buf();
+    let n = name.to_string();
+    tokio::task::spawn_blocking(move || crate::pluginfs::read_source(&d, &n).map(|(src, _)| src))
         .await
-        .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))
+        .map_err(|e| bad(format!("读插件失败: {e}")))?
+        .map_err(bad)
 }
 
 /// POST /api/plugins/{name}/reinstall —— 重装：这次加载**采纳**插件的 cron 建议。
@@ -3156,7 +3159,9 @@ fn source_max() -> usize {
 
 fn plugin_path(dir: &std::path::Path, name: &str) -> Result<PathBuf, ApiError> {
     safe_name(name)?;
-    Ok(dir.join(format!("{name}.js")))
+    // 已存在的插件按它**现在的形态**给路径：目录式插件写它的 `index.js`。
+    // 不存在时回老形态 `<name>.js`（新建插件永远是单文件，多文件靠自己放目录或用上传）。
+    Ok(crate::pluginfs::entry(dir, name).unwrap_or_else(|| dir.join(format!("{name}.js"))))
 }
 
 /// 原子写：同目录临时文件 + rename。
@@ -3308,21 +3313,19 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
     // 这**不是**客户端请求的问题：以前回 400 bad_request，界面每几秒轮询一次就刷一屏
     // `GET /api/plugins/files → 400 code=bad_request detail=`（第 205 轮实测的噪音源）。
     // 现在：ENOENT → 空列表；其它 IO 错（权限等）→ 500 并带上路径。
-    let mut rd = match tokio::fs::read_dir(&st.plugins_dir).await {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Json(json!({
-                "dir": st.plugins_dir.display().to_string(),
-                "max_bytes": source_max(),
-                "files": [],
-            })));
-        }
-        Err(e) => {
+    // 插件名来自 pluginfs（认两种形态：`<name>.js` 与 `<name>/index.js`），
+    // 但**目录不存在**要按「还没装过」处理，不能报错 —— 见上面那段说明。
+    let dir = st.plugins_dir.clone();
+    let names = match tokio::task::spawn_blocking(move || crate::pluginfs::names(&dir)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Ok(Err(e)) => {
             return Err(internal(format!(
                 "读插件目录失败 {}: {e}", st.plugins_dir.display()
             ))
             .with_detail(st.plugins_dir.display().to_string()))
         }
+        Err(e) => return Err(internal(format!("读插件目录失败: {e}"))),
     };
     let loaded: std::collections::HashSet<String> = st
         .sched
@@ -3333,32 +3336,41 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         .map(|p| p.name)
         .collect();
     let mut files = Vec::new();
-    while let Ok(Some(ent)) = rd.next_entry().await {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("js") {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+    for name in names {
+        let Some(entry) = crate::pluginfs::entry(&st.plugins_dir, &name) else {
             continue;
         };
-        let meta = ent.metadata().await.ok();
+        let meta = std::fs::metadata(&entry).ok();
         // 插件自己的界面放在 <name>.webui/ 里，有 index.html 才算有界面。
         let webui = st
             .plugins_dir
             .join(format!("{name}.webui/index.html"))
             .exists();
+        // 目录式插件的「大小」是整个目录（日志/界面里看到的就是它占多少地方），
+        // 但 modified 取入口文件 —— 那才是「这个插件上次什么时候改的」。
+        let bytes = crate::pluginfs::total_bytes(&st.plugins_dir, &name);
         files.push(json!({
             "name": name,
             // 界面按系列分组要用：禁用/未加载的插件也得能归到自己的系列里。
-            "group": crate::plugin_group(name),
-            "bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            "group": crate::plugin_group(&name),
+            "bytes": bytes,
             "modified_ms": meta
                 .as_ref()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64),
-            "loaded": loaded.contains(name),
+            "loaded": loaded.contains(&name),
             "webui": webui,
+            // 目录式插件：界面要把「多个文件」这件事说清楚（编辑的是入口文件）
+            "multi": crate::pluginfs::is_dir_plugin(&entry),
+            "entry": entry
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| if crate::pluginfs::is_dir_plugin(&entry) {
+                    format!("{name}/{s}")
+                } else {
+                    s.to_string()
+                }),
         }));
     }
     files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -3755,13 +3767,24 @@ async fn plugin_delete(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dest = trash.join(format!("{name}-{stamp}.js"));
+    // 目录式插件（`<name>/index.js`）搬整个目录，回收站里也保留它是一整个插件的形状。
+    let is_dir_plugin = crate::pluginfs::dir_entry(&st.plugins_dir, &name).is_some();
+    let dest = if is_dir_plugin {
+        trash.join(format!("{name}-{stamp}.plugin"))
+    } else {
+        trash.join(format!("{name}-{stamp}.js"))
+    };
     // **先把文件搬走**，再动内存和库。顺序反了就会出现「提示删除失败 / 重启后插件又回来」：
     // 文件还在，下次启动自然又被加载（第 131 轮用户报的两个症状是同一个根因）。
     // 另外 `rename` 跨设备会 EXDEV（插件目录在别的卷、数据目录在系统盘就是这种情况），
     // 交给 fsx::move_path 走「复制 + 删除」。
     let mut moved: Vec<String> = Vec::new();
-    match crate::fsx::move_path(&path, &dest).await {
+    let src_path = if is_dir_plugin {
+        st.plugins_dir.join(&name)
+    } else {
+        path.clone()
+    };
+    match crate::fsx::move_path(&src_path, &dest).await {
         Ok(()) => moved.push(dest.display().to_string()),
         // 文件本来就没有：内存和库照旧要清，别让界面卡在「删除失败」。
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
