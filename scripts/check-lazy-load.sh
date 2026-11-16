@@ -186,6 +186,18 @@ ping2=$(curl -s -o /dev/null -w '%{http_code}' -b "$D/jar" -X POST -H 'content-t
 [ "$(state_of uiface)" = "00" ] && ok "它已经自动装回内存" || bad "调用后状态不对：$(state_of uiface)"
 stop
 
+# ⑩ 暂停的插件也不能钉在内存里（第 189 轮）：3030 上「插件商店」被暂停后
+#    一直不卸，就因为 idle_tick 里留了「suspended 不卸」的例外。
+#    ensure_loaded 之后这个例外没有意义了 —— 界面一调用就装回来。
+start
+curl -s -b "$D/jar" -X POST -H 'x-panel: 1' "http://127.0.0.1:$PORT/api/plugins/uiface/suspend" >/dev/null
+sleep 1
+[ "$(state_of uiface)" = "00" ] && ok "暂停前置：uiface 在内存里、已暂停" || bad "暂停前置不对：$(state_of uiface)"
+echo "    等一拍空闲检查（30s）…"
+sleep 34
+[ "$(state_of uiface)" = "01" ] && ok "暂停的插件闲着也会被卸载（第 189 轮放开）" || bad "暂停插件没被卸载：$(state_of uiface)"
+stop
+
 echo ''
-if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的 18 条端到端检查全过"; else echo "红: $FAIL 条没过"; fi
+if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的 20 条端到端检查全过"; else echo "红: $FAIL 条没过"; fi
 exit "$FAIL"

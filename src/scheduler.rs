@@ -2478,14 +2478,15 @@ impl Inner {
             // 现在界面打开、接口调用都会走 ensure_loaded 自动装回来（静态文件照常从磁盘发，
             // 首屏不受影响），所以卸掉是安全的。
             //
-            // 暂停的仍然不卸：暂停意味着「我随时要用界面，只是别跑定时」。
-            if self.suspended.contains(&name) {
-                continue;
-            }
+            // 第 189 轮：暂停的**也卸**。原来说「暂停 = 随时要用界面，只是别跑定时」，
+            // 那是 ensure_loaded 之前的顾虑 —— 现在界面一调用就自动装回来，暂停不需要
+            // 豁免（3030 上 shop 就是被这个例外钉在内存里的）。
+            // 暂停插件的任务本来就不跑，它的 next_due 不该算进来（见下面的过滤）。
             let (busy, last) = match self.plugins.get(&name) {
                 Some(l) => (l.busy, l.last_active),
                 None => continue,
             };
+            let suspended = self.suspended.contains(&name);
             let next_due = self
                 .tasks
                 .iter()
@@ -2495,6 +2496,8 @@ impl Inner {
                         && !t.pending_adopt
                         && t.schedule.is_some()
                         && t.deleted_at.is_none()
+                        // 暂停的插件不会跑这些任务，别为它留着运行时
+                        && !suspended
                 })
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
@@ -2529,6 +2532,10 @@ impl Inner {
         let names: Vec<String> = self.unloaded.keys().cloned().collect();
         for name in names {
             if self.waking.contains(&name) {
+                continue;
+            }
+            // 暂停的插件不会到点跑任务，别白装一次（界面调用会走 ensure_loaded）
+            if self.suspended.contains(&name) {
                 continue;
             }
             let next = self
