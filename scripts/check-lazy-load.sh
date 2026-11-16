@@ -26,10 +26,18 @@ cat > "$D/plugins/uiface.js" <<'JS'
 import host from 'panel:host';
 await host.register_web(async () => ({ ok: true }));
 await host.sidebar({ title: '演示', order: 90 });
+await host.register_handler('ping', async () => 'pong');
 JS
 # 只有定时任务的插件：没有界面，任务在 6 小时后 → 可以按需加载
 cat > "$D/plugins/crononly.js" <<'JS'
 import host from 'panel:host';
+await host.register_cron('tick', '@every 6h', 30000, { run: async () => 'ok' });
+JS
+
+# 只有 handler、没有界面：走 /plugins/<name>/api/<handler> 那条老契约
+cat > "$D/plugins/plainapi.js" <<'JS'
+import host from 'panel:host';
+await host.register_handler('ping', async () => 'pong');
 await host.register_cron('tick', '@every 6h', 30000, { run: async () => 'ok' });
 JS
 
@@ -119,6 +127,65 @@ start
 [ "$(state_of crononly)" = "00" ] && ok "下次到点在唤醒窗口内 → 启动时就装（不省）" || bad "窗口内的任务被省掉了：$(state_of crononly)"
 stop
 
+# ⑥ 手动执行按需加载的任务：自动装回来并真的跑（不该再要求先点「加载」）
+python3 - "$D/data/config.json" <<'PY'
+import json, sys
+json.dump({"plugins": {"lazy_load": True}}, open(sys.argv[1], "w"))
+PY
+# 上一段把下次到点放在了 30 秒后；这里推回 6 小时，它才会重新变成「按需加载」
+python3 - "$D/data/panel.db" <<'PY'
+import sqlite3, sys, time
+c = sqlite3.connect(sys.argv[1])
+c.execute("update tasks set next_at=? where plugin in ('crononly','plainapi')",
+          (int(time.time() * 1000) + 6 * 3600_000,))
+c.commit()
+PY
+start
+[ "$(state_of crononly)" = "11" ] && ok "手动执行前：crononly 仍是按需加载（没装）" || bad "前置状态不对：$(state_of crononly)"
+run=$(curl -s -b "$D/jar" -X POST -H 'x-panel: 1' "http://127.0.0.1:$PORT/api/tasks/crononly/tick/run")
+case "$run" in
+  *'"run_id"'*) ok "手动执行：直接跑起来了（自动装，没有「先点加载」）" ;;
+  *) bad "手动执行被挡住了：$run" ;;
+esac
+[ "$(state_of crononly)" = "00" ] && ok "手动执行后插件已在内存里（lazy 标记已清）" || bad "执行完状态不对：$(state_of crononly)"
+
+# ⑦ 界面接口（老契约 POST /plugins/<name>/api/<handler>）：插件没装时第一次调用自动装
+[ "$(state_of plainapi)" = "11" ] && ok "接口测试前置：plainapi 是按需加载（没装）" || bad "plainapi 前置状态不对：$(state_of plainapi)"
+ping=$(curl -s -b "$D/jar" -X POST -H 'content-type: application/json' -H 'x-panel: 1' -d '{}' \
+  "http://127.0.0.1:$PORT/plugins/plainapi/api/ping")
+case "$ping" in
+  *pong*) ok "界面接口调用自动把插件装回来（返回 pong）" ;;
+  *) bad "接口调用没装回来：$ping" ;;
+esac
+[ "$(state_of plainapi)" = "00" ] && ok "自动装回来之后 plainapi 已在内存" || bad "自动装之后状态不对：$(state_of plainapi)"
+stop
+
+# ⑧ 停用的插件**不**自动装：静默装回来等于把「停用」变成摆设
+start
+curl -s -b "$D/jar" -X POST -H 'x-panel: 1' "http://127.0.0.1:$PORT/api/plugins/crononly/disable" >/dev/null
+sleep 1
+deny=$(curl -s -o /dev/null -w '%{http_code}' -b "$D/jar" -X POST -H 'x-panel: 1'   "http://127.0.0.1:$PORT/api/tasks/crononly/tick/run")
+[ "$deny" = "409" ] && ok "停用的插件拒绝自动加载（409）" || bad "停用插件被自动装了：HTTP $deny"
+[ "$(state_of crononly)" = "11" ] && ok "停用期间它一直没被装进内存" || bad "停用插件状态不对：$(state_of crononly)"
+stop
+
+# ⑨ 空闲卸载默认开着（30 分钟），而且**带界面的插件也在范围内**：
+#    这里把窗口压到 1 秒，等一拍（idle tick 是 30 秒）看它真被卸，再点一下回去。
+python3 - "$D/data/config.json" <<'PY'
+import json, sys
+json.dump({"plugins": {"lazy_load": True, "idle_unload_secs": 1}}, open(sys.argv[1], "w"))
+PY
+start
+[ "$(state_of uiface)" = "00" ] && ok "空闲窗口压到 1s：启动时 uiface 照常装（有界面）" || bad "uiface 启动状态不对：$(state_of uiface)"
+echo "    等一拍空闲检查（30s）…"
+sleep 34
+[ "$(state_of uiface)" = "01" ] && ok "有界面的插件闲着也会被卸载（第 188 轮放开）" || bad "界面插件没被空闲卸载：$(state_of uiface)"
+ping2=$(curl -s -o /dev/null -w '%{http_code}' -b "$D/jar" -X POST -H 'content-type: application/json' \
+  -H 'x-panel: 1' -d '{}' "http://127.0.0.1:$PORT/plugins/uiface/api/ping")
+[ "$ping2" = "200" ] && ok "空闲卸载之后再点界面：不是「插件未加载」，自动装回照常可用" || bad "空闲卸载后界面坏了：HTTP $ping2"
+[ "$(state_of uiface)" = "00" ] && ok "它已经自动装回内存" || bad "调用后状态不对：$(state_of uiface)"
+stop
+
 echo ''
-if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的 10 条端到端检查全过"; else echo "红: $FAIL 条没过"; fi
+if [ "$FAIL" = "0" ]; then echo "ok: 按需加载的 18 条端到端检查全过"; else echo "红: $FAIL 条没过"; fi
 exit "$FAIL"

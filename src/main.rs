@@ -23,6 +23,7 @@ mod scheduler;
 mod notify;
 mod outbound;
 mod plan;
+mod pluginfs;
 mod jsslots;
 mod ratelimit;
 /// 插件「系列」名：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。
@@ -568,7 +569,7 @@ async fn load_all(
             None,
             Level::Info,
             format!(
-                "按需加载：{} 个插件这次启动没有加载（{} 条任务照常列出），到点前 2 分钟或点「加载」才装",
+                "按需加载：{} 个插件这次启动没有加载（{} 条任务照常列出）；到点前 2 分钟、手动执行、打开它的界面都会自动装回来",
                 lazy_names.len(),
                 n
             ),

@@ -547,6 +547,14 @@ pub enum Cmd {
         adopt: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 确保插件在内存里：不在就装回来，正在装的排队等它装完（第 188 轮）。
+    ///
+    /// 这是「用到就装」的唯一入口：手动执行任务、插件界面的接口调用都先走它，
+    /// 所以用户不再需要先去插件卡片上点「加载」。
+    EnsureLoaded {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Unload {
         name: String,
     },
@@ -743,6 +751,21 @@ impl Scheduler {
 
     pub async fn load(&self, name: &str, source: String) -> Result<(), String> {
         self.load_adopt(name, source, false).await
+    }
+
+    /// 确保插件在内存里（不在就装回来）。第 188 轮「用到就装」的入口。
+    ///
+    /// 手动执行任务、插件界面的接口调用都先走它 —— 用户不该为了点一下界面
+    /// 先去插件卡片上按「加载」。
+    pub async fn ensure_loaded(&self, name: &str) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::EnsureLoaded {
+                name: name.to_string(),
+                reply: tx,
+            })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
     }
 
     /// 清掉一条任务的熔断状态，并把下一拍对齐到现在（立刻可以再跑）。
@@ -965,6 +988,9 @@ pub fn should_idle_unload(
 /// 空闲卸载的唤醒窗口：任务在这个窗口内要到点就不卸。
 pub const IDLE_WAKE_WINDOW_MS: i64 = 120_000;
 
+/// 空闲多久卸载 JS 运行时（默认 30 分钟；配置写 0 就是永不卸载）。
+pub const IDLE_UNLOAD_DEFAULT_SECS: i64 = 1800;
+
 /// 一个插件同时只有一个 JS 执行位（`Loaded::busy`）。忙的时候来的 HTTP 请求先**排队**：
 /// 插件界面里两个请求挨着发（`Promise.all`）是极常见的写法，直接 502 会让人以为
 /// 「有任务在跑」—— 其实是自己撞自己（第 142 轮，pitfalls 89）。
@@ -1034,6 +1060,9 @@ struct Inner {
     plugins_dir: Option<std::path::PathBuf>,
     /// 正在异步唤醒的插件（避免同一拍发两次 load）。
     waking: std::collections::HashSet<String>,
+    /// 等某个插件装完的调用方（第 188 轮）：ensure_loaded 的 reply，
+    /// Loaded（成功或失败）时一起放行 —— 两条通道，谁先到都得有个交代。
+    waiters: std::collections::HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// 本次 load 是「安装 / 重装」吗（第 180 轮）：是的话插件给的 cron 建议会被采纳。
     /// Loaded（无论成败）后就清掉，避免之后动态 register_cron 也去采纳。
     adopt_mode: std::collections::HashSet<String>,
@@ -1099,6 +1128,7 @@ pub fn start(
         lazy: std::collections::HashSet::new(),
         plugins_dir: None,
         waking: std::collections::HashSet::new(),
+        waiters: std::collections::HashMap::new(),
         adopt_mode: std::collections::HashSet::new(),
         tasks: Vec::new(),
         tx: tx.clone(),
@@ -1363,6 +1393,41 @@ impl Inner {
                 adopt,
                 reply,
             } => self.spawn_load(name, source, adopt, reply),
+            Cmd::EnsureLoaded { name, reply } => {
+                if self.plugins.contains_key(&name) {
+                    let _ = reply.send(Ok(()));
+                } else if let Some(dir) = self.plugins_dir.clone() {
+                    // 已经在装的（wake_unloaded 先动手了）：直接排进队列等它
+                    let mut pending: Option<oneshot::Sender<Result<(), String>>> = None;
+                    if !self.waking.contains(&name) {
+                        match crate::pluginfs::read_source(&dir, &name).map(|(src, _)| src) {
+                            Ok(src) => {
+                                self.waking.insert(name.clone());
+                                let (tx, _rx) = oneshot::channel();
+                                self.spawn_load(name.clone(), src, false, tx);
+                                self.log.emit(
+                                    &name,
+                                    None,
+                                    Level::Info,
+                                    format!("插件 {name} 不在内存里，按需装回来"),
+                                );
+                                pending = Some(reply);
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(format!("插件 {name} 装不回来：{e}")));
+                            }
+                        }
+                    } else {
+                        pending = Some(reply);
+                    }
+                    // 装好之后放行（Loaded 成功或失败都会放）
+                    if let Some(r) = pending {
+                        self.waiters.entry(name).or_default().push(r);
+                    }
+                } else {
+                    let _ = reply.send(Err(format!("插件目录未知，装不回 {name}")));
+                }
+            }
             Cmd::SetPluginsDir { dir } => {
                 self.plugins_dir = Some(dir);
             }
@@ -1458,6 +1523,10 @@ impl Inner {
                         self.unloaded.remove(&name);
                         self.waking.remove(&name);
                         self.lazy.remove(&name);
+                        // 等这个插件的调用方（手动执行 / 界面接口）现在可以继续了
+                        for w in self.waiters.remove(&name).unwrap_or_default() {
+                            let _ = w.send(Ok(()));
+                        }
                         // 占位任务里没有被真正 register_cron 顶掉的，说明插件已经不注册它了
                         // （改了名字、删了任务）：留着会让任务表显示不存在的东西。
                         self.tasks.retain(|t| !(t.plugin == name && t.lazy));
@@ -1468,6 +1537,11 @@ impl Inner {
                     Err(e) => {
                         // 加载失败：注册进来的任务是孤儿，清掉，别让它们钉住 sleep_hint
                         self.tasks.retain(|t| t.plugin != name);
+                        // waking 必须清：留着它既挡住下一轮唤醒，也让 ensure_loaded 白等
+                        self.waking.remove(&name);
+                        for w in self.waiters.remove(&name).unwrap_or_default() {
+                            let _ = w.send(Err(e.clone()));
+                        }
                         Err(e)
                     }
                 };
@@ -1791,10 +1865,12 @@ impl Inner {
                 None => {
                     let _ = reply.send(Err(format!("没有这个任务: {plugin}/{task}")));
                 }
+                // 走到这里说明调用方没先 ensure_loaded（或者刚装回来又失败了）。
+                // 正常情况下 web 层会先装再跑，用户看不到这条。
                 Some(i) if self.tasks[i].lazy => {
                     let (p0, n0) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
                     let _ = reply.send(Err(format!(
-                        "插件 {p0} 还没加载（按需加载），先点插件卡片上的「加载」再执行 {n0}"
+                        "插件 {p0} 还没装进内存，{n0} 暂时不能执行：装回失败，看日志里的加载错误"
                     )));
                 }
                 Some(i) => self.dispatch(i, true, Some(reply)).await,
@@ -1987,10 +2063,18 @@ impl Inner {
             }),
             data_dir: self.data_dir.clone(),
         };
+        // 目录式插件（`plugins/<name>/index.js`）要把自己的目录告诉引擎，
+        // 相对 import 才有根；单文件插件这里是 None，行为与以前完全一样。
+        let root = self
+            .plugins_dir
+            .as_ref()
+            .and_then(|d| crate::pluginfs::entry(d, &name))
+            .filter(|p| crate::pluginfs::is_dir_plugin(p))
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let tx = self.tx.clone();
         // 加载期可能有很长的顶层 await，不能占着调度循环
         tokio::spawn(async move {
-            let result = Plugin::load(&source, handle).await.map(Arc::new);
+            let result = Plugin::load_in_dir(&source, root, handle).await.map(Arc::new);
             let _ = tx.send(Cmd::Loaded {
                 name,
                 result,
@@ -2346,13 +2430,18 @@ impl Inner {
         );
     }
     /// 读配置里的空闲卸载秒数（0 = 关）。热生效：每一拍都重读，改配置不用重启。
+    ///
+    /// 第 188 轮之前默认 0（关）：那时界面插件本来就不在卸载范围内，开着也只是
+    /// 卸掉不带界面的，收益小、风险大。现在「用到就装」补齐了（ensure_loaded），
+    /// 卸掉谁都能自动回来，所以默认改 30 分钟 —— 内存是面板最贵的资源，
+    /// 一个每天跑两次的插件没有理由 24 小时占着 JS 运行时。
     fn idle_unload_secs(&self) -> i64 {
         let text = self.config.snapshot();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
         v.get("plugins")
             .and_then(|p| p.get("idle_unload_secs"))
             .and_then(|x| x.as_i64())
-            .unwrap_or(0)
+            .unwrap_or(IDLE_UNLOAD_DEFAULT_SECS)
     }
 
     /// 一拍空闲检查（第 174 轮）。返回这一拍卸掉了几个。
@@ -2365,11 +2454,12 @@ impl Inner {
         let names: Vec<String> = self.plugins.keys().cloned().collect();
         let mut n = 0;
         for name in names {
-            // 用户看得见的插件不卸：有 web 路由或侧栏入口的，卸掉之后界面一点就报错。
-            if self.web.contains(&name) || self.sidebar.contains_key(&name) {
-                continue;
-            }
-            // 暂停的也不卸：它本来就不跑定时，界面又可能随时要开。
+            // 第 188 轮：**有界面的插件也卸**。以前这里跳过 web/sidebar ——
+            // 结果「闲时卸载」只对不带界面的插件生效，而占内存的恰恰是带界面的那几个。
+            // 现在界面打开、接口调用都会走 ensure_loaded 自动装回来（静态文件照常从磁盘发，
+            // 首屏不受影响），所以卸掉是安全的。
+            //
+            // 暂停的仍然不卸：暂停意味着「我随时要用界面，只是别跑定时」。
             if self.suspended.contains(&name) {
                 continue;
             }
@@ -2438,8 +2528,7 @@ impl Inner {
             if next > now_ms + IDLE_WAKE_WINDOW_MS {
                 continue;
             }
-            let path = dir.join(format!("{name}.js"));
-            match std::fs::read_to_string(&path) {
+            match crate::pluginfs::read_source(&dir, &name).map(|(src, _)| src) {
                 Ok(src) => {
                     self.waking.insert(name.clone());
                     let (tx, _rx) = oneshot::channel();

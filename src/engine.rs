@@ -347,9 +347,117 @@ impl Drop for Plugin {
     }
 }
 
+
+/// 插件目录内的文件模块（第 216 轮）：让 `import './lib/x.js'` 能工作。
+///
+/// 为什么自己写：rquickjs 只给了 `FileResolver`（解析名字），**没有配一个读文件的 loader**
+/// —— 它解析出来的路径没人读，所以相对 import 在面板里一直是失败的（`Error resolving
+/// module './helper.js' from 'eval_script'`）。这里配对：解析和读取都是我们自己的。
+///
+/// 边界（都是刻意的）：
+///   · 只接 `./` `../` 开头的说明符，其余交给后面那几个（内置模块 / 包）；
+///   · 解析结果必须仍在插件根目录内，`..` 跑出去一律拒；
+///   · 单个文件 ≤ 2 MiB（插件整体上限另有 `plugins.max_bytes`）；
+///   · llrt 的 CJS 前缀（`__cjs:` / `__cjsm:`）先剥掉再判断 —— 它把 require 的说明符
+///     包了一层，不剥的话 `require('./x.cjs')` 永远匹配不上（见 llrt_modules/src/lib.rs:79）。
+///
+/// `root: None`（单文件插件）时整条链照旧，这两个 impl 立刻报错让位。
+#[derive(Debug, Default)]
+struct PluginResolver {
+    root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct PluginLoader {
+    root: Option<std::path::PathBuf>,
+}
+
+/// llrt 给 CJS 说明符加的前缀（`llrt_modules::CJS_IMPORT_PREFIX`，未对外导出，抄这里）。
+const CJS_IMPORT_PREFIX: &str = "__cjs:";
+const CJS_LOADER_PREFIX: &str = "__cjsm:";
+/// 插件目录里单个源文件的上限。
+const PLUGIN_FILE_MAX: u64 = 2 * 1024 * 1024;
+
+impl Resolver for PluginResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attrs: Option<ImportAttributes<'js>>,
+    ) -> Result<String> {
+        let Some(root) = self.root.as_deref() else {
+            return Err(Error::new_resolving(base, name));
+        };
+        let raw = name.trim_start_matches(CJS_IMPORT_PREFIX);
+        if !(raw.starts_with("./") || raw.starts_with("../")) {
+            // 不是相对路径：让后面的 resolver 去处理（内置模块 / 包）
+            return Err(Error::new_resolving(base, name));
+        }
+        crate::pluginfs::resolve_inside(root, base, raw)
+            .map(|p| p.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                Error::new_resolving_message(
+                    base,
+                    name,
+                    format!("插件目录内找不到 {name}（相对路径以插件目录为根，不能跑出去）"),
+                )
+            })
+    }
+}
+
+impl Loader for PluginLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attrs: Option<ImportAttributes<'js>>,
+    ) -> Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
+        let Some(root) = self.root.as_deref() else {
+            return Err(Error::new_loading(name));
+        };
+        let raw = name
+            .trim_start_matches(CJS_LOADER_PREFIX)
+            .trim_start_matches(CJS_IMPORT_PREFIX);
+        let path = std::path::Path::new(raw);
+        if !path.starts_with(root) || !path.is_file() {
+            return Err(Error::new_loading_message(
+                name,
+                "不在插件目录里（相对 import 只能引用插件自己的文件）",
+            ));
+        }
+        if let Ok(m) = std::fs::metadata(path) {
+            if m.len() > PLUGIN_FILE_MAX {
+                return Err(Error::new_loading_message(
+                    name,
+                    format!(
+                        "文件 {} 字节，超过单个模块 {} KiB 上限",
+                        m.len(),
+                        PLUGIN_FILE_MAX / 1024
+                    ),
+                ));
+            }
+        }
+        let src = std::fs::read_to_string(path).map_err(|e| {
+            Error::new_loading_message(name, format!("读不到 {}：{e}", path.display()))
+        })?;
+        let src = src.trim_start_matches('\u{feff}');
+        rquickjs::Module::declare(ctx.clone(), name.to_string(), src.to_string())
+    }
+}
+
 impl Plugin {
     pub async fn load(source: &str, handle: HostHandle) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, None, None).await
+        Self::load_inner(source, handle, None, None, None).await
+    }
+
+    /// 目录式插件：`root` 是插件自己的目录，`import './x.js'` 以它为根。
+    pub async fn load_in_dir(
+        source: &str,
+        root: Option<std::path::PathBuf>,
+        handle: HostHandle,
+    ) -> std::result::Result<Self, String> {
+        Self::load_inner(source, handle, None, None, root).await
     }
 
     /// 跑「脚本」用：顶层代码带**墙钟死线**。
@@ -361,19 +469,30 @@ impl Plugin {
         handle: HostHandle,
         budget_ms: Option<u64>,
         capture: Option<ConsoleCapture>,
+        plugin_root: Option<std::path::PathBuf>,
     ) -> std::result::Result<Self, String> {
         let inv = handle.inv.clone();
         let (module_resolver, module_loader, globals) =
             ModuleBuilder::default().with_module(HostModule).build();
         let mut file_resolver = FileResolver::default();
         file_resolver.add_path(".");
+        // 顺序：插件目录内的相对 import → 内置模块（带 SSRF 门的拒绝名单）→ 嵌入模块
+        // → 包 → cwd 相对（老行为，留着不动）。单文件插件时前两个是空壳，立刻让位。
         let resolver = (
+            PluginResolver {
+                root: plugin_root.clone(),
+            },
             GatedResolver(module_resolver),
             EmbeddedResolver,
             PackageResolver,
             file_resolver,
         );
-        let loader = (module_loader, EmbeddedLoader, PackageLoader);
+        let loader = (
+            PluginLoader { root: plugin_root },
+            module_loader,
+            EmbeddedLoader,
+            PackageLoader,
+        );
 
         let rt = AsyncRuntime::new().map_err(|e| e.to_string())?;
         rt.set_max_stack_size(512 * 1024).await;
@@ -460,7 +579,7 @@ impl Plugin {
     pub async fn run_test(source: &str, handle: HostHandle, budget_ms: u64) -> TestOutcome {
         let cap: ConsoleCapture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let result =
-            Self::load_inner(source, handle, Some(budget_ms), Some(cap.clone())).await;
+            Self::load_inner(source, handle, Some(budget_ms), Some(cap.clone()), None).await;
         let lines = cap.lock().map(|g| g.clone()).unwrap_or_default();
         TestOutcome {
             lines,

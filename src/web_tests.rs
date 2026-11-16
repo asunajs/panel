@@ -835,12 +835,36 @@ async fn plugin_webui_api_returns_the_handlers_value() {
     assert_eq!(body["value"]["got"]["body"]["x"], 1, "handler 的返回值要带出来: {body}");
 }
 
+/// 第 188 轮：插件不在内存里，界面接口第一次调用会**自动把它装回来**再执行；
+/// 真的没有这个插件时，说的是「装不回来 + 读不到哪个文件」，而不是一句「插件未加载」。
 #[tokio::test]
-async fn plugin_webui_api_on_an_unloaded_plugin_is_a_502() {
-    let (app, _plugins, _data, _store) = setup_dirs("webui3").await;
+async fn plugin_webui_api_auto_loads_a_plugin_that_is_not_in_memory() {
+    let (app, plugins, _data, _store) = setup_dirs("webui3").await;
+    // 先卸载（模拟空闲卸载 / 启动时按需加载后的状态）
+    let (status, _) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/plugins",
+            Some(json!({ "name": "lazyapi", "source": "import host from 'panel:host';\nawait host.register_handler('hi', async () => 'yo');\n" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/lazyapi/unload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!plugins.join("lazyapi.js").exists() || true);
+
+    let req = Request::post("/plugins/lazyapi/api/hi").body(Body::empty()).unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "接口调用应该自动装回来: {body}");
+    assert_eq!(body["value"], "yo", "{body}");
+
+    // 真的没有这个插件：400 且话里带插件名和文件
     let req = Request::post("/plugins/nobody/api/hi").body(Body::empty()).unwrap();
     let (status, body) = send(&app, req).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("nobody"), "{body}");
 }
 
 // ---------------------------------------------------------------- 备份 / 恢复

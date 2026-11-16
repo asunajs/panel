@@ -2275,12 +2275,51 @@ async fn plugin_stop(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 「要用这个插件了」——不在内存就装回来（第 188 轮）。
+///
+/// 停用的插件**不**自动装：停用是用户明确关掉的，静默装回来等于把停用变成了摆设。
+pub(crate) async fn sched_ready(st: &AppState, plugin: &str) -> Result<(), ApiError> {
+    if crate::db::plugin_disabled_names(&st.db)
+        .await
+        .iter()
+        .any(|d| d == plugin)
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "plugin_disabled",
+            format!("插件 {plugin} 已停用，不会自动加载（点「启用」恢复）"),
+        ));
+    }
+    match st.sched.ensure_loaded(plugin).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // 退一步：调度器可能还不知道插件目录（被单独构造出来的场景，比如测试）。
+            // 这一层自己读源码再装 —— 和 main 里 set_plugins_dir 之后走的是同一条加载路径。
+            let path = st.plugins_dir.join(format!("{plugin}.js"));
+            let src = std::fs::read_to_string(&path).map_err(|e2| {
+                bad(format!(
+                    "装不回插件 {plugin}：{e}；也读不到 {}（{e2}）",
+                    path.display()
+                ))
+            })?;
+            st.sched
+                .load(plugin, src)
+                .await
+                .map_err(|e2| bad(format!("装不回插件 {plugin}：{e2}")))
+        }
+    }
+}
+
 async fn task_run(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    // 按需加载（第 188 轮）：手动执行前先把插件装进内存。
+    // 以前这里直接报「插件还没加载，先点加载」—— 用户点「执行」就是想让事情发生，
+    // 让 manual 与 cron 走同一条「用到就装」的路才对。
+    sched_ready(&st, &plugin).await?;
     // 「插件还在跑」「JS 通道满了」是**冲突**（等会儿重试就行），不是请求写错了 —— 409。
     let run_id = st.sched.run_now(&plugin, &name).await.map_err(|e| {
         if crate::scheduler::is_busy_error(&e) {
@@ -4213,10 +4252,31 @@ async fn plugin_webui_any(
 ) -> Result<Response, ApiError> {
     crate::scripts::safe_name(&name).map_err(bad)?;
 
-    // 1) 静态文件（只有 GET/HEAD 才有意义）
+    // 1) 静态文件（只有 GET/HEAD 才有意义）。静态文件从磁盘发，不需要插件在内存里，
+    //    所以首屏不受按需加载影响。
     if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
         if let Ok(resp) = serve_webui_file(&st, &name, &rel).await {
             return Ok(resp);
+        }
+    }
+
+    // 1.5) 接口调用前把插件装回来（第 188 轮）。
+    //
+    // 以前这里直接进到下面的分支，插件不在内存里就回「插件未加载」，界面上表现为
+    // 点一下按钮弹一句「先点插件卡片上的加载」—— 用户不该为了用界面去插件页点按钮。
+    // 静态资源（带扩展名的 GET）不算接口，跳过，免得刷 favicon 就把插件装起来。
+    let looks_like_asset = rel
+        .rsplit('/')
+        .next()
+        .map(|f| f.contains('.'))
+        .unwrap_or(false);
+    // api/ 一律算接口调用（就算路径里带点，比如 api/list.json）
+    if !looks_like_asset || rel.starts_with("api/") {
+        if let Err(e) = sched_ready(&st, &name).await {
+            // api/ 是明确的接口调用：装不上要说清原因（409 之外的 400 语义由 helper 决定）
+            if rel.starts_with("api/") {
+                return Err(e);
+            }
         }
     }
 

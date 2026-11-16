@@ -923,11 +923,15 @@ function renderPlugins() {
       // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
       if (p.lazy) {
         const pl = pill('pill', '按需加载');
-        pl.title = '启动时没有加载它（没有界面、任务都还没到点）。到点前 2 分钟会自动装回来，也可以点「加载」。';
+        pl.title = '启动时没有装进内存（任务都还没到点）。到点前 2 分钟、手动执行、'
+          + '打开它的界面时会自动装回来 —— 不需要在这里点「加载」。';
         head.append(pl);
       } else if (p.unloaded) {
-        // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了，下一次运行/重载会自动装回来
-        head.append(pill('pill', '空闲已卸载'));
+        // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了。
+        // 第 188 轮起「用到就装」：执行任务 / 打开界面都会自动装回来。
+        const pl = pill('pill', '空闲已卸载');
+        pl.title = '闲着太久，JS 运行时被收掉了。下次执行任务或打开界面时会自动装回来。';
+        head.append(pl);
       }
     }
     cardEl.append(head);
@@ -1535,7 +1539,7 @@ function renderTasks() {
     st.append(taskPill(t));
     if (t.lazy && !t.deleted) {
       const lz = pill('pill', '待加载');
-      lz.title = '插件这次启动没加载（按需加载）。任务计划是真的，到点前 2 分钟会自动装回来。';
+      lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 2 分钟也会自动装。';
       st.append(lz);
     }
     if (t.deleted) {
@@ -1552,11 +1556,15 @@ function renderTasks() {
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
     if (t.lazy) {
-      // 按需加载的占位任务（第 179 轮）：计划、下次运行都真，只是插件还没装进内存，
-      // 现在点「执行」只会报错 —— 直接给一个「加载插件」更省事。
+      // 按需加载的占位任务（第 179 轮）：计划、下次运行都真，插件还没装进内存。
+      // 第 188 轮起「执行」会先 ensure_loaded 再跑，所以不再只给一个「加载插件」
+      // （那是在把自己的实现细节推给用户）。「加载插件」留在后面当预热用。
       const ops = t.deleted
         ? [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]]
-        : [['加载插件', () => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)]];
+        : [
+            ['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)],
+            ['加载插件', () => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)],
+          ];
       if (!t.deleted && !t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
       tr.append(actionsCell(ops));
       body.append(tr);
