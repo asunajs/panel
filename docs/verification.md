@@ -534,6 +534,12 @@ node scripts/ux-smoke.mjs --keep   # 保留临时目录，事后看现场
 | `v0.5.3` | `ffcd741` | 超时错误带线路探测（见下） |
 
 三个中间 release 已删除；需要旧产物时按上表提交重新 tag 即可重建。
+合并后：`gh release list` 只剩 `v0.5.1`（Latest）与更早的 0.4.x，四件产物齐；
+新实例 `/api/update/check?force=1` → `{current:0.5.1, latest:v0.5.1, has_update:false, show:false}`。
+
+一条顺序教训：**先删远端 release，再跑界面门禁**。版本从 0.5.3 回退到 0.5.1 时，
+GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不冒泡」当场红了一次
+（`hasPill:true`）——那是**对的**，不是断言写错；删掉三个中间 release 后重跑 171 条全过。
 
 ### 多计划下拉框「平铺箭头」（第 213 轮，用户截图）
 
