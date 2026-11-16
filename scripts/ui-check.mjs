@@ -530,6 +530,38 @@ async function main() {
   await sleep(1300);
   const routeRows = JSON.parse(await js("JSON.stringify([...document.querySelectorAll('#notify-rows .nrow')].map(r=>r.innerText.replace(/\\s+/g,' ')))"));
   check('推送行显示条件与渠道', routeRows.some((r) => r.includes('任务失败 → 手机') && r.includes('熔断')), JSON.stringify(routeRows.slice(0, 3)));
+  // 回归（用户反馈 #5，0.5.1 带进来的）：在「只收」里回车填前缀、在「不收」里勾一个插件，
+  // 点保存之后**必须真的存进配置**，重新打开还得在。
+  // 原来保存读的是 `inc.value`，而多选控件返回的是 {node, input} —— undefined 被 splitList
+  // 当成空数组，于是界面上填了、存盘变空、重新打开显示「全部插件（不限制）」。
+  // 上一版只断言了「勾选后隐藏 input 变了」，没有一条穿过 HTTP 再回来，所以没拦住。
+  await js("(()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "if(ms[0].querySelector('.ms-pop').classList.contains('hidden'))ms[0].querySelector('.ms-control').click();" +
+    "const i=ms[0].querySelector('.ms-custom-input');i.value='mcloud*';" +
+    "i.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));return 1;})()");
+  await sleep(250);
+  await js("(()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "if(ms[1].querySelector('.ms-pop').classList.contains('hidden'))ms[1].querySelector('.ms-control').click();" +
+    "const row=[...ms[1].querySelectorAll('.ms-opt')].find(r=>r.textContent.includes('seed'));" +
+    "if(!row)return 0;const cb=row.querySelector('input');cb.checked=true;" +
+    "cb.dispatchEvent(new Event('change',{bubbles:true}));return 1;})()");
+  await sleep(250);
+  await js("(()=>{[...document.querySelectorAll('#notify-main button')].find(b=>b.textContent==='保存').click();return 1;})()");
+  await sleep(1300);
+  const savedFilters = JSON.parse(await js(
+    "(async()=>{const d=await api('/api/notify');" +
+    "const r=d.routes.find(x=>x.name==='任务失败 → 手机')||{};" +
+    "return JSON.stringify({inc:r.include_plugins||[],exc:r.exclude_plugins||[]});})()"));
+  check('「只收/不收」保存后真的写进配置（不是存成空数组）',
+    JSON.stringify(savedFilters.inc) === '["mcloud*"]' && JSON.stringify(savedFilters.exc) === '["seed"]',
+    JSON.stringify(savedFilters));
+  const reopened = JSON.parse(await js(
+    "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
+    "const chips=(m)=>[...m.querySelectorAll('.ms-chip')].map(c=>c.textContent.replace('×','').trim());" +
+    "return {inc:chips(ms[0]),exc:chips(ms[1])};})())"));
+  check('重新打开这条推送时已选插件还在（不会退回「全部插件（不限制）」）',
+    JSON.stringify(reopened.inc) === '["mcloud*"]' && JSON.stringify(reopened.exc) === '["seed"]',
+    JSON.stringify(reopened));
 
   // 老配置物化出来的那条「<渠道>-default」收所有事件，也停掉：不然任何一条通知都会去发。
   await js(

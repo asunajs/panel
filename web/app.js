@@ -3910,8 +3910,11 @@ function renderRouteEditor(box, r) {
       enabled: en.input.checked,
       mode: seg.dataset.mode,
       events: Object.keys(evInputs).filter((k) => evInputs[k].checked),
-      include: inc.value,
-      exclude: exc.value,
+      // 值在**隐藏 input** 上：notifyMultiSelect 返回的是 {node, input, setOther}，没有 value。
+      // 写成 inc.value 会拿到 undefined → 存盘后「只收/不收」永远是空数组
+      // （用户反馈 #5：5.1 填完插件点保存就消失，重新打开变成「全部插件（不限制）」）。
+      include: inc.input.value,
+      exclude: exc.input.value,
       cron: cron.value.trim(),
       content: content.value,
       bodyTpl: bodyTpl.value,
