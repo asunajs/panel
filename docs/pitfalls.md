@@ -955,3 +955,12 @@
     而且暂停插件不会到点跑任务，next_due 算它还会白唤醒一次。
     守卫：`check-lazy-load.sh` 的「暂停的插件闲着也会被卸载」与「空闲卸载之后再点界面」
     两条：真起面板把插件暂停、等一拍空闲检查，断言它被卸掉、接口照常能把它装回来。
+
+114. **通知的日志级别不能写死**（第 222 轮，用户截图：「任务 日常 成功 — 用时 66.9 秒，正常结束」
+    在日志里顶着 WARN 黄标签）：`notify::record` 里那句 `log.emit(... Level::Warn, "通知: …")`
+    是写死的，于是**所有**通知（包括 info 级的「任务成功」）都记成 WARN。铃铛表里的 `level`
+    是对的，错的只有日志这一行 —— 看日志的人会以为出了事，真 WARN 反而被成功通知淹掉。
+    修法：级别跟着 `Notice.level` 走（error→Error / warn→Warn / 其余→Info）。
+    这类「展示层自己定级」的 bug 编译不报错、界面也不报错，只有人眼看日志能发现；
+    守卫是 `web_tests::info_notification_is_logged_as_info_not_warn`（反向例验过：写死 Warn 时
+    报 `left: "warn", right: "info"`，消息与用户截图一字不差）。

@@ -4191,3 +4191,39 @@ async fn dir_plugin_is_listed_read_and_deleted_as_a_whole() {
         "回收站里应当有一整个插件目录: {moved:?}"
     );
 }
+
+/// 通知落日志时的级别要跟着通知自己的级别走（第 222 轮，用户截图报的）：
+/// 一条「任务成功 — 正常结束」的 info 通知，不该在日志里顶着 WARN 黄标签。
+#[tokio::test]
+async fn info_notification_is_logged_as_info_not_warn() {
+    let (app, _plugins, _data, _store) = setup_dirs("ntflog").await;
+    load_plugin(
+        &app,
+        "n",
+        "import host from 'panel:host';\nawait host.register_handler('tell', async () => { await host.notify('任务 日常 成功', '任务 日常 用时 66.9 秒，正常结束'); return 1; });\n",
+    )
+    .await;
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/n/tell/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let _ = wait_notifications(&app, 1).await;
+    // 日志里那一行 `通知: …` 必须是 info
+    let mut found = None;
+    for _ in 0..40 {
+        let (_, v) = get(&app, "/api/logs?q=%E9%80%9A%E7%9F%A5%3A&limit=200").await;
+        if let Some(row) = v["logs"]
+            .as_array()
+            .and_then(|a| a.iter().find(|r| {
+                r["message"].as_str().unwrap_or("").contains("正常结束")
+            }))
+        {
+            found = Some(row.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let row = found.expect("应当有一条「通知: …」日志");
+    assert_eq!(
+        row["level"], "info",
+        "info 通知不该记成 warn：{row}"
+    );
+}

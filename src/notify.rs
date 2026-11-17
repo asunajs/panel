@@ -1041,10 +1041,17 @@ pub async fn record(
         log.emit(&n.plugin, n.run_id, Level::Warn, format!("通知没存下来: {e}"));
         return;
     }
+    // 日志级别跟着**通知自己的级别**走（第 222 轮，用户截图报的）。
+    // 以前这里写死 Warn，于是一条「任务 日常 成功 — 用时 66.9 秒，正常结束」在日志里
+    // 也顶着黄标签 —— 看日志的人会以为出了事，而真正的 WARN 被淹没在成功通知里。
     log.emit(
         &n.plugin,
         n.run_id,
-        Level::Warn,
+        match n.level {
+            "error" => Level::Error,
+            "warn" => Level::Warn,
+            _ => Level::Info,
+        },
         format!("通知: {title} — {body}"),
     );
 
