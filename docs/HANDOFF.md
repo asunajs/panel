@@ -147,7 +147,7 @@
 `vendor/llrt/bundle/js`（168K，生成物）**刻意 force-add 入库** —— 本机 github 不通，离线构建需要它。
 旧仓库 `rust-plugin-panel` 全程只读未碰。
 
-## 10. 复跑（十条命令）
+## 10. 复跑（十二条命令）
 
 ```bash
 cd /Users/catlair/mobile/workspace/panel-llrt
@@ -155,6 +155,8 @@ cargo build --offline && cargo test --offline   # 493 passed
 bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 1 处（期望 1，disk.rs 的 in-place allow）
 bash scripts/check-docs.sh                      # ok: 26 篇文档，内链全通、都在 1000 行内
 bash scripts/check-pitfalls.sh                  # 坑的守卫全过（静态检查，含 CSS token / 首帧主题）
+bash scripts/check-catchup.sh                   # 补跑：冻住面板跨过触发时刻，醒来必须补跑并落 runs（约 6 分钟）
+bash scripts/check-wake.sh                      # 唤醒链路 5 条（到点前 3 分钟装回来 + 那一拍真跑）
 node scripts/ui-check.mjs                       # 界面 175 条断言（自起面板 + 无头 Edge）
 node scripts/theme-flash-check.mjs              # 首帧主题：压慢链路量 first-paint 与 data-theme 的先后
 node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）

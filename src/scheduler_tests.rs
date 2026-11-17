@@ -425,7 +425,7 @@ fn a_busy_plugin_is_never_unloaded() {
 #[test]
 fn a_task_coming_soon_pins_the_plugin_in_memory() {
     let now = 1_000_000_000_000;
-    // 30 秒后要到点，唤醒窗口 2 分钟 → 不卸（留给它，别卸了又装）
+    // 30 秒后要到点，唤醒窗口 3 分钟 → 不卸（留给它，别卸了又装）
     assert!(!should_idle_unload(now, now - 10_000_000, 60, false, Some(now + 30_000), 120_000));
     // 3 分钟后才到点 → 可以卸
     assert!(should_idle_unload(now, now - 10_000_000, 60, false, Some(now + 180_000), 120_000));
@@ -549,7 +549,7 @@ fn lazy_placeholder_fallback_still_carries_suggestion() {
 
 // ── 补跑窗口（第 220 轮：用户报「8 点没跑」）────────────────────────────
 //
-// 唤醒是「到点前 2 分钟」。进程被冻结 / 机器休眠 / 唤醒卡住时，醒来那拍已经过期。
+// 唤醒是「到点前 3 分钟」。进程被冻结 / 机器休眠 / 唤醒卡住时，醒来那拍已经过期。
 // 以前注册只在「还没到」时才恢复库里的 next_at，过期那拍就被静默吃掉：
 // 不跑、不记、next 顺延 —— 用户只看到「昨天跑了、今天没跑」。
 

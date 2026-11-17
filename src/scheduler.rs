@@ -556,7 +556,7 @@ pub struct PluginView {
     pub nav: Option<NavEntry>,
     /// 因为空闲被卸载了（第 174 轮）：任务还在、界面还能开，但 JS 运行时不在内存里。
     pub unloaded: bool,
-    /// 启动时就没加载（第 179 轮「按需加载」）：下次到点前两分钟、或用户点「加载」时才装。
+    /// 启动时就没加载（第 179 轮「按需加载」）：下次到点前三分钟、或用户点「加载」时才装。
     pub lazy: bool,
 }
 
@@ -926,7 +926,7 @@ impl Scheduler {
 
     /// 启动时按需加载：把「这次没加载」的插件的任务行交给调度器（第 179 轮）。
     ///
-    /// 返回塞进去多少条。插件本体不加载，等下次到点前两分钟或用户点「加载」。
+    /// 返回塞进去多少条。插件本体不加载，等下次到点前三分钟或用户点「加载」。
     pub async fn seed_lazy(&self, tasks: Vec<LazyTask>, names: Vec<String>) -> usize {
         let (tx, rx) = oneshot::channel();
         if self
@@ -1033,7 +1033,7 @@ pub fn should_idle_unload(
 }
 
 /// 空闲卸载的唤醒窗口：任务在这个窗口内要到点就不卸。
-pub const IDLE_WAKE_WINDOW_MS: i64 = 120_000;
+pub const IDLE_WAKE_WINDOW_MS: i64 = 180_000;
 
 /// 空闲多久卸载 JS 运行时（默认 30 分钟；配置写 0 就是永不卸载）。
 pub const IDLE_UNLOAD_DEFAULT_SECS: i64 = 1800;
@@ -1041,7 +1041,7 @@ pub const IDLE_UNLOAD_DEFAULT_SECS: i64 = 1800;
 /// 按需加载的插件「补跑」窗口：库里记着的那一拍**已经过去**，但只要没过这么久，
 /// 装回来后照样补跑一次（而不是顺延到下一拍）。
 ///
-/// 为什么要有补跑（第 220 轮，用户 2026-11-17 报「8 点没跑」）：唤醒是「到点前 2 分钟」，
+/// 为什么要有补跑（第 220 轮，用户 2026-11-17 报「8 点没跑」）：唤醒是「到点前 3 分钟」，
 /// 进程被冻结、机器休眠、或者唤醒那一步卡住时，醒来时那一拍已经过期。
 ///
 /// 注意这**不是**「省内存 vs 跑任务」的取舍 —— 旧面板闲时 JS 内存也是 0（运行时照卸），
@@ -1558,7 +1558,7 @@ impl Inner {
                         names.push(row.plugin.clone());
                     }
                 }
-                // 这些插件也要进 unloaded：到点前两分钟由 wake_unloaded 装回来
+                // 这些插件也要进 unloaded：到点前三分钟由 wake_unloaded 装回来
                 let now = Local::now().timestamp_millis();
                 for name in names {
                     self.unloaded.insert(name.clone(), now);
@@ -2733,7 +2733,7 @@ impl Inner {
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {
-        // 先把快到点的、已卸载的插件装回来（第 174 轮）。提前 2 分钟，够它读文件 + 跑顶层代码。
+        // 先把快到点的、已卸载的插件装回来（第 174 轮）。提前 3 分钟，够它读文件 + 跑顶层代码。
         self.wake_unloaded(now);
         // 按需加载的任务：到点了插件还是没装回来 —— **必须说出来**（第 220 轮）。
         // 正常情况 wake_unloaded 已经在窗口里把它装回来了；走到这里说明装失败/卡住了。

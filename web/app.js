@@ -923,7 +923,7 @@ function renderPlugins() {
       // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
       if (p.lazy) {
         const pl = pill('pill', '按需加载');
-        pl.title = '启动时没有装进内存（任务都还没到点）。到点前 2 分钟、手动执行、'
+        pl.title = '启动时没有装进内存（任务都还没到点）。到点前 3 分钟、手动执行、'
           + '打开它的界面时会自动装回来 —— 不需要在这里点「加载」。';
         head.append(pl);
       } else if (p.unloaded) {
@@ -1539,7 +1539,7 @@ function renderTasks() {
     st.append(taskPill(t));
     if (t.lazy && !t.deleted) {
       const lz = pill('pill', '待加载');
-      lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 2 分钟也会自动装。';
+      lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 3 分钟也会自动装。';
       st.append(lz);
     }
     if (t.deleted) {

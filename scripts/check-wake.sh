@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 按需加载的**唤醒**链路（第 180 轮补）：
-#   ① 到点在窗口（2 分钟）外 → 这次启动省掉它
+#   ① 到点在窗口（3 分钟）外 → 这次启动省掉它
 #   ② 到窗口内 → 自动装回来
 #   ③ 到点那一拍真的跑
 #
 # 这条链路曾经整个是死的：actor 每圈都重建 sleep 定时器，30 秒一次的空闲卸载 ticker
 # 每次都把它重置，而「没有已加载任务」时 sleep_hint 恒为 60 秒 —— fire_due 永远等不到。
-# 实测 90 秒一次没跑。所以这里必须真起面板、真等两分钟。
+# 实测 90 秒一次没跑。所以这里必须真起面板、真等三分钟。
 #
 # 用法：bash scripts/check-wake.sh   （要 target/debug/panel）
 set -uo pipefail
@@ -49,7 +49,7 @@ stop
 sleep 1
 
 # 把到点时间挪到 2 分 10 秒后：在窗口（120s）外 → 这次启动应当省掉
-TARGET=$(( $(date +%s) * 1000 + 130000 ))
+TARGET=$(( $(date +%s) * 1000 + 200000 ))
 q "update tasks set next_at=$TARGET where plugin='wk'"
 start
 [ "$(q "select count(*) from tasks where plugin='wk'")" = "1" ] && ok "到点在窗口外：任务行照样列出" || bad "任务行不见了"
@@ -57,12 +57,12 @@ if q "select count(*) from logs where message like '%这次启动没有加载它
 
 # 等它自己醒：窗口一开就该装回来，然后到点就该跑
 WOKE=0; RAN=0
-for i in $(seq 1 45); do
+for i in $(seq 1 60); do
   sleep 4
   if [ "$WOKE" = "0" ] && q "select count(*) from logs where plugin='wk' and message like '%空转结束%'" | grep -q '^[1-9]'; then WOKE=1; echo "  （第 $((i*4)) 秒醒了）"; fi
   if q "select count(*) from runs where plugin='wk'" | grep -q '^[1-9]'; then RAN=1; break; fi
 done
-[ "$WOKE" = "1" ] && ok "到点前 2 分钟自动装回来了" || bad "没被唤醒（窗口外那 130 秒里没醒）"
+[ "$WOKE" = "1" ] && ok "到点前 3 分钟自动装回来了" || bad "没被唤醒（窗口外那 200 秒里没醒）"
 [ "$RAN" = "1" ] && ok "到点那一拍真的跑了" || bad "到点了没跑（最要命的那条）"
 stop
 
