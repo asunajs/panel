@@ -111,7 +111,7 @@ fn cold_connection_gets_a_floor_for_the_handshake() {
     assert_eq!(
         attempt_budget_ms(1500, true),
         COLD_MIN_BUDGET_MS,
-        "冷的连接至少要够一次握手（4.5~6 秒）"
+        "冷的连接至少够「正常握手 + 两次 RTO」（0.4 + 1 + 2 秒）"
     );
     // 本来就宽裕的预算不许被改小
     assert_eq!(attempt_budget_ms(12_000, true), 12_000);
