@@ -703,7 +703,10 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 | 项 | 读数 |
 |---|---|
 | 版本 | `0.6.1`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` → `panel 0.6.1（panel-llrt）`） |
-| 提交 / tag | 见 `git log v0.6.1` |
+| 提交 / tag | `9b4303e` / `v0.6.1` |
+| CI | `Release` 工作流 run 44015038530 → **success（8m48s）**；三档产物 + `SHA256SUMS` 齐全 |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.6.1>，说明用 `CHANGELOG.md` 的 0.6.1 段 |
+| 更新检查回归 | 临时 0.6.1 实例 `/api/update/check?force=1` → `{current:"0.6.1", latest:"v0.6.1", has_update:false, show:false}`，assets 4 件 |
 | 单测 | `cargo test --offline` → **500 passed** |
 | 界面 | `node scripts/ui-check.mjs` → **175 条全过** |
 | 唤醒 | `bash scripts/check-wake.sh` → **5/5**（窗口改 3 分钟后重跑：「第 56 秒醒了」） |
