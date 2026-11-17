@@ -1695,6 +1695,30 @@ async function main() {
   check('源码编辑器高度有界（不被全文行号撑成全文高）',
     edBox.h <= 900 && Math.abs(edBox.taH - edBox.gH) <= 2, JSON.stringify(edBox));
 
+
+  // 第 223 轮（用户反馈 #8「脚本定时页面疑似时间显示异常」）：脚本页的表头只有 7 个 <th>
+  // （名字/计划/预算/上次运行/下次运行/状态/操作），而 renderScripts 每行塞 9 个单元格
+  // （任务名/文件/运行时/计划/预算/…）—— 每个表头都右移两列，「预算 2 分 0 秒」正好落在
+  // 「上次运行」标题底下，读起来就是「上次运行 2 分 0 秒前」。报障的人和我都这么误读过一次。
+  // 这条断言按「表头列数 = 数据行单元格数」逐表核：任何一张表再漂列都当场红。
+  for (const view of ["dashboard", "scripts", "tasks", "runs"]) {
+    await js(
+      "(()=>{const a=[...document.querySelectorAll('.nav-item')].find((x)=>x.dataset.view==='" + view + "');if(a)a.click();return 'ok';})()",
+    );
+    await sleep(450);
+    const drift = JSON.parse(await js(
+      "JSON.stringify([...document.querySelectorAll('table.table')]" +
+        ".filter((t)=>t.offsetParent!==null&&t.tHead&&t.tHead.rows[0]&&t.tBodies[0]&&t.tBodies[0].rows.length)" +
+        ".map((t)=>({head:t.tHead.rows[0].cells.length,row:t.tBodies[0].rows[0].cells.length})))",
+    ));
+    const bad = drift.filter((d) => d.head !== d.row);
+    check(
+      `「${view}」页的表格：表头列数 = 数据行单元格数（不漂列）`,
+      bad.length === 0 && (view === "dashboard" || drift.length > 0),
+      JSON.stringify(drift),
+    );
+  }
+
   // 第 106 轮：大文件退成纯文本模式 —— 长行必须折行（否则右边永远看不全，用户两次截图
   // 都指着被切掉的行尾），行号层收起（折行后视觉行 ≠ 逻辑行，留着必然错位），
   // 并且能跳到指定行（一万多行的文件靠拖滚动条等于没有导航）。
