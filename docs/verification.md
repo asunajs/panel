@@ -721,3 +721,34 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 注册只在 `next_at > now` 时恢复那一拍 —— **过期的直接丢**：不跑、不记、next 顺延，
 日志里一个字都没有。现在：过期 7 天内照样补跑，唤醒装载失败会报错，唤醒卡住会重来，
 到点装不回来会每分钟吵一次。守卫 `check-catchup.sh` 把这个场景钉住了。
+
+## 0.6.2 发版（2026-11-17，第 221 轮）
+
+起因是用户点破了 0.6.1 的思路错误：「到点执行插件脚本，跟插件有没有被唤醒有什么关系？到点了
+运行插件就行；旧面板的提前唤醒是为了抢兑这种时间敏感的活准备的。」
+0.6.1 用「唤醒窗口 + 补跑 + 告警」绕开丢拍，这一版把前提拆了：到点的是任务，不是插件。
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.6.2`（`~/panel-3030/panel version` → `panel 0.6.2（panel-llrt）`） |
+| 提交 / tag | `bc90a52` / `v0.6.2` |
+| 单测 | `cargo test --offline` → **500 passed** |
+| 界面 | `node scripts/ui-check.mjs` → **175 条全过** |
+| 补跑 | `bash scripts/check-catchup.sh` → **5/5**（冻住跨过触发时刻 45 秒 → 装回来即跑并落 runs） |
+| 静态 | `check-docs`（26 篇）/ `check-pitfalls` / `check-unsafe-budget` 全过 |
+| CI | `Release` run 44027128802 → **success（6m42s）**，四件资产齐全 |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.6.2>，说明用 `CHANGELOG.md` 的 0.6.2 段 |
+| 更新检查 | 临时实例 `/api/update/check?force=1` → `{current:"0.6.2", latest:"v0.6.2", has_update:false}`，assets 4 |
+| 部署 | 13:54:38 起新进程；`readyz` `plugins:6 tasks:4 failed 0`；重启后 10 分钟内 runs=0（没有误补跑） |
+
+### 语义（这段是给以后改这块的人看的）
+
+```
+到点（trigger_at <= now）
+   ├─ 插件在内存里   → 直接 dispatch
+   └─ 插件不在内存里 → request_load() 当场装回来
+                        → Cmd::Loaded 成功后 run_overdue_of(plugin) 立刻派发这一拍
+```
+
+唤醒窗口（`IDLE_WAKE_WINDOW_MS` = 3 分钟）与任务的 `lead_ms` 都只是**提前量**：
+装回来要读文件 + 跑顶层代码，卡秒的任务（抢兑）需要提前量；错过窗口不影响跑。
