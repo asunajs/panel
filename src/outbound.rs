@@ -21,6 +21,73 @@ pub fn clamp_timeout(v: Option<i64>) -> u64 {
     v.unwrap_or(10_000).clamp(100, 60_000) as u64
 }
 
+/// 冷连接上额外给多少预算。
+///
+/// `timeout_ms` 的语义是「请求发出去了、等响应」，但 hyper 的 `client.request()`
+/// 把**建连**（DNS + TCP + TLS）也算在同一个 future 里。2026-11-17 现场：链路抖到
+/// RTT 1.3 秒时，光握手就要 4.5~6 秒，插件给的 1500ms 连握手都跑不完 ⇒ **冷连接必死**；
+/// 更糟的是超时会把池里那条连接丢掉，下一发又是冷的 —— 超时会自己续自己
+/// （实测连打 4 次全超时、领奖页读到 0 件）。
+///
+/// 所以「冷」的时候把建连预算单独加上去：请求本身仍然只有它要的那点时间。
+const COLD_MIN_BUDGET_MS: u64 = 10_000;
+
+/// 这个 host 多久没成功过就算「冷」。与 hyper 连接池的闲置时长（LLRT 默认 15 秒）对齐：
+/// 池里那条连接活不过这个窗口，再快也只是一次新的握手。
+const WARM_TTL: Duration = Duration::from_secs(15);
+
+type WarmTable = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
+
+fn warm_table() -> &'static WarmTable {
+    static T: std::sync::OnceLock<WarmTable> = std::sync::OnceLock::new();
+    T.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 这个 host 上一发**成功**过去多久了？超过 `WARM_TTL` 就当冷。
+fn host_is_warm(host: &str) -> bool {
+    match warm_table().lock() {
+        Ok(m) => m.get(host).map(|t| t.elapsed() < WARM_TTL).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+fn mark_host_warm(host: &str) {
+    if let Ok(mut m) = warm_table().lock() {
+        m.insert(host.to_string(), std::time::Instant::now());
+    }
+}
+
+/// 失败了就当冷：下一发多给建连预算（超时已经把连接踢了，池里那条不再可信）。
+fn mark_host_cold(host: &str) {
+    if let Ok(mut m) = warm_table().lock() {
+        m.remove(host);
+    }
+}
+
+/// 单次尝试给多少毫秒：冷连接抬到至少 `COLD_MIN_BUDGET_MS`（10 秒已经比 6 秒的建连宽），
+/// 热的连接就用插件要的那点时间。
+fn attempt_budget_ms(timeout: u64, cold: bool) -> u64 {
+    if cold {
+        timeout.max(COLD_MIN_BUDGET_MS)
+    } else {
+        timeout
+    }
+}
+
+/// 整发（含一次重试）的总上限。
+///
+/// 为什么要有上限：插件页的一次 web 调用只有 30 秒（`web.rs::WEBUI_BUDGET_MS`），
+/// 重试若各按单次预算算，慢链路上一次读就能把路由预算吃穿 —— 那时用户看到的是
+/// 「超预算」，比「超时」更难懂。
+fn total_cap_ms(timeout: u64) -> u64 {
+    timeout + COLD_MIN_BUDGET_MS
+}
+
+/// 幂等方法：超时后重试是安全的（同一发读两次，结果一样）。
+fn is_idempotent(method: &str) -> bool {
+    matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS")
+}
+
 fn headers_to_json(h: &http::HeaderMap) -> Json {
     let mut m = Map::new();
     for (k, v) in h {
@@ -117,34 +184,82 @@ pub async fn fetch_json_with(
         }
         ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
 
-        let mut builder = http::Request::builder()
-            .method(method.as_str())
-            .uri(&current);
-        for (k, v) in &extra_headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let req = builder
-            .body(Full::new(body_bytes.clone()).boxed())
-            .map_err(|e| format!("请求构造失败: {e}"))?;
+        let host = current.parse::<http::Uri>().ok().and_then(|u| u.host().map(str::to_string));
+        // 幂等方法超时后重试一次（链路抖一下不该等于一次失败）；写操作不重试 ——
+        // 「上游动作已经发生、任务却报失败」比多等一会儿糟得多。
+        let mut retries = if is_idempotent(&method) { 1u32 } else { 0u32 };
+        // 建连失败（一个字节都没发出去）对**任何**方法重试都是安全的。
+        let mut connect_retry = true;
 
-        let resp = match &inv {
-            Some(i) => {
-                tokio::select! {
-                    r = tokio::time::timeout(Duration::from_millis(timeout), client.request(req)) => {
-                        match r {
-                            Ok(Ok(resp)) => resp,
-                            Ok(Err(e)) => return Err(format!("请求失败: {e}")),
-                            Err(_) => return Err(format!("请求超时（{timeout}ms）：{}", timeout_note(&current).await)),
-                        }
+        let cold = host.as_deref().map(|h| !host_is_warm(h)).unwrap_or(false);
+        let attempt_budget = attempt_budget_ms(timeout, cold);
+        let deadline = std::time::Instant::now() + Duration::from_millis(total_cap_ms(timeout));
+        let mut first = true;
+        let resp = loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let cold_note = if cold { "，含冷建连预算" } else { "" };
+                return Err(format!(
+                    "请求超时（{attempt_budget}ms{cold_note}）：{}",
+                    timeout_note(&current).await
+                ));
+            }
+            // 第一发按「单次预算」；重试把剩下的上限用掉 —— 建连那一份就是给它留的。
+            let left_ms = left.as_millis().max(1) as u64;
+            let budget = if first { attempt_budget.min(left_ms) } else { left_ms };
+            first = false;
+            let mut builder = http::Request::builder()
+                .method(method.as_str())
+                .uri(&current);
+            for (k, v) in &extra_headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let req = builder
+                .body(Full::new(body_bytes.clone()).boxed())
+                .map_err(|e| format!("请求构造失败: {e}"))?;
+
+            let outcome = match &inv {
+                Some(i) => {
+                    tokio::select! {
+                        r = tokio::time::timeout(Duration::from_millis(budget), client.request(req)) => r,
+                        _ = i.cancelled() => return Err("AbortError: invocation 已停止".into()),
                     }
-                    _ = i.cancelled() => return Err("AbortError: invocation 已停止".into()),
+                }
+                None => tokio::time::timeout(Duration::from_millis(budget), client.request(req)).await,
+            };
+
+            match outcome {
+                Ok(Ok(r)) => {
+                    if let Some(h) = host.as_deref() {
+                        mark_host_warm(h);
+                    }
+                    break r;
+                }
+                Ok(Err(e)) => {
+                    if let Some(h) = host.as_deref() {
+                        mark_host_cold(h);
+                    }
+                    if connect_retry && e.is_connect() {
+                        connect_retry = false;
+                        continue;
+                    }
+                    return Err(format!("请求失败: {e}"));
+                }
+                Err(_) => {
+                    if let Some(h) = host.as_deref() {
+                        mark_host_cold(h);
+                    }
+                    if retries > 0 {
+                        retries -= 1;
+                        continue;
+                    }
+                    let cold_note = if cold { "，含冷建连预算" } else { "" };
+                    return Err(format!(
+                        "请求超时（{budget}ms{cold_note}）：{}",
+                        timeout_note(&current).await
+                    ));
                 }
             }
-            None => match tokio::time::timeout(Duration::from_millis(timeout), client.request(req)).await {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => return Err(format!("请求失败: {e}")),
-                Err(_) => return Err(format!("请求超时（{timeout}ms）：{}", timeout_note(&current).await)),
-            },
         };
 
         let status = resp.status().as_u16();
