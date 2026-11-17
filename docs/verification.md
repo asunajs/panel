@@ -695,3 +695,26 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 3. 修完后才真正验证 `readyz` 6/6、部署 exit 0。
 
 三次都靠 `bash -x` 才定位到 —— **门禁脚本自己的 shell 语义也要当代码 review**。
+
+## 0.6.1 发版（2026-11-17，第 220 轮）
+
+用户报「8 点没跑」之后的修复版。**不是**功能版：只修「任务该跑没跑」和一条通知日志级别。
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.6.1`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` → `panel 0.6.1（panel-llrt）`） |
+| 提交 / tag | 见 `git log v0.6.1` |
+| 单测 | `cargo test --offline` → **500 passed** |
+| 界面 | `node scripts/ui-check.mjs` → **175 条全过** |
+| 唤醒 | `bash scripts/check-wake.sh` → **5/5**（窗口改 3 分钟后重跑：「第 56 秒醒了」） |
+| 补跑 | `bash scripts/check-catchup.sh` → **5/5**（冻住跨过触发时刻 → 醒 45 秒仍补跑并落 runs） |
+| 静态 | `check-docs`（26 篇）/ `check-pitfalls`（23 条）/ `check-unsafe-budget` 全过 |
+| 部署 | `scripts/deploy-daily.sh`：`readyz` → `plugins:6 tasks:4 failed_plugins:0`，插件目录指纹未变 |
+| 线上启动日志 | 「按需加载：2 个插件这次启动没有加载（2 条任务照常列出）；**到点前 3 分钟**…」 |
+
+### 这一版修的是什么（一句话版）
+
+按需加载的插件靠「到点前 N 分钟」唤醒。醒来晚了（冻结/休眠/装载卡住）时，
+注册只在 `next_at > now` 时恢复那一拍 —— **过期的直接丢**：不跑、不记、next 顺延，
+日志里一个字都没有。现在：过期 7 天内照样补跑，唤醒装载失败会报错，唤醒卡住会重来，
+到点装不回来会每分钟吵一次。守卫 `check-catchup.sh` 把这个场景钉住了。
