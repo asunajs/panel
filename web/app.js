@@ -2247,7 +2247,8 @@ async function showPlugin(name) {
             if (!(await askConfirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）', '停用'))) return;
             act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
           })]),
-      // 暂停（第 167 轮）：不卸载，只是不再触发它的定时任务 —— 和上面的「停用」不是一回事。
+      // 暂停（第 167 轮）：只停定时，不保证驻留内存（闲着会被空闲卸载收走，用到时自动装回）——
+      // 和上面的「停用」不是一回事。
       ...((state.suspended || []).includes(name)
         ? [mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))]
         : [mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name))]),
@@ -5435,6 +5436,10 @@ function setView(name) {
 // ---------------------------------------------------------------- 数据
 
 async function refresh() {
+  // 重入保护（第 190 轮性能 review）：慢网下一次没回来，5 秒后的定时器又发一轮 ——
+  // 四个请求叠两层，而且**回来的顺序**不保证，旧的一轮可能把新的覆盖掉。
+  if (state.refreshing) return;
+  state.refreshing = true;
   try {
     const data = await api('/api/state');
     state.plugins = data.plugins || [];
@@ -5473,6 +5478,8 @@ async function refresh() {
     if (e instanceof Unauthorized) { showGate(true, state.token ? '令牌无效' : '需要令牌'); return; }
     banner('读取面板状态失败：' + (e.message || e) + '（自动重试中）');
     setConn(false);
+  } finally {
+    state.refreshing = false;
   }
 }
 

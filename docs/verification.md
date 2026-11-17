@@ -752,3 +752,68 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 唤醒窗口（`IDLE_WAKE_WINDOW_MS` = 3 分钟）与任务的 `lead_ms` 都只是**提前量**：
 装回来要读文件 + 跑顶层代码，卡秒的任务（抢兑）需要提前量；错过窗口不影响跑。
+
+
+## 0.6.3 发版（2026-11-18，第 190 轮：全仓 review）
+
+用户口径：「对项目整体做个 review，包括过时注释，没必要留存的注释和文档。并检可能出现的
+性能问题，安全问题。最后发布 0.6.3」。
+
+做法：三路只读审阅（注释/文档、性能、安全）各自给「文件:行号 + 证据」，我再逐条核实、
+能修的就地修，不能立刻修的写成已知边界（见 windows.md、ratelimit.rs 的注释）。
+
+### 读数
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.6.3`（`Cargo.toml`；`panel version` 同） |
+| 单测 | `cargo test --offline` → **511 passed** |
+| 界面 | `node scripts/ui-check.mjs` → **183 条全过** |
+| 控件 | `node scripts/ui-kit-check.mjs` → **42 条** |
+| 文档 | `bash scripts/check-docs.sh` → **27 篇**，内链全通 |
+| 坑守卫 | `bash scripts/check-pitfalls.sh` → 23 条 |
+| 端到端 | `check-lazy-load` 20/20 · `check-wake` 5/5 · `check-catchup` 5/5 · `check-cron-owner` 7/7 · `check-task-delete` 7/7 · `check-token-change` 14/14 · `check-plugin-boundary` 10/10 |
+| clippy | 除 vendor 的 doc lint 外**零 warning**（两条 `await_holding_lock` 是测试里的串行化锁，就地 allow 并写了理由） |
+| 一键门禁 | `bash scripts/gate.sh`（本轮新增，15 道门禁串行跑完并汇总） |
+
+### 安全（三处高危，都是「有令牌也挡不住」的形态）
+
+| 面 | 修之前 | 现在 |
+|---|---|---|
+| `POST /api/test/js` | 挂在外层 Router，**没过 require_token** → 未认证可执行任意 JS（fs 在，能读渠道密钥、能写 `plugins/*.js`） | 挪进 api 路由，和别的接口同一道鉴权 |
+| `POST /api/setup` | 在 require_token 之外（它要建令牌），于是**Host 闸也到不了它** → rebinding 能抢先写 auth.json 锁死正主 | handler 里自己判 `host_allowed` |
+| 插件 handler 的请求头 | 带着 `cookie` / `x-panel-token` 递给插件 → 30 天会话票可外借重放 | 三个凭据头一律剥掉（`proxy-authorization` 一起） |
+
+另有三处收口：`safe_name` 不再放行 `"".`（备份恢复的 `remove_dir_all` 会拿它清空 plugins）；
+上传/保存的临时文件改 `create_new` + 0600（不跟随软链）；`http://` 装插件必须带 sha256。
+
+守卫 `every_api_route_requires_a_token`：从 `web.rs` 源码里扫出全部 `/api/*`，配了令牌时
+无凭据必须 401。`/api/test/js` 就是靠这套扫描才不会再漏（漏的十轮里没人发现）。
+
+### 性能
+
+| 热点 | 修之前 | 现在 |
+|---|---|---|
+| actor 里读插件源码（按需装回 / 到点装回 / 唤醒三条路） | 调度循环同步 `read_to_string`：1 MB 插件或 NAS 上几十毫秒，全局停摆 | 读盘与 `is_dir_plugin` 都进加载任务的 `spawn_blocking` |
+| `/api/plugins/files`（界面每 5 秒拉） | 每插件 4 次阻塞 IO 摊在 async worker | 一次 `spawn_blocking` 算完，`is_dir_plugin` 不再问两遍 |
+| `panel.json` | `/api/state` 每插件每轮读盘 + 解析 | 按 mtime+size 缓存 |
+| 磁盘快照 | 30 秒过期那次在 worker 上遍历 20 万条目 | `spawn_blocking` |
+| 插件接口请求 | 停用名单查库 + ensure_loaded + `plugin_has_web` ×2 | 停用名单 1 秒缓存（写入即作废）+ `has_web` 查一次 |
+| 「上次运行」子查询 | 1.5 万行同插件 9 ms/行，带 TEMP B-TREE | `runs(plugin, task, id DESC)` 索引 |
+| 前端 `refresh()` | 慢网时两轮轮询叠加、乱序覆盖 | 重入保护 |
+
+### 文档与注释
+
+- **55 处闭合反引号被吞成 `»`**（plugins.md 19、ui.md 15…）→ 全部还原。
+- `pitfalls.md` 1022 行超上限 → 第 1–60 条搬到 [handoff/pitfalls-0.4.md](handoff/pitfalls-0.4.md)。
+- `HANDOFF.md` 重写（旧版「任务软删不做 / 在线更新不做 / src 33 文件 15309 行 / web.rs 2124 行」全过期）。
+- 一批「告诉你某功能不存在」的说法修正（任务软删已做、`--with-tasks`、更新检查+下载已做、
+  插件界面是 iframe 嵌的、脚本是子进程不是 JS 引擎、渠道 13 种、暂停≠驻留内存、空闲卸载默认 30 分钟）。
+- `notify.rs` 的 kind 报错改成列全 13 种；删掉没人用的 `Kind::is_http()`。
+
+### 已知边界（这轮没改，写进文档而不是假装没有）
+
+- 限流按对端地址分桶，IPv6 在 /64 内换地址即可换桶（登录侧还有 Auth 全局节流顶着）。
+- Windows 上 `auth.json` 没有 0600，只有父目录 ACL（见 [windows.md](windows.md)）。
+- 通知发件箱仍是**逐条串行**投递：一个渠道不响应（webhook 5s / SMTP 15s）会拖住同批其它渠道。
+

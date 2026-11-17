@@ -12,8 +12,8 @@
 //!
 //! CPU 预算能保证死循环不拖垮引擎，但保不住 CPU —— 它每轮都会烧满整个预算。
 //! 所以还要熔断：连续失败 N 次 → 冷却 base；冷却结束半开放行一次；
-//! 成功则完全恢复，失败则再熔断且冷却 ×2（封顶 max）。语义移植基线
-//! `src/scheduler.rs:973-1050`，去掉 lead / blockers / 脚本任务那些子系统。
+//! 成功则完全恢复，失败则再熔断且冷却 ×2（封顶 max）。语义移植自旧面板的
+//! 调度器（QuickJS 那一版）；lead / blockers / 脚本任务现在都在（见 `docs/scheduler.md`）。
 //!
 //! ## 派发一律 spawn
 //!
@@ -1234,7 +1234,7 @@ pub fn start(
         persist: persist_tx,
     };
     // 空闲卸载的一拍（第 174 轮）：每 30 秒看一圈谁闲着。
-    // 配置关着（idle_unload_secs = 0，默认）时这一拍什么都不做，对现有部署零影响。
+    // 默认 30 分钟（`IDLE_UNLOAD_DEFAULT_SECS`）；配置里写 0 才是关。
     {
         let itx = tx.clone();
         tokio::spawn(async move {
@@ -1495,7 +1495,7 @@ impl Inner {
                 if !self.plugins.contains_key(&name) {
                     self.waking.insert(name.clone());
                 }
-                self.spawn_load(name, source, adopt, reply);
+                self.spawn_load(name, Some(source), adopt, reply);
             }
             Cmd::EnsureLoaded { name, reply } => {
                 if let Some(l) = self.plugins.get_mut(&name) {
@@ -1503,34 +1503,24 @@ impl Inner {
                     // 被 idle_tick 当成"闲着"卸掉。
                     l.last_active = Local::now().timestamp_millis();
                     let _ = reply.send(Ok(()));
-                } else if let Some(dir) = self.plugins_dir.clone() {
-                    // 已经在装的（wake_unloaded 先动手了）：直接排进队列等它
-                    let mut pending: Option<oneshot::Sender<Result<(), String>>> = None;
+                } else if self.plugins_dir.is_some() {
+                    // 已经开始装的（wake_unloaded 先动手了）就**只排队**等它：
+                    // 再发一次会 spawn 第二份，两个 Loaded 互相覆盖。
                     if !self.waking.contains(&name) {
-                        match crate::pluginfs::read_source(&dir, &name).map(|(src, _)| src) {
-                            Ok(src) => {
+                        // 读盘交给加载任务（见 spawn_load 的注释），这里只发命令。
+                        // 读不到 / 装失败都会走 Loaded 的 Err 分支：清 waking、放行 waiters。
                                 self.waking.insert(name.clone());
                                 let (tx, _rx) = oneshot::channel();
-                                self.spawn_load(name.clone(), src, false, tx);
+                        self.spawn_load(name.clone(), None, false, tx);
                                 self.log.emit(
                                     &name,
                                     None,
                                     Level::Info,
                                     format!("插件 {name} 不在内存里，按需装回来"),
                                 );
-                                pending = Some(reply);
-                            }
-                            Err(e) => {
-                                let _ = reply.send(Err(format!("插件 {name} 装不回来：{e}")));
-                            }
-                        }
-                    } else {
-                        pending = Some(reply);
                     }
                     // 装好之后放行（Loaded 成功或失败都会放）
-                    if let Some(r) = pending {
-                        self.waiters.entry(name).or_default().push(r);
-                    }
+                    self.waiters.entry(name).or_default().push(reply);
                 } else {
                     let _ = reply.send(Err(format!("插件目录未知，装不回 {name}")));
                 }
@@ -2125,10 +2115,16 @@ impl Inner {
             .position(|t| t.plugin == plugin && t.name == name)
     }
 
+    /// 装载。`source` 给了就直接用（安装 / 保存那条路，源码在手）；没给就从磁盘读。
+    ///
+    /// **读盘不在 actor 里**（第 190 轮性能 review）：1MB 的插件、或者数据目录挂在
+    /// NAS / 移动盘上，一次 read 就是几毫秒到几十毫秒 —— 这段时间整个调度循环停摆，
+    /// 所有 /api/state、到点派发、界面接口全排队。所以「读源码」和「是不是目录式插件」
+    /// 那两个 stat 都挪进下面已经 spawn 出去的加载任务（spawn_blocking）。
     fn spawn_load(
         &mut self,
         name: String,
-        source: String,
+        source: Option<String>,
         adopt: bool,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
@@ -2144,30 +2140,103 @@ impl Inner {
             return;
         }
         let inv = Arc::new(crate::engine::Invocation::default());
-        // 目录式插件（`plugins/<name>/index.js`）要把自己的目录同时告诉引擎（相对 import 的根）
-        // 和 host（`host.plugin_dir()`）；单文件插件这里是 None，行为与以前完全一样。
-        let root = self
-            .plugins_dir
-            .as_ref()
-            .filter(|d| crate::pluginfs::is_dir_plugin(d, &name))
-            .map(|d| d.join(&name));
+        let reg = self.reg_sender();
+        let (log, db, config, data_dir, sched) = (
+            self.log.clone(),
+            self.db.clone(),
+            self.config.clone(),
+            self.data_dir.clone(),
+            Some(Scheduler {
+                tx: self.tx.clone(),
+            }),
+        );
+        let dir = self.plugins_dir.clone();
+        let tx = self.tx.clone();
+        // 加载期可能有很长的顶层 await，不能占着调度循环；读盘也一起挪进去。
+        tokio::spawn(async move {
+            // 目录式插件（plugins/<name>/index.js）要把自己的目录同时告诉引擎
+            // （相对 import 的根）和 host（host.plugin_dir()）；单文件插件是 None。
+            let (source, root) = match (source, dir) {
+                (Some(src), dir) => {
+                    let is_dir = match dir.clone() {
+                        Some(d) => {
+                            let n = name.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::pluginfs::is_dir_plugin(&d, &n)
+                            })
+                            .await
+                            .unwrap_or(false)
+                        }
+                        None => false,
+                    };
+                    (
+                        src,
+                        if is_dir {
+                            dir.map(|d| d.join(&name))
+                        } else {
+                            None
+                        },
+                    )
+                }
+                (None, Some(d)) => {
+                    let n = name.clone();
+                    let d2 = d.clone();
+                    let got = tokio::task::spawn_blocking(move || {
+                        let is_dir = crate::pluginfs::is_dir_plugin(&d2, &n);
+                        crate::pluginfs::read_source(&d2, &n)
+                            .map(|(src, _)| (src, is_dir))
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+                    match got {
+                        Ok(Ok((src, is_dir))) => {
+                            let root = if is_dir { Some(d.join(&name)) } else { None };
+                            (src, root)
+                        }
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Cmd::Loaded {
+                                name,
+                                result: Err(e),
+                                source: String::new(),
+                                reply,
+                            });
+                            return;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Cmd::Loaded {
+                                name,
+                                result: Err(format!("读插件源码的线程挂了: {e}")),
+                                source: String::new(),
+                                reply,
+                            });
+                            return;
+                        }
+                    }
+                }
+                (None, None) => {
+                    let _ = tx.send(Cmd::Loaded {
+                        name,
+                        result: Err("插件目录未知".to_string()),
+                        source: String::new(),
+                        reply,
+                    });
+                    return;
+                }
+            };
         let handle = HostHandle {
             plugin: name.clone(),
             inv,
-            log: self.log.clone(),
-            db: self.db.clone(),
-            reg: self.reg_sender(),
-            config: self.config.clone(),
-            sched: Some(Scheduler {
-                tx: self.tx.clone(),
-            }),
-            data_dir: self.data_dir.clone(),
+                log,
+                db,
+                reg,
+                config,
+                sched,
+                data_dir,
             plugin_root: root.clone(),
         };
-        let tx = self.tx.clone();
-        // 加载期可能有很长的顶层 await，不能占着调度循环
-        tokio::spawn(async move {
-            let result = Plugin::load_in_dir(&source, root, handle).await.map(Arc::new);
+            let result = Plugin::load_in_dir(&source, root, handle)
+                .await
+                .map(Arc::new);
             let _ = tx.send(Cmd::Loaded {
                 name,
                 result,
@@ -2293,7 +2362,9 @@ impl Inner {
     /// 实测同一场景一次补跑成功、一次被吃掉。改成「谁该跑没跑」这件事自己记账，就不看顺序了。
     fn apply_missed(&mut self, i: usize) {
         let key = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
-        let Some(beat) = self.missed.remove(&key) else { return };
+        let Some(beat) = self.missed.remove(&key) else {
+            return;
+        };
         if self.tasks[i].schedule.is_none()
             || !self.tasks[i].enabled
             || self.tasks[i].deleted_at.is_some()
@@ -2371,14 +2442,14 @@ impl Inner {
         if self.plugins.contains_key(name) || self.waking.contains(name) {
             return;
         }
-        let Some(dir) = self.plugins_dir.clone() else {
+        if self.plugins_dir.is_none() {
             return;
-        };
-        match crate::pluginfs::read_source(&dir, name) {
-            Ok((src, _)) => {
+        }
+        // 读盘交给加载任务（读不到会走 Loaded 的 Err 分支）——actor 只发命令，
+        // 别为了一个文件的 read 让整个调度循环停摆（第 190 轮性能 review）。
                 self.waking.insert(name.to_string());
                 let (tx, rx) = oneshot::channel();
-                self.spawn_load(name.to_string(), src, false, tx);
+        self.spawn_load(name.to_string(), None, false, tx);
                 let log = self.log.clone();
                 let n = name.to_string();
                 tokio::spawn(async move {
@@ -2392,14 +2463,6 @@ impl Inner {
                     }
                 });
             }
-            Err(e) => self.log.emit(
-                name,
-                None,
-                Level::Error,
-                format!("任务到点了，但插件 {name} 读不到源码（{e}），这一拍跑不了"),
-            ),
-        }
-    }
 
     fn register(&mut self, r: Registration) {
         match r {
@@ -2733,9 +2796,9 @@ impl Inner {
         if self.unloaded.is_empty() {
             return;
         }
-        let Some(dir) = self.plugins_dir.clone() else {
+        if self.plugins_dir.is_none() {
             return;
-        };
+        }
         let now_ms = now.timestamp_millis();
         let names: Vec<String> = self.unloaded.keys().cloned().collect();
         for name in names {
@@ -2779,14 +2842,14 @@ impl Inner {
             if next > now_ms + IDLE_WAKE_WINDOW_MS {
                 continue;
             }
-            match crate::pluginfs::read_source(&dir, &name).map(|(src, _)| src) {
-                Ok(src) => {
+            // 读盘在加载任务里做（第 190 轮：actor 不碰文件 IO）。失败会走
+            // Loaded 的 Err 分支，那里的错误日志和下面这个接收端都会喊。
                     self.waking.insert(name.clone());
-                    // 唤醒装载用的 reply 以前是**没人收**的（`let (tx, _rx)`）：装失败时
+            // 唤醒装载用的 reply 以前是**没人收**的（let (tx, _rx)）：装失败时
                     // 错误连日志都不会留 —— 线上表现为「这一拍没跑，而日志里一个字都没有」
                     // （2026-11-17 早上 mcloud-daily 就是这样）。这里挂个接收端，失败要喊。
                     let (tx, rx) = oneshot::channel();
-                    self.spawn_load(name.clone(), src, false, tx);
+            self.spawn_load(name.clone(), None, false, tx);
                     let log = self.log.clone();
                     let n = name.clone();
                     tokio::spawn(async move {
@@ -2806,19 +2869,6 @@ impl Inner {
                         format!("插件 {name} 空转结束：下次到点前提前唤醒"),
                     );
                 }
-                Err(e) => {
-                    // 源码没了（用户删了？）：别一直挂在「唤醒中」，说清楚
-                    self.unloaded.remove(&name);
-                    self.waking.remove(&name);
-                    self.log.emit(
-                        &name,
-                        None,
-                        Level::Warn,
-                        format!("插件 {name} 想唤醒但读不到源码（{e}），已移出空闲卸载名单"),
-                    );
-                }
-            }
-        }
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {

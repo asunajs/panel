@@ -233,15 +233,17 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     // 把外层目录剥掉会把 index.js 摊到 plugins/ 根上 —— 面板按 `<name>/index.js`
     // 找入口，摊平的结果是「装好了但看不见」。所以这种包**保留外层目录**。
     if let Some(prefix) = strip.clone() {
-        let entry_after_strip = names
-            .iter()
-            .any(|n| n.strip_prefix(&prefix).map(|r| r == Path::new("index.js")).unwrap_or(false));
+        let entry_after_strip = names.iter().any(|n| {
+            n.strip_prefix(&prefix)
+                .map(|r| r == Path::new("index.js"))
+                .unwrap_or(false)
+        });
         if entry_after_strip {
             let dirname = prefix.to_string_lossy().to_string();
             let ok = !dirname.is_empty()
-                && dirname
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+                && dirname.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_')
+                })
                 && !dirname.starts_with('-')
                 && !dirname.starts_with('_');
             if !ok {
@@ -465,7 +467,20 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<b
     // rename 在同盘是原子的：要么旧内容、要么新内容，没有中间态。
     let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("");
     let tmp = dest.with_extension(format!("{ext}.tmp"));
-    if let Err(e) = std::fs::write(&tmp, data) {
+    // create_new（第 190 轮安全 review）：fs::write 会跟随符号链接 —— 别人在
+    // plugins/ 里预置一个 x.js.tmp -> ~/.ssh/authorized_keys，面板就以自己的身份写过去了。
+    // 用 create_new 只认「这个文件刚被我创建」，链接/已存在的文件一律失败。
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let wrote = opts
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, data));
+    if let Err(e) = wrote {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("写入 {shown} 失败: {e}"));
     }

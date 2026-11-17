@@ -239,6 +239,13 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
         let multi = p["multi"].as_bool().unwrap_or(false)
             || p.get("files").and_then(Value::as_array).is_some();
         if multi {
+            // 名字要再校验一次（第 190 轮安全 review）：这里是**唯一会 remove_dir_all**
+            // 的地方，而 name 来自外部备份 JSON。safe_name 现在连 "." 都不放行，
+            // 但恢复路径不该依赖别人的收紧 —— 自己挡一道，坏名字直接跳过并记账。
+            if let Err(e) = crate::scripts::safe_name(name) {
+                out_plugins.push(json!({ "name": name, "ok": false, "error": e }));
+                continue;
+            }
             // 目录式插件：清掉旧目录再按备份里的相对路径铺回去。
             let root = plugins_dir.join(name);
             let _ = tokio::fs::remove_dir_all(&root).await;
@@ -285,6 +292,10 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
             }
             written.push(name.to_string());
             out_plugins.push(json!({ "name": name, "ok": true, "files": put }));
+            continue;
+        }
+        if let Err(e) = crate::scripts::safe_name(name) {
+            out_plugins.push(json!({ "name": name, "ok": false, "error": e }));
             continue;
         }
         let path = plugins_dir.join(format!("{name}.js"));
@@ -669,7 +680,6 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         p
     }
-
 
     /// 校验是「不碰磁盘的口径」：坏备份必须在这一步就被挡住。
     ///

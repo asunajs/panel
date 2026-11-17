@@ -123,6 +123,9 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             error       TEXT
         );
         CREATE INDEX IF NOT EXISTS runs_plugin_started ON runs(plugin, started_at DESC);
+        -- 脚本页/任务页的「上一次运行」是 (plugin, task) → 最新一条（第 190 轮性能 review：
+        -- 没有这条索引时实测 1.5 万行同插件要 9ms/行，还带 USE TEMP B-TREE FOR ORDER BY）。
+        CREATE INDEX IF NOT EXISTS runs_plugin_task_id ON runs(plugin, task, id DESC);
 
         CREATE TABLE IF NOT EXISTS logs (
             id          INTEGER PRIMARY KEY,
@@ -265,10 +268,11 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool, String>
     Ok(names.iter().any(|n| n == col))
 }
 
-/// 库里的「已暂停」插件名单（`plugins.suspended = 1»）。
+/// 库里的「已暂停」插件名单（`plugins.suspended = 1`）。
 ///
-/// 暂停 ≠ 停用：停用会卸载（`disable»），暂停只是**不触发它的定时任务**，
-/// 插件仍在、界面仍能打开、手动运行照旧能跑。重启后仍记得。
+/// 暂停 ≠ 停用：停用会卸载且重启不再加载（`disable`），暂停只是**不触发定时任务** ——
+/// 界面仍能打开、手动运行照旧能跑，但**不保证插件驻留内存**（第 189 轮起空闲卸载
+/// 也会把它收走，用到时 `ensure_loaded` 自动装回）。重启后仍记得。
 pub async fn plugin_suspended_names(db: &Db) -> Vec<String> {
     let rows = db
         .call(|c| {
@@ -286,7 +290,7 @@ pub async fn plugin_suspended_names(db: &Db) -> Vec<String> {
     rows.unwrap_or_default()
 }
 
-/// 写「暂停」标记。用 upsert：这个插件可能还没在 `plugins» 表里留过行。
+/// 写「暂停」标记。用 upsert：这个插件可能还没在 `plugins` 表里留过行。
 pub async fn set_plugin_suspended(db: &Db, name: &str, suspended: bool) -> Result<(), String> {
     let name = name.to_string();
     db.call(move |c| {

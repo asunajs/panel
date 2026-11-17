@@ -3,17 +3,23 @@
 给下一个模型：本文自包含，读完即可继续。仓库 `/Users/catlair/mobile/workspace/panel-llrt`。
 细节与读数在各篇 docs（索引见 [README.md](README.md)），本文只给「冷启动需要的一切」。
 
-## 0. 一句话现状（2026-11-17，0.6.2）
+## 0. 一句话现状（2026-11-17，0.6.3）
 
-用 LLRT 重写的插件面板**功能对照已经收敛**：`docs/plugins.md` **31 ✅ / 0 部分 / 2 ❌**，
-两条 ❌ 都是「明确不做」（任务软删、市场/自更新）。
+用 LLRT 重写的插件面板，功能对照已经收敛（[plugins.md](plugins.md) 的对照表）。
+最近一轮（第 190 轮）是**全仓 review**：过时注释/文档、性能、安全三件事一起过，
+结论与读数记在 [verification.md](verification.md) 的 0.6.3 一节。
 
-- `cargo build` 零 warning；`cargo test` **496 passed**；`bash scripts/check-unsafe-budget.sh` → unsafe 例外 1 处（期望 1）；
-  `bash scripts/check-docs.sh` → 26 篇文档内链全通、都在 1000 行内。
-- `src/` 33 个文件 / 15309 行（含测试）；host-api **27 个 op**，全 async。
-- 远端 `origin = https://github.com/asunajs/panel.git`；发版按 tag 走 CI。
-- 开发实例 `http://127.0.0.1:8787`（无令牌、只绑回环）；日常实例 `~/panel-3030`（launchd
-  `dev.panel`，端口 3030）。当前插件/任务数以 `/readyz` 为准，不在本文写死。
+自己核一遍（数字会漂，以命令为准）：
+
+    cargo test --offline          # 单测（500+）
+    bash scripts/gate.sh          # 全部门禁一把跑完（没有就当下面这些逐条跑）
+    node scripts/ui-check.mjs     # 界面（无头 Edge + CDP，180+ 条）
+    bash scripts/check-docs.sh    # 文档篇数与内链
+
+- 宿主源码 `src/` 约 4 万行（含测试）；WebUI 零构建（`web/` 内嵌 `include_str!`，约 1.1 万行）。
+- 远端 `origin = https://github.com/asunajs/panel.git`；发版打到 tag（`v0.6.x`），CI 出四件资产。
+- 开发实例 `http://127.0.0.1:8787`（无令牌、只绑回环）；日常实例 `~/panel-3030`
+  （launchd `dev.panel`，端口 3030）。插件/任务数以 `/readyz` 为准，不在本文写死。
 
 ## 1. 用户的原始订单（verbatim，不要改写意图）
 
@@ -22,168 +28,118 @@
 > 新的就要考虑到更好，这不是重构是重写。需要注意的是插件时长问题，20分钟没问题吧，
 > aws的函数已经有90分钟的配置了。
 
-- 基线 = 原 QuickJS 那一支：`rust-plugin-panel` 的 **git HEAD `b252bd0`**，**不是**它当前工作树的 Node-only 迁移。
-- 已拍板（用户当场确认）：① 仓库路径 `panel-llrt`；② host-api **全 async**；③ 第一版 = 最小垂直切片；④ 先实测再落档。
-- 后续拍板：插件是**可信代码**（不加 fs/dns jail）；安全面收到**令牌一处**；`目录不改、fs 不改`；不为旧插件契约写垫片。
+- 基线 = 原 QuickJS 那一支（`rust-plugin-panel` 的 git HEAD `b252bd0`），**不是**它工作树里的 Node-only 迁移。
+- 已拍板：① 仓库路径 `panel-llrt`；② host-api **全 async**；③ 第一版 = 最小垂直切片；④ 先实测再落档。
+- 后续拍板：插件是**可信代码**（不加 fs/dns jail）；安全面收到**令牌一处**；
+  `目录不改、fs 也不改`；不为旧插件契约写垫片；**永远不 push**（提交留在本地，由用户决定何时推）。
 
 ## 2. 硬边界（安全相关，逐字遵守）
 
-- **不动 `rust-plugin-panel`**：它工作树有未提交的 Node-only 迁移（可能有并行会话在飞）。
-  只读它（`git show HEAD:<path>`）作功能基线，**不写、不提交、不 stash**。
-- 本仓库独立 `git init`，**不 push**（推送要另行授权）。
-- **每轮一提交**是既定节奏（用户已接受）；但**不提交编译不过的树**，也不把没验过的读数写进 commit message。
-- 探针产物留本仓库 `docs/` 或 `/tmp/`，**不污染旧仓库**。
-- **不碰央视频真实账号的写操作**；**不跑兑换/直播任务**（要花钱、要开播）除非用户当轮明确点头。
+1. **只有一处安全面：令牌。** 插件是可信代码，不做 fs/dns jail —— 别再「顺手加个沙箱」。
+2. **写接口必须带 `x-panel: 1`**（挡跨站简单请求）；鉴权走请求头，只有 `/plugins/*` 认 `?t=`。
+3. **机密不进响应**：渠道 secret 打码成 `***` + `has_secret`；错误 `detail` 只落日志。
+4. **凭据不外借**：转给插件 handler 的请求头里剥掉 `cookie` / `authorization` / `x-panel-token`。
+5. 每加一条 `/api/*` 路由，`web_tests.rs::every_api_route_requires_a_token` 会盯着它必须鉴权。
 
-## 3. ⚠ 接手第一个坑：工作目录
+## 3. 接手第一个坑：工作目录
 
-旧会话的默认 cwd 曾是旧仓库 `/Users/catlair/mobile/workspace/rust-plugin-panel`，**不是** panel-llrt。
-所有 Bash 必须显式 `workdir`/绝对路径指向 panel-llrt，否则会读到/改到旧仓库。
+`workspace/` 下有多个**同名不同代**的仓库（`rust-plugin-panel` 的 QuickJS 支、Node 支、本站 `panel-llrt`）。
+`pwd` 不在 `panel-llrt` 时，先确认你改的是哪一个 —— 改错仓库是本项目最容易犯的错。
 
 ## 4. 文件地图
 
-### 4.1 宿主（`src/`，零 unsafe，33 个文件）
+### 4.1 宿主（`src/`）
 
-| 文件 | 一句话 |
+| 文件 | 干什么 |
 |---|---|
-| `main.rs` | 装配：DB → 日志 → 配置 → 调度 → 插件 → HTTP。**无凭据只准绑回环**。CLI：`service` / `keygen` / `backup` / `restore` |
-| `engine.rs` | 1 插件 = 1 `AsyncRuntime` + 1 `AsyncContext`；绕过 `Vm` 自组装；`GatedResolver` + 摘 `fetch` 全局；`dispatch`（墙钟死线 interrupt + idle）；试跑（`Plugin::run_test`） |
-| `hostapi.rs` | `panel:host` native module，27 个 op 全 async；`WRAP` JSON 文本边界；限额 `ROW_CAP`/`BODY_CAP`/`clamp_timeout`/`MAX_HOPS` |
-| `scheduler.rs` | 插件表 / 任务表的**唯一所有者**（actor）；cron + 预算 + 熔断 + run 记录；`lead_ms` 提前量、`params`、`summary`/`blockers` |
-| `scripts.rs` | 脚本：独立 `.js`，手动跑或按 cron 跑，一次性上下文 |
-| `db.rs` | SQLite actor（channel + 专用连接），无 Mutex poison |
-| `log/` | LogHub（SSE 广播 + 落库）+ `redact.rs`（6 道有序幂等脱敏，从基线原样移植） |
-| `web.rs` | axum 路由 + 鉴权 + 限流接线 + 零构建静态资源 + SSE（2124 行，最大的一篇） |
-| `auth.rs` | 令牌：**磁盘上只有盐 + PBKDF2 哈希**；会话票 HMAC；`/api/setup` 首次设置 |
-| `ratelimit.rs` | 令牌桶，只挡两类：登录（PBKDF2 放大）与写接口；试跑另有一套 + 信号量 |
-| `ssrf.rs` | 出站判定表（不读环境，开关作参数）；重定向每跳重判 |
-| `outbound.rs` | 出站 HTTP 的纯 Rust 实现（`host.fetch` 的传输层） |
-| `wsclient.rs` | 插件 WebSocket 客户端（第一条长连接能力） |
-| `smtp.rs` | SMTP 客户端（STARTTLS / 隐式 TLS / 明文），`smtp_send` 的传输层 |
-| `sync_bridge.rs` | 阻塞桥：同步风格插件调 async 能力的唯一通道 |
-| `config.rs` / `config_store.rs` | 面板级只读配置 + 热快照（`config()` 只 clone 一个 `Arc`） |
-| `cron.rs` | 5/6 字段 + `@every` + jitter + DST（1112 行，偏大） |
-| `backup.rs` / `backup_crypto.rs` | 备份/恢复一份实现两个入口（HTTP + CLI）；X25519 + ChaCha20-Poly1305 加密格式 |
-| `upload.rs` | 插件 / 脚本上传（单文件或 zip） |
-| `notify.rs` | 通知：任务失败、熔断、插件喊话 → 面板铃铛 + 可选 webhook |
-| `service.rs` | 开机自启动：launchd / systemd 单元生成与安装 |
-| `stats.rs` | 进程级只读计数（运行时长/圈数/心跳/预算打断） |
-| `panelversion.rs` | `panel.version()` / `panel.atLeast()`（semver） |
+| `main.rs` | 启动、参数、加载全部插件、按需加载的**判定**（`should_start_unloaded`） |
+| `web.rs` | 全部 HTTP：路由、鉴权中间件、插件 WebUI 反代、错误页（最长的文件，5k+ 行） |
+| `scheduler.rs` | 单线程 actor：注册、派发、熔断、按需加载/唤醒/空闲卸载、任务表真源 |
+| `engine.rs` | LLRT 运行时封装：一次 invocation 一个 `AsyncRuntime`、CPU 预算、panic 兜底 |
+| `hostapi.rs` | 插件能 `import 'panel:host'` 到什么（全 async，清单见 [host-api.md](host-api.md)） |
+| `notify.rs` | 通知：渠道（13 种）+ 推送路线 + 发件箱退避 |
+| `db.rs` | SQLite actor（`Db::call`）：表结构、迁移、常用查询 |
+| `scripts.rs` | 脚本 = 第三方程序子进程（不是 JS 引擎），预算/回收 |
+| `migrate.rs` | 从 0.3.x（QuickJS）面板搬插件状态 |
+| 其余 | `auth` / `backup` / `install` / `upload` / `pluginfs` / `manifest` / `plan` / `cron` / `log` / `retention` / `outbound` / `ssrf` / `sync_bridge` / `alerts` / `disk` / `update` / `platform` … |
 
-测试在同名 `*_tests.rs`（`#[path]` 挂进模块），路由级测试直接打真 `Router`，不起监听。
+### 4.2 WebUI（`web/`，零构建）
 
-### 4.2 文档（`docs/`，13 篇）
+`index.html` + `app.css` + `app.js`（约 6 千行，含视图渲染与轮询）+ `ui.js`（控件）+
+`schedule.js`（排程表单，可脱离浏览器测）+ `highlight.js`（极简高亮）+ `ui-kit.*`（插件作者的样板页）。
+**CSP 是 `script-src 'self'`：内联 `<script>` / `style=` 一律不执行**，加交互只能改这几个文件。
 
-第 82 轮合并过：原来是 35 篇「一个读数一篇」，现在是 11 篇「一章一篇」（上限也从 300 行抬到 1000 行）。
+### 4.3 文档（`docs/` 27 篇，索引 [README.md](README.md)）
 
-| 篇 | 讲什么 |
-|---|---|
-| `README.md` | 索引 + 三态约定 + 构建 |
-| `HANDOFF.md` | 本文：现状、复跑命令、协作规则 |
-| `engine.md` | LLRT 嵌入形态、隔离模型、两条预算、取消归属、JS 通道、定时器坑、外部进程插件为什么不做的清单、Stage 0 判据 |
-| `host-api.md` | host API 契约与限额、出站门（SSRF）、脱敏边界、样例插件的逐入口读数 |
-| `plugins.md` | 生命周期、自带界面与三条路由、上传、**与旧面板的功能对照** |
-| `scheduler.md` | 任务状态谁说了算、熔断、时钟回拨、休眠补跑、量过的时间分布 |
-| `api.md` | 请求体/查询参数、CSV 导出、令牌与会话 |
-| `ui.md` | 控制台形态与设计令牌、界面门禁（ui-check / ui-e2e） |
-| `ops.md` | 配置、通知、备份恢复、保留策略、日志、健康、脚本、磁盘故障 |
-| `verification.md` | 端到端读数（历史记录，按轮次） |
-| `pitfalls.md` | 踩过的坑（按顺序，每条带复现方式或守卫位置） |
-| `mcloud-migration.md` | mcloud 那一族的迁移记录 |
+分工：`engine.md`（引擎与调度语义）、`scheduler.md`、`ui.md`、`api.md`、`plugins.md`（与旧面板对照）、
+`plugin-contract.md`（插件作者）、`host-api.md`、`pitfalls.md`（**动手前先看这里**）、`verification.md`（发版读数）、
+`user/`（给用户看的：安装、运维、通知、迁移）。`pitfalls-0.4.md` 与 `handoff/*` 是历史档案。
 
-### 4.3 其它
+### 4.4 门禁（`scripts/`）
 
-`vendor/llrt/`（v0.10.0-beta 源码，含**一处本仓补丁**）、`tools/bundle/build.mjs`（生成 `vendor/llrt/bundle/js`）、
-`tools/parity/`、`spike/`（Stage 0 探针，非产品）、`plugins/`（只剩面板自己的 webui-demo —— 插件产物与部署都归插件项目）、`web/`（零构建三件）、
-`scripts/check-unsafe-budget.sh`、`scripts/check-docs.sh`、`../mcloud-plugin/`（插件的 TS 源码与打包脚本，
-`npm run deploy:panel` 自己装进实例的 `plugins/`；面板仓不留产物）。
+`ui-check.mjs`（界面）、`ui-kit-check.mjs`、`check-docs.sh`、`check-pitfalls.sh`、`check-unsafe-budget.sh`、
+`check-lazy-load.sh`、`check-wake.sh`、`check-catchup.sh`、`check-cron-owner.sh`、`check-task-delete.sh`、
+`check-token-change.sh`、`check-plugin-boundary.sh`、`check-plugin-style.mjs`、`check-css-tokens.py`、
+`deploy-daily.sh`（部署到 3030）。**提交前至少**：cargo test + ui-check + check-docs + check-pitfalls。
 
-## 5. 已经能用的（按子系统，读数在 parity.md 与各篇 docs）
+## 5. 已经能用的（按子系统，细节在 docs）
 
-| 子系统 | 一句话 |
-|---|---|
-| 插件运行时 | 进程内 LLRT，热重载/禁用/卸载，一个插件失败不影响其它 |
-| 调度 | cron + `@every` + 预算（默认 300s，`PANEL_BUDGET_MS` 可改；上限 90 分钟）+ 熔断 + 补跑 + `lead_ms` 提前量 |
-| host-api | 27 个 op：日志/配置/DB/出站 HTTP/WS/SMTP/任务表/路由/定时器/通知/版本 |
-| 鉴权 | 令牌（盐+PBKDF2）+ 会话 cookie（30 天 HttpOnly）+ 首次设置 `/api/setup` + 限流 |
-| 控制台 | 仪表盘/插件/任务/脚本/日志/设置（含引擎试跑），零构建、SSE 实时 |
-| 插件界面 | `/plugins/<name>/` 三条路由，无需 `?t=` |
-| 运维 | 备份（明文/加密）、恢复、上传、开机自启动、`/healthz` `/readyz`、重启（exec 自身） |
+- **插件**：增删改查、目录式（`<name>/index.js`）与单文件、清单 `panel.json`、按需加载 + 空闲卸载 + 用到就装（[engine.md](engine.md)）。
+- **调度**：cron（面板所有，插件只给建议）、lead 提前量、blockers、熔断、补跑、任务软删墓碑（[scheduler.md](scheduler.md)）。
+- **插件界面**：`register_web` 一插件一路由（同源 iframe 嵌）、或 `<name>.webui/` 静态目录 + handler（[plugin-contract.md](plugin-contract.md)）。
+- **通知**：铃铛 + 13 种渠道 + 推送路线（事件/定时/标题模板）+ 发件箱退避（[user/notify.md](user/notify.md)）。
+- **脚本**：第三方程序 + 预算 + 排程（不进 JS 引擎）。
+- **备份/恢复**：明文 HTTP + 加密 CLI（X25519+ChaCha20-Poly1305，私钥不进 HTTP）。
+- **运维**：口令改/重置、在线更新**检查+下载**（不自动替换）、磁盘告警、保留策略、从 0.3.x 迁移。
 
-## 6. 还没做的（就这几条，别再从零找）
+## 6. 明确没做的（就这几条）
 
-| 项 | 现状 | 下一步 |
-|---|---|---|
-| 任务软删（`/api/jobs/{p}/{n}/delete` / `restore` / `cleanup`） | **明确不做** | 任务由插件注册，删了下次加载又回来；要停用请用「禁用插件」 |
-| 市场 / 自更新（`/api/market*`、`/api/update*`） | **明确不做** | 见 plugins.md §3 |
-| 外部进程插件（`extproc.rs`） | **明确不做**（决策记录） | 改判条件与真要做的形状见 [engine.md](engine.md) |
-| `fetch` 非 UTF-8 响应体 | ❓ 到插件前就 lossy | 先确认真需要，再谈 `body_base64` / 按 charset 解 |
-| `structuredClone` 缺失 | ❓ 绕过 `Vm` 的代价 | 先查真实插件用量 |
-| 单插件定时器条数上限 | 未实现（定时器走 LLRT 原生，宿主没有注册表可数） | 要限就得自己维护注册表 |
-| 央视频 legacy TLS（CBC+SHA1） | ❓ 未实编 | 见 [engine.md](engine.md) §7 |
-| 惰性回收 idle eviction | 不在切片 | 常驻内存的边际成本见 llrt-spike 判据 3 |
-| mcloud phase C / D（兑换、直播） | 代码就位，**没跑过真任务** | 需要用户当轮点头（花钱 / 开播） |
+1. 插件市场/货架：不内置（商店是侧载插件）。
+2. 在线更新**自动替换自己**：不做（只检查 + 下载）。
+3. 任务物理清理（`cleanup`）：不做（只软删 + 恢复）。
+4. Windows 上的文件权限：只依赖父目录 ACL（[windows.md](windows.md)）。
 
-## 7. 接手必知的技术坑（踩过的，按踩到的顺序）
-## 7. 接手必知的技术坑（踩过的，按踩到的顺序）
+## 7. 接手必知的技术坑
 
-**37 条整段搬到了 [pitfalls.md](pitfalls.md)**（每条带复现方式或守卫位置）。这里只留最要紧的三条：
+全部在 [pitfalls.md](pitfalls.md)（当前 60 条 + 历史 60 条在 [handoff/pitfalls-0.4.md](handoff/pitfalls-0.4.md)）。
+先记住这五条最致命的：
 
-1. **登录态靠握手，不靠猜**（§7.1）：先 ws_open 再发消息，别自己拼 header。
-2. **出站门挂在解析层**（§7.5）：不许手搓 ModuleBuilder::new()，否则 SSRF 清单会腐烂。
-3. **插件注册值和人改过的状态必须分开存**（§7.27/29）：否则热重载会清空设置，而且不报错。
+1. **actor 里不许做文件/网络 IO**（读插件源码、遍历目录都要 `spawn_blocking`）—— 一停整个面板都卡。
+2. **「到点」跟「插件在不在内存里」无关**：到点发现没装就当场装、装完立刻补这一拍。
+3. **`waking` 集合必须双向清**（成功/失败都清），漏清 = 那个插件从此不再被唤醒且静默丢拍。
+4. **CSP 禁内联**：`web/index.html` 里写 `<script>` 不会执行，改动只会静默无效。
+5. **改文档先看行数上限**（1000 行/篇，`check-docs.sh` 会红）；整篇 `write` 会截断，优先 `edit`。
 
 ## 8. 运行中的面板
 
-- **8787** = 常用面板（`PANEL_WEB_DIR=web ./target/debug/panel`，无令牌、只绑回环，数据在 `data/`）。
-  这是用户会看的那一个；改动 UI 后要 `cargo build` + 重启才生效（`web/*` 是 `include_str!` **编译期**嵌入）。
-- 临时面板（验证用）随时可起可杀：`PANEL_DATA_DIR=/tmp/xxx PANEL_TOKEN=... PANEL_BIND=127.0.0.1:879x`。
-  杀之前确认不是用户要的。
-- 旧面板（`rust-plugin-panel`）已停，3030 上没有监听。
+- `8787`：开发实例，无令牌只绑回环。改完 `cargo build --release` 后可 `panel --replace` 热替换（PID 不变）。
+- `3030`：日常实例（`~/panel-3030`），部署用 `bash scripts/deploy-daily.sh`，起来后看 `/readyz`：
+  `{"ok":true,"failed_plugins":0,"plugins":N,"tasks":M}`。
+- 日志在库里的 `logs` 表（界面「日志」页），别去 grep 文件。
 
-## 9. git 状态
+## 9. git 与发版
 
-`panel-llrt`：branch main，**40 个 commit**，**无 remote**，工作树干净。
-`vendor/llrt/bundle/js`（168K，生成物）**刻意 force-add 入库** —— 本机 github 不通，离线构建需要它。
-旧仓库 `rust-plugin-panel` 全程只读未碰。
+- **永远不 push**：`git commit` 留给本地，推不推由用户决定（`git push` 还踩过 HTTP/2 卡死，见 pitfalls 116）。
+- 发版 = ① 改 `Cargo.toml` 版本 ② `CHANGELOG.md` 加一段 ③ `docs/verification.md` 记读数
+  `④` 提交 `release: 0.6.x（一句话）`。tag 与 CI 由用户推上去之后才动。
+- 工作区里 `plugins/mgmusic.js`、`plugins/mgmusic.webui/`、`plugins-wip/` **不要提交**（用户的私有插件）。
+- 多个会话会同时改这个仓库：提交前 `git status` 看清哪些是你的，`git add` 只加自己的文件。
 
-## 10. 复跑（十二条命令）
+## 10. 复跑（常用命令）
 
-```bash
-cd /Users/catlair/mobile/workspace/panel-llrt
-cargo build --offline && cargo test --offline   # 493 passed
-bash scripts/check-unsafe-budget.sh             # ok: unsafe 例外 1 处（期望 1，disk.rs 的 in-place allow）
-bash scripts/check-docs.sh                      # ok: 26 篇文档，内链全通、都在 1000 行内
-bash scripts/check-pitfalls.sh                  # 坑的守卫全过（静态检查，含 CSS token / 首帧主题）
-bash scripts/check-catchup.sh                   # 补跑：冻住面板跨过触发时刻，醒来必须补跑并落 runs（约 6 分钟）
-bash scripts/check-wake.sh                      # 唤醒链路 5 条（到点前 3 分钟装回来 + 那一拍真跑）
-node scripts/ui-check.mjs                       # 界面 175 条断言（自起面板 + 无头 Edge）
-node scripts/theme-flash-check.mjs              # 首帧主题：压慢链路量 first-paint 与 data-theme 的先后
-node scripts/ux-smoke.mjs                       # 用户路径 25 条（0.4.0 验收清单，起 3 个面板）
-node scripts/plugin-selftest.mjs                # host API 自检 24 条（本地 WS/SMTP/HTTP 对端，离线可跑）
-node scripts/dom-probe.mjs --quick              # WebUI 的 DOM 增长探针（自起实例；只判 GC 后净增）
-node scripts/dom-growth.mjs http://127.0.0.1:8787/ 30   # 对**在跑的实例**量（含每秒净增 + DOM 变动分类；
-                                                        # 文本节点那一层只有它量得出来，见 pitfalls §98）
-```
+    cargo build --release --offline       # 出二进制
+    cargo test --offline                  # 单测
+    node scripts/ui-check.mjs             # 界面（无头 Edge，需本机有 Edge）
+    bash scripts/check-lazy-load.sh       # 按需加载 + 空闲卸载 + 用到就装（真起面板，约 2 分钟）
+    bash scripts/check-wake.sh            # 唤醒链路（真等窗口）
+    bash scripts/check-catchup.sh         # 补跑（冻住进程跨过触发时刻）
+    bash scripts/deploy-daily.sh          # 部署到 3030 并验证 readyz
 
-要真点真发的界面端到端（61 条，需要面板 + CDP）：`node scripts/ui-e2e.mjs`，见 [ui.md](ui.md)。
+## 11. 用户的协作 standing 规则（照此办）
 
-端到端读数（20 分钟长任务 p99、SSE、熔断、引擎试跑）见 [verification.md](verification.md)。
-
-## 11. 用户的协作 standing 规则（下一个模型没有我的记忆，照此办）
-
-- 短操作指令 = 直接动手，别回 A/B 菜单等挑；但**风险/不可逆/影响共享态的动作先确认**（push/杀进程/删文件）。
-- **没测过的写 ❓ + 测法，不写断言**；错记录**就地改**，不叠「补记」；不把揣测写成「用户要求」。
-- 架构讨论落仓库 `docs/`，三态分明带行号出处；**文档 >300 行必须拆**（`check-docs.sh` 盯着）。
-- **成文无真实手机号**：掩码**不带尾号**（`19****` 而非 `19****16`），示例用合成 199 号。
-- **大文件主动报**（源 >1000 行、文档 >300 行），先提拆分方案再动手，别擅自拆。
-- **WebUI 验收归用户本人**，只报界面暴露了什么，不替用户写「已验收」。
-- 面板与 CLI 两侧都要验，不修一头坏另一头。
-- 报障只给诊断，不动配置；要写文件先给 diff 等点头。
-- **发版要攒，别一改一发**（用户 2026-11-16 原话：「不要一直发版啊？你是用户你看到一直不停
-  发版你会怎么想？」）。规矩：
-  - 纯文档 / 注释 / 文案改动**不发版**，也不动 `Cargo.toml` 版本号；
-  - 一次修一个小问题**不发版**：攒到一起，或等用户明确说「发个版」；
-  - 发版是给用户的通知，不是我的进度条 —— 一天内连发四个版本（0.5.0→0.5.3）就是反面教材，最后
-    按用户要求全部合并成一个 0.5.1；发之前先问自己「用户会因为这次发版做什么动作吗」。
-  - 提交（commit/push）照常，那不影响用户。
+1. **中文、极短**。有数字就给数字（前/后对比、实测毫秒、DOM 尺寸），别写形容词。
+2. **先看证据再动手**：用户给截图/一句话报障，先去代码与库里找根因，别猜。
+3. **改完必须自证**：跑门禁 + 真起实例复现一遍；声称「好了」之前要有读数或截图。
+4. **别问废话**：能从仓库/日志判断的自己判断；真拿不准才问，且一次问清。
+5. **不做兼容垫片**，不留过时注释；删掉的东西连注释一起删。
+6. 用户讨厌「把实现细节当交互设计」：按需加载那一课就是——用到的东西自己装，别让用户点。

@@ -2747,9 +2747,9 @@ async fn paging_by_started_at_keeps_ties_in_order() {
     let (mut after_v, mut after_id) = (None, None);
     for _ in 0..20 {
         let path = match (after_v, after_id) {
-            (Some(v), Some(i)) => format!(
-                "/api/runs?limit=7&sort=started_at&dir=desc&after_v={v}&after_id={i}"
-            ),
+            (Some(v), Some(i)) => {
+                format!("/api/runs?limit=7&sort=started_at&dir=desc&after_v={v}&after_id={i}")
+            }
             _ => "/api/runs?limit=7&sort=started_at&dir=desc".to_string(),
         };
         let (_, b) = get(&app, &path).await;
@@ -3534,7 +3534,7 @@ async fn a_plugin_can_be_suspended_without_unloading_it() {
     assert_eq!(state["suspended"], json!([]), "{state}");
 }
 
-/// 暂停名单要能扛过重启：库里 `plugins.suspended» 是唯一真相。
+/// 暂停名单要能扛过重启：库里 `plugins.suspended` 是唯一真相。
 #[tokio::test]
 async fn suspended_is_persisted_in_the_db() {
     let db = Db::open(std::path::Path::new(":memory:")).unwrap();
@@ -4210,20 +4210,210 @@ async fn info_notification_is_logged_as_info_not_warn() {
     let mut found = None;
     for _ in 0..40 {
         let (_, v) = get(&app, "/api/logs?q=%E9%80%9A%E7%9F%A5%3A&limit=200").await;
-        if let Some(row) = v["logs"]
-            .as_array()
-            .and_then(|a| a.iter().find(|r| {
-                r["message"].as_str().unwrap_or("").contains("正常结束")
-            }))
-        {
+        if let Some(row) = v["logs"].as_array().and_then(|a| {
+            a.iter()
+                .find(|r| r["message"].as_str().unwrap_or("").contains("正常结束"))
+        }) {
             found = Some(row.clone());
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let row = found.expect("应当有一条「通知: …」日志");
-    assert_eq!(
-        row["level"], "info",
-        "info 通知不该记成 warn：{row}"
+    assert_eq!(row["level"], "info", "info 通知不该记成 warn：{row}");
+}
+
+// ── 鉴权覆盖面（第 190 轮安全 review）───────────────────────────────────────
+//
+// 为什么要有这一条：**光看代码看不出来**某个路由漏了 require_token —— 它挂在
+// 外层 Router 上（`/api/test/js` 就这样漏了整整十轮，等于未认证可执行任意 JS）。
+// 所以这里直接从 `web.rs` 源码里把 `/api/*` 全扫出来，一条条打：
+// 配了令牌时**没凭据就该 401**。新增接口忘了套鉴权，这条当场红。
+
+/// 故意公开的几条，每条都有自己的门：
+/// - login：换凭据的地方，本身带更严的限流；
+/// - logout：只清 cookie，无副作用；
+/// - setup：没令牌时的「设一个」，handler 里自己有 Host 闸（挡 rebinding）；
+/// - auth/token：改口令，handler 里要**旧口令**（PBKDF2 验过才动），没设过令牌直接拒。
+const PUBLIC_API: &[&str] = &["/api/login", "/api/logout", "/api/setup", "/api/auth/token"];
+
+#[tokio::test]
+async fn every_api_route_requires_a_token() {
+    let (app, _plugins, _data, _store, _db) = setup_core_auth("auth-all", Some("s3cret")).await;
+    let src = include_str!("web.rs");
+    let mut paths: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.split_once(".route(\"").map(|(_, r)| r) else {
+            continue;
+        };
+        let Some(end) = rest.find('"') else { continue };
+        let path = &rest[..end];
+        if path.starts_with("/api/") && !paths.iter().any(|p| p == path) {
+            paths.push(path.to_string());
+        }
+    }
+    assert!(
+        paths.len() > 40,
+        "扫到的 /api 路由太少（{} 条），解析是不是坏了",
+        paths.len()
+    );
+
+    let mut leaked = Vec::new();
+    for raw in &paths {
+        if PUBLIC_API.contains(&raw.as_str()) {
+            continue;
+        }
+        // {name} / {id} / {plugin} 填个占位值；鉴权在路由匹配之前就跑，
+        // 所以就算占位值指向不存在的插件，也必须是 401 而不是 404。
+        let mut url = raw.clone();
+        for ph in ["{name}", "{id}", "{plugin}"] {
+            url = url.replace(ph, "x");
+        }
+        let req = Request::get(&url).body(Body::empty()).unwrap();
+        let (status, _) = send(&app, req).await;
+        if status != StatusCode::UNAUTHORIZED {
+            leaked.push(format!("{raw} -> {status}"));
+        }
+    }
+    assert!(leaked.is_empty(), "这些 /api 路由没要令牌：{leaked:?}");
+}
+
+/// `/api/setup` 在 require_token 之外（它要建令牌），所以必须自己挡 DNS rebinding：
+/// 不挡的话，恶意页面能抢先写一份自己的 auth.json，把正主锁在门外。
+#[tokio::test]
+async fn setup_rejects_a_foreign_host() {
+    let (app, _plugins, _data, _store, _db) = setup_core_auth("setup-host", None).await;
+    let req = Request::post("/api/setup")
+        .header("host", "evil.example.com")
+        .header("x-panel", "1")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"generate":true}"#))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    // 回环 Host 照常（这里不给 body 是因为下一步会真的写 auth.json）
+    let req = Request::post("/api/setup")
+        .header("host", "127.0.0.1:8787")
+        .header("x-panel", "1")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{}"#))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// 插件 handler 不该收到面板凭据：cookie / authorization / x-panel-token 一律剥掉。
+/// 面板在插件 ctx 建起来前专门擦过环境变量，把票递进 ctx 等于绕开那道设计。
+#[tokio::test]
+async fn plugin_handlers_never_see_the_panel_credentials() {
+    let (app, _plugins, _data, _store, _db) = setup_core_auth("hdr-strip", Some("s3cret")).await;
+    // 带令牌建插件（load_plugin 是给无鉴权用例写的，塞不进令牌头）
+    let mk = |method: &str, uri: &str, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-panel", "1")
+            .header("x-panel-token", "s3cret")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (status, body) = send(
+        &app,
+        mk("POST", "/api/plugins", json!({ "name": "echo-hdr" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        &app,
+        mk(
+            "PUT",
+            "/api/plugins/echo-hdr/source",
+            json!({ "source": "import host from 'panel:host';\nawait host.register_web(async (evt) => ({ ok: true, h: evt.headers }));\n" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 用**会话 cookie** 认证（浏览器导航就是这个形态），同时塞一份别的凭据头 ——
+    // 三种都要被剥掉，只留下普通头。
+    let req = Request::post("/plugins/echo-hdr/whatever")
+        .header("x-panel-token", "s3cret")
+        .header("cookie", "panel_session=abcdef")
+        .header("authorization", "Bearer abcdef")
+        .header("x-keep-me", "yes")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // __route 的返回值是插件给的对象本身（不走 handler 的 value 包装）
+    let h = body["h"].as_object().expect("插件要拿到 headers");
+    for bad in ["cookie", "authorization", "x-panel-token"] {
+        assert!(!h.contains_key(bad), "{bad} 不该递给插件: {h:?}");
+    }
+    assert_eq!(h["x-keep-me"], "yes", "别的头照旧要透传: {h:?}");
+}
+
+// ── 文件名的边界（第 190 轮安全 review）──────────────────────────────────────
+
+/// `"."` 以前能过 `safe_name`（字符表合法、不含 ".."），而 `dir.join(".")` 就是目录自己 ——
+/// 备份恢复里那个 `remove_dir_all` 会一次清空整个 plugins/。
+#[tokio::test]
+async fn dot_is_not_a_valid_plugin_name() {
+    for bad in [".", "..", "...", "___", "-", ""] {
+        assert!(
+            crate::scripts::safe_name(bad).is_err(),
+            "{bad:?} 不该被当成合法名字"
+        );
+    }
+    for good in ["a", "shop", "mcloud-live", "x.y", "a_b-c"] {
+        assert!(crate::scripts::safe_name(good).is_ok(), "{good:?} 应当合法");
+    }
+}
+
+/// 备份恢复：坏名字直接跳过并记账，**不能**动到 plugins 目录本身。
+#[tokio::test]
+async fn restore_refuses_a_dot_named_plugin_before_touching_disk() {
+    let (app, plugins, _data, _store, _db) = setup_core_auth("restore-dot", Some("s3cret")).await;
+    std::fs::write(plugins.join("keep.js"), b"// keep").unwrap();
+    let backup = json!({
+        "config": {},
+        "plugins": [
+            { "name": ".", "multi": true, "files": [{ "path": "index.js", "source": "boom" }] },
+            { "name": "..", "source": "boom" }
+        ],
+        "scripts": []
+    });
+    let req = Request::post("/api/backup")
+        .header("content-type", "application/json")
+        .header("x-panel", "1")
+        .header("x-panel-token", "s3cret")
+        .body(Body::from(backup.to_string()))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    // 整份备份在**写盘之前**就被 validate 挡下（比逐条跳过更安全：不留半恢复状态）
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{status} {body}");
+    assert!(body.to_string().contains("非法"), "要说清为什么: {body}");
+    // 目录还在、原来的插件文件还在
+    assert!(plugins.is_dir(), "plugins 目录被删了: {body}");
+    assert!(plugins.join("keep.js").exists(), "别的插件被连坐了: {body}");
+}
+
+/// 明文 http 装插件必须带 sha256（否则同路的人能随便替换要执行的代码）。
+#[tokio::test]
+async fn install_over_plain_http_requires_a_sha256() {
+    let (app, _plugins, _data, _store, _db) = setup_core_auth("install-http", Some("s3cret")).await;
+    let req = Request::post("/api/plugins/install")
+        .header("content-type", "application/json")
+        .header("x-panel", "1")
+        .header("x-panel-token", "s3cret")
+        .body(Body::from(
+            json!({ "url": "http://example.com/x.js" }).to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("sha256"),
+        "提示里要说清为什么: {body}"
     );
 }

@@ -137,7 +137,10 @@ pub fn set_timeout_interval<'js>(
 
     let mut rt_timer = RT_TIMER_STATE.lock().unwrap();
     let Some(state) = get_timer_state(&mut rt_timer, rt_ptr) else {
-        return Err(Exception::throw_message(ctx, "定时器已停用（运行时正在退出）"));
+        return Err(Exception::throw_message(
+            ctx,
+            "定时器已停用（运行时正在退出）",
+        ));
     };
     state.timers.push(timeout);
     let task_running = state.running;
@@ -241,6 +244,7 @@ impl From<TimersModule> for ModuleInfo<TimersModule> {
 /// 1. 析构 `AsyncContext` 要等循环任务结束，`setInterval` 永远等不到；
 /// 2. 等不到时 `Persistent` 还挂在静态表里，`JS_FreeRuntime` 断言 abort；
 /// 3. 等到了，循环任务下一次 poll 会碰一个已释放的 rt 指针。
+///
 /// 面板补丁：拿运行时的裸指针（存成 usize，便于宿主在 Drop 里带着走）。
 /// 宿主侧不需要 unsafe，也不需要认识 qjs 的类型。
 pub fn runtime_ptr(ctx: &Ctx<'_>) -> usize {

@@ -178,6 +178,7 @@ async fn serve_slow_then_fast(bind_host: &str, delay: Duration, body: &'static [
 static WARM_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // 故意的：这两条必须串行，锁拿到整条用例结束
 async fn idempotent_get_retries_once_after_a_timeout() {
     let _guard = WARM_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     mark_host_warm("[::1]"); // 预算就是 timeout，别再加建连那份
@@ -195,6 +196,7 @@ async fn idempotent_get_retries_once_after_a_timeout() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // 故意的：这两条必须串行，锁拿到整条用例结束
 async fn write_does_not_retry_after_a_timeout() {
     let _guard = WARM_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     mark_host_warm("[::1]");

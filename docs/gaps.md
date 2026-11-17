@@ -9,7 +9,7 @@
 |---|---|---|
 | 1 | 0.3 数据一键迁移（自动发现 + 预览 + 快照） | [plugins.md](plugins.md) 的「从 0.3.x 面板迁移」 |
 | 2 | 统一错误模型 + 前端错误页（detail 不进响应） | [api.md](api.md) 的「错误格式与错误页」 |
-| 3 | 通知渠道 12 种（企业微信 / 钉钉 / 飞书 / … / 自定义模板） | [notify.md](user/notify.md) |
+| 3 | 通知渠道 13 种（企业微信 / 钉钉 / 飞书 / Telegram / Bark / ntfy / Server酱 / … / 自定义模板） | [notify.md](user/notify.md) |
 | 4 | 渠道增删改 / 事件与插件过滤 / 静默时段 / 重复聚合 | [notify.md](user/notify.md) |
 | 5 | 插件清单 panel.json + 配置表单 + min_panel 硬挡 | [plugins.md](plugins.md) |
 | 6 | 扫描目录（替代文件监听） | [plugins.md](plugins.md) |

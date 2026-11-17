@@ -315,11 +315,11 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 删除插件 | ✅（delete 文件） | ✅ | 移进 `data/trash/`，不是直接删 —— 误点可捞 |
 | **插件分组（系列）** | ✅ 按名字前缀推导，组头带「全部重载 / 全部启用」 | ✅ | 规则原样搬来：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。后端 `plugin_group()` 推导并放进 `/api/state`、`/api/plugins/files`，前端只负责摆；**不做「全部停用」**（破坏性动作不该走批量路径）。第 88 轮补 |
 | 未加载插件的可见性 | ❌（列表只看已加载） | ✅ | `/api/plugins/files` 列出目录里所有 `.js`，语法错的也能进去修 |
-| **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。新标签打开，不做 iframe。契约见 [plugins.md](plugins.md) |
-| 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = 独立 `.js`，排程在记录里（不在代码里）；每次运行新建 Context，日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
+| **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。面板里用 `#view-plugin` 的**同源 iframe** 嵌着打开（第 139 轮）；也可以在新标签里直开。契约见 [plugin-contract.md](plugin-contract.md) |
+| 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = **第三方程序**（`sh`/`node`/`bun`/`python3`/`php`/二进制…），每次运行**起一个子进程**收 stdout/stderr（不进 JS 引擎，见 `src/scripts.rs`）；排程在记录里（不在代码里）；日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
 | 配置 UI 化（读 + 写 + 校验） | ✅（settings/save，需重启） | ✅ | 4 MiB 上限、必须是 JSON 对象、0600 原子写；**保存即生效**（热快照），旧面板要重启 |
 | 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 通知 / 数据（通知页是第 13 轮加的） |
-| 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（webhook / SMTP，见 [ops.md](user/ops.md)） |
+| 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（13 种：webhook / smtp / 企业微信 / 钉钉 / 飞书 / Slack / Discord / Telegram / Bark / ntfy / Gotify / Server酱 / 自定义，见 [notify.md](user/notify.md)） |
 | 备份 / 恢复 | ✅ `/api/restore*` | ✅ | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
 | 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
 
@@ -336,7 +336,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 旧面板 | 我们 | 差在哪 / 影响 |
 |---|---|---|
 | `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
-| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ❌ | 任务不能删、不能恢复（我们的任务是插件注册出来的，删了下次加载还会回来 —— 这条先不做，见下） |
+| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ✅ 第 178 轮 `/api/tasks/{p}/{n}` DELETE + `/restore` | 墓碑：删掉的记 `deleted_at`，插件再注册也不复活；「显示已删除」里能恢复（见 [scheduler.md](scheduler.md)）。`cleanup`（物理清）没做 |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
 | `POST /api/plugins/install`（按 URL 装 + sha256 校验）、`panel plugin install`（CLI，含目录） | ✅ 11-14 | 面板下载 → 校验 → 落盘 → 重载；货架 / 商店属于外部插件，不在本仓 |
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
@@ -346,7 +346,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框。见 [verification.md §9](verification.md) |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/*` | ✅ 11-12（形状不同） | 渠道写在 `config.json` 的 `notify` 键（webhook / SMTP 两种）；发件箱 `notify_outbox` 一条一渠道，失败按 1m/5m/15m/1h/6h 退避，5 次放弃且**留在表里**可手动重试；按任务开关用 `mute` 名单（`插件` 或 `插件/任务`）而不是 `push_tasks` 那张表；没有独立的 deliveries 表（发件箱行本身就是记录）。见 [ops.md](user/ops.md) |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [ops.md](user/ops.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
-| `/api/market*`、`/api/update*` | ❌ | 已声明不做（见 §3） |
+| `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新**检查 + 下载**已做（第 210 轮 `/api/update/check`、`/skip`、`/download`，见 [api.md](api.md)），**自动替换自己**仍不做 |
 | `/readyz` | ✅ 11-12 | 库能读 + 调度器活着才 200，否则 **503**（不是 200+`ok:false` —— 反向代理会把它当健康） |
 
 已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
@@ -747,14 +747,14 @@ state 里 36 个键，按命名空间：
 
 | 动作 | 端点 | 发生什么 | 任务会怎样 | 重启后 |
 |---|---|---|---|---|
-| **停止** | `POST /api/plugins/{n}/stop» | 只中断**正在跑**的那次调用（没在跑就 400） | 不动 | 不变 |
-| **暂停定时** | `POST /api/plugins/{n}/suspend» | 插件**不卸载**，界面照开、手动照跑 | 仍在列表里，但到点不触发；不攒「落后」 | 仍暂停（`plugins.suspended»） |
-| **停用** | `POST /api/plugins/{n}/disable» | 卸载 + 落库，重启不再加载 | 从界面上消失（插件没加载，任务也就没有） | 仍停用 |
+| **停止** | `POST /api/plugins/{n}/stop` | 只中断**正在跑**的那次调用（没在跑就 400） | 不动 | 不变 |
+| **暂停定时** | `POST /api/plugins/{n}/suspend` | 只停定时：界面照开、手动照跑（**不保证驻留内存** —— 第 189 轮起空闲卸载也会收走，用到时自动装回） | 仍在列表里，但到点不触发；不攒「落后」 | 仍暂停（`plugins.suspended`） |
+| **停用** | `POST /api/plugins/{n}/disable` | 卸载 + 落库，重启不再加载 | 从界面上消失（插件没加载，任务也就没有） | 仍停用 |
 
-恢复：`/resume»（暂停）与 `/enable»（停用）。**恢复不补跑**暂停期间漏掉的那些拍 ——
-`/resume» 会把到点的任务直接对齐到下一拍（`realign»），这与「blockers 挡掉的那次不补触发」是同一套判据。
+恢复：`/resume`（暂停）与 `/enable`（停用）。**恢复不补跑**暂停期间漏掉的那些拍 ——
+`/resume` 会把到点的任务直接对齐到下一拍（`realign`），这与「blockers 挡掉的那次不补触发」是同一套判据。
 
-界面入口：插件卡 → 详情抽屉（「暂停定时」/「恢复定时」），卡片上会多一个 `已暂停定时» 的药丸 ——
+界面入口：插件卡 → 详情抽屉（「暂停定时」/「恢复定时」），卡片上会多一个 `已暂停定时` 的药丸 ——
 不标出来，用户会以为是自己 cron 写错了。
 
 ### 零参数：自动扫描，别让人自己找旧库（第 168 轮）
@@ -765,8 +765,8 @@ state 里 36 个键，按命名空间：
 panel migrate                # 扫描 + 预览，不写任何东西
 ```
 
-扫描面：`PANEL_LEGACY_DIR»、当前目录（及上一级）的 `data/panel.db»、`~/.panel»、`~/panel*»、
-`~/mobile/workspace/*/data»。判据是「有 state 表」，打分是「有账号 > 有键 > 有计划 > 有运行记录」，
+扫描面：`PANEL_LEGACY_DIR`、当前目录（及上一级）的 `data/panel.db`、`~/.panel`、`~/panel*`、
+`~/mobile/workspace/*/data`。判据是「有 state 表」，打分是「有账号 > 有键 > 有计划 > 有运行记录」，
 输出像这样：
 
 ```text
@@ -781,13 +781,13 @@ panel migrate                # 扫描 + 预览，不写任何东西
 
 ### 界面上也能做（设置 → 数据）
 
-同一份实现（`crate::migrate»），界面只是把三步摆出来：
+同一份实现（`crate::migrate`），界面只是把三步摆出来：
 
 | 按钮 | 端点 | 做什么 |
 |---|---|---|
-| 扫描 | `GET /api/migrate/scan» | 列候选（只读） |
-| 预览 | `POST /api/migrate/preview» | 摆出「会搬多少键 / 多少运行记录 / 多少号 / 哪些计划」 |
-| 迁移 | `POST /api/migrate/apply» | 真写：先快照，再搬；返回各项计数与快照路径 |
+| 扫描 | `GET /api/migrate/scan` | 列候选（只读） |
+| 预览 | `POST /api/migrate/preview` | 摆出「会搬多少键 / 多少运行记录 / 多少号 / 哪些计划」 |
+| 迁移 | `POST /api/migrate/apply` | 真写：先快照，再搬；返回各项计数与快照路径 |
 
 **迁完要重启面板**（插件加载时读 state 表）。界面上会明说这一句。
 
@@ -795,11 +795,11 @@ panel migrate                # 扫描 + 预览，不写任何东西
 
 | 参数 | 搬什么 | 为什么默认关 |
 |---|---|---|
-| `--with-plugin-data» | `<旧数据目录>/plugin-data/<插件>/config.json» | 各插件自己的配置文件；有些插件已改用 state 表，搬了也不会读 |
-| `--with-scripts» | `<旧数据目录>/scripts/*.js» + 排程 | 脚本是另一套东西，很多人旧面板里根本没有 |
-| `--adopt-token» | `<旧数据目录>/auth.json» | 换令牌是大事：目标已有凭据时不覆盖，且要显式点名 |
+| `--with-plugin-data` | `<旧数据目录>/plugin-data/<插件>/config.json` | 各插件自己的配置文件；有些插件已改用 state 表，搬了也不会读 |
+| `--with-scripts` | `<旧数据目录>/scripts/*.js` + 排程 | 脚本是另一套东西，很多人旧面板里根本没有 |
+| `--adopt-token` | `<旧数据目录>/auth.json` | 换令牌是大事：目标已有凭据时不覆盖，且要显式点名 |
 
-`jobs» 表**不搬**：0.4.x 的任务是插件注册出来的，搬过来的会被下次加载覆盖 —— 只会造成「看着有、其实没有」。
+`jobs`（旧面板的任务表）**默认不搬**：0.4.x 的任务是插件注册出来的，直接搬过来会被下次加载覆盖 —— 只会造成「看着有、其实没有」。要搬就显式加 `--with-tasks`（见 [migrate.md](user/migrate.md)）。
 
 ## 插件清单 panel.json（第 172 轮）
 
@@ -875,9 +875,9 @@ panel plugin new demo --dir plugins-wip # 指定目录
 panel plugin check plugins/demo.js      # 只编译不执行
 ```
 
-- `new» 拒绝重名（要覆盖加 `--force»），名字规则与加载器一致：字母数字 `-» `_» `.»，不能以点开头；
-- 模板里已经有一个每小时跑一次的 `tick»、一个 handler、以及 state 读写的样子，改逻辑就行；
-- `check» **只编译不执行**（Module::declare）：插件顶层代码可能连网、写文件、注册定时任务，
+- `new` 拒绝重名（要覆盖加 `--force`），名字规则与加载器一致：字母数字 `-` `_` `.`，不能以点开头；
+- 模板里已经有一个每小时跑一次的 `tick`、一个 handler、以及 state 读写的样子，改逻辑就行；
+- `check` **只编译不执行**（Module::declare）：插件顶层代码可能连网、写文件、注册定时任务，
   拿「跑一遍」当检查等于让检查动作自己有副作用。它同时会看旁边的清单（版本要求、字段有没有写）。
 - 检查用的运行时装了一个「任何 import 都解析成空模块」的 loader —— 否则真插件都会因为
   找不到 panel:host 而失败（第一次就是这样，报 could not load module 'panel:host'）。

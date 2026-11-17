@@ -111,7 +111,12 @@ pub fn safe_name(name: &str) -> Result<(), String> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        && !name.contains("..");
+        && !name.contains("..")
+        // 至少要有一个字母或数字（第 190 轮安全 review）："." / "..." / "___" 都过得了
+        // 上面那几条，但 dir.join(".") 就是**目录自己** —— 备份恢复里 remove_dir_all
+        // 拿到它会一次清空整个 plugins/。名字本来就该有内容，收紧没有代价。
+        && name.chars().any(|c| c.is_ascii_alphanumeric())
+        && name != ".";
     if ok {
         Ok(())
     } else {

@@ -1,4 +1,4 @@
-//! 通知：任务失败、熔断、插件喊话 → 面板铃铛 + **外部渠道**（webhook / SMTP）。
+//! 通知：任务失败、熔断、插件喊话 → 面板铃铛 + **外部渠道**（13 种，见 `Kind`）。
 //!
 //! 为什么要有铃铛那张表：面板是**你不在的时候**在跑东西的地方。
 //! 运行记录告诉你「跑过什么」，日志告诉你「细节」，通知告诉你「有事」。
@@ -185,6 +185,23 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// 全部渠道类型（报错提示、文档生成都从这里取，别再手抄一份）。
+    pub const ALL: [Kind; 13] = [
+        Kind::Webhook,
+        Kind::Smtp,
+        Kind::Wecom,
+        Kind::Dingtalk,
+        Kind::Feishu,
+        Kind::Slack,
+        Kind::Discord,
+        Kind::Telegram,
+        Kind::Bark,
+        Kind::Ntfy,
+        Kind::Gotify,
+        Kind::Custom,
+        Kind::ServerChan,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Webhook => "webhook",
@@ -220,12 +237,6 @@ impl Kind {
             "serverchan" | "serverchan-turbo" | "sct" => Kind::ServerChan,
             _ => return None,
         })
-    }
-
-    /// 拼 HTTP 请求的那几种（smtp 之外都算）。
-    #[allow(dead_code)] // 暂留：review A3
-    pub fn is_http(self) -> bool {
-        !matches!(self, Kind::Smtp)
     }
 }
 
@@ -653,7 +664,13 @@ pub fn parse(v: Option<&Value>) -> Result<Config, String> {
         };
         let kind_s = str_field(c, "kind");
         let kind = Kind::parse(&kind_s)
-            .ok_or_else(|| format!("渠道 {id} 的 kind 只能是 webhook / smtp，收到 {kind_s:?}"))?;
+            .ok_or_else(|| {
+                let all: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
+                format!(
+                    "渠道 {id} 的 kind 不认识：收到 {kind_s:?}，可用的有 {}",
+                    all.join(" / ")
+                )
+            })?;
         let enabled = c.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
         let min_level = {
             let m = str_field(c, "min_level");
@@ -1369,12 +1386,7 @@ fn header_safe(s: &str) -> String {
 /// 从发件箱那行的 payload 里取 level / plugin / task（记录时就在里面）。
 fn payload_meta(row: &Row) -> (String, String, String) {
     let v: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
-    let g = |k: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
+    let g = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let level = g("level");
     let level = if level.is_empty() {
         "warn".to_string()
@@ -1642,9 +1654,8 @@ async fn send_mail(ch: &Channel, title: &str, body: &str) -> Result<(), String> 
         allow_plaintext_auth: false,
     };
     let note = |_: &str| {};
-    let out = tokio::task::spawn_blocking(move || {
-        crate::smtp::send_with_options(&cfg, opts, &note)
-    })
+    let out =
+        tokio::task::spawn_blocking(move || crate::smtp::send_with_options(&cfg, opts, &note))
     .await
     .map_err(|e| format!("SMTP 任务失败: {e}"))?;
     // 成功时 smtp 返回服务器最后那句回复，这里只关心「成没成」
@@ -1853,7 +1864,9 @@ pub async fn fire_scheduled(
         let mut due: Option<chrono::DateTime<chrono::Local>> = None;
         // 最多往前找 8 个点，够覆盖「停机一天」；再多的只取最后一个
         for _ in 0..8 {
-            let Some(next) = sched.next_base(cursor) else { break };
+            let Some(next) = sched.next_base(cursor) else {
+                break;
+            };
             if next.timestamp_millis() > now_ms {
                 break;
             }

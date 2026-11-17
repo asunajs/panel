@@ -91,17 +91,73 @@ pub fn path_for(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}{SUFFIX}"))
 }
 
+/// 清单缓存：路径 → (mtime, size, 解析结果)。
+///
+/// 为什么要有（第 190 轮性能 review）：`/api/state` 每 5 秒给每个插件读一次清单，
+/// `/api/plugins/files` 也是 —— 7 个插件就是每秒 2.8 次 read+parse，插件多了线性涨。
+/// 清单是「改文件才变」的东西，用 mtime+size 当版本号足够（同一个 mtime 下改内容
+/// 才会漏，而那需要故意伪造时间戳）。
+/// 缓存一格：文件时间戳（mtime_ms, len）+ 解析结果。
+type CacheRow = (u64, u64, Option<Manifest>);
+type Cache = std::sync::Mutex<std::collections::HashMap<PathBuf, CacheRow>>;
+
+fn cache() -> &'static Cache {
+    static CELL: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some((mtime, m.len()))
+}
+
 /// 读清单。**没有文件不是错误**（Ok(None)）；文件坏了是错误（要让人看见）。
 pub fn load(dir: &Path, name: &str) -> Result<Option<Manifest>, String> {
     let path = path_for(dir, name);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    // 文件不存在：连 stat 都不用，直接命中缓存里的 None（每个未装清单的插件都会走到）
+    let st = stamp(&path);
+    if let Some(st) = st {
+        if let Some((m, sz, v)) = cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+        {
+            if *m == st.0 && *sz == st.1 {
+                return Ok(v.clone());
+            }
+        }
+    } else if let Some((m, sz, v)) = cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&path)
+    {
+        if *m == 0 && *sz == 0 {
+            return Ok(v.clone());
+        }
+    }
+    let (stamp_val, out) = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let out = serde_json::from_str::<Value>(&text)
+                .map(|v| Some(parse(&v)))
+                .map_err(|e| format!("{} 不是合法 JSON: {e}", path.display()));
+            (st.unwrap_or((0, 0)), out)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ((0, 0), Ok(None)),
         Err(e) => return Err(format!("读 {} 失败: {e}", path.display())),
     };
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("{} 不是合法 JSON: {e}", path.display()))?;
-    Ok(Some(parse(&v)))
+    if let Ok(v) = &out {
+        cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path, (stamp_val.0, stamp_val.1, v.clone()));
+    }
+    out
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -263,7 +319,9 @@ fn finger_of(path: &Path, dir_plugin: bool) -> Option<Finger> {
             let mut newest = 0i64;
             let mut stack = vec![root.to_path_buf()];
             while let Some(d) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                let Ok(rd) = std::fs::read_dir(&d) else {
+                    continue;
+                };
                 for e in rd.flatten() {
                     let p = e.path();
                     if p.is_dir() {

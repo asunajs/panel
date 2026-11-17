@@ -2,7 +2,8 @@
 //!
 //! 纪律沿用基线：
 //! - 写接口必须带 `x-panel: 1`（跨站「简单请求」带不上自定义头，预检又必失败）
-//! - 单令牌鉴权走请求头，**不走 URL query** —— query 会进访问日志
+//! - 单令牌鉴权走请求头，**不走 URL query** —— query 会进访问日志。
+//!   唯一的例外是 `/plugins/*`（插件界面在新标签里打开，加不了自定义头，只能 `?t=`）
 //! - 统一安全响应头，401/403 也带上
 
 use std::path::PathBuf;
@@ -411,9 +412,11 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
     if let Some(d) = res.extensions().get::<ErrorDetail>() {
         // 每分钟配额（`log.http_per_min`，0 = 不限）：扫描器一秒几十个 404 时，
         // 这些行既是证据也是噪音 —— 前 N 条照记，超出的丢弃。
-        if !http_log_allowed() {
-            return res;
-        }
+        //
+        // 配额只管**日志**，不管页面（第 190 轮）：原来是超额就 return res，
+        // 于是扫描器刷完之后，正常用户浏览器点开 404 拿到的是一坨 JSON ——
+        // 配额的本意是「别把日志冲掉」，不该改用户看到的东西。
+        if http_log_allowed() {
         let level = if status.is_server_error() {
             crate::log::Level::Error
         } else {
@@ -440,6 +443,7 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
                 ref_id = r.to_string();
                 break;
             }
+        }
         }
     }
 
@@ -598,6 +602,17 @@ pub fn router(st: AppState) -> Router {
         .route("/api/logs", get(api_logs))
         .route("/api/logs/stream", get(api_logs_stream))
 
+        // 引擎试跑：一次性上下文，独立配额（试跑一次能占住整个执行预算）。
+        //
+        // **必须和别的 api 一样过 require_token**（第 190 轮安全 review）：原来这个 merge
+        // 挂在外层 Router 上（只套了 rate_limit_test），于是任何能连到面板的人都能
+        // POST /api/test/js 执行任意 JS —— fs 在，能读 config.json 里的渠道密钥、
+        // 能写 plugins/*.js（下次加载即代码执行）。
+        .merge(
+            Router::new()
+                .route("/api/test/js", post(api_test_js))
+                .layer(middleware::from_fn_with_state(st.clone(), rate_limit_test)),
+        )
         // 配置上限 4 MiB、插件源码 512 KiB，axum 默认 2 MiB 会先把请求挡掉 —— 提到 8 MiB。
         // 未定义的 /api 路径：JSON 404（错误页中间件会按 Accept 换成页面）。
         .fallback(api_not_found)
@@ -619,13 +634,7 @@ pub fn router(st: AppState) -> Router {
                 .layer(middleware::from_fn_with_state(st.clone(), rate_limit_login)),
         )
         .route("/api/logout", post(api_logout))
-        // 引擎试跑：一次性上下文，独立配额（试跑一次能占住整个执行预算）
-        .merge(
-            Router::new()
-                .route("/api/test/js", post(api_test_js))
-                .layer(middleware::from_fn_with_state(st.clone(), rate_limit_test)),
-        )
-        .route("/", get(index_page))
+            .route("/", get(index_page))
         .route("/app.js", get(|| async {
             asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
         }))
@@ -982,6 +991,17 @@ async fn api_setup(
     JsonBody(b): JsonBody<SetupBody>,
 ) -> Result<Response, ApiError> {
     guard_write(&h)?;
+    // setup 在 require_token 之外（它要**建**令牌），所以那道 middleware 里的
+    // Host 闸（挡 DNS rebinding）到不了这里 —— 自己判一次（第 190 轮安全 review）。
+    // 不判的后果：恶意页面 rebinding 之后抢先 POST /api/setup 写一份自己的令牌，
+    // 响应里还回显出来，正主就被锁在门外了（得手删 auth.json）。
+    if !host_allowed(&h) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "没有令牌的部署只接受回环 Host（挡 DNS rebinding）。反向代理场景设 PANEL_ALLOW_ANY_HOST=1",
+        ));
+    }
     // 已经写过一份 auth.json 也算「设置过」—— 启动时还没生效（要重启），
     // 但再写一次会把用户刚抄下来的令牌**静默换掉**。
     if st.auth().is_some() || st.data_dir.join(crate::auth::FILE).exists() {
@@ -1548,6 +1568,25 @@ fn disk_cell() -> &'static std::sync::Mutex<Option<(std::time::Instant, serde_js
 /// 低于这个余量就报警：SQLite 写日志、备份、装插件都还要空间。
 const DISK_LOW_BYTES: u64 = 500 * 1024 * 1024;
 
+/// async 版（第 190 轮性能 review）：缓存过期那一次要遍历 data/ 里最多 20 万个条目，
+/// 几百毫秒的阻塞 IO 摊在 async worker 上，同一个 worker 上的 SSE 流、/api/state
+/// 一起卡住。丢给 blocking 池，worker 只等结果。
+async fn disk_json(data_dir: &std::path::Path) -> serde_json::Value {
+    {
+        let cell = disk_cell();
+        let g = cell.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = g.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(30) {
+                return v.clone();
+            }
+        }
+    }
+    let d = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || disk_snapshot(&d))
+        .await
+        .unwrap_or(serde_json::Value::Null)
+}
+
 fn disk_snapshot(data_dir: &std::path::Path) -> serde_json::Value {
     let cell = disk_cell();
     {
@@ -1642,12 +1681,13 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         // 不放进 env vars 让用户猜 —— 界面自己该知道自己在哪。
         "os": crate::platform::os_name(),
         // 磁盘余量 + 面板自己占多少（30 秒缓存）。盘满是静默故障，界面上必须看得见。
-        "disk": disk_snapshot(&st.data_dir),
+        "disk": disk_json(&st.data_dir).await,
         "auth": st.auth().is_some(),
         "plugins": plugins,
         // 有文件但被禁用（不在 plugins 里）：界面要能列出来并给「启用」。
         "disabled": crate::db::plugin_disabled_names(&st.db).await,
-        // 暂停（不卸载）：定时任务不触发，但插件在、界面能开、手动能跑。
+        // 暂停：定时任务不触发；界面能开、手动能跑（但空闲卸载照样会把它收走 ——
+        // 用到时 ensure_loaded 自动装回来，所以「暂停」不等于「一定驻留内存」）。
         "suspended": crate::db::plugin_suspended_names(&st.db).await,
         // 有文件、没禁用、但没加载起来：界面要能说清为什么，并给「重试」。
         "failed": failed_plugins(&st.load_errors),
@@ -1858,6 +1898,20 @@ async fn plugins_install(
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(bad(format!("只接受 http(s) 地址，收到：{url}")));
     }
+    // 明文 http 装插件 = 让同路的人随便换掉要执行的代码，所以必须自带 sha256
+    // （第 190 轮安全 review）。https 才允许不校验 —— 那儿有 TLS 兜着。
+    if url.starts_with("http://")
+        && req
+            .sha256
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+    {
+        return Err(bad(
+            "http:// 装插件必须带 sha256（明文通道挡不住替换）；要省事就用 https://",
+        ));
+    }
     let name = match req.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(n) => n.to_string(),
         None => crate::install::name_from_url(&url).map_err(bad)?,
@@ -2024,7 +2078,8 @@ async fn scripts_upload(
 /// 暂停一个插件（第 167 轮）：**不卸载**，只是让调度器不再触发它的定时任务。
 ///
 /// 与「停用」的区别（用户问过）：停用 = 卸载 + 重启后不加载（任务列表会消失）；
-/// 暂停 = 插件还在，任务照旧列在界面上、标「已暂停」，手动运行也照旧能跑。
+/// 暂停 = 只停定时：任务照旧列在界面上、标「已暂停」，手动运行照旧能跑。
+/// 注意它**不保证插件驻留内存**（第 189 轮起空闲卸载也会收走，用到时自动装回）。
 async fn plugin_suspend(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -2233,6 +2288,7 @@ async fn plugin_disable(
     crate::db::set_plugin_enabled(&st.db, &name, false)
         .await
         .map_err(bad)?;
+    forget_disabled_cache();
     // 用户明确关掉的，不该再挂在「加载失败」列表上（那是另一回事）。
     if let Ok(mut g) = st.load_errors.lock() {
         g.remove(&name);
@@ -2262,6 +2318,7 @@ async fn plugin_enable(
             crate::db::set_plugin_enabled(&st.db, &name, true)
                 .await
                 .map_err(bad)?;
+            forget_disabled_cache();
             if let Ok(mut g) = st.load_errors.lock() {
                 g.remove(&name);
             }
@@ -2300,13 +2357,46 @@ async fn plugin_stop(
 /// 「要用这个插件了」——不在内存就装回来（第 188 轮）。
 ///
 /// 停用的插件**不**自动装：停用是用户明确关掉的，静默装回来等于把停用变成了摆设。
+/// 停用名单的 1 秒缓存（第 190 轮性能 review）。
+///
+/// 「用到就装」之后，插件界面的每个接口请求都要先问一次「这个插件停用了吗」——
+/// 打开一个插件页面就是几十次 DB round-trip，全排在唯一的 DB 线程上。
+/// 停用是低频动作，1 秒的延迟没有代价（真停用时调度器那边已经把它卸掉了）。
+async fn disabled_names_cached(st: &AppState) -> Vec<String> {
+    type Cached = std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>;
+    fn cell() -> &'static Cached {
+        static CELL: std::sync::OnceLock<Cached> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| std::sync::Mutex::new(None))
+    }
+    if let Some((at, v)) = cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        if at.elapsed() < std::time::Duration::from_secs(1) {
+            return v.clone();
+        }
+    }
+    let v = crate::db::plugin_disabled_names(&st.db).await;
+    *cell().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+/// 停用 / 启用之后立刻作废缓存：不然刚点完「停用」，1 秒内的插件接口调用
+/// 还会按「没停用」放行（e2e 里就是「停用后立刻执行该 409」那条）。
+pub(crate) fn forget_disabled_cache() {
+    type Cached = std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>;
+    fn cell() -> &'static Cached {
+        static CELL: std::sync::OnceLock<Cached> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| std::sync::Mutex::new(None))
+    }
+    *cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 pub(crate) async fn sched_ready(st: &AppState, plugin: &str) -> Result<(), ApiError> {
     safe_name(plugin)?;
-    if crate::db::plugin_disabled_names(&st.db)
-        .await
-        .iter()
-        .any(|d| d == plugin)
-    {
+    if disabled_names_cached(st).await.iter().any(|d| d == plugin) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "plugin_disabled",
@@ -3205,8 +3295,26 @@ async fn write_atomic(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
-    let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
-    tokio::fs::write(&tmp, bytes).await?;
+    // 名字带 pid + 纳秒，避开并发写同一个目标；create_new 拒绝跟随符号链接与已存在文件
+    // （第 190 轮安全 review：fs::write 会在别人预置的软链上开花）。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{name}.tmp{}.{stamp}", std::process::id()));
+    {
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            // tokio 的 OpenOptions 自带 mode（unix），不用引 trait
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).await?;
+        use tokio::io::AsyncWriteExt as _;
+        f.write_all(bytes).await?;
+        f.flush().await?;
+    }
     #[cfg(unix)]
     if let Some(m) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -3361,53 +3469,61 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         .into_iter()
         .map(|p| p.name)
         .collect();
-    let mut files = Vec::new();
-    for name in names {
-        let Some(entry) = crate::pluginfs::entry(&st.plugins_dir, &name) else {
-            continue;
-        };
-        let meta = std::fs::metadata(&entry).ok();
-        // 插件自己的界面放在 <name>.webui/ 里，有 index.html 才算有界面。
-        let webui = st
-            .plugins_dir
-            .join(format!("{name}.webui/index.html"))
-            .exists();
-        // 目录式插件的「大小」是整个目录（日志/界面里看到的就是它占多少地方），
-        // 但 modified 取入口文件 —— 那才是「这个插件上次什么时候改的」。
-        let bytes = crate::pluginfs::total_bytes(&st.plugins_dir, &name);
-        // 清单里的版本（没有清单 / 没写版本就是空串）。商店判断「可更新」要用它，
-        // 停用/按需加载的插件不在 `/api/state` 的 plugins 里，所以这里也带一份。
-        let version = crate::manifest::load(&st.plugins_dir, &name)
-            .ok()
-            .flatten()
-            .map(|m| m.version)
-            .unwrap_or_default();
-        files.push(json!({
-            "name": name,
-            // 界面按系列分组要用：禁用/未加载的插件也得能归到自己的系列里。
-            "group": crate::plugin_group(&name),
-            "version": version,
-            "bytes": bytes,
-            "modified_ms": meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64),
-            "loaded": loaded.contains(&name),
-            "webui": webui,
-            // 目录式插件：界面要把「多个文件」这件事说清楚（编辑的是入口文件）
-            "multi": crate::pluginfs::is_dir_plugin(&st.plugins_dir, &name),
-            "entry": entry
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| if crate::pluginfs::is_dir_plugin(&st.plugins_dir, &name) {
-                    format!("{name}/{s}")
-                } else {
-                    s.to_string()
-                }),
-        }));
+    // 每个插件一次 stat + 一次目录遍历 + 一次清单读（第 190 轮性能 review）：
+    // 界面每 5 秒拉一次这个接口，7 个带 .webui 的插件就是几十次阻塞 IO 摊在
+    // async worker 上 —— 一起挪进 spawn_blocking，worker 只等结果。
+    let pdir = st.plugins_dir.clone();
+    let files = tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for name in names {
+            let Some(entry) = crate::pluginfs::entry(&pdir, &name) else {
+                continue;
+            };
+            let meta = std::fs::metadata(&entry).ok();
+            // 插件自己的界面放在 <name>.webui/ 里，有 index.html 才算有界面。
+            let webui = pdir.join(format!("{name}.webui/index.html")).exists();
+            // 目录式插件的「大小」是整个目录（日志/界面里看到的就是它占多少地方），
+            // 但 modified 取入口文件 —— 那才是「这个插件上次什么时候改的」。
+            let bytes = crate::pluginfs::total_bytes(&pdir, &name);
+            // 清单里的版本（没有清单 / 没写版本就是空串）。商店判断「可更新」要用它，
+            // 停用/按需加载的插件不在 `/api/state` 的 plugins 里，所以这里也带一份。
+            let version = crate::manifest::load(&pdir, &name)
+                .ok()
+                .flatten()
+                .map(|m| m.version)
+                .unwrap_or_default();
+            // 一次 stat 算两处用（原来 is_dir_plugin 在同一个 JSON 里被调了两次）
+            let is_multi = crate::pluginfs::is_dir_plugin(&pdir, &name);
+            files.push(json!({
+                "name": name,
+                // 界面按系列分组要用：禁用/未加载的插件也得能归到自己的系列里。
+                "group": crate::plugin_group(&name),
+                "version": version,
+                "bytes": bytes,
+                "modified_ms": meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64),
+                "loaded": loaded.contains(&name),
+                "webui": webui,
+                // 目录式插件：界面要把「多个文件」这件事说清楚（编辑的是入口文件）
+                "multi": is_multi,
+                "entry": entry
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| if is_multi {
+                        format!("{name}/{s}")
+                    } else {
+                        s.to_string()
+                    }),
+            }));
     }
-    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        files
+    })
+    .await
+    .map_err(|e| internal(format!("读插件目录失败: {e}")))?;
     Ok(Json(json!({
         "dir": st.plugins_dir.display().to_string(),
         "max_bytes": source_max(),
@@ -4342,8 +4458,12 @@ async fn plugin_webui_any(
         }
     }
 
+    // 查一次就够（第 190 轮性能 review：每个插件接口请求原来要连续问两次调度器，
+    // 打开一个插件页面就是几十个请求 × 两次 actor hop）
+    let has_web = st.sched.plugin_has_web(&name).await;
+
     // 2) 简单插件的老契约：`POST /plugins/<name>/api/<handler>` → 调同名 handler
-    if !st.sched.plugin_has_web(&name).await && rel.starts_with("api/") {
+    if !has_web && rel.starts_with("api/") {
         let handler = rel.trim_start_matches("api/").to_string();
         if handler.is_empty() || handler.contains('/') {
             return Err(bad(format!("handler 名不合法: {handler}")));
@@ -4363,11 +4483,21 @@ async fn plugin_webui_any(
     }
 
     // 3) 插件自己注册过路由
-    if st.sched.plugin_has_web(&name).await {
+    if has_web {
         let mut h = serde_json::Map::new();
         for (k, v) in headers.iter() {
+            let name = k.as_str().to_ascii_lowercase();
+            // 凭据不外借（第 190 轮安全 review）：插件 handler 拿到 cookie 就等于拿到
+            // 一张 30 天的面板会话票 —— 而面板在插件 ctx 建起来之前专门擦过环境变量
+            // （auth.rs 的 scrub），这里把票递过去等于绕开那道设计。
+            if matches!(
+                name.as_str(),
+                "cookie" | "authorization" | "x-panel-token" | "proxy-authorization"
+            ) {
+                continue;
+            }
             h.insert(
-                k.as_str().to_ascii_lowercase(),
+                name,
                 Value::String(String::from_utf8_lossy(v.as_bytes()).into_owned()),
             );
         }

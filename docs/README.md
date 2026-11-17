@@ -40,7 +40,7 @@ Windows **已能交叉编译出 `.exe` 并通过依赖链接，但还没在真�
 插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，另外补了备份/恢复和通知；
 市场那一项没有内置：面板只提供一条通用能力（`POST /api/plugins/install` +
 `panel plugin install`），货架 / 商店这类应用由外部插件自己实现（私有，不在本仓文档范围）；
-在线更新仍明确不做（不让远端 JSON 决定本机跑什么代码）。
+在线更新做的是**检查 + 下载**（知道有新版本、把资产拿到手），**自动替换自己**仍然不做。
 
 ## 从零构建
 
@@ -99,7 +99,8 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [gaps.md](gaps.md) | 0.3 → 0.4 重写的差距表（做完 / 没做 / 决定不做） |
 | [mcloud-migration.md](mcloud-migration.md) | mcloud 插件迁移记录 |
 | [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐迁移记录（0.3.x QuickJS → 0.4.x LLRT） |
-| [schedule.md](schedule.md) | 任务调度配置：JSON 真源与五条口径（notify 会话进行中） |
+| [schedule.md](schedule.md) | 任务调度配置：JSON 真源与五条口径 |
+| [review-20261115.md](review-20261115.md) | 2026-11-15 的全量 review 记录（历史，留作判据） |
 | [handoff/mcloud-webui-0.4.md](handoff/mcloud-webui-0.4.md) | 交接记录：mcloud WebUI 的 0.4 变体归属 |
 
 ## 三态约定
