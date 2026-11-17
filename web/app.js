@@ -2104,8 +2104,9 @@ function setDrawerTab(name) {
   $('drawer-config').classList.toggle('hidden', name !== 'config');
 }
 
-function openDrawer(title, withTabs) {
+function openDrawer(title, withTabs, wide) {
   $('drawer').classList.remove('hidden');
+  $('drawer-panel').classList.toggle('wide', !!wide);
   $('drawer-title').textContent = title;
   $('drawer-tabs').classList.toggle('hidden', !withTabs);
   setDrawerTab('overview');
@@ -2137,7 +2138,7 @@ function kvList(pairs) {
 }
 
 async function showRun(id) {
-  const body = openDrawer('运行 #' + id);
+  const body = openDrawer('运行 #' + id, false, true);
   try {
     const data = await api('/api/runs/' + id);
     const r = data.run;

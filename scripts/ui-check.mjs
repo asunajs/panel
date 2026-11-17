@@ -918,6 +918,39 @@ async function main() {
   await sleep(1100);
   await js("showPlugin('seed')");
   await sleep(1600);
+  // 运行详情抽屉（第 222 轮，用户截图「实际日志部分太窄了」）：
+  // 520px 宽的四列日志行把消息挤成三四行。运行详情必须用宽抽屉，且隐藏插件列。
+  await js("location.hash = '#runs'");
+  await sleep(600);
+  const openedRun = await js(
+    "(()=>{const r=document.querySelector('#runs-body tr');" +
+    "if(!r)return 'no-run';r.click();return 'ok';})()",
+  );
+  await sleep(1800);
+  // 这个实例最近的运行恰好没有日志，所以往抽屉里注入一行同结构的日志来量 CSS
+  // （验的是「宽抽屉 + 隐藏插件列 + 消息列够宽」这条规则，不依赖种子数据）。
+  const runLayout = JSON.parse(await js(
+    "(()=>{const p=document.getElementById('drawer-panel');" +
+    "const ov=document.getElementById('drawer-overview');" +
+    "const box=document.createElement('div');box.className='console';" +
+    "const line=document.createElement('div');line.className='log-line';" +
+    "[['log-time','11-17 15:30:00'],['level level-info','INFO']," +
+    " ['log-plugin','mcloud-live'],['log-msg','这一趟不领 — 没在播 — 不听，也不看小红书；跳过 3 个账号']]" +
+    ".forEach(([c,t])=>{const s=document.createElement('span');s.className=c;s.textContent=t;line.append(s);});" +
+    "box.append(line);ov.append(box);" +
+    "const msg=line.querySelector('.log-msg'),plug=line.querySelector('.log-plugin');" +
+    "return JSON.stringify({wide:p.classList.contains('wide')," +
+    "panelW:Math.round(p.getBoundingClientRect().width)," +
+    "msgW:Math.round(msg.getBoundingClientRect().width)," +
+    "cols:getComputedStyle(line).gridTemplateColumns," +
+    "plugHidden:getComputedStyle(plug).display==='none'});})()",
+  ));
+  check('运行详情抽屉真的打开了', !!runLayout.panelW && runLayout.panelW > 0, JSON.stringify(runLayout));
+  check('运行详情用宽抽屉', runLayout.wide && runLayout.panelW > 600, JSON.stringify(runLayout));
+  check('运行详情里消息列够宽（>380px）', runLayout.msgW > 380, JSON.stringify(runLayout));
+  check('运行详情里隐藏插件列（同一次运行同一插件）', runLayout.plugHidden === true, JSON.stringify(runLayout));
+  await js("document.querySelector('#drawer [data-close]').click()");
+
   const drawerTight = await tightGaps('#drawer-overview');
   check('插件抽屉里的块间距 ≥ 8px', drawerTight.length === 0, JSON.stringify(drawerTight));
   await js("document.querySelector('.drawer [data-close]').click()");

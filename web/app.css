@@ -565,6 +565,12 @@ button, input, select { font: inherit; color: inherit; }
 .drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .drawer-head h2 { margin-right: auto; font-size: 15px; }
 .drawer-body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+/* 运行详情（第 222 轮）：520px 抽屉里四列日志行把消息挤成三四行；
+   宽抽屉 + 隐藏插件列（同一次运行全是同一个插件），消息列从 ~180px 提到 ~480px。 */
+.drawer-panel.wide { width: min(860px, 100vw); }
+.drawer-panel.wide .log-line { grid-template-columns: 118px 58px 1fr; }
+.drawer-panel.wide .log-plugin { display: none; }
+.drawer-panel.wide .console { font-size: 13px; padding-left: 0; padding-right: 0; }
 /* 抽屉里的内容块。之前 gap 只挂在 .drawer-body 上（管的是 tabs 与 pane 之间），
    pane **里面**的 kv / 按钮排 / 小标题全都没间距 —— 一排按钮直接顶着「它的任务」
    （第 24 轮用户连着两次说「太紧凑」）。这里把节奏补回 pane 内部。 */
