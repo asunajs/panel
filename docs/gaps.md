@@ -30,6 +30,12 @@
 
 ## 还没做（认账）
 
+- **armv7（`armv7-unknown-linux-musleabihf`）的发布产物**：`Release` 工作流里这一档一直是红的
+  （v0.6.2 与 v0.6.3 两次都是），挂在 `llrt_core` 的 `build.rs`：在 `cross` 容器里执行时
+  `Error: Os { code: 2, kind: NotFound }`，模块编译日志跑到一半就没了。它被 `continue-on-error`
+  放行，所以发布的三个二进制（aarch64 / x86_64 / windows）是齐的，只是没有 32 位 ARM。
+  要修得先复现那个 `NotFound`（怀疑是容器里缺 build.rs 要调的外部命令），需要一台能跑 cross 的机器。
+
 | # | 缺什么 | 现在什么样 | 为什么还没做 |
 |---|---|---|---|
 | — | （暂无） | 原计划里列的都已落地 | 下面「决定不做」是明确取舍，不是漏做 |

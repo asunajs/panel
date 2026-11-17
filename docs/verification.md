@@ -775,6 +775,12 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 | 端到端 | `check-lazy-load` 20/20 · `check-wake` 5/5 · `check-catchup` 5/5 · `check-cron-owner` 7/7 · `check-task-delete` 7/7 · `check-token-change` 14/14 · `check-plugin-boundary` 10/10 |
 | clippy | 除 vendor 的 doc lint 外**零 warning**（两条 `await_holding_lock` 是测试里的串行化锁，就地 allow 并写了理由） |
 | 一键门禁 | `bash scripts/gate.sh`（本轮新增，16 道门禁串行跑完并汇总） |
+| 提交 / tag | `ee8505d` / `v0.6.3`（`main` 与 tag 都已推） |
+| CI | `Release` run [44202597085](https://github.com/asunajs/panel/actions/runs/44202597085) → success；aarch64 5m31s · x86_64 5m14s · windows 5m51s |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.6.3>，3 个二进制 + `SHA256SUMS`，说明用 `CHANGELOG.md` 的 0.6.3 段 |
+| 发布后自测 | CI 里用**刚发布的产物**跑 `install.sh`：真下载 24M → SHA256 → 起来 → `readyz {plugins:1,tasks:1,failed:0}` |
+| 更新检查 | 临时实例 `/api/update/check?force=1` → `{current:"0.6.3", latest:"v0.6.3", has_update:false}`，assets 4 |
+| armv7 档 | **红**（见 [gaps.md](gaps.md)）：`llrt_core` 的 `build.rs` 在 cross 容器里 `Os { code: 2, NotFound }`；v0.6.2 那次同样红，不是这一版引入的 |
 | 首帧主题 | `node scripts/theme-flash-check.mjs` → 首帧 364ms / data-theme 145ms，全过（换成压缩产物之后重测） |
 
 ### 安全（三处高危，都是「有令牌也挡不住」的形态）
