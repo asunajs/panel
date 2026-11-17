@@ -1032,7 +1032,16 @@ pub fn should_idle_unload(
     true
 }
 
-/// 空闲卸载的唤醒窗口：任务在这个窗口内要到点就不卸。
+/// 提前唤醒窗口：任务在这个窗口内要到点，就把已卸载的插件先装回来。
+///
+/// ⚠ **这只是延迟优化，不是「能不能跑」的前提**（用户 2026-11-17 的原话：
+/// 「到点执行插件脚本和插件有没有唤醒有毛关系啊，到点了运行插件就行；旧面板的提前唤醒
+/// 是为了抢兑这种时间敏感的活准备的」）。
+///
+/// 装回来要读文件 + 跑顶层代码，通常几十到几百毫秒；`@every 1s` 这种卡秒的任务如果等到
+/// 触发那一刻才装，就慢了一拍。抢兑类任务另有一个按任务配置的 `lead_ms`（也是提前量）。
+/// 窗口错过/醒晚了不影响跑：`fire_due` 到点发现插件不在就 `request_load`，装完由
+/// `run_overdue_of` 立刻把这一拍派发出去。
 pub const IDLE_WAKE_WINDOW_MS: i64 = 180_000;
 
 /// 空闲多久卸载 JS 运行时（默认 30 分钟；配置写 0 就是永不卸载）。
@@ -1613,6 +1622,9 @@ impl Inner {
                         }
                         // 记下「这个插件有没有界面」：下次启动据此决定要不要省这一次加载
                         self.note_surface_async(&name);
+                        // 到点了就把这一拍跑掉（插件刚装回来）—— 见 run_overdue_of
+                        let n = name.clone();
+                        self.run_overdue_of(&n).await;
                         Ok(())
                     }
                     Err(e) => {
@@ -2312,6 +2324,83 @@ impl Inner {
         }
     }
 
+    /// 到点了就把这一拍跑掉 —— **不管插件刚才在不在内存里**。
+    ///
+    /// 到点的是**任务**，不是插件。按需加载/空闲卸载只负责省内存，不负责决定跑不跑；
+    /// 插件刚被装回来时调一次，把已经过点、还没跑的那一拍派发出去（`dispatch` 自己会置
+    /// `in_flight`，所以重复调用是幂等的）。
+    ///
+    /// 提前唤醒（`IDLE_WAKE_WINDOW_MS`、任务的 `lead_ms`）只是**延迟优化**：给抢兑这类卡秒
+    /// 的活留的提前量，跟「这一拍能不能跑」无关。
+    async fn run_overdue_of(&mut self, plugin: &str) {
+        let now = Local::now();
+        let idxs: Vec<usize> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.plugin == plugin
+                    && t.enabled
+                    && !t.pending_adopt
+                    && !t.in_flight
+                    && !t.lazy
+                    && t.deleted_at.is_none()
+                    && t.schedule.is_some()
+                    && trigger_at(t) <= now
+                    && self.plugins.get(&t.plugin).is_some_and(|l| !l.busy)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in idxs {
+            let (pl, nm) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+            self.log.emit(
+                &pl,
+                None,
+                Level::Info,
+                format!("任务 {nm} 到点了（插件刚装回来），现在跑"),
+            );
+            self.dispatch(i, false, None).await;
+        }
+    }
+
+    /// 到点了但插件不在内存里：现在就装回来（不等「到点前 N 分钟」那个窗口）。
+    ///
+    /// 窗口只是提前量；错过了窗口也照样得跑。所以到点这一拍发现插件不在，直接发一次装载，
+    /// 装完由 `run_overdue_of` 把这一拍派发出去。
+    fn request_load(&mut self, name: &str) {
+        if self.plugins.contains_key(name) || self.waking.contains(name) {
+            return;
+        }
+        let Some(dir) = self.plugins_dir.clone() else {
+            return;
+        };
+        match crate::pluginfs::read_source(&dir, name) {
+            Ok((src, _)) => {
+                self.waking.insert(name.to_string());
+                let (tx, rx) = oneshot::channel();
+                self.spawn_load(name.to_string(), src, false, tx);
+                let log = self.log.clone();
+                let n = name.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = rx.await.unwrap_or(Ok(())) {
+                        log.emit(
+                            &n,
+                            None,
+                            Level::Error,
+                            format!("插件 {n} 装载失败（{e}）：到点这一拍没法跑"),
+                        );
+                    }
+                });
+            }
+            Err(e) => self.log.emit(
+                name,
+                None,
+                Level::Error,
+                format!("任务到点了，但插件 {name} 读不到源码（{e}），这一拍跑不了"),
+            ),
+        }
+    }
+
     fn register(&mut self, r: Registration) {
         match r {
             Registration::Cron {
@@ -2739,29 +2828,34 @@ impl Inner {
         // 正常情况 wake_unloaded 已经在窗口里把它装回来了；走到这里说明装失败/卡住了。
         // 以前这种任务是静默的：不跑、不记、next 顺延，用户只看到「今天怎么没跑」。
         for i in 0..self.tasks.len() {
-            let t = &self.tasks[i];
-            if !t.lazy
-                || !t.enabled
-                || t.pending_adopt
-                || t.deleted_at.is_some()
-                || t.schedule.is_none()
-                || self.plugins.contains_key(&t.plugin)
-            {
+            // 先把要用的东西取出来（下面要 &mut self 去发装载，不能再借着 t）
+            let (lazy, plugin, name, at) = {
+                let t = &self.tasks[i];
+                (t.lazy, t.plugin.clone(), t.name.clone(), trigger_at(t))
+            };
+            let skip = {
+                let t = &self.tasks[i];
+                !lazy
+                    || !t.enabled
+                    || t.pending_adopt
+                    || t.deleted_at.is_some()
+                    || t.schedule.is_none()
+                    || self.plugins.contains_key(&plugin)
+            };
+            if skip {
                 continue;
             }
-            let at = trigger_at(&self.tasks[i]);
             if at > now {
                 continue; // 还没到点：正常等唤醒
             }
             // 记账：这一拍「该跑没跑」。**无条件记**（哪怕只晚了 1 秒）——
             // 装回来后由 apply_missed 把它排回队首补跑一次，不依赖库里那份 next_at
             // 快照（注册与 Loaded 谁先到会改变结果，实测同一场景一次补跑成功、一次被吃掉）。
-            let key = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
-            self.missed.insert(key, at.timestamp_millis());
-            // 喊不喊另说：正在装、或者刚落点不到 1 分钟，给它装的时间，别制造噪音。
-            if self.waking.contains(&t.plugin)
-                || now - at < ChronoDuration::minutes(1)
-            {
+            self.missed.insert((plugin.clone(), name), at.timestamp_millis());
+            // 到点了就装回来跑：不等「到点前 N 分钟」那个窗口（窗口只是提前量）。
+            self.request_load(&plugin);
+            // 喊不喊另说：正好在装、或者刚落点不到 1 分钟，给它装的时间，别制造噪音。
+            if self.waking.contains(&plugin) || now - at < ChronoDuration::minutes(1) {
                 continue;
             }
             if !should_note_behind(self.tasks[i].behind_noted, now) {
