@@ -774,7 +774,8 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 | 坑守卫 | `bash scripts/check-pitfalls.sh` → 23 条 |
 | 端到端 | `check-lazy-load` 20/20 · `check-wake` 5/5 · `check-catchup` 5/5 · `check-cron-owner` 7/7 · `check-task-delete` 7/7 · `check-token-change` 14/14 · `check-plugin-boundary` 10/10 |
 | clippy | 除 vendor 的 doc lint 外**零 warning**（两条 `await_holding_lock` 是测试里的串行化锁，就地 allow 并写了理由） |
-| 一键门禁 | `bash scripts/gate.sh`（本轮新增，15 道门禁串行跑完并汇总） |
+| 一键门禁 | `bash scripts/gate.sh`（本轮新增，16 道门禁串行跑完并汇总） |
+| 首帧主题 | `node scripts/theme-flash-check.mjs` → 首帧 364ms / data-theme 145ms，全过（换成压缩产物之后重测） |
 
 ### 安全（三处高危，都是「有令牌也挡不住」的形态）
 
@@ -810,6 +811,30 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 - 一批「告诉你某功能不存在」的说法修正（任务软删已做、`--with-tasks`、更新检查+下载已做、
   插件界面是 iframe 嵌的、脚本是子进程不是 JS 引擎、渠道 13 种、暂停≠驻留内存、空闲卸载默认 30 分钟）。
 - `notify.rs` 的 kind 报错改成列全 13 种；删掉没人用的 `Kind::is_http()`。
+
+### 前端压缩（用户要求：Rolldown）
+
+| 项 | 读数 |
+|---|---|
+| JS | highlight + schedule + app 三个源文件 **300.6 KB → 173.5 KB**（`web/panel.min.js`，rolldown，不 mangle 顶层名） |
+| CSS | **96.2 KB → 60.3 KB**（`web/panel.min.css`，lightningcss） |
+| 线上传输 | `curl -H 'accept-encoding: gzip' /panel.min.js` → **60,885 字节** |
+| 回归 | `ui-check` **183 条全过**（它经 `PANEL_WEB_DIR` 走磁盘读，正验了开发态） · `theme-flash-check` 全过 |
+| 同步守卫 | `bash scripts/check-web-build.sh` → 两个产物与源文件逐字节一致 |
+
+三个坑（都已写进 [ui.md](ui.md)）：
+① **产物要放在 `web/` 根下**，不能放 `web/dist/` —— `PANEL_WEB_DIR` 那个开发口子按
+「web/<file>」读盘，放子目录里开发态直接 500（实测 ui-check 里「运行记录」整页空表）；
+② **不能开 compress**：oxc 会把「本文件内没人引用」的顶层声明当死代码删掉，而这几个文件是
+经典脚本，`changeTokenBox` 这类名字是外部（ui-check / CDP eval）在用的；
+③ 缓存版本串要给新产物补上（`index_page` 原来只给 `/app.js`、`/app.css` 加 `?v=`）。
+
+### 仓库卫生
+
+误提交进仓库的运行产物一次清掉：`logs/*.jsonl`（最大 3.7 MB）、`adapters/node/logs/`、
+`perf-run` 的 mirror/runs 读数与 `manual.out`、各处 `__pycache__/*.pyc` ——
+**39 个文件、约 15 MB**。`.gitignore` 补了 `logs/`、`*.jsonl`、`*.pyc`、`__pycache__/`、
+`*.out`、`perf-run/{mirror,mirror-b,runs,logs}/`；`perf-run` 的脚本与 FINAL-REPORT.md 保留。
 
 ### 已知边界（这轮没改，写进文档而不是假装没有）
 

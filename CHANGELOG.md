@@ -65,6 +65,26 @@
   配 `telegram` 的人会拿到一句错误的整改指引）。
 - 删掉 `Kind::is_http()`（没人用，注释还挂着上一轮 review 的待办）。
 
+### 前端资源压缩（用户要求：Rolldown）
+
+- 页面现在加载 **`/panel.min.js` + `/panel.min.css`** 两个压缩产物：JS（highlight + schedule +
+  app 三个源文件）**300.6 KB → 173.5 KB**，CSS **96.2 KB → 60.3 KB**；gzip 之后 JS 从
+  约 75 KB 降到 **60.9 KB**。角色是「更少的解析与执行」：面板是单文件嵌入，产物也进仓库，
+  `cargo build` 依旧不需要 node。
+- 构建在 `tools/web`（rolldown 打 JS、lightningcss 压 CSS）：`cd tools/web && node build.mjs`。
+- 守卫 `bash scripts/check-web-build.sh`：重建一遍逐字节比，**改了 `web/` 下的源文件忘了重建**
+  当场红 —— 否则线上跑的还是上一次的产物，而 cargo 一句警告都不会给。
+- 刻意**不做**顶层改名（mangle）与 compress：这几个文件是经典脚本，彼此靠全局名字协作，
+  `changeTokenBox` 这类名字还被 ui-check 在 window 上直接取；压缩器看不到这些外部引用，
+  删/改名是静默坏掉（实测开 compress 后「运行记录」页直接空表）。
+
+### 仓库卫生
+
+- 删掉被误提交的运行产物：`logs/*.jsonl`（最大一份 3.7 MB）、`adapters/node/logs/`、
+  `perf-run` 的 mirror/runs 读数与 `logs/manual.out`、各处 `__pycache__/*.pyc`，
+  共 39 个文件、约 15 MB。`.gitignore` 补上 `logs/`、`*.jsonl`、`*.pyc`、`__pycache__/`、
+  `*.out`、`perf-run/{mirror,mirror-b,runs,logs}/`。（`perf-run` 的脚本与 FINAL-REPORT 留着。）
+
 ### 顺手
 
 - 错误页的**日志配额不再吃掉页面**：每分钟配额超了以后，浏览器点 404 拿到的是 JSON

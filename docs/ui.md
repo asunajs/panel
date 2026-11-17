@@ -59,8 +59,21 @@
 CSP 是 `default-src 'self'; script-src 'self'; style-src 'self'`（`src/web.rs` `security_headers`），所以：
 
 - 不能有内联 `<script>`、内联 `<style>`、`onclick=` 属性，也不能引 CDN；
-- 样式只走 `/app.css`，脚本只走 `/app.js`，两者由 `include_str!` **编进二进制**（发布形态 = 单文件）；
+- 样式与脚本由 `include_str!` **编进二进制**（发布形态 = 单文件）；
 - 因此 JS 里不拼 `innerHTML` 字符串，一律 `createElement` + `textContent`（插件/日志文本是外部输入）。
+
+**源文件与压缩产物（第 190 轮）**：页面加载的是 `/panel.min.css` + `/panel.min.js`
+（rolldown 打 JS、lightningcss 压 CSS，见下节）；源文件 `web/app.css` / `app.js` /
+`schedule.js` / `highlight.js` 仍然单独服务（工具、插件作者、门禁脚本要读源码）。
+
+    # 改了 web/ 下的源文件之后必须重建，否则页面跑的还是上一次的产物
+    cd tools/web && node build.mjs          # JS 300.6KB → 173.5KB，CSS 96.2KB → 60.3KB
+
+产物**进仓库**（面板要 `cargo build` 就能跑，构建机上不该装 node），所以「忘了重建」
+只能靠守卫抓：`bash scripts/check-web-build.sh`（重建到临时目录，逐字节比）。
+为什么不 mangle 顶层名字、不 compress：这几个文件是**经典脚本**，彼此靠全局名字协作，
+`changeTokenBox` 这类名字还被 ui-check 在 window 上直接取 —— 压缩器看不到这些外部引用，
+删/改名都是静默坏掉（实测：开了 compress 之后「运行记录」页直接空表）。
 
 调样式时不想重编译，就设 `PANEL_WEB_DIR=web` —— 资源改成每次请求从磁盘读。
 **这是开发口子**：开了之后「二进制里的界面」和「实际发出的界面」可能不是同一份，生产别开。

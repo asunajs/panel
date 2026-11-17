@@ -290,14 +290,15 @@ if not m:
 tag, off = m.group(0), m.start()
 if re.search(r'\b(defer|async)\b', tag) or re.search(r'type\s*=\s*["\']?module', tag):
     print('deferred'); sys.exit(0)
-c = re.search(r'<link[^>]*href="/app\.css"', html)
+# 样式表可能是源文件（/app.css）或压缩产物（/panel.min.css，第 190 轮）—— 都算
+c = re.search(r'<link[^>]*href="/(app|panel\.min)\.css"', html)
 if c and off > c.start():
     print('after-css'); sys.exit(0)
 print('ok')
 PY
 )
 case "$theme_boot" in
-  ok) ok '首帧主题在 head 里就定了（/theme-boot.js 阻塞且在 /app.css 之前）' ;;
+  ok) ok '首帧主题在 head 里就定了（/theme-boot.js 阻塞且在样式表之前）' ;;
   missing) bad 'web/index.html 的 head 里没有 /theme-boot.js —— 深色主题要等 app.js 跑完才生效（首帧闪白）' ;;
   deferred) bad 'web/index.html 的 /theme-boot.js 带了 defer/async —— 它必须阻塞，否则 paint 不等它' ;;
   after-css) bad 'web/index.html 里 /theme-boot.js 排在 /app.css 之后 —— 主题得在样式之前定下来' ;;

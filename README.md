@@ -323,7 +323,9 @@ cargo test                      # 全部单测（含引擎 / 调度 / 网络层�
 bash scripts/check-pitfalls.sh  # 踩过的坑要有守卫盯着
 bash scripts/check-docs.sh      # 文档内链与篇幅
 bash scripts/check-plugin-boundary.sh  # 面板仓不放插件产物
-node --check web/app.js         # 前端零构建，改完刷新浏览器即可
+node --check web/app.js         # 语法自检（源文件）
+cd tools/web && node build.mjs  # 改了 web/ 下源文件之后重建压缩产物（否则页面跑旧产物）
+bash scripts/check-web-build.sh # 守卫：产物与源文件是否同步
 ```
 
 前端在 `web/`，没有构建步骤。日常部署用 `scripts/deploy-daily.sh`。

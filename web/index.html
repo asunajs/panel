@@ -13,7 +13,10 @@
          这里放一个**阻塞的** head 脚本：paint 会等它执行完，顺序就反过来了。
          CSP 是 script-src 'self'，内联脚本一律被拦，所以用这个外部文件（错误页也用它）。 -->
     <script src="/theme-boot.js"></script>
-    <link rel="stylesheet" href="/app.css" />
+    <!-- 压缩产物（第 190 轮）：源文件还是 web/app.css、web/app.js 那几个，
+         这里加载的是 rolldown + lightningcss 打出来的单文件（改了源文件要跑
+         tools/web/build.mjs，scripts/check-web-build.sh 会拦住忘记重建的情况）。 -->
+    <link rel="stylesheet" href="/panel.min.css" />
   </head>
   <body>
     <div class="app">
@@ -617,9 +620,9 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
     <div class="toast hidden" id="toast" role="status"></div>
     <!-- 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就消失，用户自己关。 -->
     <div class="notices" id="notices" aria-live="polite"></div>
-    <script src="/highlight.js"></script>
-    <script src="/schedule.js"></script>
-    <script src="/app.js"></script>
+    <!-- 一个文件代替原来 highlight.js + schedule.js + app.js 三个：它们的加载顺序
+         就是打包顺序，别在 index.html 里拆开（拆开会重复声明同名顶层 const）。 -->
+    <script src="/panel.min.js"></script>
   
 </body>
 </html>

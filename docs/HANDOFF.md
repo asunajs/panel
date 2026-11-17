@@ -16,7 +16,8 @@
     node scripts/ui-check.mjs     # 界面（无头 Edge + CDP，180+ 条）
     bash scripts/check-docs.sh    # 文档篇数与内链
 
-- 宿主源码 `src/` 约 4 万行（含测试）；WebUI 零构建（`web/` 内嵌 `include_str!`，约 1.1 万行）。
+- 宿主源码 `src/` 约 4 万行（含测试）；WebUI 约 1.1 万行，源文件在 `web/`、压缩产物
+  `web/panel.min.{js,css}` 也进仓库（`tools/web` 里是 rolldown + lightningcss 的构建，见 [ui.md](ui.md)）。
 - 远端 `origin = https://github.com/asunajs/panel.git`；发版打到 tag（`v0.6.x`），CI 出四件资产。
 - 开发实例 `http://127.0.0.1:8787`（无令牌、只绑回环）；日常实例 `~/panel-3030`
   （launchd `dev.panel`，端口 3030）。插件/任务数以 `/readyz` 为准，不在本文写死。
@@ -63,9 +64,10 @@
 | `migrate.rs` | 从 0.3.x（QuickJS）面板搬插件状态 |
 | 其余 | `auth` / `backup` / `install` / `upload` / `pluginfs` / `manifest` / `plan` / `cron` / `log` / `retention` / `outbound` / `ssrf` / `sync_bridge` / `alerts` / `disk` / `update` / `platform` … |
 
-### 4.2 WebUI（`web/`，零构建）
+### 4.2 WebUI（`web/`）
 
-`index.html` + `app.css` + `app.js`（约 6 千行，含视图渲染与轮询）+ `ui.js`（控件）+
+页面加载的是压缩产物 `panel.min.js` / `panel.min.css`（第 190 轮，rolldown 打 JS +
+lightningcss 压 CSS）；源文件 `index.html` + `app.css` + `app.js`（约 6 千行，含视图渲染与轮询）+ `ui.js`（控件）+
 `schedule.js`（排程表单，可脱离浏览器测）+ `highlight.js`（极简高亮）+ `ui-kit.*`（插件作者的样板页）。
 **CSP 是 `script-src 'self'`：内联 `<script>` / `style=` 一律不执行**，加交互只能改这几个文件。
 
@@ -130,6 +132,7 @@
     cargo build --release --offline       # 出二进制
     cargo test --offline                  # 单测
     node scripts/ui-check.mjs             # 界面（无头 Edge，需本机有 Edge）
+    (cd tools/web && node build.mjs)      # 改了 web/ 下的源文件之后重建压缩产物（守卫会拦）
     bash scripts/check-lazy-load.sh       # 按需加载 + 空闲卸载 + 用到就装（真起面板，约 2 分钟）
     bash scripts/check-wake.sh            # 唤醒链路（真等窗口）
     bash scripts/check-catchup.sh         # 补跑（冻住进程跨过触发时刻）

@@ -33,6 +33,10 @@ const APP_JS: &str = include_str!("../web/app.js");
 // 单独一个文件是为了能脱离浏览器直接跑测试（scripts/schedule-check.mjs）。
 const SCHEDULE_JS: &str = include_str!("../web/schedule.js");
 const APP_CSS: &str = include_str!("../web/app.css");
+/// 压缩产物（第 190 轮，rolldown + lightningcss）。index.html 加载这两个：
+/// 源文件仍然单独服务（工具、插件作者、门禁脚本要读源码），这里是用户真正下载的那份。
+const MIN_JS: &str = include_str!("../web/panel.min.js");
+const MIN_CSS: &str = include_str!("../web/panel.min.css");
 /// 错误页模板（第 166 轮）：404/401/500 都渲染它，用的是面板自己的样式。
 const ERROR_HTML: &str = include_str!("../web/error.html");
 /// 错误页的主题兜底脚本（8 行）：错误页没有 app.js，CSP 又不许内联脚本。
@@ -640,6 +644,14 @@ pub fn router(st: AppState) -> Router {
         }))
         .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
         .route(
+            "/panel.min.css",
+            get(|| async { asset(MIN_CSS, "text/css; charset=utf-8", "panel.min.css") }),
+        )
+        .route(
+            "/panel.min.js",
+            get(|| async { asset(MIN_JS, "text/javascript; charset=utf-8", "panel.min.js") }),
+        )
+        .route(
             "/schedule.js",
             get(|| async { asset(SCHEDULE_JS, "text/javascript; charset=utf-8", "schedule.js") }),
         )
@@ -729,6 +741,9 @@ async fn index_page() -> Response {
     let body = body
         .replace("/app.js\"", &format!("/app.js?v={v}\""))
         .replace("/app.css\"", &format!("/app.css?v={v}\""))
+        // 页面真正加载的是压缩产物（第 190 轮）：它们也得不吃旧缓存
+        .replace("/panel.min.js\"", &format!("/panel.min.js?v={v}\""))
+        .replace("/panel.min.css\"", &format!("/panel.min.css?v={v}\""))
         // 首帧主题脚本也是阻塞资源：不跟版本的话，升级后仍可能吃旧缓存。
         .replace("/theme-boot.js\"", &format!("/theme-boot.js?v={v}\""));
     (

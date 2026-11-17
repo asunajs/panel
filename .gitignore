@@ -7,3 +7,14 @@ node_modules
 .DS_Store
 plugins-wip/
 .zcode/
+
+# 运行产物与缓存（第 190 轮：这些东西一度被提交进仓库，最大的一份 3.7MB）
+logs/
+*.jsonl
+*.pyc
+__pycache__/
+*.out
+perf-run/mirror/
+perf-run/mirror-b/
+perf-run/runs/
+perf-run/logs/
