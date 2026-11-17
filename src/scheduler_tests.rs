@@ -546,3 +546,33 @@ fn lazy_placeholder_fallback_still_carries_suggestion() {
     assert_eq!(t.base_cron, "0 8,20 * * *", "兜底也要把建议带上，否则同样退不回去");
     assert!(t.lazy);
 }
+
+// ── 补跑窗口（第 220 轮：用户报「8 点没跑」）────────────────────────────
+//
+// 唤醒是「到点前 2 分钟」。进程被冻结 / 机器休眠 / 唤醒卡住时，醒来那拍已经过期。
+// 以前注册只在「还没到」时才恢复库里的 next_at，过期那拍就被静默吃掉：
+// 不跑、不记、next 顺延 —— 用户只看到「昨天跑了、今天没跑」。
+
+#[test]
+fn catch_up_keeps_a_future_beat_unchanged() {
+    let now = 1_790_000_000_000i64;
+    assert_eq!(catch_up_at(now + 60_000, now), Some(now + 60_000), "还没到：照旧");
+}
+
+#[test]
+fn catch_up_restores_a_beat_that_already_passed() {
+    let now = 1_790_000_000_000i64;
+    // 早上 8:00 那拍，醒来时已经 8:05 —— 必须恢复成 next_fire，让 fire_due 补跑一次
+    assert_eq!(catch_up_at(now - 5 * 60_000, now), Some(now - 5 * 60_000));
+    // 离得久一点也认（睡了一晚上 / 白天没开机）
+    assert_eq!(catch_up_at(now - 9 * 3_600_000, now), Some(now - 9 * 3_600_000));
+}
+
+#[test]
+fn catch_up_gives_up_on_a_long_dead_beat() {
+    let now = 1_790_000_000_000i64;
+    // 太久远：别在用户打开界面时突然补跑一堆，交给正常排期
+    assert_eq!(catch_up_at(now - CATCH_UP_MAX_MS - 1, now), None);
+    // 离谱的未来值（手改库 / 时区搬家）也不认
+    assert_eq!(catch_up_at(now + CATCH_UP_MAX_MS + 1, now), None);
+}

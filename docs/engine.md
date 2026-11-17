@@ -938,7 +938,7 @@ provider，不换握手实现），**只有 `tls-openssl` 是真 OpenSSL**
 3. **没有任务行的插件也要登记**：省掉的插件若一条任务都没有（只注册 handler），
    不登记就会从界面「凭空消失」。所以 seed_lazy 除了任务行还收一份名字。
 
-端到端检查：bash scripts/check-lazy-load.sh（24 条，真起面板 + 两次重启 + 自动装 + 空闲卸载 + 停用/暂停不驻留）。
+端到端检查：bash scripts/check-lazy-load.sh（24 条，真起面板 + 两次重启 + 自动装 + 空闲卸载 + 停用/暂停不驻留）。到点那拍**不能丢**（晚到补跑 / 唤醒卡住重来 / 装不回来要吵）见 [pitfalls.md](pitfalls.md) 第 114 条。
 
 ## 用到就装（第 188 轮）
 

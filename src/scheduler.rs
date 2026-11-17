@@ -1038,6 +1038,37 @@ pub const IDLE_WAKE_WINDOW_MS: i64 = 120_000;
 /// 空闲多久卸载 JS 运行时（默认 30 分钟；配置写 0 就是永不卸载）。
 pub const IDLE_UNLOAD_DEFAULT_SECS: i64 = 1800;
 
+/// 按需加载的插件「补跑」窗口：库里记着的那一拍**已经过去**，但只要没过这么久，
+/// 装回来后照样补跑一次（而不是顺延到下一拍）。
+///
+/// 为什么要有补跑（第 220 轮，用户 2026-11-17 报「8 点没跑」）：唤醒是「到点前 2 分钟」，
+/// 进程被冻结、机器休眠、或者唤醒那一步卡住时，醒来时那一拍已经过期。**面板的职责是把
+/// 任务跑掉**，省内存不能换来丢拍 —— 旧面板常驻加载时，晚到多久都会跑。签到类任务
+/// 晚几小时跑完全无害，丢一整天才是真损失。
+///
+/// 上限存在的理由只有一个：别让一个几周没装过的插件在被人打开界面时突然跑起来。
+pub const CATCH_UP_MAX_MS: i64 = 7 * 24 * 3_600_000;
+
+/// 「正在装」这件事卡了多久就不再等：装载任务没有超时保护（插件顶层 await 可能永不返回），
+/// 卡住时 waking 里的名字永远不删，这个插件从此再也不会被唤醒 —— 静默丢拍。
+/// 到点过去这么久还卡着，就当它没在装，重来一次（两条 Loaded 都到的话，后到的替换先到的）。
+pub const STUCK_WAKE_MS: i64 = 5 * 60_000;
+
+/// 库里记着的那一拍，注册时还要不要照原样恢复成 next_fire。
+///
+/// - 未来的：恢复（老代码就只认这种情况）。
+/// - **已经过去的、但还在补跑窗口里：也恢复** —— 让 fire_due 把它当「到点了」跑一次。
+/// - 太久远/离谱（手改库、时区搬家）：不恢复，交给正常排期，别半夜补跑一堆。
+pub fn catch_up_at(saved_ms: i64, now_ms: i64) -> Option<i64> {
+    if saved_ms - now_ms > CATCH_UP_MAX_MS {
+        return None;
+    }
+    if now_ms - saved_ms > CATCH_UP_MAX_MS {
+        return None;
+    }
+    Some(saved_ms)
+}
+
 /// 一个插件同时只有一个 JS 执行位（`Loaded::busy`）。忙的时候来的 HTTP 请求先**排队**：
 /// 插件界面里两个请求挨着发（`Promise.all`）是极常见的写法，直接 502 会让人以为
 /// 「有任务在跑」—— 其实是自己撞自己（第 142 轮，pitfalls 89）。
@@ -1107,6 +1138,13 @@ struct Inner {
     plugins_dir: Option<std::path::PathBuf>,
     /// 正在异步唤醒的插件（避免同一拍发两次 load）。
     waking: std::collections::HashSet<String>,
+    /// 「到点了但插件还没装回来」的那一拍（任务键 → 该拍的触发时刻）。
+    ///
+    /// 第 220 轮：按需加载的插件醒来时那一拍往往已经过去，注册时恢复 `next_at` 依赖
+    /// 库里那份快照，遇到「注册比 Loaded 先到 / 后到」两种顺序会走出不同结果 —— 实测
+    /// 同样的场景一次补跑成功、一次被吃掉。所以单独记一份：只要这一拍是「该跑没跑」，
+    /// 装回来后**一定**把它排回队首，不再靠快照猜。
+    missed: std::collections::HashMap<(String, String), i64>,
     /// 等某个插件装完的调用方（第 188 轮）：ensure_loaded 的 reply，
     /// Loaded（成功或失败）时一起放行 —— 两条通道，谁先到都得有个交代。
     waiters: std::collections::HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
@@ -1175,6 +1213,7 @@ pub fn start(
         lazy: std::collections::HashSet::new(),
         plugins_dir: None,
         waking: std::collections::HashSet::new(),
+        missed: std::collections::HashMap::new(),
         waiters: std::collections::HashMap::new(),
         adopt_mode: std::collections::HashSet::new(),
         tasks: Vec::new(),
@@ -1562,6 +1601,14 @@ impl Inner {
                         // 占位任务里没有被真正 register_cron 顶掉的，说明插件已经不注册它了
                         // （改了名字、删了任务）：留着会让任务表显示不存在的东西。
                         self.tasks.retain(|t| !(t.plugin == name && t.lazy));
+                        // 迟到唤醒：把「该跑没跑」的那一拍排回队首（第 220 轮）。
+                        // 注册可能比这条 Loaded 先到、已经按「现在」把 next_fire 重算成下一拍；
+                        // 也可能后到，走 register 里的那条路。两边都调一次，谁先到都不丢。
+                        for i in 0..self.tasks.len() {
+                            if self.tasks[i].plugin == name {
+                                self.apply_missed(i);
+                            }
+                        }
                         // 记下「这个插件有没有界面」：下次启动据此决定要不要省这一次加载
                         self.note_surface_async(&name);
                         Ok(())
@@ -2226,6 +2273,43 @@ impl Inner {
         });
     }
 
+    /// 这一拍「该跑没跑」的，装回来就立刻排回队首（补跑一次）。
+    ///
+    /// 为什么不用库里那份 `next_at`：注册和 `Loaded` 谁先到不确定，两条路各有各的恢复点，
+    /// 实测同一场景一次补跑成功、一次被吃掉。改成「谁该跑没跑」这件事自己记账，就不看顺序了。
+    fn apply_missed(&mut self, i: usize) {
+        let key = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+        let Some(beat) = self.missed.remove(&key) else { return };
+        if self.tasks[i].schedule.is_none()
+            || !self.tasks[i].enabled
+            || self.tasks[i].deleted_at.is_some()
+        {
+            return;
+        }
+        let now = Local::now().timestamp_millis();
+        if now - beat > CATCH_UP_MAX_MS {
+            return;
+        }
+        if let Some(dt) = chrono::DateTime::from_timestamp_millis(beat) {
+            let at = dt.with_timezone(&Local);
+            self.tasks[i].base_fire = at;
+            self.tasks[i].next_fire = at;
+            let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+            let late = now - beat;
+            let how = if late < 60_000 {
+                format!("{} 秒", late.max(0) / 1000)
+            } else {
+                format!("{} 分钟", late / 60_000)
+            };
+            self.log.emit(
+                &p,
+                None,
+                Level::Info,
+                format!("任务 {n} 补跑：{} 那一拍装回来晚了 {how}", at.format("%m-%d %H:%M")),
+            );
+        }
+    }
+
     fn register(&mut self, r: Registration) {
         match r {
             Registration::Cron {
@@ -2265,6 +2349,13 @@ impl Inner {
                         self.tasks[i].suggest_lead_ms = lead_ms;
                         // 参数只能由插件给（是运行时 payload，不是配置）
                         self.tasks[i].params = params;
+                        // 第 220 轮：占位任务被「迟到唤醒」时，库里那拍可能已经过去。
+                        // next_fire 保持不动（下面不重算），但 base_fire 要跟着挪到同一刻 ——
+                        // advance 是从 base_fire 往前推的，不挪的话跑完这一次会从未来的 base
+                        // 再推，白白跳掉下一拍。
+                        if self.tasks[i].lazy && self.tasks[i].next_fire < Local::now() {
+                            self.tasks[i].base_fire = self.tasks[i].next_fire;
+                        }
                         // 真家伙来了：占位标记必须清掉，否则 Loaded 会把这条当「没被注册的
                         // 占位任务」删掉，任务就凭空消失了（第 180 轮实测：唤醒后任务不见）。
                         // 注意这里**不重算 next_fire**：库里的下一次到点是准的，
@@ -2300,6 +2391,8 @@ impl Inner {
                                 ),
                             );
                         }
+                        // 迟到唤醒：这一拍该跑没跑（注册前就记下了），排回队首补跑
+                        self.apply_missed(i);
                         self.remember(i);
                         self.persist_task(i);
                     }
@@ -2326,11 +2419,20 @@ impl Inner {
                         };
                         // 库里记着的下一次到点优先：占位任务在 Loaded 里被清掉、
                         // 注册又晚到时会走到这儿，这时重算会把 @every 推到下一个周期 → 漏跑一拍。
+                        //
+                        // 第 220 轮：**已经过去的那一拍也恢复**（catch_up_at）。以前这里只认
+                        // 「还没到」的时刻，于是按需加载的插件被唤醒晚了就静默丢一拍：
+                        // 既不跑也不说，next 顺延，用户只看到「昨天跑了、今天没跑」。
                         if let Some(saved) = self.saved.get(&(plugin.clone(), name.clone())) {
                             if let Some(ms) = saved.next_at {
-                                if ms > Local::now().timestamp_millis() {
+                                if let Some(ms) = catch_up_at(ms, Local::now().timestamp_millis()) {
                                     if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
-                                        t.next_fire = dt.with_timezone(&Local);
+                                        let at = dt.with_timezone(&Local);
+                                        // 理论线一起挪：advance 是从 base_fire 往前推的，
+                                        // 只改 next_fire 不改 base_fire，跑完会按未来的 base
+                                        // 再推一次，白白跳掉一整拍。
+                                        t.base_fire = at;
+                                        t.next_fire = at;
                                     }
                                 }
                             }
@@ -2356,6 +2458,8 @@ impl Inner {
                                 ),
                             );
                         }
+                        // 迟到唤醒：这一拍该跑没跑（注册前就记下了），排回队首补跑
+                        self.apply_missed(i);
                         self.remember(i);
                         self.persist_task(i);
                     }
@@ -2544,9 +2648,6 @@ impl Inner {
         let now_ms = now.timestamp_millis();
         let names: Vec<String> = self.unloaded.keys().cloned().collect();
         for name in names {
-            if self.waking.contains(&name) {
-                continue;
-            }
             // 暂停的插件不会到点跑任务，别白装一次（界面调用会走 ensure_loaded）
             if self.suspended.contains(&name) {
                 continue;
@@ -2564,14 +2665,49 @@ impl Inner {
                 .map(|t| t.next_fire.timestamp_millis())
                 .min();
             let Some(next) = next else { continue };
+            if self.waking.contains(&name) {
+                // 装到一半：正常情况下 Loaded 一到就清掉。但装载没有超时保护
+                // （插件顶层 await 可能永不返回），卡住时这个名字永远不删 ——
+                // 这个插件从此再也不会被唤醒，任务静默丢拍。
+                // 到点已经过去 STUCK_WAKE_MS 还卡着，就当它没在装，重来一次。
+                if next <= now_ms && now_ms - next > STUCK_WAKE_MS {
+                    self.waking.remove(&name);
+                    self.log.emit(
+                        &name,
+                        None,
+                        Level::Warn,
+                        format!(
+                            "插件 {name} 到点了还没装回来（唤醒卡了 {} 分钟），重新唤醒一次",
+                            (now_ms - next) / 60_000
+                        ),
+                    );
+                } else {
+                    continue;
+                }
+            }
             if next > now_ms + IDLE_WAKE_WINDOW_MS {
                 continue;
             }
             match crate::pluginfs::read_source(&dir, &name).map(|(src, _)| src) {
                 Ok(src) => {
                     self.waking.insert(name.clone());
-                    let (tx, _rx) = oneshot::channel();
+                    // 唤醒装载用的 reply 以前是**没人收**的（`let (tx, _rx)`）：装失败时
+                    // 错误连日志都不会留 —— 线上表现为「这一拍没跑，而日志里一个字都没有」
+                    // （2026-11-17 早上 mcloud-daily 就是这样）。这里挂个接收端，失败要喊。
+                    let (tx, rx) = oneshot::channel();
                     self.spawn_load(name.clone(), src, false, tx);
+                    let log = self.log.clone();
+                    let n = name.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = rx.await.unwrap_or(Ok(())) {
+                            log.emit(
+                                &n,
+                                None,
+                                Level::Error,
+                                format!("插件 {n} 唤醒失败（{e}）：这一拍的定时任务没法跑"),
+                            );
+                        }
+                    });
                     self.log.emit(
                         &name,
                         None,
@@ -2597,6 +2733,51 @@ impl Inner {
     async fn fire_due(&mut self, now: DateTime<Local>) {
         // 先把快到点的、已卸载的插件装回来（第 174 轮）。提前 2 分钟，够它读文件 + 跑顶层代码。
         self.wake_unloaded(now);
+        // 按需加载的任务：到点了插件还是没装回来 —— **必须说出来**（第 220 轮）。
+        // 正常情况 wake_unloaded 已经在窗口里把它装回来了；走到这里说明装失败/卡住了。
+        // 以前这种任务是静默的：不跑、不记、next 顺延，用户只看到「今天怎么没跑」。
+        for i in 0..self.tasks.len() {
+            let t = &self.tasks[i];
+            if !t.lazy
+                || !t.enabled
+                || t.pending_adopt
+                || t.deleted_at.is_some()
+                || t.schedule.is_none()
+                || self.plugins.contains_key(&t.plugin)
+            {
+                continue;
+            }
+            let at = trigger_at(&self.tasks[i]);
+            if at > now {
+                continue; // 还没到点：正常等唤醒
+            }
+            // 记账：这一拍「该跑没跑」。**无条件记**（哪怕只晚了 1 秒）——
+            // 装回来后由 apply_missed 把它排回队首补跑一次，不依赖库里那份 next_at
+            // 快照（注册与 Loaded 谁先到会改变结果，实测同一场景一次补跑成功、一次被吃掉）。
+            let key = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+            self.missed.insert(key, at.timestamp_millis());
+            // 喊不喊另说：正在装、或者刚落点不到 1 分钟，给它装的时间，别制造噪音。
+            if self.waking.contains(&t.plugin)
+                || now - at < ChronoDuration::minutes(1)
+            {
+                continue;
+            }
+            if !should_note_behind(self.tasks[i].behind_noted, now) {
+                continue;
+            }
+            self.tasks[i].behind_noted = Some(now);
+            let (p, n, m) = (
+                self.tasks[i].plugin.clone(),
+                self.tasks[i].name.clone(),
+                (now - trigger_at(&self.tasks[i])).num_minutes(),
+            );
+            self.log.emit(
+                &p,
+                None,
+                Level::Warn,
+                format!("任务 {n} 到点 {m} 分钟了，插件 {p} 还没装回来（按需加载没成功）；装回来后会补跑这一拍"),
+            );
+        }
         // 插件被暂停：到点也不跑，而且**不攒落后**（否则暂停一小时会攒出几十条「该跑没跑」）。
         // 直接把计划对齐到下一拍 —— 恢复后从下一拍开始，不补跑。
         if !self.suspended.is_empty() {
