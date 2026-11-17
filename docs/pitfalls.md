@@ -725,6 +725,19 @@
     git -c http.version=HTTP/1.1 push origin main    # 9b4303e..dc6a169  main -> main
     ```
 
+    2026-11-18 发 0.6.3 时同样的坑又踩了一次，但这次 HTTP/1.1 也过不去
+    （curl 28 Failed to connect to github.com port 443 after 75003 ms），换 SSH 走 443 一次成功：
+
+    ```bash
+    git remote add ssh-origin ssh://git@ssh.github.com:443/asunajs/panel.git
+    git push ssh-origin main && git push ssh-origin v0.6.3
+    git remote remove ssh-origin        # 用完就摘，别留一个会漂的远端
+    ```
+
+    探针顺序照旧（三条一起打，30 秒内就知道走哪条）：api.github.com 回 200 说明 gh 能用、
+    令牌没问题；github.com 回 000 说明网页/git 主机的 HTTPS 握手死在这条链路上；
+    ssh -p 443 -T git@ssh.github.com 回 Hi <你> 说明 SSH 通路好 —— 直接走它推。
+
     诊断顺序（别一上来就怀疑网络全断）：
 
     | 探针 | 本次读数 | 说明 |
