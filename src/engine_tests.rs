@@ -119,7 +119,72 @@ async fn a_non_utf8_env_var_does_not_kill_the_plugin() {
     .await;
     let out = p.dispatch("h", &json!({}), 5_000).await;
     std::env::remove_var(key);
+    std::env::remove_var("PANEL_TEST_KEEP");
     out.expect("非 UTF-8 环境变量不该让插件加载或派发失败");
+}
+
+// ------------------------------------------------ 红队修复的回归（docs/security-20261118.md）
+
+/// V10：`process.exit` 不许杀宿主。补丁把它改成抛异常，插件想结束执行就 throw。
+#[tokio::test]
+async fn process_exit_throws_instead_of_killing_the_panel() {
+    let p = ok(&format!(
+        "{HANDLERS}await host.register_handler('h', async () => {{
+           try {{
+             process.exit(1);
+             throw new Error('process.exit 没有抛错 —— 那会杀掉整个面板进程');
+           }} catch (e) {{
+             const s = String(e && e.message ? e.message : e);
+             if (!s.includes('process.exit')) throw new Error('抛的不是我们的错误: ' + s);
+           }}
+           return 'ok';
+         }});"
+    ))
+    .await;
+    let out = p.dispatch("h", &json!({}), 5_000).await;
+    out.expect("process.exit 应当抛错而不是退出进程");
+}
+
+/// V7：`ATTACH DATABASE` 被 SQLite 的 `SQLITE_LIMIT_ATTACHED = 0` 挡住。
+/// 挡住它的意义是「查库」不再等于「任意路径 sqlite 文件的读 + 建文件写」。
+#[tokio::test]
+async fn attach_database_is_blocked() {
+    let p = ok(&format!(
+        "{HANDLERS}await host.register_handler('h', async () => {{
+           try {{
+             await host.sqlite_exec(\"ATTACH DATABASE ':memory:' AS extra\");
+             throw new Error('ATTACH 应当被拒');
+           }} catch (e) {{
+             const s = String(e && e.message ? e.message : e);
+             if (!s.includes('attach')) throw new Error('错误不像 ATTACH 被拒: ' + s);
+           }}
+         }});"
+    ))
+    .await;
+    p.dispatch("h", &json!({}), 5_000).await.expect("ATTACH 必须被拒");
+}
+
+/// V6：`process.env` 是白名单，宿主环境里的无关变量（凭据就藏在这种名字里）不出现。
+/// 这条用真实注入的变量验，不靠「看代码以为过滤了」。
+#[tokio::test]
+async fn process_env_hides_host_secrets() {
+    let key = "SECRET_LEAK_TEST";
+    std::env::set_var(key, "must-not-be-visible");
+    // 白名单放行 PANEL_* 前缀：面板自己的变量（数据目录、绑定地址）必须留着，
+    // 插件靠它们找自己的位置。这条同时钉住「白名单不是把环境清空」。
+    std::env::set_var("PANEL_TEST_KEEP", "1");
+    let p = ok(&format!(
+        "{HANDLERS}await host.register_handler('h', async () => {{
+           const env = process.env || {{}};
+           if ('{key}' in env) throw new Error('宿主环境变量透传了: ' + env['{key}']);
+           if (env['PANEL_TEST_KEEP'] !== '1') throw new Error('PANEL_* 应当保留（面板自己的变量插件要用）');
+           if (!env['PATH']) throw new Error('PATH 应当保留（跑子进程要用）');
+         }});"
+    ))
+    .await;
+    let out = p.dispatch("h", &json!({}), 5_000).await;
+    std::env::remove_var(key);
+    out.expect("环境变量白名单没生效");
 }
 
 /// `config()` 走的是「启动时序列化一次、插件共享 Arc<str>」这条路：

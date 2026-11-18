@@ -6,6 +6,31 @@
 版本号按 semver：**0.x 期间 minor 变化可能带行为调整**，patch 只修 bug。
 
 ---
+## 未发布（红队修复：docs/security-20261118.md 的 P0/P1/P2）
+
+红队演练（恶意插件 / 恶意脚本，10 个向量 8 个成功）之后的收口。修的是「能收的」，收不了的写进 [gaps.md](docs/gaps.md) 认账，口径写进 [plugins.md](docs/plugins.md) 的「信任边界」。
+
+### 安全
+
+- **ATTACH DATABASE 被封**（V7 任意路径 sqlite 文件读 + 建文件写）：`Db` actor 建连后
+  `set_limit(SQLITE_LIMIT_ATTACHED, 0)`。插件仍然能跑任意 SQL（设计能力），但拿不到文件原语。
+- **`process.exit` 不再能杀面板**（V10）：vendored LLRT 的 `PANEL PATCH 2` 把它改成抛异常；
+  一行插件代码不再能让所有插件、到点派发、SSE 流一起断（运行记 error，面板继续）。
+- **`process.env` 改白名单**（V6 凭据外传）：`PANEL PATCH 3` 只放 `PANEL_*` 与
+  PATH/HOME/TZ/LANG/LC_ALL/LANGUAGE/TMPDIR/PWD；宿主环境里的 CI / 云厂商凭据不再透传。
+- **SSRF 门补上解析判定**（V4 `localtest.me` 这类「公网名字 → 127.0.0.1」）：新增
+  `ensure_outbound_url_resolved(_with)` 与 `ensure_outbound_host_resolved_blocking`，
+  接进 fetch / 重定向每一跳 / 从 URL 装插件 / `smtp_send` 四条路。DNS 重绑定窗口仍在（进 gaps）。
+- 口径：插件界面与面板**同源**、全体插件**共享 `panel.db`**（V9 / V1）写进
+  [plugins.md](docs/plugins.md) 的信任边界与 [gaps.md](docs/gaps.md) —— 隔离子源 / 每插件独立库
+  都要动会话与数据模型，留给下一轮设计。
+
+### 回归
+
+- 三条引擎级用例钉住行为：`process_exit_throws_instead_of_killing_the_panel`、
+  `attach_database_is_blocked`、`process_env_hides_host_secrets`；ssrf 侧 5 条
+  （`forbidden_ip` 与字符串表一致、解析集合里含回环即拒、空解析不当通过…）。
+- 临时实例复测读数见 [security-20261118.md](docs/security-20261118.md) 的「修复后复测」。
 
 ## 0.6.3（2026-11-18）
 

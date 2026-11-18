@@ -744,6 +744,10 @@ fn op_smtp_send(ctx: Ctx<'_>, opts: String) -> Result<String> {
     let out = crate::sync_bridge::run(
         async move {
             tokio::task::spawn_blocking(move || {
+                // 红队 V4：上面那道判定只看 host 字符串，而 smtp 的 host 是插件配置里的
+                // 任意域名 —— 解析一遍再判，挡掉「公网名字 → 127.0.0.1:25」这条路。
+                // 放在 blocking 池里用标准库解析，不用 tokio 的 IO driver。
+                crate::ssrf::ensure_outbound_host_resolved_blocking(&cfg.host)?;
                 crate::smtp::send_with_options(&cfg, crate::smtp::SendOptions::default(), &note)
             })
             .await

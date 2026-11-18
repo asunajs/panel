@@ -60,7 +60,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 ```
 
 ⚠ `vendor/` 里有**一处本仓库补丁**（`llrt_process` 的环境变量初始化，见
-[api.md §7](api.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`。
+[api.md §7](api.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`（2026-11-18 起是三处：`vars_os` 容错 / `process.exit` 抛错 / `process.env` 白名单）。
 
 ## 文档索引
 
@@ -101,6 +101,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐迁移记录（0.3.x QuickJS → 0.4.x LLRT） |
 | [schedule.md](schedule.md) | 任务调度配置：JSON 真源与五条口径 |
 | [review-20261115.md](review-20261115.md) | 2026-11-15 的全量 review 记录（历史，留作判据） |
+| [security-20261118.md](security-20261118.md) | 2026-11-18 红队演练：恶意插件/恶意脚本的 10 个向量与修复跟踪 |
 | [handoff/mcloud-webui-0.4.md](handoff/mcloud-webui-0.4.md) | 交接记录：mcloud WebUI 的 0.4 变体归属 |
 
 ## 三态约定

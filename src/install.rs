@@ -84,7 +84,8 @@ pub async fn download_with(url: &str, max_bytes: u64, allow_private: bool) -> Re
     let mut current = url.to_string();
     let mut hops = 0usize;
     loop {
-        crate::ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
+        // 同 fetch：装插件那条路也要过解析版判定（红队 V4）。
+        crate::ssrf::ensure_outbound_url_resolved_with(&current, allow_private).await?;
         let resp = client
             .get(&current)
             .send()

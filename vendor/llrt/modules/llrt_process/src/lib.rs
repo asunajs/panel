@@ -82,12 +82,16 @@ fn to_exit_code(ctx: &Ctx<'_>, code: &Value<'_>) -> Result<Option<u8>> {
     Ok(None)
 }
 
-fn exit(ctx: Ctx<'_>, code: Value<'_>) -> Result<()> {
-    let code = match to_exit_code(&ctx, &code)? {
-        Some(code) => code,
-        None => EXIT_CODE.load(Ordering::Relaxed),
-    };
-    std::process::exit(code.into())
+// PANEL PATCH 2（红队 P0-2，见 docs/security-20261118.md 的 V10）：
+// 上游这里直接 std::process::exit()。插件与**面板**在同一个进程里，于是一行
+// `process.exit(1)` 就能杀掉整个面板：所有插件、到点派发、SSE 流一起断（launchd
+// 会拉起来，但那已经是一次真实中断）。改成抛异常：插件要结束自己的执行就 throw，
+// 杀宿主不在它的能力范围内。非 0 的退出码也没法表达了 —— 那本来只对「进程」有意义。
+fn exit(ctx: Ctx<'_>, _code: Value<'_>) -> Result<()> {
+    Err(Exception::throw_message(
+        &ctx,
+        "process.exit 已被面板禁用：它会杀掉整个面板进程（不只是当前插件）。要结束这次执行，throw 一个 Error 或让顶层 return —— 面板会把这次运行记为失败。",
+    ))
 }
 
 fn env_proxy_setter<'js>(
@@ -164,14 +168,39 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
     let release = Object::new(ctx.clone())?;
     release.prop("name", Property::from("llrt").enumerable())?;
 
-    // PANEL PATCH（本仓库对 vendored LLRT 的唯一改动，见 docs/auth.md §7）：
+    // PANEL PATCH 1（本仓库对 vendored LLRT 的三处改动之一，另两处见下面 PATCH 2 / 3；
+    // 重新 vendor 上游时三处都要重打）：
     // 上游用 `env::vars()` / `env::args()`，两者在遇到**任意**非 UTF-8 的条目时会 panic
     // （内部对每个元素 unwrap）。进程环境不由面板控制，一个坏变量就能让每个插件的 ctx
     // 起不来，而 HTTP 还活着 —— 表现成「插件加载失败」，极难归因。
     // 改成 vars_os/args_os + lossy：非法字节变成 U+FFFD，而不是炸掉运行时。
     // 代价：两个不同的非 UTF-8 变量可能折叠成同一个 key（可接受）。
     // 重新 vendor 上游时**必须**重新打这个补丁。
+    // PANEL PATCH 3（红队 P1-1，见 docs/security-20261118.md 的 V6）：
+    // 上游把**整份**进程环境灌进 `process.env`。面板宿主是普通进程，环境里可能有
+    // 一堆跟插件无关的凭据（CI / 云厂商 / 其它服务令牌），于是「装个插件」就等于把这些
+    // 全交出去。改成白名单：面板自己的变量 + 跑子进程/本地化要用的几条生存变量；
+    // 其余**不出现在** process.env 里（不是先给再删，是根本看不到）。
+    // 需要新增一条时在这里加 —— 宁缺毋滥。
+    const ENV_ALLOW: [&str; 8] = [
+        "PATH", "HOME", "TZ", "LANG", "LC_ALL", "LANGUAGE", "TMPDIR", "PWD",
+    ];
+    // 逃生口：插件有自己的环境变量开关时（比如某些插件用 MY_THING_STORE=… 指路径），
+    // 部署方可以 PANEL_PLUGIN_ENV_PASSTHROUGH=MY_THING_STORE,OTHER 显式放行 ——
+    // 默认一个都不放，别为了省事把宿主环境整份还回去。
+    let extra: Vec<String> = std::env::var("PANEL_PLUGIN_ENV_PASSTHROUGH")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let env_map: HashMap<String, String> = env::vars_os()
+        .filter(|(k, _)| {
+            let k = k.to_string_lossy();
+            k.starts_with("PANEL_")
+                || ENV_ALLOW.contains(&k.as_ref())
+                || extra.iter().any(|e| e == k.as_ref())
+        })
         .map(|(k, v)| (
             k.to_string_lossy().into_owned(),
             v.to_string_lossy().into_owned(),

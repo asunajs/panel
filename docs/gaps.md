@@ -30,6 +30,21 @@
 
 ## 还没做（认账）
 
+- **插件之间的数据隔离**（红队 V1，[security-20261118.md](security-20261118.md)）：全体插件共用
+  一个 `panel.db` 和一个连接，`host.sqlite_query(... FROM state)` 一句话就能读到别的插件的
+  全部键值（真实部署里 = 账号 cookie / 设备令牌）。ATTACH 已经封了（`set_limit(Attached, 0)`，
+  V7 的文件原语消失），但**行级隔离**没做：要么强制「键名以 `<插件名>.` 开头、读时按前缀过滤」，
+  要么每插件一个 db 文件（`plugin-data/<name>/db.sqlite`）。后者隔离最彻底、迁移成本最高。
+  现状是「插件是可信代码」这条前提下的取舍 —— 装插件等于把数据交给它，见 [plugins.md](plugins.md) 的信任边界。
+- **插件界面与面板同源**（红队 V9）：`/plugins/<名字>/` 与面板同一个 origin，浏览器自动带会话
+  cookie，于是插件界面的 JS 能以你的身份调 `/api/state`、`/plugins/别的插件/api/...`。
+  当前口径是**文档明示 + 只装可信来源**；彻底解决要隔离子源（第二个端口 / 沙箱 iframe）或
+  按插件签发会话（一个插件的界面拿不到别的插件的 API 权限），两者都要动会话模型。
+- **DNS 重绑定窗口**（红队 V4 的残余）：出站判定现在会解析一次并对结果 IP 再判
+  （`ensure_outbound_url_resolved`），静态指向回环的公网域名（localtest.me 这类）已经过不去；
+  但「判定时解析到公网、建连时 TTL=0 换成 127.0.0.1」这个窗口还在 —— 彻底封它要把解析结果
+  钉给连接器，而共享的 reqwest 客户端不支持按请求钉 IP。
+
 - **armv7（`armv7-unknown-linux-musleabihf`）的发布产物**：`Release` 工作流里这一档一直是红的
   （v0.6.2 与 v0.6.3 两次都是），挂在 `llrt_core` 的 `build.rs`：在 `cross` 容器里执行时
   `Error: Os { code: 2, kind: NotFound }`，模块编译日志跑到一半就没了。它被 `continue-on-error`

@@ -189,7 +189,9 @@ pub async fn fetch_json_with(
         if cancelled(&inv) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
+        // 解析版：字符串层 + 对解析出的 IP 再判（红队 V4：localtest.me 这类
+        // 「公网名字 → 127.0.0.1」的门只做字符串匹配是挡不住的）。
+        ssrf::ensure_outbound_url_resolved_with(&current, allow_private).await?;
 
         let host = current.parse::<http::Uri>().ok().and_then(|u| u.host().map(str::to_string));
         // 幂等方法超时后重试一次（链路抖一下不该等于一次失败）；写操作不重试 ——
@@ -445,7 +447,9 @@ async fn fetch_native_json(
         if inv.as_ref().map(|i| i.is_stopped()).unwrap_or(false) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
+        // 解析版：字符串层 + 对解析出的 IP 再判（红队 V4：localtest.me 这类
+        // 「公网名字 → 127.0.0.1」的门只做字符串匹配是挡不住的）。
+        ssrf::ensure_outbound_url_resolved_with(&current, allow_private).await?;
 
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("method 不合法 {method}: {e}"))?;
