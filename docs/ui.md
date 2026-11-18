@@ -193,6 +193,10 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
   动作返回不只是 toast：`values` 回填、`keep` 存页面级 bag、`image` 出图（图形码）、
   `cooldown_s` 让按钮倒计时、`poll` 有界轮询（扫码）——契约见
   [plugin-contract.md](plugin-contract.md) §9。表格只画前 200 行、单元格截到 500 字符；
+  表单**照「设置 → 配置」的 .cfg-row 排**（第 194 轮）：190px 标签列 + 控件列、控件限宽 380px、
+  提示落在控件列下面、行间虚线 —— 抽屉那套 84px 标签 + flex 是给窄容器的，搬到整页上会变成
+  一条条通栏输入框。勾选框不套 `.input`（那个类的 min-height + flex 基准会把它拉成
+  一整条蓝色大块）；多行文本用 `.chan-area` 而不是代码编辑器的 `.editor`（340px 高）。
   有 `.webui/` 的插件永远优先用它自己的页面。
 - **自启动不在界面里点**：设置页只给四条命令（`print` / `install` / `status` / `uninstall`）。
   安装自启动要动 launchd / systemd / 计划任务，属于「出了事得能自己修」的操作，留在命令行

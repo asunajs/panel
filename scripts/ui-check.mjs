@@ -134,6 +134,13 @@ writeFileSync(path.join(plugins, 'declared.panel.json'), JSON.stringify({
         "default": true
       },
       {
+        "name": "note",
+        "label": "备注",
+        "type": "textarea",
+        "placeholder": "随便写点什么",
+        "help": "这一行是 help（提示应该落在控件列下面）"
+      },
+      {
         "name": "mode",
         "label": "模式",
         "type": "select",
@@ -892,8 +899,37 @@ async function main() {
   check('点侧栏 → 面板渲染的页面（不是 iframe）',
     pvPage.hash === '#plugin:declared' && pvPage.declared && pvPage.frameHidden, JSON.stringify(pvPage));
   check('页头是清单里的标题 + 描述', pvPage.title === '声明插件' && pvPage.desc.includes('面板按声明渲染'), JSON.stringify([pvPage.title, pvPage.desc]));
-  check('表单按 schema 渲染（5 字段，含 bool / select）',
-    pvPage.fields === 5 && pvPage.hasBool && pvPage.hasSelect, JSON.stringify([pvPage.fields, pvPage.hasBool, pvPage.hasSelect]));
+  check('表单按 schema 渲染（6 字段，含 bool / select / textarea）',
+    pvPage.fields === 6 && pvPage.hasBool && pvPage.hasSelect, JSON.stringify([pvPage.fields, pvPage.hasBool, pvPage.hasSelect]));
+  // 表单布局（第 194 轮，用户截图：「有一点丑」）：照「设置 → 配置」的 .cfg-row ——
+  // 190px 标签列 + 控件限宽 + 提示落在控件列下面 + 行间虚线；勾选框不能被拉成一条。
+  const pvLayout = JSON.parse(await js(
+    "JSON.stringify((()=>{const f=document.querySelector('#plugin-declared .schema-form');" +
+    "const line=f.querySelector('.chan-line');" +
+    "const cs=getComputedStyle(line);" +
+    "const inp=line.querySelector('input.input');" +
+    "const cb=document.querySelector('#plugin-declared .chan-inline input[type=checkbox]');" +
+    "const area=document.querySelector('#plugin-declared textarea');" +
+    "const hint=document.querySelector('#plugin-declared .chan-hint');" +
+    "const second=f.querySelectorAll('.chan-line')[1];" +
+    "const r=(n)=>n?n.getBoundingClientRect():{width:0,height:0};" +
+    "return {display:cs.display,cols:cs.gridTemplateColumns," +
+    "inputW:Math.round(r(inp).width),inputH:Math.round(r(inp).height)," +
+    "cbW:Math.round(r(cb).width),cbH:Math.round(r(cb).height)," +
+    "areaH:Math.round(r(area).height)," +
+    "hintCol:hint?getComputedStyle(hint).gridColumnStart:''," +
+    "sep:second?getComputedStyle(second).borderTopStyle:''};})())"
+  ));
+  check('声明页表单是「标签列 + 控件列」两栏（190px 标签，不是通栏）',
+    pvLayout.display === 'grid' && /^190px/.test(pvLayout.cols || ''), JSON.stringify(pvLayout));
+  check('控件限宽（输入框 ≤ 400px，不再是整行拉满）',
+    pvLayout.inputW > 200 && pvLayout.inputW <= 400, String(pvLayout.inputW));
+  check('勾选框是 16px 的方框（不是被 .input 拉成一条蓝色大块）',
+    pvLayout.cbW === 16 && pvLayout.cbH === 16, JSON.stringify([pvLayout.cbW, pvLayout.cbH]));
+  check('多行文本是表单高度（不是 340px 的代码编辑器）',
+    pvLayout.areaH > 40 && pvLayout.areaH < 160, String(pvLayout.areaH));
+  check('提示在控件列下面，行间是虚线分隔',
+    pvLayout.hintCol === '2' && pvLayout.sep === 'dashed', JSON.stringify([pvLayout.hintCol, pvLayout.sep]));
   check('动作按钮按声明出现（4 个动作 + 保存配置，主按钮带 btn-primary）',
     pvPage.buttons.length === 5 && pvPage.buttons.includes('登录') && pvPage.primary === '登录',
     JSON.stringify([pvPage.buttons, pvPage.primary]));

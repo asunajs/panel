@@ -96,7 +96,8 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [ui.md](ui.md) | 界面与界面门禁（scripts/ui-check.mjs / ui-e2e.mjs） |
 | [windows.md](windows.md) | Windows：现状、缺口、分步计划、验收表 |
 | [pitfalls.md](pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
-| [verification.md](verification.md) | 端到端读数（历史验证记录） |
+| [verification.md](verification.md) | 端到端读数（最近几轮） |
+| [verification-stage1.md](verification-stage1.md) | 早期性能基线（Stage 1 端到端、§7 的 p99） |
 | [gaps.md](gaps.md) | 0.3 → 0.4 重写的差距表（做完 / 没做 / 决定不做） |
 | [mcloud-migration.md](mcloud-migration.md) | mcloud 插件迁移记录 |
 | [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐迁移记录（0.3.x QuickJS → 0.4.x LLRT） |
