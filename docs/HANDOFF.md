@@ -17,7 +17,7 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
     cargo test --offline          # 单测（当前 511）
     bash scripts/gate.sh          # 全部门禁一把跑完（当前 16 道）
     node scripts/ui-check.mjs     # 界面（无头 Edge + CDP，当前 183 条）
-    bash scripts/check-docs.sh    # 文档篇数与内链（当前 28 篇）
+    bash scripts/check-docs.sh    # 文档篇数与内链（当前 29 篇）
 
 - 宿主源码 `src/` 约 3.9 万行（含测试）；WebUI 约 1.15 万行，源文件在 `web/`、压缩产物
   `web/panel.min.{js,css}` 也进仓库（`tools/web` 是 rolldown + lightningcss 的构建，见 [ui.md](ui.md)）。
@@ -37,18 +37,13 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 3. **面板只做该做的**：守自己的边界 —— 单令牌鉴权（令牌只走 header）、`/api/*` 一条不漏、
    `/api/setup` 的 Host 闸、转给插件的请求头里不带面板凭据、临时文件不跟随软链。
 
-## 2. 用户的原始订单（verbatim，标为历史起点，别改写意图）
+## 2. 起点（历史档案，正文已移走）
 
-> 在原版quickjs的基础上，非现在的Node版。新建一个仓库，位于workspace目录，然后使用llrt实现。
-> 能用llrt的部分就没必要手写，旧的有问题的直接抛弃而不是想着新的内容需要去兼容旧的，不必这样，
-> 新的就要考虑到更好，这不是重构是重写。需要注意的是插件时长问题，20分钟没问题吧，
-> aws的函数已经有90分钟的配置了。
+最初那张订单（"这不是重构是重写"、基线 = QuickJS 那一支、插件要能跑 20 分钟以上）连同当时的
+拍板记录在 [handoff/order-2026-11.md](handoff/order-2026-11.md) —— 想弄明白「为什么会是重写」时再翻。
 
-- 基线 = 原 QuickJS 那一支（`rust-plugin-panel` 的 git HEAD `b252bd0`），**不是**它工作树里的
-  Node-only 迁移。
-- 已拍板：仓库路径 `panel-llrt`；host-api 全 async；第一版 = 最小垂直切片；先实测再落档。
-- 后续拍板：插件是可信代码（不加 jail）；安全面收到**令牌一处**；`目录不改、fs 也不改`；
-  不为旧插件契约写垫片；**push 由用户指示**（默认提交留在本地）。
+需要现在就记住的只有两条，它们已经落进 §1 的口径：**不为旧插件契约写垫片**、
+**插件是可信代码（安全面只在令牌一处）**。
 
 ## 3. 硬边界（安全相关，逐字遵守）
 
@@ -87,7 +82,7 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 `schedule.js`（排程表单，可脱离浏览器测）+ `highlight.js`（极简高亮）+ `ui-kit.*`（插件作者的样板页）。
 **CSP 是 `script-src 'self'`：内联 `<script>` / `style=` 一律不执行**，加交互只能改这几个文件。
 
-### 5.3 文档（`docs/` 28 篇，索引 [README.md](README.md)）
+### 5.3 文档（`docs/` 29 篇，索引 [README.md](README.md)）
 
 分工：`engine.md`（引擎与调度语义）、`scheduler.md`、`ui.md`、`api.md`、`plugins.md`（与旧面板对照 +
 信任模型）、`plugin-contract.md`（插件作者）、`host-api.md`、`pitfalls.md`（**动手前先看这里**）、

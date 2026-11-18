@@ -104,6 +104,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [review-20261115.md](review-20261115.md) | 2026-11-15 的全量 review 记录（历史，留作判据） |
 | [security-20261118.md](security-20261118.md) | 2026-11-18 红队演练：恶意插件/恶意脚本的 10 个向量与修复跟踪 |
 | [handoff/mcloud-webui-0.4.md](handoff/mcloud-webui-0.4.md) | 交接记录：mcloud WebUI 的 0.4 变体归属 |
+| [handoff/order-2026-11.md](handoff/order-2026-11.md) | 最初那张订单（verbatim）与当时的拍板：为什么是重写不是重构 |
 
 ## 三态约定
 
