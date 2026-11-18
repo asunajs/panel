@@ -37,7 +37,8 @@ Windows **已能交叉编译出 `.exe` 并通过依赖链接，但还没在真�
 缺口、分步计划与验收表见 [windows.md](windows.md)。
 
 **与旧面板的功能对照见 [plugins.md](plugins.md)**：用户点名的六项（插件增删改查、脚本增删改查、
-插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，另外补了备份/恢复和通知；
+插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，**0.3.x → 这一版的迁移也已经在日常实例上跑完**
+（迁移代码 `src/migrate.rs` 留着给别的实例用，见 [user/migrate.md](user/migrate.md)），另外补了备份/恢复和通知；
 市场那一项没有内置：面板只提供一条通用能力（`POST /api/plugins/install` +
 `panel plugin install`），货架 / 商店这类应用由外部插件自己实现（私有，不在本仓文档范围）；
 在线更新做的是**检查 + 下载**（知道有新版本、把资产拿到手），**自动替换自己**仍然不做。
@@ -45,7 +46,7 @@ Windows **已能交叉编译出 `.exe` 并通过依赖链接，但还没在真�
 ## 从零构建
 
 ```bash
-cargo build && cargo test      # 114 passed，零 warning
+cargo build && cargo test      # 511 passed，零 warning
 ```
 
 **离线可构建**：仓库里带了 `vendor/llrt/bundle/js`（168K）。它是 LLRT 的 JS 侧字节码源，
