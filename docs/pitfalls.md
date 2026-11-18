@@ -784,3 +784,18 @@
     只跑 `node tools/web/build.mjs` 的话，`check-web-build.sh` 会绿（它比的是产物和源文件），
     但 `target/debug/panel` 发的还是旧界面 —— 这轮因此看到「`pluginEntries` 在页面上还是旧实现」，
     白查了二十分钟（还怀疑到打包器头上）。判据：改完前端先 `cargo build --offline`，再看行为。
+
+120. **0.3.x 的旧面板还在抢 3030**（第 191 轮，部署时踩到）：
+    这台机器上同时有两条 LaunchAgent：`dev.panel`（0.4+，`~/panel-3030/panel`）和
+    **0.3.x 的 `com.asunajs.panel`**（`~/Library/Application Support/plugin-panel/bin/plugin-panel`，
+    quickjs 那套，同样写死 `127.0.0.1:3030`，同样 `KeepAlive`）。后者平时抢不到端口就一直重试，
+    一旦我们的进程被 `launchctl kickstart -k` 换掉，它在十几秒内就把 3030 抢走 —— 之后：
+
+    - 新进程每轮都报 `绑 127.0.0.1:3030 失败: Address already in use (os error 48)`（在 err.log 里循环）；
+    - `deploy-daily.sh` 的 `/readyz` 探测拿回 401（旧面板的鉴权），于是报「300 秒内没就绪」；
+    - `/healthz` 却是 200 —— **看着像起来了，其实跑的是 0.3 的面板**（数据目录都不一样）。
+
+    处置：`launchctl bootout gui/$(id -u)/com.asunajs.panel.watchdog` +
+    `launchctl bootout gui/$(id -u)/com.asunajs.panel`（先停看门狗，否则它会把主 job 拉回来），
+    再 `kickstart -k dev.panel`；就绪判据是 `/readyz` 回 `{ok:true,failed_plugins:0,plugins:6,tasks:4}`。
+    守卫：`deploy-daily.sh` 现在起服务前先量端口监听者，不是 `$DEST/panel` 就当场报错并给出上面两条命令。

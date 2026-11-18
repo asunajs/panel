@@ -892,3 +892,19 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
   已改成自己的表 + `CREATE TABLE IF NOT EXISTS`，并写进契约文档。
 - **插件抛错的原文要原样上屏**：第一版复用 `ApiError::bad_gateway`（文案「插件没有响应。」），
   登录失败时用户看不到「验证码不对」。改成 `plugin_error` + 原文（去掉 `Error: ` 前缀）。
+
+### 部署到日常实例（3030）时踩到的另一件事
+
+第一次 `deploy-daily.sh` 报「300 秒内没就绪」，但 `/healthz` 是 200 —— 查下来是
+**0.3.x 的旧 LaunchAgent（`com.asunajs.panel`）也在 3030 上**：我们的进程被 kickstart 换掉的那几秒里，
+它抢走了端口，之后新进程每轮都 `Address already in use`，而 `/readyz` 探测拿到的是旧面板的 401。
+
+处置与守卫：
+
+- `launchctl bootout` 掉旧面板的看门狗 + 主 job（先停 watchdog，否则它会把主 job 拉回来）；
+- `deploy-daily.sh` 起服务前先量端口监听者，不是 `$DEST/panel` 就当场报错 + 给出上面两条命令；
+- 写进 [pitfalls.md](pitfalls.md) 第 120 条（含三条可辨认的症状）。
+
+修完重跑：**「进程已起（healthz 200）→ 已就绪（等 0s，插件 6/6）」**，
+`{ok:true, failed_plugins:0, plugins:6, tasks:4}`，插件目录指纹未变（24 项，
+`ad7e4ad68efe413c…`）—— 面板升级没碰插件（几条真插件都还有自己的 `.webui/`，仍走 iframe）。

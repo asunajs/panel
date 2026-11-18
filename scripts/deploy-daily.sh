@@ -77,6 +77,24 @@ if [ -d "$ROOT/scripts" ]; then
   cp -R "$ROOT/scripts/." "$DEST/scripts/"
 fi
 
+# ── 端口得是我们的（第 191 轮实测）──
+# 0.3.x 的 LaunchAgent（com.asunajs.panel，quickjs 那套）也写死 127.0.0.1:3030 + KeepAlive，
+# 一旦我们的进程被 kickstart 掉，它会在几秒内把端口抢走；之后新进程每次都「Address already in use」，
+# 表现成「进程起来了、readyz 一直不通」，而 launchctl list 里两条 job 都在（一条 0.3、一条 0.4）。
+# 所以起服务前先看监听者是谁：不是我们的二进制就当场说清楚怎么办，别让它跑到别人的地面上。
+owner="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+if [ -n "$owner" ]; then
+  ocmd="$(ps -o command= -p "$owner" 2>/dev/null | head -1)"
+  case "$ocmd" in
+    "$DEST/panel"*) ;; # 还是上一轮的自己，正常
+    *)
+      echo "端口 $PORT 被别的进程占着：pid=$owner $ocmd" >&2
+      echo "如果是 0.3.x 的旧面板（com.asunajs.panel），先停掉它的自启动：" >&2
+      echo "  launchctl bootout gui/$(id -u)/com.asunajs.panel.watchdog; launchctl bootout gui/$(id -u)/com.asunajs.panel" >&2
+      exit 1 ;;
+  esac
+fi
+
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 for _ in $(seq 1 60); do
