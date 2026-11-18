@@ -266,8 +266,7 @@ let mut args: Vec<String> = env::args_os()
 ```
 
 代价：两个不同的非 UTF-8 变量可能折叠成同一个 key（可接受）。
-⚠ **重新 vendor 上游时必须把这三处补丁都重打**（`vars_os` 容错 / `process.exit` 抛错 / `process.env` 白名单）——
-源码里有 `PANEL PATCH 1/2/3` 注释，`grep -rn 'PANEL PATCH' vendor/` 可查。
+⚠ **重新 vendor 上游时必须重打这个补丁** —— 源码里有 `PANEL PATCH` 注释，`grep -rn 'PANEL PATCH' vendor/` 可查。
 
 #### 7.3 修之后的读数（已定）
 

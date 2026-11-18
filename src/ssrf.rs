@@ -118,15 +118,6 @@ fn is_non_canonical_numeric_host(host: &str) -> bool {
     labels >= 1
 }
 
-/// 一个已解析出来的 IP 是否属于禁止出站的目标。解析版与字面量版共用这一张表 ——
-/// 两处判定必须永远一致，否则「域名解析到回环」又会从新开的那条路上漏过去。
-pub(crate) fn forbidden_ip(ip: std::net::IpAddr) -> Option<&'static str> {
-    match ip {
-        std::net::IpAddr::V4(v4) => forbidden_ipv4(v4),
-        std::net::IpAddr::V6(v6) => forbidden_ipv6(v6),
-    }
-}
-
 /// IPv4 字面量的判定（含 IPv4-mapped IPv6 复用）。
 fn forbidden_ipv4(ip: Ipv4Addr) -> Option<&'static str> {
     if ip.is_unspecified() {
@@ -199,92 +190,6 @@ pub fn allow_private_outbound_targets() -> bool {
 /// 没有 host 的 URL（相对路径等）不在这里判，交给各自的传输层报"URL 不合法"。
 pub fn ensure_outbound_url_allowed(url: &str) -> Result<(), String> {
     ensure_outbound_url_allowed_with(url, allow_private_outbound_targets())
-}
-
-/// 出站判定的**解析版**（红队 V4，见 docs/security-20261118.md 的 P2）：
-/// 字符串层判定之后，把主机名真的解析一次，对**每个**解析结果 IP 再判一遍。
-///
-/// 为什么需要：字符串层只能按名字挡，而 `localtest.me` 这种「公网域名 → 127.0.0.1」
-/// 的公共服务、或者攻击者自己的 DNS，名字完全合法、解析结果却是回环 —— 报告里的 V4
-/// 就是这么过的门。解析一次就能封掉这一族**静态**指向的绕过。
-///
-/// 仍然挡不住的（写在代码里，别以为已经封死）：DNS **重绑定** —— 判定时解析到公网 IP、
-/// 建连时 TTL=0 换成 127.0.0.1。要彻底封它得把解析结果钉给连接器（reqwest 只在
-/// ClientBuilder 上支持 `resolve`，共享客户端做不到按请求钉 IP），那是另一个量级的改动。
-///
-/// 代价：每个非字面量主机的出站多一次解析（系统解析器有缓存，一次几十微秒）。
-/// [`ensure_outbound_url_resolved`] 的可测内核（开关作参数，不读环境）。
-pub async fn ensure_outbound_url_resolved_with(
-    url: &str,
-    allow_private: bool,
-) -> Result<(), String> {
-    // 先过字符串层：IP 字面量、内网别名、非规范数字写法都在这里挡掉，也不用解析。
-    ensure_outbound_url_allowed_with(url, allow_private)?;
-    if allow_private {
-        return Ok(());
-    }
-    let uri: http::Uri = url.parse().map_err(|e| format!("url 不合法: {e}"))?;
-    let Some(host) = uri.host() else {
-        return Ok(());
-    };
-    // 已经是 IP 字面量：上面那道判定看的就是它，不用再查 DNS。
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(());
-    }
-    ensure_outbound_host_resolved_with(host, allow_private).await
-}
-
-async fn ensure_outbound_host_resolved_with(host: &str, allow_private: bool) -> Result<(), String> {
-    if allow_private {
-        return Ok(());
-    }
-    let host = host.trim().trim_end_matches('.').to_string();
-    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(());
-    }
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 80u16))
-        .await
-        .map_err(|e| format!("出站目标 {host} 解析失败：{e}"))?
-        .collect();
-    check_resolved_addrs(&host, addrs.into_iter().map(|a| a.ip()))
-}
-
-/// 阻塞版：给已经在 blocking 池里的调用方用（`smtp_send` 那条 spawn_blocking）。
-/// 同一条判定表，只是解析用标准库 —— 那里没有 tokio 的 IO driver 可用。
-pub fn ensure_outbound_host_resolved_blocking(host: &str) -> Result<(), String> {
-    let allow_private = allow_private_outbound_targets();
-    ensure_outbound_host_allowed_with(host, allow_private)?;
-    if allow_private {
-        return Ok(());
-    }
-    let h = host.trim().trim_end_matches('.');
-    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(());
-    }
-    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(h, 80u16))
-        .map_err(|e| format!("出站目标 {h} 解析失败：{e}"))?
-        .map(|a| a.ip());
-    check_resolved_addrs(h, addrs)
-}
-
-/// 解析结果的判定内核（同步/异步两个入口共用，判定逻辑只能有一份）。
-fn check_resolved_addrs(
-    host: &str,
-    addrs: impl Iterator<Item = std::net::IpAddr>,
-) -> Result<(), String> {
-    let mut any = false;
-    for ip in addrs {
-        any = true;
-        if let Some(reason) = forbidden_ip(ip) {
-            return Err(format!(
-                "出站目标被 SSRF 防护拒绝：{host} 解析到 {ip}（{reason}）。名字合法但地址是面板自己或云元数据 —— 这是 DNS 层绕过，见 docs/security-20261118.md 的 V4。"
-            ));
-        }
-    }
-    if !any {
-        return Err(format!("出站目标 {host} 解析不到任何地址"));
-    }
-    Ok(())
 }
 
 /// [`ensure_outbound_url_allowed`] 的可测内核：开关作为参数传入，**不读环境**

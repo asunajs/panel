@@ -187,9 +187,7 @@ if [ -n "$sha_line" ] && [ -n "$save_line" ] && [ "$sha_line" -lt "$save_line" ]
 else
   bad 'plugins_install 里 verify_sha256 必须排在 save_bytes 之前（写一半才发现不等 = 留半成品）'
 fi
-# 2026-11-18：判定从「字符串层」换成「解析版」（红队 V4，见 docs/security-20261118.md），
-# 两种写法都算过门 —— 要挡的是「没有这道门」，不是某个函数名。
-if grep -qE 'ensure_outbound_url_(allowed|resolved)_with' src/install.rs; then
+if grep -q 'ensure_outbound_url_allowed_with' src/install.rs; then
   ok '下载走 SSRF 门（每跳重判）'
 else
   bad 'src/install.rs 的下载没过 SSRF 门 —— 商店能把内网地址塞进插件目录'

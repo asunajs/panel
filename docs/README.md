@@ -60,7 +60,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 ```
 
 ⚠ `vendor/` 里有**一处本仓库补丁**（`llrt_process` 的环境变量初始化，见
-[api.md §7](api.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`（2026-11-18 起是三处：`vars_os` 容错 / `process.exit` 抛错 / `process.env` 白名单）。
+[api.md §7](api.md)）。重新 vendor 上游时必须重打：`grep -rn 'PANEL PATCH' vendor/`。
 
 ## 文档索引
 

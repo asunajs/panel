@@ -18,15 +18,6 @@ impl Db {
     /// 起 actor 线程。建表失败直接返回 Err —— 面板不该带着半个 schema 启动。
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut conn = Connection::open(path).map_err(|e| format!("打开数据库失败: {e}"))?;
-        // 红队 P0-1（docs/security-20261118.md 的 V7）：插件能跑任意 SQL 是设计能力，但
-        // ATTACH DATABASE '/任意/路径.sqlite' 会把「查库」升级成「任意路径 sqlite 文件的
-        // 读 + 建文件写」—— 那已经不是查库了，是文件原语。ATTACH 次数上限设 0 之后这句
-        // 直接报错，插件侧拿到的是普通 SQL 错误。
-        // 注意：这只是收口，不是隔离 —— 同一个库里别的插件的 state 行仍然可见
-        // （同一份报告里的 V1，行级隔离还在 gaps.md 里认账）。
-        if let Err(e) = conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0) {
-            return Err(format!("限制 ATTACH 失败: {e}"));
-        }
         migrate(&mut conn)?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
         std::thread::Builder::new()
