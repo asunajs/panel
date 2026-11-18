@@ -4,40 +4,158 @@
   "order": 90,
   "description": "没有 .webui/ 的插件：表单、动作、数据块全部由这份清单声明，面板负责渲染",
   "min_panel": "0.6.3",
-  "capabilities": ["sqlite"],
-  "nav": { "title": "样例页", "order": 90 },
+  "capabilities": [
+    "sqlite"
+  ],
+  "nav": {
+    "title": "样例页",
+    "order": 90
+  },
   "config": {
     "fields": [
-      { "name": "account", "label": "账号", "type": "text", "required": true, "inputmode": "tel", "placeholder": "手机号", "help": "演示：随便填一个，登录后进下面的账号表" },
-      { "name": "password", "label": "密码", "type": "password", "help": "只存本地，不回显（这版登录走验证码，密码字段只用来演示类型）" },
-      { "name": "code", "label": "验证码", "type": "text", "inputmode": "numeric", "length": 6, "help": "演示固定 123456" },
-      { "name": "captcha", "label": "图形验证码", "type": "text", "length": 4, "help": "点「登录」后会出现图片，随便填四个字" },
-      { "name": "budget_s", "label": "预算（秒）", "type": "number", "default": 600, "help": "≥ 60，跑任务的上限" },
-      { "name": "notify", "label": "跑完通知", "type": "bool", "default": true },
-      { "name": "mode", "label": "模式", "type": "select", "default": "fast",
-        "options": [{ "value": "fast", "label": "快速" }, { "value": "full", "label": "完整" }] },
-      { "name": "note", "label": "备注", "type": "textarea", "placeholder": "随便写点什么" }
+      {
+        "name": "account",
+        "label": "账号",
+        "type": "text",
+        "required": true,
+        "inputmode": "tel",
+        "placeholder": "手机号",
+        "help": "演示：随便填一个，登录后进下面的账号表"
+      },
+      {
+        "name": "password",
+        "label": "密码",
+        "type": "password",
+        "help": "只存本地，不回显（这版登录走验证码，密码字段只用来演示类型）"
+      },
+      {
+        "name": "code",
+        "label": "验证码",
+        "type": "text",
+        "inputmode": "numeric",
+        "length": 6,
+        "help": "演示固定 123456"
+      },
+      {
+        "name": "captcha",
+        "label": "图形验证码",
+        "type": "text",
+        "length": 4,
+        "help": "点「登录」后会出现图片，随便填四个字"
+      },
+      {
+        "name": "budget_s",
+        "label": "预算（秒）",
+        "type": "number",
+        "default": 600,
+        "help": "≥ 60，跑任务的上限"
+      },
+      {
+        "name": "notify",
+        "label": "跑完通知",
+        "type": "bool",
+        "default": true
+      },
+      {
+        "name": "mode",
+        "label": "模式",
+        "type": "select",
+        "default": "fast",
+        "options": [
+          {
+            "value": "fast",
+            "label": "快速"
+          },
+          {
+            "value": "full",
+            "label": "完整"
+          }
+        ]
+      },
+      {
+        "name": "note",
+        "label": "备注",
+        "type": "textarea",
+        "placeholder": "随便写点什么"
+      }
     ],
     "actions": [
-      { "id": "send_code", "label": "发验证码", "handler": "send_code" },
-      { "id": "login", "label": "登录", "handler": "login", "primary": true },
-      { "id": "qr", "label": "扫码登录", "handler": "qr_start" },
-      { "id": "ping", "label": "试连", "handler": "ping" },
-      { "id": "boom", "label": "故意失败", "handler": "boom", "confirm": "这个按钮一定会失败，用来演示错误态。继续？" }
+      {
+        "id": "send_code",
+        "label": "发验证码",
+        "handler": "cmd"
+      },
+      {
+        "id": "login",
+        "label": "登录",
+        "handler": "cmd",
+        "primary": true
+      },
+      {
+        "id": "qr",
+        "label": "扫码登录",
+        "handler": "cmd"
+      },
+      {
+        "id": "ping",
+        "label": "试连",
+        "handler": "cmd"
+      },
+      {
+        "id": "boom",
+        "label": "故意失败",
+        "handler": "cmd",
+        "confirm": "这个按钮一定会失败，用来演示错误态。继续？"
+      }
     ]
   },
   "views": [
-    { "id": "accounts", "title": "账号", "handler": "accounts", "kind": "table",
+    {
+      "id": "accounts",
+      "title": "账号",
+      "handler": "data",
+      "kind": "table",
       "empty": "还没有账号，先在上面登录",
       "columns": [
-        { "key": "name", "label": "账号" },
-        { "key": "expire", "label": "到期" },
-        { "key": "status", "label": "状态", "badge": true },
-        { "key": "note", "label": "备注" }
-      ] },
-    { "id": "quota", "title": "配额", "handler": "quota", "kind": "kv" },
-    { "id": "events", "title": "最近事件", "handler": "events", "kind": "list",
-      "title_key": "what", "subtitle_key": "when", "meta_key": "detail" },
-    { "id": "big", "title": "长列表（200 行上限演示）", "handler": "big", "kind": "table" }
+        {
+          "key": "name",
+          "label": "账号"
+        },
+        {
+          "key": "expire",
+          "label": "到期"
+        },
+        {
+          "key": "status",
+          "label": "状态",
+          "badge": true
+        },
+        {
+          "key": "note",
+          "label": "备注"
+        }
+      ]
+    },
+    {
+      "id": "quota",
+      "title": "配额",
+      "handler": "data",
+      "kind": "kv"
+    },
+    {
+      "id": "events",
+      "title": "最近事件",
+      "handler": "data",
+      "kind": "list",
+      "title_key": "what",
+      "subtitle_key": "when",
+      "meta_key": "detail"
+    },
+    {
+      "id": "big",
+      "title": "长列表（200 行上限演示）",
+      "handler": "data",
+      "kind": "table"
+    }
   ]
 }

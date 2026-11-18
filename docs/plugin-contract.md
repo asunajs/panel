@@ -184,7 +184,30 @@
 即取消；一次调用预算 30 秒（和插件页面一样）；请求 body ≤ 64 KiB，返回值序列化后
 ≤ 512 KiB，超了报错让插件自己裁剪；表格只画前 200 行、单元格文本截到 500 字符。
 
-### 9.3 什么时候仍然该写 WebUI
+### 9.3 一个 handler 服务多个动作/视图（省掉一排「手动」任务）
+
+动作和视图都是「具名 handler」，而 **handler 在面板里也算一条任务**（任务页的「手动」那一类）。
+一个视图一个 handler，任务页就会多出一排噪音。所以事件里除了表单值和 bag，还带两个分派用的键：
+
+    evt.action   // 动作 id（点的是哪个按钮）；轮询时固定是 "poll"
+    evt.view     // 视图 id（正在取哪块数据）
+
+于是清单里两个 handler 就够整页：
+
+    "actions": [ { "id": "login", "label": "登录", "handler": "cmd" }, ... ],
+    "views":   [ { "id": "accounts", "title": "账号", "handler": "data", ... }, ... ]
+
+    await host.register_handler(`cmd`, async (evt) => {
+      if (evt.action === `login`) { ... }
+      if (evt.action === `poll`) { return { done: true }; }  // 轮询走这里
+    });
+    await host.register_handler(`data`, async (evt) => {
+      if (evt.view === `accounts`) return rows;
+    });
+
+仓库里的 `plugins/preview-demo.{js,panel.json}` 就是这么写的（2 个 handler 撑起 5 个按钮 + 4 个视图）。
+
+### 9.4 什么时候仍然该写 WebUI
 
 声明式只做"表单 + 按钮 + 只读数据"。碰到下面这些就写 `<name>.webui/` 或 `register_web`：
 
@@ -194,7 +217,7 @@
 
 **有 `.webui/` 的插件永远优先用它自己的页面** —— 声明是补充，不是覆盖。
 
-### 9.4 数据别指望面板的表
+### 9.5 数据别指望面板的表
 
 面板只保证插件能读写 SQLite，**不会**替插件准备 `state` 表（那张表是 0.3.x 迁移
 留下的历史）。自己的表自己 `CREATE TABLE IF NOT EXISTS`，样例里就是这个写法。

@@ -3742,6 +3742,14 @@ async fn plugin_call_handler(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // 视图 id 也带上（第 192 轮）：插件可以用**一个** handler 服务好几个视图，
+    // 按 evt.view 分派 —— 否则每个视图都要 register_handler，任务页会多出一排
+    // 「手动」任务（handler 也算任务）。
+    let view = panel_meta
+        .get("view")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     // 「用到就装」：声明页可以在插件没加载时打开（清单在磁盘上），第一次取数/点按钮才装。
     sched_ready(&st, &name).await?;
@@ -3751,6 +3759,7 @@ async fn plugin_call_handler(
         "body": payload,
         "bag": bag,
         "action": action,
+        "view": view,
         "source": "panel-ui",
         "path": format!("/api/plugins/{name}/call/{handler}"),
     });

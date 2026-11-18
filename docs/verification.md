@@ -854,7 +854,8 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 插件不写 `.webui/`，只在清单里声明 `nav` / `config.fields` / `config.actions` / `views`，
 面板渲染成整页：表单 + 动作按钮 + 数据块。验收载体是仓库里的样例插件
-`plugins/preview-demo.{js,panel.json}`（八个字段、五个动作、四个视图，全都没有前端代码）。
+`plugins/preview-demo.{js,panel.json}`（八个字段、五个动作、四个视图，全都没有前端代码；只有 `cmd` / `data` 两个 handler，
+按 `evt.action` / `evt.view` 分派 —— 一个动作一个 handler 会在任务页多出一排「手动」任务）。
 
 ### 走查（真面板 + 无头 Edge，临时数据目录，CDP 驱动）
 

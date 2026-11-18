@@ -2307,7 +2307,8 @@ async function loadDeclaredView(ctx, view, body) {
   body.append(el('div', 'skeleton'));
   let value;
   try {
-    value = await panelCall(ctx.name, view.handler, { __panel: { bag: ctx.bag } });
+    // 带上视图 id：一个 handler 可以按 evt.view 服务好几个视图（少几个手动任务）
+    value = await panelCall(ctx.name, view.handler, { __panel: { bag: ctx.bag, view: view.id } });
   } catch (e) {
     clear(body);
     body.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '取数失败')));
