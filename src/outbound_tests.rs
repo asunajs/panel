@@ -211,3 +211,91 @@ async fn write_does_not_retry_after_a_timeout() {
     let err = out.expect_err("POST 超时不许重试（上游可能已经收到了）");
     assert!(err.contains("请求超时"), "{err}");
 }
+
+#[test]
+fn proxy_setting_is_validated_before_it_can_break_everything() {
+    // 空 = 直连，合法
+    assert!(check_proxy("").is_ok());
+    assert!(check_proxy("   ").is_ok());
+    // http / https 代理
+    assert!(check_proxy("http://127.0.0.1:7890").is_ok());
+    assert!(check_proxy("http://user:pass@10.0.0.2:3128").is_ok());
+    assert!(check_proxy("https://proxy.example.com:443").is_ok());
+    // 写错的形态：保存时就拦住，别等所有出站都超时才想起来
+    for bad in ["127.0.0.1:7890", "socks5h://127.0.0.1:1080", "ftp://x", "http://"] {
+        let e = check_proxy(bad).unwrap_err();
+        assert!(!e.is_empty(), "{bad} 应该有说明");
+    }
+}
+
+#[test]
+fn no_proxy_means_direct_and_stays_that_way() {
+    // 空串 = 直连；这条只是确认 set_proxy 不会把空串当成"设了一个叫空的代理"。
+    // 不测「设一个真代理」：全局状态会影响并行跑的其它出站用例。
+    set_proxy("");
+    assert!(proxy().is_none());
+    set_proxy("   ");
+    assert!(proxy().is_none());
+}
+
+/// 极简「HTTP 代理」：收到请求行就回 200 + 一段 JSON，并把请求行记下来。
+///
+/// 明文 http 走代理的协议就是「请求行里放绝对 URI」，所以一个只读一行、回一发的
+/// TCP 监听就够验证「请求确实发给了代理，而不是直连目标」。
+async fn fake_proxy() -> (String, std::sync::Arc<std::sync::Mutex<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = sock.read(&mut buf).await.unwrap_or(0);
+        if let Ok(mut g) = seen2.lock() {
+            *g = String::from_utf8_lossy(&buf[..n]).to_string();
+        }
+        let body = r#"{"via":"proxy"}"#;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = sock.write_all(head.as_bytes()).await;
+        let _ = sock.write_all(body.as_bytes()).await;
+        let _ = sock.shutdown().await;
+    });
+    (format!("{addr}"), seen)
+}
+
+#[tokio::test]
+async fn a_configured_proxy_is_really_used() {
+    let (addr, seen) = fake_proxy().await;
+    let client = client_for(&format!("http://{addr}")).unwrap();
+    // 目标域名根本不用能解析 —— 请求是发给代理的
+    let resp = client
+        .get("http://example.invalid/hello")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("请求应该由代理回");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("proxy"), "{body}");
+    let line = seen.lock().unwrap().clone();
+    assert!(
+        line.contains("http://example.invalid/hello"),
+        "代理收到的应该是绝对 URI，实际：{line}"
+    );
+
+    // 对照：不带代理时同一个 URL 直连（域名解析不了），必然失败
+    let direct = client_for("").unwrap();
+    assert!(
+        direct
+            .get("http://example.invalid/hello")
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .is_err(),
+        "没配代理就不该有人替它回响应"
+    );
+}

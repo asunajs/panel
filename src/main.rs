@@ -141,7 +141,11 @@ async fn main() -> Result<(), String> {
     }
     // 配置做成热快照：界面保存后插件立刻读到新值（旧实现是启动时快照，要重启）。
     // 提到收尾之前：收尾要发通知，而通知渠道在配置里。
-    let config = config_store::ConfigStore::new(&config::load(&data_dir)?);
+    let cfg_value = config::load(&data_dir)?;
+    // 出站代理在**启动**时也要装一次：refresh_server 只在保存配置时被调，
+    // 少了这一句，配好的代理要「保存一次」才生效（重启后又丢）。
+    crate::outbound::set_proxy(&config::proxy_from_value(&cfg_value));
+    let config = config_store::ConfigStore::new(&cfg_value);
     // 上次没跑完的运行记录（进程被杀/崩溃）在这里收尾，别让界面一直显示「运行中」。
     match crate::db::reap_stale_runs(&db).await {
         Ok(n) if n > 0 => {

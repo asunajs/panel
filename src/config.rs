@@ -210,7 +210,22 @@ pub fn init_server(dir: &Path) -> Option<String> {
 
 /// 配置保存/重读之后调：让热开关立刻跟上（不用重启）。
 /// `server.trust_xff` / `server.allow_any_host` / `run.budget_ms` 都在这里刷新。
+/// 出站代理（`net.proxy`）：空/缺省 = 直连。
+///
+/// 放在 config.json 而不是环境变量：服务是 launchd/systemd 起的，那里没有 shell 环境；
+/// 而且用户改这个是在界面上（设置 → 配置 → 网络），改完立刻生效，不用重启。
+pub fn proxy_from_value(v: &Value) -> String {
+    v.get("net")
+        .and_then(|n| n.get("proxy"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 pub fn refresh_server(v: &Value) {
+    // 出站代理也是热的（第 192 轮）：保存即换客户端，下一发请求就走新代理
+    crate::outbound::set_proxy(&proxy_from_value(v));
     set_server(server_from_value(v).1);
     set_run_budget(
         v.get("run")

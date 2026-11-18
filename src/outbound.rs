@@ -375,20 +375,105 @@ fn host_port(url: &str) -> Option<(String, u16)> {
 /// 握手。⚠ 这里**不设** timeout：各调用点的超时差着数量级（1500ms ~ 60s），
 /// 由调用处 `RequestBuilder::timeout()` 逐发指定。
 fn shared_client() -> Result<reqwest::Client, String> {
-    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    if let Some(c) = SHARED.get() {
-        return Ok(c.clone());
+    client_for(&proxy().unwrap_or_default())
+}
+
+/// 按代理串建（并缓存）客户端。`key` 空 = 直连。
+///
+/// 单独抽出来是为了**能测**：代理是进程级状态，测试里改它会影响并行跑的其它出站
+/// 用例；这里直接把代理当参数传，测「配了代理真的走代理」时不碰全局。
+fn client_for(key: &str) -> Result<reqwest::Client, String> {
+    // 按**代理地址**缓存客户端（第 192 轮）：换代理要换一个带代理的客户端，原来那份
+    // 留着也没意义（池里的连接是直连打出去的），所以缓存 key 就是代理串。
+    static CLIENTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>,
+    > = std::sync::OnceLock::new();
+    let map = CLIENTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = key.to_string();
+    {
+        let g = match map.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(c) = g.get(&key) {
+            return Ok(c.clone());
+        }
     }
-    let built = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
         // 空闲连接留久一点：插件的批量只读链路是一串串发的
-        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_idle_timeout(Duration::from_secs(90));
+    builder = if key.is_empty() {
+        // 没配代理就**显式**不读环境变量：launchd/systemd 里没有环境，
+        // 让「命令行跑一下」和「服务里跑」行为不同，排查成本会高得多。
+        builder.no_proxy()
+    } else {
+        builder.proxy(
+            reqwest::Proxy::all(&key).map_err(|e| format!("代理地址不合法（{key}）：{e}"))?,
+        )
+    };
+    let built = builder
         .build()
         .map_err(|e| format!("构造 native-tls 客户端失败: {e}"))?;
-    // 并发首调时谁先塞进去都行，后续统一用那一份
-    let _ = SHARED.set(built.clone());
-    Ok(SHARED.get().cloned().unwrap_or(built))
+    let mut g = match map.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    // 代理改来改去也就几种，别让 Map 无限长
+    if g.len() > 4 {
+        g.clear();
+    }
+    g.insert(key, built.clone());
+    Ok(built)
+}
+
+// ---------------------------------------------------------------- 出站代理（第 192 轮）
+//
+// 为什么放在面板而不是让插件各自配：出站只有**一条链路**（SSRF 门、不自动跟重定向、
+// 共享连接池），代理是这个链路的属性；插件各写一遍既重复又容易漏掉 SSRF 门。
+//
+// 只支持 http / https 代理：reqwest 的 socks feature 没开（少一个依赖），
+// 而本地那几种代理（Clash / v2ray / Surge）都提供 HTTP 代理端口，够用。
+// 空串 = 直连（见 `shared_client` 里为什么不读环境变量）。
+
+static PROXY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 设置出站代理（空 = 直连）。`PUT /api/config` 与启动时各调一次。
+pub fn set_proxy(url: &str) {
+    let u = url.trim().to_string();
+    let v = if u.is_empty() { None } else { Some(u) };
+    match PROXY.lock() {
+        Ok(mut g) => *g = v,
+        Err(p) => *p.into_inner() = v,
+    }
+}
+
+/// 当前代理（None = 直连）。
+pub fn proxy() -> Option<String> {
+    match PROXY.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
+/// 校验代理地址：空串合法（直连），否则必须是 http/https 且 reqwest 认。
+///
+/// 为什么要校验：写错一个字符不会立刻报错，而是「所有出站都连不上」——
+/// 那时用户看到的是插件一个个超时，很难联想到是这里手滑。
+pub fn check_proxy(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Ok(());
+    }
+    let low = u.to_ascii_lowercase();
+    if !(low.starts_with("http://") || low.starts_with("https://")) {
+        return Err(format!(
+            "代理地址要以 http:// 或 https:// 开头（收到 {u}；socks 代理这版没编进来）"
+        ));
+    }
+    reqwest::Proxy::all(u)
+        .map(|_| ())
+        .map_err(|e| format!("代理地址不合法（{u}）：{e}"))
 }
 
 /// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、

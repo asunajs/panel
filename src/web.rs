@@ -421,7 +421,17 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         // 于是扫描器刷完之后，正常用户浏览器点开 404 拿到的是一坨 JSON ——
         // 配额的本意是「别把日志冲掉」，不该改用户看到的东西。
         if http_log_allowed() {
-        let level = if status.is_server_error() {
+        // 502 里有一类不是「面板坏了」，而是「插件正忙 / 没在预算内响应」——
+        // 慢插件在页面上反复重试时，一屏红字 error 会让人以为面板出故障，也把真正的
+        // error 淹掉（第 192 轮）。所以这两类降成 warn。
+        //
+        // ⚠ 只降「等不及」，不降「插件自己抛错」：后者是插件真出错，仍然该是 error
+        //   （两者在 `plugin_busy` 这个 code 下混在一起，只能按 detail 分：
+        //   排队超时写「正忙」，超时响应写「没有响应 / 超时」）。
+        let transient = d.0.contains("code=plugin_busy")
+            && (d.0.contains("正忙") || d.0.contains("没有响应") || d.0.contains("超时"));
+        let busy = transient;
+        let level = if status.is_server_error() && !busy {
             crate::log::Level::Error
         } else {
             crate::log::Level::Warn
@@ -4147,6 +4157,11 @@ async fn api_config_save(
     // 放进去，通知会**静默全停**，而且每 30 秒往日志里刷一条「扫描失败」，直到有人打开通知页。
     // 报错就不落盘，旧配置继续生效 —— 这比「保存成功 + 什么都不发」好查得多。
     if let Err(e) = crate::notify::parse(value.get("notify")) {
+        return Err(bad(format!("配置有问题：{e}")));
+    }
+    // 代理地址写错不会当场报错，而是「所有出站都连不上」—— 那时用户看到的是插件一个个
+    // 超时，很难联想到是这里手滑。所以保存在这儿就拦住（空串合法 = 直连）。
+    if let Err(e) = crate::outbound::check_proxy(&crate::config::proxy_from_value(&value)) {
         return Err(bad(format!("配置有问题：{e}")));
     }
     let path = st.data_dir.join(crate::config::FILE);

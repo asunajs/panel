@@ -1221,6 +1221,14 @@ async function main() {
   check('表单里有监听地址、信任 XFF、接受任意 Host、运行预算',
     ['server.bind', 'server.trust_xff', 'server.allow_any_host', 'run.budget_ms']
       .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  // 第 192 轮：出站代理是配置项（插件拉 GitHub 那些要走它）
+  const proxyField = JSON.parse(await js(    "JSON.stringify((()=>{const f=document.getElementById('cfg-form');" +
+    "const g=[...f.querySelectorAll('.cfg-group')].find(x=>x.textContent.includes('网络'));" +
+    "const inp=g?g.querySelector('[data-cfg=\"net.proxy\"]'):null;" +
+    "return {group:!!g,input:!!inp,ph:inp?inp.placeholder:''};})())"
+  ));
+  check('设置·配置 里有「网络 · 出站代理」一栏（net.proxy，留空=直连）',
+    proxyField.group && proxyField.input && /7890/.test(proxyField.ph), JSON.stringify(proxyField));
   check('日志 / 数据两组也在（保留条数、HTTP 上限、运行记录、插件大小）',
     ['log.keep', 'log.http_per_min', 'runs.keep', 'plugins.max_bytes']
       .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));

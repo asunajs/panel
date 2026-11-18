@@ -356,13 +356,19 @@ async function api(path, opt = {}) {
     // 后端的错误体是 JSON（第 166 轮：code/error/ref）。直接显示整串 JSON
     // 用户看到的是 {"code":"not_found",...} —— 取 error，并把 ref 带上。
     let msg = text;
+    let code = '';
     try {
       const j = JSON.parse(text);
       if (j && j.error) msg = j.error + (j.ref ? '（编号 ' + j.ref + '）' : '');
+      if (j && j.code) code = String(j.code);
     } catch (e) {
       /* 不是 JSON 就用原文 */
     }
-    throw new Error(msg || ('HTTP ' + resp.status));
+    const err = new Error(msg || ('HTTP ' + resp.status));
+    // 调用方偶尔要看「是哪一类失败」（比如 plugin_busy = 插件正忙，不必重试）
+    err.code = code;
+    err.status = resp.status;
+    throw err;
   }
   const ct = resp.headers.get('content-type') || '';
   return ct.includes('json') ? resp.json() : resp.text();
@@ -3296,6 +3302,19 @@ const CFG_GROUPS = [
     ],
   },
   {
+    title: '网络',
+    note: '出站代理：插件拉 GitHub 那些要走它',
+    fields: [
+      {
+        path: 'net.proxy',
+        label: '出站代理',
+        kind: 'text',
+        placeholder: 'http://127.0.0.1:7890',
+        help: '留空 = 直连。填 http:// 或 https:// 的代理地址（socks 没编进来）。保存即生效，插件的 host.fetch 和面板自己的检查更新都走它。',
+      },
+    ],
+  },
+  {
     title: '运行',
     note: '',
     fields: [
@@ -5294,8 +5313,12 @@ async function runPanelOpenHooks() {
     } catch (e) {
       const n = (state.panelHookTries.get(key) || 0) + 1;
       state.panelHookTries.set(key, n);
-      // 前两次失败允许下一次 refresh 重试（插件可能还在装）；之后就不再骚扰。
-      if (n < 3) state.panelHooksDone.delete(key);
+      // 「插件正忙」不重试（第 192 轮）：钩子本身把插件占住了，重试只会再排 8 秒队、
+      // 再刷一条 502 —— 插件慢是它自己的事，等下次打开面板再说。
+      const busy = e && (e.code === 'plugin_busy' || /正忙|没有响应/.test(e.message || ''));
+      if (busy) state.panelHooksDone.add(key);
+      // 其余失败前两次允许下一次 refresh 重试（插件可能还在装）；之后就不再骚扰。
+      else if (n < 3) state.panelHooksDone.delete(key);
       console.warn('panel-open hook failed:', p.name, e && e.message ? e.message : e);
     }
   }

@@ -908,3 +908,44 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 修完重跑：**「进程已起（healthz 200）→ 已就绪（等 0s，插件 6/6）」**，
 `{ok:true, failed_plugins:0, plugins:6, tasks:4}`，插件目录指纹未变（24 项，
 `ad7e4ad68efe413c…`）—— 面板升级没碰插件（几条真插件都还有自己的 `.webui/`，仍走 iframe）。
+
+---
+
+## 第 192 轮：出站代理 + 慢插件的日志降级（2026-11-18）
+
+起因：用户截图里的面板在正常跑，但日志里每 11 秒成对出现
+`POST /plugins/shop/api/updates → 502 code=plugin_busy`。顺着查到两件事：
+
+1. `shop.panel.json` 的 `on_panel_open: "api/updates"` 每次打开面板都去拉目录
+   `https://raw.githubusercontent.com/asunajs/panel-single-plugins/main/catalog.json`，
+   而这台机器上那个域名**连不通**（`curl` 4.15 s 返回 000）→ 插件一直「忙」→ 后续调用排 8 秒队后 502。
+2. 那类 502（`plugin_busy`）按 error 记，慢插件一重试就刷一屏红字。
+
+### 改动
+
+- **出站代理**（设置 → 配置 → 网络 · `net.proxy`）：`http://` / `https://`，留空 = 直连；
+  保存即生效（换客户端），启动时也会装一次。走的是**同一条出站链路**（SSRF 门、不自动跟重定向、
+  共享连接池），所以插件的 `host.fetch` 和面板自己的检查更新一起受益。
+  写错的地址**保存时**就 400（`127.0.0.1:7890` 漏了 `http://` 这种，会让所有出站都连不上）。
+- **日志降级**：`code=plugin_busy` 且 detail 是「正忙 / 没有响应 / 超时」→ **warn**；
+  插件自己抛的错仍然是 **error**（两者共用一个 code，按 detail 分）。
+- **钩子不重试「正忙」**：`runPanelOpenHooks` 遇到 `plugin_busy` 直接放弃本次（原来会重试 3 次，
+  每次再排 8 秒队）；`api()` 现在把后端 `code` 挂到 Error 上，页面能判可重试性。
+
+### 读数
+
+| 项 | 结果 |
+|---|---|
+| 代理真的走了代理（单测，假代理 + 假目标） | 代理收到的请求行是**绝对 URI** `http://example.invalid/hello`，回包 200；对照（不配代理）同一 URL 直连失败 |
+| `check_proxy` | 接受 `http(s)://…`（含 user:pass@）、空串；拒绝 `127.0.0.1:7890`、`socks5h://…`、`ftp://x`、`http://` |
+| 保存坏代理 | `PUT /api/config` → **400**，错误里带「代理」；好代理 → 200 |
+| 排队超时的 502 | 日志级别 **warn**（`slow 正忙（排队 8s 没轮到）`） |
+| 插件抛错的 502 | 日志级别仍是 **error**（`Error: boom-marker`） |
+| 门禁 | `cargo test` **522**（+4：代理校验 2、代理走通 1、坏代理 400 1）、`ui-check` **203**（+1：设置里有「网络 · 出站代理」）、`gate.sh fast` 全绿 |
+
+### 说明
+
+- 只支持 http/https 代理：reqwest 的 `socks` feature 没开（少一个依赖），本地那几种代理
+  （Clash / v2ray / Surge）都提供 HTTP 代理端口，够用。
+- 没配代理时**显式** `no_proxy()`，不读 `HTTP_PROXY` 环境变量 —— 服务是 launchd/systemd 起的，
+  那里没有 shell 环境，靠环境变量会让「命令行跑一下」和「服务里跑」行为不同。

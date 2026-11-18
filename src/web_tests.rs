@@ -4458,3 +4458,29 @@ async fn plugin_call_route_validates_before_touching_the_plugin() {
     let (s, b) = send(&app, post_with("/api/plugins/nope-xyz/call/login", "{}", true)).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
 }
+
+#[tokio::test]
+async fn config_save_rejects_a_broken_proxy_address() {
+    let (app, _db) = setup().await;
+    // 空代理合法（直连）
+    let (status, body) = send(
+        &app,
+        with_csrf("PUT", "/api/config", Some(json!({ "text": "{\"net\":{\"proxy\":\"\"}}" }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 写成 host:port（漏了 scheme）要拦住：否则所有出站立刻连不上
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/config",
+            Some(json!({ "text": "{\"net\":{\"proxy\":\"127.0.0.1:7890\"}}" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("代理"), "{body}");
+    // 没写坏配置：那一笔 400 没有落盘（这里不断言具体值 —— 并行跑的其它用例
+    // 也在改同一个 data/config.json，断「上次写的还是上次写的」会随机红）。
+}

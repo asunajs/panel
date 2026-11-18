@@ -197,3 +197,16 @@ fn limits_default_and_clamp() {
     assert_eq!(l.logs_keep, 20_000);
     assert_eq!(l.plugin_max_bytes, 8 * 1024 * 1024);
 }
+
+#[test]
+fn net_proxy_comes_from_the_net_section() {
+    assert_eq!(crate::config::proxy_from_value(&json!({})), "");
+    assert_eq!(
+        crate::config::proxy_from_value(&json!({"net": {"proxy": "  http://127.0.0.1:7890 "}})),
+        "http://127.0.0.1:7890"
+    );
+    assert_eq!(
+        crate::config::proxy_from_value(&json!({"net": {"proxy": 1}})),
+        ""
+    );
+}
