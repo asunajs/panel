@@ -223,9 +223,41 @@ pub fn proxy_from_value(v: &Value) -> String {
         .to_string()
 }
 
+/// 前缀代理（`net.prefix`）与它适用的站点（`net.prefix_hosts`，空 = 默认 GitHub 名单）。
+///
+/// 和 HTTP 正向代理的区别：这个是把 URL **拼在**前缀后面（gh-proxy 那一类镜像），
+/// 所以必须限定站点 —— 镜像只管 GitHub，别的请求拼上去就是全盘坏掉。
+pub fn prefix_from_value(v: &Value) -> (String, Vec<String>) {
+    let net = v.get("net");
+    let url = net
+        .and_then(|n| n.get("prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let hosts = match net.and_then(|n| n.get("prefix_hosts")) {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Some(Value::String(s)) => s
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    };
+    (url, hosts)
+}
+
 pub fn refresh_server(v: &Value) {
     // 出站代理也是热的（第 192 轮）：保存即换客户端，下一发请求就走新代理
     crate::outbound::set_proxy(&proxy_from_value(v));
+    // 前缀代理（第 193 轮）：同样热生效，下一发 GitHub 请求就换个走法
+    let (pfx, hosts) = prefix_from_value(v);
+    crate::outbound::set_prefix(&pfx, &hosts);
     set_server(server_from_value(v).1);
     set_run_budget(
         v.get("run")

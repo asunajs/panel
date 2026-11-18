@@ -843,6 +843,8 @@ curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件�
 | 服务 | `server.trust_xff` | 信任 `X-Forwarded-For`（默认关） | 热 |
 | 服务 | `server.allow_any_host` | 无令牌时也接受任意 Host（等同 `PANEL_ALLOW_ANY_HOST=1`） | 热 |
 | 网络 | `net.proxy` | 出站代理（`http://` 或 `https://`，留空 = 直连）。插件 `host.fetch` 与面板自己的检查更新都走它 | 热 |
+| 网络 | `net.prefix` | **前缀代理**（gh-proxy 那类镜像）：把 URL 拼在前缀后面，只对名单里的站点生效。留空 = 关 | 热 |
+| 网络 | `net.prefix_hosts` | 前缀代理适用站点（逗号分隔；留空 = 默认那组 GitHub 域名） | 热 |
 | 运行 | `run.budget_ms` | 单次运行预算，界面上按**秒**填，存毫秒 | 热 |
 | 日志 | `log.keep` | 日志保留条数（默认 2 万，夹在 100–200 万） | 热（清理每 5 分钟一轮） |
 | 日志 | `log.http_per_min` | HTTP 错误日志每分钟上限，0 = 不限 | 热 |

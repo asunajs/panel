@@ -145,6 +145,8 @@ async fn main() -> Result<(), String> {
     // 出站代理在**启动**时也要装一次：refresh_server 只在保存配置时被调，
     // 少了这一句，配好的代理要「保存一次」才生效（重启后又丢）。
     crate::outbound::set_proxy(&config::proxy_from_value(&cfg_value));
+    let (pfx, pfx_hosts) = config::prefix_from_value(&cfg_value);
+    crate::outbound::set_prefix(&pfx, &pfx_hosts);
     let config = config_store::ConfigStore::new(&cfg_value);
     // 上次没跑完的运行记录（进程被杀/崩溃）在这里收尾，别让界面一直显示「运行中」。
     match crate::db::reap_stale_runs(&db).await {

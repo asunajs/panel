@@ -299,3 +299,62 @@ async fn a_configured_proxy_is_really_used() {
         "没配代理就不该有人替它回响应"
     );
 }
+
+#[test]
+fn prefix_proxy_rewrites_only_the_listed_hosts() {
+    let pfx = Some((
+        "https://gh-proxy.com/".to_string(),
+        vec!["raw.githubusercontent.com".to_string(), ".github.com".to_string()],
+    ));
+    // 名单里的：拼在前面（镜像要的就是完整 URL）
+    assert_eq!(
+        rewrite("https://raw.githubusercontent.com/a/b/c.json", pfx.clone()),
+        "https://gh-proxy.com/https://raw.githubusercontent.com/a/b/c.json"
+    );
+    // ".github.com" 覆盖子域，也覆盖裸域名
+    assert_eq!(
+        rewrite("https://api.github.com/repos/x", pfx.clone()),
+        "https://gh-proxy.com/https://api.github.com/repos/x"
+    );
+    assert_eq!(
+        rewrite("https://github.com/x/y", pfx.clone()),
+        "https://gh-proxy.com/https://github.com/x/y"
+    );
+    // 不在名单里：原样（不然 mcloud 那些接口全废）
+    assert_eq!(
+        rewrite("https://m.mcloud.139.com/api/x", pfx.clone()),
+        "https://m.mcloud.139.com/api/x"
+    );
+    // 没配前缀：原样
+    assert_eq!(
+        rewrite("https://raw.githubusercontent.com/a/b", None),
+        "https://raw.githubusercontent.com/a/b"
+    );
+}
+
+#[test]
+fn prefix_proxy_is_validated() {
+    assert!(check_prefix("").is_ok());
+    assert!(check_prefix("https://gh-proxy.com/").is_ok());
+    assert!(check_prefix("http://127.0.0.1:8080/gh/").is_ok());
+    // 只填域名不行：镜像要把完整 URL 拼在后面
+    let e = check_prefix("gh-proxy.com").unwrap_err();
+    assert!(e.contains("http"), "{e}");
+}
+
+#[test]
+fn prefix_hosts_come_from_config_or_fall_back_to_github() {
+    // 字符串（逗号/空格分隔）与数组都收
+    let (u, h) = crate::config::prefix_from_value(&json!({
+        "net": { "prefix": "https://gh-proxy.com", "prefix_hosts": "github.com, raw.githubusercontent.com" }
+    }));
+    assert_eq!(u, "https://gh-proxy.com");
+    assert_eq!(h, vec!["github.com", "raw.githubusercontent.com"]);
+    let (_, h2) = crate::config::prefix_from_value(&json!({
+        "net": { "prefix": "https://gh-proxy.com", "prefix_hosts": ["a.com"] }
+    }));
+    assert_eq!(h2, vec!["a.com"]);
+    // 没写名单 = 空（outbound 那边会落回默认 GitHub 名单）
+    let (u3, h3) = crate::config::prefix_from_value(&json!({}));
+    assert!(u3.is_empty() && h3.is_empty());
+}

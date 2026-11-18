@@ -950,3 +950,26 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
   （Clash / v2ray / Surge）都提供 HTTP 代理端口，够用。
 - 没配代理时**显式** `no_proxy()`，不读 `HTTP_PROXY` 环境变量 —— 服务是 launchd/systemd 起的，
   那里没有 shell 环境，靠环境变量会让「命令行跑一下」和「服务里跑」行为不同。
+
+### 前缀代理（第 193 轮）
+
+用户澄清：他要的是 **[gh-proxy.com](https://gh-proxy.com/) 这种「把 URL 拼在前缀后面」的镜像**，
+不是 HTTP 正向代理（后者保留，两者可同时配）。
+
+- 配置：`net.prefix`（镜像前缀，留空 = 关）+ `net.prefix_hosts`（逗号分隔，留空 = 默认那组
+  GitHub 域名，写 `.github.com` 可覆盖所有子域）。保存即生效。
+- 改写点：`outbound::apply_prefix` 在**两**条出站链路上都生效（rustls/hyper 那条与 native-tls 那条），
+  SSRF 门校验的是**改写后**那个真实地址；重定向仍按原始 URL 解析。
+- 单测钉住：名单内改写、`.github.com` 通配子域、名单外原样（`m.mcloud.139.com` 不受影响）、没配前缀原样；
+  只填域名（漏 `https://`）保存时 400。
+
+实测（插件 `host.fetch('https://raw.githubusercontent.com/asunajs/panel-single-plugins/main/catalog.json')`）：
+
+| 配置 | 结果 |
+|---|---|
+| 不配前缀 | `请求失败: client error (Connect)`（`curl` 同样 `(35) Recv failure: Connection reset by peer`，TLS 被重置） |
+| 配 `https://gh-proxy.com/` | 请求**确实发到了镜像**（回包 41904 字节 = 镜像自己的 404 页，1994 ms）—— 说明改写生效，但镜像当前对这两条路径 404 |
+
+⚠ 这一轮顺带量到：`gh-proxy.com` 现在（21:30 前后）对 `/https://raw.githubusercontent.com/...` 与
+`/raw.githubusercontent.com/...` 都回 **404**（42010 B 的自有错误页），`ghproxy.net` 12 秒超时。
+这是镜像那边的事，不是面板的：换一个镜像前缀（或等它恢复）即可，面板不用动。

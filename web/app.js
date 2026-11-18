@@ -1962,17 +1962,35 @@ function buildSchemaForm(fields, cfg) {
       const input = node.querySelector('[data-f="' + f.name + '"]');
       if (!input) continue;
       const cur = src[f.name] !== undefined ? src[f.name] : (f.default === undefined ? '' : f.default);
-      if (f.type === 'bool') input.checked = cur === true || cur === 'true';
-      else input.value = cur === null || cur === undefined ? '' : String(cur);
+      if (f.type === 'bool') {
+        input.checked = cur === true || cur === 'true';
+        if (input._unit) input._unit.textContent = input.checked ? '开' : '关';
+      } else input.value = cur === null || cur === undefined ? '' : String(cur);
     }
   };
   for (const f of fields) {
     const line = el('label', 'chan-line' + (f.type === 'textarea' ? ' chan-line-block' : ''));
     line.append(el('span', 'chan-label', f.label || f.name));
     let input;
-    if (f.type === 'textarea') {
-      input = el('textarea', 'editor chan-tpl');
-      input.rows = 4;
+    let control = null; // 真正塞进「控件那一格」的东西（勾选框要包一层）
+    if (f.type === 'bool') {
+      // 勾选框**不能**带 .input 类：那个类有 min-height 与 flex 基准，会把 16px 的
+      // 方框拉成一整条蓝色大块（用户截图里那个「蓝色大勾」）。包一层带「开/关」字样的
+      // 容器，和设置页的写法一致。
+      input = el('input');
+      input.type = 'checkbox';
+      const wrap = el('div', 'chan-inline');
+      const unit = el('span', 'chan-unit', '关');
+      input._unit = unit;
+      input.addEventListener('change', () => { unit.textContent = input.checked ? '开' : '关'; });
+      wrap.append(input, unit);
+      control = wrap;
+    } else if (f.type === 'textarea') {
+      // 用表单自己的多行框：`.editor` 是代码编辑器那套（min-height 340px + 等宽字体），
+      // 一个「备注」字段被撑成半屏高，明显不对。
+      input = el('textarea', 'chan-area');
+      input.rows = 3;
+      if (f.placeholder) input.placeholder = f.placeholder;
     } else if (f.type === 'select') {
       input = el('select', 'input');
       for (const o of f.options || []) {
@@ -1982,7 +2000,7 @@ function buildSchemaForm(fields, cfg) {
       }
     } else {
       input = el('input', 'input');
-      input.type = f.type === 'password' ? 'password' : (f.type === 'number' ? 'number' : (f.type === 'bool' ? 'checkbox' : 'text'));
+      input.type = f.type === 'password' ? 'password' : (f.type === 'number' ? 'number' : 'text');
       if (f.placeholder) input.placeholder = f.placeholder;
       // 手机端换键盘 / 验证码长度：只是提示，业务校验在插件里
       if (f.inputmode) input.inputMode = f.inputmode;
@@ -1990,7 +2008,7 @@ function buildSchemaForm(fields, cfg) {
     }
     input.dataset.f = f.name;
     if (f.required) input.required = true;
-    line.append(input);
+    line.append(control || input);
     if (f.help) line.append(el('span', 'chan-hint', f.help));
     node.append(line);
   }
@@ -2258,6 +2276,7 @@ async function renderPluginDeclared(name) {
   if (fields.length || actions.length) {
     const card = el('div', 'pv-card');
     if (fields.length) {
+      card.append(el('h3', 'pv-form-title', '参数'));
       const built = buildSchemaForm(fields, cfgObj);
       ctx.form = built;
       card.append(built.node);
@@ -3308,10 +3327,24 @@ const CFG_GROUPS = [
     fields: [
       {
         path: 'net.proxy',
-        label: '出站代理',
+        label: '出站代理（HTTP）',
         kind: 'text',
         placeholder: 'http://127.0.0.1:7890',
-        help: '留空 = 直连。填 http:// 或 https:// 的代理地址（socks 没编进来）。保存即生效，插件的 host.fetch 和面板自己的检查更新都走它。',
+        help: '留空 = 直连。填 http:// 或 https:// 的正向代理（socks 没编进来）。保存即生效，插件的 host.fetch 和面板自己的检查更新都走它。',
+      },
+      {
+        path: 'net.prefix',
+        label: '前缀代理（GitHub 镜像）',
+        kind: 'text',
+        placeholder: 'https://gh-proxy.com/',
+        help: '不是正向代理：把 URL 拼在前缀后面，只对下面那些站点生效。国内拉 GitHub 直连常是 4 秒超时，填这类镜像就能通（如 https://gh-proxy.com/）。留空 = 关。',
+      },
+      {
+        path: 'net.prefix_hosts',
+        label: '前缀代理适用站点',
+        kind: 'text',
+        placeholder: 'github.com, api.github.com, raw.githubusercontent.com',
+        help: '逗号分隔；留空 = 默认那组 GitHub 域名（github.com / api.github.com / raw.、objects.、codeload.、gist.）。写 .github.com 可覆盖所有子域。',
       },
     ],
   },

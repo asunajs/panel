@@ -4484,3 +4484,20 @@ async fn config_save_rejects_a_broken_proxy_address() {
     // 没写坏配置：那一笔 400 没有落盘（这里不断言具体值 —— 并行跑的其它用例
     // 也在改同一个 data/config.json，断「上次写的还是上次写的」会随机红）。
 }
+
+#[tokio::test]
+async fn config_save_rejects_a_broken_prefix_proxy() {
+    let (app, _db) = setup().await;
+    // 只填域名（漏了 https://）→ 400：镜像要把完整 URL 拼在后面
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/config",
+            Some(json!({ "text": "{\"net\":{\"prefix\":\"gh-proxy.com\"}}" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("前缀"), "{body}");
+}

@@ -189,7 +189,11 @@ pub async fn fetch_json_with(
         if cancelled(&inv) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
+        // 前缀代理在这里改写（第 193 轮）：SSRF 门必须校验**实际要连**的那个地址，
+        // 所以先改写再校验；重定向解析仍以原始 current 为基准（GitHub 的 Location 是
+        // 相对原始 URL 写的）。
+        let target = apply_prefix(&current);
+        ssrf::ensure_outbound_url_allowed_with(&target, allow_private)?;
 
         let host = current.parse::<http::Uri>().ok().and_then(|u| u.host().map(str::to_string));
         // 幂等方法超时后重试一次（链路抖一下不该等于一次失败）；写操作不重试 ——
@@ -215,9 +219,11 @@ pub async fn fetch_json_with(
             let left_ms = left.as_millis().max(1) as u64;
             let budget = if first { attempt_budget.min(left_ms) } else { left_ms };
             first = false;
+            // 这里的 URI 用**改写后**的 target（前缀代理）：current 保留原始地址，
+            // 重定向解析与报错信息仍以它为准。
             let mut builder = http::Request::builder()
                 .method(method.as_str())
-                .uri(&current);
+                .uri(&target);
             for (k, v) in &extra_headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
@@ -476,6 +482,108 @@ pub fn check_proxy(url: &str) -> Result<(), String> {
         .map_err(|e| format!("代理地址不合法（{u}）：{e}"))
 }
 
+// ---------------------------------------------------------------- 前缀代理（第 193 轮）
+//
+// 「类 gh-proxy 的前缀镜像」：不是 HTTP 正向代理，而是把 URL **拼在**前缀后面 ——
+//   https://raw.githubusercontent.com/a/b/c.json
+//   → https://gh-proxy.com/https://raw.githubusercontent.com/a/b/c.json
+//
+// 为什么要它：国内拉 GitHub 的直连经常是「4 秒后 000」，但这类镜像前缀是通的（实测
+// gh-proxy.com 1.1 s 200）。插件商店、更新检查、插件下载都走 GitHub，一个前缀全解决。
+//
+// 为什么**只对名单里的 host** 生效：镜像只管 GitHub，把别的请求也拼上去就是全盘坏掉。
+// 名单默认是一组 GitHub 域名，用户可以在设置里加减。
+
+/// 前缀代理默认只改这些 host（设置里可覆盖）。
+pub const PREFIX_HOSTS: &[&str] = &[
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+    "gist.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+];
+
+static PREFIX: std::sync::Mutex<Option<(String, Vec<String>)>> = std::sync::Mutex::new(None);
+
+/// 设置前缀代理（空 = 关）。hosts 空 = 用默认名单。
+pub fn set_prefix(url: &str, hosts: &[String]) {
+    let mut u = url.trim().to_string();
+    let v = if u.is_empty() {
+        None
+    } else {
+        if !u.ends_with('/') {
+            u.push('/');
+        }
+        let mut hs: Vec<String> = hosts
+            .iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        if hs.is_empty() {
+            hs = PREFIX_HOSTS.iter().map(|h| h.to_string()).collect();
+        }
+        Some((u, hs))
+    };
+    match PREFIX.lock() {
+        Ok(mut g) => *g = v,
+        Err(p) => *p.into_inner() = v,
+    }
+}
+
+/// 当前前缀代理（None = 关）。
+pub fn prefix() -> Option<(String, Vec<String>)> {
+    match PREFIX.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
+/// 校验前缀代理地址：空串合法；否则必须 http/https。
+pub fn check_prefix(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Ok(());
+    }
+    let low = u.to_ascii_lowercase();
+    if !(low.starts_with("http://") || low.starts_with("https://")) {
+        return Err(format!(
+            "前缀代理要以 http:// 或 https:// 开头（收到 {u}；只填域名不行，镜像要求把完整 URL 拼在后面）"
+        ));
+    }
+    Ok(())
+}
+
+/// 把 URL 改写成前缀代理形式。host 不在名单里（或没配前缀）就原样返回。
+pub fn apply_prefix(url: &str) -> String {
+    rewrite(url, prefix())
+}
+
+/// `apply_prefix` 的可测版本：前缀当参数传，不读全局（测试要能造各种名单）。
+fn rewrite(url: &str, pfx: Option<(String, Vec<String>)>) -> String {
+    let Some((pfx, hosts)) = pfx else {
+        return url.to_string();
+    };
+    let Some((host, _port)) = host_port(url) else {
+        return url.to_string();
+    };
+    let h = host.to_ascii_lowercase();
+    // 允许写成 ".github.com" 形式来覆盖子域（用户自己加名单时方便）
+    let hit = hosts.iter().any(|x| {
+        if let Some(suffix) = x.strip_prefix('.') {
+            h == suffix || h.ends_with(&format!(".{suffix}"))
+        } else {
+            h == *x
+        }
+    });
+    if hit {
+        format!("{pfx}{url}")
+    } else {
+        url.to_string()
+    }
+}
+
 /// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、
 /// 不自动跟重定向（我们自己在循环里跟，这样每跳都能过 SSRF 门）、正文 1 MiB 上限。
 async fn fetch_native_json(
@@ -530,11 +638,14 @@ async fn fetch_native_json(
         if inv.as_ref().map(|i| i.is_stopped()).unwrap_or(false) {
             return Err("AbortError: invocation 已停止".into());
         }
-        ssrf::ensure_outbound_url_allowed_with(&current, allow_private)?;
+        // 前缀代理在这里改写（第 193 轮）：SSRF 门校验**实际要连**的地址，
+        // 所以先改写再校验；重定向仍以原始 current 为基准解析。
+        let target = apply_prefix(&current);
+        ssrf::ensure_outbound_url_allowed_with(&target, allow_private)?;
 
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("method 不合法 {method}: {e}"))?;
-        let mut rb = client.request(m, &current).timeout(Duration::from_millis(timeout));
+        let mut rb = client.request(m, &target).timeout(Duration::from_millis(timeout));
         for (k, v) in &extra_headers {
             rb = rb.header(k.as_str(), v.as_str());
         }

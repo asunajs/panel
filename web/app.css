@@ -1671,6 +1671,18 @@ select option { background: var(--surface); color: var(--fg); }
 .chan-line .input { flex: 1 1 240px; min-width: 180px; }
 .chan-hint { flex: 1 1 100%; font-size: 12px; color: var(--dim); padding-left: 98px; }
 .chan-tpl { flex: 1 1 240px; font-family: var(--mono); font-size: 12px; }
+/* 表单里的多行文本（备注这类）：跟其它控件同一套边框与字号，高度按行数走。 */
+.chan-area {
+  width: 100%; min-height: 76px; max-height: 260px; resize: vertical;
+  padding: 8px var(--pad-control);
+  border: 1px solid var(--line-strong); border-radius: var(--r-control);
+  background: var(--surface); color: var(--fg);
+  font: inherit; font-size: 13px; line-height: 1.55; outline: none;
+}
+.chan-area:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
 .row-acts { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* 表单里的小节标题（第 171 轮） */
@@ -1943,6 +1955,10 @@ select option { background: var(--surface); color: var(--fg); }
 .chan-label { font-size: 12.5px; color: var(--dim); }
 /* 提示占整行（含标签那一列）：塞在控件那一列里，容器一窄就变成一列一个字 */
 .chan-hint { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); line-height: 1.5; }
+/* 勾选框那一格：.input 类会把 16px 的方框拉成一条（min-height + flex 基准），
+   所以 bool 字段包一层 .chan-inline，右边跟一个「开/关」字样（和设置页一致）。 */
+.chan-inline { display: flex; align-items: center; gap: 8px; }
+.chan-unit { font-size: 12.5px; color: var(--dim); }
 .chan-secret { display: flex; gap: 6px; align-items: center; min-width: 0; }
 .chan-secret .input { flex: 1 1 auto; min-width: 0; }
 .chan-secret-set { font-size: 12.5px; color: var(--fg-2); flex: 1 1 auto; }
@@ -2109,7 +2125,29 @@ select option { background: var(--surface); color: var(--fg); }
 .pv-title { margin: 0; font-size: 17px; }
 .pv-desc { margin: 3px 0 0; font-size: 12px; color: var(--dim); }
 .pv-card { margin-bottom: 14px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
-.pv-actions { margin-top: 10px; flex-wrap: wrap; }
+/* 表单照「设置 → 配置」的 .cfg-row 排：190px 标签列 + 控件列，控件限宽、
+   提示落在控件列下面，行间虚线。抽屉那套 84px 标签 + flex 是给窄容器的，
+   搬到这一整页上就变成一条条通栏输入框（用户截图「有一点丑」就是这个）。 */
+.declared-page .schema-form { margin: 2px 0 2px; }
+.declared-page .chan-line {
+  display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 6px 14px;
+  align-items: start; padding: 6px 0; flex-wrap: nowrap;
+}
+.declared-page .chan-line + .chan-line { border-top: 1px dashed var(--line); }
+.declared-page .chan-label { font-size: 13px; color: var(--fg-2); padding-top: 6px; flex: none; }
+.declared-page .chan-line .input { max-width: 380px; flex: none; }
+.declared-page .chan-line textarea.chan-area { max-width: 560px; }
+.pv-form-title { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; color: var(--fg); }
+.declared-page .chan-hint {
+  grid-column: 2; font-size: 12px; color: var(--dim); padding-left: 0; margin-top: 2px;
+}
+.declared-page .chan-inline { padding-top: 9px; }
+@media (max-width: 720px) {
+  .declared-page .chan-line { grid-template-columns: 1fr; }
+  .declared-page .chan-label { padding-top: 0; }
+  .declared-page .chan-hint { grid-column: 1; }
+}
+.pv-actions { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
 .pv-msg:empty { display: none; }
 .pv-image { margin-top: 10px; }
 .pv-image-img { max-width: 200px; max-height: 200px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }

@@ -4173,6 +4173,10 @@ async fn api_config_save(
     if let Err(e) = crate::outbound::check_proxy(&crate::config::proxy_from_value(&value)) {
         return Err(bad(format!("配置有问题：{e}")));
     }
+    // 前缀代理同理：只填域名（少 http://）会让所有 GitHub 请求拼出一个坏 URL
+    if let Err(e) = crate::outbound::check_prefix(&crate::config::prefix_from_value(&value).0) {
+        return Err(bad(format!("配置有问题：{e}")));
+    }
     let path = st.data_dir.join(crate::config::FILE);
     // 配置里可能有账号/令牌，落盘就是 0600。
     write_atomic(&path, body.text.as_bytes(), Some(0o600))
