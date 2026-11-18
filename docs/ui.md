@@ -186,6 +186,14 @@ JS 内存为什么没接：`AsyncRuntime::memory_usage()` 要拿 runtime 锁，�
   （src 属性在 iframe 自己导航过之后会骗人）；`guardPluginFrame()` 在 iframe 每次 load 时
   把「落到面板自己页面」的导航提到最外层 —— 否则会面板套面板（错误页的「回面板首页」就是这个坑，
   它的链接已带 `target="_top"`）。契约见 [plugins.md](plugins.md)。
+- **声明式插件页（第 191 轮）**：插件没写 `.webui/` 但清单里声明了 `views` / `config.actions`，
+  这一格就由**面板**渲染（`#plugin-declared`，与 iframe 互斥显示）：页头（标题/描述/设置/刷新）+
+  schema 表单（和抽屉「配置」共用 `buildSchemaForm()`）+ 动作按钮 + 数据块（表格 / 列表 / 键值）。
+  入口来自清单 `nav`，**插件没加载也能进侧栏**（点进去取数时才装：沿用「用到就装」）。
+  动作返回不只是 toast：`values` 回填、`keep` 存页面级 bag、`image` 出图（图形码）、
+  `cooldown_s` 让按钮倒计时、`poll` 有界轮询（扫码）——契约见
+  [plugin-contract.md](plugin-contract.md) §9。表格只画前 200 行、单元格截到 500 字符；
+  有 `.webui/` 的插件永远优先用它自己的页面。
 - **自启动不在界面里点**：设置页只给四条命令（`print` / `install` / `status` / `uninstall`）。
   安装自启动要动 launchd / systemd / 计划任务，属于「出了事得能自己修」的操作，留在命令行
   （Windows 上 `panel service install` 建的是**登录时触发的计划任务**，`print` 会打印出那条 schtasks 命令）。

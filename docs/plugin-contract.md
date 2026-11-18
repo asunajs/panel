@@ -99,3 +99,102 @@
 3. 通知相关会话按新规矩做，别各自发挥。
 
 约定不一致的代价是「同一个插件在两个会话手里变成两个东西」——那正是这一页要消灭的东西。
+
+## 9. 不用写 WebUI：清单直接声明界面（第 191 轮）
+
+「填个账号密码、点个登录、看一张表」这类需求不值得写一个前端工程。清单里声明，
+面板负责渲染成整页 —— 插件侧只留 handler。完整样例：`plugins/preview-demo.{js,panel.json}`。
+
+<!-- prettier-ignore -->
+    插件                    清单声明                        面板渲染
+    preview-demo.js   +   preview-demo.panel.json   →   侧栏一格 + 表单 + 按钮 + 数据块
+
+### 9.1 清单里三样东西
+
+    {
+      "title": "样例（声明式页面）",
+      "description": "一句话说明这页是干什么的",
+      "nav": { "title": "样例页", "order": 90 },
+
+      "config": {
+        "fields": [
+          { "name": "account", "label": "账号", "type": "text", "required": true, "inputmode": "tel" },
+          { "name": "code", "label": "验证码", "type": "text", "inputmode": "numeric", "length": 6 },
+          { "name": "password", "label": "密码", "type": "password", "help": "只存本地，不回显" },
+          { "name": "notify", "label": "跑完通知", "type": "bool", "default": true },
+          { "name": "mode", "label": "模式", "type": "select", "options": [{"value": "fast", "label": "快速"}] }
+        ],
+        "actions": [
+          { "id": "send_code", "label": "发验证码", "handler": "send_code" },
+          { "id": "login", "label": "登录", "handler": "login", "primary": true },
+          { "id": "boom", "label": "危险操作", "handler": "boom", "confirm": "真的要做？" }
+        ]
+      },
+
+      "views": [
+        { "id": "accounts", "title": "账号", "handler": "accounts", "kind": "table",
+          "empty": "还没有账号，先在上面登录",
+          "columns": [
+            { "key": "name", "label": "账号" },
+            { "key": "status", "label": "状态", "badge": true }
+          ] },
+        { "id": "quota", "title": "配额", "handler": "quota", "kind": "kv" },
+        { "id": "events", "title": "最近事件", "handler": "events", "kind": "list",
+          "title_key": "what", "subtitle_key": "when", "meta_key": "detail" }
+      ]
+    }
+
+| 声明 | 面板画什么 | 规则 |
+|---|---|---|
+| `nav` | 侧栏一格 | 写了就出现，**插件没加载也出现**（清单在磁盘上）。缺 title 不出现；order 缺省 100 |
+| `config.fields` | 表单（和抽屉「配置」同一套渲染器） | type：text / password / number / bool / select / textarea；`inputmode`、`length` 只是手机端提示，**不校验业务** |
+| `config.actions` | 按钮行 | ≤ 8 个；`primary` 出主按钮；`confirm` 非空则点击先弹确认 |
+| `views` | 数据块（表格 / 列表 / 键值） | ≤ 8 个；kind 缺省 table；columns ≤ 24；`badge: true` 的列按值上药丸 |
+
+声明写错不会静默：那一条被丢掉，原因进 `manifest.warnings`，页头显示一行黄字。
+
+### 9.2 动作怎么和插件来回（多步登录的全部机制）
+
+    POST /api/plugins/<name>/call/<handler>
+    { "body": { ...表单值平铺 },              // 插件读 evt.body.account
+      "bag":  { ...上一次动作返回的 keep },    // 面板替你留着的中间态
+      "action": "login", "source": "panel-ui" }
+
+插件返回的 JSON 里，面板只认这几个键（其余忽略，**绝不渲染插件给的 HTML**）：
+
+| 键 | 面板动作 | 用在哪 |
+|---|---|---|
+| `ok` / `message` / `error` | 成功 toast / 失败红字 | 通用 |
+| `values` | 回填同名字段 | 清空用过的验证码、规范化账号 |
+| `keep` | 存进本页 bag，下次带回 `evt.bag` | 短信 ticket、challenge、二维码 key |
+| `image`: `{url}` 或 `{data_url}` | 页面上显示图片 | 图形验证码（CSP 允许 `img-src 'self' data:`） |
+| `cooldown_s` | 该按钮倒计时禁用 | 发验证码 60 秒 |
+| `poll`: `{handler, interval_ms, timeout_ms}` | 轮询该 handler（带同一 bag）直到返回 `{done:true}` / 超时 / 你点走 | 扫码登录 |
+
+一段三段式短信登录就是三个 handler：
+
+    send_code → { ok:true, message:"已发送", keep:{ticket}, cooldown_s:60 }
+    login     → 没 ticket: { ok:false, error:"先点「发验证码」" }
+                要图形码: { ok:false, error:"请输入图形验证码", image:{url:"api/captcha?ts=…"} }
+                都对了:   { ok:true, message:"登录成功", values:{code:"", captcha:""} }
+    扫码      → qr_start: { ok:true, image:{url:"api/qr"}, poll:{handler:"qr_state", interval_ms:2000, timeout_ms:120000} }
+
+**边界**（都写死了，别指望绕过）：`bag` 只活在当前页面，刷新即丢 —— 要跨会话的中间态
+自己落库；`poll` 间隔夹到 [500, 10000] ms、超时夹到 [2, 300000] ms，切走视图或再点一次
+即取消；一次调用预算 30 秒（和插件页面一样）；请求 body ≤ 64 KiB，返回值序列化后
+≤ 512 KiB，超了报错让插件自己裁剪；表格只画前 200 行、单元格文本截到 500 字符。
+
+### 9.3 什么时候仍然该写 WebUI
+
+声明式只做"表单 + 按钮 + 只读数据"。碰到下面这些就写 `<name>.webui/` 或 `register_web`：
+
+- 要编辑表格里的行、批量选择、拖拽排序、画图表；
+- 要自定义布局/多页签/富文本；
+- 要显示实时进度条那类连续状态（这版只有一次性结果 + 有界轮询）。
+
+**有 `.webui/` 的插件永远优先用它自己的页面** —— 声明是补充，不是覆盖。
+
+### 9.4 数据别指望面板的表
+
+面板只保证插件能读写 SQLite，**不会**替插件准备 `state` 表（那张表是 0.3.x 迁移
+留下的历史）。自己的表自己 `CREATE TABLE IF NOT EXISTS`，样例里就是这个写法。

@@ -98,6 +98,134 @@ for (const [name, extra] of [['seed-extra', '同前缀第二个'], ['lonely', '�
   ].join('\n'));
 }
 
+// 声明式页面的种子（第 191 轮）：没有 .webui/、没注册 sidebar，界面全靠清单。
+writeFileSync(path.join(plugins, 'declared.js'), "import host from 'panel:host';\n\n// \u58f0\u660e\u5f0f\u9875\u9762\u7684\u79cd\u5b50\u63d2\u4ef6\uff08\u7b2c 191 \u8f6e\uff09\uff1a**\u6ca1\u6709 .webui/\u3001\u4e5f\u6ca1\u6ce8\u518c sidebar** \u2014\u2014\n// \u4fa7\u680f\u90a3\u4e00\u683c\u3001\u8868\u5355\u3001\u6309\u94ae\u3001\u6570\u636e\u5757\u5168\u90e8\u6765\u81ea declared.panel.json\u3002\n// \u6570\u636e\u53ea\u653e\u5185\u5b58\uff1a\u8fd9\u8f6e\u8981\u65ad\u7684\u662f\u300c\u9762\u677f\u80fd\u4e0d\u80fd\u6309\u58f0\u660e\u628a\u4ea4\u4e92\u8dd1\u8d77\u6765\u300d\uff0c\u4e0d\u662f\u5b58\u50a8\u3002\nlet accounts = [];\nlet polls = 0;\nconst IMG = { data_url: 'data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2220%22%3E%3C/svg%3E' };\n\nawait host.register_handler('send_code', async (evt) => {\n  if (!String((evt.body && evt.body.account) || '').trim()) return { ok: false, error: 'no account' };\n  return { ok: true, message: '\u9a8c\u8bc1\u7801\u5df2\u53d1\u9001\uff08\u79cd\u5b50\uff09', keep: { ticket: 'tk-1' }, cooldown_s: 3 };\n});\n\nawait host.register_handler('login', async (evt) => {\n  const bag = evt.bag || {};\n  if (!bag.ticket) return { ok: false, error: '\u5148\u53d1\u7801' };\n  if (!String((evt.body && evt.body.captcha) || '').trim()) {\n    return { ok: false, error: '\u8bf7\u8f93\u5165\u56fe\u5f62\u9a8c\u8bc1\u7801', image: IMG, keep: { ticket: 'tk-1' } };\n  }\n  if (!accounts.length) {\n    accounts = [\n      { name: 'seed-a', expire: '+30 \u5929', status: 'ok', note: '\u6b63\u5e38' },\n      { name: 'seed-b', expire: '+3 \u5929', status: 'warn', note: '\u5feb\u5230\u671f' },\n      { name: 'seed-c', expire: '\u5df2\u8fc7\u671f', status: 'err', note: '\u5931\u6548' },\n    ];\n  }\n  return { ok: true, message: '\u767b\u5f55\u6210\u529f bag=' + (bag.ticket ? 'yes' : 'no'), values: { code: '' } };\n});\n\nawait host.register_handler('qr_start', async () => ({\n  ok: true, message: '\u626b\u7801\u4e2d', image: IMG, keep: { t: Date.now() },\n  poll: { handler: 'qr_state', interval_ms: 500, timeout_ms: 6000 },\n}));\n\nawait host.register_handler('qr_state', async () => {\n  polls += 1;\n  if (polls >= 2) { polls = 0; return { done: true, ok: true, message: '\u626b\u7801\u6210\u529f\uff08\u79cd\u5b50\uff09' }; }\n  return { done: false };\n});\n\nawait host.register_handler('boom', async () => {\n  throw new Error('\u79cd\u5b50\u5931\u8d25\u6807\u8bb0');\n});\n\nawait host.register_handler('accounts', async () => accounts);\nawait host.register_handler('quota', async () => ({ \u8d26\u53f7\u6570: accounts.length, \u989d\u5ea6: '1 GB' }));\nawait host.register_handler('events', async () => [\n  { what: '\u4e8b\u4ef6\u4e00', when: '\u521a\u521a', detail: 'a' },\n  { what: '\u4e8b\u4ef6\u4e8c', when: '1 \u5206\u949f\u524d', detail: 'b' },\n  { what: '\u4e8b\u4ef6\u4e09', when: '\u6628\u5929', detail: 'c' },\n]);\nawait host.register_handler('big', async () => {\n  const rows = [];\n  for (let i = 1; i <= 300; i += 1) rows.push({ '#': i, name: 'row-' + i });\n  return rows;\n});\n");
+writeFileSync(path.join(plugins, 'declared.panel.json'), JSON.stringify({
+  "title": "声明插件",
+  "description": "ui-check 种子：面板按声明渲染",
+  "nav": {
+    "title": "样例页",
+    "order": 120
+  },
+  "config": {
+    "fields": [
+      {
+        "name": "account",
+        "label": "账号",
+        "type": "text",
+        "required": true
+      },
+      {
+        "name": "code",
+        "label": "验证码",
+        "type": "text",
+        "inputmode": "numeric",
+        "length": 6
+      },
+      {
+        "name": "captcha",
+        "label": "图形码",
+        "type": "text"
+      },
+      {
+        "name": "notify",
+        "label": "通知",
+        "type": "bool",
+        "default": true
+      },
+      {
+        "name": "mode",
+        "label": "模式",
+        "type": "select",
+        "default": "fast",
+        "options": [
+          {
+            "value": "fast",
+            "label": "快"
+          },
+          {
+            "value": "full",
+            "label": "全"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      {
+        "id": "send_code",
+        "label": "发验证码",
+        "handler": "send_code"
+      },
+      {
+        "id": "login",
+        "label": "登录",
+        "handler": "login",
+        "primary": true
+      },
+      {
+        "id": "qr",
+        "label": "扫码",
+        "handler": "qr_start"
+      },
+      {
+        "id": "boom",
+        "label": "故意失败",
+        "handler": "boom",
+        "confirm": "确认失败一次？"
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "accounts",
+      "title": "账号",
+      "handler": "accounts",
+      "kind": "table",
+      "empty": "还没有账号",
+      "columns": [
+        {
+          "key": "name",
+          "label": "账号"
+        },
+        {
+          "key": "expire",
+          "label": "到期"
+        },
+        {
+          "key": "status",
+          "label": "状态",
+          "badge": true
+        },
+        {
+          "key": "note",
+          "label": "备注"
+        }
+      ]
+    },
+    {
+      "id": "quota",
+      "title": "配额",
+      "handler": "quota",
+      "kind": "kv"
+    },
+    {
+      "id": "events",
+      "title": "事件",
+      "handler": "events",
+      "kind": "list",
+      "title_key": "what",
+      "subtitle_key": "when",
+      "meta_key": "detail"
+    },
+    {
+      "id": "big",
+      "title": "长列表",
+      "handler": "big",
+      "kind": "table"
+    }
+  ]
+}, null, 2));
+
 let panel;
 let browser;
 let cdp;
@@ -736,6 +864,118 @@ async function main() {
   check('保存插件配置后提示已保存并重载', /配置已保存/.test(cfgToast || ''), cfgToast);
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
+
+  // ── 声明式插件页（第 191 轮）：没有 .webui/，界面全靠清单 ───────────────
+  // 种子 declared：清单里有 nav / fields / actions / views，代码里**没注册 sidebar**
+  // （侧栏那一格只能来自清单），数据全在内存。
+  const declaredNav = JSON.parse(await js(
+    `JSON.stringify([...document.querySelectorAll('#nav-plugin-list a')].map((a)=>a.textContent.trim()))`,
+  ));
+  check('清单里的 nav 让没注册 sidebar 的插件也进侧栏',
+    declaredNav.some((t) => t.startsWith('样例页')), JSON.stringify(declaredNav));
+  check('声明式插件不再被标「缺界面」（它本来就不需要 .webui）',
+    !declaredNav.some((t) => t.includes('样例页') && t.includes('缺界面')), JSON.stringify(declaredNav));
+  await js(`(()=>{const a=[...document.querySelectorAll('#nav-plugin-list a')].find((x)=>x.textContent.trim().startsWith('样例页')); if(a) a.click();})()`);
+  await sleep(1800);
+  const pvPage = JSON.parse(await js(`JSON.stringify({
+    hash: location.hash,
+    declared: !document.getElementById('plugin-declared').classList.contains('hidden'),
+    frameHidden: document.getElementById('plugin-frame').classList.contains('hidden'),
+    title: (document.querySelector('#plugin-declared .pv-title')||{}).textContent||'',
+    desc: (document.querySelector('#plugin-declared .pv-desc')||{}).textContent||'',
+    fields: document.querySelectorAll('#plugin-declared .schema-form [data-f]').length,
+    hasBool: !!document.querySelector('#plugin-declared .schema-form [data-f=notify][type=checkbox]'),
+    hasSelect: !!document.querySelector('#plugin-declared .schema-form select[data-f=mode]'),
+    buttons: [...document.querySelectorAll('#plugin-declared .pv-actions button')].map((b)=>b.textContent.trim()),
+    primary: (document.querySelector('#plugin-declared .pv-actions button.btn-primary')||{}).textContent.trim(),
+  })`));
+  check('点侧栏 → 面板渲染的页面（不是 iframe）',
+    pvPage.hash === '#plugin:declared' && pvPage.declared && pvPage.frameHidden, JSON.stringify(pvPage));
+  check('页头是清单里的标题 + 描述', pvPage.title === '声明插件' && pvPage.desc.includes('面板按声明渲染'), JSON.stringify([pvPage.title, pvPage.desc]));
+  check('表单按 schema 渲染（5 字段，含 bool / select）',
+    pvPage.fields === 5 && pvPage.hasBool && pvPage.hasSelect, JSON.stringify([pvPage.fields, pvPage.hasBool, pvPage.hasSelect]));
+  check('动作按钮按声明出现（4 个动作 + 保存配置，主按钮带 btn-primary）',
+    pvPage.buttons.length === 5 && pvPage.buttons.includes('登录') && pvPage.primary === '登录',
+    JSON.stringify([pvPage.buttons, pvPage.primary]));
+
+  // 发验证码：成功后按钮进冷却（cooldown_s）
+  await js(`(()=>{document.querySelector('#plugin-declared [data-f=account]').value='13800000000';})()`);
+  await js(`(()=>{[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((b)=>b.dataset.action==='send_code').click();})()`);
+  await sleep(1200);
+  const pvCode = JSON.parse(await js(`JSON.stringify((()=>{
+    const b=[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((x)=>x.dataset.action==='send_code');
+    return { text: b.textContent.trim(), disabled: b.disabled };
+  })())`));
+  const pvCodeToast = await lastMsg();
+  check('「发验证码」→ 提示已发送 + 按钮进入冷却（disabled 且倒计时）',
+    /验证码已发送/.test(pvCodeToast || '') && pvCode.disabled && /\d+s/.test(pvCode.text),
+    JSON.stringify([pvCodeToast, pvCode]));
+
+  // 登录：先缺图形码（红字 + 出图），补齐后成功（bag 带回 + values 回填）
+  await js(`(()=>{document.querySelector('#plugin-declared [data-f=code]').value='123456';})()`);
+  await js(`(()=>{[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((b)=>b.dataset.action==='login').click();})()`);
+  await sleep(1200);
+  const pvCaptcha = JSON.parse(await js(`JSON.stringify({
+    err: [...document.querySelectorAll('#plugin-declared .pv-msg .hint-err')].map((x)=>x.textContent).join('|'),
+    img: !!document.querySelector('#plugin-declared .pv-image img'),
+    src: (document.querySelector('#plugin-declared .pv-image img')||{}).src||'',
+  })`));
+  check('登录缺图形码 → 红字提示 + 插件给的图片上屏',
+    /图形验证码/.test(pvCaptcha.err) && pvCaptcha.img && /^data:/.test(pvCaptcha.src),
+    JSON.stringify([pvCaptcha.err, pvCaptcha.img, pvCaptcha.src.slice(0, 24)]));
+  await js(`(()=>{document.querySelector('#plugin-declared [data-f=captcha]').value='4821';})()`);
+  await js(`(()=>{[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((b)=>b.dataset.action==='login').click();})()`);
+  await sleep(1800);
+  const pvLogin = JSON.parse(await js(`JSON.stringify({
+    code: document.querySelector('#plugin-declared [data-f=code]').value,
+    rows: document.querySelectorAll('#plugin-declared section[data-view=accounts] tbody tr').length,
+    heads: [...document.querySelectorAll('#plugin-declared section[data-view=accounts] thead th')].map((t)=>t.textContent),
+    pillOk: document.querySelectorAll('#plugin-declared section[data-view=accounts] .pill-ok').length,
+    pillWarn: document.querySelectorAll('#plugin-declared section[data-view=accounts] .pill-warn').length,
+    kv: document.querySelectorAll('#plugin-declared section[data-view=quota] .pv-kv dt').length,
+    items: document.querySelectorAll('#plugin-declared section[data-view=events] .pv-item').length,
+    big: document.querySelectorAll('#plugin-declared section[data-view=big] tbody tr').length,
+    more: (document.querySelector('#plugin-declared section[data-view=big] .pv-more')||{}).textContent||'',
+  })`));
+  const pvLoginToast = await lastMsg();
+  check('登录成功：上一次动作的中间态（bag）被带回插件', /登录成功 bag=yes/.test(pvLoginToast || ''), pvLoginToast);
+  check('values 回填：用过的验证码被清空', pvLogin.code === '', JSON.stringify(pvLogin.code));
+  check('表格按声明渲染（4 列 / 3 行 / 表头来自清单）',
+    pvLogin.rows === 3 && pvLogin.heads.join(',') === '账号,到期,状态,备注', JSON.stringify([pvLogin.rows, pvLogin.heads]));
+  check('状态列上药丸（ok / warn 各一）', pvLogin.pillOk === 1 && pvLogin.pillWarn === 1, JSON.stringify([pvLogin.pillOk, pvLogin.pillWarn]));
+  check('键值视图 2 行 label/value', pvLogin.kv === 2, String(pvLogin.kv));
+  check('列表视图 3 条（title / subtitle / meta）', pvLogin.items === 3, String(pvLogin.items));
+  check('长列表只渲染 200 行并说明上限', pvLogin.big === 200 && /200/.test(pvLogin.more), JSON.stringify([pvLogin.big, pvLogin.more]));
+
+  // 故意失败：错误态 + 页面不炸
+  await js(`(()=>{[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((b)=>b.dataset.action==='boom').click();})()`);
+  await sleep(400);
+  // 动作声明了 confirm → 走面板自己的确认框（不是系统 confirm，pitfalls §100）
+  const pvConfirmShown = await js("!document.getElementById('confirm').classList.contains('hidden')");
+  check('动作声明了 confirm 时先弹面板确认框', pvConfirmShown === true, String(pvConfirmShown));
+  await js("document.getElementById('confirm-ok').click()");
+  await sleep(1400);
+  const pvBoom = JSON.parse(await js(`JSON.stringify({
+    err: [...document.querySelectorAll('#plugin-declared .pv-msg .hint-err')].map((x)=>x.textContent).join('|'),
+    alive: !!document.querySelector('#plugin-declared .pv-title'),
+  })`));
+  check('动作抛错：红字显示插件原文、页面仍可用', /种子失败标记/.test(pvBoom.err) && pvBoom.alive, JSON.stringify(pvBoom));
+
+  // 扫码：poll 指令 → 轮询到 done
+  await js(`(()=>{[...document.querySelectorAll('#plugin-declared .pv-actions button')].find((b)=>b.dataset.action==='qr').click();})()`);
+  await sleep(3200);
+  const pvQr = await lastMsg();
+  check('poll 指令：面板轮询到 done 并提示成功', /扫码成功/.test(pvQr || ''), pvQr);
+
+  // 回归：没有声明的插件仍走 iframe
+  await js(`(()=>{const a=[...document.querySelectorAll('#nav-plugin-list a')].find((x)=>x.textContent.trim().startsWith('种子')); if(a) a.click();})()`);
+  await sleep(900);
+  const pvIframe = JSON.parse(await js(`JSON.stringify({
+    frameHidden: document.getElementById('plugin-frame').classList.contains('hidden'),
+    declaredHidden: document.getElementById('plugin-declared').classList.contains('hidden'),
+  })`));
+  check('有声明的插件不影响没声明的（后者仍走 iframe）',
+    pvIframe.frameHidden === false && pvIframe.declaredHidden === true, JSON.stringify(pvIframe));
   // 同名上传要问（第 133 轮）：覆盖 / 重命名 / 取消，而不是闷头覆盖再回一句「已上传」。
   await js(
     '(()=>{const nl=String.fromCharCode(10),q=String.fromCharCode(39);' +

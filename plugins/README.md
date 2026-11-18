@@ -12,6 +12,7 @@
 |---|---|---|
 | `webui-demo.js` + `webui-demo.webui/` | **面板项目**（UI 套件的活文档，`scripts/ui-kit-check.mjs` 用它对拍） | ✅ 可以 |
 | `hello.js.bak` | 历史遗留的示例（不加载，只作参考） | — |
+| `preview-demo.js` + `preview-demo.panel.json` | **面板项目**（声明式页面的活文档：清单声明表单/动作/数据块，没有 `.webui/`；验收读数见 [../docs/verification.md](../docs/verification.md) 第 191 轮） | ✅ 可以 |
 
 ## 插件放哪儿、怎么上线
 

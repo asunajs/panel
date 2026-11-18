@@ -16,7 +16,9 @@ FAIL=0
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 
-ALLOW='README.md hello.js.bak webui-demo.js webui-demo.webui'
+# 白名单 = 面板仓自己的样例：webui-demo 演示「.webui/ 静态界面」，
+# preview-demo 演示「清单声明界面」（第 191 轮，没有 .webui/）。
+ALLOW='README.md hello.js.bak webui-demo.js webui-demo.webui preview-demo.js preview-demo.panel.json'
 
 # ① 白名单：磁盘上的 plugins/ 顶层条目
 stray=()

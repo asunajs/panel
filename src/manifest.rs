@@ -37,6 +37,77 @@ pub struct Field {
     pub required: bool,
     /// select 的可选项：值 → 显示文字
     pub options: Vec<(String, String)>,
+    /// 手机键盘提示（`tel` / `numeric` / `email`…）。只是给手机端换键盘，
+    /// 面板**不校验**格式 —— 校验是插件的事（它才知道什么算合法账号）。
+    pub inputmode: String,
+    /// 建议长度（验证码 6 位这种）。同样只是提示：给输入框一个 `maxlength` 与等宽字体。
+    pub length: Option<i64>,
+}
+
+/// 动作按钮：点一下把**当前表单值**（+ 上一次动作留下的 bag）交给具名 handler。
+///
+/// 它和"视图"是两件事：视图是只读的数据展示，动作是"按一下会发生点什么"。
+/// 登录这种要来回几次的流程不是靠声明步骤，而是靠 handler 每次返回的响应指令
+/// （values / keep / image / cooldown_s / poll，见 docs/plugin-contract.md）。
+#[derive(Debug, Clone, Default)]
+pub struct ActionSpec {
+    pub id: String,
+    pub label: String,
+    /// 插件里 `host.register_handler` 注册的名字。
+    pub handler: String,
+    /// 主按钮（界面上给 accent 样式）。
+    pub primary: bool,
+    /// 非空 = 点击前先弹确认（危险操作，例如"退出全部账号"）。
+    pub confirm: String,
+}
+
+/// 表格的一列。
+#[derive(Debug, Clone, Default)]
+pub struct Column {
+    pub key: String,
+    pub label: String,
+    /// 值当状态上药丸（ok / warn / err / accent 四个字典值，其余按普通文本）。
+    pub badge: bool,
+}
+
+/// 一个数据视图：面板替插件渲染的一块只读数据。
+#[derive(Debug, Clone, Default)]
+pub struct ViewSpec {
+    pub id: String,
+    pub title: String,
+    /// 取数据的具名 handler（POST，返回数组 / {rows} / {items} / 键值对象）。
+    pub handler: String,
+    /// table / list / kv；非法值整条丢弃并记警告。
+    pub kind: String,
+    pub empty: String,
+    pub title_key: String,
+    pub subtitle_key: String,
+    pub meta_key: String,
+    pub columns: Vec<Column>,
+}
+
+/// 声明式侧栏入口：写了就在侧栏出现，**不依赖插件已加载**（清单是磁盘上的）。
+#[derive(Debug, Clone, Default)]
+pub struct NavDecl {
+    pub title: String,
+    pub order: i64,
+}
+
+/// 动作 / 视图的条数上限：声明是插件作者写的，写错了不能让面板去渲染 200 个按钮。
+pub const ACTIONS_MAX: usize = 8;
+pub const VIEWS_MAX: usize = 8;
+pub const COLUMNS_MAX: usize = 24;
+
+/// handler 名：和插件路由那条规则一致（字母数字 `_` `-`，1..=64）。
+///
+/// 名字要拿去 `web_call` 派发，带斜杠/点会绕到别的语义上，所以先在这里挡掉，
+/// 而且**挡在解析期**：界面拿到的清单里不会出现一个调不通的按钮。
+pub fn handler_ok(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 64
+        && h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// 一个插件的清单。字段全是可选的 —— 没有清单也能跑。
@@ -59,6 +130,14 @@ pub struct Manifest {
     /// 名目由插件自己定，面板只负责按清单里的路径 POST 一次（见 web/app.js）。
     pub on_panel_open: String,
     pub fields: Vec<Field>,
+    /// 声明式侧栏入口（第 191 轮）。None = 不出现（沿用 `host.sidebar()` 运行期注册那条）。
+    pub nav: Option<NavDecl>,
+    /// 表单下面的按钮。
+    pub actions: Vec<ActionSpec>,
+    /// 面板替插件渲染的数据块。
+    pub views: Vec<ViewSpec>,
+    /// 声明里被丢弃的条目及原因（界面显示一行提示，不静默吞掉）。
+    pub warnings: Vec<String>,
 }
 
 impl Manifest {
@@ -72,16 +151,42 @@ impl Manifest {
             "min_panel": self.min_panel,
             "on_panel_open": self.on_panel_open,
             "capabilities": self.capabilities,
-            "config": { "fields": self.fields.iter().map(|f| json!({
-                "name": f.name,
-                "label": f.label,
-                "type": f.kind,
-                "default": f.default,
-                "placeholder": f.placeholder,
-                "help": f.help,
-                "required": f.required,
-                "options": f.options.iter().map(|(v, l)| json!({"value": v, "label": l})).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>() },
+            "nav": self.nav.as_ref().map(|n| json!({"title": n.title, "order": n.order})),
+            "config": {
+                "fields": self.fields.iter().map(|f| json!({
+                    "name": f.name,
+                    "label": f.label,
+                    "type": f.kind,
+                    "default": f.default,
+                    "placeholder": f.placeholder,
+                    "help": f.help,
+                    "required": f.required,
+                    "inputmode": f.inputmode,
+                    "length": f.length,
+                    "options": f.options.iter().map(|(v, l)| json!({"value": v, "label": l})).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "actions": self.actions.iter().map(|a| json!({
+                    "id": a.id,
+                    "label": a.label,
+                    "handler": a.handler,
+                    "primary": a.primary,
+                    "confirm": a.confirm,
+                })).collect::<Vec<_>>(),
+            },
+            "views": self.views.iter().map(|v| json!({
+                "id": v.id,
+                "title": v.title,
+                "handler": v.handler,
+                "kind": v.kind,
+                "empty": v.empty,
+                "title_key": v.title_key,
+                "subtitle_key": v.subtitle_key,
+                "meta_key": v.meta_key,
+                "columns": v.columns.iter().map(|c| json!({
+                    "key": c.key, "label": c.label, "badge": c.badge,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "warnings": self.warnings,
         })
     }
 }
@@ -189,6 +294,10 @@ pub fn parse(v: &Value) -> Manifest {
             })
             .unwrap_or_default(),
         fields: Vec::new(),
+        nav: None,
+        actions: Vec::new(),
+        views: Vec::new(),
+        warnings: Vec::new(),
     };
     if let Some(fields) = v
         .get("config")
@@ -198,6 +307,13 @@ pub fn parse(v: &Value) -> Manifest {
         for f in fields {
             let name = s(f, "name");
             if name.is_empty() {
+                continue;
+            }
+            // `__panel` 是面板往事件里塞旁路信息的保留键（bag / action），
+            // 字段叫这个名字会在提交时互相覆盖 —— 直接丢，并说清原因。
+            if name == "__panel" {
+                m.warnings
+                    .push("字段名 __panel 是面板保留键，已忽略".to_string());
                 continue;
             }
             let kind = {
@@ -248,7 +364,152 @@ pub fn parse(v: &Value) -> Manifest {
                 help: s(f, "help"),
                 required: f.get("required").and_then(|x| x.as_bool()).unwrap_or(false),
                 options,
+                inputmode: s(f, "inputmode"),
+                length: f.get("length").and_then(|x| x.as_i64()),
             });
+        }
+    }
+
+    // ---------------------------------------------------------------- 声明式侧栏入口
+    if let Some(nav) = v.get("nav") {
+        let title = s(nav, "title");
+        if title.is_empty() {
+            m.warnings
+                .push("nav 没有 title，侧栏入口已忽略".to_string());
+        } else {
+            m.nav = Some(NavDecl {
+                title,
+                order: nav.get("order").and_then(|x| x.as_i64()).unwrap_or(100),
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------- 动作按钮
+    if let Some(actions) = v
+        .get("config")
+        .and_then(|c| c.get("actions"))
+        .and_then(|a| a.as_array())
+    {
+        for a in actions.iter().take(ACTIONS_MAX) {
+            let label = s(a, "label");
+            let handler = s(a, "handler");
+            let id = {
+                let i = s(a, "id");
+                if i.is_empty() { handler.clone() } else { i }
+            };
+            if label.is_empty() {
+                m.warnings.push(format!("动作 {id} 没有 label，已忽略"));
+                continue;
+            }
+            if !handler_ok(&handler) {
+                m.warnings.push(format!(
+                    "动作 {id} 的 handler 名不合法（{handler}）：只能是字母数字 _ -，已忽略"
+                ));
+                continue;
+            }
+            if m.actions.iter().any(|x| x.id == id) {
+                m.warnings.push(format!("动作 id 重复（{id}），后一个已忽略"));
+                continue;
+            }
+            m.actions.push(ActionSpec {
+                id,
+                label,
+                handler,
+                primary: a.get("primary").and_then(|x| x.as_bool()).unwrap_or(false),
+                confirm: s(a, "confirm"),
+            });
+        }
+        if actions.len() > ACTIONS_MAX {
+            m.warnings.push(format!(
+                "动作有 {} 个，超过上限 {ACTIONS_MAX}，后面的已忽略",
+                actions.len()
+            ));
+        }
+    }
+
+    // ---------------------------------------------------------------- 数据视图
+    if let Some(views) = v.get("views").and_then(|x| x.as_array()) {
+        for view in views.iter().take(VIEWS_MAX) {
+            let handler = s(view, "handler");
+            let id = {
+                let i = s(view, "id");
+                if i.is_empty() { handler.clone() } else { i }
+            };
+            if !handler_ok(&handler) {
+                m.warnings.push(format!(
+                    "视图 {id} 的 handler 名不合法（{handler}）：只能是字母数字 _ -，已忽略"
+                ));
+                continue;
+            }
+            let kind = {
+                let k = s(view, "kind");
+                if k.is_empty() { "table".to_string() } else { k }
+            };
+            if !matches!(kind.as_str(), "table" | "list" | "kv") {
+                m.warnings.push(format!(
+                    "视图 {id} 的 kind 只能是 table / list / kv（收到 {kind}），已忽略"
+                ));
+                continue;
+            }
+            if m.views.iter().any(|x| x.id == id) {
+                m.warnings.push(format!("视图 id 重复（{id}），后一个已忽略"));
+                continue;
+            }
+            let mut columns: Vec<Column> = view
+                .get("columns")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            let key = s(c, "key");
+                            if key.is_empty() {
+                                return None;
+                            }
+                            let label = {
+                                let l = s(c, "label");
+                                if l.is_empty() { key.clone() } else { l }
+                            };
+                            Some(Column {
+                                key,
+                                label,
+                                badge: c.get("badge").and_then(|x| x.as_bool()).unwrap_or(false),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if columns.len() > COLUMNS_MAX {
+                m.warnings.push(format!(
+                    "视图 {id} 声明了 {} 列，超过上限 {COLUMNS_MAX}，只留前 {COLUMNS_MAX} 列",
+                    columns.len()
+                ));
+                columns.truncate(COLUMNS_MAX);
+            }
+            let title = {
+                let t = s(view, "title");
+                if t.is_empty() { id.clone() } else { t }
+            };
+            let empty = {
+                let e = s(view, "empty");
+                if e.is_empty() { "没有数据".to_string() } else { e }
+            };
+            m.views.push(ViewSpec {
+                title,
+                id,
+                handler,
+                kind,
+                empty,
+                title_key: s(view, "title_key"),
+                subtitle_key: s(view, "subtitle_key"),
+                meta_key: s(view, "meta_key"),
+                columns,
+            });
+        }
+        if views.len() > VIEWS_MAX {
+            m.warnings.push(format!(
+                "视图有 {} 个，超过上限 {VIEWS_MAX}，后面的已忽略",
+                views.len()
+            ));
         }
     }
     m

@@ -160,6 +160,17 @@ DELETE    200  {"moved_to":".../data/trash/p1-1794476877097.js","name":"p1","ok"
 插件可以带自己的界面。**不做模板、不做组件库**：插件想怎么画就怎么画，
 宿主只负责把文件送出去、把请求转进来。
 
+### 0. 三种做法，先挑一个（第 191 轮）
+
+| 做法 | 你要写 | 适合 | 边界 |
+|---|---|---|---|
+| **声明式**（推荐先试） | 只写 `panel.json` 的 `nav` / `config.fields` / `config.actions` / `views` + 几个 handler | 配置表单、登录（含验证码/扫码多步）、看几张表格/列表 | 只读展示；不能编辑单元格、不能自定义布局 |
+| **静态目录** | `<name>.webui/` 里的 html/css/js，`api/<handler>` 走约定 | 固定版式的小页面 | 你还是得写前端 |
+| **动态路由** | `register_web()` + 一个 `__route` handler | 要完全掌控路由/响应头/流 | 自由度最高、成本最高 |
+
+声明式的完整契约在 [plugin-contract.md](plugin-contract.md) §9，活样例是
+`plugins/preview-demo.{js,panel.json}`（没有 `.webui/` 也能有一整页）。
+
 ### 1. 放哪
 
 ```

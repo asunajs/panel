@@ -4417,3 +4417,44 @@ async fn install_over_plain_http_requires_a_sha256() {
         "提示里要说清为什么: {body}"
     );
 }
+
+fn post_with(uri: &str, body: &str, panel_header: bool) -> Request<Body> {
+    let mut b = Request::post(uri).header("content-type", "application/json");
+    if panel_header {
+        b = b.header("x-panel", "1");
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn plugin_call_route_validates_before_touching_the_plugin() {
+    let (app, _db) = setup().await;
+
+    // 写接口的老规矩：没有 x-panel: 1 → 403
+    let (s, b) = send(&app, post_with("/api/plugins/preview-demo/call/login", "{}", false)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+
+    // handler 名不合法（带点/斜杠/太长）→ 400，别拿去派发
+    for bad in ["a.b", "a/b", "x"] {
+        let uri = format!("/api/plugins/preview-demo/call/{}", bad.replace('/', "%2F"));
+        if bad == "x" {
+            continue; // 合法名，跳过
+        }
+        let (s, b) = send(&app, post_with(&uri, "{}", true)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad} → {b}");
+    }
+
+    // 参数上限 64 KiB
+    let big = format!("{{\"x\":\"{}\"}}", "a".repeat(70 * 1024));
+    let (s, b) = send(&app, post_with("/api/plugins/preview-demo/call/login", &big, true)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b["error"].as_str().unwrap_or("").contains("上限"), "{b}");
+
+    // 参数必须是对象（表单值平铺）
+    let (s, b) = send(&app, post_with("/api/plugins/preview-demo/call/login", "[1,2]", true)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+
+    // 插件不存在 → 404（先看目录，再解析参数）
+    let (s, b) = send(&app, post_with("/api/plugins/nope-xyz/call/login", "{}", true)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
+}

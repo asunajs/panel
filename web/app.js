@@ -1941,6 +1941,79 @@ function setConn(ok) {
  * 插件自己的设置（账号、映射表）混进去会互相覆盖，而且插件一多就没法看。
  * 插件里用 `host.self_config()` 读这份；保存后会自动重载这个插件，改完立刻生效。
  */
+/// 按清单里的 config.fields 造一个表单。抽屉的「配置」页和声明式插件页**共用**这一个渲染器
+/// （第 191 轮：原来内联在 openPluginConfig 里，插件页要用就得复制一份 —— 两处各写一套
+/// 迟早改一处忘一处）。
+///
+/// 返回 `{ node, readFrom(src), collect(base) }`：
+///   readFrom  把配置对象里的值填回控件；
+///   collect   把控件里的值合回配置对象（**只动声明过的字段**，其它键原样保留 ——
+///             插件自己写进配置里的东西不该被界面吃掉）。
+function buildSchemaForm(fields, cfg) {
+  const node = el('div', 'schema-form');
+  const readFrom = (src) => {
+    for (const f of fields) {
+      const input = node.querySelector('[data-f="' + f.name + '"]');
+      if (!input) continue;
+      const cur = src[f.name] !== undefined ? src[f.name] : (f.default === undefined ? '' : f.default);
+      if (f.type === 'bool') input.checked = cur === true || cur === 'true';
+      else input.value = cur === null || cur === undefined ? '' : String(cur);
+    }
+  };
+  for (const f of fields) {
+    const line = el('label', 'chan-line' + (f.type === 'textarea' ? ' chan-line-block' : ''));
+    line.append(el('span', 'chan-label', f.label || f.name));
+    let input;
+    if (f.type === 'textarea') {
+      input = el('textarea', 'editor chan-tpl');
+      input.rows = 4;
+    } else if (f.type === 'select') {
+      input = el('select', 'input');
+      for (const o of f.options || []) {
+        const op = el('option', '', o.label || o.value);
+        op.value = o.value;
+        input.append(op);
+      }
+    } else {
+      input = el('input', 'input');
+      input.type = f.type === 'password' ? 'password' : (f.type === 'number' ? 'number' : (f.type === 'bool' ? 'checkbox' : 'text'));
+      if (f.placeholder) input.placeholder = f.placeholder;
+      // 手机端换键盘 / 验证码长度：只是提示，业务校验在插件里
+      if (f.inputmode) input.inputMode = f.inputmode;
+      if (f.length && Number(f.length) > 0) input.maxLength = Number(f.length);
+    }
+    input.dataset.f = f.name;
+    if (f.required) input.required = true;
+    line.append(input);
+    if (f.help) line.append(el('span', 'chan-hint', f.help));
+    node.append(line);
+  }
+  readFrom(cfg);
+  function collect(base) {
+    const out = Object.assign({}, base || {});
+    for (const f of fields) {
+      const input = node.querySelector('[data-f="' + f.name + '"]');
+      if (!input) continue;
+      if (f.type === 'bool') {
+        out[f.name] = !!input.checked;
+      } else if (f.type === 'number') {
+        const v = input.value.trim();
+        if (v === '') delete out[f.name];
+        else if (Number.isFinite(Number(v))) out[f.name] = Number(v);
+      } else if (f.type === 'password') {
+        // 空 = 不改（清单没说这个字段是必填就保持原值）
+        if (input.value.trim() !== '') out[f.name] = input.value;
+      } else {
+        const v = input.value;
+        if (v === '' && !f.required) delete out[f.name];
+        else out[f.name] = v;
+      }
+    }
+    return out;
+  }
+  return { node, readFrom, collect };
+}
+
 async function openPluginConfig(name) {
   state.drawerKind = 'plugin';
   state.drawerPlugin = name;
@@ -1970,48 +2043,12 @@ async function openPluginConfig(name) {
   }
 
   // 有 config.fields 就出表单；没有就还是裸 JSON（第 172 轮）。
-  // 表单只覆盖「清单里声明过的字段」，其它键原样保留 —— 插件自己写进去的东西不该被界面吃掉。
   let ta = null;
-  const form = el('div', 'schema-form hidden');
-  const readFrom = (src) => {
-    for (const f of fields) {
-      const node = form.querySelector('[data-f="' + f.name + '"]');
-      if (!node) continue;
-      const cur = src[f.name] !== undefined ? src[f.name] : (f.default === undefined ? '' : f.default);
-      if (f.type === 'bool') node.checked = cur === true || cur === 'true';
-      else node.value = cur === null || cur === undefined ? '' : String(cur);
-    }
-  };
-  if (fields.length) {
-    for (const f of fields) {
-      const line = el('label', 'chan-line' + (f.type === 'textarea' ? ' chan-line-block' : ''));
-      line.append(el('span', 'chan-label', f.label || f.name));
-      let node;
-      if (f.type === 'textarea') {
-        node = el('textarea', 'editor chan-tpl');
-        node.rows = 4;
-      } else if (f.type === 'select') {
-        node = el('select', 'input');
-        for (const o of f.options || []) {
-          const op = el('option', '', o.label || o.value);
-          op.value = o.value;
-          node.append(op);
-        }
-      } else {
-        node = el('input', 'input');
-        node.type = f.type === 'password' ? 'password' : (f.type === 'number' ? 'number' : (f.type === 'bool' ? 'checkbox' : 'text'));
-        if (f.placeholder) node.placeholder = f.placeholder;
-      }
-      node.dataset.f = f.name;
-      line.append(node);
-      if (f.help) line.append(el('span', 'chan-hint', f.help));
-      form.append(line);
-    }
-    readFrom(cfg);
-    // 初始是 hidden（切 JSON 时要用这个类），有字段就得先亮出来
-    form.classList.remove('hidden');
-    box.append(form);
-  }
+  const built = fields.length ? buildSchemaForm(fields, cfg) : null;
+  const form = built ? built.node : null;
+  const readFrom = built ? built.readFrom : () => {};
+  const collect = () => (built ? built.collect(cfg) : Object.assign({}, cfg));
+  if (form) box.append(form);
 
   ta = el('textarea', 'editor' + (fields.length ? ' hidden' : ''));
   ta.spellcheck = false;
@@ -2049,30 +2086,6 @@ async function openPluginConfig(name) {
   box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
   box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
 
-  /// 把表单值合回配置对象：只动清单声明过的字段。
-  function collect() {
-    const out = Object.assign({}, cfg);
-    for (const f of fields) {
-      const node = form.querySelector('[data-f="' + f.name + '"]');
-      if (!node) continue;
-      if (f.type === 'bool') {
-        out[f.name] = !!node.checked;
-      } else if (f.type === 'number') {
-        const s = node.value.trim();
-        if (s === '') delete out[f.name];
-        else if (Number.isFinite(Number(s))) out[f.name] = Number(s);
-      } else if (f.type === 'password') {
-        // 空 = 不改（清单没说这个字段是必填就保持原值）
-        if (node.value.trim() !== '') out[f.name] = node.value;
-      } else {
-        const s = node.value;
-        if (s === '' && !f.required) delete out[f.name];
-        else out[f.name] = s;
-      }
-    }
-    return out;
-  }
-
   save.addEventListener('click', async () => {
     save.disabled = true;
     const text = fields.length && !form.classList.contains('hidden')
@@ -2093,6 +2106,440 @@ async function openPluginConfig(name) {
       save.disabled = false;
     }
   });
+}
+
+// ---------------------------------------------------------------- 声明式插件页（第 191 轮）
+//
+// 插件在 panel.json 里声明 nav / config.fields / config.actions / views，面板就替它画一整页：
+// 表单 + 按钮 + 数据块。这样"填个账号密码、点个登录、看一张表"这类常见需求不用再写 .webui/。
+//
+// 流程逻辑**在插件里**：面板只执行插件返回的几条响应指令（values / keep / image /
+// cooldown_s / poll），见 docs/plugin-contract.md。绝不渲染插件给的 HTML。
+
+// 当前这一页的上下文（第 191 轮）：换页 / 重新渲染时把它的轮询停掉 —— 不然它会对着
+// 已经拆掉的 DOM 继续发请求，直到 poll 的 timeout 才罢休（用户看到的是「莫名多了几次请求」）。
+let declaredPageCtx = null;
+
+function stopDeclaredPage() {
+  if (declaredPageCtx) {
+    declaredPageCtx.pollStop = true;
+    declaredPageCtx = null;
+  }
+}
+
+const PV_MAX_ROWS = 200;
+const PV_CELL_MAX = 500;
+
+/// 清单（/api/state 会给每个插件带一份 manifest）。
+function manifestOf(name) {
+  const p = (state.plugins || []).find((x) => x && x.name === name);
+  return (p && p.manifest) || {};
+}
+
+function declaredOf(name) {
+  const m = manifestOf(name);
+  const cfg = m.config || {};
+  return { fields: cfg.fields || [], actions: cfg.actions || [], views: m.views || [] };
+}
+
+function hasDeclaredUI(name) {
+  const d = declaredOf(name);
+  return d.actions.length > 0 || d.views.length > 0;
+}
+
+/// 这个插件页该由面板渲染，还是照旧用它的 iframe？
+///
+/// 三条同时成立才走声明式：① 运行期没注册路由（has_web）② 声明了动作或视图
+/// ③ 磁盘上没有 .webui/ 目录。**有 webui 的插件永远优先用它自己的页面** —— 声明是
+/// 补充，不是覆盖，别把已经写好界面的插件抢过来。
+function useDeclaredPage(name) {
+  const p = (state.plugins || []).find((x) => x && x.name === name);
+  if (p && p.has_web) return false;
+  if (!hasDeclaredUI(name)) return false;
+  const f = (state.files || []).find((x) => x && x.name === name);
+  return !f || f.webui !== true;
+}
+
+/// 调插件的一个具名 handler（面板自己的那条路由，会「用到就装」）。
+async function panelCall(name, handler, body) {
+  const d = await api(
+    '/api/plugins/' + encodeURIComponent(name) + '/call/' + encodeURIComponent(handler),
+    { method: 'POST', body: body || {} },
+  );
+  return d && d.value !== undefined ? d.value : null;
+}
+
+/// 单元格文本：null → —，对象/数组 → 截断 JSON，长文本截断（表格不是日志查看器）。
+function pvCell(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  let t;
+  if (typeof v === 'object') {
+    try { t = JSON.stringify(v); } catch (e) { t = String(v); }
+  } else {
+    t = String(v);
+  }
+  return t.length > PV_CELL_MAX ? t.slice(0, PV_CELL_MAX) + '…' : t;
+}
+
+/// 把 handler 的返回值归一成行数组：数组 / {rows} / {items} 都收，其余当"没有数据"。
+function pvRows(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.rows)) return value.rows;
+  if (value && Array.isArray(value.items)) return value.items;
+  return null;
+}
+
+/// 状态药丸：值必须是 ok / warn / err / accent（面板固定字典），其余当普通文本。
+const PV_TONES = { ok: '正常', warn: '注意', err: '失败', accent: '信息' };
+function pvBadgeText(v) {
+  const k = String(v);
+  return PV_TONES[k] ? PV_TONES[k] : null;
+}
+
+function pvSleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/// 画一页声明式页面：页头 + 表单 + 动作 + 数据块。
+async function renderPluginDeclared(name) {
+  stopDeclaredPage();
+  const host = $('plugin-declared');
+  if (!host) return;
+  clear(host);
+  host.append(el('div', 'skeleton'));
+  let data;
+  try {
+    data = await api('/api/plugins/' + encodeURIComponent(name) + '/config');
+  } catch (e) {
+    clear(host);
+    host.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '读插件声明失败')));
+    return;
+  }
+  clear(host);
+  const man = data.manifest || {};
+  const cfgObj = data.config || {};
+  const d = declaredOf(name); // 以 /api/state 那份为准（和侧栏一致）；config 接口只用来兜底
+  const fields = d.fields.length ? d.fields : ((man.config && man.config.fields) || []);
+  const actions = d.actions.length ? d.actions : ((man.config && man.config.actions) || []);
+  const views = d.views.length ? d.views : (man.views || []);
+  const ctx = { name, cfg: cfgObj, bag: {}, views: [], pollStop: false, pollSeq: 0 };
+  declaredPageCtx = ctx;
+
+  // 页头
+  const head = el('div', 'pv-head');
+  const left = el('div');
+  left.append(el('h2', 'pv-title', man.title || name));
+  if (man.description) left.append(el('p', 'pv-desc', man.description));
+  head.append(left);
+  const right = el('div', 'head-actions');
+  const btnSet = el('button', 'btn', '设置');
+  btnSet.type = 'button';
+  btnSet.title = '编辑这个插件的配置（和抽屉里的「配置」是同一份）';
+  btnSet.addEventListener('click', () => openPluginConfig(name));
+  right.append(btnSet);
+  const btnReload = el('button', 'btn', '刷新');
+  btnReload.type = 'button';
+  btnReload.addEventListener('click', () => reloadDeclaredViews(ctx));
+  right.append(btnReload);
+  head.append(right);
+  host.append(head);
+
+  if ((man.warnings || []).length) {
+    host.append(el('p', 'hint-warn', '清单里有声明被忽略：' + man.warnings.join('；')));
+  }
+
+  // 表单 + 动作
+  if (fields.length || actions.length) {
+    const card = el('div', 'pv-card');
+    if (fields.length) {
+      const built = buildSchemaForm(fields, cfgObj);
+      ctx.form = built;
+      card.append(built.node);
+    }
+    const msgBox = el('div', 'pv-msg');
+    const imgBox = el('div', 'pv-image hidden');
+    card.append(imgBox, msgBox);
+    if (actions.length) {
+      const row = el('div', 'actions pv-actions');
+      for (const a of actions) {
+        const btn = el('button', 'btn' + (a.primary ? ' btn-primary' : ''), a.label || a.handler);
+        btn.type = 'button';
+        btn.dataset.action = a.id;
+        btn.addEventListener('click', () => runDeclaredAction(ctx, a, btn, msgBox, imgBox));
+        row.append(btn);
+      }
+      const save = el('button', 'btn', '保存配置');
+      save.type = 'button';
+      save.title = '只保存表单里的值（不会触发插件动作）';
+      save.addEventListener('click', () => saveDeclaredConfig(ctx, save));
+      row.append(save);
+      card.append(row);
+    }
+    host.append(card);
+  }
+
+  // 数据块
+  for (const v of views) {
+    const box = el('section', 'pv-card pv-view');
+    box.dataset.view = v.id;
+    const bar = el('div', 'pv-view-head');
+    bar.append(el('h3', 'pv-view-title', v.title || v.id));
+    const btn = el('button', 'btn btn-sm', '刷新');
+    btn.type = 'button';
+    const body = el('div', 'pv-view-body');
+    btn.addEventListener('click', () => loadDeclaredView(ctx, v, body));
+    bar.append(btn);
+    box.append(bar, body);
+    host.append(box);
+    ctx.views.push({ view: v, body });
+  }
+  for (const item of ctx.views) await loadDeclaredView(ctx, item.view, item.body);
+}
+
+async function loadDeclaredView(ctx, view, body) {
+  clear(body);
+  body.append(el('div', 'skeleton'));
+  let value;
+  try {
+    value = await panelCall(ctx.name, view.handler, { __panel: { bag: ctx.bag } });
+  } catch (e) {
+    clear(body);
+    body.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '取数失败')));
+    return;
+  }
+  clear(body);
+  const kind = view.kind || 'table';
+  if (kind === 'kv') {
+    renderKvView(body, value, view);
+    return;
+  }
+  const rows = pvRows(value);
+  if (rows === null) {
+    body.append(el('p', 'hint-err', '插件返回了认不出的结构（要数组，或 {rows:[]} / {items:[]}）'));
+    return;
+  }
+  if (rows.length === 0) {
+    body.append(el('p', 'pv-empty', view.empty || '没有数据'));
+    return;
+  }
+  if (kind === 'list') {
+    renderListView(body, rows, view);
+  } else {
+    renderTableView(body, rows, view);
+  }
+  if (rows.length > PV_MAX_ROWS) {
+    body.append(el('p', 'pv-more', '共 ' + rows.length + ' 行，只显示前 ' + PV_MAX_ROWS + ' 行'));
+  }
+}
+
+function viewColumns(view, rows) {
+  if ((view.columns || []).length) return view.columns;
+  // 没声明列：按第一行的键现推（最多 8 列），让"随手返回一个数组"也能看
+  const first = rows[0];
+  if (!first || typeof first !== 'object') return [{ key: null, label: '值', badge: false }];
+  return Object.keys(first).slice(0, 8).map((k) => ({ key: k, label: k, badge: false }));
+}
+
+function renderTableView(body, rows, view) {
+  const cols = viewColumns(view, rows);
+  const wrap = el('div', 'table-wrap');
+  const table = el('table', 'table');
+  const thead = el('thead');
+  const tr = el('tr');
+  for (const c of cols) tr.append(el('th', '', c.label || c.key || ''));
+  thead.append(tr);
+  table.append(thead);
+  const tb = el('tbody');
+  for (const row of rows.slice(0, PV_MAX_ROWS)) {
+    const t = el('tr');
+    for (const c of cols) {
+      const raw = c.key === null ? row : (row && typeof row === 'object' ? row[c.key] : row);
+      const cell = el('td');
+      const badge = c.badge ? pvBadgeText(raw) : null;
+      if (badge) {
+        const tone = ['ok', 'warn', 'err', 'accent'].includes(String(raw)) ? String(raw) : 'accent';
+        cell.append(el('span', 'pill pill-' + tone, badge));
+      } else {
+        cell.textContent = pvCell(raw);
+      }
+      t.append(cell);
+    }
+    tb.append(t);
+  }
+  table.append(tb);
+  wrap.append(table);
+  body.append(wrap);
+}
+
+function renderListView(body, rows, view) {
+  const tk = view.title_key || '';
+  const sk = view.subtitle_key || '';
+  const mk = view.meta_key || '';
+  const list = el('div', 'pv-list');
+  for (const row of rows.slice(0, PV_MAX_ROWS)) {
+    const item = el('div', 'pv-item');
+    const obj = row && typeof row === 'object' ? row : { value: row };
+    const titleKey = tk || Object.keys(obj)[0];
+    const subKey = sk || Object.keys(obj)[1];
+    const metaKey = mk || Object.keys(obj)[2];
+    item.append(el('div', 'pv-item-title', pvCell(obj[titleKey])));
+    if (subKey) item.append(el('div', 'pv-item-sub', pvCell(obj[subKey])));
+    if (metaKey) item.append(el('div', 'pv-item-meta', pvCell(obj[metaKey])));
+    list.append(item);
+  }
+  body.append(list);
+}
+
+function renderKvView(body, value, view) {
+  let pairs = [];
+  if (Array.isArray(value)) {
+    pairs = value.map((x) => [
+      (x && (x.label || x.key)) || '',
+      x && x.value !== undefined ? x.value : x,
+    ]);
+  } else if (value && typeof value === 'object') {
+    pairs = Object.keys(value).map((k) => [k, value[k]]);
+  }
+  if (!pairs.length) {
+    body.append(el('p', 'pv-empty', view.empty || '没有数据'));
+    return;
+  }
+  const dl = el('dl', 'kv pv-kv');
+  for (const [k, v] of pairs.slice(0, PV_MAX_ROWS)) {
+    dl.append(el('dt', '', String(k)));
+    dl.append(el('dd', '', pvCell(v)));
+  }
+  body.append(dl);
+}
+
+async function reloadDeclaredViews(ctx) {
+  for (const item of ctx.views) await loadDeclaredView(ctx, item.view, item.body);
+}
+
+function pvShowImage(box, image) {
+  clear(box);
+  const src = image && (image.url || image.data_url);
+  if (!src) {
+    box.classList.add('hidden');
+    return;
+  }
+  const img = el('img', 'pv-image-img');
+  img.alt = image.alt || '验证码';
+  img.src = src;
+  // 同源图片带时间戳，避免浏览器缓存旧验证码
+  if (image.url) img.src = src + (src.includes('?') ? '&' : '?') + '_=' + Date.now();
+  box.append(img);
+  box.classList.remove('hidden');
+}
+
+async function saveDeclaredConfig(ctx, btn) {
+  btn.disabled = true;
+  try {
+    const values = ctx.form ? ctx.form.collect(ctx.cfg) : Object.assign({}, ctx.cfg);
+    const r = await api('/api/plugins/' + encodeURIComponent(ctx.name) + '/config', {
+      method: 'PUT',
+      body: { text: JSON.stringify(values, null, 2) },
+    });
+    notify(r.reloaded === false
+      ? '配置已保存，但插件重载失败：' + (r.error || '')
+      : '配置已保存', r.reloaded === false ? 'err' : 'ok');
+    ctx.cfg = values;
+  } catch (e) {
+    notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/// 跑一个动作，并按插件返回的指令做事（回填 / 出图 / 冷却 / 中间态 / 轮询）。
+async function runDeclaredAction(ctx, action, btn, msgBox, imgBox) {
+  // 面板禁用系统对话框（pitfalls §100）：确认一律走自绘的 askConfirm。
+  if (action.confirm && !(await askConfirm(action.confirm, action.label || '继续'))) return;
+  clear(msgBox);
+  const label = btn.textContent;
+  btn.disabled = true;
+  ctx.pollStop = true; // 再点一次 = 取消上一条轮询（扫码那类会长跑）
+  try {
+    const values = ctx.form ? ctx.form.collect(ctx.cfg) : Object.assign({}, ctx.cfg);
+    const body = Object.assign({}, values, {
+      __panel: { bag: ctx.bag, action: action.id },
+    });
+    const r = await panelCall(ctx.name, action.handler, body);
+    if (r && r.keep && typeof r.keep === 'object') Object.assign(ctx.bag, r.keep);
+    if (r && r.values && typeof r.values === 'object' && ctx.form) {
+      ctx.form.readFrom(Object.assign({}, ctx.cfg, r.values));
+    }
+    if (r && r.image) pvShowImage(imgBox, r.image);
+    if (r && Number(r.cooldown_s) > 0) startCooldown(btn, label, Number(r.cooldown_s));
+    if (r && r.ok === false) {
+      msgBox.append(el('p', 'hint-err', r.error || r.message || '失败'));
+      if (r.message && r.error) msgBox.append(el('p', 'hint', r.message));
+      return;
+    }
+    notify((r && r.message) || '完成', 'ok');
+    if (r && r.poll) {
+      await runDeclaredPoll(ctx, r.poll, msgBox, imgBox);
+    }
+    await reloadDeclaredViews(ctx);
+  } catch (e) {
+    msgBox.append(el('p', 'hint-err', e instanceof Unauthorized ? '需要令牌' : (e.message || '调用失败')));
+  } finally {
+    if (!btn.dataset.cool) btn.disabled = false;
+  }
+}
+
+/// 按钮冷却：`cooldown_s` 期间禁用并显示倒计时（发验证码 60 秒这种）。
+function startCooldown(btn, label, seconds) {
+  const total = Math.min(3600, Math.max(1, Math.round(seconds)));
+  let left = total;
+  btn.dataset.cool = '1';
+  btn.disabled = true;
+  btn.textContent = label + '（' + left + 's）';
+  clearInterval(btn._coolTimer);
+  btn._coolTimer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      clearInterval(btn._coolTimer);
+      delete btn.dataset.cool;
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
+    btn.textContent = label + '（' + left + 's）';
+  }, 1000);
+}
+
+/// 有界轮询（扫码登录）：切走视图/再点一次就停。
+async function runDeclaredPoll(ctx, poll, msgBox, imgBox) {
+  const interval = Math.min(10000, Math.max(500, Number(poll.interval_ms) || 2000));
+  const timeout = Math.min(300000, Math.max(2000, Number(poll.timeout_ms) || 60000));
+  const deadline = Date.now() + timeout;
+  ctx.pollStop = false;
+  const mine = ++ctx.pollSeq;
+  while (!ctx.pollStop && ctx.pollSeq === mine && Date.now() < deadline) {
+    await pvSleep(interval);
+    if (ctx.pollStop || ctx.pollSeq !== mine) return;
+    let r;
+    try {
+      r = await panelCall(ctx.name, poll.handler, { __panel: { bag: ctx.bag, action: 'poll' } });
+    } catch (e) {
+      msgBox.append(el('p', 'hint-err', e.message || '轮询失败'));
+      return;
+    }
+    if (r && r.keep && typeof r.keep === 'object') Object.assign(ctx.bag, r.keep);
+    if (r && r.image) pvShowImage(imgBox, r.image);
+    if (r && r.done === true) {
+      notify(r.message || '完成', 'ok');
+      return;
+    }
+    if (r && r.ok === false) {
+      msgBox.append(el('p', 'hint-err', r.error || r.message || '失败'));
+      return;
+    }
+  }
+  if (!ctx.pollStop && ctx.pollSeq === mine) {
+    msgBox.append(el('p', 'hint-warn', '等待超时（' + Math.round(timeout / 1000) + ' 秒）'));
+  }
 }
 
 function setDrawerTab(name) {
@@ -5261,15 +5708,35 @@ async function importBackup(file) {
 /// 不在 = 侧栏入口点进去必然 404（JS 和配置都还在，只是界面被删了/没装上）——
 /// 所以侧栏和插件卡都要标出来，别让人以为「点了没反应」。第 203 轮用户就被这个卡住。
 function pluginWebMissing(name) {
+  // 有声明式页面（views / actions）的插件本来就不需要 .webui/ —— 别给它挂「缺界面」的
+  // 警告点，那是给"该有界面却没文件"的插件用的（第 191 轮）。
+  if (hasDeclaredUI(name)) return false;
   const f = (state.files || []).find((x) => x && x.name === name);
   return !!f && f.webui === false;
 }
 
+/// 侧栏里的插件格。两个来源：运行期注册的 `host.sidebar()`，和清单里声明的 `nav`。
+///
+/// 为什么要有第二个来源（第 191 轮）：按需加载的插件这次启动根本没加载，运行期注册的
+/// nav 不存在 —— 但清单在磁盘上，所以「声明式页面」的插件**没加载也能在侧栏出现**，
+/// 点进去取数时才装（沿用「用到就装」）。
 function pluginEntries() {
-  return (state.plugins || [])
-    .filter((p) => p && p.nav && p.nav.title)
-    .slice()
-    .sort((a, b) => (a.nav.order - b.nav.order) || String(a.nav.title).localeCompare(String(b.nav.title), 'zh'));
+  const out = [];
+  const seen = new Set();
+  for (const p of (state.plugins || [])) {
+    if (!p) continue;
+    // 运行期注册的 sidebar 优先；没有就用清单里的 nav（/api/state 每个插件都带 manifest）。
+    const nav = (p.nav && p.nav.title) ? p.nav : ((p.manifest && p.manifest.nav) || null);
+    if (!nav || !nav.title) continue;
+    out.push({ name: p.name, nav });
+    seen.add(p.name);
+  }
+  for (const f of (state.files || [])) {
+    if (!f || !f.nav || !f.nav.title || seen.has(f.name)) continue;
+    out.push({ name: f.name, nav: f.nav });
+    seen.add(f.name);
+  }
+  return out.sort((a, b) => (a.nav.order - b.nav.order) || String(a.nav.title).localeCompare(String(b.nav.title), 'zh'));
 }
 
 const PLUGIN_ICON =
@@ -5390,6 +5857,7 @@ function setView(name) {
   // `plugin/<name>` 也认（旧版 href 就是斜杠写的，深链进来不能扑空），统一成冒号形式。
   if (typeof name === 'string' && name.startsWith('plugin/')) name = 'plugin:' + name.slice(7);
   const isPlugin = typeof name === 'string' && name.startsWith('plugin:');
+  if (!isPlugin) stopDeclaredPage();
   if (!isPlugin && !VIEWS[name]) name = 'dashboard';
   state.view = name;
   const viewKey = isPlugin ? 'plugin' : name;
@@ -5410,9 +5878,17 @@ function setView(name) {
   if (isPlugin) {
     const plugin = name.slice(7);
     const entry = pluginEntries().find((p) => p.name === plugin);
-    openPluginView(plugin);
+    // 第 191 轮：没写 .webui/ 但声明了 views/actions 的插件，这一格由**面板**渲染
+    // （表单 + 按钮 + 数据块）；有界面的插件照旧走 iframe。
+    const declared = useDeclaredPage(plugin);
+    const frame = $('plugin-frame');
+    const host = $('plugin-declared');
+    if (frame) frame.classList.toggle('hidden', declared);
+    if (host) host.classList.toggle('hidden', !declared);
+    if (declared) renderPluginDeclared(plugin);
+    else openPluginView(plugin);
     $('page-title').textContent = entry ? entry.nav.title : plugin;
-    $('page-sub').textContent = '插件界面 · ' + plugin;
+    $('page-sub').textContent = (declared ? '面板渲染 · ' : '插件界面 · ') + plugin;
     document.title = (entry ? entry.nav.title : plugin) + ' · 插件面板';
     setSidebar(false);
     return;

@@ -172,3 +172,155 @@ fn scan_of_a_directory_plugin_does_not_recurse_into_its_own_entry() {
     assert_eq!(changed, vec!["dp"], "改 lib/ 也要报 changed: {out}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn declared_actions_views_and_nav_parse() {
+    let d = std::env::temp_dir().join(format!("m191-decl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    write(
+        &d,
+        "a.panel.json",
+        r#"{
+          "title": "样例",
+          "nav": { "title": "样例页", "order": 7 },
+          "config": {
+            "fields": [
+              { "name": "account", "type": "text", "inputmode": "tel", "required": true },
+              { "name": "code", "type": "text", "length": 6 }
+            ],
+            "actions": [
+              { "id": "login", "label": "登录", "handler": "login", "primary": true },
+              { "label": "试连", "handler": "ping", "confirm": "确定？" }
+            ]
+          },
+          "views": [
+            { "id": "accounts", "handler": "accounts",
+              "columns": [ { "key": "name", "label": "账号" },
+                           { "key": "status", "badge": true } ] },
+            { "id": "quota", "handler": "quota", "kind": "kv", "empty": "空" }
+          ]
+        }"#,
+    )
+    .unwrap();
+    let m = manifest::load(&d, "a").unwrap().unwrap();
+    assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    let nav = m.nav.as_ref().expect("nav");
+    assert_eq!((nav.title.as_str(), nav.order), ("样例页", 7));
+    assert_eq!(m.actions.len(), 2);
+    assert_eq!(m.actions[0].id, "login");
+    assert!(m.actions[0].primary);
+    // id 缺省用 handler 名
+    assert_eq!(m.actions[1].id, "ping");
+    assert_eq!(m.actions[1].confirm, "确定？");
+    assert_eq!(m.views.len(), 2);
+    // kind 缺省 table；列 label 缺省用 key
+    assert_eq!(m.views[0].kind, "table");
+    assert_eq!(m.views[0].title, "accounts", "title 缺省用 id");
+    assert_eq!(m.views[0].columns[1].label, "status");
+    assert!(m.views[0].columns[1].badge);
+    assert_eq!(m.views[1].kind, "kv");
+    assert_eq!(m.views[1].empty, "空");
+    assert_eq!(m.fields[0].inputmode, "tel");
+    assert_eq!(m.fields[1].length, Some(6));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn bad_declarations_are_dropped_with_warnings() {
+    let d = std::env::temp_dir().join(format!("m191-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    write(
+        &d,
+        "b.panel.json",
+        r#"{
+          "nav": { "order": 3 },
+          "config": { "fields": [ { "name": "__panel", "label": "保留名" }, { "name": "ok" } ],
+            "actions": [
+              { "id": "noHandler", "label": "坏的", "handler": "a/b" },
+              { "id": "noLabel", "handler": "fine" },
+              { "id": "good", "label": "好的", "handler": "good_one" },
+              { "id": "good", "label": "重复", "handler": "dup" }
+            ] },
+          "views": [
+            { "id": "weird", "handler": "v1", "kind": "chart" },
+            { "id": "badName", "handler": "v 2" },
+            { "id": "fine", "handler": "v3" }
+          ]
+        }"#,
+    )
+    .unwrap();
+    let m = manifest::load(&d, "b").unwrap().unwrap();
+    assert!(m.nav.is_none(), "nav 没 title 就不该出现");
+    assert_eq!(m.fields.len(), 1, "保留字段名被丢");
+    assert_eq!(m.fields[0].name, "ok");
+    assert_eq!(
+        m.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec!["good"],
+        "非法 handler / 没 label / 重复 id 都被丢"
+    );
+    assert_eq!(
+        m.views.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        vec!["fine"],
+        "未知 kind / 非法 handler 被丢"
+    );
+    let all = m.warnings.join(" ");
+    for needle in ["__panel", "a/b", "noLabel", "chart", "v 2", "重复"] {
+        assert!(all.contains(needle), "警告里应该有 {needle}：{all}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn declaration_limits_are_enforced() {
+    let d = std::env::temp_dir().join(format!("m191-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let cols: Vec<String> = (0..30).map(|i| format!("{{\"key\":\"c{i}\"}}")).collect();
+    let cols = cols.join(",");
+    let acts: Vec<String> = (0..10)
+        .map(|i| format!("{{\"id\":\"a{i}\",\"label\":\"L\",\"handler\":\"h{i}\"}}"))
+        .collect();
+    let acts = acts.join(",");
+    write(
+        &d,
+        "c.panel.json",
+        &format!(
+            "{{\"config\": {{\"actions\": [{acts}]}}, \"views\": [{{\"id\": \"v\", \"handler\": \"h\", \"columns\": [{cols}]}}]}}"
+        ),
+    )
+    .unwrap();
+    let m = manifest::load(&d, "c").unwrap().unwrap();
+    assert_eq!(m.actions.len(), manifest::ACTIONS_MAX);
+    assert_eq!(m.views[0].columns.len(), manifest::COLUMNS_MAX);
+    let all = m.warnings.join(" ");
+    assert!(all.contains("超过上限"), "{all}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn to_json_carries_the_declaration() {
+    let v = json!({
+        "nav": { "title": "页", "order": 2 },
+        "config": { "fields": [ { "name": "a" } ],
+                    "actions": [ { "label": "点", "handler": "h", "primary": true } ] },
+        "views": [ { "id": "v", "handler": "hv", "columns": [ { "key": "k", "badge": true } ] } ]
+    });
+    let m = manifest::parse(&v);
+    let j = m.to_json();
+    assert_eq!(j["nav"]["title"], "页");
+    assert_eq!(j["nav"]["order"], 2);
+    assert_eq!(j["config"]["actions"][0]["handler"], "h");
+    assert_eq!(j["config"]["actions"][0]["primary"], true);
+    assert_eq!(j["views"][0]["kind"], "table");
+    assert_eq!(j["views"][0]["columns"][0]["badge"], true);
+    assert!(j["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn handler_names_follow_the_route_rules() {
+    assert!(manifest::handler_ok("login"));
+    assert!(manifest::handler_ok("send_code-2"));
+    assert!(!manifest::handler_ok(""));
+    assert!(!manifest::handler_ok("a/b"));
+    assert!(!manifest::handler_ok("a.b"));
+    assert!(!manifest::handler_ok(&"x".repeat(65)));
+}

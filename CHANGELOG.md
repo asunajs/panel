@@ -26,6 +26,18 @@
 文档层面新增两节：[user/scripts.md](docs/user/scripts.md) 的「脚本 = 你的用户权限（没有围栏，这是设计）」、
 [plugins.md](docs/plugins.md) 的「信任模型」。
 
+### 插件不用写 WebUI 也能有一整页（第 191 轮）
+
+清单里声明就能得到：表单 + 动作按钮 + 数据块（表格 / 列表 / 键值）。
+常见的那类需求 —— 填账号密码、发验证码登录、看几张账号表 —— 从此不用再写前端工程。
+
+- 清单新增 `nav`（侧栏入口，**插件没加载也能出现**）、`config.actions`（按钮）、`views`（数据块）。
+- 新接口 `POST /api/plugins/{name}/call/{handler}`：面板替页面调具名 handler，事件里带表单值和上一步的中间态。
+- 多步登录靠插件返回的几条指令：`values`（回填）、`keep`（中间态）、`image`（图形验证码）、
+  `cooldown_s`（发码倒计时）、`poll`（扫码轮询）。流程逻辑在插件里，面板只执行指令。
+- 活样例 `plugins/preview-demo.{js,panel.json}`（没有 `.webui/`）；契约见 [plugin-contract.md](docs/plugin-contract.md) §9。
+- 有 `.webui/` 的插件不受影响，仍用自己的页面（声明是补充，不覆盖）。
+
 ## 0.6.3（2026-11-18）
 
 全仓 review 版：把「注释/文档在骗人」「热点路径上的阻塞」「三处未认证的高危面」一次清掉。

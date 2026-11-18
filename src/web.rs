@@ -578,6 +578,12 @@ pub fn router(st: AppState) -> Router {
         .route("/plugins/{name}", get(plugin_webui_redirect))
         .route("/plugins/{name}/", get(plugin_webui_index))
         .route("/plugins/{name}/{*rel}", axum::routing::any(plugin_webui_any))
+        // 第 191 轮：面板替插件的**声明式页面**调一个具名 handler（动作 / 视图取数）。
+        // 它和 /plugins/<name>/api/<h> 的区别：只看 handler 名，不受 __route / 静态文件影响。
+        .route(
+            "/api/plugins/{name}/call/{handler}",
+            post(plugin_call_handler),
+        )
         .route("/api/plugins/{name}/reload", post(plugin_reload))
         // 第 180 轮：重装 = 重新采纳插件给的 cron 建议（改计划、保留历史）
         .route("/api/plugins/{name}/reinstall", post(plugin_reinstall))
@@ -3502,11 +3508,15 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             let bytes = crate::pluginfs::total_bytes(&pdir, &name);
             // 清单里的版本（没有清单 / 没写版本就是空串）。商店判断「可更新」要用它，
             // 停用/按需加载的插件不在 `/api/state` 的 plugins 里，所以这里也带一份。
-            let version = crate::manifest::load(&pdir, &name)
-                .ok()
-                .flatten()
-                .map(|m| m.version)
-                .unwrap_or_default();
+            // 清单一次读两用：版本（商店用）+ 声明式侧栏入口（第 191 轮）。
+            // 后者必须从磁盘来 —— 按需加载的插件这次启动根本没加载，运行期注册的 nav 不存在，
+            // 但清单在磁盘上，所以「没加载也能在侧栏看见」靠的就是这一份。
+            let man = crate::manifest::load(&pdir, &name).ok().flatten();
+            let version = man.as_ref().map(|m| m.version.clone()).unwrap_or_default();
+            let nav = man
+                .as_ref()
+                .and_then(|m| m.nav.as_ref())
+                .map(|n| json!({ "title": n.title, "order": n.order }));
             // 一次 stat 算两处用（原来 is_dir_plugin 在同一个 JSON 里被调了两次）
             let is_multi = crate::pluginfs::is_dir_plugin(&pdir, &name);
             files.push(json!({
@@ -3524,6 +3534,8 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
                 "webui": webui,
                 // 目录式插件：界面要把「多个文件」这件事说清楚（编辑的是入口文件）
                 "multi": is_multi,
+            // 声明式侧栏入口（清单里的 nav）；None = 这个插件不进侧栏
+            "nav": nav,
                 "entry": entry
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -3655,6 +3667,105 @@ async fn api_plugin_manifest(
         // 清单坏了不 404 也不 500：界面要能显示「文件在、但写错了」并指到具体文件。
         Err(e) => Ok(Json(json!({ "ok": false, "found": true, "error": e }))),
     }
+}
+
+/// 声明式页面的参数上限：表单值没道理超过 64 KiB（多行备注也就几 KB），
+/// 超了基本是把整个 JSON 文件塞进来了。
+const PANEL_CALL_MAX_BODY: usize = 64 * 1024;
+/// 返回值上限：面板要把它渲染成表格，几百 KB 的响应在浏览器里已经是"卡住"而不是"预览"。
+/// 超了直接报错让插件自己裁剪 —— 比默默截断一半让人以为"数据就这些"诚实。
+const PANEL_CALL_MAX_RESPONSE: usize = 512 * 1024;
+
+/// `POST /api/plugins/{name}/call/{handler}` —— 面板替**声明式页面**调一个具名 handler。
+///
+/// 谁在用：`panel.json` 里声明的 `config.actions`（登录 / 发验证码 / 试连）和 `views`（表格取数）。
+/// 它和 `/plugins/{name}/api/{handler}` 不是一回事：那条是插件**自己**的接口面（受 `__route` /
+/// 静态文件影响），这条只认 handler 名，专门给面板的渲染层用。
+///
+/// 事件形状（插件侧读 `evt`）：
+///
+///     { handler, body: { ...表单值 }, bag: { ...上次的 keep }, action, source: "panel-ui", path }
+///
+/// `bag` 单独放在顶层、不并进 `body`：`body` 保持"表单值"这一条语义，插件照旧读
+/// `evt.body.account`；而 `__panel` 这个保留键会在送进去之前摘掉（它只用来承载 `bag` / `action`）。
+async fn plugin_call_handler(
+    State(st): State<AppState>,
+    Path((name, handler)): Path<(String, String)>,
+    h: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    crate::scripts::safe_name(&name).map_err(bad)?;
+    if !crate::manifest::handler_ok(&handler) {
+        return Err(bad(format!(
+            "handler 名不合法：{handler}（只能字母数字 _ -，最长 64）"
+        )));
+    }
+    if body.len() > PANEL_CALL_MAX_BODY {
+        return Err(bad(format!(
+            "参数有 {} 字节，超过 {} 上限（表单值不该这么大，检查是不是把整个文件塞进来了）",
+            body.len(),
+            PANEL_CALL_MAX_BODY
+        )));
+    }
+    if !plugin_path(&st.plugins_dir, &name)?.exists() {
+        return Err(ApiError::not_found("没有这个插件。").with_detail(format!("name={name}")));
+    }
+
+    // 空 body = 无参数（视图取数就是这样）。非空必须是 JSON 对象。
+    let mut payload: Value = if body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice::<Value>(&body)
+            .map_err(|e| bad(format!("参数不是合法 JSON：{e}")))?
+    };
+    if !payload.is_object() {
+        return Err(bad("参数必须是 JSON 对象（表单值平铺）".to_string()));
+    }
+    let panel_meta = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("__panel"))
+        .unwrap_or(Value::Null);
+    let bag = panel_meta.get("bag").cloned().unwrap_or(Value::Null);
+    let action = panel_meta
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    // 「用到就装」：声明页可以在插件没加载时打开（清单在磁盘上），第一次取数/点按钮才装。
+    sched_ready(&st, &name).await?;
+
+    let evt = json!({
+        "handler": handler,
+        "body": payload,
+        "bag": bag,
+        "action": action,
+        "source": "panel-ui",
+        "path": format!("/api/plugins/{name}/call/{handler}"),
+    });
+    // 插件抛错的原文要**直接给用户看**（这是声明式页面的全部意义：登录失败了要看见
+    // "验证码不对"，而不是"插件没有响应"）。所以这里不用 bad_gateway 那句通用文案。
+    let out = st
+        .sched
+        .web_call(&name, &handler, evt, WEBUI_BUDGET_MS)
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "plugin_error",
+                format!("插件报错：{}", e.trim_start_matches("Error: ")),
+            )
+        })?;
+    let value = out.unwrap_or(Value::Null);
+    let size = value.to_string().len();
+    if size > PANEL_CALL_MAX_RESPONSE {
+        return Err(ApiError::bad_gateway(format!(
+            "插件返回 {size} 字节，超过 {} 上限 —— 请在 handler 里裁剪（表格只显示前 200 行）",
+            PANEL_CALL_MAX_RESPONSE
+        )));
+    }
+    Ok(Json(json!({ "ok": true, "value": value })))
 }
 
 /// `GET /api/plugins/{name}/config` —— 读插件自己的配置。
