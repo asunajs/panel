@@ -584,7 +584,7 @@ PUT   /api/notify                      ← 整段 notify               → { ok,
 | 字段 | 类型 | 缺省 | 说明 |
 |---|---|---|---|
 | `text` | string | 必填 | 整份配置的 JSON 文本（必须是对象；上限 `PANEL_CONFIG_MAX_BYTES`） |
-| `reload` | bool | `true` | 写完是否 **unload + load** 这个插件 |
+| `reload` | bool | `false` | 写完是否 **unload + load** 这个插件（默认不重载：重载是危险动作） |
 
 回执：
 
@@ -596,10 +596,15 @@ PUT   /api/notify                      ← 整段 notify               → { ok,
 | `error` | 重载失败的原因；`skipped` 时是 `null` |
 | `path` | 落盘路径（`plugin-data/<name>/config.json`，0600） |
 
-为什么要有 `reload:false`：`host.self_config()` 每次调用都读盘，所以「用到才读」的插件
-写完就能看到新值；而重载的代价是 `Cmd::Unload` → `invocation().stop()` ——
-在跑的任务当场被打断，排队的请求直接失败。界面：插件配置抽屉里的「保存后重载插件」，
-默认勾着（= 老行为），取消后保存会提示「配置已保存（未重载）」。
+**默认不重载**，理由两条：
+
+1. 重载是**危险动作**：`Cmd::Unload` 第一件事就是 `invocation().stop()` —— 在跑的任务当场被打断，
+   排队的请求直接失败。「顺手保存一下配置」不该有这个副作用。
+2. 大多数情况根本不需要：`host.self_config()` 每次调用都读盘，所以「用到才读」的插件
+   写完就能看到新值。
+
+界面：插件配置抽屉里的「保存后重载插件」，**默认不勾**；勾上才 `reload:true`（给
+「加载期读一次配置」的插件用）。不勾时提示「配置已保存（未重载）」。
 
 `skipped` 和 `reloaded:false` 必须分得开：前者是「按你的要求没重载」，后者是
 「重载了但失败了」—— 混在一起，界面会把一次成功的保存说成失败（这条有单测）。

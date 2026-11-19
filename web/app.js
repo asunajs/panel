@@ -2042,8 +2042,8 @@ function buildSchemaForm(fields, cfg) {
 }
 
 // 「保存后重载」这个偏好记在本机（第 196 轮）：它是**用户**对「我的插件怎么读配置」的判断，
-// 换插件也该沿用，所以不放内存、不跟插件走。
-const NORELOAD_KEY = 'panel.cfgNoReload';
+// 换插件也该沿用，所以不放内存、不跟插件走。'1' = 要重载（默认不要）。
+const RELOAD_KEY = 'panel.cfgReload';
 
 async function openPluginConfig(name) {
   state.drawerKind = 'plugin';
@@ -2117,15 +2117,15 @@ async function openPluginConfig(name) {
   box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
   box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
 
-  // 保存后要不要重载这个插件（第 196 轮）。默认重载：有些插件在加载期读一次就缓存了。
-  // 取消勾选 = 只落盘 —— 用在「每次调用都重新读 self_config()」的插件上：省掉一次
-  // unload+load，而那次重载会打断它在跑的任务、让排队的请求失败。
+  // 保存后要不要重载这个插件（第 196 轮）：**默认不重载**。重载会 unload 掉插件，
+  // 在跑的任务当场断、排队的请求直接失败 —— 这是危险动作，不该是「保存一下」的副作用。
+  // 勾上 = 明确要重载（给「加载期读一次配置」的插件用）。
   const reloadBox = el('input');
   reloadBox.type = 'checkbox';
   reloadBox.dataset.reload = '1';
-  reloadBox.checked = localStorage.getItem(NORELOAD_KEY) !== '1';
+  reloadBox.checked = localStorage.getItem(RELOAD_KEY) === '1';
   const reloadRow = el('label', 'hint cfg-reload');
-  reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件（取消勾选 = 只落盘，插件下次 self_config() 才看到新值）'));
+  reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件（会打断正在跑的任务；插件每次 self_config() 都读盘，一般不用勾）'));
   box.append(reloadRow);
 
   save.addEventListener('click', async () => {
@@ -2134,12 +2134,12 @@ async function openPluginConfig(name) {
       ? JSON.stringify(collect(), null, 2)
       : ta.value;
     try {
-      const reload = reloadBox.checked; // 勾着 = 重载（老行为）
+      const reload = reloadBox.checked; // 勾着才重载（默认不勾）
       const r = await api('/api/plugins/' + encodeURIComponent(name) + '/config', {
         method: 'PUT',
         body: { text, reload },
       });
-      try { localStorage.setItem(NORELOAD_KEY, reload ? '0' : '1'); } catch (e) { /* 无痕模式 */ }
+      try { localStorage.setItem(RELOAD_KEY, reload ? '1' : '0'); } catch (e) { /* 无痕模式 */ }
       if (r && r.skipped) notify('配置已保存（未重载）', 'ok');
       else if (r && r.reloaded === false) notify('配置已保存，但插件重载失败：' + (r.error || ''), 'err');
       else notify('配置已保存，插件已重载', 'ok');

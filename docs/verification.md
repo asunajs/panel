@@ -718,10 +718,11 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 改动：
 
-- `PUT /api/plugins/{name}/config` 的 body 加 `reload`（缺省 true = 老行为）。
-  `reload:false` 只落盘，回 `{ok:true, reloaded:false, skipped:true, error:null, path}`。
+- `PUT /api/plugins/{name}/config` 的 body 加 `reload`，**缺省 false = 不重载**
+  （用户当场纠正：重载是危险动作，不该是保存的默认副作用）。不重载回
+  `{ok:true, reloaded:false, skipped:true, error:null, path}`；显式 `reload:true` 才 unload + load。
 - `skipped` 与 `reloaded:false`（重载失败）分开 —— 混在一起界面会把成功的保存说成失败。
-- 配置抽屉加「保存后重载插件」勾选（默认勾上，偏好记在本机 localStorage）。
+- 配置抽屉加「保存后重载插件」勾选（**默认不勾**，偏好记在本机 localStorage）。
 - 声明式页面保存**总是** `reload:false`：那一页每个动作都把表单值随事件带给插件，
   保存只为下次回填，重载反而会把这页的插件实例换掉（正在跑的轮询会断）。
 
@@ -729,10 +730,10 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 
 | 检查 | 结果 |
 |---|---|
-| 单测 `plugin_config_can_skip_the_reload` | `skipped:true` / `reloaded:false` / `error:null`，文本原样落盘；不传 reload 回 `skipped:false` |
-| 界面：抽屉勾选默认值 | 勾着（= 重载，老行为） |
-| 界面：取消勾选后保存 | 提示「配置已保存（未重载）」，插件实例没换 |
-| 界面：勾着保存 | 提示「配置已保存，插件已重载」 |
+| 单测 `plugin_config_does_not_reload_unless_asked` | 缺省与 `reload:false` 都回 `skipped:true`、`error:null`、文本原样落盘；显式 `reload:true` 才 `skipped:false` |
+| 界面：抽屉勾选默认值 | **不勾** |
+| 界面：默认保存 | 提示「配置已保存（未重载）」，插件实例没换 |
+| 界面：勾上后保存 | 提示「配置已保存，插件已重载」 |
 | `scripts/ui-check.mjs` | 214 条全过（新增 2 条：勾选默认值、只落盘提示） |
 
 踩到一个自己埋的坑（记在这，省下一个人的时间）：前端第一版把语义写反了

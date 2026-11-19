@@ -3830,16 +3830,21 @@ struct PluginConfigBody {
     /// 在跑的任务当场被打断（Cmd::Unload 第一件事就是 invocation().stop()），
     /// 排队的请求直接失败。这个开关把那类插件从代价里摘出来。
     ///
-    /// 缺省 = true（行为与以前一致：不传就是重载）。
+    /// **缺省 = false（不重载）**：重载是危险动作 —— 它会 unload 掉这个插件，
+    /// 在跑的任务当场断、排队的请求直接失败。所以「顺手保存一下」不该有这个副作用，
+    /// 要重载就明确写 `reload:true`。
+    ///
+    /// 反过来说：配置是**加载期读一次**的插件，不重载就看不到新值 —— 那种插件要么在
+    /// 需要时再读 `host.self_config()`，要么由用户显式要求重载（界面上的勾选）。
     #[serde(default)]
     reload: Option<bool>,
 }
 
 /// `PUT /api/plugins/{name}/config` —— 写插件自己的配置（body 是 `{text: "<json>"}`，和面板配置一致）。
 ///
-/// 写完**默认重载这个插件**：有些插件在加载期读一次配置就缓存了，不重载就得等下次。
-/// 重载失败不影响配置已经写进去 —— 要如实回 `reloaded:false` 和原因。
-/// 传 `reload:false` 可以只落盘（回 `skipped:true`）—— 见 PluginConfigBody 上的说明。
+/// 写完**默认不重载**（回 `skipped:true`）：重载是危险动作，不该是保存的默认副作用。
+/// 显式传 `reload:true` 才 unload + load；那种情况下重载失败不影响配置已经写进去 ——
+/// 要如实回 `reloaded:false` 和原因。详见 PluginConfigBody 上的说明。
 async fn plugin_config_put(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -3872,9 +3877,10 @@ async fn plugin_config_put(
     write_atomic(&path, body.text.as_bytes(), Some(0o600))
         .await
         .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
-    // reload:false = 只落盘。用在「插件每次调用都重新读 self_config()」的场合 ——
-    // 那种插件不重载也能立刻看到新值，而重载会打断它在跑的任务、让排队请求失败。
-    if body.reload == Some(false) {
+    // 默认只落盘（第 196 轮）：重载会打断在跑的任务、让排队请求失败，是**危险动作**，
+    // 不该是「保存配置」的默认副作用。要重载必须显式 reload:true。
+    // 顺带：host.self_config() 每次调用都读盘，所以「用到才读」的插件不重载也能看到新值。
+    if body.reload != Some(true) {
         st.log.emit(
             "panel",
             None,
