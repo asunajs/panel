@@ -95,6 +95,20 @@ if [ -n "$owner" ]; then
   esac
 fi
 
+# 0.3 的 job 只要还挂着，kickstart 我们之后它会在几秒内把端口抢回去（KeepAlive）——
+# 表现是「进程起来了、readyz 一直不通」，而 ps 看 3030 的监听者是
+# ~/Library/Application Support/plugin-panel/bin/plugin-panel（0.3 那套）。
+# 第 224 轮实测撞上：我们的二进制根本没绑上端口，实例等于没换。
+legacy="$(launchctl list 2>/dev/null | awk '$3=="com.asunajs.panel"||$3=="com.asunajs.panel.watchdog"{print $3}')"
+if [ -n "$legacy" ]; then
+  echo "❌ 旧 0.3 面板的 launchd job 还挂着（$(echo $legacy | tr '\n' ' ')）——它会抢走 $PORT。" >&2
+  echo "   先停掉它（只是停自启动，不删文件）：" >&2
+  echo "     launchctl bootout gui/$(id -u)/com.asunajs.panel.watchdog" >&2
+  echo "     launchctl bootout gui/$(id -u)/com.asunajs.panel" >&2
+  echo "   再跑一次这个脚本。" >&2
+  exit 1
+fi
+
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 for _ in $(seq 1 60); do
@@ -150,6 +164,14 @@ fi
 WAITED=0
 while [ "$WAITED" -lt 300 ]; do
   BODY="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/readyz" 2>/dev/null || true)"
+  # 端口上可能是**别的**面板（0.3 那套也认 /readyz，但回 401 或另一套 JSON）：
+  # 直接报「没就绪」会让人去查我们的日志，而日志里只有 EADDRINUSE。
+  if [ -n "$BODY" ] && ! printf %s "$BODY" | grep -q '"failed_plugins"'; then
+    o2="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    echo "❌ $PORT 上回的不是我们的 /readyz：pid=${o2:-?} $(ps -o command= -p "${o2:-0}" 2>/dev/null | head -1)" >&2
+    echo "   多半是旧 0.3 面板抢了端口，见上面「旧 0.3 面板的 launchd job」那条。" >&2
+    exit 1
+  fi
   if [ -n "$BODY" ]; then
     # 有插件加载失败时 readyz 仍然是 200 —— 部署不能算成功（曾经就有人对着 failed_plugins:1 的实例查了半天）
     case "$BODY" in
