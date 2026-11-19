@@ -474,13 +474,16 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- 日志控制台 ---------- */
 
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.field select, .field input {
+/* ⚠ 这里原来写的是 `.field select, .field input` —— 那是个**通用的类名**，插件页也引
+   /app.css，于是面板给「重命名输入框」定的 190px 宽 + 30px 高漏进了每个插件的表单，
+   插件再各自写 `.field > .input { width: 100% }` 去盖。第 197 轮收口：只认面板自己的容器。
+   插件表单的排布在下面「表单行 .field」那段统一定义，别在这里加回来。 */
+#clash-rename-field select, #clash-rename-field input {
   height: 30px; padding: 0 9px;
   background-color: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px;
   font-size: 12.5px; color: var(--fg-2); outline: none;
 }
-.field input { width: 190px; }
-.field select:focus, .field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+#clash-rename-field select:focus, #clash-rename-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
 
 .console {
   flex: 1; min-height: 320px; max-height: calc(100vh - 260px);
@@ -548,6 +551,10 @@ button, input, select { font: inherit; color: inherit; }
 .gate-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
 .muted { color: var(--dim); font-size: 12.5px; margin: 0; }
 .hint { color: var(--dim); font-size: 11.5px; margin: 2px 0 0; min-height: 14px; }
+/* 空提示行不占位。`min-height` 是为了「有字时不要跳一下」，但**空的时候**它就是一条
+   16px 的空白 —— 弹窗里夹在两个字段中间，看起来像少了一行（第 197 轮）。
+   有内容时高度照旧，所以不会出现「提示一出来表单就抖」。 */
+.hint:empty { display: none; }
 .hint-err { color: var(--err); }
 /* 配置抽屉里那一行「保存后重载」勾选（第 226 轮）：label 包 checkbox，和 hint 同字号 */
 .cfg-reload { display: flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -1051,7 +1058,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 .search { margin-left: auto; }
 .search-box { position: relative; display: inline-flex; align-items: center; }
 .search input,
-.field input {
+#clash-rename-field input {
   height: var(--h-control); width: 200px; padding: 0 30px 0 11px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
   font-size: 12.5px; color: var(--fg); outline: none;
@@ -1059,8 +1066,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 }
 /* 浏览器给 type=search 自带一个 ✕，各浏览器长得都不一样 —— 一律关掉，用我们自己的 */
 .search input::-webkit-search-cancel-button,
-.search input::-webkit-search-decoration,
-.field input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
 .search-clear {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   width: 22px; height: 22px; padding: 0;
@@ -1528,6 +1534,34 @@ select option { background: var(--surface); color: var(--fg); }
 /* 徽章的语言/平台变体：等宽、不带状态圆点（`.badge` 本身不带点，这里是窄一点的排版） */
 .badge.lang { font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
 .field-label { color: var(--fg-2); font-size: 12px; }
+
+/* ---------- 表单行 `.field`：标签在上、控件在下，**控件一律吃满宽度** ----------
+   这一段是「同一行里的控件必须左右对齐」的唯一出处。以前面板只画了
+   「`.field` 里的 input 长什么样」（那是给搜索框写的 190/200px 固定宽 + 30px 右内边距），
+   没画「这一行怎么排」—— 于是每个插件各自补一份 `.field` + `.field > .input{width:100%}`，
+   补漏的那个就歪：实测 mcloud 的 `#sms-code` 只有 200px、`#pwd-pass` 左边缘还差 12px；
+   yangshipin 的验证码框 200px、上面手机号那格 358px（用户截图报的就是这个）。
+
+   所以：**排布归面板，插件只写 `<p-field>` 或 `.field` + 控件**，不要再自己写一份。
+   判据（对齐 = 同一个左边缘 + 同一个宽度）：弹窗里所有 `.field > 控件` 的
+   getBoundingClientRect().left / width 必须一致 —— `scripts/ui-kit-check.mjs` 有断言。 */
+.field {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.field > label,
+.field > .field-label { color: var(--fg-2); font-size: 12px; }
+.field > .input,
+.field > input:not([type="checkbox"]):not([type="radio"]),
+.field > textarea,
+.field > select { width: 100%; }
+/* 自定义元素默认是 inline，放进 .field 要当块级撑满，否则里层 .input-group / .p-select
+   只有内容宽（`p-sms-code` 那格就会比旁边的 input 窄一截）。 */
+.field > p-sms-code,
+.field > p-select,
+.field > p-number { display: block; min-width: 0; }
+.field > p-sms-code > .input-group,
+.field > p-select > .p-select,
+.field > p-number > .p-number { width: 100%; }
 
 .input {
   min-height: var(--h-control); padding: 0 var(--pad-control);

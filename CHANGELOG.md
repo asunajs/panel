@@ -26,6 +26,33 @@
 文档层面新增两节：[user/scripts.md](docs/user/scripts.md) 的「脚本 = 你的用户权限（没有围栏，这是设计）」、
 [plugins.md](docs/plugins.md) 的「信任模型」。
 
+### 弹窗表单对齐了：`.field` 的排布归面板（第 197 轮）
+
+用户截图报的是「表单输入框没对齐」：同一个弹窗里，手机号那格和验证码那格**左边缘、宽度都不一样**。
+
+真因不在插件：面板给**搜索框**写的那条 `.field input { width: 200px; padding-right: 30px }`
+用的是通用类名，而插件页也引 `/app.css` —— 于是它漏进了每个插件的表单。四个插件各自写
+`.field > .input { width: 100% }` 去盖，盖漏的那个就歪。实测：
+
+| 插件 | 修之前 | 修之后 |
+|---|---|---|
+| yangshipin | 手机号 358px / 验证码 200px | 都是 482px |
+| mcloud | `#sms-code` 200px、`#pwd-pass` 左边缘差 12px | 都是 456px、左边缘一致 |
+| mgmusic / cmcc | 482px（各写了补丁） | 482px（补丁删了） |
+
+- **面板**：把那条给搜索框的规则收口到 `#clash-rename-field`（面板自己唯一的 `.field` 用例），
+  并在「插件也能直接用」那段补上**表单行 `.field` 的唯一出处**：竖排、`gap: 6px`、
+  `.field > 控件` 一律 100%（含 `p-sms-code` / `p-select` / `p-number` 这类自定义元素要 `display:block`）。
+- **`<p-button>` 加了 `.label`**：以前插件要改按钮文字（「登录」→「登录中…」）只能去摸私有的
+  `btn._btn`（mgmusic 的 `setBtnText` 就是这么写的），面板内部结构一变就断。
+- **`.hint:empty` 不占位**：空提示行原来是 16px 空白，夹在两个字段中间像少了一行。
+- **插件侧**：yangshipin 改用 `<p-dialog>` + `<p-field>` + `.dialog-actions`（删掉自己那份
+  `.dialog` / `.field` / `.actions`）；mgmusic 删掉 `.field` 补丁和 `_btn` hack；mcloud 删掉
+  「认证弹窗 400px」的宽度覆盖（那条注释说「面板的 `.dialog` 会铺满宽度」，早就不成立了）；
+  cmcc 把展示用的状态格从 `.field` 改名 `.stat`（`.field` 留给表单行）。
+- **门禁**：`scripts/ui-kit-check.mjs` 加 3 条 —— 同一列里 `p-sms-code` 与 `.input` 的
+  左边缘 / 宽度必须一致、`.field` 必须是竖排。demo 页也补了一格普通输入框当对照。
+
 ### 发码格 `<p-sms-code>` 终于用上了，并加了 R7 提示（第 197 轮）
 
 `<p-sms-code>`（第 182 轮从 mcloud 登录页提上来的共享控件：手机号输入框 + 行内

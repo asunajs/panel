@@ -295,6 +295,25 @@ async function main() {
   ));
   check('stopResend 后回到「获取验证码」且按位数重新放开', restored.text === '获取验证码' && restored.dis === false, JSON.stringify(restored));
 
+  // ---------- 同一列控件对齐（第 197 轮）----------
+  // 用户报的是「表单输入框没对齐」：手机号那格 358px、验证码那格 200px，左边还对不上。
+  // 根因不在插件 —— 面板给搜索框写的 `.field input { width: 200px }` 漏进了所有插件页，
+  // 每个插件再各自写 `.field > .input{width:100%}` 去盖，补漏的那个就歪。
+  // 现在排布归面板（/app.css「表单行 .field」），这条断言钉住它。
+  const align = JSON.parse(await js(
+    "(()=>{const a=document.getElementById('d-sms');const b=document.getElementById('d-code');" +
+    "if(!a||!b)return JSON.stringify({error:'demo 里缺 #d-sms / #d-code'});" +
+    "const ra=a.getBoundingClientRect(),rb=b.getBoundingClientRect();" +
+    "const fa=a.closest('.field'),fb=b.closest('.field');" +
+    "return JSON.stringify({ax:Math.round(ra.left),aw:Math.round(ra.width),bx:Math.round(rb.left),bw:Math.round(rb.width)," +
+    "col:fa&&fb?getComputedStyle(fa).flexDirection:null});})()"
+  ));
+  check('同一列里 p-sms-code 与 .input 左边缘对齐',
+    !align.error && Math.abs(align.ax - align.bx) <= 1, JSON.stringify(align));
+  check('同一列里 p-sms-code 与 .input 同宽（控件吃满 .field）',
+    !align.error && Math.abs(align.aw - align.bw) <= 1, JSON.stringify(align));
+  check('.field 是竖排（标签在上、控件在下）', align.col === 'column', String(align.col));
+
   // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
   await sleep(1600);

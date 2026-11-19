@@ -717,6 +717,8 @@ computed lineHeight / fontSize / padding。
 | `p-code` | `<p-code lang="js">`…</`p-code`> | 只读代码块，有 /highlight.js 就上色，带复制按钮 |
 | `p-form` | `<p-form submit-label="保存">`… | `.value`s() 收集带 name 的控件；提交派发 submit |
 | `p-sms-code` | `<p-sms-code length="11" seconds="60">` | 发码格（手机号 + 行内「获取验证码」）；点按钮派 `send`，`.value` 只剩数字 |
+| `.field` | `<p-field label="手机号">控件</p-field>` | 表单行（竖排，控件吃满宽度）。**插件表单/弹窗一律用它**，别自己写 |
+| `p-button` | `.disabled` / `.label` | 按钮；改文字用 `.label`（写 `textContent` 会把里面那颗 `<button>` 换掉） |
 
 两个设计约束没变：颜色只走 token；元素内部只包面板已有的 class（`.btn` / ``.tab`le` / `.badge` / `.tab`）。
 

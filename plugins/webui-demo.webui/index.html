@@ -84,6 +84,13 @@
         <p-field label="手机号">
           <p-sms-code id="d-sms" length="11" seconds="60"></p-sms-code>
         </p-field>
+        <!-- 同一列里的普通输入框：**左边缘和宽度必须和上面那格一模一样**。
+             这条是第 197 轮加的门禁（ui-kit-check「同一列控件对齐」）——
+             以前面板只画了「.field 里的 input 长什么样」，没画「这一行怎么排」，
+             于是四个插件各补一份，补漏的那个就歪成「手机号 358px、验证码 200px」。 -->
+        <p-field label="验证码">
+          <input id="d-code" class="input" type="text" inputmode="numeric" maxlength="8" placeholder="短信里的数字" />
+        </p-field>
         <div class="demo-out" id="d-sms-out">（填满 11 位数字，点「获取验证码」）</div>
       </p-card>
 

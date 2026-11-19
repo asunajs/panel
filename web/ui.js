@@ -452,6 +452,13 @@
     }
     set disabled(v) { if (this._btn) this._btn.disabled = !!v; if (v) this.setAttribute('disabled', ''); else this.removeAttribute('disabled'); }
     get disabled() { return !!(this._btn && this._btn.disabled); }
+    /** 改按钮文字（「登录」→「登录中…」）。
+     *  ⚠ 为什么需要它：`<p-button>` 里面**还包着一颗** `<button>`，直接写
+     *    `pBtn.textContent = '…'` 会把里面那颗按钮整个换成一个文本节点 —— 按钮消失，
+     *    只剩一行字（插件侧最早的写法就是去摸私有的 `btn._btn`，见 mgmusic 的
+     *    `setBtnText`）。这里给一个公开属性，插件不用再碰内部字段。 */
+    set label(v) { if (this._btn) this._btn.textContent = String(v === undefined || v === null ? '' : v); }
+    get label() { return this._btn ? this._btn.textContent : ''; }
   }
 
   /** <p-card title="账号" desc="…">内容</p-card> */
