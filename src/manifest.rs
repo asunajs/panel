@@ -610,6 +610,36 @@ fn finger_of(path: &Path, dir_plugin: bool) -> Option<Finger> {
     file_finger(path)
 }
 
+/// 启动时把**磁盘上现有的**插件全部记进快照（第 224 轮）。
+///
+/// 为什么需要：快照是进程内的，「这次启动还没加载过」的插件（按需加载跳过的、
+/// 停用的）扫描时会落进「新增」—— 用户看到的是「新增 3 个：mcloud-daily…」，
+/// 而这三个是老插件，只是这轮还没装进内存。词不达意，还让人以为要做什么动作。
+///
+/// 记了之后语义才对：**新增 = 面板运行期间新出现的文件**；重启前就在的全是「已知」。
+/// 已经在快照里的名字不覆盖 —— 那说明这轮已经加载过它（指纹更新更准）。
+pub fn seed(dir: &Path) {
+    let names = match crate::pluginfs::names(dir) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut g = match seen().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    for name in names {
+        let key = dir.join(&name);
+        if g.contains_key(&key) {
+            continue;
+        }
+        if let Some(entry) = crate::pluginfs::entry(dir, &name) {
+            if let Some(f) = finger_of(&entry, crate::pluginfs::is_dir_plugin(dir, &name)) {
+                g.insert(key, f);
+            }
+        }
+    }
+}
+
 /// 加载成功后记一笔，下次扫描才知道「变没变」。
 ///
 /// 参数用插件根目录 + 名字（不是路径）：目录式插件的入口在 `<name>/index.js`，

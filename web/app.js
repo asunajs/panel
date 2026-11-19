@@ -779,10 +779,13 @@ async function scanPlugins() {
     p.append(el('strong', '', label + ' ' + arr.length + ' 个：'), names(arr));
     box.append(p);
   };
-  // 新增里只有「还没加载」的才需要动作；已经加载的（loaded:true）只是没记指纹的历史遗留
+  // 「新增」= 面板运行期间新出现的文件（第 224 轮）。以前还分出一档
+  // 「新增（已在运行，无需动作）」—— 那是「加载过但没记指纹」的 bug 造成的假象
+  // （用到就装 / 闲时唤醒装回来的插件从来没人记指纹），用户看到「新增 3 个：
+  // mcloud-daily…」会以为这三个是新装的，其实一直在跑。现在每次加载都记指纹，
+  // 启动时也会把磁盘上现有的全部记一遍，所以这一档不该再出现，直接去掉。
   const newToLoad = (d.new || []).filter((x) => !x.loaded);
   line('新增（未加载）', newToLoad);
-  line('新增（已在运行，无需动作）', (d.new || []).filter((x) => x.loaded));
   line('改过', d.changed);
   line('目录里没了（还记着）', d.removed);
   const bad = d.manifests || [];

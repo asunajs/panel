@@ -324,3 +324,59 @@ fn handler_names_follow_the_route_rules() {
     assert!(!manifest::handler_ok("a.b"));
     assert!(!manifest::handler_ok(&"x".repeat(65)));
 }
+
+#[test]
+fn seed_makes_existing_plugins_known_so_they_are_not_reported_new() {
+    // 第 224 轮（用户：「新增是啥意思，这三个一直都在，是老插件了」）：
+    // 快照是进程内的，启动时没加载过的插件（按需加载跳过的、停用的）以前全被报成「新增」。
+    // seed 之后语义才对：新增 = 面板运行期间新出现的文件。
+    let d = std::env::temp_dir().join(format!("m224-seed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("dirp")).unwrap();
+    std::fs::write(d.join("dirp/index.js"), "// v1").unwrap();
+    std::fs::write(d.join("plain.js"), "// v1").unwrap();
+
+    manifest::seed(&d);
+    let out = manifest::scan(&d, &[], &[], "0.6.3");
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(
+        out["new"].as_array().unwrap().is_empty(),
+        "启动时就在的插件不该算新增: {out}"
+    );
+    assert!(out["changed"].as_array().unwrap().is_empty(), "{out}");
+
+    // 运行期间新丢进来的文件 → 新增（这才该报）
+    std::fs::write(d.join("dropped.js"), "// new").unwrap();
+    let out = manifest::scan(&d, &[], &[], "0.6.3");
+    let new: Vec<&str> = out["new"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(new, vec!["dropped"], "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn seed_does_not_clobber_a_fingerprint_already_taken_this_boot() {
+    // seed 只补缺：这轮已经加载过（note_loaded）的插件，指纹不能被启动时的旧值覆盖，
+    // 否则「加载后又改过文件」会被悄悄吞掉。
+    let d = std::env::temp_dir().join(format!("m224-seed2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("p.js"), "// v1").unwrap();
+    manifest::note_loaded(&d, "p");
+    std::thread::sleep(std::time::Duration::from_millis(12));
+    std::fs::write(d.join("p.js"), "// v2 changed, longer body").unwrap();
+    manifest::seed(&d);
+    let out = manifest::scan(&d, &["p".into()], &[], "0.6.3");
+    let changed: Vec<&str> = out["changed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed, vec!["p"], "已加载过又被改的文件仍要报改过: {out}");
+    let _ = std::fs::remove_dir_all(&d);
+}

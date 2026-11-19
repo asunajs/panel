@@ -1612,6 +1612,11 @@ impl Inner {
                         }
                         // 记下「这个插件有没有界面」：下次启动据此决定要不要省这一次加载
                         self.note_surface_async(&name);
+                        // 记下指纹（第 224 轮）：扫描要能回答「改没改」。以前只在
+                        // load_all / enable / reload / save 里记，**用到就装**和**闲时唤醒**
+                        // 这两条路装回来的插件永远没有指纹 —— 扫描就一直报它「新增」，
+                        // 而它其实一直在跑（用户：这三个是老插件）。
+                        self.note_fingerprint_async(&name);
                         // 到点了就把这一拍跑掉（插件刚装回来）—— 见 run_overdue_of
                         let n = name.clone();
                         self.run_overdue_of(&n).await;
@@ -2347,6 +2352,15 @@ impl Inner {
     /// 为什么注册时就要写：Loaded 和 Registration::Web/Sidebar 是两条独立的消息，
     /// 谁先到不确定。只在 Loaded 时写，会记下 has_web=0 —— 下次启动就把有界面的插件
     /// 也当成「可以省」的省掉了（第 179 轮实测：第二次启动 uiface 直接不见了）。
+    /// 记下这个插件在磁盘上的指纹（给「扫描插件目录」用）。IO 挪出调度循环。
+    fn note_fingerprint_async(&self, name: &str) {
+        let Some(dir) = self.plugins_dir.clone() else {
+            return;
+        };
+        let n = name.to_string();
+        tokio::task::spawn_blocking(move || crate::manifest::note_loaded(&dir, &n));
+    }
+
     fn note_surface_async(&self, name: &str) {
         let (hw, hn) = (self.web.contains(name), self.sidebar.contains_key(name));
         let db = self.db.clone();

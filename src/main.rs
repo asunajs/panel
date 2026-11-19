@@ -352,6 +352,9 @@ async fn load_all(
     errors: &web::LoadErrors,
     cfg: &std::sync::Arc<config_store::ConfigStore>,
 ) {
+    // 先把磁盘上现有的插件都记进扫描快照：否则「这轮没加载」的插件会被报成「新增」
+    // （按需加载跳过的、停用的都算）。见 manifest::seed 的注释。
+    crate::manifest::seed(dir);
     let names = match crate::pluginfs::names(dir) {
         Ok(v) => v,
         Err(e) => {

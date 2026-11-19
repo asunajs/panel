@@ -808,3 +808,13 @@
     判据（一行就能定位）：`pluginEntries.toString().includes('off')` 是 `false` —— 页面里跑的
     函数没有你刚写的代码。修法：`cd tools/web && node build.mjs`，然后跑
     `scripts/check-web-build.sh`（它会在临时目录重建一遍逐字节比对，本来就是为这条存在的）。
+
+119. **「新增」不能只按「这轮加载过没有」算**（第 224 轮，用户：「这个新增是啥意思，这三个一直都在」）：
+    扫描快照是进程内 `HashMap`，`note_loaded` 又只挂在 load_all / enable / reload / save 四处。
+    于是**「用到就装」和闲时唤醒**装回来的插件永远没有指纹 —— 扫描一直报它「新增」，
+    而它其实一直在跑（三个 mcloud 是老插件，只是这轮没在启动时加载）。
+    界面还为此长出一档「新增（已在运行，无需动作）」，等于把 bug 写进了文案。
+    修法两处缺一不可：① 启动时 `manifest::seed(dir)` 把磁盘上现有的都记成已知
+    （「新增」= 运行期间新出现的文件）；② 加载成功的**唯一收口** `Cmd::Loaded` 里记指纹，
+    别再靠调用方各记一次。守卫：`manifest_tests` 的 seed 两条 + `check-pitfalls.sh` ㉓
+    （源码里两处调用都在，删任一处就红）。

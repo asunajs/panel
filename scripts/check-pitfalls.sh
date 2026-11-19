@@ -305,6 +305,20 @@ case "$theme_boot" in
   *) bad "主题守卫没跑出结论：$theme_boot" ;;
 esac
 
+# ㉓ 扫描快照要在启动时 seed，否则「这轮没加载」的插件被报成「新增」（第 224 轮）
+#
+# 事故：用户看到「新增（已在运行，无需动作）3 个：mcloud-daily、mcloud-exchange、mcloud-live」——
+# 这三个是老插件，只是按需加载/闲时唤醒那条路装回来的，以前没人给它们记指纹。
+# 两处缺一不可：① load_all 之前 seed（磁盘上现有的都算已知）② 每次加载成功都记指纹。
+# 判据：源码里两处调用都在（删掉任一处都会让「新增」重新变成噪音）。
+seed_call=$(grep -c 'crate::manifest::seed(dir);' src/main.rs 2>/dev/null || true)
+note_call=$(grep -c 'note_fingerprint_async(&name);' src/scheduler.rs 2>/dev/null || true)
+if [ "${seed_call:-0}" -ge 1 ] && [ "${note_call:-0}" -ge 1 ]; then
+  ok '扫描快照启动时 seed + 每次加载都记指纹（新增只报运行期新出现的）'
+else
+  bad "扫描快照缺一处调用：main.rs seed=${seed_call:-0} / scheduler.rs note=${note_call:-0} —— 没加载过的老插件会被报成「新增」"
+fi
+
 if [ "$FAIL" = "0" ]; then
   echo "ok: 坑的守卫全过"
 else
