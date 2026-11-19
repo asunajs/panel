@@ -27,7 +27,13 @@ const PANEL_TOKENS = new Set([
 /** 允许出现颜色字面量的地方：得在同一行或上一行写这句注释并说明理由。 */
 const ALLOW = 'style-lint: allow-color';
 
+/** 手搓发码格（手机号输入框 + 「获取验证码」按钮）的豁免标记。
+ *  只给「确实不该用 <p-sms-code>」的场合用：比如号码不是用户输入、而是从账号列表选的
+ *  （cmcc 的短信登录就是这样），控件那格的输入框根本不出现。 */
+const ALLOW_SMS = 'style-lint: allow-sms-handroll';
+
 const problems = [];
+const warnings = [];
 const files = [];
 
 function walk(dir) {
@@ -118,9 +124,49 @@ for (const file of files) {
   // 免得它拦住正常部署。
 }
 
+// R7 手搓发码格（第 195 轮）：面板早就把「手机号 + 行内获取验证码 + 重发倒计时」做成
+// 共享控件 <p-sms-code>（web/ui.js，第 182 轮从 mcloud 登录页提上来的）。但控件做完之后
+// 各插件还在各写一遍——同一格三种长相、倒计时三份实现、关弹窗不停定时器各踩一次。
+// 所以这里只提醒、不拦部署：命中「11 位手机号输入框 + 带验证码字样的按钮 + 没有 p-sms-code」。
+//
+// 为什么是 warning：有的场景确实不该用控件（号码从账号列表选、不出现输入框），
+// 那种就在文件里写 style-lint: allow-sms-handroll + 理由。
+for (const file of files) {
+  if (!file.endsWith('.html')) continue;
+  const raw = readFileSync(file, 'utf8');
+  if (raw.includes(ALLOW_SMS)) continue;
+  const text = stripComments(raw);
+  if (/<p-sms-code\b/i.test(text)) continue;
+  const phoneInput = /<input[^>]*maxlength\s*=\s*["']11["']/i.test(text);
+  const sendBtn = /<(?:button|p-button)\b[^>]*>[^<]*(?:获取|发送|重发)?验证码/i.test(text);
+  if (phoneInput && sendBtn) {
+    warnings.push({
+      file: path.relative(ROOT, file),
+      rule: 'R7 手搓发码格',
+      why: '这一页自己画了「手机号输入框 + 获取验证码按钮」。面板有共享控件 <p-sms-code>：'
+        + '数字门禁、行内按钮、60 秒重发倒计时、关弹窗停表都在里面（web/ui.js）。',
+      fix: '换成 <p-sms-code id="…" length="11" seconds="60"></p-sms-code>，监听 send 事件发请求、'
+        + '成功后 el.startResend(60)、发码期间 el.busy = true。'
+        + '确实不该用（号码从账号列表选、不出现输入框）就写注释 ' + ALLOW_SMS + ' 理由。',
+    });
+  }
+}
+
+function printWarnings() {
+  if (!warnings.length) return;
+  console.log('');
+  console.log('提示 ' + warnings.length + ' 条（不拦部署，但建议改）：');
+  for (const w of warnings) {
+    console.log('  ' + w.file + '  [' + w.rule + ']');
+    console.log('    为什么：' + w.why);
+    console.log('    怎么改：' + w.fix);
+  }
+}
+
 if (!problems.length) {
   const n = files.filter((f) => f.endsWith('.css')).length;
   if (verbose) console.log('扫了 ' + files.length + ' 个文件（其中 ' + n + ' 个 CSS）');
+  printWarnings();
   console.log('ok: 插件样式检查全过（token / 颜色 / !important / 主题 / 控件）');
   process.exit(0);
 }

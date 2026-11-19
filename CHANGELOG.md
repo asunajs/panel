@@ -26,6 +26,27 @@
 文档层面新增两节：[user/scripts.md](docs/user/scripts.md) 的「脚本 = 你的用户权限（没有围栏，这是设计）」、
 [plugins.md](docs/plugins.md) 的「信任模型」。
 
+### 发码格 `<p-sms-code>` 终于用上了，并加了 R7 提示（第 197 轮）
+
+`<p-sms-code>`（第 182 轮从 mcloud 登录页提上来的共享控件：手机号输入框 + 行内
+「获取验证码」+ 60 秒重发倒计时）做完之后只有 mcloud 在用 —— 其余插件继续各写一遍
+输入框 + 按钮 + 自己那份 `setInterval`。于是同一格出现三种长相，关弹窗不停表这个坑
+各踩一次。
+
+这一轮：
+
+- **mgmusic / yangshipin 换成 `<p-sms-code>`**：删掉各自的发码按钮、倒计时状态
+  （`S.sendTimer` / `setSendButton` / `resetSendState` 那套），改成监听 `send` 事件
+  → `busy = true` → 发请求 → `startResend(60)`；关弹窗/开弹窗都 `stopResend()`；
+  换号冒 `input` 时也停表。
+- **`check-plugin-style.mjs` 加 R7**：页面里同时出现「`maxlength="11"` 的手机号输入框」
+  和「带『验证码』字样的按钮」、却没有 `<p-sms-code>` 时提示一条 warning。
+  **只提示不拦部署**（有的场景确实不该用）；豁免写 `style-lint: allow-sms-handroll 理由`。
+  现在实测：cmcc 命中且已豁免（它的号码从账号卡上选，页面上没有手机号输入框）。
+- 文档：[plugin-contract.md](docs/plugin-contract.md) 加 **R11**；
+  [plugins.md](docs/plugins.md) 补「发码格（`p-sms-code`）」一节（读值 / 门禁 / 事件 /
+  倒计时 / 「控件只管界面，不发请求」的分工）。
+
 ### 写插件配置可以选择不重载（第 196 轮）
 
 以前 `PUT /api/plugins/{name}/config` 保存完一定会 unload + load 插件。现在 body 可以带

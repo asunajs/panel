@@ -533,6 +533,7 @@ GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
 | `<p-badge tone="ok|warn|err|accent|idle">空闲</p-badge>` | 徽章（`.badge`） |
 | `<p-empty text="还没有账号">` | 空态（`.empty`） |
 | `<p-dialog open title="设置">…</p-dialog>` | 弹窗；`open` 属性控制显隐，关闭按钮自动有 |
+| `<p-sms-code length="11" seconds="60">` | 发码格：手机号输入框 + 行内「获取验证码」+ 重发倒计时（见下） |
 
 ```html
 <p-card title="账号">
@@ -647,6 +648,49 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
 
 外观取自 TDesign 的 Select：触发器同 `.input`（同高、同圆角、同边框）、选中项打勾 + 主色、
 没值时是灰色的 placeholder。想只用类：`.select-trigger` / `.select-panel` / `.select-option`。
+
+### 发码格（`p-sms-code`）
+
+「手机号 + 行内『获取验证码』」是**同一个控件**，别再各画一遍：
+
+```html
+<p-field label="手机号">
+  <p-sms-code id="phone-code" length="11" seconds="60"></p-sms-code>
+</p-field>
+```
+
+```js
+const sms = $('phone-code');
+sms.addEventListener('send', async () => {
+  sms.busy = true;                       // 请求期间按钮禁住，防连点
+  try {
+    await post('/login/send', { phone: sms.value });
+    sms.startResend(60);                 // 倒计时接管：按钮写「重新获取（N 秒）」并禁用
+    $('code').focus();
+  } finally {
+    sms.busy = false;
+  }
+});
+// 换号就解除上一号码的倒计时
+sms.addEventListener('input', () => { /* 号码变了 → sms.stopResend() */ });
+// 关弹窗/关页面**必须**停表，否则定时器在后台一直跑
+sms.stopResend();
+```
+
+| 行为 | 说明 |
+|---|---|
+| 读值 | `el.value`，只剩数字（粘贴里的空格/短横线会被去掉） |
+| 门禁 | 满 `length` 位才放开按钮；`disabled` / `busy` / 倒计时中都禁 |
+| 派事件 | 点按钮冒 `send`（`detail.value` 是号码）；输入冒 `input` / `change` |
+| 倒计时 | `startResend(60)` / `stopResend()`；**界面节奏，不是权威** —— 能不能发由服务端说了算 |
+| 回车 | 输入框回车 = 点行内按钮（手机上少一次瞄准） |
+| 分工 | **控件只管界面，不发请求**。发码归插件，成败由插件 toast 说 |
+
+控件从 mcloud 的登录页提上来（第 182 轮）：那一格最早是 mcloud 照参考实现画的，别的插件
+要发码就得再抄一遍输入框、按钮和倒计时 —— 抄出来的三种长相、三份定时器，关弹窗不停表的
+坑各踩一次。**不要**再自己写 `maxlength="11"` + 「获取验证码」按钮那一套：
+`scripts/check-plugin-style.mjs` 的 R7 会提示（warning，不拦部署）。确实不该用的场合
+（号码从账号列表选、页面上不出现输入框）在文件里写一行 `style-lint: allow-sms-handroll 理由`。
 
 ### 勾选框
 

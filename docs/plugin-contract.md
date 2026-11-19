@@ -18,7 +18,7 @@
 `/api/plugins/install`、`panel plugin install`）当然在面板仓里。官方货架不在这儿 ——
 它在单文件插件仓 `asunajs/panel-single-plugins` 的 `catalog.json`（目录归插件生态，不归面板）。
 
-## 2. 十条铁律
+## 2. 十一条铁律
 
 | # | 铁律 | 为什么（踩过的） |
 |---|---|---|
@@ -32,6 +32,7 @@
 | R8 | 插件不往面板仓 / 实例代码目录写任何文件；运行时要落盘只走 `panel:host` 给的数据目录 | 否则备份、清数据、卸载都漏东西 |
 | R9 | 插件界面只读 token，不写死颜色、不用 `!important`、不撤面板控件样式；改完跑 `scripts/check-plugin-style.mjs` | 见 panel-plugin-ui 技能；这些改动编译不报错、只有人眼看得出 |
 | R10 | 定时任务归面板，插件 `register_cron` 只是**建议**：安装 / 重装才采纳，重载与重启不采纳 | 见 [scheduler.md](scheduler.md) 的「cron 归谁」（第 180 轮） |
+| R11 | 发码界面（手机号 + 获取验证码 + 重发倒计时）用共享控件 `<p-sms-code>`，不自己画；确实不该用的写 `style-lint: allow-sms-handroll 理由` | 控件第 182 轮就做出来了（从 mcloud 登录页提上来的），但各插件继续各抄一遍：三种长相、三份定时器，关弹窗不停表各踩一次。`check-plugin-style.mjs` 的 R7 会提示 |
 
 ## 3. 上线怎么走（顺序不能换）
 
