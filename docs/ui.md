@@ -721,6 +721,7 @@ computed lineHeight / fontSize / padding。
 | `p-button` | `.disabled` / `.label` | 按钮；改文字用 `.label`（写 `textContent` 会把里面那颗 `<button>` 换掉） |
 | `PanelUI.confirm` | `await PanelUI.confirm({text, okLabel, danger})` | 自绘确认框 → `true`/`false`；**别用原生 `confirm()`** |
 | `PanelUI.prompt` | `await PanelUI.prompt({title, label, value})` | 自绘输入框 → 字符串 / `null`（取消）；**别用原生 `prompt()`** |
+| `p-log` | `plugin` / `title` / `height` / `lines` / `nofollow` / `level`；方法 `addLine(lv,ts,text)` / `clear()` / `rerender()` / `start()` / `stop()` | 实时运行日志（接 `/api/logs/stream`）；任务型插件**必须**有，别只给一段静态结果 |
 
 两个设计约束没变：颜色只走 token；元素内部只包面板已有的 class（`.btn` / ``.tab`le` / `.badge` / `.tab`）。
 

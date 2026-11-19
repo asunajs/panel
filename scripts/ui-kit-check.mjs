@@ -371,6 +371,62 @@ async function main() {
   check('prompt 也没碰原生框', promptPath.native === 0, String(promptPath.native));
   await js("delete window.__nativeHit");
 
+  // ---------- 运行日志台 p-log（第 197 轮）----------
+  // 插件里「点一下、等它跑完、看一段静态结果」不够：任务要跑 4~8 分钟。
+  // 数据源是面板的 /api/logs/stream（SSE）。这里只验**渲染与筛选**，不连真流。
+  const logShape = JSON.parse(await js(
+    "(()=>{const l=document.querySelector('#d-log');const bar=l.querySelector('.term-bar');" +
+    "const body=l.querySelector('.term-body');return JSON.stringify({bar:!!bar,body:!!body," +
+    "title:bar.querySelector('.term-title').textContent,follow:!!bar.querySelector('.term-follow input')," +
+    "level:bar.querySelector('.term-level').value,clear:!!bar.querySelector('.term-clear')," +
+    "empty:!!body.querySelector('.term-empty'),children:l.children.length})})()"
+  ));
+  // ⚠ children 必须 > 0：曾经把方法命名成 `append`，覆盖掉 Element.prototype.append，
+  //   于是 build() 里 host.append(box) 被当成"画一行日志"，控件渲染成空壳（第 197 轮踩过）。
+  check('p-log 长成「标题栏 + 跟随 + 级别 + 清空 + 日志区」',
+    logShape.bar && logShape.body && logShape.title === '运行日志' && logShape.follow
+      && logShape.level === 'info' && logShape.clear && logShape.children > 0,
+    JSON.stringify(logShape));
+  // ⚠ 这里**不能**断言"空态在场"：演示插件启动时自己会写一行「已加载」，
+  //   p-log 一挂上就先铺历史，屏上已经有行了。空态放到下面「清空」那条验。
+
+  const logPaint = JSON.parse(await js(
+    "(()=>{const l=document.querySelector('#d-log');l.clear();" +
+    "l.addLine('info',1794578027097,'第一行');l.addLine('warn',1794578028097,'第二行');" +
+    "const ls=[...l.querySelectorAll('.term-line')];" +
+    "const t=ls[0].querySelector('.term-ts').textContent.trim();" +
+    "return JSON.stringify({n:ls.length,ts:/^\\d{2}:\\d{2}:\\d{2}\\.\\d{3}$/.test(t),tsv:t," +
+    "lv:ls[1].querySelector('.term-lv').textContent.trim(),msg:ls[1].querySelector('.term-msg').textContent," +
+    "empty:!!l.querySelector('.term-empty'),emptyText:(l.querySelector('.term-empty')||{}).textContent||'',meta:l.querySelector('.term-meta').textContent})})()"
+  ));
+  check('p-log 画行：epoch 毫秒变 HH:MM:SS.mmm，级别与正文分列',
+    logPaint.n === 2 && logPaint.ts === true && logPaint.lv === 'warn' && logPaint.msg === '第二行',
+    JSON.stringify(logPaint));
+  check('p-log 画了行就不再有空态，页头报行数',
+    logPaint.empty === false && /显示 2 行/.test(logPaint.meta), logPaint.meta);
+
+  const logFilter = JSON.parse(await js(
+    "(()=>{const l=document.querySelector('#d-log');const sel=l.querySelector('.term-level');" +
+    "sel.value='error';sel.dispatchEvent(new Event('change'));" +
+    "const vis=[...l.querySelectorAll('.term-line')].filter(x=>x.style.display!=='none').length;" +
+    "const metaErr=l.querySelector('.term-meta').textContent;" +
+    "sel.value='warn';sel.dispatchEvent(new Event('change'));" +
+    "const visWarn=[...l.querySelectorAll('.term-line')].filter(x=>x.style.display!=='none').length;" +
+    "sel.value='info';sel.dispatchEvent(new Event('change'));return JSON.stringify({vis,visWarn,metaErr})})()"
+  ));
+  check('p-log 级别筛选：只看错误时 info 行藏起来，提醒以上只留 warn',
+    logFilter.vis === 0 && logFilter.visWarn === 1, JSON.stringify(logFilter));
+
+  const logClear = JSON.parse(await js(
+    "(()=>{const l=document.querySelector('#d-log');l.clear();" +
+    "return JSON.stringify({lines:l.querySelectorAll('.term-line').length," +
+    "empty:!!l.querySelector('.term-empty'),emptyText:(l.querySelector('.term-empty')||{}).textContent||''," +
+    "meta:l.querySelector('.term-meta').textContent})})()"
+  ));
+  check('p-log 清空回到空态（「（还没有日志）」）并归零行数',
+    logClear.lines === 0 && logClear.empty === true && logClear.emptyText === '（还没有日志）'
+      && /显示 0 行/.test(logClear.meta), JSON.stringify(logClear));
+
   // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
   await sleep(1600);

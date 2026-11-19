@@ -196,6 +196,34 @@ btn.disabled = true; btn.label = '登录中…';   // <p-button> 改字用 .labe
 判据就一句：**同一列里的控件，`getBoundingClientRect().left` 和 `width` 必须一致**。
 `scripts/ui-kit-check.mjs` 有断言钉着（`p-sms-code` vs `.input` 的左边缘、宽度、`.field` 方向）。
 
+### 运行日志：`<p-log>`（实时，不是一段静态结果）
+
+任务型插件（跑 4~8 分钟那种）**不能只给一段「跑完了」的静态输出** —— 用户点完按钮就想看着它跑。
+`<p-log>` 接面板自己的 `GET /api/logs/stream`（SSE），插件页和面板同源、会话 cookie 自动带上：
+
+```html
+<p-log id="run-log" plugin="yangshipin" title="运行日志" height="320"></p-log>
+```
+
+| 属性 | 说明 |
+|---|---|
+| `plugin` | 只看这个插件的行（面板的流**不按插件过滤**，控件自己筛） |
+| `title` | 标题栏左边那句，默认「运行日志」 |
+| `height` | 日志区最大高度 px，默认 320（窄屏 42vh） |
+| `lines` | 最多留多少行，默认 400（超了从上面砍） |
+| `nofollow` | 默认自动滚到底；写上就不跟随 |
+| `level` | 初始级别 `info` / `warn` / `error`，默认 `info` |
+
+自带：跟随勾选框、级别下拉（全部 / 提醒以上 / 只看错误）、清空按钮、行数页头、
+断线重连（带 `since`，把断线那段补回来）、**打开页面先铺历史**（`/api/logs?plugin=…`）。
+
+插件侧只用 `el.addLine(level, ts, text)` 就能塞自己的行（`level` 支持
+`info/warn/error` 之外的面板没定义的 `debug/start/success/fail`，面板日志里以
+`[fail] ` 这种前缀带出来，控件会还原并着色）。
+
+⚠ 不要在插件里自己写一套终端：mcloud 先写过一份（终端 + 筛选 + 重连 + 环形缓冲），
+第二个插件要「实时日志」时就得再抄一遍。这和发码格、确认框是同一个故事。
+
 ### 确认框 / 输入框：`PanelUI.confirm` / `PanelUI.prompt`
 
 **插件里不要用 `confirm()` / `alert()` / `prompt()`。** 那是浏览器自己的窗口 —— macOS 上跑到

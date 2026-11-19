@@ -1058,6 +1058,263 @@
   define('p-form', PForm);
   define('p-sms-code', PSmsCode);
 
+  // ---------------------------------------------------------------- 运行日志台
+  //
+  // `<p-log plugin="yangshipin" height="320">` —— 实时看任务在跑什么。
+  //
+  // 数据源是面板自己的 `GET /api/logs/stream`（SSE）。插件页和面板**同源**，会话 cookie
+  // 自动带上，所以不用额外传令牌；`since=<最后一行的 id>` 能把断线那段补回来。
+  //
+  // ⚠ 面板的流**不按插件过滤**（`?plugin=` 它不认），所有插件的行都会推过来 ⇒ 这里自己筛。
+  // ⚠ 一行一律走 `textContent`（日志里有用户可控的字符串）。
+  // ⚠ 只在页面上时才连：`stop()` 在 `disconnectedCallback` 里调，别让定时器/连接漏出去。
+  const TERM_MAX_LINES = 400;
+  const TERM_RANK = { debug: 0, info: 0, start: 0, success: 0, warn: 1, fail: 2, error: 2, fatal: 3 };
+
+  /** 时间戳：面板给的是 epoch 毫秒；旧面板/历史给的是 `2026-10-17 10:50:42.498` 这种串。 */
+  function termStamp(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      const d = new Date(raw);
+      const p = (n, w = 2) => String(n).padStart(w, '0');
+      return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' + p(d.getMilliseconds(), 3);
+    }
+    const t = String(raw === undefined || raw === null ? '' : raw);
+    const m = /(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*$/.exec(t);
+    return m ? m[1] : t;
+  }
+
+  class PLog extends HTMLElement {
+    connectedCallback() {
+      if (this._body) return;
+      this._plugin = this.getAttribute('plugin') || '';
+      this._level = this.getAttribute('level') || 'info';
+      this._max = Math.max(20, Math.round(Number(this.getAttribute('lines')) || TERM_MAX_LINES));
+      this._height = Math.max(80, Math.round(Number(this.getAttribute('height')) || 320));
+      this._lines = 0;
+      this._shown = 0;
+      this._lastId = 0;
+      this._es = null;
+      this._retry = 1000;
+
+      const box = build(this, 'term');
+      const bar = document.createElement('div');
+      bar.className = 'term-bar';
+      const title = document.createElement('span');
+      title.className = 'term-title';
+      title.textContent = this.getAttribute('title') || '运行日志';
+      const meta = document.createElement('span');
+      meta.className = 'term-meta';
+      const acts = document.createElement('div');
+      acts.className = 'term-actions';
+      const followWrap = document.createElement('label');
+      followWrap.className = 'term-follow';
+      const follow = document.createElement('input');
+      follow.type = 'checkbox';
+      follow.checked = !this.hasAttribute('nofollow');
+      followWrap.append(follow, document.createTextNode('跟随'));
+      const level = document.createElement('select');
+      level.className = 'term-level';
+      for (const [v, label] of [['info', '全部'], ['warn', '提醒以上'], ['error', '只看错误']]) {
+        const op = document.createElement('option');
+        op.value = v;
+        op.textContent = label;
+        level.append(op);
+      }
+      level.value = this._level;
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.className = 'btn btn-sm term-clear';
+      clearBtn.textContent = '清空';
+      acts.append(followWrap, level, clearBtn);
+      bar.append(title, meta, acts);
+
+      const body = document.createElement('div');
+      body.className = 'term-body';
+      body.style.maxHeight = this._height + 'px';
+      const empty = document.createElement('span');
+      empty.className = 'term-empty';
+      empty.textContent = '（还没有日志）';
+      body.append(empty);
+
+      box.append(bar, body);
+      this._body = body;
+      this._meta = meta;
+      this._follow = follow;
+      this._levelSel = level;
+
+      // 级别下拉**每次进页面都回「全部」**：浏览器会"恢复"上次选的值，
+      // 用户可能某次刷新后停在「只看错误」而一行都看不到（mcloud 踩过）。
+      level.addEventListener('change', () => {
+        this._level = level.value;
+        this.rerender();
+      });
+      clearBtn.addEventListener('click', () => this.clear());
+      this.start();
+    }
+
+    disconnectedCallback() { this.stop(); }
+
+    /** 当前门槛过不过。`start/success/debug` 归最低档；`fail` 跟 warn 一起出现。 */
+    _passes(lv) {
+      return (TERM_RANK[lv] ?? 0) >= (TERM_RANK[this._level] ?? 0);
+    }
+
+    _setMeta(status) {
+      if (!this._meta) return;
+      const only = this._level === 'info' ? '' : this._level === 'warn' ? '提醒以上' : '只看错误';
+      const parts = [this._plugin || '全部插件', '显示 ' + this._shown + ' 行'];
+      if (status) parts.push(status);
+      if (only) parts.push('只显示「' + only + '」');
+      const text = parts.join(' · ');
+      if (this._meta.textContent !== text) this._meta.textContent = text;
+    }
+
+    /** 画一行：`addLine(level, ts, text)`。插件也能直接调（不想进面板日志的行）。
+     *
+     *  ⚠ 名字**不能叫 `append`**：那是 `Element.prototype.append`，覆盖掉之后
+     *  `build()` 里的 `host.append(box)` 会被当成"画一行日志"，整个控件就渲染成空壳
+     *  （`children=0` 但 `_body` 又是有的 —— 第 197 轮自己踩过）。 */
+    addLine(lv, ts, text) {
+      const body = this._body;
+      if (!body) return;
+      const emptyEl = body.querySelector('.term-empty');
+      if (emptyEl) emptyEl.remove();
+      const line = document.createElement('span');
+      line.className = 'term-line term-line-' + lv;
+      line.dataset.lv = lv;
+      const t = document.createElement('span');
+      t.className = 'term-ts';
+      t.textContent = termStamp(ts) + ' ';
+      const l = document.createElement('span');
+      l.className = 'term-lv term-lv-' + lv;
+      l.textContent = String(lv).padEnd(7);
+      const msg = document.createElement('span');
+      msg.className = 'term-msg';
+      msg.textContent = String(text === undefined || text === null ? '' : text);
+      line.append(t, l, msg);
+      body.appendChild(line);
+      this._lines += 1;
+      if (this._passes(lv)) this._shown += 1;
+      while (this._lines > this._max && body.firstElementChild) {
+        const cut = body.firstElementChild;
+        if (cut.dataset && cut.dataset.lv && this._passes(cut.dataset.lv)) this._shown -= 1;
+        cut.remove();
+        this._lines -= 1;
+      }
+      if (!this._passes(lv)) line.style.display = 'none';
+      this._setMeta('');
+      if (this._follow && this._follow.checked) body.scrollTop = body.scrollHeight;
+    }
+
+    /** 改级别后重画：屏上已有的行按新门槛显示/隐藏（不清屏，也不重连）。 */
+    rerender() {
+      const body = this._body;
+      if (!body) return;
+      let shown = 0;
+      for (const line of body.querySelectorAll('.term-line')) {
+        const ok = this._passes(line.dataset.lv);
+        line.style.display = ok ? '' : 'none';
+        if (ok) shown += 1;
+      }
+      this._shown = shown;
+      this._setMeta('');
+    }
+
+    clear() {
+      const body = this._body;
+      if (!body) return;
+      body.textContent = '';
+      const empty = document.createElement('span');
+      empty.className = 'term-empty';
+      empty.textContent = '（还没有日志）';
+      body.append(empty);
+      this._lines = 0;
+      this._shown = 0;
+      this._setMeta('');
+    }
+
+    /** 先铺历史（`GET /api/logs?plugin=…&limit=…`），再连实时流。
+     *
+     *  只铺一次：打开页面时看到「刚才那段」是基本预期 —— 不然用户点开插件页，
+     *  任务已经在跑第 3 分钟，屏幕上却是空的，看起来像"没在跑"。
+     *  ⚠ 历史是**倒序**给的（`ORDER BY id DESC`），要翻过来再画。 */
+    async _seed() {
+      if (this._seeded) return;
+      this._seeded = true;
+      const q = new URLSearchParams({ limit: String(Math.min(this._max, 200)) });
+      if (this._plugin) q.set('plugin', this._plugin);
+      let rows = [];
+      try {
+        const r = await fetch('/api/logs?' + q.toString(), { headers: { accept: 'application/json' } });
+        if (r.ok) {
+          const d = await r.json();
+          rows = Array.isArray(d && d.logs) ? d.logs : [];
+        }
+      } catch { /* 拿不到历史就只看实时，不影响功能 */ }
+      if (rows.length === 0) return;
+      // 实时流可能抢在前面画了行（历史这一枪要绕一圈网络）——那就别再铺，
+      // 否则旧行会盖在新行后面，屏上时间倒流。
+      if (this._lines > 0) return;
+      for (const row of rows.slice().reverse()) {
+        if (typeof row.id === 'number' && row.id > this._lastId) this._lastId = row.id;
+        this.addLine(row.level || 'info', row.ts, row.message);
+      }
+    }
+
+    /** 连面板的日志流。断线自己重连（**带 `since`**，把断线那段补回来）。 */
+    start() {
+      if (this._es !== null || typeof EventSource === 'undefined') return;
+      this._seed();
+      const q = new URLSearchParams();
+      if (this._lastId > 0) q.set('since', String(this._lastId));
+      this._es = new EventSource('/api/logs/stream' + (q.toString() ? '?' + q.toString() : ''));
+      this._setMeta('连接中…');
+      this._es.onopen = () => { this._retry = 1000; this._setMeta(''); };
+      this._es.onmessage = (ev) => {
+        let d;
+        try { d = JSON.parse(ev.data); } catch { return; }
+        if (d === null || typeof d !== 'object') return;
+        if (this._plugin && d.plugin && d.plugin !== this._plugin) return;
+        if (typeof d.id === 'number' && d.id > this._lastId) this._lastId = d.id;
+        let lv = typeof d.level === 'string' && d.level ? d.level : 'info';
+        let text = String(d.message === undefined || d.message === null ? '' : d.message);
+        // 插件自己的语义级别以 `[debug] `/`[fail] ` 前缀带出来（面板只有 info/warn/error 三档）
+        const m = /^\[(debug|start|ok|fail|fatal|success)\]\s*/.exec(text);
+        if (m) {
+          lv = m[1] === 'ok' ? 'success' : m[1] === 'fatal' ? 'error' : m[1];
+          text = text.slice(m[0].length);
+        }
+        this.addLine(lv, d.ts, text);
+      };
+      // 面板在广播追不上时会推一帧具名事件 `lagged`（`{skipped}`）：这一段日志**真的没了**，
+      // 明说一句比让用户以为"任务没输出"好。无名帧收不到它，得单独挂。
+      this._es.addEventListener('lagged', (ev) => {
+        let d = {};
+        try { d = JSON.parse(ev.data); } catch { /* 就当地丢了 */ }
+        this.addLine('warn', Date.now(), '（日志太多，中间漏了一段：' + String(d.skipped || '已丢弃') + '）');
+      });
+      this._es.onerror = () => {
+        // EventSource 的自动重连**不带** `since` ⇒ 断线那段会丢。自己重开。
+        this.stop();
+        this._setMeta('重连中…');
+        const wait = this._retry;
+        this._retry = Math.min(this._retry * 2, 15000);
+        setTimeout(() => { if (this.isConnected) this.start(); }, wait);
+      };
+    }
+
+    stop() {
+      if (this._es !== null) {
+        this._es.onerror = null;
+        this._es.close();
+        this._es = null;
+      }
+    }
+  }
+  // ⚠ 注册要**紧跟着类定义**：末尾那串 define 在类之前执行，写在那儿会撞上 TDZ
+  //   （class 不像 function 那样提升），报 `Cannot access 'PLog' before initialization`。
+  define('p-log', PLog);
+
   // ---------------------------------------------------------------- 确认 / 输入弹窗
   //
   // 为什么要有：插件里到处是 `confirm('确定删除？')` / `prompt('这个账号叫什么？')`。

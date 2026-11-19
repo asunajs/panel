@@ -18,7 +18,7 @@
 `/api/plugins/install`、`panel plugin install`）当然在面板仓里。官方货架不在这儿 ——
 它在单文件插件仓 `asunajs/panel-single-plugins` 的 `catalog.json`（目录归插件生态，不归面板）。
 
-## 2. 十三条铁律
+## 2. 十四条铁律
 
 | # | 铁律 | 为什么（踩过的） |
 |---|---|---|
@@ -35,6 +35,7 @@
 | R11 | 发码界面（手机号 + 获取验证码 + 重发倒计时）用共享控件 `<p-sms-code>`，不自己画；确实不该用的写 `style-lint: allow-sms-handroll 理由` | 控件第 182 轮就做出来了（从 mcloud 登录页提上来的），但各插件继续各抄一遍：三种长相、三份定时器，关弹窗不停表各踩一次。`check-plugin-style.mjs` 的 R7 会提示 |
 | R12 | 弹窗表单用 `<p-dialog>` + `<p-field>` + `.dialog-actions`，**不自己定义 `.dialog` / `.field` 的排布**（宽度、标签位置、控件宽度归面板 `/app.css`） | 第 197 轮：面板只画了「`.field` 里的 input 长什么样」（给搜索框写的 200px 固定宽），没画「这一行怎么排」，四个插件各补一份、补漏的那个就歪成「手机号 358px、验证码 200px」。见 [plugins.md](plugins.md) 的「弹窗表单」 |
 | R13 | 不用浏览器原生 `confirm()` / `alert()` / `prompt()`；确认与输入走 `PanelUI.confirm()` / `PanelUI.prompt()`（`/ui.js`，返回 Promise） | 第 197 轮：四个插件全在用原生框，用户截图里就是 macOS 屏幕中间那块「localhost:3030 显示」。原生框是另一个窗口、和面板不是一个东西，iframe 里还可能被拦。`check-plugin-style.mjs` 的 R8 会提示 |
+| R14 | 任务型插件（跑几十秒以上）**必须有实时日志**：用 `<p-log plugin="<自己>">`，不要只给一段「跑完了」的静态 `<pre>` | 第 197 轮：央视频点「一键做任务」只回一段文字，用户要的是「看着它跑」；面板的 `/api/logs/stream` 早就有了，但插件各写各的终端（mcloud 写了 400 行） |
 
 ## 3. 上线怎么走（顺序不能换）
 

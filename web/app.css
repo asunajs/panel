@@ -1535,6 +1535,68 @@ select option { background: var(--surface); color: var(--fg); }
 .badge.lang { font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
 .field-label { color: var(--fg-2); font-size: 12px; }
 
+/* ---------- 运行日志台 `<p-log>`：实时看任务在跑什么 ----------
+   插件页里「点一下、等它跑完、看一段结果」那种静态 `<pre>` 是不够的 —— 任务跑 4~8 分钟，
+   用户想**看着它跑**。数据源是面板自己的 `GET /api/logs/stream`（SSE）：插件页和面板同源，
+   会话 cookie 自动带上，不用额外传令牌。
+
+   为什么放在面板而不是各插件各写一份：mcloud 先写了一套（终端 + 级别筛选 + 跟随 + 重连），
+   第二个插件要"实时日志"就得再抄一遍 —— 和发码格、确认框是同一个故事。
+   颜色全走 token，两套主题自动跟随；**不要**在插件里写死黑底（浅色下会变成白纸上一块黑砖）。 */
+.term {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); overflow: hidden;
+}
+.term-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 10px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+.term-title { color: var(--fg); font-weight: 600; font-size: 12.5px; }
+.term-meta {
+  color: var(--dim); flex: 1 1 auto; min-width: 0; font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.term-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.term-follow {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--dim); white-space: nowrap; font-size: 12px;
+}
+.term-level {
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  padding: 2px 4px; font-size: 12px;
+}
+.term-clear { padding: 2px 8px; font-size: 12px; }
+.term-body {
+  margin: 0; padding: 8px 10px 10px;
+  overflow: auto;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  color: var(--fg-2); background: var(--surface);
+  white-space: pre-wrap; word-break: break-word;
+}
+.term-line { display: block; }
+.term-ts { color: var(--dim); }
+.term-lv { display: inline-block; min-width: 3.2em; }
+.term-lv-info { color: var(--accent); }
+.term-lv-debug { color: var(--dim); }
+.term-lv-warn { color: var(--warn); }
+.term-lv-error, .term-lv-fatal { color: var(--err); font-weight: 600; }
+.term-lv-start { color: var(--accent); }
+.term-lv-success { color: var(--ok); }
+.term-lv-fail { color: var(--err); }
+.term-line-warn .term-msg { color: var(--warn); }
+.term-line-error .term-msg, .term-line-fatal .term-msg { color: var(--err); font-weight: 600; }
+.term-line-debug .term-msg { color: var(--dim); }
+.term-line-start .term-msg { color: var(--accent); font-weight: 600; }
+.term-line-success .term-msg { color: var(--ok); }
+.term-line-fail .term-msg { color: var(--err); }
+.term-empty { color: var(--dim); }
+@media (max-width: 720px) {
+  .term-body { max-height: 42vh !important; font-size: 11px; }
+}
+
 /* ---------- 表单行 `.field`：标签在上、控件在下，**控件一律吃满宽度** ----------
    这一段是「同一行里的控件必须左右对齐」的唯一出处。以前面板只画了
    「`.field` 里的 input 长什么样」（那是给搜索框写的 190/200px 固定宽 + 30px 右内边距），

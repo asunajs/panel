@@ -26,6 +26,28 @@
 文档层面新增两节：[user/scripts.md](docs/user/scripts.md) 的「脚本 = 你的用户权限（没有围栏，这是设计）」、
 [plugins.md](docs/plugins.md) 的「信任模型」。
 
+### 实时运行日志：`<p-log>`（第 197 轮）
+
+用户截图：央视频点「一键做任务」，回来的是一段**静态文字**（「已交给面板调度…」「已触发 daily1」
+「失败：触发失败（HTTP 409）…」）。任务要跑 4~8 分钟，这段文字是**跑完才知道**的摘要 ——
+中间在干什么、卡在哪一步、哪个账号过了，全都看不到。mcloud 早就有终端式的实时日志，央视频没有。
+
+- **面板 `/ui.js` 加 `<p-log plugin="…" height="320">`**：接 `GET /api/logs/stream`（SSE，同源
+  自动带 cookie），自带跟随 / 级别筛选 / 清空 / 行数页头 / 断线重连（带 `since` 补空档）/
+  **打开先铺历史**（`/api/logs?plugin=…`）。面板推的是 epoch 毫秒，控件转 `HH:MM:SS.mmm`。
+- **`/app.css` 加 `.term*`**：颜色全走 token，两套主题自动跟随（mcloud 那份写死过黑底，
+  浅色下是白纸上一条黑砖 —— 这次按 token 重写）。
+- **央视频接上**：`<p-log id="run-log" plugin="yangshipin">` 放在「运行」卡片里，
+  和原来那段静态 `<pre>` 并存（后者留给「查询任务 / 签到」这种一次性结果）。
+- **门禁**：`ui-kit-check` +5 条（结构 / 画行 / 级别筛选 / 清空 / 页头计数）→ 57 条。
+- 文档：[plugin-ui.md](docs/plugin-ui.md) 补一节、[plugin-contract.md](docs/plugin-contract.md) 加 **R14**、
+  [ui.md](docs/ui.md) 补一行。
+
+⚠ 一个自己踩的坑记在这儿：控件的方法**不能叫 `append`** —— 那是 `Element.prototype.append`，
+覆盖掉之后 `build()` 里的 `host.append(box)` 会被当成"画一行日志"，整个控件渲染成空壳
+（`children=0`，但 `_body` 又是有的，看起来像"连上了但没内容"）。现在叫 `addLine`，
+门禁里也断言了 `children > 0`。
+
 ### 插件也有自绘的确认框了：`PanelUI.confirm` / `.prompt`（第 197 轮）
 
 四个插件全在用浏览器原生的 `confirm()` / `prompt()` —— 用户截图里就是 macOS 屏幕正中那块
