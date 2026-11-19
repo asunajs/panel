@@ -141,6 +141,15 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// 清单里声明了「面板替它渲染」的界面吗（`views` 或 `config.actions`）。
+    ///
+    /// 有声明就不需要 `<name>.webui/` —— 前端据此判断「缺界面」警告该不该挂。
+    /// ⚠ 必须能对**没加载**的插件算（停用/按需加载时它不在 `/api/state` 的 plugins 里，
+    /// 只有磁盘上的清单），所以判据放在清单自己身上，不依赖运行期状态（第 223 轮）。
+    pub fn has_declared_ui(&self) -> bool {
+        !self.views.is_empty() || !self.actions.is_empty()
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "title": self.title,

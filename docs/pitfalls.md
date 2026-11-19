@@ -799,3 +799,12 @@
     `launchctl bootout gui/$(id -u)/com.asunajs.panel`（先停看门狗，否则它会把主 job 拉回来），
     再 `kickstart -k dev.panel`；就绪判据是 `/readyz` 回 `{ok:true,failed_plugins:0,plugins:6,tasks:4}`。
     守卫：`deploy-daily.sh` 现在起服务前先量端口监听者，不是 `$DEST/panel` 就当场报错并给出上面两条命令。
+
+118. **页面加载的是 `web/panel.min.js`，不是 `web/app.js`**（第 223 轮，我连改三次 UI 都不生效）：
+    `index.html` 引的是压缩产物（提交进仓库，构建机不装 node）。只改 `web/app.js` 再
+    `cargo build`，浏览器跑的还是旧代码 —— 而且**看起来像是逻辑写错了**：我在页面上
+    `state.disabled=['declared']` 后调 `renderPluginNav()`，入口照样在，于是一路去怀疑
+    作用域、重入保护、CDP 缓存……真凶是产物没重建。
+    判据（一行就能定位）：`pluginEntries.toString().includes('off')` 是 `false` —— 页面里跑的
+    函数没有你刚写的代码。修法：`cd tools/web && node build.mjs`，然后跑
+    `scripts/check-web-build.sh`（它会在临时目录重建一遍逐字节比对，本来就是为这条存在的）。

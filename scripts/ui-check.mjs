@@ -882,6 +882,59 @@ async function main() {
     declaredNav.some((t) => t.startsWith('样例页')), JSON.stringify(declaredNav));
   check('声明式插件不再被标「缺界面」（它本来就不需要 .webui）',
     !declaredNav.some((t) => t.includes('样例页') && t.includes('缺界面')), JSON.stringify(declaredNav));
+  // 第 223 轮（用户截图）：preview-demo 有 4 个 views，却因为**没加载**被标「缺界面」——
+  // `hasDeclaredUI` 只查 state.plugins（已加载的）。判据要能对没加载的插件算，
+  // 所以 /api/plugins/files 现在带 declared_ui（来自磁盘清单）。
+  const filesUi = JSON.parse(await js(
+    "(async()=>{const r=await fetch('/api/plugins/files');const d=await r.json();" +
+    "const m={};for(const f of d.files)m[f.name]={declared_ui:f.declared_ui,webui:f.webui};" +
+    "return JSON.stringify(m);})()",
+  ));
+  check('/api/plugins/files 带 declared_ui（声明式插件 true、纯脚本 false）',
+    filesUi.declared && filesUi.declared.declared_ui === true && filesUi.declared.webui === false
+      && filesUi.seed && filesUi.seed.declared_ui === false,
+    JSON.stringify(filesUi));
+  // 模拟「这个声明式插件还没加载」（按需加载启动时就是这样）：
+  // 从 state.plugins 里摘掉它，侧栏不该因此冒出「缺界面」。
+  const notLoadedNav = JSON.parse(await js(
+    "(()=>{const keep=state.plugins;state.plugins=keep.filter(p=>p.name!=='declared');" +
+    "renderPluginNav();" +
+    "const out=[...document.querySelectorAll('#nav-plugin-list a')].map(a=>a.textContent.trim());" +
+    "state.plugins=keep;renderPluginNav();return JSON.stringify(out);})()",
+  ));
+  check('声明式插件没加载时也不标「缺界面」（判据看磁盘清单）',
+    notLoadedNav.some((t) => t.startsWith('样例页'))
+      && !notLoadedNav.some((t) => t.includes('样例页') && t.includes('缺界面')),
+    JSON.stringify(notLoadedNav));
+
+  // 第 223 轮（用户：「停用插件就应该藏入口」）：停用后侧栏那一格要消失，
+  // 因为它每个接口都是 409「已停用」，点进去必然报错。
+  //
+  // ⚠ 不直接调 refresh()：它有重入保护（state.refreshing），页面自己的 5 秒轮询
+  //   正在跑时会被直接 return，测试就永远看不到变化。改成等 DOM 自己变。
+  const navText = () => js(
+    `JSON.stringify([...document.querySelectorAll('#nav-plugin-list a')].map((a)=>a.textContent.trim()))`,
+  );
+  const waitNav = async (pred, ms = 9000) => {
+    const t0 = Date.now();
+    let cur = [];
+    while (Date.now() - t0 < ms) {
+      cur = JSON.parse(await navText());
+      if (pred(cur)) return cur;
+      await sleep(300);
+    }
+    return cur;
+  };
+  const apiPost = (u) => js(`fetch('${u}',{method:'POST',headers:{'x-panel':'1'}}).then(r=>r.status)`);
+
+  await apiPost('/api/plugins/declared/disable');
+  const offNav = await waitNav((t) => !t.some((x) => x.startsWith('样例页')));
+  check('停用的插件不进侧栏', !offNav.some((t) => t.startsWith('样例页')), JSON.stringify(offNav));
+
+  await apiPost('/api/plugins/declared/enable');
+  const backNav = await waitNav((t) => t.some((x) => x.startsWith('样例页')));
+  check('重新启用后侧栏入口回来', backNav.some((t) => t.startsWith('样例页')), JSON.stringify(backNav));
+
   await js(`(()=>{const a=[...document.querySelectorAll('#nav-plugin-list a')].find((x)=>x.textContent.trim().startsWith('样例页')); if(a) a.click();})()`);
   await sleep(1800);
   const pvPage = JSON.parse(await js(`JSON.stringify({

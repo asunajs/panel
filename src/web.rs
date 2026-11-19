@@ -3546,6 +3546,8 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
                 "multi": is_multi,
             // 声明式侧栏入口（清单里的 nav）；None = 这个插件不进侧栏
             "nav": nav,
+            // 清单里声明了页面（views/actions）→ 不需要 .webui/，界面别挂「缺界面」
+            "declared_ui": man.as_ref().map(|m| m.has_declared_ui()).unwrap_or(false),
                 "entry": entry
                     .file_name()
                     .and_then(|s| s.to_str())

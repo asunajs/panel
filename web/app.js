@@ -5769,6 +5769,10 @@ function pluginWebMissing(name) {
   // 警告点，那是给"该有界面却没文件"的插件用的（第 191 轮）。
   if (hasDeclaredUI(name)) return false;
   const f = (state.files || []).find((x) => x && x.name === name);
+  // ⚠ 必须也认**磁盘清单**（第 223 轮，用户截图）：`hasDeclaredUI` 只查
+  //   `state.plugins`（已加载的），停用/按需加载的插件不在里面 —— 于是一个有 4 个
+  //   views 的声明式插件被标成「缺界面」。`declared_ui` 来自 /api/plugins/files 的清单。
+  if (f && f.declared_ui) return false;
   return !!f && f.webui === false;
 }
 
@@ -5780,8 +5784,12 @@ function pluginWebMissing(name) {
 function pluginEntries() {
   const out = [];
   const seen = new Set();
+  // 停用的插件**不进侧栏**（第 223 轮，用户：停用插件就应该藏入口）。
+  // 它的每个接口都是 409「已停用，不会自动加载」—— 点进去必然报错，那就不该让它可点。
+  // 想启用它去插件页的卡片（那里有「已禁用」徽标和「启用」按钮）。
+  const off = new Set(state.disabled || []);
   for (const p of (state.plugins || [])) {
-    if (!p) continue;
+    if (!p || off.has(p.name)) continue;
     // 运行期注册的 sidebar 优先；没有就用清单里的 nav（/api/state 每个插件都带 manifest）。
     const nav = (p.nav && p.nav.title) ? p.nav : ((p.manifest && p.manifest.nav) || null);
     if (!nav || !nav.title) continue;
@@ -5790,6 +5798,7 @@ function pluginEntries() {
   }
   for (const f of (state.files || [])) {
     if (!f || !f.nav || !f.nav.title || seen.has(f.name)) continue;
+    if (off.has(f.name)) continue;
     out.push({ name: f.name, nav: f.nav });
     seen.add(f.name);
   }
