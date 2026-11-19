@@ -50,28 +50,26 @@ npm run deploy:panel       # 拷进 $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plu
 **URL 与 JSON 载荷一字未改**：界面照旧打 `/plugins/mgmusic/api/{config,status,login/send,login/verify,run,sign,comment,report,selftest}`，
 插件侧按 `rel` 分发；未知路由回 `404 {"ok":false,"error":"没有这条路由: GET api/nope"}`（老面板是 404 纯文本，唯一形状差异）。
 
-## 2. 存储：三个 state 键（为什么不再写文件）
+## 2. 存储：用户配置一份文件，state 只放运行期数据
 
-新面板**不给插件设 cwd**，老的 `fs.writeFileSync('config.json')` 会落到面板进程的工作目录 —— 那是数据事故，不是迁移。
-所以三个文件整体搬进宿主 sqlite 的 `state` 表（与 mcloud 同一张表，键自带命名空间；表由插件自己
-`CREATE TABLE IF NOT EXISTS`，`updated_at` 是 **TEXT**，写 `String(Date.now())`）：
+**0.7.0 起（插件项目 2026-11-19）**：唯一真值是 `<PANEL_DATA_DIR>/plugin-data/mgmusic/config.json`
+（UTF-8 JSON 对象，顶层带 `schema_version`，权限 0600）。面板「插件 → 配置」表单与插件自己的
+WebUI 写的是**同一份**；`loadConfig()` 每次都重读文件，所以谁写完都立刻生效（不靠重载）。
+`state` 表只剩运行期数据。
 
-| 老文件（cwd 相对） | 新键 |
-|---|---|
-| `config.json` | `mgmusic.config` |
-| `login-pending.json` | `mgmusic.login_pending` |
-| （老版的 `app-account.json`） | — 已随「macOS App 导入」整段删除，见 §8 |
+| 老文件（0.3.x，cwd 相对） | 0.4.x～0.6.x | 0.7.0 起 |
+|---|---|---|
+| `config.json` | `state` 的 `mgmusic.config` 键 | **文件** `plugin-data/mgmusic/config.json` |
+| `login-pending.json` | `state` 的 `mgmusic.login_pending` | 仍在 `state`（运行期数据，不参与迁移） |
+| （老版 `app-account.json`） | — 已随「macOS App 导入」删除，见 §8 | — |
 
-读写用同步 op（`sqlite_query_sync` / `sqlite_exec_sync`）——老代码是「同步步骤机」，这样 `loadConfig()`
-保持同步、几百处调用一行不用改。
+读写仍走同步 op（`sqlite_query_sync` / `sqlite_exec_sync` 只用于 state；配置文件用 `node:fs` 的
+`readFileSync` / `writeFileSync` / `renameSync`）——`loadConfig()` 保持同步，几百处调用一行没改。
 
-**播种规则**：`await host.self_config()` 非空 → `validateConfig` 后写 state；空/校验失败 → `DEFAULTS`（失败会 warn 出原因，不静默）。
-播种成功会落一个标记键 `mgmusic.seed_marker`（`file` = 从文件导入过 / `state` = 本来就有账号），
-它的唯一作用是「**已经播过就别再拿文件覆盖 state**」：你在界面上把账号删光，重启也不会被那份旧文件复活。
-还有一种补救：state 里已有配置但一个账号都没有、导入源里有账号（= 先启动后放文件的次序错），
-会**补播一次**并 warn，见 §3。
-
-所以「`plugin-data/mgmusic/config.json`」在新面板里**只是导入源**，插件不回写它 —— 这正是迁移的落点。
+**迁移（加载期跑一次，幂等）**：把旧 `state` 的 `mgmusic.config` 和磁盘上的 `config.json` 合并成那一份文件
+（state 优先、文件补缺、devices 按 `ce` / `uid+msisdn` 去重）→ 先备份再原子写 0600 → 删 `mgmusic.config`、
+删老标记 `mgmusic.seed_marker`、打 `mgmusic.migration_v1`（旧原文留在 `mgmusic.config.legacy` 作只读备份）。
+细节与读数见 §11。
 
 ## 3. 迁一台面板要做的三步
 
@@ -81,40 +79,38 @@ cd ~/mobile/workspace/cmusic-others/mgmusic-plugin
 npm run build:panelllrt     # llrt/ → dist/panel-llrt/
 npm run deploy:panel        # dist/panel-llrt/ → $PANEL_PLUGINS_DIR（默认 ~/panel-3030/plugins），逐个 cmp
 
-# 2) 老账号（老面板的插件数据 → 新面板的 plugin-data；文件里是 ce/uid/msisdn，别贴到聊天里）
+# 2) 老账号
+#    a) 从老面板（0.3.x）搬：把老 config.json 放进 plugin-data —— 迁移会把「文件 + 0.6.x 的 state」合并，
+#       **先放文件还是先启动都行**（0.7.0 不再靠"先播种后忽略"的次序）。
 mkdir -p ~/panel-3030/data/plugin-data/mgmusic
 cp "$HOME/Library/Application Support/plugin-panel/data/plugin-data/mgmusic/config.json" \
    ~/panel-3030/data/plugin-data/mgmusic/config.json
 chmod 600 ~/panel-3030/data/plugin-data/mgmusic/config.json
+#    b) 从 0.6.x 升级：什么都不用做，加载期自动把 state 里那份迁成文件。
 
-# 3) 重启（或界面里点「重载」），然后看它有没有播种成功
+# 3) 重启（或界面里点「重载」）
 launchctl kickstart -k gui/$(id -u)/dev.panel
 ```
 
-播种成功的判据（不是「插件在列表里」就算成）：
+迁移成功的判据（不是「插件在列表里」就算成）：
 
 ```text
-日志   [mgmusic] 已从 plugin-data/mgmusic/config.json 播种配置：2 个设备
-state  sqlite3 ~/panel-3030/data/panel.db "select key,length(value) from state where key='mgmusic.config'"
-接口   curl -s localhost:3030/plugins/mgmusic/api/config | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["config"]["devices"]))'   → 2
+日志   [mgmusic] 配置已统一到 plugin-data/mgmusic/config.json：2 个设备（来源 merge|state|file）
+state  sqlite3 ~/panel-3030/data/panel.db "select key,length(value) from state where key like 'mgmusic%'"
+       → mgmusic.migration_v1 / mgmusic.config.legacy（+ mgmusic.login_pending，如果有）
+       ⚠ 不该再有 mgmusic.config 与 mgmusic.seed_marker
+文件   ls -l ~/panel-3030/data/plugin-data/mgmusic/config.json          → -rw------- … 0600
+接口   curl -s localhost:3030/plugins/mgmusic/api/config \
+         | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len(d["config"]["devices"]), d["schema_version"])'   → 2 1
 ```
 
-> 老面板那套 `panel migrate from <旧数据目录>` 搬的是 `state` 表（mcloud 那族）。mgmusic 的状态在
+> 老面板那套 `panel migrate from <旧数据目录>` 搬的是 `state` 表（mcloud 那族）。mgmusic 的用户配置在
 > **文件**里，所以走上面的 `cp`，不需要 `panel migrate`。
 
-**次序要紧**：`cp config.json` 要在插件**第一次加载之前**做完（也就是先放文件、再重启）。
-反过来的次序也不是死路 —— 插件发现「state 里有配置但一个账号都没有、导入源里有账号」时会
-**补播一次**并打一条 warn：
-
-```text
-warn | [mgmusic] 迁移补播种：state 里一个账号都没有，已从 plugin-data/mgmusic/config.json 导入 2 个设备。
-       正确次序是「先放 config.json，再启动面板」。
-```
-
-补播只做一次（`state` 里 `mgmusic.seed_marker` 记着「播过了」）：之后你在界面上把账号删光，
-重启也不会被那份文件偷偷复活。
-
 ## 4. 验收读数（2026-11-13，临时面板 8801 / 8802）
+
+> ⚠ 这一节的读数属于 **0.6.x 的双轨制**（配置在 state 表里）。0.7.0 改成唯一一份 config.json，
+> 新读数见 **§11**；本节保留作历史记录。
 
 被测：插件项目 `dist/panel-llrt/mgmusic.js`（2146 行）+ `mgmusic.webui/`（index 280 / style 294 / app 839 / boot 85 行）。
 下表是 verify 在 8801 的独立验证，加上 Lead 在 8802 对「补播种 / 整份提交 / 删光账号」三条的回归。
@@ -269,3 +265,29 @@ deviceid 改成「同一手机号沿用旧值，没有才新生成」——效�
 
 读数（8806，假账号）：加载后 `[(daily, '0 5 0,12,22 * * *', summary=None)]`；手动跑一次
 （`status=error "1/1 个账号失败"`，假 ce 被上游拒）后 summary **仍是 None**、`tasks.summary` 是空串。
+## 11. 0.7.0：配置统一成一份（2026-11-19）
+
+插件项目把「面板 `config.json` 只播种一次、真值藏在 `state` 表」的双轨制删掉了：用户配置只有
+`<PANEL_DATA_DIR>/plugin-data/mgmusic/config.json`（`schema_version: 1`、0600），面板表单与插件
+WebUI 写同一份，`loadConfig()` **每次重读文件**（写完立刻生效，不靠重载）。
+
+读数（临时面板 8812；数据目录里预置的是 **3030 实例的真 state**：`mgmusic.config` 1924 B +
+`mgmusic.seed_marker` + 一条 `mgmusic.login_pending`）：
+
+| 项 | 期望 | 实测 |
+|---|---|---|
+| 迁移 | state → 文件 | `config.json` 1956 B、mode `600`、`schema_version=1`、`devices=3`；日志「配置已统一到 …：3 个设备（来源 state）」 |
+| state 收尾 | 旧键消失 | 剩 `mgmusic.config.legacy`(1924) / `mgmusic.migration_v1`(74) / `mgmusic.login_pending`(31)；**没有** `mgmusic.config`、`mgmusic.seed_marker` |
+| 两条写路径 | 同一份文件 | 插件 `POST api/config`（topup 30→41）→ 文件 41；面板 `PUT /api/plugins/mgmusic/config`（41→47，`reloaded:true`）→ 文件 47、devices 仍 3 |
+| 面板改完插件立刻看到 | 不靠重载 | PUT 之后 `GET /plugins/mgmusic/api/config` 直接回 47 |
+| 面板表单清单 | 4 个标量 | `GET /api/plugins/mgmusic/config` → `manifest.config.fields` = topup_min / timeout_ms / report_ms / tls，`manifest_error = null` |
+| 坏 JSON | 报错不崩、不覆盖 | 插件接口回 `ok:false` + 带路径的「配置文件不是合法 JSON」；文件原文保留；`POST /api/plugins/mgmusic/reload` 仍 `ok:true`（日志 warn「配置读取失败」），换回好文件即恢复 |
+| selftest | 带配置读数 | `config` = path / exists:true / schema_version:1 / devices:3 / mode:"600" / readable:true |
+| 回归测试 | 全绿 | 插件项目 `npm run test:config` → **11 passed**（roundtrip / 迁移幂等 / 坏 JSON / 面板同源 / 0600 / 登录中间态 / selftest） |
+
+**次序不再是坑**：0.6.x 那份「先放 config.json 还是先启动面板」的注意事项随播种一起没了 ——
+迁移把「文件」和「0.6.x 的 state」合并（state 优先、文件补缺），谁先谁后都落在同一份文件上。
+
+**升级路径**（插件项目 README 的「0.7.0 的配置迁移」是权威版）：
+`npm run deploy:panel` → 重启/重载 → 看日志那行「配置已统一到 …」。旧 state 那份原文留在
+`mgmusic.config.legacy`，要回滚就从它或 `config.json.bak-*` 里取。
