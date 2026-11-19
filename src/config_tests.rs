@@ -210,3 +210,22 @@ fn net_proxy_comes_from_the_net_section() {
         ""
     );
 }
+
+/// 第 227 轮的三个旋钮：钳法用纯函数测（不去动全局静态，免得和别的用例抢）。
+#[test]
+fn run_queue_and_budget_max_are_clamped() {
+    use crate::config::*;
+    // 上限：默认 90 分钟，最小 1 分钟，最大 12 小时
+    assert_eq!(clamp_budget_max_ms(DEFAULT_BUDGET_MAX_MS), 5_400_000);
+    assert_eq!(clamp_budget_max_ms(1), 60_000, "再小连一次握手都不够");
+    assert_eq!(clamp_budget_max_ms(u64::MAX), 43_200_000, "12 小时封顶");
+    assert_eq!(clamp_budget_max_ms(7_200_000), 7_200_000, "2 小时照原样");
+    // 队列上限：0 会让「排队」失效，所以下限 1
+    assert_eq!(clamp_queue_max(0), 1);
+    assert_eq!(clamp_queue_max(DEFAULT_QUEUE_MAX), 32);
+    assert_eq!(clamp_queue_max(usize::MAX), 1000);
+    // 单条最长排队：10 秒 – 24 小时
+    assert_eq!(clamp_queue_wait_ms(1), 10_000);
+    assert_eq!(clamp_queue_wait_ms(DEFAULT_QUEUE_WAIT_MS), 3_600_000);
+    assert_eq!(clamp_queue_wait_ms(u64::MAX), 86_400_000);
+}

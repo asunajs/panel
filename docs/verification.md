@@ -761,8 +761,8 @@ ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当
 
 | 检查 | 结果 |
 |---|---|
-| `cargo test` | **532 过**（新增 `a_second_run_on_a_busy_plugin_queues_instead_of_being_rejected`、`run_once_spawns_one_off_runs_without_leaving_task_rows`、`a_full_run_queue_is_still_a_conflict`；旧的 409 断言**翻面**） |
-| `scripts/ui-check.mjs` | **218 条全过**（新增 4 条：能点执行、运行中显示已跑、忙时再点、排队行出现） |
+| `cargo test` | **533 过**（新增 `a_second_run_on_a_busy_plugin_queues_instead_of_being_rejected`、`run_once_spawns_one_off_runs_without_leaving_task_rows`、`a_full_run_queue_is_still_a_conflict`；旧的 409 断言**翻面**） |
+| `scripts/ui-check.mjs` | **220 条全过**（新增 6 条：能点执行、运行中显示已跑、忙时再点、排队行出现、运行组三个旋钮、单次上限能填到 12 小时） |
 | 真机（2.5 秒慢任务，连点两次） | 第一次 `200 {"run_id":1}`；第二次 `200 {"queued":true,"position":1}`；`/api/state` 里 `pending` 有它；跑完队列自动清空 |
 | 队列满（默认 32） | 第 33 条起 `409` + `运行队列满了（32 条），等前面的跑完再试` |
 | 一次性调用（样例插件「生成 3 条一次性调用」） | 三条 → 排队位置 1/2/3 → 依次跑完（每条 1.5 秒）→ 任务页**不留** `cmd#2` 这种行，运行记录 3 条 `cmd#2` / `cmd#3` / `cmd#4` |

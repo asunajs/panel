@@ -60,34 +60,52 @@ static RUN_BUDGET_MAX_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::ne
 static RUN_QUEUE_MAX: std::sync::RwLock<Option<usize>> = std::sync::RwLock::new(None);
 static RUN_QUEUE_WAIT_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::new(None);
 
+/// 上限的钳法（纯函数，好测）：再小连握手都不够，再大就是笔误。
+pub fn clamp_budget_max_ms(ms: u64) -> u64 {
+    ms.clamp(MIN_BUDGET_MAX_MS, MAX_BUDGET_MAX_MS)
+}
+
 /// 单次运行的上限（毫秒）。`run.budget_max_ms` 覆盖默认 90 分钟，夹在 [1 分钟, 12 小时]。
 pub fn budget_max_ms() -> u64 {
-    RUN_BUDGET_MAX_MS
-        .read()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or(DEFAULT_BUDGET_MAX_MS)
-        .clamp(MIN_BUDGET_MAX_MS, MAX_BUDGET_MAX_MS)
+    clamp_budget_max_ms(
+        RUN_BUDGET_MAX_MS
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(DEFAULT_BUDGET_MAX_MS),
+    )
 }
 
-/// 每插件队列上限。0 或没配 = 默认 32；夹在 [1, 1000]（0 会让「排队」这件事直接失效）。
+/// 队列上限的钳法（纯函数）：0 会让「排队」直接失效，所以下限是 1。
+pub fn clamp_queue_max(n: usize) -> usize {
+    n.clamp(1, 1000)
+}
+
+/// 每插件队列上限。没配 = 默认 32。
 pub fn queue_max() -> usize {
-    RUN_QUEUE_MAX
-        .read()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or(DEFAULT_QUEUE_MAX)
-        .clamp(1, 1000)
+    clamp_queue_max(
+        RUN_QUEUE_MAX
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(DEFAULT_QUEUE_MAX),
+    )
 }
 
-/// 单条最大排队时间（毫秒）。夹在 [10 秒, 24 小时]。
+/// 排队上限的钳法（纯函数）：10 秒以下等于「不让排队」。
+pub fn clamp_queue_wait_ms(ms: u64) -> u64 {
+    ms.clamp(10_000, 86_400_000)
+}
+
+/// 单条最大排队时间（毫秒）。没配 = 1 小时。
 pub fn queue_wait_ms() -> u64 {
-    RUN_QUEUE_WAIT_MS
-        .read()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or(DEFAULT_QUEUE_WAIT_MS)
-        .clamp(10_000, 86_400_000)
+    clamp_queue_wait_ms(
+        RUN_QUEUE_WAIT_MS
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(DEFAULT_QUEUE_WAIT_MS),
+    )
 }
 
 fn set_run_budget_max(ms: Option<u64>) {

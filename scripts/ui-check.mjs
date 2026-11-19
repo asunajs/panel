@@ -1380,6 +1380,18 @@ async function main() {
   check('表单里有监听地址、信任 XFF、接受任意 Host、运行预算',
     ['server.bind', 'server.trust_xff', 'server.allow_any_host', 'run.budget_ms']
       .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  // 第 227 轮：单次上限、排队上限、单条最长排队 —— 三个旋钮都要在表单里，
+  // 而且「单次运行上限」的 max 不能被 90 分钟那道老闸门夹住（它能到 12 小时）。
+  check('运行组多了单次上限 / 排队上限 / 单条最长排队',
+    ['run.budget_max_ms', 'run.queue_max', 'run.queue_wait_ms']
+      .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
+  const maxField = JSON.parse(await js(
+    "JSON.stringify((()=>{const f=document.getElementById('cfg-form');" +
+    "const i=f?f.querySelector('[data-cfg=\"run.budget_max_ms\"]'):null;" +
+    "return {found:!!i,max:i?i.getAttribute('max'):null,unit:i?i.parentElement.textContent.replace(/\\s+/g,''):''};})())"
+  ));
+  check('单次运行上限允许填到 12 小时（不是被 5400 秒夹住）',
+    maxField.found && Number(maxField.max) >= 43200, JSON.stringify(maxField));
   // 第 192 轮：出站代理是配置项（插件拉 GitHub 那些要走它）
   const proxyField = JSON.parse(await js(    "JSON.stringify((()=>{const f=document.getElementById('cfg-form');" +
     "const g=[...f.querySelectorAll('.cfg-group')].find(x=>x.textContent.includes('网络'));" +
