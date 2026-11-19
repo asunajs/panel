@@ -81,6 +81,7 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [user/ops.md](user/ops.md) | 运维手册：配置、备份恢复、保留策略、日志流水线、故障排查 |
 | [user/daily.md](user/daily.md) | 3030 日常实例：安装、升级、口令重置 |
 | [user/troubleshooting.md](user/troubleshooting.md) | 排障：插件请求超时 / 连不上（含「代理变量对面板无效」的实测） |
+| [user/docker.md](user/docker.md) | Docker 部署：镜像只装 Release 产物、不重编 Rust；一个 ./data 带走全部状态 |
 
 ### 开发者与 agent（docs/ 根）
 

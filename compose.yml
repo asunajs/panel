@@ -1,0 +1,74 @@
+# =============================================================================
+# docker compose 部署（面板本体 = 一个静态二进制，没有数据库服务器、没有依赖服务）
+# =============================================================================
+#
+# 运行期状态**全部收在 ./data 一个目录里**，仓库工作区保持干净：
+#   ./data/panel.db           任务、账号、插件状态、日志（SQLite）
+#   ./data/auth.json          口令的盐 + 哈希（0600；明文口令不落盘）
+#   ./data/config.json        面板设置（界面里改的就是它）
+#   ./data/plugin-data/       插件/脚本自己的数据根
+#   ./data/plugins/           插件代码（商城安装 / 上传都落在这里）
+#   ./data/scripts/           脚本任务（.js/.mjs/.py/.sh）
+#
+# 为什么不是仓库根目录下的 plugins/ scripts/：那两个目录在仓库里**是被跟踪的**
+# （里面是自带的示例插件与示例脚本），挂出来会让「商城装个插件」「面板建个脚本任务」
+# 都变成 git status 里的未跟踪文件，还会把示例插件里的压力测试任务当成生产任务一直跑。
+# 部署要的是空目录起步 —— 和「把 Release 二进制丢进一个空目录里跑」完全一致。
+#
+# 备份 = cp -a ./data；升级镜像不动它。./data/ 已在 .gitignore 内。
+#
+# ---------------------------------------------------------------------------
+# 第一次部署
+# ---------------------------------------------------------------------------
+#   export PANEL_TOKEN='一个至少 8 位的口令'      # 或写进同目录的 .env
+#   docker compose up -d
+#
+# 之后打开 http://<这台机器的 IP>:8787 ，用刚才那个口令登录。
+# 口令哈希只落 ./data/auth.json（0600），不进 compose、不进 .env、不进 git。
+# （面板启动时把 PANEL_TOKEN 派生成盐 + 哈希写进 auth.json，然后把明文从进程
+#   环境里擦掉 —— 之后容器里读不到它，插件也读不到。）
+#
+# 想换口令：docker compose run --rm panel token reset --new '<新口令>' 然后 restart。
+#
+# ---------------------------------------------------------------------------
+# 日常
+# ---------------------------------------------------------------------------
+#   docker compose ps / logs -f                    状态与日志
+#   docker compose pull && docker compose up -d    用 ghcr.io 上的新镜像升级
+#   docker compose up -d --build                   改为从本仓库产物重新构建
+#   docker compose down                            停掉（数据全在 ./data 里）
+# =============================================================================
+
+services:
+  panel:
+    # 默认用「打 tag 后由 .github/workflows/docker-publish.yml 推到 GitHub Packages」的镜像；
+    # 本地要直接从 Release 产物构建，加 --build 即可（build 段就在下面）。
+    image: ghcr.io/asunajs/panel:${PANEL_TAG:-latest}
+    build:
+      context: .
+      args:
+        PANEL_REPO: ${PANEL_REPO:-asunajs/panel}
+        PANEL_VERSION: ${PANEL_VERSION:-v0.6.3}
+    container_name: panel
+    restart: unless-stopped
+    ports:
+      # 只映射一个端口：面板与插件页面同源（插件页走 /plugins/<name>/，不另开端口）。
+      - "${PANEL_PORT:-8787}:8787"
+    environment:
+      # 容器里必须绑 0.0.0.0，否则端口映射进来也连不上（默认是 127.0.0.1）。
+      PANEL_BIND: 0.0.0.0:8787
+      # 没有凭据时面板**拒绝**绑非回环地址，所以这一项是必填的（缺了容器起不来，
+      # 错误信息会明确说「没有令牌凭据」）。
+      PANEL_TOKEN: ${PANEL_TOKEN:?容器里没有浏览器可点，口令得从外部给（至少 8 位）}
+      # 面板自己的「检查更新」对容器没意义（换了容器内文件，重建即丢）。
+      # 想彻底关掉：设置 → 配置里把更新检查关掉，或者让 PANEL_UPDATE_REPO 指向空。
+    volumes:
+      # 一个目录带走全部状态；插件代码也在里面（Dockerfile 把 PANEL_PLUGINS_DIR
+      # 指到了 /panel/data/plugins）。
+      - ./data:/panel/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
