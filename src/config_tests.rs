@@ -129,7 +129,7 @@ fn budget_defaults_to_five_minutes_and_follows_the_env() {
     std::env::set_var(ENV_BUDGET_MS, "0");
     assert_eq!(budget_ms(), MIN_BUDGET_MS, "0 会被夹到 1 秒");
     std::env::set_var(ENV_BUDGET_MS, "999999999");
-    assert_eq!(budget_ms(), MAX_BUDGET_MS, "超过 90 分钟夹回上限");
+    assert_eq!(budget_ms(), crate::scheduler::max_budget_ms(), "超过 90 分钟夹回上限");
 
     // 根本不是数字：退回默认值（同 PANEL_CONFIG_MAX_BYTES 的处理）
     std::env::set_var(ENV_BUDGET_MS, "五分钟");

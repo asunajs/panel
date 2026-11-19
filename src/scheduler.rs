@@ -62,7 +62,13 @@ pub fn default_budget_ms() -> u64 {
     crate::config::budget_ms()
 }
 /// per-task 预算上限：90 分钟。20 分钟的任务要能跑，上限就不能卡在分钟级。
-pub const MAX_BUDGET_MS: u64 = 5_400_000;
+/// 单次运行的上限（毫秒）。第 227 轮起**可配**：`run.budget_max_ms`，默认 90 分钟。
+///
+/// 为什么从常量改成函数：硬顶 90 分钟会逼插件把节奏压紧（`squeeze`），而「一个账号的任务
+/// 要跑很久」是真实需求。上限仍然是上限 —— 只是这个数该由用户定，不该写死在编译期。
+pub fn max_budget_ms() -> u64 {
+    crate::config::budget_max_ms()
+}
 
 const IDLE_SLEEP: Duration = Duration::from_secs(3600);
 const MIN_SLEEP: Duration = Duration::from_millis(1);
@@ -140,7 +146,7 @@ fn cancelled(error: &str) -> bool {
 /// 为什么要在 web 层分出来：这是**冲突**不是**请求写错了**，状态码该是 409 而不是 400。
 /// 客户端（或脚本）能靠状态码判断「过两秒重试」还是「我参数错了别重试」。
 pub fn is_busy_error(msg: &str) -> bool {
-    msg.contains("还有任务在跑") || msg.contains("JS 执行通道已满")
+    msg.contains("还有任务在跑") || msg.contains("JS 执行通道已满") || msg.contains("运行队列满了")
 }
 
 /// 给人看的说法（原来是 `Error: AbortError: invocation 已停止`）。
@@ -210,6 +216,18 @@ struct Task {
     /// 它照样出现在任务表里（用户能看见、能暂停、能改计划），但不派发 —— 没有 JS 运行时，
     /// 派发只会炸。插件被唤醒/手动加载后，真正的 register_cron 会按同名替换掉它（lazy 归 false）。
     lazy: bool,
+    /// 真正要调的 handler 名（第 227 轮）。None = 和任务名一样。
+    ///
+    /// 为什么需要它：一次性调用的任务名要唯一（重名加 `#2`），但 handler 名是插件给的那个。
+    /// 两者混在一起时，第二条 `run_once('one')` 会变成调 `one#2` —— 没有这个 handler，
+    /// 立刻失败（第 227 轮实测：三条调用 150ms 内全灭，任务页里干干净净，看着像「什么都没发生」）。
+    handler: Option<String>,
+    /// 一次性调用（第 227 轮）：由 `host.run_once` 排队后临时造出来的任务。
+    ///
+    /// 它**不落库**、不进任务页主表（`views()` 里带 `ephemeral: true`，前端归到折叠区），
+    /// 跑完就从 `self.tasks` 里删掉 —— 「跑完自动删」。与 `lazy` 的区别：lazy 是「插件没装」，
+    /// 这个是「本来就不该长期存在」。
+    ephemeral: bool,
     /// 用户删掉的时刻（第 178 轮）。None = 没删。
     ///
     /// 删掉不等于从库里抹掉：插件下次注册还会带上这条，没有墓碑的话它就会
@@ -277,7 +295,7 @@ fn skipped_beats(
 ///   · 真点「恢复默认」也只是把覆盖再抄一遍
 /// 2026-11-16 实测就是这个：改计划 → 重启（mcloud 那三条是按需加载的）→ 覆盖值成了新默认。
 fn lazy_placeholder(row: &LazyTask) -> Result<Task, String> {
-    let budget = (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS);
+    let budget = (row.budget_ms.max(1) as u64).clamp(1, max_budget_ms());
     let mut t = if row.cron.is_empty() {
         // 库里那行记得上次的预算（插件注册时声明的），占位也按它来，
         // 别回退成默认 30 秒 —— 真注册晚到之前这段是「按这个列」的形状。
@@ -300,7 +318,7 @@ fn lazy_placeholder(row: &LazyTask) -> Result<Task, String> {
 /// 库里那行的调度解析不了（老库/手改）时的兜底：按**手动任务**列出来，别的字段照旧。
 /// 宁可让用户看见一条「只能手动跑」的任务，也别让它整行从界面上消失。
 fn lazy_placeholder_fallback(row: &LazyTask) -> Task {
-    let budget = (row.budget_ms.max(1) as u64).clamp(1, MAX_BUDGET_MS);
+    let budget = (row.budget_ms.max(1) as u64).clamp(1, max_budget_ms());
     let mut t = Task::manual(row.plugin.clone(), row.name.clone(), budget);
     t.lazy = true;
     t.base_cron = row.suggest_cron.clone().unwrap_or_default();
@@ -335,7 +353,7 @@ impl Task {
             plugin,
             name,
             base_cron: cron.clone(),
-            suggest_budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
+            suggest_budget_ms: budget_ms.clamp(1, max_budget_ms()),
             suggest_lead_ms: lead_ms,
             pending_adopt: false,
             cron,
@@ -344,11 +362,13 @@ impl Task {
             blockers: Vec::new(),
             lead_ms,
             lead_override: false,
+            handler: None,
             params,
             schedule: Some(schedule),
-            budget_ms: budget_ms.clamp(1, MAX_BUDGET_MS),
+            budget_ms: budget_ms.clamp(1, max_budget_ms()),
             enabled: true,
             lazy: false,
+            ephemeral: false,
             deleted_at: None,
             base_fire: base,
             next_fire: next,
@@ -382,11 +402,59 @@ impl Task {
             blockers: Vec::new(),
             lead_ms: 0,
             lead_override: false,
+            handler: None,
             params: None,
             schedule: None,
             budget_ms: budget_ms.max(1),
             enabled: true,
             lazy: false,
+            ephemeral: false,
+            deleted_at: None,
+            base_fire: far,
+            next_fire: far,
+            consecutive_failures: 0,
+            tripped: false,
+            trips: 0,
+            in_flight: false,
+            run_started: None,
+            last_took_ms: None,
+            behind: 0,
+            behind_noted: None,
+            runs: 0,
+            last_run: None,
+            last_error: None,
+        }
+    }
+
+    /// 一次性调用用的临时任务：没有 cron、不落库、跑完即删（第 227 轮）。
+    fn ephemeral(
+        plugin: String,
+        name: String,
+        handler: String,
+        budget_ms: u64,
+        params: Option<Json>,
+    ) -> Self {
+        let far = Local::now() + ChronoDuration::days(FALLBACK_DAYS);
+        Self {
+            plugin,
+            name,
+            cron: String::new(),
+            base_cron: String::new(),
+            suggest_budget_ms: budget_ms.clamp(1, max_budget_ms()),
+            suggest_lead_ms: 0,
+            pending_adopt: false,
+            override_expr: None,
+            summary: None,
+            blockers: Vec::new(),
+            lead_ms: 0,
+            lead_override: false,
+            handler: Some(handler),
+            params,
+            schedule: None,
+            budget_ms: budget_ms.clamp(1, max_budget_ms()),
+            enabled: true,
+            lazy: false,
+            ephemeral: true,
             deleted_at: None,
             base_fire: far,
             next_fire: far,
@@ -516,6 +584,10 @@ pub struct TaskView {
     pub tripped: bool,
     pub trips: u32,
     pub in_flight: bool,
+    /// 一次性调用造出来的临时任务（前端归到折叠区，不进主表）
+    pub ephemeral: bool,
+    /// 这次运行**开始**的时刻（毫秒）；没在跑就是 None。界面拿它算「已跑 12:30」。
+    pub run_started: Option<i64>,
     pub runs: u64,
     pub last_run: Option<i64>,
     pub last_error: Option<String>,
@@ -621,7 +693,20 @@ pub enum Cmd {
     RunNow {
         plugin: String,
         task: String,
-        reply: oneshot::Sender<Result<i64, String>>,
+        reply: oneshot::Sender<Result<StartOutcome, String>>,
+    },
+    /// 插件的一次性调用（第 227 轮）：`host.run_once` 走这条 —— 入队，执行位空出来就跑。
+    SpawnOnce {
+        plugin: String,
+        name: String,
+        params: Option<serde_json::Value>,
+        budget_ms: u64,
+        at: Option<i64>,
+        reply: oneshot::Sender<Result<StartOutcome, String>>,
+    },
+    /// 队列快照（界面的「临时调用」折叠区、任务行的「排队 N」）
+    Pending {
+        reply: oneshot::Sender<Vec<PendingView>>,
     },
     /// 插件 WebUI 的动态请求：交给插件注册的 handler，把它的返回值带回去。
     /// 和 RunNow 一样占用 busy：同一个 Context 不能并发派发。
@@ -897,7 +982,8 @@ impl Scheduler {
         rx.await.unwrap_or(false)
     }
 
-    pub async fn run_now(&self, plugin: &str, task: &str) -> Result<i64, String> {
+    /// 手动跑一次。执行位被占就**排队**（返回 `Queued { position }`），不再 409。
+    pub async fn run_now(&self, plugin: &str, task: &str) -> Result<StartOutcome, String> {
         let (plugin, task) = (plugin.to_string(), task.to_string());
         self.call(|reply| Cmd::RunNow {
             plugin,
@@ -905,6 +991,32 @@ impl Scheduler {
             reply,
         })
         .await?
+    }
+
+    /// 插件的一次性调用：入队，执行位空出来就跑，跑完自动删（第 227 轮）。
+    pub async fn spawn_once(
+        &self,
+        plugin: &str,
+        name: &str,
+        params: Option<Json>,
+        budget_ms: u64,
+        at: Option<i64>,
+    ) -> Result<StartOutcome, String> {
+        let (plugin, name) = (plugin.to_string(), name.to_string());
+        self.call(|reply| Cmd::SpawnOnce {
+            plugin,
+            name,
+            params,
+            budget_ms,
+            at,
+            reply,
+        })
+        .await?
+    }
+
+    /// 现在有哪些运行在排队（界面用）。
+    pub async fn pending(&self) -> Result<Vec<PendingView>, String> {
+        self.call(|reply| Cmd::Pending { reply }).await
     }
 
     pub async fn stop(&self, plugin: &str) -> Result<(), String> {
@@ -1114,6 +1226,64 @@ struct Loaded {
     last_active: i64,
 }
 
+/// 排队中的一次运行（第 227 轮）。
+///
+/// 为什么要有队列：一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。以前第二个请求
+/// 直接被拒（409「还有任务在跑，本次跳过」），用户点了没反应；现在**默认排队**，执行位空出来
+/// 就接着跑。定时到点那条本来就是这样等的（留在 due 里），这里把「手动执行」和「插件自己
+/// spawn 的一次性调用」也接进同一条队。
+#[derive(Debug, Clone)]
+struct PendingRun {
+    plugin: String,
+    /// 任务名，或一次性调用的名字（由插件给，重名加序号）。
+    name: String,
+    /// 要调的 handler（一次性调用时是插件给的名字；手动执行时和 `name` 一样）。
+    handler: String,
+    params: Option<Json>,
+    budget_ms: u64,
+    source: RunSource,
+    /// 什么时候才允许开始（毫秒时间戳）：`run_once` 的 `at`，缺省 = 入队那一刻。
+    ready_at: i64,
+    enqueued_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunSource {
+    /// 界面上点「执行」
+    Manual,
+    /// 插件 `host.run_once(...)`
+    Once,
+}
+
+impl RunSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunSource::Manual => "manual",
+            RunSource::Once => "once",
+        }
+    }
+}
+
+/// 队列里的条目（给界面看：谁在等、等多久、第几位）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingView {
+    pub plugin: String,
+    pub name: String,
+    pub source: String,
+    /// 1 = 下一个跑
+    pub position: usize,
+    pub waited_ms: i64,
+    pub ready_at: i64,
+}
+
+/// 手动执行 / 一次性调用的结果：马上开跑，还是排到第几位。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StartOutcome {
+    Started { run_id: i64 },
+    Queued { position: usize },
+}
+
 struct Inner {
     /// 数据目录：插件自己的配置在 <data_dir>/plugin-data/<name>/config.json（第 89 轮）。
     data_dir: std::path::PathBuf,
@@ -1129,6 +1299,13 @@ struct Inner {
     web_q: std::collections::HashMap<String, std::collections::VecDeque<QueuedWeb>>,
     /// 排队编号（单调递增，只用来认领超时）
     next_qid: u64,
+    /// 排队等执行位的**运行**（插件名 → 队列，第 227 轮）。手动执行、插件的一次性调用都进这里。
+    pending: HashMap<String, std::collections::VecDeque<PendingRun>>,
+    /// 一次性调用的名字序号（只增不减）。
+    ///
+    /// 为什么要单调：临时任务跑完就删，名字也就空出来了 —— 每次都从 `#2` 起的话，
+    /// 三条调用的运行记录全叫 `cmd#2`，界面上根本分不清哪次是哪次。
+    eph_seq: u64,
     /// 库里记着的任务状态（暂停/摘要/blockers/提前量/调度覆盖）。
     ///
     /// 启动时读一次，**注册任务时同步套用**：插件重新注册、面板重启都不会把
@@ -1215,6 +1392,8 @@ pub fn start(
         sidebar: std::collections::HashMap::new(),
         web_q: std::collections::HashMap::new(),
         next_qid: 0,
+        pending: HashMap::new(),
+        eph_seq: 1,
         saved: HashMap::new(),
         db,
         log,
@@ -1620,6 +1799,8 @@ impl Inner {
                         // 到点了就把这一拍跑掉（插件刚装回来）—— 见 run_overdue_of
                         let n = name.clone();
                         self.run_overdue_of(&n).await;
+                        // 队列里等着的运行（插件刚装回来）也接着跑（第 227 轮）
+                        self.pump(&n).await;
                         Ok(())
                     }
                     Err(e) => {
@@ -1925,6 +2106,10 @@ impl Inner {
                 }
                 // 执行位空出来了：把排队的那个派出去（第 142 轮）
                 self.pump_web(&plugin);
+                // 插件可能在这次 web 调用里 `run_once` 了一把（第 227 轮）——
+                // 执行位刚空出来，正好接着跑。不在这里放行的话，要等到下一次
+                // fire_due（最长 60 秒）才会动，用户看到的是「点了没反应」。
+                self.pump(&plugin).await;
             }
             Cmd::WebExpire { plugin, id } => {
                 let mut expired = None;
@@ -1961,8 +2146,69 @@ impl Inner {
                         "插件 {p0} 还没装进内存，{n0} 暂时不能执行：装回失败，看日志里的加载错误"
                     )));
                 }
-                Some(i) => self.dispatch(i, true, Some(reply)).await,
+                Some(i) => {
+                    // 执行位被占 → **排队**（第 227 轮）。以前这里直接 409「本次跳过」，
+                    // 用户点了没反应；现在排上队，位置回给界面。
+                    if self.plugins.get(&plugin).map(|l| l.busy).unwrap_or(true) {
+                        let now = Local::now().timestamp_millis();
+                        let run = PendingRun {
+                            plugin: plugin.clone(),
+                            name: task.clone(),
+                            handler: task.clone(),
+                            params: self.tasks[i].params.clone(),
+                            budget_ms: self.tasks[i].budget_ms,
+                            source: RunSource::Manual,
+                            ready_at: now,
+                            enqueued_at: now,
+                        };
+                        match self.enqueue(run) {
+                            Ok(position) => {
+                                let _ = reply.send(Ok(StartOutcome::Queued { position }));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                            }
+                        }
+                    } else {
+                        self.dispatch(i, true, Some(reply)).await;
+                    }
+                }
             },
+            Cmd::SpawnOnce {
+                plugin,
+                name,
+                params,
+                budget_ms,
+                at,
+                reply,
+            } => {
+                let out = if !self.plugins.contains_key(&plugin) {
+                    // 正常不会走到：run_once 只能在插件自己的 handler 里调（那时它一定装着）
+                    Err(format!("插件未加载: {plugin}"))
+                } else {
+                    let now = Local::now().timestamp_millis();
+                    let run = PendingRun {
+                        plugin: plugin.clone(),
+                        name: name.clone(),
+                        handler: name,
+                        params,
+                        budget_ms: budget_ms.clamp(1, max_budget_ms()),
+                        source: RunSource::Once,
+                        ready_at: at.unwrap_or(now),
+                        enqueued_at: now,
+                    };
+                    match self.enqueue(run) {
+                        Ok(position) => Ok(StartOutcome::Queued { position }),
+                        Err(e) => Err(e),
+                    }
+                };
+                let _ = reply.send(out);
+                // 现在就空着的话，立刻开跑（位置 1 = 马上）
+                self.pump(&plugin).await;
+            }
+            Cmd::Pending { reply } => {
+                let _ = reply.send(self.pending_view());
+            }
             Cmd::Stop { plugin, reply } => {
                 // 只停这个插件自己的在途 invocation。基线 R1 High 就是停 A 打断了 B。
                 let out = match self.plugins.get(&plugin) {
@@ -2067,8 +2313,145 @@ impl Inner {
                 task,
                 run_id,
                 error,
-            } => self.finish(&plugin, &task, run_id, error),
+            } => {
+                self.finish(&plugin, &task, run_id, error);
+                // 执行位空出来了：队列里的下一条接着跑（第 227 轮）
+                self.pump(&plugin).await;
+            }
         }
+    }
+
+    // ---------------------------------------------------------------- 运行队列（第 227 轮）
+    //
+    // 一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。所以「同时要跑两条」这件事
+    // 只能排队 —— 以前是直接拒（409「还有任务在跑，本次跳过」），用户点了像没反应。
+    // 现在统一进这条队：手动执行、插件的一次性调用、以及「到点才允许跑」的 `run_once(at)`。
+
+    /// 入队。返回 1 基的位置（1 = 下一个跑）。
+    fn enqueue(&mut self, run: PendingRun) -> Result<usize, String> {
+        let max = crate::config::queue_max();
+        let q = self.pending.entry(run.plugin.clone()).or_default();
+        if q.len() >= max {
+            return Err(format!(
+                "{} 的运行队列满了（{max} 条），等前面的跑完再试",
+                run.plugin
+            ));
+        }
+        q.push_back(run);
+        Ok(q.len())
+    }
+
+    /// 清掉等太久的（`run.queue_wait_ms`，默认 1 小时）。丢掉要说出来 —— 静默丢才是真事故。
+    fn drop_stale(&mut self, plugin: &str, now_ms: i64) {
+        let wait = crate::config::queue_wait_ms() as i64;
+        let mut dropped: Vec<String> = Vec::new();
+        {
+            let Some(q) = self.pending.get_mut(plugin) else {
+                return;
+            };
+            q.retain(|r| {
+                let keep = now_ms - r.enqueued_at <= wait;
+                if !keep {
+                    dropped.push(r.name.clone());
+                }
+                keep
+            });
+            if q.is_empty() {
+                self.pending.remove(plugin);
+            }
+        }
+        if !dropped.is_empty() {
+            self.log.emit(
+                plugin,
+                None,
+                Level::Warn,
+                format!(
+                    "排队超过 {} 分钟还没轮到，丢掉 {} 条（{}）—— 插件太忙，或者单次跑得太久",
+                    wait / 60_000,
+                    dropped.len(),
+                    dropped.join("、")
+                ),
+            );
+        }
+    }
+
+    /// 一次性调用造一条临时任务；重名加 `#n`（插件不用自己保证唯一）。
+    fn add_ephemeral(&mut self, run: &PendingRun) -> usize {
+        let mut name = run.name.clone();
+        while self.find(&run.plugin, &name).is_some() {
+            self.eph_seq += 1;
+            name = format!("{}#{}", run.name, self.eph_seq);
+        }
+        self.tasks.push(Task::ephemeral(
+            run.plugin.clone(),
+            name,
+            run.handler.clone(),
+            run.budget_ms,
+            run.params.clone(),
+        ));
+        self.tasks.len() - 1
+    }
+
+    /// 执行位空出来（或到了 `at`）就把队列里的下一条派出去。
+    async fn pump(&mut self, plugin: &str) {
+        loop {
+            let now_ms = Local::now().timestamp_millis();
+            self.drop_stale(plugin, now_ms);
+            if self.plugins.get(plugin).map(|l| l.busy).unwrap_or(true) {
+                return;
+            }
+            let Some(q) = self.pending.get_mut(plugin) else {
+                return;
+            };
+            let Some(pos) = q.iter().position(|r| r.ready_at <= now_ms) else {
+                return;
+            };
+            let run = q.remove(pos).expect("刚找到的位置");
+            if q.is_empty() {
+                self.pending.remove(plugin);
+            }
+            let idx = match run.source {
+                // 手动执行：跑**原来那条任务**（运行记录的名字、预算、参数都该是它的）
+                RunSource::Manual => match self.find(&run.plugin, &run.name) {
+                    Some(i) if !self.tasks[i].lazy && self.tasks[i].deleted_at.is_none() => Some(i),
+                    _ => {
+                        self.log.emit(
+                            plugin,
+                            None,
+                            Level::Warn,
+                            format!("排队中的 {} 已经不存在了（删了？），跳过这一次", run.name),
+                        );
+                        None
+                    }
+                },
+                // 一次性调用：临时造一条任务，跑完就删
+                RunSource::Once => Some(self.add_ephemeral(&run)),
+            };
+            let Some(i) = idx else {
+                continue;
+            };
+            self.dispatch(i, run.source == RunSource::Manual, None).await;
+        }
+    }
+
+    /// 队列快照（界面用）：谁在等、等多久、第几位。
+    fn pending_view(&self) -> Vec<PendingView> {
+        let now = Local::now().timestamp_millis();
+        let mut out = Vec::new();
+        for (plugin, q) in &self.pending {
+            for (i, r) in q.iter().enumerate() {
+                out.push(PendingView {
+                    plugin: plugin.clone(),
+                    name: r.name.clone(),
+                    source: r.source.as_str().to_string(),
+                    position: i + 1,
+                    waited_ms: (now - r.enqueued_at).max(0),
+                    ready_at: r.ready_at,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.plugin.cmp(&b.plugin).then(a.position.cmp(&b.position)));
+        out
     }
 
     fn views(&self) -> Vec<TaskView> {
@@ -2107,6 +2490,8 @@ impl Inner {
                 tripped: t.tripped,
                 trips: t.trips,
                 in_flight: t.in_flight,
+                ephemeral: t.ephemeral,
+                run_started: if t.in_flight { t.run_started } else { None },
                 runs: t.runs,
                 last_run: t.last_run,
                 last_error: t.last_error.clone(),
@@ -2291,7 +2676,7 @@ impl Inner {
                 ),
             }
         }
-        self.tasks[i].budget_ms = self.tasks[i].suggest_budget_ms.clamp(1, MAX_BUDGET_MS);
+        self.tasks[i].budget_ms = self.tasks[i].suggest_budget_ms.clamp(1, max_budget_ms());
         if self.tasks[i].suggest_lead_ms > 0 {
             self.tasks[i].lead_ms = self.tasks[i].suggest_lead_ms.min(LEAD_MAX_MS);
             self.tasks[i].lead_override = true;
@@ -2492,7 +2877,7 @@ impl Inner {
                 //
                 // 采纳只发生在「安装 / 重装」（adopt_mode），重载与重启一律只更新建议 ——
                 // 否则用户改过的计划会在每次重启后被插件改回去。
-                let budget = budget_ms.clamp(1, MAX_BUDGET_MS);
+                let budget = budget_ms.clamp(1, max_budget_ms());
                 if let Err(e) = Schedule::parse(&cron) {
                     self.log.emit(
                         &plugin,
@@ -2655,7 +3040,7 @@ impl Inner {
                     self.tasks.push(Task::manual(
                         plugin.clone(),
                         name.clone(),
-                        budget_ms.clamp(1, MAX_BUDGET_MS),
+                        budget_ms.clamp(1, max_budget_ms()),
                     ));
                     // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
                     // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
@@ -3048,6 +3433,11 @@ impl Inner {
             }
             self.dispatch(i, false, None).await;
         }
+        // 队列里「到点才允许跑」的（`run_once(at)`）：到点了就把它们放出来。
+        let waiting: Vec<String> = self.pending.keys().cloned().collect();
+        for p in waiting {
+            self.pump(&p).await;
+        }
     }
 
     /// 建 run 记录 → 置 run_id（日志归属）→ 派发。整段在 spawned task 里跑，
@@ -3064,13 +3454,15 @@ impl Inner {
         &mut self,
         idx: usize,
         manual: bool,
-        reply: Option<oneshot::Sender<Result<i64, String>>>,
+        reply: Option<oneshot::Sender<Result<StartOutcome, String>>>,
     ) {
-        let (plugin_name, task_name, budget, early, lead_ms, params) = {
+        let (plugin_name, task_name, handler_name, budget, early, lead_ms, params) = {
             let t = &self.tasks[idx];
             (
                 t.plugin.clone(),
                 t.name.clone(),
+                // 一次性调用的任务名可能带 #2 后缀，但 handler 是插件给的那个名字
+                t.handler.clone().unwrap_or_else(|| t.name.clone()),
                 t.budget_ms,
                 Local::now() < t.next_fire,
                 t.lead_ms,
@@ -3127,7 +3519,7 @@ impl Inner {
         };
         // 回包在**这里**发：调用方拿到 run_id 就能去轮询，不用等 JS 跑完。
         if let Some(r) = reply {
-            let _ = r.send(Ok(run_id));
+            let _ = r.send(Ok(StartOutcome::Started { run_id }));
         }
 
         let plugin = self.plugins[&plugin_name].plugin.clone();
@@ -3189,7 +3581,7 @@ impl Inner {
                 "early": early,
                 "lead_ms": lead_ms
             });
-            let error = crate::engine::catch_panic(plugin.dispatch(&task_name, &evt, budget))
+            let error = crate::engine::catch_panic(plugin.dispatch(&handler_name, &evt, budget))
                 .await
                 .err();
             // 先还名额再收尾：收尾要写库/发通知，不该占着 JS 通道。
@@ -3287,12 +3679,25 @@ impl Inner {
         };
         if let Some(i) = self.find(plugin, task) {
             self.tasks[i].in_flight = false;
-            self.tasks[i].advance(
-                &self.cfg,
-                now,
-                if cancelled { None } else { error.clone() },
-            );
-            self.persist_task(i);
+            if self.tasks[i].ephemeral {
+                // 一次性调用（第 227 轮）：算用时、记账，但**不推进、不熔断、不落库** ——
+                // 它没有「下一拍」，也不该出现在任务页主表里。
+                self.tasks[i].runs += 1;
+                self.tasks[i].last_run = Some(now.timestamp_millis());
+                self.tasks[i].last_error = error.clone();
+                self.tasks[i].last_took_ms = self.tasks[i]
+                    .run_started
+                    .take()
+                    .map(|started| now.timestamp_millis() - started)
+                    .filter(|d| *d >= 0);
+            } else {
+                self.tasks[i].advance(
+                    &self.cfg,
+                    now,
+                    if cancelled { None } else { error.clone() },
+                );
+                self.persist_task(i);
+            }
         }
         if cancelled {
             self.log.emit(
@@ -3408,6 +3813,16 @@ impl Inner {
                 log.emit("panel", Some(run_id), Level::Warn, format!("收尾运行记录失败: {e}"));
             }
         });
+        // 「跑完自动删」：一次性调用的临时任务到这里就没了（运行记录留着）。
+        if self
+            .find(plugin, task)
+            .map(|i| self.tasks[i].ephemeral)
+            .unwrap_or(false)
+        {
+            if let Some(i) = self.find(plugin, task) {
+                self.tasks.remove(i);
+            }
+        }
     }
 }
 

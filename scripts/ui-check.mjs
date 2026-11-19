@@ -84,6 +84,8 @@ writeFileSync(path.join(plugins, 'seed.js'), [
   "await host.sidebar({ title: '种子', order: 99 });",
   "await host.register_handler('ok', async () => { await host.sleep(5); return 1; });",
   "await host.register_handler('boom', async () => { throw new Error('boom-marker'); });",
+  // 第 227 轮：慢任务 —— 「忙的时候第二次执行要排队」「运行中显示已跑时长」都靠它
+  "await host.register_handler('slow', async () => { await host.sleep(2500); return 1; });",
   "await host.register_cron('tick', '@every 30s');",
 ].join('\n'));
 
@@ -817,6 +819,40 @@ async function main() {
     return /已暂停|恢复/.test(row || '') ? row : null;
   }, 6000, '任务行变成已暂停').catch(() => null);
   check('暂停后状态变成已暂停', !!paused, paused || '等了 6 秒还是没变');
+
+  // 排队（第 227 轮）：插件忙的时候点「执行」不再报错，而是排到第 N 位；
+  // 运行中的行要显示「已跑 mm:ss / 预算 …」。
+  //
+  // 用 textContent 而不是单元格 innerText：状态格里那行小字是 overflow:hidden 的 div，
+  // 窄屏下 innerText 会把它裁掉（第 227 轮实测：行文本里有「已跑」，单元格 innerText 里没有）。
+  const clickRun = (needle) => js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('" + needle + "'));" +
+    " if(!tr) return 'no-row'; const b=[...tr.querySelectorAll('button')].find(x=>x.textContent.trim()==='执行');" +
+    " if(!b) return 'no-btn'; b.click(); return 'clicked';})()");
+  const rowText = (needle) => js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('" + needle + "'));" +
+    " return tr?tr.textContent:'NONE';})()");
+
+  check('能点到 slow 的「执行」', (await clickRun('slow')) === 'clicked');
+  await sleep(300);
+
+  // 等第一次真的派发出去（慢任务 2.5 秒，够我们接着点第二下）
+  const running = await waitFor(async () => {
+    const t = await rowText('slow');
+    return t.includes('已跑') ? t : null;
+  }, 6000, '运行中的行显示已跑时长').catch(() => null);
+  check('运行中显示「已跑 mm:ss / 预算 …」', !!running, running || '行文本里没有「已跑」');
+
+  // 再点一次：插件正忙 → 这一次排队（不是红字报错）
+  check('忙的时候能再点一次「执行」', (await clickRun('slow')) === 'clicked');
+  const queued = await waitFor(async () => {
+    const t = await js(
+      "(()=>{const tr=document.querySelector('#tasks-body tr.is-pending'); return tr?tr.textContent:'NONE';})()");
+    return t.includes('排队 第') ? t : null;
+  }, 6000, '任务表里出现排队行').catch(() => null);
+  check('忙的时候第二次执行排进队列（「排队 第 N 位」）', !!queued, queued || '没看到排队行');
+  // 等它跑完，别把后面的用例搅了
+  await sleep(3200);
 
   // 插件页：种子插件的卡片在，重载不报错
   await js("location.hash = '#plugins'");

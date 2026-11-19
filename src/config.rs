@@ -43,8 +43,67 @@ pub fn max_bytes() -> u64 {
 pub const DEFAULT_BUDGET_MS: u64 = 300_000;
 /// 下限：再小连一次 HTTP 握手都跑不完，设成 100ms 只会让所有任务集体超时。
 const MIN_BUDGET_MS: u64 = 1_000;
-/// 上限跟 per-task 的上限对齐（90 分钟）：默认值不该比单任务允许的还大。
-const MAX_BUDGET_MS: u64 = 5_400_000;
+/// 单次运行**上限**的默认值：90 分钟（第 227 轮起可配）。
+///
+/// 为什么做成可配：90 分钟是我们拍的，不是物理上限。「一个账号的任务要跑很久」是真实需求
+/// （央视频看视频类任务光节奏等待就 20 分钟量级），硬顶 90 分钟只会逼插件把节奏压紧。
+pub const DEFAULT_BUDGET_MAX_MS: u64 = 5_400_000;
+const MIN_BUDGET_MAX_MS: u64 = 60_000;
+const MAX_BUDGET_MAX_MS: u64 = 43_200_000; // 12 小时
+
+/// 每插件运行队列上限（`run.queue_max`，默认 32）：忙的时候后来的**排队**，超过才拒。
+pub const DEFAULT_QUEUE_MAX: usize = 32;
+/// 单条最大排队时间（`run.queue_wait_ms`，默认 1 小时）：等这么久还没轮到就丢掉并说清。
+pub const DEFAULT_QUEUE_WAIT_MS: u64 = 3_600_000;
+
+static RUN_BUDGET_MAX_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::new(None);
+static RUN_QUEUE_MAX: std::sync::RwLock<Option<usize>> = std::sync::RwLock::new(None);
+static RUN_QUEUE_WAIT_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::new(None);
+
+/// 单次运行的上限（毫秒）。`run.budget_max_ms` 覆盖默认 90 分钟，夹在 [1 分钟, 12 小时]。
+pub fn budget_max_ms() -> u64 {
+    RUN_BUDGET_MAX_MS
+        .read()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or(DEFAULT_BUDGET_MAX_MS)
+        .clamp(MIN_BUDGET_MAX_MS, MAX_BUDGET_MAX_MS)
+}
+
+/// 每插件队列上限。0 或没配 = 默认 32；夹在 [1, 1000]（0 会让「排队」这件事直接失效）。
+pub fn queue_max() -> usize {
+    RUN_QUEUE_MAX
+        .read()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or(DEFAULT_QUEUE_MAX)
+        .clamp(1, 1000)
+}
+
+/// 单条最大排队时间（毫秒）。夹在 [10 秒, 24 小时]。
+pub fn queue_wait_ms() -> u64 {
+    RUN_QUEUE_WAIT_MS
+        .read()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or(DEFAULT_QUEUE_WAIT_MS)
+        .clamp(10_000, 86_400_000)
+}
+
+fn set_run_budget_max(ms: Option<u64>) {
+    if let Ok(mut g) = RUN_BUDGET_MAX_MS.write() {
+        *g = ms;
+    }
+}
+
+fn set_run_queue(max: Option<usize>, wait_ms: Option<u64>) {
+    if let Ok(mut g) = RUN_QUEUE_MAX.write() {
+        *g = max;
+    }
+    if let Ok(mut g) = RUN_QUEUE_WAIT_MS.write() {
+        *g = wait_ms;
+    }
+}
 /// 覆盖默认预算的环境变量（毫秒）。
 pub const ENV_BUDGET_MS: &str = "PANEL_BUDGET_MS";
 
@@ -55,12 +114,12 @@ pub fn budget_ms() -> u64 {
     // 界面上的「单次运行预算」就是它；环境变量留着给老部署/临时覆盖）。
     if let Ok(s) = std::env::var(ENV_BUDGET_MS) {
         return match s.trim().parse::<u64>() {
-            Ok(n) => n.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS),
+            Ok(n) => n.clamp(MIN_BUDGET_MS, budget_max_ms()),
             Err(_) => DEFAULT_BUDGET_MS,
         };
     }
     match RUN_BUDGET_MS.read().ok().and_then(|g| *g) {
-        Some(n) => n.clamp(MIN_BUDGET_MS, MAX_BUDGET_MS),
+        Some(n) => n.clamp(MIN_BUDGET_MS, budget_max_ms()),
         None => DEFAULT_BUDGET_MS,
     }
 }
@@ -262,6 +321,21 @@ pub fn refresh_server(v: &Value) {
     set_run_budget(
         v.get("run")
             .and_then(|r| r.get("budget_ms"))
+            .and_then(Value::as_u64),
+    );
+    // 第 227 轮：单次上限、队列上限、单条排队上限 —— 都是热的
+    set_run_budget_max(
+        v.get("run")
+            .and_then(|r| r.get("budget_max_ms"))
+            .and_then(Value::as_u64),
+    );
+    set_run_queue(
+        v.get("run")
+            .and_then(|r| r.get("queue_max"))
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+        v.get("run")
+            .and_then(|r| r.get("queue_wait_ms"))
             .and_then(Value::as_u64),
     );
     set_limits(limits_from_value(v));

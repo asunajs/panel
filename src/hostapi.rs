@@ -135,6 +135,8 @@ const WRAP: &str = r#"(raw) => {
     set_job_summary: async (name, text) => raw.set_job_summary(String(name), String(text ?? '')),
     set_job_blockers: async (name, list) => raw.set_job_blockers(String(name), JSON.stringify(list ?? [])),
     set_job_schedule: async (name, opts) => raw.set_job_schedule(String(name), j(opts)),
+    // 一次性调用（第 227 轮）：{ params, budget_ms, at } → { ok, state:'queued', position }
+    run_once: async (name, opts) => JSON.parse(await raw.run_once(String(name), j(opts ?? {}))),
     smtp_send: (opts) => raw.smtp_send(j(opts)),
     panel_version: () => raw.panel_version(),
     panel_at_least: (v) => raw.panel_at_least(String(v)),
@@ -152,7 +154,7 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 31] = [
+const OP_NAMES: [&str; 32] = [
     "log",
     "info",
     "warn",
@@ -181,6 +183,7 @@ const OP_NAMES: [&str; 31] = [
     "set_job_summary",
     "set_job_blockers",
     "set_job_schedule",
+    "run_once",
     "smtp_send",
     "panel_version",
     "panel_at_least",
@@ -357,6 +360,7 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("set_job_summary", Func::from(Async(op_set_job_summary)).into_js(ctx)?),
         ("set_job_blockers", Func::from(Async(op_set_job_blockers)).into_js(ctx)?),
         ("set_job_schedule", Func::from(Async(op_set_job_schedule)).into_js(ctx)?),
+        ("run_once", Func::from(Async(op_run_once)).into_js(ctx)?),
         // 发邮件：同步（插件那边是阻塞调用）
         ("smtp_send", Func::from(op_smtp_send).into_js(ctx)?),
         // 面板版本（能力降级用）
@@ -788,6 +792,44 @@ async fn op_set_job_paused(ctx: Ctx<'_>, name: String, paused: bool) -> Result<(
         .set_job_state(&p, &t, crate::scheduler::JobOp::Paused(paused))
         .await
         .map_err(|e| err(&ctx, e))
+}
+
+/// `host.run_once(name, { params?, budget_ms?, at? })` —— 临时跑一次（第 227 轮）。
+///
+/// 为什么需要它：一个插件只有一个执行位（一个 `AsyncContext`，不能重入），而「8 个账号各跑
+/// 20 分钟」这类活既塞不进一条 cron（错开公式会撞车），也塞不进一次 handler（预算有上限）。
+/// 有了它，**插件自己决定**「生成几条、每条多长、什么时候」，面板负责排队、执行、留运行记录，
+/// 跑完自动删。
+///
+/// 语义：**排队**，不是并行 —— 执行位空出来才跑。同名不合并（要几条就是几条），
+/// 返回 `{ ok, state: 'queued', position }`（position=1 表示下一个跑）。
+async fn op_run_once(ctx: Ctx<'_>, name: String, opts: Undefined<String>) -> Result<String> {
+    let h = host(&ctx)?;
+    let sched = sched_of(&ctx, &h)?;
+    let o: Json = match opts.0.as_deref() {
+        None | Some("") => Json::Null,
+        Some(t) => serde_json::from_str(t)
+            .map_err(|e| err(&ctx, format!("run_once 的 opts 不是合法 JSON: {e}")))?,
+    };
+    only_keys(&o, &["params", "budget_ms", "at"], "run_once").map_err(|e| err(&ctx, e))?;
+    let params = match o.get("params") {
+        None | Some(Json::Null) => None,
+        Some(v) => Some(v.clone()),
+    };
+    let budget = o
+        .get("budget_ms")
+        .and_then(Json::as_u64)
+        .unwrap_or(crate::scheduler::default_budget_ms());
+    let at = o.get("at").and_then(Json::as_i64);
+    let out = sched
+        .spawn_once(&h.plugin, &name, params, budget, at)
+        .await
+        .map_err(|e| err(&ctx, e))?;
+    let mut v = serde_json::to_value(out).unwrap_or(Json::Null);
+    if let Json::Object(ref mut m) = v {
+        m.insert("ok".to_string(), Json::Bool(true));
+    }
+    Ok(v.to_string())
 }
 
 async fn op_set_job_summary(ctx: Ctx<'_>, name: String, text: String) -> Result<()> {

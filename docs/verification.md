@@ -740,3 +740,49 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 （`const reload = !reloadBox.checked`），于是「取消勾选」保存出来的是「已重载」。
 ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当场抓住；如果只断
 「保存成功」，这个反了的分支会一路绿灯。
+
+## 第 227 轮：忙的时候排队 + 临时一次性调用
+
+两个诉求叠在一起：「同一任务同时只能有一条，但**不要拒绝后面的，默认排队**」和
+「插件可以生成临时的一次性调用任务，数量/时长插件决定，**时间到自动删除**」。
+
+### 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `scheduler.rs` | 每插件一条 `PendingRun` FIFO；`RunNow` 忙时入队（回 `Queued{position}`）；新 `Cmd::SpawnOnce`；`pump()` 在 finish / Loaded / tick 里放行；`drop_stale` 清超时的 |
+| `scheduler.rs` | `Task` 加 `ephemeral` 和 `handler` 两个字段；一次性任务跑完即删、不落库、不熔断 |
+| `hostapi.rs` | `host.run_once(name, {params, budget_ms, at})`（`only_keys` 校验，写错键名报错） |
+| `config.rs` | `run.budget_max_ms` / `run.queue_max` / `run.queue_wait_ms`，热生效；`MAX_BUDGET_MS` 常量改成 `max_budget_ms()` |
+| `web.rs` | `task_run` 回 `{queued:true,position}`；`/api/state` 多 `pending` |
+| `web/app.js` | 任务表末尾的「排队 第 N 位」行、运行中「已跑 mm:ss / 预算 …」、`runTask()` 把位置说出来、配置表单三个旋钮 |
+
+### 读数
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test` | **532 过**（新增 `a_second_run_on_a_busy_plugin_queues_instead_of_being_rejected`、`run_once_spawns_one_off_runs_without_leaving_task_rows`、`a_full_run_queue_is_still_a_conflict`；旧的 409 断言**翻面**） |
+| `scripts/ui-check.mjs` | **218 条全过**（新增 4 条：能点执行、运行中显示已跑、忙时再点、排队行出现） |
+| 真机（2.5 秒慢任务，连点两次） | 第一次 `200 {"run_id":1}`；第二次 `200 {"queued":true,"position":1}`；`/api/state` 里 `pending` 有它；跑完队列自动清空 |
+| 队列满（默认 32） | 第 33 条起 `409` + `运行队列满了（32 条），等前面的跑完再试` |
+| 一次性调用（样例插件「生成 3 条一次性调用」） | 三条 → 排队位置 1/2/3 → 依次跑完（每条 1.5 秒）→ 任务页**不留** `cmd#2` 这种行，运行记录 3 条 `cmd#2` / `cmd#3` / `cmd#4` |
+
+### 踩到的三个坑（都记在这，省下一个人的时间）
+
+1. **handler 名 ≠ 任务名**。一次性调用的任务名要唯一（`one#2`），但 handler 还是
+   `one`。第一版拿任务名去调 handler → 三条调用 150ms 内全灭（`没有这个 handler: one#2`），
+   任务页干干净净，看着像「什么都没发生」。改成 `Task.handler: Option<String>`，
+  派发用 handler、记账用任务名。
+2. **`sameAsLast('tasks', …)` 没把 `pending` 算进变更键**：插件忙的时候任务行本身没变，
+   变的只是排队那一行 —— 于是界面不重绘，「排队 第 N 位」永远不出现（ui-check 当场抓到）。
+3. **窄屏下单元格 `innerText` 会把 `overflow:hidden` 的小字裁掉**：行文本里有「已跑」，
+   单元格 `innerText` 里没有。断言改用 `textContent`（ui-check 里写清了原因）。
+4. **web 调用结束也要放行队列**。插件界面上点按钮 → `WebCall` 占着执行位 → 里面 `run_once` 排了队 →
+   `WebDone` 之后没人 `pump`，三条调用一直躺着（实测 6 秒后 `pending` 还是 3），
+   要等下一次 `fire_due`（空闲时最长 60 秒）。现在 `Cmd::WebDone` 里也 `pump`。
+5. **临时任务名要单调递增**。跑完就删、名字空出来，于是三条运行记录全叫 `cmd#2`，界面上分不清哪次是哪次。
+   加 `eph_seq`（只增不减）→ `cmd#2/3/4`。
+
+### 没做
+
+同一插件并行执行（[gaps.md](gaps.md) N9）：`run_once` 是**排队**语义，不是并行。

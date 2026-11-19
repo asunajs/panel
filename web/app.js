@@ -26,6 +26,8 @@ const state = {
   /** 通知：铃铛上的未读数 + 列表。 */
   notify: { unread: 0, items: [] },
   tasks: [],
+  /** 排队等执行位的运行（第 227 轮）：任务表末尾的「排队 第 N 位」。 */
+  pending: [],
   stats: null,
   config: null,
   runs: [],
@@ -1494,9 +1496,13 @@ function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
   // 同上：数据没变的那几轮不该重建任务表（每轮 ~8 行 × 十几个节点）。
-  if (sameAsLast('tasks', [state.tasks, state.showDeleted, q, state.fp.tasks, state.sort.tasks])) return;
+  // pending 也要进变更键：插件忙的时候任务行本身没变，变的只是「排队」那一行（第 227 轮）。
+  if (sameAsLast('tasks', [state.tasks, state.pending, state.showDeleted, q, state.fp.tasks, state.sort.tasks])) return;
   // 已删除的任务默认不出现（第 178 轮）：它们还在库里（墓碑），只是不调度。
-  const visible = state.tasks.filter((t) => state.showDeleted || !t.deleted);
+  // 一次性调用造出来的临时任务（第 227 轮）不进主表：它们只活一次运行的时间，
+  // 混进来会让人以为插件注册了一堆怪名字的任务。排队的条目单独列在表尾。
+  const visible = state.tasks.filter((t) => (state.showDeleted || !t.deleted) && !t.ephemeral);
+  const pending = state.pending || [];
   const deletedCount = state.tasks.filter((t) => t.deleted).length;
   const rows = sortBy(
     visible
@@ -1505,7 +1511,9 @@ function renderTasks() {
     state.sort.tasks,
     { status: (t) => (t.deleted ? 3 : t.tripped ? 2 : !t.enabled ? 1 : 0) },
   );
-  $('tasks-count').textContent = visible.length;
+  $('tasks-count').textContent = pending.length
+    ? visible.length + ' · ' + pending.length + ' 排队'
+    : String(visible.length);
   const toggle = $('tasks-show-deleted');
   if (toggle) {
     toggle.setAttribute('aria-pressed', state.showDeleted ? 'true' : 'false');
@@ -1514,11 +1522,11 @@ function renderTasks() {
       : '显示已删除' + (deletedCount ? '（' + deletedCount + '）' : '');
   }
   clear(body);
-  if (!state.tasks.length) {
+  if (!state.tasks.length && !pending.length) {
     body.append(rowMessage('还没有注册任何定时任务', 8, '插件里调 host.register_cron 就会出现在这里'));
     return;
   }
-  if (!rows.length) { body.append(rowMessage('没有匹配的任务', 8)); return; }
+  if (!rows.length && !pending.length) { body.append(rowMessage('没有匹配的任务', 8)); return; }
   for (const t of rows) {
     const tr = el('tr');
     tr.append(td('插件', 'dim', t.plugin));
@@ -1546,6 +1554,12 @@ function renderTasks() {
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
     st.append(taskPill(t));
+    // 「已跑 12:30 / 预算 20:00」（第 227 轮）：长任务最想知道的就是「还要多久」。
+    // run_started 由 /api/state 带出来，跟着轮询自己走。
+    if (t.in_flight && t.run_started) {
+      st.append(el('div', 'mini-sub', '已跑 ' + elapsedLabel(Date.now() - t.run_started) +
+        ' / 预算 ' + humanMs(t.budget_ms)));
+    }
     if (t.lazy && !t.deleted) {
       const lz = pill('pill', '待加载');
       lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 3 分钟也会自动装。';
@@ -1571,7 +1585,7 @@ function renderTasks() {
       const ops = t.deleted
         ? [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]]
         : [
-            ['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)],
+            ['执行', () => runTask(t)],
             ['加载插件', () => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)],
           ];
       if (!t.deleted && !t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
@@ -1596,7 +1610,7 @@ function renderTasks() {
       body.append(tr);
       continue;
     }
-    const ops = [['执行', () => act(taskPath(t, 'run'), '已派发 ' + t.plugin + '/' + t.name)]];
+    const ops = [['执行', () => runTask(t)]];
     if (!t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
     ops.push(t.enabled
       ? ['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]
@@ -1611,7 +1625,59 @@ function renderTasks() {
     tr.append(actionsCell(ops));
     body.append(tr);
   }
+  // 排队中的运行（第 227 轮）：插件忙，这些在等执行位。它们不是任务行，
+  // 所以排在同一张表的末尾、状态写「排队 第 N 位」——用户点完「执行」要看得见它。
+  for (const q of pending) {
+    const tr = el('tr', 'is-pending');
+    tr.append(td('插件', 'dim', q.plugin));
+    const nm = td('任务', 'strong', q.name);
+    nm.append(el('div', 'mini-sub', q.source === 'once' ? '插件生成的一次性调用' : '手动执行，等执行位'));
+    tr.append(nm);
+    tr.append(td('计划', 'mono dim', '—'));
+    tr.append(td('预算', 'num', '—'));
+    tr.append(td('下次运行', 'mono dim', '排队中'));
+    tr.append(td('跑过', 'num', '—'));
+    const st = td('状态');
+    const p2 = pill('pill-warn', '排队 第 ' + q.position + ' 位');
+    p2.title = '已等 ' + elapsedLabel(q.waited_ms) + '；插件同一时刻只跑一条，前面那条收尾它就开跑';
+    st.append(p2);
+    tr.append(st);
+    tr.append(actionsCell([]));
+    body.append(tr);
+  }
   sortHeaders('tasks');
+}
+
+/** 秒表文案：mm:ss（超过一小时给 h:mm:ss）。 */
+function elapsedLabel(ms) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  const two = (n) => String(n).padStart(2, '0');
+  return h ? h + ':' + two(m) + ':' + two(sec) : two(m) + ':' + two(sec);
+}
+
+/**
+ * 跑一次任务（第 227 轮）：插件忙的时候**排队**，不再报错。
+ *
+ * 以前这里只发一个 POST 然后弹「已派发」——插件忙的时候其实是 409，
+ * 用户点完只看到一行红字，事情没发生。现在服务端回 {queued:true, position}，
+ * 就把「排在第几位」说出来。
+ */
+async function runTask(t) {
+  try {
+    const d = await api(taskPath(t, 'run'), { method: 'POST' });
+    if (d && d.queued) {
+      notify('插件正在跑别的任务，这一次排在第 ' + d.position + ' 位', 'ok');
+    } else {
+      notify('已派发 ' + t.plugin + '/' + t.name, 'ok');
+    }
+    await refresh();
+  } catch (e) {
+    if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
+    notify(e.message || '执行失败', 'err');
+  }
 }
 
 /**
@@ -3380,7 +3446,32 @@ const CFG_GROUPS = [
         path: 'run.budget_ms',
         label: '单次运行预算',
         kind: 'seconds',
-        help: '默认 300 秒（允许 1 秒–90 分钟）。单个任务在任务里写 budget_ms 可以单独覆盖。',
+        help: '默认 300 秒（允许 1 秒–上限）。单个任务在任务里写 budget_ms 可以单独覆盖。',
+      },
+      {
+        path: 'run.budget_max_ms',
+        label: '单次运行上限',
+        kind: 'seconds',
+        max: 43200,
+        placeholder: '5400',
+        help: '默认 5400 秒（90 分钟），可调到 12 小时。一个账号要跑很久的任务（看视频那类节奏等待）把它调大 —— 上限太小，插件只能把间隔压紧来赶时间。',
+      },
+      {
+        path: 'run.queue_max',
+        label: '排队上限',
+        kind: 'int',
+        unit: '条 / 插件',
+        min: 1,
+        placeholder: '32',
+        help: '插件忙的时候，后来的运行默认排队（不再 409）。排到这么多才拒绝。',
+      },
+      {
+        path: 'run.queue_wait_ms',
+        label: '单条最长排队',
+        kind: 'seconds',
+        max: 86400,
+        placeholder: '3600',
+        help: '默认 3600 秒（1 小时）。等这么久还没轮到就丢掉，并记一条 warn —— 静默丢才是真事故。',
       },
     ],
   },
@@ -3503,10 +3594,10 @@ function renderConfigForm() {
         const inp = el('input', 'input');
         inp.type = 'number';
         inp.min = '1';
-        inp.max = '5400';
+        inp.max = String(f.max === undefined ? 5400 : f.max);
         inp.step = '1';
         inp.value = typeof cur === 'number' ? String(Math.round(cur / 1000)) : '';
-        inp.placeholder = '300';
+        inp.placeholder = f.placeholder || '300';
         inp.dataset.cfg = f.path;
         inp.dataset.kind = 'seconds';
         wrap.append(inp, el('span', 'cfg-unit', '秒'));
@@ -6015,6 +6106,8 @@ async function refresh() {
     state.failed = data.failed || [];
     await loadPluginFiles();
     state.tasks = data.tasks || [];
+    // 排队等执行位的运行（第 227 轮）：任务表末尾的「排队 第 N 位」靠它
+    state.pending = data.pending || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
     // 平台：脚本运行时的默认值、自启动的做法、路径示例都要跟着它变。

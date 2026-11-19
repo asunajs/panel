@@ -68,6 +68,17 @@ async function action(evt) {
   const body = evt.body || {};
   const bag = evt.bag || {};
 
+  // 一次性调用派发过来时没有 evt.action：动作在 evt.params 里（run_once 的 params）。
+  // 用同一个 handler 当目标，是为了不额外注册一条「手动」任务 —— 那会在任务页多一行噪音。
+  const viaParams = evt.params && evt.params.action ? String(evt.params.action) : '';
+  if (!id && viaParams === 'step') {
+    const i = Number((evt.params && evt.params.i) || 0);
+    host.info('一次性调用 #' + i + ' 开始（演示 1.5 秒）');
+    await host.sleep(1500);
+    host.info('一次性调用 #' + i + ' 完成');
+    return { ok: true, message: 'step #' + i + ' 完成' };
+  }
+
   if (id === 'send_code') {
     const account = String(body.account || '').trim();
     if (!account) return { ok: false, error: '先填账号（手机号）' };
@@ -130,6 +141,21 @@ async function action(evt) {
       await saveAccounts(list);
     }
     return { done: true, ok: true, message: '扫码成功（演示）' };
+  }
+
+  // 一次性调用（第 227 轮）：面板只有一条执行位，run_once 是**排队**语义。
+  // 点一下生成 3 条，每条 1.5 秒，依次跑完；任务页主表不新增行，跑完自动消失。
+  if (id === 'fanout') {
+    const n = Math.max(1, Math.min(8, Number(body.n || 3)));
+    const out = [];
+    for (let i = 1; i <= n; i += 1) {
+      const r = await host.run_once('cmd', {
+        params: { action: 'step', i },
+        budget_ms: 30000,
+      });
+      out.push('#' + i + ' 排在第 ' + (r && r.position ? r.position : '?') + ' 位');
+    }
+    return { ok: true, message: '生成了 ' + n + ' 条一次性调用：' + out.join('，') };
   }
 
   if (id === 'ping') return { ok: true, message: '上游可达（演示）' };

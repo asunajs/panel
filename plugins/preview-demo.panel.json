@@ -97,6 +97,11 @@
         "handler": "cmd"
       },
       {
+        "id": "fanout",
+        "label": "生成 3 条一次性调用",
+        "handler": "cmd"
+      },
+      {
         "id": "ping",
         "label": "试连",
         "handler": "cmd"

@@ -53,7 +53,7 @@ impl Stats {
             "heartbeat_ms": self.heartbeat_us.load(Ordering::Relaxed) as f64 / 1000.0,
             "budget_kills": self.budget_kills.load(Ordering::Relaxed),
             "default_budget_ms": crate::scheduler::default_budget_ms(),
-            "max_budget_ms": crate::scheduler::MAX_BUDGET_MS,
+            "max_budget_ms": crate::scheduler::max_budget_ms(),
             // 默认 null（没量到），/api/state 会用量到的值覆盖它。
             "js_memory_bytes": serde_json::Value::Null,
         })

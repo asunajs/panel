@@ -29,7 +29,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | DB | `sqlite_query` / `sqlite_exec` |
 | 网络 | `fetch` |
 | 时间 | `sleep` |
-| 注册 | `register_cron` / `register_handler` |
+| 注册 | `register_cron` / `register_handler` / `run_once`（临时跑一次，不建任务行） |
 | 通知 | `notify(title, body?)` —— 进面板通知列表；配了 `PANEL_NOTIFY_WEBHOOK` 也 POST 出去（见 [notify 一节](#通知)） |
 | 配置 | `config`（**热**：界面上保存后立刻读到新值，见 `config_store.rs`）；`self_config`（**这个插件自己的**配置，见下） |
 | 路径 | `plugin_dir()`（目录式插件自己的目录，单文件插件 `null`）；`plugin_data_dir()`（`plugin-data/<name>/`）—— 给 `node:fs` 拼绝对路径用，见下 |
@@ -133,6 +133,40 @@ register_cron('兑换', '0 10 * * *', 600_000, {
   带上 `lead_ms`，插件据此知道「还没到点，是让我先准备」；
 * 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
 * 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
+
+#### 临时一次性调用：`host.run_once(name, opts)`（第 227 轮）
+
+``````js
+// 想生成几条就几条；数量、每条多长、什么时候，都是插件说了算
+await host.run_once('sign', { params: { account: 1 }, budget_ms: 20 * 60 * 1000 });
+await host.run_once('sign', { params: { account: 2 }, budget_ms: 20 * 60 * 1000 });
+await host.run_once('sign', { params: { account: 3 }, at: Date.now() + 60_000 });
+// → { ok: true, state: 'queued', position: 1 }
+``````
+
+| 键 | 说明 |
+|---|---|
+| `params` | 原样进 `evt.params` |
+| `budget_ms` | 这一次的预算；缺省用默认预算，上限是 `run.budget_max_ms`（默认 90 分钟） |
+| `at` | 毫秒时间戳；缺省 = 立刻。到点才允许开始 |
+
+语义（三条都是硬规则，别指望它并行）：
+
+1. **排队，不是并行**：一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。
+   执行位空出来才跑，位置 `position` 告诉你排在第几（1 = 下一个跑）。
+2. **不建任务行**：临时任务不落库、不进任务页主表；运行记录留着（按 `name` 查得到）。
+   重名自动加序号（`sign` → `sign#2` → `sign#3`），handler 名还是你给的那个。
+3. **跑完自动删**，失败也删，而且**不熔断**（一次性调用没有「下一拍」）。
+
+什么时候该用它、而不是 `register_handler` + `register_cron`：
+
+- 一次性的活（登录后补一次同步、点了按钮才跑的事）；
+- 「一个账号一条」这种数量由数据决定的任务 —— 注册 cron 要给每个账号编一个错开的时间，
+  账号一多就撞车（央视频那个插件：`minute = (i*20)%60` 到第 7 个号就和第 4 个撞了）；
+- 想让每个号各留一条运行记录，而不是一条大 run 里混着 8 个号。
+
+反过来，**周期**任务仍然用 `register_cron`：它有下一次、有熔断、有「落后几拍」的记录，
+这些是一次性调用故意没有的。
 
 #### 面板版本：panel.version() / panel.atLeast()
 

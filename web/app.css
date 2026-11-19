@@ -469,6 +469,9 @@ button, input, select { font: inherit; color: inherit; }
 .mini-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .mini-title { display: flex; align-items: center; gap: 7px; font-weight: 600; }
 .mini-sub { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 排队中的运行（第 227 轮）：它不是任务行，压暗一点，扫一眼就知道「在等」而不是「在跑」。 */
+tbody tr.is-pending > td { color: var(--dim); }
+tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transparent); }
 .mini-right { color: var(--dim); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* ---------- 日志控制台 ---------- */

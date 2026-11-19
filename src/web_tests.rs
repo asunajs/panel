@@ -3102,14 +3102,14 @@ async fn query_params_that_are_typoed_are_rejected() {
     assert_eq!(out["sort"], "id", "{out}");
 }
 
-/// 同一插件同时只允许一个在途调用：第二个请求要 **409 Conflict**（不是 400），
-/// 因为它不是「请求写错了」，而是「现在忙，等会儿再来」。
+/// 同一插件同时只允许一个在途调用，但第二个请求**排队**，不再 409（第 227 轮）。
 ///
-/// 第 69 轮实测：三个并发请求 → 1 个 200 + 2 个 400；改成 409 后客户端能区分
-/// 「重试」和「改参数」两条路。
+/// 第 69 轮是 409「还有任务在跑，本次跳过」：语义没错（确实忙），但用户点了「执行」
+/// 只看到一行报错、事情没发生。现在默认排队：回 200 + `{queued:true, position}`，
+/// 执行位空出来自己跑；`/api/state` 的 `pending` 里能看到它。
 #[tokio::test]
-async fn a_second_run_on_a_busy_plugin_is_a_conflict_not_a_bad_request() {
-    let (app, plugins, _data, _store) = setup_dirs("busy409").await;
+async fn a_second_run_on_a_busy_plugin_queues_instead_of_being_rejected() {
+    let (app, plugins, _data, _store) = setup_dirs("busyqueue").await;
     let src = r#"import host from 'panel:host';
 await host.register_handler('slow', async () => { await host.sleep(1500); });
 "#;
@@ -3117,18 +3117,127 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     let (status, _) = send(&app, with_csrf("POST", "/api/plugins/busy/reload", None)).await;
     assert_eq!(status, StatusCode::OK);
 
+    // 第一次：执行位空着，直接开跑
     let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["run_id"].is_number(), "空的时候应当直接跑: {body}");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let (status, text) = send_text(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
-    assert_eq!(status, StatusCode::CONFLICT, "忙的时候应当是 409: {text}");
-    assert!(text.contains("还有任务在跑"), "要说清为什么: {text}");
+    // 第二次：忙 → 排队（不是 409，也不是静默丢掉）
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "忙的时候要排队而不是报错: {body}");
+    assert_eq!(body["queued"], true, "{body}");
+    assert_eq!(body["position"], 1, "第一个排队的应当是第 1 位: {body}");
 
-    // 跑完之后又能派发（不是永久锁死）
+    // 界面上看得见它（任务行「排队 N」/ 折叠区靠这个字段）
+    let (_, st) = get(&app, "/api/state").await;
+    let pending = st["pending"].as_array().expect("state 要有 pending");
+    assert!(
+        pending
+            .iter()
+            .any(|p| p["plugin"] == "busy" && p["name"] == "slow" && p["position"] == 1),
+        "排队中的应当出现在 state 里: {st}"
+    );
+
+    // 第一条跑完后，排队那条自己接上；队列随之清空（不是永久锁死，也不是丢了）
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    let (_, st) = get(&app, "/api/state").await;
+    assert!(
+        st["pending"].as_array().unwrap().is_empty(),
+        "轮到它之后队列该空: {st}"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
     let (status, body) = send(&app, with_csrf("POST", "/api/tasks/busy/slow/run", None)).await;
     assert_eq!(status, StatusCode::OK, "跑完要能再派: {body}");
+    assert!(body["run_id"].is_number(), "{body}");
+}
+
+/// `host.run_once`：临时生成一次性调用 —— 不建任务行、排队跑、跑完自动删（第 227 轮）。
+#[tokio::test]
+async fn run_once_spawns_one_off_runs_without_leaving_task_rows() {
+    let (app, plugins, _data, _store) = setup_dirs("runonce").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('spawner', async () => {
+  for (let i = 0; i < 3; i += 1) {
+    await host.run_once('one', { params: { i }, budget_ms: 5000 });
+  }
+});
+await host.register_handler('one', async (evt) => { await host.sleep(100); });
+"#;
+    std::fs::write(plugins.join("once.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/once/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/once/spawner/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 排队中的三条要看得见（都在 'one' 这个名字下，重名由面板加序号）
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (_, st) = get(&app, "/api/state").await;
+    let pending = st["pending"].as_array().expect("state 要有 pending");
+    assert!(
+        pending.iter().filter(|p| p["name"] == "one").count() >= 1,
+        "run_once 生成的调用应当排队: {st}"
+    );
+
+    // 跑完之后：临时任务自动删掉，任务页只剩插件注册的那两条
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let (_, st) = get(&app, "/api/state").await;
+    let names: Vec<&str> = st["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["plugin"] == "once")
+        .map(|t| t["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.contains('#')),
+        "临时任务跑完要自动删（不留 one#2 这种行）: {names:?}"
+    );
+    assert!(names.contains(&"one"), "插件注册的那条要留着: {names:?}");
+    assert!(
+        st["pending"].as_array().unwrap().is_empty(),
+        "跑完队列该空: {st}"
+    );
+}
+
+/// 队列满了才拒绝（还是 409），并且说清是「队列满」而不是「插件忙」。
+///
+/// 不用改全局配置（别的用例在同一个进程里并行跑，改配置会串味）：直接顶到默认上限 32。
+#[tokio::test]
+async fn a_full_run_queue_is_still_a_conflict() {
+    let (app, plugins, _data, _store) = setup_dirs("qfull").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('slow', async () => { await host.sleep(4000); });
+"#;
+    std::fs::write(plugins.join("full.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/full/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 第一条占住执行位
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/full/slow/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // 一路排到上限（默认 32），再多一条就该 409
+    let max = crate::config::queue_max();
+    let mut last_err = String::new();
+    let mut rejected = false;
+    for _ in 0..(max + 2) {
+        let (st, text) =
+            send_text(&app, with_csrf("POST", "/api/tasks/full/slow/run", None)).await;
+        if st == StatusCode::CONFLICT {
+            rejected = true;
+            last_err = text;
+            break;
+        }
+        assert_eq!(st, StatusCode::OK, "排队不该报错: {text}");
+    }
+    assert!(rejected, "顶到上限之后应当 409");
+    assert!(
+        last_err.contains("运行队列满了"),
+        "要说清是队列满，而不是「还有任务在跑」: {last_err}"
+    );
 }
 
 /// 进程内告警：`/api/state` 要带出来，`/api/alerts/clear` 要能清。

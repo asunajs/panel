@@ -1711,6 +1711,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         }
     }
     let tasks = st.sched.tasks().await.map_err(internal)?;
+    // 排队等执行位的运行（第 227 轮）：界面上的「排队 N」和「临时调用」折叠区靠它
+    let pending = st.sched.pending().await.map_err(internal)?;
     // JS 内存要拿各 runtime 的锁：给 2ms 的耐心，插件正忙就跳过它。
     // 7 个插件最坏 14ms，而且测量在独立任务里跑（见 scheduler 的 Cmd::Memory）。
     let (js_mem, measured, total) = st.sched.memory(std::time::Duration::from_millis(2)).await;
@@ -1736,6 +1738,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         // 有文件、没禁用、但没加载起来：界面要能说清为什么，并给「重试」。
         "failed": failed_plugins(&st.load_errors),
         "tasks": tasks,
+        // 排队中（手动执行 / 插件的一次性调用）：position=1 是下一个跑
+        "pending": pending,
         "stats": stats,
         // 保留策略：界面上「数据」页要能说清「记录会留多久」（见 retention.rs）。
         "retention": {
@@ -2483,15 +2487,26 @@ async fn task_run(
     // 以前这里直接报「插件还没加载，先点加载」—— 用户点「执行」就是想让事情发生，
     // 让 manual 与 cron 走同一条「用到就装」的路才对。
     sched_ready(&st, &plugin).await?;
-    // 「插件还在跑」「JS 通道满了」是**冲突**（等会儿重试就行），不是请求写错了 —— 409。
-    let run_id = st.sched.run_now(&plugin, &name).await.map_err(|e| {
+    // 第 227 轮：插件正忙不再 409，而是**排队**（回 queued + 位置）。
+    // 只有「队列满了」还是冲突（等会儿重试就行），照旧 409。
+    let out = st.sched.run_now(&plugin, &name).await.map_err(|e| {
         if crate::scheduler::is_busy_error(&e) {
             ApiError::new(StatusCode::CONFLICT, "conflict", e)
         } else {
             bad(e)
         }
     })?;
-    Ok(Json(json!({ "ok": true, "run_id": run_id })))
+    Ok(Json(match out {
+        crate::scheduler::StartOutcome::Started { run_id } => {
+            json!({ "ok": true, "run_id": run_id })
+        }
+        crate::scheduler::StartOutcome::Queued { position } => json!({
+            "ok": true,
+            "queued": true,
+            "position": position,
+            "message": format!("插件正在跑别的任务，这一次排在第 {position} 位"),
+        }),
+    }))
 }
 
 async fn task_pause(
@@ -4288,7 +4303,7 @@ async fn scripts_list(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         "dir": st.scripts_dir.display().to_string(),
         "max_bytes": crate::scripts::FILE_MAX,
         "default_budget_ms": crate::scripts::default_budget_ms(),
-        "max_budget_ms": crate::scripts::MAX_BUDGET_MS,
+        "max_budget_ms": crate::scheduler::max_budget_ms(),
         "scripts": rows,
     })))
 }
