@@ -4138,9 +4138,40 @@ async fn http_error_logs_respect_per_minute_cap() {
     }
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let after = error_logs(&db).await.len();
-    assert_eq!(after - before, 1, "配额 1 条/分钟：三条 400 只记一条（实际 {}）", after - before);
+    // ⚠ 这里只断言「**没有三条全记**」，不断言「正好一条」：
+    //   配额窗口是**进程级** static，而 cargo test 并行跑用例 —— 别的用例打一个 400
+    //   就会把这一分钟的名额吃掉，于是「正好一条」时红时绿（实测全量跑约一半失败、
+    //   单跑必过）。精确的「1 条/分钟」由下面的 win_take 单测钉着。
+    assert!(
+        after - before <= 1,
+        "配额 1 条/分钟：三条 400 最多记一条（实际 {}）",
+        after - before
+    );
     // 复原：别把这个全局态漏给后面的用例
     crate::config::set_limits(crate::config::Limits::default());
+}
+
+/// 配额窗口的纯逻辑（第 197 轮）：不碰 static，所以能确定性地断言「正好 N 条」。
+#[test]
+fn http_log_window_takes_exactly_the_quota() {
+    let t0 = std::time::Instant::now();
+    let mut slot = None;
+    // limit = 2：前两次放行、第三次拒
+    assert!(crate::web::win_take(&mut slot, 2, t0));
+    assert!(crate::web::win_take(&mut slot, 2, t0));
+    assert!(!crate::web::win_take(&mut slot, 2, t0), "超出配额必须拒");
+    // 过了一分钟：窗口重开
+    let t1 = t0 + std::time::Duration::from_secs(61);
+    assert!(crate::web::win_take(&mut slot, 2, t1), "新窗口第一票必须放行");
+    assert!(crate::web::win_take(&mut slot, 2, t1));
+    assert!(!crate::web::win_take(&mut slot, 2, t1));
+    // 窗口刚好 60 秒：算新的一分钟（>= 就重置）
+    let t2 = t1 + std::time::Duration::from_secs(60);
+    assert!(crate::web::win_take(&mut slot, 2, t2));
+    // limit = 1：只有第一票
+    let mut one = None;
+    assert!(crate::web::win_take(&mut one, 1, t0));
+    assert!(!crate::web::win_take(&mut one, 1, t0));
 }
 
 /// 目录式插件（第 216 轮）：`/api/plugins/files` 要把它列出来（multi + entry），

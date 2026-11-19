@@ -26,6 +26,24 @@
 文档层面新增两节：[user/scripts.md](docs/user/scripts.md) 的「脚本 = 你的用户权限（没有围栏，这是设计）」、
 [plugins.md](docs/plugins.md) 的「信任模型」。
 
+### 插件也有自绘的确认框了：`PanelUI.confirm` / `.prompt`（第 197 轮）
+
+四个插件全在用浏览器原生的 `confirm()` / `prompt()` —— 用户截图里就是 macOS 屏幕正中那块
+「localhost:3030 显示 确定删除账号…」。原生框是**另一个窗口**：和面板长得完全不一样，
+在 iframe 里还可能被浏览器拦掉，移动端更难看。面板自己从第 100 轮起就不用了（自绘
+`askConfirm`），但插件一直没有对等的东西可用。
+
+- **`/ui.js` 加了 `PanelUI.confirm()` / `PanelUI.prompt()`**：用面板的 `.dialog*` 画，
+  返回 Promise。支持 `title` / `okLabel` / `danger`；`Esc` = 取消、`Enter` = 确定、
+  点外面 = 取消、关掉后焦点还给原按钮；正文 `\n` 保留换行；`prompt` 空串是有效答案、取消回 `null`。
+- **四个插件全换掉**：yangshipin 1 处、cmcc 2 处、mgmusic 1 处、mcloud 4 处
+  （含一个 `prompt` 改名——mcloud 的 `#ex-sched-list` 监听器顺带改成 `async`）。
+- **门禁**：`ui-kit-check` 加 8 条（把原生 `confirm/alert/prompt` 换成「一调用就抛错」，
+  再验取消/确定/Esc/prompt 四条路径都不碰原生框）；`check-plugin-style.mjs` 加 **R8**
+  （warning，扫 `.js`，跳过字符串字面量与 `PanelUI.confirm`）。
+- 文档：[plugin-ui.md](docs/plugin-ui.md) 补一节、[plugin-contract.md](docs/plugin-contract.md) 加 **R13**、
+  [ui.md](docs/ui.md) 补两行。
+
 ### 弹窗表单对齐了：`.field` 的排布归面板（第 197 轮）
 
 用户截图报的是「表单输入框没对齐」：同一个弹窗里，手机号那格和验证码那格**左边缘、宽度都不一样**。

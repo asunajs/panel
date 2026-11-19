@@ -314,6 +314,63 @@ async function main() {
     !align.error && Math.abs(align.aw - align.bw) <= 1, JSON.stringify(align));
   check('.field 是竖排（标签在上、控件在下）', align.col === 'column', String(align.col));
 
+  // ---------- 确认 / 输入弹窗（PanelUI.confirm / .prompt，第 197 轮）----------
+  // 插件里到处是原生 confirm()/prompt() —— 那是**另一个窗口**，和面板完全不是一个东西
+  // （用户截图里就是 macOS 中间那块「localhost:3030 显示」）。面板自己第 100 轮起就不用了，
+  // 但插件一直没得用；这里把「插件也有自绘的确认框」钉住。
+  const hasApi = JSON.parse(await js(
+    "JSON.stringify({c:typeof PanelUI!=='undefined'&&typeof PanelUI.confirm==='function'," +
+    "p:typeof PanelUI!=='undefined'&&typeof PanelUI.prompt==='function'})"
+  ));
+  check('PanelUI.confirm / .prompt 都在', hasApi.c && hasApi.p, JSON.stringify(hasApi));
+
+  // 把原生 confirm/alert/prompt 换成一调用就抛错 —— 只要插件走了原生框，这几条必红
+  await js("window.__nativeHit=0;for(const k of ['confirm','alert','prompt']){window[k]=()=>{window.__nativeHit++;throw new Error('用了原生 '+k)}}");
+
+  const cancelPath = JSON.parse(await js(
+    "(async()=>{const p=PanelUI.confirm('删掉它？');await new Promise(r=>setTimeout(r,60));" +
+    "const back=document.querySelector('[data-panel-dialog]');const self=!!back;" +
+    "const btns=[...back.querySelectorAll('.dialog-actions .btn')];" +
+    "const title=back.querySelector('.dialog-head').textContent;" +
+    "const text=back.querySelector('.hint').textContent;" +
+    "btns[0].click();const v=await p;" +
+    "return JSON.stringify({self,title,text,v,left:document.querySelectorAll('[data-panel-dialog]').length,native:window.__nativeHit});})()"
+  ));
+  check('confirm 画的是面板自己的 .dialog-back（不是原生框）', cancelPath.self === true && cancelPath.native === 0, JSON.stringify(cancelPath));
+  check('confirm 显示标题 + 正文，点取消返回 false 并收掉弹窗',
+    cancelPath.v === false && cancelPath.left === 0 && cancelPath.text === '删掉它？', JSON.stringify(cancelPath));
+
+  const okPath = JSON.parse(await js(
+    "(async()=>{const p=PanelUI.confirm({text:'真的要删？',okLabel:'删除',danger:true});" +
+    "await new Promise(r=>setTimeout(r,60));const back=document.querySelector('[data-panel-dialog]');" +
+    "const ok=back.querySelector('.btn-danger');const label=ok.textContent;" +
+    "ok.click();return JSON.stringify({v:await p,label,left:document.querySelectorAll('[data-panel-dialog]').length});})()"
+  ));
+  check('confirm 支持 okLabel / danger，点确定返回 true',
+    okPath.v === true && okPath.label === '删除' && okPath.left === 0, JSON.stringify(okPath));
+
+  const escPath = JSON.parse(await js(
+    "(async()=>{const p=PanelUI.confirm('按 Esc 试试');await new Promise(r=>setTimeout(r,60));" +
+    "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));" +
+    "return JSON.stringify({v:await p,left:document.querySelectorAll('[data-panel-dialog]').length});})()"
+  ));
+  check('confirm 按 Esc 等于取消', escPath.v === false && escPath.left === 0, JSON.stringify(escPath));
+
+  const promptPath = JSON.parse(await js(
+    "(async()=>{const p=PanelUI.prompt({title:'起个名字',label:'名字',value:'旧名'});" +
+    "await new Promise(r=>setTimeout(r,60));const back=document.querySelector('[data-panel-dialog]');" +
+    "const input=back.querySelector('input.input');const init=input.value;" +
+    "input.value='新名';back.querySelector('.btn-primary').click();const got=await p;" +
+    "const p2=PanelUI.prompt({value:'x'});await new Promise(r=>setTimeout(r,60));" +
+    "document.querySelector('[data-panel-dialog] .dialog-actions .btn').click();const got2=await p2;" +
+    "return JSON.stringify({init,got,got2,left:document.querySelectorAll('[data-panel-dialog]').length,native:window.__nativeHit});})()"
+  ));
+  check('prompt 回填初值、返回输入内容；取消返回 null',
+    promptPath.init === '旧名' && promptPath.got === '新名' && promptPath.got2 === null && promptPath.left === 0,
+    JSON.stringify(promptPath));
+  check('prompt 也没碰原生框', promptPath.native === 0, String(promptPath.native));
+  await js("delete window.__nativeHit");
+
   // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
   await sleep(1600);

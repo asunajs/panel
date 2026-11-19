@@ -1058,10 +1058,144 @@
   define('p-form', PForm);
   define('p-sms-code', PSmsCode);
 
+  // ---------------------------------------------------------------- 确认 / 输入弹窗
+  //
+  // 为什么要有：插件里到处是 `confirm('确定删除？')` / `prompt('这个账号叫什么？')`。
+  // 那是**浏览器的原生对话框** —— 它是另一个窗口（macOS 上跑到屏幕中间），
+  // 和面板长得完全不一样；在 iframe 里还可能被浏览器拦掉；移动端更是丑得没法看。
+  // 面板自己从第 100 轮起就不用原生框了（自绘 askConfirm），但插件一直没得用。
+  //
+  // 这两个函数用面板自己的 `.dialog*` 画，返回 Promise：
+  //   await PanelUI.confirm('删掉它？')                    → true / false
+  //   await PanelUI.confirm({ text, title, okLabel, danger })
+  //   await PanelUI.prompt({ title, label, value })       → string / null
+  //
+  // ⚠ 别在这两个函数里写业务：它们只负责「问一句、拿答案」，请求归插件。
+  function mountDialog(parts) {
+    const back = document.createElement('div');
+    back.className = 'dialog-back';
+    // 打个标记：页面上可能已经有插件自己的 `<p-dialog>`（也是 .dialog-back），
+    // 测试和插件想「只找确认框」时靠它，别用 document.querySelector('.dialog-back') ——
+    // 那会拿到先出现的那个（第 197 轮门禁自己踩了一次）。
+    back.dataset.panelDialog = parts.kind || 'confirm';
+    const dlg = document.createElement('div');
+    dlg.className = 'dialog';
+    dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-modal', 'true');
+    const head = document.createElement('div');
+    head.className = 'dialog-head';
+    const title = document.createElement('span');
+    title.textContent = parts.title || '确认操作';
+    head.append(title);
+    dlg.append(head);
+    if (parts.text) {
+      const p = document.createElement('p');
+      p.className = 'hint';
+      // 多行文本（插件里常写 '\n'）要保留换行，否则一整段挤成一行
+      p.style.whiteSpace = 'pre-line';
+      p.textContent = parts.text;
+      dlg.append(p);
+    }
+    if (parts.field) dlg.append(parts.field);
+    const acts = document.createElement('div');
+    acts.className = 'dialog-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = parts.cancelLabel || '取消';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn ' + (parts.danger ? 'btn-danger' : 'btn-primary');
+    ok.textContent = parts.okLabel || '确定';
+    acts.append(cancel, ok);
+    dlg.append(acts);
+    back.append(dlg);
+    document.body.append(back);
+    return { back, dlg, cancel, ok };
+  }
+
+  /** 关掉一层弹窗并清理监听。**焦点还给打开它的那个元素** —— 否则键盘用户会被扔回页面顶部。 */
+  function unmount(back, onKey, resolve, value, restore) {
+    back.remove();
+    document.removeEventListener('keydown', onKey, true);
+    if (restore && restore.focus) { try { restore.focus(); } catch (e) { /* 元素可能已经没了 */ } }
+    resolve(value);
+  }
+
+  function dialogCommon(opts, build) {
+    const o = typeof opts === 'string' ? { text: opts } : (opts || {});
+    const restore = document.activeElement;
+    return new Promise((resolve) => {
+      const parts = build(o);
+      const { back, cancel, ok } = mountDialog(parts);
+      const finish = (v) => unmount(back, onKey, resolve, v, restore);
+      const onKey = (ev) => {
+        if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); finish(parts.cancelValue === undefined ? false : parts.cancelValue); }
+        else if (ev.key === 'Enter' && !ev.isComposing) {
+          // 输入框里的回车 = 确定；按钮上的回车交给按钮自己（避免双触发）
+          if (ev.target && ev.target.tagName === 'BUTTON') return;
+          ev.preventDefault(); finish(parts.okValue());
+        }
+      };
+      cancel.addEventListener('click', () => finish(parts.cancelValue === undefined ? false : parts.cancelValue));
+      ok.addEventListener('click', () => finish(parts.okValue()));
+      back.addEventListener('click', (ev) => { if (ev.target === back) finish(parts.cancelValue === undefined ? false : parts.cancelValue); });
+      document.addEventListener('keydown', onKey, true);
+      (parts.focusEl || ok).focus();
+    });
+  }
+
+  function pConfirm(opts) {
+    return dialogCommon(opts, (o) => ({
+      kind: 'confirm',
+      title: o.title,
+      text: o.text,
+      okLabel: o.okLabel,
+      cancelLabel: o.cancelLabel,
+      danger: o.danger,
+      cancelValue: false,
+      okValue: () => true,
+    }));
+  }
+
+  /** 输入框弹窗。返回输入的内容（**空串也算有效答案**），取消返回 null。 */
+  function pPrompt(opts) {
+    return dialogCommon(opts, (o) => {
+      const field = document.createElement('label');
+      field.className = 'field';
+      if (o.label) {
+        const lab = document.createElement('span');
+        lab.className = 'field-label';
+        lab.textContent = o.label;
+        field.append(lab);
+      }
+      const input = document.createElement('input');
+      input.className = 'input';
+      input.type = 'text';
+      input.value = o.value === undefined || o.value === null ? '' : String(o.value);
+      if (o.placeholder) input.placeholder = o.placeholder;
+      input.autocomplete = 'off';
+      field.append(input);
+      return {
+        kind: 'prompt',
+        title: o.title,
+        text: o.text,
+        okLabel: o.okLabel,
+        cancelLabel: o.cancelLabel,
+        field,
+        focusEl: input,
+        cancelValue: null,
+        okValue: () => input.value,
+      };
+    });
+  }
+
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
     theme: () => document.documentElement.getAttribute('data-theme') || 'light',
     setTheme,
     version: '0.4.0',
+    confirm: pConfirm,
+    prompt: pPrompt,
   };
 })();

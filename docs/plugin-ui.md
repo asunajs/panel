@@ -196,6 +196,50 @@ btn.disabled = true; btn.label = '登录中…';   // <p-button> 改字用 .labe
 判据就一句：**同一列里的控件，`getBoundingClientRect().left` 和 `width` 必须一致**。
 `scripts/ui-kit-check.mjs` 有断言钉着（`p-sms-code` vs `.input` 的左边缘、宽度、`.field` 方向）。
 
+### 确认框 / 输入框：`PanelUI.confirm` / `PanelUI.prompt`
+
+**插件里不要用 `confirm()` / `alert()` / `prompt()`。** 那是浏览器自己的窗口 —— macOS 上跑到
+屏幕正中、和面板完全不是一个东西（用户截图里就是那块「localhost:3030 显示 …」），iframe 里
+还可能被浏览器直接拦掉，移动端更难看。面板从第 100 轮起就不用原生框了，插件现在也有：
+
+```js
+// 确认：返回 true / false
+if (!(await PanelUI.confirm('删掉它？'))) return;
+
+// 带标题 / 按钮名 / 危险色
+const ok = await PanelUI.confirm({
+  title: '删除账号',
+  text: '确定删除「央视频-8000」？\n本地保存的登录凭证会被清除。',
+  okLabel: '删除',
+  danger: true,          // 确定键用 .btn-danger
+});
+if (!ok) return;
+
+// 输入：返回字符串（**空串是有效答案**），取消返回 null
+const name = await PanelUI.prompt({
+  title: '给账号起个名字',
+  label: '名字',
+  text: '留空就回落成手机号。',
+  value: a.label || '',
+  okLabel: '保存',
+});
+if (name === null) return;   // 用户点了取消
+```
+
+| 行为 | 说明 |
+|---|---|
+| 长相 | 用面板的 `.dialog-back` / `.dialog` / `.dialog-actions`，和 `<p-dialog>` 一模一样 |
+| 键盘 | `Esc` = 取消，`Enter` = 确定（在输入框里也一样）；焦点自动落在确定键 / 输入框 |
+| 点外面 | 等于取消 |
+| 焦点归位 | 关掉后焦点还给打开它的那个按钮（键盘用户不会被扔回页面顶部） |
+| 多行 | 正文里的 `\n` 保留换行（`white-space: pre-line`） |
+| 标记 | 根节点带 `data-panel-dialog="confirm|prompt"` —— 页面上已有 `<p-dialog>` 时用它定位 |
+
+`alert()` 没有对应物：面板的语言是「页面内的提示条」（插件自己的 `.hint` / toast），
+不要为了说一句话弹一个模态框。
+
+`scripts/check-plugin-style.mjs` 的 **R8** 会提示原生 `confirm(` / `alert(` / `prompt(`（warning）。
+
 ### 发码格（`p-sms-code`）
 
 「手机号 + 行内『获取验证码』」是**同一个控件**，别再各画一遍：

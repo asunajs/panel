@@ -1404,15 +1404,28 @@ fn http_log_allowed() -> bool {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let now = std::time::Instant::now();
-    let slot = g.get_or_insert((now, 0));
-    if now.duration_since(slot.0) >= std::time::Duration::from_secs(60) {
-        *slot = (now, 0);
+    win_take(&mut g, limit, std::time::Instant::now())
+}
+
+/// 配额窗口的**纯逻辑**：给一个「起点 + 已记条数」，判这一次能不能记。
+///
+/// 抽出来是为了能确定性地测：`http_log_allowed` 用的是**进程级** static 窗口，
+/// 而 `cargo test` 是并行跑用例的 —— 别的用例打一个 400 就会把这一分钟的名额吃掉，
+/// 于是「三条只记一条」那条用例时红时绿（第 197 轮实测：全量跑约一半概率失败，
+/// 单跑必过）。窗口逻辑本身在这里单测，走 HTTP 的那条只验「不会三条全记」。
+pub(crate) fn win_take(
+    slot: &mut Option<(std::time::Instant, u32)>,
+    limit: u32,
+    now: std::time::Instant,
+) -> bool {
+    let s = slot.get_or_insert((now, 0));
+    if now.duration_since(s.0) >= std::time::Duration::from_secs(60) {
+        *s = (now, 0);
     }
-    if slot.1 >= limit {
+    if s.1 >= limit {
         return false;
     }
-    slot.1 += 1;
+    s.1 += 1;
     true
 }
 

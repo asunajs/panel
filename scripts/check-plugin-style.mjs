@@ -32,6 +32,9 @@ const ALLOW = 'style-lint: allow-color';
  *  （cmcc 的短信登录就是这样），控件那格的输入框根本不出现。 */
 const ALLOW_SMS = 'style-lint: allow-sms-handroll';
 
+/** 原生对话框的豁免标记（一般不该用：见 R8）。 */
+const ALLOW_DIALOG = 'style-lint: allow-native-dialog';
+
 const problems = [];
 const warnings = [];
 const files = [];
@@ -41,7 +44,7 @@ function walk(dir) {
     const p = path.join(dir, name);
     const st = statSync(p);
     if (st.isDirectory()) walk(p);
-    else if (/\.(css|html)$/.test(name)) files.push(p);
+    else if (/\.(css|html|js)$/.test(name)) files.push(p);
   }
 }
 
@@ -122,6 +125,40 @@ for (const file of files) {
   // ⚠ 这里原来还有一条 R6「必须有 --style-ver」—— 那是插件项目产物上的一个自检标记，
   // 不属于面板的准则（而且 plugins/ 是产物，产物形态由插件项目决定）。删掉，
   // 免得它拦住正常部署。
+}
+
+// R8 原生对话框（第 197 轮）：插件里不许再用 confirm() / alert() / prompt()。
+//
+// 为什么：那是**浏览器自己的窗口** —— macOS 上跑到屏幕正中、和面板完全不是一个东西
+// （用户截图就是那块「localhost:3030 显示 …」），iframe 里还可能被浏览器直接拦掉。
+// 面板自己第 100 轮起就不用了（自绘 askConfirm），插件现在也有：`PanelUI.confirm()` /
+// `PanelUI.prompt()`（都在 /ui.js 里，返回 Promise）。
+//
+// 只提醒不拦部署：`alert()` 在某些调试分支里无害，但正经的交互都该换掉。
+for (const file of files) {
+  if (!file.endsWith('.js')) continue;
+  const raw = readFileSync(file, 'utf8');
+  if (raw.includes(ALLOW_DIALOG)) continue;
+  // 抹掉字符串字面量再找：`'confirm( 只是提示文案'` 不该被当成调用（试过，会误报）。
+  const text = stripComments(raw)
+    .split('\n')
+    .map((line) => line.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, '``'));
+  for (let i = 0; i < text.length; i += 1) {
+    // 只看「裸调用」：`window.confirm(` / `confirm(`；跳过 `askConfirm(` / `PanelUI.confirm(`
+    const m = /(?:^|[^.\w$])(window\.)?(confirm|alert|prompt)\s*\(/.exec(text[i]);
+    if (!m) continue;
+    if (/askConfirm|PanelUI\.\s*$/.test(text[i].slice(0, m.index + (m[0] || '').length))) continue;
+    warnings.push({
+      file: path.relative(ROOT, file),
+      line: i + 1,
+      rule: 'R8 原生对话框',
+      why: '用了浏览器的原生 `' + m[2] + '()` —— 那是另一个窗口，和面板长得完全不一样；'
+        + 'iframe 里还可能被浏览器拦掉。',
+      fix: '换成面板的：`await PanelUI.confirm({text, okLabel, danger})` → true/false；'
+        + '`await PanelUI.prompt({title, label, value})` → 字符串 / null（都在 /ui.js）。'
+        + '真要保留原生框就写注释 ' + ALLOW_DIALOG + ' 理由。',
+    });
+  }
 }
 
 // R7 手搓发码格（第 195 轮）：面板早就把「手机号 + 行内获取验证码 + 重发倒计时」做成
