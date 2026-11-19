@@ -397,6 +397,14 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 插件里读它用 `await host.self_config()`（和面板级的 `host.config()` 分开，理由见
 [host-api.md](host-api.md#两份配置第-89-轮)）。界面入口：插件卡片上的「配置」。
 
+**写配置要不要重载**（第 196 轮）：`PUT` 的 body 是 `{text, reload}`，`reload` 缺省 `true`。
+`host.self_config()` 是**每次调用都读盘**的，所以「用到才读」的插件不需要重载 ——
+而重载要付一次 unload+load：`Cmd::Unload` 第一件事就是 `invocation().stop()`，
+在跑的任务当场被打断、排队的请求直接失败。这类插件传 `reload:false`（回 `skipped:true`，
+和「重载失败」的 `reloaded:false` 分得开）。界面里就是配置抽屉那个勾选，默认勾着（老行为）。
+声明式页面（`panel.json` 的 `config.fields`）保存时**总是** `reload:false`：
+那一页的每个动作都把表单值随事件带给插件，保存只为下次回填。
+
 #### 2.2 宿主 API（插件能力）
 
 | 旧 | 我们 | 影响 |

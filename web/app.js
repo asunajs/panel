@@ -2041,6 +2041,10 @@ function buildSchemaForm(fields, cfg) {
   return { node, readFrom, collect };
 }
 
+// 「保存后重载」这个偏好记在本机（第 196 轮）：它是**用户**对「我的插件怎么读配置」的判断，
+// 换插件也该沿用，所以不放内存、不跟插件走。
+const NORELOAD_KEY = 'panel.cfgNoReload';
+
 async function openPluginConfig(name) {
   state.drawerKind = 'plugin';
   state.drawerPlugin = name;
@@ -2113,19 +2117,32 @@ async function openPluginConfig(name) {
   box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
   box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
 
+  // 保存后要不要重载这个插件（第 196 轮）。默认重载：有些插件在加载期读一次就缓存了。
+  // 取消勾选 = 只落盘 —— 用在「每次调用都重新读 self_config()」的插件上：省掉一次
+  // unload+load，而那次重载会打断它在跑的任务、让排队的请求失败。
+  const reloadBox = el('input');
+  reloadBox.type = 'checkbox';
+  reloadBox.dataset.reload = '1';
+  reloadBox.checked = localStorage.getItem(NORELOAD_KEY) !== '1';
+  const reloadRow = el('label', 'hint cfg-reload');
+  reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件（取消勾选 = 只落盘，插件下次 self_config() 才看到新值）'));
+  box.append(reloadRow);
+
   save.addEventListener('click', async () => {
     save.disabled = true;
     const text = fields.length && !form.classList.contains('hidden')
       ? JSON.stringify(collect(), null, 2)
       : ta.value;
     try {
+      const reload = reloadBox.checked; // 勾着 = 重载（老行为）
       const r = await api('/api/plugins/' + encodeURIComponent(name) + '/config', {
         method: 'PUT',
-        body: { text },
+        body: { text, reload },
       });
-      notify(r.reloaded === false
-        ? '配置已保存，但插件重载失败：' + (r.error || '')
-        : '配置已保存，插件已重载', r.reloaded === false ? 'err' : 'ok');
+      try { localStorage.setItem(NORELOAD_KEY, reload ? '0' : '1'); } catch (e) { /* 无痕模式 */ }
+      if (r && r.skipped) notify('配置已保存（未重载）', 'ok');
+      else if (r && r.reloaded === false) notify('配置已保存，但插件重载失败：' + (r.error || ''), 'err');
+      else notify('配置已保存，插件已重载', 'ok');
       await refresh();
     } catch (e) {
       notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');
@@ -2465,13 +2482,17 @@ async function saveDeclaredConfig(ctx, btn) {
   btn.disabled = true;
   try {
     const values = ctx.form ? ctx.form.collect(ctx.cfg) : Object.assign({}, ctx.cfg);
+    // reload:false —— 声明式页的每个动作都把表单值随事件带给插件（evt.body），
+    // 所以保存只是为了下次打开时能回填；重载反而会把这页的插件实例换掉（正在跑的轮询会断）。
     const r = await api('/api/plugins/' + encodeURIComponent(ctx.name) + '/config', {
       method: 'PUT',
-      body: { text: JSON.stringify(values, null, 2) },
+      body: { text: JSON.stringify(values, null, 2), reload: false },
     });
-    notify(r.reloaded === false
-      ? '配置已保存，但插件重载失败：' + (r.error || '')
-      : '配置已保存', r.reloaded === false ? 'err' : 'ok');
+    if (r && r.reloaded === false && !r.skipped) {
+      notify('配置已保存，但插件重载失败：' + (r.error || ''), 'err');
+    } else {
+      notify('配置已保存（未重载）', 'ok');
+    }
     ctx.cfg = values;
   } catch (e) {
     notify(e instanceof Unauthorized ? '需要令牌' : (e.message || '保存失败'), 'err');

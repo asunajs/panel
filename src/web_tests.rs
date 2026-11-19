@@ -4501,3 +4501,49 @@ async fn config_save_rejects_a_broken_prefix_proxy() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body["error"].as_str().unwrap_or("").contains("前缀"), "{body}");
 }
+
+/// 第 196 轮：`reload:false` —— 只落盘、不重载这个插件。
+///
+/// 为什么要有这条路：面板这条写配置的路必须重载（有些插件加载期读一次就缓存），
+/// 而 `host.self_config()` 其实是**每次调用都读盘**的，所以「用到才读」的插件
+/// 白挨一次 unload+load —— 那会把在跑的任务打断、让排队的请求失败。
+/// 这条用例钉住回执：`skipped:true` 与「重载失败」的 `reloaded:false` 必须分得开，
+/// 否则界面会把「没重载」说成「重载失败」。
+#[tokio::test]
+async fn plugin_config_can_skip_the_reload() {
+    let (app, plugins, data, _store) = setup_dirs("plugin-cfg-noreload").await;
+    std::fs::write(
+        plugins.join("p2.js"),
+        "import host from 'panel:host';\nawait host.info('p2 起来了');\n",
+    )
+    .unwrap();
+
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/plugins/p2/config",
+            Some(json!({ "text": "{\"a\":2}", "reload": false })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["skipped"], json!(true), "要如实说「没重载」");
+    assert_eq!(body["reloaded"], json!(false));
+    assert_eq!(body["error"], json!(null), "没重载不是失败，别回错误");
+    let raw = std::fs::read_to_string(data.join("plugin-data/p2/config.json")).unwrap();
+    assert_eq!(raw, "{\"a\":2}", "文本原样落盘");
+
+    // 不传 reload = 老行为（重载），回 skipped:false
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "PUT",
+            "/api/plugins/p2/config",
+            Some(json!({ "text": "{\"a\":3}" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["skipped"], json!(false), "缺省必须是重载");
+}

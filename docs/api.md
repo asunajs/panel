@@ -576,3 +576,30 @@ PUT   /api/notify                      ← 整段 notify               → { ok,
 - **删渠道被引用 → 409**，`error` 里列出引用它的推送；删推送永远不碰渠道。
 - **老配置**（只有 `channels`）读出来会合成 `<id>-default` 推送；任何写操作会先物化再改。
 - `PUT /api/notify` 与 `PATCH /api/notify/settings` 都做语义校验，**坏配置不落盘**（400）。
+
+## 写插件配置：`reload` 这个开关（第 196 轮）
+
+`PUT /api/plugins/{name}/config` 的 body：
+
+| 字段 | 类型 | 缺省 | 说明 |
+|---|---|---|---|
+| `text` | string | 必填 | 整份配置的 JSON 文本（必须是对象；上限 `PANEL_CONFIG_MAX_BYTES`） |
+| `reload` | bool | `true` | 写完是否 **unload + load** 这个插件 |
+
+回执：
+
+| 字段 | 说明 |
+|---|---|
+| `ok` | 写盘成功就是 `true` |
+| `skipped` | `true` = 明确要求不重载（不是失败） |
+| `reloaded` | 插件现在是不是新装的那一份。`skipped` 时恒为 `false@@ |
+| `error` | 重载失败的原因；`skipped` 时是 `null` |
+| `path` | 落盘路径（`plugin-data/<name>/config.json`，0600） |
+
+为什么要有 `reload:false`：`host.self_config()` 每次调用都读盘，所以「用到才读」的插件
+写完就能看到新值；而重载的代价是 `Cmd::Unload` → `invocation().stop()` ——
+在跑的任务当场被打断，排队的请求直接失败。界面：插件配置抽屉里的「保存后重载插件」，
+默认勾着（= 老行为），取消后保存会提示「配置已保存（未重载）」。
+
+`skipped` 和 `reloaded:false` 必须分得开：前者是「按你的要求没重载」，后者是
+「重载了但失败了」—— 混在一起，界面会把一次成功的保存说成失败（这条有单测）。

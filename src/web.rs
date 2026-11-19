@@ -3821,12 +3821,25 @@ async fn plugin_config_get(
 #[serde(deny_unknown_fields)]
 struct PluginConfigBody {
     text: String,
+    /// `reload: false` = 只落盘、不重载这个插件（第 196 轮）。
+    ///
+    /// 为什么要有它：配置写入有两条路 —— 面板这条（通用，写完必须重载，因为**有些**插件
+    /// 在加载期读一次就缓存了）和插件自己的路由（热生效，但插件得自己实现）。
+    /// 而 `host.self_config()` 是**每次调用都读盘**的（hostapi.rs 的 op_self_config），
+    /// 所以「用到才读」的插件根本不需要重载；重载反而要付一次 unload+load 的代价：
+    /// 在跑的任务当场被打断（Cmd::Unload 第一件事就是 invocation().stop()），
+    /// 排队的请求直接失败。这个开关把那类插件从代价里摘出来。
+    ///
+    /// 缺省 = true（行为与以前一致：不传就是重载）。
+    #[serde(default)]
+    reload: Option<bool>,
 }
 
 /// `PUT /api/plugins/{name}/config` —— 写插件自己的配置（body 是 `{text: "<json>"}`，和面板配置一致）。
 ///
-/// 写完**重载这个插件**：配置是插件在加载期读的（`host.self_config()`），不重载就得等下次。
+/// 写完**默认重载这个插件**：有些插件在加载期读一次配置就缓存了，不重载就得等下次。
 /// 重载失败不影响配置已经写进去 —— 要如实回 `reloaded:false` 和原因。
+/// 传 `reload:false` 可以只落盘（回 `skipped:true`）—— 见 PluginConfigBody 上的说明。
 async fn plugin_config_put(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -3859,6 +3872,23 @@ async fn plugin_config_put(
     write_atomic(&path, body.text.as_bytes(), Some(0o600))
         .await
         .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
+    // reload:false = 只落盘。用在「插件每次调用都重新读 self_config()」的场合 ——
+    // 那种插件不重载也能立刻看到新值，而重载会打断它在跑的任务、让排队请求失败。
+    if body.reload == Some(false) {
+        st.log.emit(
+            "panel",
+            None,
+            crate::log::Level::Info,
+            format!("插件 {name} 的配置已更新（{bytes} 字节，未重载）"),
+        );
+        return Ok(Json(json!({
+            "ok": true,
+            "reloaded": false,
+            "skipped": true,
+            "error": Value::Null,
+            "path": path.display().to_string(),
+        })));
+    }
     // 重载：配置是加载期读的，不重载就要等下次。失败要说出来，不能吞。
     // 重载 = 先卸载再按磁盘上的源码装回去（和 /reload 同一条路）。
     let source = read_source(&st.plugins_dir, &name).await?;
@@ -3879,6 +3909,7 @@ async fn plugin_config_put(
     Ok(Json(json!({
         "ok": true,
         "reloaded": reloaded.is_none(),
+        "skipped": false,
         "error": reloaded,
         "path": path.display().to_string(),
     })))

@@ -861,6 +861,18 @@ async function main() {
       /plugin-data/.test(cfgState.path),
     JSON.stringify(cfgState) + ' ' + cfgOpened,
   );
+
+  // 第 196 轮：抽屉里的「保存后重载」勾选。默认勾上（= 老行为）；取消 = 只落盘。
+  // 后端两种回执不同（reloaded / skipped），前端提示也要分得开。
+  const reloadState = JSON.parse(await js(`JSON.stringify((()=>{
+    const b = document.querySelector('#drawer-config input[data-reload]');
+    return { has: !!b, checked: b ? b.checked : null, label: b ? b.parentElement.textContent.trim() : '' };
+  })())`));
+  check(
+    '配置抽屉有「保存后重载」勾选，默认勾上',
+    reloadState.has && reloadState.checked === true && /重载/.test(reloadState.label),
+    JSON.stringify(reloadState),
+  );
   await js(`(()=>{
     const ta = document.querySelector('#drawer-config textarea.editor');
     ta.value = JSON.stringify({ hello: 1 }, null, 2);
@@ -869,6 +881,27 @@ async function main() {
   await sleep(1800);
   const cfgToast = await lastMsg();
   check('保存插件配置后提示已保存并重载', /配置已保存/.test(cfgToast || ''), cfgToast);
+
+  // 等第一次保存后的 refresh 落地（保存按钮在 finally 里才恢复可点）—— 否则点到的是
+  // 还没复位的按钮，什么都不会发生（这一条就是被它咬了一次）。
+  for (let i = 0; i < 40; i += 1) {
+    const ready = await js(
+      "(()=>{const b=[...document.querySelectorAll('#drawer-config .actions button')].find((x)=>x.textContent.includes('保存'));return !!b && !b.disabled;})()",
+    );
+    if (ready) break;
+    await sleep(150);
+  }
+  await js(`(()=>{
+    const b = document.querySelector('#drawer-config input[data-reload]');
+    b.checked = false;
+    const ta = document.querySelector('#drawer-config textarea.editor');
+    ta.value = JSON.stringify({ hello: 2 }, null, 2);
+    [...document.querySelectorAll('#drawer-config .actions button')].find((x) => x.textContent.includes('保存')).click();
+  })()`);
+  await sleep(1500);
+  const noReloadToast = await lastMsg();
+  check('取消勾选后保存 = 只落盘（提示未重载）', /未重载/.test(noReloadToast || ''), noReloadToast);
+
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
 
@@ -1733,7 +1766,7 @@ async function main() {
   );
   check('预算输入框没有原生步进器（appearance: textfield）', budgetAppearance === 'textfield', String(budgetAppearance));
 
-  // 侧栏溢出（第 195 轮，用户截图报「插件界面加载太多后，菜单栏溢出了」）：
+  // 侧栏溢出（第 196 轮，用户截图报「插件界面加载太多后，菜单栏溢出了」）：
   // 侧栏是 100vh 的 flex 列，插件入口一多就把底部的「引擎正常 / 版本 / 令牌」顶出视口 ——
   // 那几样恰恰是一直要看的。修法是品牌与底部固定、中间段 `flex:1; min-height:0; overflow-y:auto`。
   // 这里故意把插件入口塞到 14 条、再把视口压到 620 高，钉住三件事：

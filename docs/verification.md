@@ -704,3 +704,38 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 - 暗色主题下同一套 token，无新增颜色字面量（`check-css-tokens.py`：36 个变量、681 处引用）。
 
 门禁：`ui-check` **208**（+5：两栏、限宽、勾选框 16px、多行文本高度、提示列与虚线）、`gate.sh fast` 全绿。
+
+## 第 196 轮：写插件配置可以不重载（2026-11-19）
+
+起因：用户问「为啥有两个目的一样过程不一样的 api」—— 面板的 `PUT /api/plugins/{n}/config`
+和插件自己的 `POST /plugins/{n}/api/config`（mgmusic 那条）都写同一份
+`plugin-data/<n>/config.json`，但前者会 unload+load、后者热生效。
+
+查下来两者不是重复，但**面板那条的代价可以去掉**：`host.self_config()` 是每次调用都读盘的
+（`hostapi.rs` 的 `op_self_config` → `config::load_plugin`），所以「用到才读」的插件
+根本不需要重载；而重载第一件事就是 `invocation().stop()`（`scheduler.rs` 的 `Cmd::Unload`），
+在跑的任务当场断、排队的请求直接失败。
+
+改动：
+
+- `PUT /api/plugins/{name}/config` 的 body 加 `reload`（缺省 true = 老行为）。
+  `reload:false` 只落盘，回 `{ok:true, reloaded:false, skipped:true, error:null, path}`。
+- `skipped` 与 `reloaded:false`（重载失败）分开 —— 混在一起界面会把成功的保存说成失败。
+- 配置抽屉加「保存后重载插件」勾选（默认勾上，偏好记在本机 localStorage）。
+- 声明式页面保存**总是** `reload:false`：那一页每个动作都把表单值随事件带给插件，
+  保存只为下次回填，重载反而会把这页的插件实例换掉（正在跑的轮询会断）。
+
+读数（`cargo test` + 无头 Edge 走查）：
+
+| 检查 | 结果 |
+|---|---|
+| 单测 `plugin_config_can_skip_the_reload` | `skipped:true` / `reloaded:false` / `error:null`，文本原样落盘；不传 reload 回 `skipped:false` |
+| 界面：抽屉勾选默认值 | 勾着（= 重载，老行为） |
+| 界面：取消勾选后保存 | 提示「配置已保存（未重载）」，插件实例没换 |
+| 界面：勾着保存 | 提示「配置已保存，插件已重载」 |
+| `scripts/ui-check.mjs` | 214 条全过（新增 2 条：勾选默认值、只落盘提示） |
+
+踩到一个自己埋的坑（记在这，省下一个人的时间）：前端第一版把语义写反了
+（`const reload = !reloadBox.checked`），于是「取消勾选」保存出来的是「已重载」。
+ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当场抓住；如果只断
+「保存成功」，这个反了的分支会一路绿灯。
