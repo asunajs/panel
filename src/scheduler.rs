@@ -3804,8 +3804,17 @@ impl Inner {
         // 成功也通知（第 198 轮）：有人只想「跑完告诉我一声」，或者只订某个插件的每次运行。
         // 但成功是高频事件，**先问一句有没有人订阅**再记 —— 否则每次运行都往铃铛表塞一条，
         // 500 条上限几天就滚完，真故障反而被挤掉。
+        //
+        // 内部运行不发（第 227 轮）：一次性调用（ephemeral）和内部任务（hidden）是插件自己的
+        // 实现细节 —— 央视频 8 个账号各发一条 = 8 条推送，ServerChan 直接被灌满（现场）。
+        // 失败照发：那才是要人来看的。
+        let internal = self
+            .find(plugin, task)
+            .map(|i| self.tasks[i].ephemeral || self.tasks[i].hidden)
+            .unwrap_or(false);
         if error.is_none()
             && !cancelled
+            && !internal
             && crate::notify::wants_event(&self.config, "task_ok", plugin)
         {
             // ⚠ 用收尾时算好的时长，不要用 `now - last_run`：后者在 advance 里刚被

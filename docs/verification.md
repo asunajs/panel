@@ -741,6 +741,24 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当场抓住；如果只断
 「保存成功」，这个反了的分支会一路绿灯。
 
+## 第 227 轮（还续）：内部运行成功不发通知
+
+用户截图：铃铛里连着「任务 sign#3 成功」「任务 sign#2 成功」「任务 daily 成功」——
+「这样噪音太大，每账号都发一次，我想推送也是会被轰炸吧」。他的 ServerChan 渠道 `events: []`（全收），
+所以每一趟 8 个号 = 8 条推送。
+
+改法：`finish()` 里判 `ephemeral || hidden` —— 内部运行**成功不通知**，失败照发。
+看得见的任务（`daily` 这种）照旧。
+
+守它的用例：`internal_runs_do_not_notify_on_success`（配一条 `events:[task_ok,task_fail]` 的 webhook 路由，
+跑一条普通任务 + 一条 hidden 任务，断言 `notifications` 里只有前者）。
+
+### 读数（这一节）
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test` | **536 过** |
+
 ## 第 227 轮（再续）：内部任务不该在任务页露面
 
 用户看到任务页里三行（`daily` / `daily1` / @@daily2`，外加一行 `sign`），回了一句

@@ -3152,6 +3152,62 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
+/// 内部运行成功**不发通知**（第 227 轮）：一次性调用和 hidden 任务是插件自己的实现细节。
+///
+/// 现场：央视频 8 个账号各跑一条 `sign` → 8 条「任务 sign#N 成功」推进 ServerChan。
+/// 失败照发 —— 那才是要人来看的。
+#[tokio::test]
+async fn internal_runs_do_not_notify_on_success() {
+    let (app, plugins, _data, store, db) = setup_core("noisyok").await;
+    // 有人订了 task_ok：老配置里 `events: []` 就是全收，这里显式写出来
+    store.set(&json!({
+        "notify": {
+            "channels": [{ "id": "c", "name": "c", "kind": "webhook",
+                           "url": "http://127.0.0.1:9/hook", "enabled": true }],
+            "routes": [{ "id": "r", "name": "r", "channel": "c", "enabled": true,
+                         "events": ["task_ok", "task_fail"] }]
+        }
+    }));
+    let src = r#"import host from 'panel:host';
+await host.register_handler('visible', async () => {}, 5000);
+await host.register_handler('hidden1', async () => {}, 5000, { hidden: true });
+"#;
+    std::fs::write(plugins.join("n.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/n/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 一条用户看得见的任务 + 一条内部任务，都跑一遍
+    let (status, _) = send(&app, with_csrf("POST", "/api/tasks/n/visible/run", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (status, _) = send(&app, with_csrf("POST", "/api/tasks/n/hidden1/run", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let rows: Vec<(String, String)> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT task, title FROM notifications ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().any(|(t, _)| t == "visible"),
+        "看得见的任务成功还是要通知: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|(t, _)| t != "hidden1"),
+        "内部任务成功不该发通知: {rows:?}"
+    );
+}
+
 /// 内部 handler（`{hidden:true}`）：能按名字跑、能带 params，但**不在任务页露面**（第 227 轮）。
 ///
 /// 起因：插件把一次性调用当内部实现（央视频的 `sign`）时，任务页会多出一行没人看得懂的
