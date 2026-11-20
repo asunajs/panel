@@ -216,6 +216,13 @@ struct Task {
     /// 它照样出现在任务表里（用户能看见、能暂停、能改计划），但不派发 —— 没有 JS 运行时，
     /// 派发只会炸。插件被唤醒/手动加载后，真正的 register_cron 会按同名替换掉它（lazy 归 false）。
     lazy: bool,
+    /// 注册时就声明「这条默认暂停」（第 227 轮）。内存态，不落库。
+    ///
+    /// 为什么需要：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，
+    /// 两条队列**没有顺序保证** —— 插件里「先注册再暂停」实测会被注册那一下按库里的
+    /// `enabled` 覆盖回来（央视频的 daily1 就这么漏成了「启用」）。
+    /// 有了它，暂停和注册是同一个动作，天然有序；插件每次加载都会重新声明，所以不用落库。
+    force_paused: bool,
     /// 真正要调的 handler 名（第 227 轮）。None = 和任务名一样。
     ///
     /// 为什么需要它：一次性调用的任务名要唯一（重名加 `#2`），但 handler 名是插件给的那个。
@@ -363,6 +370,7 @@ impl Task {
             lead_ms,
             lead_override: false,
             handler: None,
+            force_paused: false,
             params,
             schedule: Some(schedule),
             budget_ms: budget_ms.clamp(1, max_budget_ms()),
@@ -403,6 +411,7 @@ impl Task {
             lead_ms: 0,
             lead_override: false,
             handler: None,
+            force_paused: false,
             params: None,
             schedule: None,
             budget_ms: budget_ms.max(1),
@@ -449,6 +458,7 @@ impl Task {
             lead_ms: 0,
             lead_override: false,
             handler: Some(handler),
+            force_paused: false,
             params,
             schedule: None,
             budget_ms: budget_ms.clamp(1, max_budget_ms()),
@@ -2691,7 +2701,12 @@ impl Inner {
         let Some(s) = self.saved.get(&key).cloned() else {
             return;
         };
-        self.tasks[i].enabled = s.enabled;
+        // force_paused 是插件**这次加载**的声明，比库里的 enabled 优先
+        self.tasks[i].enabled = if self.tasks[i].force_paused {
+            false
+        } else {
+            s.enabled
+        };
         // 墓碑优先于插件注册：用户删过的任务，插件再注册也不复活（第 178 轮）
         self.tasks[i].deleted_at = s.deleted_at;
         // 第 180 轮：库里的「建议」和「待采纳」也认 —— 重启后没加载插件时靠它们显示
@@ -3033,15 +3048,30 @@ impl Inner {
                 self.sidebar.insert(plugin.clone(), NavEntry { title, order });
                 self.note_surface_async(&plugin);
             }
-            Registration::Handler { plugin, name, budget_ms } => {
+            Registration::Handler {
+                plugin,
+                name,
+                budget_ms,
+                paused,
+            } => {
+                // 第 227 轮：注册时就能说「这条默认暂停」（见 Task.force_paused 的注释）。
+                if paused {
+                    if let Some(i) = self.find(&plugin, &name) {
+                        self.tasks[i].force_paused = true;
+                        self.tasks[i].enabled = false;
+                    }
+                }
                 if self.find(&plugin, &name).is_none() {
                     // 预算来自插件注册时的声明（0.4.1 起 register_handler 的第三个参数），
                     // 与 register_cron 同一钳法：长链路的手动任务在注册时就要说清楚。
-                    self.tasks.push(Task::manual(
+                    let mut t = Task::manual(
                         plugin.clone(),
                         name.clone(),
                         budget_ms.clamp(1, max_budget_ms()),
-                    ));
+                    );
+                    t.force_paused = paused;
+                    t.enabled = !paused;
+                    self.tasks.push(t);
                     // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
                     // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
                     // 随后同名 register_cron 的 apply_saved 就读不回来了 ——

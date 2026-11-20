@@ -3152,6 +3152,62 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
+/// `register_handler(name, fn, budget, {paused:true})`：注册即暂停（第 227 轮）。
+///
+/// 为什么需要这个开关：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，
+/// 两条队列**没有顺序保证** —— 插件里「先注册再暂停」实测会被注册那一下按库里的
+/// enabled 覆盖回来（央视频的 daily1 就这么漏成了「启用」，定时照跑）。
+#[tokio::test]
+async fn register_handler_can_declare_a_task_paused() {
+    let (app, plugins, _data, _store) = setup_dirs("regpaused").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('manual', async () => {}, 5000, { paused: true });
+await host.register_cron('daily', '10 5,17 * * *', 120000);
+await host.register_handler('daily', async () => {}, 120000, { paused: true });
+await host.register_handler('live', async () => {}, 5000);
+"#;
+    std::fs::write(plugins.join("p.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/p/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, st) = get(&app, "/api/state").await;
+    let pick = |n: &str| {
+        st["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == n)
+            .cloned()
+    };
+    let manual = pick("manual").expect("manual 任务应当在");
+    assert_eq!(manual["enabled"], false, "声明了 paused 就该是暂停: {manual}");
+    let daily = pick("daily").expect("daily 任务应当在");
+    assert_eq!(
+        daily["enabled"], false,
+        "同名 cron+handler 也要保持暂停: {daily}"
+    );
+    let live = pick("live").expect("live 任务应当在");
+    assert_eq!(live["enabled"], true, "没声明 paused 的不该被动: {live}");
+
+    // 再重载一次：库里存的仍是 enabled=1，force_paused 必须继续压住它
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/p/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, st) = get(&app, "/api/state").await;
+    let manual = st["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "manual")
+        .cloned()
+        .expect("manual 任务应当在");
+    assert_eq!(manual["enabled"], false, "重载后不能变回启用");
+
+    // 暂停 ≠ 不能手动跑：界面上的「执行」照样能用
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/p/manual/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "暂停的任务手动要能跑: {body}");
+    assert!(body["run_id"].is_number(), "{body}");
+}
+
 /// `host.run_once`：临时生成一次性调用 —— 不建任务行、排队跑、跑完自动删（第 227 轮）。
 #[tokio::test]
 async fn run_once_spawns_one_off_runs_without_leaving_task_rows() {

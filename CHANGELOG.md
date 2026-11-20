@@ -42,6 +42,11 @@
 - 单次运行上限从常量改成可配：`run.budget_max_ms`（默认 90 分钟，可到 12 小时），
   设置 → 配置 → 运行；同组还有 `run.queue_max`、`run.queue_wait_ms`。
 
+- **`register_handler(n, fn, budget, {paused:true})`**（第 227 轮补）：注册即暂停 —— 只留手动入口，
+  定时不跑。给「每个账号一条能手动点的任务」这种场合用。**别写成「先注册再 `set_job_paused`」**：
+  两条消息走不同通道（`reg` / `cmd`），没有顺序保证，实测会被注册那一下按库里的
+  `enabled` 覆盖回启用（央视频的 `daily1` 就这么漏了）。
+
 `/api/state` 多一个 `pending` 数组（排队中的运行），任务视图多了
 `run_started` / `ephemeral` 两个字段。
 

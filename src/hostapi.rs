@@ -44,6 +44,9 @@ pub enum Registration {
         /// 手动任务的执行预算（毫秒）。0.4.1 起 `register_handler` 的第三个参数，
         /// 不给就是默认 30 秒 —— 长链路任务要在注册时显式声明。
         budget_ms: u64,
+        /// 注册成「默认暂停」（第 227 轮，`register_handler(n, fn, budget, {paused:true})`）：
+        /// 只留手动入口，定时不跑。和注册是同一个动作，所以不会跟 `set_job_paused` 抢顺序。
+        paused: bool,
     },
     /// 插件自己带 HTTP 路由（`register_web`）：宿主把 `/plugins/<name>/*` 里
     /// 没命中静态文件的请求交给它，handler 名固定 `__route`。
@@ -121,9 +124,10 @@ const WRAP: &str = r#"(raw) => {
     register_cron: async (name, cron, budget_ms, opts) =>
       raw.register_cron(String(name), String(cron), budget_ms == null ? undefined : Number(budget_ms),
         opts == null ? undefined : JSON.stringify(opts)),
-    register_handler: async (name, func, budget_ms) =>
+    register_handler: async (name, func, budget_ms, opts) =>
       raw.register_handler(String(name), func,
-        budget_ms == null ? undefined : Number(budget_ms)),
+        budget_ms == null ? undefined : Number(budget_ms),
+        opts == null ? undefined : JSON.stringify(opts)),
     register_web: raw.register_web,
     // 侧栏入口：{title, order}；传字符串当标题也收（插件作者凭直觉写过 register_nav('云盘')）
     sidebar: async (v) => JSON.parse(await raw.sidebar(typeof v === 'string' ? JSON.stringify({ title: v }) : j(v ?? {}))),
@@ -1061,6 +1065,7 @@ async fn op_register_handler<'js>(
     name: String,
     func: Value<'js>,
     budget_ms: Undefined<u64>,
+    opts: Undefined<String>,
 ) -> Result<()> {
     let h = host(&ctx)?;
     if !func.is_function() {
@@ -1072,11 +1077,20 @@ async fn op_register_handler<'js>(
     handlers.set(name.as_str(), func)?;
     // 手动任务的预算：不给就是默认 30 秒；和 register_cron 同一个语义（0.4.1 起）。
     let budget = budget_ms.0.unwrap_or(crate::scheduler::default_budget_ms());
+    // opts 是 JSON 文本：{ paused }。第 227 轮加的 —— 插件要一条「只手动、不定时」的任务。
+    let o: Json = match opts.0.as_deref() {
+        None | Some("") => Json::Null,
+        Some(t) => serde_json::from_str(t)
+            .map_err(|e| err(&ctx, format!("register_handler 的 opts 不是合法 JSON: {e}")))?,
+    };
+    only_keys(&o, &["paused"], "register_handler").map_err(|e| err(&ctx, e))?;
+    let paused = o.get("paused").and_then(Json::as_bool).unwrap_or(false);
     h.reg
         .send(Registration::Handler {
             plugin: h.plugin.clone(),
             name,
             budget_ms: budget,
+            paused,
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
 }

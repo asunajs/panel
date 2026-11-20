@@ -741,6 +741,31 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当场抓住；如果只断
 「保存成功」，这个反了的分支会一路绿灯。
 
+## 第 227 轮（续）：注册即暂停 —— 两条通道没有顺序保证
+
+央视频改成「一条 `daily` + 每号一条一次性调用」时踩到的：想给每个账号留一条「只跑这个号」的
+手动任务，写法是 `register_handler(daily1, fn)` 然后 `set_job_paused(daily1, true)`。
+结果 `daily1` 在实例里是**启用**的 —— 两条消息走不同通道（注册走 `reg`、暂停走 `cmd`），
+actor 的 `select!` 不保证跨通道顺序：暂停先到、注册后到，`apply_saved` 又把库里的
+`enabled=1` 读回来了。
+
+修法不是加 `sleep`，而是把「暂停」变成注册的**参数**：`register_handler(n, fn, budget, {paused:true})`
+→ `Registration::Handler { paused }` → 同一个 `register()` 里置
+`Task.force_paused = true; enabled = false`，并且 `apply_saved` 让 `force_paused` 压过库里的
+`enabled`（插件每次加载都重新声明，所以不落库）。
+
+守它的用例：`register_handler_can_declare_a_task_paused` —— 注册即暂停；同名 cron+handler 也保持暂停；
+重载一次仍是暂停；暂停的任务手动还能跑。
+
+### 读数（这一节）
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test` | **534 过** |
+| `scripts/ui-check.mjs` | **222 条全过** |
+| 央视频真机（假账号） | `daily` 一趟排两条 `sign`（第 1/2 位）→ 依次跑 → 运行记录 `sign#2`，任务页不留临时行 |
+| 央视频真机（实例） | `daily`（`10 5,17 * * *`）+ `daily1/2`（手动、已暂停）+ `sign`，插件 0.3.0 |
+
 ## 第 227 轮：忙的时候排队 + 临时一次性调用
 
 两个诉求叠在一起：「同一任务同时只能有一条，但**不要拒绝后面的，默认排队**」和
@@ -762,7 +787,7 @@ ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当
 | 检查 | 结果 |
 |---|---|
 | `cargo test` | **533 过**（新增 `a_second_run_on_a_busy_plugin_queues_instead_of_being_rejected`、`run_once_spawns_one_off_runs_without_leaving_task_rows`、`a_full_run_queue_is_still_a_conflict`；旧的 409 断言**翻面**） |
-| `scripts/ui-check.mjs` | **220 条全过**（新增 6 条：能点执行、运行中显示已跑、忙时再点、排队行出现、运行组三个旋钮、单次上限能填到 12 小时） |
+| `scripts/ui-check.mjs` | **222 条全过**（新增 6 条：能点执行、运行中显示已跑、忙时再点、排队行出现、运行组三个旋钮、单次上限能填到 12 小时） |
 | 真机（2.5 秒慢任务，连点两次） | 第一次 `200 {"run_id":1}`；第二次 `200 {"queued":true,"position":1}`；`/api/state` 里 `pending` 有它；跑完队列自动清空 |
 | 队列满（默认 32） | 第 33 条起 `409` + `运行队列满了（32 条），等前面的跑完再试` |
 | 一次性调用（样例插件「生成 3 条一次性调用」） | 三条 → 排队位置 1/2/3 → 依次跑完（每条 1.5 秒）→ 任务页**不留** `cmd#2` 这种行，运行记录 3 条 `cmd#2` / `cmd#3` / `cmd#4` |

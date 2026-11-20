@@ -213,6 +213,16 @@ run1 status=error dur=2079 err=已停止（插件被重载或卸载）
 `a_full_run_queue_is_still_a_conflict`；界面上两条
 （「已跑 mm:ss / 预算 …」、忙时第二次执行显示「排队 第 N 位」）。
 
+### 只手动、不定时的任务（`register_handler(n, fn, budget, {paused:true})`）
+
+插件想给用户「点一下跑这个」的入口、又不想它自己定时跑时用。第 227 轮加的，起因是央视频：
+它要一条 `daily` 到点把每个账号各排一条一次性调用，同时保留「只跑这个号」的手动入口 ——
+而老的 `daily1…dailyN` 自带 cron，会和新 `daily` 重复跑。
+
+**别写成「先 `register_handler` 再 `set_job_paused`」**：两条消息走不同通道（`reg` / `cmd`），
+队列没有顺序保证，实测会被注册那一下按库里的 `enabled` 覆盖回启用。给成注册参数才是同一个动作。
+内存态（`Task.force_paused`），不落库 —— 插件每次加载都会重新声明，所以重启也不会漏。
+
 ### 临时一次性调用：`host.run_once`（第 227 轮）
 
 同一个执行位，插件也可以往里排东西 —— 但**不建任务行**：

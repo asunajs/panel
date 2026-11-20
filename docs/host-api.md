@@ -83,8 +83,8 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 #### 注册任务
 
 ```js
-register_cron(name, cron, budget_ms?, opts?)    // 定时任务
-register_handler(name, handler, budget_ms?)     // 只手动/被派发的任务
+register_cron(name, cron, budget_ms?, opts?)           // 定时任务
+register_handler(name, handler, budget_ms?, opts?)     // 只手动/被派发的任务
 ```
 
 `register_handler` 的 `budget_ms`（**0.4.1 起**）：这条手动任务的执行预算，缺省 300000（5 分钟，`PANEL_BUDGET_MS` 可改）。
@@ -92,6 +92,17 @@ register_handler(name, handler, budget_ms?)     // 只手动/被派发的任务
 表现是任务失败、error 里一句「预算耗尽」。钳法与 `register_cron` 相同（`[1, 5400000]`）。
 同名 cron 任务来注册时（`register_cron` + 同名 handler 的标准配法），预算以 `register_cron`
 给的为准 —— 那条建议里本来就有它。
+
+`register_handler` 的 `opts`（**第 227 轮起**）：
+
+| 字段 | 说明 |
+|---|---|
+| `paused` | `true` = 这条任务**注册即暂停**：只留手动入口，定时不跑。用在「插件想给每个账号一条能手动点的任务，但不想让它们各自定时跑」这种场合 |
+
+为什么需要 `paused` 而不是「注册完再 `set_job_paused`」：两条消息走**不同的通道**
+（注册走 `reg`，暂停走 `cmd`），队列之间没有顺序保证 —— 分两步写会被注册那一下按库里的
+`enabled` 覆盖回「启用」（央视频的 `daily1` 就这么漏成了启用，定时照跑）。给成参数就和注册
+同一个动作，天然有序；插件每次加载都会重新声明，所以它不需要落库。
 
 `cron` 认五段式（`0 8,20 * * *`）和 `@every <n><s|m|h|d>`。`opts`（可选）：
 
