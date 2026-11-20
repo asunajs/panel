@@ -854,3 +854,29 @@ actor 的 `select!` 不保证跨通道顺序：暂停先到、注册后到，`ap
 ### 没做
 
 同一插件并行执行（[gaps.md](gaps.md) N9）：`run_once` 是**排队**语义，不是并行。
+
+## 0.7.0 发版（2026-11-20）
+
+从 `v0.6.3` 以来的提交合并发布。这一版的主线是**插件界面**：把「每个插件各写一份」的东西
+收成面板的控件（发码格 / 确认框 / 实时日志 / 弹窗表单），配套三条硬约束（R7 / R12 / R13 / R14）。
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.7.0`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` → `panel 0.7.0（panel-llrt）`） |
+| tag | `v0.7.0` |
+| 门禁 | `bash scripts/gate.sh` exit 0：cargo test **536**、cargo clippy 干净、ui-check **222**、ui-kit-check **57**、check-lazy-load ok、check-wake **5**、check-catchup **5**、check-cron-owner **7**、check-task-delete **7**、check-token-change **14**、check-plugin-boundary **10**、check-docs **32** 篇、CSS token 36 个变量 / 715 处引用、unsafe 例外 1（期望 1） |
+| 部署 | `scripts/deploy-daily.sh` exit 0：`readyz` 8/8、failed_plugins 0、tasks 16；插件目录指纹部署前后一致（`73d5d3ca…`） |
+| 本机二进制 | `target/release/panel` 与 `~/panel-3030/panel` 同 sha256 `012774ee…6e0fe` |
+| `min_panel` 硬挡 | 实测：清单写 `min_panel: 99.0.0` 的插件 → `readyz` `failed_plugins:1`、日志 `error 插件 bad 需要面板 >= 99.0.0（当前 0.7.0），跳过加载`（不是静默忽略） |
+
+### 这一版带来的插件侧约束
+
+| 新增 | 插件怎么用 | 门禁 |
+|---|---|---|
+| `PanelUI.confirm` / `PanelUI.prompt` | `await PanelUI.confirm({text, okLabel, danger})` | ui-kit-check 8 条；`check-plugin-style` R8 提示原生 `confirm/alert/prompt` |
+| `<p-log plugin="…">` | 任务型插件的实时日志（接 `/api/logs/stream`） | ui-kit-check 5 条；契约 R14 |
+| `<p-sms-code>` | 手机号 + 发码 + 倒计时 | `check-plugin-style` R7 提示手搓发码格 |
+| `.field` 排布归面板 | 弹窗表单只用 `<p-dialog>`/`<p-field>`/`.dialog-actions` | ui-kit-check 3 条（同列 `left`/`width` 一致）；契约 R12 |
+
+配套插件版本（都声明 `min_panel: 0.7.0`）：yangshipin **0.3.0**（首个发布版）、
+mcloud **0.6.0**、mgmusic **0.7.0**；cmcc 暂不发布（工作树里已有改动，等下一批）。
