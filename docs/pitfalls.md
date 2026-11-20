@@ -835,3 +835,36 @@
     安全做法：先把要交付的提交掉，再造反向例；或者反向例只改**副本**（`cp` 到 /tmp 再改跑），
     或者用 `git stash push -- <file>`（它能原样 pop 回来）。判据：`git status` 里还有
     你要交付的改动时，绝不能对它 `checkout --`。
+
+## 198. LLRT 的 `node:fs` 是子集：`existsSync` 不在里面
+
+**症状**：插件页面一直在报 502，日志里只有一句
+
+    GET /plugins/cmcc/api/status ← 127.0.0.1 → 502 code=plugin_busy detail=TypeError: not a function
+
+没有栈、没有文件名、没有行号。一眼看不出是哪儿。
+
+**根因**：`node:fs` 是 LLRT 内置模块，只实现了 Node 105 个方法里的 **16 个**
+（`docs/engine.md` 的模块表）：
+
+    accessSync chmodSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
+    renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
+
+**`existsSync` 没有**（`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` /
+`openSync` 也没有）。而 TS 里 `import fs from 'node:fs'` 一路编译通过 —— cmcc 甚至在自己的
+`node-fs.d.ts` 里把 `existsSync` / `unlinkSync` **声明成了存在**，于是「编译过、运行炸」。
+
+**怎么改**：
+
+    // 存在性：statSync 包 try/catch（accessSync 也行）
+    try { f.statSync(path); } catch { return { exists: false, path }; }
+    // 删除：rmSync(path, { force: true })
+    // 追加：readFileSync 读出来拼上再 writeFileSync
+
+**守卫**：`scripts/check-plugin-style.mjs` 的 **R9** 扫插件产物里的 `.js`，
+命中 `existsSync(` / `unlinkSync(` / `appendFileSync(` / `copyFileSync(` / `realpathSync(` /
+`openSync(` 就提示（warning，带改法）。要保留就写 `style-lint: allow-fs-missing` 理由。
+
+**顺带**：`import * as ns from 'node:fs'` 与 `import def from 'node:fs'` 都能用；
+但**具名** `import { existsSync }` 会在**加载期**就报
+`Could not find export 'existsSync' in module 'fs'`（这算好的 —— 至少装不上去，不是静默炸）。

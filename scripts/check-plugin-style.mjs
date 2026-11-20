@@ -35,6 +35,9 @@ const ALLOW_SMS = 'style-lint: allow-sms-handroll';
 /** 原生对话框的豁免标记（一般不该用：见 R8）。 */
 const ALLOW_DIALOG = 'style-lint: allow-native-dialog';
 
+/** `node:fs` 子集之外的方法的豁免标记（见 R9）。 */
+const ALLOW_FS = 'style-lint: allow-fs-missing';
+
 const problems = [];
 const warnings = [];
 const files = [];
@@ -125,6 +128,52 @@ for (const file of files) {
   // ⚠ 这里原来还有一条 R6「必须有 --style-ver」—— 那是插件项目产物上的一个自检标记，
   // 不属于面板的准则（而且 plugins/ 是产物，产物形态由插件项目决定）。删掉，
   // 免得它拦住正常部署。
+}
+
+// R9 LLRT 没有的 `node:fs` 方法（第 198 轮）
+//
+// LLRT 的 `node:fs` 是**子集**（面板仓 docs/engine.md 记着：16 / 105）。实测存在的是：
+//   accessSync chmodSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
+//   renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
+//
+// **`existsSync` 不在里面**，`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` /
+// `openSync` 也不在。而 Node 有 —— 所以 TS 里 `import fs from 'node:fs'` 一路编译通过，
+// 装到面板上第一次读配置就 `TypeError: not a function`（cmcc 就这么炸的：
+// `/plugins/cmcc/api/status` 502 plugin_busy，日志里只有一句 `detail=TypeError: not a function`，
+// 连栈都没有）。
+//
+// 写法：存在性判断用 `statSync` 包 try/catch（或 `accessSync`），删除用 `rmSync(p, {force:true})`。
+const FS_MISSING = [
+  ['existsSync', 'statSync 包 try/catch（或 accessSync）'],
+  ['unlinkSync', 'rmSync(path, { force: true })'],
+  ['appendFileSync', 'readFileSync 读出来拼上再 writeFileSync'],
+  ['copyFileSync', 'readFileSync + writeFileSync'],
+  ['realpathSync', '用 host.plugin_dir() / plugin_data_dir() 拿绝对路径'],
+  ['openSync', 'LLRT 没有 fd 系列，直接用 readFileSync / writeFileSync'],
+];
+for (const file of files) {
+  if (!file.endsWith('.js')) continue;
+  const raw = readFileSync(file, 'utf8');
+  if (raw.includes(ALLOW_FS)) continue;
+  const text = stripComments(raw).split('\n');
+  for (let i = 0; i < text.length; i += 1) {
+    for (const [name, fix] of FS_MISSING) {
+      // 两种写法都要抓：`fs.existsSync(…)`（方法调用）和裸 `existsSync(…)`（解构后调用）
+      const re = new RegExp('(?:^|[^.\\w$]|\\.)' + name + '\\s*\\(');
+      if (!re.test(text[i])) continue;
+      // 自己定义了同名函数（polyfill）就不算 —— 只看"直接调 fs 上的方法"
+      if (new RegExp('function\\s+' + name + '\\b').test(raw)) continue;
+      warnings.push({
+        file: path.relative(ROOT, file),
+        line: i + 1,
+        rule: 'R9 node:fs 子集',
+        why: '`' + name + '()` 在 LLRT 的 `node:fs` 里**没有**（只有 16 个方法），'
+          + 'Node 有 ⇒ 编译通过、运行时 `TypeError: not a function`。',
+        fix: '改成 ' + fix + '。清单见面板仓 docs/engine.md 的模块表；'
+          + '确实要保留就写注释 ' + ALLOW_FS + ' 理由。',
+      });
+    }
+  }
 }
 
 // R8 原生对话框（第 197 轮）：插件里不许再用 confirm() / alert() / prompt()。
