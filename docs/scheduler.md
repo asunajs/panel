@@ -199,7 +199,7 @@ run1 status=error dur=2079 err=已停止（插件被重载或卸载）
 |---|---|---|
 | 粒度 | **每插件**一条 FIFO（因为执行位是每插件的），不同任务共用 | — |
 | 队列上限 | 32 条 | `run.queue_max` |
-| 单条最长排队 | 1 小时（超时丢掉并记 warn，不静默） | `run.queue_wait_ms` |
+| 单条最长排队 | 4 小时（超时丢掉并记 warn，不静默） | `run.queue_wait_ms` |
 | 队列满了 | 仍然 **409**（`scheduler::is_busy_error()` 认「运行队列满了」） | 同上 |
 
 #### 状态码小结

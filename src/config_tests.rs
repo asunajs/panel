@@ -226,6 +226,6 @@ fn run_queue_and_budget_max_are_clamped() {
     assert_eq!(clamp_queue_max(usize::MAX), 1000);
     // 单条最长排队：10 秒 – 24 小时
     assert_eq!(clamp_queue_wait_ms(1), 10_000);
-    assert_eq!(clamp_queue_wait_ms(DEFAULT_QUEUE_WAIT_MS), 3_600_000);
+    assert_eq!(clamp_queue_wait_ms(DEFAULT_QUEUE_WAIT_MS), 14_400_000);
     assert_eq!(clamp_queue_wait_ms(u64::MAX), 86_400_000);
 }

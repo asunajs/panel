@@ -54,7 +54,12 @@ const MAX_BUDGET_MAX_MS: u64 = 43_200_000; // 12 小时
 /// 每插件运行队列上限（`run.queue_max`，默认 32）：忙的时候后来的**排队**，超过才拒。
 pub const DEFAULT_QUEUE_MAX: usize = 32;
 /// 单条最大排队时间（`run.queue_wait_ms`，默认 1 小时）：等这么久还没轮到就丢掉并说清。
-pub const DEFAULT_QUEUE_WAIT_MS: u64 = 3_600_000;
+/// 单条最长排队时间，默认 **4 小时**。
+///
+/// 为什么不是 1 小时：排队这条路的旗舰场景就是「N 个账号 × 每个跑很久」——
+/// 8 个号 × 20 分钟，第 8 条要等 140 分钟；默认 1 小时会把它当「陈旧」丢掉，
+/// 表现是「前 3 个号跑了，后面的没动静，日志里一句 warn」。4 小时能装下 12 个 20 分钟的号。
+pub const DEFAULT_QUEUE_WAIT_MS: u64 = 14_400_000;
 
 static RUN_BUDGET_MAX_MS: std::sync::RwLock<Option<u64>> = std::sync::RwLock::new(None);
 static RUN_QUEUE_MAX: std::sync::RwLock<Option<usize>> = std::sync::RwLock::new(None);
