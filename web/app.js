@@ -613,6 +613,10 @@ function runPill(status) {
 }
 
 function taskPill(t) {
+  // 顺序即优先级（第 225 轮，用户截图：一行里同时挂着「已启用」和「已删除」）。
+  // 「已启用」的语义是「到点会跑」—— 删除的、待采纳的都不会跑，不能这么说。
+  if (t.deleted) return pill('pill', '已删除');
+  if (t.pending_adopt) return pill('pill', '待采纳');
   if (t.tripped) return pill('pill-err', '熔断 ×' + t.trips);
   if (!t.enabled) return pill('', '已暂停');
   if (t.in_flight) return pill('pill-accent', '运行中');
@@ -1553,7 +1557,8 @@ function renderTasks() {
     tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (!t.enabled ? '—' : fmtDateTime(t.next_at))));
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
-    st.append(taskPill(t));
+    const head = taskPill(t);
+    st.append(head);
     // 「已跑 12:30 / 预算 20:00」（第 227 轮）：长任务最想知道的就是「还要多久」。
     // run_started 由 /api/state 带出来，跟着轮询自己走。
     if (t.in_flight && t.run_started) {
@@ -1566,9 +1571,9 @@ function renderTasks() {
       st.append(lz);
     }
     if (t.deleted) {
-      const d = pill('pill', '已删除');
-      d.title = '用户删的（插件重新注册也不会复活）。恢复后会从当前时间重算下一拍。';
-      st.append(d);
+      // 状态列只给一个结论（第 225 轮）：以前这里是「已启用」+「已删除」两个药丸并排，
+      // 字面上自相矛盾。现在 taskPill 直接回「已删除」，说明放 tooltip 里。
+      head.title = '用户删的（插件重新注册也不会复活）。恢复后会从当前时间重算下一拍。';
     }
     // blockers：插件说「现在还不能跑」的原因（只挡定时触发，手动跑照旧）。
     if (t.blockers && t.blockers.length) {

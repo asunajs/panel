@@ -828,3 +828,10 @@
     带上之后 `/healthz` 200、`data/auth.json` 0600 且**明文口令 0 处**、`/api/config` 带令牌 200 / 不带 401。
     守卫：`Dockerfile` 与 `compose.yml` 里的变量名（改错就是上面第 ① 条）；
     用户文档见 [user/docker.md](user/docker.md)。
+
+120. **反向例别用 `git checkout -- <file>`**（第 225 轮，我自己踩的）：验证「守卫会不会红」时
+    临时改坏源文件是标准做法，但改之前**没提交**的工作用 `git checkout -- web/app.js` 还原，
+    会把这次要交付的改动一起删掉（我一并丢了 `taskPill` 的三处修改，重写了一遍）。
+    安全做法：先把要交付的提交掉，再造反向例；或者反向例只改**副本**（`cp` 到 /tmp 再改跑），
+    或者用 `git stash push -- <file>`（它能原样 pop 回来）。判据：`git status` 里还有
+    你要交付的改动时，绝不能对它 `checkout --`。

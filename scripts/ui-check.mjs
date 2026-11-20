@@ -2063,6 +2063,18 @@ async function main() {
   );
   const hd = JSON.parse(hiddenDeleted);
   check('删掉的任务默认不出现（但按钮上标了数量）', delStatus === 200 && !hd.hasDeleted && hd.toggle.includes('显示已删除'), hiddenDeleted);
+  // 第 225 轮（用户截图：一行里同时挂「已启用」和「已删除」）：
+  // 状态列只给一个结论；开关要像邻居一样是个有边框的控件（不是一行灰字）。
+  const toggleLook = JSON.parse(await js(
+    "(()=>{const b=document.getElementById('tasks-show-deleted');const s=getComputedStyle(b);" +
+    "const dd=document.querySelector('#tasks-plugin-filter .dropdown-btn');" +
+    "const ds=dd?getComputedStyle(dd):null;" +
+    "return JSON.stringify({border:s.borderTopWidth,styled:s.borderTopColor!=='rgba(0, 0, 0, 0)'," +
+    "ddBorder:ds?ds.borderTopWidth:null,aria:b.getAttribute('aria-pressed')});})()",
+  ));
+  check('「显示已删除」看起来像个控件（有边框，和旁边下拉一致）',
+    toggleLook.styled && toggleLook.border === toggleLook.ddBorder,
+    JSON.stringify(toggleLook));
   await js("document.getElementById('tasks-show-deleted').click()");
   await sleep(300);
   const shownDeleted = await js(
@@ -2072,6 +2084,15 @@ async function main() {
   );
   const sd = JSON.parse(shownDeleted);
   check('点「显示已删除」能列出它，并且只给「恢复」', sd.hasDeleted && sd.hasRestore, shownDeleted);
+  const delPills = JSON.parse(await js(
+    "(()=>{const r=[...document.querySelectorAll('#tasks-body tr')].find(x=>x.textContent.includes('已删除'));" +
+    "if(!r)return JSON.stringify({err:'no-row'});" +
+    "const pills=[...r.querySelectorAll('.pill,.chip')].map(p=>p.textContent.trim());" +
+    "return JSON.stringify({pills});})()",
+  ));
+  check('已删除的任务状态只说「已删除」，不再同时挂「已启用」',
+    !delPills.err && delPills.pills.includes('已删除') && !delPills.pills.includes('已启用'),
+    JSON.stringify(delPills));
   // 收尾：恢复回去，免得影响后面的检查
   await js("fetch('/api/tasks/seed/zz/restore', {method:'POST', headers:{'x-panel':'1'}, credentials:'same-origin'}).then(r=>r.status)");
   await js("(async () => { await refresh(); return 1; })()");

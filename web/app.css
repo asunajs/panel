@@ -201,6 +201,12 @@ button, input, select { font: inherit; color: inherit; }
 .btn:active { transform: translateY(.5px); }
 .btn-primary { background: var(--accent); border-color: transparent; color: var(--accent-fg); font-weight: 600; }
 .btn-primary:hover { filter: brightness(1.06); background: var(--accent); color: var(--accent-fg); }
+/* 开关型按钮的按下态（第 225 轮）：之前用 .btn-ghost（无边框、无底色），
+   夹在「全部插件」这种有边框的控件中间像一行普通文字，看不出能点、也看不出当前开着。
+   现在统一成 .btn + aria-pressed 高亮。 */
+.btn[aria-pressed="true"] {
+  background: var(--accent-soft); border-color: transparent; color: var(--accent);
+}
 .btn-ghost { background: transparent; border-color: transparent; color: var(--dim); }
 .btn-ghost:hover { background: var(--surface-2); color: var(--fg); border-color: transparent; }
 .btn-danger { color: var(--err); }

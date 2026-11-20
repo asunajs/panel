@@ -921,3 +921,18 @@ curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件�
 - 修法：改底色一律用 `background-color`（`.sched-item .modal-input`、`.field select`、
   `.modal-input` 三处）。守卫 `scripts/check-pitfalls.sh` 第 ㉒ 条静态扫 CSS；
   `ui-check` 深浅两主题各一条断言（`img / no-repeat / 12px 12px`），造过反向例确认能红。
+
+### 一行的状态只给一个结论（第 225 轮）
+
+用户截图：任务表某行状态列并排两个药丸 —— 绿的「已启用」和灰的「已删除」。
+
+- 根因：`taskPill(t)` 只看 `t.enabled`（删掉的任务 enabled 仍是 true），
+  而「已删除」是行里**另外追加**的一个药丸，两处各说各话。同理「待采纳」的任务也照样报「已启用」，
+  可它采纳前根本不会跑。
+- 修法：状态判定收进 `taskPill` 一处，按「会不会跑」排优先级：
+  `已删除 → 待采纳 → 熔断 → 已暂停 → 运行中 → 已启用`；行里不再追加第二个结论，
+  补充说明走 tooltip。
+- 顺带：那个「显示已删除」开关原来是 `.btn-ghost`（无边框无底色），夹在「全部插件」
+  这种有边框控件中间像一行普通文字。改成 `.btn` + `.btn[aria-pressed="true"]` 高亮。
+- 守卫：`ui-check` 两条 —— 「状态只说已删除，不再同时挂已启用」「开关有边框且与旁边下拉同宽」，
+  反向例验过（把 `deleted` 分支拿掉，两条都红）。
