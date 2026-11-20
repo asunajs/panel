@@ -48,6 +48,11 @@
   两条消息走不同通道（`reg` / `cmd`），没有顺序保证，实测会被注册那一下按库里的
   `enabled` 覆盖回启用（央视频的 `daily1` 就这么漏了）。
 
+- **`register_handler(n, fn, budget, {hidden:true})`** + 手动执行带 `{params}`（第 227 轮补）：
+  插件把一次性调用当内部实现时（央视频的 `sign`），任务页不该多出一行看不懂的「sign / 手动 / 8 分 0 秒」。
+  `hidden` 让它不进任务页，但 `POST /api/tasks/<插件>/<任务>/run` 照样能跑，而且 body 可以带
+  `{params}` 覆盖这一次的参数 —— 于是「只跑第 3 个号」不用给每个账号各注册一条任务。
+
 `/api/state` 多一个 `pending` 数组（排队中的运行），任务视图多了
 `run_started` / `ephemeral` 两个字段。
 

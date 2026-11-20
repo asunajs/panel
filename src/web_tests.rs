@@ -3152,6 +3152,75 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
+/// 内部 handler（`{hidden:true}`）：能按名字跑、能带 params，但**不在任务页露面**（第 227 轮）。
+///
+/// 起因：插件把一次性调用当内部实现（央视频的 `sign`）时，任务页会多出一行没人看得懂的
+/// 「sign / 手动 / 8 分 0 秒」；而「只跑第 3 个号」又需要同一个 handler 换参数跑，
+/// 不能靠给每个账号注册一条任务。
+#[tokio::test]
+async fn hidden_handlers_stay_off_the_task_page_but_run_with_params() {
+    let (app, plugins, _data, _store, _db) = setup_core("hiddenh").await;
+    // handler 自己校验参数：收到的不是 2 就抛 —— 跑通/跑挂就是「参数对不对」的判据
+    let src = r#"import host from 'panel:host';
+await host.register_handler('sign', async (evt) => {
+  const n = evt.params ? Number(evt.params.account) : -1;
+  if (n !== 2) throw new Error('params 不对: ' + JSON.stringify(evt.params));
+}, 5000, { hidden: true });
+"#;
+    std::fs::write(plugins.join("h.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/h/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 任务页上没有它
+    let (_, st) = get(&app, "/api/state").await;
+    assert!(
+        st["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"] != "sign"),
+        "hidden 的任务不该出现在任务页: {st}"
+    );
+
+    // 带 params 跑：handler 收到 account=2 → 成功
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/tasks/h/sign/run",
+            Some(json!({ "params": { "account": 2 } })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "hidden 的任务要能手动跑: {body}");
+    assert!(body["run_id"].is_number(), "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (_, runs) = get(&app, "/api/runs?plugin=h&limit=1").await;
+    assert_eq!(runs["runs"][0]["status"], "ok", "params 没传到 handler: {runs}");
+
+    // 换一个不匹配的参数 → handler 抛错，运行记录是 error（证明这次跑的确实是新参数）
+    let (status, body) = send(
+        &app,
+        with_csrf(
+            "POST",
+            "/api/tasks/h/sign/run",
+            Some(json!({ "params": { "account": 7 } })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (_, runs) = get(&app, "/api/runs?plugin=h&limit=1").await;
+    assert_eq!(runs["runs"][0]["status"], "error", "{runs}");
+    assert!(
+        runs["runs"][0]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("params 不对"),
+        "错误信息该来自 handler: {runs}"
+    );
+}
+
 /// `register_handler(name, fn, budget, {paused:true})`：注册即暂停（第 227 轮）。
 ///
 /// 为什么需要这个开关：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，

@@ -47,6 +47,9 @@ pub enum Registration {
         /// 注册成「默认暂停」（第 227 轮，`register_handler(n, fn, budget, {paused:true})`）：
         /// 只留手动入口，定时不跑。和注册是同一个动作，所以不会跟 `set_job_paused` 抢顺序。
         paused: bool,
+        /// 内部任务（第 227 轮，`{hidden:true}`）：能按名字跑，但**不在任务页露面**。
+        /// 插件把一次性调用当内部实现时用它 —— 否则任务页会多出一行没人看得懂的东西。
+        hidden: bool,
     },
     /// 插件自己带 HTTP 路由（`register_web`）：宿主把 `/plugins/<name>/*` 里
     /// 没命中静态文件的请求交给它，handler 名固定 `__route`。
@@ -1083,14 +1086,16 @@ async fn op_register_handler<'js>(
         Some(t) => serde_json::from_str(t)
             .map_err(|e| err(&ctx, format!("register_handler 的 opts 不是合法 JSON: {e}")))?,
     };
-    only_keys(&o, &["paused"], "register_handler").map_err(|e| err(&ctx, e))?;
+    only_keys(&o, &["paused", "hidden"], "register_handler").map_err(|e| err(&ctx, e))?;
     let paused = o.get("paused").and_then(Json::as_bool).unwrap_or(false);
+    let hidden = o.get("hidden").and_then(Json::as_bool).unwrap_or(false);
     h.reg
         .send(Registration::Handler {
             plugin: h.plugin.clone(),
             name,
             budget_ms: budget,
             paused,
+            hidden,
         })
         .map_err(|_| err(&ctx, "调度器已退出".into()))
 }

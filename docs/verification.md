@@ -741,6 +741,31 @@ GitHub 上的 latest 仍是 v0.5.3，`ui-check` 的「没有新版时顶栏不�
 ui-check 那条断言是**按用户看到的话**写的（`/未重载/`），当场抓住；如果只断
 「保存成功」，这个反了的分支会一路绿灯。
 
+## 第 227 轮（再续）：内部任务不该在任务页露面
+
+用户看到任务页里三行（`daily` / `daily1` / @@daily2`，外加一行 `sign`），回了一句
+「这种临时的任务不应该直接暴露」。三行是设计出来的，但**露出来**是错的：
+`sign` 只是一次性调用的目标 handler，`daily1…dailyN` 只是为了「只跑这个号」而存在的占位任务。
+
+改法：
+
+- `register_handler(n, fn, budget, {hidden:true})` → `Task.hidden`，`views()` 过滤掉 —— 任务页看不到，
+  `find()` 照样找得到，所以按名字跑不受影响。
+- 手动执行支持 body `{params}` → `Cmd::RunNow { params }` → `dispatch(params_override)`；
+  排队时 `PendingRun` 也带着它（否则「只跑第 3 个号」排上队之后会变成第 1 个）。
+- 央视频：`sign` 标 hidden、删掉 `daily1…dailyN` 的注册，界面「只跑这个号」改成
+  `POST /api/tasks/yangshipin/sign/run {params:{account:i}}`。任务页因此只剩 `daily` 一行。
+
+守它的用例：`hidden_handlers_stay_off_the_task_page_but_run_with_params` —— 任务页没有它；
+带 `{account:2}` 跑成功（handler 自己校验参数）；换 `{account:7}` 跑挂且错误来自 handler。
+
+### 读数（这一节）
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test` | **535 过** |
+| 央视频真机（假账号，2 个） | 任务页只剩 `daily`；`sign + {account:1}` 跑到「账号 2 · 假号二」；`daily` 忙时排第 1 位 |
+
 ## 第 227 轮（续）：注册即暂停 —— 两条通道没有顺序保证
 
 央视频改成「一条 `daily` + 每号一条一次性调用」时踩到的：想给每个账号留一条「只跑这个号」的

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
@@ -2481,15 +2481,32 @@ async fn task_run(
     State(st): State<AppState>,
     Path((plugin, name)): Path<(String, String)>,
     h: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    // 可选 body `{params}`（第 227 轮）：同一个 handler 换参数跑 ——
+    // 插件界面「只跑第 3 个号」就用它，不必给每个账号各注册一条任务。
+    let params = if body.is_empty() {
+        None
+    } else {
+        let v: Value = serde_json::from_slice(&body)
+            .map_err(|e| bad(format!("body 不是 JSON：{e}")))?;
+        match v.get("params") {
+            None | Some(Value::Null) => None,
+            Some(p) => Some(p.clone()),
+        }
+    };
     // 按需加载（第 188 轮）：手动执行前先把插件装进内存。
     // 以前这里直接报「插件还没加载，先点加载」—— 用户点「执行」就是想让事情发生，
     // 让 manual 与 cron 走同一条「用到就装」的路才对。
     sched_ready(&st, &plugin).await?;
     // 第 227 轮：插件正忙不再 409，而是**排队**（回 queued + 位置）。
     // 只有「队列满了」还是冲突（等会儿重试就行），照旧 409。
-    let out = st.sched.run_now(&plugin, &name).await.map_err(|e| {
+    let out = st
+        .sched
+        .run_now(&plugin, &name, params)
+        .await
+        .map_err(|e| {
         if crate::scheduler::is_busy_error(&e) {
             ApiError::new(StatusCode::CONFLICT, "conflict", e)
         } else {

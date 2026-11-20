@@ -216,6 +216,9 @@ struct Task {
     /// 它照样出现在任务表里（用户能看见、能暂停、能改计划），但不派发 —— 没有 JS 运行时，
     /// 派发只会炸。插件被唤醒/手动加载后，真正的 register_cron 会按同名替换掉它（lazy 归 false）。
     lazy: bool,
+    /// 内部任务：注册了、能按名字跑（`/api/tasks/…/run` 带 params），但**不在任务页露面**。
+    /// 第 227 轮加的 —— 插件拿一次性调用当内部实现时，不该在任务页多出一行看不懂的东西。
+    hidden: bool,
     /// 注册时就声明「这条默认暂停」（第 227 轮）。内存态，不落库。
     ///
     /// 为什么需要：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，
@@ -370,6 +373,7 @@ impl Task {
             lead_ms,
             lead_override: false,
             handler: None,
+            hidden: false,
             force_paused: false,
             params,
             schedule: Some(schedule),
@@ -411,6 +415,7 @@ impl Task {
             lead_ms: 0,
             lead_override: false,
             handler: None,
+            hidden: false,
             force_paused: false,
             params: None,
             schedule: None,
@@ -458,6 +463,7 @@ impl Task {
             lead_ms: 0,
             lead_override: false,
             handler: Some(handler),
+            hidden: false,
             force_paused: false,
             params,
             schedule: None,
@@ -703,6 +709,9 @@ pub enum Cmd {
     RunNow {
         plugin: String,
         task: String,
+        /// 这一次的 params 覆盖（第 227 轮）：界面「只跑这个号」靠它，
+        /// 不用给每个账号各注册一条任务。None = 用任务注册时的 params。
+        params: Option<Json>,
         reply: oneshot::Sender<Result<StartOutcome, String>>,
     },
     /// 插件的一次性调用（第 227 轮）：`host.run_once` 走这条 —— 入队，执行位空出来就跑。
@@ -993,11 +1002,19 @@ impl Scheduler {
     }
 
     /// 手动跑一次。执行位被占就**排队**（返回 `Queued { position }`），不再 409。
-    pub async fn run_now(&self, plugin: &str, task: &str) -> Result<StartOutcome, String> {
+    /// 手动跑一次。`params` 是这一次的覆盖（界面「只跑这个号」靠它，第 227 轮）：
+    /// 同一个 handler 换参数跑，不必给每个账号各注册一条任务。`None` = 用任务注册时的 params。
+    pub async fn run_now(
+        &self,
+        plugin: &str,
+        task: &str,
+        params: Option<Json>,
+    ) -> Result<StartOutcome, String> {
         let (plugin, task) = (plugin.to_string(), task.to_string());
         self.call(|reply| Cmd::RunNow {
             plugin,
             task,
+            params,
             reply,
         })
         .await?
@@ -2143,6 +2160,7 @@ impl Inner {
             Cmd::RunNow {
                 plugin,
                 task,
+                params,
                 reply,
             } => match self.find(&plugin, &task) {
                 None => {
@@ -2165,7 +2183,8 @@ impl Inner {
                             plugin: plugin.clone(),
                             name: task.clone(),
                             handler: task.clone(),
-                            params: self.tasks[i].params.clone(),
+                            // 排队也要带上这一次的 params（「只跑第 3 个号」排上队之后不能变成第 1 个）
+                            params: params.clone().or_else(|| self.tasks[i].params.clone()),
                             budget_ms: self.tasks[i].budget_ms,
                             source: RunSource::Manual,
                             ready_at: now,
@@ -2180,7 +2199,7 @@ impl Inner {
                             }
                         }
                     } else {
-                        self.dispatch(i, true, Some(reply)).await;
+                        self.dispatch(i, true, params, Some(reply)).await;
                     }
                 }
             },
@@ -2440,7 +2459,13 @@ impl Inner {
             let Some(i) = idx else {
                 continue;
             };
-            self.dispatch(i, run.source == RunSource::Manual, None).await;
+            self.dispatch(
+                i,
+                run.source == RunSource::Manual,
+                run.params.clone(),
+                None,
+            )
+            .await;
         }
     }
 
@@ -2467,6 +2492,8 @@ impl Inner {
     fn views(&self) -> Vec<TaskView> {
         self.tasks
             .iter()
+            // 内部任务不露面（第 227 轮）：插件用一次性调用当内部实现时，任务页不该多一行
+            .filter(|t| !t.hidden)
             .map(|t| TaskView {
                 plugin: t.plugin.clone(),
                 name: t.name.clone(),
@@ -2844,7 +2871,7 @@ impl Inner {
                 Level::Info,
                 format!("任务 {nm} 到点了（插件刚装回来），现在跑"),
             );
-            self.dispatch(i, false, None).await;
+            self.dispatch(i, false, None, None).await;
         }
     }
 
@@ -3053,7 +3080,13 @@ impl Inner {
                 name,
                 budget_ms,
                 paused,
+                hidden,
             } => {
+                if hidden {
+                    if let Some(i) = self.find(&plugin, &name) {
+                        self.tasks[i].hidden = true;
+                    }
+                }
                 // 第 227 轮：注册时就能说「这条默认暂停」（见 Task.force_paused 的注释）。
                 if paused {
                     if let Some(i) = self.find(&plugin, &name) {
@@ -3071,6 +3104,7 @@ impl Inner {
                     );
                     t.force_paused = paused;
                     t.enabled = !paused;
+                    t.hidden = hidden;
                     self.tasks.push(t);
                     // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
                     // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
@@ -3461,7 +3495,7 @@ impl Inner {
                 self.persist_task(i);
                 continue;
             }
-            self.dispatch(i, false, None).await;
+            self.dispatch(i, false, None, None).await;
         }
         // 队列里「到点才允许跑」的（`run_once(at)`）：到点了就把它们放出来。
         let waiting: Vec<String> = self.pending.keys().cloned().collect();
@@ -3484,6 +3518,7 @@ impl Inner {
         &mut self,
         idx: usize,
         manual: bool,
+        params_override: Option<Json>,
         reply: Option<oneshot::Sender<Result<StartOutcome, String>>>,
     ) {
         let (plugin_name, task_name, handler_name, budget, early, lead_ms, params) = {
@@ -3496,7 +3531,11 @@ impl Inner {
                 t.budget_ms,
                 Local::now() < t.next_fire,
                 t.lead_ms,
-                t.params.clone().unwrap_or(Json::Null),
+                // 这一次的 params 覆盖优先（界面「只跑这个号」：同一个 handler 换参数）
+                params_override
+                    .clone()
+                    .or_else(|| t.params.clone())
+                    .unwrap_or(Json::Null),
             )
         };
         let blocked = match self.plugins.get(&plugin_name) {
