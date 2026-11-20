@@ -395,11 +395,13 @@ async function main() {
     "l.addLine('info',1794578027097,'第一行');l.addLine('warn',1794578028097,'第二行');" +
     "const ls=[...l.querySelectorAll('.term-line')];" +
     "const t=ls[0].querySelector('.term-ts').textContent.trim();" +
-    "return JSON.stringify({n:ls.length,ts:/^\\d{2}:\\d{2}:\\d{2}\\.\\d{3}$/.test(t),tsv:t," +
+    "return JSON.stringify({n:ls.length,ts:/^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}$/.test(t),tsv:t," +
     "lv:ls[1].querySelector('.term-lv').textContent.trim(),msg:ls[1].querySelector('.term-msg').textContent," +
     "empty:!!l.querySelector('.term-empty'),emptyText:(l.querySelector('.term-empty')||{}).textContent||'',meta:l.querySelector('.term-meta').textContent})})()"
   ));
-  check('p-log 画行：epoch 毫秒变 HH:MM:SS.mmm，级别与正文分列',
+  // ⚠ 必须是「月-日 时:分:秒.毫秒」：只给时分秒的话隔天分不清是哪天，
+  //   面板自己的日志页在 2026-11-15 就被指过一次（review-20261115 C3），这是第二次。
+  check('p-log 画行：epoch 毫秒变 MM-DD HH:MM:SS.mmm（跨天要能分辨），级别与正文分列',
     logPaint.n === 2 && logPaint.ts === true && logPaint.lv === 'warn' && logPaint.msg === '第二行',
     JSON.stringify(logPaint));
   check('p-log 画了行就不再有空态，页头报行数',

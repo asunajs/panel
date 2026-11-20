@@ -1586,8 +1586,12 @@ select option { background: var(--surface); color: var(--fg); }
   white-space: pre-wrap; word-break: break-word;
 }
 .term-line { display: block; }
-.term-ts { color: var(--dim); }
-.term-lv { display: inline-block; min-width: 3.2em; }
+/* 时间列要能装下 `MM-DD HH:MM:SS.mmm`（18 个字符），并且**定宽**——
+   否则每行宽度不同，后面那列级别会参差不齐。 */
+/* 定宽 18ch（装得下 `MM-DD HH:MM:SS.mmm`）+ 右留 10px —— 不留白的话时间和级别会贴成
+   `11-20 09:19:10.026info`（12px 等宽下 18 个字符正好把 18ch 填满）。 */
+.term-ts { color: var(--dim); display: inline-block; min-width: 18ch; padding-right: 10px; white-space: nowrap; }
+.term-lv { display: inline-block; min-width: 3.2em; padding-right: 6px; }
 .term-lv-info { color: var(--accent); }
 .term-lv-debug { color: var(--dim); }
 .term-lv-warn { color: var(--warn); }

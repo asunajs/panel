@@ -1071,16 +1071,31 @@
   const TERM_MAX_LINES = 400;
   const TERM_RANK = { debug: 0, info: 0, start: 0, success: 0, warn: 1, fail: 2, error: 2, fatal: 3 };
 
-  /** 时间戳：面板给的是 epoch 毫秒；旧面板/历史给的是 `2026-10-17 10:50:42.498` 这种串。 */
+  /** 时间戳：**月-日 时:分:秒.毫秒**。
+   *
+   *  ⚠ 别只给时分秒：日志跨天之后就分不清是哪天 —— 面板自己的日志页在 2026-11-15
+   *  就被用户指着说过一次（`docs/review-20261115.md` 的 C3，用户原话「隔天翻日志不知道哪天」），
+   *  当时的修法是 `fmtLogTime` = 月-日 + 时分秒、时间列 118px。第 197 轮做这个控件时
+   *  又只写了时分秒，用户第二次指出来（「时间又是只有小时」）。这里跟面板的日志页对齐。
+   *
+   *  毫秒留着：一轮任务里同一秒会打好几行，`09:19:09.880` / `.881` 的顺序是有意义的。
+   *  面板给的是 epoch 毫秒；旧面板/历史给的是 `2026-10-17 10:50:42.498` 这种串。 */
   function termStamp(raw) {
-    if (typeof raw === 'number' && Number.isFinite(raw)) {
-      const d = new Date(raw);
-      const p = (n, w = 2) => String(n).padStart(w, '0');
-      return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' + p(d.getMilliseconds(), 3);
+    const p = (n, w = 2) => String(n).padStart(w, '0');
+    const fmt = (d) =>
+      p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' +
+      p(d.getMilliseconds(), 3);
+    if (typeof raw === 'number' && Number.isFinite(raw)) return fmt(new Date(raw));
+    const t = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (t === '') return '—';
+    // `YYYY-MM-DDTHH:MM:SS…`（ISO）或 `YYYY-MM-DD HH:MM:SS…`：解析后重排
+    if (/^\d{4}-\d{2}-\d{2}[T ]/.test(t)) {
+      const d = new Date(t.replace(' ', 'T'));
+      if (!Number.isNaN(d.getTime())) return fmt(d);
     }
-    const t = String(raw === undefined || raw === null ? '' : raw);
-    const m = /(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*$/.exec(t);
-    return m ? m[1] : t;
+    // 已经是 `MM-DD HH:MM:SS(.mmm)` 就原样用；只有时分秒的补不了日期，原样显示
+    return t;
   }
 
   class PLog extends HTMLElement {
