@@ -2488,6 +2488,10 @@ html {
   /* 步进控件的 −/＋：.stepper 有 1px 上下边框，min-height: var(--h-control) 时
      **按钮的内容盒只有 38px**（40 − 2）—— 真插件走查时量的。多给 2px 让按钮够 40。 */
   .stepper { min-height: calc(var(--h-control) + 2px); }
+  /* 页签条（.tabs-bar 是 flex-wrap: nowrap 的）：插件页签一多就会把页面撑宽。
+     手机上改成横向滚动 —— 这也是移动端页签的常规做法（比换行省两行高度）。 */
+  .tabs-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs-bar::-webkit-scrollbar { display: none; }
   .seg-item { min-height: 40px; padding: 0 12px; }
   .ta-x { width: 40px; height: 40px; }
 
