@@ -400,6 +400,7 @@ async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Resu
         host.log.clone(),
         host.config.clone(),
         crate::notify::Notice {
+            push: true,
             event: "plugin",
             level: "info",
             plugin: host.plugin.clone(),

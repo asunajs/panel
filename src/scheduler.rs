@@ -3788,12 +3788,20 @@ impl Inner {
         }
         // 失败和「刚刚熔断」都要通知：面板是没人的时候在跑东西的地方，
         // 只把错误写进日志等于默认你会去翻。
+        // 内部运行（一次性调用 / hidden 任务）是插件自己的实现细节：
+        // 成功不记（见下），失败**进铃铛但不推送** —— 央视频 8 个号各挂一次就是 8 条推送
+        // （现场：ServerChan 被灌满）。留痕可查，不打扰。
+        let internal = self
+            .find(plugin, task)
+            .map(|i| self.tasks[i].ephemeral || self.tasks[i].hidden)
+            .unwrap_or(false);
         if let Some(e) = error.as_ref().filter(|_| !cancelled) {
             crate::notify::record_bg(
                 self.db.clone(),
                 self.log.clone(),
                 self.config.clone(),
                 crate::notify::Notice {
+                    push: !internal,
                     event: "task_fail",
                     level: "error",
                     plugin: plugin.to_string(),
@@ -3808,13 +3816,7 @@ impl Inner {
         // 但成功是高频事件，**先问一句有没有人订阅**再记 —— 否则每次运行都往铃铛表塞一条，
         // 500 条上限几天就滚完，真故障反而被挤掉。
         //
-        // 内部运行不发（第 227 轮）：一次性调用（ephemeral）和内部任务（hidden）是插件自己的
-        // 实现细节 —— 央视频 8 个账号各发一条 = 8 条推送，ServerChan 直接被灌满（现场）。
-        // 失败照发：那才是要人来看的。
-        let internal = self
-            .find(plugin, task)
-            .map(|i| self.tasks[i].ephemeral || self.tasks[i].hidden)
-            .unwrap_or(false);
+        // 内部运行成功**根本不记**（第 227 轮）：同上，它们是实现细节。
         if error.is_none()
             && !cancelled
             && !internal
@@ -3834,6 +3836,7 @@ impl Inner {
                 self.log.clone(),
                 self.config.clone(),
                 crate::notify::Notice {
+                    push: true,
                     event: "task_ok",
                     level: "info",
                     plugin: plugin.to_string(),
@@ -3854,6 +3857,7 @@ impl Inner {
                 self.log.clone(),
                 self.config.clone(),
                 crate::notify::Notice {
+                    push: true,
                     event: "circuit",
                     level: "error",
                     plugin: plugin.to_string(),

@@ -45,6 +45,9 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct Notice {
     /// info / warn / error
     pub level: &'static str,
+    /// 要不要往外部渠道推（第 227 轮）。`false` = **只进铃铛、不推送** ——
+    /// 内部运行（一次性调用 / hidden 任务）的失败就是这样：留痕可查，但不打扰。
+    pub push: bool,
     /// 事件类型：task_fail / circuit / plugin / system。
     /// 渠道可以按它过滤（第 171 轮）—— 「我不想收每条任务失败，但熔断必须告诉我」。
     pub event: &'static str,
@@ -1071,6 +1074,11 @@ pub async fn record(
         },
         format!("通知: {title} — {body}"),
     );
+
+    // 只进铃铛的（内部运行的失败）：记完、日志写完就到此为止
+    if !n.push {
+        return;
+    }
 
     // ---- 外部渠道 ----
     let cfg = match from_store(store) {

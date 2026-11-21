@@ -3157,6 +3157,80 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
+/// 内部运行**失败进铃铛、但不推送**（第 227 轮）。
+///
+/// 现场：央视频 8 个号 token 同时失效 → 8 条「任务 sign#N 失败」推进 ServerChan。
+/// 失败要留痕（铃铛、运行记录、日志），但不该按号轰炸推送。
+#[tokio::test]
+async fn internal_failures_reach_the_bell_but_not_the_push() {
+    let (app, plugins, _data, store, db) = setup_core("quietfail").await;
+    store.set(&json!({
+        "notify": {
+            "channels": [{ "id": "c", "name": "c", "kind": "webhook",
+                           "url": "http://127.0.0.1:9/hook", "enabled": true }],
+            "routes": [{ "id": "r", "name": "r", "channel": "c", "enabled": true,
+                         "events": ["task_ok", "task_fail"] }]
+        }
+    }));
+    let src = r#"import host from 'panel:host';
+await host.register_handler('hidden1', async () => { throw new Error('auth fail.'); }, 5000, { hidden: true });
+await host.register_handler('visible', async () => { throw new Error('visible boom'); }, 5000);
+"#;
+    std::fs::write(plugins.join("q.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/q/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for task in ["hidden1", "visible"] {
+        let (status, body) = send(
+            &app,
+            with_csrf("POST", &format!("/api/tasks/q/{task}/run"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{task}: {body}");
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    let bell: Vec<String> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT task FROM notifications ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<String> = st
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+    let outbox: Vec<String> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT title FROM notify_outbox ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<String> = st
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+
+    assert!(bell.iter().any(|t| t == "hidden1"), "失败要留痕在铃铛: {bell:?}");
+    assert!(bell.iter().any(|t| t == "visible"), "看得见的任务失败要留痕: {bell:?}");
+    assert!(
+        outbox.iter().any(|t| t.contains("visible")),
+        "看得见的任务失败要推送: {outbox:?}"
+    );
+    assert!(
+        !outbox.iter().any(|t| t.contains("hidden1")),
+        "内部任务失败不该推送: {outbox:?}"
+    );
+}
+
 /// 内部运行成功**不发通知**（第 227 轮）：一次性调用和 hidden 任务是插件自己的实现细节。
 ///
 /// 现场：央视频 8 个账号各跑一条 `sign` → 8 条「任务 sign#N 成功」推进 ServerChan。

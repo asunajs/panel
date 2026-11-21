@@ -455,6 +455,7 @@ pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<()
 /// 正是最该让人知道的事 —— 只写进日志等于默认有人会去翻。
 pub fn stale_notice(n: usize) -> crate::notify::Notice {
     crate::notify::Notice {
+        push: true,
         event: "system",
         level: "warn",
         plugin: "panel".to_string(),

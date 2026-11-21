@@ -126,7 +126,9 @@ PanelUI.busy(btn, true, '正在保存…')  // 再调 busy(btn,false) 还原原�
 
 - **内部运行成功不发通知**（第 227 轮补）：一次性调用（`host.run_once` 生成的 `sign#2` 那种）和
   `{hidden:true}` 的内部任务，成功时不进铃铛、也不推送。现场：央视频 8 个账号各跑一条 =
-  8 条「任务 sign#N 成功」推进 ServerChan。**失败照发** —— 那才是要人来看的。
+  8 条「任务 sign#N 成功」推进 ServerChan。
+- **内部运行失败：进铃铛，但不推送**（第 227 轮补）：8 个号 token 同时失效 → 8 条「sign#N 失败」推送，
+  同样是轰炸。留痕（铃铛 + 运行记录 + 日志）照旧，外部渠道不发。看得见的任务照旧。
 
 `/api/state` 多一个 `pending` 数组（排队中的运行），任务视图多了
 `run_started` / `ephemeral` 两个字段。

@@ -421,6 +421,7 @@ fn a_route_filters_by_event_and_plugin_patterns() {
         ..Default::default()
     };
     let n = |event: &'static str, plugin: &str| notify::Notice {
+        push: true,
         level: "warn",
         event,
         plugin: plugin.to_string(),
