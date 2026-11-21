@@ -224,7 +224,7 @@ if (panel.atLeast('0.3.0')) {
 
 #### 通知
 
-notify(title, body?)：插件主动喊话。落到面板的通知表（铃铛上的未读数），
+notify(title, body?, {level})：插件主动喊话。`level` 取 `info`（默认）/ `warn` / `error` —— 推送规则可以按 `min_level` 卡，写死 info 会让「一趟挂了」这种被静默丢掉（第 227 轮）。落到面板的通知表（铃铛上的未读数），
 配了 PANEL_NOTIFY_WEBHOOK 时额外 POST 一个 JSON 到那个 URL：
 
 ```json

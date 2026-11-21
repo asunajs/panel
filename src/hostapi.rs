@@ -122,7 +122,8 @@ const WRAP: &str = r#"(raw) => {
   return {
     log: raw.log, info: raw.info, warn: raw.warn, error: raw.error,
     // 通知：标题/正文都是纯文本，别走 JSON.stringify（那会多一对引号）。
-    notify: async (title, body) => raw.notify(String(title), body === undefined ? undefined : String(body)),
+    notify: async (title, body, opts) => raw.notify(String(title), body === undefined ? undefined : String(body),
+      opts == null ? undefined : JSON.stringify(opts)),
     sleep: raw.sleep,
     register_cron: async (name, cron, budget_ms, opts) =>
       raw.register_cron(String(name), String(cron), budget_ms == null ? undefined : Number(budget_ms),
@@ -393,8 +394,33 @@ async fn op_error(ctx: Ctx<'_>, msg: String) -> Result<()> {
 }
 
 /// 插件主动发一条通知：进面板的通知列表，配了 webhook 的话也发出去。
-async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Result<()> {
+async fn op_notify(
+    ctx: Ctx<'_>,
+    title: String,
+    body: Undefined<String>,
+    opts: Undefined<String>,
+) -> Result<()> {
     let host = host(&ctx)?;
+    // opts = { level }（第 227 轮）：插件喊话默认 info，但「一趟挂了」这种该是 warn ——
+    // 推送规则可以按 min_level 卡，写死 info 会让它被静默丢掉。
+    let o: Json = match opts.0.as_deref() {
+        None | Some("") => Json::Null,
+        Some(t) => serde_json::from_str(t)
+            .map_err(|e| err(&ctx, format!("notify 的 opts 不是合法 JSON: {e}")))?,
+    };
+    only_keys(&o, &["level"], "notify").map_err(|e| err(&ctx, e))?;
+    let level: &'static str = match o.get("level").and_then(Json::as_str) {
+        None => "info",
+        Some("info") => "info",
+        Some("warn") => "warn",
+        Some("error") => "error",
+        Some(other) => {
+            return Err(err(
+                &ctx,
+                format!("notify 的 level 只能是 info / warn / error，给的是 {other}"),
+            ))
+        }
+    };
     crate::notify::record_bg(
         host.db.clone(),
         host.log.clone(),
@@ -402,7 +428,7 @@ async fn op_notify(ctx: Ctx<'_>, title: String, body: Undefined<String>) -> Resu
         crate::notify::Notice {
             push: true,
             event: "plugin",
-            level: "info",
+            level,
             plugin: host.plugin.clone(),
             task: None,
             run_id: host.inv.run_id(),

@@ -3157,6 +3157,47 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
+/// `host.notify(title, body, {level})`（第 227 轮）：插件喊话能指定等级。
+///
+/// 为什么要它：等级写死 info 时，配了 `min_level: warn` 的推送规则会把「一趟挂了」的汇总
+/// **静默丢掉** —— 正是最不该丢的那种。
+#[tokio::test]
+async fn plugin_notify_can_set_a_level() {
+    let (app, plugins, _data, _store, db) = setup_core("notifylevel").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('shout', async () => {
+  await host.notify('央视频：2/2 个号失败', '账号 1：auth fail.', { level: 'warn' });
+}, 5000);
+"#;
+    std::fs::write(plugins.join("nl.js"), src).unwrap();
+    let (status, _) = send(&app, with_csrf("POST", "/api/plugins/nl/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&app, with_csrf("POST", "/api/tasks/nl/shout/run", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let levels: Vec<(String, String)> = db
+        .call(|c| {
+            let mut st = c
+                .prepare("SELECT level, title FROM notifications ORDER BY id")
+                .map_err(|e| e.to_string())?;
+            let v: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(|e| e.to_string())?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+    assert!(
+        levels
+            .iter()
+            .any(|(l, t)| l == "warn" && t.contains("央视频")),
+        "level 没传进去: {levels:?}"
+    );
+}
+
 /// 内部运行**失败进铃铛、但不推送**（第 227 轮）。
 ///
 /// 现场：央视频 8 个号 token 同时失效 → 8 条「任务 sign#N 失败」推进 ServerChan。
