@@ -1,0 +1,15 @@
+{
+  "//": "插件界面的公共编译选项（真源：panel-llrt/tools/plugin-shared/tsconfig.webui.base.json）。各仓拷一份同名文件，自己的 tsconfig.webui.json 只写 extends + include。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "none",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "types": []
+  }
+}

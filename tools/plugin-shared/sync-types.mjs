@@ -5,6 +5,10 @@
 // 但也不能在 typecheck 时依赖同级目录存在（clone 下来就没了）。
 // 折中：真源留面板，本仓留一份**逐字节相同**的副本，`--check` 用来抓「面板改了、这边没跟」。
 //
+// 同步的东西（都是「面板的契约」，插件只该有副本）：
+//   ① panel-llrt/web/ui.d.ts                        → types/panel-ui.d.ts
+//   ② panel-llrt/tools/plugin-shared/tsconfig.webui.base.json → tsconfig.webui.base.json
+//
 //   node scripts/sync-types.mjs          # 从面板拷一份过来（写盘）
 //   node scripts/sync-types.mjs --check  # 只比对，不同就非零退出（放进门禁）
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -20,28 +24,40 @@ const CANDIDATES = [
   join(ROOT, '..', 'panel-llrt'),
 ].filter(Boolean);
 
-const src = CANDIDATES.map((d) => join(d, 'web/ui.d.ts')).find((p) => existsSync(p));
+const FILES = [
+  { from: 'web/ui.d.ts', to: 'types/panel-ui.d.ts' },
+  { from: 'tools/plugin-shared/tsconfig.webui.base.json', to: 'tsconfig.webui.base.json' },
+];
+
 const check = process.argv.includes('--check');
+let bad = 0;
 
-if (!src) {
-  console.error('找不到面板仓的 web/ui.d.ts（试过：' + CANDIDATES.join(' / ') + '）');
-  console.error('提示：用 PANEL_REPO_DIR=<面板仓路径> 指一下。');
-  process.exit(2);
+for (const f of FILES) {
+  const src = CANDIDATES.map((d) => join(d, f.from)).find((p) => existsSync(p));
+  const dest = join(ROOT, f.to);
+
+  if (!src) {
+    console.error('找不到面板仓的 ' + f.from);
+    console.error('提示：用 PANEL_REPO_DIR=<面板仓路径> 指一下（试过：' + CANDIDATES.join(' / ') + '）');
+    process.exit(2);
+  }
+
+  const want = readFileSync(src, 'utf8');
+  const have = existsSync(dest) ? readFileSync(dest, 'utf8') : '';
+
+  if (check) {
+    if (have !== want) {
+      console.error('✗ ' + f.to + ' 与面板的 ' + f.from + ' 不一致 —— 跑 `node scripts/sync-types.mjs`');
+      bad += 1;
+    }
+    continue;
+  }
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, want);
+  console.log('ok: ' + f.from + ' → ' + f.to);
 }
-
-const want = readFileSync(src, 'utf8');
-const have = existsSync(DEST) ? readFileSync(DEST, 'utf8') : '';
 
 if (check) {
-  if (have !== want) {
-    console.error('types/panel-ui.d.ts 与面板的 web/ui.d.ts 不一致：' + src);
-    console.error('跑 `node scripts/sync-types.mjs` 同步。');
-    process.exit(1);
-  }
-  console.log('ok: types/panel-ui.d.ts 与面板一致');
-  process.exit(0);
+  if (bad === 0) console.log('ok: 面板契约副本与真源一致（' + FILES.length + ' 份）');
+  process.exit(bad === 0 ? 0 : 1);
 }
-
-mkdirSync(dirname(DEST), { recursive: true });
-writeFileSync(DEST, want);
-console.log('ok: 已同步 ' + src + ' → types/panel-ui.d.ts');
