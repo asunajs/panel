@@ -851,11 +851,59 @@ async function main() {
     "JSON.stringify([...document.querySelectorAll('#tasks-body tr')].map(tr=>tr.innerText.replace(/\\s+/g,' ')))"));
   check('任务表里有 seed/tick', taskRows.some((t) => t.includes('seed') && t.includes('tick')),
     JSON.stringify(taskRows.slice(0, 2)));
+  // 第 256 轮：行里只剩「执行 + ⋯」，暂停/改计划/删除都进弹窗。这里走用户的点击路径。
+  const rowBtns = JSON.parse(await js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('tick'));" +
+    "return JSON.stringify([...tr.querySelectorAll('.actions button')].map(b=>b.textContent.trim()));})()"));
+  check('任务行只有「执行 + ⋯」两个动作', rowBtns.length === 2 && rowBtns[0] === '执行' && rowBtns[1] === '⋯',
+    JSON.stringify(rowBtns));
+  // 「插件还没装进内存」是插件级状态，不该和任务结论并排挂在状态列（第 256 轮）
+  check('状态列不再挂第二个药丸「待加载」',
+    !(await js("document.getElementById('tasks-body').textContent")).includes('待加载'));
+
+  const opened = await js(
+    "(async()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('tick'));" +
+    " const b=tr.querySelector('.task-more'); if(!b) return 'no-btn'; b.click();" +
+    " await new Promise(r=>setTimeout(r,250)); return document.getElementById('task-action').classList.contains('hidden')?'hidden':'open';})()");
+  check('点「⋯」弹出任务操作弹窗', opened === 'open', opened);
+  const tabInfo = JSON.parse(await js(
+    "(()=>{return JSON.stringify({tabs:[...document.querySelectorAll('[data-ta-tab]')].length," +
+    "sel:document.querySelector('[data-ta-tab][aria-selected=true]').dataset.taTab," +
+    "saveHidden:document.getElementById('task-action-save').classList.contains('hidden')," +
+    "runItems:document.querySelectorAll('#task-action-run .act').length});})()"));
+  check('弹窗有三个页签、默认开在运行页', tabInfo.tabs === 3 && tabInfo.sel === 'run', JSON.stringify(tabInfo));
+  check('运行页列动作且不显示「保存计划」', tabInfo.runItems >= 2 && tabInfo.saveHidden === true, JSON.stringify(tabInfo));
+
+  // 计划页必须是**同一页**：cron 编辑器就地渲染，不再弹第二个窗（第 256 轮并掉了旧弹窗）
+  await js("document.querySelector('[data-ta-tab=plan]').click()");
+  await sleep(250);
+  const planInfo = JSON.parse(await js(
+    "(()=>{return JSON.stringify({form:document.querySelectorAll('#sched-form .field-inline').length," +
+    "saveHidden:document.getElementById('task-action-save').classList.contains('hidden')," +
+    "modals:[...document.querySelectorAll('.modal:not(.hidden)')].map(m=>m.id)});})()"));
+  check('计划页就地渲染 cron 编辑器（没有第二个弹窗）',
+    planInfo.form >= 1 && planInfo.saveHidden === false && planInfo.modals.length === 1, JSON.stringify(planInfo));
+
+  // 保存：改频率 → 保存 → 弹窗自己关 + 后端真的变了（只看界面会「保存成功但没生效」）
+  await js("(()=>{const s=[...document.querySelectorAll('#sched-form select')][0]; s.value='daily'; s.dispatchEvent(new Event('change',{bubbles:true}));})()");
+  await sleep(250);
+  await js("document.getElementById('task-action-save').click()");
+  const savedCron = await waitFor(async () => {
+    const s = await (await fetch('http://127.0.0.1:' + PORT + '/api/state')).json();
+    const t = s.tasks.find((x) => x.plugin === 'seed' && x.name === 'tick');
+    return t && String(t.cron).startsWith('json:') ? String(t.cron) : null;
+  }, 6000, '计划写回后端').catch(() => null);
+  check('计划页「保存」真的写回后端', !!savedCron, savedCron || '后端 cron 没变');
+  check('保存后弹窗自己关掉',
+    (await js("document.getElementById('task-action').classList.contains('hidden')")) === true);
+
+  // 暂停也走弹窗：点 ⋯ → 运行页 → 暂停
   const pauseClicked = await js(
-    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
-    " if(!tr) return false; const b=[...tr.querySelectorAll('button')].find(x=>x.textContent.trim()==='暂停');" +
-    " if(!b) return false; b.click(); return true;})()");
-  check('能点到「暂停」', pauseClicked === true);
+    "(async()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('tick'));" +
+    " if(!tr) return 'no-row'; tr.querySelector('.task-more').click(); await new Promise(r=>setTimeout(r,250));" +
+    " const b=[...document.querySelectorAll('#task-action-run .act')].find(x=>x.textContent.startsWith('暂停'));" +
+    " if(!b) return 'no-btn'; b.click(); return 'clicked';})()");
+  check('弹窗运行页能点到「暂停」', pauseClicked === 'clicked', pauseClicked);
   // 点完要**等状态真的变**：刷新是轮询的（1.5s 只是猜），猜早了就会偶发红（第 92 轮实测撞到一次）。
   const paused = await waitFor(async () => {
     const row = await js(
@@ -1234,7 +1282,8 @@ async function main() {
   const shortInfo = JSON.parse(await js(
     "JSON.stringify({toast:document.getElementById('toast').textContent," +
     "toastShown:!document.getElementById('toast').classList.contains('hidden')," +
-    "notices:document.querySelectorAll('#notices .notice').length})",
+    "notices:document.querySelectorAll('#notices .notice').length," +
+    "texts:[...document.querySelectorAll('#notices .notice')].map(n=>n.textContent.trim().slice(0,60))})",
   ));
   check(
     '短结果走顶部居中（不进右上角）',
@@ -1767,18 +1816,19 @@ async function main() {
   // 这三个弹窗的「取消」是死按钮。这里把它钉成回归检查。
   const openModal = (id) => js("document.getElementById('" + id + "').classList.remove('hidden')");
   const modalHidden = async (id) => (await js("document.getElementById('" + id + "').classList.contains('hidden')")) === true;
-  await openModal('task-schedule');
-  await js("document.querySelector('#task-schedule .modal-actions .btn').click()");
+  // 第 256 轮：「改计划」并进了任务操作弹窗（#task-action），这三个出口照样要能关。
+  await openModal('task-action');
+  await js("document.querySelector('#task-action .modal-actions .btn[data-close]').click()");
   await sleep(250);
-  check('改计划的「取消」能关掉弹窗', await modalHidden('task-schedule'), '点了没关 = 死按钮');
-  await openModal('task-schedule');
-  await js("document.querySelector('#task-schedule .modal-backdrop').click()");
+  check('任务弹窗的「关闭」能关掉', await modalHidden('task-action'), '点了没关 = 死按钮');
+  await openModal('task-action');
+  await js("document.querySelector('#task-action .modal-backdrop').click()");
   await sleep(250);
-  check('点遮罩也能关掉改计划弹窗', await modalHidden('task-schedule'));
-  await openModal('task-schedule');
+  check('点遮罩也能关掉任务弹窗', await modalHidden('task-action'));
+  await openModal('task-action');
   await js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
   await sleep(250);
-  check('Esc 也能关掉改计划弹窗', await modalHidden('task-schedule'));
+  check('Esc 也能关掉任务弹窗', await modalHidden('task-action'));
   await openModal('new-plugin');
   await js("document.querySelector('#new-plugin .modal-actions .btn').click()");
   await sleep(250);

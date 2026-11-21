@@ -651,6 +651,38 @@ function actionsCell(ops) {
   return td;
 }
 
+/**
+ * 任务行的动作（第 256 轮）：正常任务只有「执行」+「⋯」。
+ * 已删除只留「恢复」（运行记录、日志都还在，恢复后接着算）；待采纳只留「采纳 / 删除」
+ * （它还没被调度，为它多造一条路径不值）。「加载插件」这类预热动作归 ⋯ 里的运行页。
+ */
+function taskRowActions(t) {
+  const cell = el('td', 'right');
+  const wrap = el('div', 'actions');
+  const mk = (label, fn, cls, title) => {
+    const b = el('button', 'btn btn-sm' + (cls ? ' ' + cls : ''), label);
+    b.type = 'button';
+    if (title) b.title = title;
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
+    wrap.append(b);
+    return b;
+  };
+  const restore = () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name);
+  if (t.deleted) {
+    mk('恢复', restore, '', '恢复后会从当前时间重算下一拍');
+  } else if (t.pending_adopt) {
+    mk('采纳', () => act(taskPath(t, 'schedule'), '已采纳建议 ' + t.name, { expr: null }), '', '按插件注册的计划开始调度');
+    mk('删除', () => deleteTask(t), 'btn-danger');
+  } else {
+    mk('执行', () => runTask(t), '', '立刻跑一次；插件正忙就排队');
+    const more = mk('⋯', () => openTaskPanel(t), 'task-more', '计划 / 暂停 / 加载插件 / 删除…');
+    more.setAttribute('aria-haspopup', 'dialog');
+    more.setAttribute('aria-label', '更多操作');
+  }
+  cell.append(wrap);
+  return cell;
+}
+
 function rowMessage(text, span, hint) {
   const tr = el('tr');
   const td = el('td');
@@ -1132,10 +1164,170 @@ function schedDefault(type) {
   }
 }
 
-function openTaskSchedule(t) {
+// ---------------------------------------------------------------- 任务操作弹窗
+//
+// 第 256 轮：任务行的动作从「一排同权重按钮」收成「执行 + ⋯」。
+//   · 2~6 个按钮换行后右边缘参差，实测行高 71 / 82.5 / 118px 三档；
+//   · 「执行」和「删除」长得一模一样，没有层级；
+//   · 「加载插件」「采纳建议」的解释只挂在 title 上，触屏等于没有。
+// 现在全进这一个弹窗，按「会改变什么」分三页：
+//   运行 = 动作；计划 = 就地的 cron 编辑器（不再另开弹窗）；详情 = 原来塞在 title 里的东西。
+
+let taskActionTarget = null;
+let taskActionTab = 'run';
+
+/** 打开任务操作弹窗。tab 省略时：待采纳的任务直接开在计划页，其余开在运行页。 */
+function openTaskPanel(t, tab) {
+  taskActionTarget = t;
+  const title = $('task-action-title');
+  clear(title);
+  title.append(document.createTextNode(t.plugin + ' '), el('span', 'ta-who', '/ ' + t.name));
+  const st = $('task-action-status');
+  clear(st);
+  st.append(taskPill(t));
+  // 打开第一眼要能确认「点的是哪一条」：计划、预算、下次、跑过都写在副标题里
+  $('task-action-meta').textContent = [
+    t.manual ? '手动任务（计划由代码决定）' : cronLabel(t.cron),
+    '预算 ' + humanMs(t.budget_ms),
+    '下次 ' + (t.manual || !t.enabled ? '—' : fmtDateTime(t.next_at)),
+    '跑过 ' + t.runs + ' 次',
+  ].join(' · ');
+  // 角标：真有没处理的东西才挂数字，别让它变成装饰
+  setTabBadge('task-action-badge-plan', t.cron_base && t.cron_base !== t.cron ? 1 : 0);
+  setTabBadge('task-action-badge-more', (t.blockers || []).length + (t.last_error ? 1 : 0));
+  prepareScheduleEdit(t);
+  renderTaskRunPane(t);
+  renderTaskMorePane(t);
+  setTaskTab(tab || (t.pending_adopt ? 'plan' : 'run'));
+  $('task-action').classList.remove('hidden');
+  const first = $('task-action-' + taskActionTab).querySelector('button');
+  if (first) first.focus();
+}
+
+function closeTaskPanel() {
+  $('task-action').classList.add('hidden');
+  taskActionTarget = null;
+}
+
+function setTabBadge(id, n) {
+  const b = $(id);
+  if (!b) return;
+  b.textContent = String(n || '');
+  b.classList.toggle('hidden', !n);
+}
+
+function setTaskTab(name) {
+  taskActionTab = name;
+  for (const b of document.querySelectorAll('[data-ta-tab]')) {
+    b.setAttribute('aria-selected', String(b.dataset.taTab === name));
+  }
+  for (const p of ['run', 'plan', 'more']) {
+    $('task-action-' + p).classList.toggle('hidden', p !== name);
+  }
+  // 页脚跟着页签走：只有计划页能保存；没覆盖过计划的任务没有「采纳建议」可点
+  const t = taskActionTarget;
+  const isPlan = name === 'plan' && !!t && !t.manual && !t.deleted;
+  $('task-action-save').classList.toggle('hidden', !isPlan);
+  $('task-action-reset').classList.toggle('hidden', !isPlan || !t.cron_override);
+}
+
+/** 「运行」页：会改状态的动作。每条带一句人话，不指望 tooltip。 */
+function renderTaskRunPane(t) {
+  const box = $('task-action-run');
+  clear(box);
+  if (t.in_flight && t.run_started) {
+    box.append(el('p', 'muted', '正在跑：已跑 ' + elapsedLabel(Date.now() - t.run_started) +
+      ' / 预算 ' + humanMs(t.budget_ms)));
+  }
+  const list = el('div', 'act-list');
+  const item = (label, hint, fn, danger) => {
+    const b = el('button', 'act' + (danger ? ' act-danger' : ''));
+    b.type = 'button';
+    b.append(el('span', 'act-label', label), el('span', 'act-hint', hint));
+    b.addEventListener('click', fn);
+    list.append(b);
+  };
+  // 动作一律先关弹窗再派发：refresh() 会重建整张表，弹窗留着就是对着旧行说话
+  const then = (fn) => () => { closeTaskPanel(); fn(); };
+  item('执行', '立刻跑一次；插件正忙就排在它后面', then(() => runTask(t)));
+  item(t.enabled ? '暂停' : '恢复',
+    t.enabled ? '停掉定时；手动「执行」照旧可用' : '恢复定时；从当前时间重新算下一拍',
+    then(() => act(t.enabled ? taskPath(t, 'pause') : taskPath(t, 'resume'),
+      (t.enabled ? '已暂停 ' : '已恢复 ') + t.name)));
+  if (t.lazy) {
+    item('加载插件', '预热；不点也会在到点前 3 分钟自动装回',
+      then(() => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)));
+  }
+  // 熔断了才给这个出口：冷却是指数退避，人修好原因之后要能立刻恢复（通知里那句「检查完可以手动恢复」就是它）
+  if (t.tripped) {
+    item('重置熔断', '清掉退避冷却；确认原因已修好再点',
+      then(() => act(taskPath(t, 'reset'), '已重置熔断 ' + t.name)));
+  }
+  list.append(el('div', 'act-sep'));
+  item('删除任务', '运行记录和日志都留着，可在「显示已删除」里恢复', then(() => deleteTask(t)), true);
+  box.append(list);
+}
+
+/** 「详情」页：这些以前要么在 title 里，要么挤在状态列把行撑高。 */
+function renderTaskMorePane(t) {
+  const box = $('task-action-more');
+  clear(box);
+  const dl = el('dl', 'ta-kv');
+  const kv = (k, v, mono) => {
+    dl.append(el('dt', '', k));
+    dl.append(el('dd', mono ? 'mono' : '', v));
+  };
+  kv('插件', t.plugin, true);
+  kv('任务', t.name, true);
+  kv('计划', t.manual ? '手动（由代码决定）' : cronLabel(t.cron), !t.manual);
+  if (t.cron_base && t.cron_base !== t.cron) kv('插件注册', t.cron_base, true);
+  kv('预算', humanMs(t.budget_ms));
+  if (t.suggest_budget_ms && t.suggest_budget_ms !== t.budget_ms) {
+    kv('插件建议预算', humanMs(t.suggest_budget_ms));
+  }
+  kv('下次运行', t.manual ? '—' : (t.enabled ? fmtDateTime(t.next_at) : '已暂停'));
+  kv('跑过', t.runs + ' 次');
+  if (t.in_flight && t.run_started) {
+    kv('本次已跑', elapsedLabel(Date.now() - t.run_started));
+  }
+  box.append(dl);
+  if (t.blockers && t.blockers.length) {
+    box.append(el('h3', 'ta-sub', '未就绪 ' + t.blockers.length + ' 项'));
+    const ul = el('ul', 'ta-blockers');
+    for (const b of t.blockers) ul.append(el('li', '', b));
+    box.append(ul);
+  }
+  if (t.last_error) {
+    box.append(el('h3', 'ta-sub', '上次错误'));
+    box.append(el('pre', 'ta-err', t.last_error));
+  }
+  const go = el('button', 'btn btn-sm', '在日志里看 ' + t.plugin);
+  go.type = 'button';
+  go.addEventListener('click', () => { closeTaskPanel(); jumpToLogs(t.plugin); });
+  box.append(go);
+}
+
+/** 详情页的出口：日志页搜索框直接填上插件名（同一个 state，不是另开一份筛选）。 */
+function jumpToLogs(plugin) {
+  const input = $('log-search');
+  if (input) input.value = plugin;
+  state.logQuery = plugin;
+  if (typeof searchLogs === 'function') searchLogs(true);
+  location.hash = '#logs';
+}
+
+/** 计划页的数据准备：打开时算一次（之后用户改的是这份 schedJson）。 */
+function prepareScheduleEdit(t) {
   scheduleTarget = t;
-  $('task-schedule-what').textContent =
-    t.plugin + ' / ' + t.name + '　插件注册的是「' + (t.cron_base || '（无）') + '」';
+  const form = $('sched-form');
+  clear(form);
+  if (t.manual) {
+    form.append(el('p', 'hint', '手动任务：计划由代码决定，这里不能改。'));
+    const hint = $('task-action-hint');
+    hint.classList.remove('err-text');
+    hint.textContent = '';
+    return;
+  }
   // 当前计划 → JSON：认得出来就填表单，认不出来就原样进「表达式」模式
   const cur = t.cron_override || t.cron || '';
   if (cur.startsWith('json:') || cur.startsWith('{')) {
@@ -1150,11 +1342,10 @@ function openTaskSchedule(t) {
     schedJson = back.ok ? back.json : { type: 'expr', expr: cur, timezone: PanelSchedule.defaultTimezone() };
   }
   schedAdvOpen = false;
-  $('task-schedule-hint').classList.remove('err-text');
-  $('task-schedule-hint').textContent = '只换计划，运行历史和暂停状态都保留。';
-  $('task-schedule-reset').classList.toggle('hidden', !t.cron_override);
+  const hint = $('task-action-hint');
+  hint.classList.remove('err-text');
+  hint.textContent = '只换计划，运行历史和暂停状态都保留。';
   renderScheduleForm();
-  $('task-schedule').classList.remove('hidden');
 }
 
 /** 一行「标签 + 控件」。 */
@@ -1437,7 +1628,7 @@ function refreshSchedDerived() {
   }
 
   // 字段级提示
-  const hint = $('task-schedule-hint');
+  const hint = $('task-action-hint');
   if (hint) {
     const vs = PanelSchedule.validate(schedJson);
     const bad = vs.filter((v) => v.level === 'error');
@@ -1462,7 +1653,7 @@ async function submitTaskSchedule() {
   const tid = scheduleTarget ? scheduleTarget.plugin + '/' + scheduleTarget.name : 'preview';
   const pv = PanelSchedule.nextRuns(schedJson, 5, { taskId: tid });
   if (!pv.ok && schedJson.type !== 'expr') {
-    const hint = $('task-schedule-hint');
+    const hint = $('task-action-hint');
     hint.textContent = pv.reason || '该规则不会触发，请检查';
     hint.classList.add('err-text');
     return;
@@ -1475,20 +1666,41 @@ async function submitTaskSchedule() {
   await saveTaskSchedule(expr);
 }
 
+/** 计划的一句话标签（中文、短）：只给提示条用；页面上的短句仍走 PanelSchedule.toSentence。 */
+function planShortLabel(plan) {
+  const j = plan || schedJson;
+  if (!j) return '';
+  const day = (d) => (PanelSchedule.DAY_LABEL && PanelSchedule.DAY_LABEL[d]) || d;
+  const unit = (u) => (PanelSchedule.UNIT_LABEL && PanelSchedule.UNIT_LABEL[u]) || u || '';
+  const tail = j.jitter ? ' ±' + j.jitter : '';
+  switch (j.type) {
+    case 'daily': return '每天 ' + (j.at || '') + tail;
+    case 'weekly': return '每周 ' + (j.days || []).map(day).join('') + ' ' + (j.at || '');
+    case 'interval': return '每 ' + j.every + ' ' + unit(j.unit) + tail;
+    case 'monthly': return '每月 ' + (j.day === 'last' ? '最后一天' : j.day + ' 号') + ' ' + (j.at || '');
+    case 'once': return '一次 ' + (j.at || '');
+    case 'multi': return (j.items || []).length + ' 条计划';
+    case 'expr': return String(j.expr || '').slice(0, 14);
+    default: return '';
+  }
+}
+
 async function saveTaskSchedule(expr) {
   if (!scheduleTarget) return;
-  const btn = $('task-schedule-ok');
+  const btn = $('task-action-save');
   btn.disabled = true;
   try {
     await api(taskPath(scheduleTarget, 'schedule'), { method: 'POST', body: { expr } });
-    $('task-schedule').classList.add('hidden');
-    notify(
-      expr === null ? '已恢复插件注册的计划' : '计划已改成「' + cronLabel(expr) + '」',
-      'ok');
+    closeTaskPanel();
+    // 提示语要短（第 256 轮）：结构化计划存的是 `json:{...}`，而 toSentence 是英文短句
+    // （"every day at 09:00"）—— 拼进「计划已改成「…」」就超过 20 字，被当成「长提示」
+    // 钉到右上角，用户还得手动关掉它。这里给一句中文、能装进 20 字的标签。
+    const shown = expr !== null && schedJson ? planShortLabel(schedJson) : cronLabel(expr);
+    notify(expr === null ? '已恢复插件注册的计划' : '计划已改成「' + shown + '」', 'ok');
     await refresh();
   } catch (e) {
     if (e instanceof Unauthorized) { showGate(true, '令牌无效或已过期'); return; }
-    const hint = $('task-schedule-hint');
+    const hint = $('task-action-hint');
     hint.textContent = e.message || '保存失败';
     hint.classList.add('err-text');
   } finally {
@@ -1502,6 +1714,11 @@ function renderTasks() {
   // 同上：数据没变的那几轮不该重建任务表（每轮 ~8 行 × 十几个节点）。
   // pending 也要进变更键：插件忙的时候任务行本身没变，变的只是「排队」那一行（第 227 轮）。
   if (sameAsLast('tasks', [state.tasks, state.pending, state.showDeleted, q, state.fp.tasks, state.sort.tasks])) return;
+  // 弹窗开着的任务没了（插件重载后不再注册 / 换名）：弹窗跟着关 ——
+  // 留着它就是在对一条不存在的任务说「保存计划」。
+  if (taskActionTarget && !state.tasks.some((x) => x.plugin === taskActionTarget.plugin && x.name === taskActionTarget.name)) {
+    closeTaskPanel();
+  }
   // 已删除的任务默认不出现（第 178 轮）：它们还在库里（墓碑），只是不调度。
   // 一次性调用造出来的临时任务（第 227 轮）不进主表：它们只活一次运行的时间，
   // 混进来会让人以为插件注册了一堆怪名字的任务。排队的条目单独列在表尾。
@@ -1533,7 +1750,15 @@ function renderTasks() {
   if (!rows.length && !pending.length) { body.append(rowMessage('没有匹配的任务', 8)); return; }
   for (const t of rows) {
     const tr = el('tr');
-    tr.append(td('插件', 'dim', t.plugin));
+    const pluginCell = td('插件', 'dim', t.plugin);
+    // 「插件还没装进内存」是插件级状态，不是任务结论（第 256 轮）：
+    // 挂在插件名下面（同 set_job_summary 的 mini-sub），状态列就只剩一个药丸了。
+    if (t.lazy && !t.deleted) {
+      const lz = el('div', 'mini-sub', '未装载');
+      lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 3 分钟也会自动装。';
+      pluginCell.append(lz);
+    }
+    tr.append(pluginCell);
     const nameCell = td('任务', 'strong', t.name);
     // 插件自己写的一行摘要（set_job_summary）：放在任务名下面，不占新列。
     if (t.summary) nameCell.append(el('div', 'mini-sub', t.summary));
@@ -1557,18 +1782,16 @@ function renderTasks() {
     tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (!t.enabled ? '—' : fmtDateTime(t.next_at))));
     tr.append(td('跑过', 'num', String(t.runs)));
     const st = td('状态');
+    // 药丸进一个显式的栈（第 256 轮）：以前两个药丸是 td 里的行内兄弟，
+    // 列一窄就换行，中间那 1~2px 是行盒剩的，不是设计值 —— 看起来像两格数据黏在一起。
+    const stack = el('div', 'pill-stack');
     const head = taskPill(t);
-    st.append(head);
+    stack.append(head);
     // 「已跑 12:30 / 预算 20:00」（第 227 轮）：长任务最想知道的就是「还要多久」。
     // run_started 由 /api/state 带出来，跟着轮询自己走。
     if (t.in_flight && t.run_started) {
       st.append(el('div', 'mini-sub', '已跑 ' + elapsedLabel(Date.now() - t.run_started) +
         ' / 预算 ' + humanMs(t.budget_ms)));
-    }
-    if (t.lazy && !t.deleted) {
-      const lz = pill('pill', '待加载');
-      lz.title = '插件还没装进内存。点「执行」会先自动装回来再跑；到点前 3 分钟也会自动装。';
-      st.append(lz);
     }
     if (t.deleted) {
       // 状态列只给一个结论（第 225 轮）：以前这里是「已启用」+「已删除」两个药丸并排，
@@ -1579,55 +1802,14 @@ function renderTasks() {
     if (t.blockers && t.blockers.length) {
       const b = pill('pill-warn', '未就绪 ' + t.blockers.length);
       b.title = t.blockers.join('；');
-      st.append(b);
+      stack.append(b);
     }
+    st.append(stack);
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
-    if (t.lazy) {
-      // 按需加载的占位任务（第 179 轮）：计划、下次运行都真，插件还没装进内存。
-      // 第 188 轮起「执行」会先 ensure_loaded 再跑，所以不再只给一个「加载插件」
-      // （那是在把自己的实现细节推给用户）。「加载插件」留在后面当预热用。
-      const ops = t.deleted
-        ? [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]]
-        : [
-            ['执行', () => runTask(t)],
-            ['加载插件', () => act('/api/plugins/' + encodeURIComponent(t.plugin) + '/reload', '已加载 ' + t.plugin)],
-          ];
-      if (!t.deleted && !t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
-      tr.append(actionsCell(ops));
-      body.append(tr);
-      continue;
-    }
-    if (t.deleted) {
-      // 已删除：只剩「恢复」。运行记录、日志都还在，恢复后接着算。
-      const ops = [['恢复', () => act('/api/tasks/' + encodeURIComponent(t.plugin) + '/' + encodeURIComponent(t.name) + '/restore', '已恢复 ' + t.name)]];
-      tr.append(actionsCell(ops));
-      body.append(tr);
-      continue;
-    }
-    if (t.pending_adopt) {
-      // 只是插件的建议（插件更新引入的新任务名）：不调度，采纳后才跑
-      const ops = [
-        ['采纳', () => act(taskPath(t, 'schedule'), '已采纳建议 ' + t.name, { expr: null })],
-        ['删除', () => deleteTask(t)],
-      ];
-      tr.append(actionsCell(ops));
-      body.append(tr);
-      continue;
-    }
-    const ops = [['执行', () => runTask(t)]];
-    if (!t.manual) ops.push(['改计划', () => openTaskSchedule(t)]);
-    ops.push(t.enabled
-      ? ['暂停', () => act(taskPath(t, 'pause'), '已暂停 ' + t.name)]
-      : ['恢复', () => act(taskPath(t, 'resume'), '已恢复 ' + t.name)]);
-    // 熔断了才给这个按钮：冷却是指数退避，人修好原因之后得有个立刻能恢复的出口
-    // （通知里那句「检查完可以手动恢复」指的就是它）。
-    if (t.tripped) ops.push(['重置熔断', () => act(taskPath(t, 'reset'), '已重置熔断 ' + t.name)]);
-    if (t.cron_base && t.cron_base !== t.cron) {
-      ops.push(['采纳建议', () => act(taskPath(t, 'schedule'), '已采纳建议 ' + t.name, { expr: null })]);
-    }
-    ops.push(['删除', () => deleteTask(t)]);
-    tr.append(actionsCell(ops));
+    // 动作列（第 256 轮）：只给「执行 + ⋯」。其余动作按语义进弹窗的三个页签 ——
+    // 这里不再按条件 push 一串按钮，行高和右边缘才稳得住。
+    tr.append(taskRowActions(t));
     body.append(tr);
   }
   // 排队中的运行（第 227 轮）：插件忙，这些在等执行位。它们不是任务行，
@@ -6811,8 +6993,23 @@ function bind() {
   });
   $('new-script-ok').addEventListener('click', createScript);
   // 第 110 轮：表单负责写 JSON，这里只负责把 JSON 落成调度表达式（见 submitTaskSchedule）
-  $('task-schedule-ok').addEventListener('click', submitTaskSchedule);
-  $('task-schedule-reset').addEventListener('click', () => saveTaskSchedule(null));
+  $('task-action-save').addEventListener('click', submitTaskSchedule);
+  $('task-action-reset').addEventListener('click', () => saveTaskSchedule(null));
+  // 页签：点 + ←/→（只在弹窗里、且焦点不在输入控件上时接管，别抢表单的方向键）
+  for (const b of document.querySelectorAll('[data-ta-tab]')) {
+    b.addEventListener('click', () => setTaskTab(b.dataset.taTab));
+  }
+  $('task-action').addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    const tag = (ev.target && ev.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    const order = ['run', 'plan', 'more'];
+    const next = order[(order.indexOf(taskActionTab) + (ev.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length];
+    ev.preventDefault();
+    setTaskTab(next);
+    const tabBtn = document.querySelector('[data-ta-tab="' + next + '"]');
+    if (tabBtn) tabBtn.focus();
+  });
   $('new-script-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createScript(); }
   });

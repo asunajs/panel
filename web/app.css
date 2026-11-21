@@ -235,6 +235,10 @@ button, input, select { font: inherit; color: inherit; }
 .pill-err { background: var(--err-soft); color: var(--err); border-color: transparent; }
 .pill-accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
+/* 状态列的药丸栈（第 256 轮）：以前两个药丸是 td 里的行内兄弟，列一窄就换行，
+   中间那 1~2px 是行盒剩下的，不是设计值 —— 看着像两格数据黏在一起。现在显式给 gap。 */
+.pill-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
 .dot-idle { background: var(--dim); }
 .dot-ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
@@ -355,6 +359,21 @@ button, input, select { font: inherit; color: inherit; }
 .table .strong { font-weight: 600; }
 .table .dim { color: var(--dim); }
 .table .actions { display: flex; gap: 4px; justify-content: flex-end; }
+/* 表格里的动作按钮不许竖向叠（第 256 轮）：换行的 flex 容器 min-content 只等于**最宽**那颗，
+   列被挤窄时「执行 / ⋯」会叠成两行，整行高度从 46 翻到 83（真机上量到的）。
+   抽屉里那种一排按钮仍然允许换行（下面的 .actions 基础规则没动）。 */
+.table .actions { flex-wrap: nowrap; }
+/* 任务表的「数字/表达式」列给下限（第 256 轮）。
+   它们被挤到 min-content 时会**按词**折行：「5 分 0 秒」折成 4 行（5 / 分 / 0 / 秒），
+   「@every 30s」折成两截 —— 一行本来是 46px，实测被撑到 98px。
+   ≤720 是两列卡片，不受影响；721~1023 万一放不下，就在 .table-wrap 里横向滚。 */
+#view-tasks .table th[data-sort="cron"] { min-width: 148px; }
+#view-tasks .table th[data-sort="budget_ms"] { min-width: 84px; }
+#view-tasks .table th[data-sort="next_at"] { min-width: 110px; }
+/* 任务行的「⋯」（第 256 轮）：和「执行」同高，宽度按字形给 —— 三个点比两个汉字窄得多，
+   不给固定宽会缩成一小条，点起来也别扭。 */
+.table .actions .task-more { width: 34px; padding: 0; font-size: 15px; line-height: 1; color: var(--fg-2); }
+.table .actions .task-more:hover { color: var(--fg); }
 .table .err-text { color: var(--err); }
 .table .nowrap { white-space: nowrap; }
 
@@ -1038,6 +1057,8 @@ html input[type="checkbox"]:not(.check-raw):disabled {
   .table tbody td[colspan], .table tbody td.right { grid-column: 1 / -1; }
   .table .actions { justify-content: flex-start; margin-top: 6px; }
   .table tbody td.right::before { content: none; }
+  /* 卡片态横着排：竖排会白占两行高度（一张卡已经很高了） */
+  .pill-stack { flex-direction: row; flex-wrap: wrap; align-items: center; }
   /* 窄屏别再造第二根滚动条：表格自己滚 + 页面再滚，手机上两个手指也分不清滚的是谁。
      把高度放开，交给页面那一根。 */
   .panel-body.table-scroll { max-height: none; overflow-y: visible; }
@@ -2203,14 +2224,65 @@ select option { background: var(--surface); color: var(--fg); }
   word-break: break-word;
 }
 
-/* 「改计划」比一个输入框长得多（类型 + 条件字段 + 高级选项 + 短句 + 5 次预览）。
-   卡片限高之后，让**中间那块表单自己滚**：标题和「取消/保存」始终停在原地，
-   不用滚到底才能点保存。 */
-#task-schedule #sched-form {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 4px; /* 给滚动条让位，别压住右边框 */
+/* ---------- 任务操作弹窗（第 256 轮）----------
+   任务表行里只留「执行 + ⋯」，其余动作都进这个弹窗，按「会改变什么」分三页：
+   运行（动作）/ 计划（就地的 cron 编辑器，不再另开弹窗）/ 详情（原先塞在 title 里的东西）。
+   壳子复用 .modal-card + .tabs + .btn；这里只补布局，颜色一律走 token。 */
+.modal-card.wide {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow: hidden; /* 滚的是 .ta-body，标题/页签/按钮行钉住 */
+}
+.ta-head { display: flex; align-items: center; gap: 8px; }
+.ta-head h2 { margin-right: 2px; min-width: 0; overflow-wrap: anywhere; }
+.ta-who { font-family: var(--mono); font-size: 12.5px; font-weight: 400; color: var(--dim); }
+.ta-x { margin-left: auto; width: 28px; height: 28px; }
+.ta-meta { margin: -6px 0 0; }
+.modal-card .tabs { margin: 2px 0 0; }
+.modal-card .tabs .tab { flex: 0 0 auto; }
+.tab-badge {
+  display: inline-block; min-width: 15px; height: 15px; padding: 0 4px; margin-left: 5px;
+  border-radius: 8px; background: var(--accent-soft); color: var(--accent);
+  font-size: 10.5px; font-weight: 700; line-height: 15px; text-align: center;
+}
+/* 唯一的滚动容器：表单再长也不会把标题和「保存」顶出去 */
+.ta-body { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.ta-pane { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+/* 详情页底下那颗「在日志里看」不该被拉成通栏（它是个按钮，不是一栏数据） */
+.ta-pane > .btn { align-self: flex-start; }
+/* 动作行：标题 + 一句人话。以前这些解释只挂在 title 上，触屏等于没有。 */
+.act-list { display: flex; flex-direction: column; gap: 2px; margin: -4px 0; }
+.act {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 9px 10px;
+  text-align: left; background: transparent; border: 1px solid transparent;
+  border-radius: 9px; cursor: pointer;
+}
+.act:hover { background: var(--surface-2); }
+.act:focus-visible { border-color: var(--accent); outline: none; }
+.act-label { font-size: 13px; font-weight: 600; }
+.act-hint { font-size: 11.5px; color: var(--dim); }
+.act-danger .act-label { color: var(--err); }
+.act-sep { height: 1px; margin: 5px 10px; background: var(--line); }
+/* 详情页：两列 kv；cron、插件名、报错都是长串，一律不许把卡片顶宽 */
+.ta-kv { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 5px 10px; margin: 0; font-size: 12.5px; }
+.ta-kv dt { color: var(--dim); }
+.ta-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.ta-sub { margin: 4px 0 0; font-size: 12px; font-weight: 600; color: var(--fg-2); }
+.ta-blockers { margin: 2px 0 0; padding-left: 1.4em; font-size: 12.5px; color: var(--fg-2); }
+.ta-err {
+  margin: 0; padding: 8px 10px; max-height: 180px; overflow: auto;
+  border-radius: 8px; background: var(--err-soft); color: var(--err);
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* 窄屏（≤720 的手机）：卡片铺满、按钮平分一行、动作行加高到好点。
+   表格那边已经退化成两列卡片（见上面的 @media），操作列整行横跨，两个按钮正好一行。 */
+@media (max-width: 720px) {
+  .modal-card.wide { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 16px 14px; }
+  .modal-card .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .act { padding: 11px 10px; }
+  .modal-card.wide .modal-actions { flex-wrap: wrap; }
+  .modal-card.wide .modal-actions .btn { flex: 1 1 auto; }
 }
 
 /* 多计划：每条子计划一个带边框的小块，条与条之间分得开 */

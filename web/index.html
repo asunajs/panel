@@ -563,17 +563,34 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       </div>
     </div>
 
-    <div class="modal hidden" id="task-schedule" role="dialog" aria-modal="true" aria-labelledby="task-schedule-title">
+    <!-- 任务操作弹窗（第 256 轮）：行内只留「执行 / ⋯」，其余动作按语义分三页。
+         计划编辑器不再是独立弹窗（以前「⋯ → 改计划 → 又一个弹窗」两级），而是这里的第二页。 -->
+    <div class="modal hidden" id="task-action" role="dialog" aria-modal="true" aria-labelledby="task-action-title">
       <div class="modal-backdrop" data-close="1"></div>
-      <div class="modal-card">
-        <h2 id="task-schedule-title">改计划</h2>
-        <p class="muted" id="task-schedule-what"></p>
-        <div id="sched-form"></div>
-        <p class="hint" id="task-schedule-hint"></p>
+      <div class="modal-card wide">
+        <div class="ta-head">
+          <h2 id="task-action-title"></h2>
+          <span id="task-action-status"></span>
+          <button class="icon-btn ta-x" type="button" data-close="1" aria-label="关闭">✕</button>
+        </div>
+        <p class="muted ta-meta" id="task-action-meta"></p>
+        <div class="tabs tabs-sm" role="tablist" aria-label="任务操作">
+          <button class="tab" type="button" role="tab" data-ta-tab="run" aria-selected="true">运行</button>
+          <button class="tab" type="button" role="tab" data-ta-tab="plan" aria-selected="false">计划<span class="tab-badge hidden" id="task-action-badge-plan">1</span></button>
+          <button class="tab" type="button" role="tab" data-ta-tab="more" aria-selected="false">详情<span class="tab-badge hidden" id="task-action-badge-more">1</span></button>
+        </div>
+        <div class="ta-body">
+          <div class="ta-pane" id="task-action-run"></div>
+          <div class="ta-pane hidden" id="task-action-plan">
+            <div id="sched-form"></div>
+            <p class="hint" id="task-action-hint"></p>
+          </div>
+          <div class="ta-pane hidden" id="task-action-more"></div>
+        </div>
         <div class="modal-actions">
-          <button class="btn" type="button" data-close="1">取消</button>
-          <button class="btn hidden" type="button" id="task-schedule-reset">采纳插件建议</button>
-          <button class="btn btn-primary" type="button" id="task-schedule-ok">保存</button>
+          <button class="btn hidden" type="button" id="task-action-reset">采纳插件建议</button>
+          <button class="btn" type="button" data-close="1">关闭</button>
+          <button class="btn btn-primary hidden" type="button" id="task-action-save">保存计划</button>
         </div>
       </div>
     </div>
