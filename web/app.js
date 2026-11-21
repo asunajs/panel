@@ -2174,9 +2174,14 @@ async function openPluginConfig(name) {
   box.append(ta);
 
   const row = el('div', 'actions');
-  const save = el('button', 'btn btn-primary', '保存并重载插件');
+  // 按钮名跟着「保存后重载」的勾选状态走（第 255 轮，用户：「这个按钮的名字也奇怪」）。
+  // 196 轮起默认**不重载**（重载会打断正在跑的任务），按钮却还叫「保存并重载插件」，
+  // 下面紧跟着又有一个「保存后重载插件」的勾选框 —— 读起来像「勾不勾都会重载」。
+  // 现在：没勾 =「保存」，勾了 =「保存并重载」，按钮永远说的是它真会做的事。
+  const save = el('button', 'btn btn-primary', '保存');
   save.type = 'button';
-  const reset = el('button', 'btn', '重新读');
+  // 和源码页同一个名字（那边叫「重新读取」）：这个按钮是**放弃手上的改动、从盘上重读一遍**。
+  const reset = el('button', 'btn', '重新读取');
   reset.type = 'button';
   reset.addEventListener('click', () => openPluginConfig(name));
   row.append(save, reset);
@@ -2193,26 +2198,37 @@ async function openPluginConfig(name) {
       } else {
         form.classList.add('hidden');
         ta.classList.remove('hidden');
-        toggle.textContent = '用表单填';
+        toggle.textContent = '按表单编辑';
         ta.value = JSON.stringify(collect(), null, 2);
       }
     });
     row.append(toggle);
   }
   box.append(row);
-  box.append(el('p', 'hint', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
-  box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
 
   // 保存后要不要重载这个插件（第 196 轮）：**默认不重载**。重载会 unload 掉插件，
   // 在跑的任务当场断、排队的请求直接失败 —— 这是危险动作，不该是「保存一下」的副作用。
   // 勾上 = 明确要重载（给「加载期读一次配置」的插件用）。
+  // 位置紧贴按钮（第 255 轮）：它是「保存」这颗按钮的选项，隔着一堆路径说明再出现，
+  // 看起来像另一件事。
   const reloadBox = el('input');
   reloadBox.type = 'checkbox';
   reloadBox.dataset.reload = '1';
   reloadBox.checked = localStorage.getItem(RELOAD_KEY) === '1';
   const reloadRow = el('label', 'hint cfg-reload');
-  reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件（会打断正在跑的任务；插件每次 self_config() 都读盘，一般不用勾）'));
+  reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件'));
   box.append(reloadRow);
+  // 为什么「一般不用勾」放成下一行说明，而不是塞进勾选框的字里：那串话比标题长三倍，
+  // 勾选框被撑成一整段文字，反而看不出这是个开关（用户截图就是这么误读的）。
+  box.append(el('p', 'hint cfg-reload-note', '会打断正在跑的任务；插件每次 self_config() 都读盘，一般不用勾。'));
+  const syncSaveLabel = () => { save.textContent = reloadBox.checked ? '保存并重载' : '保存'; };
+  reloadBox.addEventListener('change', syncSaveLabel);
+  syncSaveLabel();
+
+  // 参考信息放最后（路径 / 插件怎么读），别挡在按钮和它的选项中间。
+  // 带 .cfg-path：界面检查按它取落盘路径（用「第一个 .hint」会随排版顺序漂）。
+  box.append(el('p', 'hint cfg-path', '文件：' + (data.path || '') + '（只存这一份，不会被插件更新覆盖）'));
+  box.append(el('p', 'hint', '插件里用 host.self_config() 读它；没配过就是 {}。'));
 
   save.addEventListener('click', async () => {
     save.disabled = true;

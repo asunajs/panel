@@ -568,6 +568,9 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 /* 配置抽屉里那一行「保存后重载」勾选（第 226 轮）：label 包 checkbox，和 hint 同字号 */
 .cfg-reload { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .cfg-reload input { width: auto; margin: 0; }
+/* 「一般不用勾」那串解释缩进到勾选框的文字下面（第 255 轮）：原来它挂在 label 里，
+   勾选框被撑成一整段话，看不出是个开关。 */
+.cfg-reload-note { margin: 2px 0 0 20px; }
 
 /* ---------- 抽屉 ---------- */
 

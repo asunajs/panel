@@ -895,7 +895,7 @@ async function main() {
     tabSelected: document.querySelector('[data-drawer-tab=config]').getAttribute('aria-selected'),
     paneShown: !document.getElementById('drawer-config').classList.contains('hidden'),
     hasEditor: !!document.querySelector('#drawer-config textarea.editor'),
-    path: (document.querySelector('#drawer-config .hint') || {}).textContent || '',
+    path: (document.querySelector('#drawer-config .cfg-path') || {}).textContent || '',
   })`));
   check(
     '点卡片「详情」→「配置」页签（有编辑器、显示落盘路径）',
@@ -916,6 +916,13 @@ async function main() {
     reloadState.has && reloadState.checked === false && /重载/.test(reloadState.label),
     JSON.stringify(reloadState),
   );
+  // 第 255 轮（用户：「这个按钮的名字也奇怪」）：196 轮起默认就不重载了，按钮却还叫
+  // 「保存并重载插件」，下面又挂着同名的勾选框。现在名字跟着勾选状态走。
+  const saveBtnText = () => js(
+    "(()=>{const b=[...document.querySelectorAll('#drawer-config .actions button')].find((x)=>x.textContent.includes('保存'));" +
+    "return b?b.textContent.trim():'';})()",
+  );
+  check('保存按钮默认就叫「保存」（不承诺重载）', (await saveBtnText()) === '保存', String(await saveBtnText()));
   await js(`(()=>{
     const ta = document.querySelector('#drawer-config textarea.editor');
     ta.value = JSON.stringify({ hello: 1 }, null, 2);
@@ -934,9 +941,11 @@ async function main() {
     if (ready) break;
     await sleep(150);
   }
+  // 真点一下（不是直接赋 checked）：按钮名要跟着 change 事件变，赋值不会触发。
+  await js("(()=>{const b=document.querySelector('#drawer-config input[data-reload]');b.click();return b.checked;})()");
+  await sleep(200);
+  check('勾上「保存后重载」后按钮改叫「保存并重载」', (await saveBtnText()) === '保存并重载', String(await saveBtnText()));
   await js(`(()=>{
-    const b = document.querySelector('#drawer-config input[data-reload]');
-    b.checked = true;
     const ta = document.querySelector('#drawer-config textarea.editor');
     ta.value = JSON.stringify({ hello: 2 }, null, 2);
     [...document.querySelectorAll('#drawer-config .actions button')].find((x) => x.textContent.includes('保存')).click();
