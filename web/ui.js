@@ -1578,6 +1578,80 @@
     }
   };
 
+  /**
+   * 插件页调自己后端的统一入口（第 248 轮收口 —— 四个插件各写了一份 call/api/post）。
+   *
+   * 语义（**定死**，别再各写一套）：
+   *   · 2xx 且是 JSON → resolve 解析后的对象
+   *   · 非 2xx → reject `PanelApiError`：`message` 取后端 `{error}`（带 `ref` 时附编号），
+   *     并把 `status` / `data` 挂在错误上，调用方要不要区分自己看
+   *   · 字符串 body 一律拒绝（后端 Json 提取器会回 415，见 pitfalls §7.14）
+   */
+  class PanelApiError extends Error {
+    constructor(message, status, data) {
+      super(message);
+      this.name = 'PanelApiError';
+      this.status = status;
+      this.data = data;
+    }
+  }
+
+  async function pApi(path, opts = {}) {
+    const method = String(opts.method || (opts.body === undefined ? 'GET' : 'POST')).toUpperCase();
+    /** @type {Record<string, string>} */
+    const headers = Object.assign({}, opts.headers || {});
+    if (opts.write) headers['x-panel'] = '1';
+
+    let body;
+    if (opts.body !== undefined) {
+      if (typeof opts.body === 'string') {
+        throw new Error('PanelUI.api：body 传对象，别传字符串（字符串不带 content-type，后端回 415）');
+      }
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(opts.body);
+    }
+
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    const timeoutMs = opts.timeoutMs === undefined ? 30000 : Number(opts.timeoutMs);
+    const timer = ac && timeoutMs > 0 ? setTimeout(() => ac.abort(), timeoutMs) : null;
+
+    let res;
+    try {
+      res = await fetch(path, {
+        method,
+        headers,
+        body,
+        credentials: 'same-origin',
+        signal: ac ? ac.signal : undefined,
+      });
+    } catch (e) {
+      const aborted = e && e.name === 'AbortError';
+      throw new PanelApiError(
+        aborted ? '等了 ' + Math.round(timeoutMs / 1000) + ' 秒还没回来' : '请求没发出去：' + ((e && e.message) || e),
+        0,
+        null,
+      );
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    const text = await res.text().catch(() => '');
+    let data = null;
+    try {
+      data = text === '' ? null : JSON.parse(text);
+    } catch {
+      // 502「正忙」、403 少头这类回的是纯文本 —— 原样带上，别假装是 JSON
+      data = null;
+    }
+
+    if (!res.ok) {
+      let msg = (data && data.error) || text.trim().slice(0, 300) || 'HTTP ' + res.status;
+      if (data && data.error && data.ref) msg += '（编号 ' + data.ref + '）';
+      throw new PanelApiError(msg, res.status, data);
+    }
+    return data;
+  }
+
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
     theme: () => document.documentElement.getAttribute('data-theme') || 'light',
@@ -1593,5 +1667,7 @@
     fmtLogTime: pFmtLogTime,
     hint: pHint,
     busy: pBusy,
+    api: pApi,
+    ApiError: PanelApiError,
   };
 })();
