@@ -28,6 +28,8 @@ declare module 'panel:host' {
     headers?: Record<string, string>;
     /** 单发请求的时间预算（毫秒） */
     timeout_ms?: number;
+    /** TLS 走谁：`'native'` = 宿主原生栈（cmcc 的 App 链路必须它，别删） */
+    tls?: 'native' | 'none' | string;
     body?: string;
   }
 
@@ -103,8 +105,9 @@ declare module 'panel:host' {
     // ── 通知 / 日志 ────────────────────────────────────────────
     /** 面板铃铛通知（标题, 正文） */
     notify(title: string, body?: string): Promise<void>;
-    /** 结构化日志（面板日志页可见） */
-    log(level: 'info' | 'warn' | 'error' | 'debug', msg: string, extra?: unknown): Promise<void> | void;
+    /** 结构化日志（面板日志页可见）。**签名就是 `(msg, extra?)`** —— 面板把
+     *  `log` / `info` 都指向同一个 op_info（见 src/hostapi.rs 的 ops()），没有 level 参数。 */
+    log(msg: string, extra?: unknown): Promise<void> | void;
     info(msg: string, extra?: unknown): Promise<void> | void;
     warn(msg: string, extra?: unknown): Promise<void> | void;
     error(msg: string, extra?: unknown): Promise<void> | void;
@@ -125,8 +128,44 @@ declare module 'panel:host' {
     smtp_send(opts: any): any;
   }
 
+  // 面板把每个 op 也做成了**具名导出**（src/hostapi.rs 的 `exports.export(name, …)`），
+  // 所以 `import host from 'panel:host'` 和 `import { sqlite_query_sync } from 'panel:host'`
+  // 两种写法都成立。cmcc 用的是具名那套，mcloud/yangshipin 用 default。
   export const host: Host;
   export default host;
+
+  export const log: Host['log'];
+  export const info: Host['info'];
+  export const warn: Host['warn'];
+  export const error: Host['error'];
+  export const notify: Host['notify'];
+  export const sleep: Host['sleep'];
+  export const config: Host['config'];
+  export const self_config: Host['self_config'];
+  export const plugin_dir: Host['plugin_dir'];
+  export const plugin_data_dir: Host['plugin_data_dir'];
+  export const sqlite_query: Host['sqlite_query'];
+  export const sqlite_exec: Host['sqlite_exec'];
+  export const sqlite_query_sync: Host['sqlite_query_sync'];
+  export const sqlite_exec_sync: Host['sqlite_exec_sync'];
+  export const fetch: Host['fetch'];
+  export const http_fetch: Host['http_fetch'];
+  export const register_cron: Host['register_cron'];
+  export const register_handler: Host['register_handler'];
+  export const register_web: Host['register_web'];
+  export const sidebar: Host['sidebar'];
+  export const run_once: Host['run_once'];
+  export const smtp_send: Host['smtp_send'];
+  export const ws_open: Host['ws_open'];
+  export const ws_send: Host['ws_send'];
+  export const ws_recv: Host['ws_recv'];
+  export const ws_close: Host['ws_close'];
+  export const set_job_paused: Host['set_job_paused'];
+  export const set_job_summary: Host['set_job_summary'];
+  export const set_job_blockers: Host['set_job_blockers'];
+  export const set_job_schedule: Host['set_job_schedule'];
+  export const panel_version: Host['panel_version'];
+  export const panel_at_least: Host['panel_at_least'];
 }
 
 /** 面板注入的全局 `panel` 对象（不是 panel:host 的导出）：只有版本等元信息。
