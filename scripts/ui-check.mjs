@@ -530,6 +530,38 @@ async function main() {
   const leaks = await js("document.body.innerText.includes('SCT_UI_CHECK_1')");
   check('页面任何地方不出现明文密钥', leaks === false);
 
+  // 发件箱的「推送 / 渠道」要写名字，不写内部 id（第 255 轮：用户截图问「这是啥渠道」——
+  // 表里只有 ch0 / ch0-default）。表里存 id 是对的（改名、删规则不改历史），所以这里
+  // 直接往库里塞一行，再走界面渲染，验的就是「显示时查名字」这一步。
+  const nstate = await (await fetch('http://127.0.0.1:' + PORT + '/api/notify')).json();
+  const seedCh = (nstate.channels || [])[0] || null;
+  const seedRt = (nstate.routes || [])[0] || null;
+  if (!seedCh) throw new Error('通知渠道没建出来，发件箱名字这条没法验');
+  const obSql = 'PRAGMA busy_timeout=5000;\n' +
+    'INSERT INTO notify_outbox(ts,channel,kind,title,body,payload,attempts,done,repeat,route) VALUES (' +
+    Date.now() + ",'" + seedCh.id + "','" + (seedCh.kind || 'serverchan') + "','种子通知','','{}',1,1,1,'" +
+    (seedRt ? seedRt.id : '') + "');\n";
+  await new Promise((res, rej) => {
+    const p = spawn('sqlite3', [path.join(dir, 'panel.db')], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', (x) => (err += x));
+    p.on('exit', (c) => (c === 0 ? res() : rej(new Error('sqlite3 退出码 ' + c + '：' + err.trim()))));
+    p.stdin.end(obSql);
+  });
+  await js("(async()=>{await renderNotifyTab();return 1;})()");
+  await sleep(900);
+  const obCells = JSON.parse(await js(
+    "(()=>{const r=document.querySelector('#notify-outbox tbody tr');if(!r)return JSON.stringify({err:'no-row'});" +
+    "const td=[...r.querySelectorAll('td')].map(x=>x.textContent.trim());" +
+    "return JSON.stringify({push:td[1]||'',chan:td[2]||''});})()"
+  ));
+  check('发件箱的「渠道」显示名字（不是 ch0 这种内部 id）',
+    !obCells.err && obCells.chan.includes(seedCh.name) && !obCells.chan.startsWith(seedCh.id + ' '),
+    JSON.stringify(obCells) + ' ch=' + seedCh.id + '/' + seedCh.name);
+  check('发件箱的「推送」显示规则名（没有规则时是「—」）',
+    !obCells.err && obCells.push === (seedRt ? (seedRt.name || seedRt.id) : '—'),
+    JSON.stringify(obCells) + ' rt=' + JSON.stringify(seedRt && { id: seedRt.id, name: seedRt.name }));
+
   // 日志分来源（第 199 轮）：面板 / 插件 / 脚本 / HTTP。
   // 用户的原话是「有人恶意攻击时一堆 40x/50x 会污染面板日志」——
   // 所以 HTTP 必须能单独看，而且选了要走服务端查询（内存里那几百条说明不了问题）。

@@ -437,7 +437,8 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
                 </header>
                 <div class="panel-body">
                   <p class="settings-note">外部渠道失败是常态（对端重启、网络抖）。每条通知先落发件箱再投递，
-                    失败按 1m / 5m / 15m / 1h / 6h 退避重试，5 次后放弃；放弃的行留在这里，可以手动重试。</p>
+                    失败按 1m / 5m / 15m / 1h / 6h 退避重试，5 次后放弃；放弃的行留在这里，可以手动重试。
+                    「推送」是规则名（什么时候、发给谁），「渠道」是投递端（Server酱 / 企业微信 / SMTP …）。</p>
                   <div id="notify-outbox"></div>
                 </div>
               </section>

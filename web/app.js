@@ -5240,6 +5240,10 @@ function renderNotifyOutbox() {
     box.append(el('p', 'chan-hint', '还没有投递记录。点上面的「试发」就会有一条。'));
     return;
   }
+  // 名字（第 255 轮，用户截图问「这是啥渠道」：表里只有 ch0 / ch0-default 这种内部 id）。
+  // 发件箱存 id 是对的 —— 渠道能改名、规则能删，历史不该跟着变；显示时再查一次名字。
+  const chById = new Map((d.channels || []).map((c) => [c.id, c]));
+  const rtById = new Map((d.routes || []).map((r) => [r.id, r]));
   const wrap = el('div', 'table-wrap');
   const table = el('table', 'table');
   const thead = el('thead');
@@ -5251,8 +5255,19 @@ function renderNotifyOutbox() {
   for (const r of rows) {
     const t = el('tr');
     t.append(el('td', '', new Date(r.ts).toLocaleString()));
-    t.append(el('td', '', r.route || '—'));
-    t.append(el('td', '', r.channel));
+    // 推送：写规则名；规则被删了才回落成 id，并明说「已删」（别让人以为是个正常 id）
+    const rt = r.route ? rtById.get(r.route) : null;
+    const pushCell = el('td', '', r.route ? (rt ? (rt.name || r.route) : r.route + '（规则已删）') : '—');
+    if (r.route) pushCell.title = r.route;
+    t.append(pushCell);
+    // 渠道：名字 + 投递端类型（Server酱 / 企业微信 …）。用户问「这是啥渠道」，答案就在这一格。
+    const ch = chById.get(r.channel);
+    const chCell = el('td');
+    chCell.append(el('span', '', ch ? (ch.name || r.channel) : r.channel + '（渠道已删）'));
+    const kindLabel = NOTIFY_KINDS[r.kind] || r.kind || (ch && NOTIFY_KINDS[ch.kind]) || '';
+    if (kindLabel) chCell.append(el('span', 'dim', ' · ' + kindLabel));
+    chCell.title = r.channel;
+    t.append(chCell);
     t.append(el('td', '', r.title + (r.repeat > 1 ? ' ×' + r.repeat : '')));
     const state = r.done === 1 ? '成功' : r.done === 2 ? '放弃' : '待发';
     const pill = el('span', 'pill ' + (r.done === 1 ? 'pill-ok' : r.done === 2 ? 'pill-err' : 'pill-warn'), state);
