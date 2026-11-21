@@ -104,7 +104,14 @@ declare module 'panel:host' {
 
     // ── 通知 / 日志 ────────────────────────────────────────────
     /** 面板铃铛通知（标题, 正文） */
-    notify(title: string, body?: string): Promise<void>;
+    /**
+     * 插件主动喊话：进面板「通知」（铃铛未读数），配了 webhook 也会推出去。
+     *
+     * `level`（第 227 轮）：`info`（默认）/ `warn` / `error`。推送规则可以按 `min_level` 卡，
+     * 所以「一趟挂了」这种必须写 `warn` —— 写死 info 会被静默丢掉。
+     * 只认 `{level}` 这一个键（面板会用 `only_keys` 拒掉别的，拼错立刻报错）。
+     */
+    notify(title: string, body?: string, opts?: { level?: 'info' | 'warn' | 'error' }): Promise<void>;
     /** 结构化日志（面板日志页可见）。**签名就是 `(msg, extra?)`** —— 面板把
      *  `log` / `info` 都指向同一个 op_info（见 src/hostapi.rs 的 ops()），没有 level 参数。 */
     log(msg: string, extra?: unknown): Promise<void> | void;
