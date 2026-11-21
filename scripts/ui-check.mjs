@@ -1729,8 +1729,14 @@ async function main() {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await js("location.hash = '#runs'");
   await sleep(1200);
-  const overflow = await js('document.documentElement.scrollWidth - window.innerWidth');
-  check('窄屏没有横向溢出', overflow <= 1, 'scrollWidth 比视口多 ' + overflow + 'px');
+  // ⚠ 判据必须用 clientWidth，**不能用 innerWidth**（第 262 轮实测）：
+  // 在 mobile:true 的模拟（真机也一样）下，内容一旦溢出，Chrome 会把 **layout viewport
+  // 一起撑宽** —— innerWidth 从 390 变成 616、scrollWidth 也是 616，两者相减恒为 0，
+  // 断言永远是绿的。documentElement.clientWidth 不跟着变（一直是 390），
+  // 用它相减才能看出「多出来 226px」。造过反向例：给 .head-actions 注入 min-width:600px，
+  // 旧判据 0px（假绿）、新判据 226px（红）。
+  const overflow = await js('document.documentElement.scrollWidth - document.documentElement.clientWidth');
+  check('窄屏没有横向溢出', overflow <= 1, '内容比视口宽 ' + overflow + 'px');
   // 触屏尺寸（第 90 轮）：图标按钮的点击目标要够大，指头按得准。
   // 32px 是桌面尺寸；手机上（≤720px）给 40px（苹果/谷歌建议 ≥44，40 是折中，
   // 再大顶栏就挤了 —— 实测三个图标 40x40 刚好不溢出）。
@@ -1764,6 +1770,45 @@ async function main() {
   ));
   check('窄屏表格是两列网格（不是一格一行）', !!rowBox && rowBox.display === 'grid' &&
     rowBox.cols === 2 && rowBox.h <= 170, JSON.stringify(rowBox));
+
+  // ---------------------------------------------------------------- 移动端基线（第 262 轮）
+  // 一次 390×844 真触摸审计发现的四个硬问题，这里各钉一条。
+  // ① iOS Safari 对 font-size < 16px 的输入控件在聚焦时会**放大整页** ——
+  //    面板和所有插件共用 .input，所以这一条覆盖到插件侧。
+  const smallInputs = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('input,select,textarea')]" +
+    ".filter(e=>e.type!=='checkbox'&&e.type!=='radio'&&e.type!=='file'&&e.getBoundingClientRect().width>0)" +
+    ".map(e=>({l:(e.id||e.className||e.tagName).toString().slice(0,24),fs:parseFloat(getComputedStyle(e).fontSize)}))" +
+    ".filter(x=>x.fs<16))",
+  ));
+  check('窄屏所有输入控件字号 ≥16px（否则 iOS 聚焦会放大整页）',
+    smallInputs.length === 0, JSON.stringify(smallInputs));
+
+  // ② 触屏目标：按钮 / 页签 / 段控都不低于 40px（.icon-btn 已有单独断言）
+  const smallBtns = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('button')].filter(b=>{" +
+    "const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&r.height<40;})" +
+    ".map(b=>({t:(b.textContent||'').trim().slice(0,8),h:Math.round(b.getBoundingClientRect().height)})))",
+  ));
+  check('窄屏所有按钮的点击目标 ≥40px', smallBtns.length === 0, JSON.stringify(smallBtns));
+
+  // ③ 日志时间列：「11-21 23:32:25」要 105px，列写死 64px 时字会压到右边那列上
+  await js("location.hash = '#logs'");
+  await sleep(900);
+  const logTime = JSON.parse(await js(
+    "JSON.stringify((()=>{const e=document.querySelector('.log-time');if(!e)return null;" +
+    "return {cw:e.clientWidth,sw:e.scrollWidth};})())",
+  ));
+  check('窄屏日志时间列不溢出', !!logTime && logTime.sw <= logTime.cw + 1, JSON.stringify(logTime));
+
+  // ④ 插件页头部：.head-actions 原来不换行，四个控件挤成 438px 把整页撑到 454px
+  await js("location.hash = '#plugins'");
+  await sleep(900);
+  // 同样用 clientWidth（见上面那条的说明）：innerWidth 会被溢出的内容一起撑宽
+  const plugOv = await js('document.documentElement.scrollWidth - document.documentElement.clientWidth');
+  check('窄屏插件页不横向溢出', plugOv <= 1, '多出 ' + plugOv + 'px');
+  await js("location.hash = '#runs'");
+  await sleep(500);
 
   // 断点回归（第 86 轮）：侧栏收成浮层只在 ≤720 发生。2 倍屏上「860 CSS px」看着像宽屏，
   // 那时多出来的 ✕ 和汉堡是纯噪音，汉堡还会压住页标题。

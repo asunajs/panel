@@ -2407,3 +2407,84 @@ select option { background: var(--surface); color: var(--fg); }
 .pv-item-meta { margin-top: 2px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .pv-kv { grid-template-columns: minmax(90px, 180px) 1fr; }
 .hint-warn { color: var(--warn); }
+
+/* ---------------------------------------------------------------- 移动端基线（第 262 轮）
+
+   这一块是「手机上怎么用」的唯一出处，放在文件最后（同优先级后者胜，能盖掉前面的规则）。
+   起因是一次 390×844 真触摸审计，四个硬问题：
+
+   ① **输入控件字号 12–14px**：iOS Safari 对 font-size < 16px 的 input/select/textarea
+      在聚焦时会**自动放大整页**（visual viewport zoom），输完还得手动缩回去。
+      这是手机上最刺眼的一处 —— 所有表单、所有插件都中招（插件直接用面板的 .input）。
+      桌面字号不动，只在 ≤720 抬到 16px，并把 --h-control 一起抬到 40px（16px 字配 32px 高会挤）。
+   ② **-webkit-text-size-adjust**：不写这一句，iOS 横屏 / 桌面模式会二次放大字号。
+   ③ **触屏目标 30–32px**：苹果建议 ≥44、谷歌 ≥48，这里统一 40（与已放大的 .icon-btn 对齐）。
+   ④ **日志时间列溢出**：≤720 的 grid 里时间列写死 64px，而 "11-21 23:32:25" 要 105px，
+      overflow 是 visible —— 字直接压到右边那列上。改成 auto 让列跟着内容走。
+
+   只针对现代 iOS Safari / Android Chrome；断点沿用既有的 720，不新增第三档。 */
+
+html {
+  /* iOS 横屏 / 「请求桌面网站」时不要二次放大字号 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+@media (max-width: 720px) {
+  /* 控件统一 40px 高（16px 字），和已经 40px 的 .icon-btn 对齐 */
+  :root { --h-control: 40px; --h-control-sm: 38px; }
+
+  /* ① 所有会获得焦点的文本类控件都 16px —— 少一个，iOS 就在那一处放大整页。
+     写法要**按特异性对齐**，不能只写 .input：
+       · `select:not([multiple])`（第 1492 行）是 (0,2,1)，比 .input 高 —— 第一版就漏了它，
+         插件页的 <select> 仍是 13px（mobile-check 抓到的）；
+       · `#clash-rename-field input/select` 是 (1,1,0)，得连 ID 一起写；
+       · `input[type=...]` 用 :not 链把 checkbox/radio/file 排除掉（它们不该被放大）。 */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]),
+  select:not([multiple]),
+  select[multiple],
+  textarea,
+  .input,
+  .modal-input,
+  .search input,
+  #clash-rename-field input,
+  #clash-rename-field select,
+  .field-inline input[type="text"],
+  .field-inline input[type="number"],
+  .field-inline input[type="time"],
+  .field-inline select,
+  #sched-form input,
+  #sched-form select,
+  #sched-form .dropdown-btn,
+  .chan-area,
+  .editor,
+  .code-editor textarea,
+  .src-goto input,
+  .tpl {
+    font-size: 16px;
+  }
+  /* 编辑器保持等宽紧凑：16px 下把行高收一点，别让一屏只剩几行 */
+  .editor, .code-editor textarea { line-height: 1.45; }
+  /* 跳行输入框只有 6ch，16px 下会挤出工具条：给个下限、允许它缩 */
+  .src-goto input { width: 7ch; padding: 3px 4px; }
+
+  /* ③ 触屏目标：按钮 / 页签 / 段控 / 弹窗右上角的 ✕ 都不低于 40px
+     （.icon-btn 早就是 40，但 .ta-x 为了桌面紧凑写死了 28，这里放回来） */
+  .btn, .btn-sm { min-height: 40px; }
+  .tab { min-height: 40px; }
+  /* 顶栏那颗「有新版本 vX」是 <button class="pill">，.pill 定高 26px —— 在手机上
+     是一颗 26px 的点击目标（ui-check 用新判据抓到的）。让它和旁边的 .icon-btn 一样高。 */
+  button.pill { height: 40px; padding: 0 12px; }
+  .seg-item { min-height: 40px; padding: 0 12px; }
+  .ta-x { width: 40px; height: 40px; }
+
+  /* ④ 日志时间列跟着内容走，不再写死 64px 把字挤到隔壁列上 */
+  .log-line { grid-template-columns: auto 52px minmax(0, 1fr); }
+
+  /* ② 插件 / 脚本页的头部：head-actions 原来不换行，四个控件挤成 438px
+     把整页撑到 454px（390 视口下必现横向滚动）。让它换行，搜索框独占一行。 */
+  .head-actions { flex-wrap: wrap; }
+  .head-actions .search { flex: 1 1 100%; }
+  .head-actions .search input { width: 100%; }
+}
+
