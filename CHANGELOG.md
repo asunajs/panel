@@ -173,7 +173,7 @@ Chrome 会把 layout viewport 一起撑宽（390 → 616），两个数同步变
 同一件事四份代码、口径还各不相同。现在收在面板一处：
 
 ```js
-PanelUI.mask('13800138000', 3, 4)   // → 138****8000（空串/短串原样返回）
+PanelUI.mask(手机号, 3, 4)          // → 前 3 位 + **** + 后 4 位（空串/短串原样返回）
 PanelUI.fmtLogTime(Date.now())      // → 11-21 09:05:07（带月日，隔天看得出）
 PanelUI.hint(el, '正在发码…', 'warn')  // 清空时传 '' 即去色
 PanelUI.busy(btn, true, '正在保存…')  // 再调 busy(btn,false) 还原原文案
