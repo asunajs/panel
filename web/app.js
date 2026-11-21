@@ -1504,16 +1504,24 @@ function planAdvancedRows(plan, refresh) {
     num.type = 'number';
     num.min = '1';
     num.value = String(Math.max(1, Math.round(jMs / kOf(unit))));
-    num.addEventListener('change', () => {
-      jMs = Math.max(1, Number(num.value)) * kOf(unit);
-      plan.jitter = PanelSchedule.durToStr(jMs) || '1m';
+    // 数字改了就立刻更新（input 事件）：等 change（失焦/回车）才动，用户会以为「改不动」
+    const applyJitter = () => {
+      const n = Number(num.value);
+      if (!Number.isFinite(n) || n < 1) return; // 打字中间态（空 / 0）先别改
+      jMs = n * kOf(unit);
+      // 用**当前单位**写回去，不要归一：选了「60 分钟」就写 60m，
+      // 归一成 1h 会让「幅度 60 分钟」和句子「± 1h」对不上（第 261 轮用户截图）。
+      plan.jitter = n + unit;
       refresh();
-    });
+    };
+    num.addEventListener('input', applyJitter);
+    num.addEventListener('change', applyJitter);
     const unitSel = schedSelect([['m', '分钟'], ['s', '秒'], ['h', '小时']], unit, (u) => {
       unit = u;
-      num.value = String(Math.max(1, Math.round(jMs / kOf(u))));
-      jMs = Math.max(1, Number(num.value)) * kOf(u);
-      plan.jitter = PanelSchedule.durToStr(jMs) || '1m';
+      const n = Math.max(1, Math.round(jMs / kOf(u)));
+      num.value = String(n);
+      jMs = n * kOf(u);
+      plan.jitter = n + u;
       refresh();
     });
     const mag = schedRow('幅度', num, unitSel);
@@ -6660,6 +6668,10 @@ function makeDropdown(box, opts, current, onPick) {
     if (o.count !== undefined) li.append(el("span", "count", String(o.count)));
     li.addEventListener("click", () => {
       onPick(o.value);
+      // 单选下拉要**立刻**反映选中项（第 261 轮）：调用方不一定重画整个表单 ——
+      // 计划表单只刷新「短句/预览」那块，不更新触发器就会「选完看着还是旧值」。
+      label.textContent = o.label;
+      items.forEach((x, idx) => x.setAttribute("aria-selected", String(idx === i)));
       close();
     });
     li.addEventListener("mouseenter", () => setActive(i));

@@ -918,6 +918,42 @@ async function main() {
     JSON.stringify(ddInfo),
   );
 
+  // 第 261 轮：自绘下拉选完要**立刻**更新触发器文字（以前只有调用方重画表单才变，
+  // 计划表单只刷新短句 → 用户选完看着还是旧值）。
+  const hasDd = (await js("!!document.querySelector('#sched-form .dropdown-btn')")) === true;
+  if (hasDd) {
+    await js("document.querySelector('#sched-form .dropdown-btn').click()");
+    await sleep(200);
+    await js("(()=>{const li=[...document.querySelectorAll('ul.dropdown-menu:not([hidden]) li')]" +
+      ".find(x=>x.textContent.trim()==='每周');if(li)li.click();return !!li;})()");
+    await sleep(250);
+    const ddLabel = await js("document.querySelector('#sched-form .dropdown-label').textContent.trim()");
+    check('下拉选完立刻更新触发器文字', ddLabel === '每周', ddLabel);
+  }
+
+  // 第 261 轮：抖动的数字「改一下就动」，而且单位和短句要对得上。
+  // 先切回「每天」——「每周」的高级选项里是「随机挑一天」，根本没有抖动行（第一版就这么红的）。
+  await js("(()=>{const f=document.getElementById('sched-form');const s=f.querySelector('select');" +
+    "if(s){s.value='daily';s.dispatchEvent(new Event('change',{bubbles:true}));return 'native';}" +
+    "f.querySelector('.dropdown-btn').click();return 'custom';})()");
+  await sleep(300);
+  await js("(()=>{const li=document.querySelector('ul.dropdown-menu:not([hidden]) li[data-value=daily]');if(li)li.click();return !!li;})()");
+  await sleep(300);
+  await js("document.querySelector('#sched-form .sched-adv summary').click()");
+  await sleep(200);
+  const jitChecked = await js("(()=>{const f=document.getElementById('sched-form');" +
+    "const lab=[...f.querySelectorAll('label.field-inline')].find(l=>l.textContent.includes('抖动'));" +
+    "if(!lab)return 'no-row';const cb=lab.querySelector('input[type=checkbox]');cb.click();return cb.checked;})()");
+  check('高级选项里有「抖动（±）」可勾', jitChecked === true, String(jitChecked));
+  await sleep(300);
+  await js("(()=>{const f=document.getElementById('sched-form');" +
+    "const lab=[...f.querySelectorAll('label.field-inline')].find(l=>l.textContent.includes('抖动'));" +
+    "const n=lab.nextElementSibling.querySelector('input[type=number]');n.value='7';" +
+    "n.dispatchEvent(new Event('input',{bubbles:true}));return 1;})()");
+  await sleep(250);
+  const jitSentence = await js("document.getElementById('sched-sentence').textContent");
+  check('抖动数字改一下立刻进短句（不用失焦）', /±\s*7/.test(jitSentence || ''), jitSentence);
+
   // 保存：改频率 → 保存 → 弹窗自己关 + 后端真的变了（只看界面会「保存成功但没生效」）
   // 第 257 轮起桌面是自绘下拉（手机上仍是原生 select），两种都走通
   await js("(()=>{const f=document.getElementById('sched-form');const s=f.querySelector('select');" +
