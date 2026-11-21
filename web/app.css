@@ -2165,6 +2165,12 @@ select option { background: var(--surface); color: var(--fg); }
    （否则「09:00 到 18:00」里那个「到」会占掉 69px，把两个时间框挤窄） */
 #sched-form .field-inline > span.muted:first-child { min-width: 5.5em; }
 #sched-form .modal-input { flex: 1 1 8em; min-width: 6em; }
+/* 控件别拉满一整行（第 260 轮，用户截图「宽了点」）：弹窗 560 宽，里面装的是「每天」「10:00」
+   这种三五个字的值 —— 铺满 520px 全是空白。按内容给上限，右侧留白反而更好读。 */
+#sched-form .field-inline > .modal-input { flex: 0 1 260px; max-width: 260px; }
+#sched-form .field-inline > .dropdown { flex: 0 1 260px; max-width: 260px; }
+#sched-form .field-inline > input[type="time"] { flex: 0 1 172px; max-width: 172px; }
+#sched-form .field-inline > input[type="number"] { flex: 0 1 110px; max-width: 110px; }
 /* 计划表单里的下拉（第 257 轮）：桌面用自绘的 .dropdown —— 原生 <select> 的**展开态**是
    系统控件，跟着 OS 主题走，浅色面板里会弹出一块深灰菜单。闭合态必须和 .modal-input 一样：
    32px 高、--surface-2 底、等宽 13px，否则一行七个控件对不齐。 */
