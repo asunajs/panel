@@ -32,6 +32,7 @@ run "check-pitfalls"    bash scripts/check-pitfalls.sh
 run "check-unsafe-budget" bash scripts/check-unsafe-budget.sh
 run "check-css-tokens"  python3 scripts/check-css-tokens.py
 run "check-plugin-style" node scripts/check-plugin-style.mjs
+run "check-phone-leak"  node tools/plugin-shared/check-phone-leak.mjs
 run "check-plugin-shared" node scripts/check-plugin-shared.mjs
 run "check-web-build"  bash scripts/check-web-build.sh
 
