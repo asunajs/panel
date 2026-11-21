@@ -72,6 +72,48 @@ async function probe() {
     out.http_fetch_gzip = 'err: ' + e.message;
   }
 
+  // 6.7) Web 压缩流：CompressionStream / DecompressionStream（第 254 轮，原生实现）
+  try {
+    const collect = async (stream) => {
+      const reader = stream.getReader();
+      const parts = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        total += value.byteLength;
+      }
+      const all = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) {
+        all.set(p instanceof Uint8Array ? p : new Uint8Array(p), at);
+        at += p.byteLength;
+      }
+      return all;
+    };
+    const eq = (a, b) => a.length === b.length && Array.prototype.every.call(a, (v, i) => v === b[i]);
+    const rt = async (fmt, text) => {
+      const enc = new TextEncoder().encode(text);
+      const packed = await collect(new Blob([enc]).stream().pipeThrough(new CompressionStream(fmt)));
+      const back = await collect(new Blob([packed]).stream().pipeThrough(new DecompressionStream(fmt)));
+      return { same: eq(back, enc), packed: packed.length };
+    };
+    out.compression = {
+      gzip: await rt('gzip', 'compression stream 压缩流'),
+      deflate: await rt('deflate', 'compression stream 压缩流'),
+      raw: await rt('deflate-raw', 'compression stream 压缩流'),
+    };
+    try {
+      new CompressionStream('nope');
+      out.compression.bad_format = '没抛（不对）';
+    } catch (e) {
+      out.compression.bad_format = e && e.name === 'TypeError' ? 'TypeError' : 'other: ' + (e && e.name);
+    }
+  } catch (e) {
+    out.compression = 'err: ' + e.message;
+  }
+
   // 6.6) fs.existsSync（第 253 轮给 LLRT 的 node:fs 补的；Node 语义：任何错误都 false、不抛）
   try {
     const f = await import('node:fs');

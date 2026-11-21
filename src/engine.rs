@@ -259,6 +259,19 @@ globalThis.__dispatch = (name, evtJson) => {
 })();
 "#;
 
+/// WHATWG 的 `CompressionStream` / `DecompressionStream`（第 254 轮）。
+///
+/// LLRT 有 `stream/web` 的 TransformStream、也有 `node:zlib`，但**没有**这两个类。
+/// 这里用「TransformStream 收集字节 → flush 时调原生 `__panelZlib`」实现：
+/// 压缩本身在 Rust（flate2 / brotli / zstd）里做，JS 只做搬运。
+///
+/// 口径（与浏览器行为对齐的几条）：
+///   · `new CompressionStream('gzip' | 'deflate' | 'deflate-raw')`，默认 `'gzip'`；别的值抛 TypeError
+///   · `.readable` / `.writable` 是真流，可 `pipeThrough` / `pipeTo` / `new Response(stream)`
+///   · 数据一次攒完再压（不是逐块流式）—— 插件里传的是 JSON / 小响应，够用；
+///     真要大流式再说，别在这里假装支持（会让人以为内存是常数）
+const COMPAT_WEB: &str = include_str!("compat_web.js");
+
 /// 把引擎错误变成人能读的一行。
 ///
 /// `Error::Exception` **本身不带消息** —— 真正的 JS 异常在 `ctx.catch()` 里。
@@ -544,7 +557,10 @@ impl Plugin {
                 // 裸名 fetch：上面 g.remove 摘掉的是 LLRT 自带那个（直连 HTTP_CLIENT、
                 // 不经门）；这里装回面板的实现，与 host.fetch 同一 WRAP 同一契约。
                 crate::hostapi::install_global_fetch(&ctx)?;
+                // Web 压缩 API 的原生底座：CompressionStream / DecompressionStream 走它（第 254 轮）
+                crate::zlibsync::install(&ctx)?;
                 ctx.eval_with_options::<Value, _>(BOOTSTRAP, EvalOptions::default())?;
+                ctx.eval_with_options::<Value, _>(COMPAT_WEB, EvalOptions::default())?;
                 Ok(())
             };
             init().map_err(|e| describe(&ctx, e))

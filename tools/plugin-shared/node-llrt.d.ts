@@ -165,6 +165,18 @@ declare function clearTimeout(handle: any): void;
 declare function setInterval(fn: (...args: any[]) => void, ms?: number, ...args: any[]): any;
 declare function clearInterval(handle: any): void;
 
+// ── WHATWG 压缩流（面板在第 254 轮补的；原生 flate2/brotli/zstd）──────
+declare class CompressionStream {
+  constructor(format?: 'gzip' | 'deflate' | 'deflate-raw');
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
+}
+declare class DecompressionStream {
+  constructor(format?: 'gzip' | 'deflate' | 'deflate-raw');
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
+}
+
 // ── 全局 ───────────────────────────────────────────────────────
 declare var process: {
   env: Record<string, string | undefined>;

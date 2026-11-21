@@ -24,6 +24,7 @@ mod notify;
 mod outbound;
 mod plan;
 mod pluginfs;
+mod zlibsync;
 mod jsslots;
 mod ratelimit;
 /// 插件「系列」名：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。
