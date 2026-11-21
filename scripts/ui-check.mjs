@@ -2114,6 +2114,24 @@ async function main() {
   ));
   check('插件抽屉概览有指标段（24 小时 / 7 天）', ov.heads.includes('指标') && ov.has24h && ov.has7d, JSON.stringify(ov));
 
+  // 操作分组（第 255 轮，用户：「过于凌乱，操作应该分组」）：九颗按钮平铺 = 一片按钮墙。
+  // 现在按「要干什么」分行，一行最多 3 颗；删除单独一行、带危险色。文案可以变，
+  // 所以这条断言盯的是**结构**（几行、每行几颗、危险那颗是不是单独一行）。
+  const opRows = JSON.parse(await js(
+    "(()=>{const b=document.getElementById('drawer-overview');" +
+    "const rows=[...b.querySelectorAll('.op-row')].map(r=>({name:((r.querySelector('.op-row-name')||{}).textContent||'')," +
+    "n:r.querySelectorAll('.op-row-btns button').length}));" +
+    "const danger=b.querySelector('.op-row-danger');" +
+    "return JSON.stringify({rows,names:rows.map(r=>r.name).join(',')," +
+    "dangerAlone:!!danger&&danger.querySelectorAll('.op-row-btns button').length===1&&!!danger.querySelector('.btn-danger')," +
+    "flat:b.querySelectorAll('.actions').length});})()"
+  ));
+  check('插件抽屉的操作按用途分组（查看/运行/计划/开关/危险）',
+    opRows.flat === 0 && opRows.rows.length === 5 &&
+    opRows.names === '查看,运行,计划,开关,危险' && opRows.rows.every((r) => r.n >= 1 && r.n <= 3),
+    JSON.stringify(opRows));
+  check('「删除插件」单独一行、且是危险色', opRows.dangerAlone === true, JSON.stringify(opRows));
+
   // 脚本源码也走同一条高亮路径（之前直接赋 value，高亮层不重画）
   const scriptHl = await js(
     "(async () => { if (typeof openScriptSource !== 'function') return 'no-fn';" +

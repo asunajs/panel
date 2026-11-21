@@ -2804,41 +2804,69 @@ async function showPlugin(name) {
       body.append(el('p', 'settings-note', '指标暂时拿不到：' + (e.message || '')));
     }
 
-    const ops = el('div', 'actions');
-    const mkOp = (label, fn, danger) => {
-      const b = el('button', 'btn btn-sm' + (danger ? ' btn-danger' : ''), label);
+    // 操作分组（第 255 轮，用户：「过于凌乱，操作应该分组」）。
+    // 九颗按钮原来平铺成两行：看一眼的（打开界面 / 配置 / 编辑源码）、动它的（重载 / 停止 /
+    // 重装 / 暂停定时 / 停用）、删它的（删除插件）混在一起，而且两边按钮宽度差得远，
+    // 眼睛得一颗颗读才知道哪颗是「只是看看」、哪颗是「删掉它」。
+    // 现在按「你要干什么」分五行，左边两字标签说明这一行是什么；删除单独一行、上面加分隔线。
+    const ops = el('div', 'op-groups');
+    const opRow = (label, btns, cls) => {
+      const row = el('div', 'op-row' + (cls ? ' ' + cls : ''));
+      row.append(el('span', 'op-row-name', label));
+      const box = el('div', 'op-row-btns');
+      box.append(...btns.filter(Boolean));
+      row.append(box);
+      return row;
+    };
+    const mkOp = (label, fn, kind, hint) => {
+      const cls = kind === 'danger' ? ' btn-danger' : kind === 'primary' ? ' btn-primary' : '';
+      const b = el('button', 'btn btn-sm' + cls, label);
       b.type = 'button';
+      // 「暂停定时」和「停用」差在哪、「停止」停的是哪一趟 —— 光看按钮名分不出，
+      // 所以各带一句 title（鼠标悬停就有，不占版面）。
+      if (hint) b.title = hint;
       b.addEventListener('click', fn);
       return b;
     };
-    if (state.files.some((f) => f.name === name && f.webui)) {
-      ops.append(mkOp('打开界面', () => openWebui(name)));
-    }
+    const hasWebui = state.files.some((f) => f.name === name && f.webui);
+    const isOff = state.disabled.includes(name);
+    const isHeld = (state.suspended || []).includes(name);
     ops.append(
-      mkOp('编辑源码', () => openPluginSource(name)),
-      mkOp('配置', () => openPluginConfig(name)),
-      // 重装 = 重新采纳插件这次的 cron 建议。和「重载」的区别就这一条，文案要写清楚。
-      mkOp('重装（采纳计划建议）', async () => {
-        if (!(await askConfirm('重装 ' + name + '？\n会用插件这次的建议覆盖任务计划、预算、提前量；\n运行历史、暂停状态、摘要都保留。', '重装'))) return;
-        act('/api/plugins/' + encodeURIComponent(name) + '/reinstall', '已重装 ' + name);
-      }),
-      // 停用 / 启用（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上
-      // 给过「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
-      ...(state.disabled.includes(name)
-        ? [mkOp('启用', () => act('/api/plugins/' + encodeURIComponent(name) + '/enable', '已启用 ' + name))]
-        : [mkOp('停用', async () => {
-            if (!(await askConfirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）', '停用'))) return;
-            act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
-          })]),
-      // 暂停（第 167 轮）：只停定时，不保证驻留内存（闲着会被空闲卸载收走，用到时自动装回）——
-      // 和上面的「停用」不是一回事。
-      ...((state.suspended || []).includes(name)
-        ? [mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))]
-        : [mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name))]),
-      // 按需加载的插件，「重载」就是「加载」—— 文案跟着实际情况走，别让人猜
-      mkOp(p && p.lazy ? '加载' : '重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', (p && p.lazy ? '已加载 ' : '已重载 ') + name)),
-      mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name)),
-      mkOp('删除插件', () => deletePlugin(name), true),
+      // ① 看一眼：不改变它任何状态
+      opRow('查看', [
+        hasWebui && mkOp('打开界面', () => openWebui(name), 'primary'),
+        mkOp('配置', () => openPluginConfig(name)),
+        mkOp('编辑源码', () => openPluginSource(name)),
+      ]),
+      // ② 让它重新跑：按需加载的插件，「重载」就是「加载」—— 文案跟着实际情况走，别让人猜
+      opRow('运行', [
+        mkOp(p && p.lazy ? '加载' : '重载', () => act('/api/plugins/' + encodeURIComponent(name) + '/reload', (p && p.lazy ? '已加载 ' : '已重载 ') + name)),
+        mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name), '', '只停掉正在跑的这一次；定时计划不变'),
+      ]),
+      // ③ 计划：重装 = 重新采纳插件这次的 cron 建议（和「重载」的区别就这一条，文案写清楚）；
+      //    暂停（第 167 轮）只停定时，不保证驻留内存（闲着会被空闲卸载收走，用到时自动装回）
+      //    —— 和下一行的「停用」不是一回事。
+      opRow('计划', [
+        mkOp('重装（采纳计划建议）', async () => {
+          if (!(await askConfirm('重装 ' + name + '？\n会用插件这次的建议覆盖任务计划、预算、提前量；\n运行历史、暂停状态、摘要都保留。', '重装'))) return;
+          act('/api/plugins/' + encodeURIComponent(name) + '/reinstall', '已重装 ' + name);
+        }),
+        isHeld
+          ? mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))
+          : mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name), '', '只停定时任务，插件本身还在（闲着会被收走，用到时自动装回）'),
+      ]),
+      // ④ 开关（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上给过
+      //    「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
+      opRow('开关', [
+        isOff
+          ? mkOp('启用', () => act('/api/plugins/' + encodeURIComponent(name) + '/enable', '已启用 ' + name))
+          : mkOp('停用', async () => {
+              if (!(await askConfirm('停用 ' + name + '？会立刻卸载；重启面板后也不再自动加载。\n（源码和它的数据都留着，随时可以再启用。）', '停用'))) return;
+              act('/api/plugins/' + encodeURIComponent(name) + '/disable', '已停用 ' + name);
+            }, '', '立刻卸载；重启面板后也不再自动加载（源码和它的数据都留着）'),
+      ]),
+      // ⑤ 危险：只这一颗，隔一条线放最后 —— 别和「重载」这种随手点的挨着
+      opRow('危险', [mkOp('删除插件', () => deletePlugin(name), 'danger')], 'op-row-danger'),
     );
     body.append(ops);
 
