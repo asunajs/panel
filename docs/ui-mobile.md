@@ -124,3 +124,29 @@ node scripts/mobile-walk.mjs --shots <dir>          # 截图落哪（默认 ../.
 
 **假阳性提醒**：`.sr-only`（给屏幕阅读器的隐藏文字）的 `scrollWidth` 必然远大于
 `clientWidth`（width:1px + clip），测量时必须排除 —— 第一版把它当「字压到隔壁」报了一屏。
+
+## 八、有数据 vs 空数据：必须用真实数据走一遍
+
+空数据时插件只渲染空态 —— **最容易崩的「账号卡（左信息 + 右按钮）」根本没渲染**。
+第 263 轮就是这么漏掉 yangshipin 的：
+
+```bash
+node scripts/mobile-walk.mjs --data ~/panel-3030/data --shots ../.shots/mobile-data
+```
+
+`--data` 会把实例的 `plugin-data/` **复制**到临时目录再起面板（不碰真实例、不带
+`config.json`/`auth.json`，所以也不需要令牌）。拿到的就是「有账号、有配置」的现场。
+
+抓到的形状（yangshipin）：
+
+- `.account-item` 是横排 flex，右侧 `.account-actions` 是 `flex: 0 0 auto`（按内容宽占位 ≈300px）；
+- 手机上它把左侧账号信息挤到 **42px** —— 一行只放得下四五个字
+  （「央视」/「频-8000」/「手机号」竖着排），一个账号卡占满一屏；
+- 修法：≤720 把 `.account-item` 改 `flex-direction: column`，按钮组到下面自己换行。
+
+**通用判据**：卡片里「左信息 + 右按钮」这种形状，在 ≤720 一律改纵向；
+按钮组不要用 `flex: 0 0 auto`（它会按内容宽把兄弟挤扁）。
+
+**已知限制**：mcloud / cmcc 的**已登录账号卡**在本地验不了（没有有效凭据，假 token 会被插件
+过滤掉或触发真实上游请求 —— 后者违反 R2 的节流原则）。这两个插件如果也有同样的挤扁形状，
+照 yangshipin 的修法处理。
