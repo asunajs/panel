@@ -1205,8 +1205,13 @@ function openTaskPanel(t, tab) {
   renderTaskMorePane(t);
   setTaskTab(tab || (t.pending_adopt ? 'plan' : 'run'));
   $('task-action').classList.remove('hidden');
-  const first = $('task-action-' + taskActionTab).querySelector('button');
-  if (first) first.focus();
+  // 焦点给卡片本身，**不要**落在第一颗动作按钮上：那会在「执行」外面留一圈蓝色焦点框，
+  // 看起来像「这个动作被选中了」，而且键盘一进来就在一颗危险按钮上（第 259 轮）。
+  const card = $('task-action').querySelector('.modal-card');
+  if (card) {
+    card.setAttribute('tabindex', '-1');
+    card.focus();
+  }
 }
 
 function closeTaskPanel() {

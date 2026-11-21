@@ -2246,6 +2246,7 @@ select option { background: var(--surface); color: var(--fg); }
   max-height: calc(100vh - 64px);
   overflow: hidden; /* 滚的是 .ta-body，标题/页签/按钮行钉住 */
 }
+.modal-card:focus, .modal-card:focus-visible { outline: none; }
 .ta-head { display: flex; align-items: center; gap: 8px; }
 .ta-head h2 { margin-right: 2px; min-width: 0; overflow-wrap: anywhere; }
 .ta-who { font-family: var(--mono); font-size: 12.5px; font-weight: 400; color: var(--dim); }
@@ -2264,19 +2265,31 @@ select option { background: var(--surface); color: var(--fg); }
 /* 详情页底下那颗「在日志里看」不该被拉成通栏（它是个按钮，不是一栏数据） */
 .ta-pane > .btn { align-self: flex-start; }
 /* 动作行：标题 + 一句人话。以前这些解释只挂在 title 上，触屏等于没有。 */
-.act-list { display: flex; flex-direction: column; gap: 2px; margin: -2px 0; }
+.act-list { display: flex; flex-direction: column; gap: 0; margin: -4px 0; }
 /* 一行动作 = 「标签按钮 + 说明」。**只有标签可点**（第 258 轮，用户截图：
-   「可点击范围太宽容易误触」—— 原来整行都是按钮，右边一大片空白也算命中区）。 */
-.act-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 6px 0; }
+   「可点击范围太宽容易误触」—— 原来整行都是按钮，右边一大片空白也算命中区）。
+   第 259 轮补布局：标签用**固定列**、说明从同一条竖线开始 —— flex + 换行时每行说明
+   的起点跟着标签字数跑（执行 / 加载插件 / 删除任务 三个起点），看着像没对齐。 */
+.act-row {
+  display: grid; grid-template-columns: 76px minmax(0, 1fr);
+  align-items: baseline; gap: 12px; padding: 7px 0;
+}
 .act {
-  flex: none; display: inline-flex; align-items: center;
-  padding: 4px 10px; margin-left: -10px;
+  justify-self: start; display: inline-flex; align-items: center;
+  /* 不给负 margin：触屏上标签带边框，负 margin 会把它的左边框顶到卡片外（第 259 轮实测截图）。
+     内缩 8px 反而更像一颗按钮。 */
+  padding: 4px 8px;
   background: transparent; border: 1px solid transparent; border-radius: 8px;
   font-size: 13px; font-weight: 600; color: var(--fg); cursor: pointer; text-align: left;
 }
 .act:hover { background: var(--surface-2); }
 .act:focus-visible { border-color: var(--accent); outline: none; }
 .act-hint { min-width: 0; font-size: 11.5px; color: var(--dim); }
+/* 触屏没有 hover：给标签补一圈边框（宽度、命中区都不变），否则它们只是一串粗体字，
+   看不出「这是能点的」 */
+@media (hover: none) {
+  .act { background-color: var(--surface-2); border-color: var(--line); }
+}
 .act-row.act-danger .act { color: var(--err); }
 .act-row.act-danger .act:hover { background: var(--err-soft); }
 .act-sep { height: 1px; margin: 7px 0 7px 10px; background: var(--line); }
@@ -2297,9 +2310,10 @@ select option { background: var(--surface); color: var(--fg); }
 @media (max-width: 720px) {
   .modal-card.wide { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 16px 14px; }
   .modal-card .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  /* 手机上标签按钮加高到好点，但说明文字仍然不接点击（误触的根源是「整行都能点」） */
-  .act-row { padding: 5px 0; }
-  .act { padding: 8px 12px; }
+  /* 手机上标签按钮加高到好点，但说明文字仍然不接点击（误触的根源是「整行都能点」）。
+     标签列收窄一点，390px 里说明才不会被挤成一条窄柱。 */
+  .act-row { grid-template-columns: 76px minmax(0, 1fr); gap: 8px; padding: 6px 0; }
+  .act { padding: 8px 10px; }
   .modal-card.wide .modal-actions { flex-wrap: wrap; }
   .modal-card.wide .modal-actions .btn { flex: 1 1 auto; }
 }
