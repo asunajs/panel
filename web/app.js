@@ -1245,12 +1245,15 @@ function renderTaskRunPane(t) {
       ' / 预算 ' + humanMs(t.budget_ms)));
   }
   const list = el('div', 'act-list');
+  // 只有**标签本身**是按钮，说明文字不接点击（第 258 轮：用户截图说「可点击范围太宽容易误触」）。
+  // 原来整行都是一颗大按钮，右侧一大片空白也算命中区 —— 想点别处却执行了「恢复」「删除」。
   const item = (label, hint, fn, danger) => {
-    const b = el('button', 'act' + (danger ? ' act-danger' : ''));
+    const row = el('div', 'act-row' + (danger ? ' act-danger' : ''));
+    const b = el('button', 'act', label);
     b.type = 'button';
-    b.append(el('span', 'act-label', label), el('span', 'act-hint', hint));
     b.addEventListener('click', fn);
-    list.append(b);
+    row.append(b, el('span', 'act-hint', hint));
+    list.append(row);
   };
   // 动作一律先关弹窗再派发：refresh() 会重建整张表，弹窗留着就是对着旧行说话
   const then = (fn) => () => { closeTaskPanel(); fn(); };

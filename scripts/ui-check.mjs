@@ -888,6 +888,14 @@ async function main() {
     "runItems:document.querySelectorAll('#task-action-run .act').length});})()"));
   check('弹窗有三个页签、默认开在运行页', tabInfo.tabs === 3 && tabInfo.sel === 'run', JSON.stringify(tabInfo));
   check('运行页列动作且不显示「保存计划」', tabInfo.runItems >= 2 && tabInfo.saveHidden === true, JSON.stringify(tabInfo));
+  // 第 258 轮：可点区域 = 标签本身，不是整行（整行能点 → 点空白处就执行了「恢复」「删除」）
+  const hitArea = JSON.parse(await js(
+    "(()=>{const b=document.querySelector('#task-action-run .act');" +
+    "const card=document.querySelector('#task-action .modal-card');" +
+    "return JSON.stringify({btn:Math.round(b.getBoundingClientRect().width)," +
+    "card:Math.round(card.getBoundingClientRect().width)});})()"));
+  check('运行页只有标签可点（不是整行）', hitArea.btn > 0 && hitArea.btn < hitArea.card * 0.5,
+    JSON.stringify(hitArea));
 
   // 计划页必须是**同一页**：cron 编辑器就地渲染，不再弹第二个窗（第 256 轮并掉了旧弹窗）
   await js("document.querySelector('[data-ta-tab=plan]').click()");

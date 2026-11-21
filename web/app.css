@@ -2264,18 +2264,22 @@ select option { background: var(--surface); color: var(--fg); }
 /* 详情页底下那颗「在日志里看」不该被拉成通栏（它是个按钮，不是一栏数据） */
 .ta-pane > .btn { align-self: flex-start; }
 /* 动作行：标题 + 一句人话。以前这些解释只挂在 title 上，触屏等于没有。 */
-.act-list { display: flex; flex-direction: column; gap: 2px; margin: -4px 0; }
+.act-list { display: flex; flex-direction: column; gap: 2px; margin: -2px 0; }
+/* 一行动作 = 「标签按钮 + 说明」。**只有标签可点**（第 258 轮，用户截图：
+   「可点击范围太宽容易误触」—— 原来整行都是按钮，右边一大片空白也算命中区）。 */
+.act-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 6px 0; }
 .act {
-  display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 9px 10px;
-  text-align: left; background: transparent; border: 1px solid transparent;
-  border-radius: 9px; cursor: pointer;
+  flex: none; display: inline-flex; align-items: center;
+  padding: 4px 10px; margin-left: -10px;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  font-size: 13px; font-weight: 600; color: var(--fg); cursor: pointer; text-align: left;
 }
 .act:hover { background: var(--surface-2); }
 .act:focus-visible { border-color: var(--accent); outline: none; }
-.act-label { font-size: 13px; font-weight: 600; }
-.act-hint { font-size: 11.5px; color: var(--dim); }
-.act-danger .act-label { color: var(--err); }
-.act-sep { height: 1px; margin: 5px 10px; background: var(--line); }
+.act-hint { min-width: 0; font-size: 11.5px; color: var(--dim); }
+.act-row.act-danger .act { color: var(--err); }
+.act-row.act-danger .act:hover { background: var(--err-soft); }
+.act-sep { height: 1px; margin: 7px 0 7px 10px; background: var(--line); }
 /* 详情页：两列 kv；cron、插件名、报错都是长串，一律不许把卡片顶宽 */
 .ta-kv { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 5px 10px; margin: 0; font-size: 12.5px; }
 .ta-kv dt { color: var(--dim); }
@@ -2293,7 +2297,9 @@ select option { background: var(--surface); color: var(--fg); }
 @media (max-width: 720px) {
   .modal-card.wide { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 16px 14px; }
   .modal-card .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .act { padding: 11px 10px; }
+  /* 手机上标签按钮加高到好点，但说明文字仍然不接点击（误触的根源是「整行都能点」） */
+  .act-row { padding: 5px 0; }
+  .act { padding: 8px 12px; }
   .modal-card.wide .modal-actions { flex-wrap: wrap; }
   .modal-card.wide .modal-actions .btn { flex: 1 1 auto; }
 }
