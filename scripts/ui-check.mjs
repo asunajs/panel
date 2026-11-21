@@ -1748,6 +1748,55 @@ async function main() {
   await js("document.querySelector('#new-script .modal-actions .btn').click()");
   await sleep(250);
   check('新建脚本的「取消」也能关掉', await modalHidden('new-script'));
+  // 长弹窗：内容超过一屏时，按钮行必须还在卡片里（第 255 轮，用户截图：cmcc 的「添加账号」
+  // 按钮行掉到卡片外面、压在遮罩和页面背景上）。`.dialog-body` 是滚动区，
+  // 插件没自己包时由 <p-dialog> 替它包上 —— 这条钉住「自动包 + 按钮不跟着滚」。
+  // 面板自己的页面**不引** /ui.js（那套 p-* 组件是给插件页的），这里按需装进来再测。
+  await js("(()=>{if(customElements.get('p-dialog'))return 1;const s=document.createElement('script');" +
+    "s.id='ui-kit-js';s.src='/ui.js';document.head.append(s);return 1;})()");
+  await waitFor(async () => (await js("!!customElements.get('p-dialog')")) === true, 8000, 'ui.js 的 p-dialog');
+  await js(`(()=>{
+    const d = document.createElement('p-dialog');
+    d.id = 'tall-dlg';
+    d.setAttribute('title', '长弹窗');
+    for (let i = 0; i < 22; i++) {
+      const f = document.createElement('p-field');
+      f.setAttribute('label', '字段 ' + i);
+      const inp = document.createElement('input');
+      inp.className = 'input';
+      f.append(inp);
+      d.append(f);
+    }
+    const acts = document.createElement('div');
+    acts.className = 'dialog-actions';
+    const b = document.createElement('p-button');
+    b.setAttribute('variant', 'primary');
+    b.textContent = '保存';
+    acts.append(b);
+    d.append(acts);
+    document.body.append(d);
+    d.setAttribute('open', '');
+    return 1;
+  })()`);
+  await sleep(600);
+  const tall = JSON.parse(await js(`(()=>{
+    const d = document.getElementById('tall-dlg');
+    const card = d.querySelector('.dialog');
+    const body = d.querySelector('.dialog-body');
+    const acts = d.querySelector('.dialog-actions');
+    const c = card.getBoundingClientRect();
+    const a = acts.getBoundingClientRect();
+    return JSON.stringify({
+      hasBody: !!body,
+      scroller: !!body && getComputedStyle(body).overflowY === 'auto',
+      bodyScrolls: !!body && body.scrollHeight > body.clientHeight + 4,
+      inside: a.bottom <= c.bottom + 1 && a.top >= c.top,
+      gap: Math.round(c.bottom - a.bottom),
+    });
+  })()`));
+  check('长弹窗：内容区自动包成 .dialog-body 并自己滚', tall.scroller && tall.bodyScrolls, JSON.stringify(tall));
+  check('长弹窗：按钮行还留在卡片里（不掉到遮罩上）', tall.inside === true, JSON.stringify(tall));
+  await js("(()=>{const d=document.getElementById('tall-dlg');if(d)d.remove();return 1;})()");
   // 勾选框的勾必须是一张居中的 SVG（以前是「两条边框转 40 度」拼的，用户报「勾是歪的」）
   const tickInfo = JSON.parse(await js(
     "(()=>{const i=document.getElementById('runs-only-failed');i.checked=true;i.dispatchEvent(new Event('change',{bubbles:true}));" +

@@ -166,6 +166,11 @@ await host.sidebar({ title: '云盘', order: 20 });   // order 越小越靠上�
 </p-dialog>
 ```
 
+内容超过一屏时，滚的是 `.dialog-body`、按钮行钉在卡片底部（第 255 轮）：
+之前 `.dialog` 有 `max-height` 却没有滚动区，字段一多就把按钮行画到卡片**外面**——
+cmcc 的「添加账号」就是按钮行半透明地压在遮罩上（用户截图）。插件自己包不包都行，
+但**别**给 `.dialog` 加自己的 `overflow` / `max-height`，那会把这条规矩顶掉。
+
 ```js
 dlg.setAttribute('open', '');       // 显隐走 open 属性（不是 hidden）
 dlg.removeAttribute('open');
@@ -179,7 +184,8 @@ btn.disabled = true; btn.label = '登录中…';   // <p-button> 改字用 .labe
 | `.dialog` 宽度 | `min(520px, calc(100vw - 32px))`；四个插件的登录弹窗都是这个宽度 |
 | `.field` 排布 | 竖排（标签在上、控件在下），`gap: 6px` |
 | `.field > 控件` 宽度 | **一律 100%** —— `.input` / `input` / `textarea` / `select` / `p-sms-code` / `p-select` / `p-number` |
-| `.dialog-actions` | 按钮行，右对齐 |
+| `.dialog-actions` | 按钮行，右对齐；**永远留在卡片里**（内容再多也不跟着滚） |
+| `.dialog-body` | 滚动区。**不写也行**（第 255 轮起 `<p-dialog>` 没找到就替插件包一层），写了就用你那份 |
 | `.hint` | 11.5px 次要色；**空的时候不占位**（`.hint:empty`），有字时不抖 |
 | `<p-button>` | `.disabled` / `.label`（改按钮文字） |
 

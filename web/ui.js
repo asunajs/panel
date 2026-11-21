@@ -545,6 +545,24 @@
       close.addEventListener('click', () => this.removeAttribute('open'));
       head.append(t, close);
       dlg.prepend(head);
+      // 内容区（第 255 轮）：`.dialog` 有 max-height，但**没有滚动区**时，多出来的一截连
+      // 按钮行会被画到卡片外面 —— cmcc 的「添加账号」就是这么坏的：按钮行落到遮罩上、
+      // 半透明地压在页面背景上（用户截图）。
+      // `.dialog-body { overflow:auto; min-height:0 }` 早就在 app.css 里，只是没人替插件包上；
+      // 而文档里的标准写法（p-field 直接摆在 <p-dialog> 里）恰好是**没包**的那种。
+      // 所以：插件自己包了 .dialog-body 就原样用；没包就替它包一层，
+      // 按钮行（.dialog-actions）留在外面 —— 滚动时不动，永远在卡片底部。
+      if (!dlg.querySelector(':scope > .dialog-body')) {
+        const body = document.createElement('div');
+        body.className = 'dialog-body';
+        const kids = [...dlg.children].filter((c) => c !== head);
+        const firstActions = kids.find((c) => c.classList.contains('dialog-actions'));
+        for (const el of kids) {
+          if (el.classList.contains('dialog-actions')) continue;
+          body.append(el);
+        }
+        dlg.insertBefore(body, firstActions || null);
+      }
       back.append(dlg);
       this.append(back);
       this._back = back;
