@@ -132,19 +132,18 @@ for (const file of files) {
 
 // R9 LLRT 没有的 `node:fs` 方法（第 198 轮）
 //
-// LLRT 的 `node:fs` 是**子集**（面板仓 docs/engine.md 记着：16 / 105）。实测存在的是：
-//   accessSync chmodSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
+// LLRT 的 `node:fs` 是**子集**（面板仓 docs/engine.md 记着：17 / 105）。实测存在的是：
+//   accessSync chmodSync existsSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
 //   renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
 //
-// **`existsSync` 不在里面**，`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` /
-// `openSync` 也不在。而 Node 有 —— 所以 TS 里 `import fs from 'node:fs'` 一路编译通过，
-// 装到面板上第一次读配置就 `TypeError: not a function`（cmcc 就这么炸的：
-// `/plugins/cmcc/api/status` 502 plugin_busy，日志里只有一句 `detail=TypeError: not a function`，
-// 连栈都没有）。
+// **`existsSync` 从第 253 轮起有了**（面板侧补的：Node 语义，任何错误都当 false、不抛）。
+// 余下这些仍然没有：`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` / `openSync`。
+// 而 Node 有 —— 所以 TS 里 `import fs from 'node:fs'` 一路编译通过，装到面板上第一次读配置
+// 就 `TypeError: not a function`（cmcc 就这么炸的：`/plugins/cmcc/api/status` 502 plugin_busy，
+// 日志里只有一句 `detail=TypeError: not a function`，连栈都没有）。
 //
-// 写法：存在性判断用 `statSync` 包 try/catch（或 `accessSync`），删除用 `rmSync(p, {force:true})`。
+// 写法：删除用 `rmSync(p, {force:true})`，其余见下表。
 const FS_MISSING = [
-  ['existsSync', 'statSync 包 try/catch（或 accessSync）'],
   ['unlinkSync', 'rmSync(path, { force: true })'],
   ['appendFileSync', 'readFileSync 读出来拼上再 writeFileSync'],
   ['copyFileSync', 'readFileSync + writeFileSync'],
@@ -167,7 +166,7 @@ for (const file of files) {
         file: path.relative(ROOT, file),
         line: i + 1,
         rule: 'R9 node:fs 子集',
-        why: '`' + name + '()` 在 LLRT 的 `node:fs` 里**没有**（只有 16 个方法），'
+        why: '`' + name + '()` 在 LLRT 的 `node:fs` 里**没有**（只有 17 个方法；`existsSync` 已有），'
           + 'Node 有 ⇒ 编译通过、运行时 `TypeError: not a function`。',
         fix: '改成 ' + fix + '。清单见面板仓 docs/engine.md 的模块表；'
           + '确实要保留就写注释 ' + ALLOW_FS + ' 理由。',

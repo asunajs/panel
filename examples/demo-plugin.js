@@ -58,6 +58,38 @@ async function probe() {
   } catch (e) {
     out.http_fetch = 'err: ' + e.message;
   }
+  // 6.5) 压缩：上游回 gzip，面板侧原生解压后插件应拿到明文（第 253 轮）
+  try {
+    const r = await host.fetch(demo.gzip_url || httpUrl);
+    out.fetch_gzip = { status: r.status, encoding: r.headers && (r.headers['content-encoding'] || ''), body: String(r.body || '') };
+  } catch (e) {
+    out.fetch_gzip = 'err: ' + e.message;
+  }
+  try {
+    const r = host.http_fetch(demo.gzip_url || httpUrl);
+    out.http_fetch_gzip = { status: r.status, body: String(r.body || '') };
+  } catch (e) {
+    out.http_fetch_gzip = 'err: ' + e.message;
+  }
+
+  // 6.6) fs.existsSync（第 253 轮给 LLRT 的 node:fs 补的；Node 语义：任何错误都 false、不抛）
+  try {
+    const f = await import('node:fs');
+    const dir = await host.plugin_data_dir();
+    // plugin_data_dir 可能还没建：先 mkdir 再落文件（宿主不保证目录已存在）
+    const probe = dir + '/exists-probe.txt';
+    try { f.mkdirSync(dir, { recursive: true }); } catch { /* 已经有了 */ }
+    f.writeFileSync(probe, 'ok');
+    out.exists_sync = {
+      dir: f.existsSync(dir) === true,
+      file: f.existsSync(probe) === true,
+      missing: f.existsSync(dir + '/definitely-not-here-253') === false,
+      default_import: typeof f.default?.existsSync === 'function',
+    };
+  } catch (e) {
+    out.exists_sync = 'err: ' + e.message;
+  }
+
   // 回环必须被挡：这条**应当**报错
   try {
     await host.fetch('http://127.0.0.1:8787/readyz');

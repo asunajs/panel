@@ -725,7 +725,7 @@ node tools/parity/probe.mjs                 > /tmp/parity-node.txt
 
 | 模块 | LLRT | Node | 模块 | LLRT | Node |
 |---|---|---|---|---|---|
-| `node:fs` | 16 | 105 | `node:crypto` | 18 | 71 |
+| `node:fs` | 17 | 105 | `node:crypto` | 18 | 71 |
 | `node:fs/promises` | 16 | 34 | `node:zlib` | 21 | 48 |
 | `node:util` | 9 | 35 | `node:events` | 2 | 16 |
 | `node:buffer` | 5 | 15 | `node:stream` | 9 | 24 |

@@ -540,6 +540,14 @@ async function main() {
   const hintRes = await js(`(function(){var el=document.createElement('p');el.className='hint';document.body.appendChild(el);PanelUI.hint(el,'正在发码…','warn');var a=el.textContent+'|'+el.className;PanelUI.hint(el,'','');return a+'|'+el.textContent+'|'+el.className;})()`);
   check('PanelUI.hint：写文案 + warn 上色、清空去色', hintRes === '正在发码…|hint hint-warn||hint', String(hintRes));
 
+  // PanelUI.api：2xx 解析 JSON；非 2xx 抛 ApiError（带 status）
+  const apiOk = await js(`PanelUI.api('/plugins/webui-demo/api/ping').then(r => r && r.ok === true && r.plugin === 'webui-demo')`);
+  check('PanelUI.api：2xx 解析成对象', apiOk === true, String(apiOk));
+
+  // 用一个确定 404 的路由（临时实例带 token，401 那条测不出来）
+  const apiErr = await js(`PanelUI.api('/plugins/webui-demo/api/definitely-not-here').then(() => 'no-throw', (e) => [e.name, e.status, typeof e.message === 'string' && e.message.length > 0].join('|'))`);
+  check('PanelUI.api：非 2xx 抛 ApiError（带 status 与后端原话）', apiErr === 'PanelApiError|404|true', String(apiErr));
+
   const busyRes = await js(`(function(){var b=document.createElement('button');b.textContent='保存';document.body.appendChild(b);PanelUI.busy(b,true,'正在保存…');var a=[b.disabled,b.textContent].join('|');PanelUI.busy(b,false);return a+'|'+b.textContent+'|'+b.disabled;})()`);
   check('PanelUI.busy：禁用 + 换文案，恢复时还原', busyRes === 'true|正在保存…|保存|false', String(busyRes));
 }

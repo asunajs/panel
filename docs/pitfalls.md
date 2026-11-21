@@ -836,7 +836,7 @@
     或者用 `git stash push -- <file>`（它能原样 pop 回来）。判据：`git status` 里还有
     你要交付的改动时，绝不能对它 `checkout --`。
 
-## 198. LLRT 的 `node:fs` 是子集：`existsSync` 不在里面
+## 198. LLRT 的 `node:fs` 是子集：`existsSync` 曾经不在里面（第 253 轮补上了）
 
 **症状**：插件页面一直在报 502，日志里只有一句
 
@@ -844,20 +844,25 @@
 
 没有栈、没有文件名、没有行号。一眼看不出是哪儿。
 
-**根因**：`node:fs` 是 LLRT 内置模块，只实现了 Node 105 个方法里的 **16 个**
+**根因**：`node:fs` 是 LLRT 内置模块，只实现了 Node 105 个方法里的 **17 个**
 （`docs/engine.md` 的模块表）：
 
-    accessSync chmodSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
+    accessSync chmodSync existsSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
     renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
 
-**`existsSync` 没有**（`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` /
-`openSync` 也没有）。而 TS 里 `import fs from 'node:fs'` 一路编译通过 —— cmcc 甚至在自己的
-`node-fs.d.ts` 里把 `existsSync` / `unlinkSync` **声明成了存在**，于是「编译过、运行炸」。
+**第 253 轮补上了 `existsSync`**（面板侧给 LLRT 的 fs 模块加的，Node 语义：任何错误都返回
+false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSync` / `copyFileSync` /
+`realpathSync` / `openSync`。而 TS 里 `import fs from 'node:fs'` 会一路编译通过 —— cmcc 当年
+甚至在自己的 `node-fs.d.ts` 里把 `existsSync` / `unlinkSync` **声明成了存在**，于是「编译过、运行炸」。
 
 **怎么改**：
 
-    // 存在性：statSync 包 try/catch（accessSync 也行）
-    try { f.statSync(path); } catch { return { exists: false, path }; }
+    // 存在性：现在可以直接 fs.existsSync(path)（返回 bool，不抛）
+    if (f.existsSync(path)) { … }
+
+    // 但新代码仍建议 statSync 包 try/catch —— 它顺带给你 mtime/size，
+    // 而且这段代码在旧面板上也能跑（existsSync 是 0.7.x 之后才有的）：
+    try { const st = f.statSync(path); } catch { return { exists: false, path }; }
     // 删除：rmSync(path, { force: true })
     // 追加：readFileSync 读出来拼上再 writeFileSync
 

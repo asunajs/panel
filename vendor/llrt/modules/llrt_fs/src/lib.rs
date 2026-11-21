@@ -93,6 +93,7 @@ impl ModuleDef for FsModule {
     fn declare(declare: &Declarations) -> Result<()> {
         declare.declare("promises")?;
         declare.declare("accessSync")?;
+        declare.declare("existsSync")?;
         declare.declare("mkdirSync")?;
         declare.declare("mkdtempSync")?;
         declare.declare("readdirSync")?;
@@ -126,6 +127,8 @@ impl ModuleDef for FsModule {
 
             default.set("promises", promises)?;
             default.set("accessSync", Func::from(access_sync))?;
+            // Node 的 existsSync：**任何错误都当 false**，不抛（第 253 轮补）。
+            default.set("existsSync", Func::from(exists_sync))?;
             default.set("mkdirSync", Func::from(mkdir_sync))?;
             default.set("mkdtempSync", Func::from(mkdtemp_sync))?;
             default.set("readdirSync", Func::from(read_dir_sync))?;
@@ -142,6 +145,13 @@ impl ModuleDef for FsModule {
             Ok(())
         })
     }
+}
+
+/// `fs.existsSync(path)` —— 与 Node 同语义：返回 bool，路径不存在/没权限/坏链接都算 false，
+/// **不抛异常**。LLRT 原来只有 `accessSync`（会抛），插件里就得包 try/catch，
+/// 于是有人干脆声明一个不存在的 `existsSync` 用 —— 2026-11-20 cmcc 就这么整页 502 的。
+fn exists_sync(path: String) -> bool {
+    std::fs::metadata(path).is_ok()
 }
 
 fn export_promises<'js>(ctx: &Ctx<'js>, exports: &Object<'js>) -> Result<()> {

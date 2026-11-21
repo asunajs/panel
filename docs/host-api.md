@@ -454,6 +454,19 @@ stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 
 逐个入口的自检读数（样例插件跑一遍）另开一篇：[host-api.md](host-api.md)。
 
+## 出站响应压缩：走原生解压（第 253 轮）
+
+`host.fetch` / `host.http_fetch` 现在**由 Rust 侧**处理响应压缩（reqwest 的 gzip / deflate /
+brotli / zstd 特性）：
+
+- 请求自动带 `Accept-Encoding: gzip, deflate, br, zstd`（调用方不用管，也没法覆盖成"不压缩"）；
+- 上游回压缩体时**在这里就解开**，插件拿到的是**明文** `body`；
+- 解压后 `content-encoding` / `content-length` 不再透传（已经不是那个字节数了）；
+- 坏数据（声称 gzip 但内容是坏的）会走 `error` 分支，而不是给一段乱码。
+
+⇒ 插件里**不要**自己 `gunzip` 上游响应；也不要在请求头里手写 `Accept-Encoding: identity`
+去"绕开"压缩（面板会覆盖它）。
+
 ## 出站能力：邮件 / WebSocket / TLS 后端
 
 > 从 [host-api.md](host-api.md) 拆出来的。三件事都是「插件往外连」，共用同一道 SSRF 门

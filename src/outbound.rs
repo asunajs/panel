@@ -123,6 +123,65 @@ fn get_str(o: &Json, k: &str) -> Option<String> {
     o.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
+/// 出站响应压缩：**在 Rust 里解开**（第 253 轮）。
+///
+/// 为什么面板要自己干：主流那条路是 hyper + rustls，body 是我们一段段读进来的，
+/// 框架不会替我们解压；而插件那边只有 LLRT 的 `node:zlib`（子集），让每个插件自己
+/// gunzip 既重复又容易漏（2026-11-20 那批 502 就是"插件里自己拼一层"的后果）。
+///
+/// 认 gzip / deflate(zlib) / br / zstd；多个 encoding 按 RFC 反向依次解。
+/// 解开之后 `content-encoding` / `content-length` 不再透传（已经不是那个字节数了）。
+fn decode_body(encoding: &str, buf: Vec<u8>) -> Result<Vec<u8>, String> {
+    let mut data = buf;
+    let list: Vec<String> = encoding
+        .split(',')
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty() && e != "identity")
+        .collect();
+    for enc in list.iter().rev() {
+        data = match enc.as_str() {
+            "gzip" | "x-gzip" => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                flate2::read::GzDecoder::new(std::io::Cursor::new(&data))
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("解 gzip 失败: {e}"))?;
+                out
+            }
+            "deflate" => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                // 有的服务端发 raw deflate、有的发 zlib 包装：先按 zlib，失败再按 raw。
+                if flate2::read::ZlibDecoder::new(std::io::Cursor::new(&data))
+                    .read_to_end(&mut out)
+                    .is_err()
+                {
+                    out.clear();
+                    flate2::read::DeflateDecoder::new(std::io::Cursor::new(&data))
+                        .read_to_end(&mut out)
+                        .map_err(|e| format!("解 deflate 失败: {e}"))?;
+                }
+                out
+            }
+            "br" => {
+                use std::io::Read;
+                let mut out = Vec::new();
+                brotli::Decompressor::new(std::io::Cursor::new(&data), 8192)
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("解 br 失败: {e}"))?;
+                out
+            }
+            "zstd" => zstd::stream::decode_all(std::io::Cursor::new(&data))
+                .map_err(|e| format!("解 zstd 失败: {e}"))?,
+            other => return Err(format!("上游用了不认识的 content-encoding: {other}")),
+        };
+    }
+    Ok(data)
+}
+
+/// 我们主动支持的压缩编码（与 `decode_body` 认的一致）。
+const ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
 /// 发一次请求（含重定向）。返回 `{status, headers, body, url, redirected}`。
 ///
 /// 正文**不设上限**（插件是可信代码）：`truncated` 字段留着但恒为 false。
@@ -227,6 +286,14 @@ pub async fn fetch_json_with(
             for (k, v) in &extra_headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
+            // 出站压缩：调用方没自己写 accept-encoding 时，我们替它要压缩体，
+            // 读回来在本地解（插件拿到明文）。写了就尊重调用方的选择。
+            if !extra_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+            {
+                builder = builder.header("accept-encoding", ACCEPT_ENCODING);
+            }
             let req = builder
                 .body(Full::new(body_bytes.clone()).boxed())
                 .map_err(|e| format!("请求构造失败: {e}"))?;
@@ -289,6 +356,12 @@ pub async fn fetch_json_with(
             }
         }
 
+        // content-encoding 要在**消费 body 之前**读出来（之后 resp 就被 into_body 吃掉了）
+        let encoding = resp
+            .headers()
+            .get(http::header::CONTENT_ENCODING)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .unwrap_or_default();
         let headers = headers_to_json(resp.headers());
         let mut buf: Vec<u8> = Vec::new();
         let mut body_error: Option<String> = None;
@@ -313,6 +386,28 @@ pub async fn fetch_json_with(
                 }
             }
         }
+
+        // 有 content-encoding 就在本地解（主流 hyper 路径不会替我们解）。
+        let mut headers = headers;
+        let enc = encoding;
+        let decoded: Result<Vec<u8>, String> = if body_error.is_none() && !enc.is_empty() {
+            decode_body(&enc, buf)
+        } else {
+            Ok(buf)
+        };
+        let (buf, body_error) = match decoded {
+            Ok(v) => {
+                if !enc.is_empty() {
+                    // 解压后这两项都不再成立，别让调用方按旧值算长度/再解一次
+                    if let Json::Object(m) = &mut headers {
+                        m.remove("content-encoding");
+                        m.remove("content-length");
+                    }
+                }
+                (v, body_error)
+            }
+            Err(e) => (Vec::new(), Some(format!("响应解压失败（content-encoding: {enc}）：{e}"))),
+        };
 
         let mut out = json!({
             "status": status,

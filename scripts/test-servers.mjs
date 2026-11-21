@@ -117,8 +117,23 @@ smtp.listen(smtpPort, '0.0.0.0', () => console.log('[smtp] fake on 0.0.0.0:' + s
 
 // ---------------------------------------------------------------- 本地 HTTP（给 fetch/http_fetch 用，离线可跑）
 import http from 'node:http';
+import zlib from 'node:zlib';
 const httpPort = Number(process.argv[4] || 9910);
+/** `/gzip` 的明文（自检要断言 host.fetch 拿到的是这段，不是乱码）。 */
+const GZIP_PLAIN = 'gzip-plain-text-from-test-server';
 const web = http.createServer((req, res) => {
+  // 压缩对端（第 253 轮）：上游回 gzip 体，面板侧应当在 Rust 里解开再交给插件。
+  if ((req.url || '').startsWith('/gzip')) {
+    const body = zlib.gzipSync(Buffer.from(GZIP_PLAIN, 'utf8'));
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'content-encoding': 'gzip',
+      'content-length': String(body.length),
+      vary: 'accept-encoding',
+    });
+    res.end(body);
+    return;
+  }
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ hello: 'world', path: req.url }));
 });

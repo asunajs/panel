@@ -108,7 +108,21 @@ webpki-roots = "1"
 # native-tls：macOS = Security.framework，Linux = OpenSSL。
 native-tls = "0.2"
 # 这条路的 HTTP 客户端。只用到 blocking 语义里的“能谈 CBC”这一点。
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+# 压缩特性 = 出站响应「走原生」解压（第 253 轮）：开了之后 reqwest 自己带
+# accept-encoding 并在 Rust 侧解 gzip / deflate / br / zstd，插件拿到的是明文 body。
+reqwest = { version = "0.12", default-features = false, features = [
+    "native-tls",
+    "gzip",
+    "deflate",
+    "brotli",
+    "zstd",
+] }
+
+# 出站响应解压：hyper 那条主流路（rustls）自己读 body，所以要**手动**解。
+# 三个 crate 本来就在依赖图里（reqwest 的压缩特性拉的），这里只是直接调用。
+flate2 = "1"
+brotli = "9"
+zstd = { version = "0.14", default-features = false }
 
 # musl 静态发布（.github/workflows/release.yml）要 vendored OpenSSL —— feature 语法
 # 要求 openssl-sys 是本 manifest 直接声明的依赖（它本来就在 Linux 的依赖图里：

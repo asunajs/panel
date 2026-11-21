@@ -642,9 +642,12 @@ version = "0.4.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84f840cff84d10085260e460023934d0af699e71212b09b2a41452e8bd9cda43"
 dependencies = [
+ "brotli",
  "compression-core",
  "flate2",
  "memchr",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -3660,10 +3663,12 @@ version = "0.7.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "brotli",
  "bytes",
  "chacha20poly1305 0.10.1",
  "chrono",
  "chrono-tz",
+ "flate2",
  "futures",
  "getrandom 0.2.17",
  "hkdf 0.12.4",
@@ -3700,6 +3705,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -4866,6 +4872,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",

@@ -82,6 +82,7 @@ async function main() {
         smtp_host: lan,
         smtp_port: smtpPort,
         http_url: 'http://' + lan + ':' + httpPort + '/hello',
+        gzip_url: 'http://' + lan + ':' + httpPort + '/gzip',
       },
     }),
   );
@@ -160,6 +161,18 @@ try {
   check('fetch 出站打通（本地对端 200）', (parsed('fetch') || {}).status === 200, String(get('fetch')));
   check('http_fetch 同步版打通（本地对端 200）', (parsed('http_fetch') || {}).status === 200, String(get('http_fetch')));
   check('回环被 SSRF 挡住', /被挡住（对）/.test(String(get('fetch_loopback'))), String(get('fetch_loopback')));
+  // 压缩（第 253 轮）：上游回 gzip，插件拿到的必须是明文，且 content-encoding 不再透传
+  const gz = parsed('fetch_gzip') || {};
+  check('fetch：gzip 上游被原生解压成明文', gz.body === 'gzip-plain-text-from-test-server', String(gz.body));
+  check('fetch：解压后不再透传 content-encoding', !gz.encoding, String(gz.encoding));
+  const gzs = parsed('http_fetch_gzip') || {};
+  check('http_fetch：同步版同样解压', gzs.body === 'gzip-plain-text-from-test-server', String(gzs.body));
+  // fs.existsSync（第 253 轮给 LLRT 补的）
+  const ex = parsed('exists_sync') || {};
+  check('fs.existsSync：存在的目录 true', ex.dir === true, String(ex.dir));
+  check('fs.existsSync：刚写的文件 true', ex.file === true, String(ex.file));
+  check('fs.existsSync：不存在 false（不抛）', ex.missing === true, String(ex.missing));
+  check('fs.existsSync：default 导出上也在', ex.default_import === true, String(ex.default_import));
   check('notify 不炸（没渠道也只落发件箱）', get('notify') === '"ok"', String(get('notify')));
   check('WebSocket 回声对得上', (parsed('ws') || {}).data === 'hello from demo', String(get('ws')));
   check('SMTP 走通了', /250 queued/.test(String(parsed('smtp')?.response || '')), String(get('smtp')));
@@ -170,12 +183,13 @@ try {
   const probeTask = (st2.tasks || []).find((t) => t.name === 'probe');
   check('set_job_summary 生效', !!probeTask && /跑过 \d+ 个入口/.test(probeTask.summary || ''), JSON.stringify(probeTask && probeTask.summary));
   check('set_job_blockers 生效', !!probeTask && (probeTask.blockers || []).length > 0, JSON.stringify(probeTask && probeTask.blockers));
-  check('set_job_schedule 生效（cron 覆盖）', !!probeTask && probeTask.cron_override === '@every 6h', JSON.stringify(probeTask && probeTask.cron));
+  // 状态接口里那个字段叫 `cron`（scheduler 内部才有 cron_override），断言跟着接口走
+  check('set_job_schedule 生效（cron 覆盖）', !!probeTask && probeTask.cron === '@every 6h', JSON.stringify(probeTask && probeTask.cron));
 
   // 5) 插件自带界面：静态文件优先，路由其次
   const page = await fetch(base + '/plugins/demo/');
   const pageText = await page.text();
-  check('静态文件 index.html 能取到', page.status === 200 && /demo 插件/.test(pageText), String(page.status));
+  check('静态文件 index.html 能取到', page.status === 200 && /面板 UI 套件演示/.test(pageText), String(page.status));
   const ping = await fetch(base + '/plugins/demo/api/ping?x=1');
   const pingBody = await ping.json();
   check('register_web 的路由能回应', ping.status === 200 && pingBody.query === 'x=1', JSON.stringify(pingBody));

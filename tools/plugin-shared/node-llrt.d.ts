@@ -25,6 +25,8 @@ declare module 'node:fs' {
   export function statSync(p: string): { isDirectory(): boolean; isFile(): boolean; mtimeMs?: number; size?: number; mode?: number };
   export function lstatSync(p: string): { isDirectory(): boolean; isFile(): boolean; mtimeMs?: number; size?: number; mode?: number };
   export function accessSync(p: string, mode?: number): void;
+  /** 存在性判断：Node 语义 —— **任何错误都返回 false，不抛**（第 253 轮面板补的）。 */
+  export function existsSync(p: string): boolean;
   export function symlinkSync(target: string, path: string): void;
   export const constants: Record<string, number>;
   declare const fs: {
@@ -40,6 +42,7 @@ declare module 'node:fs' {
     statSync: typeof statSync;
     lstatSync: typeof lstatSync;
     accessSync: typeof accessSync;
+    existsSync: typeof existsSync;
     symlinkSync: typeof symlinkSync;
     constants: typeof constants;
   };
