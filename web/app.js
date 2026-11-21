@@ -1810,6 +1810,8 @@ function renderDashLogs() {
 
 function logLine(l) {
   const row = el('div', 'log-line');
+  // 归位用（见 appendLog）：补发批次晚到时按 ts 插回该在的位置
+  row.dataset.ts = String(l.ts);
   row.append(el('span', 'log-time', fmtLogTime(l.ts)));
   row.append(el('span', 'level level-' + (l.level || 'info'), l.level || 'info'));
   row.append(el('span', 'log-plugin', l.plugin || ''));
@@ -1915,13 +1917,26 @@ function appendLog(l) {
   } else if (dupWithoutId(l)) {
     return;
   }
-  state.logs.push(l);
+  // 按 ts 归位，而不是硬追加：实时帧**没有 id**（`LogLine` 里就没这个字段），游标推不动，
+  // 所以重连时 `since` 会从旧游标补发一批 —— 那批行如果比屏上的新行还早，append 就会时间倒流。
+  // 上面那条 twin 去重已经能挡住「同一条画两遍」，这里挡的是「顺序」。
+  let at = state.logs.length;
+  while (at > 0 && state.logs[at - 1].ts > l.ts) at -= 1;
+  state.logs.splice(at, 0, l);
   if (state.logs.length > LOG_RING) state.logs.splice(0, state.logs.length - LOG_RING);
   if (state.logMode || state.logsPaused || state.view !== 'logs' || !logMatches(l)) return;
   const box = $('logs-view');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   if (box.querySelector('.empty')) clear(box);
-  box.append(logLine(l));
+  const node = logLine(l);
+  // 从尾部往前找第一个 ts 不大于它的行，插在它后面；找不到就插到最前（比屏上所有行都早）。
+  let anchor = null;
+  for (let e = box.lastElementChild; e; e = e.previousElementSibling) {
+    if (!e.classList || !e.classList.contains('log-line')) continue;
+    if (Number(e.dataset.ts) <= l.ts) { anchor = e; break; }
+  }
+  if (anchor) box.insertBefore(node, anchor.nextSibling);
+  else box.prepend(node);
   // DOM 侧也要封顶：内存环有上限（LOG_RING），DOM 以前只加不减 ——
   // 日志页开着的那段时间，节点数就完全交给日志速率了（一行 = 9 个节点）。
   while (box.childElementCount > LOG_RING) box.firstElementChild.remove();

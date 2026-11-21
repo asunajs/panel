@@ -487,6 +487,12 @@ async function main() {
   check('日志等级过滤只看 error', !!onlyErr, onlyErr || '等了 6 秒还没收敛');
   await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='').click()");
   await sleep(600);
+  // 屏上时间不能倒流：每行都要带 data-ts，且按出现顺序非递减。
+  // 实时帧没有 id、重连补发批次可能晚到 —— `appendLog` 现在按 ts 归位，这条盯的就是它。
+  const tsOrder = await js("(()=>{const ns=[...document.querySelectorAll('#logs-view .log-line')];const ts=ns.map(n=>Number(n.dataset.ts));return JSON.stringify({n:ts.length, missing:ts.filter(v=>!Number.isFinite(v)).length, back:ts.filter((v,i)=>i>0&&v<ts[i-1]).length});})()");
+  const to = JSON.parse(tsOrder || '{}');
+  check('日志每行都带 ts（归位用）', to.n > 0 && to.missing === 0, tsOrder);
+  check('日志屏上时间不倒流', to.back === 0, tsOrder);
   // 设置：5 个页签 + 通知页能出渠道表
   await js("location.hash = '#settings'");
   await sleep(1000);
