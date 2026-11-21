@@ -66,15 +66,27 @@ declare module 'panel:host' {
     sqlite_exec_sync(sql: string, params?: unknown[]): SqliteExecResult;
 
     // ── 调度 / 任务 ────────────────────────────────────────────
-    /** 注册定时任务（**建议**，采纳与删除是用户的事）：`(名称, cron 串, 预算/opts, 参数名?)` */
+    /**
+     * 注册定时任务（**建议**，采纳与删除是用户的事）。
+     * 真签名（src/hostapi.rs `op_register_cron`）：`(名称, cron 串, 预算毫秒?, opts JSON?)`，
+     * opts 认 `{ params, lead_ms }`；cron 在这里就校验，写错当场报。
+     */
     register_cron(
       name: string,
       spec: string,
-      budgetMsOrOpts?: number | Record<string, unknown>,
-      params?: string[] | Record<string, unknown>,
+      budgetMs?: number,
+      opts?: string | Record<string, unknown>,
     ): void;
-    /** 注册手动任务（任务页上的按钮） */
-    register_handler(name: string, fn: (evt?: any) => unknown): void;
+    /**
+     * 注册手动任务（任务页上的按钮）。真签名：`(名称, 函数, 预算毫秒?, opts JSON?)`，
+     * opts 认 `{ paused }`（只手动、不定时）。
+     */
+    register_handler(
+      name: string,
+      fn: (evt?: any) => unknown,
+      budgetMs?: number,
+      opts?: string | Record<string, unknown>,
+    ): void;
     /** 注册插件页面路由（`/plugins/<name>/<rel>`） */
     register_web(fn: (evt: any) => unknown): void;
     /** 侧栏入口 */
