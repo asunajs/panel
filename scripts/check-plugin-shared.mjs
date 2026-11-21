@@ -19,6 +19,9 @@ const SHARED = [
   { copy: 'types/panel-ui.d.ts', source: 'web/ui.d.ts', what: '面板 JS 契约' },
   { copy: 'scripts/sync-types.mjs', source: 'tools/plugin-shared/sync-types.mjs', what: '类型同步脚本' },
   { copy: 'tsconfig.webui.base.json', source: 'tools/plugin-shared/tsconfig.webui.base.json', what: '界面编译选项' },
+  { copy: 'types/panel-host.d.ts', source: 'tools/plugin-shared/panel-host.d.ts', what: '宿主 API 契约' },
+  { copy: 'types/node-llrt.d.ts', source: 'tools/plugin-shared/node-llrt.d.ts', what: 'LLRT 的 node 子集' },
+  { copy: 'tsconfig.node.base.json', source: 'tools/plugin-shared/tsconfig.node.base.json', what: '服务端编译选项' },
 ];
 
 const args = process.argv.slice(2);

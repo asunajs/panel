@@ -1,0 +1,24 @@
+{
+  "//": "插件服务端（LLRT 里跑的那份）公共编译选项。真源：panel-llrt/tools/plugin-shared/tsconfig.node.base.json。各仓拷一份，自己的 tsconfig.node.json 只写 extends + include。",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "panel:host": [
+        "./types/panel-host.d.ts"
+      ]
+    }
+  }
+}

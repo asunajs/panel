@@ -27,6 +27,9 @@ const CANDIDATES = [
 const FILES = [
   { from: 'web/ui.d.ts', to: 'types/panel-ui.d.ts' },
   { from: 'tools/plugin-shared/tsconfig.webui.base.json', to: 'tsconfig.webui.base.json' },
+  { from: 'tools/plugin-shared/panel-host.d.ts', to: 'types/panel-host.d.ts' },
+  { from: 'tools/plugin-shared/node-llrt.d.ts', to: 'types/node-llrt.d.ts' },
+  { from: 'tools/plugin-shared/tsconfig.node.base.json', to: 'tsconfig.node.base.json' },
 ];
 
 const check = process.argv.includes('--check');
