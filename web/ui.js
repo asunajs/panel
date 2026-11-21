@@ -1552,6 +1552,13 @@
     else if (kind === 'warn') node.classList.add('hint-warn');
   };
 
+  /** HTML 转义：拼 innerHTML 时把用户数据过一遍（四个插件里只有 mcloud 自己写了一份）。 */
+  const pEsc = (s) => String(s === undefined || s === null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
   /** 忙碌态：禁按钮 + 换文案，恢复时还原原文案。`<p-button>` 走它的 label/disabled。 */
   const pBusy = (btn, on, label) => {
     if (!btn) return;
@@ -1581,6 +1588,7 @@
     prompt: pPrompt,
     // 纯函数：四个插件各自重复实现过的那几个
     mask: pMask,
+    esc: pEsc,
     fmtTime: pFmtTime,
     fmtLogTime: pFmtLogTime,
     hint: pHint,

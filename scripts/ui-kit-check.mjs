@@ -531,6 +531,9 @@ async function main() {
   const masks = await js(`[PanelUI.mask('13800138000',3,4), PanelUI.mask(''), PanelUI.mask('123456',3,4)]`);
   check('PanelUI.mask：留头尾、空串不炸、短串原样', masks[0] === '138****8000' && masks[1] === '' && masks[2] === '123456', JSON.stringify(masks));
 
+  const escRes = await js(`[PanelUI.esc('<a href="x">&'), PanelUI.esc(null)]`);
+  check('PanelUI.esc：尖括号/引号/& 都转、null 不炸', escRes[0] === '&lt;a href=&quot;x&quot;&gt;&amp;' && escRes[1] === '', JSON.stringify(escRes));
+
   const times = await js(`[PanelUI.fmtTime(0), PanelUI.fmtLogTime(0), PanelUI.fmtLogTime(new Date(2026,10,21,9,5,7).getTime())]`);
   check('PanelUI.fmtLogTime 带月日（隔天能看出是哪天）', times[0] === '—' && times[1] === '—' && times[2] === '11-21 09:05:07', JSON.stringify(times));
 
