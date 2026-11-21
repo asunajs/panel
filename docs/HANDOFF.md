@@ -142,8 +142,13 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 
 - **默认不推**：提交留本地，推不推由用户说；用户说推了就走 SSH（HTTPS 到 github.com 常不通，见 pitfalls 116）：
   `git push ssh-origin main`（远端 `ssh://git@ssh.github.com:443/asunajs/panel.git`）。
-- 发版 = ① 改 `Cargo.toml` 版本 ② `CHANGELOG.md` 加一段 ③ `docs/verification.md` 记读数
-  ④ 提交 `release: 0.6.x（一句话）` ⑤ 用户点头后打 tag 并推（CI 出资产、发 Release，说明用 CHANGELOG 那段）。
+- 发版 = ① 改 `Cargo.toml` 版本 ② **两份日志各加一段**（见下）③ `docs/verification.md` 记读数
+  ④ 提交 `release: 0.6.x（一句话）` ⑤ 用户点头后打 tag 并推（CI 出资产、发 Release，说明用**简版**那段）。
+- **更新日志分两份**（第 264 轮起）：
+  - `CHANGELOG.md` = **简版**，一版一节、每条一行，只写用户能感知的变化 —— 它就是 Release 说明的来源；
+  - [changelog-full.md](changelog-full.md) = **完整版**，留档：为什么这么改、踩了什么坑、哪条门禁盯着、反向例。
+  - 两份都要加。完整版那段可以从简版展开写，但别把守卫条数/行号/内部重构塞进简版
+    （用户看不懂，Release 说明也不需要）。
 - 工作区里 `plugins/mgmusic.js`、`plugins/mgmusic.webui/`、`plugins-wip/` **不要提交**（用户的私有插件）。
 - 多个会话会同时改这个仓库：提交前 `git status` 看清哪些是你的，`git add` 只加自己的文件。
 - 别跑 `cargo fmt`：仓库刻意不是 fmt-clean，有些注释是手对齐的，fmt 会改 46 个无关文件。
