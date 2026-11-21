@@ -166,6 +166,18 @@ async fn run_one_carries_only_its_own_logs() {
 }
 
 #[tokio::test]
+async fn historical_run_totals_are_counted_per_task() {
+    let (_app, db) = setup().await;
+    seed(&db).await;
+    // 「跑过」要报历史（runs 表），不是本进程计数器 —— 后者重启就归零。
+    let m = crate::runs::totals_by_task(&db).await.unwrap();
+    assert_eq!(m.get(&("hello".to_string(), "tick".to_string())), Some(&1));
+    assert_eq!(m.get(&("hello".to_string(), "boom".to_string())), Some(&1));
+    assert_eq!(m.get(&("long".to_string(), "long".to_string())), Some(&1));
+    assert_eq!(m.get(&("nobody".to_string(), "nope".to_string())), None);
+}
+
+#[tokio::test]
 async fn missing_run_is_a_400_not_a_panic() {
     let (app, db) = setup().await;
     seed(&db).await;

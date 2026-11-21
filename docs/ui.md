@@ -936,52 +936,5 @@ curl -s http://127.0.0.1:<port>/api/plugins/files # 400 = 这个实例的插件�
   `.modal-input` 三处）。守卫 `scripts/check-pitfalls.sh` 第 ㉒ 条静态扫 CSS；
   `ui-check` 深浅两主题各一条断言（`img / no-repeat / 12px 12px`），造过反向例确认能红。
 
-### 一行的状态只给一个结论（第 225 轮）
-
-用户截图：任务表某行状态列并排两个药丸 —— 绿的「已启用」和灰的「已删除」。
-
-- 根因：`taskPill(t)` 只看 `t.enabled`（删掉的任务 enabled 仍是 true），
-  而「已删除」是行里**另外追加**的一个药丸，两处各说各话。同理「待采纳」的任务也照样报「已启用」，
-  可它采纳前根本不会跑。
-- 修法：状态判定收进 `taskPill` 一处，按「会不会跑」排优先级：
-  `已删除 → 待采纳 → 熔断 → 已暂停 → 运行中 → 已启用`；行里不再追加第二个结论，
-  补充说明走 tooltip。
-- 顺带：那个「显示已删除」开关原来是 `.btn-ghost`（无边框无底色），夹在「全部插件」
-  这种有边框控件中间像一行普通文字。改成 `.btn` + `.btn[aria-pressed="true"]` 高亮。
-- 守卫：`ui-check` 两条 —— 「状态只说已删除，不再同时挂已启用」「开关有边框且与旁边下拉同宽」，
-  反向例验过（把 `deleted` 分支拿掉，两条都红）。
-
-### 任务行只放两个动作，其余进一个带页签的弹窗（第 256 轮）
-
-用户截图：任务表操作列每行 2~6 颗同权重按钮（执行 / 改计划 / 加载插件 / 暂停 / 采纳建议 / 删除），
-右边缘参差、行高 71 / 82.5 / 118px 三档；状态列「已启用」下面紧贴一个「待加载」，两个药丸只隔 1~2px。
-
-- 根因 ①：动作列是 `ops` 数组按条件 `push` 出来的（2~6 个），`.table .actions` 只有 flex+wrap，
-  按钮宽度随字数走（2 字 47px / 4 字 72px），右对齐换行后每行颗数不同。
-  还有一条更隐蔽的：**换行的 flex 容器 min-content 只等于最宽那颗**，列被挤窄时
-  「执行 / ⋯」会竖向叠，整行从 46 翻到 83px（真机上量到的）。
-- 根因 ②：「待加载」是**插件级**状态，却挂在任务结论旁边；两个 `.pill` 是 td 里的行内兄弟，
-  中间那 1~2px 是行盒剩下的，不是设计值 —— 列一窄就换行，看着像两格数据黏在一起。
-- 修法：行内只留「执行 + ⋯」，其余按语义进 `#task-action` 弹窗三页：
-  **运行**（执行 / 暂停·恢复 / 加载插件（lazy）/ 重置熔断（tripped）/ 删除）、
-  **计划**（cron 编辑器**就地**）、**详情**（`last_error` 全文、`blockers` 列表、预算对比、去日志）。
-  动作一律「先关弹窗再派发」——`refresh()` 会重建整张表，弹窗留着就是对着旧行说话。
-- 「待加载」降级成插件名下的 `mini-sub`「未装载」；状态列的药丸进 `.pill-stack`（显式 6px gap），
-  卡片态（≤720）改横排。
-- 弹窗复用了现成的 `.modal` / `.modal-card` / `.tabs` / `.modal-actions`：
-  `data-close` 委托 + `closeTopModal()` 白送「点关闭 / 点遮罩 / Esc」三个出口。
-  新增只有 `.modal-card.wide`（560px）、`.ta-*` 布局、`.act` 动作行、`.tab-badge` 角标。
-- `#task-schedule` 弹窗整个退役：`openTaskSchedule(t)` → `openTaskPanel(t, tab)`，
-  `#sched-form` / `#sched-sentence` / `#sched-preview` 三个 id 原样搬进计划页，
-  `renderScheduleForm()` 一行没改；只有 `#task-schedule #sched-form{overflow}` 那条改成
-  `.ta-body` 做唯一滚动区（头尾固定，保存永远看得见）。
-- 顺带：任务表给 `cron / budget_ms / next_at` 三列加 min-width。它们被挤到 min-content 时
-  **按词**折行（「5 分 0 秒」折成 4 行、「@every 30s」折成两截），行高被撑到 98px。
-- 数字：操作列 203 → 113px；行高 71 / 82.5 / 118 → 47px（带摘要或未就绪的行 75px）。
-- 守卫：`ui-check` 新增 8 条（行内只有两颗按钮、⋯ 开弹窗、默认运行页、运行页无「保存计划」、
-  计划页就地渲染且 `.modal:not(.hidden)` 只有一个、保存真的写回后端、保存后弹窗自己关、
-  状态列不再出现「待加载」）；原来「改计划的取消 / 遮罩 / Esc」三条改成对着 `#task-action` ——
-  弹窗换了 id 还留着旧断言，就会变成 `null.classList` 直接炸掉整轮（这次踩到了）。
-- 反向例：把 `taskRowActions` 里的 `⋯` 换成直接 `openTaskPanel(t,'plan')`，
-  「默认开在运行页」这条会红；把 `prepareScheduleEdit` 里的 `renderScheduleForm()` 去掉，
-  「计划页就地渲染」这条会红。
+任务页的那几条口径（状态列只给一个结论、操作弹窗、计划编辑器里的下拉与两列数字）
+单独一篇，免得这篇过长：[ui-tasks.md](ui-tasks.md)。

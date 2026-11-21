@@ -370,6 +370,8 @@ button, input, select { font: inherit; color: inherit; }
 #view-tasks .table th[data-sort="cron"] { min-width: 148px; }
 #view-tasks .table th[data-sort="budget_ms"] { min-width: 84px; }
 #view-tasks .table th[data-sort="next_at"] { min-width: 110px; }
+/* 跑过 = 历史数字 + 「本次 N」小字，两行并排，太窄会折成一堆 */
+#view-tasks .table th[data-sort="runs"] { min-width: 72px; }
 /* 任务行的「⋯」（第 256 轮）：和「执行」同高，宽度按字形给 —— 三个点比两个汉字窄得多，
    不给固定宽会缩成一小条，点起来也别扭。 */
 .table .actions .task-more { width: 34px; padding: 0; font-size: 15px; line-height: 1; color: var(--fg-2); }
@@ -2163,6 +2165,17 @@ select option { background: var(--surface); color: var(--fg); }
    （否则「09:00 到 18:00」里那个「到」会占掉 69px，把两个时间框挤窄） */
 #sched-form .field-inline > span.muted:first-child { min-width: 5.5em; }
 #sched-form .modal-input { flex: 1 1 8em; min-width: 6em; }
+/* 计划表单里的下拉（第 257 轮）：桌面用自绘的 .dropdown —— 原生 <select> 的**展开态**是
+   系统控件，跟着 OS 主题走，浅色面板里会弹出一块深灰菜单。闭合态必须和 .modal-input 一样：
+   32px 高、--surface-2 底、等宽 13px，否则一行七个控件对不齐。 */
+#sched-form .dropdown { flex: 1 1 8em; min-width: 6em; display: flex; }
+#sched-form .dropdown-btn {
+  width: 100%; justify-content: space-between; gap: 8px; padding: 0 11px;
+  background-color: var(--surface-2); color: var(--fg);
+  font-family: var(--mono); font-size: 13px;
+}
+#sched-form .dropdown-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sched-form .sched-narrow > .dropdown { flex: 0 0 6.5em; }
 #sched-form textarea.modal-input { min-height: 3.2em; resize: vertical; }
 
 /* 星期：按钮别被 flex 拉成等宽满行，选中的用 accent 实底（浅底+白字读不出来） */

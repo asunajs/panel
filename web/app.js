@@ -623,6 +623,11 @@ function taskPill(t) {
   return pill('pill-ok', '已启用');
 }
 
+/** 任务的**历史**运行次数。老接口没有这个字段时退回本进程计数（别显示成 0 骗人）。 */
+function runTotal(t) {
+  return Number(t && t.runs_total) || 0;
+}
+
 /** 带 data-label 的单元格：窄屏时 ::before 会把它当行内标签显示。 */
 function td(label, cls, text) {
   const cell = el('td', cls, text);
@@ -1190,7 +1195,7 @@ function openTaskPanel(t, tab) {
     t.manual ? '手动任务（计划由代码决定）' : cronLabel(t.cron),
     '预算 ' + humanMs(t.budget_ms),
     '下次 ' + (t.manual || !t.enabled ? '—' : fmtDateTime(t.next_at)),
-    '跑过 ' + t.runs + ' 次',
+    '跑过 ' + runTotal(t) + ' 次',
   ].join(' · ');
   // 角标：真有没处理的东西才挂数字，别让它变成装饰
   setTabBadge('task-action-badge-plan', t.cron_base && t.cron_base !== t.cron ? 1 : 0);
@@ -1281,12 +1286,12 @@ function renderTaskMorePane(t) {
   kv('任务', t.name, true);
   kv('计划', t.manual ? '手动（由代码决定）' : cronLabel(t.cron), !t.manual);
   if (t.cron_base && t.cron_base !== t.cron) kv('插件注册', t.cron_base, true);
-  kv('预算', humanMs(t.budget_ms));
+  kv('单次预算', humanMs(t.budget_ms) + '（超过就掐断这一次；连续超会被熔断）');
   if (t.suggest_budget_ms && t.suggest_budget_ms !== t.budget_ms) {
     kv('插件建议预算', humanMs(t.suggest_budget_ms));
   }
   kv('下次运行', t.manual ? '—' : (t.enabled ? fmtDateTime(t.next_at) : '已暂停'));
-  kv('跑过', t.runs + ' 次');
+  kv('跑过', runTotal(t) + ' 次（本次启动以来 ' + (t.runs || 0) + ' 次）');
   if (t.in_flight && t.run_started) {
     kv('本次已跑', elapsedLabel(Date.now() - t.run_started));
   }
@@ -1356,16 +1361,37 @@ function schedRow(label, ...ctl) {
   return row;
 }
 
+/**
+ * 计划表单里的一行下拉（第 257 轮）。
+ *
+ * 为什么不再用原生 <select>：它的**展开态是系统控件**，跟着操作系统主题走 ——
+ * 浅色面板里会弹出一块深灰的 macOS 菜单（用户截图），字体/行高/打勾/选中态全都改不了。
+ * 桌面改用面板自绘的 .dropdown（portal 到 body；.dropdown-menu 的 z-index 85 比弹窗的 80 高，
+ * 所以塞在弹窗里也不会被盖住）。**手机上保留原生**：系统滚轮选择器比自绘列表好用。
+ *
+ * 签名和调用点不变：opts 还是 [[value, label], ...]。
+ */
 function schedSelect(opts, value, onPick) {
-  const s = el('select', 'modal-input');
-  for (const [v, t] of opts) {
-    const o = el('option', '', t);
-    o.value = v;
-    if (String(v) === String(value)) o.selected = true;
-    s.append(o);
+  // matchMedia 而不是 innerWidth：窗口拖窄/旋屏时会重画表单，判断要跟着变
+  if (window.matchMedia('(max-width: 720px)').matches) {
+    const s = el('select', 'modal-input');
+    for (const [v, t] of opts) {
+      const o = el('option', '', t);
+      o.value = v;
+      if (String(v) === String(value)) o.selected = true;
+      s.append(o);
+    }
+    s.addEventListener('change', () => onPick(s.value));
+    return s;
   }
-  s.addEventListener('change', () => onPick(s.value));
-  return s;
+  const box = el('div', 'dropdown sched-dd');
+  makeDropdown(
+    box,
+    opts.map(([v, t]) => ({ value: String(v), label: t })),
+    String(value),
+    (v) => onPick(v),
+  );
+  return box;
 }
 
 function schedTime(value, onPick, allowEmpty) {
@@ -1547,6 +1573,8 @@ function renderMultiEditor(box) {
 }
 
 function renderScheduleForm() {
+  // 每次改一个控件都重建整张表单：先把还开着的下拉收起来，否则它的菜单会变成 body 上的孤儿
+  closeOpenDropdown();
   const box = $('sched-form');
   clear(box);
   const j = schedJson;
@@ -1730,7 +1758,8 @@ function renderTasks() {
       .filter((t) => !state.fp.tasks || t.plugin === state.fp.tasks)
       .filter((t) => matches(t.plugin, q) || matches(t.name, q) || matches(t.cron, q)),
     state.sort.tasks,
-    { status: (t) => (t.deleted ? 3 : t.tripped ? 2 : !t.enabled ? 1 : 0) },
+    // runs 用历史累计排（列里显示的就是它），status 的优先级照旧
+    { status: (t) => (t.deleted ? 3 : t.tripped ? 2 : !t.enabled ? 1 : 0), runs: (t) => runTotal(t) },
   );
   $('tasks-count').textContent = pending.length
     ? visible.length + ' · ' + pending.length + ' 排队'
@@ -1780,7 +1809,13 @@ function renderTasks() {
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
     // 暂停的任务不显示「下次运行」：'已暂停' 旁边挂一个未来时间会让人以为它还要跑。
     tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (!t.enabled ? '—' : fmtDateTime(t.next_at))));
-    tr.append(td('跑过', 'num', String(t.runs)));
+    // 「跑过」= 历史累计（runs 表），不是 TaskView.runs 那个本进程计数（重启归零）。
+    // 本次启动跑过几次放小字里 —— 两个数都有人问，但主数字该是历史（第 257 轮）。
+    // 只显示历史数字：「本次启动以来」放 title 和详情页（多一行小字会让每行 +8px，
+    // 而这个数只在「刚重启」时才和表格里的 0 有关）。第 257 轮）。
+    const runsCell = td('跑过', 'num', String(runTotal(t)));
+    runsCell.title = '历史累计 ' + runTotal(t) + ' 次（在「运行记录」里可查）；本次启动以来 ' + (t.runs || 0) + ' 次';
+    tr.append(runsCell);
     const st = td('状态');
     // 药丸进一个显式的栈（第 256 轮）：以前两个药丸是 td 里的行内兄弟，
     // 列一窄就换行，中间那 1~2px 是行盒剩的，不是设计值 —— 看起来像两格数据黏在一起。
@@ -6566,6 +6601,14 @@ function wireSearch(inputId, setValue, rerender) {
 
 let openDropdown = null;
 
+/** 关掉当前打开的自绘下拉。重画表单 / 关弹窗之前必须调：菜单挂在 body 上，
+ *  宿主节点一删它就成了孤儿 —— 还看得见，但点了没反应。 */
+function closeOpenDropdown() {
+  const box = openDropdown;
+  openDropdown = null;
+  if (box && box.__close) box.__close();
+}
+
 const CHEV = '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 
 /**
@@ -6630,6 +6673,15 @@ function makeDropdown(box, opts, current, onPick) {
     menu.style.top = Math.round(r.bottom + 6) + "px";
     menu.style.minWidth = Math.max(190, Math.round(r.width)) + "px";
     menu.hidden = false;
+    // 定位收边（第 257 轮）：计划表单里的下拉在**居中弹窗**里，靠近底部那几行往下展开会出视口 ——
+    // 空间不够就改成向上展开；贴右边缘时也收一下（菜单是 fixed，走出去就点不到了）。
+    const mr = menu.getBoundingClientRect();
+    let top = r.bottom + 6;
+    if (top + mr.height > window.innerHeight - 8) top = Math.max(8, r.top - 6 - mr.height);
+    menu.style.top = Math.round(top) + "px";
+    if (r.left + mr.width > window.innerWidth - 8) {
+      menu.style.left = Math.round(Math.max(8, window.innerWidth - 8 - mr.width)) + "px";
+    }
     box.dataset.open = "true";
     btn.setAttribute("aria-expanded", "true");
     setActive(Math.max(0, opts.findIndex((o) => o.value === current)));

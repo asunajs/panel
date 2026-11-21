@@ -1,0 +1,79 @@
+# 任务页的界面口径
+
+> 从 [ui.md](ui.md) 拆出来的一篇：任务表这一页的「状态怎么说、操作放哪、下拉长什么样、
+> 预算和跑过两个数字从哪来」。通用准则（token、组件、弹窗骨架）仍在 ui.md。
+
+### 一行的状态只给一个结论（第 225 轮）
+
+用户截图：任务表某行状态列并排两个药丸 —— 绿的「已启用」和灰的「已删除」。
+
+- 根因：`taskPill(t)` 只看 `t.enabled`（删掉的任务 enabled 仍是 true），
+  而「已删除」是行里**另外追加**的一个药丸，两处各说各话。同理「待采纳」的任务也照样报「已启用」，
+  可它采纳前根本不会跑。
+- 修法：状态判定收进 `taskPill` 一处，按「会不会跑」排优先级：
+  `已删除 → 待采纳 → 熔断 → 已暂停 → 运行中 → 已启用`；行里不再追加第二个结论，
+  补充说明走 tooltip。
+- 顺带：那个「显示已删除」开关原来是 `.btn-ghost`（无边框无底色），夹在「全部插件」
+  这种有边框控件中间像一行普通文字。改成 `.btn` + `.btn[aria-pressed="true"]` 高亮。
+- 守卫：`ui-check` 两条 —— 「状态只说已删除，不再同时挂已启用」「开关有边框且与旁边下拉同宽」，
+  反向例验过（把 `deleted` 分支拿掉，两条都红）。
+
+### 任务行只放两个动作，其余进一个带页签的弹窗（第 256 轮）
+
+用户截图：任务表操作列每行 2~6 颗同权重按钮（执行 / 改计划 / 加载插件 / 暂停 / 采纳建议 / 删除），
+右边缘参差、行高 71 / 82.5 / 118px 三档；状态列「已启用」下面紧贴一个「待加载」，两个药丸只隔 1~2px。
+
+- 根因 ①：动作列是 `ops` 数组按条件 `push` 出来的（2~6 个），`.table .actions` 只有 flex+wrap，
+  按钮宽度随字数走（2 字 47px / 4 字 72px），右对齐换行后每行颗数不同。
+  还有一条更隐蔽的：**换行的 flex 容器 min-content 只等于最宽那颗**，列被挤窄时
+  「执行 / ⋯」会竖向叠，整行从 46 翻到 83px（真机上量到的）。
+- 根因 ②：「待加载」是**插件级**状态，却挂在任务结论旁边；两个 `.pill` 是 td 里的行内兄弟，
+  中间那 1~2px 是行盒剩下的，不是设计值 —— 列一窄就换行，看着像两格数据黏在一起。
+- 修法：行内只留「执行 + ⋯」，其余按语义进 `#task-action` 弹窗三页：
+  **运行**（执行 / 暂停·恢复 / 加载插件（lazy）/ 重置熔断（tripped）/ 删除）、
+  **计划**（cron 编辑器**就地**）、**详情**（`last_error` 全文、`blockers` 列表、预算对比、去日志）。
+  动作一律「先关弹窗再派发」——`refresh()` 会重建整张表，弹窗留着就是对着旧行说话。
+- 「待加载」降级成插件名下的 `mini-sub`「未装载」；状态列的药丸进 `.pill-stack`（显式 6px gap），
+  卡片态（≤720）改横排。
+- 弹窗复用了现成的 `.modal` / `.modal-card` / `.tabs` / `.modal-actions`：
+  `data-close` 委托 + `closeTopModal()` 白送「点关闭 / 点遮罩 / Esc」三个出口。
+  新增只有 `.modal-card.wide`（560px）、`.ta-*` 布局、`.act` 动作行、`.tab-badge` 角标。
+- `#task-schedule` 弹窗整个退役：`openTaskSchedule(t)` → `openTaskPanel(t, tab)`，
+  `#sched-form` / `#sched-sentence` / `#sched-preview` 三个 id 原样搬进计划页，
+  `renderScheduleForm()` 一行没改；只有 `#task-schedule #sched-form{overflow}` 那条改成
+  `.ta-body` 做唯一滚动区（头尾固定，保存永远看得见）。
+- 顺带：任务表给 `cron / budget_ms / next_at` 三列加 min-width。它们被挤到 min-content 时
+  **按词**折行（「5 分 0 秒」折成 4 行、「@every 30s」折成两截），行高被撑到 98px。
+- 数字：操作列 203 → 113px；行高 71 / 82.5 / 118 → 47px（带摘要或未就绪的行 75px）。
+- 守卫：`ui-check` 新增 8 条（行内只有两颗按钮、⋯ 开弹窗、默认运行页、运行页无「保存计划」、
+  计划页就地渲染且 `.modal:not(.hidden)` 只有一个、保存真的写回后端、保存后弹窗自己关、
+  状态列不再出现「待加载」）；原来「改计划的取消 / 遮罩 / Esc」三条改成对着 `#task-action` ——
+  弹窗换了 id 还留着旧断言，就会变成 `null.classList` 直接炸掉整轮（这次踩到了）。
+- 反向例：把 `taskRowActions` 里的 `⋯` 换成直接 `openTaskPanel(t,'plan')`，
+  「默认开在运行页」这条会红；把 `prepareScheduleEdit` 里的 `renderScheduleForm()` 去掉，
+  「计划页就地渲染」这条会红。
+
+### 计划下拉、预算口径、跑过口径（第 257 轮）
+
+用户截图三连：计划页「执行频率」点开是深灰系统菜单；「这个预算是什么」；「这个跑过为啥全是 0」。
+
+- **下拉**：`schedSelect()` 原来返回原生 `<select>` —— 展开态是**系统控件**，跟 `[data-theme]`
+  无关（浅色面板 + 深色系统 = 一块深灰菜单），字体 / 打勾 / 选中态全改不了。桌面改成
+  `makeDropdown`（自绘 listbox，portal 到 body；`.dropdown-menu` 的 z-index 85 > 弹窗 80），
+  **≤720 仍返回原生**（系统滚轮选择器更好用）。闭合态用 `#sched-form .dropdown-btn` 对齐
+  `.modal-input`：32px、`--surface-2` 底、等宽 13px —— 一行七个控件才对得齐。
+  - 坑 1：菜单定位要收边。居中弹窗靠底那几行往下展开会出视口，现在不够高就向上翻、贴右边就左移。
+  - 坑 2：`renderScheduleForm()` 每改一个控件都重建整张表单，菜单挂在 body 上会变孤儿（看得见、
+    点不动）—— `closeOpenDropdown()` 在重画前先收。
+- **预算**：`budget_ms` 是**单次运行**的墙钟上限（默认 300 秒；插件注册时可以给
+  `suggest_budget_ms`）。超了由 `engine.rs` 掐断并把 `stats.budget_kills` +1，错误文本是
+  「CPU 预算耗尽（Nms 墙钟死线）」；它算 error，所以**连续超预算会触发熔断**
+  （`advance()` 里 `consecutive_failures` +1）。列头改成「单次预算」并带 title。
+- **跑过**：原来绑的是 `TaskView.runs` —— 内存计数器，重启归零。用户看到「全是 0」就是这么来的：
+  面板 22:16 重启，而几条任务的下一次都在未来（mgmusic 23:46、daily 次日 08:00…）。
+  现在 `/api/state` 增加 `runs_total`（`runs::totals_by_task`：一条
+  `GROUP BY plugin, task` 聚合），列里显示历史数；「本次启动以来 N 次」放 title 与详情页；
+  `sortBy` 的 getter 也跟着换成历史数（列里显示什么就按什么排）。
+- 守卫：`ui-check` 3 条 —— 「计划下拉：桌面自绘、手机原生」「『预算』列头是『单次预算』并带说明」
+  「『跑过』显示历史次数（不是本进程计数）」；`cargo test` 的
+  `historical_run_totals_are_counted_per_task` 钉住聚合口径。

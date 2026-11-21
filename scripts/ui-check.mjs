@@ -857,6 +857,21 @@ async function main() {
     "return JSON.stringify([...tr.querySelectorAll('.actions button')].map(b=>b.textContent.trim()));})()"));
   check('任务行只有「执行 + ⋯」两个动作', rowBtns.length === 2 && rowBtns[0] === '执行' && rowBtns[1] === '⋯',
     JSON.stringify(rowBtns));
+
+  // 第 257 轮：「预算」列头要说清是**单次运行**的上限（不是额度），并带 title 说明后果
+  const budgetTh = JSON.parse(await js(
+    "(()=>{const th=document.querySelector('#view-tasks th[data-sort=budget_ms]');" +
+    "return JSON.stringify({text:th.textContent.trim(),title:th.title||''});})()"));
+  check('「预算」列头是「单次预算」并带说明', budgetTh.text === '单次预算' && budgetTh.title.includes('掐断'),
+    JSON.stringify(budgetTh));
+
+  // 「跑过」报**历史累计**（runs 表），不是本进程计数 —— 后者重启归零，界面上会「全是 0」。
+  // seed/ok 这个 handler 在脚本开头被真跑了 3 次，历史必然是 ≥3。
+  const runsCellText = await js(
+    "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('ok') && r.textContent.includes('seed'));" +
+    " return tr?tr.children[5].textContent.trim():'NONE';})()");
+  const runsNum = Number((String(runsCellText).match(/\d+/) || ['0'])[0]);
+  check('「跑过」显示历史次数（不是本进程计数）', runsCellText !== 'NONE' && runsNum >= 3, runsCellText);
   // 「插件还没装进内存」是插件级状态，不该和任务结论并排挂在状态列（第 256 轮）
   check('状态列不再挂第二个药丸「待加载」',
     !(await js("document.getElementById('tasks-body').textContent")).includes('待加载'));
@@ -884,8 +899,24 @@ async function main() {
   check('计划页就地渲染 cron 编辑器（没有第二个弹窗）',
     planInfo.form >= 1 && planInfo.saveHidden === false && planInfo.modals.length === 1, JSON.stringify(planInfo));
 
+  // 第 257 轮：下拉不再用原生 <select>（展开态是系统菜单，跟不了主题）——
+  // 桌面自绘 .dropdown，手机上保留原生（系统滚轮选择器更好用）。
+  const ddInfo = JSON.parse(await js(
+    "(()=>{const f=document.getElementById('sched-form');return JSON.stringify({narrow:innerWidth<=720," +
+    "dd:f.querySelectorAll('.dropdown').length,sel:f.querySelectorAll('select').length});})()"));
+  check(
+    '计划页的下拉：桌面自绘、手机原生',
+    ddInfo.narrow ? ddInfo.sel > 0 : ddInfo.dd > 0 && ddInfo.sel === 0,
+    JSON.stringify(ddInfo),
+  );
+
   // 保存：改频率 → 保存 → 弹窗自己关 + 后端真的变了（只看界面会「保存成功但没生效」）
-  await js("(()=>{const s=[...document.querySelectorAll('#sched-form select')][0]; s.value='daily'; s.dispatchEvent(new Event('change',{bubbles:true}));})()");
+  // 第 257 轮起桌面是自绘下拉（手机上仍是原生 select），两种都走通
+  await js("(()=>{const f=document.getElementById('sched-form');const s=f.querySelector('select');" +
+    " if(s){s.value='daily';s.dispatchEvent(new Event('change',{bubbles:true}));return 'native';}" +
+    " f.querySelector('.dropdown-btn').click();return 'custom';})()");
+  await sleep(300);
+  await js("(()=>{const li=document.querySelector('ul.dropdown-menu:not([hidden]) li[data-value=daily]');if(li)li.click();return 1;})()");
   await sleep(250);
   await js("document.getElementById('task-action-save').click()");
   const savedCron = await waitFor(async () => {

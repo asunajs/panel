@@ -7,6 +7,7 @@
 
 use crate::db::Db;
 use crate::log::{Level, LogHub};
+use std::collections::HashMap;
 
 /// 开局：插一行 `status='running'`，返回 run id。
 ///
@@ -20,6 +21,34 @@ pub async fn open(db: &Db, plugin: &str, task: &str, started_ms: i64) -> Result<
         )
         .map_err(|e| format!("建 run 记录失败: {e}"))?;
         Ok(c.last_insert_rowid())
+    })
+    .await
+}
+
+/// 每条任务的**历史**运行次数（runs 表聚合）。
+///
+/// 界面「跑过」这一列要的是它：`TaskView.runs` 只是**本进程内**的计数
+/// （`advance()` 里 +1，重启 / 插件重载就归零），拿它当「总共跑过几次」会全是 0
+/// （第 257 轮用户截图就是这么问的）。一条聚合覆盖所有任务，别逐行去问库。
+pub async fn totals_by_task(db: &Db) -> Result<HashMap<(String, String), u64>, String> {
+    db.call(|c| {
+        let mut stmt = c
+            .prepare("SELECT plugin, task, COUNT(*) FROM runs GROUP BY plugin, task")
+            .map_err(|e| format!("统计运行次数失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                    r.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })
+            .map_err(|e| format!("统计运行次数失败: {e}"))?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (k, n) = row.map_err(|e| format!("统计运行次数失败: {e}"))?;
+            map.insert(k, n);
+        }
+        Ok(map)
     })
     .await
 }

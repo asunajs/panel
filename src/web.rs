@@ -1710,7 +1710,17 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
             }
         }
     }
-    let tasks = st.sched.tasks().await.map_err(internal)?;
+    let mut tasks = st.sched.tasks().await.map_err(internal)?;
+    // 「跑过」= 历史累计（runs 表），不是 TaskView.runs 那个本进程计数 ——
+    // 后者在重启 / 插件重载后归零，界面上会「全是 0」（第 256 轮用户截图）。
+    // 一次聚合覆盖全部任务；查不到就当 0，不该让 /api/state 因此失败。
+    let totals = crate::runs::totals_by_task(&st.db).await.unwrap_or_default();
+    for t in tasks.iter_mut() {
+        t.runs_total = totals
+            .get(&(t.plugin.clone(), t.name.clone()))
+            .copied()
+            .unwrap_or(0);
+    }
     // 排队等执行位的运行（第 227 轮）：界面上的「排队 N」和「临时调用」折叠区靠它
     let pending = st.sched.pending().await.map_err(internal)?;
     // JS 内存要拿各 runtime 的锁：给 2ms 的耐心，插件正忙就跳过它。

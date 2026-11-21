@@ -604,7 +604,11 @@ pub struct TaskView {
     pub ephemeral: bool,
     /// 这次运行**开始**的时刻（毫秒）；没在跑就是 None。界面拿它算「已跑 12:30」。
     pub run_started: Option<i64>,
+    /// **本进程内**的触发次数（重启 / 插件重载归零）。不要拿它当「总共跑过几次」。
     pub runs: u64,
+    /// 历史累计次数（runs 表聚合，重启不清零）。界面「跑过」显示的是它。
+    /// 由 `/api/state` 的组装处填（调度器是单线程 actor，不在里面查库）。
+    pub runs_total: u64,
     pub last_run: Option<i64>,
     pub last_error: Option<String>,
 }
@@ -2531,6 +2535,7 @@ impl Inner {
                 ephemeral: t.ephemeral,
                 run_started: if t.in_flight { t.run_started } else { None },
                 runs: t.runs,
+                runs_total: 0, // 由 /api/state 用 runs 表聚合后填（见 web.rs）
                 last_run: t.last_run,
                 last_error: t.last_error.clone(),
             })

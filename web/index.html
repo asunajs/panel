@@ -193,9 +193,9 @@
                     <th class="sortable" data-sort="plugin">插件</th>
                     <th class="sortable" data-sort="name">任务</th>
                     <th class="sortable" data-sort="cron">计划</th>
-                    <th class="sortable num" data-sort="budget_ms">预算</th>
+                    <th class="sortable num" data-sort="budget_ms" title="单次运行的时间上限（不是额度）。超过就掐断这一次；连续超会熔断。">单次预算</th>
                     <th class="sortable" data-sort="next_at">下次运行</th>
-                    <th class="sortable num" data-sort="runs">跑过</th>
+                    <th class="sortable num" data-sort="runs" title="历史累计（「运行记录」里的条数）；本次启动以来跑了几次写在小字里">跑过</th>
                     <th class="sortable" data-sort="status">状态</th>
                     <th class="right">操作</th>
                   </tr></thead>
