@@ -93,3 +93,34 @@ node scripts/mobile-check.mjs          # 8 个页面（7 面板页 + 插件页�
 node scripts/mobile-check.mjs --shots  # 顺便落图到 ../.shots/mobile/
 node scripts/ui-check.mjs              # 252 条，其中 5 条是移动端（字号/触屏/日志/插件页溢出/表格卡片）
 ```
+
+## 七、无头走查（真实插件）
+
+`mobile-check.mjs` 用种子插件跑门禁；`mobile-walk.mjs` 拿**实例里真实的插件**跑一遍
+「人真的会怎么用」，每一步截图 + 测量：
+
+```bash
+node scripts/mobile-walk.mjs                        # 用 ~/panel-3030/plugins
+node scripts/mobile-walk.mjs --plugins <dir>        # 指定插件目录
+node scripts/mobile-walk.mjs --shots <dir>          # 截图落哪（默认 ../.shots/mobile-live）
+```
+
+它走的路（都是真点击，不是只测量）：
+
+1. 七个面板页各截一张；
+2. **任务弹窗全流程**：点行尾 `⋯` → 运行页 → 切「计划」→ 切「详情」→ 关掉；
+   途中检查「手机上计划表单的下拉是原生 `<select>`（不是自绘）」；
+3. **键盘弹出**：视口压到 544 高，确认「保存计划」还在视口内；
+4. **日志页**：点等级筛选（error）+ 在搜索框打字，确认结果跟着变；
+5. **每个有界面的插件**各导航到 `/plugins/<name>/` 截一张 + 测量。
+
+第 263 轮它抓到的三个问题（都是 seed 插件测不出来的）：
+
+| 页面 | 问题 | 修法 |
+|---|---|---|
+| 任务弹窗「运行」页 | 动作按钮 38px（13px 字 + 8px 内边距） | `.act { min-height: 40px }` |
+| 日志页（搜索后） | 搜索框清空 ✕ 只有 22×22 | 手机上 36×40（占满输入框高） |
+| 插件 mgmusic | 步进 −/＋ 38px；`.hint` 里长路径溢出 10px | `.stepper` 多给 2px（边框）；`.hint` 加 `overflow-wrap: anywhere` |
+
+**假阳性提醒**：`.sr-only`（给屏幕阅读器的隐藏文字）的 `scrollWidth` 必然远大于
+`clientWidth`（width:1px + clip），测量时必须排除 —— 第一版把它当「字压到隔壁」报了一屏。
