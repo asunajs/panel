@@ -3096,6 +3096,11 @@ async fn query_params_that_are_typoed_are_rejected() {
     let (status, out) = get(&app, "/api/logs?level=INFO").await;
     assert_eq!(status, StatusCode::OK, "{out}");
 
+    // debug 是第四个档（第 255 轮）：空闲卸载那类生命周期流水走它。
+    // 白名单漏掉它 = 界面上点「debug」直接 400（看着像「没有这类日志」的反面：报错）。
+    let (status, out) = get(&app, "/api/logs?level=DEBUG").await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+
     // `sort` 仍是「白名单外的值落回 id，并在响应里回显实际生效的键」（防注入 + 让人看得见）
     let (status, out) = get(&app, "/api/runs?sort=bogus").await;
     assert_eq!(status, StatusCode::OK, "{out}");

@@ -910,3 +910,21 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 **守卫**：`ui-check.mjs` 的「保存按钮默认就叫「保存」」与「勾上后按钮改叫「保存并重载」」；
 后面那条保存用例用 `b.click()` 而不是 `b.checked = true` —— 赋值不触发 change，会把这条断言测成假绿。
 
+
+## 201. 「正常但没人想逐条看」的东西要标 debug，不是 info（第 255 轮）
+
+用户截图：日志里同一个插件「空闲已卸载（省内存；到点前会自动装回来）」一天刷好几遍，
+全是 info —— 真正的任务日志被挤到后面去翻。这类生命周期流水（卸载 / 装回来）回答的是
+「为什么它现在不在内存里」，排查时要点开才看，平时不该占 info 的位置。
+
+**判据**：一条日志该不该是 info，看「用户读日志时想不想看见它」——
+想看结果（签到完了吗、票换了吗）＝ info 及以上；只是过程（装了 / 卸了 / 轮询了一次）＝ debug。
+面板原来只有 info / warn / error 三档，于是过程日志只能挤进 info；现在补了 `debug`
+（枚举、`?level=` 白名单、日志页段控都到位，`.level-debug` 样式本来就为插件的 debug 行准备好了）。
+
+**注意**：`全部` 仍然包含 debug（只是灰色小标）。这不是遗漏 —— 「全部」不能撒谎；
+嫌吵就点 info / warn / error 任一级别（那是精确匹配）。
+
+**守卫**：`check-pitfalls.sh` ㉔ 扫 `src/scheduler.rs` 那两条 `emit` 必须是 `Level::Debug`；
+`web_tests` 的 `query_params_that_are_typoed_are_rejected` 顺带钉住 `?level=DEBUG` 是 200（白名单漏了就是 400）。
+

@@ -228,8 +228,8 @@ btn.disabled = true; btn.label = '登录中…';   // <p-button> 改字用 .labe
 （`docs/review-20261115.md` 的 C3，用户原话「隔天翻日志不知道哪天」），
 做这个控件时又只写了时分秒、被指了第二次。毫秒留着：一轮任务同一秒会打好几行。
 
-插件侧只用 `el.addLine(level, ts, text)` 就能塞自己的行（`level` 支持
-`info/warn/error` 之外的面板没定义的 `debug/start/success/fail`，面板日志里以
+插件侧只用 `el.addLine(level, ts, text)` 就能塞自己的行（`level` 认面板定义的
+`debug/info/warn/error`，之外还有 `start/success/fail` 这类插件自己的档 —— 面板日志里以
 `[fail] ` 这种前缀带出来，控件会还原并着色）。
 
 ⚠ 不要在插件里自己写一套终端：mcloud 先写过一份（终端 + 筛选 + 重连 + 环形缓冲），

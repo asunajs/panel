@@ -3078,10 +3078,10 @@ async fn api_logs(
     let level = match p.level.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
         None => None,
         Some(s) if s.is_empty() => None,
-        Some(s) if matches!(s.as_str(), "info" | "warn" | "error") => Some(s),
+        Some(s) if matches!(s.as_str(), "debug" | "info" | "warn" | "error") => Some(s),
         Some(other) => {
             return Err(bad(format!(
-                "level 只认 info / warn / error，收到 {other:?}"
+                "level 只认 debug / info / warn / error，收到 {other:?}"
             )))
         }
     };

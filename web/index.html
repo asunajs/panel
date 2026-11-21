@@ -248,6 +248,9 @@
                 <div class="toolbar">
                   <div class="seg" role="group" aria-label="日志级别">
                     <button class="seg-item" type="button" data-level="" aria-pressed="true">全部</button>
+                    <!-- debug（第 255 轮）：空闲卸载 / 装回来了这类生命周期流水。默认在「全部」里
+                         看得见（只是变灰），嫌吵就点 info / warn / error 任一级别。 -->
+                    <button class="seg-item" type="button" data-level="debug" aria-pressed="false">debug</button>
                     <button class="seg-item" type="button" data-level="info" aria-pressed="false">info</button>
                     <button class="seg-item" type="button" data-level="warn" aria-pressed="false">warn</button>
                     <button class="seg-item" type="button" data-level="error" aria-pressed="false">error</button>

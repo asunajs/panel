@@ -541,6 +541,13 @@ async function main() {
   check('日志页有「来源」这一排（全部/面板/插件/脚本/HTTP）',
     JSON.stringify(srcBtns) === JSON.stringify(['', 'panel', 'plugin', 'script', 'http']),
     JSON.stringify(srcBtns));
+  // 级别段控的第四档 debug（第 255 轮）：空闲卸载 / 装回来降到 debug 之后，用户得能单独看它。
+  const lvBtns = JSON.parse(await js(
+    "JSON.stringify([...document.querySelectorAll('.seg-item[data-level]')].map(b=>b.dataset.level))"
+  ));
+  check('日志页级别段控有 debug 档（全部/debug/info/warn/error）',
+    JSON.stringify(lvBtns) === JSON.stringify(['', 'debug', 'info', 'warn', 'error']),
+    JSON.stringify(lvBtns));
   await js("(()=>{const b=[...document.querySelectorAll('.seg-item[data-source]')].find(x=>x.dataset.source==='http');b.click();return 1;})()");
   await sleep(1200);
   const srcState = JSON.parse(await js(

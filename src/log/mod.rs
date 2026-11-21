@@ -14,9 +14,12 @@ use crate::db::Db;
 
 pub use redact::prepare_msg;
 
+/// 日志级别。四个档，**debug 是「正常但没人想逐条看」的那些**（第 255 轮）：
+/// 空闲卸载 / 装回来了这类生命周期流水，以前一律 info，把真正的任务日志挤得没处站。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
+    Debug,
     Info,
     Warn,
     Error,
@@ -25,6 +28,7 @@ pub enum Level {
 impl Level {
     pub fn as_str(self) -> &'static str {
         match self {
+            Level::Debug => "debug",
             Level::Info => "info",
             Level::Warn => "warn",
             Level::Error => "error",

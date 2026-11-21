@@ -319,6 +319,24 @@ else
   bad "扫描快照缺一处调用：main.rs seed=${seed_call:-0} / scheduler.rs note=${note_call:-0} —— 没加载过的老插件会被报成「新增」"
 fi
 
+# ㉔ 空闲卸载 / 按需装回是 debug 级（第 255 轮）
+#
+# 事故：用户截图——同一个插件「空闲已卸载」一天刷好几遍、全是 info，把真正的任务日志挤到后面。
+# 判据：这两条 emit 的级别必须是 Level::Debug。退回 Info 当场红（它们成对出现，一条 = 两条噪音）。
+life_ok=1
+# 认的是 emit 的**消息行**（format! 开头），不是随便一句提到这件事的注释/别的日志。
+for pat in 'format!("插件 {name} 空闲已卸载' 'format!("插件 {name} 不在内存里'; do
+  ln=$(grep -nF "$pat" src/scheduler.rs 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -z "$ln" ] || ! sed -n "$((ln-6)),$((ln))p" src/scheduler.rs | grep -q 'Level::Debug'; then
+    life_ok=0
+  fi
+done
+if [ "$life_ok" = "1" ]; then
+  ok '空闲卸载 / 按需装回 是 debug 级（不挤 info）'
+else
+  bad '空闲卸载 / 按需装回 的 emit 必须用 Level::Debug（回到 Info 会把任务日志挤走）'
+fi
+
 if [ "$FAIL" = "0" ]; then
   echo "ok: 坑的守卫全过"
 else

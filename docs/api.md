@@ -44,7 +44,7 @@ POST /api/plugins  {"name":"z2","src":"x"}
 
 | 传入 | 以前 | 现在 |
 |---|---|---|
-| `?level=warnn` | 200，`{logs:[], total:0}` —— 像「真的没有 warn 日志」 | **400** `level 只认 info / warn / error，收到 "warnn"` |
+| `?level=warnn` | 200，`{logs:[], total:0}` —— 像「真的没有 warn 日志」 | **400** `level 只认 debug / info / warn / error，收到 "warnn"` |
 | `?level=INFO` | 200，空（大小写敏感） | 200，按 info 处理（大小写不该成为坑） |
 | `?dir=ascending` | 静默当 desc（顺序反了还以为生效） | **400** `dir 只认 asc 或 desc` |
 | `?limt=10` / `?lvl=warn` / `?plgin=q` | 静默忽略，用默认值 | **400** `查询参数有问题：… unknown field \`limt\`, expected one of …` |

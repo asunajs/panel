@@ -1718,10 +1718,11 @@ impl Inner {
                                 self.waking.insert(name.clone());
                                 let (tx, _rx) = oneshot::channel();
                         self.spawn_load(name.clone(), None, false, tx);
+                                // 同上：这是「空闲已卸载」的另一半，成对出现，一进一出一条太吵。
                                 self.log.emit(
                                     &name,
                                     None,
-                                    Level::Info,
+                                    Level::Debug,
                                     format!("插件 {name} 不在内存里，按需装回来"),
                                 );
                     }
@@ -3244,10 +3245,12 @@ impl Inner {
             self.plugins.remove(&name);
             self.unloaded.insert(name.clone(), now);
             n += 1;
+            // debug（第 255 轮）：用户看到的就是「同一句话一天刷好几遍」，而它回答的是
+            // 「为什么现在没装」—— 排查时要点开 debug 才看，平时别占 info 的地。
             self.log.emit(
                 &name,
                 None,
-                Level::Info,
+                Level::Debug,
                 format!("插件 {name} 空闲已卸载（省内存；到点前会自动装回来）"),
             );
         }
