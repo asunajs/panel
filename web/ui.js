@@ -1548,8 +1548,8 @@
     if (!node) return;
     node.textContent = text === undefined || text === null ? '' : String(text);
     node.classList.remove('hint-err', 'hint-warn');
-    if (kind === 'error') node.classList.add('hint-err');
-    else if (kind === 'warn') node.classList.add('hint-warn');
+    if (kind === 'error' || kind === 'err') node.classList.add('hint-err');
+    else if (kind === 'warn' || kind === 'warning') node.classList.add('hint-warn');
   };
 
   /** HTML 转义：拼 innerHTML 时把用户数据过一遍（四个插件里只有 mcloud 自己写了一份）。 */
