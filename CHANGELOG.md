@@ -6,6 +6,28 @@
 版本号按 semver：**0.x 期间 minor 变化可能带行为调整**，patch 只修 bug。
 
 ---
+## 未发布
+
+### 插件界面公用胶水收进面板：`PanelUI.mask / fmtTime / fmtLogTime / hint / busy`（第 246 轮）
+
+四个插件的 webui 各自实现过一遍这几个东西（掩码、时间格式、提示行、忙碌按钮），
+同一件事四份代码、口径还各不相同。现在收在面板一处：
+
+```js
+PanelUI.mask('13800138000', 3, 4)   // → 138****8000（空串/短串原样返回）
+PanelUI.fmtLogTime(Date.now())      // → 11-21 09:05:07（带月日，隔天看得出）
+PanelUI.hint(el, '正在发码…', 'warn')  // 清空时传 '' 即去色
+PanelUI.busy(btn, true, '正在保存…')  // 再调 busy(btn,false) 还原原文案
+```
+
+- 只加不改：老的 `theme / setTheme / version / confirm / prompt` 都在；
+- `PanelUI.version` 以前写死 `'0.4.0'`（早过期），改成读 `<meta name="panel-version">`，没有就 `'unknown'` ——
+  特性判断请用「有没有这个成员」，别比版本号；
+- `ui-kit-check` 新增 4 条（掩码形状、带日期时间、提示上色/去色、忙碌态还原），共 64 条全过。
+
+插件要删掉自己的那份，得等这一版发出去（插件 `min_panel` 跟着提）。
+
+---
 ## 0.7.0（2026-11-20）
 
 插件界面那一批（发码格 / 确认框 / 实时日志 / 弹窗表单）＋ 调度队列与一次性调用。

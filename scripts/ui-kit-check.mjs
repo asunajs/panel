@@ -500,6 +500,45 @@ async function main() {
     "(()=>{const f=document.getElementById('k-form');return JSON.stringify(f.values());})()"
   );
   check('p-form 收集到字段值（含 number 与开关）', JSON.parse(form).name === 'demo' && JSON.parse(form).n === 3 && JSON.parse(form).on === true, form);
+
+  // ── p-log 去重 / 保序（2026-11-21 现场：插件页日志「时间倒流」、两个号看着像并发）──
+  //
+  // 实时广播的帧**没有 id**（LogLine 里就没这个字段），补发批次才有；两者会重叠，
+  // 而且补发可能晚于实时到达。直接 append 就会「旧行落在新行后面」。
+  // 这里直接喂 _ingest 模拟四种到达：正常两行 / 重复 id / 无 id 的实时帧 + 带 id 的同一条 / 迟到的旧行。
+  const logRows = JSON.parse(await js(`(async () => {
+    const el = document.createElement('p-log');
+    el.setAttribute('plugin', '__ui_kit_no_such_plugin__');
+    el.setAttribute('lines', '50');
+    document.body.append(el);
+    await new Promise((r) => setTimeout(r, 50));
+    const feed = (row) => el._ingest(row);
+    feed({ id: 1, ts: 1000, level: 'info', message: 'A' });
+    feed({ id: 2, ts: 2000, level: 'info', message: 'B' });
+    feed({ id: 2, ts: 2000, level: 'info', message: 'B' });
+    feed({ ts: 3000, level: 'info', message: 'C' });
+    feed({ id: 3, ts: 3000, level: 'info', message: 'C' });
+    feed({ id: 4, ts: 1500, level: 'info', message: 'D' });
+    return JSON.stringify([...el._body.querySelectorAll('.term-line')].map((x) => ({
+      ts: Number(x.dataset.ts), id: x.dataset.id || '', text: x.querySelector('.term-msg').textContent,
+    })));
+  })()`));
+  const logTs = logRows.map((r) => r.ts);
+  check('p-log 重复 id 只画一次（4 行）', logRows.length === 4, JSON.stringify(logRows));
+  check('p-log 迟到的旧行归位、屏上时间不倒流', logTs.join(',') === '1000,1500,2000,3000', logTs.join(','));
+  check('p-log 实时帧补上 id 后不再重复画', (logRows.find((r) => r.text === 'C') || {}).id === '3', JSON.stringify(logRows));
+  // ── PanelUI 的纯函数（第 246 轮：把四个插件各自重复实现的胶水收到面板）──
+  const masks = await js(`[PanelUI.mask('13800138000',3,4), PanelUI.mask(''), PanelUI.mask('123456',3,4)]`);
+  check('PanelUI.mask：留头尾、空串不炸、短串原样', masks[0] === '138****8000' && masks[1] === '' && masks[2] === '123456', JSON.stringify(masks));
+
+  const times = await js(`[PanelUI.fmtTime(0), PanelUI.fmtLogTime(0), PanelUI.fmtLogTime(new Date(2026,10,21,9,5,7).getTime())]`);
+  check('PanelUI.fmtLogTime 带月日（隔天能看出是哪天）', times[0] === '—' && times[1] === '—' && times[2] === '11-21 09:05:07', JSON.stringify(times));
+
+  const hintRes = await js(`(function(){var el=document.createElement('p');el.className='hint';document.body.appendChild(el);PanelUI.hint(el,'正在发码…','warn');var a=el.textContent+'|'+el.className;PanelUI.hint(el,'','');return a+'|'+el.textContent+'|'+el.className;})()`);
+  check('PanelUI.hint：写文案 + warn 上色、清空去色', hintRes === '正在发码…|hint hint-warn||hint', String(hintRes));
+
+  const busyRes = await js(`(function(){var b=document.createElement('button');b.textContent='保存';document.body.appendChild(b);PanelUI.busy(b,true,'正在保存…');var a=[b.disabled,b.textContent].join('|');PanelUI.busy(b,false);return a+'|'+b.textContent+'|'+b.disabled;})()`);
+  check('PanelUI.busy：禁用 + 换文案，恢复时还原', busyRes === 'true|正在保存…|保存|false', String(busyRes));
 }
 
 main()

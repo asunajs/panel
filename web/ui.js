@@ -1110,6 +1110,9 @@
       this._lastId = 0;
       this._es = null;
       this._retry = 1000;
+      // 去重与保序用（见 _ingest）：id 见过的丢掉；没有 id 的实时帧按内容认亲。
+      this._seenIds = new Set();
+      this._twins = new Map();
 
       const box = build(this, 'term');
       const bar = document.createElement('div');
@@ -1189,14 +1192,16 @@
      *  ⚠ 名字**不能叫 `append`**：那是 `Element.prototype.append`，覆盖掉之后
      *  `build()` 里的 `host.append(box)` 会被当成"画一行日志"，整个控件就渲染成空壳
      *  （`children=0` 但 `_body` 又是有的 —— 第 197 轮自己踩过）。 */
-    addLine(lv, ts, text) {
+    addLine(lv, ts, text, id, before) {
       const body = this._body;
-      if (!body) return;
+      if (!body) return null;
       const emptyEl = body.querySelector('.term-empty');
       if (emptyEl) emptyEl.remove();
       const line = document.createElement('span');
       line.className = 'term-line term-line-' + lv;
       line.dataset.lv = lv;
+      line.dataset.ts = String(ts);
+      if (id !== undefined && id !== null) line.dataset.id = String(id);
       const t = document.createElement('span');
       t.className = 'term-ts';
       t.textContent = termStamp(ts) + ' ';
@@ -1207,7 +1212,9 @@
       msg.className = 'term-msg';
       msg.textContent = String(text === undefined || text === null ? '' : text);
       line.append(t, l, msg);
-      body.appendChild(line);
+      // `before` 非空 ⇒ 插在它后面（补发批次晚到时按 ts 归位，而不是硬追加到末尾）
+      if (before && before.parentElement === body) body.insertBefore(line, before.nextSibling);
+      else body.appendChild(line);
       this._lines += 1;
       if (this._passes(lv)) this._shown += 1;
       while (this._lines > this._max && body.firstElementChild) {
@@ -1219,6 +1226,7 @@
       if (!this._passes(lv)) line.style.display = 'none';
       this._setMeta('');
       if (this._follow && this._follow.checked) body.scrollTop = body.scrollHeight;
+      return line;
     }
 
     /** 改级别后重画：屏上已有的行按新门槛显示/隐藏（不清屏，也不重连）。 */
@@ -1248,6 +1256,64 @@
       this._setMeta('');
     }
 
+    /**
+     * 收一行：**去重 + 保序**，然后才画。
+     *
+     * 为什么需要它（2026-11-21 现场：插件页日志「时间倒流」、两个号看起来在并发）：
+     *   · 实时广播的帧**没有 id**（`LogLine` 结构里就没有这个字段），补发/历史批次才有；
+     *   · 服务端 `since` 补发与实时广播**会重叠**（`api_logs_stream` 的注释原话：
+     *     「重复由前端按 id 去重」），而补发批次可能**晚于**实时帧到达；
+     *   · 直接 append ⇒ 旧行落在新行后面：屏上时间倒流，两个账号的行交错，
+     *     看着像「同一个号时间乱 / 两个号并发」。
+     *
+     * 所以：id 见过的丢掉；没有 id 的帧按 (ts|level|text) 认亲；
+     * ts 比已画的最后一行还早 ⇒ 插到它该在的位置，不硬追加。
+     */
+    _ingest(row) {
+      const body = this._body;
+      if (!body || row === null || typeof row !== 'object') return false;
+      const id = typeof row.id === 'number' ? row.id : null;
+      const ts = Number(row.ts) || Date.now();
+      let lv = typeof row.level === 'string' && row.level ? row.level : 'info';
+      let text = String(row.message === undefined || row.message === null ? '' : row.message);
+      // 插件自己的语义级别以 `[debug] `/`[fail] ` 前缀带出来（面板只有 info/warn/error 三档）
+      const m = /^\[(debug|start|ok|fail|fatal|success)\]\s*/.exec(text);
+      if (m) {
+        lv = m[1] === 'ok' ? 'success' : m[1] === 'fatal' ? 'error' : m[1];
+        text = text.slice(m[0].length);
+      }
+      const key = ts + '|' + lv + '|' + text;
+      if (id !== null) {
+        if (this._seenIds.has(id)) return false; // 补发批次里已经画过
+        this._seenIds.add(id);
+        if (this._seenIds.size > 800) this._seenIds.delete(this._seenIds.values().next().value);
+        if (id > this._lastId) this._lastId = id;
+        const twin = this._twins.get(key);
+        if (twin) {
+          // 同一条：实时帧先画了（没有 id），这一帧只是把 id 补上，别再画一遍
+          twin.dataset.id = String(id);
+          this._twins.delete(key);
+          return false;
+        }
+      } else if (this._twins.has(key)) {
+        return false; // 内容一模一样，别再画一遍
+      }
+
+      // 归位：从尾部往前找第一个 ts 不大于它的行，插在它后面。
+      let anchor = null;
+      for (let el = body.lastElementChild; el; el = el.previousElementSibling) {
+        if (!el.classList || !el.classList.contains('term-line')) continue;
+        if (Number(el.dataset.ts) <= ts) { anchor = el; break; }
+      }
+      const line = this.addLine(lv, ts, text, id, anchor);
+      if (!line) return false;
+      if (id === null) {
+        this._twins.set(key, line);
+        if (this._twins.size > 200) this._twins.delete(this._twins.keys().next().value);
+      }
+      return true;
+    }
+
     /** 先铺历史（`GET /api/logs?plugin=…&limit=…`），再连实时流。
      *
      *  只铺一次：打开页面时看到「刚才那段」是基本预期 —— 不然用户点开插件页，
@@ -1270,10 +1336,8 @@
       // 实时流可能抢在前面画了行（历史这一枪要绕一圈网络）——那就别再铺，
       // 否则旧行会盖在新行后面，屏上时间倒流。
       if (this._lines > 0) return;
-      for (const row of rows.slice().reverse()) {
-        if (typeof row.id === 'number' && row.id > this._lastId) this._lastId = row.id;
-        this.addLine(row.level || 'info', row.ts, row.message);
-      }
+      // 走 _ingest：历史行同样要过一遍去重/保序（它和实时帧会重叠）
+      for (const row of rows.slice().reverse()) this._ingest(row);
     }
 
     /** 连面板的日志流。断线自己重连（**带 `since`**，把断线那段补回来）。 */
@@ -1290,16 +1354,7 @@
         try { d = JSON.parse(ev.data); } catch { return; }
         if (d === null || typeof d !== 'object') return;
         if (this._plugin && d.plugin && d.plugin !== this._plugin) return;
-        if (typeof d.id === 'number' && d.id > this._lastId) this._lastId = d.id;
-        let lv = typeof d.level === 'string' && d.level ? d.level : 'info';
-        let text = String(d.message === undefined || d.message === null ? '' : d.message);
-        // 插件自己的语义级别以 `[debug] `/`[fail] ` 前缀带出来（面板只有 info/warn/error 三档）
-        const m = /^\[(debug|start|ok|fail|fatal|success)\]\s*/.exec(text);
-        if (m) {
-          lv = m[1] === 'ok' ? 'success' : m[1] === 'fatal' ? 'error' : m[1];
-          text = text.slice(m[0].length);
-        }
-        this.addLine(lv, d.ts, text);
+        this._ingest(d);
       };
       // 面板在广播追不上时会推一帧具名事件 `lagged`（`{skipped}`）：这一段日志**真的没了**，
       // 明说一句比让用户以为"任务没输出"好。无名帧收不到它，得单独挂。
@@ -1462,12 +1517,73 @@
     });
   }
 
+  // ── 给插件页的纯函数（不碰网络、不碰布局）────────────────────────────
+  //  这四个东西四个插件的 webui 各实现过一遍：掩码、时间格式、提示行、忙碌按钮。
+  //  收在面板一处，插件调用即可；口径要改只改这里（第 246 轮）。
+  const pMask = (v, head = 3, tail = 4) => {
+    const s = v === undefined || v === null ? '' : String(v);
+    if (s === '' || s.length <= head + tail) return s;
+    return s.slice(0, head) + '***' + s.slice(-tail);
+  };
+
+  const pPad = (n) => String(n).padStart(2, '0');
+
+  /** 只有时分秒（页头、表格里够用）。 */
+  const pFmtTime = (ms) => {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    return pPad(d.getHours()) + ':' + pPad(d.getMinutes()) + ':' + pPad(d.getSeconds());
+  };
+
+  /** 带日期（日志 / 运行记录）：只显示时分秒的话，隔天翻记录看不出是哪天。 */
+  const pFmtLogTime = (ms) => {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    return pPad(d.getMonth() + 1) + '-' + pPad(d.getDate()) + ' ' + pFmtTime(ms);
+  };
+
+  /** 提示行：空串清空；kind = 'error' | 'warn' 切颜色（类在 /app.css：.hint-err / .hint-warn）。 */
+  const pHint = (el, text, kind) => {
+    const node = typeof el === 'string' ? document.getElementById(el) : el;
+    if (!node) return;
+    node.textContent = text === undefined || text === null ? '' : String(text);
+    node.classList.remove('hint-err', 'hint-warn');
+    if (kind === 'error') node.classList.add('hint-err');
+    else if (kind === 'warn') node.classList.add('hint-warn');
+  };
+
+  /** 忙碌态：禁按钮 + 换文案，恢复时还原原文案。`<p-button>` 走它的 label/disabled。 */
+  const pBusy = (btn, on, label) => {
+    if (!btn) return;
+    const isP = btn.tagName === 'P-BUTTON';
+    const read = () => (isP ? btn.label : btn.textContent) || '';
+    const write = (t) => { if (isP) btn.label = t; else btn.textContent = t; };
+    if (on) {
+      if (btn.dataset.busyText === undefined) btn.dataset.busyText = read();
+      btn.disabled = true;
+      write(label || '处理中…');
+    } else {
+      btn.disabled = false;
+      if (btn.dataset.busyText !== undefined) {
+        write(btn.dataset.busyText);
+        delete btn.dataset.busyText;
+      }
+    }
+  };
+
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
     theme: () => document.documentElement.getAttribute('data-theme') || 'light',
     setTheme,
-    version: '0.4.0',
+    // 别再用版本号做特性判断（这里以前写死 '0.4.0'，早过期了）；要判断就用「有没有这个成员」。
+    version: (document.querySelector('meta[name="panel-version"]') || {}).content || 'unknown',
     confirm: pConfirm,
     prompt: pPrompt,
+    // 纯函数：四个插件各自重复实现过的那几个
+    mask: pMask,
+    fmtTime: pFmtTime,
+    fmtLogTime: pFmtLogTime,
+    hint: pHint,
+    busy: pBusy,
   };
 })();
