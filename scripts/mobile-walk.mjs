@@ -23,6 +23,11 @@ const arg = (name, dflt) => {
   return i > 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
 };
 const PLUGINS = arg('plugins', path.join(homedir(), 'panel-3030', 'plugins'));
+// 有账号 / 有配置的现场才能看到「真实布局」：把实例的 plugin-data 复制一份过来（只读副本），
+// 页面读得到账号、写只落在临时目录 —— 不碰真实例。
+const DATA_SRC = arg('data', '');
+// 手机上也会是深色主题（系统跟随）。--theme dark 在页面加载前把主题写进 localStorage。
+const THEME = arg('theme', '');
 const SHOT_DIR = path.resolve(arg('shots', path.join(ROOT, '..', '.shots', 'mobile-live')));
 const BROWSERS = [
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
@@ -40,6 +45,12 @@ async function waitFor(fn, ms, label) {
 
 const dir = mkdtempSync(path.join(tmpdir(), 'walk-'));
 mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+if (DATA_SRC && existsSync(DATA_SRC)) {
+  // 只复制 plugin-data（config.json / auth.json 是实例级的，不带过来 → 面板无需令牌）
+  const { cpSync } = await import('node:fs');
+  cpSync(path.join(DATA_SRC, 'plugin-data'), path.join(dir, 'plugin-data'), { recursive: true });
+  console.log('已复制现场数据：' + path.join(DATA_SRC, 'plugin-data'));
+}
 mkdirSync(SHOT_DIR, { recursive: true });
 
 let panel = null, browser = null, ws = null;
@@ -121,10 +132,21 @@ async function main() {
   await send('Page.enable'); await send('Runtime.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  // 主题必须在**第一次导航之前**写进 localStorage：theme-boot.js 在 <head> 里同步跑，
+  // 只认 localStorage.panel-llrt-theme。先开 about:blank 写一次，再导航。
+  if (THEME) {
+    await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/error.html' }).catch(() => {});
+    await sleep(600);
+    await js("localStorage.setItem('panel-llrt-theme','" + THEME + "')").catch(() => {});
+  }
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/' });
   await sleep(2000);
   await js("document.getElementById('fu-skip') && document.getElementById('fu-skip').click()");
   await sleep(500);
+  if (THEME) {
+    const t = await js('document.documentElement.dataset.theme');
+    console.log('主题：' + t + (t === THEME ? ' ✓' : ' ✗（期望 ' + THEME + '）'));
+  }
 
   // ---------------------------------------------------------------- 面板七页
   for (const v of ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'settings']) {

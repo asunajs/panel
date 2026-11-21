@@ -1058,6 +1058,12 @@ html input[type="checkbox"]:not(.check-raw):disabled {
     color: var(--dim); font-size: 11.5px;
   }
   .table tbody td:empty { display: none; }
+  /* 卡片态：一格里的「值 + 摘要」要能换行。td 是 flex，默认 nowrap ——
+     任务名旁边的 mini-sub（set_job_summary 那行）会把任务名挤成竖排两个字
+     （「兑/换」「日/常」，第 263 轮深色手机截图里看到的）。摘要独占一行，
+     任务名就能整行显示。 */
+  .table tbody td { flex-wrap: wrap; }
+  .table tbody td .mini-sub { flex: 1 1 100%; }
   /* 整行类的格子：空态/「加载更多」（colspan）和操作按钮（.right）要横跨两列，
      否则它们只会占左半边，看着像被裁掉。 */
   .table tbody td[colspan], .table tbody td.right { grid-column: 1 / -1; }
