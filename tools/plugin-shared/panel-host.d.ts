@@ -116,6 +116,8 @@ declare module 'panel:host' {
      *  `log` / `info` 都指向同一个 op_info（见 src/hostapi.rs 的 ops()），没有 level 参数。 */
     log(msg: string, extra?: unknown): Promise<void> | void;
     info(msg: string, extra?: unknown): Promise<void> | void;
+    /** 第四级日志（0.8.2 起）：空闲卸载之类不该挤占 info 的噪声走它。 */
+    debug(msg: string, extra?: unknown): Promise<void> | void;
     warn(msg: string, extra?: unknown): Promise<void> | void;
     error(msg: string, extra?: unknown): Promise<void> | void;
 
@@ -143,6 +145,7 @@ declare module 'panel:host' {
 
   export const log: Host['log'];
   export const info: Host['info'];
+  export const debug: Host['debug'];
   export const warn: Host['warn'];
   export const error: Host['error'];
   export const notify: Host['notify'];
