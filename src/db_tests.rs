@@ -91,3 +91,59 @@ async fn plugin_surface_flags_never_go_back_to_zero() {
     let got = plugin_surfaces(&db).await;
     assert_eq!(got.get("crononly"), Some(&(false, false)));
 }
+
+/// 老库（0.3.x 的库直接指过来、或者更早的 0.4 快照）的 `runs` 表没有 `status` 列。
+/// 不补的话「清理旧记录」和运行记录页全线报 `no such column: status`（用户 2026-11-22 报）。
+/// 这里造一张老形状的表（多一个 `ok` 列），核对：列补上了、值按 `ok` 回填、retention 的 SQL 能跑。
+#[test]
+fn an_old_runs_table_gets_the_status_column_backfilled_from_ok() {
+    let dir = std::env::temp_dir().join(format!("panel-oldruns-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("panel.db");
+    let _ = std::fs::remove_file(&path);
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE runs (id INTEGER PRIMARY KEY, plugin TEXT NOT NULL, task TEXT NOT NULL, \
+             started_at INTEGER NOT NULL, ended_at INTEGER, ok INTEGER NOT NULL DEFAULT 1, error TEXT);\
+             INSERT INTO runs(plugin,task,started_at,ok) VALUES((\'p\'),(\'t\'),1,1),((\'p\'),(\'t\'),2,0);",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let (cols, rows) = rt
+        .block_on(db.call(|c| {
+            let mut st = c.prepare("PRAGMA table_info(runs)").map_err(|e| e.to_string())?;
+            let cols: Vec<String> = st
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            let mut st2 = c.prepare("SELECT status FROM runs ORDER BY id").map_err(|e| e.to_string())?;
+            let rows: Vec<String> = st2
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            Ok((cols, rows))
+        }))
+        .unwrap();
+    assert!(
+        cols.iter().any(|c| c == "status"),
+        "老 runs 表要补上 status 列: {cols:?}"
+    );
+    assert_eq!(
+        rows,
+        vec!["ok".to_string(), "error".to_string()],
+        "status 要按老库的 ok 列回填，不能一律算成功"
+    );
+    // retention 那条 DELETE 用的是 status：补完列就该跑得通。
+    rt.block_on(db.call(|c| {
+        c.execute("DELETE FROM runs WHERE status <> (\'running\')", [])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }))
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

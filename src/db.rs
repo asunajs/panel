@@ -252,6 +252,47 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
                 .map_err(|e| format!("加 {col} 失败: {e}"))?;
         }
     }
+
+    // `runs` 的三列：0.4 的 runs 一行先以 `status='running'` 落库、跑完回填 `ended_at`/`error`。
+    // 老库（0.3.x 的库直接指过来，或者更早的 0.4 快照）没有 `status` —— 不补的话不光
+    // 「清理旧记录」报 `no such column: status`，**凡是查 runs 的地方全炸**（运行记录页、
+    // 上次运行、retention 每一拍）。用户 2026-11-22 报的就是这个。
+    let runs_patched = if !has_column(conn, "runs", "status")? {
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("加 runs.status 失败: {e}"))?;
+        true
+    } else {
+        false
+    };
+    for (col, ddl) in [
+        ("ended_at", "ALTER TABLE runs ADD COLUMN ended_at INTEGER"),
+        ("error", "ALTER TABLE runs ADD COLUMN error TEXT"),
+    ] {
+        if !has_column(conn, "runs", col)? {
+            conn.execute(ddl, [])
+                .map_err(|e| format!("加 runs.{col} 失败: {e}"))?;
+        }
+    }
+    if runs_patched {
+        // 老库如果有 `ok` 列（0.3.x 就是这样记结果的），按它回填；没有就当成功 ——
+        // 老记录里没留下失败原因的，编不出来也不该瞎猜。
+        let sql = if has_column(conn, "runs", "ok")? {
+            "UPDATE runs SET status = CASE WHEN ifnull(ok, 1) <> 0 THEN 'ok' ELSE 'error' END \
+             WHERE status = ''"
+        } else {
+            "UPDATE runs SET status = 'ok' WHERE status = ''"
+        };
+        conn.execute(sql, [])
+            .map_err(|e| format!("回填 runs.status 失败: {e}"))?;
+        // 说清楚：这是老形状的库，能跑但建议搬一份干净的。
+        eprintln!(
+            "⚠ 这个数据库是 0.3.x 形状的（runs 表没有 status 列，已自动补上并回填）。\n\
+             这次能跑，但建议用 `panel migrate` 把它搬成 0.4 的形状再用，别直接指着老目录。"
+        );
+    }
     Ok(())
 }
 

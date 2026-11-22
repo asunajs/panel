@@ -951,3 +951,22 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 **守卫**：`check-pitfalls.sh` ㉔ 扫 `src/scheduler.rs` 那两条 `emit` 必须是 `Level::Debug`；
 `web_tests` 的 `query_params_that_are_typoed_are_rejected` 顺带钉住 `?level=DEBUG` 是 200（白名单漏了就是 400）。
 
+
+123. **老库的 `runs` 表没有 `status` 列：清理和运行记录页全线报错**（第 266 轮，用户 2026-11-22 报
+    「retention 清理旧记录报 SQL 错误：no such column: status」，同一人先前还报过「面板启动失败」）：
+
+    ```
+    清理 runs 失败: no such column: status in DELETE FROM runs WHERE status <> running ...
+    ```
+
+    后加的列一直在 `db.rs` 的 `ensure_columns` 里按表逐列补（plugins/notify_outbox/scripts/logs/tasks），
+    **`runs` 从来没进过那张清单** —— 因为 0.4 建表语句里一直有 `status`。可一旦把**0.3.x 的库**
+    直接指过来（`PANEL_DATA_DIR` 指着老目录，而不是走 `panel migrate`），`CREATE TABLE IF NOT EXISTS`
+    什么都不做，老表就一直是老形状，于是「凡是查 runs 的地方」全炸：运行记录页、上次运行、retention。
+
+    修法：`runs` 也进 ensure-columns（`status` / `ended_at` / `error`），并且**按老库的 `ok` 列回填**
+    `status`（0/1 → error/ok）—— 一律填 ok 会把历史上的失败洗成成功。补列时 eprintln 一句
+    「这是 0.3.x 形状的库，建议用 panel migrate 搬一份」。
+
+    守卫：`db::tests::an_old_runs_table_gets_the_status_column_backfilled_from_ok` —— 造一张带 `ok` 的
+    老 runs 表，断言列补上、值回填成 ["ok","error"]、retention 那条 DELETE 能跑通。
