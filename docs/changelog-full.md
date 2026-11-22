@@ -8,7 +8,24 @@
 
 ---
 
-## 未发布
+## 0.8.1（2026-11-22）
+
+### 插件拿不到数据目录（第 265 轮，用户报 cmcc）
+
+用户点「获取验证码」收到「发码失败：插件没有响应」，运行日志反复 warn「拿不到 PANEL_DATA_DIR
+—— 只能读 self_config()，账号改动将无法落盘」。
+
+插件和面板**同一个进程**，插件的 `process.env` 就是面板的环境。面板允许不设 `PANEL_DATA_DIR`
+（默认 `data`，相对 cwd），但插件无从知道这个默认值 —— 按 0.3.x 契约读环境变量的插件拿到
+`undefined`：配置路径抛错 → 账号落不了盘 → 登录时的异常又被 HTTP 层包成 502「插件没有响应」。
+
+修法：`main.rs` 的 `resolve_dir()` 把 `PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR`
+解析成绝对路径并 `set_var` 回填进进程环境；`host.plugin_data_dir()` 顺带从相对变绝对。
+脚本目录那段「用户到底设没设」的判断改用 `scripts_from_env`（回填后不能再靠环境变量判断）。
+
+实测（探针插件，面板不设 `PANEL_DATA_DIR` 启动）：修前 `undefined` / `data/plugin-data/p`（相对）；
+修后 `/private/tmp/envprobe3.…/data` / 同根绝对路径。守卫 `dir_env_tests::resolve_dir_*`。
+细节见 [pitfalls.md](pitfalls.md) 第 122 条。
 
 ### 深色手机 + 真实数据：又抓两个形状（第 263 轮续）
 
