@@ -454,8 +454,9 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
             None,
             level,
             format!(
-                "{method} {path}{} → {} {}{}",
+                "{method} {path}{}{} → {} {}{}",
                 ip.map(|ip| format!(" ← {ip}")).unwrap_or_default(),
+                ua_tag(&req_for_ip.0),
                 status.as_u16(),
                 d.0,
                 match merged.unwrap_or(0) {
@@ -1441,6 +1442,22 @@ fn http_repeat_allow(key: &str) -> Option<u32> {
             Some(0)
         }
     }
+}
+
+/// 日志里的「谁在打」：UA 前 32 个字符。
+///
+/// 只看来源 IP 分不出「浏览器」和「本机脚本」—— 127.0.0.1 既可能是用户自己的页签，
+/// 也可能是 curl / node 探针 / 另一个会话在跑检查（用户 2026-11-22 问「这些到底哪来的」）。
+/// UA 一眼就能分开：`Mozilla/5.0 …` vs `curl/8.x` vs `node`。
+fn ua_tag(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let t: String = s.chars().take(32).collect();
+            format!(" ua={}", t.replace(char::is_whitespace, " "))
+        })
+        .unwrap_or_else(|| " ua=-".to_string())
 }
 
 fn http_log_allowed() -> bool {

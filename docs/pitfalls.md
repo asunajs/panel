@@ -985,3 +985,10 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 
     守卫：web::router_tests::the_same_http_error_from_the_same_source_is_logged_once
     （同键第二次返回 None；换路径、换来源各记一条）。
+
+
+    另外给每条 HTTP 失败行加了 ua=（UA 前 32 字符）：光看来源 IP 分不出「用户自己的页签」
+    和「本机脚本 / 探针」（127.0.0.1 两者都是），UA 一眼就分开 —— 实测同一实例两种请求：
+
+        GET /api/health ← 127.0.0.1 ua=Mozilla/5.0 (Macintosh; Intel Ma → 401 ...
+        POST /api/plugins/cmcc/reload ← 127.0.0.1 ua=curl/8.7.1 → 401 ...
