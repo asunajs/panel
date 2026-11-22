@@ -698,7 +698,7 @@ plugins/mcloud.panel.json    ← 清单（可选；没有就用文件名 / 字�
 |---|---|
 | title / icon / order | 界面上的名字、图标、排序（没有就按文件名与字典序） |
 | version | 插件自己的版本（semver 文本）。面板原样透传到 `/api/state`、`/api/plugins/files`，外部货架 / 商店据此判断已装哪一版、有没有新版 |
-| min_panel | **硬挡**：面板版本不够就不加载，并在「加载失败」里说明要哪个版本 |
+| min_panel | **硬挡**：面板版本不够就不加载，并在「加载失败」里说明要哪个版本。**别凭印象写** —— 用了哪些面板能力、各自从哪版才有，跑 `node scripts/check-plugin-compat.mjs` 对一遍（写低了跑不起来，写高了白写兼容，见 contract R7） |
 | on_panel_open | 面板前端**每次打开**时 POST 一次的插件路由（例如 `api/updates`）。按「插件 + 路径」记账，等该插件首次出现在状态里才发（冷启动插件加载慢也不会漏）；失败最多重试 2 次，之后只记控制台。没有 webui 的按需加载插件也会被这次调用装回内存 |
 | capabilities | 声明用到的能力（现在的面板不据此限权，只是给人看） |
 | config.fields | 配置表单：type 属于 text / password / number / bool / select / textarea |

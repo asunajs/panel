@@ -34,6 +34,7 @@ run "check-css-tokens"  python3 scripts/check-css-tokens.py
 run "check-plugin-style" node scripts/check-plugin-style.mjs
 run "check-phone-leak"  node tools/plugin-shared/check-phone-leak.mjs
 run "check-plugin-shared" node scripts/check-plugin-shared.mjs
+run "check-plugin-compat" node scripts/check-plugin-compat.mjs
 run "check-web-build"  bash scripts/check-web-build.sh
 
 if [ "$MODE" = "fast" ]; then
