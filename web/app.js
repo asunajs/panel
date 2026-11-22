@@ -6529,8 +6529,10 @@ function render() {
 async function act(path, okMsg, body) {
   try {
     // body 可选：采纳建议要 POST {"expr": null}，而大多数动作不带 body
-    await api(path, body === undefined ? { method: 'POST' } : { method: 'POST', body });
-    notify(okMsg);
+    const d = await api(path, body === undefined ? { method: 'POST' } : { method: 'POST', body });
+    // 「本来就没在跑」不是错误，但也别报「已停止」—— 面板现在回 stopped:false + 说明
+    // （第 266 轮：用户点一次「停止」就吃一条 400 + WARN，而其实什么都没在跑）。
+    notify(d && d.stopped === false ? d.note || '当时没有在跑的任务' : okMsg);
     await refresh();
     if (state.view === 'runs') await loadRuns();
   } catch (e) {

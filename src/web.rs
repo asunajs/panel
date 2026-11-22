@@ -2598,8 +2598,14 @@ async fn plugin_stop(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    st.sched.stop(&name).await.map_err(bad)?;
-    Ok(Json(json!({ "ok": true })))
+    let stopped = st.sched.stop(&name).await.map_err(bad)?;
+    // 本来就没在跑 → 200 + stopped:false + 人话说明。以前回 400，日志里吃一条 WARN，
+    // 界面上还弹个红条（用户 2026-11-22 报）。
+    Ok(Json(json!({
+        "ok": true,
+        "stopped": stopped,
+        "note": if stopped { "" } else { "当前没有在跑的任务（不用停）" },
+    })))
 }
 
 /// 「要用这个插件了」——不在内存就装回来（第 188 轮）。

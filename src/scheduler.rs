@@ -774,7 +774,8 @@ pub enum Cmd {
     /// 停这个插件**当前在途的那一次** invocation。纯 Rust 置位，不碰 JS 锁。
     Stop {
         plugin: String,
-        reply: oneshot::Sender<Result<(), String>>,
+        /// `Ok(true)` = 真停掉了一条在跑的；`Ok(false)` = 本来就没在跑（不是错误）。
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     SetEnabled {
         plugin: String,
@@ -1050,7 +1051,7 @@ impl Scheduler {
         self.call(|reply| Cmd::Pending { reply }).await
     }
 
-    pub async fn stop(&self, plugin: &str) -> Result<(), String> {
+    pub async fn stop(&self, plugin: &str) -> Result<bool, String> {
         let plugin = plugin.to_string();
         self.call(|reply| Cmd::Stop { plugin, reply }).await?
     }
@@ -2245,13 +2246,15 @@ impl Inner {
             }
             Cmd::Stop { plugin, reply } => {
                 // 只停这个插件自己的在途 invocation。基线 R1 High 就是停 A 打断了 B。
+                // 「本来就没在跑」不是错误（用户 2026-11-22 报：点一次停止就吃一条 400 + WARN）。
+                // 只有「插件根本没加载」才算对不上 —— 那说明用户看到的界面和后台状态不一致。
                 let out = match self.plugins.get(&plugin) {
                     None => Err(format!("插件未加载: {plugin}")),
-                    Some(l) if !l.busy => Err(format!("{plugin} 当前没有在跑的任务")),
+                    Some(l) if !l.busy => Ok(false),
                     Some(l) => {
                         // 人点的停止：和重载/卸载区分开，落库的说法不一样。
                         l.plugin.invocation().stop_by_hand();
-                        Ok(())
+                        Ok(true)
                     }
                 };
                 let _ = reply.send(out);
