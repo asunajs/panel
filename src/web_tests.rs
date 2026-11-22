@@ -5014,3 +5014,23 @@ async fn plugin_config_does_not_reload_unless_asked() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["skipped"], json!(false), "显式要求才重载");
 }
+
+/// 用户 2026-11-22 报「日志流接口反复 401 弹警告」：一台没登进来的设备每几秒重连一次 SSE，
+/// 每次都 401，面板日志被同一行刷满。同一个「来源 + 路径 + 状态码」在窗口内只记一条。
+#[test]
+fn the_same_http_error_from_the_same_source_is_logged_once() {
+    let k = "GET /api/logs/stream 401 10.0.0.9";
+    assert_eq!(http_repeat_allow(k), Some(0), "第一次要记");
+    assert_eq!(http_repeat_allow(k), None, "60 秒内的重复要吞掉");
+    assert_eq!(http_repeat_allow(k), None);
+    assert_eq!(
+        http_repeat_allow("GET /api/state 401 10.0.0.9"),
+        Some(0),
+        "不同路径各记一条"
+    );
+    assert_eq!(
+        http_repeat_allow("GET /api/logs/stream 401 10.0.0.10"),
+        Some(0),
+        "不同来源各记一条"
+    );
+}

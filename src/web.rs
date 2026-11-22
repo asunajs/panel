@@ -420,7 +420,17 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         // 配额只管**日志**，不管页面（第 190 轮）：原来是超额就 return res，
         // 于是扫描器刷完之后，正常用户浏览器点开 404 拿到的是一坨 JSON ——
         // 配额的本意是「别把日志冲掉」，不该改用户看到的东西。
-        if http_log_allowed() {
+        // 同一来源、同一条错误在 60 秒内只记一条：未登入的设备会**持续**重连 SSE
+        // （`/api/logs/stream` 每次 401），一条一条记就是刷屏（用户 2026-11-22 报的就是这个）。
+        // 合并掉的条数补在第一次恢复的那条里，证据不丢。
+        let ip = client_ip(&req_for_ip.0, req_for_ip.1.as_ref());
+        let repeat_key = format!(
+            "{method} {path} {} {}",
+            status.as_u16(),
+            ip.map(|x| x.to_string()).unwrap_or_default()
+        );
+        let merged = http_repeat_allow(&repeat_key);
+        if merged.is_some() && http_log_allowed() {
         // 502 里有一类不是「面板坏了」，而是「插件正忙 / 没在预算内响应」——
         // 慢插件在页面上反复重试时，一屏红字 error 会让人以为面板出故障，也把真正的
         // error 淹掉（第 192 轮）。所以这两类降成 warn。
@@ -444,12 +454,14 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
             None,
             level,
             format!(
-                "{method} {path}{} → {} {}",
-                client_ip(&req_for_ip.0, req_for_ip.1.as_ref())
-                    .map(|ip| format!(" ← {ip}"))
-                    .unwrap_or_default(),
+                "{method} {path}{} → {} {}{}",
+                ip.map(|ip| format!(" ← {ip}")).unwrap_or_default(),
                 status.as_u16(),
-                d.0
+                d.0,
+                match merged.unwrap_or(0) {
+                    0 => String::new(),
+                    n => format!("（同来源同类错误 60 秒内另有 {n} 条已合并）"),
+                }
             ),
         );
         for part in d.0.split_whitespace() {
@@ -1394,6 +1406,43 @@ fn presented_token(h: &HeaderMap) -> Option<String> {
 ///
 /// 用「一分钟窗口 + 计数」而不是令牌桶：这里要的是「一屏之内不被刷爆」，
 /// 精确平滑没有意义，简单到不会出错更重要。
+/// 同一来源、同一条错误在窗口内只记一条（第 266 轮，用户报「日志流 401 反复刷 WARN」）。
+///
+/// 现场：一台**没登进来**的设备（手机 / 另一个浏览器）每几秒重连一次 SSE，每次都 401，
+/// 面板日志被同一行刷满，真告警反而看不见。这不是「面板出故障」，是同一件事重复了 N 次。
+///
+/// 返回 `Some(上一窗口里被合并掉的条数)` = 这次该记；`None` = 这次吞掉。
+fn http_repeat_allow(key: &str) -> Option<u32> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+    static SEEN: OnceLock<Mutex<HashMap<String, (std::time::Instant, u32)>>> = OnceLock::new();
+    let m = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = match m.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let now = std::time::Instant::now();
+    if g.len() > 512 {
+        g.retain(|_, (first, _)| now.duration_since(*first) < WINDOW);
+    }
+    match g.get_mut(key) {
+        Some(e) if now.duration_since(e.0) < WINDOW => {
+            e.1 = e.1.saturating_add(1);
+            None
+        }
+        Some(e) => {
+            let merged = e.1;
+            *e = (now, 0);
+            Some(merged)
+        }
+        None => {
+            g.insert(key.to_string(), (now, 0));
+            Some(0)
+        }
+    }
+}
+
 fn http_log_allowed() -> bool {
     let limit = crate::config::limits().http_per_min;
     if limit == 0 {

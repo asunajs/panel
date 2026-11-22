@@ -970,3 +970,18 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 
     守卫：`db::tests::an_old_runs_table_gets_the_status_column_backfilled_from_ok` —— 造一张带 `ok` 的
     老 runs 表，断言列补上、值回填成 ["ok","error"]、retention 那条 DELETE 能跑通。
+
+124. **未登入的设备把日志流刷成 WARN 墙**（第 266 轮，用户 2026-11-22 报「日志流接口反复 401 弹警告」）：
+
+    GET /api/logs/stream ← 192.168.4.43 → 401 code=unauthorized detail=需要令牌…
+
+    一台**没登进来**的设备（手机 / 另一个浏览器）会持续重连 SSE，每次都 401。面板原本每一条 4xx
+    都记一条 warn（只有每分钟总量配额 log.http_per_min），于是同一行刷满日志 —— 真正的告警被淹。
+
+    修法：**同一来源 + 同一路径 + 同一状态码，60 秒内只记一条**，被合并的条数补在恢复后的第一条里
+    （「（同来源同类错误 60 秒内另有 N 条已合并）」）。配额管的是「总量」，这条管的是「同一件事重放」。
+
+    实测：临时实例连打 5 次不带令牌的 /api/logs/stream → 5 个 401，日志里**只有 1 条**。
+
+    守卫：web::router_tests::the_same_http_error_from_the_same_source_is_logged_once
+    （同键第二次返回 None；换路径、换来源各记一条）。
