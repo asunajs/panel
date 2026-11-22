@@ -920,3 +920,34 @@ actor 的 `select!` 不保证跨通道顺序：暂停先到、注册后到，`ap
 
 配套插件版本（都声明 `min_panel: 0.7.0`）：yangshipin **0.3.0**（首个发布版）、
 mcloud **0.6.0**、mgmusic **0.7.0**；cmcc 暂不发布（工作树里已有改动，等下一批）。
+
+## 0.8.1 发版（2026-11-22，第 265 轮）
+
+起因：用户报 cmcc 插件「点获取验证码 → 发码失败：插件没有响应」，日志反复 warn「拿不到
+PANEL_DATA_DIR —— 只能读 self_config()，账号改动将无法落盘」。
+
+根因：插件和面板同一个进程，插件的 `process.env` 就是面板的环境；面板允许不设
+`PANEL_DATA_DIR`（默认 `data`，相对 cwd），插件却不知道这个默认值 → 配置路径抛错 → 落盘失败
+→ 登录异常又被 HTTP 层包成 502「插件没有响应」。
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.8.1`（`~/panel-3030/panel version` → `panel 0.8.1（panel-llrt）`） |
+| 提交 / tag | `a68244b` / `v0.8.1` |
+| 单测 | `cargo test --offline` → **543 passed**（含新增 `dir_env_tests` 2 条） |
+| 静态 | `check-docs` 37 篇 / `check-pitfalls` / `check-unsafe-budget` 全过 |
+| 部署 | `~/panel-3030`：`readyz` → `plugins:7 tasks:5 failed_plugins:0`；插件目录指纹未变 |
+
+| CI | `Release` run 44972254393 → **success（7m29s）**，四件资产 + `SHA256SUMS` 齐全 |
+| Release | <https://github.com/asunajs/panel/releases/tag/v0.8.1>（说明用 `CHANGELOG.md` 的 0.8.1 段） |
+| 更新检查 | 临时实例 `/api/update/check?force=1` → `{current:"0.8.1", latest:"v0.8.1", has_update:false}`，assets 4 |
+
+### 端到端实测（探针插件，面板**不设** `PANEL_DATA_DIR` 启动）
+
+| | 修前 | 修后 |
+|---|---|---|
+| `process.env.PANEL_DATA_DIR` | `undefined` | `/private/tmp/envprobe3.…/data` |
+| `host.plugin_data_dir()` | `data/plugin-data/p`（相对，随 cwd 漂） | `/private/tmp/envprobe3.…/data/plugin-data/p` |
+
+❓ 未验：真机「获取验证码」这条链路（会真发短信）。修复只证明「导致 502 的异常源没了」，
+短信下发要报障人复测。
