@@ -44,6 +44,10 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 `await host.plugin_dir()`（目录式插件 = `plugins/<name>/`；单文件插件 = `null`）与
 `await host.plugin_data_dir()`（`<data>/plugin-data/<name>/`，配置就在那）。
 
+三个目录变量（`PANEL_DATA_DIR` / `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR`）在启动时会被解析成
+**绝对路径并回填进进程环境**，所以插件用 `process.env.PANEL_DATA_DIR` 也读得到（0.3.x 时代的老
+写法照旧能用）；面板没设这些变量时按默认 `data` / `plugins` / `scripts` 展开 —— 见 pitfalls 第 122 条。
+
 导出的函数一共 15 个：`readFileSync` `writeFileSync` `readdirSync` `statSync` `lstatSync`
 `mkdirSync` `renameSync` `rmSync` `rmdirSync` `chmodSync` `accessSync` `mkdtempSync`
 `symlinkSync` `constants` `promises`。**没有 `existsSync`**（实测 `typeof === 'undefined'`），

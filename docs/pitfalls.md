@@ -925,6 +925,29 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 **注意**：`全部` 仍然包含 debug（只是灰色小标）。这不是遗漏 —— 「全部」不能撒谎；
 嫌吵就点 info / warn / error 任一级别（那是精确匹配）。
 
+122. **插件读 `process.env.PANEL_DATA_DIR` 拿到 `undefined`，账号存不下来**（第 265 轮，用户 2026-11-22
+    报 cmcc：「点获取验证码 → 发码失败：插件没有响应」，运行日志反复 warn「拿不到 PANEL_DATA_DIR —
+    只能读 self_config()，账号改动将无法落盘」）：
+
+    插件和面板跑在**同一个进程**里，`process.env` 看到的就是面板自己的环境。面板允许不设
+    `PANEL_DATA_DIR`（默认 `data`，相对 cwd）—— 可**插件无从知道这个默认值**，于是按 0.3.x
+    契约读环境变量的插件（cmcc 就是这样）拿到 `undefined`：配置路径抛错 → 落盘失败 → 登录时
+    异常又被 HTTP 层包成 502「插件没有响应」。
+
+    修法（面板侧，一处治所有插件）：`main.rs` 的 `resolve_dir()` 把三个目录**解析成绝对路径**
+    再 `set_var` 回填进进程环境。插件用什么值由面板决定，且不受 cwd 影响。
+    同一个坑还带出第二个问题：`host.plugin_data_dir()` 以前在没设环境变量时返回**相对路径**
+    （`data/plugin-data/<name>`），插件拼出来的路径跟着 cwd 漂 —— 回填之后自动变成绝对。
+
+    实测（探针插件，面板**不设** `PANEL_DATA_DIR` 启动）：
+
+    | | 修前 | 修后 |
+    |---|---|---|
+    | `process.env.PANEL_DATA_DIR` | `undefined` | `/private/tmp/envprobe3.…/data` |
+    | `host.plugin_data_dir()` | `data/plugin-data/p`（相对） | `/private/tmp/envprobe3.…/data/plugin-data/p` |
+
+    守卫：`dir_env_tests::resolve_dir_publishes_an_absolute_path` / `…_expands_a_relative_override`。
+
 **守卫**：`check-pitfalls.sh` ㉔ 扫 `src/scheduler.rs` 那两条 `emit` 必须是 `Level::Debug`；
 `web_tests` 的 `query_params_that_are_typoed_are_rejected` 顺带钉住 `?level=DEBUG` 是 200（白名单漏了就是 400）。
 

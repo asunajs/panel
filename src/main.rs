@@ -63,6 +63,61 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// 相对路径按 cwd 展开成绝对路径。
+fn abs_path(p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        return p;
+    }
+    match std::env::current_dir() {
+        Ok(c) => c.join(p),
+        Err(_) => p,
+    }
+}
+
+/// 目录类环境变量的统一入口：解析成**绝对路径**，并**回填进进程环境**。
+///
+/// 为什么要回填：插件和面板跑在**同一个进程**里，插件的 `process.env` 看到的就是面板的
+/// 环境。面板允许不设这些变量（默认 `data` / `plugins` / `scripts`，相对 cwd），但插件
+/// 无从知道这个默认值 —— 按 0.3.x 契约读 `process.env.PANEL_DATA_DIR` 的插件就会
+/// 「拿不到数据目录、账号改动无法落盘」，登录时抛异常还变成 HTTP 502「插件没有响应」
+/// （用户 2026-11-22 报的 cmcc 就是这条）。回填之后：面板用什么值，插件读到的就是什么值，
+/// 而且一定是绝对路径，不随 cwd 漂。
+fn resolve_dir(key: &str, default: &str) -> PathBuf {
+    let p = abs_path(PathBuf::from(env_or(key, default)));
+    std::env::set_var(key, &p);
+    p
+}
+
+#[cfg(test)]
+mod dir_env_tests {
+    use super::*;
+
+    /// 回填必须给**绝对**路径：相对路径会随 cwd 漂，插件拼出来的配置路径就对不上。
+    /// 用独立的名字，别碰真目录变量（测试并行跑，改全局环境会互相干扰）。
+    #[test]
+    fn resolve_dir_publishes_an_absolute_path() {
+        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
+        let p = resolve_dir("PANEL_TEST_DIR_PUBLISH", "data");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert_eq!(
+            std::env::var("PANEL_TEST_DIR_PUBLISH").unwrap_or_default(),
+            p.display().to_string(),
+            "解析出来的值要回填进环境，插件才读得到"
+        );
+        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
+    }
+
+    /// 显式设了相对路径的人也希望拿到绝对路径（插件那边同样按绝对路径用）。
+    #[test]
+    fn resolve_dir_expands_a_relative_override() {
+        std::env::set_var("PANEL_TEST_DIR_REL", "some/dir");
+        let p = resolve_dir("PANEL_TEST_DIR_REL", "data");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with("some/dir"), "{}", p.display());
+        std::env::remove_var("PANEL_TEST_DIR_REL");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), String> {
     // 子命令：开机自启动的安装/卸载/查看。它不启动面板，所以放在最前面。
@@ -90,8 +145,9 @@ async fn main() -> Result<(), String> {
 
     // 先起计时器：仪表盘的「运行时长」从这里开始算。
     stats::stats();
-    let data_dir = PathBuf::from(env_or("PANEL_DATA_DIR", "data"));
-    let plugins_dir = PathBuf::from(env_or("PANEL_PLUGINS_DIR", "plugins"));
+    // 三个目录一律解析成绝对路径并回填进环境：插件靠 `process.env` 找它们（见 resolve_dir）。
+    let data_dir = resolve_dir("PANEL_DATA_DIR", "data");
+    let plugins_dir = resolve_dir("PANEL_PLUGINS_DIR", "plugins");
     // 插件目录不存在不是错误（新实例、或者还没装过插件），但必须**建出来**：
     // 否则 /api/plugins/files 每次读目录都 ENOENT，界面每几秒刷一次就刷一屏 400
     // （第 205 轮：两个残留实例指向被删掉的 /tmp 目录，日志里全是
@@ -172,10 +228,14 @@ async fn main() -> Result<(), String> {
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
     // 默认放 data/scripts（用户内容归 data，与 plugin-data 同理）—— 实例根下的
     // scripts/ 是 deploy-daily 同步仓里门禁脚本的地方，两边不该混。
+    let scripts_from_env = std::env::var_os("PANEL_SCRIPTS_DIR").is_some();
     let scripts_dir = match std::env::var_os("PANEL_SCRIPTS_DIR") {
-        Some(v) => PathBuf::from(v),
+        Some(v) => abs_path(PathBuf::from(v)),
         None => data_dir.join("scripts"),
     };
+    // 回填（相对路径已展开）；下面的「旧 scripts/ 搬迁」要用「用户到底设没设」来判断，
+    // 所以那个判断改用 scripts_from_env，不能再看环境变量。
+    std::env::set_var("PANEL_SCRIPTS_DIR", &scripts_dir);
     std::fs::create_dir_all(&scripts_dir)
         .map_err(|e| format!("建脚本目录失败 {}: {e}", scripts_dir.display()))?;
     let scripts = scripts::Scripts::new(
@@ -194,7 +254,7 @@ async fn main() -> Result<(), String> {
     }
     // 存量迁移第二步：旧默认目录（相对 cwd 的 scripts/，2026-11-14 前）里登记过的脚本搬进新家。
     // 显式设了 PANEL_SCRIPTS_DIR 的人自己负责路径，不做隐式搬迁。
-    if std::env::var_os("PANEL_SCRIPTS_DIR").is_none() {
+    if !scripts_from_env {
         match scripts.migrate_from_legacy(&PathBuf::from("scripts")).await {
             Ok(n) if n > 0 => log.emit(
                 "panel",
