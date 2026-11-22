@@ -529,7 +529,7 @@ async function main() {
   check('p-log 实时帧补上 id 后不再重复画', (logRows.find((r) => r.text === 'C') || {}).id === '3', JSON.stringify(logRows));
   // ── PanelUI 的纯函数（第 246 轮：把四个插件各自重复实现的胶水收到面板）──
   const masks = await js(`[PanelUI.mask('13800138000',3,4), PanelUI.mask(''), PanelUI.mask('123456',3,4)]`);
-  check('PanelUI.mask：留头尾、空串不炸、短串原样', masks[0] === '138****8000' && masks[1] === '' && masks[2] === '123456', JSON.stringify(masks));
+  check('PanelUI.mask：留头尾、空串不炸、短串原样', masks[0] === '138***8000' && masks[1] === '' && masks[2] === '123456', JSON.stringify(masks));
 
   const escRes = await js(`[PanelUI.esc('<a href="x">&'), PanelUI.esc(null)]`);
   check('PanelUI.esc：尖括号/引号/& 都转、null 不炸', escRes[0] === '&lt;a href=&quot;x&quot;&gt;&amp;' && escRes[1] === '', JSON.stringify(escRes));

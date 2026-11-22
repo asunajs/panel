@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::db::Db;
-use crate::hostapi::{HostHandle, Registration};
+use crate::hostapi::{HostHandle, OP_NAMES, Registration};
 use crate::log::LogHub;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -99,6 +99,34 @@ async fn load_errors_carry_the_real_message() {
     let err = p.err().expect("应当加载失败");
     // Error::Exception 本身不带消息，必须从 ctx.catch() 里捞
     assert!(err.contains("加载期炸了"), "错误信息不可读: {err}");
+}
+
+/// OP_NAMES 的每一项都必须以 function 落到插件侧——default 与具名两条路都要。
+/// WRAP 是手写的对象字面量：ops() 加了 op 而 WRAP 漏了，会**静默**导出 undefined
+/// （0.8.2 的 debug 正是漏在这，546 条旧测试无一报警）。清单从 OP_NAMES 生成：
+/// 以后再往 ops() 加 op、忘改 WRAP，会被这条对账拦下。
+#[tokio::test]
+async fn every_host_op_is_a_function_on_both_export_paths() {
+    let named = OP_NAMES.join(", ");
+    let list = OP_NAMES
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named_checks = OP_NAMES
+        .iter()
+        .map(|n| format!("if (typeof {n} !== 'function') miss.push('{n}');"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let src = format!(
+        "import H, {{ {named} }} from 'panel:host';\n\
+         const OPS = [{list}];\n\
+         for (const n of OPS) if (typeof H[n] !== 'function') throw new Error('default 导出缺 op：' + n);\n\
+         const miss = [];\n\
+         {named_checks}\n\
+         if (miss.length) throw new Error('具名导出缺 op：' + miss.join(','));"
+    );
+    ok(&src).await;
 }
 
 /// PANEL PATCH 的回归：上游 `llrt_process::init` 用 `env::vars()`，任意非 UTF-8 的

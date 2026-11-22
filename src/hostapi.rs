@@ -120,7 +120,7 @@ pub struct HostModule;
 const WRAP: &str = r#"(raw) => {
   const j = (v) => (v === undefined ? undefined : JSON.stringify(v));
   return {
-    log: raw.log, info: raw.info, warn: raw.warn, error: raw.error,
+    log: raw.log, debug: raw.debug, info: raw.info, warn: raw.warn, error: raw.error,
     // 通知：标题/正文都是纯文本，别走 JSON.stringify（那会多一对引号）。
     notify: async (title, body, opts) => raw.notify(String(title), body === undefined ? undefined : String(body),
       opts == null ? undefined : JSON.stringify(opts)),
@@ -162,8 +162,9 @@ const WRAP: &str = r#"(raw) => {
   };
 }"#;
 
-const OP_NAMES: [&str; 32] = [
+pub(crate) const OP_NAMES: [&str; 33] = [
     "log",
+    "debug",
     "info",
     "warn",
     "error",
@@ -323,6 +324,10 @@ fn ops<'js>(ctx: &Ctx<'js>) -> Result<Vec<(&'static str, Value<'js>)>> {
         ("info", Func::from(Async(op_info)).into_js(ctx)?),
         ("warn", Func::from(Async(op_warn)).into_js(ctx)?),
         ("error", Func::from(Async(op_error)).into_js(ctx)?),
+        // debug：第四级日志（面板侧 0.8.0 起就有，空闲卸载那类走它）。照常落库、可查：
+        // API 的 level 白名单（docs/api.md）与界面 debug 档都在。插件用它记「内部流程」，
+        // 比如「票不认，换一张重试」—— 那不是用户的问题，不该占 info。
+        ("debug", Func::from(Async(op_debug)).into_js(ctx)?),
         ("notify", Func::from(Async(op_notify)).into_js(ctx)?),
         ("sleep", Func::from(Async(op_sleep)).into_js(ctx)?),
         ("config", Func::from(Async(op_config)).into_js(ctx)?),
@@ -391,6 +396,9 @@ async fn op_warn(ctx: Ctx<'_>, msg: String) -> Result<()> {
 }
 async fn op_error(ctx: Ctx<'_>, msg: String) -> Result<()> {
     emit(&ctx, Level::Error, msg)
+}
+async fn op_debug(ctx: Ctx<'_>, msg: String) -> Result<()> {
+    emit(&ctx, Level::Debug, msg)
 }
 
 /// 插件主动发一条通知：进面板的通知列表，配了 webhook 的话也发出去。

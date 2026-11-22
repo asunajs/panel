@@ -951,3 +951,20 @@ PANEL_DATA_DIR —— 只能读 self_config()，账号改动将无法落盘」�
 
 ❓ 未验：真机「获取验证码」这条链路（会真发短信）。修复只证明「导致 502 的异常源没了」，
 短信下发要报障人复测。
+
+## 0.8.2 发版（2026-11-22）
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.8.2`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` 验过） |
+| 门禁 | cargo test / clippy / docs / pitfalls / css-tokens / plugin-style / plugin-shared / phone-leak / web-build 全过；ui-check **252**、ui-kit-check **67**、mobile-check **8 页**、端到端 7 条全过 |
+| 本轮新增 | `host.debug` 第四级日志 op（`OP_NAMES` 32 → 33，WRAP 补 `debug`）；装插件过版本闸门；插件 `min_panel` 双向体检 |
+| 配套插件 | cmcc **0.1.1**（`min_panel: 0.8.2`，只支持抓包导入票据/模板） |
+
+### 发版时踩到的两件事
+
+1. **ui-check / ui-kit-check 报「等不到面板起来」**：不是代码问题，是**上一个跑挂的 `target/release/panel`
+   还占着 8790**（9:45 那次失败留下的）。杀掉之后两条各自全过。→ 门禁脚本起面板前应该先探端口，
+   见 [pitfalls.md](pitfalls.md) 待补。
+2. **`PanelUI.mask` 的星号数**：实现是**固定 3 个**（`'***'`），文档示例里曾写成 4 个
+   （`138****8000`）。以实现为准，示例统一回 3 个；`ui-kit-check` 的断言也跟着钉住。

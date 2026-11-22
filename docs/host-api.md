@@ -25,7 +25,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 
 | 组 | op |
 |---|---|
-| 日志 | `log` / `info` / `warn` / `error` |
+| 日志 | `log` / `debug` / `info` / `warn` / `error`（debug 0.8.2 起：记「正常但没人想逐条看」的内部流程；照常落库，界面/查询单独 debug 档） |
 | DB | `sqlite_query` / `sqlite_exec` |
 | 网络 | `fetch` |
 | 时间 | `sleep` |
