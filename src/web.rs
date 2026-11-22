@@ -1493,8 +1493,84 @@ fn guard_write(h: &HeaderMap) -> Result<(), ApiError> {
     ))
 }
 
+/// 插件页面可以**声明自己需要的 CSP**（第 N 轮）：响应头 `x-panel-csp`。
+///
+/// 为什么要有它：默认策略是 `style-src 'self'; script-src 'self'`，而第三方验证码 SDK
+/// （卓望 zw-captcha）会在运行时注入内联 `<style>` 并内联求值 —— 默认策略下它根本挂不上。
+/// 一刀切的全局 CSP 会把这个能力变成「面板做不到」，那是面板的缺陷，不是插件的问题。
+///
+/// 放宽是**受限**的：
+///   · 只对 `/plugins/` 下的响应生效（面板自己的页面永远用默认值）；
+///   · 指令白名单：只允许下面这几个，出现别的指令 → 整条忽略；
+///   · 必须保留 `frame-ancestors 'self'` 与 `object-src 'none'`（不许被放宽）；
+///   · 值里不许出现裸 `*`（那等于没有 CSP）；
+///   · 采纳后**把 `x-panel-csp` 头删掉**（内部约定，不外泄）。
+const PLUGIN_CSP_HEADER: &str = "x-panel-csp";
+const CSP_ALLOWED_DIRECTIVES: [&str; 6] = [
+    "default-src",
+    "script-src",
+    "style-src",
+    "img-src",
+    "connect-src",
+    "font-src",
+];
+
+/// 校验插件声明的 CSP；不合格返回 None（调用方退回默认策略）。
+fn sanitize_plugin_csp(raw: &str) -> Option<HeaderValue> {
+    let text = raw.trim();
+    if text.is_empty() || text.contains('*') {
+        return None;
+    }
+    let mut seen_frame_ancestors = false;
+    let mut seen_object_src = false;
+    for part in text.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let name = part.split_whitespace().next().unwrap_or("");
+        match name {
+            "frame-ancestors" => {
+                // 只允许 'self'：插件不许把自己变成任何站点都能嵌。
+                let rest = part["frame-ancestors".len()..].trim();
+                if rest != "'self'" {
+                    return None;
+                }
+                seen_frame_ancestors = true;
+            }
+            "object-src" => {
+                let rest = part["object-src".len()..].trim();
+                if rest != "'none'" {
+                    return None;
+                }
+                seen_object_src = true;
+            }
+            other => {
+                if !CSP_ALLOWED_DIRECTIVES.contains(&other) {
+                    return None;
+                }
+            }
+        }
+    }
+    if !seen_frame_ancestors || !seen_object_src {
+        return None;
+    }
+    HeaderValue::from_str(text).ok()
+}
+
 async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    // 路径要在消费 req 之前取（下面 next.run 会把 req 吃掉）。
+    let is_plugin_route = req.uri().path().starts_with("/plugins/");
     let mut resp = next.run(req).await;
+    // 插件自己声明的 CSP（只在 /plugins/ 下认）—— 先取出来，稍后替换默认值。
+    let plugin_csp = if is_plugin_route {
+        resp.headers()
+            .get(PLUGIN_CSP_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(sanitize_plugin_csp)
+    } else {
+        None
+    };
     let h = resp.headers_mut();
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -1509,14 +1585,22 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     // 插件界面嵌在面板自己的 iframe 里（同源），所以是 frame-ancestors 'self'；外站仍然嵌不了。
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; img-src 'self' data:; style-src 'self'; \
-             script-src 'self'; connect-src 'self'; frame-ancestors 'self'; \
-             base-uri 'none'; object-src 'none'; form-action 'self'",
-        ),
-    );
+    h.remove(PLUGIN_CSP_HEADER); // 内部约定头，不外泄
+    match plugin_csp {
+        Some(v) => {
+            h.insert(header::CONTENT_SECURITY_POLICY, v);
+        }
+        None => {
+            h.insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static(
+                    "default-src 'self'; img-src 'self' data:; style-src 'self'; \
+                     script-src 'self'; connect-src 'self'; frame-ancestors 'self'; \
+                     base-uri 'none'; object-src 'none'; form-action 'self'",
+                ),
+            );
+        }
+    }
     resp
 }
 
@@ -1891,7 +1975,13 @@ struct UploadQuery {
 ///
 /// 两个入口（上传、按 URL 安装）共用一份，别各写一套 —— 谁漏了「禁用名单」或
 /// 「覆盖时不采纳 cron」，症状都是「装了但行为不对」，很难查。
-async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> Vec<String> {
+struct ReloadOutcome {
+    reloaded: Vec<String>,
+    /// 落盘了但**没加载**：`(插件名, 原因)`。版本不够是最常见的一种（第 256 轮）。
+    blocked: Vec<(String, String)>,
+}
+
+async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> ReloadOutcome {
     let disabled = crate::db::plugin_disabled_names(&st.db).await;
     // 一条 zip 里可能同时有单文件（foo.js）和目录式（bar/index.js）。按**插件名**
     // 去重后统一卸载/重装；以前只认顶层 `.js`，目录式插件上传完要用户再点一次
@@ -1911,9 +2001,33 @@ async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> Vec<String
     names.sort();
     names.dedup();
     let mut reloaded = Vec::new();
+    let mut blocked: Vec<(String, String)> = Vec::new();
     for stem in names {
         if disabled.iter().any(|d| d == &stem) {
             continue;
+        }
+        // 版本闸门：上传 / 按 URL 安装都走这里，**必须在写盘之后、加载之前**挡一次。
+        // 只在启动扫描里挡（main.rs）意味着「装了个要求更高面板的插件，能跑到下次重启」——
+        // 那段时间它拿到的是不完整的能力面，坏起来比直接不加载更难查。
+        match crate::manifest::load(&st.plugins_dir, &stem) {
+            Ok(Some(m)) if !crate::manifest::version_ok(&m.min_panel, env!("CARGO_PKG_VERSION")) => {
+                let why = format!(
+                    "需要面板 >= {}（当前 {}），没有加载",
+                    m.min_panel,
+                    env!("CARGO_PKG_VERSION")
+                );
+                st.log.emit("panel", None, crate::log::Level::Error, format!("插件 {stem} {why}"));
+                blocked.push((stem.clone(), why));
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // 清单坏了也算「没加载」，并说清是清单的问题
+                let why = format!("清单有问题：{e}");
+                st.log.emit("panel", None, crate::log::Level::Error, format!("插件 {stem} {why}"));
+                blocked.push((stem.clone(), why));
+                continue;
+            }
         }
         let Ok(source) = read_source(&st.plugins_dir, &stem).await else { continue };
         st.sched.unload(&stem);
@@ -1922,11 +2036,15 @@ async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> Vec<String
         let fresh = !crate::db::plugin_surfaces(&st.db)
             .await
             .contains_key(&stem);
-        if st.sched.load_adopt(&stem, source, fresh).await.is_ok() {
-            reloaded.push(stem);
+        match st.sched.load_adopt(&stem, source, fresh).await {
+            Ok(()) => reloaded.push(stem),
+            Err(e) => {
+                st.log.emit("panel", None, crate::log::Level::Error, format!("插件 {stem} 加载失败：{e}"));
+                blocked.push((stem, e));
+            }
         }
     }
-    reloaded
+    ReloadOutcome { reloaded, blocked }
 }
 
 /// `POST /api/plugins/install` —— 按 URL 装插件（第 107 轮，商店侧载的后半截）。
@@ -1988,7 +2106,8 @@ async fn plugins_install(
     .map_err(|e| bad(format!("安装任务异常: {e}")))?
     .map_err(bad)?;
 
-    let reloaded = reload_saved(&st, &saved).await;
+    let outcome = reload_saved(&st, &saved).await;
+    let reloaded = outcome.reloaded;
     st.log.emit(
         "panel",
         None,
@@ -2010,6 +2129,7 @@ async fn plugins_install(
         "zip": saved.zip,
         "sha256": sha,
         "reloaded": reloaded,
+        "blocked": outcome.blocked.iter().map(|(n, why)| json!({ "name": n, "why": why })).collect::<Vec<_>>(),
     })))
 }
 
@@ -2070,7 +2190,8 @@ async fn plugins_upload(
     .map_err(|e| bad(format!("上传任务异常: {e}")))?
     .map_err(bad)?;
 
-    let reloaded = reload_saved(&st, &saved).await;
+    let outcome = reload_saved(&st, &saved).await;
+    let reloaded = outcome.reloaded;
     st.log.emit(
         "panel",
         None,
@@ -2090,6 +2211,9 @@ async fn plugins_upload(
         "bytes": saved.bytes,
         "zip": saved.zip,
         "reloaded": reloaded,
+        // 落盘了但没加载（版本不够 / 清单坏了 / 加载期报错）。界面要显示出来，
+        // 否则用户以为「装好了」。
+        "blocked": outcome.blocked.iter().map(|(n, why)| json!({ "name": n, "why": why })).collect::<Vec<_>>(),
     })))
 }
 
@@ -3245,6 +3369,38 @@ struct StreamQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 合法的插件 CSP：采纳。
+    #[test]
+    fn plugin_csp_accepts_whitelisted_directives() {
+        let raw = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+                   style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+                   connect-src 'self'; frame-ancestors 'self'; object-src 'none'";
+        let v = sanitize_plugin_csp(raw);
+        assert!(v.is_some(), "合法值应被采纳");
+    }
+
+    /// 缺 frame-ancestors / object-src：拒（不许削弱这两项）。
+    #[test]
+    fn plugin_csp_rejects_missing_hard_directives() {
+        assert!(sanitize_plugin_csp("default-src 'self'; object-src 'none'").is_none());
+        assert!(sanitize_plugin_csp("default-src 'self'; frame-ancestors 'self'").is_none());
+        // 放宽 frame-ancestors 也不行
+        assert!(sanitize_plugin_csp(
+            "frame-ancestors *; object-src 'none'"
+        )
+        .is_none());
+    }
+
+    /// 出现白名单外的指令 / 裸 `*`：拒（避免插件把 CSP 放到等于没有）。
+    #[test]
+    fn plugin_csp_rejects_unknown_directives_and_wildcards() {
+        let bad_dir = "default-src 'self'; frame-ancestors 'self'; object-src 'none'; worker-src *";
+        assert!(sanitize_plugin_csp(bad_dir).is_none());
+        let star = "default-src *; frame-ancestors 'self'; object-src 'none'";
+        assert!(sanitize_plugin_csp(star).is_none());
+    }
+
 
     #[test]
     fn plugin_name_rejects_traversal() {

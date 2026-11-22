@@ -7327,7 +7327,15 @@ async function uploadFile(inputId, url, okPrefix) {
     } else {
       msg = okPrefix + '：' + list;
     }
-    notify(msg + (d.zip ? '（zip）' : ''), 'ok');
+    // 落盘了但**没加载**（min_panel 不够 / 清单坏了 / 加载期报错）：
+    // 必须说清楚，否则用户以为「装好了」，点插件才发现是空的（第 256 轮）。
+    const blocked = d.blocked || [];
+    if (blocked.length) {
+      msg += '；但没加载：' + blocked.map((b) => b.name + '（' + b.why + '）').join('，');
+      notify(msg + (d.zip ? '（zip）' : ''), 'err');
+    } else {
+      notify(msg + (d.zip ? '（zip）' : ''), 'ok');
+    }
     await refresh();
     if (kind === 'script') await loadScripts();
   } catch (e) {

@@ -88,36 +88,6 @@ fn resolve_dir(key: &str, default: &str) -> PathBuf {
     p
 }
 
-#[cfg(test)]
-mod dir_env_tests {
-    use super::*;
-
-    /// 回填必须给**绝对**路径：相对路径会随 cwd 漂，插件拼出来的配置路径就对不上。
-    /// 用独立的名字，别碰真目录变量（测试并行跑，改全局环境会互相干扰）。
-    #[test]
-    fn resolve_dir_publishes_an_absolute_path() {
-        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
-        let p = resolve_dir("PANEL_TEST_DIR_PUBLISH", "data");
-        assert!(p.is_absolute(), "{}", p.display());
-        assert_eq!(
-            std::env::var("PANEL_TEST_DIR_PUBLISH").unwrap_or_default(),
-            p.display().to_string(),
-            "解析出来的值要回填进环境，插件才读得到"
-        );
-        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
-    }
-
-    /// 显式设了相对路径的人也希望拿到绝对路径（插件那边同样按绝对路径用）。
-    #[test]
-    fn resolve_dir_expands_a_relative_override() {
-        std::env::set_var("PANEL_TEST_DIR_REL", "some/dir");
-        let p = resolve_dir("PANEL_TEST_DIR_REL", "data");
-        assert!(p.is_absolute(), "{}", p.display());
-        assert!(p.ends_with("some/dir"), "{}", p.display());
-        std::env::remove_var("PANEL_TEST_DIR_REL");
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), String> {
     // 子命令：开机自启动的安装/卸载/查看。它不启动面板，所以放在最前面。
@@ -624,4 +594,34 @@ async fn load_all(
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     println!("收到中断，正在退出");
+}
+
+#[cfg(test)]
+mod dir_env_tests {
+    use super::*;
+
+    /// 回填必须给**绝对**路径：相对路径会随 cwd 漂，插件拼出来的配置路径就对不上。
+    /// 用独立的名字，别碰真目录变量（测试并行跑，改全局环境会互相干扰）。
+    #[test]
+    fn resolve_dir_publishes_an_absolute_path() {
+        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
+        let p = resolve_dir("PANEL_TEST_DIR_PUBLISH", "data");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert_eq!(
+            std::env::var("PANEL_TEST_DIR_PUBLISH").unwrap_or_default(),
+            p.display().to_string(),
+            "解析出来的值要回填进环境，插件才读得到"
+        );
+        std::env::remove_var("PANEL_TEST_DIR_PUBLISH");
+    }
+
+    /// 显式设了相对路径的人也希望拿到绝对路径（插件那边同样按绝对路径用）。
+    #[test]
+    fn resolve_dir_expands_a_relative_override() {
+        std::env::set_var("PANEL_TEST_DIR_REL", "some/dir");
+        let p = resolve_dir("PANEL_TEST_DIR_REL", "data");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with("some/dir"), "{}", p.display());
+        std::env::remove_var("PANEL_TEST_DIR_REL");
+    }
 }
