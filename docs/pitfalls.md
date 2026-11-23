@@ -992,3 +992,21 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 
         GET /api/health ← 127.0.0.1 ua=Mozilla/5.0 (Macintosh; Intel Ma → 401 ...
         POST /api/plugins/cmcc/reload ← 127.0.0.1 ua=curl/8.7.1 → 401 ...
+
+125. **`<p-switch>` 鼠标点不动：门禁点的是隐藏 input，用户点的是 knob**（第 267 轮，用户 2026-11-23 报
+    「那个开关点不了」—— 出现在插件 mgmusic 的账号设置里，根因在面板）：
+
+    面板 `PSwitch` 建的是 `<div class="switch">`，里面一个 `<input class="switch-input">`
+    （CSS 定成 `opacity:0; width:0; height:0`）+ 一个可见的 knob。`<div>` 不是 `<label>`，
+    点 knob / 点文字都没有「激活勾选」这回事 —— 只有 Tab 聚焦到那个 0×0 的 input 再按空格
+    才改得动。于是同一页面上键盘用户能用、鼠标用户怎么点都没反应，**而且不报任何错**。
+
+    为什么整整一个版本没被发现：`scripts/ui-kit-check.mjs` 那条断言写的是
+    `s.querySelector('.switch-input').click()` —— 程序化点的是**隐藏元素**，绕过了真实指针路径。
+    （坏味道：断言里 `.click()` 到一个 0×0 / `display:none` 的节点，一律不算验过。）
+
+    修法：外层改成 `<label>`（`build(this, 'switch', 'label')`），点框内任何位置都由浏览器原生
+    激活 checkbox；门禁改成点 **knob** 与 **文字** 各一次。
+
+    守卫：`scripts/ui-kit-check.mjs` 的「p-switch 点 knob 值就变 + 派发 change（真实鼠标路径）」
+    与「p-switch 点文字也切换」两条。

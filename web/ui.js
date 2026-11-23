@@ -574,12 +574,20 @@
   }
 
 
-  /** <p-switch checked label="启用"> —— 开关。值读 .value，改它派发 change。 */
+  /** <p-switch checked label="启用"> —— 开关。值读 .value，改它派发 change。
+   *
+   *  ⚠ 外层必须是 **<label>**，不能是 <div>（2026-11-23 改）：
+   *  `.switch-input` 是一条 `opacity:0; width:0; height:0` 的隐藏 checkbox，真正能看见的
+   *  是旁边的 knob。用 <div> 包着，**点 knob / 点文字都没有任何反应** —— 只有 Tab 聚焦到
+   *  那个 0×0 的 input 再按空格才改得动，等于鼠标用户用不了这个控件。改成 <label> 之后
+   *  点框内任何位置都会激活里面的 checkbox（原生行为，不用自己加 click），键盘、读屏也照旧。
+   *  门禁：scripts/ui-kit-check.mjs 现在点的是 **knob**（真实鼠标路径），点隐藏 input 会
+   *  把这类 bug 全放过。 */
   class PSwitch extends HTMLElement {
     static get observedAttributes() { return ['checked', 'disabled']; }
     connectedCallback() {
       if (this._i) return;
-      const wrap = build(this, 'switch');
+      const wrap = build(this, 'switch', 'label');
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.className = 'switch-input';

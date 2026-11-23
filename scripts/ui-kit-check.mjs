@@ -443,12 +443,24 @@ async function main() {
   await sleep(150);
 
   // p-switch
+  // ⚠ 点的是 **knob**（用户真正按下去的那块），不是隐藏的 .switch-input。
+  //   第 2026-11-23 轮：这个控件的外层原来是 <div>，点 knob 什么都不会发生，而这条断言
+  //   直接 `.switch-input`.click() 绕过了真实路径 —— 门禁绿了整整一个版本，直到用户
+  //   在插件里点不动才发现。别再为了「让它过」去点隐藏元素。
   const sw = JSON.parse(await js(
     "new Promise((res)=>{const s=document.getElementById('k-switch');" +
     "const before=s.value;s.addEventListener('change',(e)=>res(JSON.stringify({before,after:s.value,detail:e.detail.value})),{once:true});" +
-    "s.querySelector('.switch-input').click();})"
+    "s.querySelector('.switch-knob').click();})"
   ));
-  check('p-switch 点一下值变了 + 派发 change', sw.before === false && sw.after === true && sw.detail === true, JSON.stringify(sw));
+  check('p-switch 点 knob 值就变 + 派发 change（真实鼠标路径）',
+    sw.before === false && sw.after === true && sw.detail === true, JSON.stringify(sw));
+  // 点文字也得管用（外层是 <label>，点标签文字=点控件）
+  const swText = JSON.parse(await js(
+    "new Promise((res)=>{const s=document.getElementById('k-switch');" +
+    "const before=s.value;s.addEventListener('change',(e)=>res(JSON.stringify({before,after:s.value})),{once:true});" +
+    "s.querySelector('.switch-text').click();})"
+  ));
+  check('p-switch 点文字也切换', swText.before === true && swText.after === false, JSON.stringify(swText));
 
   // p-multiselect
   const ms = JSON.parse(await js(
