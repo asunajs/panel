@@ -179,7 +179,7 @@ pub async fn check_cli() -> Result<(), String> {
                         cand
                     );
                 }
-                Err(e) => println!("  ✗   —   {:>6}ms          {}", t0.elapsed().as_millis(), format!("{cand}（{e}）")),
+                Err(e) => println!("  ✗   —   {:>6}ms          {cand}（{e}）", t0.elapsed().as_millis()),
             }
         }
     }
@@ -232,6 +232,27 @@ mod tests {
             assert_eq!(v[0], "https://raw.githubusercontent.com/a/b/c.json");
             assert_eq!(v[1], "https://m1.example/https://raw.githubusercontent.com/a/b/c.json");
         });
+    }
+
+    // 从 outbound 搬过来的那组断言：谁会被拼镜像、谁不会。
+    // 这条判据以前写在 `outbound::rewrite` 里，第 267 轮收进 gh 之后**只有这里**还测它。
+    #[test]
+    fn only_listed_hosts_get_mirrored() {
+        let hosts = vec![
+            "raw.githubusercontent.com".to_string(),
+            ".github.com".to_string(),
+        ];
+        assert!(host_matches("https://raw.githubusercontent.com/a/b/c.json", &hosts));
+        // ".github.com" 既覆盖子域也覆盖裸域名
+        assert!(host_matches("https://api.github.com/repos/x", &hosts));
+        assert!(host_matches("https://github.com/x/y", &hosts));
+        // 不在名单里的一律不许拼镜像（mcloud 那些接口全废）
+        assert!(!host_matches("https://m.mcloud.139.com/api/x", &hosts));
+        // 没有 scheme / host 为空
+        assert!(!host_matches("github.com/x", &hosts));
+        assert!(!host_matches("https:///x", &hosts));
+        // 带端口也算同一个 host
+        assert!(host_matches("https://api.github.com:443/x", &hosts));
     }
 
     #[test]

@@ -301,38 +301,6 @@ async fn a_configured_proxy_is_really_used() {
 }
 
 #[test]
-fn prefix_proxy_rewrites_only_the_listed_hosts() {
-    let pfx = Some((
-        "https://gh-proxy.com/".to_string(),
-        vec!["raw.githubusercontent.com".to_string(), ".github.com".to_string()],
-    ));
-    // 名单里的：拼在前面（镜像要的就是完整 URL）
-    assert_eq!(
-        rewrite("https://raw.githubusercontent.com/a/b/c.json", pfx.clone()),
-        "https://gh-proxy.com/https://raw.githubusercontent.com/a/b/c.json"
-    );
-    // ".github.com" 覆盖子域，也覆盖裸域名
-    assert_eq!(
-        rewrite("https://api.github.com/repos/x", pfx.clone()),
-        "https://gh-proxy.com/https://api.github.com/repos/x"
-    );
-    assert_eq!(
-        rewrite("https://github.com/x/y", pfx.clone()),
-        "https://gh-proxy.com/https://github.com/x/y"
-    );
-    // 不在名单里：原样（不然 mcloud 那些接口全废）
-    assert_eq!(
-        rewrite("https://m.mcloud.139.com/api/x", pfx.clone()),
-        "https://m.mcloud.139.com/api/x"
-    );
-    // 没配前缀：原样
-    assert_eq!(
-        rewrite("https://raw.githubusercontent.com/a/b", None),
-        "https://raw.githubusercontent.com/a/b"
-    );
-}
-
-#[test]
 fn prefix_proxy_is_validated() {
     assert!(check_prefix("").is_ok());
     assert!(check_prefix("https://gh-proxy.com/").is_ok());

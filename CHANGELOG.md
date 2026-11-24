@@ -8,6 +8,25 @@ patch 只修 bug。
 
 ---
 
+## 0.9.0（2026-11-24）
+
+**界面能单独更新了；GitHub 的路也收成了一条。**
+
+- **界面包**：只改前端（`web/*.css`、`web/ui.js`、`web/app.js`）时，打一个 ~300 KB 的 zip，
+  面板「设置 → 界面」上传并启用即生效 —— **不换二进制、不升面板版本、不重启**。
+  包的 `panel` 必须与当前面板版本精确相等（面板一升级自动回到内置那份，内置就是新版带的界面）；
+  失败一律回退不白屏；逃生口 `/?ui=builtin`。插件依赖补丁包里的共用件时在清单写 `min_ui`，
+  加载期硬挡并提示去哪应用。详见 [docs/ui-pack.md](docs/ui-pack.md)
+- `panel ui status|install|activate|reset`：离线管界面包（改磁盘，重启后生效）
+- **检查更新不吃 API 额度**：面板新版走 `releases/latest` 的 302 Location，界面包走
+  `releases.atom`，API 只用来补 release 说明与资产清单。`PANEL_UPDATE_NO_API=1` 可完全禁用 API
+- **GitHub 出站收成一条通道**：`net.github_mirrors`（有序前缀，`""` = 直连）+ `net.github_token`，
+  装插件、检查更新、插件 `host.fetch` 共用同一份配置；旧 `net.prefix` 仍然生效。
+  镜像回 200 但吐网页的情况会被拦下（看内容不看状态码）
+- `panel net check`：打「通道 × 目标」矩阵，谁通、多快、多少字节，一眼看明白
+- 发界面包用 `git tag ui-v<面板版本>.<序号>`，CI 只装 node 打包、**不编译 Rust**；
+  release 标 prerelease，不会抢走 `releases/latest`
+
 ## 0.8.3（2026-11-24）
 
 **插件页有了版本药丸；日志不再被同一条 HTTP 错误刷屏。**

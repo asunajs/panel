@@ -627,14 +627,6 @@ pub fn set_prefix(url: &str, hosts: &[String]) {
     }
 }
 
-/// 当前前缀代理（None = 关）。
-pub fn prefix() -> Option<(String, Vec<String>)> {
-    match PREFIX.lock() {
-        Ok(g) => g.clone(),
-        Err(p) => p.into_inner().clone(),
-    }
-}
-
 /// 校验前缀代理地址：空串合法；否则必须 http/https。
 pub fn check_prefix(url: &str) -> Result<(), String> {
     let u = url.trim();
@@ -655,30 +647,6 @@ pub fn check_prefix(url: &str) -> Result<(), String> {
 /// 第 267 轮起走 `gh`：`net.github_mirrors` 有序，插件拿到的第一条与面板自己用的一致。
 pub fn apply_prefix(url: &str) -> String {
     crate::gh::apply(url)
-}
-
-/// `apply_prefix` 的可测版本：前缀当参数传，不读全局（测试要能造各种名单）。
-fn rewrite(url: &str, pfx: Option<(String, Vec<String>)>) -> String {
-    let Some((pfx, hosts)) = pfx else {
-        return url.to_string();
-    };
-    let Some((host, _port)) = host_port(url) else {
-        return url.to_string();
-    };
-    let h = host.to_ascii_lowercase();
-    // 允许写成 ".github.com" 形式来覆盖子域（用户自己加名单时方便）
-    let hit = hosts.iter().any(|x| {
-        if let Some(suffix) = x.strip_prefix('.') {
-            h == suffix || h.ends_with(&format!(".{suffix}"))
-        } else {
-            h == *x
-        }
-    });
-    if hit {
-        format!("{pfx}{url}")
-    } else {
-        url.to_string()
-    }
 }
 
 /// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、
