@@ -140,6 +140,52 @@ pub fn looks_like_zip(bytes: &[u8]) -> bool {
     bytes.len() > 4 && bytes[0] == b'P' && bytes[1] == b'K'
 }
 
+/// `panel net check`：把「通道 × 目标」跑一遍，打印状态码与耗时。
+///
+/// 为什么要有这个：GitHub 的失败方式太多了（墙、限速、镜像回网页、403 无 UA…），
+/// 让人猜「到底是哪一段坏了」最费时间。这里一次把矩阵打出来，谁通谁不通一目了然。
+pub async fn check_cli() -> Result<(), String> {
+    let c = channels();
+    println!("通道：{}", if c.mirrors.is_empty() { "（空）".to_string() } else { c.mirrors.iter().map(|m| if m.is_empty() { "直连" } else { m.as_str() }).collect::<Vec<_>>().join(" → ") });
+    println!("token：{}", if c.token.is_empty() { "无（API 只有 60 次/小时）" } else { "已配置" });
+    let targets = [
+        ("目录 catalog.json（raw）", "https://raw.githubusercontent.com/asunajs/panel-single-plugins/main/catalog.json"),
+        ("最新 release（api）", "https://api.github.com/repos/asunajs/panel/releases/latest"),
+        ("最近 release（atom）", "https://github.com/asunajs/panel/releases.atom"),
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent(concat!("panel/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
+    for (label, url) in targets {
+        println!("\n{label}");
+        for cand in rewrite_all(url) {
+            let t0 = std::time::Instant::now();
+            let mut req = client.get(&cand);
+            if !c.token.is_empty() {
+                req = req.header("authorization", format!("Bearer {}", c.token));
+            }
+            match req.send().await {
+                Ok(r) => {
+                    let st = r.status();
+                    let n = r.bytes().await.map(|b| b.len()).unwrap_or(0);
+                    println!(
+                        "  {} {:>3} {:>6}ms {:>8}B  {}",
+                        if st.is_success() { "✓" } else { "✗" },
+                        st.as_u16(),
+                        t0.elapsed().as_millis(),
+                        n,
+                        cand
+                    );
+                }
+                Err(e) => println!("  ✗   —   {:>6}ms          {}", t0.elapsed().as_millis(), format!("{cand}（{e}）")),
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

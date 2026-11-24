@@ -94,15 +94,7 @@ async fn latest_tag_by_redirect() -> Result<String, String> {
 /// 「URL 里有 `/releases/tag/`」这一条稳定事实，不碰 XML 结构的细节。
 async fn recent_tags_by_atom() -> Result<Vec<String>, String> {
     let url = format!("https://github.com/{}/releases.atom", repo());
-    let resp = client()?
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("连不上 github.com：{e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub 返回 {}", resp.status()));
-    }
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    let body = get_via_channels(&url).await?;
     if body.len() > 4 * 1024 * 1024 {
         return Err("atom 响应异常大，已放弃".to_string());
     }
@@ -125,19 +117,40 @@ async fn recent_tags_by_atom() -> Result<Vec<String>, String> {
 }
 
 
+/// 按 `gh` 的通道顺序取一段文本：镜像 → 直连。
+///
+/// 第 267 轮：面板自己的「检查更新」以前**完全不经过镜像**（自建 reqwest 直连），
+/// 于是设置里配了 `github_mirrors` 对这一路毫无作用。现在 atom / api 两路都过它。
+/// `github_token` 有就带上（API 5000/h；镜像也认这个头）。
+async fn get_via_channels(url: &str) -> Result<String, String> {
+    let token = crate::gh::token();
+    let mut readings: Vec<String> = Vec::new();
+    for cand in crate::gh::rewrite_all(url) {
+        let mut req = client()?.get(&cand);
+        if !token.is_empty() {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+                // 镜像挂掉时常回一张网页却给 200：文本类请求也要挡一下
+                if crate::gh::looks_like_html(body.as_bytes()) {
+                    readings.push(format!("{cand} → 200，但内容是网页"));
+                    continue;
+                }
+                return Ok(body);
+            }
+            Ok(resp) => readings.push(format!("{cand} → HTTP {}", resp.status())),
+            Err(e) => readings.push(format!("{cand} → {e}")),
+        }
+    }
+    Err(format!("所有通道都没成：{}", readings.join("；")))
+}
+
 /// 取一次 `/releases/latest` 的 JSON（**会花额度**，只在需要说明/资产时用）。
 async fn api_release() -> Result<Value, String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", repo());
-    let resp = client()?
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("连不上 GitHub：{e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub 返回 {}（可能是限流或仓库不可见）", resp.status()));
-    }
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    let body = get_via_channels(&url).await?;
     if body.len() > 2 * 1024 * 1024 {
         return Err("GitHub 响应异常大，已放弃".to_string());
     }

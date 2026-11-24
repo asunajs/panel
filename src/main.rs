@@ -111,6 +111,7 @@ async fn main() -> Result<(), String> {
         Some("ui") => return ui_cli::run(&args[1..]).await,
         // 口令重置是离线动作（要直接写 auth.json），同样放在起服务之前
         Some("token") => return token_cli::run(&args[1..]),
+        Some("net") => return gh::check_cli().await,
         Some("migrate") => return migrate::run(&args[1..]),
         Some("keygen") => return backup::keygen(),
         Some("backup") => return backup::backup_cmd(&args[1..]).await,
