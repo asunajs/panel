@@ -6003,11 +6003,22 @@ function renderUpdate() {
   const pillBtn = $('update-pill');
   if (pillBtn) {
     // 「当前版本更新就不提示了」—— 后端把 skipped / has_update 都算好给前端
-    const show = !!u.show;
+    const panelShow = !!u.show;
+    // 面板没新版时，也可能只有**界面包**可更新（第 265 轮）。这是同一类事
+    // （「有个新东西可以装」），所以共用一个入口；面板新版优先级更高。
+    const ui = state.uiLatest || {};
+    const uiNew = !panelShow && ui.available && ui.version !== ((state.ui || {}).version || '');
+    const show = panelShow || uiNew;
     pillBtn.classList.toggle('hidden', !show);
     if (show) {
-      pillBtn.querySelector('.label').textContent = '有新版本 ' + (u.latest || '');
-      pillBtn.dataset.tip = '当前 ' + (u.current || state.version) + ' → ' + u.latest;
+      const label = pillBtn.querySelector('.label');
+      if (panelShow) {
+        label.textContent = '有新版本 ' + (u.latest || '');
+        pillBtn.dataset.tip = '当前 ' + (u.current || state.version) + ' → ' + u.latest;
+      } else {
+        label.textContent = '有新界面 ' + ui.version;
+        pillBtn.dataset.tip = '界面包 ' + ui.version + '（只换前端，不重启）· 点开到设置 → 界面里一键应用';
+      }
     }
   }
   const cur = $('update-current');
@@ -7392,6 +7403,9 @@ async function main() {
   // 登录后查一次有没有新版：走 6 小时缓存，失败只记在 state.update.error（不弹条）。
   // 不 await：查更新是锦上添花，绝不能拖住首屏。
   checkUpdate(false);
+  // 界面包也查一次：这样**顶栏 pill 不用等用户进设置页**才冒出来（第 265 轮）。
+  // 同样不 await；服务端 6 小时缓存，一个页面只查一次。
+  checkUiPackUpdate(false);
   // 只在「确实读回了 state 且确实没有口令」时问。读不到 state（401 = 面板有口令但还没登录）
   // 必须走 #gate，否则两个浮层会同时出现（第 87 轮实测撞到）。
   if (state.loaded && state.auth === false && !localStorage.getItem('panel.skipSetup')) {
