@@ -5,23 +5,18 @@ name: UI release
 # 为什么单独一条工作流：**只改了前端**的改动不该逼着所有人下载一个几十 MB 的面板二进制。
 # 这条流水线只装 node、重建一次压缩产物、打一个 ~300 KB 的 zip —— 不编译 Rust（那才是大头）。
 #
-#   git tag ui-v0.8.3.2 && git push origin ui-v0.8.3.2
-#        └─ 面板 0.8.3 的第 2 号界面包
+#   git tag ui-v0.8.3.1 && git push origin ui-v0.8.3.1
+#        └─ 面板 0.8.3 的第 1 号界面包
 #
 # ⚠ **必须 --prerelease**：`install.sh` / `install.ps1` 走 `releases/latest/download/…`，
-#   面板自己的 `/releases/latest` 也是。一个只有 zip 的 release 一旦成为 "latest"，
-#   装机会去下不到二进制、更新检查也会读到错的 tag。标了 prerelease，两处都不受影响；
-#   面板侧的 `/api/ui/check` 是拿 `GET /releases`（列表）按 `ui-v` 前缀筛的，不受影响。
+#   面板自己的 `/releases/latest` 也是（现在是读它的 302）。一个只有 zip 的 release
+#   一旦成为 "latest"，装机会去下不到二进制、面板更新检查也会读到错的 tag。
+#   标了 prerelease 两处都不受影响；面板侧按 `ui-v` 前缀筛，照样能发现它。
 
 on:
   push:
     tags: ['ui-v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: '已有的 ui-v* tag（手动补发时填）'
-        required: false
-        type: string
 
 jobs:
   pack:
@@ -38,25 +33,29 @@ jobs:
         with:
           node-version: '22'
 
+      # tag 是唯一真源：`ui-v<面板版本>.<序号>`，面板段必须等于 Cargo.toml 的版本
+      # （界面包只对**这一版二进制**有效，装到别的版本上会被面板拒绝）。
       - name: 判 tag 与面板版本是否一致
         id: v
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${GITHUB_REF_NAME}"
           case "$TAG" in
             ui-v*) REST="${TAG#ui-v}" ;;
             *) echo "✗ tag 必须是 ui-v<面板版本>.<序号>，收到 $TAG"; exit 1 ;;
           esac
           PANEL=$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          # 包的 panel 段必须等于 Cargo.toml 的版本：界面包只对**这一版二进制**有效
           case "$REST" in
             "$PANEL".*) ;;
             *) echo "✗ tag $TAG 说的是面板 ${REST%.*}，而 Cargo.toml 是 $PANEL"; exit 1 ;;
           esac
           SEQ="${REST##*.}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "panel=$PANEL" >> "$GITHUB_OUTPUT"
-          echo "seq=$SEQ" >> "$GITHUB_OUTPUT"
-          echo "version=$REST" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "panel=$PANEL"
+            echo "seq=$SEQ"
+            echo "version=$REST"
+          } >> "$GITHUB_OUTPUT"
+          echo "面板 $PANEL · 界面包 $REST（序号 $SEQ）"
 
       - name: 装前端构建依赖
         run: npm ci --prefix tools/web
@@ -64,25 +63,47 @@ jobs:
       - name: 打界面包
         run: node tools/ui-pack.mjs --seq "${{ steps.v.outputs.seq }}"
 
+      # 同一条门禁：清单必须与 src/ui_pack.rs 的白名单一致，且同样输入两次打包字节相同
       - name: 自检（清单与 web/ 一致、可复现）
         run: node tools/ui-pack.mjs --check
+
+      - name: 列出产物
+        run: ls -l dist/
 
       - name: 创建 Release（prerelease！）
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          PANEL: ${{ steps.v.outputs.panel }}
+          VER: ${{ steps.v.outputs.version }}
         run: |
-          gh release create "${{ steps.v.outputs.tag }}" \
+          {
+            printf '面板 **%s** 的界面包 %s。\n\n' "$PANEL" "$VER"
+            printf '只换前端资源：装上、启用、刷新即见 —— **不换二进制、不重启**。\n\n'
+            printf '装法：面板「设置 → 界面」点「应用」；或者\n\n'
+            printf '```\n'
+            printf 'POST /api/ui/install    # body 就是这个 zip\n'
+            printf 'POST /api/ui/activate   {"version":"%s"}\n' "$VER"
+            printf '```\n\n'
+            printf '包里 `ui.json` 的 `panel` 是 %s：装到**其它面板版本**上会被拒绝（这是刻意的，\n' "$PANEL"
+            printf '界面要调那个二进制的接口）。sha256 见 `UI-SHA256SUMS`。\n'
+          } > notes.md
+          gh release create "$TAG" \
             dist/panel-ui-*.zip dist/UI-SHA256SUMS \
-            --title "界面包 ${{ steps.v.outputs.version }}（面板 ${{ steps.v.outputs.panel }}）" \
-            --notes "面板 **${{ steps.v.outputs.panel }}** 的界面包 ${{ steps.v.outputs.version }}。
-
-只换前端资源：装上、启用、刷新即见 —— **不换二进制、不重启**。
-
-装法：面板「设置 → 界面」点「应用」；或
-\`\`\`
-POST /api/ui/install   body 就是这个 zip
-POST /api/ui/activate  {\"version\":\"${{ steps.v.outputs.version }}\"}
-\`\`\`
-包里 \`ui.json\` 的 \`panel\` 是 ${{ steps.v.outputs.panel }}，与其它面板版本**不匹配、不会被启用**。
-sha256 见 \`UI-SHA256SUMS\`。" \
+            --title "界面包 $VER（面板 $PANEL）" \
+            --notes-file notes.md \
             --prerelease
+
+      # 发完自测：确认它真的是 prerelease（否则 install.sh 会被它带偏），
+      # 且 `releases/latest` 仍然指向面板版本。
+      - name: 验证它没抢走 latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IS_PRE=$(gh release view "${{ steps.v.outputs.tag }}" --json isPrerelease -q .isPrerelease)
+          echo "isPrerelease=$IS_PRE"
+          if [ "$IS_PRE" != "true" ]; then
+            echo "✗ 这个 release 不是 prerelease —— 会让 install.sh 与 /releases/latest 指向它"
+            exit 1
+          fi
+          echo "✓ prerelease，latest 不受影响"
