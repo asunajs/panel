@@ -68,6 +68,19 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 起不来时先看 `~/panel-3030/data/panel.err.log`，再看 `launchctl print gui/$(id -u)/dev.panel` 里的
 `state` 与 `last exit reason`。
 
+### 端口被占 / 一堆 `panel` 进程（第 258 轮）
+
+验证脚本常把面板丢到后台跑一次就再也不管 —— 它们的数据目录在 `/tmp`、端口是 88xx，
+每个挂 10–20 MB。真身只有 `~/panel-3030/panel` 那一个，但 `lsof -i :8790` 之类一查就懵：
+
+```bash
+bash scripts/kill-strays.sh           # 只报告：哪个 pid、工作目录、听着哪个端口
+bash scripts/kill-strays.sh --kill    # 真的杀
+```
+
+判据是「进程名 panel 且工作目录/可执行文件在 `/tmp` 下」—— 部署实例和 `panel plugin check`
+都不满足，所以不会误杀。自己写探针时记得 `trap 'kill $PID' EXIT`，别留尾巴。
+
 ### 源码体积上限（第 132 轮抬过）
 
 | 对象 | 默认值 | 环境变量 |
