@@ -34,6 +34,7 @@ export const CAPABILITIES = [
   { id: 'ui.p-multiselect', since: '0.4.0', where: 'webui', pattern: /<p-multiselect\b/ },
   { id: 'ui.p-sms-code', since: '0.4.0', where: 'webui', pattern: /<p-sms-code\b/, note: '发码格（R11 要求用它）' },
   { id: 'ui.p-log', since: '0.7.0', where: 'webui', pattern: /<p-log\b/, note: '实时日志（R14 要求任务型插件用）' },
+  { id: 'ui.p-plugin-ver', since: '0.8.2', where: 'webui', pattern: /<p-plugin-ver\b/, note: '右上角版本药丸（版本来自清单，第 257 轮）' },
 
   // ── 面板 JS 面（window.PanelUI）────────────────────────────
   { id: 'PanelUI.confirm', since: '0.7.0', where: 'webui', pattern: /PanelUI\.confirm\s*\(/ },
