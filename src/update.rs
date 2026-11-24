@@ -10,7 +10,14 @@
 //!    最后一步由人执行。
 //! 2. **查的是 GitHub release**（`asunajs/panel`），不是自建服务：面板没有后端，只有一个仓库。
 //!    可用 `PANEL_UPDATE_REPO` 指向 fork。
-//! 3. **失败不吵**。查更新失败（断网、被墙、GitHub 限流）只是「这次不知道」，
+//! 3. **先走不用 API 的路**（第 265 轮）。GitHub 的 REST API 匿名只有 60 次/小时，
+//!    而这台机器上还有别的检查在花额度 —— 实测经常一条 `403 Forbidden` 就什么都不知道了。
+//!    不花额度的两条路足够用。一是 `GET /releases/latest` —— **302 的 Location** 里就是 tag
+//!    （不跟随跳转，一个请求）；二是 `GET /releases.atom` —— 最近若干条 release 的 tag
+//!    （界面包的 `ui-v*` 通道靠它）。
+//!    API 变成**锦上添花**：只用来拿 release 正文（说明）与资产清单；失败就退化成
+//!    「tag 已知 + 资产名按发布约定拼出来」，界面照样能提示和下载。
+//! 4. **失败不吵**。查更新失败（断网、被墙、GitHub 限流）只是「这次不知道」，
 //!    不该往日志里刷错误、更不该影响面板干活 —— 调用方拿到 Err，界面显示一句「查不到」。
 //!
 //! 「不再提示」的版本记在 config.json 的 `update.skip_version`：换版本号后自动重新提示，
@@ -45,6 +52,164 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))
 }
 
+
+/// 不发 API 也能拿到「最新 tag」：`/releases/latest` 的 302 Location 最后一段。
+///
+/// `/releases/latest` **不含 prerelease**（正好是我们要的：界面包的 `ui-v*` 是 prerelease，
+/// 不该被当成面板新版）。
+async fn latest_tag_by_redirect() -> Result<String, String> {
+    let url = format!("https://github.com/{}/releases/latest", repo());
+    // ⚠ 「不跟随跳转」是 **ClientBuilder** 上的设置（RequestBuilder 没有这个方法）：
+    //   我们要的就是那一跳的 Location，跟过去反而只剩一张 HTML 页面。
+    let no_follow = reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .user_agent(concat!("panel/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))?;
+    let resp = no_follow
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("连不上 github.com：{e}"))?;
+    let loc = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // 302 → https://github.com/<repo>/releases/tag/<tag>；没有 tag 段说明这个仓库一个 release 都没有
+    let tag = loc.rsplit('/').next().unwrap_or("").trim().to_string();
+    if tag.is_empty() || !loc.contains("/releases/tag/") {
+        return Err(format!(
+            "拿不到最新 tag（HTTP {}；location={loc}）",
+            resp.status()
+        ));
+    }
+    Ok(tag)
+}
+
+/// 不发 API 也能列出最近的 release：`releases.atom` 里每条 `<link href="…/releases/tag/<tag>">`。
+///
+/// 为什么用它而不是 API 列表：API 匿名 60 次/小时，而这条通道不限；解析只依赖
+/// 「URL 里有 `/releases/tag/`」这一条稳定事实，不碰 XML 结构的细节。
+async fn recent_tags_by_atom() -> Result<Vec<String>, String> {
+    let url = format!("https://github.com/{}/releases.atom", repo());
+    let resp = client()?
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("连不上 github.com：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub 返回 {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    if body.len() > 4 * 1024 * 1024 {
+        return Err("atom 响应异常大，已放弃".to_string());
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = body.as_str();
+    while let Some(i) = rest.find("/releases/tag/") {
+        rest = &rest[i + "/releases/tag/".len()..];
+        let tag: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+            .collect();
+        if !tag.is_empty() && !out.contains(&tag) {
+            out.push(tag);
+        }
+    }
+    if out.is_empty() {
+        return Err("atom 里没有解析出任何 tag".to_string());
+    }
+    Ok(out)
+}
+
+
+/// 取一次 `/releases/latest` 的 JSON（**会花额度**，只在需要说明/资产时用）。
+async fn api_release() -> Result<Value, String> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo());
+    let resp = client()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("连不上 GitHub：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub 返回 {}（可能是限流或仓库不可见）", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    if body.len() > 2 * 1024 * 1024 {
+        return Err("GitHub 响应异常大，已放弃".to_string());
+    }
+    serde_json::from_str(&body).map_err(|e| format!("响应不是 JSON：{e}"))
+}
+
+/// 同上，但失败就当没有（不花额度的结论已经够用）。
+///
+/// 环境变量 `PANEL_UPDATE_NO_API=1` 时**一次都不调**：给「额度已耗尽 / 只放行 github.com
+/// 不放行 api.github.com」的部署留个开关，也让门禁能确定性地验「没有 API 也照样能提示」。
+async fn api_release_opt() -> Option<Value> {
+    if no_api() {
+        return None;
+    }
+    api_release().await.ok()
+}
+
+/// `PANEL_UPDATE_NO_API=1`：不碰 `api.github.com`（只走 302 与 atom）。
+pub fn no_api() -> bool {
+    std::env::var("PANEL_UPDATE_NO_API")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn tag_of(rel: &Value) -> String {
+    rel.get("tag_name")
+        .and_then(Value::as_str)
+        .or_else(|| rel.get("name").and_then(Value::as_str))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// 面板产物的文件名约定（见 `.github/workflows/release.yml`）：
+/// 发版时就叫这些名字，所以**不查 API 也能拼出下载地址**。
+pub fn panel_asset_names() -> Vec<&'static str> {
+    vec![
+        "panel-aarch64-linux-musl",
+        "panel-x86_64-linux-musl",
+        "panel-x86_64-pc-windows-msvc.exe",
+    ]
+}
+
+/// 按发布约定拼出资产清单（API 不可用时的退路）。
+fn synth_assets(tag: &str) -> Vec<Value> {
+    let base = format!("https://github.com/{}/releases/download/{tag}", repo());
+    let mut out: Vec<Value> = panel_asset_names()
+        .into_iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "size": Value::Null,
+                "url": format!("{base}/{name}"),
+                "sums": format!("{base}/SHA256SUMS-{name}"),
+                "synthesized": true,
+            })
+        })
+        .collect();
+    // 合并的那份校验文件：界面的「下载到本机」按 `^SHA256SUMS` 找它来验（见 web/app.js）。
+    // 不带上这一条，无 API 时下载就退化成"未校验"——能下但少一道闸，不值得。
+    out.push(json!({
+        "name": "SHA256SUMS",
+        "size": Value::Null,
+        "url": format!("{base}/SHA256SUMS"),
+        "synthesized": true,
+    }));
+    out
+}
+
 /// 查一次最新版本。`force` = 忽略缓存（用户手点「检查更新」时用）。
 pub async fn check(force: bool) -> Result<Value, String> {
     {
@@ -60,58 +225,69 @@ pub async fn check(force: bool) -> Result<Value, String> {
         }
     }
 
-    let url = format!("https://api.github.com/repos/{}/releases/latest", repo());
-    let resp = client()?
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("连不上 GitHub：{e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub 返回 {}（可能是限流或仓库不可见）", resp.status()));
-    }
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
-    // 正文上限：release 的 body 再长也用不了几 MB，防着被喂一个巨大响应
-    if body.len() > 2 * 1024 * 1024 {
-        return Err("GitHub 响应异常大，已放弃".to_string());
-    }
-    let rel: Value = serde_json::from_str(&body).map_err(|e| format!("响应不是 JSON：{e}"))?;
+    // ① **先走不花额度的路**：`/releases/latest` 的 302 Location 里就是 tag。
+    //    GitHub API 匿名 60 次/小时，实测经常一条 403 就什么都查不到；这条路不限次。
+    let (latest, api_rel) = match latest_tag_by_redirect().await {
+        Ok(tag) => {
+            // ② API 只当**锦上添花**：拿 release 正文（说明）与资产清单。
+            //    它失败不影响结论 —— 版本号已经有了，资产名按发布约定能拼出来。
+            (tag, api_release_opt().await)
+        }
+        Err(e) => {
+            // ③ 兜底：万一 github.com 的 302 那边出事（企业代理改写之类），再试一次 API。
+    //    `PANEL_UPDATE_NO_API=1` 时这条路直接算失败（不要偷偷把额度用掉）。
+            if no_api() {
+                return Err(format!("{e}（PANEL_UPDATE_NO_API=1，不走 API 兜底）"));
+            }
+            let rel = api_release().await.map_err(|e2| format!("{e}；API 也不通：{e2}"))?;
+            let tag = tag_of(&rel);
+            if tag.is_empty() {
+                return Err("响应里没有 tag_name".to_string());
+            }
+            (tag, Some(rel))
+        }
+    };
 
-    let latest = rel
-        .get("tag_name")
-        .and_then(Value::as_str)
-        .or_else(|| rel.get("name").and_then(Value::as_str))
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if latest.is_empty() {
-        return Err("响应里没有 tag_name".to_string());
-    }
-    let assets: Vec<Value> = rel
-        .get("assets")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| {
-                    Some(json!({
-                        "name": x.get("name")?.as_str()?,
-                        "size": x.get("size").and_then(Value::as_u64).unwrap_or(0),
-                        "url": x.get("browser_download_url")?.as_str()?,
-                    }))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let assets: Vec<Value> = match &api_rel {
+        Some(rel) => rel
+            .get("assets")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some(json!({
+                            "name": x.get("name")?.as_str()?,
+                            "size": x.get("size").and_then(Value::as_u64).unwrap_or(0),
+                            "url": x.get("browser_download_url")?.as_str()?,
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => synth_assets(&latest),
+    };
 
     let has_update = crate::panelversion::is_newer(&latest).unwrap_or(false);
     let out = json!({
         "current": crate::panelversion::current(),
         "latest": latest,
         "has_update": has_update,
-        "url": rel.get("html_url").cloned().unwrap_or(Value::Null),
-        "notes": rel.get("body").cloned().unwrap_or(Value::Null),
-        "published_at": rel.get("published_at").cloned().unwrap_or(Value::Null),
+        // 没有 API 时用发布页地址兜底：界面上的「打开下载页」照样能点
+        "url": api_rel
+            .as_ref()
+            .and_then(|r| r.get("html_url").cloned())
+            .unwrap_or_else(|| json!(format!("https://github.com/{}/releases/tag/{latest}", repo()))),
+        "notes": api_rel
+            .as_ref()
+            .and_then(|r| r.get("body").cloned())
+            .unwrap_or(Value::Null),
+        "published_at": api_rel
+            .as_ref()
+            .and_then(|r| r.get("published_at").cloned())
+            .unwrap_or(Value::Null),
         "assets": assets,
+        // 资产/说明是「拼出来的」还是 API 给的？界面上不必显示，排错时有用。
+        "assets_synthesized": api_rel.is_none(),
         "repo": repo(),
         "checked_ms": chrono::Utc::now().timestamp_millis(),
         "cached": false,
@@ -300,29 +476,14 @@ pub async fn check_ui(force: bool) -> Result<Value, String> {
             }
         }
     }
-    let url = format!("https://api.github.com/repos/{}/releases?per_page=30", repo());
-    let resp = client()?
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("连不上 GitHub：{e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub 返回 {}（可能是限流或仓库不可见）", resp.status()));
-    }
-    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
-    if body.len() > 4 * 1024 * 1024 {
-        return Err("GitHub 响应异常大，已放弃".to_string());
-    }
-    let list: Value = serde_json::from_str(&body).map_err(|e| format!("响应不是 JSON：{e}"))?;
+    // ① 不花额度的路：`releases.atom` 里的 tag 列表。
+    //    资产名是**发布约定**（`panel-ui-<版本>.zip` + `UI-SHA256SUMS`），所以有了 tag
+    //    就能拼出下载地址 —— 不需要 API 的资产清单。
+    let tags = recent_tags_by_atom().await?;
     let cur = crate::panelversion::current();
     let mut best: Option<Value> = None;
     let mut best_seq: u64 = 0;
-    for rel in list.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-        if rel.get("draft").and_then(Value::as_bool).unwrap_or(false) {
-            continue;
-        }
-        let tag = rel.get("tag_name").and_then(Value::as_str).unwrap_or("").trim();
+    for tag in &tags {
         // `ui-v0.8.3.2` → 面板段 0.8.3、序号 2
         let Some(rest) = tag.strip_prefix("ui-v") else { continue };
         let Some((panel, seq)) = split_ui_tag(rest) else { continue };
@@ -332,36 +493,17 @@ pub async fn check_ui(force: bool) -> Result<Value, String> {
         if seq < best_seq {
             continue;
         }
-        let assets: Vec<Value> = rel
-            .get("assets")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| {
-                        Some(json!({
-                            "name": x.get("name")?.as_str()?,
-                            "size": x.get("size").and_then(Value::as_u64).unwrap_or(0),
-                            "url": x.get("browser_download_url")?.as_str()?,
-                        }))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let zip = assets
-            .iter()
-            .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("panel-ui-") && n.ends_with(".zip")))
-            .cloned();
-        let Some(zip) = zip else { continue };
+        let base = format!("https://github.com/{}/releases/download/{tag}", repo());
         best_seq = seq;
         best = Some(json!({
             "available": true,
             "version": rest,
             "panel": panel,
-            "url": zip["url"].clone(),
-            "size": zip["size"].clone(),
-            "page": rel.get("html_url").cloned().unwrap_or(Value::Null),
-            "notes": rel.get("body").cloned().unwrap_or(Value::Null),
-            "published_at": rel.get("published_at").cloned().unwrap_or(Value::Null),
+            "url": format!("{base}/panel-ui-{rest}.zip"),
+            "sums": format!("{base}/UI-SHA256SUMS"),
+            "size": Value::Null,
+            "page": format!("https://github.com/{}/releases/tag/{tag}", repo()),
+            "synthesized": true,
         }));
     }
     let out = match best {
