@@ -90,7 +90,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("install") => {
-            let src = args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).ok_or_else(|| usage())?;
+            let src = args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).ok_or_else(usage)?;
             let sha = flag(args, "--sha256");
             let data = if src.starts_with("http://") || src.starts_with("https://") {
                 if src.starts_with("http://") && sha.is_none() {
@@ -116,7 +116,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("activate") => {
-            let v = args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).ok_or_else(|| usage())?;
+            let v = args.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).ok_or_else(usage)?;
             let pack = ui_pack::activate(&root, v)?;
             println!("✅ 已把 {} 设为当前界面（重启面板后生效）", pack.version);
             Ok(())

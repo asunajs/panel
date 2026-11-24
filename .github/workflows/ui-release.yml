@@ -1,0 +1,88 @@
+name: UI release
+
+# 界面包发版（第 265 轮）。
+#
+# 为什么单独一条工作流：**只改了前端**的改动不该逼着所有人下载一个几十 MB 的面板二进制。
+# 这条流水线只装 node、重建一次压缩产物、打一个 ~300 KB 的 zip —— 不编译 Rust（那才是大头）。
+#
+#   git tag ui-v0.8.3.2 && git push origin ui-v0.8.3.2
+#        └─ 面板 0.8.3 的第 2 号界面包
+#
+# ⚠ **必须 --prerelease**：`install.sh` / `install.ps1` 走 `releases/latest/download/…`，
+#   面板自己的 `/releases/latest` 也是。一个只有 zip 的 release 一旦成为 "latest"，
+#   装机会去下不到二进制、更新检查也会读到错的 tag。标了 prerelease，两处都不受影响；
+#   面板侧的 `/api/ui/check` 是拿 `GET /releases`（列表）按 `ui-v` 前缀筛的，不受影响。
+
+on:
+  push:
+    tags: ['ui-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已有的 ui-v* tag（手动补发时填）'
+        required: false
+        type: string
+
+jobs:
+  pack:
+    name: 打界面包并挂到 Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 只有这一步需要写：创建 Release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 判 tag 与面板版本是否一致
+        id: v
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$TAG" in
+            ui-v*) REST="${TAG#ui-v}" ;;
+            *) echo "✗ tag 必须是 ui-v<面板版本>.<序号>，收到 $TAG"; exit 1 ;;
+          esac
+          PANEL=$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          # 包的 panel 段必须等于 Cargo.toml 的版本：界面包只对**这一版二进制**有效
+          case "$REST" in
+            "$PANEL".*) ;;
+            *) echo "✗ tag $TAG 说的是面板 ${REST%.*}，而 Cargo.toml 是 $PANEL"; exit 1 ;;
+          esac
+          SEQ="${REST##*.}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "panel=$PANEL" >> "$GITHUB_OUTPUT"
+          echo "seq=$SEQ" >> "$GITHUB_OUTPUT"
+          echo "version=$REST" >> "$GITHUB_OUTPUT"
+
+      - name: 装前端构建依赖
+        run: npm ci --prefix tools/web
+
+      - name: 打界面包
+        run: node tools/ui-pack.mjs --seq "${{ steps.v.outputs.seq }}"
+
+      - name: 自检（清单与 web/ 一致、可复现）
+        run: node tools/ui-pack.mjs --check
+
+      - name: 创建 Release（prerelease！）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.v.outputs.tag }}" \
+            dist/panel-ui-*.zip dist/UI-SHA256SUMS \
+            --title "界面包 ${{ steps.v.outputs.version }}（面板 ${{ steps.v.outputs.panel }}）" \
+            --notes "面板 **${{ steps.v.outputs.panel }}** 的界面包 ${{ steps.v.outputs.version }}。
+
+只换前端资源：装上、启用、刷新即见 —— **不换二进制、不重启**。
+
+装法：面板「设置 → 界面」点「应用」；或
+\`\`\`
+POST /api/ui/install   body 就是这个 zip
+POST /api/ui/activate  {\"version\":\"${{ steps.v.outputs.version }}\"}
+\`\`\`
+包里 \`ui.json\` 的 \`panel\` 是 ${{ steps.v.outputs.panel }}，与其它面板版本**不匹配、不会被启用**。
+sha256 见 \`UI-SHA256SUMS\`。" \
+            --prerelease

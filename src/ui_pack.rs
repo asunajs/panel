@@ -422,7 +422,7 @@ pub fn prune(root: &Path, keep: usize) {
     if dirs.len() <= keep {
         return;
     }
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     for (_, p) in dirs.into_iter().skip(keep) {
         let _ = std::fs::remove_dir_all(&p);
     }

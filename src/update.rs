@@ -276,3 +276,132 @@ mod tests {
         rt.block_on(download(Path::new("/tmp/panel-update-test"), name, "http://127.0.0.1:1/x", None))
     }
 }
+
+/// 界面包的「有没有新版」：查同一仓库的 release 列表，挑 tag 形如
+/// `ui-v<面板版本>.<序号>` 且**面板版本段等于当前版本**的最新一个。
+///
+/// 为什么用 tag 前缀而不是读包里的 `ui.json`：读 manifest 得先把 zip 下下来，
+/// 而"有没有新版"是一次几十毫秒的查询。tag 里已经带了面板版本，够判断了；
+/// 真正的版本/哈希校验在安装那一步（`ui_pack::install_zip` 会逐文件核对 sha256）。
+///
+/// ⚠ 纯界面 release **必须标 prerelease**：`install.sh` 与 `/releases/latest`
+/// 都按 latest 找二进制，一个只有 zip 的 release 一旦成为 latest，两处都会踩空。
+pub async fn check_ui(force: bool) -> Result<Value, String> {
+    static UI_CACHE: std::sync::Mutex<Option<(Instant, Value)>> = std::sync::Mutex::new(None);
+    {
+        let g = UI_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, v)) = g.as_ref() {
+            if !force && at.elapsed() < TTL {
+                let mut v = v.clone();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("cached".into(), json!(true));
+                }
+                return Ok(v);
+            }
+        }
+    }
+    let url = format!("https://api.github.com/repos/{}/releases?per_page=30", repo());
+    let resp = client()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("连不上 GitHub：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub 返回 {}（可能是限流或仓库不可见）", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("读响应失败：{e}"))?;
+    if body.len() > 4 * 1024 * 1024 {
+        return Err("GitHub 响应异常大，已放弃".to_string());
+    }
+    let list: Value = serde_json::from_str(&body).map_err(|e| format!("响应不是 JSON：{e}"))?;
+    let cur = crate::panelversion::current();
+    let mut best: Option<Value> = None;
+    let mut best_seq: u64 = 0;
+    for rel in list.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        if rel.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let tag = rel.get("tag_name").and_then(Value::as_str).unwrap_or("").trim();
+        // `ui-v0.8.3.2` → 面板段 0.8.3、序号 2
+        let Some(rest) = tag.strip_prefix("ui-v") else { continue };
+        let Some((panel, seq)) = split_ui_tag(rest) else { continue };
+        if !crate::panelversion::same_version(&panel, cur) {
+            continue;
+        }
+        if seq < best_seq {
+            continue;
+        }
+        let assets: Vec<Value> = rel
+            .get("assets")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some(json!({
+                            "name": x.get("name")?.as_str()?,
+                            "size": x.get("size").and_then(Value::as_u64).unwrap_or(0),
+                            "url": x.get("browser_download_url")?.as_str()?,
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let zip = assets
+            .iter()
+            .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("panel-ui-") && n.ends_with(".zip")))
+            .cloned();
+        let Some(zip) = zip else { continue };
+        best_seq = seq;
+        best = Some(json!({
+            "available": true,
+            "version": rest,
+            "panel": panel,
+            "url": zip["url"].clone(),
+            "size": zip["size"].clone(),
+            "page": rel.get("html_url").cloned().unwrap_or(Value::Null),
+            "notes": rel.get("body").cloned().unwrap_or(Value::Null),
+            "published_at": rel.get("published_at").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    let out = match best {
+        Some(v) => v,
+        None => json!({
+            "available": false,
+            "current": cur,
+            "why": format!("没有给面板 {cur} 用的界面包（tag 形如 ui-v{cur}.1）"),
+        }),
+    };
+    {
+        let mut g = UI_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        *g = Some((Instant::now(), out.clone()));
+    }
+    Ok(out)
+}
+
+/// `0.8.3.2` → (`0.8.3`, 2)。序号取最后一段；不是数字就当 0（当作最旧）。
+fn split_ui_tag(rest: &str) -> Option<(String, u64)> {
+    let (panel, seq) = match rest.rsplit_once('.') {
+        Some((p, s)) if p.matches('.').count() >= 1 => (p.to_string(), s.parse::<u64>().unwrap_or(0)),
+        // `ui-v0.8` 这种没有序号的写法：整段当面板版本，序号记 0
+        _ => (rest.to_string(), 0),
+    };
+    if panel.is_empty() {
+        return None;
+    }
+    Some((panel, seq))
+}
+
+#[cfg(test)]
+mod ui_tag_tests {
+    use super::split_ui_tag;
+
+    #[test]
+    fn ui_tag_splits_panel_and_seq() {
+        assert_eq!(split_ui_tag("0.8.3.2"), Some(("0.8.3".into(), 2)));
+        assert_eq!(split_ui_tag("0.8.3.10"), Some(("0.8.3".into(), 10)));
+        // 没序号的写法：整段当版本，序号 0（当作最旧，不会把带序号的挤掉）
+        assert_eq!(split_ui_tag("0.8"), Some(("0.8".into(), 0)));
+        assert_eq!(split_ui_tag(""), None);
+    }
+}

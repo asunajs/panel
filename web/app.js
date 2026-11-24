@@ -20,6 +20,8 @@ const state = {
   ui: { source: 'builtin', version: '' },
   /** 装过的界面包版本（`GET /api/ui` 的 installed）。 */
   uiInstalled: [],
+  /** 面板仓里有没有给当前版本的界面包（`GET /api/ui/check`）。 */
+  uiLatest: null,
   auth: false,
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
@@ -3726,6 +3728,42 @@ async function resetUiPack() {
   }
 }
 
+/// 问一次面板仓：有没有给**当前面板版本**的界面包（6 小时缓存，服务端管）。
+/// 失败不吵：断网/被墙/没有包都只是「这次不知道」。
+async function checkUiPackUpdate(force) {
+  try {
+    state.uiLatest = await api('/api/ui/check' + (force ? '?force=1' : ''));
+  } catch (e) {
+    state.uiLatest = { available: false, error: e.message || '查不到' };
+  }
+  renderUiPack();
+}
+
+/// 一键应用：下载 → 校验（sha256 由安装接口对内联 url 的 https 通道兜着）→ 装 → 启用。
+async function applyUiPackUpdate() {
+  const u = state.uiLatest || {};
+  if (!u.available || !u.url) return;
+  const ok = await PanelUI.confirm({
+    title: '应用界面包 ' + u.version + '？',
+    text: '只换前端资源，不动二进制、不重启。装完会立刻启用，刷新页面即见。',
+    okLabel: '应用',
+  });
+  if (!ok) return;
+  const status = $('ui-status');
+  if (status) status.textContent = '正在下载 ' + u.version + '…';
+  try {
+    const d = await api('/api/ui/install', { method: 'POST', body: { url: u.url }, write: true });
+    await api('/api/ui/activate', { method: 'POST', body: { version: d.version }, write: true });
+    if (status) status.textContent = '已启用 ' + d.version + '，刷新页面即见';
+    toast('界面包 ' + d.version + ' 已启用，刷新页面即见');
+    state.uiLoaded = false;
+    await loadUiPack();
+  } catch (e) {
+    if (status) status.textContent = '应用失败：' + e.message;
+    toast('应用失败：' + e.message, true);
+  }
+}
+
 async function loadUiPack() {
   try {
     const d = await api("/api/ui");
@@ -3755,6 +3793,24 @@ function renderUiPack() {
   const box = $("ui-list");
   if (!box) return;
   clear(box);
+  // 先摆「有新界面包」那一行（来自面板仓的 ui-* release，6 小时缓存）
+  const latest = state.uiLatest || {};
+  if (latest.available && latest.version !== (cur.version || "")) {
+    const row = el("div", "ui-pack-row ui-pack-new");
+    const label = el("div", "ui-pack-label");
+    label.append(el("code", "", latest.version));
+    label.append(el("span", "cfg-unit", " 面板仓里的新版界面包" + (latest.size ? " · " + humanBytes(latest.size) : "")));
+    row.append(label);
+    const acts = el("div", "cfg-inline");
+    const b = el("button", "btn btn-sm btn-primary", "应用");
+    b.type = "button";
+    b.addEventListener("click", applyUiPackUpdate);
+    acts.append(b);
+    row.append(acts);
+    box.append(row);
+  } else if (latest.error) {
+    box.append(el("p", "settings-note", "查不到新版界面包（" + latest.error + "）"));
+  }
   const list = state.uiInstalled || [];
   if (list.length === 0) {
     box.append(el("p", "settings-note", "还没装过界面包。"));
@@ -6492,7 +6548,7 @@ function setView(name) {
   // 进设置页时拉一次"装过哪些界面包"（`/api/state` 只带当前来源）。
   // 放在这里而不是 renderSettings 里：那边每 5 秒轮询都会重跑，会变成请求风暴；
   // 也不靠"上次试过的时间戳"来猜 —— 切页本来就该是最新的一份。
-  if (viewKey === 'settings') loadUiPack();
+  if (viewKey === 'settings') { loadUiPack(); checkUiPackUpdate(); }
   // 切走日志页就把它的 DOM 倒掉：那几百行只在它可见时才有用，
   // 留着就是让隐藏视图替整个页面背一份节点（回来时 renderLogs() 会按 state.logs 重建）。
   if (viewKey !== 'logs') {

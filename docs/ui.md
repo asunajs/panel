@@ -115,6 +115,15 @@ panel ui status|install|activate|reset    # 离线版（改磁盘，重启后生
 **`min_ui`**（见 [plugin-contract.md](plugin-contract.md) 的 R15）：加载期硬挡，
 并把「去设置 → 界面应用」这句人话写进插件列表。
 
+**发版**：`git tag ui-v0.8.3.2 && git push origin ui-v0.8.3.2` → `ui-release.yml` 只装 node、
+打 zip、`gh release create --prerelease`（**不编译 Rust**）。
+
+- tag 形状 `ui-v<面板版本>.<序号>`：面板段必须等于 `Cargo.toml` 的版本，CI 会先核对；
+- **必须 `--prerelease`**：`install.sh` / `install.ps1` 与 `/releases/latest` 都按 latest 找二进制，
+  一个只有 zip 的 release 若成为 latest，两处都会踩空；
+- 面板侧 `GET /api/ui/check` 拿 `GET /releases` 列表按 `ui-v` 前缀筛、只认 `panel == 当前版本`，
+  所以设备上只会看到「装得上」的那一个。
+
 ### 4. 数据来源
 
 | 用途 | 接口 | 频率 |

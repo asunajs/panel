@@ -578,6 +578,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/config/reload", post(api_config_reload))
         // 界面包（第 265 轮）：查现状 / 装 / 激活 / 回到内置
         .route("/api/ui", get(api_ui_state))
+        .route("/api/ui/check", get(api_ui_check))
         .route("/api/ui/install", post(api_ui_install))
         .route("/api/ui/activate", post(api_ui_activate))
         .route("/api/ui/reset", post(api_ui_reset))
@@ -6014,6 +6015,23 @@ async fn api_ui_state(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         "installed": crate::ui_pack::list(&root),
         "path": root.display().to_string(),
     })))
+}
+
+/// `GET /api/ui/check` —— 面板仓有没有给**当前版本**的新界面包（6 小时缓存）。
+///
+/// 查不到不算错误：断网/被墙/没有包都只是「这次不知道」，界面显示一句就够了。
+async fn api_ui_check(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let force = q.get("force").map(|v| v == "1" || v == "true").unwrap_or(false);
+    match crate::update::check_ui(force).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Ok(Json(json!({
+            "available": false,
+            "current": crate::panelversion::current(),
+            "error": e,
+        }))),
+    }
 }
 
 /// `POST /api/ui/install {url, sha256}` 或直接 POST zip 字节。
