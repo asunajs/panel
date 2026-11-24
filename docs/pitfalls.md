@@ -883,3 +883,36 @@ fn ver_le(a: &[u64], b: &[u64]) -> bool
 
 **③ 改 tag 要连 tag 一起重指。** 修完 workflow 只推了 `main`，`ui-v*` 还指着旧 commit，
 于是「修了还是 0 秒失败」。`git tag -f <tag> <sha> && git push --force origin <tag>`。
+
+## 268. 恢复「用户改过的调度」不能用「换调度」那个函数 —— 一拍被静默吞掉
+
+**症状**：某个插件「今天没触发」。日志里连「到点了」「落后」「补跑」都没有，只有一句
+「插件 X 空转结束：下次到点前提前唤醒」。运行记录里昨天有、今天没有。
+
+**现场**（3030，咪咕）：
+
+```
+12:05 那拍带 30m 抖动 → 实际 12:18
+12:15 空闲唤醒 → 12:18 装回来 → 注册时 apply_saved 恢复 override
+   → set_schedule() 按「现在」重算 → next 变 22:05   ← 12:18 这一拍没了
+22:05 再来一次，同样没有
+```
+
+**根因**：`apply_saved()` 的 override 分支借用了 `set_schedule()`。那个函数的语义是
+**「换调度，按现在重算下一拍」**；而「加载插件时恢复用户改过的调度」的语义是**「照旧」** ——
+库里记着的那一拍可能就在几分钟后，甚至已经过点、正等着补跑。用重算代替恢复，等于
+**每装一次插件就吞掉一拍**。
+
+带 `override_expr` 的任务全中；不带 override 的不受影响（这也是为什么 mcloud / 央视频没事）。
+
+**修法**：换完调度后把库里那一拍放回去：
+
+```rust
+restore_saved_beat(&mut task, saved.next_at, now_ms)   // catch_up_at 把关：两周前的老拍不补
+```
+
+**怎么一眼确认**：看 `tasks.override_expr` 是不是不为空，再看日志有没有「建议改成了…」——
+那条说明这次加载走了 `apply_saved`（也正是会重算的路径）。
+
+**回归**：`restoring_an_override_keeps_the_imminent_beat` /
+`restoring_a_long_dead_beat_is_refused` / `restoring_a_passed_beat_still_fires_it`。
