@@ -1678,6 +1678,61 @@
     return data;
   }
 
+  // ── 插件版本（第 257 轮）───────────────────────────────────────────────
+  //  插件页要显示「当前装的是哪一版」，但版本的真源是面板读的清单（`<name>.panel.json`）——
+  //  插件自己也有一份（package.json / 源码常量），多一份就多一次漂移的机会。
+  //  这里统一从面板的 `/api/plugins/files` 取（同源会话 cookie 就够，插件页不需要令牌）。
+  /** 从 `location.pathname` 里认出自己在哪个插件下：`/plugins/<name>/…`。 */
+  const pluginNameFromPath = () => {
+    const m = /^\/plugins\/([^/]+)/.exec(location.pathname || '');
+    return m ? decodeURIComponent(m[1]) : '';
+  };
+
+  /** 面板里那份清单的版本（拿不到就空串，别编）。 */
+  let verCache = null;
+  async function pluginVersion(name) {
+    const who = name || pluginNameFromPath();
+    if (!who) return '';
+    try {
+      if (!verCache) {
+        const r = await fetch('/api/plugins/files', { headers: { accept: 'application/json' } });
+        verCache = r.ok ? await r.json() : null;
+      }
+      const list = (verCache && (verCache.files || verCache.plugins)) || [];
+      const hit = list.find((f) => f && f.name === who);
+      return (hit && hit.version) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  /** `<p-plugin-ver>`：右上角那枚「v0.7.0」。拿不到版本就整个隐藏，不显示空的 `v`。 */
+  class PPluginVer extends HTMLElement {
+    constructor() {
+      super();
+      this._done = false;
+    }
+    connectedCallback() {
+      if (this._done) return;
+      this._done = true;
+      if (!this.classList.contains('plugin-ver')) this.classList.add('plugin-ver');
+      this.setAttribute('title', '当前安装的版本（来自插件清单）');
+      pluginVersion(this.getAttribute('name') || '')
+        .then((v) => {
+          if (!v) {
+            this.hidden = true;
+            return;
+          }
+          this.textContent = 'v' + v;
+        })
+        .catch(() => {
+          this.hidden = true;
+        });
+    }
+  }
+
+  if (!customElements.get('p-plugin-ver')) customElements.define('p-plugin-ver', PPluginVer);
+
   // 给不需要元素、只想拿主题/版本的地方
   window.PanelUI = {
     theme: () => document.documentElement.getAttribute('data-theme') || 'light',
@@ -1693,6 +1748,7 @@
     fmtLogTime: pFmtLogTime,
     hint: pHint,
     busy: pBusy,
+    pluginVersion,
     api: pApi,
     ApiError: PanelApiError,
   };

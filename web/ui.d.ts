@@ -66,6 +66,9 @@ declare const PanelUI: {
   fmtLogTime(ms?: number): string;
   /** 提示行：写文案 + 上色；传空串清空并去色。 */
   hint(el: Element | string | null, text: unknown, kind?: PanelHintKind): void;
+  /** 当前插件的版本（来自面板读的清单）。插件页可直接用，别自己再读一遍 package.json。 */
+  pluginVersion(name?: string): Promise<string>;
+
   /** 忙碌态：`on=true` 禁用并换文案，`on=false` 还原原文案。 */
   busy(btn: Element | null, on: boolean, label?: string): void;
 

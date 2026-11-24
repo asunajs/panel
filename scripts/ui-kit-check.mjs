@@ -25,6 +25,7 @@ const dir = mkdtempSync(path.join(tmpdir(), 'kitcheck-'));
 for (const d of ['plugins', 'scripts']) mkdirSync(path.join(dir, d), { recursive: true });
 cpSync(path.join(ROOT, 'plugins/webui-demo.js'), path.join(dir, 'plugins/webui-demo.js'));
 cpSync(path.join(ROOT, 'plugins/webui-demo.webui'), path.join(dir, 'plugins/webui-demo.webui'), { recursive: true });
+cpSync(path.join(ROOT, 'plugins/webui-demo.panel.json'), path.join(dir, 'plugins/webui-demo.panel.json'));
 
 const panelBin = path.join(ROOT, 'target/debug/panel');
 const panel = spawn(panelBin, [], {
@@ -428,6 +429,14 @@ async function main() {
   check('p-log 清空回到空态（「（还没有日志）」）并归零行数',
     logClear.lines === 0 && logClear.empty === true && logClear.emptyText === '（还没有日志）'
       && /显示 0 行/.test(logClear.meta), JSON.stringify(logClear));
+
+  // <p-plugin-ver>：从 /api/plugins/files 读清单版本，渲染成 v<ver>
+  await sleep(400); // 元素在 connectedCallback 里异步取版本（这一页就是插件页）
+  const pv = await js(`(function(){var el=document.getElementById('demo-ver');return el ? [el.textContent, el.hidden, el.className] : null;})()`);
+  check('p-plugin-ver：渲染成 v<清单版本>', !!pv && pv[0] === 'v0.0.1' && pv[1] === false && /plugin-ver/.test(pv[2]), JSON.stringify(pv));
+
+  const pvApi = await js(`PanelUI.pluginVersion('webui-demo')`);
+  check('PanelUI.pluginVersion：插件页能拿到清单版本', pvApi === '0.0.1', String(pvApi));
 
   // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });

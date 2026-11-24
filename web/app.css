@@ -1699,6 +1699,19 @@ select option { background: var(--surface); color: var(--fg); }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
+.plugin-ver {
+  display: inline-flex;
+  align-items: center;
+  font: 500 11.5px/1 var(--mono);
+  color: var(--dim);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.plugin-ver[hidden] { display: none; }
+
 .badge {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 1px 8px; border-radius: 999px; font-size: 11.5px; line-height: 1.6;
