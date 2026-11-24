@@ -3666,6 +3666,47 @@ async function createPlugin() {
 // 规则只有一条要记住：**包的 `panel` 必须与当前面板版本精确相同**。面板一升级，
 // 旧包自动失效、回到内置（内置那份就是新版本带的界面），用户不需要额外做什么。
 
+/// 面板页自己的确认框（`.modal` 那套，和 #clash 同观感）。
+///
+/// ⚠ 别用 `PanelUI.confirm()`：那是**插件页**的套件（`/ui.js`），面板首页根本没引它，
+/// 调了就是 `PanelUI is not defined` —— async 函数里抛的话连报错都看不到，
+/// 表现成「点了按钮没反应」（第 265 轮实测踩到，白查半小时）。
+function panelConfirm(opts) {
+  const o = opts || {};
+  const wrap = el('div', 'modal ui-confirm');
+  wrap.setAttribute('role', 'dialog');
+  wrap.setAttribute('aria-modal', 'true');
+  const back = el('div', 'modal-backdrop');
+  const card = el('div', 'modal-card');
+  card.append(el('h2', '', o.title || '确认'));
+  if (o.text) card.append(el('p', 'muted', o.text));
+  const acts = el('div', 'actions');
+  const cancel = el('button', 'btn', o.cancelLabel || '取消');
+  cancel.type = 'button';
+  const ok = el('button', 'btn ' + (o.danger ? 'btn-danger' : 'btn-primary'), o.okLabel || '确定');
+  ok.type = 'button';
+  acts.append(cancel, ok);
+  card.append(acts);
+  wrap.append(back, card);
+  document.body.append(wrap);
+  return new Promise((resolve) => {
+    const done = (v) => {
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(v);
+    };
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); done(false); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); done(true); }
+    };
+    cancel.addEventListener('click', () => done(false));
+    ok.addEventListener('click', () => done(true));
+    back.addEventListener('click', () => done(false));
+    document.addEventListener('keydown', onKey);
+    ok.focus();
+  });
+}
+
 /// 装完之后**不自动启用**：多一步让人看清"装了什么"，装坏了也不至于当场换脸。
 async function installUiPack(file) {
   const status = $("ui-status");
@@ -3710,7 +3751,7 @@ async function resetUiPack() {
     return need !== "" && state.ui && state.ui.source === "pack";
   });
   if (dep.length) {
-    const ok = await PanelUI.confirm({
+    const ok = await panelConfirm({
       title: "回到内置界面？",
       text: "有 " + dep.length + " 个插件声明了界面共用件版本（" +
         dep.map((p) => p.name).join("、") + "）。回到内置后它们可能按 min_ui 停用。",
@@ -3736,14 +3777,17 @@ async function checkUiPackUpdate(force) {
   } catch (e) {
     state.uiLatest = { available: false, error: e.message || '查不到' };
   }
+  // 两处都要重画：设置页那一块，以及**顶栏 pill**（它可能正是靠这条才冒头的）。
+  // 只画一块的话，结论回来了但入口一直不出现 —— 第 265 轮实测踩到。
   renderUiPack();
+  renderUpdate();
 }
 
 /// 一键应用：下载 → 校验（sha256 由安装接口对内联 url 的 https 通道兜着）→ 装 → 启用。
 async function applyUiPackUpdate() {
   const u = state.uiLatest || {};
   if (!u.available || !u.url) return;
-  const ok = await PanelUI.confirm({
+  const ok = await panelConfirm({
     title: '应用界面包 ' + u.version + '？',
     text: '只换前端资源，不动二进制、不重启。装完会立刻启用，刷新页面即见。',
     okLabel: '应用',
@@ -3771,6 +3815,8 @@ async function loadUiPack() {
     state.uiInstalled = (d && d.installed) || [];
     state.uiLoaded = true;
     if ($("ui-status")) $("ui-status").textContent = "";
+    // 换过包之后顶栏 pill 的判据也变了（`state.ui.version` 参与比较），一起重画。
+    renderUpdate();
   } catch (e) {
     // 失败**不置位** loaded：下一次进设置页会重试（10 秒节流见 renderSettings）
     if ($("ui-status")) $("ui-status").textContent = "查不到界面包：" + e.message;
@@ -3795,7 +3841,10 @@ function renderUiPack() {
   clear(box);
   // 先摆「有新界面包」那一行（来自面板仓的 ui-* release，6 小时缓存）
   const latest = state.uiLatest || {};
-  if (latest.available && latest.version !== (cur.version || "")) {
+  // 已经装过那一版就**不再提示"应用"**：下面那行「启用」才是该点的按钮，
+  // 否则同一个版本会在列表里出现两次（一次「应用」、一次「启用」），看着像两个东西。
+  const alreadyInstalled = (state.uiInstalled || []).some((it) => it.version === latest.version);
+  if (latest.available && latest.version !== (cur.version || "") && !alreadyInstalled) {
     const row = el("div", "ui-pack-row ui-pack-new");
     const label = el("div", "ui-pack-label");
     label.append(el("code", "", latest.version));

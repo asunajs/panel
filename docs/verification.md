@@ -565,3 +565,32 @@ ui-check **252**、ui-kit **70**、mobile-check **8 页**、`ui-pack --check`、
    `min_ui` 会**静默放行**。改成任意段、短补零、逐段比较。
 3. **界面包 zip 的「剥外层目录」** —— 无脑剥会把 `css/components.css` 剥成 `components.css`，
    白名单立刻拒装。判据改成「所有条目第一段相同 且 不是 `css`」。
+
+## 界面包走完真实链路（第 265 轮，2026-11-24）
+
+前面那节验的是「本地装包」；这一节验的是**从 tag 到用户点上按钮**的整条路。
+
+| 环节 | 读数 |
+|---|---|
+| 发 tag | `git push ssh-origin ui-v0.8.3.1` → CI `UI release` 跑 **1m07s**（只装 node + 打包，没编译 Rust） |
+| Release | tag `ui-v0.8.3.1`，`isPrerelease=true`，资产 2 个：`panel-ui-0.8.3.1.zip` + `UI-SHA256SUMS` |
+| latest 没被抢 | `curl -sI .../releases/latest` → `location: .../releases/tag/v0.8.3`（面板新版照旧） |
+| 下载 + 校验 | zip **305,189 字节**，sha256 `68f86872…` 与 `UI-SHA256SUMS` 里那一行逐字相同 |
+| 发现 | `GET /api/ui/check` → `available:true, version:0.8.3.1, panel:0.8.3`，url/sums 都是**拼出来的**（`synthesized:true`，没花 API 额度） |
+| 一键应用（真点按钮） | 设置 → 界面 → 「应用」→ 确认框（取消/应用）→ 约 **17.5 秒**后 `state.ui = {source:"pack",version:"0.8.3.1"}`，列表变「正在使用」 |
+| 页面真的换了 | `panel.min.js?v=0.8.3.1`；服务端 `panel.min.js` = 224,703 字节 = 包内那份 |
+| 面板更新检查不受影响 | 同一次会话里 `/api/update/check` 仍是「已是最新（v0.8.3）」 |
+| pill 行为 | 没装过且仓库有新包 → 「有新界面 0.8.3.1」；装过但未启用 → 隐藏（列表里给「启用」）；已是当前 → 隐藏 |
+
+### 这一轮自己踩的四个坑（前三进 pitfalls 265，第四个是新的一类）
+
+1. **工作流 YAML 非法**：`run: |` 里的 notes 正文顶格写，把块标量截断 → 整个文件解析失败，
+   GitHub 对**每次** push 都建一条 0 秒失败记录（连 tag 那条也是 0s）。改用 printf 写 notes.md + `--notes-file`。
+   教训：`actionlint`（或任意 YAML 解析器）过一遍再推，别信「看着像 YAML」。
+2. **tag 指到了坏文件的那个提交**：修完 YAML 只推了 main，`ui-v0.8.3.1` 还指着旧 commit，
+   于是「修了还是 0s 失败」。→ 改 tag 要连 tag 一起重指（`git tag -f && git push --force`）。
+3. **面板首页没有 `PanelUI`**：`/ui.js` 是插件页的套件，首页只引 `panel.min.js`。
+   在 app.js 里 `await PanelUI.confirm(...)` 是 `undefined`，async 里抛出去连报错都看不见 ——
+   表现成「点按钮没反应」。现在有 `panelConfirm()`（`.modal` 那套，和 `#clash` 同观感）。
+4. **异步结果回来了但只重画了一半界面**：`checkUiPackUpdate()` 只 `renderUiPack()`，
+   顶栏 pill 一直不冒头；换包后 pill 也不消。两处都补了 `renderUpdate()`。

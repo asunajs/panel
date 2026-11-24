@@ -868,3 +868,18 @@ fn ver_le(a: &[u64], b: &[u64]) -> bool
 但 `css/reset.css` 的第一段 `css` 是**真目录**不是外层包装 —— 无脑剥会把
 `css/components.css` 剥成 `components.css`，白名单立刻不认（实测报错：「界面包里出现了
 不允许的文件 components.css」）。判据：所有条目第一段相同 **且** 那一段不是 `css`。
+
+## 266. 面板首页没有 `PanelUI`；异步结果回来要**两处都重画**
+
+**① `PanelUI` 只在插件页存在。** `/ui.js` 是给插件用的套件，`index.html` 只引
+`panel.min.js` / `panel.min.css` / `theme-boot.js`。所以在 `web/app.js` 里写
+`await PanelUI.confirm(...)` 是 `undefined` —— 而它在 async 函数里抛出去**连报错都看不到**，
+用户侧表现就是「点了按钮没反应」。面板页自己确认框用 `panelConfirm()`（`.modal` 那套，
+和 `#clash` 同观感，带 `ui-confirm` 标记类给测试定位）。
+
+**② 异步检查回来只 `renderUiPack()` 不够。** 顶栏 pill 的判据也吃同一份数据
+（`state.uiLatest` / `state.ui.version`），只画设置页那一块的话：检查回来了但入口永远不出现、
+换完包 pill 还在喊「有新界面」。凡是「一处数据两处渲染」，两处都要重画。
+
+**③ 改 tag 要连 tag 一起重指。** 修完 workflow 只推了 `main`，`ui-v*` 还指着旧 commit，
+于是「修了还是 0 秒失败」。`git tag -f <tag> <sha> && git push --force origin <tag>`。

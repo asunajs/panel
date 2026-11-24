@@ -1648,6 +1648,10 @@ async function main() {
 
   // 检查更新（第 210 轮）：顶栏 pill 只在**有新版且没被「不再提示」**时出现，
   // 设置页有「当前版本 + 检查更新 + 最新版本」。
+  // 界面包那条通道也要钉死：这条检查跑在**真网络**上，而仓库里可能真有一个
+  // 与当前版本匹配的 `ui-v*` release（第 265 轮实测：它会让 pill 冒出来，把下面的
+  // 「没有新版时不冒泡」判红）。所以先把它清成「没有」，需要验它时再单独注入。
+  await js("state.uiLatest={available:false};renderUpdate();1");
   const upd = JSON.parse(await js(
     "JSON.stringify((()=>{const pill=document.getElementById('update-pill');" +
     "const cur=document.getElementById('update-current');" +
@@ -1692,8 +1696,30 @@ async function main() {
   ));
   check('点「不再提示」会记下版本并收起提示',
     updSkip.hidden === true && updSkip.skip === '9.9.9', JSON.stringify(updSkip));
+  // 界面包也走同一个入口（第 265 轮）：面板没新版时，只有界面包可更新也要冒头。
+  // 分两步做（注入 → 读），别塞进一个大 IIFE —— 出错时看不出是哪一段炸的。
+  await js("state.update={};state.ui={source:'builtin',version:'0.8.3'};" +
+    "state.uiLatest={available:true,version:'9.9.9'};renderUpdate();1");
+  await sleep(200);
+  const uiPillA = JSON.parse(await js(
+    "JSON.stringify((()=>{const p=document.getElementById('update-pill');" +
+    "return {hidden:p.classList.contains('hidden'),label:p.textContent.trim()};})())"
+  ));
+  check('只有界面包有新时顶栏也提示（面板没新版也能装）',
+    uiPillA.hidden === false && /9\.9\.9/.test(uiPillA.label || ''), JSON.stringify(uiPillA));
+
+  await js("state.ui={source:'pack',version:'9.9.9'};renderUpdate();1");
+  await sleep(200);
+  const uiPillB = JSON.parse(await js(
+    "JSON.stringify((()=>{const p=document.getElementById('update-pill');" +
+    "return {hidden:p.classList.contains('hidden')};})())"
+  ));
+  check('已用上那一版界面包就不再提示', uiPillB.hidden === true, JSON.stringify(uiPillB));
+
+  await js("state.ui={source:'builtin',version:state.version};state.uiLatest={available:false};renderUpdate();1");
+
   // 收尾：把这个假版本清掉，别让后面的断言看到「有新版」
-  await js("(async()=>{await skipUpdate('');state.update={};renderUpdate();return 1;})()");
+  await js("(async()=>{await skipUpdate('');state.update={};state.uiLatest={available:false};renderUpdate();return 1;})()");
   await sleep(300);
 
   await js("document.querySelector('[data-tab=security]').click()");
