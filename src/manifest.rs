@@ -123,6 +123,20 @@ pub struct Manifest {
     pub version: String,
     /// 需要的最低面板版本；不满足就不加载（硬挡，不是警告）。
     pub min_panel: String,
+    /// 需要的**插件共用件**（`/ui.js`、`/app.css`、`/css/*.css`）最低版本。
+    ///
+    /// 为什么会有第二个版本维度：面板的界面可以靠「界面包」热更新（见 `crate::ui_pack`），
+    /// 而 `/ui.js` / `/app.css` 是**插件也在用的对外契约**。某个插件如果依赖界面包里才有的
+    /// 能力（比如新组件的修单），光写 `min_panel` 表达不了 —— 面板版本够了但没装补丁包，
+    /// 插件照样会坏在半截。这个字段就是给它准备的：
+    ///
+    ///   · 不写（默认）= 只要面板版本够就行，不关心界面包 —— 现有插件零改动；
+    ///   · 写了 = 当前**生效的**共用件版本必须 ≥ 它。生效版本 = 装了界面包就是包版本，
+    ///     没装就是面板版本本身（内置那份与面板版本一一对应）。
+    ///
+    /// ⚠ 能用 `min_panel` 表达的就别用它：`min_panel` 要求用户升级面板（自带新共用件），
+    /// 是更强、更省心的保证；`min_ui` 只在「接受用户在老面板上装补丁包」时才用。
+    pub min_ui: String,
     pub capabilities: Vec<String>,
     /// 面板打开（前端每次加载）时要调用的插件路由，例如 `api/updates`。
     ///
@@ -158,6 +172,7 @@ impl Manifest {
             "description": self.description,
             "version": self.version,
             "min_panel": self.min_panel,
+            "min_ui": self.min_ui,
             "on_panel_open": self.on_panel_open,
             "capabilities": self.capabilities,
             "nav": self.nav.as_ref().map(|n| json!({"title": n.title, "order": n.order})),
@@ -290,6 +305,7 @@ pub fn parse(v: &Value) -> Manifest {
         description: s(v, "description"),
         version: s(v, "version"),
         min_panel: s(v, "min_panel"),
+        min_ui: s(v, "min_ui"),
         on_panel_open: s(v, "on_panel_open"),
         capabilities: v
             .get("capabilities")
@@ -525,15 +541,34 @@ pub fn parse(v: &Value) -> Manifest {
 }
 
 /// "0.4.0" → (0, 4, 0)。解析不了的段当 0（版本号不该因为多写个后缀就整个失效）。
-fn ver(v: &str) -> (u64, u64, u64) {
+/// 版本串 → 数字段（**几段都行**，缺的按 0 补）。
+///
+/// ⚠ 以前写死取前三段，于是 `0.8.3.9` 与 `0.8.3.1` 都被截成 `0.8.3`、比出来相等 ——
+/// 界面包的版本是 `<面板版本>.<序号>`（四段），插件写 `min_ui: 0.8.3.9` 会被**静默放行**。
+/// 现在按「逐段比较、短的补零」来，四段/五段都正确。
+fn ver(v: &str) -> Vec<u64> {
     let core = v.trim().trim_start_matches('v');
     let core = core.split(['-', '+']).next().unwrap_or(core);
-    let mut it = core.split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0));
-    (
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-        it.next().unwrap_or(0),
-    )
+    let mut out: Vec<u64> = core
+        .split('.')
+        .map(|p| p.trim().parse::<u64>().unwrap_or(0))
+        .collect();
+    while out.len() < 3 {
+        out.push(0);
+    }
+    out
+}
+
+/// 逐段比较（短的补 0）。`a <= b` 就是「要求 a 得到 b 才算满足」。
+fn ver_le(a: &[u64], b: &[u64]) -> bool {
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let (x, y) = (*a.get(i).unwrap_or(&0), *b.get(i).unwrap_or(&0));
+        if x != y {
+            return x < y;
+        }
+    }
+    true
 }
 
 /// 面板版本够不够插件要求的。
@@ -541,7 +576,25 @@ pub fn version_ok(min_panel: &str, current: &str) -> bool {
     if min_panel.trim().is_empty() {
         return true;
     }
-    ver(min_panel) <= ver(current)
+    ver_le(&ver(min_panel), &ver(current))
+}
+
+/// 这个插件的版本前提满足吗？不满足就返回**给人看的一句话**（直接进日志与界面）。
+///
+/// 两个维度一起判，顺序是面板 → 界面：面板不够时先劝升级面板（那是更强、更省心的保证），
+/// 面板够了但界面共用件不够，才提示去装界面包。
+pub fn unmet(m: &Manifest, ui_version: &str) -> Option<String> {
+    let panel = crate::panelversion::current();
+    if !version_ok(&m.min_panel, panel) {
+        return Some(format!("需要面板 >= {}（当前 {panel}），跳过加载", m.min_panel));
+    }
+    if !version_ok(&m.min_ui, ui_version) {
+        return Some(format!(
+            "需要界面共用件 >= {}（当前 {ui_version}）—— 到「设置 → 界面」应用对应的界面包后重试",
+            m.min_ui
+        ));
+    }
+    None
 }
 
 // ---------------------------------------------------------------- 扫描

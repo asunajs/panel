@@ -16,6 +16,10 @@ const state = {
   version: '',
   /** 平台名（windows / macos / linux），来自 /api/state。界面据此换文案与默认值。 */
   os: '',
+  /** 界面资源来源（内置 / 界面包）：来自 /api/state 的 `ui`（第 265 轮）。 */
+  ui: { source: 'builtin', version: '' },
+  /** 装过的界面包版本（`GET /api/ui` 的 installed）。 */
+  uiInstalled: [],
   auth: false,
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
@@ -3652,6 +3656,135 @@ async function createPlugin() {
   }
 }
 
+// ---------------------------------------------------------------- 设置：界面包（第 265 轮）
+//
+// 干什么：让「只改了前端」的改动不必重发整个二进制。装一包 300 KB 的 zip，
+// 应用后刷新即生效 —— 不换 `panel` 二进制、不重启进程。
+//
+// 规则只有一条要记住：**包的 `panel` 必须与当前面板版本精确相同**。面板一升级，
+// 旧包自动失效、回到内置（内置那份就是新版本带的界面），用户不需要额外做什么。
+
+/// 装完之后**不自动启用**：多一步让人看清"装了什么"，装坏了也不至于当场换脸。
+async function installUiPack(file) {
+  const status = $("ui-status");
+  if (status) status.textContent = "正在上传…";
+  try {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch("/api/ui/install", {
+      method: "POST",
+      headers: Object.assign(
+        { "x-panel": "1", "content-type": "application/octet-stream" },
+        state.token ? { "x-panel-token": state.token } : {},
+      ),
+      body: buf,
+    });
+    const text = await resp.text().catch(() => "");
+    if (!resp.ok) throw new Error(text.trim() || "HTTP " + resp.status);
+    const d = JSON.parse(text);
+    if (status) status.textContent = "已装上 " + d.version + "（还没启用）";
+    toast("界面包 " + d.version + " 已装上，点这一行的「启用」生效");
+    await loadUiPack();
+  } catch (e) {
+    if (status) status.textContent = "装不上：" + e.message;
+    toast("界面包装不上：" + e.message, true);
+  }
+}
+
+async function activateUiPack(version) {
+  try {
+    const d = await api("/api/ui/activate", { method: "POST", body: { version }, write: true });
+    state.ui = d.current || state.ui;
+    toast("已启用界面包 " + version + "，刷新页面即见");
+    await loadUiPack();
+  } catch (e) {
+    toast("启用失败：" + e.message, true);
+  }
+}
+
+async function resetUiPack() {
+  // 依赖这个包的插件在切回内置后会按 `min_ui` 停用 —— 先说清，再让人决定。
+  const dep = (state.plugins || []).filter((p) => {
+    const need = p.min_ui || "";
+    return need !== "" && state.ui && state.ui.source === "pack";
+  });
+  if (dep.length) {
+    const ok = await PanelUI.confirm({
+      title: "回到内置界面？",
+      text: "有 " + dep.length + " 个插件声明了界面共用件版本（" +
+        dep.map((p) => p.name).join("、") + "）。回到内置后它们可能按 min_ui 停用。",
+      okLabel: "仍然回到内置",
+    });
+    if (!ok) return;
+  }
+  try {
+    const d = await api("/api/ui/reset", { method: "POST", body: {}, write: true });
+    state.ui = d.current || { source: "builtin" };
+    toast("已回到内置界面");
+    await loadUiPack();
+  } catch (e) {
+    toast("重置失败：" + e.message, true);
+  }
+}
+
+async function loadUiPack() {
+  try {
+    const d = await api("/api/ui");
+    state.ui = (d && d.current) || (state.ui || { source: "builtin" });
+    state.uiInstalled = (d && d.installed) || [];
+    state.uiLoaded = true;
+    if ($("ui-status")) $("ui-status").textContent = "";
+  } catch (e) {
+    // 失败**不置位** loaded：下一次进设置页会重试（10 秒节流见 renderSettings）
+    if ($("ui-status")) $("ui-status").textContent = "查不到界面包：" + e.message;
+  }
+  renderUiPack();
+}
+
+function renderUiPack() {
+  const cur = state.ui || { source: "builtin" };
+  const now = $("ui-current");
+  if (now) {
+    now.textContent = cur.source === "pack" ? "界面包 " + (cur.version || "?") : "内置（" + (cur.version || state.version) + "）";
+  }
+  const note = $("ui-current-note");
+  if (note) {
+    note.textContent = cur.source === "pack"
+      ? "给面板 " + (cur.panel || "?") + " · " + (cur.files || 0) + " 个文件"
+      : "编在二进制里，跟着面板版本走";
+  }
+  const box = $("ui-list");
+  if (!box) return;
+  clear(box);
+  const list = state.uiInstalled || [];
+  if (list.length === 0) {
+    box.append(el("p", "settings-note", "还没装过界面包。"));
+    return;
+  }
+  for (const it of list) {
+    const row = el("div", "ui-pack-row");
+    const label = el("div", "ui-pack-label");
+    label.append(el("code", "", it.version));
+    label.append(el("span", "cfg-unit",
+      it.error ? "（这个包装不上：" + it.error + "）"
+        : (it.panel ? " 给面板 " + it.panel : "") + (it.files ? " · " + it.files + " 个文件" : "")));
+    row.append(label);
+    const acts = el("div", "cfg-inline");
+    if (it.active) {
+      acts.append(el("span", "cfg-unit", "正在使用"));
+    } else if (it.usable === false) {
+      acts.append(el("span", "cfg-unit", "版本不匹配，不能启用"));
+    } else {
+      const b = el("button", "btn btn-sm", "启用");
+      b.type = "button";
+      b.addEventListener("click", () => activateUiPack(it.version));
+      acts.append(b);
+    }
+    row.append(acts);
+    box.append(row);
+  }
+}
+
+/// 顶栏那个 pill 也认「只有界面包可用」：面板没新版时，别把这条渠道藏起来。
 // ---------------------------------------------------------------- 设置
 
 const SETTINGS_TABS = ["general", "config", "security", "notify", "data"];
@@ -5965,6 +6098,7 @@ function renderSettings() {
     ),
   );
 
+  renderUiPack();
   const sec = $("settings-security");
   clear(sec);
   sec.append(kvList([
@@ -6355,6 +6489,10 @@ function setView(name) {
   if (!isPlugin && !VIEWS[name]) name = 'dashboard';
   state.view = name;
   const viewKey = isPlugin ? 'plugin' : name;
+  // 进设置页时拉一次"装过哪些界面包"（`/api/state` 只带当前来源）。
+  // 放在这里而不是 renderSettings 里：那边每 5 秒轮询都会重跑，会变成请求风暴；
+  // 也不靠"上次试过的时间戳"来猜 —— 切页本来就该是最新的一份。
+  if (viewKey === 'settings') loadUiPack();
   // 切走日志页就把它的 DOM 倒掉：那几百行只在它可见时才有用，
   // 留着就是让隐藏视图替整个页面背一份节点（回来时 renderLogs() 会按 state.logs 重建）。
   if (viewKey !== 'logs') {
@@ -6423,6 +6561,8 @@ async function refresh() {
     state.pending = data.pending || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
+  // 界面资源来源（内置 / 界面包）：设置页那块与插件 min_ui 的解释都靠它
+  if (data.ui) state.ui = data.ui;
     // 平台：脚本运行时的默认值、自启动的做法、路径示例都要跟着它变。
     state.os = data.os || '';
     // 磁盘余量 + 面板占用（服务端 30 秒缓存好的快照）
@@ -7111,6 +7251,14 @@ function bind() {
   $('topbar-logout').addEventListener('click', logoutPanel);
   $('plugin-upload').addEventListener('change', () =>
     uploadFile('plugin-upload', '/api/plugins/upload', '已上传插件'));
+  // 界面包：上传 → 装上（不启用）；「启用」在列表那一行上单独点
+  $('ui-install').addEventListener('click', () => $('ui-upload').click());
+  $('ui-upload').addEventListener('change', () => {
+    const f = $('ui-upload').files && $('ui-upload').files[0];
+    if (f) installUiPack(f);
+    $('ui-upload').value = '';
+  });
+  $('ui-reset').addEventListener('click', resetUiPack);
   $('new-plugin-ok').addEventListener('click', createPlugin);
   $('new-plugin-name').addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); createPlugin(); }

@@ -315,6 +315,30 @@
                   <div id="update-box"></div>
                 </div>
               </section>
+              <section class="panel" id="ui-pack-panel">
+                <header class="panel-head"><h2>界面</h2></header>
+                <div class="panel-body">
+                  <p class="muted">
+                    面板自己的界面默认<b>编在二进制里</b>。装了「界面包」就用包里的那套 —— 只改样式/交互的
+                    更新可以这样装，<b>不用换二进制、不用重启</b>。包里的版本必须与当前面板版本一致，
+                    否则会被忽略（面板一升级就自动回到内置那份）。
+                  </p>
+                  <div class="cfg-row">
+                    <span class="cfg-label">当前来源</span>
+                    <div class="cfg-inline">
+                      <code id="ui-current">—</code>
+                      <span class="cfg-unit" id="ui-current-note"></span>
+                    </div>
+                  </div>
+                  <div id="ui-list" class="ui-pack-list"></div>
+                  <div class="cfg-inline" style="margin-top:10px">
+                    <input id="ui-upload" type="file" accept=".zip" hidden />
+                    <button class="btn btn-sm" id="ui-install" type="button">上传界面包…</button>
+                    <button class="btn btn-sm" id="ui-reset" type="button">回到内置界面</button>
+                    <span class="cfg-unit" id="ui-status"></span>
+                  </div>
+                </div>
+              </section>
               <section class="panel">
                 <header class="panel-head"><h2>重启进程</h2></header>
                 <div class="panel-body">

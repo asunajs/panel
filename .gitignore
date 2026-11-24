@@ -18,3 +18,6 @@ perf-run/mirror/
 perf-run/mirror-b/
 perf-run/runs/
 perf-run/logs/
+
+# 界面包产物（`node tools/ui-pack.mjs` 打出来的 zip）：随 Release 走，不入库
+/dist/

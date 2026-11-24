@@ -24,6 +24,8 @@ mod notify;
 mod outbound;
 mod plan;
 mod pluginfs;
+mod ui_pack;
+mod ui_cli;
 mod zlibsync;
 mod jsslots;
 mod ratelimit;
@@ -104,6 +106,8 @@ async fn main() -> Result<(), String> {
         }
         // 从 0.3.x 面板搬插件状态：离线动作，不启动服务（第 150 轮）
         Some("plugin") => return plugin_cli::run(&args[1..]).await,
+        // 界面包也是离线动作（直接改 <data>/ui/），不启动服务
+        Some("ui") => return ui_cli::run(&args[1..]).await,
         // 口令重置是离线动作（要直接写 auth.json），同样放在起服务之前
         Some("token") => return token_cli::run(&args[1..]),
         Some("migrate") => return migrate::run(&args[1..]),
@@ -303,6 +307,24 @@ async fn main() -> Result<(), String> {
     // 加载进度照旧写日志，界面能立刻打开（这时插件列表会短暂显示「未加载」）。
 
 
+    // 界面包（`<data>/ui/`）：能装载就用它，装不上就用编进二进制的那份。
+    // 放在这里是因为有两处要它：① 插件的 `min_ui` 判定；② `AppState` 里给 `asset()` 用。
+    let (ui_pack, ui_notes) = crate::ui_pack::boot(&data_dir);
+    for (warn, msg) in ui_notes {
+        log.emit(
+            "panel",
+            None,
+            if warn { Level::Warn } else { Level::Info },
+            msg,
+        );
+    }
+    // 「生效的插件共用件版本」：装了包就是包版本，没装就是面板版本本身
+    // （内置那份 web/ 与面板版本一一对应，这是打包时保证的）。
+    let ui_version = ui_pack
+        .as_ref()
+        .map(|p| p.version.clone())
+        .unwrap_or_else(|| crate::panelversion::current().to_string());
+
     // 插件在后台加载：监听先起来，界面立刻能打开。
     let plugins_dir_for_load = plugins_dir.clone();
     let _load_task = {
@@ -311,13 +333,14 @@ async fn main() -> Result<(), String> {
         let db = db.clone();
         let errs = load_errors.clone();
         let cfg = config.clone();
+        let ui_version = ui_version.clone();
         tokio::spawn(async move {
             // 先把「暂停」名单装回调度器，**再**加载插件：反过来的话，插件注册完的
             // 第一拍就能把「暂停中的任务」跑掉（第 167 轮的顺序坑）。
             for name in crate::db::plugin_suspended_names(&db).await {
                 let _ = sched.set_suspended(&name, true).await;
             }
-            load_all(&plugins_dir_for_load, &sched, &log, &db, &errs, &cfg).await;
+            load_all(&plugins_dir_for_load, &sched, &log, &db, &errs, &cfg, &ui_version).await;
         })
     };
 
@@ -346,6 +369,8 @@ async fn main() -> Result<(), String> {
         load_errors: load_errors.clone(),
         // 可热替换：`/api/setup` 设完口令当场生效，不用重启（第 87 轮）。
         auth: Arc::new(std::sync::RwLock::new(provisioned.auth.map(Arc::new))),
+        // 界面包同样可热替换：应用/回到内置都不重启进程。
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(ui_pack)),
     };
     let app = web::router(st);
     let listener = tokio::net::TcpListener::bind(addr)
@@ -382,6 +407,8 @@ async fn load_all(
     db: &db::Db,
     errors: &web::LoadErrors,
     cfg: &std::sync::Arc<config_store::ConfigStore>,
+    // 当前**生效的**插件共用件版本（装了界面包 = 包版本；否则 = 面板版本）。
+    ui_version: &str,
 ) {
     // 先把磁盘上现有的插件都记进扫描快照：否则「这轮没加载」的插件会被报成「新增」
     // （按需加载跳过的、停用的都算）。见 manifest::seed 的注释。
@@ -456,12 +483,9 @@ async fn load_all(
         // 软警告在这里没用 —— 插件跑在不匹配的宿主上，坏起来是随机崩。
         match crate::manifest::load(dir, &name) {
             Ok(Some(m)) => {
-                if !crate::manifest::version_ok(&m.min_panel, env!("CARGO_PKG_VERSION")) {
-                    let why = format!(
-                        "需要面板 >= {}（当前 {}），跳过加载",
-                        m.min_panel,
-                        env!("CARGO_PKG_VERSION")
-                    );
+                // 版本前提（面板 + 界面共用件）是**硬挡**：软警告在这里没用，
+                // 插件跑在不匹配的宿主上，坏起来是随机崩。
+                if let Some(why) = crate::manifest::unmet(&m, ui_version) {
                     log.emit("panel", None, Level::Error, format!("插件 {name} {why}"));
                     if let Ok(mut g) = errors.lock() {
                         g.insert(name.clone(), why);

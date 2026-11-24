@@ -78,6 +78,43 @@ CSP 是 `default-src 'self'; script-src 'self'; style-src 'self'`（`src/web.rs`
 调样式时不想重编译，就设 `PANEL_WEB_DIR=web` —— 资源改成每次请求从磁盘读。
 **这是开发口子**：开了之后「二进制里的界面」和「实际发出的界面」可能不是同一份，生产别开。
 
+### 3.1 界面包：只改前端时不必重发面板
+
+「改一行 CSS 就得重编译整个二进制」这条被界面包解掉了：
+
+```bash
+node tools/ui-pack.mjs            # → dist/panel-ui-<面板版本>.<序号>.zip（~300 KB，可复现）
+```
+
+面板**设置 → 界面**上传 → 「启用」→ 刷新即见。也可以走接口
+（面板正在跑时用它，热替换、不用重启）：
+
+```bash
+POST /api/ui/install    # body 就是那个 zip（或 {"url":"https://…","sha256":"…"}）
+POST /api/ui/activate   {"version":"0.8.3.1"}
+POST /api/ui/reset      # 回到内置
+panel ui status|install|activate|reset    # 离线版（改磁盘，重启后生效）
+```
+
+规则只有一条：**包的 `ui.json` 里 `panel` 必须与当前面板版本精确相同**（semver 归一后相等）。
+面板一升级，旧包立刻不匹配 → 自动回到内置那份（内置就是这次发版带的 `web/`），
+所以「带后端的改动」永远由面板发版承载，用户不需要额外下载任何东西。
+
+三档优先级（改样式时按这个顺序理解）：
+
+| 优先级 | 来源 | 什么时候 |
+|---|---|---|
+| 1 | `PANEL_WEB_DIR` | 开发态：正在改 `web/` 里的文件 |
+| 2 | 界面包 | 装了且版本匹配 |
+| 3 | 内置（`include_str!`） | 默认；包缺失/坏/不匹配时的退路 |
+
+失败一律回退、不白屏：缺必需文件 / sha256 不符 / manifest 坏 ⇒ 整包不启用（日志一句 `warn`），
+单个可选文件缺了就那一个走内置。逃生口：**`/?ui=builtin`**（种 1 小时 cookie，全部走内置）。
+
+插件如果依赖界面包里才有的共用件（`/ui.js`、`/app.css`、`/css/*.css`），在清单里写
+**`min_ui`**（见 [plugin-contract.md](plugin-contract.md) 的 R15）：加载期硬挡，
+并把「去设置 → 界面应用」这句人话写进插件列表。
+
 ### 4. 数据来源
 
 | 用途 | 接口 | 频率 |

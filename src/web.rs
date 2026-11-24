@@ -57,6 +57,54 @@ const OLD_CSS: [(&str, &str); 3] = [
     ("components.css", include_str!("../web/css/components.css")),
 ];
 
+/// 界面资源的来源：**界面包**（`<data>/ui/`）或编译进二进制的那份。
+///
+/// 为什么单独一个类型而不是散在 `asset()` 里读 env：它要能被**热替换**（应用/停用界面包
+/// 不用重启），还要能被 `/api/state` 描述出来（界面要告诉用户"你现在用的是哪一份"）。
+pub struct UiAssets {
+    pack: std::sync::RwLock<Option<std::sync::Arc<crate::ui_pack::UiPack>>>,
+}
+
+impl UiAssets {
+    pub fn new(pack: Option<std::sync::Arc<crate::ui_pack::UiPack>>) -> Self {
+        Self { pack: std::sync::RwLock::new(pack) }
+    }
+
+    /// 取一个资源；`None` = 用内置那份（逐文件回退，缺一个不至于整页白）。
+    pub fn get(&self, file: &str) -> Option<std::sync::Arc<str>> {
+        let g = self.pack.read().unwrap_or_else(|p| p.into_inner());
+        g.as_ref().and_then(|p| p.get(file))
+    }
+
+    /// 换一包（`None` = 回到内置）。**不重启**：下一次请求就用新的。
+    pub fn set(&self, pack: Option<std::sync::Arc<crate::ui_pack::UiPack>>) {
+        let mut g = self.pack.write().unwrap_or_else(|p| p.into_inner());
+        *g = pack;
+    }
+
+    /// 当前生效的**插件共用件版本**：装了包是包版本，没装是面板版本（内置与面板同源）。
+    pub fn version(&self) -> String {
+        let g = self.pack.read().unwrap_or_else(|p| p.into_inner());
+        match g.as_ref() {
+            Some(p) => p.version.clone(),
+            None => crate::panelversion::current().to_string(),
+        }
+    }
+
+    /// 给 `/api/state` 的描述（不含内容）。
+    pub fn describe(&self) -> Value {
+        let g = self.pack.read().unwrap_or_else(|p| p.into_inner());
+        match g.as_ref() {
+            Some(p) => p.describe(),
+            None => json!({
+                "source": "builtin",
+                "version": crate::panelversion::current(),
+                "files": 0,
+            }),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
@@ -84,6 +132,8 @@ pub struct AppState {
     /// 原来它是只读的 `Option`，于是 `/api/setup` 写完 auth.json 只能提示「重启生效」——
     /// 用户设完口令被挡在门外，还得自己重启一次。现在设完立即生效并当场登录。
     pub auth: std::sync::Arc<std::sync::RwLock<Option<Arc<crate::auth::Auth>>>>,
+    /// 界面资源来源（内置 / 界面包）。可热替换，见 [`UiAssets`]。
+    pub ui: Arc<UiAssets>,
 }
 
 impl AppState {
@@ -515,6 +565,8 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
 }
 
 pub fn router(st: AppState) -> Router {
+    // 静态资源处理器要各自持一份（`asset_route` 按值收，闭包要 'static）
+    let ui = st.ui.clone();
     let api = Router::new()
         .route("/api/state", get(api_state))
         .route("/api/health", get(api_health))
@@ -524,6 +576,11 @@ pub fn router(st: AppState) -> Router {
         .route("/api/update/skip", post(api_update_skip))
         .route("/api/update/download", post(api_update_download))
         .route("/api/config/reload", post(api_config_reload))
+        // 界面包（第 265 轮）：查现状 / 装 / 激活 / 回到内置
+        .route("/api/ui", get(api_ui_state))
+        .route("/api/ui/install", post(api_ui_install))
+        .route("/api/ui/activate", post(api_ui_activate))
+        .route("/api/ui/reset", post(api_ui_reset))
         .route("/api/plugins/files", get(plugin_files))
         // 清单与扫描（第 172 轮）
         .route("/api/plugins/scan", get(api_plugins_scan))
@@ -668,43 +725,42 @@ pub fn router(st: AppState) -> Router {
         )
         .route("/api/logout", post(api_logout))
             .route("/", get(index_page))
-        .route("/app.js", get(|| async {
-            asset(APP_JS, "text/javascript; charset=utf-8", "app.js")
-        }))
-        .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8", "app.css") }))
+        .route("/app.js", asset_route(ui.clone(), APP_JS, "text/javascript; charset=utf-8", "app.js"))
+        .route("/app.css", asset_route(ui.clone(), APP_CSS, "text/css; charset=utf-8", "app.css"))
         .route(
             "/panel.min.css",
-            get(|| async { asset(MIN_CSS, "text/css; charset=utf-8", "panel.min.css") }),
+            asset_route(ui.clone(), MIN_CSS, "text/css; charset=utf-8", "panel.min.css"),
         )
         .route(
             "/panel.min.js",
-            get(|| async { asset(MIN_JS, "text/javascript; charset=utf-8", "panel.min.js") }),
+            asset_route(ui.clone(), MIN_JS, "text/javascript; charset=utf-8", "panel.min.js"),
         )
         .route(
             "/schedule.js",
-            get(|| async { asset(SCHEDULE_JS, "text/javascript; charset=utf-8", "schedule.js") }),
+            asset_route(ui.clone(), SCHEDULE_JS, "text/javascript; charset=utf-8", "schedule.js"),
         )
-        .route("/theme-boot.js", get(|| async {
-            asset(THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js")
-        }))
-        .route("/ui.js", get(|| async { asset(UI_JS, "text/javascript; charset=utf-8", "ui.js") }))
+        .route(
+            "/theme-boot.js",
+            asset_route(ui.clone(), THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js"),
+        )
+        .route("/ui.js", asset_route(ui.clone(), UI_JS, "text/javascript; charset=utf-8", "ui.js"))
         // 编辑器高亮（第 173 轮）：自己写的极简 tokenizer，为零构建服务
         .route(
             "/highlight.js",
-            get(|| async { asset(HIGHLIGHT_JS, "text/javascript; charset=utf-8", "highlight.js") }),
+            asset_route(ui.clone(), HIGHLIGHT_JS, "text/javascript; charset=utf-8", "highlight.js"),
         )
         // 套件样板页（第 175 轮）：插件作者照着这一页抄，比读文档快
         .route(
             "/ui-kit",
-            get(|| async { asset(UI_KIT_HTML, "text/html; charset=utf-8", "ui-kit.html") }),
+            asset_route(ui.clone(), UI_KIT_HTML, "text/html; charset=utf-8", "ui-kit.html"),
         )
         .route(
             "/ui-kit.css",
-            get(|| async { asset(UI_KIT_CSS, "text/css; charset=utf-8", "ui-kit.css") }),
+            asset_route(ui.clone(), UI_KIT_CSS, "text/css; charset=utf-8", "ui-kit.css"),
         )
         .route(
             "/ui-kit.js",
-            get(|| async { asset(UI_KIT_JS, "text/javascript; charset=utf-8", "ui-kit.js") }),
+            asset_route(ui.clone(), UI_KIT_JS, "text/javascript; charset=utf-8", "ui-kit.js"),
         )
         .route("/css/{*rel}", get(panel_css))
         // 匿名存活探针：不带任何面板状态，便于外部拨测
@@ -728,7 +784,31 @@ pub fn router(st: AppState) -> Router {
 ///
 /// 设了 PANEL_WEB_DIR=<目录> 就改成**每次请求从磁盘读**：只为调样式时不用重编译。
 /// 这是开发口子，别在生产上开 —— 它让「二进制里的界面」和「实际发出的界面」可能不是一份。
-fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
+fn asset(ui: &UiAssets, embedded: &'static str, ct: &'static str, file: &str) -> Response {
+    asset_with(ui, embedded, ct, file, false)
+}
+
+fn asset_with(
+    ui: &UiAssets,
+    embedded: &'static str,
+    ct: &'static str,
+    file: &str,
+    force_builtin: bool,
+) -> Response {
+    // 三档优先级：**开发口子 > 界面包 > 内置**
+    //
+    // `PANEL_WEB_DIR` 排最前是刻意的：它是"我正在改 web/ 里的文件"的信号，
+    // 那时磁盘上的源文件才是真相；装了界面包反而会让开发态看到旧东西。
+    // 门禁脚本（ui-check / ux-smoke）也靠它，行为不能变。
+    if !force_builtin && std::env::var_os("PANEL_WEB_DIR").is_none() {
+        if let Some(text) = ui.get(file) {
+            return (
+                [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "no-store")],
+                text.to_string(),
+            )
+                .into_response();
+        }
+    }
     let body = match std::env::var_os("PANEL_WEB_DIR") {
         Some(dir) => {
             let path = std::path::PathBuf::from(dir).join(file);
@@ -753,6 +833,38 @@ fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
         .into_response()
 }
 
+
+/// 「这次请求要**用内置界面**」吗？两个来源：cookie `panel-ui=builtin`（页面级逃生口）。
+///
+/// 为什么要有它：界面包是一段会被浏览器执行的代码。万一某个包把页面搞白屏，
+/// 用户得有一条**不依赖界面**的路回到能用的状态 —— `/?ui=builtin` 会种下这个 cookie，
+/// 之后静态资源全部走内置，界面恢复后再用设置页把包停掉。
+///
+/// 它只在**装了包**时才有意义；没装包时这个 cookie 什么也不影响。
+fn wants_builtin(h: &HeaderMap) -> bool {
+    h.get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|c| {
+            c.split(';')
+                .any(|kv| kv.trim().replace(' ', "") == "panel-ui=builtin")
+        })
+        .unwrap_or(false)
+}
+
+/// 一条静态资源路由。抽出来是因为 13 条路由的形状完全一样，
+/// 而它们现在都要拿到「界面包还是内置」这一份状态（`UiAssets`）。
+fn asset_route(
+    ui: Arc<UiAssets>,
+    embedded: &'static str,
+    ct: &'static str,
+    file: &'static str,
+) -> axum::routing::MethodRouter<AppState> {
+    axum::routing::get(move |h: HeaderMap| {
+        let ui = ui.clone();
+        async move { asset_with(&ui, embedded, ct, file, wants_builtin(&h)) }
+    })
+}
+
 /// 面板首页：index 的资源引用（app.js / app.css）带上**版本查询串**。
 ///
 /// 为什么要版本化：更早的版本发资源不带任何缓存头，浏览器把 app.js 缓进了磁盘，
@@ -760,12 +872,22 @@ fn asset(embedded: &'static str, ct: &'static str, file: &str) -> Response {
 /// （实测：服务端 232KB 的新 app.js，页面里加载的是 196KB 的旧货）。URL 带上
 /// 面板版本之后，升级 = URL 变化 = 缓存自然失效。asset() 的 no-store 只保护
 /// 新条目，管不了旧条目。
-async fn index_page() -> Response {
-    let v = crate::panelversion::current();
+async fn index_page(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    // `/?ui=builtin`：逃生口。种一个小时的 cookie，之后静态资源也走内置
+    // （否则会出现「内置的 index + 包里的 app.js」这种更糟的混搭）。
+    let escape = q.get("ui").map(|v| v == "builtin").unwrap_or(false);
+    // 版本串带上界面包：换包 = URL 变化 = 浏览器不会拿旧的对着新的猜。
+    let v = st.ui.version();
     let body = match std::env::var_os("PANEL_WEB_DIR") {
         Some(dir) => std::fs::read_to_string(std::path::PathBuf::from(dir).join("index.html"))
             .unwrap_or_else(|e| format!("读 index.html 失败: {e}")),
-        None => INDEX.to_string(),
+        None => match st.ui.get("index.html").filter(|_| !escape) {
+            Some(t) => t.to_string(),
+            None => INDEX.to_string(),
+        },
     };
     let body = body
         .replace("/app.js\"", &format!("/app.js?v={v}\""))
@@ -775,18 +897,28 @@ async fn index_page() -> Response {
         .replace("/panel.min.css\"", &format!("/panel.min.css?v={v}\""))
         // 首帧主题脚本也是阻塞资源：不跟版本的话，升级后仍可能吃旧缓存。
         .replace("/theme-boot.js\"", &format!("/theme-boot.js?v={v}\""));
-    (
+    let mut resp = (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")],
         body,
     )
-        .into_response()
+        .into_response();
+    if q.get("ui").map(|v| v == "builtin").unwrap_or(false) {
+        // 逃生口带 1 小时：够用户把页面救回来、顺手去设置里停掉那个包。
+        if let Ok(v) = header::HeaderValue::from_str(
+            "panel-ui=builtin; Path=/; Max-Age=3600; SameSite=Lax",
+        ) {
+            resp.headers_mut().insert(header::SET_COOKIE, v);
+        }
+    }
+    resp
 }
 
 /// 插件界面引的 /css/*（见 [OLD_CSS]）。白名单，不做通用静态目录。
-async fn panel_css(Path(rel): Path<String>) -> Response {
+async fn panel_css(State(st): State<AppState>, Path(rel): Path<String>) -> Response {
     for (name, body) in OLD_CSS {
         if rel == name {
-            return asset(body, "text/css; charset=utf-8", &format!("css/{name}"));
+            let file = format!("css/{name}");
+            return asset(&st.ui, body, "text/css; charset=utf-8", &file);
         }
     }
     (StatusCode::NOT_FOUND, "没有这个样式表").into_response()
@@ -1883,6 +2015,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
     stats["js_memory_total"] = json!(total);
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // 界面资源的来源：内置 or 界面包。插件清单里的 `min_ui` 就是拿它比。
+        "ui": st.ui.describe(),
         // 平台名（windows / macos / linux）：界面据此换文案与脚本运行时的默认值。
         // 不放进 env vars 让用户猜 —— 界面自己该知道自己在哪。
         "os": crate::platform::os_name(),
@@ -1969,6 +2103,7 @@ async fn plugin_reload(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    gate_versions(&st, &name).await?;
     let source = read_source(&st.plugins_dir, &name).await?;
     // 磁盘上的文件可能被编辑器改坏了。先把「上一次能跑的源码」拿到手，
     // 装不回去就把这份装回去 —— 否则点一次「重载」会把能跑的插件变成消失。
@@ -2557,6 +2692,7 @@ async fn plugin_enable(
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
+    gate_versions(&st, &name).await?;
     let source = read_source(&st.plugins_dir, &name).await?;
     // 顺序：**先加载成功再落库**。反过来的话加载失败时库里已经写着「启用」，
     // 界面和现实就对不上（下次启动还会再试一次、再失败一次）。
@@ -5859,4 +5995,156 @@ async fn api_notifications_read(
     crate::notify::mark_read(&st.db, ids).await.map_err(internal)?;
     let unread = crate::notify::unread(&st.db).await.map_err(internal)?;
     Ok(Json(json!({ "ok": true, "unread": unread })))
+}
+
+// ---------------------------------------------------------------- 界面包（第 265 轮）
+//
+// 这一组接口只干一件事：让「只改了前端」的改动不必重发整个二进制。
+// 装进来的东西是**静态资源**，所以：
+//   · 必须过写接口这道闸（`x-panel` + 令牌），和装插件同档；
+//   · 只认 https://（http 必须自带 sha256），和 `plugins_install` 同口径；
+//   · 校验版本必须与当前面板**精确相等** —— 包里的 JS 要调这个二进制的接口。
+
+/// `GET /api/ui` —— 现在用的是哪一份、装过哪些版本。
+async fn api_ui_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let root = crate::ui_pack::root(&st.data_dir);
+    Ok(Json(json!({
+        "ok": true,
+        "current": st.ui.describe(),
+        "installed": crate::ui_pack::list(&root),
+        "path": root.display().to_string(),
+    })))
+}
+
+/// `POST /api/ui/install {url, sha256}` 或直接 POST zip 字节。
+///
+/// 装完**不自动激活**：多一步让人看清「装了什么」，装坏了也不至于当场换脸。
+async fn api_ui_install(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let ct = h
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let data = if body.first() == Some(&b'{') || ct.starts_with("application/json") {
+        let req: Value = serde_json::from_slice(&body)
+            .map_err(|e| bad(format!("请求体不是 JSON: {e}")))?;
+        let url = req.get("url").and_then(Value::as_str).unwrap_or("").trim();
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(bad("只接受 http(s) 地址，或者直接 POST zip 字节".to_string()));
+        }
+        let want = req.get("sha256").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        if url.starts_with("http://") && want.is_none() {
+            return Err(bad(
+                "http:// 装界面包必须带 sha256（明文通道挡不住替换）；要省事就用 https://".to_string(),
+            ));
+        }
+        let data = crate::install::download(url).await.map_err(bad)?;
+        crate::install::verify_sha256(&data, want).map_err(bad)?;
+        data
+    } else {
+        body.to_vec()
+    };
+    if data.is_empty() {
+        return Err(bad("上传内容为空".to_string()));
+    }
+    let root = crate::ui_pack::root(&st.data_dir);
+    let got = tokio::task::spawn_blocking(move || crate::ui_pack::install_zip(&root, &data))
+        .await
+        .map_err(|e| internal(format!("安装任务异常: {e}")))?
+        .map_err(bad)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "装了界面包 {}（给面板 {}，{} 个文件，{} 字节，sha256 {}…）—— 还没启用",
+            got.version,
+            got.panel,
+            got.files,
+            got.bytes,
+            &got.sha256[..12.min(got.sha256.len())]
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "version": got.version,
+        "panel": got.panel,
+        "files": got.files,
+        "bytes": got.bytes,
+        "sha256": got.sha256,
+        "activated": false,
+    })))
+}
+
+/// `POST /api/ui/activate {version}` —— 换上并**立刻生效**（不用重启）。
+async fn api_ui_activate(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    JsonBody(body): JsonBody<Value>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let version = body.get("version").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if version.is_empty() {
+        return Err(bad("要给 version（`GET /api/ui` 里 installed 的那些）".to_string()));
+    }
+    let root = crate::ui_pack::root(&st.data_dir);
+    let pack = tokio::task::spawn_blocking(move || crate::ui_pack::activate(&root, &version))
+        .await
+        .map_err(|e| internal(format!("激活任务异常: {e}")))?
+        .map_err(bad)?;
+    let ver = pack.version.clone();
+    st.ui.set(Some(pack));
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!("界面包 {ver} 已启用（刷新页面即见；不重启进程）"),
+    );
+    Ok(Json(json!({ "ok": true, "current": st.ui.describe() })))
+}
+
+/// `POST /api/ui/reset` —— 回到内置界面（版本目录留着，随时能再启用）。
+async fn api_ui_reset(
+    State(st): State<AppState>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let root = crate::ui_pack::root(&st.data_dir);
+    tokio::task::spawn_blocking(move || crate::ui_pack::reset(&root))
+        .await
+        .map_err(|e| internal(format!("重置任务异常: {e}")))?
+        .map_err(bad)?;
+    st.ui.set(None);
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        "已回到内置界面（面板二进制里那份）".to_string(),
+    );
+    Ok(Json(json!({ "ok": true, "current": st.ui.describe() })))
+}
+
+/// 加载前的版本前提检查（面板版本 + 界面共用件版本）。
+///
+/// `main.rs` 启动加载走的是同一套判定（`manifest::unmet`）；这里是**重载 / 启用**那条路 ——
+/// 少了它，插件就能靠点一下「重载」绕过 `min_panel` / `min_ui`，坏在半截。
+async fn gate_versions(st: &AppState, name: &str) -> Result<(), ApiError> {
+    let Ok(Some(m)) = crate::manifest::load(&st.plugins_dir, name) else {
+        return Ok(()); // 没清单 / 读不动：交给后面真正的加载去报错
+    };
+    match crate::manifest::unmet(&m, &st.ui.version()) {
+        Some(why) => {
+            let msg = format!("插件 {name} {why}");
+            st.log.emit("panel", None, crate::log::Level::Warn, msg.clone());
+            if let Ok(mut g) = st.load_errors.lock() {
+                g.insert(name.to_string(), why.clone());
+            }
+            Err(bad(format!("{name}：{why}")))
+        }
+        None => Ok(()),
+    }
 }

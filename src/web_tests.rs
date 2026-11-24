@@ -32,6 +32,7 @@ async fn setup() -> (Router, Db) {
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
     };
     (router(st), db)
 }
@@ -88,6 +89,7 @@ async fn setup_authed() -> Router {
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
     })
 }
 /// 带响应头的版本：登录要读 Set-Cookie。
@@ -310,6 +312,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
     });
 
     let (status, _) = get(&app, "/api/state").await;
@@ -374,6 +377,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
     });
     let req = Request::get("/api/state")
         .header("host", "evil.example.com")
@@ -476,6 +480,7 @@ async fn setup_core_auth(
         auth: std::sync::Arc::new(std::sync::RwLock::new(
             token.map(|t| Arc::new(crate::auth::Auth::derive(t))),
         )),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
     };
     (router(st), plugins, data, store, db)
 }

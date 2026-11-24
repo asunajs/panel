@@ -380,3 +380,41 @@ fn seed_does_not_clobber_a_fingerprint_already_taken_this_boot() {
     assert_eq!(changed, vec!["p"], "已加载过又被改的文件仍要报改过: {out}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- 四段版本（界面包的 `<面板>.<序号>`）必须能比出大小（第 265 轮）
+//
+// 以前 `ver()` 只取前三段，`0.8.3.9` 和 `0.8.3.1` 都被截成 `0.8.3` ⇒ 插件写
+// `min_ui: 0.8.3.9` 会被静默放行，然后坏在半截。
+
+#[test]
+fn four_segment_versions_compare_correctly() {
+    assert!(manifest::version_ok("0.8.3.1", "0.8.3.1"));
+    assert!(manifest::version_ok("0.8.3.1", "0.8.3.2"), "1 ≤ 2");
+    assert!(!manifest::version_ok("0.8.3.9", "0.8.3.1"), "9 > 1 必须不满足");
+    assert!(!manifest::version_ok("0.8.3.2", "0.8.3.1"), "2 > 1 必须不满足");
+    // 段数不同要按 0 补齐，不能变成「前缀相等就算过」
+    assert!(manifest::version_ok("0.8", "0.8.0"));
+    assert!(!manifest::version_ok("0.9", "0.8.3"));
+    assert!(manifest::version_ok("", "0.8.3"), "没写 = 不要求");
+}
+
+#[test]
+fn unmet_reports_which_dimension_failed() {
+    // 面板版本不够：先说面板（更强、更省心的保证）
+    let m = manifest::parse(&json!({"min_panel": "99.0.0", "min_ui": "99.0.0"}));
+    let why = manifest::unmet(&m, "0.1.0").expect("应不满足");
+    assert!(why.contains("面板"), "{why}");
+
+    // 面板够、界面共用件不够：说界面，并指路
+    let m = manifest::parse(&json!({"min_panel": "0.0.1", "min_ui": "0.8.3.9"}));
+    let why = manifest::unmet(&m, "0.8.3.1").expect("应不满足");
+    assert!(why.contains("界面共用件"), "{why}");
+    assert!(why.contains("设置 → 界面"), "要给可操作的下一步: {why}");
+
+    // 两个都够：放行
+    let m = manifest::parse(&json!({"min_panel": "0.0.1", "min_ui": "0.8.3.1"}));
+    assert!(manifest::unmet(&m, "0.8.3.1").is_none());
+    // 不写 min_ui 的老插件不受影响
+    let m = manifest::parse(&json!({"min_panel": "0.0.1"}));
+    assert!(manifest::unmet(&m, "0.8.3").is_none());
+}
