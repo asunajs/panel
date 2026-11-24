@@ -576,3 +576,57 @@ fn catch_up_gives_up_on_a_long_dead_beat() {
     // 离谱的未来值（手改库 / 时区搬家）也不认
     assert_eq!(catch_up_at(now + CATCH_UP_MAX_MS + 1, now), None);
 }
+
+// ---- 恢复 override 不能吞掉「马上要跑的那一拍」（第 268 轮，用户报「咪咕今天没触发」）
+//
+// 现场：`override_expr` 是带 30m 抖动的 json；任务 12:05 那拍抖到 12:18。
+// 12:15 空闲唤醒 → 12:18 注册，`apply_saved` 走 `set_schedule()` 重算 = 22:05，
+// 于是 12:18 静默消失。日志里只有「空转结束」，一拍都没跑。
+
+#[test]
+fn restoring_an_override_keeps_the_imminent_beat() {
+    let now = Local::now();
+    // 插件注册的是「0 5 0,12,22」，用户那条 override 带 30m 抖动
+    let mut t = task("0 5 0,12,22 * * *");
+    t.set_schedule("json:{\"type\":\"expr\",\"expr\":\"0 5 0,12,22 * * *\",\"timezone\":\"Asia/Shanghai\",\"jitter\":\"30m\"}")
+        .expect("override 应该能解析");
+    // set_schedule 刚算出来的那一拍（按现在重算）——就是会被误当成「下一拍」的东西
+    let recomputed = t.next_fire;
+
+    // 库里记着的实际那一拍：两分钟后（模拟「唤醒时它就在眼前」）
+    let want = now + ChronoDuration::minutes(2);
+    restore_saved_beat(&mut t, Some(want.timestamp_millis()), now.timestamp_millis());
+    // 比毫秒：库里存的是 ms，`DateTime` 还原后会丢掉亚毫秒部分
+    assert_eq!(
+        t.next_fire.timestamp_millis(),
+        want.timestamp_millis(),
+        "恢复 override 之后必须仍指向库里那一拍，而不是被重算成 {recomputed}"
+    );
+    assert_eq!(
+        t.base_fire.timestamp_millis(),
+        want.timestamp_millis(),
+        "理论线也要跟着挪，否则跑完会按未来的 base 再推一拍"
+    );
+}
+
+#[test]
+fn restoring_a_long_dead_beat_is_refused() {
+    let now = Local::now();
+    let mut t = task("0 5 0,12,22 * * *");
+    let before = t.next_fire;
+    // 两周前的那一拍：超出补跑窗口，别半夜补跑一堆
+    let dead = now - ChronoDuration::days(14);
+    restore_saved_beat(&mut t, Some(dead.timestamp_millis()), now.timestamp_millis());
+    assert_eq!(t.next_fire.timestamp_millis(), before.timestamp_millis(), "太久远的那拍不该被恢复");
+}
+
+#[test]
+fn restoring_a_passed_beat_still_fires_it() {
+    let now = Local::now();
+    let mut t = task("0 5 0,12,22 * * *");
+    // 3 分钟前（刚过点、还在补跑窗口里）：要恢复成「到点了」，好让 fire_due 补跑
+    let beat = now - ChronoDuration::minutes(3);
+    restore_saved_beat(&mut t, Some(beat.timestamp_millis()), now.timestamp_millis());
+    assert_eq!(t.next_fire.timestamp_millis(), beat.timestamp_millis());
+    assert!(trigger_at(&t) <= now, "恢复之后应当立刻算「到点」");
+}

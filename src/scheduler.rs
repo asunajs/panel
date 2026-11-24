@@ -1209,6 +1209,27 @@ pub const CATCH_UP_MAX_MS: i64 = 7 * 24 * 3_600_000;
 /// 到点过去这么久还卡着，就当它没在装，重来一次（两条 Loaded 都到的话，后到的替换先到的）。
 pub const STUCK_WAKE_MS: i64 = 5 * 60_000;
 
+
+/// 把库里记着的那一拍（`next_at`）放回任务上。
+///
+/// 为什么需要它：`set_schedule()` 是「换调度」用的，它的语义是**按现在重算下一拍**；
+/// 而「加载插件时恢复用户改过的调度」不是换调度 —— 那一拍可能就在几分钟后（甚至已经过了
+/// 一两分钟，正等着补跑）。用 `set_schedule` 重算，等于把这一拍吞掉：
+///
+///   12:05 那一拍抖到 12:18 → 12:15 被唤醒 → 加载时恢复 override → 重算「下一拍」
+///   = 22:05 ⇒ **12:18 这一拍静默消失**，既不跑也不记。用户看到的就是「今天没触发」。
+///
+/// 已经在熔断/冷却里、或者太久远（超补跑窗口）的就不动它（`catch_up_at` 把关）。
+fn restore_saved_beat(t: &mut Task, saved_ms: Option<i64>, now_ms: i64) {
+    let Some(ms) = saved_ms else { return };
+    let Some(ms) = catch_up_at(ms, now_ms) else { return };
+    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
+        let at = dt.with_timezone(&Local);
+        t.base_fire = at;
+        t.next_fire = at;
+    }
+}
+
 /// 库里记着的那一拍，注册时还要不要照原样恢复成 next_fire。
 ///
 /// - 未来的：恢复（老代码就只认这种情况）。
@@ -2762,8 +2783,18 @@ impl Inner {
         }
         if let Some(expr) = s.override_expr {
             let (p, n) = (self.tasks[i].plugin.clone(), self.tasks[i].name.clone());
+            let saved_next = s.next_at;
             match self.tasks[i].set_schedule(&expr) {
-                Ok(()) => self.tasks[i].override_expr = Some(expr),
+                Ok(()) => {
+                    self.tasks[i].override_expr = Some(expr);
+                    // ⚠ set_schedule 是按「现在」重算的，会把**即将要跑的那一拍**抹掉。
+                    // 恢复 override 是「照旧」而不是「改计划」，所以要把库里那一拍放回去。
+                    restore_saved_beat(
+                        &mut self.tasks[i],
+                        saved_next,
+                        Local::now().timestamp_millis(),
+                    );
+                }
                 Err(e) => {
                     self.tasks[i].override_expr = None;
                     self.log.emit(
@@ -3027,20 +3058,11 @@ impl Inner {
                         // 第 220 轮：**已经过去的那一拍也恢复**（catch_up_at）。以前这里只认
                         // 「还没到」的时刻，于是按需加载的插件被唤醒晚了就静默丢一拍：
                         // 既不跑也不说，next 顺延，用户只看到「昨天跑了、今天没跑」。
-                        if let Some(saved) = self.saved.get(&(plugin.clone(), name.clone())) {
-                            if let Some(ms) = saved.next_at {
-                                if let Some(ms) = catch_up_at(ms, Local::now().timestamp_millis()) {
-                                    if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
-                                        let at = dt.with_timezone(&Local);
-                                        // 理论线一起挪：advance 是从 base_fire 往前推的，
-                                        // 只改 next_fire 不改 base_fire，跑完会按未来的 base
-                                        // 再推一次，白白跳掉一整拍。
-                                        t.base_fire = at;
-                                        t.next_fire = at;
-                                    }
-                                }
-                            }
-                        }
+                        let saved_next = self
+                            .saved
+                            .get(&(plugin.clone(), name.clone()))
+                            .and_then(|s| s.next_at);
+                        restore_saved_beat(&mut t, saved_next, Local::now().timestamp_millis());
                         // 不是安装/重装：先记成「待采纳」，不调度
                         t.pending_adopt = !adopt;
                         self.tasks.push(t);
