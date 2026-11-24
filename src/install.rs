@@ -64,8 +64,34 @@ fn check_name(name: &str) -> Result<(), String> {
 }
 
 /// 下载一个 URL 的**原始字节**（不是 lossy 文本）。
+///
+/// 第 267 轮起走 `gh::rewrite_all`：按「镜像 → 直连」逐个试，每个通道留一条读数。
+/// 以前的下载是单发直连 —— 配了镜像也没用，GitHub 一被墙插件就装不上。
+///
+/// ⚠ 还要防「镜像回 200 但内容是一张网页」：实测 `github.akams.cn?url=<资产>` 就是
+/// 200 + 33 KB 的 text/html。只看状态码会把网页当插件装进去。
 pub async fn download(url: &str) -> Result<Vec<u8>, String> {
-    download_with(url, MAX_BYTES, crate::ssrf::allow_private_outbound_targets()).await
+    let allow_private = crate::ssrf::allow_private_outbound_targets();
+    let want_zip = url.to_ascii_lowercase().contains(".zip");
+    let mut readings: Vec<String> = Vec::new();
+    let candidates = crate::gh::rewrite_all(url);
+    for cand in candidates.iter() {
+        match download_with(cand, MAX_BYTES, allow_private).await {
+            Ok(bytes) => {
+                if crate::gh::looks_like_html(&bytes) {
+                    readings.push(format!("{cand} → 200，但内容是网页（不是文件）"));
+                    continue;
+                }
+                if want_zip && !crate::gh::looks_like_zip(&bytes) {
+                    readings.push(format!("{cand} → 200，但不是 zip（{} 字节）", bytes.len()));
+                    continue;
+                }
+                return Ok(bytes);
+            }
+            Err(e) => readings.push(format!("{cand} → {e}")),
+        }
+    }
+    Err(format!("所有通道都没下成：\n  {}", readings.join("\n  ")))
 }
 
 /// 可测内核：上限与「放不放内网」都作为参数传进来，**不读环境**

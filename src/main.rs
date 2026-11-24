@@ -14,6 +14,7 @@ mod db;
 mod disk;
 mod engine;
 mod fsx;
+mod gh;
 mod hostapi;
 mod install;
 mod log;

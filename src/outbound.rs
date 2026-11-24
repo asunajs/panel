@@ -650,9 +650,11 @@ pub fn check_prefix(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 把 URL 改写成前缀代理形式。host 不在名单里（或没配前缀）就原样返回。
+/// 把 URL 改写成「第一条可用通道」。host 不在名单里就原样返回。
+///
+/// 第 267 轮起走 `gh`：`net.github_mirrors` 有序，插件拿到的第一条与面板自己用的一致。
 pub fn apply_prefix(url: &str) -> String {
-    rewrite(url, prefix())
+    crate::gh::apply(url)
 }
 
 /// `apply_prefix` 的可测版本：前缀当参数传，不读全局（测试要能造各种名单）。

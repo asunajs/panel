@@ -334,12 +334,55 @@ pub fn prefix_from_value(v: &Value) -> (String, Vec<String>) {
     (url, hosts)
 }
 
+/// GitHub 通道：`net.github_mirrors`（有序前缀，`""` = 直连）+ `net.github_token`。
+///
+/// 旧键 `net.prefix` 仍然生效：没写 `github_mirrors` 时它就是 mirrors 的第一项（老配置不变）。
+pub fn github_from_value(v: &Value) -> (Vec<String>, String) {
+    let net = v.get("net");
+    let list = |key: &str| -> Vec<String> {
+        match net.and_then(|n| n.get(key)) {
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .collect(),
+            Some(Value::String(s)) => s
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .map(|x| x.trim().to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut mirrors = list("github_mirrors");
+    mirrors.retain(|m| !m.is_empty() || true); // 空串有意保留（= 直连）
+    if mirrors.iter().all(|m| m.trim().is_empty()) {
+        // 没配新键 → 退回老的单前缀（空 = 直连）
+        let (pfx, _) = prefix_from_value(v);
+        let pfx = pfx.trim().to_string();
+        mirrors = if pfx.is_empty() {
+            crate::gh::DEFAULT_MIRRORS.iter().map(|s| s.to_string()).collect()
+        } else {
+            vec![pfx, String::new()]
+        };
+    }
+    let token = net
+        .and_then(|n| n.get("github_token"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (mirrors, token)
+}
+
 pub fn refresh_server(v: &Value) {
     // 出站代理也是热的（第 192 轮）：保存即换客户端，下一发请求就走新代理
     crate::outbound::set_proxy(&proxy_from_value(v));
     // 前缀代理（第 193 轮）：同样热生效，下一发 GitHub 请求就换个走法
     let (pfx, hosts) = prefix_from_value(v);
     crate::outbound::set_prefix(&pfx, &hosts);
+    // GitHub 通道（第 267 轮）：mirrors 有序 + token，面板自己和插件共用这一份
+    let (mirrors, token) = github_from_value(v);
+    crate::gh::set(mirrors, token, hosts);
     set_server(server_from_value(v).1);
     set_run_budget(
         v.get("run")
