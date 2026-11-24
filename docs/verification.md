@@ -952,6 +952,24 @@ PANEL_DATA_DIR —— 只能读 self_config()，账号改动将无法落盘」�
 ❓ 未验：真机「获取验证码」这条链路（会真发短信）。修复只证明「导致 502 的异常源没了」，
 短信下发要报障人复测。
 
+## 0.8.3 发版（2026-11-24）
+
+| 项 | 读数 |
+|---|---|
+| 版本 | `0.8.3`（Cargo.toml / Cargo.lock；`~/panel-3030/panel version` 验过） |
+| 范围 | `v0.8.2..HEAD` 7 个提交：版本药丸 / p-switch 点不动 / 停止回 200 / 日志带 UA / 同源错误合并 / 老库补列 |
+| 门禁 | cargo test **549**、clippy、docs、pitfalls、css-tokens、plugin-style、phone-leak、plugin-shared、plugin-compat（5 个一致）、web-build、ui-kit-check **70**、ui-check **252**、按需加载 / 唤醒 **5** / 补跑 **5** / cron 归属 **7** / 任务删除 **7** / 改口令 **14** / 插件边界 **10** 全过 |
+| 本轮新增 | `<p-plugin-ver>` + `PanelUI.pluginVersion()`；`<p-switch>` 可点；`runs` 老库补列 |
+| 配套插件 | 5 个仓的 `min_panel` 一起提到 `0.8.3`（`<p-plugin-ver>` 在 0.8.2 里并没有） |
+
+### 发版时踩到的两件事
+
+1. **能力表把 `<p-plugin-ver>` 记成了 0.8.2**：`git show v0.8.2:web/ui.js | grep -c p-plugin-ver` = 0 —— 它其实在 0.8.3。
+   当时为了过闸门，插件也跟着写了 0.8.2。发版时改正能力表，5 个插件的 `min_panel` 一起提上来；
+   顺手补了漏登记的 `PanelUI.pluginVersion`。
+2. **`check-plugin-boundary` 红**：`95c3b88` 给 `plugins/webui-demo` 加了清单，白名单没跟着加 ——
+   全门禁只有这一条红。白名单补 `webui-demo.panel.json` 后 10 条全过。
+
 ## 0.8.2 发版（2026-11-22）
 
 | 项 | 读数 |

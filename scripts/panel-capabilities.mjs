@@ -34,7 +34,7 @@ export const CAPABILITIES = [
   { id: 'ui.p-multiselect', since: '0.4.0', where: 'webui', pattern: /<p-multiselect\b/ },
   { id: 'ui.p-sms-code', since: '0.4.0', where: 'webui', pattern: /<p-sms-code\b/, note: '发码格（R11 要求用它）' },
   { id: 'ui.p-log', since: '0.7.0', where: 'webui', pattern: /<p-log\b/, note: '实时日志（R14 要求任务型插件用）' },
-  { id: 'ui.p-plugin-ver', since: '0.8.2', where: 'webui', pattern: /<p-plugin-ver\b/, note: '右上角版本药丸（版本来自清单，第 257 轮）' },
+  { id: 'ui.p-plugin-ver', since: '0.8.3', where: 'webui', pattern: /<p-plugin-ver\b/, note: '右上角版本药丸（版本来自清单，第 257 轮）' },
 
   // ── 面板 JS 面（window.PanelUI）────────────────────────────
   { id: 'PanelUI.confirm', since: '0.7.0', where: 'webui', pattern: /PanelUI\.confirm\s*\(/ },
@@ -43,6 +43,7 @@ export const CAPABILITIES = [
   { id: 'PanelUI.fmtTime', since: '0.8.0', where: 'webui', pattern: /PanelUI\.fmtTime\s*\(/ },
   { id: 'PanelUI.fmtLogTime', since: '0.8.0', where: 'webui', pattern: /PanelUI\.fmtLogTime\s*\(/ },
   { id: 'PanelUI.hint', since: '0.8.0', where: 'webui', pattern: /PanelUI\.hint\s*\(/ },
+  { id: 'PanelUI.pluginVersion', since: '0.8.3', where: 'webui', pattern: /PanelUI\.pluginVersion\s*\(/, note: '读插件的清单版本（配合 <p-plugin-ver>，第 257 轮）' },
   { id: 'PanelUI.busy', since: '0.8.0', where: 'webui', pattern: /PanelUI\.busy\s*\(/ },
   { id: 'PanelUI.esc', since: '0.8.0', where: 'webui', pattern: /PanelUI\.esc\s*\(/ },
   { id: 'PanelUI.api', since: '0.8.0', where: 'webui', pattern: /PanelUI\.api\s*\(/ },
