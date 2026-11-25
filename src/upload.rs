@@ -202,6 +202,75 @@ fn validate_plugin_shape(rels: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
+
+/// 把「一个插件摊成三件散件」的落点折叠成 `<name>/`（第 269 轮）。
+///
+/// 只在**zip 安装**这条路上做：单文件上传没有 `.panel.json` / `.webui` 可折。
+/// 判据：顶层名 `<X>.js` / `<X>.panel.json` / `<X>.webui` 且**同一个 X 至少有两件**
+/// （只有一件时保持原样 —— 那是别人手放的零散文件，别替他做主）。
+///
+/// 返回新的相对路径列表（已经加了一级 `<X>/`）；搬运时按新路径落盘。
+fn collapse_into_group(
+    written: &[PathBuf],
+    root: &Path,
+    overwrite: bool,
+    replaced: &mut Vec<String>,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    use std::collections::HashMap;
+    // 顶层名 → 属于哪个插件（X）
+    let mut owners: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, rel) in written.iter().enumerate() {
+        let Some(top) = rel.iter().next().and_then(|s| s.to_str()) else { continue };
+        for suffix in [".panel.json", ".webui", ".js"] {
+            if let Some(stem) = top.strip_suffix(suffix) {
+                // `a.b.js` 这种：stem 是 `a.b`，仍按 stem 分组
+                if !stem.is_empty() {
+                    owners.entry(stem.to_string()).or_default().push(i);
+                }
+                break;
+            }
+        }
+    }
+    let groups: Vec<String> = owners
+        .iter()
+        .filter(|(_, idxs)| idxs.len() >= 2)
+        .map(|(k, _)| k.clone())
+        .collect();
+    if groups.is_empty() {
+        return Ok(written.iter().map(|r| (r.clone(), r.clone())).collect());
+    }
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for rel in written.iter() {
+        let Some(top) = rel.iter().next().and_then(|s| s.to_str()) else {
+            out.push((rel.clone(), rel.clone()));
+            continue;
+        };
+        let owner = [".panel.json", ".webui", ".js"]
+            .iter()
+            .find_map(|suf| top.strip_suffix(*suf).filter(|st| groups.iter().any(|g| g == st)));
+        match owner {
+            Some(g) => {
+                let mut p = PathBuf::from(g);
+                p.push(rel);
+                // 目标位置可能已存在：按覆盖语义先判一次（错误信息指向新路径，别让人猜）
+                let dest = root.join(&p);
+                if dest.exists() && !overwrite {
+                    return Err(format!(
+                        "文件已存在: {}（要覆盖请显式勾选覆盖）",
+                        p.display()
+                    ));
+                }
+                if dest.exists() {
+                    replaced.push(p.display().to_string());
+                }
+                out.push((rel.clone(), p));
+            }
+            None => out.push((rel.clone(), rel.clone())),
+        }
+    }
+    Ok(out)
+}
+
 fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Saved, String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("不是有效的 zip: {e}"))?;
@@ -417,10 +486,20 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         written.push(rel.clone());
     }
 
+    // 收拢形状（第 269 轮）：装进来的插件落成 `<name>/<name>.js + <name>.panel.json + <name>.webui/`，
+    // 不再往 plugins/ 顶层摊三个散件。老机制的发现顺序仍然认散件，所以这里只是**落点**变了，
+    // 装法/校验/覆盖语义全不变。单文件上传（`<name>.js`）不折叠 —— 那本来就是「一个文件一个插件」。
+    let planned: Vec<(PathBuf, PathBuf)> = if kind == Kind::Plugins {
+        collapse_into_group(&written, root, overwrite, &mut replaced)?
+    } else {
+        written.iter().map(|r| (r.clone(), r.clone())).collect()
+    };
+
     // 解压完、形状验过 —— **现在才动 plugins/**（前面任何一步失败都不会留下半个包）。
     // 搬运复用 `write_file`（原子写 + 符号链接/目录拒绝 + 覆盖语义），不另开一条写盘路径。
-    for rel in &written {
-        let src = staging.join(rel);
+    for (from, rel) in &planned {
+        // 源在 staging 里是**原来的**相对路径（顶层散件），落点是折叠后的。
+        let src = staging.join(from);
         let parent = ensure_dir(root, rel.parent().unwrap_or(Path::new("")))?;
         let dest = parent.join(rel.file_name().unwrap());
         // 先判冲突/符号链接（与 write_file 同一套判据），再 rename —— 不覆盖时一个文件都不搬。
@@ -446,6 +525,11 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
             write_file(&dest, rel, &buf, true)?;
         }
     }
+    // 回报用**落点**路径（折叠后的），否则界面说「已装 mgmusic.js」而它其实在 mgmusic/ 里
+    files = planned
+        .iter()
+        .map(|(_, to)| to.to_string_lossy().replace('\\', "/"))
+        .collect();
     files.sort();
     replaced.sort();
     Ok(Saved {
@@ -996,3 +1080,57 @@ mod tests {
 #[cfg(test)]
 #[path = "upload_tests.rs"]
 mod extra_tests;
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    /// 一个插件摊成三件（`.js` + `.panel.json` + `.webui/`）要折进 `<name>/`；
+    /// 单件保持原样（那是别人手放的零散文件）。
+    #[test]
+    fn zip_install_lands_inside_the_plugin_dir() {
+        let rels: Vec<PathBuf> = [
+            "mgmusic.js",
+            "mgmusic.panel.json",
+            "mgmusic.webui/index.html",
+            "lonely.js",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let root = std::env::temp_dir().join(format!("panel-collapse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut replaced = Vec::new();
+        let planned = collapse_into_group(&rels, &root, true, &mut replaced).unwrap();
+        let dests: Vec<String> = planned
+            .iter()
+            .map(|(_, to)| to.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            dests,
+            vec![
+                "mgmusic/mgmusic.js".to_string(),
+                "mgmusic/mgmusic.panel.json".to_string(),
+                "mgmusic/mgmusic.webui/index.html".to_string(),
+                "lonely.js".to_string(),
+            ],
+            "三件套折进目录，单件不动"
+        );
+        // 源仍然是原来的顶层路径（搬运时从 staging 读它）
+        assert_eq!(planned[0].0, PathBuf::from("mgmusic.js"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn single_file_upload_is_not_collapsed() {
+        let rels = vec![PathBuf::from("quark.js")];
+        let root = std::env::temp_dir().join(format!("panel-collapse1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut replaced = Vec::new();
+        let planned = collapse_into_group(&rels, &root, true, &mut replaced).unwrap();
+        assert_eq!(planned[0].1, PathBuf::from("quark.js"), "只有一个文件时不折叠");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -23,9 +23,8 @@ function check(name, ok, detail) {
 
 const dir = mkdtempSync(path.join(tmpdir(), 'kitcheck-'));
 for (const d of ['plugins', 'scripts']) mkdirSync(path.join(dir, d), { recursive: true });
-cpSync(path.join(ROOT, 'plugins/webui-demo.js'), path.join(dir, 'plugins/webui-demo.js'));
-cpSync(path.join(ROOT, 'plugins/webui-demo.webui'), path.join(dir, 'plugins/webui-demo.webui'), { recursive: true });
-cpSync(path.join(ROOT, 'plugins/webui-demo.panel.json'), path.join(dir, 'plugins/webui-demo.panel.json'));
+// 收拢形状（第 269 轮）：整个目录搬过去，里面是 .js + .panel.json + .webui/
+cpSync(path.join(ROOT, 'plugins/webui-demo'), path.join(dir, 'plugins/webui-demo'), { recursive: true });
 
 const panelBin = path.join(ROOT, 'target/debug/panel');
 const panel = spawn(panelBin, [], {

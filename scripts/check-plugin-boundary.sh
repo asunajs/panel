@@ -19,7 +19,8 @@ bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 # 白名单 = 面板仓自己的样例：webui-demo 演示「.webui/ 静态界面」，
 #   webui-demo.panel.json 是它的清单（第 257 轮：<p-plugin-ver> 的版本从清单来），
 # preview-demo 演示「清单声明界面」（第 191 轮，没有 .webui/）。
-ALLOW='README.md hello.js.bak webui-demo.js webui-demo.webui webui-demo.panel.json preview-demo.js preview-demo.panel.json'
+# 第 269 轮起样例也收拢了：一个插件一个目录（plugins/webui-demo/ 里放三件套）。
+ALLOW='README.md hello.js.bak webui-demo preview-demo'
 
 # ① 白名单：磁盘上的 plugins/ 顶层条目
 stray=()

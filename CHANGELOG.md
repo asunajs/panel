@@ -8,6 +8,22 @@ patch 只修 bug。
 
 ---
 
+## 0.9.2（2026-11-25）
+
+**插件目录可以「一个插件一个目录」了。**
+
+- 新形状：`plugins/<name>/` 里放 `<name>.js`（或 `index.js`）+ `<name>.panel.json` +
+  `<name>.webui/`；一包多插件（`mcloud/` 里 4 个）也收得下。删插件 = 删一个目录。
+- **老形状继续支持**（顶层三件散件），发现顺序 `<name>.js` → `<name>/index.js` →
+  `<name>/<name>.js`，清单与界面也两级查找 —— 不迁移也能跑，迁移可选。
+- 新增 `scripts/migrate-plugin-layout.mjs`：`--dry` 预览、`--apply` 动手，
+  动手前整目录备份到 `<data>/backup-layout-<时间戳>/`；面板版本不够会拒绝执行。
+- 修一处收拢形状下的加载 bug：入口在属地子目录时（`mcloud/mcloud-daily/index.js`）
+  相对 import 的 base 必须指到入口文件，否则 `import '../lib.js'` 解析错、插件加载失败。
+  `module_root()` 现在统一由入口推导，调度器不再写死 `dir/<name>`。
+- 删除插件时按「属地目录」整目录进回收站，不再留孤儿清单；
+  源码备份 `<name>.js.bak` 跟着主文件走，不再落到顶层。
+
 ## 0.9.1（2026-11-24）
 
 **修「按需加载的插件到点不跑」—— 用户报咪咕音乐今天没触发。**
