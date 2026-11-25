@@ -141,6 +141,11 @@ fn trash_entries_are_parsed_in_both_generations() {
     // 认不出来的：不猜
     assert!(parse_trash_entry("随便一个目录").is_none());
     assert!(parse_trash_entry("notes.txt").is_none());
+    // 老脚本被删两次叠出来的名字：不能按插件解析（否则恢复出一个加载不起来的假插件）
+    assert!(
+        parse_trash_entry("script-demo-script-1794642865345.js").is_none(),
+        "script- 开头的不能猜成插件"
+    );
 }
 
 #[tokio::test]

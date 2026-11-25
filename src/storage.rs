@@ -364,6 +364,15 @@ pub fn parse_trash_entry(entry: &str) -> Option<Trashed> {
         }
     }
     // 老世代 · 插件：<name>-<stamp>.plugin|.js|.webui
+    //
+    // ⚠ `script-` 开头的不能按插件解析：老脚本删除写的是 `script-<name>-<stamp>`，
+    // 但它**没有扩展名约束**，同一个文件被删两次就会叠成
+    // `script-demo-script-1794642865345.js`（真机上就有这么一条）。按插件解析会把
+    // 「script-demo-script」当成插件名、恢复成 `plugins/script-demo-script.js` ——
+    // 凭空造一个加载不起来的插件。认不准就不猜，只留「彻底删」。
+    if entry.starts_with("script-") {
+        return None;
+    }
     for (suffix, to) in [
         (".plugin", "{name}"),
         (".js", "{name}.js"),
