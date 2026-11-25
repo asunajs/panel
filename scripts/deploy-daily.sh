@@ -62,8 +62,16 @@ FP_BEFORE="$(plugins_fp)"
 LIST_BEFORE="$(plugins_list)"
 
 cp target/release/panel "$DEST/panel.new"
-# **不要**顺手 codesign --force：换签名 = 换代码身份，macOS 会重新问一次「能不能访问那个卷」，
-# 而 launchd 里的后台进程问不了（会卡住）。第 134 轮实测：不重签照样能起。
+# 用**固定标识**做 ad-hoc 重签名（第 269 轮）。
+#
+# 为什么必须签：cargo 出来的二进制是 linker 签的 ad-hoc，标识是 `panel-<每次构建都变的哈希>`
+# —— 对 macOS 来说**每次重建都是另一个 app**。于是每换一次二进制就来一轮
+# 「正在验证 "panel-xxxx"…」，而且 TCC/卷权限也跟着重新问（第 134 轮那句「不要 codesign」
+# 就是踩在这个上：当时换签名导致后台进程卡在问权限的框上）。
+#
+# 现在反过来：**标识钉死成 `dev.local.panel`**，重建多少次都是同一个 app，
+# 验证与授权只发生一次。签名仍是 ad-hoc（不做公证，用户装 Release 那一份不受影响）。
+codesign --force --sign - --identifier dev.local.panel "$DEST/panel.new" 2>/dev/null || true
 mv "$DEST/panel.new" "$DEST/panel"
 
 # ── 脚本：面板自己的东西跟着一起搬 ──
