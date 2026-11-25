@@ -1,6 +1,6 @@
 //! 面板令牌：**磁盘上只有盐 + PBKDF2 哈希**，明文不落盘，也不留在进程环境里。
 //!
-//! 为什么需要这一层（实测，见 docs/verification.md §11）：
+//! 为什么需要这一层（实测，见 docs/api.md §1.5）：
 //! - 插件能 `import('fs')` 读任意文件，也能用 `process.env` 读**全部**环境变量。
 //!   探针在 `PANEL_TOKEN=secret123` 下从插件里直接读到了明文。
 //! - 所以「令牌存在哪」比「令牌怎么比」更要紧：落盘只留盐 + 哈希，
@@ -12,7 +12,7 @@
 //! 2. 只有盐和哈希时，攻击者只能对令牌做离线爆破。令牌本身是高熵随机串时这条路走不通；
 //!    PBKDF2 是给「运维图省事用了短口令」留的余量。
 //!
-//! 代价与取舍（都有一手读数，见 docs/verification.md §11）：
+//! 代价与取舍（都有一手读数，见 docs/api.md §1.5）：
 //! - 慢路径是 PBKDF2，成功过一次的令牌走内存 memo（存 sha256，不存明文）；
 //! - 同时只允许一份 KDF 在跑（`kdf_gate`），所以不管多少并发，CPU 上限是一核；
 //! - 超预算的尝试**拖延**而不是拒绝 —— 拒绝等于让未认证方能挡住正主登录。
@@ -39,7 +39,7 @@ const SALT_LEN: usize = 16;
 const HASH_LEN: usize = 32;
 /// PBKDF2 迭代数。**按构建 profile 分档**，理由是一手读数：
 /// debug 构建下 210_000 次迭代一次派生要 0.7s 量级，开发时每个请求卡这么久等于不能用；
-/// release 下 210_000 是 101ms（verification.md §11.1）。
+/// release 下 210_000 是 101ms（见 docs/api.md §1.5）。
 /// 文件里会记下实际用的迭代数，所以跨 profile 也能互相校验（弱的那份只是弱）。
 /// **部署用 release 构建** —— 这条写在 docs 里。
 #[cfg(debug_assertions)]
@@ -396,7 +396,7 @@ pub fn provision(data_dir: &Path, env_token: Option<String>) -> Result<Provision
 /// 从环境变量取令牌：**非 UTF-8 一律拒绝启动**。
 ///
 /// 不能把 `var_os` 的错误当成「没设置」：那会静默变成完全不鉴权（实测过，见
-/// verification.md §11）。也不能放过非 UTF-8 的值 —— LLRT 的 `process.env` 是
+/// docs/api.md §1.5）。也不能放过非 UTF-8 的值 —— LLRT 的 `process.env` 是
 /// `std::env::vars()` 的快照，遇到非 UTF-8 会 panic，而 panic 的消息里带着**明文**。
 pub fn token_from_env() -> Result<Option<String>, String> {
     match std::env::var_os(ENV_TOKEN) {

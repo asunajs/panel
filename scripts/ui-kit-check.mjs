@@ -399,8 +399,7 @@ async function main() {
     "lv:ls[1].querySelector('.term-lv').textContent.trim(),msg:ls[1].querySelector('.term-msg').textContent," +
     "empty:!!l.querySelector('.term-empty'),emptyText:(l.querySelector('.term-empty')||{}).textContent||'',meta:l.querySelector('.term-meta').textContent})})()"
   ));
-  // ⚠ 必须是「月-日 时:分:秒.毫秒」：只给时分秒的话隔天分不清是哪天，
-  //   面板自己的日志页在 2026-11-15 就被指过一次（review-20261115 C3），这是第二次。
+  // ⚠ 必须是「月-日 时:分:秒.毫秒」：只给时分秒的话隔天分不清是哪天。
   check('p-log 画行：epoch 毫秒变 MM-DD HH:MM:SS.mmm（跨天要能分辨），级别与正文分列',
     logPaint.n === 2 && logPaint.ts === true && logPaint.lv === 'warn' && logPaint.msg === '第二行',
     JSON.stringify(logPaint));

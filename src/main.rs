@@ -141,7 +141,7 @@ async fn main() -> Result<(), String> {
     // `<PANEL_DATA_DIR>/auth.json`，随即从进程环境里擦掉 —— 插件的 `process.env`
     // 读不到明文，拿到 auth.json 的人也不能把里面的哈希当令牌用。见 src/auth.rs。
     // 非 UTF-8 的值**不能**当成「没设置」：那会静默变成完全不鉴权（实测过，见
-    // verification.md §11）。所以这里用 var_os + 显式报错。
+    // docs/api.md §1.5）。所以这里用 var_os + 显式报错。
     let env_token = auth::token_from_env()?;
     let provisioned = auth::provision(&data_dir, env_token)?;
 

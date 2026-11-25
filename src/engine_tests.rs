@@ -1,7 +1,7 @@
 //! 引擎层测试：出站门、预算、取消归属。
 //!
 //! 这些判据都来自基线踩过的坑，不是假想场景：
-//! - 出站门：LLRT 自带的 fetch/net 绕过 SSRF（实测见 docs/verification.md 的 SSRF 判据（spike 时期实测））
+//! - 出站门：LLRT 自带的 fetch/net 绕过 SSRF（实测见 docs/host-api.md 的 SSRF 判据）
 //! - 预算：0.3.1 的固定 50ms 切片把正常的长挂起打断成 `InternalError: interrupted`
 //! - 取消归属：R1 High 停 A 打断了 B，还把 B 记成失败
 
@@ -153,7 +153,7 @@ async fn a_non_utf8_env_var_does_not_kill_the_plugin() {
 /// `config()` 走的是「启动时序列化一次、插件共享 Arc<str>」这条路：
 /// 每次调用只拷贝文本，不重新 serde 序列化。这里钉住「同一份文本、同一份内容」。
 /// `sqlite_exec` 的返回值不能是**连接级残留**：连接和 LogHub 共用，日志 INSERT 随时插进来。
-/// 回归的原始读数（verification.md §9 老账）：CREATE TABLE 报 `changes:1, rowid:2`。
+/// 回归的原始读数（老账）：CREATE TABLE 报 `changes:1, rowid:2`。
 #[tokio::test]
 async fn sqlite_exec_does_not_report_stale_changes_or_rowid() {
     let p = ok(&format!(

@@ -121,7 +121,7 @@ printf "export const g = '多文件 OK';\n" > lib/g.js
 （含 `ATTACH` 别的库）、能读 `process.env`、能调 `process.exit`。面板**不给插件加围栏** ——
 理由和 [gaps.md](gaps.md) 的 N1 一样：应用层沙箱对「有完整进程权限的可信代码」挡不住任何真实风险，
 只会挡住正常用法（先例：2026-11-18 试过把 `process.env` 改白名单，当场把 mgmusic 的
-`MGMUSIC_MCLOUD_STORE` 覆盖开关挡掉了；这类收紧已回退，见 [security-20261118.md](security-20261118.md)）。
+`MGMUSIC_MCLOUD_STORE` 覆盖开关挡掉了；这类收紧已回退）。
 
 所以装插件这件事本身是**一次信任决定**：装了它，它就能读面板的全部数据（包括别的插件存在
 `state` 表里的账号凭据）、能影响面板进程本身。只装能读懂、来源明确的插件。
@@ -407,7 +407,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `/login` `/api/login` `/api/logout` | ✅ 11-12（换了形状） | 没做独立登录页，做的是**会话 cookie**：`POST /api/login` 用令牌换一张 30 天 HttpOnly 票，`/api/logout` 清掉。好处是插件界面不再需要 `?t=`（令牌不进 URL）。见 [api.md §1](api.md) |
 | `/setup` `/api/setup`（首次设令牌） | ✅ 11-12（形状不同） | 没做独立向导页：设置 → 安全 里一个框，能「生成一个」或自己输入；写入 PBKDF2 哈希（明文不落盘），**不自动重启**（生成的令牌要让人先抄下来）。已存在凭据 → 409。见 [api.md §2](api.md) |
 | `/api/restart` | ✅ 11-12 | `exec` 自身：**PID 不变**、参数/环境/工作目录都在；设置页有按钮（带确认） |
-| `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框。见 [verification.md §9](verification.md) |
+| `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框 |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/*` | ✅ 11-12（形状不同） | 渠道写在 `config.json` 的 `notify` 键（webhook / SMTP 两种）；发件箱 `notify_outbox` 一条一渠道，失败按 1m/5m/15m/1h/6h 退避，5 次放弃且**留在表里**可手动重试；按任务开关用 `mute` 名单（`插件` 或 `插件/任务`）而不是 `push_tasks` 那张表；没有独立的 deliveries 表（发件箱行本身就是记录）。见 [ops.md](user/ops.md) |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [ops.md](user/ops.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
 | `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新**检查 + 下载**已做（`/api/update/check`、`/skip`、`/download`，见 [api.md](api.md)），**自动替换自己**仍不做 |

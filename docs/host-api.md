@@ -5,8 +5,7 @@
 三态：**已定**＝已确认 / 计划已批准 / 有一手读数 · **建议**＝agent 侧未拍板 · **❓**＝未测。
 
 **状态：Stage 1 已实现。** 本文描述的是 `src/hostapi.rs` 的现状；每条限额都标了
- enforcement 位置。端到端读数在 [verification.md](verification.md)，
-Stage 0 的引擎判据在 [engine.md](engine.md)。
+ enforcement 位置。Stage 0 的引擎判据在 [engine.md](engine.md)。
 
 ### 1. 全 async（已定）
 

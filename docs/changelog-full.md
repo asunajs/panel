@@ -280,8 +280,7 @@ PanelUI.busy(btn, true, '正在保存…')  // 再调 busy(btn,false) 还原原�
 口径定案：**插件是可信代码**，一次「收紧」的撤回写在这里。
 
 **插件代码是可信的，第三方脚本由使用者负责，面板只做该做的。** 这条口径写进了
-[plugins.md](plugins.md)「信任模型」、[gaps.md](gaps.md) 的 N7，以及
-[security-20261118.md](security-20261118.md)（红队演练）的结论。
+[plugins.md](plugins.md)「信任模型」与 [gaps.md](gaps.md) 的 N7，结论来自 2026-11-18 的红队演练。
 
 背景：一份红队演练报告（恶意插件 + 恶意脚本，10 个向量 8 个成功）进了仓库，第一轮按它
 收紧了四处 —— `ATTACH` 上限、`process.env` 白名单、`process.exit` 抛错、出站判定加 DNS 解析。

@@ -87,8 +87,7 @@ sqlite3 data/panel.db "SELECT started_at, task, status, error FROM runs \
 
 三态：**已定**＝有一手读数 / **建议**＝未拍板 / **❓**＝未测（附测法）。
 
-本文是面板鉴权的全部读数与取舍；端到端验证的其它部分在 [verification.md](verification.md)，
-设计定位在 [engine.md §10](engine.md)，契约在 [host-api.md](host-api.md)。
+本文是面板鉴权的全部读数与取舍；设计定位在 [engine.md §10](engine.md)，契约在 [host-api.md](host-api.md)。
 代码：`src/auth.rs`、`src/auth_tests.rs`。
 
 读数分两批：**初版**（本文前半）与**红队复审后的修订**（§5–§7）。两批都是实测。

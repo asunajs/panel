@@ -3,7 +3,7 @@
 ## 架构
 
 三态：**已定**＝已确认或有一手读数 / **建议**＝agent 侧未拍板 / **❓**＝未测（附测法）。
-Stage 0 读数与复跑命令在 [engine.md](engine.md)；Stage 1 端到端验证在 [verification.md](verification.md)。
+Stage 0 读数与复跑命令见 §6，验收表的读数由 `scripts/gate.sh` 复跑。
 
 ### 1. 嵌入形态（已定）
 
@@ -208,7 +208,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 
 ### 9. Stage 1 落地形态（已实现）
 
-最小垂直切片的模块划分（`src/` 是产品代码，`spike/` 是探针）。端到端读数见 [verification.md](verification.md)。
+最小垂直切片的模块划分（`src/` 是产品代码，`spike/` 是探针）。
 
 | 文件 | 职责 |
 |---|---|
@@ -253,7 +253,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 #### 10.1 为什么安全面只收在令牌上
 
 已定口径：**插件按可信代码对待** —— `fs`/`dns` 不加 jail（`import('fs')` 仍能读任意文件，
-见 [verification.md §4](verification.md)）。于是真正要守的东西只剩一件：**面板令牌**。
+见 [host-api.md](host-api.md) 的 SSRF 判据）。于是真正要守的东西只剩一件：**面板令牌**。
 面板拿到令牌就能派发任务、读日志、改插件，而插件能读文件、能读 `process.env`，
 所以令牌不能以任何「读到就能用」的形态存在。
 
@@ -550,7 +550,7 @@ TCP  子进程 ↔ 面板   host-api RPC（127.0.0.1 临时端口 + 一次性令
 
 ### 5. 现在就能用的替代（不动代码）
 
-- 验证引擎行为 → 设置 → 常规 → **引擎试跑**（`POST /api/test/js`，见 [verification.md §9](verification.md)）
+- 验证引擎行为 → 设置 → 常规 → **引擎试跑**（`POST /api/test/js`）
 - 跑一段一次性逻辑 → **脚本**（有 cron、有运行记录、有预算）
 - 调外部能力 → `host.fetch`，或者起一个本机服务让插件调
 

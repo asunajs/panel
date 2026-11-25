@@ -17,7 +17,7 @@
 **Stage 0（spike 退风险）六条判据全部通过**，读数见 [engine.md](engine.md)。
 **Stage 1（最小垂直切片）已实现并验证**：`src/` 是产品代码，`spike/` 是探针；
 端到端读数（构建/测试、九个 op、fetch 限额、SSRF 单通道、20 分钟长任务 p99、熔断/SSE/热重载）
-见 [verification.md](verification.md)。
+见 [engine.md](engine.md) 与 [host-api.md](host-api.md)。
 控制台（WebUI）在 2026-11-11 晚**整体重写**：侧栏 + 仪表盘指标 + 五视图 + 浅/深两套主题
 （主色粉），设计约束与读数见 [ui.md](ui.md)。
 
@@ -97,16 +97,10 @@ node tools/bundle/build.mjs                   # 重写 vendor/llrt/bundle/js
 | [ui.md](ui.md) | 界面与界面门禁（scripts/ui-check.mjs / ui-e2e.mjs） |
 | [windows.md](windows.md) | Windows：现状、缺口、分步计划、验收表 |
 | [pitfalls.md](pitfalls.md) | 踩过的坑（每条带复现方式或守卫位置） |
-| [verification.md](verification.md) | 端到端读数（最近几轮） |
-| [verification-stage1.md](verification-stage1.md) | 早期性能基线（Stage 1 端到端、§7 的 p99） |
 | [gaps.md](gaps.md) | 0.3 → 0.4 重写的差距表（做完 / 没做 / 决定不做） |
 | [mcloud-migration.md](mcloud-migration.md) | mcloud 插件迁移记录 |
 | [mgmusic-migration.md](mgmusic-migration.md) | 咪咕音乐迁移记录（0.3.x QuickJS → 0.4.x LLRT） |
 | [schedule.md](schedule.md) | 任务调度配置：JSON 真源与五条口径 |
-| [review-20261115.md](review-20261115.md) | 2026-11-15 的全量 review 记录（历史，留作判据） |
-| [security-20261118.md](security-20261118.md) | 2026-11-18 红队演练：恶意插件/恶意脚本的 10 个向量与修复跟踪 |
-| [handoff/mcloud-webui-0.4.md](handoff/mcloud-webui-0.4.md) | 交接记录：mcloud WebUI 的 0.4 变体归属 |
-| [handoff/order-2026-11.md](handoff/order-2026-11.md) | 最初那张订单（verbatim）与当时的拍板：为什么是重写不是重构 |
 
 ## 三态约定
 

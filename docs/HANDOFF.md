@@ -9,8 +9,8 @@
 （mcloud 系列 4 个、mgmusic、cmcc、quark、shop，另有一个 webui-demo 样例）。`v0.6.3` 已发（tag 已推、Release 三件资产 + SHA256SUMS，
 CI 发布后还拿真产物跑了一遍 `install.sh`）。
 
-之后的两笔只改文档与口径，没有发新版：[security-20261118.md](security-20261118.md) 的红队演练
-按「插件可信」结案 —— 那 8 个「成功」的向量是**插件的权限**，不是面板漏洞。
+之后的两笔只改文档与口径，没有发新版：2026-11-18 的红队演练
+按「插件可信」结案 —— 那 8 个「成功」的向量是**插件的权限**，不是面板漏洞（[gaps.md](gaps.md) N7）。
 
 自己核一遍（数字会漂，以命令为准）：
 
@@ -50,12 +50,12 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 面板一升级旧包自动失效、回到内置（内置就是新版本带的 `web/`）。所以这条不增加用户的维护负担。
 插件如果要依赖补丁包里的共用件，写 `min_ui`（见 [plugin-contract.md](plugin-contract.md) R15）。
 
-## 2. 起点（历史档案，正文已移走）
+## 2. 起点
 
-最初那张订单（"这不是重构是重写"、基线 = QuickJS 那一支、插件要能跑 20 分钟以上）连同当时的
-拍板记录在 [handoff/order-2026-11.md](handoff/order-2026-11.md) —— 想弄明白「为什么会是重写」时再翻。
+最初那张订单（"这不是重构是重写"、基线 = QuickJS 那一支、插件要能跑 20 分钟以上）的结论
+已经落进 §1 与 [engine.md](engine.md)，原始记录只在 git 历史里留档。
 
-需要现在就记住的只有两条，它们已经落进 §1 的口径：**不为旧插件契约写垫片**、
+需要现在就记住的只有两条：**不为旧插件契约写垫片**、
 **插件是可信代码（安全面只在令牌一处）**。
 
 ## 3. 硬边界（安全相关，逐字遵守）
@@ -95,12 +95,11 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 `schedule.js`（排程表单，可脱离浏览器测）+ `highlight.js`（极简高亮）+ `ui-kit.*`（插件作者的样板页）。
 **CSP 是 `script-src 'self'`：内联 `<script>` / `style=` 一律不执行**，加交互只能改这几个文件。
 
-### 5.3 文档（`docs/` 29 篇，索引 [README.md](README.md)）
+### 5.3 文档（索引 [README.md](README.md)）
 
 分工：`engine.md`（引擎与调度语义）、`scheduler.md`、`ui.md`、`api.md`、`plugins.md`（与旧面板对照 +
 信任模型）、`plugin-contract.md`（插件作者）、`host-api.md`、`pitfalls.md`（**动手前先看这里**）、
-`verification.md`（发版读数）、`security-20261118.md`（红队演练与口径）、`user/`（给用户看的：安装、运维、
-通知、迁移）。`pitfalls-0.4.md` 与 `handoff/*` 是历史档案。
+`user/`（给用户看的：安装、运维、通知、迁移）。`handoff/pitfalls-0.4.md` 是历史档案。
 
 ### 5.4 门禁（`scripts/`）
 
@@ -155,7 +154,7 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 
 - **默认不推**：提交留本地，推送由人决定；确认推送后走 SSH（HTTPS 到 github.com 常不通，见 pitfalls 116）：
   `git push ssh-origin main`（远端 `ssh://git@ssh.github.com:443/asunajs/panel.git`）。
-- 发版 = ① 改 `Cargo.toml` 版本 ② **两份日志各加一段**（见下）③ `docs/verification.md` 记读数
+- 发版 = ① 改 `Cargo.toml` 版本 ② **两份日志各加一段**（见下）③ 把读数记进对应文档（pitfalls / engine / ui 等）
   ④ 提交 `release: 0.6.x（一句话）` ⑤ 确认后再打 tag 并推（CI 出资产、发 Release，说明用**简版**那段）。
 - **更新日志分两份**：
   - `CHANGELOG.md` = **简版**，一版一节、每条一行，只写用户能感知的变化 —— 它就是 Release 说明的来源；

@@ -1,7 +1,7 @@
 //! 引擎层：1 插件 = 1 `AsyncRuntime` + 1 `AsyncContext`，跑在自己的 tokio task 上。
 //!
 //! 不用 `Vm::from_options` —— 它在 init/eval 失败时 `print_error_and_exit`，
-//! 一个插件写错语法就带走整个面板。组装路径与实测见 docs/verification.md 的组装路径判据（spike 时期实测）。
+//! 一个插件写错语法就带走整个面板。组装路径与实测见 docs/engine.md 的组装路径判据。
 //!
 //! ⚠ `idle()` 全程持有 runtime 锁，`ctx.with()` 要同一把锁。所以：
 //!
@@ -300,7 +300,7 @@ fn describe(ctx: &Ctx<'_>, e: Error) -> String {
     "未知异常（既没有 message 也没有 stack）".to_string()
 }
 
-/// LLRT 自带的出站出口**不经过**面板的 SSRF 门。实测（docs/verification.md 的 SSRF 判据（spike 时期实测））：
+/// LLRT 自带的出站出口**不经过**面板的 SSRF 门。实测（docs/host-api.md 的 SSRF 判据）：
 /// `host.fetch` 打回环被拒，但全局 `fetch` 拿到 200、`net.connect` 真连上了。
 /// 所以这些模块名在解析层就拒掉，插件发请求只剩 `panel:host` 的 fetch 一条路。
 ///
