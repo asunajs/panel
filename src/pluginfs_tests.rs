@@ -5,7 +5,15 @@
 use super::*;
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("panel-pluginfs-{tag}-{}", std::process::id()));
+    // 每次调用都唯一（tag + pid + 序号）：这些用例并行跑，同 tag 会互相踩同一目录 ——
+    // 实测 `collapsed_layout_is_discovered_and_read` 与 `group_for_finds_...` 撞过，
+    // 表现为「单跑绿、全跑红」（第 269 轮）。
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let i = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!(
+        "panel-pluginfs-{tag}-{}-{i}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

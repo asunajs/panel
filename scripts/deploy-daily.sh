@@ -202,7 +202,12 @@ while [ "$WAITED" -lt 300 ]; do
         exit 1
       fi
       echo "已就绪（等 ${WAITED}s，插件 $HAVE/$EXPECT）：$BODY"
-      echo "插件目录未改动：$(plugins_list | wc -l | tr -d ' ') 项，指纹 $FP_AFTER"
+      # 部署完顺手剪一次旧备份（留 3 份）：备份是「装坏了能换回来」用的，
+# 不剪就会一天涨 150 MB（2026-11-25 实测 backups/ 153 MB、panel.bak-* 105 MB）。
+if [ -x "$ROOT/scripts/prune-leftovers.sh" ]; then
+  bash "$ROOT/scripts/prune-leftovers.sh" --instance "$DEST" --keep 3 --apply >/dev/null 2>&1 || true
+fi
+echo "插件目录未改动：$(plugins_list | wc -l | tr -d ' ') 项，指纹 $FP_AFTER"
       exit 0
     fi
   fi

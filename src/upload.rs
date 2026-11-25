@@ -532,6 +532,36 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         .collect();
     files.sort();
     replaced.sort();
+
+    // 更新时清掉**另一种形状**的残留（第 269 轮）：装成 `<X>/` 之后，顶层那份
+    // `<X>.js` / `<X>.panel.json` / `<X>.webui/` 就是旧拷贝 —— 面板按名字去重、
+    // 优先顶层 `.js`，留着它等于「界面显示新版本、实际跑旧代码」。
+    // 只删**这次确实装了这个插件**的那几件（`<X>` 在折叠集合里），不碰别人的文件。
+    if kind == Kind::Plugins {
+        let collapsed: Vec<String> = planned
+            .iter()
+            .filter(|(from, to)| from != to)
+            .filter_map(|(_, to)| to.iter().next()?.to_str().map(str::to_string))
+            .collect();
+        for g in collapsed {
+            for stale in [
+                root.join(format!("{g}.js")),
+                root.join(format!("{g}.panel.json")),
+                root.join(format!("{g}.webui")),
+            ] {
+                if stale.symlink_metadata().is_ok() {
+                    let ok = if stale.is_dir() {
+                        std::fs::remove_dir_all(&stale).is_ok()
+                    } else {
+                        std::fs::remove_file(&stale).is_ok()
+                    };
+                    if ok {
+                        replaced.push(format!("（清掉旧形状）{}", stale.display()));
+                    }
+                }
+            }
+        }
+    }
     Ok(Saved {
         files,
         replaced,
@@ -1131,6 +1161,60 @@ mod collapse_tests {
         let mut replaced = Vec::new();
         let planned = collapse_into_group(&rels, &root, true, &mut replaced).unwrap();
         assert_eq!(planned[0].1, PathBuf::from("quark.js"), "只有一个文件时不折叠");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod stale_shape_tests {
+    use super::*;
+
+    /// 更新成收拢形状时，顶层的旧散件要被清掉（否则「显示新版本、跑旧代码」）。
+    #[test]
+    fn installing_collapsed_removes_flat_leftovers() {
+        let root = std::env::temp_dir().join(format!("panel-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mgmusic.webui")).unwrap();
+        std::fs::write(root.join("mgmusic.js"), "旧的").unwrap();
+        std::fs::write(root.join("mgmusic.panel.json"), "{}").unwrap();
+        std::fs::write(root.join("mgmusic.webui/index.html"), "old").unwrap();
+        std::fs::write(root.join("other.js"), "别人的").unwrap();
+
+        // 计划：这次装的是收拢形状 mgmusic/mgmusic.js
+        let planned = [(
+            PathBuf::from("mgmusic.js"),
+            PathBuf::from("mgmusic/mgmusic.js"),
+        )];
+        let mut replaced = Vec::new();
+        // 复刻安装尾部的清理逻辑（同一段代码在 save_zip 里；这里只验规则）
+        let collapsed: Vec<String> = planned
+            .iter()
+            .filter(|(from, to)| from != to)
+            .filter_map(|(_, to)| to.iter().next()?.to_str().map(str::to_string))
+            .collect();
+        for g in collapsed {
+            for stale in [
+                root.join(format!("{g}.js")),
+                root.join(format!("{g}.panel.json")),
+                root.join(format!("{g}.webui")),
+            ] {
+                if stale.symlink_metadata().is_ok() {
+                    let ok = if stale.is_dir() {
+                        std::fs::remove_dir_all(&stale).is_ok()
+                    } else {
+                        std::fs::remove_file(&stale).is_ok()
+                    };
+                    if ok {
+                        replaced.push(stale.display().to_string());
+                    }
+                }
+            }
+        }
+        assert!(!root.join("mgmusic.js").exists(), "旧主文件该没了");
+        assert!(!root.join("mgmusic.panel.json").exists());
+        assert!(!root.join("mgmusic.webui").exists());
+        assert!(root.join("other.js").exists(), "别人的文件不许动");
+        assert_eq!(replaced.len(), 3);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
