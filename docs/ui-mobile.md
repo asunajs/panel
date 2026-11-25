@@ -8,7 +8,7 @@
 - 面板：`@media (max-width: 720px)` 是唯一的分界。另有 `1024 / 1100 / 620 / 440 / 1180` 等局部微调，
   但「手机形态」的判据只有 720。
 - 为什么不用 860：媒体查询用的是 **CSS px**，2 倍屏上「1720 设备像素的窗口」= 860 CSS px，
-  拿它当手机边界会把一台看着很宽的屏幕误判成手机（第 86 轮的坑）。
+  拿它当手机边界会把一台看着很宽的屏幕误判成手机（踩过的坑）。
 - 判断「是不是手机」在 JS 里一律用 `matchMedia('(max-width: 720px)')`，**不用 `innerWidth`** ——
   窗口拖窄 / 旋屏时要能跟着变（`schedSelect` 桌面自绘 / 手机原生就是靠它分叉的）。
 
@@ -21,7 +21,7 @@ iOS Safari 对 `font-size < 16px` 的 `input/select/textarea` 在**聚焦时自�
 
 **坑：特异性**。只写 `.input { font-size: 16px }` 是不够的 ——
 `select:not([multiple])`（(0,2,1)）、`#clash-rename-field input`（(1,1,0)）都比它高，
-插件页的 `<select>` 会**继续是 13px**（第 262 轮 mobile-check 抓到的，肉眼看不出来）。
+插件页的 `<select>` 会**继续是 13px**（mobile-check 抓到的，肉眼看不出来）。
 现在的写法是「按特异性对齐」：`select:not([multiple])`、`input:not([type=checkbox])…`、
 `#clash-rename-field input/select` 全都单列一遍。
 
@@ -38,7 +38,7 @@ iOS Safari 对 `font-size < 16px` 的 `input/select/textarea` 在**聚焦时自�
 ### 3. 表格 ≤720 变两列卡片
 
 `thead` 隐藏、`tr` 变 `grid` 两列、每格 `::before` 取 `data-label`。
-**不是「一格一行」**（那样每条 191px 高，一屏只看得到两条，右边还空一半，第 188 轮）。
+**不是「一格一行」**（那样每条 191px 高，一屏只看得到两条，右边还空一半）。
 
 ### 4. 不许横向滚动
 
@@ -53,7 +53,7 @@ iOS Safari 对 `font-size < 16px` 的 `input/select/textarea` 在**聚焦时自�
 | 正常 | 390 | 390 | 390 |
 | 溢出 226px | **616** | **616** | **390** |
 
-所以 `scrollWidth - innerWidth` **恒为 0**，断言永远是绿的。第 262 轮之前
+所以 `scrollWidth - innerWidth` **恒为 0**，断言永远是绿的。之前
 `ui-check` 的「窄屏没有横向溢出」就是这么一条假绿断言 —— 而插件页实际撑到了 454px。
 
 **正确判据**：`document.documentElement.scrollWidth - document.documentElement.clientWidth`。
@@ -62,7 +62,7 @@ iOS Safari 对 `font-size < 16px` 的 `input/select/textarea` 在**聚焦时自�
 反向例（造过）：给 `.head-actions` 注入 `min-width: 600px` ——
 旧判据 0px（假绿）、新判据 226px（红）。
 
-## 四、已知的移动端问题清单（第 262 轮审计）
+## 四、已知的移动端问题清单（审计）
 
 | # | 问题 | 状态 |
 |---|---|---|
@@ -114,7 +114,7 @@ node scripts/mobile-walk.mjs --shots <dir>          # 截图落哪（默认 ../.
 4. **日志页**：点等级筛选（error）+ 在搜索框打字，确认结果跟着变；
 5. **每个有界面的插件**各导航到 `/plugins/<name>/` 截一张 + 测量。
 
-第 263 轮它抓到的三个问题（都是 seed 插件测不出来的）：
+它抓到的三个问题（都是 seed 插件测不出来的）：
 
 | 页面 | 问题 | 修法 |
 |---|---|---|
@@ -128,7 +128,7 @@ node scripts/mobile-walk.mjs --shots <dir>          # 截图落哪（默认 ../.
 ## 八、有数据 vs 空数据：必须用真实数据走一遍
 
 空数据时插件只渲染空态 —— **最容易崩的「账号卡（左信息 + 右按钮）」根本没渲染**。
-第 263 轮就是这么漏掉 yangshipin 的：
+就是这么漏掉 yangshipin 的：
 
 ```bash
 node scripts/mobile-walk.mjs --data ~/panel-3030/data --shots ../.shots/mobile-data

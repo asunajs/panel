@@ -32,7 +32,7 @@ panel service uninstall       # 卸载
 launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 ```
 
-**服务单元里会写死安装时的目录**（第 130 轮补的）：`PANEL_BIND` / `PANEL_DATA_DIR` /
+**服务单元里会写死安装时的目录**（补的）：`PANEL_BIND` / `PANEL_DATA_DIR` /
 `PANEL_PLUGINS_DIR` / `PANEL_SCRIPTS_DIR` 四个都进 plist（systemd 那边是 `Environment=`）。
 原来只写 `PANEL_BIND`，换个数据目录装服务会静默跑 `./data` —— 用独立数据目录时这是数据事故。
 
@@ -45,7 +45,7 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 
 一条命令：编 release → 写 `panel.new` → **重新 ad-hoc 签名** → `mv` 换掉 → `kickstart -k` → 等 `/readyz`。
 
-这三步都不是仪式感，各有各的坑（第 131 轮连着踩了两个）：
+这三步都不是仪式感，各有各的坑（连着踩了两个）：
 
 | 做法 | 不这么做会怎样 |
 |---|---|
@@ -54,7 +54,7 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 | `kickstart -k` 之后等 `/readyz` | 只换文件不重启，跑的还是旧进程，界面上看不到任何变化 |
 
 
-**插件与脚本也会一起搬（第 153 轮补的，以前漏了）**：只换二进制的话，`~/panel-3030/plugins/` 里
+**插件与脚本也会一起搬（补的，以前漏了）**：只换二进制的话，`~/panel-3030/plugins/` 里
 还是几天前的拷贝，而 `/app.css` 已经是新的 —— 同一个页面上"新面板 CSS + 旧插件 CSS"混着跑，
 表现是半新半旧的界面（账号多选没有勾选框、兑换页组行发灰），两边代码看着却都对。
 现在脚本会 `cp -R` 过去并**逐个 `cmp` 核对**，不一致直接红：
@@ -68,7 +68,7 @@ launchctl kickstart -k gui/$(id -u)/dev.panel   # 重启它
 起不来时先看 `~/panel-3030/data/panel.err.log`，再看 `launchctl print gui/$(id -u)/dev.panel` 里的
 `state` 与 `last exit reason`。
 
-### 端口被占 / 一堆 `panel` 进程（第 258 轮）
+### 端口被占 / 一堆 `panel` 进程
 
 验证脚本常把面板丢到后台跑一次就再也不管 —— 它们的数据目录在 `/tmp`、端口是 88xx，
 每个挂 10–20 MB。真身只有 `~/panel-3030/panel` 那一个，但 `lsof -i :8790` 之类一查就懵：
@@ -81,12 +81,12 @@ bash scripts/kill-strays.sh --kill    # 真的杀
 判据是「进程名 panel 且工作目录/可执行文件在 `/tmp` 下」—— 部署实例和 `panel plugin check`
 都不满足，所以不会误杀。自己写探针时记得 `trap 'kill $PID' EXIT`，别留尾巴。
 
-### 源码体积上限（第 132 轮抬过）
+### 源码体积上限（抬过）
 
 | 对象 | 默认值 | 环境变量 |
 |---|---|---|
 | 单次运行预算 | **300 秒** | `PANEL_BUDGET_MS`（毫秒，夹在 1s–上限；也可在「设置 → 配置」填，存 `run.budget_ms`；任务/脚本上写 `budget_ms` 可单独覆盖） |
-| 单次运行上限 | **90 分钟** | 「设置 → 配置 → 运行」的 `run.budget_max_ms`（可到 12 小时，第 227 轮；一个号要跑很久的任务把它调大） |
+| 单次运行上限 | **90 分钟** | 「设置 → 配置 → 运行」的 `run.budget_max_ms`（可到 12 小时，；一个号要跑很久的任务把它调大） |
 | 排队上限 | **32 条 / 插件** | `run.queue_max`（插件忙时后来的运行默认排队，排到这么多才拒） |
 | 单条最长排队 | **4 小时** | `run.queue_wait_ms`（等这么久还没轮到就丢掉并记一条 warn；8 个号 × 20 分钟要 140 分钟，所以默认给 4 小时） |
 | 脚本源码 | **8 MiB** | `PANEL_SCRIPT_MAX_BYTES`（下限 64 KiB） |
@@ -97,7 +97,7 @@ bash scripts/kill-strays.sh --kill    # 真的杀
 直接被挡在门外（界面上弹「脚本有 1580716 字节，超过上限 524288 字节」）。
 上限的作用是「别把内存吃穿」，不是「猜用户写多少」，所以给足；要收紧用环境变量。
 
-### 部署只动面板，不动插件（第 204 轮）
+### 部署只动面板，不动插件
 
 分工：**面板部署 = 二进制 + `scripts/`**；插件（`.js` / `.panel.json` / `.webui/`）归各自的
 插件项目（它们的 `deploy:panel`）。这条不是偏好，是被踩出来的：
@@ -118,7 +118,7 @@ bash scripts/kill-strays.sh --kill    # 真的杀
 要修插件：去插件项目 `npm run deploy:panel`。**不要**在面板仓的部署里顺手补文件 ——
 那样下次谁跑一次部署就又把状态改回去了。
 
-### `/readyz` 会等多久（第 132 轮）
+### `/readyz` 会等多久
 
 `readyz` 里的「调度器还活着吗」是问 actor 循环；而**插件加载就在那个 actor 里串行做**，
 真实插件（mcloud 那些）加载期会打网络，一次能拖几十秒。原来这里无限等，于是：
@@ -129,7 +129,7 @@ readyz   ~100 秒才回（挂在 actor 后面）→ 反代看到的是「超时�
 ```
 
 现在最多等 2 秒，超时就明确回 **503** + `error: "调度器在忙（多半在加载插件），稍后再试"`。
-语义回到「现在别把流量给我」，而不是把探测请求吊死。部署脚本也据此分两段等：
+语义回到「现在别把流量打过来」，而不是把探测请求吊死。部署脚本也据此分两段等：
 先等 `healthz`，再等 `readyz`（最多 120 秒）。
 
 ### 3030 的插件目录：`~/panel-3030/plugins`（不是仓库里的 plugins/）

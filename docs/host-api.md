@@ -2,7 +2,7 @@
 
 ## host-api 契约
 
-三态：**已定**＝用户确认过 / 计划已批准 / 有一手读数 · **建议**＝agent 侧未拍板 · **❓**＝未测。
+三态：**已定**＝已确认 / 计划已批准 / 有一手读数 · **建议**＝agent 侧未拍板 · **❓**＝未测。
 
 **状态：Stage 1 已实现。** 本文描述的是 `src/hostapi.rs` 的现状；每条限额都标了
  enforcement 位置。端到端读数在 [verification.md](verification.md)，
@@ -10,7 +10,7 @@ Stage 0 的引擎判据在 [engine.md](engine.md)。
 
 ### 1. 全 async（已定）
 
-用户当场确认：host-api **全部 async**，插件写 `await host.fetch(...)`。
+已定：host-api **全部 async**，插件写 `await host.fetch(...)`。
 
 **这不是偏好，是唯一形状**（已定，有读数）：LLRT **没有 `node:worker_threads`**
 （判据 5 实测 MISSING），所以旧版那套 fd3/fd4 + SAB + `Atomics.wait` 的同步 RPC 桥
@@ -35,7 +35,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 | 路径 | `plugin_dir()`（目录式插件自己的目录，单文件插件 `null`）；`plugin_data_dir()`（`plugin-data/<name>/`）—— 给 `node:fs` 拼绝对路径用，见下 |
 
 
-#### `fs` 与路径 API（第 216 轮）
+#### `fs` 与路径 API
 
 `node:fs` 是 LLRT 内置模块，**没有沙箱**：能读写面板进程有权限的任意路径（与 Node 一致）。
 面板不再给它加门 —— 唯一的约束是运行身份本身的权限。所以「装插件 = 把文件权限交给它」。
@@ -54,7 +54,7 @@ Rust 侧 `Ctx::spawn` 挂到 tokio，返回 Promise。**没有 RPC，没有序�
 也没有 `copyFileSync` / `createReadStream` / `realpath`；`readdirSync('/')` 会报
 `IO Error: No such file or directory`（普通目录正常）。这些差异是 LLRT 侧的，面板不改。
 
-#### 两份配置（第 89 轮）
+#### 两份配置
 
 | | `host.config()` | `host.self_config()` |
 |---|---|---|
@@ -97,7 +97,7 @@ register_handler(name, handler, budget_ms?, opts?)     // 只手动/被派发的
 同名 cron 任务来注册时（`register_cron` + 同名 handler 的标准配法），预算以 `register_cron`
 给的为准 —— 那条建议里本来就有它。
 
-`register_handler` 的 `opts`（**第 227 轮起**）：
+`register_handler` 的 `opts`（可选）：
 
 | 字段 | 说明 |
 |---|---|
@@ -117,7 +117,7 @@ register_handler(name, handler, budget_ms?, opts?)     // 只手动/被派发的
 | `lead_ms` | 在 cron 目标前多久唤醒，`0 ~ 3600000`。越界**报错**（不静默截断） |
 
 `lead_ms` 提前那一拍派发时，事件里 `early: true` 并带上 `lead_ms` —— 插件据此知道
-「还没到点，是让我先准备」。它和 `set_job_schedule` 写的是同一个字段（落库，重启不丢）。
+「还没到点，可先做准备」。它和 `set_job_schedule` 写的是同一个字段（落库，重启不丢）。
 
 > `lead_ms` 有两个来源：`register_cron` 的 opts（**插件默认值**，每次注册都以它为准）和
 > `set_job_schedule`（**人的改动**，落库、热重载和重启都留住）。超上限（`LEAD_MAX_MS` = 1 小时）两边都报错。
@@ -146,11 +146,11 @@ register_cron('兑换', '0 10 * * *', 600_000, {
 
 * blockers 非空时，定时那拍**不补触发**：计划直接对齐到下一次（只记一行 warn 日志）；
 * `lead_ms` = 提前多少毫秒唤醒（上限 1 小时）。提前那一拍派发时事件里 `early: true`、
-  带上 `lead_ms`，插件据此知道「还没到点，是让我先准备」；
+  带上 `lead_ms`，插件据此知道「还没到点，可先做准备」；
 * 这些状态**落库**：插件重新注册、面板重启都不会被冲掉（`tasks.enabled/summary/blockers/lead_ms/override_expr`）。
 * 脚本里没有任务表：脚本调 `set_job_*` 会直接报错，而不是静默无事发生。
 
-#### 临时一次性调用：`host.run_once(name, opts)`（第 227 轮）
+#### 临时一次性调用：`host.run_once(name, opts)`
 
 ``````js
 // 想生成几条就几条；数量、每条多长、什么时候，都是插件说了算
@@ -169,9 +169,9 @@ await host.run_once('sign', { params: { account: 3 }, at: Date.now() + 60_000 })
 语义（三条都是硬规则，别指望它并行）：
 
 1. **排队，不是并行**：一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。
-   执行位空出来才跑，位置 `position` 告诉你排在第几（1 = 下一个跑）。
+   执行位空出来才跑，`position` 是它排在第几（1 = 下一个跑）。
 2. **不建任务行**：临时任务不落库、不进任务页主表；运行记录留着（按 `name` 查得到）。
-   重名自动加序号（`sign` → `sign#2` → `sign#3`），handler 名还是你给的那个。
+   重名自动加序号（`sign` → `sign#2` → `sign#3`），handler 名仍是注册时给的那个。
 3. **跑完自动删**，失败也删，而且**不熔断**（一次性调用没有「下一拍」）。
 
 什么时候该用它、而不是 `register_handler` + `register_cron`：
@@ -228,7 +228,7 @@ if (panel.atLeast('0.3.0')) {
 
 #### 通知
 
-notify(title, body?, {level})：插件主动喊话。`level` 取 `info`（默认）/ `warn` / `error` —— 推送规则可以按 `min_level` 卡，写死 info 会让「一趟挂了」这种被静默丢掉（第 227 轮）。落到面板的通知表（铃铛上的未读数），
+notify(title, body?, {level})：插件主动喊话。`level` 取 `info`（默认）/ `warn` / `error` —— 推送规则可以按 `min_level` 卡，写死 info 会让「一趟挂了」这种被静默丢掉。落到面板的通知表（铃铛上的未读数），
 配了 PANEL_NOTIFY_WEBHOOK 时额外 POST 一个 JSON 到那个 URL：
 
 ```json
@@ -287,14 +287,14 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 | `fetch` 响应体 | **不设上限**（2026-11-12 起） | 插件是可信代码，正文要多少给多少；`truncated` 字段留着但恒为 false。实测 3 MB 响应 → `len=3000000, truncated=false`（rustls 与 native 两条路都验过） |
 | `fetch` `timeout_ms` | 默认 **10000**，钳到 `[100, 60000]` | 已实现 `clamp_timeout`；实测 500ms 打 4s 慢响应 → 502ms 报超时 |
 | `fetch` 重定向 | **≤3 跳，每跳重判 SSRF** | 已实现 `MAX_HOPS`；实测自环 → 「重定向超过 3 跳，已中止」 |
-| 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，和我们「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine.md](engine.md) |
+| 单插件定时器 | 基线 **256 条** | **加载期拦掉了**：LLRT 原生定时器是进程级单例，与本项目「1 插件 1 runtime、随时析构」冲突 —— `setInterval` 会让 `load` 卡住、待触发的 `setTimeout` 让卸载等它烧完。现在 `setInterval` 直接抛错，`setTimeout` 上限 5000ms。要等用 `await host.sleep(ms)`，要周期用 `register_cron`。详见 [engine.md](engine.md) |
 | `config` 体积 | **4 MiB**（`PANEL_CONFIG_MAX_BYTES` 可调，下限 4 KiB） | 已实现：`src/config.rs`。超限**拒绝启动**并报出真实字节数，不截断（截断 = 插件看到半个配置）。基线那个 64 KiB 是**任务参数**的上限，不是配置 |
 | 执行预算默认 | 基线 600000ms（10 分钟） | **300000ms（5 分钟）**，`PANEL_BUDGET_MS` 可改（`config::budget_ms()`，夹在 1s–90min）。0.4.2 之前是 30000ms，实测太紧：拉一次接口/下个文件经常卡在边界上被判超时。想收紧就在任务上写 `budget_ms` |
 | **新版执行预算上限** | **5400000ms（90 分钟）** | 已实现 `MAX_BUDGET_MS`；单测钉着 20 分钟放行、90 分钟封顶、0 钳到 1 |
 
 `fetch` 的 `body_error`（传输层读正文失败）如实透传给插件，不吞。
 
-### 超时错误会顺带告诉你是「网不通」还是「服务端慢」（0.5.1）
+### 超时错误会区分「网不通」与「服务端慢」（0.5.1）
 
 以前超时只有一句 `请求超时（20000ms）`，分不清这两种情况 —— 2026-11-16 08:00 那趟
 `mcloud-daily` 就是这样：17 条请求全在 20 秒上打光（整趟 343 秒），光看日志没法判断
@@ -355,7 +355,7 @@ rquickjs-core 0.14 **没有 serde feature**，vendored LLRT 全树零 `serde_jso
 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 设了也没用 —— 默认链路是 hyper + `HttpConnector`
 （没有代理层），`tls:"native"` 那条显式 `.no_proxy()`。实测把三个变量指到死端口
 （`127.0.0.1:9`）后往 `https://www.baidu.com/` 发请求，两条路仍是 258ms / 255ms HTTP 200。
-用户问「是不是我的环境变量」时，答案是**不是**；要走代理得新增功能，不是配置项
+这不是环境变量的问题；要走代理得新增功能，不是配置项
 （用户向说明见 [user/troubleshooting.md](user/troubleshooting.md)）。
 
 ⚠ **`fetch` 的 `body` 默认是 lossy UTF-8 字符串**（`String::from_utf8_lossy`）。
@@ -458,7 +458,7 @@ stop token 必须在 idle 之前拿到手，之后纯 Rust 触发。
 
 逐个入口的自检读数（样例插件跑一遍）另开一篇：[host-api.md](host-api.md)。
 
-## 出站响应压缩：走原生解压（第 253 轮）
+## 出站响应压缩：走原生解压
 
 `host.fetch` / `host.http_fetch` 现在**由 Rust 侧**处理响应压缩（reqwest 的 gzip / deflate /
 brotli / zstd 特性）：
@@ -531,7 +531,7 @@ smtp_send({
 
 ⚠ 已知：`smtp.qq.com` / `smtp.gmail.com` 的 465 与 587 在握手后被对端直接断开
 （`peer closed connection without sending TLS close_notify`），同机 `openssl s_client`
-却能通 —— 我们的 ClientHello 带了 SNI 与 TLS1.3（已 dump 核对），所以不是「没发 SNI」。
+却能通 —— 本项目的 ClientHello 带了 SNI 与 TLS1.3（已 dump 核对），所以不是「没发 SNI」。
 163 与自建服务器正常。主场景（自建 / 内网中继 / 常见服务商）不受影响，但这条没查清。
 
 #### WebSocket（长连接）
@@ -584,7 +584,7 @@ WSS wss://videoim.cmcc-cs.cn:20102/   rustls → HandshakeFailure  native → �
 
 ### 判定表（沿用基线）
 
-**必须自己做。** LLRT 的 `llrt_net_policy` 本轮一手核过：`set_deny_list` / `set_allow_list`
+**必须自己做。** LLRT 的 `llrt_net_policy` 已逐条核过：`set_deny_list` / `set_allow_list`
 是**公开** API（`vendor/llrt/libs/llrt_net_policy/src/lib.rs:23,28`），且被 fetch / net / dgram
 每个出口共用（`llrt_fetch/src/fetch.rs:106,480`、`llrt_net/src/socket.rs:245,249`、
 `llrt_dgram/src/socket.rs:375`）。但它当不了面板的门，两个硬缺口：
@@ -661,7 +661,7 @@ BLOCKED net.connect         : 解析期就失败，连接没发出
 `engine_tests::ordinary_modules_still_resolve` 钉着 buffer / zlib / crypto 仍可用；
 `the_fetch_global_is_gone` 钉着 `typeof fetch === 'undefined'`（走 miss 态）。
 
-**`fs` 与 `dns` 没禁 —— 已定不加 jail**（用户拍板：插件按可信代码对待）。
+**`fs` 与 `dns` 没禁 —— 已定不加 jail**（插件按可信代码对待）。
 `fs` 不受限意味着插件能读 `panel.db`，这比基线的 pluginfs jail 宽，是嵌入 LLRT 带来的
 **新**攻击面。补偿控制落在令牌上：明文不落盘、不进 `process.env`、文件里的哈希不能当
 令牌用（[engine.md §10](engine.md)、[api.md](api.md)）。
@@ -711,9 +711,9 @@ GET  /plugins/demo/other        → 插件返回的 HTML 兜底页
 插件作者看不到任何反馈。现在 host op 也做 opts 键名白名单（`only_keys`），
 写错直接抛「只认 expr / lead_ms，收到 "cron"」。HTTP 侧同类问题见 [api.md](api.md)。
 
-### 出站三件：WebSocket / SMTP / 静态文件（第 74 轮补）
+### 出站三件：WebSocket / SMTP / 静态文件（补）
 
-`fetch` 之外还有三条出站/界面入口，这轮补进自检。它们都要过同一道 SSRF 门，
+`fetch` 之外还有三条出站/界面入口，也补进了自检。它们都要过同一道 SSRF 门，
 所以**对端不能是回环**（那是面板自己）—— 用这台机器的局域网地址，配合
 `node scripts/test-servers.mjs`（一个 WS echo + 一个假 SMTP，都绑 `0.0.0.0`）。
 
@@ -742,7 +742,7 @@ GET /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/de
 
 样例文件在 `examples/demo-plugin.webui/index.html`：要试就 `cp -r examples/demo-plugin.webui plugins/demo.webui`。
 
-### 门禁：`node scripts/plugin-selftest.mjs`（第 75 轮）
+### 门禁：`node scripts/plugin-selftest.mjs`
 
 把上面这些手工读数变成一条命令：起临时面板 → 起三个本地对端 → 加载样例插件 → 跑 probe → 逐条断言。
 
@@ -763,7 +763,7 @@ config / sqlite 异步与同步 / `sleep` 真挂起 / `fetch` 与 `http_fetch`�
 对端必须绑 `0.0.0.0` 并用本机**局域网地址**去连：回环被 SSRF 门挡（那是面板自己）。
 机器上没有局域网地址时脚本会跳过（exit 0）而不是假装通过。
 
-### `host.sidebar({ title, order })` —— 侧栏入口（第 139 轮）
+### `host.sidebar({ title, order })` —— 侧栏入口
 
 在面板左侧栏给这个插件开一格，点进去就是它自己的界面（内嵌 iframe）。
 
@@ -782,10 +782,10 @@ await host.sidebar({ title: '云盘', order: 20 });
 旧面板的 `register_nav({label, icon})` 现在映射到它（mcloud 那族插件里的 `register_nav` 已经从
 「打一条降级日志」改成真注册）。
 
-### register_cron 是**建议**，不是命令（第 180 轮）
+### register_cron 是**建议**，不是命令
 
 - 生效的计划（cron / 预算 / 提前量）归面板，写在库里，用户随时能改；
-- register_cron 每次加载都会更新「建议」，但**只在你被安装 / 重装时才被采纳**；
+- register_cron 每次加载都会更新「建议」，但**只在安装 / 重装时被采纳**；
 - 所以「改插件里的 cron 再重载」不会改变线上计划 —— 要改请让用户点「采纳建议」或重装；
 - 插件更新里新增的任务名会先列成「待采纳」，不调度。
 
@@ -794,7 +794,7 @@ await host.sidebar({ title: '云盘', order: 20 });
 ## 版本与兼容：只面向 0.4
 
 - **插件只面向 0.4**。0.3 的调用名、参数形状，一个都不要出现在产物里。
-- 要表态「老面板别装我」就在清单里写下限，加载期**硬挡**（不是警告）：
+- 要表达「老面板不兼容」，就在清单里写下限，加载期**硬挡**（不是警告）：
 
       { "min_panel": "0.4.0" }
 
@@ -802,4 +802,4 @@ await host.sidebar({ title: '云盘', order: 20 });
   `panel plugin check` 会直接报错（规则见 [plugin-contract.md](plugin-contract.md) 的 R5）。
 - `panel.atLeast` 只用来区分 0.4 内部的小版本（0.4.1 才有的能力 → 降级到 0.4.0 的写法）。
 - 缺能力 → 在面板仓加 API（本文件 + 测试 + 一条 pitfalls 守卫），插件里不要拿
-  `typeof host.x === 'undefined'` 兜着跑 —— 那是「每个会话各写一套」的起点。
+  `typeof host.x === 'undefined'` 兜着跑 —— 那是「每个插件各写一套」的起点。

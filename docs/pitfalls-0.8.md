@@ -3,7 +3,7 @@
 > 从 [pitfalls.md](pitfalls.md) 拆出来（2026-11-24，那边超 1000 行上限）。
 > 老规矩：能静态查的都给守卫，查不了的写复现方法。
 
-## 198. LLRT 的 `node:fs` 是子集：`existsSync` 曾经不在里面（第 253 轮补上了）
+## 198. LLRT 的 `node:fs` 是子集：`existsSync` 曾经不在里面（补上了）
 
 **症状**：插件页面一直在报 502，日志里只有一句
 
@@ -17,7 +17,7 @@
     accessSync chmodSync existsSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
     renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
 
-**第 253 轮补上了 `existsSync`**（面板侧给 LLRT 的 fs 模块加的，Node 语义：任何错误都返回
+**补上了 `existsSync`**（面板侧给 LLRT 的 fs 模块加的，Node 语义：任何错误都返回
 false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSync` / `copyFileSync` /
 `realpathSync` / `openSync`。而 TS 里 `import fs from 'node:fs'` 会一路编译通过 —— cmcc 当年
 甚至在自己的 `node-fs.d.ts` 里把 `existsSync` / `unlinkSync` **声明成了存在**，于是「编译过、运行炸」。
@@ -41,11 +41,10 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 但**具名** `import { existsSync }` 会在**加载期**就报
 `Could not find export 'existsSync' in module 'fs'`（这算好的 —— 至少装不上去，不是静默炸）。
 
-## 199. 「操作全摊成一排」＝用户要的是分组，不是更多按钮（第 255 轮）
+## 199. 「操作全摊成一排」的修法：分组，不是更多按钮
 
 插件抽屉里的动作一路从 5 颗长到 9 颗（打开界面 / 编辑源码 / 配置 / 重装 / 停用 / 暂停定时 /
-重载 / 停止 / 删除），全是 `.btn-sm`、一样宽、自动换行成两行 —— 用户的原话是
-「过于凌乱，我觉得操作应该分组」。
+重载 / 停止 / 删除），全是 `.btn-sm`、一样宽、自动换行成两行，看不出主次。
 
 **判据**：动作超过 5 颗，或者里面混着不可逆动作（删除），就不能平铺。按「要干什么」分行，
 一行最多 3 颗，不可逆那颗单独一行 + 分隔线；同类里的主动作才给 `.btn-primary`（插件有界面时
@@ -59,11 +58,11 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 原来那条「抽屉里的块间距 ≥ 8px」一起跑，防止分组把节奏挤没了。
 
 
-## 200. 按钮名要和它**真会做的事**一致 —— 「保存并重载插件」→「保存」（第 255 轮）
+## 200. 按钮名要和它**真会做的事**一致 —— 「保存并重载插件」→「保存」
 
-196 轮把配置保存的默认行为改成了「只写盘、不重载」（重载会打断正在跑的任务），按钮却还叫
-「保存并重载插件」；而它下面紧挨着一个「保存后重载插件」的勾选框 —— 用户的原话是
-「这个按钮的名字也奇怪」：名字和行为对不上，还和自己的选项撞名。
+配置保存的默认行为是「只写盘、不重载」（重载会打断正在跑的任务），按钮却还叫
+「保存并重载插件」；而它下面紧挨着一个「保存后重载插件」的勾选框 —— 名字和行为对不上，
+还和自己的选项撞名。
 
 **判据**：按钮文案只描述**这一次点击会发生什么**，不描述「这类操作的领域名」。行为随选项走时，
 名字也跟着选项走（没勾 =「保存」，勾了 =「保存并重载」，由 change 事件同步），别让人从别处推断。
@@ -77,9 +76,9 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 后面那条保存用例用 `b.click()` 而不是 `b.checked = true` —— 赋值不触发 change，会把这条断言测成假绿。
 
 
-## 201. 「正常但没人想逐条看」的东西要标 debug，不是 info（第 255 轮）
+## 201. 「正常但没人想逐条看」的东西要标 debug，不是 info
 
-用户截图：日志里同一个插件「空闲已卸载（省内存；到点前会自动装回来）」一天刷好几遍，
+现象：日志里同一个插件「空闲已卸载（省内存；到点前会自动装回来）」一天刷好几遍，
 全是 info —— 真正的任务日志被挤到后面去翻。这类生命周期流水（卸载 / 装回来）回答的是
 「为什么它现在不在内存里」，排查时要点开才看，平时不该占 info 的位置。
 
@@ -91,8 +90,8 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 **注意**：`全部` 仍然包含 debug（只是灰色小标）。这不是遗漏 —— 「全部」不能撒谎；
 嫌吵就点 info / warn / error 任一级别（那是精确匹配）。
 
-122. **插件读 `process.env.PANEL_DATA_DIR` 拿到 `undefined`，账号存不下来**（第 265 轮，用户 2026-11-22
-    报 cmcc：「点获取验证码 → 发码失败：插件没有响应」，运行日志反复 warn「拿不到 PANEL_DATA_DIR —
+122. **插件读 `process.env.PANEL_DATA_DIR` 拿到 `undefined`，账号存不下来**（2026-11-22
+    cmcc：「点获取验证码 → 发码失败：插件没有响应」，运行日志反复 warn「拿不到 PANEL_DATA_DIR —
     只能读 self_config()，账号改动将无法落盘」）：
 
     插件和面板跑在**同一个进程**里，`process.env` 看到的就是面板自己的环境。面板允许不设
@@ -118,8 +117,8 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
 `web_tests` 的 `query_params_that_are_typoed_are_rejected` 顺带钉住 `?level=DEBUG` 是 200（白名单漏了就是 400）。
 
 
-123. **老库的 `runs` 表没有 `status` 列：清理和运行记录页全线报错**（第 266 轮，用户 2026-11-22 报
-    「retention 清理旧记录报 SQL 错误：no such column: status」，同一人先前还报过「面板启动失败」）：
+123. **老库的 `runs` 表没有 `status` 列：清理和运行记录页全线报错**（2026-11-22 复现
+    「retention 清理旧记录报 SQL 错误：no such column: status」，先前还出现过「面板启动失败」）：
 
     ```
     清理 runs 失败: no such column: status in DELETE FROM runs WHERE status <> running ...
@@ -135,9 +134,9 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
     「这是 0.3.x 形状的库，建议用 panel migrate 搬一份」。
 
     守卫：`db::tests::an_old_runs_table_gets_the_status_column_backfilled_from_ok` —— 造一张带 `ok` 的
-    老 runs 表，断言列补上、值回填成 ["ok","error"]、retention 那条 DELETE 能跑通。
+    老 runs 表，断言列补上、值回填成 ["ok","error"]、retention 那条 DELETE 能通过。
 
-124. **未登入的设备把日志流刷成 WARN 墙**（第 266 轮，用户 2026-11-22 报「日志流接口反复 401 弹警告」）：
+124. **未登入的设备把日志流刷成 WARN 墙**（2026-11-22 复现：「日志流接口反复 401 弹警告」）：
 
     GET /api/logs/stream ← 192.168.4.43 → 401 code=unauthorized detail=需要令牌…
 
@@ -159,7 +158,7 @@ false、不抛）。余下这些**仍然没有**：`unlinkSync` / `appendFileSyn
         GET /api/health ← 127.0.0.1 ua=Mozilla/5.0 (Macintosh; Intel Ma → 401 ...
         POST /api/plugins/cmcc/reload ← 127.0.0.1 ua=curl/8.7.1 → 401 ...
 
-125. **`<p-switch>` 鼠标点不动：门禁点的是隐藏 input，用户点的是 knob**（第 267 轮，用户 2026-11-23 报
+125. **`<p-switch>` 鼠标点不动：门禁点的是隐藏 input，用户点的是 knob**（2026-11-23 复现：
     「那个开关点不了」—— 出现在插件 mgmusic 的账号设置里，根因在面板）：
 
     面板 `PSwitch` 建的是 `<div class="switch">`，里面一个 `<input class="switch-input">`

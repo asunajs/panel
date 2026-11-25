@@ -1,6 +1,6 @@
 # 踩过的坑（第 1–60 条，0.4 重写期）
 
-> 从 [pitfalls.md](../pitfalls.md) 拆出来（第 190 轮 review）：那篇到 1022 行，超过 1000 行上限。
+> 从 [pitfalls.md](../pitfalls.md) 拆出来：原文到了 1022 行，超过 1000 行上限。
 > 这里收的是 0.4 从 QuickJS 换 LLRT 那半年的坑 —— 大部分是一次性的（rquickjs 行为、
 > 引擎边界、旧面板对照），留作历史与判据；**现在的坑在里面那篇**。
 
@@ -35,9 +35,9 @@
 11. **`process.env` 遇非 UTF-8 就 panic（已打补丁）**：上游 `llrt_process::init` 用 `env::vars()`。已改 `vars_os()` + lossy，
     源码里带 `PANEL PATCH` 注释。⚠ 这是对 vendored LLRT 的**唯一**改动，重新 vendor 时必须重打。
 12. **限流的键必须按 IP，不能按 IP:端口**：每次请求源端口都不同，按 IP:端口分桶等于每个请求一个新桶，
-    限流器变纯装饰（第 9 轮真踩，8 次登录全 401，读数里才发现）。
+    限流器变纯装饰（真踩过：8 次登录全 401，读数里才发现）。
 13. **axum 0.8 的 `ConnectInfo` 做不成可选提取器**（只有 `FromRequestParts`，没有 `OptionalFromRequestParts`）：
-    要么在中间件里读 `req.extensions()`（我们这么做），要么 handler 直接要它（单测里就没有连接信息了）。
+    要么在中间件里读 `req.extensions()`（本项目这么做），要么 handler 直接要它（单测里就没有连接信息了）。
 14. **前端 `api()` 传 string body 不会带 content-type**：`body: JSON.stringify(o)` 少了 `content-type: application/json`，
     axum 的 `Json` 提取器回 415。传对象，让它自己序列化。
 15. **llrt 的 `console` 直写进程 stdout**：守护进程跑起来就是 journal，插件里的输出在面板上看不到。
@@ -48,7 +48,7 @@
     有测试：`db::tests::reap_marks_stale_running_runs_as_error`（含「已经跑完的不能动」）。
     面板日志里会留一行「有 N 条运行记录上次没跑完」。
 17. **脚本的「内容在文件、排程在库」，`list()` 只读库**：手写一个 `scripts/x.js` 丢进去，
-    面板里根本看不见（第 27 轮做备份往返时发现：备份里 0 个脚本，因为那文件从没被登记）。
+    面板里根本看不见（做备份往返时发现：备份里 0 个脚本，因为那文件从没被登记）。
     启动时 `Scripts::reconcile()` 把目录里没登记过的 `.js` 收编成「只手动跑」，
     已有的行一个字段都不动。有测试：`scripts::tests::reconcile_*` 两条。
 18. **「重载」是从磁盘读源码，磁盘被改坏时会把能跑的插件搞丢**：`Cmd::Load` 在插件已加载时
@@ -62,7 +62,7 @@
     现在 `AppState.load_errors`（`名字 -> 原因`）在启动加载/启用/重载失败时写入、成功时清掉，
     `/api/state` 的 `failed` 字段带出去，插件卡片上直接显示原因。
     ⚠ 前端 `refresh()` 是**逐字段拷贝**（不是整体赋值），新加的字段必须在 `state.xxx = data.xxx`
-    那里补一行 —— 这轮就漏了一次：服务端有 `failed`，页面上 `state.failed` 是 undefined。
+    那里补一行 —— 漏过一次：服务端有 `failed`，页面上 `state.failed` 是 undefined。
 20. **「启用」要先加载成功再落库**：反过来的话，加载失败时库里已经写着「启用」，
     界面和现实对不上，下次启动还会再试一次、再失败一次。
     有测试：`web::router_tests::enable_of_a_broken_file_fails_and_does_not_persist_enabled`
@@ -94,7 +94,7 @@
 
 26. **脚本是「加载=执行」，预算死线只盖加载期，而且 interrupt 只在引擎回到解释器循环时才生效**：
     一个 `while(true){}` 会**占满一个 tokio worker** 直到预算打卡。10 核机器上 12 个并发死循环，
-    `/api/state` 从 4ms 涨到 **1963ms**（第 34 轮实测）。现在 `Scripts` 有全局并发上限
+    `/api/state` 从 4ms 涨到 **1963ms**（实测）。现在 `Scripts` 有全局并发上限
     `max_concurrent() = max(1, 核数 - 2)`，抢不到就排队并记一行日志 —— 同样 12 个死循环，
     HTTP 稳定在 2~5ms。有测试/守卫：`the_concurrency_cap_leaves_room_for_the_server`、
     `check-pitfalls` 第 11 条。27. **插件注册给的 `lead_ms` 会被库里那份 0 盖掉（「handler 先注册、cron 后注册」必踩）**：
@@ -121,12 +121,12 @@
 
     字段归属表见 `docs/scheduler.md`。
 32. **熔断没有「手动恢复」的出口**：`resume` 只动 `enabled`，`trips` 一直累着（冷却翻倍），
-    而通知文案写着「检查完可以手动恢复」。第 38 轮补 `POST /api/tasks/{p}/{n}/reset`
+    而通知文案写着「检查完可以手动恢复」。现在补了 `POST /api/tasks/{p}/{n}/reset`
     （界面任务行「重置熔断」按钮），清 `tripped`/`trips`/`consecutive_failures` 并把下一拍对齐到现在。
     另外 `tripped`/`trips` **不落库**，热重载和重启都会清零 —— 有意的（重启往往是「刚改完」），
     代价是必然失败的任务每次重启要先失败 5 次才重新熔断。见 `docs/scheduler.md`。
 33. **日志落库不能每行一个 spawn**：`LogHub::emit` 原来每条 `tokio::spawn` 一个写，谁先落库
-    不确定。第 39 轮实测：一个 handler 连打 300 行，按 `id` 排序**有 16 处乱序**（还有 1 处 `ts`
+    不确定。实测：一个 handler 连打 300 行，按 `id` 排序**有 16 处乱序**（还有 1 处 `ts`
     回退）；SSE 是实时有序的，一刷新顺序就变。现在单消费者队列 + 攒批事务（512 条一批），
     2000 行 0.11s 落库、0 乱序。守卫在 `src/log/queue_tests.rs`。见 `docs/user/ops.md`。
 34. **一条通知的 N 个渠道要一个事务写完**：以前一个渠道一次 DB 往返，中途被杀就留下「铃铛有、
@@ -160,13 +160,12 @@
 
 40. **面板重启收尾「没跑完的运行」时要发通知，不只是写日志**：`kill -9` / 崩溃之后重启，
     `reap_stale_runs()` 把 `status='running'` 标成 `面板重启：这次运行没有跑完（进程被杀或崩溃）`，
-    以前只写一条 panel warn 日志 —— 而那正是「你不在时出事」最该让人知道的一条。
+    以前只写一条 panel warn 日志 —— 而那正是「无人值守时出事」最该让人知道的一条。
     现在同时发通知（`panel重启：N 条运行没有跑完`，level=warn，run_id=null），第二次重启不会重复发。
     守卫：`db_tests.rs::stale_notice_says_how_many_and_where_to_look`。
 
 41. **接口里写死的参数会让调用方以为生效**：`POST /api/scripts` 的 handler 里 `save(..., None, ...)`
-    把 `cron` 写死成 None，调用方传 `cron` 被**静默忽略**（建出来是手动脚本）。和第 36 轮 `lead_ms`
-    静默截断是同一类：参数进了门却没生效，日志里一个字都没有。现在 `NewScript` 接住 `cron`/`budget_ms`。
+    把 `cron` 写死成 None，调用方传 `cron` 被**静默忽略**（建出来是手动脚本）。与 `lead_ms` 静默截断是同一类：参数进了门却没生效，日志里一个字都没有。现在 `NewScript` 接住 `cron`/`budget_ms`。
     守卫：`web_tests.rs::creating_a_script_can_carry_its_schedule`。
 
 42. **复合游标少写一半 `id`，翻页会静默漏行**：`ORDER BY started_at DESC` 时游标是
@@ -177,7 +176,7 @@
 
 43. **`LIKE` 少了 `ESCAPE`，搜 `50%` 会一条都搜不到**：`like_pat()` 把 `%`/`_`/`\` 转义成 `\%` 之类，
     但 SQL 里不写 `ESCAPE '\'` 时反斜杠只是普通字符，模式变成「50 后面跟一个反斜杠」。
-    `/api/runs` 写了、`/api/logs` 漏了两年（第 57 轮才发现）：界面上看到的是「没有匹配的日志」，
+    `/api/runs` 写了、`/api/logs` 漏了两年（很久以后才发现）：界面上看到的是「没有匹配的日志」，
     用户只会以为没这类日志。凡是给 `LIKE ?` 传转义过的模式，就一定要带 `ESCAPE`。
     守卫：`web_tests.rs::searching_percent_and_underscore_matches_them_literally`（做过反向例）。
 
@@ -204,12 +203,12 @@
     两条都不行时退到回环，用 `#[cfg(test)]` 的 `allow_loopback` 逃生门（SSRF 门有自己的测试）。
 
 48. **命令行参数被静默忽略，会把「临时目录」变成「真目录」**：`backup --out x --data-dir /tmp/scratch`
-    里的 `--data-dir` 不认识却被无声吞掉，于是备份了真面板、恢复又写回真面板（第 61 轮亲手踩到，
+    里的 `--data-dir` 不认识却被无声吞掉，于是备份了真面板、恢复又写回真面板（踩到过，
     靠「备份和恢复的是同一堆数据」侥幸没丢东西）。凡是接参数的地方都要**拒绝不认识的东西**，
     并且把实际使用的目录打印出来。守卫：`backup.rs::unknown_flags_are_rejected_instead_of_ignored`。
 
-49. **自己刚加的白名单把功能挡了**：第 61 轮给 `backup` 加「不认识就报错」，白名单写的是
-    `--out --with-db --with-auth --secret`；可加密导出用的是 **`--encrypt-to`**，于是第 62 轮
+49. **自己刚加的白名单把功能挡了**：给 `backup` 加「不认识就报错」时，白名单写的是
+    `--out --with-db --with-auth --secret`；可加密导出用的是 **`--encrypt-to`**，于是
     一开始 `backup --encrypt-to` 直接报错，加密路径整个不可用 —— 而没有任何测试盯着这个开关。
     教训：白名单要和**真实开关一一对应**，并且测试里把完整开关列表写一遍（不是只测「坏参数被拒」）。
     守卫：`unknown_flags_are_rejected_instead_of_ignored` 现在显式带 `--encrypt-to`。
@@ -217,18 +216,18 @@
 50. **中断是协作式的，只有 host op 才是中断点**：`invocation().stop()` 只置标志；
     `await host.sleep(4000)` 会在 0.7 秒内被断（`AbortError` → 记 `cancelled`），
     但 `new Promise(r => setTimeout(r, 4000))` 会**跑满 4 秒并记 `ok`** —— 重载不会打断纯 JS 的等待。
-    另：被打断的运行状态是 `cancelled` 而不是 `error`（第 64 轮改的），
+    另：被打断的运行状态是 `cancelled` 而不是 `error`，
     否则界面「只看失败」会把「人点了重载」算成失败。守卫：`reloading_during_a_run_stops_it_without_a_failure_notice`。
 
 51. **「暂停」的旁边挂着一个未来的运行时间**：`/api/state` 的 `next_at` 以前不看 `enabled`，
    暂停的任务照样返回一个未来时刻，界面上「已暂停」+「下次运行 19:52」并列 —— 看着像它还要跑。
    现在暂停时给 0，界面显示「—」。守卫：`a_paused_task_reports_no_next_run`。
 52. **改计划的请求体只认 `expr`**：传 `{"cron": "..."}` 会被当成「没有 expr = 撤销覆盖」，
-   接口 200、什么都没改（第 65 轮实测）。认不出的键要报错，别静默当默认值。
+   接口 200、什么都没改（实测）。认不出的键要报错，别静默当默认值。
    守卫：`saving_a_schedule_rejects_unknown_keys`。
 
-53. **请求体多余字段一律报错，别再静默当成默认值**：`lead_ms` 截断（36）、脚本 `cron` 写死（53）、
-    改计划 `cron` 被当成撤销覆盖（65）—— 三次都是「参数进了门却没生效」。现在十个 body 结构体
+53. **请求体多余字段一律报错，别再静默当成默认值**：`lead_ms` 截断、脚本 `cron` 写死、
+    改计划 `cron` 被当成撤销覆盖 —— 三次都是「参数进了门却没生效」。现在十个 body 结构体
     都 `deny_unknown_fields`，错误经 `JsonBody<T>` 翻成 400 + 中文（`content-type` 缺失仍是 415）。
     **例外**：备份文档不拒绝未知字段（要前向兼容）。守卫：`unknown_keys_in_request_bodies_are_rejected`。
 

@@ -4,7 +4,7 @@
 
 这篇只讲一条规矩：**请求体里的字段名写错，要报错**，不能静默当成默认值。
 
-### 十个体都收紧了（第 66 轮）
+### 十个体都收紧了
 
 十个体 `TestRunBody` / `SetupBody` / `LoginBody` / `SourceBody` / `NewPlugin` / `ConfigBody` /
 `ScriptBody` / `NewScript` / `NotifyTestBody` / `ReadBody` 全部加了 `#[serde(deny_unknown_fields)]`，
@@ -13,11 +13,11 @@
 
 为什么较真：**三次踩到「参数静默忽略」**
 
-| 轮次 | 现象 |
+| 场景 | 现象 |
 |---|---|
-| 36 | `lead_ms` 超上限被静默 `min()` 截断 |
-| 53 | `POST /api/scripts` 的 handler 写死 `cron: None`，传了 `cron` 当成没传 |
-| 65 | 改计划传 `{"cron": ...}` 被当成「没有 expr = 撤销覆盖」，200 但什么都没改 |
+| 计划提前量 | `lead_ms` 超上限被静默 `min()` 截断 |
+| 新建脚本 | `POST /api/scripts` 的 handler 写死 `cron: None`，传了 `cron` 当成没传 |
+| 改计划 | 传 `{"cron": ...}` 被当成「没有 expr = 撤销覆盖」，200 但什么都没改 |
 
 现在多余字段一律报错：
 
@@ -30,15 +30,15 @@ POST /api/plugins  {"name":"z2","src":"x"}
 语法错 / 字段不认识 / 缺字段是 **400**（内容写错了）。
 
 **例外**：`POST /api/backup` 的备份文档**不**拒绝未知字段 —— 那是「未来版本可能多出字段」，
-恢复时要前向兼容（第 61 轮实测：多一个 `future_key` 照样恢复）。
+恢复时要前向兼容（实测：多一个 `future_key` 照样恢复）。
 
 守卫：`web_tests.rs::unknown_keys_in_request_bodies_are_rejected`（八条请求体逐个试）。
 
-### 查询参数（第 67 轮收紧）
+### 查询参数
 
 `/api/runs`、`/api/logs` 共用 `Page` 结构：`limit / plugin / run_id / q / sort / dir / after_v / after_id / before / level / source`。
 
-`source` 只有日志用（第 199 轮）：`panel` / `plugin` / `script` / `http`，精确匹配，空 = 全部；
+`source` 只有日志用：`panel` / `plugin` / `script` / `http`，精确匹配，空 = 全部；
 写错返回 400 并在错误里列出可用值（静默回 0 条会让人以为「真没有这类日志」）。
 现在**认不出的键直接 400**，`level`、`dir` 有白名单，其余解析失败也翻成中文 400。
 
@@ -52,7 +52,7 @@ POST /api/plugins  {"name":"z2","src":"x"}
 | `?sort=bogus` | 落回 id，响应回显 `sort:"id"` | **不变**（白名单 + 回显实际生效的键，防注入也让人看得见） |
 
 `sort` 是唯一的例外，因为它有既定的「白名单外落回 id 并在响应里回显」语义（`sort=id;DROP TABLE runs` 也走这条），
-把它改成 400 反而丢掉了「响应告诉你实际用了什么」这个性质。
+把它改成 400 反而丢掉了「响应里带上实际用了什么」这个性质。
 
 守卫：`query_params_that_are_typoed_are_rejected`（五条坏参数 + 大小写 + sort 落回）。
 
@@ -106,7 +106,7 @@ PROBE env PANEL_TOKEN = "secret123"
 ```
 PROBE env PANEL* keys = ["PANEL_DATA_DIR","PANEL_PLUGINS_DIR","PANEL_BIND"]
 PROBE env PANEL_TOKEN = undefined
-PROBE fs still importable (按你的决定不堵): function
+PROBE fs still importable (按既定口径不堵): function
 ```
 
 落盘（`<PANEL_DATA_DIR>/auth.json`，权限 **600**，debug 构建写的 186 字节）：
@@ -394,11 +394,11 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 重启后无凭据           401
 用生成的令牌 login     200        错误令牌 login  401
 浏览器：设置→安全 出现「这个面板还没有令牌」框 → **自己设一个**（输入框就在外面）→ 重启生效。
-随机生成是次要选项：它给的 43 字符没人记得住，没抄下来就只能删 `auth.json` 重来（第 24 轮踩过）
+随机生成是次要选项：它给的 43 字符没人记得住，没抄下来就只能删 `auth.json` 重来（踩过的坑）
         → 重启生效（确认弹窗）→ 页面刷新 → 令牌门 → 粘贴 → 解锁，侧栏变「令牌已启用」
 ```
 
-## 上传接口的覆盖语义（第 133 轮改了默认值）
+## 上传接口的覆盖语义
 
 `POST /api/plugins/upload?name=x.js|bundle.zip`、`POST /api/scripts/upload?name=…`
 
@@ -416,7 +416,7 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 `replaced` 是**这次覆盖掉的已有文件**（zip 里可能有好几个）；界面用它区分「已上传」和「已覆盖」。
 默认值原来就是覆盖 —— 那会让「手滑传错名」静默毁掉旧文件，也让用户分不清到底换没换。
 
-## 按 URL 装插件（第 107 轮）
+## 按 URL 装插件
 
 `POST /api/plugins/install` —— 按 URL 分发的插件包（`.js` / `.ts` / `.zip`）走这条链。
 面板负责下载字节并落盘：插件自己的 `host.fetch` 正文是 lossy UTF-8（zip 会被拆坏），
@@ -447,7 +447,7 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 上限 64 MiB（`upload::MAX_UPLOAD_BYTES`），按**实际读到的字节数**挡，不信 `Content-Length`；
 解压后的总量、条目数、单文件大小由 `upload::save` 再挡一遍（zip bomb 那道墙没有被这条新入口绕过）。
 
-### 插件 HTTP 的并发语义（第 142 轮）
+### 插件 HTTP 的并发语义
 
 一个插件只有**一个** JS 执行位（一个 `AsyncContext`）。插件自己注册的路由（`register_web`）
 和它的定时任务**共用**这个执行位。HTTP 请求来了、执行位正忙时：
@@ -471,7 +471,7 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 所以插件界面**可以**并发发请求了（以前必有一个 502）。但仍然建议串行：
 队列只是「不让正常并发炸掉」，任务一跑几十秒时（直播监听那种）排队照样会超时。
 
-## 错误格式与错误页（第 166 轮）
+## 错误格式与错误页
 
 以前错误响应是 `(状态码, String)`，那个 String **原样**发给客户端：`没有这个文件: /Users/…`、
 `(os error 13)`、`需要令牌：请求头 x-panel-token` 都进过响应体。现在分三样：
@@ -495,7 +495,7 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 
 未定义路径：`/api/*` 由 api router 的 fallback 出 JSON 404；其余路径由根 router 的 fallback 出错误页。
 
-## 按插件指标：GET /api/plugins/{name}/stats（第 176 轮）
+## 按插件指标：GET /api/plugins/{name}/stats
 
 卡片上只有「N 个任务 / 本次启动后未运行」，看不出「最近一周挂了几次」。这个接口把
 runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一刻的）：
@@ -512,7 +512,7 @@ runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一�
 - `avg_ms` 只算 `ended_at` 有值的行（还在跑的、被杀的不算进平均）；
 - 插件不存在 → 404，而不是一份空统计（空数字会被当成「真的没跑过」）。
 
-## 重装插件：POST /api/plugins/{name}/reinstall（第 180 轮）
+## 重装插件：POST /api/plugins/{name}/reinstall
 
 和 /reload 只差一件事：**这次加载采纳插件的 cron 建议**。
 
@@ -524,7 +524,7 @@ runs 表按三个时间窗聚合（**一次 DB 往返**，三个数字是同一�
 - 安装（POST /api/plugins 新建、POST /api/plugins/upload 上传一个**没装过**的名字）
   自动走采纳，不需要额外调 reinstall。
 
-## 改口令：POST /api/auth/token（第 181 轮）
+## 改口令：POST /api/auth/token
 
 界面在「设置 - 安全 - 修改口令」，命令行在 panel token reset（见 ops.md）。
 
@@ -577,7 +577,7 @@ PUT   /api/notify                      ← 整段 notify               → { ok,
 - **老配置**（只有 `channels`）读出来会合成 `<id>-default` 推送；任何写操作会先物化再改。
 - `PUT /api/notify` 与 `PATCH /api/notify/settings` 都做语义校验，**坏配置不落盘**（400）。
 
-## 写插件配置：`reload` 这个开关（第 196 轮）
+## 写插件配置：`reload` 这个开关
 
 `PUT /api/plugins/{name}/config` 的 body：
 
@@ -606,5 +606,5 @@ PUT   /api/notify                      ← 整段 notify               → { ok,
 界面：插件配置抽屉里的「保存后重载插件」，**默认不勾**；勾上才 `reload:true`（给
 「加载期读一次配置」的插件用）。不勾时提示「配置已保存（未重载）」。
 
-`skipped` 和 `reloaded:false` 必须分得开：前者是「按你的要求没重载」，后者是
+`skipped` 和 `reloaded:false` 必须分得开：前者是「按调用方要求没重载」，后者是
 「重载了但失败了」—— 混在一起，界面会把一次成功的保存说成失败（这条有单测）。

@@ -4,7 +4,7 @@
 > 插件项目开发插件、部署到实例目录；面板仓 `plugins/` 不放插件产物。
 > 这一页讲「插件在面板里的行为」，那一页讲「谁能写哪里」。
 
-## 产物形状：一个插件一个目录（第 269 轮）
+## 产物形状：一个插件一个目录
 
 推荐形状 —— **删插件 = 删一个目录**：
 
@@ -29,7 +29,7 @@ plugins/
 一包多插件里 `mcloud/mcloud-daily/index.js` 的 `import '../lib.js'` 指 `mcloud/lib.js` ——
 与老形状 `mcloud-daily/index.js` 的语义完全一致，插件源码不用改。
 
-## 多文件插件：`<name>/index.js`（第 216 轮）
+## 多文件插件：`<name>/index.js`
 
 从一个 `<name>.js` 升级成「可以拆文件」的插件，**形态是加法，不是替换**：
 
@@ -54,7 +54,7 @@ plugins/
 |---|---|
 | `import host from 'panel:host'` | ✅ 全部 host API |
 | `import fs from 'node:fs'` / `node:path` / `node:crypto` … | ✅ LLRT 内置模块，静态与 `await import()` 都行 |
-| `import { x } from './lib/x.js'` | ✅ **相对路径以插件目录为根**（就是这轮加的能力） |
+| `import { x } from './lib/x.js'` | ✅ **相对路径以插件目录为根**（现在支持） |
 | `import { d } from './lib/deep'` | ✅ 没写扩展名补 `.js` / `.mjs`；指向目录补 `index.js` |
 | `import x from '../outside.js'` | ✅ 跑出插件目录也行（**与 Node 一致**）；只有文件不存在才报「import 的文件不存在」 |
 | `require('./x.cjs')` | ⚠️ CJS 兼容层在，但它按**面板进程 cwd** 解析，指不到插件目录 —— 多文件请用 ESM `import` |
@@ -72,7 +72,7 @@ rquickjs 只给了 `FileResolver` 却**没有配读文件的 loader**，所以�
 
 `node:fs` 是 LLRT 内置模块，**没有任何沙箱**：能读写面板进程有权限的任意路径
 （实测 `readFileSync('/etc/hosts')`、读面板自己的源码、写 `/tmp` 都行）。
-代价是「装插件 = 把文件权限交给它」，所以只装你看得懂的插件。
+代价是「装插件 = 把文件权限交给它」，所以只装能看懂的插件。
 
 但 `fs` 的相对路径是按**面板进程 cwd** 解析的（不是插件目录），所以要读插件自己目录里的
 非 JS 资源（模板、词表、证书）得用绝对路径 —— 面板给两个：
@@ -124,12 +124,12 @@ printf "export const g = '多文件 OK';\n" > lib/g.js
 `MGMUSIC_MCLOUD_STORE` 覆盖开关挡掉了；这类收紧已回退，见 [security-20261118.md](security-20261118.md)）。
 
 所以装插件这件事本身是**一次信任决定**：装了它，它就能读面板的全部数据（包括别的插件存在
-`state` 表里的账号凭据）、能影响面板进程本身。只装你读得懂、来源明确的插件。
+`state` 表里的账号凭据）、能影响面板进程本身。只装能读懂、来源明确的插件。
 
 | 谁 | 谁负责 |
 |---|---|
 | **插件** | 可信代码。出问题 = 插件作者的问题，面板不替它兜底 |
-| **第三方脚本** | 使用者负责：脚本是普通子进程，你的用户权限就是它的权限（[user/scripts.md](user/scripts.md)） |
+| **第三方脚本** | 使用者负责：脚本是普通子进程，运行者的权限就是它的权限（[user/scripts.md](user/scripts.md)） |
 | **面板** | 只守自己的边界：单令牌鉴权（令牌只走 header）、`/api/*` 一条不漏、`/api/setup` 的 Host 闸（挡 rebinding）、转发给插件的请求头里不带面板自己的会话票、上传/保存的临时文件不跟随软链。这些见 [api.md](api.md) 与 0.6.3 的 CHANGELOG |
 
 插件界面与面板**同源**（`/plugins/<名字>/`）是这条模型的一部分：可信插件的界面当然能用面板的会话。
@@ -144,12 +144,12 @@ printf "export const g = '多文件 OK';\n" > lib/g.js
 | 重载 | `POST /api/plugins/{n}/reload` | 不动 | 换一份新加载 | **留**（用户状态恢复） | 留 |
 | 停用 | 插件卡「停止」/ `POST .../stop` | 不动 | 停调用、不进 `plugins` | 留 | 留 |
 | 禁用 | `POST .../disable` | 不动 | 不加载（记在库里） | 留 | 留 |
-| 卸载 | `POST .../unload` | 不动 | 移出 `plugins` | **留**（第 37 轮改的） | 留 |
+| 卸载 | `POST .../unload` | 不动 | 移出 `plugins` | **留** | 留 |
 | 删除 | `DELETE /api/plugins/{n}` | 移到 `data/trash/<n>-<ts>.js` | 移出 | **删** | **留** |
 
 「留」和「删」的分界线：`tasks` 是**配置**（暂停、摘要、blockers、调度覆盖、提前量），
-`runs` 是**历史**。重载/卸载保留配置是必须的（否则点一次重载就把设置清了，第 37 轮的坑）；
-删除意味着「我不要这个插件了」，配置跟着走；但历史是既成事实，删插件不该把「它上次为什么失败」也删掉。
+`runs` 是**历史**。重载/卸载保留配置是必须的（否则点一次重载就把设置清了）；
+删除意味着「不再需要这个插件」，配置跟着走；但历史是既成事实，删插件不该把「它上次为什么失败」也删掉。
 
 ### 实测：删除 → 从 trash 找回（2026-11-12，临时面板 8797）
 
@@ -185,18 +185,18 @@ DELETE    200  {"moved_to":".../data/trash/p1-1794476877097.js","name":"p1","ok"
 插件可以带自己的界面。**不做模板、不做组件库**：插件想怎么画就怎么画，
 宿主只负责把文件送出去、把请求转进来。
 
-### 0. 三种做法，先挑一个（第 191 轮）
+### 0. 三种做法，先挑一个
 
-| 做法 | 你要写 | 适合 | 边界 |
+| 做法 | 需要写 | 适合 | 边界 |
 |---|---|---|---|
 | **声明式**（推荐先试） | 只写 `panel.json` 的 `nav` / `config.fields` / `config.actions` / `views` + 几个 handler | 配置表单、登录（含验证码/扫码多步）、看几张表格/列表 | 只读展示；不能编辑单元格、不能自定义布局 |
-| **静态目录** | `<name>.webui/` 里的 html/css/js，`api/<handler>` 走约定 | 固定版式的小页面 | 你还是得写前端 |
+| **静态目录** | `<name>.webui/` 里的 html/css/js，`api/<handler>` 走约定 | 固定版式的小页面 | 仍需自己写前端 |
 | **动态路由** | `register_web()` + 一个 `__route` handler | 要完全掌控路由/响应头/流 | 自由度最高、成本最高 |
 
 声明式的完整契约在 [plugin-contract.md](plugin-contract.md) §9，活样例是
 `plugins/preview-demo.{js,panel.json}`（没有 `.webui/` 也能有一整页）。
 
-两条界面规则（第 223 轮，用户两次截图）：
+两条界面规则（用户两次截图）：
 
 - **停用的插件不在侧栏留入口**。它每个接口都回 409「已停用，不会自动加载」——
   点进去必然报错，所以入口直接藏起来；要启用去插件页的卡片（那里有「已禁用」徽标和「启用」按钮）。
@@ -314,7 +314,7 @@ body 是**原始字节**（不走 multipart：浏览器端 `file.arrayBuffer()` 
 
 ### 同名怎么办
 
-`overwrite` **默认不覆盖**（第 133 轮改的默认值：手滑传错名不该静默毁掉旧文件）。
+`overwrite` **默认不覆盖**（改的默认值：手滑传错名不该静默毁掉旧文件）。
 要覆盖就显式传 `overwrite=1`：
 
 ```text
@@ -325,7 +325,7 @@ $ curl -X POST '.../api/plugins/upload?name=up1.js&overwrite=1' --data-binary @o
 {"ok":true,"files":["up1.js"],"replaced":["up1.js"],…}                          [200]
 ```
 
-### 从 URL 装（第 107 轮）
+### 从 URL 装
 
 同一个落盘链路多一个入口：`POST /api/plugins/install {url, name?, sha256?, overwrite?}`
 （面板下载 → 校验 sha256 → 落盘 → 重载），以及 CLI `panel plugin install <url|文件|目录> [--overwrite]`。
@@ -362,7 +362,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 
 ## 与旧面板的功能对照（`rust-plugin-panel`）
 
-用户要求：**按旧面板的功能实现，实现方式不必照搬**。所以这张表只谈「有没有这个能力」，
+**按旧面板的功能实现，实现方式不必照搬**。所以这张表只谈「有没有这个能力」，
 不谈内部结构。旧面板那一列来自 `rust-plugin-panel/src/web.rs` 的路由表与
 `web/index.html` 的导航项（dashboard / plugins / tasks / scripts / push / settings / logs）。
 
@@ -377,30 +377,30 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 插件源码查看 + 编辑 + 保存并重载 | ✅（source / source/restore） | ✅ | 保存 = 写盘 → 重载；重载失败**自动回滚文件**并把旧版本装回去 |
 | 新建插件（模板起步） | ✅（upload） | ✅ | 界面填名字，后端写模板文件并加载 |
 | 删除插件 | ✅（delete 文件） | ✅ | 移进 `data/trash/`，不是直接删 —— 误点可捞 |
-| **插件分组（系列）** | ✅ 按名字前缀推导，组头带「全部重载 / 全部启用」 | ✅ | 规则原样搬来：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。后端 `plugin_group()` 推导并放进 `/api/state`、`/api/plugins/files`，前端只负责摆；**不做「全部停用」**（破坏性动作不该走批量路径）。第 88 轮补 |
+| **插件分组（系列）** | ✅ 按名字前缀推导，组头带「全部重载 / 全部启用」 | ✅ | 规则原样搬来：名字里第一个 `-` / `_` 之前那段（`mcloud-signin` → `mcloud`）。后端 `plugin_group()` 推导并放进 `/api/state`、`/api/plugins/files`，前端只负责摆；**不做「全部停用」**（破坏性动作不该走批量路径）。补 |
 | 未加载插件的可见性 | ❌（列表只看已加载） | ✅ | `/api/plugins/files` 列出目录里所有 `.js`，语法错的也能进去修 |
-| **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。面板里用 `#view-plugin` 的**同源 iframe** 嵌着打开（第 139 轮）；也可以在新标签里直开。契约见 [plugin-contract.md](plugin-contract.md) |
+| **插件 WebUI** | ✅ `register_route` + `/plugins/<name>/*` | ✅ | `plugins/<name>.webui/` 静态目录 + `POST /plugins/<name>/api/<handler>` 动态调用（复用 handler 机制，把返回值带出来）。面板里用 `#view-plugin` 的**同源 iframe** 嵌着打开；也可以在新标签里直开。契约见 [plugin-contract.md](plugin-contract.md) |
 | 脚本增删改查 + 手动/定时运行 | ✅ `/api/scripts`、`/api/scripts/jobs` | ✅ | 脚本 = **第三方程序**（`sh`/`node`/`bun`/`python3`/`php`/二进制…），每次运行**起一个子进程**收 stdout/stderr（不进 JS 引擎，见 `src/scripts.rs`）；排程在记录里（不在代码里）；日志/运行记录复用 `runs`/`logs`（plugin 列 = `@script`）；列表带「上次运行」 |
 | 配置 UI 化（读 + 写 + 校验） | ✅（settings/save，需重启） | ✅ | 4 MiB 上限、必须是 JSON 对象、0600 原子写；**保存即生效**（热快照），旧面板要重启 |
-| 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 通知 / 数据（通知页是第 13 轮加的） |
+| 设置页 tabs 分页 | ✅ | ✅ | 常规 / 配置 / 安全 / 通知 / 数据（通知页是加的） |
 | 推送（通知） | ✅ push 通道 / outbox | ✅ | `host.notify()` + 任务失败/熔断自动通知 → 面板铃铛（未读数、点回那次运行）+ 外部渠道（13 种：webhook / smtp / 企业微信 / 钉钉 / 飞书 / Slack / Discord / Telegram / Bark / ntfy / Gotify / Server酱 / 自定义，见 [notify.md](user/notify.md)） |
 | 备份 / 恢复 | ✅ `/api/restore*` | ✅ | `GET/POST /api/backup`：配置原文 + 插件源码 + 脚本（含排程）打成一个 JSON。**恢复只增/覆盖，绝不删** —— 「恢复」变成「删除」最容易让人丢数据。不含数据库（运行记录/日志是历史，搬过去 run id 会对不上） |
 | 自启动 | ✅ `install.sh`（systemd/launchd） | ✅ | `panel service print\|install\|uninstall\|status`：生成 launchd plist / systemd --user unit，`print` 干跑出来的 plist 过 `plutil -lint`。不进界面：装自启动要动系统服务，出错时要有原始输出 |
 
-**用户点名的六项**（插件增删改查、脚本增删改查、插件 webui、配置 ui 化、设置 tabs、自启动）
+**核心六项**（插件增删改查、脚本增删改查、插件 webui、配置 ui 化、设置 tabs、自启动）
 **全部落地**，另外补了备份/恢复和通知两块，以及一轮「双主题 × 窄屏」的界面一致性核查。
 
 ### 2. 还差的（2026-11-12 复核）
 
 复核方法：把旧面板 `src/web.rs` 的路由表、`src/*.rs` 的模块、`web/index.html` 的导航，
-和旧库 `panel.db` 的表结构（`jobs` / `plugin_state` / `push_*`）逐条对我们这边对了一遍。
+和旧库 `panel.db` 的表结构（`jobs` / `plugin_state` / `push_*`）逐条对照过。
 
 #### 2.1 面板功能
 
-| 旧面板 | 我们 | 差在哪 / 影响 |
+| 旧面板 | 本项目 | 差在哪 / 影响 |
 |---|---|---|
 | `POST /api/jobs/{p}/{n}/edit`（只换表达式，可撤销，runs/trips 全保留） | ✅ 11-12 `/api/tasks/{p}/{n}/schedule` | 只换表达式：运行历史/熔断计数/暂停状态全保留；落库，插件热重载和面板重启都不冲掉；`{expr:null}` 恢复插件注册那条 |
-| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ✅ 第 178 轮 `/api/tasks/{p}/{n}` DELETE + `/restore` | 墓碑：删掉的记 `deleted_at`，插件再注册也不复活；「显示已删除」里能恢复（见 [scheduler.md](scheduler.md)）。`cleanup`（物理清）没做 |
+| `POST /api/jobs/{p}/{n}/delete` / `restore` / `cleanup`（软删 `deleted` 列） | ✅ `/api/tasks/{p}/{n}` DELETE + `/restore` | 墓碑：删掉的记 `deleted_at`，插件再注册也不复活；「显示已删除」里能恢复（见 [scheduler.md](scheduler.md)）。`cleanup`（物理清）没做 |
 | `plugin_state.disabled` + `/api/plugins/{n}/enable|disable` | ✅ 11-12（禁用持久化） | 禁用 = 卸载 + 落库，**重启后不再加载**；界面上那张卡变「已禁用」+「启用」。`keep_warm` / 引擎选择（`engine`/`command`）/ `runtime` 仍然没有 |
 | `POST /api/plugins/install`（按 URL 装 + sha256 校验）、`panel plugin install`（CLI，含目录） | ✅ 11-14 | 面板下载 → 校验 → 落盘 → 重载；货架 / 商店属于外部插件，不在本仓 |
 | `/api/plugins/upload`、`/api/scripts/upload`（单文件或 zip） | ✅ 11-12 | body 是原始字节 + `?name=`；zip 解压保留内部路径（`x.webui/` 原样落盘）、拒穿越/符号链接/隐藏段、按**实际解压量**挡 zip bomb；传完自动重载。脚本上传顺带建记录 |
@@ -410,19 +410,19 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框。见 [verification.md §9](verification.md) |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/*` | ✅ 11-12（形状不同） | 渠道写在 `config.json` 的 `notify` 键（webhook / SMTP 两种）；发件箱 `notify_outbox` 一条一渠道，失败按 1m/5m/15m/1h/6h 退避，5 次放弃且**留在表里**可手动重试；按任务开关用 `mute` 名单（`插件` 或 `插件/任务`）而不是 `push_tasks` 那张表；没有独立的 deliveries 表（发件箱行本身就是记录）。见 [ops.md](user/ops.md) |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [ops.md](user/ops.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
-| `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新**检查 + 下载**已做（第 210 轮 `/api/update/check`、`/skip`、`/download`，见 [api.md](api.md)），**自动替换自己**仍不做 |
+| `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新**检查 + 下载**已做（`/api/update/check`、`/skip`、`/download`，见 [api.md](api.md)），**自动替换自己**仍不做 |
 | `/readyz` | ✅ 11-12 | 库能读 + 调度器活着才 200，否则 **503**（不是 200+`ok:false` —— 反向代理会把它当健康） |
 
 已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
 `/api/plugins/{n}/source|reload|unload|delete`、`/api/config`（比旧的 `/api/settings/save` 强：热生效）、
 `/api/backup`、`/api/tasks/{p}/{n}/run|pause|resume|schedule`。
 
-**插件自己的配置**（第 89 轮补齐旧面板那条）：`GET/PUT /api/plugins/{n}/config`，文件在
+**插件自己的配置**（补齐旧面板那条）：`GET/PUT /api/plugins/{n}/config`，文件在
 `<PANEL_DATA_DIR>/plugin-data/<name>/config.json`（旧面板也是 `PLUGIN_DATA_DIR/<plugin>/config.json`）。
 插件里读它用 `await host.self_config()`（和面板级的 `host.config()` 分开，理由见
 [host-api.md](host-api.md#两份配置第-89-轮)）。界面入口：插件卡片上的「配置」。
 
-**写配置默认不重载**（第 196 轮）：`PUT` 的 body 是 `{text, reload}`，`reload` 缺省 `false`。
+**写配置默认不重载**：`PUT` 的 body 是 `{text, reload}`，`reload` 缺省 `false`。
 `host.self_config()` 是**每次调用都读盘**的，所以「用到才读」的插件不需要重载 ——
 而重载要付一次 unload+load：`Cmd::Unload` 第一件事就是 `invocation().stop()`，
 在跑的任务当场被打断、排队的请求直接失败。所以默认**不重载**（回 `skipped:true`，和「重载失败」的 `reloaded:false` 分得开）；
@@ -432,29 +432,29 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 
 #### 2.2 宿主 API（插件能力）
 
-| 旧 | 我们 | 影响 |
+| 旧 | 本项目 | 影响 |
 |---|---|---|
 | `ws_open/ws_send/ws_recv/ws_close` | ✅ 11-12 | tokio-tungstenite；同步语义 + 句柄，超时是结果不是错误 |
 | `smtp_send` | ✅ 11-12 | 移植基线的 SMTP 客户端（starttls / implicit / none、AUTH、RFC2047、ca_file）；**过 SSRF 门**；明文连接上默认不发凭据。见 [host-api.md](host-api.md#发邮件smtp_sendopts) |
 | `tls: 'native'`（legacy CBC 套件） | ✅ 11-12 | reqwest + 平台 TLS；`v.cmcc-cs.cn` 实测 rustls 失败、native 200 |
 | `register_nav({label,icon,path})` | ❌（记一行日志） | 插件不会出现在侧栏；走「插件页 → 界面」 |
-| `worker_hint('exclusive')` | ❌（忽略） | 我们本来就是一插件一 runtime |
-| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 大部分 | `params`（注册期给、派发原样交回，没给是 `null`）、`lead_ms`、`summary`、`blockers`、`paused` 都有了；`surface` / `manage_url` 还没有（我们没做侧栏注册与外部管理页） |
+| `worker_hint('exclusive')` | ❌（忽略） | 本项目本来就是一插件一 runtime |
+| `{ params, lead_ms, surface, summary, blockers, paused, manage_url }` | 大部分 | `params`（注册期给、派发原样交回，没给是 `null`）、`lead_ms`、`summary`、`blockers`、`paused` 都有了；`surface` / `manage_url` 还没有（面板没做侧栏注册与外部管理页） |
 | `set_job_paused/blockers/summary/schedule` | ✅ 11-12 | 落库（重启/重载都不丢）；blockers 只挡定时、不补触发；`lead_ms` 提前唤醒且事件带 `early`；只认自己/同组 |
 | `panel.version()` / `panel.atLeast()` | ✅ 11-12 | semver 比较（0.3≡0.3.0、v 前缀、预发布），非法串抛错；`panel` 同时是全局。**刻意没做**基线的 `@panel min` 加载期闸门（版本线不同，硬拦会挡住能跑的插件） |
 
 实测**已经有的**（2026-11-12 用脚本探过）：`setTimeout` / `setInterval` / `queueMicrotask` /
-`TextEncoder` / `crypto` / `performance` / `node:fs`（可 import，且我们**没有**旧面板那种
+`TextEncoder` / `crypto` / `performance` / `node:fs`（可 import，且本项目**没有**旧面板那种
 「限制在插件数据根」的约束）。
 
 #### 2.3 工程层
 
-| 旧 | 我们 |
+| 旧 | 本项目 |
 |---|---|
 | 多运行时（`runtimes.rs`：Node / Bun；内嵌 QuickJS 已在他们那版移除） | 内嵌 LLRT（QuickJS-ng），单运行时 |
 | 外部进程插件（`extproc.rs`，native 逃生口） | ❌ **明确不做** | 基线是 1592 行 Rust + 1760 行子进程侧 JS 的第二套插件运行时（双通道 + 杀进程即预算）。判断不做的理由、改判条件、以及真要做的形状都写在 [engine.md](engine.md)。替代：`host.fetch` 外置 / 调度器长任务 / 引擎试跑 |
 | 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
-| 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；我们没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
+| 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；本项目没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
 | 时区（`tz.rs`） | 本地时（chrono `Local`） |
 | 面板版本 / 自更新（`panelversion.rs`） | 版本有了（`panel.version()` / `atLeast()`，见 §2.2）；**自更新没有**，也不打算做 |
 | 任务目录（`taskdir.rs`，`tasks/*.json`） | 任务在 DB |
@@ -464,28 +464,28 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 
 | 插件 | 还缺什么 |
 |---|---|
-| `mcloud` | 阶段 A/B 跑过真读数；`ws_*` 与 native TLS **都已补上**（见 §2.2），直播那半剩下的只是**真跑一次**（要开播，得用户点头） |
+| `mcloud` | 阶段 A/B 跑过真读数；`ws_*` 与 native TLS **都已补上**（见 §2.2），直播那半剩下的只是**真跑一次**（要开播，得先确认） |
 | `mgmusic` | ✅ **已经迁完**（2026-11-13）：契约换完、账号配置从老 `config.json` 播种到 `state` 表、界面换成 `/app.css` + 套件。读数是「路由/界面/播种」这一层，**真账号的写链路还没跑**。详见 [mgmusic-migration.md](mgmusic-migration.md) |
-| `cmread` / `yangshipin` | ❓ **没验过**：从源码看只用 `node:fs` + `setTimeout` + `register_nav`（前两个我们有、nav 忽略），理论上换 host-api 就能打。mgmusic 这一趟证明这条路走得通（多看两条坑：[mgmusic-migration.md §5](mgmusic-migration.md)），下一个照它的形状打即可 |
+| `cmread` / `yangshipin` | ❓ **没验过**：从源码看只用 `node:fs` + `setTimeout` + `register_nav`（前两个本项目有、nav 忽略），理论上换 host-api 就能打。mgmusic 的迁移证明这条路可行（多看两条坑：[mgmusic-migration.md §5](mgmusic-migration.md)），下一个照它的形状打即可 |
 | `quark` | 只用 host-api 的 fetch/sqlite，最容易 |
 
 ### 3. 明确不做的
 
-- **不为旧插件契约做垫片**：旧插件要改就改，不写兼容层（用户明示）。
+- **不为旧插件契约做垫片**：旧插件要改就改，不写兼容层。
 - **多用户 / 登录页**：单令牌 + 只绑回环。多用户意味着权限模型，不是面板该有的复杂度。
 - **插件沙箱**：插件是**可信代码**，和本机其它程序同权。这条写在安全页里，不藏着。
 - **插件界面 iframe 内嵌**：`x-frame-options: DENY` 对所有响应生效，放宽它只省一个标签页。
 
-### 4. 四条纪律（这几轮踩出来的）
+### 4. 四条纪律（踩出来的）
 
 1. **写文件先写临时文件再 rename**：半截的插件文件下次启动会被当成真插件加载，比写失败更糟。
 2. **保存 = 先写盘再重载，失败回滚**：反过来会得到「内存跑新代码、磁盘是旧代码」，下次重启行为突变。
 3. **界面上能改的东西，后端必须先校验**：配置必须是对象、名字必须过 `safe_name`、源码有 8 MiB 上限（`PANEL_PLUGIN_MAX_BYTES` / 脚本用 `PANEL_SCRIPT_MAX_BYTES` 可调） —— 前端校验只是体验，不是边界。
 4. **通知是旁路，不是依赖**：失败/熔断照发通知，但 webhook 挂了不能让任务失败，也不能拖慢插件。
 
-### 5. 复核记录（2026-11-12，第 14 轮）
+### 5. 复核记录（2026-11-12）
 
-上一轮把最后一条「部分」补完（通知渠道）之后，这一轮反过来做一件事：**逐条查那些 ✅ 是不是
+最后一条「部分」补完（通知渠道）之后，反过来做一件事：**逐条查那些 ✅ 是不是
 真做到了「够用」**，而不是「有个接口」。方法是拿一个空数据目录起面板（8793），用 curl 打真接口
 读真返回，再对着旧面板的源码看语义。
 
@@ -493,7 +493,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 
 | 原来写的 | 实际 | 怎么发现的 |
 |---|---|---|
-| 设置页 tabs = 常规 / 配置 / 安全 / 数据 | 第 13 轮加了「通知」，现在是 **5 个** | `grep data-tab web/index.html` |
+| 设置页 tabs = 常规 / 配置 / 安全 / 数据 | 加了「通知」，现在是 **5 个** | `grep data-tab web/index.html` |
 | 工程层「面板版本：只有 `CARGO_PKG_VERSION`」 | `panel.version()` / `atLeast()` 早就有了（§2.2 自己也写着 ✅） | 同一篇里两处自相矛盾 |
 | 「`mcloud` 只差 `ws_*` + native TLS」 | 这两样 11-12 都补上了（§2.2 两行 ✅），剩下的是**真跑一次** | 同上，同一篇里对不上 |
 | 「cmread / mgmusic / yangshipin 换 host-api 就能打」 | 没验过，是**推测** | 措辞把推测写成了结论 |
@@ -534,7 +534,7 @@ GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
 - 有虚报风险的是**措辞**（「就能打」这种），已经降级成 ❓ + 测法。
 - 仍然 ❌ 的两条（任务软删、市场/自更新）和 ❌ 的外部进程插件，都是**判断不该做**，理由各有记录。
 
-## 界面：面板 UI 套件（第 139 轮）
+## 界面：面板 UI 套件
 
 插件带界面时**别自己画一套外观** —— 控件、颜色、弹窗形状都归面板，插件只写布局。
 完整清单与写法（自定义元素、弹窗表单、发码格、`p-number` / `p-select`、勾选框、
@@ -557,7 +557,7 @@ GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
 - 改 `<p-button>` 的文字用 `.label`，不要写 `textContent`（里面还包着一颗 `<button>`）。
 
 
-## 从 0.3.x 面板迁移插件状态（`panel migrate`，第 150 轮）
+## 从 0.3.x 面板迁移插件状态（`panel migrate`）
 
 0.3.x 把插件状态放在它自己 `panel.db` 的 `state` 表里（mcloud 那族是 `mcloud.accounts` +
 每号一个 JSON 袋）。0.4.x 是**另一个库**，用户手上只有旧目录 —— 这条路让他们不用手工 sqlite3 抄键。
@@ -626,15 +626,15 @@ state 里 36 个键，按命名空间：
 ⚠ 迁移期间最好把面板停掉（同一个库两个写者容易撞）。命令本身开 10s busy timeout，但那是兜底，
 不是并发方案。
 
-### 插件的三个「关掉它」不是一个意思（第 167 轮）
+### 插件的三个「关掉它」不是一个意思
 
-用户问过「插件没有暂停使用功能」—— 那时只有「停止」（中断正在跑的那一次）和「停用」
-（卸载 + 重启不加载），中间那一档没有。现在三档齐了：
+原先只有「停止」（中断正在跑的那一次）和「停用」（卸载 + 重启不加载），
+「暂停使用」这一档没有。现在三档齐了：
 
 | 动作 | 端点 | 发生什么 | 任务会怎样 | 重启后 |
 |---|---|---|---|---|
 | **停止** | `POST /api/plugins/{n}/stop` | 只中断**正在跑**的那次调用（没在跑就 400） | 不动 | 不变 |
-| **暂停定时** | `POST /api/plugins/{n}/suspend` | 只停定时：界面照开、手动照跑（**不保证驻留内存** —— 第 189 轮起空闲卸载也会收走，用到时自动装回） | 仍在列表里，但到点不触发；不攒「落后」 | 仍暂停（`plugins.suspended`） |
+| **暂停定时** | `POST /api/plugins/{n}/suspend` | 只停定时：界面照开、手动照跑（**不保证驻留内存** —— 空闲卸载也会收走，用到时自动装回） | 仍在列表里，但到点不触发；不攒「落后」 | 仍暂停（`plugins.suspended`） |
 | **停用** | `POST /api/plugins/{n}/disable` | 卸载 + 落库，重启不再加载 | 从界面上消失（插件没加载，任务也就没有） | 仍停用 |
 
 恢复：`/resume`（暂停）与 `/enable`（停用）。**恢复不补跑**暂停期间漏掉的那些拍 ——
@@ -643,9 +643,9 @@ state 里 36 个键，按命名空间：
 界面入口：插件卡 → 详情抽屉（「暂停定时」/「恢复定时」），卡片上会多一个 `已暂停定时` 的药丸 ——
 不标出来，用户会以为是自己 cron 写错了。
 
-### 零参数：自动扫描，别让人自己找旧库（第 168 轮）
+### 零参数：自动扫描，别让人自己找旧库
 
-用户的原话是「我不知道旧库在哪」。所以不给路径时先扫一圈：
+不知旧库在哪时，不给路径就先扫一圈：
 
 ```bash
 panel migrate                # 扫描 + 预览，不写任何东西
@@ -687,7 +687,7 @@ panel migrate                # 扫描 + 预览，不写任何东西
 
 `jobs`（旧面板的任务表）**默认不搬**：0.4.x 的任务是插件注册出来的，直接搬过来会被下次加载覆盖 —— 只会造成「看着有、其实没有」。要搬就显式加 `--with-tasks`（见 [migrate.md](user/migrate.md)）。
 
-## 插件清单 panel.json（第 172 轮）
+## 插件清单 panel.json
 
 一个 .js 能干活，但界面上三件事它说不清：**叫什么、排第几、要填什么配置**。
 侧车文件把这些说出来，和代码并列放：
@@ -753,20 +753,20 @@ GET /api/plugins/scan        ← 界面「插件 → 扫描目录」按钮
 它**只报告不加载**：加载这个动作始终是人喊的（按钮/重载/重启）。
 「加载过」的指纹是加载成功那一刻的文件大小 + mtime，所以「改过」= 与那次不同。
 
-**「新增」到底指什么**（第 224 轮，用户看到「新增 3 个：mcloud-daily…」以为这三个是新装的）：
-快照在进程内存里，所以「新增」= **面板运行期间新出现的文件**，不是「你没装过的插件」。
+**「新增」到底指什么**（用户看到「新增 3 个：mcloud-daily…」以为这三个是新装的）：
+快照在进程内存里，所以「新增」= **面板运行期间新出现的文件**，不是「没装过的插件」。
 为此启动时会先把磁盘上现有的插件全部记一遍（`manifest::seed`），而每次加载成功
-（含「用到就装」和闲时唤醒装回来的）都会刷新指纹 —— 否则「这轮没加载」的老插件
+（含「用到就装」和闲时唤醒装回来的）都会刷新指纹 —— 否则「这次没加载」的老插件
 会被一直报成新增，而那三个 mcloud 只是还没轮到装进内存。判断标准：
 
 | 情况 | 报什么 |
 |---|---|
-| 启动时就在目录里，这轮没加载 | 什么都不报（已知） |
+| 启动时就在目录里，这次没加载 | 什么都不报（已知） |
 | 运行期间往目录里丢了个新文件 | 新增 |
 | 加载过之后文件（含目录式插件的 `lib/`）变了 | 改过 |
 | 记着加载过，文件被删了 | 目录里没了 |
 
-## 命令行：新建与检查（第 176 轮）
+## 命令行：新建与检查
 
 ```bash
 panel plugin new mcloud-signin          # 出 mcloud-signin.js + mcloud-signin.panel.json
@@ -783,13 +783,13 @@ panel plugin check plugins/demo.js      # 只编译不执行
 - 报错会先给**人话**（unexpected token / invalid property name），再做兜底 ——
   rquickjs 的 Error::Exception 本身不带消息，直接打印只有「Exception generated by QuickJS」。
 
-## `<p-plugin-ver>`（第 257 轮）
+## `<p-plugin-ver>`
 
 插件页右上角的版本药丸：`<p-plugin-ver></p-plugin-ver>`。
 版本从**面板读的那份清单**取（`/api/plugins/files`），插件自己不需要再存一份；
 拿不到版本时整格 `hidden`，不留空药丸。也可以在 JS 里用 `await PanelUI.pluginVersion()`。
 
-## 更新后旧的东西去哪了（第 269 轮）
+## 更新后旧的东西去哪了
 
 | 东西 | 位置 | 谁清 |
 |---|---|---|

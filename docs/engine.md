@@ -2,7 +2,7 @@
 
 ## 架构
 
-三态：**已定**＝用户确认过或有一手读数 / **建议**＝agent 侧未拍板 / **❓**＝未测（附测法）。
+三态：**已定**＝已确认或有一手读数 / **建议**＝agent 侧未拍板 / **❓**＝未测（附测法）。
 Stage 0 读数与复跑命令在 [engine.md](engine.md)；Stage 1 端到端验证在 [verification.md](verification.md)。
 
 ### 1. 嵌入形态（已定）
@@ -43,7 +43,7 @@ Rust 宿主（axum + rusqlite + tokio）**进程内嵌 `llrt_core`**。没有外
 ❓ 要不要自己补一个 —— 测法：先查真实插件里有没有用到，再决定是补 native 还是让插件用
 `JSON.parse(JSON.stringify())`。**不预先造垫片。**
 
-> ⚠ 我们对 `vendor/llrt` 有**一处**改动（`llrt_timers` 的定时器退出路径），升级 llrt 时要重打：
+> ⚠ 本仓库对 `vendor/llrt` 有**一处**改动（`llrt_timers` 的定时器退出路径），升级 llrt 时要重打：
 > 见 [engine.md §6](engine.md)。
 
 #### 1.2 vendored 而非 git dep（已定，偏离原计划）
@@ -182,14 +182,14 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | 两套调度（`on_tick` + cron） | `docs/engine-safety.md §7.6` | 只留 cron |
 | `panic = "abort"` | `Cargo.toml [profile.release]` | `unwind` + 引擎边界 `catch_unwind`（已实现，见 §9） |
 | DB 单 Mutex + 168 处 `lock().unwrap()` | `db.rs:11`、review R4 | DB actor / 连接池 + 错误传播 |
-| 为旧插件契约存在的任何垫片 | 用户明示不必兼容 | — |
+| 为旧插件契约存在的任何垫片 | 明确不必兼容 | — |
 
 **代价如实写**：现有插件（含央视频）在新面板上**不能原样跑**，要按 async host-api 改写。
-这是用户已接受的重写代价，不当阻断项。
+这是已接受的重写代价，不当阻断项。
 
 ### 7. 硬边界（已定）
 
-- **不动 `rust-plugin-panel`**：它的工作树有未提交的 Node-only 迁移（可能有并行会话在飞）。
+- **不动 `rust-plugin-panel`**：它的工作树有未提交的 Node-only 迁移（可能有并行的未提交迁移）。
   只读它（`git show HEAD:<path>`）作为功能基线，不写、不提交、不 stash。
 - 本仓库独立 `git init`，**不 push**（推送要另行授权）。
 - 探针产物留在本仓库或 `/tmp/llrt-probe`，不污染旧仓库。
@@ -204,7 +204,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 | `structuredClone` 要不要补 | 先查真实插件用量，再决定 |
 | CPU 密集插件占住 worker 时的排队行为 | 本机负载 14~28，读数无法归因；要在空载机器上重跑（判据 6） |
 | 内存不还给 OS（drop 全部 runtime 后仍留 21.3 MiB） | ❓ 是 QuickJS 分配器还是 Rust 分配器缓存；测法：`malloc_zone_pressure_relief` 前后对比 |
-| ~~`fs` / `dns` 没禁~~ | **已定：不加 jail**（用户拍板）。插件是可信代码，安全面只收在面板令牌上 —— 令牌明文不落盘、不进 `process.env`，所以读得到文件也拿不到令牌。见 §10 与 [api.md](api.md) |
+| ~~`fs` / `dns` 没禁~~ | **已定：不加 jail**。插件是可信代码，安全面只收在面板令牌上 —— 令牌明文不落盘、不进 `process.env`，所以读得到文件也拿不到令牌。见 §10 与 [api.md](api.md) |
 
 ### 9. Stage 1 落地形态（已实现）
 
@@ -252,7 +252,7 @@ stop token 必须绑到**具体 invocation**，不是插件、更不是全局。
 
 #### 10.1 为什么安全面只收在令牌上
 
-用户拍板：**插件按可信代码对待** —— `fs`/`dns` 不加 jail（`import('fs')` 仍能读任意文件，
+已定口径：**插件按可信代码对待** —— `fs`/`dns` 不加 jail（`import('fs')` 仍能读任意文件，
 见 [verification.md §4](verification.md)）。于是真正要守的东西只剩一件：**面板令牌**。
 面板拿到令牌就能派发任务、读日志、改插件，而插件能读文件、能读 `process.env`，
 所以令牌不能以任何「读到就能用」的形态存在。
@@ -293,7 +293,7 @@ env 里，`ps -E` 同用户可读；Linux 上 `/proc/self/environ` 也还带着�
 
 ## 插件退出时的定时器（已修：vendor 补丁 + 加载期闸门）
 
-这一篇记一个**查出来、也修掉了**的问题（第 17 轮发现，第 18/19 轮处理）。2026-11-12 查出来的，
+这一篇记一个**查出来、也修掉了**的问题。2026-11-12 查出来的，
 起因只是想给「运行记录」写一条带耗时的测试。
 
 ### 1. 现象（三组探针，都能复跑）
@@ -320,13 +320,13 @@ LLRT 的定时器是**进程级单例**（`llrt_timers` 里 `static RT_TIMER_STA
 `unwrap_unchecked()`（找不到就 UB）。
 
 LLRT 自己的模型是「一个进程一个 runtime，跑到进程结束」，所以它**从不需要在运行时释放前清表**。
-我们是「1 插件 = 1 runtime」，`reload` / `disable` / 脚本跑完都要析构 —— 于是撞上三件事：
+本项目的模型是「1 插件 = 1 runtime」，`reload` / `disable` / 脚本跑完都要析构 —— 于是撞上三件事：
 
 1. 析构 `AsyncContext` 会**等**它 spawn 的定时器任务结束；`setInterval` 永远不结束 ⇒ load/卸载卡死；
 2. 等不到的时候，`Persistent<Function>` 还挂在静态表里 ⇒ `JS_FreeRuntime` 发现对象没释放完 ⇒ assert abort；
 3. 就算等到了，那个循环任务下一次 `poll_timers` 会碰一个**已经释放的 rt 指针**。
 
-### 3. 现在怎么办：加载期装闸门（2026-11-12 第 18 轮）
+### 3. 现在怎么办：加载期装闸门（2026-11-12）
 
 治不了根，但把「卡死 / 崩溃」变成「加载期一句人话」。闸门在 `BOOTSTRAP` 里，模块求值**之前**生效：
 
@@ -353,7 +353,7 @@ setTimeout(100)       200  {"ok":true}，出现在 /api/state 里
 | 做法 | 好处 | 代价 |
 |---|---|---|
 | (a) BOOTSTRAP 里包一层 setTimeout/clearTimeout 记账，卸载前全清 | 不动 vendor | **试过，不行**：定时器还在时 `ctx.with` 本身就进不去，清不掉 |
-| (b) 给 vendored `llrt_timers` 打补丁：`get_timer_state` 返回 `Option`（拿不到就让循环退出）+ 加 `forget_runtime`，卸载前调 | **已做（第 19 轮）**：`Plugin::drop` 里摘状态，析构不再等、不再 abort | 动 vendor 树，升级时要重打（§6） |
+| (b) 给 vendored `llrt_timers` 打补丁：`get_timer_state` 返回 `Option`（拿不到就让循环退出）+ 加 `forget_runtime`，卸载前调 | **已做**：`Plugin::drop` 里摘状态，析构不再等、不再 abort | 动 vendor 树，升级时要重打（§6） |
 | (c) 加载期拒掉 `setInterval` + 给 `setTimeout` 设上限 | **已做**（§3）：卡死变 400 | 不是治本；短定时器在卸载时的竞态还在 |
 | (d) 卸载丢到独立线程里析构，超时就放弃（泄漏） | 进程不死 | 泄漏，且只是把问题藏起来 |
 
@@ -377,13 +377,13 @@ timeout 90 cargo test --offline probe_long_timeout_load_and_drop -- --ignored --
 | `get_timer_state()` 从 `&mut RuntimeTimerState` 改成 `Option<&mut _>`（原来 `unwrap_unchecked`） | 运行时被忘掉之后，循环任务不该再拿裸指针去查表（那是 UB） |
 | 四个调用点按 `Option` 处理：`set_timeout_interval` 报错、`clear_timeout_interval` 空转、`poll_timers` 两处 `return Ok(false)` | 状态没了 = 这个运行时没有定时器了，循环自己退出 |
 | 新增 `pub fn forget_runtime(rt)`：摘掉该 runtime 的整条状态（顺带释放 `Persistent<Function>`）并 `notify_one` 叫醒循环 | 卸载路径的唯一入口 |
-| 新增 `pub fn runtime_ptr(ctx)` / `pub fn forget_runtime_ptr(rt: usize)` | 宿主（`src/engine.rs`）不需要 `unsafe`，也不认识 qjs 类型 —— 我们的 unsafe 预算仍然是 0 处 |
+| 新增 `pub fn runtime_ptr(ctx)` / `pub fn forget_runtime_ptr(rt: usize)` | 宿主（`src/engine.rs`）不需要 `unsafe`，也不认识 qjs 类型 —— 本仓库的 unsafe 预算仍然是 0 处 |
 
 宿主侧接线（`src/engine.rs`）：`Plugin` 多存一个 `rt_raw: usize`（构造时 `runtime_ptr` 取），
 `impl Drop for Plugin` 第一句 `forget_runtime_ptr(self.rt_raw)`。Drop 体在字段析构**之前**跑，
 所以那时 rt 还活着，`Persistent` 能被正常释放。
 
-验收（第 19 轮读数）
+验收
 
 ```text
 单元：handler await 30ms 定时器后 drop        0ms，不再 SIGABRT
@@ -409,13 +409,13 @@ interrupt handler 只有引擎**回到**解释器循环时才会被检查，所�
 会结结实实占满一个 tokio worker，直到预算打卡（默认 **300 秒**，`PANEL_BUDGET_MS` 可改）。
 面板的 HTTP、调度 actor、DB actor 都跑在同一组 worker 上 —— 占满就等于整个面板失去响应。
 
-两轮实测（10 核机器）：
+两次实测（10 核机器）：
 
 ```text
-第 34 轮 · 12 个死循环脚本（当时只有脚本有闸）
+· 12 个死循环脚本（当时只有脚本有闸）
   /api/state 4ms → 1963ms
 
-第 35 轮 · 12 个死循环插件 handler（当时插件**没有**闸）
+· 12 个死循环插件 handler（当时插件**没有**闸）
   /api/state 直接连不上（curl 000），面板假死 3 秒以上
   12 个 /api/tasks/x/spin/run 全部超时
 ```
@@ -440,7 +440,7 @@ limit() = max(1, 核数 - 2)
 手动为什么不排队：实测排队时 HTTP 请求要一直挂着（9 个并发死循环下 8 个请求挂到 20s 超时），
 界面上看起来就是「点了没反应」。回绝一句比静默等待诚实。
 
-### 派发顺序（第 35 轮改的）
+### 派发顺序
 
 ```text
 actor 里：建 run 记录 → 回包（给 run_id） → 抢名额 → spawn（只含 JS）
@@ -476,7 +476,7 @@ handler 跟着卡住。实测：手动点「运行」，响应在 JS 跑完（30
 ## 外部进程插件（基线 `extproc.rs`）：**判断不做**
 
 三态：**已定** ＝ 不实现。下面同时给出「什么情况下改判」和「真要做的形状」，
-省得下一轮从零讨论一遍。
+省得下次从零讨论一遍。
 
 ### 1. 基线是什么（规模与形状）
 
@@ -499,15 +499,15 @@ TCP  子进程 ↔ 面板   host-api RPC（127.0.0.1 临时端口 + 一次性令
 
 **为什么 RPC 不混在 stdio**：基线的 host-api 是**同步**的 —— 插件里一句 `sqlite_query()`
 必须在同一个系统调用里写完请求、读到响应。要是和「面板正在等 `result`」共用一条管道，
-两边就互锁。所以我们这条 async 路线上，这个理由**不成立**（见 §2.1）。
+两边就互锁。因此这条 async 路线上，这个理由**不成立**（见 §2.1）。
 
 预算 = **杀整个进程树**（Unix `process_group(0)` + `kill(-pid)`，Windows `taskkill /T /F`）。
 插件状态随之丢失 —— 基线文档把这句写成了「外部运行时的明确代价」。
 
 ### 2. 为什么这个实现不做
 
-**2.1 同步 RPC 那套互锁我们没有，但换来的不是「更简单」，是「另一套生命周期」。**
-我们的 host-api 全 async（LLRT 没有 `node:worker_threads`，这是重写的起点之一），
+**2.1 同步 RPC 那套互锁并不存在，但换来的不是「更简单」，是「另一套生命周期」。**
+本项目的 host-api 全 async（LLRT 没有 `node:worker_threads`，这是重写的起点之一），
 子进程侧可以直接 `await host.fetch(...)`，一条管道就够。可是 spawn / ready / 心跳 /
 崩溃重启 / 退避 / 杀树 —— 每一条都要在三态文档里立判据，而这些判据现在一条都没有。
 
@@ -560,7 +560,7 @@ TCP  子进程 ↔ 面板   host-api RPC（127.0.0.1 临时端口 + 一次性令
 所有读数都是本机实测：Apple M4（4P+6E，`hw.ncpu=10`）、macOS 25.6.0、rustc 1.99.0 stable、
 Node v24.16.0。**机器是共享的**，凡涉及 p99 的读数都同时记负载。
 
-### 收口结论
+### 结论
 
 | 判据 | 结果 | 关键读数 |
 |---|---|---|
@@ -791,7 +791,7 @@ STOP_A_MS=3000
 
 **机器读数**：`load averages: 14.20 12.81 11.34`（10 核）。
 同时有 GameHui 95.4%、DeepSeek Harness Renderer 99.7%、Qoder 58.3% 在跑。
-我起的 4 个自旋 shell 各只拿到 **46~49% CPU**（空载应接近 100%）。
+另外起的 4 个自旋 shell 各只拿到 **46~49% CPU**（空载应接近 100%）。
 
 ⇒ **这是外部 CPU 争抢，不是 LLRT、也不是 tokio。** 零 JS 的纯 Rust 对照已复现同一读数。
 `RT_TIMER_STATE` 的全局锁在回调前就 `drop` 了（`llrt_timers/src/lib.rs:359`），
@@ -866,7 +866,7 @@ provider，不换握手实现），**只有 `tls-openssl` 是真 OpenSSL**
 ⇒ ❓ **全局 `fetch` 能不能谈 CBC+SHA1，未测。** 测法：
 `llrt_core` 换 `tls-openssl`（去掉 `tls-ring`）实编一次，然后对
 `v.cmcc-cs.cn:443` 发一次**只读** GET，看握手成不成。编不过就要向上游提 feature 转发的 PR。
-**这一格不影响 Stage 0 收口**（它不是六条判据之一），但影响央视频能不能移植。
+**这一格不影响 Stage 0 的验收**（它不是六条判据之一），但影响央视频能不能移植。
 
 ### 8. 被推翻的结论（留着，别让人照它动手）
 
@@ -882,7 +882,7 @@ provider，不换握手实现），**只有 `tls-openssl` 是真 OpenSSL**
 
 见 [`loading.md`](loading.md) —— 什么时候把 runtime 卸掉、什么时候按需装插件。
 
-## 多文件插件：模块解析与读取（第 216 轮）
+## 多文件插件：模块解析与读取
 
 解析链 **(PluginResolver, GatedResolver, EmbeddedResolver, PackageResolver, FileResolver)**，
 读取链 **(PluginLoader, ModuleLoader, EmbeddedLoader, PackageLoader)**；前两项只在目录式插件
