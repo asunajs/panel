@@ -8,6 +8,63 @@
 
 ---
 
+## 0.9.4（2026-11-25）
+
+### 商店里更新 mcloud 报「包含多插件 zip」（用户报）
+
+用户原话：「0.9.3，插件里更新 mcloud 0.7.4 到 0.7.6 提示包含多插件 zip，更新失败」。
+
+**根因**：0.9.2 为挡「源码包被当插件上传」加的 `validate_plugin_shape` 要求
+「整包只描述**一个**插件」，判据里写着「zip 里混了两个插件：`mcloud` 和 `mcloud-daily`
+—— 一次只能装一个」。而 mcloud 的发布包本来就是 4 个插件 12 个文件
+（`mcloud-plugin-0.7.6-panel08.zip`，575 KB）。于是商店里点更新必然失败，
+而 `npm run deploy:panel`（不走 zip）是好的 —— 两条路形状不一致，只有用户那条路坏。
+
+**修法**：把「一个插件」放宽成「**一包插件**」，但边界不放松：
+
+| 原来的判据 | 现在 |
+|---|---|
+| 顶层只能一个名字，或同一个插件的几件套 | 每个顶层名都得是插件形状：`X.js` / `X.panel.json` / `X.webui` / 带 `.js` 的 `X/` |
+| 两个不同名字 → 拒 | 允许，但每个名字都**必须有代码**（只有 `evil.panel.json` → 拒） |
+| — | 一包多插件里若某个名字是其余所有名字的前缀（`mcloud` ← `mcloud-daily`…），它就是**属地名**，整包折进 `mcloud/` |
+
+落点与 `npm run deploy:panel` 完全一致：
+
+```
+plugins/mcloud/
+├── mcloud.js  mcloud.panel.json  mcloud.webui/
+├── mcloud-daily.js  mcloud-daily.panel.json
+├── mcloud-exchange.js  mcloud-exchange.panel.json
+└── mcloud-live.js  mcloud-live.panel.json
+```
+
+### 顺带修好的两个「装完像没装」
+
+1. **重载名单从文件路径反推**：`reload_saved` 原来按
+   「顶层 `.js`」或「第二段是 `index.js`」推插件名。收拢形状 `mgmusic/mgmusic.js`
+   第一段是目录名、第二段是 `mgmusic.js` —— 两个条件都不满足，推出来是空；
+   一包多插件 `mcloud/mcloud-daily.js` 更推不出来。结果「装完了、面板还在跑旧代码」，
+   界面却报「已装」。现在 `Saved::names` 由装的那一侧直接给。
+2. **`replaced` 里每个文件出现两次**：落点判定（`plan_layout`）和搬运那一步
+   各记了一次账。真机装 mcloud 时 `replaced` 里每个清单都重复。改成落点只判不记账。
+
+### 真机验证（`/tmp` 临时实例，拿真实 release 资产）
+
+```
+装前  mcloud 老布局：mcloud/mcloud/index.js + mcloud/mcloud-daily/index.js …
+POST /api/plugins/install  {url: …/mcloud-plugin-0.7.6-panel08.zip, sha256: b9c30d88…}
+装后  ok=true, files=12, reloaded=[mcloud, mcloud-daily, mcloud-exchange, mcloud-live]
+      replaced 12 条（含 4 条「清掉旧形状」：mcloud/mcloud、mcloud-daily/ …）
+      布局 = mcloud/{mcloud,mcloud-daily,mcloud-exchange,mcloud-live}.js + 4 个清单 + mcloud.webui/
+readyz  {plugins:4, tasks:3, failed_plugins:0}；4 个清单版本都是 0.7.6；3 条任务还在
+全新安装（空目录 + overwrite:false）同样 ok=true、同样布局
+```
+
+### 门禁
+
+`upload` 单测 33 → **36**（新增：一包多插件被接受 / 整包进属地 / 升级清掉嵌套旧目录 /
+清理不删新文件的上级目录），`cargo test` **596**（+2），clippy 干净，fast 全过。
+
 ## 0.9.3（2026-11-25）
 
 ### 新增「文件管理」页（第 270 轮，用户要求）

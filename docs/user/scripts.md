@@ -10,7 +10,7 @@
 
 | runtime | 命令 | 说明 |
 |---|---|---|
-| `sh` | `$PANEL_RUNTIME_SH <file>`（默认 `/bin/sh`；**Windows 上是 bare `sh`**，因为 `/bin/sh` 不存在，要 Git Bash / MSYS2 才有） | 万能兜底：任何能当命令跑的东西 |
+| `sh` | `$PANEL_RUNTIME_SH <file>`（默认 `/bin/sh`；**Windows 上是 bare `sh`**，因为 `/bin/sh` 不存在，要 Git Bash / MSYS2 才有） | 通用 shell 运行时：可执行 shell 命令、管道和重定向 |
 | `node` | `$PANEL_RUNTIME_NODE <file>`（默认 `node`） | `.ts/.mts/.cts` 自动加 `--experimental-strip-types`（node ≥ 22.6） |
 | `bun` | `bun <file>` | ts 原生；ts 想走 bun 就在界面把运行时改掉 |
 | `python3` | `$PANEL_RUNTIME_PYTHON -u <file>`（默认 `python3`；**Windows 上是 `python`** —— 那边没有 `python3` 这个名字） | `-u` 不缓冲，日志实时 |

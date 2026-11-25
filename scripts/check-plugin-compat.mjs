@@ -86,7 +86,7 @@ function readManifests(repo) {
 function artifactFiles(repo) {
   const dist = join(repo, 'dist', 'panel-llrt');
   if (existsSync(dist)) return walk(dist);
-  // 没有构建产物就退到源码（mgmusic/panel-store 的 dist 结构不同，这里宽松兜底）
+  // 优先扫 dist/panel-llrt；该目录不存在时兼容其它 dist 结构，改扫 src/webui/dist 源码。
   const cands = ['src', 'webui', 'dist'].map((d) => join(repo, d)).filter((d) => existsSync(d));
   return cands.flatMap((d) => walk(d));
 }

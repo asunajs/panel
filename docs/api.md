@@ -29,8 +29,8 @@ POST /api/plugins  {"name":"z2","src":"x"}
 **状态码分两种**：没带 `content-type` 仍然是 **415**（发的东西类型不对），
 语法错 / 字段不认识 / 缺字段是 **400**（内容写错了）。
 
-**例外**：`POST /api/backup` 的备份文档**不**拒绝未知字段 —— 那是「未来版本可能多出字段」，
-恢复时要前向兼容（实测：多一个 `future_key` 照样恢复）。
+**例外**：`POST /api/backup` 的备份文档**不**拒绝未知字段。恢复时向前兼容：
+忽略未来版本新增的未知字段，当前认识的插件、脚本和配置照常恢复（多一个 `future_key` 照样恢复）。
 
 守卫：`web_tests.rs::unknown_keys_in_request_bodies_are_rejected`（八条请求体逐个试）。
 
@@ -166,7 +166,7 @@ debug 构建下同样 210000 次迭代：**空载进程 0.72s**；在 90 个用�
 | 同时只允许一份 PBKDF2 在跑（`kdf_gate`） | 并发再多，KDF 的 CPU 上限也是一核 —— 这是「KDF 不是 DoS 放大器」的**可验证**保证 |
 | 超预算的尝试**拖延**（每次 200ms）而不是拒绝 | 拒绝等于让未认证方掌握「正主能不能登录」（§5 的回归）；拖住同样把攻击速率压到 5 次/秒 |
 | 限速窗口用 `Instant` 而不是墙钟 | 墙钟回拨会让窗口永不重置 → 认证永久锁死（§5） |
-| `auth.json` 坏了、又没有 `PANEL_TOKEN` 兜底 → **拒绝启动** | 「解析失败 → 没令牌 → 不拦」是失败即开放 |
+| `auth.json` 损坏且未显式设置 `PANEL_TOKEN` → **拒绝启动** | 「解析失败 → 没令牌 → 不拦」是失败即开放 |
 | 有 `PANEL_TOKEN` 时坏文件另存 `.corrupt` 后重写 | 否则插件写坏一份文件就能让面板再也起不来 |
 
 ### 3. 仍然敞开的（如实记）
@@ -207,7 +207,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "x-panel-token: $H" http://127.0.0.1
 | S3 | 删掉 `auth.json` + 不设令牌 → 匿名 `POST /api/plugins/x/unload` 直接 200，stdout 一个字不提；`x-panel: 1` 挡不住 DNS rebinding | 无凭据时 ① stderr + 日志双写警告；② 只接受回环 `Host`（`PANEL_ALLOW_ANY_HOST=1` 留给同机反代） | `a_rebinding_host_is_rejected_when_there_is_no_token`、`host_guard_accepts_loopback_literals_only` |
 | S4 | 限速窗口用墙钟：时间回拨 → 窗口永不重置 → 认证永久锁死 | 改 `Instant` | `throttle_delays_instead_of_rejecting` |
 | S5 | 残留的 0644 `auth.json.tmp` 被复用 → 最终 **644**；`auth.json.tmp` 做成软链接 → 盐+哈希被写到任意路径 | `create_new`（不跟随 symlink）+ rename 后显式 `set_permissions(0600)` | `a_stale_tmp_file_does_not_loosen_permissions`、`a_symlinked_tmp_file_is_not_written_through` |
-| S6 | 坏 `auth.json` + 正确的 `PANEL_TOKEN` 也起不来（与文档写的优先级相反），且文案没给恢复办法 | 有 env 兜底时坏文件另存 `.corrupt` 后重写；没有兜底时错误消息里带恢复指令 | `a_broken_file_is_replaced_when_the_env_token_is_given`、`a_broken_file_refuses_to_start_…` |
+| S6 | 坏 `auth.json` + 正确的 `PANEL_TOKEN` 也起不来（与文档写的优先级相反），且文案没给恢复办法 | 显式 `PANEL_TOKEN` 覆盖时坏文件另存 `.corrupt` 后重写；未显式设置时拒绝启动，错误消息带恢复指令 | `a_broken_file_is_replaced_when_the_env_token_is_given`、`a_broken_file_refuses_to_start_…` |
 | S7 | `v` 字段从不校验 | 只认 `v=1`，别的一律拒 | `an_unknown_version_is_refused` |
 | S8 | 限速窗口重置那一支不计数 → 实测一窗口放行 21 次 | 重置时 `attempts=1`，CAS 语义收敛到一把锁内 | `throttle_delays_instead_of_rejecting` |
 | S9 | `iter` 上限 10_000_000 → 一份恶意文件能让每个请求跑几十秒 | 上限收到 1_000_000 | `an_absurd_iteration_count_is_refused` |
@@ -492,7 +492,7 @@ auth.json              185 字节，权限 600，字段 algo/hash/iter/salt/v �
 3. **错误页必须带状态码**：`(header, body).into_response()` 默认 **200** —— 交过学费（页面 404、状态 200）。
    测试 `unknown_page_renders_the_error_page` 钉住。
 
-未定义路径：`/api/*` 由 api router 的 fallback 出 JSON 404；其余路径由根 router 的 fallback 出错误页。
+未定义路径：`/api/*` 由 api router 的未匹配处理器返回 JSON 404；其余路径由根 router 返回 HTML 错误页。
 
 ## 按插件指标：GET /api/plugins/{name}/stats
 

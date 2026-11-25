@@ -31,6 +31,9 @@ pub enum Kind {
 #[derive(Debug)]
 pub struct Saved {
     pub files: Vec<String>,
+    /// 这次装到的**插件名**（`mcloud`、`mcloud-daily`…）。重载只认这个 ——
+    /// 从文件路径反推名字在「一包多插件折进属地」的形状下推不出来（第 270 轮）。
+    pub names: Vec<String>,
     /// 其中**覆盖了已有文件**的那些（相对上传根）。界面据此说实话：
     /// 「已上传」和「已覆盖」是两件事，用户要能立刻分辨。
     pub replaced: Vec<String>,
@@ -143,6 +146,15 @@ fn save_single(
     let was_there = write_file(&dest, &rel, data, overwrite)?;
     let shown = rel.to_string_lossy().replace('\\', "/");
     Ok(Saved {
+        // 单文件插件的名字就是文件名去掉 .js（重载要用它）
+        names: if kind == Kind::Plugins {
+            vec![rel
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()]
+        } else {
+            Vec::new()
+        },
         files: vec![shown.clone()],
         replaced: if was_there { vec![shown] } else { Vec::new() },
         bytes: data.len() as u64,
@@ -151,93 +163,164 @@ fn save_single(
 }
 
 
-/// 插件 zip 的**形状校验**：整包必须只描述**一个**插件。
+/// zip 顶层一项的**形状**。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shape {
+    Js,
+    Manifest,
+    Webui,
+    /// 没有后缀的顶层目录（`demo/index.js` 这种），入口要另外验
+    Dir,
+}
+
+/// 一包 zip 描述的东西：一个插件，或者**一包多插件**。
+struct Bundle {
+    /// 每个插件的名字（顶层 stem），去重后保持 zip 里的顺序
+    stems: Vec<String>,
+    /// 一包多插件时的**属地名**（`mcloud`）：落盘折进 `<属地名>/`，与
+    /// `npm run deploy:panel` 装出来的形状一致；单插件为 `None`。
+    group: Option<String>,
+}
+
+/// `X.js` / `X.panel.json` / `X.webui` → `X`；没有形状后缀 → `None`。
+fn stem_of_top(top: &str) -> Option<&str> {
+    for suf in [".panel.json", ".webui", ".js", ".mjs"] {
+        if let Some(stem) = top.strip_suffix(suf) {
+            if !stem.is_empty() {
+                return Some(stem);
+            }
+        }
+    }
+    None
+}
+
+/// 顶层名 → (插件名, 形状)。认不出来就是「这不是插件包」。
+fn classify_top(top: &str, rels: &[PathBuf]) -> Result<(String, Shape), String> {
+    if let Some(stem) = stem_of_top(top) {
+        let shape = if top.ends_with(".panel.json") {
+            Shape::Manifest
+        } else if top.ends_with(".webui") {
+            Shape::Webui
+        } else {
+            Shape::Js
+        };
+        return Ok((stem.to_string(), shape));
+    }
+    // 没有形状后缀：要么是「目录」（`demo/index.js`、`mcloud/mcloud-daily.js`…），
+    // 要么是杂物（`package.json`、`AGENTS.md`）。
+    //
+    // 目录这一支**不要求入口在某一层**：`common_wrapper` 剥外层目录之后会出现
+    // `demo/demo/index.js`（嵌套一层）、一包多插件会出现 `mcloud/mcloud-daily.js`
+    // （入口在子目录里），都是合法形状。判据只到「目录里有没有 JS」——
+    // 一个连 .js 都没有的目录不可能是插件。
+    let mut is_dir = false;
+    let mut has_js = false;
+    for r in rels {
+        let comps: Vec<&str> = r.iter().filter_map(|s| s.to_str()).collect();
+        if comps.first() != Some(&top) || comps.len() < 2 {
+            continue;
+        }
+        is_dir = true;
+        if comps.len() >= 2
+            && comps[1..]
+                .iter()
+                .any(|c| c.ends_with(".js") || c.ends_with(".mjs"))
+        {
+            has_js = true;
+        }
+    }
+    if is_dir {
+        if !has_js {
+            return Err(format!(
+                "zip 里的 `{top}/` 里一个 .js 都没有 —— 这不是插件目录"
+            ));
+        }
+        return Ok((top.to_string(), Shape::Dir));
+    }
+    Err(format!(
+        "这不是插件包：只允许 `<名字>.js` + `<名字>.panel.json` + `<名字>.webui/`（或 `<名字>/`），但包里还有 `{top}` —— 源码/文档请别当插件传"
+    ))
+}
+
+/// 插件 zip 的**形状校验**：整包只能描述插件，不许夹带源码/文档。
 ///
 /// 为什么需要（2026-11-25 群里实测）：源码包（含 `webui/app.js`、`docs/`、`src/`）被当成插件上传，
 /// 面板只要求「zip 里至少有一个 .js」，于是剥掉外层目录后把 130 个文件**摊进 plugins/** ——
 /// 用户看到的是「插件目录被污染了」。更严重的是：恶意 zip 可以借此**覆盖别的插件**的
 /// `xxx.js` / `xxx.webui/`，或塞一个 `evil.panel.json` 让面板去加载它。
 ///
-/// 判据（只看**顶层**，不强制入口名，免得和既有形状打架）：
-///   · 顶层只有一个名字 → 放行（`foo.js` 或 `foo/`）；
-///   · 顶层多个名字 → 必须都属于同一个插件：`X.js` / `X.panel.json` / `X.webui`；
-///   · 出现不属于任何插件的顶层名（`docs`、`AGENTS.md`、`src` …）→ 拒。
-fn validate_plugin_shape(rels: &[PathBuf]) -> Result<(), String> {
+/// 第 270 轮起**允许一包多插件**（mcloud 的发布包就是 4 个插件 12 个文件）：
+/// 原来那句「一次只能装一个」把它挡在门外，商店里更新 mcloud 直接失败。
+/// 现在的判据是「每一项都得是插件形状，且每个名字都得有代码」：
+///   · 每个顶层名必须能归到某个插件（`X.js` / `X.panel.json` / `X.webui` / `X/` 带入口）；
+///   · 每个名字必须**有代码**（`X.js` 或 `X/`）—— 只有 `evil.panel.json` 不行；
+///   · 一包多插件时，若某个名字是其余所有名字的前缀（`mcloud` ← `mcloud-daily`…），
+///     它就是**属地名**，整包折进 `<属地名>/`。
+fn parse_bundle(rels: &[PathBuf]) -> Result<Bundle, String> {
     let mut tops: Vec<String> = Vec::new();
     for rel in rels {
-        let Some(first) = rel.iter().next() else { continue };
-        let top = first.to_string_lossy().to_string();
-        if !tops.contains(&top) {
-            tops.push(top);
+        let Some(top) = rel.iter().next().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !tops.iter().any(|t| t == top) {
+            tops.push(top.to_string());
         }
     }
     if tops.is_empty() {
         return Err("zip 里没有文件".into());
     }
-    if tops.len() == 1 {
-        return Ok(());
-    }
-    // 多个顶层名：必须是同一个插件的几件套
-    let mut stem: Option<String> = None;
-    for t in &tops {
-        let candidate = t
-            .strip_suffix(".js")
-            .or_else(|| t.strip_suffix(".panel.json"))
-            .or_else(|| t.strip_suffix(".webui"));
-        let Some(c) = candidate else {
-            return Err(format!(
-                "这不是插件包：只允许 `<名字>.js` + `<名字>.panel.json` + `<名字>.webui/`（或 `<名字>/`），但包里还有 `{t}` —— 源码/文档请别当插件传"
-            ));
-        };
-        match &stem {
-            None => stem = Some(c.to_string()),
-            Some(existing) if existing == c => {}
-            Some(existing) => {
-                return Err(format!(
-                    "zip 里混了两个插件：`{existing}` 和 `{c}` —— 一次只能装一个"
-                ))
-            }
+    let mut stems: Vec<String> = Vec::new();
+    let mut with_code: Vec<String> = Vec::new();
+    for top in &tops {
+        let (stem, shape) = classify_top(top, rels)?;
+        if !stems.contains(&stem) {
+            stems.push(stem.clone());
+        }
+        if matches!(shape, Shape::Js | Shape::Dir) && !with_code.contains(&stem) {
+            with_code.push(stem);
         }
     }
-    Ok(())
+    for stem in &stems {
+        if !with_code.contains(stem) {
+            return Err(format!(
+                "zip 里 `{stem}` 只有清单或界面、没有代码（`{stem}.js` 或 `{stem}/`）—— 拒装"
+            ));
+        }
+    }
+    let group = if stems.len() > 1 {
+        stems
+            .iter()
+            .find(|p| {
+                stems
+                    .iter()
+                    .all(|s| *s == **p || s.starts_with(&format!("{p}-")))
+            })
+            .cloned()
+    } else {
+        None
+    };
+    Ok(Bundle { stems, group })
 }
 
-
-/// 把「一个插件摊成三件散件」的落点折叠成 `<name>/`。
+/// 定落点：单插件折进 `<名字>/`；一包多插件折进 `<属地名>/`（没有共同前缀就各进各的目录）。
 ///
 /// 只在**zip 安装**这条路上做：单文件上传没有 `.panel.json` / `.webui` 可折。
-/// 判据：顶层名 `<X>.js` / `<X>.panel.json` / `<X>.webui` 且**同一个 X 至少有两件**
-/// （只有一件时保持原样 —— 那是别人手放的零散文件，别替用户做主）。
-///
-/// 返回新的相对路径列表（已经加了一级 `<X>/`）；搬运时按新路径落盘。
-fn collapse_into_group(
+/// 单插件只在「同一个名字至少有两件」时才折（只有一件时保持原样 —— 那是别人手放的
+/// 零散文件，别替用户做主）。
+fn plan_layout(
     written: &[PathBuf],
+    bundle: &Bundle,
     root: &Path,
     overwrite: bool,
-    replaced: &mut Vec<String>,
 ) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     use std::collections::HashMap;
-    // 顶层名 → 属于哪个插件（X）
-    let mut owners: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, rel) in written.iter().enumerate() {
-        let Some(top) = rel.iter().next().and_then(|s| s.to_str()) else { continue };
-        for suffix in [".panel.json", ".webui", ".js"] {
-            if let Some(stem) = top.strip_suffix(suffix) {
-                // `a.b.js` 这种：stem 是 `a.b`，仍按 stem 分组
-                if !stem.is_empty() {
-                    owners.entry(stem.to_string()).or_default().push(i);
-                }
-                break;
-            }
-        }
-    }
-    let groups: Vec<String> = owners
-        .iter()
-        .filter(|(_, idxs)| idxs.len() >= 2)
-        .map(|(k, _)| k.clone())
-        .collect();
-    if groups.is_empty() {
-        return Ok(written.iter().map(|r| (r.clone(), r.clone())).collect());
+    let mut parts: HashMap<String, usize> = HashMap::new();
+    for rel in written {
+        let Some(top) = rel.iter().next().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let stem = stem_of_top(top).unwrap_or(top).to_string();
+        *parts.entry(stem).or_default() += 1;
     }
     let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
     for rel in written.iter() {
@@ -245,30 +328,96 @@ fn collapse_into_group(
             out.push((rel.clone(), rel.clone()));
             continue;
         };
-        let owner = [".panel.json", ".webui", ".js"]
-            .iter()
-            .find_map(|suf| top.strip_suffix(*suf).filter(|st| groups.iter().any(|g| g == st)));
-        match owner {
-            Some(g) => {
+        // 顶层本来就是目录（`demo/index.js`、`mcloud/mcloud-daily.js`…）：它已经
+        // 在自己的目录里了，**不能再折一层** —— 否则 `demo/index.js` 变成
+        // `demo/demo/index.js`，面板按 `<name>/index.js` 找入口就找不到了。
+        let dir_top = stem_of_top(top).is_none();
+        let stem = stem_of_top(top).unwrap_or(top);
+        let dest = match &bundle.group {
+            // 一包多插件：整包进属地目录，文件名保持不变（与 deploy-panel.sh 同形状）。
+            // 顶层名就是属地名的那一份本来就在属地里，保持原样。
+            Some(g) if top != g.as_str() => {
                 let mut p = PathBuf::from(g);
                 p.push(rel);
-                // 目标位置可能已存在：按覆盖语义先判一次（错误信息指向新路径，别让人猜）
-                let dest = root.join(&p);
-                if dest.exists() && !overwrite {
-                    return Err(format!(
-                        "文件已存在: {}（要覆盖请显式勾选覆盖）",
-                        p.display()
-                    ));
-                }
-                if dest.exists() {
-                    replaced.push(p.display().to_string());
-                }
-                out.push((rel.clone(), p));
+                p
             }
-            None => out.push((rel.clone(), rel.clone())),
+            Some(_) => rel.clone(),
+            None if !dir_top && parts.get(stem).copied().unwrap_or(0) >= 2 => {
+                let mut p = PathBuf::from(stem);
+                p.push(rel);
+                p
+            }
+            None => rel.clone(),
+        };
+        // 冲突**在搬任何文件之前**判掉（搬运是逐个 rename 的，中途报错会留半份）。
+        // 这里只判不记账：`replaced` 由搬运那一步写，两处都写会出重复条目
+        // （真机装 mcloud 时 replaced 里每个清单都出现两次）。
+        if dest != *rel && root.join(&dest).exists() && !overwrite {
+            return Err(format!("文件已存在: {}（要覆盖请显式勾选覆盖）", dest.display()));
         }
+        out.push((rel.clone(), dest));
     }
     Ok(out)
+}
+
+/// 装完之后清掉**同名的另一种形状**（第 269/270 轮）。
+///
+/// 现场一：装成 `<X>/` 之后，顶层那份 `<X>.js` / `<X>.panel.json` / `<X>.webui/` 就是旧拷贝 ——
+/// 面板按名字去重、**优先顶层 `.js`**，留着它等于「界面显示新版本、实际跑旧代码」。
+/// 现场二（一包多插件）：属地里原来放的是 `<G>/<X>/index.js`，新装的是 `<G>/<X>.js`，
+/// 旧目录留着就是 1.2 MB 死重量。
+///
+/// 安全边界：**只删这次装了的那些名字**，且绝不删「某个落点的上级目录」
+/// （`<G>/<X>` 是 `<G>/<X>.js` 的兄弟而不是上级，但 `<G>` 本身是 —— 那种要跳过）。
+fn prune_other_shapes(
+    root: &Path,
+    planned: &[(PathBuf, PathBuf)],
+    bundle: &Bundle,
+    replaced: &mut Vec<String>,
+) {
+    use std::collections::HashSet;
+    let dests: HashSet<&PathBuf> = planned.iter().map(|(_, to)| to).collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for (_, to) in planned {
+        let mut cur = to.parent();
+        while let Some(p) = cur {
+            if !p.as_os_str().is_empty() {
+                dirs.push(p.to_path_buf());
+            }
+            cur = p.parent();
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for name in &bundle.stems {
+        for c in [
+            PathBuf::from(format!("{name}.js")),
+            PathBuf::from(format!("{name}.panel.json")),
+            PathBuf::from(format!("{name}.webui")),
+            PathBuf::from(name),
+        ] {
+            candidates.push(c.clone());
+            if let Some(g) = &bundle.group {
+                candidates.push(PathBuf::from(g).join(&c));
+            }
+        }
+    }
+    for c in candidates {
+        if dests.contains(&c) || dirs.contains(&c) {
+            continue;
+        }
+        let abs = root.join(&c);
+        if abs.symlink_metadata().is_err() {
+            continue;
+        }
+        let ok = if abs.is_dir() {
+            std::fs::remove_dir_all(&abs).is_ok()
+        } else {
+            std::fs::remove_file(&abs).is_ok()
+        };
+        if ok {
+            replaced.push(format!("（清掉旧形状）{}", c.display()));
+        }
+    }
 }
 
 fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Saved, String> {
@@ -375,7 +524,12 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
             strip = None;
         }
     }
-    // 插件包只允许「一个插件」的形状（源码包/杂物包在这里被挡掉，别污染 plugins/）
+    // 插件包必须是插件形状（源码包/杂物包在这里被挡掉，别污染 plugins/）；
+    // 一包多插件（mcloud 的 4 个）也认（第 270 轮）
+    let mut bundle = Bundle {
+        stems: Vec::new(),
+        group: None,
+    };
     if kind == Kind::Plugins {
         let rels: Vec<PathBuf> = names
             .iter()
@@ -384,7 +538,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
                 None => n.clone(),
             })
             .collect();
-        validate_plugin_shape(&rels)?;
+        bundle = parse_bundle(&rels)?;
     }
     // 解压先落到**临时目录**，全部验完再搬进 plugins/。
     // 为什么：以前边解边写，一个中途报错的包会把半份文件留在 plugins/ 里 ——
@@ -490,7 +644,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     // 不再往 plugins/ 顶层摊三个散件。老机制的发现顺序仍然认散件，所以这里只是**落点**变了，
     // 装法/校验/覆盖语义全不变。单文件上传（`<name>.js`）不折叠 —— 那本来就是「一个文件一个插件」。
     let planned: Vec<(PathBuf, PathBuf)> = if kind == Kind::Plugins {
-        collapse_into_group(&written, root, overwrite, &mut replaced)?
+        plan_layout(&written, &bundle, root, overwrite)?
     } else {
         written.iter().map(|r| (r.clone(), r.clone())).collect()
     };
@@ -533,36 +687,12 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     files.sort();
     replaced.sort();
 
-    // 更新时清掉**另一种形状**的残留：装成 `<X>/` 之后，顶层那份
-    // `<X>.js` / `<X>.panel.json` / `<X>.webui/` 就是旧拷贝 —— 面板按名字去重、
-    // 优先顶层 `.js`，留着它等于「界面显示新版本、实际跑旧代码」。
-    // 只删**这次确实装了这个插件**的那几件（`<X>` 在折叠集合里），不碰别人的文件。
+    // 更新时清掉**另一种形状**的残留（顶层旧散件、属地里旧的 `<X>/` 目录形态）
     if kind == Kind::Plugins {
-        let collapsed: Vec<String> = planned
-            .iter()
-            .filter(|(from, to)| from != to)
-            .filter_map(|(_, to)| to.iter().next()?.to_str().map(str::to_string))
-            .collect();
-        for g in collapsed {
-            for stale in [
-                root.join(format!("{g}.js")),
-                root.join(format!("{g}.panel.json")),
-                root.join(format!("{g}.webui")),
-            ] {
-                if stale.symlink_metadata().is_ok() {
-                    let ok = if stale.is_dir() {
-                        std::fs::remove_dir_all(&stale).is_ok()
-                    } else {
-                        std::fs::remove_file(&stale).is_ok()
-                    };
-                    if ok {
-                        replaced.push(format!("（清掉旧形状）{}", stale.display()));
-                    }
-                }
-            }
-        }
+        prune_other_shapes(root, &planned, &bundle, &mut replaced);
     }
     Ok(Saved {
+        names: bundle.stems.clone(),
         files,
         replaced,
         bytes,
@@ -733,42 +863,185 @@ mod tests {
     /// 源码包（`webui/app.js` + `docs/` + `src/`）不能当插件装 —— 2026-11-25 群里实测：
     /// 以前只要求「zip 里至少有一个 .js」，于是剥掉外层目录后把 130 个文件摊进 plugins/。
     #[test]
-    fn plugin_zip_must_describe_exactly_one_plugin() {
+    fn plugin_zip_must_be_plugin_shaped() {
+        let p = |v: &[&str]| -> Vec<PathBuf> { v.iter().map(PathBuf::from).collect() };
         // 源码包形状：外层目录被剥掉后是 webui/app.js + docs/… + src/…
+        assert!(
+            parse_bundle(&p(&[
+                "webui/app.js",
+                "webui/index.html",
+                "docs/a.md",
+                "src/x.ts",
+                "package.json",
+            ]))
+            .is_err(),
+            "源码包必须被拒"
+        );
+
+        // 单文件式插件：允许，且落进 <名字>/
+        let ok = parse_bundle(&p(&["cmcc.js", "cmcc.panel.json", "cmcc.webui/index.html"])).unwrap();
+        assert_eq!(ok.stems, vec!["cmcc".to_string()]);
+        assert!(ok.group.is_none());
+
+        // 目录式插件：允许（顶层是个带入口的目录）
+        let dir = parse_bundle(&p(&["demo/index.js", "demo/lib/a.js"])).unwrap();
+        assert_eq!(dir.stems, vec!["demo".to_string()]);
+
+        // 目录里一个 .js 都没有：拒（那不可能是插件）
+        assert!(
+            parse_bundle(&p(&["demo/lib/a.md", "demo/notes.txt"])).is_err(),
+            "没有 .js 的目录不是插件"
+        );
+
+        // 只有清单没有代码：拒（`evil.panel.json` 不能让面板去加载它）
+        assert!(parse_bundle(&p(&["evil.panel.json"])).is_err(), "只有清单没有代码");
+
+        // 夹带杂物：拒
+        assert!(
+            parse_bundle(&p(&["evil.js", "docs/readme.md"])).is_err(),
+            "插件包不该带文档/源码"
+        );
+    }
+
+    /// 一包多插件（mcloud 的发布包：4 个插件 12 个文件）必须能装 ——
+    /// 原来那句「一次只能装一个」把它挡在门外，商店里更新 mcloud 直接失败（第 270 轮）。
+    #[test]
+    fn a_bundle_of_several_plugins_is_accepted() {
         let rels: Vec<PathBuf> = [
-            "webui/app.js",
-            "webui/index.html",
-            "docs/a.md",
-            "src/x.ts",
-            "package.json",
+            "mcloud.panel.json",
+            "mcloud.js",
+            "mcloud-daily.panel.json",
+            "mcloud-daily.js",
+            "mcloud-exchange.panel.json",
+            "mcloud-exchange.js",
+            "mcloud-live.panel.json",
+            "mcloud-live.js",
+            "mcloud.webui/index.html",
         ]
         .iter()
         .map(PathBuf::from)
         .collect();
-        assert!(validate_plugin_shape(&rels).is_err(), "源码包必须被拒");
+        let b = parse_bundle(&rels).unwrap();
+        assert_eq!(b.stems, vec!["mcloud", "mcloud-daily", "mcloud-exchange", "mcloud-live"]);
+        assert_eq!(b.group.as_deref(), Some("mcloud"), "共同前缀就是属地名");
 
-        // 单文件式插件：允许
-        let ok: Vec<PathBuf> = ["cmcc.js", "cmcc.panel.json", "cmcc.webui/index.html"]
+        // 没有共同前缀的一包：允许，但不折进同一个属地（各进各的目录）
+        let unrelated: Vec<PathBuf> = ["a.js", "a.panel.json", "b.js", "b.panel.json"]
             .iter()
             .map(PathBuf::from)
             .collect();
-        assert!(validate_plugin_shape(&ok).is_ok());
+        let u = parse_bundle(&unrelated).unwrap();
+        assert_eq!(u.stems.len(), 2);
+        assert!(u.group.is_none(), "没有前缀就不该硬凑成一个属地");
+    }
 
-        // 目录式插件：允许
-        let dir: Vec<PathBuf> = ["demo/index.js", "demo/lib/a.js"]
+    /// 一包多插件落盘时整包进 `<属地名>/`，文件名不变 —— 与 `npm run deploy:panel` 同形状。
+    #[test]
+    fn a_bundle_lands_inside_one_group_dir() {
+        let rels: Vec<PathBuf> = [
+            "mcloud.js",
+            "mcloud.panel.json",
+            "mcloud-daily.js",
+            "mcloud-daily.panel.json",
+            "mcloud.webui/index.html",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let root = std::env::temp_dir().join(format!("panel-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let b = parse_bundle(&rels).unwrap();
+        let planned = plan_layout(&rels, &b, &root, true).unwrap();
+        let dests: Vec<String> = planned
+            .iter()
+            .map(|(_, to)| to.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            dests,
+            vec![
+                "mcloud/mcloud.js".to_string(),
+                "mcloud/mcloud.panel.json".to_string(),
+                "mcloud/mcloud-daily.js".to_string(),
+                "mcloud/mcloud-daily.panel.json".to_string(),
+                "mcloud/mcloud.webui/index.html".to_string(),
+            ],
+            "整包进 mcloud/，文件名不变"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 老布局（`mcloud/mcloud/index.js` 这种嵌套目录形态）升级到新布局时，
+    /// 旧目录要跟着清掉 —— 否则属地里同时躺着两套（1.2 MB 死重量），
+    /// 而面板按名字去重时用的是哪个也不好说（第 270 轮真机升 0.7.4→0.7.6 验过）。
+    #[test]
+    fn upgrading_a_nested_bundle_removes_the_old_dirs() {
+        let root = std::env::temp_dir().join(format!("panel-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // 老布局
+        for n in ["mcloud", "mcloud-daily", "mcloud-live"] {
+            std::fs::create_dir_all(root.join("mcloud").join(n)).unwrap();
+            std::fs::write(root.join("mcloud").join(n).join("index.js"), "旧的").unwrap();
+        }
+        std::fs::create_dir_all(root.join("mcloud/mcloud.webui")).unwrap();
+        std::fs::write(root.join("mcloud/mcloud.webui/index.html"), "旧界面").unwrap();
+
+        // 新布局（这次装进去的）
+        let rels: Vec<PathBuf> = [
+            "mcloud.js",
+            "mcloud.panel.json",
+            "mcloud-daily.js",
+            "mcloud-daily.panel.json",
+            "mcloud-live.js",
+            "mcloud-live.panel.json",
+            "mcloud.webui/index.html",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let b = parse_bundle(&rels).unwrap();
+        let planned = plan_layout(&rels, &b, &root, true).unwrap();
+        // 模拟落盘
+        for (_, to) in &planned {
+            let abs = root.join(to);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, "新的").unwrap();
+        }
+        let mut replaced = Vec::new();
+        prune_other_shapes(&root, &planned, &b, &mut replaced);
+
+        assert!(root.join("mcloud/mcloud.js").is_file(), "新文件在");
+        assert!(!root.join("mcloud/mcloud").exists(), "旧的嵌套目录该清掉");
+        assert!(!root.join("mcloud/mcloud-daily").exists());
+        assert!(!root.join("mcloud/mcloud-live").exists());
+        assert!(
+            !root.join("plugins/mcloud").exists() && !root.join("mcloud.js").exists(),
+            "顶层不该冒出散件"
+        );
+        assert!(replaced.iter().any(|r| r.contains("清掉旧形状")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 清理时绝不能删掉「某个落点的上级目录」—— 那是数据，不是残留。
+    #[test]
+    fn pruning_never_deletes_a_parent_of_the_new_files() {
+        let root = std::env::temp_dir().join(format!("panel-preserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // 目录式插件：新文件在 demo/ 里，`demo` 正是上级目录
+        std::fs::create_dir_all(root.join("demo")).unwrap();
+        std::fs::write(root.join("demo/index.js"), "本体").unwrap();
+        std::fs::write(root.join("demo/lib.js"), "库").unwrap();
+        let rels: Vec<PathBuf> = ["demo/index.js", "demo/lib.js"]
             .iter()
             .map(PathBuf::from)
             .collect();
-        assert!(validate_plugin_shape(&dir).is_ok());
-
-        // 夹带别的插件 / 杂物：拒
-        let sneaky: Vec<PathBuf> = ["evil.js", "other.js"].iter().map(PathBuf::from).collect();
-        assert!(validate_plugin_shape(&sneaky).is_err(), "一次只能装一个插件");
-        let junk: Vec<PathBuf> = ["evil.js", "docs/readme.md"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
-        assert!(validate_plugin_shape(&junk).is_err(), "插件包不该带文档/源码");
+        let b = parse_bundle(&rels).unwrap();
+        let planned = plan_layout(&rels, &b, &root, true).unwrap();
+        let mut replaced = Vec::new();
+        prune_other_shapes(&root, &planned, &b, &mut replaced);
+        assert!(root.join("demo/index.js").is_file(), "自己的目录不能被我删掉");
+        assert!(root.join("demo/lib.js").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1131,8 +1404,8 @@ mod collapse_tests {
         let root = std::env::temp_dir().join(format!("panel-collapse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let mut replaced = Vec::new();
-        let planned = collapse_into_group(&rels, &root, true, &mut replaced).unwrap();
+        let b = parse_bundle(&rels).unwrap();
+        let planned = plan_layout(&rels, &b, &root, true).unwrap();
         let dests: Vec<String> = planned
             .iter()
             .map(|(_, to)| to.to_string_lossy().replace('\\', "/"))
@@ -1158,8 +1431,8 @@ mod collapse_tests {
         let root = std::env::temp_dir().join(format!("panel-collapse1-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let mut replaced = Vec::new();
-        let planned = collapse_into_group(&rels, &root, true, &mut replaced).unwrap();
+        let b = parse_bundle(&rels).unwrap();
+        let planned = plan_layout(&rels, &b, &root, true).unwrap();
         assert_eq!(planned[0].1, PathBuf::from("quark.js"), "只有一个文件时不折叠");
         let _ = std::fs::remove_dir_all(&root);
     }

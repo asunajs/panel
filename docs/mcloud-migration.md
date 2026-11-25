@@ -32,7 +32,7 @@ panel-llrt 的 `panel:host` 是**全 async**。插件里 `http_fetch`/`sqlite_*`
 | `register_handler(name, handler)` | `register_handler(name)` | 同上 |
 | `sqlite_query/exec`（同步） | 有，但是 async | **新增同步 op**（阻塞桥） |
 | `http_fetch`（同步） | `fetch`（async） | **新增同步 op**（阻塞桥） |
-| `register_route(path, method, handler)` | 只有 `/plugins/<n>/api/<handler>` | web.rs 加**兜底路由**：静态文件没有就交给插件的 `route` handler（带 method/path/query/headers/body） |
+| `register_route(path, method, handler)` | 只有 `/plugins/<n>/api/<handler>` | web.rs 加**旧插件兼容路由**：静态文件未命中时交给插件的 `__route` handler（带 method/path/query/headers/body） |
 | `register_nav` | 无（面板侧栏是静态的） | 忽略（记一行 debug）；面板已有「界面」入口 |
 | `worker_hint` | 无（一插件一 runtime） | 忽略 |
 | `set_job_paused/blockers/summary/schedule` | 无 | v1 忽略（记 debug）；需要的话后面加 op |

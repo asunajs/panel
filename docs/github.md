@@ -51,5 +51,5 @@ panel net check        # 通道 × 目标 的矩阵：状态码 / 耗时 / 字�
 ## 加一个镜像
 
 1. 先自己验：`curl -sI "<镜像>/https://raw.githubusercontent.com/…/catalog.json"` 要 200；
-2. 填进 `net.github_mirrors`（**放在直连前面**，`""` 留在最后兜底）；
+2. 填进 `net.github_mirrors`（**放在直连前面**，`""` 留在最后，所有镜像失败后走原始直连）；
 3. `panel net check` 确认它真的在矩阵里打勾。

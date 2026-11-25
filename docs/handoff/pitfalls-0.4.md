@@ -229,7 +229,7 @@
 53. **请求体多余字段一律报错，别再静默当成默认值**：`lead_ms` 截断、脚本 `cron` 写死、
     改计划 `cron` 被当成撤销覆盖 —— 三次都是「参数进了门却没生效」。现在十个 body 结构体
     都 `deny_unknown_fields`，错误经 `JsonBody<T>` 翻成 400 + 中文（`content-type` 缺失仍是 415）。
-    **例外**：备份文档不拒绝未知字段（要前向兼容）。守卫：`unknown_keys_in_request_bodies_are_rejected`。
+    **例外**：备份文档不拒绝未知字段（向前兼容：忽略未来新增字段，当前字段照常恢复）。守卫：`unknown_keys_in_request_bodies_are_rejected`。
 
 54. **查询参数写错会静默变成「没有数据」**：`?level=warnn` 以前返回 `{logs:[],total:0}`，
     看着像「真的没有这类日志」；`?dir=ascending` 被当 desc（顺序反了）；`?limt=10` 直接被忽略。

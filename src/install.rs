@@ -293,6 +293,7 @@ pub fn save_dir(
         return Err("这个目录里没有文件".to_string());
     }
     let mut saved = crate::upload::Saved {
+        names: Vec::new(),
         files: Vec::new(),
         replaced: Vec::new(),
         bytes: 0,

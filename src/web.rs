@@ -2190,21 +2190,14 @@ struct ReloadOutcome {
 
 async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> ReloadOutcome {
     let disabled = crate::db::plugin_disabled_names(&st.db).await;
-    // 一条 zip 里可能同时有单文件（foo.js）和目录式（bar/index.js）。按**插件名**
-    // 去重后统一卸载/重装；以前只认顶层 `.js`，目录式插件上传完要用户再点一次
-    // 「尝试加载」，和上传接口「自动重载受影响的插件」的承诺不一致（review）。
-    let mut names: Vec<String> = saved.files.iter().filter_map(|f| {
-        let p = std::path::Path::new(f);
-        let mut it = p.components();
-        let first = it.next()?.as_os_str().to_str()?.to_string();
-        match it.next() {
-            None if p.extension().and_then(|e| e.to_str()) == Some("js") => {
-                Some(first.trim_end_matches(".js").to_string())
-            }
-            Some(second) if second.as_os_str() == "index.js" => Some(first),
-            _ => None,
-        }
-    }).collect();
+    // 名字**由装的那一侧给**（`Saved::names`），不从文件路径反推。
+    //
+    // 反推在两种形状下都推不对（第 270 轮）：
+    //   · 收拢形状 `mgmusic/mgmusic.js` —— 顶层目录名是插件名，但第二个组件是
+    //     `mgmusic.js` 而不是 `index.js`，旧代码一个名字都认不出来；
+    //   · 一包多插件 `mcloud/mcloud-daily.js` —— 更认不出来。
+    // 结果就是「装完了、面板还在跑旧代码」，而界面说「已装」。
+    let mut names: Vec<String> = saved.names.clone();
     names.sort();
     names.dedup();
     let mut reloaded = Vec::new();

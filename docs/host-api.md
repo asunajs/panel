@@ -703,7 +703,7 @@ probe bad_key          = 被拒绝（对）：set_job_schedule 的 opts 只认 e
 ```text
 GET  /plugins/demo/api/ping?x=1 → {"ok":true,"method":"GET","path":"/plugins/demo/api/ping","query":"x=1"}
 POST /plugins/demo/api/ping     → 同样 200（body 也传给了插件）
-GET  /plugins/demo/other        → 插件返回的 HTML 兜底页
+GET  /plugins/demo/other        → 插件返回的默认 HTML 响应
 ```
 
 **踩到的坑**：`set_job_schedule('x', {cron: ...})` 以前**静默无效**（op 只认 `expr`），

@@ -80,7 +80,7 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 | `main.rs` | 启动、参数、加载全部插件、按需加载的**判定**（`should_start_unloaded`） |
 | `web.rs` | 全部 HTTP：路由、鉴权中间件、插件 WebUI 反代、错误页（最长的文件，5k+ 行） |
 | `scheduler.rs` | 单线程 actor：注册、派发、熔断、按需加载/唤醒/空闲卸载、任务表真源 |
-| `engine.rs` | LLRT 运行时封装：一次 invocation 一个 `AsyncRuntime`、CPU 预算、panic 兜底 |
+| `engine.rs` | LLRT 运行时封装：一次 invocation 一个 `AsyncRuntime`、CPU 预算、panic 转 `Err` 后走任务收尾 |
 | `hostapi.rs` | 插件能 `import 'panel:host'` 到什么（全 async，清单见 [host-api.md](host-api.md)） |
 | `notify.rs` | 通知：渠道（13 种）+ 推送路线 + 发件箱退避 |
 | `db.rs` | SQLite actor（`Db::call`）：表结构、迁移、常用查询 |
@@ -132,7 +132,8 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
 
 ## 8. 接手必知的技术坑
 
-全部在 [pitfalls.md](pitfalls.md)（老账在 [handoff/pitfalls-0.4.md](handoff/pitfalls-0.4.md)；条数以
+全部在 [pitfalls.md](pitfalls.md)（0.9.x 那批在 [pitfalls-0.9.md](pitfalls-0.9.md)，0.8.x 在
+[pitfalls-0.8.md](pitfalls-0.8.md)，老账在 [handoff/pitfalls-0.4.md](handoff/pitfalls-0.4.md)；条数以
 `bash scripts/check-pitfalls.sh` 的输出为准）。先记住这六条最致命的：
 
 1. **actor 里不许做文件/网络 IO**（读插件源码、遍历目录都要 `spawn_blocking`）—— 一停整个面板都卡。
