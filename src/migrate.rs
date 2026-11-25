@@ -317,13 +317,11 @@ fn has_col(conn: &Connection, table: &str, col: &str) -> bool {
     names.iter().any(|c| c == col)
 }
 
-/// 拼一列：有就取它，没有就用 SQL 字面量兜底。
+/// 向后兼容 0.3 逐步加列的 `jobs` 表：有该列就读取，缺列时补 SQL 字面量。
 ///
-/// 为什么必须这么做：0.3 的 `jobs` 表是**逐步加列**的 —— `summary` / `kind` /
-/// `script` / `runtime` / `lead_ms` 都是后加的。直接 `SELECT summary, kind, …`
-/// 会在稍老的库上报 `no such column`，而这类库**正是迁移的目标用户**
-/// （正因为面板旧才要迁）。实测一个带 `lead_ms` 但没 `summary` 的真实
-/// 0.3 库，preview 整条断在这里。
+/// `summary` / `kind` / `script` / `runtime` / `lead_ms` 都是后加列。
+/// 直接 `SELECT summary, kind, …` 会让旧库报 `no such column`，preview/apply
+/// 因此中断。各列的字面量默认值见调用处的 `cols` 列表。
 fn col_or(conn: &Connection, table: &str, col: &str, lit: &str) -> String {
     if has_col(conn, table, col) {
         col.to_string()
@@ -593,7 +591,7 @@ pub fn preview(from: &str, target_db: &Path) -> Result<Preview, String> {
     let mut script_jobs = Vec::new();
     let mut plugin_names: Vec<String> = Vec::new();
     if has_table(&src, "jobs") {
-        // 逐列探测：老库缺哪列就用字面量兜底（见 col_or 的说明）
+        // 逐列兼容缺少后加列的 0.3 库，字面量默认值见列表与 col_or 的说明。
         let cols = [
             ("name", "'_'"),
             ("plugin", "'_'"),
@@ -1187,8 +1185,8 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
         dst
             .execute_batch(SCRIPTS04_SCHEMA)
             .map_err(|e| format!("建 scripts 表失败: {e}"))?;
-        // 没有 script 列的老库 = 那时还没有脚本任务这回事，查询直接用字面量兜底；
-        // 行过滤照样成立（plugin='__script__' 不会有）。
+        // 向后兼容没有 script 列的 0.3 库：按列表补缺列，script/runtime 为 NULL；
+        // plugin='__script__' 的行过滤保持不变。
         let cols = [
             ("name", "'_'"),
             ("script", "NULL"),

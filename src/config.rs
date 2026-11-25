@@ -458,7 +458,8 @@ pub fn limits() -> Limits {
     LIMITS.read().ok().and_then(|g| *g).unwrap_or_default()
 }
 
-/// 从整份配置里取这几项（缺省/类型不对 → 默认；超范围夹回，不拒绝启动）。
+/// 从整份配置里取这几项：缺失或类型不对时采用 `Limits::default()`（保留 20,000 条、
+/// HTTP 错误日志不限流、插件 8 MiB）；合法整数再夹到允许范围，不拒绝启动。
 pub fn limits_from_value(v: &Value) -> Limits {
     let d = Limits::default();
     let num = |path: &[&str]| -> Option<u64> {

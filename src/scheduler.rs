@@ -72,7 +72,8 @@ pub fn max_budget_ms() -> u64 {
 
 const IDLE_SLEEP: Duration = Duration::from_secs(3600);
 const MIN_SLEEP: Duration = Duration::from_millis(1);
-/// `next_base` 返回 None 的兜底（parse 阶段已挡过，理论上走不到）。
+/// 无下一次触发时使用的远未来时间（365 天）：手动任务、删除任务和
+/// `next_base` 返回 None 的任务都借它阻止立即触发；一次性任务另用 ONCE_SPENT_DAYS。
 const FALLBACK_DAYS: i64 = 365;
 /// 「只执行一次」跑完之后把下次执行钉多远。取一个明显不会到的年份，
 /// 界面上看到这个日期就知道「它不会再跑了」（而不是以为漏排了）。
@@ -325,8 +326,8 @@ fn lazy_placeholder(row: &LazyTask) -> Result<Task, String> {
     Ok(t)
 }
 
-/// 库里那行的调度解析不了（老库/手改）时的兜底：按**手动任务**列出来，别的字段照旧。
-/// 宁可让用户看见一条「只能手动跑」的任务，也别让它整行从界面上消失。
+/// 向后兼容旧库或手改数据中的非法 cron：解析失败时转成手动任务，不再自动执行。
+/// 插件、名称、预算、启用/删除状态照旧保留，`suggest_cron` 仍写入 `base_cron` 供恢复。
 fn lazy_placeholder_fallback(row: &LazyTask) -> Task {
     let budget = (row.budget_ms.max(1) as u64).clamp(1, max_budget_ms());
     let mut t = Task::manual(row.plugin.clone(), row.name.clone(), budget);
@@ -512,8 +513,8 @@ impl Task {
         } else {
             self.consecutive_failures = 0;
         }
-        // 「只执行一次」的计划跑完就到此为止。不特判的话，下面 next_base 返回 None
-        // 会走到 FALLBACK_DAYS 兜底 —— 变成「7 天后再跑一次」，等于把 once 变成了周期任务。
+        // 「只执行一次」的计划跑完就到此为止。不特判的话，next_base 返回 None
+        // 会使用 FALLBACK_DAYS 的 365 天远未来时间，等于把 once 变成周期任务。
         if schedule.one_shot_spent(now) {
             self.base_fire = now + ChronoDuration::days(ONCE_SPENT_DAYS);
             self.next_fire = self.base_fire;

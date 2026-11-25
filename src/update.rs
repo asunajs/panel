@@ -247,8 +247,8 @@ pub async fn check(force: bool) -> Result<Value, String> {
             (tag, api_release_opt().await)
         }
         Err(e) => {
-            // ③ 兜底：万一 github.com 的 302 那边出事（企业代理改写之类），再试一次 API。
-    //    `PANEL_UPDATE_NO_API=1` 时这条路直接算失败（不要偷偷把额度用掉）。
+            // ③ 302 取 tag 失败时的备用通道：再试 GitHub API。
+            //    `PANEL_UPDATE_NO_API=1` 时禁用这条通道，直接返回原错误。
             if no_api() {
                 return Err(format!("{e}（PANEL_UPDATE_NO_API=1，不走 API 兜底）"));
             }
@@ -285,7 +285,7 @@ pub async fn check(force: bool) -> Result<Value, String> {
         "current": crate::panelversion::current(),
         "latest": latest,
         "has_update": has_update,
-        // 没有 API 时用发布页地址兜底：界面上的「打开下载页」照样能点
+        // API 未返回发布页地址时，用 tag 拼出 GitHub 发布页，保证「打开下载页」可用。
         "url": api_rel
             .as_ref()
             .and_then(|r| r.get("html_url").cloned())

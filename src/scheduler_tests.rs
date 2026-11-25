@@ -543,7 +543,7 @@ fn lazy_placeholder_keeps_suggestion_for_manual_rows() {
 fn lazy_placeholder_fallback_still_carries_suggestion() {
     let t = lazy_placeholder_fallback(&lazy_row("这不是 cron", Some("0 8,20 * * *")));
     assert!(t.schedule.is_none());
-    assert_eq!(t.base_cron, "0 8,20 * * *", "兜底也要把建议带上，否则同样退不回去");
+    assert_eq!(t.base_cron, "0 8,20 * * *", "转成手动任务后仍要保留原计划建议，否则无法恢复");
     assert!(t.lazy);
 }
 

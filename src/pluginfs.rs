@@ -36,7 +36,8 @@ use std::path::{Path, PathBuf};
 /// 目录式插件的入口文件名。
 pub const ENTRY: &str = "index.js";
 
-/// 单个插件源码的上限兜底（配置里的 `plugins.max_bytes` 在 web 层另有更严的检查）。
+/// 目录式插件大小的显示上限：总字节数最多报 64 MiB，避免目录遍历读数无限增大。
+/// 上传/保存检查由 web 层按 `plugins.max_bytes` 执行，不使用这个显示上限。
 const HARD_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 目录式插件的入口：`<dir>/<name>/index.js`，存在才算。

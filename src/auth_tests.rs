@@ -189,7 +189,7 @@ fn a_broken_file_refuses_to_start_instead_of_disabling_auth() {
 fn a_broken_file_is_replaced_when_the_env_token_is_given() {
     let dir = scratch("broken-env");
     std::fs::write(dir.join(FILE), "{oops").unwrap();
-    // 有环境变量兜底时不该被一份坏文件钉死（插件能写这个文件）。
+    // 显式 PANEL_TOKEN 覆盖坏文件，避免一次损坏的凭据文件阻止启动。
     let p = provision(&dir, Some("rescue".into())).expect("应当按 env 重写");
     assert!(p.note.is_some(), "重写要有说明");
     assert!(p.auth.expect("auth").verify("rescue"));

@@ -385,7 +385,7 @@ pub fn provision(data_dir: &Path, env_token: Option<String>) -> Result<Provision
                     .map(|_| format!("鉴权凭据来自 {}（磁盘上只有盐 + 哈希）", path.display()));
                 Ok(Provisioned { auth: a, note })
             }
-            // 没有环境变量兜底时，坏文件必须拒绝启动（fail-closed），并给出恢复办法。
+            // 未显式设置 PANEL_TOKEN 时，坏文件必须拒绝启动（fail-closed），并给出恢复办法。
             Err(e) => Err(format!(
                 "{e}\n删掉它（下次启动会用 PANEL_TOKEN 重新派生），或者设 PANEL_TOKEN 覆盖它。"
             )),

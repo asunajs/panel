@@ -51,7 +51,7 @@ pub fn set(mirrors: Vec<String>, token: String, hosts: Vec<String>) {
     if list.is_empty() {
         list = DEFAULT_MIRRORS.iter().map(|s| s.to_string()).collect();
     }
-    // 直连永远有兜底：所有镜像都挂的时候，至少还试一次直连。
+    // 未配置空串时追加 GitHub 原始直连，作为镜像全部失败后的备用通道。
     if !list.iter().any(|m| m.is_empty()) {
         list.push(String::new());
     }
@@ -212,7 +212,7 @@ mod tests {
                     "https://m2.example/https://github.com/a/b/releases/download/v1/x.zip",
                     "https://github.com/a/b/releases/download/v1/x.zip",
                 ],
-                "镜像顺序要对，直连兜底必须在最后"
+                "镜像顺序要对，直连备用通道必须在最后"
             );
         });
     }

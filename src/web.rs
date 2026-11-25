@@ -39,7 +39,7 @@ const MIN_JS: &str = include_str!("../web/panel.min.js");
 const MIN_CSS: &str = include_str!("../web/panel.min.css");
 /// 错误页模板：404/401/500 都渲染它，用的是面板自己的样式。
 const ERROR_HTML: &str = include_str!("../web/error.html");
-/// 错误页的主题兜底脚本（8 行）：错误页没有 app.js，CSP 又不许内联脚本。
+/// 错误页的主题初始化脚本（8 行）：错误页没有 app.js，CSP 又不许内联脚本。
 const THEME_BOOT_JS: &str = include_str!("../web/theme-boot.js");
 /// 面板 UI 套件：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
 const UI_JS: &str = include_str!("../web/ui.js");
@@ -377,7 +377,7 @@ fn internal(msg: impl Into<String>) -> ApiError {
     .with_detail(msg.into())
 }
 
-/// 状态码 → 页面标题（错误页与兜底都用这一份，别各写一套文案）。
+/// 状态码 → 错误页标题：已知状态用专名，其他 5xx 归为内部错误，其余用通用标题。
 fn status_title(status: StatusCode) -> &'static str {
     match status {
         StatusCode::BAD_REQUEST => "请求有问题",
@@ -544,7 +544,8 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         .await
         .unwrap_or_default();
     let text = String::from_utf8_lossy(&bytes).to_string();
-    // 从本服务自己的 JSON 里取人话；取不到就用状态码兜底。
+    // 优先取本服务 JSON 的 error；解析失败或字段缺失时，短纯文本可用，
+    // 否则用 status_title 按 HTTP 状态生成固定标题。
     let mut message = status_title(parts.status).to_string();
     let mut code_ref = ref_id.clone();
     if let Ok(v) = serde_json::from_str::<Value>(&text) {
@@ -951,10 +952,10 @@ async fn api_not_found(uri: axum::http::Uri) -> ApiError {
     ApiError::not_found("这个接口不存在。").with_detail(uri.path().to_string())
 }
 
-/// 根 router 的兜底：/api 走 JSON，其余给错误页。
+/// 根 router 的未匹配处理器：/api 返回 JSON 404，其余路径返回 HTML 错误页。
 ///
-/// 为什么不用 SPA 兜底：面板是 hash 路由（#plugins），未知路径本来就该是 404 ——
-/// 把所有路径都塞回首页，会让人以为「这个功能存在但白屏」。
+/// 面板是 hash 路由（#plugins），未知路径必须保持 404；不能统一回首页，
+/// 否则会让人以为功能存在但页面空白。
 async fn root_not_found(uri: axum::http::Uri) -> Response {
     let path = uri.path().to_string();
     if path.starts_with("/api") {

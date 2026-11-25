@@ -2733,7 +2733,7 @@ async fn deleting_a_plugin_keeps_its_run_history() {
     );
 }
 
-/// 并列值下的复合游标：`started_at` 相同的一批行必须靠 `id` 兜底，一个都不能漏/重。
+/// 并列值下的复合游标：`started_at` 相同时用 `id` 作第二排序键，分页不能漏行或重复。
 ///
 /// 用 20000 行（每 5 行同一个 started_at）实测 40 页、0 重、0 漏。这里把那个性质
 /// 固化成内存库里的守卫：只删掉游标里的 `id` 那一半，这条就会红。
@@ -3054,9 +3054,7 @@ await host.register_cron('t', '@every 30s', 5000, {});
 }
 
 /// 所有请求体结构体都 `deny_unknown_fields`：键名写错要**报错**，不能静默当成默认值。
-///
-/// 三次踩到同一类问题（`lead_ms`、脚本 `cron`、改计划 `cron` 被当成
-/// 「撤销覆盖」），所以这轮把所有 body 结构一次收紧，并配一条守卫盯着。
+/// 备份文档例外：恢复时忽略未来版本可能新增的未知字段，当前认识的字段照常恢复。
 #[tokio::test]
 async fn unknown_keys_in_request_bodies_are_rejected() {
     let (app, _plugins, _data, _store) = setup_dirs("denykeys").await;

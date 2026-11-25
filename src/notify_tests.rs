@@ -47,7 +47,7 @@ fn ids_default_and_defaults_are_filled() {
     let m = c.channels[1].smtp.as_ref().unwrap();
     assert_eq!(m.port, 465, "隐式 TLS 的默认端口");
     assert_eq!(m.subject, "[panel] 通知");
-    assert_eq!(m.from, "", "from 留空由发送侧兜底");
+    assert_eq!(m.from, "", "from 留空，发送时直接报错");
     // starttls 默认 587
     let c2 = cfg_with(json!([{ "kind": "smtp", "host": "h", "to": ["a@b"], "tls": "starttls" }]));
     assert_eq!(c2.channels[0].smtp.as_ref().unwrap().port, 587);

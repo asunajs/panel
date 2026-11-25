@@ -45,8 +45,8 @@ pub type ConsoleCapture = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 /// 装进试跑上下文的 console 覆盖。
 ///
 /// 为什么要在 Rust 侧抢：llrt 自带的 console 直写进程 stdout（守护进程跑起来就是
-/// journal / 日志文件），试跑的人在那个框里什么也看不见。字符串化用 JSON.stringify
-/// 兜底，`console.log({a:1})` 至少还能看懂。
+/// journal / 日志文件），试跑结果不会进入界面输出框。字符串直出，Error 取 stack，
+/// 其余值先 JSON.stringify；循环引用等序列化失败才改用 String(v)。
 const TEST_CONSOLE: &str = r#"
 (() => {
   const fmt = (v) => {
@@ -791,7 +791,7 @@ impl Plugin {
 }
 
 
-/// 引擎边界：把一次调用的 panic 收成 `Err`，而不是让它 unwind 掉整个派发 task。
+/// 引擎错误边界：把一次调用的 panic 转成 `Err`，而不是 unwind 掉整个派发 task。
 ///
 /// 为什么要这一层：派发是 `tokio::spawn` 出去、不 await JoinHandle 的。若引擎内部 panic
 /// （QuickJS/rquickjs 某些路径会），unwind 会跳过收尾逻辑 —— 任务卡的 `busy`/`in_flight`

@@ -480,8 +480,8 @@ impl Schedule {
 
     /// 这条调度是不是「只跑一次」且已经过期。
     ///
-    /// 调度器靠它决定：跑完就把 next_fire 钉到很远的将来，而不是按
-    /// FALLBACK_DAYS 兜底成「7 天后再跑一次」。
+    /// 调度器据此在跑完后把 next_fire 钉到更远的将来；否则会按 FALLBACK_DAYS
+    /// 排到 365 天后，把 once 变成周期任务。
     pub fn one_shot_spent(&self, now: DateTime<Local>) -> bool {
         match self {
             Schedule::Plan(p) if p.is_one_shot() => {
