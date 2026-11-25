@@ -250,6 +250,10 @@ button, input, select { font: inherit; color: inherit; }
   font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums;
 }
 
+/* 文件管理页里「可清理的残留」用警示色：一眼分清哪些是面板建议清的
+   （收拢目录 + 旧散件并存那种，清错了插件就没了，值得单独一个颜色）。 */
+.chip.chip-warn { color: var(--warn); border-color: var(--warn-soft); background: var(--warn-soft); }
+
 .link { color: var(--accent); text-decoration: none; font-size: 12.5px; font-weight: 600; }
 .link:hover { text-decoration: underline; }
 
@@ -1165,6 +1169,15 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
 .settings-note { margin: 10px 0 0; font-size: 11.5px; color: var(--dim); }
+
+/* 文件管理（第 270 轮）：三块（插件 / 脚本 / 回收站）各一张面板，靠 gap 分开 */
+#files-areas { display: flex; flex-direction: column; gap: 16px; }
+#files-areas .table td { vertical-align: top; }
+/* 名字下面那行「为什么能清」的小字：跟着第一个单元格，别给它额外上边距 */
+#files-areas .table td .settings-note { margin: 2px 0 0; }
+/* 目录路径是一长串没有空格的字符：`break-word` 只管「整词放不下」，
+   中文混排时仍可能整行溢出，用 anywhere 才真的能在任意位置断（第 270 轮手机端实测）。 */
+#files-areas .files-dir { overflow-wrap: anywhere; }
 
 /* 界面包列表（设置 → 常规 → 界面）：一行一个已装版本，右边是「启用 / 正在使用」。
    用 --line 细线分隔而不是底色块 —— 浅色下 --surface-2 与 --bg 只差 4 级，会糊成一片。 */

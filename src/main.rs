@@ -51,6 +51,7 @@ mod token_cli;
 mod update;
 mod ssrf;
 mod stats;
+mod storage;
 mod upload;
 mod web;
 mod wsclient;

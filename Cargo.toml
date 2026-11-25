@@ -7,7 +7,7 @@ path = "src/main.rs"
 
 [package]
 name = "plugin-panel"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2021"
 publish = false
 

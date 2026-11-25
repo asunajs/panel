@@ -107,6 +107,26 @@ for (const [name, extra] of [['seed-extra', '同前缀第二个'], ['lonely', '�
   ].join('\n'));
 }
 
+// 文件管理页的种子（第 270 轮）：三种要能被判出来的东西各一份 ——
+//   ① 收拢目录 + 顶层旧 .js 并存（升级残留，最危险的那种：跑旧代码）
+//   ② 一个 .bak（备份，可清）
+//   ③ 回收站里一项能恢复的（删除 → 恢复的往返要在真界面上验）
+writeFileSync(path.join(plugins, 'staleplug.js'), [
+  "import host from 'panel:host';",
+  "// 旧拷贝：同名的 staleplug/ 目录才是现在该跑的那份",
+  "void host;",
+].join('\n'));
+mkdirSync(path.join(plugins, 'staleplug'), { recursive: true });
+writeFileSync(path.join(plugins, 'staleplug/staleplug.js'), [
+  "import host from 'panel:host';",
+  "// 收拢形状的正式那份",
+  "void host;",
+].join('\n'));
+writeFileSync(path.join(plugins, 'staleplug/staleplug.panel.json'), JSON.stringify({ title: '收拢样例', version: '0.0.1' }));
+writeFileSync(path.join(plugins, 'leftover.js.bak'), '// 手工备份，面板不读\n');
+mkdirSync(path.join(dir, 'trash'), { recursive: true });
+writeFileSync(path.join(dir, 'trash', '1795600000000-scripts-gone.sh'), '#!/bin/sh\n');
+
 // 声明式页面的种子（第 191 轮）：没有 .webui/、没注册 sidebar，界面全靠清单。
 writeFileSync(path.join(plugins, 'declared.js'), "import host from 'panel:host';\n\n// \u58f0\u660e\u5f0f\u9875\u9762\u7684\u79cd\u5b50\u63d2\u4ef6\uff08\u7b2c 191 \u8f6e\uff09\uff1a**\u6ca1\u6709 .webui/\u3001\u4e5f\u6ca1\u6ce8\u518c sidebar** \u2014\u2014\n// \u4fa7\u680f\u90a3\u4e00\u683c\u3001\u8868\u5355\u3001\u6309\u94ae\u3001\u6570\u636e\u5757\u5168\u90e8\u6765\u81ea declared.panel.json\u3002\n// \u6570\u636e\u53ea\u653e\u5185\u5b58\uff1a\u8fd9\u8f6e\u8981\u65ad\u7684\u662f\u300c\u9762\u677f\u80fd\u4e0d\u80fd\u6309\u58f0\u660e\u628a\u4ea4\u4e92\u8dd1\u8d77\u6765\u300d\uff0c\u4e0d\u662f\u5b58\u50a8\u3002\nlet accounts = [];\nlet polls = 0;\nconst IMG = { data_url: 'data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2220%22%3E%3C/svg%3E' };\n\nawait host.register_handler('send_code', async (evt) => {\n  if (!String((evt.body && evt.body.account) || '').trim()) return { ok: false, error: 'no account' };\n  return { ok: true, message: '\u9a8c\u8bc1\u7801\u5df2\u53d1\u9001\uff08\u79cd\u5b50\uff09', keep: { ticket: 'tk-1' }, cooldown_s: 3 };\n});\n\nawait host.register_handler('login', async (evt) => {\n  const bag = evt.bag || {};\n  if (!bag.ticket) return { ok: false, error: '\u5148\u53d1\u7801' };\n  if (!String((evt.body && evt.body.captcha) || '').trim()) {\n    return { ok: false, error: '\u8bf7\u8f93\u5165\u56fe\u5f62\u9a8c\u8bc1\u7801', image: IMG, keep: { ticket: 'tk-1' } };\n  }\n  if (!accounts.length) {\n    accounts = [\n      { name: 'seed-a', expire: '+30 \u5929', status: 'ok', note: '\u6b63\u5e38' },\n      { name: 'seed-b', expire: '+3 \u5929', status: 'warn', note: '\u5feb\u5230\u671f' },\n      { name: 'seed-c', expire: '\u5df2\u8fc7\u671f', status: 'err', note: '\u5931\u6548' },\n    ];\n  }\n  return { ok: true, message: '\u767b\u5f55\u6210\u529f bag=' + (bag.ticket ? 'yes' : 'no'), values: { code: '' } };\n});\n\nawait host.register_handler('qr_start', async () => ({\n  ok: true, message: '\u626b\u7801\u4e2d', image: IMG, keep: { t: Date.now() },\n  poll: { handler: 'qr_state', interval_ms: 500, timeout_ms: 6000 },\n}));\n\nawait host.register_handler('qr_state', async () => {\n  polls += 1;\n  if (polls >= 2) { polls = 0; return { done: true, ok: true, message: '\u626b\u7801\u6210\u529f\uff08\u79cd\u5b50\uff09' }; }\n  return { done: false };\n});\n\nawait host.register_handler('boom', async () => {\n  throw new Error('\u79cd\u5b50\u5931\u8d25\u6807\u8bb0');\n});\n\nawait host.register_handler('accounts', async () => accounts);\nawait host.register_handler('quota', async () => ({ \u8d26\u53f7\u6570: accounts.length, \u989d\u5ea6: '1 GB' }));\nawait host.register_handler('events', async () => [\n  { what: '\u4e8b\u4ef6\u4e00', when: '\u521a\u521a', detail: 'a' },\n  { what: '\u4e8b\u4ef6\u4e8c', when: '1 \u5206\u949f\u524d', detail: 'b' },\n  { what: '\u4e8b\u4ef6\u4e09', when: '\u6628\u5929', detail: 'c' },\n]);\nawait host.register_handler('big', async () => {\n  const rows = [];\n  for (let i = 1; i <= 300; i += 1) rows.push({ '#': i, name: 'row-' + i });\n  return rows;\n});\n");
 writeFileSync(path.join(plugins, 'declared.panel.json'), JSON.stringify({
@@ -2525,6 +2545,85 @@ async function main() {
   ));
   check('源码编辑器能跳到指定行（第 2500 行 + 滚到位 + 工具条报位置）',
     jump.line === 2500 && jump.scrollTop > 0 && /第 2500 行/.test(jump.pos), JSON.stringify(jump));
+
+  // ---------------------------------------------------------------- 文件管理（第 270 轮）
+  // 这一页存在的理由：更新后留下的旧东西（旧形状散件、备份、孤儿清单）在终端里
+  // 只能靠 du 看，谁也不敢删 —— 于是只能一直占着。断言按「能看见 / 判得对 / 删得掉 /
+  // 能恢复」四条走，其中「判得对」是重点：判错了就是把能用的插件标成可清理。
+  await js("(()=>{const a=[...document.querySelectorAll('.nav-item')].find((x)=>x.dataset.view==='files');if(a)a.click();return 'ok';})()");
+  await waitFor(async () => {
+    const n = await js("document.querySelectorAll('#files-areas .files-area').length");
+    return Number(n) === 3;
+  }, 8000, '文件管理页出现三个区域');
+
+  const filesView = JSON.parse(await js(
+    "(()=>{const areas=[...document.querySelectorAll('#files-areas .files-area')];" +
+    "const pick=(t)=>{const a=areas.find((x)=>(x.querySelector('h2')||{}).textContent===t);if(!a)return null;" +
+    "const rows=[...a.querySelectorAll('tbody tr')];" +
+    "return {n:rows.length,rows:rows.map((r)=>({name:r.dataset.name,kind:(r.children[1].textContent||'').trim()," +
+    "btns:[...r.querySelectorAll('button')].map((b)=>b.textContent.trim())}))};};" +
+    "return JSON.stringify({total:(document.getElementById('files-total')||{}).textContent," +
+    "plugins:pick('插件目录'),scripts:pick('脚本目录'),trash:pick('回收站')});})()",
+  ));
+  check('文件管理页只列三个区域（插件 / 脚本 / 回收站）',
+    filesView.plugins && filesView.scripts && filesView.trash && /^共 /.test(filesView.total || ''),
+    JSON.stringify(filesView).slice(0, 200));
+
+  const staleRow = (filesView.plugins.rows || []).find((r) => r.name === 'staleplug.js');
+  const dirRow = (filesView.plugins.rows || []).find((r) => r.name === 'staleplug');
+  check('升级残留被判成「旧拷贝」且标了可清理',
+    !!staleRow && staleRow.kind === '旧拷贝（主文件）', JSON.stringify(staleRow));
+  check('收拢目录本身不算残留（不会被标成可清理）',
+    !!dirRow && dirRow.kind === '插件（收拢）', JSON.stringify(dirRow));
+  const bakRow = (filesView.plugins.rows || []).find((r) => r.name === 'leftover.js.bak');
+  check('.bak 备份单独一种形状，并且给了删除入口',
+    !!bakRow && bakRow.kind === '备份' && bakRow.btns.includes('删除'), JSON.stringify(bakRow));
+
+  const trashRow = (filesView.trash.rows || [])[0];
+  check('回收站里认出来处的那项给了「恢复」+「彻底删」两个入口',
+    !!trashRow && trashRow.btns.includes('恢复') && trashRow.btns.includes('彻底删'),
+    JSON.stringify(trashRow));
+
+  // 真删一次（进回收站）→ 真恢复回来：这一页最该保证的就是「删错了有退路」。
+  const beforeCount = (filesView.plugins.rows || []).length;
+  // ⚠ 别 await deleteOne：它内部 await panelConfirm，而确认框要靠**下一次** js() 才点得到，
+  // 同一个 evaluate 里等它就自锁（CDP 只会报「Runtime.evaluate 超时」）。
+  await js("(() => { void deleteOne('plugins', FILES.data.plugins.items.find((x)=>x.name==='leftover.js.bak')); return 'ok'; })()");
+  await sleep(400);
+  await js("(()=>{const b=document.querySelector('.ui-confirm .btn-primary,.ui-confirm .btn-danger');if(b)b.click();return 'ok';})()");
+  await waitFor(async () => {
+    const n = await js("document.querySelectorAll('#files-areas .files-area')[0].querySelectorAll('tbody tr').length");
+    return Number(n) === beforeCount - 1;
+  }, 8000, '删掉之后列表少一行');
+  const trashAfter = Number(await js(
+    "document.querySelectorAll('#files-areas .files-area')[2].querySelectorAll('tbody tr').length",
+  ));
+  check('删插件文件是「进回收站」，不是真删（回收站多了一项）', trashAfter >= 2, 'trash=' + trashAfter);
+
+  const gone = Number(await js(
+    "JSON.stringify([...document.querySelectorAll('#files-areas .files-area')[0].querySelectorAll('tbody tr')]" +
+    ".map((r)=>r.dataset.name)).includes('leftover.js.bak') ? 1 : 0",
+  ));
+  check('删掉的那项从插件目录列表里消失了', gone === 0);
+
+  // 恢复：点回收站里刚进去那项的「恢复」
+  const restored = await js(
+    "(async () => { const it = FILES.data.trash.items.find((x)=>String(x.restore_name||'')==='leftover.js.bak');" +
+    "if(!it) return 'no-item'; await restoreTrash(it); return 'ok'; })()",
+  );
+  await sleep(800);
+  const backAgain = Number(await js(
+    "JSON.stringify([...document.querySelectorAll('#files-areas .files-area')[0].querySelectorAll('tbody tr')]" +
+    ".map((r)=>r.dataset.name)).includes('leftover.js.bak') ? 1 : 0",
+  ));
+  check('回收站能把它恢复回原目录（删错了有退路）', restored === 'ok' && backAgain === 1, restored);
+
+  // 三个目录之外的东西不该出现在这一页：data/ 里的凭据文件是红线
+  const leaked = Number(await js(
+    "JSON.stringify([...document.querySelectorAll('#files-areas tbody tr')].map((r)=>r.dataset.name))" +
+    ".match(/auth\\.json|panel\\.db|config\\.json/) ? 1 : 0",
+  ));
+  check('数据目录（凭据 / 库 / 配置）不在这一页出现', leaked === 0);
 
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }

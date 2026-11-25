@@ -149,7 +149,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------- 面板七页
-  for (const v of ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'settings']) {
+  for (const v of ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'files', 'settings']) {
     await js("location.hash = '#" + v + "'");
     await sleep(1000);
     await record(v);

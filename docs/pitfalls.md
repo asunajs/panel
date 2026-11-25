@@ -942,3 +942,55 @@ Release 发出去那份不受影响。
 
 **临时实例也一样**：`cp target/debug/panel /tmp/x/` 之后也签一下，否则每起一个测试实例
 又是一轮验证框。
+
+## 270. 「这是什么」不能有第二份实现：文件管理页差点删掉正在跑的插件
+
+**现场**：新增的「文件管理」页第一版把 `mcloud/`（1.2 MB、4 个插件）判成
+「目录（没有主文件）」并标了可清理，「清理残留」按钮上写着「5 项 · 1.3 MB」。
+按下去就是删掉一个正在跑的插件 —— 而且它进了回收站，用户多半不会立刻发现。
+
+**根因**：判定「这个目录是不是某个插件的家」时手写了
+
+```rust
+path.join(format!("{name}.js")).is_file() || path.join("index.js").is_file()
+```
+
+而一包多插件的真实形状是 `<name>/<name>/index.js`（mcloud、yangshipin 都是这样）。
+面板早就有一个函数在定义这件事 —— `pluginfs::dir_entry()` —— 手写的那份漂了。
+
+**为什么单测没抓到**：种子目录也是我手写的（`mgmusic/mgmusic.js`），
+跟错误假设完全一致，所以全绿。**真机截图**（拿实例里真实插件目录跑 mobile-walk）才露出来。
+
+**修法**：判定一律问 `pluginfs::dir_entry(dir, name)`；`storage_tests` 补
+`packed/packed/index.js` 这个形状的回归用例。
+
+> 规矩：任何「这算不算一个插件 / 这是哪个插件的」判断，都只能走 `pluginfs`。
+> 第二份实现必然漂，而且漂的时候测试也一起漂。
+
+## 271. ui-check 里 `await` 一个「等确认框」的函数 = 自锁（报错是 CDP 超时）
+
+**现场**：文件管理页的删除断言写成
+
+```js
+await js("(async () => { await deleteOne(...); return 'ok'; })()");
+```
+
+`deleteOne` 内部 `await panelConfirm()`，确认框要靠**下一次** `js()` 才点得到。
+CDP 的 `Runtime.evaluate` 带 `awaitPromise: true`，于是这次求值永远不返回，
+报的是一句看不出因果的「挂了：CDP 超时：Runtime.evaluate」。
+
+**修法**：`void deleteOne(...)`（fire-and-forget），下一次 `js()` 去点确认按钮。
+
+> 规矩：凡是会弹面板确认框的函数，在 ui-check 里**不能 await** —— 拆成两步：
+> 触发 → 点确认 → 再断言结果。
+
+## 272. 手机上「一长串没空格的路径」用 `break-word` 照样溢出
+
+**现场**：文件管理页每块写着目录路径（`/Users/xxx/plugins（…）`），
+`mobile-check` 在 390 视口量到 `scrollWidth 332 > clientWidth 294`，报该页不合格。
+
+**根因**：`overflow-wrap: break-word` 只在「整词放不下」时断，中文混排时
+它认为这一整串是一个词、又找不到合适的断点，于是照样撑出去。
+`overflow-wrap: anywhere` 才允许在任意字符间断（并把它算进 min-content 宽度）。
+
+**修法**：给路径那一行单独一个 class（`.files-dir`），`overflow-wrap: anywhere`。

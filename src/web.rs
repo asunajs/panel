@@ -583,6 +583,11 @@ pub fn router(st: AppState) -> Router {
         .route("/api/ui/activate", post(api_ui_activate))
         .route("/api/ui/reset", post(api_ui_reset))
         .route("/api/plugins/files", get(plugin_files))
+        // 文件管理（第 270 轮）：只看插件目录 / 脚本目录 / 回收站这三个地方。
+        // 明确不做通用文件浏览器 —— 面板自己的 data/、库、配置不从这里进出。
+        .route("/api/files", get(api_files))
+        .route("/api/files/delete", post(api_files_delete))
+        .route("/api/files/restore", post(api_files_restore))
         // 清单与扫描（第 172 轮）
         .route("/api/plugins/scan", get(api_plugins_scan))
         .route("/api/plugins/{name}/manifest", get(api_plugin_manifest))
@@ -3872,6 +3877,161 @@ async fn api_update_download(
         "verified": verified,
         // 最后一步交给人：正在跑的服务不该自己覆盖自己的二进制（见 src/update.rs 文件头）
         "hint": format!("chmod +x {path} && mv {path} <面板目录>/panel && 重启面板服务"),
+    })))
+}
+
+// ---------------------------------------------------------------- 文件管理（第 270 轮）
+
+async fn api_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let pdir = st.plugins_dir.clone();
+    let sdir = st.scripts_dir.clone();
+    let tdir = st.data_dir.join("trash");
+    // 递归求大小是阻塞 IO（插件目录可能几百 MB、几千个文件）：整段挪出 worker。
+    let snap = tokio::task::spawn_blocking(move || {
+        let scan = |dir: &std::path::Path, area: crate::storage::Area| match area {
+            crate::storage::Area::Plugins => crate::storage::scan_plugins(dir),
+            crate::storage::Area::Scripts => crate::storage::scan_scripts(dir),
+        };
+        let plugins = scan(&pdir, crate::storage::Area::Plugins)?;
+        let scripts = scan(&sdir, crate::storage::Area::Scripts)?;
+        let trash = crate::storage::scan_trash(&tdir)?;
+        let sum = |v: &[crate::storage::Item]| v.iter().map(|x| x.bytes).sum::<u64>();
+        Ok::<Value, String>(json!({
+            "plugins": { "dir": pdir.display().to_string(), "bytes": sum(&plugins), "items": plugins },
+            "scripts": { "dir": sdir.display().to_string(), "bytes": sum(&scripts), "items": scripts },
+            "trash": { "dir": tdir.display().to_string(), "bytes": sum(&trash), "items": trash },
+        }))
+    })
+    .await
+    .map_err(|e| internal(format!("扫目录失败: {e}")))?
+    .map_err(internal)?;
+    Ok(Json(json!({ "ok": true, "files": snap })))
+}
+
+#[derive(serde::Deserialize)]
+struct FileDeleteBody {
+    /// `plugins` / `scripts` / `trash`
+    area: String,
+    name: String,
+}
+
+/// 删一项：插件/脚本 → **移进回收站**；回收站里的 → 彻底删。
+async fn api_files_delete(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(body): Json<FileDeleteBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    crate::storage::check_name(&body.name).map_err(bad)?;
+    let trash_dir = st.data_dir.join("trash");
+    // 回收站里的东西只能彻底删（它已经在回收站了）
+    if body.area == "trash" {
+        let target = trash_dir.join(&body.name);
+        if !tokio::fs::try_exists(&target).await.unwrap_or(false) {
+            return Err(bad(format!("回收站里没有 {}", body.name)));
+        }
+        crate::storage::purge(&target).await.map_err(internal)?;
+        st.log.emit(
+            "panel",
+            None,
+            crate::log::Level::Info,
+            format!("回收站：彻底删除 {}", body.name),
+        );
+        return Ok(Json(json!({ "ok": true, "purged": true, "name": body.name })));
+    }
+    let area = crate::storage::Area::parse(&body.area)
+        .ok_or_else(|| bad(format!("不认识的区域：{}", body.area)))?;
+    let dir = match area {
+        crate::storage::Area::Plugins => st.plugins_dir.clone(),
+        crate::storage::Area::Scripts => st.scripts_dir.clone(),
+    };
+    let target = dir.join(&body.name);
+    if !tokio::fs::try_exists(&target).await.unwrap_or(false) {
+        return Err(bad(format!("{} 里没有 {}", dir.display(), body.name)));
+    }
+    // 删的是**正在用的插件**时，先按名字卸掉再搬文件：顺序反了会出现
+    // 「提示删了、进程里还在跑、下次启动又回来」（第 131 轮同款症状）。
+    if area == crate::storage::Area::Plugins {
+        let base = body
+            .name
+            .trim_end_matches(".panel.json")
+            .trim_end_matches(".webui")
+            .trim_end_matches(".mjs")
+            .trim_end_matches(".js")
+            .trim_end_matches(".bak")
+            .to_string();
+        if !base.is_empty() && crate::pluginfs::entry(&st.plugins_dir, &base).is_some() {
+            st.sched.unload(&base);
+            let b = base.clone();
+            let _ = st
+                .db
+                .call(move |c| {
+                    c.execute("DELETE FROM tasks WHERE plugin=?1", [&b])
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+        }
+    }
+    let dest = crate::storage::move_to_trash(&target, &trash_dir, area)
+        .await
+        .map_err(internal)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Warn,
+        format!(
+            "文件管理：{} 移进回收站（{}）",
+            body.name,
+            dest.file_name().and_then(|x| x.to_str()).unwrap_or("")
+        ),
+    );
+    Ok(Json(json!({ "ok": true, "trashed": true, "name": body.name })))
+}
+
+#[derive(serde::Deserialize)]
+struct FileRestoreBody {
+    name: String,
+}
+
+/// 从回收站恢复：落回原目录、原名。目标已存在就拒绝（不覆盖现役那份）。
+async fn api_files_restore(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    Json(body): Json<FileRestoreBody>,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    crate::storage::check_name(&body.name).map_err(bad)?;
+    let trash_dir = st.data_dir.join("trash");
+    let src = trash_dir.join(&body.name);
+    if !tokio::fs::try_exists(&src).await.unwrap_or(false) {
+        return Err(bad(format!("回收站里没有 {}", body.name)));
+    }
+    let t = crate::storage::parse_trash_entry(&body.name)
+        .ok_or_else(|| bad("这个名字对不上任何已知的删除格式，只能彻底删"))?;
+    let dir = match t.area {
+        crate::storage::Area::Plugins => st.plugins_dir.clone(),
+        crate::storage::Area::Scripts => st.scripts_dir.clone(),
+    };
+    let target = dir.join(&t.restore_to);
+    crate::storage::restore(&src, &target)
+        .await
+        .map_err(bad)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "回收站：{} 恢复到 {}",
+            body.name,
+            target.display()
+        ),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "restored": t.restore_to,
+        "area": t.area.as_str(),
+        "hint": "插件要在「插件」页点一次重载（或重启面板）才会生效",
     })))
 }
 

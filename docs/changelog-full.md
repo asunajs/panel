@@ -8,6 +8,74 @@
 
 ---
 
+## 0.9.3（2026-11-25）
+
+### 新增「文件管理」页（第 270 轮，用户要求）
+
+用户的原话是「那就应该给面板加个清理功能，手动清理，也就是页面加个文件管理页面，
+只管理插件 / 脚本 / 回收站」。背景是上一轮把 cmcc 收拢之后暴露的问题：更新会留下
+旧形状的散件（`x.js` 与 `x/` 并存）、`.bak`、孤儿清单、`__pycache__`、回收站里几十份
+旧备份 —— `du -sh` 能看出「占了多少」，但「哪个能删」只能靠人记，猜错一次就是插件消失。
+
+**做法**：新增 `src/storage.rs`（形状判定 + 搬迁）+ `GET /api/files`、`POST /api/files/delete`、
+`POST /api/files/restore`，界面是侧栏「文件管理」一页。
+
+三条硬规矩：
+
+1. **只管三个目录**（插件 / 脚本 / 回收站）。面板自己的 `data/`（配置、库、`auth.json`）
+   不进这一页 —— 给一个能点删除的列表等于把「误删凭据」变成一个手滑的距离。
+2. **删插件/脚本一律进回收站**，能恢复；只有回收站里的「彻底删」才真删。
+3. **判定一律问 `pluginfs`**，不自己拼文件名。
+
+### 坑一：一包多插件被判成「空目录 ⇒ 可清理」（差点删掉正在跑的 mcloud）
+
+第一版 `has_main` 是手写的：
+
+```rust
+path.join(format!("{name}.js")).is_file() || path.join("index.js").is_file()
+```
+
+看着没问题，但一包多插件的真实形状是 `<name>/<name>/index.js`（mcloud、yangshipin 都是）。
+于是 `mcloud/`（1.2 MB，4 个插件）被判成「目录（没有主文件）」、标成可清理，
+「清理残留」按钮上写着「5 项 · 1.3 MB」—— 按下去就是删掉一个正在跑的插件。
+
+抓到它的方式很土：**真机截图**。接口测试当时是绿的，因为我在测试里也是手写的种子目录
+（`mgmusic/mgmusic.js`），跟我的错误假设一致。改成 `crate::pluginfs::dir_entry(dir, name)`，
+并在 `storage_tests.rs` 里补了 `packed/packed/index.js` 这个形状的回归用例。
+
+> 教训：**判定「这是什么」的代码不能有第二份实现**。面板已经有 `pluginfs` 在定义
+> 「什么叫一个插件」，再写一遍必然漂。
+
+### 坑二：ui-check 里 `await` 一个「等确认框」的函数 = 自锁
+
+```js
+await js("(async () => { await deleteOne(...); return 'ok'; })()");  // 卡死
+```
+
+`deleteOne` 内部 `await panelConfirm()`，而确认框要靠**下一次** `js()` 才点得到；
+CDP 的 `Runtime.evaluate` 带 `awaitPromise: true`，于是这次求值永远不返回，
+报的是一句看不出因果的「CDP 超时：Runtime.evaluate」。
+改成 `void deleteOne(...)`（fire-and-forget），下一次 `js()` 点确认。
+
+### 坑三：手机上目录路径把卡片撑出横向溢出
+
+`/Users/xxx/plugins（插件本体、清单、界面）` 是一长串没有空格的字符，
+`overflow-wrap: break-word` 只管「整词放不下」，中文混排时仍会溢出 ——
+`mobile-check` 在 390 视口量到 `sw 332 > cw 294`，报 `files` 页不合格。
+改用 `overflow-wrap: anywhere`（真的能在任意位置断）。
+
+### 不进 5 秒轮询
+
+递归求目录大小是阻塞 IO（插件目录可能几百 MB、几千个文件），塞进 `/api/state` 那条
+5 秒轮询等于让服务端一直爬盘。所以：进页面读一次 + 手动「刷新」按钮；
+服务端整段 `spawn_blocking`。
+
+### 门禁
+
+`storage_tests` 8 条（形状判定 / 名字越界 / 删→恢复往返 / 拒绝覆盖 / 彻底删 / 回收站两世代解析）、
+`web_tests` 6 条接口级（列表 / 删→恢复 / 拒绝覆盖现役 / 彻底删 / 路径越界被拒 / 缺 CSRF 头被拒）、
+`ui-check` 新增 9 条（从 255 → **264**）、`mobile-check` 加了 `files` 页（8 → **9** 页）。
+
 ## 0.8.1（2026-11-22）
 
 ### 插件拿不到数据目录（第 265 轮，用户报 cmcc）

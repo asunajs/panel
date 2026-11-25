@@ -89,7 +89,7 @@ iOS Safari 对 `font-size < 16px` 的 `input/select/textarea` 在**聚焦时自�
 ## 六、验证
 
 ```bash
-node scripts/mobile-check.mjs          # 8 个页面（7 面板页 + 插件页）逐页出表
+node scripts/mobile-check.mjs          # 9 个页面（8 面板页 + 插件页）逐页出表
 node scripts/mobile-check.mjs --shots  # 顺便落图到 ../.shots/mobile/
 node scripts/ui-check.mjs              # 252 条，其中 5 条是移动端（字号/触屏/日志/插件页溢出/表格卡片）
 ```

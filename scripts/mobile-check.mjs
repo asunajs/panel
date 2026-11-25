@@ -220,7 +220,8 @@ async function main() {
   await sleep(400);
 
   const rows = [];
-  const views = ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'settings'];
+  // 文件管理（第 270 轮）：这页有三张表，手机上最容易横向溢出 —— 也要量。
+  const views = ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'files', 'settings'];
   for (const v of views) {
     await js("location.hash = '#" + v + "'");
     await sleep(900);

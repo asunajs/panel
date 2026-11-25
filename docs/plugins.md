@@ -788,3 +788,26 @@ panel plugin check plugins/demo.js      # 只编译不执行
 插件页右上角的版本药丸：`<p-plugin-ver></p-plugin-ver>`。
 版本从**面板读的那份清单**取（`/api/plugins/files`），插件自己不需要再存一份；
 拿不到版本时整格 `hidden`，不留空药丸。也可以在 JS 里用 `await PanelUI.pluginVersion()`。
+
+## 更新后旧的东西去哪了（第 269 轮）
+
+| 东西 | 位置 | 谁清 |
+|---|---|---|
+| 插件本体（旧版本） | 覆盖写，不留旧的 | 安装本身 |
+| **形状切换的残留**：`<X>.js` / `<X>.panel.json` / `<X>.webui/` | `plugins/` 顶层 | 装成 `<X>/` 时自动清同名散件（只清这次装的插件） |
+| 一包多插件搬家：顶层 `mcloud-daily/` | `plugins/` 顶层 | 属地里已有同一份时清顶层那个 |
+| 部署备份 `<插件>-<时间戳>/` | `<实例>/backups/` | `scripts/prune-leftovers.sh`（部署时自动跑，留 3 份） |
+| 旧二进制 `panel.bak-*` | `<实例>/` | 同上 |
+| 删掉的插件 | `<实例>/data/trash/` | 面板自己的回收站，手动清 |
+
+```bash
+bash scripts/prune-leftovers.sh              # 预览（默认不删）
+bash scripts/prune-leftovers.sh --apply      # 动手，留最近 3 份
+bash scripts/prune-leftovers.sh --apply --keep 5
+```
+
+**不动**：`data/`（账号、库、配置）、`data/trash/`（用户删掉的插件在里面，可捞）、
+`plugins/README.md`。
+
+为什么备份也要清：那是「装坏了能立刻换回来」的保险，不是版本库 —— 实测一天能堆到
+`backups/` 153 MB + `panel.bak-*` 105 MB，留 3 份足够覆盖「刚装坏」这个场景。

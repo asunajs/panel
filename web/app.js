@@ -6596,6 +6596,234 @@ function guardPluginFrame() {
     }
   });
 }
+// ---------------------------------------------------------------- 文件管理（第 270 轮）
+
+/**
+ * 只管三个目录：插件 / 脚本 / 回收站。
+ *
+ * 为什么不是通用文件浏览器：面板自己的 data/（配置、库、账号、auth.json）就在隔壁，
+ * 给一个能点删除的列表等于把「误删凭据」变成一个手滑的距离。这里只碰这三处，
+ * 而且插件/脚本的删除一律先进回收站。
+ */
+const FILES = { data: null, busy: false };
+
+const FILES_AREAS = [
+  { key: 'plugins', title: '插件目录', what: '插件本体、清单、界面' },
+  { key: 'scripts', title: '脚本目录', what: '脚本文件（单文件跑的）' },
+  { key: 'trash', title: '回收站', what: '删掉的插件与脚本，能恢复' },
+];
+
+async function loadFiles() {
+  const box = $('files-areas');
+  if (!box) return;
+  if (!FILES.data) {
+    clear(box);
+    box.append(el('p', 'settings-note', '正在读目录…'));
+  }
+  try {
+    const d = await api('/api/files');
+    FILES.data = d.files || null;
+    renderFiles();
+  } catch (e) {
+    clear(box);
+    box.append(el('p', 'settings-note', '读不到：' + (e.message || e)));
+  }
+}
+
+function renderFiles() {
+  const box = $('files-areas');
+  if (!box) return;
+  const data = FILES.data;
+  clear(box);
+  if (!data) return;
+  // 顶部合计：三个目录加起来多少
+  const all = ['plugins', 'scripts', 'trash'].reduce((n, k) => n + ((data[k] || {}).bytes || 0), 0);
+  const total = $('files-total');
+  if (total) total.textContent = '共 ' + humanBytes(all);
+
+  for (const area of FILES_AREAS) {
+    const sec = data[area.key] || { items: [], bytes: 0, dir: '' };
+    const items = sec.items || [];
+    const panel = el('section', 'panel files-area');
+    const head = el('header', 'panel-head');
+    head.append(el('h2', '', area.title));
+    head.append(el('span', 'chip', items.length + ' 项 · ' + humanBytes(sec.bytes || 0)));
+    const acts = el('div', 'head-actions');
+
+    // 「清理可清理的 N 项」：只对**面板判定为残留**的那些动手，正常插件一个都不碰。
+    const stale = items.filter((x) => x.removable && area.key !== 'trash');
+    if (area.key === 'trash') {
+      if (items.length) {
+        const b = el('button', 'btn btn-sm btn-danger', '清空回收站（' + items.length + '）');
+        b.type = 'button';
+        b.addEventListener('click', () => purgeAllTrash(items));
+        acts.append(b);
+      }
+    } else if (stale.length) {
+      const b = el('button', 'btn btn-sm', '清理残留（' + stale.length + ' 项 · ' + humanBytes(stale.reduce((n, x) => n + x.bytes, 0)) + '）');
+      b.type = 'button';
+      b.title = '只清面板判定为残留的：旧形状拷贝、备份、孤儿清单、缓存目录';
+      b.addEventListener('click', () => cleanupStale(area.key, stale));
+      acts.append(b);
+    }
+    if (acts.childElementCount) head.append(acts);
+    panel.append(head);
+
+    const body = el('div', 'panel-body');
+    // 目录路径单独一个 class：手机上它是「一长串没有空格的路径」，不折行就横向溢出
+    // （mobile-check 在 390 视口上量到 332 > 294，报的就是这一行）。
+    body.append(el('p', 'settings-note files-dir', sec.dir + '（' + area.what + '）'));
+    if (!items.length) {
+      body.append(el('p', 'settings-note', area.key === 'trash' ? '回收站是空的。' : '这个目录是空的。'));
+    } else {
+      const wrap = el('div', 'table-wrap');
+      const t = el('table', 'table');
+      const thead = el('thead');
+      const hr = el('tr');
+      for (const h of ['名字', '形状', '大小', '修改时间', '操作']) hr.append(el('th', '', h));
+      thead.append(hr);
+      t.append(thead);
+      const tb = el('tbody');
+      for (const it of items) tb.append(fileRow(area.key, it));
+      t.append(tb);
+      wrap.append(t);
+      body.append(wrap);
+    }
+    panel.append(body);
+    box.append(panel);
+  }
+}
+
+function fileRow(areaKey, it) {
+  const tr = el('tr');
+  tr.dataset.name = it.name;
+  // 名字：残留的加个小字理由，正常的不加（否则一屏全是字）
+  const nameTd = el('td', 'mono');
+  nameTd.append(el('span', '', it.name));
+  if (it.note) nameTd.append(el('div', 'settings-note', it.note));
+  tr.append(nameTd);
+  const kindTd = el('td');
+  kindTd.append(el('span', 'chip' + (it.removable ? ' chip-warn' : ''), it.kind_label || it.kind));
+  tr.append(kindTd);
+  tr.append(el('td', 'num', humanBytes(it.bytes)));
+  const when = el('td', '', it.modified_ms ? relTime(it.modified_ms) : '—');
+  if (it.modified_ms) when.title = fmtDateTime(it.modified_ms);
+  tr.append(when);
+
+  const op = el('td', 'right');
+  if (areaKey === 'trash') {
+    if (it.restore_area) {
+      const rb = el('button', 'btn btn-sm', '恢复');
+      rb.type = 'button';
+      rb.title = '恢复到 ' + it.restore_area + ' 目录，原名';
+      rb.addEventListener('click', () => restoreTrash(it));
+      op.append(rb);
+    }
+    const pb = el('button', 'btn btn-sm btn-danger', '彻底删');
+    pb.type = 'button';
+    pb.disabled = !it.removable;
+    pb.addEventListener('click', () => deleteOne('trash', it));
+    op.append(pb);
+  } else {
+    const db = el('button', 'btn btn-sm', '删除');
+    db.type = 'button';
+    db.title = '移进回收站（能恢复）';
+    db.addEventListener('click', () => deleteOne(areaKey, it));
+    op.append(db);
+  }
+  tr.append(op);
+  return tr;
+}
+
+async function deleteOne(area, it) {
+  const hard = area === 'trash';
+  const ok = await panelConfirm({
+    title: hard ? '彻底删除' : '移进回收站',
+    text: hard
+      ? it.name + '（' + humanBytes(it.bytes) + '）会被永久删除，恢复不了。'
+      : it.name + ' → 回收站。插件/脚本从目录里消失，需要时能从回收站恢复。',
+    okLabel: hard ? '彻底删' : '移进回收站',
+    danger: hard,
+  });
+  if (!ok) return;
+  await filesPost('/api/files/delete', { area, name: it.name });
+}
+
+/** 批量清残留：逐个删，任何一失败就停下并说明（别把「清了一半」显示成全清）。 */
+async function cleanupStale(area, stale) {
+  const bytes = stale.reduce((n, x) => n + x.bytes, 0);
+  const ok = await panelConfirm({
+    title: '清理残留',
+    text:
+      '要清 ' + stale.length + ' 项（' + humanBytes(bytes) + '）：' +
+      stale.map((x) => x.name).join('、') +
+      '。它们都是面板判定为「用不上」的旧形状拷贝 / 备份 / 孤儿文件，会进回收站，能恢复。',
+    okLabel: '清理',
+    danger: true,
+  });
+  if (!ok) return;
+  let done = 0;
+  for (const it of stale) {
+    try {
+      await api('/api/files/delete', { method: 'POST', body: { area, name: it.name } });
+      done++;
+    } catch (e) {
+      notify('清到 ' + it.name + ' 停了：' + (e.message || e), 'err');
+      break;
+    }
+  }
+  if (done) notify('清掉 ' + done + ' 项（已在回收站）', 'ok');
+  await loadFiles();
+}
+
+async function purgeAllTrash(items) {
+  const ok = await panelConfirm({
+    title: '清空回收站',
+    text: '回收站里 ' + items.length + ' 项（' + humanBytes(items.reduce((n, x) => n + x.bytes, 0)) + '）会全部永久删除，恢复不了。',
+    okLabel: '清空',
+    danger: true,
+  });
+  if (!ok) return;
+  let done = 0;
+  for (const it of items) {
+    try {
+      await api('/api/files/delete', { method: 'POST', body: { area: 'trash', name: it.name } });
+      done++;
+    } catch (e) {
+      notify('清到 ' + it.name + ' 停了：' + (e.message || e), 'err');
+      break;
+    }
+  }
+  if (done) notify('永久删除 ' + done + ' 项', 'ok');
+  await loadFiles();
+}
+
+async function restoreTrash(it) {
+  try {
+    const d = await api('/api/files/restore', { method: 'POST', body: { name: it.name } });
+    notify('已恢复到 ' + (d.area || '?') + ' / ' + (d.restored || it.name), 'ok');
+    await loadFiles();
+    await refresh();
+  } catch (e) {
+    notify(e.message || '恢复失败', 'err');
+  }
+}
+
+async function filesPost(path, body) {
+  if (FILES.busy) return;
+  FILES.busy = true;
+  try {
+    await api(path, { method: 'POST', body });
+    await loadFiles();
+    await refresh();
+  } catch (e) {
+    notify(e.message || '操作失败', 'err');
+    await loadFiles();
+  } finally {
+    FILES.busy = false;
+  }
+}
+
 // ---------------------------------------------------------------- 视图
 
 const VIEWS = {
@@ -6605,6 +6833,7 @@ const VIEWS = {
   tasks: ['任务', '定时计划、预算与熔断状态'],
   runs: ['运行记录', '每次派发的耗时与结果，点开看这一次的日志'],
   logs: ['日志', '实时日志流（SSE），最多保留 500 条'],
+  files: ['文件管理', '插件目录 / 脚本目录 / 回收站：看清占了什么，手动清理'],
   settings: ['设置', '面板信息、配置与安全'],
 };
 
@@ -6667,6 +6896,9 @@ function setView(name) {
   if (name === 'runs') { loadRunPlugins(); loadRuns(); }
   if (name === 'dashboard') loadDashboard();
   if (name === 'settings') { renderSettings(); loadConfig(); }
+  // 文件管理只在进页面时读一次：它要递归求目录大小（插件目录几百 MB），
+  // 塞进 5 秒轮询等于让服务端一直爬盘（第 270 轮）。
+  if (name === 'files') loadFiles();
 }
 
 // ---------------------------------------------------------------- 数据
@@ -7120,6 +7352,20 @@ function bind() {
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && $('sidebar').classList.contains('open')) setSidebar(false);
   });
+
+  // 文件管理页的刷新（第 270 轮）：这一页不进 5 秒轮询（递归求大小很贵），
+  // 所以给一个显式的刷新按钮 —— 在终端里删了东西之后要能立刻看到。
+  const frefresh = $('files-refresh');
+  if (frefresh) {
+    frefresh.addEventListener('click', async () => {
+      frefresh.disabled = true;
+      try {
+        await loadFiles();
+      } finally {
+        frefresh.disabled = false;
+      }
+    });
+  }
 
   // 任务页「显示已删除」（第 178 轮）：墓碑行默认藏着，点了才列出来
   $('tasks-show-deleted').addEventListener('click', () => {

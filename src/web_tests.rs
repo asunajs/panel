@@ -5039,3 +5039,211 @@ fn the_same_http_error_from_the_same_source_is_logged_once() {
         "不同来源各记一条"
     );
 }
+
+// ---------------------------------------------------------------- 文件管理（第 270 轮）
+
+/// 三个目录都用真临时目录：这一页的全部逻辑就是「读目录 + 搬文件」，
+/// 用相对路径的话测不到搬迁（会跑到 cwd 下）。
+fn files_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let i = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("panel-files-api-{tag}-{}-{i}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    let scripts = root.join("scripts");
+    let data = root.join("data");
+    for d in [&plugins, &scripts, &data] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    (plugins, scripts, data)
+}
+
+async fn files_app(
+    plugins: std::path::PathBuf,
+    scripts_dir: std::path::PathBuf,
+    data: std::path::PathBuf,
+) -> Router {
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(
+        db.clone(),
+        log.clone(),
+        store.clone(),
+        data.clone(),
+    );
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        scripts_dir.clone(),
+        data.join("trash"),
+        data.clone(),
+    );
+    router(AppState {
+        db,
+        log,
+        sched,
+        plugins_dir: plugins,
+        scripts_dir,
+        scripts,
+        data_dir: data,
+        config: store,
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+    })
+}
+
+fn post_json(uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("x-panel", "1")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn files_lists_the_three_areas_and_flags_stale_copies() {
+    let (plugins, scripts, data) = files_dirs("list");
+    // 收拢目录 + 顶层旧拷贝（就是第 269 轮那个现场）
+    std::fs::create_dir_all(plugins.join("cmcc")).unwrap();
+    std::fs::write(plugins.join("cmcc/cmcc.js"), "export default 1").unwrap();
+    std::fs::write(plugins.join("cmcc.js"), "旧的").unwrap();
+    std::fs::write(plugins.join("cmcc.panel.json"), "{}").unwrap();
+    std::fs::write(scripts.join("gate.sh"), "#!/bin/sh").unwrap();
+    std::fs::create_dir_all(data.join("trash")).unwrap();
+    std::fs::write(data.join("trash/1795600000000-plugins-cmcc.js"), "x").unwrap();
+
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+    let (status, body) = send(
+        &app,
+        Request::builder().uri("/api/files").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let f = &body["files"];
+    assert!(f["plugins"]["dir"].as_str().unwrap().ends_with("plugins"));
+    assert_eq!(f["scripts"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(f["trash"]["items"].as_array().unwrap().len(), 1);
+    // 旧拷贝要带 removable，收拢目录本身不带
+    let items = f["plugins"]["items"].as_array().unwrap();
+    let stale = items.iter().find(|x| x["name"] == "cmcc.js").unwrap();
+    assert_eq!(stale["kind"], "stale-js");
+    assert_eq!(stale["removable"], true);
+    let real = items.iter().find(|x| x["name"] == "cmcc").unwrap();
+    assert_eq!(real["kind"], "collapsed");
+    assert_eq!(real["removable"], false);
+    // 回收站那项能恢复
+    let t = &f["trash"]["items"][0];
+    assert_eq!(t["restore_name"], "cmcc.js");
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}
+
+#[tokio::test]
+async fn delete_goes_to_trash_then_restore_puts_it_back() {
+    let (plugins, scripts, data) = files_dirs("roundtrip");
+    std::fs::write(plugins.join("quark.js"), "export default 3").unwrap();
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+
+    let (status, body) = send(
+        &app,
+        post_json("/api/files/delete", json!({"area":"plugins","name":"quark.js"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!plugins.join("quark.js").exists(), "原位置该没了");
+    let trash: Vec<_> = std::fs::read_dir(data.join("trash")).unwrap().flatten().collect();
+    assert_eq!(trash.len(), 1, "回收站里应该正好一份");
+    let entry = trash[0].file_name().to_str().unwrap().to_string();
+
+    let (status, body) = send(&app, post_json("/api/files/restore", json!({"name":entry}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["restored"], "quark.js");
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("quark.js")).unwrap(),
+        "export default 3"
+    );
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}
+
+#[tokio::test]
+async fn restore_refuses_to_clobber_a_live_plugin() {
+    let (plugins, scripts, data) = files_dirs("clobber");
+    std::fs::create_dir_all(plugins.join("cmcc")).unwrap();
+    std::fs::write(plugins.join("cmcc/cmcc.js"), "新的").unwrap();
+    std::fs::create_dir_all(data.join("trash")).unwrap();
+    std::fs::write(data.join("trash/1795600000000-plugins-cmcc"), "旧的").unwrap();
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+
+    let (status, body) = send(
+        &app,
+        post_json("/api/files/restore", json!({"name":"1795600000000-plugins-cmcc"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "现役那份不能被覆盖：{body}");
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("cmcc/cmcc.js")).unwrap(),
+        "新的"
+    );
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}
+
+#[tokio::test]
+async fn delete_in_trash_purges_for_real() {
+    let (plugins, scripts, data) = files_dirs("purge");
+    std::fs::create_dir_all(data.join("trash")).unwrap();
+    std::fs::write(data.join("trash/1795600000000-scripts-gate.sh"), "x").unwrap();
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/files/delete",
+            json!({"area":"trash","name":"1795600000000-scripts-gate.sh"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["purged"], true);
+    assert!(!data.join("trash/1795600000000-scripts-gate.sh").exists());
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}
+
+#[tokio::test]
+async fn path_escape_is_refused_by_the_write_apis() {
+    let (plugins, scripts, data) = files_dirs("escape");
+    std::fs::write(data.join("auth.json"), "别删我").unwrap();
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+
+    for name in ["../auth.json", "..", "a/b", ".hidden"] {
+        let (status, _) = send(
+            &app,
+            post_json("/api/files/delete", json!({"area":"plugins","name":name})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name} 必须被拒");
+    }
+    assert!(data.join("auth.json").exists(), "凭据文件不能被删");
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}
+
+#[tokio::test]
+async fn write_apis_require_the_csrf_header() {
+    let (plugins, scripts, data) = files_dirs("csrf");
+    std::fs::write(plugins.join("quark.js"), "x").unwrap();
+    let app = files_app(plugins.clone(), scripts.clone(), data.clone()).await;
+    // 不带 x-panel: 1
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/files/delete")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"area":"plugins","name":"quark.js"}"#))
+        .unwrap();
+    let (status, _) = send(&app, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(plugins.join("quark.js").exists(), "被拒时不能动文件");
+    let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+}

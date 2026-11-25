@@ -37,6 +37,7 @@
         <a class="nav-item" href="#tasks" data-view="tasks"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg><span>任务</span></a>
         <a class="nav-item" href="#runs" data-view="runs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>运行记录</span></a>
         <a class="nav-item" href="#logs" data-view="logs"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h10"/></svg><span>日志</span></a>
+        <a class="nav-item" href="#files" data-view="files"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 11h18"/></svg><span>文件管理</span></a>
         <a class="nav-item" href="#settings" data-view="settings"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span></a>
         </nav>
         <!-- 插件注册的侧栏入口（host.sidebar，第 139 轮）：没有插件注册时整块隐藏 -->
@@ -287,6 +288,26 @@
                  config.actions / views 时用它。两个容器互斥显示，见 app.js 的 setView。 -->
             <div class="declared-page hidden" id="plugin-declared"></div>
           </section>
+          <section class="view hidden" id="view-files" data-view="files">
+            <section class="panel">
+              <header class="panel-head">
+                <h2>文件管理</h2>
+                <span class="chip" id="files-total">—</span>
+                <div class="head-actions">
+                  <button class="btn" id="files-refresh" type="button" title="重新读一遍三个目录">刷新</button>
+                </div>
+              </header>
+              <div class="panel-body">
+                <p class="settings-note" id="files-intro">
+                  只管三个地方：<strong>插件目录</strong>、<strong>脚本目录</strong>、<strong>回收站</strong>。
+                  删插件和脚本都是<strong>移进回收站</strong>（能恢复），只有回收站里的才是彻底删。
+                  面板自己的数据目录（配置、库、账号）不在这里出现。
+                </p>
+                <div id="files-areas"></div>
+              </div>
+            </section>
+          </section>
+
           <section class="view hidden" id="view-settings" data-view="settings">
             <div class="tabs" role="tablist" aria-label="设置分类">
               <button class="tab" type="button" role="tab" data-tab="general" aria-selected="true">常规</button>
