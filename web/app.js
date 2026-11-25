@@ -622,6 +622,14 @@ function taskPill(t) {
   // 顺序即优先级（第 225 轮，用户截图：一行里同时挂着「已启用」和「已删除」）。
   // 「已启用」的语义是「到点会跑」—— 删除的、待采纳的都不会跑，不能这么说。
   if (t.deleted) return pill('pill', '已删除');
+  // 插件被停用：任务行还挂在表里（插件没加载，注册不会发生，行是历史遗留），
+  // 但它**永远不会跑**。说「已启用」就是在骗人 —— 用户看到 next_at 停在过去，
+  // 会以为调度坏了（第 269 轮，quark：任务行「已启用 + 下次运行 11-20」，其实插件 11-15 就停用了）。
+  if ((state.disabled || []).includes(t.plugin)) {
+    const p2 = pill('pill-warn', '插件已停用');
+    p2.title = '插件 ' + t.plugin + ' 已停用（不加载），这条任务不会跑。插件页点「启用」并重载后恢复。';
+    return p2;
+  }
   if (t.pending_adopt) return pill('pill', '待采纳');
   if (t.tripped) return pill('pill-err', '熔断 ×' + t.trips);
   if (!t.enabled) return pill('', '已暂停');
@@ -1304,7 +1312,8 @@ function renderTaskMorePane(t) {
   if (t.suggest_budget_ms && t.suggest_budget_ms !== t.budget_ms) {
     kv('插件建议预算', humanMs(t.suggest_budget_ms));
   }
-  kv('下次运行', t.manual ? '—' : (t.enabled ? fmtDateTime(t.next_at) : '已暂停'));
+  const off = !t.enabled || (state.disabled || []).includes(t.plugin);
+  kv('下次运行', t.manual ? '手动' : (off ? '—' : fmtDateTime(t.next_at)));
   kv('跑过', runTotal(t) + ' 次（本次启动以来 ' + (t.runs || 0) + ' 次）');
   if (t.in_flight && t.run_started) {
     kv('本次已跑', elapsedLabel(Date.now() - t.run_started));
@@ -1763,7 +1772,8 @@ function renderTasks() {
   const q = state.q.tasks;
   // 同上：数据没变的那几轮不该重建任务表（每轮 ~8 行 × 十几个节点）。
   // pending 也要进变更键：插件忙的时候任务行本身没变，变的只是「排队」那一行（第 227 轮）。
-  if (sameAsLast('tasks', [state.tasks, state.pending, state.showDeleted, q, state.fp.tasks, state.sort.tasks])) return;
+  // state.disabled 也在键里：插件停用/启用会改任务行的状态药丸与「下次运行」（第 269 轮）
+  if (sameAsLast('tasks', [state.tasks, state.pending, state.showDeleted, q, state.fp.tasks, state.sort.tasks, state.disabled])) return;
   // 弹窗开着的任务没了（插件重载后不再注册 / 换名）：弹窗跟着关 ——
   // 留着它就是在对一条不存在的任务说「保存计划」。
   if (taskActionTarget && !state.tasks.some((x) => x.plugin === taskActionTarget.plugin && x.name === taskActionTarget.name)) {
@@ -1829,8 +1839,10 @@ function renderTasks() {
     }
     tr.append(cronCell);
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
-    // 暂停的任务不显示「下次运行」：'已暂停' 旁边挂一个未来时间会让人以为它还要跑。
-    tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (!t.enabled ? '—' : fmtDateTime(t.next_at))));
+    // 暂停/插件停用的任务不显示「下次运行」：一个时间挂在旁边会让人以为它还要跑
+    //（停用插件的那行过去 next_at，读起来就是「那天该跑而没跑」—— 第 269 轮）。
+    const dead = !t.enabled || (state.disabled || []).includes(t.plugin);
+    tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (dead ? '—' : fmtDateTime(t.next_at))));
     // 「跑过」= 历史累计（runs 表），不是 TaskView.runs 那个本进程计数（重启归零）。
     // 本次启动跑过几次放小字里 —— 两个数都有人问，但主数字该是历史（第 257 轮）。
     // 只显示历史数字：「本次启动以来」放 title 和详情页（多一行小字会让每行 +8px，

@@ -858,6 +858,21 @@ async function main() {
   check('任务行只有「执行 + ⋯」两个动作', rowBtns.length === 2 && rowBtns[0] === '执行' && rowBtns[1] === '⋯',
     JSON.stringify(rowBtns));
 
+  // 第 269 轮：插件被**停用**后，它的任务行还在表里 —— 但状态必须说「插件已停用」，
+  // 下次运行显示 —。以前照旧显示「已启用 + 过去的 next_at」，读起来就是「那天该跑没跑」。
+  const offPlugin = JSON.parse(await js(
+    "(async()=>{await api('/api/plugins/seed/disable',{method:'POST',write:true});" +
+    "state.disabled=['seed'];renderTasks();" +
+    "const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('seed'));" +
+    "return JSON.stringify({pill:(tr.querySelector('.pill')||{}).textContent||'',next:tr.children[4].textContent.trim()});})()"
+  ));
+  check('停用插件的任务行显示「插件已停用」+ 下次运行 —',
+    offPlugin.pill === '插件已停用' && offPlugin.next === '—', JSON.stringify(offPlugin));
+  // 收尾恢复
+  await js("(async()=>{await api('/api/plugins/seed/enable',{method:'POST',write:true});" +
+    "state.disabled=(state.disabled||[]).filter(n=>n!=='seed');renderTasks();return 1;})()");
+  await sleep(400);
+
   // 第 257 轮：「预算」列头要说清是**单次运行**的上限（不是额度），并带 title 说明后果
   const budgetTh = JSON.parse(await js(
     "(()=>{const th=document.querySelector('#view-tasks th[data-sort=budget_ms]');" +
