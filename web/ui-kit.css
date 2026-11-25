@@ -1,4 +1,4 @@
-/* UI 套件样板页（第 175 轮）。只排自己的版，不定义任何控件样式 —— 那些在 /app.css。 */
+/* UI 套件样板页。只排自己的版，不定义任何控件样式 —— 那些在 /app.css。 */
 body.kit { padding: 24px; }
 .kit-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .kit-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }

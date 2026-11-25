@@ -16,7 +16,7 @@ const state = {
   version: '',
   /** 平台名（windows / macos / linux），来自 /api/state。界面据此换文案与默认值。 */
   os: '',
-  /** 界面资源来源（内置 / 界面包）：来自 /api/state 的 `ui`（第 265 轮）。 */
+  /** 界面资源来源（内置 / 界面包）：来自 /api/state 的 `ui`。 */
   ui: { source: 'builtin', version: '' },
   /** 装过的界面包版本（`GET /api/ui` 的 installed）。 */
   uiInstalled: [],
@@ -32,7 +32,7 @@ const state = {
   /** 通知：铃铛上的未读数 + 列表。 */
   notify: { unread: 0, items: [] },
   tasks: [],
-  /** 排队等执行位的运行（第 227 轮）：任务表末尾的「排队 第 N 位」。 */
+  /** 排队等执行位的运行：任务表末尾的「排队 第 N 位」。 */
   pending: [],
   stats: null,
   config: null,
@@ -63,7 +63,7 @@ const state = {
   /** 下拉筛选：按插件过滤任务 / 运行记录。 */
   fp: { tasks: '', runs: '' },
   onlyFailed: false,
-  // 任务页是否显示「已删除」（墓碑）的行（第 178 轮）
+  // 任务页是否显示「已删除」（墓碑）的行
   showDeleted: false,
   /** 抽屉当前打开的插件（源码页签保存要用）。 */
   drawerPlugin: null,
@@ -90,7 +90,7 @@ function fmtTime(ms) {
 }
 
 /** 日志 / 运行记录行的时间：带日期 —— 只显示时分秒的话，隔天翻日志根本
- *  不知道是哪天的（2026-11-15 用户截图报障）。月-日 + 时分秒，等宽数字对齐。 */
+ *  不知道是哪天的。月-日 + 时分秒，等宽数字对齐。 */
 function fmtLogTime(ms) {
   if (!ms) return '—';
   const d = new Date(ms);
@@ -158,7 +158,7 @@ function clear(node) {
  *
  *  为什么不用 `node.textContent = x`：它每次都**丢掉旧的 Text 节点、造一个新的**。
  *  于是「数字每 5s 刷一遍」的卡片、每秒刷一次的「N 秒前」，就成了 DevTools
- *  「DOM 节点」里一条只涨不跌的锯齿 —— 第 187 轮实测仪表盘 **8.8 节点/秒**，
+ *  「DOM 节点」里一条只涨不跌的锯齿 —— 实测仪表盘 **8.8 节点/秒**，
  *  而挂载元素（`getElementsByTagName('*').length`）**零变化**：涨的全是这种
  *  「一换一扔」的文本节点，等 GC 才回落。只改 `nodeValue` 不换节点，
  *  值变了也照样不产生垃圾。 */
@@ -225,7 +225,7 @@ function markText(text, q) {
   return frag;
 }
 
-/** 右上角**常驻**提示（第 134 轮）。
+/** 右上角**常驻**提示。
  *
  * 用户的抱怨很具体：「瞬间消失字都没看完，压根不知道发生了什么」。
  * toast 是 2.6 秒自动消失，适合「已复制」「已刷新」这种一眼就懂的；
@@ -266,7 +266,7 @@ function notice(msg, kind) {
   while (box.children.length > 4) box.firstElementChild.remove();
   return el;
 }
-/** 什么时候「顶部居中闪一下」、什么时候「右上角常驻」——由**内容**决定，不靠调用点记得（第 135 轮）。
+/** 什么时候「顶部居中闪一下」、什么时候「右上角常驻」——由**内容**决定，不靠调用点记得。
  *
  * 用户的判据很干脆：
  *   短结果（「mcloud 当前没有在跑的任务」）→ 顶部居中闪一下就行，用户只要知道结果；
@@ -277,7 +277,7 @@ const NOTICE_MIN_LEN = 20;
 function notify(msg, kind) {
   const text = msg == null ? '' : String(msg);
   const k = kind || 'info';
-  // 只看**长度**，不看是不是错误（第 136 轮）：
+  // 只看**长度**，不看是不是错误：
   // 「mcloud 当前没有在跑的任务」这种一句话的错误结果，用户一眼就懂，不需要一直摆在右上角让他去关；
   // 真正需要细看的错误（带路径、带字节数、带 os error）本来就很长，自然会去右边。
   const long = text.length > NOTICE_MIN_LEN || text.includes('\n');
@@ -328,7 +328,7 @@ function applyTheme(name) {
   document.documentElement.setAttribute('data-theme', name);
   $('theme-toggle').setAttribute('aria-label', name === 'dark' ? '切换到浅色' : '切换到深色');
   localStorage.setItem(THEME_KEY, name);
-  // 内嵌的插件页是另一个 document，收不到 data-theme 的变化：直接告诉它（第 139 轮）。
+  // 内嵌的插件页是另一个 document，收不到 data-theme 的变化：直接告诉它。
   pushThemeToFrame();
 }
 
@@ -361,7 +361,7 @@ async function api(path, opt = {}) {
   if (resp.status === 401) throw new Unauthorized('需要令牌');
   if (!resp.ok) {
     const text = (await resp.text().catch(() => '')).trim();
-    // 后端的错误体是 JSON（第 166 轮：code/error/ref）。直接显示整串 JSON
+    // 后端的错误体是 JSON（code/error/ref）。直接显示整串 JSON
     // 用户看到的是 {"code":"not_found",...} —— 取 error，并把 ref 带上。
     let msg = text;
     let code = '';
@@ -382,7 +382,7 @@ async function api(path, opt = {}) {
   return ct.includes('json') ? resp.json() : resp.text();
 }
 
-/** 首次运行：还没有口令凭据时，让用户当场设一个（第 87 轮）。
+/** 首次运行：还没有口令凭据时，让用户当场设一个。
  *
  * 为什么要有：面板没凭据时是「谁打开都能用」，但界面上只有一行日志说这事 —— 用户看不见。
  * 设完**立即生效并当场登录**（服务端已经把 auth 换掉并发好了会话票），不用重启。
@@ -476,7 +476,7 @@ function setCard(box, label, value, note, small) {
   const v = c.querySelector('.card-value');
   if (v) {
     // 数字这一格可能是「文本 + <small> 单位」两段：只改文本节点的 nodeValue，
-    // 单位那截没变就复用 —— 每 5s 重造这两段就是那条 8.8 节点/秒的锯齿（第 187 轮）。
+    // 单位那截没变就复用 —— 每 5s 重造这两段就是那条 8.8 节点/秒的锯齿。
     const head = v.firstChild;
     const want = value == null ? '' : String(value);
     if (head && head.nodeType === 3) {
@@ -526,7 +526,7 @@ function renderCards() {
       ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
       : '各 runtime 合计';
   const heartbeat = s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1);
-  // 磁盘余量**不上仪表盘**（第 203 轮，用户说这张卡不需要）：读数留着走 /api/state，
+  // 磁盘余量**不上仪表盘**：读数留着走 /api/state，
   // 余量低于 500 MiB 时由服务端推 alert —— 静默故障的兜底不需要占一张卡的位置。
   // 只有「卡片数量」变了才重建；数字（运行时长/圈数/心跳/库大小）每轮都在变，
   // 走 setCard 原地改 —— 每 5s 重造 12 张卡是这页「DOM 节点只涨不跌」的主犯。
@@ -619,12 +619,12 @@ function runPill(status) {
 }
 
 function taskPill(t) {
-  // 顺序即优先级（第 225 轮，用户截图：一行里同时挂着「已启用」和「已删除」）。
+  // 顺序即优先级：一行里可能同时挂着「已启用」和「已删除」。
   // 「已启用」的语义是「到点会跑」—— 删除的、待采纳的都不会跑，不能这么说。
   if (t.deleted) return pill('pill', '已删除');
   // 插件被停用：任务行还挂在表里（插件没加载，注册不会发生，行是历史遗留），
   // 但它**永远不会跑**。说「已启用」就是在骗人 —— 用户看到 next_at 停在过去，
-  // 会以为调度坏了（第 269 轮，quark：任务行「已启用 + 下次运行 11-20」，其实插件 11-15 就停用了）。
+  // 会以为调度坏了（quark：任务行「已启用 + 下次运行 11-20」，其实插件 11-15 就停用了）。
   if ((state.disabled || []).includes(t.plugin)) {
     const p2 = pill('pill-warn', '插件已停用');
     p2.title = '插件 ' + t.plugin + ' 已停用（不加载），这条任务不会跑。插件页点「启用」并重载后恢复。';
@@ -671,7 +671,7 @@ function actionsCell(ops) {
 }
 
 /**
- * 任务行的动作（第 256 轮）：正常任务只有「执行」+「⋯」。
+ * 任务行的动作：正常任务只有「执行」+「⋯」。
  * 已删除只留「恢复」（运行记录、日志都还在，恢复后接着算）；待采纳只留「采纳 / 删除」
  * （它还没被调度，为它多造一条路径不值）。「加载插件」这类预热动作归 ⋯ 里的运行页。
  */
@@ -754,7 +754,7 @@ function renderFirstRun() {
   head.append(el('h2', '', '开始使用'));
   const body = el('div', 'panel-body');
 
-  // 「现在缺什么」摆最前面（第 88 轮）：新用户最想知道的是「下一步点哪里」，
+  // 「现在缺什么」摆最前面：新用户最想知道的是「下一步点哪里」，
   // 而不是先读三步说明。口令这一项尤其重要 —— 没设的时候别人打开就能用。
   const ready = el('div', 'ready-row');
   const chip = (ok, label, action) => {
@@ -810,9 +810,9 @@ function renderFirstRun() {
 }
 
 /**
- * 扫描插件目录（第 172 轮）。**只报告，不自动加载** —— 加载是人的决定。
+ * 扫描插件目录。**只报告，不自动加载** —— 加载是人的决定。
  * 监听文件在服务化机器上坑太多（句柄、编辑器的临时文件+rename、网络盘不发事件），
- * 所以这里是「你说一声我才看」。
+ * 所以这里是「点一下才扫」。
  */
 async function scanPlugins() {
   const box = $('scan-report');
@@ -836,7 +836,7 @@ async function scanPlugins() {
     p.append(el('strong', '', label + ' ' + arr.length + ' 个：'), names(arr));
     box.append(p);
   };
-  // 「新增」= 面板运行期间新出现的文件（第 224 轮）。以前还分出一档
+  // 「新增」= 面板运行期间新出现的文件。以前还分出一档
   // 「新增（已在运行，无需动作）」—— 那是「加载过但没记指纹」的 bug 造成的假象
   // （用到就装 / 闲时唤醒装回来的插件从来没人记指纹），用户看到「新增 3 个：
   // mcloud-daily…」会以为这三个是新装的，其实一直在跑。现在每次加载都记指纹，
@@ -912,11 +912,11 @@ function renderPlugins() {
   const off = (state.disabled || []).filter((n) => matches(n, q));
   if (!rows.length && !off.length) { emptyState(grid, '没有匹配的插件'); return; }
 
-  // 按「系列」分组（第 88 轮，从旧面板搬过来）：插件现实里成系列（mcloud-* / bilibili-*），
+  // 按「系列」分组（从旧面板搬过来）：插件现实里成系列（mcloud-* / bilibili-*），
   // 摆在一起才看得清「这一系列有哪几个、哪个挂了」。组名由服务端推导（名字里第一个
   // `-`/`_` 之前那段，见 plugin_group），前端只负责摆。
   //
-  // 第 109 轮（用户口径「两个及以上才是系列，一个的放一起」）：只有一个成员的组**不叫系列**
+  // 规则：两个及以上才算系列，单个的放一起；只有一个成员的组**不叫系列**
   // —— 每来一个独立插件就多一个「xx 系列（1）」的标题，标题比卡片还多。单个的并进末尾
   // 一组「独立插件」，那组没有组级批量按钮（成员不同源，一起动没有意义）。
   const loadedNames = new Set(state.plugins.map((p) => p.name));
@@ -975,7 +975,7 @@ function renderPlugins() {
     if (p.title && p.title !== p.name) head.append(el('div', 'plugin-file', p.name));
     // 停用（用户明确关掉的）：最高优先级的状态 —— 它盖住下面的按需加载/空闲，
     // 不然停用后的插件还挂着「按需加载」，用户不知道它为什么一直 0 任务不运行
-    //（2026-11-15 用户截图报障：停用了中国移动/夸克，卡片只显示「按需加载 + 0 个任务」）。
+    //（停用了中国移动/夸克后，卡片只显示「按需加载 + 0 个任务」）。
     const off = (state.disabled || []).includes(p.name);
     if (off) {
       const pl = pill('pill-warn', '已停用');
@@ -986,15 +986,15 @@ function renderPlugins() {
       if (!p.lazy) head.append(pill(p.busy ? 'pill-accent' : 'pill-ok', p.busy ? '运行中' : '空闲'));
       // 暂停 ≠ 停用：插件在、任务也在，只是定时不触发。不标出来会被当成「定时坏了」。
       if ((state.suspended || []).includes(p.name)) head.append(pill('pill-warn', '已暂停定时'));
-      // 按需加载（第 179 轮）：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
+      // 按需加载：启动时就没装，任务照常列着，到点前自动装 / 也可以手动装
       if (p.lazy) {
         const pl = pill('pill', '按需加载');
         pl.title = '启动时没有装进内存（任务都还没到点）。到点前 3 分钟、手动执行、'
           + '打开它的界面时会自动装回来 —— 不需要在这里点「加载」。';
         head.append(pl);
       } else if (p.unloaded) {
-        // 空闲卸载（第 174 轮）：不是没了，是 JS 运行时被收掉了。
-        // 第 188 轮起「用到就装」：执行任务 / 打开界面都会自动装回来。
+        // 空闲卸载：不是没了，是 JS 运行时被收掉了。
+        // 「用到就装」：执行任务 / 打开界面都会自动装回来。
         const pl = pill('pill', '空闲已卸载');
         pl.title = '闲着太久，JS 运行时被收掉了。下次执行任务或打开界面时会自动装回来。';
         head.append(pl);
@@ -1023,7 +1023,7 @@ function renderPlugins() {
     };
     // 卡片上只留两个：插件自己的界面（有才有）和「详情」。
     // 重载/停止/删除/配置/源码都放进详情抽屉 —— 卡片排了 6 个按钮之后，一屏全是按钮，
-    // 反而看不出这个插件是干嘛的（第 92 轮用户的意见）。危险操作也不该就摆在明面上。
+    // 反而看不出这个插件是干嘛的。危险操作也不该就摆在明面上。
     const hasWebui = state.files.some((f) => f.name === p.name && f.webui);
     if (hasWebui) acts.append(mk('界面', () => openWebui(p.name)));
     // 停用的插件：卡片上直接给「启用」（详情抽屉里也有一份，但两步太深）
@@ -1081,7 +1081,7 @@ function renderPlugins() {
     const n = s.inner.children.length;
     s.title.textContent = (key === SOLO ? '独立插件' : key + ' 系列') + '（' + n + '）';
   }
-  // 「独立插件」固定排最后：它是兜底的一组，不该插在真系列中间。
+  // 「独立插件」固定排最后：它是收不进任何系列的那一组，不该插在真系列中间。
   const solo = sections.get(SOLO);
   if (solo && solo.sec !== grid.lastElementChild) grid.append(solo.sec);
 }
@@ -1139,7 +1139,7 @@ function cronLabel(cron) {
 /** 正在改哪条任务（弹窗共用一份）。 */
 let scheduleTarget = null;
 
-// ---------------------------------------------------------------- 计划表单（第 110 轮）
+// ---------------------------------------------------------------- 计划表单
 //
 // 口径（见 web/schedule.js 头注与 docs/schedule.md）：
 //   · **JSON 是唯一真源**：表单写 JSON，短句/预览都从 JSON 派生；
@@ -1185,7 +1185,7 @@ function schedDefault(type) {
 
 // ---------------------------------------------------------------- 任务操作弹窗
 //
-// 第 256 轮：任务行的动作从「一排同权重按钮」收成「执行 + ⋯」。
+// 任务行的动作从「一排同权重按钮」收成「执行 + ⋯」。
 //   · 2~6 个按钮换行后右边缘参差，实测行高 71 / 82.5 / 118px 三档；
 //   · 「执行」和「删除」长得一模一样，没有层级；
 //   · 「加载插件」「采纳建议」的解释只挂在 title 上，触屏等于没有。
@@ -1220,7 +1220,7 @@ function openTaskPanel(t, tab) {
   setTaskTab(tab || (t.pending_adopt ? 'plan' : 'run'));
   $('task-action').classList.remove('hidden');
   // 焦点给卡片本身，**不要**落在第一颗动作按钮上：那会在「执行」外面留一圈蓝色焦点框，
-  // 看起来像「这个动作被选中了」，而且键盘一进来就在一颗危险按钮上（第 259 轮）。
+  // 看起来像「这个动作被选中了」，而且键盘一进来就在一颗危险按钮上。
   const card = $('task-action').querySelector('.modal-card');
   if (card) {
     card.setAttribute('tabindex', '-1');
@@ -1264,7 +1264,7 @@ function renderTaskRunPane(t) {
       ' / 预算 ' + humanMs(t.budget_ms)));
   }
   const list = el('div', 'act-list');
-  // 只有**标签本身**是按钮，说明文字不接点击（第 258 轮：用户截图说「可点击范围太宽容易误触」）。
+  // 只有**标签本身**是按钮，说明文字不接点击（可点击范围太宽容易误触）。
   // 原来整行都是一颗大按钮，右侧一大片空白也算命中区 —— 想点别处却执行了「恢复」「删除」。
   const item = (label, hint, fn, danger) => {
     const row = el('div', 'act-row' + (danger ? ' act-danger' : ''));
@@ -1385,10 +1385,10 @@ function schedRow(label, ...ctl) {
 }
 
 /**
- * 计划表单里的一行下拉（第 257 轮）。
+ * 计划表单里的一行下拉。
  *
  * 为什么不再用原生 <select>：它的**展开态是系统控件**，跟着操作系统主题走 ——
- * 浅色面板里会弹出一块深灰的 macOS 菜单（用户截图），字体/行高/打勾/选中态全都改不了。
+ * 浅色面板里会弹出一块深灰的 macOS 菜单，字体/行高/打勾/选中态全都改不了。
  * 桌面改用面板自绘的 .dropdown（portal 到 body；.dropdown-menu 的 z-index 85 比弹窗的 80 高，
  * 所以塞在弹窗里也不会被盖住）。**手机上保留原生**：系统滚轮选择器比自绘列表好用。
  *
@@ -1525,7 +1525,7 @@ function planAdvancedRows(plan, refresh) {
       if (!Number.isFinite(n) || n < 1) return; // 打字中间态（空 / 0）先别改
       jMs = n * kOf(unit);
       // 用**当前单位**写回去，不要归一：选了「60 分钟」就写 60m，
-      // 归一成 1h 会让「幅度 60 分钟」和句子「± 1h」对不上（第 261 轮用户截图）。
+      // 归一成 1h 会让「幅度 60 分钟」和句子「± 1h」对不上。
       plan.jitter = n + unit;
       refresh();
     };
@@ -1751,7 +1751,7 @@ async function saveTaskSchedule(expr) {
   try {
     await api(taskPath(scheduleTarget, 'schedule'), { method: 'POST', body: { expr } });
     closeTaskPanel();
-    // 提示语要短（第 256 轮）：结构化计划存的是 `json:{...}`，而 toSentence 是英文短句
+    // 提示语要短：结构化计划存的是 `json:{...}`，而 toSentence 是英文短句
     // （"every day at 09:00"）—— 拼进「计划已改成「…」」就超过 20 字，被当成「长提示」
     // 钉到右上角，用户还得手动关掉它。这里给一句中文、能装进 20 字的标签。
     const shown = expr !== null && schedJson ? planShortLabel(schedJson) : cronLabel(expr);
@@ -1771,16 +1771,16 @@ function renderTasks() {
   const body = $('tasks-body');
   const q = state.q.tasks;
   // 同上：数据没变的那几轮不该重建任务表（每轮 ~8 行 × 十几个节点）。
-  // pending 也要进变更键：插件忙的时候任务行本身没变，变的只是「排队」那一行（第 227 轮）。
-  // state.disabled 也在键里：插件停用/启用会改任务行的状态药丸与「下次运行」（第 269 轮）
+  // pending 也要进变更键：插件忙的时候任务行本身没变，变的只是「排队」那一行。
+  // state.disabled 也在键里：插件停用/启用会改任务行的状态药丸与「下次运行」
   if (sameAsLast('tasks', [state.tasks, state.pending, state.showDeleted, q, state.fp.tasks, state.sort.tasks, state.disabled])) return;
   // 弹窗开着的任务没了（插件重载后不再注册 / 换名）：弹窗跟着关 ——
   // 留着它就是在对一条不存在的任务说「保存计划」。
   if (taskActionTarget && !state.tasks.some((x) => x.plugin === taskActionTarget.plugin && x.name === taskActionTarget.name)) {
     closeTaskPanel();
   }
-  // 已删除的任务默认不出现（第 178 轮）：它们还在库里（墓碑），只是不调度。
-  // 一次性调用造出来的临时任务（第 227 轮）不进主表：它们只活一次运行的时间，
+  // 已删除的任务默认不出现：它们还在库里（墓碑），只是不调度。
+  // 一次性调用造出来的临时任务不进主表：它们只活一次运行的时间，
   // 混进来会让人以为插件注册了一堆怪名字的任务。排队的条目单独列在表尾。
   const visible = state.tasks.filter((t) => (state.showDeleted || !t.deleted) && !t.ephemeral);
   const pending = state.pending || [];
@@ -1812,7 +1812,7 @@ function renderTasks() {
   for (const t of rows) {
     const tr = el('tr');
     const pluginCell = td('插件', 'dim', t.plugin);
-    // 「插件还没装进内存」是插件级状态，不是任务结论（第 256 轮）：
+    // 「插件还没装进内存」是插件级状态，不是任务结论：
     // 挂在插件名下面（同 set_job_summary 的 mini-sub），状态列就只剩一个药丸了。
     if (t.lazy && !t.deleted) {
       const lz = el('div', 'mini-sub', '未装载');
@@ -1825,8 +1825,8 @@ function renderTasks() {
     if (t.summary) nameCell.append(el('div', 'mini-sub', t.summary));
     tr.append(nameCell);
     const cronCell = td('计划', 'mono', t.pending_adopt ? '（待采纳）' : cronLabel(t.cron));
-    // 第 180 轮：cron 是面板的，插件只给建议。两者不一样时说清楚，并给「采纳」的出口。
-    // 第 180 轮：cron 归面板，插件只给建议。两者不一样时**把建议写出来**，
+    // cron 是面板的，插件只给建议。两者不一样时说清楚，并给「采纳」的出口。
+    // cron 归面板，插件只给建议。两者不一样时**把建议写出来**，
     // 光挂一个 tooltip 等于没提示（截图里看到的就是这样）。
     if (t.cron_base && t.cron_base !== t.cron && !t.pending_adopt) {
       cronCell.append(el('div', 'mini-sub', '插件建议 ' + t.cron_base));
@@ -1840,30 +1840,30 @@ function renderTasks() {
     tr.append(cronCell);
     tr.append(td('预算', 'num', humanMs(t.budget_ms)));
     // 暂停/插件停用的任务不显示「下次运行」：一个时间挂在旁边会让人以为它还要跑
-    //（停用插件的那行过去 next_at，读起来就是「那天该跑而没跑」—— 第 269 轮）。
+    //（停用插件的那行过去 next_at，读起来就是「那天该跑而没跑」）。
     const dead = !t.enabled || (state.disabled || []).includes(t.plugin);
     tr.append(td('下次运行', 'mono dim', t.manual ? '手动' : (dead ? '—' : fmtDateTime(t.next_at))));
     // 「跑过」= 历史累计（runs 表），不是 TaskView.runs 那个本进程计数（重启归零）。
-    // 本次启动跑过几次放小字里 —— 两个数都有人问，但主数字该是历史（第 257 轮）。
+    // 本次启动跑过几次放小字里 —— 两个数都有人问，但主数字该是历史。
     // 只显示历史数字：「本次启动以来」放 title 和详情页（多一行小字会让每行 +8px，
-    // 而这个数只在「刚重启」时才和表格里的 0 有关）。第 257 轮）。
+    // 而这个数只在「刚重启」时才和表格里的 0 有关）。
     const runsCell = td('跑过', 'num', String(runTotal(t)));
     runsCell.title = '历史累计 ' + runTotal(t) + ' 次（在「运行记录」里可查）；本次启动以来 ' + (t.runs || 0) + ' 次';
     tr.append(runsCell);
     const st = td('状态');
-    // 药丸进一个显式的栈（第 256 轮）：以前两个药丸是 td 里的行内兄弟，
+    // 药丸进一个显式的栈：以前两个药丸是 td 里的行内兄弟，
     // 列一窄就换行，中间那 1~2px 是行盒剩的，不是设计值 —— 看起来像两格数据黏在一起。
     const stack = el('div', 'pill-stack');
     const head = taskPill(t);
     stack.append(head);
-    // 「已跑 12:30 / 预算 20:00」（第 227 轮）：长任务最想知道的就是「还要多久」。
+    // 「已跑 12:30 / 预算 20:00」：长任务最想知道的就是「还要多久」。
     // run_started 由 /api/state 带出来，跟着轮询自己走。
     if (t.in_flight && t.run_started) {
       st.append(el('div', 'mini-sub', '已跑 ' + elapsedLabel(Date.now() - t.run_started) +
         ' / 预算 ' + humanMs(t.budget_ms)));
     }
     if (t.deleted) {
-      // 状态列只给一个结论（第 225 轮）：以前这里是「已启用」+「已删除」两个药丸并排，
+      // 状态列只给一个结论：以前这里是「已启用」+「已删除」两个药丸并排，
       // 字面上自相矛盾。现在 taskPill 直接回「已删除」，说明放 tooltip 里。
       head.title = '用户删的（插件重新注册也不会复活）。恢复后会从当前时间重算下一拍。';
     }
@@ -1876,12 +1876,12 @@ function renderTasks() {
     st.append(stack);
     if (t.last_error) st.append(el('div', 'mini-sub err-text', t.last_error));
     tr.append(st);
-    // 动作列（第 256 轮）：只给「执行 + ⋯」。其余动作按语义进弹窗的三个页签 ——
+    // 动作列：只给「执行 + ⋯」。其余动作按语义进弹窗的三个页签 ——
     // 这里不再按条件 push 一串按钮，行高和右边缘才稳得住。
     tr.append(taskRowActions(t));
     body.append(tr);
   }
-  // 排队中的运行（第 227 轮）：插件忙，这些在等执行位。它们不是任务行，
+  // 排队中的运行：插件忙，这些在等执行位。它们不是任务行，
   // 所以排在同一张表的末尾、状态写「排队 第 N 位」——用户点完「执行」要看得见它。
   for (const q of pending) {
     const tr = el('tr', 'is-pending');
@@ -1915,7 +1915,7 @@ function elapsedLabel(ms) {
 }
 
 /**
- * 跑一次任务（第 227 轮）：插件忙的时候**排队**，不再报错。
+ * 跑一次任务：插件忙的时候**排队**，不再报错。
  *
  * 以前这里只发一个 POST 然后弹「已派发」——插件忙的时候其实是 409，
  * 用户点完只看到一行红字，事情没发生。现在服务端回 {queued:true, position}，
@@ -1937,7 +1937,7 @@ async function runTask(t) {
 }
 
 /**
- * 删任务（第 178 轮）。
+ * 删任务。
  *
  * 为什么不直接 DELETE 完事：插件下次注册还会带上这条，抹了库就会「复活」。
  * 服务端打墓碑（deleted_at），这里只需要说清「删了还能恢复」。
@@ -2232,7 +2232,7 @@ async function streamLogs() {
           if (rows.length) state.logLastId = rows[0].id;
         } catch (_) { /* 取不到就这次先不补，下次再试 */ }
       }
-      // 重连时带上「我最后看到的那条 id」：服务端先把断线期间的行补发过来，再走实时。
+      // 重连时带上「客户端最后看到的那条 id」：服务端先把断线期间的行补发过来，再走实时。
       const since = state.logLastId ? ('?since=' + state.logLastId) : '';
       const resp = await fetch('/api/logs/stream' + since, { headers, signal: ac.signal });
       if (resp.status === 401) { showGate(true, '需要令牌才能读日志'); return; }
@@ -2281,14 +2281,14 @@ function setConn(ok) {
 
 // ---------------------------------------------------------------- 抽屉
 
-/** 插件自己的配置（第 89 轮）：`<data_dir>/plugin-data/<name>/config.json`。
+/** 插件自己的配置：`<data_dir>/plugin-data/<name>/config.json`。
  *
  * 为什么单独一个页签而不是塞进「设置 → 配置」：那份是**面板级**配置，所有插件拿到的是同一份快照；
  * 插件自己的设置（账号、映射表）混进去会互相覆盖，而且插件一多就没法看。
  * 插件里用 `host.self_config()` 读这份；保存后会自动重载这个插件，改完立刻生效。
  */
 /// 按清单里的 config.fields 造一个表单。抽屉的「配置」页和声明式插件页**共用**这一个渲染器
-/// （第 191 轮：原来内联在 openPluginConfig 里，插件页要用就得复制一份 —— 两处各写一套
+/// （原来内联在 openPluginConfig 里，插件页要用就得复制一份 —— 两处各写一套
 /// 迟早改一处忘一处）。
 ///
 /// 返回 `{ node, readFrom(src), collect(base) }`：
@@ -2315,7 +2315,7 @@ function buildSchemaForm(fields, cfg) {
     let control = null; // 真正塞进「控件那一格」的东西（勾选框要包一层）
     if (f.type === 'bool') {
       // 勾选框**不能**带 .input 类：那个类有 min-height 与 flex 基准，会把 16px 的
-      // 方框拉成一整条蓝色大块（用户截图里那个「蓝色大勾」）。包一层带「开/关」字样的
+      // 方框拉成一整条蓝色大块（那个「蓝色大勾」）。包一层带「开/关」字样的
       // 容器，和设置页的写法一致。
       input = el('input');
       input.type = 'checkbox';
@@ -2378,7 +2378,7 @@ function buildSchemaForm(fields, cfg) {
   return { node, readFrom, collect };
 }
 
-// 「保存后重载」这个偏好记在本机（第 196 轮）：它是**用户**对「我的插件怎么读配置」的判断，
+// 「保存后重载」这个偏好记在本机：它是使用者对「插件怎么读配置」的判断，
 // 换插件也该沿用，所以不放内存、不跟插件走。'1' = 要重载（默认不要）。
 const RELOAD_KEY = 'panel.cfgReload';
 
@@ -2410,7 +2410,7 @@ async function openPluginConfig(name) {
     box.append(head);
   }
 
-  // 有 config.fields 就出表单；没有就还是裸 JSON（第 172 轮）。
+  // 有 config.fields 就出表单；没有就还是裸 JSON。
   let ta = null;
   const built = fields.length ? buildSchemaForm(fields, cfg) : null;
   const form = built ? built.node : null;
@@ -2425,7 +2425,7 @@ async function openPluginConfig(name) {
   box.append(ta);
 
   const row = el('div', 'actions');
-  // 按钮名跟着「保存后重载」的勾选状态走（第 255 轮，用户：「这个按钮的名字也奇怪」）。
+  // 按钮名跟着「保存后重载」的勾选状态走。
   // 196 轮起默认**不重载**（重载会打断正在跑的任务），按钮却还叫「保存并重载插件」，
   // 下面紧跟着又有一个「保存后重载插件」的勾选框 —— 读起来像「勾不勾都会重载」。
   // 现在：没勾 =「保存」，勾了 =「保存并重载」，按钮永远说的是它真会做的事。
@@ -2457,10 +2457,10 @@ async function openPluginConfig(name) {
   }
   box.append(row);
 
-  // 保存后要不要重载这个插件（第 196 轮）：**默认不重载**。重载会 unload 掉插件，
+  // 保存后要不要重载这个插件：**默认不重载**。重载会 unload 掉插件，
   // 在跑的任务当场断、排队的请求直接失败 —— 这是危险动作，不该是「保存一下」的副作用。
   // 勾上 = 明确要重载（给「加载期读一次配置」的插件用）。
-  // 位置紧贴按钮（第 255 轮）：它是「保存」这颗按钮的选项，隔着一堆路径说明再出现，
+  // 位置紧贴按钮：它是「保存」这颗按钮的选项，隔着一堆路径说明再出现，
   // 看起来像另一件事。
   const reloadBox = el('input');
   reloadBox.type = 'checkbox';
@@ -2470,7 +2470,7 @@ async function openPluginConfig(name) {
   reloadRow.append(reloadBox, el('span', '', ' 保存后重载插件'));
   box.append(reloadRow);
   // 为什么「一般不用勾」放成下一行说明，而不是塞进勾选框的字里：那串话比标题长三倍，
-  // 勾选框被撑成一整段文字，反而看不出这是个开关（用户截图就是这么误读的）。
+  // 勾选框被撑成一整段文字，反而看不出这是个开关。
   box.append(el('p', 'hint cfg-reload-note', '会打断正在跑的任务；插件每次 self_config() 都读盘，一般不用勾。'));
   const syncSaveLabel = () => { save.textContent = reloadBox.checked ? '保存并重载' : '保存'; };
   reloadBox.addEventListener('change', syncSaveLabel);
@@ -2505,7 +2505,7 @@ async function openPluginConfig(name) {
   });
 }
 
-// ---------------------------------------------------------------- 声明式插件页（第 191 轮）
+// ---------------------------------------------------------------- 声明式插件页
 //
 // 插件在 panel.json 里声明 nav / config.fields / config.actions / views，面板就替它画一整页：
 // 表单 + 按钮 + 数据块。这样"填个账号密码、点个登录、看一张表"这类常见需求不用再写 .webui/。
@@ -2513,7 +2513,7 @@ async function openPluginConfig(name) {
 // 流程逻辑**在插件里**：面板只执行插件返回的几条响应指令（values / keep / image /
 // cooldown_s / poll），见 docs/plugin-contract.md。绝不渲染插件给的 HTML。
 
-// 当前这一页的上下文（第 191 轮）：换页 / 重新渲染时把它的轮询停掉 —— 不然它会对着
+// 当前这一页的上下文：换页 / 重新渲染时把它的轮询停掉 —— 不然它会对着
 // 已经拆掉的 DOM 继续发请求，直到 poll 的 timeout 才罢休（用户看到的是「莫名多了几次请求」）。
 let declaredPageCtx = null;
 
@@ -3050,7 +3050,7 @@ async function showPlugin(name) {
       ['任务数', tasks.length],
       ['最近运行', (data.runs || []).length + ' 条'],
     ]));
-    // 指标（第 177 轮）：卡片上只有「N 个任务」，看不出最近一周挂了几次。
+    // 指标：卡片上只有「N 个任务」，看不出最近一周挂了几次。
     // 拿不到不影响其它操作 —— 统计是附加信息，不是打开抽屉的前提。
     try {
       const s = await api('/api/plugins/' + encodeURIComponent(name) + '/stats');
@@ -3071,11 +3071,11 @@ async function showPlugin(name) {
       body.append(el('p', 'settings-note', '指标暂时拿不到：' + (e.message || '')));
     }
 
-    // 操作分组（第 255 轮，用户：「过于凌乱，操作应该分组」）。
+    // 操作分组：动作多时按语义分组，避免堆成一排。
     // 九颗按钮原来平铺成两行：看一眼的（打开界面 / 配置 / 编辑源码）、动它的（重载 / 停止 /
     // 重装 / 暂停定时 / 停用）、删它的（删除插件）混在一起，而且两边按钮宽度差得远，
     // 眼睛得一颗颗读才知道哪颗是「只是看看」、哪颗是「删掉它」。
-    // 现在按「你要干什么」分五行，左边两字标签说明这一行是什么；删除单独一行、上面加分隔线。
+    // 现在按「操作目的」分五行，左边两字标签说明这一行是什么；删除单独一行、上面加分隔线。
     const ops = el('div', 'op-groups');
     const opRow = (label, btns, cls) => {
       const row = el('div', 'op-row' + (cls ? ' ' + cls : ''));
@@ -3111,7 +3111,7 @@ async function showPlugin(name) {
         mkOp('停止', () => act('/api/plugins/' + encodeURIComponent(name) + '/stop', '已停止 ' + name), '', '只停掉正在跑的这一次；定时计划不变'),
       ]),
       // ③ 计划：重装 = 重新采纳插件这次的 cron 建议（和「重载」的区别就这一条，文案写清楚）；
-      //    暂停（第 167 轮）只停定时，不保证驻留内存（闲着会被空闲卸载收走，用到时自动装回）
+      //    暂停只停定时，不保证驻留内存（闲着会被空闲卸载收走，用到时自动装回）
       //    —— 和下一行的「停用」不是一回事。
       opRow('计划', [
         mkOp('重装（采纳计划建议）', async () => {
@@ -3122,8 +3122,8 @@ async function showPlugin(name) {
           ? mkOp('恢复定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/resume', '已恢复定时：' + name))
           : mkOp('暂停定时', () => act('/api/plugins/' + encodeURIComponent(name) + '/suspend', '已暂停定时：' + name), '', '只停定时任务，插件本身还在（闲着会被收走，用到时自动装回）'),
       ]),
-      // ④ 开关（第 166 轮）：后端一直有 disable/enable，界面只在「已停用」的卡片上给过
-      //    「启用」，抽屉里没有出口 —— 用户想停掉一个插件只能去删它。
+      // ④ 开关：后端一直有 disable/enable，界面只在「已停用」的卡片上给过
+      //    「启用」，抽屉里没有出口 —— 想停掉一个插件只能去删它。
       opRow('开关', [
         isOff
           ? mkOp('启用', () => act('/api/plugins/' + encodeURIComponent(name) + '/enable', '已启用 ' + name))
@@ -3330,7 +3330,7 @@ async function openScriptSource(name) {
     }
     makeDropdown($("script-runtime-box"), opts, drawerScriptRuntime, (v) => { drawerScriptRuntime = v; });
     // 和插件源码共用同一个 #src-text：高亮层必须走 setValue，否则它不会重画
-    // （第 177 轮发现：直接赋值 value 时，行号与高亮还停在上一个插件的内容上）
+    // （直接赋值 value 时，行号与高亮还停在上一个插件的内容上）
     const lang = { js: "js", mjs: "js", cjs: "js", ts: "js", mts: "js", cts: "js", py: "python", sh: "bash", bash: "bash", php: "php" }[
       (name.split(".").pop() || "").toLowerCase()
     ] || "js";
@@ -3529,7 +3529,7 @@ async function openPluginSource(name) {
   $("src-meta").textContent = "读取中…";
   try {
     const d = await api("/api/plugins/" + encodeURIComponent(name) + "/source");
-    // 高亮 + 行号（第 173 轮）：textarea 管编辑，下面的 pre 管上色，滚动同步。
+    // 高亮 + 行号：textarea 管编辑，下面的 pre 管上色，滚动同步。
     const hl = window.PanelHL ? window.PanelHL.attach(ta, { lang: 'js' }) : null;
     if (hl) hl.setValue(d.source);
     else ta.value = d.source;
@@ -3670,7 +3670,7 @@ async function createPlugin() {
   }
 }
 
-// ---------------------------------------------------------------- 设置：界面包（第 265 轮）
+// ---------------------------------------------------------------- 设置：界面包
 //
 // 干什么：让「只改了前端」的改动不必重发整个二进制。装一包 300 KB 的 zip，
 // 应用后刷新即生效 —— 不换 `panel` 二进制、不重启进程。
@@ -3682,7 +3682,7 @@ async function createPlugin() {
 ///
 /// ⚠ 别用 `PanelUI.confirm()`：那是**插件页**的套件（`/ui.js`），面板首页根本没引它，
 /// 调了就是 `PanelUI is not defined` —— async 函数里抛的话连报错都看不到，
-/// 表现成「点了按钮没反应」（第 265 轮实测踩到，白查半小时）。
+/// 表现成「点了按钮没反应」。
 function panelConfirm(opts) {
   const o = opts || {};
   const wrap = el('div', 'modal ui-confirm');
@@ -3790,7 +3790,7 @@ async function checkUiPackUpdate(force) {
     state.uiLatest = { available: false, error: e.message || '查不到' };
   }
   // 两处都要重画：设置页那一块，以及**顶栏 pill**（它可能正是靠这条才冒头的）。
-  // 只画一块的话，结论回来了但入口一直不出现 —— 第 265 轮实测踩到。
+  // 只画一块的话，结论回来了但入口一直不出现。
   renderUiPack();
   renderUpdate();
 }
@@ -3923,11 +3923,11 @@ async function loadConfig() {
   await loadConfigEditor();
 }
 
-/// 面板设置表单（第 207 轮）：按功能分组，一行一个键。
+/// 面板设置表单：按功能分组，一行一个键。
 ///
-/// 用户的诉求很直接：「我需要更多配置，比如绑定端口、地址…以及 x-forwarded-for…
-/// 配置记得按功能分组，直接表单，简洁明了」。以前只有一个 config.json 文本框，
-/// 想改端口得知道键名、记得它是 `server.bind` 还能不能缺省。
+/// 需要改的部署项有绑定端口、地址、x-forwarded-for 等，按功能分组、直接给表单。
+/// 以前只有一个 config.json 文本框，想改端口得知道键名、记得它是 `server.bind`
+/// 还能不能缺省。
 ///
 /// 这里只列**面板自己认得**的键；插件用的键一律留在下面的「高级：config.json」里，
 /// 保存时按「读原文 → 改表单管的键 → 写回原文」走，别人的键一个都不会丢。
@@ -4383,7 +4383,7 @@ function setupBox() {
   box.append(el('p', 'settings-note',
     '没有令牌时只允许绑回环、只接受回环 Host 头（挡 DNS rebinding）。要给局域网用，先设一个令牌。'));
   // 主路径是「自己设一个」：随机生成的令牌没人记得住，一旦没抄下来就得删 auth.json 重来。
-  // 所以输入框直接摆在外面，随机生成退成次要选项（第 24 轮用户明确说「还是自己设置的好」）。
+  // 所以输入框直接摆在外面，随机生成退成次要选项（口令由使用者自己设置）。
   const row = el('div', 'actions setup-row');
   const inp = el('input', 'setup-input');
   inp.type = 'password';
@@ -4418,7 +4418,7 @@ function setupBox() {
       } else {
         out.append(el('p', 'settings-note', '令牌已写入 auth.json（明文没有落盘）。'));
       }
-      // 第 87 轮起**立即生效**：服务端换掉了内存里的凭据并给这个浏览器发了会话票，不用重启。
+      // **立即生效**：服务端换掉了内存里的凭据并给这个浏览器发了会话票，不用重启。
       out.append(el('p', 'settings-note', '**已经生效**：别的设备下次打开会要求输入令牌；这个浏览器已经登录（30 天会话票）。'));
       state.auth = true;
     } catch (e) {
@@ -4442,8 +4442,8 @@ function setupBox() {
 const NOTIFY_STATE = { pending: [], failed: [], ok: [] };
 
 /** 拉一次渠道 + 发件箱，重画这一页。 */
-// 每种渠道要填哪些字段（第 170 轮）。界面上只显示相关的，避免「12 种渠道一屏 20 个框」。
-/* ---------- 通知工作台（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁 ---------- */
+// 每种渠道要填哪些字段。界面上只显示相关的，避免「12 种渠道一屏 20 个框」。
+/* ---------- 通知工作台：渠道 = 怎么发，推送 = 什么时候发给谁 ---------- */
 
 const NOTIFY_KINDS = {
   webhook: 'webhook（通用 JSON）',
@@ -4973,7 +4973,7 @@ function renderRouteEditor(box, r) {
       + '只想推某个插件，把它填进下面的「只收」（支持前缀通配，比如 mcloud*）。'),
   );
   const eg = el('div', 'chan-grid');
-  // 多选下拉（第 206 轮）：点开勾选，收起只看已选 —— 两排胶囊太占高度（用户说「用多选select」）
+  // 多选下拉：点开勾选，收起只看已选 —— 两排胶囊太占高度
   const inc = notifyMultiSelect(r.include_plugins, '全部插件（不限制）');
   const exc = notifyMultiSelect(r.exclude_plugins, '都不排除');
   inc.setOther(exc.input);
@@ -5077,7 +5077,7 @@ function renderRouteEditor(box, r) {
       events: Object.keys(evInputs).filter((k) => evInputs[k].checked),
       // 值在**隐藏 input** 上：notifyMultiSelect 返回的是 {node, input, setOther}，没有 value。
       // 写成 inc.value 会拿到 undefined → 存盘后「只收/不收」永远是空数组
-      // （用户反馈 #5：5.1 填完插件点保存就消失，重新打开变成「全部插件（不限制）」）。
+      // （填完插件点保存就消失，重新打开变成「全部插件（不限制）」）。
       include: inc.input.value,
       exclude: exc.input.value,
       cron: cron.value.trim(),
@@ -5723,7 +5723,7 @@ function renderNotifyOutbox() {
     box.append(el('p', 'chan-hint', '还没有投递记录。点上面的「试发」就会有一条。'));
     return;
   }
-  // 名字（第 255 轮，用户截图问「这是啥渠道」：表里只有 ch0 / ch0-default 这种内部 id）。
+  // 名字（表里只有 ch0 / ch0-default 这种内部 id）。
   // 发件箱存 id 是对的 —— 渠道能改名、规则能删，历史不该跟着变；显示时再查一次名字。
   const chById = new Map((d.channels || []).map((c) => [c.id, c]));
   const rtById = new Map((d.routes || []).map((r) => [r.id, r]));
@@ -5829,7 +5829,7 @@ async function retryNotify() {
   }
   renderNotifyTab();
 }
-/** 从 0.3.x 面板迁移：扫描 → 预览 → 一键（第 168 轮）。
+/** 从 0.3.x 面板迁移：扫描 → 预览 → 一键。
  *
  * 判据都在后端（crate::migrate），这里只负责把三个数字摆出来让人看清再点。
  * 界面上**不猜路径**：扫描扫不到就让用户自己填，填错也是后端报错。
@@ -5999,7 +5999,7 @@ function migrateBox() {
   return box;
 }
 
-// ---------------------------------------------------------------- 面板打开钩子（第 217 轮）
+// ---------------------------------------------------------------- 面板打开钩子
 
 /** 面板每次打开：按插件清单里的 `on_panel_open` 各 POST 一次。
  *
@@ -6025,7 +6025,7 @@ async function runPanelOpenHooks() {
     } catch (e) {
       const n = (state.panelHookTries.get(key) || 0) + 1;
       state.panelHookTries.set(key, n);
-      // 「插件正忙」不重试（第 192 轮）：钩子本身把插件占住了，重试只会再排 8 秒队、
+      // 「插件正忙」不重试：钩子本身把插件占住了，重试只会再排 8 秒队、
       // 再刷一条 502 —— 插件慢是它自己的事，等下次打开面板再说。
       const busy = e && (e.code === 'plugin_busy' || /正忙|没有响应/.test(e.message || ''));
       if (busy) state.panelHooksDone.add(key);
@@ -6036,9 +6036,9 @@ async function runPanelOpenHooks() {
   }
 }
 
-// ---------------------------------------------------------------- 检查更新（第 210 轮）
+// ---------------------------------------------------------------- 检查更新
 //
-// 旧面板就有这个功能，用户要求照搬：**有更新时右上角提示**、可以**不再提示**、
+// 行为契约：**有更新时右上角提示**、可以**不再提示**、
 // 已经是最新就不出现。查的是 GitHub 的 latest release（后端 6 小时缓存），
 // 更新动作永远是手动点出来的。
 
@@ -6065,7 +6065,7 @@ function renderUpdate() {
   if (pillBtn) {
     // 「当前版本更新就不提示了」—— 后端把 skipped / has_update 都算好给前端
     const panelShow = !!u.show;
-    // 面板没新版时，也可能只有**界面包**可更新（第 265 轮）。这是同一类事
+    // 面板没新版时，也可能只有**界面包**可更新。这是同一类事
     // （「有个新东西可以装」），所以共用一个入口；面板新版优先级更高。
     const ui = state.uiLatest || {};
     const uiNew = !panelShow && ui.available && ui.version !== ((state.ui || {}).version || '');
@@ -6276,11 +6276,11 @@ function renderSettings() {
         "panel-llrt backup --out 备份.bk --with-db。恢复只增/覆盖，不删除。",
     ),
   );
-  // 从 0.3.x 迁移（第 168 轮）：以前这里只指路不给按钮，理由是「要停面板、要写库」。
+  // 从 0.3.x 迁移：以前这里只指路不给按钮，理由是「要停面板、要写库」。
   // 现在后端有了 scan / preview / apply，界面上就能真做，而且写前自动快照。
   dat.append(migrateBox());
 
-  // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**（第 24 轮用户抓到）。
+  // 明文那两个星号以前是直接写在字符串里的 —— 页面上就真显示成 **明文**。
   // 这里改成 strong，长句里的命令也用 code 包起来，别让它糊成一片。
   const plain = el("p", "settings-note backup-note");
   plain.append("这里的导出是", el("strong", "", "明文"), "（插件源码 + 配置原样在 JSON 里）。要加密导出得在终端跑：");
@@ -6344,7 +6344,7 @@ function renderNotify() {
     item.append(head);
     item.append(el("div", "m", n.plugin + (n.task ? " · " + n.task : "") + " · " + fmtDateTime(n.ts)));
     if (n.body) item.append(el("div", "b", n.body));
-    // 每一条都能点：**点一下就标记已读**（第 89 轮修）。原来是「只有带 run_id 的能点，
+    // 每一条都能点：**点一下就标记已读**。原来是「只有带 run_id 的能点，
     // 且点了只跳转、不标已读」—— 用户点了通知、看完那次运行，红点还在，像是没生效。
     item.classList.add("notify-clickable");
     item.addEventListener("click", async () => {
@@ -6442,7 +6442,7 @@ async function importBackup(file) {
   }
 }
 
-// ---------------------------------------------------------------- 插件界面（第 139 轮）
+// ---------------------------------------------------------------- 插件界面
 //
 // 插件用 `host.sidebar({title, order})` 在侧栏注册一格（面板一侧的数据在
 // `/api/state` 的 `plugins[].nav` 上）。点进去是**内嵌 iframe**，不是新标签页：
@@ -6453,13 +6453,13 @@ async function importBackup(file) {
 
 /// 插件的界面文件（`<name>.webui/index.html`）在不在。
 /// 不在 = 侧栏入口点进去必然 404（JS 和配置都还在，只是界面被删了/没装上）——
-/// 所以侧栏和插件卡都要标出来，别让人以为「点了没反应」。第 203 轮用户就被这个卡住。
+/// 所以侧栏和插件卡都要标出来：不标的话，点进去只会看到 404，像是没反应。
 function pluginWebMissing(name) {
   // 有声明式页面（views / actions）的插件本来就不需要 .webui/ —— 别给它挂「缺界面」的
-  // 警告点，那是给"该有界面却没文件"的插件用的（第 191 轮）。
+  // 警告点，那是给"该有界面却没文件"的插件用的。
   if (hasDeclaredUI(name)) return false;
   const f = (state.files || []).find((x) => x && x.name === name);
-  // ⚠ 必须也认**磁盘清单**（第 223 轮，用户截图）：`hasDeclaredUI` 只查
+  // ⚠ 必须也认**磁盘清单**：`hasDeclaredUI` 只查
   //   `state.plugins`（已加载的），停用/按需加载的插件不在里面 —— 于是一个有 4 个
   //   views 的声明式插件被标成「缺界面」。`declared_ui` 来自 /api/plugins/files 的清单。
   if (f && f.declared_ui) return false;
@@ -6468,13 +6468,13 @@ function pluginWebMissing(name) {
 
 /// 侧栏里的插件格。两个来源：运行期注册的 `host.sidebar()`，和清单里声明的 `nav`。
 ///
-/// 为什么要有第二个来源（第 191 轮）：按需加载的插件这次启动根本没加载，运行期注册的
+/// 为什么要有第二个来源：按需加载的插件这次启动根本没加载，运行期注册的
 /// nav 不存在 —— 但清单在磁盘上，所以「声明式页面」的插件**没加载也能在侧栏出现**，
 /// 点进去取数时才装（沿用「用到就装」）。
 function pluginEntries() {
   const out = [];
   const seen = new Set();
-  // 停用的插件**不进侧栏**（第 223 轮，用户：停用插件就应该藏入口）。
+  // 停用的插件**不进侧栏**（停用就该藏入口）。
   // 它的每个接口都是 409「已停用，不会自动加载」—— 点进去必然报错，那就不该让它可点。
   // 想启用它去插件页的卡片（那里有「已禁用」徽标和「启用」按钮）。
   const off = new Set(state.disabled || []);
@@ -6523,7 +6523,7 @@ function renderPluginNav() {
       span.append(el('span', 'nav-warn-dot', '缺界面'));
     }
     if (state.view === 'plugin:' + p.name) a.setAttribute('aria-current', 'page');
-    // ⚠ 只改 hash，**不许** preventDefault + 直接 setView（第 182 轮用户踩的坑）：
+    // ⚠ 只改 hash，**不许** preventDefault + 直接 setView：
     //   主导航全靠 hashchange 切换，而这里原来绕过它 —— hash 停在旧页面上，
     //   从插件页点「仪表盘」（href="#dashboard"）时 hash 没变、没有事件，界面就赖着不动
     //   （先切到别的页再点才好）。交给 hash：已经在这一格上时浏览器不发事件，正好 no-op；
@@ -6559,7 +6559,7 @@ function openPluginView(name) {
   const want = '/plugins/' + encodeURIComponent(name) + '/?embed=1&theme=' + currentTheme();
   // 判据看 iframe **当前真正所在的地址**，不看 src 属性：插件页（或错误页）自己导航过之后，
   // src 属性还停在老值上 —— 只看 src 就永远不重新加载，用户再点这个插件还是眼前那个错页面
-  // （第 190 轮：错误页「回面板首页」把 iframe 导航到 /，于是面板套面板）。
+  // （错误页「回面板首页」把 iframe 导航到 /，于是面板套面板）。
   let cur = '';
   try {
     const w = f.contentWindow;
@@ -6596,7 +6596,7 @@ function guardPluginFrame() {
     }
   });
 }
-// ---------------------------------------------------------------- 文件管理（第 270 轮）
+// ---------------------------------------------------------------- 文件管理
 
 /**
  * 只管三个目录：插件 / 脚本 / 回收站。
@@ -6838,7 +6838,7 @@ const VIEWS = {
 };
 
 function setView(name) {
-  // `plugin:<name>` 是插件自己的界面（第 139 轮）：一个 iframe，标题用插件注册的那个。
+  // `plugin:<name>` 是插件自己的界面：一个 iframe，标题用插件注册的那个。
   // `plugin/<name>` 也认（旧版 href 就是斜杠写的，深链进来不能扑空），统一成冒号形式。
   if (typeof name === 'string' && name.startsWith('plugin/')) name = 'plugin:' + name.slice(7);
   const isPlugin = typeof name === 'string' && name.startsWith('plugin:');
@@ -6867,7 +6867,7 @@ function setView(name) {
   if (isPlugin) {
     const plugin = name.slice(7);
     const entry = pluginEntries().find((p) => p.name === plugin);
-    // 第 191 轮：没写 .webui/ 但声明了 views/actions 的插件，这一格由**面板**渲染
+    // 没写 .webui/ 但声明了 views/actions 的插件，这一格由**面板**渲染
     // （表单 + 按钮 + 数据块）；有界面的插件照旧走 iframe。
     const declared = useDeclaredPage(plugin);
     const frame = $('plugin-frame');
@@ -6897,14 +6897,14 @@ function setView(name) {
   if (name === 'dashboard') loadDashboard();
   if (name === 'settings') { renderSettings(); loadConfig(); }
   // 文件管理只在进页面时读一次：它要递归求目录大小（插件目录几百 MB），
-  // 塞进 5 秒轮询等于让服务端一直爬盘（第 270 轮）。
+  // 塞进 5 秒轮询等于让服务端一直爬盘。
   if (name === 'files') loadFiles();
 }
 
 // ---------------------------------------------------------------- 数据
 
 async function refresh() {
-  // 重入保护（第 190 轮性能 review）：慢网下一次没回来，5 秒后的定时器又发一轮 ——
+  // 重入保护：慢网下一次没回来，5 秒后的定时器又发一轮 ——
   // 四个请求叠两层，而且**回来的顺序**不保证，旧的一轮可能把新的覆盖掉。
   if (state.refreshing) return;
   state.refreshing = true;
@@ -6917,7 +6917,7 @@ async function refresh() {
     state.failed = data.failed || [];
     await loadPluginFiles();
     state.tasks = data.tasks || [];
-    // 排队等执行位的运行（第 227 轮）：任务表末尾的「排队 第 N 位」靠它
+    // 排队等执行位的运行：任务表末尾的「排队 第 N 位」靠它
     state.pending = data.pending || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
@@ -7031,7 +7031,7 @@ async function act(path, okMsg, body) {
     // body 可选：采纳建议要 POST {"expr": null}，而大多数动作不带 body
     const d = await api(path, body === undefined ? { method: 'POST' } : { method: 'POST', body });
     // 「本来就没在跑」不是错误，但也别报「已停止」—— 面板现在回 stopped:false + 说明
-    // （第 266 轮：用户点一次「停止」就吃一条 400 + WARN，而其实什么都没在跑）。
+    // （点一次「停止」就吃一条 400 + WARN，而其实什么都没在跑）。
     notify(d && d.stopped === false ? d.note || '当时没有在跑的任务' : okMsg);
     await refresh();
     if (state.view === 'runs') await loadRuns();
@@ -7045,13 +7045,13 @@ async function act(path, okMsg, body) {
 
 /** 导出 CSV：整表导出，不带筛选（服务端就是 SELECT 整表，简单到没有参数可传）。
  *
- * 要精细查询请用 sqlite3；界面上的筛选只管「看」，不管「导出」——第 83 轮删掉的正是那套筛选导出。
+ * 要精细查询请用 sqlite3；界面上的筛选只管「看」，不管「导出」——那套筛选导出已经删掉。
  */
 function exportCsv(which) {
   window.location = '/api/export.csv?table=' + (which === 'runs' ? 'runs' : 'logs');
 }
 
-// ---------------------------------------------------------------- 运行告警（第 71 轮）
+// ---------------------------------------------------------------- 运行告警
 
 /** 画顶部那条黄条。数据来自 state.alerts（进程内、不落库）。
  *
@@ -7170,7 +7170,7 @@ function makeDropdown(box, opts, current, onPick) {
     if (o.count !== undefined) li.append(el("span", "count", String(o.count)));
     li.addEventListener("click", () => {
       onPick(o.value);
-      // 单选下拉要**立刻**反映选中项（第 261 轮）：调用方不一定重画整个表单 ——
+      // 单选下拉要**立刻**反映选中项：调用方不一定重画整个表单 ——
       // 计划表单只刷新「短句/预览」那块，不更新触发器就会「选完看着还是旧值」。
       label.textContent = o.label;
       items.forEach((x, idx) => x.setAttribute("aria-selected", String(idx === i)));
@@ -7195,7 +7195,7 @@ function makeDropdown(box, opts, current, onPick) {
     menu.style.top = Math.round(r.bottom + 6) + "px";
     menu.style.minWidth = Math.max(190, Math.round(r.width)) + "px";
     menu.hidden = false;
-    // 定位收边（第 257 轮）：计划表单里的下拉在**居中弹窗**里，靠近底部那几行往下展开会出视口 ——
+    // 定位收边：计划表单里的下拉在**居中弹窗**里，靠近底部那几行往下展开会出视口 ——
     // 空间不够就改成向上展开；贴右边缘时也收一下（菜单是 fixed，走出去就点不到了）。
     const mr = menu.getBoundingClientRect();
     let top = r.bottom + 6;
@@ -7353,7 +7353,7 @@ function bind() {
     if (ev.key === 'Escape' && $('sidebar').classList.contains('open')) setSidebar(false);
   });
 
-  // 文件管理页的刷新（第 270 轮）：这一页不进 5 秒轮询（递归求大小很贵），
+  // 文件管理页的刷新：这一页不进 5 秒轮询（递归求大小很贵），
   // 所以给一个显式的刷新按钮 —— 在终端里删了东西之后要能立刻看到。
   const frefresh = $('files-refresh');
   if (frefresh) {
@@ -7367,7 +7367,7 @@ function bind() {
     });
   }
 
-  // 任务页「显示已删除」（第 178 轮）：墓碑行默认藏着，点了才列出来
+  // 任务页「显示已删除」：墓碑行默认藏着，点了才列出来
   $('tasks-show-deleted').addEventListener('click', () => {
     state.showDeleted = !state.showDeleted;
     renderTasks();
@@ -7393,7 +7393,7 @@ function bind() {
     }
   });
 
-  // 源码编辑器的位置提示 / 跳到行（第 106 轮）
+  // 源码编辑器的位置提示 / 跳到行
   const srcText = $("src-text");
   if (srcText) {
     for (const ev of ["input", "click", "keyup", "select"]) srcText.addEventListener(ev, srcPosRefresh);
@@ -7495,7 +7495,7 @@ function bind() {
       searchLogs(true);
     });
   }
-  // 来源（第 199 轮）：面板 / 插件 / 脚本 / HTTP。选了就走服务端查询（和等级一样），
+  // 来源：面板 / 插件 / 脚本 / HTTP。选了就走服务端查询（和等级一样），
   // 否则只能筛到内存里那几百条，「HTTP 到底堆了多少」根本看不出来。
   for (const btn of document.querySelectorAll('.seg-item[data-source]')) {
     btn.addEventListener('click', () => {
@@ -7519,7 +7519,7 @@ function bind() {
     b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
   }
   $('config-save').addEventListener('click', saveConfig);
-  // 面板设置表单（第 207 轮）
+  // 面板设置表单
   if ($('cfg-form-save')) $('cfg-form-save').addEventListener('click', saveConfigForm);
   if ($('cfg-form-reload')) $('cfg-form-reload').addEventListener('click', loadConfigEditor);
   $('config-format').addEventListener('click', formatConfig);
@@ -7580,7 +7580,7 @@ function bind() {
     if (f) await importBackup(f);
   });
   $('new-script-ok').addEventListener('click', createScript);
-  // 第 110 轮：表单负责写 JSON，这里只负责把 JSON 落成调度表达式（见 submitTaskSchedule）
+  // 表单负责写 JSON，这里只负责把 JSON 落成调度表达式（见 submitTaskSchedule）
   $('task-action-save').addEventListener('click', submitTaskSchedule);
   $('task-action-reset').addEventListener('click', () => saveTaskSchedule(null));
   // 页签：点 + ←/→（只在弹窗里、且焦点不在输入控件上时接管，别抢表单的方向键）
@@ -7614,7 +7614,7 @@ function bind() {
   $('plugin-scan').addEventListener('click', () => scanPlugins());
   $('plugin-upload-btn').addEventListener('click', () => $('plugin-upload').click());
   $('panel-restart').addEventListener('click', restartPanel);
-  // 检查更新（第 210 轮）：手点才 force 查，顶栏 pill 直接带用户去版本那块
+  // 检查更新：手点才 force 查，顶栏 pill 直接带用户去版本那块
   if ($('update-check')) $('update-check').addEventListener('click', () => checkUpdate(true));
   if ($('update-pill')) $('update-pill').addEventListener('click', gotoUpdatePanel);
   $('test-run').addEventListener('click', runTest);
@@ -7646,9 +7646,9 @@ function bind() {
   $('confirm').addEventListener('click', (ev) => { if (ev.target.dataset.close) settleConfirm(false); });
   $('confirm-ok').addEventListener('click', () => settleConfirm(true));
 
-  // 其余弹窗的「取消 / 点遮罩」统一在这里收（第 143 轮）。
+  // 其余弹窗的「取消 / 点遮罩」统一在这里收。
   // 之前只有 #drawer / #confirm / #clash 各自绑了一份 —— 改计划、新建插件、新建脚本
-  // 这三个弹窗的「取消」**根本没人管**，点了毫无反应（用户报「不支持取消，点击无效」），
+  // 这三个弹窗的「取消」**根本没人管**，点了毫无反应（不支持取消，点击无效），
   // 只能按回去保存或者刷新页面。现在按 `data-close` 委托，新增弹窗也不用再记得绑。
   // #confirm / #clash 要 resolve 一个 promise，收尾归它们自己，这里跳过。
   const SELF_MANAGED_MODALS = new Set(['confirm', 'clash']);
@@ -7710,11 +7710,11 @@ async function main() {
   // 登录后查一次有没有新版：走 6 小时缓存，失败只记在 state.update.error（不弹条）。
   // 不 await：查更新是锦上添花，绝不能拖住首屏。
   checkUpdate(false);
-  // 界面包也查一次：这样**顶栏 pill 不用等用户进设置页**才冒出来（第 265 轮）。
+  // 界面包也查一次：这样**顶栏 pill 不用等用户进设置页**才冒出来。
   // 同样不 await；服务端 6 小时缓存，一个页面只查一次。
   checkUiPackUpdate(false);
   // 只在「确实读回了 state 且确实没有口令」时问。读不到 state（401 = 面板有口令但还没登录）
-  // 必须走 #gate，否则两个浮层会同时出现（第 87 轮实测撞到）。
+  // 必须走 #gate，否则两个浮层会同时出现（实测撞到）。
   if (state.loaded && state.auth === false && !localStorage.getItem('panel.skipSetup')) {
     showFirstRun(true);
   }
@@ -7734,12 +7734,12 @@ main();
 /** 上传：单文件或 zip，body 是原始字节（服务端按 ?name= 决定落点）。 */
 /** 上传：单文件或 zip，body 是原始字节（服务端按 ?name= 决定落点）。
  *
- * 第 133 轮：单文件且**同名已存在**时先问（覆盖 / 重命名 / 取消），并如实说结果：
+ * 单文件且**同名已存在**时先问（覆盖 / 重命名 / 取消），并如实说结果：
  *   「已上传：x.js」（新建） / 「已覆盖：x.js」（替换了旧的）
  * zip 没法在客户端预判里面有哪些同名文件，所以照旧带 overwrite=1 —— 但会在提示里
  * 说出「覆盖了 N 个已有文件」，不再含糊。
  */
-/** 同名文件的三种选择（第 133 轮）。
+/** 同名文件的三种选择。
  *
  * 为什么不是「默认覆盖」：上传的本意可能是更新，也可能是手滑。原来默认覆盖，界面只回一句
  * 「已上传」，用户根本不知道内容到底换没换。这里把选择权交回去，三种结果都说清楚：
@@ -7855,7 +7855,7 @@ async function uploadFile(inputId, url, okPrefix) {
       msg = okPrefix + '：' + list;
     }
     // 落盘了但**没加载**（min_panel 不够 / 清单坏了 / 加载期报错）：
-    // 必须说清楚，否则用户以为「装好了」，点插件才发现是空的（第 256 轮）。
+    // 必须说清楚，否则用户以为「装好了」，点插件才发现是空的。
     const blocked = d.blocked || [];
     if (blocked.length) {
       msg += '；但没加载：' + blocked.map((b) => b.name + '（' + b.why + '）').join('，');

@@ -3,10 +3,10 @@
 
 :root {
   /* 让**浏览器自己画的东西**跟着主题走：滚动条、原生下拉的弹层、日期选择器、
-     以及还没被我们重画的表单控件。不写这一句时，深色页面上会冒出浅色滚动条和
-     白底控件（插件页尤其明显：那些控件不是我们画的）。 */
+     以及还没被面板重画的表单控件。不写这一句时，深色页面上会冒出浅色滚动条和
+     白底控件（插件页尤其明显：那些控件不是面板画的）。 */
   color-scheme: light;
-  /* 亮色：TDesign 那套中性灰 + 单一品牌蓝（第 137 轮换掉原来的粉色系）。
+  /* 亮色：TDesign 那套中性灰 + 单一品牌蓝（换掉原来的粉色系）。
      原则就三条：底色和卡片都接近无色、只有主色带颜色、阴影和圆角都收小。 */
   --scrim: rgba(0, 0, 0, .45);
   --bg: #f3f3f3;
@@ -126,9 +126,9 @@ button, input, select { font: inherit; color: inherit; }
 .brand-text strong { font-size: 14px; }
 .brand-text span { font-size: 11px; color: var(--dim); letter-spacing: .02em; }
 
-/* 侧栏中间段（第 195 轮）：品牌与底部状态固定，只有这一块滚动。
+/* 侧栏中间段：品牌与底部状态固定，只有这一块滚动。
    `min-height: 0` 是关键 —— flex 子项的默认 min-height 是 auto，不加它，
-   内容一多就撑破父容器（表现就是底部状态被顶出视口，用户截图报的那个）。
+   内容一多就撑破父容器（表现就是底部状态被顶出视口）。
    左右留 6px 再负回来：既不让滚动条盖住圆角，也不让 focus 框被裁掉。 */
 .sidebar-scroll {
   display: flex; flex-direction: column; gap: 18px;
@@ -180,7 +180,7 @@ button, input, select { font: inherit; color: inherit; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 /* 选择器要写成 `.icon-btn.xxx`（0,2,0）：`.icon-btn` 本身是 `display: inline-flex`，
    而且写在下面 —— 只用 `.nav-toggle`（0,1,0）会被它压掉，于是这两个只在窄屏该出现的按钮
-   在**所有**宽度都显示（第 86 轮用户截图报的就是这个：宽屏上多出 ✕ 和汉堡）。 */
+   在**所有**宽度都显示（宽屏上会多出 ✕ 和汉堡）。 */
 .icon-btn.nav-toggle { display: none; }
 /* 侧栏收起按钮只在窄屏（浮层模式）出现 */
 .icon-btn.sidebar-close { display: none; }
@@ -201,7 +201,7 @@ button, input, select { font: inherit; color: inherit; }
 .btn:active { transform: translateY(.5px); }
 .btn-primary { background: var(--accent); border-color: transparent; color: var(--accent-fg); font-weight: 600; }
 .btn-primary:hover { filter: brightness(1.06); background: var(--accent); color: var(--accent-fg); }
-/* 开关型按钮的按下态（第 225 轮）：之前用 .btn-ghost（无边框、无底色），
+/* 开关型按钮的按下态：之前用 .btn-ghost（无边框、无底色），
    夹在「全部插件」这种有边框的控件中间像一行普通文字，看不出能点、也看不出当前开着。
    现在统一成 .btn + aria-pressed 高亮。 */
 .btn[aria-pressed="true"] {
@@ -235,7 +235,7 @@ button, input, select { font: inherit; color: inherit; }
 .pill-err { background: var(--err-soft); color: var(--err); border-color: transparent; }
 .pill-accent { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 
-/* 状态列的药丸栈（第 256 轮）：以前两个药丸是 td 里的行内兄弟，列一窄就换行，
+/* 状态列的药丸栈：以前两个药丸是 td 里的行内兄弟，列一窄就换行，
    中间那 1~2px 是行盒剩下的，不是设计值 —— 看着像两格数据黏在一起。现在显式给 gap。 */
 .pill-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 
@@ -345,7 +345,7 @@ button, input, select { font: inherit; color: inherit; }
   .table td.num { white-space: nowrap; }
 }
 .table td.right, .table th.right { text-align: right; }
-/* 操作列钉在右边（第 196 轮，用户截图问「操作固定位置？」）：
+/* 操作列钉在右边：
    运行记录七列，窗口一窄就横向滚动，「日志」按钮跟着滑出视口 —— 而那是每行唯一要点的东西。
    `.right` 这个类只用在操作列（`actionsCell()` 与三个表头），不会误伤别的列。
    底色必须自己给：sticky 的格子浮在滚动内容上，不铺底就会看到字从按钮下面穿过。
@@ -363,11 +363,11 @@ button, input, select { font: inherit; color: inherit; }
 .table .strong { font-weight: 600; }
 .table .dim { color: var(--dim); }
 .table .actions { display: flex; gap: 4px; justify-content: flex-end; }
-/* 表格里的动作按钮不许竖向叠（第 256 轮）：换行的 flex 容器 min-content 只等于**最宽**那颗，
+/* 表格里的动作按钮不许竖向叠：换行的 flex 容器 min-content 只等于**最宽**那颗，
    列被挤窄时「执行 / ⋯」会叠成两行，整行高度从 46 翻到 83（真机上量到的）。
    抽屉里那种一排按钮仍然允许换行（下面的 .actions 基础规则没动）。 */
 .table .actions { flex-wrap: nowrap; }
-/* 任务表的「数字/表达式」列给下限（第 256 轮）。
+/* 任务表的「数字/表达式」列给下限。
    它们被挤到 min-content 时会**按词**折行：「5 分 0 秒」折成 4 行（5 / 分 / 0 / 秒），
    「@every 30s」折成两截 —— 一行本来是 46px，实测被撑到 98px。
    ≤720 是两列卡片，不受影响；721~1023 万一放不下，就在 .table-wrap 里横向滚。 */
@@ -376,14 +376,14 @@ button, input, select { font: inherit; color: inherit; }
 #view-tasks .table th[data-sort="next_at"] { min-width: 110px; }
 /* 跑过 = 历史数字 + 「本次 N」小字，两行并排，太窄会折成一堆 */
 #view-tasks .table th[data-sort="runs"] { min-width: 72px; }
-/* 任务行的「⋯」（第 256 轮）：和「执行」同高，宽度按字形给 —— 三个点比两个汉字窄得多，
+/* 任务行的「⋯」：和「执行」同高，宽度按字形给 —— 三个点比两个汉字窄得多，
    不给固定宽会缩成一小条，点起来也别扭。 */
 .table .actions .task-more { width: 34px; padding: 0; font-size: 15px; line-height: 1; color: var(--fg-2); }
 .table .actions .task-more:hover { color: var(--fg); }
 .table .err-text { color: var(--err); }
 .table .nowrap { white-space: nowrap; }
 
-/* 面板设置表单（第 207 轮）：按功能分组，一行一个配置项。
+/* 面板设置表单：按功能分组，一行一个配置项。
    为什么不做成纯 JSON 编辑器：用户要的是「绑定端口/地址、信任 XFF」这类**能填**的开关，
    手写 JSON 还得记住键名和类型。JSON 编辑器保留在下面的「高级」里，给插件用的键留门。 */
 .cfg-group { margin: 0 0 18px; }
@@ -411,7 +411,7 @@ button, input, select { font: inherit; color: inherit; }
   .cfg-help { grid-column: 1; }
 }
 
-/* 高级 JSON 默认收起（第 209 轮，用户：「json 默认收起，这个一般不需要配置的」）。
+/* 高级 JSON 默认收起（一般不需要配置）。
    直接写 JSON 的场景只剩「改插件用的键」，那就别占着页面高度：一行 summary，点开再编辑。 */
 .cfg-adv { margin-top: 14px; }
 .cfg-adv > summary {
@@ -426,7 +426,7 @@ button, input, select { font: inherit; color: inherit; }
 .cfg-adv > summary:hover { background: var(--surface-2); color: var(--fg); }
 .cfg-adv > section.panel { margin-top: 10px; }
 
-/* 更新说明（第 210 轮）：release notes 可能很长，别把设置页撑爆 */
+/* 更新说明：release notes 可能很长，别把设置页撑爆 */
 .update-notes {
   margin: 8px 0 0; padding: 10px 12px; max-height: 220px; overflow: auto;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
@@ -434,7 +434,7 @@ button, input, select { font: inherit; color: inherit; }
   white-space: pre-wrap; word-break: break-word;
 }
 
-/* 多选下拉（第 206 轮）:只收/不收。前两版是「逗号文本框」和「标签 + 两排胶囊」,
+/* 多选下拉:只收/不收。前两版是「逗号文本框」和「标签 + 两排胶囊」,
    都不合用(看不清边界 / 占一大片高度)。现在收起是个控件,点开是勾选清单:
    已选项直接摆在控件里,× 能单个取消;底部输入框留给前缀通配(mcloud*)。
    外观照 .input,弹层照 .dialog 的边与影,全部走 token。 */
@@ -500,7 +500,7 @@ button, input, select { font: inherit; color: inherit; }
 .mini-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .mini-title { display: flex; align-items: center; gap: 7px; font-weight: 600; }
 .mini-sub { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 排队中的运行（第 227 轮）：它不是任务行，压暗一点，扫一眼就知道「在等」而不是「在跑」。 */
+/* 排队中的运行：它不是任务行，压暗一点，扫一眼就知道「在等」而不是「在跑」。 */
 tbody tr.is-pending > td { color: var(--dim); }
 tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transparent); }
 .mini-right { color: var(--dim); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -510,7 +510,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* ⚠ 这里原来写的是 `.field select, .field input` —— 那是个**通用的类名**，插件页也引
    /app.css，于是面板给「重命名输入框」定的 190px 宽 + 30px 高漏进了每个插件的表单，
-   插件再各自写 `.field > .input { width: 100% }` 去盖。第 197 轮收口：只认面板自己的容器。
+   插件再各自写 `.field > .input { width: 100% }` 去盖。统一规则：只认面板自己的容器。
    插件表单的排布在下面「表单行 .field」那段统一定义，别在这里加回来。 */
 #clash-rename-field select, #clash-rename-field input {
   height: 30px; padding: 0 9px;
@@ -586,18 +586,18 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 .muted { color: var(--dim); font-size: 12.5px; margin: 0; }
 .hint {
   color: var(--dim); font-size: 11.5px; margin: 2px 0 0; min-height: 14px;
-  /* 提示里可能带 URL / 长英文串：手机上不许顶出容器（第 263 轮 mgmusic 的 hint 溢出 10px） */
+  /* 提示里可能带 URL / 长英文串：手机上不许顶出容器（mgmusic 的 hint 溢出 10px） */
   overflow-wrap: anywhere;
 }
 /* 空提示行不占位。`min-height` 是为了「有字时不要跳一下」，但**空的时候**它就是一条
-   16px 的空白 —— 弹窗里夹在两个字段中间，看起来像少了一行（第 197 轮）。
+   16px 的空白 —— 弹窗里夹在两个字段中间，看起来像少了一行。
    有内容时高度照旧，所以不会出现「提示一出来表单就抖」。 */
 .hint:empty { display: none; }
 .hint-err { color: var(--err); }
-/* 配置抽屉里那一行「保存后重载」勾选（第 226 轮）：label 包 checkbox，和 hint 同字号 */
+/* 配置抽屉里那一行「保存后重载」勾选：label 包 checkbox，和 hint 同字号 */
 .cfg-reload { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .cfg-reload input { width: auto; margin: 0; }
-/* 「一般不用勾」那串解释缩进到勾选框的文字下面（第 255 轮）：原来它挂在 label 里，
+/* 「一般不用勾」那串解释缩进到勾选框的文字下面：原来它挂在 label 里，
    勾选框被撑成一整段话，看不出是个开关。 */
 .cfg-reload-note { margin: 2px 0 0 20px; }
 
@@ -616,7 +616,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 .drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .drawer-head h2 { margin-right: auto; font-size: 15px; }
 .drawer-body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
-/* 运行详情（第 222 轮）：520px 抽屉里四列日志行把消息挤成三四行；
+/* 运行详情：520px 抽屉里四列日志行把消息挤成三四行；
    宽抽屉 + 隐藏插件列（同一次运行全是同一个插件），消息列从 ~180px 提到 ~480px。 */
 .drawer-panel.wide { width: min(860px, 100vw); }
 .drawer-panel.wide .log-line { grid-template-columns: 118px 58px 1fr; }
@@ -624,11 +624,11 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 .drawer-panel.wide .console { font-size: 13px; padding-left: 0; padding-right: 0; }
 /* 抽屉里的内容块。之前 gap 只挂在 .drawer-body 上（管的是 tabs 与 pane 之间），
    pane **里面**的 kv / 按钮排 / 小标题全都没间距 —— 一排按钮直接顶着「它的任务」
-   （第 24 轮用户连着两次说「太紧凑」）。这里把节奏补回 pane 内部。 */
+   （密集布局会显得太紧凑）。这里把节奏补回 pane 内部。 */
 #drawer-overview, #drawer-source { display: flex; flex-direction: column; gap: 14px; }
 #drawer-overview > .card-label:not(:first-child) { margin-top: 2px; }
 
-/* 抽屉里的操作分组（第 255 轮，用户：「过于凌乱，操作应该分组」）。
+/* 抽屉里的操作分组（动作多时按语义分组）。
    原来九颗等宽按钮平铺成两行：只是看看的（打开界面 / 配置 / 编辑源码）、动它的
    （重载 / 停止 / 重装 / 暂停定时 / 停用）、删它的（删除插件）混在一片，
    得一颗颗读才知道哪颗有后果。现在按「要干什么」分行，左边两字标签点题。
@@ -654,7 +654,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 /* ---------- Toast ---------- */
 
 .toast {
-  /* 提示放**顶部**（第 131 轮）：人的习惯是往上找，放屏幕底下经常整场没被看见。
+  /* 提示放**顶部**：人的习惯是往上找，放屏幕底下经常整场没被看见。
      位置避开 sticky 顶栏（桌面 80px / 手机两行 115px），所以用变量按断点给。 */
   position: fixed; left: 50%; top: var(--toast-top); bottom: auto; transform: translateX(-50%);
   z-index: 70; padding: 10px 12px; border-radius: 8px;
@@ -674,7 +674,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
   line-height: 1.45;
 }
 /* 错误提示原来是「浅红底 + 白字」：暗色主题下 --err 是 #d97a78，白字压上去几乎看不清
-   （用户报「这个配色难以看清字」）。改成用主题的反色字（--bg），两套主题都够对比。 */
+   （对比度不够会看不清字）。改成用主题的反色字（--bg），两套主题都够对比。 */
 .toast-err { border-left-color: var(--err); }
 @keyframes toast-in { from { transform: translate(-50%, -10px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
 
@@ -716,7 +716,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 }
 
 /* 侧栏收成浮层只要到 720 为止，不是 860。
-   为什么要改（第 86 轮）：媒体查询用的是 **CSS px**，2 倍屏上「1720 设备像素的窗口」= 860 CSS px，
+   为什么要改：媒体查询用的是 **CSS px**，2 倍屏上「1720 设备像素的窗口」= 860 CSS px，
    于是那台看着很宽的屏幕被当成手机：侧栏变浮层、右上角多出 ✕、内容区左上多出汉堡（还压住页标题）。
    版面真正需要多少：侧栏 236 + 内容最小约 480 ≈ 716 —— 所以 720 才是该收的那条线。 */
 @media (max-width: 720px) {
@@ -728,7 +728,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
   }
   .sidebar.open { transform: none; }
   /* 汉堡必须压在侧栏（40）和遮罩（35）之上：否则侧栏一开，按钮被盖住，
-     点上去是侧栏本身 —— 用户看到的就是「点了没反应」（第 24 轮）。 */
+     点上去是侧栏本身 —— 用户看到的就是「点了没反应」。 */
   .icon-btn.nav-toggle { display: inline-flex; position: relative; z-index: 45; }
   /* 浮层侧栏的遮罩：点一下就收起。z-index 在侧栏（40）与顶栏（20）之间。 */
   .sidebar-backdrop:not([hidden]) {
@@ -778,7 +778,7 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 .plugin-actions { display: flex; gap: 6px; margin-top: 2px; }
 
 .btn.spinning .ico { animation: spin .9s linear infinite; }
-/* 顶栏刷新是同系列的纯图标按钮（用户要求「不要图标加字」），转圈规则也要跟过来 */
+/* 顶栏刷新是同系列的纯图标按钮（顶栏只放图标，不加文字），转圈规则也要跟过来 */
 .icon-btn.spinning .ico { animation: spin .9s linear infinite; }
 .icon-btn.spinning { color: var(--fg); }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -806,10 +806,10 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
   font-size: 12.5px; color: var(--dim); cursor: pointer; user-select: none;
 }
 .check input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; }
-/* ---------- 勾选框：面板自绘的 + 原生 checkbox 拉齐（第 145 轮） ---------- */
+/* ---------- 勾选框：面板自绘的 + 原生 checkbox 对齐 ---------- */
 /*
    为什么改：以前那个勾是「两条边框转 40 度」拼出来的（`left:5 top:2 w:5 h:9` + `rotate(40deg)`），
-   几何上是手调出来的 —— 看着总是有点歪，换个字号/缩放更明显（用户报「选择的勾是歪的」）。
+   几何上是手调出来的 —— 看着总是有点歪，换个字号/缩放更明显（勾容易显得歪）。
    现在勾是**一张 SVG**：居中、等比、跟控件一起缩放，不用再拿像素凑。
    `background-image` 而不是 `::after`：原生 `<input>` 是替换元素，部分浏览器不渲染它的伪元素，
    同一套写法用在原生 checkbox 上才不会有浏览器差异。
@@ -833,14 +833,14 @@ tbody tr.is-pending { background: color-mix(in oklab, var(--accent) 4%, transpar
 
    ⚠ 选择器为什么带 `html` 前缀：旧插件普遍写着「把全局 input 样式撤掉」的补丁
    （`.picker-row input[type=checkbox] { width:auto; border:0; background:none }`），
-   那是给没有复选框样式的旧面板写的；在这里它会把我们画的方块整个擦掉
-   （第 153 轮：任务页账号多选只剩一串名字）。带上 html 之后特异度 (0,2,2) >
+   那是给没有复选框样式的旧面板写的；在这里它会把面板画的方块整个擦掉
+   （任务页账号多选只剩一串名字）。带上 html 之后特异度 (0,2,2) >
    插件那条 (0,2,1)，插件再"撤"也撤不掉控件的形状；真想用系统原生那个就加
    `.check-raw` 类，那条路留着的。 */
 html input[type="checkbox"]:not(.check-raw) {
   appearance: none; -webkit-appearance: none;
   /* padding / box-sizing 必须自己钉死：插件里一条笼统的 `input { padding: 7px 10px; width: 100% }`
-     会把勾选框撑成 22px 的一坨（第 153 轮实测，勾选框比旁边的字还高）。 */
+     会把勾选框撑成 22px 的一坨（勾选框比旁边的字还高）。 */
   box-sizing: border-box; padding: 0;
   width: 16px; height: 16px; margin: 0; flex: none;
   border: 1px solid var(--line-strong); border-radius: 5px; background-color: var(--surface);
@@ -1039,7 +1039,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 .notify-item.notify-clickable:hover { background: var(--surface-2); }
 
 /* 窄屏的表格：**两列网格**，不是「一格一行」。
-   为什么改（第 188 轮，用户手机截图：运行记录 11 条，每条 7 个字面行、191px 高，
+   为什么改（运行记录 11 条，每条 7 个字面行、191px 高，
    一屏只看得到两条，右边还空着一半）：一格一行把「标签」当成新的一行用，
    行高被字段数乘起来；两列之后同样的字段只占一半高度，右边不再空着。
    横向仍按 label:value 读，语义没变（::before 拿 data-label）。 */
@@ -1064,7 +1064,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
   .table tbody td:empty { display: none; }
   /* 卡片态：一格里的「值 + 摘要」要能换行。td 是 flex，默认 nowrap ——
      任务名旁边的 mini-sub（set_job_summary 那行）会把任务名挤成竖排两个字
-     （「兑/换」「日/常」，第 263 轮深色手机截图里看到的）。摘要独占一行，
+     （「兑/换」「日/常」，在深色主题的手机上会各占一行）。摘要独占一行，
      任务名就能整行显示。 */
   .table tbody td { flex-wrap: wrap; }
   .table tbody td .mini-sub { flex: 1 1 100%; }
@@ -1109,7 +1109,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
 .table th, .table td { padding: 8px 16px; }
 /* 七列的运行记录在 721~1100 这一档最容易挤出横向滚动条（1024 宽实测：表 755 / 容器 734）：
    左右内边距各收 4px，14 个格子省出 56px 就够。必须放在上面那行**之后**，
-   否则同优先级被它覆盖（第 188 轮先踩了一次：改了没生效）。 */
+   否则同优先级被它覆盖（覆盖顺序不对时改了不生效）。 */
 @media (max-width: 1100px) and (min-width: 721px) {
   /* 下限写 721：≤720 那套「两列网格」自己定了 td 的 padding，别在这儿偷偷再加一次
      （否则手机上每个格子左右多 12px，虽然不至于坏，但不是设计意图）。 */
@@ -1127,7 +1127,7 @@ html input[type="checkbox"]:not(.check-raw):disabled {
   font-size: 12.5px; color: var(--fg); outline: none;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
-/* 浏览器给 type=search 自带一个 ✕，各浏览器长得都不一样 —— 一律关掉，用我们自己的 */
+/* 浏览器给 type=search 自带一个 ✕，各浏览器长得都不一样 —— 一律关掉，用面板自己的 */
 .search input::-webkit-search-cancel-button,
 .search input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; }
 .search-clear {
@@ -1170,13 +1170,13 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 
 .settings-note { margin: 10px 0 0; font-size: 11.5px; color: var(--dim); }
 
-/* 文件管理（第 270 轮）：三块（插件 / 脚本 / 回收站）各一张面板，靠 gap 分开 */
+/* 文件管理：三块（插件 / 脚本 / 回收站）各一张面板，靠 gap 分开 */
 #files-areas { display: flex; flex-direction: column; gap: 16px; }
 #files-areas .table td { vertical-align: top; }
 /* 名字下面那行「为什么能清」的小字：跟着第一个单元格，别给它额外上边距 */
 #files-areas .table td .settings-note { margin: 2px 0 0; }
 /* 目录路径是一长串没有空格的字符：`break-word` 只管「整词放不下」，
-   中文混排时仍可能整行溢出，用 anywhere 才真的能在任意位置断（第 270 轮手机端实测）。 */
+   中文混排时仍可能整行溢出，用 anywhere 才真的能在任意位置断（手机端实测）。 */
 #files-areas .files-dir { overflow-wrap: anywhere; }
 
 /* 界面包列表（设置 → 常规 → 界面）：一行一个已装版本，右边是「启用 / 正在使用」。
@@ -1204,8 +1204,8 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 
 /* 首次设置令牌的框（设置 → 安全，只在没凭据时出现） */
 /* 首次设令牌的框。原来写的是 var(--bg-soft, #fafafc) —— 这个变量**根本没定义**，
-   于是静默回落到近白，深色主题下整块白得像外来户（第 24 轮用户抓到）。
-   规矩：只许用定义过的 token，不许写 fallback 兜底。 */
+   于是静默回落到近白，深色主题下整块白得像外来户。
+   规矩：只许用定义过的 token，不许写回退值。 */
 .setup-box {
   margin-top: 14px;
   padding: 14px 16px;
@@ -1264,7 +1264,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .test-out:empty { display: none; }
 /* ⚠ 这里原来写死 `#d7dae0` / `#ff8b8b` —— 那是给**深色**控制台配的颜色。
-   面板切成浅色之后，这两行就是「浅灰底上的浅灰字」，用户看到的是「啥也没写」（第 146 轮报的）。
+   面板切成浅色之后，这两行就是「浅灰底上的浅灰字」，用户看到的是「啥也没写」。
    一律走 token：正常输出用正文色，错误用 --err（两个主题都过 AA）。 */
 .test-line { color: var(--fg); }
 .test-err { color: var(--err); }
@@ -1283,7 +1283,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   max-height: 320px;
 }
 
-/* ---------- 运行告警黄条（第 71 轮） ----------
+/* ---------- 运行告警黄条 ----------
    什么时候出现：库自己坏了（磁盘满、日志写不进去）—— 那些事没法落库，
    只能在内存里记一条，靠这条黄条说出来。 */
 .alerts-bar {
@@ -1303,7 +1303,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .alerts-bar .alert-clear {
   align-self: flex-end;
 }
-/* ---------- 插件「系列」分组（第 88 轮，从旧面板搬来） ---------- */
+/* ---------- 插件「系列」分组（从旧面板搬来） ---------- */
 
 /* 每组占满整行（外层 #plugin-grid 本身是 grid）：组头一行 + 组内自己的卡片格。 */
 .plugin-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 9px; }
@@ -1317,7 +1317,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .plugin-group-actions { display: flex; gap: 6px; margin-left: auto; }
 
-/* 「开始使用」顶部：现在缺什么（第 88 轮） */
+/* 「开始使用」顶部：现在缺什么 */
 .ready-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .ready-chip {
   display: inline-flex; align-items: center; gap: 8px;
@@ -1333,14 +1333,14 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 .ready-chip.ok .ready-dot { background: var(--ok-soft); color: var(--ok); }
 
 /* 触屏：图标按钮的点击目标要够大（苹果/谷歌都写 ≥44px，这里给 40px + 内边距补偿）。
-   手机上顶栏的铃铛、主题、抽屉的 ✕ 原来是 32px，指头按不准 —— 第 90 轮实测。 */
+   手机上顶栏的铃铛、主题、抽屉的 ✕ 原来是 32px，指头按不准。 */
 @media (max-width: 720px) {
   .icon-btn { width: 40px; height: 40px; }
 }
 
-/* 退出登录在顶栏右上角（2026-11-15 用户口径：左下角太偏），用 icon-btn 同款。 */
+/* 退出登录在顶栏右上角（左下角太偏），用 icon-btn 同款。 */
 
-/* 动作按钮行（第 93 轮，用户反馈「这种按钮太紧凑」）：
+/* 动作按钮行（按钮会挤在一起）：
    .actions 原来没有布局声明 —— 一串 inline-flex 的按钮**直接相邻**（中间连空格都没有），
    看起来像挤在一起的一条。这里统一成 flex + 10px 间距，允许换行（窄屏不至于溢出）。 */
 .actions {
@@ -1352,7 +1352,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 /* 表格里的动作列是行内小按钮，间距保持紧凑、但不要被上面的规则带上纵向 margin。 */
 .table .actions { margin: 0; gap: 6px; }
 
-/* ---------- 右上角常驻提示（第 134 轮）---------- */
+/* ---------- 右上角常驻提示 ---------- */
 /* toast（居中、2.6 秒消失）留给「已复制 / 已刷新」这类一眼就懂的；
    要读的信息走这里：一直在，直到用户点 ×。 */
 .notices {
@@ -1392,7 +1392,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   .notices { left: 12px; right: 12px; max-width: none; }
 }
 
-/* ---------- 插件侧栏入口 + 内嵌界面（第 139 轮） ---------- */
+/* ---------- 插件侧栏入口 + 内嵌界面 ---------- */
 .nav-group { display: flex; flex-direction: column; gap: 4px; }
 .nav-group-title {
   padding: 0 10px 2px; font-size: 11.5px; letter-spacing: .04em;
@@ -1400,7 +1400,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 }
 .nav-group .nav-item { color: var(--fg-2); }
 .nav-group .nav-item[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
-/* 界面文件缺失的插件入口（第 203 轮）：点进去必然 404，先在侧栏说清楚 */
+/* 界面文件缺失的插件入口：点进去必然 404，先在侧栏说清楚 */
 .nav-item-warn .nav-warn-dot {
   margin-left: 6px; padding: 1px 6px;
   font-size: 10.5px; line-height: 1.4; border-radius: 999px;
@@ -1418,7 +1418,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
   .plugin-frame { height: calc(100vh - 168px); }
 }
 
-/* ---------- 供插件复用的组件补全（第 139 轮：面板自己的 UI 套件） ---------- */
+/* ---------- 供插件复用的组件补全（面板自己的 UI 套件） ---------- */
 /* 这一段是「**插件也能直接用**」的部分：`.input` / `.field-label` / `.badge` / `.dialog*` /
    `.table-wrap`。插件页把 `/app.css` 和 `/ui.js` 引进去，就得到和面板一模一样的控件；
    颜色全走 token，所以两套主题自动跟随。改这里等于同时改面板和所有插件的外观 ——
@@ -1436,7 +1436,7 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
 /* `hidden` 属性必须赢过组件类里的 `display`。
    真实踩到：插件页里 `<div class="toast" hidden>`（插件自己的提示条）跑在 iframe 里，
    而 iframe 引了面板的 /app.css —— 面板的 `.toast` 写了 `display: flex`，
-   于是那个本该隐藏的元素变成「一个空白的小圆角卡片」挂在页面上（第 142 轮）。 */
+   于是那个本该隐藏的元素变成「一个空白的小圆角卡片」挂在页面上。 */
 [hidden] { display: none !important; }
 /* 插件自己画提示条时常把「不提示」写成 `toast('')`：空内容的卡片会被当成「加载中」，别画。 */
 .toast:empty { display: none; }
@@ -1522,7 +1522,7 @@ input[type="number"]::-webkit-inner-spin-button {
 .p-number .hint.is-warn { color: var(--warn); }
 .p-number .hint.is-ok { color: var(--ok); }
 
-/* ---------- 下拉框：原生 select 拉齐 + 可自定义的 p-select ---------- */
+/* ---------- 下拉框：原生 select 对齐 + 可自定义的 p-select ---------- */
 
 /* 原生 <select>：系统箭头在深色主题下是块浅灰的方角，和面板的圆角控件完全不是一个东西。
    统一去掉系统外观，自己画一个 chevron（颜色走 data URI —— CSS 变量进不了 svg）。 */
@@ -1588,12 +1588,12 @@ select option { background: var(--surface); color: var(--fg); }
 .select-option.is-on .select-tick { opacity: 1; }
 .select-empty { padding: 10px 8px; color: var(--dim); font-size: 12.5px; text-align: center; }
 
-/* ---------- 卡片 / 分区：旧插件在用的这套名字（第 149 轮） ---------- */
+/* ---------- 卡片 / 分区：旧插件在用的这套名字 ---------- */
 /*
    为什么要有：0.4.0 把卡片的头部改叫 `.panel-head`，而既有插件（mcloud.webui）写的是
    旧面板那套 `.card-head` / `.card-title` / `.card-actions` / `.card-sub`，还有块级的
    `.section` / `.section-head` / `.section-title`。这些名字在新 CSS 里**一个都没有**，
-   于是卡片里的标题、徽章和五个按钮全挤成一坨（用户报「过于紧凑」）。
+   于是卡片里的标题、徽章和五个按钮全挤成一坨（控件会挤在一起）。
    这里把它们补回来 —— 缺的不是间距，是**布局本身**。
 */
 
@@ -1692,7 +1692,7 @@ select option { background: var(--surface); color: var(--fg); }
    「`.field` 里的 input 长什么样」（那是给搜索框写的 190/200px 固定宽 + 30px 右内边距），
    没画「这一行怎么排」—— 于是每个插件各自补一份 `.field` + `.field > .input{width:100%}`，
    补漏的那个就歪：实测 mcloud 的 `#sms-code` 只有 200px、`#pwd-pass` 左边缘还差 12px；
-   yangshipin 的验证码框 200px、上面手机号那格 358px（用户截图报的就是这个）。
+   yangshipin 的验证码框 200px、上面手机号那格 358px。
 
    所以：**排布归面板，插件只写 `<p-field>` 或 `.field` + 控件**，不要再自己写一份。
    判据（对齐 = 同一个左边缘 + 同一个宽度）：弹窗里所有 `.field > 控件` 的
@@ -1772,12 +1772,12 @@ select option { background: var(--surface); color: var(--fg); }
   font-size: 14px; font-weight: 600;
 }
 .dialog-body { overflow: auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-/* 按钮多的时候要能折行（第 255 轮）：cmcc 的「添加账号」底下一排五颗
+/* 按钮多的时候要能折行：cmcc 的「添加账号」底下一排五颗
    （重新验证 / 生成独立设备 / 保存档案 / 取消 / 保存并登录），520px 里已经贴边，
    手机上必然横向溢出到卡片外面。折行只是兜底 —— 放得下就不换行，依旧右对齐。 */
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
-/* ── 错误页（第 166 轮）──
+/* ── 错误页 ──
    404/403/500 都走这张页面：状态码 + 一句人话 + 两个出口 + 错误编号。
    不显示路径、堆栈、SQL、OS 错误 —— 那些只在日志里，靠编号对上。 */
 .error-body {
@@ -1834,7 +1834,7 @@ select option { background: var(--surface); color: var(--fg); }
   flex-wrap: wrap;
 }
 
-/* ── 迁移卡片（第 168 轮）── */
+/* ── 迁移卡片 ── */
 .migrate-card {
   margin: 12px 0 4px;
   padding: 12px 14px;
@@ -1858,7 +1858,7 @@ select option { background: var(--surface); color: var(--fg); }
 .migrate-preview { flex: 1 1 100%; }
 .warn-note { color: var(--warn); }
 
-/* ── 渠道表单（第 170 轮）── */
+/* ── 渠道表单 ── */
 .chan-addbar { margin: 8px 0 4px; }
 .chan-form-box:empty { display: none; }
 .chan-form {
@@ -1890,13 +1890,13 @@ select option { background: var(--surface); color: var(--fg); }
 }
 .row-acts { display: flex; gap: 6px; flex-wrap: wrap; }
 
-/* 表单里的小节标题（第 171 轮） */
+/* 表单里的小节标题 */
 .chan-sub { margin: 6px 0 0; font-size: 12px; font-weight: 600; color: var(--fg-2); }
 
-/* 清单给了 title 时，卡片上补一行真实文件名（第 172 轮） */
+/* 清单给了 title 时，卡片上补一行真实文件名 */
 .plugin-file { font-size: 11px; color: var(--dim); font-family: var(--mono); }
 
-/* ── 编辑器：高亮层 + 行号（第 173 轮）─────────────────────────────────────
+/* ── 编辑器：高亮层 + 行号 ─────────────────────────────────────
    做法是「textarea 透明字 + 底下 pre 上色」：两边字体、行高、padding 必须一模一样，
    差 1px 就会看到重影。所有数值都用变量，改一处两边一起动。 */
 :root {
@@ -1911,10 +1911,10 @@ select option { background: var(--surface); color: var(--fg); }
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   overflow: hidden;
-  /* **定高**（第 189 轮）：行号层 `.code-gutter` 是一个 `pre`，14,726 行就是 29 万像素高，
+  /* **定高**：行号层 `.code-gutter` 是一个 `pre`，14,726 行就是 29 万像素高，
      而 flex 容器的 auto 高度由内容撑开 —— 于是 `.code-editor` 被撑成 29 万像素，
      抽屉变成一条 29 万像素的滚动条，textarea 只有 55vh 那一截，往下全是空行号
-     （用户截图报「编辑源码不能使用」，箭头指的就是那根细得看不见的滚动条）。
+     （滚动条太细，看起来像不能用）。
      定高之后：两层各自在内部滚，sync() 负责对齐 scrollTop/scrollLeft。 */
   height: clamp(240px, 62vh, 820px);
   min-height: 220px;
@@ -1982,7 +1982,7 @@ select option { background: var(--surface); color: var(--fg); }
 /* 选中背景必须**半透明**：这块 bg 画在高亮层（.code-hl）**上面**（textarea z-index:1、
    自己的字是透明的，看得见的字全来自垫底的高亮层）。实底色（比如 --accent-soft 的
    #ecf2fe）会把选区里的语法配色整个盖没 —— 用户看到的就是一排「没有字」的浅蓝块
-   （2026-11-14 用户截图报的）。30% 的 accent 盖上去，字还看得清、选区也够显眼；
+   30% 的 accent 盖上去，字还看得清、选区也够显眼；
    plain 模式（大文件退路，textarea 自己显示文字）同样适用。 */
 .code-editor textarea.editor::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .code-editor textarea.editor::-webkit-scrollbar { width: 12px; height: 12px; }
@@ -2020,7 +2020,7 @@ select option { background: var(--surface); color: var(--fg); }
 .tok-punc { color: var(--fg-2); }
 [data-theme="dark"] .tok-str { color: var(--ok); }
 
-/* ── UI 套件补充控件（第 175 轮）────────────────────────────────────────────
+/* ── UI 套件补充控件 ────────────────────────────────────────────
    p-switch / p-multiselect / p-tabs / p-table / p-code / p-form。
    老规矩：颜色只走 token，尺寸只用变量，两套主题自动跟着变。 */
 
@@ -2108,10 +2108,10 @@ select option { background: var(--surface); color: var(--fg); }
 .pform { display: flex; flex-direction: column; gap: 10px; }
 .pform-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 
-/* 抽屉里的小节标题（第 177 轮） */
+/* 抽屉里的小节标题 */
 .drawer-sub { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--fg-2); }
 
-/* ---------- 通知工作台：左列表 / 右配置（第 186 轮） ---------- */
+/* ---------- 通知工作台：左列表 / 右配置 ---------- */
 
 .notify-work {
   display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 14px;
@@ -2206,7 +2206,7 @@ select option { background: var(--surface); color: var(--fg); }
   .notify-side { gap: 8px; }
 }
 
-/* ── 计划表单（第 110 轮）────────────────────────────────────────────
+/* ── 计划表单 ────────────────────────────────────────────
    全部复用已有 token，不新增颜色字面量。表单本身用 .field-inline 排，
    这里只补「短句」「预览」「高级选项」三块的结构性样式。 */
 #sched-form { display: flex; flex-direction: column; gap: 10px; }
@@ -2215,13 +2215,13 @@ select option { background: var(--surface); color: var(--fg); }
    （否则「09:00 到 18:00」里那个「到」会占掉 69px，把两个时间框挤窄） */
 #sched-form .field-inline > span.muted:first-child { min-width: 5.5em; }
 #sched-form .modal-input { flex: 1 1 8em; min-width: 6em; }
-/* 控件别拉满一整行（第 260 轮，用户截图「宽了点」）：弹窗 560 宽，里面装的是「每天」「10:00」
+/* 控件别拉满一整行：弹窗 560 宽，里面装的是「每天」「10:00」
    这种三五个字的值 —— 铺满 520px 全是空白。按内容给上限，右侧留白反而更好读。 */
 #sched-form .field-inline > .modal-input { flex: 0 1 260px; max-width: 260px; }
 #sched-form .field-inline > .dropdown { flex: 0 1 260px; max-width: 260px; }
 #sched-form .field-inline > input[type="time"] { flex: 0 1 172px; max-width: 172px; }
 #sched-form .field-inline > input[type="number"] { flex: 0 1 110px; max-width: 110px; }
-/* 计划表单里的下拉（第 257 轮）：桌面用自绘的 .dropdown —— 原生 <select> 的**展开态**是
+/* 计划表单里的下拉：桌面用自绘的 .dropdown —— 原生 <select> 的**展开态**是
    系统控件，跟着 OS 主题走，浅色面板里会弹出一块深灰菜单。闭合态必须和 .modal-input 一样：
    32px 高、--surface-2 底、等宽 13px，否则一行七个控件对不齐。 */
 #sched-form .dropdown { flex: 1 1 8em; min-width: 6em; display: flex; }
@@ -2293,7 +2293,7 @@ select option { background: var(--surface); color: var(--fg); }
   word-break: break-word;
 }
 
-/* ---------- 任务操作弹窗（第 256 轮）----------
+/* ---------- 任务操作弹窗 ----------
    任务表行里只留「执行 + ⋯」，其余动作都进这个弹窗，按「会改变什么」分三页：
    运行（动作）/ 计划（就地的 cron 编辑器，不再另开弹窗）/ 详情（原先塞在 title 里的东西）。
    壳子复用 .modal-card + .tabs + .btn；这里只补布局，颜色一律走 token。 */
@@ -2322,9 +2322,9 @@ select option { background: var(--surface); color: var(--fg); }
 .ta-pane > .btn { align-self: flex-start; }
 /* 动作行：标题 + 一句人话。以前这些解释只挂在 title 上，触屏等于没有。 */
 .act-list { display: flex; flex-direction: column; gap: 0; margin: -4px 0; }
-/* 一行动作 = 「标签按钮 + 说明」。**只有标签可点**（第 258 轮，用户截图：
-   「可点击范围太宽容易误触」—— 原来整行都是按钮，右边一大片空白也算命中区）。
-   第 259 轮补布局：标签用**固定列**、说明从同一条竖线开始 —— flex + 换行时每行说明
+/* 一行动作 = 「标签按钮 + 说明」。**只有标签可点**（「可点击范围太宽容易误触」——
+   原来整行都是按钮，右边一大片空白也算命中区）。
+   标签用**固定列**、说明从同一条竖线开始 —— flex + 换行时每行说明
    的起点跟着标签字数跑（执行 / 加载插件 / 删除任务 三个起点），看着像没对齐。 */
 .act-row {
   display: grid; grid-template-columns: 76px minmax(0, 1fr);
@@ -2332,7 +2332,7 @@ select option { background: var(--surface); color: var(--fg); }
 }
 .act {
   justify-self: start; display: inline-flex; align-items: center;
-  /* 不给负 margin：触屏上标签带边框，负 margin 会把它的左边框顶到卡片外（第 259 轮实测截图）。
+  /* 不给负 margin：触屏上标签带边框，负 margin 会把它的左边框顶到卡片外。
      内缩 8px 反而更像一颗按钮。 */
   padding: 4px 8px;
   background: transparent; border: 1px solid transparent; border-radius: 8px;
@@ -2395,8 +2395,7 @@ select option { background: var(--surface); color: var(--fg); }
 .sched-item .field-inline > span.muted:first-child { min-width: 5.5em; }
 /* ⚠ 只能写 background-color：用 `background` 简写会把 select 那条规则画的 chevron
    的 background-repeat/position/size 一起重置。深色主题另有一条只设 background-image 的
-   规则（特异性更高），图还会被加回来 → 于是整块输入框变成「平铺箭头」。
-   第 213 轮用户截图报的就是这个。 */
+   规则（特异性更高），图还会被加回来 → 于是整块输入框变成「平铺箭头」。 */
 .sched-item .modal-input { background-color: var(--surface); }
 #sched-form > button.btn { align-self: flex-start; }
 
@@ -2408,7 +2407,7 @@ select option { background: var(--surface); color: var(--fg); }
   min-width: 6.8em;
 }
 
-/* ---------------------------------------------------------------- 声明式插件页（第 191 轮）
+/* ---------------------------------------------------------------- 声明式插件页
 
    插件只声明面板.json，这一页由面板渲染：页头 + 表单 + 动作按钮 + 数据块。
    颜色全走 token（check-css-tokens.py 会拦未定义变量与 fallback），不加 !important。 */
@@ -2420,7 +2419,7 @@ select option { background: var(--surface); color: var(--fg); }
 .pv-card { margin-bottom: 14px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 /* 表单照「设置 → 配置」的 .cfg-row 排：190px 标签列 + 控件列，控件限宽、
    提示落在控件列下面，行间虚线。抽屉那套 84px 标签 + flex 是给窄容器的，
-   搬到这一整页上就变成一条条通栏输入框（用户截图「有一点丑」就是这个）。 */
+   搬到这一整页上就变成一条条通栏输入框，视觉上过于松散。 */
 .declared-page .schema-form { margin: 2px 0 2px; }
 .declared-page .chan-line {
   display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 6px 14px;
@@ -2458,7 +2457,7 @@ select option { background: var(--surface); color: var(--fg); }
 .pv-kv { grid-template-columns: minmax(90px, 180px) 1fr; }
 .hint-warn { color: var(--warn); }
 
-/* ---------------------------------------------------------------- 移动端基线（第 262 轮）
+/* ---------------------------------------------------------------- 移动端基线
 
    这一块是「手机上怎么用」的唯一出处，放在文件最后（同优先级后者胜，能盖掉前面的规则）。
    起因是一次 390×844 真触摸审计，四个硬问题：

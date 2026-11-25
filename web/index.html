@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>插件面板</title>
-    <!-- 主题必须在**第一帧之前**定下来（第 219 轮，用户反馈 #6「dark 模式刷新闪白」）。
+    <!-- 主题必须在**第一帧之前**定下来（否则 dark 模式刷新时会闪白）。
          首屏 HTML 里写的是 data-theme="light"，用户选的深色是 app.js（255KB，在 body 末尾）
          执行时才挂上去的 —— 中间那段「CSS 已到、脚本还没跑」的窗口里，页面先按浅色画一遍
          再翻成深色，就是那一下白闪。实测（scripts/theme-flash-check.mjs，慢链路）：
@@ -13,7 +13,7 @@
          这里放一个**阻塞的** head 脚本：paint 会等它执行完，顺序就反过来了。
          CSP 是 script-src 'self'，内联脚本一律被拦，所以用这个外部文件（错误页也用它）。 -->
     <script src="/theme-boot.js"></script>
-    <!-- 压缩产物（第 190 轮）：源文件还是 web/app.css、web/app.js 那几个，
+    <!-- 压缩产物：源文件还是 web/app.css、web/app.js 那几个，
          这里加载的是 rolldown + lightningcss 打出来的单文件（改了源文件要跑
          tools/web/build.mjs，scripts/check-web-build.sh 会拦住忘记重建的情况）。 -->
     <link rel="stylesheet" href="/panel.min.css" />
@@ -26,7 +26,7 @@
           <span class="brand-text"><strong>插件面板</strong><span>panel</span></span>
           <button class="icon-btn sidebar-close" id="sidebar-close" type="button" aria-label="收起侧栏">✕</button>
         </div>
-        <!-- 中间段单独滚（第 195 轮，用户报「插件界面加载太多后菜单栏溢出」）：
+        <!-- 中间段单独滚（插件界面加载太多后菜单栏会溢出）：
              侧栏是 100vh 的 flex 列，插件入口一多，把底部的「引擎正常 / 版本 / 令牌」
              整块顶出视口 —— 那些恰恰是一直要看的状态。品牌与底部固定，只让中间滚。 -->
         <div class="sidebar-scroll" id="sidebar-scroll">
@@ -40,7 +40,7 @@
         <a class="nav-item" href="#files" data-view="files"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 11h18"/></svg><span>文件管理</span></a>
         <a class="nav-item" href="#settings" data-view="settings"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span></a>
         </nav>
-        <!-- 插件注册的侧栏入口（host.sidebar，第 139 轮）：没有插件注册时整块隐藏 -->
+        <!-- 插件注册的侧栏入口（host.sidebar）：没有插件注册时整块隐藏 -->
         <div class="nav-group hidden" id="nav-plugins">
           <div class="nav-group-title">插件界面</div>
           <div class="nav" id="nav-plugin-list"></div>
@@ -49,11 +49,11 @@
         <div class="sidebar-foot">
           <div class="engine" id="engine-state"><span class="dot dot-idle"></span><span id="engine-text">连接中…</span></div>
           <div class="meta-row"><span id="version">v—</span><span class="sep">·</span><span id="auth-state">未启用令牌</span></div>
-          <!-- 登出（第 92 轮，用户报「没有退出登录」）：原来只在 设置 → 安全 最底下，
+          <!-- 登出：原来只在 设置 → 安全 最底下，
                翻三层才找得到。侧栏底部一直在眼前，放这儿；没启用令牌时（无可登出）隐藏。 -->
         </div>
       </aside>
-      <!-- 窄屏侧栏是浮层：点遮罩 / 按 Esc 都要能收起（第 24 轮用户报「无法收起」——
+      <!-- 窄屏侧栏是浮层：点遮罩 / 按 Esc 都要能收起 ——
            汉堡按钮当时在侧栏底下，z-index 比它低，根本点不到）。 -->
       <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
 
@@ -67,7 +67,7 @@
             </div>
           </div>
           <div class="topbar-right">
-            <!-- 有新版才出现（第 210 轮）：点开看说明、下载、或「不再提示」 -->
+            <!-- 有新版才出现：点开看说明、下载、或「不再提示」 -->
             <button class="pill pill-accent hidden" id="update-pill" type="button" data-tip="有新版本">
               <span class="label">有新版本</span>
             </button>
@@ -76,7 +76,7 @@
               <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M13.7 19a2 2 0 0 1-3.4 0"/></svg>
               <span class="bell-dot hidden" id="bell-dot"></span>
             </button>
-        <!-- 通知弹层（第 87 轮）：原来放在 .shell 里，position:absolute 找不到已定位的祖先，
+        <!-- 通知弹层：原来放在 .shell 里，position:absolute 找不到已定位的祖先，
              就按文档顶部定位 —— 页面一滚就跟着滚走，用户看不见。现在挂在顶栏右侧里，
              跟着 sticky 顶栏走。 -->
         <div class="notify-pop hidden" id="notify-pop" role="dialog" aria-label="通知">
@@ -94,7 +94,7 @@
           </div>
         </header>
 
-        <!-- 进程内告警（第 71 轮）：数据库自己写不进去的时候，只有这条路能把话说出来。
+        <!-- 进程内告警：数据库自己写不进去的时候，只有这条路能把话说出来。
              内容来自 /api/state 的 alerts（纯内存，不落库）。 -->
         <div class="alerts-bar hidden" id="alerts-bar" role="status" aria-live="polite"></div>
 
@@ -249,16 +249,16 @@
                 <div class="toolbar">
                   <div class="seg" role="group" aria-label="日志级别">
                     <button class="seg-item" type="button" data-level="" aria-pressed="true">全部</button>
-                    <!-- debug（第 255 轮）：空闲卸载 / 装回来了这类生命周期流水。默认在「全部」里
+                    <!-- debug：空闲卸载 / 装回来了这类生命周期流水。默认在「全部」里
                          看得见（只是变灰），嫌吵就点 info / warn / error 任一级别。 -->
                     <button class="seg-item" type="button" data-level="debug" aria-pressed="false">debug</button>
                     <button class="seg-item" type="button" data-level="info" aria-pressed="false">info</button>
                     <button class="seg-item" type="button" data-level="warn" aria-pressed="false">warn</button>
                     <button class="seg-item" type="button" data-level="error" aria-pressed="false">error</button>
                   </div>
-                  <!-- 来源（第 199 轮）：面板自己的 / 插件内部的 / 脚本的 / HTTP 请求失败的。
+                  <!-- 来源：面板自己的 / 插件内部的 / 脚本的 / HTTP 请求失败的。
                        最后一种必须能单独看：有人刷 404/401 时它会以每秒几十条涌进来，
-                       混在一起就把「面板自己在干嘛」冲没了（用户报的就是这个）。 -->
+                       混在一起就把「面板自己在干嘛」冲没了。 -->
                   <div class="seg" role="group" aria-label="日志来源">
                     <button class="seg-item" type="button" data-source="" aria-pressed="true">全部来源</button>
                     <button class="seg-item" type="button" data-source="panel" aria-pressed="false">面板</button>
@@ -284,7 +284,7 @@
           <!-- 插件自己的界面（iframe 嵌进来）：主题由 ?theme= 和 postMessage 同步 -->
           <section class="view hidden" id="view-plugin" data-view="plugin">
             <iframe class="plugin-frame" id="plugin-frame" title="插件界面"></iframe>
-            <!-- 面板替插件渲染的页面（第 191 轮）：插件没写 .webui/ 但清单里声明了
+            <!-- 面板替插件渲染的页面：插件没写 .webui/ 但清单里声明了
                  config.actions / views 时用它。两个容器互斥显示，见 app.js 的 setView。 -->
             <div class="declared-page hidden" id="plugin-declared"></div>
           </section>
@@ -501,7 +501,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
 
     <input id="restore-file" type="file" accept="application/json,.json" hidden />
 
-    <!-- 首次运行：还没有任何口令凭据（第 87 轮）。这不是「登录」，是「设一个」。
+    <!-- 首次运行：还没有任何口令凭据。这不是「登录」，是「设一个」。
          没设也能用（只绑回环），所以给「先不设」的出口 —— 强迫设置会把本地开发的路堵死。 -->
     <div class="gate hidden" id="setup-gate">
       <div class="gate-card">
@@ -566,7 +566,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
             </div>
             <div class="toolbar src-toolbar">
               <span class="src-meta" id="src-meta">—</span>
-              <!-- 跳到行 + 当前行（第 106 轮）：插件打包产物动辄一万多行，纯文本模式又收起了
+              <!-- 跳到行 + 当前行：插件打包产物动辄一万多行，纯文本模式又收起了
                    行号层，没有这两个就等于没有导航 —— 用户「编辑源码不能使用」里有这一半。 -->
               <label class="src-goto">
                 <span>行</span>
@@ -608,7 +608,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       </div>
     </div>
 
-    <!-- 任务操作弹窗（第 256 轮）：行内只留「执行 / ⋯」，其余动作按语义分三页。
+    <!-- 任务操作弹窗：行内只留「执行 / ⋯」，其余动作按语义分三页。
          计划编辑器不再是独立弹窗（以前「⋯ → 改计划 → 又一个弹窗」两级），而是这里的第二页。 -->
     <div class="modal hidden" id="task-action" role="dialog" aria-modal="true" aria-labelledby="task-action-title">
       <div class="modal-backdrop" data-close="1"></div>
@@ -666,7 +666,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
       </div>
     </div>
 
-    <!-- 同名冲突（第 133 轮）：原来是「默认覆盖 + 只说一句已上传」，用户没法判断内容换没换。
+    <!-- 同名冲突：原来是「默认覆盖 + 只说一句已上传」，使用方没法判断内容换没换。
          现在把选择权交回来：覆盖 / 重命名 / 取消。 -->
     <div class="modal hidden" id="clash" role="dialog" aria-modal="true" aria-labelledby="clash-title">
       <div class="modal-backdrop" data-close="1"></div>
@@ -687,7 +687,7 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
 
     <div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
     <div class="toast hidden" id="toast" role="status"></div>
-    <!-- 右上角常驻提示（第 134 轮）：要读的信息不该 2.6 秒就消失，用户自己关。 -->
+    <!-- 右上角常驻提示：要读的信息不该 2.6 秒就消失，用户自己关。 -->
     <div class="notices" id="notices" aria-live="polite"></div>
     <!-- 一个文件代替原来 highlight.js + schedule.js + app.js 三个：它们的加载顺序
          就是打包顺序，别在 index.html 里拆开（拆开会重复声明同名顶层 const）。 -->

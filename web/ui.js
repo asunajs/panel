@@ -1,5 +1,5 @@
 /*!
- * 面板 UI 套件（第 139 轮）—— 插件页引这一个 + /app.css，就有和面板一样的控件与主题。
+ * 面板 UI 套件 —— 插件页引这一个 + /app.css，就有和面板一样的控件与主题。
  *
  * 用法：
  *   <link rel="stylesheet" href="/app.css">        <!-- token + 组件样式 -->
@@ -29,7 +29,7 @@
 
   // ⚠ `?theme=` 只在**第一帧**说得上话：用户之后在面板里切主题时，
   // 它是过期信息（URL 不会变）。原来一直优先读它，于是「切了深色又被 storage 事件拉回浅色」
-  // —— 消息确实到了，界面纹丝不动（第 140 轮实测）。收到过父窗口的消息就把它作废。
+  // —— 消息确实到了，界面纹丝不动（实测如此）。收到过父窗口的消息就把它作废。
   const urlTheme = new URLSearchParams(location.search).get('theme');
   let urlWins = urlTheme === 'light' || urlTheme === 'dark';
 
@@ -89,7 +89,7 @@
    *
    * 也可以不写 <option>，用 `options='[{"value":"a","label":"账号 A"}]'`。
    * 外观照 TDesign 的 Select：一个触发器（底色/边框和 .input 一致）+ 浮层列表 +
-   * 选中项打勾。原生 <select> 那张脸由 /app.css 拉齐，但列表没法自定义 —— 要完全一致就用这个。
+   * 选中项打勾。原生 <select> 那张脸由 /app.css 对齐，但列表没法自定义 —— 要完全一致就用这个。
    *
    * 读值：`el.value`；改值会冒 `change`（`detail.value` 也带着）和 `input`。
    */
@@ -97,7 +97,7 @@
    * 所有 p-select 共用的「点外面收起」。
    *
    * 为什么共享而不是每实例一个：一个页面上可能有七八个下拉，每个都在 document 上挂一个捕获
-   * 监听，既浪费又互相踩（第 144 轮实测：点 body 收不起来，但手动调实例自己的处理函数就正常）。
+   * 监听，既浪费又互相踩（实测：点 body 收不起来，但手动调实例自己的处理函数就正常）。
    * 共享版只挂一次，按「现在开着哪些面板」扫，动态加进来的实例自动算数。
    */
   let outsideCloseInstalled = false;
@@ -545,9 +545,9 @@
       close.addEventListener('click', () => this.removeAttribute('open'));
       head.append(t, close);
       dlg.prepend(head);
-      // 内容区（第 255 轮）：`.dialog` 有 max-height，但**没有滚动区**时，多出来的一截连
+      // 内容区：`.dialog` 有 max-height，但**没有滚动区**时，多出来的一截连
       // 按钮行会被画到卡片外面 —— cmcc 的「添加账号」就是这么坏的：按钮行落到遮罩上、
-      // 半透明地压在页面背景上（用户截图）。
+      // 半透明地压在页面背景上。
       // `.dialog-body { overflow:auto; min-height:0 }` 早就在 app.css 里，只是没人替插件包上；
       // 而文档里的标准写法（p-field 直接摆在 <p-dialog> 里）恰好是**没包**的那种。
       // 所以：插件自己包了 .dialog-body 就原样用；没包就替它包一层，
@@ -1011,7 +1011,7 @@
     }
     /** 按钮可不可点：整体禁用 / 发码请求中 / 倒计时里 / 位数不满，任一都不行。
      *  ⚠ 倒计时自己每秒都会写一次 disabled，这里不排它的话「重新获取（N 秒）」
-     *    会被重画重新点亮（mcloud 第 145 轮踩过：每次 load() 重画都走到这）。 */
+     *    会被重画重新点亮（mcloud：每次 load() 重画都会走到这里）。 */
     _gate() {
       if (!this._btn) return;
       const ok =
@@ -1101,7 +1101,7 @@
    *
    *  ⚠ 别只给时分秒：日志跨天之后就分不清是哪天 —— 面板自己的日志页在 2026-11-15
    *  就被用户指着说过一次（`docs/review-20261115.md` 的 C3，用户原话「隔天翻日志不知道哪天」），
-   *  当时的修法是 `fmtLogTime` = 月-日 + 时分秒、时间列 118px。第 197 轮做这个控件时
+   *  当时的修法是 `fmtLogTime` = 月-日 + 时分秒、时间列 118px。做这个控件时
    *  又只写了时分秒，用户第二次指出来（「时间又是只有小时」）。这里跟面板的日志页对齐。
    *
    *  毫秒留着：一轮任务里同一秒会打好几行，`09:19:09.880` / `.881` 的顺序是有意义的。
@@ -1217,7 +1217,7 @@
      *
      *  ⚠ 名字**不能叫 `append`**：那是 `Element.prototype.append`，覆盖掉之后
      *  `build()` 里的 `host.append(box)` 会被当成"画一行日志"，整个控件就渲染成空壳
-     *  （`children=0` 但 `_body` 又是有的 —— 第 197 轮自己踩过）。 */
+     *  （`children=0` 但 `_body` 又是有的 —— 判空要同时看两者）。 */
     addLine(lv, ts, text, id, before) {
       const body = this._body;
       if (!body) return null;
@@ -1416,7 +1416,7 @@
   // 为什么要有：插件里到处是 `confirm('确定删除？')` / `prompt('这个账号叫什么？')`。
   // 那是**浏览器的原生对话框** —— 它是另一个窗口（macOS 上跑到屏幕中间），
   // 和面板长得完全不一样；在 iframe 里还可能被浏览器拦掉；移动端更是丑得没法看。
-  // 面板自己从第 100 轮起就不用原生框了（自绘 askConfirm），但插件一直没得用。
+  // 面板早就不再用原生框了（自绘 askConfirm），但插件一直没得用。
   //
   // 这两个函数用面板自己的 `.dialog*` 画，返回 Promise：
   //   await PanelUI.confirm('删掉它？')                    → true / false
@@ -1429,7 +1429,7 @@
     back.className = 'dialog-back';
     // 打个标记：页面上可能已经有插件自己的 `<p-dialog>`（也是 .dialog-back），
     // 测试和插件想「只找确认框」时靠它，别用 document.querySelector('.dialog-back') ——
-    // 那会拿到先出现的那个（第 197 轮门禁自己踩了一次）。
+    // 那会拿到先出现的那个（门禁自己踩了一次）。
     back.dataset.panelDialog = parts.kind || 'confirm';
     const dlg = document.createElement('div');
     dlg.className = 'dialog';
@@ -1545,7 +1545,7 @@
 
   // ── 给插件页的纯函数（不碰网络、不碰布局）────────────────────────────
   //  这四个东西四个插件的 webui 各实现过一遍：掩码、时间格式、提示行、忙碌按钮。
-  //  收在面板一处，插件调用即可；口径要改只改这里（第 246 轮）。
+  //  收在面板一处，插件调用即可；口径要改只改这里。
   const pMask = (v, head = 3, tail = 4) => {
     const s = v === undefined || v === null ? '' : String(v);
     if (s === '' || s.length <= head + tail) return s;
@@ -1605,7 +1605,7 @@
   };
 
   /**
-   * 插件页调自己后端的统一入口（第 248 轮收口 —— 四个插件各写了一份 call/api/post）。
+   * 插件页调自己后端的统一入口（原先是四个插件各写一份 call/api/post）。
    *
    * 语义（**定死**，别再各写一套）：
    *   · 2xx 且是 JSON → resolve 解析后的对象
@@ -1678,7 +1678,7 @@
     return data;
   }
 
-  // ── 插件版本（第 257 轮）───────────────────────────────────────────────
+  // ── 插件版本 ───────────────────────────────────────────────
   //  插件页要显示「当前装的是哪一版」，但版本的真源是面板读的清单（`<name>.panel.json`）——
   //  插件自己也有一份（package.json / 源码常量），多一份就多一次漂移的机会。
   //  这里统一从面板的 `/api/plugins/files` 取（同源会话 cookie 就够，插件页不需要令牌）。
