@@ -174,12 +174,12 @@
    `--success` / `--warning` / `--border` 双方同名，什么都不用写。
 
    它的组件局部变量（`--pd-menu-*` / `--pd-tooltip-*` / `--pd-popconfirm-*`）
-   自己兜底到这一层，所以不需要我们操心。 */
+   通过上游的 fallback 链读到这一层，不需要重复定义 `--pd-*`。 */
 :root {
   /* 颜色：我们有分层语义（surface / error / warning），它是直白的颜色名 */
   --panel: var(--surface);
   --panel-2: var(--surface-2);
-  --panel-3: var(--surface-2); /* 我们没有第三层，退到第二层 —— 比让它兜底成 Canvas 好 */
+  --panel-3: var(--surface-2); /* 没有第三层语义时复用第二层，避免落到上游 Canvas 默认色 */
   --muted: var(--text-dim);
   --red: var(--error);
   --danger: var(--error);

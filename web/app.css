@@ -1774,7 +1774,7 @@ select option { background: var(--surface); color: var(--fg); }
 .dialog-body { overflow: auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 /* 按钮多的时候要能折行：cmcc 的「添加账号」底下一排五颗
    （重新验证 / 生成独立设备 / 保存档案 / 取消 / 保存并登录），520px 里已经贴边，
-   手机上必然横向溢出到卡片外面。折行只是兜底 —— 放得下就不换行，依旧右对齐。 */
+   手机上必然横向溢出到卡片外面。空间足够时保持一行，不足时换行并右对齐。 */
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
 /* ── 错误页 ──

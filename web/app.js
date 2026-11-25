@@ -526,8 +526,7 @@ function renderCards() {
       ? s.js_memory_measured + '/' + s.js_memory_total + ' 个 runtime（在跑的不计入）'
       : '各 runtime 合计';
   const heartbeat = s.heartbeat_ms === undefined ? '—' : s.heartbeat_ms.toFixed(1);
-  // 磁盘余量**不上仪表盘**：读数留着走 /api/state，
-  // 余量低于 500 MiB 时由服务端推 alert —— 静默故障的兜底不需要占一张卡的位置。
+  // 磁盘余量**不上仪表盘**：读数留在 /api/state，低于 500 MiB 时由服务端发 alert。
   // 只有「卡片数量」变了才重建；数字（运行时长/圈数/心跳/库大小）每轮都在变，
   // 走 setCard 原地改 —— 每 5s 重造 12 张卡是这页「DOM 节点只涨不跌」的主犯。
   const built =
@@ -649,8 +648,8 @@ function td(label, cls, text) {
   return cell;
 }
 
-// 默认预算（毫秒）：**服务端说了算**（PANEL_BUDGET_MS 可改），前端只是没拿到时兜底。
-// 以前这里写死 30000，服务端一改默认值，脚本编辑器就显示成 30 秒 —— 两处各写一份必然漂。
+// 默认预算（毫秒）：优先用服务端的 default_budget_ms；缺失或非正数时显示 300000（5 分钟）。
+// 这个数值只影响前端显示，运行时预算仍由服务端配置决定。
 function defaultBudgetMs() {
   const s = state.stats || {};
   const n = Number(s.default_budget_ms);
@@ -2615,7 +2614,9 @@ async function renderPluginDeclared(name) {
   clear(host);
   const man = data.manifest || {};
   const cfgObj = data.config || {};
-  const d = declaredOf(name); // 以 /api/state 那份为准（和侧栏一致）；config 接口只用来兜底
+  // 优先用 /api/state 的 manifest，与侧栏一致；state 未加载或字段为空时，
+  // fields/actions/views 逐项改用 config 接口返回的 manifest。
+  const d = declaredOf(name);
   const fields = d.fields.length ? d.fields : ((man.config && man.config.fields) || []);
   const actions = d.actions.length ? d.actions : ((man.config && man.config.actions) || []);
   const views = d.views.length ? d.views : (man.views || []);
