@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 const wsPort = Number(process.argv[2] || 9911);
 const smtpPort = Number(process.argv[3] || 9925);
 
-// ---------------------------------------------------------------- WebSocket echo
+// WebSocket echo
 const ws = net.createServer((sock) => {
   let handshaken = false;
   let buf = Buffer.alloc(0);
@@ -81,7 +81,7 @@ const ws = net.createServer((sock) => {
 });
 ws.listen(wsPort, '0.0.0.0', () => console.log('[ws] echo on 0.0.0.0:' + wsPort));
 
-// ---------------------------------------------------------------- 假 SMTP
+// 假 SMTP
 const smtp = net.createServer((sock) => {
   let data = false;
   let buf = '';
@@ -115,14 +115,14 @@ const smtp = net.createServer((sock) => {
 });
 smtp.listen(smtpPort, '0.0.0.0', () => console.log('[smtp] fake on 0.0.0.0:' + smtpPort));
 
-// ---------------------------------------------------------------- 本地 HTTP（给 fetch/http_fetch 用，离线可跑）
+// 本地 HTTP（给 fetch/http_fetch 用，离线可跑）
 import http from 'node:http';
 import zlib from 'node:zlib';
 const httpPort = Number(process.argv[4] || 9910);
 /** `/gzip` 的明文（自检要断言 host.fetch 拿到的是这段，不是乱码）。 */
 const GZIP_PLAIN = 'gzip-plain-text-from-test-server';
 const web = http.createServer((req, res) => {
-  // 压缩对端（第 253 轮）：上游回 gzip 体，面板侧应当在 Rust 里解开再交给插件。
+  // 压缩对端：上游回 gzip 体，面板侧应当在 Rust 里解开再交给插件。
   if ((req.url || '').startsWith('/gzip')) {
     const body = zlib.gzipSync(Buffer.from(GZIP_PLAIN, 'utf8'));
     res.writeHead(200, {

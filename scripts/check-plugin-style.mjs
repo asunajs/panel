@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 插件样式的静态闸门（第 156 轮）。
+// 插件样式的静态闸门。
 //
 // 为什么要有：一次「修 bug」把 plugins/mcloud.webui/style.css 的 token 映射整段换成了
 // 旧面板的名字（--fg: var(--text)），0.4.0 里根本没有 --text —— 于是 --fg 变无效值，
@@ -130,13 +130,13 @@ for (const file of files) {
   // 免得它拦住正常部署。
 }
 
-// R9 LLRT 没有的 `node:fs` 方法（第 198 轮）
+// R9 LLRT 没有的 `node:fs` 方法
 //
 // LLRT 的 `node:fs` 是**子集**（面板仓 docs/engine.md 记着：17 / 105）。实测存在的是：
 //   accessSync chmodSync existsSync lstatSync mkdirSync mkdtempSync readFileSync readdirSync
 //   renameSync rmSync rmdirSync statSync symlinkSync writeFileSync（+ constants / promises）
 //
-// **`existsSync` 从第 253 轮起有了**（面板侧补的：Node 语义，任何错误都当 false、不抛）。
+// **`existsSync` 从有了**（面板侧补的：Node 语义，任何错误都当 false、不抛）。
 // 余下这些仍然没有：`unlinkSync` / `appendFileSync` / `copyFileSync` / `realpathSync` / `openSync`。
 // 而 Node 有 —— 所以 TS 里 `import fs from 'node:fs'` 一路编译通过，装到面板上第一次读配置
 // 就 `TypeError: not a function`（cmcc 就这么炸的：`/plugins/cmcc/api/status` 502 plugin_busy，
@@ -175,11 +175,11 @@ for (const file of files) {
   }
 }
 
-// R8 原生对话框（第 197 轮）：插件里不许再用 confirm() / alert() / prompt()。
+// R8 原生对话框：插件里不许再用 confirm() / alert() / prompt()。
 //
 // 为什么：那是**浏览器自己的窗口** —— macOS 上跑到屏幕正中、和面板完全不是一个东西
 // （用户截图就是那块「localhost:3030 显示 …」），iframe 里还可能被浏览器直接拦掉。
-// 面板自己第 100 轮起就不用了（自绘 askConfirm），插件现在也有：`PanelUI.confirm()` /
+// 面板自己就不用了（自绘 askConfirm），插件现在也有：`PanelUI.confirm()` /
 // `PanelUI.prompt()`（都在 /ui.js 里，返回 Promise）。
 //
 // 只提醒不拦部署：`alert()` 在某些调试分支里无害，但正经的交互都该换掉。
@@ -209,8 +209,8 @@ for (const file of files) {
   }
 }
 
-// R7 手搓发码格（第 195 轮）：面板早就把「手机号 + 行内获取验证码 + 重发倒计时」做成
-// 共享控件 <p-sms-code>（web/ui.js，第 182 轮从 mcloud 登录页提上来的）。但控件做完之后
+// R7 手搓发码格：面板早就把「手机号 + 行内获取验证码 + 重发倒计时」做成
+// 共享控件 <p-sms-code>（web/ui.js，从 mcloud 登录页提上来的）。但控件做完之后
 // 各插件还在各写一遍——同一格三种长相、倒计时三份实现、关弹窗不停定时器各踩一次。
 // 所以这里只提醒、不拦部署：命中「11 位手机号输入框 + 带验证码字样的按钮 + 没有 p-sms-code」。
 //

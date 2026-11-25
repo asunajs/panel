@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 改口令 / 重置口令（第 181 轮）端到端：
+# 改口令 / 重置口令端到端：
 #   WebUI 路由 POST /api/auth/token —— 旧口令 + 新口令，写完立即生效，所有旧会话票失效
 #   CLI  panel token reset —— 离线重置（要旧口令干什么？能读 auth.json 的人本来就能离线爆破）
 #

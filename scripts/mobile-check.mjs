@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 移动端审计（第 262 轮）：在 390×844 @3x + 真触摸下把**每个页面**量一遍。
+// 移动端审计：在 390×844 @3x + 真触摸下把**每个页面**量一遍。
 //
 // 为什么单独一个脚本（而不是只靠 ui-check）：ui-check 是「断言」——它只说红绿，
 // 不说「哪一页的哪个元素超了多少」。移动端的问题是**成片**的（输入框字号、
@@ -24,7 +24,7 @@ const CDP_PORT = Number(process.env.MOBILE_CHECK_CDP_PORT || 9341);
 const SHOTS = process.argv.includes('--shots');
 const ROOT = process.cwd();
 const BIN = path.join(ROOT, 'target', 'debug', 'panel');
-// 用固定标识重签一次（第 269 轮）：不签的话每跑一次门禁就弹一轮「正在验证 panel-<哈希>」，
+// 用固定标识重签一次：不签的话每跑一次门禁就弹一轮「正在验证 panel-<哈希>」，
 // 那个框只有最小化按钮 ⇒ Dock 里攒一堆关不掉的空白图标。见 scripts/sign-panel.sh。
 try {
   execFileSync('bash', [path.join(ROOT, 'scripts', 'sign-panel.sh'), BIN], { stdio: 'ignore' });
@@ -220,7 +220,7 @@ async function main() {
   await sleep(400);
 
   const rows = [];
-  // 文件管理（第 270 轮）：这页有三张表，手机上最容易横向溢出 —— 也要量。
+  // 文件管理：这页有三张表，手机上最容易横向溢出 —— 也要量。
   const views = ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'files', 'settings'];
   for (const v of views) {
     await js("location.hash = '#" + v + "'");
@@ -265,7 +265,7 @@ async function main() {
     console.log('（seed.webui 没被面板识别 —— 界面文件没放到 <plugins>/seed.webui/index.html？）');
   }
 
-  // ---------------------------------------------------------------- 报表
+  // 报表
   const bad = (r) => r.overflow > 1 || r.small.length || r.tiny.length || r.text.length;
   console.log('');
   console.log('页面'.padEnd(22) + '溢出  字号<16  触屏<40  文字溢出');

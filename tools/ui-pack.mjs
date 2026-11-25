@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 界面包打包（第 265 轮）。
+// 界面包打包。
 //
 // 为什么单独一个脚本：面板的 `web/` 是**编进二进制**的（`include_str!`），所以「只改前端」
 // 过去只能靠重编译 + 重发整个面板。界面包把同一份字节打成 ~300 KB 的 zip，
@@ -61,7 +61,7 @@ function requiredFiles() {
   return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
-// ---------------------------------------------------------------- 最小 zip 写出器
+// 最小 zip 写出器
 // 与 scripts/zip.mjs 同源：固定时间戳，产物可复现。
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -141,7 +141,7 @@ function makeZip(entries) {
   return Buffer.concat([...locals, ...centrals, end]);
 }
 
-// ---------------------------------------------------------------- 主流程
+// 主流程
 const panel = panelVersion();
 const version = `${panel}.${SEQ}`;
 const allowed = allowedFiles();

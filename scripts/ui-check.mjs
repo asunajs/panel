@@ -21,7 +21,7 @@ const CDP_PORT = Number(process.env.UI_CHECK_CDP_PORT || 9334);
 const KEEP = process.argv.includes('--keep');
 const ROOT = process.cwd();
 const BIN = path.join(ROOT, 'target', 'debug', 'panel');
-// 用固定标识重签一次（第 269 轮）：不签的话每跑一次门禁就弹一轮「正在验证 panel-<哈希>」，
+// 用固定标识重签一次：不签的话每跑一次门禁就弹一轮「正在验证 panel-<哈希>」，
 // 那个框只有最小化按钮 ⇒ Dock 里攒一堆关不掉的空白图标。见 scripts/sign-panel.sh。
 try {
   execFileSync('bash', [path.join(ROOT, 'scripts', 'sign-panel.sh'), BIN], { stdio: 'ignore' });
@@ -54,7 +54,7 @@ async function waitFor(fn, ms, label) {
   }
 }
 
-// ---------------------------------------------------------------- 面板
+// 面板
 
 const dir = mkdtempSync(path.join(tmpdir(), 'ui-check-'));
 const plugins = path.join(dir, 'plugins');
@@ -64,8 +64,8 @@ mkdirSync(scripts, { recursive: true });
 
 // 种子插件：一个能手动跑的 handler（真跑出来的运行记录比塞库更可信），
 // 外加一个会失败的，用来验「只看失败」和搜索错误文本。
-// 一个脚本（第 177 轮）：脚本源码复用插件那个编辑器，高亮要跟着走
-// 第 189 轮：脚本源码故意写长（1200 行）。行号层是一个 `pre`，它会按全文行数把
+// 一个脚本：脚本源码复用插件那个编辑器，高亮要跟着走
+// 脚本源码故意写长（1200 行）。行号层是一个 `pre`，它会按全文行数把
 // `.code-editor` 撑高 —— 500 行时只是抽屉长得难看，14,726 行（mcloud.js）时抽屉变成
 // 29 万像素高，textarea 只占 55vh、往下全是空行号，用户报「编辑源码不能使用」。
 // 这里用 1200 行当探子，编辑器高度必须有界。
@@ -75,7 +75,7 @@ writeFileSync(
     .concat(Array.from({ length: 1200 }, (_, i) => '// pad ' + i))
     .concat(['return a;', '']).join('\n'),
 );
-// 第 106 轮：再放一个**超 20 万字符**的脚本，用来钉「纯文本模式」（折行、行号层收起、跳到行）。
+// 再放一个**超 20 万字符**的脚本，用来钉「纯文本模式」（折行、行号层收起、跳到行）。
 // 20 万是 highlight.js 的 MAX：超过就不上色、不画行号树。
 writeFileSync(
   path.join(scripts, 'big-script.js'),
@@ -86,17 +86,17 @@ writeFileSync(
 
 writeFileSync(path.join(plugins, 'seed.js'), [
   "import host from 'panel:host';",
-  // 侧栏一格（第 182 轮）：插件导航 ⇄ 主导航的切换要有真插件可点（回归那个
+  // 侧栏一格：插件导航 ⇄ 主导航的切换要有真插件可点（回归那个
   // 「从插件页点仪表盘没反应」的坑），iframe 里是 404 无所谓 —— 断言只看视图切换。
   "await host.sidebar({ title: '种子', order: 99 });",
   "await host.register_handler('ok', async () => { await host.sleep(5); return 1; });",
   "await host.register_handler('boom', async () => { throw new Error('boom-marker'); });",
-  // 第 227 轮：慢任务 —— 「忙的时候第二次执行要排队」「运行中显示已跑时长」都靠它
+  // 慢任务 —— 「忙的时候第二次执行要排队」「运行中显示已跑时长」都靠它
   "await host.register_handler('slow', async () => { await host.sleep(2500); return 1; });",
   "await host.register_cron('tick', '@every 30s');",
 ].join('\n'));
 
-// 第 109 轮的分组断言要两种分支都有样本：
+// 分组断言要两种分支都有样本：
 //   seed + seed-extra 同前缀 → 「seed 系列（2）」，带组级批量按钮
 //   lonely              单独 → 并进「独立插件」，不带批量按钮
 for (const [name, extra] of [['seed-extra', '同前缀第二个'], ['lonely', '单个']]) {
@@ -107,7 +107,7 @@ for (const [name, extra] of [['seed-extra', '同前缀第二个'], ['lonely', '�
   ].join('\n'));
 }
 
-// 文件管理页的种子（第 270 轮）：三种要能被判出来的东西各一份 ——
+// 文件管理页的种子：三种要能被判出来的东西各一份 ——
 //   ① 收拢目录 + 顶层旧 .js 并存（升级残留，最危险的那种：跑旧代码）
 //   ② 一个 .bak（备份，可清）
 //   ③ 回收站里一项能恢复的（删除 → 恢复的往返要在真界面上验）
@@ -127,7 +127,7 @@ writeFileSync(path.join(plugins, 'leftover.js.bak'), '// 手工备份，面板�
 mkdirSync(path.join(dir, 'trash'), { recursive: true });
 writeFileSync(path.join(dir, 'trash', '1795600000000-scripts-gone.sh'), '#!/bin/sh\n');
 
-// 声明式页面的种子（第 191 轮）：没有 .webui/、没注册 sidebar，界面全靠清单。
+// 声明式页面的种子：没有 .webui/、没注册 sidebar，界面全靠清单。
 writeFileSync(path.join(plugins, 'declared.js'), "import host from 'panel:host';\n\n// \u58f0\u660e\u5f0f\u9875\u9762\u7684\u79cd\u5b50\u63d2\u4ef6\uff08\u7b2c 191 \u8f6e\uff09\uff1a**\u6ca1\u6709 .webui/\u3001\u4e5f\u6ca1\u6ce8\u518c sidebar** \u2014\u2014\n// \u4fa7\u680f\u90a3\u4e00\u683c\u3001\u8868\u5355\u3001\u6309\u94ae\u3001\u6570\u636e\u5757\u5168\u90e8\u6765\u81ea declared.panel.json\u3002\n// \u6570\u636e\u53ea\u653e\u5185\u5b58\uff1a\u8fd9\u8f6e\u8981\u65ad\u7684\u662f\u300c\u9762\u677f\u80fd\u4e0d\u80fd\u6309\u58f0\u660e\u628a\u4ea4\u4e92\u8dd1\u8d77\u6765\u300d\uff0c\u4e0d\u662f\u5b58\u50a8\u3002\nlet accounts = [];\nlet polls = 0;\nconst IMG = { data_url: 'data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2220%22%3E%3C/svg%3E' };\n\nawait host.register_handler('send_code', async (evt) => {\n  if (!String((evt.body && evt.body.account) || '').trim()) return { ok: false, error: 'no account' };\n  return { ok: true, message: '\u9a8c\u8bc1\u7801\u5df2\u53d1\u9001\uff08\u79cd\u5b50\uff09', keep: { ticket: 'tk-1' }, cooldown_s: 3 };\n});\n\nawait host.register_handler('login', async (evt) => {\n  const bag = evt.bag || {};\n  if (!bag.ticket) return { ok: false, error: '\u5148\u53d1\u7801' };\n  if (!String((evt.body && evt.body.captcha) || '').trim()) {\n    return { ok: false, error: '\u8bf7\u8f93\u5165\u56fe\u5f62\u9a8c\u8bc1\u7801', image: IMG, keep: { ticket: 'tk-1' } };\n  }\n  if (!accounts.length) {\n    accounts = [\n      { name: 'seed-a', expire: '+30 \u5929', status: 'ok', note: '\u6b63\u5e38' },\n      { name: 'seed-b', expire: '+3 \u5929', status: 'warn', note: '\u5feb\u5230\u671f' },\n      { name: 'seed-c', expire: '\u5df2\u8fc7\u671f', status: 'err', note: '\u5931\u6548' },\n    ];\n  }\n  return { ok: true, message: '\u767b\u5f55\u6210\u529f bag=' + (bag.ticket ? 'yes' : 'no'), values: { code: '' } };\n});\n\nawait host.register_handler('qr_start', async () => ({\n  ok: true, message: '\u626b\u7801\u4e2d', image: IMG, keep: { t: Date.now() },\n  poll: { handler: 'qr_state', interval_ms: 500, timeout_ms: 6000 },\n}));\n\nawait host.register_handler('qr_state', async () => {\n  polls += 1;\n  if (polls >= 2) { polls = 0; return { done: true, ok: true, message: '\u626b\u7801\u6210\u529f\uff08\u79cd\u5b50\uff09' }; }\n  return { done: false };\n});\n\nawait host.register_handler('boom', async () => {\n  throw new Error('\u79cd\u5b50\u5931\u8d25\u6807\u8bb0');\n});\n\nawait host.register_handler('accounts', async () => accounts);\nawait host.register_handler('quota', async () => ({ \u8d26\u53f7\u6570: accounts.length, \u989d\u5ea6: '1 GB' }));\nawait host.register_handler('events', async () => [\n  { what: '\u4e8b\u4ef6\u4e00', when: '\u521a\u521a', detail: 'a' },\n  { what: '\u4e8b\u4ef6\u4e8c', when: '1 \u5206\u949f\u524d', detail: 'b' },\n  { what: '\u4e8b\u4ef6\u4e09', when: '\u6628\u5929', detail: 'c' },\n]);\nawait host.register_handler('big', async () => {\n  const rows = [];\n  for (let i = 1; i <= 300; i += 1) rows.push({ '#': i, name: 'row-' + i });\n  return rows;\n});\n");
 writeFileSync(path.join(plugins, 'declared.panel.json'), JSON.stringify({
   "title": "声明插件",
@@ -334,7 +334,7 @@ async function main() {
     p.stdin.end(seedSql);
   });
 
-  // ---------------------------------------------------------------- 浏览器
+  // 浏览器
 
   browser = spawn(browserBin, [
     '--headless=new',
@@ -367,7 +367,7 @@ async function main() {
   await cdp.send('Page.navigate', { url });
   await sleep(1500);
   const js = (expr) => cdp.eval(expr);
-  /** 最近一条提示的文本：**两个通道都看**（第 134 轮起要读的信息走右上角 #notices）。
+  /** 最近一条提示的文本：**两个通道都看**（要读的信息走右上角 #notices）。
    *  断言不该关心走哪条通道，只关心「用户看到的那句话」。 */
   const lastMsg = async () => {
     // 短结果走 toast（正在显示就是最新的），长提示/错误在 #notices 里
@@ -381,14 +381,14 @@ async function main() {
     return arr && arr.length ? arr[arr.length - 1] : '';
   };
 
-  // ---------------------------------------------------------------- 断言
+  // 断言
 
   check('页面标题是「插件面板」', (await js('document.title')).includes('插件'), await js('document.title'));
 
   const views = await js("JSON.stringify([...document.querySelectorAll('.nav-item, [data-view]')].length)");
   check('侧栏有导航项', Number(views) >= 5, 'nav 项 ' + views);
 
-  // 首次运行：没有口令凭据时要主动请他设一个（第 87 轮，0.4.0 的「口令初始化」）。
+  // 首次运行：没有口令凭据时要主动提示设一个（0.4.0 的「口令初始化」）。
   // 这个用例的面板本来就没设令牌，正好是首次运行的现场。
   const setupVisible = await js("!document.getElementById('setup-gate').classList.contains('hidden')");
   check('没有口令时弹出「设置口令」', setupVisible === true, String(setupVisible));
@@ -398,7 +398,7 @@ async function main() {
   check('点「先不设」后收起，且记住了选择',
     setupHidden === true && (await js("localStorage.getItem('panel.skipSetup')")) === '1', String(setupHidden));
 
-  // 插件导航 ⇄ 主导航（第 182 轮修的坑：插件导航原来 preventDefault + 直接 setView，
+  // 插件导航 ⇄ 主导航（修的坑：插件导航原来 preventDefault + 直接 setView，
   // hash 不动 —— 从插件页点「仪表盘」（href="#dashboard"）时 hash 没变、没有 hashchange，
   // 界面就赖在插件页，先切到别的页再点才好）。走**真点击**（锚链接默认行为），跟用户的路径一样。
   const plugNav = await js(
@@ -429,7 +429,7 @@ async function main() {
     'hash=' + (await js('location.hash')),
   );
 
-  // 第 190 轮：错误页会被装进**插件 iframe**（`/plugins/<不存在>/` 就是那个 404）。
+  // 错误页会被装进**插件 iframe**（`/plugins/<不存在>/` 就是那个 404）。
   // 它的「回面板首页」必须 target="_top"，否则导航的是 iframe 自己 → 面板套面板
   // （用户截图：地址栏 #plugin:mgmusic1，里面又套了一个完整的面板）。
   // fetch 偶尔会第一次就 Failed to fetch（面板刚起来 / devtools 通道抖）：重试几次，
@@ -488,7 +488,7 @@ async function main() {
   const ghostCount = await js("document.getElementById('runs-count').textContent");
   check('筛选后计数跟着变', /共 40/.test(ghostCount || ''), ghostCount);
 
-  // ---------------------------------------------------------------- 日志页
+  // 日志页
   // 搜索/等级一律走服务端：屏幕外的历史也要能搜到、能往前翻。
   await js("location.hash = '#logs'");
   await sleep(1200);
@@ -505,7 +505,7 @@ async function main() {
   await js("(()=>{const i=document.getElementById('log-search'); i.value=''; i.dispatchEvent(new Event('input',{bubbles:true}));})()");
   await sleep(800);
   await js("[...document.querySelectorAll('.seg-item')].find(b=>b.dataset.level==='error').click()");
-  // 等筛选真的生效（服务端往返 + 重画）：睡死固定时间会偶发红（第 131 轮撞到一次）。
+  // 等筛选真的生效（服务端往返 + 重画）：睡死固定时间会偶发红（撞到一次）。
   const onlyErr = await waitFor(async () => {
     const all = await js("[...document.querySelectorAll('#logs-view .level')].every(e=>e.textContent==='error')");
     const foot = await js("document.querySelector('.log-foot')?.textContent.replace(/\\s+/g,' ') || ''");
@@ -530,7 +530,7 @@ async function main() {
   const notifyVisible = await js("(()=>{const e=document.getElementById('notify-work'); if(!e) return 'missing'; return e.getBoundingClientRect().height>0?'visible':'hidden';})()");
   check('通知页签显示两栏工作台', notifyVisible === 'visible', notifyVisible);
 
-  // ── 通知：左推送 / 右配置（第 186 轮）────────────────────────────────
+  // 通知：左推送 / 右配置
   // 空态：不许再把一段死 JSON 当主内容（上一版就是这里被打回的）
   const emptyMain = await js("document.getElementById('notify-main').innerText.replace(/\\s+/g,' ')");
   check('通知空态是引导不是 JSON', emptyMain.includes('还没有推送规则') && !emptyMain.includes('{'), emptyMain.slice(0, 80));
@@ -557,7 +557,7 @@ async function main() {
   const leaks = await js("document.body.innerText.includes('SCT_UI_CHECK_1')");
   check('页面任何地方不出现明文密钥', leaks === false);
 
-  // 发件箱的「推送 / 渠道」要写名字，不写内部 id（第 255 轮：用户截图问「这是啥渠道」——
+  // 发件箱的「推送 / 渠道」要写名字，不写内部 id（用户截图问「这是啥渠道」——
   // 表里只有 ch0 / ch0-default）。表里存 id 是对的（改名、删规则不改历史），所以这里
   // 直接往库里塞一行，再走界面渲染，验的就是「显示时查名字」这一步。
   const nstate = await (await fetch('http://127.0.0.1:' + PORT + '/api/notify')).json();
@@ -589,7 +589,7 @@ async function main() {
     !obCells.err && obCells.push === (seedRt ? (seedRt.name || seedRt.id) : '—'),
     JSON.stringify(obCells) + ' rt=' + JSON.stringify(seedRt && { id: seedRt.id, name: seedRt.name }));
 
-  // 日志分来源（第 199 轮）：面板 / 插件 / 脚本 / HTTP。
+  // 日志分来源：面板 / 插件 / 脚本 / HTTP。
   // 用户的原话是「有人恶意攻击时一堆 40x/50x 会污染面板日志」——
   // 所以 HTTP 必须能单独看，而且选了要走服务端查询（内存里那几百条说明不了问题）。
   await js("location.hash = '#logs'");
@@ -600,7 +600,7 @@ async function main() {
   check('日志页有「来源」这一排（全部/面板/插件/脚本/HTTP）',
     JSON.stringify(srcBtns) === JSON.stringify(['', 'panel', 'plugin', 'script', 'http']),
     JSON.stringify(srcBtns));
-  // 级别段控的第四档 debug（第 255 轮）：空闲卸载 / 装回来降到 debug 之后，用户得能单独看它。
+  // 级别段控的第四档 debug：空闲卸载 / 装回来降到 debug 之后，用户得能单独看它。
   const lvBtns = JSON.parse(await js(
     "JSON.stringify([...document.querySelectorAll('.seg-item[data-level]')].map(b=>b.dataset.level))"
   ));
@@ -618,12 +618,12 @@ async function main() {
     srcState.src === 'http' && srcState.mode === true && JSON.stringify(srcState.pressed) === JSON.stringify(['http']),
     JSON.stringify(srcState));
   // 回「全部来源」**并把视图还回设置页**：后面的用例量的是设置页里的提示块，
-  // 停在 #logs 上它会是 0×0（我第一次就这么把「提示不竖排」那条搞红了）。
+  // 停在 #logs 上它会是 0×0（第一次运行就把「提示不竖排」那条测试弄红了）。
   await js("(()=>{const b=[...document.querySelectorAll('.seg-item[data-source]')].find(x=>x.dataset.source==='');b.click();return 1;})()");
   await js("location.hash = '#settings'");
   await sleep(700);
 
-  // 事件勾选里必须有「任务成功」（第 198 轮，用户报「缺少事件：某个插件运行成功」）。
+  // 事件勾选里必须有「任务成功」（用户报「缺少事件：某个插件运行成功」）。
   // 顺带钉住「只收」这条文案 —— 只推单个插件就是靠它，别哪天被删了还以为功能在。
   // 打开**已有**的那条推送看勾选项（新建一条会把下面「推送行显示条件」的条数断言搞乱）
   await js("(()=>{[...document.querySelectorAll('#notify-seg .seg-item')].find(b=>b.dataset.seg==='routes').click();return 1;})()");
@@ -643,7 +643,7 @@ async function main() {
   );
   check('「只收插件」的用法写在提示里（只推单个插件靠它）', /只收/.test(onlyHint) && /mcloud\*|通配/.test(onlyHint), onlyHint.slice(0, 80));
 
-  // 多选下拉（第 206 轮）：只收/不收 换过三版 —— 逗号文本框 → 标签 + 两排胶囊 →
+  // 多选下拉：只收/不收 换过三版 —— 逗号文本框 → 标签 + 两排胶囊 →
   // 用户说「用多选select」，现在是一个下拉：收起显示已选项，点开是勾选清单。
   const msInit = JSON.parse(await js(
     "JSON.stringify((()=>{const ms=[...document.querySelectorAll('#notify-main .ms')];" +
@@ -735,7 +735,7 @@ async function main() {
   await js("(()=>{document.querySelector('#notify-main .chan-group input.input').value='任务失败 → 手机';return 1;})()");
   // 勾「熔断」不勾「任务失败」：这轮检查后面会真的跑任务、会有失败通知，
   // 挂上渠道就会真发请求（对端是假的），冒出一条「通知发不出去」的黄条，把后面的用例带崩。
-  // 按**文字**点「熔断」，别按下标：事件列表的位置会变（第 198 轮加了「任务成功」在最前，
+  // 按**文字**点「熔断」，别按下标：事件列表的位置会变（加了「任务成功」在最前，
   // 原来按下标点第 2 个，正好点成了「任务失败」，这条断言就莫名其妙红了）。
   await js("(()=>{const g=document.querySelectorAll('#notify-main .chan-group')[1];" +
     "const c=[...g.querySelectorAll('.chan-check')].find(x=>x.textContent.includes('熔断'));" +
@@ -847,7 +847,7 @@ async function main() {
   const after = await js("document.documentElement.getAttribute('data-theme')");
   check('主题能切', before !== after, before + ' -> ' + after);
 
-  // 顶栏右上一排是**同系列纯图标按钮**（第 221 轮，用户：「刷新换成同系列的简单图标而不是图标加字」）。
+  // 顶栏右上一排是**同系列纯图标按钮**（用户：「刷新换成同系列的简单图标而不是图标加字」）。
   // 判据：与铃铛/主题/退出同款 .icon-btn；只有一枚 svg.ico（没有文字节点）；有 aria-label 与 data-tip。
   const barIcons = JSON.parse(await js(
     "JSON.stringify([...document.querySelectorAll('.topbar-right > .icon-btn')]" +
@@ -878,14 +878,14 @@ async function main() {
     "JSON.stringify([...document.querySelectorAll('#tasks-body tr')].map(tr=>tr.innerText.replace(/\\s+/g,' ')))"));
   check('任务表里有 seed/tick', taskRows.some((t) => t.includes('seed') && t.includes('tick')),
     JSON.stringify(taskRows.slice(0, 2)));
-  // 第 256 轮：行里只剩「执行 + ⋯」，暂停/改计划/删除都进弹窗。这里走用户的点击路径。
+  // 行里只剩「执行 + ⋯」，暂停/改计划/删除都进弹窗。这里走用户的点击路径。
   const rowBtns = JSON.parse(await js(
     "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('tick'));" +
     "return JSON.stringify([...tr.querySelectorAll('.actions button')].map(b=>b.textContent.trim()));})()"));
   check('任务行只有「执行 + ⋯」两个动作', rowBtns.length === 2 && rowBtns[0] === '执行' && rowBtns[1] === '⋯',
     JSON.stringify(rowBtns));
 
-  // 第 269 轮：插件被**停用**后，它的任务行还在表里 —— 但状态必须说「插件已停用」，
+  // 插件被**停用**后，它的任务行还在表里 —— 但状态必须说「插件已停用」，
   // 下次运行显示 —。以前照旧显示「已启用 + 过去的 next_at」，读起来就是「那天该跑没跑」。
   const offPlugin = JSON.parse(await js(
     "(async()=>{await api('/api/plugins/seed/disable',{method:'POST',write:true});" +
@@ -900,7 +900,7 @@ async function main() {
     "state.disabled=(state.disabled||[]).filter(n=>n!=='seed');renderTasks();return 1;})()");
   await sleep(400);
 
-  // 第 257 轮：「预算」列头要说清是**单次运行**的上限（不是额度），并带 title 说明后果
+  // 「预算」列头要说清是**单次运行**的上限（不是额度），并带 title 说明后果
   const budgetTh = JSON.parse(await js(
     "(()=>{const th=document.querySelector('#view-tasks th[data-sort=budget_ms]');" +
     "return JSON.stringify({text:th.textContent.trim(),title:th.title||''});})()"));
@@ -914,7 +914,7 @@ async function main() {
     " return tr?tr.children[5].textContent.trim():'NONE';})()");
   const runsNum = Number((String(runsCellText).match(/\d+/) || ['0'])[0]);
   check('「跑过」显示历史次数（不是本进程计数）', runsCellText !== 'NONE' && runsNum >= 3, runsCellText);
-  // 「插件还没装进内存」是插件级状态，不该和任务结论并排挂在状态列（第 256 轮）
+  // 「插件还没装进内存」是插件级状态，不该和任务结论并排挂在状态列
   check('状态列不再挂第二个药丸「待加载」',
     !(await js("document.getElementById('tasks-body').textContent")).includes('待加载'));
 
@@ -930,7 +930,7 @@ async function main() {
     "runItems:document.querySelectorAll('#task-action-run .act').length});})()"));
   check('弹窗有三个页签、默认开在运行页', tabInfo.tabs === 3 && tabInfo.sel === 'run', JSON.stringify(tabInfo));
   check('运行页列动作且不显示「保存计划」', tabInfo.runItems >= 2 && tabInfo.saveHidden === true, JSON.stringify(tabInfo));
-  // 第 258 轮：可点区域 = 标签本身，不是整行（整行能点 → 点空白处就执行了「恢复」「删除」）
+  // 可点区域 = 标签本身，不是整行（整行能点 → 点空白处就执行了「恢复」「删除」）
   const hitArea = JSON.parse(await js(
     "(()=>{const b=document.querySelector('#task-action-run .act');" +
     "const card=document.querySelector('#task-action .modal-card');" +
@@ -939,7 +939,7 @@ async function main() {
   check('运行页只有标签可点（不是整行）', hitArea.btn > 0 && hitArea.btn < hitArea.card * 0.5,
     JSON.stringify(hitArea));
 
-  // 计划页必须是**同一页**：cron 编辑器就地渲染，不再弹第二个窗（第 256 轮并掉了旧弹窗）
+  // 计划页必须是**同一页**：cron 编辑器就地渲染，不再弹第二个窗（并掉了旧弹窗）
   await js("document.querySelector('[data-ta-tab=plan]').click()");
   await sleep(250);
   const planInfo = JSON.parse(await js(
@@ -949,7 +949,7 @@ async function main() {
   check('计划页就地渲染 cron 编辑器（没有第二个弹窗）',
     planInfo.form >= 1 && planInfo.saveHidden === false && planInfo.modals.length === 1, JSON.stringify(planInfo));
 
-  // 第 257 轮：下拉不再用原生 <select>（展开态是系统菜单，跟不了主题）——
+  // 下拉不再用原生 <select>（展开态是系统菜单，跟不了主题）——
   // 桌面自绘 .dropdown，手机上保留原生（系统滚轮选择器更好用）。
   const ddInfo = JSON.parse(await js(
     "(()=>{const f=document.getElementById('sched-form');return JSON.stringify({narrow:innerWidth<=720," +
@@ -960,7 +960,7 @@ async function main() {
     JSON.stringify(ddInfo),
   );
 
-  // 第 261 轮：自绘下拉选完要**立刻**更新触发器文字（以前只有调用方重画表单才变，
+  // 自绘下拉选完要**立刻**更新触发器文字（以前只有调用方重画表单才变，
   // 计划表单只刷新短句 → 用户选完看着还是旧值）。
   const hasDd = (await js("!!document.querySelector('#sched-form .dropdown-btn')")) === true;
   if (hasDd) {
@@ -973,7 +973,7 @@ async function main() {
     check('下拉选完立刻更新触发器文字', ddLabel === '每周', ddLabel);
   }
 
-  // 第 261 轮：抖动的数字「改一下就动」，而且单位和短句要对得上。
+  // 抖动的数字「改一下就动」，而且单位和短句要对得上。
   // 先切回「每天」——「每周」的高级选项里是「随机挑一天」，根本没有抖动行（第一版就这么红的）。
   await js("(()=>{const f=document.getElementById('sched-form');const s=f.querySelector('select');" +
     "if(s){s.value='daily';s.dispatchEvent(new Event('change',{bubbles:true}));return 'native';}" +
@@ -997,7 +997,7 @@ async function main() {
   check('抖动数字改一下立刻进短句（不用失焦）', /±\s*7/.test(jitSentence || ''), jitSentence);
 
   // 保存：改频率 → 保存 → 弹窗自己关 + 后端真的变了（只看界面会「保存成功但没生效」）
-  // 第 257 轮起桌面是自绘下拉（手机上仍是原生 select），两种都走通
+  // 桌面是自绘下拉（手机上仍是原生 select），两种都走通
   await js("(()=>{const f=document.getElementById('sched-form');const s=f.querySelector('select');" +
     " if(s){s.value='daily';s.dispatchEvent(new Event('change',{bubbles:true}));return 'native';}" +
     " f.querySelector('.dropdown-btn').click();return 'custom';})()");
@@ -1021,7 +1021,7 @@ async function main() {
     " const b=[...document.querySelectorAll('#task-action-run .act')].find(x=>x.textContent.startsWith('暂停'));" +
     " if(!b) return 'no-btn'; b.click(); return 'clicked';})()");
   check('弹窗运行页能点到「暂停」', pauseClicked === 'clicked', pauseClicked);
-  // 点完要**等状态真的变**：刷新是轮询的（1.5s 只是猜），猜早了就会偶发红（第 92 轮实测撞到一次）。
+  // 点完要**等状态真的变**：刷新是轮询的（1.5s 只是猜），猜早了就会偶发红（实测撞到一次）。
   const paused = await waitFor(async () => {
     const row = await js(
       "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.innerText.includes('tick'));" +
@@ -1030,11 +1030,11 @@ async function main() {
   }, 6000, '任务行变成已暂停').catch(() => null);
   check('暂停后状态变成已暂停', !!paused, paused || '等了 6 秒还是没变');
 
-  // 排队（第 227 轮）：插件忙的时候点「执行」不再报错，而是排到第 N 位；
+  // 排队：插件忙的时候点「执行」不再报错，而是排到第 N 位；
   // 运行中的行要显示「已跑 mm:ss / 预算 …」。
   //
   // 用 textContent 而不是单元格 innerText：状态格里那行小字是 overflow:hidden 的 div，
-  // 窄屏下 innerText 会把它裁掉（第 227 轮实测：行文本里有「已跑」，单元格 innerText 里没有）。
+  // 窄屏下 innerText 会把它裁掉（实测：行文本里有「已跑」，单元格 innerText 里没有）。
   const clickRun = (needle) => js(
     "(()=>{const tr=[...document.querySelectorAll('#tasks-body tr')].find(r=>r.textContent.includes('" + needle + "'));" +
     " if(!tr) return 'no-row'; const b=[...tr.querySelectorAll('button')].find(x=>x.textContent.trim()==='执行');" +
@@ -1046,7 +1046,7 @@ async function main() {
   check('能点到 slow 的「执行」', (await clickRun('slow')) === 'clicked');
   await sleep(300);
 
-  // 等第一次真的派发出去（慢任务 2.5 秒，够我们接着点第二下）
+  // 等第一次真的派发出去（慢任务 2.5 秒，够接着点第二下）
   const running = await waitFor(async () => {
     const t = await rowText('slow');
     return t.includes('已跑') ? t : null;
@@ -1069,21 +1069,21 @@ async function main() {
   await sleep(1200);
   const hasCard = await js("document.querySelector('#plugin-grid').innerText.includes('seed')");
   check('插件页有 seed 卡片', hasCard === true);
-  // 插件按「系列」分组（第 88 轮，规则搬自旧面板：名字里第一个 -/_ 之前那段）。
+  // 插件按「系列」分组（规则搬自旧面板：名字里第一个 -/_ 之前那段）。
   const groups = JSON.parse(await js(
     "JSON.stringify([...document.querySelectorAll('.plugin-group')].map(s=>({" +
     " t:s.querySelector('.group-title').textContent," +
     " n:s.querySelectorAll('.plugin-card').length," +
     " b:[...s.querySelectorAll('.plugin-group-actions button')].map(x=>x.textContent)})))"
   ));
-  // 插件自己的配置（第 89 轮）：卡片上的「配置」→ 抽屉「配置」页签 → 改 → 保存
+  // 插件自己的配置：卡片上的「配置」→ 抽屉「配置」页签 → 改 → 保存
   // → 文件落在 plugin-data 下 + 插件被重载。旧面板里这是「点卡片改 config.json」。
   await js("document.querySelector('#plugin-grid .plugin-card .card-actions button:last-child')");
   const cfgOpened = await js(`JSON.stringify((()=>{
     // 找到 seed 那张卡上的「配置」按钮（按文本找，别依赖位置）
     const card = [...document.querySelectorAll('#plugin-grid .plugin-card')].find((c) => c.innerText.includes('seed'));
     if (!card) return { err: 'no card' };
-    // 第 92 轮起卡片上只有「界面 / 详情」：配置和源码都在详情抽屉里。
+    // 卡片上只有「界面 / 详情」：配置和源码都在详情抽屉里。
     const btns = [...card.querySelectorAll('button')].map((x) => x.textContent.trim());
     if (btns.length > 2) return { err: '卡片按钮太多了', btns };
     const b = [...card.querySelectorAll('button')].find((x) => x.textContent.trim() === '详情');
@@ -1108,7 +1108,7 @@ async function main() {
     JSON.stringify(cfgState) + ' ' + cfgOpened,
   );
 
-  // 第 196 轮：抽屉里的「保存后重载」勾选。**默认不勾** —— 重载会打断在跑的任务，
+  // 抽屉里的「保存后重载」勾选。**默认不勾** —— 重载会打断在跑的任务，
   // 是危险动作，不该是「保存一下」的默认副作用。后端两种回执不同（skipped / reloaded），
   // 前端提示也要分得开。
   const reloadState = JSON.parse(await js(`JSON.stringify((()=>{
@@ -1120,7 +1120,7 @@ async function main() {
     reloadState.has && reloadState.checked === false && /重载/.test(reloadState.label),
     JSON.stringify(reloadState),
   );
-  // 第 255 轮（用户：「这个按钮的名字也奇怪」）：196 轮起默认就不重载了，按钮却还叫
+  // （用户：「这个按钮的名字也奇怪」）：196 轮起默认就不重载了，按钮却还叫
   // 「保存并重载插件」，下面又挂着同名的勾选框。现在名字跟着勾选状态走。
   const saveBtnText = () => js(
     "(()=>{const b=[...document.querySelectorAll('#drawer-config .actions button')].find((x)=>x.textContent.includes('保存'));" +
@@ -1161,7 +1161,7 @@ async function main() {
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
 
-  // ── 声明式插件页（第 191 轮）：没有 .webui/，界面全靠清单 ───────────────
+  // 声明式插件页：没有 .webui/，界面全靠清单
   // 种子 declared：清单里有 nav / fields / actions / views，代码里**没注册 sidebar**
   // （侧栏那一格只能来自清单），数据全在内存。
   const declaredNav = JSON.parse(await js(
@@ -1171,7 +1171,7 @@ async function main() {
     declaredNav.some((t) => t.startsWith('样例页')), JSON.stringify(declaredNav));
   check('声明式插件不再被标「缺界面」（它本来就不需要 .webui）',
     !declaredNav.some((t) => t.includes('样例页') && t.includes('缺界面')), JSON.stringify(declaredNav));
-  // 第 223 轮（用户截图）：preview-demo 有 4 个 views，却因为**没加载**被标「缺界面」——
+  // （用户截图）：preview-demo 有 4 个 views，却因为**没加载**被标「缺界面」——
   // `hasDeclaredUI` 只查 state.plugins（已加载的）。判据要能对没加载的插件算，
   // 所以 /api/plugins/files 现在带 declared_ui（来自磁盘清单）。
   const filesUi = JSON.parse(await js(
@@ -1196,7 +1196,7 @@ async function main() {
       && !notLoadedNav.some((t) => t.includes('样例页') && t.includes('缺界面')),
     JSON.stringify(notLoadedNav));
 
-  // 第 223 轮（用户：「停用插件就应该藏入口」）：停用后侧栏那一格要消失，
+  // （用户：「停用插件就应该藏入口」）：停用后侧栏那一格要消失，
   // 因为它每个接口都是 409「已停用」，点进去必然报错。
   //
   // ⚠ 不直接调 refresh()：它有重入保护（state.refreshing），页面自己的 5 秒轮询
@@ -1243,7 +1243,7 @@ async function main() {
   check('页头是清单里的标题 + 描述', pvPage.title === '声明插件' && pvPage.desc.includes('面板按声明渲染'), JSON.stringify([pvPage.title, pvPage.desc]));
   check('表单按 schema 渲染（6 字段，含 bool / select / textarea）',
     pvPage.fields === 6 && pvPage.hasBool && pvPage.hasSelect, JSON.stringify([pvPage.fields, pvPage.hasBool, pvPage.hasSelect]));
-  // 表单布局（第 194 轮，用户截图：「有一点丑」）：照「设置 → 配置」的 .cfg-row ——
+  // 表单布局（用户截图：「有一点丑」）：照「设置 → 配置」的 .cfg-row ——
   // 190px 标签列 + 控件限宽 + 提示落在控件列下面 + 行间虚线；勾选框不能被拉成一条。
   const pvLayout = JSON.parse(await js(
     "JSON.stringify((()=>{const f=document.querySelector('#plugin-declared .schema-form');" +
@@ -1354,7 +1354,7 @@ async function main() {
   })`));
   check('有声明的插件不影响没声明的（后者仍走 iframe）',
     pvIframe.frameHidden === false && pvIframe.declaredHidden === true, JSON.stringify(pvIframe));
-  // 同名上传要问（第 133 轮）：覆盖 / 重命名 / 取消，而不是闷头覆盖再回一句「已上传」。
+  // 同名上传要问：覆盖 / 重命名 / 取消，而不是闷头覆盖再回一句「已上传」。
   await js(
     '(()=>{const nl=String.fromCharCode(10),q=String.fromCharCode(39);' +
     'const dt=new DataTransfer();' +
@@ -1370,7 +1370,7 @@ async function main() {
   await sleep(1600);
   const clashToast = await lastMsg();
   check('选「覆盖」后提示说「已覆盖」而不是「已上传」', /已覆盖/.test(clashToast || ''), clashToast);
-  // 第 107 轮：按 URL 装插件（POST /api/plugins/install）的三条**离线**校验。
+  // 按 URL 装插件（POST /api/plugins/install）的三条**离线**校验。
   // 真下载不在这里测（测试机不出网）：落到别处的守卫在 src/install.rs 的单测里。
   const inst = JSON.parse(await js(
     "(async () => {" +
@@ -1388,11 +1388,11 @@ async function main() {
     inst.noGuard.status === 403 && /x-panel/.test(inst.noGuard.body), JSON.stringify(inst.noGuard));
   check('装插件只收 http(s)（ftp:// 直接拒）',
     inst.badScheme.status === 400 && /只接受 http\(s\)/.test(inst.badScheme.body), JSON.stringify(inst.badScheme));
-  // 第 108 轮加了 .ts（面板用内置 OXC 擦类型后落成 .js），文案随之变成三件套
+  // 加了 .ts（面板用内置 OXC 擦类型后落成 .js），文案随之变成三件套
   check('装插件只认 .js / .ts / .zip（.sh 直接拒，一个字节都不下）',
     inst.badExt.status === 400 && /只认 \.js \/ \.ts \/ \.zip/.test(inst.badExt.body), JSON.stringify(inst.badExt));
 
-  // 第 135 轮：**短结果**走顶部居中（闪一下就走），**长提示/错误**走右上角常驻。
+  // **短结果**走顶部居中（闪一下就走），**长提示/错误**走右上角常驻。
   await js("document.getElementById('toast').className = 'toast hidden'");
   await js("notify('mcloud 当前没有在跑的任务', 'ok')");
   await sleep(300);
@@ -1407,7 +1407,7 @@ async function main() {
     shortInfo.toastShown === true && shortInfo.notices === 0 && /没有在跑的任务/.test(shortInfo.toast),
     JSON.stringify(shortInfo),
   );
-  // 「刷新」这种纯确认不能赖在右上角（第 135 轮用户拿它举例）：点一下只该闪一条居中提示。
+  // 「刷新」这种纯确认不能赖在右上角（用户拿它举例）：点一下只该闪一条居中提示。
   await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
   await js("document.getElementById('toast').className = 'toast hidden'");
   await sleep(200);
@@ -1423,7 +1423,7 @@ async function main() {
     refreshInfo.notices === 0 && refreshInfo.toastShown === true && /已刷新/.test(refreshInfo.toast),
     JSON.stringify(refreshInfo),
   );
-  // 短错误也不该常驻（第 136 轮）：用户拿「mcloud 当前没有在跑的任务」举过例，它连 20 字都不到。
+  // 短错误也不该常驻：用户拿「mcloud 当前没有在跑的任务」举过例，它连 20 字都不到。
   await js("[...document.querySelectorAll('#notices .notice-x')].forEach(b=>b.click())");
   await js("document.getElementById('toast').className = 'toast hidden'");
   await sleep(200);
@@ -1463,7 +1463,7 @@ async function main() {
     groups.reduce((a, g) => a + g.n, 0) === allCards,
     JSON.stringify({ groups: groups.map((g) => g.n), allCards }),
   );
-  // 第 109 轮用户口径「两个及以上才是系列，一个的放一起」：
+  // 用户口径「两个及以上才是系列，一个的放一起」：
   //   · 成员 ≥2 的组叫「X 系列（n）」，带组级批量按钮；
   //   · 只有 1 个成员的组**不叫系列**，全部并进末尾一组「独立插件（n）」，没有批量按钮。
   const isSolo = (g) => g.t.startsWith('独立插件');
@@ -1504,7 +1504,7 @@ async function main() {
   const groupToast = await lastMsg();
   check('「全部重载」有系列级结果提示', /系列：/.test(groupToast), groupToast);
   // 控件不许掉回系统样式（§7「一律自绘」）。UA 默认的三件套：白底 / 0 圆角 / 2px 灰边。
-  // 第 24 轮用户抓到的试跑「预算」框就是漏了 class —— 裸 input 在深色主题下白底刺眼。
+  // 用户抓到的试跑「预算」框就是漏了 class —— 裸 input 在深色主题下白底刺眼。
   // 先回到设置页：上面几段会跳到任务/插件页，视图隐藏时 input 的 rect 是 0，会被漏掉。
   await js("location.hash = '#settings'");
   await sleep(900);
@@ -1526,7 +1526,7 @@ async function main() {
   }
   check('设置页扫到的控件够多（防假绿）', scanned >= 3, '只扫到 ' + scanned + ' 个');
   check('没有掉回系统样式的控件', uaStyled.length === 0, JSON.stringify(uaStyled));
-  // 垂直节奏：相邻块间距 < 8px 就是「太紧凑」（第 24 轮用户连着报了两处）。
+  // 垂直节奏：相邻块间距 < 8px 就是「太紧凑」（用户连着报了两处）。
   const tightGaps = async (sel) => JSON.parse(await js(
     "JSON.stringify((()=>{const p=document.querySelector('" + sel + "'); if(!p) return ['没找到 '+ '" + sel + "'];" +
     " const k=[...p.children].filter(e=>e.getBoundingClientRect().height>0); const out=[];" +
@@ -1537,7 +1537,7 @@ async function main() {
   await sleep(1100);
   await js("showPlugin('seed')");
   await sleep(1600);
-  // 运行详情抽屉（第 222 轮，用户截图「实际日志部分太窄了」）：
+  // 运行详情抽屉（用户截图「实际日志部分太窄了」）：
   // 520px 宽的四列日志行把消息挤成三四行。运行详情必须用宽抽屉，且隐藏插件列。
   await js("location.hash = '#runs'");
   await sleep(600);
@@ -1580,7 +1580,7 @@ async function main() {
   await sleep(800);
   const dataTight = await tightGaps('#settings-data');
   check('设置·数据页的块间距 ≥ 8px', dataTight.length === 0, JSON.stringify(dataTight));
-  // 面板设置表单（第 207 轮）：用户要「绑定端口/地址、信任 XFF」这类能填的开关，
+  // 面板设置表单：用户要「绑定端口/地址、信任 XFF」这类能填的开关，
   // 而不是手写 config.json。验：分组在、字段在、保存真的写进 config.json、
   // 而且**不碰**表单不管的键（插件用的那些）。
   await js("document.querySelector('[data-tab=config]').click()");
@@ -1600,7 +1600,7 @@ async function main() {
   check('表单里有监听地址、信任 XFF、接受任意 Host、运行预算',
     ['server.bind', 'server.trust_xff', 'server.allow_any_host', 'run.budget_ms']
       .every((p) => (cfgForm.paths || []).includes(p)), JSON.stringify(cfgForm.paths));
-  // 第 227 轮：单次上限、排队上限、单条最长排队 —— 三个旋钮都要在表单里，
+  // 单次上限、排队上限、单条最长排队 —— 三个旋钮都要在表单里，
   // 而且「单次运行上限」的 max 不能被 90 分钟那道老闸门夹住（它能到 12 小时）。
   check('运行组多了单次上限 / 排队上限 / 单条最长排队',
     ['run.budget_max_ms', 'run.queue_max', 'run.queue_wait_ms']
@@ -1612,7 +1612,7 @@ async function main() {
   ));
   check('单次运行上限允许填到 12 小时（不是被 5400 秒夹住）',
     maxField.found && Number(maxField.max) >= 43200, JSON.stringify(maxField));
-  // 第 192 轮：出站代理是配置项（插件拉 GitHub 那些要走它）
+  // 出站代理是配置项（插件拉 GitHub 那些要走它）
   const proxyField = JSON.parse(await js(    "JSON.stringify((()=>{const f=document.getElementById('cfg-form');" +
     "const g=[...f.querySelectorAll('.cfg-group')].find(x=>x.textContent.includes('网络'));" +
     "const inp=g?g.querySelector('[data-cfg=\"net.proxy\"]'):null;" +
@@ -1688,10 +1688,10 @@ async function main() {
     "await new Promise(r=>setTimeout(r,900));return 1;})()");
   await sleep(300);
 
-  // 检查更新（第 210 轮）：顶栏 pill 只在**有新版且没被「不再提示」**时出现，
+  // 检查更新：顶栏 pill 只在**有新版且没被「不再提示」**时出现，
   // 设置页有「当前版本 + 检查更新 + 最新版本」。
   // 界面包那条通道也要钉死：这条检查跑在**真网络**上，而仓库里可能真有一个
-  // 与当前版本匹配的 `ui-v*` release（第 265 轮实测：它会让 pill 冒出来，把下面的
+  // 与当前版本匹配的 `ui-v*` release（实测：它会让 pill 冒出来，把下面的
   // 「没有新版时不冒泡」判红）。所以先把它清成「没有」，需要验它时再单独注入。
   await js("state.uiLatest={available:false};renderUpdate();1");
   const upd = JSON.parse(await js(
@@ -1738,7 +1738,7 @@ async function main() {
   ));
   check('点「不再提示」会记下版本并收起提示',
     updSkip.hidden === true && updSkip.skip === '9.9.9', JSON.stringify(updSkip));
-  // 界面包也走同一个入口（第 265 轮）：面板没新版时，只有界面包可更新也要冒头。
+  // 界面包也走同一个入口：面板没新版时，只有界面包可更新也要冒头。
   // 分两步做（注入 → 读），别塞进一个大 IIFE —— 出错时看不出是哪一段炸的。
   await js("state.update={};state.ui={source:'builtin',version:'0.8.3'};" +
     "state.uiLatest={available:true,version:'9.9.9'};renderUpdate();1");
@@ -1768,7 +1768,7 @@ async function main() {
   await sleep(700);
   const setupTight = await tightGaps('.setup-box');
   check('设置·安全页设令牌那块间距 ≥ 8px', setupTight.length === 0, JSON.stringify(setupTight));
-  // 第 181 轮：修改口令。这个场景里面板没有口令（走的是 setupBox），
+  // 修改口令。这个场景里面板没有口令（走的是 setupBox），
   // 所以这里只能验两件事：不该同时出现两个入口、以及表单确实接到了那个路由。
   const hasChangeBox = await js("!!document.getElementById('token-old')");
   check('没有口令时不显示「修改口令」（别出现两个入口）', hasChangeBox === false, String(hasChangeBox));
@@ -1776,7 +1776,7 @@ async function main() {
   check('修改口令的表单有实现（changeTokenBox）', changeFn === 'function', changeFn);
   const appSrc = await js("fetch('/app.js').then(r => r.text())");
   check('修改口令走 POST /api/auth/token', typeof appSrc === 'string' && appSrc.includes("'/api/auth/token'"), '');
-  // 深色主题下不许有大块近白背景：第 24 轮「还没有令牌」那张白卡片就是
+  // 深色主题下不许有大块近白背景：「还没有令牌」那张白卡片就是
   // var(--bg-soft, #fafafc) 静默回落来的。这里用面积 + 亮度兜一遍。
   const theme = await js("document.documentElement.getAttribute('data-theme')");
   if (theme !== 'dark') { await js("document.getElementById('theme-toggle').click()"); await sleep(400); }
@@ -1797,7 +1797,7 @@ async function main() {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await js("location.hash = '#runs'");
   await sleep(1200);
-  // ⚠ 判据必须用 clientWidth，**不能用 innerWidth**（第 262 轮实测）：
+  // ⚠ 判据必须用 clientWidth，**不能用 innerWidth**（实测）：
   // 在 mobile:true 的模拟（真机也一样）下，内容一旦溢出，Chrome 会把 **layout viewport
   // 一起撑宽** —— innerWidth 从 390 变成 616、scrollWidth 也是 616，两者相减恒为 0，
   // 断言永远是绿的。documentElement.clientWidth 不跟着变（一直是 390），
@@ -1805,7 +1805,7 @@ async function main() {
   // 旧判据 0px（假绿）、新判据 226px（红）。
   const overflow = await js('document.documentElement.scrollWidth - document.documentElement.clientWidth');
   check('窄屏没有横向溢出', overflow <= 1, '内容比视口宽 ' + overflow + 'px');
-  // 触屏尺寸（第 90 轮）：图标按钮的点击目标要够大，指头按得准。
+  // 触屏尺寸：图标按钮的点击目标要够大，指头按得准。
   // 32px 是桌面尺寸；手机上（≤720px）给 40px（苹果/谷歌建议 ≥44，40 是折中，
   // 再大顶栏就挤了 —— 实测三个图标 40x40 刚好不溢出）。
   const iconBox = JSON.parse(await js(
@@ -1828,7 +1828,7 @@ async function main() {
   check('卡片每格都带列名', cells.length > 0 && cells.every((c) => c.d === 'flex') &&
     labelled.length > 0 && labelled.every((c) => c.b.includes(c.l)),
     JSON.stringify(cells.slice(0, 3)));
-  // 第 188 轮：窄屏的表格是**两列网格**，不是「一格一行」。
+  // 窄屏的表格是**两列网格**，不是「一格一行」。
   // 一格一行时运行记录每条 191px 高（7 个字面行），一屏只看得到两条，右边还空一半。
   const rowBox = JSON.parse(await js(
     "JSON.stringify((()=>{const tr=document.querySelector('#runs-body tr'); if(!tr) return null;" +
@@ -1839,7 +1839,7 @@ async function main() {
   check('窄屏表格是两列网格（不是一格一行）', !!rowBox && rowBox.display === 'grid' &&
     rowBox.cols === 2 && rowBox.h <= 170, JSON.stringify(rowBox));
 
-  // ---------------------------------------------------------------- 移动端基线（第 262 轮）
+  // 移动端基线
   // 一次 390×844 真触摸审计发现的四个硬问题，这里各钉一条。
   // ① iOS Safari 对 font-size < 16px 的输入控件在聚焦时会**放大整页** ——
   //    面板和所有插件共用 .input，所以这一条覆盖到插件侧。
@@ -1878,7 +1878,7 @@ async function main() {
   await js("location.hash = '#runs'");
   await sleep(500);
 
-  // 断点回归（第 86 轮）：侧栏收成浮层只在 ≤720 发生。2 倍屏上「860 CSS px」看着像宽屏，
+  // 断点回归：侧栏收成浮层只在 ≤720 发生。2 倍屏上「860 CSS px」看着像宽屏，
   // 那时多出来的 ✕ 和汉堡是纯噪音，汉堡还会压住页标题。
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 900, deviceScaleFactor: 2, mobile: false });
   await js("location.hash = '#tasks'");
@@ -1901,7 +1901,7 @@ async function main() {
   // 仪表盘在窄屏也要能用（卡片单列）
   await js("location.hash = '#dashboard'");
   await sleep(1200);
-  // 窄屏侧栏：浮层要能收起（遮罩 / Esc / ✕）。第 24 轮用户报「无法收起 / 点击无效」，
+  // 窄屏侧栏：浮层要能收起（遮罩 / Esc / ✕）。用户报「无法收起 / 点击无效」，
   // 当时汉堡按钮在侧栏底下，点上去是侧栏本身。
   const drawerState = () => js("document.getElementById('sidebar').classList.contains('open')");
   await js("setSidebar(true)");
@@ -1928,7 +1928,7 @@ async function main() {
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   await sleep(300);
 
-  // ---------------------------------------------------------------- 运行告警黄条（第 71 轮）
+  // 运行告警黄条
   // 数据来自 /api/state 的 alerts（进程内、不落库）。验「隐藏 / 画得对 / 清空后收起」。
   const alertHidden0 = await js("document.getElementById('alerts-bar').classList.contains('hidden')");
   check('没有告警时黄条是隐藏的', alertHidden0 === true, String(alertHidden0));
@@ -1939,7 +1939,7 @@ async function main() {
   await js("renderAlerts([])");
   check('告警清空后黄条自己收起', (await js("document.getElementById('alerts-bar').classList.contains('hidden')")) === true, 'still visible');
 
-  // ---------------------------------------------------------------- 导出 CSV（第 80 轮）
+  // 导出 CSV
   const hasRunsExport = await js("!!document.getElementById('runs-export')");
   const hasLogsExport = await js("!!document.getElementById('log-export')");
   check('运行记录页有「导出 CSV」按钮', hasRunsExport === true, String(hasRunsExport));
@@ -1950,11 +1950,11 @@ async function main() {
     csvProbe && csvProbe.status === 200 && /text\/csv/.test(csvProbe.ct || '') && /插件/.test(csvProbe.head || ''),
     JSON.stringify(csvProbe),
   );
-  // 通知弹层必须跟着 sticky 顶栏走（第 87 轮）：它原来是 .shell 的直接子元素，
+  // 通知弹层必须跟着 sticky 顶栏走：它原来是 .shell 的直接子元素，
   // position:absolute 找不到已定位的祖先 → 按文档顶部定位，页面一滚就滚出视口。
   // 判据用 offsetParent（= 定位祖先）而不是「滚动后还在不在」—— 数据集小时页面根本滚不动，
   // 那种断言会因为「没滚」而假通过/假失败。
-  // 提示条（第 131 轮，用户报「配色难以看清」+「应该放顶部」）：
+  // 提示条（用户报「配色难以看清」+「应该放顶部」）：
   // 位置要在视口上部（避开 sticky 顶栏），文字对比度要够 —— 两套主题都验。
   await js("location.hash='#dashboard'");
   await sleep(800);
@@ -1999,12 +1999,12 @@ async function main() {
   check('通知弹层整个在视口里', popRect.top >= 0 && popRect.bottom <= popRect.vh + 1, JSON.stringify(popRect));
   await js("document.getElementById('bell').click()");
   await sleep(200);
-  // 弹窗的「取消 / 点遮罩 / Esc」（第 143 轮）：用户报「改计划不支持取消，点击无效」。
+  // 弹窗的「取消 / 点遮罩 / Esc」：用户报「改计划不支持取消，点击无效」。
   // 那时候只有 #drawer / #confirm / #clash 各自绑了处理器，改计划 / 新建插件 / 新建脚本
   // 这三个弹窗的「取消」是死按钮。这里把它钉成回归检查。
   const openModal = (id) => js("document.getElementById('" + id + "').classList.remove('hidden')");
   const modalHidden = async (id) => (await js("document.getElementById('" + id + "').classList.contains('hidden')")) === true;
-  // 第 256 轮：「改计划」并进了任务操作弹窗（#task-action），这三个出口照样要能关。
+  // 「改计划」并进了任务操作弹窗（#task-action），这三个出口照样要能关。
   await openModal('task-action');
   await js("document.querySelector('#task-action .modal-actions .btn[data-close]').click()");
   await sleep(250);
@@ -2025,7 +2025,7 @@ async function main() {
   await js("document.querySelector('#new-script .modal-actions .btn').click()");
   await sleep(250);
   check('新建脚本的「取消」也能关掉', await modalHidden('new-script'));
-  // 长弹窗：内容超过一屏时，按钮行必须还在卡片里（第 255 轮，用户截图：cmcc 的「添加账号」
+  // 长弹窗：内容超过一屏时，按钮行必须还在卡片里（用户截图：cmcc 的「添加账号」
   // 按钮行掉到卡片外面、压在遮罩和页面背景上）。`.dialog-body` 是滚动区，
   // 插件没自己包时由 <p-dialog> 替它包上 —— 这条钉住「自动包 + 按钮不跟着滚」。
   // 面板自己的页面**不引** /ui.js（那套 p-* 组件是给插件页的），这里按需装进来再测。
@@ -2122,7 +2122,7 @@ async function main() {
     check('试跑输出对比度 ≥ 4.5（' + (theme === 'dark' ? '暗色' : '亮色') + '主题）', c.ratio >= 4.5, c.fg + ' on ' + c.bg + ' = ' + c.ratio);
   }
   await js("document.documentElement.setAttribute('data-theme','light')");
-  // 下拉框的 chevron（第 213 轮用户截图：「第 1 条」那个框里整片平铺箭头）
+  // 下拉框的 chevron（用户截图：「第 1 条」那个框里整片平铺箭头）
   //
   // 根因是 `.sched-item .modal-input { background: ... }` 这个**简写**把 select 那条规则
   // 画的 chevron 的 repeat/position/size 一起重置了；深色主题另一条规则又把图补回来
@@ -2156,7 +2156,7 @@ async function main() {
   );
   check('预算输入框没有原生步进器（appearance: textfield）', budgetAppearance === 'textfield', String(budgetAppearance));
 
-  // 侧栏溢出（第 196 轮，用户截图报「插件界面加载太多后，菜单栏溢出了」）：
+  // 侧栏溢出（用户截图报「插件界面加载太多后，菜单栏溢出了」）：
   // 侧栏是 100vh 的 flex 列，插件入口一多就把底部的「引擎正常 / 版本 / 令牌」顶出视口 ——
   // 那几样恰恰是一直要看的。修法是品牌与底部固定、中间段 `flex:1; min-height:0; overflow-y:auto`。
   // 这里故意把插件入口塞到 14 条、再把视口压到 620 高，钉住三件事：
@@ -2253,7 +2253,7 @@ async function main() {
   await js("setSidebar(false)");
   await sleep(300);
 
-  // 操作列钉在右边（第 196 轮，用户截图问「操作固定位置？」）：
+  // 操作列钉在右边（用户截图问「操作固定位置？」）：
   // 运行记录七列在窄窗口横向滚动时，「日志」按钮会跟着滑出视口 —— 而那正是每行要点的东西。
   // 这里把表格人为撑宽造出横向溢出（数据不动），在「滚到最左 / 滚到最右」两个位置量按钮的 x：
   // 位置必须不变，而且始终在容器可视范围内。
@@ -2314,7 +2314,7 @@ async function main() {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
   await sleep(300);
 
-  // 默认预算（第 197 轮）：默认 300 秒，并且卡片上要写清「哪里能改」。
+  // 默认预算：默认 300 秒，并且卡片上要写清「哪里能改」。
   // 以前前端自己也写死一份 30000 —— 服务端一改默认值，脚本编辑器就显示成 30 秒。
   await js("location.hash = '#dashboard'");
   await sleep(900);
@@ -2338,7 +2338,7 @@ async function main() {
     const sc=document.getElementById('sidebar-scroll'); if(sc) sc.scrollTop=0;return 1;})()`);
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 560, deviceScaleFactor: 1, mobile: false });
   await sleep(300);
-  // 源码编辑器：行号 + 高亮 + 两层对齐（第 173 轮）
+  // 源码编辑器：行号 + 高亮 + 两层对齐
   await js("location.hash = '#plugins'");
   await sleep(600);
   // 种子插件就叫 seed（不要去猜 state.plugins[0]：前面的检查会把它弄空）
@@ -2391,7 +2391,7 @@ async function main() {
   await js("document.querySelector('#drawer-close') && document.querySelector('#drawer-close').click()");
   await sleep(300);
 
-  // 任务删除 / 恢复（第 178 轮）
+  // 任务删除 / 恢复
   const delStatus = await js(
     "fetch('/api/tasks/seed/zz', {method:'DELETE', headers:{'x-panel':'1'}, credentials:'same-origin'}).then(r=>r.status)"
   );
@@ -2404,7 +2404,7 @@ async function main() {
   );
   const hd = JSON.parse(hiddenDeleted);
   check('删掉的任务默认不出现（但按钮上标了数量）', delStatus === 200 && !hd.hasDeleted && hd.toggle.includes('显示已删除'), hiddenDeleted);
-  // 第 225 轮（用户截图：一行里同时挂「已启用」和「已删除」）：
+  // （用户截图：一行里同时挂「已启用」和「已删除」）：
   // 状态列只给一个结论；开关要像邻居一样是个有边框的控件（不是一行灰字）。
   const toggleLook = JSON.parse(await js(
     "(()=>{const b=document.getElementById('tasks-show-deleted');const s=getComputedStyle(b);" +
@@ -2438,7 +2438,7 @@ async function main() {
   await js("fetch('/api/tasks/seed/zz/restore', {method:'POST', headers:{'x-panel':'1'}, credentials:'same-origin'}).then(r=>r.status)");
   await js("(async () => { await refresh(); return 1; })()");
 
-  // 插件抽屉的「指标」段（第 177 轮）：卡片给不出「最近一周挂几次」
+  // 插件抽屉的「指标」段：卡片给不出「最近一周挂几次」
   await js("(async () => { if (typeof showPlugin === 'function') await showPlugin('seed'); return 1; })()");
   await sleep(900);
   const ov = JSON.parse(await js(
@@ -2449,7 +2449,7 @@ async function main() {
   ));
   check('插件抽屉概览有指标段（24 小时 / 7 天）', ov.heads.includes('指标') && ov.has24h && ov.has7d, JSON.stringify(ov));
 
-  // 操作分组（第 255 轮，用户：「过于凌乱，操作应该分组」）：九颗按钮平铺 = 一片按钮墙。
+  // 操作分组（用户：「过于凌乱，操作应该分组」）：九颗按钮平铺 = 一片按钮墙。
   // 现在按「要干什么」分行，一行最多 3 颗；删除单独一行、带危险色。文案可以变，
   // 所以这条断言盯的是**结构**（几行、每行几颗、危险那颗是不是单独一行）。
   const opRows = JSON.parse(await js(
@@ -2483,7 +2483,7 @@ async function main() {
   check('脚本源码同样有行号与高亮（共用同一条编辑器路径）',
     scriptHl === 'ok' && sh.gutter >= 1200 && sh.spans > 0, JSON.stringify(sh));
 
-  // 第 189 轮：编辑器高度必须被容器兜住（1200 行的行号层不能把抽屉撑成 2.4 万像素），
+  // 编辑器高度必须被容器兜住（1200 行的行号层不能把抽屉撑成 2.4 万像素），
   // 而且行号层与输入层要一样高（差 1px 就会看到重影/错位）。
   const edBox = JSON.parse(await js(
     "(()=>{const w=document.getElementById('src-editor');const ta=document.getElementById('src-text');" +
@@ -2495,10 +2495,10 @@ async function main() {
     edBox.h <= 900 && Math.abs(edBox.taH - edBox.gH) <= 2, JSON.stringify(edBox));
 
 
-  // 第 223 轮（用户反馈 #8「脚本定时页面疑似时间显示异常」）：脚本页的表头只有 7 个 <th>
+  // （用户反馈 #8「脚本定时页面疑似时间显示异常」）：脚本页的表头只有 7 个 <th>
   // （名字/计划/预算/上次运行/下次运行/状态/操作），而 renderScripts 每行塞 9 个单元格
   // （任务名/文件/运行时/计划/预算/…）—— 每个表头都右移两列，「预算 2 分 0 秒」正好落在
-  // 「上次运行」标题底下，读起来就是「上次运行 2 分 0 秒前」。报障的人和我都这么误读过一次。
+  // 「上次运行」标题底下，读起来就是「上次运行 2 分 0 秒前」。报障记录里这么误读过一次。
   // 这条断言按「表头列数 = 数据行单元格数」逐表核：任何一张表再漂列都当场红。
   for (const view of ["dashboard", "scripts", "tasks", "runs"]) {
     await js(
@@ -2518,7 +2518,7 @@ async function main() {
     );
   }
 
-  // 第 106 轮：大文件退成纯文本模式 —— 长行必须折行（否则右边永远看不全，用户两次截图
+  // 大文件退成纯文本模式 —— 长行必须折行（否则右边永远看不全，用户两次截图
   // 都指着被切掉的行尾），行号层收起（折行后视觉行 ≠ 逻辑行，留着必然错位），
   // 并且能跳到指定行（一万多行的文件靠拖滚动条等于没有导航）。
   // 名字**必须带扩展名**：`/api/scripts/<name>` 是按文件名找文件的，不带 `.js` 就是
@@ -2546,7 +2546,7 @@ async function main() {
   check('源码编辑器能跳到指定行（第 2500 行 + 滚到位 + 工具条报位置）',
     jump.line === 2500 && jump.scrollTop > 0 && /第 2500 行/.test(jump.pos), JSON.stringify(jump));
 
-  // ---------------------------------------------------------------- 文件管理（第 270 轮）
+  // 文件管理
   // 这一页存在的理由：更新后留下的旧东西（旧形状散件、备份、孤儿清单）在终端里
   // 只能靠 du 看，谁也不敢删 —— 于是只能一直占着。断言按「能看见 / 判得对 / 删得掉 /
   // 能恢复」四条走，其中「判得对」是重点：判错了就是把能用的插件标成可清理。
@@ -2628,7 +2628,7 @@ async function main() {
   check('没有 JS 报错', errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 
-// ---------------------------------------------------------------- 极简 CDP
+// 极简 CDP
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);
@@ -2682,7 +2682,7 @@ async function connect(wsUrl) {
 
 /// 收尾删临时目录：**删不掉不算失败**。
 ///
-/// 第 69 轮实测踩到：36 条全过，但 `rmSync(dir, {recursive:true, force:true})` 偶尔抛
+/// 实测踩到：36 条全过，但 `rmSync(dir, {recursive:true, force:true})` 偶尔抛
 /// `ENOTEMPTY`（浏览器刚被 kill、还有句柄在写这个目录），于是整条命令以 2 退出 ——
 /// 门禁看上去「挂了」，其实检查全过。删不掉就重试几次，再不行留个提示走人。
 function cleanup() {
@@ -2703,7 +2703,7 @@ function cleanup() {
     }
   }
 }
-// ---------------------------------------------------------------- 收尾
+// 收尾
 
 main()
   .then(() => {

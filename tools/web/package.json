@@ -2,7 +2,7 @@
   "name": "panel-web",
   "private": true,
   "type": "module",
-  "description": "面板 WebUI 的压缩构建（第 190 轮）：rolldown 打 JS，lightningcss 压 CSS",
+  "description": "面板 WebUI 的压缩构建：rolldown 打 JS，lightningcss 压 CSS",
   "scripts": {
     "build": "node build.mjs"
   },

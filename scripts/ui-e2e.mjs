@@ -1,7 +1,7 @@
 // 真浏览器里的界面端到端：点按钮 → 看后端状态 + 看界面有没有跟着变。
 //
 // 为什么要有它：ui-check.mjs 是**静态**断言（DOM 结构/样式令牌），它能证明按钮存在，
-// 证明不了「点下去发的是哪个请求、发完界面有没有刷新」。第 49 轮就是这么发现
+// 证明不了「点下去发的是哪个请求、发完界面有没有刷新」。就是这么发现
 // 「暂停」后状态列没更新的（纯 API 测不出来）。
 //
 // 需要一个**已经跑起来的面板**和一个 **CDP 端点**（Edge/Chrome 的 --remote-debugging-port）：
@@ -9,8 +9,8 @@
 //   PANEL_DATA_DIR=/tmp/ui PANEL_PLUGINS_DIR=/tmp/ui/plugins PANEL_WEB_DIR=web \
 //     PANEL_BIND=127.0.0.1:8797 ./target/debug/panel &
 //   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
-//     --headless=new --remote-debugging-port=9333 --user-data-dir=/tmp/ui/edge \
-//     --no-first-run --no-default-browser-check about:blank &
+// headless=new --remote-debugging-port=9333 --user-data-dir=/tmp/ui/edge \
+// no-first-run --no-default-browser-check about:blank &
 //   node scripts/ui-e2e.mjs
 //
 // 环境变量：UI_BASE（默认 http://127.0.0.1:8797）、CDP（默认 http://127.0.0.1:9333）。
@@ -30,7 +30,7 @@ const check = (name, ok, extra) => {
   else { fail.push(name + (extra ? ' -> ' + extra : '')); console.log('  \u2717 ' + name + (extra ? ' -> ' + extra : '')); }
 };
 
-// ---------------------------------------------------------------- 准备：插件 + 任务
+// 准备：插件 + 任务
 const SRC = [
   "import host from 'panel:host';",
   "await host.register_handler('tick', async () => { await host.info('ui-e2e tick'); });",
@@ -49,7 +49,7 @@ async function seed() {
   await sleep(1500);
 }
 
-// ---------------------------------------------------------------- CDP
+// CDP
 async function pickTarget() {
   for (let i = 0; i < 40; i++) {
     try {
@@ -172,7 +172,7 @@ await sleep(1500);
 check('重载后有提示', /已重载/.test((await ev("document.getElementById('toast').textContent")) || ''));
 
 
-// ---------------------------------------------------------------- 设置页的失败路径
+// 设置页的失败路径
 //
 // 成功路径 API 层测过；用户最容易撞的其实是失败路径（粘错一段 JSON、令牌太短、
 // 选错文件）。这类地方如果只说「保存失败」，用户会以为面板坏了。
@@ -240,7 +240,7 @@ const badToast = await ev("document.getElementById('toast').textContent");
 checkFail('选错文件时提示「不是合法 JSON」', /不是合法 JSON/.test(badToast || ''), badToast);
 
 
-// ---------------------------------------------------------------- 通知 tab（真会往外部发东西的那一页）
+// 通知 tab（真会往外部发东西的那一页）
 const hits = [];
 const recv = createServer((req, res) => {
   let b = '';
@@ -304,7 +304,7 @@ checkFail('点「重试失败的」有回执', /已打回/.test(toast3 || ''), t
 const stillPending = execSync('sqlite3 ' + db + " \"SELECT count(*) FROM notify_outbox WHERE channel='dead' AND done=0\"").toString().trim();
 checkFail('放弃的行被拉回待发（done=0）', stillPending === '1', 'count=' + stillPending);
 
-// 坏配置：第 60 轮起 PUT /api/config 会在**进门时**拒绝语义错的通知配置（不再等红条），
+// 坏配置： PUT /api/config 会在**进门时**拒绝语义错的通知配置（不再等红条），
 // 所以这里验的是「保存被拒 + 生效中的配置没被换掉」。
 const badPut = await putCfg({ notify: { channels: 'oops' } });
 checkFail('坏通知配置保存被拒（400）', badPut.ok === false && badPut.status === 400, 'status=' + badPut.status);
@@ -319,7 +319,7 @@ await putCfg(goodCfg);
 recv.close();
 
 
-// ---------------------------------------------------------------- 长错误文案（第 68 轮）
+// 长错误文案
 // 接口的 400 文案可能很长（serde 原话 / 带字段名的中文提示）。以前 toast 不限宽、不换行，
 // 这种文案会横着撑出视口、两头被切掉，用户只看到中间半句。
 await ev("(toast('长错误文案' + 'x'.repeat(400), true), 'ok')");
@@ -339,12 +339,12 @@ check('计划写错时红字说清要什么', /数字 \+ 单位|无法识别/.te
 check('红字没被挤成一行（高度 > 0 且不横向溢出）', hint2.h > 0 && hint2.sw <= hint2.cw + 1, JSON.stringify(hint2));
 await ev("document.querySelector('#task-schedule .modal-actions .btn:not(.btn-primary):not(#task-schedule-reset)').click()");
 await sleep(300);
-// ---------------------------------------------------------------- 插件源码编辑器（唯一会改磁盘的界面）
+// 插件源码编辑器（唯一会改磁盘的界面）
 //
 // 「保存并重载」= 写盘 → 重载，失败要回滚。这条路上有三个必须成立的东西：
 //   1) 保存后真的重载了（新注册的任务出现在任务表里）
 //   2) 写坏语法时回滚 + 报错（盘上还是上一版，插件还在跑）
-//   3) 重载不吃掉人的决定（暂停/改过的计划）—— 第 37 轮修的就是这个
+//   3) 重载不吃掉人的决定（暂停/改过的计划）—— 修的就是这个
 await ev("document.querySelector('[data-view=\"plugins\"]').click()");
 await sleep(900);
 
@@ -409,7 +409,7 @@ await fetch(base + '/api/plugins/ui-e2e/source', {
 });
 await sleep(1200);
 
-// ---------------------------------------------------------------- 日志断线重连：补空档（第 58 轮）
+// 日志断线重连：补空档
 //
 // SSE 一断，断线期间的日志以前是**静默消失**的。现在客户端记住最后一条 id，重连时带 ?since=。
 await ev("document.querySelector('[data-view=\"logs\"]').click()");
@@ -453,7 +453,7 @@ const seenAll = await ev("(() => { const ids = state.logs.filter(l => l.id != nu
 checkFail('游标就是环里最大的 id', seenAll === true);
 void duringLen;
 
-// ---------------------------------------------------------------- 运行状态徽标（第 64 轮：取消≠失败）
+// 运行状态徽标
 const pillTexts = await ev("(() => ({ ok: runPill('ok').textContent, running: runPill('running').textContent, cancelled: runPill('cancelled').textContent, error: runPill('error').textContent }))()");
 checkFail('运行状态 ok → 成功', /成功/.test(pillTexts.ok), JSON.stringify(pillTexts));
 checkFail('运行状态 cancelled → 已停止（不叫失败）', /已停止/.test(pillTexts.cancelled), JSON.stringify(pillTexts));

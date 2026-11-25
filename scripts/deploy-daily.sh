@@ -9,10 +9,10 @@
 #      只有「原地 cp 到同一个路径」才要 `codesign --force --sign -`（见坑 110）。
 #   2) **不要**重新签名（codesign --force）：签名一换，macOS 就把这个二进制当成另一个程序，
 #      受保护路径（外部卷等）会重新走一次授权询问；launchd 里的后台进程问不了人，于是卡住
-#      —— 表现成「服务起来了但插件一个都不加载」（第 134 轮踩了两次才发现）。
+#      —— 表现成「服务起来了但插件一个都不加载」（踩了两次才发现）。
 #   3) 换完必须 kickstart 一次；只改文件不重启，跑的还是旧进程。
 #
-# 等待分两段（第 132 轮）：
+# 等待分两段：
 #   /healthz 起来 = 进程活着（毫秒级）
 #   /readyz  200 = 插件都加载完 —— 真实插件（mcloud 那些）加载期会打网络，几十秒才收敛，
 #                 所以这里等 120 秒；期间 readyz 会明确回 503「调度器在忙」而不是挂着。
@@ -23,7 +23,7 @@ DEST="${PANEL_DEST:-$HOME/panel-3030}"
 LABEL="${PANEL_LABEL:-dev.panel}"
 PORT="${PANEL_PORT:-3030}"
 
-# ── 不变量：面板部署**不动插件**（第 204 轮）──
+# 不变量：面板部署**不动插件**
 #
 # 分工写在这里是为了以后别再走回头路：面板部署只搬**面板自己的东西**（二进制 + scripts），
 # 插件（.js / .panel.json / .webui/）归各自的插件项目（它们的 `deploy:panel`）装。
@@ -47,14 +47,14 @@ plugins_list() {
 }
 
 cd "$ROOT"
-# ── 面板仓不碰插件（第 159 轮）──
+# 面板仓不碰插件
 # 分工：面板提供面板，插件（源码 / 构建 / 上线）归各自的插件项目，部署分开。
 # 所以这里**不再**同步 plugins/、也不再核对插件文件 —— 实例的 plugins/ 由
 # mcloud-plugin / cmusic-others-mgmusic-plugin 的 `npm run deploy:panel` 自己装。
 # （插件项目自己的样式门禁就在它们的 deploy 脚本里：拿产物摆成 plugins/ 再跑
 #  本仓的 scripts/check-plugin-style.mjs，闸门一条没丢。）
 # 样式闸门（现在只覆盖面板自己的 plugins/webui-demo*）：token 被重定义 / 颜色写死 / !important / prefers-color-scheme / 撤掉控件样式
-# 这几类改动编译不报错、单测照过，只有人眼看得出（第 156 轮有人把整段 token 映射换掉了）。
+# 这几类改动编译不报错、单测照过，只有人眼看得出（有人把整段 token 映射换掉了）。
 node scripts/check-plugin-style.mjs
 cargo build --release --offline
 
@@ -62,11 +62,11 @@ FP_BEFORE="$(plugins_fp)"
 LIST_BEFORE="$(plugins_list)"
 
 cp target/release/panel "$DEST/panel.new"
-# 用**固定标识**做 ad-hoc 重签名（第 269 轮）。
+# 用**固定标识**做 ad-hoc 重签名。
 #
 # 为什么必须签：cargo 出来的二进制是 linker 签的 ad-hoc，标识是 `panel-<每次构建都变的哈希>`
 # —— 对 macOS 来说**每次重建都是另一个 app**。于是每换一次二进制就来一轮
-# 「正在验证 "panel-xxxx"…」，而且 TCC/卷权限也跟着重新问（第 134 轮那句「不要 codesign」
+# 「正在验证 "panel-xxxx"…」，而且 TCC/卷权限也跟着重新问（那句「不要 codesign」
 # 就是踩在这个上：当时换签名导致后台进程卡在问权限的框上）。
 #
 # 现在反过来：**标识钉死成 `dev.local.panel`**，重建多少次都是同一个 app，
@@ -74,7 +74,7 @@ cp target/release/panel "$DEST/panel.new"
 codesign --force --sign - --identifier dev.local.panel "$DEST/panel.new" 2>/dev/null || true
 mv "$DEST/panel.new" "$DEST/panel"
 
-# ── 脚本：面板自己的东西跟着一起搬 ──
+# 脚本：面板自己的东西跟着一起搬
 # plugins/ **不在这里搬**：面板仓的 plugins/ 只剩面板自己的 webui-demo（UI 套件样板），
 # 真插件由各自的插件项目部署（它们各有 deploy:panel，装完自己 cmp）。
 # 为什么以前要搬：二进制里的 /app.css 换了，plugins/ 里却是几天前的拷贝，同一个页面上
@@ -85,11 +85,11 @@ if [ -d "$ROOT/scripts" ]; then
   cp -R "$ROOT/scripts/." "$DEST/scripts/"
 fi
 
-# ── 端口得是我们的（第 191 轮实测）──
+# 端口必须是本程序的
 # 0.3.x 的 LaunchAgent（com.asunajs.panel，quickjs 那套）也写死 127.0.0.1:3030 + KeepAlive，
-# 一旦我们的进程被 kickstart 掉，它会在几秒内把端口抢走；之后新进程每次都「Address already in use」，
+# 一旦本程序的进程被 kickstart 掉，它会在几秒内把端口抢走；之后新进程每次都「Address already in use」，
 # 表现成「进程起来了、readyz 一直不通」，而 launchctl list 里两条 job 都在（一条 0.3、一条 0.4）。
-# 所以起服务前先看监听者是谁：不是我们的二进制就当场说清楚怎么办，别让它跑到别人的地面上。
+# 所以起服务前先看监听者是谁：不是本程序的二进制就当场说清楚怎么办，别让它占着别人的端口。
 owner="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
 if [ -n "$owner" ]; then
   ocmd="$(ps -o command= -p "$owner" 2>/dev/null | head -1)"
@@ -103,10 +103,10 @@ if [ -n "$owner" ]; then
   esac
 fi
 
-# 0.3 的 job 只要还挂着，kickstart 我们之后它会在几秒内把端口抢回去（KeepAlive）——
+# 0.3 的 job 只要还挂着，kickstart 本程序之后它会在几秒内把端口抢回去（KeepAlive）——
 # 表现是「进程起来了、readyz 一直不通」，而 ps 看 3030 的监听者是
 # ~/Library/Application Support/plugin-panel/bin/plugin-panel（0.3 那套）。
-# 第 224 轮实测撞上：我们的二进制根本没绑上端口，实例等于没换。
+# 实测撞上：本程序的二进制根本没绑上端口，实例等于没换。
 legacy="$(launchctl list 2>/dev/null | awk '$3=="com.asunajs.panel"||$3=="com.asunajs.panel.watchdog"{print $3}')"
 if [ -n "$legacy" ]; then
   echo "❌ 旧 0.3 面板的 launchd job 还挂着（$(echo $legacy | tr '\n' ' ')）——它会抢走 $PORT。" >&2
@@ -131,12 +131,12 @@ done
 # 所以给 300 秒，并且每 15 秒报一次「还在加载」，别让人以为卡死了。
 # 数的是**实例** plugins/ 里的插件（不是仓里的、更不是 HEAD 里的）：插件是插件项目装的，
 # 拿仓里的数目对账永远对不上（撤掉产物之后）。
-# 第 216 轮起插件有两种形态，必须和面板的 `pluginfs::names` 用同一套判据：
+# 插件有两种形态，必须和面板的 `pluginfs::names` 用同一套判据：
 #   · 单文件 `<name>.js`
 #   · 目录式 `<name>/index.js`（`.webui/` 目录没有 index.js，天然不会被算进来）
 # 只数 *.js 会把目录式插件漏掉，readyz 报 6 而这里算成 2（日志里出现「插件 6/2」）。
 # 两种形态**同名并存**时（升级期的安全垫）面板只算一个，这里也必须按名字去重，
-# 否则 EXPECT 多 1，会一直等到 300 秒超时（第 217 轮 review 实测）。
+# 否则 EXPECT 多 1，会一直等到 300 秒超时（review 实测）。
 EXPECT="$(
   {
     for f in "$DEST"/plugins/*.js; do
@@ -173,7 +173,7 @@ WAITED=0
 while [ "$WAITED" -lt 300 ]; do
   BODY="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/readyz" 2>/dev/null || true)"
   # 端口上可能是**别的**面板（0.3 那套也认 /readyz，但回 401 或另一套 JSON）：
-  # 直接报「没就绪」会让人去查我们的日志，而日志里只有 EADDRINUSE。
+  # 直接报「没就绪」会让人去查本程序的日志，而日志里只有 EADDRINUSE。
   if [ -n "$BODY" ] && ! printf %s "$BODY" | grep -q '"failed_plugins"'; then
     o2="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
     echo "❌ $PORT 上回的不是我们的 /readyz：pid=${o2:-?} $(ps -o command= -p "${o2:-0}" 2>/dev/null | head -1)" >&2

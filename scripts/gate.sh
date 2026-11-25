@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 全部门禁一把跑完（第 190 轮）。提交前跑它，红哪条修哪条。
+# 全部门禁一把跑完。提交前跑它，红哪条修哪条。
 #
 # 为什么要有：门禁从 3 条涨到 15 条之后，靠记忆挑着跑总会漏 —— 而且每条都
 # 起一次面板/浏览器，逐条手敲太慢。这里串行跑完，最后汇总。
@@ -24,7 +24,7 @@ run() {  # run <名字> <命令...>
   rm -f /tmp/gate-out.$$
 }
 
-# ── 静态与单测（快）──
+# 静态与单测（快）
 run "cargo test"        cargo test --offline
 run "cargo clippy"      bash -c 'cargo clippy --offline --all-targets 2>&1 | grep -E "^(warning|error)[: ]" | grep -v vendor | grep -q . && exit 1 || exit 0'
 run "check-docs"        bash scripts/check-docs.sh
@@ -44,11 +44,11 @@ if [ "$MODE" = "fast" ]; then
   exit 0
 fi
 
-# ── 界面与研究性检查（要浏览器）──
+# 界面与研究性检查（要浏览器）
 run "ui-kit-check"      node scripts/ui-kit-check.mjs
 run "ui-check"          node scripts/ui-check.mjs
 
-# ── 端到端（真起面板，慢）──
+# 端到端（真起面板，慢）
 run "check-lazy-load"   bash scripts/check-lazy-load.sh
 run "check-wake"        bash scripts/check-wake.sh
 run "check-catchup"     bash scripts/check-catchup.sh

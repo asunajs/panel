@@ -69,7 +69,7 @@ const WEB_SRC = process.env.DOM_PROBE_WEB_SRC || path.join(ROOT, 'web');
 // 重建抖动也会让它变正，那不是泄漏（DevTools 截图看到的正是这个数）。
 const NET_ELEMS_FAIL = Number(process.env.DOM_PROBE_NET_ELEMS_FAIL || 50);
 const NET_NODES_FAIL = Number(process.env.DOM_PROBE_NET_NODES_FAIL || 300);
-// 原始斜率（含游离节点，不靠 GC 兜）也从第 187 轮起判：修掉「文本节点一换一扔」之后
+// 原始斜率（含游离节点，不靠 GC 兜）也从判：修掉「文本节点一换一扔」之后
 // 静置时它该是 0/s（实测 0.00）；再涨回来就说明有人又把「每轮重建 / 每轮 textContent=」加回来了。
 // 「每秒净增」的参考值（只进 report，不做判定）：把它当成读数，别当门禁 ——
 // 无头 Edge 上这一层量不出来（见下方判定段里的说明）。
@@ -101,7 +101,7 @@ function check(name, ok, detail) {
   console.log('  ' + (ok ? '✓' : '✗') + ' ' + name + (detail ? '   [' + detail + ']' : ''));
 }
 
-// ---------------------------------------------------------------- 临时现场
+// 临时现场
 
 const dir = mkdtempSync(path.join(tmpdir(), 'dom-probe-'));
 const dataDir = path.join(dir, 'data');
@@ -181,7 +181,7 @@ async function panelAlive() {
   } catch (_) { return false; }
 }
 
-// ---------------------------------------------------------------- 读数
+// 读数
 
 async function counters() {
   const expr =
@@ -257,7 +257,7 @@ async function nodeHistogram(protoExpr) {
   } catch (_) { return null; }
 }
 
-// ---------------------------------------------------------------- CDP
+// CDP
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);
@@ -300,7 +300,7 @@ async function connect(wsUrl) {
   };
 }
 
-// ---------------------------------------------------------------- 主要流程
+// 主要流程
 
 const report = { meta: {}, stages: [], checks: [], histogram: null };
 let apiCalls = 0;
@@ -347,7 +347,7 @@ async function main() {
   console.log('冻结点：web ← ' + WEB_SRC + '  app.js ' + report.meta.appJsSha + ' / index.html ' + report.meta.indexSha);
 
   // **二进制也拷一份并改名**：队友跑探针时习惯先 pkill -f 'target/debug/panel' 清场，
-  // 那会顺手把我这个副本一起打死（实测两次「洪水阶段 fetch failed」就是这么来的）。
+  // 那会顺手把这个副本一起打死（实测两次「洪水阶段 fetch failed」就是这么来的）。
   // 换个路径启动，命令行里就没有那个串了。
   const panelBin = path.join(dir, 'panel-probe-bin');
   copyFileSync(BIN, panelBin);
@@ -415,9 +415,9 @@ async function main() {
   ], { stdio: 'ignore' });
 
   // Edge 会自己开一个 `edge://sync-confirmation-dialog` 的 page 并且**抢前台**。
-  // 于是我们这一页成了后台标签：`setInterval` 被降频、`requestAnimationFrame` 直接停摆，
+  // 于是这一页成了后台标签：`setInterval` 被降频、`requestAnimationFrame` 直接停摆，
   // 而 `render()` 正是挂在 rAF 上 —— API 照调、一个节点都不重画，探针量出一条假的零增长
-  // （第 187 轮踩到：同一份修前代码，探针 0.00/s，手动起实例 7.97/s）。把它关掉。
+  // （踩到：同一份修前代码，探针 0.00/s，手动起实例 7.97/s）。把它关掉。
   const target = await waitFor(async () => {
     const list = await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).json();
     return list.find((t) => t.type === 'page' && (t.url || '').includes('127.0.0.1:' + PORT));
@@ -437,7 +437,7 @@ async function main() {
   await cdp.send('Runtime.enable');
   // 无头浏览器里目标页可能是**后台标签页**：rAF 直接被暂停，而 `render()` 正是挂在
   // requestAnimationFrame 上 —— 页面的 5s 轮询照跑、API 照调，但一个节点都不重画，
-  // 探针就会量出一条假的「零增长」（第 187 轮踩到：同一份修前代码，探针 0.00/s，
+  // 探针就会量出一条假的「零增长」（踩到：同一份修前代码，探针 0.00/s，
   // 手动起实例 7.97/s）。强制让页面「一直被聚焦 + 前台」。
   try { await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }); } catch (_) {}
   try { await cdp.send('Page.bringToFront'); } catch (_) {}
@@ -471,7 +471,7 @@ async function main() {
     ' · 监听 ' + fmt(boot.listeners) + ' · 文档 ' + fmt(boot.documents));
   report.stages.push({ name: 'boot', ...boot });
 
-  // ---- 一个视图停一段时间，按 SAMPLE_MS 采样；gcEveryMs>0 时定期强制 GC ----
+  // 一个视图停一段时间，按 SAMPLE_MS 采样；gcEveryMs>0 时定期强制 GC
   async function stay(view, label, opts) {
     const o = opts || {};
     const ms = o.ms == null ? VIEW_MS : o.ms;
@@ -580,7 +580,7 @@ async function main() {
       ((g[g.length - 1].at - g[0].at) / 1000).toFixed(0) + 's');
   }
 
-  // ---- 日志洪水：DOM 行数是封顶还是线性涨 ----
+  // 日志洪水：DOM 行数是封顶还是线性涨
   let floodStage = null;
   if (!NO_FLOOD) {
     await cdp.eval("location.hash = '#logs'");
@@ -661,7 +661,7 @@ async function main() {
     floodStage.reenterRows = back.logsRows;
   }
 
-  // ---- 复现「运行记录页只有 8 行，DOM 节点却 112,681」----
+  // 复现「运行记录页只有 8 行，DOM 节点却 112,681」
   // 假设：那不是运行记录页画出来的，是**隐藏的日志页**留着历次追加上去的行。
   // 做法：在日志页灌 N 条，再切到运行记录页读数 —— 若挂载/总节点停在高位，假设成立。
   let reproStage = null;
@@ -715,7 +715,7 @@ async function main() {
     console.log('    ⇒ 用户截图 112,681 节点 ≈ ' + Math.round((112681 - 2100) / perRowSafe) + ' 行被隐藏视图留着');
   }
 
-  // ---- 判定 ----
+  // 判定
   console.log('');
   console.log('判定（以 GC 后净增为准）');
   const stays = VIEWS.map((v) => stages[v]).filter(Boolean);
@@ -727,7 +727,7 @@ async function main() {
       '挂载 ' + dd(s.elems0, s.elems1) + '（阈值 +' + NET_ELEMS_FAIL + '），' +
       '总节点 ' + dd(s.nodes0, s.nodes1) + '（阈值 +' + NET_NODES_FAIL + '），GC 前峰值 ' + fmt(s.rawNodes1));
   }
-  // 原始斜率/每秒净增**只报不判**（第 187 轮的结论，别再加回来当门禁）：
+  // 原始斜率/每秒净增**只报不判**：
   // 无头 Edge 里同一份「修前」代码也量出 0.00/s —— 探针页面上 `textContent =` 走的是
   // 原地 setData（MutationObserver 看到 characterData，addedNodes 是 0），所以「文本节点
   // 一换一扔」这一层在这个环境里根本构造不出来。真实浏览器（以及 scripts/dom-growth.mjs
@@ -780,7 +780,7 @@ async function main() {
   return bad;
 }
 
-// ---------------------------------------------------------------- 收尾
+// 收尾
 
 function cleanup() {
   if (KEEP) { console.log('现场留着：' + dir); return; }

@@ -1,4 +1,4 @@
-/// 面板给插件的能力 ↔ **首次出现的面板版本**（第 255 轮）。
+/// 面板给插件的能力 ↔ **首次出现的面板版本**。
 ///
 /// 为什么要有这张表：插件的 `min_panel` 一旦写错，两个方向都难受 ——
 ///   · **写低了**：用户的面板版本够不着那些能力，装上去跑一半报「不是函数」，甚至页面打不开；
@@ -15,11 +15,11 @@
 ///     发版前跑 `--strict` 会让它显形，提醒把 min_panel 提上去。
 
 export const CAPABILITIES = [
-  // ── 清单字段 ───────────────────────────────────────────────
+  // 清单字段
   { id: 'manifest.version', since: '0.6.0', where: 'manifest', pattern: /^\s*"version"\s*:/m, note: '清单 version（商店显示已装哪版）' },
   { id: 'manifest.on_panel_open', since: '0.6.0', where: 'manifest', pattern: /"on_panel_open"\s*:/, note: '打开面板时回调一次' },
 
-  // ── 面板控件（web/ui.js 注册的自定义元素）──────────────────
+  // 面板控件（web/ui.js 注册的自定义元素）
   { id: 'ui.p-button', since: '0.4.0', where: 'webui', pattern: /<p-button\b/ },
   { id: 'ui.p-field', since: '0.4.0', where: 'webui', pattern: /<p-field\b/ },
   { id: 'ui.p-dialog', since: '0.4.0', where: 'webui', pattern: /<p-dialog\b/ },
@@ -36,7 +36,7 @@ export const CAPABILITIES = [
   { id: 'ui.p-log', since: '0.7.0', where: 'webui', pattern: /<p-log\b/, note: '实时日志（R14 要求任务型插件用）' },
   { id: 'ui.p-plugin-ver', since: '0.8.3', where: 'webui', pattern: /<p-plugin-ver\b/, note: '右上角版本药丸（版本来自清单，第 257 轮）' },
 
-  // ── 面板 JS 面（window.PanelUI）────────────────────────────
+  // 面板 JS 面（window.PanelUI）
   { id: 'PanelUI.confirm', since: '0.7.0', where: 'webui', pattern: /PanelUI\.confirm\s*\(/ },
   { id: 'PanelUI.prompt', since: '0.7.0', where: 'webui', pattern: /PanelUI\.prompt\s*\(/ },
   { id: 'PanelUI.mask', since: '0.8.0', where: 'webui', pattern: /PanelUI\.mask\s*\(/ },
@@ -48,7 +48,7 @@ export const CAPABILITIES = [
   { id: 'PanelUI.esc', since: '0.8.0', where: 'webui', pattern: /PanelUI\.esc\s*\(/ },
   { id: 'PanelUI.api', since: '0.8.0', where: 'webui', pattern: /PanelUI\.api\s*\(/ },
 
-  // ── 宿主 API（panel:host）──────────────────────────────────
+  // 宿主 API（panel:host）
   { id: 'host.run_once', since: '0.7.0', where: 'server', pattern: /host\.run_once\s*\(/ },
   { id: 'host.set_job_paused', since: '0.4.0', where: 'server', pattern: /set_job_paused\s*\(/ },
   { id: 'host.sqlite_exec_sync', since: '0.4.0', where: 'server', pattern: /sqlite_exec_sync\s*\(/ },
@@ -56,12 +56,12 @@ export const CAPABILITIES = [
   { id: 'host.smtp_send', since: '0.6.0', where: 'server', pattern: /smtp_send\s*\(/ },
   { id: 'host.panel_at_least', since: '0.4.0', where: 'server', pattern: /panel_at_least\s*\(/ },
 
-  // ── LLRT 运行时（由面板内置）───────────────────────────────
+  // LLRT 运行时（由面板内置）
   { id: 'runtime.fs.existsSync', since: '0.8.0', where: 'server', pattern: /\.existsSync\s*\(/ },
   { id: 'runtime.CompressionStream', since: '0.8.0', where: 'server', pattern: /\bCompressionStream\b/ },
   { id: 'runtime.DecompressionStream', since: '0.8.0', where: 'server', pattern: /\bDecompressionStream\b/ },
 
-  // ── 插件页响应头（插件自己声明的 CSP）──────────────────────
+  // 插件页响应头（插件自己声明的 CSP）
   { id: 'webui.x-panel-csp', since: '0.8.2', where: 'server', pattern: /['"]x-panel-csp['"]\s*:/, note: '插件页声明自己需要的 CSP（滑块页要用）' },
   { id: 'host.log.debug', since: '0.8.2', where: 'server', pattern: /['"]debug['"]\s*\)|log\(\s*['"]debug['"]/, note: '第四级日志（空闲卸载不再挤占 info）' },
 ];

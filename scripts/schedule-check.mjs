@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 任务调度模块的门禁（第 110 轮）：web/schedule.js 的纯函数逐条验。
+// 任务调度模块的门禁：web/schedule.js 的纯函数逐条验。
 //
 //   node scripts/schedule-check.mjs
 //
@@ -31,7 +31,7 @@ function fmt(ms, tz = TZ) {
     `${String(p.h).padStart(2, '0')}:${String(p.mi).padStart(2, '0')}:${String(p.s).padStart(2, '0')} ${wd}`;
 }
 
-// ---------------------------------------------------------------- ① weekly + 抖动
+// ① weekly + 抖动
 
 test('① every mon,wed,fri at 08:30 ± 5m：短句、5 次预览、抖动可复现', () => {
   const json = {
@@ -82,7 +82,7 @@ test('① 没有抖动时短句不带 ±，预览精确落在 08:30', () => {
   }
 });
 
-// ---------------------------------------------------------------- ② window
+// ② window
 
 test('② every day between 09:00 and 18:00, 1 time：跨天窗口 5 次预览', () => {
   const json = { type: 'window', every: 'day', between: ['09:00', '18:00'], count: 1, timezone: TZ };
@@ -125,7 +125,7 @@ test('② 跨午夜窗口（止 < 起）按本地墙钟处理', () => {
   }
 });
 
-// ---------------------------------------------------------------- ③ expr
+// ③ expr
 
 test('③ {type:expr, expr:"30 8 * * 1,3,5"} 能预览，且 JSON 一个字节都不改', () => {
   const json = { type: 'expr', expr: '30 8 * * 1,3,5', timezone: TZ };
@@ -161,7 +161,7 @@ test('③ 解析不了的表达式只报「无法预览」，不抛、不当配�
   assert.equal(v.filter((x) => x.level === 'warn').length, 1);
 });
 
-// ---------------------------------------------------------------- ④ @every 3d
+// ④ @every 3d
 
 test('④ @every 3d：归一化成 interval，短句与预览都跟着变', () => {
   const raw = { type: 'expr', expr: '@every 3d', timezone: TZ };
@@ -243,7 +243,7 @@ test('④+ 表达式不被渲染/预览/导出改写（归一化必须是显式�
   assert.equal(n.unit, 'hour');
 });
 
-// ---------------------------------------------------------------- ⑤ exportCron
+// ⑤ exportCron
 
 test('⑤ exportCron：window / randomPick / monthly last / once 必须显式 ok:false', () => {
   const cases = [
@@ -293,7 +293,7 @@ test('⑤ exportCron：不能整除的间隔不许输出会漂移的 */N', () =>
   assert.equal(ok.cron, '*/15 * * * *');
 });
 
-// ---------------------------------------------------------------- 多计划
+// 多计划
 
 test('多计划：短句是各条用「；」连起来', () => {
   const m = {
@@ -363,7 +363,7 @@ test('多计划：子计划没写时区就继承外层的', () => {
   assert.equal(n.items[0].timezone, 'America/New_York');
 });
 
-// ---------------------------------------------------------------- 短句模板
+// 短句模板
 
 test('短句：六种类型的模板逐条对齐', () => {
   assert.equal(
@@ -380,7 +380,7 @@ test('短句：六种类型的模板逐条对齐', () => {
   assert.equal(S.toSentence({ type: 'expr', expr: '@daily', timezone: TZ }), '@daily');
 });
 
-// ---------------------------------------------------------------- 字段级校验
+// 字段级校验
 
 test('校验：规格里那六条逐条命中', () => {
   const has = (json, field, re) => {
@@ -409,7 +409,7 @@ test('校验：29–31 的日期在短月里自动跳过，不会算到 3 月 1 
   assert.ok(got[1].startsWith('2027-03-31'), '2 月应跳过，实际 ' + got[1]);
 });
 
-// ---------------------------------------------------------------- 时区
+// 时区
 
 test('时区：同一个 JSON 换时区，落地时刻跟着变', () => {
   const sh = { type: 'daily', at: '09:00', jitter: null, timezone: 'Asia/Shanghai' };
@@ -421,7 +421,7 @@ test('时区：同一个 JSON 换时区，落地时刻跟着变', () => {
   assert.notEqual(a.runs[0], b.runs[0], '两个时区的 9 点不是同一个时刻');
 });
 
-// ---------------------------------------------------------------- fromCron（可选便利）
+// fromCron（可选便利）
 
 test('fromCron：认得出就填表单，认不出就建议保持 expr', () => {
   const d = S.fromCron('0 9 * * *');
@@ -441,7 +441,7 @@ test('fromCron：认得出就填表单，认不出就建议保持 expr', () => {
   assert.equal(sec.ok, false, '带秒的保持 expr');
 });
 
-// ---------------------------------------------------------------- 哈希与可复现
+// 哈希与可复现
 
 test('hash32：同一输入永远同一结果，不同输入基本不同', () => {
   assert.equal(S.hash32('abc'), S.hash32('abc'));

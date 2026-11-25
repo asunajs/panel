@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 把插件目录从「散件」收拢成「一个插件一个目录」（第 269 轮）。
+// 把插件目录从「散件」收拢成「一个插件一个目录」。
 //
 //   node scripts/migrate-plugin-layout.mjs --dir ~/panel-3030/plugins --dry
 //   node scripts/migrate-plugin-layout.mjs --dir ~/panel-3030/plugins --apply

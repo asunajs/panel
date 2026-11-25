@@ -50,7 +50,7 @@ tokio = { version = "1", features = [
 ] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.8"
-# 静态资源压一下：app.js 112KB + app.css 41KB 是首屏大头（第 88 轮）。
+# 静态资源压一下：app.js 112KB + app.css 41KB 是首屏大头。
 # 只在有 Accept-Encoding 时压，老浏览器拿到原文，不影响兼容。
 tower-http = { version = "0.6", features = ["compression-gzip"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -73,10 +73,10 @@ ring = "0.17"
 # 引擎边界的 catch_unwind 用 FutureExt。futures 已在依赖树里（rquickjs 的 futures feature）。
 futures = "0.3"
 
-# ── WebSocket（插件的长连接能力）──────────────────────────────────────
+# WebSocket（插件的长连接能力）
 # 用 tokio-tungstenite 而不是自己写帧：握手/掩码/分片/ping-pong 都是细节坑。
 # ⚠ 不启用 rustls-tls-webpki-roots：那条路会拖进 webpki-roots 0.26（旧根证书），
-#   我们直接用项目已有的 rustls 0.23 + webpki-roots 1 手工搭 connector（与 http 同一份信任库）。
+#   直接用项目已有的 rustls 0.23 + webpki-roots 1 手工搭 connector（与 http 同一份信任库）。
 # 上传 zip：只编 deflate，不把 bzip2/lzma/zstd 全拖进来。
 # 9 起会拒「实际解压量 > 声明值」的条目 —— 给 zip 炸弹又多一道，所以用 9。
 # 备份加密（移植自基线 unpanel 2.10）：服务端只留公钥，私钥归人保管。
@@ -88,7 +88,7 @@ base64 = "0.23"
 # panel.version()/atLeast() 的版本比较。1.x 已在树里（cargo 依赖链），不增加编译单元。
 semver = "1"
 sha2 = "0.10"
-# 装 .ts 插件时做类型擦除（第 108 轮）。0.154.0 全套已在离线缓存里 —— 老面板
+# 装 .ts 插件时做类型擦除。0.154.0 全套已在离线缓存里 —— 老面板
 # src/market.rs 用的就是这一版，不引 Bun/Node 这种外部运行时。约 +0.9 MiB（release）。
 # 只做 TypeScript transform：不 bundle、不解析 panel:host、不生成 sourcemap。
 oxc_allocator = "0.154.0"
@@ -103,12 +103,12 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pki-types = "1"
 webpki-roots = "1"
 
-# ── legacy TLS（只给 CBC 套件的主机）────────────────────────────────
+# legacy TLS（只给 CBC 套件的主机）
 # rustls **不实现任何 CBC 套件**（设计选择），所以 tls:"native" 必须走平台 TLS。
 # native-tls：macOS = Security.framework，Linux = OpenSSL。
 native-tls = "0.2"
 # 这条路的 HTTP 客户端。只用到 blocking 语义里的“能谈 CBC”这一点。
-# 压缩特性 = 出站响应「走原生」解压（第 253 轮）：开了之后 reqwest 自己带
+# 压缩特性 = 出站响应「走原生」解压：开了之后 reqwest 自己带
 # accept-encoding 并在 Rust 侧解 gzip / deflate / br / zstd，插件拿到的是明文 body。
 reqwest = { version = "0.12", default-features = false, features = [
     "native-tls",
@@ -132,7 +132,7 @@ zstd = { version = "0.14", default-features = false }
 #   —— rustls 不实现任何 CBC 套件，只有 CBC 的主机（见 outbound.rs 的 fetch_native_json）
 #   在 rustls 那条路上永远握手失败。代价是 Linux 静态产物多 ~6MB OpenSSL，
 #   这是功能的价钱，不是浪费。macOS 那边 native-tls = Security.framework，所以小一截。
-# 磁盘余量（第 200 轮）：面板得能说清「这块盘还剩多少」——盘满会让日志写不进去、
+# 磁盘余量：面板得能说清「这块盘还剩多少」——盘满会让日志写不进去、
 # 备份失败、插件装不上，而界面上完全看不出来（这次开发机盘满最先崩的是 cargo 链接）。
 # 两个 crate 都已在 Cargo.lock 里（LLRT 间接依赖），加为直接依赖不新增下载。
 [target.'cfg(unix)'.dependencies]
@@ -164,7 +164,7 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 [features]
 # musl 静态发布用（.github/workflows/release.yml）：把 OpenSSL 静态编进二进制，
 # 否则产物带 NEEDED 段、丢到别的设备跑不了。只在 Linux 目标上启用
-# （macOS 的依赖图里没有 openssl-sys，启用这个 feature 会解析失败 —— 我们从不在
+# （macOS 的依赖图里没有 openssl-sys，启用这个 feature 会解析失败 —— 本项目从不在
 # macOS 上开它）。原生开发与测试都不带这个 feature。
 vendored-openssl = ["openssl-sys/vendored"]
 

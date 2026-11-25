@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 主题闪白探针（第 219 轮，用户反馈 #6「dark 模式刷新闪白」）。
+// 主题闪白探针（用户反馈 #6「dark 模式刷新闪白」）。
 //
 // 量的是一件很具体的事：**首帧**画出来的时候，<html data-theme> 是用户选的那个吗？
 // 做法：先把 localStorage 设成 dark → 刷新 → 用 PerformanceObserver 取 first-paint 的时刻，

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 插件边界（第 182 轮）：面板仓里不许有插件产物，两条部署路径不许混。
+# 插件边界：面板仓里不许有插件产物，两条部署路径不许混。
 #
 # 规则见 docs/plugin-contract.md。这里只查「机器能查的」：
 #   ① 面板仓 plugins/ 只有白名单里的东西（磁盘 + git 索引都查）
@@ -17,9 +17,9 @@ ok()  { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 
 # 白名单 = 面板仓自己的样例：webui-demo 演示「.webui/ 静态界面」，
-#   webui-demo.panel.json 是它的清单（第 257 轮：<p-plugin-ver> 的版本从清单来），
-# preview-demo 演示「清单声明界面」（第 191 轮，没有 .webui/）。
-# 第 269 轮起样例也收拢了：一个插件一个目录（plugins/webui-demo/ 里放三件套）。
+#   webui-demo.panel.json 是它的清单（<p-plugin-ver> 的版本从清单来），
+# preview-demo 演示「清单声明界面」（没有 .webui/）。
+# 样例也收拢了：一个插件一个目录（plugins/webui-demo/ 里放三件套）。
 ALLOW='README.md hello.js.bak webui-demo preview-demo'
 
 # ① 白名单：磁盘上的 plugins/ 顶层条目
@@ -96,7 +96,7 @@ for pat in '.zcode/' 'plugins-wip/'; do
   fi
 done
 
-# ⑥ 面板部署脚本不许写 plugins/（第 204 轮）
+# ⑥ 面板部署脚本不许写 plugins/
 #
 # 这条是「分工」的守卫：面板部署只搬二进制 + scripts，插件（.js/.panel.json/.webui）
 # 归各自的插件项目（deploy:panel）。以前反复出过「插件页 404 / 新面板配旧插件」，

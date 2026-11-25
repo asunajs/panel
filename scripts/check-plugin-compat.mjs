@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/// 插件「能力 ↔ min_panel」双向体检（第 255 轮）。
+/// 插件「能力 ↔ min_panel」双向体检。
 ///
 /// 用法：
 ///   node scripts/check-plugin-compat.mjs              # 报告（永远 exit 0，除非读文件出错）

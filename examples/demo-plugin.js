@@ -58,7 +58,7 @@ async function probe() {
   } catch (e) {
     out.http_fetch = 'err: ' + e.message;
   }
-  // 6.5) 压缩：上游回 gzip，面板侧原生解压后插件应拿到明文（第 253 轮）
+  // 6.5) 压缩：上游回 gzip，面板侧原生解压后插件应拿到明文
   try {
     const r = await host.fetch(demo.gzip_url || httpUrl);
     out.fetch_gzip = { status: r.status, encoding: r.headers && (r.headers['content-encoding'] || ''), body: String(r.body || '') };
@@ -72,7 +72,7 @@ async function probe() {
     out.http_fetch_gzip = 'err: ' + e.message;
   }
 
-  // 6.7) Web 压缩流：CompressionStream / DecompressionStream（第 254 轮，原生实现）
+  // 6.7) Web 压缩流：CompressionStream / DecompressionStream（原生实现）
   try {
     const collect = async (stream) => {
       const reader = stream.getReader();
@@ -114,7 +114,7 @@ async function probe() {
     out.compression = 'err: ' + e.message;
   }
 
-  // 6.6) fs.existsSync（第 253 轮给 LLRT 的 node:fs 补的；Node 语义：任何错误都 false、不抛）
+  // 6.6) fs.existsSync（给 LLRT 的 node:fs 补的；Node 语义：任何错误都 false、不抛）
   try {
     const f = await import('node:fs');
     const dir = await host.plugin_data_dir();
@@ -181,7 +181,7 @@ async function probe() {
     out.smtp = 'err: ' + e.message;
   }
 
-  // 11) 写错键名必须报错（而不是静默当成默认值）—— 第 73 轮就是这么踩到的
+  // 11) 写错键名必须报错（而不是静默当成默认值）—— 就是这么踩到的
   try {
     await host.set_job_schedule('probe', { cron: '@every 6h' });
     out.bad_key = '没报错（不对）';

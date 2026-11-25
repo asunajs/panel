@@ -21,9 +21,9 @@ on:
 # 权限按 job 最小化（安全审计 中13）：编译 job 只读；只有真正 gh release create
 # 的那个 job 能写。
 jobs:
-  # ------------------------------------------------------------------
+  #
   # 每个平台各自原生编译（不是交叉编译），编完跑一遍自检
-  # ------------------------------------------------------------------
+  #
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -79,7 +79,7 @@ jobs:
           export "CARGO_TARGET_${TARGET_UPPER}_LINKER=musl-gcc"
           export "CC_${TARGET_LOWER}=musl-gcc"
           # Termux（Android 10+ / targetSdk ≥ 29）不再直接 exec，而是让 termux-exec
-          # 去 exec `/system/bin/linker64 <你的程序>`，把 LD_PRELOAD 注进去。
+          # 去 exec `/system/bin/linker64 <目标程序>`，把 LD_PRELOAD 注进去。
           # bionic 的 linker 只接受 ET_DYN（PIE），**静态 ET_EXEC 会被当场拒绝**：
           #     error: "…/panel" has unexpected e_type: 2
           # 所以 ARM 产物必须编成 **static PIE**：ET_DYN + 没有 PT_INTERP ——
@@ -170,12 +170,12 @@ jobs:
             target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.name }}
           if-no-files-found: error
 
-  # ------------------------------------------------------------------
+  #
   # 32 位 ARM：老树莓派 / 电视盒子 / 部分 Termux 设备
   #
   # GitHub 没有 armv7 原生 runner，所以用 cross + Docker 里的 musl 交叉工具链。
   # 产物仍是静态链接；qemu 只用来跑一次 `version`，证明这个二进制能启动。
-  # ------------------------------------------------------------------
+  #
   armv7:
     name: armv7-linux-musleabihf
     runs-on: ubuntu-latest
@@ -253,9 +253,9 @@ jobs:
             target/armv7-unknown-linux-musleabihf/release/SHA256SUMS-armv7-linux-musleabihf
           if-no-files-found: error
 
-  # ------------------------------------------------------------------
+  #
   # 汇总成一个 Release
-  # ------------------------------------------------------------------
+  #
   windows:
     name: windows-x86_64-msvc
     runs-on: windows-latest

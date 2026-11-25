@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 用**固定标识**给 panel 二进制做 ad-hoc 重签名（第 269 轮）。
+# 用**固定标识**给 panel 二进制做 ad-hoc 重签名。
 #
 #   bash scripts/sign-panel.sh target/debug/panel
 #

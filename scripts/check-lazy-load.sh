@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 按需加载（第 179 轮）的端到端检查。
+# 按需加载的端到端检查。
 #
 # 要证的是一条跨三层的链路：启动决策（main）→ 占位任务（scheduler）→ 界面/恢复。
 # 单测只盯得住其中一层，所以真起面板跑：
@@ -186,7 +186,7 @@ ping2=$(curl -s -o /dev/null -w '%{http_code}' -b "$D/jar" -X POST -H 'content-t
 [ "$(state_of uiface)" = "00" ] && ok "它已经自动装回内存" || bad "调用后状态不对：$(state_of uiface)"
 stop
 
-# ⑩ 暂停的插件也不能钉在内存里（第 189 轮）：3030 上「插件商店」被暂停后
+# ⑩ 暂停的插件也不能钉在内存里：3030 上「插件商店」被暂停后
 #    一直不卸，就因为 idle_tick 里留了「suspended 不卸」的例外。
 #    ensure_loaded 之后这个例外没有意义了 —— 界面一调用就装回来。
 start

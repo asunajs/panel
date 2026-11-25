@@ -1,6 +1,6 @@
 import host from 'panel:host';
 
-// 样例插件：**声明式页面**的验收载体（第 191 轮）。
+// 样例插件：**声明式页面**的验收载体。
 //
 // 它没有 .webui/ 目录，界面全在 preview-demo.panel.json 里声明：
 //   nav            → 侧栏一格（清单驱动，插件没加载也出现）
@@ -61,7 +61,7 @@ async function saveAccounts(list) {
   );
 }
 
-// ---------------------------------------------------------------- 动作（evt.action）
+// 动作（evt.action）
 
 async function action(evt) {
   const id = String(evt.action || '');
@@ -143,7 +143,7 @@ async function action(evt) {
     return { done: true, ok: true, message: '扫码成功（演示）' };
   }
 
-  // 一次性调用（第 227 轮）：面板只有一条执行位，run_once 是**排队**语义。
+  // 一次性调用：面板只有一条执行位，run_once 是**排队**语义。
   // 点一下生成 3 条，每条 1.5 秒，依次跑完；任务页主表不新增行，跑完自动消失。
   if (id === 'fanout') {
     const n = Math.max(1, Math.min(8, Number(body.n || 3)));
@@ -165,7 +165,7 @@ async function action(evt) {
   return { ok: false, error: '未知动作：' + (id || '(空)') };
 }
 
-// ---------------------------------------------------------------- 视图（evt.view，只读）
+// 视图（evt.view，只读）
 
 async function data(evt) {
   const v = String(evt.view || '');

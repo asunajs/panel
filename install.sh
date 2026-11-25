@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-# ---- fork 之后改这一行 ----
+# fork 之后改这一行
 REPO="${PANEL_REPO:-asunajs/panel}"
 
 VERSION="${PANEL_VERSION:-latest}"
@@ -41,7 +41,7 @@ info() { printf '\033[36m·\033[0m %s\n' "$*"; }
 ok() { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m警告\033[0m %s\n' "$*" >&2; }
 
-# ---------- 1. 检测平台 ----------
+# 1. 检测平台
 case "$(uname -s)" in
     Linux) OS=linux ;;
     Darwin) OS=darwin ;;
@@ -61,7 +61,7 @@ if [ "$OS" != linux ]; then
   node tools/bundle/build.mjs && cargo build --release（见 README 的构建一节）"
 fi
 
-# ---------- 2. 决定安装目录 ----------
+# 2. 决定安装目录
 IS_TERMUX=0
 if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
     IS_TERMUX=1
@@ -74,7 +74,7 @@ fi
 info "平台: $OS/$ARCH$([ $IS_TERMUX = 1 ] && echo ' (Termux)')"
 info "安装到: $INSTALL_DIR"
 
-# ---------- 3. 决定下载地址 + scheme 白名单 ----------
+# 3. 决定下载地址 + scheme 白名单
 if [ -n "${PANEL_BASE_URL:-}" ]; then
     BASE="$PANEL_BASE_URL"
 elif [ "$VERSION" = latest ]; then
@@ -157,7 +157,7 @@ if ! fetch "$BASE/$ASSET" "$TMP/$BIN_NAME"; then
   预期地址: $BASE/$ASSET"
 fi
 
-# ---------- 4. 校验 SHA256（强制） ----------
+# 4. 校验 SHA256（强制）
 if fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null; then
     EXPECT="$(grep " $ASSET\$" "$TMP/SHA256SUMS" | awk '{print $1}' || true)"
     # 清单在、但没有本资产条目 ⇒ 多半是拉到了别的版本的清单/被裁过的清单，不能当「校验通过」
@@ -177,7 +177,7 @@ if fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null; then
     [ "$EXPECT" = "$ACTUAL" ] || die "SHA256 校验失败！期望 $EXPECT，实际 $ACTUAL"
     ok "SHA256 校验通过（$ASSET）"
 else
-    # 拿不到校验和 ≠ 可以照装。默认拒绝；只有用户显式放弃校验才继续，且必须让他看见警告。
+    # 拿不到校验和 ≠ 可以照装。默认拒绝；只有用户显式放弃校验才继续，且必须让用户看见警告。
     if [ "${PANEL_ALLOW_UNVERIFIED:-0}" = 1 ]; then
         warn "取不到 SHA256SUMS，已按 PANEL_ALLOW_UNVERIFIED=1 跳过校验 —— 装进去的东西没有任何完整性保证。"
     else
@@ -187,7 +187,7 @@ else
     fi
 fi
 
-# ---------- 5. 产物自检（ELF + 体积） ----------
+# 5. 产物自检（ELF + 体积）
 # 这里防两类「校验和过了但东西还是不对」的情况：镜像把错误页 200 返回了、
 # 镜像放了个占位文本/别的架构的小文件。
 MAGIC="$(od -An -tx1 -N4 "$TMP/$BIN_NAME" | tr -d ' \n')"
@@ -198,7 +198,7 @@ SIZE="$(wc -c < "$TMP/$BIN_NAME" | tr -d ' ')"
 
 ok "产物自检通过（ELF, $((SIZE / 1024))KB）"
 
-# ---------- 6. 安装 ----------
+# 6. 安装
 if [ "${EUID:-$(id -u)}" = 0 ]; then
     warn "你正在把从网络下载的二进制装成 root 的二进制 —— 出问题就是整机；能不用 root 就别用。"
 fi
@@ -209,7 +209,7 @@ install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME" 2>/dev/null \
 
 ok "已安装: $INSTALL_DIR/$BIN_NAME"
 
-# ---------- 6.5 真的能跑起来吗 ----------
+# 6.5 真的能跑起来吗
 # 校验和、ELF 头、体积都过了，仍然可能「在这台机器上跑不起来」：
 #   - 架构不对（装错产物、32 位系统装了 64 位）
 #   - 非静态产物（自己用 NDK 编的 aarch64-linux-android 加了 -no-pie，
@@ -238,7 +238,7 @@ else
     warn "排查见 docs/pitfalls.md 的「Android / Termux」一节。"
 fi
 
-# ---------- 7. PATH 提示 ----------
+# 7. PATH 提示
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 清「更新后留下的旧东西」（第 269 轮）。
+# 清「更新后留下的旧东西」。
 #
 #   bash scripts/prune-leftovers.sh [--instance ~/panel-3030] [--apply] [--keep 3]
 #

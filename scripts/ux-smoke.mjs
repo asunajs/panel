@@ -47,7 +47,7 @@ async function waitFor(fn, ms, label) {
   }
 }
 
-// ---------------------------------------------------------------- 面板
+// 面板
 
 const dirA = mkdtempSync(path.join(tmpdir(), 'ux-smoke-a-'));
 const dirB = mkdtempSync(path.join(tmpdir(), 'ux-smoke-b-'));
@@ -94,7 +94,7 @@ function stopAll() {
   try { browser && browser.kill('SIGKILL'); } catch {}
   for (const p of panels) { try { p.kill('SIGKILL'); } catch {} }
 }
-// ---------------------------------------------------------------- 浏览器
+// 浏览器
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);
@@ -138,7 +138,7 @@ const js = (expr) => cdp.eval(expr);
 const goto = async (url, waitMs) => { await cdp.send('Page.navigate', { url }); await sleep(waitMs || 2500); };
 const visible = (id) => js("!document.getElementById('" + id + "').classList.contains('hidden')");
 
-// ---------------------------------------------------------------- 走一遍
+// 走一遍
 
 async function main() {
   if (!existsSync(BIN)) throw new Error('先构建：cargo build --offline（找不到 ' + BIN + '）');
@@ -185,14 +185,14 @@ async function main() {
   const pageErrors = [];
   cdp.on('Runtime.exceptionThrown', (p) => pageErrors.push(p.exceptionDetails?.text || 'exception'));
 
-  // ---- 1. 首次打开：没有口令时主动请他设一个（先不设，后面还有 14 条要跑）
+  // 1. 首次打开：没有口令时主动提示设一个（先不设，后面还有 14 条要跑）
   await goto(base(PORT_A) + '/', 3000);
   check('① 没有口令时弹出「给面板设一个口令」', await visible('setup-gate'));
   await js("document.getElementById('fu-skip').click()");
   await sleep(300);
   check('① 点「先不设」后收起（不强迫本地开发）', (await visible('setup-gate')) === false);
 
-  // ---- 2. 首屏：FCP、传输量、数据渲染
+  // 2. 首屏：FCP、传输量、数据渲染
   const perf = JSON.parse(await js(
     "JSON.stringify((()=>{const n=performance.getEntriesByType('navigation')[0]||{};" +
     "const p=performance.getEntriesByType('paint');" +
@@ -205,7 +205,7 @@ async function main() {
     'FCP ' + perf.fcp + 'ms，引擎卡片 ' + cards + ' 个');
   check('② 首屏传输 ≤ 200KB（gzip 之后）', perf.kb > 0 && perf.kb <= 200, perf.kb + ' KB');
 
-  // ---- 3. 插件页：卡片 + 系列分组
+  // 3. 插件页：卡片 + 系列分组
   await js("location.hash='#plugins'");
   await sleep(1500);
   const groups = JSON.parse(await js(
@@ -220,7 +220,7 @@ async function main() {
   check('③ 每个系列都有「全部重载 / 全部启用」',
     groups.every((g) => g.b.join(',') === '全部重载,全部启用'), JSON.stringify(groups.map((g) => g.b)));
 
-  // ---- 4. 插件自己的配置：卡片「配置」→ 改 → 保存并重载
+  // 4. 插件自己的配置：卡片「配置」→ 改 → 保存并重载
   await js("(()=>{const c=[...document.querySelectorAll('#plugin-grid .plugin-card')].find(x=>x.innerText.includes('hello'));" +
     "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='详情').click();})()");
   await sleep(900);
@@ -242,7 +242,7 @@ async function main() {
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
 
-  // ---- 5. 改插件源码
+  // 5. 改插件源码
   await js("(()=>{const c=[...document.querySelectorAll('#plugin-grid .plugin-card')].find(x=>x.innerText.includes('hello'));" +
     "[...c.querySelectorAll('button')].find(b=>b.textContent.trim()==='详情').click();})()");
   await sleep(1200);
@@ -251,7 +251,7 @@ async function main() {
   const srcLen = await js("(document.getElementById('src-text')||{}).value?.length || 0");
   check('⑤ 抽屉「源码」页能读到插件源码', srcLen > 20, srcLen + ' 字符');
   // 用 fromCharCode(10) 而不是 '\n'：这行是**发给页面**的字符串，写 '\n' 会在页面里变成真换行，
-  // 单引号字符串里出现裸换行 = SyntaxError（第 91 轮踩到，脚本报 "Uncaught" 看不到原因）。
+  // 单引号字符串里出现裸换行 = SyntaxError（踩到，脚本报 "Uncaught" 看不到原因）。
   await js("(()=>{const t=document.getElementById('src-text');" +
     "t.value = t.value + String.fromCharCode(10) + '// smoke-marker';" +
     "document.getElementById('src-save').click();})()");
@@ -261,13 +261,13 @@ async function main() {
   await js("document.querySelector('#drawer [data-close]').click()");
   await sleep(400);
 
-  // ---- 6. 任务页：能看到任务、能立即跑
+  // 6. 任务页：能看到任务、能立即跑
   await js("location.hash='#tasks'");
   await sleep(1500);
   const taskRow = await js("[...document.querySelectorAll('#tasks-body tr')].map(t=>t.innerText.replace(/\\s+/g,' ')).join('|')");
   check('⑥ 任务页列出 hello 的任务', /hello/.test(taskRow || '') && /tick|run/.test(taskRow || ''), (taskRow || '').slice(0, 80));
 
-  // ---- 7. 运行记录：有行、能导出
+  // 7. 运行记录：有行、能导出
   await js("location.hash='#runs'");
   await sleep(1600);
   const runRows = await js("document.querySelectorAll('#runs-body tr').length");
@@ -275,14 +275,14 @@ async function main() {
   const csv = await js("fetch('/api/export.csv?table=runs').then(r=>r.text().then(t=>({ct:r.headers.get('content-type'),head:t.split('\\n')[0]})))");
   check('⑦ 导出 CSV 是 text/csv 且带表头', /text\/csv/.test(csv.ct || '') && /,/.test(csv.head || ''), JSON.stringify(csv));
 
-  // ---- 8. 日志：有内容、引擎健康（SSE 连着）
+  // 8. 日志：有内容、引擎健康（SSE 连着）
   await js("location.hash='#logs'");
   await sleep(1800);
   const logLines = await js("document.querySelectorAll('#logs-view .log-line').length");
   const health = await js("document.getElementById('health-pill').innerText");
   check('⑧ 日志页有内容且实时流连着', logLines > 0 && /健康/.test(health || ''), logLines + ' 行 / ' + health);
 
-  // ---- 9. 通知弹层
+  // 9. 通知弹层
   await js("document.getElementById('bell').click()");
   await sleep(500);
   const pop = JSON.parse(await js(
@@ -294,7 +294,7 @@ async function main() {
   await js("document.getElementById('bell').click()");
   await sleep(300);
 
-  // ---- 10. 手机（390×844 + 触屏）
+  // 10. 手机（390×844 + 触屏）
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await js("location.hash='#dashboard'");
@@ -319,7 +319,7 @@ async function main() {
   await sleep(500);
   check('⑩ 点遮罩能收起侧栏', (await js("document.getElementById('sidebar').className.includes('open')")) === false);
 
-  // ---- 11. 空插件目录：开始使用引导（换面板 C）
+  // 11. 空插件目录：开始使用引导（换面板 C）
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
   await goto(base(PORT_C) + '/#dashboard', 3000);
@@ -328,7 +328,7 @@ async function main() {
   check('⑪ 空面板显示「开始使用」+ 现在缺什么', guide && chips.length === 2,
     '指南 ' + guide + ' / ' + JSON.stringify(chips));
 
-  // ---- 12. 首次运行：设口令 → 立即生效（换面板 B，独立 origin 所以没有 skipSetup）
+  // 12. 首次运行：设口令 → 立即生效（换面板 B，独立 origin 所以没有 skipSetup）
   await goto(base(PORT_B) + '/', 3000);
   check('⑫ 全新面板首次打开要请用户设口令', await visible('setup-gate'));
   const before = (await fetch(base(PORT_B) + '/api/state')).status;
@@ -341,7 +341,7 @@ async function main() {
   check('⑫ 设完浮层收起、面板能用',
     (await visible('setup-gate')) === false && (await js("document.querySelectorAll('#cards-engine .card').length")) > 0);
 
-  // ---- 13. 登出（用户报「没有退出登录」）：设置口令之后，侧栏底部要能退出
+  // 13. 登出（用户报「没有退出登录」）：设置口令之后，侧栏底部要能退出
   const logoutShown = await js("!document.getElementById('sidebar-logout').classList.contains('hidden')");
   check('⑬ 有口令时侧栏显示「退出登录」', logoutShown === true, String(logoutShown));
   await js("document.getElementById('sidebar-logout').click()");
@@ -351,7 +351,7 @@ async function main() {
   check('⑬ 点登出后回到令牌门（且服务端确实不认了）',
     (await visible('gate')) === true && (await fetch(base(PORT_B) + '/api/state')).status === 401,
     'gate ' + (await visible('gate')));
-  // ---- 收尾
+  // 收尾
   check('整轮没有页面 JS 报错', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 
   const bad = results.filter((r) => !r.ok);

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/// 面板 UI 套件的控件检查（第 144 轮）。
+/// 面板 UI 套件的控件检查。
 ///
 /// 为什么单独一个脚本：这些是**给插件用的控件**（/app.css + /ui.js），
 /// 面板自己的页面不用它们，ui-check 那 75 条盯不到。起一个临时面板 + 把 demo 插件
@@ -23,7 +23,7 @@ function check(name, ok, detail) {
 
 const dir = mkdtempSync(path.join(tmpdir(), 'kitcheck-'));
 for (const d of ['plugins', 'scripts']) mkdirSync(path.join(dir, d), { recursive: true });
-// 收拢形状（第 269 轮）：整个目录搬过去，里面是 .js + .panel.json + .webui/
+// 收拢形状：整个目录搬过去，里面是 .js + .panel.json + .webui/
 cpSync(path.join(ROOT, 'plugins/webui-demo'), path.join(dir, 'plugins/webui-demo'), { recursive: true });
 
 const panelBin = path.join(ROOT, 'target/debug/panel');
@@ -109,7 +109,7 @@ async function main() {
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/plugins/webui-demo/?embed=1&theme=light' });
   await sleep(2500);
 
-  // ---------- 下拉框（p-select）----------
+  // 下拉框（p-select）
   const selRect = async () => js("document.querySelector('#d-account .select-panel').hidden");
   await js("document.querySelector('#d-account .select-trigger').click()");
   await sleep(200);
@@ -169,7 +169,7 @@ async function main() {
   );
   check('禁用的 p-select 点不开', disabledSelect === true, String(disabledSelect));
 
-  // 原生 select 也被拉齐了（否则深色主题下是一块浅灰方角）
+  // 原生 select 也一起对齐了（否则深色主题下是一块浅灰方角）
   const nativeSel = await js(
     "(()=>{const s=document.querySelector('select.input');const cs=getComputedStyle(s);" +
     "return JSON.stringify({appearance:cs.appearance,radius:cs.borderRadius});})()"
@@ -253,7 +253,7 @@ async function main() {
   ));
   check('三种反馈态都在（ok / warn / err）',  ['is-ok', 'is-warn', 'is-err'].every((c) => tones.some((t) => t.includes(c))), JSON.stringify(tones));
 
-  // ---------- 发码格（p-sms-code）----------
+  // 发码格（p-sms-code）
   // 这一格是「手机号 + 行内获取验证码」合成一个控件（从 mcloud 的登录页提上来的）。
   const smsShape = JSON.parse(await js(
     "(()=>{const s=document.getElementById('d-sms');" +
@@ -295,7 +295,7 @@ async function main() {
   ));
   check('stopResend 后回到「获取验证码」且按位数重新放开', restored.text === '获取验证码' && restored.dis === false, JSON.stringify(restored));
 
-  // ---------- 同一列控件对齐（第 197 轮）----------
+  // 同一列控件对齐
   // 用户报的是「表单输入框没对齐」：手机号那格 358px、验证码那格 200px，左边还对不上。
   // 根因不在插件 —— 面板给搜索框写的 `.field input { width: 200px }` 漏进了所有插件页，
   // 每个插件再各自写 `.field > .input{width:100%}` 去盖，补漏的那个就歪。
@@ -314,9 +314,9 @@ async function main() {
     !align.error && Math.abs(align.aw - align.bw) <= 1, JSON.stringify(align));
   check('.field 是竖排（标签在上、控件在下）', align.col === 'column', String(align.col));
 
-  // ---------- 确认 / 输入弹窗（PanelUI.confirm / .prompt，第 197 轮）----------
+  // 确认 / 输入弹窗
   // 插件里到处是原生 confirm()/prompt() —— 那是**另一个窗口**，和面板完全不是一个东西
-  // （用户截图里就是 macOS 中间那块「localhost:3030 显示」）。面板自己第 100 轮起就不用了，
+  // （用户截图里就是 macOS 中间那块「localhost:3030 显示」）。面板自己就不用了，
   // 但插件一直没得用；这里把「插件也有自绘的确认框」钉住。
   const hasApi = JSON.parse(await js(
     "JSON.stringify({c:typeof PanelUI!=='undefined'&&typeof PanelUI.confirm==='function'," +
@@ -371,7 +371,7 @@ async function main() {
   check('prompt 也没碰原生框', promptPath.native === 0, String(promptPath.native));
   await js("delete window.__nativeHit");
 
-  // ---------- 运行日志台 p-log（第 197 轮）----------
+  // 运行日志台 p-log
   // 插件里「点一下、等它跑完、看一段静态结果」不够：任务要跑 4~8 分钟。
   // 数据源是面板的 /api/logs/stream（SSE）。这里只验**渲染与筛选**，不连真流。
   const logShape = JSON.parse(await js(
@@ -382,7 +382,7 @@ async function main() {
     "empty:!!body.querySelector('.term-empty'),children:l.children.length})})()"
   ));
   // ⚠ children 必须 > 0：曾经把方法命名成 `append`，覆盖掉 Element.prototype.append，
-  //   于是 build() 里 host.append(box) 被当成"画一行日志"，控件渲染成空壳（第 197 轮踩过）。
+  //   于是 build() 里 host.append(box) 被当成"画一行日志"，控件渲染成空壳（踩过）。
   check('p-log 长成「标题栏 + 跟随 + 级别 + 清空 + 日志区」',
     logShape.bar && logShape.body && logShape.title === '运行日志' && logShape.follow
       && logShape.level === 'info' && logShape.clear && logShape.children > 0,
@@ -437,7 +437,7 @@ async function main() {
   const pvApi = await js(`PanelUI.pluginVersion('webui-demo')`);
   check('PanelUI.pluginVersion：插件页能拿到清单版本', pvApi === '0.0.1', String(pvApi));
 
-  // ---------- /ui-kit 样板页里的新控件（第 175 轮）----------
+  // /ui-kit 样板页里的新控件
   await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/ui-kit' });
   await sleep(1600);
   await js("document.getElementById('kit-theme').click()"); // 先切到暗色，顺便验 token 两套都活
@@ -521,7 +521,7 @@ async function main() {
   );
   check('p-form 收集到字段值（含 number 与开关）', JSON.parse(form).name === 'demo' && JSON.parse(form).n === 3 && JSON.parse(form).on === true, form);
 
-  // ── p-log 去重 / 保序（2026-11-21 现场：插件页日志「时间倒流」、两个号看着像并发）──
+  // p-log 去重 / 保序（2026-11-21 现场：插件页日志「时间倒流」、两个号看着像并发）
   //
   // 实时广播的帧**没有 id**（LogLine 里就没这个字段），补发批次才有；两者会重叠，
   // 而且补发可能晚于实时到达。直接 append 就会「旧行落在新行后面」。
@@ -547,7 +547,7 @@ async function main() {
   check('p-log 重复 id 只画一次（4 行）', logRows.length === 4, JSON.stringify(logRows));
   check('p-log 迟到的旧行归位、屏上时间不倒流', logTs.join(',') === '1000,1500,2000,3000', logTs.join(','));
   check('p-log 实时帧补上 id 后不再重复画', (logRows.find((r) => r.text === 'C') || {}).id === '3', JSON.stringify(logRows));
-  // ── PanelUI 的纯函数（第 246 轮：把四个插件各自重复实现的胶水收到面板）──
+  // PanelUI 的纯函数
   const masks = await js(`[PanelUI.mask('13800138000',3,4), PanelUI.mask(''), PanelUI.mask('123456',3,4)]`);
   check('PanelUI.mask：留头尾、空串不炸、短串原样', masks[0] === '138***8000' && masks[1] === '' && masks[2] === '123456', JSON.stringify(masks));
 

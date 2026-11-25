@@ -57,7 +57,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ---- fork 之后改这一行 ----
+# fork 之后改这一行
 $Repo = if ($env:PANEL_REPO) { $env:PANEL_REPO } else { 'asunajs/panel' }
 $BinName = 'panel'
 
@@ -70,7 +70,7 @@ function Info([string]$msg) { Write-Host "· $msg" -ForegroundColor Cyan }
 function Ok([string]$msg)   { Write-Host "✓ $msg" -ForegroundColor Green }
 function Warn([string]$msg) { Write-Host "警告 $msg" -ForegroundColor Yellow }
 
-# ---------- 1. 检测架构 ----------
+# 1. 检测架构
 # 现在只发 x86_64：ARM64 的 Windows 能跑 x64 的 exe（系统自带模拟），
 # 所以 ARM64 机器走 x64 产物是**可用**的，但要说明白，别让人以为装错了。
 $procArch = $env:PROCESSOR_ARCHITECTURE
@@ -80,7 +80,7 @@ switch ($procArch) {
   default { Die "不支持的架构: $procArch（目前只发 x86_64-pc-windows-msvc）" }
 }
 
-# ---------- 2. 决定下载地址 + scheme 白名单 ----------
+# 2. 决定下载地址 + scheme 白名单
 if ($BaseUrl) {
   $Base = $BaseUrl.TrimEnd('/')
 } elseif ($Version -eq 'latest') {
@@ -143,7 +143,7 @@ try {
 "@
   }
 
-  # ---------- 3. 校验 SHA256（强制） ----------
+  # 3. 校验 SHA256（强制）
   $sumsPath = Join-Path $tmp 'SHA256SUMS'
   $haveSums = $true
   try { Fetch "$Base/SHA256SUMS" $sumsPath } catch { $haveSums = $false }
@@ -172,7 +172,7 @@ try {
     Warn '取不到 SHA256SUMS，已按 -AllowUnverified 跳过校验 —— 装进去的东西没有任何完整性保证。'
   }
 
-  # ---------- 4. 产物自检（PE + 体积） ----------
+  # 4. 产物自检（PE + 体积）
   # 校验和过了也可能是错的产物（镜像把 404 页当 200 返回之类），所以再看一眼文件本身。
   $bin = Join-Path $tmp $Asset
   $len = (Get-Item $bin).Length
@@ -185,7 +185,7 @@ try {
   if ($sig[0] -ne 0x4D -or $sig[1] -ne 0x5A) { Die '产物不是 PE 文件（缺 MZ 头）' }
   Ok "产物自检通过（$([math]::Round($len/1MB,2)) MB，PE32+）"
 
-  # ---------- 5. 落盘 ----------
+  # 5. 落盘
   if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'Programs\panel' }
   New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
   $dest = Join-Path $Prefix "$BinName.exe"
@@ -200,13 +200,13 @@ try {
   Copy-Item -LiteralPath $bin -Destination $dest -Force
   Ok "已安装: $dest"
 
-  # ---------- 6. 自检运行 ----------
+  # 6. 自检运行
   # 装的这份能不能跑起来，比「文件复制成功」有用得多。
   $v = & $dest version 2>&1
   if ($LASTEXITCODE -ne 0) { Die "装好的程序跑不起来：$v" }
   Ok "版本自检: $v"
 
-  # ---------- 7. PATH 提示 ----------
+  # 7. PATH 提示
   $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
   $inPath = $userPath -and ($userPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $Prefix.TrimEnd('\') })
   if (-not $inPath) {

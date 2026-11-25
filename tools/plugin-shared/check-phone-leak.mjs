@@ -98,7 +98,7 @@ const DENY_TAIL_HASHES = new Set([
 const TEXT_EXT = new Set([
   '.md', '.mjs', '.js', '.ts', '.tsx', '.json', '.txt', '.yml', '.yaml', '.sh', '.css', '.html',
 ]);
-/** 这些目录是构建产物/依赖，不扫（它们要么来自源码，要么不是我们的文本）。 */
+/** 这些目录是构建产物/依赖，不扫（它们要么来自源码，要么不是本项目文本）。 */
 const SKIP_DIR = /(^|\/)(node_modules|dist|release|target|\.git|data|\.tmp)\//;
 
 function listFiles() {

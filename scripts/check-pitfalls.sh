@@ -90,7 +90,7 @@ else
   bad 'main.rs 里没有 retention::spawn_ticker —— 运行记录/日志会无限增长'
 fi
 
-# ui.md §7（第 175 轮）：页面响应带 CSP（script-src 'self'），**内联 script/style 不会执行**。
+# ui.md §7：页面响应带 CSP（script-src 'self'），**内联 script/style 不会执行**。
 # 第一次写 /ui-kit 时用了内联，结果「点按钮没反应、localStorage 也是空」，查了半天才想到 CSP。
 INLINE_S=$(grep -rn '<script' web/*.html 2>/dev/null | grep -v 'src=' | wc -l | tr -d ' ')
 INLINE_C=$(grep -rn '<style' web/*.html 2>/dev/null | wc -l | tr -d ' ')
@@ -100,7 +100,7 @@ else
   bad "web/*.html 里有内联 script($INLINE_S) / style($INLINE_C)：CSP 是 script-src 'self'，这些不会执行"
 fi
 
-# ui.md §4.1 + pitfalls §95（第 181 轮）：日志页的 DOM 必须跟内存环一样封顶。
+# ui.md §4.1 + pitfalls §95：日志页的 DOM 必须跟内存环一样封顶。
 # 只限 state.logs 不限 DOM 时，日志页开着几分钟就是上万个节点（用户 2026-11-14 的截图）。
 if grep -q 'childElementCount > LOG_RING' web/app.js; then
   ok '日志页的 DOM 也按 LOG_RING 封顶（不只内存环）'
@@ -125,7 +125,7 @@ else
   bad "sameAsLast 只有 $SIG_N 处 —— 每 5s 全量重建会把「DOM 节点」顶成上升曲线"
 fi
 
-# pitfalls §98（第 187 轮）：就地改文本必须用 setText（改 nodeValue），不能用 textContent =。
+# pitfalls §98：就地改文本必须用 setText（改 nodeValue），不能用 textContent =。
 # `node.textContent = x` 每次都扔掉旧 Text 节点、造一个新的：12 张卡 + 每秒的「N 秒前更新」
 # 就是 8.4 节点/秒，性能监视器上看着像泄漏（实测强制 GC 后回到基线，纯垃圾）。
 if [ "$(grep -c '^function setText(' web/app.js)" = "1" ]; then
@@ -140,7 +140,7 @@ else
 fi
 
 # ui.md §7：只许用定义过的 CSS token，且不许写 fallback —— var(--不存在的, #fff) 会静默
-# 回落到浅色，深色主题下就冒白块（第 24 轮那张「还没有令牌」卡片）
+# 回落到浅色，深色主题下就冒白块（那张「还没有令牌」卡片）
 if python3 scripts/check-css-tokens.py; then
   :
 else
@@ -197,7 +197,7 @@ if grep -q 'lower.ends_with(".js") || lower.ends_with(".ts") || lower.ends_with(
 else
   bad 'src/install.rs 少了扩展名白名单（否则安装 = 往插件目录写任意文件）'
 fi
-# 第 108 轮：.ts 必须落成 .js（加载器只扫 plugins/*.js），别把 .ts 原样留在插件目录
+# .ts 必须落成 .js（加载器只扫 plugins/*.js），别把 .ts 原样留在插件目录
 if grep -q 'format!("{stem}.js")' src/install.rs; then
   ok '.ts 安装时转成同名 .js（不把 .ts 原样留在插件目录）'
 else
@@ -213,7 +213,7 @@ else
 fi
 
 echo ''
-# ⑳ cfg(windows) 里的 unsafe 必须有就地 allow（第 211 轮）
+# ⑳ cfg(windows) 里的 unsafe 必须有就地 allow
 #
 # 事故：Cargo.toml 的 lints 是 `unsafe_code = "deny"`，而 disk.rs 的 Windows 分支用了
 # `unsafe { GetDiskFreeSpaceExW(...) }` —— 这段在 macOS 上根本不编译，本地全绿、单测全过，
@@ -230,7 +230,7 @@ for f in src/*.rs; do
 done
 
 
-# ㉑ select 的 chevron 靠 background-image + no-repeat，别用 background 简写把它重置掉（第 213 轮）
+# ㉑ select 的 chevron 靠 background-image + no-repeat，别用 background 简写把它重置掉
 #
 # 事故：`.sched-item .modal-input { background: var(--surface) }` —— 简写把
 # background-repeat/position/size 一起重置成初始值。深色主题另有一条只设 background-image
@@ -274,7 +274,7 @@ else
   bad "web/app.css 这些规则对 select 用了 background 简写，会把 chevron 变成平铺箭头：$css_bad"
 fi
 
-# 坑 112（第 219 轮，用户反馈 #6「dark 刷新闪白」）：首帧主题必须在 head 里就定下来。
+# 坑 112（用户反馈 #6「dark 刷新闪白」）：首帧主题必须在 head 里就定下来。
 # 少了它，用户选的深色要等 body 末尾 255KB 的 app.js 跑完才挂上 —— 中间那段「CSS 已到、
 # 脚本还没跑」的窗口里，页面先按浅色画一帧再翻深，就是那一下白闪。
 # 动态版（真量 first-paint 与 data-theme 的先后）：node scripts/theme-flash-check.mjs
@@ -290,7 +290,7 @@ if not m:
 tag, off = m.group(0), m.start()
 if re.search(r'\b(defer|async)\b', tag) or re.search(r'type\s*=\s*["\']?module', tag):
     print('deferred'); sys.exit(0)
-# 样式表可能是源文件（/app.css）或压缩产物（/panel.min.css，第 190 轮）—— 都算
+# 样式表可能是源文件（/app.css）或压缩产物（/panel.min.css）—— 都算
 c = re.search(r'<link[^>]*href="/(app|panel\.min)\.css"', html)
 if c and off > c.start():
     print('after-css'); sys.exit(0)
@@ -305,7 +305,7 @@ case "$theme_boot" in
   *) bad "主题守卫没跑出结论：$theme_boot" ;;
 esac
 
-# ㉓ 扫描快照要在启动时 seed，否则「这轮没加载」的插件被报成「新增」（第 224 轮）
+# ㉓ 扫描快照要在启动时 seed，否则「这轮没加载」的插件被报成「新增」
 #
 # 事故：用户看到「新增（已在运行，无需动作）3 个：mcloud-daily、mcloud-exchange、mcloud-live」——
 # 这三个是老插件，只是按需加载/闲时唤醒那条路装回来的，以前没人给它们记指纹。
@@ -319,7 +319,7 @@ else
   bad "扫描快照缺一处调用：main.rs seed=${seed_call:-0} / scheduler.rs note=${note_call:-0} —— 没加载过的老插件会被报成「新增」"
 fi
 
-# ㉔ 空闲卸载 / 按需装回是 debug 级（第 255 轮）
+# ㉔ 空闲卸载 / 按需装回是 debug 级
 #
 # 事故：用户截图——同一个插件「空闲已卸载」一天刷好几遍、全是 info，把真正的任务日志挤到后面。
 # 判据：这两条 emit 的级别必须是 Level::Debug。退回 Info 当场红（它们成对出现，一条 = 两条噪音）。

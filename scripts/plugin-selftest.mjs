@@ -161,20 +161,20 @@ try {
   check('fetch 出站打通（本地对端 200）', (parsed('fetch') || {}).status === 200, String(get('fetch')));
   check('http_fetch 同步版打通（本地对端 200）', (parsed('http_fetch') || {}).status === 200, String(get('http_fetch')));
   check('回环被 SSRF 挡住', /被挡住（对）/.test(String(get('fetch_loopback'))), String(get('fetch_loopback')));
-  // 压缩（第 253 轮）：上游回 gzip，插件拿到的必须是明文，且 content-encoding 不再透传
+  // 压缩：上游回 gzip，插件拿到的必须是明文，且 content-encoding 不再透传
   const gz = parsed('fetch_gzip') || {};
   check('fetch：gzip 上游被原生解压成明文', gz.body === 'gzip-plain-text-from-test-server', String(gz.body));
   check('fetch：解压后不再透传 content-encoding', !gz.encoding, String(gz.encoding));
   const gzs = parsed('http_fetch_gzip') || {};
   check('http_fetch：同步版同样解压', gzs.body === 'gzip-plain-text-from-test-server', String(gzs.body));
-  // CompressionStream / DecompressionStream（第 254 轮）
+  // CompressionStream / DecompressionStream
   const cs = parsed('compression') || {};
   check('CompressionStream gzip 往返一致', cs.gzip && cs.gzip.same === true, JSON.stringify(cs.gzip));
   check('CompressionStream deflate 往返一致', cs.deflate && cs.deflate.same === true, JSON.stringify(cs.deflate));
   check('CompressionStream deflate-raw 往返一致', cs.raw && cs.raw.same === true, JSON.stringify(cs.raw));
   check('CompressionStream 不认识的格式抛 TypeError', cs.bad_format === 'TypeError', String(cs.bad_format));
 
-  // fs.existsSync（第 253 轮给 LLRT 补的）
+  // fs.existsSync（给 LLRT 补的）
   const ex = parsed('exists_sync') || {};
   check('fs.existsSync：存在的目录 true', ex.dir === true, String(ex.dir));
   check('fs.existsSync：刚写的文件 true', ex.file === true, String(ex.file));

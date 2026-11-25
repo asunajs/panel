@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 移动端无头走查（第 263 轮）：用**真实插件**在 390×844 真触摸下把每个页面走一遍，
+// 移动端无头走查：用**真实插件**在 390×844 真触摸下把每个页面走一遍，
 // 每一步都截图 + 测量，最后出一张表。
 //
 // 和 mobile-check.mjs 的分工：
@@ -148,7 +148,7 @@ async function main() {
     console.log('主题：' + t + (t === THEME ? ' ✓' : ' ✗（期望 ' + THEME + '）'));
   }
 
-  // ---------------------------------------------------------------- 面板七页
+  // 面板七页
   for (const v of ['dashboard', 'tasks', 'runs', 'logs', 'plugins', 'scripts', 'files', 'settings']) {
     await js("location.hash = '#" + v + "'");
     await sleep(1000);
@@ -156,7 +156,7 @@ async function main() {
     await shot(v);
   }
 
-  // ---------------------------------------------------------------- 无头操作：任务弹窗全流程
+  // 无头操作：任务弹窗全流程
   await js("location.hash = '#tasks'"); await sleep(1200);
   const opened = await js("(()=>{const tr=document.querySelector('#tasks-body tr');if(!tr)return 'no-row';const b=tr.querySelector('.task-more');if(!b)return 'no-btn';b.click();return 'ok';})()");
   await sleep(700);
@@ -185,7 +185,7 @@ async function main() {
     await sleep(400);
   }
 
-  // ---------------------------------------------------------------- 无头操作：日志页筛选 / 搜索
+  // 无头操作：日志页筛选 / 搜索
   await js("location.hash = '#logs'"); await sleep(1200);
   const logOps = await js("(async()=>{const seg=[...document.querySelectorAll('#view-logs .seg-item')].find(b=>b.textContent.includes('error'));if(!seg)return 'no-seg';seg.click();await new Promise(r=>setTimeout(r,1200));const n=document.querySelectorAll('#log-list .log-line, #logs-body .log-line, .log-line').length;const inp=document.getElementById('log-search');let searched='no-input';if(inp){inp.value='a';inp.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,1200));searched='typed';}return JSON.stringify({lines:n,searched});})()");
   await sleep(800);
@@ -193,7 +193,7 @@ async function main() {
   await record('logs-filtered');
   await shot('logs-filtered');
 
-  // ---------------------------------------------------------------- 插件页：逐个打开
+  // 插件页：逐个打开
   const pluginRows = [];
   for (const name of withUi) {
     await send('Page.navigate', { url: 'http://127.0.0.1:' + PORT + '/plugins/' + name + '/' });
@@ -204,7 +204,7 @@ async function main() {
     pluginRows.push({ name, ...m });
   }
 
-  // ---------------------------------------------------------------- 报表
+  // 报表
   const bad = (r) => r.overflow > 1 || (r.small && r.small.length) || (r.tiny && r.tiny.length) || (r.text && r.text.length);
   console.log('');
   console.log('页面'.padEnd(30) + '溢出  字号<16  触屏<40  文字溢出');
