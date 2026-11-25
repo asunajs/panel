@@ -916,3 +916,29 @@ restore_saved_beat(&mut task, saved.next_at, now_ms)   // catch_up_at 把关：�
 
 **回归**：`restoring_an_override_keeps_the_imminent_beat` /
 `restoring_a_long_dead_beat_is_refused` / `restoring_a_passed_beat_still_fires_it`。
+
+## 269. 每重建一次二进制就弹一轮「正在验证 "panel-<哈希>"…」
+
+**症状**：换过几次二进制后，屏幕上堆着好几个 macOS 的
+「正在验证 "panel-527cd85e5cb20840"…」进度框，关掉一个又冒一个。
+
+**根因**：cargo 出来的二进制是 **linker 签的 ad-hoc**，标识由内容哈希决定 ——
+`panel-a8c5662a0ad52a91`、`panel-527cd85e5cb20840`… **每次重建都是另一个 app**。
+于是每次 `cp` 新二进制到实例目录、launchd 拉起它，macOS 都当成首次运行 →
+一次 Gatekeeper 验证框；TCC / 卷权限也跟着重新问。
+
+**修法**：部署时用**固定标识**重签（`scripts/deploy-daily.sh`）：
+
+```bash
+codesign --force --sign - --identifier dev.local.panel "$DEST/panel.new"
+```
+
+标识钉死之后，重建多少次都是同一个 app，验证只发生一次。仍是 ad-hoc 签名、不做公证，
+Release 发出去那份不受影响。
+
+⚠ 第 134 轮那句「**不要**顺手 codesign」说的是另一件事：当时是随意换签名，导致后台进程
+卡在「能不能访问那个卷」的框上（launchd 里的进程没法点）。现在不是「随手重签」，
+而是**把标识钉成一个常量** —— 目的正好相反：让 macOS 别再把每次重建当新应用。
+
+**临时实例也一样**：`cp target/debug/panel /tmp/x/` 之后也签一下，否则每起一个测试实例
+又是一轮验证框。
