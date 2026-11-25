@@ -1,7 +1,7 @@
 //! 面板版本：panel.version() / panel.atLeast()。
 //!
 //! **插件只面向 0.4**（docs/plugin-contract.md 的 R5）：不要写 0.3 的兼容分支。
-//! 「老面板别装我」这件事由清单的 min_panel 在**加载期硬挡**，不在运行时猜：
+//! 「老面板不得安装」这件事由清单的 min_panel 在**加载期硬挡**，不在运行时猜：
 //!
 //!     { "min_panel": "0.4.0" }
 //!
@@ -16,7 +16,7 @@
 //!
 //! # 为什么没有搬基线的「插件头 @panel min 门禁」
 //!
-//! 基线面板用插件头部的注释块做加载期闸门。这里改成清单里的 min_panel：
+//! 基线面板用插件头部的注释块做加载期闸门。这里用清单里的 min_panel：
 //! 一个字段、能被界面读、能被 panel plugin check 核对，比藏在注释里强。
 
 use semver::Version;
@@ -66,7 +66,7 @@ pub fn same_version(a: &str, b: &str) -> bool {
     }
 }
 
-/// `candidate` 比当前版本新吗？（检查更新用，第 210 轮）
+/// `candidate` 比当前版本新吗？（检查更新用）
 ///
 /// 和 `at_least` 一样：非法版本串是 **Err**，不是 false —— 「版本号写错」和「已是最新」
 /// 是两件事，静默当 false 会让用户以为没更新。

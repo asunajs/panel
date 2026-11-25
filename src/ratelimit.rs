@@ -98,7 +98,7 @@ impl Limiter {
         self.check_at(who, Instant::now())
     }
 
-    // 已知边界（第 190 轮安全 review）：桶按**对端地址**分，IPv6 客户端在自己的 /64 里
+    // 已知边界（安全 review）：桶按**对端地址**分，IPv6 客户端在自己的 /64 里
     // 换地址就等于换桶。真按 /64 归并要引 ipnet 之类的依赖，收益也有限 —— 登录侧还有
     // Auth 的全局节流（20/s 之后每次 +200ms）顶着，实际打不到每 IP 那个配额。
     // 写在代码里而不是只写在 review 里：下一个人看到「限流能绕」时能立刻判断值不值得改。
@@ -187,7 +187,7 @@ mod tests {
         let t0 = Instant::now();
         assert!(l.check_at(addr(1), t0).is_ok());
         assert!(l.check_at(addr(1), t0).is_ok());
-        // 第三次立刻打：拒，而且告诉你等多久
+        // 第三次立刻打：拒，而且给出等待时长
         let e = l.check_at(addr(1), t0).unwrap_err();
         assert_eq!(e.retry_after, Duration::from_secs(10));
         // 过了 10 秒补回来一个

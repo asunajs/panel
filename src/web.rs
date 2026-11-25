@@ -29,19 +29,19 @@ use crate::scheduler::Scheduler;
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
-// 任务调度配置模块（第 110 轮）：纯函数 + 表单逻辑，和 app.js 一起内嵌。
+// 任务调度配置模块：纯函数 + 表单逻辑，和 app.js 一起内嵌。
 // 单独一个文件是为了能脱离浏览器直接跑测试（scripts/schedule-check.mjs）。
 const SCHEDULE_JS: &str = include_str!("../web/schedule.js");
 const APP_CSS: &str = include_str!("../web/app.css");
-/// 压缩产物（第 190 轮，rolldown + lightningcss）。index.html 加载这两个：
+/// 压缩产物（rolldown + lightningcss）。index.html 加载这两个：
 /// 源文件仍然单独服务（工具、插件作者、门禁脚本要读源码），这里是用户真正下载的那份。
 const MIN_JS: &str = include_str!("../web/panel.min.js");
 const MIN_CSS: &str = include_str!("../web/panel.min.css");
-/// 错误页模板（第 166 轮）：404/401/500 都渲染它，用的是面板自己的样式。
+/// 错误页模板：404/401/500 都渲染它，用的是面板自己的样式。
 const ERROR_HTML: &str = include_str!("../web/error.html");
 /// 错误页的主题兜底脚本（8 行）：错误页没有 app.js，CSP 又不许内联脚本。
 const THEME_BOOT_JS: &str = include_str!("../web/theme-boot.js");
-/// 面板 UI 套件（第 139 轮）：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
+/// 面板 UI 套件：自定义元素 + 主题桥，插件页引这一个就能和面板同观感。
 const UI_JS: &str = include_str!("../web/ui.js");
 const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
 const UI_KIT_HTML: &str = include_str!("../web/ui-kit.html");
@@ -60,7 +60,7 @@ const OLD_CSS: [(&str, &str); 3] = [
 /// 界面资源的来源：**界面包**（`<data>/ui/`）或编译进二进制的那份。
 ///
 /// 为什么单独一个类型而不是散在 `asset()` 里读 env：它要能被**热替换**（应用/停用界面包
-/// 不用重启），还要能被 `/api/state` 描述出来（界面要告诉用户"你现在用的是哪一份"）。
+/// 不用重启），还要能被 `/api/state` 描述出来（界面要告诉用户"当前用的是哪一份"）。
 pub struct UiAssets {
     pack: std::sync::RwLock<Option<std::sync::Arc<crate::ui_pack::UiPack>>>,
 }
@@ -127,7 +127,7 @@ pub struct AppState {
     pub load_errors: LoadErrors,
     /// 鉴权凭据。`None` = 没配令牌（那种部署必须只绑回环，main.rs 负责强制）。
     /// 这里**没有明文**：磁盘上只有盐 + PBKDF2 哈希，见 `crate::auth`。
-    /// 令牌材料：**可热替换**（第 87 轮）。
+    /// 令牌材料：**可热替换**。
     ///
     /// 原来它是只读的 `Option`，于是 `/api/setup` 写完 auth.json 只能提示「重启生效」——
     /// 用户设完口令被挡在门外，还得自己重启一次。现在设完立即生效并当场登录。
@@ -190,7 +190,7 @@ where
     }
 }
 
-/// 请求体错误的状态码：**没带 content-type 仍然是 415**（那是「你发的东西类型不对」，
+/// 请求体错误的状态码：**没带 content-type 仍然是 415**（那是「请求体类型不对」，
 /// 不是「内容写错了」），其余（语法错、字段不认识、缺字段）一律 400。
 fn body_status(rej: &axum::extract::rejection::JsonRejection) -> StatusCode {
     if rej.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE {
@@ -241,7 +241,7 @@ where
         }
     }
 }
-/// 统一的错误结构（第 166 轮）。
+/// 统一的错误结构。
 ///
 /// 为什么换掉 (`StatusCode, String`)：那个形状把 String **原样**发给客户端 ——
 /// 「没有这个文件: /Users/xxx/plugins/y」「(os error 13)」全进了响应体。用户看到的
@@ -319,7 +319,7 @@ impl IntoResponse for ApiError {
         }
         // detail（和编号）只交给中间件写日志，绝不进响应体。
         // detail 只给日志。它为空时**退回公开消息**：否则日志行是
-        // `400 code=bad_request detail=`，等于什么都没说（第 205 轮就是这么查了半天）。
+        // `400 code=bad_request detail=`，等于什么都没说（就是这么查了半天）。
         let detail = match self.detail.as_deref() {
             Some(d) if !d.is_empty() => d.to_string(),
             _ => self.public_msg.clone(),
@@ -348,16 +348,16 @@ fn new_ref_id() -> String {
 }
 
 fn bad(msg: impl Into<String>) -> ApiError {
-    // 只表达「你的请求有问题」。写盘/权限那类底层失败走 write_err / internal ——
+    // 只表达「请求有问题」。写盘/权限那类底层失败走 write_err / internal ——
     // 别在这里嗅 os error：有个用例要求「停用一个不存在的插件」是 400，
     // 而底层错误文案里带 (os error 2)，嗅一下就把语义改成了 500。
     ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg)
 }
 
-/// 存储/权限类失败是**服务端**问题（500），不是「你的请求写错了」（400）。
+/// 存储/权限类失败是**服务端**问题（500），不是「请求写错了」（400）。
 ///
 /// 为什么按文本判：脚本层的错误全都是 String，OS 失败一定带 (os error N)，
-/// 而校验类错误（名字不合法、表达式不合法）不会。第 70 轮实测：脚本目录只读时
+/// 而校验类错误（名字不合法、表达式不合法）不会。实测：脚本目录只读时
 /// 新建脚本回的是 400 —— 用户会以为是自己填错了。
 fn write_err(e: String) -> ApiError {
     if e.contains("os error") || e.contains("No space left") {
@@ -422,7 +422,7 @@ fn error_page(status: StatusCode, message: &str, ref_id: &str, retry: &str) -> R
         .replace("{{REF}}", &html_escape(&ref_line))
         .replace("{{RETRY}}", &html_escape(retry));
     // ⚠ 别忘了把状态码带上：只有 header+body 的元组默认是 200，
-    // 那会变成「404 的页面配 200 的状态」—— 浏览器不认，测试也会抓（第 166 轮抓到一次）。
+    // 那会变成「404 的页面配 200 的状态」—— 浏览器不认，测试也会抓（抓到一次）。
     (
         status,
         [
@@ -467,7 +467,7 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         // 每分钟配额（`log.http_per_min`，0 = 不限）：扫描器一秒几十个 404 时，
         // 这些行既是证据也是噪音 —— 前 N 条照记，超出的丢弃。
         //
-        // 配额只管**日志**，不管页面（第 190 轮）：原来是超额就 return res，
+        // 配额只管**日志**，不管页面：原来是超额就 return res，
         // 于是扫描器刷完之后，正常用户浏览器点开 404 拿到的是一坨 JSON ——
         // 配额的本意是「别把日志冲掉」，不该改用户看到的东西。
         // 同一来源、同一条错误在 60 秒内只记一条：未登入的设备会**持续**重连 SSE
@@ -483,7 +483,7 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         if merged.is_some() && http_log_allowed() {
         // 502 里有一类不是「面板坏了」，而是「插件正忙 / 没在预算内响应」——
         // 慢插件在页面上反复重试时，一屏红字 error 会让人以为面板出故障，也把真正的
-        // error 淹掉（第 192 轮）。所以这两类降成 warn。
+        // error 淹掉。所以这两类降成 warn。
         //
         // ⚠ 只降「等不及」，不降「插件自己抛错」：后者是插件真出错，仍然该是 error
         //   （两者在 `plugin_busy` 这个 code 下混在一起，只能按 detail 分：
@@ -496,7 +496,7 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         } else {
             crate::log::Level::Warn
         };
-        // HTTP 失败单独一栏（第 199 轮）：这类行必须留证据，但它会被扫描器刷成
+        // HTTP 失败单独一栏：这类行必须留证据，但它会被扫描器刷成
         // 每秒几十条，混在面板日志里就把「面板自己在干嘛」冲没了。来源分开即可两全。
         st.log.emit_src(
             crate::log::Source::Http,
@@ -544,7 +544,7 @@ async fn error_pages(State(st): State<AppState>, req: Request<Body>, next: Next)
         .await
         .unwrap_or_default();
     let text = String::from_utf8_lossy(&bytes).to_string();
-    // 从我们自己的 JSON 里取人话；取不到就用状态码兜底。
+    // 从本服务自己的 JSON 里取人话；取不到就用状态码兜底。
     let mut message = status_title(parts.status).to_string();
     let mut code_ref = ref_id.clone();
     if let Ok(v) = serde_json::from_str::<Value>(&text) {
@@ -571,28 +571,28 @@ pub fn router(st: AppState) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/health", get(api_health))
         .route("/api/config", get(api_config).put(api_config_save))
-        // 检查更新（第 210 轮）：只查 + 下载 + 记「不再提示」，替换二进制那一步由人来
+        // 检查更新：只查 + 下载 + 记「不再提示」，替换二进制那一步由人来
         .route("/api/update/check", get(api_update_check))
         .route("/api/update/skip", post(api_update_skip))
         .route("/api/update/download", post(api_update_download))
         .route("/api/config/reload", post(api_config_reload))
-        // 界面包（第 265 轮）：查现状 / 装 / 激活 / 回到内置
+        // 界面包：查现状 / 装 / 激活 / 回到内置
         .route("/api/ui", get(api_ui_state))
         .route("/api/ui/check", get(api_ui_check))
         .route("/api/ui/install", post(api_ui_install))
         .route("/api/ui/activate", post(api_ui_activate))
         .route("/api/ui/reset", post(api_ui_reset))
         .route("/api/plugins/files", get(plugin_files))
-        // 文件管理（第 270 轮）：只看插件目录 / 脚本目录 / 回收站这三个地方。
+        // 文件管理：只看插件目录 / 脚本目录 / 回收站这三个地方。
         // 明确不做通用文件浏览器 —— 面板自己的 data/、库、配置不从这里进出。
         .route("/api/files", get(api_files))
         .route("/api/files/delete", post(api_files_delete))
         .route("/api/files/restore", post(api_files_restore))
-        // 清单与扫描（第 172 轮）
+        // 清单与扫描
         .route("/api/plugins/scan", get(api_plugins_scan))
         .route("/api/plugins/{name}/manifest", get(api_plugin_manifest))
         .route("/api/plugins/{name}/stats", get(api_plugin_stats))
-        // 迁移（第 168 轮）：scan → preview → apply，与 CLI 同一份实现
+        // 迁移：scan → preview → apply，与 CLI 同一份实现
         .route("/api/migrate/scan", get(api_migrate_scan))
         .route("/api/migrate/preview", post(api_migrate_preview))
         .route("/api/migrate/apply", post(api_migrate_apply))
@@ -613,7 +613,7 @@ pub fn router(st: AppState) -> Router {
                 crate::upload::MAX_UPLOAD_BYTES as usize,
             )),
         )
-        // 按 URL 装插件（第 107 轮）：商店是侧载插件，它下载不了二进制（fetch 的正文是
+        // 按 URL 装插件：商店是侧载插件，它下载不了二进制（fetch 的正文是
         // lossy UTF-8），落盘也不许它自己写 —— 这两步归面板。
         .route("/api/plugins/install", post(plugins_install))
         .route("/api/plugins", post(plugin_create))
@@ -630,14 +630,14 @@ pub fn router(st: AppState) -> Router {
         .route("/api/notify/outbox", get(api_notify_outbox))
         .route("/api/notify/test", post(api_notify_test))
         .route("/api/notify/outbox/retry", post(api_notify_retry))
-        // 渠道增删改（第 170 轮）：写回 config.json 的 notify.channels，热生效
+        // 渠道增删改：写回 config.json 的 notify.channels，热生效
         .route("/api/notify/channels", post(api_notify_channel_create))
         .route(
             "/api/notify/channels/{id}",
             axum::routing::patch(api_notify_channel_update).delete(api_notify_channel_delete),
         )
         .route("/api/notify/channels/{id}/toggle", post(api_notify_channel_toggle))
-        // 推送规则（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁
+        // 推送规则：渠道 = 怎么发，推送 = 什么时候发给谁
         .route("/api/notify/routes", post(api_notify_route_create))
         .route(
             "/api/notify/routes/{id}",
@@ -664,20 +664,20 @@ pub fn router(st: AppState) -> Router {
         .route("/plugins/{name}", get(plugin_webui_redirect))
         .route("/plugins/{name}/", get(plugin_webui_index))
         .route("/plugins/{name}/{*rel}", axum::routing::any(plugin_webui_any))
-        // 第 191 轮：面板替插件的**声明式页面**调一个具名 handler（动作 / 视图取数）。
+        // 面板替插件的**声明式页面**调一个具名 handler（动作 / 视图取数）。
         // 它和 /plugins/<name>/api/<h> 的区别：只看 handler 名，不受 __route / 静态文件影响。
         .route(
             "/api/plugins/{name}/call/{handler}",
             post(plugin_call_handler),
         )
         .route("/api/plugins/{name}/reload", post(plugin_reload))
-        // 第 180 轮：重装 = 重新采纳插件给的 cron 建议（改计划、保留历史）
+        // 重装 = 重新采纳插件给的 cron 建议（改计划、保留历史）
         .route("/api/plugins/{name}/reinstall", post(plugin_reinstall))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
         .route("/api/plugins/{name}/disable", post(plugin_disable))
         .route("/api/plugins/{name}/enable", post(plugin_enable))
-        // 暂停 / 恢复（第 167 轮）：不卸载，只是不再触发它的定时任务。
+        // 暂停 / 恢复：不卸载，只是不再触发它的定时任务。
         .route("/api/plugins/{name}/suspend", post(plugin_suspend))
         .route("/api/plugins/{name}/resume", post(plugin_resume))
         .route("/api/tasks/{plugin}/{name}/run", post(task_run))
@@ -686,7 +686,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/tasks/{plugin}/{name}/reset", post(task_reset))
         // 改调度：`{"expr":"0 9 * * *"}` 或 `{"expr":null}` 恢复默认
         .route("/api/tasks/{plugin}/{name}/schedule", post(task_schedule))
-        // 第 178 轮：删任务（打墓碑）
+        // 删任务（打墓碑）
         .route("/api/tasks/{plugin}/{name}", axum::routing::delete(task_delete))
         .route("/api/tasks/{plugin}/{name}/restore", post(task_restore))
         .route("/api/alerts", get(api_alerts))
@@ -700,7 +700,7 @@ pub fn router(st: AppState) -> Router {
 
         // 引擎试跑：一次性上下文，独立配额（试跑一次能占住整个执行预算）。
         //
-        // **必须和别的 api 一样过 require_token**（第 190 轮安全 review）：原来这个 merge
+        // **必须和别的 api 一样过 require_token**（安全 review）：原来这个 merge
         // 挂在外层 Router 上（只套了 rate_limit_test），于是任何能连到面板的人都能
         // POST /api/test/js 执行任意 JS —— fs 在，能读 config.json 里的渠道密钥、
         // 能写 plugins/*.js（下次加载即代码执行）。
@@ -724,7 +724,7 @@ pub fn router(st: AppState) -> Router {
             Router::new()
                 .route("/api/login", post(api_login))
                 // 改口令也走 PBKDF2（旧口令要再验一次），所以和登录共用那道更严的限流：
-                // 5 次突发、之后每 12 秒补一次（第 181 轮）
+                // 5 次突发、之后每 12 秒补一次
                 .route("/api/auth/token", post(api_change_token))
                 .route("/api/setup", post(api_setup))
                 .layer(middleware::from_fn_with_state(st.clone(), rate_limit_login)),
@@ -750,12 +750,12 @@ pub fn router(st: AppState) -> Router {
             asset_route(ui.clone(), THEME_BOOT_JS, "text/javascript; charset=utf-8", "theme-boot.js"),
         )
         .route("/ui.js", asset_route(ui.clone(), UI_JS, "text/javascript; charset=utf-8", "ui.js"))
-        // 编辑器高亮（第 173 轮）：自己写的极简 tokenizer，为零构建服务
+        // 编辑器高亮：自己写的极简 tokenizer，为零构建服务
         .route(
             "/highlight.js",
             asset_route(ui.clone(), HIGHLIGHT_JS, "text/javascript; charset=utf-8", "highlight.js"),
         )
-        // 套件样板页（第 175 轮）：插件作者照着这一页抄，比读文档快
+        // 套件样板页：插件作者照着这一页抄，比读文档快
         .route(
             "/ui-kit",
             asset_route(ui.clone(), UI_KIT_HTML, "text/html; charset=utf-8", "ui-kit.html"),
@@ -803,7 +803,7 @@ fn asset_with(
 ) -> Response {
     // 三档优先级：**开发口子 > 界面包 > 内置**
     //
-    // `PANEL_WEB_DIR` 排最前是刻意的：它是"我正在改 web/ 里的文件"的信号，
+    // `PANEL_WEB_DIR` 排最前是刻意的：它是"正在修改 web/ 里的文件"的信号，
     // 那时磁盘上的源文件才是真相；装了界面包反而会让开发态看到旧东西。
     // 门禁脚本（ui-check / ux-smoke）也靠它，行为不能变。
     if !force_builtin && std::env::var_os("PANEL_WEB_DIR").is_none() {
@@ -898,7 +898,7 @@ async fn index_page(
     let body = body
         .replace("/app.js\"", &format!("/app.js?v={v}\""))
         .replace("/app.css\"", &format!("/app.css?v={v}\""))
-        // 页面真正加载的是压缩产物（第 190 轮）：它们也得不吃旧缓存
+        // 页面真正加载的是压缩产物：它们也得不吃旧缓存
         .replace("/panel.min.js\"", &format!("/panel.min.js?v={v}\""))
         .replace("/panel.min.css\"", &format!("/panel.min.css?v={v}\""))
         // 首帧主题脚本也是阻塞资源：不跟版本的话，升级后仍可能吃旧缓存。
@@ -1107,7 +1107,7 @@ async fn api_test_js(
     }
     let budget = b.budget_ms.unwrap_or(2000).clamp(100, 10_000);
 
-    // 在飞数量：同时只跑一个。速率限流挡「狂点」，这个挡「排队」——
+    // 正在执行的插件数量：同时只跑一个。速率限流挡「狂点」，这个挡「排队」——
     // 排队的那几个即使 HTTP 已经超时，也照样占着执行预算。
     let Ok(_permit) = st.limits.test_gate.try_acquire() else {
         let mut resp =
@@ -1165,7 +1165,7 @@ struct SetupBody {
 /// 只在「还没有任何凭据」时可用（`st.auth.is_none()`），而那种部署本来就只绑回环、
 /// 只认回环 Host（见 require_token 的降级分支），所以这个口子的暴露面和面板首页一样。
 ///
-/// 写完 `auth.json` **立刻生效并当场发会话票**（第 87 轮）：设完口令就能用，不用重启。
+/// 写完 `auth.json` **立刻生效并当场发会话票**：设完口令就能用，不用重启。
 /// 面板生成的那种会回显一次给人抄（人自己给的就不回显，免得响应里留痕）。
 async fn api_setup(
     State(st): State<AppState>,
@@ -1174,7 +1174,7 @@ async fn api_setup(
 ) -> Result<Response, ApiError> {
     guard_write(&h)?;
     // setup 在 require_token 之外（它要**建**令牌），所以那道 middleware 里的
-    // Host 闸（挡 DNS rebinding）到不了这里 —— 自己判一次（第 190 轮安全 review）。
+    // Host 闸（挡 DNS rebinding）到不了这里 —— 自己判一次（安全 review）。
     // 不判的后果：恶意页面 rebinding 之后抢先 POST /api/setup 写一份自己的令牌，
     // 响应里还回显出来，正主就被锁在门外了（得手删 auth.json）。
     if !host_allowed(&h) {
@@ -1210,7 +1210,7 @@ async fn api_setup(
     let path = crate::auth::write_new(&st.data_dir, &token).map_err(|e| {
         internal(format!("写 auth.json 失败: {e}"))
     })?;
-    // 写完**立刻生效**（第 87 轮）：从刚写的文件读回材料，换掉内存里那一份，
+    // 写完**立刻生效**：从刚写的文件读回材料，换掉内存里那一份，
     // 再给浏览器发一张会话票 —— 否则用户设完口令就被挡在门外，还得自己去重启。
     // 读回文件（而不是用 Auth::derive(&token) 重新派生）：盐要和磁盘上一致，
     // 不然重启后这张会话票会失效。
@@ -1230,7 +1230,7 @@ async fn api_setup(
     );
     let mut resp = Json(json!({
         "ok": true,
-        // 只有面板生成的才回显：人给的那份他自己知道，别在响应里留痕
+        // 只有面板生成的才回显：调用方给的那份自己知道，别在响应里留痕
         "token": if generated { Value::String(token) } else { Value::Null },
         // 已经生效了：不用重启，浏览器也已经拿到会话票
         "restart_required": false,
@@ -1357,7 +1357,7 @@ async fn api_logout() -> Response {
 
 /// `GET /readyz` —— 就绪探针：比 `/healthz` 多查两件事（库能读、调度器活着）。
 ///
-/// 不就绪时返回 **503**：反向代理/系统服务管理器的语义是「现在别把流量给我」，
+/// 不就绪时返回 **503**：反向代理/系统服务管理器的语义是「现在别把流量发过来」，
 /// 而 200 + `{"ok":false}` 会被它们当成健康。
 async fn readyz(State(st): State<AppState>) -> Response {
     // 库能不能读（`plugins` 表只是个探针，别拿它的行数当插件数 ——
@@ -1375,8 +1375,8 @@ async fn readyz(State(st): State<AppState>) -> Response {
     // 调度器还活着吗：能应答就说明 actor 循环没卡死。
     // **但不能无限等**：插件加载是在这个 actor 里串行做的，而真实插件（mcloud 那些）
     // 加载期会打网络，一次能拖几十秒。没有超时的话 `/readyz` 会被挂住 ——
-    // 反代/launchd 看到的不是「还没好」，而是「请求超时」（第 132 轮实测：100 秒后才回）。
-    // 现在最多等 2 秒，超时就明确回 503「调度器在忙」，语义是「现在别把流量给我」。
+    // 反代/launchd 看到的不是「还没好」，而是「请求超时」（实测：100 秒后才回）。
+    // 现在最多等 2 秒，超时就明确回 503「调度器在忙」，语义是「现在别把流量发过来」。
     let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mark = busy.clone();
     let (plugins, tasks) = match tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1545,7 +1545,7 @@ fn presented_token(h: &HeaderMap) -> Option<String> {
 ///
 /// 用「一分钟窗口 + 计数」而不是令牌桶：这里要的是「一屏之内不被刷爆」，
 /// 精确平滑没有意义，简单到不会出错更重要。
-/// 同一来源、同一条错误在窗口内只记一条（第 266 轮，用户报「日志流 401 反复刷 WARN」）。
+/// 同一来源、同一条错误在窗口内只记一条（用户报「日志流 401 反复刷 WARN」）。
 ///
 /// 现场：一台**没登进来**的设备（手机 / 另一个浏览器）每几秒重连一次 SSE，每次都 401，
 /// 面板日志被同一行刷满，真告警反而看不见。这不是「面板出故障」，是同一件事重复了 N 次。
@@ -1585,7 +1585,7 @@ fn http_repeat_allow(key: &str) -> Option<u32> {
 /// 日志里的「谁在打」：UA 前 32 个字符。
 ///
 /// 只看来源 IP 分不出「浏览器」和「本机脚本」—— 127.0.0.1 既可能是用户自己的页签，
-/// 也可能是 curl / node 探针 / 另一个会话在跑检查（用户 2026-11-22 问「这些到底哪来的」）。
+/// 也可能是 curl / node 探针 / 另一条流水线在跑检查（用户 2026-11-22 问「这些到底哪来的」）。
 /// UA 一眼就能分开：`Mozilla/5.0 …` vs `curl/8.x` vs `node`。
 fn ua_tag(headers: &axum::http::HeaderMap) -> String {
     headers
@@ -1615,7 +1615,7 @@ fn http_log_allowed() -> bool {
 ///
 /// 抽出来是为了能确定性地测：`http_log_allowed` 用的是**进程级** static 窗口，
 /// 而 `cargo test` 是并行跑用例的 —— 别的用例打一个 400 就会把这一分钟的名额吃掉，
-/// 于是「三条只记一条」那条用例时红时绿（第 197 轮实测：全量跑约一半概率失败，
+/// 于是「三条只记一条」那条用例时红时绿（实测：全量跑约一半概率失败，
 /// 单跑必过）。窗口逻辑本身在这里单测，走 HTTP 的那条只验「不会三条全记」。
 pub(crate) fn win_take(
     slot: &mut Option<(std::time::Instant, u32)>,
@@ -1662,7 +1662,7 @@ fn host_allowed(h: &HeaderMap) -> bool {
     let env_on = *ALLOW_ANY.get_or_init(|| {
         std::env::var("PANEL_ALLOW_ANY_HOST").ok().as_deref() == Some("1")
     });
-    // 配置里的 server.allow_any_host 是热开关（第 207 轮）：改完保存就生效，不用重启。
+    // 配置里的 server.allow_any_host 是热开关：改完保存就生效，不用重启。
     if env_on || crate::config::server().allow_any_host {
         return true;
     }
@@ -1780,7 +1780,7 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    // 插件界面现在**嵌在面板自己的 iframe 里**（第 139 轮，`#view-plugin`）。
+    // 插件界面现在**嵌在面板自己的 iframe 里**（`#view-plugin`）。
     // DENY 会把自家页面也挡掉 —— 用户看到的是一个白板 + 损坏文档图标。
     // 改成 SAMEORIGIN（CSP 同步改成 frame-ancestors 'self'）：同源可嵌，外站照旧不行。
     h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
@@ -1886,7 +1886,7 @@ fn human_size(n: u64) -> String {
 }
 
 
-// ---------------------------------------------------------------- 磁盘（第 200 轮）
+// ---------------------------------------------------------------- 磁盘
 
 /// 磁盘读数缓存。遍历 `data/` 要 stat 几万个文件，而界面每 5 秒拉一次 `/api/state` ——
 /// 每请求都全量遍历会把磁盘 IO 顶满（那正好是盘快满时最不该发生的事）。30 秒一次足够。
@@ -1900,7 +1900,7 @@ fn disk_cell() -> &'static std::sync::Mutex<Option<(std::time::Instant, serde_js
 /// 低于这个余量就报警：SQLite 写日志、备份、装插件都还要空间。
 const DISK_LOW_BYTES: u64 = 500 * 1024 * 1024;
 
-/// async 版（第 190 轮性能 review）：缓存过期那一次要遍历 data/ 里最多 20 万个条目，
+/// async 版（性能 review）：缓存过期那一次要遍历 data/ 里最多 20 万个条目，
 /// 几百毫秒的阻塞 IO 摊在 async worker 上，同一个 worker 上的 SSE 流、/api/state
 /// 一起卡住。丢给 blocking 池，worker 只等结果。
 async fn disk_json(data_dir: &std::path::Path) -> serde_json::Value {
@@ -1962,7 +1962,7 @@ fn disk_snapshot(data_dir: &std::path::Path) -> serde_json::Value {
 }
 
 async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    // 插件清单（第 172 轮）：标题/图标/顺序来自 plugins/<name>.panel.json。
+    // 插件清单：标题/图标/顺序来自 plugins/<name>.panel.json。
     // 没有清单就维持原样（界面回退到文件名 + 字典序），不 pretend。
     let mut plugins = serde_json::to_value(st.sched.plugins().await.map_err(internal)?)
         .unwrap_or_else(|_| json!([]));
@@ -2000,7 +2000,7 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
     }
     let mut tasks = st.sched.tasks().await.map_err(internal)?;
     // 「跑过」= 历史累计（runs 表），不是 TaskView.runs 那个本进程计数 ——
-    // 后者在重启 / 插件重载后归零，界面上会「全是 0」（第 256 轮用户截图）。
+    // 后者在重启 / 插件重载后归零，界面上会「全是 0」（用户截图）。
     // 一次聚合覆盖全部任务；查不到就当 0，不该让 /api/state 因此失败。
     let totals = crate::runs::totals_by_task(&st.db).await.unwrap_or_default();
     for t in tasks.iter_mut() {
@@ -2009,7 +2009,7 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
             .copied()
             .unwrap_or(0);
     }
-    // 排队等执行位的运行（第 227 轮）：界面上的「排队 N」和「临时调用」折叠区靠它
+    // 排队等执行位的运行：界面上的「排队 N」和「临时调用」折叠区靠它
     let pending = st.sched.pending().await.map_err(internal)?;
     // JS 内存要拿各 runtime 的锁：给 2ms 的耐心，插件正忙就跳过它。
     // 7 个插件最坏 14ms，而且测量在独立任务里跑（见 scheduler 的 Cmd::Memory）。
@@ -2069,7 +2069,7 @@ fn safe_name(name: &str) -> Result<(), ApiError> {
 
 async fn read_source(dir: &std::path::Path, name: &str) -> Result<String, ApiError> {
     safe_name(name)?;
-    // 两种形态都认：`<name>.js` 或 `<name>/index.js`（第 216 轮）。
+    // 两种形态都认：`<name>.js` 或 `<name>/index.js`。
     let d = dir.to_path_buf();
     let n = name.to_string();
     tokio::task::spawn_blocking(move || crate::pluginfs::read_source(&d, &n).map(|(src, _)| src))
@@ -2168,9 +2168,8 @@ struct UploadQuery {
     name: String,
     /// `1` = 覆盖已存在的文件；缺省（或不传）= **不覆盖**，同名就报冲突。
     ///
-    /// 默认原来是「覆盖」—— 用户传了同名文件只看到一句「已上传」，内容到底换没换不知道
-    /// （第 133 轮报的就是这个）。现在不传就是冲突，界面会先问「覆盖 / 重命名 / 取消」，
-    /// 用户点了覆盖才带 `overwrite=1` 过来。
+    /// 不设默认覆盖：静默覆盖时用户只看到一句「已上传」，内容到底换没换不知道。
+    /// 不传就是冲突，界面会先问「覆盖 / 重命名 / 取消」，点了覆盖才带 `overwrite=1` 过来。
     overwrite: Option<u8>,
 }
 
@@ -2184,7 +2183,7 @@ struct UploadQuery {
 /// 「覆盖时不采纳 cron」，症状都是「装了但行为不对」，很难查。
 struct ReloadOutcome {
     reloaded: Vec<String>,
-    /// 落盘了但**没加载**：`(插件名, 原因)`。版本不够是最常见的一种（第 256 轮）。
+    /// 落盘了但**没加载**：`(插件名, 原因)`。版本不够是最常见的一种。
     blocked: Vec<(String, String)>,
 }
 
@@ -2192,7 +2191,7 @@ async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> ReloadOutc
     let disabled = crate::db::plugin_disabled_names(&st.db).await;
     // 一条 zip 里可能同时有单文件（foo.js）和目录式（bar/index.js）。按**插件名**
     // 去重后统一卸载/重装；以前只认顶层 `.js`，目录式插件上传完要用户再点一次
-    // 「尝试加载」，和上传接口「自动重载受影响的插件」的承诺不一致（第 217 轮 review）。
+    // 「尝试加载」，和上传接口「自动重载受影响的插件」的承诺不一致（review）。
     let mut names: Vec<String> = saved.files.iter().filter_map(|f| {
         let p = std::path::Path::new(f);
         let mut it = p.components();
@@ -2239,7 +2238,7 @@ async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> ReloadOutc
         let Ok(source) = read_source(&st.plugins_dir, &stem).await else { continue };
         st.sched.unload(&stem);
         // 没装过的名字 = 静默安装（API 直接上传，不走界面）：采纳它的 cron 建议。
-        // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划（第 180 轮）。
+        // 覆盖已有插件 = 更新：只更新建议，不动用户改过的计划。
         let fresh = !crate::db::plugin_surfaces(&st.db)
             .await
             .contains_key(&stem);
@@ -2254,7 +2253,7 @@ async fn reload_saved(st: &AppState, saved: &crate::upload::Saved) -> ReloadOutc
     ReloadOutcome { reloaded, blocked }
 }
 
-/// `POST /api/plugins/install` —— 按 URL 装插件（第 107 轮，商店侧载的后半截）。
+/// `POST /api/plugins/install` —— 按 URL 装插件（商店侧载的后半截）。
 ///
 /// body: `{ url, name?, sha256?, overwrite? }`
 /// - `name` 不给就从 URL 末段猜（只认 `.js` / `.zip`）；
@@ -2282,7 +2281,7 @@ async fn plugins_install(
         return Err(bad(format!("只接受 http(s) 地址，收到：{url}")));
     }
     // 明文 http 装插件 = 让同路的人随便换掉要执行的代码，所以必须自带 sha256
-    // （第 190 轮安全 review）。https 才允许不校验 —— 那儿有 TLS 兜着。
+    // （安全 review）。https 才允许不校验 —— 那儿有 TLS 兜着。
     if url.starts_with("http://")
         && req
             .sha256
@@ -2464,11 +2463,11 @@ async fn scripts_upload(
     })))
 }
 
-/// 暂停一个插件（第 167 轮）：**不卸载**，只是让调度器不再触发它的定时任务。
+/// 暂停一个插件：**不卸载**，只是让调度器不再触发它的定时任务。
 ///
 /// 与「停用」的区别（用户问过）：停用 = 卸载 + 重启后不加载（任务列表会消失）；
 /// 暂停 = 只停定时：任务照旧列在界面上、标「已暂停」，手动运行照旧能跑。
-/// 注意它**不保证插件驻留内存**（第 189 轮起空闲卸载也会收走，用到时自动装回）。
+/// 注意它**不保证插件驻留内存**（空闲卸载也会收走，用到时自动装回）。
 async fn plugin_suspend(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -2511,7 +2510,7 @@ async fn plugin_resume(
 }
 
 
-// ── 迁移（第 168 轮）──
+// 迁移
 //
 // 与 CLI 同一份实现（crate::migrate），界面只负责「发现 → 预览 → 一键」。
 // 只有 apply 会写库，且写完要重启面板才生效（插件加载时读 state 表）。
@@ -2750,10 +2749,10 @@ async fn plugin_stop(
     })))
 }
 
-/// 「要用这个插件了」——不在内存就装回来（第 188 轮）。
+/// 「要用这个插件了」——不在内存就装回来。
 ///
 /// 停用的插件**不**自动装：停用是用户明确关掉的，静默装回来等于把停用变成了摆设。
-/// 停用名单的 1 秒缓存（第 190 轮性能 review）。
+/// 停用名单的 1 秒缓存（性能 review）。
 ///
 /// 「用到就装」之后，插件界面的每个接口请求都要先问一次「这个插件停用了吗」——
 /// 打开一个插件页面就是几十次 DB round-trip，全排在唯一的 DB 线程上。
@@ -2832,7 +2831,7 @@ async fn task_run(
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    // 可选 body `{params}`（第 227 轮）：同一个 handler 换参数跑 ——
+    // 可选 body `{params}`：同一个 handler 换参数跑 ——
     // 插件界面「只跑第 3 个号」就用它，不必给每个账号各注册一条任务。
     let params = if body.is_empty() {
         None
@@ -2844,11 +2843,11 @@ async fn task_run(
             Some(p) => Some(p.clone()),
         }
     };
-    // 按需加载（第 188 轮）：手动执行前先把插件装进内存。
+    // 按需加载：手动执行前先把插件装进内存。
     // 以前这里直接报「插件还没加载，先点加载」—— 用户点「执行」就是想让事情发生，
     // 让 manual 与 cron 走同一条「用到就装」的路才对。
     sched_ready(&st, &plugin).await?;
-    // 第 227 轮：插件正忙不再 409，而是**排队**（回 queued + 位置）。
+    // 插件正忙不再 409，而是**排队**（回 queued + 位置）。
     // 只有「队列满了」还是冲突（等会儿重试就行），照旧 409。
     let out = st
         .sched
@@ -2909,7 +2908,7 @@ async fn task_reset(
 /// 只换表达式：`runs` / 熔断计数 / 暂停状态全部保留 —— 这正是「编辑」相对
 /// 「删了重建」的意义（删了重建会把运行历史清零）。改完落库，插件热重载和面板
 /// 重启都不会把人的改动冲掉。
-/// DELETE /api/tasks/{plugin}/{name} —— 删掉一条任务（第 178 轮）。
+/// DELETE /api/tasks/{plugin}/{name} —— 删掉一条任务。
 ///
 /// **不抹库**：插件下次注册还会带上这条，抹了就会被「重新注册」复活。所以打墓碑
 /// （tasks.deleted_at），调度器立刻不再触发它，界面归到「已删除」。
@@ -2943,7 +2942,7 @@ async fn task_schedule(
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     // 只认 expr 这一个键：{"cron": "@every 10m"} 这种以前会被当成「没有 expr = 撤销覆盖」，
-    // 于是「改计划」看起来成功了、其实什么都没改（第 65 轮实测踩到）。认不出的键直接报错。
+    // 于是「改计划」看起来成功了、其实什么都没改（实测踩到）。认不出的键直接报错。
     if let Some(o) = body.as_object() {
         if let Some(k) = o.keys().find(|k| *k != "expr") {
             return Err(bad(format!(
@@ -3005,7 +3004,7 @@ struct Page {
     before: Option<i64>,
     /// 日志等级过滤（精确匹配：`warn` 只看 warn，不看 error）。
     level: Option<String>,
-    /// 日志来源过滤（第 199 轮）：panel / plugin / script / http。空 = 全部。
+    /// 日志来源过滤：panel / plugin / script / http。空 = 全部。
     source: Option<String>,
 }
 
@@ -3032,7 +3031,7 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
     } else {
         text
     };
-    // 编辑器要的是**磁盘上的原文**（保留用户的键顺序和缩进），不是我们 pretty 过的版本。
+    // 编辑器要的是**磁盘上的原文**（保留用户的键顺序和缩进），不是格式化后的版本。
     let raw = std::fs::read_to_string(&path).unwrap_or_default();
     let raw_truncated = raw.chars().count() > 200_000;
     let raw_shown: String = if raw_truncated {
@@ -3573,7 +3572,7 @@ data: {}
         .into_response()
 }
 
-/// 日志流参数：`since` 传「我最后看到的那条 id」。
+/// 日志流参数：`since` 传「最后看到的那条 id」。
 #[derive(Debug, Deserialize)]
 struct StreamQuery {
     since: Option<i64>,
@@ -3713,7 +3712,7 @@ const SOURCE_MIN: usize = 64 * 1024;
 const ENV_SOURCE_MAX: &str = "PANEL_PLUGIN_MAX_BYTES";
 
 fn source_max() -> usize {
-    // 优先级：环境变量 > config.json 的 `plugins.max_bytes` > 内置默认（第 208 轮）
+    // 优先级：环境变量 > config.json 的 `plugins.max_bytes` > 内置默认
     if let Some(n) = std::env::var(ENV_SOURCE_MAX)
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
@@ -3752,7 +3751,7 @@ async fn write_atomic(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
     // 名字带 pid + 纳秒，避开并发写同一个目标；create_new 拒绝跟随符号链接与已存在文件
-    // （第 190 轮安全 review：fs::write 会在别人预置的软链上开花）。
+    // （安全 review：fs::write 会在别人预置的软链上开花）。
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -3782,7 +3781,7 @@ async fn write_atomic(
     Ok(())
 }
 
-// ---------------------------------------------------------------- 检查更新（第 210 轮）
+// ---------------------------------------------------------------- 检查更新
 
 /// `GET /api/update/check?force=1` —— 查最新 release，并把「该不该提示」算好。
 ///
@@ -3807,7 +3806,7 @@ async fn api_update_check(
     }
 }
 
-/// `POST /api/update/skip {"version": "0.4.4"}` —— 记下「这个版本别再提示我」。
+/// `POST /api/update/skip {"version": "0.4.4"}` —— 记下「这个版本不再提示」。
 ///
 /// 传空版本号 = 清掉记录（以后照常提示）。写进 config.json 而不是单独的库：
 /// 它就是一条配置，跟着备份/迁移走才合理。
@@ -3880,7 +3879,7 @@ async fn api_update_download(
     })))
 }
 
-// ---------------------------------------------------------------- 文件管理（第 270 轮）
+// ---------------------------------------------------------------- 文件管理
 
 async fn api_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let pdir = st.plugins_dir.clone();
@@ -3950,7 +3949,7 @@ async fn api_files_delete(
         return Err(bad(format!("{} 里没有 {}", dir.display(), body.name)));
     }
     // 删的是**正在用的插件**时，先按名字卸掉再搬文件：顺序反了会出现
-    // 「提示删了、进程里还在跑、下次启动又回来」（第 131 轮同款症状）。
+    // 「提示删了、进程里还在跑、下次启动又回来」（同款症状）。
     if area == crate::storage::Area::Plugins {
         let base = body
             .name
@@ -4056,7 +4055,7 @@ struct DownloadBody {
 async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 目录不在 = 还没装过插件（或者这个实例的 PANEL_PLUGINS_DIR 指向了已删的路径）。
     // 这**不是**客户端请求的问题：以前回 400 bad_request，界面每几秒轮询一次就刷一屏
-    // `GET /api/plugins/files → 400 code=bad_request detail=`（第 205 轮实测的噪音源）。
+    // `GET /api/plugins/files → 400 code=bad_request detail=`（实测的噪音源）。
     // 现在：ENOENT → 空列表；其它 IO 错（权限等）→ 500 并带上路径。
     // 插件名来自 pluginfs（认两种形态：`<name>.js` 与 `<name>/index.js`），
     // 但**目录不存在**要按「还没装过」处理，不能报错 —— 见上面那段说明。
@@ -4080,7 +4079,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
         .into_iter()
         .map(|p| p.name)
         .collect();
-    // 每个插件一次 stat + 一次目录遍历 + 一次清单读（第 190 轮性能 review）：
+    // 每个插件一次 stat + 一次目录遍历 + 一次清单读（性能 review）：
     // 界面每 5 秒拉一次这个接口，7 个带 .webui 的插件就是几十次阻塞 IO 摊在
     // async worker 上 —— 一起挪进 spawn_blocking，worker 只等结果。
     let pdir = st.plugins_dir.clone();
@@ -4098,7 +4097,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             let bytes = crate::pluginfs::total_bytes(&pdir, &name);
             // 清单里的版本（没有清单 / 没写版本就是空串）。商店判断「可更新」要用它，
             // 停用/按需加载的插件不在 `/api/state` 的 plugins 里，所以这里也带一份。
-            // 清单一次读两用：版本（商店用）+ 声明式侧栏入口（第 191 轮）。
+            // 清单一次读两用：版本（商店用）+ 声明式侧栏入口。
             // 后者必须从磁盘来 —— 按需加载的插件这次启动根本没加载，运行期注册的 nav 不存在，
             // 但清单在磁盘上，所以「没加载也能在侧栏看见」靠的就是这一份。
             let man = crate::manifest::load(&pdir, &name).ok().flatten();
@@ -4151,7 +4150,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
 }
 
 
-// ── 插件清单与目录扫描（第 172 轮）──
+// 插件清单与目录扫描
 //
 // 三个问题合成一组接口：插件叫什么（清单）、要填什么（config.schema）、
 // 目录里现在有什么（scan）。扫描只报告差异，不自动加载 —— 加载始终是人喊的。
@@ -4177,7 +4176,7 @@ async fn api_plugins_scan(State(st): State<AppState>) -> Result<Json<Value>, Api
 }
 
 /// GET /api/plugins/{name}/manifest —— 清单原文（界面用来排顺序、取标题）。
-/// GET /api/plugins/{name}/stats —— 这个插件最近跑得怎么样（第 176 轮）。
+/// GET /api/plugins/{name}/stats —— 这个插件最近跑得怎么样。
 ///
 /// 卡片上原本只有「N 个任务 / 本次启动后未运行」两个数字，看不出「最近一周挂了几次」。
 /// 这里把 runs 表按 24h / 7d / 全部 三个窗口各聚合一次（一次 DB 往返，三个数字同一刻）。
@@ -4324,7 +4323,7 @@ async fn plugin_call_handler(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    // 视图 id 也带上（第 192 轮）：插件可以用**一个** handler 服务好几个视图，
+    // 视图 id 也带上：插件可以用**一个** handler 服务好几个视图，
     // 按 evt.view 分派 —— 否则每个视图都要 register_handler，任务页会多出一排
     // 「手动」任务（handler 也算任务）。
     let view = panel_meta
@@ -4401,7 +4400,7 @@ async fn plugin_config_get(
 #[serde(deny_unknown_fields)]
 struct PluginConfigBody {
     text: String,
-    /// `reload: false` = 只落盘、不重载这个插件（第 196 轮）。
+    /// `reload: false` = 只落盘、不重载这个插件。
     ///
     /// 为什么要有它：配置写入有两条路 —— 面板这条（通用，写完必须重载，因为**有些**插件
     /// 在加载期读一次就缓存了）和插件自己的路由（热生效，但插件得自己实现）。
@@ -4457,7 +4456,7 @@ async fn plugin_config_put(
     write_atomic(&path, body.text.as_bytes(), Some(0o600))
         .await
         .map_err(|e| internal(format!("写配置失败 {}: {e}", path.display())))?;
-    // 默认只落盘（第 196 轮）：重载会打断在跑的任务、让排队请求失败，是**危险动作**，
+    // 默认只落盘：重载会打断在跑的任务、让排队请求失败，是**危险动作**，
     // 不该是「保存配置」的默认副作用。要重载必须显式 reload:true。
     // 顺带：host.self_config() 每次调用都读盘，所以「用到才读」的插件不重载也能看到新值。
     if body.reload != Some(true) {
@@ -4649,7 +4648,7 @@ async fn plugin_create(
     write_atomic(&path, source.as_bytes(), None)
         .await
         .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
-    // 新建 = 安装：这次注册的 cron 建议直接采纳（复制成生效计划，第 180 轮）
+    // 新建 = 安装：这次注册的 cron 建议直接采纳（复制成生效计划）
     match st.sched.load_adopt(&body.name, source.clone(), true).await {
         Ok(()) => {
             // 新建也是加载：记指纹（不然下次扫描一直把这条报成「新增」）
@@ -4691,9 +4690,9 @@ async fn plugin_delete(
         .unwrap_or(0);
     // 目录式插件（`<name>/index.js`）搬整个目录，回收站里也保留它是一整个插件的形状。
     // 升级期可能 `<name>.js` 与 `<name>/` 同时存在（单文件优先）：两个都要搬走，
-    // 只搬目录的话重启后 `.js` 又把插件带回来了（第 131 轮同款症状）。
+    // 只搬目录的话重启后 `.js` 又把插件带回来了（同款症状）。
     let is_dir_plugin = crate::pluginfs::dir_entry(&st.plugins_dir, &name).is_some();
-    // 收拢形状（第 269 轮）：`<name>/` 是这个插件的属地 —— 主文件、清单、界面全在里面。
+    // 收拢形状：`<name>/` 是这个插件的属地 —— 主文件、清单、界面全在里面。
     // 整个目录搬走，别只搬 `<name>.js` / `.webui` 留下孤儿清单。
     let collapsed = crate::pluginfs::group_dir(&st.plugins_dir, &name).is_some();
     let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
@@ -4716,7 +4715,7 @@ async fn plugin_delete(
         }
     }
     // **先把文件搬走**，再动内存和库。顺序反了就会出现「提示删除失败 / 重启后插件又回来」：
-    // 文件还在，下次启动自然又被加载（第 131 轮用户报的两个症状是同一个根因）。
+    // 文件还在，下次启动自然又被加载（用户报的两个症状是同一个根因）。
     // 另外 `rename` 跨设备会 EXDEV（插件目录在别的卷、数据目录在系统盘就是这种情况），
     // 交给 fsx::move_path 走「复制 + 删除」。
     let mut moved: Vec<String> = Vec::new();
@@ -5027,7 +5026,7 @@ async fn script_create(
     guard_write(&h)?;
     crate::scripts::safe_name(&body.name).map_err(bad)?;
     // 以前这里写死 `cron: None`：调用方传了 `cron` 会被**静默忽略**（建出来是手动脚本）。
-    // 静默忽略参数是最难查的一类问题（第 36 轮 lead_ms 也是这个毛病），所以现在接住它。
+    // 静默忽略参数是最难查的一类问题（lead_ms 也是这个毛病），所以现在接住它。
     let out = match body.source {
         // 显式给了源码：按扩展名推断运行时（可被 runtime 字段覆盖）直接落盘。
         Some(source) => {
@@ -5108,7 +5107,7 @@ async fn script_run(
 /// 动态请求走 `/plugins/<name>/api/<handler>`，交给插件注册的 handler。
 const WEBUI_BUDGET_MS: u64 = 30_000;
 
-/// 插件的界面目录，两级查找（第 269 轮）：
+/// 插件的界面目录，两级查找：
 /// 先老形状 `<name>.webui/`（顶层，兼容不迁移的老实例与老 zip），
 /// 再收拢形状 `<name>/<name>.webui/`。
 fn webui_dir_of(plugins_dir: &std::path::Path, name: &str) -> PathBuf {
@@ -5154,7 +5153,7 @@ async fn serve_webui_file(
     let dir = webui_dir(st, name)?;
     // 整个 `<name>.webui` 目录都不在 = 这个插件的界面文件没了（装的时候没带上，
     // 或者被别的部署脚本先删后拷、拷失败了）。这时回「这个文件不在插件里」等于没说 ——
-    // 用户看到的是一张 404 页面，实际要做的是**重装这个插件**（第 203 轮就这么被卡住：
+    // 用户看到的是一张 404 页面，实际要做的是**重装这个插件**（就这么被卡住：
     // 侧栏有「移动云盘」入口，点进去 404，而 JS 和配置都在）。
     if !dir.is_dir() {
         return Err(ApiError::not_found(format!(
@@ -5195,7 +5194,7 @@ async fn serve_webui_file(
 ///
 /// 为什么必须带尾斜杠：插件页的 `style.css` / `boot.js` 是**相对路径**，没有尾斜杠时
 /// 浏览器按「/plugins/mcloud 是一段目录名」去解析，请求就飞到 `/plugins/style.css` ——
-/// 面板里那次插件界面是「有结构没样式、主题也不跟随」的样子（第 139 轮实测）。
+/// 面板里那次插件界面是「有结构没样式、主题也不跟随」的样子（实测）。
 async fn plugin_webui_redirect(
     Path(name): Path<String>,
     uri: axum::http::Uri,
@@ -5245,7 +5244,7 @@ async fn plugin_webui_any(
         }
     }
 
-    // 1.5) 接口调用前把插件装回来（第 188 轮）。
+    // 1.5) 接口调用前把插件装回来。
     //
     // 以前这里直接进到下面的分支，插件不在内存里就回「插件未加载」，界面上表现为
     // 点一下按钮弹一句「先点插件卡片上的加载」—— 用户不该为了用界面去插件页点按钮。
@@ -5265,7 +5264,7 @@ async fn plugin_webui_any(
         }
     }
 
-    // 查一次就够（第 190 轮性能 review：每个插件接口请求原来要连续问两次调度器，
+    // 查一次就够（性能 review：每个插件接口请求原来要连续问两次调度器，
     // 打开一个插件页面就是几十个请求 × 两次 actor hop）
     let has_web = st.sched.plugin_has_web(&name).await;
 
@@ -5294,7 +5293,7 @@ async fn plugin_webui_any(
         let mut h = serde_json::Map::new();
         for (k, v) in headers.iter() {
             let name = k.as_str().to_ascii_lowercase();
-            // 凭据不外借（第 190 轮安全 review）：插件 handler 拿到 cookie 就等于拿到
+            // 凭据不外借（安全 review）：插件 handler 拿到 cookie 就等于拿到
             // 一张 30 天的面板会话票 —— 而面板在插件 ctx 建起来之前专门擦过环境变量
             // （auth.rs 的 scrub），这里把票递过去等于绕开那道设计。
             if matches!(
@@ -5501,7 +5500,7 @@ async fn api_notify_state(State(st): State<AppState>) -> Result<Json<Value>, Api
             json!(600),
         ),
     };
-    // 推送规则（第 186 轮）：老配置没写 routes 时，这里给出「每条渠道一条」的合成视图，
+    // 推送规则：老配置没写 routes 时，这里给出「每条渠道一条」的合成视图，
     // 界面永远按两层显示，不用为兼容分支写两套 UI。
     let routes = match crate::notify::from_store(&st.config) {
         Ok(c) => c
@@ -5556,7 +5555,7 @@ struct NotifyTestBody {
     channel: Option<String>,
 }
 
-// ── 通知渠道的增删改（第 170 轮）──
+// 通知渠道的增删改
 //
 // 以前只能在 config.json 里手写 JSON：用户得知道 kind 有哪些、每个 kind 要哪些字段、
 // 密钥字段叫什么。这一组接口把「改一个渠道」变成一次点击，写盘与热更新
@@ -5574,7 +5573,7 @@ fn channels_of(value: &Value) -> Vec<Value> {
 
 /// 改 notify 段（渠道 / 推送 / 全局都走这一条）：合并 → 语义校验 → 0600 原子写 → 换热快照。
 ///
-/// 第 186 轮把渠道、推送、全局三项的写盘合成一条路径：以前每加一种写操作就复制一遍
+/// 把渠道、推送、全局三项的写盘合成一条路径：以前每加一种写操作就复制一遍
 /// 「读配置 + 校验 + 写盘 + 换快照」，校验漏一处就会写出一个能落盘但跑不起来的配置。
 async fn save_notify(
     st: &AppState,
@@ -5701,7 +5700,7 @@ fn snapshot_value(st: &AppState) -> Value {
     serde_json::from_str::<Value>(&st.config.snapshot()).unwrap_or(Value::Null)
 }
 
-// ---------------------------------------------------------------- 推送规则（第 186 轮）
+// ---------------------------------------------------------------- 推送规则
 //
 // 渠道 = 怎么发；推送 = 什么时候发给谁。CRUD 的形状和渠道一致（同样的合并语义、
 // 同样的 0600 原子写），只是删推送**不动渠道** —— 这正是要的「删掉推送但渠道还在」。
@@ -6084,7 +6083,7 @@ async fn api_notify_channel_delete(
     guard_write(&h)?;
     let snap = snapshot_value(&st);
     let chans = channels_of(&snap);
-    // 被推送引用着就不许删（第 186 轮）：删掉它，那些推送会静默变成「渠道缺失」，
+    // 被推送引用着就不许删：删掉它，那些推送会静默变成「渠道缺失」，
     // 而用户以为自己只是删了一个没用的渠道。要说清是谁在引用。
     let refs: Vec<String> = routes_of(&snap)
         .iter()
@@ -6192,7 +6191,7 @@ async fn api_notifications_read(
     Ok(Json(json!({ "ok": true, "unread": unread })))
 }
 
-// ---------------------------------------------------------------- 界面包（第 265 轮）
+// ---------------------------------------------------------------- 界面包
 //
 // 这一组接口只干一件事：让「只改了前端」的改动不必重发整个二进制。
 // 装进来的东西是**静态资源**，所以：

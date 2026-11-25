@@ -1,4 +1,4 @@
-// WHATWG Compression Streams：`CompressionStream` / `DecompressionStream`（第 254 轮）
+// WHATWG Compression Streams：`CompressionStream` / `DecompressionStream`
 //
 // 面板侧补的：LLRT 有 `stream/web`（TransformStream / ReadableStream）和 `node:zlib`，
 // 但**没有**这两个标准类。这里把它们包出来，压缩本身交给原生 `__panelZlib`（Rust:
@@ -61,7 +61,7 @@
   function base64ToBytes(b64) {
     const clean = String(b64).replace(/[^A-Za-z0-9+/]/g, '');
     // 长度按「去掉 padding 后的字符数」推：n 个 base64 字符 = floor(n * 3 / 4) 字节。
-    // （先减 pad 再乘 3/4 会差 1 字节 —— 第 254 轮踩过：44 字节被解成 43，gzip 少了最后一字节）
+    // （先减 pad 再乘 3/4 会差 1 字节：44 字节被解成 43，gzip 少了最后一字节）
     const len = Math.floor((clean.length * 3) / 4);
     const out = new Uint8Array(len);
     let at = 0;

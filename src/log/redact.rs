@@ -18,7 +18,7 @@ const SECRET_KEYS: &[&str] = &[
     "ticket",
     "signature",
     "credential",
-    // 云厂商 / 网关的 API key 家族（2026-10 审计中4）。刻意写成完整词：
+    // 云厂商 / 网关的 API key 家族。刻意写成完整词：
     // 裸 `key` 会把 `keyword` / `key=value` 这类排查用的正常参数一并误伤。
     "api_key",
     "apikey",
@@ -124,7 +124,7 @@ pub fn redact(msg: &str) -> String {
 /// - 截断按 **UTF-8 边界**退让，绝不产生半个汉字（否则 JSONL 里就是乱码）。
 pub const MAX_MSG_BYTES: usize = 32 * 1024;
 
-/// 超长正文的尾巴。保留「原长」是为了排查时能判断「是内容就这么多，还是被我截了」。
+/// 超长正文的尾巴。保留「原长」是为了排查时能判断「是内容就这么多，还是被截断」。
 fn truncation_note(original_len: usize) -> String {
     format!("…（已截断，原长 {original_len} 字节）")
 }
@@ -191,7 +191,7 @@ fn push_masked(out: &mut Vec<char>) {
 
 /// 1) URL userinfo：`scheme://user:pass@host/x` → `scheme://***:***@host/x`。
 ///
-/// 审计中4：`https://alice:hunter2@host/x` 这种写法会把**账号和口令**原样留在
+/// `https://alice:hunter2@host/x` 这种写法会把**账号和口令**原样留在
 /// 盘上一周。`redact_kv` 看不见它（userinfo 里不一定有 `=`），`Bearer` 更不沾边。
 ///
 /// 判定刻意收紧到「RFC 3986 的 authority 段」：

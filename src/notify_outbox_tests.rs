@@ -5,7 +5,7 @@
 
 use super::*;
 
-/// 测试里造一条待入队的投递（第 186 轮：enqueue_all 收 Queued，不再收 (Channel, at)）。
+/// 测试里造一条待入队的投递（enqueue_all 收 Queued，不再收 (Channel, at)）。
 fn queued(ch: Channel, at: i64, title: &str) -> Queued {
     Queued {
         channel: ch,
@@ -222,7 +222,7 @@ async fn retry_resets_failed_rows_but_leaves_pending_alone() {
     assert_eq!(pnext, 99999999999999);
 }
 
-// ---------------------------------------------------------------- 一次写全（第 40 轮）
+// ---------------------------------------------------------------- 一次写全
 //
 // 一条通知配 N 个渠道，以前是 N 次 DB 往返。中途进程被杀 → 前面几个渠道有发件箱行、
 // 后面的没有，而铃铛里已经有这条通知了 —— 界面上「通知有了」，外部渠道却永远收不到，

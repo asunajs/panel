@@ -49,7 +49,7 @@ use crate::log::{Level, LogHub};
 ///
 /// 为什么不能只靠末尾那行 `remove`：`execute` 跑在 `tokio::spawn` 里，没人 await 它。
 /// panic 或任何提前 return 都会跳过末尾那行 —— 那个脚本从此永远「正在运行」，
-/// 再点就报「脚本 X 正在运行，等这次跑完」，而其实什么都没在跑（第 86 轮）。
+/// 再点就报「脚本 X 正在运行，等这次跑完」，而其实什么都没在跑。
 struct Flight(Arc<Mutex<HashSet<String>>>, String);
 
 impl Drop for Flight {
@@ -112,7 +112,7 @@ pub fn safe_name(name: &str) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !name.contains("..")
-        // 至少要有一个字母或数字（第 190 轮安全 review）："." / "..." / "___" 都过得了
+        // 至少要有一个字母或数字（安全 review）："." / "..." / "___" 都过得了
         // 上面那几条，但 dir.join(".") 就是**目录自己** —— 备份恢复里 remove_dir_all
         // 拿到它会一次清空整个 plugins/。名字本来就该有内容，收紧没有代价。
         && name.chars().any(|c| c.is_ascii_alphanumeric())
@@ -267,11 +267,11 @@ type ScriptRow = (
     Option<String>,
 );
 
-/// 新建/覆盖脚本时的元数据（第 212 轮，review A2：`save()` 原来 8 个参数）。
+/// 新建/覆盖脚本时的元数据（review A2：`save()` 原来 8 个参数）。
 ///
 /// 单独成结构体不只是为了过 clippy：调用方原来得数位置（第四个是 title、第五个是
 /// `Option<cron>`…），把它写成 `ScriptMeta { title, cron, ..manual(10_000) }`
-/// 之后，「我在改哪一项」在代码里是看得见的。
+/// 之后，「正在改哪一项」在代码里是看得见的。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptMeta {
     pub title: String,
@@ -385,7 +385,7 @@ impl Scripts {
     ///
     /// 为什么要有：脚本的**内容**在文件里，**排程**在库里，而 `list()` 只读库。
     /// 手写一个 `scripts/xx.py` 丢进去，面板里根本看不见 —— 用户会以为坏了
-    ///（第 27 轮做备份往返时发现：备份里 0 个脚本，因为那个文件从没被登记）。
+    ///（做备份往返时发现：备份里 0 个脚本，因为那个文件从没被登记）。
     ///
     /// 扩展名决定默认 runtime（`infer_runtime`），界面上随时可改；只补登记、
     /// 不动已有的行 —— 库里已经排好程的脚本不能被一次重启改掉。
@@ -556,7 +556,7 @@ impl Scripts {
             }
             match crate::fsx::move_path(&oldp, &newp).await {
                 Ok(()) => {
-                    // demo 是我们自己随面板发的示例：旧内容用 host-api（新模型跑不了），
+                    // demo 是随面板分发的示例：旧内容用 host-api（新模型跑不了），
                     // 搬完顺手换成纯 node 版。只认准这一条记录，用户脚本一个字节不碰。
                     if name == "demo-script.js" {
                         let old = tokio::fs::read_to_string(&newp).await.unwrap_or_default();
@@ -711,7 +711,7 @@ impl Scripts {
             ensure_exec(&p).await;
         }
         let title = sanitize_title(title)?;
-        // cron 在创建时就收下（第 19 轮的老坑回归过一次：传了 cron 被静默丢成
+        // cron 在创建时就收下（老坑回归过一次：传了 cron 被静默丢成
         // 「只手动跑」，用户在弹窗里填的计划凭空消失）。校验+算 next_at 归 insert_record。
         let cron = cron.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
         if let Some(expr) = &cron {

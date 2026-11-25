@@ -62,7 +62,7 @@ pub fn default_budget_ms() -> u64 {
     crate::config::budget_ms()
 }
 /// per-task 预算上限：90 分钟。20 分钟的任务要能跑，上限就不能卡在分钟级。
-/// 单次运行的上限（毫秒）。第 227 轮起**可配**：`run.budget_max_ms`，默认 90 分钟。
+/// 单次运行的上限（毫秒）。**可配**：`run.budget_max_ms`，默认 90 分钟。
 ///
 /// 为什么从常量改成函数：硬顶 90 分钟会逼插件把节奏压紧（`squeeze`），而「一个账号的任务
 /// 要跑很久」是真实需求。上限仍然是上限 —— 只是这个数该由用户定，不该写死在编译期。
@@ -126,7 +126,7 @@ fn cooldown_for(cfg: &TripConfig, trips: u32) -> ChronoDuration {
 ///
 /// `register_cron(..., {lead_ms})` 给的是插件的默认值，它不该盖住下次注册时插件
 /// 自己改过的值；`set_job_schedule({lead_ms})` 是人的决定，必须留住。
-/// 第 36 轮的 bug 就是没分这两种：注册值也被写库，于是「handler 先注册、cron 后注册」
+/// bug 就是没分这两种：注册值也被写库，于是「handler 先注册、cron 后注册」
 /// 这条最常见的写法里，cron 的 lead_ms 被库里那份 0 盖掉了。
 fn saved_lead(lead_override: bool, lead_ms: u64) -> Option<u64> {
     lead_override.then_some(lead_ms)
@@ -144,7 +144,7 @@ fn cancelled(error: &str) -> bool {
 /// 这次调用被**「现在不行，等会儿再来」**挡回去了（插件还在忙 / JS 通道满了）。
 ///
 /// 为什么要在 web 层分出来：这是**冲突**不是**请求写错了**，状态码该是 409 而不是 400。
-/// 客户端（或脚本）能靠状态码判断「过两秒重试」还是「我参数错了别重试」。
+/// 客户端（或脚本）能靠状态码判断「过两秒重试」还是「参数错了别重试」。
 pub fn is_busy_error(msg: &str) -> bool {
     msg.contains("还有任务在跑") || msg.contains("JS 执行通道已满") || msg.contains("运行队列满了")
 }
@@ -184,7 +184,7 @@ struct Task {
     cron: String,
     /// 插件注册时给的那条（用户改了计划也不动它，用来「恢复默认」）。
     base_cron: String,
-    /// 插件建议的预算（毫秒）。生效的是 budget_ms（第 180 轮）。
+    /// 插件建议的预算（毫秒）。生效的是 budget_ms。
     suggest_budget_ms: u64,
     /// 插件建议的提前量（毫秒）。
     suggest_lead_ms: u64,
@@ -202,7 +202,7 @@ struct Task {
     ///
     /// 为什么要分：插件热重载/重启时 `apply_saved` 会用库里的值盖掉注册值。如果注册值
     /// 也算「面板改过」，那 `register_cron(name, cron, budget, {lead_ms})` 给的提前量
-    /// 会被库里那份 0 盖掉 —— 第 36 轮实测：任务表里 lead=0、事件 early=false。
+    /// 会被库里那份 0 盖掉 —— 实测：任务表里 lead=0、事件 early=false。
     /// 所以只有面板改过的才写库、才在注册后盖回去。
     lead_override: bool,
     /// 注册时给的参数，派发时原样交给 handler 的 payload.params。
@@ -211,34 +211,34 @@ struct Task {
     schedule: Option<Schedule>,
     budget_ms: u64,
     enabled: bool,
-    /// 按需加载的**占位**任务（第 179 轮）：插件这次启动没加载，任务行是从库里搬来的。
+    /// 按需加载的**占位**任务：插件这次启动没加载，任务行是从库里搬来的。
     ///
     /// 它照样出现在任务表里（用户能看见、能暂停、能改计划），但不派发 —— 没有 JS 运行时，
     /// 派发只会炸。插件被唤醒/手动加载后，真正的 register_cron 会按同名替换掉它（lazy 归 false）。
     lazy: bool,
     /// 内部任务：注册了、能按名字跑（`/api/tasks/…/run` 带 params），但**不在任务页露面**。
-    /// 第 227 轮加的 —— 插件拿一次性调用当内部实现时，不该在任务页多出一行看不懂的东西。
+    /// 为什么有它：插件拿一次性调用当内部实现时，不该在任务页多出一行看不懂的东西。
     hidden: bool,
-    /// 注册时就声明「这条默认暂停」（第 227 轮）。内存态，不落库。
+    /// 注册时就声明「这条默认暂停」。内存态，不落库。
     ///
     /// 为什么需要：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，
     /// 两条队列**没有顺序保证** —— 插件里「先注册再暂停」实测会被注册那一下按库里的
     /// `enabled` 覆盖回来（央视频的 daily1 就这么漏成了「启用」）。
     /// 有了它，暂停和注册是同一个动作，天然有序；插件每次加载都会重新声明，所以不用落库。
     force_paused: bool,
-    /// 真正要调的 handler 名（第 227 轮）。None = 和任务名一样。
+    /// 真正要调的 handler 名。None = 和任务名一样。
     ///
     /// 为什么需要它：一次性调用的任务名要唯一（重名加 `#2`），但 handler 名是插件给的那个。
     /// 两者混在一起时，第二条 `run_once('one')` 会变成调 `one#2` —— 没有这个 handler，
-    /// 立刻失败（第 227 轮实测：三条调用 150ms 内全灭，任务页里干干净净，看着像「什么都没发生」）。
+    /// 立刻失败（实测：三条调用 150ms 内全灭，任务页里干干净净，看着像「什么都没发生」）。
     handler: Option<String>,
-    /// 一次性调用（第 227 轮）：由 `host.run_once` 排队后临时造出来的任务。
+    /// 一次性调用：由 `host.run_once` 排队后临时造出来的任务。
     ///
     /// 它**不落库**、不进任务页主表（`views()` 里带 `ephemeral: true`，前端归到折叠区），
     /// 跑完就从 `self.tasks` 里删掉 —— 「跑完自动删」。与 `lazy` 的区别：lazy 是「插件没装」，
     /// 这个是「本来就不该长期存在」。
     ephemeral: bool,
-    /// 用户删掉的时刻（第 178 轮）。None = 没删。
+    /// 用户删掉的时刻。None = 没删。
     ///
     /// 删掉不等于从库里抹掉：插件下次注册还会带上这条，没有墓碑的话它就会
     /// 「自己复活」—— 用户删三次复活三次。删除的任务仍在 self.tasks 里
@@ -294,7 +294,7 @@ fn skipped_beats(
     n
 }
 
-/// 按库里的行造一个「按需加载」的占位任务（第 179 轮的 lazy 行）。
+/// 按库里的行造一个「按需加载」的占位任务。
 ///
 /// 与真注册只差两件事：`lazy = true`（没有 JS 运行时，派发不了），以及
 /// **`base_cron` 来自插件建议**（`tasks.suggest_cron`）。
@@ -440,7 +440,7 @@ impl Task {
         }
     }
 
-    /// 一次性调用用的临时任务：没有 cron、不落库、跑完即删（第 227 轮）。
+    /// 一次性调用用的临时任务：没有 cron、不落库、跑完即删。
     fn ephemeral(
         plugin: String,
         name: String,
@@ -574,7 +574,7 @@ pub struct TaskView {
     pub cron: String,
     /// 用户改过的调度（None = 跟着插件注册的那条走）。
     pub cron_override: Option<String>,
-    /// 插件注册时给的那条，用来「恢复默认」（第 180 轮起 = 插件的建议）。
+    /// 插件注册时给的那条，用来「恢复默认」（ = 插件的建议）。
     pub cron_base: String,
     /// 插件建议的预算；和 budget_ms 不一样时可以提示「采纳建议」。
     pub suggest_budget_ms: u64,
@@ -613,7 +613,7 @@ pub struct TaskView {
     pub last_error: Option<String>,
 }
 
-/// 懒加载的起步数据（第 179 轮）：库里的任务行，插件这次启动不加载。
+/// 懒加载的起步数据：库里的任务行，插件这次启动不加载。
 ///
 /// 有了它，任务表在「插件没装进内存」时也能列出正确的计划、下次运行时间，
 /// 用户照样能暂停/改计划 —— 只是不能立刻执行（没有 JS 运行时）。
@@ -646,9 +646,9 @@ pub struct PluginView {
     pub has_web: bool,
     /// 侧栏入口（`host.sidebar({title, order})`）。`None` = 这个插件不要在侧栏出现。
     pub nav: Option<NavEntry>,
-    /// 因为空闲被卸载了（第 174 轮）：任务还在、界面还能开，但 JS 运行时不在内存里。
+    /// 因为空闲被卸载了：任务还在、界面还能开，但 JS 运行时不在内存里。
     pub unloaded: bool,
-    /// 启动时就没加载（第 179 轮「按需加载」）：下次到点前三分钟、或用户点「加载」时才装。
+    /// 启动时就没加载（「按需加载」）：下次到点前三分钟、或用户点「加载」时才装。
     pub lazy: bool,
 }
 
@@ -686,7 +686,7 @@ pub enum Cmd {
         adopt: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// 确保插件在内存里：不在就装回来，正在装的排队等它装完（第 188 轮）。
+    /// 确保插件在内存里：不在就装回来，正在装的排队等它装完。
     ///
     /// 这是「用到就装」的唯一入口：手动执行任务、插件界面的接口调用都先走它，
     /// 所以用户不再需要先去插件卡片上点「加载」。
@@ -701,9 +701,9 @@ pub enum Cmd {
     SetPluginsDir {
         dir: std::path::PathBuf,
     },
-    /// 空闲卸载的一拍（第 174 轮）：看一圈谁闲着，把它的 JS 运行时收掉。
+    /// 空闲卸载的一拍：看一圈谁闲着，把它的 JS 运行时收掉。
     IdleTick { reply: oneshot::Sender<usize> },
-    /// 插件级「暂停 / 恢复」（第 167 轮）：不卸载，只是不再触发它的定时任务。
+    /// 插件级「暂停 / 恢复」：不卸载，只是不再触发它的定时任务。
     /// 落库（plugins.suspended），所以重启后仍记得。
     SetSuspended {
         name: String,
@@ -713,12 +713,12 @@ pub enum Cmd {
     RunNow {
         plugin: String,
         task: String,
-        /// 这一次的 params 覆盖（第 227 轮）：界面「只跑这个号」靠它，
+        /// 这一次的 params 覆盖：界面「只跑这个号」靠它，
         /// 不用给每个账号各注册一条任务。None = 用任务注册时的 params。
         params: Option<Json>,
         reply: oneshot::Sender<Result<StartOutcome, String>>,
     },
-    /// 插件的一次性调用（第 227 轮）：`host.run_once` 走这条 —— 入队，执行位空出来就跑。
+    /// 插件的一次性调用：`host.run_once` 走这条 —— 入队，执行位空出来就跑。
     SpawnOnce {
         plugin: String,
         name: String,
@@ -783,14 +783,14 @@ pub enum Cmd {
         enabled: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// 启动时按需加载：把没加载的插件的任务行塞进任务表（第 179 轮）。
+    /// 启动时按需加载：把没加载的插件的任务行塞进任务表。
     SeedLazy {
         tasks: Vec<LazyTask>,
         /// 连任务行都没有的插件（只有 handler）：也要列在界面里，否则会「凭空消失」
         names: Vec<String>,
         reply: oneshot::Sender<usize>,
     },
-    /// 用户删任务（第 178 轮）：打墓碑，不抹库。
+    /// 用户删任务：打墓碑，不抹库。
     DeleteTask {
         plugin: String,
         task: String,
@@ -890,7 +890,7 @@ impl Scheduler {
         rx.await.unwrap_or(0)
     }
 
-    /// 安装 / 重装：这次加载要**采纳**插件给的 cron 建议（第 180 轮）。
+    /// 安装 / 重装：这次加载要**采纳**插件给的 cron 建议。
     ///
     /// 和普通 load 的区别只有一个：adopt_mode 置上。注册消息和 Loaded 走同一个
     /// 串行通道，注册一定先到，所以采纳一定生效；Loaded（成功或失败）会把它清掉。
@@ -909,7 +909,7 @@ impl Scheduler {
         self.load_adopt(name, source, false).await
     }
 
-    /// 确保插件在内存里（不在就装回来）。第 188 轮「用到就装」的入口。
+    /// 确保插件在内存里（不在就装回来）。「用到就装」的入口。
     ///
     /// 手动执行任务、插件界面的接口调用都先走它 —— 用户不该为了点一下界面
     /// 先去插件卡片上按「加载」。
@@ -1007,7 +1007,7 @@ impl Scheduler {
     }
 
     /// 手动跑一次。执行位被占就**排队**（返回 `Queued { position }`），不再 409。
-    /// 手动跑一次。`params` 是这一次的覆盖（界面「只跑这个号」靠它，第 227 轮）：
+    /// 手动跑一次。`params` 是这一次的覆盖（界面「只跑这个号」靠它）：
     /// 同一个 handler 换参数跑，不必给每个账号各注册一条任务。`None` = 用任务注册时的 params。
     pub async fn run_now(
         &self,
@@ -1025,7 +1025,7 @@ impl Scheduler {
         .await?
     }
 
-    /// 插件的一次性调用：入队，执行位空出来就跑，跑完自动删（第 227 轮）。
+    /// 插件的一次性调用：入队，执行位空出来就跑，跑完自动删。
     pub async fn spawn_once(
         &self,
         plugin: &str,
@@ -1068,7 +1068,7 @@ impl Scheduler {
     }
 
 
-    /// 启动时按需加载：把「这次没加载」的插件的任务行交给调度器（第 179 轮）。
+    /// 启动时按需加载：把「这次没加载」的插件的任务行交给调度器。
     ///
     /// 返回塞进去多少条。插件本体不加载，等下次到点前三分钟或用户点「加载」。
     pub async fn seed_lazy(&self, tasks: Vec<LazyTask>, names: Vec<String>) -> usize {
@@ -1194,7 +1194,7 @@ pub const IDLE_UNLOAD_DEFAULT_SECS: i64 = 1800;
 /// 按需加载的插件「补跑」窗口：库里记着的那一拍**已经过去**，但只要没过这么久，
 /// 装回来后照样补跑一次（而不是顺延到下一拍）。
 ///
-/// 为什么要有补跑（第 220 轮，用户 2026-11-17 报「8 点没跑」）：唤醒是「到点前 3 分钟」，
+/// 为什么要有补跑（用户 2026-11-17 报「8 点没跑」）：唤醒是「到点前 3 分钟」，
 /// 进程被冻结、机器休眠、或者唤醒那一步卡住时，醒来时那一拍已经过期。
 ///
 /// 注意这**不是**「省内存 vs 跑任务」的取舍 —— 旧面板闲时 JS 内存也是 0（运行时照卸），
@@ -1247,7 +1247,7 @@ pub fn catch_up_at(saved_ms: i64, now_ms: i64) -> Option<i64> {
 
 /// 一个插件同时只有一个 JS 执行位（`Loaded::busy`）。忙的时候来的 HTTP 请求先**排队**：
 /// 插件界面里两个请求挨着发（`Promise.all`）是极常见的写法，直接 502 会让人以为
-/// 「有任务在跑」—— 其实是自己撞自己（第 142 轮，pitfalls 89）。
+/// 「有任务在跑」—— 其实是自己撞自己（pitfalls 89）。
 const WEB_QUEUE_MS: u64 = 8_000;
 /// 排队上限：超过就不排了，直接失败。队列是给「并发两三个」用的，不是无限缓冲。
 const WEB_QUEUE_MAX: usize = 16;
@@ -1274,12 +1274,12 @@ struct Loaded {
     /// 新的又装不回来 —— 插件直接消失。有了这份就能把上一个能跑的版本装回去。
     /// 代价是每插件多存一份源码（几 KB）。
     source: String,
-    /// 最后一次「有事发生」的时刻（ms）：加载、跑任务、被 web 调用（第 174 轮）。
+    /// 最后一次「有事发生」的时刻（ms）：加载、跑任务、被 web 调用。
     /// 空闲卸载只看它 —— 用运行记录去猜太贵，也不准。
     last_active: i64,
 }
 
-/// 排队中的一次运行（第 227 轮）。
+/// 排队中的一次运行。
 ///
 /// 为什么要有队列：一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。以前第二个请求
 /// 直接被拒（409「还有任务在跑，本次跳过」），用户点了没反应；现在**默认排队**，执行位空出来
@@ -1338,21 +1338,21 @@ pub enum StartOutcome {
 }
 
 struct Inner {
-    /// 数据目录：插件自己的配置在 <data_dir>/plugin-data/<name>/config.json（第 89 轮）。
+    /// 数据目录：插件自己的配置在 <data_dir>/plugin-data/<name>/config.json。
     data_dir: std::path::PathBuf,
     /// 声明了自带路由的插件名（`register_web`）。注册发生在**加载期**，
     /// 那时插件还没进 `plugins` 表，所以单独记一份。
-    /// 被「暂停」的插件（第 167 轮）：定时任务一律不触发，但插件照样在、界面照样能开。
+    /// 被「暂停」的插件：定时任务一律不触发，但插件照样在、界面照样能开。
     /// 与 plugins / tasks 无关 —— 暂停是调度层的事，不动任务自己的 enabled。
     suspended: std::collections::HashSet<String>,
     web: std::collections::HashSet<String>,
-    /// 侧栏入口：插件名 → 入口（第 139 轮）
+    /// 侧栏入口：插件名 → 入口
     sidebar: std::collections::HashMap<String, NavEntry>,
-    /// 等执行位的 web 调用（插件名 → 队列，第 142 轮）
+    /// 等执行位的 web 调用（插件名 → 队列）
     web_q: std::collections::HashMap<String, std::collections::VecDeque<QueuedWeb>>,
     /// 排队编号（单调递增，只用来认领超时）
     next_qid: u64,
-    /// 排队等执行位的**运行**（插件名 → 队列，第 227 轮）。手动执行、插件的一次性调用都进这里。
+    /// 排队等执行位的**运行**（插件名 → 队列）。手动执行、插件的一次性调用都进这里。
     pending: HashMap<String, std::collections::VecDeque<PendingRun>>,
     /// 一次性调用的名字序号（只增不减）。
     ///
@@ -1369,10 +1369,10 @@ struct Inner {
     log: LogHub,
     cfg: TripConfig,
     plugins: HashMap<String, Loaded>,
-    /// 因为**空闲**被卸载的插件（第 174 轮）：名字 → 卸载时刻。
+    /// 因为**空闲**被卸载的插件：名字 → 卸载时刻。
     /// 与「接口坏了的卸载」不同：这里的任务、侧栏、web 路由都留着，随时能装回来。
     unloaded: HashMap<String, i64>,
-    /// 启动时**没加载**的插件（第 179 轮「按需加载」）。它们也在 unloaded 里，
+    /// 启动时**没加载**的插件（「按需加载」）。它们也在 unloaded 里，
     /// 这里单独记一份是为了让界面能区分「闲下来被卸了」和「一开始就没装」。
     lazy: std::collections::HashSet<String>,
     /// 插件目录：空闲卸载后要能从磁盘把源码读回来。
@@ -1381,15 +1381,15 @@ struct Inner {
     waking: std::collections::HashSet<String>,
     /// 「到点了但插件还没装回来」的那一拍（任务键 → 该拍的触发时刻）。
     ///
-    /// 第 220 轮：按需加载的插件醒来时那一拍往往已经过去，注册时恢复 `next_at` 依赖
+    /// 按需加载的插件醒来时那一拍往往已经过去，注册时恢复 `next_at` 依赖
     /// 库里那份快照，遇到「注册比 Loaded 先到 / 后到」两种顺序会走出不同结果 —— 实测
     /// 同样的场景一次补跑成功、一次被吃掉。所以单独记一份：只要这一拍是「该跑没跑」，
     /// 装回来后**一定**把它排回队首，不再靠快照猜。
     missed: std::collections::HashMap<(String, String), i64>,
-    /// 等某个插件装完的调用方（第 188 轮）：ensure_loaded 的 reply，
+    /// 等某个插件装完的调用方：ensure_loaded 的 reply，
     /// Loaded（成功或失败）时一起放行 —— 两条通道，谁先到都得有个交代。
     waiters: std::collections::HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
-    /// 本次 load 是「安装 / 重装」吗（第 180 轮）：是的话插件给的 cron 建议会被采纳。
+    /// 本次 load 是「安装 / 重装」吗：是的话插件给的 cron 建议会被采纳。
     /// Loaded（无论成败）后就清掉，避免之后动态 register_cron 也去采纳。
     adopt_mode: std::collections::HashSet<String>,
     tasks: Vec<Task>,
@@ -1401,7 +1401,7 @@ struct Inner {
     /// 任务状态的**串行**写通道。
     ///
     /// 为什么不是每次 `tokio::spawn` 一个写：两次注册挨着发生（handler 先、cron 后，
-    /// 最常见的写法）时，两个写任务谁先落库是不确定的 —— 第 37 轮实测库里留下了
+    /// 最常见的写法）时，两个写任务谁先落库是不确定的 —— 实测库里留下了
     /// 「cron 空、budget=默认值」的**旧版本**那一行，重启后 `enabled=true` 会把用户
     /// 暂停过的任务重新打开。串行通道保证「谁先调用谁先落库」。
     persist: mpsc::UnboundedSender<PersistJob>,
@@ -1421,7 +1421,7 @@ struct PersistJob {
     lead: Option<i64>,
     /// NULL = 没删；有值 = 删除时刻（毫秒）。
     deleted_at: Option<i64>,
-    /// 插件最近一次的建议（第 180 轮）：重载/重启靠它判断「建议变没变」。
+    /// 插件最近一次的建议：重载/重启靠它判断「建议变没变」。
     suggest_cron: String,
     suggest_budget_ms: i64,
     suggest_lead_ms: i64,
@@ -1465,7 +1465,7 @@ pub fn start(
         config,
         persist: persist_tx,
     };
-    // 空闲卸载的一拍（第 174 轮）：每 30 秒看一圈谁闲着。
+    // 空闲卸载的一拍：每 30 秒看一圈谁闲着。
     // 默认 30 分钟（`IDLE_UNLOAD_DEFAULT_SECS`）；配置里写 0 才是关。
     {
         let itx = tx.clone();
@@ -1520,7 +1520,7 @@ pub fn start(
         inner.saved = load_saved(&inner.db).await;
         // 上一圈看到的「现在」：用来发现系统时钟往回跳（见 clock_went_back）。
         let mut last_now = Local::now();
-        // 到点时刻是**绝对**的，而且只缩不涨（第 180 轮修）。
+        // 到点时刻是**绝对**的，而且只缩不涨（修）。
         //
         // 原来每圈都新建一个定时器（sleep(sleep_hint(now))）：只要 30 秒里来一批命令
         // （空闲卸载的 ticker 就是每 30 秒一次），定时器就被重置；而「没有已加载任务」时
@@ -1584,7 +1584,7 @@ impl Task {
     }
 }
 
-/// 启动时能不能省掉这次加载（第 179 轮「按需加载」）。
+/// 启动时能不能省掉这次加载（「按需加载」）。
 ///
 /// 判据两条，缺一不可：
 ///   ① 这个插件**没有界面**（上次加载时既没 register_web 也没 sidebar）——
@@ -1619,9 +1619,9 @@ struct SavedTask {
     lead_ms: Option<u64>,
     /// 用户删过这条（毫秒时间戳）。注册时必须尊重它，否则插件一注册就「复活」。
     deleted_at: Option<i64>,
-    /// 库里记着的下一次到点（毫秒）。占位任务被重建时用它，别重算（第 180 轮）。
+    /// 库里记着的下一次到点（毫秒）。占位任务被重建时用它，别重算。
     next_at: Option<i64>,
-    /// 插件上一次的建议（第 180 轮）。
+    /// 插件上一次的建议。
     suggest_cron: String,
     suggest_budget_ms: u64,
     suggest_lead_ms: u64,
@@ -1835,7 +1835,7 @@ impl Inner {
                         // 占位任务里没有被真正 register_cron 顶掉的，说明插件已经不注册它了
                         // （改了名字、删了任务）：留着会让任务表显示不存在的东西。
                         self.tasks.retain(|t| !(t.plugin == name && t.lazy));
-                        // 迟到唤醒：把「该跑没跑」的那一拍排回队首（第 220 轮）。
+                        // 迟到唤醒：把「该跑没跑」的那一拍排回队首。
                         // 注册可能比这条 Loaded 先到、已经按「现在」把 next_fire 重算成下一拍；
                         // 也可能后到，走 register 里的那条路。两边都调一次，谁先到都不丢。
                         for i in 0..self.tasks.len() {
@@ -1845,7 +1845,7 @@ impl Inner {
                         }
                         // 记下「这个插件有没有界面」：下次启动据此决定要不要省这一次加载
                         self.note_surface_async(&name);
-                        // 记下指纹（第 224 轮）：扫描要能回答「改没改」。以前只在
+                        // 记下指纹：扫描要能回答「改没改」。以前只在
                         // load_all / enable / reload / save 里记，**用到就装**和**闲时唤醒**
                         // 这两条路装回来的插件永远没有指纹 —— 扫描就一直报它「新增」，
                         // 而它其实一直在跑（用户：这三个是老插件）。
@@ -1853,7 +1853,7 @@ impl Inner {
                         // 到点了就把这一拍跑掉（插件刚装回来）—— 见 run_overdue_of
                         let n = name.clone();
                         self.run_overdue_of(&n).await;
-                        // 队列里等着的运行（插件刚装回来）也接着跑（第 227 轮）
+                        // 队列里等着的运行（插件刚装回来）也接着跑
                         self.pump(&n).await;
                         Ok(())
                     }
@@ -1950,7 +1950,7 @@ impl Inner {
                 // **不删** tasks 里的行：那是「人的改动」（暂停/摘要/blockers/调度覆盖/提前量），
                 // 卸下插件不该把它抹掉 —— 重载/再启用之后还要靠它恢复。
                 // 代价：插件被删掉后留下几行孤儿（只在注册时被读，没有副作用）。
-                // 第 37 轮实测：原来在这里 DELETE，于是「重载」等于「清空这个插件的所有设置」。
+                // 实测：原来在这里 DELETE，于是「重载」等于「清空这个插件的所有设置」。
             }
             Cmd::Tasks { reply } => {
                 let _ = reply.send(self.views());
@@ -2012,7 +2012,7 @@ impl Inner {
                     self.start_web(plugin, handler, evt, budget_ms, reply);
                     return;
                 }
-                // 忙：**短排队**（第 142 轮）。原来这里直接 502，于是插件界面把两个请求
+                // 忙：**短排队**。原来这里直接 502，于是插件界面把两个请求
                 // 并发发出来（`Promise.all`）必有一个失败 —— 用户看到的是「正忙」，
                 // 而占着执行位的可能只是它自己的上一个请求。
                 let full = self
@@ -2078,7 +2078,7 @@ impl Inner {
                             }
                             // 和 register_cron 一个口径：超上限**报错**，不静默截断。
                             // 静默截断的话，插件以为「提前了两小时」，实际只有一小时，
-                            // 而日志里一个字都不会有 —— 这种「悄悄改了你的参数」最难查。
+                            // 而日志里一个字都不会有 —— 这种「悄悄改了调用方参数」最难查。
                             if let Some(l) = lead_ms {
                                 if l > LEAD_MAX_MS {
                                     return Err(format!(
@@ -2158,9 +2158,9 @@ impl Inner {
                 if let Some(l) = self.plugins.get_mut(&plugin) {
                     l.busy = false;
                 }
-                // 执行位空出来了：把排队的那个派出去（第 142 轮）
+                // 执行位空出来了：把排队的那个派出去
                 self.pump_web(&plugin);
-                // 插件可能在这次 web 调用里 `run_once` 了一把（第 227 轮）——
+                // 插件可能在这次 web 调用里 `run_once` 了一把——
                 // 执行位刚空出来，正好接着跑。不在这里放行的话，要等到下一次
                 // fire_due（最长 60 秒）才会动，用户看到的是「点了没反应」。
                 self.pump(&plugin).await;
@@ -2202,7 +2202,7 @@ impl Inner {
                     )));
                 }
                 Some(i) => {
-                    // 执行位被占 → **排队**（第 227 轮）。以前这里直接 409「本次跳过」，
+                    // 执行位被占 → **排队**。以前这里直接 409「本次跳过」，
                     // 用户点了没反应；现在排上队，位置回给界面。
                     if self.plugins.get(&plugin).map(|l| l.busy).unwrap_or(true) {
                         let now = Local::now().timestamp_millis();
@@ -2373,13 +2373,13 @@ impl Inner {
                 error,
             } => {
                 self.finish(&plugin, &task, run_id, error);
-                // 执行位空出来了：队列里的下一条接着跑（第 227 轮）
+                // 执行位空出来了：队列里的下一条接着跑
                 self.pump(&plugin).await;
             }
         }
     }
 
-    // ---------------------------------------------------------------- 运行队列（第 227 轮）
+    // ---------------------------------------------------------------- 运行队列
     //
     // 一个插件只有一个执行位（一个 `AsyncContext`，不能重入）。所以「同时要跑两条」这件事
     // 只能排队 —— 以前是直接拒（409「还有任务在跑，本次跳过」），用户点了像没反应。
@@ -2521,13 +2521,13 @@ impl Inner {
     fn views(&self) -> Vec<TaskView> {
         self.tasks
             .iter()
-            // 内部任务不露面（第 227 轮）：插件用一次性调用当内部实现时，任务页不该多一行
+            // 内部任务不露面：插件用一次性调用当内部实现时，任务页不该多一行
             .filter(|t| !t.hidden)
             .map(|t| TaskView {
                 plugin: t.plugin.clone(),
                 name: t.name.clone(),
                 cron: t.cron.clone(),
-                // 第 180 轮：cron 是面板的，override 由「和插件的建议不一样」推导，
+                // cron 是面板的，override 由「和插件的建议不一样」推导，
                 // 不再单独存一份（存两份迟早对不上）。
                 cron_override: if t.cron != t.base_cron && !t.base_cron.is_empty() {
                     Some(t.cron.clone())
@@ -2574,7 +2574,7 @@ impl Inner {
 
     /// 装载。`source` 给了就直接用（安装 / 保存那条路，源码在手）；没给就从磁盘读。
     ///
-    /// **读盘不在 actor 里**（第 190 轮性能 review）：1MB 的插件、或者数据目录挂在
+    /// **读盘不在 actor 里**（性能 review）：1MB 的插件、或者数据目录挂在
     /// NAS / 移动盘上，一次 read 就是几毫秒到几十毫秒 —— 这段时间整个调度循环停摆，
     /// 所有 /api/state、到点派发、界面接口全排队。所以「读源码」和「是不是目录式插件」
     /// 那两个 stat 都挪进下面已经 spawn 出去的加载任务（spawn_blocking）。
@@ -2586,7 +2586,7 @@ impl Inner {
         reply: oneshot::Sender<Result<(), String>>,
     ) {
         // 采纳模式在**加载开始时**定死：注册消息和 Loaded 是两条通道，谁先被处理不确定，
-        // 在 Loaded 里清会让「后到的注册」看不到采纳标记（第 180 轮踩到：安装后任务成了待采纳）。
+        // 在 Loaded 里清会让「后到的注册」看不到采纳标记（踩到：安装后任务成了待采纳）。
         if adopt {
             self.adopt_mode.insert(name.clone());
         } else {
@@ -2615,7 +2615,7 @@ impl Inner {
             // （相对 import 的根）和 host（host.plugin_dir()）；单文件插件是 None。
             let (source, root) = match (source, dir) {
                 (Some(src), dir) => {
-                    // 模块根统一走 module_root（第 269 轮）：以前 `dir.join(&name)`，
+                    // 模块根统一走 module_root：以前 `dir.join(&name)`，
                     // 老形态恰好相等；收拢形状 / 一包多插件时属地不是 `<name>/`。
                     let d2 = match dir.clone() {
                         Some(d) => d,
@@ -2633,7 +2633,7 @@ impl Inner {
                     let n = name.clone();
                     let d2 = d.clone();
                     let got = tokio::task::spawn_blocking(move || {
-                        // 模块根与 read_source 用同一个函数（第 269 轮）：以前这里
+                        // 模块根与 read_source 用同一个函数：以前这里
                         // 是 `d.join(&name)`，老形态恰好相等、收拢形状就错了 ——
                         // mcloud-daily 的根该是 `mcloud/mcloud-daily/`，不是 `mcloud/`。
                         crate::pluginfs::read_source(&d2, &n).map_err(|e| e.to_string())
@@ -2755,9 +2755,9 @@ impl Inner {
         } else {
             s.enabled
         };
-        // 墓碑优先于插件注册：用户删过的任务，插件再注册也不复活（第 178 轮）
+        // 墓碑优先于插件注册：用户删过的任务，插件再注册也不复活
         self.tasks[i].deleted_at = s.deleted_at;
-        // 第 180 轮：库里的「建议」和「待采纳」也认 —— 重启后没加载插件时靠它们显示
+        // 库里的「建议」和「待采纳」也认 —— 重启后没加载插件时靠它们显示
         if !s.suggest_cron.is_empty() {
             self.tasks[i].base_cron = s.suggest_cron.clone();
         }
@@ -2809,7 +2809,7 @@ impl Inner {
     ///
     /// 为什么注册时就要写：Loaded 和 Registration::Web/Sidebar 是两条独立的消息，
     /// 谁先到不确定。只在 Loaded 时写，会记下 has_web=0 —— 下次启动就把有界面的插件
-    /// 也当成「可以省」的省掉了（第 179 轮实测：第二次启动 uiface 直接不见了）。
+    /// 也当成「可以省」的省掉了（实测：第二次启动 uiface 直接不见了）。
     /// 记下这个插件在磁盘上的指纹（给「扫描插件目录」用）。IO 挪出调度循环。
     fn note_fingerprint_async(&self, name: &str) {
         let Some(dir) = self.plugins_dir.clone() else {
@@ -2918,7 +2918,7 @@ impl Inner {
             return;
         }
         // 读盘交给加载任务（读不到会走 Loaded 的 Err 分支）——actor 只发命令，
-        // 别为了一个文件的 read 让整个调度循环停摆（第 190 轮性能 review）。
+        // 别为了一个文件的 read 让整个调度循环停摆（性能 review）。
                 self.waking.insert(name.to_string());
                 let (tx, rx) = oneshot::channel();
         self.spawn_load(name.to_string(), None, false, tx);
@@ -2946,7 +2946,7 @@ impl Inner {
                 params,
                 lead_ms,
             } => {
-                // 第 180 轮：cron 归面板所有，插件这里只是**建议**。
+                // cron 归面板所有，插件这里只是**建议**。
                 //
                 // 采纳只发生在「安装 / 重装」（adopt_mode），重载与重启一律只更新建议 ——
                 // 否则用户改过的计划会在每次重启后被插件改回去。
@@ -2975,7 +2975,7 @@ impl Inner {
                         self.tasks[i].suggest_lead_ms = lead_ms;
                         // 参数只能由插件给（是运行时 payload，不是配置）
                         self.tasks[i].params = params;
-                        // 第 220 轮：占位任务被「迟到唤醒」时，库里那拍可能已经过去。
+                        // 占位任务被「迟到唤醒」时，库里那拍可能已经过去。
                         // next_fire 保持不动（下面不重算），但 base_fire 要跟着挪到同一刻 ——
                         // advance 是从 base_fire 往前推的，不挪的话跑完这一次会从未来的 base
                         // 再推，白白跳掉下一拍。
@@ -2983,14 +2983,14 @@ impl Inner {
                             self.tasks[i].base_fire = self.tasks[i].next_fire;
                         }
                         // 真家伙来了：占位标记必须清掉，否则 Loaded 会把这条当「没被注册的
-                        // 占位任务」删掉，任务就凭空消失了（第 180 轮实测：唤醒后任务不见）。
+                        // 占位任务」删掉，任务就凭空消失了（实测：唤醒后任务不见）。
                         // 注意这里**不重算 next_fire**：库里的下一次到点是准的，
                         // @every 这种按间隔算的表达式重算会把它推到下一个周期（漏跑一次）。
                         self.tasks[i].lazy = false;
                         // 「手动任务」的占位（同名的 register_handler 在同一次加载里先到，
                         // 或者占位任务被 Loaded 清掉后 handler 重建了一个）没有调度，
                         // next_fire 是指向 365 天后的假值 —— 这种必须由这条注册把调度装上，
-                        // 否则任务永远不会跑（第 180 轮实测：唤醒后任务挂在 2027 年）。
+                        // 否则任务永远不会跑（实测：唤醒后任务挂在 2027 年）。
                         if adopt || was_manual {
                             self.adopt_suggestion(i);
                             // 占位/手动任务：库里的下一次到点还是准的，别重算掉那一拍
@@ -3046,7 +3046,7 @@ impl Inner {
                         // 库里记着的下一次到点优先：占位任务在 Loaded 里被清掉、
                         // 注册又晚到时会走到这儿，这时重算会把 @every 推到下一个周期 → 漏跑一拍。
                         //
-                        // 第 220 轮：**已经过去的那一拍也恢复**（catch_up_at）。以前这里只认
+                        // **已经过去的那一拍也恢复**（catch_up_at）。以前这里只认
                         // 「还没到」的时刻，于是按需加载的插件被唤醒晚了就静默丢一拍：
                         // 既不跑也不说，next 顺延，用户只看到「昨天跑了、今天没跑」。
                         let saved_next = self
@@ -3109,7 +3109,7 @@ impl Inner {
                         self.tasks[i].hidden = true;
                     }
                 }
-                // 第 227 轮：注册时就能说「这条默认暂停」（见 Task.force_paused 的注释）。
+                // 注册时就能说「这条默认暂停」（见 Task.force_paused 的注释）。
                 if paused {
                     if let Some(i) = self.find(&plugin, &name) {
                         self.tasks[i].force_paused = true;
@@ -3131,7 +3131,7 @@ impl Inner {
                     // ⚠ 这里**不能** persist_task：它会 `remember`，把内存里 saved 的那份
                     // 用户状态（暂停/摘要/blockers/调度覆盖/提前量）换成刚建出来的默认值。
                     // 随后同名 register_cron 的 apply_saved 就读不回来了 ——
-                    // 第 37 轮实测：热重载后暂停被恢复成「启用」、调度覆盖和摘要全丢。
+                    // 实测：热重载后暂停被恢复成「启用」、调度覆盖和摘要全丢。
                     // 手动任务本身不需要落库：它的状态是靠 set_job_* 落库的。
                 }
             }
@@ -3206,7 +3206,7 @@ impl Inner {
     }
     /// 读配置里的空闲卸载秒数（0 = 关）。热生效：每一拍都重读，改配置不用重启。
     ///
-    /// 第 188 轮之前默认 0（关）：那时界面插件本来就不在卸载范围内，开着也只是
+    /// 之前默认 0（关）：那时界面插件本来就不在卸载范围内，开着也只是
     /// 卸掉不带界面的，收益小、风险大。现在「用到就装」补齐了（ensure_loaded），
     /// 卸掉谁都能自动回来，所以默认改 30 分钟 —— 内存是面板最贵的资源，
     /// 一个每天跑两次的插件没有理由 24 小时占着 JS 运行时。
@@ -3219,7 +3219,7 @@ impl Inner {
             .unwrap_or(IDLE_UNLOAD_DEFAULT_SECS)
     }
 
-    /// 一拍空闲检查（第 174 轮）。返回这一拍卸掉了几个。
+    /// 一拍空闲检查。返回这一拍卸掉了几个。
     fn idle_tick(&mut self) -> usize {
         let idle = self.idle_unload_secs();
         if idle <= 0 {
@@ -3229,12 +3229,12 @@ impl Inner {
         let names: Vec<String> = self.plugins.keys().cloned().collect();
         let mut n = 0;
         for name in names {
-            // 第 188 轮：**有界面的插件也卸**。以前这里跳过 web/sidebar ——
+            // **有界面的插件也卸**。以前这里跳过 web/sidebar ——
             // 结果「闲时卸载」只对不带界面的插件生效，而占内存的恰恰是带界面的那几个。
             // 现在界面打开、接口调用都会走 ensure_loaded 自动装回来（静态文件照常从磁盘发，
             // 首屏不受影响），所以卸掉是安全的。
             //
-            // 第 189 轮：暂停的**也卸**。原来说「暂停 = 随时要用界面，只是别跑定时」，
+            // 暂停的**也卸**。原来说「暂停 = 随时要用界面，只是别跑定时」，
             // 那是 ensure_loaded 之前的顾虑 —— 现在界面一调用就自动装回来，暂停不需要
             // 豁免（3030 上 shop 就是被这个例外钉在内存里的）。
             // 暂停插件的任务本来就不跑，它的 next_due 不该算进来（见下面的过滤）。
@@ -3266,7 +3266,7 @@ impl Inner {
             self.plugins.remove(&name);
             self.unloaded.insert(name.clone(), now);
             n += 1;
-            // debug（第 255 轮）：用户看到的就是「同一句话一天刷好几遍」，而它回答的是
+            // debug：用户看到的就是「同一句话一天刷好几遍」，而它回答的是
             // 「为什么现在没装」—— 排查时要点开 debug 才看，平时别占 info 的地。
             self.log.emit(
                 &name,
@@ -3329,7 +3329,7 @@ impl Inner {
             if next > now_ms + IDLE_WAKE_WINDOW_MS {
                 continue;
             }
-            // 读盘在加载任务里做（第 190 轮：actor 不碰文件 IO）。失败会走
+            // 读盘在加载任务里做（actor 不碰文件 IO）。失败会走
             // Loaded 的 Err 分支，那里的错误日志和下面这个接收端都会喊。
                     self.waking.insert(name.clone());
             // 唤醒装载用的 reply 以前是**没人收**的（let (tx, _rx)）：装失败时
@@ -3359,9 +3359,9 @@ impl Inner {
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {
-        // 先把快到点的、已卸载的插件装回来（第 174 轮）。提前 3 分钟，够它读文件 + 跑顶层代码。
+        // 先把快到点的、已卸载的插件装回来。提前 3 分钟，够它读文件 + 跑顶层代码。
         self.wake_unloaded(now);
-        // 按需加载的任务：到点了插件还是没装回来 —— **必须说出来**（第 220 轮）。
+        // 按需加载的任务：到点了插件还是没装回来 —— **必须说出来**。
         // 正常情况 wake_unloaded 已经在窗口里把它装回来了；走到这里说明装失败/卡住了。
         // 以前这种任务是静默的：不跑、不记、next 顺延，用户只看到「今天怎么没跑」。
         for i in 0..self.tasks.len() {
@@ -3537,7 +3537,7 @@ impl Inner {
     /// 为什么不是「全塞进 spawn」：建记录要 await 数据库，回包要唤醒 HTTP handler；
     /// 如果这些都在 spawned 任务里做，回包会把 handler 唤醒到**当前 worker 的 LIFO 槽位**，
     /// 而这个 worker 紧接着被 `while(true){}` 占住 —— handler 也跟着卡住。
-    /// 第 35 轮实测：手动点「运行」在 JS 跑完（30s）之后才收到响应，界面看起来像卡死。
+    /// 实测：手动点「运行」在 JS 跑完（30s）之后才收到响应，界面看起来像卡死。
     async fn dispatch(
         &mut self,
         idx: usize,
@@ -3629,7 +3629,7 @@ impl Inner {
             // 排队时 run 记录已经存在，界面上看得出「这条在等」，不是一片空白。
             //
             // 没有这道闸会怎样：10 核机器 12 个死循环 handler 能把 10 个 worker 全占满
-            // 30 秒，`/api/state` 直接连不上（第 35 轮实测）。
+            // 30 秒，`/api/state` 直接连不上（实测）。
             let slot = match manual_slot {
                 Some(p) => p,
                 None => match crate::jsslots::try_acquire() {
@@ -3670,7 +3670,7 @@ impl Inner {
                 "run_id": run_id,
                 // 注册时给的参数原样交回；没给是 null（JSON 里没有 undefined）。
                 "params": params,
-                // 提前唤醒（lead_ms）时为 true：插件据此知道「还没到点，是让我先准备」。
+                // 提前唤醒（lead_ms）时为 true：插件据此知道「还没到点，是让插件先准备」。
                 "early": early,
                 "lead_ms": lead_ms
             });
@@ -3749,7 +3749,7 @@ impl Inner {
         if let Some(l) = self.plugins.get_mut(plugin) {
             l.busy = false;
         }
-        // 任务跑完，执行位空出来了：界面那边排着的请求可以走了（第 142 轮）
+        // 任务跑完，执行位空出来了：界面那边排着的请求可以走了
         self.pump_web(plugin);
         let now = Local::now();
         let was_tripped = self
@@ -3773,7 +3773,7 @@ impl Inner {
         if let Some(i) = self.find(plugin, task) {
             self.tasks[i].in_flight = false;
             if self.tasks[i].ephemeral {
-                // 一次性调用（第 227 轮）：算用时、记账，但**不推进、不熔断、不落库** ——
+                // 一次性调用：算用时、记账，但**不推进、不熔断、不落库** ——
                 // 它没有「下一拍」，也不该出现在任务页主表里。
                 self.tasks[i].runs += 1;
                 self.tasks[i].last_run = Some(now.timestamp_millis());
@@ -3808,7 +3808,7 @@ impl Inner {
             );
         }
         // 失败和「刚刚熔断」都要通知：面板是没人的时候在跑东西的地方，
-        // 只把错误写进日志等于默认你会去翻。
+        // 只把错误写进日志等于默认有人会去翻。
         // 内部运行（一次性调用 / hidden 任务）是插件自己的实现细节：
         // 成功不记（见下），失败**进铃铛但不推送** —— 央视频 8 个号各挂一次就是 8 条推送
         // （现场：ServerChan 被灌满）。留痕可查，不打扰。
@@ -3833,11 +3833,11 @@ impl Inner {
                 },
             );
         }
-        // 成功也通知（第 198 轮）：有人只想「跑完告诉我一声」，或者只订某个插件的每次运行。
+        // 成功也通知：有人只想「跑完通知一声」，或者只订某个插件的每次运行。
         // 但成功是高频事件，**先问一句有没有人订阅**再记 —— 否则每次运行都往铃铛表塞一条，
         // 500 条上限几天就滚完，真故障反而被挤掉。
         //
-        // 内部运行成功**根本不记**（第 227 轮）：同上，它们是实现细节。
+        // 内部运行成功**根本不记**：同上，它们是实现细节。
         if error.is_none()
             && !cancelled
             && !internal

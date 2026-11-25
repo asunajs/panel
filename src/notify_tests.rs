@@ -85,7 +85,7 @@ fn a_disabled_or_narrow_channel_is_skipped() {
     assert!(Config::channel_wants(&c.channels[1], "error", "task_fail", "mcloud"));
 }
 
-// ── 12 种渠道的「请求长什么样」（第 169 轮）─────────────────────────────────
+// 12 种渠道的「请求长什么样」
 //
 // 这里钉的是**拼出来的东西**：URL、body、加签、请求头。真正发出去要靠对端，
 // 但错在这里（比如 sign 没编码、telegram 把 token 拼错位置）永远发不出去。
@@ -253,7 +253,7 @@ fn custom_template_escapes_what_it_inserts() {
     assert_eq!(v["level"], "error");
 }
 
-// ── 静默时段 / 过滤 / 去重（第 171 轮）─────────────────────────────────────
+// 静默时段 / 过滤 / 去重
 
 #[test]
 fn quiet_hours_parse_and_match_across_midnight() {
@@ -323,7 +323,7 @@ fn quiet_and_dedupe_come_from_config_with_defaults() {
     assert!(notify::parse(Some(&json!({ "quiet_hours": "23-8" }))).is_err());
 }
 
-// ── 推送规则（第 186 轮）：渠道 = 怎么发，推送 = 什么时候发给谁 ──────────────
+// 推送规则：渠道 = 怎么发，推送 = 什么时候发给谁
 
 /// 老配置（只有 channels）要能自动看成「每条渠道一条推送」，字段从渠道上搬过来。
 #[test]
@@ -445,7 +445,7 @@ fn a_route_filters_by_event_and_plugin_patterns() {
     assert!(!mk(vec![], vec![], vec![], false).accepts(&n("task_fail", "x"), 600));
 }
 
-/// 「任务成功」这个事件是新加的（第 198 轮，用户报「缺少事件：某个插件运行成功」）。
+/// 「任务成功」这个事件是新加的（用户报「缺少事件：某个插件运行成功」）。
 /// 白名单要认它，并且**不能**顺手把所有未知事件都放过去。
 #[test]
 fn task_ok_is_a_known_event_and_unknown_ones_are_still_refused() {

@@ -258,7 +258,7 @@ pub fn install_zip(root: &Path, data: &[u8]) -> Result<Installed, String> {
     // 「把 web/ 整个文件夹压进来」很常见，所以允许剥掉**统一的一层**外层目录。
     // ⚠ 但 `css/` 是真目录不是外层包装：只有「所有条目第一段都相同、且不是 css」
     //   才剥 —— 否则 `css/reset.css` 会被剥成 `reset.css`，白名单立刻不认
-    //   （第 265 轮实测踩到，报「界面包里出现了不允许的文件 components.css」）。
+    // （实测踩到，报「界面包里出现了不允许的文件 components.css」）。
     let strip = common_wrapper(&mut archive);
     let mut total: u64 = 0;
     let result = (|| -> Result<(), String> {

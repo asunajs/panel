@@ -290,7 +290,7 @@ fn refuses_a_source_without_state_table() {
     assert!(err.contains("state"), "错误里要说清是缺 state 表: {err}");
 }
 
-/// 自动发现：给定一个「旧面板数据目录」，discover 要认出它并给出读数（第 168 轮）。
+/// 自动发现：给定一个「旧面板数据目录」，discover 要认出它并给出读数。
 #[test]
 fn discover_finds_a_legacy_data_dir() {
     let d = std::env::temp_dir().join(format!("panel-mig-discover-{}", std::process::id()));
@@ -523,7 +523,7 @@ fn preview_reports_tasks_scripts_and_plugins() {
     assert_eq!(p.push_channels.len(), 1);
 }
 
-// ── 回归（第 168 轮 review）──────────────────────────────────────────────────
+// 回归
 
 /// 老版本 0.3 的 jobs 表没有 `summary` / `kind` / `script` / `runtime`。
 ///
@@ -636,7 +636,7 @@ fn apply_marks_the_data_dir_so_it_stops_nagging() {
     );
 }
 
-/// 重复跑不能回滚你在 0.4 里改过的东西：任务是 DO NOTHING、脚本文件不覆盖。
+/// 重复跑不能回滚 0.4 里改过的东西：任务是 DO NOTHING、脚本文件不覆盖。
 #[test]
 fn second_run_keeps_what_you_changed_in_04() {
     let dir = tmp("rerun");

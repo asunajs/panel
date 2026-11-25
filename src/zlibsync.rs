@@ -1,4 +1,4 @@
-//! `CompressionStream` / `DecompressionStream` 需要的**同步原生压缩**（第 254 轮）。
+//! `CompressionStream` / `DecompressionStream` 需要的**同步原生压缩**。
 //!
 //! 为什么是原生：LLRT 有 `node:zlib`（Rust flate2 实现）但没有 WHATWG 的
 //! `CompressionStream` / `DecompressionStream`；在 JS 里纯手写 gzip 既慢又不是

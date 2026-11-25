@@ -332,7 +332,7 @@ fn only_a_real_abort_counts_as_cancelled() {
 
 #[test]
 fn cancel_text_is_human() {
-    // 两种停法说法必须不同：人点的停止说「重载」会让人去查是谁卸载了插件（第 83 轮实测撞到）。
+    // 两种停法说法必须不同：人点的停止说「重载」会让人去查是谁卸载了插件（实测撞到）。
     let by_hand = cancel_text(true);
     assert!(by_hand.contains("已停止"), "{by_hand}");
     assert!(by_hand.contains("人点了停止"), "{by_hand}");
@@ -349,7 +349,7 @@ fn cancel_text_is_human() {
 
     /// 时钟回拨要能被发现：这是「面板好像卡住了」最难查的一种。
     ///
-    /// 第 78 轮：`next_fire` 是算好存下来的绝对时刻，回拨一小时它就跟着推后一小时。
+    /// `next_fire` 是算好存下来的绝对时刻，回拨一小时它就跟着推后一小时。
     /// 检测阈值 10 秒（NTP 微调不会有这么大动作，只有真改时间才会）。
     #[test]
     fn a_clock_that_goes_back_is_detected_but_small_drift_is_not() {
@@ -380,7 +380,7 @@ fn cancel_text_is_human() {
         );
     }
 
-    /// 进程被挂起 / 机器休眠过之后，「中间漏了几拍」要能算出来（第 79 轮）。
+    /// 进程被挂起 / 机器休眠过之后，「中间漏了几拍」要能算出来。
     ///
     /// `@every 5s` 从 T 起、醒来时已是 T+30s → 中间有 6 个下次时刻（5/10/15/20/25/30 秒）。
     #[test]
@@ -394,7 +394,7 @@ fn cancel_text_is_human() {
         assert_eq!(skipped_beats(&s, t0, t0 + ChronoDuration::days(30)), 1000);
     }
 
-// ── 空闲卸载的判定（第 174 轮）────────────────────────────────────────────
+// 空闲卸载的判定
 //
 // 这个判定错了的代价很直接：卸掉一个马上要跑定时任务的插件 = 那次任务漏跑。
 
@@ -433,7 +433,7 @@ fn a_task_coming_soon_pins_the_plugin_in_memory() {
     assert!(should_idle_unload(now, now - 10_000_000, 60, false, None, 120_000));
 }
 
-// ── 按需加载的判定（第 179 轮）──────────────────────────────────────────
+// 按需加载的判定
 //
 // 判错的代价：把有界面的插件省掉 = 用户一点就报错；把马上要到点的插件省掉 =
 // 那一次任务可能晚跑（要靠唤醒窗口兜）。
@@ -480,7 +480,7 @@ fn a_task_without_a_next_time_pins_the_plugin() {
     ));
 }
 
-// ── 按需加载的占位任务（第 181 轮）──────────────────────────────────────
+// 按需加载的占位任务
 //
 // 实拍的病：用户在界面上把「日常」从 `0 8,20 * * *` 改成 `0 9 * * *`，重启面板之后
 // 面板把 mcloud 那三条按需加载 ⇒ 从库里的行造占位任务。占位任务如果拿**库里的生效 cron**
@@ -547,7 +547,7 @@ fn lazy_placeholder_fallback_still_carries_suggestion() {
     assert!(t.lazy);
 }
 
-// ── 补跑窗口（第 220 轮：用户报「8 点没跑」）────────────────────────────
+// 补跑窗口
 //
 // 唤醒是「到点前 3 分钟」。进程被冻结 / 机器休眠 / 唤醒卡住时，醒来那拍已经过期。
 // 以前注册只在「还没到」时才恢复库里的 next_at，过期那拍就被静默吃掉：
@@ -577,7 +577,7 @@ fn catch_up_gives_up_on_a_long_dead_beat() {
     assert_eq!(catch_up_at(now + CATCH_UP_MAX_MS + 1, now), None);
 }
 
-// ---- 恢复 override 不能吞掉「马上要跑的那一拍」（第 268 轮，用户报「咪咕今天没触发」）
+// ---- 恢复 override 不能吞掉「马上要跑的那一拍」（用户报「咪咕今天没触发」）
 //
 // 现场：`override_expr` 是带 30m 抖动的 json；任务 12:05 那拍抖到 12:18。
 // 12:15 空闲唤醒 → 12:18 注册，`apply_saved` 走 `set_schedule()` 重算 = 22:05，

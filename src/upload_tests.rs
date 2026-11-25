@@ -164,7 +164,7 @@ fn a_corrupt_zip_is_rejected_with_a_readable_error() {
 
 /// zip bomb：压缩后几十 KB，解压后 64 MB 以上。**按实际解压量记账**，不看中央目录的声明。
 ///
-/// 这条以前没有守卫：第 54 轮 e2e 里它是拦住的（`zip 解压后太大（上限 64 MiB）`），
+/// 这条以前没有守卫：e2e 里它是拦住的（`zip 解压后太大（上限 64 MiB）`），
 /// 但代码里两个常量一旦被调大或被删掉，只有真上传一个炸弹才知道。
 #[test]
 fn a_zip_bomb_is_stopped_by_actually_expanding_it() {

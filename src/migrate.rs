@@ -1,8 +1,8 @@
-//! 从 0.3.x 面板迁移插件状态（第 150 轮）。
+//! 从 0.3.x 面板迁移插件状态。
 //!
 //! 为什么要有它：0.3.x 的 panel.db 里有一张 state 表，插件的键值都在那儿
 //! （mcloud 那族是 mcloud.accounts + 每号一个 JSON 袋）。换到 0.4.x 之后是另一个库，
-//! 用户手上只有旧目录 —— 没有这条路，他们得手工 sqlite3 抄键。
+//! 用户手上只有旧目录 —— 没有这条路，只能手工 sqlite3 抄键。
 //!
 //! 三条纪律：
 //! 1. 默认只预览：不带 --apply 一个字节都不写。
@@ -114,7 +114,7 @@ pub fn resolve_source(from: &str) -> Result<PathBuf, String> {
 }
 
 
-// ── 自动发现（第 168 轮）────────────────────────────────────────────────────
+// 自动发现
 //
 // 用户的真实痛点不是「迁移算法不对」，而是**得自己知道旧库在哪**。所以这里扫一圈
 // 常见位置，按「有 state 表 + 有 mcloud 账号」打分，把候选按可信度排出来，
@@ -322,7 +322,7 @@ fn has_col(conn: &Connection, table: &str, col: &str) -> bool {
 /// 为什么必须这么做：0.3 的 `jobs` 表是**逐步加列**的 —— `summary` / `kind` /
 /// `script` / `runtime` / `lead_ms` 都是后加的。直接 `SELECT summary, kind, …`
 /// 会在稍老的库上报 `no such column`，而这类库**正是迁移的目标用户**
-/// （他们正因为面板旧才要迁）。实测一个带 `lead_ms` 但没 `summary` 的真实
+/// （正因为面板旧才要迁）。实测一个带 `lead_ms` 但没 `summary` 的真实
 /// 0.3 库，preview 整条断在这里。
 fn col_or(conn: &Connection, table: &str, col: &str, lit: &str) -> String {
     if has_col(conn, table, col) {
@@ -357,7 +357,7 @@ pub struct Preview {
     /// 账号表里没有的袋子：默认不搬（它们属于已经删掉的号）。
     pub orphan_bags: Vec<String>,
     /// 定时抢兑计划：**会真的按 cron 去跑**，所以预览必须把它们摆出来，
-    /// 不然用户迁完一脸莫名其妙（实测：迁完多出一条"不是我设的"计划）。
+    /// 不然用户迁完一脸莫名其妙（实测：迁完多出一条"不是自己设的"计划）。
     pub plans: Vec<PlanBrief>,
     /// 老面板的插件任务（jobs 表）：0.4 里同名插件装上后会接管这些计划
     pub tasks: Vec<TaskBrief>,
@@ -734,7 +734,7 @@ pub struct Opts {
     pub with_orphan_bags: bool,
     /// 不搬定时抢兑计划（plans / plan.runs / schedule.*）—— 迁完不会自己开抢
     pub skip_schedules: bool,
-    /// 连 plugin-data/<插件>/config.json 一起搬（第 168 轮）
+    /// 连 plugin-data/<插件>/config.json 一起搬
     pub with_plugin_data: bool,
     /// 连 scripts/ 目录一起搬
     pub with_scripts: bool,
@@ -775,7 +775,7 @@ pub struct Applied {
     pub tasks_rows: usize,
     /// 老面板 runs 表搬进 0.4 运行历史的行数
     pub runs_history_rows: usize,
-    /// 因为目标里已有同名任务而**没有覆盖**的条数（重复跑时保护你在 0.4 里的改动）
+    /// 因为目标里已有同名任务而**没有覆盖**的条数（重复跑时保护 0.4 里改过的任务）
     pub tasks_kept: usize,
     /// 脚本任务的文件拷贝数
     pub script_jobs_files: usize,
@@ -1253,7 +1253,7 @@ pub fn apply(from: &str, target_db: &Path, opts: &Opts) -> Result<Applied, Strin
                 continue;
             }
             let to = scripts_dir.join(&fname);
-            // 目标已有的文件不覆盖：重复跑迁移不该把你改过的脚本回滚成旧文件
+            // 目标已有的文件不覆盖：重复跑迁移不该把改过的脚本回滚成旧文件
             if to.is_file() {
                 script_jobs_kept += 1;
             } else {
@@ -1576,7 +1576,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| "data".to_string());
     let target = PathBuf::from(&data_dir).join("panel.db");
 
-    // 不给来源就扫一圈：用户的痛点是「我哪知道旧库在哪」，不是「迁移算法不对」。
+    // 不给来源就扫一圈：用户的痛点是「不知道旧库在哪」，不是「迁移算法不对」。
     let from = match from {
         Some(f) => f,
         None => {

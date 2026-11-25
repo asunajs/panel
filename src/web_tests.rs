@@ -511,7 +511,7 @@ async fn config_save_hot_swaps_and_rejects_bad_json() {
     assert_eq!(body["hot"], true);
     // 插件侧读到的就是新值（热快照换了）
     assert_eq!(store.snapshot().as_ref(), r#"{"greet":"hi"}"#);
-    // 盘上是**用户原文**，不是我们 pretty 过的版本
+    // 盘上是**用户原文**，不是格式化后的版本
     let on_disk = std::fs::read_to_string(data.join("config.json")).unwrap();
     assert_eq!(on_disk, text);
 
@@ -599,7 +599,7 @@ async fn plugin_create_refuses_an_existing_name_and_writes_a_template() {
 async fn plugin_delete_moves_the_file_into_trash() {
     let (app, plugins, data, _store) = setup_dirs("pdel").await;
     std::fs::write(plugins.join("gone.js"), "import host from 'panel:host';\n").unwrap();
-    // 界面目录也要跟着走：只删 .js 会留一堆孤儿文件（第 131 轮补）。
+    // 界面目录也要跟着走：只删 .js 会留一堆孤儿文件（补）。
     std::fs::create_dir_all(plugins.join("gone.webui")).unwrap();
     std::fs::write(plugins.join("gone.webui/index.html"), "<h1>x</h1>").unwrap();
     let (status, body) = send(&app, with_csrf("DELETE", "/api/plugins/gone", None)).await;
@@ -852,7 +852,7 @@ async fn plugin_webui_api_returns_the_handlers_value() {
     assert_eq!(body["value"]["got"]["body"]["x"], 1, "handler 的返回值要带出来: {body}");
 }
 
-/// 第 188 轮：插件不在内存里，界面接口第一次调用会**自动把它装回来**再执行；
+/// 插件不在内存里，界面接口第一次调用会**自动把它装回来**再执行；
 /// 真的没有这个插件时，说的是「装不回来 + 读不到哪个文件」，而不是一句「插件未加载」。
 #[tokio::test]
 async fn plugin_webui_api_auto_loads_a_plugin_that_is_not_in_memory() {
@@ -1692,7 +1692,7 @@ async fn setup_writes_auth_json_once_and_never_the_plaintext() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let token = body["token"].as_str().unwrap_or_default().to_string();
     assert_eq!(token.len(), 43, "32 字节 base64url 应当是 43 字符: {token}");
-    // 第 87 轮：写完就生效，不用重启；同时给浏览器发一张会话票
+    // 写完就生效，不用重启；同时给浏览器发一张会话票
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["applied"], true);
 
@@ -2345,11 +2345,11 @@ async fn a_successful_enable_clears_the_failure_record() {
     assert!(!state["failed"].as_array().unwrap().iter().any(|v| v["name"] == "fix"));
 }
 
-/// 上传接口的覆盖语义（第 133 轮改）：**默认不覆盖** —— 同名就报冲突，
+/// 上传接口的覆盖语义（改）：**默认不覆盖** —— 同名就报冲突，
 /// 要覆盖必须显式带 `overwrite=1`。
 ///
-/// 原来是默认覆盖：用户传同名文件只看到一句「已上传」，内容到底换没换心里没底。
-/// 现在界面会先问「覆盖 / 重命名 / 取消」，用户点覆盖才带 overwrite=1 过来；
+/// 默认不覆盖（静默覆盖时用户只看到「已上传」，换没换心里没底）。
+/// 界面先问「覆盖 / 重命名 / 取消」，点覆盖才带 overwrite=1 过来；
 /// 响应里还会回 `replaced`，让界面说清楚是「已上传」还是「已覆盖」。
 #[tokio::test]
 async fn upload_defaults_to_a_conflict_and_reports_what_it_replaced() {
@@ -2632,7 +2632,7 @@ async fn reloading_during_a_run_stops_it_without_a_failure_notice() {
     );
     assert!(!err.contains("AbortError"), "别把 rquickjs 的术语丢给用户: {r}");
     assert!(r["ended_at"].as_i64().is_some(), "必须写结束时间: {r}");
-    // 第 64 轮：状态单独记 cancelled，不是 error —— 界面「只看失败」不该把它算进去。
+    // 状态单独记 cancelled，不是 error —— 界面「只看失败」不该把它算进去。
     assert_eq!(r["status"], "cancelled", "被重载打断不是失败: {r}");
 
     let (_, notes) = get(&app, "/api/notifications").await;
@@ -2735,7 +2735,7 @@ async fn deleting_a_plugin_keeps_its_run_history() {
 
 /// 并列值下的复合游标：`started_at` 相同的一批行必须靠 `id` 兜底，一个都不能漏/重。
 ///
-/// 第 56 轮用 20000 行（每 5 行同一个 started_at）实测 40 页、0 重、0 漏。这里把那个性质
+/// 用 20000 行（每 5 行同一个 started_at）实测 40 页、0 重、0 漏。这里把那个性质
 /// 固化成内存库里的守卫：只删掉游标里的 `id` 那一半，这条就会红。
 #[tokio::test]
 async fn paging_by_started_at_keeps_ties_in_order() {
@@ -2815,7 +2815,7 @@ async fn paging_by_started_at_keeps_ties_in_order() {
 
 /// LIKE 的通配符必须当**字面量**处理：搜 `50%` 不能变成「50 + 任意串」，搜 `a_c` 不能匹配 `abc`。
 ///
-/// 第 57 轮实测抓到的真问题：`/api/logs` 的两条 LIKE **没写 `ESCAPE`**（`/api/runs` 写了），
+/// 实测抓到的真问题：`/api/logs` 的两条 LIKE **没写 `ESCAPE`**（`/api/runs` 写了），
 /// 于是 `like_pat()` 加进去的反斜杠被当普通字符：搜 `50%` 一条都搜不到，界面上就是「没有匹配」。
 #[tokio::test]
 async fn searching_percent_and_underscore_matches_them_literally() {
@@ -2878,7 +2878,7 @@ async fn searching_percent_and_underscore_matches_them_literally() {
 
 /// 断线重连补日志：`/api/logs/stream?since=<id>` 要先补发 `id > since` 的行，再走实时。
 ///
-/// 第 58 轮之前没有这个参数：SSE 一断，断线期间产生的日志**静默消失**（ring 里还是旧的，
+/// 之前没有这个参数：SSE 一断，断线期间产生的日志**静默消失**（ring 里还是旧的，
 /// 新行只从重连那一刻开始流），用户只会看到「中间少了一段」。现在补发的行带 `id`，
 /// 前端用它去重并记住游标。
 #[tokio::test]
@@ -2935,8 +2935,8 @@ async fn the_log_stream_can_replay_what_was_missed() {
 
 /// 配置的「语义」错要在**进门时**挡住，而不是等通知静默停掉才有人发现。
 ///
-/// 第 60 轮之前 `PUT /api/config` 只校验 JSON 合法性：`min_level` 拼成 `infoo` 也能保存，
-/// 之后通知**全停**、每 30 秒往日志刷一条扫描失败，界面上只有「通知」页那条红条会告诉你。
+/// 之前 `PUT /api/config` 只校验 JSON 合法性：`min_level` 拼成 `infoo` 也能保存，
+/// 之后通知**全停**、每 30 秒往日志刷一条扫描失败，界面上只有「通知」页那条红条会提示。
 #[tokio::test]
 async fn saving_a_config_with_broken_notify_semantics_is_rejected() {
     let (app, _plugins, data, _store) = setup_dirs("cfgbad").await;
@@ -2994,7 +2994,7 @@ async fn config_reload_reads_the_file_and_keeps_the_old_one_when_it_is_broken() 
     assert_eq!(n["min_level"], "error", "{n}");
 }
 
-/// 改计划只认 `expr` 这个键。第 65 轮实测踩到：传 `{"cron": "..."}` 时它被当成
+/// 改计划只认 `expr` 这个键。实测踩到：传 `{"cron": "..."}` 时它被当成
 /// 「没有 expr = 撤销覆盖」，接口 200、什么都没改 —— 又是一次「静默忽略参数」。
 #[tokio::test]
 async fn saving_a_schedule_rejects_unknown_keys() {
@@ -3055,7 +3055,7 @@ await host.register_cron('t', '@every 30s', 5000, {});
 
 /// 所有请求体结构体都 `deny_unknown_fields`：键名写错要**报错**，不能静默当成默认值。
 ///
-/// 三次踩到同一类问题（第 36 轮 `lead_ms`、第 53 轮脚本 `cron`、第 65 轮改计划 `cron` 被当成
+/// 三次踩到同一类问题（`lead_ms`、脚本 `cron`、改计划 `cron` 被当成
 /// 「撤销覆盖」），所以这轮把所有 body 结构一次收紧，并配一条守卫盯着。
 #[tokio::test]
 async fn unknown_keys_in_request_bodies_are_rejected() {
@@ -3091,7 +3091,7 @@ async fn unknown_keys_in_request_bodies_are_rejected() {
 
 /// 查询参数写错要报错，别静默返回「没有数据」。
 ///
-/// 第 67 轮实测：`level=warnn` 返回 `{logs:[], total:0}` —— 看着像「真的没有 warn 日志」；
+/// 实测：`level=warnn` 返回 `{logs:[], total:0}` —— 看着像「真的没有 warn 日志」；
 /// `dir=ascending` 被静默当 desc（顺序反了还以为生效）；`limt=10` 直接被忽略（默认 50）。
 #[tokio::test]
 async fn query_params_that_are_typoed_are_rejected() {
@@ -3113,7 +3113,7 @@ async fn query_params_that_are_typoed_are_rejected() {
     let (status, out) = get(&app, "/api/logs?level=INFO").await;
     assert_eq!(status, StatusCode::OK, "{out}");
 
-    // debug 是第四个档（第 255 轮）：空闲卸载那类生命周期流水走它。
+    // debug 是第四个档：空闲卸载那类生命周期流水走它。
     // 白名单漏掉它 = 界面上点「debug」直接 400（看着像「没有这类日志」的反面：报错）。
     let (status, out) = get(&app, "/api/logs?level=DEBUG").await;
     assert_eq!(status, StatusCode::OK, "{out}");
@@ -3124,9 +3124,9 @@ async fn query_params_that_are_typoed_are_rejected() {
     assert_eq!(out["sort"], "id", "{out}");
 }
 
-/// 同一插件同时只允许一个在途调用，但第二个请求**排队**，不再 409（第 227 轮）。
+/// 同一插件同时只允许一个在途调用，但第二个请求**排队**，不再 409。
 ///
-/// 第 69 轮是 409「还有任务在跑，本次跳过」：语义没错（确实忙），但用户点了「执行」
+/// 曾经的 409「还有任务在跑，本次跳过」：语义没错（确实忙），但用户点了「执行」
 /// 只看到一行报错、事情没发生。现在默认排队：回 200 + `{queued:true, position}`，
 /// 执行位空出来自己跑；`/api/state` 的 `pending` 里能看到它。
 #[tokio::test]
@@ -3174,7 +3174,7 @@ await host.register_handler('slow', async () => { await host.sleep(1500); });
     assert!(body["run_id"].is_number(), "{body}");
 }
 
-/// `host.notify(title, body, {level})`（第 227 轮）：插件喊话能指定等级。
+/// `host.notify(title, body, {level})`：插件喊话能指定等级。
 ///
 /// 为什么要它：等级写死 info 时，配了 `min_level: warn` 的推送规则会把「一趟挂了」的汇总
 /// **静默丢掉** —— 正是最不该丢的那种。
@@ -3215,7 +3215,7 @@ await host.register_handler('shout', async () => {
     );
 }
 
-/// 内部运行**失败进铃铛、但不推送**（第 227 轮）。
+/// 内部运行**失败进铃铛、但不推送**。
 ///
 /// 现场：央视频 8 个号 token 同时失效 → 8 条「任务 sign#N 失败」推进 ServerChan。
 /// 失败要留痕（铃铛、运行记录、日志），但不该按号轰炸推送。
@@ -3289,7 +3289,7 @@ await host.register_handler('visible', async () => { throw new Error('visible bo
     );
 }
 
-/// 内部运行成功**不发通知**（第 227 轮）：一次性调用和 hidden 任务是插件自己的实现细节。
+/// 内部运行成功**不发通知**：一次性调用和 hidden 任务是插件自己的实现细节。
 ///
 /// 现场：央视频 8 个账号各跑一条 `sign` → 8 条「任务 sign#N 成功」推进 ServerChan。
 /// 失败照发 —— 那才是要人来看的。
@@ -3345,7 +3345,7 @@ await host.register_handler('hidden1', async () => {}, 5000, { hidden: true });
     );
 }
 
-/// 内部 handler（`{hidden:true}`）：能按名字跑、能带 params，但**不在任务页露面**（第 227 轮）。
+/// 内部 handler（`{hidden:true}`）：能按名字跑、能带 params，但**不在任务页露面**。
 ///
 /// 起因：插件把一次性调用当内部实现（央视频的 `sign`）时，任务页会多出一行没人看得懂的
 /// 「sign / 手动 / 8 分 0 秒」；而「只跑第 3 个号」又需要同一个 handler 换参数跑，
@@ -3353,7 +3353,7 @@ await host.register_handler('hidden1', async () => {}, 5000, { hidden: true });
 #[tokio::test]
 async fn hidden_handlers_stay_off_the_task_page_but_run_with_params() {
     let (app, plugins, _data, _store, _db) = setup_core("hiddenh").await;
-    // handler 自己校验参数：收到的不是 2 就抛 —— 跑通/跑挂就是「参数对不对」的判据
+    // handler 自己校验参数：收到的不是 2 就抛 —— 通过/失败就是「参数对不对」的判据
     let src = r#"import host from 'panel:host';
 await host.register_handler('sign', async (evt) => {
   const n = evt.params ? Number(evt.params.account) : -1;
@@ -3414,7 +3414,7 @@ await host.register_handler('sign', async (evt) => {
     );
 }
 
-/// `register_handler(name, fn, budget, {paused:true})`：注册即暂停（第 227 轮）。
+/// `register_handler(name, fn, budget, {paused:true})`：注册即暂停。
 ///
 /// 为什么需要这个开关：`register_handler` 走 reg 通道、`set_job_paused` 走 cmd 通道，
 /// 两条队列**没有顺序保证** —— 插件里「先注册再暂停」实测会被注册那一下按库里的
@@ -3470,7 +3470,7 @@ await host.register_handler('live', async () => {}, 5000);
     assert!(body["run_id"].is_number(), "{body}");
 }
 
-/// `host.run_once`：临时生成一次性调用 —— 不建任务行、排队跑、跑完自动删（第 227 轮）。
+/// `host.run_once`：临时生成一次性调用 —— 不建任务行、排队跑、跑完自动删。
 #[tokio::test]
 async fn run_once_spawns_one_off_runs_without_leaving_task_rows() {
     let (app, plugins, _data, _store) = setup_dirs("runonce").await;
@@ -3654,7 +3654,7 @@ fn plugin_group_by_name_prefix() {
     assert_eq!(crate::plugin_group("-x"), "");
 }
 
-/// 第 87 轮：`/api/setup` 写完**立即生效**（不用重启），并给浏览器发一张会话票。
+/// `/api/setup` 写完**立即生效**（不用重启），并给浏览器发一张会话票。
 #[tokio::test]
 async fn setup_takes_effect_immediately_and_logs_this_browser_in() {
     let (app, _plugins, _data, _store) = setup_dirs("setup-live").await;
@@ -3709,7 +3709,7 @@ async fn setup_takes_effect_immediately_and_logs_this_browser_in() {
     assert_eq!(resp.status(), StatusCode::OK, "会话票要能直接进");
 }
 
-/// 插件自己的配置（第 89 轮）：`plugin-data/<name>/config.json`。
+/// 插件自己的配置：`plugin-data/<name>/config.json`。
 ///
 /// 这条链路是「点卡片上的配置就能改」的底座，护栏要和面板配置一致：
 /// 未知插件 404、缺 x-panel 403、坏 JSON / 非对象 400。
@@ -3805,7 +3805,7 @@ async fn plugin_config_roundtrip_and_guards() {
     assert_eq!(body["config"]["account"], json!("me"));
 }
 
-/// 第 132 轮：脚本源码上限从 512 KiB 抬到 8 MiB。
+/// 脚本源码上限从 512 KiB 抬到 8 MiB。
 ///
 /// 起因是用户保存一个 1.5 MB 的打包脚本被挡在门外（`脚本有 1580716 字节，超过上限 524288 字节`）。
 /// 这条用例钉住两件事：**1.6 MB 能存进去**、**报出来的上限是 8 MiB**。
@@ -3840,7 +3840,7 @@ async fn big_script_saves_and_reports_an_eight_mib_limit() {
     assert_eq!(files["max_bytes"], json!(8 * 1024 * 1024), "{files}");
 }
 
-// ── 错误页（第 166 轮）──────────────────────────────────────────────────────
+// 错误页
 //
 // 判据只有一条：**用户不该看到后端内部信息**。所以除了断言状态码和页面文案，
 // 还要断言响应体里没有路径、os error、堆栈痕迹 —— 这几样以前都真的出现过。
@@ -3924,7 +3924,7 @@ async fn internal_errors_hide_the_detail_but_keep_a_ref() {
     assert!(!text.contains("secret"), "{text}");
 }
 
-/// 暂停 ≠ 停用（第 167 轮）：暂停**不卸载**，插件还在已加载列表里、任务也还在，
+/// 暂停 ≠ 停用：暂停**不卸载**，插件还在已加载列表里、任务也还在，
 /// 只是调度器不再触发它的定时任务；库里有标记（重启后仍暂停）。
 #[tokio::test]
 async fn a_plugin_can_be_suspended_without_unloading_it() {
@@ -3974,7 +3974,7 @@ async fn suspended_is_persisted_in_the_db() {
     assert!(crate::db::plugin_suspended_names(&db).await.is_empty());
 }
 
-/// 渠道增删改（第 170 轮）：改动要真落进 config.json，密钥不许从接口回显，
+/// 渠道增删改：改动要真落进 config.json，密钥不许从接口回显，
 /// 不传 secret 的编辑不许把它清掉，写错的配置不许落盘。
 #[tokio::test]
 async fn channel_crud_lands_in_config_and_never_echoes_the_secret() {
@@ -4079,7 +4079,7 @@ async fn channel_crud_lands_in_config_and_never_echoes_the_secret() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// 清单（第 172 轮）：配置文件接口带上 config.fields，清单接口能读，扫描能看见新文件。
+/// 清单：配置文件接口带上 config.fields，清单接口能读，扫描能看见新文件。
 #[tokio::test]
 async fn plugin_manifest_feeds_the_config_form_and_the_scan() {
     let (app, plugins, _data, _store) = setup_dirs("man172").await;
@@ -4136,7 +4136,7 @@ async fn plugin_manifest_feeds_the_config_form_and_the_scan() {
     assert!(body["error"].as_str().unwrap().contains("JSON"), "{body}");
 }
 
-/// 插件指标（第 176 轮）：三个时间窗各一次聚合，数字要能对得上。
+/// 插件指标：三个时间窗各一次聚合，数字要能对得上。
 #[tokio::test]
 async fn plugin_stats_aggregate_runs_by_window() {
     let (app, plugins, _data, _store, db) = setup_core("stats176").await;
@@ -4189,7 +4189,7 @@ async fn plugin_stats_aggregate_runs_by_window() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-// ── 通知：渠道 / 推送两层（第 186 轮）────────────────────────────────────
+// 通知：渠道 / 推送两层
 
 fn two_layer_config() -> Value {
     json!({
@@ -4390,7 +4390,7 @@ async fn toggling_a_synthesized_route_materializes_it() {
     assert_eq!(ops["enabled"], false);
 }
 
-/// 日志按来源分开（第 199 轮）：面板 / 插件 / 脚本 / HTTP 各看各的。
+/// 日志按来源分开：面板 / 插件 / 脚本 / HTTP 各看各的。
 ///
 /// 用户报的是「有人恶意刷 40x/50x 会把面板日志淹没」—— 这些行必须留，
 /// 但不能和面板自己的日志混在一起看。所以接口要能按 source 精确过滤，
@@ -4443,7 +4443,7 @@ async fn logs_can_be_filtered_by_source() {
     assert!(e.contains("httpp") && e.contains("http"), "错误要能照着改：{e}");
 }
 
-/// `/api/state` 要带磁盘读数（第 200 轮）：盘满是静默故障，界面得有地方看。
+/// `/api/state` 要带磁盘读数：盘满是静默故障，界面得有地方看。
 ///
 /// 这里只钉「结构对 + 不编数字」：`total/avail` 要么是正数、要么是 null，
 /// 绝不允许是 0（0 会被界面读成「盘空了」）。
@@ -4467,7 +4467,7 @@ async fn state_reports_disk_usage_honestly() {
     }
 }
 
-/// 插件的 `<name>.webui` 整个目录不在时，404 要说人话（第 203 轮）。
+/// 插件的 `<name>.webui` 整个目录不在时，404 要说人话。
 ///
 /// 真实事故：插件的 JS 和配置都在、侧栏入口也在，只有界面目录被删了 ——
 /// 界面上给的是「这个文件不在插件里」，没人能看出该做什么。这里钉住：
@@ -4487,7 +4487,7 @@ async fn a_missing_webui_dir_says_reinstall_not_just_404() {
 ///
 /// 根因不是浏览器乱请求，是**插件目录不存在**（实测：两个实例的 `PANEL_PLUGINS_DIR`
 /// 指向已被删掉的 /tmp 路径）。界面每几秒轮询一次这个接口，于是每几秒刷一条 400，把日志刷满。
-/// 目录不在 = 「还没装过插件」，不是「你的请求有问题」：必须 200 + 空列表，且不写错误日志。
+/// 目录不在 = 「还没装过插件」，不是「请求有问题」：必须 200 + 空列表，且不写错误日志。
 #[tokio::test]
 async fn plugin_files_on_missing_dir_is_empty_not_400() {
     let (app, plugins, _data, _store, db) = setup_core("nlfile").await;
@@ -4547,7 +4547,7 @@ async fn error_logs(db: &Db) -> Vec<String> {
     .unwrap()
 }
 
-/// HTTP 错误日志的每分钟上限（第 208 轮）：设 1 条，打三个 400，日志里只该有一条。
+/// HTTP 错误日志的每分钟上限：设 1 条，打三个 400，日志里只该有一条。
 ///
 /// 这条是「证据 vs 噪音」的折中：扫描器刷满日志时，前 N 条照记、其余丢弃，
 /// 而不是干脆不记（那就什么都没有了）。
@@ -4578,7 +4578,7 @@ async fn http_error_logs_respect_per_minute_cap() {
     crate::config::set_limits(crate::config::Limits::default());
 }
 
-/// 配额窗口的纯逻辑（第 197 轮）：不碰 static，所以能确定性地断言「正好 N 条」。
+/// 配额窗口的纯逻辑：不碰 static，所以能确定性地断言「正好 N 条」。
 #[test]
 fn http_log_window_takes_exactly_the_quota() {
     let t0 = std::time::Instant::now();
@@ -4601,7 +4601,7 @@ fn http_log_window_takes_exactly_the_quota() {
     assert!(!crate::web::win_take(&mut one, 1, t0));
 }
 
-/// 目录式插件（第 216 轮）：`/api/plugins/files` 要把它列出来（multi + entry），
+/// 目录式插件：`/api/plugins/files` 要把它列出来（multi + entry），
 /// `/api/plugins/<name>/source` 读的是它的入口文件，删除时整目录进回收站。
 #[tokio::test]
 async fn dir_plugin_is_listed_read_and_deleted_as_a_whole() {
@@ -4650,7 +4650,7 @@ async fn dir_plugin_is_listed_read_and_deleted_as_a_whole() {
     );
 }
 
-/// 通知落日志时的级别要跟着通知自己的级别走（第 222 轮，用户截图报的）：
+/// 通知落日志时的级别要跟着通知自己的级别走（用户截图报的）：
 /// 一条「任务成功 — 正常结束」的 info 通知，不该在日志里顶着 WARN 黄标签。
 #[tokio::test]
 async fn info_notification_is_logged_as_info_not_warn() {
@@ -4681,7 +4681,7 @@ async fn info_notification_is_logged_as_info_not_warn() {
     assert_eq!(row["level"], "info", "info 通知不该记成 warn：{row}");
 }
 
-// ── 鉴权覆盖面（第 190 轮安全 review）───────────────────────────────────────
+// 鉴权覆盖面
 //
 // 为什么要有这一条：**光看代码看不出来**某个路由漏了 require_token —— 它挂在
 // 外层 Router 上（`/api/test/js` 就这样漏了整整十轮，等于未认证可执行任意 JS）。
@@ -4811,7 +4811,7 @@ async fn plugin_handlers_never_see_the_panel_credentials() {
     assert_eq!(h["x-keep-me"], "yes", "别的头照旧要透传: {h:?}");
 }
 
-// ── 文件名的边界（第 190 轮安全 review）──────────────────────────────────────
+// 文件名的边界
 
 /// `"."` 以前能过 `safe_name`（字符表合法、不含 ".."），而 `dir.join(".")` 就是目录自己 ——
 /// 备份恢复里那个 `remove_dir_all` 会一次清空整个 plugins/。
@@ -4960,7 +4960,7 @@ async fn config_save_rejects_a_broken_prefix_proxy() {
     assert!(body["error"].as_str().unwrap_or("").contains("前缀"), "{body}");
 }
 
-/// 第 196 轮：写配置**默认不重载**（`skipped:true`），要重载得显式 `reload:true`。
+/// 写配置**默认不重载**（`skipped:true`），要重载得显式 `reload:true`。
 ///
 /// 为什么默认不重载：重载会 unload 掉插件 —— 在跑的任务当场断、排队的请求直接失败，
 /// 是危险动作，不该是「保存一下」的默认副作用。而 `host.self_config()` 每次调用都读盘，
@@ -5040,7 +5040,7 @@ fn the_same_http_error_from_the_same_source_is_logged_once() {
     );
 }
 
-// ---------------------------------------------------------------- 文件管理（第 270 轮）
+// ---------------------------------------------------------------- 文件管理
 
 /// 三个目录都用真临时目录：这一页的全部逻辑就是「读目录 + 搬文件」，
 /// 用相对路径的话测不到搬迁（会跑到 cwd 下）。
@@ -5108,7 +5108,7 @@ fn post_json(uri: &str, body: Value) -> Request<Body> {
 #[tokio::test]
 async fn files_lists_the_three_areas_and_flags_stale_copies() {
     let (plugins, scripts, data) = files_dirs("list");
-    // 收拢目录 + 顶层旧拷贝（就是第 269 轮那个现场）
+    // 收拢目录 + 顶层旧拷贝
     std::fs::create_dir_all(plugins.join("cmcc")).unwrap();
     std::fs::write(plugins.join("cmcc/cmcc.js"), "export default 1").unwrap();
     std::fs::write(plugins.join("cmcc.js"), "旧的").unwrap();

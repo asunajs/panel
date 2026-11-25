@@ -1,8 +1,8 @@
-//! 检查更新（第 210 轮）：旧面板有这个功能，用户要求「支持上，检查更新，
-//! 并由用户手动更新，有更新可以登录时右上角提示，可选择不再提示，
-//! 当前版本更新就不提示了」。
+//! 检查更新：只查不装，安装由人执行。
 //!
-//! 三条设计上的取舍，写在这儿免得以后被「优化」掉：
+//! 行为契约：有新版本、且该版本没被「不再提示」过，才在右上角提示；没有新版本不提示。
+//!
+//! 三条设计取舍：
 //!
 //! 1. **不自动更新**。面板是个正在跑的服务（launchd / schtasks / systemd 都可能是它爹），
 //!    自己替换运行中的二进制要处理「就地覆盖会不会崩」「签名变不变」「谁负责重启」——
@@ -10,7 +10,7 @@
 //!    最后一步由人执行。
 //! 2. **查的是 GitHub release**（`asunajs/panel`），不是自建服务：面板没有后端，只有一个仓库。
 //!    可用 `PANEL_UPDATE_REPO` 指向 fork。
-//! 3. **先走不用 API 的路**（第 265 轮）。GitHub 的 REST API 匿名只有 60 次/小时，
+//! 3. **先走不用 API 的路**。GitHub 的 REST API 匿名只有 60 次/小时，
 //!    而这台机器上还有别的检查在花额度 —— 实测经常一条 `403 Forbidden` 就什么都不知道了。
 //!    不花额度的两条路足够用。一是 `GET /releases/latest` —— **302 的 Location** 里就是 tag
 //!    （不跟随跳转，一个请求）；二是 `GET /releases.atom` —— 最近若干条 release 的 tag
@@ -55,12 +55,12 @@ fn client() -> Result<reqwest::Client, String> {
 
 /// 不发 API 也能拿到「最新 tag」：`/releases/latest` 的 302 Location 最后一段。
 ///
-/// `/releases/latest` **不含 prerelease**（正好是我们要的：界面包的 `ui-v*` 是 prerelease，
+/// `/releases/latest` **不含 prerelease**（正好符合需求：界面包的 `ui-v*` 是 prerelease，
 /// 不该被当成面板新版）。
 async fn latest_tag_by_redirect() -> Result<String, String> {
     let url = format!("https://github.com/{}/releases/latest", repo());
     // ⚠ 「不跟随跳转」是 **ClientBuilder** 上的设置（RequestBuilder 没有这个方法）：
-    //   我们要的就是那一跳的 Location，跟过去反而只剩一张 HTML 页面。
+    //   需要的正是那一跳的 Location，跟过去反而只剩一张 HTML 页面。
     let no_follow = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(concat!("panel/", env!("CARGO_PKG_VERSION")))
@@ -119,7 +119,7 @@ async fn recent_tags_by_atom() -> Result<Vec<String>, String> {
 
 /// 按 `gh` 的通道顺序取一段文本：镜像 → 直连。
 ///
-/// 第 267 轮：面板自己的「检查更新」以前**完全不经过镜像**（自建 reqwest 直连），
+/// 面板自己的「检查更新」以前**完全不经过镜像**（自建 reqwest 直连），
 /// 于是设置里配了 `github_mirrors` 对这一路毫无作用。现在 atom / api 两路都过它。
 /// `github_token` 有就带上（API 5000/h；镜像也认这个头）。
 async fn get_via_channels(url: &str) -> Result<String, String> {
@@ -325,7 +325,7 @@ pub fn skip_version(cfg: &Value) -> Option<String> {
 pub fn verdict(v: &Value, cfg: &Value) -> Value {
     let latest = v.get("latest").and_then(Value::as_str).unwrap_or_default();
     let has_update = v.get("has_update").and_then(Value::as_bool).unwrap_or(false);
-    // 用版本比较而不是字符串比较：tag 带 `v`、手填的不带（第 210 轮踩过）
+    // 用版本比较而不是字符串比较：tag 带 `v`、手填的不带
     let skipped = skip_version(cfg)
         .map(|s| crate::panelversion::same_version(&s, latest))
         .unwrap_or(false);

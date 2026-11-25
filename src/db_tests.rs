@@ -76,7 +76,7 @@ fn stale_notice_says_how_many_and_where_to_look() {
 
 /// 「有没有界面」只增不减：一条注册比 Loaded 晚到，也不能把已记下的 1 抹成 0。
 ///
-/// 第 180 轮实测：mcloud 的 sidebar 注册被重启打断，库里停在 0|0，
+/// 实测：mcloud 的 sidebar 注册被重启打断，库里停在 0|0，
 /// 下次启动就把有界面的插件按需省掉了 —— 界面直接打不开。
 #[tokio::test]
 async fn plugin_surface_flags_never_go_back_to_zero() {

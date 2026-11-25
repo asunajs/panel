@@ -1,6 +1,6 @@
 //! 插件文件形态：**一个 `<name>.js`**，或者**一个 `<name>/` 目录（入口 `index.js`）**。
 //!
-//! 为什么要有目录形态（第 216 轮，用户要求「需要多文件支持」）：单文件插件写着写着就要
+//! 为什么要有目录形态：单文件插件写着写着就要
 //! 几千行，复用只能复制粘贴。目录形态让插件能 `import './lib/xxx.js'`，而**仍然是一个整体**：
 //! 停用/删除/备份/指纹都按「一个插件」这个粒度处理。
 //!
@@ -10,7 +10,7 @@
 //! 注意：`<name>.webui/` 是插件**界面**目录，不是插件本体 —— 这里只认 `<name>/`，
 //! 两者在同一层并列互不影响（`.webui` 后缀把它区分开了）。
 //!
-//! # 收拢形状（第 269 轮起支持，老形状继续认）
+//! # 收拢形状（老形状继续认）
 //!
 //! 一个插件摊成三个顶层条目（`<name>.js` + `<name>.panel.json` + `<name>.webui/`）在插件
 //! 多了之后是一锅粥。新形状把它们**收进一个目录**：
@@ -45,7 +45,7 @@ pub fn dir_entry(dir: &Path, name: &str) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p);
     }
-    // 收拢形状（第 269 轮）两种子形态，都在属地目录 `<dir>/<name>/` 里：
+    // 收拢形状两种子形态，都在属地目录 `<dir>/<name>/` 里：
     //   · `<dir>/<name>/<name>.js` —— 目录里与插件同名的主文件
     //   · `<dir>/<name>/<name>/index.js` —— 一包多插件（mcloud/ 里的 mcloud-daily/ 等）
     let g = dir.join(name);
@@ -69,7 +69,7 @@ pub fn entry(dir: &Path, name: &str) -> Option<PathBuf> {
     if let Some(p) = dir_entry(dir, name) {
         return Some(p);
     }
-    // 收拢形状（第 269 轮）：主文件可能在属地目录里（一包多插件时属地不与插件同名）。
+    // 收拢形状：主文件可能在属地目录里（一包多插件时属地不与插件同名）。
     if let Some(g) = group_for(dir, name) {
         if let Some(p) = main_in_group(&g, name) {
             return Some(p);
@@ -98,7 +98,7 @@ pub fn read_source(dir: &Path, name: &str) -> Result<(String, Option<PathBuf>), 
 
 /// 插件的**模块根**（相对 import 的边界）：目录式插件才有，单文件是 `None`。
 ///
-/// 收拢形状（第 269 轮）：`mgmusic/mgmusic.js` 的根是 `mgmusic/`；一包多插件里
+/// 收拢形状：`mgmusic/mgmusic.js` 的根是 `mgmusic/`；一包多插件里
 /// `mcloud/mcloud-daily/index.js` 的根是 `mcloud/mcloud-daily/` —— 与老形态
 /// `mcloud-daily/index.js` 的根 `mcloud-daily/` 完全一致，插件自己的相对 import
 /// 不用改一个字。
@@ -122,7 +122,7 @@ pub fn module_root(dir: &Path, name: &str) -> Option<PathBuf> {
 ///
 /// ⚠ 参数是**插件根目录 + 插件名**，不是入口路径：只看文件名叫不叫 `index.js` 会把
 /// 单文件插件 `plugins/index.js` 误判成「名为 index 的目录插件」，进而让指纹/备份
-/// 去扫整个 plugins 目录（第 217 轮 review 实测：启动即栈溢出）。
+/// 去扫整个 plugins 目录（review 实测：启动即栈溢出）。
 pub fn is_dir_plugin(dir: &Path, name: &str) -> bool {
     if dir.join(format!("{name}.js")).is_file() {
         return false;
@@ -149,7 +149,7 @@ pub fn names(dir: &Path) -> std::io::Result<Vec<String>> {
         };
         if path.is_dir() {
             // 目录：入口在（index.js 或目录内同名 .js）才算插件。
-            // 收拢形状（第 269 轮）：`mgmusic/mgmusic.js` 这种「目录里同名主文件」也认 ——
+            // 收拢形状：`mgmusic/mgmusic.js` 这种「目录里同名主文件」也认 ——
             // 没有这条，迁移后的目录会被当成「不是插件」漏掉。
             if dir_entry(dir, name).is_some() || nested_main(&path, name).is_some() {
                 out.push(name.to_string());
@@ -250,7 +250,7 @@ fn nested_main(group: &Path, name: &str) -> Option<PathBuf> {
 
 /// 一个插件（或一包插件）的**属地目录**：收拢形状 = `<dir>/<name>/`；老形状 = `None`（散件）。
 ///
-/// 「属地」这个概念是第 269 轮的核心：删除/回收站按它整体搬走，指纹/字节统计按它算，
+/// 「属地」贯穿三处：删除/回收站按它整体搬走，指纹/字节统计按它算，
 /// 界面「一个插件一行」也按它聚合。判定依据：目录里能找到与它相关的插件文件
 /// （主文件 / 清单 / 界面目录）。
 pub fn group_dir(dir: &Path, name: &str) -> Option<PathBuf> {

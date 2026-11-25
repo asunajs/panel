@@ -123,10 +123,10 @@ fn get_str(o: &Json, k: &str) -> Option<String> {
     o.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-/// 出站响应压缩：**在 Rust 里解开**（第 253 轮）。
+/// 出站响应压缩：**在 Rust 里解开**。
 ///
-/// 为什么面板要自己干：主流那条路是 hyper + rustls，body 是我们一段段读进来的，
-/// 框架不会替我们解压；而插件那边只有 LLRT 的 `node:zlib`（子集），让每个插件自己
+/// 为什么面板要自己干：主流那条路是 hyper + rustls，body 由本模块逐段读入，
+/// 框架不负责解压；而插件那边只有 LLRT 的 `node:zlib`（子集），让每个插件自己
 /// gunzip 既重复又容易漏（2026-11-20 那批 502 就是"插件里自己拼一层"的后果）。
 ///
 /// 认 gzip / deflate(zlib) / br / zstd；多个 encoding 按 RFC 反向依次解。
@@ -179,7 +179,7 @@ fn decode_body(encoding: &str, buf: Vec<u8>) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-/// 我们主动支持的压缩编码（与 `decode_body` 认的一致）。
+/// 主动支持的压缩编码（与 `decode_body` 认的一致）。
 const ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
 
 /// 发一次请求（含重定向）。返回 `{status, headers, body, url, redirected}`。
@@ -248,7 +248,7 @@ pub async fn fetch_json_with(
         if cancelled(&inv) {
             return Err("AbortError: invocation 已停止".into());
         }
-        // 前缀代理在这里改写（第 193 轮）：SSRF 门必须校验**实际要连**的那个地址，
+        // 前缀代理在这里改写：SSRF 门必须校验**实际要连**的那个地址，
         // 所以先改写再校验；重定向解析仍以原始 current 为基准（GitHub 的 Location 是
         // 相对原始 URL 写的）。
         let target = apply_prefix(&current);
@@ -286,7 +286,7 @@ pub async fn fetch_json_with(
             for (k, v) in &extra_headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            // 出站压缩：调用方没自己写 accept-encoding 时，我们替它要压缩体，
+            // 出站压缩：调用方没自己写 accept-encoding 时，由本模块代填并要求压缩体，
             // 读回来在本地解（插件拿到明文）。写了就尊重调用方的选择。
             if !extra_headers
                 .iter()
@@ -387,7 +387,7 @@ pub async fn fetch_json_with(
             }
         }
 
-        // 有 content-encoding 就在本地解（主流 hyper 路径不会替我们解）。
+        // 有 content-encoding 就在本地解（主流 hyper 路径不负责解）。
         let mut headers = headers;
         let enc = encoding;
         let decoded: Result<Vec<u8>, String> = if body_error.is_none() && !enc.is_empty() {
@@ -484,7 +484,7 @@ fn shared_client() -> Result<reqwest::Client, String> {
 /// 单独抽出来是为了**能测**：代理是进程级状态，测试里改它会影响并行跑的其它出站
 /// 用例；这里直接把代理当参数传，测「配了代理真的走代理」时不碰全局。
 fn client_for(key: &str) -> Result<reqwest::Client, String> {
-    // 按**代理地址**缓存客户端（第 192 轮）：换代理要换一个带代理的客户端，原来那份
+    // 按**代理地址**缓存客户端：换代理要换一个带代理的客户端，原来那份
     // 留着也没意义（池里的连接是直连打出去的），所以缓存 key 就是代理串。
     static CLIENTS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, reqwest::Client>>,
@@ -528,7 +528,7 @@ fn client_for(key: &str) -> Result<reqwest::Client, String> {
     Ok(built)
 }
 
-// ---------------------------------------------------------------- 出站代理（第 192 轮）
+// ---------------------------------------------------------------- 出站代理
 //
 // 为什么放在面板而不是让插件各自配：出站只有**一条链路**（SSRF 门、不自动跟重定向、
 // 共享连接池），代理是这个链路的属性；插件各写一遍既重复又容易漏掉 SSRF 门。
@@ -577,7 +577,7 @@ pub fn check_proxy(url: &str) -> Result<(), String> {
         .map_err(|e| format!("代理地址不合法（{u}）：{e}"))
 }
 
-// ---------------------------------------------------------------- 前缀代理（第 193 轮）
+// ---------------------------------------------------------------- 前缀代理
 //
 // 「类 gh-proxy 的前缀镜像」：不是 HTTP 正向代理，而是把 URL **拼在**前缀后面 ——
 //   https://raw.githubusercontent.com/a/b/c.json
@@ -644,13 +644,13 @@ pub fn check_prefix(url: &str) -> Result<(), String> {
 
 /// 把 URL 改写成「第一条可用通道」。host 不在名单里就原样返回。
 ///
-/// 第 267 轮起走 `gh`：`net.github_mirrors` 有序，插件拿到的第一条与面板自己用的一致。
+/// 走 `gh`：`net.github_mirrors` 有序，插件拿到的第一条与面板自己用的一致。
 pub fn apply_prefix(url: &str) -> String {
     crate::gh::apply(url)
 }
 
 /// 平台 TLS（native-tls）那条路。与 rustls 那条**同语义**：每跳重判 SSRF、
-/// 不自动跟重定向（我们自己在循环里跟，这样每跳都能过 SSRF 门）、正文 1 MiB 上限。
+/// 不自动跟重定向（手动在循环里跟，这样每跳都能过 SSRF 门）、正文 1 MiB 上限。
 async fn fetch_native_json(
     url: String,
     o: &Json,
@@ -685,7 +685,7 @@ async fn fetch_native_json(
         })
         .unwrap_or_default();
 
-    // ⚠ 客户端**复用**，不是每次新建。
+    // 客户端**复用**，不是每次新建。
     //
     //   以前这里是 `Client::builder()...build()` —— 连接池跟着这一次调用一起丢掉，
     //   于是**每一发请求都要重做一次 TLS 握手**（2026-11-15 实测：到
@@ -693,7 +693,7 @@ async fn fetch_native_json(
     //   复用之后同一主机走 keep-alive，握手只做第一次。
     //
     //   超时**不能**设在客户端上（各调用点要的时长不同：插件里 1500ms 与 12s 并存），
-    //   改成在**每一次请求**上设（`rb.timeout`）—— 语义与原来逐调用一致。
+    //   所以超时设在**每一次请求**上（`rb.timeout`）。
     let client = shared_client()?;
 
     let mut current = url;
@@ -703,7 +703,7 @@ async fn fetch_native_json(
         if inv.as_ref().map(|i| i.is_stopped()).unwrap_or(false) {
             return Err("AbortError: invocation 已停止".into());
         }
-        // 前缀代理在这里改写（第 193 轮）：SSRF 门校验**实际要连**的地址，
+        // 前缀代理在这里改写：SSRF 门校验**实际要连**的地址，
         // 所以先改写再校验；重定向仍以原始 current 为基准解析。
         let target = apply_prefix(&current);
         ssrf::ensure_outbound_url_allowed_with(&target, allow_private)?;

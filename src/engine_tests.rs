@@ -131,7 +131,7 @@ async fn every_host_op_is_a_function_on_both_export_paths() {
 
 /// PANEL PATCH 的回归：上游 `llrt_process::init` 用 `env::vars()`，任意非 UTF-8 的
 /// 环境变量都会让它 panic，插件的 ctx 根本起不来（而面板 HTTP 还活着，看起来像
-/// 「插件加载失败」）。补丁改成 `vars_os()` + lossy，见 src/auth.rs 的头注（派生与明文清理）。
+/// 「插件加载失败」）。补丁用 `vars_os()` + lossy，见 src/auth.rs 的头注（派生与明文清理）。
 #[cfg(unix)]
 #[tokio::test]
 async fn a_non_utf8_env_var_does_not_kill_the_plugin() {
@@ -591,7 +591,7 @@ async fn web_fetch_sends_string_and_binary_request_bodies() {
     }
 }
 
-/// 目录式插件（第 216 轮）：`import './lib/x.js'` 要在插件自己的目录里解析，
+/// 目录式插件：`import './lib/x.js'` 要在插件自己的目录里解析，
 /// 且 `..` 跑出插件目录必须被拒。
 #[tokio::test]
 async fn dir_plugin_can_import_its_own_files() {
@@ -644,7 +644,7 @@ async fn dir_plugin_can_import_its_own_files() {
     let p = Plugin::load_in_dir(&src, Some(root.clone()), handle)
         .await
         .expect("目录式插件应当加载成功（相对 import 走 PluginResolver/PluginLoader）");
-    // handler 里自己断言（dispatch 不回值）：跑通 = 两个 import 的结果都对
+    // handler 里自己断言（dispatch 不回值）：通过 = 两个 import 的结果都对
     p.dispatch("hi", &json!({}), 5_000)
         .await
         .expect("handler 应当能跑，且 import 进来的值都对");
@@ -690,7 +690,7 @@ async fn dir_plugin_may_import_above_its_dir_like_node() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// 第 269 轮：收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里。
+// 收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里。
 // base 必须指到那个文件，否则 `import '../lib.js'` 会从属地表层算 —— 实测（2026-11-25）
 // mcloud-daily 在 mcloud/mcloud-daily/index.js，`import '../lib.js'` 解析成
 // mcloud/mcloud/lib.js（不存在）而加载失败，错误是 `from 'eval_script'`。

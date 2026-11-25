@@ -138,7 +138,7 @@ fn budget_defaults_to_five_minutes_and_follows_the_env() {
     std::env::remove_var(ENV_BUDGET_MS);
 }
 
-/// `server` 段的解析（第 207 轮）：缺省全关，写错的类型不当真。
+/// `server` 段的解析：缺省全关，写错的类型不当真。
 #[test]
 fn server_section_parses_and_defaults_off() {
     let _g = lock();
@@ -158,7 +158,7 @@ fn server_section_parses_and_defaults_off() {
     assert!(!s.trust_xff && !s.allow_any_host, "非 bool 一律当关");
 }
 
-/// `run.budget_ms` 进默认预算，并且夹在 [1s, 90min] 里（第 207 轮）。
+/// `run.budget_ms` 进默认预算，并且夹在 [1s, 90min] 里。
 #[test]
 fn run_budget_from_config_is_clamped() {
     let _g = lock();
@@ -172,7 +172,7 @@ fn run_budget_from_config_is_clamped() {
     assert_eq!(crate::config::budget_ms(), crate::config::DEFAULT_BUDGET_MS);
 }
 
-/// 保留与上限（第 208 轮）：缺省、夹紧、类型写错。
+/// 保留与上限：缺省、夹紧、类型写错。
 #[test]
 fn limits_default_and_clamp() {
     let _g = lock();
@@ -211,7 +211,7 @@ fn net_proxy_comes_from_the_net_section() {
     );
 }
 
-/// 第 227 轮的三个旋钮：钳法用纯函数测（不去动全局静态，免得和别的用例抢）。
+/// 三个旋钮：钳法用纯函数测（不去动全局静态，免得和别的用例抢）。
 #[test]
 fn run_queue_and_budget_max_are_clamped() {
     use crate::config::*;

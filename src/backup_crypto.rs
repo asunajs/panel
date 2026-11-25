@@ -162,7 +162,7 @@ pub fn encrypt_to(src: &Path, dst: &Path, recipient: &str) -> Result<u64, String
 /// 也就是人手动跑、当场把私钥交出来的那一次。
 /// 解密并保证**失败不留残片**：`decrypt_to_inner` 是流式写，认证标签要到最后一个块才校验，
 /// 所以前面几块明文可能已经写进 dst 了。任何一步出错都把 dst 删掉 —— 加密备份的意义就是
-/// 明文不落盘，失败时留个半截明文正好把这件事破坏掉（第 27 轮写测试时发现）。
+/// 明文不落盘，失败时留个半截明文正好把这件事破坏掉（写测试时发现）。
 pub fn decrypt_to(src: &Path, dst: &Path, secret: &str) -> Result<u64, String> {
     match decrypt_to_inner(src, dst, secret) {
         Ok(n) => Ok(n),

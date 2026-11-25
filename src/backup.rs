@@ -25,7 +25,7 @@ pub async fn collect(
     config_text: String,
 ) -> Result<Value, String> {
     let mut plugins = Vec::new();
-    // 两种形态都要收：单文件 `<name>.js`，和目录式 `<name>/index.js`（第 216 轮）。
+    // 两种形态都要收：单文件 `<name>.js`，和目录式 `<name>/index.js`。
     let names = {
         let d = plugins_dir.to_path_buf();
         tokio::task::spawn_blocking(move || crate::pluginfs::names(&d))
@@ -132,7 +132,7 @@ pub fn db_snapshot(db_path: &Path, dst: &Path) -> Result<u64, String> {
 /// 全量校验一份备份，**不碰磁盘**。
 ///
 /// 为什么单独一步：恢复是「覆盖现有插件和配置」，写之前必须知道整份文件是好的。
-/// 第 41 轮实测：CLI 的 `restore` 先 `apply()`（写插件 + 脚本），**之后**才验配置 JSON ——
+/// 实测：CLI 的 `restore` 先 `apply()`（写插件 + 脚本），**之后**才验配置 JSON ——
 /// 一份插件正常、`config_text` 坏掉的备份，会把插件全换掉再报错，留下半恢复状态。
 /// 那正是人最没有第二份备份的时候。
 ///
@@ -239,7 +239,7 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
         let multi = p["multi"].as_bool().unwrap_or(false)
             || p.get("files").and_then(Value::as_array).is_some();
         if multi {
-            // 名字要再校验一次（第 190 轮安全 review）：这里是**唯一会 remove_dir_all**
+            // 名字要再校验一次（安全 review）：这里是**唯一会 remove_dir_all**
             // 的地方，而 name 来自外部备份 JSON。safe_name 现在连 "." 都不放行，
             // 但恢复路径不该依赖别人的收紧 —— 自己挡一道，坏名字直接跳过并记账。
             if let Err(e) = crate::scripts::safe_name(name) {
@@ -344,7 +344,7 @@ pub async fn apply(plugins_dir: &Path, scripts: &Scripts, data: &Value) -> Resul
 /// 取 --flag 的值（支持 --flag v 与 --flag=v 两种写法）。
 /// 只认识列出来的这些开关，**其余一律报错**。
 ///
-/// 第 61 轮亲手踩到：`backup --out x --data-dir /tmp/scratch` 里的 `--data-dir` 被**静默忽略**，
+/// 亲手踩到：`backup --out x --data-dir /tmp/scratch` 里的 `--data-dir` 被**静默忽略**，
 /// 于是「备份临时目录」实际备份了**真面板**，「恢复到临时目录」实际覆盖了真面板的 plugins/ 和 panel.db。
 /// 目录来自环境变量（PANEL_DATA_DIR 等），不是命令行开关 —— 那更要把它说清楚，别装听不见。
 fn reject_unknown_args(args: &[String], known: &[&str], cmd: &str) -> Result<(), String> {
@@ -517,7 +517,7 @@ pub async fn backup_cmd(args: &[String]) -> Result<(), String> {
     match arg_value(args, "--encrypt-to") {
         Some(key) => {
             // 加密失败（公钥写错之类）不能把明文临时文件留在盘上 —— 那等于「以为加密了，
-            // 其实旁边躺着一份明文」（第 27 轮 e2e 时抓到）。
+            // 其实旁边躺着一份明文」（e2e 时抓到）。
             let n = match crate::backup_crypto::encrypt_to(&tmp, Path::new(&out), &key) {
                 Ok(n) => n,
                 Err(e) => {
@@ -683,7 +683,7 @@ mod tests {
 
     /// 校验是「不碰磁盘的口径」：坏备份必须在这一步就被挡住。
     ///
-    /// 第 41 轮实测：CLI `restore` 以前先 `apply()` 写插件、**之后**才验配置 JSON，
+    /// 实测：CLI `restore` 以前先 `apply()` 写插件、**之后**才验配置 JSON，
     /// 一份「插件合法、config_text 坏掉」的备份会把插件全换掉再报错。
     #[test]
     fn validate_rejects_a_broken_payload_before_anything_is_written() {
@@ -818,7 +818,7 @@ mod tests {
     }
 }
 
-/// 不认识的开关要报错。第 61 轮的教训：`backup --data-dir /tmp/x` 里的 `--data-dir` 被静默忽略，
+/// 不认识的开关要报错。教训：`backup --data-dir /tmp/x` 里的 `--data-dir` 被静默忽略，
 /// 于是「备份临时目录」实际备份了真面板，「恢复到临时目录」实际覆盖了真面板的 plugins/ 和 panel.db。
 #[test]
 fn unknown_flags_are_rejected_instead_of_ignored() {
@@ -827,7 +827,7 @@ fn unknown_flags_are_rejected_instead_of_ignored() {
     // --out=x 这种写法也算认识
     assert!(reject_unknown_args(&["--out=x.bk".to_string()], &["--out"], "backup").is_ok());
 
-    // backup 真正的开关（第 62 轮：我自己加的守卫把 --encrypt-to 挡了，加密导出直接不可用）
+    // backup 真正的开关（一个守卫把 --encrypt-to 挡了，加密导出直接不可用）
     assert!(reject_unknown_args(
         &[
             "--out".to_string(),

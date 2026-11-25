@@ -146,7 +146,7 @@ fn manifest_json_carries_the_version_and_open_hook() {
 
 #[test]
 fn scan_of_a_directory_plugin_does_not_recurse_into_its_own_entry() {
-    // 回归（第 217 轮 review）：finger_of 遍历目录时把入口 index.js 又当目录插件，
+    // 回归（review）：finger_of 遍历目录时把入口 index.js 又当目录插件，
     // 会无限递归 → 栈溢出 abort。这里只要求它正常返回，且指纹记在正确的插件名下。
     let d = std::env::temp_dir().join(format!("m217-dir-scan-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -327,9 +327,8 @@ fn handler_names_follow_the_route_rules() {
 
 #[test]
 fn seed_makes_existing_plugins_known_so_they_are_not_reported_new() {
-    // 第 224 轮（用户：「新增是啥意思，这三个一直都在，是老插件了」）：
-    // 快照是进程内的，启动时没加载过的插件（按需加载跳过的、停用的）以前全被报成「新增」。
-    // seed 之后语义才对：新增 = 面板运行期间新出现的文件。
+    // 快照是进程内的：启动时没加载过的插件（按需加载跳过的、停用的）没有指纹，
+    // 不 seed 就会被报成「新增」。语义：新增 = 面板运行期间新出现的文件。
     let d = std::env::temp_dir().join(format!("m224-seed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("dirp")).unwrap();
@@ -381,7 +380,7 @@ fn seed_does_not_clobber_a_fingerprint_already_taken_this_boot() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-// ---- 四段版本（界面包的 `<面板>.<序号>`）必须能比出大小（第 265 轮）
+// ---- 四段版本（界面包的 `<面板>.<序号>`）必须能比出大小
 //
 // 以前 `ver()` 只取前三段，`0.8.3.9` 和 `0.8.3.1` 都被截成 `0.8.3` ⇒ 插件写
 // `min_ui: 0.8.3.9` 会被静默放行，然后坏在半截。

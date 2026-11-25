@@ -1,11 +1,11 @@
-//! panel plugin new|check（第 176 轮）。
+//! panel plugin new|check。
 //!
 //! 两件写插件时最常干的事：**起一个新文件**、**看看它能不能加载**。
 //! 以前这两步都得手写模板 + 把文件丢进目录重启面板看日志。现在都在命令行里：
 //!
 //!     panel plugin new mcloud-signin      # 出 .js + .panel.json 两个文件
 //!     panel plugin check plugins/x.js     # 只编译不执行（不连网、不写文件）
-//!     panel plugin install <url|路径>      # 装（第 107 轮）：商店就是靠这条侧载进来的
+//! panel plugin install <url|路径> # 装：商店就是靠这条侧载进来的
 
 use std::path::{Path, PathBuf};
 
@@ -260,7 +260,7 @@ fn check(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// `panel plugin install <url|文件.js|文件.zip|目录>`（第 107 轮）。
+/// `panel plugin install <url|文件.js|文件.zip|目录>`。
 ///
 /// 和界面上的 `POST /api/plugins/install` 是同一条链（`crate::install`），区别只有一个：
 /// **CLI 不加载插件** —— 它跑在「面板还没起来」的时候，只能把文件放到位，

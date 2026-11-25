@@ -1,4 +1,4 @@
-//! GitHub 出站通道（第 267 轮）：**一个地方**决定「这条 GitHub 请求走哪个镜像 / 直连」。
+//! GitHub 出站通道：**一个地方**决定「这条 GitHub 请求走哪个镜像 / 直连」。
 //!
 //! 为什么要有这个模块：以前四处各写一套 ——
 //!   · 面板 \`update.rs\` 自建 reqwest 打 \`github.com\` / \`api.github.com\`，**完全不经过镜像**；
@@ -17,7 +17,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-/// 默认镜像（\`""\` = 直连）。不内置更多第三方服务：镜像会把「你在下载什么」看个遍。
+/// 默认镜像（\`""\` = 直连）。不内置更多第三方服务：镜像会把「下载的是什么」看个遍。
 pub const DEFAULT_MIRRORS: &[&str] = &["https://gh-proxy.com", ""];
 
 static CHANNELS: OnceLock<Mutex<Channels>> = OnceLock::new();
@@ -235,7 +235,7 @@ mod tests {
     }
 
     // 从 outbound 搬过来的那组断言：谁会被拼镜像、谁不会。
-    // 这条判据以前写在 `outbound::rewrite` 里，第 267 轮收进 gh 之后**只有这里**还测它。
+    // 这条判据以前写在 `outbound::rewrite` 里，收进 gh 之后**只有这里**还测它。
     #[test]
     fn only_listed_hosts_get_mirrored() {
         let hosts = vec![

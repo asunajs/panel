@@ -352,7 +352,7 @@ pub enum Schedule {
         base: Box<Schedule>,
         jitter: Jitter,
     },
-    /// 结构化 JSON 计划（第 110 轮）：cron 表达不了的那些形状
+    /// 结构化 JSON 计划：cron 表达不了的那些形状
     /// （窗口内随机 / 每周随机挑一天 / 只跑一次 / 每月最后一天）。
     /// 抖动已经算在 `Plan` 内部（哈希可复现），所以它**没有** `Jitter` 字段。
     Plan(crate::plan::Plan),
@@ -1099,7 +1099,7 @@ mod tests {
 #[cfg(test)]
     #[test]
     fn every_with_a_non_numeric_part_says_what_it_wants() {
-        // 第 68 轮：以前报「`` 不是合法数字」（空引号），等于没说。
+        // 以前报「`` 不是合法数字」（空引号），等于没说。
         let e = parse_duration("不是时间").unwrap_err();
         assert!(e.contains("数字 + 单位"), "{e}");
         assert!(e.contains("不是时间"), "要把用户输入原样带回来: {e}");

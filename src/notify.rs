@@ -1,7 +1,7 @@
 //! 通知：任务失败、熔断、插件喊话 → 面板铃铛 + **外部渠道**（13 种，见 `Kind`）。
 //!
-//! 为什么要有铃铛那张表：面板是**你不在的时候**在跑东西的地方。
-//! 运行记录告诉你「跑过什么」，日志告诉你「细节」，通知告诉你「有事」。
+//! 为什么要有铃铛那张表：面板是**没人看着也在跑**的地方。
+//! 运行记录答「跑过什么」，日志答「细节」，通知答「有事」。
 //!
 //! # 为什么外部渠道要有发件箱
 //!
@@ -45,11 +45,11 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct Notice {
     /// info / warn / error
     pub level: &'static str,
-    /// 要不要往外部渠道推（第 227 轮）。`false` = **只进铃铛、不推送** ——
+    /// 要不要往外部渠道推。`false` = **只进铃铛、不推送** ——
     /// 内部运行（一次性调用 / hidden 任务）的失败就是这样：留痕可查，但不打扰。
     pub push: bool,
     /// 事件类型：task_fail / circuit / plugin / system。
-    /// 渠道可以按它过滤（第 171 轮）—— 「我不想收每条任务失败，但熔断必须告诉我」。
+    /// 渠道可以按它过滤—— 「不要每条任务失败，但熔断必须通知」。
     pub event: &'static str,
     pub plugin: String,
     pub task: Option<String>,
@@ -155,7 +155,7 @@ fn plugin_match(pattern: &str, plugin: &str) -> bool {
 
 // ---------------------------------------------------------------- 渠道配置
 
-/// 渠道类型（第 169 轮从 2 种扩到 12 种）。
+/// 渠道类型（从 2 种扩到 12 种）。
 ///
 /// 除 smtp 外全是「一次 HTTP 请求」，差别只在**请求长什么样**：
 /// 拼 URL、拼 body、要不要加签。所以投递仍是同一条发件箱路径（退避/放弃/重试共用）。
@@ -296,7 +296,7 @@ pub struct Channel {
     pub smtp: Option<SmtpConf>,
 }
 
-/// 一条**推送规则**（第 186 轮）：引用某个渠道 + 什么时候推 + 推什么。
+/// 一条**推送规则**：引用某个渠道 + 什么时候推 + 推什么。
 ///
 /// 和 Channel 的分工：Channel 是「怎么发」（类型 / 地址 / 密钥），Route 是「发给谁、什么时候发」。
 /// 一条渠道可以被多条推送引用；停用一条推送只是这条哑了，停用渠道则引用它的全哑。
@@ -370,7 +370,7 @@ impl Config {
     ///
     /// 点名了就不再受「全局等级门槛」约束 —— 否则会出这种极难查的情况：
     /// 用户在界面上勾了「任务成功」，而成功是 `info`、全局门槛默认 `warn`，
-    /// 于是通知永远发不出去，界面上却看不出任何异常（第 198 轮实测踩到：
+    /// 于是通知永远发不出去，界面上却看不出任何异常（实测踩到：
     /// 铃铛里有、发件箱里 0 条）。等级门槛管的是「默认想知道多严重的消息」，
     /// 而「点名要这个事件」是更明确的意图，应当压过默认值。
     pub fn explicitly_wants_event(&self, event: &str, plugin: &str) -> bool {
@@ -513,7 +513,7 @@ fn parse_routes(v: Option<&Value>, channels: &[Channel]) -> Result<Vec<Route>, S
         };
         let events = str_list(r, "events");
         for e in &events {
-            // task_ok = 任务**跑成功**（第 198 轮）。原来只有失败可订，「跑完就告诉我一声」
+            // task_ok = 任务**跑成功**。原来只有失败可订，「跑完通知一声」
             // 或者「只订某个插件的每次运行」都做不到 —— 用户对着事件勾选那张图报的就是这个。
             if !matches!(
                 e.as_str(),
@@ -933,7 +933,7 @@ pub fn channel_view(c: &Channel) -> Value {
                 out["method"] = json!(c.method);
                 out["content_type"] = json!(c.content_type);
             }
-            // 过滤与静默（第 171 轮）：界面编辑时要能看见当前值
+            // 过滤与静默：界面编辑时要能看见当前值
             out["events"] = json!(c.events);
             out["include_plugins"] = json!(c.include_plugins);
             out["exclude_plugins"] = json!(c.exclude_plugins);
@@ -1061,7 +1061,7 @@ pub async fn record(
         log.emit(&n.plugin, n.run_id, Level::Warn, format!("通知没存下来: {e}"));
         return;
     }
-    // 日志级别跟着**通知自己的级别**走（第 222 轮，用户截图报的）。
+    // 日志级别跟着**通知自己的级别**走（用户截图报的）。
     // 以前这里写死 Warn，于是一条「任务 日常 成功 — 用时 66.9 秒，正常结束」在日志里
     // 也顶着黄标签 —— 看日志的人会以为出了事，而真正的 WARN 被淹没在成功通知里。
     log.emit(
@@ -1110,7 +1110,7 @@ pub async fn record(
     .to_string();
     // 静默时段：铃铛照旧记，外部渠道推到静默结束（不是丢掉 —— 半夜的故障早上也得知道）。
     //
-    // 第 186 轮：从「按渠道」改成「按推送规则」。一条渠道可以被多条推送引用，
+    // 按「推送规则」而非「渠道」逐条处理：一条渠道可以被多条推送引用，
     // 每条推送有自己的过滤、门槛、静默和标题模板 —— 标题在这一步逐条渲染。
     let minute = now_min();
     let mut deferred = 0usize;
@@ -1189,7 +1189,7 @@ pub struct Row {
 
 /// 一条待入队的投递：渠道 + 是哪个推送触发的 + 最早可发时间 + 渲染后的标题。
 ///
-/// 标题逐条渲染（第 186 轮）：每条推送可以有「[告警] {{title}}」这种模板，
+/// 标题逐条渲染：每条推送可以有「[告警] {{title}}」这种模板，
 /// 所以入队时不能再共用一个 title。
 #[derive(Debug, Clone)]
 pub struct Queued {
@@ -1207,9 +1207,9 @@ pub struct Queued {
 /// 现在整批一个事务：要么全有，要么全没有。
 /// 把一条通知排进发件箱。items 是（渠道，最早可发时间）：静默时段里会大于 now。
 ///
-/// 去重（第 171 轮）：同一渠道 + 同一标题，在 dedupe 窗口内已经有一条**待发**的，
+/// 去重：同一渠道 + 同一标题，在 dedupe 窗口内已经有一条**待发**的，
 /// 就不再新开一行，只把它的 repeat +1 并且刷新内容 —— 一个任务每 5 分钟失败一次，
-/// 不该给你 12 条一样的推送，而应该是一条「×12」。
+/// 不该发 12 条一样的推送，而应该是一条「×12」。
 async fn enqueue_all(
     db: &Db,
     log: &LogHub,
@@ -1565,7 +1565,7 @@ fn build_http(ch: &Channel, row: &Row, now_ms: i64) -> Result<HttpReq, String> {
                 .replace("{{plugin}}", &esc(&plugin))
                 .replace("{{task}}", &esc(&task))
                 .replace("{{payload}}", &row.payload);
-            // 自定义渠道（第 186 轮）：预设之外的东西都走这里 ——
+            // 自定义渠道：预设之外的东西都走这里 ——
             // method 可以是 GET（老式 API 只认 query），content_type 可以是 form / text。
             let ct = match ch.content_type.as_str() {
                 "form" => "application/x-www-form-urlencoded; charset=utf-8",
@@ -1732,7 +1732,7 @@ async fn deliver(db: &Db, log: &LogHub, row: Row, ch: Option<&Channel>) {
             Level::Warn,
             format!("通知发不出去，放弃渠道 {cid}: {errmsg}"),
         );
-        // 只在日志里说不够：通知发不出去意味着「出事的时候你收不到消息」，
+        // 只在日志里说不够：通知发不出去意味着「出事时收不到消息」，
         // 而人不会天天翻日志页。推到顶部黄条（纯内存，不落库）。
         crate::alerts::global().push(
             "warn",
@@ -1815,7 +1815,7 @@ pub async fn seed_route_state(db: &Db, id: &str, ts: i64) {
     .ok();
 }
 
-/// 定时推送：到点主动发一条（第 186 轮）。
+/// 定时推送：到点主动发一条。
 ///
 /// 和事件推送共用同一条投递路径（入队 → 发件箱 → 退避重试），区别只是「谁触发」。
 /// 状态只存 last_fire：停机期间错过的多次**只补最近一次**（补一串没意义，
@@ -2009,7 +2009,7 @@ pub fn spawn_ticker(
         let mut last_err: Option<String> = None;
         loop {
             tick.tick().await;
-            // 定时推送（第 186 轮）：先看有没有到点的，再排空发件箱
+            // 定时推送：先看有没有到点的，再排空发件箱
             if let Err(e) = fire_scheduled(&db, &log, &store).await {
                 if last_err.as_deref() != Some(e.as_str()) {
                     log.emit(

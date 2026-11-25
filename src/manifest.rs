@@ -144,7 +144,7 @@ pub struct Manifest {
     /// 名目由插件自己定，面板只负责按清单里的路径 POST 一次（见 web/app.js）。
     pub on_panel_open: String,
     pub fields: Vec<Field>,
-    /// 声明式侧栏入口（第 191 轮）。None = 不出现（沿用 `host.sidebar()` 运行期注册那条）。
+    /// 声明式侧栏入口。None = 不出现（沿用 `host.sidebar()` 运行期注册那条）。
     pub nav: Option<NavDecl>,
     /// 表单下面的按钮。
     pub actions: Vec<ActionSpec>,
@@ -159,7 +159,7 @@ impl Manifest {
     ///
     /// 有声明就不需要 `<name>.webui/` —— 前端据此判断「缺界面」警告该不该挂。
     /// ⚠ 必须能对**没加载**的插件算（停用/按需加载时它不在 `/api/state` 的 plugins 里，
-    /// 只有磁盘上的清单），所以判据放在清单自己身上，不依赖运行期状态（第 223 轮）。
+    /// 只有磁盘上的清单），所以判据放在清单自己身上，不依赖运行期状态。
     pub fn has_declared_ui(&self) -> bool {
         !self.views.is_empty() || !self.actions.is_empty()
     }
@@ -217,7 +217,7 @@ impl Manifest {
 
 /// 清单文件路径（不保证存在）。
 pub fn path_for(dir: &Path, name: &str) -> PathBuf {
-    // 多级查找（第 269 轮）：
+    // 多级查找：
     //   ① 顶层（老形状）`<name>.panel.json`
     //   ② 收拢形状 `<name>/<name>.panel.json`
     //   ③ 一包多插件：属地目录是别的名字（`mcloud-daily` 的属地是 `mcloud/`），
@@ -241,7 +241,7 @@ pub fn path_for(dir: &Path, name: &str) -> PathBuf {
 
 /// 清单缓存：路径 → (mtime, size, 解析结果)。
 ///
-/// 为什么要有（第 190 轮性能 review）：`/api/state` 每 5 秒给每个插件读一次清单，
+/// 为什么要有（性能 review）：`/api/state` 每 5 秒给每个插件读一次清单，
 /// `/api/plugins/files` 也是 —— 7 个插件就是每秒 2.8 次 read+parse，插件多了线性涨。
 /// 清单是「改文件才变」的东西，用 mtime+size 当版本号足够（同一个 mtime 下改内容
 /// 才会漏，而那需要故意伪造时间戳）。
@@ -633,7 +633,7 @@ fn seen() -> &'static Mutex<HashMap<PathBuf, Finger>> {
 }
 
 /// 单个普通文件的指纹（只 stat，不再递归）。目录聚合必须用它，否则入口 `index.js`
-/// 会再次命中 `is_dir_plugin` 的判断、把同一个目录无限扫下去（第 217 轮 review 复现：
+/// 会再次命中 `is_dir_plugin` 的判断、把同一个目录无限扫下去（review 复现：
 /// `/api/plugins/scan` 一次请求就栈溢出 abort 整个进程）。
 fn file_finger(path: &Path) -> Option<Finger> {
     let md = std::fs::metadata(path).ok()?;
@@ -654,7 +654,7 @@ fn file_finger(path: &Path) -> Option<Finger> {
 
 fn finger_of(path: &Path, dir_plugin: bool) -> Option<Finger> {
     // 目录式插件（`<name>/index.js`）：指纹算整个目录 —— 只盯入口文件的话，
-    // 改 `lib/x.js` 在扫描报告里会显示「没变」，热加载就漏了（第 216 轮）。
+    // 改 `lib/x.js` 在扫描报告里会显示「没变」，热加载就漏了。
     if dir_plugin {
         if let Some(root) = path.parent() {
             let mut size = 0u64;
@@ -682,7 +682,7 @@ fn finger_of(path: &Path, dir_plugin: bool) -> Option<Finger> {
     file_finger(path)
 }
 
-/// 启动时把**磁盘上现有的**插件全部记进快照（第 224 轮）。
+/// 启动时把**磁盘上现有的**插件全部记进快照。
 ///
 /// 为什么需要：快照是进程内的，「这次启动还没加载过」的插件（按需加载跳过的、
 /// 停用的）扫描时会落进「新增」—— 用户看到的是「新增 3 个：mcloud-daily…」，

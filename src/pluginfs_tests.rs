@@ -7,7 +7,7 @@ use super::*;
 fn tmp(tag: &str) -> PathBuf {
     // 每次调用都唯一（tag + pid + 序号）：这些用例并行跑，同 tag 会互相踩同一目录 ——
     // 实测 `collapsed_layout_is_discovered_and_read` 与 `group_for_finds_...` 撞过，
-    // 表现为「单跑绿、全跑红」（第 269 轮）。
+    // 表现为「单跑绿、全跑红」。
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let i = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
@@ -140,7 +140,7 @@ fn resolve_module_follows_node_semantics_not_a_fence() {
 #[test]
 fn a_single_file_named_index_is_not_a_dir_plugin() {
     // `plugins/index.js` 是个合法单文件插件名，不能被当成 `index/index.js`：
-    // 误判会让 host.plugin_dir() 回 plugins/、指纹扫整个目录（第 217 轮 review）。
+    // 误判会让 host.plugin_dir() 回 plugins/、指纹扫整个目录（review）。
     let d = tmp("index-single");
     std::fs::write(d.join("index.js"), "export const x = 1;").unwrap();
     assert!(!is_dir_plugin(&d, "index"));
@@ -159,7 +159,7 @@ fn a_directory_plugin_named_index_is_still_a_dir_plugin() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-// ---- 收拢形状（第 269 轮）：一个插件一个目录 ----
+// ---- 收拢形状：一个插件一个目录 ----
 //
 // 一个插件摊成三个顶层条目（<name>.js + <name>.panel.json + <name>.webui/）在插件多了
 // 之后是一锅粥。新形状把它们收进 <name>/ 里；老形状继续认，迁移是可选的。
@@ -249,7 +249,7 @@ fn empty_group_dir_is_not_a_plugin() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-// 第 269 轮补充：group_for 的两条路径（自名属地 / 一包多插件）
+// group_for 的两条路径（自名属地 / 一包多插件）
 #[test]
 fn group_for_finds_own_and_packed_groups() {
     let d = tmp("collapsed");

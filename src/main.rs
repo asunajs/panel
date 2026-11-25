@@ -106,7 +106,7 @@ async fn main() -> Result<(), String> {
             println!("panel {}（panel-llrt）", crate::panelversion::current());
             return Ok(());
         }
-        // 从 0.3.x 面板搬插件状态：离线动作，不启动服务（第 150 轮）
+        // 从 0.3.x 面板搬插件状态：离线动作，不启动服务
         Some("plugin") => return plugin_cli::run(&args[1..]).await,
         // 界面包也是离线动作（直接改 <data>/ui/），不启动服务
         Some("ui") => return ui_cli::run(&args[1..]).await,
@@ -127,13 +127,13 @@ async fn main() -> Result<(), String> {
     let plugins_dir = resolve_dir("PANEL_PLUGINS_DIR", "plugins");
     // 插件目录不存在不是错误（新实例、或者还没装过插件），但必须**建出来**：
     // 否则 /api/plugins/files 每次读目录都 ENOENT，界面每几秒刷一次就刷一屏 400
-    // （第 205 轮：两个残留实例指向被删掉的 /tmp 目录，日志里全是
+    // （两个残留实例指向被删掉的 /tmp 目录，日志里全是
     //  `GET /api/plugins/files → 400 code=bad_request detail=`）。
     if let Err(e) = std::fs::create_dir_all(&plugins_dir) {
         eprintln!("建插件目录失败 {}: {e}（继续启动，插件页会是空的）", plugins_dir.display());
     }
     // 带上路径：机器上可能挂了多个盘，「Permission denied」不说清是哪一个的话，
-    // 运维只能靠猜（第 70 轮：只读目录下启动，报的就是一句没有路径的 Permission denied）。
+    // 运维只能靠猜（只读目录下启动，报的就是一句没有路径的 Permission denied）。
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("建数据目录失败 {}: {e}", data_dir.display()))?;
 
@@ -145,7 +145,7 @@ async fn main() -> Result<(), String> {
     let env_token = auth::token_from_env()?;
     let provisioned = auth::provision(&data_dir, env_token)?;
 
-    // 监听地址：环境变量 > config.json 的 server.bind > 默认（第 207 轮起配置也能改，
+    // 监听地址：环境变量 > config.json 的 server.bind > 默认（配置也能改，
     // 但**只启动时读一次** —— 端口没法热切，改了得重启）。
     let cfg_bind = crate::config::init_server(&data_dir);
     let bind = std::env::var("PANEL_BIND")
@@ -191,15 +191,15 @@ async fn main() -> Result<(), String> {
                 Level::Warn,
                 format!("有 {n} 条运行记录上次没跑完（进程被杀或崩溃），已标成失败"),
             );
-            // 也发一条通知：面板是「你不在的时候在跑东西」的地方，被杀掉的那次正是
-            // 最该让人知道的事 —— 只写进日志等于默认你会去翻。
+            // 也发一条通知：面板是「没人看着也在跑东西」的地方，被杀掉的那次正是
+            // 最该让人知道的事 —— 只写进日志等于默认有人会去翻。
             crate::notify::record(&db, &log, &config, crate::db::stale_notice(n)).await;
         }
         Ok(_) => {}
         Err(e) => log.emit("panel", None, Level::Warn, format!("收尾未完成的运行记录失败: {e}")),
     }
     let (sched, _sched_task) = scheduler::start(db.clone(), log.clone(), config.clone(), data_dir.clone());
-    // 空闲卸载后要能从磁盘读回源码（第 174 轮）。
+    // 空闲卸载后要能从磁盘读回源码。
     sched.set_plugins_dir(plugins_dir.clone());
 
     // 脚本：独立目录 + 自己的排程循环（不进任务表，见 src/scripts.rs）。
@@ -304,7 +304,7 @@ async fn main() -> Result<(), String> {
     let load_errors: web::LoadErrors = std::sync::Arc::new(std::sync::Mutex::new(
         std::collections::HashMap::new(),
     ));
-    // ⚠ 插件加载**不能挡在监听之前**（第 134 轮实测）：插件在加载期求值顶层代码，
+    // ⚠ 插件加载**不能挡在监听之前**（实测）：插件在加载期求值顶层代码，
     // mcloud 那几个会打网络；网络卡住时整个进程连端口都不绑 —— 面板在用户眼里是「死了」，
     // 而真相只是某个插件还在等 TCP。现在先把监听起来，插件在后台加载，
     // 加载进度照旧写日志，界面能立刻打开（这时插件列表会短暂显示「未加载」）。
@@ -339,7 +339,7 @@ async fn main() -> Result<(), String> {
         let ui_version = ui_version.clone();
         tokio::spawn(async move {
             // 先把「暂停」名单装回调度器，**再**加载插件：反过来的话，插件注册完的
-            // 第一拍就能把「暂停中的任务」跑掉（第 167 轮的顺序坑）。
+            // 第一拍就能把「暂停中的任务」跑掉。
             for name in crate::db::plugin_suspended_names(&db).await {
                 let _ = sched.set_suspended(&name, true).await;
             }
@@ -370,7 +370,7 @@ async fn main() -> Result<(), String> {
         data_dir,
         config,
         load_errors: load_errors.clone(),
-        // 可热替换：`/api/setup` 设完口令当场生效，不用重启（第 87 轮）。
+        // 可热替换：`/api/setup` 设完口令当场生效，不用重启。
         auth: Arc::new(std::sync::RwLock::new(provisioned.auth.map(Arc::new))),
         // 界面包同样可热替换：应用/回到内置都不重启进程。
         ui: std::sync::Arc::new(crate::web::UiAssets::new(ui_pack)),
@@ -443,7 +443,7 @@ async fn load_all(
     // （懒加载的判据在下面每个插件加载前现算，见 lazy_on / surfaces）
     let disabled = db::plugin_disabled_names(db).await;
     let suspended = db::plugin_suspended_names(db).await;
-    // 按需加载（第 179 轮）：启动时能不装的就不装。
+    // 按需加载：启动时能不装的就不装。
     //
     // 判据只有一条能成立才省：**这个插件没有界面**（上次加载时没 register_web / sidebar），
     // 且它库里那些任务下一次到点都还在窗口之外。有界面的必须装 —— 用户可能正打开着它。
@@ -553,10 +553,10 @@ async fn load_all(
             }
         };
         // 单个插件的加载也要有上限：插件在加载期跑顶层代码，可能 await 一个没有超时的网络调用。
-        // 没有这一层，一个插件卡住 = 后面的插件永远不加载 + 启动永远不结束（第 134 轮实测）。
+        // 没有这一层，一个插件卡住 = 后面的插件永远不加载 + 启动永远不结束（实测）。
         // 60 秒对「读配置 + 建路由 + 打一次 API」足够宽；超时算加载失败，界面能看到原因。
         // 第一次见到这个插件 = 装它：这次注册的 cron 建议直接采纳（复制成生效计划）。
-        // 之后重载 / 重启都只更新建议，不动生效计划 —— 用户说了算（第 180 轮）。
+        // 之后重载 / 重启都只更新建议，不动生效计划 —— 用户说了算。
         let adopt = !known.contains_key(&name);
         let loaded = tokio::time::timeout(
             std::time::Duration::from_secs(60),

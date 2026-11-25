@@ -96,7 +96,7 @@ impl Auth {
     /// 会话签名密钥 = HMAC-SHA256，key 用**令牌哈希**。
     ///
     /// 三个好处：不用额外存密钥、不用落盘、换令牌等于吊销所有会话。
-    /// 反过来，拿到 auth.json 的人能伪造会话 —— 但那时他已经能离线爆破令牌了，
+    /// 反过来，拿到 auth.json 的人能伪造会话 —— 但那时攻击者已经能离线爆破令牌了，
     /// 而 auth.json 本来就要按凭据保管（见文件头）。
     fn session_key(&self) -> ring::hmac::Key {
         ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.hash)
@@ -199,7 +199,7 @@ impl Auth {
     ///
     /// 返回 `ZERO` = 立刻算。窗口内超过 `MAX_ATTEMPTS_PER_SEC` 之后每次拖
     /// `THROTTLE_DELAY_MS`，于是攻击侧的 KDF 速率被压在 5 次/秒，而正常用户
-    /// 永远不会拿到一个「因为别人在打你所以你不许登录」的 401。
+    /// 永远不会拿到一个「因为别人在打所以不许登录」的 401。
     fn throttle_delay(&self) -> Duration {
         let mut g = match self.throttle.lock() {
             Ok(g) => g,

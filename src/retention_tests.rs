@@ -90,7 +90,7 @@ async fn keep_zero_does_not_wipe_the_table() {
 
 /// 清理只碰 `runs` 和 `logs`。**通知发件箱、任务状态、令牌都不能被它顺手带走**。
 ///
-/// 第 63 轮补的守卫：以前只数 runs/logs 的条数，没人验过「别的表还在」。
+/// 守的是：以前只数 runs/logs 的条数，没人验过「别的表还在」。
 #[tokio::test]
 async fn pruning_leaves_every_other_table_alone() {
     let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
@@ -117,7 +117,7 @@ async fn pruning_leaves_every_other_table_alone() {
     assert_eq!(p.logs, 30, "{p:?}");
     assert_eq!(count(&db, "notify_outbox").await, 1, "发件箱不能被清理带走");
     assert_eq!(count(&db, "tasks").await, 1, "任务状态（暂停等）不能被清理带走");
-    // 暂停标记也得原样留着（enabled=0 是我们插进去的值）
+    // 暂停标记也得原样留着（enabled=0 是测试写入的值）
     let enabled: i64 = db
         .call(|c| {
             c.query_row("SELECT enabled FROM tasks WHERE plugin='p'", [], |r| r.get(0))
@@ -146,7 +146,7 @@ async fn the_newest_row_survives_even_if_keep_is_one() {
     .await
     .unwrap();
     crate::retention::prune_with(&db, 1, 1).await.unwrap();
-    // 留 1 条 ok + 那条 running：正在跑的不占 keep 名额，也不许被剪（第 84 轮）。
+    // 留 1 条 ok + 那条 running：正在跑的不占 keep 名额，也不许被剪。
     assert_eq!(count(&db, "runs").await, 2);
     let st: String = db
         .call(|c| {
@@ -162,7 +162,7 @@ async fn the_newest_row_survives_even_if_keep_is_one() {
     assert_eq!(st, "running", "最新那条（正在跑的）必须留下");
 }
 
-/// 清理失败要推到顶部黄条（第 72 轮）：表会一直长下去，而没人会天天翻日志页。
+/// 清理失败要推到顶部黄条：表会一直长下去，而没人会天天翻日志页。
 /// 同一次失败重复发生时只累加 count（`alerts` 的去重语义）。
 #[tokio::test]
 async fn a_failed_prune_is_announced_on_the_alert_bar() {
@@ -180,7 +180,7 @@ async fn a_failed_prune_is_announced_on_the_alert_bar() {
     crate::alerts::global().clear();
 }
 
-/// 正在跑的那次就算**老到该剪**也不许剪（第 84 轮修）。
+/// 正在跑的那次就算**老到该剪**也不许剪（修）。
 ///
 /// 场景：20 分钟的长任务在跑，期间又跑了两万多次短任务。按 id 剪时它是最老的，
 /// 一剪掉，`finish()` 那条 UPDATE 就静默命中 0 行 —— 界面上这次运行凭空消失（既不是成功也不是失败）。

@@ -1,4 +1,4 @@
-//! 文件管理（第 270 轮）：**只**管插件目录 / 脚本目录 / 回收站这三个地方。
+//! 文件管理：**只**管插件目录 / 脚本目录 / 回收站这三个地方。
 //!
 //! 为什么要有它：更新后留下的旧东西没人看得见 —— 老形状的散件（`x.js` 与 `x/` 并存）、
 //! `.bak`、孤儿清单、`__pycache__`、回收站里几十份旧备份。终端里 `du -sh` 能看出来，
@@ -215,7 +215,7 @@ fn classify_plugin(
 /// 扫插件目录，判定每一项的形状。
 ///
 /// 判定顺序很重要：**先看有没有同名收拢目录**，再看散件 —— 因为「收拢目录已存在、
-/// 顶层还留着散件」正是第 269 轮那个「显示新版本、跑旧代码」的现场。
+/// 顶层还留着散件」正是那个「显示新版本、跑旧代码」的现场。
 pub fn scan_plugins(dir: &Path) -> Result<Vec<Item>, String> {
     let mut out = Vec::new();
     let rd = match std::fs::read_dir(dir) {
@@ -254,7 +254,7 @@ pub fn scan_plugins(dir: &Path) -> Result<Vec<Item>, String> {
         // 「这个目录是不是某个插件的家」**必须问 pluginfs**，不能自己拼文件名：
         // 一包多插件是 `<name>/<name>/index.js`（mcloud、yangshipin 都是），
         // 自己只看 `<name>/index.js` 会把它们判成「没有主文件的目录 ⇒ 可清理」——
-        // 那一按下去就删掉一个正在跑的插件。第 270 轮真机截图时抓到。
+        // 那一按下去就删掉一个正在跑的插件。真机截图时抓到。
         let has_main = d && crate::pluginfs::dir_entry(dir, name).is_some();
         let c = classify_plugin(name, base, d, has_main, twin_dir);
         item.kind = c.0.to_string();
@@ -329,7 +329,7 @@ pub struct Trashed {
 
 /// 解析回收站条目名，认两种世代：
 ///
-///   · 第 270 轮起（本模块写的）：`<stamp>-<area>-<原名>`，一整个搬，名字无损；
+/// · （本模块写的）：`<stamp>-<area>-<原名>`，一整个搬，名字无损；
 ///   · 老世代（插件/脚本删除接口写的）：`<name>-<stamp>.plugin|.js|.webui`、`script-<name>-<stamp>`。
 ///
 /// 两世代都要认：用户升级面板之前删的东西也得能看见、能恢复。
@@ -365,7 +365,7 @@ pub fn parse_trash_entry(entry: &str) -> Option<Trashed> {
     }
     // 老世代 · 插件：<name>-<stamp>.plugin|.js|.webui
     //
-    // ⚠ `script-` 开头的不能按插件解析：老脚本删除写的是 `script-<name>-<stamp>`，
+    // `script-` 开头的不能按插件解析：老脚本删除写的是 `script-<name>-<stamp>`，
     // 但它**没有扩展名约束**，同一个文件被删两次就会叠成
     // `script-demo-script-1794642865345.js`（真机上就有这么一条）。按插件解析会把
     // 「script-demo-script」当成插件名、恢复成 `plugins/script-demo-script.js` ——

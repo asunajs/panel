@@ -1,4 +1,4 @@
-//! 按 URL / 本地路径**装插件**（第 107 轮）。
+//! 按 URL / 本地路径**装插件**。
 //!
 //! 背景：商店不做成面板内置功能，而是**侧载**进来的一个普通插件。但侧载的商店
 //! 自己有两条够不到的地方，所以面板必须补这一条通用能力：
@@ -36,7 +36,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// 从 URL 末段猜插件文件名（`…/mcloud.zip` → `mcloud.zip`）。
 ///
 /// 只认 `.js` / `.ts` / `.zip`：和上传同一套规矩，别让「安装」变成「往插件目录写
-/// 任意文件」的洞。`.ts` 会在落盘前用 OXC 擦掉类型、写成同名 `.js`（第 108 轮）。
+/// 任意文件」的洞。`.ts` 会在落盘前用 OXC 擦掉类型、写成同名 `.js`。
 pub fn name_from_url(url: &str) -> Result<String, String> {
     let bare = url.split(['?', '#']).next().unwrap_or("");
     let last = bare
@@ -65,7 +65,7 @@ fn check_name(name: &str) -> Result<(), String> {
 
 /// 下载一个 URL 的**原始字节**（不是 lossy 文本）。
 ///
-/// 第 267 轮起走 `gh::rewrite_all`：按「镜像 → 直连」逐个试，每个通道留一条读数。
+/// 走 `gh::rewrite_all`：按「镜像 → 直连」逐个试，每个通道留一条读数。
 /// 以前的下载是单发直连 —— 配了镜像也没用，GitHub 一被墙插件就装不上。
 ///
 /// ⚠ 还要防「镜像回 200 但内容是一张网页」：实测 `github.akams.cn?url=<资产>` 就是
@@ -368,7 +368,7 @@ mod tests {
         // 只认 .js / .ts / .zip：别的扩展名一律拒绝，别把安装变成往插件目录写任意文件
         assert!(name_from_url("https://x/y/run.sh").is_err());
         assert!(name_from_url("https://x/y/").is_err());
-        // .ts 现在也认（第 108 轮：落盘前转译成 .js）
+        // .ts 现在也认（落盘前转译成 .js）
         assert_eq!(name_from_url("https://x/y/quark.ts").unwrap(), "quark.ts");
     }
 

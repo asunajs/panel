@@ -14,7 +14,7 @@ use crate::db::Db;
 
 pub use redact::prepare_msg;
 
-/// 日志级别。四个档，**debug 是「正常但没人想逐条看」的那些**（第 255 轮）：
+/// 日志级别。四个档，**debug 是「正常但没人想逐条看」的那些**：
 /// 空闲卸载 / 装回来了这类生命周期流水，以前一律 info，把真正的任务日志挤得没处站。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,7 +36,7 @@ impl Level {
     }
 }
 
-/// 日志「来源」。界面按它分栏（第 199 轮）。
+/// 日志「来源」。界面按它分栏。
 ///
 /// 为什么要分开：有人刷 404/401 时，HTTP 那类日志会以每秒几十条的速度把面板自己的
 /// 日志挤没 —— 但这些行本身是必须留的证据（谁在打、打了什么）。分开存、分开看，
@@ -93,7 +93,7 @@ pub struct LogHub {
     tx: broadcast::Sender<LogLine>,
     /// 落库队列。**单消费者**，所以库里 `id` 的顺序就是 `emit` 的调用顺序。
     ///
-    /// 为什么不能每条 `tokio::spawn` 一个写：第 39 轮实测，一个 handler 连打 300 行，
+    /// 为什么不能每条 `tokio::spawn` 一个写：实测，一个 handler 连打 300 行，
     /// 按 `id` 排序有 16 处乱序（2000 行时开始出现「开始」排在「结束」后面）。
     /// SSE 是实时的、顺序正确，一刷新反了 —— 看某次运行为什么失败时这很要命。
     q: tokio::sync::mpsc::UnboundedSender<LogLine>,

@@ -43,9 +43,9 @@ pub fn max_bytes() -> u64 {
 pub const DEFAULT_BUDGET_MS: u64 = 300_000;
 /// 下限：再小连一次 HTTP 握手都跑不完，设成 100ms 只会让所有任务集体超时。
 const MIN_BUDGET_MS: u64 = 1_000;
-/// 单次运行**上限**的默认值：90 分钟（第 227 轮起可配）。
+/// 单次运行**上限**的默认值：90 分钟（可配）。
 ///
-/// 为什么做成可配：90 分钟是我们拍的，不是物理上限。「一个账号的任务要跑很久」是真实需求
+/// 为什么做成可配：90 分钟是拍出来的默认值，不是物理上限。「一个账号的任务要跑很久」是真实需求
 /// （央视频看视频类任务光节奏等待就 20 分钟量级），硬顶 90 分钟只会逼插件把节奏压紧。
 pub const DEFAULT_BUDGET_MAX_MS: u64 = 5_400_000;
 const MIN_BUDGET_MAX_MS: u64 = 60_000;
@@ -133,7 +133,7 @@ pub const ENV_BUDGET_MS: &str = "PANEL_BUDGET_MS";
 /// 本次启动生效的默认预算。环境变量非法就退回默认值（同 `max_bytes`：不因为一个笔误拒绝启动），
 /// 但会在 `[1s, 90min]` 之间夹一次 —— 0 或天文数字都是笔误，夹回可用范围比报错更有用。
 pub fn budget_ms() -> u64 {
-    // 优先级：环境变量 > config.json 的 `run.budget_ms` > 默认（第 207 轮加了中间这层，
+    // 优先级：环境变量 > config.json 的 `run.budget_ms` > 默认（加了中间这层，
     // 界面上的「单次运行预算」就是它；环境变量留着给老部署/临时覆盖）。
     if let Ok(s) = std::env::var(ENV_BUDGET_MS) {
         return match s.trim().parse::<u64>() {
@@ -220,10 +220,10 @@ pub fn load_plugin(data_dir: &Path, name: &str) -> Result<Value, String> {
 #[path = "config_tests.rs"]
 mod tests;
 
-// ---------------------------------------------------------------- 服务段（第 207 轮）
+// ---------------------------------------------------------------- 服务段
 //
 // 以前监听地址只能靠环境变量 `PANEL_BIND`、反代只能靠 `PANEL_ALLOW_ANY_HOST` ——
-// 用户的原话是「优化配置，我需要更多配置，比如绑定端口，地址…以及 x-forwarded-for」。
+// 需求：更多可配置项（绑定端口、地址、x-forwarded-for）。
 // 现在这些进 config.json 的 `server` 段，界面上是表单：
 //
 //   "server": { "bind": "127.0.0.1:3030", "trust_xff": false, "allow_any_host": false }
@@ -375,12 +375,12 @@ pub fn github_from_value(v: &Value) -> (Vec<String>, String) {
 }
 
 pub fn refresh_server(v: &Value) {
-    // 出站代理也是热的（第 192 轮）：保存即换客户端，下一发请求就走新代理
+    // 出站代理也是热的：保存即换客户端，下一发请求就走新代理
     crate::outbound::set_proxy(&proxy_from_value(v));
-    // 前缀代理（第 193 轮）：同样热生效，下一发 GitHub 请求就换个走法
+    // 前缀代理：同样热生效，下一发 GitHub 请求就换个走法
     let (pfx, hosts) = prefix_from_value(v);
     crate::outbound::set_prefix(&pfx, &hosts);
-    // GitHub 通道（第 267 轮）：mirrors 有序 + token，面板自己和插件共用这一份
+    // GitHub 通道：mirrors 有序 + token，面板自己和插件共用这一份
     let (mirrors, token) = github_from_value(v);
     crate::gh::set(mirrors, token, hosts);
     set_server(server_from_value(v).1);
@@ -389,7 +389,7 @@ pub fn refresh_server(v: &Value) {
             .and_then(|r| r.get("budget_ms"))
             .and_then(Value::as_u64),
     );
-    // 第 227 轮：单次上限、队列上限、单条排队上限 —— 都是热的
+    // 单次上限、队列上限、单条排队上限 —— 都是热的
     set_run_budget_max(
         v.get("run")
             .and_then(|r| r.get("budget_max_ms"))
@@ -407,7 +407,7 @@ pub fn refresh_server(v: &Value) {
     set_limits(limits_from_value(v));
 }
 
-// ---------------------------------------------------------------- 保留与上限（第 208 轮）
+// ---------------------------------------------------------------- 保留与上限
 //
 // 「设置 → 配置」里的第二组：保留多少条记录、HTTP 错误日志每分钟最多记几条、
 // 单个插件源码多大。都是**热**的：清理任务每 5 分钟读一次，中间件每条错误读一次，

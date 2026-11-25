@@ -195,7 +195,7 @@ pub struct WinTaskSpec {
 
 pub fn windows_task_spec(label: &str, exe: &std::path::Path, dir: &std::path::Path) -> WinTaskSpec {
     let start_cmd_path = dir.join("panel-start.cmd");
-    // `@echo off` + `cd /d` 之后前台跑 exe：计划任务的「起始于」不由我们控制，
+    // `@echo off` + `cd /d` 之后前台跑 exe：计划任务的「起始于」不由本程序控制，
     // 而面板的 data/plugins 是相对工作目录的，不切目录就是「服务起来后数据没了」。
     let start_cmd_body = format!(
         "@echo off\r\ncd /d \"{dir}\"\r\n\"{exe}\"\r\n",

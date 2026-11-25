@@ -413,7 +413,7 @@ impl Conn {
         let has = |m: &str| mechs.split_whitespace().any(|x| x == m);
 
         // 没声明任何机制时也试 PLAIN：有些服务器只在 TLS 之后才报 AUTH，
-        // 而我们已经升过级了 —— 试一下比直接失败有用。
+        // 而本实现已升级 —— 试一下比直接失败有用。
         if mechs.is_empty() || has("PLAIN") {
             let token = b64(&format!("\0{}\0{}", cfg.user, cfg.pass));
             let (code, text) = self.cmd(&format!("AUTH PLAIN {token}"))?;
@@ -541,7 +541,7 @@ fn read_ca_file(path: &std::path::Path) -> Result<String, String> {
 /// 从一个 PEM 文件里读出所有证书。
 ///
 /// 自己解析而不是引 `rustls-pemfile`：只需要「把 BEGIN/END 之间的 base64 抠出来
-/// 解码」这一点，而 base64 我们已经有了。多一个依赖对离线构建是实打实的成本。
+/// 解码」这一点，而 base64 已有实现。多一个依赖对离线构建是实打实的成本。
 fn load_pem_certs(
     path: &std::path::Path,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
@@ -592,7 +592,7 @@ fn build_message(cfg: &Config) -> Result<String, String> {
         .join(", ");
     out.push_str(&format!("To: {to_header}\r\n"));
     out.push_str(&format!("Subject: {}\r\n", encode_header(&cfg.subject)));
-    // 日期用本地时区：收件人看到的是「你发的时候」，而 `to_rfc2822` 带 +0800 这种
+    // 日期用本地时区：收件人看到的是「发送时刻」，而 `to_rfc2822` 带 +0800 这种
     // 偏移，符合 RFC 2822，不需要自己算 UTC
     out.push_str(&format!("Date: {}\r\n", chrono::Local::now().to_rfc2822()));
     out.push_str(&format!("Message-ID: {}\r\n", message_id(&cfg.from)));

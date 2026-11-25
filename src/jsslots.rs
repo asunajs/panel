@@ -4,8 +4,8 @@
 //! `while(true){}` 会结结实实占满一个 tokio worker，直到预算打卡 —— 而预算默认 30 秒。
 //! 面板的 HTTP、调度循环、DB actor 都跑在同一组 worker 上，占满了就等于整个面板失去响应。
 //!
-//! 第 34 轮在脚本上实测过：10 核机器 12 个并发死循环，`/api/state` 从 4ms 涨到 1963ms。
-//! 第 35 轮在**插件**上更糟：同样 12 个，HTTP 直接连不上（连接被排队 3 秒以上），
+//! 在脚本上实测过：10 核机器 12 个并发死循环，`/api/state` 从 4ms 涨到 1963ms。
+//! 在**插件**上更糟：同样 12 个，HTTP 直接连不上（连接被排队 3 秒以上），
 //! 因为插件 dispatch 没人管并发。
 //!
 //! 所以插件 dispatch 和脚本**共用**这一套名额：留 2 个 worker 给服务本身。
@@ -41,7 +41,7 @@ pub async fn acquire() -> Option<OwnedSemaphorePermit> {
 /// 当前还有几个空位。
 ///
 /// 只有 jsslots_tests 用得到（`cargo clippy --all-targets` 在**不编测试**的那趟里
-/// 会报 never used —— 别照着那个提示删，删了测试就编不过，第 212 轮踩过）。
+/// 会报 never used —— 别照着那个提示删，删了测试就编不过，踩过）。
 #[allow(dead_code)] // 只有 jsslots_tests 用；clippy 在不编测试的那趟里会误报（pitfalls §64）
 pub fn available() -> usize {
     cell().available_permits()

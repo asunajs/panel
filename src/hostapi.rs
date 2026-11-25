@@ -44,10 +44,10 @@ pub enum Registration {
         /// 手动任务的执行预算（毫秒）。0.4.1 起 `register_handler` 的第三个参数，
         /// 不给就是默认 30 秒 —— 长链路任务要在注册时显式声明。
         budget_ms: u64,
-        /// 注册成「默认暂停」（第 227 轮，`register_handler(n, fn, budget, {paused:true})`）：
+        /// 注册成「默认暂停」（`register_handler(n, fn, budget, {paused:true})`）：
         /// 只留手动入口，定时不跑。和注册是同一个动作，所以不会跟 `set_job_paused` 抢顺序。
         paused: bool,
-        /// 内部任务（第 227 轮，`{hidden:true}`）：能按名字跑，但**不在任务页露面**。
+        /// 内部任务（`{hidden:true}`）：能按名字跑，但**不在任务页露面**。
         /// 插件把一次性调用当内部实现时用它 —— 否则任务页会多出一行没人看得懂的东西。
         hidden: bool,
     },
@@ -56,7 +56,7 @@ pub enum Registration {
     Web {
         plugin: String,
     },
-    /// 侧边栏入口（`host.sidebar({title, order})`，第 139 轮）：
+    /// 侧边栏入口（`host.sidebar({title, order})`）：
     /// 插件带界面的，要在面板左侧栏里有一格 —— 否则用户只能去「插件 → 详情 → 开界面」
     /// 找它（旧面板用 `register_nav` 干这件事，插件里那句 `[nav] 这个面板没有侧栏注册`
     /// 就是当年留下的坑）。
@@ -82,11 +82,11 @@ pub struct HostHandle {
     /// 调度器句柄（只有插件加载时给）。脚本没有任务表，所以是 None ——
     /// `set_job_*` 在脚本里会直接报错，而不是静默无事发生。
     pub sched: Option<crate::scheduler::Scheduler>,
-    /// 数据目录：插件自己的配置在 `<data_dir>/plugin-data/<name>/config.json`（第 89 轮）。
+    /// 数据目录：插件自己的配置在 `<data_dir>/plugin-data/<name>/config.json`。
     pub data_dir: std::path::PathBuf,
     /// 目录式插件自己的目录（`plugins/<name>/`）；单文件插件是 `None`。
     ///
-    /// 为什么要有它（第 216 轮）：`node:fs` 的相对路径按**面板进程 cwd** 解析，
+    /// 为什么要有它：`node:fs` 的相对路径按**面板进程 cwd** 解析，
     /// 插件想读自己目录里的非 JS 资源（模板、词表）时，没有可靠办法拿到那个路径。
     pub plugin_root: Option<std::path::PathBuf>,
 }
@@ -143,7 +143,7 @@ const WRAP: &str = r#"(raw) => {
     set_job_summary: async (name, text) => raw.set_job_summary(String(name), String(text ?? '')),
     set_job_blockers: async (name, list) => raw.set_job_blockers(String(name), JSON.stringify(list ?? [])),
     set_job_schedule: async (name, opts) => raw.set_job_schedule(String(name), j(opts)),
-    // 一次性调用（第 227 轮）：{ params, budget_ms, at } → { ok, state:'queued', position }
+    // 一次性调用：{ params, budget_ms, at } → { ok, state:'queued', position }
     run_once: async (name, opts) => JSON.parse(await raw.run_once(String(name), j(opts ?? {}))),
     smtp_send: (opts) => raw.smtp_send(j(opts)),
     panel_version: () => raw.panel_version(),
@@ -409,7 +409,7 @@ async fn op_notify(
     opts: Undefined<String>,
 ) -> Result<()> {
     let host = host(&ctx)?;
-    // opts = { level }（第 227 轮）：插件喊话默认 info，但「一趟挂了」这种该是 warn ——
+    // opts = { level }：插件喊话默认 info，但「一趟挂了」这种该是 warn ——
     // 推送规则可以按 min_level 卡，写死 info 会让它被静默丢掉。
     let o: Json = match opts.0.as_deref() {
         None | Some("") => Json::Null,
@@ -467,7 +467,7 @@ async fn op_plugin_data_dir(ctx: Ctx<'_>) -> Result<String> {
         .to_string())
 }
 
-/// `host.self_config()` —— 这个插件**自己**的配置（第 89 轮）。
+/// `host.self_config()` —— 这个插件**自己**的配置。
 ///
 /// 和 `host.config()` 的区别：那是面板级配置（每个插件拿到的都一样），这是
 /// `<PANEL_DATA_DIR>/plugin-data/<name>/config.json` —— 界面「插件 → 配置」改的就是它。
@@ -836,7 +836,7 @@ async fn op_set_job_paused(ctx: Ctx<'_>, name: String, paused: bool) -> Result<(
         .map_err(|e| err(&ctx, e))
 }
 
-/// `host.run_once(name, { params?, budget_ms?, at? })` —— 临时跑一次（第 227 轮）。
+/// `host.run_once(name, { params?, budget_ms?, at? })` —— 临时跑一次。
 ///
 /// 为什么需要它：一个插件只有一个执行位（一个 `AsyncContext`，不能重入），而「8 个账号各跑
 /// 20 分钟」这类活既塞不进一条 cron（错开公式会撞车），也塞不进一次 handler（预算有上限）。
@@ -914,8 +914,8 @@ async fn op_set_job_blockers(ctx: Ctx<'_>, name: String, blockers: String) -> Re
 ///
 /// 为什么较真：`set_job_schedule('x', {cron: '@every 6h'})` 这种写错键名的调用，
 /// 以前会静默变成「撤销覆盖」——HTTP 侧连续踩过三次同类问题（第 36/53/65 轮），
-/// 这次是 host op 这一侧（第 73 轮跑演示插件时踩到）。插件作者看不到任何反馈，
-/// 只能干瞪眼「为什么我的任务没有按计划跑」。
+/// 这次是 host op 这一侧（跑演示插件时踩到）。插件作者看不到任何反馈，
+/// 只能干瞪眼「为什么这条任务没有按计划跑」。
 fn only_keys(o: &Json, allowed: &[&str], what: &str) -> std::result::Result<(), String> {
     let Some(map) = o.as_object() else {
         // null / 非对象：交给各 op 自己的默认值逻辑（null 表示「没传」）
@@ -1052,7 +1052,7 @@ async fn op_register_cron(
 ///
 /// 和 `register_handler` 分开是为了**不建任务**：路由是服务，不是定时任务，
 /// 让它出现在任务列表里只是噪音。
-/// `host.sidebar({title, order})` —— 在面板左侧栏给我一格（第 139 轮）。
+/// `host.sidebar({title, order})` —— 在面板左侧栏占一格。
 ///
 /// 为什么需要：插件带界面时，用户不该只能从「插件 → 详情 → 开界面」里找它。
 /// 旧面板用 `register_nav` 做这件事，mcloud 那族插件里还留着那个调用（在 0.3 的面板上
@@ -1115,7 +1115,7 @@ async fn op_register_handler<'js>(
     handlers.set(name.as_str(), func)?;
     // 手动任务的预算：不给就是默认 30 秒；和 register_cron 同一个语义（0.4.1 起）。
     let budget = budget_ms.0.unwrap_or(crate::scheduler::default_budget_ms());
-    // opts 是 JSON 文本：{ paused }。第 227 轮加的 —— 插件要一条「只手动、不定时」的任务。
+    // opts 是 JSON 文本：{ paused }。加的 —— 插件要一条「只手动、不定时」的任务。
     let o: Json = match opts.0.as_deref() {
         None | Some("") => Json::Null,
         Some(t) => serde_json::from_str(t)
@@ -1139,7 +1139,7 @@ mod only_keys_tests {
     use super::only_keys;
     use serde_json::json;
 
-    /// 写错键名要报错：第 73 轮跑演示插件时踩到 `{cron: ...}` 被静默当成「撤销覆盖」。
+    /// 写错键名要报错：跑演示插件时踩到 `{cron: ...}` 被静默当成「撤销覆盖」。
     #[test]
     fn a_misspelled_option_is_rejected_with_the_allowed_list() {
         let e = only_keys(&json!({ "cron": "@every 6h" }), &["expr", "lead_ms"], "set_job_schedule")

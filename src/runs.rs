@@ -3,7 +3,7 @@
 //! 为什么要单独一个模块：任务（`scheduler.rs`）和脚本（`scripts.rs`）各写了一份
 //! 一模一样的 SQL，两份的收尾都写成 `let _ = ...` —— 命中 0 行时**完全静默**。
 //! 0 行意味着「界面上这次运行既没有成功也没有失败」，是最需要说出来的一种情况
-//! （第 84 轮修掉的「保留策略剪掉正在跑的行」就是它的一个成因）。
+//! （修掉的「保留策略剪掉正在跑的行」就是它的一个成因）。
 
 use crate::db::Db;
 use crate::log::{Level, LogHub};
@@ -29,7 +29,7 @@ pub async fn open(db: &Db, plugin: &str, task: &str, started_ms: i64) -> Result<
 ///
 /// 界面「跑过」这一列要的是它：`TaskView.runs` 只是**本进程内**的计数
 /// （`advance()` 里 +1，重启 / 插件重载就归零），拿它当「总共跑过几次」会全是 0
-/// （第 257 轮用户截图就是这么问的）。一条聚合覆盖所有任务，别逐行去问库。
+/// （用户截图就是这么问的）。一条聚合覆盖所有任务，别逐行去问库。
 pub async fn totals_by_task(db: &Db) -> Result<HashMap<(String, String), u64>, String> {
     db.call(|c| {
         let mut stmt = c

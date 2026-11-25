@@ -134,12 +134,12 @@ impl Invocation {
     }
 }
 
-/// 只编译、不执行：给 panel plugin check 用（第 176 轮）。
+/// 只编译、不执行：给 panel plugin check 用。
 ///
 /// 为什么不用「跑一遍」代替：插件顶层代码可能连网、写文件、注册定时任务 ——
 /// 拿真面板去试跑等于让检查动作自己有副作用。Module::declare 只做编译，
 /// 语法错、import 写错、模板字符串没闭合都会在这里现形。
-/// 检查用：任何 import 都解析成「同名空模块」—— 我们只关心语法，
+/// 检查用：任何 import 都解析成「同名空模块」—— 这里只关心语法，
 /// 不关心 panel:host / node:fs 到底能不能加载（那是运行时的事）。
 struct AnyResolver;
 impl Resolver for AnyResolver {
@@ -237,7 +237,7 @@ globalThis.__dispatch = (name, evtJson) => {
 // 定时器闸门：JS 定时器会踩「1 插件 1 runtime」的退出路径（docs/engine.md 的定时器与退出路径一节）。
 //
 // setInterval 直接禁掉：它的循环任务让 eval_module 永不返回（实测 load 卡死），
-// 而且我们没有任何办法在析构前把它清掉。
+// 而且没有任何办法在析构前把它清掉。
 // setTimeout 只放行 5 秒以内的：长等待会让卸载等它烧完，短定时器是插件里常见的
 // 防抖/延迟用途，代价可控。
 (() => {
@@ -259,7 +259,7 @@ globalThis.__dispatch = (name, evtJson) => {
 })();
 "#;
 
-/// WHATWG 的 `CompressionStream` / `DecompressionStream`（第 254 轮）。
+/// WHATWG 的 `CompressionStream` / `DecompressionStream`。
 ///
 /// LLRT 有 `stream/web` 的 TransformStream、也有 `node:zlib`，但**没有**这两个类。
 /// 这里用「TransformStream 收集字节 → flush 时调原生 `__panelZlib`」实现：
@@ -361,11 +361,11 @@ impl Drop for Plugin {
 }
 
 
-/// 插件目录内的文件模块（第 216 轮）：让 `import './lib/x.js'` 能工作。
+/// 插件目录内的文件模块：让 `import './lib/x.js'` 能工作。
 ///
 /// 为什么自己写：rquickjs 只给了 `FileResolver`（解析名字），**没有配一个读文件的 loader**
 /// —— 它解析出来的路径没人读，所以相对 import 在面板里一直是失败的（`Error resolving
-/// module './helper.js' from 'eval_script'`）。这里配对：解析和读取都是我们自己的。
+/// module './helper.js' from 'eval_script'`）。这里配对：解析和读取都在本模块。
 ///
 /// 边界（都是刻意的）：
 ///   · 只接 `./` `../` 开头的说明符，其余交给后面那几个（内置模块 / 包）；
@@ -483,7 +483,7 @@ impl Plugin {
         root: Option<std::path::PathBuf>,
         handle: HostHandle,
     ) -> std::result::Result<Self, String> {
-        // 入口文件（第 269 轮）：root 下的 index.js 或 <目录名>.js。
+        // 入口文件：root 下的 index.js 或 <目录名>.js。
         // 传给 eval 当 base —— 相对 import 从入口文件所在目录算起。
         let entry = root.as_ref().and_then(|r| {
             let stem = r
@@ -570,7 +570,7 @@ impl Plugin {
                 // 裸名 fetch：上面 g.remove 摘掉的是 LLRT 自带那个（直连 HTTP_CLIENT、
                 // 不经门）；这里装回面板的实现，与 host.fetch 同一 WRAP 同一契约。
                 crate::hostapi::install_global_fetch(&ctx)?;
-                // Web 压缩 API 的原生底座：CompressionStream / DecompressionStream 走它（第 254 轮）
+                // Web 压缩 API 的原生底座：CompressionStream / DecompressionStream 走它
                 crate::zlibsync::install(&ctx)?;
                 ctx.eval_with_options::<Value, _>(BOOTSTRAP, EvalOptions::default())?;
                 ctx.eval_with_options::<Value, _>(COMPAT_WEB, EvalOptions::default())?;
@@ -633,7 +633,7 @@ impl Plugin {
     /// 不能像 `Vm::from_options` 那样把进程带走。
     /// 入口模块的 base 名可指定：`opts.filename` 决定了相对 import「相对谁」。
     ///
-    /// 第 269 轮：收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里
+    /// 收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里
     /// （`mcloud/mcloud-daily/index.js`），base 必须指到那个文件，
     /// 否则 `import '../lib.js'` 会从属地表层算，解析到不存在的路径。
     /// 老形状（`<name>/index.js`）不传 —— base 落回插件根，行为不变。

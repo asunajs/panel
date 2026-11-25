@@ -32,7 +32,7 @@ pub enum Kind {
 pub struct Saved {
     pub files: Vec<String>,
     /// 其中**覆盖了已有文件**的那些（相对上传根）。界面据此说实话：
-    /// 「已上传」和「已覆盖」是两件事，用户要能立刻分辨（第 133 轮）。
+    /// 「已上传」和「已覆盖」是两件事，用户要能立刻分辨。
     pub replaced: Vec<String>,
     pub bytes: u64,
     pub zip: bool,
@@ -203,11 +203,11 @@ fn validate_plugin_shape(rels: &[PathBuf]) -> Result<(), String> {
 }
 
 
-/// 把「一个插件摊成三件散件」的落点折叠成 `<name>/`（第 269 轮）。
+/// 把「一个插件摊成三件散件」的落点折叠成 `<name>/`。
 ///
 /// 只在**zip 安装**这条路上做：单文件上传没有 `.panel.json` / `.webui` 可折。
 /// 判据：顶层名 `<X>.js` / `<X>.panel.json` / `<X>.webui` 且**同一个 X 至少有两件**
-/// （只有一件时保持原样 —— 那是别人手放的零散文件，别替他做主）。
+/// （只有一件时保持原样 —— 那是别人手放的零散文件，别替用户做主）。
 ///
 /// 返回新的相对路径列表（已经加了一级 `<X>/`）；搬运时按新路径落盘。
 fn collapse_into_group(
@@ -289,7 +289,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     let mut names: Vec<PathBuf> = Vec::new();
     let mut total: u64 = 0;
     // 「zip 里至少有一个能跑的文件」必须在**落盘之前**判定：放在第二遍的末尾的话，
-    // 一个只有 readme.md 的 zip 会先把 readme.md 写进 plugins/ 再报错（第 30 轮测试抓到）。
+    // 一个只有 readme.md 的 zip 会先把 readme.md 写进 plugins/ 再报错（测试抓到）。
     let mut has_script = false;
     for i in 0..archive.len() {
         let f = archive
@@ -350,7 +350,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     }
 
     let mut strip = common_wrapper(root, &names);
-    // 目录式插件（第 216 轮）：`<name>/index.js` + `<name>/lib/…` 打成 zip 时，
+    // 目录式插件：`<name>/index.js` + `<name>/lib/…` 打成 zip 时，
     // 把外层目录剥掉会把 index.js 摊到 plugins/ 根上 —— 面板按 `<name>/index.js`
     // 找入口，摊平的结果是「装好了但看不见」。所以这种包**保留外层目录**。
     if let Some(prefix) = strip.clone() {
@@ -386,7 +386,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
             .collect();
         validate_plugin_shape(&rels)?;
     }
-    // 解压先落到**临时目录**，全部验完再搬进 plugins/（2026-11-25 用户要求）。
+    // 解压先落到**临时目录**，全部验完再搬进 plugins/。
     // 为什么：以前边解边写，一个中途报错的包会把半份文件留在 plugins/ 里 ——
     // 群里那次「插件目录被污染」就是这么来的。临时目录 + 最后统一搬，失败时 plugins/ 一个字节都不动。
     // ⚠ 用**自己的**临时目录（放在 plugins/ 下、以 . 开头），不用系统 /tmp：
@@ -446,7 +446,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         let parent = ensure_dir(&staging, rel.parent().unwrap_or(Path::new("")))?;
         let dest = parent.join(rel.file_name().unwrap());
 
-        // ⚠ 审计中8：这里**不能**信 `f.size()` —— 它是 central directory 里由
+        // 这里**不能**信 `f.size()` —— 它是 central directory 里由
         // 攻击者写的**声明值**（zip 2.6.1 的读路径只对**压缩数据**加 `io::Take`，
         // 解压输出没有任何上限）。声明 `size=1`、deflate 实际解出几百 MB 是可行的，
         // 而 MAX_UPLOAD_BODY 72 MiB + 高压缩比足以把内存打爆。
@@ -486,7 +486,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         written.push(rel.clone());
     }
 
-    // 收拢形状（第 269 轮）：装进来的插件落成 `<name>/<name>.js + <name>.panel.json + <name>.webui/`，
+    // 收拢形状：装进来的插件落成 `<name>/<name>.js + <name>.panel.json + <name>.webui/`，
     // 不再往 plugins/ 顶层摊三个散件。老机制的发现顺序仍然认散件，所以这里只是**落点**变了，
     // 装法/校验/覆盖语义全不变。单文件上传（`<name>.js`）不折叠 —— 那本来就是「一个文件一个插件」。
     let planned: Vec<(PathBuf, PathBuf)> = if kind == Kind::Plugins {
@@ -533,7 +533,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
     files.sort();
     replaced.sort();
 
-    // 更新时清掉**另一种形状**的残留（第 269 轮）：装成 `<X>/` 之后，顶层那份
+    // 更新时清掉**另一种形状**的残留：装成 `<X>/` 之后，顶层那份
     // `<X>.js` / `<X>.panel.json` / `<X>.webui/` 就是旧拷贝 —— 面板按名字去重、
     // 优先顶层 `.js`，留着它等于「界面显示新版本、实际跑旧代码」。
     // 只删**这次确实装了这个插件**的那几件（`<X>` 在折叠集合里），不碰别人的文件。
@@ -703,9 +703,9 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<b
     // rename 在同盘是原子的：要么旧内容、要么新内容，没有中间态。
     let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("");
     let tmp = dest.with_extension(format!("{ext}.tmp"));
-    // create_new（第 190 轮安全 review）：fs::write 会跟随符号链接 —— 别人在
+    // create_new（安全 review）：fs::write 会跟随符号链接 —— 别人在
     // plugins/ 里预置一个 x.js.tmp -> ~/.ssh/authorized_keys，面板就以自己的身份写过去了。
-    // 用 create_new 只认「这个文件刚被我创建」，链接/已存在的文件一律失败。
+    // 用 create_new 只认「这个文件刚由本进程创建」，链接/已存在的文件一律失败。
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -1011,10 +1011,10 @@ mod tests {
         forge_declared_size_one(out.into_inner())
     }
 
-    /// 审计中8：上限必须按**实际解压量**判，不能信声明值。
+    /// 上限必须按**实际解压量**判，不能信声明值。
     ///
     /// 造一个压缩后只有几十 KB、声明 `size=1`、实际解压 32 MiB + 1 的条目。
-    /// 修复前它会被放过去（读满内存之后才判），修复后必须在**读的时候就刹住**。
+    /// 判晚了会被放过去（读满内存之后才判），必须在**读的时候就刹住**。
     #[test]
     fn declared_size_does_not_cap_decompressed_bytes() {
         let root = tmpdir("zip-bomb-one");
@@ -1028,7 +1028,7 @@ mod tests {
         // 两道防线，命中哪一道都算过：
         //   ① zip 9 自己在读流时会拒「实际解压量 > 声明值」（`File is larger than its
         //      declared uncompressed size`）—— 这是升级 zip 9 白捡的；
-        //   ② 我们的 `take(上限+1)` + 按实际 `buf.len()` 记账。
+        //   ② `take(上限+1)` + 按实际 `buf.len()` 记账。
         // 为什么要留②：①是**依赖库**的行为，将来换版本/换解压后端就可能没有；
         // 而「按实际字节记账」这条是 upload.rs 自己的不变式，不该寄存在别人身上。
         assert!(
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn dir_plugin_zip_keeps_its_wrapper_dir() {
-        // 目录式插件（第 216 轮）：`<name>/index.js` + `<name>/lib/x.js`。
+        // 目录式插件：`<name>/index.js` + `<name>/lib/x.js`。
         // 剥掉外层目录会把 index.js 摊到 plugins/ 根上 → 面板「装好了但看不见」。
         let root = tmpdir("dirzip");
         let zip = make_zip(&[

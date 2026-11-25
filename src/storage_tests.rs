@@ -3,7 +3,7 @@
 use super::*;
 use std::path::PathBuf;
 
-/// 每个用例一个独立目录：几个用例并行跑，同 tag 会互相踩（第 269 轮踩过一次）。
+/// 每个用例一个独立目录：几个用例并行跑，同 tag 会互相踩（踩过一次）。
 fn tmp(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let i = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -36,7 +36,7 @@ fn plugins_are_classified_by_shape() {
     // 收拢：mgmusic/
     w(&d.join("mgmusic/mgmusic.js"), "export default 1");
     w(&d.join("mgmusic/mgmusic.panel.json"), "{}");
-    // 收拢目录 + 顶层旧拷贝：cmcc.js 与 cmcc/ 并存（第 269 轮的现场）
+    // 收拢目录 + 顶层旧拷贝：cmcc.js 与 cmcc/ 并存
     w(&d.join("cmcc/cmcc.js"), "export default 2");
     w(&d.join("cmcc.js"), "旧的");
     w(&d.join("cmcc.panel.json"), "{}");

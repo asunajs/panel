@@ -123,8 +123,8 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             error       TEXT
         );
         CREATE INDEX IF NOT EXISTS runs_plugin_started ON runs(plugin, started_at DESC);
-        -- 脚本页/任务页的「上一次运行」是 (plugin, task) → 最新一条（第 190 轮性能 review：
-        -- 没有这条索引时实测 1.5 万行同插件要 9ms/行，还带 USE TEMP B-TREE FOR ORDER BY）。
+        -- 脚本页/任务页的「上一次运行」是 (plugin, task) → 最新一条。
+        -- 没有这条索引时实测 1.5 万行同插件要 9ms/行，还带 USE TEMP B-TREE FOR ORDER BY。
         CREATE INDEX IF NOT EXISTS runs_plugin_task_id ON runs(plugin, task, id DESC);
 
         CREATE TABLE IF NOT EXISTS logs (
@@ -141,7 +141,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     .map_err(|e| format!("建表失败: {e}"))?;
 
     // 后加的列都走这条：SQLite 没有 ADD COLUMN IF NOT EXISTS。
-    // 插件级「暂停」（第 167 轮）：不卸载，只是不再触发它的定时任务。
+    // 插件级「暂停」：不卸载，只是不再触发它的定时任务。
     if !has_column(conn, "plugins", "suspended")? {
         conn.execute(
             "ALTER TABLE plugins ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0",
@@ -149,7 +149,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("加 suspended 失败: {e}"))?;
     }
-    // 发件箱的「重复次数」（第 171 轮）：同一个失败连着来 5 次，不该发 5 条。
+    // 发件箱的「重复次数」：同一个失败连着来 5 次，不该发 5 条。
     if !has_column(conn, "notify_outbox", "repeat")? {
         conn.execute(
             "ALTER TABLE notify_outbox ADD COLUMN repeat INTEGER NOT NULL DEFAULT 1",
@@ -175,7 +175,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("加 scripts.title 失败: {e}"))?;
     }
-    // 第 186 轮：定时推送要记住「上次什么时候发的」，不然每次 tick 都会重发。
+    // 定时推送要记住「上次什么时候发的」，不然每次 tick 都会重发。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notify_route_state (
             route     TEXT PRIMARY KEY,
@@ -184,7 +184,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("建 notify_route_state 失败: {e}"))?;
-    // 第 186 轮：发件箱要知道「这条是哪个推送触发的」（渠道与推送分开了）。
+    // 发件箱要知道「这条是哪个推送触发的」（渠道与推送分开了）。
     if !has_column(conn, "notify_outbox", "route")? {
         conn.execute(
             "ALTER TABLE notify_outbox ADD COLUMN route TEXT NOT NULL DEFAULT ''",
@@ -192,9 +192,9 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("加 route 失败: {e}"))?;
     }
-    // 第 179 轮：懒加载要知道「这个插件上次加载时有没有界面」——
+    // 懒加载要知道「这个插件上次加载时有没有界面」——
     // 有界面的必须立刻加载（用户可能正打开着它），没有的可以等下一次到点前再装。
-    // 第 199 轮：日志要能按「来源」分开看 —— 面板自己的、插件内部的、脚本的、
+    // 日志要能按「来源」分开看 —— 面板自己的、插件内部的、脚本的、
     // 以及 **HTTP 请求错误**。最后一种最需要隔离：有人刷 404/401 的时候，
     // 它会以每秒几十条的速度把面板自己的日志挤没（用户报的就是这个）。
     if !has_column(conn, "logs", "source")? {
@@ -228,9 +228,9 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         ("summary", "ALTER TABLE tasks ADD COLUMN summary TEXT"),
         ("blockers", "ALTER TABLE tasks ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]'"),
         ("lead_ms", "ALTER TABLE tasks ADD COLUMN lead_ms INTEGER"),
-        // 第 178 轮：任务删除的墓碑（NULL = 没删）。插件重载时靠它判断「这条是用户删的」
+        // 任务删除的墓碑（NULL = 没删）。插件重载时靠它判断「这条是用户删的」
         ("deleted_at", "ALTER TABLE tasks ADD COLUMN deleted_at INTEGER"),
-        // 第 180 轮：cron 改成「面板所有、插件只给建议」——
+        // cron 归「面板所有、插件只给建议」——
         //   生效的是 cron / budget_ms（用户说了算），下面这四个存插件最近一次的建议。
         ("suggest_cron", "ALTER TABLE tasks ADD COLUMN suggest_cron TEXT"),
         (
@@ -312,7 +312,7 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool, String>
 /// 库里的「已暂停」插件名单（`plugins.suspended = 1`）。
 ///
 /// 暂停 ≠ 停用：停用会卸载且重启不再加载（`disable`），暂停只是**不触发定时任务** ——
-/// 界面仍能打开、手动运行照旧能跑，但**不保证插件驻留内存**（第 189 轮起空闲卸载
+/// 界面仍能打开、手动运行照旧能跑，但**不保证插件驻留内存**（空闲卸载
 /// 也会把它收走，用到时 `ensure_loaded` 自动装回）。重启后仍记得。
 pub async fn plugin_suspended_names(db: &Db) -> Vec<String> {
     let rows = db
@@ -357,7 +357,7 @@ pub async fn set_plugin_suspended(db: &Db, name: &str, suspended: bool) -> Resul
 ///
 /// **只增不减**（MAX）：一次加载里 register_web / sidebar 的注册消息可能比 Loaded 晚到，
 /// 那样 Loaded 会先写下 0 —— 之后那条注册没来得及写就重启，库里就停在 0，下次启动
-/// 会把有界面的插件省掉（第 180 轮实测：mcloud 被跳过，界面打不开）。
+/// 会把有界面的插件省掉（实测：mcloud 被跳过，界面打不开）。
 /// 单调的代价是「插件自己把界面删了」也会被当成有界面 —— 比界面打不开好。
 pub async fn note_surface(db: &Db, name: &str, has_web: bool, has_nav: bool) {
     let name = name.to_string();
@@ -492,7 +492,7 @@ pub async fn set_plugin_enabled(db: &Db, name: &str, enabled: bool) -> Result<()
 /// 启动时统一标成 error 并写明原因 —— 比留一条假「运行中」诚实。
 /// 「面板重启时收尾了 N 条没跑完的运行」这条通知的内容。
 ///
-/// 单独拿出来是为了能测：面板是「你不在的时候在跑东西」的地方，被杀掉的那次运行
+/// 单独拿出来是为了能测：面板是「没人看着也在跑东西」的地方，被杀掉的那次运行
 /// 正是最该让人知道的事 —— 只写进日志等于默认有人会去翻。
 pub fn stale_notice(n: usize) -> crate::notify::Notice {
     crate::notify::Notice {
