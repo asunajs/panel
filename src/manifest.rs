@@ -217,7 +217,26 @@ impl Manifest {
 
 /// 清单文件路径（不保证存在）。
 pub fn path_for(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("{name}{SUFFIX}"))
+    // 多级查找（第 269 轮）：
+    //   ① 顶层（老形状）`<name>.panel.json`
+    //   ② 收拢形状 `<name>/<name>.panel.json`
+    //   ③ 一包多插件：属地目录是别的名字（`mcloud-daily` 的属地是 `mcloud/`），
+    //      清单在 `<group>/<name>.panel.json`
+    let top = dir.join(format!("{name}{SUFFIX}"));
+    if top.is_file() {
+        return top;
+    }
+    let nested = dir.join(name).join(format!("{name}{SUFFIX}"));
+    if nested.is_file() {
+        return nested;
+    }
+    if let Some(g) = crate::pluginfs::group_for(dir, name) {
+        let p = g.join(format!("{name}{SUFFIX}"));
+        if p.is_file() {
+            return p;
+        }
+    }
+    top
 }
 
 /// 清单缓存：路径 → (mtime, size, 解析结果)。

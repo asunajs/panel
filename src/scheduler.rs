@@ -2615,41 +2615,32 @@ impl Inner {
             // （相对 import 的根）和 host（host.plugin_dir()）；单文件插件是 None。
             let (source, root) = match (source, dir) {
                 (Some(src), dir) => {
-                    let is_dir = match dir.clone() {
-                        Some(d) => {
-                            let n = name.clone();
-                            tokio::task::spawn_blocking(move || {
-                                crate::pluginfs::is_dir_plugin(&d, &n)
-                            })
-                            .await
-                            .unwrap_or(false)
-                        }
-                        None => false,
+                    // 模块根统一走 module_root（第 269 轮）：以前 `dir.join(&name)`，
+                    // 老形态恰好相等；收拢形状 / 一包多插件时属地不是 `<name>/`。
+                    let d2 = match dir.clone() {
+                        Some(d) => d,
+                        None => std::path::PathBuf::new(),
                     };
-                    (
-                        src,
-                        if is_dir {
-                            dir.map(|d| d.join(&name))
-                        } else {
-                            None
-                        },
-                    )
+                    let n = name.clone();
+                    let root = tokio::task::spawn_blocking(move || {
+                        crate::pluginfs::module_root(&d2, &n)
+                    })
+                    .await
+                    .unwrap_or(None);
+                    (src, root)
                 }
                 (None, Some(d)) => {
                     let n = name.clone();
                     let d2 = d.clone();
                     let got = tokio::task::spawn_blocking(move || {
-                        let is_dir = crate::pluginfs::is_dir_plugin(&d2, &n);
-                        crate::pluginfs::read_source(&d2, &n)
-                            .map(|(src, _)| (src, is_dir))
-                            .map_err(|e| e.to_string())
+                        // 模块根与 read_source 用同一个函数（第 269 轮）：以前这里
+                        // 是 `d.join(&name)`，老形态恰好相等、收拢形状就错了 ——
+                        // mcloud-daily 的根该是 `mcloud/mcloud-daily/`，不是 `mcloud/`。
+                        crate::pluginfs::read_source(&d2, &n).map_err(|e| e.to_string())
                     })
                     .await;
                     match got {
-                        Ok(Ok((src, is_dir))) => {
-                            let root = if is_dir { Some(d.join(&name)) } else { None };
-                            (src, root)
-                        }
+                        Ok(Ok((src, root))) => (src, root),
                         Ok(Err(e)) => {
                             let _ = tx.send(Cmd::Loaded {
                                 name,

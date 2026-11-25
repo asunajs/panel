@@ -150,3 +150,126 @@ fn a_directory_plugin_named_index_is_still_a_dir_plugin() {
     assert_eq!(read_source(&d, "index").unwrap().1.unwrap(), d.join("index"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- 收拢形状（第 269 轮）：一个插件一个目录 ----
+//
+// 一个插件摊成三个顶层条目（<name>.js + <name>.panel.json + <name>.webui/）在插件多了
+// 之后是一锅粥。新形状把它们收进 <name>/ 里；老形状继续认，迁移是可选的。
+
+fn collapse(dir: &std::path::Path, name: &str, body: &str) {
+    let g = dir.join(name);
+    std::fs::create_dir_all(&g).unwrap();
+    std::fs::write(g.join(format!("{name}.js")), body).unwrap();
+    std::fs::write(g.join(format!("{name}.panel.json")), r#"{"title":"x","version":"1.0.0"}"#).unwrap();
+    std::fs::create_dir_all(g.join(format!("{name}.webui"))).unwrap();
+    std::fs::write(g.join(format!("{name}.webui/index.html")), b"<p>hi</p>").unwrap();
+}
+
+#[test]
+fn collapsed_layout_is_discovered_and_read() {
+    let d = tmp("collapsed");
+    collapse(&d, "mgmusic", "export default 1");
+    // 扫描能发现
+    assert_eq!(names(&d).unwrap(), vec!["mgmusic".to_string()]);
+    // 主文件三级查找的第三级：<name>/<name>.js
+    let (src, root) = read_source(&d, "mgmusic").unwrap();
+    assert_eq!(src, "export default 1");
+    assert_eq!(root, Some(d.join("mgmusic")), "相对 import 的边界在属地目录里");
+    assert!(is_dir_plugin(&d, "mgmusic"));
+    // 属地目录
+    assert_eq!(group_dir(&d, "mgmusic"), Some(d.join("mgmusic")));
+    // 字节按整个属地算（不是只有主文件）
+    let bytes = total_bytes(&d, "mgmusic");
+    assert!(bytes > "export default 1".len() as u64, "清单与界面也要算进去：{bytes}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn collapsed_manifest_and_webui_resolve_nested() {
+    let d = tmp("collapsed");
+    collapse(&d, "mgmusic", "export default 1");
+    // 清单两级查找：顶层没有 → 目录里
+    assert_eq!(crate::manifest::path_for(&d, "mgmusic"), d.join("mgmusic/mgmusic.panel.json"));
+    assert!(crate::manifest::path_for(&d, "mgmusic").is_file());
+    let m = crate::manifest::load(&d, "mgmusic").unwrap().unwrap();
+    assert_eq!(m.title, "x");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn legacy_loose_layout_still_works_alongside() {
+    let d = tmp("collapsed");
+    // 老形状（顶层散件）与收拢形状共存
+    collapse(&d, "mgmusic", "export default 1");
+    std::fs::write(d.join("quark.js"), "export default 2").unwrap();
+    std::fs::write(d.join("quark.panel.json"), r#"{"title":"q"}"#).unwrap();
+    let mut names = names(&d).unwrap();
+    names.sort();
+    assert_eq!(names, vec!["mgmusic".to_string(), "quark".to_string()]);
+    // quark 走老路径
+    assert_eq!(crate::manifest::path_for(&d, "quark"), d.join("quark.panel.json"));
+    assert_eq!(group_dir(&d, "quark"), None, "散件没有属地目录");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn pack_dir_with_multiple_manifests_is_one_group() {
+    let d = tmp("collapsed");
+    // mcloud 一包四插件：属地目录里有 4 个清单 + 各自的入口目录
+    let g = d.join("mcloud");
+    std::fs::create_dir_all(g.join("mcloud")).unwrap();
+    std::fs::create_dir_all(g.join("mcloud-daily")).unwrap();
+    std::fs::write(g.join("mcloud/index.js"), "export default 1").unwrap();
+    std::fs::write(g.join("mcloud-daily/index.js"), "import '../mcloud/lib/x.js';").unwrap();
+    for n in ["mcloud", "mcloud-daily", "mcloud-exchange", "mcloud-live"] {
+        std::fs::write(g.join(format!("{n}.panel.json")), r#"{"title":"m"}"#).unwrap();
+    }
+    // 一个属地目录；每个子插件的主文件/清单都能找到
+    assert_eq!(group_dir(&d, "mcloud"), Some(g.clone()));
+    assert!(entry(&d, "mcloud").is_some());
+    assert!(entry(&d, "mcloud-daily").is_some());
+    assert!(crate::manifest::path_for(&d, "mcloud-daily").is_file(), "兄弟插件的清单要能找到");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn empty_group_dir_is_not_a_plugin() {
+    let d = tmp("collapsed");
+    std::fs::create_dir_all(d.join("empty")).unwrap();
+    assert_eq!(names(&d).unwrap(), Vec::<String>::new());
+    assert_eq!(group_dir(&d, "empty"), None);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// 第 269 轮补充：group_for 的两条路径（自名属地 / 一包多插件）
+#[test]
+fn group_for_finds_own_and_packed_groups() {
+    let d = tmp("collapsed");
+    collapse(&d, "mgmusic", "export default 1");
+    assert_eq!(group_for(&d, "mgmusic"), Some(d.join("mgmusic")), "自名属地");
+
+    // mcloud-daily 的属地是 mcloud/
+    let g = d.join("mcloud");
+    std::fs::create_dir_all(g.join("mcloud-daily")).unwrap();
+    std::fs::write(g.join("mcloud-daily/index.js"), "x").unwrap();
+    std::fs::write(g.join("mcloud-daily.panel.json"), "{}").unwrap();
+    assert_eq!(group_for(&d, "mcloud-daily"), Some(g.clone()), "一包多插件");
+    assert_eq!(entry(&d, "mcloud-daily"), Some(g.join("mcloud-daily/index.js")));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn module_root_for_packed_subplugin() {
+    let d = tmp("collapsed");
+    let g = d.join("mcloud");
+    std::fs::create_dir_all(g.join("mcloud-daily")).unwrap();
+    std::fs::write(g.join("mcloud-daily/index.js"), "import '../lib.js';").unwrap();
+    std::fs::write(g.join("lib.js"), "export const lib = 1;").unwrap();
+    std::fs::write(g.join("mcloud-daily.panel.json"), "{}").unwrap();
+    assert_eq!(
+        module_root(&d, "mcloud-daily"),
+        Some(g.join("mcloud-daily")),
+        "一包多插件的模块根是自己的子目录，不是属地表面"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

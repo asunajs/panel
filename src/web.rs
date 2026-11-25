@@ -3932,7 +3932,7 @@ async fn plugin_files(State(st): State<AppState>) -> Result<Json<Value>, ApiErro
             };
             let meta = std::fs::metadata(&entry).ok();
             // 插件自己的界面放在 <name>.webui/ 里，有 index.html 才算有界面。
-            let webui = pdir.join(format!("{name}.webui/index.html")).exists();
+            let webui = webui_dir_of(&pdir, &name).join("index.html").exists();
             // 目录式插件的「大小」是整个目录（日志/界面里看到的就是它占多少地方），
             // 但 modified 取入口文件 —— 那才是「这个插件上次什么时候改的」。
             let bytes = crate::pluginfs::total_bytes(&pdir, &name);
@@ -4358,7 +4358,11 @@ async fn plugin_source(
     let source = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| bad(format!("读插件失败 {}: {e}", path.display())))?;
-    let bak = st.plugins_dir.join(format!("{name}.js.bak"));
+    // 备份位置跟主文件走（收拢形状下在属地目录里，见 plugin_save）
+    let bak = path
+        .parent()
+        .unwrap_or(&st.plugins_dir)
+        .join(format!("{name}.js.bak"));
     Ok(Json(json!({
         "name": name,
         "path": path.display().to_string(),
@@ -4400,7 +4404,11 @@ async fn plugin_save(
         .await
         .map_err(|e| internal(format!("写 {} 失败: {e}", path.display())))?;
     if let Some(prev) = &old {
-        let bak = st.plugins_dir.join(format!("{name}.js.bak"));
+        // 备份跟着主文件走：收拢形状下主文件在 `<name>/` 里，备份也放那里
+        // （放顶层会变成散件，又把「一个插件一个目录」弄乱）。
+        let bak = path.parent()
+            .unwrap_or(&st.plugins_dir)
+            .join(format!("{name}.js.bak"));
         let _ = write_atomic(&bak, prev.as_bytes(), None).await;
     }
     st.sched.unload(&name);
@@ -4512,7 +4520,7 @@ async fn plugin_delete(
     guard_write(&h)?;
     plugin_path(&st.plugins_dir, &name)?; // 只做名字/路径校验
     // 插件的界面目录（`<name>.webui/`）也跟着进回收站：只删 .js 会留一堆孤儿文件。
-    let webui = st.plugins_dir.join(format!("{name}.webui"));
+    let webui = webui_dir_of(&st.plugins_dir, &name);
     let trash = st.data_dir.join("trash");
     tokio::fs::create_dir_all(&trash)
         .await
@@ -4525,16 +4533,27 @@ async fn plugin_delete(
     // 升级期可能 `<name>.js` 与 `<name>/` 同时存在（单文件优先）：两个都要搬走，
     // 只搬目录的话重启后 `.js` 又把插件带回来了（第 131 轮同款症状）。
     let is_dir_plugin = crate::pluginfs::dir_entry(&st.plugins_dir, &name).is_some();
+    // 收拢形状（第 269 轮）：`<name>/` 是这个插件的属地 —— 主文件、清单、界面全在里面。
+    // 整个目录搬走，别只搬 `<name>.js` / `.webui` 留下孤儿清单。
+    let collapsed = crate::pluginfs::group_dir(&st.plugins_dir, &name).is_some();
     let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    if is_dir_plugin {
+    if collapsed {
+        // 收拢形状：属地目录一锅端（清单一并进回收站，恢复时形状完整）。
         moves.push((
             st.plugins_dir.join(&name),
             trash.join(format!("{name}-{stamp}.plugin")),
         ));
-    }
-    let single = st.plugins_dir.join(format!("{name}.js"));
-    if single.is_file() {
-        moves.push((single, trash.join(format!("{name}-{stamp}.js"))));
+    } else {
+        if is_dir_plugin {
+            moves.push((
+                st.plugins_dir.join(&name),
+                trash.join(format!("{name}-{stamp}.plugin")),
+            ));
+        }
+        let single = st.plugins_dir.join(format!("{name}.js"));
+        if single.is_file() {
+            moves.push((single, trash.join(format!("{name}-{stamp}.js"))));
+        }
     }
     // **先把文件搬走**，再动内存和库。顺序反了就会出现「提示删除失败 / 重启后插件又回来」：
     // 文件还在，下次启动自然又被加载（第 131 轮用户报的两个症状是同一个根因）。
@@ -4549,7 +4568,7 @@ async fn plugin_delete(
             Err(e) => return Err(internal(format!("移走 {} 失败: {e}", src.display()))),
         }
     }
-    if tokio::fs::try_exists(&webui).await.unwrap_or(false) {
+    if !collapsed && tokio::fs::try_exists(&webui).await.unwrap_or(false) {
         let wdest = trash.join(format!("{name}-{stamp}.webui"));
         match crate::fsx::move_path(&webui, &wdest).await {
             Ok(()) => moved.push(wdest.display().to_string()),
@@ -4929,9 +4948,24 @@ async fn script_run(
 /// 动态请求走 `/plugins/<name>/api/<handler>`，交给插件注册的 handler。
 const WEBUI_BUDGET_MS: u64 = 30_000;
 
+/// 插件的界面目录，两级查找（第 269 轮）：
+/// 先老形状 `<name>.webui/`（顶层，兼容不迁移的老实例与老 zip），
+/// 再收拢形状 `<name>/<name>.webui/`。
+fn webui_dir_of(plugins_dir: &std::path::Path, name: &str) -> PathBuf {
+    let top = plugins_dir.join(format!("{name}.webui"));
+    if top.is_dir() {
+        return top;
+    }
+    let nested = plugins_dir.join(name).join(format!("{name}.webui"));
+    if nested.is_dir() {
+        return nested;
+    }
+    top // 都没有时回顶层路径 —— 调用方的「不存在」报错信息照旧指对地方
+}
+
 fn webui_dir(st: &AppState, name: &str) -> Result<PathBuf, ApiError> {
     crate::scripts::safe_name(name).map_err(bad)?;
-    Ok(st.plugins_dir.join(format!("{name}.webui")))
+    Ok(webui_dir_of(&st.plugins_dir, name))
 }
 
 fn mime_of(rel: &str) -> &'static str {

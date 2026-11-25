@@ -689,3 +689,44 @@ async fn dir_plugin_may_import_above_its_dir_like_node() {
         .expect("handler 应当能跑，且拿到上级目录模块的值");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// 第 269 轮：收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里。
+// base 必须指到那个文件，否则 `import '../lib.js'` 会从属地表层算 —— 实测（2026-11-25）
+// mcloud-daily 在 mcloud/mcloud-daily/index.js，`import '../lib.js'` 解析成
+// mcloud/mcloud/lib.js（不存在）而加载失败，错误是 `from 'eval_script'`。
+#[tokio::test]
+async fn collapsed_pack_entry_base_points_at_the_entry_file() {
+    let root = std::env::temp_dir().join(format!("panel-collapsed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    // mcloud/ 是属地；mcloud-daily/ 是里面的子插件
+    std::fs::create_dir_all(root.join("mcloud/mcloud-daily")).unwrap();
+    std::fs::write(root.join("mcloud/lib.js"), "export const lib = '属地共享模块';").unwrap();
+    let src = format!("{HANDLERS}import {{ lib }} from '../lib.js';\n\
+         await host.register_handler('hi', async () => ({{ lib }}));\n");
+    global_inits();
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let (reg, _rx) = mpsc::unbounded_channel();
+    let handle = HostHandle {
+        plugin: "mcloud-daily".into(),
+        inv: Arc::new(Invocation::default()),
+        log,
+        db,
+        reg,
+        config: crate::config_store::ConfigStore::new(&json!({})),
+        sched: None,
+        data_dir: root.clone(),
+        plugin_root: Some(root.join("mcloud/mcloud-daily")),
+    };
+    let entry_root = root.join("mcloud/mcloud-daily");
+    let p = Plugin::load_in_dir(&src, Some(entry_root), handle)
+        .await
+        .expect("入口在子目录的插件应能加载（base 指到入口文件）");
+    let out = p
+        .call_json("hi", &json!({}), 5_000)
+        .await
+        .expect("handler 应能跑且返回值")
+        .expect("handler 应有返回值");
+    assert_eq!(out["lib"], "属地共享模块", "相对 import 拿到的应是属地里的模块");
+    let _ = std::fs::remove_dir_all(&root);
+}

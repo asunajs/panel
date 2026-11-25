@@ -474,7 +474,7 @@ impl Plugin {
     /// 这个薄封装留给测试与将来的调用点。
     #[allow(dead_code)]
     pub async fn load(source: &str, handle: HostHandle) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, None, None, None).await
+        Self::load_inner(source, handle, None, None, None, None).await
     }
 
     /// 目录式插件：`root` 是插件自己的目录，`import './x.js'` 以它为根。
@@ -483,7 +483,19 @@ impl Plugin {
         root: Option<std::path::PathBuf>,
         handle: HostHandle,
     ) -> std::result::Result<Self, String> {
-        Self::load_inner(source, handle, None, None, root).await
+        // 入口文件（第 269 轮）：root 下的 index.js 或 <目录名>.js。
+        // 传给 eval 当 base —— 相对 import 从入口文件所在目录算起。
+        let entry = root.as_ref().and_then(|r| {
+            let stem = r
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| r.join(format!("{n}.js")));
+            let stem = stem.unwrap_or_else(|| r.clone());
+            [r.join("index.js"), stem]
+                .into_iter()
+                .find(|cand| cand.is_file())
+        });
+        Self::load_inner(source, handle, None, None, root, entry).await
     }
 
     /// 跑「脚本」用：顶层代码带**墙钟死线**。
@@ -496,6 +508,7 @@ impl Plugin {
         budget_ms: Option<u64>,
         capture: Option<ConsoleCapture>,
         plugin_root: Option<std::path::PathBuf>,
+        entry_file: Option<std::path::PathBuf>,
     ) -> std::result::Result<Self, String> {
         let inv = handle.inv.clone();
         let (module_resolver, module_loader, globals) =
@@ -587,7 +600,7 @@ impl Plugin {
             rt_raw,
             inv,
         };
-        if let Err(e) = plugin.eval_module(source).await {
+        if let Err(e) = plugin.eval_module_as(source, entry_file.as_deref()).await {
             // 加载期也可能被预算打断（脚本就是「加载=执行」）。这里的原始错误只有
             // 一个 `interrupted`，直接冒出去等于让用户看天书，也没记进预算打断的计数。
             let budget_hit = deadline.is_some_and(|dl| Instant::now() >= dl);
@@ -608,7 +621,7 @@ impl Plugin {
     pub async fn run_test(source: &str, handle: HostHandle, budget_ms: u64) -> TestOutcome {
         let cap: ConsoleCapture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let result =
-            Self::load_inner(source, handle, Some(budget_ms), Some(cap.clone()), None).await;
+            Self::load_inner(source, handle, Some(budget_ms), Some(cap.clone()), None, None).await;
         let lines = cap.lock().map(|g| g.clone()).unwrap_or_default();
         TestOutcome {
             lines,
@@ -618,13 +631,22 @@ impl Plugin {
 
     /// 求值一段 ESM 并把它挂起的顶层 await 跑完。加载期的错误要报出来，
     /// 不能像 `Vm::from_options` 那样把进程带走。
-    async fn eval_module(&self, source: &str) -> std::result::Result<(), String> {
+    /// 入口模块的 base 名可指定：`opts.filename` 决定了相对 import「相对谁」。
+    ///
+    /// 第 269 轮：收拢形状 / 一包多插件下，入口文件在属地目录的**子目录**里
+    /// （`mcloud/mcloud-daily/index.js`），base 必须指到那个文件，
+    /// 否则 `import '../lib.js'` 会从属地表层算，解析到不存在的路径。
+    /// 老形状（`<name>/index.js`）不传 —— base 落回插件根，行为不变。
+    async fn eval_module_as(&self, source: &str, entry_file: Option<&std::path::Path>) -> std::result::Result<(), String> {
         self.ctx
             .with(|ctx| {
                 let mut opts = EvalOptions::default();
                 opts.strict = true;
                 opts.promise = true;
                 opts.global = false;
+                if let Some(f) = entry_file {
+                    opts.filename = Some(f.display().to_string());
+                }
                 let p: Result<llrt_core::Promise> = ctx.eval_with_options(source, opts);
                 let p = p.map_err(|e| describe(&ctx, e))?;
                 ctx.globals()

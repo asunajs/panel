@@ -4,6 +4,31 @@
 > 插件项目开发插件、部署到实例目录；面板仓 `plugins/` 不放插件产物。
 > 这一页讲「插件在面板里的行为」，那一页讲「谁能写哪里」。
 
+## 产物形状：一个插件一个目录（第 269 轮）
+
+推荐形状 —— **删插件 = 删一个目录**：
+
+```
+plugins/
+├── mgmusic/                  ← 一个插件一个目录
+│   ├── mgmusic.js                主文件（也认 index.js）
+│   ├── mgmusic.panel.json        清单
+│   └── mgmusic.webui/            界面（可选）
+└── mcloud/                   ← 一包多插件也放得下
+    ├── mcloud/mcloud.panel.json 等 4 个清单
+    ├── mcloud/index.js  mcloud-daily/index.js …
+    └── mcloud.webui/
+```
+
+老形状（`mgmusic.js` + `mgmusic.panel.json` + `mgmusic.webui/` 三个顶层散件）**照样能跑** ——
+发现顺序是 `<name>.js` → `<name>/index.js` → `<name>/<name>.js`，清单和界面也两级查找。
+迁移是可选的，新装/迁移之后才变成收拢形状。
+
+**相对 import 的根**：目录式插件是「入口文件所在目录」。所以
+`mgmusic/mgmusic.js` 里 `import './lib/x.js'` 指 `mgmusic/lib/x.js`；
+一包多插件里 `mcloud/mcloud-daily/index.js` 的 `import '../lib.js'` 指 `mcloud/lib.js` ——
+与老形状 `mcloud-daily/index.js` 的语义完全一致，插件源码不用改。
+
 ## 多文件插件：`<name>/index.js`（第 216 轮）
 
 从一个 `<name>.js` 升级成「可以拆文件」的插件，**形态是加法，不是替换**：

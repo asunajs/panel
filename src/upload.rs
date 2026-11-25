@@ -150,6 +150,58 @@ fn save_single(
     })
 }
 
+
+/// 插件 zip 的**形状校验**：整包必须只描述**一个**插件。
+///
+/// 为什么需要（2026-11-25 群里实测）：源码包（含 `webui/app.js`、`docs/`、`src/`）被当成插件上传，
+/// 面板只要求「zip 里至少有一个 .js」，于是剥掉外层目录后把 130 个文件**摊进 plugins/** ——
+/// 用户看到的是「插件目录被污染了」。更严重的是：恶意 zip 可以借此**覆盖别的插件**的
+/// `xxx.js` / `xxx.webui/`，或塞一个 `evil.panel.json` 让面板去加载它。
+///
+/// 判据（只看**顶层**，不强制入口名，免得和既有形状打架）：
+///   · 顶层只有一个名字 → 放行（`foo.js` 或 `foo/`）；
+///   · 顶层多个名字 → 必须都属于同一个插件：`X.js` / `X.panel.json` / `X.webui`；
+///   · 出现不属于任何插件的顶层名（`docs`、`AGENTS.md`、`src` …）→ 拒。
+fn validate_plugin_shape(rels: &[PathBuf]) -> Result<(), String> {
+    let mut tops: Vec<String> = Vec::new();
+    for rel in rels {
+        let Some(first) = rel.iter().next() else { continue };
+        let top = first.to_string_lossy().to_string();
+        if !tops.contains(&top) {
+            tops.push(top);
+        }
+    }
+    if tops.is_empty() {
+        return Err("zip 里没有文件".into());
+    }
+    if tops.len() == 1 {
+        return Ok(());
+    }
+    // 多个顶层名：必须是同一个插件的几件套
+    let mut stem: Option<String> = None;
+    for t in &tops {
+        let candidate = t
+            .strip_suffix(".js")
+            .or_else(|| t.strip_suffix(".panel.json"))
+            .or_else(|| t.strip_suffix(".webui"));
+        let Some(c) = candidate else {
+            return Err(format!(
+                "这不是插件包：只允许 `<名字>.js` + `<名字>.panel.json` + `<名字>.webui/`（或 `<名字>/`），但包里还有 `{t}` —— 源码/文档请别当插件传"
+            ));
+        };
+        match &stem {
+            None => stem = Some(c.to_string()),
+            Some(existing) if existing == c => {}
+            Some(existing) => {
+                return Err(format!(
+                    "zip 里混了两个插件：`{existing}` 和 `{c}` —— 一次只能装一个"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Saved, String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("不是有效的 zip: {e}"))?;
@@ -254,7 +306,47 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
             strip = None;
         }
     }
+    // 插件包只允许「一个插件」的形状（源码包/杂物包在这里被挡掉，别污染 plugins/）
+    if kind == Kind::Plugins {
+        let rels: Vec<PathBuf> = names
+            .iter()
+            .map(|n| match &strip {
+                Some(p) => n.strip_prefix(p).unwrap_or(n).to_path_buf(),
+                None => n.clone(),
+            })
+            .collect();
+        validate_plugin_shape(&rels)?;
+    }
+    // 解压先落到**临时目录**，全部验完再搬进 plugins/（2026-11-25 用户要求）。
+    // 为什么：以前边解边写，一个中途报错的包会把半份文件留在 plugins/ 里 ——
+    // 群里那次「插件目录被污染」就是这么来的。临时目录 + 最后统一搬，失败时 plugins/ 一个字节都不动。
+    // ⚠ 用**自己的**临时目录（放在 plugins/ 下、以 . 开头），不用系统 /tmp：
+    //   · 同一个文件系统 → 最后一步是 rename（原子、不跨盘、不复制）；
+    //   · 系统 /tmp 可能被清理、可能有 noexec/只读、macOS 上还常跟数据盘不同卷；
+    //   · 名字以 `.` 开头 → 面板的插件扫描不看它（扫的是 *.js / 目录）。
+    // 用完必删：`StagingGuard` 的 Drop 负责，成功失败都删。
+    let staging = root.join(format!(
+        ".upload-tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        return Err(format!("建临时目录失败: {e}"));
+    }
+    struct StagingGuard(PathBuf);
+    impl Drop for StagingGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _staging_guard = StagingGuard(staging.clone());
+
     let mut files = Vec::new();
+    // 与 `files` 同序的 PathBuf（搬运阶段要用路径操作）
+    let mut written: Vec<PathBuf> = Vec::new();
     // 覆盖了哪些已有文件（界面据此说「已覆盖」而不是「已上传」）
     let mut replaced: Vec<String> = Vec::new();
     let mut bytes = 0u64;
@@ -282,7 +374,7 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let parent = ensure_dir(root, rel.parent().unwrap_or(Path::new("")))?;
+        let parent = ensure_dir(&staging, rel.parent().unwrap_or(Path::new("")))?;
         let dest = parent.join(rel.file_name().unwrap());
 
         // ⚠ 审计中8：这里**不能**信 `f.size()` —— 它是 central directory 里由
@@ -318,12 +410,42 @@ fn save_zip(kind: Kind, root: &Path, data: &[u8], overwrite: bool) -> Result<Sav
         if bytes > MAX_UNCOMPRESSED_BYTES {
             return Err("zip 解压后太大（上限 64 MiB）".into());
         }
-        if write_file(&dest, &rel, &buf, overwrite)? {
-            replaced.push(rel.to_string_lossy().replace('\\', "/"));
+        if let Err(e) = std::fs::write(&dest, &buf) {
+            return Err(format!("解压 {} 到临时目录失败: {e}", rel.display()));
         }
         files.push(rel.to_string_lossy().replace('\\', "/"));
+        written.push(rel.clone());
     }
 
+    // 解压完、形状验过 —— **现在才动 plugins/**（前面任何一步失败都不会留下半个包）。
+    // 搬运复用 `write_file`（原子写 + 符号链接/目录拒绝 + 覆盖语义），不另开一条写盘路径。
+    for rel in &written {
+        let src = staging.join(rel);
+        let parent = ensure_dir(root, rel.parent().unwrap_or(Path::new("")))?;
+        let dest = parent.join(rel.file_name().unwrap());
+        // 先判冲突/符号链接（与 write_file 同一套判据），再 rename —— 不覆盖时一个文件都不搬。
+        match std::fs::symlink_metadata(&dest) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(format!("目标是符号链接，拒绝写入: {}", rel_display(rel)));
+                }
+                if md.is_dir() {
+                    return Err(format!("目标是目录，不能当文件写: {}", rel_display(rel)));
+                }
+                if !overwrite {
+                    return Err(format!("文件已存在: {}（要覆盖请显式勾选覆盖）", rel_display(rel)));
+                }
+                replaced.push(rel_display(rel));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("检查目标文件失败: {e}")),
+        }
+        // 同盘 rename 是原子的；极端情况（staging 与 plugins 被 bind-mount 成两卷）才退回复制。
+        if std::fs::rename(&src, &dest).is_err() {
+            let buf = std::fs::read(&src).map_err(|e| format!("读临时文件失败 {}: {e}", rel.display()))?;
+            write_file(&dest, rel, &buf, true)?;
+        }
+    }
     files.sort();
     replaced.sort();
     Ok(Saved {
@@ -493,6 +615,48 @@ fn write_file(dest: &Path, rel: &Path, data: &[u8], overwrite: bool) -> Result<b
 
 #[cfg(test)]
 mod tests {
+
+    /// 源码包（`webui/app.js` + `docs/` + `src/`）不能当插件装 —— 2026-11-25 群里实测：
+    /// 以前只要求「zip 里至少有一个 .js」，于是剥掉外层目录后把 130 个文件摊进 plugins/。
+    #[test]
+    fn plugin_zip_must_describe_exactly_one_plugin() {
+        // 源码包形状：外层目录被剥掉后是 webui/app.js + docs/… + src/…
+        let rels: Vec<PathBuf> = [
+            "webui/app.js",
+            "webui/index.html",
+            "docs/a.md",
+            "src/x.ts",
+            "package.json",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert!(validate_plugin_shape(&rels).is_err(), "源码包必须被拒");
+
+        // 单文件式插件：允许
+        let ok: Vec<PathBuf> = ["cmcc.js", "cmcc.panel.json", "cmcc.webui/index.html"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert!(validate_plugin_shape(&ok).is_ok());
+
+        // 目录式插件：允许
+        let dir: Vec<PathBuf> = ["demo/index.js", "demo/lib/a.js"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert!(validate_plugin_shape(&dir).is_ok());
+
+        // 夹带别的插件 / 杂物：拒
+        let sneaky: Vec<PathBuf> = ["evil.js", "other.js"].iter().map(PathBuf::from).collect();
+        assert!(validate_plugin_shape(&sneaky).is_err(), "一次只能装一个插件");
+        let junk: Vec<PathBuf> = ["evil.js", "docs/readme.md"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert!(validate_plugin_shape(&junk).is_err(), "插件包不该带文档/源码");
+    }
+
     #[test]
     fn successful_upload_leaves_no_tmp_file() {
         // 安全审计 M3：先写 .tmp 再 rename。成功之后目录里不能留下临时文件，
