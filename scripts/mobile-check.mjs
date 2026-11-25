@@ -14,7 +14,7 @@
 //   字号       可见的 input/select/textarea 的 font-size < 16px（iOS 聚焦会放大整页）
 //   触屏       按钮点击目标高度 < 40px
 //   文字       元素内容宽度 > 容器且 overflow 不是 auto/scroll/ellipsis（字压到隔壁）
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,6 +24,13 @@ const CDP_PORT = Number(process.env.MOBILE_CHECK_CDP_PORT || 9341);
 const SHOTS = process.argv.includes('--shots');
 const ROOT = process.cwd();
 const BIN = path.join(ROOT, 'target', 'debug', 'panel');
+// 用固定标识重签一次（第 269 轮）：不签的话每跑一次门禁就弹一轮「正在验证 panel-<哈希>」，
+// 那个框只有最小化按钮 ⇒ Dock 里攒一堆关不掉的空白图标。见 scripts/sign-panel.sh。
+try {
+  execFileSync('bash', [path.join(ROOT, 'scripts', 'sign-panel.sh'), BIN], { stdio: 'ignore' });
+} catch {
+  /* 没有 codesign 就照旧跑：只是可能弹一次验证框 */
+}
 const SHOT_DIR = path.join(ROOT, '..', '.shots', 'mobile');
 
 const BROWSERS = [
