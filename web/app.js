@@ -6190,8 +6190,8 @@ function renderUpdate() {
     clear(box);
     if (u.has_update && !u.skipped) {
       const p = el('p', 'settings-note',
-        '新版 ' + u.latest + ' 已发布。面板不会自己替换运行中的二进制：先下载并校验，' +
-        '再按提示执行最后一步。');
+        '新版 ' + u.latest + ' 已发布。点「更新并重启」会下载、校验 sha256、' +
+        '把旧二进制改名备份，然后自动重启（按**本机**平台挑包，不看浏览器）。');
       const bar = el('div', 'cfg-inline');
       const dl = el('button', 'btn btn-sm btn-primary', '更新并重启');
       dl.type = 'button';
