@@ -3624,19 +3624,112 @@ async function savePluginSource() {
   }
 }
 
+/**
+ * 卸载插件（第 274 轮）：先问一次「它的数据留不留」，像 Windows 卸载程序那样
+ * 把要删的和要留的分两栏列出来。
+ *
+ * 为什么不是简单一句「确定吗」：这个插件的账号、token 都在
+ * `<data>/plugin-data/<name>/` 和库里，删了要重新登录。而「我就是要清干净」
+ * 也是正当需求 —— 所以摊开让人选，默认选可逆的那一边。
+ */
 async function deletePlugin(name) {
-  const ok = await askConfirm(
-    "删除插件「" + name + "」？文件会移到数据目录的 trash（还能找回），它注册的任务一起消失。",
-    "删除",
-  );
-  if (!ok) return;
+  let info = null;
   try {
-    const d = await api("/api/plugins/" + encodeURIComponent(name), { method: "DELETE" });
-    notify("已删除 " + name + (d.moved_to ? "（副本在 trash）" : ""), "ok");
+    info = await api("/api/plugins/" + encodeURIComponent(name) + "/data");
+  } catch (e) {
+    // 拿不到数据清单不该挡住卸载：退化成一句普通确认
+    if (!(await askConfirm(
+      "删除插件「" + name + "」？文件会移到数据目录的 trash（还能找回），它注册的任务一起消失。",
+      "删除",
+    ))) return;
+    return doDeletePlugin(name, true);
+  }
+  const d = (info && info.data) || {};
+  const choice = await askUninstall(name, d);
+  if (!choice) return;
+  await doDeletePlugin(name, choice.keepData);
+}
+
+/** 摊开「会删掉 / 它的数据」，返回 `{keepData}` 或 null（取消）。 */
+function askUninstall(name, data) {
+  $("uninstall-title").textContent = "卸载「" + name + "」";
+  $("uninstall-lead").textContent =
+    "插件代码会移进数据目录的 trash（还能恢复），它注册的任务会一起消失。";
+
+  const gone = $("uninstall-gone");
+  clear(gone);
+  for (const t of ["插件代码、清单、界面（进 trash，可恢复）", "它注册的定时任务"]) {
+    gone.append(el("li", "", t));
+  }
+
+  const list = $("uninstall-data");
+  clear(list);
+  const has = data && !data.empty;
+  $("uninstall-data-empty").classList.toggle("hidden", !!has);
+  list.classList.toggle("hidden", !has);
+  if (has) {
+    for (const t of String(data.summary || "").split("、").filter(Boolean)) {
+      list.append(el("li", "", t));
+    }
+  }
+  const keepBox = $("uninstall-keep");
+  keepBox.checked = true; // 默认保留：可逆
+  const hint = $("uninstall-keep-hint");
+  const sync = () => {
+    hint.textContent = keepBox.checked
+      ? "保留：下次装回来还是原来的账号和配置。"
+      : "不保留：配置目录、状态记录、它建的表都会删掉，找不回来。";
+    hint.className = "hint" + (keepBox.checked ? "" : " hint-err");
+  };
+  sync();
+  keepBox.onchange = sync;
+  // 没有数据时这个开关没意义，禁用比留着让人困惑好
+  keepBox.disabled = !has;
+
+  const ok = $("uninstall-ok");
+  ok.textContent = has ? "卸载" : "卸载";
+  $("uninstall").classList.remove("hidden");
+  return new Promise((resolve) => {
+    const done = (v) => {
+      $("uninstall").classList.add("hidden");
+      ok.removeEventListener("click", onOk);
+      $("uninstall").querySelectorAll("[data-close]").forEach((b) => b.removeEventListener("click", onCancel));
+      document.removeEventListener("keydown", onKey);
+      resolve(v);
+    };
+    const onOk = () => done({ keepData: keepBox.checked });
+    const onCancel = () => done(null);
+    const onKey = (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); done(null); }
+      else if (ev.key === "Enter" && !ev.target.matches("input")) { ev.preventDefault(); onOk(); }
+    };
+    ok.addEventListener("click", onOk);
+    $("uninstall").querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", onCancel));
+    document.addEventListener("keydown", onKey);
+    ok.focus();
+  });
+}
+
+async function doDeletePlugin(name, keepData) {
+  try {
+    const q = keepData ? "" : "?keep_data=0";
+    const d = await api("/api/plugins/" + encodeURIComponent(name) + q, { method: "DELETE" });
+    const kept = d && d.data ? d.data.kept !== false : true;
+    let msg = "已卸载 " + name + (d.moved_to ? "（副本在 trash）" : "");
+    if (!kept && d.data) {
+      const bits = [];
+      if (d.data.files) bits.push(d.data.files + " 个配置文件");
+      if (d.data.state_keys) bits.push(d.data.state_keys + " 条状态");
+      if (d.data.tables && d.data.tables.length) bits.push(d.data.tables.length + " 张表");
+      msg += bits.length ? "，数据已清除（" + bits.join("、") + "）" : "，数据已清除";
+    } else if (kept) {
+      msg += "，数据保留";
+    }
+    notify(msg, "ok");
     closeDrawer();
     await refresh();
   } catch (e) {
-    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), 'err');
+    notify(e instanceof Unauthorized ? "需要令牌" : (e.message || "删除失败"), "err");
   }
 }
 
@@ -6100,7 +6193,7 @@ function renderUpdate() {
         '新版 ' + u.latest + ' 已发布。面板不会自己替换运行中的二进制：先下载并校验，' +
         '再按提示执行最后一步。');
       const bar = el('div', 'cfg-inline');
-      const dl = el('button', 'btn btn-sm btn-primary', '下载到本机');
+      const dl = el('button', 'btn btn-sm btn-primary', '更新并重启');
       dl.type = 'button';
       dl.addEventListener('click', () => downloadUpdate(dl));
       const go = el('button', 'btn btn-sm', '打开下载页');
@@ -6134,34 +6227,41 @@ function updateAsset() {
   return pick((n) => n.includes(isArm ? 'aarch64' : 'x86_64') && /linux/i.test(n));
 }
 
+/** 一键更新（第 268 轮）：
+ *  查最新 → **由服务端按面板自己的 os/arch** 挑资产 → 下载校验 → 换掉二进制 → 重启。
+ *  用户只点一下，不再需要自己去 mv / 重启。
+ *
+ *  ⚠ 挑资产必须在服务端做：下载落到**面板那台机器**上，看浏览器的 UA 会挑错
+ *  （Windows 浏览器 + Linux 面板 → 下成 .exe，用户 2026-11-26 报的就是这个）。
+ */
 async function downloadUpdate(btn) {
-  const a = updateAsset();
   const u = state.update || {};
-  if (!a) {
-    toast('这个平台没有现成产物，按文档从源码更新');
-    if (u.url) window.open(u.url, '_blank', 'noopener');
-    return;
-  }
-  const sums = (u.assets || []).find((x) => /^SHA256SUMS/.test(String(x.name || '')));
   btn.disabled = true;
+  btn.textContent = '更新中…';
   try {
-    const d = await api('/api/update/download', {
-      method: 'POST',
-      body: { name: a.name, url: a.url, sums: sums ? sums.url : null },
-    });
-    notify('已下载到 ' + d.path + (d.verified ? '（sha256 校验通过）' : ''), 'ok');
-    const ta = document.createElement('textarea');
-    ta.className = 'input';
-    ta.readOnly = true;
-    ta.rows = 2;
-    ta.value = d.hint || '';
+    const d = await api('/api/update/apply', { method: 'POST' });
+    notify('已换成 ' + d.name + '（' + (d.os || '?') + '/' + (d.arch || '?') + (d.verified ? '，sha256 通过' : '') + '），' + Math.round((d.restart_in_ms || 1500) / 100) / 10 + ' 秒后重启', 'ok');
     const box = $('update-box');
-    if (box) box.append(el('p', 'settings-note', '最后一步（在终端里执行）：'), ta);
-    ta.select();
+    if (box) {
+      box.append(el('p', 'settings-note', '旧版本已备份到 ' + (d.backup || '—') + '；重启后这个页面会自动重连。'));
+    }
+    // 重启期间接口会短暂失败 —— 每隔一秒探一次，起来了就把新版本号报出来。
+    const want = (u.latest || '').replace(/^v/, '');
+    for (let i = 0; i < 30; i += 1) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        await refresh();
+        if (!want || String(state.version).replace(/^v/, '') === want) {
+          notify('已更新到 ' + state.version, 'ok');
+          break;
+        }
+      } catch (_) { /* 还没起来，继续等 */ }
+    }
   } catch (e) {
-    notify(e.message || '下载失败', 'err');
+    notify(e.message || '更新失败', 'err');
   } finally {
     btn.disabled = false;
+    btn.textContent = '更新并重启';
   }
 }
 

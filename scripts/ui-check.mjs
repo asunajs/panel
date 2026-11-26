@@ -2546,6 +2546,61 @@ async function main() {
   check('源码编辑器能跳到指定行（第 2500 行 + 滚到位 + 工具条报位置）',
     jump.line === 2500 && jump.scrollTop > 0 && /第 2500 行/.test(jump.pos), JSON.stringify(jump));
 
+  // ---------------------------------------------------------------- 卸载插件（第 274 轮）
+  // 用户问的是「删插件数据会保留吗」。这里要能**说出**会留什么、并且真的能选。
+  // 四条：弹窗列出数据 / 默认保留 / 勾掉后提示变危险色 / 真删之后数据还在。
+  // 两个种子插件都要有数据：`seed` 用来验「预览接口」，`seed-extra` 用来验「弹窗里
+  // 真的列出了东西」（只给其中一个造数据的话，弹窗那条会因为「没有数据」而空着 ——
+  // 那是**正确行为**，但断言就测不到要测的东西了）。
+  for (const nm of ['seed', 'seed-extra']) {
+    const sd = path.join(dir, 'plugin-data', nm);
+    mkdirSync(sd, { recursive: true });
+    writeFileSync(path.join(sd, 'config.json'), JSON.stringify({ token: 'seed-token' }));
+    writeFileSync(path.join(sd, 'accounts.json'), '[]');
+  }
+  const preview = await (await fetch('http://127.0.0.1:' + PORT + '/api/plugins/seed/data')).json();
+  check('删插件前能查到「它的数据」清单（文件数 / 状态 / 表）',
+    !!preview.data && preview.data.empty === false && preview.data.dir_files >= 2,
+    JSON.stringify(preview.data || preview).slice(0, 160));
+
+  const dlg = JSON.parse(await js(
+    "(async () => { void deletePlugin('seed-extra'); await new Promise((r)=>setTimeout(r,700));" +
+    "const box=document.getElementById('uninstall');" +
+    "return JSON.stringify({open: !box.classList.contains('hidden')," +
+    "gone:[...document.querySelectorAll('#uninstall-gone li')].map((x)=>x.textContent)," +
+    "data:[...document.querySelectorAll('#uninstall-data li')].map((x)=>x.textContent)," +
+    "keep: document.getElementById('uninstall-keep').checked," +
+    "hint: document.getElementById('uninstall-keep-hint').textContent});})()",
+  ));
+  check('卸载弹窗摊开「会删掉」和「它的数据」两栏（不是一句确定吗）',
+    dlg.open && dlg.gone.length >= 2 && dlg.data.length >= 1, JSON.stringify(dlg).slice(0, 220));
+  check('默认勾选「保留数据」（可逆的那一边）', dlg.keep === true, String(dlg.keep));
+  check('默认状态的提示说的是「保留」', /保留/.test(dlg.hint || ''), dlg.hint);
+
+  const flipped = JSON.parse(await js(
+    "(()=>{const k=document.getElementById('uninstall-keep');k.checked=false;" +
+    "k.dispatchEvent(new Event('change'));" +
+    "const h=document.getElementById('uninstall-keep-hint');" +
+    "return JSON.stringify({hint:h.textContent, err:h.className});})()",
+  ));
+  check('勾掉之后提示改成「找不回来」并变危险色',
+    /找不回来/.test(flipped.hint) && /hint-err/.test(flipped.err), JSON.stringify(flipped));
+
+  await js("document.querySelector('#uninstall [data-close]').click()");
+  await sleep(400);
+  const uninstCancel = await (async () => {
+    const d = await (await fetch('http://127.0.0.1:' + PORT + '/api/plugins/files')).json();
+    return (d.files || []).some((f) => f.name === 'seed-extra');
+  })();
+  check('取消卸载：插件还在', uninstCancel === true);
+
+  await js("(async()=>{ void doDeletePlugin('seed-extra', true); return 'ok'; })()");
+  await sleep(1000);
+  const keptData = await (await fetch('http://127.0.0.1:' + PORT + '/api/plugins/seed/data')).json();
+  check('选「保留」删完之后，数据还在（下次装回来不用重登）',
+    !!keptData.data && keptData.data.dir_files >= 2,
+    JSON.stringify(keptData.data || {}).slice(0, 120));
+
   // 文件管理
   // 这一页存在的理由：更新后留下的旧东西（旧形状散件、备份、孤儿清单）在终端里
   // 只能靠 du 看，谁也不敢删 —— 于是只能一直占着。断言按「能看见 / 判得对 / 删得掉 /

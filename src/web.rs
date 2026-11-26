@@ -619,6 +619,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/install", post(plugins_install))
         .route("/api/plugins", post(plugin_create))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
+        // 删插件前先看「它会留下什么数据」；删的时候可以选一并带走（第 274 轮）
+        .route("/api/plugins/{name}/data", get(api_plugin_data))
         .route("/api/plugins/{name}/source", get(plugin_source).put(plugin_save))
         .route(
             "/api/plugins/{name}/config",
@@ -676,6 +678,7 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/{name}/reinstall", post(plugin_reinstall))
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
+        .route("/api/update/apply", post(api_update_apply))
         .route("/api/plugins/{name}/disable", post(plugin_disable))
         .route("/api/plugins/{name}/enable", post(plugin_enable))
         // 暂停 / 恢复：不卸载，只是不再触发它的定时任务。
@@ -2027,6 +2030,7 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
         // 平台名（windows / macos / linux）：界面据此换文案与脚本运行时的默认值。
         // 不放进 env vars 让用户猜 —— 界面自己该知道自己在哪。
         "os": crate::platform::os_name(),
+        "arch": crate::platform::arch_name(),
         // 磁盘余量 + 面板自己占多少（30 秒缓存）。盘满是静默故障，界面上必须看得见。
         "disk": disk_json(&st.data_dir).await,
         "auth": st.auth().is_some(),
@@ -2727,6 +2731,30 @@ async fn plugin_unload(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/update/apply` —— 一键更新：查最新 → 按**本机**挑资产 → 下载校验 → 换二进制 → 重启。
+///
+/// 与老的 `/api/update/download` 的区别：那个只把文件放进 `data/updates/` 然后要人自己去 mv。
+/// 用户的口径（2026-11-26）是「只点一下更新按钮，别让用户再手工做事」。
+async fn api_update_apply(
+    State(st): State<AppState>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let got = crate::update::apply(&st.data_dir).await.map_err(bad)?;
+    st.log.emit(
+        "panel",
+        None,
+        crate::log::Level::Info,
+        format!(
+            "更新：已换成 {}（{} 字节，校验{}），{} 毫秒后重启",
+            got.get("name").and_then(Value::as_str).unwrap_or("?"),
+            got.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+            if got.get("verified").and_then(Value::as_bool).unwrap_or(false) { "通过" } else { "未提供" },
+            got.get("restart_in_ms").and_then(Value::as_u64).unwrap_or(1500),
+        ),
+    );
+    Ok(Json(got))
+}
 async fn plugin_stop(
     State(st): State<AppState>,
     Path(name): Path<String>,
@@ -3044,6 +3072,7 @@ async fn api_config(State(st): State<AppState>) -> Result<Json<Value>, ApiError>
         "text": raw_shown,
         "text_truncated": raw_truncated,
         "os": crate::platform::os_name(),
+        "arch": crate::platform::arch_name(),
         "plugins_dir": st.plugins_dir.display().to_string(),
         "trash_dir": st.data_dir.join("trash").display().to_string(),
     })))
@@ -4662,6 +4691,120 @@ async fn plugin_create(
     }
 }
 
+/// `GET /api/plugins/{name}/data` —— 删之前先看它会留下什么（第 274 轮）。
+///
+/// 界面的删除确认框要能说出「还有 16 个文件、36 条状态、2 张表」，
+/// 而不是让用户猜「我的账号会不会没」。
+async fn api_plugin_data(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    plugin_path(&st.plugins_dir, &name)?; // 名字校验（不许路径）
+    let data_dir = st.data_dir.clone();
+    let n = name.clone();
+    // 文件扫描走阻塞线程（递归 stat）；库查询用 Db actor 自己的异步接口。
+    let mut d = tokio::task::spawn_blocking(move || crate::plugin_data::scan_files(&data_dir, &n))
+        .await
+        .map_err(|e| internal(format!("扫描插件数据失败: {e}")))?;
+
+    let n2 = name.clone();
+    let keys: Vec<String> = st
+        .db
+        .call(move |c| {
+            // `state` 表**不是面板建的**（插件自己 `CREATE TABLE IF NOT EXISTS`），
+            // 所以新实例上它可能根本不存在。那种情况下答案是「没有键」，
+            // 不是 500 —— 删插件的确认框不能因为「从没有插件写过状态」就弹不出来。
+            if !table_exists(c, "state")? {
+                return Ok(Vec::new());
+            }
+            let mut stmt = c
+                .prepare("SELECT key FROM state ORDER BY key")
+                .map_err(|e| e.to_string())?;
+            let it = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            Ok(it
+                .flatten()
+                .filter(|k| crate::plugin_data::key_belongs(&n2, k))
+                .collect::<Vec<String>>())
+        })
+        .await
+        .map_err(internal)?;
+
+    let n3 = name.clone();
+    let tables: Vec<(String, i64)> = st
+        .db
+        .call(move |c| {
+            let mut stmt = c
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .map_err(|e| e.to_string())?;
+            let names: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .filter(|t| crate::plugin_data::table_belongs(&n3, t))
+                .collect();
+            let mut out: Vec<(String, i64)> = Vec::new();
+            for t in names {
+                // 表名来自 sqlite_master（不是用户输入），但仍要转义引号：
+                // `preview-demo` 这种带 `-` 的名字直接拼进 SQL 会解析失败。
+                let q = t.replace('"', "");
+                let n: i64 = c
+                    .query_row(&format!("SELECT count(*) FROM \"{q}\""), [], |r| r.get(0))
+                    .unwrap_or(-1);
+                out.push((t, n));
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(internal)?;
+
+    d.state_keys = keys;
+    d.table_rows = tables;
+    Ok(Json(json!({
+        "ok": true,
+        "name": name,
+        "data": d.summary(),
+        // 明说一句：代码会进回收站，数据默认不动
+        "hint": "插件代码会移进回收站（能恢复）；下面这些数据默认原样保留",
+    })))
+}
+
+/// 这个表在不在。`state` 由插件自建，新实例上可能没有。
+fn table_exists(c: &rusqlite::Connection, name: &str) -> Result<bool, String> {
+    c.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeletePluginQuery {
+    /// 缺省 = true（保留）。`?keep_data=0` 表示连数据一起清。
+    ///
+    /// 收字符串不收 `bool`：serde_urlencoded 只认 `true` / `false`，
+    /// 而人会写 `?keep_data=0`（前端也会）—— 那种请求会被 axum 判成 400，
+    /// 表现成「删插件突然报请求错误」。
+    #[serde(default)]
+    keep_data: Option<String>,
+}
+
+impl DeletePluginQuery {
+    /// 缺省 true；`0` / `false` / `no` / `off` 都算「不保留」。
+    fn keep(&self) -> bool {
+        match self.keep_data.as_deref().map(str::trim) {
+            None | Some("") => true,
+            Some(v) => !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
+        }
+    }
+}
+
 /// 删除插件：**移进数据目录的 trash**，不是直接删。
 ///
 /// 面板上的误点代价太高（插件是手写的、不在版本库里），留一份可捞的副本。
@@ -4669,9 +4812,13 @@ async fn plugin_delete(
     State(st): State<AppState>,
     Path(name): Path<String>,
     h: HeaderMap,
+    q: axum::extract::Query<DeletePluginQuery>,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
     plugin_path(&st.plugins_dir, &name)?; // 只做名字/路径校验
+    // 数据去留（第 274 轮）：默认**保留**（重装不用重登），`keep_data=0` 才一起清。
+    // 默认值选「保留」是因为它可逆 —— 清掉就找不回来了。
+    let keep_data = q.keep();
     // 插件的界面目录（`<name>.webui/`）也跟着进回收站：只删 .js 会留一堆孤儿文件。
     let webui = webui_dir_of(&st.plugins_dir, &name);
     let trash = st.data_dir.join("trash");
@@ -4747,23 +4894,93 @@ async fn plugin_delete(
             })
             .await;
     }
+    // 数据去留：默认留着；`keep_data=0` 才清。清之前**先数一遍**，
+    // 报出来的数字要能对上确认框里那份（不然用户不知道到底删了什么）。
+    let mut purged = json!({ "kept": true });
+    if !keep_data {
+        let data_dir = st.data_dir.clone();
+        let n = name.clone();
+        let file_part = tokio::task::spawn_blocking(move || {
+            crate::plugin_data::purge_files(&data_dir, &n)
+        })
+        .await
+        .map_err(|e| internal(format!("清理插件数据失败: {e}")))?;
+        let (files, bytes) = file_part.unwrap_or((0, 0));
+        let n2 = name.clone();
+        let (state_deleted, dropped) = st
+            .db
+            .call(move |c| {
+                let mut stmt = c
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                    .map_err(|e| e.to_string())?;
+                let names: Vec<String> = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                    .filter(|t| crate::plugin_data::table_belongs(&n2, t))
+                    .collect();
+                drop(stmt);
+                let has_state = table_exists(c, "state")?;
+                let mut dropped: Vec<String> = Vec::new();
+                for t in names {
+                    let q = t.replace('"', "");
+                    if c.execute(&format!("DROP TABLE IF EXISTS \"{q}\""), []).is_ok() {
+                        dropped.push(t);
+                    }
+                }
+                // 只删 `<name>.` 开头的键，且**跳过保留前缀**（`plugin.` / `panel.`）：
+                // 保留前缀归面板，插件名撞上也不该被它带走（判据同 key_belongs）。
+                let mut changed = 0usize;
+                let mut keys: Vec<String> = Vec::new();
+                if has_state {
+                    let mut stmt = c
+                        .prepare("SELECT key FROM state ORDER BY key")
+                        .map_err(|e| e.to_string())?;
+                    let it = stmt
+                        .query_map([], |r| r.get::<_, String>(0))
+                        .map_err(|e| e.to_string())?;
+                    for k in it.flatten() {
+                        if crate::plugin_data::key_belongs(&n2, &k) {
+                            keys.push(k);
+                        }
+                    }
+                }
+                for k in &keys {
+                    if c.execute("DELETE FROM state WHERE key=?1", [k]).is_ok() {
+                        changed += 1;
+                    }
+                }
+                Ok((changed, dropped))
+            })
+            .await
+            .map_err(internal)?;
+        purged = json!({
+            "kept": false,
+            "files": files,
+            "bytes": bytes,
+            "state_keys": state_deleted,
+            "tables": dropped,
+        });
+    }
     st.log.emit(
         "panel",
         None,
         crate::log::Level::Warn,
         format!(
-            "插件 {name} 已删除（副本在 {}）",
+            "插件 {name} 已删除（副本在 {}）{}",
             if moved.is_empty() {
                 "（文件本来就不在）".to_string()
             } else {
                 moved.join("、")
-            }
+            },
+            if keep_data { "，数据保留" } else { "，数据已一并清除" },
         ),
     );
     Ok(Json(json!({
         "ok": true,
         "name": name,
         "moved_to": moved.first().cloned(),
+        "data": purged,
     })))
 }
 #[derive(Deserialize)]

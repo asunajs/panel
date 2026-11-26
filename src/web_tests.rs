@@ -5245,3 +5245,307 @@ async fn write_apis_require_the_csrf_header() {
     assert!(plugins.join("quark.js").exists(), "被拒时不能动文件");
     let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
 }
+
+// ---------------------------------------------------------------- 删插件的数据去留（第 274 轮）
+
+/// 造一个「有数据」的插件：代码 + plugin-data 目录 + state 键 + 自建表。
+async fn seed_plugin_with_data(
+    plugins: &std::path::Path,
+    data: &std::path::Path,
+    db: &Db,
+    name: &str,
+) {
+    std::fs::create_dir_all(plugins.join(name)).unwrap();
+    std::fs::write(plugins.join(name).join(format!("{name}.js")), "export default 1").unwrap();
+    std::fs::write(
+        plugins.join(name).join(format!("{name}.panel.json")),
+        r#"{"title":"t","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let pd = data.join("plugin-data").join(name);
+    std::fs::create_dir_all(&pd).unwrap();
+    std::fs::write(pd.join("config.json"), "{}").unwrap();
+    std::fs::write(pd.join("accounts.json"), "[1,2,3]").unwrap();
+    let n = name.to_string();
+    db.call(move |c| {
+        // `state` 表由插件自己建（面板不建它）—— 测试里也照这个事实来
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT OR REPLACE INTO state(key,value,updated_at) VALUES(?1,'v','now')",
+            [format!("{n}.accounts")],
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT OR REPLACE INTO state(key,value,updated_at) VALUES(?1,'v','now')",
+            ["other.accounts"],
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS {n}_items(id INTEGER PRIMARY KEY, v TEXT);
+             INSERT INTO {n}_items(v) VALUES('a'),('b');"
+        ))
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn data_app(
+    plugins: std::path::PathBuf,
+    data: std::path::PathBuf,
+) -> (Router, Db) {
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), data.clone());
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(),
+        log.clone(),
+        data.join("scripts"),
+        data.join("trash"),
+        data.clone(),
+    );
+    let app = router(AppState {
+        db: db.clone(),
+        log,
+        sched,
+        plugins_dir: plugins,
+        scripts_dir: data.join("scripts"),
+        scripts,
+        data_dir: data,
+        config: store,
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+    });
+    (app, db)
+}
+
+#[tokio::test]
+async fn plugin_data_preview_lists_everything_but_no_values() {
+    let root = std::env::temp_dir().join(format!("panel-pd-prev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    let data = root.join("data");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let (app, db) = data_app(plugins.clone(), data.clone()).await;
+    seed_plugin_with_data(&plugins, &data, &db, "demo").await;
+
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .uri("/api/plugins/demo/data")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let d = &body["data"];
+    assert_eq!(d["dir_files"], 2, "两个配置文件：{d}");
+    assert_eq!(d["state_keys"], 1, "只算 demo. 开头那条，不算 other.");
+    assert_eq!(d["tables"][0]["name"], "demo_items");
+    assert_eq!(d["tables"][0]["rows"], 2);
+    assert_eq!(d["empty"], false);
+    assert!(d["summary"].as_str().unwrap().contains("demo_items"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn delete_keeps_data_by_default() {
+    let root = std::env::temp_dir().join(format!("panel-pd-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    let data = root.join("data");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let (app, db) = data_app(plugins.clone(), data.clone()).await;
+    seed_plugin_with_data(&plugins, &data, &db, "demo").await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/demo")
+        .header("x-panel", "1")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["kept"], true);
+
+    // 代码进回收站了
+    assert!(!plugins.join("demo").exists(), "代码该搬走");
+    // 数据**一个都没少**
+    assert!(data.join("plugin-data/demo/config.json").is_file(), "配置要留着");
+    let n: i64 = db
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM state WHERE key='demo.accounts'", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "state 键要留着");
+    let t: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='demo_items'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(t, 1, "插件自建表要留着");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn delete_with_keep_data_false_clears_everything_but_spares_others() {
+    let root = std::env::temp_dir().join(format!("panel-pd-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    let data = root.join("data");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let (app, db) = data_app(plugins.clone(), data.clone()).await;
+    seed_plugin_with_data(&plugins, &data, &db, "demo").await;
+    // 另一个插件的数据：绝不能被牵连
+    let other = data.join("plugin-data/other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("config.json"), "{}").unwrap();
+    db.call(|c| {
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS other_items(id INTEGER PRIMARY KEY);",
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap();
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/demo?keep_data=0")
+        .header("x-panel", "1")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["kept"], false);
+    assert_eq!(body["data"]["files"], 2);
+
+    assert!(!data.join("plugin-data/demo").exists(), "配置目录该删掉");
+    let keys: i64 = db
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM state WHERE key LIKE 'demo.%'", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(keys, 0, "state 键该删掉");
+    let tables: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='demo_items'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(tables, 0, "插件自建表该 drop 掉");
+
+    // 别人的东西一件不少
+    assert!(other.join("config.json").is_file(), "别的插件的配置不能动");
+    let ok: i64 = db
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM state WHERE key='other.accounts'", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(ok, 1, "别的插件的 state 键不能动");
+    let ot: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='other_items'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(ot, 1, "别的插件的表不能动");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn purge_never_touches_core_tables_or_reserved_keys() {
+    let root = std::env::temp_dir().join(format!("panel-pd-core-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let plugins = root.join("plugins");
+    let data = root.join("data");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let (app, db) = data_app(plugins.clone(), data.clone()).await;
+    // 插件名叫 state：撞上核心表
+    seed_plugin_with_data(&plugins, &data, &db, "state").await;
+    db.call(|c| {
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .map_err(|e| e.to_string())?;
+        c.execute(
+            "INSERT OR REPLACE INTO state(key,value,updated_at) VALUES('plugin.loaded_at','v','now')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/plugins/state?keep_data=0")
+        .header("x-panel", "1")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 核心表 `state` 必须还在（删了面板就崩了）
+    let core: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='state'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(core, 1, "核心表 state 不能被 drop");
+    // 保留前缀的键不能被插件带走
+    let kept: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM state WHERE key='plugin.loaded_at'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(kept, 1, "保留前缀的键不能删");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -8,6 +8,90 @@
 
 ---
 
+## 0.9.5（2026-11-26）
+
+### 删插件时的「数据留不留」（用户问的）
+
+用户原话：「如果我删除一个插件，他的数据会保留吗，能在删除时留一个是否保留的选项吗，
+像那种 windows 的软件卸载时一样」。
+
+**先回答「会保留吗」**：会，而且原来**只有**代码会被移走。一个插件的东西散在四处，
+旧的删除逻辑只动其中一处：
+
+| 东西 | 在哪 | 0.9.4 之前 |
+|---|---|---|
+| 代码 / 清单 / 界面 | `plugins/<name>/` | 进回收站 |
+| 配置、账号、token | `<data>/plugin-data/<name>/` | **原样留着** |
+| 库里的行 | `state` 表的 `<name>.*`、插件自建的表 | **原样留着** |
+| 任务 / 运行记录 | `tasks` / `runs` / `logs` | 任务删，记录留 |
+
+「留着」对重装是好事（账号不用重登），对「我就是要清干净」是坏事（下次装回来
+还带着上次的号）。两边都合理，所以改成**让人当场选**。
+
+### 做成了 Windows 卸载程序的样子
+
+不是一句「确定吗」，而是分两栏列出：
+
+```
+会删掉
+  · 插件代码、清单、界面（进 trash，可恢复）
+  · 它注册的定时任务
+它的数据
+  · 配置目录（4 个文件，5.9 KB）
+  · 2 条状态记录
+  · 表 cmcc_accounts（3 行）
+  ☑ 保留这些数据（下次装回来不用重新登录/配置）
+```
+
+默认**勾上保留**（可逆的那一边）；勾掉时那一行提示立刻变成危险色 +「找不回来」。
+
+### 归属判定（这一层判错的代价不对称）
+
+判宽了删别人的数据，判窄了留一份垃圾 —— 所以宁可留：
+
+- **文件**：只认 `<data>/plugin-data/<name>/` 这一个目录。不顺着配置里的路径去删别处
+  （插件能把任意路径写进自己的配置，照它删等于把「删插件」变成一个任意文件删除器）。
+  删之前还会 `canonicalize` 一次，确认它真的是 `plugin-data` 下面的一层。
+- **`state` 键**：`<name>.` 开头。实测线上 mcloud 的 36 个键全是 `mcloud.*`，这条是准的。
+- **表**：`<name>_` 开头或恰好等于 `<name>`。核心表（`plugins`/`tasks`/`runs`/`logs`/
+  `notifications`/`notify_outbox`/`notify_route_state`/`scripts`/`state`/`sqlite_sequence`）
+  **永不算**插件的 —— 哪怕插件就叫 `state`。
+- **保留键前缀** `plugin.` / `panel.`：面板的。现场库里有一条 `plugin.loaded_at`，
+  是 mcloud 早期版本自己写的（键名没带插件名），现在谁都不认领它 —— 刻意保守。
+- **认不出来源的**（比如孤儿表 `daily`）：不算任何插件的。
+
+### 预览接口不给内容
+
+`GET /api/plugins/{name}/data` 只回**数量和名字**，不回任何配置值 ——
+账号和 token 不该出现在删除确认框里（那玩意儿会被人截图发群）。测试里钉了这条：
+摘要文本里不许出现配置里的 token。
+
+### 踩到的两个坑
+
+1. **`state` 表不是面板建的**，是插件自己 `CREATE TABLE IF NOT EXISTS`。新实例上它
+   根本不存在，第一版预览接口直接 500（`no such table: state`）—— 表现成「删插件的
+   确认框弹不出来」。改成先查 `sqlite_master`，没有就当「没有键」。
+2. **`?keep_data=0` 被 axum 判成 400**：serde 的 `bool` 只认 `true`/`false`，
+   而人会写 `0`。改成收字符串自己解析（`0`/`false`/`no`/`off` 都算不保留）。
+
+### 真机验证（临时实例 + 线上真实数据）
+
+```
+GET  /api/plugins/cmcc/data  → dir_files=4 · state_keys=2 · tables=[cmcc_accounts(3 行)]
+                              summary=「配置目录（4 个文件，5.9 KB）、2 条状态记录、表 cmcc_accounts（3 行）」
+DELETE /api/plugins/cmcc            → data={kept:true}；配置目录 4 个文件、2 条 cmcc.* 键、cmcc_accounts 表全在
+DELETE /api/plugins/cmcc?keep_data=0 → data={files:4, bytes:5996, state_keys:2, tables:[cmcc_accounts]}
+                                     清完后：配置目录没了、cmcc.* 0 条、cmcc_accounts 没了
+                                     别人的 other.x / plugin.loaded_at **一条不少**
+```
+
+### 门禁
+
+`plugin_data` 单测 6 条（核心表不归插件 / 前缀与同名 / 连字符表名 / 保留键前缀 /
+目录统计 / 摘要不泄值），`web_tests` 新增 4 条（预览 / 默认保留 / 清干净且不牵连别人 /
+插件名叫 `state` 也不碰核心表），`cargo test` **610**（+8），
+`ui-check` **271**（+7），clippy 干净，fast 全过，mobile-check 9 页全过。
+
 ## 0.9.4（2026-11-25）
 
 ### 商店里更新 mcloud 报「包含多插件 zip」（用户报）

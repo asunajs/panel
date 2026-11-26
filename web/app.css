@@ -1179,6 +1179,15 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: in
    中文混排时仍可能整行溢出，用 anywhere 才真的能在任意位置断（手机端实测）。 */
 #files-areas .files-dir { overflow-wrap: anywhere; }
 
+/* 卸载插件的「会删掉 / 它的数据」两栏（第 274 轮）。
+   学 Windows 卸载程序：把要删的和要留的分开列，而不是一句「确定吗」。 */
+.uninstall-block { margin-top: 14px; }
+.uninstall-block h3 { margin: 0 0 6px; font-size: 12.5px; color: var(--dim); font-weight: 600; }
+.uninstall-block ul { margin: 0 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.uninstall-block li { color: var(--fg-2); }
+.uninstall-block .check { height: auto; padding: 6px 2px; }
+.uninstall-block .check-label { color: var(--fg-2); }
+
 /* 界面包列表（设置 → 常规 → 界面）：一行一个已装版本，右边是「启用 / 正在使用」。
    用 --line 细线分隔而不是底色块 —— 浅色下 --surface-2 与 --bg 只差 4 级，会糊成一片。 */
 .ui-pack-list { margin-top: 10px; display: flex; flex-direction: column; }

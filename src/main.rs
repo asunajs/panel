@@ -25,6 +25,7 @@ mod notify;
 mod outbound;
 mod plan;
 mod pluginfs;
+mod plugin_data;
 mod ui_pack;
 mod ui_cli;
 mod zlibsync;
