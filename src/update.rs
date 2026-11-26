@@ -393,6 +393,117 @@ pub async fn download(dir: &Path, name: &str, url: &str, sums_url: Option<&str>)
     }))
 }
 
+
+/// 按**这台机器**挑更新资产（第 268 轮）。
+///
+/// ⚠ 不能用浏览器的 `navigator.userAgent`：下载是**服务端**动作，落到面板所在的那台机器上。
+/// 用 Windows 的浏览器打开一台 Linux 面板 → 挑了 `.exe` → 到 Linux 上根本替换不了
+/// （用户 2026-11-26 报的就是这个）。同理架构也看主机，不看浏览器。
+pub fn pick_asset_for(os: &str, arch: &str, assets: &[Value]) -> Option<(String, String)> {
+    let name_of = |a: &Value| a.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+    let url_of = |a: &Value| a.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    let arm = arch.contains("aarch64") || arch.contains("arm64");
+    let want_arch = if arm { "aarch64" } else { "x86_64" };
+    let hit = assets.iter().find(|a| {
+        let n = name_of(a);
+        if n.is_empty() {
+            return false;
+        }
+        if os == "windows" {
+            n.contains("windows")
+        } else if os == "macos" {
+            n.contains("macos") || n.contains("darwin")
+        } else {
+            n.contains("linux") && n.contains(want_arch)
+        }
+    })?;
+    Some((name_of(hit), url_of(hit)))
+}
+
+/// 一键更新：查最新 → 按本机挑资产 → 下载校验 → 换掉正在跑的二进制 → 重启。
+pub async fn apply(dir: &Path) -> Result<Value, String> {
+    let rel = check(true).await?;
+    let assets = rel
+        .get("assets")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let os = crate::platform::os_name();
+    let arch = crate::platform::arch_name();
+    let (name, url) = pick_asset_for(os, arch, &assets)
+        .ok_or_else(|| format!("这个平台（{os}/{arch}）没有现成产物；按文档从源码更新"))?;
+    let sums = assets
+        .iter()
+        .find(|a| {
+            a.get("name")
+                .and_then(Value::as_str)
+                .map(|n| n.starts_with("SHA256SUMS"))
+                .unwrap_or(false)
+        })
+        .and_then(|a| a.get("url").and_then(Value::as_str))
+        .map(|s| s.to_string());
+    let got = download(dir, &name, &url, sums.as_deref()).await?;
+    let new_path = got.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+    let exe = std::env::current_exe().map_err(|e| format!("找不到自己的路径: {e}"))?;
+    let bak = swap_in(&exe, Path::new(&new_path))?;
+    schedule_restart(&exe);
+    Ok(json!({
+        "name": name,
+        "path": new_path,
+        "backup": bak.display().to_string(),
+        "verified": got.get("verified").cloned().unwrap_or(Value::Bool(false)),
+        "os": os,
+        "arch": arch,
+        "restart_in_ms": 1500,
+    }))
+}
+
+/// 把新二进制换到位：先把正在跑的自己挪开（Unix / Windows 都允许重命名运行中的 exe），
+/// 再把新文件放到原位；Unix 再补一次可执行位。换不上去就回滚，绝不把面板弄没。
+fn swap_in(exe: &Path, new: &Path) -> Result<std::path::PathBuf, String> {
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let base = exe.file_name().and_then(|s| s.to_str()).unwrap_or("panel");
+    let bak = exe.with_file_name(format!("{base}.bak-{ts}"));
+    std::fs::rename(exe, &bak).map_err(|e| format!("把旧二进制挪开失败（{}）: {e}", bak.display()))?;
+    if let Err(e) = std::fs::copy(new, exe) {
+        let _ = std::fs::rename(&bak, exe);
+        return Err(format!("写入新二进制失败: {e}（已回滚到旧版）"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(bak)
+}
+
+/// 延迟一点再重启：得先把 HTTP 响应发出去，否则界面只看到「连接被重置」。
+///
+/// Unix 用 `sh -c 'sleep 1; exec …'`（我们的父进程退出后它还活着）；
+/// Windows 用 `cmd /c start` 起一个脱离的进程。正在跑的面板随后自己退出。
+fn schedule_restart(exe: &Path) {
+    let exe = exe.to_path_buf();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        eprintln!("更新完成，正在重启：{}", exe.display());
+        let shown = exe.display().to_string();
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "", &shown])
+                .spawn();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 1; exec \"{shown}\""))
+                .spawn();
+        }
+        std::process::exit(0);
+    });
+}
+
 /// 从 `SHA256SUMS` 里挑出这个名字的哈希。
 async fn fetch_sha256(url: &str, name: &str) -> Result<String, String> {
     let text = client()?
@@ -558,5 +669,45 @@ mod ui_tag_tests {
         // 没序号的写法：整段当版本，序号 0（当作最旧，不会把带序号的挤掉）
         assert_eq!(split_ui_tag("0.8"), Some(("0.8".into(), 0)));
         assert_eq!(split_ui_tag(""), None);
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn assets() -> Vec<Value> {
+        vec![
+            json!({"name": "panel-aarch64-linux-musl", "url": "u-arm"}),
+            json!({"name": "panel-x86_64-linux-musl", "url": "u-x86"}),
+            json!({"name": "panel-x86_64-pc-windows-msvc.exe", "url": "u-win"}),
+            json!({"name": "SHA256SUMS", "url": "u-sums"}),
+        ]
+    }
+
+    /// 用户 2026-11-26 报的 bug：Windows 浏览器打开 Linux 面板，结果下成 .exe。
+    /// 挑资产只看**主机**，与浏览器无关 —— 这条钉住那个行为。
+    #[test]
+    fn linux_host_never_gets_the_windows_exe() {
+        let got = pick_asset_for("linux", "x86_64", &assets()).unwrap();
+        assert_eq!(got.0, "panel-x86_64-linux-musl", "Linux 主机必须拿 linux 产物");
+        assert_eq!(got.1, "u-x86");
+    }
+
+    #[test]
+    fn arm_host_gets_the_aarch64_build() {
+        let got = pick_asset_for("linux", "aarch64", &assets()).unwrap();
+        assert_eq!(got.0, "panel-aarch64-linux-musl");
+    }
+
+    #[test]
+    fn windows_host_gets_the_exe() {
+        let got = pick_asset_for("windows", "x86_64", &assets()).unwrap();
+        assert_eq!(got.0, "panel-x86_64-pc-windows-msvc.exe");
+    }
+
+    #[test]
+    fn macos_host_gets_nothing_instead_of_a_wrong_package() {
+        assert!(pick_asset_for("macos", "aarch64", &assets()).is_none(), "没有产物就该说没有，不能乱挑");
     }
 }

@@ -22,6 +22,14 @@ pub fn os_name() -> &'static str {
     }
 }
 
+/// 对外报的架构名（挑更新产物用）：`x86_64` / `aarch64` / 其它原样。
+///
+/// 归一化一次：Rust 在 macOS / Windows 的 ARM 上都给 `aarch64`，而发布产物的名字是
+/// `panel-aarch64-linux-musl` —— 两边同一口径，挑资产的地方就不用再做映射。
+pub fn arch_name() -> &'static str {
+    std::env::consts::ARCH
+}
+
 pub fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
