@@ -157,6 +157,9 @@ CI 发布后还拿真产物跑了一遍 `install.sh`）。
   `git push ssh-origin main`（远端 `ssh://git@ssh.github.com:443/asunajs/panel.git`）。
 - 发版 = ① 改 `Cargo.toml` 版本 ② **两份日志各加一段**（见下）③ 把读数记进对应文档（pitfalls / engine / ui 等）
   ④ 提交 `release: 0.6.x（一句话）` ⑤ 确认后再打 tag 并推（CI 出资产、发 Release，说明用**简版**那段）。
+- **发版前先跑 `bash scripts/pre-release.sh`**（第 275 轮）：它查版本号三处一致、货架对不对得上、
+  工作区干不干净。发版是**三条线** —— 面板 tag、插件 tag、货架 `catalog.json`，
+  前两条都不会自动带动第三条（用户报过两次「发版又没更新商店数据」）。
 - **更新日志分两份**：
   - `CHANGELOG.md` = **简版**，一版一节、每条一行，只写用户能感知的变化 —— 它就是 Release 说明的来源；
   - [changelog-full.md](changelog-full.md) = **完整版**，留档：为什么这么改、踩了什么坑、哪条门禁盯着、反向例。

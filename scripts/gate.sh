@@ -48,6 +48,16 @@ fi
 run "ui-kit-check"      node scripts/ui-kit-check.mjs
 run "ui-check"          node scripts/ui-check.mjs
 
+# 货架（第 275 轮）：catalog.json 里的版本 / 资产名 / sha256 跟各插件仓的最新 release 对不对得上。
+# 用户报过「发版又没更新商店数据」—— 面板发版和插件发版是两条线，货架是第三条，不跟任何一边自动走。
+# 找不到货架仓就跳过（不是每个人都在同一个目录放它），找到就必须绿。
+SHELF="${PANEL_SHELF:-$HOME/mobile/workspace/panel-single-plugins}"
+if [ -f "$SHELF/scripts/check-catalog.mjs" ]; then
+  run "check-catalog"   node "$SHELF/scripts/check-catalog.mjs"
+else
+  echo "  ↷ 跳过 check-catalog（没找到 $SHELF）"
+fi
+
 # 端到端（真起面板，慢）
 run "check-lazy-load"   bash scripts/check-lazy-load.sh
 run "check-wake"        bash scripts/check-wake.sh

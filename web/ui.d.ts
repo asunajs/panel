@@ -32,6 +32,10 @@ interface PanelEl extends HTMLElement {
   /** `<input type="number">`：上下限（属性值，字符串） */
   min: string;
   max: string;
+  /** `<p-tabs>`：切到第 i 页（会派发 `change`，detail.index 是新的下标） */
+  select(index: number): void;
+  /** `<p-tabs>`：当前页下标（0 起） */
+  readonly index: number;
 }
 
 type PanelHintKind = 'error' | 'err' | 'warn' | 'warning' | '' | null;
