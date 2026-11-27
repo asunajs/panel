@@ -8004,6 +8004,13 @@ function bind() {
   $('panel-restart').addEventListener('click', restartPanel);
   // 检查更新：手点才 force 查，顶栏 pill 直接带用户去版本那块
   if ($('update-check')) $('update-check').addEventListener('click', () => checkUpdate(true));
+  if ($('update-local-go')) {
+    $('update-local-go').addEventListener('click', () => {
+      const p = ($('update-local-input').value || '').trim();
+      if (!p) { notify('先填一个本机二进制的路径', 'err'); $('update-local-input').focus(); return; }
+      stageLocal(p, null, $('update-local-go'));
+    });
+  }
   if ($('update-pill')) $('update-pill').addEventListener('click', gotoUpdatePanel);
   $('test-run').addEventListener('click', runTest);
   wireNotify();

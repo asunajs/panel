@@ -339,6 +339,15 @@
                       <span class="cfg-unit" id="update-status"></span>
                     </div>
                   </div>
+                  <div class="cfg-row">
+                    <span class="cfg-label">本地构建</span>
+                    <div class="cfg-inline">
+                      <input id="update-local-input" class="input" type="text" autocomplete="off" spellcheck="false"
+                             placeholder="例：/Users/你/panel-llrt/target/release/panel" />
+                      <button class="btn btn-sm" id="update-local-go" type="button">用这个路径更新</button>
+                    </div>
+                  </div>
+                  <p class="settings-note">自己编译的那台机器直接填产物路径：先暂存，再走同一套排水/替换，不用传上 GitHub 再下回来。同版本重建也能装（字节不同就行）。</p>
                   <div id="update-box"></div>
                 </div>
               </section>

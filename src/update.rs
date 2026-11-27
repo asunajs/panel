@@ -488,12 +488,12 @@ pub fn stage_local(dir: &Path, src: &Path) -> Result<Value, String> {
     let bytes = std::fs::read(src).map_err(|e| format!("读 {} 失败：{e}", src.display()))?;
     let local_ver = binary_version(src)
         .ok_or_else(|| format!("{} 跑 version 没报出版本号，可能不是面板二进制", src.display()))?;
-    if crate::panelversion::same_version(&local_ver, crate::panelversion::current()) {
-        return Err(format!(
-            "{} 的版本和正在运行的相同（都是 {}），没必要更新",
-            src.display(),
-            crate::panelversion::current()
-        ));
+    // 同版本**重建**要能装：自己改了代码、版本号还没动是常态。
+    // 真正该拒的是「和正在跑的一模一样」（字节相同）—— 那种装了也没意义。
+    if let Ok(cur) = std::fs::read(&exe) {
+        if sha256_hex(&cur) == sha256_hex(&bytes) {
+            return Err("这个文件和正在跑的面板一模一样，不用更新".to_string());
+        }
     }
     let sha = sha256_hex(&bytes);
     let name = format!("panel-local-{}", &sha[..12]);

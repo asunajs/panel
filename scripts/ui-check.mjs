@@ -1780,6 +1780,15 @@ async function main() {
     "return {hidden:m.classList.contains('hidden'),title:document.getElementById('changelog-title').textContent," +
     "text:pre?pre.textContent:'',scrollable:pre?getComputedStyle(pre).overflowY:''};})())"
   ));
+  const localInput = JSON.parse(await js(
+    "JSON.stringify((()=>{const i=document.getElementById('update-local-input');" +
+    "const b=document.getElementById('update-local-go');" +
+    "return {input:!!i,button:!!b,label:b?b.textContent:''};})())"
+  ));
+  check('设置页能手填本机构建路径（不绕 GitHub）',
+    localInput.input === true && localInput.button === true && /用这个路径更新/.test(localInput.label),
+    JSON.stringify(localInput));
+
   check('点「更新内容」弹出更新日志（正文来自内置 CHANGELOG）',
     logModal.hidden === false && /新版本的说明/.test(logModal.text) && logModal.scrollable === 'auto',
     JSON.stringify(logModal));
