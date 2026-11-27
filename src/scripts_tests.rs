@@ -406,9 +406,19 @@ async fn a_script_cannot_run_twice_at_once() {
         second.unwrap_err().contains("正在运行"),
         "要说清是「正在运行」"
     );
-    // 等第一次跑完，再跑就该成功了
-    tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-    let third = s.run("slow.sh", true).await;
+    // 等第一次跑完，再跑就该成功了。
+    // ⚠ 别用固定 1800ms：Windows CI 上 `sleep 1` + 进程回收 + 收尾落库经常超过这个数，
+    // 于是这条在 Windows 上偶发红（实测 2026-11-27 那次：604 过、就它挂）。
+    // 轮询到「不再算运行中」为止，最多等 10 秒 —— 断言的是**语义**（跑完能再跑），
+    // 不是「1.8 秒够不够」。
+    let mut third = s.run("slow.sh", true).await;
+    for _ in 0..40 {
+        if third.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        third = s.run("slow.sh", true).await;
+    }
     assert!(third.is_ok(), "跑完之后应当能再跑: {third:?}");
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 }
