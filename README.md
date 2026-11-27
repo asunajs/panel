@@ -9,7 +9,7 @@
 - 用 JavaScript 写插件，把一组重复操作做成按钮或定时任务
 - 只想跑一段 Shell / Python / PHP / 二进制程序，不想为它写完整插件
 
-当前版本见 `Cargo.toml`（现在是 **0.6.3**）。设置页与 `/api/update/check` 也能看到正在运行的面板版本。
+当前版本见 `Cargo.toml`。设置页与 `/api/update/check` 也能看到正在运行的面板版本。
 
 ---
 
@@ -23,12 +23,13 @@ Linux、树莓派、家里的小主机一行搞定：
 curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 ```
 
-脚本会识别 CPU 架构，从 GitHub Release 下载对应的静态二进制，**强制校验 SHA256**
-（还有 ELF/体积自检），然后装进 `~/.local/bin`。GitHub 下载慢可以走镜像
+脚本会识别平台，从 GitHub Release 下载对应二进制，**强制校验 SHA256**
+（还有二进制头/体积自检），然后装进 `~/.local/bin`。GitHub 下载慢可以走镜像
 （`PANEL_BASE_URL=https://你的镜像/panel bash install.sh`）；脚本其他行为不变。
 
 支持的产物：`aarch64-linux-musl`（64 位 ARM：手机、盒子、树莓派 3/4/5）、
 `x86_64-linux-musl`（PC / VPS）、`x86_64-pc-windows-msvc.exe`（Windows，见下）。
+macOS 不出预编译包：本地构建（见文末），或者在面板里用「用本地构建更新」。
 
 ### Windows
 

@@ -291,6 +291,10 @@ pub struct Scripts {
     data_dir: PathBuf,
     /// 同一个脚本不允许并发跑：手动点两次不该同时进来两份。
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// 优雅更新排水中：不再启动新脚本，已经启动的让它们跑完。
+    draining: Arc<std::sync::atomic::AtomicBool>,
+    /// 「检查 draining + 占 in_flight」必须是一原子段，否则更新会夹在检查和启动之间。
+    drain_gate: Arc<Mutex<()>>,
 }
 
 /// 脚本侧的错误日志都写这一处（review D2：同一个模式在文件里重复了 5+ 次）。
@@ -310,7 +314,34 @@ impl Scripts {
             trash,
             data_dir,
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            drain_gate: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// 开始排水：保留已经启动的脚本，拒绝新启动。
+    pub fn begin_drain(&self) {
+        let _g = self.drain_gate.lock().unwrap_or_else(|p| p.into_inner());
+        self.draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn cancel_drain(&self) {
+        let _g = self.drain_gate.lock().unwrap_or_else(|p| p.into_inner());
+        self.draining
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 当前已经启动、还没收尾的脚本数。
+    pub fn active_count(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 
     /// 列表：记录 + 文件状态（文件没了要能看出来）。
@@ -1002,6 +1033,12 @@ impl Scripts {
         let task = display(name, &task).to_string();
 
         {
+            // 和 begin_drain 用同一把门：要么这次先占上位置（更新等它跑完），
+            // 要么更新先关门（这次明确拒绝），不能出现「检查完才关门，却又启动一条」。
+            let _gate = self.drain_gate.lock().unwrap_or_else(|p| p.into_inner());
+            if self.is_draining() {
+                return Err("面板正在更新，暂不接收新脚本".to_string());
+            }
             let mut guard = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
             if !guard.insert(name.to_string()) {
                 return Err(format!("脚本 {name} 正在运行，等这次跑完"));
@@ -1009,7 +1046,16 @@ impl Scripts {
         }
 
         let started = now_ms();
-        let run_id = crate::runs::open(&self.db, PLUGIN, &task, started).await?;
+        let run_id = match crate::runs::open(&self.db, PLUGIN, &task, started).await {
+            Ok(id) => id,
+            Err(e) => {
+                self.in_flight
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(name);
+                return Err(e);
+            }
+        };
 
         self.log.emit(
             PLUGIN,
@@ -1246,6 +1292,9 @@ async fn kill_tree(child: &mut tokio::process::Child) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(TICK_MS)).await;
+                if self.is_draining() {
+                    continue; // 不推进 next_at：重启后欠的这拍还在
+                }
                 let due = match self.due_scripts().await {
                     Ok(v) => v,
                     Err(e) => {
@@ -1254,11 +1303,15 @@ async fn kill_tree(child: &mut tokio::process::Child) {
                     }
                 };
                 for (name, cron) in due {
-                    // 先推进 next_at 再跑：跑的过程中不能一直命中同一条。
-                    self.advance(&name, &cron).await;
+                    // 先尝试占位；没启动成功（更新中 / 同脚本还在跑）就不推进 next_at。
+                    // 旧顺序是「先推进再跑」，更新恰好夹在中间时会白丢一拍。
                     if let Err(e) = self.run(&name, false).await {
-                        self.log.emit(PLUGIN, None, Level::Warn, format!("脚本 {name} 未能启动: {e}"));
+                        if !self.is_draining() {
+                            self.log.emit(PLUGIN, None, Level::Warn, format!("脚本 {name} 未能启动: {e}"));
+                        }
+                        continue;
                     }
+                    self.advance(&name, &cron).await;
                 }
             }
         })

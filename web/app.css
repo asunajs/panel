@@ -434,6 +434,16 @@ button, input, select { font: inherit; color: inherit; }
   white-space: pre-wrap; word-break: break-word;
 }
 
+
+/* 更新日志弹窗正文：CHANGELOG 的一段纯文本，保留换行、给滚动上限 */
+.changelog-body { margin: 10px 0 0; }
+.changelog-pre {
+  margin: 0; padding: 12px 14px; max-height: min(58vh, 460px); overflow: auto;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-control);
+  font-size: 12.5px; line-height: 1.65; color: var(--fg-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+
 /* 多选下拉:只收/不收。前两版是「逗号文本框」和「标签 + 两排胶囊」,
    都不合用(看不清边界 / 占一大片高度)。现在收起是个控件,点开是勾选清单:
    已选项直接摆在控件里,× 能单个取消;底部输入框留给前缀通配(mcloud*)。

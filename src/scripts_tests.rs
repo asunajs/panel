@@ -515,3 +515,37 @@ fn flight_guard_releases_the_name_even_on_panic() {
         "panic 之后名字必须摘掉，否则这个脚本永远跑不了第二次"
     );
 }
+
+
+/// 优雅更新：已经启动的脚本让它们收尾，新脚本拒绝；取消后恢复。
+#[cfg(unix)]
+#[tokio::test]
+async fn drain_waits_for_running_scripts_and_rejects_new_ones() {
+    let dir = tmpdir("drain-scripts");
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let s = mk(db.clone(), &dir);
+    s.save("slow.sh", "sh", "#!/bin/sh\nsleep 1\n", meta("", None, 10_000, true))
+        .await
+        .unwrap();
+
+    let first = s.run("slow.sh", true).await.unwrap();
+    s.begin_drain();
+    assert_eq!(s.active_count(), 1, "更新必须看见已经启动的脚本");
+    let rejected = s.run("slow.sh", true).await;
+    assert!(rejected.unwrap_err().contains("正在更新"), "排水期间不能启动新脚本");
+
+    let mut idle = false;
+    for _ in 0..40 {
+        if s.active_count() == 0 { idle = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(idle, "已经启动的脚本要正常收尾");
+    let (status, error) = run_status(&db, first).await;
+    assert_eq!(status, "ok", "不能硬切正在跑的脚本: {error}");
+
+    s.cancel_drain();
+    let second = s.run("slow.sh", true).await.unwrap();
+    let (status, error) = run_status(&db, second).await;
+    assert_eq!(status, "ok", "取消后要恢复接单: {error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

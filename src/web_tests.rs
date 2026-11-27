@@ -33,6 +33,7 @@ async fn setup() -> (Router, Db) {
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     };
     (router(st), db)
 }
@@ -90,6 +91,7 @@ async fn setup_authed() -> Router {
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     })
 }
 /// 带响应头的版本：登录要读 Set-Cookie。
@@ -313,6 +315,7 @@ async fn token_gates_the_api_but_not_the_assets() {
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     });
 
     let (status, _) = get(&app, "/api/state").await;
@@ -378,6 +381,7 @@ async fn a_rebinding_host_is_rejected_when_there_is_no_token() {
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(Some(Arc::new(crate::auth::Auth::derive("s3cret"))))),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     });
     let req = Request::get("/api/state")
         .header("host", "evil.example.com")
@@ -481,8 +485,40 @@ async fn setup_core_auth(
             token.map(|t| Arc::new(crate::auth::Auth::derive(t))),
         )),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     };
     (router(st), plugins, data, store, db)
+}
+
+/// 优雅更新专用：把 AppState 也交出来，直接验调度器排水，不碰进程 exec。
+async fn setup_graceful(tag: &str) -> (Router, AppState, PathBuf) {
+    crate::engine::global_inits();
+    let (plugins, data) = temp_dirs(tag);
+    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+    let log = LogHub::new(db.clone());
+    let store = crate::config_store::ConfigStore::new(&json!({}));
+    let (sched, _task) = crate::scheduler::start(db.clone(), log.clone(), store.clone(), PathBuf::from("data"));
+    let scripts_dir = data.join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    let scripts = crate::scripts::Scripts::new(
+        db.clone(), log.clone(), scripts_dir.clone(), data.join("trash"), data.clone(),
+    );
+    let st = AppState {
+        db,
+        log,
+        sched,
+        plugins_dir: plugins.clone(),
+        scripts_dir,
+        scripts,
+        update: Arc::new(crate::update::UpdateControl::new(&data)),
+        data_dir: data.clone(),
+        config: store,
+        limits: std::sync::Arc::new(crate::ratelimit::Limits::new()),
+        load_errors: Default::default(),
+        auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+    };
+    (router(st.clone()), st, data)
 }
 
 fn with_csrf(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
@@ -5090,6 +5126,7 @@ async fn files_app(
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     })
 }
 
@@ -5322,6 +5359,7 @@ async fn data_app(
         load_errors: Default::default(),
         auth: std::sync::Arc::new(std::sync::RwLock::new(None)),
         ui: std::sync::Arc::new(crate::web::UiAssets::new(None)),
+        update: Default::default(),
     });
     (app, db)
 }
@@ -5548,4 +5586,207 @@ async fn purge_never_touches_core_tables_or_reserved_keys() {
         .unwrap();
     assert_eq!(kept, 1, "保留前缀的键不能删");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+
+/// 优雅更新排水：已经开始的和已经排队的都跑完，新的拒绝；取消后恢复接单。
+#[tokio::test]
+async fn graceful_update_drains_running_and_queued_tasks_then_resumes() {
+    let (_app, st, _data) = setup_graceful("gracedrain").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('slow', async () => { await host.sleep(500); }, 5000);
+"#;
+    std::fs::write(st.plugins_dir.join("g.js"), src).unwrap();
+    let (status, _) = send(&_app, with_csrf("POST", "/api/plugins/g/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let first = st.sched.run_now("g", "slow", None).await.unwrap();
+    assert!(matches!(first, crate::scheduler::StartOutcome::Started { .. }));
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let second = st.sched.run_now("g", "slow", None).await.unwrap();
+    assert!(matches!(second, crate::scheduler::StartOutcome::Queued { position: 1 }));
+
+    let draining = st.sched.begin_drain().await.unwrap();
+    assert!(!draining.active_tasks.is_empty(), "在途那条要出现在等待清单: {draining:?}");
+    assert_eq!(draining.queued_runs, 1, "已经排队的不能丢: {draining:?}");
+    let rejected = st.sched.run_now("g", "slow", None).await;
+    assert!(rejected.unwrap_err().contains("正在更新"), "排水期间不能接新任务");
+
+    let mut idle = false;
+    for _ in 0..40 {
+        let view = st.sched.drain_status().await.unwrap();
+        if view.idle() { idle = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(idle, "在途 + 已排队两条都该跑完");
+
+    let count: i64 = st.db.call(|c| {
+        c.query_row("SELECT count(*) FROM runs WHERE plugin='g' AND task='slow'", [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }).await.unwrap();
+    assert_eq!(count, 2, "排队的那条也要真正执行，不是静默丢");
+
+    st.sched.cancel_drain().await.unwrap();
+    let third = st.sched.run_now("g", "slow", None).await.unwrap();
+    assert!(matches!(third, crate::scheduler::StartOutcome::Started { .. }), "取消后要恢复接单");
+}
+
+/// 更新状态机：暂存 → 排水 → 取消 → 再排水；取消后旧后台任务不能继续提交。
+#[test]
+fn update_control_cancels_by_generation() {
+    let dir = std::env::temp_dir().join(format!("upctl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("updates")).unwrap();
+    std::fs::write(dir.join("updates/panel-new"), b"fake").unwrap();
+    let staged = crate::update::StagedUpdate {
+        version: "999.0.0".into(), name: "panel-new".into(),
+        path: dir.join("updates/panel-new").display().to_string(),
+        bytes: 4, sha256: "00".repeat(32), verified: true,
+        os: "linux".into(), arch: "x86_64".into(), staged_ms: 1,
+    };
+    std::fs::write(dir.join("updates/pending.json"), staged.to_value().to_string()).unwrap();
+    let ctl = crate::update::UpdateControl::new(&dir);
+    assert_eq!(ctl.snapshot()["phase"], "ready", "启动要恢复暂存状态");
+    let (g1, _) = ctl.begin_restart().unwrap();
+    assert_eq!(ctl.snapshot()["phase"], "draining");
+    ctl.cancel(g1).unwrap();
+    assert_eq!(ctl.snapshot()["phase"], "ready");
+    let (g2, _) = ctl.begin_restart().unwrap();
+    assert_ne!(g1, g2);
+    assert!(!ctl.progress(g1, vec![], vec![], 0, 0), "旧后台任务不能改新状态");
+    assert!(ctl.try_restarting(g2));
+    assert!(ctl.cancel(g2).is_err(), "已经开始切换就不能取消");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 暂存文件在「稍后」期间被改过：提交必须拒绝，不能换二进制。
+#[test]
+fn update_commit_rejects_a_tampered_staged_file() {
+    let dir = std::env::temp_dir().join(format!("uptamper-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("updates")).unwrap();
+    let file = dir.join("updates/panel-new");
+    std::fs::write(&file, b"tampered").unwrap();
+    let staged = crate::update::StagedUpdate {
+        version: "999.0.0".into(), name: "panel-new".into(),
+        path: file.display().to_string(), bytes: 9,
+        sha256: "11".repeat(32), verified: true,
+        os: "linux".into(), arch: "x86_64".into(), staged_ms: 1,
+    };
+    // 直接写元数据，避免调用私有 write_pending；commit 仍走完整校验路径。
+    std::fs::write(dir.join("updates/pending.json"), staged.to_value().to_string()).unwrap();
+    let err = crate::update::commit(&dir).unwrap_err();
+    assert!(err.contains("sha256 已变化"), "实际错误: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// 更新接口全链路（不 exec）：暂存一个哈希不对的包 → 开始排水 → 提交拒绝 →
+/// 状态变 failed，调度器恢复接单。这个用例永远不会替换测试二进制。
+#[tokio::test]
+async fn graceful_update_api_recovers_from_a_bad_staged_package() {
+    let (app, st, data) = setup_graceful("graceapi").await;
+    std::fs::create_dir_all(data.join("updates")).unwrap();
+    let file = data.join("updates/panel-new");
+    std::fs::write(&file, b"not-the-release").unwrap();
+    let staged = crate::update::StagedUpdate {
+        version: "999.0.0".into(), name: "panel-new".into(),
+        path: file.display().to_string(), bytes: 16,
+        sha256: "22".repeat(32), verified: true,
+        os: "linux".into(), arch: "x86_64".into(), staged_ms: 1,
+    };
+    std::fs::write(data.join("updates/pending.json"), staged.to_value().to_string()).unwrap();
+    st.update.downloaded(staged);
+
+    let (status, body) = send(&app, with_csrf("POST", "/api/update/restart", None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["phase"], "draining");
+
+    let mut failed = false;
+    for _ in 0..40 {
+        let (_, job) = get(&app, "/api/update/status").await;
+        if job["phase"] == "failed" { failed = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(failed, "坏包必须让更新失败，而不是尝试 exec");
+    let (_, job) = get(&app, "/api/update/status").await;
+    assert!(job["error"].as_str().unwrap_or_default().contains("sha256 已变化"), "{job}");
+
+    // 失败后调度器已恢复：直接 begin/status/cancel 走一圈，确认不是永久卡死。
+    let view = st.sched.begin_drain().await.unwrap();
+    assert!(view.idle());
+    st.sched.cancel_drain().await.unwrap();
+}
+
+
+/// 排水期间，正在跑的插件仍能把后续步骤 run_once 排完；更新等它们收尾。
+#[tokio::test]
+async fn graceful_update_allows_the_in_flight_plugin_to_queue_followups() {
+    let (_app, st, _data) = setup_graceful("gracefollow").await;
+    let src = r#"import host from 'panel:host';
+await host.register_handler('tail', async () => { await host.sleep(120); }, 5000);
+await host.register_handler('head', async () => {
+  await host.sleep(180);
+  await host.run_once('tail', { budget_ms: 5000 });
+}, 5000);
+"#;
+    std::fs::write(st.plugins_dir.join("f.js"), src).unwrap();
+    let (status, _) = send(&_app, with_csrf("POST", "/api/plugins/f/reload", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let first = st.sched.run_now("f", "head", None).await.unwrap();
+    assert!(matches!(first, crate::scheduler::StartOutcome::Started { .. }));
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let view = st.sched.begin_drain().await.unwrap();
+    assert!(!view.active_tasks.is_empty());
+
+    let mut idle = false;
+    for _ in 0..40 {
+        let view = st.sched.drain_status().await.unwrap();
+        if view.idle() { idle = true; break; }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(idle, "head 排出的 tail 也必须跑完");
+    let count: i64 = st.db.call(|c| {
+        c.query_row("SELECT count(*) FROM runs WHERE plugin='f' AND (task='head' OR task LIKE 'tail#%')", [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }).await.unwrap();
+    assert_eq!(count, 2, "后续步骤不能被排水拒绝");
+}
+
+
+/// 本地构建更新（第 276 轮）：`POST /api/update/local` 把本机二进制暂存，
+/// 之后的排水/替换与在线更新同一条路。这里用「会报版本的脚本 + 填充到 1MB」模拟二进制，
+/// 只验暂存和状态，不触发真正替换。
+#[cfg(unix)]
+#[tokio::test]
+async fn local_binary_can_be_staged_for_update() {
+    use std::os::unix::fs::PermissionsExt;
+    let (app, st, data) = setup_graceful("localstage").await;
+    let fake = data.join("fake-panel");
+    let mut body = String::from("#!/bin/sh\nif [ \"$1\" = version ]; then echo 'panel 999.0.0（panel-llrt）'; exit 0; fi\n");
+    body.push_str(&"#".repeat(1_200_000));
+    std::fs::write(&fake, body).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (status, got) = send(
+        &app,
+        with_csrf("POST", "/api/update/local", Some(json!({ "path": fake.display().to_string() }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    assert_eq!(got["version"], "999.0.0");
+    assert_eq!(got["source"], "local");
+    assert!(st.data_dir.join("updates/pending.json").is_file(), "要落暂存元数据");
+
+    let (_, job) = get(&app, "/api/update/status").await;
+    assert_eq!(job["phase"], "ready");
+    assert_eq!(job["version"], "999.0.0");
+
+    // 排水后取消：确认这条路的生命周期和在线更新一致。
+    let (status, d) = send(&app, with_csrf("POST", "/api/update/restart", None)).await;
+    assert_eq!(status, StatusCode::OK, "{d}");
+    let (status, c) = send(&app, with_csrf("POST", "/api/update/cancel", None)).await;
+    assert_eq!(status, StatusCode::OK, "{c}");
+    let (_, job) = get(&app, "/api/update/status").await;
+    assert_eq!(job["phase"], "ready", "取消后回到「已就绪」: {job}");
 }

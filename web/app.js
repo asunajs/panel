@@ -22,6 +22,8 @@ const state = {
   uiInstalled: [],
   /** 面板仓里有没有给当前版本的界面包（`GET /api/ui/check`）。 */
   uiLatest: null,
+  /** 一键更新任务：idle / downloading / ready / draining / restarting / failed。 */
+  updateJob: { phase: 'idle' },
   auth: false,
   plugins: [],
   /** 插件目录里的文件（含未加载的：语法错的插件只能在界面里修）。 */
@@ -6155,19 +6157,29 @@ async function checkUpdate(force) {
 /// 顶栏那个 pill + 设置页那块，都从这一处渲染。
 function renderUpdate() {
   const u = state.update || {};
+  const job = state.updateJob || { phase: 'idle' };
   const pillBtn = $('update-pill');
   if (pillBtn) {
-    // 「当前版本更新就不提示了」—— 后端把 skipped / has_update 都算好给前端
-    const panelShow = !!u.show;
-    // 面板没新版时，也可能只有**界面包**可更新。这是同一类事
-    // （「有个新东西可以装」），所以共用一个入口；面板新版优先级更高。
+    const panelShow = !!u.show || ['ready', 'draining', 'restarting', 'downloading'].includes(job.phase);
     const ui = state.uiLatest || {};
     const uiNew = !panelShow && ui.available && ui.version !== ((state.ui || {}).version || '');
     const show = panelShow || uiNew;
     pillBtn.classList.toggle('hidden', !show);
     if (show) {
       const label = pillBtn.querySelector('.label');
-      if (panelShow) {
+      if (job.phase === 'ready') {
+        label.textContent = '更新就绪 ' + (job.version || '');
+        pillBtn.dataset.tip = '已下载并校验，点进去选择「重启以更新」或「稍后」';
+      } else if (job.phase === 'draining') {
+        label.textContent = '更新等待中';
+        pillBtn.dataset.tip = '已停止接新任务，正在等当前任务和排队任务收尾';
+      } else if (job.phase === 'downloading') {
+        label.textContent = '下载更新中';
+        pillBtn.dataset.tip = '正在按本机平台下载并校验';
+      } else if (job.phase === 'restarting') {
+        label.textContent = '更新切换中';
+        pillBtn.dataset.tip = '任务已收尾，正在换二进制并重启';
+      } else if (panelShow) {
         label.textContent = '有新版本 ' + (u.latest || '');
         pillBtn.dataset.tip = '当前 ' + (u.current || state.version) + ' → ' + u.latest;
       } else {
@@ -6180,88 +6192,361 @@ function renderUpdate() {
   if (cur) cur.textContent = u.current || state.version || '—';
   const st = $('update-status');
   if (st) {
-    if (u.error) st.textContent = '查不到最新版本（' + u.error + '）';
+    if (job.phase === 'downloading') st.textContent = '正在下载并校验更新包…';
+    else if (job.phase === 'ready') st.textContent = '更新包已就绪：' + (job.version || '?') + '（等确认重启）';
+    else if (job.phase === 'draining') st.textContent = updateDrainText(job);
+    else if (job.phase === 'restarting') st.textContent = '任务已收尾，正在切换二进制并重启…';
+    else if (job.phase === 'failed') st.textContent = '更新失败：' + (job.error || '未知原因');
+    else if (u.error) st.textContent = '查不到最新版本（' + u.error + '）';
     else if (u.has_update) st.textContent = '有新版 ' + u.latest + '（当前 ' + (u.current || state.version) + '）' + (u.skipped ? ' · 已设为不再提示' : '');
     else if (u.latest) st.textContent = '已是最新（' + u.latest + '）';
     else st.textContent = '';
   }
   const box = $('update-box');
-  if (box) {
-    clear(box);
-    if (u.has_update && !u.skipped) {
-      const p = el('p', 'settings-note',
-        '新版 ' + u.latest + ' 已发布。点「更新并重启」会下载、校验 sha256、' +
-        '把旧二进制改名备份，然后自动重启（按**本机**平台挑包，不看浏览器）。');
-      const bar = el('div', 'cfg-inline');
-      const dl = el('button', 'btn btn-sm btn-primary', '更新并重启');
-      dl.type = 'button';
-      dl.addEventListener('click', () => downloadUpdate(dl));
-      const go = el('button', 'btn btn-sm', '打开下载页');
-      go.type = 'button';
-      if (u.url) go.addEventListener('click', () => window.open(u.url, '_blank', 'noopener'));
-      else go.disabled = true;
-      const skip = el('button', 'btn btn-sm', '不再提示这个版本');
-      skip.type = 'button';
-      skip.addEventListener('click', () => skipUpdate(u.latest));
-      bar.append(dl, go, skip);
-      box.append(p, bar);
-      if (u.notes) {
-        const pre = el('pre', 'update-notes', String(u.notes).slice(0, 4000));
-        box.append(pre);
-      }
+  if (!box) return;
+  clear(box);
+
+  if (job.phase === 'ready') {
+    const p = el('p', 'settings-note',
+      '更新包 ' + (job.version || '?') + ' 已下载并' + (job.verified ? '通过 sha256 校验' : '暂存（发布方未提供校验值）') + '。' +
+      '确认后先停止接收新任务，等在途和已排队任务收尾，再换二进制并重启。');
+    const bar = el('div', 'cfg-inline');
+    const go = el('button', 'btn btn-sm btn-primary', '重启以更新');
+    go.type = 'button';
+    go.addEventListener('click', restartUpdate);
+    const later = el('button', 'btn btn-sm', '稍后');
+    later.type = 'button';
+    later.addEventListener('click', () => {
+      notify('更新包已暂存，之后可随时回来点「重启以更新」', 'ok');
+    });
+    bar.append(go, later);
+    box.append(p, bar);
+    return;
+  }
+
+  if (job.phase === 'draining') {
+    const p = el('p', 'settings-note', updateDrainText(job));
+    const bar = el('div', 'cfg-inline');
+    const cancel = el('button', 'btn btn-sm', '取消更新');
+    cancel.type = 'button';
+    cancel.addEventListener('click', cancelUpdate);
+    bar.append(cancel);
+    box.append(p, bar);
+    if ((job.active_tasks || []).length) {
+      box.append(el('pre', 'update-notes', '正在收尾：\n' + job.active_tasks.join('\n')));
     }
+    return;
+  }
+
+  if (job.phase === 'restarting' || job.phase === 'downloading') {
+    box.append(el('p', 'settings-note', job.phase === 'restarting'
+      ? '所有任务已收尾，正在切换并重启。页面会自动重连。'
+      : '正在按面板所在主机下载更新包并校验，请稍等。'));
+    return;
+  }
+
+  if (job.phase === 'failed') {
+    const p = el('p', 'settings-note', '更新失败：' + (job.error || '未知原因') + '。旧面板仍在运行。');
+    const bar = el('div', 'cfg-inline');
+    if (u.has_update && !u.skipped) {
+      const retry = el('button', 'btn btn-sm btn-primary', '重新下载');
+      retry.type = 'button';
+      retry.addEventListener('click', () => downloadUpdate(retry));
+      bar.append(retry);
+    }
+    if (job.version) {
+      const retryInstall = el('button', 'btn btn-sm', '重试安装暂存包');
+      retryInstall.type = 'button';
+      retryInstall.addEventListener('click', restartUpdate);
+      bar.append(retryInstall);
+    }
+    box.append(p, bar);
+    return;
+  }
+
+  // 本机就有构建产物时，先给「用本地构建」—— 自己编译的那台机器不该传上 GitHub 再下回来。
+  const local = Array.isArray(u.local) ? u.local.filter((x) => x && x.path) : [];
+  if (local.length) {
+    const fresh = local.filter((x) => x.version && x.version !== (u.current || state.version));
+    const box2 = el('div', 'cfg-inline');
+    for (const cand of (fresh.length ? fresh : local).slice(0, 3)) {
+      const b = el('button', 'btn btn-sm btn-primary',
+        '用本地构建' + (cand.version ? ' ' + cand.version : ''));
+      b.type = 'button';
+      b.dataset.tip = cand.path + (cand.bytes ? '（' + humanBytes(cand.bytes) + '）' : '');
+      b.addEventListener('click', () => stageLocal(cand.path, cand.version, b));
+      box2.append(b);
+    }
+    const note = el('p', 'settings-note',
+      '本机有构建产物：直接拿它更新，不走 GitHub。' +
+      '选中后同样先暂存、再排水、最后换二进制。');
+    box.append(note, box2);
+  }
+
+  if (u.has_update && !u.skipped) {
+    const p = el('p', 'settings-note',
+      '新版 ' + u.latest + ' 已发布。先下载并校验，再选择「重启以更新」或「稍后」；' +
+      '重启时会等当前任务和排队任务收尾，不会硬切。按本机平台挑包，不看浏览器。');
+    const bar = el('div', 'cfg-inline');
+    const dl = el('button', 'btn btn-sm', local.length ? '从 GitHub 下载' : '下载更新');
+    dl.type = 'button';
+    dl.addEventListener('click', () => downloadUpdate(dl));
+    const go = el('button', 'btn btn-sm', '打开下载页');
+    go.type = 'button';
+    if (u.url) go.addEventListener('click', () => window.open(u.url, '_blank', 'noopener'));
+    else go.disabled = true;
+    const skip = el('button', 'btn btn-sm', '不再提示这个版本');
+    skip.type = 'button';
+    skip.addEventListener('click', () => skipUpdate(u.latest));
+    bar.append(dl, go, skip);
+    box.append(p, bar);
+    if (u.notes) box.append(el('pre', 'update-notes', String(u.notes).slice(0, 4000)));
+  }
+  // 首页那块与设置页共用同一份 state：每次渲染都同步，别让两处说法打架。
+  renderDashUpdate();
+}
+
+function updateDrainText(job) {
+  const parts = [];
+  if ((job.active_tasks || []).length) parts.push('正在收尾 ' + job.active_tasks.length + ' 项');
+  if ((job.loading_plugins || []).length) parts.push('加载插件 ' + job.loading_plugins.join('、'));
+  if (job.queued_runs) parts.push('已排队 ' + job.queued_runs + ' 条');
+  if (job.active_scripts) parts.push('脚本 ' + job.active_scripts + ' 个');
+  return parts.length ? '已停止接收新任务，等待' + parts.join(' · ') : '任务已收尾，准备切换并重启…';
+}
+
+/// 首页的「版本更新」块：有新版 / 本地有构建 / 更新包已就绪 / 正在排水时出现。
+///
+/// 为什么不只在顶栏放个 pill：pill 只说明「有事」，用户还得自己找过去。
+/// 首页这块直接给结论、动作和「更新内容」入口（日志编进二进制，离线可读）。
+function renderDashUpdate() {
+  const panel = $('dash-update');
+  if (!panel) return;
+  const u = state.update || {};
+  const job = state.updateJob || { phase: 'idle' };
+  const local = Array.isArray(u.local) ? u.local.filter((x) => x && x.path) : [];
+  const localNew = local.filter((x) => x.version && String(x.version) !== String(u.current || state.version));
+  const hasNews = !!u.has_update || localNew.length > 0 || ['ready', 'draining', 'restarting', 'downloading', 'failed'].includes(job.phase);
+  panel.classList.toggle('hidden', !hasNews);
+  if (!hasNews) return;
+
+  const chip = $('dash-update-chip');
+  if (chip) {
+    chip.textContent = job.phase === 'draining' ? '等待任务收尾'
+      : job.phase === 'restarting' ? '正在切换'
+        : job.phase === 'downloading' ? '下载中'
+          : job.phase === 'ready' ? '已就绪 ' + (job.version || '')
+            : job.phase === 'failed' ? '更新失败'
+              : u.has_update ? '新版 ' + (u.latest || '') : '本地有新构建';
+  }
+  const body = $('dash-update-body');
+  if (!body) return;
+  clear(body);
+
+  const line = (text) => el('p', 'settings-note', text);
+  const actions = el('div', 'cfg-inline');
+
+  if (job.phase === 'draining' || job.phase === 'restarting' || job.phase === 'downloading') {
+    body.append(line(updateDrainText(job)));
+    const more = el('button', 'btn btn-sm', '去设置里看');
+    more.type = 'button';
+    more.addEventListener('click', gotoUpdatePanel);
+    actions.append(more);
+  } else if (job.phase === 'ready') {
+    body.append(line('更新包 ' + (job.version || '') + ' 已就绪，点一下就重启并换上（会先等任务收尾）。'));
+    const go = el('button', 'btn btn-sm btn-primary', '重启以更新');
+    go.type = 'button';
+    go.addEventListener('click', restartUpdate);
+    const later = el('button', 'btn btn-sm', '稍后');
+    later.type = 'button';
+    later.addEventListener('click', () => notify('更新包已暂存，之后可随时回来', 'ok'));
+    actions.append(go, later);
+  } else if (job.phase === 'failed') {
+    body.append(line('上次更新没成：' + (job.error || '未知原因') + '。旧面板还在跑。'));
+    const go = el('button', 'btn btn-sm', '去设置里重试');
+    go.type = 'button';
+    go.addEventListener('click', gotoUpdatePanel);
+    actions.append(go);
+  } else if (localNew.length) {
+    const cand = localNew[0];
+    body.append(line('本机有更新的构建 ' + (cand.version || '') + '（' + cand.path + '），可以直接换上，不必走 GitHub。'));
+    const go = el('button', 'btn btn-sm btn-primary', '用本地构建更新');
+    go.type = 'button';
+    go.addEventListener('click', () => stageLocal(cand.path, cand.version, go));
+    actions.append(go);
+  } else if (u.has_update) {
+    body.append(line('新版 ' + (u.latest || '') + ' 已发布（当前 ' + (u.current || state.version) + '）。'));
+    const go = el('button', 'btn btn-sm btn-primary', '去更新');
+    go.type = 'button';
+    go.addEventListener('click', gotoUpdatePanel);
+    actions.append(go);
+  }
+
+  const log = el('button', 'btn btn-sm', '更新内容');
+  log.type = 'button';
+  log.addEventListener('click', () => openChangelog(
+    '本次更新内容',
+    job.version && (state.updateJob || {}).source === 'local' ? null : (u.notes_latest || u.notes_current),
+  ));
+  actions.append(log);
+  body.append(actions);
+}
+
+/** 更新日志弹窗：正文是纯文本（CHANGELOG.md 的一段），用 pre-wrap 排。 */
+function openChangelog(title, text) {
+  const box = $('changelog-body');
+  const t = $('changelog-title');
+  if (!box) return;
+  if (t) t.textContent = title || '更新内容';
+  clear(box);
+  const body = String(text || '').trim();
+  box.append(el('pre', 'changelog-pre', body || '这一版没有单独的更新说明。'));
+  $('changelog').classList.remove('hidden');
+}
+
+/// 版本变了就自动弹一次更新内容（每个版本只弹一次，记在本机）。
+function maybeAnnounceVersion() {
+  const v = String(state.version || '').replace(/^v/, '');
+  if (!v) return;
+  let seen = '';
+  try { seen = localStorage.getItem('panel.seen-version') || ''; } catch (_) { seen = ''; }
+  if (!seen) {
+    // 第一次打开不弹历史：只记下来，免得升级当天就糊一脸。
+    try { localStorage.setItem('panel.seen-version', v); } catch (_) {}
+    return;
+  }
+  if (seen === v) return;
+  const notes = (state.update || {}).notes_current;
+  try { localStorage.setItem('panel.seen-version', v); } catch (_) {}
+  openChangelog('已更新到 ' + v, notes);
+}
+
+/** 用本机已有的二进制暂存更新（自己构建的那台机器走这条，不绕 GitHub）。 */
+async function stageLocal(path, version, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '暂存中…'; }
+  state.updateJob = { phase: 'downloading' };
+  renderUpdate();
+  try {
+    const d = await api('/api/update/local', { method: 'POST', body: { path: path } });
+    state.updateJob = d;
+    renderUpdate();
+    const ok = await panelConfirm({
+      title: '本地构建已就绪 ' + (d.version || version || ''),
+      text: '已从 ' + (d.src || path) + ' 暂存（sha256 ' + String(d.sha256 || '').slice(0, 12) + '…）。\n\n' +
+        '重启以更新：先停收新任务，等在途和已排队任务收尾，再换二进制并重启。\n' +
+        '稍后：不动正在运行的面板，暂存文件留在 data/updates/。',
+      okLabel: '重启以更新',
+      cancelLabel: '稍后',
+    });
+    if (ok) await restartUpdate();
+    else notify('本地构建已暂存，之后可随时回来点「重启以更新」', 'ok');
+  } catch (e) {
+    state.updateJob = { phase: 'failed', error: e.message || '暂存失败' };
+    renderUpdate();
+    notify(e.message || '暂存失败', 'err');
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = '用本地构建' + (version ? ' ' + version : ''); }
   }
 }
 
-/// 给当前平台挑一个能装的资产。挑不到就返回 null（macOS 走源码，不发二进制）。
-function updateAsset() {
-  const u = state.update || {};
-  const list = Array.isArray(u.assets) ? u.assets : [];
-  const pick = (test) => list.find((a) => test(String(a.name || '')));
-  const ua = navigator.userAgent;
-  const isWin = /Windows/i.test(ua);
-  const isMac = /Mac OS X|Macintosh/i.test(ua);
-  const isArm = /arm64|aarch64/i.test(ua);
-  if (isWin) return pick((n) => /windows/i.test(n));
-  if (isMac) return pick((n) => /macos|darwin/i.test(n));
-  return pick((n) => n.includes(isArm ? 'aarch64' : 'x86_64') && /linux/i.test(n));
-}
-
-/** 一键更新（第 268 轮）：
- *  查最新 → **由服务端按面板自己的 os/arch** 挑资产 → 下载校验 → 换掉二进制 → 重启。
- *  用户只点一下，不再需要自己去 mv / 重启。
- *
- *  ⚠ 挑资产必须在服务端做：下载落到**面板那台机器**上，看浏览器的 UA 会挑错
- *  （Windows 浏览器 + Linux 面板 → 下成 .exe，用户 2026-11-26 报的就是这个）。
- */
+/** 第一步：只下载、校验、暂存；完成后问用户什么时候重启。 */
 async function downloadUpdate(btn) {
-  const u = state.update || {};
-  btn.disabled = true;
-  btn.textContent = '更新中…';
+  if (btn) { btn.disabled = true; btn.textContent = '下载中…'; }
+  state.updateJob = { phase: 'downloading' };
+  renderUpdate();
   try {
     const d = await api('/api/update/apply', { method: 'POST' });
-    notify('已换成 ' + d.name + '（' + (d.os || '?') + '/' + (d.arch || '?') + (d.verified ? '，sha256 通过' : '') + '），' + Math.round((d.restart_in_ms || 1500) / 100) / 10 + ' 秒后重启', 'ok');
-    const box = $('update-box');
-    if (box) {
-      box.append(el('p', 'settings-note', '旧版本已备份到 ' + (d.backup || '—') + '；重启后这个页面会自动重连。'));
-    }
-    // 重启期间接口会短暂失败 —— 每隔一秒探一次，起来了就把新版本号报出来。
-    const want = (u.latest || '').replace(/^v/, '');
-    for (let i = 0; i < 30; i += 1) {
+    state.updateJob = d;
+    renderUpdate();
+    const ok = await panelConfirm({
+      title: '更新已就绪 ' + (d.version || ''),
+      text: '更新包已下载并' + (d.verified ? '通过 sha256 校验' : '暂存') + '。\n\n' +
+        '点「重启以更新」后会先停止接收新任务，等在途和已排队任务跑完，再自动切换并重启。\n' +
+        '点「稍后」不会改动正在运行的面板，更新包会保留。',
+      okLabel: '重启以更新',
+      cancelLabel: '稍后',
+    });
+    if (ok) await restartUpdate();
+    else notify('更新包已暂存，之后可随时回来点「重启以更新」', 'ok');
+  } catch (e) {
+    state.updateJob = { phase: 'failed', error: e.message || '下载失败' };
+    renderUpdate();
+    notify(e.message || '更新失败', 'err');
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = '下载更新'; }
+  }
+}
+
+/** 第二步：确认安装。后台排水，页面每秒拉状态；切进程后自动探活。 */
+async function restartUpdate() {
+  if (state.updateWatching) return;
+  state.updateWatching = true;
+  const want = String((state.updateJob || {}).version || (state.update || {}).latest || '').replace(/^v/, '');
+  try {
+    const d = await api('/api/update/restart', { method: 'POST' });
+    state.updateJob = d;
+    renderUpdate();
+    notify('已停止接收新任务，正在等当前任务收尾', 'ok');
+
+    // 排水可能比 30 秒长得多（8 个号串行跑是常态），所以按状态循环，不设短超时。
+    for (;;) {
       await new Promise((r) => setTimeout(r, 1000));
+      let job;
+      try { job = await api('/api/update/status'); }
+      catch (_) { continue; } // 进程可能刚好开始 exec
+      state.updateJob = job;
+      renderUpdate();
+      if (job.phase === 'ready') { notify('已取消更新，面板继续运行', 'ok'); return; }
+      if (job.phase === 'failed') { notify(job.error || '更新失败', 'err'); return; }
+      if (job.phase === 'restarting') break;
+      if (job.phase === 'idle') {
+        // 轮询刚好跨过 exec，落到了新进程：不再等旧状态，直接探活。
+        try {
+          await refresh();
+          if (!want || String(state.version).replace(/^v/, '') === want) {
+            notify('已更新到 ' + state.version, 'ok');
+            return;
+          }
+        } catch (_) { /* 新进程还没起来 */ }
+      }
+    }
+
+    notify('任务已收尾，正在重启，页面会自动重连…', 'ok');
+    for (let i = 0; i < 120; i += 1) {
+      await new Promise((r) => setTimeout(r, 1000));
+      // 切换阶段也可能在 commit 失败时回到 failed；先看状态，别把它误报成「进程没回来」。
+      try {
+        const job = await api('/api/update/status');
+        state.updateJob = job;
+        renderUpdate();
+        if (job.phase === 'failed') { notify(job.error || '更新失败', 'err'); return; }
+        if (job.phase === 'ready') { notify('更新已取消，面板继续运行', 'ok'); return; }
+      } catch (_) { /* 可能刚好在 exec */ }
       try {
         await refresh();
         if (!want || String(state.version).replace(/^v/, '') === want) {
           notify('已更新到 ' + state.version, 'ok');
-          break;
+          return;
         }
-      } catch (_) { /* 还没起来，继续等 */ }
+      } catch (_) { /* 还没起来 */ }
     }
+    notify('进程还没回来，请稍后手动刷新页面', 'err');
   } catch (e) {
     notify(e.message || '更新失败', 'err');
+    try { state.updateJob = await api('/api/update/status'); renderUpdate(); } catch (_) {}
   } finally {
-    btn.disabled = false;
-    btn.textContent = '更新并重启';
+    state.updateWatching = false;
+  }
+}
+
+async function cancelUpdate() {
+  try {
+    const d = await api('/api/update/cancel', { method: 'POST' });
+    state.updateJob = d;
+    renderUpdate();
+    notify('已取消更新，恢复接收新任务', 'ok');
+  } catch (e) {
+    notify(e.message || '取消失败', 'err');
   }
 }
 
@@ -7022,6 +7307,7 @@ async function refresh() {
     state.pending = data.pending || [];
     state.stats = data.stats || null;
     state.version = data.version || '';
+    state.updateJob = data.update || { phase: 'idle' };
   // 界面资源来源（内置 / 界面包）：设置页那块与插件 min_ui 的解释都靠它
   if (data.ui) state.ui = data.ui;
     // 平台：脚本运行时的默认值、自启动的做法、路径示例都要跟着它变。
@@ -7035,6 +7321,7 @@ async function refresh() {
     $('topbar-logout').classList.toggle('hidden', !state.auth);
     state.loaded = true;
     setText($('version'), 'v' + (state.version || '—'));
+    maybeAnnounceVersion();
     setText($('auth-state'), state.auth ? '令牌已启用' : '未启用令牌');
     // 能读到 /api/state 就说明凭据是通的（请求头或会话 cookie），不用再看 state.token
     showGate(false);

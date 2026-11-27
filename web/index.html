@@ -103,6 +103,12 @@
         <main class="content">
           <section class="view" id="view-dashboard" data-view="dashboard">
             <div id="first-run" class="hidden"></div>
+            <!-- 首页更新提示：有新版 / 本地有构建 / 更新包已就绪时出现在最上面，
+                 点「更新内容」弹更新日志（编进二进制，离线也能看）。 -->
+            <section class="panel hidden" id="dash-update">
+              <header class="panel-head"><h2>版本更新</h2><span class="chip" id="dash-update-chip">—</span></header>
+              <div class="panel-body" id="dash-update-body"></div>
+            </section>
             <div class="group">
               <h2 class="group-title">引擎</h2>
               <div class="cards" id="cards-engine"></div>
@@ -650,6 +656,18 @@ console.log(await import('node:crypto').then(m => typeof m.createHash));</textar
         <div class="modal-actions">
           <button class="btn" type="button" data-close="1">取消</button>
           <button class="btn btn-primary" type="button" id="new-plugin-ok">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 更新日志：内容来自编进二进制的 CHANGELOG.md（按版本切片），离线可读。 -->
+    <div class="modal hidden" id="changelog" role="dialog" aria-modal="true" aria-labelledby="changelog-title">
+      <div class="modal-backdrop" data-close="1"></div>
+      <div class="modal-card wide">
+        <h2 id="changelog-title">更新内容</h2>
+        <div class="changelog-body" id="changelog-body"></div>
+        <div class="modal-actions">
+          <button class="btn" type="button" data-close="1">关闭</button>
         </div>
       </div>
     </div>

@@ -4,12 +4,13 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/asunajs/panel/main/install.sh | bash
 #
-# 做四件事：检测架构 → 下载对应产物 → 强制校验（SHA256 + ELF 自检）→ 装进 PATH。
+# 做四件事：检测平台 → 下载对应产物 → 强制校验（SHA256 + 二进制自检）→ 装进 PATH。
 #
 # 支持的平台：
 #   aarch64 / arm64  → 64 位 ARM：旧手机（Termux）、ARM 盒子、树莓派 3/4/5
 #   armv7l / armhf   → 32 位 ARM：树莓派 2、老盒子、部分电视盒子
 #   x86_64  / amd64  → 普通 PC、VPS、开发机
+#   macOS             → aarch64 / x86_64 原生产物
 #
 # 环境变量：
 #   PANEL_REPO     仓库，默认下面的 REPO（fork 后改这里）
@@ -55,10 +56,11 @@ case "$(uname -m)" in
     *) die "不支持的架构: $(uname -m)（本项目出 aarch64、armv7 和 x86_64 产物）" ;;
 esac
 
-# 只发 Linux 静态产物 —— 静态链接意味着不挑发行版、不挑 libc
+# 只发 Linux / Windows 预编译包；macOS 没有发布档，走本地构建（面板内「用本地构建更新」）。
 if [ "$OS" != linux ]; then
-    die "只提供 Linux 产物（当前: $OS）。macOS 请本地编译：
-  node tools/bundle/build.mjs && cargo build --release（见 README 的构建一节）"
+    die "没有 macOS 预编译包（当前: $OS）。本机构建：
+  node tools/bundle/build.mjs && cargo build --release
+构建完在面板里点「用本地构建更新」，或用 bash scripts/deploy-daily.sh。"
 fi
 
 # 2. 决定安装目录
@@ -187,14 +189,14 @@ else
     fi
 fi
 
-# 5. 产物自检（ELF + 体积）
+# 5. 产物自检（二进制头 + 体积）
 # 这里防两类「校验和过了但东西还是不对」的情况：镜像把错误页 200 返回了、
 # 镜像放了个占位文本/别的架构的小文件。
 MAGIC="$(od -An -tx1 -N4 "$TMP/$BIN_NAME" | tr -d ' \n')"
 [ "$MAGIC" = 7f454c46 ] || die "产物不是 ELF 二进制（头部: ${MAGIC:-空}）。多半是下到了错误页或占位文件，别装。"
 
 SIZE="$(wc -c < "$TMP/$BIN_NAME" | tr -d ' ')"
-[ "${SIZE:-0}" -gt 1048576 ] || die "产物只有 ${SIZE:-0} 字节（< 1MB），不像真实的静态二进制，已中止。"
+[ "${SIZE:-0}" -gt 1048576 ] || die "产物只有 ${SIZE:-0} 字节（< 1MB），不像真实的二进制，已中止。"
 
 ok "产物自检通过（ELF, $((SIZE / 1024))KB）"
 
@@ -210,7 +212,7 @@ install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME" 2>/dev/null \
 ok "已安装: $INSTALL_DIR/$BIN_NAME"
 
 # 6.5 真的能跑起来吗
-# 校验和、ELF 头、体积都过了，仍然可能「在这台机器上跑不起来」：
+# 校验和、二进制头、体积都过了，仍然可能「在这台机器上跑不起来」：
 #   - 架构不对（装错产物、32 位系统装了 64 位）
 #   - 非静态产物（自己用 NDK 编的 aarch64-linux-android 加了 -no-pie，
 #     Android 10+ 的 linker 会直接拒绝：has unexpected e_type: 2）

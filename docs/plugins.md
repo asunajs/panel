@@ -410,7 +410,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | `/api/test/{lang}`（引擎自测） | ✅ 11-12（换了形状） | 只做 js（基线也只剩 js）：`POST /api/test/js` 在**一次性上下文**里跑源码，`console.*` 抢过来接进响应，不写 runs 表、不碰插件状态；同时只跑一个 + 独立配额。界面上是设置 → 常规的「引擎试跑」框 |
 | 推送：`push_config` / `push_tasks` / `push_outbox` / `push_deliveries` 四张表 + `/api/push/*` | ✅ 11-12（形状不同） | 渠道写在 `config.json` 的 `notify` 键（webhook / SMTP 两种）；发件箱 `notify_outbox` 一条一渠道，失败按 1m/5m/15m/1h/6h 退避，5 次放弃且**留在表里**可手动重试；按任务开关用 `mute` 名单（`插件` 或 `插件/任务`）而不是 `push_tasks` 那张表；没有独立的 deliveries 表（发件箱行本身就是记录）。见 [ops.md](user/ops.md) |
 | 备份加密（`backup_crypto.rs`）+ 原子切换 | ✅ 11-12（CLI 那条） | 移植基线的 X25519+HKDF+ChaCha20-Poly1305 分块格式（`PANELBK1`）：`keygen` / `backup --encrypt-to` / `restore --secret`。**私钥故意不进 HTTP**。见 [ops.md](user/ops.md)。`/api/restore/activate`（备份里带数据目录、整体切换）仍然没有 |
-| `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新**检查 + 下载**已做（`/api/update/check`、`/skip`、`/download`，见 [api.md](api.md)），**自动替换自己**仍不做 |
+| `/api/market*`、`/api/update*` | 部分 | 商店是**侧载插件**（本仓不做货架）；在线更新已有：检查、下载暂存、排水、换二进制、exec（`/api/update/check|apply|status|restart|cancel`，见 [ui.md](ui.md)） |
 | `/readyz` | ✅ 11-12 | 库能读 + 调度器活着才 200，否则 **503**（不是 200+`ok:false` —— 反向代理会把它当健康） |
 
 已经对齐的：`/api/state`、`/api/logs`(+stream)、`/api/runs`(+`/{id}`)、`/api/scripts` 全套、
@@ -456,7 +456,7 @@ HTTP 层：`web_tests.rs::upload_saves_a_plugin_and_a_script`、
 | 文件监听热重载（`watcher.rs`） | ❌（手动 reload） |
 | 限流（`ratelimit.rs`） | ✅ 11-12（范围不同） | 基线只给 `/api/test/*` 加（挡「一条引擎线程被测试运行占满」）；本项目没有那个接口，改成给**真正会烧 CPU 的两类**加：`POST /api/login`（PBKDF2 放大，5 次突发后 429）与写接口（30 次突发后 429）。读接口一律不挡 —— 界面每隔几秒就在轮询。按**客户端 IP** 分桶 |
 | 时区（`tz.rs`） | 本地时（chrono `Local`） |
-| 面板版本 / 自更新（`panelversion.rs`） | 版本有了（`panel.version()` / `atLeast()`，见 §2.2）；**自更新没有**，也不打算做 |
+| 面板版本 / 自更新（`panelversion.rs` / `update.rs`） | 版本有了（`panel.version()` / `atLeast()`，见 §2.2）；自更新也有：下载暂存 → 排水 → 换二进制 → exec（见 [changelog-full.md](changelog-full.md) 的「优雅更新」） |
 | 任务目录（`taskdir.rs`，`tasks/*.json`） | 任务在 DB |
 | 懒加载（`docs/lazy-plugins.md`） | 启动即全加载 |
 
@@ -532,7 +532,7 @@ GET  /api/runs?plugin=@script             1 条，plugin="@script"、task="s1"
 
 - §1 那 15 行「已经能用的」逐条对过，**没有虚报**：每条都能指到一个真接口或一段真代码。
 - 有虚报风险的是**措辞**（「就能打」这种），已经降级成 ❓ + 测法。
-- 仍然 ❌ 的两条（任务软删、市场/自更新）和 ❌ 的外部进程插件，都是**判断不该做**，理由各有记录。
+- 任务软删已补；市场仍 ❌；自更新已补（下载暂存 + 排水 + exec）。外部进程插件仍 ❌，理由各有记录。
 
 ## 界面：面板 UI 套件
 

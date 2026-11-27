@@ -1758,7 +1758,71 @@ async function main() {
   ));
   check('已用上那一版界面包就不再提示', uiPillB.hidden === true, JSON.stringify(uiPillB));
 
-  await js("state.ui={source:'builtin',version:state.version};state.uiLatest={available:false};renderUpdate();1");
+  // 首页更新提示 + 更新日志弹窗（第 276 轮）：有新版时仪表盘冒一块，
+  // 「更新内容」来自编进二进制的 CHANGELOG（离线可读），不是空框。
+  const dashUpd = JSON.parse(await js(
+    "JSON.stringify((()=>{state.update={current:'0.0.1',latest:'9.9.9',has_update:true,show:true,skipped:false," +
+    "notes_current:'## 0.0.1\\n- 老版本的说明',notes_latest:'## 9.9.9\\n- 新版本的说明',local:[]};" +
+    "state.updateJob={phase:'idle'};renderUpdate();" +
+    "const d=document.getElementById('dash-update');" +
+    "return {hidden:d.classList.contains('hidden'),chip:document.getElementById('dash-update-chip').textContent," +
+    "buttons:[...document.querySelectorAll('#dash-update-body button')].map(b=>b.textContent)};})())"
+  ));
+  check('首页出现「版本更新」块（带版本号与动作）',
+    dashUpd.hidden === false && /9\.9\.9/.test(dashUpd.chip) &&
+    dashUpd.buttons.includes('去更新') && dashUpd.buttons.includes('更新内容'),
+    JSON.stringify(dashUpd));
+
+  const logModal = JSON.parse(await js(
+    "JSON.stringify((()=>{openChangelog('本次更新内容',state.update.notes_latest);" +
+    "const m=document.getElementById('changelog');" +
+    "const pre=document.querySelector('#changelog-body .changelog-pre');" +
+    "return {hidden:m.classList.contains('hidden'),title:document.getElementById('changelog-title').textContent," +
+    "text:pre?pre.textContent:'',scrollable:pre?getComputedStyle(pre).overflowY:''};})())"
+  ));
+  check('点「更新内容」弹出更新日志（正文来自内置 CHANGELOG）',
+    logModal.hidden === false && /新版本的说明/.test(logModal.text) && logModal.scrollable === 'auto',
+    JSON.stringify(logModal));
+  await js("document.getElementById('changelog').classList.add('hidden');1");
+
+  // 没新版但有本地构建时：首页提示「用本地构建更新」，不走 GitHub。
+  const dashLocal = JSON.parse(await js(
+    "JSON.stringify((()=>{state.update={current:'0.0.1',latest:'0.0.1',has_update:false,skipped:false," +
+    "local:[{path:'target/release/panel',bytes:12345678,version:'9.9.8'}]};" +
+    "state.updateJob={phase:'idle'};renderUpdate();" +
+    "const d=document.getElementById('dash-update');" +
+    "return {hidden:d.classList.contains('hidden')," +
+    "buttons:[...document.querySelectorAll('#dash-update-body button')].map(b=>b.textContent)};})())"
+  ));
+  check('本机有新构建时首页提示「用本地构建更新」（不绕 GitHub）',
+    dashLocal.hidden === false && dashLocal.buttons.some((t) => /本地构建/.test(t)), JSON.stringify(dashLocal));
+
+  await js("state.update={};state.updateJob={phase:'idle'};renderUpdate();1");
+  await sleep(150);
+
+  // 优雅更新：下载后先暂存，确认前不重启；排水时显示等待项和取消入口。
+  const updReady = JSON.parse(await js(
+    "JSON.stringify((()=>{state.updateJob={phase:'ready',version:'9.9.9',verified:true};renderUpdate();" +
+    "const box=document.getElementById('update-box');" +
+    "return {status:document.getElementById('update-status').textContent," +
+    "buttons:[...box.querySelectorAll('button')].map(b=>b.textContent)};})())"
+  ));
+  check('更新包暂存后显示「重启以更新 / 稍后」，不自动重启',
+    /等确认重启/.test(updReady.status) && updReady.buttons.includes('重启以更新') && updReady.buttons.includes('稍后'),
+    JSON.stringify(updReady));
+  const updDrain = JSON.parse(await js(
+    "JSON.stringify((()=>{state.updateJob={phase:'draining',version:'9.9.9',active_tasks:['p/t']," +
+    "loading_plugins:[],queued_runs:2,active_scripts:1};renderUpdate();" +
+    "const box=document.getElementById('update-box');" +
+    "return {status:document.getElementById('update-status').textContent," +
+    "buttons:[...box.querySelectorAll('button')].map(b=>b.textContent)};})())"
+  ));
+  check('排水时显示在途 / 排队 / 脚本数量，并给「取消更新」',
+    /正在收尾 1 项/.test(updDrain.status) && /已排队 2 条/.test(updDrain.status) &&
+    /脚本 1 个/.test(updDrain.status) && updDrain.buttons.includes('取消更新'),
+    JSON.stringify(updDrain));
+
+  await js("state.updateJob={phase:'idle'};state.ui={source:'builtin',version:state.version};state.uiLatest={available:false};renderUpdate();1");
 
   // 收尾：把这个假版本清掉，别让后面的断言看到「有新版」
   await js("(async()=>{await skipUpdate('');state.update={};state.uiLatest={available:false};renderUpdate();return 1;})()");

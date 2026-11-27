@@ -134,6 +134,8 @@ pub struct AppState {
     pub auth: std::sync::Arc<std::sync::RwLock<Option<Arc<crate::auth::Auth>>>>,
     /// 界面资源来源（内置 / 界面包）。可热替换，见 [`UiAssets`]。
     pub ui: Arc<UiAssets>,
+    /// 一键更新的共享状态：下载 / 暂存 / 排水 / 切换。
+    pub update: Arc<crate::update::UpdateControl>,
 }
 
 impl AppState {
@@ -679,6 +681,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/plugins/{name}/unload", post(plugin_unload))
         .route("/api/plugins/{name}/stop", post(plugin_stop))
         .route("/api/update/apply", post(api_update_apply))
+        .route("/api/update/local", post(api_update_local))
+        .route("/api/update/status", get(api_update_status))
+        .route("/api/update/restart", post(api_update_restart))
+        .route("/api/update/cancel", post(api_update_cancel))
         .route("/api/plugins/{name}/disable", post(plugin_disable))
         .route("/api/plugins/{name}/enable", post(plugin_enable))
         // 暂停 / 恢复：不卸载，只是不再触发它的定时任务。
@@ -2025,6 +2031,8 @@ async fn api_state(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
     stats["js_memory_total"] = json!(total);
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // 一键更新进度（暂存 / 等待任务收尾 / 切换中）
+        "update": st.update.snapshot(),
         // 界面资源的来源：内置 or 界面包。插件清单里的 `min_ui` 就是拿它比。
         "ui": st.ui.describe(),
         // 平台名（windows / macos / linux）：界面据此换文案与脚本运行时的默认值。
@@ -2365,12 +2373,18 @@ async fn api_restart(
 /// 用当前可执行文件替换自己。**只有失败才返回**。
 fn restart_now() -> ! {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("panel"));
+    restart_exec(&exe)
+}
+
+/// exec 明确的可执行文件。更新场景下不能事后再取 current_exe：
+/// 旧文件已经被改名，新文件刚放到原位，不同平台对 /proc/self/exe 的解析不一样。
+fn restart_exec(exe: &std::path::Path) -> ! {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // exec 成功就不会回来了；返回一定是失败。
-        let err = std::process::Command::new(&exe).args(&args).exec();
+        let err = std::process::Command::new(exe).args(&args).exec();
         eprintln!("重启失败（exec {}）: {err}", exe.display());
     }
     // 非 Unix：没有 exec，只能退而求其次。守护进程会拉起来，手动跑的就到此为止。
@@ -2731,30 +2745,219 @@ async fn plugin_unload(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// `POST /api/update/apply` —— 一键更新：查最新 → 按**本机**挑资产 → 下载校验 → 换二进制 → 重启。
+/// POST /api/update/apply —— 下载、校验并暂存；**不换二进制、不重启**。
 ///
-/// 与老的 `/api/update/download` 的区别：那个只把文件放进 `data/updates/` 然后要人自己去 mv。
-/// 用户的口径（2026-11-26）是「只点一下更新按钮，别让用户再手工做事」。
+/// 与老的 /api/update/download 的区别：那个只给文件；这里按本机平台挑包并记下
+/// pending.json。界面拿到 ready 后再问「重启以更新 / 稍后」。
 async fn api_update_apply(
     State(st): State<AppState>,
     h: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     guard_write(&h)?;
-    let got = crate::update::apply(&st.data_dir).await.map_err(bad)?;
-    st.log.emit(
-        "panel",
-        None,
-        crate::log::Level::Info,
-        format!(
-            "更新：已换成 {}（{} 字节，校验{}），{} 毫秒后重启",
-            got.get("name").and_then(Value::as_str).unwrap_or("?"),
-            got.get("bytes").and_then(Value::as_u64).unwrap_or(0),
-            if got.get("verified").and_then(Value::as_bool).unwrap_or(false) { "通过" } else { "未提供" },
-            got.get("restart_in_ms").and_then(Value::as_u64).unwrap_or(1500),
-        ),
-    );
-    Ok(Json(got))
+    st.update.begin_download().map_err(bad)?;
+    match crate::update::stage(&st.data_dir).await {
+        Ok(got) => {
+            let Some(staged) = crate::update::read_pending(&st.data_dir) else {
+                st.update.failed("更新包下载了，但暂存元数据没写成功");
+                return Err(bad("更新包下载了，但暂存元数据没写成功"));
+            };
+            st.update.downloaded(staged);
+            st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Info,
+                format!(
+                    "更新：{} 已下载并暂存（{} 字节，校验{}），等用户确认重启",
+                    got.get("name").and_then(Value::as_str).unwrap_or("?"),
+                    got.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+                    if got.get("verified").and_then(Value::as_bool).unwrap_or(false) { "通过" } else { "未提供" },
+                ),
+            );
+            Ok(Json(got))
+        }
+        Err(e) => {
+            st.update.failed(e.clone());
+            Err(bad(e))
+        }
+    }
 }
+
+/// POST /api/update/local —— 用本机已有的二进制暂存更新（自己构建的那台机器用）。
+///
+/// body 可以是 `{"path": "target/release/panel"}`；不给就挑一个候选（见
+/// `update::local_candidates`）。整条流程和在线更新一致：暂存 → 确认 → 排水 → 替换。
+async fn api_update_local(
+    State(st): State<AppState>,
+    h: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let asked = if body.is_empty() {
+        None
+    } else {
+        let v: Value = serde_json::from_slice(&body)
+            .map_err(|e| bad(format!("body 不是 JSON：{e}")))?;
+        v.get("path")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let path = match asked {
+        Some(p) => PathBuf::from(p),
+        None => crate::update::local_candidates()
+            .first()
+            .and_then(|v| v.get("path").and_then(Value::as_str))
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                bad("没找到本地构建产物（target/release/panel）。先 cargo build --release，或者直接填路径")
+            })?,
+    };
+    st.update.begin_download().map_err(bad)?;
+    match crate::update::stage_local(&st.data_dir, &path) {
+        Ok(got) => {
+            let Some(staged) = crate::update::read_pending(&st.data_dir) else {
+                st.update.failed("本地二进制已复制，但暂存元数据没写成功");
+                return Err(bad("本地二进制已复制，但暂存元数据没写成功"));
+            };
+            st.update.downloaded(staged);
+            st.log.emit(
+                "panel",
+                None,
+                crate::log::Level::Info,
+                format!(
+                    "更新：已取本地构建 {}（版本 {}）暂存，等确认重启",
+                    path.display(),
+                    got.get("version").and_then(Value::as_str).unwrap_or("?")
+                ),
+            );
+            Ok(Json(got))
+        }
+        Err(e) => {
+            st.update.failed(e.clone());
+            Err(bad(e))
+        }
+    }
+}
+
+/// GET /api/update/status —— 下载 / 暂存 / 排水 / 切换的实时状态。
+async fn api_update_status(State(st): State<AppState>) -> Json<Value> {
+    Json(st.update.snapshot())
+}
+
+/// POST /api/update/restart —— 开始优雅更新：先排水，收尾后换二进制并 exec。
+///
+/// 立即回包，后台每 250ms 更新一次状态；界面靠 /api/update/status 显示
+/// 「还在等哪个任务 / 几个排队 / 几个脚本」。用户可取消，取消后恢复接单。
+async fn api_update_restart(
+    State(st): State<AppState>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let (generation, _staged) = st.update.begin_restart().map_err(bad)?;
+    let drain = st.sched.begin_drain().await.map_err(|e| {
+        let _ = st.update.cancel(generation);
+        bad(e)
+    })?;
+    st.scripts.begin_drain();
+    st.update.progress(
+        generation,
+        drain.active_tasks,
+        drain.loading_plugins,
+        drain.queued_runs,
+        st.scripts.active_count(),
+    );
+
+    let bg = st.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let Ok(view) = bg.sched.drain_status().await else {
+                bg.update.restart_failed(generation, "调度器已退出，无法确认任务是否收尾");
+                let _ = bg.sched.cancel_drain().await;
+                bg.scripts.cancel_drain();
+                return;
+            };
+            let scripts = bg.scripts.active_count();
+            let idle = view.idle();
+            if !bg.update.progress(
+                generation,
+                view.active_tasks,
+                view.loading_plugins,
+                view.queued_runs,
+                scripts,
+            ) {
+                return; // 用户取消了（generation 变了）
+            }
+            if !idle || scripts != 0 {
+                continue;
+            }
+            if !bg.update.try_restarting(generation) {
+                return;
+            }
+            // 给界面一个拍到「切换中」的机会，也让最后的 HTTP 响应发完。
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            match crate::update::commit(&bg.data_dir) {
+                Ok(got) => {
+                    bg.log.emit(
+                        "panel",
+                        None,
+                        crate::log::Level::Info,
+                        format!(
+                            "优雅更新：任务已收尾，已换成 {}；旧版备份 {}",
+                            got.get("name").and_then(Value::as_str).unwrap_or("?"),
+                            got.get("backup").and_then(Value::as_str).unwrap_or("?"),
+                        ),
+                    );
+                    let exe = got
+                        .get("exe")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("panel"))
+                        });
+                    restart_exec(&exe);
+                }
+                Err(e) => {
+                    bg.update.restart_failed(generation, e.clone());
+                    let _ = bg.sched.cancel_drain().await;
+                    bg.scripts.cancel_drain();
+                    bg.log.emit(
+                        "panel",
+                        None,
+                        crate::log::Level::Error,
+                        format!("优雅更新失败，已恢复接单：{e}"),
+                    );
+                    return;
+                }
+            }
+        }
+    });
+    let mut out = st.update.snapshot();
+    out["ok"] = json!(true);
+    out["message"] = json!("已停止接收新任务，正在等在途和已排队任务收尾");
+    Ok(Json(out))
+}
+
+/// POST /api/update/cancel —— 取消等待，恢复接单；暂存包保留，之后还能再试。
+async fn api_update_cancel(
+    State(st): State<AppState>,
+    h: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    guard_write(&h)?;
+    let generation = st.update.snapshot()["generation"]
+        .as_u64()
+        .unwrap_or(0);
+    st.update.cancel(generation).map_err(bad)?;
+    // 先把 UpdateControl 的 phase 改回 ready，后台任务下一轮就会因 generation 不匹配退出；
+    // 然后才恢复调度器，避免后台在「已经空闲」的同一刻又抢着去 commit。
+    st.sched.cancel_drain().await.map_err(bad)?;
+    st.scripts.cancel_drain();
+    let mut out = st.update.snapshot();
+    out["ok"] = json!(true);
+    out["message"] = json!("已取消更新，恢复接单");
+    Ok(Json(out))
+}
+
 async fn plugin_stop(
     State(st): State<AppState>,
     Path(name): Path<String>,

@@ -32,9 +32,8 @@
 备份/恢复（`GET/POST /api/backup`）也在设置页数据 tab 里。
 最后做了一次「浅色/暗色 × 宽屏/窄屏」的界面一致性核查。
 
-**平台面**：Linux（静态 musl，aarch64 / x86_64）是当前发布档；macOS 用于开发；
-Windows **已能交叉编译出 `.exe` 并通过依赖链接，但还没在真机上验收过运行时** ——
-缺口、分步计划与验收表见 [windows.md](windows.md)。
+**平台面**：Linux（静态 musl，aarch64 / x86_64）与 Windows（`.exe`）有发布档；macOS 本地构建
+（面板内可用「用本地构建更新」）。Windows 的桌面细节仍以 [windows.md](windows.md) 的验收表为准。
 
 **与旧面板的功能对照见 [plugins.md](plugins.md)**：核心六项（插件增删改查、脚本增删改查、
 插件 webui、配置 ui 化、设置 tabs、自启动）全部落地，**0.3.x → 这一版的迁移也已经在日常实例上跑完**

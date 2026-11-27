@@ -732,6 +732,18 @@ pub enum Cmd {
     Pending {
         reply: oneshot::Sender<Vec<PendingView>>,
     },
+    /// 开始排水（优雅更新）：停止新派发，让在途和已排队任务收尾。
+    BeginDrain {
+        reply: oneshot::Sender<DrainView>,
+    },
+    DrainStatus {
+        reply: oneshot::Sender<DrainView>,
+    },
+    /// 取消排水：恢复接单。暂存的更新包还在，之后可以再试。
+    CancelDrain {
+        reply: oneshot::Sender<()>,
+    },
+
     /// 插件 WebUI 的动态请求：交给插件注册的 handler，把它的返回值带回去。
     /// 和 RunNow 一样占用 busy：同一个 Context 不能并发派发。
     WebCall {
@@ -1052,6 +1064,19 @@ impl Scheduler {
         self.call(|reply| Cmd::Pending { reply }).await
     }
 
+    /// 开始优雅更新排水。返回当前还在忙/加载/排队的东西。
+    pub async fn begin_drain(&self) -> Result<DrainView, String> {
+        self.call(|reply| Cmd::BeginDrain { reply }).await
+    }
+
+    pub async fn drain_status(&self) -> Result<DrainView, String> {
+        self.call(|reply| Cmd::DrainStatus { reply }).await
+    }
+
+    pub async fn cancel_drain(&self) -> Result<(), String> {
+        self.call(|reply| Cmd::CancelDrain { reply }).await
+    }
+
     pub async fn stop(&self, plugin: &str) -> Result<bool, String> {
         let plugin = plugin.to_string();
         self.call(|reply| Cmd::Stop { plugin, reply }).await?
@@ -1330,6 +1355,23 @@ pub struct PendingView {
     pub ready_at: i64,
 }
 
+/// 优雅更新时的排水快照。已经开始的全部收尾，已经排队的也跑完；
+/// 新的派发在 draining 期间一律拒绝。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DrainView {
+    pub active_tasks: Vec<String>,
+    pub loading_plugins: Vec<String>,
+    pub queued_runs: usize,
+}
+
+impl DrainView {
+    pub fn idle(&self) -> bool {
+        self.active_tasks.is_empty()
+            && self.loading_plugins.is_empty()
+            && self.queued_runs == 0
+    }
+}
+
 /// 手动执行 / 一次性调用的结果：马上开跑，还是排到第几位。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -1349,6 +1391,8 @@ struct Inner {
     web: std::collections::HashSet<String>,
     /// 侧栏入口：插件名 → 入口
     sidebar: std::collections::HashMap<String, NavEntry>,
+    /// 优雅更新排水中：到点任务不派发，手动/一次性/界面调用不再接收。
+    draining: bool,
     /// 等执行位的 web 调用（插件名 → 队列）
     web_q: std::collections::HashMap<String, std::collections::VecDeque<QueuedWeb>>,
     /// 排队编号（单调递增，只用来认领超时）
@@ -1444,6 +1488,7 @@ pub fn start(
         web: std::collections::HashSet::new(),
         suspended: std::collections::HashSet::new(),
         sidebar: std::collections::HashMap::new(),
+        draining: false,
         web_q: std::collections::HashMap::new(),
         next_qid: 0,
         pending: HashMap::new(),
@@ -1723,6 +1768,10 @@ impl Inner {
                 adopt,
                 reply,
             } => {
+                if self.draining {
+                    let _ = reply.send(Err("面板正在更新，暂不加载插件".to_string()));
+                    return;
+                }
                 // 和 EnsureLoaded 共用一把「正在装」的锁：否则 reload 装到一半时
                 // 用户点开插件界面，会再 spawn 一份，两个 Loaded 互相覆盖。
                 if !self.plugins.contains_key(&name) {
@@ -1731,6 +1780,10 @@ impl Inner {
                 self.spawn_load(name, Some(source), adopt, reply);
             }
             Cmd::EnsureLoaded { name, reply } => {
+                if self.draining {
+                    let _ = reply.send(Err("面板正在更新，暂不加载插件".to_string()));
+                    return;
+                }
                 if let Some(l) = self.plugins.get_mut(&name) {
                     // 刚被"用到"：刷新活跃时间，避免 ensure_loaded 返回 Ok 后紧接着
                     // 被 idle_tick 当成"闲着"卸掉。
@@ -1763,6 +1816,10 @@ impl Inner {
                 self.plugins_dir = Some(dir);
             }
             Cmd::IdleTick { reply } => {
+                if self.draining {
+                    let _ = reply.send(0);
+                    return;
+                }
                 let n = self.idle_tick();
                 let _ = reply.send(n);
             }
@@ -2002,6 +2059,10 @@ impl Inner {
                 budget_ms,
                 reply,
             } => {
+                if self.draining {
+                    let _ = reply.send(Err("面板正在更新，暂不接收插件界面请求".to_string()));
+                    return;
+                }
                 if let Some(l) = self.plugins.get_mut(&plugin) {
                     l.last_active = Local::now().timestamp_millis();
                 }
@@ -2185,6 +2246,38 @@ impl Inner {
                     )));
                 }
             }
+            Cmd::BeginDrain { reply } => {
+                self.draining = true;
+                // 插件界面的短队列不是任务，没必要等：全部回失败，别让浏览器干等。
+                let queued = std::mem::take(&mut self.web_q);
+                for (plugin, q) in queued {
+                    for item in q {
+                        let _ = item.reply.send(Err(format!(
+                            "{plugin} 正在更新，暂不接收插件界面请求"
+                        )));
+                    }
+                }
+                self.log.emit(
+                    "panel",
+                    None,
+                    Level::Info,
+                    "优雅更新：已停止接收新任务，等待在途和已排队任务收尾".to_string(),
+                );
+                let _ = reply.send(self.drain_view());
+            }
+            Cmd::DrainStatus { reply } => {
+                let _ = reply.send(self.drain_view());
+            }
+            Cmd::CancelDrain { reply } => {
+                self.draining = false;
+                self.log.emit(
+                    "panel",
+                    None,
+                    Level::Info,
+                    "优雅更新已取消：恢复接收新任务".to_string(),
+                );
+                let _ = reply.send(());
+            }
             Cmd::RunNow {
                 plugin,
                 task,
@@ -2193,6 +2286,9 @@ impl Inner {
             } => match self.find(&plugin, &task) {
                 None => {
                     let _ = reply.send(Err(format!("没有这个任务: {plugin}/{task}")));
+                }
+                Some(_) if self.draining => {
+                    let _ = reply.send(Err("面板正在更新，暂不接收新任务".to_string()));
                 }
                 // 走到这里说明调用方没先 ensure_loaded（或者刚装回来又失败了）。
                 // 正常情况下 web 层会先装再跑，用户看不到这条。
@@ -2239,6 +2335,9 @@ impl Inner {
                 at,
                 reply,
             } => {
+                // 排水期间仍允许**正在运行的那个插件**继续 run_once：这是它当前
+                // 任务的后续步骤（例如 daily 正在给账号逐个排队），拒绝会把在途
+                // 任务本身弄失败。队列会被 drain_view 看见，更新继续等它收尾。
                 let out = if !self.plugins.contains_key(&plugin) {
                     // 正常不会走到：run_once 只能在插件自己的 handler 里调（那时它一定装着）
                     Err(format!("插件未加载: {plugin}"))
@@ -2517,6 +2616,35 @@ impl Inner {
         }
         out.sort_by(|a, b| a.plugin.cmp(&b.plugin).then(a.position.cmp(&b.position)));
         out
+    }
+
+    fn drain_view(&self) -> DrainView {
+        let mut active_tasks: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| t.in_flight)
+            .map(|t| format!("{}/{}", t.plugin, t.name))
+            .collect();
+        // busy 但没有 in_flight 任务 = 插件界面调用。让它也进等待清单。
+        for (name, loaded) in &self.plugins {
+            if loaded.busy
+                && !self
+                    .tasks
+                    .iter()
+                    .any(|t| t.plugin == *name && t.in_flight)
+            {
+                active_tasks.push(format!("{name}/界面调用"));
+            }
+        }
+        active_tasks.sort();
+        active_tasks.dedup();
+        let mut loading_plugins: Vec<String> = self.waking.iter().cloned().collect();
+        loading_plugins.sort();
+        DrainView {
+            active_tasks,
+            loading_plugins,
+            queued_runs: self.pending.values().map(|q| q.len()).sum(),
+        }
     }
 
     fn views(&self) -> Vec<TaskView> {
@@ -2877,6 +3005,9 @@ impl Inner {
     /// 提前唤醒（`IDLE_WAKE_WINDOW_MS`、任务的 `lead_ms`）只是**延迟优化**：给抢兑这类卡秒
     /// 的活留的提前量，跟「这一拍能不能跑」无关。
     async fn run_overdue_of(&mut self, plugin: &str) {
+        if self.draining {
+            return;
+        }
         let now = Local::now();
         let idxs: Vec<usize> = self
             .tasks
@@ -3360,6 +3491,9 @@ impl Inner {
     }
 
     async fn fire_due(&mut self, now: DateTime<Local>) {
+        if self.draining {
+            return; // 不推进 next_fire：重启后欠下的那一拍还会补
+        }
         // 先把快到点的、已卸载的插件装回来。提前 3 分钟，够它读文件 + 跑顶层代码。
         self.wake_unloaded(now);
         // 按需加载的任务：到点了插件还是没装回来 —— **必须说出来**。
@@ -3716,6 +3850,16 @@ impl Inner {
 
     /// 执行位空出来之后，把队列里第一个（没过期的）派出去。
     fn pump_web(&mut self, plugin: &str) {
+        if self.draining {
+            if let Some(q) = self.web_q.remove(plugin) {
+                for item in q {
+                    let _ = item.reply.send(Err(format!(
+                        "{plugin} 正在更新，暂不接收插件界面请求"
+                    )));
+                }
+            }
+            return;
+        }
         loop {
             // 还占着（比如刚派出去的那次自己又排队了）：等下一次 WebDone。
             if self.plugins.get(plugin).map(|l| l.busy).unwrap_or(true) {

@@ -368,6 +368,7 @@ async fn main() -> Result<(), String> {
         plugins_dir,
         scripts_dir,
         scripts,
+        update: Arc::new(crate::update::UpdateControl::new(&data_dir)),
         data_dir,
         config,
         load_errors: load_errors.clone(),
